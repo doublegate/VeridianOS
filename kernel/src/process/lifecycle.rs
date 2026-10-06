@@ -10,6 +10,9 @@
 // Re-export everything from submodules to maintain existing API
 // Re-export wait_process (used by parent module re-exports)
 #[cfg(feature = "alloc")]
+#[allow(unused_imports)]
+pub(crate) use super::creation::setup_exec_stack as setup_exec_stack_pub;
+#[cfg(feature = "alloc")]
 pub use super::exit::wait_process;
 pub use super::{
     creation::{

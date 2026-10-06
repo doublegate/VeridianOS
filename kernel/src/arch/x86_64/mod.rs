@@ -39,6 +39,7 @@ pub fn init() {
 
     println!("[ARCH] Starting GDT init...");
     gdt::init();
+    gdt::init_tss_rsp0_ptr();
     println!("[ARCH] GDT initialized");
 
     // Initialize SYSCALL/SYSRET support (must be after GDT init so that
@@ -92,6 +93,13 @@ pub fn init() {
         pic2_data.write(0xFF);
     }
     println!("[ARCH] PIC initialized with all interrupts masked");
+
+    // Initialize FPU, SSE, and XSAVE/AVX/AVX-512 state.
+    // Must happen before any code that uses SSE/AVX instructions.
+    // Enables CR4.OSXSAVE and configures XCR0 so user-space binaries
+    // compiled with AVX (VEX-encoded instructions) don't #UD.
+    context::init_fpu();
+    println!("[ARCH] FPU/SSE/AVX initialized");
 
     println!("[ARCH] Starting MMU init...");
     mmu::init();

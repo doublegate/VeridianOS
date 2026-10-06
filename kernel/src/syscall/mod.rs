@@ -56,6 +56,13 @@ fn validate_user_pointer(ptr: usize, size: usize) -> Result<(), SyscallError> {
     if ptr == 0 {
         return Err(SyscallError::InvalidPointer);
     }
+    // Reject pointers in the null guard page (first 4KB).  No legitimate
+    // user-space data lives below 0x1000; this catches common NULL-derived
+    // offsets (e.g. struct field access on a NULL pointer) without a page
+    // table walk.
+    if ptr < 0x1000 {
+        return Err(SyscallError::InvalidPointer);
+    }
     if size > MAX_BUFFER_SIZE {
         return Err(SyscallError::InvalidArgument);
     }
@@ -159,6 +166,14 @@ static SYSCALL_RATE_LIMITER: SyscallRateLimiter = SyscallRateLimiter::new();
 static SYSCALL_COUNT: AtomicU64 = AtomicU64::new(0);
 static SYSCALL_ERRORS: AtomicU64 = AtomicU64::new(0);
 
+/// Last syscall number (for diagnostics in page fault handler).
+/// Written on every syscall entry, read from PF handler via raw atomic load.
+pub(crate) static LAST_SYSCALL_NUM: AtomicU64 = AtomicU64::new(0);
+/// Last syscall arg1 (for diagnostics).
+pub(crate) static LAST_SYSCALL_ARG1: AtomicU64 = AtomicU64::new(0);
+/// Last syscall arg2 (for diagnostics).
+pub(crate) static LAST_SYSCALL_ARG2: AtomicU64 = AtomicU64::new(0);
+
 // Import process syscalls module
 pub(crate) mod process;
 use self::process::*;
@@ -194,6 +209,7 @@ use self::memory::*;
 // Import user space utilities
 mod arch_prctl;
 mod futex;
+pub(crate) mod linux_compat;
 mod thread_clone;
 mod userspace;
 pub use futex::sys_futex_wake;
@@ -648,8 +664,29 @@ pub extern "C" fn syscall_handler(
     #[cfg(target_arch = "x86_64")]
     crate::arch::x86_64::kpti::on_syscall_entry();
 
-    // Track syscall count
-    SYSCALL_COUNT.fetch_add(1, Ordering::Relaxed);
+    // Track syscall count and last syscall info (for PF handler diagnostics)
+    #[cfg_attr(not(target_arch = "x86_64"), allow(unused_variables))]
+    let count = SYSCALL_COUNT.fetch_add(1, Ordering::Relaxed);
+    LAST_SYSCALL_NUM.store(syscall_num as u64, Ordering::Relaxed);
+    LAST_SYSCALL_ARG1.store(arg1 as u64, Ordering::Relaxed);
+    LAST_SYSCALL_ARG2.store(arg2 as u64, Ordering::Relaxed);
+
+    // Diagnostic: print first 500 syscalls via raw serial for KDE bringup.
+    // Uses unbuffered port I/O so output appears immediately regardless of
+    // serial mode (-serial stdio vs -serial file:).  Limit to 500 to avoid
+    // flooding serial output during normal operation.
+    #[cfg(target_arch = "x86_64")]
+    if count < 500 {
+        unsafe {
+            crate::arch::x86_64::idt::raw_serial_str(b"SC#");
+            crate::arch::x86_64::idt::raw_serial_hex(syscall_num as u64);
+            crate::arch::x86_64::idt::raw_serial_str(b" a1=");
+            crate::arch::x86_64::idt::raw_serial_hex(arg1 as u64);
+            crate::arch::x86_64::idt::raw_serial_str(b" a2=");
+            crate::arch::x86_64::idt::raw_serial_hex(arg2 as u64);
+            crate::arch::x86_64::idt::raw_serial_str(b"\n");
+        }
+    }
 
     // Trace: syscall entry
     crate::trace!(
@@ -669,9 +706,82 @@ pub extern "C" fn syscall_handler(
         .map(|p| p.pid.0)
         .unwrap_or(0);
 
-    let result = match Syscall::try_from(syscall_num) {
-        Ok(syscall) => handle_syscall(syscall, arg1, arg2, arg3, arg4, arg5),
-        Err(_) => Err(SyscallError::InvalidSyscall),
+    // Check per-process flag: does this process use the Linux x86_64 syscall ABI?
+    // Musl/glibc binaries loaded from the rootfs set this flag during
+    // load_user_program. When set, ALL syscall numbers are dispatched through
+    // the Linux compat layer (not VeridianOS numbering), and error codes are
+    // translated to Linux errno values on return.
+    let linux_abi = linux_compat::is_linux_abi(caller_pid);
+
+    let result = if linux_abi {
+        // Handle ppoll specially (different arg layout from poll)
+        if syscall_num == 271 {
+            // ppoll(fds, nfds, timespec*, sigmask, sigsetsize)
+            linux_compat::handle_ppoll(arg1, arg2, arg3)
+        } else if let Some(syscall) = linux_compat::translate_linux_syscall(syscall_num) {
+            handle_syscall(syscall, arg1, arg2, arg3, arg4, arg5)
+        } else if let Some(result) = linux_compat::handle_linux_stub(syscall_num) {
+            result
+        } else {
+            // SAFETY: Writing to COM1 I/O port for diagnostic output.
+            #[cfg(target_arch = "x86_64")]
+            unsafe {
+                crate::arch::x86_64::idt::raw_serial_str(b"SC_UNK#");
+                crate::arch::x86_64::idt::raw_serial_hex(syscall_num as u64);
+                crate::arch::x86_64::idt::raw_serial_str(b"\n");
+            }
+            Err(SyscallError::InvalidSyscall)
+        }
+    } else {
+        // VeridianOS native ABI: dispatch syscalls from musl-patched binaries.
+        //
+        // Cross-compiled musl binaries (kwin, plasmashell, dbus-daemon) contain
+        // a __veridian_remap_syscall() patch that translates Linux syscall
+        // numbers to VeridianOS numbers. However, the musl patch has several
+        // bugs (swapped epoll numbers, wrong timerfd numbers, sigaltstack->
+        // setsid mismap, etc.) that must be corrected at the kernel level since
+        // the musl binary is pre-compiled and cannot be re-patched.
+        //
+        // Additionally, Qt/KWin C++ code and GCC runtime libraries may issue
+        // raw Linux x86_64 syscall numbers that bypass musl's remap entirely
+        // (via inline asm or direct `syscall` instructions). The kernel must
+        // handle BOTH musl-remapped VeridianOS numbers AND raw Linux numbers.
+        //
+        // The dispatch strategy is:
+        // 1. Fix known musl remap bugs (specific number intercepts)
+        // 2. For IPC range (0-7): disambiguate Linux file I/O vs VeridianOS IPC
+        // 3. Try VeridianOS Syscall::try_from() for musl-remapped numbers
+        // 4. Fall back to Linux translation for raw Linux numbers
+        // 5. Try Linux stubs for optional/advisory syscalls
+        //
+        // === musl remap bugs fixed here ===
+        //
+        // Bug 1: epoll_ctl/epoll_create1 SWAPPED
+        //   musl: Linux epoll_ctl(233) -> 262, Linux epoll_create1(281) -> 263
+        //   Correct: epoll_ctl -> EpollCtl(263), epoll_create1 -> EpollCreate(262)
+        //   Effect: 262 and 263 are swapped. Fix: swap them back.
+        //
+        // Bug 2: epoll_create1(291) -> FileDup3(66) instead of EpollCreate(262)
+        //   musl confused Linux 291 (epoll_create1) with dup3.
+        //   Already handled by arg-pattern heuristic at 66.
+        //
+        // Bug 3: dup3(292) -> FilePipe2(65) instead of FileDup3(66)
+        //   musl confused Linux 292 (dup3) with pipe2.
+        //   Already handled by arg-pattern heuristic at 65.
+        //
+        // Bug 4: sigaltstack(131) -> Setsid(179)
+        //   Linux 131 = sigaltstack, NOT setsid. musl incorrectly maps it.
+        //   Fix: intercept 179 and check if it's really setsid or sigaltstack.
+        //
+        // Bug 5: timerfd numbers wrong (322/325/326 instead of 283/286/287)
+        //   Dead code in musl remap (never triggered). Kernel intercepts
+        //   the correct raw Linux numbers (283/286/287) via default passthrough.
+        //
+        // Bug 6: truncate(76)/ftruncate(77) SWAPPED
+        //   musl: truncate(76) -> FileTruncate(56, fd-based)
+        //         ftruncate(77) -> FileTruncatePath(188, path-based)
+        //   Fix: intercept 56 and 188 for correct routing.
+        dispatch_native_abi(syscall_num, arg1, arg2, arg3, arg4, arg5)
     };
 
     // Audit log: syscall with result.
@@ -689,8 +799,31 @@ pub extern "C" fn syscall_handler(
 
     let ret = match result {
         Ok(value) => value as isize,
-        Err(error) => error as i32 as isize,
+        Err(error) => {
+            // Always translate error codes to Linux errno values.
+            //
+            // Both the linux_abi path (raw Linux syscall numbers) and the
+            // native ABI path (musl-remapped VeridianOS numbers) ultimately
+            // return to musl's __syscall_ret(), which interprets negative
+            // return values as -errno (Linux convention).
+            //
+            // Previously, native ABI returned raw VeridianOS error codes
+            // (e.g., ResourceNotFound = -4). musl interpreted -4 as -EINTR
+            // (errno 4) and retried the syscall in an infinite loop, because
+            // Linux ENOENT is -2, not -4.
+            linux_compat::to_linux_errno(error)
+        }
     };
+
+    // Diagnostic: print syscall results for first 500 calls
+    #[cfg(target_arch = "x86_64")]
+    if count < 500 {
+        unsafe {
+            crate::arch::x86_64::idt::raw_serial_str(b"  =>");
+            crate::arch::x86_64::idt::raw_serial_hex(ret as u64);
+            crate::arch::x86_64::idt::raw_serial_str(b"\n");
+        }
+    }
 
     // Trace: syscall exit
     crate::trace!(
@@ -703,7 +836,296 @@ pub extern "C" fn syscall_handler(
     #[cfg(target_arch = "x86_64")]
     crate::arch::x86_64::kpti::on_syscall_exit();
 
+    // Boot-path cooperative yield: if this process was dispatched as a clone
+    // child from futex_wait's spin loop, yield back to the parent after each
+    // syscall so the parent can re-check the futex word.
+    #[cfg(target_arch = "x86_64")]
+    {
+        if crate::arch::x86_64::usermode::BOOT_CLONE_YIELD_PENDING
+            .load(core::sync::atomic::Ordering::Acquire)
+            && crate::arch::x86_64::usermode::has_boot_return_context()
+        {
+            // Save the child's live register state back to its ThreadContext
+            // so the next dispatch uses the correct RIP/RSP/GPRs.
+            // Without this, the child would restart from the clone return
+            // point on every dispatch instead of progressing.
+            if let Some(thread) = crate::process::current_thread() {
+                if let Some(frame) = crate::arch::x86_64::syscall::get_syscall_frame() {
+                    let mut ctx = thread.context.lock();
+                    ctx.rip = frame.rcx; // RCX = user RIP (saved by SYSCALL)
+                    ctx.rflags = frame.r11; // R11 = user RFLAGS
+                    ctx.rsp = crate::arch::x86_64::syscall::get_saved_user_rsp();
+                    ctx.rax = ret as u64; // syscall return value
+                    ctx.rbx = frame.rbx;
+                    ctx.rbp = frame.rbp;
+                    ctx.rdi = frame.rdi;
+                    ctx.rsi = frame.rsi;
+                    ctx.rdx = frame.rdx;
+                    ctx.r8 = frame.r8;
+                    ctx.r9 = frame.r9;
+                    ctx.r10 = frame.r10;
+                    ctx.r12 = frame.r12;
+                    ctx.r13 = frame.r13;
+                    ctx.r14 = frame.r14;
+                    ctx.r15 = frame.r15;
+                }
+            }
+
+            // SAFETY: boot return context is valid (checked above).
+            // boot_return_to_kernel restores the parent's saved
+            // context from enter_forked_child_returnable and returns
+            // to the parent's dispatch loop in boot_futex_spin.
+            unsafe {
+                crate::arch::x86_64::usermode::boot_return_to_kernel();
+            }
+        }
+    }
+
     ret
+}
+
+/// Dispatch a syscall using the native VeridianOS ABI, with corrections for
+/// musl remap bugs and fallback to Linux x86_64 translation.
+///
+/// This is the primary dispatch path for cross-compiled musl binaries
+/// (kwin_wayland, plasmashell, dbus-daemon). It handles:
+/// 1. Known musl __veridian_remap_syscall() bugs (swapped/wrong numbers)
+/// 2. Raw Linux x86_64 syscall numbers from C++ code bypassing musl
+/// 3. Correct VeridianOS-numbered syscalls from musl's remap
+fn dispatch_native_abi(
+    syscall_num: usize,
+    arg1: usize,
+    arg2: usize,
+    arg3: usize,
+    arg4: usize,
+    arg5: usize,
+) -> SyscallResult {
+    // ---------------------------------------------------------------
+    // Phase 1: Fix known musl remap bugs (specific number intercepts)
+    // ---------------------------------------------------------------
+
+    // --- Raw Linux epoll_ctl (233) bypass fix ---
+    // Some code paths (e.g., statically linked Qt/KDE) may call epoll_ctl
+    // via raw syscall(233, ...) bypassing musl's __veridian_remap_syscall().
+    // VeridianOS 233 = InputRead, which silently fails. Intercept it here.
+    if syscall_num == 233 {
+        // epoll_ctl(epfd, op, fd, event_ptr): op is 1/2/3
+        if arg2 <= 3 {
+            return handle_syscall(Syscall::EpollCtl, arg1, arg2, arg3, arg4, arg5);
+        }
+        // Fall through to InputRead for genuine InputRead calls
+    }
+
+    // --- epoll swap fix (Bug 1) ---
+    // musl maps: Linux epoll_ctl(233) -> 262, Linux epoll_create1(281) -> 263
+    // Correct:   epoll_ctl -> EpollCtl(263), epoll_create1 -> EpollCreate(262)
+    // So 262 arrives when musl meant EpollCtl, and 263 when musl meant EpollCreate.
+    if syscall_num == 262 {
+        // 262 can be EITHER:
+        // (a) musl's buggy remap: Linux epoll_ctl(233) -> 262 (swap bug)
+        // (b) Raw Linux newfstatat(262) via musl's SYS_newfstatat path
+        //
+        // Disambiguate by argument patterns:
+        //   newfstatat(dirfd, pathname, statbuf, flags):
+        //     arg1 = AT_FDCWD (0xffffffffffffff9c = -100 sign-extended) or valid fd
+        //     arg2 = pathname pointer (large user-space address)
+        //   epoll_ctl(epfd, op, fd, event_ptr):
+        //     arg1 = epoll fd (small non-negative integer, usually < 256)
+        //     arg2 = EPOLL_CTL_ADD/MOD/DEL (1, 2, or 3)
+        let at_fdcwd = 0xffffffffffffff9c_usize; // AT_FDCWD = -100 as usize
+        if arg1 == at_fdcwd || (arg2 > 4096 && arg2 < USER_SPACE_END) {
+            // Looks like fstatat(AT_FDCWD, path, ...) or fstatat(fd, path, ...)
+            return handle_syscall(Syscall::FileFstatat, arg1, arg2, arg3, arg4, arg5);
+        }
+        // Looks like epoll_ctl(epfd, op, fd, event_ptr)
+        return handle_syscall(Syscall::EpollCtl, arg1, arg2, arg3, arg4, arg5);
+    }
+    if syscall_num == 263 {
+        // 263 can be EITHER:
+        // (a) musl's buggy remap of Linux epoll_create1(291) -> 263 (swap bug)
+        // (b) musl's buggy remap of Linux epoll_pwait(281) -> 263 (mislabeled as
+        // epoll_ctl)
+        //
+        // Disambiguate by argument patterns:
+        //   epoll_create1(flags): arg1 = 0 or O_CLOEXEC(0x80000), arg2 = 0
+        //   epoll_pwait(epfd, events_ptr, maxevents, timeout, sigmask, sigsetsize):
+        //     arg1 = epoll fd (small non-negative int)
+        //     arg2 = events pointer (large user-space address)
+        //     arg3 = maxevents (small positive int)
+        if arg2 > 4096 && arg2 < USER_SPACE_END {
+            // Looks like epoll_pwait (arg2 is a user-space pointer to events array)
+            return handle_syscall(Syscall::EpollWait, arg1, arg2, arg3, arg4, arg5);
+        }
+        // Looks like epoll_create1 (arg2 = 0, arg1 = flags)
+        return handle_syscall(Syscall::EpollCreate, arg1, arg2, arg3, arg4, arg5);
+    }
+
+    // --- epoll_create1 via wrong dup3 mapping (Bug 2) ---
+    // musl maps: Linux epoll_create1(291) -> 66 (FileDup3, wrong)
+    // Also: VeridianOS FileDup3 IS 66 (correct for actual dup3 calls)
+    // Heuristic: epoll_create1 flags are 0 or O_CLOEXEC(0x80000);
+    //            dup3(oldfd, newfd, flags) has oldfd as a small non-zero integer.
+    if syscall_num == 66 {
+        if arg1 == 0 || arg1 == 0x80000 {
+            return handle_syscall(Syscall::EpollCreate, arg1, arg2, arg3, arg4, arg5);
+        }
+        return handle_syscall(Syscall::FileDup3, arg1, arg2, arg3, arg4, arg5);
+    }
+
+    // --- dup3 via wrong pipe2 mapping (Bug 3) ---
+    // musl maps: Linux dup3(292) -> 65 (FilePipe2, wrong; should be FileDup3=66)
+    // Also: VeridianOS FilePipe2 IS 65 (correct for actual pipe2 calls)
+    // Heuristic: pipe2(pipefd_ptr, flags) has arg1 as a pointer (large value);
+    //            dup3(oldfd, newfd, flags) has arg1 as a small fd integer.
+    if syscall_num == 65 {
+        if arg1 > 4096 {
+            return handle_syscall(Syscall::FilePipe2, arg1, arg2, arg3, arg4, arg5);
+        }
+        return handle_syscall(Syscall::FileDup3, arg1, arg2, arg3, arg4, arg5);
+    }
+
+    // --- ppoll passthrough (not in musl remap, arrives as raw Linux 271) ---
+    // Linux ppoll(271) has no musl remap case; `default: return nr` passes
+    // 271 through. Collides with VeridianOS GetPgid(271).
+    // ppoll args: (fds_ptr, nfds, timespec_ptr, sigmask, sigsetsize)
+    //   arg1 = fds pointer (large value)
+    // getpgid args: (pid) where arg1 is a small integer or 0
+    if syscall_num == 271 {
+        if arg1 > 4096 {
+            // Looks like ppoll (fds pointer)
+            return linux_compat::handle_ppoll(arg1, arg2, arg3);
+        }
+        // Looks like getpgid (pid as small int)
+        return handle_syscall(Syscall::Getpgid, arg1, arg2, arg3, arg4, arg5);
+    }
+
+    // --- epoll_pwait passthrough (musl remap maps 281->263, but raw Linux 281
+    // also arrives from Qt/KDE C++ code or libstdc++ bypassing musl) ---
+    // Linux epoll_pwait(281) collides with VeridianOS GrantPty(281).
+    // epoll_pwait args: (epfd, events_ptr, maxevents, timeout, sigmask, sigsetsize)
+    //   arg1 = epoll fd (small non-negative int)
+    //   arg2 = events pointer (large user-space address)
+    // grantpt args: (master_fd) where arg2 is unused/0
+    if syscall_num == 281 {
+        if arg2 > 4096 && arg2 < USER_SPACE_END {
+            // Looks like epoll_pwait (arg2 is user-space events pointer)
+            return handle_syscall(Syscall::EpollWait, arg1, arg2, arg3, arg4, arg5);
+        }
+        // Looks like grantpt (arg2 = 0 or small)
+        return handle_syscall(Syscall::GrantPty, arg1, arg2, arg3, arg4, arg5);
+    }
+
+    // --- timerfd passthrough (not in musl remap, arrives as raw Linux 283/286/287)
+    // ---
+    if syscall_num == 283 {
+        return handle_syscall(Syscall::TimerfdCreate, arg1, arg2, arg3, arg4, arg5);
+    }
+    if syscall_num == 286 {
+        return handle_syscall(Syscall::TimerfdSettime, arg1, arg2, arg3, arg4, arg5);
+    }
+    if syscall_num == 287 {
+        return handle_syscall(Syscall::TimerfdGettime, arg1, arg2, arg3, arg4, arg5);
+    }
+
+    // --- statx stub (Linux 332, not in musl remap) ---
+    // Collides with VeridianOS EventfdRead(332).
+    // Qt may call statx directly. Return ENOSYS so caller falls back to fstatat.
+    // Heuristic: statx has arg1=dirfd (small int), EventfdRead has arg1=efd_id.
+    // Since eventfd IDs are also small ints, prefer ENOSYS which is safe for both
+    // (Qt retries with fstatat, eventfd read falls back to VfsNode path).
+    if syscall_num == 332 {
+        return Err(SyscallError::NotImplemented);
+    }
+
+    // ---------------------------------------------------------------
+    // Phase 2: IPC range (0-7) -> always route to Linux translation
+    // ---------------------------------------------------------------
+    // musl's remap translates Linux file I/O (0-7) to VeridianOS equivalents
+    // that are ALL outside the 0-7 range:
+    //   Linux 0(read)->52, 1(write)->53, 2(open)->50, 3(close)->51,
+    //   4(stat)->150, 5(fstat)->55, 6(lstat)->151, 7(poll)->300
+    //
+    // Therefore, if the kernel receives 0-7, it is ALWAYS a raw Linux
+    // syscall (from C++ code or libstdc++ bypassing musl's remap).
+    // It is NEVER a musl-remapped output. Safe to route through Linux
+    // translation unconditionally.
+    //
+    // This fixes kwin crash: Qt/libstdc++ code issues raw Linux open(2)
+    // and close(3) which collide with VeridianOS IpcCall(2)/IpcReply(3).
+    if syscall_num <= 7 {
+        if let Some(syscall) = linux_compat::translate_linux_syscall(syscall_num) {
+            return handle_syscall(syscall, arg1, arg2, arg3, arg4, arg5);
+        }
+    }
+
+    // ---------------------------------------------------------------
+    // Phase 3: Handle specific known collisions in the 8-63 range
+    // ---------------------------------------------------------------
+    // We CANNOT use blanket Linux-first dispatch for these ranges because
+    // musl's remap OUTPUTS fall within them. For example:
+    //   - musl remaps Linux mmap(9) -> VeridianOS 20 (MemoryMap)
+    //   - Linux 20 = writev
+    //   - Linux-first would wrongly dispatch VeridianOS 20 as writev
+    //
+    // However, some specific Linux syscalls DO bypass musl's remap
+    // (via libstdc++ or Qt inline asm). Handle these individually:
+
+    // Linux connect(42) collides with VeridianOS ThreadJoin(42).
+    // Heuristic: connect(fd, sockaddr_ptr, addrlen) always has arg2 as
+    // a user-space pointer (large address > 4096). ThreadJoin(tid, retval_ptr)
+    // typically has a small tid and retval_ptr is 0 or a stack pointer.
+    // When arg2 is a valid user-space pointer AND we just created a socket
+    // (arg1 is a plausible fd), treat as connect.
+    if syscall_num == 42 && arg2 > 4096 && arg3 > 0 && arg3 < 256 {
+        // arg3 is addrlen (small value like 110 for sockaddr_un)
+        return handle_syscall(Syscall::SocketConnect, arg1, arg2, arg3, arg4, arg5);
+    }
+
+    // Linux getpeername(52) collides with VeridianOS NetGetPeerName(253).
+    // musl maps it to 253. Raw Linux 52 would collide with FileRead(52).
+    // But musl also maps Linux read(0)->52. So 52 is always FileRead.
+    // (No fix needed -- covered by musl remap)
+
+    // Linux setsockopt(54) collides with VeridianOS FileSeek(54).
+    // musl maps it to 254. So 54 is always FileSeek. (No fix needed)
+
+    // Linux flock(73) collides with VeridianOS FsFsync(73).
+    // musl does not remap flock, so it arrives as raw 73.
+    // flock(fd, operation) has arg2 = LOCK_SH(1)/LOCK_EX(2)/LOCK_UN(8)/LOCK_NB(4)
+    // fsync(fd) has no meaningful arg2 (undefined/0).
+    // Heuristic: if arg2 is a valid flock operation (1-15), treat as flock.
+    if syscall_num == 73 && arg2 > 0 && arg2 <= 15 {
+        // Accept flock silently (no-op -- VeridianOS doesn't have file locking)
+        return Ok(0);
+    }
+
+    // ---------------------------------------------------------------
+    // Phase 5: Standard VeridianOS dispatch with Linux fallback
+    // ---------------------------------------------------------------
+    // At this point, the number is either:
+    // - A correctly musl-remapped VeridianOS number (most common case)
+    // - A VeridianOS-only number (no Linux collision)
+    // - An unmapped Linux number > 63 that fell through Phase 4
+    match Syscall::try_from(syscall_num) {
+        Ok(syscall) => handle_syscall(syscall, arg1, arg2, arg3, arg4, arg5),
+        Err(_) => {
+            // Not a valid VeridianOS number -- try Linux translation
+            if let Some(syscall) = linux_compat::translate_linux_syscall(syscall_num) {
+                handle_syscall(syscall, arg1, arg2, arg3, arg4, arg5)
+            } else if let Some(result) = linux_compat::handle_linux_stub(syscall_num) {
+                result
+            } else {
+                // SAFETY: Writing to COM1 I/O port for diagnostic output.
+                #[cfg(target_arch = "x86_64")]
+                unsafe {
+                    crate::arch::x86_64::idt::raw_serial_str(b"SC_UNK#");
+                    crate::arch::x86_64::idt::raw_serial_hex(syscall_num as u64);
+                    crate::arch::x86_64::idt::raw_serial_str(b"\n");
+                }
+                Err(SyscallError::InvalidSyscall)
+            }
+        }
+    }
 }
 
 /// Handle individual system calls
@@ -946,6 +1368,21 @@ fn handle_syscall(
             let op = arg2 as u32;
             let fd = arg3 as i32;
             let event_ptr = arg4;
+
+            // Debug: trace epoll_ctl args
+            #[cfg(target_arch = "x86_64")]
+            unsafe {
+                crate::arch::x86_64::idt::raw_serial_str(b"[EPOLL_CTL] epfd=");
+                crate::arch::x86_64::idt::raw_serial_hex(epoll_fd as u64);
+                crate::arch::x86_64::idt::raw_serial_str(b" op=");
+                crate::arch::x86_64::idt::raw_serial_hex(op as u64);
+                crate::arch::x86_64::idt::raw_serial_str(b" fd=");
+                crate::arch::x86_64::idt::raw_serial_hex(fd as u64);
+                crate::arch::x86_64::idt::raw_serial_str(b" ev=");
+                crate::arch::x86_64::idt::raw_serial_hex(event_ptr as u64);
+                crate::arch::x86_64::idt::raw_serial_str(b"\n");
+            }
+
             let epoll_id = resolve_epoll_id(epoll_fd)?;
             let event = if event_ptr != 0 {
                 validate_user_ptr_typed::<crate::net::epoll::EpollEvent>(event_ptr)?;
@@ -2776,7 +3213,10 @@ fn inet_socket_id(id: usize) -> usize {
 fn to_unix_socket_type(
     sock_type: usize,
 ) -> Result<crate::net::unix_socket::UnixSocketType, SyscallError> {
-    match sock_type {
+    // Mask off SOCK_CLOEXEC (0x80000) and SOCK_NONBLOCK (0x800) flags
+    // that musl passes alongside the base socket type.
+    let base_type = sock_type & 0xF;
+    match base_type {
         SOCK_STREAM => Ok(crate::net::unix_socket::UnixSocketType::Stream),
         SOCK_DGRAM => Ok(crate::net::unix_socket::UnixSocketType::Datagram),
         _ => Err(SyscallError::InvalidArgument),
@@ -2802,7 +3242,9 @@ fn sys_socket_create(domain: usize, sock_type: usize) -> SyscallResult {
         }
         AF_INET => {
             let sock_domain = crate::net::socket::SocketDomain::Inet;
-            let (sock_tp, proto) = match sock_type {
+            // Mask off SOCK_CLOEXEC/SOCK_NONBLOCK flags
+            let base_type = sock_type & 0xF;
+            let (sock_tp, proto) = match base_type {
                 SOCK_STREAM => (
                     crate::net::socket::SocketType::Stream,
                     crate::net::socket::SocketProtocol::Tcp,
@@ -2862,7 +3304,11 @@ fn sys_socket_listen(socket_id: usize, backlog: usize) -> SyscallResult {
 }
 
 /// SYS_SOCKET_CONNECT: Connect to a listening socket.
-fn sys_socket_connect(socket_id: usize, addr_ptr: usize, _addr_len: usize) -> SyscallResult {
+///
+/// For Unix sockets, `addr_ptr` points to `struct sockaddr_un`:
+///   `{ sa_family_t sun_family; char sun_path[108]; }`
+/// The path starts at offset 2 (after the 2-byte family field).
+fn sys_socket_connect(socket_id: usize, addr_ptr: usize, addr_len: usize) -> SyscallResult {
     if is_inet_socket(socket_id) {
         let id = inet_socket_id(socket_id);
         validate_user_buffer(addr_ptr, 6)?;
@@ -2875,10 +3321,31 @@ fn sys_socket_connect(socket_id: usize, addr_ptr: usize, _addr_len: usize) -> Sy
             .map_err(|_| SyscallError::InvalidState)?;
         return Ok(0);
     }
-    let path = read_user_name(addr_ptr, crate::net::unix_socket::UNIX_PATH_MAX)?;
+    // Unix socket: read sa_family (2 bytes) then sun_path from offset 2.
+    // addr_len includes the sa_family, so path_len = addr_len - 2.
+    let min_len = if addr_len > 2 { addr_len } else { 4 };
+    validate_user_buffer(addr_ptr, min_len)?;
+    // Skip sa_family (2 bytes) to get the path
+    let path = read_user_name(addr_ptr + 2, crate::net::unix_socket::UNIX_PATH_MAX)?;
+
+    // Trace the connect path for debugging
+    #[cfg(target_arch = "x86_64")]
+    {
+        // SAFETY: Writing to COM1 for diagnostic output.
+        unsafe {
+            crate::arch::x86_64::idt::raw_serial_str(b"[CONNECT] ");
+            let show_len = path.len().min(80);
+            for &b in &path.as_bytes()[..show_len] {
+                crate::arch::x86_64::idt::raw_serial_str(&[b]);
+            }
+            crate::arch::x86_64::idt::raw_serial_str(b"\n");
+        }
+    }
+
     crate::net::unix_socket::socket_connect(socket_id as u64, &path)
         .map(|()| 0)
-        .map_err(|_| SyscallError::InvalidState)
+        .map_err(|_| SyscallError::ResourceNotFound) // ENOENT -- socket path
+                                                     // not found
 }
 
 /// SYS_SOCKET_ACCEPT: Accept a pending connection.

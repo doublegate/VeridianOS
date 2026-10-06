@@ -51,4 +51,6 @@ fn main() {
     println!("cargo:rerun-if-changed=src/arch/x86_64/link.ld");
     println!("cargo:rerun-if-changed=src/arch/aarch64/link.ld");
     println!("cargo:rerun-if-changed=src/arch/riscv64/link.ld");
+    // bootstrap.rs bakes the cross-compiled sysroot path via option_env!.
+    println!("cargo:rerun-if-env-changed=VERIDIAN_SYSROOT");
 }

@@ -19,9 +19,15 @@ const CLONE_FS: usize = 0x0000_0200;
 const CLONE_FILES: usize = 0x0000_0400;
 const CLONE_SIGHAND: usize = 0x0000_0800;
 const CLONE_THREAD: usize = 0x0001_0000;
+/// Share SysV semaphore undo lists (musl always sets this for pthreads).
+/// Accepted but ignored -- VeridianOS has no SysV semaphore undo tracking.
+const CLONE_SYSVSEM: usize = 0x0004_0000;
 const CLONE_SETTLS: usize = 0x0008_0000;
 const CLONE_PARENT_SETTID: usize = 0x0010_0000;
 const CLONE_CHILD_CLEARTID: usize = 0x0020_0000;
+/// Deprecated flag set by musl's pthread_create (ignored on Linux 2.6+).
+/// Accepted but ignored for compatibility.
+const CLONE_DETACHED: usize = 0x0040_0000;
 const CLONE_CHILD_SETTID: usize = 0x0100_0000;
 
 /// Upper bound of the user-space address range.  Any stack pointer must be
@@ -83,9 +89,11 @@ pub fn sys_thread_clone(
             | CLONE_FILES
             | CLONE_SIGHAND
             | CLONE_THREAD
+            | CLONE_SYSVSEM
             | CLONE_SETTLS
             | CLONE_PARENT_SETTID
             | CLONE_CHILD_CLEARTID
+            | CLONE_DETACHED
             | CLONE_CHILD_SETTID);
     if unsupported != 0 {
         return Err(SyscallError::InvalidArgument);
@@ -151,10 +159,38 @@ pub fn sys_thread_clone(
     let thread = builder.build().map_err(|_| SyscallError::InvalidState)?;
     let tid = thread.tid;
 
-    // Override context with cloned registers so the child returns 0 from clone
+    // Override context with cloned registers so the child returns 0 from clone.
+    //
+    // The thread's context was initialized from the exec/load entry point, but
+    // the parent is mid-syscall: the *live* registers (RIP = return address
+    // after SYSCALL, callee-saved GPRs) are on the kernel stack in the
+    // SyscallFrame, NOT in the stale ThreadContext.  We clone the stale
+    // context as a baseline, then overlay the live values from SyscallFrame.
     {
         let mut child_ctx = thread.context.lock();
         ThreadContext::clone_from(&mut *child_ctx, &*current_ctx);
+
+        // Overlay live registers from the SyscallFrame saved by syscall_entry.
+        // Without this, the child's RIP is the process entry point (from exec)
+        // instead of the instruction after the clone() syscall.
+        #[cfg(target_arch = "x86_64")]
+        if let Some(frame) = crate::arch::x86_64::syscall::get_syscall_frame() {
+            child_ctx.rip = frame.rcx; // RCX = user RIP (saved by SYSCALL)
+            child_ctx.rflags = frame.r11; // R11 = user RFLAGS (saved by SYSCALL)
+            child_ctx.rbx = frame.rbx;
+            child_ctx.rbp = frame.rbp;
+            child_ctx.r12 = frame.r12;
+            child_ctx.r13 = frame.r13;
+            child_ctx.r14 = frame.r14;
+            child_ctx.r15 = frame.r15;
+            child_ctx.rdi = frame.rdi;
+            child_ctx.rsi = frame.rsi;
+            child_ctx.rdx = frame.rdx;
+            child_ctx.r8 = frame.r8;
+            child_ctx.r9 = frame.r9;
+            child_ctx.r10 = frame.r10;
+        }
+
         child_ctx.set_stack_pointer(newsp);
         child_ctx.set_return_value(0); // child sees 0 return
                                        // Apply requested TLS base after cloning parent context
@@ -182,7 +218,7 @@ pub fn sys_thread_clone(
     }
 
     // Create scheduler task
-    let _task_ptr = sched::create_task_from_thread(proc.pid, tid, &thread)
+    let task_ptr = sched::create_task_from_thread(proc.pid, tid, &thread)
         .map_err(|_| SyscallError::InvalidState)?;
 
     // Add to process
@@ -191,6 +227,12 @@ pub fn sys_thread_clone(
 
     // Mark ready
     proc.set_state(ProcessState::Ready);
+
+    // Enqueue the child thread in the scheduler so it actually gets CPU time.
+    // Without this, the child task exists but is never placed on a ready queue,
+    // causing the parent to spin forever in futex_wait (pthread_create waits
+    // for the child to write its TID).
+    sched::SCHEDULER.lock().enqueue(task_ptr);
 
     // CLONE_PARENT_SETTID: write the child's TID into the parent's address
     // space at `parent_tid_ptr`.  This happens in the parent's context

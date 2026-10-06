@@ -115,6 +115,19 @@ pub fn load_user_program(
 
     let pid = lifecycle::create_process_with_options(options)?;
 
+    // NOTE: Do NOT call set_linux_abi() here.
+    //
+    // Cross-compiled musl binaries (from tools/cross/) contain a patched
+    // __veridian_remap_syscall() function that translates Linux syscall
+    // numbers to VeridianOS numbers BEFORE the `syscall` instruction.
+    // The kernel therefore receives VeridianOS-native syscall numbers
+    // and must use the native ABI dispatch path (Syscall::try_from).
+    //
+    // If set_linux_abi() were called, the kernel would re-translate the
+    // already-translated numbers through translate_linux_syscall(), causing
+    // wrong handler dispatch (e.g., VeridianOS mmap=20 would be treated
+    // as Linux writev=20).
+
     #[cfg(target_arch = "x86_64")]
     // SAFETY: raw_serial_str writes to the COM1 I/O port for diagnostic output.
     unsafe {
@@ -225,6 +238,127 @@ pub fn load_user_program(
                 println!(
                     "[LOADER] WARNING: binary is dynamically linked but has no interpreter set"
                 );
+            }
+        }
+    }
+
+    // Post-load setup: Build auxiliary vector and set up TLS for the loaded
+    // ELF binary. musl libc needs AT_PAGESZ (at minimum) from the auxv, and
+    // PT_TLS for thread-local storage initialization. Without these, musl's
+    // __init_tls crashes immediately after entering user mode.
+    #[cfg(not(target_arch = "riscv64"))]
+    if let Some(process) = crate::process::get_process(pid) {
+        use crate::elf::dynamic::{AuxType, AuxVecEntry};
+
+        // Build auxiliary vector from parsed ELF binary.
+        // AT_PHDR must point to the program header table in memory, which is
+        // at load_base + phoff (where phoff = e_phoff from the ELF header).
+        // musl's __init_libc iterates the program headers via AT_PHDR to find
+        // PT_TLS, PT_GNU_STACK, etc. Pointing at load_base (the ELF magic)
+        // instead of load_base+phoff causes musl to misparse and crash.
+        let phdr_addr = binary.load_base + binary.phoff;
+
+        #[cfg(target_arch = "x86_64")]
+        // SAFETY: raw_serial_str/raw_serial_hex write to COM1 I/O port for diagnostic output.
+        unsafe {
+            crate::arch::x86_64::idt::raw_serial_str(b"[AUXV] phdr=0x");
+            crate::arch::x86_64::idt::raw_serial_hex(phdr_addr);
+            crate::arch::x86_64::idt::raw_serial_str(b" phent=");
+            crate::arch::x86_64::idt::raw_serial_hex(binary.phentsize as u64);
+            crate::arch::x86_64::idt::raw_serial_str(b" phnum=");
+            crate::arch::x86_64::idt::raw_serial_hex(binary.phnum as u64);
+            crate::arch::x86_64::idt::raw_serial_str(b" entry=0x");
+            crate::arch::x86_64::idt::raw_serial_hex(binary.entry_point);
+            crate::arch::x86_64::idt::raw_serial_str(b"\n");
+        }
+
+        let auxv = vec![
+            AuxVecEntry::new(AuxType::AtPhdr, phdr_addr),
+            AuxVecEntry::new(AuxType::AtPhent, binary.phentsize as u64),
+            AuxVecEntry::new(AuxType::AtPhnum, binary.phnum as u64),
+            AuxVecEntry::new(AuxType::AtPagesz, 0x1000),
+            AuxVecEntry::new(AuxType::AtEntry, binary.entry_point),
+            AuxVecEntry::new(AuxType::AtNull, 0),
+        ];
+
+        // Re-setup the user stack with auxv included. The initial stack was
+        // set up by create_process_with_options with None for auxv. We rebuild
+        // it now that we have the ELF info.
+        let argv_refs: Vec<&str> = argv.to_vec();
+        let envp_refs: Vec<&str> = envp.to_vec();
+
+        // If argv is empty, use the program name as argv[0]
+        let default_argv;
+        let argv_for_stack = if argv_refs.is_empty() {
+            default_argv = vec![path];
+            &default_argv[..]
+        } else {
+            &argv_refs[..]
+        };
+
+        let stack_top =
+            lifecycle::setup_exec_stack_pub(process, argv_for_stack, &envp_refs, Some(&auxv))?;
+
+        // Update the thread context with the new stack pointer
+        if let Some(main_tid) = process.get_main_thread_id() {
+            if let Some(thread) = process.get_thread(main_tid) {
+                use crate::arch::context::ThreadContext;
+                let mut ctx = thread.context.lock();
+                ctx.set_stack_pointer(stack_top);
+            }
+        }
+
+        // Set up TLS (Thread-Local Storage) from PT_TLS segment if present.
+        // x86_64 uses TLS variant II: FS_BASE points to the TCB at the END
+        // of the TLS block. TLS variables are at negative offsets from FS_BASE.
+        #[cfg(target_arch = "x86_64")]
+        {
+            if let Some(tls_seg) = binary
+                .segments
+                .iter()
+                .find(|s| s.segment_type == crate::elf::SegmentType::Tls)
+            {
+                let tls_memsz = tls_seg.memory_size as usize;
+                let tls_filesz = tls_seg.file_size as usize;
+                // TLS block: tls_memsz (data+bss) + 8 (TCB self-pointer), aligned to 16
+                let tcb_size = 8usize;
+                let tls_block_size = ((tls_memsz + tcb_size) + 15) & !15;
+
+                let memory_space = process.memory_space.lock();
+                if let Ok(tls_base_vaddr) =
+                    memory_space.mmap(tls_block_size, crate::mm::vas::MappingType::Data)
+                {
+                    let tls_base = tls_base_vaddr.as_usize();
+                    let tcb_addr = tls_base + tls_memsz;
+
+                    // Copy TLS init data from the ELF file buffer
+                    if tls_filesz > 0 {
+                        let tls_file_offset = tls_seg.file_offset as usize;
+                        if tls_file_offset + tls_filesz <= buffer.len() {
+                            let tls_init = &buffer[tls_file_offset..tls_file_offset + tls_filesz];
+                            let _ = crate::elf::write_to_user_pages(
+                                &memory_space,
+                                tls_base as u64,
+                                tls_init,
+                            );
+                        }
+                    }
+
+                    // Write TCB self-pointer: *(u64*)tcb_addr = tcb_addr
+                    let self_ptr_bytes = (tcb_addr as u64).to_le_bytes();
+                    let _ = crate::elf::write_to_user_pages(
+                        &memory_space,
+                        tcb_addr as u64,
+                        &self_ptr_bytes,
+                    );
+
+                    drop(memory_space);
+
+                    // Store FS_BASE so enter_usermode / run_user_process sets it
+                    process
+                        .tls_fs_base
+                        .store(tcb_addr as u64, core::sync::atomic::Ordering::Release);
+                }
             }
         }
     }

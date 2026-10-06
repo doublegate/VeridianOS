@@ -194,6 +194,13 @@ pub struct ElfBinary {
     pub entry_point: u64,
     pub load_base: u64,
     pub load_size: usize,
+    /// Offset of the program header table within the ELF file (e_phoff).
+    /// Used to compute AT_PHDR = load_base + phoff for the auxiliary vector.
+    pub phoff: u64,
+    /// Number of program header entries (e_phnum).
+    pub phnum: u16,
+    /// Size of each program header entry in bytes (e_phentsize, typically 56).
+    pub phentsize: u16,
     pub segments: Vec<ElfSegment>,
     pub interpreter: Option<String>,
     pub dynamic: bool,

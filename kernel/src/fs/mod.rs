@@ -795,6 +795,7 @@ pub fn init() {
                 root.mkdir("root", Permissions::default()).ok();
                 root.mkdir("sbin", Permissions::default()).ok();
                 root.mkdir("sys", Permissions::default()).ok();
+                root.mkdir("run", Permissions::default()).ok();
                 root.mkdir("tmp", Permissions::from_mode(0o777)).ok();
                 root.mkdir("usr", Permissions::default()).ok();
                 root.mkdir("var", Permissions::default()).ok();
@@ -825,6 +826,25 @@ pub fn init() {
                     var.mkdir("tmp", Permissions::default()).ok();
                     var.mkdir("run", Permissions::default()).ok();
                     var.mkdir("cache", Permissions::default()).ok();
+                    // /var/lib/dbus/machine-id (D-Bus machine identifier)
+                    // Some libraries check this path before /etc/machine-id.
+                    if let Ok(lib) = var.mkdir("lib", Permissions::default()) {
+                        if let Ok(dbus) = lib.mkdir("dbus", Permissions::default()) {
+                            if let Ok(f) = dbus.create("machine-id", Permissions::read_only()) {
+                                f.write(0, b"a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6\n").ok();
+                            }
+                        }
+                    }
+                }
+
+                // /run subdirectories (XDG_RUNTIME_DIR, D-Bus sockets)
+                if let Ok(run) = root.lookup("run") {
+                    // /run/user/0 -- XDG_RUNTIME_DIR for root user (KWin, Wayland)
+                    if let Ok(user) = run.mkdir("user", Permissions::default()) {
+                        user.mkdir("0", Permissions::from_mode(0o700)).ok();
+                    }
+                    // /run/dbus -- D-Bus system bus socket directory
+                    run.mkdir("dbus", Permissions::default()).ok();
                 }
 
                 // /home/root (root user home directory)
@@ -879,6 +899,13 @@ pub fn init() {
                         .ok();
                     }
 
+                    // /etc/machine-id (D-Bus/systemd machine identifier, 32 hex + newline)
+                    // Required by Qt/KDE/D-Bus for session tracking. Without this,
+                    // kwin_wayland crashes with a page fault when reading machine-id.
+                    if let Ok(f) = etc.create("machine-id", Permissions::read_only()) {
+                        f.write(0, b"a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6\n").ok();
+                    }
+
                     // /etc/veridian/session.conf (default desktop session config)
                     if let Ok(veridian_dir) = etc.mkdir("veridian", Permissions::default()) {
                         if let Ok(f) = veridian_dir.create("session.conf", Permissions::default()) {
@@ -919,6 +946,45 @@ pub fn init() {
 
         println!("[VFS] Process filesystem mounted at /proc");
 
+        // Create /proc/sys/kernel/ hierarchy for KDE/Qt compatibility.
+        // Qt's KCrash module reads /proc/sys/kernel/core_pattern to decide
+        // whether to install a crash handler. Without it, KCrash enters an
+        // infinite retry loop that prevents kwin from starting.
+        {
+            let vfs = get_vfs();
+            let vfs_guard = vfs.read();
+            // ProcFS is mounted at /proc. Access its root node through
+            // the mounts table.
+            if let Some(proc_fs) = vfs_guard.mounts.get("/proc") {
+                let proc_root = proc_fs.root();
+                // /proc/sys/kernel/core_pattern
+                if let Ok(sys_dir) = proc_root.mkdir("sys", Permissions::default()) {
+                    if let Ok(kernel_dir) = sys_dir.mkdir("kernel", Permissions::default()) {
+                        if let Ok(f) = kernel_dir.create("core_pattern", Permissions::default()) {
+                            f.write(0, b"core\n").ok();
+                        }
+                        // /proc/sys/kernel/random/boot_id (UUID for Qt sessions)
+                        if let Ok(random_dir) = kernel_dir.mkdir("random", Permissions::default()) {
+                            if let Ok(f) = random_dir.create("boot_id", Permissions::default()) {
+                                f.write(0, b"00000000-0000-0000-0000-000000000001\n").ok();
+                            }
+                        }
+                    }
+                }
+                // /proc/self/exe (Qt's applicationFilePath())
+                if let Ok(self_dir) = proc_root.mkdir("self", Permissions::default()) {
+                    if let Ok(f) = self_dir.create("exe", Permissions::default()) {
+                        f.write(0, b"").ok();
+                    }
+                    // /proc/self/maps (Qt crash handler)
+                    if let Ok(f) = self_dir.create("maps", Permissions::default()) {
+                        f.write(0, b"").ok();
+                    }
+                }
+            }
+        }
+        println!("[VFS] Created /proc/sys/kernel/ stubs for Qt/KDE");
+
         println!("[VFS] Virtual Filesystem initialization complete");
     }
 
@@ -926,6 +992,64 @@ pub fn init() {
     {
         println!("[VFS] Skipping VFS initialization (no alloc)");
     }
+}
+
+/// Re-create /proc/sys/kernel/ stubs after a root filesystem swap.
+///
+/// When BlockFS replaces the initial RamFS root, the old ProcFS mount is
+/// destroyed and a fresh one is created. This function re-populates the
+/// Qt/KDE-required files in /proc that were originally created in [`init`].
+#[cfg(feature = "alloc")]
+pub fn recreate_proc_stubs() {
+    let vfs = get_vfs();
+    let vfs_guard = vfs.read();
+    if let Some(proc_fs) = vfs_guard.mounts.get("/proc") {
+        let proc_root = proc_fs.root();
+        // /proc/sys/kernel/core_pattern
+        if let Ok(sys_dir) = proc_root
+            .lookup("sys")
+            .or_else(|_| proc_root.mkdir("sys", Permissions::default()))
+        {
+            if let Ok(kernel_dir) = sys_dir
+                .lookup("kernel")
+                .or_else(|_| sys_dir.mkdir("kernel", Permissions::default()))
+            {
+                if kernel_dir.lookup("core_pattern").is_err() {
+                    if let Ok(f) = kernel_dir.create("core_pattern", Permissions::default()) {
+                        f.write(0, b"core\n").ok();
+                    }
+                }
+                // /proc/sys/kernel/random/boot_id
+                if let Ok(random_dir) = kernel_dir
+                    .lookup("random")
+                    .or_else(|_| kernel_dir.mkdir("random", Permissions::default()))
+                {
+                    if random_dir.lookup("boot_id").is_err() {
+                        if let Ok(f) = random_dir.create("boot_id", Permissions::default()) {
+                            f.write(0, b"00000000-0000-0000-0000-000000000001\n").ok();
+                        }
+                    }
+                }
+            }
+        }
+        // /proc/self/exe and /proc/self/maps
+        if let Ok(self_dir) = proc_root
+            .lookup("self")
+            .or_else(|_| proc_root.mkdir("self", Permissions::default()))
+        {
+            if self_dir.lookup("exe").is_err() {
+                if let Ok(f) = self_dir.create("exe", Permissions::default()) {
+                    f.write(0, b"").ok();
+                }
+            }
+            if self_dir.lookup("maps").is_err() {
+                if let Ok(f) = self_dir.create("maps", Permissions::default()) {
+                    f.write(0, b"").ok();
+                }
+            }
+        }
+    }
+    println!("[VFS] Re-created /proc/sys/kernel/ stubs for Qt/KDE");
 }
 
 /// Read the entire contents of a file into a Vec<u8>

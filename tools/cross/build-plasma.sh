@@ -343,9 +343,17 @@ HEADER
     if [[ ! -f "${SYSROOT}/usr/lib/libudev.a" ]]; then
         local cc="${SYSROOT}/bin/x86_64-veridian-musl-gcc"
         local ar="${SYSROOT}/bin/x86_64-veridian-ar"
-        cd /tmp && echo 'void __udev_stub(void) {}' > udev_stub.c
-        "$cc" -c udev_stub.c -o udev_stub.o
-        "$ar" rcs "${SYSROOT}/usr/lib/libudev.a" udev_stub.o
+        local stubs_src="${SCRIPT_DIR}/musl-compat/libudev_stubs.c"
+        if [[ -f "$stubs_src" ]]; then
+            log "Building libudev.a from musl-compat/libudev_stubs.c..."
+            "$cc" -c -O2 -fPIC "$stubs_src" -o /tmp/libudev_stubs.o
+            "$ar" rcs "${SYSROOT}/usr/lib/libudev.a" /tmp/libudev_stubs.o
+        else
+            log "WARNING: libudev_stubs.c not found, using minimal stub"
+            cd /tmp && echo 'void __udev_stub(void) {}' > udev_stub.c
+            "$cc" -c udev_stub.c -o udev_stub.o
+            "$ar" rcs "${SYSROOT}/usr/lib/libudev.a" udev_stub.o
+        fi
     fi
     mkdir -p "${SYSROOT}/usr/lib/pkgconfig"
     [[ -f "${SYSROOT}/usr/lib/pkgconfig/libudev.pc" ]] || \

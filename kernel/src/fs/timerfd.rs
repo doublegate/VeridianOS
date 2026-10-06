@@ -235,6 +235,12 @@ pub fn timerfd_read(tfd_id: u32) -> Result<u64, SyscallError> {
             if crate::timer::get_uptime_ms() - start >= MAX_BLOCK_MS {
                 return Err(SyscallError::WouldBlock);
             }
+            // Enable interrupts so APIC timer advances UPTIME_MS
+            #[cfg(target_arch = "x86_64")]
+            unsafe {
+                core::arch::asm!("sti; hlt; cli", options(nomem, nostack));
+            }
+            #[cfg(not(target_arch = "x86_64"))]
             crate::sched::yield_cpu();
             continue;
         }
@@ -271,6 +277,12 @@ pub fn timerfd_read(tfd_id: u32) -> Result<u64, SyscallError> {
         if crate::timer::get_uptime_ms() - start >= MAX_BLOCK_MS {
             return Err(SyscallError::WouldBlock);
         }
+        // Enable interrupts so APIC timer advances UPTIME_MS
+        #[cfg(target_arch = "x86_64")]
+        unsafe {
+            core::arch::asm!("sti; hlt; cli", options(nomem, nostack));
+        }
+        #[cfg(not(target_arch = "x86_64"))]
         crate::sched::yield_cpu();
     }
 }

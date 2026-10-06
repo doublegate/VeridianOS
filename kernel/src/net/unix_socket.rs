@@ -507,3 +507,57 @@ pub fn socket_sendto(socket_id: u64, data: &[u8], dest_path: &str) -> KernelResu
 pub fn socket_count() -> usize {
     UNIX_SOCKETS.lock().len()
 }
+
+/// Check if a socket ID exists in the unix socket registry.
+pub fn socket_exists(socket_id: u64) -> bool {
+    UNIX_SOCKETS.lock().contains_key(&socket_id)
+}
+
+/// Poll readiness of a unix socket for epoll/poll integration.
+///
+/// Returns POLL-style flags:
+/// - 0x0001 (POLLIN): data available to read, or pending connection to accept
+/// - 0x0004 (POLLOUT): socket is writable (connected and send buffer has space)
+/// - 0x0008 (POLLERR): error condition
+/// - 0x0010 (POLLHUP): peer disconnected
+pub fn socket_poll_readiness(socket_id: u64) -> u16 {
+    let sockets = UNIX_SOCKETS.lock();
+    let socket = match sockets.get(&socket_id) {
+        Some(s) => s,
+        None => return 0x0008 | 0x0010, // POLLERR | POLLHUP for invalid socket
+    };
+
+    let mut events = 0u16;
+
+    match socket.state {
+        UnixSocketState::Listening => {
+            // Listening socket: POLLIN if pending connections
+            if !socket.pending_connections.is_empty() {
+                events |= 0x0001; // POLLIN
+            }
+        }
+        UnixSocketState::Connected => {
+            // Connected socket: POLLIN if data in recv buffer
+            if !socket.recv_buffer.is_empty() {
+                events |= 0x0001; // POLLIN
+            }
+            // POLLOUT if we can send (peer exists and buffer has space)
+            if !socket.shutdown_write {
+                events |= 0x0004; // POLLOUT
+            }
+            // POLLHUP if peer shut down
+            if socket.shutdown_read {
+                events |= 0x0010; // POLLHUP
+            }
+        }
+        UnixSocketState::Unbound | UnixSocketState::Bound => {
+            // Not yet connected or listening -- writable
+            events |= 0x0004; // POLLOUT
+        }
+        UnixSocketState::Closed => {
+            events |= 0x0010; // POLLHUP
+        }
+    }
+
+    events
+}

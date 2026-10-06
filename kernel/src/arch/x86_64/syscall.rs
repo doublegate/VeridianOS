@@ -165,6 +165,28 @@ pub unsafe extern "C" fn syscall_entry() {
         // live registers instead of the stale ThreadContext from exec/load.
         "mov [{frame_ptr}], rsp",
 
+        // Save user SSE registers (xmm0-xmm15).
+        // The kernel is compiled with +sse2 and LLVM may use XMM registers
+        // in any Rust function (memcpy, memset, optimizations). Without
+        // saving them here, the kernel clobbers user SSE state.
+        "sub rsp, 256",              // 16 registers * 16 bytes
+        "movdqu [rsp],      xmm0",
+        "movdqu [rsp+0x10], xmm1",
+        "movdqu [rsp+0x20], xmm2",
+        "movdqu [rsp+0x30], xmm3",
+        "movdqu [rsp+0x40], xmm4",
+        "movdqu [rsp+0x50], xmm5",
+        "movdqu [rsp+0x60], xmm6",
+        "movdqu [rsp+0x70], xmm7",
+        "movdqu [rsp+0x80], xmm8",
+        "movdqu [rsp+0x90], xmm9",
+        "movdqu [rsp+0xa0], xmm10",
+        "movdqu [rsp+0xb0], xmm11",
+        "movdqu [rsp+0xc0], xmm12",
+        "movdqu [rsp+0xd0], xmm13",
+        "movdqu [rsp+0xe0], xmm14",
+        "movdqu [rsp+0xf0], xmm15",
+
         // Rearrange registers from SYSCALL ABI to C calling convention.
         //
         // SYSCALL ABI:  rax=number, rdi=arg1, rsi=arg2, rdx=arg3, r10=arg4, r8=arg5
@@ -184,6 +206,25 @@ pub unsafe extern "C" fn syscall_entry() {
         // Clear frame pointer now that handler has returned.
         // This prevents stale pointer use outside syscall context.
         "mov qword ptr [{frame_ptr}], 0",
+
+        // Restore user SSE registers (xmm0-xmm15)
+        "movdqu xmm0,  [rsp]",
+        "movdqu xmm1,  [rsp+0x10]",
+        "movdqu xmm2,  [rsp+0x20]",
+        "movdqu xmm3,  [rsp+0x30]",
+        "movdqu xmm4,  [rsp+0x40]",
+        "movdqu xmm5,  [rsp+0x50]",
+        "movdqu xmm6,  [rsp+0x60]",
+        "movdqu xmm7,  [rsp+0x70]",
+        "movdqu xmm8,  [rsp+0x80]",
+        "movdqu xmm9,  [rsp+0x90]",
+        "movdqu xmm10, [rsp+0xa0]",
+        "movdqu xmm11, [rsp+0xb0]",
+        "movdqu xmm12, [rsp+0xc0]",
+        "movdqu xmm13, [rsp+0xd0]",
+        "movdqu xmm14, [rsp+0xe0]",
+        "movdqu xmm15, [rsp+0xf0]",
+        "add rsp, 256",
 
         // Restore user registers (reverse order of saves).
         // rax holds the syscall return value and is NOT restored.

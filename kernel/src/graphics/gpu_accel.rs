@@ -1813,6 +1813,8 @@ pub struct VblankEvent {
     pub timestamp_ns: u64,
     /// CRTC that generated this event
     pub crtc_id: u32,
+    /// User data from the page flip request (returned to user space)
+    pub user_data: u64,
 }
 
 /// Page flip request
@@ -1940,6 +1942,7 @@ impl PageFlipManager {
                     sequence: seq,
                     timestamp_ns,
                     crtc_id,
+                    user_data: flip.user_data,
                 });
 
                 completed_indices.push(i);
@@ -2258,6 +2261,144 @@ pub fn with_page_flip<R, F: FnOnce(&mut PageFlipManager) -> R>(f: F) -> Option<R
 /// Access the hardware cursor
 pub fn with_cursor<R, F: FnOnce(&mut HardwareCursor) -> R>(f: F) -> Option<R> {
     HARDWARE_CURSOR.lock().as_mut().map(f)
+}
+
+/// Check if there are pending DRM page-flip events waiting to be read.
+///
+/// Used by DRM device node poll_readiness() to report POLLIN only when
+/// events are queued, preventing spurious wakeups that confuse kwin's
+/// event loop.
+pub fn has_pending_drm_events() -> bool {
+    with_page_flip(|pf| !pf.vblank_events.is_empty()).unwrap_or(false)
+}
+
+/// Read pending DRM events into a user buffer as `drm_event_vblank` structs.
+///
+/// Each event is 32 bytes matching Linux's `struct drm_event_vblank`:
+///   u32 type (0x02 = DRM_EVENT_FLIP_COMPLETE)
+///   u32 length (32)
+///   u64 user_data
+///   u32 tv_sec
+///   u32 tv_usec
+///   u32 sequence
+///   u32 crtc_id (reserved/pad in upstream, we use for crtc_id)
+///
+/// Returns the number of bytes written to the buffer.
+pub fn read_drm_events(buffer: &mut [u8]) -> usize {
+    const DRM_EVENT_FLIP_COMPLETE: u32 = 0x02;
+    const EVENT_SIZE: usize = 32;
+
+    let events = match with_page_flip(|pf| pf.drain_events()) {
+        Some(events) => events,
+        None => return 0,
+    };
+
+    let mut offset = 0;
+    for event in &events {
+        if offset + EVENT_SIZE > buffer.len() {
+            break;
+        }
+
+        // Convert timestamp_ns to tv_sec / tv_usec
+        let tv_sec = (event.timestamp_ns / 1_000_000_000) as u32;
+        let tv_usec = ((event.timestamp_ns % 1_000_000_000) / 1_000) as u32;
+        let sequence = event.sequence as u32;
+
+        // Write drm_event_vblank struct
+        buffer[offset..offset + 4].copy_from_slice(&DRM_EVENT_FLIP_COMPLETE.to_ne_bytes());
+        buffer[offset + 4..offset + 8].copy_from_slice(&(EVENT_SIZE as u32).to_ne_bytes());
+        buffer[offset + 8..offset + 16].copy_from_slice(&event.user_data.to_ne_bytes());
+        buffer[offset + 16..offset + 20].copy_from_slice(&tv_sec.to_ne_bytes());
+        buffer[offset + 20..offset + 24].copy_from_slice(&tv_usec.to_ne_bytes());
+        buffer[offset + 24..offset + 28].copy_from_slice(&sequence.to_ne_bytes());
+        buffer[offset + 28..offset + 32].copy_from_slice(&event.crtc_id.to_ne_bytes());
+
+        offset += EVENT_SIZE;
+    }
+
+    offset
+}
+
+// ===========================================================================
+// Virtual DRM device initialization
+// ===========================================================================
+
+/// Initialize a virtual DRM device backed by the UEFI GOP framebuffer.
+///
+/// Creates one CRTC, one encoder, and one connector with the 1280x800@60Hz
+/// mode matching the UEFI GOP display. This allows DRM clients (e.g., KWin)
+/// to discover display resources via standard DRM ioctls and use dumb
+/// buffers for rendering.
+pub fn init_virtual_drm_device() {
+    let fb_info = super::framebuffer::get_fb_info();
+    let (width, height) = fb_info
+        .map(|fb| (fb.width, fb.height))
+        .unwrap_or((1280, 800));
+
+    with_kms(|kms| {
+        // Add CRTC (id=1)
+        let crtc_id = kms.add_crtc();
+
+        // Add encoder (id=1, type=TMDS for HDMI, can drive CRTC 0)
+        let encoder_id = kms.add_encoder(EncoderType::Tmds, 0x1);
+
+        // Bind encoder to CRTC
+        kms.bind_encoder(encoder_id, crtc_id);
+
+        // Add connector (id=1, type=HDMI -- KWin's DRM backend may skip Virtual
+        // connectors)
+        let connector_id = kms.add_connector(ConnectorType::Hdmi);
+
+        // Connect encoder to connector
+        kms.connect_encoder(connector_id, encoder_id);
+
+        // Build display mode from actual framebuffer dimensions.
+        // Use the WXGA60 preset if dimensions match, otherwise build custom.
+        let mode = if width == 1280 && height == 800 {
+            DisplayMode::mode_wxga60()
+        } else if width == 1920 && height == 1080 {
+            DisplayMode::mode_1080p60()
+        } else if width == 1280 && height == 720 {
+            DisplayMode::mode_720p60()
+        } else {
+            // Custom mode: approximate timings for the given resolution
+            let htotal = width + width / 5; // ~120% of active
+            let vtotal = height + height / 20; // ~105% of active
+                                               // Pixel clock = htotal * vtotal * 60 / 1000 (in kHz)
+            let clock_khz = (htotal as u64)
+                .checked_mul(vtotal as u64)
+                .and_then(|v| v.checked_mul(60))
+                .map(|v| (v / 1000) as u32)
+                .unwrap_or(83500);
+            DisplayMode {
+                hdisplay: width,
+                vdisplay: height,
+                clock_khz,
+                hsync_start: width + width / 20,
+                hsync_end: width + width / 10,
+                htotal,
+                vsync_start: height + 3,
+                vsync_end: height + 9,
+                vtotal,
+                vrefresh_mhz: 60000,
+            }
+        };
+
+        // Set connector as connected with the display mode
+        kms.set_connector_status(connector_id, ConnectorStatus::Connected, vec![mode]);
+
+        // Set the CRTC as active with this mode
+        if let Some(crtc) = kms.crtcs.iter_mut().find(|c| c.crtc_id == crtc_id) {
+            crtc.mode = Some(mode);
+            crtc.active = true;
+        }
+    });
+
+    // Register the CRTC with the page flip manager so that page flip
+    // requests (from atomic commits with PAGE_FLIP_EVENT) are accepted.
+    with_page_flip(|pf| {
+        pf.register_crtc(1, 0); // CRTC id=1, no initial framebuffer
+    });
 }
 
 // ===========================================================================

@@ -101,7 +101,15 @@ fn try_demand_page(info: &PageFaultInfo) -> Result<(), KernelError> {
     let vaddr = VirtualAddress::new(info.faulting_address);
 
     // Check whether the faulting address is within any existing mapping.
-    let memory_space = process.memory_space.lock();
+    // Use try_lock() to avoid deadlock: the page fault handler runs from IST
+    // interrupt context, so if the syscall path already holds memory_space.lock(),
+    // a blocking .lock() would spin forever and GP fault on the IST stack.
+    let memory_space = process
+        .memory_space
+        .try_lock()
+        .ok_or(KernelError::NotInitialized {
+            subsystem: "memory_space (lock held)",
+        })?;
 
     #[cfg(feature = "alloc")]
     {
@@ -138,7 +146,13 @@ fn try_demand_page(info: &PageFaultInfo) -> Result<(), KernelError> {
                 drop(memory_space);
 
                 let page_addr = (info.faulting_address & !(PAGE_SIZE as u64 - 1)) as usize;
-                let mut memory_space_mut = process.memory_space.lock();
+                let mut memory_space_mut =
+                    process
+                        .memory_space
+                        .try_lock()
+                        .ok_or(KernelError::NotInitialized {
+                            subsystem: "memory_space (lock held, map)",
+                        })?;
                 memory_space_mut.map_page(page_addr, m.flags)?;
 
                 Ok(())
@@ -194,7 +208,12 @@ fn try_stack_growth(info: &PageFaultInfo) -> Result<(), KernelError> {
         subsystem: "process",
     })?;
 
-    let memory_space = process.memory_space.lock();
+    let memory_space = process
+        .memory_space
+        .try_lock()
+        .ok_or(KernelError::NotInitialized {
+            subsystem: "memory_space (lock held, stack)",
+        })?;
     let stack_top = memory_space.stack_top() as u64;
     let stack_size = memory_space.user_stack_size() as u64;
     let stack_bottom = stack_top - stack_size;
@@ -233,7 +252,13 @@ fn try_stack_growth(info: &PageFaultInfo) -> Result<(), KernelError> {
 
     let flags = PageFlags::PRESENT | PageFlags::WRITABLE | PageFlags::USER | PageFlags::NO_EXECUTE;
 
-    let mut memory_space_mut = process.memory_space.lock();
+    let mut memory_space_mut =
+        process
+            .memory_space
+            .try_lock()
+            .ok_or(KernelError::NotInitialized {
+                subsystem: "memory_space (lock held, stack map)",
+            })?;
     for i in 0..pages_needed {
         let page_addr = (stack_bottom - ((i + 1) as u64 * PAGE_SIZE as u64)) as usize;
         memory_space_mut.map_page(page_addr, flags)?;

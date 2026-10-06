@@ -661,7 +661,7 @@ unsafe fn write_bytes_to_user_stack(
 /// [low addresses]
 /// ```
 #[cfg(feature = "alloc")]
-fn setup_exec_stack(
+pub(crate) fn setup_exec_stack(
     process: &Process,
     argv: &[&str],
     envp: &[&str],

@@ -301,14 +301,61 @@ pub fn kernel_init() -> KernelResult<()> {
             kprintln!("[BOOTSTRAP] Framebuffer console initialized");
 
             // Store the framebuffer physical address for user-space mmap.
-            // The virtual address is fb_info.buffer; subtract PHYS_MEM_OFFSET to get
-            // physical.
-            let phys_offset =
-                crate::mm::PHYS_MEM_OFFSET.load(core::sync::atomic::Ordering::Acquire);
-            if phys_offset > 0 {
-                let fb_phys = (fb_info.buffer as u64).wrapping_sub(phys_offset);
-                crate::graphics::framebuffer::set_phys_addr(fb_phys);
-                kprintln!("[BOOTSTRAP] Framebuffer phys addr: 0x{:x}", fb_phys);
+            // The bootloader maps the framebuffer at a dynamic virtual address
+            // (via Mapping::Dynamic) which is NOT necessarily PHYS_MEM_OFFSET +
+            // phys_addr. We must walk the kernel page table to discover the
+            // physical address backing the framebuffer virtual address.
+            {
+                let fb_virt = fb_info.buffer as u64;
+                let mut fb_phys = 0u64;
+
+                // Walk the kernel page table (CR3) to translate fb virtual -> physical
+                let cr3: u64;
+                // SAFETY: Reading CR3 to get the current page table root.
+                unsafe { core::arch::asm!("mov {}, cr3", out(reg) cr3, options(nomem, nostack)) };
+                let pt_root = cr3 & !0xFFF;
+
+                // SAFETY: pt_root is the current kernel L4 page table, valid and
+                // identity-mapped via the physical memory window.
+                let mapper = unsafe { crate::mm::vas::create_mapper_from_root_pub(pt_root) };
+                if let Ok((frame, _flags)) =
+                    mapper.translate_page(crate::mm::VirtualAddress(fb_virt))
+                {
+                    fb_phys = frame.as_u64() << 12;
+                    // Add page offset from the virtual address
+                    fb_phys |= fb_virt & 0xFFF;
+                }
+
+                if fb_phys != 0 {
+                    // Set the global FB_PHYS_ADDR atomic (used by DRM mmap via
+                    // get_phys_addr()). Must be called BEFORE configure_with_phys
+                    // to avoid lock ordering issues.
+                    crate::graphics::framebuffer::set_phys_addr(fb_phys);
+
+                    // Configure the graphics::framebuffer FRAMEBUFFER static with
+                    // the real dimensions, buffer pointer, and physical address.
+                    // This is needed by get_fb_info() (used by init_virtual_drm_device).
+                    let fb_format: u32 = if fb_info.is_bgr { 0 } else { 1 };
+                    crate::graphics::framebuffer::with_framebuffer(|fb| {
+                        fb.configure_with_phys(
+                            fb_info.width as u32,
+                            fb_info.height as u32,
+                            fb_info.stride as u32,
+                            fb_info.bpp as u8,
+                            fb_info.buffer as *mut u32,
+                            fb_phys,
+                            fb_format,
+                        );
+                    });
+                    kprintln!(
+                        "[BOOTSTRAP] Framebuffer phys addr: 0x{:x} ({}x{})",
+                        fb_phys,
+                        fb_info.width,
+                        fb_info.height
+                    );
+                } else {
+                    kprintln!("[BOOTSTRAP] WARNING: Could not determine framebuffer phys addr");
+                }
             }
 
             // Apply write-combining to the framebuffer's MMIO pages for
@@ -502,6 +549,10 @@ fn kernel_init_stage3_impl() -> KernelResult<()> {
         // and load its contents into the VFS. This is how cross-compiled
         // user-space binaries get into the filesystem at boot.
         load_rootfs_from_disk();
+
+        // ProcFS natively supports /proc/sys/kernel/core_pattern,
+        // /proc/sys/kernel/random/boot_id, and /proc/self/{exe,maps}
+        // as virtual files. No re-creation needed after rootfs swap.
     }
 
     // Initialize services (process server, driver framework, etc.)
@@ -558,7 +609,14 @@ fn kernel_init_stage3_impl() -> KernelResult<()> {
     // Initialize graphics subsystem
     kprintln!("[BOOTSTRAP] Initializing graphics subsystem...");
     graphics::init().expect("Failed to initialize graphics");
-    kprintln!("[BOOTSTRAP] Graphics subsystem initialized");
+
+    // Initialize GPU acceleration subsystem (GEM, KMS, page flip) and
+    // populate KMS with a virtual DRM device backed by the UEFI GOP
+    // framebuffer. This provides /dev/dri/card0 ioctl support for KWin
+    // and other DRM clients.
+    graphics::gpu_accel::init();
+    graphics::gpu_accel::init_virtual_drm_device();
+    kprintln!("[BOOTSTRAP] Graphics subsystem initialized (DRM device ready)");
 
     // Initialize IRQ manager and timer wheel (needed by drivers and scheduler)
     #[cfg(feature = "alloc")]
@@ -642,6 +700,23 @@ fn kernel_init_stage3_impl() -> KernelResult<()> {
         kprintln!("[BOOTSTRAP] Initializing KPTI shadow page tables...");
         crate::arch::x86_64::kpti::init();
         kprintln!("[BOOTSTRAP] KPTI initialized");
+    }
+
+    // Cache the bootloader's physical memory offset for later use.
+    // This MUST happen before any user process runs, because BOOT_INFO
+    // resides in the bootloader's lower-half mapping which is NOT present
+    // in user process page tables. After this point, kernel code can use
+    // msr::phys_to_virt() safely from any context (syscall, interrupt, IST).
+    #[cfg(target_arch = "x86_64")]
+    {
+        // SAFETY: BOOT_INFO is written once during early boot and read-only
+        // after. We are still in single-threaded bootstrap before user mode.
+        #[allow(static_mut_refs)]
+        if let Some(ref boot_info) = unsafe { &crate::arch::x86_64::boot::BOOT_INFO } {
+            if let Some(offset) = boot_info.physical_memory_offset.into_option() {
+                crate::arch::x86_64::usermode::init_phys_offset(offset);
+            }
+        }
     }
 
     kprintln!("[BOOTSTRAP] Scheduler activated - entering main scheduling loop");
@@ -832,6 +907,482 @@ fn mount_blockfs_root() {
             root.mkdir("dev", Permissions::default()).ok();
             root.mkdir("proc", Permissions::default()).ok();
             root.mkdir("tmp", Permissions::from_mode(0o777)).ok();
+            // /run hierarchy for XDG_RUNTIME_DIR and D-Bus sockets
+            if let Ok(run) = root
+                .lookup("run")
+                .or_else(|_| root.mkdir("run", Permissions::default()))
+            {
+                if let Ok(user) = run
+                    .lookup("user")
+                    .or_else(|_| run.mkdir("user", Permissions::default()))
+                {
+                    user.mkdir("0", Permissions::from_mode(0o700)).ok();
+                }
+                run.mkdir("dbus", Permissions::default()).ok();
+            }
+            // /etc/xdg for KDE/Qt config fallback searches
+            if let Ok(etc) = root.lookup("etc") {
+                if let Ok(xdg) = etc
+                    .lookup("xdg")
+                    .or_else(|_| etc.mkdir("xdg", Permissions::default()))
+                {
+                    // Create /etc/xdg/kwinrc so KWin finds its config.
+                    // QPlatformScreen=false disables QPlatformScreen creation
+                    // which avoids a NULL crash when no DRM outputs exist yet.
+                    // Backend is intentionally not set (default QPainter avoids
+                    // OpenGL/EGL dependencies).
+                    if let Ok(f) = xdg.create("kwinrc", Permissions::from_mode(0o644)) {
+                        f.write(
+                            0,
+                            b"[Compositing]\nBackend=QPainter\n\n[Wayland]\nInputMethod=\n",
+                        )
+                        .ok();
+                    }
+                }
+            }
+            // /sys/class/drm/ hierarchy for kwin DRM device discovery.
+            // kwin uses udev/sysfs to find DRM devices. Without these entries,
+            // kwin's DRM backend stays NULL and crashes on first access.
+            if let Ok(sys) = root
+                .lookup("sys")
+                .or_else(|_| root.mkdir("sys", Permissions::default()))
+            {
+                if let Ok(class) = sys
+                    .lookup("class")
+                    .or_else(|_| sys.mkdir("class", Permissions::default()))
+                {
+                    if let Ok(drm) = class
+                        .lookup("drm")
+                        .or_else(|_| class.mkdir("drm", Permissions::default()))
+                    {
+                        // card0 directory with dev file (major:minor) and
+                        // attributes that KWin's DRM backend reads during
+                        // device initialization (driver name, status, etc.)
+                        if let Ok(card0) = drm
+                            .lookup("card0")
+                            .or_else(|_| drm.mkdir("card0", Permissions::default()))
+                        {
+                            if let Ok(f) = card0.create("dev", Permissions::read_only()) {
+                                f.write(0, b"226:0\n").ok();
+                            }
+                            if let Ok(f) = card0.create("uevent", Permissions::read_only()) {
+                                f.write(
+                                    0,
+                                    b"MAJOR=226\nMINOR=0\nDEVNAME=dri/card0\nDEVTYPE=drm_minor\n",
+                                )
+                                .ok();
+                            }
+                            if let Ok(f) = card0.create("enabled", Permissions::read_only()) {
+                                f.write(0, b"enabled\n").ok();
+                            }
+                            if let Ok(f) = card0.create("status", Permissions::read_only()) {
+                                f.write(0, b"connected\n").ok();
+                            }
+                            // device/ subtree with driver info
+                            if let Ok(dev_dir) = card0
+                                .lookup("device")
+                                .or_else(|_| card0.mkdir("device", Permissions::default()))
+                            {
+                                if let Ok(f) = dev_dir.create("uevent", Permissions::read_only()) {
+                                    f.write(0, b"DRIVER=veridian-drm\nPCI_ID=1234:1111\n").ok();
+                                }
+                                // drm/card0/ back-reference for udev parent traversal
+                                if let Ok(drm_sub) = dev_dir
+                                    .lookup("drm")
+                                    .or_else(|_| dev_dir.mkdir("drm", Permissions::default()))
+                                {
+                                    drm_sub.mkdir("card0", Permissions::default()).ok();
+                                }
+                            }
+                        }
+                    }
+                    // /sys/class/input/ for evdev discovery
+                    class.mkdir("input", Permissions::default()).ok();
+                }
+                // /sys/devices/ stub for device enumeration
+                sys.mkdir("devices", Permissions::default()).ok();
+            }
+            // /root/.config for user-level config
+            if let Ok(root_home) = root
+                .lookup("root")
+                .or_else(|_| root.mkdir("root", Permissions::default()))
+            {
+                root_home.mkdir(".config", Permissions::default()).ok();
+            }
+
+            // /etc/fonts/fonts.conf -- fontconfig needs this to find font dirs.
+            // The rootfs already has 22 fonts in /usr/share/fonts/.
+            if let Ok(etc) = root.lookup("etc") {
+                if let Ok(fonts_dir) = etc
+                    .lookup("fonts")
+                    .or_else(|_| etc.mkdir("fonts", Permissions::default()))
+                {
+                    if let Ok(f) = fonts_dir.create("fonts.conf", Permissions::from_mode(0o644)) {
+                        f.write(
+                            0,
+                            b"<?xml version=\"1.0\"?>\n\
+                            <!DOCTYPE fontconfig SYSTEM \"fonts.dtd\">\n\
+                            <fontconfig>\n\
+                            <dir>/usr/share/fonts</dir>\n\
+                            <cachedir>/tmp/fontconfig-cache</cachedir>\n\
+                            <match target=\"pattern\">\n\
+                            <edit name=\"family\" mode=\"append_last\">\n\
+                            <string>Noto Sans</string>\n\
+                            </edit>\n\
+                            </match>\n\
+                            </fontconfig>\n",
+                        )
+                        .ok();
+                    }
+                }
+            }
+
+            // /usr/share/X11/xkb/ -- xkbcommon needs minimal keymap data.
+            // Without these, kwin prints "Could not create xkb context".
+            if let Ok(usr) = root
+                .lookup("usr")
+                .or_else(|_| root.mkdir("usr", Permissions::default()))
+            {
+                if let Ok(share) = usr
+                    .lookup("share")
+                    .or_else(|_| usr.mkdir("share", Permissions::default()))
+                {
+                    if let Ok(x11) = share
+                        .lookup("X11")
+                        .or_else(|_| share.mkdir("X11", Permissions::default()))
+                    {
+                        if let Ok(xkb) = x11
+                            .lookup("xkb")
+                            .or_else(|_| x11.mkdir("xkb", Permissions::default()))
+                        {
+                            // rules/evdev -- minimal rules mapping
+                            if let Ok(rules) = xkb
+                                .lookup("rules")
+                                .or_else(|_| xkb.mkdir("rules", Permissions::default()))
+                            {
+                                if let Ok(f) = rules.create("evdev", Permissions::from_mode(0o644))
+                                {
+                                    // xkbcommon rules format: each section starts with
+                                    // "! <column-names>" and is followed by match lines.
+                                    // Columns are tab-separated.
+                                    f.write(
+                                        0,
+                                        b"! model\t=\tkeycodes\n\
+  *\t=\tevdev\n\
+\n\
+! layout\t=\tsymbols\n\
+  us\t=\tus\n\
+\n\
+! model\t=\ttypes\n\
+  *\t=\tcomplete\n\
+\n\
+! model\t=\tcompat\n\
+  *\t=\tcomplete\n",
+                                    )
+                                    .ok();
+                                }
+                                if let Ok(f) =
+                                    rules.create("evdev.xml", Permissions::from_mode(0o644))
+                                {
+                                    f.write(
+                                        0,
+                                        b"<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+                                        <!DOCTYPE xkbConfigRegistry>\n\
+                                        <xkbConfigRegistry version=\"1.1\">\n\
+                                        <modelList><model><configItem><name>pc105</name>\
+                                        <description>Generic 105-key PC</description>\
+                                        </configItem></model></modelList>\n\
+                                        <layoutList><layout><configItem><name>us</name>\
+                                        <description>English (US)</description>\
+                                        </configItem></layout></layoutList>\n\
+                                        </xkbConfigRegistry>\n",
+                                    )
+                                    .ok();
+                                }
+                            }
+
+                            // keycodes/evdev -- evdev keycode mappings
+                            if let Ok(keycodes) = xkb
+                                .lookup("keycodes")
+                                .or_else(|_| xkb.mkdir("keycodes", Permissions::default()))
+                            {
+                                if let Ok(f) =
+                                    keycodes.create("evdev", Permissions::from_mode(0o644))
+                                {
+                                    f.write(
+                                        0,
+                                        b"default xkb_keycodes \"evdev\" {\n\
+                                        minimum = 8;\n\
+                                        maximum = 255;\n\
+                                        <ESC> = 9;\n\
+                                        <AE01> = 10; <AE02> = 11; <AE03> = 12; <AE04> = 13;\n\
+                                        <AE05> = 14; <AE06> = 15; <AE07> = 16; <AE08> = 17;\n\
+                                        <AE09> = 18; <AE10> = 19; <AE11> = 20; <AE12> = 21;\n\
+                                        <BKSP> = 22; <TAB> = 23;\n\
+                                        <AD01> = 24; <AD02> = 25; <AD03> = 26; <AD04> = 27;\n\
+                                        <AD05> = 28; <AD06> = 29; <AD07> = 30; <AD08> = 31;\n\
+                                        <AD09> = 32; <AD10> = 33; <AD11> = 34; <AD12> = 35;\n\
+                                        <RTRN> = 36; <LCTL> = 37;\n\
+                                        <AC01> = 38; <AC02> = 39; <AC03> = 40; <AC04> = 41;\n\
+                                        <AC05> = 42; <AC06> = 43; <AC07> = 44; <AC08> = 45;\n\
+                                        <AC09> = 46; <AC10> = 47; <AC11> = 48;\n\
+                                        <TLDE> = 49; <LFSH> = 50;\n\
+                                        <BKSL> = 51;\n\
+                                        <AB01> = 52; <AB02> = 53; <AB03> = 54; <AB04> = 55;\n\
+                                        <AB05> = 56; <AB06> = 57; <AB07> = 58; <AB08> = 59;\n\
+                                        <AB09> = 60; <AB10> = 61;\n\
+                                        <RTSH> = 62; <KPMU> = 63; <LALT> = 64; <SPCE> = 65;\n\
+                                        <CAPS> = 66;\n\
+                                        <FK01> = 67; <FK02> = 68; <FK03> = 69; <FK04> = 70;\n\
+                                        <FK05> = 71; <FK06> = 72; <FK07> = 73; <FK08> = 74;\n\
+                                        <FK09> = 75; <FK10> = 76;\n\
+                                        <NMLK> = 77; <SCLK> = 78;\n\
+                                        <UP> = 111; <LEFT> = 113; <RGHT> = 114; <DOWN> = 116;\n\
+                                        <RALT> = 108; <RCTL> = 105;\n\
+                                        <LWIN> = 133; <RWIN> = 134; <MENU> = 135;\n\
+                                        };\n",
+                                    )
+                                    .ok();
+                                }
+                            }
+
+                            // symbols/us -- US keyboard layout
+                            if let Ok(symbols) = xkb
+                                .lookup("symbols")
+                                .or_else(|_| xkb.mkdir("symbols", Permissions::default()))
+                            {
+                                if let Ok(f) = symbols.create("us", Permissions::from_mode(0o644)) {
+                                    f.write(
+                                        0,
+                                        b"default partial alphanumeric_keys\n\
+                                        xkb_symbols \"basic\" {\n\
+                                        name[Group1]= \"English (US)\";\n\
+                                        key <AE01> { [ 1, exclam ] };\n\
+                                        key <AE02> { [ 2, at ] };\n\
+                                        key <AE03> { [ 3, numbersign ] };\n\
+                                        key <AE04> { [ 4, dollar ] };\n\
+                                        key <AE05> { [ 5, percent ] };\n\
+                                        key <AE06> { [ 6, asciicircum ] };\n\
+                                        key <AE07> { [ 7, ampersand ] };\n\
+                                        key <AE08> { [ 8, asterisk ] };\n\
+                                        key <AE09> { [ 9, parenleft ] };\n\
+                                        key <AE10> { [ 0, parenright ] };\n\
+                                        key <AE11> { [ minus, underscore ] };\n\
+                                        key <AE12> { [ equal, plus ] };\n\
+                                        key <AD01> { [ q, Q ] };\n\
+                                        key <AD02> { [ w, W ] };\n\
+                                        key <AD03> { [ e, E ] };\n\
+                                        key <AD04> { [ r, R ] };\n\
+                                        key <AD05> { [ t, T ] };\n\
+                                        key <AD06> { [ y, Y ] };\n\
+                                        key <AD07> { [ u, U ] };\n\
+                                        key <AD08> { [ i, I ] };\n\
+                                        key <AD09> { [ o, O ] };\n\
+                                        key <AD10> { [ p, P ] };\n\
+                                        key <AD11> { [ bracketleft, braceleft ] };\n\
+                                        key <AD12> { [ bracketright, braceright ] };\n\
+                                        key <AC01> { [ a, A ] };\n\
+                                        key <AC02> { [ s, S ] };\n\
+                                        key <AC03> { [ d, D ] };\n\
+                                        key <AC04> { [ f, F ] };\n\
+                                        key <AC05> { [ g, G ] };\n\
+                                        key <AC06> { [ h, H ] };\n\
+                                        key <AC07> { [ j, J ] };\n\
+                                        key <AC08> { [ k, K ] };\n\
+                                        key <AC09> { [ l, L ] };\n\
+                                        key <AC10> { [ semicolon, colon ] };\n\
+                                        key <AC11> { [ apostrophe, quotedbl ] };\n\
+                                        key <TLDE> { [ grave, asciitilde ] };\n\
+                                        key <BKSL> { [ backslash, bar ] };\n\
+                                        key <AB01> { [ z, Z ] };\n\
+                                        key <AB02> { [ x, X ] };\n\
+                                        key <AB03> { [ c, C ] };\n\
+                                        key <AB04> { [ v, V ] };\n\
+                                        key <AB05> { [ b, B ] };\n\
+                                        key <AB06> { [ n, N ] };\n\
+                                        key <AB07> { [ m, M ] };\n\
+                                        key <AB08> { [ comma, less ] };\n\
+                                        key <AB09> { [ period, greater ] };\n\
+                                        key <AB10> { [ slash, question ] };\n\
+                                        key <SPCE> { [ space ] };\n\
+                                        key <RTRN> { [ Return ] };\n\
+                                        key <BKSP> { [ BackSpace ] };\n\
+                                        key <TAB> { [ Tab ] };\n\
+                                        key <ESC> { [ Escape ] };\n\
+                                        key <CAPS> { [ Caps_Lock ] };\n\
+                                        key <LFSH> { [ Shift_L ] };\n\
+                                        key <RTSH> { [ Shift_R ] };\n\
+                                        key <LCTL> { [ Control_L ] };\n\
+                                        key <RCTL> { [ Control_R ] };\n\
+                                        key <LALT> { [ Alt_L ] };\n\
+                                        key <RALT> { [ Alt_R ] };\n\
+                                        key <LWIN> { [ Super_L ] };\n\
+                                        key <RWIN> { [ Super_R ] };\n\
+                                        };\n",
+                                    )
+                                    .ok();
+                                }
+                            }
+
+                            // types/complete -- key type definitions
+                            if let Ok(types) = xkb
+                                .lookup("types")
+                                .or_else(|_| xkb.mkdir("types", Permissions::default()))
+                            {
+                                if let Ok(f) =
+                                    types.create("complete", Permissions::from_mode(0o644))
+                                {
+                                    f.write(
+                                        0,
+                                        b"default xkb_types \"complete\" {\n\
+                                        type \"ONE_LEVEL\" {\n\
+                                            modifiers = none;\n\
+                                            map[none] = Level1;\n\
+                                            level_name[Level1] = \"Any\";\n\
+                                        };\n\
+                                        type \"TWO_LEVEL\" {\n\
+                                            modifiers = Shift;\n\
+                                            map[Shift] = Level2;\n\
+                                            level_name[Level1] = \"Base\";\n\
+                                            level_name[Level2] = \"Shift\";\n\
+                                        };\n\
+                                        type \"ALPHABETIC\" {\n\
+                                            modifiers = Shift+Lock;\n\
+                                            map[Shift] = Level2;\n\
+                                            map[Lock] = Level2;\n\
+                                            level_name[Level1] = \"Base\";\n\
+                                            level_name[Level2] = \"Caps\";\n\
+                                        };\n\
+                                        type \"KEYPAD\" {\n\
+                                            modifiers = Shift+NumLock;\n\
+                                            map[NumLock] = Level2;\n\
+                                            level_name[Level1] = \"Base\";\n\
+                                            level_name[Level2] = \"Number\";\n\
+                                        };\n\
+                                        };\n",
+                                    )
+                                    .ok();
+                                }
+                            }
+
+                            // compat/complete -- compatibility rules
+                            if let Ok(compat) = xkb
+                                .lookup("compat")
+                                .or_else(|_| xkb.mkdir("compat", Permissions::default()))
+                            {
+                                if let Ok(f) =
+                                    compat.create("complete", Permissions::from_mode(0o644))
+                                {
+                                    f.write(
+                                        0,
+                                        b"default xkb_compatibility \"complete\" {\n\
+                                        interpret Any+AnyOf(all) {\n\
+                                            action = SetMods(modifiers=modMapMods,clearLocks);\n\
+                                        };\n\
+                                        interpret Shift_L+AnyOf(all) {\n\
+                                            action = SetMods(modifiers=Shift,clearLocks);\n\
+                                        };\n\
+                                        interpret Caps_Lock+AnyOf(all) {\n\
+                                            action = LockMods(modifiers=Lock);\n\
+                                        };\n\
+                                        interpret Num_Lock+AnyOf(all) {\n\
+                                            action = LockMods(modifiers=NumLock);\n\
+                                        };\n\
+                                        };\n",
+                                    )
+                                    .ok();
+                                }
+                            }
+                        }
+                    }
+
+                    // /usr/share/libinput/ -- empty quirk database directory
+                    // prevents libinput from warning about missing device database
+                    share
+                        .lookup("libinput")
+                        .or_else(|_| share.mkdir("libinput", Permissions::default()))
+                        .ok();
+                }
+            }
+
+            // /etc/libinput/ -- empty local overrides directory
+            if let Ok(etc) = root.lookup("etc") {
+                etc.lookup("libinput")
+                    .or_else(|_| etc.mkdir("libinput", Permissions::default()))
+                    .ok();
+            }
+
+            // /tmp/fontconfig-cache -- directory for fontconfig cache files
+            if let Ok(tmp) = root.lookup("tmp") {
+                tmp.lookup("fontconfig-cache")
+                    .or_else(|_| tmp.mkdir("fontconfig-cache", Permissions::from_mode(0o777)))
+                    .ok();
+            }
+
+            // Sysroot path symlink -- the KDE stack was cross-compiled with
+            // `--prefix=<VERIDIAN_SYSROOT>/usr`, which bakes the host build
+            // path into the binaries. Libraries like xkbcommon, fontconfig,
+            // and libinput search for data files at those compile-time
+            // paths, so recreate the sysroot directory and symlink its `usr`
+            // back to `/usr`. Set VERIDIAN_SYSROOT at kernel build time to
+            // match the sysroot the rootfs binaries were built against; the
+            // default is the path the shipped v0.25 rootfs was built with.
+            // This goes away once tools/cross builds with --prefix=/usr.
+            {
+                const SYSROOT: &str = match option_env!("VERIDIAN_SYSROOT") {
+                    Some(path) => path,
+                    None => "/home/parobek/Code/VeridianOS/target/veridian-sysroot",
+                };
+                let mut current = root.clone();
+                for component in SYSROOT.split('/').filter(|c| !c.is_empty()) {
+                    current = current
+                        .lookup(component)
+                        .or_else(|_| current.mkdir(component, Permissions::default()))
+                        .unwrap_or_else(|_| current.clone());
+                }
+                current.symlink("usr", "/usr").ok();
+            }
+
+            // /usr/var/cache/fontconfig/ -- the sysroot symlink resolves
+            // .../veridian-sysroot/usr/var/cache/fontconfig to /usr/var/cache/fontconfig.
+            // Create this directory tree so fontconfig cache writes succeed.
+            if let Ok(usr) = root.lookup("usr") {
+                if let Ok(var) = usr
+                    .lookup("var")
+                    .or_else(|_| usr.mkdir("var", Permissions::default()))
+                {
+                    if let Ok(cache) = var
+                        .lookup("cache")
+                        .or_else(|_| var.mkdir("cache", Permissions::default()))
+                    {
+                        cache
+                            .lookup("fontconfig")
+                            .or_else(|_| cache.mkdir("fontconfig", Permissions::from_mode(0o777)))
+                            .ok();
+                    }
+                }
+                // /usr/etc/ -- some sysroot-compiled libs look for configs here
+                if let Ok(etc) = usr
+                    .lookup("etc")
+                    .or_else(|_| usr.mkdir("etc", Permissions::default()))
+                {
+                    // /usr/etc/libinput/ -- empty local overrides
+                    etc.lookup("libinput")
+                        .or_else(|_| etc.mkdir("libinput", Permissions::default()))
+                        .ok();
+                    // /usr/etc/drirc -- empty DRI config file
+                    if let Ok(f) = etc.create("drirc", Permissions::from_mode(0o644)) {
+                        f.write(0, b"").ok();
+                    }
+                }
+                // /usr/share/drirc.d/ -- DRI config snippets directory
+                if let Ok(share) = usr.lookup("share") {
+                    share
+                        .lookup("drirc.d")
+                        .or_else(|_| share.mkdir("drirc.d", Permissions::default()))
+                        .ok();
+                }
+            }
         }
     }
 
@@ -1435,7 +1986,68 @@ pub(crate) fn run_user_process(pid: crate::process::ProcessId) {
     // - CS/SS are valid Ring 3 selectors from the GDT
     // - pt_root is a valid L4 page table with kernel mappings preserved
     // - kernel_rsp_ptr points to the per-CPU kernel_rsp field
-    let kernel_rsp_ptr = crate::arch::x86_64::syscall::per_cpu_data_ptr() as u64;
+    // DEBUG: Print TSS stack addresses and IDT handler addresses before entering
+    // Ring 3.
+    crate::arch::x86_64::gdt::debug_print_tss_stacks();
+    unsafe {
+        let pf_addr = crate::arch::x86_64::gdt::debug_idt_handler_addr(14); // #PF = vector 14
+        let df_addr = crate::arch::x86_64::gdt::debug_idt_handler_addr(8); // #DF = vector 8
+        let gp_addr = crate::arch::x86_64::gdt::debug_idt_handler_addr(13); // #GP = vector 13
+        crate::arch::x86_64::idt::raw_serial_str(b"[IDT] PF_handler=0x");
+        crate::arch::x86_64::idt::raw_serial_hex(pf_addr);
+        crate::arch::x86_64::idt::raw_serial_str(b" GP_handler=0x");
+        crate::arch::x86_64::idt::raw_serial_hex(gp_addr);
+        crate::arch::x86_64::idt::raw_serial_str(b" DF_handler=0x");
+        crate::arch::x86_64::idt::raw_serial_hex(df_addr);
+        crate::arch::x86_64::idt::raw_serial_str(b"\n");
+    }
+    // DEBUG: Verify IST stacks and handler code are mapped in the process
+    // page table (pt_root). Walk each critical kernel address through the
+    // process L4 to confirm it's present before entering Ring 3.
+    crate::arch::x86_64::gdt::debug_verify_ist_in_cr3(pt_root);
+
+    // IST write test and Ring 0 PF trigger test removed -- both confirmed
+    // IST stacks are properly mapped (PASS). The DF was caused by hardware
+    // interrupts (APIC timer, etc.) firing from Ring 3 without IST, falling
+    // back to TSS.RSP0 which was stale/unmapped in the process CR3. Fixed
+    // by adding IST to all hardware IRQ vectors (32, 33, 48, 49, 50).
+    // SAFETY: Reading TSS.RSP0 and writing to COM1 for diagnostics.
+    let tss_rsp0 = crate::arch::x86_64::gdt::get_kernel_stack();
+    unsafe {
+        crate::arch::x86_64::idt::raw_serial_str(b"[BOOT] TSS_RSP0=0x");
+        crate::arch::x86_64::idt::raw_serial_hex(tss_rsp0);
+        crate::arch::x86_64::idt::raw_serial_str(b" entry=0x");
+        crate::arch::x86_64::idt::raw_serial_hex(entry_point);
+        crate::arch::x86_64::idt::raw_serial_str(b" usp=0x");
+        crate::arch::x86_64::idt::raw_serial_hex(user_stack_ptr);
+        crate::arch::x86_64::idt::raw_serial_str(b" cr3=0x");
+        crate::arch::x86_64::idt::raw_serial_hex(pt_root);
+        crate::arch::x86_64::idt::raw_serial_str(b"\n");
+    }
+
+    // Update TSS.RSP0 to the current boot stack. Hardware exceptions from
+    // Ring 3 (page faults, GPF, timer IRQ, etc.) load RSP from TSS.RSP0 for
+    // the privilege-level switch. enter_usermode_returnable will save the
+    // current RSP as per-CPU kernel_rsp (for SYSCALL), but TSS.RSP0 (for
+    // hardware interrupts) must also be updated.
+    //
+    // Read current RSP -- this is our boot stack which is guaranteed mapped.
+    let current_rsp: u64;
+    unsafe {
+        core::arch::asm!("mov {}, rsp", out(reg) current_rsp, options(nomem, nostack));
+    }
+    crate::arch::x86_64::gdt::set_kernel_stack(current_rsp);
+
+    // Re-initialize FPU/AVX state before entering usermode.
+    // VEX-encoded instructions (AVX) in user binaries require CR4.OSXSAVE
+    // and XCR0 bits 0-2 (x87/SSE/AVX), otherwise they cause #UD.
+    // The boot-time init_fpu() in arch::init() runs early, but subsequent
+    // boot stages (MMU, KPTI, etc.) may not preserve all CR4 bits.
+    // This idempotent re-init ensures the state is correct.
+    crate::arch::x86_64::context::init_fpu();
+
+    let per_cpu = crate::arch::x86_64::syscall::per_cpu_data_ptr();
+    let kernel_rsp_ptr = per_cpu as u64;
     unsafe {
         crate::arch::x86_64::usermode::enter_usermode_returnable(
             entry_point,
@@ -1625,6 +2237,7 @@ pub fn boot_run_forked_child(
                     r13: ctx.r13,
                     r14: ctx.r14,
                     r15: ctx.r15,
+                    fs_base: ctx.tls_base,
                 };
                 (r, t.tid)
             }

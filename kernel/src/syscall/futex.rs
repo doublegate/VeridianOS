@@ -158,6 +158,22 @@ pub fn sys_futex_wait(
         .0;
     let key = (pid, uaddr);
 
+    // Check if we are in boot-launched mode (no scheduler task for this thread).
+    // In the boot path, user processes run directly via iretq from
+    // enter_usermode_returnable, not through the scheduler.  The scheduler has
+    // no "current task" for us, so we cannot block via the normal
+    // task-state-based path.  Instead, cooperatively dispatch child threads
+    // from the scheduler's ready queue and spin-poll the futex word.
+    let has_sched_task = {
+        let sched = crate::sched::scheduler::current_scheduler();
+        let slock = sched.lock();
+        slock.current().is_some()
+    };
+
+    if !has_sched_task {
+        return boot_futex_spin(uaddr, expected, deadline);
+    }
+
     let task_ptr = {
         let sched = crate::sched::scheduler::current_scheduler();
         let slock = sched.lock();
@@ -527,4 +543,280 @@ pub fn sys_futex_requeue(
     }
 
     Ok((woken + moved) as isize)
+}
+
+// ============================================================================
+// Boot-path futex spin for processes launched outside the scheduler
+// ============================================================================
+
+/// Cooperative futex wait for boot-launched processes.
+///
+/// When the parent thread has no scheduler task (running via direct iretq from
+/// the boot path), we cannot block through the normal scheduler.  Instead, we
+/// spin-poll the futex word while dispatching child threads from the scheduler
+/// ready queue.
+///
+/// Each iteration:
+/// 1. Re-read the futex word -- if changed, return `Ok(0)`.
+/// 2. Dequeue a ready child task from the scheduler.
+/// 3. Set the `BOOT_CLONE_YIELD_PENDING` flag so `syscall_handler` yields after
+///    the child's next syscall.
+/// 4. Dispatch the child via `enter_forked_child_returnable` (blocks until
+///    `boot_return_to_kernel` is called from the child's syscall path).
+/// 5. Repeat.
+///
+/// Timeout handling: if a deadline is given and expires, return `WouldBlock`.
+#[cfg(target_arch = "x86_64")]
+fn boot_futex_spin(
+    uaddr: usize,
+    expected: u32,
+    deadline: Option<u64>,
+) -> Result<isize, SyscallError> {
+    use core::sync::atomic::Ordering;
+
+    use crate::arch::x86_64::usermode::{
+        ForkChildRegs, BOOT_CLONE_YIELD_PENDING, BOOT_RETURN_CR3, BOOT_RETURN_RSP,
+        BOOT_STACK_CANARY,
+    };
+
+    const MAX_SPINS: u32 = 100_000;
+    // After this many consecutive iterations with no dispatchable child tasks,
+    // assume all children are dead and stop waiting.
+    const MAX_EMPTY_ITERS: u32 = 50;
+
+    // Cache parent identity before the loop so we can skip the parent's own
+    // task when dequeuing from the scheduler.
+    let parent_pid = crate::process::current_process()
+        .map(|p| p.pid)
+        .unwrap_or(crate::process::ProcessId(0));
+    let parent_tid = crate::process::current_thread()
+        .map(|t| t.tid)
+        .unwrap_or(crate::process::thread::ThreadId(0));
+
+    let mut empty_iters: u32 = 0;
+
+    for _ in 0..MAX_SPINS {
+        // Re-check the futex word
+        let cur = unsafe { core::ptr::read_volatile(uaddr as *const u32) };
+        if cur != expected {
+            return Ok(0);
+        }
+
+        // Check timeout
+        if let Some(dl) = deadline {
+            if get_ticks() >= dl {
+                return Err(SyscallError::WouldBlock);
+            }
+        }
+
+        // Try to dequeue a ready child task and dispatch it.
+        // Skip the parent's own task (tid==parent_tid) -- we only want
+        // child threads spawned by clone().
+        let child_task = {
+            let sched = crate::sched::scheduler::current_scheduler();
+            let slock = sched.lock();
+            let mut found = None;
+            // Drain up to 8 tasks looking for a non-parent task.
+            // Re-enqueue any parent tasks we accidentally dequeue.
+            let mut skipped = alloc::vec::Vec::new();
+            for _ in 0..8 {
+                match slock.pick_next() {
+                    Some(t) => {
+                        let tid = unsafe { t.as_ref().tid };
+                        if tid != parent_tid {
+                            found = Some(t);
+                            break;
+                        }
+                        // Parent task -- save to re-enqueue
+                        skipped.push(t);
+                    }
+                    None => break,
+                }
+            }
+            // Re-enqueue any skipped tasks
+            for t in skipped {
+                slock.enqueue(t);
+            }
+            found
+        };
+
+        let child_task = match child_task {
+            Some(t) => {
+                empty_iters = 0;
+                t
+            }
+            None => {
+                empty_iters += 1;
+                if empty_iters >= MAX_EMPTY_ITERS {
+                    // No dispatchable child tasks for many iterations.
+                    // All children likely exited/crashed. Return WouldBlock
+                    // so the parent can continue.
+                    return Err(SyscallError::WouldBlock);
+                }
+                // Enable interrupts, halt until the APIC timer fires
+                // (advances UPTIME_MS), then disable interrupts again.
+                // Plain `hlt` with IF=0 (set by SFMASK) never wakes.
+                unsafe { core::arch::asm!("sti; hlt; cli", options(nomem, nostack)) };
+                continue;
+            }
+        };
+
+        // Extract the child's thread context for user-mode dispatch.
+        let (regs, child_pid, child_tid, cr3) = unsafe {
+            let task_ref = child_task.as_ref();
+
+            // Find the child's ThreadContext via the process table.
+            let proc = match crate::process::get_process(task_ref.pid) {
+                Some(p) => p,
+                None => continue,
+            };
+
+            let thread = match proc.get_thread(task_ref.tid) {
+                Some(t) => t,
+                None => continue,
+            };
+
+            let ctx = thread.context.lock();
+            let r = ForkChildRegs {
+                rip: ctx.rip,
+                rsp: ctx.rsp,
+                rflags: ctx.rflags | 0x200, // Ensure IF is set
+                rax: ctx.rax,
+                rbx: ctx.rbx,
+                rcx: ctx.rcx,
+                rdx: ctx.rdx,
+                rsi: ctx.rsi,
+                rdi: ctx.rdi,
+                rbp: ctx.rbp,
+                r8: ctx.r8,
+                r9: ctx.r9,
+                r10: ctx.r10,
+                r11: ctx.r11,
+                r12: ctx.r12,
+                r13: ctx.r13,
+                r14: ctx.r14,
+                r15: ctx.r15,
+                fs_base: ctx.tls_base,
+            };
+            drop(ctx);
+
+            let cr3 = proc.memory_space.lock().get_page_table();
+            (r, task_ref.pid, task_ref.tid, cr3)
+        };
+
+        if cr3 == 0 {
+            continue;
+        }
+
+        // Save parent's boot return context
+        let saved_rsp = BOOT_RETURN_RSP.load(Ordering::SeqCst);
+        let saved_cr3 = BOOT_RETURN_CR3.load(Ordering::SeqCst);
+        let saved_canary = BOOT_STACK_CANARY.load(Ordering::SeqCst);
+
+        let per_cpu = crate::arch::x86_64::syscall::per_cpu_data_ptr();
+        let saved_kernel_rsp = unsafe { (*per_cpu).kernel_rsp };
+        let saved_user_rsp = unsafe { (*per_cpu).user_rsp };
+
+        // Save parent's FS_BASE.  boot_return_to_kernel zeroes FS via
+        // `mov fs, ax`, which clears FS_BASE.  We restore it after the
+        // child dispatch so the parent's TLS remains correct.
+        let saved_fs_base: u64 = unsafe {
+            let lo: u32;
+            let hi: u32;
+            core::arch::asm!(
+                "rdmsr",
+                in("ecx") 0xC0000100u32,
+                out("eax") lo,
+                out("edx") hi,
+                options(nomem, nostack),
+            );
+            ((hi as u64) << 32) | (lo as u64)
+        };
+
+        // Set child as boot-current
+        crate::process::set_boot_current(child_pid, child_tid);
+
+        // Set the yield flag so syscall_handler returns to us after the
+        // child's next syscall.
+        BOOT_CLONE_YIELD_PENDING.store(true, Ordering::Release);
+
+        // Rebalance swapgs: we are in syscall context (GS.base=per_cpu_data).
+        // enter_forked_child_returnable expects KernelGsBase=per_cpu_data.
+        unsafe { core::arch::asm!("swapgs", options(nomem, nostack)) };
+
+        let kernel_rsp_ptr = per_cpu as u64;
+
+        // Dispatch child to user mode (blocks until boot_return_to_kernel)
+        unsafe {
+            crate::arch::x86_64::usermode::enter_forked_child_returnable(
+                &regs,
+                cr3,
+                kernel_rsp_ptr,
+            );
+        }
+
+        // Child yielded back. Restore GS state.
+        unsafe { core::arch::asm!("swapgs", options(nomem, nostack)) };
+
+        // Restore parent's FS_BASE (zeroed by boot_return_to_kernel)
+        unsafe {
+            core::arch::asm!(
+                "wrmsr",
+                in("ecx") 0xC0000100u32,
+                in("eax") saved_fs_base as u32,
+                in("edx") (saved_fs_base >> 32) as u32,
+                options(nomem, nostack),
+            );
+        }
+
+        // Restore parent's per-CPU state
+        unsafe {
+            (*per_cpu).kernel_rsp = saved_kernel_rsp;
+            (*per_cpu).user_rsp = saved_user_rsp;
+        }
+
+        // Restore parent as boot-current
+        crate::process::set_boot_current(parent_pid, parent_tid);
+
+        // Restore boot return context
+        BOOT_RETURN_RSP.store(saved_rsp, Ordering::SeqCst);
+        BOOT_RETURN_CR3.store(saved_cr3, Ordering::SeqCst);
+        BOOT_STACK_CANARY.store(saved_canary, Ordering::SeqCst);
+
+        // Clear yield flag
+        BOOT_CLONE_YIELD_PENDING.store(false, Ordering::Release);
+
+        // Re-enqueue the child task if it didn't exit.
+        // The child's ThreadContext was updated by the yield path in
+        // syscall_handler, so the next dispatch will resume the child
+        // at the correct instruction. If the child called sys_exit,
+        // the process/thread is Zombie -- don't re-enqueue.
+        let child_exited = crate::process::get_process(child_pid)
+            .map(|p| {
+                p.get_state() == crate::process::pcb::ProcessState::Zombie
+                    || p.get_thread(child_tid)
+                        .map(|t| t.get_state() == crate::process::thread::ThreadState::Zombie)
+                        .unwrap_or(true)
+            })
+            .unwrap_or(true);
+
+        if !child_exited {
+            let sched = crate::sched::scheduler::current_scheduler();
+            let slock = sched.lock();
+            slock.enqueue(child_task);
+        }
+    }
+
+    // Exhausted spins without the futex word changing
+    Err(SyscallError::WouldBlock)
+}
+
+/// Stub for non-x86_64 architectures.
+#[cfg(not(target_arch = "x86_64"))]
+fn boot_futex_spin(
+    _uaddr: usize,
+    _expected: u32,
+    _deadline: Option<u64>,
+) -> Result<isize, SyscallError> {
+    Err(SyscallError::InvalidState)
 }

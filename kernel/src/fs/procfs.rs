@@ -17,6 +17,8 @@ enum ProcNodeType {
     ProcessDir(u64),
     ProcessFile(u64, String),
     SystemFile(String),
+    /// Virtual subdirectory (e.g., /proc/sys, /proc/sys/kernel, /proc/self)
+    SubDir(String),
 }
 
 /// ProcFS node
@@ -53,7 +55,9 @@ impl ProcNode {
 impl VfsNode for ProcNode {
     fn node_type(&self) -> NodeType {
         match &self.node_type {
-            ProcNodeType::Root | ProcNodeType::ProcessDir(_) => NodeType::Directory,
+            ProcNodeType::Root | ProcNodeType::ProcessDir(_) | ProcNodeType::SubDir(_) => {
+                NodeType::Directory
+            }
             ProcNodeType::ProcessFile(_, _) | ProcNodeType::SystemFile(_) => NodeType::File,
         }
     }
@@ -103,6 +107,11 @@ impl VfsNode for ProcNode {
                     }
                     "cpuinfo" => generate_cpuinfo(),
                     "loadavg" => generate_loadavg(),
+                    // Qt/KDE compatibility files
+                    "core_pattern" => String::from("core\n"),
+                    "boot_id" => String::from("00000000-0000-0000-0000-000000000001\n"),
+                    "self/exe" => String::new(),
+                    "self/maps" => String::new(),
                     _ => String::new(),
                 }
             }
@@ -174,7 +183,9 @@ impl VfsNode for ProcNode {
 
     fn metadata(&self) -> Result<Metadata, KernelError> {
         let node_type = match &self.node_type {
-            ProcNodeType::Root | ProcNodeType::ProcessDir(_) => NodeType::Directory,
+            ProcNodeType::Root | ProcNodeType::ProcessDir(_) | ProcNodeType::SubDir(_) => {
+                NodeType::Directory
+            }
             _ => NodeType::File,
         };
 
@@ -285,6 +296,13 @@ impl VfsNode for ProcNode {
                         Ok(Arc::new(ProcNode::new_system_file(String::from(name)))
                             as Arc<dyn VfsNode>)
                     }
+                    // Virtual subdirectories for Qt/KDE compatibility
+                    "sys" => Ok(Arc::new(ProcNode {
+                        node_type: ProcNodeType::SubDir(String::from("sys")),
+                    }) as Arc<dyn VfsNode>),
+                    "self" => Ok(Arc::new(ProcNode {
+                        node_type: ProcNodeType::SubDir(String::from("self")),
+                    }) as Arc<dyn VfsNode>),
                     _ => {
                         // Try to parse as PID
                         if let Ok(pid) = name.parse::<u64>() {
@@ -308,6 +326,41 @@ impl VfsNode for ProcNode {
                 )) as Arc<dyn VfsNode>),
                 _ => Err(KernelError::FsError(FsError::NotFound)),
             },
+            ProcNodeType::SubDir(dir_name) => {
+                // Handle /proc/sys/*, /proc/self/*
+                match dir_name.as_str() {
+                    "sys" => match name {
+                        "kernel" => Ok(Arc::new(ProcNode {
+                            node_type: ProcNodeType::SubDir(String::from("sys/kernel")),
+                        }) as Arc<dyn VfsNode>),
+                        _ => Err(KernelError::FsError(FsError::NotFound)),
+                    },
+                    "sys/kernel" => match name {
+                        "core_pattern" => Ok(Arc::new(ProcNode::new_system_file(String::from(
+                            "core_pattern",
+                        ))) as Arc<dyn VfsNode>),
+                        "random" => Ok(Arc::new(ProcNode {
+                            node_type: ProcNodeType::SubDir(String::from("sys/kernel/random")),
+                        }) as Arc<dyn VfsNode>),
+                        _ => Err(KernelError::FsError(FsError::NotFound)),
+                    },
+                    "sys/kernel/random" => match name {
+                        "boot_id" => {
+                            Ok(Arc::new(ProcNode::new_system_file(String::from("boot_id")))
+                                as Arc<dyn VfsNode>)
+                        }
+                        _ => Err(KernelError::FsError(FsError::NotFound)),
+                    },
+                    "self" => match name {
+                        "exe" | "maps" => Ok(Arc::new(ProcNode::new_system_file(format!(
+                            "self/{}",
+                            name
+                        ))) as Arc<dyn VfsNode>),
+                        _ => Err(KernelError::FsError(FsError::NotFound)),
+                    },
+                    _ => Err(KernelError::FsError(FsError::NotFound)),
+                }
+            }
             _ => Err(KernelError::FsError(FsError::NotADirectory)),
         }
     }

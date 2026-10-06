@@ -531,8 +531,15 @@ impl VfsNode for BlockFsNode {
     }
 
     fn link(&self, name: &str, target: Arc<dyn VfsNode>) -> Result<(), KernelError> {
+        // Extract metadata BEFORE acquiring the write lock on BlockFsInner.
+        // The target node may share the same Arc<RwLock<BlockFsInner>>, so
+        // calling target.metadata() while holding the write lock would deadlock
+        // (metadata() takes a read lock on the same RwLock).
+        let target_meta = target.metadata()?;
+        let target_node_type = target.node_type();
+
         let mut fs = self.fs.write();
-        fs.link_in_dir(self.inode_num, name, target)
+        fs.link_in_dir_with_meta(self.inode_num, name, &target_meta, target_node_type)
     }
 }
 
@@ -1710,15 +1717,19 @@ impl BlockFsInner {
         Ok(())
     }
 
-    /// Create a hard link in a directory.
+    /// Create a hard link in a directory using pre-extracted metadata.
     ///
-    /// Adds a new directory entry `name` in `dir_inode` pointing to the
-    /// same inode as `target`. The target's link count is incremented.
-    fn link_in_dir(
+    /// This variant accepts pre-extracted metadata instead of an
+    /// `Arc<dyn VfsNode>` to avoid deadlocks: the caller extracts the
+    /// target's metadata BEFORE acquiring the BlockFsInner write lock,
+    /// since `target.metadata()` would need a read lock on the same
+    /// `RwLock<BlockFsInner>` (deadlock with the held write lock).
+    fn link_in_dir_with_meta(
         &mut self,
         dir_inode: u32,
         name: &str,
-        target: Arc<dyn VfsNode>,
+        target_meta: &Metadata,
+        target_node_type: NodeType,
     ) -> Result<(), KernelError> {
         if name.is_empty() || name.len() > MAX_FILENAME_LEN {
             return Err(KernelError::InvalidArgument {
@@ -1728,7 +1739,7 @@ impl BlockFsInner {
         }
 
         // Hard links to directories are not allowed (POSIX)
-        if target.node_type() == NodeType::Directory {
+        if target_node_type == NodeType::Directory {
             return Err(KernelError::FsError(FsError::IsADirectory));
         }
 
@@ -1737,8 +1748,7 @@ impl BlockFsInner {
             return Err(KernelError::FsError(FsError::AlreadyExists));
         }
 
-        // Get the target's inode number from its metadata
-        let target_meta = target.metadata()?;
+        // Get the target's inode number from the pre-extracted metadata
         let target_inode = target_meta.inode as u32;
 
         // Verify the target inode exists in our inode table (same filesystem)

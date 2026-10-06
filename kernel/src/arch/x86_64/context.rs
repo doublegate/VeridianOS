@@ -390,6 +390,11 @@ pub fn restore_fpu_state(state: &FpuState) {
 
 /// Initialize FPU for current CPU. Called from
 /// `crate::arch::context::init_fpu()`.
+///
+/// Enables x87 FPU, SSE, and (if supported) AVX/AVX-512 via XSAVE.
+/// Without XSAVE + XCR0 setup, VEX-encoded (AVX) and EVEX-encoded
+/// (AVX-512) instructions cause #UD in user-space binaries such as
+/// kwin_wayland which is compiled with AVX/AVX-512.
 pub fn init_fpu() {
     // SAFETY: FPU initialization modifies CR0 and CR4 control registers to
     // enable floating point and SSE support. This must only be called once
@@ -414,10 +419,16 @@ pub fn init_fpu() {
             out("rax") _,
         );
     }
+
+    // Enable XSAVE and configure XCR0 for AVX/AVX-512 state management.
+    // This must happen after basic SSE is enabled (CR4.OSFXSR) above.
+    enable_xsave();
+    if has_xsave() {
+        init_xcr0();
+    }
 }
 
-/// Check if CPU supports XSAVE
-#[allow(dead_code)] // CPU feature detection API -- used when extended state mgmt is enabled
+/// Check if CPU supports XSAVE (CPUID.01H:ECX bit 26).
 pub fn has_xsave() -> bool {
     // SAFETY: CPUID with leaf 1 is always valid on x86_64. We check
     // bit 26 of ECX (XSAVE feature flag). The push/pop of RBX is
@@ -439,8 +450,11 @@ pub fn has_xsave() -> bool {
     }
 }
 
-/// Enable XSAVE if supported
-#[allow(dead_code)] // CPU feature detection API -- used when extended state mgmt is enabled
+/// Enable XSAVE if supported.
+///
+/// Sets the OSXSAVE bit (bit 18) in CR4, which enables XSAVE/XRSTOR
+/// instructions and the XGETBV/XSETBV instructions used to configure
+/// XCR0 (extended control register 0).
 pub fn enable_xsave() {
     if has_xsave() {
         // SAFETY: XSAVE support was verified by has_xsave() above.
@@ -449,11 +463,71 @@ pub fn enable_xsave() {
         unsafe {
             asm!(
                 "mov rax, cr4",
-                "or rax, 0x40000",  // Set OSXSAVE bit
+                "or rax, 0x40000",  // Set OSXSAVE bit (bit 18)
                 "mov cr4, rax",
                 out("rax") _,
             );
         }
+    }
+}
+
+/// Configure XCR0 to enable x87, SSE, and AVX/AVX-512 state components.
+///
+/// XCR0 controls which extended state components the CPU tracks and
+/// saves/restores via XSAVE/XRSTOR. Without the AVX bit (bit 2),
+/// VEX-encoded instructions cause #UD. Without AVX-512 bits (5-7),
+/// EVEX-encoded instructions cause #UD.
+///
+/// Bits are only set if the CPU actually supports them (checked via
+/// CPUID leaf 0Dh, sub-leaf 0).
+fn init_xcr0() {
+    // SAFETY: XGETBV/XSETBV are available because the caller verified
+    // has_xsave() and enabled CR4.OSXSAVE. CPUID leaf 0Dh returns the
+    // bitmask of XCR0 bits the CPU supports.
+    unsafe {
+        // Query supported XCR0 bits via CPUID leaf 0Dh, sub-leaf 0.
+        // EAX returns the low 32 bits of the supported XCR0 bitmap.
+        let supported_lo: u32;
+        asm!(
+            "push rbx",
+            "mov eax, 0x0d",
+            "xor ecx, ecx",
+            "cpuid",
+            "mov {0:e}, eax",
+            "pop rbx",
+            out(reg) supported_lo,
+            out("eax") _,
+            out("edx") _,
+            lateout("ecx") _,
+        );
+
+        // Build desired XCR0 value:
+        // Bit 0: x87 FPU state (always required)
+        // Bit 1: SSE state (XMM registers)
+        // Bit 2: AVX state (YMM upper halves)
+        // Bit 5: AVX-512 opmask (k0-k7)
+        // Bit 6: AVX-512 upper 256 bits of ZMM0-15
+        // Bit 7: AVX-512 ZMM16-31
+        let mut xcr0: u64 = 0x3; // x87 + SSE (always)
+
+        // Enable AVX if supported
+        if supported_lo & (1 << 2) != 0 {
+            xcr0 |= 1 << 2;
+        }
+
+        // Enable AVX-512 if all three components are supported.
+        // All three bits (5, 6, 7) must be set together per Intel SDM.
+        if supported_lo & (7 << 5) == (7 << 5) {
+            xcr0 |= 7 << 5;
+        }
+
+        // Write XCR0 via XSETBV (ECX=0 selects XCR0).
+        asm!(
+            "xsetbv",
+            in("ecx") 0u32,
+            in("edx") (xcr0 >> 32) as u32,
+            in("eax") xcr0 as u32,
+        );
     }
 }
 

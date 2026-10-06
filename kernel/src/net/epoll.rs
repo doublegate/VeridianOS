@@ -59,8 +59,14 @@ pub const EPOLL_CTL_MOD: u32 = 3;
 
 /// Event structure passed to/from user space (matches Linux struct
 /// epoll_event).
-#[repr(C)]
-#[derive(Debug, Clone, Copy)]
+///
+/// Linux's `struct epoll_event` is `__attribute__((packed))` so it uses
+/// 4-byte alignment (from the leading `u32 events` field) rather than the
+/// natural 8-byte alignment that the `u64 data` field would impose. We must
+/// match this layout to accept user-space pointers at 4-byte-aligned
+/// addresses.
+#[repr(C, packed)]
+#[derive(Clone, Copy)]
 pub struct EpollEvent {
     /// Event flags (EPOLLIN, EPOLLOUT, etc.)
     pub events: u32,
@@ -173,8 +179,26 @@ impl EpollInstance {
                 continue;
             }
 
+            // Skip invalid fds (negative or obviously bad)
+            if entry.fd < 0 {
+                entry.disabled = true;
+                continue;
+            }
+
             let ready = poll_fd_readiness(entry.fd);
-            let matched = ready & entry.events;
+
+            // If the fd returns only ERR|HUP (meaning it's not found in any
+            // registry -- stale/closed fd), silently disable it to prevent
+            // busy loops. On Linux, closing an fd auto-removes it from epoll
+            // when the underlying file description is freed.
+            if ready == (EPOLLERR | EPOLLHUP) {
+                entry.disabled = true;
+                continue;
+            }
+
+            // Match requested events. EPOLLERR and EPOLLHUP are always
+            // delivered when present (Linux kernel behavior).
+            let matched = (ready & entry.events) | (ready & (EPOLLERR | EPOLLHUP));
 
             if matched != 0 {
                 events[count] = EpollEvent {
@@ -301,12 +325,25 @@ pub fn epoll_wait(
     events: &mut [EpollEvent],
     timeout_ms: i32,
 ) -> Result<usize, KernelError> {
+    // Boot-path cooperative dispatch: when a child thread is dispatched from
+    // boot_futex_spin, the syscall handler yields back to the parent after
+    // each syscall. If we spin-loop here for the full timeout, the
+    // cooperative scheduler is blocked and no other threads can run. Force
+    // non-blocking (single poll pass) so the child yields promptly.
+    #[cfg(target_arch = "x86_64")]
+    let in_boot_coop = crate::arch::x86_64::usermode::BOOT_CLONE_YIELD_PENDING
+        .load(core::sync::atomic::Ordering::Acquire);
+    #[cfg(not(target_arch = "x86_64"))]
+    let in_boot_coop = false;
+
+    let effective_timeout = if in_boot_coop { 0 } else { timeout_ms };
+
     let start = crate::timer::get_uptime_ms();
     // Cap infinite wait to 30 seconds to prevent permanent hangs
-    let max_wait_ms: u64 = if timeout_ms < 0 {
+    let max_wait_ms: u64 = if effective_timeout < 0 {
         30_000
     } else {
-        timeout_ms as u64
+        effective_timeout as u64
     };
 
     loop {
@@ -327,7 +364,7 @@ pub fn epoll_wait(
             instance.poll_events(events)
         }; // Drop lock before yielding
 
-        if count > 0 || timeout_ms == 0 {
+        if count > 0 || effective_timeout == 0 {
             return Ok(count);
         }
 
@@ -335,6 +372,22 @@ pub fn epoll_wait(
             return Ok(0);
         }
 
+        // Enable interrupts briefly so the APIC timer ISR can fire and
+        // advance UPTIME_MS.  Without this, the monotonic clock is frozen
+        // (SFMASK clears IF on syscall entry) and time-based fds such as
+        // timerfd never become readable.
+        //
+        // `sti; hlt` is atomic on x86_64: the CPU enables interrupts and
+        // halts in a single step, waking on the next interrupt (typically
+        // the 1 kHz APIC timer).  After the ISR returns, execution
+        // resumes here with IF=1; we immediately `cli` to restore the
+        // expected interrupts-disabled state for the rest of the syscall
+        // path.
+        #[cfg(target_arch = "x86_64")]
+        unsafe {
+            core::arch::asm!("sti; hlt; cli", options(nomem, nostack));
+        }
+        #[cfg(not(target_arch = "x86_64"))]
         crate::sched::yield_cpu();
     }
 }
@@ -366,38 +419,60 @@ pub fn epoll_destroy(epoll_id: u32) -> Result<(), KernelError> {
 /// (eventfd, timerfd, signalfd) which use pseudo-fd IDs from their own
 /// registries.
 fn poll_fd_readiness(fd: i32) -> u32 {
-    // All fd types (eventfd, timerfd, signalfd, pipes, sockets, files) are
-    // now VfsNode-backed in the process file table. poll_readiness() on
-    // each VfsNode handles type-specific readiness checking.
+    if fd < 0 {
+        return EPOLLERR | EPOLLHUP;
+    }
+
     let proc = match crate::process::current_process() {
         Some(p) => p,
         None => return EPOLLERR,
     };
 
     let file_table = proc.file_table.lock();
-    let file = match file_table.get(fd as usize) {
-        Some(f) => f,
-        None => return EPOLLERR | EPOLLHUP,
-    };
+    if let Some(file) = file_table.get(fd as usize) {
+        // VfsNode-backed fd (timerfd, epoll, pipe, regular file, etc.)
+        let readiness = file.node.poll_readiness() as u32;
+        let mut ready = 0u32;
+        if readiness & 0x0001 != 0 {
+            ready |= EPOLLIN;
+        }
+        if readiness & 0x0004 != 0 {
+            ready |= EPOLLOUT;
+        }
+        if readiness & 0x0008 != 0 {
+            ready |= EPOLLERR;
+        }
+        if readiness & 0x0010 != 0 {
+            ready |= EPOLLHUP;
+        }
+        return ready;
+    }
+    drop(file_table);
 
-    // Use VfsNode::poll_readiness() for actual buffer state checking.
-    // Maps POLL* flags (u16) to EPOLL* flags (u32) -- same bit positions.
-    let readiness = file.node.poll_readiness() as u32;
-    let mut ready = 0u32;
-    if readiness & 0x0001 != 0 {
-        ready |= EPOLLIN;
-    }
-    if readiness & 0x0004 != 0 {
-        ready |= EPOLLOUT;
-    }
-    if readiness & 0x0008 != 0 {
-        ready |= EPOLLERR;
-    }
-    if readiness & 0x0010 != 0 {
-        ready |= EPOLLHUP;
+    // Fallback: check if this fd corresponds to a Unix socket.
+    // Sockets use their own ID registry (not yet VfsNode-backed),
+    // so they won't be in the process file table.
+    let sock_id = fd as u64;
+    if crate::net::unix_socket::socket_exists(sock_id) {
+        let readiness = crate::net::unix_socket::socket_poll_readiness(sock_id) as u32;
+        let mut ready = 0u32;
+        if readiness & 0x0001 != 0 {
+            ready |= EPOLLIN;
+        }
+        if readiness & 0x0004 != 0 {
+            ready |= EPOLLOUT;
+        }
+        if readiness & 0x0008 != 0 {
+            ready |= EPOLLERR;
+        }
+        if readiness & 0x0010 != 0 {
+            ready |= EPOLLHUP;
+        }
+        return ready;
     }
 
-    ready
+    // fd not found anywhere
+    EPOLLERR | EPOLLHUP
 }
 
 // ============================================================================
