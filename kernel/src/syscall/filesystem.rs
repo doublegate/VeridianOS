@@ -229,7 +229,7 @@ pub fn sys_open(path: usize, flags: usize, mode: usize) -> SyscallResult {
         Err(_) => {
             // If O_CREAT is set, create the file in its parent directory
             if open_flags.create {
-                let perms = Permissions::from_mode(mode as u32);
+                let perms = creation_perms(mode);
                 let (parent_path, name) = split_path(path_str)?;
                 require_dir_write(path_str)?;
                 let vfs_guard = vfs()?.read();
@@ -241,6 +241,7 @@ pub fn sys_open(path: usize, flags: usize, mode: usize) -> SyscallResult {
                 };
                 match parent.create(&name, perms) {
                     Ok(node) => {
+                        own_new_node(&node);
                         let file = crate::fs::file::File::new_with_path(
                             node,
                             open_flags,
@@ -658,9 +659,15 @@ pub fn sys_mkdir(path: usize, mode: usize) -> SyscallResult {
     };
 
     // Create directory through VFS
-    let permissions = Permissions::from_mode(mode as u32);
-    match vfs()?.read().mkdir(path_str, permissions) {
-        Ok(_) => Ok(0),
+    let permissions = creation_perms(mode);
+    let vfs_guard = vfs()?.read();
+    match vfs_guard.mkdir(path_str, permissions) {
+        Ok(_) => {
+            if let Ok(node) = vfs_guard.resolve_path_no_follow(path_str) {
+                own_new_node(&node);
+            }
+            Ok(0)
+        }
         Err(e) => Err(super::map_kernel_error(e)),
     }
 }
@@ -671,7 +678,7 @@ pub fn sys_mkdir(path: usize, mode: usize) -> SyscallResult {
 /// - path: Path to directory to remove
 pub fn sys_rmdir(path: usize) -> SyscallResult {
     let path_str = read_user_path(path)?;
-    require_dir_write(&path_str)?;
+    require_may_remove(&path_str)?;
 
     // Remove directory through VFS
     match vfs()?.read().unlink(&path_str) {
@@ -1391,6 +1398,25 @@ fn caller_creds() -> (u32, u32) {
     process::current_process().map_or((0, 0), |p| (p.uid(), p.gid()))
 }
 
+/// Permissions for a new node: the requested `mode` minus the calling
+/// thread's umask (POSIX). The umask never removes the sticky bit.
+pub(crate) fn creation_perms(mode: usize) -> Permissions {
+    let umask = process::current_thread().map_or(0o022, |t| {
+        t.fs().umask.load(core::sync::atomic::Ordering::Acquire)
+    });
+    Permissions::from_mode(mode as u32 & 0o7777 & !(umask & 0o777))
+}
+
+/// A node created by a syscall belongs to the caller. Without this every
+/// new file was owned by root, so a user could not chmod, or remove from a
+/// sticky directory, what it had just created.
+pub(crate) fn own_new_node(node: &alloc::sync::Arc<dyn crate::fs::VfsNode>) {
+    let (uid, gid) = caller_creds();
+    if uid != 0 || gid != 0 {
+        let _ = node.chown(Some(uid), Some(gid));
+    }
+}
+
 /// chmod-style operations: only the owner or root may change a node's
 /// mode (FS-SEC-02).
 pub(crate) fn require_owner_or_root(
@@ -1438,8 +1464,13 @@ pub(crate) fn require_open_access(
 /// mode and contents -- is moved, never copied, and a symlink at `new` is
 /// replaced rather than followed.
 fn rename_entry(old: &str, new: &str) -> SyscallResult {
-    require_dir_write(old)?;
+    require_may_remove(old)?;
     require_dir_write(new)?;
+    // Replacing an existing `new` removes it, so the sticky rule applies.
+    let new_exists = vfs()?.read().resolve_path_no_follow(new).is_ok();
+    if new_exists {
+        require_may_remove(new)?;
+    }
 
     let vfs_lock = vfs()?;
     let vfs_guard = vfs_lock.read();
@@ -1489,6 +1520,37 @@ pub(crate) fn require_dir_write(path: &str) -> Result<(), SyscallError> {
     let meta = dir.metadata().map_err(|_| SyscallError::InvalidState)?;
     let p = meta.permissions;
     if p.can_write(uid, gid, meta.uid, meta.gid) && p.can_run(uid, gid, meta.uid, meta.gid) {
+        Ok(())
+    } else {
+        Err(SyscallError::PermissionDenied)
+    }
+}
+
+/// Check that the caller may remove or rename the entry at `path`: it needs
+/// write and search permission on the parent directory and, if that
+/// directory is sticky, must own the entry or the directory (or be root).
+pub(crate) fn require_may_remove(path: &str) -> Result<(), SyscallError> {
+    require_dir_write(path)?;
+    let (uid, _) = caller_creds();
+    if uid == 0 {
+        return Ok(());
+    }
+    let (parent, _) = split_path(path)?;
+    let vfs_guard = vfs()?.read();
+    let dir_meta = vfs_guard
+        .resolve_path(&parent)
+        .map_err(map_resolve_err)?
+        .metadata()
+        .map_err(|_| SyscallError::InvalidState)?;
+    if !dir_meta.permissions.sticky || dir_meta.uid == uid {
+        return Ok(());
+    }
+    let entry_meta = vfs_guard
+        .resolve_path_no_follow(path)
+        .map_err(map_resolve_err)?
+        .metadata()
+        .map_err(|_| SyscallError::InvalidState)?;
+    if entry_meta.uid == uid {
         Ok(())
     } else {
         Err(SyscallError::PermissionDenied)
@@ -1756,7 +1818,7 @@ pub fn sys_rename(old_ptr: usize, new_ptr: usize) -> SyscallResult {
 /// 0 on success.
 pub fn sys_unlink(path_ptr: usize) -> SyscallResult {
     let path = read_user_path(path_ptr)?;
-    require_dir_write(&path)?;
+    require_may_remove(&path)?;
 
     let vfs_lock = vfs()?;
     let vfs_guard = vfs_lock.read();
@@ -2244,9 +2306,10 @@ pub fn sys_symlink(target_ptr: usize, link_ptr: usize) -> SyscallResult {
         .resolve_path(&parent_path)
         .map_err(map_resolve_err)?;
 
-    parent
+    let node = parent
         .symlink(&link_name, &target)
         .map_err(|_| SyscallError::InvalidArgument)?;
+    own_new_node(&node);
 
     Ok(0)
 }
@@ -2580,7 +2643,7 @@ pub fn sys_openat(dirfd: usize, path_ptr: usize, flags: usize, mode: usize) -> S
         Err(_) => {
             // If O_CREAT, create the file
             if open_flags.create {
-                let perms = Permissions::from_mode(mode as u32);
+                let perms = creation_perms(mode);
                 let (parent_path, name) = split_path(&abs_path)?;
                 require_dir_write(&abs_path)?;
                 let vfs_guard = vfs()?.read();
@@ -2589,6 +2652,7 @@ pub fn sys_openat(dirfd: usize, path_ptr: usize, flags: usize, mode: usize) -> S
                     .map_err(|_| SyscallError::ResourceNotFound)?;
                 match parent.create(&name, perms) {
                     Ok(node) => {
+                        own_new_node(&node);
                         let file = crate::fs::file::File::new_with_path(
                             node,
                             open_flags,
@@ -2651,7 +2715,7 @@ pub fn sys_fstatat(dirfd: usize, path_ptr: usize, stat_buf: usize, _flags: usize
 pub fn sys_unlinkat(dirfd: usize, path_ptr: usize, _flags: usize) -> SyscallResult {
     let rel_path = read_user_path(path_ptr)?;
     let abs_path = resolve_at_path(dirfd, &rel_path)?;
-    require_dir_write(&abs_path)?;
+    require_may_remove(&abs_path)?;
 
     let vfs_lock = vfs()?;
     vfs_lock
@@ -2668,11 +2732,14 @@ pub fn sys_mkdirat(dirfd: usize, path_ptr: usize, mode: usize) -> SyscallResult 
     let abs_path = resolve_at_path(dirfd, &rel_path)?;
     require_dir_write(&abs_path)?;
 
-    let permissions = Permissions::from_mode(mode as u32);
-    vfs()?
-        .read()
+    let permissions = creation_perms(mode);
+    let vfs_guard = vfs()?.read();
+    vfs_guard
         .mkdir(&abs_path, permissions)
         .map_err(|_| SyscallError::InvalidState)?;
+    if let Ok(node) = vfs_guard.resolve_path_no_follow(&abs_path) {
+        own_new_node(&node);
+    }
 
     Ok(0)
 }

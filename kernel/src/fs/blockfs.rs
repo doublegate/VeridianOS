@@ -545,7 +545,22 @@ impl VfsNode for BlockFsNode {
         fs.chown_inode(self.inode_num, uid, gid)
     }
 
+    fn as_any(&self) -> Option<&dyn core::any::Any> {
+        Some(self)
+    }
+
     fn link(&self, name: &str, target: Arc<dyn VfsNode>) -> Result<(), KernelError> {
+        // A hard link can only name an inode of this same filesystem. The
+        // inode number alone does not prove that (another filesystem can
+        // use the same numbers), so require the same BlockFS instance (W-18).
+        let same_fs = target
+            .as_any()
+            .and_then(|a| a.downcast_ref::<BlockFsNode>())
+            .is_some_and(|t| Arc::ptr_eq(&t.fs, &self.fs));
+        if !same_fs {
+            return Err(KernelError::FsError(FsError::CrossDevice));
+        }
+
         // Extract metadata BEFORE acquiring the write lock on BlockFsInner.
         // The target node may share the same Arc<RwLock<BlockFsInner>>, so
         // calling target.metadata() while holding the write lock would deadlock
@@ -2242,6 +2257,9 @@ fn permissions_to_mode(perms: Permissions, is_dir: bool) -> u16 {
     if perms.other_exec {
         mode |= 0o001;
     }
+    if perms.sticky {
+        mode |= 0o1000;
+    }
 
     mode
 }
@@ -2414,5 +2432,39 @@ mod tests {
         let fs = BlockFs::format(1000, 100).unwrap();
         assert_eq!(fs.name(), "blockfs");
         assert!(!fs.is_readonly());
+    }
+    #[test]
+    fn test_link_rejects_other_filesystem() {
+        let a = BlockFs::format(1000, 100).unwrap();
+        let b = BlockFs::format(1000, 100).unwrap();
+        let (root_a, root_b) = (a.root(), b.root());
+        let file_a = root_a.create("f", Permissions::default()).unwrap();
+        let file_b = root_b.create("g", Permissions::default()).unwrap();
+        // Both filesystems hand out the same inode numbers, which the old
+        // range check took as proof of "same filesystem" (W-18).
+        assert_eq!(
+            file_a.metadata().unwrap().inode,
+            file_b.metadata().unwrap().inode
+        );
+        assert!(matches!(
+            root_a.link("h", file_b),
+            Err(KernelError::FsError(FsError::CrossDevice))
+        ));
+        root_a.link("h", file_a).unwrap();
+        assert!(root_a.lookup("h").is_ok());
+    }
+
+    #[test]
+    fn test_sticky_bit_persists_through_chmod() {
+        let fs = BlockFs::format(1000, 100).unwrap();
+        let dir = fs
+            .root()
+            .mkdir("tmp", Permissions::from_mode(0o1777))
+            .unwrap();
+        assert!(dir.metadata().unwrap().permissions.sticky);
+        dir.chmod(Permissions::from_mode(0o777)).unwrap();
+        assert!(!dir.metadata().unwrap().permissions.sticky);
+        dir.chmod(Permissions::from_mode(0o1777)).unwrap();
+        assert_eq!(dir.metadata().unwrap().permissions.to_mode(), 0o1777);
     }
 }

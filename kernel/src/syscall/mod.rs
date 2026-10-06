@@ -685,6 +685,7 @@ pub fn map_kernel_error(err: crate::error::KernelError) -> SyscallError {
             FsError::InvalidPath => SyscallError::InvalidArgument,
             FsError::NoRootFs => SyscallError::ResourceNotFound,
             FsError::TooManyOpenFiles => SyscallError::OutOfMemory,
+            FsError::CrossDevice => SyscallError::CrossDevice,
             _ => SyscallError::InvalidState,
         },
         KernelError::OutOfMemory { .. } => SyscallError::OutOfMemory,
@@ -1455,13 +1456,13 @@ fn handle_syscall(
             let max_events = arg3;
             let timeout_ms = arg4 as i32;
             let epoll_id = resolve_epoll_id(epoll_fd)?;
-            if max_events == 0 {
+            // Linux caps maxevents at INT_MAX / sizeof(struct epoll_event);
+            // the byte count must not wrap (W-16).
+            let event_size = core::mem::size_of::<crate::net::epoll::EpollEvent>();
+            if max_events == 0 || max_events > i32::MAX as usize / event_size {
                 return Err(SyscallError::InvalidArgument);
             }
-            validate_user_buffer(
-                events_ptr,
-                max_events * core::mem::size_of::<crate::net::epoll::EpollEvent>(),
-            )?;
+            validate_user_buffer(events_ptr, max_events * event_size)?;
             // SAFETY: events_ptr validated by validate_user_buffer above as non-null and in
             // user-space.
             let events = unsafe {
@@ -2053,9 +2054,10 @@ fn sys_symlinkat(target_ptr: usize, newdirfd: usize, linkpath_ptr: usize) -> Sys
     let parent = vfs_guard
         .resolve_path(&parent_path)
         .map_err(filesystem::map_resolve_err)?;
-    parent
+    let node = parent
         .symlink(&link_name, &target)
         .map_err(|_| SyscallError::InvalidArgument)?;
+    filesystem::own_new_node(&node);
     Ok(0)
 }
 

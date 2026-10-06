@@ -909,7 +909,7 @@ fn mount_blockfs_root() {
             // Create dirs if they don't exist (ok to fail with AlreadyExists)
             root.mkdir("dev", Permissions::default()).ok();
             root.mkdir("proc", Permissions::default()).ok();
-            root.mkdir("tmp", Permissions::from_mode(0o777)).ok();
+            root.mkdir("tmp", Permissions::from_mode(0o1777)).ok();
             // /run hierarchy for XDG_RUNTIME_DIR and D-Bus sockets
             if let Ok(run) = root
                 .lookup("run")
@@ -1318,7 +1318,7 @@ fn mount_blockfs_root() {
             // /tmp/fontconfig-cache -- directory for fontconfig cache files
             if let Ok(tmp) = root.lookup("tmp") {
                 tmp.lookup("fontconfig-cache")
-                    .or_else(|_| tmp.mkdir("fontconfig-cache", Permissions::from_mode(0o777)))
+                    .or_else(|_| tmp.mkdir("fontconfig-cache", Permissions::from_mode(0o1777)))
                     .ok();
             }
 
@@ -1358,7 +1358,7 @@ fn mount_blockfs_root() {
                     {
                         cache
                             .lookup("fontconfig")
-                            .or_else(|_| cache.mkdir("fontconfig", Permissions::from_mode(0o777)))
+                            .or_else(|_| cache.mkdir("fontconfig", Permissions::from_mode(0o1777)))
                             .ok();
                     }
                 }

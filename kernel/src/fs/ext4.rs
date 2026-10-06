@@ -230,6 +230,7 @@ impl Ext4Inode {
             other_read: (mode & 0o004) != 0,
             other_write: (mode & 0o002) != 0,
             other_exec: (mode & 0o001) != 0,
+            sticky: (mode & 0o1000) != 0,
         }
     }
 }

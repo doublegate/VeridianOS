@@ -168,6 +168,11 @@ reads a host-written signature at LBA 0, does a two-page (PRP2) write/flush/read
 on the last 8 KiB and restores it, and checks that out-of-range and empty requests are rejected.
 NVMe is not probed on AArch64/RISC-V (no PCI enumeration there).
 
+Found by the runtime suite while testing W-17: files, directories and symlinks created through
+syscalls were always owned by root, and the umask was stored but never applied. New nodes now
+belong to the caller and take `mode & ~umask`; both are checked in the guest
+(`sticky_dir_protects_entries`, `umask_applied`).
+
 ### Commit security review follow-ups
 
 | Finding | Fix |
@@ -203,7 +208,7 @@ reachable from an unprivileged process and are fixed first in v0.26.0 Sprint A.
 | W-13 | Medium | `sti; hlt; cli` in epoll, poll, nanosleep, timerfd, futex | Enables interrupts mid-syscall, so the timer IRQ can `schedule()` on the syscall stack (feeds W-8). `timerfd_read` ignores the boot cooperative mode and can stall boot for 30 s per call. | open |
 | W-14 | Low-Medium | `net/epoll.rs`, `syscall/filesystem.rs` poll | The Unix-socket readiness fallback treats any fd number as a global socket ID, ignoring ownership: cross-process readiness side channel. | open |
 | W-15 | Medium | `syscall/linux_compat.rs` | `faccessat2` always returns success. `LINUX_FCHOWNAT` was 269 -- faccessat's number -- so every `faccessat()` was executed as `fchownat` (a no-op only because chown was unimplemented). | fixed (faccessat/faccessat2 enforce access; fchownat is 260) |
-| W-16 | Low | `syscall/mod.rs` epoll_wait | `max_events * size_of::<EpollEvent>()` is unchecked; in release builds it wraps to a small validated length while the slice keeps the huge count. *Pre-existing; now also reachable via the 263/281 heuristics.* | open |
-| W-17 | Low | `bootstrap.rs` | `fontconfig` cache directories are 0777 without the sticky bit (cache poisoning of files kwin/Qt parse). | open |
+| W-16 | Low | `syscall/mod.rs` epoll_wait | `max_events * size_of::<EpollEvent>()` is unchecked; in release builds it wraps to a small validated length while the slice keeps the huge count. *Pre-existing; now also reachable via the 263/281 heuristics.* | fixed (maxevents capped at INT_MAX / sizeof(epoll_event)) |
+| W-17 | Low | `bootstrap.rs` | `fontconfig` cache directories are 0777 without the sticky bit (cache poisoning of files kwin/Qt parse). | fixed (sticky bit implemented and enforced; /tmp and fontconfig caches are 1777; runtime-tested) |
 | W-19 | High | `drivers/evdev.rs` via `sys_ioctl` | evdev ioctls wrote through the raw user `arg` (e.g. `EVIOCGNAME` writes 64 bytes regardless of the size the command encodes). *Pre-existing.* | fixed (DRM hardening) |
-| W-18 | Low | `fs/blockfs.rs` `link` | The same-filesystem check is an inode-number range test, so a hard link to a node from another filesystem with a colliding inode number links an arbitrary BlockFS inode. *Pre-existing.* | open |
+| W-18 | Low | `fs/blockfs.rs` `link` | The same-filesystem check is an inode-number range test, so a hard link to a node from another filesystem with a colliding inode number links an arbitrary BlockFS inode. *Pre-existing.* | fixed (link requires the same BlockFS instance; EXDEV otherwise) |
