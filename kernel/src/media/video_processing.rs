@@ -2408,7 +2408,7 @@ mod tests {
 
     #[test]
     fn test_avi_demux_streams() {
-        let mut container = AviContainer {
+        let container = AviContainer {
             main_header: AviMainHeader::default(),
             streams: Vec::new(),
             index: vec![

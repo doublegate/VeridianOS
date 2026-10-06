@@ -452,7 +452,7 @@ mod tests {
     fn test_gc_integration() {
         let mut engine = ScriptEngine::new();
         // Allocate objects and trigger GC
-        for i in 0..100 {
+        for _i in 0..100 {
             engine.gc.allocate(super::super::js_vm::JsObject::new());
         }
         engine.gc.collect(&engine.vm);

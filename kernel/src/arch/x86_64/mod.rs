@@ -25,6 +25,8 @@ pub mod rtc;
 pub mod serial;
 pub mod syscall;
 pub mod timer;
+#[cfg(target_os = "none")]
+pub(crate) mod usercopy;
 pub mod usermode;
 pub mod vga;
 
@@ -35,6 +37,22 @@ pub fn init() {
     // IDT and PIC are properly configured. nomem/nostack confirm no memory access.
     unsafe {
         core::arch::asm!("cli", options(nomem, nostack));
+    }
+
+    // CR0.WP: make supervisor-mode writes honour read-only pages. Without
+    // it the kernel writes through read-only user mappings without faulting,
+    // so a syscall's copy-out could modify pages (e.g. program text) the
+    // process itself may not write.
+    {
+        use x86_64::registers::control::{Cr0, Cr0Flags};
+        let was_set = Cr0::read().contains(Cr0Flags::WRITE_PROTECT);
+        // SAFETY: setting WP only makes supervisor writes to read-only pages
+        // fault; the kernel never relies on writing through such mappings.
+        unsafe { Cr0::update(|flags| flags.insert(Cr0Flags::WRITE_PROTECT)) };
+        println!(
+            "[ARCH] CR0.WP enabled (was {})",
+            if was_set { "set" } else { "clear" }
+        );
     }
 
     println!("[ARCH] Starting GDT init...");

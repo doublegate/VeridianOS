@@ -340,6 +340,15 @@ impl CapabilityManager {
 }
 
 /// Get the global capability manager
+impl CapabilityManager {
+    /// Allocate a capability id from the one system-wide allocator. Every
+    /// path that mints a capability id must come here: separate counters
+    /// all started at 1 and handed out colliding ids (N-05).
+    pub(crate) fn allocate_id(&self) -> Result<u64, CapError> {
+        self.id_allocator.allocate()
+    }
+}
+
 pub fn cap_manager() -> &'static CapabilityManager {
     &CAP_MANAGER
 }

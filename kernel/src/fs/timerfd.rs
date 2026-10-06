@@ -436,8 +436,13 @@ impl Drop for TimerFdNode {
 mod tests {
     use super::*;
 
+    /// The registry is a process-wide static: tests that reset it must not
+    /// run concurrently, or one test's reset removes another's instance.
+    static TEST_SERIAL: spin::Mutex<()> = spin::Mutex::new(());
+
     #[test]
     fn test_timerfd_create_monotonic() {
+        let _serial = TEST_SERIAL.lock();
         TIMERFD_REGISTRY.lock().clear();
 
         let id = timerfd_create(CLOCK_MONOTONIC, 0).unwrap();
@@ -446,6 +451,7 @@ mod tests {
 
     #[test]
     fn test_timerfd_create_invalid_clock() {
+        let _serial = TEST_SERIAL.lock();
         TIMERFD_REGISTRY.lock().clear();
 
         assert!(timerfd_create(99, 0).is_err());
@@ -453,6 +459,7 @@ mod tests {
 
     #[test]
     fn test_timerfd_disarm() {
+        let _serial = TEST_SERIAL.lock();
         TIMERFD_REGISTRY.lock().clear();
 
         let id = timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK).unwrap() as u32;
@@ -477,6 +484,7 @@ mod tests {
 
     #[test]
     fn test_timerfd_gettime_disarmed() {
+        let _serial = TEST_SERIAL.lock();
         TIMERFD_REGISTRY.lock().clear();
 
         let id = timerfd_create(CLOCK_MONOTONIC, 0).unwrap() as u32;
@@ -486,6 +494,7 @@ mod tests {
 
     #[test]
     fn test_timerfd_close() {
+        let _serial = TEST_SERIAL.lock();
         TIMERFD_REGISTRY.lock().clear();
 
         let id = timerfd_create(CLOCK_MONOTONIC, 0).unwrap() as u32;

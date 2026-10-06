@@ -539,11 +539,12 @@ pub fn restore_fpu_state(state: &FpuState) {
 /// needed for per-CPU data structures.
 #[allow(dead_code)] // SMP API -- needed for multi-hart support
 pub fn hart_id() -> usize {
-    // SAFETY: Reading the mhartid CSR is a read-only operation that returns the
-    // current hardware thread ID. Always accessible in M-mode with no side effects.
+    // mhartid is an M-mode CSR and traps in S-mode; the kernel keeps the
+    // logical CPU ID in `tp` (see sched::smp::current_cpu_id).
+    // SAFETY: reading a general-purpose register has no side effects.
     unsafe {
         let id: usize;
-        asm!("csrr {}, mhartid", out(reg) id);
+        asm!("mv {}, tp", out(reg) id, options(nomem, nostack));
         id
     }
 }

@@ -137,7 +137,7 @@ impl FunctionRegistry {
 
 #[cfg(test)]
 mod tests {
-    use alloc::{string::ToString, vec};
+    use alloc::vec;
 
     use super::*;
 

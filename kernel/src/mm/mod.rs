@@ -302,6 +302,71 @@ fn translate_kernel_vaddr(vaddr: u64) -> u64 {
     (l1_entry & 0x000F_FFFF_FFFF_F000) | (vaddr & 0xFFF)
 }
 
+/// Most memory regions handed to `init` (each becomes a NUMA node).
+const MAX_BOOT_REGIONS: usize = 8;
+
+/// Guard between the end of the kernel image and the first frame the frame
+/// allocator may hand out.
+const FRAME_POOL_GUARD: u64 = 0x20_0000;
+
+/// First physical address the frame pool may use after a kernel image that
+/// ends at `kernel_end`: rounded up to 2 MiB, plus a 2 MiB guard.
+///
+/// Deriving this from the linker's `__kernel_end` -- rather than a constant
+/// -- is what keeps the pool from overlapping the kernel as it grows. A
+/// hardcoded 0x80E00000 on riscv64 ended up 3.3 MiB inside a kernel ending
+/// at 0x81148000, so frames aliased the kernel heap and boot stack (N-13).
+pub(crate) const fn pool_start_after(kernel_end: u64) -> u64 {
+    let aligned = (kernel_end + 0x1F_FFFF) & !0x1F_FFFF;
+    aligned + FRAME_POOL_GUARD
+}
+
+/// The single region `[pool_start_after(kernel_end), ram_end)`, or `None`
+/// if the kernel leaves no room in RAM.
+pub(crate) fn region_after_kernel(kernel_end: u64, ram_end: u64) -> Option<MemoryRegion> {
+    let start = pool_start_after(kernel_end);
+    (ram_end > start).then(|| MemoryRegion {
+        start,
+        size: ram_end - start,
+        usable: true,
+    })
+}
+
+/// Clip usable `[start, end)` ranges to begin at or above `floor`, align
+/// them to whole frames, and keep the largest `out.len()` of them (each
+/// becomes a NUMA node, and there are only so many). Returns how many were
+/// written; the written regions are sorted by start address.
+pub(crate) fn clip_usable_regions(
+    ranges: impl IntoIterator<Item = (u64, u64)>,
+    floor: u64,
+    out: &mut [MemoryRegion],
+) -> usize {
+    let page = FRAME_SIZE as u64;
+    let mut count = 0;
+    for (start, end) in ranges {
+        let start = (start.max(floor) + page - 1) & !(page - 1);
+        let end = end & !(page - 1);
+        if end <= start {
+            continue;
+        }
+        let region = MemoryRegion {
+            start,
+            size: end - start,
+            usable: true,
+        };
+        if count < out.len() {
+            out[count] = region;
+            count += 1;
+        } else if let Some(smallest) = out.iter_mut().min_by_key(|r| r.size) {
+            if region.size > smallest.size {
+                *smallest = region;
+            }
+        }
+    }
+    out[..count].sort_unstable_by_key(|r| r.start);
+    count
+}
+
 /// Initialize with default memory map for testing
 pub fn init_default() {
     kprintln!("[MM] Using default memory map for initialization");
@@ -367,44 +432,73 @@ pub fn init_default() {
             safe_start
         };
 
-        // Total usable RAM. MUST match the QEMU `-m` flag exactly.
-        // Over-estimating causes the buddy allocator to hand out frames
-        // from non-existent physical addresses, corrupting kernel heap
-        // state (manifests as null-ptr deref in linked_list_allocator
-        // after ~200 fork+exec cycles exhaust the bitmap region).
-        // Current QEMU config: -m 2048M.
-        let ram_end: u64 = 2048 * 1024 * 1024;
-        let size = ram_end.saturating_sub(alloc_start);
-
-        [MemoryRegion {
-            start: alloc_start,
-            size,
-            usable: true,
-        }]
+        // Usable RAM comes from the bootloader's memory map (UEFI), clipped
+        // to start above the kernel. This replaces a hardcoded 2 GiB end
+        // that had to match QEMU's `-m` exactly: over-estimating hands out
+        // frames that do not exist.
+        let mut regions = [MemoryRegion {
+            start: 0,
+            size: 0,
+            usable: false,
+        }; MAX_BOOT_REGIONS];
+        // SAFETY: BOOT_INFO is written once by the boot entry before
+        // kernel_main and is read-only afterwards; this runs during
+        // single-threaded early init.
+        #[allow(static_mut_refs)]
+        let count = unsafe {
+            crate::arch::x86_64::boot::BOOT_INFO
+                .as_ref()
+                .map_or(0, |bi| {
+                    clip_usable_regions(
+                        bi.memory_regions
+                            .iter()
+                            .filter(|r| r.kind == bootloader_api::info::MemoryRegionKind::Usable)
+                            .map(|r| (r.start, r.end)),
+                        alloc_start,
+                        &mut regions,
+                    )
+                })
+        };
+        if count == 0 {
+            panic!("[MM] bootloader reported no usable RAM above the kernel");
+        }
+        kprintln!(
+            "[MM] {} usable region(s) above {:#x} from the bootloader memory map",
+            count,
+            alloc_start
+        );
+        (regions, count)
     };
 
-    #[cfg(target_arch = "aarch64")]
-    let default_map = [MemoryRegion {
-        start: 0x48000000, // 1.125GB (after kernel at 0x40080000)
-        size: 134217728,   // 128MB pre-calculated
-        usable: true,
-    }];
-
-    #[cfg(target_arch = "riscv64")]
-    let default_map = [MemoryRegion {
-        // QEMU virt machine: RAM at 0x80000000, kernel loaded at 0x80200000.
-        // __kernel_end is at ~0x80D2C000 (includes BSS + 128KB stack).
-        // Start frame allocation well after the kernel image to avoid
-        // corrupting kernel data. 0x80E00000 provides ~1MB safety margin.
-        // End of RAM at 0x88000000 (128MB), giving ~114MB for frames.
-        start: 0x80E00000,
-        size: 0x88000000 - 0x80E00000, // ~114MB until end of 128MB RAM
-        usable: true,
-    }];
+    // AArch64 and RISC-V boot with the MMU off or identity-mapped, so the
+    // linker's __kernel_end is the kernel's physical end. The pool starts
+    // after it and ends at 128 MiB of RAM -- QEMU `virt`'s default when no
+    // `-m` is given. Under-estimating only leaves memory unused; over-
+    // estimating would hand out frames that do not exist.
+    // TODO(v0.27): read the RAM size from the device tree instead.
+    #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
+    let default_map = {
+        extern "C" {
+            static __kernel_end: u8;
+        }
+        // Only the linker symbol's address is taken; it is never read.
+        let kernel_end = core::ptr::addr_of!(__kernel_end) as u64;
+        #[cfg(target_arch = "aarch64")]
+        let ram_end: u64 = 0x4000_0000 + 128 * 1024 * 1024;
+        #[cfg(target_arch = "riscv64")]
+        let ram_end: u64 = 0x8000_0000 + 128 * 1024 * 1024;
+        let Some(region) = region_after_kernel(kernel_end, ram_end) else {
+            panic!("[MM] kernel image leaves no RAM for the frame allocator");
+        };
+        let mut regions = [region; MAX_BOOT_REGIONS];
+        regions[0] = region;
+        (regions, 1)
+    };
 
     kprintln!("[MM] Calling init with default memory map");
 
-    init(&default_map);
+    let (regions, count) = default_map;
+    init(&regions[..count]);
 
     kprintln!("[MM] init returned successfully");
 
@@ -617,5 +711,63 @@ pub fn get_memory_stats() -> MemoryStats {
         total_frames: stats.total_frames as usize,
         free_frames: stats.free_frames as usize,
         cached_frames: PAGE_CACHE_FRAMES.load(Ordering::Relaxed) as usize,
+    }
+}
+
+#[cfg(all(test, not(target_os = "none")))]
+mod layout_tests {
+    use super::*;
+
+    /// N-13: the riscv64 kernel that ends at 0x81148000 gets a pool that
+    /// starts past it, not the old hardcoded 0x80E00000.
+    #[test]
+    fn pool_starts_after_the_kernel() {
+        assert_eq!(pool_start_after(0x8114_8000), 0x8140_0000);
+        assert_eq!(pool_start_after(0x8120_0000), 0x8140_0000);
+        assert!(pool_start_after(0x8114_8000) > 0x8114_8000);
+        let region = region_after_kernel(0x8114_8000, 0x8800_0000).unwrap();
+        assert_eq!(region.start + region.size, 0x8800_0000);
+        assert!(region_after_kernel(0x87F0_0000, 0x8800_0000).is_none());
+    }
+
+    #[test]
+    fn clip_drops_low_and_tiny_regions_and_aligns() {
+        let mut out = [MemoryRegion {
+            start: 0,
+            size: 0,
+            usable: false,
+        }; 4];
+        let n = clip_usable_regions(
+            [
+                (0x1000, 0x9F000),
+                (0x10_0000, 0x40_0000),
+                (0x40_0800, 0x80_0FFF),
+            ],
+            0x20_0000,
+            &mut out,
+        );
+        assert_eq!(n, 2);
+        assert_eq!(out[0].start, 0x20_0000);
+        assert_eq!(out[0].size, 0x20_0000);
+        assert_eq!(out[1].start, 0x40_1000);
+        assert_eq!(out[1].start + out[1].size, 0x80_0000);
+    }
+
+    #[test]
+    fn clip_keeps_the_largest_regions() {
+        let mut out = [MemoryRegion {
+            start: 0,
+            size: 0,
+            usable: false,
+        }; 2];
+        let ranges = [
+            (0x1_0000_0000u64, 0x1_0010_0000u64),
+            (0x2000_0000, 0x4000_0000),
+            (0x5000_0000, 0x5001_0000),
+            (0x6000_0000, 0x7000_0000),
+        ];
+        let n = clip_usable_regions(ranges, 0, &mut out);
+        assert_eq!(n, 2);
+        assert_eq!((out[0].start, out[1].start), (0x2000_0000, 0x6000_0000));
     }
 }

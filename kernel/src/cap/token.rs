@@ -3,8 +3,6 @@
 //! Implements the 64-bit capability token format with packed fields
 //! for efficient storage and fast validation.
 
-use core::sync::atomic::Ordering;
-
 /// 64-bit capability token with packed fields
 #[repr(transparent)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -235,11 +233,6 @@ impl Rights {
     }
 }
 
-/// Global capability ID allocator
-use core::sync::atomic::AtomicU64;
-
-static GLOBAL_CAP_ID: AtomicU64 = AtomicU64::new(1);
-
 /// Maximum capability ID (48 bits)
 const MAX_CAP_ID: u64 = (1 << 48) - 1;
 
@@ -250,30 +243,9 @@ pub enum CapAllocError {
     IdExhausted,
 }
 
-/// Allocate a globally unique capability ID
+/// Allocate a globally unique capability ID (from the manager's allocator).
 pub fn alloc_cap_id() -> Result<u64, CapAllocError> {
-    loop {
-        let current = GLOBAL_CAP_ID.load(Ordering::Relaxed);
-
-        // Check if we've exhausted the ID space
-        if current > MAX_CAP_ID {
-            return Err(CapAllocError::IdExhausted);
-        }
-
-        let next = current + 1;
-
-        // Use compare_exchange_weak for better performance
-        match GLOBAL_CAP_ID.compare_exchange_weak(
-            current,
-            next,
-            Ordering::Release,
-            Ordering::Relaxed,
-        ) {
-            Ok(_) => return Ok(current),
-            Err(_) => {
-                // Another thread updated the counter, retry
-                continue;
-            }
-        }
-    }
+    super::manager::cap_manager()
+        .allocate_id()
+        .map_err(|_| CapAllocError::IdExhausted)
 }

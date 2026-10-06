@@ -454,7 +454,7 @@ mod tests {
 
     #[test]
     fn test_alpha_blend_half() {
-        let (r, g, b) = alpha_blend(200, 100, 0, 128, 0, 0, 200);
+        let (r, _g, b) = alpha_blend(200, 100, 0, 128, 0, 0, 200);
         // r ~ (200*128 + 0*127) / 255 ~ 100
         // b ~ (0*128 + 200*127) / 255 ~ 99
         assert!(r > 90 && r < 110);

@@ -1815,7 +1815,13 @@ pub struct VblankEvent {
     pub crtc_id: u32,
     /// User data from the page flip request (returned to user space)
     pub user_data: u64,
+    /// Process that requested the flip; only it may read the event
+    pub owner_pid: u64,
 }
+
+/// Maximum completion events queued for one process before further flip
+/// requests are refused (Linux allows 4 KiB of pending 32-byte events).
+pub const MAX_PENDING_EVENTS_PER_OWNER: usize = 128;
 
 /// Page flip request
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1826,6 +1832,8 @@ pub struct PageFlipRequest {
     pub fb_id: u32,
     /// User data for completion callback
     pub user_data: u64,
+    /// Process requesting the flip; its completion event is queued for it
+    pub owner_pid: u64,
 }
 
 /// Double-buffered page flip manager
@@ -1889,6 +1897,17 @@ impl PageFlipManager {
             return false;
         }
 
+        // Refuse while the requester has a full queue of unread events, so a
+        // process that never reads cannot grow kernel memory (W-10).
+        let queued = self
+            .vblank_events
+            .iter()
+            .filter(|e| e.owner_pid == request.owner_pid)
+            .count();
+        if queued >= MAX_PENDING_EVENTS_PER_OWNER {
+            return false;
+        }
+
         // Set back buffer and mark pending
         if let Some(back) = self
             .back_buffers
@@ -1943,6 +1962,7 @@ impl PageFlipManager {
                     timestamp_ns,
                     crtc_id,
                     user_data: flip.user_data,
+                    owner_pid: flip.owner_pid,
                 });
 
                 completed_indices.push(i);
@@ -1988,9 +2008,24 @@ impl PageFlipManager {
             .map(|(_, ts)| ts.load(Ordering::Relaxed))
     }
 
-    /// Drain all pending vblank events
-    pub(crate) fn drain_events(&mut self) -> Vec<VblankEvent> {
-        core::mem::take(&mut self.vblank_events)
+    /// Whether any completion event is queued for `owner_pid`.
+    pub(crate) fn has_events_for(&self, owner_pid: u64) -> bool {
+        self.vblank_events.iter().any(|e| e.owner_pid == owner_pid)
+    }
+
+    /// Remove and return up to `max` of `owner_pid`'s events, oldest first.
+    /// Other processes' events, and any beyond `max`, stay queued.
+    pub(crate) fn take_events_for(&mut self, owner_pid: u64, max: usize) -> Vec<VblankEvent> {
+        let mut taken = Vec::new();
+        self.vblank_events.retain(|e| {
+            if e.owner_pid == owner_pid && taken.len() < max {
+                taken.push(*e);
+                false
+            } else {
+                true
+            }
+        });
+        taken
     }
 
     /// Check if a flip is pending for a given CRTC
@@ -2268,8 +2303,8 @@ pub fn with_cursor<R, F: FnOnce(&mut HardwareCursor) -> R>(f: F) -> Option<R> {
 /// Used by DRM device node poll_readiness() to report POLLIN only when
 /// events are queued, preventing spurious wakeups that confuse kwin's
 /// event loop.
-pub fn has_pending_drm_events() -> bool {
-    with_page_flip(|pf| !pf.vblank_events.is_empty()).unwrap_or(false)
+pub fn has_pending_drm_events(owner_pid: u64) -> bool {
+    with_page_flip(|pf| pf.has_events_for(owner_pid)).unwrap_or(false)
 }
 
 /// Read pending DRM events into a user buffer as `drm_event_vblank` structs.
@@ -2283,22 +2318,23 @@ pub fn has_pending_drm_events() -> bool {
 ///   u32 sequence
 ///   u32 crtc_id (reserved/pad in upstream, we use for crtc_id)
 ///
-/// Returns the number of bytes written to the buffer.
-pub fn read_drm_events(buffer: &mut [u8]) -> usize {
+/// Only `owner_pid`'s events are returned, and only as many as fit in
+/// `buffer`; the rest stay queued. Returns the number of bytes written.
+pub fn read_drm_events(owner_pid: u64, buffer: &mut [u8]) -> usize {
     const DRM_EVENT_FLIP_COMPLETE: u32 = 0x02;
     const EVENT_SIZE: usize = 32;
 
-    let events = match with_page_flip(|pf| pf.drain_events()) {
+    let fits = buffer.len() / EVENT_SIZE;
+    if fits == 0 {
+        return 0;
+    }
+    let events = match with_page_flip(|pf| pf.take_events_for(owner_pid, fits)) {
         Some(events) => events,
         None => return 0,
     };
 
     let mut offset = 0;
     for event in &events {
-        if offset + EVENT_SIZE > buffer.len() {
-            break;
-        }
-
         // Convert timestamp_ns to tv_sec / tv_usec
         let tv_sec = (event.timestamp_ns / 1_000_000_000) as u32;
         let tv_usec = ((event.timestamp_ns % 1_000_000_000) / 1_000) as u32;
@@ -2754,6 +2790,7 @@ mod tests {
             crtc_id: 1,
             fb_id: 20,
             user_data: 0,
+            owner_pid: 1,
         };
         assert!(pfm.request_flip(req));
         assert!(pfm.is_flip_pending(1));
@@ -2774,6 +2811,7 @@ mod tests {
             crtc_id: 1,
             fb_id: 20,
             user_data: 0,
+            owner_pid: 1,
         };
         assert!(pfm.request_flip(req));
         // Second flip should fail while first is pending
@@ -2781,8 +2819,67 @@ mod tests {
             crtc_id: 1,
             fb_id: 30,
             user_data: 0,
+            owner_pid: 1,
         };
         assert!(!pfm.request_flip(req2));
+    }
+
+    fn flip(owner_pid: u64, user_data: u64) -> PageFlipRequest {
+        PageFlipRequest {
+            crtc_id: 1,
+            fb_id: 20,
+            user_data,
+            owner_pid,
+        }
+    }
+
+    /// W-9: events go only to the process that requested the flip.
+    #[test]
+    fn test_page_flip_events_are_per_owner() {
+        let mut pfm = PageFlipManager::new();
+        pfm.register_crtc(1, 10);
+        assert!(pfm.request_flip(flip(7, 0xAA)));
+        pfm.handle_vblank(1, 1);
+
+        assert!(!pfm.has_events_for(8));
+        assert!(pfm.take_events_for(8, 16).is_empty());
+        assert!(pfm.has_events_for(7));
+        let events = pfm.take_events_for(7, 16);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].user_data, 0xAA);
+        assert!(!pfm.has_events_for(7));
+    }
+
+    /// W-10: a process that never reads cannot grow the queue without bound.
+    #[test]
+    fn test_page_flip_event_queue_is_capped() {
+        let mut pfm = PageFlipManager::new();
+        pfm.register_crtc(1, 10);
+        let mut accepted = 0;
+        for i in 0..(MAX_PENDING_EVENTS_PER_OWNER as u64 + 50) {
+            if pfm.request_flip(flip(7, i)) {
+                accepted += 1;
+                pfm.handle_vblank(1, i);
+            }
+        }
+        assert_eq!(accepted, MAX_PENDING_EVENTS_PER_OWNER);
+        assert_eq!(pfm.vblank_events.len(), MAX_PENDING_EVENTS_PER_OWNER);
+    }
+
+    /// Events that do not fit the reader's buffer stay queued.
+    #[test]
+    fn test_page_flip_partial_take_keeps_rest() {
+        let mut pfm = PageFlipManager::new();
+        pfm.register_crtc(1, 10);
+        for i in 0..3 {
+            assert!(pfm.request_flip(flip(7, i)));
+            pfm.handle_vblank(1, i);
+        }
+        let first = pfm.take_events_for(7, 1);
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].user_data, 0);
+        let rest = pfm.take_events_for(7, 16);
+        assert_eq!(rest.iter().map(|e| e.user_data).collect::<Vec<_>>(), [1, 2]);
     }
 
     // -- Hardware cursor tests --

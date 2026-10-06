@@ -305,6 +305,15 @@ pub trait VfsNode: Send + Sync {
     fn as_any(&self) -> Option<&dyn core::any::Any> {
         None
     }
+
+    /// `(major, minor)` for device nodes, `None` for everything else.
+    ///
+    /// Use this, never the path a file was opened with, to decide whether a
+    /// file is a particular device: a path such as `/tmp/dri/x` says nothing
+    /// about what the node is (W-7).
+    fn device_id(&self) -> Option<(u32, u32)> {
+        None
+    }
 }
 
 /// Filesystem trait

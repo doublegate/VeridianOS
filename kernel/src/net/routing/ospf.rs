@@ -1061,7 +1061,7 @@ mod tests {
     #[test]
     fn test_spf_simple_topology() {
         // Topology: R1 --10-- R2 --5-- R3
-        let router = OspfRouter::new(1, 0, 1, 0xFFFFFF00);
+        let _router = OspfRouter::new(1, 0, 1, 0xFFFFFF00);
 
         // R1's Router LSA: link to R2 with cost 10
         let r1_lsa = Lsa::Router(RouterLsa {

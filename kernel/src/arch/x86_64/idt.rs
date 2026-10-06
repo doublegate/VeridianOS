@@ -151,8 +151,55 @@ extern "x86-interrupt" fn double_fault_handler(
     }
 }
 
+/// Resolve a page fault through `mm::page_fault` on a 16-byte-aligned
+/// stack: the full user-fault path (demand paging, CoW, stack growth, then
+/// SIGSEGV), or for `kernel_copy` the narrow, signal-free
+/// `resolve_user_copy_fault`.
+///
+/// Exceptions that push an error code enter the handler with RSP 8 bytes
+/// off the alignment compiled code assumes, so deep Rust code reached from
+/// the handler can fault on an aligned SSE store (`movaps`) -- observed as a
+/// GP inside `handle_page_fault` when called for a kernel-mode user-copy
+/// fault. The trampoline realigns RSP before the call and restores it.
+fn resolve_fault_aligned(ec: u64, cr2: u64, rip: u64, kernel_copy: bool) -> bool {
+    extern "C" fn resolve_user(ec: u64, cr2: u64, rip: u64) -> u64 {
+        let info = crate::mm::page_fault::from_x86_64(ec, cr2, rip);
+        crate::mm::page_fault::handle_page_fault(info).is_ok() as u64
+    }
+    extern "C" fn resolve_copy(ec: u64, cr2: u64, rip: u64) -> u64 {
+        let info = crate::mm::page_fault::from_x86_64(ec, cr2, rip);
+        crate::mm::page_fault::resolve_user_copy_fault(&info) as u64
+    }
+    let resolve: extern "C" fn(u64, u64, u64) -> u64 = if kernel_copy {
+        resolve_copy
+    } else {
+        resolve_user
+    };
+    let resolved: u64;
+    // SAFETY: r12 is callee-saved under the C ABI, so it survives the call
+    // and restores the original RSP; `and rsp, -16` only moves RSP down into
+    // the same stack. All other caller-saved state is declared clobbered.
+    unsafe {
+        core::arch::asm!(
+            "mov r12, rsp",
+            "and rsp, -16",
+            "call {f}",
+            "mov rsp, r12",
+            f = in(reg) resolve,
+            in("rdi") ec,
+            in("rsi") cr2,
+            in("rdx") rip,
+            lateout("rax") resolved,
+            out("r12") _,
+            clobber_abi("C"),
+        );
+    }
+    resolved != 0
+}
+
 extern "x86-interrupt" fn page_fault_handler(
-    stack_frame: InterruptStackFrame,
+    // Mutated only by the bare-metal user-copy fixup.
+    #[cfg_attr(not(target_os = "none"), allow(unused_mut))] mut stack_frame: InterruptStackFrame,
     error_code: PageFaultErrorCode,
 ) {
     // FIRST: Emit a raw serial byte to prove we reached the handler.
@@ -192,7 +239,38 @@ extern "x86-interrupt" fn page_fault_handler(
     // Now safe to call Rust functions — we already have CR2 and diagnostics.
     crate::perf::count_page_fault();
 
+    // --- Kernel-mode fault inside the fault-tolerant user copy ---
+    //
+    // A syscall touching user memory through usercopy::copy_user (the
+    // validated accessors in syscall::userspace) faulted. Resolve it like a
+    // user fault if it is a not-yet-populated page (W-3); otherwise resume
+    // at the fixup so the copy returns EFAULT and the syscall unwinds
+    // normally, releasing its locks (MEM-SEC-01, SYS-SEC-01, W-12).
+    #[cfg(target_os = "none")]
+    if !was_user && cr2_val < 0x0000_8000_0000_0000 {
+        if let Some(fixup) = crate::arch::x86_64::usercopy::fixup_for(rip_val) {
+            if cr2_val >= 0x1000 && resolve_fault_aligned(ec, cr2_val, rip_val, true) {
+                return; // page now present: retry the copy instruction
+            }
+            // Redirect the saved RIP to the fixup stub of the routine that
+            // faulted; the fixup only sets rax and returns to copy_user's
+            // caller, whose stack frame is intact. A single 8-byte store:
+            // Volatile::update copies the frame through SSE registers, which
+            // faults on this handler's 8-byte-misaligned stack.
+            // SAFETY: the x86-interrupt ABI passes `stack_frame` in place
+            // (it is the hardware frame); instruction_pointer is its first
+            // field, a u64 VirtAddr.
+            unsafe {
+                core::ptr::write_volatile(core::ptr::addr_of_mut!(stack_frame) as *mut u64, fixup);
+            }
+            return;
+        }
+    }
+
     // --- Kernel-mode fault at user address (fast path) ---
+    //
+    // Any other kernel-mode access to user memory (code that bypasses the
+    // fault-tolerant accessors) is still abandoned via the boot context.
     //
     // Handle this BEFORE demand paging. A kernel-mode fault (U/S bit clear)
     // at a user-space address means a syscall handler tried to access
@@ -250,12 +328,9 @@ extern "x86-interrupt" fn page_fault_handler(
     //
     // The demand paging code uses try_lock() on process.memory_space to avoid
     // deadlock from IST interrupt context.
-    if was_user && cr2_val >= 0x1000 {
-        let info = crate::mm::page_fault::from_x86_64(ec, cr2_val, rip_val);
-        if let Ok(()) = crate::mm::page_fault::handle_page_fault(info) {
-            // Fault resolved (demand page, CoW, or stack growth) -- resume.
-            return;
-        }
+    if was_user && cr2_val >= 0x1000 && resolve_fault_aligned(ec, cr2_val, rip_val, false) {
+        // Fault resolved (demand page, CoW, or stack growth) -- resume.
+        return;
     }
 
     // --- Unresolvable fault ---

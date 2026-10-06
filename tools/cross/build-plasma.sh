@@ -38,7 +38,7 @@ fetch() {
     local tarball="${BUILD_DIR}/${name}.tar.xz"
     if [[ ! -f "${tarball}" ]]; then
         log "Downloading ${name}..."
-        curl -fsSL -o "${tarball}" "${url}" || wget -q -O "${tarball}" "${url}"
+        { curl -fsSL -o "${tarball}.part" "${url}" || wget -q -O "${tarball}.part" "${url}"; } && [[ -s "${tarball}.part" ]] && mv "${tarball}.part" "${tarball}" || { rm -f "${tarball}.part"; echo "download failed: ${url}" >&2; exit 1; }
     fi
     if [[ ! -d "${BUILD_DIR}/${dir}" ]]; then
         log "Extracting ${name}..."

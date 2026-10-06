@@ -288,6 +288,26 @@ install_musl() {
     create_wrapper
 }
 
+# ── Linux UAPI headers ────────────────────────────────────────────────
+# musl does not ship the Linux kernel UAPI headers (linux/*, asm/*), but
+# several dependencies include them (libffi: linux/limits.h; libinput,
+# evdev, DRM users: linux/input.h, drm/*). VeridianOS implements the Linux
+# x86_64 ABI, so the host's x86_64 linux-api-headers are the right set.
+# Override with LINUX_HEADERS_DIR to use a pinned headers_install tree.
+install_linux_headers() {
+    local src="${LINUX_HEADERS_DIR:-/usr/include}"
+    local dst="${SYSROOT}/usr/include"
+    [[ -f "${src}/linux/limits.h" ]] || die "Linux UAPI headers not found in ${src} (install linux-api-headers or set LINUX_HEADERS_DIR)"
+    log "Installing Linux UAPI headers from ${src}..."
+    local dir
+    for dir in linux asm asm-generic drm mtd rdma scsi sound video misc xen; do
+        if [[ -d "${src}/${dir}" ]]; then
+            mkdir -p "${dst}/${dir}"
+            cp -a "${src}/${dir}/." "${dst}/${dir}/"
+        fi
+    done
+}
+
 # ── Wrapper Scripts ───────────────────────────────────────────────────
 create_wrapper() {
     local gcc_wrapper="${SYSROOT}/bin/x86_64-veridian-musl-gcc"
@@ -460,6 +480,7 @@ main() {
     configure_musl
     build_musl
     install_musl
+    install_linux_headers
     verify_install
 
     log "=== musl libc build complete ==="

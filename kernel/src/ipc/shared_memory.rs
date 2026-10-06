@@ -509,7 +509,6 @@ pub fn zero_copy_transfer(
 #[cfg(all(test, not(target_os = "none")))]
 mod tests {
     use super::*;
-    use crate::process::ProcessId;
 
     #[test]
     fn test_permission_flags() {

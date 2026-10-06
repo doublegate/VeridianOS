@@ -12,6 +12,14 @@ use super::bare_lock::RwLock;
 use super::{DirEntry, Filesystem, Metadata, NodeType, Permissions, VfsNode};
 use crate::error::{FsError, KernelError};
 
+/// Major number of DRM (Direct Rendering Manager) character devices.
+pub(crate) const DRM_MAJOR: u32 = 226;
+
+/// PID of the calling process (0 when there is none, e.g. during boot).
+fn current_pid() -> u64 {
+    crate::process::current_process().map_or(0, |p| p.pid.0)
+}
+
 /// Device node
 struct DevNode {
     name: String,
@@ -323,7 +331,7 @@ impl VfsNode for DevNode {
                 // DRM read(): return queued page-flip completion events.
                 // kwin's render loop reads drm_event_vblank structs (32 bytes
                 // each) from the DRM fd after epoll_wait signals readability.
-                let bytes = crate::graphics::gpu_accel::read_drm_events(buffer);
+                let bytes = crate::graphics::gpu_accel::read_drm_events(current_pid(), buffer);
                 Ok(bytes)
             }
             _ => {
@@ -452,7 +460,7 @@ impl VfsNode for DevNode {
             // are queued (which would return 0 bytes = EOF).
             "dri/card0" | "dri/renderD128" => {
                 let mut events = 0x0004u16; // POLLOUT
-                if crate::graphics::gpu_accel::has_pending_drm_events() {
+                if crate::graphics::gpu_accel::has_pending_drm_events(current_pid()) {
                     events |= 0x0001; // POLLIN
                 }
                 events
@@ -460,6 +468,10 @@ impl VfsNode for DevNode {
             // All other devices: default (always readable + writable)
             _ => 0x0001 | 0x0004, // POLLIN | POLLOUT
         }
+    }
+
+    fn device_id(&self) -> Option<(u32, u32)> {
+        Some((self._major, self._minor))
     }
 }
 
@@ -628,11 +640,15 @@ impl DevRoot {
         let dri_dir = Arc::new(DevSubDir::new(String::from("dri")));
         dri_dir.add_device(
             String::from("card0"),
-            Arc::new(DevNode::new_char(String::from("dri/card0"), 226, 0)),
+            Arc::new(DevNode::new_char(String::from("dri/card0"), DRM_MAJOR, 0)),
         );
         dri_dir.add_device(
             String::from("renderD128"),
-            Arc::new(DevNode::new_char(String::from("dri/renderD128"), 226, 128)),
+            Arc::new(DevNode::new_char(
+                String::from("dri/renderD128"),
+                DRM_MAJOR,
+                128,
+            )),
         );
 
         // Create /dev/input/ subdirectory with evdev device nodes

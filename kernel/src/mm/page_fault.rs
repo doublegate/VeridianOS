@@ -97,7 +97,38 @@ fn try_demand_page(info: &PageFaultInfo) -> Result<(), KernelError> {
     let process = crate::process::current_process().ok_or(KernelError::NotInitialized {
         subsystem: "process",
     })?;
+    try_demand_page_in(process, info)
+}
 
+/// Resolve a fault the kernel took while copying to or from user memory
+/// (x86_64 `usercopy`). Returns whether the page is now present.
+///
+/// Deliberately narrower than [`handle_page_fault`]:
+/// - only not-present faults: a protection fault on a present page is never
+///   "fixed" on the kernel's behalf, so a syscall can never write a page the
+///   process itself may not write;
+/// - only demand paging, checked against the mapping as a *user* access (USER
+///   required, WRITABLE required for writes) -- no CoW, no stack growth;
+/// - no blocking on the scheduler lock, and never a signal: on any failure the
+///   copy returns EFAULT instead.
+pub fn resolve_user_copy_fault(info: &PageFaultInfo) -> bool {
+    if info.reason != PageFaultReason::NotPresent {
+        return false;
+    }
+    let Some(process) = crate::process::try_current_process() else {
+        return false;
+    };
+    let as_user = PageFaultInfo {
+        was_user_mode: true,
+        ..*info
+    };
+    try_demand_page_in(process, &as_user).is_ok()
+}
+
+fn try_demand_page_in(
+    process: &crate::process::Process,
+    info: &PageFaultInfo,
+) -> Result<(), KernelError> {
     let vaddr = VirtualAddress::new(info.faulting_address);
 
     // Check whether the faulting address is within any existing mapping.

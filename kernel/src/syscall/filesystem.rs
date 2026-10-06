@@ -319,26 +319,11 @@ pub fn sys_close(fd: usize) -> SyscallResult {
     // Get current process
     let process = process::current_process().ok_or(SyscallError::InvalidState)?;
 
-    // Prevent premature closure of DRM device fds.
-    //
-    // KWin/Mesa close the DRM device fds (opened as /dev/dri/card0) during
-    // initialization -- likely Mesa's DRI driver cleanup after reading an
-    // empty /proc/self/maps. This breaks QSocketNotifier, which needs the
-    // DRM fd for page-flip event notification via epoll. On real Linux,
-    // /proc/self/maps returns valid memory mapping data so Mesa succeeds
-    // and doesn't close the DRM fds.
-    //
-    // Fix: return success without actually closing DRM device fds. The fd
-    // remains open in the file table so QSocketNotifier can register it
-    // for epoll monitoring and kwin's render loop receives page-flip events.
+    // A closed PRIME export can no longer be imported (W-11).
     {
         let file_table = process.file_table.lock();
-        if let Some(file) = file_table.get(fd) {
-            if let Some(ref p) = file.path {
-                if p.contains("dri/card0") || p.contains("dri/renderD128") {
-                    return Ok(0);
-                }
-            }
+        if file_table.get(fd).is_some_and(|f| f.is_drm_device()) {
+            crate::graphics::drm_ioctl::prime_fd_closed(process.pid.0, fd as i32);
         }
     }
 
@@ -1197,6 +1182,9 @@ pub fn sys_chdir(path_ptr: usize) -> SyscallResult {
 ///
 /// # Returns
 /// Command-specific return value
+/// Major number of evdev input devices (`/dev/input/event*`).
+const EVDEV_MAJOR: u32 = 13;
+
 pub fn sys_ioctl(fd: usize, cmd: usize, arg: usize) -> SyscallResult {
     use crate::drivers::terminal::{
         self, KernelTermios, KernelWinsize, TCGETS, TCSETS, TCSETSF, TCSETSW, TIOCGPGRP,
@@ -1214,44 +1202,44 @@ pub fn sys_ioctl(fd: usize, cmd: usize, arg: usize) -> SyscallResult {
         }
     }
 
-    // DRM ioctl dispatch: check if the fd refers to a /dev/dri/* device.
-    // Also handle evdev ioctls for /dev/input/event* devices.
+    // Device ioctls (DRM, evdev). The device is identified by the node's
+    // (major, minor), never by the path it was opened with (W-7). Both run
+    // against a kernel copy of the argument (W-4, W-19): the handlers never
+    // see the user pointer.
     if fd > 2 {
         if let Some(proc) = process::current_process() {
             let file_table = proc.file_table.lock();
-            if let Some(file) = file_table.get(fd as crate::fs::file::FileDescriptor) {
-                if let Some(ref path) = file.path {
-                    if path.contains("dri/") {
-                        // DRM ioctl -- dispatch to drm_ioctl module
-                        drop(file_table);
-                        return match crate::graphics::drm_ioctl::drm_ioctl_dispatch(
-                            fd as i32,
-                            cmd as u64,
-                            arg as *mut u8,
-                        ) {
-                            Ok(v) => Ok(v as usize),
-                            Err(_) => Err(SyscallError::InvalidArgument),
-                        };
-                    } else if path.contains("input/event") {
-                        // evdev ioctl -- extract minor from path
-                        let minor = if path.ends_with("event0") {
-                            64u32
-                        } else if path.ends_with("event1") {
-                            65u32
-                        } else {
-                            return Err(SyscallError::InvalidArgument);
-                        };
-                        drop(file_table);
-                        return match crate::drivers::evdev::handle_ioctl(
-                            minor,
-                            cmd as u32,
-                            arg as *mut u8,
-                        ) {
-                            Ok(v) => Ok(v as usize),
-                            Err(_) => Err(SyscallError::InvalidArgument),
-                        };
-                    }
+            let device = file_table
+                .get(fd as crate::fs::file::FileDescriptor)
+                .and_then(|file| file.node.device_id());
+            drop(file_table);
+            match device {
+                Some((crate::fs::devfs::DRM_MAJOR, _)) => {
+                    let result =
+                        crate::syscall::userspace::ioctl_bounce(cmd as u64, arg, |kernel_arg| {
+                            crate::graphics::drm_ioctl::drm_ioctl_dispatch(
+                                fd as i32, cmd as u64, kernel_arg,
+                            )
+                        })?;
+                    return match result {
+                        Ok(v) => Ok(v as usize),
+                        Err(crate::error::KernelError::PermissionDenied { .. }) => {
+                            Err(SyscallError::PermissionDenied)
+                        }
+                        Err(_) => Err(SyscallError::InvalidArgument),
+                    };
                 }
+                Some((EVDEV_MAJOR, minor)) => {
+                    let result =
+                        crate::syscall::userspace::ioctl_bounce(cmd as u64, arg, |kernel_arg| {
+                            crate::drivers::evdev::handle_ioctl(minor, cmd as u32, kernel_arg)
+                        })?;
+                    return match result {
+                        Ok(v) => Ok(v as usize),
+                        Err(_) => Err(SyscallError::InvalidArgument),
+                    };
+                }
+                _ => {}
             }
         }
     }
@@ -1654,12 +1642,25 @@ pub fn sys_readlink(path_ptr: usize, buf: usize, bufsiz: usize) -> SyscallResult
 /// 0 if accessible, error otherwise.
 pub fn sys_access(path_ptr: usize, mode: usize) -> SyscallResult {
     let path = read_user_path(path_ptr)?;
+    access_path(&path, mode)
+}
 
+/// faccessat / faccessat2: `access` relative to a directory fd.
+///
+/// `flags` (AT_EACCESS, AT_SYMLINK_NOFOLLOW) are accepted; real and
+/// effective IDs are the same here and symlinks are always followed.
+pub fn sys_faccessat(dirfd: usize, path_ptr: usize, mode: usize, _flags: usize) -> SyscallResult {
+    let path = read_user_path(path_ptr)?;
+    let path = resolve_at_path(dirfd, &path)?;
+    access_path(&path, mode)
+}
+
+fn access_path(path: &str, mode: usize) -> SyscallResult {
     let vfs_lock = vfs()?;
     let vfs_guard = vfs_lock.read();
 
     // Check if the file exists (F_OK = 0)
-    let node = vfs_guard.resolve_path(&path).map_err(map_resolve_err)?;
+    let node = vfs_guard.resolve_path(path).map_err(map_resolve_err)?;
 
     // For non-zero mode, check permissions against metadata
     if mode != 0 {

@@ -418,14 +418,22 @@ pub fn current_cpu_id() -> u8 {
 
     #[cfg(any(target_arch = "riscv32", target_arch = "riscv64"))]
     {
-        // SAFETY: mhartid is a read-only CSR that returns the hardware
-        // thread (hart) ID. It is always readable from M-mode. This may
-        // trap in S-mode if not delegated, but during bootstrap we run in
-        // M-mode or the SBI provides this value.
+        // The kernel runs in S-mode, where reading the M-mode CSR mhartid is
+        // an illegal instruction (it was, and restarted boot -- N-13). The
+        // logical CPU ID lives in `tp` instead: boot.S zeroes it on the BSP,
+        // and secondary harts will set it when they are brought up.
+        //
+        // INVARIANT (N-14): `tp` is the user thread pointer in U-mode, so it
+        // is attacker-controlled on entry from user space. Any trap path
+        // from U-mode must swap the kernel `tp` back in (kept in sscratch
+        // while user code runs, as Linux does) before reaching code that
+        // calls this. There is no U-mode entry on riscv64 yet.
+        // SAFETY: reading a general-purpose register has no side effects;
+        // the kernel does not use `tp` for thread-local storage.
         unsafe {
-            let hartid: usize;
-            core::arch::asm!("csrr {}, mhartid", out(reg) hartid);
-            hartid as u8
+            let cpu: usize;
+            core::arch::asm!("mv {}, tp", out(reg) cpu, options(nomem, nostack));
+            cpu as u8
         }
     }
 }

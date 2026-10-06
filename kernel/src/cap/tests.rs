@@ -73,6 +73,45 @@ mod space_tests {
         );
     }
 
+    /// N-04: L2 keys were `(id >> 8) as u16`, so ids 2^24 apart aliased the
+    /// same L2 slot and the second insert failed.
+    #[test]
+    fn test_l2_index_does_not_alias_large_ids() {
+        let cap_space = space::CapabilitySpace::new();
+        let obj = || object::ObjectRef::Process {
+            pid: ProcessId(1234),
+        };
+        let low = token::CapabilityToken::new(0x100, 0, 0, 0);
+        let high = token::CapabilityToken::new(0x1_0000_0100, 0, 0, 0);
+        assert!(cap_space.insert(low, obj(), token::Rights::READ).is_ok());
+        assert!(cap_space.insert(high, obj(), token::Rights::WRITE).is_ok());
+        assert_eq!(cap_space.lookup(low), Some(token::Rights::READ));
+        assert_eq!(cap_space.lookup(high), Some(token::Rights::WRITE));
+    }
+
+    /// N-04: remove() took the slot before comparing tokens, so removing
+    /// with a stale (wrong-generation) token deleted the live capability.
+    #[test]
+    fn test_remove_with_mismatched_token_keeps_entry() {
+        let cap_space = space::CapabilitySpace::new();
+        let obj = || object::ObjectRef::Process {
+            pid: ProcessId(1234),
+        };
+        for id in [42u64, 300] {
+            let live = token::CapabilityToken::new(id, 2, 0, 0);
+            let stale = token::CapabilityToken::new(id, 1, 0, 0);
+            cap_space.insert(live, obj(), token::Rights::READ).unwrap();
+            assert!(cap_space.remove(stale).is_none(), "id {}", id);
+            assert_eq!(
+                cap_space.lookup(live),
+                Some(token::Rights::READ),
+                "id {}",
+                id
+            );
+            assert!(cap_space.remove(live).is_some());
+        }
+    }
+
     #[test]
     fn test_capability_insertion_and_lookup() {
         let cap_space = space::CapabilitySpace::new();
@@ -139,6 +178,50 @@ mod space_tests {
 
 mod manager_tests {
     use super::*;
+
+    /// IPC-INC-01: genuine endpoint tokens carry type/generation/flags in
+    /// their high bits, so they are >= 2^32. The fast path's old range
+    /// check rejected every one of them and accepted any smaller integer.
+    /// Send permission is now decided by the sender's capability space.
+    #[test]
+    fn test_send_permission_uses_capability_space() {
+        use alloc::sync::Arc;
+
+        let cap_space = space::CapabilitySpace::new();
+        let endpoint = object::ObjectRef::Endpoint {
+            endpoint: Arc::new(crate::ipc::Endpoint::new(ProcessId(7))),
+        };
+        let cap = manager::cap_manager()
+            .create_capability(endpoint, ipc_integration::IpcRights::SEND, &cap_space)
+            .unwrap();
+
+        assert!(
+            cap.to_u64() >= 0x1_0000_0000,
+            "genuine token {:#x}",
+            cap.to_u64()
+        );
+        assert!(ipc_integration::check_send_permission(cap, &cap_space).is_ok());
+
+        let forged = token::CapabilityToken::from_u64(0x1337_cafe);
+        assert!(ipc_integration::check_send_permission(forged, &cap_space).is_err());
+
+        let other_space = space::CapabilitySpace::new();
+        assert!(
+            ipc_integration::check_send_permission(cap, &other_space).is_err(),
+            "a token is only valid in the space that holds it"
+        );
+
+        let read_only = manager::cap_manager()
+            .create_capability(
+                object::ObjectRef::Endpoint {
+                    endpoint: Arc::new(crate::ipc::Endpoint::new(ProcessId(7))),
+                },
+                token::Rights::READ,
+                &cap_space,
+            )
+            .unwrap();
+        assert!(ipc_integration::check_send_permission(read_only, &cap_space).is_err());
+    }
 
     #[test]
     fn test_capability_creation() {

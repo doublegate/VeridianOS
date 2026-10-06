@@ -767,7 +767,6 @@ pub fn init() -> Result<(), KernelError> {
 
 #[cfg(test)]
 mod tests {
-    use alloc::vec;
 
     use super::*;
 

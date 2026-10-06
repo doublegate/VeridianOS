@@ -655,7 +655,7 @@ mod tests {
 
     #[test]
     fn test_pty_creation() {
-        let mut manager = PtyManager::new();
+        let manager = PtyManager::new();
         let result = manager.create_pty();
         assert!(result.is_ok());
     }
@@ -663,7 +663,7 @@ mod tests {
     #[test]
     fn test_pty_read_write() {
         let master = PtyMaster::new(0);
-        let slave = PtySlave::new(0, 0);
+        let _slave = PtySlave::new(0, 0);
 
         // Write from master
         let data = b"Hello PTY!";

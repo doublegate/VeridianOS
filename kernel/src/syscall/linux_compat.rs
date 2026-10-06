@@ -174,7 +174,10 @@ const LINUX_LINKAT: usize = 265;
 const LINUX_SYMLINKAT: usize = 266;
 const LINUX_READLINKAT: usize = 267;
 const LINUX_FCHMODAT: usize = 268;
-const LINUX_FCHOWNAT: usize = 269;
+const LINUX_FCHOWNAT: usize = 260;
+/// faccessat. (Was mistakenly the number for fchownat, which routed every
+/// faccessat() to a chown.)
+const LINUX_FACCESSAT: usize = 269;
 const LINUX_PIPE2: usize = 293;
 const LINUX_DUP3: usize = 292;
 const LINUX_PRLIMIT64: usize = 302;
@@ -506,6 +509,12 @@ pub(crate) fn handle_ppoll(fds_ptr: usize, nfds: usize, timespec_ptr: usize) -> 
 ///
 /// Some Linux syscalls have no direct mapping but can be handled with
 /// sensible defaults (e.g., sigaltstack returning success as a no-op).
+/// Whether `linux_num` is faccessat or faccessat2, which take a dirfd and
+/// are handled by `sys_faccessat` with the raw arguments.
+pub(crate) fn is_faccessat(linux_num: usize) -> bool {
+    linux_num == LINUX_FACCESSAT || linux_num == LINUX_FACCESSAT2
+}
+
 pub(crate) fn handle_linux_stub(linux_num: usize) -> Option<SyscallResult> {
     match linux_num {
         // sigaltstack: musl calls this during signal init. Return success.
@@ -538,9 +547,6 @@ pub(crate) fn handle_linux_stub(linux_num: usize) -> Option<SyscallResult> {
         LINUX_INOTIFY_INIT1 => Some(Err(super::SyscallError::NotImplemented)),
         // clone3: newer clone interface. Return ENOSYS so musl falls back to clone.
         LINUX_CLONE3 => Some(Err(super::SyscallError::NotImplemented)),
-        // faccessat2: like faccessat but with flags. Treat as access check that
-        // succeeds (file exists). Caller typically falls back if this fails.
-        LINUX_FACCESSAT2 => Some(Ok(0)),
         // fallocate: preallocate disk space. Not needed, return ENOSYS.
         LINUX_FALLOCATE => Some(Err(super::SyscallError::NotImplemented)),
         // fstatfs/statfs: filesystem info. Return ENOSYS (Qt handles gracefully).
@@ -561,6 +567,18 @@ pub(crate) fn handle_linux_stub(linux_num: usize) -> Option<SyscallResult> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// W-15: 269 is faccessat (never fchownat), 260 is fchownat, and
+    /// faccessat2 is a real access check rather than an unconditional Ok.
+    #[test]
+    fn test_faccessat_and_fchownat_numbers() {
+        assert_eq!(translate_linux_syscall(260), Some(Syscall::Fchownat));
+        assert_eq!(translate_linux_syscall(269), None);
+        assert!(is_faccessat(269));
+        assert!(is_faccessat(439));
+        assert!(!is_faccessat(260));
+        assert!(handle_linux_stub(439).is_none());
+    }
 
     #[test]
     fn test_critical_musl_syscalls_mapped() {

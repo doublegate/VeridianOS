@@ -377,6 +377,10 @@ impl Drop for SignalFdNode {
 mod tests {
     use super::*;
 
+    /// The registry is a process-wide static: tests that reset it must not
+    /// run concurrently, or one test's reset removes another's instance.
+    static TEST_SERIAL: spin::Mutex<()> = spin::Mutex::new(());
+
     #[test]
     fn test_sigset_basic() {
         let mut s = SigSet::new();
@@ -408,6 +412,7 @@ mod tests {
 
     #[test]
     fn test_signalfd_create_and_close() {
+        let _serial = TEST_SERIAL.lock();
         SIGNALFD_REGISTRY.lock().clear();
 
         let id = signalfd_create(-1, 0b10, SFD_NONBLOCK).unwrap() as u32;
@@ -417,6 +422,7 @@ mod tests {
 
     #[test]
     fn test_signalfd_update_mask() {
+        let _serial = TEST_SERIAL.lock();
         SIGNALFD_REGISTRY.lock().clear();
 
         let id = signalfd_create(-1, 0b10, 0).unwrap();
@@ -432,6 +438,7 @@ mod tests {
 
     #[test]
     fn test_signalfd_deliver_and_read() {
+        let _serial = TEST_SERIAL.lock();
         SIGNALFD_REGISTRY.lock().clear();
 
         // Mask signal 2 (SIGINT). Non-blocking so empty reads return instead
@@ -454,6 +461,7 @@ mod tests {
 
     #[test]
     fn test_signalfd_ignores_unmasked() {
+        let _serial = TEST_SERIAL.lock();
         SIGNALFD_REGISTRY.lock().clear();
 
         // Only mask signal 1

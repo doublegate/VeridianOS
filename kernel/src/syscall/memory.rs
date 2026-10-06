@@ -150,6 +150,19 @@ pub fn sys_mmap(
         (fd_or_packed >> 32, fd_or_packed & 0xFFFF_FFFF)
     };
 
+    // DRM device mappings are checked before any memory is mapped: the
+    // device is identified by its node, not by the path it was opened with
+    // (W-7), and the caller must be allowed this exact range (W-6).
+    let is_drm_mmap = !is_anonymous
+        && proc
+            .file_table
+            .lock()
+            .get(fd)
+            .is_some_and(|file| file.is_drm_device());
+    if is_drm_mmap && !crate::graphics::drm_ioctl::may_mmap(caller_pid, fd as i32, offset, length) {
+        return Err(SyscallError::PermissionDenied);
+    }
+
     let mapping_type = prot_to_mapping_type(prot, shared);
     let memory_space = proc.memory_space.lock();
 
@@ -194,18 +207,6 @@ pub fn sys_mmap(
         // DRM MAP_DUMB returns an offset = (handle << 12). When user space
         // calls mmap() on /dev/dri/card0 with that offset, we map the
         // framebuffer physical memory directly instead of reading from VFS.
-        let is_drm_mmap = {
-            let file_table = proc.file_table.lock();
-            if let Some(file) = file_table.get(fd) {
-                file.path
-                    .as_ref()
-                    .map(|p| p.contains("dri/"))
-                    .unwrap_or(false)
-            } else {
-                false
-            }
-        };
-
         if is_drm_mmap {
             // DRM dumb buffer mmap: map the framebuffer physical memory
             // directly into user space. The offset from MAP_DUMB encodes the

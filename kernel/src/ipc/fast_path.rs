@@ -8,7 +8,7 @@
 //! ## Performance features
 //!
 //! - **O(log n) PID lookup** via global task registry (no linear scan)
-//! - **CapabilityCache** (16-entry direct-mapped) for repeated IPC validation
+//! - Capability validation against the sender's own capability space
 //! - **Tracepoints** for IpcFastSend / IpcFastReceive / IpcSlowPath events
 //!
 //! ## Register mapping
@@ -24,16 +24,12 @@
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use spin::Mutex;
-
 use super::{
     error::{IpcError, Result},
     SmallMessage,
 };
 use crate::{
-    arch::entropy::read_timestamp,
-    cap::{space::CapabilityCache, token::CapabilityToken},
-    process::pcb::ProcessState,
+    arch::entropy::read_timestamp, cap::token::CapabilityToken, process::pcb::ProcessState,
     sched::current_process,
 };
 
@@ -42,12 +38,6 @@ static FAST_PATH_COUNT: AtomicU64 = AtomicU64::new(0);
 static FAST_PATH_CYCLES: AtomicU64 = AtomicU64::new(0);
 /// Counter for slow-path fallbacks (target not blocked)
 static SLOW_PATH_FALLBACK_COUNT: AtomicU64 = AtomicU64::new(0);
-
-/// Per-CPU capability cache for fast IPC validation.
-///
-/// 16-entry direct-mapped cache: on cache hit, capability validation
-/// is a single hash + comparison (no capability space traversal).
-static FAST_CAP_CACHE: Mutex<CapabilityCache> = Mutex::new(CapabilityCache::new());
 
 // IPC register semantic indices (architecture-neutral)
 const IPC_REG_CAP: usize = 0; // Capability token
@@ -63,14 +53,19 @@ const IPC_REG_DATA3: usize = 6; // Data word 3
 /// Copies the message directly into the target task's `ipc_regs` array
 /// if the target is blocked waiting for a message. This avoids all
 /// intermediate queuing and achieves sub-microsecond latency.
+///
+/// Not reachable from the syscall path: it checks that the sender holds a
+/// SEND capability, but not that `target_pid` is a *receiver* on that
+/// capability's endpoint, nor does it claim the target atomically
+/// (IPC-SYNC-01/02). `sync_send` uses the queued path until the wait-list
+/// rework provides both. Module-private so nothing new can depend on it.
 #[inline(always)]
-pub fn fast_send(msg: &SmallMessage, target_pid: u64) -> Result<()> {
+fn fast_send(msg: &SmallMessage, target_pid: u64) -> Result<()> {
     let start = read_timestamp();
 
-    // Quick capability validation (cache-accelerated)
-    if !validate_capability_fast(msg.capability) {
-        return Err(IpcError::InvalidCapability);
-    }
+    // The sender must hold this capability, with SEND rights, in its own
+    // capability space (IPC-INC-01).
+    validate_send_capability(msg.capability)?;
 
     // Find target task via global registry (O(log n) lookup, no scheduler lock)
     #[cfg(feature = "alloc")]
@@ -142,12 +137,6 @@ pub fn fast_send(msg: &SmallMessage, target_pid: u64) -> Result<()> {
             let elapsed = read_timestamp() - start;
             FAST_PATH_COUNT.fetch_add(1, Ordering::Relaxed);
             FAST_PATH_CYCLES.fetch_add(elapsed, Ordering::Relaxed);
-
-            // Cache the capability for future fast lookups
-            if let Some(mut cache) = FAST_CAP_CACHE.try_lock() {
-                let token = CapabilityToken::from_u64(msg.capability);
-                cache.insert(token, crate::cap::Rights::ALL);
-            }
 
             // Trace: IPC fast path send
             crate::trace!(
@@ -227,30 +216,22 @@ pub fn fast_receive(endpoint: u64, timeout: Option<u64>) -> Result<SmallMessage>
     })
 }
 
-/// Fast capability validation using CapabilityCache.
+/// Check that the calling process holds `cap`, unrevoked and with SEND
+/// rights, in its own capability space.
 ///
-/// Checks the 16-entry direct-mapped cache first for O(1) validation.
-/// On cache miss, falls back to range validation. Successfully validated
-/// capabilities are cached by `fast_send()` after IPC completion.
-#[inline(always)]
-fn validate_capability_fast(cap: u64) -> bool {
-    // Range check: valid capability tokens are in [1, 0x1_0000_0000)
-    if cap == 0 || cap >= 0x1_0000_0000 {
-        return false;
+/// This replaced a check that rejected every genuine token (all are at
+/// least 2^32: generation, type and flags live in the high bits) and accepted
+/// any integer below 2^32 on a cache miss, after which it was cached with
+/// all rights for every process (IPC-INC-01, IPC-PERF-01). There is no
+/// cache: a cache entry would outlive revocation. Lookup cost is the
+/// capability space's to fix (CAP-PERF-01/02).
+fn validate_send_capability(cap: u64) -> Result<()> {
+    if cap == 0 {
+        return Err(IpcError::InvalidCapability);
     }
-
-    // Try capability cache for O(1) validation.
-    // Use try_lock to avoid blocking on the fast path.
-    if let Some(ref cache) = FAST_CAP_CACHE.try_lock() {
-        let token = CapabilityToken::from_u64(cap);
-        if cache.lookup(token).is_some() {
-            return true; // Cache hit -- validated
-        }
-    }
-
-    // Cache miss -- range check passed, treat as valid.
-    // The capability will be cached on successful IPC completion.
-    true
+    let process = crate::process::current_process().ok_or(IpcError::ProcessNotFound)?;
+    let space = process.capability_space.lock();
+    crate::cap::ipc_integration::check_send_permission(CapabilityToken::from_u64(cap), &space)
 }
 
 /// Read message from the current task's IPC registers.

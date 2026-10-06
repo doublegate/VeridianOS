@@ -13,7 +13,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 use super::{
     error::{IpcError, Result},
-    fast_path::{fast_receive, fast_send},
+    fast_path::fast_receive,
     message::Message,
 };
 use crate::{
@@ -54,22 +54,18 @@ pub fn sync_send(msg: Message, target_endpoint: u64) -> Result<()> {
 
     match msg {
         Message::Small(small_msg) => {
-            // Try fast path first
-            match fast_send(&small_msg, target_endpoint) {
-                Ok(()) => {
-                    SYNC_STATS.fast_path_count.fetch_add(1, Ordering::Relaxed);
-                    update_latency_stats(start);
-                    Ok(())
-                }
-                Err(IpcError::WouldBlock) => {
-                    // Fall back to slow path
-                    SYNC_STATS.slow_path_count.fetch_add(1, Ordering::Relaxed);
-                    sync_send_slow_path(Message::Small(small_msg), target_endpoint)?;
-                    update_latency_stats(start);
-                    Ok(())
-                }
-                Err(e) => Err(e),
-            }
+            // Small messages also take the queued path for now. A direct
+            // hand-off needs the receiver to be claimed atomically from a
+            // receive-only wait list bound to this endpoint; the shared
+            // IPC wait queue cannot do that (senders blocked on a full
+            // endpoint park under the same key, and the task can change
+            // state between lookup and delivery). The queued path checks
+            // the capability's endpoint binding and wakes waiters
+            // correctly. Restored with the IPC-SYNC-01/02 wait rework.
+            SYNC_STATS.slow_path_count.fetch_add(1, Ordering::Relaxed);
+            sync_send_slow_path(Message::Small(small_msg), target_endpoint)?;
+            update_latency_stats(start);
+            Ok(())
         }
         Message::Large(large_msg) => {
             // Large messages always use slow path

@@ -127,10 +127,10 @@ pub unsafe fn set_current_task(task: *mut Task) {
         // SAFETY: Caller guarantees `task` is a valid, non-null pointer to a
         // properly initialized Task. `NonNull::new_unchecked` is safe here
         // because we just checked `!task.is_null()`.
-        sched.current = Some(task_ptr::TaskPtr::new(core::ptr::NonNull::new_unchecked(
-            task,
+        sched.set_current(Some(task_ptr::TaskPtr::new(
+            core::ptr::NonNull::new_unchecked(task),
         )));
     } else {
-        sched.current = None;
+        sched.set_current(None);
     }
 }

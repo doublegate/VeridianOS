@@ -416,8 +416,7 @@ pub fn apply_opacity(pixel: u32, opacity: u8) -> u32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{super::buffer::Buffer, *};
-    use crate::graphics::PixelFormat;
+    use super::*;
 
     #[test]
     fn test_create_destroy_surface() {
