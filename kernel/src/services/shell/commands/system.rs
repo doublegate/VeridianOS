@@ -635,8 +635,7 @@ impl BuiltinCommand for DmesgCommand {
 
     fn execute(&self, _args: &[String], _shell: &Shell) -> CommandResult {
         // Try reading boot log from VFS first
-        if let Some(vfs_lock) = crate::fs::try_get_vfs() {
-            let vfs = vfs_lock.read();
+        if let Some(vfs) = crate::fs::try_get_vfs() {
             if let Ok(node) = vfs.resolve_path("/var/log/boot.log") {
                 let mut buffer = [0u8; 4096];
                 let mut offset = 0usize;
@@ -2389,8 +2388,7 @@ impl BuiltinCommand for CoredumpCommand {
         }
         match args[0].as_str() {
             "list" => {
-                if let Some(vfs_lock) = crate::fs::try_get_vfs() {
-                    let vfs = vfs_lock.read();
+                if let Some(vfs) = crate::fs::try_get_vfs() {
                     if let Ok(node) = vfs.resolve_path("/var/core") {
                         match node.readdir() {
                             Ok(entries) => {

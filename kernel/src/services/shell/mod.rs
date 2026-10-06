@@ -589,7 +589,7 @@ impl Shell {
     /// Set current working directory
     pub fn set_cwd(&self, path: String) -> Result<(), crate::error::KernelError> {
         // Verify directory exists using VFS
-        let vfs = crate::fs::get_vfs().read();
+        let vfs = crate::fs::get_vfs();
         let node = vfs.resolve_path(&path)?;
         let metadata = node.metadata()?;
 
@@ -930,7 +930,7 @@ impl Shell {
     fn execute_external_command(&self, command: &str, args: &[String]) -> CommandResult {
         // If command is an absolute or relative path, try it directly first
         if command.starts_with('/') || command.starts_with("./") || command.starts_with("../") {
-            if let Ok(_node) = crate::fs::get_vfs().read().resolve_path(command) {
+            if let Ok(_node) = crate::fs::get_vfs().resolve_path(command) {
                 crate::println!("[SHELL] Found executable: {}", command);
                 match crate::userspace::load_user_program(
                     command,
@@ -970,7 +970,7 @@ impl Shell {
             };
 
             // Check if file exists using VFS
-            if let Ok(_node) = crate::fs::get_vfs().read().resolve_path(&full_path) {
+            if let Ok(_node) = crate::fs::get_vfs().resolve_path(&full_path) {
                 crate::println!("[SHELL] Found executable: {}", full_path);
                 // Load and execute the program
                 match crate::userspace::load_user_program(

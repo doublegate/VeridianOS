@@ -32,8 +32,8 @@ impl BuiltinCommand for CdCommand {
         match shell.set_cwd(target.clone()) {
             Ok(()) => {
                 // Synchronize VFS CWD so resolve_path() handles relative paths
-                if let Some(vfs_lock) = crate::fs::try_get_vfs() {
-                    let _ = vfs_lock.write().set_cwd(shell.get_cwd());
+                if let Some(vfs) = crate::fs::try_get_vfs() {
+                    let _ = vfs.set_cwd(shell.get_cwd());
                 }
                 shell.set_env(String::from("PWD"), target);
                 CommandResult::Success(0)
@@ -74,7 +74,7 @@ impl BuiltinCommand for LsCommand {
             args[0].clone()
         };
 
-        match crate::fs::get_vfs().read().resolve_path(&path) {
+        match crate::fs::get_vfs().resolve_path(&path) {
             Ok(node) => match node.readdir() {
                 Ok(entries) => {
                     for entry in entries {
@@ -113,10 +113,7 @@ impl BuiltinCommand for MkdirCommand {
         }
 
         for path in args {
-            match crate::fs::get_vfs()
-                .read()
-                .mkdir(path, crate::fs::Permissions::default())
-            {
+            match crate::fs::get_vfs().mkdir(path, crate::fs::Permissions::default()) {
                 Ok(_) => {}
                 Err(e) => return CommandResult::Error(format!("mkdir: {}: {}", path, e)),
             }
@@ -145,7 +142,7 @@ impl BuiltinCommand for CatCommand {
         }
 
         for path in args {
-            match crate::fs::get_vfs().read().resolve_path(path) {
+            match crate::fs::get_vfs().resolve_path(path) {
                 Ok(node) => {
                     let mut buffer = [0u8; 4096];
                     let mut offset = 0;
@@ -216,8 +213,8 @@ impl BuiltinCommand for TouchCommand {
             }
 
             // File doesn't exist -- create it via VFS
-            if let Some(vfs) = crate::fs::try_get_vfs() {
-                let vfs_guard = vfs.read();
+            if let Some(vfs_guard) = crate::fs::try_get_vfs() {
+                let cwd = vfs_guard.get_cwd();
                 // Split into parent path and filename
                 let (parent_path, filename) = if let Some(pos) = path.rfind('/') {
                     if pos == 0 {
@@ -227,7 +224,7 @@ impl BuiltinCommand for TouchCommand {
                     }
                 } else {
                     // Relative to cwd
-                    (vfs_guard.get_cwd(), path.as_str())
+                    (cwd.as_str(), path.as_str())
                 };
 
                 match vfs_guard.resolve_path(parent_path) {
@@ -270,7 +267,7 @@ impl BuiltinCommand for RmCommand {
         }
 
         for path in args {
-            match crate::fs::get_vfs().read().unlink(path) {
+            match crate::fs::get_vfs().unlink(path) {
                 Ok(()) => {}
                 Err(e) => return CommandResult::Error(format!("rm: {}: {}", path, e)),
             }
@@ -336,7 +333,7 @@ impl BuiltinCommand for MvCommand {
         }
 
         // Remove source
-        match crate::fs::get_vfs().read().unlink(source) {
+        match crate::fs::get_vfs().unlink(source) {
             Ok(()) => CommandResult::Success(0),
             Err(e) => CommandResult::Error(format!("mv: cannot remove '{}': {}", source, e)),
         }
@@ -372,7 +369,7 @@ impl BuiltinCommand for ChmodCommand {
         };
 
         // Verify file exists
-        match crate::fs::get_vfs().read().resolve_path(path) {
+        match crate::fs::get_vfs().resolve_path(path) {
             Ok(_node) => {
                 // In a full implementation, we would set permissions on the node.
                 // For now, acknowledge the operation.
@@ -395,8 +392,7 @@ impl BuiltinCommand for MountCommand {
 
     fn execute(&self, _args: &[String], _shell: &Shell) -> CommandResult {
         if let Some(vfs) = crate::fs::try_get_vfs() {
-            let vfs_guard = vfs.read();
-            let mounts = vfs_guard.list_mounts();
+            let mounts = vfs.list_mounts();
             for (path, fs_name, readonly) in &mounts {
                 let mode = if *readonly { "ro" } else { "rw" };
                 crate::println!("{} on {} ({})", path, fs_name, mode);
@@ -419,7 +415,7 @@ impl BuiltinCommand for SyncCommand {
 
     fn execute(&self, _args: &[String], _shell: &Shell) -> CommandResult {
         if let Some(vfs) = crate::fs::try_get_vfs() {
-            match vfs.read().sync() {
+            match vfs.sync() {
                 Ok(()) => {
                     crate::println!("sync: filesystems synced");
                     CommandResult::Success(0)
@@ -457,8 +453,7 @@ impl BuiltinCommand for DfCommand {
         );
 
         if let Some(vfs) = crate::fs::try_get_vfs() {
-            let vfs_guard = vfs.read();
-            let mounts = vfs_guard.list_mounts();
+            let mounts = vfs.list_mounts();
             for (path, fs_name, _readonly) in &mounts {
                 // RamFS/DevFS/ProcFS are in-memory, show nominal values
                 crate::println!(
@@ -1163,9 +1158,8 @@ impl BuiltinCommand for XattrCommand {
 
         // Resolve path to inode via VFS metadata
         let resolve_inode = |path: &str| -> Result<u64, String> {
-            let vfs_lock = crate::fs::try_get_vfs()
+            let vfs = crate::fs::try_get_vfs()
                 .ok_or_else(|| String::from("xattr: VFS not initialized"))?;
-            let vfs = vfs_lock.read();
             let node = vfs
                 .resolve_path(path)
                 .map_err(|e| format!("xattr: cannot resolve '{}': {:?}", path, e))?;
@@ -1418,8 +1412,7 @@ impl BuiltinCommand for FsckCommand {
 
         // Walk the VFS tree from root and count entries
         match crate::fs::try_get_vfs() {
-            Some(vfs_lock) => {
-                let vfs = vfs_lock.read();
+            Some(vfs) => {
                 let mut file_count: usize = 0;
                 let mut dir_count: usize = 0;
                 let mut errors: usize = 0;

@@ -191,7 +191,7 @@ impl PortCollection {
     /// unavailable or the directory does not exist).
     #[cfg_attr(not(target_arch = "x86_64"), allow(unused_variables))]
     fn scan_ports_directory(&mut self) -> usize {
-        let vfs_lock = match crate::fs::try_get_vfs() {
+        let vfs = match crate::fs::try_get_vfs() {
             Some(lock) => lock,
             None => {
                 crate::println!("[PORTS] VFS not available, skipping directory scan");
@@ -199,7 +199,6 @@ impl PortCollection {
             }
         };
 
-        let vfs = vfs_lock.read();
         let ports_root = match vfs.resolve_path("/usr/ports") {
             Ok(node) => node,
             Err(_) => {

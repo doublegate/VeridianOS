@@ -350,7 +350,7 @@ pub(crate) mod io {
             OpenFlags::read_only()
         };
 
-        match get_vfs().read().open(path, open_flags) {
+        match get_vfs().open(path, open_flags) {
             Ok(node) => {
                 let file = Box::new(File {
                     node,

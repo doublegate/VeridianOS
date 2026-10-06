@@ -1954,9 +1954,8 @@ fn sys_fchmodat(dirfd: usize, path_ptr: usize, mode: usize) -> SyscallResult {
     let rel_path = filesystem::read_user_path(path_ptr)?;
     let abs_path = filesystem::resolve_at_path(dirfd, &rel_path)?;
 
-    let vfs_lock = filesystem::vfs()?;
-    let vfs_guard = vfs_lock.read();
-    let node = vfs_guard
+    let vfs = filesystem::vfs()?;
+    let node = vfs
         .resolve_path(&abs_path)
         .map_err(filesystem::map_resolve_err)?;
     filesystem::require_owner_or_root(&node)?;
@@ -1984,12 +1983,11 @@ fn sys_fchownat(
     const AT_SYMLINK_NOFOLLOW: usize = 0x100;
     let rel_path = filesystem::read_user_path(path_ptr)?;
     let abs_path = filesystem::resolve_at_path(dirfd, &rel_path)?;
-    let vfs_lock = filesystem::vfs()?;
-    let vfs_guard = vfs_lock.read();
+    let vfs = filesystem::vfs()?;
     let node = if flags & AT_SYMLINK_NOFOLLOW != 0 {
-        vfs_guard.resolve_path_no_follow(&abs_path)
+        vfs.resolve_path_no_follow(&abs_path)
     } else {
-        vfs_guard.resolve_path(&abs_path)
+        vfs.resolve_path(&abs_path)
     }
     .map_err(filesystem::map_resolve_err)?;
     // Same rules as chown (root only); this used to report success and
@@ -2018,17 +2016,16 @@ fn sys_linkat(
     let new_abs = filesystem::resolve_at_path(newdirfd, &new_rel)?;
     filesystem::require_dir_write(&new_abs)?;
 
-    let vfs_lock = filesystem::vfs()?;
-    let vfs_guard = vfs_lock.read();
+    let vfs = filesystem::vfs()?;
 
     // Resolve old path to get target node
-    let target = vfs_guard
+    let target = vfs
         .resolve_path(&old_abs)
         .map_err(filesystem::map_resolve_err)?;
 
     // Split new path into parent + name, create link in parent
     let (parent_path, link_name) = filesystem::split_path(&new_abs)?;
-    let parent = vfs_guard
+    let parent = vfs
         .resolve_path(&parent_path)
         .map_err(filesystem::map_resolve_err)?;
     parent
@@ -2049,12 +2046,11 @@ fn sys_symlinkat(target_ptr: usize, newdirfd: usize, linkpath_ptr: usize) -> Sys
     let link_abs = filesystem::resolve_at_path(newdirfd, &link_rel)?;
     filesystem::require_dir_write(&link_abs)?;
 
-    let vfs_lock = filesystem::vfs()?;
-    let vfs_guard = vfs_lock.read();
+    let vfs = filesystem::vfs()?;
 
     // Split link path into parent + name, create symlink in parent
     let (parent_path, link_name) = filesystem::split_path(&link_abs)?;
-    let parent = vfs_guard
+    let parent = vfs
         .resolve_path(&parent_path)
         .map_err(filesystem::map_resolve_err)?;
     let node = parent
@@ -2079,11 +2075,10 @@ fn sys_readlinkat(dirfd: usize, path_ptr: usize, buf_ptr: usize, buf_size: usize
     let abs_path = filesystem::resolve_at_path(dirfd, &rel_path)?;
     validate_user_buffer(buf_ptr, buf_size)?;
 
-    let vfs_lock = filesystem::vfs()?;
-    let vfs_guard = vfs_lock.read();
+    let vfs = filesystem::vfs()?;
 
     // readlinkat must not follow the final symlink
-    let node = vfs_guard
+    let node = vfs
         .resolve_path_no_follow(&abs_path)
         .map_err(filesystem::map_resolve_err)?;
     let target = node.readlink().map_err(|_| SyscallError::InvalidArgument)?;

@@ -448,177 +448,78 @@ fn path_relative_to_mount<'a>(path: &'a str, mount: &str) -> &'a str {
     }
 }
 
-/// Virtual Filesystem Manager
-pub struct Vfs {
+/// An immutable view of the mounted filesystems (FS-PERF-02).
+///
+/// Path resolution works on a snapshot: it clones the `Arc` under a short
+/// read lock and walks without holding any VFS lock, so a lookup that reads
+/// a disk does not hold up mount changes, and mount changes never observe a
+/// half-finished walk. Mount changes copy the table, edit the copy and swap
+/// it in (RCU-style); a walk already in progress finishes on the table it
+/// started with.
+#[derive(Clone, Default)]
+struct MountTable {
     /// Root filesystem
     root_fs: Option<Arc<dyn Filesystem>>,
-
-    /// Mount points
+    /// Mount points, keyed by normalized path
     mounts: BTreeMap<String, Arc<dyn Filesystem>>,
+}
+
+/// Virtual Filesystem Manager
+pub struct Vfs {
+    /// Current mount table; replaced as a whole on every mount change.
+    table: RwLock<Arc<MountTable>>,
 
     /// Legacy global working directory (fallback only).
     /// Per-process CWD is tracked in `process::cwd::ProcessCwd` and
     /// `process::thread::ThreadFs`.  This field is retained for
     /// kernel-context operations where no process is running.
-    cwd: String,
+    cwd: RwLock<String>,
 }
 
 impl Vfs {
     /// Create a new VFS instance
     pub fn new() -> Self {
         Self {
-            root_fs: None,
-            mounts: BTreeMap::new(),
-            cwd: String::from("/"),
-        }
-    }
-}
-
-impl Default for Vfs {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl Vfs {
-    /// Mount the root filesystem
-    pub fn mount_root(&mut self, fs: Arc<dyn Filesystem>) -> Result<(), KernelError> {
-        if self.root_fs.is_some() {
-            return Err(KernelError::FsError(crate::error::FsError::AlreadyMounted));
-        }
-        self.root_fs = Some(fs);
-        Ok(())
-    }
-
-    /// Mount a filesystem at the specified path
-    pub fn mount(&mut self, path: String, fs: Arc<dyn Filesystem>) -> Result<(), KernelError> {
-        if self.root_fs.is_none() {
-            return Err(KernelError::FsError(crate::error::FsError::NoRootFs));
-        }
-
-        let path = normalize_path(&path, "/");
-        if self.mounts.contains_key(&path) {
-            return Err(KernelError::FsError(crate::error::FsError::AlreadyMounted));
-        }
-
-        self.mounts.insert(path, fs);
-        Ok(())
-    }
-
-    /// Mount a filesystem by type at the specified path
-    pub fn mount_by_type(
-        &mut self,
-        path: &str,
-        fs_type: &str,
-        _flags: u32,
-    ) -> Result<(), KernelError> {
-        let fs: Arc<dyn Filesystem> = match fs_type {
-            "ramfs" => Arc::new(ramfs::RamFs::new()),
-            "devfs" => Arc::new(devfs::DevFs::new()),
-            "procfs" => Arc::new(procfs::ProcFs::new()),
-            "blockfs" => Arc::new(blockfs::BlockFs::new(10000, 1000)),
-            _ => return Err(KernelError::FsError(crate::error::FsError::UnknownFsType)),
-        };
-
-        if path == "/" {
-            self.mount_root(fs)
-        } else {
-            self.mount(path.into(), fs)
+            table: RwLock::new(Arc::new(MountTable::default())),
+            cwd: RwLock::new(String::from("/")),
         }
     }
 
-    /// Replace the root filesystem (used for persistent BlockFS mount at boot).
-    ///
-    /// The previous root filesystem (if any) is dropped. Mount points under
-    /// `/dev` and `/proc` should be re-mounted after calling this.
-    pub fn swap_root(&mut self, fs: Arc<dyn Filesystem>) {
-        self.root_fs = Some(fs);
+    /// The root filesystem, if one is mounted.
+    pub(crate) fn root_fs(&self) -> Option<Arc<dyn Filesystem>> {
+        self.snapshot().root_fs.clone()
     }
 
-    /// Unmount a filesystem at the specified path
-    pub fn unmount(&mut self, path: &str) -> Result<(), KernelError> {
-        self.mounts
-            .remove(&normalize_path(path, "/"))
-            .ok_or(KernelError::FsError(crate::error::FsError::NotMounted))
-            .map(|_| ())
-    }
-
-    /// Resolve a path to a VFS node, following symlinks (including the
-    /// final component).
-    pub fn resolve_path(&self, path: &str) -> Result<Arc<dyn VfsNode>, KernelError> {
-        self.resolve_path_inner(path, &self.cwd, true, 0)
-    }
-
-    /// Resolve a path to a VFS node without following the final symlink
-    /// component. Intermediate symlinks are still followed. Used by
-    /// `lstat()` and `readlink()`.
-    pub fn resolve_path_no_follow(&self, path: &str) -> Result<Arc<dyn VfsNode>, KernelError> {
-        self.resolve_path_inner(path, &self.cwd, false, 0)
-    }
-
-    /// Resolve a path to a VFS node using an explicit cwd (per-thread FS
-    /// state).
-    pub fn resolve_from(&self, path: &str, cwd: &str) -> Result<Arc<dyn VfsNode>, KernelError> {
-        self.resolve_path_inner(path, cwd, true, 0)
-    }
-
-    /// Resolve a path to a VFS node using an explicit cwd, without
-    /// following the final symlink component.
-    pub fn resolve_from_no_follow(
-        &self,
-        path: &str,
-        cwd: &str,
-    ) -> Result<Arc<dyn VfsNode>, KernelError> {
-        self.resolve_path_inner(path, cwd, false, 0)
-    }
-
-    /// The mount point (normalized path) that serves `path`.
-    pub fn mount_point_of(&self, path: &str) -> String {
-        let path = normalize_path(path, &self.cwd);
-        self.mounts
-            .keys()
-            .filter(|m| path_is_under(&path, m))
-            .max_by_key(|m| m.len())
+    /// The filesystem mounted exactly at `path`, if any.
+    pub(crate) fn mounted(&self, path: &str) -> Option<Arc<dyn Filesystem>> {
+        self.snapshot()
+            .mounts
+            .get(&normalize_path(path, "/"))
             .cloned()
-            .unwrap_or_else(|| String::from("/"))
     }
 
-    /// Resolve a path, returning the node together with its canonical
-    /// absolute path (all `.`, `..` and followed symlinks removed). Access
-    /// checks must use this path: checking the path as written lets a
-    /// symlink or a `..` reach an object the policy meant to protect.
-    pub fn resolve_canonical(
-        &self,
-        path: &str,
-        cwd: &str,
-        follow_last: bool,
-    ) -> Result<(Arc<dyn VfsNode>, String), KernelError> {
-        self.resolve_inner(path, cwd, follow_last, 0)
+    fn snapshot(&self) -> Arc<MountTable> {
+        self.table.read().clone()
     }
 
-    /// Inner path resolution with configurable symlink behavior.
-    ///
-    /// - `follow_last`: if `true`, a symlink at the final component is
-    ///   resolved. If `false`, the symlink node itself is returned.
-    /// - `symlink_depth`: current nesting depth for loop detection. Returns
-    ///   `FsError::SymlinkLoop` when it exceeds `SYMLINK_MAX_DEPTH`.
-    fn resolve_path_inner(
-        &self,
-        path: &str,
-        cwd: &str,
-        follow_last: bool,
-        symlink_depth: usize,
-    ) -> Result<Arc<dyn VfsNode>, KernelError> {
-        self.resolve_inner(path, cwd, follow_last, symlink_depth)
-            .map(|(node, _)| node)
+    /// Apply `f` to a copy of the mount table and publish the copy.
+    /// Mount changes are serialized by the table's write lock.
+    fn update_table<R>(&self, f: impl FnOnce(&mut MountTable) -> R) -> R {
+        let mut table = self.table.write();
+        let mut next = MountTable::clone(&table);
+        let result = f(&mut next);
+        *table = Arc::new(next);
+        result
     }
+}
 
+impl MountTable {
     /// Resolution core (FS-SEC-01). The path is made absolute and its `.`
     /// and `..` components are removed lexically *before* the mount table is
     /// consulted, so `..` cannot stay pinned inside a mount, and the mount
     /// is chosen by whole path components (longest match), so `/devices`
     /// is not served by a filesystem mounted at `/dev`.
-    fn resolve_inner(
+    fn resolve(
         &self,
         path: &str,
         cwd: &str,
@@ -694,20 +595,162 @@ impl Vfs {
                     spliced.push('/');
                     spliced.push_str(c);
                 }
-                return self.resolve_inner(&spliced, "/", follow_last, symlink_depth + 1);
+                return self.resolve(&spliced, "/", follow_last, symlink_depth + 1);
             }
         }
 
         Ok((node, String::from(path)))
     }
+}
+
+impl Default for Vfs {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Vfs {
+    /// Mount the root filesystem
+    pub fn mount_root(&self, fs: Arc<dyn Filesystem>) -> Result<(), KernelError> {
+        self.update_table(|t| {
+            if t.root_fs.is_some() {
+                return Err(KernelError::FsError(crate::error::FsError::AlreadyMounted));
+            }
+            t.root_fs = Some(fs);
+            Ok(())
+        })
+    }
+
+    /// Mount a filesystem at the specified path
+    pub fn mount(&self, path: String, fs: Arc<dyn Filesystem>) -> Result<(), KernelError> {
+        let path = normalize_path(&path, "/");
+        self.update_table(|t| {
+            if t.root_fs.is_none() {
+                return Err(KernelError::FsError(crate::error::FsError::NoRootFs));
+            }
+            if t.mounts.contains_key(&path) {
+                return Err(KernelError::FsError(crate::error::FsError::AlreadyMounted));
+            }
+            t.mounts.insert(path, fs);
+            Ok(())
+        })
+    }
+
+    /// Mount a filesystem by type at the specified path
+    pub fn mount_by_type(&self, path: &str, fs_type: &str, _flags: u32) -> Result<(), KernelError> {
+        let fs: Arc<dyn Filesystem> = match fs_type {
+            "ramfs" => Arc::new(ramfs::RamFs::new()),
+            "devfs" => Arc::new(devfs::DevFs::new()),
+            "procfs" => Arc::new(procfs::ProcFs::new()),
+            "blockfs" => Arc::new(blockfs::BlockFs::new(10000, 1000)),
+            _ => return Err(KernelError::FsError(crate::error::FsError::UnknownFsType)),
+        };
+
+        if path == "/" {
+            self.mount_root(fs)
+        } else {
+            self.mount(path.into(), fs)
+        }
+    }
+
+    /// Replace the root filesystem (used for persistent BlockFS mount at boot).
+    ///
+    /// The previous root filesystem (if any) is dropped. Mount points under
+    /// `/dev` and `/proc` should be re-mounted after calling this.
+    pub fn swap_root(&self, fs: Arc<dyn Filesystem>) {
+        self.update_table(|t| t.root_fs = Some(fs));
+    }
+
+    /// Unmount a filesystem at the specified path
+    pub fn unmount(&self, path: &str) -> Result<(), KernelError> {
+        let path = normalize_path(path, "/");
+        self.update_table(|t| {
+            t.mounts
+                .remove(&path)
+                .ok_or(KernelError::FsError(crate::error::FsError::NotMounted))
+                .map(|_| ())
+        })
+    }
+
+    /// Resolve a path to a VFS node, following symlinks (including the
+    /// final component).
+    pub fn resolve_path(&self, path: &str) -> Result<Arc<dyn VfsNode>, KernelError> {
+        self.resolve_path_inner(path, &self.get_cwd(), true, 0)
+    }
+
+    /// Resolve a path to a VFS node without following the final symlink
+    /// component. Intermediate symlinks are still followed. Used by
+    /// `lstat()` and `readlink()`.
+    pub fn resolve_path_no_follow(&self, path: &str) -> Result<Arc<dyn VfsNode>, KernelError> {
+        self.resolve_path_inner(path, &self.get_cwd(), false, 0)
+    }
+
+    /// Resolve a path to a VFS node using an explicit cwd (per-thread FS
+    /// state).
+    pub fn resolve_from(&self, path: &str, cwd: &str) -> Result<Arc<dyn VfsNode>, KernelError> {
+        self.resolve_path_inner(path, cwd, true, 0)
+    }
+
+    /// Resolve a path to a VFS node using an explicit cwd, without
+    /// following the final symlink component.
+    pub fn resolve_from_no_follow(
+        &self,
+        path: &str,
+        cwd: &str,
+    ) -> Result<Arc<dyn VfsNode>, KernelError> {
+        self.resolve_path_inner(path, cwd, false, 0)
+    }
+
+    /// The mount point (normalized path) that serves `path`.
+    pub fn mount_point_of(&self, path: &str) -> String {
+        let path = normalize_path(path, &self.get_cwd());
+        self.snapshot()
+            .mounts
+            .keys()
+            .filter(|m| path_is_under(&path, m))
+            .max_by_key(|m| m.len())
+            .cloned()
+            .unwrap_or_else(|| String::from("/"))
+    }
+
+    /// Resolve a path, returning the node together with its canonical
+    /// absolute path (all `.`, `..` and followed symlinks removed). Access
+    /// checks must use this path: checking the path as written lets a
+    /// symlink or a `..` reach an object the policy meant to protect.
+    pub fn resolve_canonical(
+        &self,
+        path: &str,
+        cwd: &str,
+        follow_last: bool,
+    ) -> Result<(Arc<dyn VfsNode>, String), KernelError> {
+        self.snapshot().resolve(path, cwd, follow_last, 0)
+    }
+
+    /// Inner path resolution with configurable symlink behavior.
+    ///
+    /// - `follow_last`: if `true`, a symlink at the final component is
+    ///   resolved. If `false`, the symlink node itself is returned.
+    /// - `symlink_depth`: current nesting depth for loop detection. Returns
+    ///   `FsError::SymlinkLoop` when it exceeds `SYMLINK_MAX_DEPTH`.
+    fn resolve_path_inner(
+        &self,
+        path: &str,
+        cwd: &str,
+        follow_last: bool,
+        symlink_depth: usize,
+    ) -> Result<Arc<dyn VfsNode>, KernelError> {
+        self.snapshot()
+            .resolve(path, cwd, follow_last, symlink_depth)
+            .map(|(node, _)| node)
+    }
 
     /// Get current working directory
-    pub fn get_cwd(&self) -> &str {
-        &self.cwd
+    pub fn get_cwd(&self) -> String {
+        self.cwd.read().clone()
     }
 
     /// Set current working directory
-    pub fn set_cwd(&mut self, path: String) -> Result<(), KernelError> {
+    pub fn set_cwd(&self, path: String) -> Result<(), KernelError> {
         // Verify the path exists and is a directory
         let node = self.resolve_path(&path)?;
         let metadata = node.metadata()?;
@@ -716,7 +759,7 @@ impl Vfs {
             return Err(KernelError::FsError(crate::error::FsError::NotADirectory));
         }
 
-        self.cwd = path;
+        *self.cwd.write() = path;
         Ok(())
     }
 
@@ -738,7 +781,7 @@ impl Vfs {
 
         // MAC is checked on the canonical path, after `..` and symlinks are
         // resolved, never on the path as written (FS-SEC-01).
-        let (node, canonical) = self.resolve_canonical(path, &self.cwd, true)?;
+        let (node, canonical) = self.resolve_canonical(path, &self.get_cwd(), true)?;
         crate::security::mac::check_file_access(&canonical, access, pid)?;
         Ok(node)
     }
@@ -760,7 +803,7 @@ impl Vfs {
         // the path the directory is really created at. Normalizing also
         // removes trailing slashes, `.` and `..`, so the final name is
         // never one of those.
-        let path = normalize_path(path, &self.cwd);
+        let path = normalize_path(path, &self.get_cwd());
         if path == "/" {
             return Err(KernelError::FsError(crate::error::FsError::AlreadyExists));
         }
@@ -808,9 +851,10 @@ impl Vfs {
     /// Returns a vector of `(path, fs_name, readonly)` tuples.
     pub fn list_mounts(&self) -> Vec<(String, String, bool)> {
         let mut result = Vec::new();
+        let table = self.snapshot();
 
         // Root filesystem
-        if let Some(ref root) = self.root_fs {
+        if let Some(ref root) = table.root_fs {
             result.push((
                 String::from("/"),
                 String::from(root.name()),
@@ -819,7 +863,7 @@ impl Vfs {
         }
 
         // Mounted filesystems
-        for (path, fs) in &self.mounts {
+        for (path, fs) in &table.mounts {
             result.push((path.clone(), String::from(fs.name()), fs.is_readonly()));
         }
 
@@ -828,13 +872,15 @@ impl Vfs {
 
     /// Sync all filesystems
     pub fn sync(&self) -> Result<(), KernelError> {
+        let table = self.snapshot();
+
         // Sync root filesystem
-        if let Some(ref root) = self.root_fs {
+        if let Some(ref root) = table.root_fs {
             root.sync()?;
         }
 
         // Sync all mounted filesystems
-        for fs in self.mounts.values() {
+        for fs in table.mounts.values() {
             fs.sync()?;
         }
 
@@ -843,22 +889,20 @@ impl Vfs {
 }
 
 /// Global VFS instance using OnceLock for safe initialization.
-static VFS_LOCK: crate::sync::once_lock::OnceLock<RwLock<Vfs>> =
-    crate::sync::once_lock::OnceLock::new();
+static VFS: crate::sync::once_lock::OnceLock<Vfs> = crate::sync::once_lock::OnceLock::new();
 
 /// Get the VFS instance (unified for all architectures).
 ///
 /// Panics if the VFS has not been initialized via [`init`].
 /// Prefer [`try_get_vfs`] in contexts where a panic is unacceptable.
-pub fn get_vfs() -> &'static RwLock<Vfs> {
-    VFS_LOCK
-        .get()
+pub fn get_vfs() -> &'static Vfs {
+    VFS.get()
         .expect("VFS not initialized: init() was not called")
 }
 
 /// Try to get the VFS instance without panicking
-pub fn try_get_vfs() -> Option<&'static RwLock<Vfs>> {
-    VFS_LOCK.get()
+pub fn try_get_vfs() -> Option<&'static Vfs> {
+    VFS.get()
 }
 
 /// Initialize the VFS with a RAM filesystem as root
@@ -869,10 +913,7 @@ pub fn init() {
     println!("[VFS] Initializing Virtual Filesystem...");
 
     println!("[VFS] Creating VFS structure...");
-    let vfs = Vfs::new();
-    let vfs_lock = RwLock::new(vfs);
-
-    match VFS_LOCK.set(vfs_lock) {
+    match VFS.set(Vfs::new()) {
         Ok(()) => println!("[VFS] VFS initialized successfully"),
         Err(_) => {
             println!("[VFS] WARNING: VFS already initialized! Skipping re-initialization.");
@@ -891,8 +932,7 @@ pub fn init() {
         // Mount as root
         {
             let vfs = get_vfs();
-            let mut vfs_guard = vfs.write();
-            vfs_guard.mount_root(Arc::new(ramfs)).ok();
+            vfs.mount_root(Arc::new(ramfs)).ok();
         }
 
         println!("[VFS] RAM filesystem mounted as root");
@@ -900,8 +940,7 @@ pub fn init() {
         // Create standard directories in root
         {
             let vfs = get_vfs();
-            let vfs_guard = vfs.read();
-            if let Some(ref root_fs) = vfs_guard.root_fs {
+            if let Some(root_fs) = vfs.root_fs() {
                 let root = root_fs.root();
                 root.mkdir("bin", Permissions::default()).ok();
                 root.mkdir("boot", Permissions::default()).ok();
@@ -927,8 +966,7 @@ pub fn init() {
         // Create standard subdirectories
         {
             let vfs = get_vfs();
-            let vfs_guard = vfs.read();
-            if let Some(ref root_fs) = vfs_guard.root_fs {
+            if let Some(root_fs) = vfs.root_fs() {
                 let root = root_fs.root();
 
                 // /usr subdirectories
@@ -977,8 +1015,7 @@ pub fn init() {
         // Populate /etc with basic configuration files
         {
             let vfs = get_vfs();
-            let vfs_guard = vfs.read();
-            if let Some(ref root_fs) = vfs_guard.root_fs {
+            if let Some(root_fs) = vfs.root_fs() {
                 let root = root_fs.root();
                 if let Ok(etc) = root.lookup("etc") {
                     // /etc/hostname
@@ -1048,8 +1085,7 @@ pub fn init() {
 
         {
             let vfs = get_vfs();
-            let mut vfs_guard = vfs.write();
-            vfs_guard.mount("/dev".into(), Arc::new(devfs)).ok();
+            vfs.mount("/dev".into(), Arc::new(devfs)).ok();
         }
 
         println!("[VFS] Device filesystem mounted at /dev");
@@ -1060,8 +1096,7 @@ pub fn init() {
 
         {
             let vfs = get_vfs();
-            let mut vfs_guard = vfs.write();
-            vfs_guard.mount("/proc".into(), Arc::new(procfs)).ok();
+            vfs.mount("/proc".into(), Arc::new(procfs)).ok();
         }
 
         println!("[VFS] Process filesystem mounted at /proc");
@@ -1072,10 +1107,9 @@ pub fn init() {
         // infinite retry loop that prevents kwin from starting.
         {
             let vfs = get_vfs();
-            let vfs_guard = vfs.read();
             // ProcFS is mounted at /proc. Access its root node through
             // the mounts table.
-            if let Some(proc_fs) = vfs_guard.mounts.get("/proc") {
+            if let Some(proc_fs) = vfs.mounted("/proc") {
                 let proc_root = proc_fs.root();
                 // /proc/sys/kernel/core_pattern
                 if let Ok(sys_dir) = proc_root.mkdir("sys", Permissions::default()) {
@@ -1122,8 +1156,7 @@ pub fn init() {
 #[cfg(feature = "alloc")]
 pub fn recreate_proc_stubs() {
     let vfs = get_vfs();
-    let vfs_guard = vfs.read();
-    if let Some(proc_fs) = vfs_guard.mounts.get("/proc") {
+    if let Some(proc_fs) = vfs.mounted("/proc") {
         let proc_root = proc_fs.root();
         // /proc/sys/kernel/core_pattern
         if let Ok(sys_dir) = proc_root
@@ -1184,7 +1217,7 @@ pub fn recreate_proc_stubs() {
 /// * `Ok(Vec<u8>)` - The file contents on success
 /// * `Err(&'static str)` - An error message on failure
 pub fn read_file(path: &str) -> Result<Vec<u8>, KernelError> {
-    let vfs = get_vfs().read();
+    let vfs = get_vfs();
 
     // Resolve the path to a VFS node
     let node = vfs.resolve_path(path)?;
@@ -1220,7 +1253,7 @@ pub fn read_file(path: &str) -> Result<Vec<u8>, KernelError> {
 /// * `Ok(usize)` - The number of bytes written on success
 /// * `Err(&'static str)` - An error message on failure
 pub fn write_file(path: &str, data: &[u8]) -> Result<usize, KernelError> {
-    let vfs = get_vfs().read();
+    let vfs = get_vfs();
 
     // Try to resolve the path first
     let node = match vfs.resolve_path(path) {
@@ -1255,13 +1288,13 @@ pub fn write_file(path: &str, data: &[u8]) -> Result<usize, KernelError> {
 
 /// Check if a file exists
 pub fn file_exists(path: &str) -> bool {
-    let vfs = get_vfs().read();
+    let vfs = get_vfs();
     vfs.resolve_path(path).is_ok()
 }
 
 /// Get file size without reading contents
 pub fn file_size(path: &str) -> Result<usize, KernelError> {
-    let vfs = get_vfs().read();
+    let vfs = get_vfs();
     let node = vfs.resolve_path(path)?;
     let metadata = node.metadata()?;
     Ok(metadata.size)
@@ -1275,7 +1308,7 @@ pub fn copy_file(src_path: &str, dst_path: &str) -> Result<usize, KernelError> {
 
 /// Append data to a file
 pub fn append_file(path: &str, data: &[u8]) -> Result<usize, KernelError> {
-    let vfs = get_vfs().read();
+    let vfs = get_vfs();
     let node = vfs.resolve_path(path)?;
     let metadata = node.metadata()?;
     let current_size = metadata.size;
@@ -1400,7 +1433,7 @@ mod tests {
 
     /// Helper: create a Vfs with a ramfs root filesystem already mounted.
     fn make_vfs_with_root() -> Vfs {
-        let mut vfs = Vfs::new();
+        let vfs = Vfs::new();
         let ramfs = Arc::new(ramfs::RamFs::new());
         vfs.mount_root(ramfs).expect("mount_root should succeed");
         vfs
@@ -1428,8 +1461,8 @@ mod tests {
     #[test]
     fn sibling_with_mount_prefix_is_not_hijacked() {
         // Before the fix "/devices" matched the "/dev" mount by prefix.
-        let mut vfs = make_vfs_with_root();
-        let root = vfs.root_fs.as_ref().unwrap().root();
+        let vfs = make_vfs_with_root();
+        let root = vfs.root_fs().unwrap().root();
         root.mkdir("dev", Permissions::default()).unwrap();
         let devices = root.mkdir("devices", Permissions::default()).unwrap();
         devices.create("marker", Permissions::default()).unwrap();
@@ -1442,8 +1475,8 @@ mod tests {
     #[test]
     fn dotdot_leaves_a_mount() {
         // Before the fix ".." at a mount root stayed inside the mount.
-        let mut vfs = make_vfs_with_root();
-        let root = vfs.root_fs.as_ref().unwrap().root();
+        let vfs = make_vfs_with_root();
+        let root = vfs.root_fs().unwrap().root();
         root.mkdir("mnt", Permissions::default()).unwrap();
         root.create("top", Permissions::default()).unwrap();
         vfs.mount(String::from("/mnt"), Arc::new(ramfs::RamFs::new()))
@@ -1455,7 +1488,7 @@ mod tests {
     fn relative_symlink_resolves_from_its_directory() {
         // Before the fix a relative target was resolved from "/".
         let vfs = make_vfs_with_root();
-        let root = vfs.root_fs.as_ref().unwrap().root();
+        let root = vfs.root_fs().unwrap().root();
         let a = root.mkdir("a", Permissions::default()).unwrap();
         a.create("target", Permissions::default()).unwrap();
         a.symlink("link", "target").unwrap();
@@ -1466,7 +1499,7 @@ mod tests {
     #[test]
     fn canonical_path_follows_intermediate_symlink() {
         let vfs = make_vfs_with_root();
-        let root = vfs.root_fs.as_ref().unwrap().root();
+        let root = vfs.root_fs().unwrap().root();
         let real = root.mkdir("real", Permissions::default()).unwrap();
         real.create("f", Permissions::default()).unwrap();
         root.symlink("alias", "/real").unwrap();
@@ -1481,7 +1514,7 @@ mod tests {
     #[test]
     fn mkdir_parses_path_once() {
         let vfs = make_vfs_with_root();
-        let root = vfs.root_fs.as_ref().unwrap().root();
+        let root = vfs.root_fs().unwrap().root();
         root.mkdir("real", Permissions::default()).unwrap();
         root.symlink("alias", "/real").unwrap();
         // Created where the parent really resolves, which is the path the
@@ -1495,7 +1528,7 @@ mod tests {
     #[test]
     fn symlink_loop_is_reported() {
         let vfs = make_vfs_with_root();
-        let root = vfs.root_fs.as_ref().unwrap().root();
+        let root = vfs.root_fs().unwrap().root();
         root.symlink("loop", "/loop").unwrap();
         assert!(vfs.resolve_path("/loop").is_err());
     }
@@ -1609,11 +1642,66 @@ mod tests {
         assert_eq!(vfs.get_cwd(), "/");
     }
 
+    // --- Mount table snapshots (FS-PERF-02) ---
+
+    /// A filesystem whose `sync` mounts another filesystem on the VFS that
+    /// is syncing it, i.e. VFS work running inside a VFS operation.
+    struct MountsOnSync {
+        vfs: &'static Vfs,
+        inner: ramfs::RamFs,
+    }
+
+    impl Filesystem for MountsOnSync {
+        fn root(&self) -> Arc<dyn VfsNode> {
+            self.inner.root()
+        }
+        fn name(&self) -> &str {
+            "mounts-on-sync"
+        }
+        fn is_readonly(&self) -> bool {
+            false
+        }
+        fn sync(&self) -> Result<(), KernelError> {
+            self.vfs
+                .mount("/late".into(), Arc::new(ramfs::RamFs::new()))
+        }
+    }
+
+    #[test]
+    fn vfs_operations_hold_no_lock_across_filesystem_calls() {
+        // With the old global RwLock<Vfs>, `sync` ran under the read lock
+        // and this mount needed the write lock: a self-deadlock.
+        let vfs: &'static Vfs = alloc::boxed::Box::leak(alloc::boxed::Box::new(Vfs::new()));
+        vfs.mount_root(Arc::new(MountsOnSync {
+            vfs,
+            inner: ramfs::RamFs::new(),
+        }))
+        .unwrap();
+        vfs.sync().unwrap();
+        assert!(vfs.mounted("/late").is_some());
+    }
+
+    #[test]
+    fn walk_in_progress_keeps_its_mount_table() {
+        let vfs = Vfs::new();
+        vfs.mount_root(Arc::new(ramfs::RamFs::new())).unwrap();
+        let tmp = Arc::new(ramfs::RamFs::new());
+        tmp.root().create("f", Permissions::default()).unwrap();
+        vfs.mount("/tmp".into(), tmp).unwrap();
+
+        let before = vfs.snapshot();
+        vfs.unmount("/tmp").unwrap();
+        // The old snapshot still sees the mount; new walks do not.
+        assert!(before.resolve("/tmp/f", "/", true, 0).is_ok());
+        assert!(vfs.resolve_path("/tmp/f").is_err());
+        assert!(vfs.mounted("/tmp").is_none());
+    }
+
     // --- Mount tests ---
 
     #[test]
     fn test_mount_root() {
-        let mut vfs = Vfs::new();
+        let vfs = Vfs::new();
         let ramfs = Arc::new(ramfs::RamFs::new());
         let result = vfs.mount_root(ramfs);
         assert!(result.is_ok());
@@ -1621,7 +1709,7 @@ mod tests {
 
     #[test]
     fn test_mount_root_twice_fails() {
-        let mut vfs = Vfs::new();
+        let vfs = Vfs::new();
         let ramfs1 = Arc::new(ramfs::RamFs::new());
         let ramfs2 = Arc::new(ramfs::RamFs::new());
 
@@ -1636,7 +1724,7 @@ mod tests {
 
     #[test]
     fn test_mount_without_root_fails() {
-        let mut vfs = Vfs::new();
+        let vfs = Vfs::new();
         let ramfs = Arc::new(ramfs::RamFs::new());
         let result = vfs.mount("/dev".into(), ramfs);
         assert!(result.is_err());
@@ -1648,7 +1736,7 @@ mod tests {
 
     #[test]
     fn test_mount_at_path() {
-        let mut vfs = make_vfs_with_root();
+        let vfs = make_vfs_with_root();
         let devfs = Arc::new(devfs::DevFs::new());
         let result = vfs.mount("/dev".into(), devfs);
         assert!(result.is_ok());
@@ -1656,7 +1744,7 @@ mod tests {
 
     #[test]
     fn test_mount_duplicate_path_fails() {
-        let mut vfs = make_vfs_with_root();
+        let vfs = make_vfs_with_root();
         let fs1 = Arc::new(ramfs::RamFs::new());
         let fs2 = Arc::new(ramfs::RamFs::new());
 
@@ -1673,7 +1761,7 @@ mod tests {
 
     #[test]
     fn test_unmount() {
-        let mut vfs = make_vfs_with_root();
+        let vfs = make_vfs_with_root();
         let fs = Arc::new(ramfs::RamFs::new());
         vfs.mount("/mnt".into(), fs).unwrap();
 
@@ -1683,7 +1771,7 @@ mod tests {
 
     #[test]
     fn test_unmount_nonexistent_fails() {
-        let mut vfs = make_vfs_with_root();
+        let vfs = make_vfs_with_root();
         let result = vfs.unmount("/nonexistent");
         assert!(result.is_err());
         assert_eq!(
@@ -1696,28 +1784,28 @@ mod tests {
 
     #[test]
     fn test_mount_by_type_ramfs() {
-        let mut vfs = make_vfs_with_root();
+        let vfs = make_vfs_with_root();
         let result = vfs.mount_by_type("/tmp", "ramfs", 0);
         assert!(result.is_ok());
     }
 
     #[test]
     fn test_mount_by_type_devfs() {
-        let mut vfs = make_vfs_with_root();
+        let vfs = make_vfs_with_root();
         let result = vfs.mount_by_type("/dev", "devfs", 0);
         assert!(result.is_ok());
     }
 
     #[test]
     fn test_mount_by_type_procfs() {
-        let mut vfs = make_vfs_with_root();
+        let vfs = make_vfs_with_root();
         let result = vfs.mount_by_type("/proc", "procfs", 0);
         assert!(result.is_ok());
     }
 
     #[test]
     fn test_mount_by_type_unknown_fails() {
-        let mut vfs = make_vfs_with_root();
+        let vfs = make_vfs_with_root();
         let result = vfs.mount_by_type("/foo", "unknownfs", 0);
         assert!(result.is_err());
         assert_eq!(
@@ -1728,7 +1816,7 @@ mod tests {
 
     #[test]
     fn test_mount_by_type_root() {
-        let mut vfs = Vfs::new();
+        let vfs = Vfs::new();
         let result = vfs.mount_by_type("/", "ramfs", 0);
         assert!(result.is_ok());
     }
@@ -1766,7 +1854,7 @@ mod tests {
         let vfs = make_vfs_with_root();
 
         // Create directory via the root node
-        let root = vfs.root_fs.as_ref().unwrap().root();
+        let root = vfs.root_fs().unwrap().root();
         root.mkdir("testdir", Permissions::default()).unwrap();
 
         let result = vfs.resolve_path("/testdir");
@@ -1778,7 +1866,7 @@ mod tests {
     fn test_resolve_nested_path() {
         let vfs = make_vfs_with_root();
 
-        let root = vfs.root_fs.as_ref().unwrap().root();
+        let root = vfs.root_fs().unwrap().root();
         let sub = root.mkdir("a", Permissions::default()).unwrap();
         sub.mkdir("b", Permissions::default()).unwrap();
 
@@ -1790,7 +1878,7 @@ mod tests {
     #[test]
     fn test_resolve_path_with_dot() {
         let vfs = make_vfs_with_root();
-        let root = vfs.root_fs.as_ref().unwrap().root();
+        let root = vfs.root_fs().unwrap().root();
         root.mkdir("mydir", Permissions::default()).unwrap();
 
         // "." should be ignored in path traversal
@@ -1801,7 +1889,7 @@ mod tests {
     #[test]
     fn test_resolve_path_with_dotdot() {
         let vfs = make_vfs_with_root();
-        let root = vfs.root_fs.as_ref().unwrap().root();
+        let root = vfs.root_fs().unwrap().root();
         let sub = root.mkdir("parent", Permissions::default()).unwrap();
         sub.mkdir("child", Permissions::default()).unwrap();
 
@@ -1847,7 +1935,7 @@ mod tests {
     #[test]
     fn test_unlink_file() {
         let vfs = make_vfs_with_root();
-        let root = vfs.root_fs.as_ref().unwrap().root();
+        let root = vfs.root_fs().unwrap().root();
         root.create("testfile", Permissions::default()).unwrap();
 
         let result = vfs.unlink("/testfile");
@@ -1868,8 +1956,8 @@ mod tests {
 
     #[test]
     fn test_set_cwd() {
-        let mut vfs = make_vfs_with_root();
-        let root = vfs.root_fs.as_ref().unwrap().root();
+        let vfs = make_vfs_with_root();
+        let root = vfs.root_fs().unwrap().root();
         root.mkdir("home", Permissions::default()).unwrap();
 
         let result = vfs.set_cwd(String::from("/home"));
@@ -1879,8 +1967,8 @@ mod tests {
 
     #[test]
     fn test_set_cwd_not_directory_fails() {
-        let mut vfs = make_vfs_with_root();
-        let root = vfs.root_fs.as_ref().unwrap().root();
+        let vfs = make_vfs_with_root();
+        let root = vfs.root_fs().unwrap().root();
         root.create("afile", Permissions::default()).unwrap();
 
         let result = vfs.set_cwd(String::from("/afile"));

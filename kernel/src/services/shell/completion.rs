@@ -276,8 +276,7 @@ fn tokenize_for_completion(input: &str) -> Vec<String> {
 /// vector if the VFS is unavailable or the directory cannot be read.
 fn list_directory_entries(dir_path: &str) -> Vec<(String, bool)> {
     if let Some(vfs) = crate::fs::try_get_vfs() {
-        let vfs_guard = vfs.read();
-        if let Ok(node) = vfs_guard.resolve_path(dir_path) {
+        if let Ok(node) = vfs.resolve_path(dir_path) {
             if let Ok(entries) = node.readdir() {
                 return entries
                     .iter()

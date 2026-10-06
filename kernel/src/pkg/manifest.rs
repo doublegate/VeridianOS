@@ -139,8 +139,7 @@ impl FileManifest {
         })?;
 
         for record in records {
-            if let Some(vfs_lock) = crate::fs::try_get_vfs() {
-                let vfs = vfs_lock.read();
+            if let Some(vfs) = crate::fs::try_get_vfs() {
                 match vfs.resolve_path(&record.path) {
                     Ok(node) => {
                         if let Ok(metadata) = node.metadata() {

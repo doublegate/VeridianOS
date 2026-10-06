@@ -42,7 +42,7 @@ pub(super) use system::*;
 /// Read a file from VFS and return its contents as a String.
 /// Uses a 4096-byte buffer with offset-based reading to handle larger files.
 pub(super) fn read_file_to_string(path: &str) -> Result<String, String> {
-    match crate::fs::get_vfs().read().resolve_path(path) {
+    match crate::fs::get_vfs().resolve_path(path) {
         Ok(node) => {
             let mut result = Vec::new();
             let mut buffer = [0u8; 4096];
@@ -84,7 +84,7 @@ pub(super) fn evaluate_test(args: &[String]) -> bool {
             "-f" => crate::fs::file_exists(&args[1]),
             "-d" => {
                 // Check if path is a directory
-                match crate::fs::get_vfs().read().resolve_path(&args[1]) {
+                match crate::fs::get_vfs().resolve_path(&args[1]) {
                     Ok(node) => match node.metadata() {
                         Ok(meta) => meta.node_type == crate::fs::NodeType::Directory,
                         Err(_) => false,

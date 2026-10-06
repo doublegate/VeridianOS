@@ -84,7 +84,7 @@ fn is_zero_block(block: &[u8]) -> bool {
 /// For example, given `/usr/local/bin`, this will create `/usr`, `/usr/local`,
 /// and `/usr/local/bin` as directories if they don't already exist.
 fn ensure_parent_dirs(path: &str) -> Result<(), KernelError> {
-    let vfs = get_vfs().read();
+    let vfs = get_vfs();
 
     let mut accumulated = String::new();
     for component in path.split('/').filter(|c| !c.is_empty()) {
@@ -205,7 +205,7 @@ pub fn load_tar_to_vfs(data: &[u8]) -> Result<usize, KernelError> {
                 // Directory entry.
                 ensure_parent_dirs(&path)?;
                 // The directory itself may already exist from ensure_parent_dirs.
-                let vfs = get_vfs().read();
+                let vfs = get_vfs();
                 if vfs.resolve_path(&path).is_err() {
                     let (parent_path, dir_name) = split_path(&path)?;
                     let parent = vfs.resolve_path(parent_path)?;
@@ -230,7 +230,7 @@ pub fn load_tar_to_vfs(data: &[u8]) -> Result<usize, KernelError> {
                 };
 
                 // Create the file in the VFS.
-                let vfs = get_vfs().read();
+                let vfs = get_vfs();
                 let (parent_path, file_name) = split_path(&path)?;
                 let parent = vfs.resolve_path(parent_path)?;
 
@@ -282,7 +282,7 @@ pub fn load_tar_to_vfs(data: &[u8]) -> Result<usize, KernelError> {
                 }
 
                 // Read the target file's contents and copy them.
-                let vfs = get_vfs().read();
+                let vfs = get_vfs();
                 match vfs.resolve_path(&link_target) {
                     Ok(target_node) => {
                         // Read target file data (up to 4MB limit for safety).
@@ -335,7 +335,7 @@ pub fn load_tar_to_vfs(data: &[u8]) -> Result<usize, KernelError> {
             }
         }
 
-        let vfs = get_vfs().read();
+        let vfs = get_vfs();
         if let Ok(target_node) = vfs.resolve_path(target_path) {
             let target_size = target_node.metadata().map(|m| m.size).unwrap_or(0);
             if target_size > 0 && target_size <= 4 * 1024 * 1024 {

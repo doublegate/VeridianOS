@@ -514,7 +514,7 @@ pub fn load_and_execute(path: &str, args: ProgramArgs) -> Result<ProcessId, Kern
     println!("[ELF-LOADER] Loading program: {}", path);
 
     // Read file from filesystem
-    let vfs = crate::fs::get_vfs().read();
+    let vfs = crate::fs::get_vfs();
     let file_node = vfs
         .open(path, crate::fs::file::OpenFlags::read_only())
         .map_err(|_| KernelError::NotFound {
@@ -548,9 +548,6 @@ pub fn load_and_execute(path: &str, args: ProgramArgs) -> Result<ProcessId, Kern
             value: "incomplete",
         });
     }
-
-    // Release the VFS lock before creating process
-    drop(vfs);
 
     // Create ELF loader and parse
     let loader = EnhancedElfLoader::new(elf_data)?;
@@ -609,7 +606,7 @@ fn load_interpreter(process: &Process, interp_path: &str) -> Result<VirtualAddre
     println!("[ELF-LOADER] Loading interpreter from {}", interp_path);
 
     // Read interpreter from filesystem
-    let vfs = crate::fs::get_vfs().read();
+    let vfs = crate::fs::get_vfs();
     let file_node = vfs
         .open(interp_path, crate::fs::file::OpenFlags::read_only())
         .map_err(|_| KernelError::NotFound {
@@ -633,8 +630,6 @@ fn load_interpreter(process: &Process, interp_path: &str) -> Result<VirtualAddre
             name: "read",
             value: "failed",
         })?;
-
-    drop(vfs);
 
     // Parse interpreter ELF
     let interp_loader = EnhancedElfLoader::new(interp_data)?;

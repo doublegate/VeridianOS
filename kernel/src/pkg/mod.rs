@@ -1144,14 +1144,14 @@ fn install_file(path: &str, data: &[u8], mode: u32) -> PkgResult<()> {
                 let parent = &path[..parent_end];
                 let perms = Permissions::from_mode(0o755);
                 // Ignore errors for existing directories
-                let _ = get_vfs().write().mkdir(parent, perms);
+                let _ = get_vfs().mkdir(parent, perms);
             }
         }
 
         // Open/create file via VFS and write data
         // For now, use the ramfs node write capability
         let flags = OpenFlags::read_write();
-        match get_vfs().read().open(path, flags) {
+        match get_vfs().open(path, flags) {
             Ok(node) => {
                 // Write data to the node
                 if let Err(_e) = node.write(0, data) {
@@ -1523,7 +1523,7 @@ fn create_directories(path: &str) -> PkgResult<()> {
             use crate::fs::{get_vfs, Permissions};
             let perms = Permissions::from_mode(0o755);
             // Ignore errors for existing directories
-            let _ = get_vfs().write().mkdir(&current_path, perms);
+            let _ = get_vfs().mkdir(&current_path, perms);
         }
     }
 

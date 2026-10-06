@@ -903,7 +903,7 @@ fn handle_prime_handle_to_fd(arg: *mut u8, pid: u64) -> Result<i32, KernelError>
     // Look up the DRM device node in VFS
     let flags = crate::fs::file::OpenFlags::read_write();
     let vfs = crate::fs::try_get_vfs().ok_or(KernelError::NotInitialized { subsystem: "VFS" })?;
-    let vfs_read = vfs.read();
+    let vfs_read = vfs;
     let node =
         vfs_read
             .open("/dev/dri/card0", flags)
