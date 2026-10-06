@@ -202,8 +202,9 @@ impl E1000Driver {
     /// Reset the controller, which stops all DMA. Returns whether the
     /// controller confirmed the reset by clearing `CTRL_RST`; on `false` the
     /// device may still own the rings and buffers (review of the v0.26.0
-    /// stack, PR #10).
-    fn reset(&self) -> bool {
+    /// stack, PR #10). A timeout is remembered in `reset_failed`, so `Drop`
+    /// never trusts a later poll.
+    fn reset(&mut self) -> bool {
         self.write_reg(REG_IMC, 0xFFFF_FFFF);
         self.write_reg(REG_RCTL, 0);
         self.write_reg(REG_TCTL, 0);
@@ -211,12 +212,14 @@ impl E1000Driver {
         let done = poll_until_clear(|| self.read_reg(REG_CTRL), CTRL_RST, RESET_SPINS);
         self.write_reg(REG_IMC, 0xFFFF_FFFF);
         self.read_reg(REG_ICR);
+        if !done {
+            self.reset_failed = true;
+        }
         done
     }
 
     fn initialize(&mut self) -> Result<(), KernelError> {
         if !self.reset() {
-            self.reset_failed = true;
             // Programming rings into a controller that never left reset
             // would hand it DMA addresses it may act on later.
             return Err(KernelError::Timeout {

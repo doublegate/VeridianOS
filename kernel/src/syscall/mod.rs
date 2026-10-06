@@ -122,13 +122,13 @@ fn validate_user_string_ptr(ptr: usize) -> Result<(), SyscallError> {
 /// would wait on an empty bitset (review of the v0.26.0 stack, PR #9). Only
 /// x86_64 has user mode today, so this is not yet reachable elsewhere.
 fn syscall_arg6() -> Result<usize, SyscallError> {
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(all(target_arch = "x86_64", target_os = "none"))]
     {
         crate::arch::x86_64::syscall::get_syscall_frame()
             .map(|frame| frame.r9 as usize)
             .ok_or(SyscallError::NotImplemented)
     }
-    #[cfg(not(target_arch = "x86_64"))]
+    #[cfg(not(all(target_arch = "x86_64", target_os = "none")))]
     {
         Err(SyscallError::NotImplemented)
     }
