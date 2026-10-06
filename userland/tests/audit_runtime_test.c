@@ -21,6 +21,7 @@
 #include <sys/mman.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/un.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
@@ -497,6 +498,41 @@ static void test_closed_stdio(void)
     report("closed_stderr_is_ebadf", ok, "write(2) after close(2) did not fail with EBADF");
 }
 
+/* --- AF_UNIX bind/connect by path (review of the v0.26.0 stack): bind
+ * read the name from the start of the sockaddr, family bytes included, so
+ * nothing could connect to the path that was bound. ----------------------- */
+static void test_unix_bind_connect(void)
+{
+    struct sockaddr_un sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sun_family = AF_UNIX;
+    strcpy(sa.sun_path, "/tmp/audit_bind.sock");
+    unlink(sa.sun_path);
+    char buf[8] = {0};
+    int srv = socket(AF_UNIX, SOCK_STREAM, 0);
+    int cli = socket(AF_UNIX, SOCK_STREAM, 0);
+    int ok = srv >= 0 && cli >= 0 &&
+             bind(srv, (struct sockaddr *)&sa, sizeof(sa)) == 0 && listen(srv, 1) == 0 &&
+             connect(cli, (struct sockaddr *)&sa, sizeof(sa)) == 0;
+    int conn = ok ? accept(srv, NULL, NULL) : -1;
+    ok = ok && conn >= 0 && write(cli, "hi", 2) == 2 && read(conn, buf, sizeof(buf)) == 2 &&
+         memcmp(buf, "hi", 2) == 0;
+    /* A path nobody bound is not reachable. */
+    struct sockaddr_un other = sa;
+    strcpy(other.sun_path, "/tmp/audit_nobody.sock");
+    int cli2 = socket(AF_UNIX, SOCK_STREAM, 0);
+    ok = ok && cli2 >= 0 && connect(cli2, (struct sockaddr *)&other, sizeof(other)) != 0;
+    if (conn >= 0)
+        close(conn);
+    if (cli2 >= 0)
+        close(cli2);
+    if (srv >= 0)
+        close(srv);
+    if (cli >= 0)
+        close(cli);
+    report("unix_bind_connect_by_path", ok, "bind/listen/connect/accept by path failed");
+}
+
 /* --- Search permission on directories (FS-SEC-02, review of the v0.26.0
  * stack): a non-root user cannot reach a file through a 0700 directory it
  * does not own, even when the file itself is world-readable. ---------- */
@@ -603,6 +639,7 @@ int main(int argc, char **argv)
     test_map_fixed_limits();
     test_rename_directory();
     test_closed_stdio();
+    test_unix_bind_connect();
     test_dir_search_permission();
     test_direction_flag();
     printf("AUDIT-RUNTIME: %d/%d\n", passed, total);

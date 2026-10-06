@@ -3158,24 +3158,49 @@ impl TryFrom<usize> for Syscall {
 
 /// Read a null-terminated name string from user space (for shm/socket paths).
 fn read_user_name(ptr: usize, max_len: usize) -> Result<alloc::string::String, SyscallError> {
-    validate_user_string_ptr(ptr)?;
-    // SAFETY: ptr was validated as non-null and in user-space.
-    let bytes = unsafe {
-        let mut buf = alloc::vec::Vec::new();
-        let mut p = ptr as *const u8;
-        for _ in 0..max_len {
-            let byte = *p;
-            if byte == 0 {
-                break;
-            }
-            buf.push(byte);
-            p = p.add(1);
-        }
-        buf
-    };
-    core::str::from_utf8(&bytes)
+    userspace::read_user_cstr(ptr, max_len)
+}
+
+/// `sizeof(struct sockaddr_un)`: a 2-byte family and a 108-byte path.
+const SOCKADDR_UN_LEN: usize = 110;
+
+/// The path in a `struct sockaddr_un` of `addr_len` bytes.
+///
+/// `sun_path` starts after the 2-byte family; it ends at the first NUL or
+/// at `addr_len`, whichever is first (Linux accepts both). The family must
+/// be AF_UNIX. Abstract names (leading NUL) and unnamed addresses are not
+/// supported and are rejected. `bind` used to read the name from offset 0,
+/// so every bind registered the family bytes as the path (review of the
+/// v0.26.0 stack, PR #14).
+fn parse_sockaddr_un(raw: &[u8]) -> Result<alloc::string::String, SyscallError> {
+    if raw.len() <= 2 || raw.len() > SOCKADDR_UN_LEN {
+        return Err(SyscallError::InvalidArgument);
+    }
+    if usize::from(u16::from_ne_bytes([raw[0], raw[1]])) != AF_UNIX {
+        return Err(SyscallError::InvalidArgument);
+    }
+    let path = &raw[2..];
+    let end = path.iter().position(|&b| b == 0).unwrap_or(path.len());
+    if end == 0 {
+        return Err(SyscallError::InvalidArgument);
+    }
+    core::str::from_utf8(&path[..end])
         .map(alloc::string::String::from)
         .map_err(|_| SyscallError::InvalidArgument)
+}
+
+/// Copy a `struct sockaddr_un` of `addr_len` bytes from user memory and
+/// return its path.
+fn read_sockaddr_un(
+    addr_ptr: usize,
+    addr_len: usize,
+) -> Result<alloc::string::String, SyscallError> {
+    if addr_len <= 2 || addr_len > SOCKADDR_UN_LEN {
+        return Err(SyscallError::InvalidArgument);
+    }
+    let mut raw = [0u8; SOCKADDR_UN_LEN];
+    userspace::read_user_bytes(addr_ptr, &mut raw[..addr_len])?;
+    parse_sockaddr_un(&raw[..addr_len])
 }
 
 /// SYS_SHM_OPEN: Create or open a named shared memory object.
@@ -3358,7 +3383,7 @@ fn sys_socket_create(domain: usize, sock_type: usize) -> SyscallResult {
 }
 
 /// SYS_SOCKET_BIND: Bind a socket to an address/path.
-fn sys_socket_bind(fd: usize, addr_ptr: usize, _addr_len: usize) -> SyscallResult {
+fn sys_socket_bind(fd: usize, addr_ptr: usize, addr_len: usize) -> SyscallResult {
     match with_socket_fd(fd, SocketNode::handle)? {
         SocketHandle::Inet(id) => {
             let addr = read_inet_addr(addr_ptr)?;
@@ -3368,7 +3393,7 @@ fn sys_socket_bind(fd: usize, addr_ptr: usize, _addr_len: usize) -> SyscallResul
             Ok(0)
         }
         SocketHandle::Unix(id) => {
-            let path = read_user_name(addr_ptr, crate::net::unix_socket::UNIX_PATH_MAX)?;
+            let path = read_sockaddr_un(addr_ptr, addr_len)?;
             crate::net::unix_socket::socket_bind(id, &path)
                 .map(|()| 0)
                 .map_err(|_| SyscallError::InvalidState)
@@ -3406,10 +3431,7 @@ fn sys_socket_connect(fd: usize, addr_ptr: usize, addr_len: usize) -> SyscallRes
             Ok(0)
         }
         SocketHandle::Unix(id) => {
-            // addr_len includes the sa_family, so path_len = addr_len - 2.
-            let min_len = if addr_len > 2 { addr_len } else { 4 };
-            validate_user_buffer(addr_ptr, min_len)?;
-            let path = read_user_name(addr_ptr + 2, crate::net::unix_socket::UNIX_PATH_MAX)?;
+            let path = read_sockaddr_un(addr_ptr, addr_len)?;
             crate::net::unix_socket::socket_connect(id, &path)
                 .map(|()| 0)
                 // ENOENT: no socket bound at that path.
@@ -3541,6 +3563,24 @@ mod tests {
 
     // --- Numbers the musl remap patch relies on (review of the v0.26.0
     // stack, PR #8) ---
+
+    #[test]
+    fn sockaddr_un_path_starts_after_the_family() {
+        let mut sa = alloc::vec::Vec::from((AF_UNIX as u16).to_ne_bytes());
+        sa.extend_from_slice(b"/tmp/sock\0garbage");
+        assert_eq!(parse_sockaddr_un(&sa).unwrap(), "/tmp/sock");
+        // Without a NUL, addr_len bounds the path.
+        assert_eq!(parse_sockaddr_un(&sa[..2 + 4]).unwrap(), "/tmp");
+        // Unnamed, abstract, wrong family, oversized.
+        assert!(parse_sockaddr_un(&sa[..2]).is_err());
+        let mut abs = alloc::vec::Vec::from((AF_UNIX as u16).to_ne_bytes());
+        abs.extend_from_slice(b"\0name");
+        assert!(parse_sockaddr_un(&abs).is_err());
+        let mut inet = alloc::vec::Vec::from(2u16.to_ne_bytes());
+        inet.extend_from_slice(b"/tmp/sock\0");
+        assert!(parse_sockaddr_un(&inet).is_err());
+        assert!(parse_sockaddr_un(&[0u8; SOCKADDR_UN_LEN + 1]).is_err());
+    }
 
     #[test]
     fn musl_remap_targets_have_the_expected_meaning() {
