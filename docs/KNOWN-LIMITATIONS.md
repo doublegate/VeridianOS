@@ -105,6 +105,13 @@ Socket addresses, lengths and control messages already use the fault-tolerant co
 Only the first control message is parsed, SOCK_CLOEXEC and SOCK_NONBLOCK are ignored at creation,
 `setsockopt` on a Unix socket is accepted and ignored, and peers are reported unnamed.
 
+### Package signatures are not FIPS 204 ML-DSA (N-55)
+
+The Dilithium signatures used for packages have the round-3 Dilithium3 sizes (3293-byte signature,
+4000-byte secret key), not FIPS 204 ML-DSA-65's (3309 and 4032). They do not interoperate with
+standard ML-DSA implementations. Moving to the FIPS 204 encoding, verified against NIST known-answer
+tests, is planned for v0.27.
+
 ### Unix sockets cannot pass Unix sockets
 
 Passing a Unix-socket file descriptor in SCM_RIGHTS is refused with EINVAL. Passing one would need a

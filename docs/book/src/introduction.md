@@ -21,7 +21,7 @@ This book serves as the comprehensive guide for understanding, building, and con
 - **Written in Rust** - Memory safety without garbage collection, 99%+ SAFETY comment coverage
 - **High performance** - Lock-free algorithms, zero-copy IPC (<1us latency)
 - **Multi-architecture** - x86_64, AArch64, and RISC-V support (all boot to Stage 6)
-- **Security focused** - Post-quantum crypto (ML-KEM, ML-DSA), KASLR, SMEP/SMAP, MAC/RBAC
+- **Security focused** - Post-quantum crypto (Kyber/ML-KEM; Dilithium3 with pre-FIPS 204 sizes, N-55), KASLR, SMEP/SMAP, MAC/RBAC
 - **KDE Plasma 6 desktop** - Cross-compiled from source with Qt 6.8.3, KDE Frameworks 6.12.0
 - **Self-hosting** - Native GCC 14.2, binutils, make, ninja, vpkg toolchain
 - **Modern package management** - Source and binary package support
