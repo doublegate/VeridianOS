@@ -116,15 +116,21 @@ fn validate_user_string_ptr(ptr: usize) -> Result<(), SyscallError> {
 }
 
 /// The sixth syscall argument, which the 5-argument handlers do not receive.
-/// On x86_64 it is r9, saved in the syscall frame; 0 elsewhere.
-fn syscall_arg6() -> usize {
+/// On x86_64 it is r9, saved in the syscall frame. Elsewhere it is not
+/// captured yet, and callers that need it must fail rather than act on a
+/// made-up 0: FUTEX_WAKE_OP would store 0 to `*uaddr2` and FUTEX_WAIT_BITSET
+/// would wait on an empty bitset (review of the v0.26.0 stack, PR #9). Only
+/// x86_64 has user mode today, so this is not yet reachable elsewhere.
+fn syscall_arg6() -> Result<usize, SyscallError> {
     #[cfg(target_arch = "x86_64")]
     {
-        crate::arch::x86_64::syscall::get_syscall_frame().map_or(0, |frame| frame.r9 as usize)
+        crate::arch::x86_64::syscall::get_syscall_frame()
+            .map(|frame| frame.r9 as usize)
+            .ok_or(SyscallError::NotImplemented)
     }
     #[cfg(not(target_arch = "x86_64"))]
     {
-        0
+        Err(SyscallError::NotImplemented)
     }
 }
 
@@ -1522,10 +1528,10 @@ fn handle_syscall(
                 3 => futex::sys_futex_requeue(arg1, arg3, arg5, 0).map(|v| v as usize),
                 // FUTEX_WAKE_OP(uaddr, val, val2 = arg4, uaddr2, encoded op = val3).
                 // Passing 0 for the encoded op meant "*uaddr2 = 0" on every call.
-                5 => futex::sys_futex_wake_op(arg1, arg3, arg5, arg4, syscall_arg6())
+                5 => futex::sys_futex_wake_op(arg1, arg3, arg5, arg4, syscall_arg6()?)
                     .map(|v| v as usize),
                 // FUTEX_WAIT_BITSET: the bitset is val3 (arg6).
-                9 => futex::sys_futex_wait(arg1, arg3 as u32, arg4, syscall_arg6(), arg2)
+                9 => futex::sys_futex_wait(arg1, arg3 as u32, arg4, syscall_arg6()?, arg2)
                     .map(|v| v as usize),
                 _ => Err(SyscallError::InvalidArgument),
             }
@@ -3667,6 +3673,13 @@ mod tests {
 
     // --- Numbers the musl remap patch relies on (review of the v0.26.0
     // stack, PR #8) ---
+
+    #[test]
+    fn missing_sixth_argument_is_an_error_not_zero() {
+        // No syscall frame (host test, or an architecture that does not
+        // capture it): the futex ops that need val3 must fail, not use 0.
+        assert_eq!(syscall_arg6(), Err(SyscallError::NotImplemented));
+    }
 
     #[test]
     fn sockaddr_un_path_starts_after_the_family() {
