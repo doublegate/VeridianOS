@@ -1501,12 +1501,21 @@ fn rename_entry(old: &str, new: &str) -> SyscallResult {
     }
 
     let vfs = vfs()?;
-    if vfs.mount_point_of(old) != vfs.mount_point_of(new) {
+    let (old_parent_path, old_name) = split_path(old)?;
+    let (new_parent_path, new_name) = split_path(new)?;
+    // Compared on canonical parents: the parents are resolved with symlinks
+    // followed below, so a string comparison let a symlink into another
+    // mount through (review of the v0.26.0 stack, PR #11).
+    let old_mount = vfs
+        .entry_mount_point(&old_parent_path, &old_name)
+        .map_err(map_resolve_err)?;
+    let new_mount = vfs
+        .entry_mount_point(&new_parent_path, &new_name)
+        .map_err(map_resolve_err)?;
+    if old_mount != new_mount {
         return Err(SyscallError::CrossDevice);
     }
     let src = vfs.resolve_path_no_follow(old).map_err(map_resolve_err)?;
-    let (old_parent_path, old_name) = split_path(old)?;
-    let (new_parent_path, new_name) = split_path(new)?;
 
     if src.node_type() == crate::fs::NodeType::Directory {
         // A directory cannot move into its own subtree (POSIX: EINVAL).

@@ -757,6 +757,21 @@ impl Vfs {
             .unwrap_or_else(|| String::from("/"))
     }
 
+    /// The mount point holding the directory entry `name` in `parent`, with
+    /// `parent` resolved canonically (symlinks, `.` and `..` followed; the
+    /// entry itself is not). A rename must compare these rather than the
+    /// paths as written: a symlink in the parent path can point into another
+    /// mount (review of the v0.26.0 stack, PR #11).
+    pub fn entry_mount_point(&self, parent: &str, name: &str) -> Result<String, KernelError> {
+        let (_, canon) = self.resolve_canonical(parent, &self.get_cwd(), true)?;
+        let entry = if canon == "/" {
+            alloc::format!("/{}", name)
+        } else {
+            alloc::format!("{}/{}", canon, name)
+        };
+        Ok(self.mount_point_of(&entry))
+    }
+
     /// Resolve a path, returning the node together with its canonical
     /// absolute path (all `.`, `..` and followed symlinks removed). Access
     /// checks must use this path: checking the path as written lets a
@@ -1632,6 +1647,23 @@ mod tests {
         vfs.mount(String::from("/mnt"), Arc::new(ramfs::RamFs::new()))
             .unwrap();
         assert!(vfs.resolve_path("/mnt/../top").is_ok());
+    }
+
+    #[test]
+    fn entry_mount_point_follows_symlinked_parent() {
+        let vfs = make_vfs_with_root();
+        let root = vfs.root_fs().unwrap().root();
+        root.mkdir("mnt", Permissions::default()).unwrap();
+        vfs.mount(String::from("/mnt"), Arc::new(ramfs::RamFs::new()))
+            .unwrap();
+        root.symlink("link", "/mnt").unwrap();
+        // The path as written is fooled by the symlink...
+        assert_eq!(vfs.mount_point_of("/link/g"), "/");
+        // ...the canonical parent is not.
+        assert_eq!(vfs.entry_mount_point("/link", "g").unwrap(), "/mnt");
+        assert_eq!(vfs.entry_mount_point("/", "f").unwrap(), "/");
+        // A mount point belongs to its own mount, so renaming it stays EXDEV.
+        assert_eq!(vfs.entry_mount_point("/", "mnt").unwrap(), "/mnt");
     }
 
     #[test]
