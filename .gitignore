@@ -345,3 +345,6 @@ target/rootfs-kde-blockfs.img
 # Plan files (Claude Code)
 .claude/plans/
 a.out
+
+# Antigravity PR reviewer: large-diff on-disk handoff (transient, removed by the script).
+/.agy-review-work/
