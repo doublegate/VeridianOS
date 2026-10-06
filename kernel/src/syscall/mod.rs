@@ -1370,7 +1370,7 @@ fn handle_syscall(
         Syscall::SocketClose => sys_socket_close(arg1),
         // Linux ABI: socketpair(domain, type, protocol, sv[2])
         // arg1=domain, arg2=type, arg3=protocol, arg4=sv pointer
-        Syscall::SocketPair => sys_socket_pair(arg1, arg2, arg4),
+        Syscall::SocketPair => sys_socket_pair(arg1, arg2, arg3, arg4),
 
         // Graphics / framebuffer (Phase 6)
         Syscall::FbGetInfo => sys_fb_get_info(arg1),
@@ -3556,15 +3556,37 @@ fn sys_socket_close(fd: usize) -> SyscallResult {
     result
 }
 
+/// The Unix socket type for `socketpair(domain, sock_type, protocol, sv)`:
+/// AF_UNIX only, protocol 0 or PF_UNIX (as Linux accepts), and the type
+/// mapped like socket() does. The type and protocol used to be ignored, so
+/// a SOCK_DGRAM pair silently got stream semantics (review of the v0.26.0
+/// stack, PR #10). SOCK_CLOEXEC / SOCK_NONBLOCK are masked off and not yet
+/// honoured, as for socket().
+fn socketpair_type(
+    domain: usize,
+    sock_type: usize,
+    protocol: usize,
+) -> Result<crate::net::unix_socket::UnixSocketType, SyscallError> {
+    if domain != AF_UNIX || (protocol != 0 && protocol != AF_UNIX) {
+        return Err(SyscallError::InvalidArgument);
+    }
+    to_unix_socket_type(sock_type)
+}
+
 /// SYS_SOCKET_PAIR: Create a connected socket pair.
 ///
 /// # Arguments
 /// - domain: AF_UNIX only
+/// - sock_type: SOCK_STREAM or SOCK_DGRAM (plus flags)
+/// - protocol: 0 or PF_UNIX
 /// - result_ptr: user-space pointer to `int sv[2]`
-fn sys_socket_pair(domain: usize, _sock_type: usize, result_ptr: usize) -> SyscallResult {
-    if domain != AF_UNIX {
-        return Err(SyscallError::InvalidArgument);
-    }
+fn sys_socket_pair(
+    domain: usize,
+    sock_type: usize,
+    protocol: usize,
+    result_ptr: usize,
+) -> SyscallResult {
+    let utype = socketpair_type(domain, sock_type, protocol)?;
     // Linux writes int sv[2] (two i32 values = 8 bytes).
     validate_user_buffer(result_ptr, 2 * core::mem::size_of::<i32>())?;
 
@@ -3573,8 +3595,7 @@ fn sys_socket_pair(domain: usize, _sock_type: usize, result_ptr: usize) -> Sysca
         .unwrap_or(0);
 
     let (id_a, id_b) =
-        crate::net::unix_socket::socketpair(crate::net::unix_socket::UnixSocketType::Stream, pid)
-            .map_err(|_| SyscallError::OutOfMemory)?;
+        crate::net::unix_socket::socketpair(utype, pid).map_err(|_| SyscallError::OutOfMemory)?;
     let fd_a = install_socket(SocketHandle::Unix(id_a));
     let fd_b = install_socket(SocketHandle::Unix(id_b));
     let (fd_a, fd_b) = match (fd_a, fd_b) {
@@ -3588,12 +3609,16 @@ fn sys_socket_pair(domain: usize, _sock_type: usize, result_ptr: usize) -> Sysca
         (Err(e), Err(_)) => return Err(e),
     };
 
-    // SAFETY: result_ptr validated above as non-null and in user-space.
-    // Write as i32 to match Linux ABI (int sv[2]).
-    unsafe {
-        let ptr = result_ptr as *mut i32;
-        *ptr = fd_a as i32;
-        *ptr.add(1) = fd_b as i32;
+    // int sv[2] through the fault-handled user copy: `sv` need not be
+    // aligned or mapped. If it cannot be written the caller can never learn
+    // the fds, so close them, as Linux does.
+    if let Err(e) = userspace::write_user_slice::<i32>(result_ptr, &[fd_a as i32, fd_b as i32]) {
+        if let Some(p) = crate::process::current_process() {
+            let table = p.file_table.lock();
+            let _ = table.close(fd_a);
+            let _ = table.close(fd_b);
+        }
+        return Err(e);
     }
     Ok(0)
 }
@@ -3728,6 +3753,37 @@ mod tests {
         assert_eq!(recvmsg_flags(2, 2), 0);
         assert_eq!(recvmsg_flags(3, 1), MSG_CTRUNC);
         assert_eq!(recvmsg_flags(1, 0), MSG_CTRUNC);
+    }
+
+    /// socketpair honours the type and accepts protocol 0 or PF_UNIX only
+    /// (review of the v0.26.0 stack, PR #10).
+    #[test]
+    fn socketpair_type_maps_type_and_protocol() {
+        use crate::net::unix_socket::UnixSocketType;
+        assert_eq!(
+            socketpair_type(AF_UNIX, SOCK_STREAM, 0),
+            Ok(UnixSocketType::Stream)
+        );
+        assert_eq!(
+            socketpair_type(AF_UNIX, SOCK_DGRAM | 0x80000, 0),
+            Ok(UnixSocketType::Datagram)
+        );
+        assert_eq!(
+            socketpair_type(AF_UNIX, SOCK_DGRAM, AF_UNIX),
+            Ok(UnixSocketType::Datagram)
+        );
+        assert_eq!(
+            socketpair_type(AF_UNIX, 7, 0),
+            Err(SyscallError::InvalidArgument)
+        );
+        assert_eq!(
+            socketpair_type(AF_UNIX, SOCK_STREAM, 6),
+            Err(SyscallError::InvalidArgument)
+        );
+        assert_eq!(
+            socketpair_type(2, SOCK_STREAM, 0),
+            Err(SyscallError::InvalidArgument)
+        );
     }
 
     #[test]
