@@ -70,7 +70,7 @@ Paths are relative to `kernel/src/` unless they start with `userland/`.
 | IPC-SYNC-02 | CONFIRMED | `ipc/fast_path.rs:124-139` | Unlocked state check; never verifies the target is blocked on *this* endpoint, so a futex/sleep waiter can be woken with clobbered registers; no refcount on the task pointer. | v0.26.0 | open |
 | IPC-SYNC-03 | CONFIRMED, test-only | `ipc/async_channel.rs:250-285, 368` | Unsound MPMC ring (and `capacity == 0` divides by zero). Only constructed in tests, but publicly re-exported. | v0.26.0 | fixed (VecDeque ring) |
 | IPC-SEC-01 | CONFIRMED (worse) | `ipc/registry.rs:408-427` | Endpoints are stored by value in a `BTreeMap`, which moves values on node split/merge, so *any* insert can dangle the `&'static`. Live caller: `syscall/mod.rs:2686`. Endpoint IDs come from two different counters. | v0.26.0 | open |
-| CAP-INC-01 | PARTIAL, LATENT | `cap/revocation.rs:80-90` | Logic bug confirmed, but `cleanup` has no callers and production checks use `cap_manager().is_valid()`, not `REVOCATION_LIST`. | v0.26.0 | open |
+| CAP-INC-01 | PARTIAL, LATENT | `cap/revocation.rs:80-90` | Logic bug confirmed, but `cleanup` has no callers and production checks use `cap_manager().is_valid()`, not `REVOCATION_LIST`. | v0.26.0 | fixed: cleanup() removed |
 | CAP-INC-02 | CONFIRMED, dead code | `cap/revocation.rs:288-342`, `cap/manager.rs:213-268, 295` | Derivation tree never populated; cascade rebuilds tokens without generation/type/flags; revocation is broadcast twice. | v0.27.0 | open |
 | CAP-PERF-01 | CONFIRMED | `cap/space.rs:146-266`, `cap/manager.rs:52-95` | As described. | v0.26.0 | open |
 | CAP-PERF-02 | CONFIRMED | `cap/space.rs:91, 223` | As described; also `IdAllocator::allocate` takes a write lock on every allocation. | v0.26.0 | open |
@@ -133,8 +133,8 @@ Paths are relative to `kernel/src/` unless they start with `userland/`.
 | N-01 | `mm/frame_allocator.rs:229-334` | Bitmap is initialised all-free for 131072 frames regardless of node size, and `allocate` never checks `total_frames`: on nodes under 512 MB it returns frames past the end of RAM (hits aarch64/riscv64 at the 128 MB default). `free()` can underflow and partially frees before detecting a double free. | v0.26.0 | fixed (3f72251) |
 | N-02 | `sched/scheduler.rs:~1018` | `schedule_on_cpu` silently drops the task when `per_cpu(cpu)` is `None` (always, today). | v0.26.0 | open |
 | N-03 | `sched/task_management.rs:150-158` | `CLEANUP_QUEUE` is a function-local static nothing drains; dead tasks leak. | v0.26.0 | open |
-| N-04 | `cap/space.rs:163, 217, 251-266` | L2 index `(cap_id >> 8) as u16` truncates and aliases IDs >= 2^24; `remove()` takes the slot before comparing tokens, wiping a different capability. | v0.26.0 | open |
-| N-05 | `cap/manager.rs:52`, `cap/token.rs:241-279`, `cap/space.rs:409` | Three independent capability-ID allocators, all starting at 1. | v0.26.0 | open |
+| N-04 | `cap/space.rs:163, 217, 251-266` | L2 index `(cap_id >> 8) as u16` truncates and aliases IDs >= 2^24; `remove()` takes the slot before comparing tokens, wiping a different capability. | v0.26.0 | fixed |
+| N-05 | `cap/manager.rs:52`, `cap/token.rs:241-279`, `cap/space.rs:409` | Three independent capability-ID allocators, all starting at 1. | v0.26.0 | fixed |
 | N-06 | `fs/file.rs:293-305` | `FileTable::new` leaves fds 0-2 as free slots, so the first `open` returns fd 0. | v0.26.0 | open |
 | N-07 | `mm/vas.rs:1419, 1478`, `mm/demand_paging.rs:265` | Unreachable CoW code paths (`vas.fork`, `vas.handle_page_fault`, `handle_cow_fault`). | v0.27.0 | open |
 | N-08 | `net/tcp.rs:226-247` | TCP segments are built with checksum 0. | v0.27.0 | open |
