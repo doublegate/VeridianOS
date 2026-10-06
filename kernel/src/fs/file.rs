@@ -1,7 +1,7 @@
 //! File descriptors and file operations
 
 use alloc::{string::String, sync::Arc, vec::Vec};
-use core::sync::atomic::AtomicBool;
+use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
 #[cfg(not(target_arch = "aarch64"))]
 use spin::RwLock;
@@ -292,7 +292,16 @@ pub struct FileTable {
 
     /// Next available file descriptor
     next_fd: RwLock<FileDescriptor>,
+
+    /// Bit `n` (n < 3) set: fd `n` has no table entry but is still the
+    /// implicit serial console that `sys_read`/`sys_write` fall back to.
+    /// Allocation skips such fds, so the first `open` cannot shadow stdin
+    /// or stdout (N-06); closing or `dup2`-ing over one clears its bit.
+    console_fds: AtomicU8,
 }
+
+/// All three standard descriptors are the implicit console.
+const CONSOLE_FDS_ALL: u8 = 0b111;
 
 impl FileTable {
     /// Create a new file table
@@ -307,6 +316,7 @@ impl FileTable {
         Self {
             files: RwLock::new(files),
             next_fd: RwLock::new(3),
+            console_fds: AtomicU8::new(CONSOLE_FDS_ALL),
         }
     }
 }
@@ -318,6 +328,20 @@ impl Default for FileTable {
 }
 
 impl FileTable {
+    /// Whether `fd` is free for allocation: no entry, and not an fd that is
+    /// still the implicit console.
+    fn is_allocatable(&self, files: &[Option<FileEntry>], fd: FileDescriptor) -> bool {
+        files[fd].is_none()
+            && (fd >= 3 || self.console_fds.load(Ordering::Acquire) & (1 << fd) == 0)
+    }
+
+    /// `fd` now refers to something other than the implicit console.
+    fn release_console_fd(&self, fd: FileDescriptor) {
+        if fd < 3 {
+            self.console_fds.fetch_and(!(1u8 << fd), Ordering::AcqRel);
+        }
+    }
+
     /// Open a file and return a file descriptor
     pub fn open(&self, file: Arc<File>) -> Result<FileDescriptor, KernelError> {
         self.open_with_flags(file, false)
@@ -334,12 +358,10 @@ impl FileTable {
 
         let entry = FileEntry { file, cloexec };
 
-        // Find an empty slot
-        for (fd, slot) in files.iter_mut().enumerate() {
-            if slot.is_none() {
-                *slot = Some(entry);
-                return Ok(fd);
-            }
+        // Find the lowest free slot
+        if let Some(fd) = (0..files.len()).find(|&fd| self.is_allocatable(&files, fd)) {
+            files[fd] = Some(entry);
+            return Ok(fd);
         }
 
         // No empty slot, append new one
@@ -371,6 +393,14 @@ impl FileTable {
     /// Close a file descriptor
     pub fn close(&self, fd: FileDescriptor) -> Result<(), KernelError> {
         let mut files = self.files.write();
+
+        if fd < 3 && files.get(fd).is_none_or(|slot| slot.is_none()) {
+            // Closing the implicit console: valid, and frees the fd.
+            let bit = 1u8 << fd;
+            if self.console_fds.fetch_and(!bit, Ordering::AcqRel) & bit != 0 {
+                return Ok(());
+            }
+        }
 
         if fd >= files.len() {
             return Err(KernelError::FsError(FsError::BadFileDescriptor));
@@ -431,12 +461,10 @@ impl FileTable {
             *next_fd = min_fd;
         }
 
-        // Find the lowest empty slot >= min_fd
-        for slot_fd in min_fd..files.len() {
-            if files[slot_fd].is_none() {
-                files[slot_fd] = Some(entry);
-                return Ok(slot_fd);
-            }
+        // Find the lowest free slot >= min_fd
+        if let Some(slot_fd) = (min_fd..files.len()).find(|&fd| self.is_allocatable(&files, fd)) {
+            files[slot_fd] = Some(entry);
+            return Ok(slot_fd);
         }
 
         // No empty slot found in existing range; append new one
@@ -483,6 +511,7 @@ impl FileTable {
         }
 
         // Set new file (dup2 doesn't preserve close-on-exec)
+        self.release_console_fd(new_fd);
         files[new_fd] = Some(FileEntry {
             file,
             cloexec: false,
@@ -523,6 +552,7 @@ impl FileTable {
         }
 
         // Set new file with specified close-on-exec flag
+        self.release_console_fd(new_fd);
         files[new_fd] = Some(FileEntry { file, cloexec });
         Ok(())
     }
@@ -603,6 +633,7 @@ impl FileTable {
         Self {
             files: RwLock::new(new_files),
             next_fd: RwLock::new(next_fd),
+            console_fds: AtomicU8::new(self.console_fds.load(Ordering::Acquire)),
         }
     }
 
@@ -615,5 +646,55 @@ impl FileTable {
                 entry.file.dec_ref();
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::fs::{ramfs::RamFs, Filesystem};
+
+    fn some_file() -> Arc<File> {
+        Arc::new(File::new(RamFs::new().root(), OpenFlags::read_only()))
+    }
+
+    #[test]
+    fn first_open_does_not_shadow_console_fds() {
+        // N-06: fds 0-2 are the implicit console, so the first open is 3.
+        let table = FileTable::new();
+        assert_eq!(table.open(some_file()).unwrap(), 3);
+        assert_eq!(table.open(some_file()).unwrap(), 4);
+    }
+
+    #[test]
+    fn closing_console_fd_frees_it_for_open() {
+        // close(0); open() must return 0, as daemons and shells rely on.
+        let table = FileTable::new();
+        table.close(0).unwrap();
+        assert_eq!(table.open(some_file()).unwrap(), 0);
+        assert_eq!(table.open(some_file()).unwrap(), 3);
+        // A second close of the now-real fd 0 closes the file, then EBADF.
+        table.close(0).unwrap();
+        assert!(table.close(0).is_err());
+    }
+
+    #[test]
+    fn dup2_over_console_fd_replaces_it() {
+        let table = FileTable::new();
+        let fd = table.open(some_file()).unwrap();
+        table.dup2(fd, 1).unwrap();
+        assert!(table.get(1).is_some());
+        table.close(1).unwrap();
+        // fd 1 is no longer the console: it is free for the next open.
+        assert_eq!(table.open(some_file()).unwrap(), 1);
+    }
+
+    #[test]
+    fn fork_inherits_console_state() {
+        let table = FileTable::new();
+        table.close(2).unwrap();
+        let child = table.clone_for_fork();
+        assert_eq!(child.open(some_file()).unwrap(), 2);
+        assert_eq!(table.clone_for_fork().open(some_file()).unwrap(), 2);
     }
 }
