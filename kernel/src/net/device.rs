@@ -273,6 +273,15 @@ impl NetworkDevice for EthernetDevice {
 static DEVICES: Mutex<Option<Vec<Box<dyn NetworkDevice>>>> = Mutex::new(None);
 
 /// Initialize device subsystem
+/// Next `ethN` index; shared by every Ethernet driver so names are unique.
+static NEXT_ETH_INDEX: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
+/// Allocate a unique Ethernet interface name (`eth0`, `eth1`, ...).
+pub fn alloc_ethernet_name() -> alloc::string::String {
+    let n = NEXT_ETH_INDEX.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    alloc::format!("eth{}", n)
+}
+
 pub fn init() -> Result<(), KernelError> {
     println!("[NETDEV] Initializing network device subsystem...");
 

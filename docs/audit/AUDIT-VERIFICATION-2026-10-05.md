@@ -64,12 +64,12 @@ Paths are relative to `kernel/src/` unless they start with `userland/`.
 | IPC-INC-02 | CONFIRMED (worse), dead code | `ipc/zero_copy.rs:278, 353-406` | Capability check ignores the region. `map` allocates a fresh zeroed frame, so "share" shares nothing and "move" loses data; `update_flags` never changes flags. No callers. | v0.26.0 | open |
 | IPC-PERF-01 | PARTIAL | `ipc/fast_path.rs:46-50` | Single global `Mutex` despite the "per-CPU" comment: confirmed. **FALSE**: lock contention does not cause the bypass -- a cache miss returns `true` with or without contention (see IPC-INC-01). | v0.26.0 | fixed: cache removed (acee6ea) |
 | IPC-PERF-02 | PARTIAL, dead code | `ipc/zero_copy.rs:312-332, 429-439` | `tlb_flush_all` is real, but no small message ever takes this path; the benchmark times code that does not run. | v0.26.0 | open |
-| IPC-ARCH-01 | CONFIRMED | `ipc/registry.rs:25-58` | One global `Mutex` over three `BTreeMap`s, taken on the fast-path receive. | v0.26.0 | open |
+| IPC-ARCH-01 | CONFIRMED | `ipc/registry.rs:25-58` | One global `Mutex` over three `BTreeMap`s, taken on the fast-path receive. | v0.26.0 | partly fixed (4f1666e: `Arc<Endpoint>`, one ID source; still one global lock) |
 | IPC-ARCH-02 | CONFIRMED | `ipc/` | No copy tier between 64-byte register messages and page remapping. | v0.26.0 | open |
-| IPC-SYNC-01 | CONFIRMED (worse) | `ipc/channel.rs:161-172`, `sched/ipc_blocking.rs:18-235` | Lost wakeup as described; on SMP the same window can also double-enqueue a running task. No wait primitive with a pending-wakeup flag exists; `process/sync.rs` `WaitQueue::wait` has the same race. | v0.26.0 | open |
-| IPC-SYNC-02 | CONFIRMED | `ipc/fast_path.rs:124-139` | Unlocked state check; never verifies the target is blocked on *this* endpoint, so a futex/sleep waiter can be woken with clobbered registers; no refcount on the task pointer. | v0.26.0 | open |
+| IPC-SYNC-01 | CONFIRMED (worse) | `ipc/channel.rs:161-172`, `sched/ipc_blocking.rs:18-235` | Lost wakeup as described; on SMP the same window can also double-enqueue a running task. No wait primitive with a pending-wakeup flag exists; `process/sync.rs` `WaitQueue::wait` has the same race. | v0.26.0 | fixed (07deada) |
+| IPC-SYNC-02 | CONFIRMED | `ipc/fast_path.rs:124-139` | Unlocked state check; never verifies the target is blocked on *this* endpoint, so a futex/sleep waiter can be woken with clobbered registers; no refcount on the task pointer. | v0.26.0 | fixed (07deada) |
 | IPC-SYNC-03 | CONFIRMED, test-only | `ipc/async_channel.rs:250-285, 368` | Unsound MPMC ring (and `capacity == 0` divides by zero). Only constructed in tests, but publicly re-exported. | v0.26.0 | fixed (VecDeque ring) |
-| IPC-SEC-01 | CONFIRMED (worse) | `ipc/registry.rs:408-427` | Endpoints are stored by value in a `BTreeMap`, which moves values on node split/merge, so *any* insert can dangle the `&'static`. Live caller: `syscall/mod.rs:2686`. Endpoint IDs come from two different counters. | v0.26.0 | open |
+| IPC-SEC-01 | CONFIRMED (worse) | `ipc/registry.rs:408-427` | Endpoints are stored by value in a `BTreeMap`, which moves values on node split/merge, so *any* insert can dangle the `&'static`. Live caller: `syscall/mod.rs:2686`. Endpoint IDs come from two different counters. | v0.26.0 | fixed (4f1666e) |
 | CAP-INC-01 | PARTIAL, LATENT | `cap/revocation.rs:80-90` | Logic bug confirmed, but `cleanup` has no callers and production checks use `cap_manager().is_valid()`, not `REVOCATION_LIST`. | v0.26.0 | fixed: cleanup() removed |
 | CAP-INC-02 | CONFIRMED, dead code | `cap/revocation.rs:288-342`, `cap/manager.rs:213-268, 295` | Derivation tree never populated; cascade rebuilds tokens without generation/type/flags; revocation is broadcast twice. | v0.27.0 | open |
 | CAP-PERF-01 | CONFIRMED | `cap/space.rs:146-266`, `cap/manager.rs:52-95` | As described. | v0.26.0 | open |
@@ -91,7 +91,7 @@ Paths are relative to `kernel/src/` unless they start with `userland/`.
 | SYS-CONC-01 | CONFIRMED, LATENT | `syscall/futex.rs:425-439` | Non-atomic RMW; also ignores `FUTEX_OP_OPARG_SHIFT`, never wakes `uaddr2` waiters, and runs without the table lock. Syscalls run with interrupts off, so on one CPU nothing interleaves today. | v0.26.0 | fixed (ed89c26, a8937a2) |
 | SYS-INC-01 | CONFIRMED, dead code | `syscall/linux_compat.rs:31-59` | 64-PID limit confirmed, but `set_linux_abi` has no callers (`userspace/loader.rs:118` says not to call it), so the bitmap is always empty. | v0.27.0 | open |
 | SYS-SEC-01 | PARTIAL | `syscall/userspace.rs:51-146`, `arch/x86_64/idt.rs` | No `EFAULT` path and no fixup table: confirmed. The kernel does not halt on a user-address fault (see MEM-SEC-01). | v0.26.0 | fixed on x86_64 for the user accessors (34db90c); direct dereferences elsewhere remain |
-| PROC-SEC-01 | CONFIRMED | `process/table.rs:172-217` | `&'static` / `&'static mut` into boxed entries that `remove_process` drops. | v0.26.0 | open |
+| PROC-SEC-01 | CONFIRMED | `process/table.rs:172-217` | `&'static` / `&'static mut` into boxed entries that `remove_process` drops. | v0.26.0 | fixed (b0b92eb) |
 | PROC-SEC-02 | CONFIRMED (worse) | `process/mod.rs:234-262`, `process/exit.rs:660-750` | Frees the running kernel stack, and also drops the `Thread` and then reads `thread.clear_tid`. | v0.26.0 | fixed (479be43) |
 
 ### Filesystems, drivers, network, desktop, virtualisation
@@ -107,12 +107,12 @@ Paths are relative to `kernel/src/` unless they start with `userland/`.
 | DRV-PERF-01 | PARTIAL, dead code | `services/desktop_ipc.rs:213-221` | Only a struct definition; nothing handles `UpdateWindowContent`. The copies that do happen are DESK-ARCH-01. | v0.26.0 | open |
 | DRV-PERF-02 | CONFIRMED | `fs/blockfs.rs:143-150`, `drivers/virtio/blk.rs:395, 484-496` | 8 requests per 4 KB block, each allocating and zeroing a frame and spinning up to 10M iterations. | v0.26.0 | open |
 | DRV-INC-01 | CONFIRMED (dangerous) | `drivers/nvme.rs:426, 472` | With a real controller, reads DMA to physical address 0. | v0.26.0 | open |
-| DRV-SEC-01 | CONFIRMED | `drivers/virtio_net.rs:603-621` | Descriptor freed before the device is notified; no barrier; non-volatile ring indices. | v0.26.0 | open |
-| DRV-SEC-02 | CONFIRMED (worse for e1000) | `drivers/virtio_net.rs:410-520`, `drivers/e1000.rs:88-212` | Virtual addresses used as DMA addresses. e1000 programs addresses of fields on a stack frame that has since been returned from. | v0.26.0 | open |
+| DRV-SEC-01 | CONFIRMED | `drivers/virtio_net.rs:603-621` | Descriptor freed before the device is notified; no barrier; non-volatile ring indices. | v0.26.0 | fixed (c99fca9, 7f9a6d0; used-ring ids validated in the e1000 commit) |
+| DRV-SEC-02 | CONFIRMED (worse for e1000) | `drivers/virtio_net.rs:410-520`, `drivers/e1000.rs:88-212` | Virtual addresses used as DMA addresses. e1000 programs addresses of fields on a stack frame that has since been returned from. | v0.26.0 | fixed (virtio-net c99fca9; e1000 rewritten on frame-backed rings) |
 | NET-PERF-01 | CONFIRMED | `net/http.rs:539, 555, 572, 608, 609, 641, 647, 664, 670` | Nine sites; the feed buffer is also unbounded. | v0.26.0 | open |
 | NET-INC-01 | CONFIRMED | `net/tcp.rs:419-520` | Also: segments carry checksum 0 (see N-08). | v0.27.0 | open |
 | NET-INC-02 | CONFIRMED | `net/wireguard.rs`, `services/shell/commands/network.rs:770` | Not bound to the stack; the `wg` command uses an all-zero key seed. | v0.27.0 | open |
-| NET-ARCH-01 | CONFIRMED (worse) | `net/ip.rs:~249-263` | virtio-net registers as `eth1`, so on a virtio-net-only machine every IPv4 transmit is silently dropped. Routing table and gateway are ignored. | v0.26.0 | open |
+| NET-ARCH-01 | CONFIRMED (worse) | `net/ip.rs:~249-263` | virtio-net registers as `eth1`, so on a virtio-net-only machine every IPv4 transmit is silently dropped. Routing table and gateway are ignored. | v0.26.0 | partly fixed (f93770c: primary interface, RX dispatch; no routing table yet) |
 | NET-SEC-01 | CONFIRMED, different line | `net/udp.rs:303-311` | `from_bytes` is safe; the panic is in `process_packet`. | v0.26.0 | fixed (399929b) |
 | NET-SEC-02 | CONFIRMED | `syscall/network_ext_syscalls.rs:29-36, 150-152` | | v0.26.0 | fixed (399929b) |
 | DESK-ARCH-01 | CONFIRMED | `desktop/wayland/buffer.rs:25-154`, `desktop/wayland/mod.rs:424-452` | Also: pool size is client-controlled and unbounded; `write_data` panics on a bad offset (see N-09). | v0.26.0 | open |
@@ -146,6 +146,29 @@ Paths are relative to `kernel/src/` unless they start with `userland/`.
 | N-15 | `security/smep_smap.rs`, `bootstrap.rs` | SMEP/SMAP (announced in v0.11.0) are never enabled: `smep_smap::init()` is only called from `security::init()`, which bootstrap does not call (it initialises security modules individually). Enabling SMAP also requires `stac`/`clac` around every user access, i.e. moving the remaining direct dereferences onto the accessors first. | v0.27.0 | open |
 | N-16 | `arch/riscv64/link.ld` | The 128 KiB riscv64 boot stack overflowed into .bss during `timer::init` (TimerWheel built by value), zeroing the global allocator. Stack now 1 MiB with a canary checked by boot test 32. | v0.26.0 | fixed (59c23e7) |
 | N-12 | test suite, CI | The host unit-test build did not compile (missing `alloc` imports in five test modules, `ScriptError` assertions stale since v0.17.1), and two eventfd/signalfd tests crashed the test binary by reaching the real scheduler from a blocking read. CI hid this because the coverage job -- the only job that runs host tests -- is `continue-on-error`. | v0.26.0 | fixed |
+
+## Runtime verification status
+
+The BlockFS/BusyBox runtime run (`audit_runtime_test`, BUSYBOX_ALL_PASS) exercises open/stat/
+rename/chmod/unlink permissions, exec, pipes and `/proc/self/exe` on a booted kernel. DHCP is
+verified over virtio-net on all three architectures and over e1000 on x86_64.
+
+Two fixes are **verified by host unit tests only**, because VeridianOS cannot yet run user
+threads (the scheduler has no ring-3 entry path for a new thread; planned for v0.27.0, C5):
+
+| ID | Unit-tested | Runtime check that is blocked |
+|---|---|---|
+| LIBC-SEC-01 | allocator lock in `stdlib.c` | pthread malloc stress (`audit_runtime_test threads`) |
+| PROC-SEC-02 | deferred reap queues | a detached thread exiting on a running system |
+
+Release notes for v0.26.0 must not claim either as runtime-verified.
+
+### Commit security review follow-ups
+
+| Finding | Fix |
+|---|---|
+| DHCP replies accepted from any host (fixed xid `0x12345678`, any source port, no hardware-address check) | xid from the CSPRNG per negotiation; only BOOTREPLY from port 67, addressed to our MAC, during an active negotiation; ACK must come from the selected server |
+| virtio used-ring `id` trusted: `free_desc` indexed past the table in release builds; `u32` id truncated to `u16` | `poll_used` drops ids `>= size`; `free_desc` bounds-checks; TX reclaim frees only descriptors that are in flight |
 
 ## Issues in the uncommitted KDE Ring-3 work (pre-commit review)
 

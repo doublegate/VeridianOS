@@ -13,7 +13,6 @@
 //! device QEMU exposes on x86_64 at all.
 
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicU32, Ordering};
 
 use crate::{
     drivers::virtio::{
@@ -45,9 +44,6 @@ const TX_BUFFERS: usize = 32;
 
 /// Descriptor flag: buffer is device-writable.
 const VIRTQ_DESC_F_WRITE: u16 = 2;
-
-/// Next interface index for virtio NICs (e1000 uses eth0).
-static NEXT_IFINDEX: AtomicU32 = AtomicU32::new(1);
 
 /// Largest Ethernet frame we send or accept (without FCS).
 const MAX_FRAME: usize = 1514;
@@ -174,7 +170,7 @@ impl VirtioNetDriver {
             tx_busy: Vec::with_capacity(TX_BUFFERS),
             hdr_len: if version_1 { 12 } else { 10 },
             mac_address: MacAddress(mac),
-            name: alloc::format!("eth{}", NEXT_IFINDEX.fetch_add(1, Ordering::Relaxed)),
+            name: crate::net::device::alloc_ethernet_name(),
             features,
             state: DeviceState::Down,
             stats: DeviceStatistics::default(),
@@ -243,11 +239,19 @@ impl VirtioNetDriver {
 
     /// Return completed TX descriptors and their buffers to the free pool.
     fn reclaim_tx(&mut self) {
-        while let Some((desc, _)) = self.tx.poll_used() {
+        while self.tx.has_used() {
+            // Only a descriptor we have in flight is freed: a bogus or
+            // repeated id from the device must not corrupt the free list.
+            let Some((desc, _)) = self.tx.poll_used() else {
+                self.stats.tx_errors += 1;
+                continue;
+            };
             if let Some(slot) = self.tx_busy.iter().position(|d| *d == Some(desc)) {
                 self.tx_busy[slot] = None;
+                self.tx.free_desc(desc);
+            } else {
+                self.stats.tx_errors += 1;
             }
-            self.tx.free_desc(desc);
         }
     }
 
