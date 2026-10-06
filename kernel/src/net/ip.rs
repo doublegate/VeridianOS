@@ -195,6 +195,13 @@ static INTERFACE_CONFIG: Mutex<InterfaceConfig> = Mutex::new(InterfaceConfig {
     gateway: None,
 });
 
+/// The interface the current configuration's routes were installed on.
+/// The primary interface can change between two reconfigurations (eth0
+/// goes down, eth1 comes up), so the old routes must be removed from the
+/// interface they were put on, not from today's primary (review of the
+/// v0.26.0 stack, PR #15). Locked only while INTERFACE_CONFIG is held.
+static APPLIED_IFACE: Mutex<Option<String>> = Mutex::new(None);
+
 /// Get the currently configured interface IP address.
 pub fn get_interface_ip() -> Ipv4Address {
     INTERFACE_CONFIG.lock().ip_addr
@@ -223,9 +230,15 @@ pub fn set_interface_config(ip: Ipv4Address, mask: Ipv4Address, gw: Option<Ipv4A
         config.ip_addr = ip;
         config.subnet_mask = mask;
         config.gateway = gw;
-        if let Some(iface) = iface {
-            replace_interface_routes(&mut ROUTES.lock(), &old, &config, &iface);
-        }
+        let mut applied = APPLIED_IFACE.lock();
+        replace_interface_routes(
+            &mut ROUTES.lock(),
+            &old,
+            applied.as_deref(),
+            &config,
+            iface.as_deref(),
+        );
+        *applied = iface;
     }
 
     println!(
@@ -280,20 +293,25 @@ fn config_routes(config: &InterfaceConfig, iface: &str) -> Vec<RouteEntry> {
     routes
 }
 
-/// Swap the routes `old` installed on `iface` for those `new` implies.
-/// Only exact copies of `old`'s routes are removed, so static routes, and
-/// a static route that has since replaced one of them, survive. Review of
-/// the v0.26.0 stack, PR #12.
+/// Swap the routes `old` installed on `old_iface` for those `new` implies
+/// on `new_iface` (either may be absent). Only exact copies of `old`'s
+/// routes are removed, so static routes, and a static route that has since
+/// replaced one of them, survive. Review of the v0.26.0 stack, PRs #12, #15.
 fn replace_interface_routes(
     routes: &mut Vec<RouteEntry>,
     old: &InterfaceConfig,
+    old_iface: Option<&str>,
     new: &InterfaceConfig,
-    iface: &str,
+    new_iface: Option<&str>,
 ) {
-    let stale = config_routes(old, iface);
-    routes.retain(|r| !stale.contains(r));
-    for entry in config_routes(new, iface) {
-        insert_route(routes, entry);
+    if let Some(iface) = old_iface {
+        let stale = config_routes(old, iface);
+        routes.retain(|r| !stale.contains(r));
+    }
+    if let Some(iface) = new_iface {
+        for entry in config_routes(new, iface) {
+            insert_route(routes, entry);
+        }
     }
 }
 
@@ -498,12 +516,18 @@ mod tests {
         );
         let other_iface = route([10, 0, 2, 0], [255, 255, 255, 0], None, "eth1");
         let mut routes = Vec::new();
-        replace_interface_routes(&mut routes, &config([0; 4], [0; 4], None), &old, "eth0");
+        replace_interface_routes(
+            &mut routes,
+            &config([0; 4], [0; 4], None),
+            None,
+            &old,
+            Some("eth0"),
+        );
         routes.push(static_route.clone());
         routes.push(other_iface.clone());
         assert_eq!(routes.len(), 4);
 
-        replace_interface_routes(&mut routes, &old, &new, "eth0");
+        replace_interface_routes(&mut routes, &old, Some("eth0"), &new, Some("eth0"));
 
         assert!(!routes.contains(&route([10, 0, 2, 0], [255, 255, 255, 0], None, "eth0")));
         assert!(
@@ -516,8 +540,26 @@ mod tests {
         assert_eq!(routes.len(), 3);
 
         // Renewing the same lease changes nothing and adds no duplicates.
-        replace_interface_routes(&mut routes, &new, &new, "eth0");
+        replace_interface_routes(&mut routes, &new, Some("eth0"), &new, Some("eth0"));
         assert_eq!(routes.len(), 3);
+    }
+
+    #[test]
+    fn reconfiguration_on_a_new_primary_removes_the_old_interfaces_routes() {
+        // The lease moved from eth0 to eth1: eth0's derived routes must go,
+        // although today's primary is eth1.
+        let lease = config([10, 0, 2, 15], [255, 255, 255, 0], Some([10, 0, 2, 2]));
+        let mut routes = Vec::new();
+        replace_interface_routes(
+            &mut routes,
+            &config([0; 4], [0; 4], None),
+            None,
+            &lease,
+            Some("eth0"),
+        );
+        replace_interface_routes(&mut routes, &lease, Some("eth0"), &lease, Some("eth1"));
+        assert_eq!(routes.len(), 2);
+        assert!(routes.iter().all(|r| r.interface == "eth1"));
     }
 
     fn packet(ihl: u8, total_length: u16, payload: &[u8], padding: usize) -> Vec<u8> {
