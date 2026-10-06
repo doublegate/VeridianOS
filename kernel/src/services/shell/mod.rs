@@ -1029,6 +1029,13 @@ impl Shell {
         loop {
             let ch = Self::read_char();
 
+            // Feed received network frames into the stack while idle at
+            // the prompt (there is no network RX interrupt path yet).
+            #[cfg(feature = "alloc")]
+            if ch.is_none() {
+                crate::net::device::poll_rx();
+            }
+
             match ch {
                 Some(byte) => {
                     let history = self.history.read();

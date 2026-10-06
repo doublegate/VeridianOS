@@ -243,7 +243,7 @@ fn send_arp_frame(arp_data: &[u8], src_mac: MacAddress, dst_mac: MacAddress) {
     let _pkt = super::Packet::from_bytes(&frame);
 
     // Try to send through eth0-style device; fall back silently if unavailable
-    super::device::with_device_mut("eth0", |dev| {
+    super::device::with_primary_device_mut(|dev| {
         let _ = dev.transmit(&_pkt);
     });
 }
@@ -258,7 +258,7 @@ fn get_interface_ip() -> Ipv4Address {
 
 /// Get the MAC address of the primary network interface.
 fn get_interface_mac() -> MacAddress {
-    super::device::with_device("eth0", |dev| dev.mac_address()).unwrap_or(MacAddress::ZERO)
+    super::device::with_primary_device(|dev| dev.mac_address()).unwrap_or(MacAddress::ZERO)
 }
 
 /// Get a snapshot of the ARP cache for display purposes.

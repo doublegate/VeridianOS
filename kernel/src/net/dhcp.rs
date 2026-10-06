@@ -556,11 +556,21 @@ static DHCP_CLIENT: spin::Mutex<Option<DhcpClient>> = spin::Mutex::new(None);
 /// Start DHCP on the primary interface.
 pub fn start_dhcp() -> Result<(), KernelError> {
     let mac =
-        super::device::with_device("eth0", |dev| dev.mac_address()).unwrap_or(MacAddress::ZERO);
+        super::device::with_primary_device(|dev| dev.mac_address()).unwrap_or(MacAddress::ZERO);
 
     let mut lock = DHCP_CLIENT.lock();
     let client = lock.get_or_insert_with(|| DhcpClient::new(mac));
     client.start()
+}
+
+/// Hand a datagram received on UDP port 68 to the DHCP client, if one is
+/// running. Nothing delivered these before, so negotiation never got past
+/// DISCOVER.
+pub fn handle_packet(data: &[u8]) -> Result<(), KernelError> {
+    match DHCP_CLIENT.lock().as_mut() {
+        Some(client) => client.process_response(data),
+        None => Ok(()),
+    }
 }
 
 /// Get current DHCP state for display.

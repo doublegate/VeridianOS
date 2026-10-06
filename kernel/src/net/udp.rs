@@ -312,6 +312,11 @@ pub fn process_packet(
 
     // Extract payload
     let payload = &data[UdpHeader::SIZE..header.length as usize];
+
+    // DHCP client traffic is handled in the kernel, not by a socket.
+    if header.dest_port == 68 {
+        return super::dhcp::handle_packet(payload);
+    }
     let src = SocketAddr::new(src_addr, header.source_port);
     let _dst = SocketAddr::new(dst_addr, header.dest_port);
 

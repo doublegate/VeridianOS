@@ -331,6 +331,67 @@ pub fn with_device_mut<R, F: FnOnce(&mut dyn NetworkDevice) -> R>(name: &str, f:
     }
 }
 
+/// Whether `name` is the loopback device ("lo0").
+fn is_loopback(name: &str) -> bool {
+    name.starts_with("lo")
+}
+
+/// Name of the primary interface: the first registered device that is up
+/// and is not loopback. Callers that used to hardcode "eth0" go through this
+/// (a virtio-net NIC registers as "eth1", so its traffic was dropped).
+pub fn primary_device_name() -> Option<String> {
+    let devices_lock = DEVICES.lock();
+    devices_lock.as_ref().and_then(|devices| {
+        devices
+            .iter()
+            .find(|d| !is_loopback(d.name()) && d.state() == DeviceState::Up)
+            .map(|d| String::from(d.name()))
+    })
+}
+
+/// Run `f` on the primary interface (see [`primary_device_name`]).
+pub fn with_primary_device<R, F: FnOnce(&dyn NetworkDevice) -> R>(f: F) -> Option<R> {
+    let name = primary_device_name()?;
+    with_device(&name, f)
+}
+
+/// Run `f` on the primary interface, mutably.
+pub fn with_primary_device_mut<R, F: FnOnce(&mut dyn NetworkDevice) -> R>(f: F) -> Option<R> {
+    let name = primary_device_name()?;
+    with_device_mut(&name, f)
+}
+
+/// Drain received frames from every non-loopback device and hand them to
+/// the protocol stack. Returns the number of frames dispatched.
+///
+/// Frames are collected first and dispatched after the device registry
+/// lock is released: protocol handlers transmit (ARP replies, TCP ACKs)
+/// and would otherwise deadlock on it. Nothing used to read received
+/// frames into the stack at all.
+pub fn poll_rx() -> usize {
+    const BUDGET: usize = 64;
+    let mut frames: Vec<(Vec<u8>, MacAddress)> = Vec::new();
+    {
+        let mut devices_lock = DEVICES.lock();
+        if let Some(ref mut devices) = *devices_lock {
+            for dev in devices.iter_mut().filter(|d| !is_loopback(d.name())) {
+                let mac = dev.mac_address();
+                while frames.len() < BUDGET {
+                    match dev.receive() {
+                        Ok(Some(pkt)) => frames.push((pkt.data().to_vec(), mac)),
+                        _ => break,
+                    }
+                }
+            }
+        }
+    }
+    let count = frames.len();
+    for (frame, mac) in frames {
+        let _ = super::ethernet::dispatch_frame(&frame, &mac);
+    }
+    count
+}
+
 /// List all device names
 pub fn list_devices() -> Vec<String> {
     let devices_lock = DEVICES.lock();

@@ -276,7 +276,7 @@ pub fn send(dest: IpAddress, protocol: IpProtocol, data: &[u8]) -> Result<(), Ke
                 })
             };
 
-            let src_mac = super::device::with_device("eth0", |dev| dev.mac_address())
+            let src_mac = super::device::with_primary_device(|dev| dev.mac_address())
                 .unwrap_or(super::MacAddress::ZERO);
 
             // Wrap in Ethernet frame
@@ -289,7 +289,7 @@ pub fn send(dest: IpAddress, protocol: IpProtocol, data: &[u8]) -> Result<(), Ke
 
             // Transmit
             let pkt = super::Packet::from_bytes(&frame);
-            super::device::with_device_mut("eth0", |dev| {
+            super::device::with_primary_device_mut(|dev| {
                 let _ = dev.transmit(&pkt);
             });
 
