@@ -85,6 +85,19 @@ impl PriorityQueue {
         self.count
     }
 
+    /// Remove and return the first task (in queue order) for which `pred`
+    /// holds, leaving the others in place and in order.
+    pub fn take_first_where(&mut self, pred: impl Fn(&Task) -> bool) -> Option<NonNull<Task>> {
+        let target = (0..self.count)
+            .filter_map(|i| self.tasks[(self.head + i) % MAX_TASKS_PER_QUEUE])
+            .map(|t| t.as_ptr())
+            // SAFETY: queued tasks are valid while queued (scheduler
+            // invariant); `pred` only reads them.
+            .find(|t| pred(unsafe { t.as_ref() }))?;
+        self.remove(target);
+        Some(target)
+    }
+
     /// Remove specific task from queue, keeping the others in order.
     ///
     /// Compacts in place (SCHED-PERF-03): the previous version built a
@@ -257,6 +270,45 @@ impl ReadyQueue {
         None
     }
 
+    /// Remove and return the highest-priority task for which `pred` holds
+    /// (FIFO within a level), leaving all others where they are.
+    pub fn take_first_where(&mut self, pred: impl Fn(&Task) -> bool) -> Option<NonNull<Task>> {
+        let mut rt = self.rt_bitmap;
+        while rt != 0 {
+            let idx = rt.trailing_zeros() as usize;
+            rt &= !(1 << idx);
+            if let Some(t) = self.rt_queues[idx].take_first_where(&pred) {
+                if self.rt_queues[idx].is_empty() {
+                    self.rt_bitmap &= !(1 << idx);
+                }
+                self.len -= 1;
+                return Some(t);
+            }
+        }
+        let mut normal = self.normal_bitmap;
+        while normal != 0 {
+            let idx = normal.trailing_zeros() as usize;
+            normal &= !(1 << idx);
+            if let Some(t) = self.normal_queues[idx].take_first_where(&pred) {
+                if self.normal_queues[idx].is_empty() {
+                    self.normal_bitmap &= !(1 << idx);
+                }
+                self.len -= 1;
+                return Some(t);
+            }
+        }
+        if self.idle_flag {
+            if let Some(t) = self.idle_queue.take_first_where(&pred) {
+                if self.idle_queue.is_empty() {
+                    self.idle_flag = false;
+                }
+                self.len -= 1;
+                return Some(t);
+            }
+        }
+        None
+    }
+
     /// Remove specific task from queues
     pub fn remove(&mut self, task: NonNull<Task>) -> bool {
         let removed = self.remove_inner(task);
@@ -386,6 +438,24 @@ impl CfsRunQueue {
         } else {
             None
         }
+    }
+
+    /// Remove and return the task with the lowest vruntime for which `pred`
+    /// holds, leaving all others where they are.
+    pub fn take_first_where(&mut self, pred: impl Fn(&Task) -> bool) -> Option<NonNull<Task>> {
+        let target = self
+            .tasks
+            .values()
+            .flat_map(|v| v.iter().rev()) // dequeue() pops from the end
+            .map(|t| t.as_ptr())
+            // SAFETY: queued tasks are valid while queued; `pred` only reads.
+            .find(|t| pred(unsafe { t.as_ref() }))?;
+        // As dequeue() does: min_vruntime follows the queue's lowest key.
+        if let Some(&lowest) = self.tasks.keys().next() {
+            self.min_vruntime = self.min_vruntime.max(lowest);
+        }
+        self.remove(target);
+        Some(target)
     }
 
     /// Remove specific task

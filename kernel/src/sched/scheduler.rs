@@ -63,54 +63,32 @@ pub enum SchedAlgorithm {
     Hybrid,
 }
 
-/// A run queue that `take_runnable` can rotate.
+/// A run queue that can hand out the first task allowed on a CPU.
 trait RunQueue {
-    fn take(&mut self) -> Option<NonNull<Task>>;
-    fn put_back(&mut self, task: NonNull<Task>);
-    fn queued(&self) -> usize;
+    fn take_first_where(&mut self, pred: &dyn Fn(&Task) -> bool) -> Option<NonNull<Task>>;
 }
 
 impl RunQueue for super::queue::ReadyQueue {
-    fn take(&mut self) -> Option<NonNull<Task>> {
-        self.dequeue()
-    }
-    fn put_back(&mut self, task: NonNull<Task>) {
-        // Cannot fail: the task's slot was freed by the dequeue.
-        let _ = self.enqueue(task);
-    }
-    fn queued(&self) -> usize {
-        self.len()
+    fn take_first_where(&mut self, pred: &dyn Fn(&Task) -> bool) -> Option<NonNull<Task>> {
+        super::queue::ReadyQueue::take_first_where(self, pred)
     }
 }
 
 #[cfg(feature = "alloc")]
 impl RunQueue for super::queue::CfsRunQueue {
-    fn take(&mut self) -> Option<NonNull<Task>> {
-        self.dequeue()
-    }
-    fn put_back(&mut self, task: NonNull<Task>) {
-        self.enqueue(task);
-    }
-    fn queued(&self) -> usize {
-        self.len()
+    fn take_first_where(&mut self, pred: &dyn Fn(&Task) -> bool) -> Option<NonNull<Task>> {
+        super::queue::CfsRunQueue::take_first_where(self, pred)
     }
 }
 
-/// Dequeue the first task that can run on `cpu`, taking each queued task at
-/// most once (SCHED-PERF-02). Tasks that cannot run here are put back in
-/// order. Without the bound, a queue whose tasks were all pinned to other
-/// CPUs was rotated forever with its lock held.
+/// Remove and return the first task, in the queue's own order, that can
+/// run on `cpu` (SCHED-PERF-02). Tasks that cannot run here are not
+/// touched. The previous loops dequeued and re-enqueued them: unbounded
+/// when every task was pinned elsewhere, and on the CFS queue -- whose
+/// dequeue is LIFO among equal vruntimes -- re-enqueueing a pinned task
+/// handed the same task straight back, starving runnable tasks behind it.
 fn take_runnable<Q: RunQueue + ?Sized>(queue: &mut Q, cpu: u8) -> Option<NonNull<Task>> {
-    for _ in 0..queue.queued() {
-        let task = queue.take()?;
-        // SAFETY: tasks in a ready queue are valid while queued; only
-        // cpu_affinity is read.
-        if unsafe { task.as_ref() }.can_run_on(cpu) {
-            return Some(task);
-        }
-        queue.put_back(task);
-    }
-    None
+    queue.take_first_where(&|t: &Task| t.can_run_on(cpu))
 }
 
 impl Scheduler {
@@ -946,7 +924,23 @@ mod tests {
     }
 
     #[test]
-    fn take_runnable_rotates_each_task_at_most_once() {
+    fn cfs_pinned_task_does_not_starve_runnable_ones() {
+        // Equal vruntimes: CFS dequeue is LIFO among them, so the old
+        // dequeue/re-enqueue loop got the pinned task back every time.
+        let mut q = super::super::queue::CfsRunQueue::new();
+        let mine = pinned(10, 0);
+        let other = pinned(11, 1);
+        q.enqueue(mine);
+        q.enqueue(other);
+        assert_eq!(take_runnable(&mut q, 0), Some(mine));
+        assert_eq!(q.len(), 1);
+        assert_eq!(take_runnable(&mut q, 0), None);
+        assert_eq!(take_runnable(&mut q, 1), Some(other));
+        assert!(q.is_empty());
+    }
+
+    #[test]
+    fn take_runnable_leaves_other_tasks_in_order() {
         let mut q = ReadyQueue::new_boxed();
         let others = [pinned(1, 1), pinned(2, 1), pinned(3, 1)];
         for &t in &others {
