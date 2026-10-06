@@ -2426,7 +2426,10 @@ fn sys_recvmsg(socket_fd: usize, msghdr_ptr: usize, _flags: usize) -> SyscallRes
     // many as the control buffer can report; the rest are dropped (closed),
     // as Linux does when it truncates the control message.
     let mut wrote_control = false;
+    let mut sent_fds = 0usize;
+    let mut delivered_fds = 0usize;
     if let Some(scm) = rights {
+        sent_fds = scm.files.len();
         let room = if control_ptr != 0 && control_len >= CMSGHDR_SIZE {
             (control_len - CMSGHDR_SIZE) / 4
         } else {
@@ -2443,7 +2446,9 @@ fn sys_recvmsg(socket_fd: usize, msghdr_ptr: usize, _flags: usize) -> SyscallRes
         }
         if !fds.is_empty() {
             wrote_control = write_scm_rights(control_ptr, control_len, &fds, msghdr_ptr);
-            if !wrote_control {
+            if wrote_control {
+                delivered_fds = fds.len();
+            } else {
                 // The receiver could never learn these fds: undo.
                 for &fd in &fds {
                     let _ = table.close(fd as usize);
@@ -2456,8 +2461,30 @@ fn sys_recvmsg(socket_fd: usize, msghdr_ptr: usize, _flags: usize) -> SyscallRes
         // stale bytes. SAFETY: msghdr_ptr was validated for 56 bytes above.
         unsafe { core::ptr::write_unaligned((msghdr_ptr as *mut usize).add(5), 0) };
     }
+    // msg_flags is always written, so the caller never reads back what it
+    // left there, and carries MSG_CTRUNC when fds were dropped (review of
+    // the v0.26.0 stack, PR #10).
+    userspace::write_user::<i32>(
+        msghdr_ptr + MSGHDR_FLAGS_OFFSET,
+        recvmsg_flags(sent_fds, delivered_fds),
+    )?;
 
     Ok(received)
+}
+
+/// `MSG_CTRUNC`: control data was discarded for lack of room.
+const MSG_CTRUNC: i32 = 0x8;
+/// Offset of `int msg_flags` in the LP64 `struct msghdr`.
+const MSGHDR_FLAGS_OFFSET: usize = 48;
+
+/// `msg_flags` for a recvmsg that received `sent` passed fds and could
+/// deliver `delivered` of them.
+fn recvmsg_flags(sent: usize, delivered: usize) -> i32 {
+    if delivered < sent {
+        MSG_CTRUNC
+    } else {
+        0
+    }
 }
 
 /// Write SCM_RIGHTS fds into the user's msg_control buffer as one cmsghdr
@@ -3690,6 +3717,17 @@ mod tests {
             parse_scm_rights(b.as_ptr() as usize, b.len()),
             Err(SyscallError::InvalidArgument)
         );
+    }
+
+    /// recvmsg reports dropped fds with MSG_CTRUNC (review of the v0.26.0
+    /// stack, PR #10).
+    #[test]
+    fn recvmsg_flags_report_control_truncation() {
+        assert_eq!(MSG_CTRUNC, 0x8);
+        assert_eq!(recvmsg_flags(0, 0), 0);
+        assert_eq!(recvmsg_flags(2, 2), 0);
+        assert_eq!(recvmsg_flags(3, 1), MSG_CTRUNC);
+        assert_eq!(recvmsg_flags(1, 0), MSG_CTRUNC);
     }
 
     #[test]
