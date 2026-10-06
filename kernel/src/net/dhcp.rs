@@ -294,8 +294,12 @@ pub struct DhcpClient {
     /// Current state
     state: DhcpState,
 
-    /// Transaction ID
+    /// Transaction ID, fresh from the CSPRNG for every negotiation so an
+    /// off-path host cannot guess it.
     xid: u32,
+
+    /// Server chosen from the OFFER; the ACK must come from it.
+    server_id: Option<Ipv4Address>,
 
     /// Current configuration
     #[allow(dead_code)] // Read during DHCP lease renewal (Phase 6)
@@ -308,7 +312,8 @@ impl DhcpClient {
         Self {
             mac_address,
             state: DhcpState::Init,
-            xid: 0x12345678, // Would use random
+            xid: 0,
+            server_id: None,
             config: None,
         }
     }
@@ -357,6 +362,7 @@ impl DhcpClient {
         );
 
         // Send REQUEST for the offered IP
+        self.server_id = Some(server_id);
         let request = self.create_request(offered_ip, server_id);
         let request_bytes = request.to_bytes();
         send_dhcp_packet(&request_bytes);
@@ -376,6 +382,9 @@ impl DhcpClient {
         }
 
         let options = parse_dhcp_options(&packet.options);
+        if options.server_id.is_some() && options.server_id != self.server_id {
+            return Ok(()); // ACK from a server we did not select
+        }
 
         let ip = packet.yiaddr;
         let subnet = options
@@ -438,9 +447,10 @@ impl DhcpClient {
     pub fn process_response(&mut self, data: &[u8]) -> Result<(), KernelError> {
         let packet = DhcpPacket::from_bytes(data)?;
 
-        // Verify transaction ID matches
-        if packet.xid != self.xid {
-            return Ok(()); // Not for us
+        // Only replies to the negotiation in progress, addressed to our
+        // hardware address, are accepted.
+        if !self.accepts(&packet) {
+            return Ok(());
         }
 
         match packet.get_message_type() {
@@ -453,6 +463,15 @@ impl DhcpClient {
             }
             _ => Ok(()),
         }
+    }
+
+    /// Whether `packet` is a server reply to our current negotiation.
+    fn accepts(&self, packet: &DhcpPacket) -> bool {
+        matches!(self.state, DhcpState::Selecting | DhcpState::Requesting)
+            && packet.op == DHCP_OP_BOOTREPLY
+            && packet.xid == self.xid
+            && packet.hlen == 6
+            && packet.chaddr[..6] == self.mac_address.0
     }
 
     /// Get current DHCP state
@@ -468,6 +487,8 @@ impl DhcpClient {
     /// Start DHCP negotiation -- sends DISCOVER via UDP broadcast.
     pub fn start(&mut self) -> Result<(), KernelError> {
         println!("[DHCP] Starting DHCP negotiation");
+        self.xid = crate::crypto::random::get_random().next_u32();
+        self.server_id = None;
 
         let discover = self.create_discover();
         let discover_bytes = discover.to_bytes();
@@ -597,6 +618,35 @@ mod tests {
         assert_eq!(packet.op, DHCP_OP_BOOTREQUEST);
         assert_eq!(packet.htype, DHCP_HTYPE_ETHERNET);
         assert_eq!(packet.hlen, 6);
+    }
+
+    #[test]
+    fn test_dhcp_accepts_only_matching_replies() {
+        let mac = MacAddress([0x52, 0x54, 0x00, 0x12, 0x34, 0x56]);
+        let mut client = DhcpClient::new(mac);
+        client.xid = 0xA1B2_C3D4;
+
+        let mut reply = DhcpPacket::new(DhcpMessageType::Offer, mac, client.xid);
+        reply.op = DHCP_OP_BOOTREPLY;
+
+        // No negotiation in progress: nothing is accepted.
+        assert!(!client.accepts(&reply));
+
+        client.state = DhcpState::Selecting;
+        assert!(client.accepts(&reply));
+
+        let mut wrong_xid = DhcpPacket::new(DhcpMessageType::Offer, mac, 0x1234_5678);
+        wrong_xid.op = DHCP_OP_BOOTREPLY;
+        assert!(!client.accepts(&wrong_xid));
+
+        let other = MacAddress([0x02, 0, 0, 0, 0, 1]);
+        let mut wrong_mac = DhcpPacket::new(DhcpMessageType::Offer, other, client.xid);
+        wrong_mac.op = DHCP_OP_BOOTREPLY;
+        assert!(!client.accepts(&wrong_mac));
+
+        // A client request echoed back is not a server reply.
+        let request = DhcpPacket::new(DhcpMessageType::Request, mac, client.xid);
+        assert!(!client.accepts(&request));
     }
 
     #[test]

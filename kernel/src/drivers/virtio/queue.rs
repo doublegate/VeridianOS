@@ -267,9 +267,11 @@ impl VirtQueue {
 
     /// Return a descriptor to the free list.
     pub fn free_desc(&mut self, idx: u16) {
-        debug_assert!((idx as usize) < self.size as usize);
+        if idx >= self.size {
+            return;
+        }
 
-        // SAFETY: `idx` is within bounds (asserted above). We relink it into
+        // SAFETY: `idx` is within bounds (checked above). We relink it into
         // the free list by updating its `next` field.
         unsafe {
             let desc = &mut *self.desc.add(idx as usize);
@@ -380,6 +382,12 @@ impl VirtQueue {
 
         self.last_used_idx = self.last_used_idx.wrapping_add(1);
 
+        // The id comes from the device and is untrusted: an id outside the
+        // table would index past it (and truncating it to u16 would alias
+        // a real descriptor). Callers see `None` for this element.
+        if elem.id >= u32::from(self.size) {
+            return None;
+        }
         Some((elem.id as u16, elem.len))
     }
 
