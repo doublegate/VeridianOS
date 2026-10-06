@@ -6,7 +6,7 @@
 use alloc::boxed::Box;
 
 use super::device::{self, NetworkDevice};
-use crate::error::KernelError;
+use crate::{drivers::virtio_net::VirtioNetDriver, error::KernelError};
 
 // PCI vendor and device IDs for network cards (only used on x86_64)
 #[cfg(target_arch = "x86_64")]
@@ -95,12 +95,20 @@ pub fn register_drivers() -> Result<(), KernelError> {
                     device.location.bus, device.location.device, device.location.function
                 );
 
-                if let Some(bar0) = device.bars.first() {
-                    if let Some(address) = bar0.get_memory_address() {
-                        if try_register_virtio_net(address).is_ok() {
+                // Legacy virtio-net-pci exposes its registers through an
+                // I/O-port BAR0; it was passed to the MMIO driver as a memory
+                // address before, so it was never registered on x86_64. The
+                // modern (memory BAR, capability-list) layout is not supported.
+                match device.bars.first().and_then(|bar| bar.get_io_address()) {
+                    Some(io_base) => {
+                        if register_virtio_net(VirtioNetDriver::new_pci(io_base as u16)).is_ok() {
                             device_count += 1;
                         }
                     }
+                    None => println!(
+                        "[NET-INTEGRATION] VirtIO-Net without an I/O BAR (modern-only) is not \
+                         supported"
+                    ),
                 }
             }
         }
@@ -109,15 +117,19 @@ pub fn register_drivers() -> Result<(), KernelError> {
     // For non-x86_64 architectures, try VirtIO MMIO at known addresses
     #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
     {
-        // VirtIO MMIO devices at platform-specific addresses
+        // QEMU virt boards have a fixed array of virtio-mmio slots and fill
+        // them from the highest address down, so scan every slot; the
+        // driver skips slots holding another device type. Only the first
+        // four were probed before, which missed a NIC in the usual slot.
         #[cfg(target_arch = "aarch64")]
-        let virtio_bases = [0x0a000000, 0x0a000200, 0x0a000400, 0x0a000600];
+        let virtio_bases = (0..32usize).map(|i| 0x0a00_0000 + i * 0x200);
 
         #[cfg(target_arch = "riscv64")]
-        let virtio_bases = [0x10001000, 0x10002000, 0x10003000, 0x10004000];
+        let virtio_bases = (0..8usize).map(|i| 0x1000_1000 + i * 0x1000);
 
-        for &base in &virtio_bases {
-            if try_register_virtio_net(base as u64).is_ok() {
+        for base in virtio_bases {
+            // VirtioNetDriver::new checks the slot holds a network device.
+            if register_virtio_net(VirtioNetDriver::new(base)).is_ok() {
                 device_count += 1;
             }
         }
@@ -179,41 +191,27 @@ fn try_register_e1000(bar_address: u64) -> Result<(), KernelError> {
     }
 }
 
-/// Try to register VirtIO-Net driver if hardware is present
-fn try_register_virtio_net(bar_address: u64) -> Result<(), KernelError> {
-    use crate::drivers::virtio_net::VirtioNetDriver;
-
+/// Register an initialized VirtIO-Net driver with the device registry.
+fn register_virtio_net(driver: Result<VirtioNetDriver, KernelError>) -> Result<(), KernelError> {
+    let driver = driver?;
+    let mac = driver.mac_address();
     println!(
-        "[NET-INTEGRATION] Initializing VirtIO-Net at 0x{:x}",
-        bar_address
+        "[NET-INTEGRATION] VirtIO-Net initialized: {} (MAC: \
+         {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x})",
+        driver.name(),
+        mac.0[0],
+        mac.0[1],
+        mac.0[2],
+        mac.0[3],
+        mac.0[4],
+        mac.0[5]
     );
-
-    match VirtioNetDriver::new(bar_address as usize) {
-        Ok(driver) => {
-            let name = driver.name();
-            let mac = driver.mac_address();
-
-            println!(
-                "[NET-INTEGRATION] VirtIO-Net initialized: {} (MAC: \
-                 {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x})",
-                name, mac.0[0], mac.0[1], mac.0[2], mac.0[3], mac.0[4], mac.0[5]
-            );
-
-            // Register with network device registry
-            if let Err(e) = device::register_device(Box::new(driver)) {
-                println!(
-                    "[NET-INTEGRATION] Warning: failed to register VirtIO-Net: {:?}",
-                    e
-                );
-            }
-
-            Ok(())
-        }
-        Err(_) => Err(KernelError::NotFound {
-            resource: "virtio_net_hardware",
-            id: 0,
-        }),
-    }
+    device::register_device(Box::new(driver)).inspect_err(|e| {
+        println!(
+            "[NET-INTEGRATION] Warning: failed to register VirtIO-Net: {:?}",
+            e
+        )
+    })
 }
 
 /// Register a manually-created network device (for testing/debugging)
