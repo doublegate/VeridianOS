@@ -11,8 +11,8 @@ v0.26.0 remediates the findings of the 2026-10-05 performance and quality audit
 
 Each finding was first re-verified against the code; the per-finding results are in
 `docs/audit/AUDIT-VERIFICATION-2026-10-05.md`. Verification found 34 defects the audit missed
-(N-01..N-34), and the bot review of the release found 14 more (N-35..N-48). The same file tracks all
-of them: 32 are fixed and 16 are open, each with its planned release.
+(N-01..N-34), and the bot review of the release found 16 more (N-35..N-50). The same file tracks all
+of them: 32 are fixed and 18 are open, each with its planned release.
 
 **Status:**
 
@@ -222,7 +222,8 @@ Deferred with audit IDs:
 - BlockFS directory space (N-44);
 - the remaining socket options (N-48);
 - fork leaks on late errors (N-46);
-- the split IPC endpoint registries (N-47).
+- the split IPC endpoint registries (N-47), and two IPC races that are unreachable today (N-49,
+  N-50).
 
 #### Known limitations and deferrals
 
