@@ -2245,11 +2245,13 @@ fn sys_sendmsg(socket_fd: usize, msghdr_ptr: usize, _flags: usize) -> SyscallRes
 
     // Parse ancillary data for SCM_RIGHTS: the passed fds must be open in
     // the sender's table, and what travels is the open files themselves.
-    let rights = if control_len >= 16 && control_ptr != 0 {
+    let rights = if control_len >= CMSGHDR_SIZE && control_ptr != 0 {
         validate_user_buffer(control_ptr, control_len)?;
-        match parse_scm_rights(control_ptr, control_len) {
-            Some(fds) => Some(files_for_fds(&fds)?),
-            None => None,
+        let fds = parse_scm_rights(control_ptr, control_len)?;
+        if fds.is_empty() {
+            None
+        } else {
+            Some(files_for_fds(&fds)?)
         }
     } else {
         None
@@ -2262,15 +2264,21 @@ fn sys_sendmsg(socket_fd: usize, msghdr_ptr: usize, _flags: usize) -> SyscallRes
     })?
 }
 
-/// Look up each fd in the caller's table (EBADF if any is not open).
-fn files_for_fds(fds: &[u32]) -> Result<crate::net::unix_socket::ScmRights, SyscallError> {
+/// An fd from an SCM_RIGHTS array as a table index; a negative fd is EBADF.
+fn scm_fd_index(fd: i32) -> Result<usize, SyscallError> {
+    usize::try_from(fd).map_err(|_| SyscallError::BadFileDescriptor)
+}
+
+/// Look up each fd in the caller's table (EBADF if any is negative or not
+/// open).
+fn files_for_fds(fds: &[i32]) -> Result<crate::net::unix_socket::ScmRights, SyscallError> {
     let process = crate::process::current_process().ok_or(SyscallError::InvalidState)?;
     let table = process.file_table.lock();
     let files = fds
         .iter()
         .map(|&fd| {
             table
-                .get(fd as usize)
+                .get(scm_fd_index(fd)?)
                 .ok_or(SyscallError::BadFileDescriptor)
         })
         .collect::<Result<alloc::vec::Vec<_>, _>>()?;
@@ -2298,46 +2306,54 @@ const SCM_RIGHTS_TYPE: i32 = 1;
 /// Most fds accepted in one SCM_RIGHTS message (Linux: SCM_MAX_FD = 253).
 const SCM_MAX_FDS: usize = 16;
 
-/// Parse the fd array of an SCM_RIGHTS control message. `control_ptr` must
-/// have been validated for `control_len` bytes; `cmsg_len` comes from user
-/// memory and is checked against that length before anything past the
-/// header is read.
-fn parse_scm_rights(control_ptr: usize, control_len: usize) -> Option<alloc::vec::Vec<u32>> {
+/// Parse the fd array of the first control message at `control_ptr`
+/// (`control_len` bytes of user memory). `cmsg_len` comes from user memory
+/// and is checked against `control_len` before anything past the header is
+/// read.
+///
+/// Mirrors Linux `__scm_send`/`scm_fp_copy` (review of the v0.26.0 stack,
+/// PR #10): a `cmsg_len` shorter than the header or past the buffer is
+/// EINVAL; a message for another level is skipped (empty result); an
+/// unsupported SOL_SOCKET type (including SCM_CREDENTIALS, not modelled) is
+/// EINVAL; more than `SCM_MAX_FDS` fds is EINVAL. Negative fds are returned
+/// as-is so that `files_for_fds` fails the send with EBADF -- they used to
+/// be dropped silently. An empty result means "no rights to pass".
+fn parse_scm_rights(
+    control_ptr: usize,
+    control_len: usize,
+) -> Result<alloc::vec::Vec<i32>, SyscallError> {
     if control_len < CMSGHDR_SIZE {
-        return None;
+        return Err(SyscallError::InvalidArgument);
     }
-    // SAFETY: control_ptr was validated by the caller for control_len >= 16
-    // bytes; user memory has no alignment guarantee, hence read_unaligned.
-    let (cmsg_len, level, kind) = unsafe {
-        (
-            core::ptr::read_unaligned(control_ptr as *const u64) as usize,
-            core::ptr::read_unaligned((control_ptr + 8) as *const i32),
-            core::ptr::read_unaligned((control_ptr + 12) as *const i32),
-        )
-    };
-    if level != SOL_SOCKET_LEVEL || kind != SCM_RIGHTS_TYPE {
-        return None;
-    }
+    let mut hdr = [0u8; CMSGHDR_SIZE];
+    userspace::read_user_bytes(control_ptr, &mut hdr)?;
+    let cmsg_len = u64::from_ne_bytes([
+        hdr[0], hdr[1], hdr[2], hdr[3], hdr[4], hdr[5], hdr[6], hdr[7],
+    ]);
+    let level = i32::from_ne_bytes([hdr[8], hdr[9], hdr[10], hdr[11]]);
+    let kind = i32::from_ne_bytes([hdr[12], hdr[13], hdr[14], hdr[15]]);
+    let cmsg_len = usize::try_from(cmsg_len).map_err(|_| SyscallError::InvalidArgument)?;
     if cmsg_len < CMSGHDR_SIZE || cmsg_len > control_len {
-        return None;
+        return Err(SyscallError::InvalidArgument);
+    }
+    if level != SOL_SOCKET_LEVEL {
+        return Ok(alloc::vec::Vec::new());
+    }
+    if kind != SCM_RIGHTS_TYPE {
+        return Err(SyscallError::InvalidArgument);
     }
     let fd_count = (cmsg_len - CMSGHDR_SIZE) / 4;
-    if fd_count == 0 || fd_count > SCM_MAX_FDS {
-        return None;
+    if fd_count > SCM_MAX_FDS {
+        return Err(SyscallError::InvalidArgument);
     }
-    let fds: alloc::vec::Vec<u32> = (0..fd_count)
-        .map(|i| {
-            // SAFETY: CMSGHDR_SIZE + 4 * i + 4 <= cmsg_len <= control_len.
-            unsafe { core::ptr::read_unaligned((control_ptr + CMSGHDR_SIZE + 4 * i) as *const i32) }
-        })
-        .filter(|&fd| fd >= 0)
-        .map(|fd| fd as u32)
-        .collect();
-    if fds.is_empty() {
-        None
-    } else {
-        Some(fds)
-    }
+    let mut raw = [0u8; 4 * SCM_MAX_FDS];
+    let raw = &mut raw[..4 * fd_count];
+    // CMSGHDR_SIZE + 4 * fd_count <= cmsg_len <= control_len.
+    userspace::read_user_bytes(control_ptr + CMSGHDR_SIZE, raw)?;
+    Ok(raw
+        .chunks_exact(4)
+        .map(|c| i32::from_ne_bytes([c[0], c[1], c[2], c[3]]))
+        .collect())
 }
 
 /// recvmsg syscall -- receives data with optional ancillary data (SCM_RIGHTS).
@@ -3612,7 +3628,19 @@ mod tests {
         let b = cmsg(16 + 8, 1, 1, &[5, 7]);
         assert_eq!(
             parse_scm_rights(b.as_ptr() as usize, b.len()),
-            Some(alloc::vec![5, 7])
+            Ok(alloc::vec![5, 7])
+        );
+    }
+
+    /// A negative fd is kept so files_for_fds fails the send with EBADF,
+    /// instead of being dropped from the array (review of the v0.26.0
+    /// stack, PR #10).
+    #[test]
+    fn scm_rights_keeps_negative_fds() {
+        let b = cmsg(16 + 8, 1, 1, &[5, -1]);
+        assert_eq!(
+            parse_scm_rights(b.as_ptr() as usize, b.len()),
+            Ok(alloc::vec![5, -1])
         );
     }
 
@@ -3620,17 +3648,55 @@ mod tests {
     fn scm_rights_rejects_len_past_buffer() {
         // cmsg_len claims 4 fds but the validated buffer holds 1.
         let b = cmsg(16 + 16, 1, 1, &[5]);
-        assert_eq!(parse_scm_rights(b.as_ptr() as usize, b.len()), None);
+        assert_eq!(
+            parse_scm_rights(b.as_ptr() as usize, b.len()),
+            Err(SyscallError::InvalidArgument)
+        );
+        // Shorter than the header (Linux CMSG_OK fails: EINVAL).
+        let b = cmsg(8, 1, 1, &[]);
+        assert_eq!(
+            parse_scm_rights(b.as_ptr() as usize, 16),
+            Err(SyscallError::InvalidArgument)
+        );
     }
 
     #[test]
-    fn scm_rights_rejects_other_levels_and_types() {
+    fn scm_rights_level_and_type() {
+        // Linux skips control messages for other levels.
         let b = cmsg(20, 0, 1, &[5]);
-        assert_eq!(parse_scm_rights(b.as_ptr() as usize, b.len()), None);
-        let b = cmsg(20, 1, 2, &[5]); // SCM_CREDENTIALS
-        assert_eq!(parse_scm_rights(b.as_ptr() as usize, b.len()), None);
-        let b = cmsg(8, 1, 1, &[]); // shorter than the header
-        assert_eq!(parse_scm_rights(b.as_ptr() as usize, 16), None);
+        assert_eq!(
+            parse_scm_rights(b.as_ptr() as usize, b.len()),
+            Ok(alloc::vec![])
+        );
+        // An unsupported SOL_SOCKET type is EINVAL (SCM_CREDENTIALS = 2).
+        let b = cmsg(20, 1, 2, &[5]);
+        assert_eq!(
+            parse_scm_rights(b.as_ptr() as usize, b.len()),
+            Err(SyscallError::InvalidArgument)
+        );
+    }
+
+    #[test]
+    fn scm_rights_fd_count_limits() {
+        // An empty SCM_RIGHTS passes nothing, as on Linux.
+        let b = cmsg(16, 1, 1, &[]);
+        assert_eq!(
+            parse_scm_rights(b.as_ptr() as usize, b.len()),
+            Ok(alloc::vec![])
+        );
+        let fds = [3i32; SCM_MAX_FDS + 1];
+        let b = cmsg((16 + 4 * fds.len()) as u64, 1, 1, &fds);
+        assert_eq!(
+            parse_scm_rights(b.as_ptr() as usize, b.len()),
+            Err(SyscallError::InvalidArgument)
+        );
+    }
+
+    #[test]
+    fn fd_index_rejects_negative() {
+        assert_eq!(scm_fd_index(-1), Err(SyscallError::BadFileDescriptor));
+        assert_eq!(scm_fd_index(i32::MIN), Err(SyscallError::BadFileDescriptor));
+        assert_eq!(scm_fd_index(7), Ok(7));
     }
 
     // --- Rate limiter (SYS-PERF-01) ---
