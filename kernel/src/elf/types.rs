@@ -231,7 +231,17 @@ impl ElfBinary {
                     && self.phoff >= s.file_offset
                     && self.phoff - s.file_offset < s.file_size
             })
-            .map(|s| s.virtual_addr + (self.phoff - s.file_offset))
+            .and_then(|s| s.virtual_addr.checked_add(self.phoff - s.file_offset))
+    }
+
+    /// AT_PHDR for the auxiliary vector: [`Self::phdr_vaddr`], or, for a
+    /// table outside every segment, `load_base + e_phoff`. `None` if that
+    /// sum overflows: the header values are untrusted input, so an
+    /// out-of-range address is an error, not a wrapped or panicking
+    /// computation (review of the v0.26.0 stack, PR #15).
+    pub fn phdr_address(&self) -> Option<u64> {
+        self.phdr_vaddr()
+            .or_else(|| self.load_base.checked_add(self.phoff))
     }
 }
 

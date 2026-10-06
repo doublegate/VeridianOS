@@ -259,23 +259,10 @@ pub fn load_user_program(
         // points anywhere else. phdr_vaddr() takes it from PT_PHDR or the
         // PT_LOAD that holds e_phoff; load_base + e_phoff is only the
         // fallback for a table outside every segment.
-        let phdr_addr = binary
-            .phdr_vaddr()
-            .unwrap_or(binary.load_base + binary.phoff);
-
-        #[cfg(target_arch = "x86_64")]
-        // SAFETY: raw_serial_str/raw_serial_hex write to COM1 I/O port for diagnostic output.
-        unsafe {
-            crate::arch::x86_64::idt::raw_serial_str(b"[AUXV] phdr=0x");
-            crate::arch::x86_64::idt::raw_serial_hex(phdr_addr);
-            crate::arch::x86_64::idt::raw_serial_str(b" phent=");
-            crate::arch::x86_64::idt::raw_serial_hex(binary.phentsize as u64);
-            crate::arch::x86_64::idt::raw_serial_str(b" phnum=");
-            crate::arch::x86_64::idt::raw_serial_hex(binary.phnum as u64);
-            crate::arch::x86_64::idt::raw_serial_str(b" entry=0x");
-            crate::arch::x86_64::idt::raw_serial_hex(binary.entry_point);
-            crate::arch::x86_64::idt::raw_serial_str(b"\n");
-        }
+        let phdr_addr = binary.phdr_address().ok_or(KernelError::InvalidArgument {
+            name: "e_phoff",
+            value: "program header address overflows",
+        })?;
 
         let auxv = vec![
             AuxVecEntry::new(AuxType::AtPhdr, phdr_addr),
@@ -332,12 +319,31 @@ pub fn load_user_program(
                 let layout = crate::elf::tls_layout(tls_memsz, tls_seg.alignment);
 
                 let memory_space = process.memory_space.lock();
-                if let Some((Ok(tls_base_vaddr), tcb_offset)) = layout.map(|(size, tcb)| {
-                    (
-                        memory_space.mmap(size, crate::mm::vas::MappingType::Data),
-                        tcb,
-                    )
-                }) {
+                // Either way of skipping is logged: a silent skip left no
+                // trace of why a process started without kernel-built TLS.
+                let mapped = match layout {
+                    None => {
+                        crate::println!(
+                            "[LOADER] PT_TLS alignment {} unsupported; leaving TLS to libc",
+                            tls_seg.alignment
+                        );
+                        None
+                    }
+                    Some((size, tcb)) => {
+                        match memory_space.mmap(size, crate::mm::vas::MappingType::Data) {
+                            Ok(base) => Some((base, tcb)),
+                            Err(e) => {
+                                crate::println!(
+                                    "[LOADER] TLS block of {} bytes not mapped: {:?}",
+                                    size,
+                                    e
+                                );
+                                None
+                            }
+                        }
+                    }
+                };
+                if let Some((tls_base_vaddr, tcb_offset)) = mapped {
                     let tls_base = tls_base_vaddr.as_usize();
                     let tcb_addr = tls_base + tcb_offset;
 
@@ -518,18 +524,22 @@ fn setup_auxiliary_vector(
 
     // Build auxiliary vector entries
     let _auxv: Vec<(u64, u64)> = vec![
-        (AT_PAGESZ, 0x1000),                           // Page size
-        (AT_BASE, interp_base),                        // Interpreter base
-        (AT_ENTRY, main_binary.entry_point),           // Main program entry
-        (AT_PHNUM, main_binary.segments.len() as u64), // Number of program headers
-        (AT_PHENT, 56),                                // Size of program header (Elf64_Phdr)
+        (AT_PAGESZ, 0x1000),                 // Page size
+        (AT_BASE, interp_base),              // Interpreter base
+        (AT_ENTRY, main_binary.entry_point), // Main program entry
+        // e_phnum/e_phentsize, which can differ from the parsed segments.
+        (AT_PHNUM, main_binary.phnum as u64),
+        (AT_PHENT, main_binary.phentsize as u64),
         (
             AT_PHDR,
             main_binary
-                .phdr_vaddr()
-                .unwrap_or(main_binary.load_base + main_binary.phoff),
+                .phdr_address()
+                .ok_or(KernelError::InvalidArgument {
+                    name: "e_phoff",
+                    value: "program header address overflows",
+                })?,
         ), /* Program headers address (not the ELF
-                                                        * header at load_base) */
+            * header at load_base) */
         (AT_UID, 0), // Root user
         (AT_EUID, 0),
         (AT_GID, 0),

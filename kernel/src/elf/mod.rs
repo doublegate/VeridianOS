@@ -1567,6 +1567,23 @@ mod tests {
     }
 
     #[test]
+    fn phdr_address_rejects_overflowing_header_values() {
+        // A segment near the top of the address space: p_vaddr + offset
+        // must not wrap (or panic in a debug build).
+        let b = binary(
+            0x100,
+            vec![seg(SegmentType::Load, u64::MAX - 0x10, 0, 0x1000)],
+        );
+        assert_eq!(b.phdr_vaddr(), None);
+        // No segment holds the table and load_base + e_phoff overflows.
+        let mut b = binary(0x5000, vec![seg(SegmentType::Load, 0x40_0000, 0, 0x1000)]);
+        b.load_base = u64::MAX - 0x10;
+        assert_eq!(b.phdr_address(), None);
+        b.load_base = 0x40_0000;
+        assert_eq!(b.phdr_address(), Some(0x40_5000));
+    }
+
+    #[test]
     fn tls_layout_honours_p_align() {
         // memsz 0x13 at align 8: the image rounds up to 0x18.
         assert_eq!(tls_layout(0x13, 8), Some((0x20, 0x18)));
