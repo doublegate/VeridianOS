@@ -3539,6 +3539,23 @@ fn sys_socket_pair(domain: usize, _sock_type: usize, result_ptr: usize) -> Sysca
 mod tests {
     use super::*;
 
+    // --- Numbers the musl remap patch relies on (review of the v0.26.0
+    // stack, PR #8) ---
+
+    #[test]
+    fn musl_remap_targets_have_the_expected_meaning() {
+        // tools/cross/musl-patches/0001-veridian-syscall-remap.patch.
+        // faccessat (Linux 269) is left unmapped: it must not be a native
+        // number, so it reaches the faccessat fallback. It used to be
+        // remapped to 347, native fchownat, which chowned the file.
+        assert!(Syscall::try_from(269).is_err());
+        assert!(linux_compat::is_faccessat(269));
+        assert_eq!(Syscall::try_from(347), Ok(Syscall::Fchownat)); // Linux 260
+        assert_eq!(Syscall::try_from(191), Ok(Syscall::FileFstatat)); // Linux 262
+        assert_eq!(Syscall::try_from(260), Ok(Syscall::GetRlimit)); // Linux 97
+        assert_eq!(Syscall::try_from(261), Ok(Syscall::SetRlimit)); // Linux 160
+    }
+
     // --- SCM_RIGHTS control messages (Linux LP64 cmsghdr) ---
 
     fn cmsg(len: u64, level: i32, kind: i32, fds: &[i32]) -> alloc::vec::Vec<u8> {
