@@ -56,6 +56,13 @@ frame (`SYSCALL_FRAME_PTR`, N-35) is one example.
 All memory is treated as Device memory, so the filesystems use `fs::bare_lock`, which does not
 actually lock. This blocks SMP and EL0 (user mode) on AArch64. RISC-V has no user mode yet either.
 
+### FPU and vector registers are not saved across switches (N-41, planned v0.27)
+
+No x87, SSE or AVX state is saved or restored when the CPU switches between processes, although
+AVX and AVX-512 are enabled. Two processes that both use vector registers can corrupt, and read,
+each other's values. The fix (XSAVE, with the area sized from CPUID) is part of the v0.27 process
+model work (C5).
+
 ### Kernel stacks have no guard pages (N-26, planned v0.27)
 
 A kernel stack overflow silently corrupts the neighbouring frame.
