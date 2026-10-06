@@ -719,8 +719,7 @@ pub fn evaluate_test(args: &[String]) -> bool {
 /// Check whether a file exists in the VFS.
 fn test_file_exists(path: &str) -> bool {
     if let Some(vfs) = crate::fs::try_get_vfs() {
-        let vfs_guard = vfs.read();
-        if let Ok(node) = vfs_guard.resolve_path(path) {
+        if let Ok(node) = vfs.resolve_path(path) {
             if let Ok(meta) = node.metadata() {
                 return meta.node_type == crate::fs::NodeType::File;
             }
@@ -732,8 +731,7 @@ fn test_file_exists(path: &str) -> bool {
 /// Check whether a directory exists in the VFS.
 fn test_dir_exists(path: &str) -> bool {
     if let Some(vfs) = crate::fs::try_get_vfs() {
-        let vfs_guard = vfs.read();
-        if let Ok(node) = vfs_guard.resolve_path(path) {
+        if let Ok(node) = vfs.resolve_path(path) {
             if let Ok(meta) = node.metadata() {
                 return meta.node_type == crate::fs::NodeType::Directory;
             }

@@ -79,7 +79,7 @@ pub mod test_programs {
             crate::println!("  Write/read verified");
 
             // List /tmp
-            let vfs = crate::fs::get_vfs().read();
+            let vfs = crate::fs::get_vfs();
             let node = vfs
                 .resolve_path("/tmp")
                 .map_err(|e| alloc::format!("{}", e))?;

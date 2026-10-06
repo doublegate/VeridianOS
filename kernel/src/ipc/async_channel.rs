@@ -15,7 +15,7 @@ use super::{
     error::{IpcError, Result},
     message::Message,
 };
-use crate::arch::entropy::read_timestamp;
+use crate::bench::read_timestamp;
 
 /// Maximum messages in async channel
 pub const ASYNC_CHANNEL_SIZE: usize = 256;
@@ -285,7 +285,7 @@ impl MessageBatch {
     /// Create a new batch
     pub fn new() -> Self {
         Self {
-            messages: [None; 16],
+            messages: core::array::from_fn(|_| None),
             count: 0,
         }
     }
@@ -306,10 +306,8 @@ impl MessageBatch {
     where
         F: FnMut(Message),
     {
-        for i in 0..self.count {
-            if let Some(msg) = self.messages[i] {
-                f(msg);
-            }
+        for msg in self.messages.into_iter().take(self.count).flatten() {
+            f(msg);
         }
     }
 }
@@ -325,9 +323,8 @@ fn wake_process(pid: ProcessId) {
     crate::sched::ipc_blocking::wake_up_process(pid);
 }
 
-fn timestamp_to_ns(cycles: u64) -> u64 {
-    // Assume 2GHz CPU for now
-    cycles / 2
+fn timestamp_to_ns(ticks: u64) -> u64 {
+    crate::bench::cycles_to_ns(ticks)
 }
 
 #[cfg(all(test, not(target_os = "none")))]
@@ -422,8 +419,8 @@ mod tests {
         let msg = Message::small(0x1234, 42);
 
         // Fill channel
-        assert!(channel.send_async(msg).is_ok());
-        assert!(channel.send_async(msg).is_ok());
+        assert!(channel.send_async(msg.clone()).is_ok());
+        assert!(channel.send_async(msg.clone()).is_ok());
 
         // Should be full
         assert_eq!(channel.send_async(msg), Err(IpcError::ChannelFull));

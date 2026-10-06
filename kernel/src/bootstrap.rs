@@ -194,9 +194,8 @@ extern "C" fn kernel_init_stage3_onwards() -> ! {
     // via the `ash` or `/bin/sh` command if a rootfs with BusyBox is loaded.
     #[cfg(all(feature = "alloc", target_arch = "x86_64"))]
     {
-        let vfs = crate::fs::get_vfs().read();
+        let vfs = crate::fs::get_vfs();
         let has_sh = vfs.resolve_path("/bin/sh").is_ok();
-        drop(vfs);
         if has_sh {
             kprintln!("[BOOTSTRAP] BusyBox ash available at /bin/sh (run 'ash' from vsh)");
         }
@@ -851,9 +850,9 @@ fn load_rootfs_from_disk() {
 
 /// Mount a pre-formatted BlockFS image as the persistent root filesystem.
 ///
-/// Reads superblock, bitmap, inode table, and all data blocks from the
-/// virtio-blk device. Replaces the initial RamFS via `swap_root()`, then
-/// re-mounts DevFS at `/dev` and ProcFS at `/proc`.
+/// Reads the superblock, bitmap and inode table from the virtio-blk device;
+/// data blocks are read on first use (FS-PERF-01). Replaces the initial RamFS
+/// via `swap_root()`, then re-mounts DevFS at `/dev` and ProcFS at `/proc`.
 #[cfg(feature = "alloc")]
 fn mount_blockfs_root() {
     use alloc::sync::Arc;
@@ -890,13 +889,12 @@ fn mount_blockfs_root() {
     // Swap root filesystem from RamFS to BlockFS
     {
         let vfs = get_vfs();
-        let mut vfs_guard = vfs.write();
 
         // Remove existing DevFS/ProcFS mounts (they're on the old root)
-        let _ = vfs_guard.unmount("/dev");
-        let _ = vfs_guard.unmount("/proc");
+        let _ = vfs.unmount("/dev");
+        let _ = vfs.unmount("/proc");
 
-        vfs_guard.swap_root(blockfs_arc);
+        vfs.swap_root(blockfs_arc);
     }
 
     kprintln!("[ROOTFS] BlockFS mounted as persistent root");
@@ -904,8 +902,7 @@ fn mount_blockfs_root() {
     // Ensure standard directories exist (may already exist from mkfs population)
     {
         let vfs = get_vfs();
-        let vfs_guard = vfs.read();
-        if let Ok(root) = vfs_guard.resolve_path("/") {
+        if let Ok(root) = vfs.resolve_path("/") {
             // Create dirs if they don't exist (ok to fail with AlreadyExists)
             root.mkdir("dev", Permissions::default()).ok();
             root.mkdir("proc", Permissions::default()).ok();
@@ -1390,11 +1387,8 @@ fn mount_blockfs_root() {
     // Re-mount DevFS and ProcFS
     {
         let vfs = get_vfs();
-        let mut vfs_guard = vfs.write();
-        vfs_guard.mount("/dev".into(), Arc::new(DevFs::new())).ok();
-        vfs_guard
-            .mount("/proc".into(), Arc::new(ProcFs::new()))
-            .ok();
+        vfs.mount("/dev".into(), Arc::new(DevFs::new())).ok();
+        vfs.mount("/proc".into(), Arc::new(ProcFs::new())).ok();
     }
 
     kprintln!("[ROOTFS] DevFS and ProcFS re-mounted on BlockFS root");
@@ -1468,45 +1462,28 @@ fn test_user_binary_load() {
     use crate::fs::get_vfs;
 
     // Test 1: /bin/minimal (no-libc, provides its own _start)
-    let vfs = get_vfs().read();
-    match vfs.resolve_path("/bin/minimal") {
-        Ok(_node) => {
-            drop(vfs);
-            match crate::userspace::load_user_program("/bin/minimal", &["minimal"], &["PATH=/bin"])
-            {
-                Ok(pid) => {
-                    run_user_process_scheduled(pid);
-                }
-                Err(e) => {
-                    kprintln!("[BOOT] /bin/minimal FAILED: {:?}", e);
-                }
+    let vfs = get_vfs();
+    if vfs.resolve_path("/bin/minimal").is_ok() {
+        match crate::userspace::load_user_program("/bin/minimal", &["minimal"], &["PATH=/bin"]) {
+            Ok(pid) => {
+                run_user_process_scheduled(pid);
             }
-        }
-        Err(_) => {
-            drop(vfs);
+            Err(e) => {
+                kprintln!("[BOOT] /bin/minimal FAILED: {:?}", e);
+            }
         }
     }
 
     // Test 2: /bin/fork_test (fork + waitpid)
-    let vfs = get_vfs().read();
-    match vfs.resolve_path("/bin/fork_test") {
-        Ok(_node) => {
-            drop(vfs);
-            match crate::userspace::load_user_program(
-                "/bin/fork_test",
-                &["fork_test"],
-                &["PATH=/bin"],
-            ) {
-                Ok(pid) => {
-                    run_user_process_scheduled(pid);
-                }
-                Err(e) => {
-                    kprintln!("[BOOT] /bin/fork_test FAILED: {:?}", e);
-                }
+    if vfs.resolve_path("/bin/fork_test").is_ok() {
+        match crate::userspace::load_user_program("/bin/fork_test", &["fork_test"], &["PATH=/bin"])
+        {
+            Ok(pid) => {
+                run_user_process_scheduled(pid);
             }
-        }
-        Err(_) => {
-            drop(vfs);
+            Err(e) => {
+                kprintln!("[BOOT] /bin/fork_test FAILED: {:?}", e);
+            }
         }
     }
 
@@ -1544,9 +1521,8 @@ fn test_user_binary_load() {
     // BusyBox applets are installed as symlinks that resolve to copies
     // of the busybox binary; the TAR loader expands symlinks as file copies.
     {
-        let vfs = get_vfs().read();
+        let vfs = get_vfs();
         let has_busybox = vfs.resolve_path("/bin/busybox").is_ok();
-        drop(vfs);
         if has_busybox {
             kprintln!("[BOOT] BusyBox detected -- running applet smoke tests");
             // BusyBox version banner
@@ -1621,12 +1597,11 @@ fn test_user_binary_load() {
 
             // Phase C: Native compilation tests (only if GCC + BusyBox source in rootfs)
             {
-                let vfs = get_vfs().read();
+                let vfs = get_vfs();
                 let has_gcc = vfs.resolve_path("/usr/bin/gcc").is_ok();
                 let has_bb_src = vfs
                     .resolve_path("/usr/src/busybox-1.36.1/include/autoconf.h")
                     .is_ok();
-                drop(vfs);
                 if has_gcc && has_bb_src {
                     kprintln!("[BOOT] Phase C: Native compilation tests");
 
@@ -1657,13 +1632,12 @@ fn test_user_binary_load() {
                     );
                     // Verify the object file was produced
                     {
-                        let vfs = get_vfs().read();
+                        let vfs = get_vfs();
                         if vfs.resolve_path("/tmp/echo.o").is_ok() {
                             kprintln!("NATIVE_COMPILE_SINGLE_PASS");
                         } else {
                             kprintln!("NATIVE_COMPILE_SINGLE_FAIL");
                         }
-                        drop(vfs);
                     }
 
                     // C-2: Link echo.o into a binary and execute it natively
@@ -1689,9 +1663,8 @@ fn test_user_binary_load() {
                     );
                     // Verify link produced a binary, then execute it
                     {
-                        let vfs = get_vfs().read();
+                        let vfs = get_vfs();
                         if vfs.resolve_path("/tmp/echo-native").is_ok() {
-                            drop(vfs);
                             kprintln!("[BOOT] Phase C-2: Executing natively-compiled echo");
                             boot_run_program(
                                 "/tmp/echo-native",
@@ -1699,7 +1672,6 @@ fn test_user_binary_load() {
                                 env,
                             );
                         } else {
-                            drop(vfs);
                             kprintln!(
                                 "[BOOT] Phase C-2: Link FAILED -- /tmp/echo-native not found"
                             );
@@ -1711,10 +1683,9 @@ fn test_user_binary_load() {
                     // interactive shell for several minutes. Run manually:
                     //   ash /usr/src/build-busybox-native.sh
                     {
-                        let vfs = get_vfs().read();
+                        let vfs = get_vfs();
                         let has_script =
                             vfs.resolve_path("/usr/src/build-busybox-native.sh").is_ok();
-                        drop(vfs);
                         if has_script {
                             kprintln!("[BOOT] Phase C-3: Skipped (208-file native build)");
                             kprintln!("[BOOT] Run manually: ash /usr/src/build-busybox-native.sh");
@@ -1724,11 +1695,10 @@ fn test_user_binary_load() {
                     // C-4: Native sysinfo + edit compilation
                     // SKIPPED at boot -- run manually at the ash prompt.
                     {
-                        let vfs = get_vfs().read();
+                        let vfs = get_vfs();
                         let has_script = vfs
                             .resolve_path("/usr/src/build-native-programs.sh")
                             .is_ok();
-                        drop(vfs);
                         if has_script {
                             kprintln!("[BOOT] Phase C-4: Skipped (native sysinfo+edit build)");
                             kprintln!("[BOOT] Run manually: ash /usr/src/build-native-programs.sh");
@@ -1738,9 +1708,8 @@ fn test_user_binary_load() {
                     // C-5: Execute pre-built native binaries (if present from C-4)
                     // sysinfo reads /proc/* so output validates VFS + uname + proc subsystems
                     {
-                        let vfs = get_vfs().read();
+                        let vfs = get_vfs();
                         let has_sysinfo = vfs.resolve_path("/tmp/sysinfo-native").is_ok();
-                        drop(vfs);
                         if has_sysinfo {
                             kprintln!("[BOOT] Phase C-5: Executing natively-compiled sysinfo");
                             boot_run_program("/tmp/sysinfo-native", &["sysinfo"], env);
@@ -1754,11 +1723,10 @@ fn test_user_binary_load() {
                     // C-6: Native coreutils compilation
                     // SKIPPED at boot -- run manually at the ash prompt.
                     {
-                        let vfs = get_vfs().read();
+                        let vfs = get_vfs();
                         let has_script = vfs
                             .resolve_path("/usr/src/build-native-coreutils.sh")
                             .is_ok();
-                        drop(vfs);
                         if has_script {
                             kprintln!("[BOOT] Phase C-6: Skipped (native coreutils build)");
                             kprintln!(
@@ -1788,22 +1756,18 @@ fn test_user_binary_load() {
 fn boot_run_program(path: &str, argv: &[&str], envp: &[&str]) {
     use crate::fs::get_vfs;
 
-    let vfs = get_vfs().read();
+    let vfs = get_vfs();
     match vfs.resolve_path(path) {
-        Ok(_node) => {
-            drop(vfs);
-            match crate::userspace::load_user_program(path, argv, envp) {
-                Ok(pid) => {
-                    kprintln!("[BOOT] Running {}", path);
-                    run_user_process_scheduled(pid);
-                }
-                Err(e) => {
-                    kprintln!("[BOOT] {} load FAILED: {:?}", path, e);
-                }
+        Ok(_node) => match crate::userspace::load_user_program(path, argv, envp) {
+            Ok(pid) => {
+                kprintln!("[BOOT] Running {}", path);
+                run_user_process_scheduled(pid);
             }
-        }
+            Err(e) => {
+                kprintln!("[BOOT] {} load FAILED: {:?}", path, e);
+            }
+        },
         Err(_) => {
-            drop(vfs);
             kprintln!("[BOOT] {} not found in VFS, skipping", path);
         }
     }
@@ -2408,7 +2372,6 @@ fn run_vfs_tests(passed: &mut u32, failed: &mut u32) {
     // Test 1: Create directory
     {
         let ok = fs::get_vfs()
-            .read()
             .mkdir("/tmp/test_init", fs::Permissions::default())
             .is_ok();
         report_test("vfs_mkdir", ok, passed, failed);
@@ -2417,7 +2380,7 @@ fn run_vfs_tests(passed: &mut u32, failed: &mut u32) {
     // Test 2: Write file via VFS create + write
     {
         let ok = (|| -> Result<(), crate::error::KernelError> {
-            let vfs = fs::get_vfs().read();
+            let vfs = fs::get_vfs();
             let parent = vfs.resolve_path("/tmp/test_init")?;
             let file = parent.create("hello.txt", fs::Permissions::default())?;
             file.write(0, b"Hello VeridianOS")?;
@@ -2430,7 +2393,7 @@ fn run_vfs_tests(passed: &mut u32, failed: &mut u32) {
     // Test 3: Read file back and verify contents
     {
         let ok = (|| -> Result<bool, crate::error::KernelError> {
-            let vfs = fs::get_vfs().read();
+            let vfs = fs::get_vfs();
             let dir = vfs.resolve_path("/tmp/test_init")?;
             let file = dir.lookup("hello.txt")?;
             let mut buf = [0u8; 32];
@@ -2444,7 +2407,7 @@ fn run_vfs_tests(passed: &mut u32, failed: &mut u32) {
     // Test 4: List directory entries
     {
         let ok = (|| -> Result<bool, crate::error::KernelError> {
-            let vfs = fs::get_vfs().read();
+            let vfs = fs::get_vfs();
             let node = vfs.resolve_path("/tmp/test_init")?;
             let entries = node.readdir()?;
             Ok(entries.iter().any(|e| e.name == "hello.txt"))
@@ -2455,13 +2418,13 @@ fn run_vfs_tests(passed: &mut u32, failed: &mut u32) {
 
     // Test 5: /proc is mounted
     {
-        let ok = fs::get_vfs().read().resolve_path("/proc").is_ok();
+        let ok = fs::get_vfs().resolve_path("/proc").is_ok();
         report_test("vfs_procfs", ok, passed, failed);
     }
 
     // Test 6: /dev is mounted
     {
-        let ok = fs::get_vfs().read().resolve_path("/dev").is_ok();
+        let ok = fs::get_vfs().resolve_path("/dev").is_ok();
         report_test("vfs_devfs", ok, passed, failed);
     }
 }

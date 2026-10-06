@@ -674,7 +674,7 @@ fn verify_source_from_vfs(
     expected: &[u8; 32],
     source_index: usize,
 ) -> Result<bool, KernelError> {
-    let vfs_lock = match crate::fs::try_get_vfs() {
+    let vfs = match crate::fs::try_get_vfs() {
         Some(lock) => lock,
         None => {
             crate::println!(
@@ -685,7 +685,6 @@ fn verify_source_from_vfs(
         }
     };
 
-    let vfs = vfs_lock.read();
     let node = match vfs.resolve_path(archive_path) {
         Ok(n) => n,
         Err(_) => {
@@ -932,7 +931,7 @@ fn collect_installed_files(pkg_dir: &str) -> Vec<super::manifest::FileRecord> {
 
     let mut records = Vec::new();
 
-    let vfs_lock = match crate::fs::try_get_vfs() {
+    let vfs = match crate::fs::try_get_vfs() {
         Some(lock) => lock,
         None => {
             crate::println!(
@@ -943,7 +942,6 @@ fn collect_installed_files(pkg_dir: &str) -> Vec<super::manifest::FileRecord> {
         }
     };
 
-    let vfs = vfs_lock.read();
     let node = match vfs.resolve_path(pkg_dir) {
         Ok(n) => n,
         Err(_) => {

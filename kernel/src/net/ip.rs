@@ -3,7 +3,7 @@
 //! Handles IPv4 packet construction, parsing, routing, and fragmentation.
 //! Provides the foundation for TCP and UDP transport protocols.
 
-use alloc::vec::Vec;
+use alloc::{string::String, vec::Vec};
 
 use spin::Mutex;
 
@@ -155,12 +155,25 @@ pub fn split_packet(bytes: &[u8]) -> Result<(Ipv4Header, &[u8]), KernelError> {
 }
 
 /// Routing table entry
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RouteEntry {
     pub destination: Ipv4Address,
     pub netmask: Ipv4Address,
+    /// Next hop; `None` for a directly connected network.
     pub gateway: Option<Ipv4Address>,
-    pub interface: usize,
+    /// Name of the device the route leaves through ("eth0", "lo0").
+    pub interface: String,
+}
+
+impl RouteEntry {
+    fn matches(&self, dest: Ipv4Address) -> bool {
+        let mask = self.netmask.to_u32();
+        dest.to_u32() & mask == self.destination.to_u32() & mask
+    }
+
+    fn prefix_len(&self) -> u32 {
+        self.netmask.to_u32().count_ones()
+    }
 }
 
 /// Interface IP configuration
@@ -193,11 +206,37 @@ pub fn get_interface_config() -> InterfaceConfig {
 }
 
 /// Set the interface IP configuration (called by DHCP or manual config).
+///
+/// Also installs the routes the configuration implies on the primary
+/// interface: the connected subnet and, with a gateway, the default route.
+/// Both replace earlier routes for the same prefix, so lease renewals do not
+/// pile up duplicates.
 pub fn set_interface_config(ip: Ipv4Address, mask: Ipv4Address, gw: Option<Ipv4Address>) {
-    let mut config = INTERFACE_CONFIG.lock();
-    config.ip_addr = ip;
-    config.subnet_mask = mask;
-    config.gateway = gw;
+    {
+        let mut config = INTERFACE_CONFIG.lock();
+        config.ip_addr = ip;
+        config.subnet_mask = mask;
+        config.gateway = gw;
+    }
+
+    if let Some(iface) = super::device::primary_device_name() {
+        if mask != Ipv4Address::ANY {
+            add_route(RouteEntry {
+                destination: Ipv4Address::from_u32(ip.to_u32() & mask.to_u32()),
+                netmask: mask,
+                gateway: None,
+                interface: iface.clone(),
+            });
+        }
+        if let Some(gateway) = gw {
+            add_route(RouteEntry {
+                destination: Ipv4Address::ANY,
+                netmask: Ipv4Address::ANY,
+                gateway: Some(gateway),
+                interface: iface,
+            });
+        }
+    }
 
     println!(
         "[IP] Interface configured: {}.{}.{}.{}/{}.{}.{}.{}",
@@ -215,23 +254,33 @@ pub fn set_interface_config(ip: Ipv4Address, mask: Ipv4Address, gw: Option<Ipv4A
 /// Simple routing table protected by Mutex
 static ROUTES: Mutex<Vec<RouteEntry>> = Mutex::new(Vec::new());
 
-/// Add a route
+/// Add a route, replacing any route for the same prefix.
 pub fn add_route(entry: RouteEntry) {
-    ROUTES.lock().push(entry);
+    let mut routes = ROUTES.lock();
+    routes.retain(|r| !(r.destination == entry.destination && r.netmask == entry.netmask));
+    routes.push(entry);
 }
 
-/// Lookup route for destination
+/// Lookup route for destination: the longest matching prefix (NET-ARCH-01;
+/// this used to return the first match in insertion order).
 pub fn lookup_route(dest: Ipv4Address) -> Option<RouteEntry> {
-    let routes = ROUTES.lock();
-    for route in routes.iter() {
-        let dest_masked = dest.to_u32() & route.netmask.to_u32();
-        let route_masked = route.destination.to_u32() & route.netmask.to_u32();
+    best_route(&ROUTES.lock(), dest).cloned()
+}
 
-        if dest_masked == route_masked {
-            return Some(route.clone());
-        }
+fn best_route(routes: &[RouteEntry], dest: Ipv4Address) -> Option<&RouteEntry> {
+    routes
+        .iter()
+        .filter(|r| r.matches(dest))
+        .max_by_key(|r| r.prefix_len())
+}
+
+/// The interface and next-hop address for `dest`. Without a matching route
+/// the destination is assumed to be on the primary interface's link.
+fn next_hop(dest: Ipv4Address) -> Option<(String, Ipv4Address)> {
+    match lookup_route(dest) {
+        Some(route) => Some((route.interface, route.gateway.unwrap_or(dest))),
+        None => super::device::primary_device_name().map(|iface| (iface, dest)),
     }
-    None
 }
 
 /// Get all routing table entries (used by `route` shell command).
@@ -265,18 +314,34 @@ pub fn send(dest: IpAddress, protocol: IpProtocol, data: &[u8]) -> Result<(), Ke
             ip_packet.extend_from_slice(&header_bytes);
             ip_packet.extend_from_slice(data);
 
-            // Resolve destination MAC via ARP (or use broadcast for broadcast IP)
-            let dst_mac = if dest_v4 == Ipv4Address::BROADCAST {
+            // Choose the interface and next hop from the routing table: an
+            // off-link destination is reached through its gateway, so ARP
+            // asks for the gateway's address, not the destination's.
+            let (iface, hop) = if dest_v4 == Ipv4Address::BROADCAST {
+                match super::device::primary_device_name() {
+                    Some(iface) => (iface, dest_v4),
+                    None => return Ok(()),
+                }
+            } else {
+                match next_hop(dest_v4) {
+                    Some(route) => route,
+                    // No usable interface (none up yet): nothing to send on.
+                    None => return Ok(()),
+                }
+            };
+
+            // Resolve the next hop's MAC via ARP (broadcast for broadcast IP)
+            let dst_mac = if hop == Ipv4Address::BROADCAST {
                 super::MacAddress::BROADCAST
             } else {
                 // Check ARP cache; if miss, send ARP request and use broadcast
-                super::arp::resolve(dest_v4).unwrap_or_else(|| {
-                    super::arp::send_arp_request(dest_v4);
+                super::arp::resolve(hop).unwrap_or_else(|| {
+                    super::arp::send_arp_request(hop);
                     super::MacAddress::BROADCAST
                 })
             };
 
-            let src_mac = super::device::with_primary_device(|dev| dev.mac_address())
+            let src_mac = super::device::with_device(&iface, |dev| dev.mac_address())
                 .unwrap_or(super::MacAddress::ZERO);
 
             // Wrap in Ethernet frame
@@ -289,7 +354,7 @@ pub fn send(dest: IpAddress, protocol: IpProtocol, data: &[u8]) -> Result<(), Ke
 
             // Transmit
             let pkt = super::Packet::from_bytes(&frame);
-            super::device::with_primary_device_mut(|dev| {
+            super::device::with_device_mut(&iface, |dev| {
                 let _ = dev.transmit(&pkt);
             });
 
@@ -320,7 +385,7 @@ pub fn init() -> Result<(), KernelError> {
         destination: Ipv4Address::new(127, 0, 0, 0),
         netmask: Ipv4Address::new(255, 0, 0, 0),
         gateway: None,
-        interface: 0,
+        interface: String::from("lo0"),
     });
 
     println!("[IP] IP layer initialized");
@@ -332,6 +397,46 @@ mod tests {
     use alloc::vec::Vec;
 
     use super::*;
+
+    fn route(dest: [u8; 4], mask: [u8; 4], gw: Option<[u8; 4]>, iface: &str) -> RouteEntry {
+        RouteEntry {
+            destination: Ipv4Address(dest),
+            netmask: Ipv4Address(mask),
+            gateway: gw.map(Ipv4Address),
+            interface: String::from(iface),
+        }
+    }
+
+    /// NET-ARCH-01: the most specific route wins whatever the insertion
+    /// order (a default route added first used to capture everything).
+    #[test]
+    fn longest_prefix_match() {
+        let routes = [
+            route([0, 0, 0, 0], [0, 0, 0, 0], Some([10, 0, 2, 2]), "eth1"),
+            route([10, 0, 2, 0], [255, 255, 255, 0], None, "eth1"),
+            route([127, 0, 0, 0], [255, 0, 0, 0], None, "lo0"),
+        ];
+        let pick = |a: [u8; 4]| best_route(&routes, Ipv4Address(a)).unwrap().clone();
+        assert_eq!(pick([10, 0, 2, 15]).gateway, None, "on-link: direct");
+        assert_eq!(
+            pick([93, 184, 216, 34]).gateway,
+            Some(Ipv4Address([10, 0, 2, 2]))
+        );
+        assert_eq!(pick([127, 0, 0, 1]).interface, "lo0");
+        assert!(best_route(&routes[1..], Ipv4Address([8, 8, 8, 8])).is_none());
+    }
+
+    #[test]
+    fn add_route_replaces_same_prefix() {
+        let before = get_routes().len();
+        let r = |gw| route([0, 0, 0, 0], [0, 0, 0, 0], Some(gw), "test0");
+        add_route(r([192, 0, 2, 1]));
+        add_route(r([192, 0, 2, 254]));
+        let routes = get_routes();
+        assert_eq!(routes.len(), before + 1, "a renewal replaces, not appends");
+        assert!(routes.contains(&r([192, 0, 2, 254])));
+        ROUTES.lock().retain(|x| x.interface != "test0");
+    }
 
     fn packet(ihl: u8, total_length: u16, payload: &[u8], padding: usize) -> Vec<u8> {
         let mut header = Ipv4Header::new(

@@ -175,7 +175,7 @@ fn fast_send(msg: &SmallMessage, target_pid: u64) -> Result<()> {
 /// (by a fast_send while we were blocked), read it directly. Otherwise,
 /// check the endpoint's message queue, and if empty, block.
 #[inline(always)]
-pub fn fast_receive(endpoint: u64, timeout: Option<u64>) -> Result<SmallMessage> {
+pub fn fast_receive(endpoint: u64, timeout: Option<u64>) -> Result<super::Message> {
     let current = current_process();
 
     // Check if message already waiting in endpoint queue
@@ -184,7 +184,7 @@ pub fn fast_receive(endpoint: u64, timeout: Option<u64>) -> Result<SmallMessage>
         crate::trace!(
             crate::perf::trace::TraceEventType::IpcFastReceive,
             endpoint,
-            msg.capability
+            msg.capability()
         );
         return Ok(msg);
     }
@@ -206,7 +206,7 @@ pub fn fast_receive(endpoint: u64, timeout: Option<u64>) -> Result<SmallMessage>
             endpoint,
             msg.capability
         );
-        return Ok(msg);
+        return Ok(super::Message::Small(msg));
     }
 
     // No fast-path message; re-check endpoint queue (slow path deposited it)
@@ -215,12 +215,12 @@ pub fn fast_receive(endpoint: u64, timeout: Option<u64>) -> Result<SmallMessage>
     }
 
     // Spurious wake-up or timeout -- return default
-    Ok(SmallMessage {
+    Ok(super::Message::Small(SmallMessage {
         capability: 0,
         opcode: 0,
         flags: 0,
         data: [0; 4],
-    })
+    }))
 }
 
 /// Check that the calling process holds `cap`, unrevoked and with SEND
@@ -287,19 +287,13 @@ fn read_from_current_task_ipc_regs() -> SmallMessage {
 ///
 /// Queries the IPC registry for the endpoint and tries to dequeue a message.
 /// Returns None if no message is waiting or the endpoint doesn't exist.
-fn check_pending_message(endpoint: u64) -> Option<SmallMessage> {
+/// The whole message is returned: this used to flatten every queued
+/// message to a `SmallMessage`, dropping any payload.
+fn check_pending_message(endpoint: u64) -> Option<super::Message> {
     #[cfg(feature = "alloc")]
     {
         if let Some(msg) = crate::ipc::registry::try_receive_from_endpoint(endpoint) {
-            return Some(match msg {
-                super::Message::Small(sm) => sm,
-                super::Message::Large(lg) => SmallMessage {
-                    capability: lg.header.capability,
-                    opcode: lg.header.opcode,
-                    flags: lg.header.flags,
-                    data: [0; 4],
-                },
-            });
+            return Some(msg);
         }
     }
     let _ = endpoint;

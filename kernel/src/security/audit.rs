@@ -803,8 +803,7 @@ pub fn init() -> Result<(), KernelError> {
 fn ensure_audit_log_dir() -> Result<(), KernelError> {
     // Try to create /var, /var/log directories if they don't exist.
     // This is best-effort; if VFS is not mounted we silently skip.
-    if let Some(vfs_lock) = crate::fs::try_get_vfs() {
-        let vfs = vfs_lock.read();
+    if let Some(vfs) = crate::fs::try_get_vfs() {
         let perms = crate::fs::Permissions::default();
         let _ = vfs.mkdir("/var", perms);
         let _ = vfs.mkdir("/var/log", perms);

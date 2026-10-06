@@ -54,6 +54,12 @@ impl<T: ?Sized> RwLock<T> {
             data: unsafe { &mut *self.data.get() },
         }
     }
+
+    /// Exclusive access through `&mut self`, which already proves no other
+    /// reference exists.
+    pub fn get_mut(&mut self) -> &mut T {
+        self.data.get_mut()
+    }
 }
 
 impl<T: ?Sized> Deref for RwLockReadGuard<'_, T> {

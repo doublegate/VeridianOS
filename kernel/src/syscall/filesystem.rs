@@ -159,7 +159,7 @@ const SERIAL_IO_MAX_SIZE: usize = 64 * 1024;
 
 /// Helper to get the VFS instance, returning a syscall error instead of
 /// panicking if the VFS subsystem has not been initialized yet.
-pub(crate) fn vfs() -> Result<&'static spin::RwLock<crate::fs::Vfs>, SyscallError> {
+pub(crate) fn vfs() -> Result<&'static crate::fs::Vfs, SyscallError> {
     try_get_vfs().ok_or(SyscallError::InvalidState)
 }
 
@@ -203,7 +203,7 @@ pub fn sys_open(path: usize, flags: usize, mode: usize) -> SyscallResult {
     let cloexec = (flags & 0x80000) != 0; // O_CLOEXEC
 
     // Open the file through VFS
-    match vfs()?.read().open(path_str, open_flags) {
+    match vfs()?.open(path_str, open_flags) {
         Ok(node) => {
             require_open_access(&node, &open_flags)?;
 
@@ -232,7 +232,7 @@ pub fn sys_open(path: usize, flags: usize, mode: usize) -> SyscallResult {
                 let perms = creation_perms(mode);
                 let (parent_path, name) = split_path(path_str)?;
                 require_dir_write(path_str)?;
-                let vfs_guard = vfs()?.read();
+                let vfs_guard = vfs()?;
                 let parent = match vfs_guard.resolve_path(&parent_path) {
                     Ok(p) => p,
                     Err(_) => {
@@ -660,7 +660,7 @@ pub fn sys_mkdir(path: usize, mode: usize) -> SyscallResult {
 
     // Create directory through VFS
     let permissions = creation_perms(mode);
-    let vfs_guard = vfs()?.read();
+    let vfs_guard = vfs()?;
     match vfs_guard.mkdir(path_str, permissions) {
         Ok(node) => {
             own_new_node(&node);
@@ -679,7 +679,7 @@ pub fn sys_rmdir(path: usize) -> SyscallResult {
     require_may_remove(&path_str)?;
 
     // Remove directory through VFS
-    match vfs()?.read().unlink(&path_str) {
+    match vfs()?.unlink(&path_str) {
         Ok(_) => Ok(0),
         Err(e) => Err(super::map_kernel_error(e)),
     }
@@ -776,10 +776,7 @@ pub fn sys_mount(
     };
 
     // Mount filesystem
-    match vfs()?
-        .write()
-        .mount_by_type(mount_path, fs_type_str, flags as u32)
-    {
+    match vfs()?.mount_by_type(mount_path, fs_type_str, flags as u32) {
         Ok(_) => Ok(0),
         Err(_) => Err(SyscallError::InvalidState),
     }
@@ -844,7 +841,7 @@ pub fn sys_unmount(mount_point: usize) -> SyscallResult {
     };
 
     // Unmount filesystem
-    match vfs()?.write().unmount(mount_path) {
+    match vfs()?.unmount(mount_path) {
         Ok(_) => Ok(0),
         Err(_) => Err(SyscallError::InvalidState),
     }
@@ -854,7 +851,7 @@ pub fn sys_unmount(mount_point: usize) -> SyscallResult {
 ///
 /// Flushes all pending writes to disk
 pub fn sys_sync() -> SyscallResult {
-    match vfs()?.read().sync() {
+    match vfs()?.sync() {
         Ok(_) => Ok(0),
         Err(_) => Err(SyscallError::InvalidState),
     }
@@ -875,7 +872,7 @@ pub fn sys_fsync(fd: usize) -> SyscallResult {
     drop(file_table);
 
     // Sync all filesystems (BlockFS syncs dirty blocks to disk)
-    match vfs()?.read().sync() {
+    match vfs()?.sync() {
         Ok(_) => Ok(0),
         Err(_) => Err(SyscallError::InvalidState),
     }
@@ -1087,9 +1084,8 @@ pub fn sys_chdir(path_ptr: usize) -> SyscallResult {
     #[cfg(feature = "alloc")]
     {
         let cwd = thread.fs().cwd.lock().clone();
-        let vfs_lock = vfs()?;
-        let vfs_guard = vfs_lock.read();
-        let node = vfs_guard
+        let vfs = vfs()?;
+        let node = vfs
             .resolve_from(&path, &cwd)
             .map_err(|_| SyscallError::ResourceNotFound)?;
         if node.node_type() != crate::fs::NodeType::Directory {
@@ -1472,19 +1468,16 @@ fn rename_entry(old: &str, new: &str) -> SyscallResult {
     require_may_remove(old)?;
     require_dir_write(new)?;
     // Replacing an existing `new` removes it, so the sticky rule applies.
-    let new_exists = vfs()?.read().resolve_path_no_follow(new).is_ok();
+    let new_exists = vfs()?.resolve_path_no_follow(new).is_ok();
     if new_exists {
         require_may_remove(new)?;
     }
 
-    let vfs_lock = vfs()?;
-    let vfs_guard = vfs_lock.read();
-    if vfs_guard.mount_point_of(old) != vfs_guard.mount_point_of(new) {
+    let vfs = vfs()?;
+    if vfs.mount_point_of(old) != vfs.mount_point_of(new) {
         return Err(SyscallError::CrossDevice);
     }
-    let src = vfs_guard
-        .resolve_path_no_follow(old)
-        .map_err(map_resolve_err)?;
+    let src = vfs.resolve_path_no_follow(old).map_err(map_resolve_err)?;
     let (old_parent_path, old_name) = split_path(old)?;
     let (new_parent_path, new_name) = split_path(new)?;
 
@@ -1493,7 +1486,7 @@ fn rename_entry(old: &str, new: &str) -> SyscallResult {
         // Compared on canonical paths (symlinks, ".", ".." resolved): a
         // string prefix test on the raw paths was bypassed by "/a/./b" or
         // a symlink to the directory, which orphaned it as its own child.
-        let (_, old_parent_canon) = vfs_guard
+        let (_, old_parent_canon) = vfs
             .resolve_canonical(&old_parent_path, "/", true)
             .map_err(map_resolve_err)?;
         let src_canon = if old_parent_canon == "/" {
@@ -1501,7 +1494,7 @@ fn rename_entry(old: &str, new: &str) -> SyscallResult {
         } else {
             alloc::format!("{}/{}", old_parent_canon, old_name)
         };
-        let (_, new_parent_canon) = vfs_guard
+        let (_, new_parent_canon) = vfs
             .resolve_canonical(&new_parent_path, "/", true)
             .map_err(map_resolve_err)?;
         if crate::fs::path_is_under(&new_parent_canon, &src_canon) {
@@ -1518,10 +1511,10 @@ fn rename_entry(old: &str, new: &str) -> SyscallResult {
         }
     }
 
-    let old_parent = vfs_guard
+    let old_parent = vfs
         .resolve_path(&old_parent_path)
         .map_err(map_resolve_err)?;
-    let new_parent = vfs_guard
+    let new_parent = vfs
         .resolve_path(&new_parent_path)
         .map_err(map_resolve_err)?;
     // The node moves; nothing is copied, and a symlink at `new` is replaced
@@ -1540,10 +1533,7 @@ pub(crate) fn require_dir_write(path: &str) -> Result<(), SyscallError> {
         return Ok(());
     }
     let (parent, _) = split_path(path)?;
-    let dir = vfs()?
-        .read()
-        .resolve_path(&parent)
-        .map_err(map_resolve_err)?;
+    let dir = vfs()?.resolve_path(&parent).map_err(map_resolve_err)?;
     let meta = dir.metadata().map_err(|_| SyscallError::InvalidState)?;
     let p = meta.permissions;
     if p.can_write(uid, gid, meta.uid, meta.gid) && p.can_run(uid, gid, meta.uid, meta.gid) {
@@ -1563,7 +1553,7 @@ pub(crate) fn require_may_remove(path: &str) -> Result<(), SyscallError> {
         return Ok(());
     }
     let (parent, _) = split_path(path)?;
-    let vfs_guard = vfs()?.read();
+    let vfs_guard = vfs()?;
     let dir_meta = vfs_guard
         .resolve_path(&parent)
         .map_err(map_resolve_err)?
@@ -1598,9 +1588,8 @@ pub fn sys_stat_path(path_ptr: usize, stat_buf: usize) -> SyscallResult {
     validate_user_ptr_typed::<FileStat>(stat_buf)?;
     let path = read_user_path(path_ptr)?;
 
-    let vfs_lock = vfs()?;
-    let vfs_guard = vfs_lock.read();
-    let node = vfs_guard.resolve_path(&path).map_err(map_resolve_err)?;
+    let vfs = vfs()?;
+    let node = vfs.resolve_path(&path).map_err(map_resolve_err)?;
 
     let metadata = node.metadata().map_err(|_| SyscallError::InvalidState)?;
     let stat = fill_stat(&metadata);
@@ -1642,9 +1631,8 @@ pub fn sys_lstat(path_ptr: usize, stat_buf: usize) -> SyscallResult {
         }
     }
 
-    let vfs_lock = vfs()?;
-    let vfs_guard = vfs_lock.read();
-    match vfs_guard.resolve_path_no_follow(&path) {
+    let vfs = vfs()?;
+    match vfs.resolve_path_no_follow(&path) {
         Ok(node) => {
             let metadata = node.metadata().map_err(|_| SyscallError::InvalidState)?;
             let stat = fill_stat(&metadata);
@@ -1735,14 +1723,11 @@ pub fn sys_readlink(path_ptr: usize, buf: usize, bufsiz: usize) -> SyscallResult
     }
     validate_user_buffer(buf, bufsiz)?;
 
-    let vfs_lock = vfs()?;
-    let vfs_guard = vfs_lock.read();
+    let vfs = vfs()?;
 
     // readlink must NOT follow the final symlink -- we want the link
     // node itself so we can read its target.
-    let node = vfs_guard
-        .resolve_path_no_follow(&path)
-        .map_err(map_resolve_err)?;
+    let node = vfs.resolve_path_no_follow(&path).map_err(map_resolve_err)?;
 
     // readlink operates on the link node itself; if the node is not a
     // symlink, readlink() returns NotImplemented or NotASymlink.
@@ -1789,11 +1774,10 @@ pub fn sys_faccessat(dirfd: usize, path_ptr: usize, mode: usize, _flags: usize) 
 }
 
 fn access_path(path: &str, mode: usize) -> SyscallResult {
-    let vfs_lock = vfs()?;
-    let vfs_guard = vfs_lock.read();
+    let vfs = vfs()?;
 
     // Check if the file exists (F_OK = 0)
-    let node = vfs_guard.resolve_path(path).map_err(map_resolve_err)?;
+    let node = vfs.resolve_path(path).map_err(map_resolve_err)?;
 
     // For non-zero mode, check permissions against metadata
     if mode != 0 {
@@ -1847,10 +1831,9 @@ pub fn sys_unlink(path_ptr: usize) -> SyscallResult {
     let path = read_user_path(path_ptr)?;
     require_may_remove(&path)?;
 
-    let vfs_lock = vfs()?;
-    let vfs_guard = vfs_lock.read();
+    let vfs = vfs()?;
 
-    match vfs_guard.unlink(&path) {
+    match vfs.unlink(&path) {
         Ok(()) => Ok(0),
         Err(_) => Err(SyscallError::ResourceNotFound),
     }
@@ -2043,11 +2026,10 @@ pub fn sys_dup3(old_fd: usize, new_fd: usize, flags: usize) -> SyscallResult {
 pub fn sys_opendir(path_ptr: usize) -> SyscallResult {
     let path = read_user_path(path_ptr)?;
 
-    let vfs_lock = vfs()?;
-    let vfs_guard = vfs_lock.read();
+    let vfs = vfs()?;
 
     // Verify path exists and is a directory
-    let node = vfs_guard
+    let node = vfs
         .resolve_path(&path)
         .map_err(|_| SyscallError::ResourceNotFound)?;
 
@@ -2296,18 +2278,15 @@ pub fn sys_link(old_ptr: usize, new_ptr: usize) -> SyscallResult {
     let new_path = read_user_path(new_ptr)?;
     require_dir_write(&new_path)?;
 
-    let vfs_lock = vfs()?;
-    let vfs_guard = vfs_lock.read();
+    let vfs = vfs()?;
 
     // Resolve the old path to get the target node
-    let target = vfs_guard.resolve_path(&old_path).map_err(map_resolve_err)?;
+    let target = vfs.resolve_path(&old_path).map_err(map_resolve_err)?;
 
     // Split new_path into parent dir + name
     let (parent_path, link_name) = split_path(&new_path)?;
 
-    let parent = vfs_guard
-        .resolve_path(&parent_path)
-        .map_err(map_resolve_err)?;
+    let parent = vfs.resolve_path(&parent_path).map_err(map_resolve_err)?;
 
     parent
         .link(&link_name, target)
@@ -2324,14 +2303,11 @@ pub fn sys_symlink(target_ptr: usize, link_ptr: usize) -> SyscallResult {
     let link_path = read_user_path(link_ptr)?;
     require_dir_write(&link_path)?;
 
-    let vfs_lock = vfs()?;
-    let vfs_guard = vfs_lock.read();
+    let vfs = vfs()?;
 
     let (parent_path, link_name) = split_path(&link_path)?;
 
-    let parent = vfs_guard
-        .resolve_path(&parent_path)
-        .map_err(map_resolve_err)?;
+    let parent = vfs.resolve_path(&parent_path).map_err(map_resolve_err)?;
 
     let node = parent
         .symlink(&link_name, &target)
@@ -2345,9 +2321,8 @@ pub fn sys_symlink(target_ptr: usize, link_ptr: usize) -> SyscallResult {
 pub fn sys_chmod(path_ptr: usize, mode: usize) -> SyscallResult {
     let path = read_user_path(path_ptr)?;
 
-    let vfs_lock = vfs()?;
-    let vfs_guard = vfs_lock.read();
-    let node = vfs_guard.resolve_path(&path).map_err(map_resolve_err)?;
+    let vfs = vfs()?;
+    let node = vfs.resolve_path(&path).map_err(map_resolve_err)?;
     require_owner_or_root(&node)?;
 
     let perms = Permissions::from_mode(mode as u32);
@@ -2396,9 +2371,8 @@ pub fn sys_umask(mask: usize) -> SyscallResult {
 pub fn sys_truncate_path(path_ptr: usize, size: usize) -> SyscallResult {
     let path = read_user_path(path_ptr)?;
 
-    let vfs_lock = vfs()?;
-    let vfs_guard = vfs_lock.read();
-    let node = vfs_guard
+    let vfs = vfs()?;
+    let node = vfs
         .resolve_path(&path)
         .map_err(|_| SyscallError::ResourceNotFound)?;
 
@@ -2558,9 +2532,8 @@ pub(crate) fn resolve_at_path(
 
     if dirfd == AT_FDCWD {
         // Relative to CWD
-        let cwd = if let Some(vfs_lock) = try_get_vfs() {
-            let vfs_guard = vfs_lock.read();
-            String::from(vfs_guard.get_cwd())
+        let cwd = if let Some(vfs) = try_get_vfs() {
+            vfs.get_cwd()
         } else {
             String::from("/")
         };
@@ -2618,7 +2591,7 @@ pub fn sys_openat(dirfd: usize, path_ptr: usize, flags: usize, mode: usize) -> S
     let open_flags = OpenFlags::from_bits(flags as u32).ok_or(SyscallError::InvalidArgument)?;
     let cloexec = (flags & 0x80000) != 0; // O_CLOEXEC
 
-    match vfs()?.read().open(&abs_path, open_flags) {
+    match vfs()?.open(&abs_path, open_flags) {
         Ok(node) => {
             // openat had no permission check at all; musl routes every
             // open() through it.
@@ -2642,7 +2615,7 @@ pub fn sys_openat(dirfd: usize, path_ptr: usize, flags: usize, mode: usize) -> S
                 let perms = creation_perms(mode);
                 let (parent_path, name) = split_path(&abs_path)?;
                 require_dir_write(&abs_path)?;
-                let vfs_guard = vfs()?.read();
+                let vfs_guard = vfs()?;
                 let parent = vfs_guard
                     .resolve_path(&parent_path)
                     .map_err(|_| SyscallError::ResourceNotFound)?;
@@ -2690,9 +2663,8 @@ pub fn sys_fstatat(dirfd: usize, path_ptr: usize, stat_buf: usize, _flags: usize
 
     validate_user_ptr_typed::<FileStat>(stat_buf)?;
 
-    let vfs_lock = vfs()?;
-    let vfs_guard = vfs_lock.read();
-    let node = vfs_guard
+    let vfs = vfs()?;
+    let node = vfs
         .resolve_path(&abs_path)
         .map_err(|_| SyscallError::ResourceNotFound)?;
 
@@ -2713,10 +2685,8 @@ pub fn sys_unlinkat(dirfd: usize, path_ptr: usize, _flags: usize) -> SyscallResu
     let abs_path = resolve_at_path(dirfd, &rel_path)?;
     require_may_remove(&abs_path)?;
 
-    let vfs_lock = vfs()?;
-    vfs_lock
-        .read()
-        .unlink(&abs_path)
+    let vfs = vfs()?;
+    vfs.unlink(&abs_path)
         .map_err(|_| SyscallError::ResourceNotFound)?;
 
     Ok(0)
@@ -2729,7 +2699,7 @@ pub fn sys_mkdirat(dirfd: usize, path_ptr: usize, mode: usize) -> SyscallResult 
     require_dir_write(&abs_path)?;
 
     let permissions = creation_perms(mode);
-    let vfs_guard = vfs()?.read();
+    let vfs_guard = vfs()?;
     let node = vfs_guard
         .mkdir(&abs_path, permissions)
         .map_err(|_| SyscallError::InvalidState)?;
@@ -2811,9 +2781,8 @@ pub(crate) fn split_path(
         Ok((parent, name))
     } else {
         // No slash — parent is CWD
-        let cwd = if let Some(vfs_lock) = try_get_vfs() {
-            let vfs_guard = vfs_lock.read();
-            String::from(vfs_guard.get_cwd())
+        let cwd = if let Some(vfs) = try_get_vfs() {
+            vfs.get_cwd()
         } else {
             String::from("/")
         };
@@ -2852,7 +2821,7 @@ pub(crate) fn chown_node(
 /// Change ownership of a file by path (syscall 197).
 pub fn sys_chown(path_ptr: usize, uid: usize, gid: usize) -> SyscallResult {
     let path = read_user_path(path_ptr)?;
-    let node = vfs()?.read().resolve_path(&path).map_err(map_resolve_err)?;
+    let node = vfs()?.resolve_path(&path).map_err(map_resolve_err)?;
     chown_node(&node, uid, gid)
 }
 

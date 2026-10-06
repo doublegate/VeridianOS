@@ -1,18 +1,37 @@
 # VeridianOS IPC Design Document
 
-**Version**: 1.4
-**Date**: 2026-03-10
-**Status**: Implementation Complete (100%)
+**Version**: 1.5
+**Date**: 2026-10-06
+**Status**: Implemented in the kernel; not reachable from user space yet (see below)
 
-### Current Implementation Status (v0.25.1)
+### Current Implementation Status (v0.26.0)
 
-All IPC features fully implemented and benchmarked:
-- Synchronous/asynchronous channels with zero-copy shared memory
-- Fast path register-based IPC: <1us latency achieved
-- Benchmarks (QEMU x86_64+KVM): syscall_getpid 79ns, ipc_stats_read 44ns
-- Global O(1) channel registry, token bucket rate limiting
-- NUMA-aware message routing, capability-integrated send/receive
-- Direct IPC context switching for priority inheritance
+What exists, and what the v0.26 audit work established:
+
+- **Three message size tiers** (IPC-ARCH-02):
+
+  | Payload | Transport |
+  |---|---|
+  | up to 64 bytes | `SmallMessage`, copied by value |
+  | up to 16 KiB | `BufferedMessage`, copied into a kernel buffer at send and out at receive |
+  | larger | a shared region mapped by both processes |
+
+  Receivers pass a buffer length, and all copies go through the validated user-copy routines. The
+  old large path had the receiver copy from the *sender's* virtual address into an unchecked buffer
+  (audit N-34).
+- **Shared regions own their frames.** Every process that maps a region gets a non-owning mapping
+  of those same frames. `zero_copy_transfer` shares or moves a region after checking the sender's
+  SHARE right, flushing the TLB per page. Copy-on-write transfer is refused until frame reference
+  counting lands in v0.27. Before v0.26, "mapping" a region allocated fresh zeroed frames, so
+  nothing was shared (IPC-INC-02).
+- **Not reachable from user space.** Native syscall numbers 0-7 (IPC send, receive, call, reply,
+  create, bind, share and map) are routed to Linux translation, because Qt and libstdc++ issue raw
+  Linux numbers (audit N-33). As a result:
+  - the IPC paths above are verified only by host unit tests and review;
+  - the "<1us" figure measures in-kernel helpers, not a user-to-user round trip.
+
+  The fix is the v0.28 ABI work (X1): one Linux ABI, with VeridianOS IPC calls in a separate number
+  range.
 
 ## Executive Summary
 

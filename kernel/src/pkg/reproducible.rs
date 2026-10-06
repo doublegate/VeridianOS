@@ -287,7 +287,7 @@ pub fn create_build_manifest(
 fn compute_outputs(output_dir: &str) -> BuildOutputs {
     let mut outputs = BuildOutputs::new();
 
-    let vfs_lock = match crate::fs::try_get_vfs() {
+    let vfs = match crate::fs::try_get_vfs() {
         Some(lock) => lock,
         None => {
             crate::println!(
@@ -297,8 +297,6 @@ fn compute_outputs(output_dir: &str) -> BuildOutputs {
             return outputs;
         }
     };
-
-    let vfs = vfs_lock.read();
 
     // Try to resolve the output directory
     let dir_node = match vfs.resolve_path(output_dir) {

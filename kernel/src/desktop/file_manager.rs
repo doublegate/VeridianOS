@@ -104,10 +104,7 @@ impl FileManager {
         let vfs = get_vfs();
 
         // Open directory
-        match vfs
-            .read()
-            .open(&self.current_path, crate::fs::file::OpenFlags::read_only())
-        {
+        match vfs.open(&self.current_path, crate::fs::file::OpenFlags::read_only()) {
             Ok(dir_node) => {
                 // List directory contents
                 match dir_node.readdir() {
@@ -307,10 +304,7 @@ impl FileManager {
                     //
                     // Check if the executable exists first (read guard is
                     // dropped after resolve_path returns).
-                    let app_exists = crate::fs::get_vfs()
-                        .read()
-                        .resolve_path(&assoc.app_exec)
-                        .is_ok();
+                    let app_exists = crate::fs::get_vfs().resolve_path(&assoc.app_exec).is_ok();
 
                     if app_exists {
                         match crate::userspace::load_user_program(

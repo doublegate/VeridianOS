@@ -2,7 +2,7 @@
 //!
 //! Manages capability creation, delegation, and revocation across the system.
 
-use core::sync::atomic::{AtomicU64, AtomicU8, Ordering};
+use core::sync::atomic::{AtomicU64, AtomicU8, AtomicUsize, Ordering};
 
 use super::{
     object::ObjectRef,
@@ -33,65 +33,56 @@ pub enum CapError {
     QuotaExceeded,
 }
 
-/// ID allocator for capability IDs
+/// ID allocator for capability IDs (CAP-PERF-02).
+///
+/// Fresh IDs come from an atomic counter. Recycled IDs sit in a set whose
+/// size is mirrored in `recycled_len`, so the common case (nothing to reuse)
+/// never takes the lock; it used to take the set's write lock on every
+/// allocation.
 struct IdAllocator {
     next_id: AtomicU64,
     #[cfg(feature = "alloc")]
     recycled: RwLock<BTreeSet<u64>>,
+    #[cfg(feature = "alloc")]
+    recycled_len: AtomicUsize,
 }
 
+/// IDs occupy the low 48 bits of a capability token.
+const MAX_CAP_ID: u64 = (1 << 48) - 1;
+
 impl IdAllocator {
-    fn new() -> Self {
+    const fn new() -> Self {
         Self {
             next_id: AtomicU64::new(1),
             #[cfg(feature = "alloc")]
             recycled: RwLock::new(BTreeSet::new()),
+            #[cfg(feature = "alloc")]
+            recycled_len: AtomicUsize::new(0),
         }
     }
 
     fn allocate(&self) -> Result<u64, CapError> {
-        // Try to reuse a recycled ID first
         #[cfg(feature = "alloc")]
-        {
+        if self.recycled_len.load(Ordering::Acquire) > 0 {
             let mut recycled = self.recycled.write();
-            if let Some(&id) = recycled.iter().next() {
-                recycled.remove(&id);
+            if let Some(id) = recycled.pop_first() {
+                self.recycled_len.store(recycled.len(), Ordering::Release);
                 return Ok(id);
             }
         }
 
-        // Allocate new ID using atomic compare-exchange
-        const MAX_CAP_ID: u64 = (1 << 48) - 1;
-
-        loop {
-            let current = self.next_id.load(Ordering::Relaxed);
-
-            // Check if we've exhausted the ID space
-            if current > MAX_CAP_ID {
-                return Err(CapError::IdExhausted);
-            }
-
-            let next = current + 1;
-
-            // Use compare_exchange_weak for better performance
-            match self.next_id.compare_exchange_weak(
-                current,
-                next,
-                Ordering::Release,
-                Ordering::Relaxed,
-            ) {
-                Ok(_) => return Ok(current),
-                Err(_) => {
-                    // Another thread updated the counter, retry
-                    continue;
-                }
-            }
-        }
+        self.next_id
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| {
+                (id <= MAX_CAP_ID).then_some(id + 1)
+            })
+            .map_err(|_| CapError::IdExhausted)
     }
 
     #[cfg(feature = "alloc")]
     fn recycle(&self, id: u64) {
-        self.recycled.write().insert(id);
+        let mut recycled = self.recycled.write();
+        recycled.insert(id);
+        self.recycled_len.store(recycled.len(), Ordering::Release);
     }
 }
 
@@ -145,11 +136,7 @@ impl CapabilityManager {
         Self {
             #[cfg(feature = "alloc")]
             registry: RwLock::new(BTreeMap::new()),
-            id_allocator: IdAllocator {
-                next_id: AtomicU64::new(1),
-                #[cfg(feature = "alloc")]
-                recycled: RwLock::new(BTreeSet::new()),
-            },
+            id_allocator: IdAllocator::new(),
             global_generation: AtomicU8::new(0),
             stats: CapManagerStats {
                 capabilities_created: AtomicU64::new(0),
@@ -387,4 +374,29 @@ macro_rules! require_capability {
     ($cap:expr, $rights:expr, $cap_space:expr) => {
         $crate::cap::manager::check_capability($cap, $rights, $cap_space)?
     };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn id_allocator_reuses_recycled_ids_then_counts_on() {
+        let ids = IdAllocator::new();
+        assert_eq!(ids.allocate(), Ok(1));
+        assert_eq!(ids.allocate(), Ok(2));
+        ids.recycle(1);
+        assert_eq!(ids.recycled_len.load(Ordering::Relaxed), 1);
+        assert_eq!(ids.allocate(), Ok(1));
+        assert_eq!(ids.recycled_len.load(Ordering::Relaxed), 0);
+        assert_eq!(ids.allocate(), Ok(3));
+    }
+
+    #[test]
+    fn id_allocator_stops_at_48_bits() {
+        let ids = IdAllocator::new();
+        ids.next_id.store(MAX_CAP_ID, Ordering::Relaxed);
+        assert_eq!(ids.allocate(), Ok(MAX_CAP_ID));
+        assert_eq!(ids.allocate(), Err(CapError::IdExhausted));
+    }
 }

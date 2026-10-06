@@ -442,10 +442,9 @@ pub fn populate_initramfs() -> Result<(), crate::error::KernelError> {
 
     // /sbin and /bin are already created by fs::init(), but guard against
     // them being absent. Ignore AlreadyExists errors.
-    let vfs = fs::get_vfs().read();
+    let vfs = fs::get_vfs();
     let _ = vfs.mkdir("/sbin", fs::Permissions::default());
     let _ = vfs.mkdir("/bin", fs::Permissions::default());
-    drop(vfs);
 
     // Write init binary to /sbin/init
     fs::write_file("/sbin/init", &init_elf)?;

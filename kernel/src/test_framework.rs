@@ -232,22 +232,18 @@ pub struct BenchmarkResult {
     pub max_time_ns: u64,
 }
 
-/// Get current timestamp in nanoseconds (architecture-specific).
-///
-/// Delegates to the centralized [`crate::arch::entropy::read_timestamp`] which
-/// provides implementations for x86_64 (RDTSC), AArch64 (CNTVCT_EL0), and
-/// RISC-V (rdcycle).
+/// Read the architectural clock source (raw ticks; see
+/// `crate::bench::read_timestamp`). Convert with [`cycles_to_ns`].
 #[inline(always)]
 pub fn read_timestamp() -> u64 {
-    crate::arch::entropy::read_timestamp()
+    crate::bench::read_timestamp()
 }
 
-/// Convert CPU cycles to nanoseconds (approximate)
+/// Convert `read_timestamp` ticks to nanoseconds (see
+/// `crate::bench::cycles_to_ns`).
 #[inline(always)]
 pub fn cycles_to_ns(cycles: u64) -> u64 {
-    // Assume 2GHz CPU for now (should be configurable)
-    const CPU_FREQ_GHZ: u64 = 2;
-    cycles / CPU_FREQ_GHZ
+    crate::bench::cycles_to_ns(cycles)
 }
 
 /// Benchmark runner

@@ -416,7 +416,7 @@ impl BuiltinCommand for RouteCommand {
                 Some(g) => format!("{}.{}.{}.{}", g.0[0], g.0[1], g.0[2], g.0[3]),
                 None => String::from("*"),
             };
-            crate::println!("{:<18} {:<18} {:<18} eth{}", dest, gw, mask, r.interface);
+            crate::println!("{:<18} {:<18} {:<18} {}", dest, gw, mask, r.interface);
         }
         CommandResult::Success(0)
     }

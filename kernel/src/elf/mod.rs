@@ -1118,7 +1118,7 @@ pub fn load_elf_from_file(path: &str) -> Result<ElfBinary, ElfError> {
     use crate::fs::get_vfs;
 
     // Open the file
-    let vfs = get_vfs().read();
+    let vfs = get_vfs();
     let node = vfs
         .resolve_path(path)
         .map_err(|_| ElfError::FileReadFailed)?;
@@ -1517,7 +1517,7 @@ pub fn exec_elf(path: &str) -> Result<u64, ElfError> {
     }
 
     // Read file again and load into memory
-    let vfs = get_vfs().read();
+    let vfs = get_vfs();
     let node = vfs
         .resolve_path(path)
         .map_err(|_| ElfError::FileReadFailed)?;

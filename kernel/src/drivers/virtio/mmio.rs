@@ -7,8 +7,8 @@
 //!
 //! # Default MMIO Base Addresses
 //!
-//! The `DEFAULT_BASES` array lists the first four virtio-mmio device regions
-//! for QEMU's `virt` machine. Each region is 0x200 bytes (512 bytes) and
+//! [`slots`] lists every virtio-mmio device region for QEMU's `virt`
+//! machine. Each region is 0x200 bytes (512 bytes) and
 //! contains the standard virtio-mmio register set at the offsets defined in
 //! the `regs` module. Valid register offsets range from 0x000 to 0x0A4.
 //! Device-specific configuration space starts at offset 0x100 (modern) or
@@ -29,26 +29,23 @@ use crate::{
     error::KernelError,
 };
 
-/// Default virtio-mmio base addresses for QEMU's `virt` machine.
+/// Every virtio-mmio slot on QEMU's `virt` machine.
 ///
-/// The two architectures use different memory maps:
+/// - **AArch64**: 32 slots from 0x0A00_0000, 0x200 apart (`hw/arm/virt.c`).
+/// - **RISC-V**: 8 slots from 0x1000_1000, 0x1000 apart (`hw/riscv/virt.c`).
 ///
-/// - **AArch64**: virtio-mmio devices start at 0x0A00_0000 with 0x200 stride
-///   (up to 32 devices, each 512 bytes). See QEMU `hw/arm/virt.c`.
-/// - **RISC-V**: virtio-mmio devices start at 0x1000_1000 with 0x1000 stride
-///   (up to 8 devices, each 4 KB). See QEMU `hw/riscv/virt.c`.
-///
-/// We probe the first four slots; this is sufficient for virtio-blk discovery.
-#[cfg(target_arch = "aarch64")]
-pub const DEFAULT_BASES: [usize; 4] = [0x0a00_0000, 0x0a00_0200, 0x0a00_0400, 0x0a00_0600];
-
-#[cfg(target_arch = "riscv64")]
-pub const DEFAULT_BASES: [usize; 4] = [0x1000_1000, 0x1000_2000, 0x1000_3000, 0x1000_4000];
-
-/// Fallback for other architectures (should not be reached; MMIO transport is
-/// only used on AArch64 and RISC-V).
-#[cfg(not(any(target_arch = "aarch64", target_arch = "riscv64")))]
-pub const DEFAULT_BASES: [usize; 4] = [0x0a00_0000, 0x0a00_2000, 0x0a00_4000, 0x0a00_6000];
+/// QEMU fills the slots from the highest address down, so drivers must scan
+/// all of them (a probe of the first four found no disk at all); each
+/// driver skips slots holding another device type.
+pub fn slots() -> impl Iterator<Item = usize> {
+    #[cfg(target_arch = "aarch64")]
+    let (base, count, stride) = (0x0a00_0000usize, 32usize, 0x200usize);
+    #[cfg(target_arch = "riscv64")]
+    let (base, count, stride) = (0x1000_1000usize, 8usize, 0x1000usize);
+    #[cfg(not(any(target_arch = "aarch64", target_arch = "riscv64")))]
+    let (base, count, stride) = (0usize, 0usize, 0usize);
+    (0..count).map(move |i| base + i * stride)
+}
 
 /// MMIO register offsets (per virtio spec 4.2.2, legacy interface).
 ///

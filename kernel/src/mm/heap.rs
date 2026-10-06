@@ -38,8 +38,9 @@ use super::VirtualAddress;
 // 1GB provides headroom for BlockFS cache, VFS, native compilation, and
 // the Rust toolchain rootfs (rustc+cargo+std ~400MB). Requires QEMU -m 4096M
 // minimum (typically -m 32768M for Phase 6.5 self-hosting).
-// AArch64/RISC-V keep 8MB since they have less RAM (128MB default) and
-// don't use virtio-blk for rootfs loading.
+// AArch64/RISC-V keep 8MB since they have less RAM (128MB default). Their
+// bump allocator never frees, so the BlockFS block cache there is a fixed
+// 1 MiB pool of recycled buffers (fs/blockfs/cache.rs).
 #[cfg(target_arch = "x86_64")]
 #[allow(static_mut_refs)]
 static mut HEAP_MEMORY: [u8; 1024 * 1024 * 1024] = [0; 1024 * 1024 * 1024];

@@ -96,7 +96,7 @@ pub fn quick_health_check() -> bool {
     let mut healthy = true;
 
     // Check VFS
-    if let Ok(_) = crate::fs::get_vfs().read().resolve_path("/") {
+    if let Ok(_) = crate::fs::get_vfs().resolve_path("/") {
         crate::println!("✓ VFS responding");
     } else {
         crate::println!("✗ VFS not responding");

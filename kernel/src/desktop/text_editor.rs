@@ -119,7 +119,7 @@ impl TextEditor {
         let vfs = get_vfs();
 
         // Open file
-        match vfs.read().open(path, OpenFlags::read_only()) {
+        match vfs.open(path, OpenFlags::read_only()) {
             Ok(node) => {
                 // Read file
                 let metadata = node.metadata().map_err(|_| KernelError::InvalidArgument {
@@ -198,7 +198,7 @@ impl TextEditor {
         let vfs = get_vfs();
 
         // First check if file exists, otherwise create it
-        match vfs.read().open(path, OpenFlags::read_only()) {
+        match vfs.open(path, OpenFlags::read_only()) {
             Ok(node) => {
                 // File exists, write to it
                 node.write(0, bytes)

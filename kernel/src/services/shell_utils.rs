@@ -267,7 +267,7 @@ fn find_files(start_path: &str, pattern: Option<&String>) -> Result<Vec<String>,
         pattern: Option<&String>,
         results: &mut Vec<String>,
     ) -> Result<(), KernelError> {
-        let vfs = crate::fs::get_vfs().read();
+        let vfs = crate::fs::get_vfs();
         let node = vfs.resolve_path(path)?;
 
         match node.readdir() {
@@ -304,7 +304,7 @@ fn find_files(start_path: &str, pattern: Option<&String>) -> Result<Vec<String>,
 }
 
 fn grep_file(pattern: &str, file_path: &str) -> Result<Vec<String>, KernelError> {
-    let vfs = crate::fs::get_vfs().read();
+    let vfs = crate::fs::get_vfs();
     let node = vfs.resolve_path(file_path)?;
 
     let mut buffer = [0u8; 4096];
@@ -327,7 +327,7 @@ fn grep_file(pattern: &str, file_path: &str) -> Result<Vec<String>, KernelError>
 }
 
 fn count_file(file_path: &str) -> Result<(usize, usize, usize), KernelError> {
-    let vfs = crate::fs::get_vfs().read();
+    let vfs = crate::fs::get_vfs();
     let node = vfs.resolve_path(file_path)?;
 
     let mut buffer = [0u8; 4096];
@@ -347,7 +347,7 @@ fn count_file(file_path: &str) -> Result<(usize, usize, usize), KernelError> {
 }
 
 fn head_file(file_path: &str, num_lines: usize) -> Result<Vec<String>, KernelError> {
-    let vfs = crate::fs::get_vfs().read();
+    let vfs = crate::fs::get_vfs();
     let node = vfs.resolve_path(file_path)?;
 
     let mut buffer = [0u8; 4096];
@@ -365,7 +365,7 @@ fn head_file(file_path: &str, num_lines: usize) -> Result<Vec<String>, KernelErr
 }
 
 fn tail_file(file_path: &str, num_lines: usize) -> Result<Vec<String>, KernelError> {
-    let vfs = crate::fs::get_vfs().read();
+    let vfs = crate::fs::get_vfs();
     let node = vfs.resolve_path(file_path)?;
 
     let mut buffer = [0u8; 4096];
@@ -388,7 +388,7 @@ fn tail_file(file_path: &str, num_lines: usize) -> Result<Vec<String>, KernelErr
 }
 
 fn diff_files(file1: &str, file2: &str) -> Result<Vec<String>, KernelError> {
-    let vfs = crate::fs::get_vfs().read();
+    let vfs = crate::fs::get_vfs();
 
     let node1 = vfs.resolve_path(file1)?;
     let node2 = vfs.resolve_path(file2)?;
@@ -434,7 +434,7 @@ fn diff_files(file1: &str, file2: &str) -> Result<Vec<String>, KernelError> {
 }
 
 fn sort_file(file_path: &str) -> Result<Vec<String>, KernelError> {
-    let vfs = crate::fs::get_vfs().read();
+    let vfs = crate::fs::get_vfs();
     let node = vfs.resolve_path(file_path)?;
 
     let mut buffer = [0u8; 4096];
@@ -453,7 +453,7 @@ fn sort_file(file_path: &str) -> Result<Vec<String>, KernelError> {
 }
 
 fn uniq_file(file_path: &str) -> Result<Vec<String>, KernelError> {
-    let vfs = crate::fs::get_vfs().read();
+    let vfs = crate::fs::get_vfs();
     let node = vfs.resolve_path(file_path)?;
 
     let mut buffer = [0u8; 4096];

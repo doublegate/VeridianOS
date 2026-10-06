@@ -164,8 +164,7 @@ impl PkgConfig {
                 // Full .pc file parsing (variable substitution, Requires lines)
                 // is deferred to Phase 6.
                 let pc_path = format!("{}/lib/pkgconfig/{}.pc", sysroot, name);
-                if let Some(vfs_lock) = crate::fs::try_get_vfs() {
-                    let vfs = vfs_lock.read();
+                if let Some(vfs) = crate::fs::try_get_vfs() {
                     if let Ok(node) = vfs.resolve_path(&pc_path) {
                         let mut buf = alloc::vec![0u8; 4096];
                         if let Ok(n) = node.read(0, &mut buf) {

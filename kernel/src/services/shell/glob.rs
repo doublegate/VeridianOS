@@ -270,8 +270,7 @@ fn split_dir_pattern(token: &str, cwd: &str) -> (String, String) {
 /// Returns `Some(names)` on success, `None` if the directory cannot be read.
 fn list_directory(path: &str) -> Option<Vec<String>> {
     let vfs = crate::fs::try_get_vfs()?;
-    let vfs_guard = vfs.read();
-    let node = vfs_guard.resolve_path(path).ok()?;
+    let node = vfs.resolve_path(path).ok()?;
     let entries = node.readdir().ok()?;
 
     let names: Vec<String> = entries.iter().map(|e| e.name.clone()).collect();

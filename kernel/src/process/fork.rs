@@ -468,6 +468,12 @@ fn collect_user_pages(
             continue;
         }
 
+        // Borrowed frames (device memory, shared regions) are shared, not
+        // copy-on-write.
+        if !mapping.owns_frames() {
+            continue;
+        }
+
         let base = vaddr.as_u64() as usize;
         for (i, &frame) in mapping.physical_frames.iter().enumerate() {
             let page_vaddr = base + i * 4096;

@@ -7,7 +7,7 @@
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use crate::arch::entropy::read_timestamp;
+use crate::bench::read_timestamp;
 
 /// Global IPC performance statistics
 pub struct IpcPerfStats {
@@ -177,11 +177,10 @@ impl IpcPerfReport {
     }
 }
 
-/// Convert CPU cycles to nanoseconds (assumes 2GHz CPU)
+/// Convert `read_timestamp` ticks to nanoseconds (see
+/// `crate::bench::cycles_to_ns`).
 pub fn cycles_to_ns(cycles: u64) -> u64 {
-    // For a 2GHz CPU: 1 cycle = 0.5ns
-    // Adjust this based on actual CPU frequency
-    cycles / 2
+    crate::bench::cycles_to_ns(cycles)
 }
 
 /// Measure a single IPC operation

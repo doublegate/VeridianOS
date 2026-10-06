@@ -67,10 +67,10 @@ pub fn sync_send(msg: Message, target_endpoint: u64) -> Result<()> {
             update_latency_stats(start);
             Ok(())
         }
-        Message::Large(large_msg) => {
-            // Large messages always use slow path
+        msg @ (Message::Large(_) | Message::Buffered(_)) => {
+            // Large and buffered messages always use slow path
             SYNC_STATS.slow_path_count.fetch_add(1, Ordering::Relaxed);
-            sync_send_slow_path(Message::Large(large_msg), target_endpoint)?;
+            sync_send_slow_path(msg, target_endpoint)?;
             update_latency_stats(start);
             Ok(())
         }
@@ -86,10 +86,10 @@ pub fn sync_receive(endpoint: u64) -> Result<Message> {
 
     // Try fast path for small messages
     match fast_receive(endpoint, None) {
-        Ok(small_msg) => {
+        Ok(msg) => {
             SYNC_STATS.fast_path_count.fetch_add(1, Ordering::Relaxed);
             update_latency_stats(start);
-            Ok(Message::Small(small_msg))
+            Ok(msg)
         }
         Err(IpcError::WouldBlock) => {
             // Fall back to slow path
@@ -143,7 +143,7 @@ fn sync_send_slow_path(msg: Message, target_endpoint: u64) -> Result<()> {
     {
         const MAX_RETRIES: u32 = 3;
         for _attempt in 0..MAX_RETRIES {
-            match crate::ipc::message_passing::send_to_endpoint(msg, target_endpoint) {
+            match crate::ipc::message_passing::send_to_endpoint(msg.clone(), target_endpoint) {
                 Ok(()) => {
                     // Wake any processes waiting on this endpoint
                     crate::sched::ipc_blocking::wake_up_endpoint_waiters(target_endpoint);

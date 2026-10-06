@@ -154,25 +154,98 @@ mod space_tests {
         assert!(cap_space.lookup(cap).is_none());
     }
 
-    #[test]
-    fn test_l1_and_l2_tables() {
-        let cap_space = space::CapabilitySpace::new();
-
-        // Test L1 table (ID < 256)
-        let cap_l1 = token::CapabilityToken::new(100, 1, 0, 0);
-        let obj = object::ObjectRef::Process { pid: ProcessId(1) };
-        let rights = token::Rights::READ;
-
-        assert!(cap_space.insert(cap_l1, obj.clone(), rights).is_ok());
-        assert!(cap_space.lookup(cap_l1).is_some());
-
-        // Test L2 table (ID >= 256)
-        #[cfg(feature = "alloc")]
-        {
-            let cap_l2 = token::CapabilityToken::new(1000, 1, 0, 0);
-            assert!(cap_space.insert(cap_l2, obj, rights).is_ok());
-            assert!(cap_space.lookup(cap_l2).is_some());
+    fn obj(pid: u64) -> object::ObjectRef {
+        object::ObjectRef::Process {
+            pid: ProcessId(pid),
         }
+    }
+
+    /// CAP-PERF-01: IDs are global, so a process's capabilities have
+    /// arbitrary, widely spread IDs. Memory must follow the number held,
+    /// not the ID values (the old L2 arrays cost ~14 KiB per capability).
+    #[test]
+    fn test_memory_follows_capabilities_held() {
+        let cap_space = space::CapabilitySpace::new();
+        assert_eq!(
+            cap_space.table_capacity(),
+            0,
+            "empty space allocates nothing"
+        );
+        let ids = [100u64, 1000, 70_000, 1 << 40, (1 << 48) - 1];
+        for &id in &ids {
+            let cap = token::CapabilityToken::new(id, 1, 0, 0);
+            cap_space.insert(cap, obj(id), token::Rights::READ).unwrap();
+        }
+        assert_eq!(cap_space.table_capacity(), 8);
+        for &id in &ids {
+            let cap = token::CapabilityToken::new(id, 1, 0, 0);
+            assert_eq!(cap_space.lookup(cap), Some(token::Rights::READ));
+            // A token with another generation is a different capability.
+            assert!(cap_space
+                .lookup(token::CapabilityToken::new(id, 2, 0, 0))
+                .is_none());
+        }
+        for &id in &ids {
+            assert!(cap_space
+                .remove(token::CapabilityToken::new(id, 1, 0, 0))
+                .is_some());
+        }
+        assert_eq!(cap_space.used(), 0);
+        assert_eq!(cap_space.table_capacity(), 0, "memory returned when empty");
+    }
+
+    /// The hash table against a BTreeMap model through inserts, removes
+    /// (tombstones), stale-generation removes, regrowth and reuse.
+    #[test]
+    fn test_table_matches_model() {
+        use alloc::collections::BTreeMap;
+
+        let cap_space = space::CapabilitySpace::with_quota(10_000);
+        let mut model: BTreeMap<u64, u64> = BTreeMap::new();
+        let mut x: u64 = 0x2545_F491_4F6C_DD1D;
+        for step in 0..20_000u64 {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            let id = (x % 600) * 97 + 1; // collisions and reuse
+            let cap = token::CapabilityToken::new(id, 1, 0, 0);
+            match x % 3 {
+                0 | 1 => {
+                    let r = cap_space.insert(cap, obj(step), token::Rights::READ);
+                    assert_eq!(r.is_ok(), !model.contains_key(&id));
+                    model.entry(id).or_insert(step);
+                }
+                _ => {
+                    // A stale token never removes the live entry (N-04).
+                    let stale = token::CapabilityToken::new(id, 2, 0, 0);
+                    assert!(cap_space.remove(stale).is_none());
+                    let removed = cap_space.remove(cap);
+                    assert_eq!(removed.is_some(), model.remove(&id).is_some());
+                }
+            }
+            assert_eq!(cap_space.used(), model.len());
+        }
+        for id in 0..600 * 97 + 2 {
+            let cap = token::CapabilityToken::new(id, 1, 0, 0);
+            assert_eq!(cap_space.lookup(cap).is_some(), model.contains_key(&id));
+        }
+        assert_eq!(cap_space.entries().len(), model.len());
+        assert!(cap_space.table_capacity() <= 4 * model.len().max(2));
+    }
+
+    #[test]
+    fn test_quota_enforced() {
+        let cap_space = space::CapabilitySpace::with_quota(3);
+        for id in 1..=3 {
+            let cap = token::CapabilityToken::new(id * 1000, 1, 0, 0);
+            cap_space.insert(cap, obj(id), token::Rights::READ).unwrap();
+        }
+        let extra = token::CapabilityToken::new(9999, 1, 0, 0);
+        assert!(cap_space
+            .insert(extra, obj(9), token::Rights::READ)
+            .is_err());
+        cap_space.remove(token::CapabilityToken::new(1000, 1, 0, 0));
+        assert!(cap_space.insert(extra, obj(9), token::Rights::READ).is_ok());
     }
 }
 
@@ -364,6 +437,67 @@ mod inheritance_tests {
             0,
             inheritance::InheritancePolicy::Inheritable
         ));
+    }
+
+    fn entry(id: u64, flags: u32) -> space::CapabilityEntry {
+        space::CapabilityEntry::new(
+            token::CapabilityToken::new(id, 1, 0, 0),
+            object::ObjectRef::Process { pid: ProcessId(id) },
+            token::Rights::READ | token::Rights::GRANT,
+        )
+        .with_flags(flags)
+    }
+
+    /// exec used to scan IDs 0..256 only. IDs are global, so after the
+    /// first 256 capabilities system-wide every PRESERVE_EXEC capability
+    /// was silently dropped.
+    #[test]
+    fn test_exec_keeps_preserved_capabilities_of_any_id() {
+        use inheritance::InheritanceFlags as F;
+        let old = space::CapabilitySpace::new();
+        old.insert_entry(entry(7, F::PRESERVE_EXEC)).unwrap();
+        old.insert_entry(entry(5000, F::PRESERVE_EXEC)).unwrap();
+        old.insert_entry(entry(1 << 40, F::PRESERVE_EXEC | F::REDUCE_RIGHTS))
+            .unwrap();
+        old.insert_entry(entry(6000, F::INHERITABLE)).unwrap();
+
+        let new = space::CapabilitySpace::new();
+        inheritance::exec_inherit_capabilities(&old, &new).unwrap();
+        let tok = |id| token::CapabilityToken::new(id, 1, 0, 0);
+        assert!(new.lookup(tok(7)).is_some());
+        assert!(new.lookup(tok(5000)).is_some());
+        assert_eq!(new.lookup(tok(1 << 40)), Some(token::Rights::READ));
+        assert!(new.lookup(tok(6000)).is_none());
+        assert_eq!(new.used(), 3);
+    }
+
+    /// fork copies every capability and keeps its inheritance flags, so a
+    /// capability that must not survive exec still won't in the child.
+    #[test]
+    fn test_fork_copies_all_with_flags() {
+        use inheritance::InheritanceFlags as F;
+        let parent = space::CapabilitySpace::new();
+        parent.insert_entry(entry(3, 0)).unwrap();
+        parent
+            .insert_entry(entry(90_000, F::PRESERVE_EXEC))
+            .unwrap();
+        let child = space::CapabilitySpace::new();
+        inheritance::fork_inherit_capabilities(&parent, &child).unwrap();
+        assert_eq!(child.used(), 2);
+        assert_eq!(child.get_entry(3).unwrap().inheritance_flags, 0);
+        assert_eq!(
+            child.get_entry(90_000).unwrap().inheritance_flags,
+            F::PRESERVE_EXEC
+        );
+        // Spawn (Inheritable policy) takes only the INHERITABLE one.
+        let spawned = space::CapabilitySpace::new();
+        let n = inheritance::inherit_capabilities(
+            &parent,
+            &spawned,
+            inheritance::InheritancePolicy::Inheritable,
+        )
+        .unwrap();
+        assert_eq!(n, 0);
     }
 }
 

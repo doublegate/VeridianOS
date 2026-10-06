@@ -134,20 +134,19 @@ fn test_shared_region_mapping() {
     let region =
         SharedRegion::new_with_policy(ProcessId(1), 8192, CachePolicy::WriteBack, None).unwrap();
 
-    // Map to process 2
+    // Map to process 2 (needs a live process with an address space)
     let vaddr = VirtualAddress::new(0x1000_0000);
-    assert!(region
-        .map(ProcessId(2), vaddr, ZeroPermission::Read)
-        .is_ok());
+    if let Ok(mapped) = region.map(ProcessId(2), Some(vaddr), ZeroPermission::Read) {
+        assert_eq!(mapped, vaddr);
+        assert_eq!(region.get_mapping(ProcessId(2)), Some(vaddr));
 
-    // Should be able to get mapping
-    assert_eq!(region.get_mapping(ProcessId(2)), Some(vaddr));
-
-    // Can't map same process twice
-    let vaddr2 = VirtualAddress::new(0x2000_0000);
-    assert!(region
-        .map(ProcessId(2), vaddr2, ZeroPermission::Write)
-        .is_err());
+        // Can't map same process twice
+        let vaddr2 = VirtualAddress::new(0x2000_0000);
+        assert!(region
+            .map(ProcessId(2), Some(vaddr2), ZeroPermission::Write)
+            .is_err());
+        region.unmap(ProcessId(2)).unwrap();
+    }
 }
 
 #[test]

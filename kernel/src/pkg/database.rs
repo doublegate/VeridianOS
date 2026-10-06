@@ -89,13 +89,12 @@ impl PackageDatabase {
     /// If the database file does not exist or the VFS is not available,
     /// the in-memory database remains empty -- this is not an error.
     pub fn load(&mut self) -> Result<(), KernelError> {
-        let vfs_lock = match crate::fs::try_get_vfs() {
+        let vfs = match crate::fs::try_get_vfs() {
             Some(v) => v,
             None => return Ok(()), // VFS not yet initialised
         };
 
         let data = {
-            let vfs = vfs_lock.read();
             match vfs.resolve_path(&self.db_path) {
                 Ok(node) => {
                     let meta = node.metadata()?;
@@ -367,9 +366,9 @@ fn ensure_directories(path: &str) -> Result<(), KernelError> {
         current_path.push('/');
         current_path.push_str(component);
 
-        if let Some(vfs_lock) = crate::fs::try_get_vfs() {
+        if let Some(vfs) = crate::fs::try_get_vfs() {
             let perms = Permissions::from_mode(0o755);
-            let _ = vfs_lock.write().mkdir(&current_path, perms);
+            let _ = vfs.mkdir(&current_path, perms);
         }
     }
 

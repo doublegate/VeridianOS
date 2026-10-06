@@ -57,7 +57,6 @@ pub fn load_user_program(
 ) -> Result<ProcessId, KernelError> {
     // Open the file
     let file_node = get_vfs()
-        .read()
         .open(path, crate::fs::file::OpenFlags::read_only())
         .map_err(|_| KernelError::NotFound {
             resource: "program file",
@@ -147,7 +146,7 @@ pub fn load_user_program(
         use crate::fs::file::{File, OpenFlags};
 
         let console_node: Arc<dyn crate::fs::VfsNode> = {
-            let vfs = get_vfs().read();
+            let vfs = get_vfs();
             match vfs.resolve_path("/dev/console") {
                 Ok(node) => node,
                 Err(_) => Arc::new(SerialConsoleNode),
@@ -386,7 +385,6 @@ fn load_dynamic_linker(
 
     // Read the interpreter from filesystem
     let file_node = get_vfs()
-        .read()
         .open(interpreter_path, crate::fs::file::OpenFlags::read_only())
         .map_err(|_| KernelError::NotFound {
             resource: "interpreter",

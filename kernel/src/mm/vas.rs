@@ -340,8 +340,10 @@ pub enum MappingType {
     File,
     /// Shared memory
     Shared,
-    /// Device memory (no caching)
+    /// Device memory (no caching). Frames belong to the device.
     Device,
+    /// Frames of an IPC shared region, which owns and frees them.
+    SharedRegion,
 }
 
 /// Virtual memory mapping
@@ -375,6 +377,9 @@ impl VirtualMapping {
             MappingType::File => PageFlags::PRESENT | PageFlags::USER,
             MappingType::Shared => PageFlags::PRESENT | PageFlags::WRITABLE | PageFlags::USER,
             MappingType::Device => PageFlags::PRESENT | PageFlags::WRITABLE | PageFlags::NO_CACHE,
+            MappingType::SharedRegion => {
+                PageFlags::PRESENT | PageFlags::WRITABLE | PageFlags::USER | PageFlags::NO_EXECUTE
+            }
         };
 
         Self {
@@ -385,6 +390,17 @@ impl VirtualMapping {
             #[cfg(feature = "alloc")]
             physical_frames: Vec::new(),
         }
+    }
+
+    /// Whether this mapping's frames came from the frame allocator for it
+    /// and must be freed with it. Device memory and IPC shared-region frames
+    /// are only borrowed: freeing them handed MMIO or framebuffer frames, or
+    /// a region another process still maps, to the allocator (N-32).
+    pub fn owns_frames(&self) -> bool {
+        !matches!(
+            self.mapping_type,
+            MappingType::Device | MappingType::SharedRegion
+        )
     }
 
     /// Check if address is within this mapping
@@ -733,6 +749,21 @@ impl VirtualAddressSpace {
                 }
 
                 let num_pages = mapping.size / 4096;
+
+                // Device memory and shared regions are mapped to the same
+                // frames in the child: copying a framebuffer or a region
+                // into private frames would silently stop sharing it.
+                if !mapping.owns_frames() {
+                    for (i, &frame) in mapping.physical_frames.iter().enumerate() {
+                        let vaddr = VirtualAddress(mapping.start.0 + (i as u64) * 4096);
+                        child_mapper
+                            .map_page(vaddr, frame, mapping.flags, &mut alloc)
+                            .ok();
+                    }
+                    child_mappings.insert(*addr, mapping.clone());
+                    continue;
+                }
+
                 let mut child_frames = Vec::with_capacity(num_pages);
 
                 for i in 0..num_pages {
@@ -831,8 +862,8 @@ impl VirtualAddressSpace {
                 }
             }
 
-            // Free physical frames for each mapping
-            for (_, mapping) in mappings.iter() {
+            // Free physical frames for each mapping that owns them
+            for (_, mapping) in mappings.iter().filter(|(_, m)| m.owns_frames()) {
                 let allocator = FRAME_ALLOCATOR.lock();
                 for &frame in &mapping.physical_frames {
                     let _ = allocator.free_frames(frame, 1);
@@ -1034,6 +1065,89 @@ impl VirtualAddressSpace {
         Ok(())
     }
 
+    /// Map frames this address space borrows -- an IPC shared region's --
+    /// at `at`, or at a fresh mmap address when `at` is `None`, and return
+    /// the start. The mapping (`MappingType::SharedRegion`) does not own the
+    /// frames: unmapping it or destroying the address space leaves them to
+    /// their owner. `at` must be page-aligned user space that overlaps no
+    /// existing mapping.
+    #[cfg(feature = "alloc")]
+    pub fn map_borrowed_frames(
+        &self,
+        at: Option<VirtualAddress>,
+        frames: &[FrameNumber],
+        flags: PageFlags,
+    ) -> Result<VirtualAddress, KernelError> {
+        if frames.is_empty() {
+            return Err(KernelError::InvalidArgument {
+                name: "frames",
+                value: "empty",
+            });
+        }
+        let size = frames.len() * 4096;
+        let start = match at {
+            Some(addr) => addr,
+            None => VirtualAddress(
+                self.next_mmap_addr
+                    .fetch_add(size as u64, Ordering::Relaxed),
+            ),
+        };
+        if start.0 % 4096 != 0 || !super::user_layout::is_user_range(start.0 as usize, size) {
+            return Err(KernelError::InvalidArgument {
+                name: "addr",
+                value: "not page-aligned user space",
+            });
+        }
+
+        let mut mappings = self.mappings.lock();
+        let end = start.0 + size as u64;
+        if mappings
+            .values()
+            .any(|m| m.start.0 < end && start.0 < m.start.0 + m.size as u64)
+        {
+            return Err(KernelError::AlreadyExists {
+                resource: "address range",
+                id: start.0,
+            });
+        }
+
+        let pt_root = self.page_table_root.load(Ordering::Acquire);
+        if pt_root != 0 {
+            // SAFETY: pt_root is a valid L4 page table set during
+            // VAS::init(); the mappings lock serializes changes to it.
+            let mut mapper = unsafe { create_mapper_from_root(pt_root) };
+            let mut alloc = VasFrameAllocator;
+            for (i, &frame) in frames.iter().enumerate() {
+                let page = VirtualAddress(start.0 + (i as u64) * 4096);
+                if let Err(e) = mapper.map_page(page, frame, flags, &mut alloc) {
+                    for j in 0..i {
+                        let page = start.0 + (j as u64) * 4096;
+                        let _ = mapper.unmap_page(VirtualAddress(page));
+                        crate::arch::tlb_flush_address(page);
+                    }
+                    return Err(e);
+                }
+            }
+            let mut tlb_batch = TlbFlushBatch::new();
+            for i in 0..frames.len() {
+                tlb_batch.add(start.0 + (i as u64) * 4096);
+            }
+            tlb_batch.flush();
+        }
+
+        mappings.insert(
+            start,
+            VirtualMapping {
+                start,
+                size,
+                mapping_type: MappingType::SharedRegion,
+                flags,
+                physical_frames: frames.to_vec(),
+            },
+        );
+        Ok(start)
+    }
+
     /// Map a region of virtual memory with RAII guard
     #[cfg(feature = "alloc")]
     pub fn map_region_raii(
@@ -1094,10 +1208,12 @@ impl VirtualAddressSpace {
         }
         tlb_batch.flush();
 
-        // Free the physical frames
-        let frame_allocator = FRAME_ALLOCATOR.lock();
-        for frame in mapping.physical_frames {
-            let _ = frame_allocator.free_frames(frame, 1);
+        // Free the physical frames (only if the mapping owns them)
+        if mapping.owns_frames() {
+            let frame_allocator = FRAME_ALLOCATOR.lock();
+            for frame in mapping.physical_frames {
+                let _ = frame_allocator.free_frames(frame, 1);
+            }
         }
 
         Ok(())
@@ -1201,7 +1317,7 @@ impl VirtualAddressSpace {
         tlb_batch.flush();
 
         // Free the physical frames for the unmapped range
-        {
+        if mapping.owns_frames() {
             let frame_allocator = FRAME_ALLOCATOR.lock();
             for i in unmap_page_start..unmap_page_end.min(mapping.physical_frames.len()) {
                 let _ = frame_allocator.free_frames(mapping.physical_frames[i], 1);
@@ -1644,8 +1760,8 @@ impl VirtualAddressSpace {
                 }
             }
 
-            // Free physical frames for each mapping
-            for (_, mapping) in mappings.iter() {
+            // Free physical frames for each mapping that owns them
+            for (_, mapping) in mappings.iter().filter(|(_, m)| m.owns_frames()) {
                 let frame_allocator = FRAME_ALLOCATOR.lock();
                 for frame in &mapping.physical_frames {
                     frame_allocator.free_frames(*frame, 1).ok();
@@ -1724,7 +1840,7 @@ impl VirtualAddressSpace {
 
             // Free physical frames and remove mappings
             for addr in &to_remove {
-                if let Some(mapping) = mappings.get(addr) {
+                if let Some(mapping) = mappings.get(addr).filter(|m| m.owns_frames()) {
                     let frame_allocator = FRAME_ALLOCATOR.lock();
                     for frame in &mapping.physical_frames {
                         frame_allocator.free_frames(*frame, 1).ok();
@@ -2025,6 +2141,63 @@ mod tests {
         assert!(mapping.flags.contains(PageFlags::NO_CACHE));
         // Device memory should NOT have USER flag
         assert!(!mapping.flags.contains(PageFlags::USER));
+    }
+
+    #[test]
+    fn test_map_borrowed_frames_validates_and_records() {
+        let vas = VirtualAddressSpace::new();
+        let frames = [FrameNumber::new(0x100), FrameNumber::new(0x101)];
+        let flags = PageFlags::PRESENT | PageFlags::USER | PageFlags::WRITABLE;
+        let at = VirtualAddress(0x4000_0000);
+        assert_eq!(vas.map_borrowed_frames(Some(at), &frames, flags), Ok(at));
+        let m = vas.find_mapping(VirtualAddress(0x4000_1000)).unwrap();
+        assert_eq!(m.mapping_type, MappingType::SharedRegion);
+        assert_eq!(m.physical_frames, frames);
+        assert!(!m.owns_frames());
+        // Overlap, misalignment, kernel half and the reserved top page.
+        assert!(vas
+            .map_borrowed_frames(Some(VirtualAddress(0x4000_1000)), &frames, flags)
+            .is_err());
+        assert!(vas
+            .map_borrowed_frames(Some(VirtualAddress(0x5000_0010)), &frames, flags)
+            .is_err());
+        assert!(vas
+            .map_borrowed_frames(Some(VirtualAddress(0xFFFF_8000_0000_0000)), &frames, flags)
+            .is_err());
+        let top = super::super::user_layout::USER_SPACE_END as u64 - 0x1000;
+        assert!(vas
+            .map_borrowed_frames(Some(VirtualAddress(top)), &frames, flags)
+            .is_err());
+        // Kernel-chosen address.
+        let chosen = vas.map_borrowed_frames(None, &frames, flags).unwrap();
+        assert_ne!(chosen, at);
+        assert!(vas.find_mapping(chosen).is_some());
+        // (unmap_region flushes the TLB, a privileged instruction, so it is
+        // exercised by the in-kernel runs, not here.)
+    }
+
+    #[test]
+    fn test_only_allocator_backed_mappings_own_their_frames() {
+        // N-32: unmapping a device or shared-region mapping must not hand
+        // its frames to the allocator.
+        let at = VirtualAddress(0x4000_0000);
+        for (ty, owns) in [
+            (MappingType::Code, true),
+            (MappingType::Data, true),
+            (MappingType::Stack, true),
+            (MappingType::Heap, true),
+            (MappingType::File, true),
+            (MappingType::Shared, true),
+            (MappingType::Device, false),
+            (MappingType::SharedRegion, false),
+        ] {
+            assert_eq!(
+                VirtualMapping::new(at, 4096, ty).owns_frames(),
+                owns,
+                "{:?}",
+                ty
+            );
+        }
     }
 
     #[test]
