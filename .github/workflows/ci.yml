@@ -333,6 +333,20 @@ jobs:
               # Honours .cargo/audit.toml (documented ignores).
               run: cargo audit
 
+    # Self-test of the Antigravity PR reviewer's shell logic (comment
+    # archive, error/OAuth/timeout guards, comment ownership). The reviewer
+    # runs on a self-hosted runner, so its regressions would otherwise only
+    # show up as a bad review on a live PR.
+    agy-reviewer-selftest:
+        name: Reviewer Self-Test
+        runs-on: ubuntu-latest
+        permissions:
+            contents: read
+        steps:
+            - uses: actions/checkout@v4
+            - name: Run agy-review self-test
+              run: bash scripts/agy-review-selftest.sh
+
     # Code coverage with Codecov
     coverage:
         name: Code Coverage

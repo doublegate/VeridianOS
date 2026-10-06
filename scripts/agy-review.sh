@@ -10,7 +10,8 @@
 # Flow: resolve PR -> `gh pr diff` -> build an adversarial-reviewer prompt
 #       (+ repo style guide) -> `agy --print` under a PTY -> post via `gh pr comment`.
 #
-# See ../README.md for setup, the issue #76 PTY workaround, and the ToS caveat.
+# See README.md (installed into target repos as .github/AGY-REVIEWER.md) for setup, the issue #76
+# PTY workaround, and the ToS caveat.
 set -euo pipefail
 
 # Helpers are defined FIRST: the configuration block below calls log() from the MAX_PROMPT_BYTES
@@ -677,7 +678,7 @@ if [ "$use_file" = "1" ]; then
   cp "$diff_file" "$agy_diff_file"
   {
     printf '\n--- UNIFIED DIFF (in a file) ---\n'
-    printf 'The full unified diff for this PR is in the file at the absolute path `%s`\n' "$agy_diff_file"
+    printf 'The unified diff for this PR is in the file at the absolute path `%s`\n' "$agy_diff_file"
     printf '(it is too large to inline). Read that file IN FULL with your file-reading tool first, then\n'
     printf 'produce the review above from its actual contents. Do not review from the PR title alone.\n'
   } >> "$prompt_file"
@@ -688,6 +689,17 @@ else
   [ "$diff_bytes" -gt "$inline_budget" ] && log "warning: forced inline with a ${diff_bytes}-byte diff over the ${inline_budget}-byte budget; the prompt will be truncated -- use AGY_DIFF_MODE=auto to file it in full"
   { printf '\n--- UNIFIED DIFF ---\n'; cat "$diff_file"; } >> "$prompt_file"
   log "diff is ${diff_bytes} bytes; inlined into the prompt"
+fi
+# The sanity cap above may have cut the diff. The note in `$truncated` used to reach only the
+# posted comment, so the model was told it had the whole diff and could present a partial review
+# as complete. Say so in the prompt itself, whichever way the diff was delivered.
+if [ -n "$truncated" ]; then
+  {
+    printf '\n--- NOTE: TRUNCATED DIFF ---\n'
+    printf 'The diff above is only the first %s bytes; everything after that was cut and you have NOT\n' "$MAX_DIFF_BYTES"
+    printf 'seen it. Say at the top of your review that it covers a truncated diff, and do not state or\n'
+    printf 'imply that the whole change was reviewed.\n'
+  } >> "$prompt_file"
 fi
 
 # --- guard the argv size (E2BIG) -----------------------------------------------

@@ -301,6 +301,12 @@ check "an unfamiliar error signature is caught" "MATCH" \
 # REGRESSION, observed on VeridianOS PR #5: agy under `unbuffer` printed the auth failure in
 # lowercase, the case-sensitive guard missed it, and the error was posted as the review under a
 # green check. Any capitalisation of the word is the same failure.
+# A diff cut by the MAX_DIFF_BYTES cap must be disclosed to the MODEL, not only in the posted
+# comment: otherwise it reviews a prefix believing it has the whole change (Copilot review,
+# VeridianOS PR #5).
+check "a truncated diff is disclosed in the prompt" "yes" \
+  "$(grep -q 'NOTE: TRUNCATED DIFF' "$SCRIPT_DIR/agy-review.sh" && grep -q '} >> "\$prompt_file"' "$SCRIPT_DIR/agy-review.sh" && echo yes || echo no)"
+
 check "a lowercase error (agy under unbuffer) is caught" "MATCH" \
   "$(se 'error: Eligibility check failed: PERMISSION_DENIED (code 403): Request had insufficient authentication scopes.. Please log out (/logout) and log back in (/login).')"
 check "an all-caps ERROR: is caught" "MATCH" "$(se 'ERROR: backend unavailable')"

@@ -3,7 +3,8 @@
 # so it draws on your Google AI Ultra limits instead of a paid API key.
 #
 # Requires a self-hosted runner registered with the label `agy` on a machine
-# where `agy` is logged in. See ../../README.md for the full setup.
+# where `agy` is logged in. See the template README (installed into target repos
+# as .github/AGY-REVIEWER.md) for the full setup.
 name: Antigravity PR Review
 
 on:
