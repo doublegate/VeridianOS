@@ -24,8 +24,8 @@ of them: 33 are fixed and 21 are open, each with its planned release.
 and allocators, scheduler, filesystem and networking are faster. Documentation now matches what the
 code does.
 
-**Compared with v0.25.2:** 262 files changed (+30,174 / -8,051). Host unit tests rise from 4,284 to
-4,468 (one more is ignored on purpose: it pins N-47), in-kernel boot tests from 29 to 34 on all
+**Compared with v0.25.2:** 264 files changed (+30,637 / -8,094). Host unit tests rise from 4,284 to
+4,472 (one more is ignored on purpose: it pins N-47), in-kernel boot tests from 29 to 34 on all
 three architectures, and a new in-guest runtime suite (`audit_runtime_test`) runs 27 checks on the
 BlockFS root.
 
