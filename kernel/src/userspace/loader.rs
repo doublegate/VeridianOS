@@ -114,6 +114,9 @@ pub fn load_user_program(
     };
 
     let pid = lifecycle::create_process_with_options(options)?;
+    if let Some(process) = crate::process::get_process(pid) {
+        *process.exe_path.lock() = String::from(path);
+    }
 
     // NOTE: Do NOT call set_linux_abi() here.
     //
@@ -159,7 +162,7 @@ pub fn load_user_program(
             OpenFlags::read_only(),
             String::from("/dev/console"),
         ));
-        let _ = ft.open(stdin_file);
+        let _ = ft.install(0, stdin_file);
 
         // fd 1 = stdout (write-only)
         let stdout_file = Arc::new(File::new_with_path(
@@ -167,7 +170,7 @@ pub fn load_user_program(
             OpenFlags::write_only(),
             String::from("/dev/console"),
         ));
-        let _ = ft.open(stdout_file);
+        let _ = ft.install(1, stdout_file);
 
         // fd 2 = stderr (write-only)
         let stderr_file = Arc::new(File::new_with_path(
@@ -175,7 +178,7 @@ pub fn load_user_program(
             OpenFlags::write_only(),
             String::from("/dev/console"),
         ));
-        let _ = ft.open(stderr_file);
+        let _ = ft.install(2, stderr_file);
     }
 
     // Load the ELF segments into the process's address space.

@@ -342,6 +342,33 @@ impl FileTable {
         }
     }
 
+    /// Install `file` at exactly descriptor `fd`, replacing whatever was
+    /// there (including the implicit console). Used to set up a new
+    /// process's standard descriptors, which `open` would never hand out
+    /// while they are still the implicit console.
+    pub fn install(&self, fd: FileDescriptor, file: Arc<File>) -> Result<(), KernelError> {
+        if fd >= 1024 {
+            return Err(KernelError::FsError(FsError::TooManyOpenFiles));
+        }
+        let mut files = self.files.write();
+        while files.len() <= fd {
+            files.push(None);
+        }
+        if let Some(existing) = files[fd].take() {
+            existing.file.dec_ref();
+        }
+        self.release_console_fd(fd);
+        files[fd] = Some(FileEntry {
+            file,
+            cloexec: false,
+        });
+        let mut next_fd = self.next_fd.write();
+        if *next_fd <= fd {
+            *next_fd = fd + 1;
+        }
+        Ok(())
+    }
+
     /// Open a file and return a file descriptor
     pub fn open(&self, file: Arc<File>) -> Result<FileDescriptor, KernelError> {
         self.open_with_flags(file, false)
@@ -687,6 +714,16 @@ mod tests {
         table.close(1).unwrap();
         // fd 1 is no longer the console: it is free for the next open.
         assert_eq!(table.open(some_file()).unwrap(), 1);
+    }
+
+    #[test]
+    fn install_sets_standard_fds() {
+        let table = FileTable::new();
+        for fd in 0..3 {
+            table.install(fd, some_file()).unwrap();
+        }
+        assert!(table.get(0).is_some() && table.get(2).is_some());
+        assert_eq!(table.open(some_file()).unwrap(), 3);
     }
 
     #[test]
