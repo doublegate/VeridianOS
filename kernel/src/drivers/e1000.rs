@@ -14,8 +14,8 @@
 use alloc::vec::Vec;
 
 use crate::{
+    drivers::dma_frame::DmaFrame,
     error::KernelError,
-    mm::{FrameNumber, FRAME_ALLOCATOR, FRAME_SIZE},
     net::{
         device::{DeviceCapabilities, DeviceState, DeviceStatistics, NetworkDevice},
         MacAddress, Packet,
@@ -88,37 +88,6 @@ struct TxDescriptor {
     status: u8,
     css: u8,
     special: u16,
-}
-
-/// One frame of DMA memory.
-struct DmaFrame {
-    frame: FrameNumber,
-    phys: u64,
-    virt: usize,
-}
-
-impl DmaFrame {
-    fn alloc() -> Result<Self, KernelError> {
-        let frame = FRAME_ALLOCATOR
-            .lock()
-            .allocate_frames(1, None)
-            .map_err(|_| KernelError::OutOfMemory {
-                requested: FRAME_SIZE,
-                available: 0,
-            })?;
-        let phys = frame.as_u64() * FRAME_SIZE as u64;
-        let virt = crate::mm::phys_to_virt_addr(phys) as usize;
-        // SAFETY: the frame was just allocated and is mapped by the kernel's
-        // direct map at `virt`; nothing else references it.
-        unsafe { core::ptr::write_bytes(virt as *mut u8, 0, FRAME_SIZE) };
-        Ok(Self { frame, phys, virt })
-    }
-}
-
-impl Drop for DmaFrame {
-    fn drop(&mut self) {
-        let _ = FRAME_ALLOCATOR.lock().free_frames(self.frame, 1);
-    }
 }
 
 /// E1000 driver state.
@@ -484,7 +453,7 @@ mod tests {
         // Ring lengths must be multiples of 128 bytes and fit in one frame.
         assert_eq!((NUM_RX_DESC * 16) % 128, 0);
         assert_eq!((NUM_TX_DESC * 16) % 128, 0);
-        assert!(TX_RING_OFFSET + NUM_TX_DESC * 16 <= FRAME_SIZE);
+        assert!(TX_RING_OFFSET + NUM_TX_DESC * 16 <= crate::mm::FRAME_SIZE);
         assert_eq!(NUM_RX_DESC % 2, 0);
         assert_eq!(NUM_TX_DESC % 2, 0);
     }

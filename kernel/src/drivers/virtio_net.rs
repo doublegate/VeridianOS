@@ -15,11 +15,14 @@
 use alloc::vec::Vec;
 
 use crate::{
-    drivers::virtio::{
-        mmio::VirtioMmioTransport, queue::VirtQueue, VirtioPciTransport, VirtioTransport,
+    drivers::{
+        dma_frame::DmaFrame,
+        virtio::{
+            mmio::VirtioMmioTransport, queue::VirtQueue, VirtioPciTransport, VirtioTransport,
+        },
     },
     error::KernelError,
-    mm::{FrameNumber, FRAME_ALLOCATOR, FRAME_SIZE},
+    mm::FRAME_SIZE,
     net::{
         device::{DeviceCapabilities, DeviceState, DeviceStatistics, NetworkDevice},
         MacAddress, Packet,
@@ -48,56 +51,15 @@ const VIRTQ_DESC_F_WRITE: u16 = 2;
 /// Largest Ethernet frame we send or accept (without FCS).
 const MAX_FRAME: usize = 1514;
 
-/// One frame of DMA memory.
-struct DmaBuffer {
-    frame: FrameNumber,
-    phys: u64,
-    virt: usize,
-}
-
-impl DmaBuffer {
-    fn alloc() -> Result<Self, KernelError> {
-        let frame = FRAME_ALLOCATOR
-            .lock()
-            .allocate_frames(1, None)
-            .map_err(|_| KernelError::OutOfMemory {
-                requested: FRAME_SIZE,
-                available: 0,
-            })?;
-        let phys = frame.as_u64() * FRAME_SIZE as u64;
-        let virt = crate::mm::phys_to_virt_addr(phys) as usize;
-        // SAFETY: the frame was just allocated and is mapped by the kernel's
-        // direct map at `virt`; nothing else references it.
-        unsafe { core::ptr::write_bytes(virt as *mut u8, 0, FRAME_SIZE) };
-        Ok(Self { frame, phys, virt })
-    }
-
-    fn bytes(&self) -> &[u8] {
-        // SAFETY: `virt` maps a whole frame owned by this buffer.
-        unsafe { core::slice::from_raw_parts(self.virt as *const u8, FRAME_SIZE) }
-    }
-
-    fn bytes_mut(&mut self) -> &mut [u8] {
-        // SAFETY: as above; `&mut self` gives exclusive access.
-        unsafe { core::slice::from_raw_parts_mut(self.virt as *mut u8, FRAME_SIZE) }
-    }
-}
-
-impl Drop for DmaBuffer {
-    fn drop(&mut self) {
-        let _ = FRAME_ALLOCATOR.lock().free_frames(self.frame, 1);
-    }
-}
-
 /// VirtIO network driver.
 pub struct VirtioNetDriver {
     transport: VirtioTransport,
     rx: VirtQueue,
     tx: VirtQueue,
     /// RX buffers, with the descriptor each one is posted on.
-    rx_bufs: Vec<(u16, DmaBuffer)>,
+    rx_bufs: Vec<(u16, DmaFrame)>,
     /// TX buffers; `tx_busy[i]` is the descriptor using buffer `i`.
-    tx_bufs: Vec<DmaBuffer>,
+    tx_bufs: Vec<DmaFrame>,
     tx_busy: Vec<Option<u16>>,
     /// virtio-net header length: 12 with VIRTIO_F_VERSION_1, else 10.
     hdr_len: usize,
@@ -179,13 +141,13 @@ impl VirtioNetDriver {
         // Post receive buffers before DRIVER_OK so the device can deliver
         // as soon as it is live.
         for _ in 0..RX_BUFFERS.min(driver.rx.size() as usize) {
-            let buf = DmaBuffer::alloc()?;
+            let buf = DmaFrame::alloc()?;
             let desc = driver.rx.alloc_desc().ok_or(fail(2))?;
             driver.post_rx(desc, &buf);
             driver.rx_bufs.push((desc, buf));
         }
         for _ in 0..TX_BUFFERS.min(driver.tx.size() as usize) {
-            driver.tx_bufs.push(DmaBuffer::alloc()?);
+            driver.tx_bufs.push(DmaFrame::alloc()?);
             driver.tx_busy.push(None);
         }
 
@@ -227,7 +189,7 @@ impl VirtioNetDriver {
     }
 
     /// (Re)post an RX buffer on descriptor `desc`.
-    fn post_rx(&mut self, desc: u16, buf: &DmaBuffer) {
+    fn post_rx(&mut self, desc: u16, buf: &DmaFrame) {
         // SAFETY: `desc` is a descriptor this driver allocated; `buf` is a
         // whole frame of DMA memory that stays allocated while posted.
         unsafe {
