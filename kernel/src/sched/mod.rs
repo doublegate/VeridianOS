@@ -99,9 +99,20 @@ pub fn in_syscall_wait() -> bool {
 }
 
 /// From inside a syscall that polls for a condition (sleep, poll, epoll,
-/// timerfd, futex), wait for the next interrupt so the clock can advance,
-/// without letting the timer preempt the syscall. On x86_64 syscall entry
-/// clears IF, so a plain `hlt` would never wake.
+/// timerfd, futex), give the CPU away until something may have changed.
+///
+/// x86_64: halt until the next interrupt so the clock advances, without
+/// letting the timer preempt the syscall from interrupt context (W-13).
+/// Syscall entry clears IF, so a plain `hlt` would never wake. A voluntary
+/// yield is not possible here yet: user programs run nested in the boot
+/// context, and switching to another task from inside one of their
+/// syscalls breaks it (tested: the program faults). So a task waiting in a
+/// syscall keeps the CPU until its wait ends; other tasks run once the
+/// process model dispatches user tasks through the scheduler (C5).
+///
+/// AArch64 / RISC-V (kernel tasks only, no user mode): yield if another
+/// task is ready, else WFI until the next 1000 Hz timer interrupt (WFI
+/// wakes on a pending interrupt even if interrupts are masked).
 pub fn wait_for_interrupt_in_syscall() {
     #[cfg(target_arch = "x86_64")]
     {
@@ -113,8 +124,15 @@ pub fn wait_for_interrupt_in_syscall() {
         unsafe { core::arch::asm!("sti; hlt; cli", options(nomem, nostack)) };
         SYSCALL_WAIT_DEPTH.fetch_sub(1, Ordering::AcqRel);
     }
-    #[cfg(not(target_arch = "x86_64"))]
-    yield_cpu();
+    #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
+    {
+        if has_ready_tasks() {
+            yield_cpu();
+        } else {
+            // SAFETY: WFI only waits for an interrupt or event.
+            unsafe { core::arch::asm!("wfi", options(nomem, nostack)) };
+        }
+    }
 }
 
 // Import ProcessState from process module (used by submodules via super::)

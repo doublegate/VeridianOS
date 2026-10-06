@@ -180,6 +180,14 @@ syscalls were always owned by root, and the umask was stored but never applied. 
 belong to the caller and take `mode & ~umask`; both are checked in the guest
 (`sticky_dir_protects_entries`, `umask_applied`).
 
+**Known residual (C5): a task waiting in a syscall keeps the CPU on x86_64.** A sleeping or
+polling syscall halts until its wait ends; neither the tick nor the syscall switches to another
+task. Preempting from the tick was the W-13 hazard. A voluntary yield was tried and breaks the user
+program, which runs nested in the boot context (it faulted as soon as the scheduler dispatched the
+init task). Other ready tasks therefore starve while one user program sleeps or polls with a long
+or infinite timeout. This resolves with the process model (C5), where user tasks are dispatched by
+the scheduler. AArch64 and RISC-V, which have no user mode yet, yield to ready tasks.
+
 **Known residual (tracked with W-13 / C5):** permission checks resolve a path, then the operation
 resolves it again by name (`require_may_remove` then `unlink`, `require_dir_write` then `create`).
 With one CPU and no preemption inside these syscalls the window cannot be raced today; it becomes
