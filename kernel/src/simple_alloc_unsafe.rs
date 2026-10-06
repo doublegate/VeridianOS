@@ -6,7 +6,7 @@
 
 use core::{
     alloc::{GlobalAlloc, Layout},
-    ptr::{self, NonNull},
+    ptr,
     sync::atomic::{AtomicUsize, Ordering},
 };
 
@@ -139,33 +139,31 @@ unsafe impl GlobalAlloc for UnsafeBumpAllocator {
         }
 
         let alloc_size = layout.size();
-        let alloc_align = layout.align();
+        // Layout guarantees a non-zero power-of-two alignment; honour all of
+        // it (it used to be capped at 8, misaligning page-aligned requests).
+        let mask = layout.align() - 1;
+        let end_of_heap = start + size;
 
-        // Simple load-store path for bump allocation.
-        // Safe during single-core boot - no concurrent access possible.
-        // AArch64 and RISC-V both use this path since they run on the
-        // UnsafeBumpAllocator which is only used during single-threaded boot.
-        {
-            let current_next = self.next.load(Ordering::SeqCst);
-            let align = if alloc_align > 8 { 8 } else { alloc_align };
-            let mask = align - 1;
-            let aligned_next = (current_next + mask) & !mask;
+        // Claim [aligned, aligned + size) with a CAS so two CPUs (or an
+        // interrupt handler) cannot be handed the same bytes (MEM-SEC-03).
+        let claimed = self
+            .next
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
+                let aligned = current.checked_add(mask)? & !mask;
+                let end = aligned.checked_add(alloc_size)?;
+                (end <= end_of_heap).then_some(end)
+            });
+        let Ok(previous) = claimed else {
+            return ptr::null_mut();
+        };
+        let aligned = (previous + mask) & !mask;
+        self.allocations.fetch_add(1, Ordering::Relaxed);
 
-            let alloc_end = match aligned_next.checked_add(alloc_size) {
-                Some(end) => end,
-                None => return ptr::null_mut(),
-            };
-            if alloc_end > start + size {
-                return ptr::null_mut();
-            }
-
-            self.next.store(alloc_end, Ordering::SeqCst);
-            self.allocations.fetch_add(1, Ordering::Relaxed);
-
-            let allocated_ptr = aligned_next as *mut u8;
-            core::ptr::write_bytes(allocated_ptr, 0, alloc_size);
-            allocated_ptr
-        }
+        let allocated_ptr = aligned as *mut u8;
+        // SAFETY: [aligned, aligned + alloc_size) lies inside the heap
+        // region given to init() and was claimed exclusively by the CAS.
+        unsafe { core::ptr::write_bytes(allocated_ptr, 0, alloc_size) };
+        allocated_ptr
     }
 
     #[inline(always)]
@@ -174,62 +172,47 @@ unsafe impl GlobalAlloc for UnsafeBumpAllocator {
     }
 }
 
-/// Simple locked-like interface for compatibility
-pub struct LockedUnsafeBumpAllocator {
-    pub inner: UnsafeBumpAllocator,
-}
+#[cfg(test)]
+mod tests {
+    use alloc::{vec, vec::Vec};
 
-impl LockedUnsafeBumpAllocator {
-    /// Create a new empty allocator
-    pub const fn empty() -> Self {
-        Self {
-            inner: UnsafeBumpAllocator::new(),
-        }
+    use super::*;
+
+    fn heap(bytes: usize) -> (UnsafeBumpAllocator, Vec<u8>) {
+        let mut backing = vec![0u8; bytes];
+        let alloc = UnsafeBumpAllocator::new();
+        // SAFETY: `backing` outlives every allocation made in the test.
+        unsafe { alloc.init(backing.as_mut_ptr(), bytes) };
+        (alloc, backing)
     }
 
-    /// Get a "lock" (just returns a wrapper)
-    pub fn lock(&self) -> UnsafeBumpAllocatorGuard<'_> {
-        UnsafeBumpAllocatorGuard { inner: &self.inner }
-    }
-}
-
-/// Guard for unsafe bump allocator (no actual locking)
-pub struct UnsafeBumpAllocatorGuard<'a> {
-    pub inner: &'a UnsafeBumpAllocator,
-}
-
-impl UnsafeBumpAllocatorGuard<'_> {
-    /// Initialize the allocator
-    ///
-    /// # Safety
-    ///
-    /// The caller must ensure the memory region is valid
-    pub unsafe fn init(&mut self, start: *mut u8, size: usize) {
-        self.inner.init(start, size);
+    #[test]
+    fn honours_large_alignment() {
+        let (a, _backing) = heap(64 * 1024);
+        let layout = Layout::from_size_align(16, 4096).unwrap();
+        // SAFETY: valid non-zero layout.
+        let p = unsafe { a.alloc(layout) };
+        assert!(!p.is_null());
+        assert_eq!(p as usize % 4096, 0);
     }
 
-    /// Allocate memory using first fit (same as bump allocation)
-    pub fn allocate_first_fit(&mut self, layout: Layout) -> Result<NonNull<u8>, ()> {
-        // SAFETY: self.inner.alloc returns either a valid heap pointer or null.
-        // The null check ensures NonNull::new_unchecked is only called with a
-        // non-null pointer. The allocator was initialized with a valid memory
-        // region via the unsafe init() method.
-        unsafe {
-            let ptr = self.inner.alloc(layout);
-            if ptr.is_null() {
-                Err(())
-            } else {
-                Ok(NonNull::new_unchecked(ptr))
-            }
-        }
+    #[test]
+    fn returns_null_when_exhausted() {
+        let (a, _backing) = heap(256);
+        let layout = Layout::from_size_align(512, 8).unwrap();
+        // SAFETY: valid non-zero layout.
+        assert!(unsafe { a.alloc(layout) }.is_null());
     }
 
-    /// Deallocate memory (no-op for bump allocator)
-    ///
-    /// # Safety
-    ///
-    /// The pointer must have been allocated by this allocator
-    pub unsafe fn deallocate(&mut self, _ptr: NonNull<u8>, _layout: Layout) {
-        // Bump allocator doesn't support deallocation
+    #[test]
+    fn allocations_never_overlap() {
+        let (a, _backing) = heap(64 * 1024);
+        let layout = Layout::from_size_align(24, 8).unwrap();
+        let mut ptrs: Vec<usize> = (0..100)
+            // SAFETY: valid non-zero layout.
+            .map(|_| unsafe { a.alloc(layout) } as usize)
+            .collect();
+        ptrs.sort_unstable();
+        assert!(ptrs.windows(2).all(|w| w[1] - w[0] >= 24));
     }
 }

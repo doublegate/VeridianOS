@@ -22,10 +22,12 @@ extern crate alloc;
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 use linked_list_allocator::LockedHeap;
 
-#[cfg(any(target_arch = "riscv64", target_arch = "aarch64"))]
+// Also built for host unit tests, which exercise it on a Vec-backed heap.
+#[cfg(any(target_arch = "riscv64", target_arch = "aarch64", test))]
+#[cfg_attr(test, allow(dead_code))]
 mod simple_alloc_unsafe;
 #[cfg(any(target_arch = "riscv64", target_arch = "aarch64"))]
-use simple_alloc_unsafe::{LockedUnsafeBumpAllocator, UnsafeBumpAllocator};
+use simple_alloc_unsafe::UnsafeBumpAllocator;
 
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 #[global_allocator]
@@ -34,9 +36,6 @@ static ALLOCATOR: LockedHeap = LockedHeap::empty();
 #[cfg(any(target_arch = "riscv64", target_arch = "aarch64"))]
 #[global_allocator]
 pub static ALLOCATOR: UnsafeBumpAllocator = UnsafeBumpAllocator::new();
-
-#[cfg(any(target_arch = "riscv64", target_arch = "aarch64"))]
-pub static LOCKED_ALLOCATOR: LockedUnsafeBumpAllocator = LockedUnsafeBumpAllocator::empty();
 
 // Host target: use the system allocator so unit tests can allocate normally.
 #[cfg(not(target_os = "none"))]
@@ -49,12 +48,6 @@ static SYSTEM_ALLOCATOR: std::alloc::System = std::alloc::System;
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 pub fn get_allocator() -> &'static LockedHeap {
     &ALLOCATOR
-}
-
-/// Get a reference to the global allocator for RISC-V/AArch64
-#[cfg(any(target_arch = "riscv64", target_arch = "aarch64"))]
-pub fn get_allocator() -> &'static LockedUnsafeBumpAllocator {
-    &LOCKED_ALLOCATOR
 }
 
 #[macro_use]
