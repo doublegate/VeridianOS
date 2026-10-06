@@ -228,6 +228,11 @@ pub struct VirtioBlkDevice {
     /// Negotiated features
     #[allow(dead_code)] // Negotiated feature bits for device capabilities
     features: u32,
+    /// Set after a request timed out with the device still owning its
+    /// buffer and descriptors. The queue state is then unknown (a late
+    /// completion would be taken for the next request's), so every later
+    /// request fails instead (N-10).
+    failed: bool,
 }
 
 impl VirtioBlkDevice {
@@ -296,6 +301,7 @@ impl VirtioBlkDevice {
             capacity_sectors,
             read_only,
             features: accepted,
+            failed: false,
         })
     }
 
@@ -313,6 +319,7 @@ impl VirtioBlkDevice {
             capacity_sectors,
             read_only,
             features,
+            failed: false,
         }
     }
 
@@ -390,6 +397,13 @@ impl VirtioBlkDevice {
         write_data: Option<&[u8]>,
     ) -> Result<(), KernelError> {
         let data_len = BLOCK_SIZE;
+
+        if self.failed {
+            return Err(KernelError::HardwareError {
+                device: "virtio-blk",
+                code: 0x03, // device quarantined after a request timeout
+            });
+        }
 
         // Allocate DMA buffer for the request
         let req_buf = RequestBuffer::new(data_len)?;
@@ -487,8 +501,12 @@ impl VirtioBlkDevice {
             core::hint::spin_loop();
             spins += 1;
             if spins >= MAX_SPINS {
-                // Free descriptors before returning error
-                self.queue.free_chain(desc_header);
+                // The device may still DMA into the request frame and still
+                // owns the descriptor chain: freeing either would let it
+                // corrupt reallocated memory or a later request. Leak both
+                // and stop using the device (N-10).
+                core::mem::forget(req_buf);
+                self.failed = true;
                 return Err(KernelError::Timeout {
                     operation: "virtio-blk request",
                     duration_ms: 0,
