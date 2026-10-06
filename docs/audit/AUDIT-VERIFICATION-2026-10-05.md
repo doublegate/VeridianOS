@@ -199,6 +199,7 @@ Paths are relative to `kernel/src/` unless they start with `userland/`.
 | N-48 | Unix sockets | Only the first `cmsghdr` in a control buffer is parsed; `socket`/`socketpair` ignore SOCK_CLOEXEC and SOCK_NONBLOCK; Unix `setsockopt` accepts and ignores every option; accepted and connected peers are reported unnamed because client paths are not tracked. | v0.30.0 (X2 network tier) | open |
 | N-49 | `ipc/fast_path.rs` `fast_send` | Dereferences a task pointer from `get_task_ptr` without holding the scheduler lock, so a task that exits concurrently is a use-after-free. Unreachable today: `fast_send` is called only from `IpcBatch::flush`, which has no callers outside the module. Review (PR #10). | v0.28.0 (IPC rework with N-33) | open |
 | N-50 | `sched/ipc_blocking.rs` | The rollback after a failed block removes a waiter by PID across every endpoint, which would also remove a sibling thread of the same process blocked elsewhere. Harmless while a process has one runnable thread. Review (PR #10). | v0.27.0 (C5, user threads) | open |
+| N-51 | `syscall/filesystem.rs` | Permission checks on a parent directory (`require_dir_write`, `require_may_remove`) resolve the path separately from the operation that follows, so the directory or a symlink in the path could change in between. Not reachable while one CPU runs and syscalls are not preempted (W-13); rename already holds `RENAME_LOCK` across its checks. agy review (PR #9). | v0.27.0 (SMP: check on the resolved node under the operation's lock) | open |
 
 ## Runtime verification status
 

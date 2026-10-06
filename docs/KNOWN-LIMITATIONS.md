@@ -50,7 +50,8 @@ nested boot-time process context. A long wait therefore delays other processes o
 Only the boot CPU runs on every architecture. SMP bring-up, per-CPU run queues and TLB shootdown are
 v0.27 work. Lock-free and per-CPU structures are single-CPU-safe but have not run on more than one
 CPU. Some state that must be per-CPU is still global: the x86_64 saved syscall
-frame (`SYSCALL_FRAME_PTR`, N-35) is one example.
+frame (`SYSCALL_FRAME_PTR`, N-35) is one example, and directory permission checks that resolve the
+path separately from the operation (N-51) are another.
 
 ### AArch64 runs with the MMU and caches off (N-28, planned v0.27)
 

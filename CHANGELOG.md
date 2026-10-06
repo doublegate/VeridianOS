@@ -11,8 +11,8 @@ v0.26.0 remediates the findings of the 2026-10-05 performance and quality audit
 
 Each finding was first re-verified against the code; the per-finding results are in
 `docs/audit/AUDIT-VERIFICATION-2026-10-05.md`. Verification found 34 defects the audit missed
-(N-01..N-34), and the bot review of the release found 16 more (N-35..N-50). The same file tracks all
-of them: 32 are fixed and 18 are open, each with its planned release.
+(N-01..N-34), and the bot review of the release found 17 more (N-35..N-51). The same file tracks all
+of them: 32 are fixed and 19 are open, each with its planned release.
 
 **Status:**
 
@@ -223,7 +223,7 @@ Deferred with audit IDs:
 - the remaining socket options (N-48);
 - fork leaks on late errors (N-46);
 - the split IPC endpoint registries (N-47), and two IPC races that are unreachable today (N-49,
-  N-50).
+  N-50), and parent-directory permission checks that are separate from the operation (N-51, SMP).
 
 #### Known limitations and deferrals
 
