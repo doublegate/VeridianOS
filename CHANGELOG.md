@@ -11,8 +11,8 @@ v0.26.0 remediates the findings of the 2026-10-05 performance and quality audit
 
 Each finding was first re-verified against the code; the per-finding results are in
 `docs/audit/AUDIT-VERIFICATION-2026-10-05.md`. Verification found 34 defects the audit missed
-(N-01..N-34), and the bot review of the release found 17 more (N-35..N-51). The same file tracks all
-of them: 32 are fixed and 19 are open, each with its planned release.
+(N-01..N-34), and the bot review of the release found 20 more (N-35..N-54). The same file tracks all
+of them: 33 are fixed and 21 are open, each with its planned release.
 
 **Status:**
 
@@ -181,6 +181,8 @@ reason, then resolved. Fixed:
 - **Storage**
   - BlockFS refuses a device smaller than the filesystem and never syncs past its end.
   - BlockFS rename runs every check before changing anything.
+  - Removing a BlockFS directory frees its inode and blocks, and every removal returns its inode
+    to the free count, which used to underflow after enough deletions (N-44).
   - ramfs rejects a rename across instances with EXDEV.
   - virtio-blk quarantines a completion that is not its request.
   - The NVMe self-test always restores the blocks it wrote, and reports a failure as a failure.
@@ -209,6 +211,16 @@ reason, then resolved. Fixed:
   - **These fix the build inputs only.** KDE binaries in an image built before v0.26.0 keep both
     defects until the `tools/cross/` pipeline is rerun. The BusyBox rootfs uses the native libc and
     is not affected.
+- **Second review round (on the fixes themselves)**
+  - A rate-limited syscall now returns EAGAIN in Linux numbering.
+  - `epoll_ctl` and SCM_RIGHTS control messages are copied with the fault-tolerant routines.
+  - The futex operations that need a sixth argument fail with ENOSYS where it is not captured.
+  - ELF program-header addresses are computed with overflow checks.
+  - AT_PHNUM and AT_PHENT come from the ELF header.
+  - Interface routes are removed from the interface they were installed on.
+  - The TSS stacks are no longer `static mut`.
+  - `sscanf` reads integers with long zero padding.
+  - Two debug traces are gone from the epoll and exec paths.
 - **Reviewer**
   - Fork pull requests from any outside contributor now need approval before a workflow runs, which
     is what protects the self-hosted runner.
@@ -219,11 +231,11 @@ Deferred with audit IDs:
 - the FPU/vector state, which is not saved across switches (N-41, v0.27);
 - the global syscall frame pointer (N-35, SMP);
 - raw buffer reads in send/recv (N-43);
-- BlockFS directory space (N-44);
 - the remaining socket options (N-48);
 - fork leaks on late errors (N-46);
 - the split IPC endpoint registries (N-47), and two IPC races that are unreachable today (N-49,
-  N-50), and parent-directory permission checks that are separate from the operation (N-51, SMP).
+  N-50), and parent-directory permission checks that are separate from the operation (N-51, SMP), the NVMe lock held while polling (N-52), shared-region fragments
+  after a partial munmap (N-53) and boot futex waits that do not run a forked child (N-54).
 
 #### Known limitations and deferrals
 

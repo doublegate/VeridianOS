@@ -79,11 +79,6 @@ Changed blocks stay in memory until `sync`, so the disk always holds the last-sy
 no journal, and there is no periodic sync yet, so memory for unsynced writes grows until the next
 sync. Clean blocks are cached within a bound (16 MiB on x86_64, 1 MiB elsewhere).
 
-### Directories on BlockFS are not freed (N-44)
-
-Removing an empty directory, or replacing one by rename, leaves its inode and blocks allocated until
-the filesystem is recreated.
-
 ### Shared IPC regions are never reclaimed
 
 A region's frames are freed only when no process maps it. Mappings that a child inherits through
