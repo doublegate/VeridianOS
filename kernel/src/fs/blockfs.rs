@@ -731,16 +731,25 @@ impl BlockFsInner {
             writable: true,
         };
 
-        // Write all dirty data blocks
+        // A dirty block past the end of the device can never be written.
+        // Persisting metadata that references it would make its contents
+        // read back as zeros after a remount, so fail before writing
+        // anything; the dirty blocks stay in memory (ADR 0003). Review of the
+        // v0.26.0 stack, PR #12.
         let cache = self.cache.get_mut();
-        let mut synced = cache.flush(view)?;
-        for _block in cache.unwritable_dirty(view) {
+        if let Some(_block) = cache.unwritable_dirty(view).next() {
             crate::println!(
-                "[BLOCKFS] Warning: dirty block {} exceeds device capacity {}",
+                "[BLOCKFS] sync refused: dirty block {} exceeds device capacity {}",
                 _block,
                 self.device_blocks
             );
+            return Err(KernelError::ResourceExhausted {
+                resource: "blockfs device capacity",
+            });
         }
+
+        // Write all dirty data blocks
+        let mut synced = cache.flush(view)?;
 
         // Update superblock write time and mount count
         self.superblock.write_time = crate::arch::timer::read_hw_timestamp();
@@ -771,13 +780,30 @@ impl BlockFsInner {
     }
 
     /// Attach `backend`, sampling its size and writability once.
-    fn attach_disk(&mut self, backend: Arc<Mutex<dyn DiskBackend>>) {
+    ///
+    /// A device with fewer blocks than the superblock's `block_count` is
+    /// refused: the bitmap could hand out blocks that the device cannot
+    /// store.
+    fn attach_disk(&mut self, backend: Arc<Mutex<dyn DiskBackend>>) -> Result<(), KernelError> {
         {
             let bk = backend.lock();
-            self.device_blocks = bk.block_count();
+            let device_blocks = bk.block_count();
+            if device_blocks < u64::from(self.superblock.block_count) {
+                crate::println!(
+                    "[BLOCKFS] device has {} blocks, filesystem needs {}",
+                    device_blocks,
+                    self.superblock.block_count
+                );
+                return Err(KernelError::InvalidArgument {
+                    name: "disk",
+                    value: "device smaller than the filesystem",
+                });
+            }
+            self.device_blocks = device_blocks;
             self.disk_writable = !bk.is_read_only();
         }
         self.disk = Some(backend);
+        Ok(())
     }
 
     // --- On-disk metadata serialization ---
@@ -1050,7 +1076,7 @@ impl BlockFsInner {
             device_blocks: 0,
             disk_writable: false,
         };
-        fs.attach_disk(backend);
+        fs.attach_disk(backend)?;
 
         // Update mount count and time
         fs.superblock.mount_count += 1;
@@ -2397,13 +2423,16 @@ impl BlockFs {
     /// cached blocks are dropped and reread on demand. Otherwise memory is
     /// treated as newer than the disk (every block written since creation
     /// is still dirty) and the next sync writes it out.
+    ///
+    /// Fails, leaving no backend attached, if the device has fewer blocks
+    /// than the filesystem.
     pub fn set_disk_backend(
         &self,
         backend: Arc<Mutex<dyn DiskBackend>>,
         load: bool,
     ) -> Result<(), KernelError> {
         let mut inner = self.inner.write();
-        inner.attach_disk(backend);
+        inner.attach_disk(backend)?;
 
         if load {
             let loaded = inner.load_from_disk()?;
@@ -2611,6 +2640,54 @@ mod tests {
         let n = node.read(0, &mut buf).unwrap();
         buf.truncate(n);
         buf
+    }
+
+    /// A device smaller than the filesystem cannot hold every block the
+    /// bitmap may hand out: attaching it is refused (review of the v0.26.0
+    /// stack, PR #12).
+    #[test]
+    fn attach_rejects_device_smaller_than_filesystem() {
+        let fs = BlockFs::format(1000, 100).unwrap();
+        assert!(fs
+            .set_disk_backend(backend(&MemDisk::new(64)), false)
+            .is_err());
+        assert!(fs.inner.read().disk.is_none());
+
+        // A valid image whose device was truncated must not mount either.
+        let full = MemDisk::new(1000);
+        fs.set_disk_backend(backend(&full), false).unwrap();
+        fs.sync().unwrap();
+        let small = MemDisk::new(64);
+        small
+            .blocks
+            .lock()
+            .clone_from_slice(&full.blocks.lock()[..64]);
+        assert!(BlockFs::open_existing(backend(&small)).is_err());
+    }
+
+    /// If any dirty block lies past the end of the device, sync fails before
+    /// it writes anything, so no metadata can point at unwritten data.
+    #[test]
+    fn sync_fails_without_writing_when_a_dirty_block_does_not_fit() {
+        let fs = BlockFs::format(1000, 100).unwrap();
+        let root = fs.root();
+        // ~75 data blocks: the bitmap hands out blocks past index 64.
+        root.create("big", Permissions::default())
+            .unwrap()
+            .write(0, &pattern(3, 300 * 1024))
+            .unwrap();
+        let disk = MemDisk::new(64);
+        {
+            // Bypass the attach-time size check to model a device that is
+            // smaller than the filesystem.
+            let mut inner = fs.inner.write();
+            inner.disk = Some(backend(&disk));
+            inner.device_blocks = 64;
+            inner.disk_writable = true;
+        }
+        assert!(fs.sync().is_err());
+        assert_eq!(disk.writes(), 0, "nothing, metadata included, is written");
+        assert!(fs.dirty_block_count() > 0, "dirty blocks stay in memory");
     }
 
     /// FS-PERF-01: data larger than the cache survives sync and remount, and
