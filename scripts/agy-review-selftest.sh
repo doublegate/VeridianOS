@@ -472,12 +472,13 @@ fi
 # the linear backoff between attempts (delay x 1 + delay x 2 + ...). Read from the workflow
 # and the script's defaults, so changing either without the other fails here.
 wf="$SCRIPT_DIR/../.github/workflows/antigravity-review.yml"
-wf_val() { sed -n "s/^[[:space:]]*$1:[[:space:]]*\"\{0,1\}\([0-9][0-9]*\).*/\1/p" "$wf" | head -1; }
+wf_val() { sed -n "s/^[[:space:]]*$1:[[:space:]]*[\"']\{0,1\}\([0-9][0-9]*\).*/\1/p" "$wf" | head -1; }
 sh_default() { sed -n "s/^$1=\"\${$1:-\([0-9][0-9]*\)}\".*/\1/p" "$SCRIPT_DIR/agy-review.sh" | head -1; }
 job_min="$(wf_val timeout-minutes)"
 max_s="$(wf_val AGY_PRINT_TIMEOUT_MAX_SECONDS)"; [ -n "$max_s" ] || max_s="$(sh_default AGY_PRINT_TIMEOUT_MAX_SECONDS)"
 lock_s="$(wf_val AGY_LOCK_WAIT)";               [ -n "$lock_s" ] || lock_s="$(sh_default AGY_LOCK_WAIT)"
-retries="$(sh_default AGY_RETRIES)"; delay="$(sh_default AGY_RETRY_DELAY)"
+retries="$(wf_val AGY_RETRIES)";  [ -n "$retries" ] || retries="$(sh_default AGY_RETRIES)"
+delay="$(wf_val AGY_RETRY_DELAY)"; [ -n "$delay" ] || delay="$(sh_default AGY_RETRY_DELAY)"
 if [ -z "$job_min" ] || [ -z "$max_s" ] || [ -z "$lock_s" ] || [ -z "$retries" ] \
    || [ -z "$delay" ]; then
   echo "  FAIL  could not read the timeout budget (job=$job_min max=$max_s lock=$lock_s retries=$retries delay=$delay)"

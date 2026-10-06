@@ -113,7 +113,9 @@ AGY_REVIEWED_AT_PREFIX='<!-- agy-reviewed-at: '
 # "oldest round" cut at it and discarded the new round together with the whole legacy history.
 agy_assemble_archive() {
   local head="$1" archive="$2" fallback="$3" when label
-  when="$(printf '%s\n' "$head" | awk -v p="$AGY_REVIEWED_AT_PREFIX" '
+  # The line sits right under the marker; looking only at the first lines keeps this cheap
+  # for a 64 KB head.
+  when="$(printf '%s\n' "$head" | head -n 5 | awk -v p="$AGY_REVIEWED_AT_PREFIX" '
     index($0, p) == 1 { s = substr($0, length(p) + 1); sub(/ -->$/, "", s); print s; exit }')"
   if [ -n "$when" ]; then
     label="Round reviewed at $when"
