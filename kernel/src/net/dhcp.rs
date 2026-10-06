@@ -382,8 +382,10 @@ impl DhcpClient {
         }
 
         let options = parse_dhcp_options(&packet.options);
-        if options.server_id.is_some() && options.server_id != self.server_id {
-            return Ok(()); // ACK from a server we did not select
+        // RFC 2131 requires the server identifier in every ACK; one without
+        // it, or from a server we did not select, is ignored.
+        if options.server_id.is_none() || options.server_id != self.server_id {
+            return Ok(());
         }
 
         let ip = packet.yiaddr;
@@ -647,6 +649,35 @@ mod tests {
         // A client request echoed back is not a server reply.
         let request = DhcpPacket::new(DhcpMessageType::Request, mac, client.xid);
         assert!(!client.accepts(&request));
+    }
+
+    #[test]
+    fn test_dhcp_ack_requires_selected_server() {
+        let mac = MacAddress([0x52, 0x54, 0x00, 0x12, 0x34, 0x56]);
+        let mut client = DhcpClient::new(mac);
+        client.xid = 0x0BAD_F00D;
+        client.state = DhcpState::Requesting;
+        client.server_id = Some(Ipv4Address([10, 0, 2, 2]));
+
+        // ACK without a server identifier: ignored.
+        let mut ack = DhcpPacket::new(DhcpMessageType::Ack, mac, client.xid);
+        ack.op = DHCP_OP_BOOTREPLY;
+        ack.finalize();
+        client.process_ack(&ack).unwrap();
+        assert_eq!(client.state(), DhcpState::Requesting);
+
+        // ACK from a different server: ignored.
+        let mut rogue = DhcpPacket::new(DhcpMessageType::Ack, mac, client.xid);
+        rogue.op = DHCP_OP_BOOTREPLY;
+        rogue.add_option_ipv4(OPT_SERVER_ID, Ipv4Address([10, 0, 2, 99]));
+        rogue.finalize();
+        // The option is really there, so the rejection below is not vacuous.
+        assert_eq!(
+            parse_dhcp_options(&rogue.options).server_id,
+            Some(Ipv4Address([10, 0, 2, 99]))
+        );
+        client.process_ack(&rogue).unwrap();
+        assert_eq!(client.state(), DhcpState::Requesting);
     }
 
     #[test]
