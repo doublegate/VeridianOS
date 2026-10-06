@@ -20,7 +20,8 @@ the audit plan.
 The native IPC syscalls 0-7 are send, receive, call, reply, create endpoint, bind, share memory and
 map memory. The native dispatcher routes all eight numbers to the Linux compatibility layer, where
 they mean read, write, open, close, stat, fstat, lstat and poll. This is because Qt and libstdc++
-issue raw Linux numbers. So no user program can use VeridianOS IPC today.
+issue raw Linux numbers. So no user program can use VeridianOS IPC today. Inside the kernel, the synchronous send path also looks endpoints up in a registry that
+nothing fills (N-47), so it cannot reach any endpoint either.
 
 - **Verification is host-only.** The v0.26 IPC work (shared regions that really share their frames,
   the 16 KiB buffered message tier, capability checks with rights attenuation, and the receive
@@ -77,11 +78,36 @@ Changed blocks stay in memory until `sync`, so the disk always holds the last-sy
 no journal, and there is no periodic sync yet, so memory for unsynced writes grows until the next
 sync. Clean blocks are cached within a bound (16 MiB on x86_64, 1 MiB elsewhere).
 
+### Directories on BlockFS are not freed (N-44)
+
+Removing an empty directory, or replacing one by rename, leaves its inode and blocks allocated until
+the filesystem is recreated.
+
 ### Shared IPC regions are never reclaimed
 
 A region's frames are freed only when no process maps it. Mappings that a child inherits through
 `fork` are not counted, so registered regions are kept for the life of the system. This leaks
 memory, but it cannot free memory that is still in use.
+
+### KDE binaries in existing images predate the musl and shim fixes (N-37, N-42)
+
+v0.26.0 fixes the musl syscall-number patch (`faccessat` was delivered as `fchownat`, so a root
+access check changed the file's owner; errors were translated twice) and the ctype table of the
+glibc compatibility shim. These are build inputs: the kwin_wayland, plasmashell and dbus-daemon
+binaries in a KDE rootfs built before v0.26.0 still contain both defects. Rebuild them with the
+`tools/cross/` pipeline (`build-musl.sh` first) before using the KDE session. The BusyBox rootfs is
+not affected, because it uses the native libc.
+
+### Some socket calls still read user buffers directly (N-43)
+
+`send`, `recv`, `sendto`, `recvfrom` and `sendmsg` read the caller's buffer through a raw slice after
+a range check. An unmapped page inside that range kills the process instead of returning EFAULT.
+Socket addresses, lengths and control messages already use the fault-tolerant copies.
+
+### Unix socket options and flags (N-48)
+
+Only the first control message is parsed, SOCK_CLOEXEC and SOCK_NONBLOCK are ignored at creation,
+`setsockopt` on a Unix socket is accepted and ignored, and peers are reported unnamed.
 
 ### Unix sockets cannot pass Unix sockets
 
