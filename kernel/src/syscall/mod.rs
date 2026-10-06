@@ -3464,12 +3464,10 @@ fn sys_socket_accept(fd: usize, addr_ptr: usize, addrlen_ptr: usize) -> SyscallR
 
             if addr_ptr != 0 && addrlen_ptr != 0 {
                 let _ = network_ext_syscalls::write_sockaddr(addr_ptr, &remote);
-                if validate_user_buffer(addrlen_ptr, 4).is_ok() {
-                    // SAFETY: addrlen_ptr validated above.
-                    unsafe {
-                        *(addrlen_ptr as *mut u32) = 16; // sizeof(sockaddr_in)
-                    }
-                }
+                // sizeof(sockaddr_in), through the fault-handled user copy:
+                // a socklen_t * may be misaligned (review of the v0.26.0
+                // stack, PR #10).
+                let _ = userspace::write_user::<u32>(addrlen_ptr, 16);
             }
             Ok(new_fd)
         }

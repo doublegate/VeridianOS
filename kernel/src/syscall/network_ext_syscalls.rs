@@ -12,12 +12,13 @@ fn socket_handle(fd: usize) -> Result<SocketHandle, SyscallError> {
 }
 
 /// Write an AF_UNIX address with no path (`sun_family` only).
+///
+/// Both stores go through the fault-handled user-copy routines: neither
+/// user pointer is guaranteed to be aligned or mapped (review of the v0.26.0
+/// stack, PRs #7 and #10).
 fn write_unnamed_unix_addr(addr_ptr: usize, len_ptr: usize) -> SyscallResult {
-    // SAFETY: both pointers were validated by the caller (16 and 4 bytes).
-    unsafe {
-        core::ptr::write_unaligned(addr_ptr as *mut u16, 1); // AF_UNIX
-        *(len_ptr as *mut u32) = 2;
-    }
+    super::userspace::write_user_bytes(addr_ptr, &1u16.to_ne_bytes())?; // AF_UNIX
+    super::userspace::write_user::<u32>(len_ptr, 2)?;
     Ok(0)
 }
 
@@ -131,12 +132,8 @@ pub(super) fn sys_net_getsockname(fd: usize, addr_ptr: usize, len_ptr: usize) ->
     let addr = crate::net::socket::getsockname(id).map_err(|_| SyscallError::BadFileDescriptor)?;
     write_sockaddr(addr_ptr, &addr)?;
 
-    // Write actual address length
-    // SAFETY: len_ptr validated by validate_user_buffer above as non-null and
-    // within user-space.
-    unsafe {
-        *(len_ptr as *mut u32) = 16;
-    }
+    // Write actual address length (unaligned-safe, fault-handled).
+    super::userspace::write_user::<u32>(len_ptr, 16)?;
 
     Ok(0)
 }
@@ -153,11 +150,7 @@ pub(super) fn sys_net_getpeername(fd: usize, addr_ptr: usize, len_ptr: usize) ->
     let addr = crate::net::socket::getpeername(id).map_err(|_| SyscallError::BadFileDescriptor)?;
     write_sockaddr(addr_ptr, &addr)?;
 
-    // SAFETY: len_ptr validated by validate_user_buffer above as non-null and
-    // within user-space.
-    unsafe {
-        *(len_ptr as *mut u32) = 16;
-    }
+    super::userspace::write_user::<u32>(len_ptr, 16)?;
 
     Ok(0)
 }
@@ -206,12 +199,13 @@ pub(super) fn sys_net_getsockopt(
 /// Infer sockaddr length from sa_family when the actual length is unavailable
 /// (e.g., sendto where arg6 is lost due to 5-arg handler limit).
 fn infer_sockaddr_len(addr_ptr: usize) -> Result<usize, SyscallError> {
-    // The family field is read before the full length is known, so it is
-    // validated on its own first (NET-SEC-02).
-    super::validate_user_buffer(addr_ptr, core::mem::size_of::<u16>())?;
-    // SAFETY: the two bytes at addr_ptr were validated as user memory above;
-    // read_unaligned because a user sockaddr carries no alignment guarantee.
-    let family = unsafe { core::ptr::read_unaligned(addr_ptr as *const u16) };
+    // The family field is read before the full length is known, so only its
+    // two bytes are copied (NET-SEC-02). read_user_bytes validates the range
+    // and is fault-handled; a raw read_unaligned was neither (review of the
+    // v0.26.0 stack, PR #7).
+    let mut fam = [0u8; 2];
+    super::userspace::read_user_bytes(addr_ptr, &mut fam)?;
+    let family = u16::from_ne_bytes(fam);
     Ok(match family {
         2 => 16,  // AF_INET: sizeof(sockaddr_in)
         10 => 28, // AF_INET6: sizeof(sockaddr_in6)
@@ -299,5 +293,40 @@ mod tests {
             let addr = [family, 0u16];
             assert_eq!(infer_sockaddr_len(addr.as_ptr() as usize), Ok(expected));
         }
+    }
+
+    /// A user sockaddr has no alignment guarantee (review of the v0.26.0
+    /// stack, PR #7).
+    #[test]
+    fn infer_sockaddr_len_unaligned() {
+        let mut buf = [0u8; 4];
+        buf[1..3].copy_from_slice(&2u16.to_ne_bytes());
+        assert_eq!(infer_sockaddr_len(buf.as_ptr() as usize + 1), Ok(16));
+    }
+
+    /// `socklen_t *` from user space may be misaligned; an aligned `u32`
+    /// store through it is undefined behaviour (review of the v0.26.0
+    /// stack, PRs #7 and #10).
+    #[test]
+    fn write_unnamed_unix_addr_misaligned_len() {
+        let mut addr = [0xAAu8; 5];
+        let mut len = [0xAAu8; 8];
+        let addr_ptr = addr.as_mut_ptr() as usize + 1;
+        let len_ptr = len.as_mut_ptr() as usize + 1;
+        assert_eq!(write_unnamed_unix_addr(addr_ptr, len_ptr), Ok(0));
+        assert_eq!(u16::from_ne_bytes([addr[1], addr[2]]), 1);
+        assert_eq!(u32::from_ne_bytes([len[1], len[2], len[3], len[4]]), 2);
+        assert_eq!(len[0], 0xAA);
+        assert_eq!(len[5], 0xAA);
+    }
+
+    #[test]
+    fn write_unnamed_unix_addr_rejects_kernel_pointers() {
+        let mut len = [0u8; 4];
+        assert!(write_unnamed_unix_addr(0xFFFF_8000_0000_1000, len.as_mut_ptr() as usize).is_err());
+        let mut addr = [0u8; 2];
+        assert!(
+            write_unnamed_unix_addr(addr.as_mut_ptr() as usize, 0xFFFF_8000_0000_1000).is_err()
+        );
     }
 }
