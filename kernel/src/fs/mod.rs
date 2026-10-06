@@ -693,37 +693,32 @@ impl Vfs {
     ///
     /// Checks MAC policy (Write access to file domain) before creating.
     pub fn mkdir(&self, path: &str, permissions: Permissions) -> Result<(), KernelError> {
-        // Strip trailing slashes (e.g., "/tmp/foo/" -> "/tmp/foo")
-        let path = path.trim_end_matches('/');
-        if path.is_empty() {
+        // Parse the path once and use that single result both for the MAC
+        // check and for the creation, so they cannot disagree: the parent
+        // is resolved canonically (following symlinks) and the policy sees
+        // the path the directory is really created at. Normalizing also
+        // removes trailing slashes, `.` and `..`, so the final name is
+        // never one of those.
+        let path = normalize_path(path, &self.cwd);
+        if path == "/" {
             return Err(KernelError::FsError(crate::error::FsError::AlreadyExists));
         }
+        let pos = path.rfind('/').unwrap_or(0);
+        let (parent_path, name) = (&path[..pos.max(1)], &path[pos + 1..]);
+
+        let (parent, canonical_parent) = self.resolve_canonical(parent_path, "/", true)?;
+        let target = if canonical_parent == "/" {
+            format!("/{}", name)
+        } else {
+            format!("{}/{}", canonical_parent, name)
+        };
 
         // MAC check: creating a directory requires Write access
         let pid = crate::process::current_process()
             .map(|p| p.pid.0)
             .unwrap_or(0);
-        crate::security::mac::check_file_access(
-            &normalize_path(path, &self.cwd),
-            crate::security::AccessType::Write,
-            pid,
-        )?;
+        crate::security::mac::check_file_access(&target, crate::security::AccessType::Write, pid)?;
 
-        // Split path into parent and name
-        let (parent_path, name) = if let Some(pos) = path.rfind('/') {
-            if pos == 0 {
-                ("/", &path[1..])
-            } else {
-                (&path[..pos], &path[pos + 1..])
-            }
-        } else {
-            return Err(KernelError::FsError(crate::error::FsError::InvalidPath));
-        };
-
-        // Get parent directory
-        let parent = self.resolve_path(parent_path)?;
-
-        // Create directory in parent
         parent.mkdir(name, permissions)?;
         Ok(())
     }
@@ -1314,6 +1309,20 @@ mod tests {
     }
 
     #[test]
+    fn mkdir_parses_path_once() {
+        let vfs = make_vfs_with_root();
+        let root = vfs.root_fs.as_ref().unwrap().root();
+        root.mkdir("real", Permissions::default()).unwrap();
+        root.symlink("alias", "/real").unwrap();
+        // Created where the parent really resolves, which is the path the
+        // MAC check now sees.
+        vfs.mkdir("/alias/sub/", Permissions::default()).unwrap();
+        assert!(vfs.resolve_path("/real/sub").is_ok());
+        // ".." is resolved, never created as an entry name.
+        assert!(vfs.mkdir("/real/..", Permissions::default()).is_err());
+    }
+
+    #[test]
     fn symlink_loop_is_reported() {
         let vfs = make_vfs_with_root();
         let root = vfs.root_fs.as_ref().unwrap().root();
@@ -1649,10 +1658,13 @@ mod tests {
     }
 
     #[test]
-    fn test_mkdir_invalid_path() {
+    fn test_mkdir_relative_path_uses_cwd() {
+        // A relative path is resolved against the cwd like everywhere else
+        // in the VFS (it used to be rejected as invalid).
         let vfs = make_vfs_with_root();
-        let result = vfs.mkdir("no_slash", Permissions::default());
-        assert!(result.is_err());
+        vfs.mkdir("no_slash", Permissions::default()).unwrap();
+        assert!(vfs.resolve_path("/no_slash").is_ok());
+        assert!(vfs.mkdir("/", Permissions::default()).is_err());
     }
 
     #[test]
