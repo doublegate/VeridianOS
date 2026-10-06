@@ -213,7 +213,7 @@ pub fn load_user_program(
         // Handle dynamic linking if needed
         if binary.dynamic {
             if let Some(interpreter) = &binary.interpreter {
-                match load_dynamic_linker(process, interpreter, &binary) {
+                match load_dynamic_linker(&process, interpreter, &binary) {
                     Ok(interp_entry) => {
                         // Update process entry point to the interpreter.
                         // The dynamic linker will initialize GOT/PLT then jump
@@ -300,7 +300,7 @@ pub fn load_user_program(
         };
 
         let stack_top =
-            lifecycle::setup_exec_stack_pub(process, argv_for_stack, &envp_refs, Some(&auxv))?;
+            lifecycle::setup_exec_stack_pub(&process, argv_for_stack, &envp_refs, Some(&auxv))?;
 
         // Update the thread context with the new stack pointer
         if let Some(main_tid) = process.get_main_thread_id() {

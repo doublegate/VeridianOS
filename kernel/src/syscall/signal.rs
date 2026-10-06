@@ -250,7 +250,7 @@ pub fn sys_sigreturn(frame_ptr: usize) -> SyscallResult {
     // Restore the saved context from the signal frame on the user stack.
     // This reads the SignalFrame at frame_ptr, restores all general-purpose
     // registers, RIP, RFLAGS, RSP, and the signal mask.
-    process::signal_delivery::restore_signal_frame(proc, thread, frame_ptr)
+    process::signal_delivery::restore_signal_frame(&proc, &thread, frame_ptr)
         .map_err(|_| SyscallError::InvalidArgument)?;
 
     // Return 0. The normal syscall return path will load the restored context

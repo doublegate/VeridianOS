@@ -1388,7 +1388,7 @@ pub(crate) fn read_user_path(ptr: usize) -> Result<alloc::string::String, Syscal
 /// Credentials of the calling process: (uid, gid). Kernel context, with no
 /// process, acts as root.
 fn caller_creds() -> (u32, u32) {
-    process::current_process().map_or((0, 0), |p| (p.uid, p.gid))
+    process::current_process().map_or((0, 0), |p| (p.uid(), p.gid()))
 }
 
 /// chmod-style operations: only the owner or root may change a node's
@@ -1712,7 +1712,7 @@ fn access_path(path: &str, mode: usize) -> SyscallResult {
 
         // Determine the caller's uid.  Root (uid 0) bypasses all checks.
         let caller_uid = crate::process::current_process()
-            .map(|p| p.uid)
+            .map(|p| p.uid())
             .unwrap_or(0);
 
         if caller_uid != 0 {

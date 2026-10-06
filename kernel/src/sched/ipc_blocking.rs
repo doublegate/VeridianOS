@@ -89,7 +89,7 @@ pub fn block_process(pid: ProcessId) {
         drop(sched);
 
         // Look up process in the process table and block all its threads
-        if let Some(process) = crate::process::table::get_process_mut(pid) {
+        if let Some(process) = crate::process::table::get_process(pid) {
             // Update process state
             process
                 .state
@@ -210,7 +210,7 @@ pub fn wake_up_process(pid: ProcessId) {
     // If still not found, try to look up in process table and create task if needed
     #[cfg(feature = "alloc")]
     {
-        if let Some(process) = crate::process::table::get_process_mut(pid) {
+        if let Some(process) = crate::process::table::get_process(pid) {
             // Update process state
             process
                 .state

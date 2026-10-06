@@ -153,7 +153,7 @@ impl VfsNode for ProcNode {
                             #[cfg(not(feature = "alloc"))]
                             let name = "process";
 
-                            let parent = process.parent.unwrap_or(crate::process::ProcessId(0));
+                            let parent = process.parent().unwrap_or(crate::process::ProcessId(0));
 
                             format!(
                                 "Name:\t{}\nPid:\t{}\nPPid:\t{}\nState:\t{}\n",

@@ -217,12 +217,16 @@ pub fn sys_thread_clone(
         }
     }
 
-    // Create scheduler task
-    let task_ptr = sched::create_task_from_thread(proc.pid, tid, &thread)
+    // Add to the process first: the task keeps a pointer to the thread, so
+    // it must be created from the thread's final, shared (Arc) location.
+    // It used to be created from this local, which add_thread() then moved,
+    // leaving the task's thread_ref pointing at a dead stack slot.
+    let thread = proc
+        .add_thread(thread)
         .map_err(|_| SyscallError::InvalidState)?;
 
-    // Add to process
-    proc.add_thread(thread)
+    // Create scheduler task
+    let task_ptr = sched::create_task_from_thread(proc.pid, tid, &thread)
         .map_err(|_| SyscallError::InvalidState)?;
 
     // Mark ready

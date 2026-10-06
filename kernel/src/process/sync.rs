@@ -65,7 +65,7 @@ impl WaitQueue {
                     // Re-enqueue the thread in the scheduler's run queue
                     #[cfg(feature = "alloc")]
                     {
-                        let _ = crate::sched::schedule_thread(pid, tid, thread);
+                        let _ = crate::sched::schedule_thread(pid, tid, &thread);
                     }
                     return true;
                 }
@@ -86,7 +86,7 @@ impl WaitQueue {
                     // Re-enqueue the thread in the scheduler's run queue
                     #[cfg(feature = "alloc")]
                     {
-                        let _ = crate::sched::schedule_thread(pid, tid, thread);
+                        let _ = crate::sched::schedule_thread(pid, tid, &thread);
                     }
                     count += 1;
                 }

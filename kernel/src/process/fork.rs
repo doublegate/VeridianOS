@@ -259,7 +259,7 @@ pub fn fork_process() -> Result<ProcessId, KernelError> {
         process.set_state(ProcessState::Ready);
 
         if let Some(thread) = process.get_thread(new_tid) {
-            create_scheduler_task(process, thread)?;
+            create_scheduler_task(&process, &thread)?;
         }
     }
 
@@ -443,7 +443,7 @@ pub fn cow_fork() -> Result<ProcessId, KernelError> {
     if let Some(process) = table::get_process(new_pid) {
         process.set_state(ProcessState::Ready);
         if let Some(thread) = process.get_thread(new_tid) {
-            create_scheduler_task(process, thread)?;
+            create_scheduler_task(&process, &thread)?;
         }
     }
 

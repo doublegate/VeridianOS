@@ -9,7 +9,7 @@ use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 extern crate alloc;
 
 #[cfg(feature = "alloc")]
-use alloc::{collections::BTreeMap, string::String, vec::Vec};
+use alloc::{collections::BTreeMap, string::String, sync::Arc, vec::Vec};
 
 use spin::Mutex;
 
@@ -76,7 +76,9 @@ pub struct Process {
     pub pid: ProcessId,
 
     /// Parent process ID (None for init)
-    pub parent: Option<ProcessId>,
+    /// Parent process (reparented to init when the parent exits). Behind a
+    /// lock because processes are shared through `Arc` (PROC-SEC-01).
+    parent: Mutex<Option<ProcessId>>,
 
     /// Process name
     #[cfg(feature = "alloc")]
@@ -99,7 +101,9 @@ pub struct Process {
 
     /// Threads in this process
     #[cfg(feature = "alloc")]
-    pub threads: Mutex<BTreeMap<ThreadId, Thread>>,
+    /// Threads, shared through `Arc`: the map moves its values when nodes
+    /// split or merge, so references into it were never stable.
+    pub threads: Mutex<BTreeMap<ThreadId, Arc<Thread>>>,
 
     /// IPC endpoints owned by this process
     #[cfg(feature = "alloc")]
@@ -121,11 +125,11 @@ pub struct Process {
     /// Creation timestamp
     pub created_at: u64,
 
-    /// User ID (for future use)
-    pub uid: u32,
+    /// User ID. Atomic because processes are shared through `Arc`.
+    uid: AtomicU32,
 
-    /// Group ID (for future use)
-    pub gid: u32,
+    /// Group ID.
+    gid: AtomicU32,
 
     /// Process group ID (initialized to pid)
     pub pgid: AtomicU64,
@@ -185,6 +189,36 @@ pub struct MemoryStats {
 }
 
 impl Process {
+    /// Parent process ID (None for init).
+    pub fn parent(&self) -> Option<ProcessId> {
+        *self.parent.lock()
+    }
+
+    /// Change the parent (used when reparenting orphans to init).
+    pub fn set_parent(&self, parent: Option<ProcessId>) {
+        *self.parent.lock() = parent;
+    }
+
+    /// User ID.
+    pub fn uid(&self) -> u32 {
+        self.uid.load(Ordering::Acquire)
+    }
+
+    /// Set the user ID (callers enforce setuid rules).
+    pub fn set_uid(&self, uid: u32) {
+        self.uid.store(uid, Ordering::Release);
+    }
+
+    /// Group ID.
+    pub fn gid(&self) -> u32 {
+        self.gid.load(Ordering::Acquire)
+    }
+
+    /// Set the group ID (callers enforce setgid rules).
+    pub fn set_gid(&self, gid: u32) {
+        self.gid.store(gid, Ordering::Release);
+    }
+
     /// Create a new process
     #[cfg(feature = "alloc")]
     pub fn new(
@@ -195,7 +229,7 @@ impl Process {
     ) -> Self {
         Self {
             pid,
-            parent,
+            parent: Mutex::new(parent),
             name,
             state: AtomicU32::new(ProcessState::Creating as u32),
             priority: Mutex::new(priority),
@@ -209,8 +243,8 @@ impl Process {
             cpu_time: AtomicU64::new(0),
             memory_stats: MemoryStats::default(),
             created_at: crate::arch::timer::get_ticks(),
-            uid: 0,
-            gid: 0,
+            uid: AtomicU32::new(0),
+            gid: AtomicU32::new(0),
             pgid: AtomicU64::new(pid.0),
             sid: AtomicU64::new(pid.0),
             env_vars: Mutex::new(BTreeMap::new()),
@@ -256,7 +290,7 @@ impl Process {
 
     /// Add a thread to this process
     #[cfg(feature = "alloc")]
-    pub fn add_thread(&self, thread: Thread) -> Result<(), KernelError> {
+    pub fn add_thread(&self, thread: Thread) -> Result<Arc<Thread>, KernelError> {
         let tid = thread.tid;
         let mut threads = self.threads.lock();
 
@@ -273,30 +307,21 @@ impl Process {
             });
         }
 
-        threads.insert(tid, thread);
-        Ok(())
+        let thread = Arc::new(thread);
+        threads.insert(tid, thread.clone());
+        Ok(thread)
     }
 
     /// Remove a thread from this process
     #[cfg(feature = "alloc")]
-    pub fn remove_thread(&self, tid: ThreadId) -> Option<Thread> {
+    pub fn remove_thread(&self, tid: ThreadId) -> Option<Arc<Thread>> {
         self.threads.lock().remove(&tid)
     }
 
     /// Get a thread by ID
     #[cfg(feature = "alloc")]
-    pub fn get_thread(&self, tid: ThreadId) -> Option<&Thread> {
-        // This is a bit tricky - we need to return a reference that outlives the lock
-        // In a real implementation, we'd use more sophisticated synchronization
-        // SAFETY: The Thread is stored in a BTreeMap behind a Mutex, providing
-        // a stable heap address. Casting to *const and back to a reference
-        // extends the borrow lifetime beyond the lock scope. Sound because
-        // threads are not moved or deallocated while references exist in the
-        // current kernel model.
-        unsafe {
-            let threads = self.threads.lock();
-            threads.get(&tid).map(|t| &*(t as *const Thread))
-        }
+    pub fn get_thread(&self, tid: ThreadId) -> Option<Arc<Thread>> {
+        self.threads.lock().get(&tid).cloned()
     }
 
     /// Get number of threads
@@ -359,12 +384,6 @@ impl Process {
     #[cfg(feature = "alloc")]
     pub fn set_name(&mut self, name: String) {
         self.name = name;
-    }
-
-    /// Get main thread (first thread created)
-    #[cfg(feature = "alloc")]
-    pub fn get_main_thread_mut(&mut self) -> Option<&mut Thread> {
-        self.threads.get_mut().values_mut().next()
     }
 
     /// Reset all signal handlers to default (used during exec)
@@ -768,13 +787,13 @@ mod tests {
             alloc::string::String::from("child"),
             ProcessPriority::Normal,
         );
-        assert_eq!(proc.parent, Some(ProcessId(1)));
+        assert_eq!(proc.parent(), Some(ProcessId(1)));
     }
 
     #[test]
     fn test_process_no_parent() {
         let proc = make_process(1, "init");
-        assert_eq!(proc.parent, None);
+        assert_eq!(proc.parent(), None);
     }
 
     #[test]
@@ -870,9 +889,9 @@ impl ProcessBuilder {
     /// address space (as `fork_process` does).
     pub fn build(self) -> Process {
         let pid = super::alloc_pid();
-        let mut process = Process::new(pid, self.parent, self.name, self.priority);
-        process.uid = self.uid;
-        process.gid = self.gid;
+        let process = Process::new(pid, self.parent, self.name, self.priority);
+        process.set_uid(self.uid);
+        process.set_gid(self.gid);
         process
     }
 
@@ -883,9 +902,9 @@ impl ProcessBuilder {
     /// standalone processes (not forked from an existing process).
     pub fn build_with_address_space(self) -> Result<Process, KernelError> {
         let pid = super::alloc_pid();
-        let mut process = Process::new(pid, self.parent, self.name, self.priority);
-        process.uid = self.uid;
-        process.gid = self.gid;
+        let process = Process::new(pid, self.parent, self.name, self.priority);
+        process.set_uid(self.uid);
+        process.set_gid(self.gid);
 
         // Initialize the virtual address space with a real page table root
         // and kernel space mappings

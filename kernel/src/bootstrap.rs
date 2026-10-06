@@ -1837,7 +1837,7 @@ fn boot_reap_orphan_zombies() {
         if proc.get_state() == ProcessState::Zombie {
             // Reap zombies that were reparented to init (PID 1) or whose
             // parent no longer exists. PID 0 and PID 1 are system processes.
-            let dominated_by_init_or_orphaned = match proc.parent {
+            let dominated_by_init_or_orphaned = match proc.parent() {
                 Some(parent_pid) => parent_pid.0 <= 1 || table::get_process(parent_pid).is_none(),
                 None => true,
             };
