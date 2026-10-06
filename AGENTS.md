@@ -108,7 +108,7 @@ qemu-system-riscv64 -M virt -m 256M -bios default \
 | AArch64 | Direct `-kernel` | None | `target/aarch64-unknown-none/debug/veridian-kernel` | N/A (TCG) |
 | RISC-V | `-kernel` + `-bios default` | OpenSBI | `target/riscv64gc-unknown-none-elf/debug/veridian-kernel` | N/A (TCG) |
 
-**Expected**: All 3 archs boot Stage 6 BOOTOK, 29/29 tests. x86_64 shows Ring 3 entry.
+**Expected**: All 3 archs boot Stage 6 BOOTOK, 34/34 tests. x86_64 shows Ring 3 entry.
 
 #### QEMU 10.2 Pitfalls
 - **DO NOT** use `timeout` -- causes "drive exists" errors. Use background+kill: `cmd </dev/null > log 2>&1 &; PID=$!; sleep N; kill $PID`
@@ -138,7 +138,7 @@ cargo clippy --target riscv64gc-unknown-none-elf -p veridian-kernel $BS -- -D wa
 cargo test --lib --features alloc -p veridian-kernel --target x86_64-unknown-linux-gnu
 
 # In-kernel boot tests: boot each arch in QEMU (commands above) and check for
-# "[INIT] Results: 29/29 passed" followed by BOOTOK.
+# "[INIT] Results: 34/34 passed" followed by BOOTOK.
 ```
 
 ### Development Tools

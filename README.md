@@ -96,7 +96,7 @@ The design goal is a microkernel that provides only memory management, schedulin
 | Metric | Value |
 | --- | --- |
 | Build | 0 errors, 0 warnings across all 3 architectures |
-| Boot tests | 29/29 (Stage 6 BOOTOK on all architectures) |
+| Boot tests | 34/34 (Stage 6 BOOTOK on all architectures) |
 | Host-target unit tests | 4,095 passing |
 | CI pipeline | 11/11 jobs green (GitHub Actions + Codecov) |
 | Unsafe code | 7 justified `static mut`; 99%+ unsafe blocks have SAFETY documentation |

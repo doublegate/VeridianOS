@@ -31,7 +31,7 @@
 ## Testing Guidelines
 - Fast unit tests live beside source; cross-arch/boot tests are in `tests/` plus `scripts/test-*.sh`.  
 - `just test-verbose` runs `cargo test --all -- --nocapture`; note that some no_std automation is limited — rely on QEMU boot tests.  
-- Expectation: all three architectures reach Stage 6 with 29/29 boot tests (includes `fbcon_initialized` and `keyboard_driver_ready`).  
+- Expectation: all three architectures reach Stage 6 with 34/34 boot tests (includes `fbcon_initialized` and `keyboard_driver_ready`).  
 - When touching arch-specific paths, run the matching `just test-<arch>` and report coverage (Codecov wired).  
 - Add regression tests for kernel invariants, IPC, and syscall surfaces when fixing bugs.
 
