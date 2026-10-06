@@ -3488,8 +3488,10 @@ fn sys_socket_connect(fd: usize, addr_ptr: usize, addr_len: usize) -> SyscallRes
 /// SYS_SOCKET_ACCEPT: Accept a pending connection and return an fd for it.
 ///
 /// Linux ABI: `accept4(fd, addr, addrlen_ptr, flags)`.
-/// `addr_ptr` and `addrlen_ptr` are optional (may be 0). When non-null, the
-/// peer address is written back in sockaddr_in format.
+/// `addr_ptr` is optional (may be 0). When non-null, `addrlen_ptr` must
+/// point at the buffer size: at most that many bytes of the peer address
+/// (sockaddr_in, or an unnamed sockaddr_un for Unix sockets) are written,
+/// and its full length is stored back in `*addrlen_ptr`.
 fn sys_socket_accept(fd: usize, addr_ptr: usize, addrlen_ptr: usize) -> SyscallResult {
     match with_socket_fd(fd, SocketNode::handle)? {
         SocketHandle::Inet(id) => {
@@ -3506,22 +3508,56 @@ fn sys_socket_accept(fd: usize, addr_ptr: usize, addrlen_ptr: usize) -> SyscallR
             )
             .map_err(|_| SyscallError::OutOfMemory)?;
             let new_fd = install_socket(SocketHandle::Inet(new_id))?;
-
-            if addr_ptr != 0 && addrlen_ptr != 0 {
-                let _ = network_ext_syscalls::write_sockaddr(addr_ptr, &remote);
-                // sizeof(sockaddr_in), through the fault-handled user copy:
-                // a socklen_t * may be misaligned (review of the v0.26.0
-                // stack, PR #10).
-                let _ = userspace::write_user::<u32>(addrlen_ptr, 16);
-            }
-            Ok(new_fd)
+            let peer = network_ext_syscalls::sockaddr_in_bytes(&remote);
+            finish_accept(new_fd, addr_ptr, addrlen_ptr, &peer)
         }
         SocketHandle::Unix(id) => {
             let (new_id, _connecting_id) =
                 crate::net::unix_socket::socket_accept(id).map_err(socket_err)?;
-            install_socket(SocketHandle::Unix(new_id))
+            let new_fd = install_socket(SocketHandle::Unix(new_id))?;
+            // The peer of an accepted Unix connection is reported unnamed:
+            // sun_family only, length 2 (bound client paths are not
+            // tracked).
+            finish_accept(
+                new_fd,
+                addr_ptr,
+                addrlen_ptr,
+                &(AF_UNIX as u16).to_ne_bytes(),
+            )
         }
     }
+}
+
+/// Report the peer address of an accepted connection and return its fd.
+/// If the address cannot be written the caller would never learn about
+/// the fd, so it is closed and the error returned, as Linux does.
+fn finish_accept(new_fd: usize, addr_ptr: usize, addrlen_ptr: usize, peer: &[u8]) -> SyscallResult {
+    if let Err(e) = copy_sockaddr_out(addr_ptr, addrlen_ptr, peer) {
+        if let Some(p) = crate::process::current_process() {
+            let _ = p.file_table.lock().close(new_fd);
+        }
+        return Err(e);
+    }
+    Ok(new_fd)
+}
+
+/// Copy a socket address out to user space with Linux `move_addr_to_user`
+/// semantics: read `*addrlen` (a socklen_t, negative is EINVAL), copy at
+/// most that many bytes of `addr`, then store the full length so the caller
+/// can see truncation. `addr_ptr == 0` means the caller wants no address.
+///
+/// accept used to write a whole 16-byte sockaddr_in regardless of the
+/// caller's buffer, overflowing a smaller one, and nothing for a Unix
+/// socket (review of the v0.26.0 stack, PR #10). Both pointers go through
+/// the fault-handled user-copy routines, so neither needs to be aligned.
+fn copy_sockaddr_out(addr_ptr: usize, addrlen_ptr: usize, addr: &[u8]) -> Result<(), SyscallError> {
+    if addr_ptr == 0 {
+        return Ok(());
+    }
+    let len = userspace::read_user::<u32>(addrlen_ptr)? as i32;
+    let len = usize::try_from(len).map_err(|_| SyscallError::InvalidArgument)?;
+    userspace::write_user_bytes(addr_ptr, &addr[..len.min(addr.len())])?;
+    userspace::write_user::<u32>(addrlen_ptr, addr.len() as u32)
 }
 
 /// SYS_SOCKET_SEND: Send data on a connected socket.
@@ -3786,6 +3822,65 @@ mod tests {
             socketpair_type(2, SOCK_STREAM, 0),
             Err(SyscallError::InvalidArgument)
         );
+    }
+
+    /// accept copies at most *addrlen bytes and stores the full length
+    /// (review of the v0.26.0 stack, PR #10).
+    #[test]
+    fn sockaddr_out_honours_addrlen() {
+        let addr: [u8; 16] = core::array::from_fn(|i| i as u8 + 1);
+        // Room for everything; misaligned socklen_t.
+        let mut out = [0u8; 16];
+        let mut len = [0u8; 5];
+        len[1..5].copy_from_slice(&64u32.to_ne_bytes());
+        let len_ptr = len.as_mut_ptr() as usize + 1;
+        assert_eq!(
+            copy_sockaddr_out(out.as_mut_ptr() as usize, len_ptr, &addr),
+            Ok(())
+        );
+        assert_eq!(out, addr);
+        assert_eq!(u32::from_ne_bytes([len[1], len[2], len[3], len[4]]), 16);
+
+        // A 1-byte buffer gets 1 byte, and learns the real length.
+        let mut out = [0xEEu8; 4];
+        let mut l = 1u32;
+        assert_eq!(
+            copy_sockaddr_out(
+                out.as_mut_ptr() as usize,
+                &mut l as *mut u32 as usize,
+                &addr
+            ),
+            Ok(())
+        );
+        assert_eq!(out, [1, 0xEE, 0xEE, 0xEE]);
+        assert_eq!(l, 16);
+
+        // Unnamed AF_UNIX: length 2.
+        let mut out = [0u8; 110];
+        let mut l = 110u32;
+        let unnamed = (AF_UNIX as u16).to_ne_bytes();
+        assert_eq!(
+            copy_sockaddr_out(
+                out.as_mut_ptr() as usize,
+                &mut l as *mut u32 as usize,
+                &unnamed
+            ),
+            Ok(())
+        );
+        assert_eq!(l, 2);
+        assert_eq!(u16::from_ne_bytes([out[0], out[1]]), AF_UNIX as u16);
+
+        // Negative *addrlen is EINVAL; no address buffer means no copy.
+        let mut l = u32::MAX;
+        assert_eq!(
+            copy_sockaddr_out(
+                out.as_mut_ptr() as usize,
+                &mut l as *mut u32 as usize,
+                &addr
+            ),
+            Err(SyscallError::InvalidArgument)
+        );
+        assert_eq!(copy_sockaddr_out(0, 0, &addr), Ok(()));
     }
 
     #[test]

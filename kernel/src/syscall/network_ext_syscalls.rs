@@ -302,7 +302,7 @@ fn parse_sockaddr(
 }
 
 /// Encode `addr` as a 16-byte `struct sockaddr_in`.
-fn sockaddr_in_bytes(addr: &crate::net::SocketAddr) -> [u8; 16] {
+pub(super) fn sockaddr_in_bytes(addr: &crate::net::SocketAddr) -> [u8; 16] {
     let ip = match &addr.ip {
         crate::net::IpAddress::V4(v4) => v4.0,
         _ => [0, 0, 0, 0],
