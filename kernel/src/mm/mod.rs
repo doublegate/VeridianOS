@@ -29,7 +29,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 pub(crate) use frame_allocator::FRAME_ALLOCATOR;
 // Re-export commonly used types
 pub use frame_allocator::{
-    FrameAllocatorError, FrameNumber, PhysicalAddress, PhysicalFrame, FRAME_SIZE,
+    note_free_failure, FrameAllocatorError, FrameNumber, PhysicalAddress, PhysicalFrame, FRAME_SIZE,
 };
 pub use heap::init as init_heap;
 pub use user_validation::{is_user_addr_valid, translate_address as translate_user_address};

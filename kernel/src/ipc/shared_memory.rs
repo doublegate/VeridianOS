@@ -367,9 +367,13 @@ impl Drop for SharedRegion {
         }
         let page_size = PageSize::Small as usize;
         let first = crate::mm::FrameNumber::new(self.physical_base.as_u64() / page_size as u64);
-        let _ = crate::mm::FRAME_ALLOCATOR
-            .lock()
-            .free_frames(first, self.size / page_size);
+        crate::mm::note_free_failure(
+            crate::mm::FRAME_ALLOCATOR
+                .lock()
+                .free_frames(first, self.size / page_size),
+            first,
+            "shared region drop",
+        );
     }
 }
 

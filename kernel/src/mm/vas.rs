@@ -711,7 +711,7 @@ impl VirtualAddressSpace {
             for (addr, mapping) in mappings.iter() {
                 if addr.0 < KERNEL_SPACE_START && mapping.owns_frames() {
                     for &frame in &mapping.physical_frames {
-                        let _ = allocator.free_frames(frame, 1);
+                        crate::mm::note_free_failure(allocator.free_frames(frame, 1), frame, "vas");
                     }
                 }
             }
@@ -877,7 +877,11 @@ impl VirtualAddressSpace {
                         .map_page(vaddr, child_frame, flags, &mut alloc)
                         .is_err()
                     {
-                        let _ = FRAME_ALLOCATOR.lock().free_frames(child_frame, 1);
+                        crate::mm::note_free_failure(
+                            FRAME_ALLOCATOR.lock().free_frames(child_frame, 1),
+                            child_frame,
+                            "vas",
+                        );
                         failure = Some(KernelError::OutOfMemory {
                             requested: 4096,
                             available: 0,
@@ -953,7 +957,7 @@ impl VirtualAddressSpace {
             for (_, mapping) in mappings.iter().filter(|(_, m)| m.owns_frames()) {
                 let allocator = FRAME_ALLOCATOR.lock();
                 for &frame in &mapping.physical_frames {
-                    let _ = allocator.free_frames(frame, 1);
+                    crate::mm::note_free_failure(allocator.free_frames(frame, 1), frame, "vas");
                 }
             }
 
@@ -1299,7 +1303,7 @@ impl VirtualAddressSpace {
         if mapping.owns_frames() {
             let frame_allocator = FRAME_ALLOCATOR.lock();
             for frame in mapping.physical_frames {
-                let _ = frame_allocator.free_frames(frame, 1);
+                crate::mm::note_free_failure(frame_allocator.free_frames(frame, 1), frame, "vas");
             }
         }
 
@@ -1407,7 +1411,11 @@ impl VirtualAddressSpace {
         if mapping.owns_frames() {
             let frame_allocator = FRAME_ALLOCATOR.lock();
             for i in unmap_page_start..unmap_page_end.min(mapping.physical_frames.len()) {
-                let _ = frame_allocator.free_frames(mapping.physical_frames[i], 1);
+                crate::mm::note_free_failure(
+                    frame_allocator.free_frames(mapping.physical_frames[i], 1),
+                    mapping.physical_frames[i],
+                    "vas",
+                );
             }
         }
 
@@ -2028,7 +2036,11 @@ impl VirtualAddressSpace {
                     // Update flags to the union of old and new, then free
                     // the unused frame we just allocated.
                     let _ = mapper.update_page_flags(vaddr_obj, flags);
-                    let _ = FRAME_ALLOCATOR.lock().free_frames(frame, 1);
+                    crate::mm::note_free_failure(
+                        FRAME_ALLOCATOR.lock().free_frames(frame, 1),
+                        frame,
+                        "vas",
+                    );
                     crate::arch::tlb_flush_address(vaddr as u64);
                     return Ok(());
                 }

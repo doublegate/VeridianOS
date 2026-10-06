@@ -175,6 +175,21 @@ impl PhysicalFrame {
 /// Frame allocation result
 pub type Result<T> = core::result::Result<T, FrameAllocatorError>;
 
+/// Report a failed free from a path that cannot return the error (a `Drop`
+/// or a rollback). A free fails only when an invariant is broken (a frame
+/// freed twice, or outside every allocator), so it is logged rather than
+/// discarded with `let _` (agy review of the v0.26.0 stack, PR #12).
+pub fn note_free_failure(result: Result<()>, frame: FrameNumber, context: &str) {
+    if let Err(e) = result {
+        crate::println!(
+            "[MM] {}: freeing frame {:#x} failed: {:?}",
+            context,
+            frame.as_u64(),
+            e
+        );
+    }
+}
+
 /// Frame allocator errors
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FrameAllocatorError {

@@ -2601,7 +2601,12 @@ fn message_to_user(msg: &Message, buf: usize, cap: usize) -> SyscallResult {
             }
             userspace::write_user_bytes(buf, pod_bytes(&m.header))?;
             let fits = m.payload.len().min(cap - HEADER);
-            userspace::write_user_bytes(buf + HEADER, &m.payload[..fits])?;
+            // The header write above already validated `buf` as user memory,
+            // but the sum is still checked rather than trusted.
+            let payload_at = buf
+                .checked_add(HEADER)
+                .ok_or(SyscallError::InvalidPointer)?;
+            userspace::write_user_bytes(payload_at, &m.payload[..fits])?;
             Ok(HEADER + m.payload.len())
         }
         Message::Large(m) => {
@@ -2845,7 +2850,15 @@ fn sys_ipc_share_memory(
         Ok(cap) => Ok(cap.to_u64() as usize),
         Err(_) => {
             // Nobody can reach the region: drop it (frees its frames).
-            let _ = shared_memory::unregister_region(base as u64);
+            if let Err(e) = shared_memory::unregister_region(base as u64) {
+                // It was registered just above; failing here means the
+                // registry changed underneath us.
+                crate::println!(
+                    "[IPC] share: unregistering region {:#x} failed: {:?}",
+                    base,
+                    e
+                );
+            }
             Err(SyscallError::OutOfMemory)
         }
     }
