@@ -602,10 +602,7 @@ pub fn sys_stat(fd: usize, stat_buf: usize) -> SyscallResult {
         .map_err(|_| SyscallError::InvalidState)?;
     let stat = fill_stat(&metadata);
 
-    // SAFETY: stat_buf was validated as non-null, in user-space, and aligned.
-    unsafe {
-        core::ptr::write(stat_buf as *mut FileStat, stat);
-    }
+    super::userspace::write_user(stat_buf, stat)?;
     Ok(0)
 }
 
@@ -893,6 +890,7 @@ pub fn sys_fsync(fd: usize) -> SyscallResult {
 /// Key difference from naive layout: nlink comes before mode, and there
 /// is a 4-byte pad after gid, plus nanosecond fields and trailing padding.
 #[repr(C)]
+#[derive(Clone, Copy)]
 struct FileStat {
     st_dev: u64,        // offset 0
     st_ino: u64,        // offset 8
@@ -916,6 +914,17 @@ struct FileStat {
 
 // Compile-time assertion: Linux x86_64 struct stat is exactly 144 bytes.
 const _: () = assert!(core::mem::size_of::<FileStat>() == 144);
+// Every field sits where the next one ends (Linux x86_64 offsets), so there
+// is no implicit padding and a copy to user memory exposes no
+// uninitialized kernel bytes.
+const _: () = {
+    use core::mem::offset_of;
+    assert!(offset_of!(FileStat, st_mode) == 24);
+    assert!(offset_of!(FileStat, __pad0) == 36);
+    assert!(offset_of!(FileStat, st_rdev) == 40);
+    assert!(offset_of!(FileStat, st_atime) == 72);
+    assert!(offset_of!(FileStat, __unused) == 120);
+};
 
 /// Helper: populate a FileStat from VFS metadata.
 fn fill_stat(metadata: &crate::fs::Metadata) -> FileStat {
@@ -1066,13 +1075,11 @@ pub fn sys_getcwd(buf: usize, size: usize) -> SyscallResult {
         return Err(SyscallError::InvalidArgument); // Buffer too small
     }
 
-    // SAFETY: buf was validated above as non-null and in user space with
-    // sufficient size. We write cwd_bytes.len() + 1 bytes (including NUL).
-    unsafe {
-        let dst = buf as *mut u8;
-        core::ptr::copy_nonoverlapping(cwd_bytes.as_ptr(), dst, cwd_bytes.len());
-        *dst.add(cwd_bytes.len()) = 0; // NUL terminator
-    }
+    // The path and its NUL go out through the fault-tolerant writer (N-43).
+    let mut out = Vec::with_capacity(cwd_bytes.len() + 1);
+    out.extend_from_slice(cwd_bytes);
+    out.push(0);
+    super::userspace::write_user_bytes(buf, &out)?;
 
     Ok(cwd_bytes.len())
 }
@@ -1216,10 +1223,7 @@ pub fn sys_ioctl(fd: usize, cmd: usize, arg: usize) -> SyscallResult {
             validate_user_ptr_typed::<KernelWinsize>(arg)?;
 
             let ws = terminal::get_winsize_snapshot();
-            // SAFETY: arg was validated as aligned, non-null, and in user space.
-            unsafe {
-                core::ptr::write(arg as *mut KernelWinsize, ws);
-            }
+            super::userspace::write_user(arg, ws)?;
             Ok(0)
         }
         TIOCSWINSZ => {
@@ -1229,8 +1233,7 @@ pub fn sys_ioctl(fd: usize, cmd: usize, arg: usize) -> SyscallResult {
             }
             validate_user_ptr_typed::<KernelWinsize>(arg)?;
 
-            // SAFETY: arg was validated as aligned, non-null, and in user space.
-            let ws = unsafe { core::ptr::read(arg as *const KernelWinsize) };
+            let ws: KernelWinsize = super::userspace::read_user(arg)?;
             terminal::set_winsize(&ws);
             Ok(0)
         }
@@ -1242,10 +1245,7 @@ pub fn sys_ioctl(fd: usize, cmd: usize, arg: usize) -> SyscallResult {
             validate_user_ptr_typed::<KernelTermios>(arg)?;
 
             let termios = terminal::get_termios_snapshot();
-            // SAFETY: arg was validated above.
-            unsafe {
-                core::ptr::write(arg as *mut KernelTermios, termios);
-            }
+            super::userspace::write_user(arg, termios)?;
             Ok(0)
         }
         TCSETS => {
@@ -1255,8 +1255,7 @@ pub fn sys_ioctl(fd: usize, cmd: usize, arg: usize) -> SyscallResult {
             }
             validate_user_ptr_typed::<KernelTermios>(arg)?;
 
-            // SAFETY: arg was validated as aligned, non-null, and in user space.
-            let new_termios = unsafe { core::ptr::read(arg as *const KernelTermios) };
+            let new_termios: KernelTermios = super::userspace::read_user(arg)?;
             terminal::set_termios(&new_termios);
             Ok(0)
         }
@@ -1269,8 +1268,7 @@ pub fn sys_ioctl(fd: usize, cmd: usize, arg: usize) -> SyscallResult {
             }
             validate_user_ptr_typed::<KernelTermios>(arg)?;
 
-            // SAFETY: arg was validated above.
-            let new_termios = unsafe { core::ptr::read(arg as *const KernelTermios) };
+            let new_termios: KernelTermios = super::userspace::read_user(arg)?;
             terminal::set_termios(&new_termios);
             Ok(0)
         }
@@ -1282,8 +1280,7 @@ pub fn sys_ioctl(fd: usize, cmd: usize, arg: usize) -> SyscallResult {
             }
             validate_user_ptr_typed::<KernelTermios>(arg)?;
 
-            // SAFETY: arg was validated above.
-            let new_termios = unsafe { core::ptr::read(arg as *const KernelTermios) };
+            let new_termios: KernelTermios = super::userspace::read_user(arg)?;
             terminal::set_termios(&new_termios);
             Ok(0)
         }
@@ -1298,10 +1295,7 @@ pub fn sys_ioctl(fd: usize, cmd: usize, arg: usize) -> SyscallResult {
             } else {
                 1
             };
-            // SAFETY: arg was validated above.
-            unsafe {
-                core::ptr::write(arg as *mut i32, pgid);
-            }
+            super::userspace::write_user(arg, pgid)?;
             Ok(0)
         }
         TIOCSPGRP => {
@@ -1624,10 +1618,7 @@ pub fn sys_stat_path(path_ptr: usize, stat_buf: usize) -> SyscallResult {
     let metadata = node.metadata().map_err(|_| SyscallError::InvalidState)?;
     let stat = fill_stat(&metadata);
 
-    // SAFETY: stat_buf was validated as non-null, in user-space, and aligned.
-    unsafe {
-        core::ptr::write(stat_buf as *mut FileStat, stat);
-    }
+    super::userspace::write_user(stat_buf, stat)?;
     Ok(0)
 }
 
@@ -1666,10 +1657,7 @@ pub fn sys_lstat(path_ptr: usize, stat_buf: usize) -> SyscallResult {
         Ok(node) => {
             let metadata = node.metadata().map_err(|_| SyscallError::InvalidState)?;
             let stat = fill_stat(&metadata);
-            // SAFETY: stat_buf was validated as non-null, in user-space, and aligned.
-            unsafe {
-                core::ptr::write(stat_buf as *mut FileStat, stat);
-            }
+            super::userspace::write_user(stat_buf, stat)?;
             Ok(0)
         }
         Err(_) => {
@@ -1708,9 +1696,7 @@ pub fn sys_lstat(path_ptr: usize, stat_buf: usize) -> SyscallResult {
                     st_ctime_nsec: 0,
                     __unused: [0; 3],
                 };
-                unsafe {
-                    core::ptr::write(stat_buf as *mut FileStat, fake_stat);
-                }
+                super::userspace::write_user(stat_buf, fake_stat)?;
                 return Ok(0);
             }
             Err(map_resolve_err(crate::error::KernelError::FsError(
@@ -2126,23 +2112,21 @@ pub fn sys_readdir(fd: usize, entry_buf: usize, buf_size: usize) -> SyscallResul
         return Err(SyscallError::InvalidArgument);
     }
 
-    // Write entry name + NUL terminator + node type byte to user buffer
-    // SAFETY: entry_buf was validated above as non-null and in user space
-    // with sufficient size. We write name_bytes.len() + 2 bytes total.
-    unsafe {
-        let dst = entry_buf as *mut u8;
-        core::ptr::copy_nonoverlapping(name_bytes.as_ptr(), dst, name_bytes.len());
-        *dst.add(name_bytes.len()) = 0; // NUL terminator
-        *dst.add(name_bytes.len() + 1) = match entry.node_type {
-            crate::fs::NodeType::File => 0,
-            crate::fs::NodeType::Directory => 1,
-            crate::fs::NodeType::CharDevice => 2,
-            crate::fs::NodeType::BlockDevice => 3,
-            crate::fs::NodeType::Symlink => 4,
-            crate::fs::NodeType::Pipe => 5,
-            _ => 0,
-        };
-    }
+    // Entry name + NUL terminator + node type byte, written to the user
+    // buffer in one fault-tolerant copy (N-43).
+    let mut out = Vec::with_capacity(name_bytes.len() + 2);
+    out.extend_from_slice(name_bytes);
+    out.push(0);
+    out.push(match entry.node_type {
+        crate::fs::NodeType::File => 0,
+        crate::fs::NodeType::Directory => 1,
+        crate::fs::NodeType::CharDevice => 2,
+        crate::fs::NodeType::BlockDevice => 3,
+        crate::fs::NodeType::Symlink => 4,
+        crate::fs::NodeType::Pipe => 5,
+        _ => 0,
+    });
+    super::userspace::write_user_bytes(entry_buf, &out)?;
 
     // Advance the file position to the next entry
     let _ = file_desc.seek(crate::fs::SeekFrom::Start(pos + 1));
@@ -2174,6 +2158,10 @@ struct Iovec {
     iov_len: usize,
 }
 
+// SAFETY: repr(C) with two usize fields and no padding, so every bit
+// pattern is a valid value.
+unsafe impl super::userspace::UserPod for Iovec {}
+
 /// Maximum number of iovec entries per readv/writev call.
 const IOV_MAX: usize = 1024;
 
@@ -2201,12 +2189,7 @@ pub fn sys_readv(fd: usize, iov_ptr: usize, iovcnt: usize) -> SyscallResult {
     let mut total_read = 0usize;
 
     for i in 0..iovcnt {
-        // SAFETY: iov_ptr was validated above. Each Iovec is repr(C) with
-        // known size. We read iov entries one at a time within bounds.
-        let iov = unsafe {
-            let ptr = (iov_ptr as *const Iovec).add(i);
-            core::ptr::read(ptr)
-        };
+        let iov: Iovec = super::userspace::read_user_index(iov_ptr, i)?;
 
         if iov.iov_len == 0 {
             continue;
@@ -2258,12 +2241,7 @@ pub fn sys_writev(fd: usize, iov_ptr: usize, iovcnt: usize) -> SyscallResult {
     let mut total_written = 0usize;
 
     for i in 0..iovcnt {
-        // SAFETY: iov_ptr was validated above. Each Iovec is repr(C) with
-        // known size. We read iov entries one at a time within bounds.
-        let iov = unsafe {
-            let ptr = (iov_ptr as *const Iovec).add(i);
-            core::ptr::read(ptr)
-        };
+        let iov: Iovec = super::userspace::read_user_index(iov_ptr, i)?;
 
         if iov.iov_len == 0 {
             continue;
@@ -2700,10 +2678,7 @@ pub fn sys_fstatat(dirfd: usize, path_ptr: usize, stat_buf: usize, _flags: usize
 
     let metadata = node.metadata().map_err(|_| SyscallError::InvalidState)?;
     let stat = fill_stat(&metadata);
-    // SAFETY: stat_buf was validated above.
-    unsafe {
-        core::ptr::write(stat_buf as *mut FileStat, stat);
-    }
+    super::userspace::write_user(stat_buf, stat)?;
     Ok(0)
 }
 
@@ -2913,26 +2888,21 @@ pub fn sys_select(
         if fdset_ptr == 0 {
             continue;
         }
-        validate_user_buffer(fdset_ptr, bytes_needed)?;
+        // Copied in, updated, and copied back out (N-43).
+        let mut set = alloc::vec![0u8; bytes_needed];
+        super::userspace::read_user_bytes(fdset_ptr, &mut set)?;
         for fd in 0..nfds {
-            let byte_idx = fd / 8;
-            let bit_idx = fd % 8;
-            // SAFETY: fdset_ptr validated above; byte_idx < bytes_needed.
-            let byte_val = unsafe { core::ptr::read_volatile((fdset_ptr + byte_idx) as *const u8) };
-            if byte_val & (1 << bit_idx) != 0 {
-                // Check if this fd exists in the file table
+            let (byte_idx, bit) = (fd / 8, 1u8 << (fd % 8));
+            if set[byte_idx] & bit != 0 {
                 if file_table.get(fd).is_some() {
                     ready_count += 1;
                 } else {
                     // Clear the bit for fds that don't exist
-                    let cleared = byte_val & !(1 << bit_idx);
-                    // SAFETY: same pointer, validated above.
-                    unsafe {
-                        core::ptr::write_volatile((fdset_ptr + byte_idx) as *mut u8, cleared);
-                    }
+                    set[byte_idx] &= !bit;
                 }
             }
         }
+        super::userspace::write_user_bytes(fdset_ptr, &set)?;
     }
 
     Ok(ready_count)

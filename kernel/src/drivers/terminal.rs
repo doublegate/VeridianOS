@@ -92,12 +92,27 @@ pub struct KernelTermios {
     pub c_lflag: u32,
     pub c_line: u8,
     pub c_cc: [u8; NCCS],
+    /// Explicit alignment padding before `c_ispeed` (bytes 49-51), so the
+    /// struct has no implicit padding and copying it to user memory never
+    /// exposes uninitialized kernel bytes.
+    pub _pad: [u8; 3],
     pub c_ispeed: u32,
     pub c_ospeed: u32,
 }
 
 // Compile-time assertion: Linux struct termios is 60 bytes (with NCCS=32).
 const _: () = assert!(core::mem::size_of::<KernelTermios>() == 60);
+// No implicit padding: `_pad` fills bytes 49-51 and `c_ispeed` starts at 52.
+const _: () = {
+    use core::mem::offset_of;
+    assert!(offset_of!(KernelTermios, c_line) == 16);
+    assert!(offset_of!(KernelTermios, _pad) == 17 + NCCS);
+    assert!(offset_of!(KernelTermios, c_ispeed) == 52);
+};
+// SAFETY: repr(C), every field is an integer or an integer array, and the
+// assertion above shows there is no implicit padding, so every 60-byte
+// pattern is a valid value and no byte of a value is uninitialized.
+unsafe impl crate::syscall::userspace::UserPod for KernelTermios {}
 
 impl KernelTermios {
     /// Create default terminal attributes (cooked mode, echo on).
@@ -126,6 +141,7 @@ impl KernelTermios {
             c_cc: cc,
             c_ispeed: 38400,
             c_ospeed: 38400,
+            _pad: [0; 3],
         }
     }
 
@@ -182,6 +198,11 @@ pub struct KernelWinsize {
     pub ws_xpixel: u16,
     pub ws_ypixel: u16,
 }
+
+const _: () = assert!(core::mem::size_of::<KernelWinsize>() == 8);
+// SAFETY: repr(C), four u16 fields and no padding (size asserted above), so
+// every bit pattern is a valid value.
+unsafe impl crate::syscall::userspace::UserPod for KernelWinsize {}
 
 impl KernelWinsize {
     /// Default 80x24 terminal (standard VT100 size).
