@@ -576,15 +576,24 @@ jobs:
               run: |
                   sudo mkdir -p /opt/veridian
                   sudo chown "$USER" /opt/veridian
-            - name: Cache cross toolchain
+            # Restore and save separately: actions/cache saves only when the
+            # whole job succeeds, so a later failing step would otherwise
+            # throw away a 25-minute toolchain build every time.
+            - name: Restore cross toolchain
               id: toolchain-cache
-              uses: actions/cache@v4
+              uses: actions/cache/restore@v4
               with:
                   path: /opt/veridian/toolchain
                   key: veridian-toolchain-x86_64-${{ hashFiles('scripts/build-cross-toolchain.sh', 'scripts/build-sysroot.sh', 'ports/binutils/patches/**', 'ports/gcc/patches/**') }}
             - name: Build cross toolchain
               if: steps.toolchain-cache.outputs.cache-hit != 'true'
               run: ./scripts/build-cross-toolchain.sh --arch x86_64 --prefix /opt/veridian/toolchain
+            - name: Save cross toolchain
+              if: steps.toolchain-cache.outputs.cache-hit != 'true'
+              uses: actions/cache/save@v4
+              with:
+                  path: /opt/veridian/toolchain
+                  key: ${{ steps.toolchain-cache.outputs.cache-primary-key }}
             - name: Build kernel
               run: ./build-kernel.sh x86_64 dev
             - name: Build BusyBox rootfs

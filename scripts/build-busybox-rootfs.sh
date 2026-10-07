@@ -249,6 +249,10 @@ phase_build() {
         echo ""
         echo "  FAILED: No busybox binary produced"
         echo "  Check build log: $WORK_DIR/busybox-build.log"
+        # A parallel build interleaves output, so the tail above rarely
+        # shows the cause: print every compiler/linker error.
+        grep -n -B2 -A6 -E ' error: |undefined reference|cannot find|No such file' \
+            "$WORK_DIR/busybox-build.log" | head -120 || true
         exit 1
     fi
     echo ""
