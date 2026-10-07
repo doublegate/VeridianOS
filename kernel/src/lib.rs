@@ -19,21 +19,30 @@ extern crate alloc;
 // On bare-metal targets use the custom kernel heap allocators.
 // On host (x86_64-unknown-linux-gnu) for coverage/testing, delegate to the
 // system allocator so that test code using Vec/String/alloc compiles and runs.
-#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+#[cfg(all(
+    any(target_arch = "x86_64", target_arch = "riscv64"),
+    target_os = "none"
+))]
 use linked_list_allocator::LockedHeap;
 
-// Also built for host unit tests, which exercise it on a Vec-backed heap.
-#[cfg(any(target_arch = "riscv64", target_arch = "aarch64", test))]
+// The bump allocator AArch64 uses until its MMU is on (N-28: locks need
+// exclusives, unreliable on Device memory). Also built for host unit tests,
+// which exercise it on a Vec-backed heap.
+#[cfg(any(target_arch = "aarch64", test))]
 #[cfg_attr(test, allow(dead_code))]
 mod simple_alloc_unsafe;
-#[cfg(any(target_arch = "riscv64", target_arch = "aarch64"))]
+#[cfg(target_arch = "aarch64")]
 use simple_alloc_unsafe::UnsafeBumpAllocator;
 
-#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+/// x86_64 and RISC-V: a real heap that reuses freed memory (MEM-SEC-03).
+#[cfg(all(
+    any(target_arch = "x86_64", target_arch = "riscv64"),
+    target_os = "none"
+))]
 #[global_allocator]
 static ALLOCATOR: LockedHeap = LockedHeap::empty();
 
-#[cfg(any(target_arch = "riscv64", target_arch = "aarch64"))]
+#[cfg(target_arch = "aarch64")]
 #[global_allocator]
 pub static ALLOCATOR: UnsafeBumpAllocator = UnsafeBumpAllocator::new();
 
@@ -45,7 +54,10 @@ extern crate std;
 static SYSTEM_ALLOCATOR: std::alloc::System = std::alloc::System;
 
 /// Get a reference to the global allocator
-#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+#[cfg(all(
+    any(target_arch = "x86_64", target_arch = "riscv64"),
+    target_os = "none"
+))]
 pub fn get_allocator() -> &'static LockedHeap {
     &ALLOCATOR
 }

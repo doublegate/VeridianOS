@@ -73,7 +73,10 @@ pub fn heap_end_vaddr() -> u64 {
 /// Get current heap statistics (x86_64 only).
 ///
 /// Returns (total, used, free) in bytes.
-#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+#[cfg(all(
+    any(target_arch = "x86_64", target_arch = "riscv64"),
+    target_os = "none"
+))]
 pub fn get_heap_stats() -> (usize, usize, usize) {
     let allocator = crate::get_allocator().lock();
     let total = HEAP_SIZE;
@@ -97,26 +100,17 @@ pub fn init() -> Result<(), crate::error::KernelError> {
         let heap_start = core::ptr::addr_of_mut!(HEAP_MEMORY) as *mut u8;
         let heap_size = HEAP_SIZE;
 
-        // RISC-V: Use UnsafeBumpAllocator (same as AArch64).
-        // LockedHeap's linked-list free list gets corrupted on RISC-V bare
-        // metal ("Hole list out of order?"), so we use the simpler bump
-        // allocator with a 4MB heap that provides ample space for boot.
-        #[cfg(target_arch = "riscv64")]
+        // RISC-V: the same LockedHeap as x86_64 (MEM-SEC-03). It used to
+        // use the never-freeing bump allocator because the linked-list free
+        // list was corrupted ("Hole list out of order?"); the cause was the
+        // frame allocator handing out frames inside the kernel image, where
+        // this static heap lives, and that has since been fixed (the
+        // allocator starts after the kernel end).
+        #[cfg(all(target_arch = "riscv64", target_os = "none"))]
         {
-            println!("[HEAP] Initializing RISC-V UnsafeBumpAllocator");
-            println!(
-                "[HEAP] Heap start: {:p}, size: {} bytes",
-                heap_start, heap_size
-            );
-
-            // SAFETY: `ALLOCATOR` is the global bump allocator. `heap_start` points to
-            // valid memory of at least `heap_size` bytes (the static HEAP_MEMORY array).
-            // This is called once during single-threaded boot, so no concurrent access.
-            unsafe {
-                crate::ALLOCATOR.init(heap_start, heap_size);
-            }
-
-            println!("[HEAP] RISC-V heap initialization complete");
+            let mut allocator = crate::get_allocator().lock();
+            allocator.init(heap_start, heap_size);
+            drop(allocator);
         }
 
         // AArch64: Use lock-free UnsafeBumpAllocator (LockedHeap deadlocks on AArch64)

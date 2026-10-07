@@ -29,6 +29,10 @@
   pages instead of copying them. The first write by either side takes a private copy, and
   shared frames are freed by their last owner. `/proc/meminfo` reports `CowShared`.
 
+- **RISC-V has a real kernel heap (MEM-SEC-03).** It uses the same linked-list allocator as
+  x86_64 instead of a bump allocator that never reused freed memory. AArch64 follows once its
+  MMU is enabled.
+
 ### Changed
 
 - The AArch64 kernel is linked at 0x40200000 (was 0x40080000), so QEMU has room to load the
