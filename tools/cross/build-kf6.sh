@@ -241,41 +241,6 @@ patch_kf_source() {
             fi
             grep -qF 'find_package(Canberra)' "${f}" || die "failed to patch ${f}"
             ;;
-        KIO)
-            # libmount is REQUIRED on Linux only for KMountPoint, whose code
-            # is guarded by HAVE_LIB_MOUNT; VeridianOS has no util-linux.
-            local f="${src}/CMakeLists.txt"
-            if grep -qF 'find_package(LibMount REQUIRED)' "${f}"; then
-                python3 -c 'import sys; p = sys.argv[1]; s = open(p).read(); open(p, "w").write(s.replace("find_package(LibMount REQUIRED)", "find_package(LibMount)"))' "${f}"
-            fi
-            grep -qF 'find_package(LibMount)' "${f}" || die "failed to patch ${f}"
-            ;;
-        Solid)
-            # libmount is marked REQUIRED for the Linux UDisks backend, but
-            # that backend builds without it (HAVE_LIBMOUNT), and VeridianOS
-            # has no util-linux. Make it OPTIONAL and skip the fstab backend,
-            # which cannot build without it.
-            local f="${src}/CMakeLists.txt"
-            python3 - "${f}" <<'PYEOF' || die "failed to patch ${f}"
-import sys
-p = sys.argv[1]
-s = open(p).read()
-# (old, new): libmount optional, and the fstab backend -- which includes
-# libmount.h unconditionally -- only built when libmount was found.
-for old, new in (
-    ("set_package_properties(LibMount PROPERTIES\n                           TYPE REQUIRED)",
-     "set_package_properties(LibMount PROPERTIES\n                           TYPE OPTIONAL)"),
-    ("    add_device_backend(udisks2)\n    add_device_backend(fstab)\n",
-     "    add_device_backend(udisks2)\n    if(LibMount_FOUND)\n        add_device_backend(fstab)\n    endif()\n"),
-):
-    if new in s:
-        continue
-    if s.count(old) != 1:
-        sys.exit("unexpected Solid CMakeLists.txt")
-    s = s.replace(old, new)
-open(p, "w").write(s)
-PYEOF
-            ;;
     esac
 }
 

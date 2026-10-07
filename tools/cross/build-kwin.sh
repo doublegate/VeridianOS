@@ -125,35 +125,12 @@ build_kwin() {
     local bld="${BUILD_DIR}/kwin-build"
     log "Building KWin ${KWIN_VER}..."
 
-    # Patch NoopSession::openRestricted() to actually open the device.
-    # The upstream implementation returns -1 unconditionally, which prevents
-    # kwin from opening /dev/dri/card0 on systems without logind/consolekit.
-    # Our patch makes it call open() directly, matching the behavior needed
-    # for VeridianOS where DRM devices are opened via the VFS.
-    # (A multi-line sed used to "apply" this: sed cannot match across lines
-    # and exits 0 anyway, so the python fallback never ran and kwin was
-    # left unable to open the DRM device.)
-    if ! grep -q 'return open(fileName' "${src}/src/core/session_noop.cpp"; then
-        log "Patching session_noop.cpp: openRestricted() -> direct open()"
-        sed -i '/^#include "session_noop.h"/a\
-#include <fcntl.h>\
-#include <unistd.h>' "${src}/src/core/session_noop.cpp"
-        python3 - "${src}/src/core/session_noop.cpp" <<'PYEOF' || die "failed to patch session_noop.cpp"
-import re, sys
-p = sys.argv[1]
-s = open(p).read()
-s, n = re.subn(
-    r"(int NoopSession::openRestricted\(const QString &fileName\)\s*\{\s*)return -1;",
-    r"\1return open(fileName.toUtf8().constData(), O_RDWR | O_CLOEXEC);",
-    s,
-)
-if n != 1:
-    sys.exit("openRestricted() body not found")
-open(p, "w").write(s)
-PYEOF
-    fi
-    grep -q 'return open(fileName' "${src}/src/core/session_noop.cpp" || \
-        die "session_noop.cpp: openRestricted() not patched"
+    # Without logind, kwin opens /dev/dri/card0 through
+    # NoopSession::openRestricted(). Older releases returned -1 there and
+    # were patched to call open(); since 6.4 upstream opens the device
+    # itself. Check that it still does, rather than patch blindly.
+    grep -q '::open(fileName' "${src}/src/core/session_noop.cpp" || \
+        die "session_noop.cpp: NoopSession::openRestricted() no longer opens the device"
 
     # Qt UiTools is only used by the KCMs and the Aurorae config UI, both
     # disabled below (KWIN_BUILD_KCMS=OFF); qttools is not cross-built.

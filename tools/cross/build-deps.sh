@@ -42,6 +42,8 @@ LIBEVDEV_VER="1.14.0"
 MTDEV_VER="1.1.7"
 LIBINPUT_VER="1.32.0"
 ATSPI_VER="2.62.0"
+UTIL_LINUX_VER="2.42.4"   # libblkid + libmount (KF6 KCoreAddons needs libmount)
+UTIL_LINUX_SHA256="fbd62a100ab7bb8746ba0661255c3c48185b1e9021507c624da01fbc696330ec"
 
 log() { echo "[build-deps] $*"; }
 die() { echo "[build-deps] ERROR: $*" >&2; exit 1; }
@@ -519,10 +521,53 @@ build_atspi() {
 }
 
 # ── Verify ────────────────────────────────────────────────────────────
+# ── libmount (and libblkid, which it needs) from util-linux ───────────
+# KF6 KCoreAddons requires libmount on Linux targets (mount point
+# queries); only the two libraries are built, no util-linux programs.
+build_libmount() {
+    if [[ -f "${SYSROOT}/usr/lib/libmount.a" ]]; then
+        log "libmount: already installed."
+        return 0
+    fi
+    local major="${UTIL_LINUX_VER%.*}"
+    fetch "util-linux-${UTIL_LINUX_VER}" \
+        "https://cdn.kernel.org/pub/linux/utils/util-linux/v${major}/util-linux-${UTIL_LINUX_VER}.tar.xz" \
+        "util-linux-${UTIL_LINUX_VER}"
+    echo "${UTIL_LINUX_SHA256}  ${VERIDIAN_SOURCES}/util-linux-${UTIL_LINUX_VER}.tar.gz" |
+        sha256sum -c --quiet - || die "util-linux ${UTIL_LINUX_VER}: checksum mismatch"
+
+    local src="${BUILD_DIR}/util-linux-${UTIL_LINUX_VER}"
+    log "Building libblkid + libmount ${UTIL_LINUX_VER}..."
+    (cd "${src}" && \
+        ./configure "${COMMON_CONFIGURE[@]}" \
+            --disable-all-programs \
+            --enable-libblkid \
+            --enable-libmount \
+            --disable-liblastlog2 \
+            --disable-nls \
+            --disable-bash-completion \
+            --disable-asciidoc \
+            --disable-poman \
+            --disable-makeinstall-chown \
+            --disable-makeinstall-setuid \
+            --without-python \
+            --without-systemd \
+            --without-udev \
+            --without-cryptsetup \
+            --without-econf \
+            --without-ncursesw \
+            --without-tinfo \
+            --without-selinux \
+            --without-audit && \
+        make -j"${JOBS}" && \
+        make install)
+    log "libmount: done."
+}
+
 verify() {
     log "Verifying all dependencies..."
     local errors=0
-    for lib in libz.a libffi.a libpcre2-8.a libexpat.a libxml2.a libjpeg.a libpng16.a libxkbcommon.a libsqlite3.a libssl.a libcrypto.a libevdev.a libmtdev.a libinput.a; do
+    for lib in libz.a libffi.a libpcre2-8.a libexpat.a libxml2.a libjpeg.a libpng16.a libxkbcommon.a libsqlite3.a libssl.a libcrypto.a libevdev.a libmtdev.a libinput.a libblkid.a libmount.a; do
         if [[ -f "${SYSROOT}/usr/lib/${lib}" ]]; then
             local size
             size=$(stat -c%s "${SYSROOT}/usr/lib/${lib}" 2>/dev/null || echo "?")
@@ -560,6 +605,7 @@ main() {
     prepare_udev_stub
     build_libinput
     build_atspi || log "at-spi2-core: skipped (requires glib-2.0; optional for accessibility)"
+    build_libmount
 
     verify
 
