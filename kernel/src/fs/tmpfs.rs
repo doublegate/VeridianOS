@@ -138,6 +138,22 @@ impl TmpNode {
     }
 }
 
+impl Drop for TmpNode {
+    /// A file's bytes are charged to its tmpfs while the node exists, so
+    /// they are released when the last name and the last open file are
+    /// gone. Releasing at unlink let a hard link keep data alive uncounted.
+    fn drop(&mut self) {
+        let freed = self.data.get_mut().len();
+        if freed > 0 {
+            let _ = self
+                .bytes_used
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |used| {
+                    Some(used.saturating_sub(freed))
+                });
+        }
+    }
+}
+
 /// Recover the concrete `Arc<TmpNode>` behind a VFS node, if it is one.
 fn as_tmp_arc(node: Arc<dyn VfsNode>) -> Option<Arc<TmpNode>> {
     node.as_any()?.downcast_ref::<TmpNode>()?;
@@ -324,20 +340,9 @@ impl VfsNode for TmpNode {
                 }
             }
 
-            // Reclaim bytes if it's a file
-            if node.node_type == NodeType::File {
-                let data = node.data.read();
-                let freed = data.len();
-                if freed > 0 {
-                    // Saturating sub to avoid underflow on race
-                    let prev = self.bytes_used.fetch_sub(freed, Ordering::Relaxed);
-                    // Guard against underflow (should not happen but be safe)
-                    if prev < freed {
-                        self.bytes_used.store(0, Ordering::Relaxed);
-                    }
-                }
-            }
-
+            // The bytes go back to the size budget when the node itself is
+            // dropped (see `Drop for TmpNode`), not here: another hard link
+            // or an open file can still hold the data.
             children.remove(name);
             Ok(())
         } else {
@@ -651,6 +656,25 @@ mod tests {
     }
 
     #[test]
+    fn bytes_are_released_when_the_last_link_goes() {
+        let fs = TmpFs::new(8);
+        let root = fs.root();
+        let a = root.create("a", Permissions::default()).unwrap();
+        a.write(0, b"12345678").unwrap();
+        root.link("b", a.clone()).unwrap();
+        drop(a);
+        // Unlinking one name must not return bytes still reachable through
+        // the other, or link + unlink would grow tmpfs past its limit.
+        root.unlink("a").unwrap();
+        assert_eq!(fs.bytes_used(), 8);
+        let c = root.create("c", Permissions::default()).unwrap();
+        assert!(c.write(0, b"x").is_err());
+        drop(c);
+        root.unlink("b").unwrap();
+        assert_eq!(fs.bytes_used(), 0);
+    }
+
+    #[test]
     fn hard_link_across_tmpfs_instances_is_exdev() {
         let fs1 = TmpFs::new(1024 * 1024);
         let fs2 = TmpFs::new(1024 * 1024);
@@ -776,6 +800,10 @@ mod tests {
         assert_eq!(fs.bytes_used(), 9);
 
         root.unlink("temp.txt").unwrap();
+        // Still open: the data exists, so it stays charged (as on Linux,
+        // where an unlinked open file keeps its blocks until the last close).
+        assert_eq!(fs.bytes_used(), 9);
+        drop(file);
         assert_eq!(fs.bytes_used(), 0);
     }
 
