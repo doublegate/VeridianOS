@@ -67,6 +67,19 @@ What does not work yet: `docs/KNOWN-LIMITATIONS.md`.
   - [ ] **Release:** tri-arch boot with `-smp 4`, runtime suite, CHANGELOG, tag.
 - [ ] **v0.28.0:** one Linux ABI with VeridianOS IPC in its own range (X1, fixes N-33), plus the
   process, signal, time and file syscall tiers.
+  - [ ] **Package signing keys (N-55 follow-up).** Today no post-quantum key is provisioned, so a
+    policy requiring the PQ signature refuses every package.
+    - Key hierarchy: an offline maintainer root key (ML-DSA-65 seed, plus Ed25519) that only
+      certifies and revokes, and online signing keys (Ed25519 + ML-DSA-65 pairs) that sign
+      packages, certified by the root and usable from CI.
+    - `tools/pkg-keygen`: an offline tool on the `ml-dsa` crate to generate the root seed, and to
+      generate and certify signing keys and revocations.
+    - Kernel: embed the root public key; verify a signing-key certificate (and revocation list)
+      against it instead of trusting one embedded key; replace `trusted_mldsa_public_key()`.
+    - Users may add their own trusted keys for their own repositories (an extra keyring); the base
+      system trusts the project root.
+    - ADR for the key ceremony: offline generation, seed backup, rotation, revocation, and what
+      happens if the root is lost or compromised.
 - [ ] **v0.29.0 - v0.31.0:** the rest of the Linux/POSIX syscall surface, loader/vDSO/TTY/procfs,
   and LTP and open_posix in CI. See `docs/compat/COMPATIBILITY-PLAN.md`.
 - [ ] **C6 (staged from v0.28):** move drivers, protocols and codecs out of the kernel.
