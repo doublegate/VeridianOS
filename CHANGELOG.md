@@ -189,6 +189,12 @@
 
 ### Fixed
 
+- **pty writes lost data and signalled under a lock (N-128).** With output processing on, a
+  newline that did not fit was dropped while the write still reported every byte written, and a
+  full buffer failed the whole write after part of it had been queued. ^C and ^Z sent their
+  signals while holding the input buffer lock. Writes now return the exact number of bytes
+  taken (EAGAIN when none fit), and signals go out after the lock is released. Host tests
+  `master_input_reports_short_writes_and_signals` and `slave_output_counts_opost_newlines_exactly`.
 - **`MAP_FIXED` and `munmap` followed Linux only for single mappings (N-141).** `MAP_FIXED` over
   existing memory failed with ENOMEM instead of replacing it (dynamic loaders map this way), and
   `munmap` of a range covering several mappings or a hole failed with EINVAL. `MAP_FIXED` now

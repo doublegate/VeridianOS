@@ -63,7 +63,8 @@ work. User code is preempted when its slice ends (D3). What is still missing:
   - a pipe write that only partly fits returns a short count instead of waiting for the rest,
     and PIPE_BUF writes are not atomic;
   - eventfd, signalfd and timerfd waits spin for up to 30 s;
-  - an empty pty read returns end-of-file;
+  - an empty pty read returns end-of-file, and a write to a full pty fails with EAGAIN instead
+    of waiting (it returns a short count when part fits; N-128);
   - `flock` without `LOCK_NB` fails with EWOULDBLOCK instead of waiting (N-120).
 - **exec from a multithreaded process fails with EAGAIN.** The other threads would keep running
   on the page tables exec replaces; stopping them first is N-101.
@@ -188,8 +189,6 @@ filesystem.
 - **On-disk structures are not validated (N-123).** BlockFS checks only the magic number; the ext4
   and FAT32 readers have unchecked arithmetic and cannot be mounted; the shell `mkfs` does nothing.
   Only mount images you trust.
-- **pty (N-128):** output processing drops `\n` but reports it written; signals are sent while
-  holding the input lock.
 - **mount (N-129)** is allowed to any process holding a memory capability, and type `blockfs`
   mounts an empty RAM filesystem.
 
