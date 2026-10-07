@@ -12,7 +12,7 @@ All memory allocator features fully implemented and benchmarked:
 - Per-CPU page frame cache (64-frame) for fast allocation
 - TLB shootdown reduction via `TlbFlushBatch`
 - Benchmarks (QEMU x86_64+KVM): frame_alloc_global 1,525ns, frame_alloc_1 (per-CPU) 2,215ns
-- Memory zones (DMA, Normal), kernel heap with slab allocator
+- Memory zones (DMA, Normal); kernel heap: a linked-list allocator on x86_64, a bump allocator on AArch64/RISC-V (no slab allocator; see MEM-INC-02)
 - Virtual Address Space management with user-space safety
 
 ## Executive Summary
@@ -343,7 +343,6 @@ pub struct MemoryWatermarks {
 
 ### Reclamation
 - Page cache eviction
-- Slab cache shrinking
 - Process memory pressure signals
 
 ## Testing Strategy
@@ -365,9 +364,10 @@ pub struct MemoryWatermarks {
 
 ## Integration Points
 
-### Slab Allocator
-- Built on top of frame allocator
-- Efficient for kernel objects
+### Kernel Heap
+- A fixed static region, not frame-backed: `linked_list_allocator` on x86_64,
+  a bump allocator on AArch64/RISC-V
+- An earlier slab allocator was never wired in and was removed (MEM-INC-02)
 
 ### Virtual Memory Manager
 - Physical frame provider

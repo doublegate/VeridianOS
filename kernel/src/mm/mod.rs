@@ -18,7 +18,6 @@ pub mod page_table;
 pub mod user_layout;
 pub mod user_validation;
 pub mod vas;
-pub mod vmm;
 
 #[cfg(feature = "alloc")]
 extern crate alloc;

@@ -143,29 +143,13 @@ Shootdown modes:
 
 ## Kernel Heap Management
 
-### Slab Allocator
+### Heap Allocator
 
-The kernel uses a slab allocator for common object sizes:
-
-```rust
-pub struct SlabAllocator {
-    slabs: [Slab; 12],  // 8B, 16B, 32B, ..., 16KB
-    large_allocator: LinkedListAllocator,
-}
-```
-
-Benefits:
-- Reduced fragmentation
-- Fast allocation for common sizes
-- Cache-friendly memory layout
-- Per-CPU caches for scalability
-
-### Large Object Allocator
-
-For allocations > 16KB:
-- Linked list allocator with first-fit strategy
-- Coalescing of adjacent free blocks
-- Optional debug features for leak detection
+The kernel heap is a fixed static region. On x86_64 it is managed by
+`linked_list_allocator` (first fit, coalescing adjacent free blocks); on
+AArch64 and RISC-V by a bump allocator that does not reuse freed memory, which
+is a known limitation (MEM-SEC-03). There is no slab allocator: an earlier one
+was never wired in and has been removed (MEM-INC-02).
 
 ## Memory Zones
 
@@ -238,7 +222,6 @@ pub fn handle_page_fault(addr: VirtAddr, error_code: PageFaultError) -> Result<(
 Achieved performance metrics:
 - Frame allocation: ~500ns average
 - Page mapping: ~1.5μs including TLB flush
-- Heap allocation: ~350ns for slab sizes
 - TLB shootdown: ~4.2μs per CPU
 
 ### Optimization Techniques
