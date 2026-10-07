@@ -840,7 +840,16 @@ impl Vfs {
     }
 
     /// Get current working directory
+    /// The working directory relative paths resolve against: the calling
+    /// user thread's own (N-115), or, in kernel context (the kernel shell),
+    /// the VFS-wide one. Every path lookup in a system call used the
+    /// VFS-wide directory, so `chdir` in a program changed what `getcwd`
+    /// reported but not where its relative paths went.
     pub fn get_cwd(&self) -> String {
+        #[cfg(feature = "alloc")]
+        if let Some(thread) = crate::process::current_thread() {
+            return thread.fs().cwd.lock().clone();
+        }
         self.cwd.read().clone()
     }
 

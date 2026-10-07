@@ -189,6 +189,12 @@
 
 ### Fixed
 
+- **Relative paths ignored the program's working directory (N-115).** Every path lookup in a
+  system call resolved against the kernel shell's directory, so after `chdir` a program's
+  `getcwd` changed but its relative paths did not. Lookups now use the calling thread's
+  directory, and a new process starts in its creator's. Runtime test
+  `relative_paths_follow_own_cwd` (fails on the previous kernel, passes now).
+
 - **musl `sigpending()` suspended the caller.** The musl patch mapped Linux 127 (rt_sigpending)
   to the native sigsuspend, so `sigpending` waited for a signal and consumed it; Linux 130
   (rt_sigsuspend) was not mapped at all. 127 now maps to the new native sigpending (360) and

@@ -1371,6 +1371,44 @@ static void test_signal_handlers(void)
     signal(SIGUSR2, SIG_DFL);
 }
 
+/* --- Relative paths follow the caller's own working directory (N-115). ---
+ * They resolved against the kernel shell's directory, whatever the program
+ * had chdir'd to. A child's chdir must not move the parent either. */
+static void test_relative_paths(void)
+{
+    char saved[256];
+    if (!getcwd(saved, sizeof(saved)))
+        strcpy(saved, "/");
+    unlink("/tmp/relprobe");
+    unlink("/relprobe_child");
+    int ok = chdir("/tmp") == 0;
+    int fd = open("relprobe", O_CREAT | O_WRONLY, 0644);
+    if (fd >= 0)
+        close(fd);
+    struct stat st;
+    int in_tmp = stat("/tmp/relprobe", &st) == 0;
+
+    pid_t pid = fork();
+    if (pid == 0) {
+        if (chdir("/") != 0)
+            _exit(2);
+        int cfd = open("relprobe_child", O_CREAT | O_WRONLY, 0644);
+        _exit(cfd >= 0 ? 0 : 1);
+    }
+    int cst = 0;
+    waitpid(pid, &cst, 0);
+    int child_in_root = stat("/relprobe_child", &st) == 0;
+    int parent_unmoved = stat("relprobe", &st) == 0; /* still /tmp */
+    unlink("/tmp/relprobe");
+    unlink("/relprobe_child");
+    if (chdir(saved) != 0)
+        ok = 0;
+    static char why[80];
+    snprintf(why, sizeof(why), "in_tmp=%d child_in_root=%d parent_unmoved=%d", in_tmp,
+             child_in_root, parent_unmoved);
+    report("relative_paths_follow_own_cwd", ok && in_tmp && child_in_root && parent_unmoved, why);
+}
+
 int main(int argc, char **argv)
 {
     setvbuf(stdout, NULL, _IONBF, 0);
@@ -1408,6 +1446,7 @@ int main(int argc, char **argv)
     test_kill_sleeping();
     test_blocking_pipe();
     test_signal_handlers();
+    test_relative_paths();
     printf("AUDIT-RUNTIME: %d/%d\n", passed, total);
     return passed == total ? 0 : 1;
 }

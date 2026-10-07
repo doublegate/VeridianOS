@@ -57,6 +57,15 @@ impl ThreadFs {
         })
     }
 
+    /// Filesystem state starting in `cwd`, umask 0o022: a new process's
+    /// first thread starts in its creator's directory.
+    pub fn with_cwd(cwd: alloc::string::String) -> Arc<Self> {
+        Arc::new(Self {
+            cwd: Mutex::new(cwd),
+            umask: AtomicU32::new(0o022),
+        })
+    }
+
     /// Share the filesystem state (CLONE_FS semantics).
     ///
     /// Returns a clone of the `Arc`, so parent and child reference the

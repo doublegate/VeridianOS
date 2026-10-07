@@ -114,9 +114,9 @@ What remains:
 
 ### Processes, exec and credentials
 
-- **One working directory for everything (N-115).** Relative paths resolve against a global
-  directory set by the kernel shell, not the calling process's, and `*at()` directory fds resolve
-  through a path string.
+- **Directory fds are paths (N-115 remainder).** `*at()` calls resolve their directory fd
+  through a path string rather than the open directory, so a directory renamed after it was
+  opened is looked up by its old name.
 - **exec (N-101):** a failure after the old address space is cleared returns to an empty address
   space instead of killing the process, there is no execute-permission check, and other threads are
   not stopped first. Fork children are runnable before setup completes (N-110).

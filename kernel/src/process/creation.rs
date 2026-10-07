@@ -95,10 +95,16 @@ pub fn create_process_with_options(
     }
 
     // Create the main thread
+    // The new process starts in its creator's working directory: the
+    // kernel shell's after a `cd`, or the calling thread's (N-115).
+    let start_cwd = crate::fs::try_get_vfs()
+        .map(|vfs| vfs.get_cwd())
+        .unwrap_or_else(|| String::from("/"));
     let main_thread =
         ThreadBuilder::new(pid, format!("{}-main", options.name), options.entry_point)
             .user_stack_size(options.user_stack_size)
             .kernel_stack_size(options.kernel_stack_size)
+            .fs(super::thread::ThreadFs::with_cwd(start_cwd))
             .build()?;
 
     let tid = main_thread.tid;
