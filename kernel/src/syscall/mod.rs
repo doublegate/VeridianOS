@@ -665,6 +665,7 @@ fn handle_syscall(
         Syscall::SchedYield => sys_yield(),
         Syscall::ExitGroup => sys_exit(arg1),
         Syscall::Fork => sys_fork(),
+        Syscall::Vfork => process::sys_vfork(),
         Syscall::Execve => sys_exec(arg1, arg2, arg3),
         Syscall::Wait4 => sys_wait(arg1 as isize, arg2, arg3),
         Syscall::Getpid => sys_getpid(),

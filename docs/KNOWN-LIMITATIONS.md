@@ -27,15 +27,16 @@ behind one found about 80 differences. The security-relevant ones and those the 
 exposed were fixed (N-182 to N-189); the rest are listed, with their targets, in
 [`docs/audit/ABI-REVIEW-2026-10-07.md`](audit/ABI-REVIEW-2026-10-07.md). The most visible:
 
-- **Permission checks.** pread/pwrite and ftruncate ignore the file's access mode, truncate and
-  mkdir check no permission, and access() checks only the "other" bits (N-190 to N-193).
 - **Blocking.** select never blocks; recvfrom, accept, sendmsg and recvmsg never block on a
   blocking socket; non-blocking eventfd, timerfd and signalfd reads block (N-194, N-232, N-235).
-- **Signals 32-64** are refused, so musl's `pthread_cancel` fails (N-209); fork-style `clone`
-  (musl `posix_spawn`, hence `system` and `popen`) is refused (N-210).
+- **clone across processes.** A `clone` without CLONE_THREAD makes a process (fork, vfork,
+  `posix_spawn`); with CLONE_VM it shares the parent's memory page by page as it is at the
+  clone, so a mapping either side adds or removes afterwards is its own (enough for vfork and
+  `posix_spawn`, whose child only execs or exits). CLONE_FILES and CLONE_SIGHAND between
+  processes (a shared fd or signal-handler table) are refused (N-210).
 - **Time.** CLOCK_REALTIME counts from boot, not 1970, and only clocks 0 and 1 exist (N-218, N-219).
-- **Errnos.** Many errors come back as EINVAL where Linux is specific (N-197, N-202, N-212 to
-  N-216, N-234, N-238).
+- **Errnos.** Many errors come back as EINVAL where Linux is specific (N-202, N-212 to N-216,
+  N-234, N-238).
 
 ### Drivers and services run in the kernel (C6, planned v0.28+)
 

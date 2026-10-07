@@ -54,7 +54,9 @@ pub fn exit_process(exit_code: i32) {
             if let Some(parent) = table::get_process(parent_pid) {
                 // Send SIGCHLD to parent (POSIX: delivered on child exit)
                 if let Err(_e) = {
-                    super::signals::notify(&parent, signals::SIGCHLD as usize);
+                    if exit_signal(&process) != 0 {
+                        super::signals::notify(&parent, exit_signal(&process));
+                    }
                     Ok::<(), KernelError>(())
                 } {
                     println!(
@@ -470,7 +472,7 @@ pub fn kill_process(pid: ProcessId, signal: i32) -> Result<(), KernelError> {
             println!("[PROCESS] Process {} stopped by SIGSTOP", pid.0);
 
             // Notify parent with SIGCHLD (POSIX: child stopped)
-            notify_parent_sigchld(&process);
+            notify_parent_sigchld(&process, signals::SIGCHLD as usize);
         }
         _ => {
             // Handle based on action
@@ -489,7 +491,7 @@ pub fn kill_process(pid: ProcessId, signal: i32) -> Result<(), KernelError> {
                     println!("[PROCESS] Process {} stopped by signal {}", pid.0, signal);
 
                     // Notify parent with SIGCHLD (POSIX: child stopped)
-                    notify_parent_sigchld(&process);
+                    notify_parent_sigchld(&process, signals::SIGCHLD as usize);
                 }
                 SignalAction::Continue => {
                     if process.get_state() == ProcessState::Blocked {
@@ -498,7 +500,7 @@ pub fn kill_process(pid: ProcessId, signal: i32) -> Result<(), KernelError> {
                         println!("[PROCESS] Process {} continued by signal {}", pid.0, signal);
 
                         // Notify parent with SIGCHLD (POSIX: child continued)
-                        notify_parent_sigchld(&process);
+                        notify_parent_sigchld(&process, signals::SIGCHLD as usize);
                     }
                     process.clear_pending_signal(signal as usize);
                 }
@@ -578,7 +580,7 @@ pub fn exit_dispatched(exit_code: i32, group: bool) -> ! {
         if !others_alive {
             cleanup_process(&process);
             process.set_state(ProcessState::Zombie);
-            notify_parent_sigchld(&process);
+            notify_parent_sigchld(&process, exit_signal(&process));
         }
         dispatch::PROCESS_EVENTS.wake_all();
     }
@@ -589,17 +591,26 @@ pub fn exit_dispatched(exit_code: i32, group: bool) -> ! {
 // SIGCHLD notification helper
 // ============================================================================
 
-/// Send SIGCHLD to the parent of `process` and wake it if blocked.
+/// The signal a parent gets when `process` exits: SIGCHLD, or what clone
+/// asked for (its low byte; 0 for none, N-210).
+fn exit_signal(process: &Process) -> usize {
+    process.exit_signal.load(Ordering::Acquire) as usize
+}
+
+/// Send `sig` (SIGCHLD, or the child's exit signal; 0 sends nothing) to
+/// the parent of `process` and wake it if blocked.
 ///
 /// Called when a child process exits, stops, or continues. This is the
 /// unified notification path: `exit_process` and `kill_process` (for Stop
 /// and Continue actions) both funnel through here.
-fn notify_parent_sigchld(process: &Process) {
+fn notify_parent_sigchld(process: &Process, sig: usize) {
     if let Some(parent_pid) = process.parent() {
         if let Some(parent) = table::get_process(parent_pid) {
-            // Send SIGCHLD to parent (POSIX: delivered on child state change)
+            // Signal the parent (POSIX: delivered on child state change)
             if let Err(_e) = {
-                super::signals::notify(&parent, signals::SIGCHLD as usize);
+                if sig != 0 {
+                    super::signals::notify(&parent, sig);
+                }
                 Ok::<(), KernelError>(())
             } {
                 println!(
@@ -678,7 +689,9 @@ fn force_terminate_process(process: &Process, signal: i32) -> Result<(), KernelE
         if let Some(parent) = table::get_process(parent_pid) {
             // Send SIGCHLD to parent
             if let Err(_e) = {
-                super::signals::notify(&parent, signals::SIGCHLD as usize);
+                if exit_signal(process) != 0 {
+                    super::signals::notify(&parent, exit_signal(process));
+                }
                 Ok::<(), KernelError>(())
             } {
                 println!(
@@ -703,6 +716,9 @@ pub fn cleanup_process(process: &Process) {
         "[PROCESS] Cleaning up resources for process {}",
         process.pid.0
     );
+
+    // A parent waiting in vfork for this child may resume.
+    process.release_vfork_parent();
 
     // Release memory (VAS-tracked data frames + page table subtrees)
     {

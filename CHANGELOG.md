@@ -2,6 +2,16 @@
 
 ### Added
 
+- **fork- and vfork-style clone, and vfork (N-210).** Only thread-creating `clone` existed, so
+  musl's and glibc's `posix_spawn` -- and with it `system` and `popen` -- failed with EINVAL, and
+  `vfork` was missing (the native libc's was a `fork`). `clone` without CLONE_THREAD now makes a
+  process: with CLONE_VM the child maps the parent's own pages writable (the parent's
+  copy-on-write pages made its own first), with CLONE_VFORK the parent waits until the child execs
+  or exits; the exit signal (clone's low byte), a new stack, TLS and the parent/child TID flags
+  are honoured. `vfork` (58) is a system call, and the native libc implements it in assembly.
+  Sharing is per page as at the clone; CLONE_FILES and CLONE_SIGHAND across processes are refused.
+  Runtime tests `vfork_and_process_clone`, `musl_posix_spawn`, `musl_posix_spawn_reports_enoent`,
+  `musl_system`.
 - **Signals 32 to 64, queued (N-209).** Only signals 1-31 existed: `sigaction`, `kill`, `tkill` and
   `tgkill` refused the rest with EINVAL, though musl's `pthread_cancel` sends signal 33. All 64 now
   work, and real-time signals (32-64) queue as POSIX requires: each send is delivered once, where
@@ -204,6 +214,10 @@
 
 ### Security
 
+- **ptrace writes reach the tracee only (N-252).** POKETEXT/POKEDATA wrote into the physical
+  frame behind the tracee's page, which after a fork is shared with its parent and siblings, so a
+  breakpoint set in a child also changed its parent. A shared page is now copied first, as a
+  write fault would; MAP_SHARED memory stays shared. Found while implementing N-210.
 - **execve with an empty environment passes none (N-211).** A NULL or empty `envp` made the
   kernel substitute the caller's environment, so `env -i` and programs that clear the environment
   before running something passed every variable on. It is now empty, as on Linux.

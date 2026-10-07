@@ -24,9 +24,58 @@ use super::{
 #[allow(unused_imports)]
 use crate::{arch::context::ThreadContext, error::KernelError, println};
 
+/// How a clone that makes a new process (not a thread) differs from a
+/// plain fork (N-210). `Default` is fork.
+#[derive(Debug, Clone, Copy)]
+pub struct ForkOptions {
+    /// CLONE_VM: the child maps the parent's memory itself
+    /// (`VirtualAddressSpace::share_from`), not a copy-on-write copy.
+    pub share_vm: bool,
+    /// CLONE_FS: the child shares the working directory, root and umask.
+    pub share_fs: bool,
+    /// CLONE_VFORK: the parent waits until the child execs or exits
+    /// (`Process::vfork_pending`; the caller waits).
+    pub vfork: bool,
+    /// The child's stack pointer, when not the parent's (clone's stack).
+    pub stack: Option<usize>,
+    /// CLONE_SETTLS: the child's TLS base.
+    pub tls: Option<usize>,
+    /// The signal the parent gets when the child exits (0: none).
+    pub exit_signal: u32,
+    /// CLONE_PARENT_SETTID: where to store the child's TID in the parent.
+    pub parent_settid: Option<usize>,
+    /// CLONE_CHILD_SETTID: where to store it in the child.
+    pub child_settid: Option<usize>,
+    /// CLONE_CHILD_CLEARTID: cleared and futex-woken when the child exits.
+    pub child_cleartid: Option<usize>,
+}
+
+impl Default for ForkOptions {
+    fn default() -> Self {
+        Self {
+            share_vm: false,
+            share_fs: false,
+            vfork: false,
+            stack: None,
+            tls: None,
+            exit_signal: super::signals::SIGCHLD as u32,
+            parent_settid: None,
+            child_settid: None,
+            child_cleartid: None,
+        }
+    }
+}
+
 /// Fork current process
 #[cfg(feature = "alloc")]
 pub fn fork_process() -> Result<ProcessId, KernelError> {
+    fork_process_with(&ForkOptions::default()).map(|(pid, _)| pid)
+}
+
+/// Make a new process from the calling thread, as fork or a non-thread
+/// clone (`opts`). Returns the child's pid and the TID of its thread.
+#[cfg(feature = "alloc")]
+pub fn fork_process_with(opts: &ForkOptions) -> Result<(ProcessId, super::ThreadId), KernelError> {
     // Enforce process count limit (includes zombies awaiting reap).
     // This prevents unbounded process table growth during workloads
     // like BusyBox native compilation (213+ sequential fork+exec+wait).
@@ -68,7 +117,12 @@ pub fn fork_process() -> Result<ProcessId, KernelError> {
         // Share the address space copy-on-write: clone_from maps the
         // parent's frames read-only + COW in both, with per-frame owner
         // counts (mm::frame_refs); the first write takes a private copy.
-        new_space.clone_from(&current_space)?;
+        // A CLONE_VM child maps the same frames writable instead.
+        if opts.share_vm {
+            new_space.share_from(&current_space)?;
+        } else {
+            new_space.clone_from(&current_space)?;
+        }
     }
 
     // Clone capabilities
@@ -174,8 +228,21 @@ pub fn fork_process() -> Result<ProcessId, KernelError> {
         .priority(current_thread.priority)
         .cpu_affinity(current_thread.get_affinity())
         // Working directory and umask are copied, not reset to "/" and 022
-        // (N-93); a copy, because the child's later chdir is its own.
-        .fs(super::thread::ThreadFs::clone_copy(&current_thread.fs))
+        // (N-93); a copy, because the child's later chdir is its own --
+        // unless CLONE_FS shares them.
+        .fs(if opts.share_fs {
+            super::thread::ThreadFs::clone_shared(&current_thread.fs)
+        } else {
+            super::thread::ThreadFs::clone_copy(&current_thread.fs)
+        });
+        let thread = match opts.child_cleartid {
+            Some(ptr) => thread.clear_tid(ptr),
+            None => thread,
+        };
+        let thread = match opts.tls {
+            Some(tls) => thread.tls_base(tls),
+            None => thread,
+        }
         .build()?;
 
         // Copy thread context for child process.
@@ -243,12 +310,45 @@ pub fn fork_process() -> Result<ProcessId, KernelError> {
                 *new_ctx = (*ctx).clone();
                 new_ctx.set_return_value(0);
             }
+
+            // clone(2)'s stack and TLS for the child.
+            if let Some(sp) = opts.stack {
+                new_ctx.set_stack_pointer(sp);
+            }
+            if let Some(tls) = opts.tls {
+                new_ctx.set_tls_base(tls as u64);
+            }
         } // Drop lock here
 
         thread
     };
 
     let new_tid = new_thread.tid;
+    new_process
+        .exit_signal
+        .store(opts.exit_signal, core::sync::atomic::Ordering::Release);
+    new_process
+        .vfork_pending
+        .store(opts.vfork, core::sync::atomic::Ordering::Release);
+
+    // The TID stores happen before the child can run. CLONE_CHILD_SETTID
+    // writes the child's memory only: a copy-on-write page is copied first
+    // (a CLONE_VM child shares the frame, so the parent sees it too, as on
+    // Linux).
+    let tid_bytes = (new_tid.0 as u32).to_ne_bytes();
+    if let Some(ptr) = opts.child_settid {
+        new_process
+            .memory_space
+            .lock()
+            .write_bytes_private(ptr as u64, &tid_bytes)?;
+    }
+    if let Some(ptr) = opts.parent_settid {
+        current_process
+            .memory_space
+            .lock()
+            .write_bytes_private(ptr as u64, &tid_bytes)?;
+    }
+
     // The calling thread's blocked mask (per thread, N-109).
     new_thread.sigmask.store(
         current_thread
@@ -283,7 +383,7 @@ pub fn fork_process() -> Result<ProcessId, KernelError> {
     }
 
     // Return child PID to parent
-    Ok(new_pid)
+    Ok((new_pid, new_tid))
 }
 
 /// Register each `MappingType::SharedRegion` mapping the child inherited

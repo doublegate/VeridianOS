@@ -7,8 +7,8 @@ use super::{validate_user_buffer, validate_user_string_ptr, SyscallError, Syscal
 #[cfg(target_arch = "x86_64")]
 use crate::arch::context::ThreadContext;
 use crate::process::{
-    create_thread, current_process, exec_process, exit::exit_process, exit_thread, fork_process,
-    get_thread_tid, set_thread_affinity, ProcessId, ProcessPriority, ThreadId,
+    create_thread, current_process, exec_process, exit::exit_process, exit_thread, get_thread_tid,
+    set_thread_affinity, ProcessId, ProcessPriority, ThreadId,
 };
 
 /// Fork the current process
@@ -16,11 +16,28 @@ use crate::process::{
 /// Creates a new process that is a copy of the current process.
 /// Returns the PID of the child in the parent, and 0 in the child.
 pub fn sys_fork() -> SyscallResult {
+    sys_fork_with(&crate::process::fork::ForkOptions::default())
+}
+
+/// vfork: a child sharing the caller's memory, the caller suspended until
+/// the child execs or exits (N-210). musl's vfork wrapper and BusyBox use
+/// it.
+pub fn sys_vfork() -> SyscallResult {
+    sys_fork_with(&crate::process::fork::ForkOptions {
+        share_vm: true,
+        vfork: true,
+        ..Default::default()
+    })
+}
+
+/// fork, vfork and clone without CLONE_THREAD: a new process as `opts`
+/// describe; the parent gets its pid.
+pub(crate) fn sys_fork_with(opts: &crate::process::fork::ForkOptions) -> SyscallResult {
     // Get current process before forking
     let current = current_process().ok_or(SyscallError::InvalidState)?;
 
-    match fork_process() {
-        Ok(child_pid) => {
+    match crate::process::fork::fork_process_with(opts) {
+        Ok((child_pid, _)) => {
             // In parent process, inherit capabilities to child
             if let Some(child_process) = crate::process::get_process(child_pid) {
                 let parent_cap_space = current.capability_space.lock();
@@ -51,6 +68,18 @@ pub fn sys_fork() -> SyscallResult {
                         current.children.lock().retain(|&p| p != child_pid);
                         return Err(SyscallError::OutOfMemory);
                     }
+                }
+
+                // vfork: the parent runs again once the child has exec'd or
+                // exited (it may be using the parent's memory and stack
+                // until then).
+                #[cfg(feature = "alloc")]
+                if opts.vfork {
+                    crate::sched::dispatch::PROCESS_EVENTS.wait_until(|| {
+                        !child_process
+                            .vfork_pending
+                            .load(core::sync::atomic::Ordering::Acquire)
+                    });
                 }
             }
 

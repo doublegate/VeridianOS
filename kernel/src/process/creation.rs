@@ -653,6 +653,10 @@ pub fn exec_process(path: &str, argv: &[&str], envp: &[&str]) -> Result<(), Kern
     // Step 6: Reset signal handlers to defaults
     process.reset_signal_handlers();
 
+    // The image is replaced: a parent waiting in vfork may run again; the
+    // memory it shared with this process is no longer this process's.
+    process.release_vfork_parent();
+
     // The actual execution resumes when we return to user mode
     // The modified thread context will cause execution at the new entry point
     Ok(())

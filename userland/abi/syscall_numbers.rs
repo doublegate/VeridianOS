@@ -18,6 +18,7 @@ pub mod sysno {
     pub const SYS_sched_yield: usize = 24;
     pub const SYS_exit_group: usize = 231;
     pub const SYS_fork: usize = 57;
+    pub const SYS_vfork: usize = 58;
     pub const SYS_execve: usize = 59;
     pub const SYS_wait4: usize = 61;
     pub const SYS_getpid: usize = 39;

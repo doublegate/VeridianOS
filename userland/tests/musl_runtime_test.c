@@ -30,6 +30,7 @@
 #include <sys/file.h>
 #include <sys/mman.h>
 #include <sys/prctl.h>
+#include <spawn.h>
 #include <sys/wait.h>
 #include <sys/socket.h>
 #include <sys/syscall.h>
@@ -689,6 +690,31 @@ static void test_creds_and_paths(void)
     report("musl_futimens", ok, why);
 }
 
+/* posix_spawn and system: musl runs the child with
+ * clone(CLONE_VM | CLONE_VFORK | SIGCHLD) on a stack of its own, which
+ * was EINVAL (N-210). An exec failure comes back through a pipe. */
+static void test_spawn(void)
+{
+    extern char **environ;
+    pid_t pid = -1;
+    char *argv[] = {"sh", "-c", "exit 4", NULL};
+    int rc = posix_spawn(&pid, "/bin/sh", NULL, NULL, argv, environ);
+    int st = 0;
+    int ok = rc == 0 && waitpid(pid, &st, 0) == pid && WIFEXITED(st) && WEXITSTATUS(st) == 4;
+    static char why[64];
+    snprintf(why, sizeof(why), "rc %d status %d", rc, st);
+    report("musl_posix_spawn", ok, why);
+
+    char *bad[] = {"nope", NULL};
+    rc = posix_spawn(&pid, "/no/such/program", NULL, NULL, bad, environ);
+    snprintf(why, sizeof(why), "rc %d", rc);
+    report("musl_posix_spawn_reports_enoent", rc == ENOENT, why);
+
+    st = system("exit 6");
+    snprintf(why, sizeof(why), "status %d", st);
+    report("musl_system", WIFEXITED(st) && WEXITSTATUS(st) == 6, why);
+}
+
 int main(void)
 {
     test_fsync();
@@ -707,6 +733,7 @@ int main(void)
     test_pipe_write_semantics();
     test_unix_socket_wakeups();
     test_creds_and_paths();
+    test_spawn();
     printf("MUSL-RUNTIME: %d/%d\n", passed, total);
     return passed == total ? 0 : 1;
 }

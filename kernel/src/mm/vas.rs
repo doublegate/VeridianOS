@@ -749,11 +749,67 @@ impl VirtualAddressSpace {
     /// caller can simply drop the child.
     #[cfg(feature = "alloc")]
     pub fn clone_from(&mut self, other: &Self) -> Result<(), KernelError> {
-        let result = self.clone_from_inner(other);
+        let result = self.clone_from_inner(other, false);
         if result.is_err() {
             self.discard_partial_clone();
         }
         result
+    }
+
+    /// The address space of a CLONE_VM child that is not a thread -- vfork,
+    /// posix_spawn (N-210): every page of `other` mapped to the same frame
+    /// with the same access, so what the child writes the parent sees (the
+    /// parent waits, under CLONE_VFORK, until the child execs or exits).
+    /// Pages `other` still shares copy-on-write with a third process are
+    /// first made its own, or the child's first write would copy them away
+    /// from the parent. Huge pages are copied as by fork. Mappings either
+    /// side adds or removes afterwards are its own.
+    #[cfg(feature = "alloc")]
+    pub fn share_from(&mut self, other: &Self) -> Result<(), KernelError> {
+        other.resolve_all_cow()?;
+        let result = self.clone_from_inner(other, true);
+        if result.is_err() {
+            self.discard_partial_clone();
+        }
+        result
+    }
+
+    /// Resolve every copy-on-write page of the user mappings now, as a
+    /// write fault on each would.
+    #[cfg(feature = "alloc")]
+    fn resolve_all_cow(&self) -> Result<(), KernelError> {
+        const KERNEL_SPACE_START: u64 = 0xFFFF_8000_0000_0000;
+        let root = self.page_table_root.load(Ordering::Acquire);
+        if root == 0 {
+            return Ok(());
+        }
+        // Collected under the mappings lock, resolved after it is dropped:
+        // resolve_cow_fault takes it.
+        let pages: Vec<u64> = {
+            // SAFETY: this address space's L4 table; only read here.
+            let mapper = unsafe { create_mapper_from_root(root) };
+            let mappings = self.mappings.lock();
+            let mut pages = Vec::new();
+            for mapping in mappings.values() {
+                if mapping.start.0 >= KERNEL_SPACE_START || mapping.flags.contains(PageFlags::HUGE)
+                {
+                    continue;
+                }
+                for i in 0..mapping.physical_frames.len() as u64 {
+                    let va = mapping.start.0 + i * 4096;
+                    if let Ok((_, flags)) = mapper.translate_page(VirtualAddress(va)) {
+                        if flags.contains(PageFlags::COW) {
+                            pages.push(va);
+                        }
+                    }
+                }
+            }
+            pages
+        };
+        for va in pages {
+            self.resolve_cow_fault(va)?;
+        }
+        Ok(())
     }
 
     /// Undo a failed [`Self::clone_from`]: free the frames it deep-copied
@@ -814,7 +870,7 @@ impl VirtualAddressSpace {
     }
 
     #[cfg(feature = "alloc")]
-    fn clone_from_inner(&mut self, other: &Self) -> Result<(), KernelError> {
+    fn clone_from_inner(&mut self, other: &Self, share_all: bool) -> Result<(), KernelError> {
         use super::page_table::{PageTable, PageTableHierarchy, PAGE_TABLE_ENTRIES};
 
         // Step 1: Allocate a new L4 page table for the child
@@ -974,8 +1030,10 @@ impl VirtualAddressSpace {
                 }
 
                 // MAP_SHARED memory stays shared and writable in both
-                // (N-140): the frames gain an owner but not copy-on-write.
-                let keep_writable = mapping.mapping_type == MappingType::Shared;
+                // (N-140), and so does everything for a CLONE_VM child
+                // (`share_from`): the frames gain an owner but not
+                // copy-on-write.
+                let keep_writable = share_all || mapping.mapping_type == MappingType::Shared;
                 let mut child_mapping = mapping.clone();
                 child_mapping.physical_frames = mapping.physical_frames.clone();
                 for &frame in &child_mapping.physical_frames {
@@ -1730,56 +1788,97 @@ impl VirtualAddressSpace {
         let writable = flags.without(PageFlags::COW) | PageFlags::WRITABLE;
 
         if super::frame_refs::is_shared(frame) {
-            let copy = FRAME_ALLOCATOR
-                .lock()
-                .allocate_frames(1, None)
-                .map_err(|_| KernelError::OutOfMemory {
-                    requested: 4096,
-                    available: 0,
-                })?;
-            // SAFETY: both frames are RAM reached through the physical map;
-            // `copy` was just allocated and is not mapped anywhere yet.
-            unsafe {
-                core::ptr::copy_nonoverlapping(
-                    super::phys_to_virt_addr(frame.as_u64() << 12) as *const u8,
-                    super::phys_to_virt_addr(copy.as_u64() << 12) as *mut u8,
-                    4096,
-                );
-            }
-            let _ = mapper.unmap_page(VirtualAddress(page));
-            if let Err(e) =
-                mapper.map_page(VirtualAddress(page), copy, writable, &mut VasFrameAllocator)
-            {
-                // Put the shared page back so the process keeps a valid
-                // (read-only) mapping, and give up the copy.
-                let _ = mapper.map_page(VirtualAddress(page), frame, flags, &mut VasFrameAllocator);
-                crate::mm::note_free_failure(
-                    FRAME_ALLOCATOR.lock().free_frames(copy, 1),
-                    copy,
-                    "vas",
-                );
-                return Err(e);
-            }
-            if let Some(slot) = mapping.physical_frames.get_mut(index) {
-                *slot = copy;
-            }
+            replace_with_copy(&mut mapper, mapping, index, page, frame, flags, writable)?;
             drop(mappings);
-            // Flush before the shared frame can lose its last owner.
-            super::tlb::flush_page(page);
-            if super::frame_refs::release(frame) {
-                // The other sharer let go meanwhile.
-                crate::mm::note_free_failure(
-                    FRAME_ALLOCATOR.lock().free_frames(frame, 1),
-                    frame,
-                    "vas",
-                );
-            }
+            release_after_copy(page, frame);
         } else {
             mapper.update_page_flags(VirtualAddress(page), writable)?;
             drop(mappings);
             super::tlb::flush_page(page);
         }
         Ok(true)
+    }
+
+    /// Make the page at `vaddr` this address space's own and return its
+    /// frame: a frame still shared with another address space -- after a
+    /// fork, copy-on-write or read-only -- is replaced by a private copy
+    /// with the same access (a copy-on-write page becomes plainly
+    /// writable). MAP_SHARED and shared-region pages stay shared: writes
+    /// through them are meant to reach every sharer. For writes the kernel
+    /// makes into one address space only (ptrace POKE, clone's
+    /// CHILD_SETTID), which must not reach the other sharers.
+    #[cfg(feature = "alloc")]
+    pub fn private_frame(&self, vaddr: u64) -> Result<FrameNumber, KernelError> {
+        let page = vaddr & !0xFFF;
+        let root = self.page_table_root.load(Ordering::Acquire);
+        let bad = KernelError::InvalidAddress {
+            addr: vaddr as usize,
+        };
+        if root == 0 {
+            return Err(bad);
+        }
+        // SAFETY: as in resolve_cow_fault: this address space's L4 table,
+        // changed only under the mappings lock taken below.
+        let mut mapper = unsafe { create_mapper_from_root(root) };
+        let (frame, flags) = mapper
+            .translate_page(VirtualAddress(page))
+            .map_err(|_| bad)?;
+        if !super::frame_refs::is_shared(frame) {
+            return Ok(frame);
+        }
+        let mut mappings = self.mappings.lock();
+        let mapping = mappings
+            .values_mut()
+            .find(|m| m.contains(VirtualAddress(page)))
+            .ok_or(KernelError::InvalidAddress {
+                addr: vaddr as usize,
+            })?;
+        if matches!(
+            mapping.mapping_type,
+            MappingType::Shared | MappingType::SharedRegion
+        ) {
+            return Ok(frame);
+        }
+        let index = ((page - mapping.start.0) / 4096) as usize;
+        let private = if flags.contains(PageFlags::COW) {
+            flags.without(PageFlags::COW) | PageFlags::WRITABLE
+        } else {
+            flags
+        };
+        let copy = replace_with_copy(&mut mapper, mapping, index, page, frame, flags, private)?;
+        drop(mappings);
+        release_after_copy(page, frame);
+        Ok(copy)
+    }
+
+    /// Write `data` at `vaddr` into this address space only (see
+    /// [`Self::private_frame`]), whatever the pages' protection, as ptrace
+    /// may. Every page must be mapped (InvalidAddress otherwise).
+    #[cfg(feature = "alloc")]
+    pub fn write_bytes_private(&self, vaddr: u64, data: &[u8]) -> Result<(), KernelError> {
+        let mut done = 0usize;
+        while done < data.len() {
+            let at = vaddr
+                .checked_add(done as u64)
+                .ok_or(KernelError::InvalidAddress {
+                    addr: vaddr as usize,
+                })?;
+            let offset = (at & 0xFFF) as usize;
+            let n = (4096 - offset).min(data.len() - done);
+            let frame = self.private_frame(at)?;
+            // SAFETY: `frame` is RAM this address space alone maps (just
+            // made private), reached through the physical map; `offset + n`
+            // stays within the 4 KiB page.
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    data[done..].as_ptr(),
+                    (super::phys_to_virt_addr(frame.as_u64() << 12) as *mut u8).add(offset),
+                    n,
+                );
+            }
+            done += n;
+        }
+        Ok(())
     }
 
     /// Get a reference to the underlying mappings BTreeMap.
@@ -2651,6 +2750,72 @@ pub fn map_physical_region_user(
         .map_err(|_| crate::syscall::SyscallError::OutOfMemory)?;
 
     Ok(vaddr.as_usize())
+}
+
+/// Replace the shared `frame` mapped at `page` (slot `index` of `mapping`)
+/// with a private copy mapped with `new_flags`; on failure the shared page
+/// is put back with `old_flags`. The caller drops the mappings lock and
+/// then calls [`release_after_copy`].
+#[cfg(feature = "alloc")]
+fn replace_with_copy(
+    mapper: &mut PageMapper,
+    mapping: &mut VirtualMapping,
+    index: usize,
+    page: u64,
+    frame: FrameNumber,
+    old_flags: PageFlags,
+    new_flags: PageFlags,
+) -> Result<FrameNumber, KernelError> {
+    let copy = FRAME_ALLOCATOR
+        .lock()
+        .allocate_frames(1, None)
+        .map_err(|_| KernelError::OutOfMemory {
+            requested: 4096,
+            available: 0,
+        })?;
+    // SAFETY: both frames are RAM reached through the physical map; `copy`
+    // was just allocated and is not mapped anywhere yet.
+    unsafe {
+        core::ptr::copy_nonoverlapping(
+            super::phys_to_virt_addr(frame.as_u64() << 12) as *const u8,
+            super::phys_to_virt_addr(copy.as_u64() << 12) as *mut u8,
+            4096,
+        );
+    }
+    let _ = mapper.unmap_page(VirtualAddress(page));
+    if let Err(e) = mapper.map_page(
+        VirtualAddress(page),
+        copy,
+        new_flags,
+        &mut VasFrameAllocator,
+    ) {
+        // Put the shared page back so the process keeps a valid mapping,
+        // and give up the copy.
+        let _ = mapper.map_page(
+            VirtualAddress(page),
+            frame,
+            old_flags,
+            &mut VasFrameAllocator,
+        );
+        crate::mm::note_free_failure(FRAME_ALLOCATOR.lock().free_frames(copy, 1), copy, "vas");
+        return Err(e);
+    }
+    if let Some(slot) = mapping.physical_frames.get_mut(index) {
+        *slot = copy;
+    }
+    Ok(copy)
+}
+
+/// After [`replace_with_copy`]: flush the old translation, then give up
+/// this address space's share of `frame` (freeing it if the other sharer
+/// let go meanwhile).
+#[cfg(feature = "alloc")]
+fn release_after_copy(page: u64, frame: FrameNumber) {
+    // Flush before the shared frame can lose its last owner.
+    super::tlb::flush_page(page);
+    if super::frame_refs::release(frame) {
+        crate::mm::note_free_failure(FRAME_ALLOCATOR.lock().free_frames(frame, 1), frame, "vas");
+    }
 }
 
 #[cfg(test)]

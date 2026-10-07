@@ -24,6 +24,7 @@
 #define SYS_sched_yield                  24
 #define SYS_exit_group                   231
 #define SYS_fork                         57
+#define SYS_vfork                        58
 #define SYS_execve                       59
 #define SYS_wait4                        61
 #define SYS_getpid                       39

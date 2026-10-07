@@ -35,6 +35,7 @@ IpcMapMemory            private 1031
 sched_yield
 exit_group
 fork
+vfork
 execve
 wait4
 getpid

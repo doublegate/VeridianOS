@@ -29,12 +29,77 @@ const CLONE_CHILD_CLEARTID: usize = 0x0020_0000;
 /// Accepted but ignored for compatibility.
 const CLONE_DETACHED: usize = 0x0040_0000;
 const CLONE_CHILD_SETTID: usize = 0x0100_0000;
+const CLONE_VFORK: usize = 0x0000_4000;
+/// clone's low byte: the signal the parent gets when a new process exits.
+const CSIGNAL: usize = 0xFF;
 
 /// Upper bound of the user-space address range.  Any stack pointer must be
 /// strictly below this address.  The value matches the canonical user-space
 /// limit on x86_64; AArch64 and RISC-V use the same logical limit via
 /// `validate_user_ptr`.
 use crate::mm::user_layout::USER_SPACE_END;
+
+/// clone without CLONE_THREAD: a new process, as fork or vfork (N-210).
+/// musl's and glibc's posix_spawn -- and so system and popen -- call
+/// clone(CLONE_VM | CLONE_VFORK | SIGCHLD) with a stack of their own; it
+/// was EINVAL. CLONE_VM shares the parent's memory page by page
+/// (`VirtualAddressSpace::share_from`). CLONE_FILES and CLONE_SIGHAND
+/// across processes (a shared fd or handler table) are not supported
+/// (EINVAL).
+fn process_clone(
+    flags: usize,
+    newsp: usize,
+    parent_tid_ptr: usize,
+    child_tid_ptr: usize,
+    tls: usize,
+) -> Result<usize, SyscallError> {
+    let supported = CSIGNAL
+        | CLONE_VM
+        | CLONE_FS
+        | CLONE_VFORK
+        | CLONE_SYSVSEM
+        | CLONE_SETTLS
+        | CLONE_PARENT_SETTID
+        | CLONE_CHILD_SETTID
+        | CLONE_CHILD_CLEARTID
+        | CLONE_DETACHED;
+    if flags & !supported != 0 {
+        return Err(SyscallError::InvalidArgument);
+    }
+    let exit_signal = flags & CSIGNAL;
+    if exit_signal > crate::process::signals::NSIG {
+        return Err(SyscallError::InvalidArgument);
+    }
+    #[cfg(target_arch = "x86_64")]
+    if flags & CLONE_SETTLS != 0 && !crate::arch::x86_64::trap::is_user_address(tls as u64) {
+        return Err(SyscallError::InvalidArgument);
+    }
+    // 0 keeps the caller's stack (fork); otherwise it must be user memory.
+    if newsp > USER_SPACE_END {
+        return Err(SyscallError::InvalidPointer);
+    }
+    for (flag, ptr) in [
+        (CLONE_PARENT_SETTID, parent_tid_ptr),
+        (CLONE_CHILD_SETTID, child_tid_ptr),
+        (CLONE_CHILD_CLEARTID, child_tid_ptr),
+    ] {
+        if flags & flag != 0 {
+            validate_user_ptr(ptr as *const u32, core::mem::size_of::<u32>())?;
+        }
+    }
+    let on = |flag: usize| flags & flag != 0;
+    super::process::sys_fork_with(&process::fork::ForkOptions {
+        share_vm: on(CLONE_VM),
+        share_fs: on(CLONE_FS),
+        vfork: on(CLONE_VFORK),
+        stack: (newsp != 0).then_some(newsp),
+        tls: on(CLONE_SETTLS).then_some(tls),
+        exit_signal: exit_signal as u32,
+        parent_settid: on(CLONE_PARENT_SETTID).then_some(parent_tid_ptr),
+        child_settid: on(CLONE_CHILD_SETTID).then_some(child_tid_ptr),
+        child_cleartid: on(CLONE_CHILD_CLEARTID).then_some(child_tid_ptr),
+    })
+}
 
 /// Create a new thread sharing the current process's address space and
 /// resources, following the Linux `clone(2)` semantics for thread creation.
@@ -77,6 +142,9 @@ pub fn sys_thread_clone(
     child_tid_ptr: usize,
     tls: usize,
 ) -> Result<usize, SyscallError> {
+    if flags & CLONE_THREAD == 0 {
+        return process_clone(flags, newsp, parent_tid_ptr, child_tid_ptr, tls);
+    }
     // Validate flags
     let required = CLONE_VM | CLONE_FILES | CLONE_SIGHAND | CLONE_THREAD;
     if flags & required != required {

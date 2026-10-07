@@ -121,6 +121,12 @@ fn ptrace_peek(target_pid: process::ProcessId, addr: usize) -> Result<usize, Sys
 }
 
 /// Write a usize-sized word to the target process's virtual address space.
+///
+/// Into the tracee only: a page it still shares with another process after
+/// fork (copy-on-write, or read-only like its code) is copied first. The
+/// word was written into the shared frame itself, so a breakpoint set in a
+/// child also landed in its parent. Read-only pages may be written, as
+/// ptrace allows (breakpoints in code).
 fn ptrace_poke(
     target_pid: process::ProcessId,
     addr: usize,
@@ -128,34 +134,18 @@ fn ptrace_poke(
 ) -> Result<(), SyscallError> {
     let target = process::find_process(target_pid).ok_or(SyscallError::ProcessNotFound)?;
     let memory_space = target.memory_space.lock();
-
-    let mapping = memory_space
-        .find_mapping(VirtualAddress(addr as u64))
-        .ok_or(SyscallError::InvalidArgument)?;
-
-    let page_offset_in_mapping = (addr as u64 - mapping.start.0) as usize;
-    let page_index = page_offset_in_mapping / 4096;
-    let offset_in_page = page_offset_in_mapping % 4096;
-
-    if page_index >= mapping.physical_frames.len() {
-        return Err(SyscallError::InvalidArgument);
+    #[cfg(feature = "alloc")]
+    {
+        memory_space
+            .write_bytes_private(addr as u64, &value.to_ne_bytes())
+            // EIO for an unmapped address, as Linux's ptrace_access_vm.
+            .map_err(|_| SyscallError::IoError)
     }
-
-    let frame = mapping.physical_frames[page_index];
-    let phys_addr = frame.as_u64() as usize * 4096 + offset_in_page;
-    let kernel_vaddr = phys_to_kernel_vaddr(phys_addr);
-
-    if !kernel_vaddr.is_multiple_of(core::mem::align_of::<usize>()) {
-        return Err(SyscallError::InvalidArgument);
+    #[cfg(not(feature = "alloc"))]
+    {
+        let _ = (memory_space, addr, value);
+        Err(SyscallError::InvalidState)
     }
-
-    // SAFETY: Same as ptrace_peek, but writing. The mapping must be writable
-    // for this to be meaningful, but ptrace explicitly allows writing to
-    // read-only pages (e.g., setting breakpoints in code sections).
-    unsafe {
-        *(kernel_vaddr as *mut usize) = value;
-    }
-    Ok(())
 }
 
 /// Convert a physical address to a kernel virtual address.

@@ -130,6 +130,14 @@ pub struct Process {
     /// to user mode or wakeup, and the last one tears the process down.
     pub kill_pending: AtomicU32,
 
+    /// The signal the parent gets when this process exits: SIGCHLD, or
+    /// clone's low byte (0: none) (N-210).
+    pub exit_signal: AtomicU32,
+
+    /// A CLONE_VFORK child whose parent waits until it execs or exits;
+    /// cleared (and PROCESS_EVENTS woken) by either (N-210).
+    pub vfork_pending: core::sync::atomic::AtomicBool,
+
     /// Job control (D3): the signal that stopped the process, 0 while it
     /// runs. Its threads park on their way back to user mode until SIGCONT
     /// or SIGKILL.
@@ -291,6 +299,8 @@ impl Process {
             term_signal: AtomicU32::new(0),
             dispatched: core::sync::atomic::AtomicBool::new(false),
             kill_pending: AtomicU32::new(0),
+            exit_signal: AtomicU32::new(super::signals::SIGCHLD as u32),
+            vfork_pending: core::sync::atomic::AtomicBool::new(false),
             stop_signal: AtomicU32::new(0),
             cont_seq: AtomicU32::new(0),
             job_report: AtomicU32::new(0),
@@ -500,6 +510,14 @@ impl Process {
             return None;
         }
         Some(self.signal_handlers.lock()[signum])
+    }
+
+    /// A CLONE_VFORK child has exec'd or exited: its parent may resume.
+    pub fn release_vfork_parent(&self) {
+        if self.vfork_pending.swap(false, Ordering::AcqRel) {
+            #[cfg(feature = "alloc")]
+            crate::sched::dispatch::PROCESS_EVENTS.wake_all();
+        }
     }
 
     /// Send a signal to this process

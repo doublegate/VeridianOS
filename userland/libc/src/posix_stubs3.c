@@ -401,12 +401,7 @@ int pipe2(int pipefd[2], int flags)
 #include <sys/ioctl.h>
 #include <stdarg.h>
 
-/* vfork() -- equivalent to fork() on VeridianOS */
-pid_t vfork(void)
-{
-    extern pid_t fork(void);
-    return fork();
-}
+/* vfork() is in vfork_x86_64.S. */
 
 /* execvp() -- already defined in unistd.c, not duplicated here */
 #include <unistd.h>

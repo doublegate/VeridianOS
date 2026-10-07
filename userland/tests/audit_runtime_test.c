@@ -2066,6 +2066,82 @@ static void test_realtime_signals(void)
     report("realtime_signals_queue", fails == 0, why);
 }
 
+/* --- vfork, and clone without CLONE_THREAD (N-210): vfork was fork,
+ * and every non-thread clone EINVAL, so posix_spawn, system and popen
+ * failed. ------------------------------------------------------------- */
+#include <veridian/syscall.h>
+
+static volatile int vfork_mark;
+static volatile int settid_slot;
+
+static int exit_code_of(pid_t pid)
+{
+    int st = 0;
+    if (waitpid(pid, &st, 0) != pid || !WIFEXITED(st))
+        return -1;
+    return WEXITSTATUS(st);
+}
+
+static void test_vfork_and_clone(void)
+{
+    /* Live across vfork, which returns twice: volatile. */
+    volatile int fails = 0;
+    vfork_mark = 0;
+    pid_t pid = vfork();
+    if (pid == 0) {
+        vfork_mark = 42;                        /* the parent's memory */
+        _exit(7);
+    }
+    if (vfork_mark != 42)
+        fails |= 1;                             /* shared, and the parent waited */
+    if (exit_code_of(pid) != 7)
+        fails |= 2;
+
+    pid = vfork();
+    if (pid == 0) {
+        execl("/bin/sh", "sh", "-c", "exit 3", (char *)0);
+        _exit(127);
+    }
+    if (exit_code_of(pid) != 3)
+        fails |= 4;
+
+    /* clone(SIGCHLD) is fork. */
+    long r = veridian_syscall5(SYS_clone, SIGCHLD, 0, 0, 0, 0);
+    if (r == 0)
+        _exit(5);
+    if (r < 0 || exit_code_of((pid_t)r) != 5)
+        fails |= 8;
+
+    /* CLONE_CHILD_SETTID writes the child's copy only;
+     * CLONE_PARENT_SETTID the parent's. */
+    settid_slot = 0;
+    r = veridian_syscall5(SYS_clone, CLONE_CHILD_SETTID | SIGCHLD, 0, 0, &settid_slot, 0);
+    if (r == 0)
+        _exit(settid_slot != 0 ? 0 : 1);
+    if (r < 0 || exit_code_of((pid_t)r) != 0 || settid_slot != 0)
+        fails |= 16;
+    r = veridian_syscall5(SYS_clone, CLONE_PARENT_SETTID | SIGCHLD, 0, &settid_slot, 0, 0);
+    if (r == 0)
+        _exit(0);
+    if (r < 0 || exit_code_of((pid_t)r) != 0 || settid_slot == 0)
+        fails |= 32;
+
+    /* A file table shared between processes is not supported. */
+    if (veridian_syscall5(SYS_clone, CLONE_FILES | SIGCHLD, 0, 0, 0, 0) != -EINVAL)
+        fails |= 64;
+
+    /* What posix_spawn, system and popen rest on. */
+    FILE *p = popen("echo spawned", "r");
+    char line[32] = {0};
+    if (!p || !fgets(line, sizeof(line), p) || strcmp(line, "spawned\n") != 0)
+        fails |= 128;
+    if (p)
+        pclose(p);
+    static char why[64];
+    snprintf(why, sizeof(why), "bitmask of failures %d", fails);
+    report("vfork_and_process_clone", fails == 0, why);
+}
+
 int main(int argc, char **argv)
 {
     setvbuf(stdout, NULL, _IONBF, 0);
@@ -2115,6 +2191,7 @@ int main(int argc, char **argv)
     test_exec_environment();
     test_memfd();
     test_realtime_signals();
+    test_vfork_and_clone();
     printf("AUDIT-RUNTIME: %d/%d\n", passed, total);
     return passed == total ? 0 : 1;
 }
