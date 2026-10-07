@@ -1447,16 +1447,9 @@ fn handle_syscall(
             // field by field through the fault-tolerant reader rather than
             // borrowed from user memory (review of the v0.26.0 stack).
             let event = if event_ptr != 0 {
-                let mut raw = [0u8; 12];
+                let mut raw = [0u8; EPOLL_EVENT_BYTES];
                 userspace::read_user_bytes(event_ptr, &mut raw)?;
-                let mut events = [0u8; 4];
-                let mut data = [0u8; 8];
-                events.copy_from_slice(&raw[..4]);
-                data.copy_from_slice(&raw[4..]);
-                Some(crate::net::epoll::EpollEvent {
-                    events: u32::from_ne_bytes(events),
-                    data: u64::from_ne_bytes(data),
-                })
+                Some(epoll_event_from_bytes(&raw))
             } else {
                 None
             };
@@ -1470,13 +1463,7 @@ fn handle_syscall(
             let max_events = arg3;
             let timeout_ms = arg4 as i32;
             let epoll_id = resolve_epoll_id(epoll_fd)?;
-            // Linux caps maxevents at INT_MAX / sizeof(struct epoll_event);
-            // the byte count must not wrap (W-16).
-            let event_size = core::mem::size_of::<crate::net::epoll::EpollEvent>();
-            if max_events == 0 || max_events > i32::MAX as usize / event_size {
-                return Err(SyscallError::InvalidArgument);
-            }
-            validate_user_buffer(events_ptr, max_events * event_size)?;
+            validate_user_buffer(events_ptr, epoll_events_buffer_len(max_events)?)?;
             // Events are gathered in a kernel array (at most 1024 per call,
             // as a short count is always allowed) and copied out packed,
             // through the fault-tolerant writer (N-43).
@@ -1486,13 +1473,7 @@ fn handle_syscall(
             ];
             let n = crate::net::epoll::epoll_wait(epoll_id, &mut events, timeout_ms)
                 .map_err(|_| SyscallError::InvalidArgument)?;
-            let mut out = alloc::vec::Vec::with_capacity(n * event_size);
-            for ev in &events[..n] {
-                let (flags, data) = (ev.events, ev.data);
-                out.extend_from_slice(&flags.to_ne_bytes());
-                out.extend_from_slice(&data.to_ne_bytes());
-            }
-            userspace::write_user_bytes(events_ptr, &out)?;
+            userspace::write_user_bytes(events_ptr, &epoll_events_to_bytes(&events[..n]))?;
             Ok(n)
         }
         // Process groups / sessions (Phase 6.5) -- delegate to existing
@@ -1808,6 +1789,42 @@ fn resolve_epoll_id(fd: usize) -> Result<u32, SyscallError> {
     Ok(epoll_node.epoll_id())
 }
 
+/// `sizeof(struct epoll_event)`: packed `u32 events` + `u64 data`.
+const EPOLL_EVENT_BYTES: usize = core::mem::size_of::<crate::net::epoll::EpollEvent>();
+
+/// Decode a user `struct epoll_event`.
+fn epoll_event_from_bytes(raw: &[u8; EPOLL_EVENT_BYTES]) -> crate::net::epoll::EpollEvent {
+    let mut events = [0u8; 4];
+    let mut data = [0u8; 8];
+    events.copy_from_slice(&raw[..4]);
+    data.copy_from_slice(&raw[4..]);
+    crate::net::epoll::EpollEvent {
+        events: u32::from_ne_bytes(events),
+        data: u64::from_ne_bytes(data),
+    }
+}
+
+/// Bytes of the user buffer epoll_wait may fill for `max_events` events.
+/// Linux caps maxevents at INT_MAX / sizeof(struct epoll_event); the byte
+/// count must not wrap (W-16). Zero is EINVAL as well.
+fn epoll_events_buffer_len(max_events: usize) -> Result<usize, SyscallError> {
+    if max_events == 0 || max_events > i32::MAX as usize / EPOLL_EVENT_BYTES {
+        return Err(SyscallError::InvalidArgument);
+    }
+    Ok(max_events * EPOLL_EVENT_BYTES)
+}
+
+/// `events` as the packed user array epoll_wait returns.
+fn epoll_events_to_bytes(events: &[crate::net::epoll::EpollEvent]) -> alloc::vec::Vec<u8> {
+    let mut out = alloc::vec::Vec::with_capacity(events.len() * EPOLL_EVENT_BYTES);
+    for ev in events {
+        let (flags, data) = (ev.events, ev.data);
+        out.extend_from_slice(&flags.to_ne_bytes());
+        out.extend_from_slice(&data.to_ne_bytes());
+    }
+    out
+}
+
 /// getrandom syscall -- fills user buffer with cryptographically secure random
 /// bytes.
 ///
@@ -1868,9 +1885,42 @@ fn sys_getdents64(fd: usize, buf_ptr: usize, buf_size: usize) -> SyscallResult {
         return Ok(0);
     }
 
+    // Records are built in a kernel buffer and copied out once (N-43).
+    let (out, idx) = build_dirents64(&entries, pos, buf_size);
+
+    userspace::write_user_bytes(buf_ptr, &out)?;
+
+    // Advance file position
+    if idx > pos {
+        let _ = file_desc.seek(crate::fs::SeekFrom::Start(idx));
+    }
+
+    Ok(out.len())
+}
+
+/// `d_type` of a `linux_dirent64` for a node of type `node_type`.
+fn dirent64_type(node_type: crate::fs::NodeType) -> u8 {
+    match node_type {
+        crate::fs::NodeType::File => 8,        // DT_REG
+        crate::fs::NodeType::Directory => 4,   // DT_DIR
+        crate::fs::NodeType::CharDevice => 2,  // DT_CHR
+        crate::fs::NodeType::BlockDevice => 6, // DT_BLK
+        crate::fs::NodeType::Symlink => 10,    // DT_LNK
+        crate::fs::NodeType::Pipe => 1,        // DT_FIFO
+        crate::fs::NodeType::Socket => 12,     // DT_SOCK
+    }
+}
+
+/// Build `linux_dirent64` records for `entries[pos..]`, as many as fit in
+/// `buf_size` bytes. Returns the records and the index of the first entry
+/// not included.
+fn build_dirents64(
+    entries: &[crate::fs::DirEntry],
+    pos: usize,
+    buf_size: usize,
+) -> (alloc::vec::Vec<u8>, usize) {
     let mut offset = 0usize;
     let mut idx = pos;
-    // Records are built in a kernel buffer and copied out once (N-43).
     let mut out: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
 
     while idx < entries.len() {
@@ -1885,16 +1935,6 @@ fn sys_getdents64(fd: usize, buf_ptr: usize, buf_size: usize) -> SyscallResult {
             break;
         }
 
-        let d_type: u8 = match entry.node_type {
-            crate::fs::NodeType::File => 8,        // DT_REG
-            crate::fs::NodeType::Directory => 4,   // DT_DIR
-            crate::fs::NodeType::CharDevice => 2,  // DT_CHR
-            crate::fs::NodeType::BlockDevice => 6, // DT_BLK
-            crate::fs::NodeType::Symlink => 10,    // DT_LNK
-            crate::fs::NodeType::Pipe => 1,        // DT_FIFO
-            crate::fs::NodeType::Socket => 12,     // DT_SOCK
-        };
-
         // d_ino (use inode from entry, default 1)
         let ino = if entry.inode == 0 {
             (idx + 1) as u64
@@ -1907,7 +1947,7 @@ fn sys_getdents64(fd: usize, buf_ptr: usize, buf_size: usize) -> SyscallResult {
         // d_reclen
         out.extend_from_slice(&(reclen as u16).to_ne_bytes());
         // d_type
-        out.push(d_type);
+        out.push(dirent64_type(entry.node_type));
         // d_name (NUL-terminated), then zero padding to reclen
         out.extend_from_slice(name_bytes);
         out.resize(offset + reclen, 0);
@@ -1915,15 +1955,7 @@ fn sys_getdents64(fd: usize, buf_ptr: usize, buf_size: usize) -> SyscallResult {
         offset += reclen;
         idx += 1;
     }
-
-    userspace::write_user_bytes(buf_ptr, &out)?;
-
-    // Advance file position
-    if idx > pos {
-        let _ = file_desc.seek(crate::fs::SeekFrom::Start(idx));
-    }
-
-    Ok(offset)
+    (out, idx)
 }
 
 /// prlimit64 syscall -- get/set resource limits for a process.
@@ -2573,33 +2605,64 @@ fn message_from_user(
     ptr: usize,
     len: usize,
 ) -> Result<Message, SyscallError> {
-    use crate::ipc::message::{BufferedMessage, MAX_BUFFERED_PAYLOAD};
+    use crate::ipc::message::BufferedMessage;
 
-    const SMALL: usize = core::mem::size_of::<SmallMessage>();
-    if len == 0 {
-        return Err(SyscallError::InvalidArgument);
-    }
-    if len <= SMALL {
-        let mut bytes = [0u8; SMALL];
-        userspace::read_user_bytes(ptr, &mut bytes[..len])?;
-        // SAFETY: SmallMessage is repr(C) plain data (u64, u32, u32,
-        // [u64; 4]) without padding, so every byte pattern is a valid value;
-        // read_unaligned imposes no alignment on the stack buffer.
-        let mut msg: SmallMessage =
-            unsafe { core::ptr::read_unaligned(bytes.as_ptr() as *const SmallMessage) };
-        if let Some(cap) = capability {
-            msg.capability = cap;
+    match message_tier(len)? {
+        MessageTier::Small => {
+            let mut bytes = [0u8; SMALL_MESSAGE_BYTES];
+            userspace::read_user_bytes(ptr, &mut bytes[..len])?;
+            Ok(Message::Small(small_message_from_bytes(&bytes, capability)))
         }
-        return Ok(Message::Small(msg));
+        MessageTier::Buffered => {
+            let mut payload = alloc::vec![0u8; len];
+            userspace::read_user_bytes(ptr, &mut payload)?;
+            BufferedMessage::new(capability.unwrap_or(0), 0, payload)
+                .map(Message::Buffered)
+                .ok_or(SyscallError::InvalidArgument)
+        }
     }
-    if len > MAX_BUFFERED_PAYLOAD {
-        return Err(SyscallError::InvalidArgument);
+}
+
+/// `sizeof(SmallMessage)`: the largest message passed by value.
+const SMALL_MESSAGE_BYTES: usize = core::mem::size_of::<SmallMessage>();
+
+/// How `message_from_user` carries a message of a given length.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MessageTier {
+    /// By value, zero-padded to `SMALL_MESSAGE_BYTES`.
+    Small,
+    /// Copied into a kernel buffer.
+    Buffered,
+}
+
+/// The tier for a `len`-byte message: empty and over-`MAX_BUFFERED_PAYLOAD`
+/// messages are EINVAL (the latter need a shared region).
+fn message_tier(len: usize) -> Result<MessageTier, SyscallError> {
+    use crate::ipc::message::MAX_BUFFERED_PAYLOAD;
+
+    match len {
+        0 => Err(SyscallError::InvalidArgument),
+        1..=SMALL_MESSAGE_BYTES => Ok(MessageTier::Small),
+        _ if len > MAX_BUFFERED_PAYLOAD => Err(SyscallError::InvalidArgument),
+        _ => Ok(MessageTier::Buffered),
     }
-    let mut payload = alloc::vec![0u8; len];
-    userspace::read_user_bytes(ptr, &mut payload)?;
-    BufferedMessage::new(capability.unwrap_or(0), 0, payload)
-        .map(Message::Buffered)
-        .ok_or(SyscallError::InvalidArgument)
+}
+
+/// A small message from its bytes; `capability`, when given, replaces the
+/// capability the sender wrote.
+fn small_message_from_bytes(
+    bytes: &[u8; SMALL_MESSAGE_BYTES],
+    capability: Option<u64>,
+) -> SmallMessage {
+    // SAFETY: SmallMessage is repr(C) plain data (u64, u32, u32, [u64; 4])
+    // without padding, so every byte pattern is a valid value;
+    // read_unaligned imposes no alignment on the byte array.
+    let mut msg: SmallMessage =
+        unsafe { core::ptr::read_unaligned(bytes.as_ptr() as *const SmallMessage) };
+    if let Some(cap) = capability {
+        msg.capability = cap;
+    }
+    msg
 }
 
 /// Bytes of a `repr(C)` plain-data value.
@@ -3413,10 +3476,15 @@ pub(super) fn socket_err(e: crate::error::KernelError) -> SyscallError {
 fn read_inet_addr(addr_ptr: usize) -> Result<crate::net::SocketAddr, SyscallError> {
     let mut raw = [0u8; 6];
     userspace::read_user_bytes(addr_ptr, &mut raw)?;
-    Ok(crate::net::SocketAddr::v4(
+    Ok(inet_addr_from_bytes(&raw))
+}
+
+/// Decode an INET address passed as (4 address bytes, big-endian port).
+fn inet_addr_from_bytes(raw: &[u8; 6]) -> crate::net::SocketAddr {
+    crate::net::SocketAddr::v4(
         crate::net::Ipv4Address([raw[0], raw[1], raw[2], raw[3]]),
         u16::from_be_bytes([raw[4], raw[5]]),
-    ))
+    )
 }
 
 /// Convert user-space socket type to UnixSocketType.
@@ -4140,6 +4208,251 @@ mod tests {
         assert_eq!(scm_fd_index(-1), Err(SyscallError::BadFileDescriptor));
         assert_eq!(scm_fd_index(i32::MIN), Err(SyscallError::BadFileDescriptor));
         assert_eq!(scm_fd_index(7), Ok(7));
+    }
+
+    // --- IPC message size tiers (IPC-ARCH-02) ---
+
+    #[test]
+    fn message_tier_boundaries() {
+        use crate::ipc::message::MAX_BUFFERED_PAYLOAD;
+        assert_eq!(SMALL_MESSAGE_BYTES, 48);
+        assert_eq!(message_tier(0), Err(SyscallError::InvalidArgument));
+        assert_eq!(message_tier(1), Ok(MessageTier::Small));
+        assert_eq!(message_tier(SMALL_MESSAGE_BYTES), Ok(MessageTier::Small));
+        assert_eq!(
+            message_tier(SMALL_MESSAGE_BYTES + 1),
+            Ok(MessageTier::Buffered)
+        );
+        assert_eq!(
+            message_tier(MAX_BUFFERED_PAYLOAD),
+            Ok(MessageTier::Buffered)
+        );
+        assert_eq!(
+            message_tier(MAX_BUFFERED_PAYLOAD + 1),
+            Err(SyscallError::InvalidArgument)
+        );
+        assert_eq!(message_tier(usize::MAX), Err(SyscallError::InvalidArgument));
+    }
+
+    fn small_bytes(msg: &SmallMessage) -> [u8; SMALL_MESSAGE_BYTES] {
+        let mut b = [0u8; SMALL_MESSAGE_BYTES];
+        b.copy_from_slice(pod_bytes(msg));
+        b
+    }
+
+    #[test]
+    fn small_message_capability_is_replaced_only_when_given() {
+        let sent = SmallMessage::new(0x1111, 7)
+            .with_flags(3)
+            .with_data(0, 0xAA)
+            .with_data(3, 0xDD);
+        let bytes = small_bytes(&sent);
+        assert_eq!(small_message_from_bytes(&bytes, None), sent);
+        let got = small_message_from_bytes(&bytes, Some(0x9999));
+        assert_eq!(got.capability, 0x9999);
+        assert_eq!((got.opcode, got.flags, got.data), (7, 3, sent.data));
+    }
+
+    #[test]
+    fn message_from_user_picks_the_tier_and_pads_short_messages() {
+        // A short small message is zero-padded.
+        let raw = 0x0102_0304_0506_0708u64.to_ne_bytes();
+        match message_from_user(Some(5), raw.as_ptr() as usize, raw.len()) {
+            Ok(Message::Small(m)) => {
+                assert_eq!(m.capability, 5, "the validated capability wins");
+                assert_eq!((m.opcode, m.flags, m.data), (0, 0, [0; 4]));
+            }
+            _ => panic!("expected a small message"),
+        }
+        let full = small_bytes(&SmallMessage::new(1, 2).with_data(1, 9));
+        match message_from_user(None, full.as_ptr() as usize, full.len()) {
+            Ok(Message::Small(m)) => assert_eq!(m, SmallMessage::new(1, 2).with_data(1, 9)),
+            _ => panic!("expected a small message"),
+        }
+        // One byte more is buffered, with the capability in the header.
+        let payload = [0x5Au8; SMALL_MESSAGE_BYTES + 1];
+        match message_from_user(Some(77), payload.as_ptr() as usize, payload.len()) {
+            Ok(Message::Buffered(m)) => {
+                assert_eq!(m.payload, payload);
+                assert_eq!(m.header.capability, 77);
+                assert_eq!(m.header.total_size, payload.len() as u64);
+            }
+            _ => panic!("expected a buffered message"),
+        }
+        assert!(matches!(
+            message_from_user(None, payload.as_ptr() as usize, 0),
+            Err(SyscallError::InvalidArgument)
+        ));
+    }
+
+    #[test]
+    fn message_to_user_copies_and_truncates() {
+        use crate::ipc::message::{BufferedMessage, MessageHeader};
+        const HEADER: usize = core::mem::size_of::<MessageHeader>();
+
+        let small = SmallMessage::new(4, 5).with_data(2, 6);
+        let mut out = [0u8; SMALL_MESSAGE_BYTES + 4];
+        assert_eq!(
+            message_to_user(&Message::Small(small), out.as_mut_ptr() as usize, out.len()),
+            Ok(SMALL_MESSAGE_BYTES)
+        );
+        assert_eq!(&out[..SMALL_MESSAGE_BYTES], &small_bytes(&small)[..]);
+        // A small message never goes into a shorter buffer.
+        assert_eq!(
+            message_to_user(&Message::Small(small), out.as_mut_ptr() as usize, 47),
+            Err(SyscallError::InvalidArgument)
+        );
+
+        let payload: alloc::vec::Vec<u8> = (0..100).collect();
+        let msg = Message::Buffered(BufferedMessage::new(8, 0, payload.clone()).unwrap());
+        // Room for the header and 10 payload bytes: the full length is
+        // reported so the receiver sees what it missed.
+        let mut out = [0xEEu8; HEADER + 12];
+        assert_eq!(
+            message_to_user(&msg, out.as_mut_ptr() as usize, HEADER + 10),
+            Ok(HEADER + 100)
+        );
+        assert_eq!(&out[HEADER..HEADER + 10], &payload[..10]);
+        assert_eq!(&out[HEADER + 10..], &[0xEE, 0xEE]);
+        assert_eq!(u64::from_ne_bytes(out[..8].try_into().unwrap()), 8);
+        assert_eq!(
+            message_to_user(&msg, out.as_mut_ptr() as usize, HEADER - 1),
+            Err(SyscallError::InvalidArgument)
+        );
+    }
+
+    // --- epoll_event layout ---
+
+    #[test]
+    fn epoll_event_is_packed_and_round_trips() {
+        use crate::net::epoll::EpollEvent;
+        assert_eq!(EPOLL_EVENT_BYTES, 12);
+        let mut raw = [0u8; 12];
+        raw[..4].copy_from_slice(&0x8000_0011u32.to_ne_bytes());
+        raw[4..].copy_from_slice(&0xDEAD_BEEF_0000_0042u64.to_ne_bytes());
+        let ev = epoll_event_from_bytes(&raw);
+        let (events, data) = (ev.events, ev.data);
+        assert_eq!((events, data), (0x8000_0011, 0xDEAD_BEEF_0000_0042));
+
+        let second = EpollEvent { events: 1, data: 2 };
+        let bytes = epoll_events_to_bytes(&[ev, second]);
+        assert_eq!(bytes.len(), 24);
+        assert_eq!(&bytes[..12], &raw);
+        assert_eq!(&bytes[12..16], &1u32.to_ne_bytes());
+        assert_eq!(&bytes[16..], &2u64.to_ne_bytes());
+        assert!(epoll_events_to_bytes(&[]).is_empty());
+    }
+
+    /// W-16: the byte count for maxevents must not wrap.
+    #[test]
+    fn epoll_buffer_len_bounds_maxevents() {
+        let cap = i32::MAX as usize / 12;
+        assert_eq!(epoll_events_buffer_len(1), Ok(12));
+        assert_eq!(epoll_events_buffer_len(cap), Ok(cap * 12));
+        assert_eq!(
+            epoll_events_buffer_len(cap + 1),
+            Err(SyscallError::InvalidArgument)
+        );
+        assert_eq!(
+            epoll_events_buffer_len(0),
+            Err(SyscallError::InvalidArgument)
+        );
+        assert_eq!(
+            epoll_events_buffer_len(usize::MAX),
+            Err(SyscallError::InvalidArgument)
+        );
+    }
+
+    #[test]
+    fn inet_addr_is_address_then_big_endian_port() {
+        let a = inet_addr_from_bytes(&[10, 0, 2, 15, 0x1F, 0x90]);
+        assert_eq!(
+            a,
+            crate::net::SocketAddr::v4(crate::net::Ipv4Address([10, 0, 2, 15]), 8080)
+        );
+        let raw = [192u8, 168, 1, 1, 0, 53];
+        assert_eq!(
+            read_inet_addr(raw.as_ptr() as usize),
+            Ok(inet_addr_from_bytes(&raw))
+        );
+        assert!(read_inet_addr(0).is_err());
+    }
+
+    // --- getdents64 records ---
+
+    fn dir_entry(name: &str, node_type: crate::fs::NodeType, inode: u64) -> crate::fs::DirEntry {
+        crate::fs::DirEntry {
+            name: alloc::string::String::from(name),
+            node_type,
+            inode,
+        }
+    }
+
+    /// (d_ino, d_off, d_reclen, d_type, name) of each record in `buf`.
+    fn parse_dirents(buf: &[u8]) -> alloc::vec::Vec<(u64, u64, usize, u8, alloc::string::String)> {
+        let mut out = alloc::vec::Vec::new();
+        let mut at = 0;
+        while at < buf.len() {
+            let rec = &buf[at..];
+            let reclen = u16::from_ne_bytes([rec[16], rec[17]]) as usize;
+            let name_end = rec[19..reclen].iter().position(|&b| b == 0).unwrap();
+            out.push((
+                u64::from_ne_bytes(rec[..8].try_into().unwrap()),
+                u64::from_ne_bytes(rec[8..16].try_into().unwrap()),
+                reclen,
+                rec[18],
+                alloc::string::String::from_utf8(rec[19..19 + name_end].to_vec()).unwrap(),
+            ));
+            at += reclen;
+        }
+        out
+    }
+
+    #[test]
+    fn dirent64_types_match_linux() {
+        use crate::fs::NodeType;
+        assert_eq!(dirent64_type(NodeType::Pipe), 1);
+        assert_eq!(dirent64_type(NodeType::CharDevice), 2);
+        assert_eq!(dirent64_type(NodeType::Directory), 4);
+        assert_eq!(dirent64_type(NodeType::BlockDevice), 6);
+        assert_eq!(dirent64_type(NodeType::File), 8);
+        assert_eq!(dirent64_type(NodeType::Symlink), 10);
+        assert_eq!(dirent64_type(NodeType::Socket), 12);
+    }
+
+    #[test]
+    fn dirents64_are_aligned_terminated_and_bounded() {
+        use crate::fs::NodeType;
+        let entries = [
+            dir_entry(".", NodeType::Directory, 0),
+            dir_entry("hello.txt", NodeType::File, 42),
+            dir_entry("abcd", NodeType::Symlink, 7),
+        ];
+        // 19 + 1 + 1 = 21 -> 24; 19 + 9 + 1 = 29 -> 32; 19 + 4 + 1 = 24.
+        let (buf, next) = build_dirents64(&entries, 0, 4096);
+        assert_eq!(next, 3);
+        assert_eq!(buf.len(), 24 + 32 + 24);
+        let recs = parse_dirents(&buf);
+        assert_eq!(recs.len(), 3);
+        // A missing inode number becomes index + 1.
+        assert_eq!((recs[0].0, recs[0].2, recs[0].3), (1, 24, 4));
+        assert_eq!(recs[0].4, ".");
+        assert_eq!((recs[1].0, recs[1].2, recs[1].3), (42, 32, 8));
+        assert_eq!(recs[1].4, "hello.txt");
+        assert_eq!((recs[2].0, recs[2].3), (7, 10));
+        // Padding after the name is zeroed.
+        assert!(buf[24 + 19 + 9..56].iter().all(|&b| b == 0));
+
+        // A buffer that ends inside a record stops before it.
+        let (buf, next) = build_dirents64(&entries, 0, 24 + 31);
+        assert_eq!((buf.len(), next), (24, 1));
+        // Resuming at an index continues from there.
+        let (buf, next) = build_dirents64(&entries, 2, 24);
+        assert_eq!((buf.len(), next), (24, 3));
+        assert_eq!(parse_dirents(&buf)[0].4, "abcd");
+        // Nothing left, or no room for even one record.
+        assert_eq!(build_dirents64(&entries, 3, 4096), (alloc::vec![], 3));
+        assert_eq!(build_dirents64(&entries, 0, 23), (alloc::vec![], 0));
     }
 
     // --- Rate limiter (SYS-PERF-01) ---
