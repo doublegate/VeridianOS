@@ -22,6 +22,12 @@ pub fn enumerate_secondaries() -> Vec<u32> {
         crate::println!("[SMP] SBI has no HSM extension: secondary harts cannot be started");
         return harts;
     }
+    // Remote TLB invalidation goes through SBI RFENCE (mm::tlb); without it
+    // a second hart could keep stale translations.
+    if !crate::arch::riscv::sbi::has_rfence() {
+        crate::println!("[SMP] SBI has no RFENCE extension: secondary harts not started");
+        return harts;
+    }
     let boot = super::boot::boot_hartid();
     // SAFETY: written once by boot.S from a1 before any Rust code ran.
     let dtb_pa = unsafe { core::ptr::addr_of!(veridian_dtb_pa).read_volatile() };

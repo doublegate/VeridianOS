@@ -15,19 +15,24 @@
 //!   to make its own request services requests aimed at it, so two CPUs
 //!   requesting at once with interrupts disabled cannot deadlock.
 //!
+//! This fails closed: a requester never returns -- and so never lets a frame
+//! be reused -- until every CPU has flushed. A slow CPU is reported once and
+//! still waited for, as Linux waits in `smp_call_function`; an SBI RFENCE
+//! error is fatal.
+//!
 //! With one CPU online the remote part is a single atomic load.
 
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 use core::sync::atomic::AtomicU32;
 use core::sync::atomic::{AtomicBool, Ordering};
 
-/// Set when a remote invalidation could not be confirmed (an x86 CPU that
-/// did not acknowledge, an SBI error). Checked by the boot tests.
-static REMOTE_FAILED: AtomicBool = AtomicBool::new(false);
+/// Set when a remote invalidation was slow to be confirmed (it was still
+/// waited for). Checked by the boot tests.
+static REMOTE_SLOW: AtomicBool = AtomicBool::new(false);
 
-/// Whether every remote invalidation so far was confirmed.
+/// Whether every remote invalidation so far was confirmed promptly.
 pub fn remote_flushes_confirmed() -> bool {
-    !REMOTE_FAILED.load(Ordering::Acquire)
+    !REMOTE_SLOW.load(Ordering::Acquire)
 }
 
 /// Invalidate the translation of `vaddr` on every CPU.
@@ -72,9 +77,12 @@ fn remote(addr: Option<u64>) {
             Some(a) => (a as usize & !0xFFF, 4096),
             None => (0, usize::MAX),
         };
-        if !crate::arch::riscv::sbi::remote_sfence_vma_all(start, size).is_ok() {
-            REMOTE_FAILED.store(true, Ordering::Release);
-        }
+        // Secondary harts are started only when the firmware has RFENCE
+        // (smp bring-up checks), so an error means another hart may keep a
+        // stale translation; continuing could let the frame be reused while
+        // it is still mapped there.
+        let ret = crate::arch::riscv::sbi::remote_sfence_vma_all(start, size);
+        assert!(ret.is_ok(), "SBI remote_sfence_vma failed: {}", ret.error);
     }
     #[cfg(not(any(
         all(target_arch = "x86_64", target_os = "none"),
@@ -102,9 +110,9 @@ mod x86 {
     /// Per CPU: a flush is requested of it.
     static PENDING: [AtomicBool; MAX_CPUS] = [const { AtomicBool::new(false) }; MAX_CPUS];
 
-    /// Longest wait for acknowledgements before giving up with a warning
-    /// (a CPU that never answers must not hang the kernel).
-    const ACK_TIMEOUT_MS: u64 = 100;
+    /// Wait after which a missing acknowledgement is reported (and still
+    /// waited for).
+    const ACK_WARN_MS: u64 = 100;
 
     pub(super) fn service_pending() {
         let me = crate::arch::percpu::this_cpu_id() as usize;
@@ -134,22 +142,26 @@ mod x86 {
             crate::arch::x86_64::apic::TLB_SHOOTDOWN_VECTOR,
         );
         let start = crate::arch::timer::monotonic_ns();
+        let mut warned = false;
+        // Fail closed: wait until every CPU has flushed, however long that
+        // takes. The caller is about to reuse the frames, and giving up
+        // here (as a timeout once did) let a slow CPU keep a translation to
+        // a frame that already belonged to someone else; it also let a late
+        // acknowledgement wrap the counter.
         while ACKS_OUTSTANDING.load(Ordering::Acquire) != 0 {
             service_pending();
-            if crate::arch::timer::monotonic_ns().saturating_sub(start) > ACK_TIMEOUT_MS * 1_000_000
+            if !warned
+                && crate::arch::timer::monotonic_ns().saturating_sub(start)
+                    > ACK_WARN_MS * 1_000_000
             {
+                warned = true;
+                REMOTE_SLOW.store(true, Ordering::Release);
                 // SAFETY: raw COM1 output, no locks taken.
                 unsafe {
                     crate::arch::x86_64::idt::raw_serial_str(
-                        b"[TLB] shootdown not acknowledged by every CPU\n",
+                        b"[TLB] shootdown still waiting for a CPU after 100 ms\n",
                     )
                 };
-                REMOTE_FAILED.store(true, Ordering::Release);
-                for p in PENDING.iter() {
-                    p.store(false, Ordering::Release);
-                }
-                ACKS_OUTSTANDING.store(0, Ordering::Release);
-                break;
             }
             core::hint::spin_loop();
         }

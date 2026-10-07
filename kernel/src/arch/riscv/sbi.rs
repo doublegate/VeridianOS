@@ -90,6 +90,12 @@ pub fn get_sbi_impl_version() -> SbiRet {
 }
 
 /// Check if an SBI extension is available
+/// Whether the firmware implements remote fences (needed for TLB
+/// shootdown across harts).
+pub fn has_rfence() -> bool {
+    probe_extension(SBI_EXT_RFENCE)
+}
+
 /// Whether the firmware implements hart state management (needed to start
 /// secondary harts).
 pub fn has_hsm() -> bool {
