@@ -141,6 +141,24 @@ phase_headers() {
     cp "$libc_build/libc.a" "$dst_lib/libc.a"
     echo "  libc.a: $obj_count objects"
 
+    # libm: <math.h> and libm.a (BusyBox awk and dc use them). Built here so
+    # a fresh sysroot has them; they used to exist only in sysroots that were
+    # set up by hand.
+    local libm_dir="${PROJECT_ROOT}/userland/libm"
+    local libm_build="${WORK_DIR}/libm-build"
+    rm -rf "$libm_build"
+    mkdir -p "$libm_build"
+    cp "$libm_dir"/include/*.h "$dst_inc/"
+    for src in "$libm_dir"/src/*.c; do
+        if ! "$CC" $cflags -isystem "$libm_dir/include" -c "$src" \
+                -o "$libm_build/$(basename "$src" .c).o" 2>&1; then
+            echo "  ERROR: libm source failed to compile: $src"
+            exit 1
+        fi
+    done
+    "$TOOLCHAIN_PREFIX/bin/x86_64-veridian-ar" rcs "$dst_lib/libm.a" "$libm_build"/*.o
+    echo "  libm.a: $(ls "$libm_build"/*.o | wc -l) objects"
+
     local hdr_count
     hdr_count=$(find "$dst_inc" -name '*.h' | wc -l)
     echo "  Sysroot headers: $hdr_count"
