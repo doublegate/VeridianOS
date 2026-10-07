@@ -582,7 +582,7 @@ pub fn sys_write(fd: usize, buffer: usize, count: usize) -> SyscallResult {
 
     // Non-stdout/stderr: use file table normally
     let proc = process::current_process().ok_or(SyscallError::InvalidState)?;
-    write_fd(&proc, fd, buffer, count).unwrap_or(Err(SyscallError::InvalidArgument))
+    write_fd(&proc, fd, buffer, count).unwrap_or(Err(SyscallError::BadFileDescriptor))
 }
 
 /// Write `count` bytes from `buffer` to `fd` of `proc` (`None`: no such
@@ -666,7 +666,16 @@ fn wait_ready(
 /// else (pipe, tty, socket, device) gets exactly one underlying read, so its
 /// blocking and short-read behaviour is unchanged. EOF on a pipe is 0.
 fn file_read_to_user(file: &crate::fs::file::File, buf: usize, count: usize) -> SyscallResult {
-    let regular = file.node.node_type() == crate::fs::NodeType::File;
+    // Not open for reading is EBADF (it was EACCES), a directory EISDIR
+    // (N-197).
+    if !file.flags.read {
+        return Err(SyscallError::BadFileDescriptor);
+    }
+    let regular = match file.node.node_type() {
+        crate::fs::NodeType::File => true,
+        crate::fs::NodeType::Directory => return Err(SyscallError::IsADirectory),
+        _ => false,
+    };
     super::userspace::produce_to_user(buf, count, regular, |kbuf| match file.read(kbuf) {
         Ok(n) => Ok(n),
         Err(crate::error::KernelError::BrokenPipe) => Ok(0),
@@ -679,6 +688,10 @@ fn file_read_to_user(file: &crate::fs::file::File, buf: usize, count: usize) -> 
 /// chunks; a short write (a full pipe) ends the transfer with the count so
 /// far.
 fn file_write_from_user(file: &crate::fs::file::File, buf: usize, count: usize) -> SyscallResult {
+    // Not open for writing is EBADF, as on Linux (N-197).
+    if !file.flags.write {
+        return Err(SyscallError::BadFileDescriptor);
+    }
     super::userspace::consume_from_user(buf, count, true, |kbuf| match file.write(kbuf) {
         Ok(n) => Ok(n),
         Err(crate::error::KernelError::BrokenPipe) => Err(SyscallError::BrokenPipe),

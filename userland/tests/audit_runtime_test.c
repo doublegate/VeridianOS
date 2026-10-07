@@ -1869,6 +1869,27 @@ static void test_positioned_io_and_truncate(void)
     struct stat st = {0};
     if (stat("/tmp/audit_pio", &st) != 0 || st.st_size != 3)
         fails |= 1024;
+    /* read/write: the wrong access mode and an unopened fd are EBADF, a
+     * directory read EISDIR (N-197). */
+    rd = open("/tmp/audit_pio", O_RDONLY);
+    wr = open("/tmp/audit_pio", O_WRONLY);
+    errno = 0;
+    if (write(rd, &c, 1) != -1 || errno != EBADF)
+        fails |= 8192;
+    errno = 0;
+    if (read(wr, &c, 1) != -1 || errno != EBADF)
+        fails |= 16384;
+    close(rd);
+    close(wr);
+    errno = 0;
+    if (write(999, &c, 1) != -1 || errno != EBADF)
+        fails |= 32768;
+    int dfd = open("/tmp", O_RDONLY | O_DIRECTORY);
+    errno = 0;
+    if (dfd < 0 || read(dfd, &c, 1) != -1 || errno != EISDIR)
+        fails |= 65536;
+    if (dfd >= 0)
+        close(dfd);
     static char why[64];
     snprintf(why, sizeof(why), "bitmask of failures %d", fails);
     report("pread_pwrite_ftruncate_checks", fails == 0, why);

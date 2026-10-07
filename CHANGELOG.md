@@ -322,6 +322,10 @@
 
 ### Fixed
 
+- **read and write report Linux's errors (N-197).** The wrong access mode was EACCES and a write
+  to an unopened fd EINVAL; both are EBADF, and reading a directory is EISDIR. timerfd, signalfd
+  and epoll fds are opened read-write, and a process's console fds 0-2 are one read-write open
+  of `/dev/console`, as on Linux (`more` and `less` read keys from fd 2).
 - **chdir resolves to the real directory and checks search permission;** `*at` calls report
   EBADF for a bad directory fd and ENOTDIR for a non-directory, and an fd records the canonical
   path it opened rather than the path as written (N-204).

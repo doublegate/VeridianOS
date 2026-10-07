@@ -144,26 +144,28 @@ pub fn load_user_program(
 
         let ft = process.file_table.lock();
 
-        // fd 0 = stdin (read-only)
+        // fds 0-2 read-write, as the dups of one open of /dev/console that
+        // Linux's init hands down (`more` and `less` read keys from fd 2).
+        // fd 0 = stdin
         let stdin_file = Arc::new(File::new_with_path(
             console_node.clone(),
-            OpenFlags::read_only(),
+            OpenFlags::read_write(),
             String::from("/dev/console"),
         ));
         let _ = ft.install(0, stdin_file);
 
-        // fd 1 = stdout (write-only)
+        // fd 1 = stdout
         let stdout_file = Arc::new(File::new_with_path(
             console_node.clone(),
-            OpenFlags::write_only(),
+            OpenFlags::read_write(),
             String::from("/dev/console"),
         ));
         let _ = ft.install(1, stdout_file);
 
-        // fd 2 = stderr (write-only)
+        // fd 2 = stderr
         let stderr_file = Arc::new(File::new_with_path(
             console_node,
-            OpenFlags::write_only(),
+            OpenFlags::read_write(),
             String::from("/dev/console"),
         ));
         let _ = ft.install(2, stderr_file);

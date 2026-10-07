@@ -876,7 +876,7 @@ fn handle_syscall(
             // Wrap as VfsNode for real fd semantics
             let node: alloc::sync::Arc<dyn crate::fs::VfsNode> =
                 alloc::sync::Arc::new(crate::net::epoll::EpollNode::new(epoll_id));
-            let file = crate::fs::file::File::new(node, crate::fs::OpenFlags::read_only());
+            let file = crate::fs::file::File::new(node, crate::fs::OpenFlags::read_write());
             let proc = crate::process::current_process().ok_or(SyscallError::InvalidState)?;
             let file_table = proc.file_table.lock();
             let fd = file_table
@@ -1129,7 +1129,7 @@ fn handle_syscall(
             let tfd_id = crate::fs::timerfd::timerfd_create(clockid, flags)? as u32;
             let node: alloc::sync::Arc<dyn crate::fs::VfsNode> =
                 alloc::sync::Arc::new(crate::fs::timerfd::TimerFdNode::new(tfd_id));
-            let file = crate::fs::file::File::new(node, crate::fs::OpenFlags::read_only());
+            let file = crate::fs::file::File::new(node, crate::fs::OpenFlags::read_write());
             let proc = crate::process::current_process().ok_or(SyscallError::InvalidState)?;
             let file_table = proc.file_table.lock();
             let fd = file_table
@@ -1183,7 +1183,7 @@ fn handle_syscall(
             }
             let node: alloc::sync::Arc<dyn crate::fs::VfsNode> =
                 alloc::sync::Arc::new(crate::fs::signalfd::SignalFdNode::new(sfd_id));
-            let file = crate::fs::file::File::new(node, crate::fs::OpenFlags::read_only());
+            let file = crate::fs::file::File::new(node, crate::fs::OpenFlags::read_write());
             let proc = crate::process::current_process().ok_or(SyscallError::InvalidState)?;
             let file_table = proc.file_table.lock();
             let fd = file_table
