@@ -11,6 +11,16 @@
   user buffer now gives EFAULT instead of a kernel fault. Bulk transfers go through bounded
   bounce buffers, and messages and datagrams are capped at 1 MiB.
 
+### Fixed
+
+- **Hard links on ramfs and tmpfs are real links (N-45).** `link()` used to copy the file,
+  so the two names diverged on the next write. It also copied files from other filesystems
+  instead of returning EXDEV. Both names now refer to one node.
+
+### Removed
+
+- The unused in-kernel `stdlib` module (1,018 lines with no callers).
+
 ---
 
 ## [v0.26.0] - 2026-10-06

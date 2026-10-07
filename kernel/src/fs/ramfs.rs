@@ -2,7 +2,7 @@
 //!
 //! A simple in-memory filesystem for testing and temporary storage.
 
-use alloc::{collections::BTreeMap, string::String, sync::Arc, vec, vec::Vec};
+use alloc::{collections::BTreeMap, string::String, sync::Arc, vec::Vec};
 
 #[cfg(not(target_arch = "aarch64"))]
 use spin::RwLock;
@@ -112,6 +112,18 @@ impl RamNode {
             parent_inode: core::sync::atomic::AtomicU64::new(parent_inode),
         }
     }
+}
+
+/// Recover the concrete `Arc<RamNode>` behind a VFS node, if it is one.
+fn as_ram_arc(node: Arc<dyn VfsNode>) -> Option<Arc<RamNode>> {
+    node.as_any()?.downcast_ref::<RamNode>()?;
+    // SAFETY: the downcast above proved the value behind this `Arc<dyn
+    // VfsNode>` is a `RamNode`, so the allocation is an `ArcInner<RamNode>` and the
+    // data pointer, stripped of its vtable, is the pointer `Arc<RamNode>` would
+    // hold. This is the reverse of the unsizing coercion that made the
+    // trait object, and is how `Arc::downcast` is implemented. The strong
+    // count moves from `node` to the result unchanged.
+    Some(unsafe { Arc::from_raw(Arc::into_raw(node) as *const RamNode) })
 }
 
 impl VfsNode for RamNode {
@@ -414,37 +426,19 @@ impl VfsNode for RamNode {
             return Err(KernelError::FsError(FsError::IsADirectory));
         }
 
+        // A hard link names the same node, and only within one RamFs
+        // instance; anything else is EXDEV. The old code copied the data
+        // into a new node, so the two names drifted apart on the next write
+        // and a file from another filesystem was silently duplicated (N-45).
+        let target = as_ram_arc(target)
+            .filter(|t| t.fs_id == self.fs_id)
+            .ok_or(KernelError::FsError(FsError::CrossDevice))?;
+
         let mut children = self.children.write();
         if children.contains_key(name) {
             return Err(KernelError::FsError(FsError::AlreadyExists));
         }
-
-        // RamFS hard link: create a new node that copies the target's data
-        // and shares the same inode number. This provides POSIX-compatible
-        // semantics (same inode visible via stat) although the data is
-        // copied rather than shared. True shared-data hard links would
-        // require Arc downcasting or a different internal representation.
-        let target_meta = target.metadata()?;
-        let inode = target_meta.inode;
-
-        let new_node = Arc::new(RamNode::new_file(
-            inode,
-            self.inode,
-            self.fs_id,
-            target_meta.permissions,
-        ));
-
-        // Copy file data from the target
-        let mut buf = vec![0u8; target_meta.size];
-        if !buf.is_empty() {
-            let bytes_read = target.read(0, &mut buf)?;
-            buf.truncate(bytes_read);
-        }
-        if !buf.is_empty() {
-            new_node.write(0, &buf)?;
-        }
-
-        children.insert(String::from(name), new_node);
+        children.insert(String::from(name), target);
         Ok(())
     }
 
@@ -554,6 +548,38 @@ mod tests {
     use alloc::vec;
 
     use super::*;
+
+    // --- Hard links (N-45) ---
+
+    #[test]
+    fn hard_link_shares_the_file() {
+        let fs = RamFs::new();
+        let root = fs.root();
+        let a = root.create("a", Permissions::default()).unwrap();
+        a.write(0, b"one").unwrap();
+        root.link("b", a.clone()).unwrap();
+        // A write through either name is visible through the other.
+        root.lookup("b").unwrap().write(0, b"two").unwrap();
+        let mut buf = [0u8; 3];
+        a.read(0, &mut buf).unwrap();
+        assert_eq!(&buf, b"two");
+        // Removing one name leaves the file reachable through the other.
+        root.unlink("a").unwrap();
+        root.lookup("b").unwrap().read(0, &mut buf).unwrap();
+        assert_eq!(&buf, b"two");
+    }
+
+    #[test]
+    fn hard_link_across_ramfs_instances_is_exdev() {
+        let fs1 = RamFs::new();
+        let fs2 = RamFs::new();
+        let a = fs1.root().create("a", Permissions::default()).unwrap();
+        assert_eq!(
+            fs2.root().link("b", a).err(),
+            Some(KernelError::FsError(FsError::CrossDevice))
+        );
+        assert!(fs2.root().lookup("b").is_err());
+    }
 
     // --- RamFs construction tests ---
 

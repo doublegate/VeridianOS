@@ -4,7 +4,7 @@
 //! Data is stored in heap-backed buffers and is lost on unmount.
 //! Supports all standard VFS operations including symlinks.
 
-use alloc::{collections::BTreeMap, string::String, sync::Arc, vec, vec::Vec};
+use alloc::{collections::BTreeMap, string::String, sync::Arc, vec::Vec};
 use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 #[cfg(not(target_arch = "aarch64"))]
@@ -136,6 +136,18 @@ impl TmpNode {
         }
         Ok(())
     }
+}
+
+/// Recover the concrete `Arc<TmpNode>` behind a VFS node, if it is one.
+fn as_tmp_arc(node: Arc<dyn VfsNode>) -> Option<Arc<TmpNode>> {
+    node.as_any()?.downcast_ref::<TmpNode>()?;
+    // SAFETY: the downcast above proved the value behind this `Arc<dyn
+    // VfsNode>` is a `TmpNode`, so the allocation is an `ArcInner<TmpNode>` and the
+    // data pointer, stripped of its vtable, is the pointer `Arc<TmpNode>` would
+    // hold. This is the reverse of the unsizing coercion that made the
+    // trait object, and is how `Arc::downcast` is implemented. The strong
+    // count moves from `node` to the result unchanged.
+    Some(unsafe { Arc::from_raw(Arc::into_raw(node) as *const TmpNode) })
 }
 
 impl VfsNode for TmpNode {
@@ -482,33 +494,17 @@ impl VfsNode for TmpNode {
             return Err(KernelError::FsError(FsError::IsADirectory));
         }
 
+        // Same node, same tmpfs instance only (N-45): a copy drifted apart
+        // from the original and was charged twice against the size limit.
+        let target = as_tmp_arc(target)
+            .filter(|t| Arc::ptr_eq(&t.bytes_used, &self.bytes_used))
+            .ok_or(KernelError::FsError(FsError::CrossDevice))?;
+
         let mut children = self.children.write();
         if children.contains_key(name) {
             return Err(KernelError::FsError(FsError::AlreadyExists));
         }
-
-        // Copy data for hard link (same pattern as RamFS)
-        let target_meta = target.metadata()?;
-        let inode = target_meta.inode;
-
-        let new_node = Arc::new(TmpNode::new_file(
-            inode,
-            self.inode,
-            target_meta.permissions,
-            self.bytes_used.clone(),
-            self.size_limit,
-        ));
-
-        let mut buf = vec![0u8; target_meta.size];
-        if !buf.is_empty() {
-            let bytes_read = target.read(0, &mut buf)?;
-            buf.truncate(bytes_read);
-        }
-        if !buf.is_empty() {
-            new_node.write(0, &buf)?;
-        }
-
-        children.insert(String::from(name), new_node);
+        children.insert(String::from(name), target);
         Ok(())
     }
 
@@ -638,6 +634,38 @@ mod tests {
     use alloc::vec;
 
     use super::*;
+
+    #[test]
+    fn hard_link_shares_the_file_and_its_bytes() {
+        let fs = TmpFs::new(1024 * 1024);
+        let root = fs.root();
+        let a = root.create("a", Permissions::default()).unwrap();
+        a.write(0, b"one").unwrap();
+        root.link("b", a.clone()).unwrap();
+        // One file, counted once against the size limit (N-45).
+        assert_eq!(fs.bytes_used(), 3);
+        root.lookup("b").unwrap().write(0, b"two").unwrap();
+        let mut buf = [0u8; 3];
+        a.read(0, &mut buf).unwrap();
+        assert_eq!(&buf, b"two");
+    }
+
+    #[test]
+    fn hard_link_across_tmpfs_instances_is_exdev() {
+        let fs1 = TmpFs::new(1024 * 1024);
+        let fs2 = TmpFs::new(1024 * 1024);
+        let a = fs1.root().create("a", Permissions::default()).unwrap();
+        assert_eq!(
+            fs2.root().link("b", a).err(),
+            Some(KernelError::FsError(FsError::CrossDevice))
+        );
+        let ram = super::super::ramfs::RamFs::new();
+        let r = ram.root().create("r", Permissions::default()).unwrap();
+        assert_eq!(
+            fs1.root().link("r", r).err(),
+            Some(KernelError::FsError(FsError::CrossDevice))
+        );
+    }
 
     #[test]
     fn test_tmpfs_new() {
