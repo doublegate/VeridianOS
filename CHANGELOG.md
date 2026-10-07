@@ -354,6 +354,15 @@
 
 ### Fixed
 
+- **wait, getcwd and process groups behave as on Linux (N-212 to N-216).** pid arguments are
+  ints (a zero-extended -1 was pid 4294967295); waiting for a non-child is ECHILD, WNOHANG with
+  nothing to report no longer writes the status, and `waitid` supports WNOWAIT; `getcwd` returns
+  the length with its NUL and ERANGE for a short buffer; `setpgid` follows Linux's rules
+  (ESRCH, EPERM across sessions or to a missing group, EACCES after the child's exec) and
+  `setsid` from a group leader is EPERM. Runtime test `getcwd_wait_and_groups`.
+- **The native libc's `siginfo_t` and `pid_t` match the kernel (N-253).** `siginfo_t` was a
+  32-byte struct while the kernel writes Linux's 128-byte layout, so SA_SIGINFO handlers read the
+  wrong fields; `pid_t` was 64 bits. Both now follow Linux, and `waitid` exists.
 - **read and write report Linux's errors (N-197).** The wrong access mode was EACCES and a write
   to an unopened fd EINVAL; both are EBADF, and reading a directory is EISDIR. timerfd, signalfd
   and epoll fds are opened read-write, and a process's console fds 0-2 are one read-write open

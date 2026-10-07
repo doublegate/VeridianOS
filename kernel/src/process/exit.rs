@@ -96,6 +96,9 @@ pub struct WaitOptions {
     pub continued: bool,
     /// Do not report exited children (waitid without WEXITED)
     pub skip_exited: bool,
+    /// Report without reaping the child or consuming its stop/continue
+    /// report (waitid WNOWAIT), so a later wait sees it again
+    pub keep: bool,
 }
 
 impl WaitOptions {
@@ -191,6 +194,9 @@ pub fn wait_children(
 
                 // Check for zombie (exited)
                 if child_state == ProcessState::Zombie && !options.skip_exited {
+                    if options.keep {
+                        return Ok((*child_pid, child.wait_status()));
+                    }
                     // Reap the zombie
                     let exit_code = child.get_exit_code();
 
@@ -217,6 +223,9 @@ pub fn wait_children(
                 // A stop (WUNTRACED) or continue (WCONTINUED), reported
                 // once: whoever clears it reports it (N-99).
                 if let Some(r) = job_report_for(&child, options) {
+                    if options.keep {
+                        return Ok((*child_pid, r as i32));
+                    }
                     if child
                         .job_report
                         .compare_exchange(r, 0, Ordering::AcqRel, Ordering::Acquire)

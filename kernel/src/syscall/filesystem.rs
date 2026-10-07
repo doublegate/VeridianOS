@@ -1160,11 +1160,6 @@ pub fn sys_pipe(pipe_fds_ptr: usize) -> SyscallResult {
 /// # Returns
 /// Length of the CWD path
 pub fn sys_getcwd(buf: usize, size: usize) -> SyscallResult {
-    if size == 0 {
-        return Err(SyscallError::InvalidArgument);
-    }
-    validate_user_buffer(buf, size)?;
-
     let cwd = {
         let thread = process::current_thread().ok_or(SyscallError::InvalidState)?;
         #[cfg(feature = "alloc")]
@@ -1177,10 +1172,14 @@ pub fn sys_getcwd(buf: usize, size: usize) -> SyscallResult {
         }
     };
 
+    // As Linux: ERANGE when the path and its NUL do not fit (size 0
+    // included), only the bytes written must be user memory, and the
+    // result counts the NUL (N-214; it was strlen, and EINVAL).
     let cwd_bytes = cwd.as_bytes();
     if cwd_bytes.len() + 1 > size {
-        return Err(SyscallError::InvalidArgument); // Buffer too small
+        return Err(SyscallError::RangeError);
     }
+    validate_user_buffer(buf, cwd_bytes.len() + 1)?;
 
     // The path and its NUL go out through the fault-tolerant writer (N-43).
     let mut out = Vec::with_capacity(cwd_bytes.len() + 1);
@@ -1188,7 +1187,7 @@ pub fn sys_getcwd(buf: usize, size: usize) -> SyscallResult {
     out.push(0);
     super::userspace::write_user_bytes(buf, &out)?;
 
-    Ok(cwd_bytes.len())
+    Ok(out.len())
 }
 
 /// Change current working directory

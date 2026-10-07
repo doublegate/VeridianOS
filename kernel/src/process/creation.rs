@@ -656,6 +656,9 @@ pub fn exec_process(path: &str, argv: &[&str], envp: &[&str]) -> Result<(), Kern
     // The image is replaced: a parent waiting in vfork may run again; the
     // memory it shared with this process is no longer this process's.
     process.release_vfork_parent();
+    process
+        .did_exec
+        .store(true, core::sync::atomic::Ordering::Release);
 
     // The actual execution resumes when we return to user mode
     // The modified thread context will cause execution at the new entry point

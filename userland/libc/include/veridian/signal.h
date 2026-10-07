@@ -165,16 +165,77 @@ static inline int sigismember(const sigset_t *set, int signum)
 /* siginfo_t                                                                 */
 /* ========================================================================= */
 
-/** Signal information structure (passed when SA_SIGINFO is set) */
+/** Value carried by a queued signal (sigqueue, timers) */
+union sigval {
+    int   sival_int;
+    void *sival_ptr;
+};
+
+/** Signal information (SA_SIGINFO handlers, waitid): Linux's 128-byte
+ *  x86_64 layout, which the kernel writes. It was a 32-byte struct with
+ *  si_pid at offset 12, so every field after si_code was read from the
+ *  wrong place. The members are macros over the union, as in glibc and
+ *  musl. */
 typedef struct {
-    int         si_signo;   /* Signal number */
-    int         si_errno;   /* Errno value associated with signal */
-    int         si_code;    /* Signal code (SI_USER, SI_KERNEL, etc.) */
-    pid_t       si_pid;     /* Sending process PID */
-    uid_t       si_uid;     /* Sending process real UID */
-    int         si_status;  /* Exit value or signal */
-    void       *si_addr;    /* Faulting instruction/memory address */
+    int si_signo;               /* Signal number */
+    int si_errno;               /* Errno value associated with signal */
+    int si_code;                /* Signal code (SI_USER, CLD_EXITED, ...) */
+    int __si_pad0;
+    union {
+        char __si_pad[112];
+        /* kill, sigqueue, SIGCHLD */
+        struct {
+            pid_t pid;          /* Sending (or child) process */
+            uid_t uid;          /* Its real user ID */
+            union {
+                int          status;    /* SIGCHLD: exit value or signal */
+                union sigval value;     /* sigqueue: the value */
+            } u;
+            long utime;         /* SIGCHLD: user CPU time */
+            long stime;         /* SIGCHLD: system CPU time */
+        } __proc;
+        /* POSIX timers */
+        struct {
+            int          timerid;
+            int          overrun;
+            union sigval value;
+        } __timer;
+        /* SIGSEGV, SIGBUS, SIGILL, SIGFPE, SIGTRAP */
+        struct {
+            void *addr;         /* Faulting address */
+            short addr_lsb;
+        } __fault;
+        /* SIGPOLL */
+        struct {
+            long band;
+            int  fd;
+        } __poll;
+    } __si;
 } siginfo_t;
+
+#define si_pid      __si.__proc.pid
+#define si_uid      __si.__proc.uid
+#define si_status   __si.__proc.u.status
+#define si_value    __si.__proc.u.value
+#define si_utime    __si.__proc.utime
+#define si_stime    __si.__proc.stime
+#define si_timerid  __si.__timer.timerid
+#define si_overrun  __si.__timer.overrun
+#define si_addr     __si.__fault.addr
+#define si_addr_lsb __si.__fault.addr_lsb
+#define si_band     __si.__poll.band
+#define si_fd       __si.__poll.fd
+
+_Static_assert(sizeof(siginfo_t) == 128, "siginfo_t is Linux's 128 bytes");
+_Static_assert(__builtin_offsetof(siginfo_t, __si) == 16, "siginfo_t union at 16");
+
+/** si_code values for SIGCHLD */
+#define CLD_EXITED    1
+#define CLD_KILLED    2
+#define CLD_DUMPED    3
+#define CLD_TRAPPED   4
+#define CLD_STOPPED   5
+#define CLD_CONTINUED 6
 
 /** si_code values */
 #define SI_USER     0       /* Sent by kill(), raise(), or abort() */

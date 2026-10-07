@@ -351,7 +351,8 @@ pub fn sys_wait(pid: isize, status_ptr: usize, options: usize) -> SyscallResult 
     };
 
     // -1 any child, > 0 that child, 0 the caller's process group, < -1 the
-    // group -pid (N-99).
+    // group -pid (N-99). pid_t is an int: its low 32 bits (N-212).
+    let pid = pid as u32 as i32;
     let filter = match pid {
         -1 => WaitFilter::Any,
         p if p > 0 => WaitFilter::Pid(ProcessId(p as u64)),
@@ -368,20 +369,28 @@ pub fn sys_wait(pid: isize, status_ptr: usize, options: usize) -> SyscallResult 
     const WNOHANG: usize = 1;
     const WUNTRACED: usize = 2;
     const WCONTINUED: usize = 8;
+    /// __WNOTHREAD, __WALL, __WCLONE: accepted, as every child here is a
+    /// process that signals its parent.
+    const WTHREAD_FLAGS: usize = 0x2000_0000 | 0x4000_0000 | 0x8000_0000;
+    if options & !(WNOHANG | WUNTRACED | WCONTINUED | WTHREAD_FLAGS) != 0 {
+        return Err(SyscallError::InvalidArgument);
+    }
 
     let wait_options = WaitOptions {
         no_hang: (options & WNOHANG) != 0,
         untraced: (options & WUNTRACED) != 0,
         continued: (options & WCONTINUED) != 0,
         skip_exited: false,
+        keep: false,
     };
 
     let wait_result = crate::process::exit::wait_children(filter, wait_options);
 
     match wait_result {
         Ok((child_pid, exit_status)) => {
-            // Write exit status to user space if pointer provided
-            if status_ptr != 0 {
+            // Write the status if a child was reported: WNOHANG with
+            // nothing to report returns 0 and leaves it alone (N-213).
+            if status_ptr != 0 && child_pid.0 != 0 {
                 // SAFETY: status_ptr is non-zero; copy_to_user validates it is within
                 // user-space.
                 unsafe {
@@ -399,7 +408,10 @@ pub fn sys_wait(pid: isize, status_ptr: usize, options: usize) -> SyscallResult 
 /// when a signal interrupted it.
 pub(crate) fn wait_error(e: crate::error::KernelError) -> SyscallError {
     match e {
-        crate::error::KernelError::NotFound { .. } => SyscallError::NoChildProcess,
+        // No such child of the caller (it was EINVAL for a pid that is not
+        // a child, N-213).
+        crate::error::KernelError::NotFound { .. }
+        | crate::error::KernelError::ProcessNotFound { .. } => SyscallError::NoChildProcess,
         // The wait loop reports a signal interruption as WouldBlock.
         crate::error::KernelError::WouldBlock => SyscallError::Interrupted,
         _ => SyscallError::InvalidArgument,
@@ -874,36 +886,52 @@ pub fn sys_setgroups(size: usize, list: usize) -> SyscallResult {
 /// - `pid`: Target process (0 = calling process)
 /// - `pgid`: New process group (0 = use pid as pgid)
 pub fn sys_setpgid(pid: usize, pgid: usize) -> SyscallResult {
+    use core::sync::atomic::Ordering;
     let proc = current_process().ok_or(SyscallError::InvalidState)?;
-
-    let target_pid = if pid == 0 {
-        proc.pid
-    } else {
-        ProcessId(pid as u64)
+    // Linux's rules (N-216; pid_t arguments are ints, N-212).
+    let (pid, pgid) = (pid as u32 as i32, pgid as u32 as i32);
+    if pgid < 0 {
+        return Err(SyscallError::InvalidArgument);
+    }
+    let target_pid = match pid {
+        0 => proc.pid,
+        p if p > 0 => ProcessId(p as u64),
+        _ => return Err(SyscallError::ProcessNotFound),
     };
     let new_pgid = if pgid == 0 { target_pid.0 } else { pgid as u64 };
-
-    // Can only set pgid for self or children
+    let target =
+        crate::process::table::get_process(target_pid).ok_or(SyscallError::ProcessNotFound)?;
+    let sid = proc.sid.load(Ordering::Acquire);
+    // The caller itself or one of its children (ESRCH); a child that has
+    // exec'd is out of reach (EACCES).
     if target_pid != proc.pid {
-        // Check if target is a child
-        #[cfg(feature = "alloc")]
-        {
-            let children = proc.children.lock();
-            if !children.contains(&target_pid) {
-                return Err(SyscallError::PermissionDenied);
-            }
+        if target.parent() != Some(proc.pid) {
+            return Err(SyscallError::ProcessNotFound);
+        }
+        if target.did_exec.load(Ordering::Acquire) {
+            return Err(SyscallError::PermissionDenied);
         }
     }
-
-    // Apply to the target process
-    if let Some(target) = crate::process::table::get_process(target_pid) {
-        target
-            .pgid
-            .store(new_pgid, core::sync::atomic::Ordering::Release);
-        Ok(0)
-    } else {
-        Err(SyscallError::ProcessNotFound)
+    // A session leader keeps its group; the target must be in the
+    // caller's session, and so must the group it joins (EPERM).
+    if target.sid.load(Ordering::Acquire) == target_pid.0
+        || target.sid.load(Ordering::Acquire) != sid
+    {
+        return Err(SyscallError::OperationNotPermitted);
     }
+    if new_pgid != target_pid.0 {
+        let mut exists = false;
+        crate::process::table::PROCESS_TABLE.for_each(|p| {
+            if p.pgid.load(Ordering::Acquire) == new_pgid && p.sid.load(Ordering::Acquire) == sid {
+                exists = true;
+            }
+        });
+        if !exists {
+            return Err(SyscallError::OperationNotPermitted);
+        }
+    }
+    target.pgid.store(new_pgid, Ordering::Release);
+    Ok(0)
 }
 
 /// Get process group ID (SYS_getpgid = 121)
@@ -911,11 +939,10 @@ pub fn sys_setpgid(pid: usize, pgid: usize) -> SyscallResult {
 /// # Arguments
 /// - `pid`: Target process (0 = calling process)
 pub fn sys_getpgid(pid: usize) -> SyscallResult {
-    let target_pid = if pid == 0 {
-        let proc = current_process().ok_or(SyscallError::InvalidState)?;
-        proc.pid
-    } else {
-        ProcessId(pid as u64)
+    let target_pid = match pid as u32 as i32 {
+        0 => current_process().ok_or(SyscallError::InvalidState)?.pid,
+        p if p > 0 => ProcessId(p as u64),
+        _ => return Err(SyscallError::ProcessNotFound),
     };
 
     if let Some(target) = crate::process::table::get_process(target_pid) {
@@ -937,10 +964,11 @@ pub fn sys_getpgrp() -> SyscallResult {
 pub fn sys_setsid() -> SyscallResult {
     let proc = current_process().ok_or(SyscallError::InvalidState)?;
 
-    // Process must not already be a process group leader
+    // Process must not already be a process group leader (EPERM; it was
+    // EACCES, N-215)
     let current_pgid = proc.pgid.load(core::sync::atomic::Ordering::Acquire);
     if current_pgid == proc.pid.0 {
-        return Err(SyscallError::PermissionDenied);
+        return Err(SyscallError::OperationNotPermitted);
     }
 
     // Set both pgid and sid to our pid (new session + group leader)
@@ -957,11 +985,10 @@ pub fn sys_setsid() -> SyscallResult {
 /// # Arguments
 /// - `pid`: Target process (0 = calling process)
 pub fn sys_getsid(pid: usize) -> SyscallResult {
-    let target_pid = if pid == 0 {
-        let proc = current_process().ok_or(SyscallError::InvalidState)?;
-        proc.pid
-    } else {
-        ProcessId(pid as u64)
+    let target_pid = match pid as u32 as i32 {
+        0 => current_process().ok_or(SyscallError::InvalidState)?.pid,
+        p if p > 0 => ProcessId(p as u64),
+        _ => return Err(SyscallError::ProcessNotFound),
     };
 
     if let Some(target) = crate::process::table::get_process(target_pid) {
@@ -1182,6 +1209,8 @@ fn process_of_thread(tid: usize) -> Option<ProcessId> {
 /// signal state exists (N-109), so this signals the thread's process; musl
 /// uses it for raise() and abort() (N-103).
 pub fn sys_tkill(tid: usize, signal: usize) -> SyscallResult {
+    // A pid_t: its low 32 bits; not positive is EINVAL (N-212).
+    let tid = positive_id(tid)?;
     let caller = current_process().ok_or(SyscallError::InvalidState)?;
     let pid = process_of_thread(tid).ok_or(SyscallError::ProcessNotFound)?;
     // An int: its low 32 bits. Signals 1..=64 (0 tests for existence).
@@ -1211,10 +1240,20 @@ pub fn sys_tkill(tid: usize, signal: usize) -> SyscallResult {
 
 /// tgkill(2): like tkill, but the thread must belong to process `tgid`.
 pub fn sys_tgkill(tgid: usize, tid: usize, signal: usize) -> SyscallResult {
+    let (tgid, tid) = (positive_id(tgid)?, positive_id(tid)?);
     if process_of_thread(tid) != Some(ProcessId(tgid as u64)) {
         return Err(SyscallError::ProcessNotFound);
     }
     sys_tkill(tid, signal)
+}
+
+/// A pid_t argument that must name one thread or process: the register's
+/// low 32 bits, positive (EINVAL otherwise, as Linux; N-212).
+fn positive_id(raw: usize) -> Result<usize, SyscallError> {
+    match raw as u32 as i32 {
+        id if id > 0 => Ok(id as usize),
+        _ => Err(SyscallError::InvalidArgument),
+    }
 }
 
 /// waitid(2) for P_ALL and P_PID, with WEXITED, WSTOPPED, WCONTINUED and
@@ -1230,6 +1269,8 @@ pub fn sys_waitid(idtype: usize, id: usize, infop: usize, options: usize) -> Sys
     const WCONTINUED: usize = 8;
     const WNOWAIT: usize = 0x0100_0000;
 
+    // id is a pid_t: its low 32 bits (N-212).
+    let id = id as u32 as i32;
     let filter = match idtype {
         P_ALL => WaitFilter::Any,
         P_PID if id > 0 => WaitFilter::Pid(ProcessId(id as u64)),
@@ -1240,11 +1281,13 @@ pub fn sys_waitid(idtype: usize, id: usize, infop: usize, options: usize) -> Sys
                 .pgid
                 .load(core::sync::atomic::Ordering::Acquire),
         ),
-        P_PGID => WaitFilter::Group(id as u64),
-        // pidfds come later.
+        P_PGID if id > 0 => WaitFilter::Group(id as u64),
+        // A negative id, or a pidfd (P_PIDFD, not yet supported): EINVAL.
         _ => return Err(SyscallError::InvalidArgument),
     };
-    if options & (WEXITED | WSTOPPED | WCONTINUED) == 0 || options & WNOWAIT != 0 {
+    if options & (WEXITED | WSTOPPED | WCONTINUED) == 0
+        || options & !(WNOHANG | WSTOPPED | WEXITED | WCONTINUED | WNOWAIT) != 0
+    {
         return Err(SyscallError::InvalidArgument);
     }
     let (child, status) = crate::process::exit::wait_children(
@@ -1254,6 +1297,8 @@ pub fn sys_waitid(idtype: usize, id: usize, infop: usize, options: usize) -> Sys
             untraced: options & WSTOPPED != 0,
             continued: options & WCONTINUED != 0,
             skip_exited: options & WEXITED == 0,
+            // WNOWAIT: report, but leave the child to a later wait (N-213).
+            keep: options & WNOWAIT != 0,
         },
     )
     .map_err(wait_error)?;
@@ -1321,5 +1366,20 @@ mod waitid_tests {
         assert_eq!((field(&stopped, 8), field(&stopped, 24)), (5, 20));
         let continued = waitid_siginfo(7, 0xffff);
         assert_eq!((field(&continued, 8), field(&continued, 24)), (6, 18));
+    }
+}
+
+#[cfg(test)]
+mod pid_argument_tests {
+    use super::{positive_id, SyscallError};
+
+    /// pid_t arguments are ints: a zero-extended -1 is -1, not pid
+    /// 4294967295, and tkill/tgkill refuse anything not positive (N-212).
+    #[test]
+    fn pid_arguments_use_the_low_32_bits() {
+        assert_eq!(positive_id(7), Ok(7));
+        assert_eq!(positive_id(0xFFFF_FFFF), Err(SyscallError::InvalidArgument));
+        assert_eq!(positive_id(0), Err(SyscallError::InvalidArgument));
+        assert_eq!(positive_id(0x1_0000_0005), Ok(5));
     }
 }

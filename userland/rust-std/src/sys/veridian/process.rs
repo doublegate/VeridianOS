@@ -119,8 +119,10 @@ pub fn kill(pid: usize, sig: usize) -> Result<usize, SyscallError> {
 /// Get the current working directory as a `PathBuf`.
 pub fn current_dir() -> Result<PathBuf, SyscallError> {
     let mut buf = [0u8; 4096];
+    // getcwd returns the length with its NUL, as Linux's (N-214).
     let len = getcwd(buf.as_mut_ptr(), buf.len())?;
-    Ok(PathBuf::from_vec(buf[..len].to_vec()))
+    let end = buf[..len].iter().position(|&b| b == 0).unwrap_or(len);
+    Ok(PathBuf::from_vec(buf[..end].to_vec()))
 }
 
 /// Set the current working directory.

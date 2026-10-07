@@ -138,6 +138,10 @@ pub struct Process {
     /// cleared (and PROCESS_EVENTS woken) by either (N-210).
     pub vfork_pending: core::sync::atomic::AtomicBool,
 
+    /// The process has exec'd since it was created: its parent may no
+    /// longer change its process group (setpgid EACCES, N-216).
+    pub did_exec: core::sync::atomic::AtomicBool,
+
     /// Job control (D3): the signal that stopped the process, 0 while it
     /// runs. Its threads park on their way back to user mode until SIGCONT
     /// or SIGKILL.
@@ -301,6 +305,7 @@ impl Process {
             kill_pending: AtomicU32::new(0),
             exit_signal: AtomicU32::new(super::signals::SIGCHLD as u32),
             vfork_pending: core::sync::atomic::AtomicBool::new(false),
+            did_exec: core::sync::atomic::AtomicBool::new(false),
             stop_signal: AtomicU32::new(0),
             cont_seq: AtomicU32::new(0),
             job_report: AtomicU32::new(0),

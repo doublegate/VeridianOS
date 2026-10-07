@@ -66,6 +66,17 @@ extern "C" {
 /** Also report children resumed by SIGCONT. */
 #define WCONTINUED  8
 
+/* waitid(2) */
+#define WSTOPPED    2
+#define WEXITED     4
+#define WNOWAIT     0x01000000
+
+typedef enum {
+    P_ALL  = 0,
+    P_PID  = 1,
+    P_PGID = 2,
+} idtype_t;
+
 /* ========================================================================= */
 /* Function declarations                                                     */
 /* ========================================================================= */
@@ -93,6 +104,10 @@ struct rusage;
  */
 pid_t wait3(int *wstatus, int options, struct rusage *rusage);
 pid_t wait4(pid_t pid, int *wstatus, int options, struct rusage *rusage);
+
+/* Forward declaration: <signal.h> defines siginfo_t. */
+#include <veridian/signal.h>
+int waitid(idtype_t idtype, id_t id, siginfo_t *infop, int options);
 
 #ifdef __cplusplus
 }

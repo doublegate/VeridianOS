@@ -2142,6 +2142,103 @@ static void test_vfork_and_clone(void)
     report("vfork_and_process_clone", fails == 0, why);
 }
 
+/* --- getcwd, wait and process groups as Linux (N-212 to N-216). ----- */
+static void test_wait_and_groups(void)
+{
+    int fails = 0;
+    char buf[256];
+    long n = veridian_syscall2(SYS_getcwd, buf, sizeof(buf));
+    if (n <= 0 || (size_t)n != strlen(buf) + 1)
+        fails |= 1;                             /* counts the NUL */
+    if (veridian_syscall2(SYS_getcwd, buf, 1) != -ERANGE ||
+        veridian_syscall2(SYS_getcwd, buf, 0) != -ERANGE)
+        fails |= 2;
+
+    /* wait4's pid is an int: a zero-extended -1 is "any child". */
+    pid_t pid = fork();
+    if (pid == 0)
+        _exit(9);
+    int st = 0;
+    long r = veridian_syscall4(SYS_wait4, 0xFFFFFFFFul, &st, 0, 0);
+    if (r != pid || !WIFEXITED(st) || WEXITSTATUS(st) != 9)
+        fails |= 4;
+    errno = 0;
+    if (waitpid(1, &st, 0) != -1 || errno != ECHILD)
+        fails |= 8;                             /* not a child */
+
+    /* WNOHANG with nothing to report leaves the status alone; WNOWAIT
+     * reports without reaping. */
+    int p[2];
+    if (pipe(p) != 0)
+        fails |= 16;
+    pid = fork();
+    if (pid == 0) {
+        char c;
+        close(p[1]);
+        if (read(p[0], &c, 1) < 0)
+            _exit(1);
+        _exit(4);
+    }
+    close(p[0]);
+    st = 12345;
+    if (waitpid(pid, &st, WNOHANG) != 0 || st != 12345)
+        fails |= 32;
+    close(p[1]);                                /* let it exit */
+    siginfo_t si;
+    memset(&si, 0, sizeof(si));
+    if (waitid(P_PID, pid, &si, WEXITED | WNOWAIT) != 0 || si.si_pid != pid)
+        fails |= 64;
+    if (waitpid(pid, &st, 0) != pid || WEXITSTATUS(st) != 4)
+        fails |= 128;                           /* still there to reap */
+
+    /* setpgid: EINVAL, ESRCH, EPERM for a group that does not exist,
+     * EACCES for a child that has exec'd. */
+    errno = 0;
+    if (setpgid(0, -1) != -1 || errno != EINVAL)
+        fails |= 256;
+    errno = 0;
+    if (setpgid(1, 1) != -1 || errno != ESRCH)
+        fails |= 512;
+    errno = 0;
+    if (setpgid(0, 99999) != -1 || errno != EPERM)
+        fails |= 1024;
+    /* The child blocks reading a pipe, never the console: a read of the
+     * inherited stdin took the harness's next command. */
+    int hold[2];
+    if (pipe(hold) != 0)
+        fails |= 16;
+    pid = fork();
+    if (pid == 0) {
+        dup2(hold[0], 0);
+        close(hold[1]);
+        execl("/bin/sh", "sh", "-c", "read x", (char *)0);
+        _exit(127);
+    }
+    close(hold[0]);
+    for (int i = 0; i < 50; i++)
+        sched_yield();                          /* let it exec */
+    errno = 0;
+    if (setpgid(pid, pid) != -1 || errno != EACCES)
+        fails |= 2048;
+    kill(pid, SIGKILL);
+    waitpid(pid, &st, 0);
+    close(hold[1]);
+
+    /* setsid from a process-group leader: EPERM. */
+    pid = fork();
+    if (pid == 0) {
+        if (setpgid(0, 0) != 0)
+            _exit(1);
+        errno = 0;
+        _exit(setsid() == -1 && errno == EPERM ? 0 : 2);
+    }
+    if (exit_code_of(pid) != 0)
+        fails |= 4096;
+    static char why[64];
+    snprintf(why, sizeof(why), "bitmask of failures %d", fails);
+    report("getcwd_wait_and_groups", fails == 0, why);
+}
+
 int main(int argc, char **argv)
 {
     setvbuf(stdout, NULL, _IONBF, 0);
@@ -2192,6 +2289,7 @@ int main(int argc, char **argv)
     test_memfd();
     test_realtime_signals();
     test_vfork_and_clone();
+    test_wait_and_groups();
     printf("AUDIT-RUNTIME: %d/%d\n", passed, total);
     return passed == total ? 0 : 1;
 }

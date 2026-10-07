@@ -445,8 +445,15 @@ int execvpe(const char *file, char *const argv[], char *const envp[])
     return -1;
 }
 
-/* waitid() -- wait for process (stub using waitpid) */
+/* waitid() -- the kernel's waitid: P_ALL, P_PID, P_PGID; WEXITED,
+ * WSTOPPED, WCONTINUED, WNOHANG, WNOWAIT. */
 #include <sys/wait.h>
+
+int waitid(idtype_t idtype, id_t id, siginfo_t *infop, int options)
+{
+    return (int)__syscall_ret(
+        veridian_syscall5(SYS_waitid, idtype, id, infop, options, 0));
+}
 
 /*
  * wait3() / wait4() -- BSD-style wait. The native wait syscall carries no
