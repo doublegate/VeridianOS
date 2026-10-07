@@ -189,6 +189,9 @@
 
 ### Security
 
+- **execve with an empty environment passes none (N-211).** A NULL or empty `envp` made the
+  kernel substitute the caller's environment, so `env -i` and programs that clear the environment
+  before running something passed every variable on. It is now empty, as on Linux.
 - **pread/pwrite, truncate/ftruncate and mkdir check access (N-190 to N-192).** `pwrite` worked
   through a read-only fd and `pread` through a write-only one, `ftruncate` through any fd,
   `truncate` and `mkdir` checked no permission at all, so any user could empty a file it could

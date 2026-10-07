@@ -55,7 +55,7 @@ renumbering; **X2** = the Linux syscall completion program (`docs/compat/COMPATI
 |---|---|---|---|---|---|
 | N-209 | High C | rt_sigaction, kill, tkill, tgkill | Signals 32-64 are EINVAL; musl's `pthread_cancel` uses 33 | 64-entry tables (the sigset is already 64-bit) | D3 |
 | N-210 | High C | clone | Only the CLONE_THREAD form is accepted; fork/vfork-style clone (musl `posix_spawn`, so `system`/`popen`) is EINVAL; newsp 0 is EFAULT | route non-thread clones to fork/vfork | D3 |
-| N-211 | High C | execve | A NULL or empty envp inherits the parent's environment (`env -i` leaks it) | empty means empty | D3 |
+| N-211 | High C | execve | A NULL or empty envp inherits the parent's environment (`env -i` leaks it) | empty means empty | v0.27; **fixed**: a NULL or empty envp is an empty environment (runtime tests `execve_empty_envp_is_empty`, `execve_null_envp_is_empty`) |
 | N-212 | Medium C | int arguments | pid_t/int arguments use the full 64-bit register (a zero-extended -1 is pid 4294967295) in wait4, kill, waitid, setpgid, getpgid, getsid, tkill, tgkill | `as i32` first | X2 (process) |
 | N-213 | Medium C | wait4, waitid | Non-child pid EINVAL (ECHILD); rusage ignored; status written under WNOHANG with nothing to report; WNOWAIT EINVAL | per finding | X2 (process) |
 | N-214 | Medium C | getcwd | Returns strlen, not strlen+1; too-small buffer EINVAL, not ERANGE | `len + 1`, ERANGE (now a `SyscallError`) | X2 (files) |

@@ -1917,9 +1917,42 @@ static void test_positioned_io_and_truncate(void)
     report("nonroot_truncate_mkdir_left_no_trace", kept, "file truncated or directory created");
 }
 
+/* --- execve with an empty or NULL envp passes no environment (N-211):
+ * the kernel substituted the caller's, so `env -i` leaked it. A child
+ * re-executes this program with AUDIT_ENV_MARK in its environment; that
+ * image (exec_env_helper) then runs sh with an empty or NULL envp, and sh
+ * exits 0 only if the mark did not come through. ---------------------- */
+static void exec_env_helper(const char *mode)
+{
+    char *args[] = {"sh", "-c", "test -z \"$AUDIT_ENV_MARK\"", NULL};
+    char *empty[] = {NULL};
+    execve("/bin/sh", args, strcmp(mode, "exec-env-null") == 0 ? NULL : empty);
+    _exit(100);
+}
+
+static void exec_without_env(const char *mode, const char *name)
+{
+    pid_t pid = fork();
+    if (pid == 0) {
+        char *args[] = {"audit_runtime_test", (char *)mode, NULL};
+        char *env[] = {"AUDIT_ENV_MARK=leaked", NULL};
+        execve("/bin/audit_runtime_test", args, env);
+        _exit(101);
+    }
+    report_child(name, pid);
+}
+
+static void test_exec_environment(void)
+{
+    exec_without_env("exec-env-empty", "execve_empty_envp_is_empty");
+    exec_without_env("exec-env-null", "execve_null_envp_is_empty");
+}
+
 int main(int argc, char **argv)
 {
     setvbuf(stdout, NULL, _IONBF, 0);
+    if (argc > 1 && strncmp(argv[1], "exec-env-", 9) == 0)
+        exec_env_helper(argv[1]);
     test_fd_numbering();
     test_scanf();
     /* User threads need a ring-3 entry path in the scheduler that does not
@@ -1961,6 +1994,7 @@ int main(int argc, char **argv)
     test_stop_continue();
     test_credentials_and_paths();
     test_positioned_io_and_truncate();
+    test_exec_environment();
     printf("AUDIT-RUNTIME: %d/%d\n", passed, total);
     return passed == total ? 0 : 1;
 }

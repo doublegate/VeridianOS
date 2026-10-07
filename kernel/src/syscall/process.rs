@@ -3,8 +3,6 @@
 //! Implements system calls for process and thread management including
 //! creation, termination, and state management.
 
-use alloc::format;
-
 use super::{validate_user_buffer, validate_user_string_ptr, SyscallError, SyscallResult};
 #[cfg(target_arch = "x86_64")]
 use crate::arch::context::ThreadContext;
@@ -105,21 +103,11 @@ pub fn sys_exec(path_ptr: usize, argv_ptr: usize, envp_ptr: usize) -> SyscallRes
     // null pointer checks internally and bounds-checks string lengths.
     let argv = unsafe { copy_string_array_from_user_tracked(argv_ptr, &mut arg_total_bytes)? };
 
+    // A NULL or empty envp is an empty environment, as on Linux: it used to
+    // inherit the caller's, so `env -i` passed everything on (N-211).
+    //
     // SAFETY: as for argv above -- the callee validates every user pointer.
-    let mut envp = unsafe { copy_string_array_from_user_tracked(envp_ptr, &mut arg_total_bytes)? };
-
-    // If envp is empty (NULL pointer from user-space), inherit the parent
-    // process's environment variables. This handles the case where libc's
-    // `environ` is NULL (e.g., GCC's libiberty overrides `environ` symbol)
-    // or the caller explicitly passes NULL for envp.
-    if envp.is_empty() {
-        if let Some(current) = current_process() {
-            let parent_env = current.env_vars.lock();
-            for (key, value) in parent_env.iter() {
-                envp.push(format!("{}={}", key, value));
-            }
-        }
-    }
+    let envp = unsafe { copy_string_array_from_user_tracked(envp_ptr, &mut arg_total_bytes)? };
 
     // exec_process keeps only PRESERVE_EXEC capabilities once the new
     // image is in place (N-30, N-94).
