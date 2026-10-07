@@ -45,6 +45,10 @@
     through the normal exit path.
   - **Tests.** The runtime suites now run entirely on the dispatcher, and a new musl test
     checks concurrent pthreads with a mutex, `pthread_join` and `pthread_exit`.
+- **User code is preempted (stage D3).** When the tick finds a task's slice used up (EEVDF, 3 ms
+  base slice), the task gives up the CPU on its way back to user mode, from an interrupt or a
+  system call. A program that computes without system calls no longer keeps the CPU from
+  everything else. Runtime test: a parent sleeps and kills a child spinning in user mode.
 - **Three new boot tests** (39 in total with the two added earlier in this cycle) check:
   - per-CPU identity and ticks;
   - that uptime follows the hardware clock;
@@ -82,6 +86,15 @@
   used to report "Meltdown mitigation: enabled".
 
 ### Security
+
+- **Security review of stage D2.** Three defects, each fixed with a regression test:
+  - `clone(CLONE_SETTLS)` accepted any TLS base, which was loaded into IA32_FS_BASE at every
+    switch, so a non-canonical value faulted (#GP) in ring 0. It is now rejected (EINVAL), and
+    the switch never loads a non-user value.
+  - exec in a multithreaded process freed page tables its other threads still ran on. It is
+    refused (EAGAIN) until those threads are stopped first (N-101).
+  - A process blocked in a sleep, `poll` or another in-kernel wait could not be killed until
+    the wait ended. Every dispatched wait now acts on a pending fatal signal.
 
 - **x86_64 kernel entry rebuilt (N-166, N-169, N-170, N-171, N-175; ADR 0008).**
   - **One frame and dispatcher.** Every exception and interrupt enters through an assembly stub

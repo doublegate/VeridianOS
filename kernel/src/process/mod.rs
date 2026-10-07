@@ -328,6 +328,14 @@ pub fn start_thread(
     } else {
         process.tls_fs_base.load(Ordering::Acquire)
     };
+    // Loaded into IA32_FS_BASE at every switch: it must be a user address
+    // (a non-canonical value faults in ring 0).
+    if !crate::arch::x86_64::trap::is_user_address(fs_base) {
+        return Err(crate::error::KernelError::InvalidArgument {
+            name: "thread TLS base",
+            value: "outside user space",
+        });
+    }
     let mut area = Area::new().ok_or(crate::error::KernelError::OutOfMemory {
         requested: crate::arch::x86_64::switch::xsave::size(),
         available: 0,

@@ -26,6 +26,7 @@
 #include <sys/mman.h>
 #include <sys/prctl.h>
 #include <sys/wait.h>
+#include <sys/syscall.h>
 #include <unistd.h>
 
 static int passed, total;
@@ -203,6 +204,46 @@ static void test_threads(void)
     report("musl_pthreads_join_mutex_exit", ok, why);
 }
 
+/* Guards found by the security review of stage D2: a clone with a
+ * non-canonical TLS base is refused (it used to reach IA32_FS_BASE and #GP
+ * the kernel at every switch), and exec is refused while another thread of
+ * the process runs (it freed page tables that thread still used). */
+static void *sleeper(void *arg)
+{
+    (void)arg;
+    struct timespec ts = {0, 200 * 1000 * 1000};
+    nanosleep(&ts, 0);
+    return 0;
+}
+
+static void test_thread_guards(void)
+{
+    pid_t pid = fork();
+    if (pid == 0) {
+        static char stack[16384] __attribute__((aligned(16)));
+        long flags = CLONE_VM | CLONE_FS | CLONE_FILES | CLONE_SIGHAND | CLONE_THREAD |
+                     CLONE_SYSVSEM | CLONE_SETTLS;
+        errno = 0;
+        long r = syscall(SYS_clone, flags, stack + sizeof(stack), 0, 0, 0x8000000000000000UL);
+        int tls_refused = r == -1 && errno == EINVAL;
+
+        pthread_t t;
+        int exec_refused = 0;
+        if (pthread_create(&t, 0, sleeper, 0) == 0) {
+            char *argv[] = {"true", 0};
+            errno = 0;
+            exec_refused = execve("/bin/true", argv, 0) == -1 && errno == EAGAIN;
+            pthread_join(t, 0);
+        }
+        _exit(tls_refused && exec_refused ? 0 : 1 + tls_refused + 2 * exec_refused);
+    }
+    int st = 0;
+    int ok = pid > 0 && waitpid(pid, &st, 0) == pid && WIFEXITED(st) && WEXITSTATUS(st) == 0;
+    static char why[48];
+    snprintf(why, sizeof(why), "status=0x%x", st);
+    report("musl_clone_tls_and_exec_guards", ok, why);
+}
+
 int main(void)
 {
     test_fsync();
@@ -212,6 +253,7 @@ int main(void)
     test_waitid();
     test_mprotect();
     test_threads();
+    test_thread_guards();
     printf("MUSL-RUNTIME: %d/%d\n", passed, total);
     return passed == total ? 0 : 1;
 }

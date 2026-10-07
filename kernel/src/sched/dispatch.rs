@@ -460,7 +460,12 @@ unsafe fn arch_switch(prev: *const Task, next: *const Task) {
 
         let b = &*(*next).arch.get();
         switch::switch_address_space(b.cr3);
-        switch::write_fs_base(b.fs_base);
+        // Validated where it was set; a non-canonical value would #GP here.
+        switch::write_fs_base(if crate::arch::x86_64::trap::is_user_address(b.fs_base) {
+            b.fs_base
+        } else {
+            0
+        });
         crate::arch::percpu::set_entry_stack(b.entry_stack);
         (*cpu).user_rsp = b.user_rsp;
         (*cpu).syscall_frame = b.syscall_frame;
@@ -639,6 +644,17 @@ pub fn tick() {
     }
 }
 
+/// Preemption point on the way back to user mode (stage D3): if the tick
+/// found the running task's slice used up, or a woken task should run
+/// first, switch now. Only user tasks are preempted -- the kernel itself is
+/// not preemptible -- and only here, where the task holds no locks and its
+/// whole user context is in the frame on its own kernel stack.
+pub fn preempt_user() {
+    if current_owner().is_some() && need_resched() {
+        schedule();
+    }
+}
+
 /// Whether the running task should give up the CPU.
 pub fn need_resched() -> bool {
     let Some(cpu) = this_cpu() else {
@@ -758,6 +774,10 @@ pub fn tasks_of(pid: u64) -> Vec<Arc<Task>> {
 /// timeout): let other tasks run if any are runnable, otherwise halt until
 /// the next interrupt. The caller re-checks its condition afterwards.
 pub fn wait_in_syscall() {
+    // A thread whose process received a fatal signal exits here rather than
+    // wait on (callers wait with no lock held). Without this a process
+    // blocked in a read, poll or sleep could not be killed.
+    crate::process::user_return_check();
     let others = this_cpu().is_some_and(|cpu| {
         let irq = irq_save();
         let n = CPUS[cpu].lock().as_ref().map_or(0, |st| st.rq.nr_running());

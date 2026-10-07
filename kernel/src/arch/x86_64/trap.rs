@@ -313,6 +313,10 @@ extern "C" fn trap_dispatch(f: &mut TrapFrame) {
 /// a thread whose process received a fatal signal exits instead. Signal
 /// delivery and rescheduling hook in here too (sprint D3).
 fn exit_to_user(f: &mut TrapFrame) {
+    // Timer preemption of user code (stage D3): an interrupt from ring 3
+    // whose tick used up the task's slice switches here.
+    #[cfg(feature = "alloc")]
+    crate::sched::dispatch::preempt_user();
     crate::process::user_return_check();
     sanitize_user_frame(f);
 }

@@ -132,6 +132,16 @@ pub fn sys_exec(path_ptr: usize, argv_ptr: usize, envp_ptr: usize) -> SyscallRes
     let argv_refs: Vec<&str> = argv.iter().map(|s| s.as_str()).collect();
     let envp_refs: Vec<&str> = envp.iter().map(|s| s.as_str()).collect();
 
+    // exec replaces the address space every thread of the process runs in.
+    // Until the other threads are stopped first (N-101), refuse while any
+    // of them is alive rather than free page tables they still use.
+    #[cfg(feature = "alloc")]
+    if crate::sched::dispatch::current_owner()
+        .is_some_and(|(pid, _)| crate::sched::dispatch::tasks_of(pid).len() > 1)
+    {
+        return Err(SyscallError::WouldBlock);
+    }
+
     match exec_process(&path, &argv_refs, &envp_refs) {
         Ok(_) => {
             // exec succeeded. The current process's address space has been

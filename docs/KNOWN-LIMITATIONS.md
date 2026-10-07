@@ -47,16 +47,15 @@ nothing fills (N-47), so it cannot reach any endpoint either.
   the fast-path receive never blocks, and kernel memory used by IPC is not accounted. All of this
   is unreachable from user space today.
 
-### User processes are not preempted (C5, ADR 0006; planned v0.27 sprint D3)
+### Process model gaps (C5, ADR 0006; planned v0.27 sprint D)
 
 Since stage D2, every user thread (x86_64) runs as a dispatcher task of its own, on its own
 kernel stack and with its own saved vector state. Programs, forked children and `clone` threads
 run alongside each other, the kernel shell waits for the programs it starts, and musl's pthreads
-work. What is still missing:
+work. User code is preempted when its slice ends (D3). What is still missing:
 
-- **No timer preemption (W-13, D3).** A task switches only when it waits or yields, so a program
-  that computes without making system calls keeps the CPU, the shell included, until it
-  finishes.
+- **The kernel is not preemptible.** A task is switched only on its way back to user mode or
+  when it waits, so a long system call keeps the CPU until it returns or waits.
 - **Waits poll (N-119, blocking step of sprint D).** A system call that waits re-checks its
   condition each time another task has run, or after the next interrupt: correct, but busier
   than a wait queue with a direct wakeup. Pipes, futexes, `poll`, `nanosleep` and the rest have
@@ -66,9 +65,11 @@ work. What is still missing:
   - eventfd, signalfd and timerfd waits spin for up to 30 s;
   - an empty pty read returns end-of-file;
   - `flock` without `LOCK_NB` fails with EWOULDBLOCK instead of waiting (N-120).
-- **A fatal signal waits for the target (D3).** A process killed by another one stops at its
-  next return to user mode, or when a `wait` or futex wait notices. A target waiting in a pipe
-  read, `poll` or `nanosleep` keeps waiting until that call returns.
+- **Signals are only fatal or ignored.** A fatal signal to a dispatched process is acted on by
+  its threads at their next return to user mode or wait. Handlers, stop/continue and
+  per-thread delivery come with the rest of D3 (N-96, N-98, N-109, N-113).
+- **exec from a multithreaded process fails with EAGAIN.** The other threads would keep running
+  on the page tables exec replaces; stopping them first is N-101.
 - **Native libc threads (N-102).** The native C library's `clone` returns through a C epilogue
   and `errno` is one global, so its `pthread_create` still does not work (musl's does). Two
   fixes are therefore tested by unit tests only: LIBC-SEC-01 (the allocator lock in `stdlib.c`)

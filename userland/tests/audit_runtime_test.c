@@ -1164,6 +1164,51 @@ static void test_traps(void)
     }
 }
 
+/* --- Timer preemption of user code (ADR 0006 stage D3). -------------------
+ * A child spins in user mode without system calls. The parent must still
+ * run (its sleep ends), and SIGKILL must stop the spinning child. Without
+ * preemption the parent never runs again and the suite hangs. */
+static void test_preemption(void)
+{
+    pid_t pid = fork();
+    if (pid == 0) {
+        for (;;)
+            __asm__ volatile("" ::: "memory");
+    }
+    struct timespec ts = {0, 50 * 1000 * 1000};
+    int slept = pid > 0 && nanosleep(&ts, 0) == 0;
+    int killed = pid > 0 && kill(pid, SIGKILL) == 0;
+    int st = 0;
+    int reaped = pid > 0 && waitpid(pid, &st, 0) == pid;
+    static char why[80];
+    snprintf(why, sizeof(why), "slept=%d killed=%d reaped=%d status=0x%x", slept, killed, reaped, st);
+    report("preempt_spinning_child_then_kill", slept && killed && reaped && WIFSIGNALED(st) &&
+                                                    WTERMSIG(st) == SIGKILL,
+           why);
+}
+
+/* --- A fatal signal ends a process blocked in a system call. ------------
+ * The child sleeps for ten minutes; SIGKILL must end it at once (it used to
+ * be acted on only when the sleep returned; security review of stage D2). */
+static void test_kill_sleeping(void)
+{
+    pid_t pid = fork();
+    if (pid == 0) {
+        struct timespec ts = {600, 0};
+        nanosleep(&ts, 0);
+        _exit(0);
+    }
+    struct timespec ts = {0, 20 * 1000 * 1000};
+    nanosleep(&ts, 0);
+    int killed = pid > 0 && kill(pid, SIGKILL) == 0;
+    int st = 0;
+    int reaped = pid > 0 && waitpid(pid, &st, 0) == pid;
+    static char why[64];
+    snprintf(why, sizeof(why), "killed=%d reaped=%d status=0x%x", killed, reaped, st);
+    report("kill_ends_blocked_sleep", killed && reaped && WIFSIGNALED(st) && WTERMSIG(st) == SIGKILL,
+           why);
+}
+
 int main(int argc, char **argv)
 {
     setvbuf(stdout, NULL, _IONBF, 0);
@@ -1197,6 +1242,8 @@ int main(int argc, char **argv)
     test_dir_search_permission();
     test_direction_flag();
     test_traps();
+    test_preemption();
+    test_kill_sleeping();
     printf("AUDIT-RUNTIME: %d/%d\n", passed, total);
     return passed == total ? 0 : 1;
 }

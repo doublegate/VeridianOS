@@ -101,6 +101,13 @@ pub fn sys_thread_clone(
     // Share FS? (CWD and umask). If not set, clone gets its own copy.
     let share_fs = flags & CLONE_FS != 0;
 
+    // The TLS base is loaded into IA32_FS_BASE whenever the thread runs; a
+    // non-canonical value would fault (#GP) in ring 0 at every switch.
+    #[cfg(target_arch = "x86_64")]
+    if flags & CLONE_SETTLS != 0 && !crate::arch::x86_64::trap::is_user_address(tls as u64) {
+        return Err(SyscallError::InvalidArgument);
+    }
+
     // Basic user stack validation
     if newsp == 0 {
         return Err(SyscallError::InvalidPointer);
