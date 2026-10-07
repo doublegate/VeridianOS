@@ -366,6 +366,13 @@ mod manager_tests {
         assert!(manager::check_capability(root, token::Rights::READ, &a).is_ok());
         assert!(manager::check_capability(grandchild, token::Rights::READ, &c).is_ok());
 
+        // Delegating the same rights to the same space again reuses the
+        // live delegation instead of minting another.
+        assert_eq!(
+            mgr.delegate(child, &b, &c, token::Rights::READ).unwrap(),
+            grandchild
+        );
+
         // Revoking the root cascades down the derivation tree.
         revocation::revoke_capability(root).unwrap();
         assert!(manager::check_capability(root, token::Rights::READ, &a).is_err());

@@ -238,8 +238,11 @@ pub fn send_to_endpoint(mut msg: Message, endpoint_id: EndpointId) -> Result<()>
         // Direct delivery
         drop(queue);
 
-        // Handle capability transfer if present
-        if msg.capability() != 0 {
+        // Transfer a capability only when the sender asks for it. The field
+        // otherwise holds the sender's own (validated) endpoint capability,
+        // which used to be delegated to the receiver on every message
+        // (N-61).
+        if msg.capability() != 0 && msg.flags() & crate::ipc::message::flags::HAS_CAPABILITY != 0 {
             if let Some(sender) = crate::process::current_process() {
                 if let Some(real_sender) = crate::process::table::get_process(sender.pid) {
                     let sender_cap_space = real_sender.capability_space.lock();

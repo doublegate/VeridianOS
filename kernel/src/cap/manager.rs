@@ -86,6 +86,11 @@ impl IdAllocator {
     }
 }
 
+/// Most capabilities that may be delegated from one capability. Revoked
+/// delegations still count until the parent is deleted.
+#[cfg(feature = "alloc")]
+const MAX_DELEGATIONS: usize = 1024;
+
 /// Registry entry for a capability
 struct RegistryEntry {
     object: ObjectRef,
@@ -212,34 +217,73 @@ impl CapabilityManager {
             return Err(CapError::PermissionDenied);
         }
 
-        // Get object reference
-        #[cfg(feature = "alloc")]
-        let object = {
-            let registry = self.registry.read();
-            let entry = registry.get(&cap.id()).ok_or(CapError::InvalidCapability)?;
-
-            if entry.revoked {
-                return Err(CapError::CapabilityRevoked);
-            }
-
-            entry.object.clone()
-        };
-
         #[cfg(not(feature = "alloc"))]
         return Err(CapError::OutOfMemory);
 
         // Ensure new rights are subset of source rights
         let derived_rights = source_rights.intersection(new_rights);
 
+        // A target that already holds a live delegation of this capability
+        // with these rights gets that one back, and a capability has at
+        // most MAX_DELEGATIONS children, so repeated transfers cannot grow
+        // the registry without bound.
+        #[cfg(feature = "alloc")]
+        {
+            let children = super::revocation::get_children(cap.id());
+            for &child in &children {
+                let generation = match self.registry.read().get(&child) {
+                    Some(entry) if !entry.revoked => entry.generation.load(Ordering::Acquire),
+                    _ => continue,
+                };
+                let token = CapabilityToken::new(
+                    child,
+                    generation,
+                    cap.cap_type(),
+                    derived_rights.to_flags(),
+                );
+                if target.lookup(token) == Some(derived_rights) {
+                    return Ok(token);
+                }
+            }
+            if children.len() >= MAX_DELEGATIONS {
+                return Err(CapError::QuotaExceeded);
+            }
+        }
+
         // A delegation is a capability of its own, recorded under its
         // parent. It used to reuse the parent's ID, so revoking any one
         // holder's copy revoked them all, and the derivation tree that
         // cascading revocation walks was never filled (CAP-INC-02).
+        //
+        // The parent check, the registration and the derivation record are
+        // one critical section under the registry lock, and `revoke` reads
+        // the subtree under the same lock, so a delegation either completes
+        // before a revocation (and is revoked with its parent) or sees the
+        // parent revoked and fails. Lock order: registry, then tree.
         #[cfg(feature = "alloc")]
-        let new_cap = {
+        let (new_cap, object) = {
             let id = self.id_allocator.allocate()?;
-            let new_cap = CapabilityToken::new(id, 0, cap.cap_type(), derived_rights.to_flags());
-            self.registry.write().insert(
+            let mut registry = self.registry.write();
+            let parent = match registry.get(&cap.id()) {
+                Some(entry)
+                    if !entry.revoked
+                        && entry.generation.load(Ordering::Acquire) == cap.generation() =>
+                {
+                    entry
+                }
+                Some(_) => {
+                    drop(registry);
+                    self.id_allocator.recycle(id);
+                    return Err(CapError::CapabilityRevoked);
+                }
+                None => {
+                    drop(registry);
+                    self.id_allocator.recycle(id);
+                    return Err(CapError::InvalidCapability);
+                }
+            };
+            let object = parent.object.clone();
+            registry.insert(
                 id,
                 RegistryEntry {
                     object: object.clone(),
@@ -247,14 +291,23 @@ impl CapabilityManager {
                     revoked: false,
                 },
             );
-            if target.insert(new_cap, object, derived_rights).is_err() {
-                self.registry.write().remove(&id);
-                self.id_allocator.recycle(id);
-                return Err(CapError::OutOfMemory);
-            }
             super::revocation::record_derivation(cap.id(), id);
-            new_cap
+            (
+                CapabilityToken::new(id, 0, cap.cap_type(), derived_rights.to_flags()),
+                object,
+            )
         };
+
+        // Outside the registry lock (the space has its own locks). A
+        // revocation that lands now finds the child in the tree and revokes
+        // it, so the token inserted here is already invalid.
+        #[cfg(feature = "alloc")]
+        if target.insert(new_cap, object, derived_rights).is_err() {
+            super::revocation::cleanup_capability(new_cap.id());
+            self.registry.write().remove(&new_cap.id());
+            self.id_allocator.recycle(new_cap.id());
+            return Err(CapError::OutOfMemory);
+        }
 
         self.stats
             .capabilities_delegated
@@ -271,13 +324,14 @@ impl CapabilityManager {
     pub fn revoke(&self, cap: CapabilityToken) -> Result<(), CapError> {
         #[cfg(feature = "alloc")]
         {
-            // The subtree is read before taking the registry lock; the
-            // derivation tree has its own lock and is never taken inside
-            // the registry's.
-            let descendants = super::revocation::get_derivation_tree(cap.id());
             let mut revoked = alloc::vec::Vec::new();
             {
+                // The subtree is read under the registry lock (order:
+                // registry, then tree), so it includes every delegation
+                // registered before this point and none can be added under
+                // a revoked parent afterwards (see `delegate`).
                 let mut registry = self.registry.write();
+                let descendants = super::revocation::get_derivation_tree(cap.id());
                 let root = registry
                     .get_mut(&cap.id())
                     .ok_or(CapError::InvalidCapability)?;
