@@ -91,7 +91,9 @@ pub struct Process {
     pub priority: Mutex<ProcessPriority>,
 
     /// Virtual address space
-    pub memory_space: Mutex<VirtualAddressSpace>,
+    /// The address space. A sleeping lock: a page fault that finds it held
+    /// waits instead of failing (N-138).
+    pub memory_space: crate::sync::sleep_mutex::SleepMutex<VirtualAddressSpace>,
 
     /// Capability space
     pub capability_space: Mutex<CapabilitySpace>,
@@ -269,7 +271,7 @@ impl Process {
             name,
             state: AtomicU32::new(ProcessState::Creating as u32),
             priority: Mutex::new(priority),
-            memory_space: Mutex::new(VirtualAddressSpace::new()),
+            memory_space: crate::sync::sleep_mutex::SleepMutex::new(VirtualAddressSpace::new()),
             capability_space: Mutex::new(CapabilitySpace::new()),
             file_table: Mutex::new(FileTable::new()),
             threads: Mutex::new(BTreeMap::new()),

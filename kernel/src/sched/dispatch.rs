@@ -867,6 +867,24 @@ extern "C" fn idle_entry(_: usize) {
     }
 }
 
+/// The key of the task running on this CPU (0 before the dispatcher
+/// starts), without taking any lock.
+pub fn current_key() -> TaskKey {
+    if !started() {
+        return 0;
+    }
+    let Some(cpu) = this_cpu() else {
+        return 0;
+    };
+    let p = CURRENT[cpu].load(Ordering::Acquire);
+    if p.is_null() {
+        return 0;
+    }
+    // SAFETY: as in `current_owner` -- the current task stays alive while
+    // it is current, and only this CPU replaces it.
+    unsafe { (*p).key }
+}
+
 /// The (pid, tid) of the user thread running on this CPU, without taking
 /// any lock (safe in fault handlers).
 pub fn current_owner() -> Option<(u64, u64)> {

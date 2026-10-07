@@ -141,15 +141,16 @@ fn try_demand_page_in(
     let vaddr = VirtualAddress::new(info.faulting_address);
 
     // Check whether the faulting address is within any existing mapping.
-    // Use try_lock() to avoid deadlock: the page fault handler runs from IST
-    // interrupt context, so if the syscall path already holds memory_space.lock(),
-    // a blocking .lock() would spin forever and GP fault on the IST stack.
-    let memory_space = process
-        .memory_space
-        .try_lock()
-        .ok_or(KernelError::NotInitialized {
-            subsystem: "memory_space (lock held)",
-        })?;
+    // The lock sleeps if another thread holds it (N-138); it is refused
+    // only when this thread holds it itself (a system call copying user
+    // memory under it), where waiting would deadlock.
+    let memory_space =
+        process
+            .memory_space
+            .lock_unless_mine()
+            .ok_or(KernelError::NotInitialized {
+                subsystem: "memory_space (held by this thread)",
+            })?;
 
     #[cfg(feature = "alloc")]
     {
@@ -189,7 +190,7 @@ fn try_demand_page_in(
                 let mut memory_space_mut =
                     process
                         .memory_space
-                        .try_lock()
+                        .lock_unless_mine()
                         .ok_or(KernelError::NotInitialized {
                             subsystem: "memory_space (lock held, map)",
                         })?;
@@ -224,20 +225,21 @@ fn try_copy_on_write(info: &PageFaultInfo) -> Result<(), KernelError> {
 }
 
 /// Resolve a write to a copy-on-write page of `process` (see
-/// `VirtualAddressSpace::resolve_cow_fault`). Uses `try_lock`: the fault may
-/// have interrupted code that holds the memory-space lock.
+/// `VirtualAddressSpace::resolve_cow_fault`). Refused only when this thread
+/// holds the address-space lock itself (see `try_demand_page_in`).
 fn resolve_cow_in(
     process: &crate::process::Process,
     info: &PageFaultInfo,
 ) -> Result<(), KernelError> {
     #[cfg(feature = "alloc")]
     {
-        let memory_space = process
-            .memory_space
-            .try_lock()
-            .ok_or(KernelError::NotInitialized {
-                subsystem: "memory_space (lock held)",
-            })?;
+        let memory_space =
+            process
+                .memory_space
+                .lock_unless_mine()
+                .ok_or(KernelError::NotInitialized {
+                    subsystem: "memory_space (lock held)",
+                })?;
         if memory_space.resolve_cow_fault(info.faulting_address)? {
             return Ok(());
         }
@@ -266,12 +268,13 @@ fn try_stack_growth(info: &PageFaultInfo) -> Result<(), KernelError> {
         subsystem: "process",
     })?;
 
-    let memory_space = process
-        .memory_space
-        .try_lock()
-        .ok_or(KernelError::NotInitialized {
-            subsystem: "memory_space (lock held, stack)",
-        })?;
+    let memory_space =
+        process
+            .memory_space
+            .lock_unless_mine()
+            .ok_or(KernelError::NotInitialized {
+                subsystem: "memory_space (lock held, stack)",
+            })?;
     let stack_top = memory_space.stack_top() as u64;
     let stack_size = memory_space.user_stack_size() as u64;
     let stack_bottom = stack_top - stack_size;
@@ -327,7 +330,7 @@ fn try_stack_growth(info: &PageFaultInfo) -> Result<(), KernelError> {
     let mut memory_space_mut =
         process
             .memory_space
-            .try_lock()
+            .lock_unless_mine()
             .ok_or(KernelError::NotInitialized {
                 subsystem: "memory_space (lock held, stack map)",
             })?;
