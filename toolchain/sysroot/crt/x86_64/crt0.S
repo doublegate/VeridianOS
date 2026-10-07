@@ -59,3 +59,6 @@ _exit:
     ud2
 
 .size _exit, . - _exit
+
+/* No executable stack. */
+.section .note.GNU-stack,"",%progbits

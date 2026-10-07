@@ -88,3 +88,6 @@ _fini:
 #else
 #error "Unsupported architecture for VeridianOS crti.S"
 #endif
+
+/* No executable stack. */
+.section .note.GNU-stack,"",%progbits

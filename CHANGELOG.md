@@ -354,6 +354,12 @@
 
 ### Fixed
 
+- **No executable stacks, and a warning-free userland build.** The VeridianOS GCC target never
+  emitted `.note.GNU-stack`, nor did the crt objects, so every program the cross toolchain
+  linked got an executable stack and ld warned for each. The target now marks objects as FreeBSD
+  and GNU/Linux do (`ports/gcc/patches/0001-veridian-target.patch`) and the crt sources carry the
+  note; the native libc builds cleanly with `-Wpedantic` too. The toolchain builder records each
+  patch's hash, so a tree patched with an older version is reported instead of being reused.
 - **wait, getcwd and process groups behave as on Linux (N-212 to N-216).** pid arguments are
   ints (a zero-extended -1 was pid 4294967295); waiting for a non-child is ECHILD, WNOHANG with
   nothing to report no longer writes the status, and `waitid` supports WNOWAIT; `getcwd` returns

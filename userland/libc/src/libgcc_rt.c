@@ -33,8 +33,9 @@ typedef          long long di_int;
 typedef unsigned long long du_int;
 
 #ifdef __SIZEOF_INT128__
-typedef          __int128 ti_int;
-typedef unsigned __int128 tu_int;
+/* __extension__: __int128 is a GCC extension (-Wpedantic). */
+__extension__ typedef          __int128 ti_int;
+__extension__ typedef unsigned __int128 tu_int;
 #endif
 
 typedef union {

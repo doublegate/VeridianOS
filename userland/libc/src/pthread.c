@@ -469,9 +469,11 @@ int pthread_create(pthread_t *thread,
 
     /* Set up the child stack: push start_routine and arg at the top so the
      * kernel entry trampoline can pop them. Stack grows downward. */
-    void **child_stack_top = (void **)((uint8_t *)stack + stack_size);
-    *(--child_stack_top) = arg;
-    *(--child_stack_top) = (void *)start_routine;
+    /* Slots of uintptr_t: ISO C converts a function pointer to an
+     * integer, but not to void * (-Wpedantic). */
+    uintptr_t *child_stack_top = (uintptr_t *)((uint8_t *)stack + stack_size);
+    *(--child_stack_top) = (uintptr_t)arg;
+    *(--child_stack_top) = (uintptr_t)start_routine;
     unsigned long flags = CLONE_VM | CLONE_FS | CLONE_FILES | CLONE_SIGHAND |
                           CLONE_THREAD | CLONE_SETTLS |
                           CLONE_CHILD_CLEARTID | CLONE_CHILD_SETTID | CLONE_PARENT_SETTID;

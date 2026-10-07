@@ -203,6 +203,26 @@ create_directories() {
 # ---------------------------------------------------------------------------
 # Step 3: Download source tarballs
 # ---------------------------------------------------------------------------
+# Apply a patch to an extracted source tree once. The stamp records the
+# patch's SHA-256: a tree patched with an older version of it cannot be
+# patched again, and is reported instead of being silently built as it is.
+apply_patch_once() {
+    local tree="$1" patch_file="$2" label="$3"
+    local pname sum stamp
+    pname="$(basename "${patch_file}")"
+    sum="$(sha256sum "${patch_file}" | cut -d' ' -f1)"
+    stamp="${tree}/.applied-${pname}"
+    if [[ -f "${stamp}" ]]; then
+        [[ "$(cat "${stamp}")" == "${sum}" ]] ||
+            die "${tree} has an older ${label}/${pname}; remove the tree to re-extract it"
+        info "Patch already applied: ${label}/${pname}"
+        return 0
+    fi
+    info "Applying: ${label}/${pname}"
+    patch -d "${tree}" -p1 < "${patch_file}" || die "Failed to apply patch: ${patch_file}"
+    echo "${sum}" > "${stamp}"
+}
+
 download_sources() {
     step "Downloading source tarballs"
 
@@ -309,17 +329,7 @@ apply_patches() {
     if [[ -d "${patches_dir}" ]]; then
         for patch_file in "${patches_dir}"/*.patch; do
             [[ -f "${patch_file}" ]] || continue
-            local pname
-            pname="$(basename "${patch_file}")"
-            local stamp="${srcdir}/binutils-${BINUTILS_VERSION}/.applied-${pname}"
-            if [[ -f "${stamp}" ]]; then
-                info "Patch already applied: binutils/${pname}"
-            else
-                info "Applying: binutils/${pname}"
-                patch -d "${srcdir}/binutils-${BINUTILS_VERSION}" -p1 < "${patch_file}" \
-                    || die "Failed to apply patch: ${patch_file}"
-                touch "${stamp}"
-            fi
+            apply_patch_once "${srcdir}/binutils-${BINUTILS_VERSION}" "${patch_file}" binutils
         done
     else
         warn "No binutils patches directory found at ${patches_dir}"
@@ -330,17 +340,7 @@ apply_patches() {
     if [[ -d "${patches_dir}" ]]; then
         for patch_file in "${patches_dir}"/*.patch; do
             [[ -f "${patch_file}" ]] || continue
-            local pname
-            pname="$(basename "${patch_file}")"
-            local stamp="${srcdir}/gcc-${GCC_VERSION}/.applied-${pname}"
-            if [[ -f "${stamp}" ]]; then
-                info "Patch already applied: gcc/${pname}"
-            else
-                info "Applying: gcc/${pname}"
-                patch -d "${srcdir}/gcc-${GCC_VERSION}" -p1 < "${patch_file}" \
-                    || die "Failed to apply patch: ${patch_file}"
-                touch "${stamp}"
-            fi
+            apply_patch_once "${srcdir}/gcc-${GCC_VERSION}" "${patch_file}" gcc
         done
     else
         warn "No GCC patches directory found at ${patches_dir}"

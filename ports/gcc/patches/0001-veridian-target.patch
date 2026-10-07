@@ -21,11 +21,11 @@ Modified files:
     (VeridianOS provides its own headers).
 ---
  gcc/config.gcc          | 27 ++++++++++++++++++++++
- gcc/config/veridian.h   | 70 +++++++++++++++++++++++++++++++++++++++++++++++++
+ gcc/config/veridian.h   | 76 +++++++++++++++++++++++++++++++++++++++++++++++++++++++
  gcc/config/t-veridian   |  8 ++++++
  libgcc/config.host      | 15 +++++++++++
  fixincludes/mkfixinc.sh |  1 +
- 5 files changed, 121 insertions(+)
+ 5 files changed, 127 insertions(+)
  create mode 100644 gcc/config/veridian.h
  create mode 100644 gcc/config/t-veridian
 
@@ -77,7 +77,7 @@ diff --git a/gcc/config.gcc b/gcc/config.gcc
 diff --git a/gcc/config/veridian.h b/gcc/config/veridian.h
 --- a/gcc/config/veridian.h
 +++ b/gcc/config/veridian.h
-@@ -0,0 +1,70 @@
+@@ -0,0 +1,76 @@
 +/* Target configuration for VeridianOS.
 +   Copyright (C) 2026 Free Software Foundation, Inc.
 +
@@ -147,6 +147,12 @@ diff --git a/gcc/config/veridian.h b/gcc/config/veridian.h
 +   STARTFILE_SPEC / ENDFILE_SPEC already request.  */
 +#undef  LINK_GCC_C_SEQUENCE_SPEC
 +#define LINK_GCC_C_SEQUENCE_SPEC "%G %L"
++
++/* Every object says it needs no executable stack (.note.GNU-stack), as
++   on GNU/Linux and FreeBSD: without the note ld warns and marks the
++   program's stack executable.  (riscv.cc emits it itself.)  */
++#undef  TARGET_ASM_FILE_END
++#define TARGET_ASM_FILE_END file_end_indicate_exec_stack
 +
 diff --git a/gcc/config/t-veridian b/gcc/config/t-veridian
 --- a/gcc/config/t-veridian
