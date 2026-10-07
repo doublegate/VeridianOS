@@ -9,8 +9,9 @@
 pub mod bootloader;
 pub mod cache_aligned;
 pub mod cache_topology;
-pub mod demand_paging;
 pub mod frame_allocator;
+#[cfg(feature = "alloc")]
+pub mod frame_refs;
 pub mod heap;
 pub mod ksm;
 pub mod page_fault;
@@ -152,6 +153,9 @@ impl PageFlags {
     pub const DIRTY: Self = Self(1 << 6);
     pub const HUGE: Self = Self(1 << 7);
     pub const GLOBAL: Self = Self(1 << 8);
+    /// Software bit (ignored by the MMU): the page is shared copy-on-write
+    /// and mapped read-only; a write fault gives the writer a private copy.
+    pub const COW: Self = Self(1 << 9);
     pub const NO_EXECUTE: Self = Self(1 << 63);
 
     // Alias for NO_EXECUTE
@@ -159,6 +163,11 @@ impl PageFlags {
 
     pub fn contains(&self, other: Self) -> bool {
         (self.0 & other.0) == other.0
+    }
+
+    /// These flags without `other`.
+    pub const fn without(self, other: Self) -> Self {
+        Self(self.0 & !other.0)
     }
 }
 

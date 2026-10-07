@@ -104,20 +104,22 @@ fn try_demand_page(info: &PageFaultInfo) -> Result<(), KernelError> {
 /// (x86_64 `usercopy`). Returns whether the page is now present.
 ///
 /// Deliberately narrower than [`handle_page_fault`]:
-/// - only not-present faults: a protection fault on a present page is never
+/// - not-present faults, and writes to copy-on-write pages of mappings the
+///   process may write: any other protection fault on a present page is never
 ///   "fixed" on the kernel's behalf, so a syscall can never write a page the
-///   process itself may not write;
-/// - only demand paging, checked against the mapping as a *user* access (USER
-///   required, WRITABLE required for writes) -- no CoW, no stack growth;
+///   process itself may not write (a `read()` into a buffer shared after a fork
+///   would otherwise fail with EFAULT);
+/// - demand paging, checked against the mapping as a *user* access (USER
+///   required, WRITABLE required for writes), and CoW -- no stack growth;
 /// - no blocking on the scheduler lock, and never a signal: on any failure the
 ///   copy returns EFAULT instead.
 pub fn resolve_user_copy_fault(info: &PageFaultInfo) -> bool {
-    if info.reason != PageFaultReason::NotPresent {
-        return false;
-    }
     let Some(process) = crate::process::try_current_process() else {
         return false;
     };
+    if info.reason != PageFaultReason::NotPresent {
+        return info.was_write && resolve_cow_in(&process, info).is_ok();
+    }
     let as_user = PageFaultInfo {
         was_user_mode: true,
         ..*info
@@ -208,17 +210,35 @@ fn try_demand_page_in(
 /// If the page is mapped read-only and is marked for CoW, create a private
 /// copy of the page, map it as writable, and return success.
 fn try_copy_on_write(info: &PageFaultInfo) -> Result<(), KernelError> {
-    // Copy-on-write requires detecting CoW-marked pages. The current VAS
-    // implementation does not track CoW state, so we cannot resolve it yet.
-    // When CoW tracking is added (e.g., a `cow: bool` field on
-    // VirtualMapping), this handler will:
-    //   1. Allocate a new physical frame.
-    //   2. Copy the old frame's contents to the new frame.
-    //   3. Remap the page as writable with the new frame.
-    //   4. Flush the TLB entry.
-    let _ = info;
-    Err(KernelError::NotImplemented {
-        feature: "copy-on-write page handling",
+    let process = crate::process::current_process().ok_or(KernelError::NotInitialized {
+        subsystem: "process",
+    })?;
+    resolve_cow_in(&process, info)
+}
+
+/// Resolve a write to a copy-on-write page of `process` (see
+/// `VirtualAddressSpace::resolve_cow_fault`). Uses `try_lock`: the fault may
+/// have interrupted code that holds the memory-space lock.
+fn resolve_cow_in(
+    process: &crate::process::Process,
+    info: &PageFaultInfo,
+) -> Result<(), KernelError> {
+    #[cfg(feature = "alloc")]
+    {
+        let memory_space = process
+            .memory_space
+            .try_lock()
+            .ok_or(KernelError::NotInitialized {
+                subsystem: "memory_space (lock held)",
+            })?;
+        if memory_space.resolve_cow_fault(info.faulting_address)? {
+            return Ok(());
+        }
+    }
+    #[cfg(not(feature = "alloc"))]
+    let _ = (process, info);
+    Err(KernelError::InvalidAddress {
+        addr: info.faulting_address as usize,
     })
 }
 

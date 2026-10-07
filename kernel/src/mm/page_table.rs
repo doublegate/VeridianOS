@@ -55,7 +55,9 @@ impl PageTableEntry {
 
     /// Get flags for this entry
     pub const fn flags(&self) -> PageFlags {
-        PageFlags(self.entry & 0xFFF)
+        // The low flag bits and NX (bit 63). NX used to be dropped, so a
+        // fork re-mapped the child's data and stack pages executable.
+        PageFlags(self.entry & (0xFFF | PageFlags::NO_EXECUTE.0))
     }
 
     /// Set this entry to map to a frame with given flags
@@ -768,4 +770,25 @@ pub trait FrameAllocator {
         count: usize,
         numa_node: Option<usize>,
     ) -> Result<FrameNumber, super::FrameAllocatorError>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn entry_flags_keep_no_execute_and_cow() {
+        let mut e = PageTableEntry::empty();
+        let flags = PageFlags::PRESENT | PageFlags::USER | PageFlags::COW | PageFlags::NO_EXECUTE;
+        e.set(FrameNumber::new(0x1234), flags);
+        let got = e.flags();
+        assert!(
+            got.contains(PageFlags::NO_EXECUTE),
+            "NX must survive a read-back"
+        );
+        assert!(got.contains(PageFlags::COW));
+        assert!(!got.contains(PageFlags::WRITABLE));
+        assert_eq!(e.frame(), Some(FrameNumber::new(0x1234)));
+        assert!(!got.without(PageFlags::COW).contains(PageFlags::COW));
+    }
 }

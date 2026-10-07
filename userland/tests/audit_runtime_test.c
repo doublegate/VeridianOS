@@ -59,6 +59,79 @@ static void test_fork_exit(void)
     report("fork_exit_reap_x40", ok, "fork/waitpid/exit status mismatch");
 }
 
+/* --- Copy-on-write fork (MEM-PERF-03, PROC-ARCH-01). ------------------
+ * Parent and child share pages after fork; each side's writes must stay its
+ * own. The child's read() lands in a page it still shares with its parent,
+ * so the kernel's user-copy write has to take a private copy (a protection
+ * fault on a present page, resolved as COW instead of EFAULT), and the
+ * parent must not see the data. The pipe is filled before the fork so no
+ * syscall blocks (a blocked syscall cannot yet yield to another process). */
+static int cow_global = 7;
+
+/* CowShared from /proc/meminfo, in kB (-1 if unreadable). */
+static int cow_shared_kb(void)
+{
+    char info[1024];
+    int mfd = open("/proc/meminfo", O_RDONLY);
+    if (mfd < 0)
+        return -1;
+    ssize_t m = read(mfd, info, sizeof(info) - 1);
+    close(mfd);
+    if (m <= 0)
+        return -1;
+    info[m] = 0;
+    const char *c = strstr(info, "CowShared:");
+    return c ? atoi(c + 10) : -1;
+}
+
+static void test_cow(void)
+{
+    char stack_buf[64];
+    memset(stack_buf, 's', sizeof(stack_buf));
+    char *heap = malloc(8192);
+    int fds[2];
+    if (!heap || pipe(fds) != 0 || write(fds[1], "hello", 5) != 5) {
+        report("fork_copy_on_write_isolation", 0, "setup failed");
+        return;
+    }
+    memset(heap, 'p', 8192);
+    pid_t pid = fork();
+    if (pid < 0) {
+        report("fork_copy_on_write_isolation", 0, "fork failed");
+        return;
+    }
+    if (pid == 0) {
+        /* While the parent is alive the pages are shared, which
+         * /proc/meminfo reports as CowShared (a deep-copying fork shows 0). */
+        if (cow_shared_kb() <= 0)
+            _exit(5);
+        cow_global = 99;
+        stack_buf[0] = 'S';
+        heap[4096] = 'C';
+        ssize_t n = read(fds[0], heap, 5);
+        int ok = n == 5 && memcmp(heap, "hello", 5) == 0 && cow_global == 99 &&
+                 stack_buf[0] == 'S' && heap[4096] == 'C';
+        _exit(ok ? 0 : (n < 0 ? 10 + (errno & 0x3f) : 1));
+    }
+    int status = 0;
+    int child_ok = waitpid(pid, &status, 0) == pid && WIFEXITED(status) &&
+                   WEXITSTATUS(status) == 0;
+    int parent_ok = cow_global == 7 && stack_buf[0] == 's' && heap[0] == 'p' &&
+                    heap[4096] == 'p';
+    /* With the child gone nothing is shared any more: owner counts drop. */
+    int shared_after = cow_shared_kb();
+    parent_ok = parent_ok && shared_after == 0;
+    cow_global = 8; /* the last owner just regains write access */
+    parent_ok = parent_ok && cow_global == 8;
+    static char why[96];
+    snprintf(why, sizeof(why), "child %d (status 0x%x) parent %d, CowShared %d kB after", child_ok,
+             (unsigned)status, parent_ok, shared_after);
+    report("fork_copy_on_write_isolation", child_ok && parent_ok, why);
+    close(fds[0]);
+    close(fds[1]);
+    free(heap);
+}
+
 /* --- Joinable and detached thread exit (PROC-SEC-02). ------------------ */
 static void *thread_ret(void *arg)
 {
@@ -716,6 +789,7 @@ int main(int argc, char **argv)
         test_threads();
     }
     test_fork_exit();
+    test_cow();
     test_rename();
     test_nonroot_permissions();
     test_sticky_dir();

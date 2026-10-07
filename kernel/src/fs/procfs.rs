@@ -110,7 +110,8 @@ impl VfsNode for ProcNode {
                              Buffers:        {:>8} kB\n\
                              Cached:         {:>8} kB\n\
                              Slab:           {:>8} kB\n\
-                             MemUsed:        {:>8} kB\n",
+                             MemUsed:        {:>8} kB\n\
+                             CowShared:      {:>8} kB\n",
                             total_kb,
                             free_kb,
                             available_kb,
@@ -118,6 +119,9 @@ impl VfsNode for ProcNode {
                             cached_kb,
                             slab_kb,
                             used_kb,
+                            // Frames shared copy-on-write between processes
+                            // (each counted once).
+                            crate::mm::frame_refs::shared_frames() * 4,
                         )
                     }
                     "cpuinfo" => generate_cpuinfo(),

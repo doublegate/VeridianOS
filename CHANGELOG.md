@@ -25,6 +25,10 @@
   - that uptime follows the hardware clock;
   - that a TLB shootdown is confirmed by every CPU.
 
+- **Copy-on-write fork (MEM-PERF-03, PROC-ARCH-01; ADR 0005).** Fork shares the parent's
+  pages instead of copying them. The first write by either side takes a private copy, and
+  shared frames are freed by their last owner. `/proc/meminfo` reports `CowShared`.
+
 ### Changed
 
 - The AArch64 kernel is linked at 0x40200000 (was 0x40080000), so QEMU has room to load the
@@ -32,6 +36,8 @@
 
 ### Security
 
+- **Forked children no longer run with executable data pages (N-62).** Reading a page-table
+  entry dropped its no-execute bit, so fork mapped the child's data, heap and stack executable.
 - **Package signatures use real FIPS 204 ML-DSA-65 verification (N-55).** The previous
   "Dilithium" verifier never used the public key and accepted any non-zero signature. It is
   replaced by the RustCrypto `ml-dsa` crate, pinned to NIST ACVP vectors. No post-quantum
@@ -57,6 +63,8 @@
 ### Removed
 
 - The unused slab allocator and `mm/vmm.rs` (MEM-INC-02).
+- The never-consulted global demand-paging and CoW tables, and the dead fork and fault paths
+  that used them (MEM-ARCH-02, N-07).
 - The unused in-kernel `stdlib` module (1,018 lines with no callers).
 
 ---
