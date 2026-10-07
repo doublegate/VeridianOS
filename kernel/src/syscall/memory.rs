@@ -135,7 +135,7 @@ pub fn sys_mmap(
     // The 6th arg (r9 = offset) is saved in the SyscallFrame on the stack.
     // For Linux ABI processes, extract fd directly from arg5 and offset
     // from the saved r9 register in the SyscallFrame.
-    let linux_abi = crate::syscall::linux_compat::is_linux_abi(caller_pid);
+    let linux_abi = crate::syscall::linux_compat::is_linux_abi(&proc);
     let (fd, offset) = if is_anonymous {
         (0usize, 0usize)
     } else if linux_abi {

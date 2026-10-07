@@ -16,47 +16,14 @@
 //! Only syscalls needed for musl libc initialization and basic I/O are
 //! mapped here. Additional mappings can be added as needed.
 
-use core::sync::atomic::{AtomicU64, Ordering};
-
 use super::{Syscall, SyscallError, SyscallResult};
 
-// =========================================================================
-// Per-process Linux ABI tracking
-// =========================================================================
-// Tracks which PIDs use the Linux x86_64 syscall ABI.
-// Uses a simple bitmap for the first 64 PIDs (sufficient for our use case
-// where we only launch a handful of user processes).
-
-/// Bitmap of PIDs using Linux ABI. Bit N = PID N uses Linux ABI.
-static LINUX_ABI_BITMAP: AtomicU64 = AtomicU64::new(0);
-
-/// Mark a PID as using the Linux x86_64 syscall ABI.
-pub(crate) fn set_linux_abi(pid: u64) {
-    if pid < 64 {
-        LINUX_ABI_BITMAP.fetch_or(1u64 << pid, Ordering::Release);
-    }
-}
-
-/// Mark a PID's children as using Linux ABI (for fork inheritance).
-pub(crate) fn inherit_linux_abi(parent_pid: u64, child_pid: u64) {
-    if parent_pid < 64 && child_pid < 64 {
-        let bitmap = LINUX_ABI_BITMAP.load(Ordering::Acquire);
-        if (bitmap & (1u64 << parent_pid)) != 0 {
-            LINUX_ABI_BITMAP.fetch_or(1u64 << child_pid, Ordering::Release);
-        }
-    }
-}
-
-/// Check if a PID uses the Linux x86_64 syscall ABI.
-pub(crate) fn is_linux_abi(pid: u64) -> bool {
-    if pid < 64 {
-        let bitmap = LINUX_ABI_BITMAP.load(Ordering::Acquire);
-        (bitmap & (1u64 << pid)) != 0
-    } else {
-        // PIDs >= 64: assume Linux ABI if loaded via load_user_program.
-        // For safety, default to false (VeridianOS native ABI).
-        false
-    }
+/// Whether `process` uses the Linux x86_64 syscall ABI (a flag on the
+/// process, inherited on fork; SYS-INC-01).
+pub(crate) fn is_linux_abi(process: &crate::process::Process) -> bool {
+    process
+        .linux_abi
+        .load(core::sync::atomic::Ordering::Acquire)
 }
 
 // =========================================================================

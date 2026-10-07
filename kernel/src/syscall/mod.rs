@@ -769,16 +769,16 @@ pub extern "C" fn syscall_handler(
     }
 
     // Get caller PID for audit logging
-    let caller_pid = crate::process::current_process()
-        .map(|p| p.pid.0)
-        .unwrap_or(0);
-
-    // Check per-process flag: does this process use the Linux x86_64 syscall ABI?
-    // Musl/glibc binaries loaded from the rootfs set this flag during
-    // load_user_program. When set, ALL syscall numbers are dispatched through
-    // the Linux compat layer (not VeridianOS numbering), and error codes are
-    // translated to Linux errno values on return.
-    let linux_abi = linux_compat::is_linux_abi(caller_pid);
+    //
+    // Per-process flag: does this process use the Linux x86_64 syscall ABI?
+    // When set, ALL syscall numbers are dispatched through the Linux compat
+    // layer (not VeridianOS numbering), and error codes are translated to
+    // Linux errno values on return. Nothing sets it yet (see the loader).
+    // The process reference is dropped here: exit and exec do not return,
+    // so an Arc held across the dispatch would never be released.
+    let (caller_pid, linux_abi) = crate::process::current_process()
+        .map(|p| (p.pid.0, linux_compat::is_linux_abi(&p)))
+        .unwrap_or((0, false));
 
     let result = if linux_abi {
         // Handle ppoll specially (different arg layout from poll)
