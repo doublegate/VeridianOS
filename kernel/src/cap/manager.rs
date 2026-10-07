@@ -231,18 +231,30 @@ impl CapabilityManager {
         // Ensure new rights are subset of source rights
         let derived_rights = source_rights.intersection(new_rights);
 
-        // Create new capability with same ID but potentially different rights
-        let new_cap = CapabilityToken::new(
-            cap.id(),
-            cap.generation(),
-            cap.cap_type(),
-            derived_rights.to_flags(),
-        );
-
-        // Insert into target space
-        target
-            .insert(new_cap, object, derived_rights)
-            .map_err(|_| CapError::OutOfMemory)?;
+        // A delegation is a capability of its own, recorded under its
+        // parent. It used to reuse the parent's ID, so revoking any one
+        // holder's copy revoked them all, and the derivation tree that
+        // cascading revocation walks was never filled (CAP-INC-02).
+        #[cfg(feature = "alloc")]
+        let new_cap = {
+            let id = self.id_allocator.allocate()?;
+            let new_cap = CapabilityToken::new(id, 0, cap.cap_type(), derived_rights.to_flags());
+            self.registry.write().insert(
+                id,
+                RegistryEntry {
+                    object: object.clone(),
+                    generation: AtomicU8::new(0),
+                    revoked: false,
+                },
+            );
+            if target.insert(new_cap, object, derived_rights).is_err() {
+                self.registry.write().remove(&id);
+                self.id_allocator.recycle(id);
+                return Err(CapError::OutOfMemory);
+            }
+            super::revocation::record_derivation(cap.id(), id);
+            new_cap
+        };
 
         self.stats
             .capabilities_delegated
@@ -254,32 +266,44 @@ impl CapabilityManager {
         Ok(new_cap)
     }
 
-    /// Revoke a capability globally
+    /// Revoke a capability globally, together with every capability
+    /// delegated from it, directly or transitively (CAP-INC-02).
     pub fn revoke(&self, cap: CapabilityToken) -> Result<(), CapError> {
         #[cfg(feature = "alloc")]
         {
-            let mut registry = self.registry.write();
-            let entry = registry
-                .get_mut(&cap.id())
-                .ok_or(CapError::InvalidCapability)?;
-
-            if entry.revoked {
-                return Ok(()); // Already revoked
+            // The subtree is read before taking the registry lock; the
+            // derivation tree has its own lock and is never taken inside
+            // the registry's.
+            let descendants = super::revocation::get_derivation_tree(cap.id());
+            let mut revoked = alloc::vec::Vec::new();
+            {
+                let mut registry = self.registry.write();
+                let root = registry
+                    .get_mut(&cap.id())
+                    .ok_or(CapError::InvalidCapability)?;
+                if root.revoked {
+                    return Ok(()); // Already revoked (and so is its subtree)
+                }
+                for id in core::iter::once(cap.id()).chain(descendants) {
+                    if let Some(entry) = registry.get_mut(&id) {
+                        if !entry.revoked {
+                            entry.revoked = true;
+                            // The generation the holders' tokens carry.
+                            let generation = entry.generation.fetch_add(1, Ordering::SeqCst);
+                            revoked.push((id, generation));
+                        }
+                    }
+                }
             }
 
-            entry.revoked = true;
-            entry.generation.fetch_add(1, Ordering::SeqCst);
+            self.stats
+                .capabilities_revoked
+                .fetch_add(revoked.len() as u64, Ordering::Relaxed);
+            for (i, &(id, generation)) in revoked.iter().enumerate() {
+                crate::security::audit::log_capability_op(0, id, 0);
+                super::revocation::record_revoked(id, generation, i > 0);
+            }
         }
-
-        self.stats
-            .capabilities_revoked
-            .fetch_add(1, Ordering::Relaxed);
-
-        // Audit log: capability revocation
-        crate::security::audit::log_capability_op(0, cap.id(), 0);
-
-        // Notify all processes of revocation via the revocation subsystem
-        super::revocation::broadcast_capability_revoked(cap);
 
         Ok(())
     }
@@ -295,6 +319,7 @@ impl CapabilityManager {
 
             // Recycle the ID
             self.id_allocator.recycle(cap.id());
+            super::revocation::cleanup_capability(cap.id());
         }
 
         self.stats

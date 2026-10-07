@@ -340,6 +340,40 @@ mod manager_tests {
         assert!(!target_space.check_rights(new_cap, token::Rights::GRANT));
     }
 
+    /// Delegation mints a capability of its own, recorded under its parent,
+    /// so one delegation can be revoked without the parent, and revoking the
+    /// parent takes every delegation with it (CAP-INC-02).
+    #[test]
+    fn delegation_has_its_own_id_and_revocation_cascades() {
+        let a = space::CapabilitySpace::new();
+        let b = space::CapabilitySpace::new();
+        let c = space::CapabilitySpace::new();
+        let obj = object::ObjectRef::Process {
+            pid: ProcessId(4321),
+        };
+        let all = token::Rights::READ | token::Rights::GRANT;
+        let mgr = manager::cap_manager();
+        let root = mgr.create_capability(obj.clone(), all, &a).unwrap();
+        let child = mgr.delegate(root, &a, &b, all).unwrap();
+        let grandchild = mgr.delegate(child, &b, &c, token::Rights::READ).unwrap();
+        assert_ne!(child.id(), root.id());
+        assert_ne!(grandchild.id(), child.id());
+
+        // Revoking one delegation leaves its parent alone.
+        let sibling = mgr.delegate(root, &a, &c, token::Rights::READ).unwrap();
+        revocation::revoke_capability(sibling).unwrap();
+        assert!(manager::check_capability(sibling, token::Rights::READ, &c).is_err());
+        assert!(manager::check_capability(root, token::Rights::READ, &a).is_ok());
+        assert!(manager::check_capability(grandchild, token::Rights::READ, &c).is_ok());
+
+        // Revoking the root cascades down the derivation tree.
+        revocation::revoke_capability(root).unwrap();
+        assert!(manager::check_capability(root, token::Rights::READ, &a).is_err());
+        assert!(manager::check_capability(child, token::Rights::READ, &b).is_err());
+        assert!(manager::check_capability(grandchild, token::Rights::READ, &c).is_err());
+        assert!(revocation::is_revoked(grandchild));
+    }
+
     #[test]
     fn test_capability_check() {
         let cap_space = space::CapabilitySpace::new();

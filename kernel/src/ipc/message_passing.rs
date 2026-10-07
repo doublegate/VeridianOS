@@ -222,7 +222,7 @@ pub(crate) static ENDPOINT_REGISTRY: EndpointRegistry = EndpointRegistry::new();
 
 /// Send a message to an endpoint
 #[cfg(feature = "alloc")]
-pub fn send_to_endpoint(msg: Message, endpoint_id: EndpointId) -> Result<()> {
+pub fn send_to_endpoint(mut msg: Message, endpoint_id: EndpointId) -> Result<()> {
     let endpoint = ENDPOINT_REGISTRY
         .get(endpoint_id)
         .ok_or(IpcError::EndpointNotFound)?;
@@ -243,17 +243,23 @@ pub fn send_to_endpoint(msg: Message, endpoint_id: EndpointId) -> Result<()> {
             if let Some(sender) = crate::process::current_process() {
                 if let Some(real_sender) = crate::process::table::get_process(sender.pid) {
                     let sender_cap_space = real_sender.capability_space.lock();
-                    // Transfer capability to receiver
-                    if let Err(e) = crate::ipc::cap_transfer::transfer_capability(
+                    // Transfer capability to receiver. A delegation is a
+                    // capability of its own (CAP-INC-02), so the receiver
+                    // gets its token, not the sender's.
+                    match crate::ipc::cap_transfer::transfer_capability(
                         &msg,
                         &sender_cap_space,
                         receiver_pid,
                     ) {
-                        // Log capability transfer failure but don't fail the message send
-                        #[cfg(target_arch = "x86_64")]
-                        println!("[IPC] Capability transfer failed: {:?}", e);
-                        #[cfg(not(target_arch = "x86_64"))]
-                        let _ = e;
+                        Ok(Some(delegated)) => msg.set_capability(delegated.to_u64()),
+                        Ok(None) => {}
+                        Err(e) => {
+                            // Log capability transfer failure but don't fail the message send
+                            #[cfg(target_arch = "x86_64")]
+                            println!("[IPC] Capability transfer failed: {:?}", e);
+                            #[cfg(not(target_arch = "x86_64"))]
+                            let _ = e;
+                        }
                     }
                 }
             }

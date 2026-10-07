@@ -6,7 +6,7 @@
 //!
 //! When capabilities are delegated (derived), the parent-child relationship is
 //! recorded in a global derivation tree. Revoking a parent capability
-//! transitively revokes all descendants via [`revoke_cascade`].
+//! transitively revokes all descendants (`CapabilityManager::revoke`).
 //!
 //! # Revocation Notifications
 //!
@@ -16,7 +16,7 @@
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use super::{manager::cap_manager, space::CapabilitySpace, token::CapabilityToken};
+use super::{manager::cap_manager, token::CapabilityToken};
 use crate::error::KernelError;
 
 #[cfg(feature = "alloc")]
@@ -51,10 +51,17 @@ impl RevocationList {
 
     /// Add a capability to the revocation list
     pub fn add(&self, cap: CapabilityToken) {
+        self.add_id(cap.id(), cap.generation());
+    }
+
+    /// Add a capability by ID and generation.
+    pub fn add_id(&self, id: u64, generation: u8) {
         #[cfg(feature = "alloc")]
         {
-            self.revoked.write().insert((cap.id(), cap.generation()));
+            self.revoked.write().insert((id, generation));
         }
+        #[cfg(not(feature = "alloc"))]
+        let _ = (id, generation);
         self.epoch.fetch_add(1, Ordering::SeqCst);
     }
 
@@ -85,18 +92,30 @@ impl RevocationList {
 /// Global revocation list
 static REVOCATION_LIST: RevocationList = RevocationList::new();
 
-/// Revoke a capability and all derived capabilities
+/// Revoke a capability and all derived capabilities.
+///
+/// The manager revokes the capability and its derivation subtree and
+/// reports each one through [`record_revoked`], which lists and broadcasts
+/// it exactly once. A token the manager does not know is still listed, so
+/// a forged or stale token is refused by the list as well.
 pub fn revoke_capability(cap: CapabilityToken) -> Result<(), KernelError> {
-    // Add to global revocation list
-    REVOCATION_LIST.add(cap);
-
-    // Mark as revoked in capability manager
-    cap_manager().revoke(cap).ok();
-
-    // Notify all processes that might have this capability
-    broadcast_revocation(cap);
-
+    if cap_manager().revoke(cap).is_err() {
+        REVOCATION_LIST.add(cap);
+    }
     Ok(())
+}
+
+/// Called by the capability manager for each capability it revokes:
+/// list `(id, generation)` -- the generation the holders' tokens carry --
+/// and broadcast it once. `derived` marks a capability revoked because an
+/// ancestor was.
+pub(super) fn record_revoked(id: u64, generation: u8, derived: bool) {
+    REVOCATION_LIST.add_id(id, generation);
+    broadcast_revocation(id);
+    #[cfg(feature = "alloc")]
+    if derived {
+        push_revocation_notifications(&[id], RevocationReason::ParentRevoked);
+    }
 }
 
 /// Check if a capability is revoked (fast path)
@@ -105,77 +124,21 @@ pub fn is_revoked(cap: CapabilityToken) -> bool {
     REVOCATION_LIST.is_revoked(cap)
 }
 
-/// Public entry point for capability revocation broadcast from manager
-pub fn broadcast_capability_revoked(cap: CapabilityToken) {
-    broadcast_revocation(cap);
-}
-
 /// Broadcast revocation to all processes
 ///
-/// Iterates through the process table and marks the revoked capability
-/// as invalid in each process's capability space.
-fn broadcast_revocation(_cap: CapabilityToken) {
+/// Tells the process server, which audits it per process. Validity itself
+/// is global (the manager's registry and this list), so nothing here is
+/// needed for the revocation to take effect. Before the process server
+/// exists (early boot, host tests) there is no one to tell.
+fn broadcast_revocation(id: u64) {
     #[cfg(feature = "alloc")]
-    {
-        // Notify via IPC: send revocation event to process server
-        let process_server = crate::services::process_server::get_process_server();
-        let pids = process_server.list_process_ids();
-        let _notified_count = pids.len();
-        for pid in pids {
-            // Mark the capability as revoked in each process's capability space
-            // The process server tracks per-process capability spaces
-            process_server.notify_capability_revoked(pid, _cap.id());
-        }
-        crate::println!(
-            "[CAP] Broadcast revocation of capability {} to {} processes",
-            _cap.id(),
-            _notified_count
-        );
-    }
-}
-
-/// Revocation with cascading - revoke all capabilities derived from this one
-pub fn revoke_cascading(
-    cap: CapabilityToken,
-    cap_space: &CapabilitySpace,
-) -> Result<u32, KernelError> {
-    let mut revoked_count = 0;
-
-    #[cfg(feature = "alloc")]
-    let mut to_revoke = Vec::new();
-
-    // Cache parent's object and rights BEFORE revoking (lookup would fail after)
-    let parent_info = cap_space.lookup_entry(cap);
-
-    // Now revoke the main capability
-    revoke_capability(cap)?;
-    revoked_count += 1;
-
-    // Find all capabilities that reference the same object
-    if let Some((object, parent_rights)) = parent_info {
-        #[cfg(feature = "alloc")]
-        {
-            // Iterate through all capabilities to find derived ones with same object
-            let _ = cap_space.iter_capabilities(|entry| {
-                if entry.object == object && entry.capability != cap {
-                    // A derived capability has a subset of the parent's rights
-                    if !entry.rights.contains(parent_rights) {
-                        to_revoke.push(entry.capability);
-                    }
-                }
-                true // Continue iteration
-            });
-
-            // Revoke all derived capabilities
-            for derived_cap in to_revoke {
-                if revoke_capability(derived_cap).is_ok() {
-                    revoked_count += 1;
-                }
-            }
+    if let Some(process_server) = crate::services::process_server::try_get_process_server() {
+        for pid in process_server.list_process_ids() {
+            process_server.notify_capability_revoked(pid, id);
         }
     }
-
-    Ok(revoked_count)
+    #[cfg(not(feature = "alloc"))]
+    let _ = id;
 }
 
 /// Batch revocation for efficiency
@@ -280,57 +243,6 @@ static DERIVATION_TREE: RwLock<BTreeMap<u64, Vec<u64>>> = RwLock::new(BTreeMap::
 pub fn record_derivation(parent_cap_id: u64, child_cap_id: u64) {
     let mut tree = DERIVATION_TREE.write();
     tree.entry(parent_cap_id).or_default().push(child_cap_id);
-}
-
-/// Revoke a capability and transitively revoke all derived capabilities.
-///
-/// Walks the derivation tree in breadth-first order, revoking each descendant.
-/// Returns the list of all capability IDs that were revoked (including the
-/// root).
-///
-/// Generation counters are checked before revocation: if a capability has been
-/// re-created with a newer generation, it is skipped (the revocation list add
-/// is a no-op for already-revoked IDs).
-#[cfg(feature = "alloc")]
-pub fn revoke_cascade(cap_id: u64) -> Vec<u64> {
-    let mut revoked_ids = Vec::new();
-    let mut queue = VecDeque::new();
-    queue.push_back(cap_id);
-
-    while let Some(current_id) = queue.pop_front() {
-        // Construct a token from the raw ID (generation 0 for lookup purposes).
-        // The revocation list and capability manager handle generation checks
-        // internally.
-        let cap = CapabilityToken::from_u64(current_id);
-
-        // Add to global revocation list
-        REVOCATION_LIST.add(cap);
-        // Mark as revoked in capability manager (best-effort)
-        cap_manager().revoke(cap).ok();
-
-        revoked_ids.push(current_id);
-
-        // Enqueue all children for transitive revocation
-        let tree = DERIVATION_TREE.read();
-        if let Some(children) = tree.get(&current_id) {
-            for &child_id in children {
-                // Avoid cycles (defensive)
-                if !revoked_ids.contains(&child_id) {
-                    queue.push_back(child_id);
-                }
-            }
-        }
-    }
-
-    // Broadcast revocation for all affected capabilities
-    for &id in &revoked_ids {
-        broadcast_revocation(CapabilityToken::from_u64(id));
-    }
-
-    // Push notifications for all revoked capabilities
-    push_revocation_notifications(&revoked_ids, RevocationReason::ParentRevoked);
-
-    revoked_ids
 }
 
 /// Get the full derivation subtree rooted at the given capability ID.
@@ -471,8 +383,10 @@ fn get_revocation_timestamp() -> u64 {
 fn push_revocation_notifications(cap_ids: &[u64], reason: RevocationReason) {
     let timestamp = get_revocation_timestamp();
 
-    // Get list of all PIDs from the process server
-    let process_server = crate::services::process_server::get_process_server();
+    // Get list of all PIDs from the process server (none before it exists)
+    let Some(process_server) = crate::services::process_server::try_get_process_server() else {
+        return;
+    };
     let pids = process_server.list_process_ids();
 
     let mut queue = REVOCATION_QUEUE.write();
