@@ -559,6 +559,154 @@ mod tests {
         assert!(result.is_err());
     }
 
+    fn timer(wheel: &TimerWheel, id: TimerId) -> Timer {
+        wheel
+            .timers
+            .iter()
+            .flatten()
+            .find(|t| t.id == id)
+            .copied()
+            .expect("timer present")
+    }
+
+    #[test]
+    fn test_timer_wheel_pool_exhaustion_and_slot_reuse() {
+        let mut wheel = TimerWheel::new();
+        let first = wheel
+            .add_timer(TimerMode::OneShot, 5, test_callback)
+            .unwrap();
+        for _ in 1..MAX_TIMERS {
+            wheel
+                .add_timer(TimerMode::Periodic, 5, test_callback)
+                .unwrap();
+        }
+        assert_eq!(wheel.pending_count(), MAX_TIMERS);
+        assert!(matches!(
+            wheel.add_timer(TimerMode::OneShot, 5, test_callback),
+            Err(KernelError::ResourceExhausted { .. })
+        ));
+        // Cancelling frees a slot for the next timer.
+        wheel.cancel_timer(first).unwrap();
+        assert!(wheel
+            .add_timer(TimerMode::OneShot, 5, test_callback)
+            .is_ok());
+        assert_eq!(wheel.pending_count(), MAX_TIMERS);
+    }
+
+    #[test]
+    fn test_timer_wheel_partial_advance_counts_down() {
+        let mut wheel = TimerWheel::new();
+        let id = wheel
+            .add_timer(TimerMode::OneShot, 100, test_callback)
+            .unwrap();
+        wheel.advance(40);
+        let t = timer(&wheel, id);
+        assert_eq!((t.remaining_ms, t.due, t.active), (60, false, true));
+        let mut out = [(TimerId(0), noop_callback as TimerCallback); 4];
+        assert_eq!(wheel.take_due(&mut out), 0);
+        // Exactly at the remaining time it is due.
+        wheel.advance(60);
+        assert!(timer(&wheel, id).due);
+        assert_eq!(wheel.take_due(&mut out), 1);
+        assert_eq!(out[0].0, id);
+        assert!(wheel.timers.iter().all(|t| t.is_none()), "one-shot freed");
+    }
+
+    #[test]
+    fn test_timer_wheel_periodic_reload_keeps_phase() {
+        let mut wheel = TimerWheel::new();
+        let id = wheel
+            .add_timer(TimerMode::Periodic, 100, test_callback)
+            .unwrap();
+        // 150 ms late: the next expiry is 50 ms away, on the original grid.
+        wheel.advance(250);
+        assert_eq!(timer(&wheel, id).remaining_ms, 50);
+        // Landing exactly on a period boundary reloads a full interval.
+        wheel.advance(250);
+        assert_eq!(timer(&wheel, id).remaining_ms, 100);
+    }
+
+    /// A periodic timer that expires twice before its callback is
+    /// collected fires once, and is due again only after a new expiry.
+    #[test]
+    fn test_timer_wheel_periodic_due_does_not_stack() {
+        let mut wheel = TimerWheel::new();
+        let id = wheel
+            .add_timer(TimerMode::Periodic, 10, test_callback)
+            .unwrap();
+        wheel.advance(10);
+        wheel.advance(10);
+        let mut out = [(TimerId(0), noop_callback as TimerCallback); 4];
+        assert_eq!(wheel.take_due(&mut out), 1);
+        assert_eq!(wheel.take_due(&mut out), 0);
+        let t = timer(&wheel, id);
+        assert!(t.active && !t.due);
+    }
+
+    /// Cancelling a one-shot that expired but was not yet collected must
+    /// not take it off the active count a second time.
+    #[test]
+    fn test_timer_wheel_cancel_expired_one_shot() {
+        let mut wheel = TimerWheel::new();
+        let expired = wheel
+            .add_timer(TimerMode::OneShot, 10, test_callback)
+            .unwrap();
+        let _pending = wheel
+            .add_timer(TimerMode::OneShot, 1_000, test_callback)
+            .unwrap();
+        wheel.advance(10);
+        assert_eq!(wheel.pending_count(), 1);
+        wheel.cancel_timer(expired).unwrap();
+        assert_eq!(wheel.pending_count(), 1);
+        let mut out = [(TimerId(0), noop_callback as TimerCallback); 4];
+        assert_eq!(wheel.take_due(&mut out), 0, "its callback is gone too");
+        assert!(wheel.cancel_timer(expired).is_err());
+    }
+
+    #[test]
+    fn test_timer_wheel_take_due_respects_the_batch_size() {
+        let mut wheel = TimerWheel::new();
+        for _ in 0..3 {
+            wheel
+                .add_timer(TimerMode::OneShot, 1, test_callback)
+                .unwrap();
+        }
+        wheel.advance(1);
+        let mut out = [(TimerId(0), noop_callback as TimerCallback); 2];
+        assert_eq!(wheel.take_due(&mut out), 2);
+        assert_eq!(wheel.take_due(&mut out), 1);
+        assert_eq!(wheel.take_due(&mut out), 0);
+        assert_eq!(wheel.take_due(&mut []), 0);
+    }
+
+    #[test]
+    fn test_timer_wheel_slot_wraps() {
+        let mut wheel = TimerWheel::new();
+        wheel.advance(300);
+        assert_eq!(wheel.current_slot, 300 % TIMER_WHEEL_SLOTS);
+        wheel.advance(TIMER_WHEEL_SLOTS as u64);
+        assert_eq!(wheel.current_slot, 300 % TIMER_WHEEL_SLOTS);
+        // No timers: advancing changes nothing else.
+        assert_eq!(wheel.pending_count(), 0);
+    }
+
+    /// The global API over the shared wheel. Only this test uses it.
+    #[test]
+    fn test_global_timer_api() {
+        let _ = init();
+        assert!(matches!(init(), Err(KernelError::AlreadyExists { .. })));
+        assert!(create_timer(TimerMode::OneShot, 0, test_callback).is_err());
+        let before = pending_timer_count();
+        let id = create_timer(TimerMode::Periodic, 1_000, test_callback).unwrap();
+        assert_eq!(pending_timer_count(), before + 1);
+        cancel_timer(id).unwrap();
+        assert_eq!(pending_timer_count(), before);
+        assert!(matches!(
+            cancel_timer(id),
+            Err(KernelError::NotFound { .. })
+        ));
+    }
+
     #[test]
     fn test_timer_id_uniqueness() {
         let id1 = TimerId::next();
