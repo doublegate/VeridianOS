@@ -449,6 +449,7 @@ pub fn map_kernel_error(err: crate::error::KernelError) -> SyscallError {
             FsError::CorruptedData => SyscallError::IoError,
             FsError::SymlinkLoop => SyscallError::SymlinkLoop,
             FsError::NoSpace => SyscallError::NoSpace,
+            FsError::OperationNotPermitted => SyscallError::OperationNotPermitted,
         },
         KernelError::OutOfMemory { .. } => SyscallError::OutOfMemory,
         KernelError::InvalidArgument { .. } => SyscallError::InvalidArgument,
@@ -1630,20 +1631,51 @@ fn sys_readlinkat(dirfd: usize, path_ptr: usize, buf_ptr: usize, buf_size: usize
     Ok(copy_len)
 }
 
-/// memfd_create syscall -- create anonymous memory-backed file descriptor.
-///
-/// Returns an fd backed by anonymous memory. Used by Wayland for shared
-/// buffers and by various libraries for temporary file-like objects.
-///
-/// # Arguments
-/// - `name_ptr`: User-space pointer to name string (for debugging).
-/// - `flags`: MFD_CLOEXEC (0x01), MFD_ALLOW_SEALING (0x02).
-fn sys_memfd_create(_name_ptr: usize, _flags: usize) -> SyscallResult {
-    // Create an anonymous memory region as a pseudo-fd via eventfd's
-    // infrastructure (counter=0, non-blocking). This provides a valid fd
-    // that can be mmap'd. In a full implementation this would use a
-    // dedicated memfd subsystem with sealing support.
-    crate::fs::eventfd::eventfd_create(0, crate::fs::eventfd::EFD_NONBLOCK)
+/// memfd_create (N-229): a read-write fd on an anonymous regular file in no
+/// directory, which can be sized, read, written, mapped and sealed
+/// (fcntl F_ADD_SEALS) -- what Wayland clients put their buffers in. It
+/// returned an eventfd registry id that was never installed as an fd.
+/// Flags as on Linux: MFD_CLOEXEC, MFD_ALLOW_SEALING, MFD_NOEXEC_SEAL,
+/// MFD_EXEC; names over 249 bytes are EINVAL.
+fn sys_memfd_create(name_ptr: usize, flags: usize) -> SyscallResult {
+    const MFD_CLOEXEC: usize = 0x1;
+    const MFD_ALLOW_SEALING: usize = 0x2;
+    const MFD_NOEXEC_SEAL: usize = 0x8;
+    const MFD_EXEC: usize = 0x10;
+    /// NAME_MAX less the "memfd:" prefix Linux shows the name with.
+    const MFD_NAME_MAX: usize = 249;
+
+    // MFD_HUGETLB (0x4) and its size bits are refused with the unknown
+    // flags: there is no hugetlbfs.
+    if flags & !(MFD_CLOEXEC | MFD_ALLOW_SEALING | MFD_NOEXEC_SEAL | MFD_EXEC) != 0
+        || (flags & MFD_NOEXEC_SEAL != 0 && flags & MFD_EXEC != 0)
+    {
+        return Err(SyscallError::InvalidArgument);
+    }
+    let name = userspace::read_user_cstr(name_ptr, MFD_NAME_MAX)?;
+    let proc = crate::process::current_process().ok_or(SyscallError::InvalidState)?;
+    let creds = proc.credentials();
+    // MFD_NOEXEC_SEAL: not executable, the mode's execute bits sealed, and
+    // sealable as with MFD_ALLOW_SEALING.
+    let noexec = flags & MFD_NOEXEC_SEAL != 0;
+    let node = crate::fs::ramfs::anonymous_file(
+        crate::fs::Permissions::from_mode(if noexec { 0o666 } else { 0o777 }),
+        creds.euid,
+        creds.egid,
+        flags & (MFD_ALLOW_SEALING | MFD_NOEXEC_SEAL) != 0,
+        if noexec { crate::fs::seals::EXEC } else { 0 },
+    );
+    let file = crate::fs::file::File::new_with_path(
+        node,
+        crate::fs::OpenFlags::read_write(),
+        alloc::format!("/memfd:{} (deleted)", name),
+    );
+    let fd = proc
+        .file_table
+        .lock()
+        .open_with_flags(alloc::sync::Arc::new(file), flags & MFD_CLOEXEC != 0)
+        .map_err(map_kernel_error)?;
+    Ok(fd)
 }
 
 /// set_tid_address syscall -- register the calling thread's clear_child_tid

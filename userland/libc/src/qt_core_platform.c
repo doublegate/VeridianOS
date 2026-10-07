@@ -220,20 +220,3 @@ unsigned long getauxval(unsigned long type)
     }
 }
 
-/* ========================================================================= */
-/* memfd_create                                                              */
-/* ========================================================================= */
-
-#define MFD_CLOEXEC     0x0001U
-#define MFD_ALLOW_SEALING 0x0002U
-
-int memfd_create(const char *name, unsigned int flags)
-{
-    long ret = __veridian_syscall(SYS_memfd_create, (long)name, (long)flags,
-                                  0, 0, 0, 0);
-    if (ret < 0) {
-        errno = (int)(-ret);
-        return -1;
-    }
-    return (int)ret;
-}

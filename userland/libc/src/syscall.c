@@ -551,6 +551,12 @@ int ftruncate(int fd, off_t length)
         veridian_syscall2(SYS_ftruncate, fd, length));
 }
 
+int memfd_create(const char *name, unsigned int flags)
+{
+    return (int)__syscall_ret(
+        veridian_syscall2(SYS_memfd_create, name, flags));
+}
+
 ssize_t pread(int fd, void *buf, size_t count, off_t offset)
 {
     return (ssize_t)__syscall_ret(

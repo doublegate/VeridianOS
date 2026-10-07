@@ -2288,6 +2288,8 @@ pub fn sys_fcntl(fd: usize, cmd: usize, arg: usize) -> SyscallResult {
     const F_GETFL: usize = 3;
     const F_SETFL: usize = 4;
     const F_DUPFD_CLOEXEC: usize = 1030;
+    const F_ADD_SEALS: usize = 1033;
+    const F_GET_SEALS: usize = 1034;
     const FD_CLOEXEC: usize = 1;
 
     let proc = process::current_process().ok_or(SyscallError::InvalidState)?;
@@ -2350,6 +2352,29 @@ pub fn sys_fcntl(fd: usize, cmd: usize, arg: usize) -> SyscallResult {
             file.nonblock
                 .store(nonblock, core::sync::atomic::Ordering::Relaxed);
             Ok(0)
+        }
+        // Seals (N-229): only a memfd has them (EINVAL otherwise); adding
+        // needs the fd open for writing (EPERM), as on Linux.
+        F_GET_SEALS => {
+            let file = file_table.get(fd).ok_or(SyscallError::BadFileDescriptor)?;
+            file.node
+                .seals()
+                .map(|s| s as usize)
+                .ok_or(SyscallError::InvalidArgument)
+        }
+        F_ADD_SEALS => {
+            let file = file_table.get(fd).ok_or(SyscallError::BadFileDescriptor)?;
+            drop(file_table);
+            if file.node.seals().is_none() {
+                return Err(SyscallError::InvalidArgument);
+            }
+            if !file.flags.write {
+                return Err(SyscallError::OperationNotPermitted);
+            }
+            file.node
+                .add_seals(arg as u32)
+                .map(|_| 0)
+                .map_err(super::map_kernel_error)
         }
         _ => Err(SyscallError::InvalidArgument),
     }

@@ -407,6 +407,22 @@ pub trait VfsNode: Send + Sync {
         matches!(self.node_type(), NodeType::Pipe | NodeType::Socket)
     }
 
+    /// The file's seals (fcntl F_GET_SEALS, bits from [`seals`]); `None`
+    /// for a file that cannot be sealed -- only memfds can -- which fcntl
+    /// reports as EINVAL.
+    fn seals(&self) -> Option<u32> {
+        None
+    }
+
+    /// Add seals (F_ADD_SEALS): EPERM once `seals::SEAL` is set, EINVAL for
+    /// a file that cannot be sealed.
+    fn add_seals(&self, _seals: u32) -> Result<(), KernelError> {
+        Err(KernelError::InvalidArgument {
+            name: "seals",
+            value: "file cannot be sealed",
+        })
+    }
+
     /// Whether every readiness change of this node calls
     /// [`crate::sched::dispatch::io_event`]. Waiters on such a node sleep
     /// until woken; on any other they also re-check periodically.
@@ -707,6 +723,26 @@ impl MountTable {
         }
         Ok(node)
     }
+}
+
+/// File seals (fcntl F_ADD_SEALS / F_GET_SEALS), with Linux's values. A
+/// sealed memfd refuses the sealed operations with EPERM.
+pub mod seals {
+    /// No further seals may be added.
+    pub const SEAL: u32 = 0x1;
+    /// The size may not decrease.
+    pub const SHRINK: u32 = 0x2;
+    /// The size may not increase.
+    pub const GROW: u32 = 0x4;
+    /// The contents may not change.
+    pub const WRITE: u32 = 0x8;
+    /// As `WRITE` for write(2) and new writable mappings; existing writable
+    /// mappings keep working.
+    pub const FUTURE_WRITE: u32 = 0x10;
+    /// The execute bits may not change.
+    pub const EXEC: u32 = 0x20;
+    /// Every seal.
+    pub const ALL: u32 = SEAL | SHRINK | GROW | WRITE | FUTURE_WRITE | EXEC;
 }
 
 /// Whose view of the tree a path lookup uses (N-251). A kernel subsystem

@@ -1948,6 +1948,73 @@ static void test_exec_environment(void)
     exec_without_env("exec-env-null", "execve_null_envp_is_empty");
 }
 
+/* --- memfd_create (N-229): it returned an eventfd id that was never an
+ * fd. Now a sizeable, readable, mappable, sealable anonymous file. ---- */
+static void test_memfd(void)
+{
+    int fails = 0;
+    int fd = memfd_create("audit", MFD_CLOEXEC | MFD_ALLOW_SEALING);
+    struct stat st = {0};
+    char buf[8] = {0};
+    if (fd < 0) {
+        report("memfd_create_file_and_seals", 0, "memfd_create failed");
+        return;
+    }
+    if (ftruncate(fd, 4096) != 0)
+        fails |= 1;
+    if (pwrite(fd, "seal", 4, 100) != 4 || pread(fd, buf, 4, 100) != 4 || memcmp(buf, "seal", 4) != 0)
+        fails |= 2;
+    if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size != 4096)
+        fails |= 4;
+    if (!(fcntl(fd, F_GETFD) & FD_CLOEXEC))
+        fails |= 8;
+    char *map = mmap(NULL, 4096, PROT_READ, MAP_PRIVATE, fd, 0);
+    if (map == MAP_FAILED || memcmp(map + 100, "seal", 4) != 0)
+        fails |= 16;
+    if (map != MAP_FAILED)
+        munmap(map, 4096);
+    if (fcntl(fd, F_ADD_SEALS, F_SEAL_SHRINK | F_SEAL_SEAL) != 0)
+        fails |= 32;
+    errno = 0;
+    if (ftruncate(fd, 0) != -1 || errno != EPERM)
+        fails |= 64;                            /* shrinking is sealed */
+    if (ftruncate(fd, 8192) != 0)
+        fails |= 128;                           /* growing is not */
+    if (fcntl(fd, F_GET_SEALS) != (F_SEAL_SHRINK | F_SEAL_SEAL))
+        fails |= 256;
+    errno = 0;
+    if (fcntl(fd, F_ADD_SEALS, F_SEAL_GROW) != -1 || errno != EPERM)
+        fails |= 512;                           /* F_SEAL_SEAL */
+    close(fd);
+
+    /* Without MFD_ALLOW_SEALING no seal can be added. */
+    fd = memfd_create("plain", 0);
+    errno = 0;
+    if (fd < 0 || fcntl(fd, F_GET_SEALS) != F_SEAL_SEAL ||
+        fcntl(fd, F_ADD_SEALS, F_SEAL_WRITE) != -1 || errno != EPERM)
+        fails |= 1024;
+    if (fd >= 0 && (fcntl(fd, F_GETFD) & FD_CLOEXEC))
+        fails |= 2048;
+    if (fd >= 0)
+        close(fd);
+    /* A regular file cannot be sealed; unknown flags are refused. */
+    write_file("/tmp/audit_seal", "x", 0644);
+    fd = open("/tmp/audit_seal", O_RDWR);
+    errno = 0;
+    if (fcntl(fd, F_ADD_SEALS, F_SEAL_WRITE) != -1 || errno != EINVAL)
+        fails |= 4096;
+    close(fd);
+    errno = 0;
+    if (memfd_create("bad", 0x100) != -1 || errno != EINVAL)
+        fails |= 8192;
+    errno = 0;
+    if (memfd_create("huge", MFD_HUGETLB) != -1 || errno != EINVAL)
+        fails |= 16384;
+    static char why[64];
+    snprintf(why, sizeof(why), "bitmask of failures %d", fails);
+    report("memfd_create_file_and_seals", fails == 0, why);
+}
+
 int main(int argc, char **argv)
 {
     setvbuf(stdout, NULL, _IONBF, 0);
@@ -1995,6 +2062,7 @@ int main(int argc, char **argv)
     test_credentials_and_paths();
     test_positioned_io_and_truncate();
     test_exec_environment();
+    test_memfd();
     printf("AUDIT-RUNTIME: %d/%d\n", passed, total);
     return passed == total ? 0 : 1;
 }

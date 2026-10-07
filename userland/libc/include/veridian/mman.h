@@ -119,6 +119,24 @@ int mprotect(void *addr, size_t length, int prot);
  */
 int msync(void *addr, size_t length, int flags);
 
+/** memfd_create flags */
+#define MFD_CLOEXEC       0x0001U
+#define MFD_ALLOW_SEALING 0x0002U
+#define MFD_HUGETLB       0x0004U
+#define MFD_NOEXEC_SEAL   0x0008U
+#define MFD_EXEC          0x0010U
+
+/**
+ * Create an anonymous file: a read-write fd on a regular file in no
+ * directory, which can be sized, mapped and (with MFD_ALLOW_SEALING)
+ * sealed with fcntl(F_ADD_SEALS).
+ *
+ * @param name   Name shown as "memfd:<name>" (at most 249 bytes).
+ * @param flags  MFD_CLOEXEC, MFD_ALLOW_SEALING, MFD_NOEXEC_SEAL, MFD_EXEC.
+ * @return the new fd, or -1 with errno set.
+ */
+int memfd_create(const char *name, unsigned int flags);
+
 #ifdef __cplusplus
 }
 #endif

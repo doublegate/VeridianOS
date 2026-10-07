@@ -2,6 +2,14 @@
 
 ### Added
 
+- **memfd_create and file seals (N-229).** `memfd_create` returned an eventfd registry id that was
+  never installed as an fd, so every caller (Wayland clients, Qt) got a number that named nothing.
+  It now creates a read-write fd on an anonymous file that can be sized, read, written and mapped,
+  with Linux's flags (MFD_CLOEXEC, MFD_ALLOW_SEALING, MFD_NOEXEC_SEAL, MFD_EXEC) and sealing through
+  `fcntl(F_ADD_SEALS/F_GET_SEALS)`: shrink, grow, write, future-write, exec and seal seals are
+  enforced (EPERM). The native libc declares it in `<sys/mman.h>`. A `MAP_SHARED` mapping of it is
+  still a private copy (N-230). Runtime test `memfd_create_file_and_seals`; host tests for the
+  seals.
 - **Credentials (N-248).** Processes have real, effective and saved user and group IDs and up
   to 64 supplementary groups, changed by Linux's rules: `setresuid`/`setresgid`,
   `setreuid`/`setregid`, `setuid`/`setgid`, `getresuid`/`getresgid`, `getgroups`/`setgroups`.

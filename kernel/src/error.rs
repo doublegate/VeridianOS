@@ -210,6 +210,9 @@ pub enum FsError {
     NoSpace,
     /// Operation would cross filesystems (EXDEV)
     CrossDevice,
+    /// Refused by the object's own state, not by permission bits (EPERM):
+    /// a sealed memfd, for one
+    OperationNotPermitted,
 }
 
 /// Result type alias for kernel operations

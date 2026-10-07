@@ -78,7 +78,7 @@ renumbering; **X2** = the Linux syscall completion program (`docs/compat/COMPATI
 
 | ID | Sev | Call | Finding | Fix | Target |
 |---|---|---|---|---|---|
-| N-229 | High C | memfd_create | Returns an eventfd registry id, not an installed fd | ENOSYS until a tmpfs-backed node exists | X2 (memory) |
+| N-229 | High C | memfd_create | Returns an eventfd registry id, not an installed fd | ENOSYS until a tmpfs-backed node exists | v0.27; **fixed** (implemented rather than ENOSYS): an installed read-write fd on an anonymous file in no directory (owned by the caller, mode 0777, or 0666 with MFD_NOEXEC_SEAL), Linux's flags and name limit, and file seals (F_ADD_SEALS/F_GET_SEALS; SHRINK, GROW, WRITE, FUTURE_WRITE, EXEC, SEAL enforced with EPERM); the native libc declares it in `<sys/mman.h>` and the seals in `<fcntl.h>`. Still open: a MAP_SHARED mapping of it is a copy (N-230) |
 | N-230 | High C | mmap | A non-anonymous mapping with a closed fd silently becomes anonymous (EBADF); unaligned offset not EINVAL; MAP_SHARED file mappings are copies | per finding | X2 (memory) |
 | N-231 | High C | bind, connect (AF_INET) | see **N-64** | | F1 |
 | N-232 | High C | eventfd2, timerfd_create, signalfd4 | NONBLOCK flag stored in the object but not on the file, so read blocks | set `file.nonblock` | X2 (events) |
