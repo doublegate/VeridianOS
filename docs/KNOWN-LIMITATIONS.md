@@ -300,8 +300,9 @@ two processes mapping one file do not see each other's changes.
 
 Page protections now follow `prot` (fixed in v0.27, N-132 to N-137). What remains:
 
-- **`MAP_SHARED` anonymous memory** becomes copy-on-write at `fork`, so parent and child stop
-  sharing it (N-140).
+- **`MAP_SHARED` with huge pages** (`MAP_HUGETLB`) is still copied at `fork`; ordinary
+  `MAP_SHARED` memory stays shared (fixed in v0.27, N-140). File-backed `MAP_SHARED` shares the
+  pages between processes but is not written back to the file (no page cache, v0.29).
 - **`MAP_FIXED` over an existing mapping** fails with ENOMEM instead of replacing it, and `munmap`
   across several mappings or holes fails with EINVAL (N-141). `mprotect` of part of a mapping does
   not split it (N-135 remainder).

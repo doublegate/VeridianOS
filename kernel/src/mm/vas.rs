@@ -27,12 +27,20 @@ use crate::error::KernelError;
 /// becomes read-only + COW, so the first write copies; a read-only request
 /// drops COW (the frame stays shared and read-only, so a later writable
 /// request sees it shared again). `None` when the page is not mapped.
+///
+/// A `MAP_SHARED` page (`shared_mapping`) is the exception: its frame is
+/// shared on purpose, so a writable request makes it writable for every
+/// sharer instead of copy-on-write (N-140).
 fn cow_safe_flags(
     mapper: &PageMapper,
     page: VirtualAddress,
     requested: PageFlags,
+    shared_mapping: bool,
 ) -> Option<PageFlags> {
     let (frame, old) = mapper.translate_page(page).ok()?;
+    if shared_mapping {
+        return Some(requested.without(PageFlags::COW));
+    }
     Some(cow_flags_for(
         old,
         requested,
@@ -965,6 +973,9 @@ impl VirtualAddressSpace {
                     continue;
                 }
 
+                // MAP_SHARED memory stays shared and writable in both
+                // (N-140): the frames gain an owner but not copy-on-write.
+                let keep_writable = mapping.mapping_type == MappingType::Shared;
                 let mut child_mapping = mapping.clone();
                 child_mapping.physical_frames = mapping.physical_frames.clone();
                 for &frame in &child_mapping.physical_frames {
@@ -980,7 +991,7 @@ impl VirtualAddressSpace {
                         Ok(result) => result,
                         Err(_) => continue, // Page not actually mapped in HW
                     };
-                    let flags = if flags.contains(PageFlags::WRITABLE) {
+                    let flags = if flags.contains(PageFlags::WRITABLE) && !keep_writable {
                         let cow = flags.without(PageFlags::WRITABLE) | PageFlags::COW;
                         parent_mapper.update_page_flags(vaddr, cow)?;
                         cow
@@ -2069,7 +2080,11 @@ impl VirtualAddressSpace {
         let num_pages = size / 4096;
         for i in 0..num_pages {
             let vaddr = VirtualAddress(start.0 + (i as u64) * 4096);
-            if let Some(flags) = cow_safe_flags(&mapper, vaddr, new_flags) {
+            let shared_mapping = mappings
+                .range(..=vaddr)
+                .next_back()
+                .is_some_and(|(_, m)| m.contains(vaddr) && m.mapping_type == MappingType::Shared);
+            if let Some(flags) = cow_safe_flags(&mapper, vaddr, new_flags, shared_mapping) {
                 let _ = mapper.update_page_flags(vaddr, flags);
             }
         }
@@ -2335,7 +2350,7 @@ impl VirtualAddressSpace {
                     // overlapping LOAD segments sharing a boundary page).
                     // Update flags to the union of old and new, then free
                     // the unused frame we just allocated.
-                    if let Some(flags) = cow_safe_flags(&mapper, vaddr_obj, flags) {
+                    if let Some(flags) = cow_safe_flags(&mapper, vaddr_obj, flags, false) {
                         let _ = mapper.update_page_flags(vaddr_obj, flags);
                     }
                     crate::mm::note_free_failure(

@@ -189,13 +189,18 @@
 
 ### Fixed
 
+- **`MAP_SHARED` memory stopped being shared at fork (N-140).** fork made shared pages
+  copy-on-write like private ones, so a child's writes never reached the parent. Shared
+  mappings now keep the same frames, writable, in both processes, and an `mprotect` round trip
+  no longer turns them copy-on-write. Runtime test `map_shared_survives_fork`.
 - **exec ignored execute permission and survived a failed load (N-101).** Any readable file
   could be executed. exec now requires a regular file the caller may execute (root needs at
   least one execute bit, as on Linux) and returns EACCES otherwise. A failure after the old
   address space has been cleared (a missing interpreter, out of memory while loading) used to
   return to that empty address space; the process is now killed with SIGSEGV at the system-call
-  exit, as Linux does. Runtime test `exec_requires_execute_permission` (root, directory,
-  non-root and a control exec).
+  exit, as Linux does. The check and the read use the same file node, and the dynamic loader
+  (PT_INTERP) is checked and read before the point of no return too. Runtime test
+  `exec_requires_execute_permission` (root, directory, non-root and a control exec).
 - **Relative paths ignored the program's working directory (N-115).** Every path lookup in a
   system call resolved against the kernel shell's directory, so after `chdir` a program's
   `getcwd` changed but its relative paths did not. Lookups now use the calling thread's

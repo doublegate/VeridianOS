@@ -1470,6 +1470,51 @@ static void test_exec_permission(void)
            root_eacces && dir_eacces && user_eacces && control, why);
 }
 
+/* N-140: MAP_SHARED anonymous memory stays shared with a forked child,
+ * also after an mprotect round trip; MAP_PRIVATE stays private. */
+static void test_shared_anon_fork(void)
+{
+    volatile int *sh = mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    volatile int *pr =
+        mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (sh == MAP_FAILED || pr == MAP_FAILED) {
+        report("map_shared_survives_fork", 0, "mmap failed");
+        return;
+    }
+    sh[0] = 1;
+    sh[1] = 1;
+    pr[0] = 1;
+    pid_t pid = fork();
+    if (pid == 0) {
+        sh[0] = 42;
+        pr[0] = 42;
+        _exit(0);
+    }
+    int st = 0;
+    waitpid(pid, &st, 0);
+    int seen_child = sh[0] == 42;
+    int private_kept = pr[0] == 1;
+
+    /* Read-only and back: still the shared page, not a private copy. */
+    int prot_ok = mprotect((void *)sh, 4096, PROT_READ) == 0 &&
+                  mprotect((void *)sh, 4096, PROT_READ | PROT_WRITE) == 0;
+    pid = fork();
+    if (pid == 0) {
+        sh[1] = 7;
+        _exit(0);
+    }
+    waitpid(pid, &st, 0);
+    sh[0] = 5; /* parent write after the child is gone */
+    int after_prot = sh[1] == 7 && sh[0] == 5;
+    munmap((void *)sh, 4096);
+    munmap((void *)pr, 4096);
+
+    static char why[96];
+    snprintf(why, sizeof(why), "child_write=%d private=%d prot=%d after_prot=%d", seen_child,
+             private_kept, prot_ok, after_prot);
+    report("map_shared_survives_fork", seen_child && private_kept && prot_ok && after_prot, why);
+}
+
 int main(int argc, char **argv)
 {
     setvbuf(stdout, NULL, _IONBF, 0);
@@ -1509,6 +1554,7 @@ int main(int argc, char **argv)
     test_signal_handlers();
     test_relative_paths();
     test_exec_permission();
+    test_shared_anon_fork();
     printf("AUDIT-RUNTIME: %d/%d\n", passed, total);
     return passed == total ? 0 : 1;
 }
