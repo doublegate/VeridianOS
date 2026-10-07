@@ -35,25 +35,33 @@ What does not work yet: `docs/KNOWN-LIMITATIONS.md`.
 
 - [ ] **v0.27.0: process model and SMP (C5, X0).** Sprints, in dependency order; IDs are in
   `docs/audit/AUDIT-VERIFICATION-2026-10-05.md`:
-  - [ ] **A, foundations and hygiene:**
+  - [x] **A, foundations and hygiene:** done (N-07 moves to C with copy-on-write).
     - N-56 workspace lints and the clippy allow-list (C2).
     - N-55 FIPS 204 ML-DSA with NIST known-answer tests.
     - N-43 raw socket buffer reads; N-45 ramfs cross-fs link.
     - Dead code: N-07, `mm/vmm.rs`, MEM-INC-02 slab, CAP-INC-02 derivation, SYS-INC-01.
     - Coverage helpers (plan Addendum 3); C1 runtime-suite CI job.
-  - [ ] **B, per-CPU data and SMP:**
-    - BSP per-CPU data on every architecture; N-35 per-CPU syscall frame.
-    - AP bring-up: x86 INIT-SIPI-SIPI, AArch64 PSCI, RISC-V SBI HSM; N-14.
-    - TLB shootdown: MEM-SEC-02, MEM-ARCH-03.
-    - Per-CPU run queues and work stealing: SCHED-PERF-01, SMP-PERF-01.
-    - N-51, N-52.
+  - [x] **B, per-CPU data and SMP (stage S1, ADR 0004):**
+    - [x] BSP per-CPU data on every architecture; N-35 per-CPU syscall frame.
+    - [x] AP bring-up behind `smp`: x86 INIT-SIPI-SIPI, AArch64 PSCI, RISC-V SBI HSM; 4/4 online
+      on every arch in QEMU and in CI.
+    - [x] TLB shootdown: MEM-SEC-02, MEM-ARCH-03.
+    - Moved to D: per-CPU run queues and work stealing (SCHED-PERF-01, SMP-PERF-01; stage S2),
+      N-51, N-52 and N-14 (with RISC-V U-mode in E). S2 needs scheduler-dispatched context
+      switching, which D reworks. Today `schedule()` switches while its caller holds the
+      scheduler lock, so a task that starts fresh never releases it. The two races become
+      reachable only once tasks run concurrently.
   - [ ] **C, memory:**
     - Copy-on-write with frame refcounts: MEM-ARCH-02, PROC-ARCH-01, N-07.
     - Huge pages: MEM-ARCH-01.
     - Real AArch64/RISC-V heaps: MEM-SEC-03.
     - Kernel stack guard pages: N-26.
   - [ ] **D, process model (C5):**
-    - Scheduler-dispatched, preemptible ring-3 tasks.
+    - Scheduler-dispatched, preemptible ring-3 tasks (a context switch must not hold the
+      scheduler lock across the switch).
+    - SMP stage S2: per-CPU run queues, idle tasks and work stealing on the secondaries
+      (SCHED-PERF-01, SMP-PERF-01), per-CPU RUNNING_TASK; then S3, user tasks on every CPU and
+      `smp` on by default. N-51, N-52.
     - User threads.
     - XSAVE FPU state: N-41.
     - N-46, N-50, N-54, W-13.
