@@ -245,7 +245,10 @@ phase_build() {
         SKIP_STRIP=y \
         V=1 \
         O="$BB_BUILD" \
-        busybox 2>&1 | tee "$WORK_DIR/busybox-build.log" | tail -20
+        busybox >"$WORK_DIR/busybox-build.log" 2>&1 || true
+    # Not a pipeline into tail: with pipefail a failed make would exit here,
+    # before the error report below.
+    tail -20 "$WORK_DIR/busybox-build.log"
 
     if [ -f "$BB_BUILD/busybox" ]; then
         echo ""
