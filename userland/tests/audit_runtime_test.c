@@ -1515,6 +1515,52 @@ static void test_shared_anon_fork(void)
     report("map_shared_survives_fork", seen_child && private_kept && prot_ok && after_prot, why);
 }
 
+/* N-141: MAP_FIXED replaces what is mapped; munmap spans mappings and
+ * holes; munmap of an unmapped range succeeds. */
+static void test_map_fixed_replace(void)
+{
+    char *base = mmap(NULL, 4 * 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (base == MAP_FAILED) {
+        report("map_fixed_replaces_and_munmap_spans", 0, "mmap failed");
+        return;
+    }
+    memset(base, 'a', 4 * 4096);
+    /* Replace the middle two pages: fresh zero pages, neighbours kept. */
+    char *mid = mmap(base + 4096, 2 * 4096, PROT_READ | PROT_WRITE,
+                     MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
+    int replaced = mid == base + 4096 && mid[0] == 0 && mid[4096] == 0 && base[0] == 'a' &&
+                   base[3 * 4096] == 'a';
+    /* Punch a hole, then unmap across both sides of it at once. */
+    int hole = munmap(base + 4096, 4096) == 0;
+    int span = munmap(base, 4 * 4096) == 0;
+    /* The range is free again: MAP_FIXED there works without replacing. */
+    char *again = mmap(base, 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED,
+                       -1, 0);
+    int reuse = again == base && again[0] == 0;
+    int empty = munmap(base, 4096) == 0 && munmap(base, 4 * 4096) == 0;
+
+    /* A fixed mapping just ahead of the kernel's mmap cursor must not make
+     * the next kernel-chosen mapping fail. */
+    char *p = mmap(NULL, 4096, PROT_READ, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    char *ahead = p == MAP_FAILED ? MAP_FAILED
+                                  : mmap(p + 2 * 4096, 4096, PROT_READ,
+                                         MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
+    char *next = mmap(NULL, 4 * 4096, PROT_READ, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    int cursor = p != MAP_FAILED && ahead != MAP_FAILED && next != MAP_FAILED;
+    if (p != MAP_FAILED)
+        munmap(p, 4096);
+    if (ahead != MAP_FAILED)
+        munmap(ahead, 4096);
+    if (next != MAP_FAILED)
+        munmap(next, 4 * 4096);
+
+    static char why[112];
+    snprintf(why, sizeof(why), "replaced=%d hole=%d span=%d reuse=%d empty=%d cursor=%d",
+             replaced, hole, span, reuse, empty, cursor);
+    report("map_fixed_replaces_and_munmap_spans",
+           replaced && hole && span && reuse && empty && cursor, why);
+}
+
 int main(int argc, char **argv)
 {
     setvbuf(stdout, NULL, _IONBF, 0);
@@ -1555,6 +1601,7 @@ int main(int argc, char **argv)
     test_relative_paths();
     test_exec_permission();
     test_shared_anon_fork();
+    test_map_fixed_replace();
     printf("AUDIT-RUNTIME: %d/%d\n", passed, total);
     return passed == total ? 0 : 1;
 }

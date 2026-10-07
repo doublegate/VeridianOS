@@ -1118,6 +1118,32 @@ impl VirtualAddressSpace {
         mapping_type: MappingType,
         flags: Option<PageFlags>,
     ) -> Result<(), KernelError> {
+        self.map_region_inner(start, size, mapping_type, flags, false)
+    }
+
+    /// `MAP_FIXED`: like [`Self::map_region_flags`], but whatever is mapped
+    /// in the range is replaced (unmapped under the same lock once the new
+    /// frames are ready), as Linux does (N-141).
+    #[cfg(feature = "alloc")]
+    pub fn map_region_fixed(
+        &self,
+        start: VirtualAddress,
+        size: usize,
+        mapping_type: MappingType,
+        flags: Option<PageFlags>,
+    ) -> Result<(), KernelError> {
+        self.map_region_inner(start, size, mapping_type, flags, true)
+    }
+
+    #[cfg(feature = "alloc")]
+    fn map_region_inner(
+        &self,
+        start: VirtualAddress,
+        size: usize,
+        mapping_type: MappingType,
+        flags: Option<PageFlags>,
+        replace: bool,
+    ) -> Result<(), KernelError> {
         let too_big = KernelError::OutOfMemory {
             requested: size,
             available: 0,
@@ -1136,13 +1162,28 @@ impl VirtualAddressSpace {
 
         let mut mappings = self.mappings.lock();
 
+        let aligned_end = aligned_start.0 + aligned_size as u64;
+        // A replacing map may not cut a huge page; refuse before anything
+        // is allocated or unmapped.
+        if replace
+            && mappings
+                .range(..VirtualAddress(aligned_end))
+                .rev()
+                .take_while(|(_, m)| m.end().0 > aligned_start.0)
+                .any(|(_, m)| {
+                    m.flags.contains(PageFlags::HUGE)
+                        && (aligned_start.0 > m.start.0 || aligned_end < m.end().0)
+                })
+        {
+            return Err(KernelError::InvalidArgument {
+                name: "MAP_FIXED range",
+                value: "part of a huge-page mapping",
+            });
+        }
+
         // [a_start, a_end) and [b_start, b_end) overlap iff
         // a_start < b_end && b_start < a_end.
-        if Self::overlaps(
-            &mappings,
-            aligned_start.0,
-            aligned_start.0 + aligned_size as u64,
-        ) {
+        if !replace && Self::overlaps(&mappings, aligned_start.0, aligned_end) {
             return Err(KernelError::AlreadyExists {
                 resource: "address range",
                 id: aligned_start.0,
@@ -1183,6 +1224,17 @@ impl VirtualAddressSpace {
             // SAFETY: each frame was just allocated and is not mapped
             // anywhere; the physical map makes it accessible to the kernel.
             unsafe { core::ptr::write_bytes(virt, 0, 4096) };
+        }
+
+        if replace {
+            // Cannot fail: the huge-page case was refused above.
+            if let Err(e) = self.unmap_range_locked(&mut mappings, aligned_start.0, aligned_end) {
+                let frame_allocator = FRAME_ALLOCATOR.lock();
+                for &f in &physical_frames {
+                    frame_allocator.free_frames(f, 1).ok();
+                }
+                return Err(e);
+            }
         }
 
         let pt_root = self.page_table_root.load(Ordering::Acquire);
@@ -1452,104 +1504,96 @@ impl VirtualAddressSpace {
         Ok(())
     }
 
-    /// Unmap a region by address and size (POSIX-compliant partial munmap).
-    ///
-    /// Supports three cases:
-    /// 1. **Exact match**: `addr` and `size` match a BTreeMap entry → remove
-    ///    it.
-    /// 2. **Front trim**: `addr` matches the start of a larger mapping → shrink
-    ///    the mapping and free the leading pages.
-    /// 3. **Back trim**: `addr+size` matches the end of a mapping → shrink from
-    ///    the back.
-    /// 4. **Hole punch**: Range is in the middle of a mapping → split into two.
-    /// 5. **Sub-range not at start**: `addr` is inside a mapping → find the
-    ///    containing mapping and trim/punch accordingly.
-    ///
-    /// GCC's ggc garbage collector relies on partial munmap to free individual
-    /// pages within larger mmap pools. Without this, munmap(pool_start, 4KB)
-    /// would destroy the entire multi-MB pool.
+    /// Unmap `[start_addr, start_addr + size)` rounded out to pages, with
+    /// Linux `munmap` semantics (N-141): the range may cover several
+    /// mappings, parts of mappings and holes; only the pages actually mapped
+    /// are removed, and a range with nothing mapped succeeds. A partly
+    /// covered mapping is trimmed or split (GCC's ggc frees single pages of
+    /// its pools this way). A 2 MiB page is only unmapped whole.
     #[cfg(feature = "alloc")]
     pub fn unmap(&self, start_addr: usize, size: usize) -> Result<(), KernelError> {
+        let bad = KernelError::InvalidArgument {
+            name: "munmap range",
+            value: "overflows the address space",
+        };
         let unmap_start = (start_addr & !(4096 - 1)) as u64;
-        let unmap_size = ((size + 4095) / 4096) * 4096;
-        let unmap_end = unmap_start + unmap_size as u64;
-
-        // First try exact-key match (fast path, most common for our small mmaps)
-        let addr = VirtualAddress(unmap_start);
+        let unmap_end = (start_addr as u64)
+            .checked_add(size as u64)
+            .and_then(|e| e.checked_next_multiple_of(4096))
+            .ok_or(bad)?;
         let mut mappings = self.mappings.lock();
+        self.unmap_range_locked(&mut mappings, unmap_start, unmap_end)
+    }
 
-        if let Some(existing) = mappings.get(&addr) {
-            if existing.size == unmap_size {
-                // Exact match: remove entire mapping
-                drop(mappings);
-                return self.unmap_region(addr);
-            }
+    /// Remove every mapped page of `[start, end)` (page aligned) from
+    /// `mappings` and the page tables. Huge-page mappings must be covered
+    /// whole; that is checked before anything changes, so an error leaves
+    /// the address space untouched.
+    #[cfg(feature = "alloc")]
+    fn unmap_range_locked(
+        &self,
+        mappings: &mut BTreeMap<VirtualAddress, VirtualMapping>,
+        start: u64,
+        end: u64,
+    ) -> Result<(), KernelError> {
+        if start >= end {
+            return Ok(());
         }
-
-        // Find the mapping that CONTAINS the requested unmap range.
-        // This handles partial munmap within a larger mmap.
-        let mut containing_key = None;
-        for (key, mapping) in mappings.iter() {
-            let m_start = key.0;
-            let m_end = m_start + mapping.size as u64;
-            if m_start <= unmap_start && m_end >= unmap_end {
-                containing_key = Some(*key);
-                break;
-            }
-        }
-
-        let containing_key = match containing_key {
-            Some(k) => k,
-            None => {
-                // No containing mapping found. If the exact key exists but with
-                // a different size, fall back to removing the entire mapping
-                // (original behavior, for backwards compat with code that passes
-                // size=0 or incorrect size).
-                if mappings.contains_key(&addr) {
-                    drop(mappings);
-                    return self.unmap_region(addr);
-                }
-                return Err(KernelError::NotFound {
-                    resource: "memory region",
-                    id: unmap_start,
+        // Mappings never overlap: walking back from the last one starting
+        // below `end`, they overlap the range until one ends at or before
+        // `start`.
+        let keys: Vec<VirtualAddress> = mappings
+            .range(..VirtualAddress(end))
+            .rev()
+            .take_while(|(_, m)| m.end().0 > start)
+            .map(|(k, _)| *k)
+            .collect();
+        for k in &keys {
+            let m = &mappings[k];
+            if m.flags.contains(PageFlags::HUGE) && (start > m.start.0 || end < m.end().0) {
+                return Err(KernelError::InvalidArgument {
+                    name: "munmap range",
+                    value: "part of a huge-page mapping",
                 });
             }
-        };
-
-        // A 2 MiB page is unmapped whole; splitting one is not supported.
-        if mappings
-            .get(&containing_key)
-            .is_some_and(|m| m.flags.contains(PageFlags::HUGE))
-            && (unmap_start != containing_key.0
-                || unmap_size as u64 != mappings[&containing_key].size as u64)
-        {
-            return Err(KernelError::InvalidArgument {
-                name: "munmap range",
-                value: "part of a huge-page mapping",
-            });
         }
+        for k in keys {
+            let Some(mapping) = mappings.remove(&k) else {
+                continue;
+            };
+            let part_start = start.max(k.0);
+            let part_end = end.min(mapping.end().0);
+            self.unmap_part(mappings, mapping, part_start, part_end);
+        }
+        Ok(())
+    }
 
-        // Remove the containing mapping from BTreeMap
-        let mapping = mappings
-            .remove(&containing_key)
-            .ok_or(KernelError::NotFound {
-                resource: "vas_mapping",
-                id: containing_key.0 as u64,
-            })?;
-        let m_start = containing_key.0;
+    /// Unmap `[unmap_start, unmap_end)` of `mapping` (already removed from
+    /// `mappings`, and containing the range), then put back what is left
+    /// before and after it.
+    #[cfg(feature = "alloc")]
+    fn unmap_part(
+        &self,
+        mappings: &mut BTreeMap<VirtualAddress, VirtualMapping>,
+        mapping: VirtualMapping,
+        unmap_start: u64,
+        unmap_end: u64,
+    ) {
+        let m_start = mapping.start.0;
 
         // Calculate page indices within the mapping for the unmap range
         let unmap_page_start = ((unmap_start - m_start) / 4096) as usize;
-        let unmap_page_count = unmap_size / 4096;
-        let unmap_page_end = unmap_page_start + unmap_page_count;
+        let unmap_page_end = ((unmap_end - m_start) / 4096) as usize;
 
         // Unmap the requested pages from the page table
         let pt_root = self.page_table_root.load(Ordering::Acquire);
         if pt_root != 0 {
-            // SAFETY: pt_root is a valid L4 page table address set during VAS::init().
+            // SAFETY: pt_root is a valid L4 page table address set during
+            // VAS::init(); the caller holds the mappings lock, which
+            // serialises page-table changes for this space.
             let mut mapper = unsafe { create_mapper_from_root(pt_root) };
             if mapping.flags.contains(PageFlags::HUGE) {
-                // Only whole huge mappings get here (checked above).
+                // Only whole huge mappings get here (checked by the caller).
                 unmap_mapping_pages(&mut mapper, &mapping);
             } else {
                 for i in unmap_page_start..unmap_page_end {
@@ -1557,15 +1601,16 @@ impl VirtualAddressSpace {
                     let _ = mapper.unmap_page(vaddr);
                 }
             }
-        }
 
-        // Flush TLB for unmapped pages using batched flushes
-        let mut tlb_batch = TlbFlushBatch::new();
-        for i in unmap_page_start..unmap_page_end {
-            let vaddr = m_start + (i as u64) * 4096;
-            tlb_batch.add(vaddr);
+            // Flush TLB for unmapped pages using batched flushes (without
+            // page tables nothing was ever translated).
+            let mut tlb_batch = TlbFlushBatch::new();
+            for i in unmap_page_start..unmap_page_end {
+                let vaddr = m_start + (i as u64) * 4096;
+                tlb_batch.add(vaddr);
+            }
+            tlb_batch.flush();
         }
-        tlb_batch.flush();
 
         // Free the physical frames for the unmapped range
         if mapping.owns_frames() {
@@ -1582,17 +1627,15 @@ impl VirtualAddressSpace {
             }
         }
 
-        // Re-insert the remaining parts of the mapping
-
         // Front portion: pages [0..unmap_page_start)
         if unmap_page_start > 0 {
             let front_size = unmap_page_start * 4096;
-            let mut front = VirtualMapping::new(containing_key, front_size, mapping.mapping_type);
+            let mut front = VirtualMapping::new(mapping.start, front_size, mapping.mapping_type);
             front.flags = mapping.flags;
             if unmap_page_start <= mapping.physical_frames.len() {
                 front.physical_frames = mapping.physical_frames[..unmap_page_start].to_vec();
             }
-            mappings.insert(containing_key, front);
+            mappings.insert(mapping.start, front);
         }
 
         // Back portion: pages [unmap_page_end..total_pages)
@@ -1611,8 +1654,6 @@ impl VirtualAddressSpace {
             }
             mappings.insert(VirtualAddress(back_start_addr), back);
         }
-
-        Ok(())
     }
 
     /// Find mapping for address
@@ -1838,18 +1879,30 @@ impl VirtualAddressSpace {
         mapping_type: MappingType,
         flags: Option<PageFlags>,
     ) -> Result<VirtualAddress, KernelError> {
-        let (base, size) = self.reserve_mmap_range(size, 4096)?;
-        // Skip physical page mapping in host tests (no frame allocator available)
-        #[cfg(all(feature = "alloc", not(test)))]
-        if let Err(e) =
-            self.map_region_flags(VirtualAddress(base), size as usize, mapping_type, flags)
-        {
-            self.unreserve_mmap_range(base, size);
-            return Err(e);
+        // A MAP_FIXED mapping may sit ahead of the cursor; a reservation
+        // that lands on it is skipped (the cursor has moved past it) and
+        // the next one tried, a bounded number of times.
+        for _ in 0..64 {
+            let (base, size) = self.reserve_mmap_range(size, 4096)?;
+            // Skip physical page mapping in host tests (no frame allocator
+            // available)
+            #[cfg(all(feature = "alloc", not(test)))]
+            match self.map_region_flags(VirtualAddress(base), size as usize, mapping_type, flags) {
+                Ok(()) => {}
+                Err(KernelError::AlreadyExists { .. }) => continue,
+                Err(e) => {
+                    self.unreserve_mmap_range(base, size);
+                    return Err(e);
+                }
+            }
+            #[cfg(any(not(feature = "alloc"), test))]
+            let _ = (mapping_type, flags, size);
+            return Ok(VirtualAddress(base));
         }
-        #[cfg(any(not(feature = "alloc"), test))]
-        let _ = (mapping_type, flags);
-        Ok(VirtualAddress(base))
+        Err(KernelError::OutOfMemory {
+            requested: size,
+            available: 0,
+        })
     }
 
     /// Return the base address of the user heap region.
@@ -2583,6 +2636,8 @@ pub fn map_physical_region_user(
 
 #[cfg(test)]
 mod tests {
+    use alloc::vec;
+
     use super::*;
 
     #[test]
@@ -2912,5 +2967,69 @@ mod tests {
         assert_eq!(stats.stack_size, 0);
         assert_eq!(stats.heap_size, 0);
         assert_eq!(stats.mapping_count, 0);
+    }
+
+    /// A borrowed (frame-less to free) mapping for the munmap tests.
+    fn device_mapping(start: u64, pages: usize) -> VirtualMapping {
+        let mut m = VirtualMapping::new(VirtualAddress(start), pages * 4096, MappingType::Device);
+        m.physical_frames = (0..pages as u64)
+            .map(|i| FrameNumber::new(0x900 + i))
+            .collect();
+        m
+    }
+
+    fn ranges(vas: &VirtualAddressSpace) -> Vec<(u64, usize)> {
+        vas.mappings
+            .lock()
+            .values()
+            .map(|m| (m.start.0, m.size / 4096))
+            .collect()
+    }
+
+    /// N-141: munmap spans mappings and holes, trims and splits, and a
+    /// range with nothing mapped succeeds.
+    #[test]
+    fn munmap_spans_mappings_and_holes() {
+        let vas = VirtualAddressSpace::new();
+        {
+            let mut m = vas.mappings.lock();
+            m.insert(VirtualAddress(0x10000), device_mapping(0x10000, 4));
+            m.insert(VirtualAddress(0x20000), device_mapping(0x20000, 2));
+            m.insert(VirtualAddress(0x30000), device_mapping(0x30000, 3));
+        }
+        // From inside the first, across a hole, into the second.
+        assert_eq!(vas.unmap(0x12000, 0x21000 - 0x12000), Ok(()));
+        assert_eq!(ranges(&vas), vec![(0x10000, 2), (0x21000, 1), (0x30000, 3)]);
+        let back = vas.find_mapping(VirtualAddress(0x21000)).unwrap();
+        assert_eq!(back.physical_frames, vec![FrameNumber::new(0x901)]);
+        // Nothing mapped: success, nothing changes.
+        assert_eq!(vas.unmap(0x50000, 0x4000), Ok(()));
+        // Hole punch in the middle of the third.
+        assert_eq!(vas.unmap(0x31000, 0x1000), Ok(()));
+        assert_eq!(
+            ranges(&vas),
+            vec![(0x10000, 2), (0x21000, 1), (0x30000, 1), (0x32000, 1)]
+        );
+        // Everything, with an unaligned length rounded up.
+        assert_eq!(vas.unmap(0x10000, 0x22001), Ok(()));
+        assert!(ranges(&vas).is_empty());
+    }
+
+    /// A huge-page mapping is only unmapped whole, and a refused request
+    /// changes nothing.
+    #[test]
+    fn munmap_refuses_part_of_a_huge_page_atomically() {
+        let vas = VirtualAddressSpace::new();
+        {
+            let mut m = vas.mappings.lock();
+            m.insert(VirtualAddress(0x10000), device_mapping(0x10000, 1));
+            let mut huge = device_mapping(0x20_0000, 512);
+            huge.flags |= PageFlags::HUGE;
+            m.insert(VirtualAddress(0x20_0000), huge);
+        }
+        assert!(vas.unmap(0x10000, 0x20_1000).is_err());
+        assert_eq!(ranges(&vas), vec![(0x10000, 1), (0x20_0000, 512)]);
+        assert_eq!(vas.unmap(0x10000, 0x40_0000 - 0x10000), Ok(()));
+        assert!(ranges(&vas).is_empty());
     }
 }

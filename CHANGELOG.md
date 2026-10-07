@@ -189,6 +189,14 @@
 
 ### Fixed
 
+- **`MAP_FIXED` and `munmap` followed Linux only for single mappings (N-141).** `MAP_FIXED` over
+  existing memory failed with ENOMEM instead of replacing it (dynamic loaders map this way), and
+  `munmap` of a range covering several mappings or a hole failed with EINVAL. `MAP_FIXED` now
+  replaces what is there under the same lock, `munmap` removes whatever is mapped in the range
+  (an empty range succeeds), and a kernel-chosen address skips a fixed mapping placed ahead of
+  it. Host tests `munmap_spans_mappings_and_holes` and
+  `munmap_refuses_part_of_a_huge_page_atomically`; runtime test
+  `map_fixed_replaces_and_munmap_spans`.
 - **`MAP_SHARED` memory stopped being shared at fork (N-140).** fork made shared pages
   copy-on-write like private ones, so a child's writes never reached the parent. Shared
   mappings now keep the same frames, writable, in both processes, and an `mprotect` round trip

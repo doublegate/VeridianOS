@@ -184,9 +184,10 @@ pub fn sys_mmap(
     let memory_space = proc.memory_space.lock();
 
     let mapped_addr = if is_fixed {
-        // MAP_FIXED: map at the exact requested address
+        // MAP_FIXED: map at the exact requested address, replacing what
+        // is there (N-141).
         memory_space
-            .map_region_flags(
+            .map_region_fixed(
                 VirtualAddress(addr as u64),
                 length,
                 mapping_type,

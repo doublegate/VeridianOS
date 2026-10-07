@@ -303,9 +303,9 @@ Page protections now follow `prot` (fixed in v0.27, N-132 to N-137). What remain
 - **`MAP_SHARED` with huge pages** (`MAP_HUGETLB`) is still copied at `fork`; ordinary
   `MAP_SHARED` memory stays shared (fixed in v0.27, N-140). File-backed `MAP_SHARED` shares the
   pages between processes but is not written back to the file (no page cache, v0.29).
-- **`MAP_FIXED` over an existing mapping** fails with ENOMEM instead of replacing it, and `munmap`
-  across several mappings or holes fails with EINVAL (N-141). `mprotect` of part of a mapping does
-  not split it (N-135 remainder).
+- **Huge pages are not split:** `munmap` or `MAP_FIXED` over part of a 2 MiB mapping fails with
+  EINVAL (`MAP_FIXED` replacement and `munmap` across mappings work since v0.27, N-141).
+  `mprotect` of part of a mapping does not split it (N-135 remainder).
 - **Memory is allocated eagerly** at `mmap` time, not on first touch (v0.29 memory work).
 - **RAM above the eighth memory region is lost (N-142, HX-07).** Only the eight largest usable
   regions are used; UEFI firmware on real machines reports 50 to 150.
