@@ -329,17 +329,7 @@ pub fn sys_read(fd: usize, buffer: usize, count: usize) -> SyscallResult {
         if let Some(proc) = process::current_process() {
             let file_table = proc.file_table.lock();
             if let Some(file_desc) = file_table.get(fd) {
-                // SAFETY: buffer is non-zero (checked above). The caller
-                // must provide a valid, writable buffer of at least `count`
-                // bytes. from_raw_parts_mut creates a mutable slice.
-                let buffer_slice =
-                    unsafe { core::slice::from_raw_parts_mut(buffer as *mut u8, count) };
-                return match file_desc.read(buffer_slice) {
-                    Ok(bytes_read) => Ok(bytes_read),
-                    Err(crate::error::KernelError::WouldBlock) => Err(SyscallError::WouldBlock),
-                    Err(crate::error::KernelError::BrokenPipe) => Ok(0),
-                    Err(_) => Err(SyscallError::InvalidState),
-                };
+                return file_read_to_user(&file_desc, buffer, count);
             }
         }
 
@@ -348,12 +338,9 @@ pub fn sys_read(fd: usize, buffer: usize, count: usize) -> SyscallResult {
         }
         // Fallback: read from serial UART, respecting terminal state.
         let read_count = count.min(SERIAL_IO_MAX_SIZE);
-        // SAFETY: buffer is non-zero (checked above). We limit the size
-        // via SERIAL_IO_MAX_SIZE. The caller must provide a valid writable
-        // buffer of at least `count` bytes. During early bring-up this
-        // may be a kernel-space address from the embedded init binary.
-        let buffer_slice =
-            unsafe { core::slice::from_raw_parts_mut(buffer as *mut u8, read_count) };
+        // Bytes are gathered in a kernel buffer and copied out once (N-43).
+        let mut line = alloc::vec![0u8; read_count];
+        let buffer_slice = &mut line[..];
 
         let canonical = crate::drivers::terminal::is_canonical_mode();
         let echo = crate::drivers::terminal::is_echo_enabled();
@@ -388,6 +375,7 @@ pub fn sys_read(fd: usize, buffer: usize, count: usize) -> SyscallResult {
             }
         }
 
+        super::userspace::write_user_bytes(buffer, &line[..bytes_read])?;
         return Ok(bytes_read);
     }
 
@@ -401,23 +389,16 @@ pub fn sys_read(fd: usize, buffer: usize, count: usize) -> SyscallResult {
     // parent reads from a pipe that the child writes to.
     let proc = process::current_process().ok_or(SyscallError::InvalidState)?;
 
-    // SAFETY: buffer was validated as non-zero above. The caller must
-    // provide a valid, writable user-space buffer of at least `count`
-    // bytes. from_raw_parts_mut creates a mutable slice for the read.
-    let buffer_slice = unsafe { core::slice::from_raw_parts_mut(buffer as *mut u8, count) };
-
     // First attempt: try reading directly.
     {
         let file_table = proc.file_table.lock();
         let file_desc = file_table.get(fd).ok_or(SyscallError::InvalidArgument)?;
-        match file_desc.read(buffer_slice) {
-            Ok(bytes_read) => return Ok(bytes_read),
-            Err(crate::error::KernelError::WouldBlock) => {
+        match file_read_to_user(&file_desc, buffer, count) {
+            Err(SyscallError::WouldBlock) => {
                 // Pipe empty with write end open -- fall through to try
                 // dispatching children in boot context.
             }
-            Err(crate::error::KernelError::BrokenPipe) => return Ok(0), // EOF
-            Err(_) => return Err(SyscallError::InvalidState),
+            other => return other,
         }
     } // Drop file_table lock before dispatching children.
 
@@ -461,9 +442,8 @@ pub fn sys_read(fd: usize, buffer: usize, count: usize) -> SyscallResult {
                 // Retry the read after dispatching the child.
                 let file_table = proc.file_table.lock();
                 if let Some(file_desc) = file_table.get(fd) {
-                    match file_desc.read(buffer_slice) {
-                        Ok(bytes_read) => return Ok(bytes_read),
-                        Err(crate::error::KernelError::WouldBlock) => {
+                    match file_read_to_user(&file_desc, buffer, count) {
+                        Err(SyscallError::WouldBlock) => {
                             // Still empty -- continue dispatching if we ran a child
                             drop(file_table);
                             if !dispatched {
@@ -471,8 +451,7 @@ pub fn sys_read(fd: usize, buffer: usize, count: usize) -> SyscallResult {
                                 return Err(SyscallError::WouldBlock);
                             }
                         }
-                        Err(crate::error::KernelError::BrokenPipe) => return Ok(0),
-                        Err(_) => return Err(SyscallError::InvalidState),
+                        other => return other,
                     }
                 } else {
                     return Err(SyscallError::InvalidArgument);
@@ -515,17 +494,7 @@ pub fn sys_write(fd: usize, buffer: usize, count: usize) -> SyscallResult {
         if let Some(proc) = process::current_process() {
             let file_table = proc.file_table.lock();
             if let Some(file_desc) = file_table.get(fd) {
-                // SAFETY: buffer is non-zero (checked above). The caller
-                // must provide a valid, readable buffer of at least `count`
-                // bytes. from_raw_parts creates an immutable slice.
-                let buffer_slice =
-                    unsafe { core::slice::from_raw_parts(buffer as *const u8, count) };
-                return match file_desc.write(buffer_slice) {
-                    Ok(bytes_written) => Ok(bytes_written),
-                    Err(crate::error::KernelError::BrokenPipe) => Err(SyscallError::BrokenPipe),
-                    Err(crate::error::KernelError::WouldBlock) => Err(SyscallError::WouldBlock),
-                    Err(_) => Err(SyscallError::InvalidState),
-                };
+                return file_write_from_user(&file_desc, buffer, count);
             }
         }
 
@@ -534,13 +503,10 @@ pub fn sys_write(fd: usize, buffer: usize, count: usize) -> SyscallResult {
         }
         // Fallback: write directly to serial UART
         let write_count = count.min(SERIAL_IO_MAX_SIZE);
-        // SAFETY: buffer is non-zero (checked above). We limit the size
-        // via SERIAL_IO_MAX_SIZE. The caller must provide a valid readable
-        // buffer of at least `count` bytes. During early bring-up this
-        // may be a kernel-space address from the embedded init binary.
-        let buffer_slice = unsafe { core::slice::from_raw_parts(buffer as *const u8, write_count) };
-
-        for &byte in buffer_slice {
+        // Copied in once through the fault-tolerant reader (N-43).
+        let mut out = alloc::vec![0u8; write_count];
+        super::userspace::read_user_bytes(buffer, &mut out)?;
+        for &byte in &out {
             serial_write_byte(byte);
         }
 
@@ -552,17 +518,33 @@ pub fn sys_write(fd: usize, buffer: usize, count: usize) -> SyscallResult {
     let file_table = proc.file_table.lock();
     let file_desc = file_table.get(fd).ok_or(SyscallError::InvalidArgument)?;
 
-    // SAFETY: buffer was validated as non-zero above. The caller must
-    // provide a valid, readable user-space buffer of at least `count`
-    // bytes. from_raw_parts creates an immutable slice for the write.
-    let buffer_slice = unsafe { core::slice::from_raw_parts(buffer as *const u8, count) };
+    file_write_from_user(&file_desc, buffer, count)
+}
 
-    match file_desc.write(buffer_slice) {
-        Ok(bytes_written) => Ok(bytes_written),
+/// Read up to `count` bytes from an open file into user memory at `buf`.
+/// A regular file is read in chunks until `count` or end of file; anything
+/// else (pipe, tty, socket, device) gets exactly one underlying read, so its
+/// blocking and short-read behaviour is unchanged. EOF on a pipe is 0.
+fn file_read_to_user(file: &crate::fs::file::File, buf: usize, count: usize) -> SyscallResult {
+    let regular = file.node.node_type() == crate::fs::NodeType::File;
+    super::userspace::produce_to_user(buf, count, regular, |kbuf| match file.read(kbuf) {
+        Ok(n) => Ok(n),
+        Err(crate::error::KernelError::BrokenPipe) => Ok(0),
+        Err(crate::error::KernelError::WouldBlock) => Err(SyscallError::WouldBlock),
+        Err(_) => Err(SyscallError::InvalidState),
+    })
+}
+
+/// Write up to `count` bytes of user memory at `buf` to an open file, in
+/// chunks; a short write (a full pipe) ends the transfer with the count so
+/// far.
+fn file_write_from_user(file: &crate::fs::file::File, buf: usize, count: usize) -> SyscallResult {
+    super::userspace::consume_from_user(buf, count, true, |kbuf| match file.write(kbuf) {
+        Ok(n) => Ok(n),
         Err(crate::error::KernelError::BrokenPipe) => Err(SyscallError::BrokenPipe),
         Err(crate::error::KernelError::WouldBlock) => Err(SyscallError::WouldBlock),
         Err(_) => Err(SyscallError::InvalidState),
-    }
+    })
 }
 
 /// Seek within a file
@@ -2780,13 +2762,17 @@ pub fn sys_pread(fd: usize, buf: usize, count: usize, offset: usize) -> SyscallR
     let file_table = proc.file_table.lock();
     let file = file_table.get(fd).ok_or(SyscallError::InvalidArgument)?;
 
-    // Read directly at offset through the VfsNode, bypassing File position
-    // SAFETY: buf was validated above.
-    let buffer_slice = unsafe { core::slice::from_raw_parts_mut(buf as *mut u8, count) };
-    match file.node.read(offset, buffer_slice) {
-        Ok(n) => Ok(n),
-        Err(_) => Err(SyscallError::InvalidState),
-    }
+    // Read at `offset` through the VfsNode, bypassing the File position,
+    // a chunk at a time through a kernel buffer (N-43).
+    let mut at = offset;
+    super::userspace::produce_to_user(buf, count, true, |kbuf| {
+        let n = file
+            .node
+            .read(at, kbuf)
+            .map_err(|_| SyscallError::InvalidState)?;
+        at += n;
+        Ok(n)
+    })
 }
 
 /// Write to a file descriptor at a given offset without changing position
@@ -2801,13 +2787,16 @@ pub fn sys_pwrite(fd: usize, buf: usize, count: usize, offset: usize) -> Syscall
     let file_table = proc.file_table.lock();
     let file = file_table.get(fd).ok_or(SyscallError::InvalidArgument)?;
 
-    // Write directly at offset through the VfsNode, bypassing File position
-    // SAFETY: buf was validated above.
-    let buffer_slice = unsafe { core::slice::from_raw_parts(buf as *const u8, count) };
-    match file.node.write(offset, buffer_slice) {
-        Ok(n) => Ok(n),
-        Err(_) => Err(SyscallError::InvalidState),
-    }
+    // Write at `offset` through the VfsNode, a chunk at a time (N-43).
+    let mut at = offset;
+    super::userspace::consume_from_user(buf, count, true, |kbuf| {
+        let n = file
+            .node
+            .write(at, kbuf)
+            .map_err(|_| SyscallError::InvalidState)?;
+        at += n;
+        Ok(n)
+    })
 }
 
 /// Helper: split a path into (parent_dir, basename).

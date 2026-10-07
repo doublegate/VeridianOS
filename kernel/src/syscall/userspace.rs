@@ -378,6 +378,90 @@ pub fn read_user_bytes(addr: usize, dst: &mut [u8]) -> Result<(), SyscallError> 
     unsafe { raw_copy(dst.as_mut_ptr(), addr as *const u8, dst.len()) }
 }
 
+/// Bounce-buffer size for bulk transfers between the kernel and user memory.
+pub(crate) const USER_COPY_CHUNK: usize = 64 * 1024;
+
+/// Move up to `count` bytes produced by the kernel into user memory at
+/// `addr`, one bounded kernel buffer at a time.
+///
+/// `produce` fills the buffer it is given and returns how many bytes it
+/// wrote. With `repeat`, another chunk follows a full one (regular files,
+/// where a further read cannot block); without it `produce` runs exactly
+/// once, so a pipe, socket or tty read keeps its one-call semantics.
+///
+/// User memory is touched only through [`write_user_bytes`]: an unmapped
+/// page gives EFAULT, or the partial count if some bytes already reached the
+/// caller, as Linux does. Bytes `produce` consumed but that could not be
+/// copied out are lost, as they are for Linux on a mid-copy fault. Before
+/// v0.27 these paths built slices over user memory and faulted in the kernel
+/// instead (N-43).
+pub fn produce_to_user(
+    addr: usize,
+    count: usize,
+    repeat: bool,
+    mut produce: impl FnMut(&mut [u8]) -> Result<usize, SyscallError>,
+) -> Result<usize, SyscallError> {
+    if count == 0 {
+        return Ok(0);
+    }
+    validate_user_ptr(addr as *const u8, count)?;
+    let mut kbuf = alloc::vec![0u8; count.min(USER_COPY_CHUNK)];
+    let mut total = 0;
+    while total < count {
+        let want = (count - total).min(kbuf.len());
+        let n = match produce(&mut kbuf[..want]) {
+            Ok(n) => n.min(want),
+            Err(e) if total == 0 => return Err(e),
+            Err(_) => break,
+        };
+        if n > 0 {
+            if let Err(e) = write_user_bytes(addr + total, &kbuf[..n]) {
+                return if total > 0 { Ok(total) } else { Err(e) };
+            }
+        }
+        total += n;
+        if !repeat || n < want {
+            break;
+        }
+    }
+    Ok(total)
+}
+
+/// Hand up to `count` bytes of user memory at `addr` to `consume`, one
+/// bounded kernel buffer at a time. `consume` returns how many bytes it
+/// accepted; a short count ends the transfer. `repeat` as for
+/// [`produce_to_user`]. An unmapped page gives EFAULT, or the count accepted
+/// so far.
+pub fn consume_from_user(
+    addr: usize,
+    count: usize,
+    repeat: bool,
+    mut consume: impl FnMut(&[u8]) -> Result<usize, SyscallError>,
+) -> Result<usize, SyscallError> {
+    if count == 0 {
+        return Ok(0);
+    }
+    validate_user_ptr(addr as *const u8, count)?;
+    let mut kbuf = alloc::vec![0u8; count.min(USER_COPY_CHUNK)];
+    let mut total = 0;
+    while total < count {
+        let want = (count - total).min(kbuf.len());
+        if let Err(e) = read_user_bytes(addr + total, &mut kbuf[..want]) {
+            return if total > 0 { Ok(total) } else { Err(e) };
+        }
+        let n = match consume(&kbuf[..want]) {
+            Ok(n) => n.min(want),
+            Err(e) if total == 0 => return Err(e),
+            Err(_) => break,
+        };
+        total += n;
+        if !repeat || n < want {
+            break;
+        }
+    }
+    Ok(total)
+}
+
 /// Copy `src` into user memory at `addr`.
 pub fn write_user_bytes(addr: usize, src: &[u8]) -> Result<(), SyscallError> {
     if src.is_empty() {
@@ -487,6 +571,67 @@ mod accessor_tests {
             unsafe { copy_from_user::<[u32; 2]>(base) }.unwrap()[0],
             -5i32 as u32
         );
+    }
+
+    #[test]
+    fn produce_to_user_chunks_regular_reads_and_stops_short() {
+        // A source of 150_000 bytes, more than two chunks.
+        let src: alloc::vec::Vec<u8> = (0..150_000u32).map(|i| i as u8).collect();
+        let mut dst = alloc::vec![0u8; 200_000];
+        let mut pos = 0;
+        let n = produce_to_user(dst.as_mut_ptr() as usize, dst.len(), true, |k| {
+            let n = k.len().min(src.len() - pos);
+            k[..n].copy_from_slice(&src[pos..pos + n]);
+            pos += n;
+            Ok(n)
+        })
+        .unwrap();
+        assert_eq!(n, 150_000);
+        assert_eq!(&dst[..n], &src[..]);
+        // Without repeat, exactly one producer call, however large the request.
+        let mut calls = 0;
+        let n = produce_to_user(dst.as_mut_ptr() as usize, dst.len(), false, |k| {
+            calls += 1;
+            Ok(k.len())
+        })
+        .unwrap();
+        assert_eq!((n, calls), (USER_COPY_CHUNK, 1));
+        // An error before anything is copied is returned; after, the count.
+        assert_eq!(
+            produce_to_user(dst.as_mut_ptr() as usize, 10, true, |_| Err(
+                SyscallError::WouldBlock
+            )),
+            Err(SyscallError::WouldBlock)
+        );
+        let mut first = true;
+        let n = produce_to_user(dst.as_mut_ptr() as usize, dst.len(), true, |k| {
+            if first {
+                first = false;
+                Ok(k.len())
+            } else {
+                Err(SyscallError::IoError)
+            }
+        })
+        .unwrap();
+        assert_eq!(n, USER_COPY_CHUNK);
+        assert!(produce_to_user(KERNEL_ADDR, 8, true, |k| Ok(k.len())).is_err());
+    }
+
+    #[test]
+    fn consume_from_user_hands_over_chunks_until_short() {
+        let src: alloc::vec::Vec<u8> = (0..100_000u32).map(|i| (i * 7) as u8).collect();
+        let mut got = alloc::vec::Vec::new();
+        let n = consume_from_user(src.as_ptr() as usize, src.len(), true, |k| {
+            got.extend_from_slice(k);
+            Ok(k.len())
+        })
+        .unwrap();
+        assert_eq!((n, &got[..]), (src.len(), &src[..]));
+        // A consumer that accepts less ends the transfer there.
+        let n =
+            consume_from_user(src.as_ptr() as usize, src.len(), true, |k| Ok(k.len() / 2)).unwrap();
+        assert_eq!(n, USER_COPY_CHUNK / 2);
+        assert!(consume_from_user(KERNEL_ADDR, 8, true, |k| Ok(k.len())).is_err());
     }
 
     #[test]
