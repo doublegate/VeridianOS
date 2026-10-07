@@ -197,6 +197,10 @@
 
 ### Fixed
 
+- **Every thread cost a 256 KiB stack it never used (N-114).** `clone` requires the caller's
+  stack, yet the kernel also mapped a stack of its own for each new thread, placed by thread id.
+  It no longer does; a child forked from such a thread still gets a full stack size for a later
+  `exec`. musl runtime test `musl_thread_fork_exec`.
 - **File system calls reported most errors as EINVAL or ENOENT (N-127).** read, write, lseek,
   fstat, truncate, mount, sync, the fd-table calls and the path lookups now return the errno of
   the actual cause: ENOSPC, EMFILE, EBUSY, EFBIG, EOPNOTSUPP, ENODEV and EIO are new, symlink

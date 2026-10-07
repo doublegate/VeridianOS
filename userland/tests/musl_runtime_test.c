@@ -285,6 +285,36 @@ static void test_signals(void)
     signal(SIGUSR2, SIG_DFL);
 }
 
+/* N-114: a thread runs on its own stack (no kernel-chosen one is mapped
+ * for it), and a child it forks can still exec. */
+static void *fork_exec_from_thread(void *arg)
+{
+    (void)arg;
+    pid_t pid = fork();
+    if (pid == 0) {
+        char *args[] = {"false", 0};
+        char *env[] = {0};
+        execve("/bin/false", args, env);
+        _exit(42);
+    }
+    int st = 0;
+    if (pid < 0 || waitpid(pid, &st, 0) != pid)
+        return (void *)-1L;
+    return (void *)(long)(WIFEXITED(st) ? WEXITSTATUS(st) : 100 + WTERMSIG(st));
+}
+
+static void test_thread_fork_exec(void)
+{
+    pthread_t t;
+    void *res = (void *)-2L;
+    int created = pthread_create(&t, 0, fork_exec_from_thread, 0) == 0;
+    if (created)
+        pthread_join(t, &res);
+    static char why[64];
+    snprintf(why, sizeof(why), "created=%d result=%ld", created, (long)res);
+    report("musl_thread_fork_exec", created && (long)res == 1, why);
+}
+
 int main(void)
 {
     test_fsync();
@@ -296,6 +326,7 @@ int main(void)
     test_threads();
     test_thread_guards();
     test_signals();
+    test_thread_fork_exec();
     printf("MUSL-RUNTIME: %d/%d\n", passed, total);
     return passed == total ? 0 : 1;
 }

@@ -171,7 +171,14 @@ pub fn fork_process() -> Result<ProcessId, KernelError> {
             current_thread.name.clone(),
             ctx.get_instruction_pointer(),
         )
-        .user_stack_size(current_thread.user_stack.size)
+        // A clone thread has no kernel-chosen stack (it runs on its own);
+        // the child's main thread still needs a size for a later exec.
+        .user_stack_size(
+            current_thread
+                .user_stack
+                .size
+                .max(super::creation::DEFAULT_USER_STACK_SIZE),
+        )
         .kernel_stack_size(current_thread.kernel_stack.size)
         .priority(current_thread.priority)
         .cpu_affinity(current_thread.get_affinity())

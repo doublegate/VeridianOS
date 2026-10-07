@@ -86,7 +86,7 @@ IPC is unreachable from user space until the v0.28 ABI work (N-33); except N-88 
 | N-111 | Medium L | Concurrent waits can reap one child twice (`exit.rs:141-160`) | Zombie->Dead CAS before reaping | D |
 | N-112 | Medium S | Reparenting races exit notification (`exit.rs:615-630`); without pid 1 orphans leak | a tasklist lock; kernel reaper for orphans | D |
 | N-113 | High C/L | Signal frames: trampoline on the NX user stack (`signal_delivery.rs:742`), no red zone, misaligned, RFLAGS restored verbatim (IOPL), no canonical RIP check | restorer-based frame on the kernel-stack frame, sanitised (with N-170) | D3; **fixed** on x86_64 (D3: Linux rt_sigframe below the red zone, 16-byte aligned, SA_RESTORER return, FXSAVE state, sanitised rt_sigreturn) |
-| N-114 | Low C | Thread user stacks placed by global tid (`thread.rs:~866`); clone maps 256 KiB even with `newsp`; main thread tid != pid; futex keys (pid, vaddr) break MAP_SHARED futexes | Linux layout and keys | D |
+| N-114 | Low C | Thread user stacks placed by global tid (`thread.rs:~866`); clone maps 256 KiB even with `newsp`; main thread tid != pid; futex keys (pid, vaddr) break MAP_SHARED futexes | Linux layout and keys | D; partly **fixed** (D3: clone maps no stack of its own, a thread's forked child gets a full stack for exec; musl runtime test); main tid == pid and keyed futex queues remain (dispatched futex waits poll the word, so shared-memory futexes already meet) |
 
 ## Filesystems (N-115 to N-131)
 

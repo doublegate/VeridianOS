@@ -68,6 +68,9 @@ work. User code is preempted when its slice ends (D3). What is still missing:
   - `flock` without `LOCK_NB` fails with EWOULDBLOCK instead of waiting (N-120).
 - **exec from a multithreaded process fails with EAGAIN.** The other threads would keep running
   on the page tables exec replaces; stopping them first is N-101.
+- **Thread ids and futex keys (N-114 remainder).** A main thread's id differs from its process
+  id (Linux makes them equal), and futex waits poll the futex word instead of queueing on a key
+  (so waits in shared memory between processes work, but every waiter polls).
 - **Native libc threads (N-102).** The native C library's `clone` returns through a C epilogue
   and `errno` is one global, so its `pthread_create` still does not work (musl's does). Two
   fixes are therefore tested by unit tests only: LIBC-SEC-01 (the allocator lock in `stdlib.c`)

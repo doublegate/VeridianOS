@@ -104,7 +104,8 @@ What does not work yet: `docs/KNOWN-LIMITATIONS.md`.
       return to user with restorer frames (N-113); per-thread signal state (N-109); ignored
       signals dropped at generation (N-98); sigset layout (N-96); wait status and errno (N-99 done except
       WNOWAIT/rusage; N-127 done); exec permission and fatal-after-clear (done, N-101; multithreaded exec remains); relative paths per thread (N-115); MAP_SHARED anon (done, N-140) and
-      MAP_FIXED semantics (done, N-141); pty fixes (done, N-128); thread placement (N-114).
+      MAP_FIXED semantics (done, N-141); pty fixes (done, N-128); thread placement (N-114 partly done: no unused
+      clone stacks; main tid == pid and futex keys remain).
     - [ ] Threads: clone through the dispatcher, native libc clone stub, TCB join, TLS errno
       (N-102); N-46, N-50, N-54.
     - [ ] D4: nested boot dispatch and `BOOT_RETURN_*` removed; old scheduler, `queue.rs`,

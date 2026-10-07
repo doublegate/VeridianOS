@@ -143,7 +143,10 @@ pub fn sys_thread_clone(
         current_ctx.get_instruction_pointer(),
     )
     .kernel_stack_size(process::creation::DEFAULT_KERNEL_STACK_SIZE)
-    .user_stack_size(process::creation::DEFAULT_USER_STACK_SIZE);
+    // The thread runs on the caller's stack (`newsp`, required above): no
+    // kernel-chosen stack is mapped for it. One used to be, 256 KiB per
+    // thread that nothing ran on (N-114).
+    .user_stack_size(0);
 
     #[cfg(feature = "alloc")]
     {
@@ -245,23 +248,6 @@ pub fn sys_thread_clone(
         unsafe {
             crate::syscall::userspace::copy_to_user(child_tid_ptr, &(tid.0 as u32))
                 .map_err(|_| SyscallError::InvalidPointer)?;
-        }
-    }
-
-    // Map user stack pages for the new thread
-    {
-        let mut vas = proc.memory_space.lock();
-        let stack_base = thread.user_stack.base;
-        let stack_size = thread.user_stack.size;
-        let flags = crate::mm::PageFlags::PRESENT
-            | crate::mm::PageFlags::USER
-            | crate::mm::PageFlags::WRITABLE
-            | crate::mm::PageFlags::NO_EXECUTE;
-        let pages = stack_size / 4096;
-        for i in 0..pages {
-            let vaddr = stack_base + i * 4096;
-            vas.map_page(vaddr, flags)
-                .map_err(|_| SyscallError::InvalidState)?;
         }
     }
 
