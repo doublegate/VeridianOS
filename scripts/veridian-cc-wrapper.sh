@@ -12,7 +12,8 @@
 TOOLCHAIN="/opt/veridian/toolchain"
 CC="${TOOLCHAIN}/bin/x86_64-veridian-gcc"
 SYSROOT="${TOOLCHAIN}/sysroot"
-GCC_LIBDIR="${TOOLCHAIN}/lib/gcc/x86_64-veridian/14.2.0"
+# The compiler's own version (its private headers and libgcc), not hardcoded.
+GCC_LIBDIR="${TOOLCHAIN}/lib/gcc/x86_64-veridian/$("$CC" -dumpfullversion)"
 GCC_INCDIR="${GCC_LIBDIR}/include"
 
 # CRT objects for linking

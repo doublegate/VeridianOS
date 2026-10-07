@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # Build musl libc for VeridianOS cross-compilation
 #
-# This script downloads, patches, and cross-compiles musl libc 1.2.5
+# This script downloads, patches, and cross-compiles musl libc 1.2.6
 # to produce a static libc.a and C headers in the sysroot.
 #
 # Prerequisites:
 #   - GCC cross-compiler (x86_64-linux-musl or host gcc for static target)
-#   - wget/curl for downloading source
+#   - curl (or wget) for downloading source
 #
 # Output:
 #   $SYSROOT/usr/lib/libc.a
@@ -15,12 +15,15 @@
 
 set -euo pipefail
 
-MUSL_VERSION="1.2.5"
+MUSL_VERSION="1.2.6"
 MUSL_URL="https://musl.libc.org/releases/musl-${MUSL_VERSION}.tar.gz"
+MUSL_SHA256="d585fd3b613c66151fc3249e8ed44f77020cb5e6c1e635a616d3f9f82460512a"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
-BUILD_DIR="${PROJECT_ROOT}/target/cross-build/musl"
-SYSROOT="${VERIDIAN_SYSROOT:-${PROJECT_ROOT}/target/veridian-sysroot}"
+# shellcheck source=veridian-paths.sh
+source "${SCRIPT_DIR}/veridian-paths.sh"
+BUILD_DIR="${VERIDIAN_CROSS_BUILD}/musl"
+SYSROOT="${VERIDIAN_SYSROOT}"
 PATCH_DIR="${SCRIPT_DIR}/musl-patches"
 JOBS="${JOBS:-$(nproc)}"
 
@@ -33,20 +36,32 @@ die() { echo "[build-musl] ERROR: $*" >&2; exit 1; }
 
 # ── Download ──────────────────────────────────────────────────────────
 download_musl() {
-    local tarball="${BUILD_DIR}/musl-${MUSL_VERSION}.tar.gz"
+    local tarball="${VERIDIAN_SOURCES}/musl-${MUSL_VERSION}.tar.gz"
     if [[ -f "${tarball}" ]]; then
         log "Source tarball already downloaded."
+        verify_musl "${tarball}"
         return 0
     fi
     mkdir -p "${BUILD_DIR}"
     log "Downloading musl ${MUSL_VERSION}..."
-    if command -v wget &>/dev/null; then
-        wget -q -O "${tarball}" "${MUSL_URL}"
-    elif command -v curl &>/dev/null; then
+    # curl first: wget may be a sandbox wrapper (firejail) that cannot
+    # write outside the home directory, e.g. to /opt/veridian/sources.
+    if command -v curl &>/dev/null; then
         curl -fsSL -o "${tarball}" "${MUSL_URL}"
+    elif command -v wget &>/dev/null; then
+        wget -q -O "${tarball}" "${MUSL_URL}"
     else
         die "Need wget or curl to download musl."
     fi
+    verify_musl "${tarball}"
+}
+
+# The tarball must be the release the patches were made for.
+verify_musl() {
+    local got
+    got="$(sha256sum "$1" | cut -d' ' -f1)"
+    [[ "${got}" == "${MUSL_SHA256}" ]] \
+        || die "musl tarball checksum mismatch (got ${got}); remove $1 and retry."
 }
 
 # ── Extract ───────────────────────────────────────────────────────────
@@ -69,7 +84,7 @@ extract_musl() {
         rm -rf "${src}" "${BUILD_DIR}/build"
     fi
     log "Extracting..."
-    tar -xzf "${BUILD_DIR}/musl-${MUSL_VERSION}.tar.gz" -C "${BUILD_DIR}"
+    tar -xzf "${VERIDIAN_SOURCES}/musl-${MUSL_VERSION}.tar.gz" -C "${BUILD_DIR}"
 }
 
 # ── Patch ─────────────────────────────────────────────────────────────

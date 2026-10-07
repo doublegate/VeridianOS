@@ -1337,8 +1337,8 @@ fn mount_blockfs_root() {
             // and libinput search for data files at those compile-time
             // paths, so recreate the sysroot directory and symlink its `usr`
             // back to `/usr`. build.rs sets the path: VERIDIAN_SYSROOT if
-            // given at kernel build time, else <repo>/target/veridian-sysroot,
-            // the tools/cross default. It must match the sysroot the rootfs
+            // given at kernel build time, else /opt/veridian/musl-sysroot, the
+            // tools/cross default. It must match the sysroot the rootfs
             // binaries were built against. This goes away once tools/cross
             // builds with --prefix=/usr.
             {
@@ -1629,7 +1629,7 @@ fn test_user_binary_load() {
                             "-isystem",
                             "/usr/include",
                             "-isystem",
-                            "/usr/lib/gcc/x86_64-veridian/14.2.0/include",
+                            "/usr/lib/gcc/x86_64-veridian/16.2.0/include", /* GCC_VERSION in scripts/build-native-gcc-static.sh */
                             "-static",
                             "-fno-stack-protector",
                             "-ffreestanding",
@@ -1667,7 +1667,7 @@ fn test_user_binary_load() {
                             "-L",
                             "/usr/lib",
                             "-L",
-                            "/usr/lib/gcc/x86_64-veridian/14.2.0",
+                            "/usr/lib/gcc/x86_64-veridian/16.2.0",
                             "-lc",
                             "-lgcc",
                         ],

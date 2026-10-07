@@ -16,15 +16,17 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
-BUILD_DIR="${PROJECT_ROOT}/target/cross-build/wayland"
-SYSROOT="${VERIDIAN_SYSROOT:-${PROJECT_ROOT}/target/veridian-sysroot}"
+# shellcheck source=veridian-paths.sh
+source "${SCRIPT_DIR}/veridian-paths.sh"
+BUILD_DIR="${VERIDIAN_CROSS_BUILD}/wayland"
+SYSROOT="${VERIDIAN_SYSROOT}"
 JOBS="${JOBS:-$(nproc)}"
 CC="${SYSROOT}/bin/x86_64-veridian-musl-gcc"
 
-WAYLAND_VER="1.23.1"
+WAYLAND_VER="1.26.0"
 WAYLAND_URL="https://gitlab.freedesktop.org/wayland/wayland/-/releases/${WAYLAND_VER}/downloads/wayland-${WAYLAND_VER}.tar.xz"
 # If system wayland-scanner version doesn't match, we build our own from this source
-PROTOCOLS_VER="1.38"
+PROTOCOLS_VER="1.49"
 PROTOCOLS_URL="https://gitlab.freedesktop.org/wayland/wayland-protocols/-/releases/${PROTOCOLS_VER}/downloads/wayland-protocols-${PROTOCOLS_VER}.tar.xz"
 
 log() { echo "[build-wayland] $*"; }
@@ -34,7 +36,7 @@ mkdir -p "${BUILD_DIR}"
 
 fetch() {
     local name="$1" url="$2" dir="$3"
-    local tarball="${BUILD_DIR}/${name}.tar.xz"
+    local tarball="${VERIDIAN_SOURCES}/${name}.tar.xz"
     if [[ ! -f "${tarball}" ]]; then
         log "Downloading ${name}..."
         { curl -fsSL -o "${tarball}.part" "${url}" || wget -q -O "${tarball}.part" "${url}"; } && [[ -s "${tarball}.part" ]] && mv "${tarball}.part" "${tarball}" || { rm -f "${tarball}.part"; echo "download failed: ${url}" >&2; exit 1; }

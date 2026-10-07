@@ -7,7 +7,7 @@
 #   Phase C: Native compilation on VeridianOS (separate script)
 #
 # Prerequisites:
-#   - Cross-compiler: /opt/veridian/toolchain/bin/x86_64-veridian-gcc (GCC 14.2.0)
+#   - Cross-compiler: /opt/veridian/toolchain/bin/x86_64-veridian-gcc (GCC 16.2.0, scripts/build-cross-toolchain.sh)
 #   - BusyBox source: downloaded automatically to /tmp/VeridianOS/busybox-1.36.1/
 #   - Native GCC toolchain: target/native-gcc-static/ (from build-native-gcc-static.sh)
 #
@@ -18,6 +18,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
+# The latest STABLE release (checked 2026-10-07): busybox.net labels 1.37.0 and
+# 1.38.0 "unstable".
 BUSYBOX_VERSION="1.36.1"
 BUSYBOX_URL="https://busybox.net/downloads/busybox-${BUSYBOX_VERSION}.tar.bz2"
 
@@ -34,7 +36,10 @@ CC="${TOOLCHAIN_PREFIX}/bin/x86_64-veridian-gcc"
 STRIP="${TOOLCHAIN_PREFIX}/bin/x86_64-veridian-strip"
 READELF="${TOOLCHAIN_PREFIX}/bin/x86_64-veridian-readelf"
 SYSROOT="${TOOLCHAIN_PREFIX}/sysroot"
-GCC_LIBDIR="${TOOLCHAIN_PREFIX}/lib/gcc/x86_64-veridian/14.2.0"
+# The cross compiler's version (its private headers and libgcc live under
+# lib/gcc/<target>/<version>), read from the compiler rather than hardcoded.
+GCC_VERSION="$("$CC" -dumpversion 2>/dev/null || echo unknown)"
+GCC_LIBDIR="${TOOLCHAIN_PREFIX}/lib/gcc/x86_64-veridian/${GCC_VERSION}"
 GCC_INCDIR="${GCC_LIBDIR}/include"
 CC_WRAPPER="${SCRIPT_DIR}/veridian-cc-wrapper.sh"
 
@@ -394,7 +399,9 @@ phase_rootfs() {
     # edit (nano-inspired text editor, depends on libcurses)
     if [ -f "${PROGRAMS_DIR}/edit/edit.c" ] && [ -f "$BUILD_DIR/usr/lib/libcurses.a" ]; then
         echo -n "    edit... "
-        if "$CC" $pgm_cflags $pgm_ldflags -o "$BUILD_DIR/bin/edit" \
+        # curses.h from the in-tree library (the toolchain sysroot does not
+        # carry it; an old one only had a hand-installed copy).
+        if "$CC" $pgm_cflags -I"${curses_src}" $pgm_ldflags -o "$BUILD_DIR/bin/edit" \
                 "${SYSROOT}/usr/lib/crt0.o" "${PROGRAMS_DIR}/edit/edit.c" \
                 -L"$BUILD_DIR/usr/lib" -lcurses -lc 2>&1; then
             "$STRIP" "$BUILD_DIR/bin/edit" 2>/dev/null || true
@@ -436,8 +443,10 @@ phase_rootfs() {
     # The same kind of checks for programs built against the patched musl
     # (as KDE is), so musl's syscall remapping is exercised too. Built when
     # the musl sysroot exists (tools/cross/build-musl.sh).
-    local musl_cc="${PROJECT_ROOT}/target/veridian-sysroot/bin/x86_64-veridian-musl-gcc"
-    if [ -x "$musl_cc" ] && [ -f "${PROJECT_ROOT}/target/veridian-sysroot/usr/lib/libc.a" ]; then
+    # The musl sysroot of tools/cross (veridian-paths.sh).
+    local musl_sysroot="${VERIDIAN_SYSROOT:-/opt/veridian/musl-sysroot}"
+    local musl_cc="${musl_sysroot}/bin/x86_64-veridian-musl-gcc"
+    if [ -x "$musl_cc" ] && [ -f "${musl_sysroot}/usr/lib/libc.a" ]; then
         echo -n "    musl_runtime_test... "
         if "$musl_cc" -O2 -Wall -o "$BUILD_DIR/bin/musl_runtime_test" \
                 "${TESTS_DIR}/musl_runtime_test.c" 2>&1; then
@@ -503,8 +512,10 @@ phase_rootfs() {
     # Include native GCC toolchain if available (for Phase C)
     if [ -d "$NATIVE_GCC_DIR/usr/bin" ]; then
         echo "  Adding native GCC toolchain..."
-        mkdir -p "$BUILD_DIR/usr/lib/gcc/x86_64-veridian/14.2.0/include"
-        mkdir -p "$BUILD_DIR/usr/libexec/gcc/x86_64-veridian/14.2.0"
+        # The native compiler's version, from its own install tree.
+        NATIVE_GCC_VERSION="$(ls "$NATIVE_GCC_DIR/usr/lib/gcc/x86_64-veridian/" 2>/dev/null | sort -V | tail -1)"
+        mkdir -p "$BUILD_DIR/usr/lib/gcc/x86_64-veridian/${NATIVE_GCC_VERSION}/include"
+        mkdir -p "$BUILD_DIR/usr/libexec/gcc/x86_64-veridian/${NATIVE_GCC_VERSION}"
         mkdir -p "$BUILD_DIR/usr/include/sys"
         mkdir -p "$BUILD_DIR/usr/include/arpa"
         mkdir -p "$BUILD_DIR/usr/include/netinet"
@@ -521,8 +532,8 @@ phase_rootfs() {
 
         # cc1, collect2
         for tool in cc1 collect2 ld as; do
-            src="$NATIVE_GCC_DIR/usr/libexec/gcc/x86_64-veridian/14.2.0/$tool"
-            [ -f "$src" ] && cp "$src" "$BUILD_DIR/usr/libexec/gcc/x86_64-veridian/14.2.0/"
+            src="$NATIVE_GCC_DIR/usr/libexec/gcc/x86_64-veridian/${NATIVE_GCC_VERSION}/$tool"
+            [ -f "$src" ] && cp "$src" "$BUILD_DIR/usr/libexec/gcc/x86_64-veridian/${NATIVE_GCC_VERSION}/"
         done
 
         # Libraries
@@ -530,9 +541,9 @@ phase_rootfs() {
             [ -f "$NATIVE_GCC_DIR/usr/lib/$f" ] && cp "$NATIVE_GCC_DIR/usr/lib/$f" "$BUILD_DIR/usr/lib/"
         done
         for f in libgcc.a crtbegin.o crtend.o; do
-            [ -f "$NATIVE_GCC_DIR/usr/lib/gcc/x86_64-veridian/14.2.0/$f" ] && \
-                cp "$NATIVE_GCC_DIR/usr/lib/gcc/x86_64-veridian/14.2.0/$f" \
-                   "$BUILD_DIR/usr/lib/gcc/x86_64-veridian/14.2.0/"
+            [ -f "$NATIVE_GCC_DIR/usr/lib/gcc/x86_64-veridian/${NATIVE_GCC_VERSION}/$f" ] && \
+                cp "$NATIVE_GCC_DIR/usr/lib/gcc/x86_64-veridian/${NATIVE_GCC_VERSION}/$f" \
+                   "$BUILD_DIR/usr/lib/gcc/x86_64-veridian/${NATIVE_GCC_VERSION}/"
         done
 
         # Headers -- copy sysroot headers (canonical, freshly rebuilt by phase_headers),
@@ -542,14 +553,14 @@ phase_rootfs() {
         [ -d "${SYSROOT}/usr/include" ] && cp -r "${SYSROOT}/usr/include/"* "$BUILD_DIR/usr/include/" 2>/dev/null || true
 
         # GCC internal headers (stdbool.h, stddef.h, stdarg.h, etc.) -- essential for compilation
-        local gcc_inc="$NATIVE_GCC_DIR/usr/lib/gcc/x86_64-veridian/14.2.0/include"
+        local gcc_inc="$NATIVE_GCC_DIR/usr/lib/gcc/x86_64-veridian/${NATIVE_GCC_VERSION}/include"
         if [ -d "$gcc_inc" ]; then
-            cp -r "$gcc_inc/"* "$BUILD_DIR/usr/lib/gcc/x86_64-veridian/14.2.0/include/" 2>/dev/null || true
+            cp -r "$gcc_inc/"* "$BUILD_DIR/usr/lib/gcc/x86_64-veridian/${NATIVE_GCC_VERSION}/include/" 2>/dev/null || true
             echo "    + GCC internal headers ($(ls "$gcc_inc" | wc -l) files)"
         fi
 
         # GCC specs
-        cat > "$BUILD_DIR/usr/lib/gcc/x86_64-veridian/14.2.0/specs" << 'SPECEOF'
+        cat > "$BUILD_DIR/usr/lib/gcc/x86_64-veridian/${NATIVE_GCC_VERSION}/specs" << 'SPECEOF'
 *linker:
 ld
 SPECEOF

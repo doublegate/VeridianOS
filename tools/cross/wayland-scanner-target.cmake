@@ -9,7 +9,12 @@ if(NOT TARGET Wayland::Scanner)
 endif()
 
 # Load KF6/Plasma stub targets for cross-compilation
-set(_veridian_stubs_file "${CMAKE_CURRENT_LIST_DIR}/../../../target/veridian-sysroot/usr/lib/cmake/veridian-kf6-stubs.cmake")
+if(DEFINED ENV{VERIDIAN_SYSROOT})
+    set(_veridian_sysroot "$ENV{VERIDIAN_SYSROOT}")
+else()
+    set(_veridian_sysroot "/opt/veridian/musl-sysroot") # tools/cross/veridian-paths.sh
+endif()
+set(_veridian_stubs_file "${_veridian_sysroot}/usr/lib/cmake/veridian-kf6-stubs.cmake")
 if(NOT EXISTS "${_veridian_stubs_file}")
     # Try relative to sysroot from CMAKE_PREFIX_PATH
     foreach(_prefix IN LISTS CMAKE_PREFIX_PATH)

@@ -4,7 +4,7 @@
 #   meson setup build --cross-file=tools/cross/meson-cross-veridian.txt
 #
 # NOTE: Paths reference $VERIDIAN_SYSROOT which defaults to
-#       <project>/target/veridian-sysroot. Set VERIDIAN_SYSROOT
+#       /opt/veridian/musl-sysroot (tools/cross/veridian-paths.sh). Set VERIDIAN_SYSROOT
 #       environment variable to override.
 
 [binaries]

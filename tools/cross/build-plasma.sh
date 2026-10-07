@@ -19,14 +19,19 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
-BUILD_DIR="${PROJECT_ROOT}/target/cross-build/plasma"
-SYSROOT="${VERIDIAN_SYSROOT:-${PROJECT_ROOT}/target/veridian-sysroot}"
+# shellcheck source=veridian-paths.sh
+source "${SCRIPT_DIR}/veridian-paths.sh"
+BUILD_DIR="${VERIDIAN_CROSS_BUILD}/plasma"
+SYSROOT="${VERIDIAN_SYSROOT}"
 TOOLCHAIN="${SCRIPT_DIR}/cmake-toolchain-veridian.cmake"
-HOST_QT="${PROJECT_ROOT}/target/cross-build/qt6/host-qt"
+HOST_QT="${VERIDIAN_CROSS_BUILD}/qt6/host-qt"
 JOBS="${JOBS:-$(nproc)}"
 
-PLASMA_VER="6.3.5"
-PLASMA_URL_BASE="https://download.kde.org/stable/plasma/6.3.5"
+PLASMA_VER="6.7.5"
+PLASMA_URL_BASE="https://download.kde.org/stable/plasma/${PLASMA_VER}"
+# The Frameworks release built by build-kf6.sh (one place to change it).
+KF6_VER="$(sed -n 's/^KF_VER="\(.*\)"$/\1/p' "$(dirname "$0")/build-kf6.sh")"
+[[ -n "${KF6_VER}" ]] || { echo "[build-plasma] cannot read KF_VER from build-kf6.sh" >&2; exit 1; }
 
 log() { echo "[build-plasma] $*"; }
 die() { echo "[build-plasma] ERROR: $*" >&2; exit 1; }
@@ -37,7 +42,7 @@ mkdir -p "${BUILD_DIR}"
 
 fetch() {
     local name="$1" url="$2" dir="$3"
-    local tarball="${BUILD_DIR}/${name}.tar.xz"
+    local tarball="${VERIDIAN_SOURCES}/${name}.tar.xz"
     if [[ ! -f "${tarball}" ]]; then
         log "Downloading ${name}..."
         { curl -fsSL -o "${tarball}.part" "${url}" || wget -q -O "${tarball}.part" "${url}"; } && [[ -s "${tarball}.part" ]] && mv "${tarball}.part" "${tarball}" || { rm -f "${tarball}.part"; echo "download failed: ${url}" >&2; exit 1; }
@@ -178,16 +183,16 @@ build_libplasma() {
     # Create Plasma cmake config if not installed
     if [[ ! -f "${SYSROOT}/usr/lib/cmake/Plasma/PlasmaConfig.cmake" ]]; then
         mkdir -p "${SYSROOT}/usr/lib/cmake/Plasma"
-        cat > "${SYSROOT}/usr/lib/cmake/Plasma/PlasmaConfig.cmake" << 'CMEOF'
+        sed "s/@PLASMA_VER@/${PLASMA_VER}/g" > "${SYSROOT}/usr/lib/cmake/Plasma/PlasmaConfig.cmake" << 'CMEOF'
 set(Plasma_FOUND TRUE)
-set(Plasma_VERSION "6.3.5")
+set(Plasma_VERSION "@PLASMA_VER@")
 set(PLASMA_RELATIVE_DATA_INSTALL_DIR "plasma")
 include(CMakeFindDependencyMacro)
 find_dependency(KF6Package)
 find_dependency(Qt6Qml)
 CMEOF
-        cat > "${SYSROOT}/usr/lib/cmake/Plasma/PlasmaConfigVersion.cmake" << 'CMEOF'
-set(PACKAGE_VERSION "6.3.5")
+        sed "s/@PLASMA_VER@/${PLASMA_VER}/g" > "${SYSROOT}/usr/lib/cmake/Plasma/PlasmaConfigVersion.cmake" << 'CMEOF'
+set(PACKAGE_VERSION "@PLASMA_VER@")
 set(PACKAGE_VERSION_COMPATIBLE TRUE)
 set(PACKAGE_VERSION_EXACT FALSE)
 CMEOF
@@ -223,9 +228,9 @@ build_layer_shell_qt() {
     # Create cmake config if not installed
     if [[ ! -d "${SYSROOT}/usr/lib/cmake/LayerShellQt" ]]; then
         mkdir -p "${SYSROOT}/usr/lib/cmake/LayerShellQt"
-        cat > "${SYSROOT}/usr/lib/cmake/LayerShellQt/LayerShellQtConfig.cmake" << 'CMEOF'
+        sed "s/@PLASMA_VER@/${PLASMA_VER}/g" > "${SYSROOT}/usr/lib/cmake/LayerShellQt/LayerShellQtConfig.cmake" << 'CMEOF'
 set(LayerShellQt_FOUND TRUE)
-set(LayerShellQt_VERSION "6.3.5")
+set(LayerShellQt_VERSION "@PLASMA_VER@")
 if(NOT TARGET Plasma::LayerShellQt)
   add_library(Plasma::LayerShellQt STATIC IMPORTED)
   set_target_properties(Plasma::LayerShellQt PROPERTIES
@@ -234,8 +239,8 @@ if(NOT TARGET Plasma::LayerShellQt)
   )
 endif()
 CMEOF
-        cat > "${SYSROOT}/usr/lib/cmake/LayerShellQt/LayerShellQtConfigVersion.cmake" << 'CMEOF'
-set(PACKAGE_VERSION "6.3.5")
+        sed "s/@PLASMA_VER@/${PLASMA_VER}/g" > "${SYSROOT}/usr/lib/cmake/LayerShellQt/LayerShellQtConfigVersion.cmake" << 'CMEOF'
+set(PACKAGE_VERSION "@PLASMA_VER@")
 set(PACKAGE_VERSION_COMPATIBLE TRUE)
 set(PACKAGE_VERSION_EXACT FALSE)
 CMEOF
@@ -415,9 +420,9 @@ PC
 
     # KF6 stub cmake configs for REQUIRED components
     local stub_targets=(
-        "KF6NewStuff:KF6::NewStuff:6.12.0"
-        "KF6NotifyConfig:KF6::NotifyConfig:6.12.0"
-        "KF6Prison:KF6::Prison:6.12.0"
+        "KF6NewStuff:KF6::NewStuff:${KF6_VER}"
+        "KF6NotifyConfig:KF6::NotifyConfig:${KF6_VER}"
+        "KF6Prison:KF6::Prison:${KF6_VER}"
         "Phonon4Qt6:Phonon::phonon4qt6:4.12.0"
         "QCoro6:QCoro::Core:0.10.0"
         "QCoro6Core:QCoro::Core:0.10.0"
@@ -662,7 +667,7 @@ EOF
         IFS=: read -r pkg target dir <<< "$pkg_target_dir"
         cat > "${SYSROOT}/usr/lib/cmake/${pkg}/${pkg}Config.cmake" << EOF
 set(${pkg}_FOUND TRUE)
-set(${pkg}_VERSION "6.12.0")
+set(${pkg}_VERSION "${KF6_VER}")
 if(NOT TARGET ${target})
     add_library(${target} INTERFACE IMPORTED)
     set_target_properties(${target} PROPERTIES
@@ -675,7 +680,7 @@ EOF
     # KF6KIO: multiple targets
     cat > "${SYSROOT}/usr/lib/cmake/KF6KIO/KF6KIOConfig.cmake" << EOF
 set(KF6KIO_FOUND TRUE)
-set(KF6KIO_VERSION "6.12.0")
+set(KF6KIO_VERSION "${KF6_VER}")
 include(CMakeFindDependencyMacro)
 find_dependency(KF6CoreAddons)
 find_dependency(KF6Service)
@@ -692,16 +697,16 @@ EOF
 
 # Helper: install KF6/Plasma headers from source trees
 install_kf6_headers_from_source() {
-    local kf6_src="${PROJECT_ROOT}/target/cross-build/kf6"
+    local kf6_src="${VERIDIAN_CROSS_BUILD}/kf6"
 
     # Solid headers
-    if [[ -d "${kf6_src}/solid-6.12.0/src" ]]; then
+    if [[ -d "${kf6_src}/solid-${KF6_VER}/src" ]]; then
         mkdir -p "${SYSROOT}/usr/include/KF6/Solid/Solid"
-        find "${kf6_src}/solid-6.12.0/src" -name "*.h" -exec cp {} "${SYSROOT}/usr/include/KF6/Solid/Solid/" \;
+        find "${kf6_src}/solid-${KF6_VER}/src" -name "*.h" -exec cp {} "${SYSROOT}/usr/include/KF6/Solid/Solid/" \;
     fi
 
     # KIO headers
-    if [[ -d "${kf6_src}/kio-6.12.0/src" ]]; then
+    if [[ -d "${kf6_src}/kio-${KF6_VER}/src" ]]; then
         for sub in core gui widgets; do
             local dest
             case "$sub" in
@@ -710,15 +715,15 @@ install_kf6_headers_from_source() {
                 widgets) dest="KIOWidgets" ;;
             esac
             mkdir -p "${SYSROOT}/usr/include/KF6/${dest}"
-            find "${kf6_src}/kio-6.12.0/src/${sub}" -name "*.h" -exec cp {} "${SYSROOT}/usr/include/KF6/${dest}/" \; 2>/dev/null
+            find "${kf6_src}/kio-${KF6_VER}/src/${sub}" -name "*.h" -exec cp {} "${SYSROOT}/usr/include/KF6/${dest}/" \; 2>/dev/null
         done
         mkdir -p "${SYSROOT}/usr/include/KF6/KIO/KIO"
     fi
 
     # KRunner headers
-    if [[ -d "${kf6_src}/krunner-6.12.0/src" ]]; then
+    if [[ -d "${kf6_src}/krunner-${KF6_VER}/src" ]]; then
         mkdir -p "${SYSROOT}/usr/include/KF6/KRunner/KRunner"
-        find "${kf6_src}/krunner-6.12.0/src" -name "*.h" -exec cp {} "${SYSROOT}/usr/include/KF6/KRunner/KRunner/" \;
+        find "${kf6_src}/krunner-${KF6_VER}/src" -name "*.h" -exec cp {} "${SYSROOT}/usr/include/KF6/KRunner/KRunner/" \;
     fi
 
     # Plasma5Support headers from source

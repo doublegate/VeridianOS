@@ -12,7 +12,9 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
-SYSROOT="${VERIDIAN_SYSROOT:-${PROJECT_ROOT}/target/veridian-sysroot}"
+# shellcheck source=veridian-paths.sh
+source "${SCRIPT_DIR}/veridian-paths.sh"
+SYSROOT="${VERIDIAN_SYSROOT}"
 STAGING="${PROJECT_ROOT}/target/rootfs-kde-staging"
 OUTPUT="${PROJECT_ROOT}/target/rootfs-kde-blockfs.img"
 MKFS_BLOCKFS="${PROJECT_ROOT}/tools/mkfs-blockfs"

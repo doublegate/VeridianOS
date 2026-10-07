@@ -4,7 +4,7 @@
 # Creates a TAR archive containing:
 #   - /bin/ programs (from regular rootfs + coreutils)
 #   - /usr/bin/gcc, /usr/bin/as, /usr/bin/ld (native toolchain)
-#   - /usr/libexec/gcc/x86_64-veridian/14.2.0/cc1, collect2
+#   - /usr/libexec/gcc/x86_64-veridian/${NATIVE_GCC_VERSION}/cc1, collect2
 #   - /usr/lib/ (libc.a, libgcc.a, crt*.o)
 #   - /usr/include/ (C headers)
 #   - /usr/src/ (selfhost test source, coreutils source, test data)
@@ -44,7 +44,10 @@ if [ ! -d "$NATIVE_GCC_DIR/usr/bin" ]; then
     exit 1
 fi
 
-if [ ! -f "$NATIVE_GCC_DIR/usr/libexec/gcc/x86_64-veridian/14.2.0/cc1" ]; then
+# The native compiler's version, from its own install tree.
+NATIVE_GCC_VERSION="$(ls "$NATIVE_GCC_DIR/usr/libexec/gcc/x86_64-veridian/" 2>/dev/null | sort -V | tail -1)"
+
+if [ ! -f "$NATIVE_GCC_DIR/usr/libexec/gcc/x86_64-veridian/${NATIVE_GCC_VERSION}/cc1" ]; then
     echo "ERROR: cc1 not found in native toolchain"
     exit 1
 fi
@@ -59,8 +62,8 @@ echo ""
 rm -rf "$BUILD_DIR"
 mkdir -p "$BUILD_DIR/bin"
 mkdir -p "$BUILD_DIR/usr/bin"
-mkdir -p "$BUILD_DIR/usr/lib/gcc/x86_64-veridian/14.2.0/include"
-mkdir -p "$BUILD_DIR/usr/libexec/gcc/x86_64-veridian/14.2.0"
+mkdir -p "$BUILD_DIR/usr/lib/gcc/x86_64-veridian/${NATIVE_GCC_VERSION}/include"
+mkdir -p "$BUILD_DIR/usr/libexec/gcc/x86_64-veridian/${NATIVE_GCC_VERSION}"
 mkdir -p "$BUILD_DIR/usr/include/sys"
 mkdir -p "$BUILD_DIR/usr/include/arpa"
 mkdir -p "$BUILD_DIR/usr/include/netinet"
@@ -184,11 +187,11 @@ echo "  + /usr/bin/cc -> gcc (symlink)"
 
 # GCC internal tools (cc1 is the actual compiler, collect2 wraps the linker)
 for tool in cc1 collect2; do
-    src="$NATIVE_GCC_DIR/usr/libexec/gcc/x86_64-veridian/14.2.0/$tool"
+    src="$NATIVE_GCC_DIR/usr/libexec/gcc/x86_64-veridian/${NATIVE_GCC_VERSION}/$tool"
     if [ -f "$src" ]; then
-        cp "$src" "$BUILD_DIR/usr/libexec/gcc/x86_64-veridian/14.2.0/"
-        size=$(stat -c%s "$BUILD_DIR/usr/libexec/gcc/x86_64-veridian/14.2.0/$tool" 2>/dev/null || echo "?")
-        echo "  + /usr/libexec/.../14.2.0/$tool ($(( size / 1024 )) KB)"
+        cp "$src" "$BUILD_DIR/usr/libexec/gcc/x86_64-veridian/${NATIVE_GCC_VERSION}/"
+        size=$(stat -c%s "$BUILD_DIR/usr/libexec/gcc/x86_64-veridian/${NATIVE_GCC_VERSION}/$tool" 2>/dev/null || echo "?")
+        echo "  + /usr/libexec/.../${NATIVE_GCC_VERSION}/$tool ($(( size / 1024 )) KB)"
     else
         echo "  - $tool (NOT FOUND)"
     fi
@@ -198,9 +201,9 @@ done
 # Copy them into the GCC libexec dir so collect2 can find them.
 for tool in ld as; do
     if [ -f "$NATIVE_GCC_DIR/usr/bin/$tool" ]; then
-        cp "$NATIVE_GCC_DIR/usr/bin/$tool" "$BUILD_DIR/usr/libexec/gcc/x86_64-veridian/14.2.0/"
-        size=$(stat -c%s "$BUILD_DIR/usr/libexec/gcc/x86_64-veridian/14.2.0/$tool" 2>/dev/null || echo "?")
-        echo "  + /usr/libexec/.../14.2.0/$tool ($(( size / 1024 )) KB) [for collect2]"
+        cp "$NATIVE_GCC_DIR/usr/bin/$tool" "$BUILD_DIR/usr/libexec/gcc/x86_64-veridian/${NATIVE_GCC_VERSION}/"
+        size=$(stat -c%s "$BUILD_DIR/usr/libexec/gcc/x86_64-veridian/${NATIVE_GCC_VERSION}/$tool" 2>/dev/null || echo "?")
+        echo "  + /usr/libexec/.../${NATIVE_GCC_VERSION}/$tool ($(( size / 1024 )) KB) [for collect2]"
     fi
 done
 
@@ -214,10 +217,10 @@ for f in crt0.o crti.o crtn.o libc.a; do
 done
 
 for f in libgcc.a crtbegin.o crtend.o; do
-    if [ -f "$NATIVE_GCC_DIR/usr/lib/gcc/x86_64-veridian/14.2.0/$f" ]; then
-        cp "$NATIVE_GCC_DIR/usr/lib/gcc/x86_64-veridian/14.2.0/$f" \
-           "$BUILD_DIR/usr/lib/gcc/x86_64-veridian/14.2.0/"
-        echo "  + /usr/lib/gcc/.../14.2.0/$f"
+    if [ -f "$NATIVE_GCC_DIR/usr/lib/gcc/x86_64-veridian/${NATIVE_GCC_VERSION}/$f" ]; then
+        cp "$NATIVE_GCC_DIR/usr/lib/gcc/x86_64-veridian/${NATIVE_GCC_VERSION}/$f" \
+           "$BUILD_DIR/usr/lib/gcc/x86_64-veridian/${NATIVE_GCC_VERSION}/"
+        echo "  + /usr/lib/gcc/.../${NATIVE_GCC_VERSION}/$f"
     fi
 done
 
@@ -230,17 +233,17 @@ if [ -d "$NATIVE_GCC_DIR/usr/include" ]; then
 fi
 
 # GCC internal headers (stdarg.h, stddef.h, stdbool.h, etc.)
-gcc_inc="$NATIVE_GCC_DIR/usr/lib/gcc/x86_64-veridian/14.2.0/include"
+gcc_inc="$NATIVE_GCC_DIR/usr/lib/gcc/x86_64-veridian/${NATIVE_GCC_VERSION}/include"
 if [ -d "$gcc_inc" ]; then
     # Copy only essential GCC headers, not the huge x86 intrinsics
     for h in stdarg.h stddef.h stdbool.h varargs.h float.h limits.h \
              stdint.h stdalign.h stdatomic.h stdnoreturn.h stdfix.h \
              iso646.h unwind.h; do
         if [ -f "$gcc_inc/$h" ]; then
-            cp "$gcc_inc/$h" "$BUILD_DIR/usr/lib/gcc/x86_64-veridian/14.2.0/include/"
+            cp "$gcc_inc/$h" "$BUILD_DIR/usr/lib/gcc/x86_64-veridian/${NATIVE_GCC_VERSION}/include/"
         fi
     done
-    gcc_hdr_count=$(find "$BUILD_DIR/usr/lib/gcc/x86_64-veridian/14.2.0/include" -name '*.h' | wc -l)
+    gcc_hdr_count=$(find "$BUILD_DIR/usr/lib/gcc/x86_64-veridian/${NATIVE_GCC_VERSION}/include" -name '*.h' | wc -l)
     echo "  + $gcc_hdr_count GCC internal headers"
 fi
 
@@ -253,11 +256,11 @@ echo "--- GCC specs ---"
 # getenv() returns NULL inside gcc/collect2, and collect2 cannot
 # find 'ld'.  Work around this by overriding the *linker spec to
 # invoke ld directly instead of collect2.
-cat > "$BUILD_DIR/usr/lib/gcc/x86_64-veridian/14.2.0/specs" << 'SPECEOF'
+cat > "$BUILD_DIR/usr/lib/gcc/x86_64-veridian/${NATIVE_GCC_VERSION}/specs" << 'SPECEOF'
 *linker:
 ld
 SPECEOF
-echo "  + /usr/lib/gcc/x86_64-veridian/14.2.0/specs (linker=ld)"
+echo "  + /usr/lib/gcc/x86_64-veridian/${NATIVE_GCC_VERSION}/specs (linker=ld)"
 
 # =========================================================================
 # 4. Copy source files for on-OS compilation
@@ -307,7 +310,7 @@ if [ ! -x "$READELF" ]; then
     READELF="readelf"
 fi
 
-for bin in "$BUILD_DIR"/bin/* "$BUILD_DIR"/usr/bin/* "$BUILD_DIR"/usr/libexec/gcc/x86_64-veridian/14.2.0/*; do
+for bin in "$BUILD_DIR"/bin/* "$BUILD_DIR"/usr/bin/* "$BUILD_DIR"/usr/libexec/gcc/x86_64-veridian/${NATIVE_GCC_VERSION}/*; do
     [ -f "$bin" ] || continue
     # Skip non-ELF files (symlinks, etc.)
     file_type="$(file "$bin" 2>/dev/null)" || continue
@@ -360,18 +363,18 @@ echo "  /bin/pipeline_test                   # -> SUBTEST[1-3]_PASS + PIPELINE_P
 echo ""
 echo "Self-hosting test commands (run inside VeridianOS, step-by-step):"
 echo "  # Step 1: Compile C to assembly"
-echo "  /usr/libexec/gcc/x86_64-veridian/14.2.0/cc1 -isystem /usr/include \\"
-echo "    -isystem /usr/lib/gcc/x86_64-veridian/14.2.0/include \\"
+echo "  /usr/libexec/gcc/x86_64-veridian/${NATIVE_GCC_VERSION}/cc1 -isystem /usr/include \\"
+echo "    -isystem /usr/lib/gcc/x86_64-veridian/${NATIVE_GCC_VERSION}/include \\"
 echo "    /usr/src/selfhost_test.c -o /tmp/test.s -quiet"
 echo "  # Step 2: Assemble"
 echo "  /usr/bin/as -o /tmp/test.o /tmp/test.s"
 echo "  # Step 3: Link with CRT startup objects"
 echo "  /usr/bin/ld -static -o /tmp/selfhost_test \\"
 echo "    /usr/lib/crt0.o /usr/lib/crti.o \\"
-echo "    /usr/lib/gcc/x86_64-veridian/14.2.0/crtbegin.o \\"
-echo "    /tmp/test.o -L/usr/lib -L/usr/lib/gcc/x86_64-veridian/14.2.0 \\"
+echo "    /usr/lib/gcc/x86_64-veridian/${NATIVE_GCC_VERSION}/crtbegin.o \\"
+echo "    /tmp/test.o -L/usr/lib -L/usr/lib/gcc/x86_64-veridian/${NATIVE_GCC_VERSION} \\"
 echo "    -lc -lgcc \\"
-echo "    /usr/lib/gcc/x86_64-veridian/14.2.0/crtend.o /usr/lib/crtn.o"
+echo "    /usr/lib/gcc/x86_64-veridian/${NATIVE_GCC_VERSION}/crtend.o /usr/lib/crtn.o"
 echo "  # Step 4: Run"
 echo "  /tmp/selfhost_test"
 echo "  # Expected output: SELF_HOSTED_PASS"

@@ -1,17 +1,19 @@
 #!/bin/ash
 # build-native-programs.sh -- Native compilation of sysinfo + edit on VeridianOS
 #
-# Compiles libcurses.a, sysinfo, and edit natively using GCC 14.2.0 running
+# Compiles libcurses.a, sysinfo, and edit natively using the native GCC running
 # on VeridianOS itself. Follows the same CFLAGS/LDFLAGS pattern as
 # build-busybox-native.sh.
 #
 # Usage: ash /usr/src/build-native-programs.sh
 
 CC=/usr/bin/gcc
+# The native compiler's own directory (its version, not hardcoded).
+GCC_LIBDIR="/usr/lib/gcc/x86_64-veridian/$(/usr/bin/gcc -dumpfullversion)"
 AR=/usr/bin/ar
 CFLAGS="-std=c11 -static -O2 -nostdinc \
  -isystem /usr/include \
- -isystem /usr/lib/gcc/x86_64-veridian/14.2.0/include \
+ -isystem ${GCC_LIBDIR}/include \
  -fno-stack-protector -ffreestanding \
  -mno-red-zone -mcmodel=small \
  -Wall -Wextra -Wno-unused-parameter"
@@ -63,7 +65,7 @@ echo "=== Building sysinfo ==="
 echo "[CC+LD] sysinfo.c"
 $CC $CFLAGS $LDFLAGS -o /tmp/sysinfo-native \
     /usr/lib/crt0.o /usr/src/sysinfo.c \
-    -L /usr/lib -L /usr/lib/gcc/x86_64-veridian/14.2.0 \
+    -L /usr/lib -L ${GCC_LIBDIR} \
     -lc -lgcc 2>&1
 if [ -f /tmp/sysinfo-native ]; then
     echo "  sysinfo: OK"
@@ -80,7 +82,7 @@ echo "[CC+LD] edit.c"
 $CC $CFLAGS $LDFLAGS -o /tmp/edit-native \
     /usr/lib/crt0.o /usr/src/edit.c \
     -I /usr/src \
-    -L /usr/lib -L /usr/lib/gcc/x86_64-veridian/14.2.0 \
+    -L /usr/lib -L ${GCC_LIBDIR} \
     -lcurses -lc -lgcc 2>&1
 if [ -f /tmp/edit-native ]; then
     echo "  edit: OK"

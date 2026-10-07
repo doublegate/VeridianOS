@@ -5,16 +5,16 @@
  * verifying the full self-hosting compilation pipeline:
  *
  *   cc1 + as + ld (step-by-step):
- *     /usr/libexec/gcc/x86_64-veridian/14.2.0/cc1 -isystem /usr/include \
- *       -isystem /usr/lib/gcc/x86_64-veridian/14.2.0/include \
+ *     /usr/libexec/gcc/x86_64-veridian/16.2.0/cc1 -isystem /usr/include \
+ *       -isystem /usr/lib/gcc/x86_64-veridian/16.2.0/include \
  *       /usr/src/selfhost_test.c -o /tmp/test.s -quiet
  *     /usr/bin/as -o /tmp/test.o /tmp/test.s
  *     /usr/bin/ld -static -o /tmp/selfhost_test \
  *       /usr/lib/crt0.o /usr/lib/crti.o \
- *       /usr/lib/gcc/x86_64-veridian/14.2.0/crtbegin.o \
- *       /tmp/test.o -L/usr/lib -L/usr/lib/gcc/x86_64-veridian/14.2.0 \
+ *       /usr/lib/gcc/x86_64-veridian/16.2.0/crtbegin.o \
+ *       /tmp/test.o -L/usr/lib -L/usr/lib/gcc/x86_64-veridian/16.2.0 \
  *       -lc -lgcc \
- *       /usr/lib/gcc/x86_64-veridian/14.2.0/crtend.o /usr/lib/crtn.o
+ *       /usr/lib/gcc/x86_64-veridian/16.2.0/crtend.o /usr/lib/crtn.o
  *     /tmp/selfhost_test
  *
  * Expected output: "SELF_HOSTED_PASS"

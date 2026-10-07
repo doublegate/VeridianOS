@@ -11,14 +11,16 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
-BUILD_DIR="${PROJECT_ROOT}/target/cross-build/kf6"
-SYSROOT="${VERIDIAN_SYSROOT:-${PROJECT_ROOT}/target/veridian-sysroot}"
+# shellcheck source=veridian-paths.sh
+source "${SCRIPT_DIR}/veridian-paths.sh"
+BUILD_DIR="${VERIDIAN_CROSS_BUILD}/kf6"
+SYSROOT="${VERIDIAN_SYSROOT}"
 TOOLCHAIN="${SCRIPT_DIR}/cmake-toolchain-veridian.cmake"
-HOST_QT="${PROJECT_ROOT}/target/cross-build/qt6/host-qt"
+HOST_QT="${VERIDIAN_CROSS_BUILD}/qt6/host-qt"
 JOBS="${JOBS:-$(nproc)}"
 
-KF_VER="6.12.0"
-KF_MAJOR="6.12"
+KF_VER="6.30.0"
+KF_MAJOR="${KF_VER%.*}"
 KF_URL_BASE="https://download.kde.org/stable/frameworks/${KF_MAJOR}"
 
 log() { echo "[build-kf6] $*"; }
@@ -30,7 +32,7 @@ mkdir -p "${BUILD_DIR}"
 
 fetch() {
     local name="$1" url="$2" dir="$3"
-    local tarball="${BUILD_DIR}/${name}.tar.xz"
+    local tarball="${VERIDIAN_SOURCES}/${name}.tar.xz"
     if [[ ! -f "${tarball}" ]]; then
         log "Downloading ${name}..."
         { curl -fsSL -o "${tarball}.part" "${url}" || wget -q -O "${tarball}.part" "${url}"; } && [[ -s "${tarball}.part" ]] && mv "${tarball}.part" "${tarball}" || { rm -f "${tarball}.part"; echo "download failed: ${url}" >&2; exit 1; }
@@ -315,7 +317,7 @@ build_plasma_wayland_protocols() {
         log "PlasmaWaylandProtocols: already installed."
         return 0
     fi
-    local PWP_VER="1.15.0"
+    local PWP_VER="1.23.0"
     local pkg="plasma-wayland-protocols-${PWP_VER}"
     fetch "${pkg}" \
         "https://download.kde.org/stable/plasma-wayland-protocols/${pkg}.tar.xz" \

@@ -81,7 +81,7 @@ Measured on QEMU x86_64 with KVM (i9-10850K):
 ## Self-Hosting Status
 
 All self-hosting tiers (0-7) complete as of v0.5.0:
-- GCC 14.2, binutils 2.43, make, ninja
+- Cross toolchain GCC 16.2 / binutils 2.47 (since 2026-10-07); native GCC 14.2 / binutils 2.43 as last built, make, ninja
 - vpkg package manager
 - BusyBox 208/208 tests passing
 - Native compilation on VeridianOS
@@ -93,7 +93,7 @@ Cross-compiled from source using musl-based static pipeline:
 - **plasmashell**: 59MB stripped
 - **dbus-daemon**: 886KB
 - **Rootfs**: 180MB BlockFS image (512 inodes)
-- Qt 6.8.3, KDE Frameworks 6.12.0, Mesa 24.2.8 (softpipe), Wayland 1.23.1
+- Built with Qt 6.8.3, KDE Frameworks 6.12.0, Mesa 24.2.8 (softpipe), Wayland 1.23.1; the scripts now pin Qt 6.12.0, KDE Frameworks 6.30.0, Plasma 6.7.5 and Mesa 26.2.4 (not yet rebuilt)
 
 Current state: ELF loader maps kwin_wayland into user memory, musl `_start` entry point reached. Expected double-fault at syscall boundary (kernel syscall gaps pending for v1.0.0).
 

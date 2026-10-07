@@ -20,14 +20,16 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
-BUILD_DIR="${PROJECT_ROOT}/target/cross-build/mesa"
-SYSROOT="${VERIDIAN_SYSROOT:-${PROJECT_ROOT}/target/veridian-sysroot}"
+# shellcheck source=veridian-paths.sh
+source "${SCRIPT_DIR}/veridian-paths.sh"
+BUILD_DIR="${VERIDIAN_CROSS_BUILD}/mesa"
+SYSROOT="${VERIDIAN_SYSROOT}"
 JOBS="${JOBS:-$(nproc)}"
 CC="${SYSROOT}/bin/x86_64-veridian-musl-gcc"
 CXX="${SYSROOT}/bin/x86_64-veridian-musl-g++"
 
-LIBDRM_VER="2.4.123"
-MESA_VER="24.2.8"
+LIBDRM_VER="2.4.134"
+MESA_VER="26.2.4"
 LIBEPOXY_VER="1.5.10"
 
 log() { echo "[build-mesa] $*"; }
@@ -38,7 +40,7 @@ mkdir -p "${BUILD_DIR}"
 # ── Fetch helper ──────────────────────────────────────────────────────
 fetch() {
     local name="$1" url="$2" dir="$3"
-    local tarball="${BUILD_DIR}/${name}.tar.xz"
+    local tarball="${VERIDIAN_SOURCES}/${name}.tar.xz"
     if [[ ! -f "${tarball}" ]]; then
         log "Downloading ${name}..."
         { curl -fsSL -o "${tarball}.part" "${url}" || wget -q -O "${tarball}.part" "${url}"; } && [[ -s "${tarball}.part" ]] && mv "${tarball}.part" "${tarball}" || { rm -f "${tarball}.part"; echo "download failed: ${url}" >&2; exit 1; }
@@ -162,6 +164,8 @@ build_mesa() {
 
     # Build Mesa with --default-library=static for internal libraries.
     # shared-glapi must be enabled (Mesa requires it for EGL + GLES2).
+    # Mesa 25+ removed the dri3, osmesa, gallium-vdpau, gallium-xa and
+    # gallium-nine options (and the features), so they are no longer passed.
     # NOTE: Mesa hardcodes EGL/GBM/GLES2/glapi as shared_library() in its
     # meson.build, so --default-library=static only affects internal libs.
     # We create static archives from the .so object files in a post-step.
@@ -181,19 +185,14 @@ build_mesa() {
             -Dshared-glapi=enabled \
             -Dllvm=disabled \
             -Dgbm=enabled \
-            -Ddri3=disabled \
             -Dglvnd=disabled \
             -Dvalgrind=disabled \
             -Dlibunwind=disabled \
             -Dlmsensors=disabled \
             -Dbuild-tests=false \
             -Dselinux=false \
-            -Dosmesa=false \
             -Dxlib-lease=disabled \
-            -Dgallium-vdpau=disabled \
             -Dgallium-va=disabled \
-            -Dgallium-xa=disabled \
-            -Dgallium-nine=false \
             -Dvideo-codecs= \
             -Dpower8=disabled \
             -Dzstd=disabled && \

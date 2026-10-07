@@ -25,7 +25,7 @@ listed in [Known Limitations](https://github.com/doublegate/VeridianOS/blob/main
 - **Performance-oriented design** - Per-CPU frame caches, shared-region (zero-copy) IPC, an EEVDF/real-time/deadline scheduling policy
 - **Multi-architecture** - x86_64, AArch64 and RISC-V all boot to Stage 6 under QEMU; user programs run on x86_64 only so far
 - **Security focused** - Post-quantum crypto (ML-DSA-65 verification per FIPS 204; experimental non-standard Kyber, N-57), NX/W^X page protections, MAC/RBAC model
-- **KDE Plasma 6 desktop** - Cross-compiled from source with Qt 6.8.3, KDE Frameworks 6.12.0
+- **KDE Plasma 6 desktop** - Cross-compiled from source with Qt 6.8.3, KDE Frameworks 6.12.0 (the build scripts now pin Qt 6.12.0, KDE Frameworks 6.30.0 and Plasma 6.7.5; not yet rebuilt)
 - **Self-hosting** - Native GCC 14.2, binutils, make, ninja, vpkg toolchain
 - **Modern package management** - Source and binary package support
 - **153 shell builtins** - Full-featured vsh shell with job control and scripting

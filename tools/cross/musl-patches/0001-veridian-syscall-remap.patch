@@ -22,7 +22,8 @@
 --- version translated them a second time here, which turned ENOENT into
 --- EINVAL, EAGAIN into EPERM and EINTR into ENOENT.
 ---
---- Apply with: cd musl-1.2.5 && patch -p1 < 0001-veridian-syscall-remap.patch
+--- Apply with: cd musl-1.2.6 && patch -p1 < 0001-veridian-syscall-remap.patch
+--- Applies unchanged, with no fuzz, to musl 1.2.6 (checked 2026-10-07).
 ---
 --- Regenerated 2026-10-05 with `diff -ruN` against a pristine musl 1.2.5
 --- tarball: the previous hand-written hunks did not match 1.2.5 (clone.s

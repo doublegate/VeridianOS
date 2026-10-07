@@ -14,6 +14,7 @@ just before the closing parenthesis.
  config.sub | 3 ++-
  1 file changed, 2 insertions(+), 1 deletion(-)
 
+diff --git a/config.sub b/config.sub
 --- a/config.sub
 +++ b/config.sub
 @@ -1749,7 +1749,8 @@
@@ -26,6 +27,3 @@ just before the closing parenthesis.
  		;;
  	# This one is extra strict with allowed versions
  	sco3.2v2 | sco3.2v[4-9]* | sco5v6*)
---
-2.47.1
-

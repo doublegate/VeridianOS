@@ -3,7 +3,7 @@ From: VeridianOS <veridian@veridian-os.org>
 Date: Mon, 17 Feb 2026 00:00:00 +0000
 Subject: [PATCH 1/2] Add VeridianOS target support to GCC
 
-Teach GCC 14.2.0 to recognize x86_64-veridian, aarch64-veridian,
+Teach GCC 16.2.0 to recognize x86_64-veridian, aarch64-veridian,
 and riscv64-veridian as valid cross-compilation targets.
 
 New files:
@@ -29,9 +29,10 @@ Modified files:
  create mode 100644 gcc/config/veridian.h
  create mode 100644 gcc/config/t-veridian
 
+diff --git a/gcc/config.gcc b/gcc/config.gcc
 --- a/gcc/config.gcc
 +++ b/gcc/config.gcc
-@@ -1227,6 +1227,12 @@
+@@ -1274,6 +1274,12 @@
  	done
  	TM_MULTILIB_CONFIG=`echo $TM_MULTILIB_CONFIG | sed 's/^,//'`
  	;;
@@ -44,7 +45,7 @@ Modified files:
  aarch64*-*-freebsd*)
  	tm_file="${tm_file} elfos.h ${fbsd_tm_file}"
  	tm_file="${tm_file} aarch64/aarch64-elf.h aarch64/aarch64-errata.h aarch64/aarch64-freebsd.h"
-@@ -1938,6 +1944,16 @@
+@@ -2018,6 +2024,16 @@
  x86_64-*-rtems*)
  	tm_file="${tm_file} i386/unix.h i386/att.h elfos.h newlib-stdint.h i386/i386elf.h i386/x86-64.h i386/rtemself.h rtems.h"
  	;;
@@ -61,7 +62,7 @@ Modified files:
  i[34567]86-*-rdos*)
      tm_file="${tm_file} i386/unix.h i386/att.h elfos.h newlib-stdint.h i386/i386elf.h i386/rdos.h"
      ;;
-@@ -2532,6 +2548,11 @@
+@@ -2638,6 +2654,11 @@
  	# automatically detect that GAS supports it, yet we require it.
  	gcc_cv_initfini_array=yes
  	;;
@@ -73,7 +74,8 @@ Modified files:
  riscv*-*-freebsd*)
  	tm_file="${tm_file} elfos.h ${fbsd_tm_file} riscv/freebsd.h"
  	tmake_file="${tmake_file} riscv/t-riscv"
---- /dev/null
+diff --git a/gcc/config/veridian.h b/gcc/config/veridian.h
+--- a/gcc/config/veridian.h
 +++ b/gcc/config/veridian.h
 @@ -0,0 +1,70 @@
 +/* Target configuration for VeridianOS.
@@ -146,14 +148,8 @@ Modified files:
 +#undef  LINK_GCC_C_SEQUENCE_SPEC
 +#define LINK_GCC_C_SEQUENCE_SPEC "%G %L"
 +
-+/* No multilib support.  */
-+#undef  MULTILIB_DEFAULTS
-+#define MULTILIB_DEFAULTS { "" }
-+
-+/* Thread model -- single for now (no pthreads yet).  */
-+#undef  THREAD_MODEL_SPEC
-+#define THREAD_MODEL_SPEC "single"
---- /dev/null
+diff --git a/gcc/config/t-veridian b/gcc/config/t-veridian
+--- a/gcc/config/t-veridian
 +++ b/gcc/config/t-veridian
 @@ -0,0 +1,8 @@
 +# Makefile fragment for VeridianOS targets.
@@ -164,10 +160,11 @@ Modified files:
 +MULTILIB_OPTIONS =
 +MULTILIB_DIRNAMES =
 +MULTILIB_OSDIRNAMES =
+diff --git a/libgcc/config.host b/libgcc/config.host
 --- a/libgcc/config.host
 +++ b/libgcc/config.host
-@@ -418,6 +418,11 @@
- 	tmake_file="${tmake_file} t-dfprules"
+@@ -399,6 +399,11 @@
+ 	md_unwind_def_header=aarch64/aarch64-unwind-def.h
  	md_unwind_header=aarch64/aarch64-unwind.h
  	;;
 +aarch64*-*-veridian*)
@@ -178,7 +175,7 @@ Modified files:
  aarch64*-*-freebsd*)
  	extra_parts="$extra_parts crtfastmath.o"
  	tmake_file="${tmake_file} ${cpu_type}/t-aarch64"
-@@ -749,6 +754,11 @@
+@@ -754,6 +759,11 @@
  	    ;;
  	esac
  	;;
@@ -202,9 +199,10 @@ Modified files:
  riscv*-*-*)
  	tmake_file="${tmake_file} riscv/t-softfp${host_address} t-softfp riscv/t-elf riscv/t-elf${host_address}"
  	extra_parts="$extra_parts crtbegin.o crtend.o crti.o crtn.o"
+diff --git a/fixincludes/mkfixinc.sh b/fixincludes/mkfixinc.sh
 --- a/fixincludes/mkfixinc.sh
 +++ b/fixincludes/mkfixinc.sh
-@@ -20,6 +20,7 @@
+@@ -19,6 +19,7 @@
      powerpcle-*-eabisim* | \
      powerpcle-*-eabi* | \
      *-*-vxworks7* | \
@@ -212,6 +210,3 @@ Modified files:
      *-musl* )
  	#  IF there is no include fixing,
  	#  THEN create a no-op fixer and exit
---
-2.47.1
-

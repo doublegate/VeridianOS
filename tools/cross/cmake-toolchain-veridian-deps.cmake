@@ -9,9 +9,8 @@ set(CMAKE_CROSSCOMPILING ON CACHE BOOL "Cross-compiling to VeridianOS" FORCE)
 
 set(VERIDIAN_SYSROOT "$ENV{VERIDIAN_SYSROOT}")
 if(NOT VERIDIAN_SYSROOT)
-    get_filename_component(_tools_dir "${CMAKE_CURRENT_LIST_DIR}" DIRECTORY)
-    get_filename_component(_project_root "${_tools_dir}" DIRECTORY)
-    set(VERIDIAN_SYSROOT "${_project_root}/target/veridian-sysroot")
+    # Default of tools/cross/veridian-paths.sh.
+    set(VERIDIAN_SYSROOT "/opt/veridian/musl-sysroot")
 endif()
 
 set(CMAKE_SYSROOT "${VERIDIAN_SYSROOT}")

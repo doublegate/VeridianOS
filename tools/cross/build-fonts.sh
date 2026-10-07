@@ -14,13 +14,15 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
-BUILD_DIR="${PROJECT_ROOT}/target/cross-build/fonts"
-SYSROOT="${VERIDIAN_SYSROOT:-${PROJECT_ROOT}/target/veridian-sysroot}"
+# shellcheck source=veridian-paths.sh
+source "${SCRIPT_DIR}/veridian-paths.sh"
+BUILD_DIR="${VERIDIAN_CROSS_BUILD}/fonts"
+SYSROOT="${VERIDIAN_SYSROOT}"
 JOBS="${JOBS:-$(nproc)}"
 
-FREETYPE_VER="2.13.2"
-HARFBUZZ_VER="8.3.0"
-FONTCONFIG_VER="2.15.0"
+FREETYPE_VER="2.14.3"
+HARFBUZZ_VER="14.6.0"
+FONTCONFIG_VER="2.18.3"
 
 log() { echo "[build-fonts] $*"; }
 die() { echo "[build-fonts] ERROR: $*" >&2; exit 1; }
@@ -30,7 +32,7 @@ mkdir -p "${BUILD_DIR}"
 fetch() {
     local name="$1" url="$2" dir="$3"
     local ext="${4:-.tar.xz}"
-    local tarball="${BUILD_DIR}/${name}${ext}"
+    local tarball="${VERIDIAN_SOURCES}/${name}${ext}"
     if [[ ! -f "${tarball}" ]]; then
         log "Downloading ${name}..."
         { curl -fsSL -o "${tarball}.part" "${url}" || wget -q -O "${tarball}.part" "${url}"; } && [[ -s "${tarball}.part" ]] && mv "${tarball}.part" "${tarball}" || { rm -f "${tarball}.part"; echo "download failed: ${url}" >&2; exit 1; }
@@ -178,7 +180,7 @@ build_fontconfig() {
         return 0
     fi
     fetch "fontconfig-${FONTCONFIG_VER}" \
-        "https://www.freedesktop.org/software/fontconfig/release/fontconfig-${FONTCONFIG_VER}.tar.xz" \
+        "https://gitlab.freedesktop.org/api/v4/projects/890/packages/generic/fontconfig/${FONTCONFIG_VER}/fontconfig-${FONTCONFIG_VER}.tar.xz" \
         "fontconfig-${FONTCONFIG_VER}"
 
     local src="${BUILD_DIR}/fontconfig-${FONTCONFIG_VER}"

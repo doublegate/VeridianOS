@@ -14,13 +14,15 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
-BUILD_DIR="${PROJECT_ROOT}/target/cross-build/qt6"
-SYSROOT="${VERIDIAN_SYSROOT:-${PROJECT_ROOT}/target/veridian-sysroot}"
+# shellcheck source=veridian-paths.sh
+source "${SCRIPT_DIR}/veridian-paths.sh"
+BUILD_DIR="${VERIDIAN_CROSS_BUILD}/qt6"
+SYSROOT="${VERIDIAN_SYSROOT}"
 TOOLCHAIN="${SCRIPT_DIR}/cmake-toolchain-veridian.cmake"
 JOBS="${JOBS:-$(nproc)}"
 
-QT_VER="6.8.3"
-QT_MAJOR="6.8"
+QT_VER="6.12.0"
+QT_MAJOR="6.12"
 # archive/ is permanent; official_releases/ drops a version once it is superseded.
 QT_BASE_URL="https://download.qt.io/archive/qt/${QT_MAJOR}/${QT_VER}/submodules"
 
@@ -31,7 +33,7 @@ mkdir -p "${BUILD_DIR}"
 
 fetch() {
     local name="$1" url="$2" dir="$3"
-    local tarball="${BUILD_DIR}/${name}.tar.xz"
+    local tarball="${VERIDIAN_SOURCES}/${name}.tar.xz"
     if [[ ! -f "${tarball}" ]]; then
         log "Downloading ${name}..."
         { curl -fsSL -o "${tarball}.part" "${url}" || wget -q -O "${tarball}.part" "${url}"; } && [[ -s "${tarball}.part" ]] && mv "${tarball}.part" "${tarball}" || { rm -f "${tarball}.part"; echo "download failed: ${url}" >&2; exit 1; }
@@ -168,6 +170,7 @@ build_qt_cross() {
             -no-feature-mtdev \
             -no-feature-tslib \
             -feature-libinput \
+            -feature-wayland-client \
             -no-feature-brotli \
             -system-zlib \
             -system-freetype \
@@ -197,11 +200,11 @@ build_host_qt_wayland() {
         log "Host QtWayland scanner: already built."
         return 0
     fi
-    fetch "qtwayland-everywhere-src-${QT_VER}" \
-        "${QT_BASE_URL}/qtwayland-everywhere-src-${QT_VER}.tar.xz" \
-        "qtwayland-everywhere-src-${QT_VER}"
-
-    local src="${BUILD_DIR}/qtwayland-everywhere-src-${QT_VER}/src/qtwaylandscanner/qtwaylandscanner.cpp"
+    # Since Qt 6.10 the scanner, WaylandClient and the Wayland QPA plugin
+    # live in qtbase (fetched by build_host_qt); qtwayland keeps only the
+    # compositor and a few extra plugins. A host qtbase that found the
+    # host's wayland-scanner has built the tool already (checked above).
+    local src="${BUILD_DIR}/qtbase-everywhere-src-${QT_VER}/src/tools/qtwaylandscanner/qtwaylandscanner.cpp"
     log "Building host qtwaylandscanner..."
     mkdir -p "${host_prefix}/libexec"
     g++ -std=c++17 -O2 \
@@ -247,10 +250,15 @@ VEREOF
 
 # ── 4b. Build QtWayland (cross) ──────────────────────────────────────
 build_qt_wayland() {
-    if [[ -f "${SYSROOT}/usr/lib/libQt6WaylandClient.a" ]]; then
+    # libQt6WaylandClient.a now comes from qtbase, so a stamp marks this
+    # module (the remaining qtwayland plugins) as done.
+    if [[ -f "${BUILD_DIR}/qtwayland.done" ]]; then
         log "QtWayland: already installed."
         return 0
     fi
+    fetch "qtwayland-everywhere-src-${QT_VER}" \
+        "${QT_BASE_URL}/qtwayland-everywhere-src-${QT_VER}.tar.xz" \
+        "qtwayland-everywhere-src-${QT_VER}"
 
     local src="${BUILD_DIR}/qtwayland-everywhere-src-${QT_VER}"
     local bld="${BUILD_DIR}/qtwayland-build"
@@ -278,6 +286,7 @@ build_qt_wayland() {
             -DCMAKE_IGNORE_PREFIX_PATH="${CMAKE_IGNORE_PREFIX_PATH:-/home/linuxbrew/.linuxbrew}" && \
         cmake --build . --parallel "${JOBS}" && \
         cmake --install .)
+    touch "${BUILD_DIR}/qtwayland.done"
     log "QtWayland: done."
 }
 
@@ -595,6 +604,9 @@ main() {
     [[ -f "${SYSROOT}/usr/lib/libwayland-client.a" ]] || die "Wayland not found. Run build-wayland.sh first."
 
     build_host_qt
+    # The host scanner must exist before the cross qtbase: since Qt 6.10
+    # qtbase builds WaylandClient and needs it.
+    build_host_qt_wayland
     install_qpa_plugin
     build_qt_cross
     build_qt_shadertools
@@ -602,7 +614,6 @@ main() {
     build_qt_svg
     build_qt_5compat
     build_qt_sensors
-    build_host_qt_wayland
     build_qt_wayland
     verify
     log "=== Qt 6 build complete ==="

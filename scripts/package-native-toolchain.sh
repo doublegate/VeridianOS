@@ -13,7 +13,7 @@
 #   bin/as
 #   bin/ld
 #   usr/lib/libc.a
-#   usr/lib/gcc/x86_64-veridian/14.2.0/libgcc.a
+#   usr/lib/gcc/x86_64-veridian/<version>/libgcc.a
 #   usr/include/stdio.h
 #   ...
 #

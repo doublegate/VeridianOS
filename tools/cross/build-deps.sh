@@ -14,8 +14,10 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
-BUILD_DIR="${PROJECT_ROOT}/target/cross-build/deps"
-SYSROOT="${VERIDIAN_SYSROOT:-${PROJECT_ROOT}/target/veridian-sysroot}"
+# shellcheck source=veridian-paths.sh
+source "${SCRIPT_DIR}/veridian-paths.sh"
+BUILD_DIR="${VERIDIAN_CROSS_BUILD}/deps"
+SYSROOT="${VERIDIAN_SYSROOT}"
 TOOLCHAIN="${SCRIPT_DIR}/cmake-toolchain-veridian-deps.cmake"
 MESON_CROSS="${SCRIPT_DIR}/meson-cross-veridian.txt"
 JOBS="${JOBS:-$(nproc)}"
@@ -25,20 +27,21 @@ CC="${SYSROOT}/bin/x86_64-veridian-musl-gcc"
 CROSS_BIN="${BUILD_DIR}/.cross-bin"
 
 # Library versions
-ZLIB_VER="1.3.1"
-LIBFFI_VER="3.4.6"
-PCRE2_VER="10.43"
-LIBXML2_VER="2.12.6"
-LIBJPEG_VER="3.0.3"
-LIBPNG_VER="1.6.43"
-XKBCOMMON_VER="1.7.0"
-EXPAT_VER="2.6.2"
-SQLITE_VER="3490100"  # 3.49.1
-OPENSSL_VER="3.3.2"
-LIBEVDEV_VER="1.13.3"
+ZLIB_VER="1.3.2"
+LIBFFI_VER="3.8.0"
+PCRE2_VER="10.49"
+LIBXML2_VER="2.15.4"
+LIBJPEG_VER="3.2.0"
+LIBPNG_VER="1.6.59"
+XKBCOMMON_VER="1.13.2"
+EXPAT_VER="2.9.0"
+SQLITE_VER="3530400"  # 3.53.4
+SQLITE_YEAR="2026"    # the sqlite.org release directory
+OPENSSL_VER="4.0.3"
+LIBEVDEV_VER="1.14.0"
 MTDEV_VER="1.1.7"
-LIBINPUT_VER="1.26.2"
-ATSPI_VER="2.52.0"
+LIBINPUT_VER="1.32.0"
+ATSPI_VER="2.62.0"
 
 log() { echo "[build-deps] $*"; }
 die() { echo "[build-deps] ERROR: $*" >&2; exit 1; }
@@ -48,7 +51,7 @@ mkdir -p "${BUILD_DIR}"
 # ── Helper: download + extract ────────────────────────────────────────
 fetch() {
     local name="$1" url="$2" dir="$3"
-    local tarball="${BUILD_DIR}/${name}.tar.gz"
+    local tarball="${VERIDIAN_SOURCES}/${name}.tar.gz"
     if [[ ! -f "${tarball}" ]]; then
         log "Downloading ${name}..."
         { curl -fsSL -o "${tarball}.part" "${url}" || wget -q -O "${tarball}.part" "${url}"; } && [[ -s "${tarball}.part" ]] && mv "${tarball}.part" "${tarball}" || { rm -f "${tarball}.part"; echo "download failed: ${url}" >&2; exit 1; }
@@ -181,7 +184,7 @@ build_libxml2() {
         return 0
     fi
     fetch "libxml2-${LIBXML2_VER}" \
-        "https://download.gnome.org/sources/libxml2/2.12/libxml2-${LIBXML2_VER}.tar.xz" \
+        "https://download.gnome.org/sources/libxml2/${LIBXML2_VER%.*}/libxml2-${LIBXML2_VER}.tar.xz" \
         "libxml2-${LIBXML2_VER}"
 
     local src="${BUILD_DIR}/libxml2-${LIBXML2_VER}"
@@ -252,11 +255,12 @@ build_xkbcommon() {
         log "libxkbcommon: already installed."
         return 0
     fi
+    # Releases are GitHub tags now (xkbcommon.org no longer hosts tarballs).
     fetch "libxkbcommon-${XKBCOMMON_VER}" \
-        "https://xkbcommon.org/download/libxkbcommon-${XKBCOMMON_VER}.tar.xz" \
-        "libxkbcommon-${XKBCOMMON_VER}"
+        "https://github.com/xkbcommon/libxkbcommon/archive/refs/tags/xkbcommon-${XKBCOMMON_VER}.tar.gz" \
+        "libxkbcommon-xkbcommon-${XKBCOMMON_VER}"
 
-    local src="${BUILD_DIR}/libxkbcommon-${XKBCOMMON_VER}"
+    local src="${BUILD_DIR}/libxkbcommon-xkbcommon-${XKBCOMMON_VER}"
     local bld="${BUILD_DIR}/xkbcommon-build"
     log "Building libxkbcommon ${XKBCOMMON_VER}..."
     mkdir -p "${bld}"
@@ -282,8 +286,8 @@ build_sqlite() {
         log "SQLite: already installed."
         return 0
     fi
-    local url="https://www.sqlite.org/2025/sqlite-autoconf-${SQLITE_VER}.tar.gz"
-    local tarball="${BUILD_DIR}/sqlite-${SQLITE_VER}.tar.gz"
+    local url="https://www.sqlite.org/${SQLITE_YEAR}/sqlite-autoconf-${SQLITE_VER}.tar.gz"
+    local tarball="${VERIDIAN_SOURCES}/sqlite-${SQLITE_VER}.tar.gz"
     local dir="sqlite-autoconf-${SQLITE_VER}"
     if [[ ! -f "${tarball}" ]]; then
         log "Downloading SQLite..."
@@ -316,7 +320,7 @@ build_openssl() {
         return 0
     fi
     local url="https://github.com/openssl/openssl/releases/download/openssl-${OPENSSL_VER}/openssl-${OPENSSL_VER}.tar.gz"
-    local tarball="${BUILD_DIR}/openssl-${OPENSSL_VER}.tar.gz"
+    local tarball="${VERIDIAN_SOURCES}/openssl-${OPENSSL_VER}.tar.gz"
     local dir="openssl-${OPENSSL_VER}"
     if [[ ! -f "${tarball}" ]]; then
         log "Downloading OpenSSL ${OPENSSL_VER}..."
@@ -354,7 +358,7 @@ build_libevdev() {
         return 0
     fi
     local url="https://freedesktop.org/software/libevdev/libevdev-${LIBEVDEV_VER}.tar.xz"
-    local tarball="${BUILD_DIR}/libevdev-${LIBEVDEV_VER}.tar.xz"
+    local tarball="${VERIDIAN_SOURCES}/libevdev-${LIBEVDEV_VER}.tar.xz"
     local dir="libevdev-${LIBEVDEV_VER}"
     if [[ ! -f "${tarball}" ]]; then
         log "Downloading libevdev ${LIBEVDEV_VER}..."
@@ -436,7 +440,7 @@ build_libinput() {
         return 0
     fi
     local url="https://gitlab.freedesktop.org/libinput/libinput/-/archive/${LIBINPUT_VER}/libinput-${LIBINPUT_VER}.tar.gz"
-    local tarball="${BUILD_DIR}/libinput-${LIBINPUT_VER}.tar.gz"
+    local tarball="${VERIDIAN_SOURCES}/libinput-${LIBINPUT_VER}.tar.gz"
     local dir="libinput-${LIBINPUT_VER}"
     if [[ ! -f "${tarball}" ]]; then
         log "Downloading libinput ${LIBINPUT_VER}..."
@@ -481,7 +485,7 @@ build_atspi() {
         return 0
     fi
     local url="https://download.gnome.org/sources/at-spi2-core/${ATSPI_VER%.*}/at-spi2-core-${ATSPI_VER}.tar.xz"
-    local tarball="${BUILD_DIR}/at-spi2-core-${ATSPI_VER}.tar.xz"
+    local tarball="${VERIDIAN_SOURCES}/at-spi2-core-${ATSPI_VER}.tar.xz"
     local dir="at-spi2-core-${ATSPI_VER}"
     if [[ ! -f "${tarball}" ]]; then
         log "Downloading at-spi2-core ${ATSPI_VER}..."
@@ -503,7 +507,9 @@ build_atspi() {
             --default-library=static \
             -Dintrospection=disabled \
             -Dx11=disabled \
-            -Dsystemd=disabled \
+            -Duse_systemd=false \
+            -Ddefault_bus=dbus-daemon \
+            -Dgtk2_atk_adaptor=false \
             -Ddocs=false && \
         ninja -j"${JOBS}" && \
         ninja install)

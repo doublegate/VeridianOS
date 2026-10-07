@@ -11,16 +11,20 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
-BUILD_DIR="${PROJECT_ROOT}/target/cross-build/kwin"
-SYSROOT="${VERIDIAN_SYSROOT:-${PROJECT_ROOT}/target/veridian-sysroot}"
+# shellcheck source=veridian-paths.sh
+source "${SCRIPT_DIR}/veridian-paths.sh"
+BUILD_DIR="${VERIDIAN_CROSS_BUILD}/kwin"
+SYSROOT="${VERIDIAN_SYSROOT}"
 TOOLCHAIN="${SCRIPT_DIR}/cmake-toolchain-veridian.cmake"
 JOBS="${JOBS:-$(nproc)}"
 
-KWIN_VER="6.3.5"
-KWIN_URL="https://download.kde.org/stable/plasma/6.3.5/kwin-${KWIN_VER}.tar.xz"
-KDECORATION_VER="6.3.5"
-KDECORATION_URL="https://download.kde.org/stable/plasma/6.3.5/kdecoration-${KDECORATION_VER}.tar.xz"
-HOST_QT="${PROJECT_ROOT}/target/cross-build/qt6/host-qt"
+# KWin and KDecoration ship with Plasma: the release is build-plasma.sh's.
+KWIN_VER="$(sed -n 's/^PLASMA_VER="\(.*\)"$/\1/p' "$(dirname "$0")/build-plasma.sh")"
+[[ -n "${KWIN_VER}" ]] || { echo "[build-kwin] cannot read PLASMA_VER from build-plasma.sh" >&2; exit 1; }
+KWIN_URL="https://download.kde.org/stable/plasma/${KWIN_VER}/kwin-${KWIN_VER}.tar.xz"
+KDECORATION_VER="${KWIN_VER}"
+KDECORATION_URL="https://download.kde.org/stable/plasma/${KDECORATION_VER}/kdecoration-${KDECORATION_VER}.tar.xz"
+HOST_QT="${VERIDIAN_CROSS_BUILD}/qt6/host-qt"
 
 log() { echo "[build-kwin] $*"; }
 die() { echo "[build-kwin] ERROR: $*" >&2; exit 1; }
@@ -31,7 +35,7 @@ mkdir -p "${BUILD_DIR}"
 
 fetch() {
     local name="$1" url="$2" dir="$3"
-    local tarball="${BUILD_DIR}/${name}.tar.xz"
+    local tarball="${VERIDIAN_SOURCES}/${name}.tar.xz"
     if [[ ! -f "${tarball}" ]]; then
         log "Downloading ${name}..."
         { curl -fsSL -o "${tarball}.part" "${url}" || wget -q -O "${tarball}.part" "${url}"; } && [[ -s "${tarball}.part" ]] && mv "${tarball}.part" "${tarball}" || { rm -f "${tarball}.part"; echo "download failed: ${url}" >&2; exit 1; }

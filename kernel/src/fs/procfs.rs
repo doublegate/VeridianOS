@@ -83,7 +83,7 @@ impl VfsNode for ProcNode {
                 match name.as_str() {
                     "version" => {
                         format!(
-                            "VeridianOS version 0.5.0 (gcc 14.2.0) #1 SMP {}\n",
+                            "VeridianOS version 0.5.0 (gcc 16.2.0) #1 SMP {}\n",
                             env!("CARGO_PKG_VERSION")
                         )
                     }

@@ -6,12 +6,14 @@
 BB_SRC="/usr/src/busybox-1.36.1"
 OBJ_DIR="/tmp/busybox-obj"
 CC="/usr/bin/gcc"
+# The native compiler's own directory (its version, not hardcoded).
+GCC_LIBDIR="/usr/lib/gcc/x86_64-veridian/$(/usr/bin/gcc -dumpfullversion)"
 COMPILE_LIST="/usr/src/busybox-compile-list.txt"
 OBJ_LIST_FILE="/usr/src/busybox-obj-list.txt"
 
 CFLAGS_BASE="-std=gnu99 -nostdinc \
  -isystem /usr/include \
- -isystem /usr/lib/gcc/x86_64-veridian/14.2.0/include \
+ -isystem ${GCC_LIBDIR}/include \
  -include ${BB_SRC}/include/autoconf.h \
  -include /usr/src/bb_ver.h \
  -I ${BB_SRC}/include -I ${BB_SRC}/libbb \
@@ -106,7 +108,7 @@ echo "[LD] busybox (207 objects)"
 $CC $LDFLAGS \
     -Wl,--start-group \
     $OBJ_LIST \
-    -L /usr/lib -L /usr/lib/gcc/x86_64-veridian/14.2.0 \
+    -L /usr/lib -L ${GCC_LIBDIR} \
     -lc -lgcc \
     -Wl,--end-group \
     -o /tmp/busybox-native 2>&1

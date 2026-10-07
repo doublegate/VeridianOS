@@ -72,7 +72,7 @@ VeridianOS intentionally prioritizes architectural clarity over feature velocity
 
 ### Developer Tools
 
-- **Compiler toolchain** -- Cross and native GCC 14.2, Rust std platform port (`std::sys::veridian`), LLVM 19 bootstrap pipeline
+- **Compiler toolchain** -- Cross GCC 16.2 with binutils 2.47 (the native GCC was built at 14.2; its scripts now pin 16.2), Rust std platform port (`std::sys::veridian`), LLVM 19 bootstrap pipeline
 - **Debugging** -- GDB remote serial protocol, kernel debug scripts, QEMU integration on all architectures
 - **Development environment** -- IDE with gap buffer editor and LSP client, CI runner, profiler with flame graph rendering, native git client
 - **Build system** -- Build orchestrator with dependency topological sort, package repository server

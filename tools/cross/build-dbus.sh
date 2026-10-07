@@ -12,11 +12,13 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
-BUILD_DIR="${PROJECT_ROOT}/target/cross-build/dbus"
-SYSROOT="${VERIDIAN_SYSROOT:-${PROJECT_ROOT}/target/veridian-sysroot}"
+# shellcheck source=veridian-paths.sh
+source "${SCRIPT_DIR}/veridian-paths.sh"
+BUILD_DIR="${VERIDIAN_CROSS_BUILD}/dbus"
+SYSROOT="${VERIDIAN_SYSROOT}"
 JOBS="${JOBS:-$(nproc)}"
 
-DBUS_VER="1.14.10"
+DBUS_VER="1.16.2"  # 1.16 is meson-only (autotools was removed)
 DBUS_URL="https://dbus.freedesktop.org/releases/dbus/dbus-${DBUS_VER}.tar.xz"
 
 log() { echo "[build-dbus] $*"; }
@@ -30,16 +32,37 @@ export CFLAGS="-O2 -fPIC"
 export PKG_CONFIG_PATH="${SYSROOT}/usr/lib/pkgconfig:${SYSROOT}/usr/share/pkgconfig"
 export PKG_CONFIG_SYSROOT_DIR="${SYSROOT}"
 
-COMMON_CONFIGURE=(
-    --host=x86_64-unknown-linux-musl
-    --prefix="${SYSROOT}/usr"
-    --enable-static
-    --disable-shared
-)
+# Meson cross file with the resolved sysroot (as in build-fonts.sh).
+generate_meson_cross() {
+    local cross_file="${BUILD_DIR}/meson-cross.txt"
+    cat > "${cross_file}" << CROSSEOF
+[binaries]
+c = '${CC}'
+ar = 'ar'
+strip = 'strip'
+pkgconfig = 'pkg-config'
+
+[built-in options]
+c_args = ['-fPIC']
+c_link_args = []
+
+[properties]
+sys_root = '${SYSROOT}'
+pkg_config_libdir = '${SYSROOT}/usr/lib/pkgconfig:${SYSROOT}/usr/share/pkgconfig'
+needs_exe_wrapper = true
+
+[host_machine]
+system = 'linux'
+cpu_family = 'x86_64'
+cpu = 'x86_64'
+endian = 'little'
+CROSSEOF
+    echo "${cross_file}"
+}
 
 fetch() {
     local name="$1" url="$2" dir="$3"
-    local tarball="${BUILD_DIR}/${name}.tar.xz"
+    local tarball="${VERIDIAN_SOURCES}/${name}.tar.xz"
     if [[ ! -f "${tarball}" ]]; then
         log "Downloading ${name}..."
         { curl -fsSL -o "${tarball}.part" "${url}" || wget -q -O "${tarball}.part" "${url}"; } && [[ -s "${tarball}.part" ]] && mv "${tarball}.part" "${tarball}" || { rm -f "${tarball}.part"; echo "download failed: ${url}" >&2; exit 1; }
@@ -58,25 +81,32 @@ build_dbus() {
     fetch "dbus-${DBUS_VER}" "${DBUS_URL}" "dbus-${DBUS_VER}"
 
     local src="${BUILD_DIR}/dbus-${DBUS_VER}"
+    local bld="${BUILD_DIR}/dbus-build"
     log "Building D-Bus ${DBUS_VER}..."
-    (cd "${src}" && \
-        ./configure "${COMMON_CONFIGURE[@]}" \
-            --disable-systemd \
-            --disable-launchd \
-            --disable-selinux \
-            --disable-apparmor \
-            --disable-libaudit \
-            --disable-kqueue \
-            --disable-xml-docs \
-            --disable-doxygen-docs \
-            --disable-ducktype-docs \
-            --disable-tests \
-            --without-x \
-            --with-xml=expat \
-            --with-system-socket=/run/dbus/system_bus_socket \
-            --with-session-socket-dir="${DBUS_SESSION_SOCKET_DIR:-/run/dbus/session}" && \
-        make -j"${JOBS}" && \
-        make install)
+    # The options of the old ./configure call, in meson form (XML parsing
+    # is expat-only under meson).
+    rm -rf "${bld}"
+    meson setup "${bld}" "${src}" \
+        --cross-file="$(generate_meson_cross)" \
+        --prefix="${SYSROOT}/usr" \
+        --default-library=static \
+        -Dsystemd=disabled \
+        -Dlaunchd=disabled \
+        -Dselinux=disabled \
+        -Dapparmor=disabled \
+        -Dlibaudit=disabled \
+        -Dkqueue=disabled \
+        -Dxml_docs=disabled \
+        -Ddoxygen_docs=disabled \
+        -Dducktype_docs=disabled \
+        -Dqt_help=disabled \
+        -Dmodular_tests=disabled \
+        -Dinstalled_tests=false \
+        -Dx11_autolaunch=disabled \
+        -Dsystem_socket=/run/dbus/system_bus_socket \
+        -Dsession_socket_dir="${DBUS_SESSION_SOCKET_DIR:-/run/dbus/session}"
+    ninja -C "${bld}" -j"${JOBS}"
+    ninja -C "${bld}" install
     log "D-Bus: done."
 }
 

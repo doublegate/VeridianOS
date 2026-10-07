@@ -108,6 +108,35 @@
 
 ### Changed
 
+- **Toolchain and cross-built stack moved to the latest stable releases (2026-10-07).**
+  - Cross and native GCC 16.2.0 with binutils 2.47, MPFR 4.2.2 and MPC 1.4.1 (were 14.2.0,
+    2.43, 4.2.1 and 1.3.1). The VeridianOS target patches were regenerated against the new
+    sources and apply without fuzz; the binutils one was ported by hand, since 2.47
+    restructured `config.sub` and moved the `config.bfd` anchors. Ports and the in-kernel
+    native-compile test follow.
+  - musl 1.2.6 (was 1.2.5); its syscall-remap patch applies unchanged, and `build-musl.sh`
+    now verifies the tarball checksum.
+  - BusyBox stays at 1.36.1, the latest release busybox.net calls stable.
+  - The KDE stack scripts pin Qt 6.12.0, KDE Frameworks 6.30.0, Plasma, KWin and KDecoration
+    6.7.5, Mesa 26.2.4, Wayland 1.26.0 and current releases of every library under them. D-Bus
+    1.16 is meson-only, so `build-dbus.sh` now uses meson. Qt 6.10+ builds WaylandClient in
+    qtbase, so the host Wayland scanner is built first. Removed Mesa and at-spi2-core options
+    were dropped or renamed. Plasma, KWin and the KF6 configs take their versions from one
+    variable each instead of literals. Full table:
+    `docs/book/src/phases/phase12-kde-crosscompile.md`.
+  - Verified: the toolchain, musl, native libc, BusyBox and runtime tests build on GCC 16.2,
+    and the rootfs suite and boot tests pass as before. Fixes this needed: the BusyBox
+    compiler wrapper and the self-host scripts read the GCC version instead of hardcoding
+    14.2.0; `curses.h` no longer typedefs `bool`, a C23 keyword (GCC 15+ default); `edit`
+    finds the in-tree `curses.h`; downloads use curl first, because `wget` here may be a
+    firejail wrapper that cannot write to `/opt`. The KDE stack has not been rebuilt yet.
+- **Cross-built artifacts moved out of `target/`.** `cargo clean` deletes `target/` whole, which
+  lost the musl/KDE sysroot and 36 GB of KDE build trees on 2026-10-07.
+  `tools/cross/veridian-paths.sh` now places them in `/opt/veridian/musl-sysroot`,
+  `/opt/veridian/cross-build` and a source cache `/opt/veridian/sources` (each overridable); the
+  CMake/meson cross files, `kernel/build.rs` and the rootfs script use the same default.
+  `build-all-kde.sh` archives the sysroot after every phase, and the toolchain once per GCC
+  version, to `~/Code/Backups/veridian-builds/` (`--no-snapshot` to skip).
 - The AArch64 kernel is linked at 0x40200000 (was 0x40080000), so QEMU has room to load the
   device tree below it.
 - **CI gates releases on the tests (N-159, N-160).** Release artifacts and the CI summary now
