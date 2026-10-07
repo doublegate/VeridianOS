@@ -33,19 +33,38 @@ What does not work yet: `docs/KNOWN-LIMITATIONS.md`.
 
 ### Roadmap after v0.26.0
 
-- [ ] **v0.27.0: process model and SMP (C5, X0).**
-  - Preemptible ring-3/EL0/U-mode tasks.
-  - User threads.
-  - Kernel stack guard pages (N-26).
-  - AArch64 MMU (N-28) and RISC-V U-mode.
-  - SMP bring-up and TLB shootdown.
-  - Copy-on-write fork.
-  - Huge pages, real AArch64/RISC-V heaps, priority inheritance, TCP completion, namespaces.
-- [ ] **v0.27.0 carry-overs from the v0.26 plan:**
-  - C1 CI job for the runtime suite.
-  - C2 build hygiene.
-  - C3 shared ABI crate.
-  - C4 lifetime cleanup.
+- [ ] **v0.27.0: process model and SMP (C5, X0).** Sprints, in dependency order; IDs are in
+  `docs/audit/AUDIT-VERIFICATION-2026-10-05.md`:
+  - [ ] **A, foundations and hygiene:**
+    - N-56 workspace lints and the clippy allow-list (C2).
+    - N-55 FIPS 204 ML-DSA with NIST known-answer tests.
+    - N-43 raw socket buffer reads; N-45 ramfs cross-fs link.
+    - Dead code: N-07, `mm/vmm.rs`, MEM-INC-02 slab, CAP-INC-02 derivation, SYS-INC-01.
+    - Coverage helpers (plan Addendum 3); C1 runtime-suite CI job.
+  - [ ] **B, per-CPU data and SMP:**
+    - BSP per-CPU data on every architecture; N-35 per-CPU syscall frame.
+    - AP bring-up: x86 INIT-SIPI-SIPI, AArch64 PSCI, RISC-V SBI HSM; N-14.
+    - TLB shootdown: MEM-SEC-02, MEM-ARCH-03.
+    - Per-CPU run queues and work stealing: SCHED-PERF-01, SMP-PERF-01.
+    - N-51, N-52.
+  - [ ] **C, memory:**
+    - Copy-on-write with frame refcounts: MEM-ARCH-02, PROC-ARCH-01, N-07.
+    - Huge pages: MEM-ARCH-01.
+    - Real AArch64/RISC-V heaps: MEM-SEC-03.
+    - Kernel stack guard pages: N-26.
+  - [ ] **D, process model (C5):**
+    - Scheduler-dispatched, preemptible ring-3 tasks.
+    - User threads.
+    - XSAVE FPU state: N-41.
+    - N-46, N-50, N-54, W-13.
+  - [ ] **E, user mode beyond x86_64:** AArch64 MMU, caches and EL0 (N-28); RISC-V U-mode.
+  - [ ] **F, protocols and policy:**
+    - TCP: NET-INC-01, N-08, N-20.
+    - WireGuard: NET-INC-02.
+    - NVMe queues.
+    - Priority inheritance: SCHED-INC-01. Deadline scheduling: SCHED-INC-02.
+    - Namespaces: VIRT-INC-01.
+  - [ ] **Release:** tri-arch boot with `-smp 4`, runtime suite, CHANGELOG, tag.
 - [ ] **v0.28.0:** one Linux ABI with VeridianOS IPC in its own range (X1, fixes N-33), plus the
   process, signal, time and file syscall tiers.
 - [ ] **v0.29.0 - v0.31.0:** the rest of the Linux/POSIX syscall surface, loader/vDSO/TTY/procfs,
