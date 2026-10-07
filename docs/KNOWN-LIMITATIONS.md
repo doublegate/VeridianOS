@@ -61,8 +61,6 @@ work. User code is preempted when its slice ends (D3). What is still missing:
   `poll`, `epoll_wait` and blocking reads of sockets, ptys, signalfd and other descriptors that
   do not report readiness changes yet sleep too but re-check every 10 ms. `select` reports every
   open descriptor as ready. Other waits are still wrong:
-  - a pipe write that only partly fits returns a short count instead of waiting for the rest,
-    and PIPE_BUF writes are not atomic;
   - an empty pty read returns end-of-file, and a write to a full pty fails with EAGAIN instead
     of waiting (it returns a short count when part fits; N-128);
   - `flock` without `LOCK_NB` fails with EWOULDBLOCK instead of waiting (N-120).

@@ -21,6 +21,10 @@ fn pipe_event() {
 /// Default pipe capacity (64 KB).
 const PIPE_CAPACITY: usize = 64 * 1024;
 
+/// Writes of at most this many bytes are atomic: all or nothing, never
+/// interleaved with another writer's data (POSIX PIPE_BUF, Linux 4096).
+pub const PIPE_BUF: usize = 4096;
+
 /// Internal shared state of a pipe.
 struct PipeInner {
     /// Data buffer.
@@ -155,6 +159,10 @@ impl PipeWriter {
                 return Err(KernelError::BrokenPipe);
             }
             let available = pipe.capacity.saturating_sub(pipe.buffer.len());
+            // A write of up to PIPE_BUF bytes goes in whole or waits.
+            if data.len() <= PIPE_BUF && available < data.len() {
+                return Err(KernelError::WouldBlock);
+            }
             let to_write = data.len().min(available);
             for &byte in &data[..to_write] {
                 pipe.buffer.push_back(byte);

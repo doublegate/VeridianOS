@@ -588,24 +588,37 @@ fn write_fd(
 ) -> Option<SyscallResult> {
     #[cfg(feature = "alloc")]
     let mut retry_now = false;
+    // A blocking write to a stream (pipe, socket, terminal) waits until all
+    // of it is written, as POSIX requires; a short count used to come back
+    // as soon as a pipe filled. A signal or a closed reader after part was
+    // written returns the count so far.
+    let mut done = 0usize;
     loop {
         // Looked up under the file table lock, written without it (N-118).
         let file_desc = proc.file_table.lock().get(fd)?;
         let blocking = !file_desc
             .nonblock
             .load(core::sync::atomic::Ordering::Acquire);
-        let result = file_write_from_user(&file_desc, buffer, count);
-        if !(blocking && matches!(result, Err(SyscallError::WouldBlock))) {
-            return Some(result);
+        let stream = !matches!(
+            file_desc.node.node_type(),
+            crate::fs::NodeType::File | crate::fs::NodeType::Directory
+        );
+        let result = file_write_from_user(&file_desc, buffer + done, count - done);
+        #[cfg(feature = "alloc")]
+        let dispatched = crate::sched::dispatch::current_owner().is_some();
+        #[cfg(not(feature = "alloc"))]
+        let dispatched = false;
+        match result {
+            Ok(n) if blocking && stream && dispatched && done + n < count => done += n,
+            Ok(n) => return Some(Ok(done + n)),
+            Err(SyscallError::WouldBlock) if blocking && dispatched => {}
+            Err(_) if done > 0 => return Some(Ok(done)),
+            Err(e) => return Some(Err(e)),
         }
         #[cfg(feature = "alloc")]
-        if crate::sched::dispatch::current_owner().is_some() {
-            if let Err(e) = wait_ready(&file_desc, (POLLOUT | POLLERR) as u16, &mut retry_now) {
-                return Some(Err(e));
-            }
-            continue;
+        if let Err(e) = wait_ready(&file_desc, (POLLOUT | POLLERR) as u16, &mut retry_now) {
+            return Some(if done > 0 { Ok(done) } else { Err(e) });
         }
-        return Some(result);
     }
 }
 

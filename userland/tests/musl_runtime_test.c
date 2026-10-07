@@ -522,6 +522,83 @@ static void test_blocking_io(void)
     report("musl_blocking_io_wakes", got_pipe && pipe_ms >= 50 && got_efd && polled, why);
 }
 
+/* Blocking sprint: a blocking pipe write returns only when all of it is
+ * written, and writes of up to PIPE_BUF bytes from different writers are
+ * never interleaved. */
+static void test_pipe_write_semantics(void)
+{
+    int fds[2];
+    if (pipe(fds) != 0) {
+        report("musl_pipe_write_whole_and_atomic", 0, "pipe failed");
+        return;
+    }
+    /* One 256 KiB write (four times the capacity) against a slow reader. */
+    enum { BIG = 256 * 1024 };
+    pid_t pid = fork();
+    if (pid == 0) {
+        close(fds[0]);
+        static char big[BIG];
+        memset(big, 'z', sizeof(big));
+        ssize_t w = write(fds[1], big, sizeof(big));
+        _exit(w == BIG ? 0 : 1);
+    }
+    static char buf[8192];
+    long got = 0;
+    struct timespec ms5 = {0, 5 * 1000 * 1000};
+    while (got < BIG) {
+        nanosleep(&ms5, 0);
+        ssize_t n = read(fds[0], buf, sizeof(buf));
+        if (n <= 0)
+            break;
+        got += n;
+    }
+    int st = 0;
+    waitpid(pid, &st, 0);
+    int whole = got == BIG && WIFEXITED(st) && WEXITSTATUS(st) == 0;
+
+    /* Two writers, 64 blocks of PIPE_BUF bytes each. */
+    pid_t w[2];
+    for (int k = 0; k < 2; k++) {
+        w[k] = fork();
+        if (w[k] == 0) {
+            close(fds[0]);
+            char blk[4096];
+            memset(blk, 'a' + k, sizeof(blk));
+            for (int i = 0; i < 64; i++)
+                if (write(fds[1], blk, sizeof(blk)) != (ssize_t)sizeof(blk))
+                    _exit(1);
+            _exit(0);
+        }
+    }
+    close(fds[1]);
+    int atomic = 1;
+    long total = 0;
+    static char blk[4096];
+    for (;;) {
+        /* Read exactly one block at a time. */
+        long have = 0;
+        while (have < (long)sizeof(blk)) {
+            ssize_t n = read(fds[0], blk + have, sizeof(blk) - have);
+            if (n <= 0)
+                break;
+            have += n;
+        }
+        if (have == 0)
+            break;
+        total += have;
+        for (long i = 1; i < have; i++)
+            if (blk[i] != blk[0])
+                atomic = 0;
+    }
+    waitpid(w[0], 0, 0);
+    waitpid(w[1], 0, 0);
+    close(fds[0]);
+
+    static char why[96];
+    snprintf(why, sizeof(why), "whole=%d(got=%ld) atomic=%d total=%ld", whole, got, atomic, total);
+    report("musl_pipe_write_whole_and_atomic", whole && atomic && total == 2 * 64 * 4096, why);
+}
+
 int main(void)
 {
     test_fsync();
@@ -537,6 +614,7 @@ int main(void)
     test_sleeps();
     test_futex_queues();
     test_blocking_io();
+    test_pipe_write_semantics();
     printf("MUSL-RUNTIME: %d/%d\n", passed, total);
     return passed == total ? 0 : 1;
 }

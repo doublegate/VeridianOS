@@ -212,6 +212,11 @@
 
 ### Fixed
 
+- **Pipe writes were short and could interleave.** A blocking write to a pipe, socket or terminal
+  returned as soon as the buffer filled, with however much had fit; it now waits until all of it
+  is written (a signal or a closed reader returns the count so far). Writes of up to PIPE_BUF
+  (4096) bytes to a pipe are atomic: never split, so two writers' blocks never interleave. musl
+  runtime test `musl_pipe_write_whole_and_atomic`.
 - **A page fault that met a held address-space lock killed the thread (N-138).** The fault path
   could only `try_lock` the address space, so a fault while another thread of the process held
   it (in `mmap`, say) failed and the thread got SIGSEGV. The address space is now a sleeping
