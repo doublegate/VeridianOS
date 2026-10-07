@@ -286,311 +286,11 @@ mod pty;
 #[allow(unused_imports)]
 use self::pty::{sys_grantpt, sys_openpty, sys_ptsname, sys_unlockpt};
 
-/// System call numbers
-#[repr(usize)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Syscall {
-    // IPC system calls
-    IpcSend = 0,
-    IpcReceive = 1,
-    IpcCall = 2,
-    IpcReply = 3,
-    IpcCreateEndpoint = 4,
-    IpcBindEndpoint = 5,
-    IpcShareMemory = 6,
-    IpcMapMemory = 7,
-
-    // Process management
-    ProcessYield = 10,
-    ProcessExit = 11,
-    ProcessFork = 12,
-    ProcessExec = 13,
-    ProcessWait = 14,
-    ProcessGetPid = 15,
-    ProcessGetPPid = 16,
-    ProcessSetPriority = 17,
-    ProcessGetPriority = 18,
-
-    // Thread management
-    ThreadCreate = 40,
-    ThreadExit = 41,
-    ThreadJoin = 42,
-    ThreadGetTid = 43,
-    ThreadSetAffinity = 44,
-    ThreadGetAffinity = 45,
-    ThreadClone = 46,
-
-    // Memory management
-    MemoryMap = 20,
-    MemoryUnmap = 21,
-    MemoryProtect = 22,
-    MemoryBrk = 23,
-
-    // Capability management
-    CapabilityGrant = 30,
-    CapabilityRevoke = 31,
-
-    // Filesystem operations
-    FileOpen = 50,
-    FileClose = 51,
-    FileRead = 52,
-    FileWrite = 53,
-    FileSeek = 54,
-    FileStat = 55,
-    FileTruncate = 56,
-
-    // Directory operations
-    DirMkdir = 60,
-    DirRmdir = 61,
-    DirOpendir = 62,
-    DirReaddir = 63,
-    DirClosedir = 64,
-    FilePipe2 = 65,
-    FileDup3 = 66,
-
-    // Filesystem management
-    FsMount = 70,
-    FsUnmount = 71,
-    FsSync = 72,
-    FsFsync = 73,
-
-    // Kernel information
-    KernelGetInfo = 80,
-
-    // Package management
-    PkgInstall = 90,
-    PkgRemove = 91,
-    PkgQuery = 92,
-    PkgList = 93,
-    PkgUpdate = 94,
-
-    // Extended filesystem operations
-    FileDup = 57,
-    FileDup2 = 58,
-    FilePipe = 59,
-
-    // Time management
-    TimeGetUptime = 100,
-    TimeCreateTimer = 101,
-    TimeCancelTimer = 102,
-
-    // Extended process operations
-    ProcessGetcwd = 110,
-    ProcessChdir = 111,
-    FileIoctl = 112,
-    ProcessKill = 113,
-
-    // Signal management
-    SigAction = 120,
-    SigProcmask = 121,
-    SigSuspend = 122,
-    SigReturn = 123,
-
-    // POSIX time syscalls
-    ClockGettime = 160,
-    ClockGetres = 161,
-    Nanosleep = 162,
-    Gettimeofday = 163,
-
-    // Identity syscalls
-    Getuid = 170,
-    Geteuid = 171,
-    Getgid = 172,
-    Getegid = 173,
-    Setuid = 174,
-    Setgid = 175,
-
-    // Process group / session syscalls
-    Setpgid = 176,
-    Getpgid = 177,
-    Getpgrp = 178,
-    Setsid = 179,
-    Getsid = 180,
-
-    // Scatter/gather I/O
-    Readv = 183,
-    Writev = 184,
-
-    // Debug / tracing
-    Ptrace = 140,
-
-    // Extended filesystem operations (Phase 4B)
-    FileStatPath = 150,
-    FileLstat = 151,
-    FileReadlink = 152,
-    FileAccess = 153,
-    FileRename = 154,
-    FileLink = 155,
-    FileSymlink = 156,
-    FileUnlink = 157,
-    FileFcntl = 158,
-
-    // New filesystem ops for self-hosting (Phase 4A)
-    FileChmod = 185,
-    FileFchmod = 186,
-    ProcessUmask = 187,
-    FileTruncatePath = 188,
-    FilePoll = 189,
-    FileOpenat = 190,
-    FileFstatat = 191,
-    FileUnlinkat = 192,
-    FileMkdirat = 193,
-    FileRenameat = 194,
-    FilePread = 195,
-    FilePwrite = 196,
-
-    // Ownership and device node syscalls
-    FileChown = 197,
-    FileFchown = 198,
-    FileMknod = 199,
-    FileSelect = 200,
-    FutexWait = 201,
-    FutexWake = 202,
-    ArchPrctl = 203,
-
-    // System information
-    ProcessUname = 204,
-    /// Look up an environment variable by name from the process's env_vars.
-    ///
-    /// Required because some CRT implementations (e.g. GCC's internal CRT)
-    /// skip __libc_start_main, leaving the libc `environ` pointer NULL.
-    ProcessGetenv = 205,
-
-    // POSIX shared memory
-    ShmOpen = 210,
-    ShmUnlink = 211,
-    ShmTruncate = 212,
-
-    // Socket operations
-    SocketCreate = 220,
-    SocketBind = 221,
-    SocketListen = 222,
-    SocketConnect = 223,
-    SocketAccept = 224,
-    SocketSend = 225,
-    SocketRecv = 226,
-    SocketClose = 227,
-    SocketPair = 228,
-
-    // Graphics / framebuffer (Phase 6)
-    FbGetInfo = 230,
-    FbMap = 231,
-    InputPoll = 232,
-    InputRead = 233,
-    FbSwap = 234,
-
-    // Wayland compositor (Phase 6)
-    WlConnect = 240,
-    WlDisconnect = 241,
-    WlSendMessage = 242,
-    WlRecvMessage = 243,
-    WlCreateShmPool = 244,
-    WlCreateSurface = 245,
-    WlCommitSurface = 246,
-    WlGetEvents = 247,
-
-    // Network (Phase 6) -- AF_INET extensions
-    NetSendTo = 250,
-    NetRecvFrom = 251,
-    NetGetSockName = 252,
-    NetGetPeerName = 253,
-    NetSetSockOpt = 254,
-    NetGetSockOpt = 255,
-
-    // Resource limits (Phase 6.5)
-    GetRlimit = 260,
-    SetRlimit = 261,
-
-    // epoll I/O multiplexing (Phase 6.5)
-    EpollCreate = 262,
-    EpollCtl = 263,
-    EpollWait = 264,
-
-    // Process groups / sessions (Phase 6.5)
-    SetPgid = 270,
-    GetPgid = 271,
-    SetSid = 272,
-    GetSid = 273,
-    TcSetPgrp = 274,
-    TcGetPgrp = 275,
-
-    // PTY (Phase 6.5)
-    OpenPty = 280,
-    GrantPty = 281,
-    UnlockPty = 282,
-    PtsName = 283,
-
-    // Filesystem extensions (Phase 6.5)
-    Link = 290,
-    Symlink = 291,
-    Readlink = 292,
-    Lstat = 293,
-    Fchmod = 294,
-    Fchown = 295,
-    Umask = 296,
-    Access = 297,
-
-    // Poll/fcntl (Phase 6.5)
-    Poll = 300,
-    Fcntl = 301,
-
-    // Threading (Phase 6.5)
-    Clone = 310,
-    Futex = 311,
-
-    // Audio (Phase 7)
-    AudioOpen = 320,
-    AudioClose = 321,
-    AudioWrite = 322,
-    AudioSetVolume = 323,
-    AudioGetInfo = 324,
-    AudioStart = 325,
-    AudioStop = 326,
-    AudioPause = 327,
-
-    // musl libc compatibility syscalls
-    Getdents64 = 340,
-    Prlimit64 = 341,
-    InotifyInit1 = 342,
-    InotifyAddWatch = 343,
-    InotifyRmWatch = 344,
-    Madvise = 345,
-
-    // *at() syscalls for musl (dirfd-relative path operations)
-    Fchmodat = 346,
-    Fchownat = 347,
-    Linkat = 348,
-    Symlinkat = 349,
-    Readlinkat = 350,
-    MemfdCreate = 351,
-    SetTidAddress = 352,
-    SetRobustList = 353,
-    ClockNanosleep = 354,
-
-    // Linux calls musl used to pass through unmapped, landing on unrelated
-    // native syscalls (N-103: prctl 157 = FileUnlink, tkill 200 =
-    // FileSelect, tgkill 234 = FbSwap, waitid 247 = WlGetEvents; flock 73
-    // shares FsFsync). The musl patch maps them here.
-    Prctl = 355,
-    Flock = 356,
-    Tkill = 357,
-    Tgkill = 358,
-    Waitid = 359,
-    /// rt_sigpending: signals pending for the caller while blocked.
-    SigPending = 360,
-
-    // Event/timer notification fds (KDE/Wayland infrastructure)
-    Getrandom = 330,
-    EventfdCreate = 331,
-    EventfdRead = 332,
-    EventfdWrite = 333,
-    TimerfdCreate = 334,
-    TimerfdSettime = 335,
-    TimerfdGettime = 336,
-    SignalfdCreate = 337,
-    SendMsg = 338,
-    RecvMsg = 339,
-}
+// System call numbers, generated from abi/syscalls.map (ADR 0009): Linux
+// x86_64 numbers for the calls Linux has, private numbers from 1024 for the
+// rest.
+mod numbers;
+pub use self::numbers::Syscall;
 
 /// System call result type
 pub type SyscallResult = Result<usize, SyscallError>;
@@ -671,6 +371,17 @@ pub enum SyscallError {
     ExecFormat = -117,
     /// A timed wait ran out (ETIMEDOUT, errno 110).
     TimedOut = -118,
+    AddressFamilyNotSupported = -119,
+    ProtocolNotSupported = -120,
+    IllegalSeek = -121,
+    RangeError = -122,
+    NameTooLong = -123,
+    AddressInUse = -124,
+    ConnectionRefused = -125,
+    NotConnected = -126,
+    AlreadyConnected = -127,
+    InProgress = -128,
+    ConnectionReset = -129,
 }
 
 impl From<IpcError> for SyscallError {
@@ -818,89 +529,19 @@ pub extern "C" fn syscall_handler(
         return linux_compat::to_linux_errno(SyscallError::WouldBlock);
     }
 
-    // Get caller PID for audit logging
-    //
-    // Per-process flag: does this process use the Linux x86_64 syscall ABI?
-    // When set, ALL syscall numbers are dispatched through the Linux compat
-    // layer (not VeridianOS numbering), and error codes are translated to
-    // Linux errno values on return. Nothing sets it yet (see the loader).
-    // The process reference is dropped here: exit and exec do not return,
-    // so an Arc held across the dispatch would never be released.
-    let (caller_pid, linux_abi) = crate::process::current_process()
-        .map(|p| (p.pid.0, linux_compat::is_linux_abi(&p)))
-        .unwrap_or((0, false));
+    // Caller PID for audit logging. The process reference is dropped here:
+    // exit and exec do not return, so an Arc held across the dispatch would
+    // never be released.
+    let caller_pid = crate::process::current_process()
+        .map(|p| p.pid.0)
+        .unwrap_or(0);
 
-    let result = if linux_abi {
-        // Handle ppoll specially (different arg layout from poll)
-        if syscall_num == 271 {
-            // ppoll(fds, nfds, timespec*, sigmask, sigsetsize)
-            linux_compat::handle_ppoll(arg1, arg2, arg3)
-        } else if linux_compat::is_faccessat(syscall_num) {
-            sys_faccessat(arg1, arg2, arg3, arg4)
-        } else if let Some(syscall) = linux_compat::translate_linux_syscall(syscall_num) {
-            handle_syscall(syscall, arg1, arg2, arg3, arg4, arg5)
-        } else if let Some(result) = linux_compat::handle_linux_stub(syscall_num, arg1, arg2) {
-            result
-        } else {
-            // SAFETY: Writing to COM1 I/O port for diagnostic output.
-            #[cfg(target_arch = "x86_64")]
-            unsafe {
-                crate::arch::x86_64::idt::raw_serial_str(b"SC_UNK#");
-                crate::arch::x86_64::idt::raw_serial_hex(syscall_num as u64);
-                crate::arch::x86_64::idt::raw_serial_str(b"\n");
-            }
-            Err(SyscallError::InvalidSyscall)
-        }
-    } else {
-        // VeridianOS native ABI: dispatch syscalls from musl-patched binaries.
-        //
-        // Cross-compiled musl binaries (kwin, plasmashell, dbus-daemon) contain
-        // a __veridian_remap_syscall() patch that translates Linux syscall
-        // numbers to VeridianOS numbers. However, the musl patch has several
-        // bugs (swapped epoll numbers, wrong timerfd numbers, sigaltstack->
-        // setsid mismap, etc.) that must be corrected at the kernel level since
-        // the musl binary is pre-compiled and cannot be re-patched.
-        //
-        // Additionally, Qt/KWin C++ code and GCC runtime libraries may issue
-        // raw Linux x86_64 syscall numbers that bypass musl's remap entirely
-        // (via inline asm or direct `syscall` instructions). The kernel must
-        // handle BOTH musl-remapped VeridianOS numbers AND raw Linux numbers.
-        //
-        // The dispatch strategy is:
-        // 1. Fix known musl remap bugs (specific number intercepts)
-        // 2. For IPC range (0-7): disambiguate Linux file I/O vs VeridianOS IPC
-        // 3. Try VeridianOS Syscall::try_from() for musl-remapped numbers
-        // 4. Fall back to Linux translation for raw Linux numbers
-        // 5. Try Linux stubs for optional/advisory syscalls
-        //
-        // === musl remap bugs fixed here ===
-        //
-        // Bug 1: epoll_ctl/epoll_create1 SWAPPED
-        //   musl: Linux epoll_ctl(233) -> 262, Linux epoll_create1(281) -> 263
-        //   Correct: epoll_ctl -> EpollCtl(263), epoll_create1 -> EpollCreate(262)
-        //   Effect: 262 and 263 are swapped. Fix: swap them back.
-        //
-        // Bug 2: epoll_create1(291) -> FileDup3(66) instead of EpollCreate(262)
-        //   musl confused Linux 291 (epoll_create1) with dup3.
-        //   Already handled by arg-pattern heuristic at 66.
-        //
-        // Bug 3: dup3(292) -> FilePipe2(65) instead of FileDup3(66)
-        //   musl confused Linux 292 (dup3) with pipe2.
-        //   Already handled by arg-pattern heuristic at 65.
-        //
-        // Bug 4: sigaltstack(131) -> Setsid(179)
-        //   Linux 131 = sigaltstack, NOT setsid. musl incorrectly maps it.
-        //   Fix: intercept 179 and check if it's really setsid or sigaltstack.
-        //
-        // Bug 5: timerfd numbers wrong (322/325/326 instead of 283/286/287)
-        //   Dead code in musl remap (never triggered). Kernel intercepts
-        //   the correct raw Linux numbers (283/286/287) via default passthrough.
-        //
-        // Bug 6: truncate(76)/ftruncate(77) SWAPPED
-        //   musl: truncate(76) -> FileTruncate(56, fd-based)
-        //         ftruncate(77) -> FileTruncatePath(188, path-based)
-        //   Fix: intercept 56 and 188 for correct routing.
-        dispatch_native_abi(syscall_num, arg1, arg2, arg3, arg4, arg5)
+    // One table for every caller (ADR 0009): Linux x86_64 numbers, and
+    // private numbers from 1024 for VeridianOS-only calls. An unknown
+    // number is ENOSYS, as on Linux.
+    let result = match Syscall::try_from(syscall_num) {
+        Ok(syscall) => handle_syscall(syscall, arg1, arg2, arg3, arg4, arg5),
+        Err(()) => Err(SyscallError::InvalidSyscall),
     };
 
     // Audit log: syscall with result.
@@ -919,17 +560,10 @@ pub extern "C" fn syscall_handler(
     let ret = match result {
         Ok(value) => value as isize,
         Err(error) => {
-            // Always translate error codes to Linux errno values.
-            //
-            // Both the linux_abi path (raw Linux syscall numbers) and the
-            // native ABI path (musl-remapped VeridianOS numbers) ultimately
-            // return to musl's __syscall_ret(), which interprets negative
-            // return values as -errno (Linux convention).
-            //
-            // Previously, native ABI returned raw VeridianOS error codes
-            // (e.g., ResourceNotFound = -4). musl interpreted -4 as -EINTR
-            // (errno 4) and retried the syscall in an infinite loop, because
-            // Linux ENOENT is -2, not -4.
+            // Errors are Linux errno values (-errno), which both C
+            // libraries' __syscall_ret expect. Raw VeridianOS codes were
+            // misread: ResourceNotFound (-4) is EINTR to musl, which then
+            // retried forever.
             linux_compat::to_linux_errno(error)
         }
     };
@@ -1005,261 +639,6 @@ pub extern "C" fn syscall_handler(
     ret
 }
 
-/// Dispatch a syscall using the native VeridianOS ABI, with corrections for
-/// musl remap bugs and fallback to Linux x86_64 translation.
-///
-/// This is the primary dispatch path for cross-compiled musl binaries
-/// (kwin_wayland, plasmashell, dbus-daemon). It handles:
-/// 1. Known musl __veridian_remap_syscall() bugs (swapped/wrong numbers)
-/// 2. Raw Linux x86_64 syscall numbers from C++ code bypassing musl
-/// 3. Correct VeridianOS-numbered syscalls from musl's remap
-fn dispatch_native_abi(
-    syscall_num: usize,
-    arg1: usize,
-    arg2: usize,
-    arg3: usize,
-    arg4: usize,
-    arg5: usize,
-) -> SyscallResult {
-    // ---------------------------------------------------------------
-    // Phase 1: Fix known musl remap bugs (specific number intercepts)
-    // ---------------------------------------------------------------
-
-    // --- Raw Linux epoll_ctl (233) bypass fix ---
-    // Some code paths (e.g., statically linked Qt/KDE) may call epoll_ctl
-    // via raw syscall(233, ...) bypassing musl's __veridian_remap_syscall().
-    // VeridianOS 233 = InputRead, which silently fails. Intercept it here.
-    if syscall_num == 233 {
-        // epoll_ctl(epfd, op, fd, event_ptr): op is 1/2/3
-        if arg2 <= 3 {
-            return handle_syscall(Syscall::EpollCtl, arg1, arg2, arg3, arg4, arg5);
-        }
-        // Fall through to InputRead for genuine InputRead calls
-    }
-
-    // --- epoll swap fix (Bug 1) ---
-    // musl maps: Linux epoll_ctl(233) -> 262, Linux epoll_create1(281) -> 263
-    // Correct:   epoll_ctl -> EpollCtl(263), epoll_create1 -> EpollCreate(262)
-    // So 262 arrives when musl meant EpollCtl, and 263 when musl meant EpollCreate.
-    if syscall_num == 262 {
-        // 262 can be EITHER:
-        // (a) musl's buggy remap: Linux epoll_ctl(233) -> 262 (swap bug)
-        // (b) Raw Linux newfstatat(262) via musl's SYS_newfstatat path
-        //
-        // Disambiguate by argument patterns:
-        //   newfstatat(dirfd, pathname, statbuf, flags):
-        //     arg1 = AT_FDCWD (0xffffffffffffff9c = -100 sign-extended) or valid fd
-        //     arg2 = pathname pointer (large user-space address)
-        //   epoll_ctl(epfd, op, fd, event_ptr):
-        //     arg1 = epoll fd (small non-negative integer, usually < 256)
-        //     arg2 = EPOLL_CTL_ADD/MOD/DEL (1, 2, or 3)
-        let at_fdcwd = 0xffffffffffffff9c_usize; // AT_FDCWD = -100 as usize
-        if arg1 == at_fdcwd || (arg2 > 4096 && arg2 < USER_SPACE_END) {
-            // Looks like fstatat(AT_FDCWD, path, ...) or fstatat(fd, path, ...)
-            return handle_syscall(Syscall::FileFstatat, arg1, arg2, arg3, arg4, arg5);
-        }
-        // Looks like epoll_ctl(epfd, op, fd, event_ptr)
-        return handle_syscall(Syscall::EpollCtl, arg1, arg2, arg3, arg4, arg5);
-    }
-    if syscall_num == 263 {
-        // 263 can be EITHER:
-        // (a) musl's buggy remap of Linux epoll_create1(291) -> 263 (swap bug)
-        // (b) musl's buggy remap of Linux epoll_pwait(281) -> 263 (mislabeled as
-        // epoll_ctl)
-        //
-        // Disambiguate by argument patterns:
-        //   epoll_create1(flags): arg1 = 0 or O_CLOEXEC(0x80000), arg2 = 0
-        //   epoll_pwait(epfd, events_ptr, maxevents, timeout, sigmask, sigsetsize):
-        //     arg1 = epoll fd (small non-negative int)
-        //     arg2 = events pointer (large user-space address)
-        //     arg3 = maxevents (small positive int)
-        if arg2 > 4096 && arg2 < USER_SPACE_END {
-            // Looks like epoll_pwait (arg2 is a user-space pointer to events array)
-            return handle_syscall(Syscall::EpollWait, arg1, arg2, arg3, arg4, arg5);
-        }
-        // Looks like epoll_create1 (arg2 = 0, arg1 = flags)
-        return handle_syscall(Syscall::EpollCreate, arg1, arg2, arg3, arg4, arg5);
-    }
-
-    // --- epoll_create1 via wrong dup3 mapping (Bug 2) ---
-    // musl maps: Linux epoll_create1(291) -> 66 (FileDup3, wrong)
-    // Also: VeridianOS FileDup3 IS 66 (correct for actual dup3 calls)
-    // Heuristic: epoll_create1 flags are 0 or O_CLOEXEC(0x80000);
-    //            dup3(oldfd, newfd, flags) has oldfd as a small non-zero integer.
-    if syscall_num == 66 {
-        if arg1 == 0 || arg1 == 0x80000 {
-            return handle_syscall(Syscall::EpollCreate, arg1, arg2, arg3, arg4, arg5);
-        }
-        return handle_syscall(Syscall::FileDup3, arg1, arg2, arg3, arg4, arg5);
-    }
-
-    // --- dup3 via wrong pipe2 mapping (Bug 3) ---
-    // musl maps: Linux dup3(292) -> 65 (FilePipe2, wrong; should be FileDup3=66)
-    // Also: VeridianOS FilePipe2 IS 65 (correct for actual pipe2 calls)
-    // Heuristic: pipe2(pipefd_ptr, flags) has arg1 as a pointer (large value);
-    //            dup3(oldfd, newfd, flags) has arg1 as a small fd integer.
-    if syscall_num == 65 {
-        if arg1 > 4096 {
-            return handle_syscall(Syscall::FilePipe2, arg1, arg2, arg3, arg4, arg5);
-        }
-        return handle_syscall(Syscall::FileDup3, arg1, arg2, arg3, arg4, arg5);
-    }
-
-    // --- ppoll passthrough (not in musl remap, arrives as raw Linux 271) ---
-    // Linux ppoll(271) has no musl remap case; `default: return nr` passes
-    // 271 through. Collides with VeridianOS GetPgid(271).
-    // ppoll args: (fds_ptr, nfds, timespec_ptr, sigmask, sigsetsize)
-    //   arg1 = fds pointer (large value)
-    // getpgid args: (pid) where arg1 is a small integer or 0
-    if syscall_num == 271 {
-        if arg1 > 4096 {
-            // Looks like ppoll (fds pointer)
-            return linux_compat::handle_ppoll(arg1, arg2, arg3);
-        }
-        // Looks like getpgid (pid as small int)
-        return handle_syscall(Syscall::Getpgid, arg1, arg2, arg3, arg4, arg5);
-    }
-
-    // --- epoll_pwait passthrough (musl remap maps 281->263, but raw Linux 281
-    // also arrives from Qt/KDE C++ code or libstdc++ bypassing musl) ---
-    // Linux epoll_pwait(281) collides with VeridianOS GrantPty(281).
-    // epoll_pwait args: (epfd, events_ptr, maxevents, timeout, sigmask, sigsetsize)
-    //   arg1 = epoll fd (small non-negative int)
-    //   arg2 = events pointer (large user-space address)
-    // grantpt args: (master_fd) where arg2 is unused/0
-    if syscall_num == 281 {
-        if arg2 > 4096 && arg2 < USER_SPACE_END {
-            // Looks like epoll_pwait (arg2 is user-space events pointer)
-            return handle_syscall(Syscall::EpollWait, arg1, arg2, arg3, arg4, arg5);
-        }
-        // Looks like grantpt (arg2 = 0 or small)
-        return handle_syscall(Syscall::GrantPty, arg1, arg2, arg3, arg4, arg5);
-    }
-
-    // --- timerfd passthrough (not in musl remap, arrives as raw Linux 283/286/287)
-    // ---
-    if syscall_num == 283 {
-        return handle_syscall(Syscall::TimerfdCreate, arg1, arg2, arg3, arg4, arg5);
-    }
-    if syscall_num == 286 {
-        return handle_syscall(Syscall::TimerfdSettime, arg1, arg2, arg3, arg4, arg5);
-    }
-    if syscall_num == 287 {
-        return handle_syscall(Syscall::TimerfdGettime, arg1, arg2, arg3, arg4, arg5);
-    }
-
-    // --- statx stub (Linux 332, not in musl remap) ---
-    // Collides with VeridianOS EventfdRead(332).
-    // Qt may call statx directly. Return ENOSYS so caller falls back to fstatat.
-    // Heuristic: statx has arg1=dirfd (small int), EventfdRead has arg1=efd_id.
-    // Since eventfd IDs are also small ints, prefer ENOSYS which is safe for both
-    // (Qt retries with fstatat, eventfd read falls back to VfsNode path).
-    if syscall_num == 332 {
-        return Err(SyscallError::NotImplemented);
-    }
-
-    // ---------------------------------------------------------------
-    // Phase 2: IPC range (0-7) -> always route to Linux translation
-    // ---------------------------------------------------------------
-    // musl's remap translates Linux file I/O (0-7) to VeridianOS equivalents
-    // that are ALL outside the 0-7 range:
-    //   Linux 0(read)->52, 1(write)->53, 2(open)->50, 3(close)->51,
-    //   4(stat)->150, 5(fstat)->55, 6(lstat)->151, 7(poll)->300
-    //
-    // Therefore, if the kernel receives 0-7, it is ALWAYS a raw Linux
-    // syscall (from C++ code or libstdc++ bypassing musl's remap).
-    // It is NEVER a musl-remapped output. Safe to route through Linux
-    // translation unconditionally.
-    //
-    // This fixes kwin crash: Qt/libstdc++ code issues raw Linux open(2)
-    // and close(3) which collide with VeridianOS IpcCall(2)/IpcReply(3).
-    if syscall_num <= 7 {
-        if let Some(syscall) = linux_compat::translate_linux_syscall(syscall_num) {
-            return handle_syscall(syscall, arg1, arg2, arg3, arg4, arg5);
-        }
-    }
-
-    // ---------------------------------------------------------------
-    // Phase 3: Handle specific known collisions in the 8-63 range
-    // ---------------------------------------------------------------
-    // We CANNOT use blanket Linux-first dispatch for these ranges because
-    // musl's remap OUTPUTS fall within them. For example:
-    //   - musl remaps Linux mmap(9) -> VeridianOS 20 (MemoryMap)
-    //   - Linux 20 = writev
-    //   - Linux-first would wrongly dispatch VeridianOS 20 as writev
-    //
-    // However, some specific Linux syscalls DO bypass musl's remap
-    // (via libstdc++ or Qt inline asm). Handle these individually:
-
-    // Linux connect(42) collides with VeridianOS ThreadJoin(42).
-    // Heuristic: connect(fd, sockaddr_ptr, addrlen) always has arg2 as
-    // a user-space pointer (large address > 4096). ThreadJoin(tid, retval_ptr)
-    // typically has a small tid and retval_ptr is 0 or a stack pointer.
-    // When arg2 is a valid user-space pointer AND we just created a socket
-    // (arg1 is a plausible fd), treat as connect.
-    if syscall_num == 42 && arg2 > 4096 && arg3 > 0 && arg3 < 256 {
-        // arg3 is addrlen (small value like 110 for sockaddr_un)
-        return handle_syscall(Syscall::SocketConnect, arg1, arg2, arg3, arg4, arg5);
-    }
-
-    // Linux getpeername(52) collides with VeridianOS NetGetPeerName(253).
-    // musl maps it to 253. Raw Linux 52 would collide with FileRead(52).
-    // But musl also maps Linux read(0)->52. So 52 is always FileRead.
-    // (No fix needed -- covered by musl remap)
-
-    // Linux setsockopt(54) collides with VeridianOS FileSeek(54).
-    // musl maps it to 254. So 54 is always FileSeek. (No fix needed)
-
-    // Syscall 73 is both fsync and flock: native FsFsync is 73, the musl
-    // patch remaps Linux fsync (74) to it, and musl passes Linux flock (73)
-    // through unchanged. Both C libraries make the second argument decide:
-    // musl zero-pads unused syscall arguments, the native libc's fsync
-    // passes an explicit 0, and a flock operation is never 0
-    // (LOCK_SH/EX/UN = 1/2/8). Every process uses the native numbering,
-    // because musl remaps before the syscall instruction, so the
-    // `linux_abi` flag cannot tell them apart (N-120).
-    if syscall_num == 73 && arg2 != 0 {
-        return sys_flock(arg1, arg2);
-    }
-    // musl binaries built before the remap fix send prctl as 157, which is
-    // FileUnlink here. A prctl option is a small integer and a path pointer
-    // never is (nothing is mapped below 0x1000), so the first argument
-    // tells them apart (N-103).
-    if syscall_num == 157 && arg1 < crate::mm::user_layout::USER_SPACE_START {
-        return linux_compat::sys_prctl(arg1, arg2);
-    }
-
-    // ---------------------------------------------------------------
-    // Phase 5: Standard VeridianOS dispatch with Linux fallback
-    // ---------------------------------------------------------------
-    // At this point, the number is either:
-    // - A correctly musl-remapped VeridianOS number (most common case)
-    // - A VeridianOS-only number (no Linux collision)
-    // - An unmapped Linux number > 63 that fell through Phase 4
-    match Syscall::try_from(syscall_num) {
-        Ok(syscall) => handle_syscall(syscall, arg1, arg2, arg3, arg4, arg5),
-        Err(_) => {
-            // Not a valid VeridianOS number -- try Linux translation
-            if linux_compat::is_faccessat(syscall_num) {
-                sys_faccessat(arg1, arg2, arg3, arg4)
-            } else if let Some(syscall) = linux_compat::translate_linux_syscall(syscall_num) {
-                handle_syscall(syscall, arg1, arg2, arg3, arg4, arg5)
-            } else if let Some(result) = linux_compat::handle_linux_stub(syscall_num, arg1, arg2) {
-                result
-            } else {
-                // SAFETY: Writing to COM1 I/O port for diagnostic output.
-                #[cfg(target_arch = "x86_64")]
-                unsafe {
-                    crate::arch::x86_64::idt::raw_serial_str(b"SC_UNK#");
-                    crate::arch::x86_64::idt::raw_serial_hex(syscall_num as u64);
-                    crate::arch::x86_64::idt::raw_serial_str(b"\n");
-                }
-                Err(SyscallError::InvalidSyscall)
-            }
-        }
-    }
-}
-
 /// Handle individual system calls
 fn handle_syscall(
     syscall: Syscall,
@@ -1282,57 +661,57 @@ fn handle_syscall(
         Syscall::IpcMapMemory => sys_ipc_map_memory(arg1, arg2, arg3),
 
         // Process management
-        Syscall::ProcessYield => sys_yield(),
-        Syscall::ProcessExit => sys_exit(arg1),
-        Syscall::ProcessFork => sys_fork(),
-        Syscall::ProcessExec => sys_exec(arg1, arg2, arg3),
-        Syscall::ProcessWait => sys_wait(arg1 as isize, arg2, arg3),
-        Syscall::ProcessGetPid => sys_getpid(),
-        Syscall::ProcessGetPPid => sys_getppid(),
+        Syscall::SchedYield => sys_yield(),
+        Syscall::ExitGroup => sys_exit(arg1),
+        Syscall::Fork => sys_fork(),
+        Syscall::Execve => sys_exec(arg1, arg2, arg3),
+        Syscall::Wait4 => sys_wait(arg1 as isize, arg2, arg3),
+        Syscall::Getpid => sys_getpid(),
+        Syscall::Getppid => sys_getppid(),
         Syscall::ProcessSetPriority => sys_setpriority(arg1, arg2, arg3),
         Syscall::ProcessGetPriority => sys_getpriority(arg1, arg2),
 
         // Thread management
         Syscall::ThreadCreate => sys_thread_create(arg1, arg2, arg3, arg4),
-        Syscall::ThreadExit => sys_thread_exit(arg1),
+        Syscall::Exit => sys_thread_exit(arg1),
         Syscall::ThreadJoin => sys_thread_join(arg1, arg2),
-        Syscall::ThreadGetTid => sys_gettid(),
+        Syscall::Gettid => sys_gettid(),
         Syscall::ThreadSetAffinity => sys_thread_setaffinity(arg1, arg2, arg3),
         Syscall::ThreadGetAffinity => sys_thread_getaffinity(arg1, arg2, arg3),
-        Syscall::ThreadClone => thread_clone::sys_thread_clone(arg1, arg2, arg3, arg4, arg5),
+        Syscall::Clone => thread_clone::sys_thread_clone(arg1, arg2, arg3, arg4, arg5),
 
         // Filesystem operations
-        Syscall::FileOpen => sys_open(arg1, arg2, arg3),
-        Syscall::FileClose => sys_close(arg1),
-        Syscall::FileRead => sys_read(arg1, arg2, arg3),
-        Syscall::FileWrite => sys_write(arg1, arg2, arg3),
-        Syscall::FileSeek => sys_seek(arg1, arg2 as isize, arg3),
-        Syscall::FileStat => sys_stat(arg1, arg2),
-        Syscall::FileTruncate => sys_truncate(arg1, arg2),
-        Syscall::FileDup => sys_dup(arg1),
-        Syscall::FileDup2 => sys_dup2(arg1, arg2),
-        Syscall::FilePipe => sys_pipe(arg1),
+        Syscall::Open => sys_open(arg1, arg2, arg3),
+        Syscall::Close => sys_close(arg1),
+        Syscall::Read => sys_read(arg1, arg2, arg3),
+        Syscall::Write => sys_write(arg1, arg2, arg3),
+        Syscall::Lseek => sys_seek(arg1, arg2 as isize, arg3),
+        Syscall::Fstat => sys_stat(arg1, arg2),
+        Syscall::Ftruncate => sys_truncate(arg1, arg2),
+        Syscall::Dup => sys_dup(arg1),
+        Syscall::Dup2 => sys_dup2(arg1, arg2),
+        Syscall::Pipe => sys_pipe(arg1),
 
         // Memory management
-        Syscall::MemoryMap => sys_mmap(arg1, arg2, arg3, arg4, arg5),
-        Syscall::MemoryUnmap => sys_munmap(arg1, arg2),
-        Syscall::MemoryProtect => sys_mprotect(arg1, arg2, arg3),
-        Syscall::MemoryBrk => sys_brk(arg1),
+        Syscall::Mmap => sys_mmap(arg1, arg2, arg3, arg4, arg5),
+        Syscall::Munmap => sys_munmap(arg1, arg2),
+        Syscall::Mprotect => sys_mprotect(arg1, arg2, arg3),
+        Syscall::Brk => sys_brk(arg1),
 
         // Directory operations
-        Syscall::DirMkdir => sys_mkdir(arg1, arg2),
-        Syscall::DirRmdir => sys_rmdir(arg1),
+        Syscall::Mkdir => sys_mkdir(arg1, arg2),
+        Syscall::Rmdir => sys_rmdir(arg1),
         Syscall::DirOpendir => sys_opendir(arg1),
         Syscall::DirReaddir => sys_readdir(arg1, arg2, arg3),
         Syscall::DirClosedir => sys_closedir(arg1),
-        Syscall::FilePipe2 => sys_pipe2(arg1, arg2),
-        Syscall::FileDup3 => sys_dup3(arg1, arg2, arg3),
+        Syscall::Pipe2 => sys_pipe2(arg1, arg2),
+        Syscall::Dup3 => sys_dup3(arg1, arg2, arg3),
 
         // Filesystem management
         Syscall::FsMount => sys_mount(arg1, arg2, arg3, arg4),
         Syscall::FsUnmount => sys_unmount(arg1),
-        Syscall::FsSync => sys_sync(),
-        Syscall::FsFsync => sys_fsync(arg1),
+        Syscall::Sync => sys_sync(),
+        Syscall::Fsync | Syscall::Fdatasync => sys_fsync(arg1),
 
         // Kernel information
         Syscall::KernelGetInfo => sys_get_kernel_info(arg1),
@@ -1345,10 +724,10 @@ fn handle_syscall(
         Syscall::PkgUpdate => sys_pkg_update(arg1),
 
         // Extended process operations
-        Syscall::ProcessGetcwd => sys_getcwd(arg1, arg2),
-        Syscall::ProcessChdir => sys_chdir(arg1),
-        Syscall::FileIoctl => sys_ioctl(arg1, arg2, arg3),
-        Syscall::ProcessKill => sys_kill(arg1, arg2),
+        Syscall::Getcwd => sys_getcwd(arg1, arg2),
+        Syscall::Chdir => sys_chdir(arg1),
+        Syscall::Ioctl => sys_ioctl(arg1, arg2, arg3),
+        Syscall::Kill => sys_kill(arg1, arg2),
 
         // Time management
         Syscall::TimeGetUptime => sys_time_get_uptime(),
@@ -1356,10 +735,10 @@ fn handle_syscall(
         Syscall::TimeCancelTimer => sys_time_cancel_timer(arg1),
 
         // Signal management
-        Syscall::SigAction => sys_sigaction(arg1, arg2, arg3),
-        Syscall::SigProcmask => sys_sigprocmask(arg1, arg2, arg3),
-        Syscall::SigSuspend => sys_sigsuspend(arg1),
-        Syscall::SigReturn => sys_sigreturn(arg1),
+        Syscall::RtSigaction => sys_sigaction(arg1, arg2, arg3),
+        Syscall::RtSigprocmask => sys_sigprocmask(arg1, arg2, arg3),
+        Syscall::RtSigsuspend => sys_sigsuspend(arg1),
+        Syscall::RtSigreturn => sys_sigreturn(arg1),
 
         // POSIX time syscalls
         Syscall::ClockGettime => sys_clock_gettime(arg1, arg2),
@@ -1390,40 +769,40 @@ fn handle_syscall(
         Syscall::Ptrace => sys_ptrace(arg1, arg2, arg3, arg4),
 
         // Extended filesystem operations
-        Syscall::FileStatPath => sys_stat_path(arg1, arg2),
-        Syscall::FileLstat => sys_lstat(arg1, arg2),
-        Syscall::FileReadlink => sys_readlink(arg1, arg2, arg3),
-        Syscall::FileAccess => sys_access(arg1, arg2),
-        Syscall::FileRename => sys_rename(arg1, arg2),
-        Syscall::FileLink => sys_link(arg1, arg2),
-        Syscall::FileSymlink => sys_symlink(arg1, arg2),
-        Syscall::FileUnlink => sys_unlink(arg1),
-        Syscall::FileFcntl => sys_fcntl(arg1, arg2, arg3),
+        Syscall::Stat => sys_stat_path(arg1, arg2),
+        Syscall::Lstat => sys_lstat(arg1, arg2),
+        Syscall::Readlink => sys_readlink(arg1, arg2, arg3),
+        Syscall::Access => sys_access(arg1, arg2),
+        Syscall::Rename => sys_rename(arg1, arg2),
+        Syscall::Link => sys_link(arg1, arg2),
+        Syscall::Symlink => sys_symlink(arg1, arg2),
+        Syscall::Unlink => sys_unlink(arg1),
+        Syscall::Fcntl => sys_fcntl(arg1, arg2, arg3),
 
         // Self-hosting filesystem ops
-        Syscall::FileChmod => sys_chmod(arg1, arg2),
-        Syscall::FileFchmod => sys_fchmod(arg1, arg2),
-        Syscall::ProcessUmask => sys_umask(arg1),
-        Syscall::FileTruncatePath => sys_truncate_path(arg1, arg2),
-        Syscall::FilePoll => sys_poll(arg1, arg2, arg3),
-        Syscall::FileOpenat => sys_openat(arg1, arg2, arg3, arg4),
-        Syscall::FileFstatat => sys_fstatat(arg1, arg2, arg3, arg4),
-        Syscall::FileUnlinkat => sys_unlinkat(arg1, arg2, arg3),
-        Syscall::FileMkdirat => sys_mkdirat(arg1, arg2, arg3),
-        Syscall::FileRenameat => sys_renameat(arg1, arg2, arg3, arg4),
-        Syscall::FilePread => sys_pread(arg1, arg2, arg3, arg4),
-        Syscall::FilePwrite => sys_pwrite(arg1, arg2, arg3, arg4),
-        Syscall::FileChown => sys_chown(arg1, arg2, arg3),
-        Syscall::FileFchown => sys_fchown(arg1, arg2, arg3),
-        Syscall::FileMknod => sys_mknod(arg1, arg2, arg3),
-        Syscall::FileSelect => sys_select(arg1, arg2, arg3, arg4, arg5),
+        Syscall::Chmod => sys_chmod(arg1, arg2),
+        Syscall::Fchmod => sys_fchmod(arg1, arg2),
+        Syscall::Umask => sys_umask(arg1),
+        Syscall::Truncate => sys_truncate_path(arg1, arg2),
+        Syscall::Poll => sys_poll(arg1, arg2, arg3),
+        Syscall::Openat => sys_openat(arg1, arg2, arg3, arg4),
+        Syscall::Newfstatat => sys_fstatat(arg1, arg2, arg3, arg4),
+        Syscall::Unlinkat => sys_unlinkat(arg1, arg2, arg3),
+        Syscall::Mkdirat => sys_mkdirat(arg1, arg2, arg3),
+        Syscall::Renameat => sys_renameat(arg1, arg2, arg3, arg4),
+        Syscall::Pread64 => sys_pread(arg1, arg2, arg3, arg4),
+        Syscall::Pwrite64 => sys_pwrite(arg1, arg2, arg3, arg4),
+        Syscall::Chown => sys_chown(arg1, arg2, arg3),
+        Syscall::Fchown => sys_fchown(arg1, arg2, arg3),
+        Syscall::Mknod => sys_mknod(arg1, arg2, arg3),
+        Syscall::Select => sys_select(arg1, arg2, arg3, arg4, arg5),
         // Futex entrypoint: dispatch all futex ops (wait/wake/requeue/bitset/wake_op)
         Syscall::FutexWait => {
             futex::sys_futex_dispatch(arg1, arg2, arg3, arg4, arg5).map(|v| v as usize)
         }
         Syscall::FutexWake => futex::sys_futex_wake(arg1, arg2, arg3).map(|v| v as usize),
         Syscall::ArchPrctl => arch_prctl::sys_arch_prctl(arg1, arg2).map(|v| v as usize),
-        Syscall::ProcessUname => sys_uname(arg1),
+        Syscall::Uname => sys_uname(arg1),
         Syscall::ProcessGetenv => sys_getenv(arg1, arg2, arg3, arg4),
 
         // POSIX shared memory
@@ -1432,19 +811,18 @@ fn handle_syscall(
         Syscall::ShmTruncate => sys_shm_truncate(arg1, arg2, arg3),
 
         // Socket operations
-        Syscall::SocketCreate => sys_socket_create(arg1, arg2),
-        Syscall::SocketBind => sys_socket_bind(arg1, arg2, arg3),
-        Syscall::SocketListen => sys_socket_listen(arg1, arg2),
-        Syscall::SocketConnect => sys_socket_connect(arg1, arg2, arg3),
-        // Linux ABI: accept4(fd, addr, addrlen_ptr, flags)
-        // accept (Linux 43) also maps here via remap patch.
-        Syscall::SocketAccept => sys_socket_accept(arg1, arg2, arg3),
+        Syscall::Socket => sys_socket_create(arg1, arg2, arg3),
+        Syscall::Bind => sys_socket_bind(arg1, arg2, arg3),
+        Syscall::Listen => sys_socket_listen(arg1, arg2),
+        Syscall::Connect => sys_socket_connect(arg1, arg2, arg3),
+        Syscall::Accept => sys_socket_accept(arg1, arg2, arg3, 0),
+        Syscall::Accept4 => sys_socket_accept(arg1, arg2, arg3, arg4),
         Syscall::SocketSend => sys_socket_send(arg1, arg2, arg3),
         Syscall::SocketRecv => sys_socket_recv(arg1, arg2, arg3),
         Syscall::SocketClose => sys_socket_close(arg1),
         // Linux ABI: socketpair(domain, type, protocol, sv[2])
         // arg1=domain, arg2=type, arg3=protocol, arg4=sv pointer
-        Syscall::SocketPair => sys_socket_pair(arg1, arg2, arg3, arg4),
+        Syscall::Socketpair => sys_socket_pair(arg1, arg2, arg3, arg4),
 
         // Graphics / framebuffer (Phase 6)
         Syscall::FbGetInfo => sys_fb_get_info(arg1),
@@ -1464,19 +842,19 @@ fn handle_syscall(
         Syscall::WlGetEvents => sys_wl_get_events(arg1, arg2, arg3),
 
         // Network extensions (Phase 6)
-        Syscall::NetSendTo => sys_net_sendto(arg1, arg2, arg3, arg4, arg5),
-        Syscall::NetRecvFrom => sys_net_recvfrom(arg1, arg2, arg3, arg4, arg5),
-        Syscall::NetGetSockName => sys_net_getsockname(arg1, arg2, arg3),
-        Syscall::NetGetPeerName => sys_net_getpeername(arg1, arg2, arg3),
-        Syscall::NetSetSockOpt => sys_net_setsockopt(arg1, arg2, arg3, arg4, arg5),
-        Syscall::NetGetSockOpt => sys_net_getsockopt(arg1, arg2, arg3, arg4, arg5),
+        Syscall::Sendto => sys_net_sendto(arg1, arg2, arg3, arg4, arg5),
+        Syscall::Recvfrom => sys_net_recvfrom(arg1, arg2, arg3, arg4, arg5),
+        Syscall::Getsockname => sys_net_getsockname(arg1, arg2, arg3),
+        Syscall::Getpeername => sys_net_getpeername(arg1, arg2, arg3),
+        Syscall::Setsockopt => sys_net_setsockopt(arg1, arg2, arg3, arg4, arg5),
+        Syscall::Getsockopt => sys_net_getsockopt(arg1, arg2, arg3, arg4, arg5),
 
         // Resource limits (Phase 6.5)
-        Syscall::GetRlimit => memory::sys_getrlimit(arg1, arg2),
-        Syscall::SetRlimit => memory::sys_setrlimit(arg1, arg2),
+        Syscall::Getrlimit => memory::sys_getrlimit(arg1, arg2),
+        Syscall::Setrlimit => memory::sys_setrlimit(arg1, arg2),
 
         // epoll I/O multiplexing (Phase 6.5)
-        Syscall::EpollCreate => {
+        Syscall::EpollCreate1 => {
             let _flags = arg1; // epoll_create1 flags (EPOLL_CLOEXEC)
             let cloexec = (arg1 & 0x80000) != 0; // EPOLL_CLOEXEC = O_CLOEXEC
             let pid = crate::process::current_process()
@@ -1516,7 +894,7 @@ fn handle_syscall(
                 .map(|_| 0)
                 .map_err(|_| SyscallError::InvalidArgument)
         }
-        Syscall::EpollWait => {
+        Syscall::EpollWait | Syscall::EpollPwait => {
             let epoll_fd = arg1;
             let events_ptr = arg2;
             let max_events = arg3;
@@ -1542,10 +920,6 @@ fn handle_syscall(
         }
         // Process groups / sessions (Phase 6.5) -- delegate to existing
         // implementations which also back the older syscall numbers 176-180.
-        Syscall::SetPgid => sys_setpgid(arg1, arg2),
-        Syscall::GetPgid => sys_getpgid(arg1),
-        Syscall::SetSid => sys_setsid(),
-        Syscall::GetSid => sys_getsid(arg1),
         Syscall::TcSetPgrp => sys_tcsetpgrp(arg1, arg2),
         Syscall::TcGetPgrp => sys_tcgetpgrp(arg1),
         // PTY syscalls (Phase 6.5)
@@ -1553,18 +927,7 @@ fn handle_syscall(
         Syscall::GrantPty => pty::sys_grantpt(arg1),
         Syscall::UnlockPty => pty::sys_unlockpt(arg1),
         Syscall::PtsName => pty::sys_ptsname(arg1, arg2, arg3),
-        Syscall::Link => sys_link(arg1, arg2),
-        Syscall::Symlink => sys_symlink(arg1, arg2),
-        Syscall::Readlink => sys_readlink(arg1, arg2, arg3),
-        Syscall::Lstat => sys_lstat(arg1, arg2),
-        Syscall::Fchmod => sys_fchmod(arg1, arg2),
-        Syscall::Fchown => sys_fchown(arg1, arg2, arg3),
-        Syscall::Umask => sys_umask(arg1),
-        Syscall::Access => sys_access(arg1, arg2),
         // Duplicate POSIX aliases -- delegate to the primary implementations.
-        Syscall::Poll => filesystem::sys_poll(arg1, arg2, arg3),
-        Syscall::Fcntl => filesystem::sys_fcntl(arg1, arg2, arg3),
-        Syscall::Clone => thread_clone::sys_thread_clone(arg1, arg2, arg3, arg4, arg5),
         Syscall::Futex => {
             // Linux ABI: futex(uaddr, op, val, timeout/val2, uaddr2, val3)
             // arg1=uaddr, arg2=op, arg3=val, arg4=timeout/val2, arg5=uaddr2
@@ -1712,7 +1075,7 @@ fn handle_syscall(
         Syscall::Getrandom => sys_getrandom(arg1, arg2, arg3),
 
         // eventfd syscall -- creates VfsNode-backed fd for musl compat
-        Syscall::EventfdCreate => {
+        Syscall::Eventfd2 => {
             let initval = arg1 as u32;
             let flags = arg2 as u32;
             let cloexec = (flags & crate::fs::eventfd::EFD_CLOEXEC) != 0;
@@ -1797,7 +1160,7 @@ fn handle_syscall(
         }
 
         // signalfd syscall -- creates VfsNode-backed fd
-        Syscall::SignalfdCreate => {
+        Syscall::Signalfd4 => {
             let fd_arg = arg1 as i32;
             let mask = arg2 as u64;
             let flags = arg3 as u32;
@@ -1819,8 +1182,8 @@ fn handle_syscall(
         }
 
         // sendmsg/recvmsg -- delegate to unix socket module for SCM_RIGHTS
-        Syscall::SendMsg => sys_sendmsg(arg1, arg2, arg3),
-        Syscall::RecvMsg => sys_recvmsg(arg1, arg2, arg3),
+        Syscall::Sendmsg => sys_sendmsg(arg1, arg2, arg3),
+        Syscall::Recvmsg => sys_recvmsg(arg1, arg2, arg3),
 
         // musl libc compatibility syscalls
         Syscall::Getdents64 => sys_getdents64(arg1, arg2, arg3),
@@ -1848,7 +1211,27 @@ fn handle_syscall(
         Syscall::Tkill => process::sys_tkill(arg1, arg2),
         Syscall::Tgkill => process::sys_tgkill(arg1, arg2, arg3),
         Syscall::Waitid => process::sys_waitid(arg1, arg2, arg3, arg4),
-        Syscall::SigPending => signal::sys_sigpending(arg1, arg2),
+        Syscall::RtSigpending => signal::sys_sigpending(arg1, arg2),
+        Syscall::Ppoll => linux_compat::handle_ppoll(arg1, arg2, arg3),
+        Syscall::Faccessat | Syscall::Faccessat2 => sys_faccessat(arg1, arg2, arg3, arg4),
+        // Not implemented yet; callers fall back (musl: statx -> fstatat,
+        // clone3 -> clone, mremap ENOMEM -> mmap + copy).
+        Syscall::Mremap => Err(SyscallError::OutOfMemory),
+        Syscall::Getrusage
+        | Syscall::Sysinfo
+        | Syscall::Rseq
+        | Syscall::Statx
+        | Syscall::Clone3
+        | Syscall::Fallocate
+        | Syscall::Statfs
+        | Syscall::Fstatfs => Err(SyscallError::NotImplemented),
+        Syscall::Sigaltstack => Ok(0),
+        Syscall::SchedSetscheduler
+        | Syscall::SchedGetscheduler
+        | Syscall::SchedGetPriorityMax
+        | Syscall::SchedGetPriorityMin
+        | Syscall::SchedSetaffinity
+        | Syscall::SchedGetaffinity => Ok(0),
 
         _ => Err(SyscallError::InvalidSyscall),
     }
@@ -3106,299 +2489,6 @@ fn sys_ipc_map_memory(capability: usize, addr_hint: usize, flags: usize) -> Sysc
     Ok(vaddr.as_usize())
 }
 
-impl TryFrom<usize> for Syscall {
-    type Error = ();
-
-    fn try_from(value: usize) -> Result<Self, Self::Error> {
-        match value {
-            // IPC system calls
-            0 => Ok(Syscall::IpcSend),
-            1 => Ok(Syscall::IpcReceive),
-            2 => Ok(Syscall::IpcCall),
-            3 => Ok(Syscall::IpcReply),
-            4 => Ok(Syscall::IpcCreateEndpoint),
-            5 => Ok(Syscall::IpcBindEndpoint),
-            6 => Ok(Syscall::IpcShareMemory),
-            7 => Ok(Syscall::IpcMapMemory),
-
-            // Process management
-            10 => Ok(Syscall::ProcessYield),
-            11 => Ok(Syscall::ProcessExit),
-            12 => Ok(Syscall::ProcessFork),
-            13 => Ok(Syscall::ProcessExec),
-            14 => Ok(Syscall::ProcessWait),
-            15 => Ok(Syscall::ProcessGetPid),
-            16 => Ok(Syscall::ProcessGetPPid),
-            17 => Ok(Syscall::ProcessSetPriority),
-            18 => Ok(Syscall::ProcessGetPriority),
-
-            // Memory management
-            20 => Ok(Syscall::MemoryMap),
-            21 => Ok(Syscall::MemoryUnmap),
-            22 => Ok(Syscall::MemoryProtect),
-            23 => Ok(Syscall::MemoryBrk),
-
-            // Capability management
-            30 => Ok(Syscall::CapabilityGrant),
-            31 => Ok(Syscall::CapabilityRevoke),
-
-            // Thread management
-            40 => Ok(Syscall::ThreadCreate),
-            41 => Ok(Syscall::ThreadExit),
-            42 => Ok(Syscall::ThreadJoin),
-            43 => Ok(Syscall::ThreadGetTid),
-            44 => Ok(Syscall::ThreadSetAffinity),
-            45 => Ok(Syscall::ThreadGetAffinity),
-            46 => Ok(Syscall::ThreadClone),
-
-            // Filesystem operations
-            50 => Ok(Syscall::FileOpen),
-            51 => Ok(Syscall::FileClose),
-            52 => Ok(Syscall::FileRead),
-            53 => Ok(Syscall::FileWrite),
-            54 => Ok(Syscall::FileSeek),
-            55 => Ok(Syscall::FileStat),
-            56 => Ok(Syscall::FileTruncate),
-            57 => Ok(Syscall::FileDup),
-            58 => Ok(Syscall::FileDup2),
-            59 => Ok(Syscall::FilePipe),
-
-            // Directory operations
-            60 => Ok(Syscall::DirMkdir),
-            61 => Ok(Syscall::DirRmdir),
-            62 => Ok(Syscall::DirOpendir),
-            63 => Ok(Syscall::DirReaddir),
-            64 => Ok(Syscall::DirClosedir),
-            65 => Ok(Syscall::FilePipe2),
-            66 => Ok(Syscall::FileDup3),
-
-            // Filesystem management
-            70 => Ok(Syscall::FsMount),
-            71 => Ok(Syscall::FsUnmount),
-            72 => Ok(Syscall::FsSync),
-            73 => Ok(Syscall::FsFsync),
-
-            // Kernel information
-            80 => Ok(Syscall::KernelGetInfo),
-
-            // Package management
-            90 => Ok(Syscall::PkgInstall),
-            91 => Ok(Syscall::PkgRemove),
-            92 => Ok(Syscall::PkgQuery),
-            93 => Ok(Syscall::PkgList),
-            94 => Ok(Syscall::PkgUpdate),
-
-            // Time management
-            100 => Ok(Syscall::TimeGetUptime),
-            101 => Ok(Syscall::TimeCreateTimer),
-            102 => Ok(Syscall::TimeCancelTimer),
-
-            // Extended process operations
-            110 => Ok(Syscall::ProcessGetcwd),
-            111 => Ok(Syscall::ProcessChdir),
-            112 => Ok(Syscall::FileIoctl),
-            113 => Ok(Syscall::ProcessKill),
-
-            // Signal management
-            120 => Ok(Syscall::SigAction),
-            121 => Ok(Syscall::SigProcmask),
-            122 => Ok(Syscall::SigSuspend),
-            123 => Ok(Syscall::SigReturn),
-
-            // Debug / tracing
-            140 => Ok(Syscall::Ptrace),
-
-            // POSIX time syscalls
-            160 => Ok(Syscall::ClockGettime),
-            161 => Ok(Syscall::ClockGetres),
-            162 => Ok(Syscall::Nanosleep),
-            163 => Ok(Syscall::Gettimeofday),
-
-            // Identity syscalls
-            170 => Ok(Syscall::Getuid),
-            171 => Ok(Syscall::Geteuid),
-            172 => Ok(Syscall::Getgid),
-            173 => Ok(Syscall::Getegid),
-            174 => Ok(Syscall::Setuid),
-            175 => Ok(Syscall::Setgid),
-
-            // Process group / session syscalls
-            176 => Ok(Syscall::Setpgid),
-            177 => Ok(Syscall::Getpgid),
-            178 => Ok(Syscall::Getpgrp),
-            179 => Ok(Syscall::Setsid),
-            180 => Ok(Syscall::Getsid),
-
-            // Scatter/gather I/O
-            183 => Ok(Syscall::Readv),
-            184 => Ok(Syscall::Writev),
-
-            // Extended filesystem operations
-            150 => Ok(Syscall::FileStatPath),
-            151 => Ok(Syscall::FileLstat),
-            152 => Ok(Syscall::FileReadlink),
-            153 => Ok(Syscall::FileAccess),
-            154 => Ok(Syscall::FileRename),
-            155 => Ok(Syscall::FileLink),
-            156 => Ok(Syscall::FileSymlink),
-            157 => Ok(Syscall::FileUnlink),
-            158 => Ok(Syscall::FileFcntl),
-
-            // Self-hosting filesystem ops
-            185 => Ok(Syscall::FileChmod),
-            186 => Ok(Syscall::FileFchmod),
-            187 => Ok(Syscall::ProcessUmask),
-            188 => Ok(Syscall::FileTruncatePath),
-            189 => Ok(Syscall::FilePoll),
-            190 => Ok(Syscall::FileOpenat),
-            191 => Ok(Syscall::FileFstatat),
-            192 => Ok(Syscall::FileUnlinkat),
-            193 => Ok(Syscall::FileMkdirat),
-            194 => Ok(Syscall::FileRenameat),
-            195 => Ok(Syscall::FilePread),
-            196 => Ok(Syscall::FilePwrite),
-            197 => Ok(Syscall::FileChown),
-            198 => Ok(Syscall::FileFchown),
-            199 => Ok(Syscall::FileMknod),
-            200 => Ok(Syscall::FileSelect),
-            201 => Ok(Syscall::FutexWait),
-            202 => Ok(Syscall::FutexWake),
-            203 => Ok(Syscall::ArchPrctl),
-            204 => Ok(Syscall::ProcessUname),
-            205 => Ok(Syscall::ProcessGetenv),
-
-            // POSIX shared memory
-            210 => Ok(Syscall::ShmOpen),
-            211 => Ok(Syscall::ShmUnlink),
-            212 => Ok(Syscall::ShmTruncate),
-
-            // Socket operations
-            220 => Ok(Syscall::SocketCreate),
-            221 => Ok(Syscall::SocketBind),
-            222 => Ok(Syscall::SocketListen),
-            223 => Ok(Syscall::SocketConnect),
-            224 => Ok(Syscall::SocketAccept),
-            225 => Ok(Syscall::SocketSend),
-            226 => Ok(Syscall::SocketRecv),
-            227 => Ok(Syscall::SocketClose),
-            228 => Ok(Syscall::SocketPair),
-
-            // Graphics / framebuffer (Phase 6)
-            230 => Ok(Syscall::FbGetInfo),
-            231 => Ok(Syscall::FbMap),
-            232 => Ok(Syscall::InputPoll),
-            233 => Ok(Syscall::InputRead),
-            234 => Ok(Syscall::FbSwap),
-
-            // Wayland compositor (Phase 6)
-            240 => Ok(Syscall::WlConnect),
-            241 => Ok(Syscall::WlDisconnect),
-            242 => Ok(Syscall::WlSendMessage),
-            243 => Ok(Syscall::WlRecvMessage),
-            244 => Ok(Syscall::WlCreateShmPool),
-            245 => Ok(Syscall::WlCreateSurface),
-            246 => Ok(Syscall::WlCommitSurface),
-            247 => Ok(Syscall::WlGetEvents),
-
-            // Network extensions (Phase 6)
-            250 => Ok(Syscall::NetSendTo),
-            251 => Ok(Syscall::NetRecvFrom),
-            252 => Ok(Syscall::NetGetSockName),
-            253 => Ok(Syscall::NetGetPeerName),
-            254 => Ok(Syscall::NetSetSockOpt),
-            255 => Ok(Syscall::NetGetSockOpt),
-
-            // Resource limits (Phase 6.5)
-            260 => Ok(Syscall::GetRlimit),
-            261 => Ok(Syscall::SetRlimit),
-
-            // epoll I/O multiplexing (Phase 6.5)
-            262 => Ok(Syscall::EpollCreate),
-            263 => Ok(Syscall::EpollCtl),
-            264 => Ok(Syscall::EpollWait),
-
-            // Process groups / sessions (Phase 6.5)
-            270 => Ok(Syscall::SetPgid),
-            271 => Ok(Syscall::GetPgid),
-            272 => Ok(Syscall::SetSid),
-            273 => Ok(Syscall::GetSid),
-            274 => Ok(Syscall::TcSetPgrp),
-            275 => Ok(Syscall::TcGetPgrp),
-
-            // PTY (Phase 6.5)
-            280 => Ok(Syscall::OpenPty),
-            281 => Ok(Syscall::GrantPty),
-            282 => Ok(Syscall::UnlockPty),
-            283 => Ok(Syscall::PtsName),
-
-            // Filesystem extensions (Phase 6.5)
-            290 => Ok(Syscall::Link),
-            291 => Ok(Syscall::Symlink),
-            292 => Ok(Syscall::Readlink),
-            293 => Ok(Syscall::Lstat),
-            294 => Ok(Syscall::Fchmod),
-            295 => Ok(Syscall::Fchown),
-            296 => Ok(Syscall::Umask),
-            297 => Ok(Syscall::Access),
-
-            // Poll/fcntl (Phase 6.5)
-            300 => Ok(Syscall::Poll),
-            301 => Ok(Syscall::Fcntl),
-
-            // Threading (Phase 6.5)
-            310 => Ok(Syscall::Clone),
-            311 => Ok(Syscall::Futex),
-
-            // Audio (Phase 7)
-            320 => Ok(Syscall::AudioOpen),
-            321 => Ok(Syscall::AudioClose),
-            322 => Ok(Syscall::AudioWrite),
-            323 => Ok(Syscall::AudioSetVolume),
-            324 => Ok(Syscall::AudioGetInfo),
-            325 => Ok(Syscall::AudioStart),
-            326 => Ok(Syscall::AudioStop),
-            327 => Ok(Syscall::AudioPause),
-
-            // Event/timer notification fds (KDE/Wayland infrastructure)
-            330 => Ok(Syscall::Getrandom),
-            331 => Ok(Syscall::EventfdCreate),
-            332 => Ok(Syscall::EventfdRead),
-            333 => Ok(Syscall::EventfdWrite),
-            334 => Ok(Syscall::TimerfdCreate),
-            335 => Ok(Syscall::TimerfdSettime),
-            336 => Ok(Syscall::TimerfdGettime),
-            337 => Ok(Syscall::SignalfdCreate),
-            338 => Ok(Syscall::SendMsg),
-            339 => Ok(Syscall::RecvMsg),
-
-            // musl libc compatibility
-            340 => Ok(Syscall::Getdents64),
-            341 => Ok(Syscall::Prlimit64),
-            342 => Ok(Syscall::InotifyInit1),
-            343 => Ok(Syscall::InotifyAddWatch),
-            344 => Ok(Syscall::InotifyRmWatch),
-            345 => Ok(Syscall::Madvise),
-            346 => Ok(Syscall::Fchmodat),
-            347 => Ok(Syscall::Fchownat),
-            348 => Ok(Syscall::Linkat),
-            349 => Ok(Syscall::Symlinkat),
-            350 => Ok(Syscall::Readlinkat),
-            351 => Ok(Syscall::MemfdCreate),
-            352 => Ok(Syscall::SetTidAddress),
-            353 => Ok(Syscall::SetRobustList),
-            354 => Ok(Syscall::ClockNanosleep),
-            355 => Ok(Syscall::Prctl),
-            356 => Ok(Syscall::Flock),
-            357 => Ok(Syscall::Tkill),
-            358 => Ok(Syscall::Tgkill),
-            359 => Ok(Syscall::Waitid),
-            360 => Ok(Syscall::SigPending),
-
-            _ => Err(()),
-        }
-    }
-}
-
 // ---------------------------------------------------------------------------
 // POSIX Shared Memory syscall handlers
 // ---------------------------------------------------------------------------
@@ -3535,20 +2625,52 @@ pub(super) fn with_socket_fd<R>(
     Ok(f(node))
 }
 
+/// Linux SOCK_NONBLOCK and SOCK_CLOEXEC: OR-ed into socket()'s type, and
+/// accept4()'s flags.
+const SOCK_NONBLOCK: usize = 0x800;
+const SOCK_CLOEXEC: usize = 0x8_0000;
+
+/// Descriptor flags of a new socket.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+struct SocketFdFlags {
+    cloexec: bool,
+    nonblock: bool,
+}
+
+/// Split socket()'s type into the base type (low 4 bits) and the
+/// descriptor flags. Any other bit is EINVAL, as on Linux; they were
+/// masked off and lost, so a "non-blocking" socket blocked.
+fn socket_type_flags(raw: usize) -> Result<(usize, SocketFdFlags), SyscallError> {
+    let flags = raw & !0xF;
+    if flags & !(SOCK_NONBLOCK | SOCK_CLOEXEC) != 0 {
+        return Err(SyscallError::InvalidArgument);
+    }
+    Ok((
+        raw & 0xF,
+        SocketFdFlags {
+            cloexec: flags & SOCK_CLOEXEC != 0,
+            nonblock: flags & SOCK_NONBLOCK != 0,
+        },
+    ))
+}
+
 /// Install a new socket in the caller's file table and return its fd. If
 /// that fails the node is dropped, which closes the socket.
-fn install_socket(handle: SocketHandle) -> SyscallResult {
+fn install_socket(handle: SocketHandle, fd_flags: SocketFdFlags) -> SyscallResult {
     let process = crate::process::current_process().ok_or(SyscallError::InvalidState)?;
     let node: alloc::sync::Arc<dyn crate::fs::VfsNode> =
         alloc::sync::Arc::new(SocketNode::new(handle));
     let file = alloc::sync::Arc::new(crate::fs::file::File::new(
         node,
-        crate::fs::file::OpenFlags::read_write(),
+        crate::fs::file::OpenFlags {
+            nonblock: fd_flags.nonblock,
+            ..crate::fs::file::OpenFlags::read_write()
+        },
     ));
     let fd = process
         .file_table
         .lock()
-        .open(file)
+        .open_with_flags(file, fd_flags.cloexec)
         .map_err(|_| SyscallError::ResourceLimitExceeded);
     fd
 }
@@ -3577,13 +2699,11 @@ fn inet_addr_from_bytes(raw: &[u8; 6]) -> crate::net::SocketAddr {
     )
 }
 
-/// Convert user-space socket type to UnixSocketType.
+/// The Unix socket type for a base socket type (flags already removed by
+/// `socket_type_flags`).
 fn to_unix_socket_type(
-    sock_type: usize,
+    base_type: usize,
 ) -> Result<crate::net::unix_socket::UnixSocketType, SyscallError> {
-    // Mask off SOCK_CLOEXEC (0x80000) and SOCK_NONBLOCK (0x800) flags
-    // that musl passes alongside the base socket type.
-    let base_type = sock_type & 0xF;
     match base_type {
         SOCK_STREAM => Ok(crate::net::unix_socket::UnixSocketType::Stream),
         SOCK_DGRAM => Ok(crate::net::unix_socket::UnixSocketType::Datagram),
@@ -3591,47 +2711,85 @@ fn to_unix_socket_type(
     }
 }
 
-/// SYS_SOCKET_CREATE: Create a new socket and return an fd for it.
-///
-/// # Arguments
-/// - domain: AF_UNIX (1) or AF_INET (2)
-/// - sock_type: SOCK_STREAM (1) or SOCK_DGRAM (2)
-fn sys_socket_create(domain: usize, sock_type: usize) -> SyscallResult {
+/// IPPROTO_TCP and IPPROTO_UDP, the protocols AF_INET sockets accept
+/// besides 0 (the type's default).
+const IPPROTO_TCP: usize = 6;
+const IPPROTO_UDP: usize = 17;
+
+/// What socket(domain, type, protocol) creates, or Linux's error for it:
+/// EAFNOSUPPORT for an unknown domain, EINVAL for an unknown type,
+/// EPROTONOSUPPORT for a protocol the type does not use.
+#[derive(Debug, PartialEq, Eq)]
+enum SocketKind {
+    Unix(usize),
+    Inet(usize),
+}
+
+fn socket_kind(
+    domain: usize,
+    base_type: usize,
+    protocol: usize,
+) -> Result<SocketKind, SyscallError> {
+    match domain {
+        AF_UNIX => {
+            if base_type != SOCK_STREAM && base_type != SOCK_DGRAM {
+                return Err(SyscallError::InvalidArgument);
+            }
+            if protocol != 0 && protocol != AF_UNIX {
+                return Err(SyscallError::ProtocolNotSupported);
+            }
+            Ok(SocketKind::Unix(base_type))
+        }
+        AF_INET => {
+            let default = match base_type {
+                SOCK_STREAM => IPPROTO_TCP,
+                SOCK_DGRAM => IPPROTO_UDP,
+                _ => return Err(SyscallError::InvalidArgument),
+            };
+            if protocol != 0 && protocol != default {
+                return Err(SyscallError::ProtocolNotSupported);
+            }
+            Ok(SocketKind::Inet(base_type))
+        }
+        _ => Err(SyscallError::AddressFamilyNotSupported),
+    }
+}
+
+/// SYS_socket: socket(domain, type | SOCK_NONBLOCK | SOCK_CLOEXEC, protocol).
+fn sys_socket_create(domain: usize, sock_type: usize, protocol: usize) -> SyscallResult {
+    let (base_type, fd_flags) = socket_type_flags(sock_type)?;
     let pid = crate::process::current_process()
         .map(|p| p.pid.0)
         .unwrap_or(0);
 
-    match domain {
-        AF_UNIX => {
-            let utype = to_unix_socket_type(sock_type)?;
+    match socket_kind(domain, base_type, protocol)? {
+        SocketKind::Unix(base_type) => {
+            let utype = to_unix_socket_type(base_type)?;
             let id = crate::net::unix_socket::socket_create(utype, pid)
                 .map_err(|_| SyscallError::OutOfMemory)?;
-            install_socket(SocketHandle::Unix(id))
+            install_socket(SocketHandle::Unix(id), fd_flags)
         }
-        AF_INET => {
+        SocketKind::Inet(base_type) => {
             let sock_domain = crate::net::socket::SocketDomain::Inet;
-            // Mask off SOCK_CLOEXEC/SOCK_NONBLOCK flags
-            let base_type = sock_type & 0xF;
-            let (sock_tp, proto) = match base_type {
-                SOCK_STREAM => (
+            let (sock_tp, proto) = if base_type == SOCK_STREAM {
+                (
                     crate::net::socket::SocketType::Stream,
                     crate::net::socket::SocketProtocol::Tcp,
-                ),
-                SOCK_DGRAM => (
+                )
+            } else {
+                (
                     crate::net::socket::SocketType::Dgram,
                     crate::net::socket::SocketProtocol::Udp,
-                ),
-                _ => return Err(SyscallError::InvalidArgument),
+                )
             };
             let id = crate::net::socket::create_socket(sock_domain, sock_tp, proto)
                 .map_err(|_| SyscallError::OutOfMemory)?;
-            install_socket(SocketHandle::Inet(id))
+            install_socket(SocketHandle::Inet(id), fd_flags)
         }
-        _ => Err(SyscallError::InvalidArgument),
     }
 }
 
-/// SYS_SOCKET_BIND: Bind a socket to an address/path.
+/// SYS_bind: Bind a socket to an address/path.
 fn sys_socket_bind(fd: usize, addr_ptr: usize, addr_len: usize) -> SyscallResult {
     match with_socket_fd(fd, SocketNode::handle)? {
         SocketHandle::Inet(id) => {
@@ -3650,7 +2808,7 @@ fn sys_socket_bind(fd: usize, addr_ptr: usize, addr_len: usize) -> SyscallResult
     }
 }
 
-/// SYS_SOCKET_LISTEN: Start listening on a bound socket.
+/// SYS_listen: Start listening on a bound socket.
 fn sys_socket_listen(fd: usize, backlog: usize) -> SyscallResult {
     match with_socket_fd(fd, SocketNode::handle)? {
         SocketHandle::Inet(id) => {
@@ -3665,7 +2823,7 @@ fn sys_socket_listen(fd: usize, backlog: usize) -> SyscallResult {
     }
 }
 
-/// SYS_SOCKET_CONNECT: Connect to a listening socket.
+/// SYS_connect: Connect to a listening socket.
 ///
 /// For Unix sockets, `addr_ptr` points to `struct sockaddr_un`:
 ///   `{ sa_family_t sun_family; char sun_path[108]; }`
@@ -3689,14 +2847,25 @@ fn sys_socket_connect(fd: usize, addr_ptr: usize, addr_len: usize) -> SyscallRes
     }
 }
 
-/// SYS_SOCKET_ACCEPT: Accept a pending connection and return an fd for it.
+/// SYS_accept: Accept a pending connection and return an fd for it.
 ///
 /// Linux ABI: `accept4(fd, addr, addrlen_ptr, flags)`.
 /// `addr_ptr` is optional (may be 0). When non-null, `addrlen_ptr` must
 /// point at the buffer size: at most that many bytes of the peer address
 /// (sockaddr_in, or an unnamed sockaddr_un for Unix sockets) are written,
 /// and its full length is stored back in `*addrlen_ptr`.
-fn sys_socket_accept(fd: usize, addr_ptr: usize, addrlen_ptr: usize) -> SyscallResult {
+/// accept and accept4: `flags` is accept4's SOCK_NONBLOCK | SOCK_CLOEXEC
+/// for the new descriptor (0 for accept); any other bit is EINVAL.
+fn sys_socket_accept(
+    fd: usize,
+    addr_ptr: usize,
+    addrlen_ptr: usize,
+    flags: usize,
+) -> SyscallResult {
+    let (base, fd_flags) = socket_type_flags(flags)?;
+    if base != 0 {
+        return Err(SyscallError::InvalidArgument);
+    }
     match with_socket_fd(fd, SocketNode::handle)? {
         SocketHandle::Inet(id) => {
             let (new_sock, remote) = crate::net::socket::with_socket(id, |s| s.accept())
@@ -3711,14 +2880,14 @@ fn sys_socket_accept(fd: usize, addr_ptr: usize, addrlen_ptr: usize) -> SyscallR
                 new_sock.protocol,
             )
             .map_err(|_| SyscallError::OutOfMemory)?;
-            let new_fd = install_socket(SocketHandle::Inet(new_id))?;
+            let new_fd = install_socket(SocketHandle::Inet(new_id), fd_flags)?;
             let peer = network_ext_syscalls::sockaddr_in_bytes(&remote);
             finish_accept(new_fd, addr_ptr, addrlen_ptr, &peer)
         }
         SocketHandle::Unix(id) => {
             let (new_id, _connecting_id) =
                 crate::net::unix_socket::socket_accept(id).map_err(socket_err)?;
-            let new_fd = install_socket(SocketHandle::Unix(new_id))?;
+            let new_fd = install_socket(SocketHandle::Unix(new_id), fd_flags)?;
             // The peer of an accepted Unix connection is reported unnamed:
             // sun_family only, length 2 (bound client paths are not
             // tracked).
@@ -3796,24 +2965,24 @@ fn sys_socket_close(fd: usize) -> SyscallResult {
     result
 }
 
-/// The Unix socket type for `socketpair(domain, sock_type, protocol, sv)`:
-/// AF_UNIX only, protocol 0 or PF_UNIX (as Linux accepts), and the type
-/// mapped like socket() does. The type and protocol used to be ignored, so
-/// a SOCK_DGRAM pair silently got stream semantics (review of the v0.26.0
-/// stack, PR #10). SOCK_CLOEXEC / SOCK_NONBLOCK are masked off and not yet
-/// honoured, as for socket().
+/// The Unix socket type and descriptor flags for
+/// `socketpair(domain, sock_type, protocol, sv)`, checked as socket()
+/// checks them. Only AF_UNIX makes pairs: AF_INET is EOPNOTSUPP, as on
+/// Linux. The type and protocol used to be ignored, so a SOCK_DGRAM pair
+/// silently got stream semantics (review of the v0.26.0 stack, PR #10).
 fn socketpair_type(
     domain: usize,
     sock_type: usize,
     protocol: usize,
-) -> Result<crate::net::unix_socket::UnixSocketType, SyscallError> {
-    if domain != AF_UNIX || (protocol != 0 && protocol != AF_UNIX) {
-        return Err(SyscallError::InvalidArgument);
+) -> Result<(crate::net::unix_socket::UnixSocketType, SocketFdFlags), SyscallError> {
+    let (base_type, fd_flags) = socket_type_flags(sock_type)?;
+    match socket_kind(domain, base_type, protocol)? {
+        SocketKind::Unix(base_type) => Ok((to_unix_socket_type(base_type)?, fd_flags)),
+        SocketKind::Inet(_) => Err(SyscallError::NotSupported),
     }
-    to_unix_socket_type(sock_type)
 }
 
-/// SYS_SOCKET_PAIR: Create a connected socket pair.
+/// SYS_socketpair: Create a connected socket pair.
 ///
 /// # Arguments
 /// - domain: AF_UNIX only
@@ -3826,7 +2995,7 @@ fn sys_socket_pair(
     protocol: usize,
     result_ptr: usize,
 ) -> SyscallResult {
-    let utype = socketpair_type(domain, sock_type, protocol)?;
+    let (utype, fd_flags) = socketpair_type(domain, sock_type, protocol)?;
     // Linux writes int sv[2] (two i32 values = 8 bytes).
     validate_user_buffer(result_ptr, 2 * core::mem::size_of::<i32>())?;
 
@@ -3836,8 +3005,8 @@ fn sys_socket_pair(
 
     let (id_a, id_b) =
         crate::net::unix_socket::socketpair(utype, pid).map_err(|_| SyscallError::OutOfMemory)?;
-    let fd_a = install_socket(SocketHandle::Unix(id_a));
-    let fd_b = install_socket(SocketHandle::Unix(id_b));
+    let fd_a = install_socket(SocketHandle::Unix(id_a), fd_flags);
+    let fd_b = install_socket(SocketHandle::Unix(id_b), fd_flags);
     let (fd_a, fd_b) = match (fd_a, fd_b) {
         (Ok(a), Ok(b)) => (a, b),
         (Ok(a), Err(e)) | (Err(e), Ok(a)) => {
@@ -3901,9 +3070,6 @@ fn sys_flock(fd: usize, operation: usize) -> SyscallResult {
 mod tests {
     use super::*;
 
-    // --- Numbers the musl remap patch relies on (review of the v0.26.0
-    // stack, PR #8) ---
-
     #[test]
     fn missing_sixth_argument_is_an_error_not_zero() {
         // No syscall frame (host test, or an architecture that does not
@@ -3929,18 +3095,54 @@ mod tests {
         assert!(parse_sockaddr_un(&[0u8; SOCKADDR_UN_LEN + 1]).is_err());
     }
 
+    /// The generated table (ADR 0009): every call decodes from its own
+    /// number, Linux calls are below 1024 and VeridianOS calls from 1024.
     #[test]
-    fn musl_remap_targets_have_the_expected_meaning() {
-        // tools/cross/musl-patches/0001-veridian-syscall-remap.patch.
-        // faccessat (Linux 269) is left unmapped: it must not be a native
-        // number, so it reaches the faccessat fallback. It used to be
-        // remapped to 347, native fchownat, which chowned the file.
-        assert!(Syscall::try_from(269).is_err());
-        assert!(linux_compat::is_faccessat(269));
-        assert_eq!(Syscall::try_from(347), Ok(Syscall::Fchownat)); // Linux 260
-        assert_eq!(Syscall::try_from(191), Ok(Syscall::FileFstatat)); // Linux 262
-        assert_eq!(Syscall::try_from(260), Ok(Syscall::GetRlimit)); // Linux 97
-        assert_eq!(Syscall::try_from(261), Ok(Syscall::SetRlimit)); // Linux 160
+    fn syscall_numbers_round_trip() {
+        for &call in numbers::ALL {
+            let n = call as usize;
+            assert_eq!(Syscall::try_from(n), Ok(call), "number {}", n);
+            assert_eq!(call.linux_name().is_some(), n < 1024, "{:?}", call);
+        }
+        assert!(Syscall::try_from(9999).is_err());
+        assert!(Syscall::try_from(1023).is_err());
+    }
+
+    /// Linux numbers that the old musl remap or the old Linux translation
+    /// table sent to the wrong call now reach the right one.
+    #[test]
+    fn linux_numbers_reach_the_linux_call() {
+        let cases: &[(usize, Syscall)] = &[
+            (60, Syscall::Exit),
+            (231, Syscall::ExitGroup),
+            (73, Syscall::Flock),
+            (74, Syscall::Fsync),
+            (76, Syscall::Truncate),
+            (77, Syscall::Ftruncate),
+            (97, Syscall::Getrlimit),
+            (110, Syscall::Getppid),
+            (121, Syscall::Getpgid),
+            (127, Syscall::RtSigpending),
+            (130, Syscall::RtSigsuspend),
+            (131, Syscall::Sigaltstack),
+            (157, Syscall::Prctl),
+            (160, Syscall::Setrlimit),
+            (233, Syscall::EpollCtl),
+            (260, Syscall::Fchownat),
+            (262, Syscall::Newfstatat),
+            (269, Syscall::Faccessat),
+            (271, Syscall::Ppoll),
+            (281, Syscall::EpollPwait),
+            (288, Syscall::Accept4),
+            (291, Syscall::EpollCreate1),
+            (292, Syscall::Dup3),
+            (293, Syscall::Pipe2),
+            (294, Syscall::InotifyInit1),
+            (439, Syscall::Faccessat2),
+        ];
+        for &(n, call) in cases {
+            assert_eq!(Syscall::try_from(n), Ok(call), "Linux {}", n);
+        }
     }
 
     // --- SCM_RIGHTS control messages (Linux LP64 cmsghdr) ---
@@ -4237,22 +3439,27 @@ mod tests {
         assert_eq!(recvmsg_flags(1, 0), MSG_CTRUNC);
     }
 
-    /// socketpair honours the type and accepts protocol 0 or PF_UNIX only
+    /// socketpair honours the type, the descriptor flags and the protocol
     /// (review of the v0.26.0 stack, PR #10).
     #[test]
     fn socketpair_type_maps_type_and_protocol() {
         use crate::net::unix_socket::UnixSocketType;
+        let none = SocketFdFlags::default();
+        let cloexec = SocketFdFlags {
+            cloexec: true,
+            nonblock: false,
+        };
         assert_eq!(
             socketpair_type(AF_UNIX, SOCK_STREAM, 0),
-            Ok(UnixSocketType::Stream)
+            Ok((UnixSocketType::Stream, none))
         );
         assert_eq!(
-            socketpair_type(AF_UNIX, SOCK_DGRAM | 0x80000, 0),
-            Ok(UnixSocketType::Datagram)
+            socketpair_type(AF_UNIX, SOCK_DGRAM | SOCK_CLOEXEC, 0),
+            Ok((UnixSocketType::Datagram, cloexec))
         );
         assert_eq!(
             socketpair_type(AF_UNIX, SOCK_DGRAM, AF_UNIX),
-            Ok(UnixSocketType::Datagram)
+            Ok((UnixSocketType::Datagram, none))
         );
         assert_eq!(
             socketpair_type(AF_UNIX, 7, 0),
@@ -4260,11 +3467,61 @@ mod tests {
         );
         assert_eq!(
             socketpair_type(AF_UNIX, SOCK_STREAM, 6),
+            Err(SyscallError::ProtocolNotSupported)
+        );
+        assert_eq!(
+            socketpair_type(AF_INET, SOCK_STREAM, 0),
+            Err(SyscallError::NotSupported)
+        );
+        assert_eq!(
+            socketpair_type(99, SOCK_STREAM, 0),
+            Err(SyscallError::AddressFamilyNotSupported)
+        );
+    }
+
+    /// socket() keeps SOCK_NONBLOCK / SOCK_CLOEXEC instead of masking them
+    /// off, rejects other type bits, and checks the protocol.
+    #[test]
+    fn socket_type_flags_and_protocol_are_checked() {
+        assert_eq!(
+            socket_type_flags(SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC),
+            Ok((
+                SOCK_STREAM,
+                SocketFdFlags {
+                    cloexec: true,
+                    nonblock: true
+                }
+            ))
+        );
+        assert_eq!(
+            socket_type_flags(SOCK_STREAM | 0x100),
             Err(SyscallError::InvalidArgument)
         );
         assert_eq!(
-            socketpair_type(2, SOCK_STREAM, 0),
-            Err(SyscallError::InvalidArgument)
+            socket_kind(AF_INET, SOCK_STREAM, 6),
+            Ok(SocketKind::Inet(SOCK_STREAM))
+        );
+        assert_eq!(
+            socket_kind(AF_INET, SOCK_DGRAM, 17),
+            Ok(SocketKind::Inet(SOCK_DGRAM))
+        );
+        assert_eq!(
+            socket_kind(AF_INET, SOCK_DGRAM, 6),
+            Err(SyscallError::ProtocolNotSupported)
+        );
+        assert_eq!(
+            socket_kind(AF_UNIX, SOCK_STREAM, 0),
+            Ok(SocketKind::Unix(SOCK_STREAM))
+        );
+        assert_eq!(
+            socket_kind(10, SOCK_STREAM, 0),
+            Err(SyscallError::AddressFamilyNotSupported)
+        );
+        // accept4 takes only the two descriptor flags.
+        assert_eq!(socket_type_flags(SOCK_CLOEXEC).map(|(b, _)| b), Ok(0));
+        assert_eq!(
+            socket_type_flags(SOCK_STREAM).map(|(b, _)| b),
+            Ok(SOCK_STREAM)
         );
     }
 
@@ -4667,79 +3924,79 @@ mod tests {
 
     #[test]
     fn test_syscall_try_from_ipc_send() {
-        let result = Syscall::try_from(0);
+        let result = Syscall::try_from(1024);
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), Syscall::IpcSend);
     }
 
     #[test]
     fn test_syscall_try_from_ipc_receive() {
-        assert_eq!(Syscall::try_from(1).unwrap(), Syscall::IpcReceive);
+        assert_eq!(Syscall::try_from(1025).unwrap(), Syscall::IpcReceive);
     }
 
     #[test]
     fn test_syscall_try_from_ipc_call() {
-        assert_eq!(Syscall::try_from(2).unwrap(), Syscall::IpcCall);
+        assert_eq!(Syscall::try_from(1026).unwrap(), Syscall::IpcCall);
     }
 
     #[test]
     fn test_syscall_try_from_ipc_reply() {
-        assert_eq!(Syscall::try_from(3).unwrap(), Syscall::IpcReply);
+        assert_eq!(Syscall::try_from(1027).unwrap(), Syscall::IpcReply);
     }
 
     #[test]
     fn test_syscall_try_from_process_yield() {
-        assert_eq!(Syscall::try_from(10).unwrap(), Syscall::ProcessYield);
+        assert_eq!(Syscall::try_from(24).unwrap(), Syscall::SchedYield);
     }
 
     #[test]
     fn test_syscall_try_from_process_exit() {
-        assert_eq!(Syscall::try_from(11).unwrap(), Syscall::ProcessExit);
+        assert_eq!(Syscall::try_from(231).unwrap(), Syscall::ExitGroup);
     }
 
     #[test]
     fn test_syscall_try_from_process_fork() {
-        assert_eq!(Syscall::try_from(12).unwrap(), Syscall::ProcessFork);
+        assert_eq!(Syscall::try_from(57).unwrap(), Syscall::Fork);
     }
 
     #[test]
     fn test_syscall_try_from_process_getpid() {
-        assert_eq!(Syscall::try_from(15).unwrap(), Syscall::ProcessGetPid);
+        assert_eq!(Syscall::try_from(39).unwrap(), Syscall::Getpid);
     }
 
     #[test]
     fn test_syscall_try_from_memory_map() {
-        assert_eq!(Syscall::try_from(20).unwrap(), Syscall::MemoryMap);
+        assert_eq!(Syscall::try_from(9).unwrap(), Syscall::Mmap);
     }
 
     #[test]
     fn test_syscall_try_from_capability_grant() {
-        assert_eq!(Syscall::try_from(30).unwrap(), Syscall::CapabilityGrant);
+        assert_eq!(Syscall::try_from(1054).unwrap(), Syscall::CapabilityGrant);
     }
 
     #[test]
     fn test_syscall_try_from_thread_create() {
-        assert_eq!(Syscall::try_from(40).unwrap(), Syscall::ThreadCreate);
+        assert_eq!(Syscall::try_from(1064).unwrap(), Syscall::ThreadCreate);
     }
 
     #[test]
     fn test_syscall_try_from_file_open() {
-        assert_eq!(Syscall::try_from(50).unwrap(), Syscall::FileOpen);
+        assert_eq!(Syscall::try_from(2).unwrap(), Syscall::Open);
     }
 
     #[test]
     fn test_syscall_try_from_dir_mkdir() {
-        assert_eq!(Syscall::try_from(60).unwrap(), Syscall::DirMkdir);
+        assert_eq!(Syscall::try_from(83).unwrap(), Syscall::Mkdir);
     }
 
     #[test]
     fn test_syscall_try_from_fs_mount() {
-        assert_eq!(Syscall::try_from(70).unwrap(), Syscall::FsMount);
+        assert_eq!(Syscall::try_from(1094).unwrap(), Syscall::FsMount);
     }
 
     #[test]
     fn test_syscall_try_from_kernel_get_info() {
-        assert_eq!(Syscall::try_from(80).unwrap(), Syscall::KernelGetInfo);
+        assert_eq!(Syscall::try_from(1104).unwrap(), Syscall::KernelGetInfo);
     }
 
     #[test]
@@ -4749,12 +4006,12 @@ mod tests {
 
     #[test]
     fn test_syscall_try_from_gap_value() {
-        // Values between defined syscalls should fail (e.g., 8 is between IPC and
-        // Process)
-        assert!(Syscall::try_from(8).is_err());
-        assert!(Syscall::try_from(9).is_err());
-        assert!(Syscall::try_from(19).is_err());
-        assert!(Syscall::try_from(25).is_err());
+        // Linux numbers with no call yet, and the gap below the private
+        // range, are not decoded.
+        assert!(Syscall::try_from(26).is_err()); // msync
+        assert!(Syscall::try_from(155).is_err()); // pivot_root
+        assert!(Syscall::try_from(500).is_err());
+        assert!(Syscall::try_from(1023).is_err());
     }
 
     // --- Syscall round-trip tests ---
@@ -4762,14 +4019,14 @@ mod tests {
     #[test]
     fn test_all_ipc_syscalls() {
         let ipc_syscalls = [
-            (0, Syscall::IpcSend),
-            (1, Syscall::IpcReceive),
-            (2, Syscall::IpcCall),
-            (3, Syscall::IpcReply),
-            (4, Syscall::IpcCreateEndpoint),
-            (5, Syscall::IpcBindEndpoint),
-            (6, Syscall::IpcShareMemory),
-            (7, Syscall::IpcMapMemory),
+            (1024, Syscall::IpcSend),
+            (1025, Syscall::IpcReceive),
+            (1026, Syscall::IpcCall),
+            (1027, Syscall::IpcReply),
+            (1028, Syscall::IpcCreateEndpoint),
+            (1029, Syscall::IpcBindEndpoint),
+            (1030, Syscall::IpcShareMemory),
+            (1031, Syscall::IpcMapMemory),
         ];
 
         for (num, expected) in &ipc_syscalls {
@@ -4782,15 +4039,15 @@ mod tests {
     #[test]
     fn test_all_process_syscalls() {
         let proc_syscalls = [
-            (10, Syscall::ProcessYield),
-            (11, Syscall::ProcessExit),
-            (12, Syscall::ProcessFork),
-            (13, Syscall::ProcessExec),
-            (14, Syscall::ProcessWait),
-            (15, Syscall::ProcessGetPid),
-            (16, Syscall::ProcessGetPPid),
-            (17, Syscall::ProcessSetPriority),
-            (18, Syscall::ProcessGetPriority),
+            (24, Syscall::SchedYield),
+            (231, Syscall::ExitGroup),
+            (57, Syscall::Fork),
+            (59, Syscall::Execve),
+            (61, Syscall::Wait4),
+            (39, Syscall::Getpid),
+            (110, Syscall::Getppid),
+            (1041, Syscall::ProcessSetPriority),
+            (1042, Syscall::ProcessGetPriority),
         ];
 
         for (num, expected) in &proc_syscalls {
@@ -4801,12 +4058,12 @@ mod tests {
     #[test]
     fn test_all_thread_syscalls() {
         let thread_syscalls = [
-            (40, Syscall::ThreadCreate),
-            (41, Syscall::ThreadExit),
-            (42, Syscall::ThreadJoin),
-            (43, Syscall::ThreadGetTid),
-            (44, Syscall::ThreadSetAffinity),
-            (45, Syscall::ThreadGetAffinity),
+            (1064, Syscall::ThreadCreate),
+            (60, Syscall::Exit),
+            (1066, Syscall::ThreadJoin),
+            (186, Syscall::Gettid),
+            (1068, Syscall::ThreadSetAffinity),
+            (1069, Syscall::ThreadGetAffinity),
         ];
 
         for (num, expected) in &thread_syscalls {
@@ -4817,13 +4074,13 @@ mod tests {
     #[test]
     fn test_all_file_syscalls() {
         let file_syscalls = [
-            (50, Syscall::FileOpen),
-            (51, Syscall::FileClose),
-            (52, Syscall::FileRead),
-            (53, Syscall::FileWrite),
-            (54, Syscall::FileSeek),
-            (55, Syscall::FileStat),
-            (56, Syscall::FileTruncate),
+            (2, Syscall::Open),
+            (3, Syscall::Close),
+            (0, Syscall::Read),
+            (1, Syscall::Write),
+            (8, Syscall::Lseek),
+            (5, Syscall::Fstat),
+            (77, Syscall::Ftruncate),
         ];
 
         for (num, expected) in &file_syscalls {
@@ -4834,11 +4091,11 @@ mod tests {
     #[test]
     fn test_all_dir_syscalls() {
         let dir_syscalls = [
-            (60, Syscall::DirMkdir),
-            (61, Syscall::DirRmdir),
-            (62, Syscall::DirOpendir),
-            (63, Syscall::DirReaddir),
-            (64, Syscall::DirClosedir),
+            (83, Syscall::Mkdir),
+            (84, Syscall::Rmdir),
+            (1086, Syscall::DirOpendir),
+            (1087, Syscall::DirReaddir),
+            (1088, Syscall::DirClosedir),
         ];
 
         for (num, expected) in &dir_syscalls {

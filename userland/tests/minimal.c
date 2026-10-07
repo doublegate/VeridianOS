@@ -9,8 +9,8 @@
  * freestanding static binary can execute on VeridianOS.
  *
  * Syscall numbers from kernel/src/syscall/mod.rs:
- *   SYS_FILE_WRITE   = 53   (fd, buf, count)
- *   SYS_PROCESS_EXIT = 11   (status)
+ *   SYS_write   = 53   (fd, buf, count)
+ *   SYS_exit_group = 231   (status)
  *
  * Architecture-specific calling conventions:
  *   x86_64:  syscall   -- nr in rax, args in rdi/rsi/rdx/r10/r8/r9
@@ -23,8 +23,7 @@
  *  its own _start.)
  */
 
-#define SYS_FILE_WRITE   53
-#define SYS_PROCESS_EXIT 11
+#include <veridian/sysno.h> /* system call numbers (ADR 0009) */
 
 /* Stdout file descriptor */
 #define STDOUT_FD 1
@@ -138,10 +137,10 @@ void _start(void)
 {
     /* Write the success marker to stdout */
     static const char msg[] = "MINIMAL_TEST_PASS\n";
-    syscall3(SYS_FILE_WRITE, STDOUT_FD, (long)msg, sizeof(msg) - 1);
+    syscall3(SYS_write, STDOUT_FD, (long)msg, sizeof(msg) - 1);
 
     /* Exit with success */
-    syscall1(SYS_PROCESS_EXIT, 0);
+    syscall1(SYS_exit_group, 0);
 
     /* Should never reach here */
     __builtin_unreachable();

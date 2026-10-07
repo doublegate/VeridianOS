@@ -712,13 +712,13 @@ pub fn sys_setpriority(which: usize, who: usize, priority: usize) -> SyscallResu
 // Identity syscalls (170-175)
 // ============================================================================
 
-/// Get real user ID (SYS_GETUID = 170)
+/// Get real user ID (SYS_getuid = 102)
 pub fn sys_getuid() -> SyscallResult {
     let proc = current_process().ok_or(SyscallError::InvalidState)?;
     Ok(proc.uid() as usize)
 }
 
-/// Get effective user ID (SYS_GETEUID = 171)
+/// Get effective user ID (SYS_geteuid = 107)
 ///
 /// VeridianOS does not yet distinguish real/effective UIDs, so this returns
 /// the same value as getuid.
@@ -726,18 +726,18 @@ pub fn sys_geteuid() -> SyscallResult {
     sys_getuid()
 }
 
-/// Get real group ID (SYS_GETGID = 172)
+/// Get real group ID (SYS_getgid = 104)
 pub fn sys_getgid() -> SyscallResult {
     let proc = current_process().ok_or(SyscallError::InvalidState)?;
     Ok(proc.gid() as usize)
 }
 
-/// Get effective group ID (SYS_GETEGID = 173)
+/// Get effective group ID (SYS_getegid = 108)
 pub fn sys_getegid() -> SyscallResult {
     sys_getgid()
 }
 
-/// Set user ID (SYS_SETUID = 174)
+/// Set user ID (SYS_setuid = 105)
 ///
 /// Only uid 0 (root) can change to a different UID. Non-root processes
 /// may only "set" their uid to the current value (a no-op).
@@ -761,7 +761,7 @@ pub fn sys_setuid(uid: usize) -> SyscallResult {
     Ok(0)
 }
 
-/// Set group ID (SYS_SETGID = 175)
+/// Set group ID (SYS_setgid = 106)
 ///
 /// Only uid 0 (root) can change to a different GID. Non-root processes
 /// may only "set" their gid to the current value (a no-op).
@@ -790,7 +790,7 @@ pub fn sys_setgid(gid: usize) -> SyscallResult {
 // Process group / session syscalls (176-180)
 // ============================================================================
 
-/// Set process group ID (SYS_SETPGID = 176)
+/// Set process group ID (SYS_setpgid = 109)
 ///
 /// # Arguments
 /// - `pid`: Target process (0 = calling process)
@@ -828,7 +828,7 @@ pub fn sys_setpgid(pid: usize, pgid: usize) -> SyscallResult {
     }
 }
 
-/// Get process group ID (SYS_GETPGID = 177)
+/// Get process group ID (SYS_getpgid = 121)
 ///
 /// # Arguments
 /// - `pid`: Target process (0 = calling process)
@@ -847,12 +847,12 @@ pub fn sys_getpgid(pid: usize) -> SyscallResult {
     }
 }
 
-/// Get process group ID of calling process (SYS_GETPGRP = 178)
+/// Get process group ID of calling process (SYS_getpgrp = 111)
 pub fn sys_getpgrp() -> SyscallResult {
     sys_getpgid(0)
 }
 
-/// Create a new session (SYS_SETSID = 179)
+/// Create a new session (SYS_setsid = 112)
 ///
 /// Makes the calling process the session leader and process group leader
 /// of a new session. The process must not already be a process group leader.
@@ -874,7 +874,7 @@ pub fn sys_setsid() -> SyscallResult {
     Ok(proc.pid.0 as usize)
 }
 
-/// Get session ID (SYS_GETSID = 180)
+/// Get session ID (SYS_getsid = 124)
 ///
 /// # Arguments
 /// - `pid`: Target process (0 = calling process)

@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # Build musl libc for VeridianOS cross-compilation
 #
-# This script downloads, patches, and cross-compiles musl libc 1.2.6
+# This script downloads and cross-compiles musl libc 1.2.6 with the patches
+# in musl-patches/ (no syscall patch since ADR 0009: the kernel speaks the
+# Linux ABI)
 # to produce a static libc.a and C headers in the sysroot.
 #
 # Prerequisites:
@@ -65,11 +67,16 @@ verify_musl() {
 }
 
 # ── Extract ───────────────────────────────────────────────────────────
-# Identity of the patch set: the .patch files plus this script (which
-# writes veridian_syscall_map.h). A tree patched with anything else is
-# re-extracted, so a changed patch can never be silently skipped.
+# Identity of the patch set: the .patch files plus this script. A tree
+# patched with anything else is re-extracted, so a changed patch can never
+# be silently skipped.
 patch_stamp() {
-    cat "${PATCH_DIR}"/*.patch "${BASH_SOURCE[0]}" 2>/dev/null | sha256sum | cut -d' ' -f1
+    # nullglob: an empty patch set is valid (cat of a literal "*.patch"
+    # would fail, and with pipefail stop the build).
+    local patches
+    patches=$(shopt -s nullglob; echo "${PATCH_DIR}"/*.patch)
+    # shellcheck disable=SC2086 # word splitting of the list is intended
+    cat $patches "${BASH_SOURCE[0]}" | sha256sum | cut -d' ' -f1
 }
 
 extract_musl() {
@@ -88,8 +95,7 @@ extract_musl() {
 }
 
 # ── Patch ─────────────────────────────────────────────────────────────
-# Patch musl's x86_64 syscall_arch.h to remap Linux syscall numbers
-# to VeridianOS equivalents.
+# Apply musl-patches/*.patch (an empty set is valid).
 patch_musl() {
     local src="${BUILD_DIR}/musl-${MUSL_VERSION}"
     local marker="${src}/.veridian_patched"
@@ -97,7 +103,7 @@ patch_musl() {
         log "Already patched."
         return 0
     fi
-    log "Applying VeridianOS syscall patches..."
+    log "Applying VeridianOS patches (if any)..."
     if [[ -d "${PATCH_DIR}" ]]; then
         for patch in "${PATCH_DIR}"/*.patch; do
             [[ -f "$patch" ]] || continue
@@ -109,169 +115,6 @@ patch_musl() {
     # Generate syscall number remapping header.
     # musl uses Linux syscall numbers from arch/x86_64/bits/syscall.h.in.
     # We create an overlay that redefines the critical ones to VeridianOS numbers.
-    cat > "${src}/arch/x86_64/bits/veridian_syscall_map.h" << 'HEADER'
-/* VeridianOS syscall number remapping for musl libc.
- *
- * musl's internal __syscall() calls use Linux x86_64 numbers.
- * This header is included from syscall_arch.h to remap them
- * to VeridianOS equivalents at compile time.
- *
- * Only the ~60 syscalls actually used by musl are remapped.
- * Unmapped syscalls will return -ENOSYS at runtime.
- */
-#ifndef _VERIDIAN_SYSCALL_MAP_H
-#define _VERIDIAN_SYSCALL_MAP_H
-
-/* Filesystem */
-#define __VER_SYS_read       52
-#define __VER_SYS_write      53
-#define __VER_SYS_open       50
-#define __VER_SYS_close      51
-#define __VER_SYS_stat       150
-#define __VER_SYS_fstat      55
-#define __VER_SYS_lstat      151
-#define __VER_SYS_lseek      54
-#define __VER_SYS_dup        57
-#define __VER_SYS_dup2       58
-#define __VER_SYS_dup3       66
-#define __VER_SYS_pipe2      65
-#define __VER_SYS_fcntl      158
-#define __VER_SYS_truncate   188
-#define __VER_SYS_ftruncate  56
-#define __VER_SYS_getcwd     110
-#define __VER_SYS_chdir      111
-#define __VER_SYS_mkdir      60
-#define __VER_SYS_rmdir      61
-#define __VER_SYS_unlink     157
-#define __VER_SYS_rename     154
-#define __VER_SYS_link       155
-#define __VER_SYS_symlink    156
-#define __VER_SYS_readlink   152
-#define __VER_SYS_chmod      185
-#define __VER_SYS_fchmod     186
-#define __VER_SYS_chown      197
-#define __VER_SYS_fchown     198
-#define __VER_SYS_umask      187
-#define __VER_SYS_access     153
-#define __VER_SYS_openat     190
-#define __VER_SYS_mkdirat    193
-#define __VER_SYS_unlinkat   192
-#define __VER_SYS_renameat   194
-#define __VER_SYS_fstatat    191
-#define __VER_SYS_readv      183
-#define __VER_SYS_writev     184
-#define __VER_SYS_pread64    195
-#define __VER_SYS_pwrite64   196
-#define __VER_SYS_fsync      73
-#define __VER_SYS_ioctl      112
-
-/* Memory */
-#define __VER_SYS_mmap       20
-#define __VER_SYS_munmap     21
-#define __VER_SYS_mprotect   22
-#define __VER_SYS_brk        23
-
-/* Process */
-#define __VER_SYS_exit       11
-#define __VER_SYS_exit_group 11
-#define __VER_SYS_fork       12
-#define __VER_SYS_execve     13
-#define __VER_SYS_wait4      14
-#define __VER_SYS_getpid     15
-#define __VER_SYS_getppid    16
-#define __VER_SYS_kill       113
-#define __VER_SYS_getuid     170
-#define __VER_SYS_geteuid    171
-#define __VER_SYS_getgid     172
-#define __VER_SYS_getegid    173
-#define __VER_SYS_setuid     174
-#define __VER_SYS_setgid     175
-#define __VER_SYS_setpgid    176
-#define __VER_SYS_getpgid    177
-#define __VER_SYS_getpgrp    178
-#define __VER_SYS_setsid     179
-#define __VER_SYS_getsid     180
-#define __VER_SYS_uname      204
-
-/* Signals */
-#define __VER_SYS_rt_sigaction   120
-#define __VER_SYS_rt_sigprocmask 121
-#define __VER_SYS_rt_sigsuspend  122
-#define __VER_SYS_rt_sigreturn   123
-
-/* Threading */
-#define __VER_SYS_clone      310
-#define __VER_SYS_futex      311
-#define __VER_SYS_gettid     43
-
-/* Time */
-#define __VER_SYS_clock_gettime  160
-#define __VER_SYS_clock_getres   161
-#define __VER_SYS_nanosleep      162
-#define __VER_SYS_gettimeofday   163
-
-/* Socket */
-#define __VER_SYS_socket     220
-#define __VER_SYS_bind       221
-#define __VER_SYS_listen     222
-#define __VER_SYS_connect    223
-#define __VER_SYS_accept     224
-#define __VER_SYS_accept4    224
-#define __VER_SYS_sendto     250
-#define __VER_SYS_recvfrom   251
-#define __VER_SYS_sendmsg    338
-#define __VER_SYS_recvmsg    339
-#define __VER_SYS_socketpair 228
-#define __VER_SYS_setsockopt 254
-#define __VER_SYS_getsockopt 255
-#define __VER_SYS_getsockname 252
-#define __VER_SYS_getpeername 253
-
-/* I/O multiplexing */
-#define __VER_SYS_poll       300
-#define __VER_SYS_select     200
-#define __VER_SYS_epoll_create1 262
-#define __VER_SYS_epoll_ctl  263
-#define __VER_SYS_epoll_wait 264
-
-/* Event notification */
-#define __VER_SYS_eventfd2   331
-#define __VER_SYS_timerfd_create  334
-#define __VER_SYS_timerfd_settime 335
-#define __VER_SYS_timerfd_gettime 336
-#define __VER_SYS_signalfd4  337
-#define __VER_SYS_getrandom  330
-
-/* PTY */
-#define __VER_SYS_ioctl      112
-
-/* Shared memory */
-#define __VER_SYS_shmget     210
-#define __VER_SYS_shmat      210
-
-/* Misc */
-#define __VER_SYS_arch_prctl     203
-#define __VER_SYS_getrlimit      260
-#define __VER_SYS_setrlimit      261
-#define __VER_SYS_mknod          199
-#define __VER_SYS_ptrace         140
-#define __VER_SYS_set_tid_address 352
-#define __VER_SYS_set_robust_list 353
-#define __VER_SYS_madvise        345
-#define __VER_SYS_getdents64     340
-#define __VER_SYS_prlimit64      341
-#define __VER_SYS_inotify_init1  342
-#define __VER_SYS_memfd_create   351
-#define __VER_SYS_fchmodat       346
-#define __VER_SYS_fchownat       347
-#define __VER_SYS_linkat         348
-#define __VER_SYS_symlinkat      349
-#define __VER_SYS_readlinkat     350
-#define __VER_SYS_shutdown       227
-
-#endif /* _VERIDIAN_SYSCALL_MAP_H */
-HEADER
-
     patch_stamp > "${marker}"
     log "Patches applied."
 }

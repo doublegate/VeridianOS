@@ -7,15 +7,15 @@
 //! - High-level: `Command` builder, `Child`, `ExitStatus`
 //!
 //! Syscall mappings:
-//! - `exit`    -> SYS_PROCESS_EXIT (11)
-//! - `fork`    -> SYS_PROCESS_FORK (12)
-//! - `exec`    -> SYS_PROCESS_EXEC (13)
-//! - `waitpid` -> SYS_PROCESS_WAIT (14)
-//! - `getpid`  -> SYS_PROCESS_GETPID (15)
-//! - `getppid` -> SYS_PROCESS_GETPPID (16)
-//! - `getcwd`  -> SYS_PROCESS_GETCWD (110)
-//! - `chdir`   -> SYS_PROCESS_CHDIR (111)
-//! - `kill`    -> SYS_PROCESS_KILL (113)
+//! - `exit`    -> SYS_exit_group (231)
+//! - `fork`    -> SYS_fork (57)
+//! - `exec`    -> SYS_execve (59)
+//! - `waitpid` -> SYS_wait4 (61)
+//! - `getpid`  -> SYS_getpid (39)
+//! - `getppid` -> SYS_getppid (110)
+//! - `getcwd`  -> SYS_getcwd (79)
+//! - `chdir`   -> SYS_chdir (80)
+//! - `kill`    -> SYS_kill (62)
 
 extern crate alloc;
 use alloc::vec::Vec;
@@ -24,9 +24,9 @@ use super::{
     fd::OwnedFd,
     io::AnonPipe,
     path::{OsStr, OsString, Path, PathBuf},
-    syscall0, syscall1, syscall2, syscall3, syscall_result, SyscallError, SYS_PROCESS_CHDIR,
-    SYS_PROCESS_EXEC, SYS_PROCESS_EXIT, SYS_PROCESS_FORK, SYS_PROCESS_GETCWD, SYS_PROCESS_GETPID,
-    SYS_PROCESS_GETPPID, SYS_PROCESS_KILL, SYS_PROCESS_WAIT, SYS_PROCESS_YIELD,
+    syscall0, syscall1, syscall2, syscall3, syscall_result, SyscallError, SYS_chdir,
+    SYS_execve, SYS_exit_group, SYS_fork, SYS_getcwd, SYS_getpid,
+    SYS_getppid, SYS_kill, SYS_wait4, SYS_sched_yield,
 };
 
 // ============================================================================
@@ -38,7 +38,7 @@ use super::{
 /// This function never returns.
 pub fn exit(status: i32) -> ! {
     unsafe {
-        syscall1(SYS_PROCESS_EXIT, status as usize);
+        syscall1(SYS_exit_group, status as usize);
     }
     loop {
         core::hint::spin_loop();
@@ -49,7 +49,7 @@ pub fn exit(status: i32) -> ! {
 ///
 /// Returns child PID in the parent, 0 in the child.
 pub fn fork() -> Result<usize, SyscallError> {
-    let ret = unsafe { syscall0(SYS_PROCESS_FORK) };
+    let ret = unsafe { syscall0(SYS_fork) };
     syscall_result(ret)
 }
 
@@ -63,7 +63,7 @@ pub fn execve(
 ) -> Result<usize, SyscallError> {
     let ret = unsafe {
         syscall3(
-            SYS_PROCESS_EXEC,
+            SYS_execve,
             path as usize,
             argv as usize,
             envp as usize,
@@ -74,41 +74,41 @@ pub fn execve(
 
 /// Wait for a child process to change state.
 pub fn waitpid(pid: isize, wstatus: *mut i32, options: usize) -> Result<usize, SyscallError> {
-    let ret = unsafe { syscall3(SYS_PROCESS_WAIT, pid as usize, wstatus as usize, options) };
+    let ret = unsafe { syscall3(SYS_wait4, pid as usize, wstatus as usize, options) };
     syscall_result(ret)
 }
 
 /// Get the current process ID.
 pub fn getpid() -> usize {
-    unsafe { syscall0(SYS_PROCESS_GETPID) as usize }
+    unsafe { syscall0(SYS_getpid) as usize }
 }
 
 /// Get the parent process ID.
 pub fn getppid() -> usize {
-    unsafe { syscall0(SYS_PROCESS_GETPPID) as usize }
+    unsafe { syscall0(SYS_getppid) as usize }
 }
 
 /// Yield the CPU to another process.
 pub fn sched_yield() -> Result<usize, SyscallError> {
-    let ret = unsafe { syscall0(SYS_PROCESS_YIELD) };
+    let ret = unsafe { syscall0(SYS_sched_yield) };
     syscall_result(ret)
 }
 
 /// Get the current working directory.
 pub fn getcwd(buf: *mut u8, size: usize) -> Result<usize, SyscallError> {
-    let ret = unsafe { syscall2(SYS_PROCESS_GETCWD, buf as usize, size) };
+    let ret = unsafe { syscall2(SYS_getcwd, buf as usize, size) };
     syscall_result(ret)
 }
 
 /// Change the current working directory.
 pub fn chdir(path: *const u8) -> Result<usize, SyscallError> {
-    let ret = unsafe { syscall1(SYS_PROCESS_CHDIR, path as usize) };
+    let ret = unsafe { syscall1(SYS_chdir, path as usize) };
     syscall_result(ret)
 }
 
 /// Send a signal to a process.
 pub fn kill(pid: usize, sig: usize) -> Result<usize, SyscallError> {
-    let ret = unsafe { syscall2(SYS_PROCESS_KILL, pid, sig) };
+    let ret = unsafe { syscall2(SYS_kill, pid, sig) };
     syscall_result(ret)
 }
 

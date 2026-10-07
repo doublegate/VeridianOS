@@ -62,9 +62,6 @@ if [ "$IS_COMPILE" = "1" ]; then
         -mcmodel=small \
         -D__veridian__ \
         -D__linux__ \
-        -Wno-unused-parameter \
-        -Wno-implicit-function-declaration \
-        -Wno-return-type \
         "$@"
 elif [ "$IS_LINK" = "1" ]; then
     # ---- Link step ----
@@ -135,6 +132,5 @@ else
         -fno-stack-protector \
         -ffreestanding \
         -D__veridian__ \
-        -Wno-implicit-function-declaration \
         "$@"
 fi

@@ -114,7 +114,7 @@ phase_headers() {
     cflags+=" -isystem ${GCC_INCDIR}"
     cflags+=" -fno-stack-protector -ffreestanding"
     cflags+=" -mno-red-zone -mcmodel=small"
-    cflags+=" -Wno-unused-parameter -Wno-implicit-function-declaration"
+    cflags+=" -Wall -Wextra -Werror"
 
     local obj_count=0
     local failed=""
@@ -129,6 +129,20 @@ phase_headers() {
         else
             echo "FAILED"
             failed+=" $name.c"
+        fi
+    done
+    # Architecture assembly (setjmp/longjmp), as the libc Makefile builds it.
+    for src in "$libc_src"/*_x86_64.S; do
+        [ -f "$src" ] || continue
+        local name
+        name="$(basename "$src" .S)"
+        echo -n "    $name.S -> "
+        if "$CC" $cflags -c "$src" -o "$libc_build/${name}.o" 2>&1; then
+            echo "OK"
+            obj_count=$((obj_count + 1))
+        else
+            echo "FAILED"
+            failed+=" $name.S"
         fi
     done
     # A libc missing objects links programs that fail at run time, far from
@@ -352,7 +366,7 @@ phase_rootfs() {
     pgm_cflags+=" -isystem ${GCC_INCDIR}"
     pgm_cflags+=" -fno-stack-protector -ffreestanding"
     pgm_cflags+=" -mno-red-zone -mcmodel=small"
-    pgm_cflags+=" -Wall -Wextra -Wno-unused-parameter"
+    pgm_cflags+=" -Wall -Wextra"
     local pgm_ldflags="-static -nostdlib -L${SYSROOT}/usr/lib"
 
     # sysinfo (fastfetch-inspired system info display)
@@ -376,7 +390,7 @@ phase_rootfs() {
         local curses_build="/tmp/VeridianOS/libcurses-rootfs-build"
         rm -rf "$curses_build"
         mkdir -p "$curses_build"
-        local curses_cflags="-static -O2 -Wall -Wextra -Wno-unused-parameter"
+        local curses_cflags="-static -O2 -Wall -Wextra"
         curses_cflags+=" -fno-stack-protector -ffreestanding -mno-red-zone -mcmodel=small"
         curses_cflags+=" -nostdinc -isystem ${SYSROOT}/usr/include -isystem ${GCC_INCDIR}"
         curses_cflags+=" -I${curses_src}"
@@ -432,7 +446,7 @@ phase_rootfs() {
     # The runtime audit suite run by scripts/run-rootfs-tests.sh. Built here
     # so a full rebuild never drops it; a failure stops the build (C1).
     echo -n "    audit_runtime_test... "
-    if "$CC" -static -O2 -Wall -L"${SYSROOT}/usr/lib" -o "$BUILD_DIR/bin/audit_runtime_test" \
+    if "$CC" -static -O2 -Wall -Wextra -L"${SYSROOT}/usr/lib" -o "$BUILD_DIR/bin/audit_runtime_test" \
             "${TESTS_DIR}/audit_runtime_test.c" 2>&1; then
         echo "OK"
     else
@@ -448,7 +462,7 @@ phase_rootfs() {
     local musl_cc="${musl_sysroot}/bin/x86_64-veridian-musl-gcc"
     if [ -x "$musl_cc" ] && [ -f "${musl_sysroot}/usr/lib/libc.a" ]; then
         echo -n "    musl_runtime_test... "
-        if "$musl_cc" -O2 -Wall -o "$BUILD_DIR/bin/musl_runtime_test" \
+        if "$musl_cc" -O2 -Wall -Wextra -o "$BUILD_DIR/bin/musl_runtime_test" \
                 "${TESTS_DIR}/musl_runtime_test.c" 2>&1; then
             echo "OK"
         else

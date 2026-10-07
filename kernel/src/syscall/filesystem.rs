@@ -2092,10 +2092,22 @@ pub fn sys_fcntl(fd: usize, cmd: usize, arg: usize) -> SyscallResult {
 ///
 /// # Returns
 /// 0 on success.
-pub fn sys_pipe2(pipe_fds_ptr: usize, flags: usize) -> SyscallResult {
-    validate_user_buffer(pipe_fds_ptr, 2 * core::mem::size_of::<i32>())?;
+/// Linux O_CLOEXEC and O_NONBLOCK, the only flags pipe2 and dup3 accept.
+const FD_FLAG_CLOEXEC: usize = 0x8_0000;
+const FD_FLAG_NONBLOCK: usize = 0x800;
 
-    let cloexec = flags & 0x2000 != 0;
+/// pipe2's flags as (cloexec, nonblock); anything else is EINVAL, as on
+/// Linux.
+fn pipe2_flags(flags: usize) -> Result<(bool, bool), SyscallError> {
+    if flags & !(FD_FLAG_CLOEXEC | FD_FLAG_NONBLOCK) != 0 {
+        return Err(SyscallError::InvalidArgument);
+    }
+    Ok((flags & FD_FLAG_CLOEXEC != 0, flags & FD_FLAG_NONBLOCK != 0))
+}
+
+pub fn sys_pipe2(pipe_fds_ptr: usize, flags: usize) -> SyscallResult {
+    let (cloexec, nonblock) = pipe2_flags(flags)?;
+    validate_user_buffer(pipe_fds_ptr, 2 * core::mem::size_of::<i32>())?;
 
     // Create the pipe
     let (reader, writer) = crate::fs::pipe::create_pipe().map_err(|_| SyscallError::OutOfMemory)?;
@@ -2107,8 +2119,20 @@ pub fn sys_pipe2(pipe_fds_ptr: usize, flags: usize) -> SyscallResult {
         alloc::sync::Arc::new(crate::fs::pipe::PipeWriteNode::new(writer));
 
     // Create File objects
-    let read_file = crate::fs::file::File::new(read_node, OpenFlags::read_only());
-    let write_file = crate::fs::file::File::new(write_node, OpenFlags::write_only());
+    let read_file = crate::fs::file::File::new(
+        read_node,
+        OpenFlags {
+            nonblock,
+            ..OpenFlags::read_only()
+        },
+    );
+    let write_file = crate::fs::file::File::new(
+        write_node,
+        OpenFlags {
+            nonblock,
+            ..OpenFlags::write_only()
+        },
+    );
 
     // Allocate file descriptors in the calling process's file table
     let proc = process::current_process().ok_or(SyscallError::InvalidState)?;
@@ -2159,17 +2183,17 @@ pub fn sys_dup3(old_fd: usize, new_fd: usize, flags: usize) -> SyscallResult {
     }
 
     // Only O_CLOEXEC is valid
-    if flags & !0x2000 != 0 {
+    if flags & !FD_FLAG_CLOEXEC != 0 {
         return Err(SyscallError::InvalidArgument);
     }
 
-    let cloexec = flags & 0x2000 != 0;
+    let cloexec = flags & FD_FLAG_CLOEXEC != 0;
     let proc = process::current_process().ok_or(SyscallError::InvalidState)?;
     let file_table = proc.file_table.lock();
 
     file_table
         .dup3(old_fd, new_fd, cloexec)
-        .map_err(|_| SyscallError::InvalidArgument)?;
+        .map_err(super::map_kernel_error)?;
 
     Ok(new_fd)
 }
@@ -2309,7 +2333,7 @@ unsafe impl super::userspace::UserPod for Iovec {}
 /// Maximum number of iovec entries per readv/writev call.
 const IOV_MAX: usize = 1024;
 
-/// Read from a file descriptor into multiple buffers (SYS_READV = 183).
+/// Read from a file descriptor into multiple buffers (SYS_readv = 19).
 ///
 /// # Arguments
 /// - `fd`: File descriptor to read from.
@@ -2361,7 +2385,7 @@ pub fn sys_readv(fd: usize, iov_ptr: usize, iovcnt: usize) -> SyscallResult {
     Ok(total_read)
 }
 
-/// Write to a file descriptor from multiple buffers (SYS_WRITEV = 184).
+/// Write to a file descriptor from multiple buffers (SYS_writev = 20).
 ///
 /// # Arguments
 /// - `fd`: File descriptor to write to.
@@ -3055,4 +3079,21 @@ pub fn sys_select(
     }
 
     Ok(ready_count)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// pipe2 takes Linux O_CLOEXEC (0x80000) and O_NONBLOCK (0x800); it
+    /// tested 0x2000, which no C library sends, and accepted anything.
+    #[test]
+    fn pipe2_decodes_linux_flags() {
+        assert_eq!(pipe2_flags(0), Ok((false, false)));
+        assert_eq!(pipe2_flags(0x8_0000), Ok((true, false)));
+        assert_eq!(pipe2_flags(0x800), Ok((false, true)));
+        assert_eq!(pipe2_flags(0x8_0800), Ok((true, true)));
+        assert_eq!(pipe2_flags(0x2000), Err(SyscallError::InvalidArgument));
+        assert_eq!(pipe2_flags(1), Err(SyscallError::InvalidArgument));
+    }
 }

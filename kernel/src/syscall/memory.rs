@@ -135,33 +135,13 @@ pub fn sys_mmap(
 
     let is_anonymous = flags & MAP_ANONYMOUS != 0;
 
-    // Extract fd and offset. Linux mmap has 6 args:
-    //   rdi=addr, rsi=len, rdx=prot, r10=flags, r8=fd, r9=offset
-    // Our syscall entry only passes 5 C params (arg5 = r8 = fd).
-    // The 6th arg (r9 = offset) is saved in the SyscallFrame on the stack.
-    // For Linux ABI processes, extract fd directly from arg5 and offset
-    // from the saved r9 register in the SyscallFrame.
-    let linux_abi = crate::syscall::linux_compat::is_linux_abi(&proc);
+    // Linux layout (ADR 0009): fd in r8 (arg5), offset in r9 (the sixth
+    // argument). The native ABI used to pack both into arg5, so a musl
+    // file mapping, which uses the Linux layout, read fd 0.
     let (fd, offset) = if is_anonymous {
         (0usize, 0usize)
-    } else if linux_abi {
-        // Linux ABI: fd_or_packed IS the fd; offset is in r9 on the stack.
-        let mmap_offset = {
-            #[cfg(target_arch = "x86_64")]
-            {
-                crate::arch::x86_64::syscall::get_syscall_frame()
-                    .map(|frame| frame.r9 as usize)
-                    .unwrap_or(0)
-            }
-            #[cfg(not(target_arch = "x86_64"))]
-            {
-                0usize
-            }
-        };
-        (fd_or_packed, mmap_offset)
     } else {
-        // VeridianOS native ABI: packed fd(upper 32) + offset(lower 32)
-        (fd_or_packed >> 32, fd_or_packed & 0xFFFF_FFFF)
+        (fd_or_packed, super::syscall_arg6()?)
     };
 
     // DRM device mappings are checked before any memory is mapped: the
@@ -461,7 +441,8 @@ pub fn sys_getrlimit(resource: usize, rlim_ptr: usize) -> SyscallResult {
             (stack_size, stack_size)
         }
         RLIMIT_NOFILE => {
-            (256, 256) // current fd table limit
+            let max = crate::fs::file::MAX_FDS as u64;
+            (max, max)
         }
         RLIMIT_FSIZE => {
             (RLIM_INFINITY, RLIM_INFINITY) // no file size limit

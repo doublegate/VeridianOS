@@ -20,32 +20,47 @@ A claim elsewhere in the documentation that contradicts this page is wrong. Plea
 
 ## Kernel limitations
 
+### Linux system call semantics (N-190 to N-247; sprints D, F and X2)
+
+Since ADR 0009 a Linux system call number promises Linux behaviour. A review of every handler
+behind one found about 80 differences. The security-relevant ones and those the renumbering
+exposed were fixed (N-182 to N-189); the rest are listed, with their targets, in
+[`docs/audit/ABI-REVIEW-2026-10-07.md`](audit/ABI-REVIEW-2026-10-07.md). The most visible:
+
+- **Permission checks.** pread/pwrite and ftruncate ignore the file's access mode, truncate and
+  mkdir check no permission, and access() checks only the "other" bits (N-190 to N-193).
+- **Blocking.** select never blocks; recvfrom, accept, sendmsg and recvmsg never block on a
+  blocking socket; non-blocking eventfd, timerfd and signalfd reads block (N-194, N-232, N-235).
+- **Signals 32-64** are refused, so musl's `pthread_cancel` fails (N-209); fork-style `clone`
+  (musl `posix_spawn`, hence `system` and `popen`) is refused (N-210).
+- **Time.** CLOCK_REALTIME counts from boot, not 1970, and only clocks 0 and 1 exist (N-218, N-219).
+- **Errnos.** Many errors come back as EINVAL where Linux is specific (N-197, N-202, N-212 to
+  N-216, N-234, N-238).
+
 ### Drivers and services run in the kernel (C6, planned v0.28+)
 
 The microkernel design places drivers, filesystems, network protocols and the desktop in user-space
 processes. Today all of them run in ring 0. Moving them out, in risk order, is critique item C6 of
 the audit plan.
 
-### IPC is not reachable from user programs (N-33, planned v0.28)
+### IPC cannot reach an endpoint (N-47, N-81; planned v0.28)
 
-The native IPC syscalls 0-7 are send, receive, call, reply, create endpoint, bind, share memory and
-map memory. The native dispatcher routes all eight numbers to the Linux compatibility layer, where
-they mean read, write, open, close, stat, fstat, lstat and poll. This is because Qt and libstdc++
-issue raw Linux numbers. So no user program can use VeridianOS IPC today. Inside the kernel, the synchronous send path also looks endpoints up in a registry that
-nothing fills (N-47), so it cannot reach any endpoint either.
+The native IPC calls (send, receive, call, reply, create endpoint, bind, share memory, map memory)
+have private numbers 1024-1031 since the switch to Linux system call numbers (ADR 0009). Before
+that they collided with Linux read/write/open/close and could not be called (N-33). Inside the
+kernel, the synchronous send path still looks endpoints up in a registry that nothing fills
+(N-47), so it cannot reach any endpoint.
 
 - **Verification is host-only.** The v0.26 IPC work (shared regions that really share their frames,
   the 16 KiB buffered message tier, capability checks with rights attenuation, and the receive
   buffer fix N-34) is covered by host unit tests and review only.
 - **Latency figures are in-kernel.** Any IPC latency figure measures in-kernel helpers, not a
   process-to-process round trip.
-- **The fix is v0.28 (X1):** a single Linux ABI, with the VeridianOS IPC calls in their own number
-  range.
 - **The IPC design itself is rebuilt in v0.28 (N-79 to N-91).** One endpoint is represented by
   several unrelated objects, receive and reply use tokens and pids as endpoint ids, SEND is the
   generic WRITE right that heap and stack capabilities also carry, delivered messages can be lost,
   the fast-path receive never blocks, and kernel memory used by IPC is not accounted. All of this
-  is unreachable from user space today.
+  is reachable from user space only since ADR 0009 and is not used by any program yet.
 
 ### Process model gaps (C5, ADR 0006; planned v0.27 sprint D)
 
@@ -202,19 +217,13 @@ A region's frames are freed only when no process maps it. Mappings that a child 
 `fork` are not counted, so registered regions are kept for the life of the system. This leaks
 memory, but it cannot free memory that is still in use.
 
-### KDE binaries in existing images predate the musl and shim fixes (N-37, N-42)
+### Binaries built before ADR 0009 do not run (rebuild required)
 
-v0.26.0 fixes the musl syscall-number patch (`faccessat` was delivered as `fchownat`, so a root
-access check changed the file's owner; errors were translated twice) and the ctype table of the
-glibc compatibility shim. These are build inputs: the kwin_wayland, plasmashell and dbus-daemon
-binaries in a KDE rootfs built before v0.26.0 still contain both defects. Rebuild them with the
-`tools/cross/` pipeline (`build-musl.sh` first) before using the KDE session. The BusyBox rootfs is
-not affected, because it uses the native libc.
-
-v0.27 adds native calls 355-359 for `prctl`, `flock`, `tkill`, `tgkill` and `waitid` to the musl
-patch (N-103). Binaries built with an older patch still get `prctl` (the kernel recognises it) and
-`flock`/`fsync` (told apart by argument), but their `tkill`, `tgkill` and `waitid` reach unrelated
-native calls, so `raise()` and `abort()` do not work in them until they are rebuilt.
+The kernel speaks Linux system call numbers since v0.27 (ADR 0009). Programs built before the
+switch, against the native numbering or the patched musl, call the wrong system calls: rebuild the
+BusyBox rootfs (`scripts/build-busybox-rootfs.sh headers`, `all`, `blockfs`) and the KDE stack
+(`tools/cross/build-all-kde.sh`, which starts with `build-musl.sh`). The KDE binaries in the
+v0.26 images also predate the shim fixes N-37 and N-42.
 
 ### Some socket calls still read user buffers directly (N-43)
 
@@ -249,8 +258,12 @@ garbage collector for reference cycles. Other file types pass normally.
 
 ### Frame-backed Wayland buffers (DRV-PERF-01, DESK-ARCH-01; with C7)
 
-`wl_shm` pools live in kernel heap memory and are not shared with a client. No user-space Wayland
-client exists yet to share them with.
+`wl_shm` pools live in kernel heap memory and are not shared with a client, so no client can draw
+through the built-in compositor. `userland/libwayland/wayland-client.c` is an early prototype of
+such a client, built by no script: it creates kernel surfaces with the attached buffer's size and
+pool at commit, but its pool memory is its own anonymous mapping, never the kernel pool, so
+nothing it draws reaches the screen until pools are shared. KDE uses upstream libwayland over Unix
+sockets instead.
 
 ### Capability lookup in debug builds
 

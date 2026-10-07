@@ -22,13 +22,13 @@
 
 #include <veridian/syscall.h>
 
-/* Raw syscall: write(fd, buf, len) via VeridianOS SYS_FILE_WRITE (53) */
+/* Raw syscall: write(fd, buf, len) via VeridianOS SYS_write (1) */
 static long do_write(int fd, const void *buf, unsigned long len) {
     long ret;
     __asm__ volatile (
         "syscall"
         : "=a" (ret)
-        : "0" ((long)SYS_FILE_WRITE),
+        : "0" ((long)SYS_write),
           "D" ((long)fd),     /* rdi = fd */
           "S" ((long)buf),    /* rsi = buf */
           "d" ((long)len)     /* rdx = len */
@@ -37,12 +37,12 @@ static long do_write(int fd, const void *buf, unsigned long len) {
     return ret;
 }
 
-/* Raw syscall: exit(code) via VeridianOS SYS_PROCESS_EXIT (11) */
+/* Raw syscall: exit(code) via VeridianOS SYS_exit_group (231) */
 static void do_exit(int code) {
     __asm__ volatile (
         "syscall"
         :
-        : "a" ((long)SYS_PROCESS_EXIT),
+        : "a" ((long)SYS_exit_group),
           "D" ((long)code)
         : "rcx", "r11", "memory"
     );

@@ -1060,7 +1060,7 @@ static void test_dir_search_permission(void)
  * clear again by the time the wait path copied the status out (what clears
  * it was not determined). ------------------------------------------------ */
 #define DF_GUARD 64
-#define VERIDIAN_SYS_WAIT 14 /* Syscall::ProcessWait */
+#include <veridian/sysno.h> /* system call numbers (ADR 0009) */
 
 static long raw_syscall4_df(long nr, long a, long b, long c, long d)
 {
@@ -1084,10 +1084,9 @@ static long raw_syscall4_df(long nr, long a, long b, long c, long d)
 static void test_direction_flag(void)
 {
 #if defined(__x86_64__)
-    /* The native wait call stores the status through the kernel's
-     * validated user copy (`rep movsb`). With DF set that copy ran
-     * downwards from the status address. Raw numbers are the native ABI;
-     * only 0-7 are translated as Linux numbers (N-33). */
+    /* wait4 stores the status through the kernel's validated user copy
+     * (`rep movsb`). With DF set that copy ran downwards from the status
+     * address. */
     unsigned char area[DF_GUARD + sizeof(int) + DF_GUARD];
     memset(area, 0x55, sizeof(area));
     /* Let the child become a zombie first, so the wait does not block: a
@@ -1098,7 +1097,7 @@ static void test_direction_flag(void)
         _exit(42);
     struct timespec nap = {0, 200 * 1000 * 1000};
     nanosleep(&nap, NULL);
-    long r = raw_syscall4_df(VERIDIAN_SYS_WAIT, pid, (long)(area + DF_GUARD), 0, 0);
+    long r = raw_syscall4_df(SYS_wait4, pid, (long)(area + DF_GUARD), 0, 0);
     int status;
     memcpy(&status, area + DF_GUARD, sizeof(status));
     int guards = 1;
@@ -1358,7 +1357,10 @@ static void test_signal_handlers(void)
     pid = fork();
     if (pid == 0) {
         d3_install(SIGSEGV, d3_on_segv, 0);
-        *(volatile int *)8 = 1;
+        /* An unmapped address, chosen at run time so the store is a real
+         * fault rather than something the compiler reasons about. */
+        volatile uintptr_t unmapped = 8;
+        *(volatile int *)unmapped = 1;
         _exit(1);
     }
     st = 0;

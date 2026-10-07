@@ -7,15 +7,15 @@
 //! - High-level: `Duration`, `Instant`, `SystemTime`
 //!
 //! Syscall mappings:
-//! - `clock_gettime`  -> SYS_CLOCK_GETTIME (160)
-//! - `clock_getres`   -> SYS_CLOCK_GETRES (161)
-//! - `nanosleep`      -> SYS_NANOSLEEP (162)
-//! - `gettimeofday`   -> SYS_GETTIMEOFDAY (163)
-//! - `get_uptime`     -> SYS_TIME_GET_UPTIME (100)
+//! - `clock_gettime`  -> SYS_clock_gettime (228)
+//! - `clock_getres`   -> SYS_clock_getres (229)
+//! - `nanosleep`      -> SYS_nanosleep (35)
+//! - `gettimeofday`   -> SYS_gettimeofday (96)
+//! - `get_uptime`     -> SYS_TIME_GET_UPTIME (1124)
 
 use super::{
-    syscall0, syscall2, syscall_result, SyscallError, SYS_CLOCK_GETRES, SYS_CLOCK_GETTIME,
-    SYS_GETTIMEOFDAY, SYS_NANOSLEEP, SYS_TIME_GET_UPTIME,
+    syscall0, syscall2, syscall_result, SyscallError, SYS_clock_getres, SYS_clock_gettime,
+    SYS_gettimeofday, SYS_nanosleep, SYS_TIME_GET_UPTIME,
 };
 
 // ============================================================================
@@ -61,25 +61,25 @@ pub struct Timeval {
 
 /// Get the current time from a clock source.
 pub fn clock_gettime(clock_id: usize, tp: *mut Timespec) -> Result<usize, SyscallError> {
-    let ret = unsafe { syscall2(SYS_CLOCK_GETTIME, clock_id, tp as usize) };
+    let ret = unsafe { syscall2(SYS_clock_gettime, clock_id, tp as usize) };
     syscall_result(ret)
 }
 
 /// Get the resolution of a clock source.
 pub fn clock_getres(clock_id: usize, res: *mut Timespec) -> Result<usize, SyscallError> {
-    let ret = unsafe { syscall2(SYS_CLOCK_GETRES, clock_id, res as usize) };
+    let ret = unsafe { syscall2(SYS_clock_getres, clock_id, res as usize) };
     syscall_result(ret)
 }
 
 /// Sleep for the specified duration.
 pub fn nanosleep(req: *const Timespec, rem: *mut Timespec) -> Result<usize, SyscallError> {
-    let ret = unsafe { syscall2(SYS_NANOSLEEP, req as usize, rem as usize) };
+    let ret = unsafe { syscall2(SYS_nanosleep, req as usize, rem as usize) };
     syscall_result(ret)
 }
 
 /// Get the current time of day.
 pub fn gettimeofday(tv: *mut Timeval, _tz: usize) -> Result<usize, SyscallError> {
-    let ret = unsafe { syscall2(SYS_GETTIMEOFDAY, tv as usize, 0) };
+    let ret = unsafe { syscall2(SYS_gettimeofday, tv as usize, 0) };
     syscall_result(ret)
 }
 

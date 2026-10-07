@@ -7,7 +7,7 @@
 
 use super::{validate_user_ptr_typed, SyscallError, SyscallResult};
 
-/// Get monotonic uptime in milliseconds (SYS_TIME_GET_UPTIME = 100)
+/// Get monotonic uptime in milliseconds (SYS_TIME_GET_UPTIME = 1124)
 ///
 /// # Returns
 /// Current uptime in milliseconds since boot.
@@ -15,7 +15,7 @@ pub fn sys_time_get_uptime() -> SyscallResult {
     Ok(crate::timer::get_uptime_ms() as usize)
 }
 
-/// Create a new timer (SYS_TIME_CREATE_TIMER = 101)
+/// Create a new timer (SYS_TIME_CREATE_TIMER = 1125)
 ///
 /// # Arguments
 /// - `mode`: 0 for OneShot, 1 for Periodic
@@ -50,7 +50,7 @@ pub fn sys_time_create_timer(
     }
 }
 
-/// Cancel an active timer (SYS_TIME_CANCEL_TIMER = 102)
+/// Cancel an active timer (SYS_TIME_CANCEL_TIMER = 1126)
 ///
 /// # Arguments
 /// - `timer_id`: The timer ID returned by `SYS_TIME_CREATE_TIMER`.
@@ -93,7 +93,7 @@ struct Timeval {
     tv_usec: i64,
 }
 
-/// Get the current time for a given clock (SYS_CLOCK_GETTIME = 160).
+/// Get the current time for a given clock (SYS_clock_gettime = 228).
 ///
 /// # Arguments
 /// - `clock_id`: CLOCK_REALTIME (0) or CLOCK_MONOTONIC (1).
@@ -121,7 +121,7 @@ pub fn sys_clock_gettime(clock_id: usize, tp_ptr: usize) -> SyscallResult {
     Ok(0)
 }
 
-/// Get clock resolution (SYS_CLOCK_GETRES = 161).
+/// Get clock resolution (SYS_clock_getres = 229).
 ///
 /// # Arguments
 /// - `clock_id`: CLOCK_REALTIME (0) or CLOCK_MONOTONIC (1).
@@ -147,7 +147,7 @@ pub fn sys_clock_getres(clock_id: usize, res_ptr: usize) -> SyscallResult {
     Ok(0)
 }
 
-/// Sleep for a specified duration (SYS_NANOSLEEP = 162).
+/// Sleep for a specified duration (SYS_nanosleep = 35).
 ///
 /// # Arguments
 /// - `req_ptr`: User-space pointer to a `struct timespec` with the requested
@@ -278,7 +278,7 @@ pub fn sys_clock_nanosleep(
     Ok(0)
 }
 
-/// Get time of day (SYS_GETTIMEOFDAY = 163).
+/// Get time of day (SYS_gettimeofday = 96).
 ///
 /// # Arguments
 /// - `tv_ptr`: User-space pointer to a `struct timeval`.

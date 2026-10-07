@@ -197,29 +197,95 @@ fn phys_to_kernel_vaddr(phys_addr: usize) -> usize {
 ///
 /// # Returns
 /// Request-specific value on success, or error.
+/// Whether a process may attach to `target`: never to itself or to a
+/// process that already has a tracer, and only to its own uid's processes
+/// unless it is root (Linux's EPERM cases, without capabilities).
+fn may_attach(
+    caller_pid: u64,
+    caller_uid: u32,
+    target_pid: u64,
+    target_uid: u32,
+    target_tracer: u64,
+) -> Result<(), SyscallError> {
+    if target_pid == caller_pid || target_tracer != 0 {
+        return Err(SyscallError::OperationNotPermitted);
+    }
+    if caller_uid != 0 && caller_uid != target_uid {
+        return Err(SyscallError::OperationNotPermitted);
+    }
+    Ok(())
+}
+
+/// The process `pid` if the caller is its tracer; ESRCH otherwise, as
+/// Linux answers requests about a process the caller does not trace.
+/// Reading or writing another process's memory needs this relationship;
+/// any process could peek and poke any pid.
+fn traced_by_caller(
+    pid: usize,
+    caller_pid: u64,
+) -> Result<alloc::sync::Arc<process::Process>, SyscallError> {
+    let target = process::find_process(process::ProcessId(pid as u64))
+        .ok_or(SyscallError::ProcessNotFound)?;
+    if target.tracer.load(core::sync::atomic::Ordering::Acquire) != caller_pid {
+        return Err(SyscallError::ProcessNotFound);
+    }
+    Ok(target)
+}
+
 pub fn sys_ptrace(request: usize, pid: usize, addr: usize, data: usize) -> SyscallResult {
+    use core::sync::atomic::Ordering;
+
     let req = PtraceRequest::try_from(request).map_err(|_| SyscallError::InvalidArgument)?;
-    let _caller = process::current_process().ok_or(SyscallError::InvalidState)?;
+    let caller = process::current_process().ok_or(SyscallError::InvalidState)?;
+    let caller_pid = caller.pid.0;
 
     match req {
         PtraceRequest::TraceMe => {
-            // Mark the current process as traceable by its parent.
-            // Full tracer relationship enforcement requires a `traced_by`
-            // field on the PCB and permission checks. For now, accept the
-            // call -- user-space debuggers expect this to succeed.
+            // The parent becomes the tracer; a process can be traced once.
+            let parent = caller.parent().ok_or(SyscallError::OperationNotPermitted)?;
+            caller
+                .tracer
+                .compare_exchange(0, parent.0, Ordering::AcqRel, Ordering::Acquire)
+                .map_err(|_| SyscallError::OperationNotPermitted)?;
+            Ok(0)
+        }
+
+        PtraceRequest::Attach => {
+            let target = process::find_process(process::ProcessId(pid as u64))
+                .ok_or(SyscallError::ProcessNotFound)?;
+            may_attach(
+                caller_pid,
+                caller.uid(),
+                target.pid.0,
+                target.uid(),
+                target.tracer.load(Ordering::Acquire),
+            )?;
+            // Lost race with another tracer: EPERM, as above.
+            target
+                .tracer
+                .compare_exchange(0, caller_pid, Ordering::AcqRel, Ordering::Acquire)
+                .map_err(|_| SyscallError::OperationNotPermitted)?;
+            Ok(0)
+        }
+
+        PtraceRequest::Detach => {
+            let target = traced_by_caller(pid, caller_pid)?;
+            target.tracer.store(0, Ordering::Release);
             Ok(0)
         }
 
         PtraceRequest::PeekText | PtraceRequest::PeekData => {
-            // Read a word from the tracee's address space via VAS.
-            let target_pid = process::ProcessId(pid as u64);
-            ptrace_peek(target_pid, addr)
+            // The word goes to *data and the call returns 0: the raw
+            // syscall's convention, which the C library wrappers unpack.
+            let target = traced_by_caller(pid, caller_pid)?;
+            let word = ptrace_peek(target.pid, addr)?;
+            super::userspace::write_user::<usize>(data, word)?;
+            Ok(0)
         }
 
         PtraceRequest::PokeText | PtraceRequest::PokeData => {
-            // Write a word to the tracee's address space via VAS.
-            let target_pid = process::ProcessId(pid as u64);
-            ptrace_poke(target_pid, addr, data)?;
+            let target = traced_by_caller(pid, caller_pid)?;
+            ptrace_poke(target.pid, addr, data)?;
             Ok(0)
         }
 
@@ -234,22 +300,6 @@ pub fn sys_ptrace(request: usize, pid: usize, addr: usize, data: usize) -> Sysca
         PtraceRequest::SetRegs => {
             // Write the tracee's register state from the tracer's buffer.
             // Same requirements as GetRegs.
-            let _target_pid = process::ProcessId(pid as u64);
-            Err(SyscallError::InvalidSyscall)
-        }
-
-        PtraceRequest::Attach => {
-            // Become the tracer of an existing process.
-            // Requires: permission check, tracer field on PCB, SIGSTOP
-            // delivery, scheduler integration to stop tracee.
-            let _target_pid = process::ProcessId(pid as u64);
-            Err(SyscallError::InvalidSyscall)
-        }
-
-        PtraceRequest::Detach => {
-            // Release the tracee, optionally delivering a signal.
-            // Requires: tracer relationship cleanup, signal delivery,
-            // resume tracee via scheduler.
             let _target_pid = process::ProcessId(pid as u64);
             Err(SyscallError::InvalidSyscall)
         }
@@ -270,5 +320,30 @@ pub fn sys_ptrace(request: usize, pid: usize, addr: usize, data: usize) -> Sysca
             let _target_pid = process::ProcessId(pid as u64);
             Err(SyscallError::InvalidSyscall)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// ptrace ATTACH: not to oneself or an already traced process, and
+    /// only to one's own uid unless root.
+    #[test]
+    fn attach_needs_same_uid_or_root_and_no_tracer() {
+        assert_eq!(may_attach(10, 1000, 20, 1000, 0), Ok(()));
+        assert_eq!(may_attach(10, 0, 20, 1000, 0), Ok(()));
+        assert_eq!(
+            may_attach(10, 1000, 20, 1001, 0),
+            Err(SyscallError::OperationNotPermitted)
+        );
+        assert_eq!(
+            may_attach(10, 1000, 10, 1000, 0),
+            Err(SyscallError::OperationNotPermitted)
+        );
+        assert_eq!(
+            may_attach(10, 0, 20, 1000, 30),
+            Err(SyscallError::OperationNotPermitted)
+        );
     }
 }

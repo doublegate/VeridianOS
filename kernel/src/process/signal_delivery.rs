@@ -34,10 +34,9 @@
 #![allow(dead_code)] // Signal delivery infrastructure -- cross-arch stubs + frame helpers
 
 #[allow(unused_imports)]
-use crate::{error::KernelError, println, process::pcb::Process, process::thread::Thread};
-
-/// Syscall number for SIG_RETURN (must match Syscall::SigReturn = 123).
-const SYS_SIGRETURN: u64 = 123;
+use crate::{
+    error::KernelError, println, process::pcb::Process, process::thread::Thread, syscall::Syscall,
+};
 
 /// Signal handler value indicating default action.
 const SIG_DFL: u64 = 0;
@@ -98,27 +97,38 @@ const SIGNAL_FRAME_SIZE: usize = core::mem::size_of::<SignalFrame>();
 ///
 /// This small code sequence is written onto the user stack just above the
 /// signal frame. When the signal handler returns, it executes this trampoline
-/// which calls `syscall(SYS_SIGRETURN, frame_ptr)`.
+/// which calls `rt_sigreturn(frame_ptr)`.
 ///
 /// Assembly:
 /// ```text
 ///   lea rdi, [rsp]      ; frame_ptr = current RSP (points to SignalFrame)
-///   mov rax, 123         ; SYS_SIGRETURN
+///   mov rax, Syscall::RtSigreturn
 ///   syscall
 ///   ud2                  ; should never reach here
 /// ```
 ///
 /// Encoded bytes (15 bytes):
 ///   48 8d 3c 24          lea rdi, [rsp]
-///   48 c7 c0 7b 00 00 00 mov rax, 123
+///   48 c7 c0 nn nn nn nn mov rax, imm32 (Syscall::RtSigreturn)
 ///   0f 05                syscall
 ///   0f 0b                ud2
 #[cfg(target_arch = "x86_64")]
 const SIGRETURN_TRAMPOLINE: [u8; 15] = [
-    0x48, 0x8d, 0x3c, 0x24, // lea rdi, [rsp]
-    0x48, 0xc7, 0xc0, 0x7b, 0x00, 0x00, 0x00, // mov rax, 123
-    0x0f, 0x05, // syscall
-    0x0f, 0x0b, // ud2
+    0x48,
+    0x8d,
+    0x3c,
+    0x24, // lea rdi, [rsp]
+    0x48,
+    0xc7,
+    0xc0,
+    Syscall::RtSigreturn as u8,
+    (Syscall::RtSigreturn as u32 >> 8) as u8,
+    (Syscall::RtSigreturn as u32 >> 16) as u8,
+    (Syscall::RtSigreturn as u32 >> 24) as u8, // mov rax, Syscall::RtSigreturn
+    0x0f,
+    0x05, // syscall
+    0x0f,
+    0x0b, // ud2
 ];
 
 /// Size of the trampoline code in bytes.
@@ -373,14 +383,14 @@ fn deliver_signal_to_handler(
 /// general-purpose registers (x0-x30), SP, PC, and PSTATE. A 4-instruction
 /// trampoline is placed immediately after the frame; when the signal handler
 /// returns, it executes the trampoline which invokes `svc #0` with
-/// `SYS_SIGRETURN` in w8 (the syscall number register on AArch64).
+/// `Syscall::RtSigreturn` in w8 (the syscall number register on AArch64).
 ///
 /// # Stack layout after delivery (growing downward)
 ///
 /// ```text
 /// [original SP]
 ///   ...
-/// [trampoline: add x0,sp,#0 / mov w8,#SYS_SIGRETURN / svc #0 / brk #0]
+/// [trampoline: add x0,sp,#0 / mov w8,#Syscall::RtSigreturn / svc #0 / brk #0]
 /// [Aarch64SignalFrame]         <- new SP
 ///   .trampoline_ret            = address of trampoline code
 ///   .signum
@@ -414,7 +424,7 @@ fn deliver_signal_aarch64(
         pstate: u64,
     }
 
-    // Trampoline: add x0, sp, #0 ; mov w8, #SYS_SIGRETURN ; svc #0 ; brk #0
+    // Trampoline: add x0, sp, #0 ; mov w8, #Syscall::RtSigreturn ; svc #0 ; brk #0
     const TRAMPOLINE: [u32; 4] = [
         0x910003e0, // add x0, sp, #0
         0x52800000, // mov w8,#0 (patched below)
@@ -467,9 +477,9 @@ fn deliver_signal_aarch64(
         );
     }
 
-    // Patch trampoline SYS_SIGRETURN number
+    // Patch trampoline Syscall::RtSigreturn number
     let mut tramp = TRAMPOLINE;
-    tramp[1] = 0x52800000 | ((SYS_SIGRETURN as u32) << 5); // mov w8,#SYS_SIGRETURN
+    tramp[1] = 0x52800000 | ((Syscall::RtSigreturn as u32) << 5); // mov w8, #Syscall::RtSigreturn
 
     // SAFETY: The trampoline is written immediately after the signal
     // frame at `sp + frame_size`. This address is within the same user
@@ -515,7 +525,7 @@ fn deliver_signal_aarch64(
 /// general-purpose registers (x1-x31; x0 is hardwired to zero), sepc, and
 /// sstatus. A 4-instruction trampoline is placed immediately after the frame;
 /// when the signal handler returns, it executes the trampoline which invokes
-/// `ecall` with `SYS_SIGRETURN` in a7 (the syscall number register on
+/// `ecall` with `Syscall::RtSigreturn` in a7 (the syscall number register on
 /// RISC-V).
 ///
 /// # Stack layout after delivery (growing downward)
@@ -523,7 +533,7 @@ fn deliver_signal_aarch64(
 /// ```text
 /// [original SP]
 ///   ...
-/// [trampoline: addi a0,sp,0 / addi a7,x0,SYS_SIGRETURN / ecall / ebreak]
+/// [trampoline: addi a0,sp,0 / addi a7,x0,Syscall::RtSigreturn / ecall / ebreak]
 /// [RiscvSignalFrame]           <- new SP
 ///   .trampoline_ret            = address of trampoline code
 ///   .signum
@@ -557,7 +567,7 @@ fn deliver_signal_riscv(
 
     const TRAMPOLINE: [u32; 4] = [
         0x00010513, // addi a0, sp, 0   (frame ptr via sp)
-        0x00000893, // addi a7, x0, imm (patched below with SYS_SIGRETURN)
+        0x00000893, // addi a7, x0, imm (patched below with Syscall::RtSigreturn)
         0x00000073, // ecall
         0x00100073, // ebreak
     ];
@@ -637,7 +647,7 @@ fn deliver_signal_riscv(
     }
 
     let mut tramp = TRAMPOLINE;
-    tramp[1] = 0x00000893 | ((SYS_SIGRETURN as u32) << 20); // addi a7,x0,SYS_SIGRETURN
+    tramp[1] = 0x00000893 | ((Syscall::RtSigreturn as u32) << 20); // addi a7, x0, Syscall::RtSigreturn
 
     // SAFETY: The trampoline is written immediately after the signal
     // frame at `sp + frame_size`. This address is within the same user

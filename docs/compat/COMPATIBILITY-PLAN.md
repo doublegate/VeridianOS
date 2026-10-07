@@ -58,16 +58,20 @@ User mode exists on x86_64 only. The native IPC syscalls 0-7 cannot be reached f
    `sscratch`.
 4. **Memory and CPUs:** SMP bring-up, TLB shootdown, and copy-on-write fork.
 
-## X1. One user ABI (v0.28)
+## X1. One user ABI (done in v0.27, ADR 0009)
 
-- **Linux numbering on every architecture.** x86_64 uses the numbers from `syscall_64.tbl`; arm64
-  and riscv64 use `scripts/syscall.tbl`. The dispatch tables are generated from the Linux tables at
-  build time.
-- **VeridianOS calls in their own range.** IPC and capability calls get a separate number range,
-  which also fixes N-33.
-- **One libc path.** Retire the native numbering and the patched-musl `__veridian_remap_syscall`
-  path, and rebuild against stock musl.
-- **One errno table,** shared by the kernel and libc.
+- **Linux numbering.** Done for x86_64: the numbers come from `abi/linux/syscall_64.tbl` through
+  `abi/syscalls.map` and `tools/compat/gen_syscalls.py`, which generates the kernel enum, the C
+  and Rust constants and `SYSCALL-NUMBERS.md`, checked in CI. arm64 and riscv64 get Linux's
+  generic table with their user mode (sprint E).
+- **VeridianOS calls in their own range.** Done: private numbers from 1024; N-33 fixed.
+- **One libc path.** Done: the native numbering and the musl remap patch are retired; musl is
+  built stock. Every program built before must be rebuilt.
+- **Linux semantics behind Linux numbers.** A review of every handler found about 80
+  differences (`docs/audit/ABI-REVIEW-2026-10-07.md`, N-182 to N-250). The ones the switch
+  exposed are fixed; the rest are scheduled into the X2 groups below and sprints D and F.
+- **One errno table,** shared by the kernel and libc: open (C3). Errors already reach every
+  caller as Linux errno values.
 
 ## X2. Syscall completion (v0.28 - v0.31)
 

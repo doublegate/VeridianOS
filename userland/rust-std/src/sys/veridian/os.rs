@@ -7,7 +7,7 @@
 //!
 //! VeridianOS passes environment variables on the initial stack following
 //! the Linux ABI convention: after argv comes a NULL-terminated envp array.
-//! The kernel also provides `SYS_PROCESS_GETENV (205)` for direct lookup.
+//! The kernel also provides `SYS_PROCESS_GETENV (1229)` for direct lookup.
 //!
 //! # Arguments
 //!
@@ -18,7 +18,7 @@ use alloc::{string::String, vec::Vec};
 
 use super::{
     path::{OsStr, OsString, Path, PathBuf},
-    syscall0, syscall_result, SyscallError, SYS_GETEGID, SYS_GETEUID, SYS_GETGID, SYS_GETUID,
+    syscall0, syscall_result, SyscallError, SYS_getegid, SYS_geteuid, SYS_getgid, SYS_getuid,
 };
 
 // ============================================================================
@@ -27,22 +27,22 @@ use super::{
 
 /// Get the real user ID.
 pub fn getuid() -> usize {
-    unsafe { syscall0(SYS_GETUID) as usize }
+    unsafe { syscall0(SYS_getuid) as usize }
 }
 
 /// Get the effective user ID.
 pub fn geteuid() -> usize {
-    unsafe { syscall0(SYS_GETEUID) as usize }
+    unsafe { syscall0(SYS_geteuid) as usize }
 }
 
 /// Get the real group ID.
 pub fn getgid() -> usize {
-    unsafe { syscall0(SYS_GETGID) as usize }
+    unsafe { syscall0(SYS_getgid) as usize }
 }
 
 /// Get the effective group ID.
 pub fn getegid() -> usize {
-    unsafe { syscall0(SYS_GETEGID) as usize }
+    unsafe { syscall0(SYS_getegid) as usize }
 }
 
 // ============================================================================
@@ -109,7 +109,7 @@ pub unsafe fn c_strlen(s: *const u8) -> usize {
 }
 
 /// Look up an environment variable by name via the kernel's
-/// `SYS_PROCESS_GETENV (205)` syscall.
+/// `SYS_PROCESS_GETENV (1229)` syscall.
 ///
 /// Returns the value as an `OsString`, or `None` if not found.
 pub fn getenv(name: &OsStr) -> Option<OsString> {
@@ -261,7 +261,7 @@ pub fn kernel_info(buf: *mut u8) -> Result<usize, SyscallError> {
 ///
 /// Returns the hostname as a byte vector on success.
 pub fn hostname() -> Result<OsString, SyscallError> {
-    use super::{syscall1, SYS_PROCESS_UNAME};
+    use super::{syscall1, SYS_uname};
 
     // uname fills a utsname structure.  We only need the nodename field.
     // The exact layout matches the kernel's UtsName.  For simplicity we
@@ -283,7 +283,7 @@ pub fn hostname() -> Result<OsString, SyscallError> {
         machine: [0; 65],
     };
 
-    let ret = unsafe { syscall1(SYS_PROCESS_UNAME, &mut buf as *mut Utsname as usize) };
+    let ret = unsafe { syscall1(SYS_uname, &mut buf as *mut Utsname as usize) };
     syscall_result(ret)?;
 
     // Find the NUL terminator in nodename.

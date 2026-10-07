@@ -5,7 +5,7 @@
  * SPDX-License-Identifier: MIT OR Apache-2.0
  *
  * Package query, search, list, info, and update operations.
- * Uses SYS_PKG_QUERY (92), SYS_PKG_LIST (93), and SYS_PKG_UPDATE (94)
+ * Uses SYS_PKG_QUERY (1116), SYS_PKG_LIST (1117), and SYS_PKG_UPDATE (1118)
  * syscalls for kernel-side operations.
  */
 
@@ -62,7 +62,7 @@ int vpkg_search(vpkg_db_t *db, const char *pattern)
 
     /*
      * First, query the kernel for available (not just installed) packages.
-     * SYS_PKG_QUERY (92) expects:
+     * SYS_PKG_QUERY (1116) expects:
      *   arg1: pointer to pattern string
      *   arg2: length of pattern
      *
@@ -103,7 +103,7 @@ int vpkg_list(vpkg_db_t *db)
         return VPKG_ERR_ARGS;
 
     /*
-     * Also invoke kernel-side list via SYS_PKG_LIST (93).
+     * Also invoke kernel-side list via SYS_PKG_LIST (1117).
      * arg1: pointer to output buffer (or 0 for console)
      * arg2: buffer size
      */
@@ -194,7 +194,7 @@ int vpkg_update(vpkg_db_t *db)
     printf("Updating package lists...\n");
 
     /*
-     * Invoke kernel-side repository update via SYS_PKG_UPDATE (94).
+     * Invoke kernel-side repository update via SYS_PKG_UPDATE (1118).
      *
      * The kernel's sys_pkg_update() expects:
      *   arg1: flags (0 = default)

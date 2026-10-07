@@ -117,19 +117,6 @@ pub fn load_user_program(
         *process.exe_path.lock() = String::from(path);
     }
 
-    // NOTE: Do NOT set `Process::linux_abi` here.
-    //
-    // Cross-compiled musl binaries (from tools/cross/) contain a patched
-    // __veridian_remap_syscall() function that translates Linux syscall
-    // numbers to VeridianOS numbers BEFORE the `syscall` instruction.
-    // The kernel therefore receives VeridianOS-native syscall numbers
-    // and must use the native ABI dispatch path (Syscall::try_from).
-    //
-    // If the flag were set, the kernel would re-translate the
-    // already-translated numbers through translate_linux_syscall(), causing
-    // wrong handler dispatch (e.g., VeridianOS mmap=20 would be treated
-    // as Linux writev=20).
-
     #[cfg(target_arch = "x86_64")]
     // SAFETY: raw_serial_str writes to the COM1 I/O port for diagnostic output.
     unsafe {

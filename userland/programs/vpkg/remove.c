@@ -6,7 +6,7 @@
  *
  * Package removal logic.
  * Checks for reverse dependencies before removing.
- * Uses SYS_PKG_REMOVE (91) syscall for kernel-side cleanup.
+ * Uses SYS_PKG_REMOVE (1115) syscall for kernel-side cleanup.
  */
 
 #include <stdio.h>
@@ -73,7 +73,7 @@ int vpkg_remove(vpkg_db_t *db, const char *name)
     printf("Removing %s...\n", name);
 
     /*
-     * Invoke kernel-side package removal via SYS_PKG_REMOVE (91).
+     * Invoke kernel-side package removal via SYS_PKG_REMOVE (1115).
      *
      * The kernel's sys_pkg_remove() expects:
      *   arg1 (rdi): pointer to package name string

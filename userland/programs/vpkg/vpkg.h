@@ -36,11 +36,7 @@
 /* Syscall numbers for package management (kernel/src/syscall/mod.rs)        */
 /* ========================================================================= */
 
-#define SYS_PKG_INSTALL     90
-#define SYS_PKG_REMOVE      91
-#define SYS_PKG_QUERY       92
-#define SYS_PKG_LIST        93
-#define SYS_PKG_UPDATE      94
+#include <veridian/sysno.h> /* system call numbers (ADR 0009) */
 
 /* ========================================================================= */
 /* Data structures                                                           */

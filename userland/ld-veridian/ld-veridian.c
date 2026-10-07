@@ -39,16 +39,7 @@
 
 /* ===== Syscall Numbers (from veridian/syscall.h) ===== */
 
-#define SYS_PROCESS_EXIT   11   /* sys_exit(code) */
-#define SYS_MEMORY_MAP     20   /* mmap(addr, len, prot, flags, fd, off) */
-#define SYS_MEMORY_UNMAP   21   /* munmap(addr, len) */
-#define SYS_MEMORY_PROTECT 22   /* mprotect(addr, len, prot) */
-#define SYS_FILE_OPEN      50   /* open(path, flags, mode) */
-#define SYS_FILE_CLOSE     51   /* close(fd) */
-#define SYS_FILE_READ      52   /* read(fd, buf, len) */
-#define SYS_FILE_WRITE     53   /* write(fd, buf, len) */
-#define SYS_FILE_SEEK      54   /* lseek(fd, off, whence) */
-#define SYS_ARCH_PRCTL     158  /* arch_prctl(code, addr) */
+#include "../libc/include/veridian/sysno.h" /* system call numbers (ADR 0009) */
 
 /* mmap / mprotect constants */
 #define PROT_NONE   0x0
@@ -421,7 +412,7 @@ static char *_strcat(char *dst, const char *src)
 static void _write_str(const char *s)
 {
     size_t len = _strlen(s);
-    _syscall3(SYS_FILE_WRITE, 2, (long)s, (long)len);
+    _syscall3(SYS_write, 2, (long)s, (long)len);
 }
 
 static void _write_hex(uint64_t val)
@@ -489,52 +480,52 @@ static void dl_debug_str(const char *prefix, const char *str)
 
 static long _open(const char *path, int flags)
 {
-    return _syscall3(SYS_FILE_OPEN, (long)path, (long)flags, 0);
+    return _syscall3(SYS_open, (long)path, (long)flags, 0);
 }
 
 static long _close(long fd)
 {
-    return _syscall1(SYS_FILE_CLOSE, fd);
+    return _syscall1(SYS_close, fd);
 }
 
 static long _read(long fd, void *buf, size_t len)
 {
-    return _syscall3(SYS_FILE_READ, fd, (long)buf, (long)len);
+    return _syscall3(SYS_read, fd, (long)buf, (long)len);
 }
 
 static long _pread(long fd, void *buf, size_t len, long offset)
 {
     /* seek then read -- no SYS_PREAD on VeridianOS */
-    long ret = _syscall3(SYS_FILE_SEEK, fd, offset, SEEK_SET);
+    long ret = _syscall3(SYS_lseek, fd, offset, SEEK_SET);
     if (ret < 0) return ret;
     return _read(fd, buf, len);
 }
 
 static void *_mmap(void *addr, size_t len, int prot, int flags, long fd, long off)
 {
-    return (void *)_syscall6(SYS_MEMORY_MAP,
+    return (void *)_syscall6(SYS_mmap,
         (long)addr, (long)len, (long)prot, (long)flags, fd, off);
 }
 
 static long _munmap(void *addr, size_t len)
 {
-    return _syscall2(SYS_MEMORY_UNMAP, (long)addr, (long)len);
+    return _syscall2(SYS_munmap, (long)addr, (long)len);
 }
 
 static long _mprotect(void *addr, size_t len, int prot)
 {
-    return _syscall3(SYS_MEMORY_PROTECT, (long)addr, (long)len, (long)prot);
+    return _syscall3(SYS_mprotect, (long)addr, (long)len, (long)prot);
 }
 
 static long _arch_prctl(int code, unsigned long addr)
 {
-    return _syscall2(SYS_ARCH_PRCTL, (long)code, (long)addr);
+    return _syscall2(SYS_arch_prctl, (long)code, (long)addr);
 }
 
 static void _exit(int code) __attribute__((noreturn));
 static void _exit(int code)
 {
-    _syscall1(SYS_PROCESS_EXIT, code);
+    _syscall1(SYS_exit_group, code);
     __builtin_unreachable();
 }
 

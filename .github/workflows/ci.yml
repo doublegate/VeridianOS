@@ -65,6 +65,19 @@ jobs:
                     cargo clippy --target "$t" -p veridian-kernel $BS -- -D warnings
                     echo "::endgroup::"
                   done
+            # Syscall numbers come from abi/syscalls.map; the generated
+            # kernel, libc and Rust copies must match it (ADR 0009).
+            - name: Syscall numbers are up to date
+              run: python3 tools/compat/gen_syscalls.py --check
+            # Host-run checks of native libc code (PNG decoder, C++ EH,
+            # division helpers, inet conversions, sscanf fields).
+            - name: Native libc host tests
+              run: |
+                  for t in userland/libc/tests/test-*.sh; do
+                    echo "::group::$t"
+                    bash "$t"
+                    echo "::endgroup::"
+                  done
             - name: Check vsh formatting
               run: cd userland/vsh && cargo fmt -- --check
             - name: Build vsh (x86_64)

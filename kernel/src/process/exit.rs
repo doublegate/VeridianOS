@@ -802,6 +802,18 @@ pub fn cleanup_process(process: &Process) {
         crate::fs::flock::cleanup_process_locks(process.pid.0);
     }
 
+    // An exiting tracer detaches from everything it traced (as on Linux),
+    // so a later process with the same pid inherits no tracing rights.
+    #[cfg(feature = "alloc")]
+    table::PROCESS_TABLE.for_each(|p| {
+        let _ = p.tracer.compare_exchange(
+            process.pid.0,
+            0,
+            core::sync::atomic::Ordering::AcqRel,
+            core::sync::atomic::Ordering::Acquire,
+        );
+    });
+
     // Reparent children to init if not zombie
     #[cfg(feature = "alloc")]
     {

@@ -19,6 +19,10 @@ pub const STDIN: FileDescriptor = 0;
 pub const STDOUT: FileDescriptor = 1;
 pub const STDERR: FileDescriptor = 2;
 
+/// Highest number of descriptors a process can hold (fds 0..MAX_FDS);
+/// RLIMIT_NOFILE reports it.
+pub const MAX_FDS: usize = 1024;
+
 /// File open flags
 #[derive(Debug, Clone, Copy)]
 pub struct OpenFlags {
@@ -416,7 +420,7 @@ impl FileTable {
     /// process's standard descriptors, which `open` would never hand out
     /// while they are still the implicit console.
     pub fn install(&self, fd: FileDescriptor, file: Arc<File>) -> Result<(), KernelError> {
-        if fd >= 1024 {
+        if fd >= MAX_FDS {
             return Err(KernelError::FsError(FsError::TooManyOpenFiles));
         }
         let mut files = self.files.write();
@@ -462,7 +466,7 @@ impl FileTable {
         // grew the table, so open returned one fd and stored the file at
         // another.
         let fd = files.len();
-        if fd >= 1024 {
+        if fd >= MAX_FDS {
             return Err(KernelError::FsError(FsError::TooManyOpenFiles));
         }
 
@@ -551,6 +555,14 @@ impl FileTable {
         min_fd: FileDescriptor,
         cloexec: bool,
     ) -> Result<FileDescriptor, KernelError> {
+        // F_DUPFD at or past the limit is EINVAL, and must not grow the
+        // table (it was unbounded).
+        if min_fd >= MAX_FDS {
+            return Err(KernelError::InvalidArgument {
+                name: "min_fd",
+                value: "at or above the descriptor limit",
+            });
+        }
         let file = self
             .get(fd)
             .ok_or(KernelError::FsError(FsError::BadFileDescriptor))?;
@@ -575,7 +587,7 @@ impl FileTable {
         // No free slot >= min_fd: append. (This used a separate counter
         // that could point at an occupied slot, which was then overwritten.)
         let new_fd = files.len();
-        if new_fd >= 1024 {
+        if new_fd >= MAX_FDS {
             return Err(KernelError::FsError(FsError::TooManyOpenFiles));
         }
         files.push(Some(entry));
@@ -594,6 +606,11 @@ impl FileTable {
             return Ok(());
         }
 
+        // A target past the limit is EBADF, and must not grow the table (it
+        // was unbounded).
+        if new_fd >= MAX_FDS {
+            return Err(KernelError::FsError(FsError::BadFileDescriptor));
+        }
         let file = self
             .get(old_fd)
             .ok_or(KernelError::FsError(FsError::BadFileDescriptor))?;
@@ -635,6 +652,11 @@ impl FileTable {
             });
         }
 
+        // A target past the limit is EBADF, and must not grow the table (it
+        // was unbounded).
+        if new_fd >= MAX_FDS {
+            return Err(KernelError::FsError(FsError::BadFileDescriptor));
+        }
         let file = self
             .get(old_fd)
             .ok_or(KernelError::FsError(FsError::BadFileDescriptor))?;
@@ -766,6 +788,27 @@ mod tests {
         (0..)
             .find(|&fd| fd >= files.len() || table.is_allocatable(&files, fd))
             .unwrap()
+    }
+
+    /// A dup target at or past MAX_FDS fails without growing the table
+    /// (it allocated up to whatever number the caller passed).
+    #[test]
+    fn dup_targets_are_bounded() {
+        let table = FileTable::new();
+        let fd = table.open_with_flags(some_file(), false).unwrap();
+        let before = table.files.read().len();
+        assert!(matches!(
+            table.dup2(fd, usize::MAX >> 4),
+            Err(KernelError::FsError(FsError::BadFileDescriptor))
+        ));
+        assert!(matches!(
+            table.dup3(fd, MAX_FDS, false),
+            Err(KernelError::FsError(FsError::BadFileDescriptor))
+        ));
+        assert!(table.dup_at_least(fd, MAX_FDS, false).is_err());
+        assert_eq!(table.files.read().len(), before);
+        assert_eq!(table.dup2(fd, MAX_FDS - 1), Ok(()));
+        assert!(table.get(MAX_FDS - 1).is_some());
     }
 
     #[test]

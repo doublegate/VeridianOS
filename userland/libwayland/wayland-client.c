@@ -12,8 +12,9 @@
  *   1. wl_display_connect() -> SYS_WL_CONNECT -> kernel allocates client
  *   2. wl_display_get_registry() -> local registry object
  *   3. wl_registry_bind() -> local proxy objects (compositor, shm, shell)
- *   4. Surface/buffer creation -> SYS_WL_CREATE_SURFACE / SYS_WL_CREATE_POOL
- *   5. Rendering -> write to SHM pool, SYS_WL_ATTACH + SYS_WL_COMMIT
+ *   4. Pools -> SYS_WL_CREATE_SHM_POOL; the kernel surface is created at
+ *      the first commit, at the attached buffer's size
+ *   5. Rendering -> write to the SHM pool, then SYS_WL_COMMIT_SURFACE
  *   6. Input -> SYS_WL_GET_EVENTS polls for input events
  */
 
@@ -23,18 +24,9 @@
  * VeridianOS Syscall Numbers (from kernel/src/syscall/mod.rs)
  * =================================================================== */
 
-#define SYS_WL_CONNECT        240
-#define SYS_WL_CREATE_SURFACE 241
-#define SYS_WL_CREATE_POOL    242
-#define SYS_WL_CREATE_BUFFER  243
-#define SYS_WL_ATTACH         244
-#define SYS_WL_COMMIT         245
-#define SYS_WL_DAMAGE         246
-#define SYS_WL_GET_EVENTS     247
+#include "../libc/include/veridian/sysno.h" /* system call numbers (ADR 0009) */
 
 /* Memory management syscalls */
-#define SYS_MEMORY_MAP        20
-#define SYS_MEMORY_UNMAP      21
 
 /* mmap flags */
 #define PROT_READ   1
@@ -203,7 +195,9 @@ struct wl_compositor {
 
 /* Surface */
 struct wl_surface {
-    uint32_t id;         /* kernel-assigned surface ID */
+    uint32_t id;         /* kernel surface ID; 0 until the first commit */
+    int32_t width;       /* size of the kernel surface */
+    int32_t height;
     wl_display *display;
     wl_buffer *attached_buffer;
     int32_t attach_x;
@@ -449,10 +443,13 @@ void wl_display_disconnect(wl_display *display)
     /* Free active pools */
     for (int i = 0; i < MAX_POOLS; i++) {
         if (s_pools[i].active && s_pools[i].data) {
-            syscall2(SYS_MEMORY_UNMAP, (long)s_pools[i].data, (long)s_pools[i].size);
+            syscall2(SYS_munmap, (long)s_pools[i].data, (long)s_pools[i].size);
             s_pools[i].data = (void *)0;
         }
     }
+
+    /* Release the kernel client and everything it owns. */
+    syscall1(SYS_WL_DISCONNECT, (long)display->client_id);
 
     display->connected = 0;
     s_initialized = 0;
@@ -592,21 +589,10 @@ wl_surface *wl_compositor_create_surface(wl_compositor *compositor)
     if (!compositor || !compositor->display)
         return (wl_surface *)0;
 
-    struct wl_surface *surface = alloc_surface();
-    if (!surface)
-        return (wl_surface *)0;
-
-    /* Ask kernel to create a compositor surface */
-    long ret = syscall4(SYS_WL_CREATE_SURFACE,
-                        (long)compositor->display->client_id,
-                        0, 0, 0);
-    if (ret < 0) {
-        surface->active = 0;
-        return (wl_surface *)0;
-    }
-
-    surface->id = (uint32_t)ret;
-    return surface;
+    /* The kernel surface needs a size and a pool, which a Wayland surface
+     * only gets from its first attached buffer, so it is created at the
+     * first commit (wl_surface_commit). */
+    return alloc_surface();
 }
 
 void wl_surface_destroy(wl_surface *surface)
@@ -623,33 +609,22 @@ void wl_surface_attach(wl_surface *surface, wl_buffer *buffer,
     if (!surface)
         return;
 
+    /* Takes effect at the next commit, as in Wayland. */
     surface->attached_buffer = buffer;
     surface->attach_x = x;
     surface->attach_y = y;
-
-    if (buffer && surface->display) {
-        syscall4(SYS_WL_ATTACH,
-                 (long)surface->display->client_id,
-                 (long)surface->id,
-                 (long)buffer->id,
-                 0);
-    }
 }
 
 void wl_surface_damage(wl_surface *surface, int32_t x, int32_t y,
                        int32_t width, int32_t height)
 {
-    if (!surface || !surface->display)
-        return;
-
-    /* Pack damage rect: x | y in first arg, w | h in second */
-    uint64_t xy = ((uint64_t)(uint32_t)x << 32) | (uint32_t)y;
-    uint64_t wh = ((uint64_t)(uint32_t)width << 32) | (uint32_t)height;
-    syscall4(SYS_WL_DAMAGE,
-             (long)surface->display->client_id,
-             (long)surface->id,
-             (long)xy,
-             (long)wh);
+    /* The kernel compositor redraws the whole surface on each commit, so
+     * damage needs no request of its own. */
+    (void)surface;
+    (void)x;
+    (void)y;
+    (void)width;
+    (void)height;
 }
 
 void wl_surface_commit(wl_surface *surface)
@@ -657,7 +632,26 @@ void wl_surface_commit(wl_surface *surface)
     if (!surface || !surface->display)
         return;
 
-    syscall2(SYS_WL_COMMIT,
+    wl_buffer *buffer = surface->attached_buffer;
+    if (buffer && buffer->pool &&
+        (surface->id == 0 || buffer->width != surface->width ||
+         buffer->height != surface->height)) {
+        /* First commit, or the buffer size changed: (re)create the kernel
+         * surface at the buffer's size, backed by its pool. */
+        long ret = syscall4(SYS_WL_CREATE_SURFACE,
+                            (long)surface->display->client_id,
+                            (long)buffer->width, (long)buffer->height,
+                            (long)buffer->pool->id);
+        if (ret < 0)
+            return;
+        surface->id = (uint32_t)ret;
+        surface->width = buffer->width;
+        surface->height = buffer->height;
+    }
+    if (surface->id == 0)
+        return;  /* nothing attached yet */
+
+    syscall2(SYS_WL_COMMIT_SURFACE,
              (long)surface->display->client_id,
              (long)surface->id);
 }
@@ -705,7 +699,7 @@ wl_shm_pool *wl_shm_create_pool(wl_shm *shm, int32_t fd, int32_t size)
         return (wl_shm_pool *)0;
 
     /* Ask kernel to create a SHM pool */
-    long ret = syscall2(SYS_WL_CREATE_POOL,
+    long ret = syscall2(SYS_WL_CREATE_SHM_POOL,
                         (long)shm->display->client_id,
                         (long)size);
     if (ret < 0) {
@@ -718,7 +712,7 @@ wl_shm_pool *wl_shm_create_pool(wl_shm *shm, int32_t fd, int32_t size)
 
     /* Attempt to mmap the pool for direct pixel access.
      * This may fail if the kernel does not support user-mappable SHM pools. */
-    long map_ret = syscall6(SYS_MEMORY_MAP,
+    long map_ret = syscall6(SYS_mmap,
                             0,
                             (long)size,
                             (long)(PROT_READ | PROT_WRITE),
@@ -738,7 +732,7 @@ void wl_shm_pool_destroy(wl_shm_pool *pool)
         return;
 
     if (pool->data) {
-        syscall2(SYS_MEMORY_UNMAP, (long)pool->data, (long)pool->size);
+        syscall2(SYS_munmap, (long)pool->data, (long)pool->size);
         pool->data = (void *)0;
     }
     pool->active = 0;
@@ -755,14 +749,9 @@ wl_buffer *wl_shm_pool_create_buffer(wl_shm_pool *pool, int32_t offset,
     if (!buffer)
         return (wl_buffer *)0;
 
-    /* Ask kernel to create a buffer within the pool */
-    long ret = syscall4(SYS_WL_CREATE_BUFFER,
-                        (long)pool->id,
-                        (long)((uint64_t)width << 32 | (uint32_t)height),
-                        (long)stride,
-                        (long)format);
-
-    buffer->id = (ret > 0) ? (uint32_t)ret : 0;
+    /* A buffer is a region of its pool; the kernel tracks pools and
+     * surfaces, not buffers. */
+    buffer->id = (uint32_t)(buffer - s_buffers) + 1;
     buffer->pool = pool;
     buffer->offset = offset;
     buffer->width = width;

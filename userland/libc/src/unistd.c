@@ -206,8 +206,9 @@ int isatty(int fd)
     struct winsize ws;
     if (ioctl(fd, TIOCGWINSZ, &ws) == 0)
         return 1;
-    /* ioctl failed — check if errno suggests "not a terminal" */
-    if (errno != ENOTTY)
+    /* A bad descriptor stays EBADF; any other failure means "not a
+     * terminal" (POSIX isatty). */
+    if (errno != EBADF)
         errno = ENOTTY;
     return 0;
 }

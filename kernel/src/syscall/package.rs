@@ -23,7 +23,7 @@ fn read_user_string(ptr: usize, max_len: usize) -> Result<String, SyscallError> 
     super::userspace::read_user_cstr(ptr, max_len)
 }
 
-/// Install a package by name (SYS_PKG_INSTALL = 90)
+/// Install a package by name (SYS_PKG_INSTALL = 1114)
 ///
 /// # Arguments
 /// - `name_ptr`: Pointer to null-terminated package name string
@@ -65,7 +65,7 @@ pub fn sys_pkg_install(name_ptr: usize, _name_len: usize) -> SyscallResult {
     }
 }
 
-/// Remove a package (SYS_PKG_REMOVE = 91)
+/// Remove a package (SYS_PKG_REMOVE = 1115)
 ///
 /// # Arguments
 /// - `name_ptr`: Pointer to null-terminated package name string
@@ -106,7 +106,7 @@ pub fn sys_pkg_remove(name_ptr: usize, _name_len: usize) -> SyscallResult {
     }
 }
 
-/// Query package information (SYS_PKG_QUERY = 92)
+/// Query package information (SYS_PKG_QUERY = 1116)
 ///
 /// # Arguments
 /// - `name_ptr`: Pointer to null-terminated package name string
@@ -124,7 +124,7 @@ pub fn sys_pkg_query(name_ptr: usize, _info_buf: usize) -> SyscallResult {
     }
 }
 
-/// List installed packages (SYS_PKG_LIST = 93)
+/// List installed packages (SYS_PKG_LIST = 1117)
 ///
 /// # Arguments
 /// - `buf_ptr`: Pointer to buffer for writing package count
@@ -149,7 +149,7 @@ pub fn sys_pkg_list(buf_ptr: usize, _buf_size: usize) -> SyscallResult {
     Ok(count)
 }
 
-/// Update repository index (SYS_PKG_UPDATE = 94)
+/// Update repository index (SYS_PKG_UPDATE = 1118)
 ///
 /// # Arguments
 /// - `flags`: Reserved for future use (must be 0)

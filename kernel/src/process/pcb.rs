@@ -3,7 +3,7 @@
 //! The PCB is the core data structure representing a process in the kernel.
 //! It contains all the information needed to manage a process.
 
-use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 #[cfg(feature = "alloc")]
 extern crate alloc;
@@ -161,6 +161,10 @@ pub struct Process {
     /// Process group ID (initialized to pid)
     pub pgid: AtomicU64,
 
+    /// The pid of the process tracing this one with ptrace, or 0. Not
+    /// inherited on fork, as on Linux.
+    pub tracer: AtomicU64,
+
     /// Session ID (initialized to pid)
     pub sid: AtomicU64,
 
@@ -206,13 +210,6 @@ pub struct Process {
     /// User-space address of robust futex list head
     /// (set by set_robust_list syscall for cleanup on abnormal exit).
     pub robust_list_head: AtomicU64,
-
-    /// The process makes Linux x86_64 syscalls (raw Linux numbers, Linux
-    /// errno). Inherited on fork. Nothing sets it yet: the patched musl
-    /// remaps numbers in user space (see the loader), and X1 makes the
-    /// Linux ABI the only one. It replaces a 64-PID global bitmap
-    /// (SYS-INC-01).
-    pub linux_abi: AtomicBool,
 }
 
 /// Memory usage statistics
@@ -290,6 +287,7 @@ impl Process {
             uid: AtomicU32::new(0),
             gid: AtomicU32::new(0),
             pgid: AtomicU64::new(pid.0),
+            tracer: AtomicU64::new(0),
             sid: AtomicU64::new(pid.0),
             env_vars: Mutex::new(BTreeMap::new()),
             #[cfg(feature = "alloc")]
@@ -303,7 +301,6 @@ impl Process {
             container_id: AtomicU64::new(0),
             clear_child_tid: AtomicU64::new(0),
             robust_list_head: AtomicU64::new(0),
-            linux_abi: AtomicBool::new(false),
         }
     }
 

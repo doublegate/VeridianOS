@@ -1,0 +1,46 @@
+getcwd: give the getcwd(NULL, 0) buffer its own scope.
+
+Same behaviour; GCC 16 could not see that the local buffer only ever
+leaves through strdup and warned -Wreturn-local-addr.
+
+--- a/src/unistd/getcwd.c	2026-10-07 10:06:15.516488567 -0400
++++ b/src/unistd/getcwd.c	2026-10-07 10:06:15.517369693 -0400
+@@ -4,22 +4,27 @@
+ #include <string.h>
+ #include "syscall.h"
+ 
+-char *getcwd(char *buf, size_t size)
++static int do_getcwd(char *buf, size_t size)
+ {
+-	char tmp[buf ? 1 : PATH_MAX];
+-	if (!buf) {
+-		buf = tmp;
+-		size = sizeof tmp;
+-	} else if (!size) {
+-		errno = EINVAL;
+-		return 0;
+-	}
+ 	long ret = syscall(SYS_getcwd, buf, size);
+ 	if (ret < 0)
+-		return 0;
++		return -1;
+ 	if (ret == 0 || buf[0] != '/') {
+ 		errno = ENOENT;
++		return -1;
++	}
++	return 0;
++}
++
++char *getcwd(char *buf, size_t size)
++{
++	if (!buf) {
++		char tmp[PATH_MAX];
++		return do_getcwd(tmp, sizeof tmp) ? 0 : strdup(tmp);
++	}
++	if (!size) {
++		errno = EINVAL;
+ 		return 0;
+ 	}
+-	return buf == tmp ? strdup(buf) : buf;
++	return do_getcwd(buf, size) ? 0 : buf;
+ }

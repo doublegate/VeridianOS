@@ -37,20 +37,7 @@ extern long write(int fd, const void *buf, unsigned long count);
 /* ========================================================================= */
 
 /* Syscall numbers -- MUST match kernel/src/syscall/mod.rs enum values */
-#define SYS_EVENTFD         331
-#define SYS_EVENTFD_READ    332
-#define SYS_EVENTFD_WRITE   333
-#define SYS_TIMERFD_CREATE  334
-#define SYS_TIMERFD_SETTIME 335
-#define SYS_TIMERFD_GETTIME 336
-#define SYS_SIGNALFD        337
-#define SYS_GETRANDOM       330
-#define SYS_INOTIFY_INIT1   290
-#define SYS_INOTIFY_ADD_WATCH 291
-#define SYS_INOTIFY_RM_WATCH 292
-#define SYS_MADVISE         233
-#define SYS_GETAUXVAL       270
-#define SYS_MEMFD_CREATE    319
+#include <veridian/sysno.h> /* system call numbers (ADR 0009) */
 
 /* ========================================================================= */
 /* eventfd                                                                   */
@@ -58,7 +45,7 @@ extern long write(int fd, const void *buf, unsigned long count);
 
 int eventfd(unsigned int initval, int flags)
 {
-    long ret = __veridian_syscall(SYS_EVENTFD, (long)initval, (long)flags,
+    long ret = __veridian_syscall(SYS_eventfd2, (long)initval, (long)flags,
                                   0, 0, 0, 0);
     if (ret < 0) {
         errno = (int)(-ret);
@@ -95,7 +82,7 @@ int eventfd_write(int fd, eventfd_t value)
 
 int timerfd_create(int clockid, int flags)
 {
-    long ret = __veridian_syscall(SYS_TIMERFD_CREATE, (long)clockid,
+    long ret = __veridian_syscall(SYS_timerfd_create, (long)clockid,
                                   (long)flags, 0, 0, 0, 0);
     if (ret < 0) {
         errno = (int)(-ret);
@@ -108,7 +95,7 @@ int timerfd_settime(int fd, int flags,
                     const struct itimerspec *new_value,
                     struct itimerspec *old_value)
 {
-    long ret = __veridian_syscall(SYS_TIMERFD_SETTIME, (long)fd, (long)flags,
+    long ret = __veridian_syscall(SYS_timerfd_settime, (long)fd, (long)flags,
                                   (long)new_value, (long)old_value, 0, 0);
     if (ret < 0) {
         errno = (int)(-ret);
@@ -119,7 +106,7 @@ int timerfd_settime(int fd, int flags,
 
 int timerfd_gettime(int fd, struct itimerspec *curr_value)
 {
-    long ret = __veridian_syscall(SYS_TIMERFD_GETTIME, (long)fd,
+    long ret = __veridian_syscall(SYS_timerfd_gettime, (long)fd,
                                   (long)curr_value, 0, 0, 0, 0);
     if (ret < 0) {
         errno = (int)(-ret);
@@ -139,7 +126,7 @@ int inotify_init(void)
 
 int inotify_init1(int flags)
 {
-    long ret = __veridian_syscall(SYS_INOTIFY_INIT1, (long)flags,
+    long ret = __veridian_syscall(SYS_inotify_init1, (long)flags,
                                   0, 0, 0, 0, 0);
     if (ret < 0) {
         errno = (int)(-ret);
@@ -150,7 +137,7 @@ int inotify_init1(int flags)
 
 int inotify_add_watch(int fd, const char *pathname, uint32_t mask)
 {
-    long ret = __veridian_syscall(SYS_INOTIFY_ADD_WATCH, (long)fd,
+    long ret = __veridian_syscall(SYS_inotify_add_watch, (long)fd,
                                   (long)pathname, (long)mask, 0, 0, 0);
     if (ret < 0) {
         errno = (int)(-ret);
@@ -161,7 +148,7 @@ int inotify_add_watch(int fd, const char *pathname, uint32_t mask)
 
 int inotify_rm_watch(int fd, int wd)
 {
-    long ret = __veridian_syscall(SYS_INOTIFY_RM_WATCH, (long)fd, (long)wd,
+    long ret = __veridian_syscall(SYS_inotify_rm_watch, (long)fd, (long)wd,
                                   0, 0, 0, 0);
     if (ret < 0) {
         errno = (int)(-ret);
@@ -176,7 +163,7 @@ int inotify_rm_watch(int fd, int wd)
 
 int madvise(void *addr, size_t length, int advice)
 {
-    long ret = __veridian_syscall(SYS_MADVISE, (long)addr, (long)length,
+    long ret = __veridian_syscall(SYS_madvise, (long)addr, (long)length,
                                   (long)advice, 0, 0, 0);
     if (ret < 0) {
         errno = (int)(-ret);
@@ -242,7 +229,7 @@ unsigned long getauxval(unsigned long type)
 
 int memfd_create(const char *name, unsigned int flags)
 {
-    long ret = __veridian_syscall(SYS_MEMFD_CREATE, (long)name, (long)flags,
+    long ret = __veridian_syscall(SYS_memfd_create, (long)name, (long)flags,
                                   0, 0, 0, 0);
     if (ret < 0) {
         errno = (int)(-ret);

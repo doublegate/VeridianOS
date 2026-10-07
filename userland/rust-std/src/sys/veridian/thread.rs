@@ -6,12 +6,12 @@
 //! - High-level: `Thread` (spawn/join/sleep/park/unpark)
 //!
 //! Syscall mappings:
-//! - `clone`       -> SYS_THREAD_CLONE (46)
-//! - `thread_exit` -> SYS_THREAD_EXIT (41)
-//! - `gettid`      -> SYS_THREAD_GETTID (43)
-//! - `futex_wait`  -> SYS_FUTEX_WAIT (201)
-//! - `futex_wake`  -> SYS_FUTEX_WAKE (202)
-//! - `nanosleep`   -> SYS_NANOSLEEP (162)
+//! - `clone`       -> SYS_clone (56)
+//! - `thread_exit` -> SYS_exit (60)
+//! - `gettid`      -> SYS_gettid (186)
+//! - `futex_wait`  -> SYS_FUTEX_WAIT (1225)
+//! - `futex_wake`  -> SYS_FUTEX_WAKE (1226)
+//! - `nanosleep`   -> SYS_nanosleep (35)
 
 extern crate alloc;
 use alloc::{boxed::Box, sync::Arc};
@@ -19,8 +19,8 @@ use core::sync::atomic::{AtomicI32, AtomicU32, Ordering};
 
 use super::{
     syscall0, syscall1, syscall3, syscall5, syscall_result, time::Timespec, SyscallError,
-    SYS_FUTEX_WAIT, SYS_FUTEX_WAKE, SYS_NANOSLEEP, SYS_THREAD_CLONE, SYS_THREAD_EXIT,
-    SYS_THREAD_GETTID,
+    SYS_FUTEX_WAIT, SYS_FUTEX_WAKE, SYS_nanosleep, SYS_clone, SYS_exit,
+    SYS_gettid,
 };
 
 // ============================================================================
@@ -73,7 +73,7 @@ pub fn clone(
 ) -> Result<usize, SyscallError> {
     let ret = unsafe {
         syscall5(
-            SYS_THREAD_CLONE,
+            SYS_clone,
             flags,
             stack as usize,
             parent_tidptr as usize,
@@ -87,7 +87,7 @@ pub fn clone(
 /// Exit the current thread.
 pub fn thread_exit(status: usize) -> ! {
     unsafe {
-        syscall1(SYS_THREAD_EXIT, status);
+        syscall1(SYS_exit, status);
     }
     loop {
         core::hint::spin_loop();
@@ -96,7 +96,7 @@ pub fn thread_exit(status: usize) -> ! {
 
 /// Get the current thread ID.
 pub fn gettid() -> usize {
-    unsafe { syscall0(SYS_THREAD_GETTID) as usize }
+    unsafe { syscall0(SYS_gettid) as usize }
 }
 
 /// Futex wait: block the calling thread if `*uaddr == expected`.
@@ -250,7 +250,7 @@ impl Thread {
         // x86_64 jumps to the child with rsp = stack and rdi = arg (if we
         // use CLONE_SETTLS to pass fn ptr via TLS, or via a wrapper).
         //
-        // For VeridianOS, SYS_THREAD_CLONE takes:
+        // For VeridianOS, SYS_clone takes:
         //   arg1 = flags
         //   arg2 = stack top
         //   arg3 = parent_tidptr
@@ -355,7 +355,7 @@ impl Thread {
         };
         unsafe {
             let _ = super::syscall2(
-                SYS_NANOSLEEP,
+                SYS_nanosleep,
                 &req as *const Timespec as usize,
                 0, // rem = NULL
             );

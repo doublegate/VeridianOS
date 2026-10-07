@@ -195,9 +195,20 @@ What does not work yet: `docs/KNOWN-LIMITATIONS.md`.
     - CI: the QEMU validation matrices from the three documents (flat-Image loads at two
       addresses, `gic-version=3`, `virtualization=on`, `-M sifive_u`, `sv48=off`, `aia=`, no
       PIT/HPET, no COM1, `pxb-pcie`, x2APIC above 255 CPUs) as boot jobs.
+  - [x] **X1, Linux system call numbers (pulled forward from v0.28; ADR 0009):** generated from
+    `abi/syscalls.map`, VeridianOS calls from 1024 (fixes N-33), stock musl, every caller and
+    the kernel's embedded code moved; rootfs suite and tri-arch boot pass. Handler review:
+    N-182 to N-250 (`docs/audit/ABI-REVIEW-2026-10-07.md`), N-182 to N-189 fixed.
+  - [ ] **Credentials and paths (N-248 to N-250, pulled forward from v0.30 at the user's
+    request):** setresuid/setresgid/getres*id, setreuid/setregid, setgroups/getgroups, permission
+    checks on effective ids and groups; fchdir; chroot through the path resolver; utimensat.
+    Native libc and musl use them.
+  - [ ] **ABI review, security and D/F items:** N-190 to N-193 (permission checks) with D;
+    N-207, N-209 to N-211, N-217, N-221, N-222, N-225 with D3/threads/scheduling syscalls;
+    N-231, N-235 to N-238 with F1.
   - [ ] **Release:** tri-arch boot with `-smp 4`, runtime suite, CHANGELOG, tag.
-- [ ] **v0.28.0:** one Linux ABI with VeridianOS IPC in its own range (X1, fixes N-33), plus the
-  process, signal, time and file syscall tiers.
+- [ ] **v0.28.0:** the process, signal, time and file syscall tiers (X2 groups, with the open
+  ABI-review findings N-194 to N-247 that belong to them).
   - [ ] **IPC redesign** (makes IPC reachable and correct): one endpoint object held by capabilities,
     typed rights, per-endpoint sender/receiver wait queues, one-shot reply capabilities and a direct
     switch with time-slice donation on call, notifications, accounting and rollback, the derivation
@@ -223,7 +234,8 @@ What does not work yet: `docs/KNOWN-LIMITATIONS.md`.
     (N-130), stable getdents cookies (N-124), atomic O_APPEND (N-126).
   - [ ] **v0.29 memory architecture:** lazy anonymous memory, range-indexed mappings, per-frame
     refcount array, ranged per-mm TLB flushes, per-VMA locks (N-143).
-  - [ ] **v0.30 credentials:** real/effective/saved/fs ids and groups (N-131).
+  - [ ] **v0.30 credentials remainder:** filesystem ids, Linux capabilities, setuid exec
+    (N-131; the id triples and groups move to v0.27 as N-248).
 - [ ] **C6 (staged from v0.28):** move drivers, protocols and codecs out of the kernel.
 - [ ] **C7:** serve a native user-space Wayland client; frame-backed `wl_shm` (DRV-PERF-01,
   DESK-ARCH-01).

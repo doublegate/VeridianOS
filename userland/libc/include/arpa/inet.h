@@ -19,6 +19,9 @@ extern "C" {
 /** Convert IPv4 dotted-decimal string to network byte order. */
 in_addr_t inet_addr(const char *cp);
 
+/** Parse an IPv4 numbers-and-dots address; returns 1 if valid, else 0. */
+int inet_aton(const char *cp, struct in_addr *inp);
+
 /** Convert IPv4 address to dotted-decimal string. */
 char *inet_ntoa(struct in_addr in);
 

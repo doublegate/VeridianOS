@@ -20,6 +20,7 @@
 #include <veridian/fcntl.h>
 #include <veridian/mman.h>
 #include <sys/utsname.h>
+#include <poll.h>
 #include <time.h>
 #include <errno.h>
 #include <stddef.h>
@@ -49,13 +50,13 @@ static inline long __syscall_ret(long r)
 ssize_t read(int fd, void *buf, size_t count)
 {
     return (ssize_t)__syscall_ret(
-        veridian_syscall3(SYS_FILE_READ, fd, buf, count));
+        veridian_syscall3(SYS_read, fd, buf, count));
 }
 
 ssize_t write(int fd, const void *buf, size_t count)
 {
     return (ssize_t)__syscall_ret(
-        veridian_syscall3(SYS_FILE_WRITE, fd, buf, count));
+        veridian_syscall3(SYS_write, fd, buf, count));
 }
 
 int open(const char *pathname, int flags, ...)
@@ -69,66 +70,58 @@ int open(const char *pathname, int flags, ...)
         __builtin_va_end(ap);
     }
     return (int)__syscall_ret(
-        veridian_syscall3(SYS_FILE_OPEN, pathname, flags, mode));
+        veridian_syscall3(SYS_open, pathname, flags, mode));
 }
 
 int close(int fd)
 {
     return (int)__syscall_ret(
-        veridian_syscall1(SYS_FILE_CLOSE, fd));
+        veridian_syscall1(SYS_close, fd));
 }
 
 off_t lseek(int fd, off_t offset, int whence)
 {
     return (off_t)__syscall_ret(
-        veridian_syscall3(SYS_FILE_SEEK, fd, offset, whence));
+        veridian_syscall3(SYS_lseek, fd, offset, whence));
 }
 
 int dup(int oldfd)
 {
     return (int)__syscall_ret(
-        veridian_syscall1(SYS_FILE_DUP, oldfd));
+        veridian_syscall1(SYS_dup, oldfd));
 }
 
 int dup2(int oldfd, int newfd)
 {
     return (int)__syscall_ret(
-        veridian_syscall2(SYS_FILE_DUP2, oldfd, newfd));
+        veridian_syscall2(SYS_dup2, oldfd, newfd));
 }
 
 int pipe(int pipefd[2])
 {
     return (int)__syscall_ret(
-        veridian_syscall1(SYS_FILE_PIPE, pipefd));
+        veridian_syscall1(SYS_pipe, pipefd));
 }
 
 int unlink(const char *pathname)
 {
     return (int)__syscall_ret(
-        veridian_syscall1(SYS_FILE_UNLINK, pathname));
+        veridian_syscall1(SYS_unlink, pathname));
 }
 
 int fsync(int fd)
 {
-    /* The explicit 0 tells the kernel this is fsync, not flock: both are
-     * syscall 73, distinguished by the second argument (N-120). */
-    return (int)__syscall_ret(
-        veridian_syscall2(SYS_FS_FSYNC, fd, 0));
+    return (int)__syscall_ret(veridian_syscall1(SYS_fsync, fd));
 }
 
 int flock(int fd, int operation)
 {
-    /* Syscall 73 with a nonzero operation is flock (0 would mean fsync). */
-    if (operation == 0) {
-        errno = EINVAL;
-        return -1;
-    }
-    return (int)__syscall_ret(veridian_syscall2(SYS_FS_FSYNC, fd, operation));
+    return (int)__syscall_ret(veridian_syscall2(SYS_flock, fd, operation));
 }
 
 void sync(void)
 {
-    veridian_syscall0(SYS_FS_SYNC);
+    veridian_syscall0(SYS_sync);
 }
 
 int fcntl(int fd, int cmd, ...)
@@ -139,25 +132,25 @@ int fcntl(int fd, int cmd, ...)
     arg = __builtin_va_arg(ap, long);
     __builtin_va_end(ap);
     return (int)__syscall_ret(
-        veridian_syscall3(SYS_FILE_FCNTL, fd, cmd, arg));
+        veridian_syscall3(SYS_fcntl, fd, cmd, arg));
 }
 
 int rename(const char *oldpath, const char *newpath)
 {
     return (int)__syscall_ret(
-        veridian_syscall2(SYS_FILE_RENAME, oldpath, newpath));
+        veridian_syscall2(SYS_rename, oldpath, newpath));
 }
 
 int access(const char *pathname, int mode)
 {
     return (int)__syscall_ret(
-        veridian_syscall2(SYS_FILE_ACCESS, pathname, mode));
+        veridian_syscall2(SYS_access, pathname, mode));
 }
 
 ssize_t readlink(const char *pathname, char *buf, size_t bufsiz)
 {
     return (ssize_t)__syscall_ret(
-        veridian_syscall3(SYS_FILE_READLINK, pathname, buf, bufsiz));
+        veridian_syscall3(SYS_readlink, pathname, buf, bufsiz));
 }
 
 /* ========================================================================= */
@@ -167,19 +160,19 @@ ssize_t readlink(const char *pathname, char *buf, size_t bufsiz)
 int stat(const char *pathname, struct stat *statbuf)
 {
     return (int)__syscall_ret(
-        veridian_syscall2(SYS_FILE_STAT_PATH, pathname, statbuf));
+        veridian_syscall2(SYS_stat, pathname, statbuf));
 }
 
 int fstat(int fd, struct stat *statbuf)
 {
     return (int)__syscall_ret(
-        veridian_syscall2(SYS_FILE_STAT, fd, statbuf));
+        veridian_syscall2(SYS_fstat, fd, statbuf));
 }
 
 int lstat(const char *pathname, struct stat *statbuf)
 {
     return (int)__syscall_ret(
-        veridian_syscall2(SYS_FILE_LSTAT, pathname, statbuf));
+        veridian_syscall2(SYS_lstat, pathname, statbuf));
 }
 
 /* ========================================================================= */
@@ -189,13 +182,13 @@ int lstat(const char *pathname, struct stat *statbuf)
 int mkdir(const char *pathname, mode_t mode)
 {
     return (int)__syscall_ret(
-        veridian_syscall2(SYS_DIR_MKDIR, pathname, mode));
+        veridian_syscall2(SYS_mkdir, pathname, mode));
 }
 
 int rmdir(const char *pathname)
 {
     return (int)__syscall_ret(
-        veridian_syscall1(SYS_DIR_RMDIR, pathname));
+        veridian_syscall1(SYS_rmdir, pathname));
 }
 
 /* ========================================================================= */
@@ -205,34 +198,34 @@ int rmdir(const char *pathname)
 pid_t fork(void)
 {
     return (pid_t)__syscall_ret(
-        veridian_syscall0(SYS_PROCESS_FORK));
+        veridian_syscall0(SYS_fork));
 }
 
 int execve(const char *pathname, char *const argv[], char *const envp[])
 {
     return (int)__syscall_ret(
-        veridian_syscall3(SYS_PROCESS_EXEC, pathname, argv, envp));
+        veridian_syscall3(SYS_execve, pathname, argv, envp));
 }
 
 void _exit(int status)
 {
-    veridian_syscall1(SYS_PROCESS_EXIT, status);
+    veridian_syscall1(SYS_exit_group, status);
     __builtin_unreachable();
 }
 
 pid_t getpid(void)
 {
-    return (pid_t)veridian_syscall0(SYS_PROCESS_GETPID);
+    return (pid_t)veridian_syscall0(SYS_getpid);
 }
 
 pid_t getppid(void)
 {
-    return (pid_t)veridian_syscall0(SYS_PROCESS_GETPPID);
+    return (pid_t)veridian_syscall0(SYS_getppid);
 }
 
 pid_t gettid(void)
 {
-    return (pid_t)veridian_syscall0(SYS_THREAD_GETTID);
+    return (pid_t)veridian_syscall0(SYS_gettid);
 }
 
 /*
@@ -245,7 +238,7 @@ long veridian_thread_clone(unsigned long flags,
                            int *child_tidptr,
                            void *tls)
 {
-    return __syscall_ret(veridian_syscall5(SYS_THREAD_CLONE,
+    return __syscall_ret(veridian_syscall5(SYS_clone,
                                            flags,
                                            (long)newsp,
                                            (long)parent_tidptr,
@@ -255,13 +248,13 @@ long veridian_thread_clone(unsigned long flags,
 
 int arch_prctl(int code, unsigned long addr)
 {
-    return (int)__syscall_ret(veridian_syscall2(SYS_ARCH_PRCTL, code, addr));
+    return (int)__syscall_ret(veridian_syscall2(SYS_arch_prctl, code, addr));
 }
 
 pid_t waitpid(pid_t pid, int *wstatus, int options)
 {
     return (pid_t)__syscall_ret(
-        veridian_syscall3(SYS_PROCESS_WAIT, pid, wstatus, options));
+        veridian_syscall3(SYS_wait4, pid, wstatus, options));
 }
 
 pid_t wait(int *wstatus)
@@ -272,13 +265,13 @@ pid_t wait(int *wstatus)
 int sched_yield(void)
 {
     return (int)__syscall_ret(
-        veridian_syscall0(SYS_PROCESS_YIELD));
+        veridian_syscall0(SYS_sched_yield));
 }
 
 int kill(pid_t pid, int sig)
 {
     return (int)__syscall_ret(
-        veridian_syscall2(SYS_PROCESS_KILL, pid, sig));
+        veridian_syscall2(SYS_kill, pid, sig));
 }
 
 /* ========================================================================= */
@@ -287,7 +280,7 @@ int kill(pid_t pid, int sig)
 
 char *getcwd(char *buf, size_t size)
 {
-    long ret = veridian_syscall2(SYS_PROCESS_GETCWD, buf, size);
+    long ret = veridian_syscall2(SYS_getcwd, buf, size);
     if (ret < 0) {
         errno = (int)(-ret);
         return NULL;
@@ -298,7 +291,7 @@ char *getcwd(char *buf, size_t size)
 int chdir(const char *path)
 {
     return (int)__syscall_ret(
-        veridian_syscall1(SYS_PROCESS_CHDIR, path));
+        veridian_syscall1(SYS_chdir, path));
 }
 
 /* ========================================================================= */
@@ -306,7 +299,7 @@ int chdir(const char *path)
 /* ========================================================================= */
 
 /*
- * brk/sbrk are implemented here because they directly map to SYS_MEMORY_BRK.
+ * brk/sbrk are implemented here because they directly map to SYS_brk.
  * The malloc implementation in stdlib.c uses sbrk() from here.
  *
  * DESIGN NOTES (B-9 hardening for cc1-scale workloads):
@@ -350,12 +343,12 @@ static int __brk_ensure(void *target)
     if (chunked > aligned)
         aligned = chunked;
 
-    long ret = veridian_syscall1(SYS_MEMORY_BRK, (long)aligned);
+    long ret = veridian_syscall1(SYS_brk, (long)aligned);
     if (ret < 0 || (unsigned long)ret < t) {
         /* Kernel could not satisfy even the minimum request.
          * Try the exact target without chunk rounding. */
         unsigned long exact = (t + PAGE_SIZE_LIBC - 1) & ~(PAGE_SIZE_LIBC - 1);
-        ret = veridian_syscall1(SYS_MEMORY_BRK, (long)exact);
+        ret = veridian_syscall1(SYS_brk, (long)exact);
         if (ret < 0 || (unsigned long)ret < t) {
             errno = ENOMEM;
             return -1;
@@ -374,7 +367,7 @@ static int __brk_init(void)
     if (__brk_cur)
         return 0;
 
-    long cur = veridian_syscall1(SYS_MEMORY_BRK, 0);
+    long cur = veridian_syscall1(SYS_brk, 0);
     if (cur <= 0) {
         errno = ENOMEM;
         return -1;
@@ -424,14 +417,9 @@ void *sbrk(intptr_t increment)
 void *mmap(void *addr, size_t length, int prot, int flags,
            int fd, off_t offset)
 {
-    /* Pack fd and offset into a single arg5 to match kernel's unpacking:
-     *   fd     = fd_offset >> 32
-     *   offset = fd_offset & 0xFFFFFFFF
-     * The kernel syscall ABI only passes 5 arguments, so we must encode
-     * both values into one parameter. */
-    long fd_offset = ((long)(unsigned int)fd << 32) | ((unsigned long)offset & 0xFFFFFFFF);
-    long ret = veridian_syscall5(SYS_MEMORY_MAP, addr, length,
-                                  prot, flags, (void *)fd_offset);
+    /* Linux layout: fd in the fifth argument, offset in the sixth. */
+    long ret = veridian_syscall6(SYS_mmap, addr, length, prot, flags, fd,
+                                 offset);
     if (ret < 0) {
         errno = (int)(-ret);
         return MAP_FAILED;
@@ -442,13 +430,13 @@ void *mmap(void *addr, size_t length, int prot, int flags,
 int munmap(void *addr, size_t length)
 {
     return (int)__syscall_ret(
-        veridian_syscall2(SYS_MEMORY_UNMAP, addr, length));
+        veridian_syscall2(SYS_munmap, addr, length));
 }
 
 int mprotect(void *addr, size_t length, int prot)
 {
     return (int)__syscall_ret(
-        veridian_syscall3(SYS_MEMORY_PROTECT, addr, length, prot));
+        veridian_syscall3(SYS_mprotect, addr, length, prot));
 }
 
 /* ========================================================================= */
@@ -457,34 +445,34 @@ int mprotect(void *addr, size_t length, int prot)
 
 uid_t getuid(void)
 {
-    return (uid_t)veridian_syscall0(SYS_GETUID);
+    return (uid_t)veridian_syscall0(SYS_getuid);
 }
 
 uid_t geteuid(void)
 {
-    return (uid_t)veridian_syscall0(SYS_GETEUID);
+    return (uid_t)veridian_syscall0(SYS_geteuid);
 }
 
 gid_t getgid(void)
 {
-    return (gid_t)veridian_syscall0(SYS_GETGID);
+    return (gid_t)veridian_syscall0(SYS_getgid);
 }
 
 gid_t getegid(void)
 {
-    return (gid_t)veridian_syscall0(SYS_GETEGID);
+    return (gid_t)veridian_syscall0(SYS_getegid);
 }
 
 int setuid(uid_t uid)
 {
     return (int)__syscall_ret(
-        veridian_syscall1(SYS_SETUID, uid));
+        veridian_syscall1(SYS_setuid, uid));
 }
 
 int setgid(gid_t gid)
 {
     return (int)__syscall_ret(
-        veridian_syscall1(SYS_SETGID, gid));
+        veridian_syscall1(SYS_setgid, gid));
 }
 
 /* ========================================================================= */
@@ -494,30 +482,30 @@ int setgid(gid_t gid)
 int setpgid(pid_t pid, pid_t pgid)
 {
     return (int)__syscall_ret(
-        veridian_syscall2(SYS_SETPGID, pid, pgid));
+        veridian_syscall2(SYS_setpgid, pid, pgid));
 }
 
 pid_t getpgid(pid_t pid)
 {
     return (pid_t)__syscall_ret(
-        veridian_syscall1(SYS_GETPGID, pid));
+        veridian_syscall1(SYS_getpgid, pid));
 }
 
 pid_t getpgrp(void)
 {
-    return (pid_t)veridian_syscall0(SYS_GETPGRP);
+    return (pid_t)veridian_syscall0(SYS_getpgrp);
 }
 
 pid_t setsid(void)
 {
     return (pid_t)__syscall_ret(
-        veridian_syscall0(SYS_SETSID));
+        veridian_syscall0(SYS_setsid));
 }
 
 pid_t getsid(pid_t pid)
 {
     return (pid_t)__syscall_ret(
-        veridian_syscall1(SYS_GETSID, pid));
+        veridian_syscall1(SYS_getsid, pid));
 }
 
 /* ========================================================================= */
@@ -527,7 +515,7 @@ pid_t getsid(pid_t pid)
 int ioctl(int fd, unsigned long request, void *argp)
 {
     return (int)__syscall_ret(
-        veridian_syscall3(SYS_FILE_IOCTL, fd, request, argp));
+        veridian_syscall3(SYS_ioctl, fd, request, argp));
 }
 
 /* ========================================================================= */
@@ -537,54 +525,54 @@ int ioctl(int fd, unsigned long request, void *argp)
 int link(const char *oldpath, const char *newpath)
 {
     return (int)__syscall_ret(
-        veridian_syscall2(SYS_FILE_LINK, oldpath, newpath));
+        veridian_syscall2(SYS_link, oldpath, newpath));
 }
 
 int symlink(const char *target, const char *linkpath)
 {
     return (int)__syscall_ret(
-        veridian_syscall2(SYS_FILE_SYMLINK, target, linkpath));
+        veridian_syscall2(SYS_symlink, target, linkpath));
 }
 
 int chmod(const char *pathname, mode_t mode)
 {
     return (int)__syscall_ret(
-        veridian_syscall2(SYS_FILE_CHMOD, pathname, mode));
+        veridian_syscall2(SYS_chmod, pathname, mode));
 }
 
 int fchmod(int fd, mode_t mode)
 {
     return (int)__syscall_ret(
-        veridian_syscall2(SYS_FILE_FCHMOD, fd, mode));
+        veridian_syscall2(SYS_fchmod, fd, mode));
 }
 
 mode_t umask(mode_t mask)
 {
-    return (mode_t)veridian_syscall1(SYS_PROCESS_UMASK, mask);
+    return (mode_t)veridian_syscall1(SYS_umask, mask);
 }
 
 int truncate(const char *path, off_t length)
 {
     return (int)__syscall_ret(
-        veridian_syscall2(SYS_FILE_TRUNCATE_PATH, path, length));
+        veridian_syscall2(SYS_truncate, path, length));
 }
 
 int ftruncate(int fd, off_t length)
 {
     return (int)__syscall_ret(
-        veridian_syscall2(SYS_FILE_TRUNCATE, fd, length));
+        veridian_syscall2(SYS_ftruncate, fd, length));
 }
 
 ssize_t pread(int fd, void *buf, size_t count, off_t offset)
 {
     return (ssize_t)__syscall_ret(
-        veridian_syscall4(SYS_FILE_PREAD, fd, buf, count, offset));
+        veridian_syscall4(SYS_pread64, fd, buf, count, offset));
 }
 
 ssize_t pwrite(int fd, const void *buf, size_t count, off_t offset)
 {
     return (ssize_t)__syscall_ret(
-        veridian_syscall4(SYS_FILE_PWRITE, fd, buf, count, offset));
+        veridian_syscall4(SYS_pwrite64, fd, buf, count, offset));
 }
 
 /* ========================================================================= */
@@ -601,32 +589,32 @@ int openat(int dirfd, const char *pathname, int flags, ...)
         __builtin_va_end(ap);
     }
     return (int)__syscall_ret(
-        veridian_syscall4(SYS_FILE_OPENAT, dirfd, pathname, flags, mode));
+        veridian_syscall4(SYS_openat, dirfd, pathname, flags, mode));
 }
 
 int fstatat(int dirfd, const char *pathname, struct stat *statbuf, int flags)
 {
     return (int)__syscall_ret(
-        veridian_syscall4(SYS_FILE_FSTATAT, dirfd, pathname, statbuf, flags));
+        veridian_syscall4(SYS_newfstatat, dirfd, pathname, statbuf, flags));
 }
 
 int unlinkat(int dirfd, const char *pathname, int flags)
 {
     return (int)__syscall_ret(
-        veridian_syscall3(SYS_FILE_UNLINKAT, dirfd, pathname, flags));
+        veridian_syscall3(SYS_unlinkat, dirfd, pathname, flags));
 }
 
 int mkdirat(int dirfd, const char *pathname, mode_t mode)
 {
     return (int)__syscall_ret(
-        veridian_syscall3(SYS_FILE_MKDIRAT, dirfd, pathname, mode));
+        veridian_syscall3(SYS_mkdirat, dirfd, pathname, mode));
 }
 
 int renameat(int olddirfd, const char *oldpath,
              int newdirfd, const char *newpath)
 {
     return (int)__syscall_ret(
-        veridian_syscall4(SYS_FILE_RENAMEAT, olddirfd, oldpath,
+        veridian_syscall4(SYS_renameat, olddirfd, oldpath,
                           newdirfd, newpath));
 }
 
@@ -634,10 +622,10 @@ int renameat(int olddirfd, const char *oldpath,
 /* poll                                                                      */
 /* ========================================================================= */
 
-int poll(struct pollfd *fds, unsigned long nfds, int timeout)
+int poll(struct pollfd *fds, nfds_t nfds, int timeout)
 {
     return (int)__syscall_ret(
-        veridian_syscall3(SYS_FILE_POLL, fds, nfds, timeout));
+        veridian_syscall3(SYS_poll, fds, nfds, timeout));
 }
 
 /* ========================================================================= */
@@ -684,20 +672,20 @@ int futex_requeue(int *uaddr, int wake_count, int *uaddr2, int requeue_count)
 int chown(const char *pathname, uid_t owner, gid_t group)
 {
     return (int)__syscall_ret(
-        veridian_syscall3(SYS_FILE_CHOWN, pathname, owner, group));
+        veridian_syscall3(SYS_chown, pathname, owner, group));
 }
 
 int fchown(int fd, uid_t owner, gid_t group)
 {
     return (int)__syscall_ret(
-        veridian_syscall3(SYS_FILE_FCHOWN, fd, owner, group));
+        veridian_syscall3(SYS_fchown, fd, owner, group));
 }
 
 int lchown(const char *pathname, uid_t owner, gid_t group)
 {
     /* Same as chown — symlink following not implemented */
     return (int)__syscall_ret(
-        veridian_syscall3(SYS_FILE_CHOWN, pathname, owner, group));
+        veridian_syscall3(SYS_chown, pathname, owner, group));
 }
 
 /* ========================================================================= */
@@ -707,7 +695,7 @@ int lchown(const char *pathname, uid_t owner, gid_t group)
 int mknod(const char *pathname, mode_t mode, dev_t dev)
 {
     return (int)__syscall_ret(
-        veridian_syscall3(SYS_FILE_MKNOD, pathname, mode, dev));
+        veridian_syscall3(SYS_mknod, pathname, mode, dev));
 }
 
 /* ========================================================================= */
@@ -721,5 +709,5 @@ int uname(struct utsname *buf)
         return -1;
     }
     return (int)__syscall_ret(
-        veridian_syscall1(SYS_PROCESS_UNAME, buf));
+        veridian_syscall1(SYS_uname, buf));
 }

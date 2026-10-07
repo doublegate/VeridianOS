@@ -101,11 +101,11 @@ int getloadavg(double loadavg[], int nelem)
 
 #include <veridian/syscall.h>
 
-/* The signals pending while blocked (native 360, rt_sigpending). It
- * reported none. */
+/* The signals pending while blocked (rt_sigpending). */
 int sigpending(sigset_t *set)
 {
-    long ret = veridian_syscall2(360, (long)set, (long)sizeof(*set));
+    long ret = veridian_syscall2(SYS_rt_sigpending, (long)set,
+                                 (long)sizeof(*set));
     if (ret < 0) {
         errno = (int)(-ret);
         return -1;
@@ -403,7 +403,9 @@ int utime(const char *filename, const struct utimbuf *times)
 /* utimes (sys/time.h)                                                       */
 /* ========================================================================= */
 
-int utimes(const char *filename, const void *times)
+#include <sys/time.h>
+
+int utimes(const char *filename, const struct timeval times[2])
 {
     (void)filename; (void)times;
     return 0;
@@ -631,21 +633,21 @@ int getnameinfo(const struct sockaddr *sa, socklen_t salen,
  * interface defined in <veridian/syscall.h>.
  *
  * Syscall number layout:
- *   SYS_SOCKET_CREATE  (220) -- socket()
- *   SYS_SOCKET_BIND    (221) -- bind()
- *   SYS_SOCKET_LISTEN  (222) -- listen()
- *   SYS_SOCKET_CONNECT (223) -- connect()
- *   SYS_SOCKET_ACCEPT  (224) -- accept()
+ *   SYS_socket  (220) -- socket()
+ *   SYS_bind    (221) -- bind()
+ *   SYS_listen  (222) -- listen()
+ *   SYS_connect (42) -- connect()
+ *   SYS_accept  (224) -- accept()
  *   SYS_SOCKET_SEND    (225) -- send()
  *   SYS_SOCKET_RECV    (226) -- recv()
  *   SYS_SOCKET_CLOSE   (227) -- shutdown() (best-effort)
- *   SYS_SOCKET_PAIR    (228) -- socketpair()
- *   SYS_NET_SENDTO     (250) -- sendto()
- *   SYS_NET_RECVFROM   (251) -- recvfrom()
- *   SYS_NET_GETSOCKNAME(252) -- getsockname()
- *   SYS_NET_GETPEERNAME(253) -- getpeername()
- *   SYS_NET_SETSOCKOPT (254) -- setsockopt()
- *   SYS_NET_GETSOCKOPT (255) -- getsockopt()
+ *   SYS_socketpair    (228) -- socketpair()
+ *   SYS_sendto     (250) -- sendto()
+ *   SYS_recvfrom   (251) -- recvfrom()
+ *   SYS_getsockname(252) -- getsockname()
+ *   SYS_getpeername(253) -- getpeername()
+ *   SYS_setsockopt (54) -- setsockopt()
+ *   SYS_getsockopt (55) -- getsockopt()
  */
 
 #include <veridian/syscall.h>
@@ -675,7 +677,7 @@ static inline long __sock_ret(long r)
 int socket(int domain, int type, int protocol)
 {
     (void)protocol;
-    long ret = veridian_syscall2(SYS_SOCKET_CREATE, domain, type);
+    long ret = veridian_syscall2(SYS_socket, domain, type);
     return (int)__sock_ret(ret);
 }
 
@@ -686,7 +688,7 @@ int socket(int domain, int type, int protocol)
  */
 int connect(int sockfd, const struct sockaddr *addr, socklen_t addrlen)
 {
-    long ret = veridian_syscall3(SYS_SOCKET_CONNECT, sockfd, addr, addrlen);
+    long ret = veridian_syscall3(SYS_connect, sockfd, addr, addrlen);
     return (int)__sock_ret(ret);
 }
 
@@ -697,7 +699,7 @@ int connect(int sockfd, const struct sockaddr *addr, socklen_t addrlen)
  */
 int bind(int sockfd, const struct sockaddr *addr, socklen_t addrlen)
 {
-    long ret = veridian_syscall3(SYS_SOCKET_BIND, sockfd, addr, addrlen);
+    long ret = veridian_syscall3(SYS_bind, sockfd, addr, addrlen);
     return (int)__sock_ret(ret);
 }
 
@@ -708,7 +710,7 @@ int bind(int sockfd, const struct sockaddr *addr, socklen_t addrlen)
  */
 int listen(int sockfd, int backlog)
 {
-    long ret = veridian_syscall2(SYS_SOCKET_LISTEN, sockfd, backlog);
+    long ret = veridian_syscall2(SYS_listen, sockfd, backlog);
     return (int)__sock_ret(ret);
 }
 
@@ -722,7 +724,7 @@ int listen(int sockfd, int backlog)
  */
 int accept(int sockfd, struct sockaddr *addr, socklen_t *addrlen)
 {
-    long ret = veridian_syscall3(SYS_SOCKET_ACCEPT, sockfd, addr, addrlen);
+    long ret = veridian_syscall3(SYS_accept, sockfd, addr, addrlen);
     if (ret < 0) {
         errno = (int)(-ret);
         return -1;
@@ -764,7 +766,7 @@ long recv(int sockfd, void *buf, unsigned long len, int flags)
 int setsockopt(int sockfd, int level, int optname,
                const void *optval, unsigned int optlen)
 {
-    long ret = veridian_syscall5(SYS_NET_SETSOCKOPT,
+    long ret = veridian_syscall5(SYS_setsockopt,
                                   sockfd, level, optname, optval, optlen);
     return (int)__sock_ret(ret);
 }
@@ -779,7 +781,7 @@ int setsockopt(int sockfd, int level, int optname,
 int getsockopt(int sockfd, int level, int optname,
                void *optval, unsigned int *optlen)
 {
-    long ret = veridian_syscall5(SYS_NET_GETSOCKOPT,
+    long ret = veridian_syscall5(SYS_getsockopt,
                                   sockfd, level, optname, optval, optlen);
     if (ret < 0) {
         errno = (int)(-ret);

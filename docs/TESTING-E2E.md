@@ -137,12 +137,12 @@ This is the simplest possible test: a freestanding binary that writes a message 
 - **No CRT required** -- provides its own `_start` entry point
 - **Multi-architecture** -- includes x86_64, AArch64, and RISC-V 64 syscall wrappers
 
-Syscall numbers used (from `kernel/src/syscall/mod.rs`):
+Syscall numbers used (Linux numbers, from `<veridian/sysno.h>`; ADR 0009):
 
 | Syscall | Number | Arguments |
 |---------|--------|-----------|
-| `SYS_FILE_WRITE` | 53 | fd, buf_ptr, count |
-| `SYS_PROCESS_EXIT` | 11 | status |
+| `SYS_write` | 1 | fd, buf_ptr, count |
+| `SYS_exit_group` | 231 | status |
 
 **Expected output:**
 ```
@@ -257,14 +257,17 @@ For x86_64 user-space programs, use `-mcmodel=small` (the default). The kernel u
 
 ### Wrong syscall numbers
 
-Verify that the syscall numbers in your test match `kernel/src/syscall/mod.rs` and `toolchain/sysroot/include/veridian/syscall.h`. Key numbers:
+Take the numbers from `<veridian/sysno.h>` (generated from `abi/syscalls.map`; the full table is
+`docs/compat/SYSCALL-NUMBERS.md`) instead of writing them by hand. They are Linux's x86_64
+numbers (ADR 0009); a program built before v0.27 uses the old native numbers and must be rebuilt.
+Key numbers:
 
 | Syscall | Number |
 |---------|--------|
-| `SYS_FILE_WRITE` | 53 |
-| `SYS_PROCESS_EXIT` | 11 |
-| `SYS_PROCESS_GETPID` | 15 |
-| `SYS_MEMORY_BRK` | 23 |
+| `SYS_write` | 1 |
+| `SYS_exit_group` | 231 |
+| `SYS_getpid` | 39 |
+| `SYS_brk` | 12 |
 
 ## File Locations
 

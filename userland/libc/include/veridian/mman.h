@@ -5,7 +5,7 @@
  * SPDX-License-Identifier: MIT OR Apache-2.0
  *
  * Memory mapping flags, protection bits, and mmap/munmap/mprotect declarations.
- * Corresponds to kernel SYS_MEMORY_MAP (20) and SYS_MEMORY_UNMAP (21).
+ * Corresponds to kernel SYS_mmap (9) and SYS_munmap (11).
  */
 
 #ifndef VERIDIAN_MMAN_H

@@ -11,23 +11,23 @@
 //!   `symlink`, `readlink`, `hard_link`, `metadata`, `set_permissions`
 //!
 //! Syscall mappings:
-//! - `open`    -> SYS_FILE_OPEN (50)
-//! - `close`   -> SYS_FILE_CLOSE (51)
-//! - `read`    -> SYS_FILE_READ (52)
-//! - `write`   -> SYS_FILE_WRITE (53)
-//! - `seek`    -> SYS_FILE_SEEK (54)
-//! - `stat`    -> SYS_FILE_STAT (55)
-//! - `unlink`  -> SYS_FILE_UNLINK (157)
-//! - `rename`  -> SYS_FILE_RENAME (154)
-//! - `link`    -> SYS_FILE_LINK (155)
-//! - `symlink` -> SYS_FILE_SYMLINK (156)
-//! - `readlink`-> SYS_FILE_READLINK (152)
-//! - `mkdir`   -> SYS_DIR_MKDIR (60)
-//! - `rmdir`   -> SYS_DIR_RMDIR (61)
-//! - `opendir` -> SYS_DIR_OPENDIR (62)
-//! - `readdir` -> SYS_DIR_READDIR (63)
-//! - `closedir`-> SYS_DIR_CLOSEDIR (64)
-//! - `fsync`   -> SYS_FS_FSYNC (73)
+//! - `open`    -> SYS_open (2)
+//! - `close`   -> SYS_close (3)
+//! - `read`    -> SYS_read (0)
+//! - `write`   -> SYS_write (1)
+//! - `seek`    -> SYS_lseek (8)
+//! - `stat`    -> SYS_fstat (5)
+//! - `unlink`  -> SYS_unlink (87)
+//! - `rename`  -> SYS_rename (82)
+//! - `link`    -> SYS_link (86)
+//! - `symlink` -> SYS_symlink (88)
+//! - `readlink`-> SYS_readlink (89)
+//! - `mkdir`   -> SYS_mkdir (83)
+//! - `rmdir`   -> SYS_rmdir (84)
+//! - `opendir` -> SYS_DIR_OPENDIR (1086)
+//! - `readdir` -> SYS_DIR_READDIR (1087)
+//! - `closedir`-> SYS_DIR_CLOSEDIR (1088)
+//! - `fsync`   -> SYS_fsync (74)
 
 extern crate alloc;
 use alloc::vec::Vec;
@@ -35,11 +35,11 @@ use alloc::vec::Vec;
 use super::{
     fd::SharedFd,
     path::{OsStr, OsString, Path, PathBuf},
-    syscall1, syscall2, syscall3, syscall_result, SyscallError, SYS_DIR_CLOSEDIR, SYS_DIR_MKDIR,
-    SYS_DIR_OPENDIR, SYS_DIR_READDIR, SYS_DIR_RMDIR, SYS_FILE_CLOSE, SYS_FILE_DUP, SYS_FILE_DUP2,
-    SYS_FILE_LINK, SYS_FILE_OPEN, SYS_FILE_PIPE, SYS_FILE_READ, SYS_FILE_READLINK, SYS_FILE_RENAME,
-    SYS_FILE_SEEK, SYS_FILE_STAT, SYS_FILE_STAT_PATH, SYS_FILE_SYMLINK, SYS_FILE_TRUNCATE,
-    SYS_FILE_UNLINK, SYS_FILE_WRITE, SYS_FS_FSYNC,
+    syscall1, syscall2, syscall3, syscall_result, SyscallError, SYS_DIR_CLOSEDIR, SYS_mkdir,
+    SYS_DIR_OPENDIR, SYS_DIR_READDIR, SYS_rmdir, SYS_close, SYS_dup, SYS_dup2,
+    SYS_link, SYS_open, SYS_pipe, SYS_read, SYS_readlink, SYS_rename,
+    SYS_lseek, SYS_fstat, SYS_stat, SYS_symlink, SYS_ftruncate,
+    SYS_unlink, SYS_write, SYS_fsync,
 };
 
 // ============================================================================
@@ -208,25 +208,25 @@ pub const DT_SOCK: u8 = 12;
 /// # Returns
 /// File descriptor on success, error on failure.
 pub fn open(path: *const u8, flags: usize, mode: usize) -> Result<usize, SyscallError> {
-    let ret = unsafe { syscall3(SYS_FILE_OPEN, path as usize, flags, mode) };
+    let ret = unsafe { syscall3(SYS_open, path as usize, flags, mode) };
     syscall_result(ret)
 }
 
 /// Close a file descriptor.
 pub fn close(fd: usize) -> Result<usize, SyscallError> {
-    let ret = unsafe { syscall1(SYS_FILE_CLOSE, fd) };
+    let ret = unsafe { syscall1(SYS_close, fd) };
     syscall_result(ret)
 }
 
 /// Read from a file descriptor.
 pub fn read(fd: usize, buf: *mut u8, count: usize) -> Result<usize, SyscallError> {
-    let ret = unsafe { syscall3(SYS_FILE_READ, fd, buf as usize, count) };
+    let ret = unsafe { syscall3(SYS_read, fd, buf as usize, count) };
     syscall_result(ret)
 }
 
 /// Write to a file descriptor.
 pub fn write(fd: usize, buf: *const u8, count: usize) -> Result<usize, SyscallError> {
-    let ret = unsafe { syscall3(SYS_FILE_WRITE, fd, buf as usize, count) };
+    let ret = unsafe { syscall3(SYS_write, fd, buf as usize, count) };
     syscall_result(ret)
 }
 
@@ -237,79 +237,79 @@ pub fn write_bytes(fd: usize, data: &[u8]) -> Result<usize, SyscallError> {
 
 /// Seek within a file.
 pub fn seek(fd: usize, offset: isize, whence: usize) -> Result<usize, SyscallError> {
-    let ret = unsafe { syscall3(SYS_FILE_SEEK, fd, offset as usize, whence) };
+    let ret = unsafe { syscall3(SYS_lseek, fd, offset as usize, whence) };
     syscall_result(ret)
 }
 
 /// Get file status by file descriptor.
 pub fn fstat(fd: usize, stat_buf: *mut Stat) -> Result<usize, SyscallError> {
-    let ret = unsafe { syscall2(SYS_FILE_STAT, fd, stat_buf as usize) };
+    let ret = unsafe { syscall2(SYS_fstat, fd, stat_buf as usize) };
     syscall_result(ret)
 }
 
 /// Get file status by path.
 pub fn stat(path: *const u8, stat_buf: *mut Stat) -> Result<usize, SyscallError> {
-    let ret = unsafe { syscall2(SYS_FILE_STAT_PATH, path as usize, stat_buf as usize) };
+    let ret = unsafe { syscall2(SYS_stat, path as usize, stat_buf as usize) };
     syscall_result(ret)
 }
 
 /// Truncate a file to a specified length.
 pub fn ftruncate(fd: usize, length: usize) -> Result<usize, SyscallError> {
-    let ret = unsafe { syscall2(SYS_FILE_TRUNCATE, fd, length) };
+    let ret = unsafe { syscall2(SYS_ftruncate, fd, length) };
     syscall_result(ret)
 }
 
 /// Duplicate a file descriptor.
 pub fn dup(oldfd: usize) -> Result<usize, SyscallError> {
-    let ret = unsafe { syscall1(SYS_FILE_DUP, oldfd) };
+    let ret = unsafe { syscall1(SYS_dup, oldfd) };
     syscall_result(ret)
 }
 
 /// Duplicate a file descriptor to a specific fd number.
 pub fn dup2(oldfd: usize, newfd: usize) -> Result<usize, SyscallError> {
-    let ret = unsafe { syscall2(SYS_FILE_DUP2, oldfd, newfd) };
+    let ret = unsafe { syscall2(SYS_dup2, oldfd, newfd) };
     syscall_result(ret)
 }
 
 /// Create a pipe.
 pub fn pipe(pipefd: *mut [i32; 2]) -> Result<usize, SyscallError> {
-    let ret = unsafe { syscall1(SYS_FILE_PIPE, pipefd as usize) };
+    let ret = unsafe { syscall1(SYS_pipe, pipefd as usize) };
     syscall_result(ret)
 }
 
 /// Unlink (delete) a file.
 pub fn unlink(path: *const u8) -> Result<usize, SyscallError> {
-    let ret = unsafe { syscall1(SYS_FILE_UNLINK, path as usize) };
+    let ret = unsafe { syscall1(SYS_unlink, path as usize) };
     syscall_result(ret)
 }
 
 /// Rename a file.
 pub fn rename(oldpath: *const u8, newpath: *const u8) -> Result<usize, SyscallError> {
-    let ret = unsafe { syscall2(SYS_FILE_RENAME, oldpath as usize, newpath as usize) };
+    let ret = unsafe { syscall2(SYS_rename, oldpath as usize, newpath as usize) };
     syscall_result(ret)
 }
 
 /// Create a hard link.
 pub fn link(oldpath: *const u8, newpath: *const u8) -> Result<usize, SyscallError> {
-    let ret = unsafe { syscall2(SYS_FILE_LINK, oldpath as usize, newpath as usize) };
+    let ret = unsafe { syscall2(SYS_link, oldpath as usize, newpath as usize) };
     syscall_result(ret)
 }
 
 /// Create a symbolic link.
 pub fn symlink(target: *const u8, linkpath: *const u8) -> Result<usize, SyscallError> {
-    let ret = unsafe { syscall2(SYS_FILE_SYMLINK, target as usize, linkpath as usize) };
+    let ret = unsafe { syscall2(SYS_symlink, target as usize, linkpath as usize) };
     syscall_result(ret)
 }
 
 /// Read the target of a symbolic link.
 pub fn readlink(path: *const u8, buf: *mut u8, bufsiz: usize) -> Result<usize, SyscallError> {
-    let ret = unsafe { syscall3(SYS_FILE_READLINK, path as usize, buf as usize, bufsiz) };
+    let ret = unsafe { syscall3(SYS_readlink, path as usize, buf as usize, bufsiz) };
     syscall_result(ret)
 }
 
 /// Sync a file descriptor to disk.
 pub fn fsync(fd: usize) -> Result<usize, SyscallError> {
-    let ret = unsafe { syscall1(SYS_FS_FSYNC, fd) };
+    let ret = unsafe { syscall1(SYS_fsync, fd) };
     syscall_result(ret)
 }
 
@@ -319,13 +319,13 @@ pub fn fsync(fd: usize) -> Result<usize, SyscallError> {
 
 /// Create a directory.
 pub fn mkdir(path: *const u8, mode: usize) -> Result<usize, SyscallError> {
-    let ret = unsafe { syscall2(SYS_DIR_MKDIR, path as usize, mode) };
+    let ret = unsafe { syscall2(SYS_mkdir, path as usize, mode) };
     syscall_result(ret)
 }
 
 /// Remove a directory.
 pub fn rmdir(path: *const u8) -> Result<usize, SyscallError> {
-    let ret = unsafe { syscall1(SYS_DIR_RMDIR, path as usize) };
+    let ret = unsafe { syscall1(SYS_rmdir, path as usize) };
     syscall_result(ret)
 }
 
@@ -645,7 +645,7 @@ impl OpenOptions {
         self
     }
 
-    /// Compute the flags integer for `SYS_FILE_OPEN`.
+    /// Compute the flags integer for `SYS_open`.
     fn flags(&self) -> usize {
         let mut flags = if self.read && self.write {
             O_RDWR

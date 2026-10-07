@@ -123,6 +123,9 @@ char *realpath(const char *path, char *resolved_path);
 /** Create a child process (copy of the caller). */
 pid_t fork(void);
 
+/** Create a child process; here the same as fork(), which POSIX allows. */
+pid_t vfork(void);
+
 /** Replace the current process image. */
 int execve(const char *pathname, char *const argv[], char *const envp[]);
 
@@ -165,6 +168,8 @@ char *getcwd(char *buf, size_t size);
 
 /** Change the working directory. */
 int chdir(const char *path);
+int fchdir(int fd);
+int chroot(const char *path);
 
 /* ========================================================================= */
 /* User / group identity                                                     */
@@ -176,6 +181,8 @@ gid_t getgid(void);
 gid_t getegid(void);
 int setuid(uid_t uid);
 int setgid(gid_t gid);
+int seteuid(uid_t euid);
+int setegid(gid_t egid);
 int getgroups(int size, gid_t list[]);
 
 /** Get login name of the user. */
@@ -270,6 +277,10 @@ long fpathconf(int fd, int name);
 
 /** Check if fd refers to a terminal. */
 int isatty(int fd);
+
+/** Name of the terminal open on fd (ENOTTY if fd is not a terminal). */
+char *ttyname(int fd);
+int ttyname_r(int fd, char *buf, size_t buflen);
 
 /** Change ownership of a file. */
 int chown(const char *pathname, uid_t owner, gid_t group);

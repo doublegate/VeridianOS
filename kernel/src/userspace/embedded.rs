@@ -49,33 +49,32 @@ const ELF_MACHINE: u16 = 243; // EM_RISCV
 
 /// x86_64 machine code for the minimal init process.
 ///
-/// Writes "VeridianOS init started\n" to stdout (fd 1) using VeridianOS
-/// syscall FileWrite (53), then exits with code 0 via ProcessExit (11).
+/// Writes "VeridianOS init started\n" to stdout (fd 1) using `write`
+/// (Linux number 1), then exits with status 0 via `exit_group` (231).
 ///
 /// Disassembly:
 /// ```text
 ///   0: bf 01 00 00 00          mov  edi, 1           ; fd = stdout
 ///   5: 48 8d 35 15 00 00 00    lea  rsi, [rip+0x15]  ; buf = &msg
 ///  12: ba 18 00 00 00          mov  edx, 24          ; len = 24
-///  17: b8 35 00 00 00          mov  eax, 53          ; SYS_WRITE (FileWrite)
+///  17: b8 01 00 00 00          mov  eax, 1           ; write
 ///  22: 0f 05                   syscall
 ///  24: 31 ff                   xor  edi, edi         ; exit_code = 0
-///  26: b8 0b 00 00 00          mov  eax, 11          ; SYS_EXIT (ProcessExit)
+///  26: b8 e7 00 00 00          mov  eax, 231         ; exit_group
 ///  31: 0f 05                   syscall
 ///  33: "VeridianOS init started\n"
 /// ```
 #[cfg(target_arch = "x86_64")]
 const INIT_CODE: &[u8] = &[
-    // mov edi, 1
-    0xBF, 0x01, 0x00, 0x00, 0x00,
-    // lea rsi, [rip+0x15]  (displacement = 33 - 12 = 21 = 0x15)
-    0x48, 0x8D, 0x35, 0x15, 0x00, 0x00, 0x00, // mov edx, 24
-    0xBA, 0x18, 0x00, 0x00, 0x00, // mov eax, 53  (FileWrite)
-    0xB8, 0x35, 0x00, 0x00, 0x00, // syscall
-    0x0F, 0x05, // xor edi, edi
-    0x31, 0xFF, // mov eax, 11  (ProcessExit)
-    0xB8, 0x0B, 0x00, 0x00, 0x00, // syscall
-    0x0F, 0x05, // msg: "VeridianOS init started\n" (24 bytes)
+    0xBF, 0x01, 0x00, 0x00, 0x00, // mov edi, 1 (fd = stdout)
+    0x48, 0x8D, 0x35, 0x15, 0x00, 0x00, 0x00, // lea rsi, [rip+0x15] (buf = &msg)
+    0xBA, 0x18, 0x00, 0x00, 0x00, // mov edx, 24 (len)
+    0xB8, 0x01, 0x00, 0x00, 0x00, // mov eax, 1 (write)
+    0x0F, 0x05, // syscall
+    0x31, 0xFF, // xor edi, edi (status = 0)
+    0xB8, 0xE7, 0x00, 0x00, 0x00, // mov eax, 231 (exit_group)
+    0x0F, 0x05, // syscall
+    // msg: "VeridianOS init started\n" (24 bytes)
     b'V', b'e', b'r', b'i', b'd', b'i', b'a', b'n', b'O', b'S', b' ', b'i', b'n', b'i', b't', b' ',
     b's', b't', b'a', b'r', b't', b'e', b'd', b'\n',
 ];
@@ -94,25 +93,24 @@ const INIT_CODE: &[u8] = &[
 ///   0: bf 01 00 00 00          mov  edi, 1           ; fd = stdout
 ///   5: 48 8d 35 15 00 00 00    lea  rsi, [rip+0x15]  ; buf = &msg
 ///  12: ba 05 00 00 00          mov  edx, 5           ; len = 5
-///  17: b8 35 00 00 00          mov  eax, 53          ; SYS_WRITE (FileWrite)
+///  17: b8 01 00 00 00          mov  eax, 1           ; write
 ///  22: 0f 05                   syscall
 ///  24: 31 ff                   xor  edi, edi         ; exit_code = 0
-///  26: b8 0b 00 00 00          mov  eax, 11          ; SYS_EXIT (ProcessExit)
+///  26: b8 e7 00 00 00          mov  eax, 231         ; exit_group
 ///  31: 0f 05                   syscall
 ///  33: "vsh> \n"
 /// ```
 #[cfg(target_arch = "x86_64")]
 const SHELL_CODE: &[u8] = &[
-    // mov edi, 1
-    0xBF, 0x01, 0x00, 0x00, 0x00,
-    // lea rsi, [rip+0x15]  (displacement = 33 - 12 = 21 = 0x15)
-    0x48, 0x8D, 0x35, 0x15, 0x00, 0x00, 0x00, // mov edx, 6
-    0xBA, 0x06, 0x00, 0x00, 0x00, // mov eax, 53  (FileWrite)
-    0xB8, 0x35, 0x00, 0x00, 0x00, // syscall
-    0x0F, 0x05, // xor edi, edi
-    0x31, 0xFF, // mov eax, 11  (ProcessExit)
-    0xB8, 0x0B, 0x00, 0x00, 0x00, // syscall
-    0x0F, 0x05, // msg: "vsh> \n" (6 bytes)
+    0xBF, 0x01, 0x00, 0x00, 0x00, // mov edi, 1 (fd = stdout)
+    0x48, 0x8D, 0x35, 0x15, 0x00, 0x00, 0x00, // lea rsi, [rip+0x15] (buf = &msg)
+    0xBA, 0x06, 0x00, 0x00, 0x00, // mov edx, 6 (len)
+    0xB8, 0x01, 0x00, 0x00, 0x00, // mov eax, 1 (write)
+    0x0F, 0x05, // syscall
+    0x31, 0xFF, // xor edi, edi (status = 0)
+    0xB8, 0xE7, 0x00, 0x00, 0x00, // mov eax, 231 (exit_group)
+    0x0F, 0x05, // syscall
+    // msg: "vsh> \n" (6 bytes)
     b'v', b's', b'h', b'>', b' ', b'\n',
 ];
 
@@ -128,26 +126,25 @@ const SHELL_CODE: &[u8] = &[
 /// ```text
 ///   0: bf 01 00 00 00          mov  edi, 1           ; fd = stdout
 ///   5: 48 8d 35 15 00 00 00    lea  rsi, [rip+0x15]  ; buf = &msg
-///  12: ba 18 00 00 00          mov  edx, 24          ; len = 24
-///  17: b8 35 00 00 00          mov  eax, 53          ; SYS_WRITE (FileWrite)
+///  12: ba 17 00 00 00          mov  edx, 23          ; len = 23
+///  17: b8 01 00 00 00          mov  eax, 1           ; write
 ///  22: 0f 05                   syscall
 ///  24: 31 ff                   xor  edi, edi         ; exit_code = 0
-///  26: b8 0b 00 00 00          mov  eax, 11          ; SYS_EXIT (ProcessExit)
+///  26: b8 e7 00 00 00          mov  eax, 231         ; exit_group
 ///  31: 0f 05                   syscall
 ///  33: "Hello from VeridianOS!\n"
 /// ```
 #[cfg(target_arch = "x86_64")]
 const HELLO_CODE: &[u8] = &[
-    // mov edi, 1
-    0xBF, 0x01, 0x00, 0x00, 0x00,
-    // lea rsi, [rip+0x15]  (displacement = 33 - 12 = 21 = 0x15)
-    0x48, 0x8D, 0x35, 0x15, 0x00, 0x00, 0x00, // mov edx, 24
-    0xBA, 0x18, 0x00, 0x00, 0x00, // mov eax, 53  (FileWrite)
-    0xB8, 0x35, 0x00, 0x00, 0x00, // syscall
-    0x0F, 0x05, // xor edi, edi
-    0x31, 0xFF, // mov eax, 11  (ProcessExit)
-    0xB8, 0x0B, 0x00, 0x00, 0x00, // syscall
-    0x0F, 0x05, // msg: "Hello from VeridianOS!\n" (24 bytes)
+    0xBF, 0x01, 0x00, 0x00, 0x00, // mov edi, 1 (fd = stdout)
+    0x48, 0x8D, 0x35, 0x15, 0x00, 0x00, 0x00, // lea rsi, [rip+0x15] (buf = &msg)
+    0xBA, 0x17, 0x00, 0x00, 0x00, // mov edx, 23 (len)
+    0xB8, 0x01, 0x00, 0x00, 0x00, // mov eax, 1 (write)
+    0x0F, 0x05, // syscall
+    0x31, 0xFF, // xor edi, edi (status = 0)
+    0xB8, 0xE7, 0x00, 0x00, 0x00, // mov eax, 231 (exit_group)
+    0x0F, 0x05, // syscall
+    // msg: "Hello from VeridianOS!\n" (23 bytes)
     b'H', b'e', b'l', b'l', b'o', b' ', b'f', b'r', b'o', b'm', b' ', b'V', b'e', b'r', b'i', b'd',
     b'i', b'a', b'n', b'O', b'S', b'!', b'\n',
 ];
@@ -158,33 +155,33 @@ const HELLO_CODE: &[u8] = &[
 
 /// AArch64 machine code for the minimal init process.
 ///
-/// Writes "VeridianOS init started\n" to stdout (fd 1) using VeridianOS
-/// syscall FileWrite (53) via SVC, then exits with code 0 via
-/// ProcessExit (11).
+/// Writes "VeridianOS init started\n" to stdout (fd 1) using `write`
+/// (Linux number 1) via SVC, then exits with status 0 via
+/// `exit_group` (231).
 ///
 /// Disassembly:
 /// ```text
 ///  0x00: d2800020  mov  x0, #1           ; fd = stdout
 ///  0x04: 100000e1  adr  x1, #28          ; buf = &msg (PC-relative)
 ///  0x08: d2800302  mov  x2, #24          ; len = 24
-///  0x0c: d28006a8  mov  x8, #53          ; SYS_WRITE (FileWrite)
+///  0x0c: d2800028  mov  x8, #1           ; write
 ///  0x10: d4000001  svc  #0               ; syscall
 ///  0x14: d2800000  mov  x0, #0           ; exit_code = 0
-///  0x18: d2800168  mov  x8, #11          ; SYS_EXIT (ProcessExit)
+///  0x18: d2801ce8  mov  x8, #231         ; exit_group
 ///  0x1c: d4000001  svc  #0               ; syscall
 ///  0x20: "VeridianOS init started\n"
 /// ```
 #[cfg(target_arch = "aarch64")]
 const INIT_CODE: &[u8] = &[
-    // mov x0, #1 (fd = stdout)
-    0x20, 0x00, 0x80, 0xD2, // adr x1, #28 (msg is 28 bytes ahead of this instruction)
-    0xE1, 0x00, 0x00, 0x10, // mov x2, #24 (len = 24)
-    0x02, 0x03, 0x80, 0xD2, // mov x8, #53 (FileWrite)
-    0xA8, 0x06, 0x80, 0xD2, // svc #0
-    0x01, 0x00, 0x00, 0xD4, // mov x0, #0 (exit_code = 0)
-    0x00, 0x00, 0x80, 0xD2, // mov x8, #11 (ProcessExit)
-    0x68, 0x01, 0x80, 0xD2, // svc #0
-    0x01, 0x00, 0x00, 0xD4, // msg: "VeridianOS init started\n" (24 bytes)
+    0x20, 0x00, 0x80, 0xD2, // mov x0, #1 (fd = stdout)
+    0xE1, 0x00, 0x00, 0x10, // adr x1, #28 (buf = &msg)
+    0x02, 0x03, 0x80, 0xD2, // mov x2, #24 (len)
+    0x28, 0x00, 0x80, 0xD2, // mov x8, #1 (write)
+    0x01, 0x00, 0x00, 0xD4, // svc #0
+    0x00, 0x00, 0x80, 0xD2, // mov x0, #0 (status = 0)
+    0xE8, 0x1C, 0x80, 0xD2, // mov x8, #231 (exit_group)
+    0x01, 0x00, 0x00, 0xD4, // svc #0
+    // msg: "VeridianOS init started\n" (24 bytes)
     b'V', b'e', b'r', b'i', b'd', b'i', b'a', b'n', b'O', b'S', b' ', b'i', b'n', b'i', b't', b' ',
     b's', b't', b'a', b'r', b't', b'e', b'd', b'\n',
 ];
@@ -202,24 +199,24 @@ const INIT_CODE: &[u8] = &[
 ///  0x00: d2800020  mov  x0, #1           ; fd = stdout
 ///  0x04: 100000e1  adr  x1, #28          ; buf = &msg (PC-relative)
 ///  0x08: d28000c2  mov  x2, #6           ; len = 6
-///  0x0c: d28006a8  mov  x8, #53          ; SYS_WRITE (FileWrite)
+///  0x0c: d2800028  mov  x8, #1           ; write
 ///  0x10: d4000001  svc  #0               ; syscall
 ///  0x14: d2800000  mov  x0, #0           ; exit_code = 0
-///  0x18: d2800168  mov  x8, #11          ; SYS_EXIT (ProcessExit)
+///  0x18: d2801ce8  mov  x8, #231         ; exit_group
 ///  0x1c: d4000001  svc  #0               ; syscall
 ///  0x20: "vsh> \n"
 /// ```
 #[cfg(target_arch = "aarch64")]
 const SHELL_CODE: &[u8] = &[
-    // mov x0, #1 (fd = stdout)
-    0x20, 0x00, 0x80, 0xD2, // adr x1, #28 (msg is 28 bytes ahead of this instruction)
-    0xE1, 0x00, 0x00, 0x10, // mov x2, #6 (len = 6)
-    0xC2, 0x00, 0x80, 0xD2, // mov x8, #53 (FileWrite)
-    0xA8, 0x06, 0x80, 0xD2, // svc #0
-    0x01, 0x00, 0x00, 0xD4, // mov x0, #0 (exit_code = 0)
-    0x00, 0x00, 0x80, 0xD2, // mov x8, #11 (ProcessExit)
-    0x68, 0x01, 0x80, 0xD2, // svc #0
-    0x01, 0x00, 0x00, 0xD4, // msg: "vsh> \n" (6 bytes)
+    0x20, 0x00, 0x80, 0xD2, // mov x0, #1 (fd = stdout)
+    0xE1, 0x00, 0x00, 0x10, // adr x1, #28 (buf = &msg)
+    0xC2, 0x00, 0x80, 0xD2, // mov x2, #6 (len)
+    0x28, 0x00, 0x80, 0xD2, // mov x8, #1 (write)
+    0x01, 0x00, 0x00, 0xD4, // svc #0
+    0x00, 0x00, 0x80, 0xD2, // mov x0, #0 (status = 0)
+    0xE8, 0x1C, 0x80, 0xD2, // mov x8, #231 (exit_group)
+    0x01, 0x00, 0x00, 0xD4, // svc #0
+    // msg: "vsh> \n" (6 bytes)
     b'v', b's', b'h', b'>', b' ', b'\n',
 ];
 
@@ -229,9 +226,9 @@ const SHELL_CODE: &[u8] = &[
 
 /// RISC-V 64-bit machine code for the minimal init process.
 ///
-/// Writes "VeridianOS init started\n" to stdout (fd 1) using VeridianOS
-/// syscall FileWrite (53) via ECALL, then exits with code 0 via
-/// ProcessExit (11).
+/// Writes "VeridianOS init started\n" to stdout (fd 1) using `write`
+/// (Linux number 1) via ECALL, then exits with status 0 via
+/// `exit_group` (231).
 ///
 /// Disassembly:
 /// ```text
@@ -239,25 +236,25 @@ const SHELL_CODE: &[u8] = &[
 ///  0x04: 00000597  auipc  a1, 0           ; a1 = PC
 ///  0x08: 02058593  addi   a1, a1, 32      ; a1 = &msg (32 bytes from auipc)
 ///  0x0c: 01800613  addi   a2, zero, 24    ; len = 24
-///  0x10: 03500893  addi   a7, zero, 53    ; SYS_WRITE (FileWrite)
+///  0x10: 00100893  addi   a7, zero, 1     ; write
 ///  0x14: 00000073  ecall                  ; syscall
 ///  0x18: 00000513  addi   a0, zero, 0     ; exit_code = 0
-///  0x1c: 00b00893  addi   a7, zero, 11    ; SYS_EXIT (ProcessExit)
+///  0x1c: 0e700893  addi   a7, zero, 231   ; exit_group
 ///  0x20: 00000073  ecall                  ; syscall
 ///  0x24: "VeridianOS init started\n"
 /// ```
 #[cfg(target_arch = "riscv64")]
 const INIT_CODE: &[u8] = &[
-    // addi a0, zero, 1 (fd = stdout)
-    0x13, 0x05, 0x10, 0x00, // auipc a1, 0 (a1 = PC of this instruction)
-    0x97, 0x05, 0x00, 0x00, // addi a1, a1, 32 (a1 += 32 → points to msg)
-    0x93, 0x85, 0x05, 0x02, // addi a2, zero, 24 (len = 24)
-    0x13, 0x06, 0x80, 0x01, // addi a7, zero, 53 (FileWrite)
-    0x93, 0x08, 0x50, 0x03, // ecall
-    0x73, 0x00, 0x00, 0x00, // addi a0, zero, 0 (exit_code = 0)
-    0x13, 0x05, 0x00, 0x00, // addi a7, zero, 11 (ProcessExit)
-    0x93, 0x08, 0xB0, 0x00, // ecall
-    0x73, 0x00, 0x00, 0x00, // msg: "VeridianOS init started\n" (24 bytes)
+    0x13, 0x05, 0x10, 0x00, // addi a0, zero, 1 (fd = stdout)
+    0x97, 0x05, 0x00, 0x00, // auipc a1, 0 (a1 = this instruction)
+    0x93, 0x85, 0x05, 0x02, // addi a1, a1, 32 (buf = &msg)
+    0x13, 0x06, 0x80, 0x01, // addi a2, zero, 24 (len)
+    0x93, 0x08, 0x10, 0x00, // addi a7, zero, 1 (write)
+    0x73, 0x00, 0x00, 0x00, // ecall
+    0x13, 0x05, 0x00, 0x00, // addi a0, zero, 0 (status = 0)
+    0x93, 0x08, 0x70, 0x0E, // addi a7, zero, 231 (exit_group)
+    0x73, 0x00, 0x00, 0x00, // ecall
+    // msg: "VeridianOS init started\n" (24 bytes)
     b'V', b'e', b'r', b'i', b'd', b'i', b'a', b'n', b'O', b'S', b' ', b'i', b'n', b'i', b't', b' ',
     b's', b't', b'a', b'r', b't', b'e', b'd', b'\n',
 ];
@@ -276,25 +273,25 @@ const INIT_CODE: &[u8] = &[
 ///  0x04: 00000597  auipc  a1, 0           ; a1 = PC
 ///  0x08: 02058593  addi   a1, a1, 32      ; a1 = &msg (32 bytes from auipc)
 ///  0x0c: 00600613  addi   a2, zero, 6     ; len = 6
-///  0x10: 03500893  addi   a7, zero, 53    ; SYS_WRITE (FileWrite)
+///  0x10: 00100893  addi   a7, zero, 1     ; write
 ///  0x14: 00000073  ecall                  ; syscall
 ///  0x18: 00000513  addi   a0, zero, 0     ; exit_code = 0
-///  0x1c: 00b00893  addi   a7, zero, 11    ; SYS_EXIT (ProcessExit)
+///  0x1c: 0e700893  addi   a7, zero, 231   ; exit_group
 ///  0x20: 00000073  ecall                  ; syscall
 ///  0x24: "vsh> \n"
 /// ```
 #[cfg(target_arch = "riscv64")]
 const SHELL_CODE: &[u8] = &[
-    // addi a0, zero, 1 (fd = stdout)
-    0x13, 0x05, 0x10, 0x00, // auipc a1, 0 (a1 = PC of this instruction)
-    0x97, 0x05, 0x00, 0x00, // addi a1, a1, 32 (a1 += 32 → points to msg)
-    0x93, 0x85, 0x05, 0x02, // addi a2, zero, 6 (len = 6)
-    0x13, 0x06, 0x60, 0x00, // addi a7, zero, 53 (FileWrite)
-    0x93, 0x08, 0x50, 0x03, // ecall
-    0x73, 0x00, 0x00, 0x00, // addi a0, zero, 0 (exit_code = 0)
-    0x13, 0x05, 0x00, 0x00, // addi a7, zero, 11 (ProcessExit)
-    0x93, 0x08, 0xB0, 0x00, // ecall
-    0x73, 0x00, 0x00, 0x00, // msg: "vsh> \n" (6 bytes)
+    0x13, 0x05, 0x10, 0x00, // addi a0, zero, 1 (fd = stdout)
+    0x97, 0x05, 0x00, 0x00, // auipc a1, 0 (a1 = this instruction)
+    0x93, 0x85, 0x05, 0x02, // addi a1, a1, 32 (buf = &msg)
+    0x13, 0x06, 0x60, 0x00, // addi a2, zero, 6 (len)
+    0x93, 0x08, 0x10, 0x00, // addi a7, zero, 1 (write)
+    0x73, 0x00, 0x00, 0x00, // ecall
+    0x13, 0x05, 0x00, 0x00, // addi a0, zero, 0 (status = 0)
+    0x93, 0x08, 0x70, 0x0E, // addi a7, zero, 231 (exit_group)
+    0x73, 0x00, 0x00, 0x00, // ecall
+    // msg: "vsh> \n" (6 bytes)
     b'v', b's', b'h', b'>', b' ', b'\n',
 ];
 

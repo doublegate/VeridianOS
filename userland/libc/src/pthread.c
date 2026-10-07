@@ -9,8 +9,8 @@
  * primitives actually used by self-hosting toolchain code are implemented.
  *
  * Threading model:
- *   - Threads are created via SYS_THREAD_CLONE (Linux clone-style semantics).
- *   - Synchronization uses SYS_FUTEX (futex_wait / futex_wake / futex_requeue).
+ *   - Threads are created via SYS_clone (Linux clone-style semantics).
+ *   - Synchronization uses SYS_futex (futex_wait / futex_wake / futex_requeue).
  *   - Thread joining uses SYS_THREAD_JOIN with CLONE_CHILD_CLEARTID for
  *     robust exit notification.
  *   - No kernel-side helper threads are required.
@@ -515,7 +515,7 @@ int pthread_create(pthread_t *thread,
  *   (or returns immediately if the thread has already exited).
  *
  *   After the join syscall returns, we read the return value from the TCB
- *   (which the child wrote before calling SYS_THREAD_EXIT), then unregister
+ *   (which the child wrote before calling SYS_exit), then unregister
  *   and free the TCB and its stack allocation.
  */
 int pthread_join(pthread_t thread, void **retval)
@@ -574,7 +574,7 @@ static void __attribute__((noreturn)) pthread_exit_raw(void *retval)
     if (tcb) {
         tcb->retval = retval;
     }
-    veridian_syscall1(SYS_THREAD_EXIT, (long)retval);
+    veridian_syscall1(SYS_exit, (long)retval);
     __builtin_unreachable();
 }
 
@@ -589,7 +589,7 @@ int pthread_setcancelstate(int state, int *oldstate)
 
 int pthread_yield(void)
 {
-    veridian_syscall0(SYS_PROCESS_YIELD);
+    veridian_syscall0(SYS_sched_yield);
     return 0;
 }
 
@@ -1130,7 +1130,7 @@ int pthread_spin_unlock(pthread_spinlock_t *lock)
  *
  * Runs TLS destructors for all active keys belonging to this thread, then
  * calls pthread_exit_raw() which stores the return value in the TCB and
- * issues SYS_THREAD_EXIT.  The TCB cleanup (freeing stack, unregistering
+ * issues SYS_exit.  The TCB cleanup (freeing stack, unregistering
  * from the TCB list) is handled by pthread_join() in the joining thread.
  *
  * Destructor ordering follows POSIX: up to PTHREAD_DESTRUCTOR_ITERATIONS

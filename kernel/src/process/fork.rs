@@ -122,14 +122,6 @@ pub fn fork_process() -> Result<ProcessId, KernelError> {
         }
     }
 
-    // The child keeps its parent's syscall ABI (SYS-INC-01).
-    new_process.linux_abi.store(
-        current_process
-            .linux_abi
-            .load(core::sync::atomic::Ordering::Acquire),
-        core::sync::atomic::Ordering::Release,
-    );
-
     // Inherit uid, gid, pgid, sid from parent
     // (ProcessBuilder doesn't copy these, so do it manually)
     // uid/gid are non-atomic, but the new_process is not yet visible

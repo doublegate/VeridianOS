@@ -108,6 +108,28 @@
 
 ### Changed
 
+- **Linux system call numbers are the only user ABI (X1, ADR 0009).** A call Linux has uses
+  Linux's x86_64 number and name (`write` is 1); a VeridianOS-only call (IPC, capabilities,
+  packages, framebuffer, Wayland, audio) has a private number from 1024. `abi/syscalls.map` is
+  the single source: `tools/compat/gen_syscalls.py` generates the kernel's `Syscall` enum, the C
+  header `<veridian/sysno.h>`, the Rust constants for rust-std and vsh, and
+  `docs/compat/SYSCALL-NUMBERS.md`, and CI fails when any of them is stale. Each call has one
+  name (`Syscall::RtSigaction`, `SYS_rt_sigaction`). The dispatcher decodes the number and
+  nothing else: the per-process Linux-ABI flag, its translation table, and the guessing of a
+  call from its argument values are gone. musl is built stock. The native libc, rust-std, vsh,
+  the dynamic loader, the test programs and the kernel's embedded programs and signal
+  trampolines all take their numbers from the generated files; several had private copies, some
+  already wrong. **Programs built before this change must be rebuilt** (rootfs and KDE stack).
+  Coverage: 133 Linux calls implemented (118 before, as calls reachable only through the musl
+  remap now count).
+- **Every handler behind a Linux number was reviewed against Linux.** About 80 differences are
+  recorded as N-182 to N-250 in `docs/audit/ABI-REVIEW-2026-10-07.md`; those fixed here are listed
+  under Security and Fixed, the rest are scheduled.
+- **Builds treat warnings as errors.** The native libc is built with `-Wall -Wextra -Werror`,
+  the rootfs programs and test suites with `-Wall -Wextra`, and the cross-compiler wrapper and
+  BusyBox config no longer suppress `-Wunused-parameter`, `-Wimplicit-function-declaration` or
+  `-Wreturn-type`. Doing so exposed ten functions the native libc defined but never declared
+  (see Fixed).
 - **Toolchain and cross-built stack moved to the latest stable releases (2026-10-07).**
   - Cross and native GCC 16.2.0 with binutils 2.47, MPFR 4.2.2 and MPC 1.4.1 (were 14.2.0,
     2.43, 4.2.1 and 1.3.1). The VeridianOS target patches were regenerated against the new
@@ -154,6 +176,19 @@
 
 ### Security
 
+- **ptrace needs a tracer relationship (N-187).** Any process could read and write any other
+  process's memory with PTRACE_PEEK/POKE. Now TRACEME makes the parent the tracer, ATTACH
+  requires the same uid or root and refuses a traced or own process, DETACH ends it, and an
+  exiting tracer is detached; PEEK/POKE work only on a process the caller traces (ESRCH
+  otherwise), and PEEK stores the word at `*data` as Linux does.
+- **The fd table no longer grows to any number a caller names (N-185).** `dup2`, `dup3` and
+  `fcntl(F_DUPFD)` allocated up to the target fd, so one call could exhaust kernel memory. Targets
+  at or past 1024 (`MAX_FDS`) are EBADF or EINVAL, and RLIMIT_NOFILE reports 1024 (it said 256).
+- **The native libc PNG decoder overran the caller's rows.** `png_read_image` guessed the row
+  length by searching for a divisor of the data size and wrote past the row buffers (a heap
+  overflow on most images), and always unfiltered with one byte per pixel. It now decodes from
+  the image header: every colour type and bit depth, Adam7 interlacing, exact inflated size.
+  `png_read_row` and `png_read_rows` work (they did nothing).
 - **Security review of stage D2.** Three defects, each fixed with a regression test:
   - `clone(CLONE_SETTLS)` accepted any TLS base, which was loaded into IA32_FS_BASE at every
     switch, so a non-canonical value faulted (#GP) in ring 0. It is now rejected (EINVAL), and
@@ -241,6 +276,47 @@
 
 ### Fixed
 
+- **Linux numbers reach the Linux call (N-182, N-183).** The musl remap sent dup3 to pipe2,
+  epoll_create1 to dup3, epoll_ctl to epoll_create, sigaltstack to setsid, getppid to getpgid,
+  pipe2 to inotify_init1 and execveat/mlock2/copy_file_range to the timerfd calls, and swapped
+  truncate and ftruncate; the kernel table sent Linux `exit` (one thread) to whole-process exit.
+  A musl file `mmap` read fd 0, because the native path unpacked fd and offset from one register.
+- **pipe2 and dup3 take Linux flags (N-184).** They decoded O_CLOEXEC as 0x2000, which no C
+  library sends: `dup3(.., O_CLOEXEC)` was EINVAL and pipe2 ignored O_CLOEXEC and O_NONBLOCK.
+- **socket, socketpair and accept4 keep SOCK_NONBLOCK and SOCK_CLOEXEC (N-186)** instead of
+  masking them off, reject unknown type bits, check the protocol (EPROTONOSUPPORT) and return
+  EAFNOSUPPORT for an unknown domain.
+- **Native libc:**
+  - the C++ exception runtime chose catch handlers without looking at the type, so `catch (A&)`
+    caught any exception and a privately derived class was caught by its base; it now matches
+    exact types, public bases through single, multiple and virtual inheritance (binding the
+    handler to the base subobject) and `catch (...)`, and honours exception specifications;
+  - `inet_addr`, `inet_pton` and `inet_ntop` were declared but never defined, and `inet_aton`
+    always failed; all five conversions are implemented (IPv4 and IPv6, matching glibc);
+  - ten functions were defined but undeclared (vfork, utimes, inet_aton, wait3, ttyname_r,
+    seteuid, setegid, initgroups, fchdir, chroot), so callers got implicit `int` prototypes;
+  - `ttyname`/`ttyname_r` named every fd `/dev/console`; non-terminals are now ENOTTY, and
+    `isatty` keeps EBADF;
+  - `wait3`/`wait4` take a `struct rusage *` and fill it;
+  - the 64- and 128-bit division helpers start at the quotient's top bit instead of always
+    running 64 or 128 steps;
+  - `glob` grows its result array by doubling instead of reallocating per match;
+  - `hb_language_get_default` follows LC_ALL/LC_CTYPE/LANG and tags are canonicalised;
+  - `flock` and `fsync` use their own system calls (they shared one, told apart by an argument);
+  - a duplicate C `setjmp`/`longjmp` that shadowed the assembly version is gone, and the rootfs
+    build assembles the architecture `.S` files as the Makefile does;
+  - host tests for all of the above run in CI (`userland/libc/tests/`).
+- **BusyBox and musl build without warnings.** Two BusyBox variables set but never read and a GCC
+  16 false positive in musl's `getcwd` are patched (`tools/busybox/patches/`,
+  `tools/cross/musl-patches/`).
+- **Kernel host tests build without warnings,** and the audit log is persisted (to an in-memory
+  sink) in host tests too, with a test.
+- **The VeridianOS Qt platform plugin builds.** `qveridian` is compiled into qtbase as a static
+  platform plugin (`libqveridian.a`) for Qt 6.12, with its entry point, metadata and xdg-shell
+  bindings generated at build time. It builds; running it under the compositor is not verified.
+- **KDE stack build fixes for the current releases:** Mesa 26's thin glapi archive and new
+  library layout, xkbcommon's tools, D-Bus's `-pthread` in `dbus-1.pc`, and the qtdeclarative
+  tools gate for cross builds.
 - **Unix socket reads lost data.** Data the peer sent just before closing was discarded (a read
   returned end-of-file while it was still queued), and a stream read into a buffer smaller than
   a queued message dropped the rest of the message. Buffered data is now read before end-of-file,
@@ -371,6 +447,9 @@
 
 ### Removed
 
+- **The musl syscall remap patch,** the kernel's Linux translation table and per-process ABI flag,
+  and fifteen duplicate system calls that served an existing handler under a second number
+  (ADR 0009).
 - The unused slab allocator and `mm/vmm.rs` (MEM-INC-02).
 - The never-consulted global demand-paging and CoW tables, and the dead fork and fault paths
   that used them (MEM-ARCH-02, N-07).

@@ -28,6 +28,7 @@
 #include <errno.h>
 #include <stdio.h>
 #include <sys/types.h>
+#include <unistd.h>
 
 /* ========================================================================= */
 /* libgen.h -- basename() and dirname()                                      */
@@ -268,21 +269,33 @@ char *strsignal(int sig)
     }
 }
 
-char *ttyname(int fd)
-{
-    (void)fd;
-    return "/dev/console";
-}
-
+/*
+ * The terminal open on fd. The native ABI has no fd-to-path query; the
+ * terminal a native program sees is the console, so a tty fd is named
+ * /dev/console and anything else is ENOTTY.
+ */
 int ttyname_r(int fd, char *buf, size_t buflen)
 {
-    (void)fd;
-    if (buf == NULL || buflen < 13) {
-        errno = ERANGE;
+    static const char console[] = "/dev/console";
+
+    if (!isatty(fd))
+        return errno == EBADF ? EBADF : ENOTTY;
+    if (buf == NULL || buflen < sizeof(console))
         return ERANGE;
-    }
-    strcpy(buf, "/dev/console");
+    memcpy(buf, console, sizeof(console));
     return 0;
+}
+
+char *ttyname(int fd)
+{
+    static char name[32];
+    int err = ttyname_r(fd, name, sizeof(name));
+
+    if (err) {
+        errno = err;
+        return NULL;
+    }
+    return name;
 }
 
 int getpagesize(void)
@@ -389,17 +402,24 @@ int execvpe(const char *file, char *const argv[], char *const envp[])
 /* waitid() -- wait for process (stub using waitpid) */
 #include <sys/wait.h>
 
-/* wait3() / wait4() -- BSD-style wait */
-pid_t wait3(int *wstatus, int options, void *rusage)
+/*
+ * wait3() / wait4() -- BSD-style wait. The native wait syscall carries no
+ * resource accounting, so a requested rusage is reported as all zeros,
+ * which is what getrusage() reports for children here too.
+ */
+#include <sys/resource.h>
+
+pid_t wait4(pid_t pid, int *wstatus, int options, struct rusage *rusage)
 {
-    (void)rusage;
-    return waitpid(-1, wstatus, options);
+    pid_t r = waitpid(pid, wstatus, options);
+    if (r > 0 && rusage)
+        memset(rusage, 0, sizeof(*rusage));
+    return r;
 }
 
-pid_t wait4(pid_t pid, int *wstatus, int options, void *rusage)
+pid_t wait3(int *wstatus, int options, struct rusage *rusage)
 {
-    (void)rusage;
-    return waitpid(pid, wstatus, options);
+    return wait4(-1, wstatus, options, rusage);
 }
 
 /* ========================================================================= */
@@ -1034,11 +1054,11 @@ int prctl(int option, unsigned long arg2, unsigned long arg3,
 
 #include <veridian/syscall.h>
 
-/* Wait with `mask` until a signal is caught (native 122); always ends
+/* Wait with `mask` until a signal is caught (rt_sigsuspend); always ends
  * with EINTR. It returned at once without waiting. */
 int sigsuspend(const sigset_t *mask)
 {
-    long ret = veridian_syscall1(SYS_SIGSUSPEND, (long)mask);
+    long ret = veridian_syscall1(SYS_rt_sigsuspend, (long)mask);
     errno = ret < 0 ? (int)(-ret) : EINTR;
     return -1;
 }
@@ -1214,25 +1234,34 @@ static int __glob_has_magic(const char *p)
     return 0;
 }
 
+/*
+ * Slots allocated for an array holding `used` slots: the next power of two,
+ * minimum 16. glob_t has no capacity field, so the capacity is always this
+ * function of the slot count, and __glob_add grows the array (by doubling)
+ * only when the next entry crosses it.
+ */
+static size_t __glob_capacity(size_t used)
+{
+    size_t cap = 16;
+    while (cap < used)
+        cap *= 2;
+    return cap;
+}
+
 /* Helper: add a path to the glob result, growing the array as needed. */
 static int __glob_add(glob_t *pglob, const char *path)
 {
     size_t idx = pglob->gl_pathc + pglob->gl_offs;
-    /* Grow by doubling, minimum 16 slots. */
     size_t needed = idx + 2; /* +1 for entry, +1 for trailing NULL */
-    size_t capacity = 0;
-    /* Calculate current capacity from gl_pathv allocation. */
-    if (pglob->gl_pathv == NULL)
-        capacity = 0;
-    else {
-        /* We need at least 'needed' slots. */
-        capacity = needed; /* simplification: always realloc */
-    }
+    size_t capacity = pglob->gl_pathv == NULL ? 0 : __glob_capacity(idx + 1);
 
-    char **nv = (char **)realloc(pglob->gl_pathv, needed * sizeof(char *));
-    if (nv == NULL)
-        return GLOB_NOSPACE;
-    pglob->gl_pathv = nv;
+    if (needed > capacity) {
+        char **nv = (char **)realloc(pglob->gl_pathv,
+                                     __glob_capacity(needed) * sizeof(char *));
+        if (nv == NULL)
+            return GLOB_NOSPACE;
+        pglob->gl_pathv = nv;
+    }
 
     /* Initialize gl_offs entries to NULL on first allocation. */
     if (pglob->gl_pathc == 0) {
@@ -1407,65 +1436,7 @@ void globfree(glob_t *pglob)
     pglob->gl_pathc = 0;
 }
 
-/* --- setjmp / longjmp (x86_64 only) -------------------------------------- */
-/* These MUST be in assembly for real correctness, but we provide minimal
- * C stubs that work for simple cases (save/restore callee-saved registers
- * is not possible from C).  A real implementation needs asm.
- *
- * For BusyBox, setjmp/longjmp are used in the shell (ash) for error
- * recovery.  A trivial stub that always returns 0 from setjmp and
- * makes longjmp call _exit() is the minimum viable approach.
- */
-
-#include <setjmp.h>
-
-/* Minimal setjmp: save rsp and rip into jmp_buf, return 0.
- * This is an assembly-level operation; the C version below is a placeholder
- * that will NOT correctly restore state.  For BusyBox to actually use
- * setjmp/longjmp properly, this needs a proper assembly implementation.
- */
-
-/* Provide weak symbols so a proper asm implementation can override */
-__attribute__((naked))
-int setjmp(jmp_buf env)
-{
-    __asm__ volatile (
-        "mov %%rbx, 0(%%rdi)\n\t"
-        "mov %%rbp, 8(%%rdi)\n\t"
-        "mov %%r12, 16(%%rdi)\n\t"
-        "mov %%r13, 24(%%rdi)\n\t"
-        "mov %%r14, 32(%%rdi)\n\t"
-        "mov %%r15, 40(%%rdi)\n\t"
-        "lea 8(%%rsp), %%rdx\n\t"  /* rsp before call */
-        "mov %%rdx, 48(%%rdi)\n\t"
-        "mov (%%rsp), %%rdx\n\t"   /* return address */
-        "mov %%rdx, 56(%%rdi)\n\t"
-        "xor %%eax, %%eax\n\t"
-        "ret"
-        ::: "memory"
-    );
-}
-
-__attribute__((naked, noreturn))
-void longjmp(jmp_buf env, int val)
-{
-    __asm__ volatile (
-        "mov %%esi, %%eax\n\t"
-        "test %%eax, %%eax\n\t"
-        "jnz 1f\n\t"
-        "mov $1, %%eax\n\t"
-        "1:\n\t"
-        "mov 0(%%rdi), %%rbx\n\t"
-        "mov 8(%%rdi), %%rbp\n\t"
-        "mov 16(%%rdi), %%r12\n\t"
-        "mov 24(%%rdi), %%r13\n\t"
-        "mov 32(%%rdi), %%r14\n\t"
-        "mov 40(%%rdi), %%r15\n\t"
-        "mov 48(%%rdi), %%rsp\n\t"
-        "jmp *56(%%rdi)"
-        ::: "memory"
-    );
-}
+/* setjmp / longjmp are assembly: src/setjmp_<arch>.S. */
 
 /* h_errno global */
 int h_errno = 0;
@@ -1526,12 +1497,12 @@ struct hostent *gethostbyname(const char *name)
 /*
  * getpeername() -- get name of connected peer socket.
  *
- * Kernel syscall SYS_NET_GETPEERNAME (253): (fd, addr_ptr, len_ptr)
+ * Kernel syscall SYS_getpeername (52): (fd, addr_ptr, len_ptr)
  * The kernel writes the remote address into *addr and sets *addrlen to 16.
  */
 int getpeername(int sockfd, struct sockaddr *addr, socklen_t *addrlen)
 {
-    long ret = veridian_syscall3(SYS_NET_GETPEERNAME, sockfd, addr, addrlen);
+    long ret = veridian_syscall3(SYS_getpeername, sockfd, addr, addrlen);
     if (ret < 0) {
         errno = (int)(-ret);
         return -1;
@@ -1542,12 +1513,12 @@ int getpeername(int sockfd, struct sockaddr *addr, socklen_t *addrlen)
 /*
  * getsockname() -- get socket name (local bound address).
  *
- * Kernel syscall SYS_NET_GETSOCKNAME (252): (fd, addr_ptr, len_ptr)
+ * Kernel syscall SYS_getsockname (51): (fd, addr_ptr, len_ptr)
  * The kernel writes the local address into *addr and sets *addrlen to 16.
  */
 int getsockname(int sockfd, struct sockaddr *addr, socklen_t *addrlen)
 {
-    long ret = veridian_syscall3(SYS_NET_GETSOCKNAME, sockfd, addr, addrlen);
+    long ret = veridian_syscall3(SYS_getsockname, sockfd, addr, addrlen);
     if (ret < 0) {
         errno = (int)(-ret);
         return -1;
@@ -1555,26 +1526,12 @@ int getsockname(int sockfd, struct sockaddr *addr, socklen_t *addrlen)
     return 0;
 }
 
-int inet_aton(const char *cp, struct in_addr *inp)
-{
-    (void)cp;
-    (void)inp;
-    return 0;
-}
-
-char *inet_ntoa(struct in_addr in)
-{
-    static char buf[16];
-    unsigned char *b = (unsigned char *)&in.s_addr;
-    int n = snprintf(buf, sizeof(buf), "%u.%u.%u.%u", b[0], b[1], b[2], b[3]);
-    (void)n;
-    return buf;
-}
+/* inet_aton, inet_ntoa and the other address conversions: inet.c */
 
 /*
  * sendto() -- send a message to a specific destination address.
  *
- * Kernel syscall SYS_NET_SENDTO (250): (fd, buf_ptr, buf_len, addr_ptr, addr_len)
+ * Kernel syscall SYS_sendto (44): (fd, buf_ptr, buf_len, addr_ptr, addr_len)
  * The flags argument is not forwarded (not yet implemented in the kernel).
  * When dest_addr is NULL (connected socket), falls back to SYS_SOCKET_SEND.
  */
@@ -1584,7 +1541,7 @@ ssize_t sendto(int sockfd, const void *buf, size_t len, int flags,
     (void)flags;
     long ret;
     if (dest_addr != NULL) {
-        ret = veridian_syscall5(SYS_NET_SENDTO,
+        ret = veridian_syscall5(SYS_sendto,
                                  sockfd, buf, len, dest_addr, addrlen);
     } else {
         /* No destination address: send on connected socket. */
@@ -1600,7 +1557,7 @@ ssize_t sendto(int sockfd, const void *buf, size_t len, int flags,
 /*
  * recvfrom() -- receive a message and optionally capture sender's address.
  *
- * Kernel syscall SYS_NET_RECVFROM (251): (fd, buf_ptr, buf_len, addr_ptr)
+ * Kernel syscall SYS_recvfrom (45): (fd, buf_ptr, buf_len, addr_ptr)
  * addr_ptr may be NULL (kernel handles gracefully).  addrlen is updated to
  * the fixed sockaddr size (16) when an address was written.
  * The flags argument is not forwarded.
@@ -1609,7 +1566,7 @@ ssize_t recvfrom(int sockfd, void *buf, size_t len, int flags,
                  struct sockaddr *src_addr, socklen_t *addrlen)
 {
     (void)flags;
-    long ret = veridian_syscall4(SYS_NET_RECVFROM,
+    long ret = veridian_syscall4(SYS_recvfrom,
                                   sockfd, buf, len, src_addr);
     if (ret < 0) {
         errno = (int)(-ret);
@@ -1625,12 +1582,12 @@ ssize_t recvfrom(int sockfd, void *buf, size_t len, int flags,
 /*
  * socketpair() -- create a pair of connected sockets (AF_UNIX only).
  *
- * Kernel syscall SYS_SOCKET_PAIR (228) takes the Linux argument order
+ * Kernel syscall SYS_socketpair (53) takes the Linux argument order
  * (domain, type, protocol, int sv[2]) and writes the two new fds into sv.
  */
 int socketpair(int domain, int type, int protocol, int sv[2])
 {
-    long ret = veridian_syscall4(SYS_SOCKET_PAIR, domain, type, protocol, sv);
+    long ret = veridian_syscall4(SYS_socketpair, domain, type, protocol, sv);
     if (ret < 0) {
         errno = (int)(-ret);
         return -1;
@@ -1641,7 +1598,7 @@ int socketpair(int domain, int type, int protocol, int sv[2])
 /* sendmsg()/recvmsg() -- data plus ancillary data (SCM_RIGHTS). */
 ssize_t sendmsg(int sockfd, const struct msghdr *msg, int flags)
 {
-    long ret = veridian_syscall3(SYS_SENDMSG, sockfd, msg, flags);
+    long ret = veridian_syscall3(SYS_sendmsg, sockfd, msg, flags);
     if (ret < 0) {
         errno = (int)(-ret);
         return -1;
@@ -1651,7 +1608,7 @@ ssize_t sendmsg(int sockfd, const struct msghdr *msg, int flags)
 
 ssize_t recvmsg(int sockfd, struct msghdr *msg, int flags)
 {
-    long ret = veridian_syscall3(SYS_RECVMSG, sockfd, msg, flags);
+    long ret = veridian_syscall3(SYS_recvmsg, sockfd, msg, flags);
     if (ret < 0) {
         errno = (int)(-ret);
         return -1;

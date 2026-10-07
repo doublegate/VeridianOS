@@ -5,7 +5,7 @@
  * SPDX-License-Identifier: MIT OR Apache-2.0
  *
  * Package installation logic.
- * Uses SYS_PKG_INSTALL (90) syscall for kernel-side package processing,
+ * Uses SYS_PKG_INSTALL (1114) syscall for kernel-side package processing,
  * then records the installed package in the local database.
  */
 
@@ -51,7 +51,7 @@ int vpkg_install(vpkg_db_t *db, const char *name, const char *version)
     printf("...\n");
 
     /*
-     * Invoke kernel-side package installation via SYS_PKG_INSTALL (90).
+     * Invoke kernel-side package installation via SYS_PKG_INSTALL (1114).
      *
      * The kernel's sys_pkg_install() expects:
      *   arg1 (rdi): pointer to package name string

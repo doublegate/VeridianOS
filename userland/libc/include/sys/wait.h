@@ -85,6 +85,15 @@ pid_t waitpid(pid_t pid, int *wstatus, int options);
  */
 pid_t wait(int *wstatus);
 
+struct rusage;
+
+/**
+ * BSD waits: as waitpid(-1, ...) and waitpid(pid, ...), also reporting the
+ * child's resource usage when rusage is non-NULL.
+ */
+pid_t wait3(int *wstatus, int options, struct rusage *rusage);
+pid_t wait4(pid_t pid, int *wstatus, int options, struct rusage *rusage);
+
 #ifdef __cplusplus
 }
 #endif
