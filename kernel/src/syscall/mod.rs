@@ -1942,8 +1942,11 @@ fn build_dirents64(
             entry.inode
         };
         out.extend_from_slice(&ino.to_ne_bytes());
-        // d_off (offset to next entry)
-        out.extend_from_slice(&((offset + reclen) as u64).to_ne_bytes());
+        // d_off: the directory position of the next entry. Positions are
+        // entry indices (see the seek in sys_getdents64), and musl's
+        // telldir/seekdir hand d_off to lseek; this used to be the byte
+        // offset of the next record in this buffer.
+        out.extend_from_slice(&((idx + 1) as u64).to_ne_bytes());
         // d_reclen
         out.extend_from_slice(&(reclen as u16).to_ne_bytes());
         // d_type
@@ -4453,6 +4456,28 @@ mod tests {
         // Nothing left, or no room for even one record.
         assert_eq!(build_dirents64(&entries, 3, 4096), (alloc::vec![], 3));
         assert_eq!(build_dirents64(&entries, 0, 23), (alloc::vec![], 0));
+    }
+
+    /// d_off is the position to seek to for the next entry. A directory
+    /// fd's position is an entry index, and musl's telldir/seekdir pass
+    /// d_off straight to lseek, so it must be an index, not a byte offset
+    /// into this call's buffer.
+    #[test]
+    fn dirent64_d_off_is_the_next_entry_index() {
+        use crate::fs::NodeType;
+        let entries = [
+            dir_entry("a", NodeType::File, 0),
+            dir_entry("bb", NodeType::File, 0),
+            dir_entry("ccc", NodeType::File, 0),
+        ];
+        let (buf, _) = build_dirents64(&entries, 0, 4096);
+        let offs: alloc::vec::Vec<u64> = parse_dirents(&buf).iter().map(|r| r.1).collect();
+        assert_eq!(offs, [1, 2, 3]);
+        // Resuming at the d_off of the first record yields the second.
+        let (buf, _) = build_dirents64(&entries, offs[0] as usize, 4096);
+        let recs = parse_dirents(&buf);
+        assert_eq!(recs[0].4, "bb");
+        assert_eq!(recs[0].1, 2);
     }
 
     // --- Rate limiter (SYS-PERF-01) ---
