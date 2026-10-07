@@ -16,8 +16,14 @@
   - the x86 Local APIC is used without a lock;
   - the x86 syscall frame pointer is per CPU (N-35);
   - RISC-V works when OpenSBI boots on a hart other than 0.
-- **Two new boot tests** check per-CPU identity and ticks, and that uptime follows the hardware
-  clock (36 in total).
+- **TLB shootdown (MEM-SEC-02, MEM-ARCH-03).** Unmapping invalidates the translation on every
+  online CPU and waits for all of them before the frames are reused: x86 by IPI with
+  acknowledgement, RISC-V through SBI RFENCE, AArch64 with broadcast TLB maintenance.
+  Address-space teardown used to free frames before flushing.
+- **Three new boot tests** (37 in total) check:
+  - per-CPU identity and ticks;
+  - that uptime follows the hardware clock;
+  - that a TLB shootdown is confirmed by every CPU.
 
 ### Changed
 

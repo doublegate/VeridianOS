@@ -605,7 +605,7 @@ extern "x86-interrupt" fn tlb_shootdown_handler(_stack_frame: InterruptStackFram
     // Flush the local CPU's TLB in response to a remote CPU modifying shared
     // page tables. On single-CPU systems this handler is never invoked, but
     // it is registered for correctness when SMP is enabled.
-    crate::arch::x86_64::tlb_flush_all();
+    crate::mm::tlb::service_pending();
     crate::arch::x86_64::apic::send_eoi();
 }
 

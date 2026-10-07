@@ -15,7 +15,8 @@
 #
 # Usage: scripts/run-rootfs-tests.sh [prompt-wait-seconds]
 # Env:   LOG_DIR (default target/boot-logs), ROOTFS (default
-#        target/rootfs-blockfs.img), TEST_WAIT (seconds for the suite, 120)
+#        target/rootfs-blockfs.img), TEST_WAIT (seconds for the suite, 120),
+#        SMP (CPU count, default 1)
 set -u
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
@@ -43,7 +44,7 @@ accel=(-cpu qemu64)
 
 rm -f "$fifo"
 mkfifo "$fifo"
-qemu-system-x86_64 "${accel[@]}" \
+qemu-system-x86_64 "${accel[@]}" -smp "${SMP:-1}" \
     -drive "if=pflash,format=raw,readonly=on,file=$ovmf" \
     -drive "id=disk0,if=none,format=raw,file=$img,snapshot=on" \
     -device ide-hd,drive=disk0 \

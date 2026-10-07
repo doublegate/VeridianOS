@@ -153,6 +153,11 @@ pub fn free_user_page_table_frames(l4_phys: u64) -> usize {
         return 0;
     }
 
+    // No CPU may still cache a translation through these tables (or the
+    // tables themselves, in its paging-structure caches) once their frames
+    // are reused (MEM-SEC-02).
+    crate::mm::tlb::flush_all();
+
     let phys_offset_val = super::PHYS_MEM_OFFSET.load(core::sync::atomic::Ordering::Acquire);
     let mut freed = 0usize;
 
@@ -485,12 +490,10 @@ impl TlbFlushBatch {
         }
         if self.count > Self::MAX_BATCH {
             // Too many addresses -- full TLB flush is cheaper
-            crate::arch::tlb_flush_all();
+            crate::mm::tlb::flush_all();
         } else {
-            // Individual flushes for small batches
-            for i in 0..self.count {
-                crate::arch::tlb_flush_address(self.addresses[i]);
-            }
+            // Individual flushes for small batches (one remote request).
+            crate::mm::tlb::flush_pages(&self.addresses[..self.count]);
         }
     }
 
@@ -502,29 +505,6 @@ impl TlbFlushBatch {
     /// Is the batch empty?
     pub fn is_empty(&self) -> bool {
         self.count == 0
-    }
-
-    /// Flush locally and broadcast TLB shootdown IPI to all other CPUs.
-    ///
-    /// On single-CPU systems the IPI is a no-op (no other CPUs to notify).
-    /// On multi-CPU systems, remote CPUs receive vector 49 and flush their
-    /// entire TLB in the handler.
-    pub fn flush_with_shootdown(self) {
-        // First, flush the local CPU's TLB.
-        self.flush();
-
-        // Then broadcast TLB shootdown IPI to all other CPUs.
-        // On x86_64 with APIC initialized, this sends vector 49 via the ICR
-        // "all excluding self" shorthand. On other architectures or if APIC is
-        // not initialized, this is a no-op.
-        #[cfg(target_arch = "x86_64")]
-        {
-            if crate::arch::x86_64::apic::is_initialized() {
-                let _ = crate::arch::x86_64::apic::send_ipi_all_excluding_self(
-                    crate::arch::x86_64::apic::TLB_SHOOTDOWN_VECTOR,
-                );
-            }
-        }
     }
 }
 
@@ -953,6 +933,12 @@ impl VirtualAddressSpace {
                 }
             }
 
+            // Invalidate the unmapped pages on every CPU BEFORE their frames
+            // go back to the allocator, or a CPU holding a stale translation
+            // could write into a frame that already belongs to someone else
+            // (MEM-SEC-02).
+            crate::mm::tlb::flush_all();
+
             // Free physical frames for each mapping that owns them
             for (_, mapping) in mappings.iter().filter(|(_, m)| m.owns_frames()) {
                 let allocator = FRAME_ALLOCATOR.lock();
@@ -966,9 +952,6 @@ impl VirtualAddressSpace {
 
             // NOTE: Page table frames are NOT freed here -- see clear() comment.
             // The caller must free them after switching to a different CR3.
-
-            // Flush entire TLB since we destroyed the whole address space
-            crate::arch::tlb_flush_all();
         }
     }
 
@@ -1215,7 +1198,7 @@ impl VirtualAddressSpace {
                     for j in 0..i {
                         let page = start.0 + (j as u64) * 4096;
                         let _ = mapper.unmap_page(VirtualAddress(page));
-                        crate::arch::tlb_flush_address(page);
+                        crate::mm::tlb::flush_page(page);
                     }
                     return Err(e);
                 }
@@ -1494,7 +1477,7 @@ impl VirtualAddressSpace {
             let mut mapper = unsafe { create_mapper_from_root(pt_root) };
             let mut alloc = VasFrameAllocator;
             mapper.map_page(vaddr_obj, frame, flags, &mut alloc)?;
-            crate::arch::tlb_flush_address(vaddr as u64);
+            crate::mm::tlb::flush_page(vaddr as u64);
         }
         Ok(())
     }
@@ -1518,7 +1501,7 @@ impl VirtualAddressSpace {
             // Unmap old entry (ignore error if not currently mapped)
             let _ = mapper.unmap_page(vaddr_obj);
             mapper.map_page(vaddr_obj, new_frame, flags, &mut alloc)?;
-            crate::arch::tlb_flush_address(vaddr as u64);
+            crate::mm::tlb::flush_page(vaddr as u64);
         }
         Ok(())
     }
@@ -1670,7 +1653,7 @@ impl VirtualAddressSpace {
             for (i, &frame) in new_frames.iter().enumerate() {
                 let vaddr = VirtualAddress(start_addr.0 + (i as u64) * 4096);
                 mapper.map_page(vaddr, frame, flags, &mut alloc)?;
-                crate::arch::tlb_flush_address(vaddr.0);
+                crate::mm::tlb::flush_page(vaddr.0);
             }
         }
 
@@ -1745,7 +1728,7 @@ impl VirtualAddressSpace {
             let vaddr = VirtualAddress(start.0 + (i as u64) * 4096);
             // Ignore errors for pages that aren't mapped in the hardware tables
             let _ = mapper.update_page_flags(vaddr, new_flags);
-            crate::arch::tlb_flush_address(vaddr.0);
+            crate::mm::tlb::flush_page(vaddr.0);
         }
 
         // Update the mapping metadata flags too
@@ -1856,6 +1839,12 @@ impl VirtualAddressSpace {
                 }
             }
 
+            // Invalidate the unmapped pages on every CPU BEFORE their frames
+            // go back to the allocator, or a CPU holding a stale translation
+            // could write into a frame that already belongs to someone else
+            // (MEM-SEC-02).
+            crate::mm::tlb::flush_all();
+
             // Free physical frames for each mapping that owns them
             for (_, mapping) in mappings.iter().filter(|(_, m)| m.owns_frames()) {
                 let frame_allocator = FRAME_ALLOCATOR.lock();
@@ -1867,10 +1856,8 @@ impl VirtualAddressSpace {
             // Clear all mappings
             mappings.clear();
 
-            // Flush TLB for the unmapped user-space pages. This MUST happen
-            // before freeing page table subtrees below, so that no stale TLB
-            // entry references the about-to-be-freed L3/L2/L1 frames.
-            crate::arch::tlb_flush_all();
+            // The TLB was flushed above, before the data frames were freed,
+            // which also covers the page table subtrees freed below.
 
             // Free user-space page table subtree frames (L3/L2/L1) now that
             // all user PTEs have been cleared and the TLB flushed. The L4
@@ -1934,6 +1921,12 @@ impl VirtualAddressSpace {
                 }
             }
 
+            // Invalidate the unmapped pages on every CPU BEFORE their frames
+            // go back to the allocator, or a CPU holding a stale translation
+            // could write into a frame that already belongs to someone else
+            // (MEM-SEC-02).
+            crate::mm::tlb::flush_all();
+
             // Free physical frames and remove mappings
             for addr in &to_remove {
                 if let Some(mapping) = mappings.get(addr).filter(|m| m.owns_frames()) {
@@ -1954,9 +1947,6 @@ impl VirtualAddressSpace {
             // corrupt the active page table hierarchy. The old page table
             // frames are reused by subsequent map_region calls since their L1
             // entries were already unmapped above (all slots are non-present).
-
-            // Flush TLB for user-space changes
-            crate::arch::tlb_flush_all();
         }
 
         // Reset user-space metadata
@@ -2042,12 +2032,12 @@ impl VirtualAddressSpace {
                         frame,
                         "vas",
                     );
-                    crate::arch::tlb_flush_address(vaddr as u64);
+                    crate::mm::tlb::flush_page(vaddr as u64);
                     return Ok(());
                 }
                 Err(e) => return Err(e),
             }
-            crate::arch::tlb_flush_address(vaddr as u64);
+            crate::mm::tlb::flush_page(vaddr as u64);
         }
 
         // Record the mapping
@@ -2113,7 +2103,7 @@ impl VirtualAddressSpace {
             let mut mapper = unsafe { create_mapper_from_root(pt_root) };
             let mut alloc = VasFrameAllocator;
             mapper.map_page(vaddr_obj, frame, huge_flags, &mut alloc)?;
-            crate::arch::tlb_flush_address(vaddr as u64);
+            crate::mm::tlb::flush_page(vaddr as u64);
         }
 
         // Record the mapping.

@@ -135,24 +135,31 @@ pub const HEAP_START: usize = 0x41000000;
 /// Flush TLB for a specific virtual address. Called via
 /// `crate::arch::tlb_flush_address()`.
 pub fn tlb_flush_address(addr: u64) {
-    // SAFETY: `tlbi vae1` invalidates the TLB entry at EL1. Address is shifted
-    // right by 12 for page-number format. DSB SY + ISB ensure completion.
+    // SAFETY: `tlbi vaae1is` invalidates the EL1 entries for this page, any
+    // ASID, on every CPU in the Inner Shareable domain (MEM-ARCH-03: the
+    // non-shareable `vae1` reached only the local CPU). `dsb ishst` orders
+    // the page-table update before it; `dsb ish` waits for completion
+    // everywhere; `isb` resynchronises this CPU.
     unsafe {
-        let page_addr = addr >> 12;
-        core::arch::asm!("tlbi vae1, {}", in(reg) page_addr);
-        core::arch::asm!("dsb sy");
-        core::arch::asm!("isb");
+        let page_addr = (addr >> 12) & 0x0000_0FFF_FFFF_FFFF;
+        core::arch::asm!("dsb ishst", "tlbi vaae1is, {}", "dsb ish", "isb",
+            in(reg) page_addr, options(nostack));
     }
 }
 
 /// Flush entire TLB. Called via `crate::arch::tlb_flush_all()`.
 pub fn tlb_flush_all() {
-    // SAFETY: `tlbi vmalle1` invalidates all EL1 TLB entries. DSB SY + ISB
-    // ensure completion. Architectural maintenance instructions, safe at EL1.
+    // SAFETY: `tlbi vmalle1is` invalidates all EL1 entries on every CPU in
+    // the Inner Shareable domain (MEM-ARCH-03); the barriers order and
+    // complete it as in `tlb_flush_address`.
     unsafe {
-        core::arch::asm!("tlbi vmalle1");
-        core::arch::asm!("dsb sy");
-        core::arch::asm!("isb");
+        core::arch::asm!(
+            "dsb ishst",
+            "tlbi vmalle1is",
+            "dsb ish",
+            "isb",
+            options(nostack)
+        );
     }
 }
 

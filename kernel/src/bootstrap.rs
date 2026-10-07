@@ -2900,6 +2900,20 @@ fn run_usercopy_tests(passed: &mut u32, failed: &mut u32) {
         let ok = hw_ms >= 100 && up_ms * 10 >= hw_ms * 7 && up_ms * 10 <= hw_ms * 13;
         report_test("uptime_tracks_hw_clock", ok, passed, failed);
     }
+
+    // Test 37: a TLB shootdown reaches every online CPU and is confirmed
+    // (x86 IPI acknowledgements, SBI RFENCE, AArch64 broadcast TLBI;
+    // MEM-SEC-02). Trivially true on one CPU.
+    {
+        let start = crate::arch::timer::monotonic_ns();
+        for _ in 0..8 {
+            crate::mm::tlb::flush_all();
+            crate::mm::tlb::flush_page(0x0000_7FF0_0000_0000);
+        }
+        let quick = crate::arch::timer::monotonic_ns().saturating_sub(start) < 500_000_000;
+        let ok = quick && crate::mm::tlb::remote_flushes_confirmed();
+        report_test("tlb_shootdown_confirmed", ok, passed, failed);
+    }
 }
 
 #[cfg(not(feature = "alloc"))]
