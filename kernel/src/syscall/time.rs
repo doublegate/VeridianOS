@@ -182,7 +182,9 @@ pub fn sys_nanosleep(req_ptr: usize, rem_ptr: usize) -> SyscallResult {
         // Busy-wait with interrupt-enabled halts so APIC timer ISR can
         // advance UPTIME_MS (SFMASK clears IF on syscall entry).
         while crate::timer::get_uptime_ms() - start < sleep_ms {
-            crate::sched::wait_for_interrupt_in_syscall();
+            if crate::sched::wait_for_interrupt_in_syscall() {
+                return Err(SyscallError::Interrupted);
+            }
         }
     }
 

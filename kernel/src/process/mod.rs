@@ -405,6 +405,14 @@ pub fn user_task_reaped(pid: u64, _tid: u64) {
     crate::sched::dispatch::PROCESS_EVENTS.wake_all();
 }
 
+/// Whether a dispatched thread waiting in a system call must stop waiting
+/// and fail with EINTR: its process has a fatal signal to act on. The
+/// signal is acted on at the system-call exit, once the call has unwound.
+pub fn wait_interrupted() -> bool {
+    dispatched_context().is_some()
+        && current_process().is_some_and(|p| p.kill_pending.load(Ordering::Acquire) != 0)
+}
+
 /// Run on every return to user mode of a dispatched thread: a thread whose
 /// process received a fatal signal exits here instead (the signal is acted
 /// on by the process's own threads, never torn down under them).

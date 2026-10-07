@@ -94,7 +94,13 @@
   - exec in a multithreaded process freed page tables its other threads still ran on. It is
     refused (EAGAIN) until those threads are stopped first (N-101).
   - A process blocked in a sleep, `poll` or another in-kernel wait could not be killed until
-    the wait ended. Every dispatched wait now acts on a pending fatal signal.
+    the wait ended. Every dispatched wait now ends with EINTR when a fatal signal is pending,
+    and the signal is acted on at the system-call exit. (The first version of this fix exited
+    from inside the wait and leaked whatever the system call held; found by a second review.)
+- **Blocking pipe reads and writes wait (N-119, part).** A dispatched reader of an empty pipe
+  waits for data or end of file, and a writer to a full pipe waits for room; both used to get
+  EAGAIN. That broke `$(sort f | head -n 1)` once the two ran at the same time. O_NONBLOCK
+  still gets EAGAIN. Runtime test `pipe_read_blocks_for_writer`.
 
 - **x86_64 kernel entry rebuilt (N-166, N-169, N-170, N-171, N-175; ADR 0008).**
   - **One frame and dispatcher.** Every exception and interrupt enters through an assembly stub

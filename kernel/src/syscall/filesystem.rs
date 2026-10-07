@@ -421,6 +421,36 @@ pub fn sys_read(fd: usize, buffer: usize, count: usize) -> SyscallResult {
         }
     } // Drop file_table lock before dispatching children.
 
+    // A dispatched reader (stage D2) runs alongside its writer: a blocking
+    // read of an empty pipe or socket waits until data arrives or the
+    // writers close (EOF), as POSIX requires. It used to return EAGAIN,
+    // which the nested model hid by running the writer inline and which
+    // made `$(sort f | head -n 1)` read nothing once both ran at once
+    // (N-119). O_NONBLOCK still gets EAGAIN.
+    #[cfg(feature = "alloc")]
+    if crate::sched::dispatch::current_owner().is_some() {
+        loop {
+            {
+                let file_table = proc.file_table.lock();
+                let file_desc = file_table.get(fd).ok_or(SyscallError::InvalidArgument)?;
+                if file_desc
+                    .nonblock
+                    .load(core::sync::atomic::Ordering::Acquire)
+                {
+                    return Err(SyscallError::WouldBlock);
+                }
+                match file_read_to_user(&file_desc, buffer, count) {
+                    Err(SyscallError::WouldBlock) => {}
+                    other => return other,
+                }
+            }
+            // No lock held while waiting; a signal ends the wait (EINTR).
+            if crate::sched::wait_for_interrupt_in_syscall() {
+                return Err(SyscallError::Interrupted);
+            }
+        }
+    }
+
     // Boot execution mode: dispatch any Ready children so they can write
     // to the pipe, then retry the read. This loop runs at most
     // MAX_CHILD_DISPATCH iterations to prevent infinite loops.
@@ -511,9 +541,8 @@ pub fn sys_write(fd: usize, buffer: usize, count: usize) -> SyscallResult {
     if fd == 1 || fd == 2 {
         // Try the file table first if we have a process context
         if let Some(proc) = process::current_process() {
-            let file_table = proc.file_table.lock();
-            if let Some(file_desc) = file_table.get(fd) {
-                return file_write_from_user(&file_desc, buffer, count);
+            if let Some(result) = write_fd(&proc, fd, buffer, count) {
+                return result;
             }
         }
 
@@ -534,10 +563,42 @@ pub fn sys_write(fd: usize, buffer: usize, count: usize) -> SyscallResult {
 
     // Non-stdout/stderr: use file table normally
     let proc = process::current_process().ok_or(SyscallError::InvalidState)?;
-    let file_table = proc.file_table.lock();
-    let file_desc = file_table.get(fd).ok_or(SyscallError::InvalidArgument)?;
+    write_fd(&proc, fd, buffer, count).unwrap_or(Err(SyscallError::InvalidArgument))
+}
 
-    file_write_from_user(&file_desc, buffer, count)
+/// Write `count` bytes from `buffer` to `fd` of `proc` (`None`: no such
+/// fd). A dispatched writer (stage D2) to a full pipe or socket waits for
+/// room, as POSIX requires of a blocking descriptor, instead of getting
+/// EAGAIN; O_NONBLOCK still gets it (N-119). No lock is held while waiting,
+/// and a signal ends the wait (EINTR).
+fn write_fd(
+    proc: &crate::process::Process,
+    fd: usize,
+    buffer: usize,
+    count: usize,
+) -> Option<SyscallResult> {
+    loop {
+        let result = {
+            let file_table = proc.file_table.lock();
+            let file_desc = file_table.get(fd)?;
+            let blocking = !file_desc
+                .nonblock
+                .load(core::sync::atomic::Ordering::Acquire);
+            let result = file_write_from_user(&file_desc, buffer, count);
+            if !(blocking && matches!(result, Err(SyscallError::WouldBlock))) {
+                return Some(result);
+            }
+            result
+        };
+        #[cfg(feature = "alloc")]
+        if crate::sched::dispatch::current_owner().is_some() {
+            if crate::sched::wait_for_interrupt_in_syscall() {
+                return Some(Err(SyscallError::Interrupted));
+            }
+            continue;
+        }
+        return Some(result);
+    }
 }
 
 /// Read up to `count` bytes from an open file into user memory at `buf`.
@@ -2440,7 +2501,9 @@ pub fn sys_poll(fds_ptr: usize, nfds: usize, timeout_ms: usize) -> SyscallResult
             while crate::timer::get_uptime_ms() - start < timeout_ms as u64 {
                 // Enable interrupts briefly to let APIC timer advance
                 // UPTIME_MS (see epoll::epoll_wait for full rationale).
-                crate::sched::wait_for_interrupt_in_syscall();
+                if crate::sched::wait_for_interrupt_in_syscall() {
+                    return Err(SyscallError::Interrupted);
+                }
             }
         }
         return Ok(0);
@@ -2537,7 +2600,9 @@ pub fn sys_poll(fds_ptr: usize, nfds: usize, timeout_ms: usize) -> SyscallResult
         // (SFMASK clears IF on syscall entry) and time-based fds such as
         // timerfd never become readable.  See epoll::epoll_wait for the
         // detailed rationale.
-        crate::sched::wait_for_interrupt_in_syscall();
+        if crate::sched::wait_for_interrupt_in_syscall() {
+            return Err(SyscallError::Interrupted);
+        }
     }
 }
 

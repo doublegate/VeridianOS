@@ -117,12 +117,13 @@ pub fn in_syscall_wait() -> bool {
 /// AArch64 / RISC-V (kernel tasks only, no user mode): yield if another
 /// task is ready, else WFI until the next 1000 Hz timer interrupt (WFI
 /// wakes on a pending interrupt even if interrupts are masked).
-pub fn wait_for_interrupt_in_syscall() {
-    // A thread running as its own task lets other tasks run (stage D2).
+#[must_use]
+pub fn wait_for_interrupt_in_syscall() -> bool {
+    // A thread running as its own task lets other tasks run (stage D2), and
+    // stops waiting when a signal is to be acted on.
     #[cfg(feature = "alloc")]
     if dispatch::current_owner().is_some() {
-        dispatch::wait_in_syscall();
-        return;
+        return dispatch::wait_in_syscall();
     }
     #[cfg(target_arch = "x86_64")]
     {
@@ -143,6 +144,7 @@ pub fn wait_for_interrupt_in_syscall() {
             unsafe { core::arch::asm!("wfi", options(nomem, nostack)) };
         }
     }
+    false
 }
 
 // Import ProcessState from process module (used by submodules via super::)

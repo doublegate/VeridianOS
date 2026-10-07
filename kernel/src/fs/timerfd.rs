@@ -249,7 +249,9 @@ pub fn timerfd_read(tfd_id: u32) -> Result<u64, SyscallError> {
                 return Err(SyscallError::WouldBlock);
             }
             // Enable interrupts so APIC timer advances UPTIME_MS
-            crate::sched::wait_for_interrupt_in_syscall();
+            if crate::sched::wait_for_interrupt_in_syscall() {
+                return Err(SyscallError::Interrupted);
+            }
             continue;
         }
 
@@ -286,7 +288,9 @@ pub fn timerfd_read(tfd_id: u32) -> Result<u64, SyscallError> {
             return Err(SyscallError::WouldBlock);
         }
         // Enable interrupts so APIC timer advances UPTIME_MS
-        crate::sched::wait_for_interrupt_in_syscall();
+        if crate::sched::wait_for_interrupt_in_syscall() {
+            return Err(SyscallError::Interrupted);
+        }
     }
 }
 

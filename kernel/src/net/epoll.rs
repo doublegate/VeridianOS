@@ -383,7 +383,10 @@ pub fn epoll_wait(
         // resumes here with IF=1; we immediately `cli` to restore the
         // expected interrupts-disabled state for the rest of the syscall
         // path.
-        crate::sched::wait_for_interrupt_in_syscall();
+        if crate::sched::wait_for_interrupt_in_syscall() {
+            // Interrupted by a signal: the caller reports EINTR.
+            return Err(KernelError::WouldBlock);
+        }
     }
 }
 

@@ -96,7 +96,8 @@ pub fn block_process(pid: ProcessId) {
     #[cfg(feature = "alloc")]
     if super::dispatch::started() {
         if crate::process::current_process().is_some_and(|p| p.pid == pid) {
-            super::dispatch::wait_in_syscall();
+            // Callers loop and re-check, including for signals.
+            let _ = super::dispatch::wait_in_syscall();
         }
         return;
     }

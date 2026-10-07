@@ -60,8 +60,8 @@ work. User code is preempted when its slice ends (D3). What is still missing:
   condition each time another task has run, or after the next interrupt: correct, but busier
   than a wait queue with a direct wakeup. Pipes, futexes, `poll`, `nanosleep` and the rest have
   no wait queues yet. Some waits are also still wrong:
-  - a blocking pipe read with no data returns EAGAIN, and a full pipe short-writes;
-  - PIPE_BUF writes are not atomic;
+  - a pipe write that only partly fits returns a short count instead of waiting for the rest,
+    and PIPE_BUF writes are not atomic;
   - eventfd, signalfd and timerfd waits spin for up to 30 s;
   - an empty pty read returns end-of-file;
   - `flock` without `LOCK_NB` fails with EWOULDBLOCK instead of waiting (N-120).

@@ -581,12 +581,9 @@ fn dispatched_futex_wait(
         if deadline.is_some_and(|dl| get_ticks() >= dl) {
             return Err(SyscallError::WouldBlock);
         }
-        if process::current_process()
-            .is_some_and(|p| p.kill_pending.load(core::sync::atomic::Ordering::Acquire) != 0)
-        {
+        if crate::sched::dispatch::wait_in_syscall() {
             return Err(SyscallError::Interrupted);
         }
-        crate::sched::dispatch::wait_in_syscall();
     }
 }
 
@@ -699,8 +696,9 @@ fn boot_futex_spin(
                     return Err(SyscallError::WouldBlock);
                 }
                 // Halt until the APIC timer fires (advances UPTIME_MS)
-                // without letting it preempt this syscall (W-13).
-                crate::sched::wait_for_interrupt_in_syscall();
+                // without letting it preempt this syscall (W-13). The boot
+                // path is never dispatched, so it is never interrupted.
+                let _ = crate::sched::wait_for_interrupt_in_syscall();
                 continue;
             }
         };

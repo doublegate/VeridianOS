@@ -1498,8 +1498,13 @@ fn handle_syscall(
                 crate::net::epoll::EpollEvent { events: 0, data: 0 };
                 max_events.min(1024)
             ];
-            let n = crate::net::epoll::epoll_wait(epoll_id, &mut events, timeout_ms)
-                .map_err(|_| SyscallError::InvalidArgument)?;
+            let n =
+                crate::net::epoll::epoll_wait(epoll_id, &mut events, timeout_ms).map_err(|e| {
+                    match e {
+                        crate::error::KernelError::WouldBlock => SyscallError::Interrupted,
+                        _ => SyscallError::InvalidArgument,
+                    }
+                })?;
             userspace::write_user_bytes(events_ptr, &epoll_events_to_bytes(&events[..n]))?;
             Ok(n)
         }

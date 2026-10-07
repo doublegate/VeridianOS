@@ -1209,6 +1209,38 @@ static void test_kill_sleeping(void)
            why);
 }
 
+/* --- A blocking pipe read waits for the writer (N-119). ----------------
+ * The child writes after a delay while the parent is already reading; the
+ * read must block and return the byte, not fail with EAGAIN. Then EOF
+ * once the writer has gone. */
+static void test_blocking_pipe(void)
+{
+    int fds[2];
+    if (pipe(fds) != 0) {
+        report("pipe_read_blocks_for_writer", 0, "pipe failed");
+        return;
+    }
+    pid_t pid = fork();
+    if (pid == 0) {
+        close(fds[0]);
+        struct timespec ts = {0, 30 * 1000 * 1000};
+        nanosleep(&ts, 0);
+        _exit(write(fds[1], "x", 1) == 1 ? 0 : 1);
+    }
+    close(fds[1]);
+    char c = 0;
+    errno = 0;
+    ssize_t n = read(fds[0], &c, 1);
+    int e1 = errno;
+    ssize_t eof = read(fds[0], &c, 1);
+    close(fds[0]);
+    int st = 0;
+    waitpid(pid, &st, 0);
+    static char why[64];
+    snprintf(why, sizeof(why), "n=%d errno=%d c=%d eof=%d", (int)n, e1, c, (int)eof);
+    report("pipe_read_blocks_for_writer", n == 1 && c == 'x' && eof == 0, why);
+}
+
 int main(int argc, char **argv)
 {
     setvbuf(stdout, NULL, _IONBF, 0);
@@ -1244,6 +1276,7 @@ int main(int argc, char **argv)
     test_traps();
     test_preemption();
     test_kill_sleeping();
+    test_blocking_pipe();
     printf("AUDIT-RUNTIME: %d/%d\n", passed, total);
     return passed == total ? 0 : 1;
 }

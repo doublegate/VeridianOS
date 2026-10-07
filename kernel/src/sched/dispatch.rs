@@ -773,11 +773,18 @@ pub fn tasks_of(pid: u64) -> Vec<Arc<Task>> {
 /// Wait inside a system call for "something to happen" (data, a child, a
 /// timeout): let other tasks run if any are runnable, otherwise halt until
 /// the next interrupt. The caller re-checks its condition afterwards.
-pub fn wait_in_syscall() {
-    // A thread whose process received a fatal signal exits here rather than
-    // wait on (callers wait with no lock held). Without this a process
-    // blocked in a read, poll or sleep could not be killed.
-    crate::process::user_return_check();
+///
+/// Returns true when the wait must end instead: a signal is waiting to be
+/// acted on (a fatal one, or one with a handler). The caller then fails
+/// with EINTR, the system call unwinds normally -- dropping everything it
+/// holds -- and the signal is acted on at the system-call exit. (Exiting
+/// from in here leaked whatever the callers above held: security review of
+/// 9302803.)
+#[must_use]
+pub fn wait_in_syscall() -> bool {
+    if crate::process::wait_interrupted() {
+        return true;
+    }
     let others = this_cpu().is_some_and(|cpu| {
         let irq = irq_save();
         let n = CPUS[cpu].lock().as_ref().map_or(0, |st| st.rq.nr_running());
@@ -793,6 +800,7 @@ pub fn wait_in_syscall() {
         #[cfg(all(target_arch = "x86_64", target_os = "none"))]
         x86_64::instructions::interrupts::disable();
     }
+    crate::process::wait_interrupted()
 }
 
 /// Number of live tasks (the idle tasks excluded).
