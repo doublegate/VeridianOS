@@ -118,6 +118,12 @@ pub fn in_syscall_wait() -> bool {
 /// task is ready, else WFI until the next 1000 Hz timer interrupt (WFI
 /// wakes on a pending interrupt even if interrupts are masked).
 pub fn wait_for_interrupt_in_syscall() {
+    // A thread running as its own task lets other tasks run (stage D2).
+    #[cfg(feature = "alloc")]
+    if dispatch::current_owner().is_some() {
+        dispatch::wait_in_syscall();
+        return;
+    }
     #[cfg(target_arch = "x86_64")]
     {
         use core::sync::atomic::Ordering;

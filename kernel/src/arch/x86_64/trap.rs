@@ -309,9 +309,11 @@ extern "C" fn trap_dispatch(f: &mut TrapFrame) {
     }
 }
 
-/// Last step before any return to ring 3 from an interrupt or exception.
-/// Signal delivery and rescheduling hook in here (sprint D3).
+/// Last step before any return to ring 3 from an interrupt or exception:
+/// a thread whose process received a fatal signal exits instead. Signal
+/// delivery and rescheduling hook in here too (sprint D3).
 fn exit_to_user(f: &mut TrapFrame) {
+    crate::process::user_return_check();
     sanitize_user_frame(f);
 }
 
@@ -321,6 +323,13 @@ fn exit_to_user(f: &mut TrapFrame) {
 /// `thread_only` keeps the other threads of the process alive (the page
 /// fault path's existing behaviour for clone threads).
 fn kill_user(signal: u32, thread_only: bool) -> ! {
+    // A thread running as its own task leaves through the normal exit
+    // path (stage D2), which tears its process down. The trap frame on its
+    // kernel stack is simply abandoned.
+    #[cfg(feature = "alloc")]
+    if crate::sched::dispatch::current_owner().is_some() {
+        let _ = crate::syscall::process::exit_current(0, signal);
+    }
     if thread_only {
         if let Some(thread) = crate::process::current_thread() {
             thread.set_state(crate::process::thread::ThreadState::Zombie);

@@ -175,8 +175,26 @@ pub fn init() {
     println!("[PROCESS] Process management initialized");
 }
 
+/// The (pid, tid) of the user thread the running dispatcher task belongs
+/// to (ADR 0006 stage D2). Lock-free.
+fn dispatched_context() -> Option<(u64, u64)> {
+    #[cfg(feature = "alloc")]
+    {
+        crate::sched::dispatch::current_owner()
+    }
+    #[cfg(not(feature = "alloc"))]
+    {
+        None
+    }
+}
+
 /// Get current process
 pub fn current_process() -> Option<alloc::sync::Arc<Process>> {
+    // A user thread running as its own dispatcher task.
+    if let Some((pid, _)) = dispatched_context() {
+        return table::get_process(ProcessId(pid));
+    }
+
     // A process launched directly by the boot/cooperative dispatcher
     // (enter_usermode_returnable) is not the scheduler's current task -- the
     // scheduler still reports the dispatching task. While that dispatching
@@ -209,6 +227,9 @@ pub fn current_process() -> Option<alloc::sync::Arc<Process>> {
 /// returns `None` if it is held. For fault handlers that may run while the
 /// interrupted code holds that lock.
 pub fn try_current_process() -> Option<alloc::sync::Arc<Process>> {
+    if let Some((pid, _)) = dispatched_context() {
+        return table::get_process(ProcessId(pid));
+    }
     if let Some((boot_pid, _)) = boot_context() {
         return table::get_process(ProcessId(boot_pid));
     }
@@ -244,6 +265,9 @@ pub fn get_current_process() -> Option<alloc::sync::Arc<Process>> {
 pub fn current_thread() -> Option<alloc::sync::Arc<Thread>> {
     // Same rule as current_process(), so the two never name different
     // processes.
+    if let Some((pid, tid)) = dispatched_context() {
+        return table::get_process(ProcessId(pid))?.get_thread(ThreadId(tid));
+    }
     if let Some((boot_pid, boot_tid)) = boot_context() {
         if let Some(process) = table::get_process(ProcessId(boot_pid)) {
             if let Some(thread) = process.get_thread(ThreadId(boot_tid)) {
@@ -269,6 +293,127 @@ pub fn current_thread() -> Option<alloc::sync::Arc<Thread>> {
     }
 
     None
+}
+
+/// Start `thread` of `process` as a dispatcher task (ADR 0006 stage D2):
+/// it enters ring 3 with the registers in its saved context. `inherit_fpu`
+/// gives it a copy of the calling thread's live vector registers (fork,
+/// clone) instead of the initial state (a new program).
+#[cfg(all(feature = "alloc", target_arch = "x86_64"))]
+pub fn start_thread(
+    process: &Process,
+    thread: &Thread,
+    inherit_fpu: bool,
+) -> crate::error::KernelResult<()> {
+    use crate::arch::x86_64::switch::{xsave::Area, UserFrame};
+
+    let (frame, ctx_tls) = {
+        let ctx = thread.context.lock();
+        let frame =
+            UserFrame::from_context(&ctx).ok_or(crate::error::KernelError::InvalidArgument {
+                name: "thread context",
+                value: "entry point or stack outside user space",
+            })?;
+        (frame, ctx.tls_base)
+    };
+    let cr3 = process.memory_space.lock().get_page_table();
+    if cr3 == 0 {
+        return Err(crate::error::KernelError::InvalidState {
+            expected: "address space",
+            actual: "no page table",
+        });
+    }
+    let fs_base = if ctx_tls != 0 {
+        ctx_tls
+    } else {
+        process.tls_fs_base.load(Ordering::Acquire)
+    };
+    let mut area = Area::new().ok_or(crate::error::KernelError::OutOfMemory {
+        requested: crate::arch::x86_64::switch::xsave::size(),
+        available: 0,
+    })?;
+    if inherit_fpu {
+        // The kernel is soft-float, so the CPU still holds the calling
+        // thread's user vector state.
+        area.save();
+    }
+    process
+        .dispatched
+        .store(true, core::sync::atomic::Ordering::Release);
+    crate::sched::dispatch::spawn_user((process.pid.0, thread.tid.0), &frame, cr3, fs_base, area)?;
+    Ok(())
+}
+
+/// Run a freshly created (or exec'd) process as dispatcher tasks and wait
+/// for it to end (stage D2): its first thread is started, the caller blocks
+/// until the process is a zombie whose last task is off the CPU, and the
+/// zombie is reaped. Returns the exit code, or 128 + the signal that killed
+/// it (the shell convention). `None` if the process could not be started.
+#[cfg(all(feature = "alloc", target_arch = "x86_64"))]
+pub fn run_and_wait(pid: ProcessId) -> Option<i32> {
+    let process = table::get_process(pid)?;
+    let thread = process.threads.lock().values().next().cloned()?;
+    if start_thread(&process, &thread, false).is_err() {
+        return None;
+    }
+    drop(thread);
+    crate::sched::dispatch::PROCESS_EVENTS.wait_until(|| {
+        process.get_state() == ProcessState::Zombie
+            && crate::sched::dispatch::tasks_of(pid.0).is_empty()
+    });
+    let sig = process.term_signal.load(Ordering::Acquire);
+    let code = if sig != 0 {
+        128 + sig as i32
+    } else {
+        process.get_exit_code()
+    };
+    drop(process);
+    table::remove_process(pid);
+    Some(code)
+}
+
+/// A dispatcher task of thread (pid, tid) has been reaped (it is off every
+/// CPU). Once a zombie process has no task left, its page tables -- which a
+/// running thread was still using when it tore the rest down -- are freed.
+#[cfg(feature = "alloc")]
+pub fn user_task_reaped(pid: u64, _tid: u64) {
+    let Some(process) = table::get_process(ProcessId(pid)) else {
+        return;
+    };
+    if process.get_state() != ProcessState::Zombie
+        || !crate::sched::dispatch::tasks_of(pid).is_empty()
+    {
+        return;
+    }
+    let root = {
+        let vas = process.memory_space.lock();
+        let root = vas.get_page_table();
+        vas.set_page_table(0);
+        root
+    };
+    if root != 0 {
+        crate::mm::vas::free_user_page_table_frames(root);
+    }
+    crate::sched::dispatch::PROCESS_EVENTS.wake_all();
+}
+
+/// Run on every return to user mode of a dispatched thread: a thread whose
+/// process received a fatal signal exits here instead (the signal is acted
+/// on by the process's own threads, never torn down under them).
+pub extern "C" fn user_return_check() {
+    #[cfg(feature = "alloc")]
+    if dispatched_context().is_some() {
+        if let Some(process) = current_process() {
+            let sig = process.kill_pending.load(Ordering::Acquire);
+            if sig == exit::GROUP_EXIT_PENDING {
+                drop(process);
+                exit::exit_dispatched(0, true);
+            } else if sig != 0 {
+                drop(process);
+                let _ = crate::syscall::process::exit_current(0, sig);
+            }
+        }
+    }
 }
 
 /// Yield current thread

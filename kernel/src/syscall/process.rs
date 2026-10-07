@@ -36,6 +36,24 @@ pub fn sys_fork() -> SyscallResult {
                     // Log error but don't fail the fork
                     println!("[WARN] Failed to inherit capabilities to child process");
                 }
+                drop(child_cap_space);
+                drop(parent_cap_space);
+
+                // A dispatched parent's child runs as its own task, from the
+                // parent's registers at this syscall (rax = 0) and a copy of
+                // its vector state.
+                #[cfg(all(feature = "alloc", target_arch = "x86_64"))]
+                if crate::sched::dispatch::current_owner().is_some() {
+                    let thread = child_process.threads.lock().values().next().cloned();
+                    let started = thread.is_some_and(|t| {
+                        crate::process::start_thread(&child_process, &t, true).is_ok()
+                    });
+                    if !started {
+                        crate::process::table::remove_process(child_pid);
+                        current.children.lock().retain(|&p| p != child_pid);
+                        return Err(SyscallError::OutOfMemory);
+                    }
+                }
             }
 
             // In parent process, return child PID
@@ -145,7 +163,19 @@ pub fn sys_exec(path_ptr: usize, argv_ptr: usize, envp_ptr: usize) -> SyscallRes
                     let new_cr3 = memory_space.get_page_table();
                     drop(memory_space);
                     if new_cr3 != 0 {
+                        let old_cr3: u64;
+                        core::arch::asm!("mov {}, cr3", out(reg) old_cr3);
                         core::arch::asm!("mov cr3, {}", in(reg) new_cr3);
+                        // A dispatched thread owns its old tables: nothing
+                        // else will free them (the nested launchers free
+                        // their child's pre-exec root themselves).
+                        let old_root = old_cr3 & 0x000F_FFFF_FFFF_F000;
+                        if crate::sched::dispatch::current_owner().is_some()
+                            && old_root != new_cr3
+                            && old_root != 0
+                        {
+                            crate::mm::vas::free_user_page_table_frames(old_root);
+                        }
                     }
                 }
 
@@ -202,6 +232,13 @@ pub(crate) fn exit_current(exit_code: i32, term_signal: u32) -> SyscallResult {
             process.set_term_signal(term_signal);
         }
     }
+    // A thread running as its own dispatcher task (stage D2) leaves through
+    // the dispatcher. The native exit call ends the whole process.
+    #[cfg(feature = "alloc")]
+    if crate::sched::dispatch::current_owner().is_some() {
+        crate::process::exit::exit_dispatched(exit_code, true);
+    }
+
     // Check for boot return context FIRST, before exit_thread/exit_process.
     // Both of those call sched::exit_task() which does a context switch and
     // never returns, preventing boot_return_to_kernel from being reached.
@@ -384,6 +421,12 @@ pub fn sys_thread_create(
 /// # Arguments
 /// - exit_code: Thread exit code
 pub fn sys_thread_exit(exit_code: usize) -> SyscallResult {
+    // A dispatched thread ends alone (pthread_exit); its process lives on
+    // until its last thread leaves.
+    #[cfg(feature = "alloc")]
+    if crate::sched::dispatch::current_owner().is_some() {
+        crate::process::exit::exit_dispatched(exit_code as i32, false);
+    }
     exit_thread(exit_code as i32);
     // Should never reach here
     unreachable!("exit_thread returned");

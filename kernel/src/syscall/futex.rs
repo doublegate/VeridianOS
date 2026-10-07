@@ -172,6 +172,15 @@ pub fn sys_futex_wait(
         None
     };
 
+    // A thread running as its own dispatcher task (stage D2) waits through
+    // the dispatcher. The old paths below would either block on the old
+    // scheduler, which never runs, or run sibling threads nested from their
+    // saved context -- a second copy of a thread that is already running.
+    #[cfg(feature = "alloc")]
+    if crate::sched::dispatch::current_owner().is_some() {
+        return dispatched_futex_wait(uaddr, expected, deadline);
+    }
+
     let pid = process::current_process()
         .ok_or(SyscallError::InvalidState)?
         .pid
@@ -553,6 +562,33 @@ pub fn sys_futex_requeue(
 // ============================================================================
 // Boot-path futex spin for processes launched outside the scheduler
 // ============================================================================
+
+/// FUTEX_WAIT for a dispatched thread: re-check the word and let other
+/// tasks run until it changes, the deadline passes, or the process receives
+/// a fatal signal. Wakers need not find it: it polls (a futex wait queue
+/// with direct wakeup replaces this with the blocking primitives).
+#[cfg(feature = "alloc")]
+fn dispatched_futex_wait(
+    uaddr: usize,
+    expected: u32,
+    deadline: Option<u64>,
+) -> Result<isize, SyscallError> {
+    loop {
+        let cur: u32 = super::userspace::read_user(uaddr)?;
+        if cur != expected {
+            return Ok(0);
+        }
+        if deadline.is_some_and(|dl| get_ticks() >= dl) {
+            return Err(SyscallError::WouldBlock);
+        }
+        if process::current_process()
+            .is_some_and(|p| p.kill_pending.load(core::sync::atomic::Ordering::Acquire) != 0)
+        {
+            return Err(SyscallError::Interrupted);
+        }
+        crate::sched::dispatch::wait_in_syscall();
+    }
+}
 
 /// Cooperative futex wait for boot-launched processes.
 ///

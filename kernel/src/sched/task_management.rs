@@ -76,6 +76,11 @@ pub fn create_task(
 /// Exit current task
 #[allow(unused_variables)]
 pub fn exit_task(exit_code: i32) {
+    // A dispatched thread leaves through the dispatcher (stage D2).
+    #[cfg(feature = "alloc")]
+    if super::dispatch::current_owner().is_some() {
+        crate::process::exit::exit_dispatched(exit_code, false);
+    }
     let mut scheduler = super::SCHEDULER.lock();
 
     if let Some(current_task) = scheduler.current() {

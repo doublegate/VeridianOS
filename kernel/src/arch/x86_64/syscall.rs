@@ -66,6 +66,9 @@ pub fn per_cpu_data_ptr() -> *mut PerCpuData {
 /// the user stack loaded (CVE-2012-0217), and Linux likewise refuses the
 /// last page below the canonical boundary (N-171).
 extern "C" fn syscall_exit_prepare(frame: &mut SyscallFrame) -> u64 {
+    // A thread whose process received a fatal signal (or an exit_group by
+    // another thread) leaves here instead of returning.
+    crate::process::user_return_check();
     super::trap::sanitize_user_frame(frame);
     let sysret_ok = frame.rcx == frame.rip
         && frame.r11 == frame.rflags

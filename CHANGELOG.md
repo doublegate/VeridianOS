@@ -32,6 +32,19 @@
     wakeups, the idle task, and reaping.
 
   User programs still run nested in the boot task until stage D2.
+- **User threads run as tasks, stage D2 (ADR 0006).** Every user thread on x86_64 is a
+  dispatcher task with its own kernel stack, address space root, TLS base and XSAVE area (user
+  vector state is switched eagerly, N-41). Programs, forked children and `clone` threads now run
+  alongside each other instead of nested inside whatever started them:
+  - **Launching.** The kernel shell and the boot launcher start a program and wait for it.
+  - **Exit.** `exit` ends the process and `pthread_exit` only its thread (N-106). The last thread
+    out tears the process down; its page tables are freed once it has left the CPU (N-108).
+  - **Wait and kill.** `wait` blocks on a process-event queue (N-107). A fatal signal sent to a
+    dispatched process is acted on by its own threads at their next return to user mode.
+  - **Waits and faults.** Waits inside system calls let other tasks run. User faults leave
+    through the normal exit path.
+  - **Tests.** The runtime suites now run entirely on the dispatcher, and a new musl test
+    checks concurrent pthreads with a mutex, `pthread_join` and `pthread_exit`.
 - **Three new boot tests** (39 in total with the two added earlier in this cycle) check:
   - per-CPU identity and ticks;
   - that uptime follows the hardware clock;
@@ -141,6 +154,17 @@
   bounce buffers, and messages and datagrams are capped at 1 MiB.
 
 ### Fixed
+
+- **`mprotect` from PROT_NONE to read-write left the memory inaccessible.** A user-accessible
+  leaf needs the user bit at every page-table level; `mprotect` set it only on the leaf, so
+  tables first created for kernel-only (PROT_NONE) pages kept user code out. musl's thread
+  stacks are made exactly this way. Regression test `mprotect_none_to_rw_fresh_tables`.
+- **musl `pthread_exit` ended the whole process.** The musl patch mapped `exit` (60) to the
+  native process exit; it now maps to the native thread exit (41), and `exit_group` (231) to the
+  process exit.
+- **`tools/cross/build-musl.sh` ignored a changed patch.** It skipped patching whenever the tree
+  had been patched once, so a patch change never reached `libc.a`. The tree is now stamped with
+  a hash of the patch set and re-extracted when the stamp differs.
 
 - **`sigaction` no longer overwrites its caller's stack (N-95).** The native libc passed its
   24-byte `struct sigaction` where the kernel reads and writes 32 bytes, so every `signal()`

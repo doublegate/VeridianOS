@@ -137,6 +137,8 @@ unsafe extern "C" fn user_trampoline() {
     naked_asm!(
         // rsp points at the UserFrame, 16-byte aligned.
         "call {finish}",
+        // A fatal signal sent before the thread first ran ends it here.
+        "call {check}",
         "pop r15",
         "pop r14",
         "pop r13",
@@ -156,6 +158,7 @@ unsafe extern "C" fn user_trampoline() {
         "swapgs",
         "iretq",
         finish = sym crate::sched::dispatch::finish_switch,
+        check = sym crate::process::user_return_check,
     );
 }
 

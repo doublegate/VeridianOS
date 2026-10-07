@@ -86,10 +86,13 @@ What does not work yet: `docs/KNOWN-LIMITATIONS.md`.
     - [x] D1: switch primitive (`switch_stacks`), boot task + idle, kernel threads on guarded
       stacks, wait queues (prepare-to-wait), reaping after `on_cpu` clears (`sched/dispatch.rs`,
       2 boot tests).
-    - [ ] D2 dispatcher: user tasks
+    - [x] D2 dispatcher: user tasks
       dispatched by the scheduler on their own kernel stacks; launch from boot/shell/KDE as
       spawn + wait; exit vs exit_group, process exit by the last thread, teardown after every
       thread is off-CPU, child wait queue (N-106 to N-111); fork/wait; XSAVE switching (N-41).
+      Done 2026-10-07: every launcher (boot, shell, KDE session) uses `process::run_and_wait`;
+      musl pthreads run concurrently. Open: N-111 (Zombie->Dead CAS) and N-112 with SMP (D5);
+      waits poll through `dispatch::wait_in_syscall` until the blocking step.
     - [ ] Blocking: wait-queue primitive, sleep queue, no spinlock held across I/O, user copies
       or waits; file table lock dropped after fd lookup; sleeping address-space lock (N-118,
       N-119, N-138); pipes with reader/writer counts and PIPE_BUF atomicity; futex queues with

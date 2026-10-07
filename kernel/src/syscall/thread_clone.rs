@@ -259,6 +259,17 @@ pub fn sys_thread_clone(
         .add_thread(thread)
         .map_err(|_| SyscallError::InvalidState)?;
 
+    // A dispatched process's new thread runs as its own task (stage D2),
+    // starting from the registers prepared above and a copy of the caller's
+    // vector state. It must not also go on the old scheduler's queue, where
+    // the old nested dispatch would run a second copy of it.
+    #[cfg(target_arch = "x86_64")]
+    if sched::dispatch::current_owner().is_some() {
+        crate::process::start_thread(&proc, &thread, true)
+            .map_err(|_| SyscallError::OutOfMemory)?;
+        return Ok(tid.0 as usize);
+    }
+
     // Create scheduler task
     let task_ptr = sched::create_task_from_thread(proc.pid, tid, &thread)
         .map_err(|_| SyscallError::InvalidState)?;

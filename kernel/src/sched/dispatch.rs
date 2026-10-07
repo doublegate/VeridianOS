@@ -1,10 +1,12 @@
 //! Task dispatcher (ADR 0006): every task runs on its own kernel stack and
 //! all switching happens between kernel stacks.
 //!
-//! Stage D1 (this file today): the switch primitive, the boot flow adopted
-//! as CPU 0's first task, an idle task, kernel threads, blocking on wait
-//! queues, and the reaping of exited threads. User tasks (D2), timer
-//! preemption (D3) and other CPUs (D5) build on it.
+//! Stage D1: the switch primitive, the boot flow adopted as CPU 0's first
+//! task, an idle task, kernel threads, blocking on wait queues, and the
+//! reaping of exited threads. Stage D2: user threads as tasks
+//! ([`spawn_user`]), each with its own kernel stack and saved vector state
+//! (XSAVE, N-41), entering ring 3 from `user_trampoline`. Timer preemption
+//! (D3) and other CPUs (D5) build on it.
 //!
 //! Per-CPU state is a run queue of the ADR 0007 policy plus the running
 //! task, the idle task and the task just switched away from. Rules:
@@ -27,7 +29,7 @@
 use alloc::{collections::BTreeMap, sync::Arc, vec::Vec};
 use core::{
     cell::UnsafeCell,
-    sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering},
+    sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, AtomicU8, Ordering},
 };
 
 use spin::Mutex;
@@ -99,6 +101,14 @@ pub struct Task {
     arch: UnsafeCell<ArchState>,
     /// The task's own kernel stack (`None`: the boot flow's stack).
     stack: Option<crate::mm::kstack::KernelStack>,
+    /// The user thread this task runs, as (pid, tid); `None` for kernel
+    /// tasks.
+    owner: Option<(u64, u64)>,
+    /// User vector state (x87/SSE/AVX), switched eagerly: the kernel itself
+    /// is soft-float, so only tasks that run user code need it. Same access
+    /// rule as `saved_sp`.
+    #[cfg(target_arch = "x86_64")]
+    xsave: UnsafeCell<Option<crate::arch::x86_64::switch::xsave::Area>>,
 }
 
 // SAFETY: `saved_sp` and `arch` are accessed only by the CPU switching the
@@ -125,7 +135,15 @@ impl Task {
             saved_sp: UnsafeCell::new(0),
             arch: UnsafeCell::new(ArchState::default()),
             stack,
+            owner: None,
+            #[cfg(target_arch = "x86_64")]
+            xsave: UnsafeCell::new(None),
         }
+    }
+
+    /// The (pid, tid) of the user thread this task runs.
+    pub fn owner(&self) -> Option<(u64, u64)> {
+        self.owner
     }
 
     pub fn key(&self) -> TaskKey {
@@ -170,6 +188,16 @@ struct CpuSched {
 
 /// Per-CPU dispatch state; only CPU 0 dispatches until stage D5.
 static CPUS: [Mutex<Option<CpuSched>>; 1] = [const { Mutex::new(None) }];
+
+/// The running task of each dispatching CPU, readable without the CPU lock
+/// (for `current_process()` on every syscall and in fault handlers). Only
+/// that CPU changes it, in `schedule` with interrupts off, and the task it
+/// points to stays alive while it is current.
+static CURRENT: [AtomicPtr<Task>; 1] = [const { AtomicPtr::new(core::ptr::null_mut()) }];
+
+/// Woken whenever a process changes state (exit, stop, a fatal signal);
+/// `wait` and the program launchers wait here.
+pub static PROCESS_EVENTS: WaitQueue = WaitQueue::new();
 
 /// Every live task except the idle tasks, by key.
 static TASKS: Mutex<BTreeMap<TaskKey, Arc<Task>>> = Mutex::new(BTreeMap::new());
@@ -251,7 +279,12 @@ pub fn start() -> Result<(), KernelError> {
             .as_u64();
         KERNEL_CR3.store(cr3, Ordering::Release);
 
-        let boot = Arc::new(Task::new(alloc_key(), "boot", Policy::default(), None));
+        crate::arch::x86_64::switch::xsave::init();
+        let mut boot = Task::new(alloc_key(), "boot", Policy::default(), None);
+        // The boot flow runs the nested user programs of the old model, so
+        // its vector state is switched too.
+        *boot.xsave.get_mut() = crate::arch::x86_64::switch::xsave::Area::new();
+        let boot = Arc::new(boot);
         boot.set_state(State::Running);
         boot.on_cpu.store(true, Ordering::Release);
 
@@ -263,6 +296,7 @@ pub fn start() -> Result<(), KernelError> {
         rq.enqueue(boot.key, *boot.entity.lock(), t);
         rq.pick_next(t);
         TASKS.lock().insert(boot.key, boot.clone());
+        CURRENT[0].store(Arc::as_ptr(&boot) as *mut Task, Ordering::Release);
         *CPUS[0].lock() = Some(CpuSched {
             rq,
             current: boot,
@@ -378,6 +412,7 @@ pub fn schedule() {
             }
             next.set_state(State::Running);
             next.on_cpu.store(true, Ordering::Release);
+            CURRENT[cpu].store(Arc::as_ptr(&next) as *mut Task, Ordering::Release);
             let pair = (Arc::as_ptr(&prev), Arc::as_ptr(&next));
             st.prev = Some(prev);
             Some(pair)
@@ -416,6 +451,13 @@ unsafe fn arch_switch(prev: *const Task, next: *const Task) {
         a.user_rsp = (*cpu).user_rsp;
         a.syscall_frame = (*cpu).syscall_frame;
 
+        if let Some(area) = (*(*prev).xsave.get()).as_mut() {
+            area.save();
+        }
+        if let Some(area) = (*(*next).xsave.get()).as_ref() {
+            area.restore();
+        }
+
         let b = &*(*next).arch.get();
         switch::switch_address_space(b.cr3);
         switch::write_fs_base(b.fs_base);
@@ -441,10 +483,14 @@ pub extern "C" fn finish_switch() {
         prev.on_cpu.store(false, Ordering::Release);
         if prev.state() == State::Dead {
             TASKS.lock().remove(&prev.key);
-            EXITED.wake_all();
+            let owner = prev.owner;
             // Dropping the last reference frees its kernel stack, which no
             // CPU uses any more.
             drop(prev);
+            if let Some((pid, tid)) = owner {
+                crate::process::user_task_reaped(pid, tid);
+            }
+            EXITED.wake_all();
         }
     }
 }
@@ -546,6 +592,13 @@ pub fn wake_key(key: TaskKey) -> bool {
 
 /// Terminate the running kernel thread. Never returns.
 pub extern "C" fn exit_kernel_thread() -> ! {
+    exit_current_task()
+}
+
+/// Terminate the running task (kernel thread or user thread, after the
+/// caller released what the thread owns). It is reaped once off the CPU.
+/// Never returns.
+pub fn exit_current_task() -> ! {
     if let Some(cpu) = this_cpu() {
         let irq = irq_save();
         {
@@ -621,6 +674,104 @@ extern "C" fn idle_entry(_: usize) {
         }
         #[cfg(not(all(target_arch = "x86_64", target_os = "none")))]
         core::hint::spin_loop();
+    }
+}
+
+/// The (pid, tid) of the user thread running on this CPU, without taking
+/// any lock (safe in fault handlers).
+pub fn current_owner() -> Option<(u64, u64)> {
+    if !started() {
+        return None;
+    }
+    let cpu = this_cpu()?;
+    let p = CURRENT[cpu].load(Ordering::Acquire);
+    if p.is_null() {
+        return None;
+    }
+    // SAFETY: CURRENT holds the task running on this CPU, which stays
+    // alive (in the CPU state) while it is current; reading it from the
+    // same CPU cannot race with its replacement.
+    unsafe { (*p).owner }
+}
+
+/// Start a user thread as a task: its first switch-in enters ring 3 with
+/// `frame`, on address space `cr3`, with TLS base `fs_base` and vector
+/// state `xsave`.
+#[cfg(target_arch = "x86_64")]
+pub fn spawn_user(
+    owner: (u64, u64),
+    frame: &crate::arch::x86_64::switch::UserFrame,
+    cr3: u64,
+    fs_base: u64,
+    xsave: crate::arch::x86_64::switch::xsave::Area,
+) -> Result<TaskKey, KernelError> {
+    #[cfg(not(target_os = "none"))]
+    {
+        let _ = (owner, frame, cr3, fs_base, xsave);
+        Err(KernelError::NotImplemented {
+            feature: "user tasks on the host",
+        })
+    }
+    #[cfg(target_os = "none")]
+    {
+        if !started() {
+            return Err(KernelError::InvalidState {
+                expected: "dispatcher started",
+                actual: "not started",
+            });
+        }
+        let stack = crate::mm::kstack::allocate(KTHREAD_STACK_PAGES)?;
+        let top = stack.base + stack.pages * 4096;
+        let mut task = Task::new(alloc_key(), "user", Policy::default(), Some(stack));
+        task.owner = Some(owner);
+        *task.xsave.get_mut() = Some(xsave);
+        // SAFETY: the stack was just allocated for this task and is unused.
+        let sp = unsafe { crate::arch::x86_64::switch::seed_user_thread(top, frame) };
+        *task.saved_sp.get_mut() = sp;
+        let arch = task.arch.get_mut();
+        arch.cr3 = cr3;
+        arch.fs_base = fs_base;
+        arch.entry_stack = top as u64;
+        let task = Arc::new(task);
+        let key = task.key;
+        TASKS.lock().insert(key, task.clone());
+        let irq = irq_save();
+        if let Some(st) = CPUS[0].lock().as_mut() {
+            st.rq.enqueue(key, *task.entity.lock(), now());
+        }
+        irq_restore(irq);
+        Ok(key)
+    }
+}
+
+/// Live tasks running threads of process `pid`.
+pub fn tasks_of(pid: u64) -> Vec<Arc<Task>> {
+    TASKS
+        .lock()
+        .values()
+        .filter(|t| t.owner.is_some_and(|(p, _)| p == pid))
+        .cloned()
+        .collect()
+}
+
+/// Wait inside a system call for "something to happen" (data, a child, a
+/// timeout): let other tasks run if any are runnable, otherwise halt until
+/// the next interrupt. The caller re-checks its condition afterwards.
+pub fn wait_in_syscall() {
+    let others = this_cpu().is_some_and(|cpu| {
+        let irq = irq_save();
+        let n = CPUS[cpu].lock().as_ref().map_or(0, |st| st.rq.nr_running());
+        irq_restore(irq);
+        // The running task is still queued.
+        n > 1
+    });
+    if others {
+        yield_now();
+    } else {
+        #[cfg(all(target_arch = "x86_64", target_os = "none"))]
+        x86_64::instructions::interrupts::enable_and_hlt();
+        #[cfg(all(target_arch = "x86_64", target_os = "none"))]
+        x86_64::instructions::interrupts::disable();
     }
 }
 

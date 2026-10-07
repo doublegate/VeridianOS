@@ -47,31 +47,36 @@ nothing fills (N-47), so it cannot reach any endpoint either.
   the fast-path receive never blocks, and kernel memory used by IPC is not accounted. All of this
   is unreachable from user space today.
 
-### User processes are not scheduled (C5, ADR 0006; planned v0.27 sprint D)
+### User processes are not preempted (C5, ADR 0006; planned v0.27 sprint D3)
 
-User programs (x86_64 only) do not run as scheduler tasks yet. Kernel threads do (stage D1:
-`sched/dispatch.rs`, with the boot flow, an idle task, wait queues and reaping), but each user
-program still runs nested inside the kernel shell's boot task: `fork` runs the child to
-completion, or until it waits, before the parent continues. Stage D2 gives user threads their
-own tasks on the dispatcher (ADR 0006) and the scheduling policy (ADR 0007: EEVDF fair class,
-FIFO/RR real-time, SCHED_DEADLINE). Until then:
+Since stage D2, every user thread (x86_64) runs as a dispatcher task of its own, on its own
+kernel stack and with its own saved vector state. Programs, forked children and `clone` threads
+run alongside each other, the kernel shell waits for the programs it starts, and musl's pthreads
+work. What is still missing:
 
-- **No timer preemption of user code, and none inside system calls (W-13).** On x86_64 a system
-  call that waits (poll, epoll, nanosleep, futex, timerfd) halts with interrupts enabled, but the
-  tick does not schedule other work during that wait. A long wait delays every other process.
-- **No real blocking (N-119).** A blocking pipe read with no data returns EAGAIN, a full pipe
-  short-writes, PIPE_BUF writes are not atomic, eventfd/signalfd/timerfd waits spin for up to
-  30 s, an empty pty read returns end-of-file, and `flock` without `LOCK_NB` fails with
-  EWOULDBLOCK instead of waiting (N-120).
-- **No user threads (N-102, N-46, N-50, N-54).** `clone(CLONE_THREAD)` and `pthread_create`
-  cannot run threads, the native libc's `clone` returns through a C epilogue, and `errno` is one
-  global. Two fixes are therefore tested by unit tests only: LIBC-SEC-01 (the allocator lock in
-  `stdlib.c`; runtime test `audit_runtime_test threads`) and PROC-SEC-02 (deferred reaping of an
-  exiting thread's stack).
+- **No timer preemption (W-13, D3).** A task switches only when it waits or yields, so a program
+  that computes without making system calls keeps the CPU, the shell included, until it
+  finishes.
+- **Waits poll (N-119, blocking step of sprint D).** A system call that waits re-checks its
+  condition each time another task has run, or after the next interrupt: correct, but busier
+  than a wait queue with a direct wakeup. Pipes, futexes, `poll`, `nanosleep` and the rest have
+  no wait queues yet. Some waits are also still wrong:
+  - a blocking pipe read with no data returns EAGAIN, and a full pipe short-writes;
+  - PIPE_BUF writes are not atomic;
+  - eventfd, signalfd and timerfd waits spin for up to 30 s;
+  - an empty pty read returns end-of-file;
+  - `flock` without `LOCK_NB` fails with EWOULDBLOCK instead of waiting (N-120).
+- **A fatal signal waits for the target (D3).** A process killed by another one stops at its
+  next return to user mode, or when a `wait` or futex wait notices. A target waiting in a pipe
+  read, `poll` or `nanosleep` keeps waiting until that call returns.
+- **Native libc threads (N-102).** The native C library's `clone` returns through a C epilogue
+  and `errno` is one global, so its `pthread_create` still does not work (musl's does). Two
+  fixes are therefore tested by unit tests only: LIBC-SEC-01 (the allocator lock in `stdlib.c`)
+  and PROC-SEC-02 (deferred reaping of an exiting thread's stack).
 - **Per-thread state is per process (N-109):** signal mask and pending set, `clear_child_tid`,
   the robust-list head and the FS base.
-- **Exit and wait (N-106 to N-112)** are correct only because everything is nested; the
-  non-nested paths lose wakeups, can reap a child twice and free running threads' stacks.
+- **Old binaries.** KDE binaries built before the v0.27 musl patch map `pthread_exit` to a
+  process exit.
 
 ### x86_64 entry layer remainders (N-167, N-168; sprint D2)
 
@@ -79,9 +84,10 @@ The entry layer was rebuilt in v0.27 (ADR 0008): one register frame for every en
 `swapgs`, IST only for #DF, NMI and #MC, checked `sysretq`, sanitised user registers, and
 handlers for every exception. What remains depends on the dispatcher:
 
-- The syscall frame pointer and user RSP scratch are per CPU, not per thread (N-167, N-35).
-- A fault in user code is handled by returning to the context that launched the program; without
-  one (none exists today outside that model) it stops the CPU (N-168).
+- The syscall frame pointer and user RSP scratch are per CPU; the dispatcher saves and restores
+  them with each task rather than keeping them on the task's own stack (N-167, N-35).
+- The nested launch model (`enter_usermode_returnable`) is still compiled in, and is removed
+  with the old scheduler in D4.
 - A fatal kernel fault stops only the faulting CPU; the others keep running until SMP stage S2.
 
 ### Signals (N-96, N-98, N-99, N-104, N-105, N-113, N-170; sprint D)

@@ -11,6 +11,13 @@ use crate::process::{ProcessId, ProcessState};
 
 /// Yield CPU to scheduler
 pub fn yield_cpu() {
+    // Once the dispatcher runs (ADR 0006) the old scheduler must never
+    // switch: its tasks are stale shadows of dispatcher tasks.
+    #[cfg(feature = "alloc")]
+    if super::dispatch::started() {
+        super::dispatch::yield_now();
+        return;
+    }
     super::SCHEDULER.lock().schedule();
 }
 
@@ -83,6 +90,16 @@ pub fn block_on_ipc_unless(endpoint: u64, ready: impl Fn() -> bool) {
 /// Block a process (for signal handling like SIGSTOP)
 /// Sets process and thread states to Blocked and triggers reschedule
 pub fn block_process(pid: ProcessId) {
+    // Under the dispatcher a caller blocking itself waits for "something to
+    // happen" and re-checks its condition (every caller loops); blocking
+    // another process is acted on by that process's own threads.
+    #[cfg(feature = "alloc")]
+    if super::dispatch::started() {
+        if crate::process::current_process().is_some_and(|p| p.pid == pid) {
+            super::dispatch::wait_in_syscall();
+        }
+        return;
+    }
     // First try to find the process in wait queues or as current task
     #[cfg(feature = "alloc")]
     {

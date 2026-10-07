@@ -195,6 +195,34 @@ pub fn wait_process_with_options(
             return Ok((ProcessId(0), 0));
         }
 
+        // A dispatched process waits for a child to change state; its
+        // children run as tasks of their own. A fatal signal for this
+        // process ends the wait (EINTR; the thread then exits on its way
+        // back to user mode).
+        #[cfg(feature = "alloc")]
+        if crate::sched::dispatch::current_owner().is_some() {
+            let filter = pid;
+            sched::dispatch::PROCESS_EVENTS.wait_until(|| {
+                current.kill_pending.load(Ordering::Acquire) != 0
+                    || table::PROCESS_TABLE
+                        .find_children(current_pid)
+                        .iter()
+                        .filter(|c| filter.is_none() || filter == Some(**c))
+                        .any(|c| {
+                            // A zombie is reapable once its last task is off
+                            // the CPU and its page tables are gone.
+                            table::get_process(*c).is_none_or(|p| {
+                                p.get_state() == ProcessState::Zombie
+                                    && sched::dispatch::tasks_of(c.0).is_empty()
+                            })
+                        })
+            });
+            if current.kill_pending.load(Ordering::Acquire) != 0 {
+                return Err(KernelError::WouldBlock);
+            }
+            continue;
+        }
+
         // Boot execution model: no preemptive scheduler to context-switch
         // to the child. If we find a Ready child (just forked, never run),
         // run it inline to completion. After it exits, loop back to reap
@@ -440,6 +468,64 @@ pub fn kill_process(pid: ProcessId, signal: i32) -> Result<(), KernelError> {
     Ok(())
 }
 
+/// `kill_pending` value for an `exit_group` by another thread: leave with
+/// the process's exit code, not as killed by a signal.
+pub const GROUP_EXIT_PENDING: u32 = u32::MAX;
+
+/// Exit the running thread of a dispatched process (ADR 0006 stage D2).
+/// Never returns.
+///
+/// `group` ends the whole process (`exit`/`exit_group`): the other threads
+/// leave at their next return to user mode or wakeup. Otherwise only this
+/// thread ends (`pthread_exit`). The last thread to leave tears the process
+/// down -- files, memory, capabilities -- makes it a zombie and tells the
+/// parent. Its page tables, which this thread is still running on, are
+/// freed once its task is off the CPU (`user_task_reaped`).
+#[cfg(feature = "alloc")]
+pub fn exit_dispatched(exit_code: i32, group: bool) -> ! {
+    use crate::sched::dispatch;
+
+    if let (Some(process), Some(thread)) = (super::current_process(), super::current_thread()) {
+        // CLONE_CHILD_CLEARTID: clear the TID word and wake a joiner.
+        let clear_ptr = thread.clear_tid.load(Ordering::Acquire);
+        if clear_ptr != 0 {
+            let _ = crate::syscall::userspace::write_user(clear_ptr, 0u32);
+            let _ = crate::syscall::sys_futex_wake(clear_ptr, 1, 0);
+        }
+
+        let pending = process.kill_pending.load(Ordering::Acquire);
+        if group && pending == 0 {
+            // First thread out of an exit_group decides the exit code and
+            // sends the others after it.
+            process.set_exit_code(exit_code);
+            process
+                .kill_pending
+                .store(GROUP_EXIT_PENDING, Ordering::Release);
+            for task in dispatch::tasks_of(process.pid.0) {
+                dispatch::wake(&task);
+            }
+        } else if !group && pending == 0 {
+            process.set_exit_code(exit_code);
+        }
+        thread.set_exited(exit_code);
+
+        let others_alive = process.threads.lock().values().any(|t| {
+            t.tid != thread.tid
+                && !matches!(
+                    t.get_state(),
+                    super::thread::ThreadState::Zombie | super::thread::ThreadState::Dead
+                )
+        });
+        if !others_alive {
+            cleanup_process(&process);
+            process.set_state(ProcessState::Zombie);
+            notify_parent_sigchld(&process);
+        }
+        dispatch::PROCESS_EVENTS.wake_all();
+    }
+    dispatch::exit_current_task()
+}
+
 // ============================================================================
 // SIGCHLD notification helper
 // ============================================================================
@@ -475,6 +561,26 @@ fn notify_parent_sigchld(process: &Process) {
 
 /// Force terminate a process (used by SIGKILL and unhandled fatal signals)
 fn force_terminate_process(process: &Process, signal: i32) -> Result<(), KernelError> {
+    // A dispatched process is never torn down under its running threads:
+    // they act on the signal themselves (at their next return to user mode
+    // or wakeup), and the last one out does the teardown (stage D2).
+    #[cfg(feature = "alloc")]
+    if process.dispatched.load(Ordering::Acquire) {
+        let tasks = sched::dispatch::tasks_of(process.pid.0);
+        if !tasks.is_empty() {
+            let _ = process.kill_pending.compare_exchange(
+                0,
+                signal as u32,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            );
+            for task in &tasks {
+                sched::dispatch::wake(task);
+            }
+            sched::dispatch::PROCESS_EVENTS.wake_all();
+            return Ok(());
+        }
+    }
     let _pid = process.pid;
     println!("[PROCESS] Force terminating process {}", _pid.0);
     process.set_term_signal(signal as u32);

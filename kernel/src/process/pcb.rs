@@ -119,6 +119,15 @@ pub struct Process {
     /// Signal that terminated the process (0: it exited normally).
     pub term_signal: AtomicU32,
 
+    /// Its threads run as dispatcher tasks (ADR 0006 stage D2) rather than
+    /// nested inside the context that launched them.
+    pub dispatched: core::sync::atomic::AtomicBool,
+
+    /// A fatal signal waiting to be acted on by the process's own threads
+    /// (dispatched processes only): each thread exits at its next return
+    /// to user mode or wakeup, and the last one tears the process down.
+    pub kill_pending: AtomicU32,
+
     /// CPU time used (in microseconds)
     pub cpu_time: AtomicU64,
 
@@ -255,6 +264,8 @@ impl Process {
             children: Mutex::new(Vec::new()),
             exit_code: AtomicU32::new(0),
             term_signal: AtomicU32::new(0),
+            dispatched: core::sync::atomic::AtomicBool::new(false),
+            kill_pending: AtomicU32::new(0),
             cpu_time: AtomicU64::new(0),
             memory_stats: MemoryStats::default(),
             created_at: crate::arch::timer::get_ticks(),

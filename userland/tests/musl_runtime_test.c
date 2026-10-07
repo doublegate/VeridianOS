@@ -4,8 +4,9 @@
  *
  * audit_runtime_test is built with VeridianOS's own C library, so it never
  * exercises musl's syscall remapping. This program does: fsync and flock
- * (which share native syscall 73), prctl, raise/abort (tkill), waitid, and
- * the memory protections, each as musl issues them.
+ * (which share native syscall 73), prctl, raise/abort (tkill), waitid, the
+ * memory protections, and threads (which run as tasks of their own since
+ * stage D2), each as musl issues them.
  *
  * Run from a BusyBox shell: /bin/musl_runtime_test
  * Prints "PASS <name>" or "FAIL <name>: <why>" per check and a final
@@ -14,6 +15,8 @@
 
 #define _GNU_SOURCE
 #include <errno.h>
+#include <pthread.h>
+#include <sched.h>
 #include <fcntl.h>
 #include <signal.h>
 #include <stdio.h>
@@ -160,6 +163,46 @@ static void test_mprotect(void)
     report("musl_prot_read_blocks_write", ok, why);
 }
 
+/* Threads run concurrently as their own tasks (ADR 0006 stage D2):
+ * pthread_create/join with a mutex-protected counter, and pthread_exit
+ * ends only the calling thread (musl's exit was a process exit, N-106). */
+static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
+static long counter;
+
+static void *adder(void *arg)
+{
+    for (int i = 0; i < 1000; i++) {
+        pthread_mutex_lock(&lock);
+        counter++;
+        pthread_mutex_unlock(&lock);
+        if (i % 100 == 0)
+            sched_yield();
+    }
+    if (arg)
+        pthread_exit((void *)42);
+    return (void *)7;
+}
+
+static void test_threads(void)
+{
+    pid_t pid = fork();
+    if (pid == 0) {
+        /* In a child, so a hang or crash cannot take the suite down. */
+        pthread_t a, b;
+        void *ra = 0, *rb = 0;
+        if (pthread_create(&a, 0, adder, 0) != 0 || pthread_create(&b, 0, adder, (void *)1) != 0)
+            _exit(2);
+        if (pthread_join(a, &ra) != 0 || pthread_join(b, &rb) != 0)
+            _exit(3);
+        _exit(counter == 2000 && ra == (void *)7 && rb == (void *)42 ? 0 : 4);
+    }
+    int st = 0;
+    int ok = pid > 0 && waitpid(pid, &st, 0) == pid && WIFEXITED(st) && WEXITSTATUS(st) == 0;
+    static char why[48];
+    snprintf(why, sizeof(why), "status=0x%x", st);
+    report("musl_pthreads_join_mutex_exit", ok, why);
+}
+
 int main(void)
 {
     test_fsync();
@@ -168,6 +211,7 @@ int main(void)
     test_raise_abort();
     test_waitid();
     test_mprotect();
+    test_threads();
     printf("MUSL-RUNTIME: %d/%d\n", passed, total);
     return passed == total ? 0 : 1;
 }

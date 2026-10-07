@@ -1314,6 +1314,17 @@ fn run_user_process_from_shell(pid: crate::process::ProcessId) -> i32 {
         }
     };
 
+    // With the dispatcher running, the program runs as tasks of its own and
+    // the shell (the boot task) waits for it (ADR 0006 stage D2).
+    #[cfg(target_arch = "x86_64")]
+    if crate::sched::dispatch::started() {
+        drop(process);
+        return crate::process::run_and_wait(pid).unwrap_or_else(|| {
+            crate::println!("[SHELL] Error: could not start process {}", pid.0);
+            1
+        });
+    }
+
     // Architecture-specific user-mode entry
     #[cfg(target_arch = "x86_64")]
     {

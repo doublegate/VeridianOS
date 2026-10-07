@@ -1872,6 +1872,16 @@ fn boot_reap_orphan_zombies() {
 pub(crate) fn run_user_process(pid: crate::process::ProcessId) {
     use crate::process::get_process;
 
+    // With the dispatcher running (stage D2) every launcher -- boot tests,
+    // the shell, the KDE session -- starts the program as tasks of its own
+    // and waits for it.
+    if crate::sched::dispatch::started() {
+        if crate::process::run_and_wait(pid).is_none() {
+            kprintln!("[BOOT] Could not start pid {}", pid.0);
+        }
+        return;
+    }
+
     let process = match get_process(pid) {
         Some(p) => p,
         None => return,
@@ -2019,6 +2029,15 @@ pub(crate) fn run_user_process(pid: crate::process::ProcessId) {
 #[cfg(all(feature = "alloc", target_arch = "x86_64"))]
 fn run_user_process_scheduled(pid: crate::process::ProcessId) {
     use crate::process::get_process;
+
+    // With the dispatcher running, the program runs as tasks of its own and
+    // this (the boot task) waits for it (ADR 0006 stage D2).
+    if crate::sched::dispatch::started() {
+        if crate::process::run_and_wait(pid).is_none() {
+            kprintln!("[BOOT] Could not start pid {}", pid.0);
+        }
+        return;
+    }
 
     // Save the process's page table root BEFORE running. cleanup_process()
     // (called during sys_exit) frees data frames but intentionally does NOT
