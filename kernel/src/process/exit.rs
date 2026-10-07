@@ -555,16 +555,13 @@ pub fn cleanup_process(process: &Process) {
             let frame_num = thread.kernel_stack.phys_frame.load(Ordering::Acquire);
             let page_count = thread.kernel_stack.phys_page_count.load(Ordering::Acquire);
             if frame_num != 0 && page_count > 0 {
-                let frame = crate::mm::FrameNumber::new(frame_num);
-                if let Err(_e) = crate::mm::FRAME_ALLOCATOR
-                    .lock()
-                    .free_frames(frame, page_count)
-                {
-                    println!(
-                        "[PROCESS] Warning: failed to free kernel stack frames for tid {}: {:?}",
-                        thread.tid.0, _e
-                    );
-                }
+                // Unmaps the guard-paged stack (N-26) on every CPU, then
+                // returns its frames.
+                crate::mm::kstack::free(crate::mm::kstack::KernelStack {
+                    base: thread.kernel_stack.base,
+                    frame: crate::mm::FrameNumber::new(frame_num),
+                    pages: page_count,
+                });
                 // Mark as freed to prevent double-free
                 thread.kernel_stack.phys_frame.store(0, Ordering::Release);
                 thread
@@ -726,21 +723,15 @@ pub fn cleanup_thread(process: &Process, tid: ThreadId) -> Result<(), KernelErro
                 .phys_page_count
                 .load(core::sync::atomic::Ordering::Acquire);
             if frame_num != 0 && page_count > 0 {
-                let frame = crate::mm::FrameNumber::new(frame_num);
-                if let Err(_e) = crate::mm::FRAME_ALLOCATOR
-                    .lock()
-                    .free_frames(frame, page_count)
-                {
-                    println!(
-                        "[PROCESS] Warning: Failed to free kernel stack for tid {}: {:?}",
-                        tid.0, _e
-                    );
-                } else {
-                    println!(
-                        "[PROCESS] Freed kernel stack for tid {} ({} frames)",
-                        tid.0, page_count
-                    );
-                }
+                crate::mm::kstack::free(crate::mm::kstack::KernelStack {
+                    base: thread.kernel_stack.base,
+                    frame: crate::mm::FrameNumber::new(frame_num),
+                    pages: page_count,
+                });
+                println!(
+                    "[PROCESS] Freed kernel stack for tid {} ({} frames)",
+                    tid.0, page_count
+                );
                 // Mark as freed to prevent double-free
                 thread
                     .kernel_stack

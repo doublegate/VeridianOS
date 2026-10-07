@@ -263,6 +263,10 @@ pub fn kernel_init() -> KernelResult<()> {
     #[cfg(target_arch = "x86_64")]
     mm::reserve_boot_page_table_frames();
 
+    // Kernel stack region (N-26): its page tables must exist before the
+    // first address space copies the kernel half.
+    mm::kstack::init();
+
     kprintln!("[BOOTSTRAP] Memory management initialized");
 
     // Verify heap allocation works (AArch64 requires -Zub-checks=no)
@@ -2933,6 +2937,49 @@ fn run_usercopy_tests(passed: &mut u32, failed: &mut u32) {
         #[cfg(target_arch = "aarch64")]
         let ok = true;
         report_test("heap_reuses_freed_memory", ok, passed, failed);
+    }
+
+    // Test 39: a kernel stack has an unmapped guard page below it, and
+    // freeing it unmaps it (N-26). x86_64 only until the other
+    // architectures run the kernel with paging (sprint E).
+    {
+        let ok = match crate::mm::kstack::allocate(16) {
+            Ok(stack) => {
+                // SAFETY: both ends of the 16 pages just allocated.
+                let usable = unsafe {
+                    let lo = stack.base as *mut u64;
+                    let hi = (stack.base + 16 * 4096 - 8) as *mut u64;
+                    lo.write_volatile(0x1234);
+                    hi.write_volatile(0x5678);
+                    lo.read_volatile() == 0x1234 && hi.read_volatile() == 0x5678
+                };
+                #[cfg(target_arch = "x86_64")]
+                let guarded = {
+                    // SAFETY: the kernel's root table through the physical map;
+                    // only read here.
+                    let m = unsafe {
+                        crate::mm::vas::create_mapper_from_root_pub(
+                            crate::mm::get_kernel_page_table() as u64,
+                        )
+                    };
+                    let probe = |a: usize| m.translate_page(crate::mm::VirtualAddress(a as u64));
+                    let guard_unmapped = probe(stack.base - 4096).is_err()
+                        && crate::mm::kstack::is_guard_fault((stack.base - 8) as u64);
+                    let mapped = probe(stack.base).is_ok();
+                    let base = stack.base;
+                    crate::mm::kstack::free(stack);
+                    guard_unmapped && mapped && probe(base).is_err()
+                };
+                #[cfg(not(target_arch = "x86_64"))]
+                let guarded = {
+                    crate::mm::kstack::free(stack);
+                    true
+                };
+                usable && guarded
+            }
+            Err(_) => false,
+        };
+        report_test("kernel_stack_guard_page", ok, passed, failed);
     }
 }
 

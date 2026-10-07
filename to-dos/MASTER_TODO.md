@@ -51,7 +51,7 @@ What does not work yet: `docs/KNOWN-LIMITATIONS.md`.
       switching, which D reworks. Today `schedule()` switches while its caller holds the
       scheduler lock, so a task that starts fresh never releases it. The two races become
       reachable only once tasks run concurrently.
-  - [ ] **C, memory:**
+  - [x] **C, memory** (guard pages x86_64 only until E):
     - Copy-on-write with frame refcounts: MEM-ARCH-02, PROC-ARCH-01, N-07.
     - Huge pages: MEM-ARCH-01.
     - Real AArch64/RISC-V heaps: MEM-SEC-03.

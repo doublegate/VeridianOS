@@ -14,6 +14,7 @@ pub mod frame_allocator;
 pub mod frame_refs;
 pub mod heap;
 pub mod ksm;
+pub mod kstack;
 pub mod page_fault;
 pub mod page_table;
 pub mod tlb;

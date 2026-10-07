@@ -46,6 +46,11 @@
 
 ### Security
 
+- **x86_64 kernel stacks have guard pages (N-26).** Each thread's kernel stack is mapped into
+  its own slot of a dedicated region with unmapped pages below it, so an overflow faults
+  instead of silently overwriting the neighbouring frame in the physical map. Freeing a stack
+  unmaps it on every CPU before its frames are reused. AArch64 and RISC-V follow when they
+  run the kernel with paging (sprint E).
 - **Forked children no longer run with executable data pages (N-62).** Reading a page-table
   entry dropped its no-execute bit, so fork mapped the child's data, heap and stack executable.
 - **Package signatures use real FIPS 204 ML-DSA-65 verification (N-55).** The previous

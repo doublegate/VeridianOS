@@ -65,13 +65,15 @@ AVX and AVX-512 are enabled. Two processes that both use vector registers can co
 each other's values. The fix (XSAVE, with the area sized from CPUID) is part of the v0.27 process
 model work (C5).
 
-### Kernel stacks have no guard pages (N-26, planned v0.27)
+### AArch64 and RISC-V kernel stacks have no guard pages (N-26, sprint E)
 
-A kernel stack overflow silently corrupts the neighbouring frame.
+x86_64 kernel stacks have unmapped guard pages. On AArch64 and RISC-V, which run the kernel
+without paging today, a kernel stack overflow still silently corrupts the neighbouring frame.
 
-### No copy-on-write (planned v0.27)
+### IPC copy-on-write transfers are refused
 
-Fork copies every page. IPC copy-on-write transfers are refused rather than faked.
+Fork is copy-on-write (ADR 0005), but IPC copy-on-write transfers are still refused rather
+than faked.
 
 ### BlockFS writes only at sync (ADR 0003)
 

@@ -846,31 +846,23 @@ impl ThreadBuilder {
         // Those VAS-managed frames are the ones actually used and properly
         // freed by VAS::clear(). Allocating frames here would orphan them.
 
-        // Allocate physical frames for kernel stack
-        let kernel_frame = allocate_stack_frames(kernel_stack_pages).inspect_err(|_| {
+        // Kernel stack: on x86_64 mapped into its own slot of the stack
+        // region with unmapped guard pages below it (N-26); elsewhere its
+        // direct-map address. Zeroed by `allocate`.
+        let kstack = crate::mm::kstack::allocate(kernel_stack_pages).inspect_err(|_| {
             crate::println!(
                 "[THREAD] Failed to allocate {} kernel stack frames for tid {}",
                 kernel_stack_pages,
                 tid.0
             );
         })?;
+        let kernel_frame = kstack.frame;
         let kernel_stack_phys = kernel_frame.as_addr().as_usize();
+        let kernel_stack_usable_base = kstack.base;
 
-        // Compute virtual addresses for stacks.
-        // Use the thread index (tid) to space stacks apart so each thread
-        // gets a unique region. Each region includes a guard page below.
+        // Space user stacks apart by thread index; each region includes a
+        // guard page below.
         let thread_index = tid.0 as usize;
-
-        // Kernel stack virtual address: the frames' address in the kernel's
-        // direct physical map, which every address space shares. A per-thread
-        // address under KERNEL_STACK_REGION_BASE used to be computed here but
-        // was never mapped, so the first dispatch of any scheduler-run thread
-        // (pthread_create, clone) page-faulted on its own stack. The frames
-        // are contiguous (allocate_stack_frames) and are freed by frame
-        // number, so nothing else depends on the old address. There is no
-        // guard page below the stack yet.
-        let kernel_stack_usable_base =
-            crate::mm::phys_to_virt_addr(kernel_stack_phys as u64) as usize;
 
         // User stack virtual address: similar layout in user space
         let user_region_size = (user_stack_pages + GUARD_PAGE_COUNT) * FRAME_SIZE;
@@ -880,18 +872,6 @@ impl ThreadBuilder {
         // Calculate actual stack sizes based on full pages
         let user_stack_size = user_stack_pages * FRAME_SIZE;
         let kernel_stack_size = kernel_stack_pages * FRAME_SIZE;
-
-        // Zero the kernel stack region for safety
-        // SAFETY: `kernel_stack_phys` is the physical address of frames we
-        // just allocated from the frame allocator. On x86_64 with bootloader
-        // 0.11, physical memory is mapped at a dynamic offset (not identity-
-        // mapped), so we must convert via phys_to_virt_addr(). We write
-        // zeroes to exactly `kernel_stack_size` bytes. No other code
-        // references these frames yet.
-        unsafe {
-            let virt = crate::mm::phys_to_virt_addr(kernel_stack_phys as u64);
-            core::ptr::write_bytes(virt as *mut u8, 0, kernel_stack_size);
-        }
 
         let mut thread = Thread::new(
             tid,

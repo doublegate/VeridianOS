@@ -52,7 +52,7 @@ fn cow_flags_for(old: PageFlags, requested: PageFlags, shared: bool) -> PageFlag
 
 /// Frame allocator wrapper implementing the page_table::FrameAllocator trait.
 /// Delegates to the global FRAME_ALLOCATOR.
-struct VasFrameAllocator;
+pub(crate) struct VasFrameAllocator;
 
 impl PageFrameAllocator for VasFrameAllocator {
     fn allocate_frames(
