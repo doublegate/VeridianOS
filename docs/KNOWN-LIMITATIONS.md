@@ -117,9 +117,9 @@ What remains:
 - **Directory fds are paths (N-115 remainder).** `*at()` calls resolve their directory fd
   through a path string rather than the open directory, so a directory renamed after it was
   opened is looked up by its old name.
-- **exec (N-101):** a failure after the old address space is cleared returns to an empty address
-  space instead of killing the process, there is no execute-permission check, and other threads are
-  not stopped first. Fork children are runnable before setup completes (N-110).
+- **exec (N-101 remainder):** a multithreaded process cannot exec (EAGAIN, above), and a corrupt
+  image is reported as EINVAL rather than ENOEXEC. Fork children are runnable before setup
+  completes (N-110).
 - **Credentials (N-131, planned v0.30):** one uid and gid per process; no effective, saved or
   filesystem ids, no supplementary groups, no Linux capabilities. `chdir` does not check search
   permission.

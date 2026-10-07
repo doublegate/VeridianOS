@@ -1409,6 +1409,67 @@ static void test_relative_paths(void)
     report("relative_paths_follow_own_cwd", ok && in_tmp && child_in_root && parent_unmoved, why);
 }
 
+/* N-101: exec needs an executable regular file; a refused exec leaves the
+ * caller running. Root needs at least one execute bit, as on Linux. */
+static void test_exec_permission(void)
+{
+    const char *path = "/tmp/noexec_probe";
+    unlink(path);
+    int fd = open(path, O_CREAT | O_WRONLY | O_TRUNC, 0644);
+    if (fd >= 0) {
+        const char body[] = "#!/bin/sh\nexit 0\n";
+        if (write(fd, body, sizeof(body) - 1) < 0) {
+            /* checked through the exec results below */
+        }
+        close(fd);
+    }
+    chmod(path, 0644);
+    char *args[] = {(char *)path, NULL};
+    char *env[] = {NULL};
+
+    /* Root, no execute bit anywhere: EACCES, and we are still here. */
+    errno = 0;
+    int r = execve(path, args, env);
+    int root_eacces = r == -1 && errno == EACCES;
+
+    /* A directory is not executable either. */
+    char *dargs[] = {"/tmp", NULL};
+    errno = 0;
+    r = execve("/tmp", dargs, env);
+    int dir_eacces = r == -1 && errno == EACCES;
+
+    /* Non-root, mode 0700 owned by root: EACCES in the child. */
+    chmod(path, 0700);
+    pid_t pid = fork();
+    if (pid == 0) {
+        if (setuid(1000) != 0)
+            _exit(3);
+        execve(path, args, env);
+        _exit(errno == EACCES ? 0 : 1);
+    }
+    int st = 0;
+    waitpid(pid, &st, 0);
+    int user_eacces = WIFEXITED(st) && WEXITSTATUS(st) == 0;
+
+    /* Control: an executable program still runs (busybox false -> 1). */
+    pid = fork();
+    if (pid == 0) {
+        char *fargs[] = {"false", NULL};
+        execve("/bin/false", fargs, env);
+        _exit(42);
+    }
+    st = 0;
+    waitpid(pid, &st, 0);
+    int control = WIFEXITED(st) && WEXITSTATUS(st) == 1;
+    unlink(path);
+
+    static char why[96];
+    snprintf(why, sizeof(why), "root=%d dir=%d user=%d control=%d(st=%#x)", root_eacces,
+             dir_eacces, user_eacces, control, st);
+    report("exec_requires_execute_permission",
+           root_eacces && dir_eacces && user_eacces && control, why);
+}
+
 int main(int argc, char **argv)
 {
     setvbuf(stdout, NULL, _IONBF, 0);
@@ -1447,6 +1508,7 @@ int main(int argc, char **argv)
     test_blocking_pipe();
     test_signal_handlers();
     test_relative_paths();
+    test_exec_permission();
     printf("AUDIT-RUNTIME: %d/%d\n", passed, total);
     return passed == total ? 0 : 1;
 }

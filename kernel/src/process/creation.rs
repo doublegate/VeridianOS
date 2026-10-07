@@ -315,6 +315,27 @@ pub fn exec_process(path: &str, argv: &[&str], envp: &[&str]) -> Result<(), Kern
         String::from(path)
     };
 
+    // Execute permission (N-101): a regular file the caller may execute;
+    // root needs at least one execute bit, as on Linux.
+    {
+        let node = fs::get_vfs()
+            .resolve_path(&resolved_path)
+            .map_err(|_| KernelError::FsError(crate::error::FsError::NotFound))?;
+        let meta = node.metadata()?;
+        let perms = &meta.permissions;
+        let uid = process.uid();
+        let gid = process.gid();
+        let allowed = meta.node_type == fs::NodeType::File
+            && if uid == 0 {
+                perms.owner_exec || perms.group_exec || perms.other_exec
+            } else {
+                perms.can_run(uid, gid, meta.uid, meta.gid)
+            };
+        if !allowed {
+            return Err(KernelError::PermissionDenied { operation: "exec" });
+        }
+    }
+
     // Step 1: Load new program from filesystem
     let file_data = fs::read_file(&resolved_path)
         .map_err(|_| KernelError::FsError(crate::error::FsError::NotFound))?;
@@ -357,151 +378,170 @@ pub fn exec_process(path: &str, argv: &[&str], envp: &[&str]) -> Result<(), Kern
                 value: "not a loadable ELF image",
             })?;
 
-    // Step 2: Clear current address space and load new program
-    *process.exe_path.lock() = resolved_path.clone();
-    let entry_point = {
-        let mut memory_space = process.memory_space.lock();
+    // Point of no return: from clear() on, a failure cannot go back to the
+    // old image. The process is then killed with SIGSEGV at the system-call
+    // exit (Linux force_sigsegv), instead of returning into an emptied
+    // address space (N-101).
+    let committed = (|| -> Result<_, KernelError> {
+        // Step 2: Clear current address space and load new program
+        *process.exe_path.lock() = resolved_path.clone();
+        let entry_point = {
+            let mut memory_space = process.memory_space.lock();
 
-        // Clear existing mappings before loading new program
-        memory_space.clear();
+            // Clear existing mappings before loading new program
+            memory_space.clear();
 
-        // Reinitialize the address space for the new program
-        memory_space.init()?;
+            // Reinitialize the address space for the new program
+            memory_space.init()?;
 
-        // Re-map the main thread's user stack into the fresh VAS. `clear()`
-        // removed all user mappings; without this, the new image would return
-        // to an unmapped stack (the /bin/sh crash).
-        if let Some(main_tid) = process.get_main_thread_id() {
-            if let Some(main_thread) = process.get_thread(main_tid) {
-                let user_base = main_thread.user_stack.base;
-                let user_size = main_thread.user_stack.size;
-                let flags = crate::mm::PageFlags::PRESENT
-                    | crate::mm::PageFlags::USER
-                    | crate::mm::PageFlags::WRITABLE
-                    | crate::mm::PageFlags::NO_EXECUTE;
-                let pages = user_size / 4096;
-                for i in 0..pages {
-                    let vaddr = user_base + i * 4096;
-                    memory_space.map_page(vaddr, flags)?;
-                }
-                memory_space.set_stack_top(user_base + user_size);
-                memory_space.set_stack_size(user_size);
-            }
-        }
-
-        // Load ELF segments into address space and get entry point
-        ElfLoader::load(&file_data, &mut memory_space)?
-    };
-
-    // Step 2b: Check for dynamic linking
-    let (final_entry, aux_vector) = {
-        if elf_binary.dynamic && elf_binary.interpreter.is_some() {
-            // Dynamically linked -- load interpreter and build aux vector
-            let dyn_info = crate::elf::dynamic::prepare_dynamic_linking(
-                &file_data,
-                &elf_binary,
-                elf_binary.load_base,
-            )?
-            .ok_or(KernelError::InvalidArgument {
-                name: "dynamic",
-                value: "binary has interpreter but prepare_dynamic_linking returned None",
-            })?;
-
-            // Load interpreter LOAD segments into the process address space.
-            // The interpreter is a separate ELF loaded at its own base address
-            // (distinct from the main binary) to avoid overlap.
-            let interp_data = fs::read_file(&dyn_info.interp_path)
-                .map_err(|_| KernelError::FsError(crate::error::FsError::NotFound))?;
-            {
-                let mut memory_space = process.memory_space.lock();
-                let _interp_entry = ElfLoader::load(&interp_data, &mut memory_space)?;
-            }
-
-            // Entry point is the interpreter, not the main binary
-            (dyn_info.interp_entry, Some(dyn_info.aux_vector))
-        } else {
-            // Statically linked -- use binary entry directly, no aux vector
-            (entry_point, None)
-        }
-    };
-
-    // Step 2c: Set up TLS (Thread-Local Storage) if the ELF has a PT_TLS segment.
-    //
-    // x86_64 uses TLS variant II: %fs points to the Thread Control Block (TCB)
-    // at the END of the TLS block. TLS variables are at negative offsets from %fs.
-    // Layout: [tls_data | tls_bss | TCB_self_pointer]
-    //                                ^--- %fs base points here
-    //
-    // We allocate the TLS block via mmap in the process's VAS, copy the TLS
-    // template from the already-mapped PT_TLS segment, write a self-pointer
-    // at the TCB, and store the FS_BASE for the syscall/enter_usermode path.
-    #[cfg(target_arch = "x86_64")]
-    {
-        let loader = ElfLoader::new();
-        let elf_binary = loader.parse(&file_data).ok();
-        if let Some(ref binary) = elf_binary {
-            if let Some(tls_seg) = binary
-                .segments
-                .iter()
-                .find(|s| s.segment_type == crate::elf::types::SegmentType::Tls)
-            {
-                let tls_memsz = tls_seg.memory_size as usize;
-                let tls_filesz = tls_seg.file_size as usize;
-                // The TLS block needs: tls_memsz (data+bss) + 8 (TCB self-pointer),
-                // aligned up to 16 bytes.
-                let tcb_size = 8usize; // self-pointer
-                let tls_block_size = ((tls_memsz + tcb_size) + 15) & !15;
-
-                // Allocate user-space memory for TLS via mmap
-                let memory_space = process.memory_space.lock();
-                let tls_alloc =
-                    memory_space.mmap(tls_block_size, crate::mm::vas::MappingType::Data);
-                if let Ok(tls_base_vaddr) = tls_alloc {
-                    let tls_base = tls_base_vaddr.as_usize();
-
-                    // The TCB (and %fs) points to: tls_base + tls_memsz
-                    let tcb_addr = tls_base + tls_memsz;
-
-                    // Copy TLS init data from the already-loaded PT_TLS segment.
-                    // The template lives at tls_vaddr in the process's VAS (already
-                    // mapped by the LOAD segment that contains the TLS section).
-                    // We read from the ELF file data and write to the new TLS block.
-                    if tls_filesz > 0 {
-                        let tls_file_offset = tls_seg.file_offset as usize;
-                        if tls_file_offset + tls_filesz <= file_data.len() {
-                            let tls_init =
-                                &file_data[tls_file_offset..tls_file_offset + tls_filesz];
-                            let _ = crate::elf::write_to_user_pages(
-                                &memory_space,
-                                tls_base as u64,
-                                tls_init,
-                            );
-                        }
+            // Re-map the main thread's user stack into the fresh VAS. `clear()`
+            // removed all user mappings; without this, the new image would return
+            // to an unmapped stack (the /bin/sh crash).
+            if let Some(main_tid) = process.get_main_thread_id() {
+                if let Some(main_thread) = process.get_thread(main_tid) {
+                    let user_base = main_thread.user_stack.base;
+                    let user_size = main_thread.user_stack.size;
+                    let flags = crate::mm::PageFlags::PRESENT
+                        | crate::mm::PageFlags::USER
+                        | crate::mm::PageFlags::WRITABLE
+                        | crate::mm::PageFlags::NO_EXECUTE;
+                    let pages = user_size / 4096;
+                    for i in 0..pages {
+                        let vaddr = user_base + i * 4096;
+                        memory_space.map_page(vaddr, flags)?;
                     }
-                    // BSS portion (tls_memsz - tls_filesz) is already zero from mmap
+                    memory_space.set_stack_top(user_base + user_size);
+                    memory_space.set_stack_size(user_size);
+                }
+            }
 
-                    // Write TCB self-pointer: *(u64*)tcb_addr = tcb_addr
-                    // This is needed because %fs:0 must return the TCB address itself.
-                    let self_ptr_bytes = (tcb_addr as u64).to_le_bytes();
-                    let _ = crate::elf::write_to_user_pages(
-                        &memory_space,
-                        tcb_addr as u64,
-                        &self_ptr_bytes,
-                    );
+            // Load ELF segments into address space and get entry point
+            ElfLoader::load(&file_data, &mut memory_space)?
+        };
 
-                    drop(memory_space);
+        // Step 2b: Check for dynamic linking
+        let (final_entry, aux_vector) = {
+            if elf_binary.dynamic && elf_binary.interpreter.is_some() {
+                // Dynamically linked -- load interpreter and build aux vector
+                let dyn_info = crate::elf::dynamic::prepare_dynamic_linking(
+                    &file_data,
+                    &elf_binary,
+                    elf_binary.load_base,
+                )?
+                .ok_or(KernelError::InvalidArgument {
+                    name: "dynamic",
+                    value: "binary has interpreter but prepare_dynamic_linking returned None",
+                })?;
 
-                    // Store FS_BASE in the process for later use by enter_usermode
-                    process
-                        .tls_fs_base
-                        .store(tcb_addr as u64, core::sync::atomic::Ordering::Release);
+                // Load interpreter LOAD segments into the process address space.
+                // The interpreter is a separate ELF loaded at its own base address
+                // (distinct from the main binary) to avoid overlap.
+                let interp_data = fs::read_file(&dyn_info.interp_path)
+                    .map_err(|_| KernelError::FsError(crate::error::FsError::NotFound))?;
+                {
+                    let mut memory_space = process.memory_space.lock();
+                    let _interp_entry = ElfLoader::load(&interp_data, &mut memory_space)?;
+                }
+
+                // Entry point is the interpreter, not the main binary
+                (dyn_info.interp_entry, Some(dyn_info.aux_vector))
+            } else {
+                // Statically linked -- use binary entry directly, no aux vector
+                (entry_point, None)
+            }
+        };
+
+        // Step 2c: Set up TLS (Thread-Local Storage) if the ELF has a PT_TLS segment.
+        //
+        // x86_64 uses TLS variant II: %fs points to the Thread Control Block (TCB)
+        // at the END of the TLS block. TLS variables are at negative offsets from %fs.
+        // Layout: [tls_data | tls_bss | TCB_self_pointer]
+        //                                ^--- %fs base points here
+        //
+        // We allocate the TLS block via mmap in the process's VAS, copy the TLS
+        // template from the already-mapped PT_TLS segment, write a self-pointer
+        // at the TCB, and store the FS_BASE for the syscall/enter_usermode path.
+        #[cfg(target_arch = "x86_64")]
+        {
+            let loader = ElfLoader::new();
+            let elf_binary = loader.parse(&file_data).ok();
+            if let Some(ref binary) = elf_binary {
+                if let Some(tls_seg) = binary
+                    .segments
+                    .iter()
+                    .find(|s| s.segment_type == crate::elf::types::SegmentType::Tls)
+                {
+                    let tls_memsz = tls_seg.memory_size as usize;
+                    let tls_filesz = tls_seg.file_size as usize;
+                    // The TLS block needs: tls_memsz (data+bss) + 8 (TCB self-pointer),
+                    // aligned up to 16 bytes.
+                    let tcb_size = 8usize; // self-pointer
+                    let tls_block_size = ((tls_memsz + tcb_size) + 15) & !15;
+
+                    // Allocate user-space memory for TLS via mmap
+                    let memory_space = process.memory_space.lock();
+                    let tls_alloc =
+                        memory_space.mmap(tls_block_size, crate::mm::vas::MappingType::Data);
+                    if let Ok(tls_base_vaddr) = tls_alloc {
+                        let tls_base = tls_base_vaddr.as_usize();
+
+                        // The TCB (and %fs) points to: tls_base + tls_memsz
+                        let tcb_addr = tls_base + tls_memsz;
+
+                        // Copy TLS init data from the already-loaded PT_TLS segment.
+                        // The template lives at tls_vaddr in the process's VAS (already
+                        // mapped by the LOAD segment that contains the TLS section).
+                        // We read from the ELF file data and write to the new TLS block.
+                        if tls_filesz > 0 {
+                            let tls_file_offset = tls_seg.file_offset as usize;
+                            if tls_file_offset + tls_filesz <= file_data.len() {
+                                let tls_init =
+                                    &file_data[tls_file_offset..tls_file_offset + tls_filesz];
+                                let _ = crate::elf::write_to_user_pages(
+                                    &memory_space,
+                                    tls_base as u64,
+                                    tls_init,
+                                );
+                            }
+                        }
+                        // BSS portion (tls_memsz - tls_filesz) is already zero from mmap
+
+                        // Write TCB self-pointer: *(u64*)tcb_addr = tcb_addr
+                        // This is needed because %fs:0 must return the TCB address itself.
+                        let self_ptr_bytes = (tcb_addr as u64).to_le_bytes();
+                        let _ = crate::elf::write_to_user_pages(
+                            &memory_space,
+                            tcb_addr as u64,
+                            &self_ptr_bytes,
+                        );
+
+                        drop(memory_space);
+
+                        // Store FS_BASE in the process for later use by enter_usermode
+                        process
+                            .tls_fs_base
+                            .store(tcb_addr as u64, core::sync::atomic::Ordering::Release);
+                    }
                 }
             }
         }
-    }
 
-    // Step 3: Setup new stack with arguments, environment, and aux vector
-    let stack_top = setup_exec_stack(&process, argv, envp, aux_vector.as_deref())?;
+        // Step 3: Setup new stack with arguments, environment, and aux vector
+        let stack_top = setup_exec_stack(&process, argv, envp, aux_vector.as_deref())?;
+        Ok((final_entry, stack_top))
+    })();
+    let (final_entry, stack_top) = match committed {
+        Ok(v) => v,
+        Err(e) => {
+            let _ = process.kill_pending.compare_exchange(
+                0,
+                11,
+                core::sync::atomic::Ordering::AcqRel,
+                core::sync::atomic::Ordering::Acquire,
+            );
+            return Err(e);
+        }
+    };
 
     // Step 3b: Populate the process's env_vars BTreeMap from envp.
     // This makes environment variables available to kernel-side lookups

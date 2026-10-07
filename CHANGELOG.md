@@ -189,6 +189,13 @@
 
 ### Fixed
 
+- **exec ignored execute permission and survived a failed load (N-101).** Any readable file
+  could be executed. exec now requires a regular file the caller may execute (root needs at
+  least one execute bit, as on Linux) and returns EACCES otherwise. A failure after the old
+  address space has been cleared (a missing interpreter, out of memory while loading) used to
+  return to that empty address space; the process is now killed with SIGSEGV at the system-call
+  exit, as Linux does. Runtime test `exec_requires_execute_permission` (root, directory,
+  non-root and a control exec).
 - **Relative paths ignored the program's working directory (N-115).** Every path lookup in a
   system call resolved against the kernel shell's directory, so after `chdir` a program's
   `getcwd` changed but its relative paths did not. Lookups now use the calling thread's
