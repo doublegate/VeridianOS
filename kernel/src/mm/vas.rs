@@ -852,43 +852,60 @@ impl VirtualAddressSpace {
                 let _ = num_pages;
 
                 // Huge pages are not shared copy-on-write (ADR 0005): the
-                // child gets its own 2 MiB copy.
+                // child gets its own copy of every 2 MiB chunk. A mapping may
+                // span several chunks, each a separate 2 MiB block, so each
+                // is copied and mapped on its own (copying the whole size
+                // from the first block read past it; review of f3f2c1a).
                 if mapping.flags.contains(PageFlags::HUGE) {
+                    const CHUNK_FRAMES: usize = (HUGE_PAGE_SIZE / 4096) as usize;
                     let mut child_mapping = mapping.clone();
                     child_mapping.physical_frames.clear();
-                    child_mappings.insert(*addr, child_mapping.clone());
-                    let Some(&src) = mapping.physical_frames.first() else {
-                        continue;
-                    };
-                    let copy = FRAME_ALLOCATOR
-                        .lock()
-                        .allocate_frames(mapping.physical_frames.len(), None)
-                        .map_err(|_| KernelError::OutOfMemory {
-                            requested: mapping.size,
-                            available: 0,
-                        })?;
-                    // Recorded first, so a failure below is torn down by
-                    // clone_from like any partial copy.
-                    child_mapping.physical_frames = (0..mapping.physical_frames.len() as u64)
-                        .map(|i| FrameNumber::new(copy.as_u64() + i))
-                        .collect();
-                    child_mappings.insert(*addr, child_mapping);
-                    if copy.as_u64() % 512 != 0 {
-                        return Err(KernelError::OutOfMemory {
-                            requested: mapping.size,
-                            available: 0,
-                        });
-                    }
-                    // SAFETY: both 2 MiB ranges are RAM in the physical map;
-                    // `copy` was just allocated and is not mapped anywhere.
-                    unsafe {
-                        core::ptr::copy_nonoverlapping(
-                            super::phys_to_virt_addr(src.as_u64() << 12) as *const u8,
-                            super::phys_to_virt_addr(copy.as_u64() << 12) as *mut u8,
-                            mapping.size,
+                    for (c, src_chunk) in mapping.physical_frames.chunks(CHUNK_FRAMES).enumerate() {
+                        let src = src_chunk[0];
+                        let copy = match FRAME_ALLOCATOR.lock().allocate_frames(CHUNK_FRAMES, None)
+                        {
+                            Ok(f) => f,
+                            Err(_) => {
+                                // Record what was copied so far for teardown.
+                                child_mappings.insert(*addr, child_mapping);
+                                return Err(KernelError::OutOfMemory {
+                                    requested: HUGE_PAGE_SIZE as usize,
+                                    available: 0,
+                                });
+                            }
+                        };
+                        child_mapping.physical_frames.extend(
+                            (0..CHUNK_FRAMES as u64).map(|i| FrameNumber::new(copy.as_u64() + i)),
                         );
+                        if src_chunk.len() != CHUNK_FRAMES
+                            || copy.as_u64() % CHUNK_FRAMES as u64 != 0
+                        {
+                            child_mappings.insert(*addr, child_mapping);
+                            return Err(KernelError::OutOfMemory {
+                                requested: HUGE_PAGE_SIZE as usize,
+                                available: 0,
+                            });
+                        }
+                        // SAFETY: `src` starts one 2 MiB block of the parent
+                        // (contiguous, 2 MiB aligned); `copy` is a fresh,
+                        // unmapped 2 MiB block. Both are RAM in the physical
+                        // map, and exactly 2 MiB is copied.
+                        unsafe {
+                            core::ptr::copy_nonoverlapping(
+                                super::phys_to_virt_addr(src.as_u64() << 12) as *const u8,
+                                super::phys_to_virt_addr(copy.as_u64() << 12) as *mut u8,
+                                HUGE_PAGE_SIZE as usize,
+                            );
+                        }
+                        let chunk_va = VirtualAddress(mapping.start.0 + c as u64 * HUGE_PAGE_SIZE);
+                        if let Err(e) =
+                            child_mapper.map_huge_2m(chunk_va, copy, mapping.flags, &mut alloc)
+                        {
+                            child_mappings.insert(*addr, child_mapping);
+                            return Err(e);
+                        }
                     }
-                    child_mapper.map_huge_2m(mapping.start, copy, mapping.flags, &mut alloc)?;
+                    child_mappings.insert(*addr, child_mapping);
                     continue;
                 }
 

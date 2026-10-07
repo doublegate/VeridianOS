@@ -168,13 +168,19 @@ static void test_huge_pages(void)
     int zero_ok = p[1] == 0 && p[len - 1] == 0;
     pid_t pid = fork();
     if (pid == 0) {
+        /* The child has its own copy of every 2 MiB chunk, holding the
+         * parent's data (a multi-chunk mapping once copied only the first). */
+        int c_ok = 1;
+        for (size_t off = 0; off < len; off += 4096)
+            c_ok = c_ok && p[off] == (unsigned char)(off >> 12);
         p[0] = 0xAA;
-        _exit(p[4096] == 1 && p[0] == 0xAA ? 0 : 1);
+        p[len - 4096] = 0xBB;
+        _exit(c_ok && p[0] == 0xAA ? 0 : 1);
     }
     int status = 0;
     int child_ok = pid > 0 && waitpid(pid, &status, 0) == pid && WIFEXITED(status) &&
                    WEXITSTATUS(status) == 0;
-    int parent_ok = p[0] == 0;
+    int parent_ok = p[0] == 0 && p[len - 4096] == (unsigned char)((len - 4096) >> 12);
     int unmap_ok = munmap(p, len) == 0;
     long after = mem_free_kb();
     int freed_ok = before > 0 && after >= before - 64; /* small slack for tables */
