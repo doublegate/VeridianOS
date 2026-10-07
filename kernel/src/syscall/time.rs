@@ -82,6 +82,9 @@ struct Timespec {
     tv_nsec: i64,
 }
 
+// SAFETY: two i64 fields, no padding; every bit pattern is a valid value.
+unsafe impl super::userspace::UserPod for Timespec {}
+
 /// POSIX timeval structure layout (matches C struct timeval).
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -114,10 +117,7 @@ pub fn sys_clock_gettime(clock_id: usize, tp_ptr: usize) -> SyscallResult {
         _ => return Err(SyscallError::InvalidArgument),
     };
 
-    // SAFETY: tp_ptr was validated as aligned, non-null, and in user space.
-    unsafe {
-        core::ptr::write(tp_ptr as *mut Timespec, ts);
-    }
+    super::userspace::write_user(tp_ptr, ts)?;
     Ok(0)
 }
 
@@ -142,10 +142,7 @@ pub fn sys_clock_getres(clock_id: usize, res_ptr: usize) -> SyscallResult {
             tv_sec: 0,
             tv_nsec: 1_000_000, // 1ms in nanoseconds
         };
-        // SAFETY: res_ptr was validated above.
-        unsafe {
-            core::ptr::write(res_ptr as *mut Timespec, res);
-        }
+        super::userspace::write_user(res_ptr, res)?;
     }
     Ok(0)
 }
@@ -163,8 +160,7 @@ pub fn sys_clock_getres(clock_id: usize, res_ptr: usize) -> SyscallResult {
 pub fn sys_nanosleep(req_ptr: usize, rem_ptr: usize) -> SyscallResult {
     validate_user_ptr_typed::<Timespec>(req_ptr)?;
 
-    // SAFETY: req_ptr was validated as aligned, non-null, and in user space.
-    let req = unsafe { core::ptr::read(req_ptr as *const Timespec) };
+    let req: Timespec = super::userspace::read_user(req_ptr)?;
 
     if req.tv_sec < 0 || req.tv_nsec < 0 || req.tv_nsec >= 1_000_000_000 {
         return Err(SyscallError::InvalidArgument);
@@ -197,10 +193,7 @@ pub fn sys_nanosleep(req_ptr: usize, rem_ptr: usize) -> SyscallResult {
             tv_sec: 0,
             tv_nsec: 0,
         };
-        // SAFETY: rem_ptr was validated above.
-        unsafe {
-            core::ptr::write(rem_ptr as *mut Timespec, zero);
-        }
+        super::userspace::write_user(rem_ptr, zero)?;
     }
 
     Ok(0)
@@ -226,9 +219,6 @@ pub fn sys_gettimeofday(tv_ptr: usize, _tz_ptr: usize) -> SyscallResult {
         tv_usec: ((uptime_ms % 1000) * 1000) as i64,
     };
 
-    // SAFETY: tv_ptr was validated above.
-    unsafe {
-        core::ptr::write(tv_ptr as *mut Timeval, tv);
-    }
+    super::userspace::write_user(tv_ptr, tv)?;
     Ok(0)
 }

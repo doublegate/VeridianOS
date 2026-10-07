@@ -1,5 +1,16 @@
 ## [Unreleased]
 
+### Security
+
+- **Package signatures use real FIPS 204 ML-DSA-65 verification (N-55).** The previous
+  "Dilithium" verifier never used the public key and accepted any non-zero signature. It is
+  replaced by the RustCrypto `ml-dsa` crate, pinned to NIST ACVP vectors. No post-quantum
+  trusted key is provisioned yet, so a policy that requires the PQ signature fails closed.
+  Ed25519, which the default policy uses, is unaffected.
+- **Every syscall copies user memory fault-tolerantly (N-43).** An unmapped page inside a
+  user buffer now gives EFAULT instead of a kernel fault. Bulk transfers go through bounded
+  bounce buffers, and messages and datagrams are capped at 1 MiB.
+
 ---
 
 ## [v0.26.0] - 2026-10-06

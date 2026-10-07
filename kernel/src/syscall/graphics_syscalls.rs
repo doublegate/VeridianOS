@@ -15,10 +15,7 @@ pub(super) fn sys_fb_get_info(info_ptr: usize) -> SyscallResult {
 
     let fb_info = crate::graphics::framebuffer::get_fb_info().ok_or(SyscallError::InvalidState)?;
 
-    // SAFETY: info_ptr validated as non-null, aligned, and in user space.
-    unsafe {
-        *(info_ptr as *mut FbInfo) = fb_info;
-    }
+    super::userspace::write_user(info_ptr, fb_info)?;
 
     Ok(0)
 }

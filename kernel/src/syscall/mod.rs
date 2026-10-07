@@ -1473,16 +1473,23 @@ fn handle_syscall(
                 return Err(SyscallError::InvalidArgument);
             }
             validate_user_buffer(events_ptr, max_events * event_size)?;
-            // SAFETY: events_ptr validated by validate_user_buffer above as non-null and in
-            // user-space.
-            let events = unsafe {
-                core::slice::from_raw_parts_mut(
-                    events_ptr as *mut crate::net::epoll::EpollEvent,
-                    max_events,
-                )
-            };
-            crate::net::epoll::epoll_wait(epoll_id, events, timeout_ms)
-                .map_err(|_| SyscallError::InvalidArgument)
+            // Events are gathered in a kernel array (at most 1024 per call,
+            // as a short count is always allowed) and copied out packed,
+            // through the fault-tolerant writer (N-43).
+            let mut events = alloc::vec![
+                crate::net::epoll::EpollEvent { events: 0, data: 0 };
+                max_events.min(1024)
+            ];
+            let n = crate::net::epoll::epoll_wait(epoll_id, &mut events, timeout_ms)
+                .map_err(|_| SyscallError::InvalidArgument)?;
+            let mut out = alloc::vec::Vec::with_capacity(n * event_size);
+            for ev in &events[..n] {
+                let (flags, data) = (ev.events, ev.data);
+                out.extend_from_slice(&flags.to_ne_bytes());
+                out.extend_from_slice(&data.to_ne_bytes());
+            }
+            userspace::write_user_bytes(events_ptr, &out)?;
+            Ok(n)
         }
         // Process groups / sessions (Phase 6.5) -- delegate to existing
         // implementations which also back the older syscall numbers 176-180.
@@ -1568,13 +1575,16 @@ fn handle_syscall(
             let stream_id = crate::audio::client::AudioStreamId(arg1 as u32);
             let buf_ptr = arg2;
             let sample_count = arg3;
-            let byte_len = sample_count * 2; // i16 = 2 bytes
-            validate_user_buffer(buf_ptr, byte_len)?;
-            // SAFETY: buf_ptr validated by validate_user_buffer above as non-null and in
-            // user-space.
-            let samples =
-                unsafe { core::slice::from_raw_parts(buf_ptr as *const i16, sample_count) };
-            crate::audio::client::with_client(|client| client.write_samples(stream_id, samples))
+            let byte_len = sample_count
+                .checked_mul(2) // i16 = 2 bytes
+                .ok_or(SyscallError::InvalidArgument)?;
+            // Copied in through the fault-tolerant reader (N-43).
+            let bytes = userspace::read_user_vec(buf_ptr, byte_len, userspace::MAX_USER_MESSAGE)?;
+            let samples: alloc::vec::Vec<i16> = bytes
+                .chunks_exact(2)
+                .map(|b| i16::from_ne_bytes([b[0], b[1]]))
+                .collect();
+            crate::audio::client::with_client(|client| client.write_samples(stream_id, &samples))
                 .map_err(|_| SyscallError::InvalidState)?
                 .map_err(|_| SyscallError::InvalidArgument)
         }
@@ -1661,18 +1671,14 @@ fn handle_syscall(
             let buf_ptr = arg2;
             validate_user_buffer(buf_ptr, 8)?;
             let val = crate::fs::eventfd::eventfd_read(efd_id)?;
-            // SAFETY: buf_ptr validated by validate_user_buffer above.
-            unsafe {
-                *(buf_ptr as *mut u64) = val;
-            }
+            userspace::write_user::<u64>(buf_ptr, val)?;
             Ok(8)
         }
         Syscall::EventfdWrite => {
             let efd_id = arg1 as u32;
             let buf_ptr = arg2;
             validate_user_buffer(buf_ptr, 8)?;
-            // SAFETY: buf_ptr validated by validate_user_buffer above.
-            let val = unsafe { *(buf_ptr as *const u64) };
+            let val: u64 = userspace::read_user(buf_ptr)?;
             crate::fs::eventfd::eventfd_write(efd_id, val)
         }
 
@@ -1700,17 +1706,20 @@ fn handle_syscall(
             let new_ptr = arg3;
             let old_ptr = arg4;
             let tfd_id = resolve_timerfd_id(fd)?;
-            validate_user_ptr_typed::<crate::fs::timerfd::Itimerspec>(new_ptr)?;
-            // SAFETY: new_ptr validated above.
-            let new_spec = unsafe { &*(new_ptr as *const crate::fs::timerfd::Itimerspec) };
-            let old_spec = if old_ptr != 0 {
-                validate_user_ptr_typed::<crate::fs::timerfd::Itimerspec>(old_ptr)?;
-                // SAFETY: old_ptr validated above.
-                Some(unsafe { &mut *(old_ptr as *mut crate::fs::timerfd::Itimerspec) })
-            } else {
-                None
-            };
-            crate::fs::timerfd::timerfd_settime(tfd_id, flags, new_spec, old_spec)
+            // Copied in, and the previous value copied out, through the
+            // fault-tolerant accessors (N-43).
+            let new_spec: crate::fs::timerfd::Itimerspec = userspace::read_user(new_ptr)?;
+            let mut old_spec = crate::fs::timerfd::Itimerspec::default();
+            let result = crate::fs::timerfd::timerfd_settime(
+                tfd_id,
+                flags,
+                &new_spec,
+                (old_ptr != 0).then_some(&mut old_spec),
+            );
+            if result.is_ok() && old_ptr != 0 {
+                userspace::write_user(old_ptr, old_spec)?;
+            }
+            result
         }
         Syscall::TimerfdGettime => {
             let fd = arg1;
@@ -1718,10 +1727,7 @@ fn handle_syscall(
             let tfd_id = resolve_timerfd_id(fd)?;
             validate_user_ptr_typed::<crate::fs::timerfd::Itimerspec>(curr_ptr)?;
             let spec = crate::fs::timerfd::timerfd_gettime(tfd_id)?;
-            // SAFETY: curr_ptr validated above.
-            unsafe {
-                *(curr_ptr as *mut crate::fs::timerfd::Itimerspec) = spec;
-            }
+            userspace::write_user(curr_ptr, spec)?;
             Ok(0)
         }
 
@@ -1821,9 +1827,13 @@ fn sys_getrandom(buf_ptr: usize, buflen: usize, _flags: usize) -> SyscallResult 
     validate_user_buffer(buf_ptr, len)?;
 
     let rng = crate::crypto::random::get_random();
-    // SAFETY: buf_ptr validated by validate_user_buffer above.
-    let buf = unsafe { core::slice::from_raw_parts_mut(buf_ptr as *mut u8, len) };
-    rng.fill_bytes(buf).map_err(|_| SyscallError::IoError)?;
+    // Filled in a kernel buffer and copied out (N-43).
+    let mut buf = [0u8; 256];
+    rng.fill_bytes(&mut buf[..len])
+        .map_err(|_| SyscallError::IoError)?;
+    userspace::write_user_bytes(buf_ptr, &buf[..len])?;
+    // The random bytes are not left on the kernel stack.
+    buf.fill(0);
     Ok(len)
 }
 
@@ -1862,6 +1872,8 @@ fn sys_getdents64(fd: usize, buf_ptr: usize, buf_size: usize) -> SyscallResult {
 
     let mut offset = 0usize;
     let mut idx = pos;
+    // Records are built in a kernel buffer and copied out once (N-43).
+    let mut out: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
 
     while idx < entries.len() {
         let entry = &entries[idx];
@@ -1885,35 +1897,28 @@ fn sys_getdents64(fd: usize, buf_ptr: usize, buf_size: usize) -> SyscallResult {
             crate::fs::NodeType::Socket => 12,     // DT_SOCK
         };
 
-        // SAFETY: buf_ptr + offset is within the validated user buffer.
-        unsafe {
-            let base = (buf_ptr + offset) as *mut u8;
-            // d_ino (use inode from entry, default 1)
-            let ino = if entry.inode == 0 {
-                (idx + 1) as u64
-            } else {
-                entry.inode
-            };
-            *(base as *mut u64) = ino;
-            // d_off (offset to next entry)
-            *((base.add(8)) as *mut u64) = (offset + reclen) as u64;
-            // d_reclen
-            *((base.add(16)) as *mut u16) = reclen as u16;
-            // d_type
-            *base.add(18) = d_type;
-            // d_name (NUL-terminated)
-            core::ptr::copy_nonoverlapping(name_bytes.as_ptr(), base.add(19), name_bytes.len());
-            *base.add(19 + name_bytes.len()) = 0;
-            // Zero-fill padding
-            let written = 19 + name_bytes.len() + 1;
-            for i in written..reclen {
-                *base.add(i) = 0;
-            }
-        }
+        // d_ino (use inode from entry, default 1)
+        let ino = if entry.inode == 0 {
+            (idx + 1) as u64
+        } else {
+            entry.inode
+        };
+        out.extend_from_slice(&ino.to_ne_bytes());
+        // d_off (offset to next entry)
+        out.extend_from_slice(&((offset + reclen) as u64).to_ne_bytes());
+        // d_reclen
+        out.extend_from_slice(&(reclen as u16).to_ne_bytes());
+        // d_type
+        out.push(d_type);
+        // d_name (NUL-terminated), then zero padding to reclen
+        out.extend_from_slice(name_bytes);
+        out.resize(offset + reclen, 0);
 
         offset += reclen;
         idx += 1;
     }
+
+    userspace::write_user_bytes(buf_ptr, &out)?;
 
     // Advance file position
     if idx > pos {
@@ -2092,10 +2097,7 @@ fn sys_readlinkat(dirfd: usize, path_ptr: usize, buf_ptr: usize, buf_size: usize
 
     let bytes = target.as_bytes();
     let copy_len = bytes.len().min(buf_size);
-    // SAFETY: buf_ptr validated by validate_user_buffer above.
-    unsafe {
-        core::ptr::copy_nonoverlapping(bytes.as_ptr(), buf_ptr as *mut u8, copy_len);
-    }
+    userspace::write_user_bytes(buf_ptr, &bytes[..copy_len])?;
     Ok(copy_len)
 }
 
@@ -2214,38 +2216,25 @@ fn sys_clock_nanosleep(
 /// For SCM_RIGHTS: msg_control points to a cmsghdr with cmsg_level=SOL_SOCKET,
 /// cmsg_type=SCM_RIGHTS, followed by an array of i32 file descriptors.
 fn sys_sendmsg(socket_fd: usize, msghdr_ptr: usize, _flags: usize) -> SyscallResult {
-    // Validate msghdr pointer (7 fields, ~56 bytes on 64-bit)
-    validate_user_buffer(msghdr_ptr, 56)?;
-
-    // SAFETY: msghdr_ptr validated above.
-    let (iov_ptr, iov_len, control_ptr, control_len) = unsafe {
-        let base = msghdr_ptr as *const usize;
-        // msg_name = offset 0, msg_namelen = offset 1
-        // msg_iov = offset 2, msg_iovlen = offset 3
-        let iov_ptr = *base.add(2);
-        let iov_len = *base.add(3);
-        // msg_control = offset 4, msg_controllen = offset 5
-        let control_ptr = *base.add(4);
-        let control_len = *base.add(5);
-        (iov_ptr, iov_len, control_ptr, control_len)
-    };
+    // The msghdr is copied in whole through the fault-tolerant reader
+    // (N-43). In usize words: msg_name = 0, msg_namelen = 1, msg_iov = 2,
+    // msg_iovlen = 3, msg_control = 4, msg_controllen = 5.
+    let hdr: [usize; 7] = userspace::read_user(msghdr_ptr)?;
+    let (iov_ptr, iov_len, control_ptr, control_len) = (hdr[2], hdr[3], hdr[4], hdr[5]);
+    if iov_len > IOV_MAX_MSG {
+        return Err(SyscallError::InvalidArgument);
+    }
 
     // Gather data from iovec array
     let mut data = alloc::vec::Vec::new();
     if iov_len > 0 && iov_ptr != 0 {
-        let iov_byte_len = iov_len * core::mem::size_of::<[usize; 2]>();
-        validate_user_buffer(iov_ptr, iov_byte_len)?;
         for i in 0..iov_len {
-            // SAFETY: iov_ptr validated above, each iovec is (base, len).
-            let (base, len) = unsafe {
-                let entry = (iov_ptr as *const usize).add(i * 2);
-                (*entry, *entry.add(1))
-            };
+            let [base, len]: [usize; 2] = userspace::read_user_index(iov_ptr, i)?;
             if len > 0 && base != 0 {
-                validate_user_buffer(base, len)?;
-                // SAFETY: base validated above.
-                let slice = unsafe { core::slice::from_raw_parts(base as *const u8, len) };
-                data.extend_from_slice(slice);
+                // Bounded in total, so a sender cannot make the kernel
+                // buffer an arbitrary amount (N-43).
+                let room = userspace::MAX_USER_MESSAGE.saturating_sub(data.len());
+                data.extend_from_slice(&userspace::read_user_vec(base, len, room)?);
             }
         }
     }
@@ -2370,26 +2359,20 @@ fn parse_scm_rights(
 /// On return, if SCM_RIGHTS fds were received, they are written into the
 /// msg_control buffer as a cmsghdr.
 fn sys_recvmsg(socket_fd: usize, msghdr_ptr: usize, _flags: usize) -> SyscallResult {
-    validate_user_buffer(msghdr_ptr, 56)?;
-
-    // SAFETY: msghdr_ptr validated above.
-    let (iov_ptr, iov_len, control_ptr, control_len) = unsafe {
-        let base = msghdr_ptr as *const usize;
-        let iov_ptr = *base.add(2);
-        let iov_len = *base.add(3);
-        let control_ptr = *base.add(4);
-        let control_len = *base.add(5);
-        (iov_ptr, iov_len, control_ptr, control_len)
-    };
+    // The msghdr is copied in whole through the fault-tolerant reader
+    // (N-43). In usize words: msg_name = 0, msg_namelen = 1, msg_iov = 2,
+    // msg_iovlen = 3, msg_control = 4, msg_controllen = 5.
+    let hdr: [usize; 7] = userspace::read_user(msghdr_ptr)?;
+    let (iov_ptr, iov_len, control_ptr, control_len) = (hdr[2], hdr[3], hdr[4], hdr[5]);
+    if iov_len > IOV_MAX_MSG {
+        return Err(SyscallError::InvalidArgument);
+    }
 
     // Calculate total receive buffer size from iovec
     let mut total_buf_len: usize = 0;
     if iov_len > 0 && iov_ptr != 0 {
-        let iov_byte_len = iov_len * core::mem::size_of::<[usize; 2]>();
-        validate_user_buffer(iov_ptr, iov_byte_len)?;
         for i in 0..iov_len {
-            // SAFETY: iov_ptr validated above.
-            let len = unsafe { *((iov_ptr as *const usize).add(i * 2 + 1)) };
+            let [_, len]: [usize; 2] = userspace::read_user_index(iov_ptr, i)?;
             total_buf_len = total_buf_len.saturating_add(len);
         }
     }
@@ -2408,22 +2391,10 @@ fn sys_recvmsg(socket_fd: usize, msghdr_ptr: usize, _flags: usize) -> SyscallRes
             if offset >= received {
                 break;
             }
-            // SAFETY: iov_ptr validated above.
-            let (base, len) = unsafe {
-                let entry = (iov_ptr as *const usize).add(i * 2);
-                (*entry, *entry.add(1))
-            };
+            let [base, len]: [usize; 2] = userspace::read_user_index(iov_ptr, i)?;
             if len > 0 && base != 0 {
                 let copy_len = (received - offset).min(len);
-                validate_user_buffer(base, copy_len)?;
-                // SAFETY: base validated above.
-                unsafe {
-                    core::ptr::copy_nonoverlapping(
-                        recv_buf[offset..].as_ptr(),
-                        base as *mut u8,
-                        copy_len,
-                    );
-                }
+                userspace::write_user_bytes(base, &recv_buf[offset..offset + copy_len])?;
                 offset += copy_len;
             }
         }
@@ -2465,8 +2436,8 @@ fn sys_recvmsg(socket_fd: usize, msghdr_ptr: usize, _flags: usize) -> SyscallRes
     }
     if !wrote_control {
         // No control data: msg_controllen = 0 so the caller does not parse
-        // stale bytes. SAFETY: msghdr_ptr was validated for 56 bytes above.
-        unsafe { core::ptr::write_unaligned((msghdr_ptr as *mut usize).add(5), 0) };
+        // stale bytes.
+        userspace::write_user::<usize>(msghdr_ptr + 5 * core::mem::size_of::<usize>(), 0)?;
     }
     // msg_flags is always written, so the caller never reads back what it
     // left there, and carries MSG_CTRUNC when fds were dropped (review of
@@ -2478,6 +2449,9 @@ fn sys_recvmsg(socket_fd: usize, msghdr_ptr: usize, _flags: usize) -> SyscallRes
 
     Ok(received)
 }
+
+/// Most iovec entries one sendmsg/recvmsg accepts (Linux `UIO_MAXIOV`).
+const IOV_MAX_MSG: usize = 1024;
 
 /// `MSG_CTRUNC`: control data was discarded for lack of room.
 const MSG_CTRUNC: i32 = 0x8;
@@ -3377,14 +3351,11 @@ pub(super) fn socket_err(e: crate::error::KernelError) -> SyscallError {
 
 /// Read an INET address passed as (4 address bytes, big-endian port).
 fn read_inet_addr(addr_ptr: usize) -> Result<crate::net::SocketAddr, SyscallError> {
-    validate_user_buffer(addr_ptr, 6)?;
-    // SAFETY: addr_ptr validated above as non-null, in user space, 6 bytes.
-    let ip_bytes = unsafe { core::ptr::read_unaligned(addr_ptr as *const [u8; 4]) };
-    // SAFETY: as above; bytes 4..6 are inside the validated range.
-    let port = unsafe { core::ptr::read_unaligned((addr_ptr + 4) as *const u16) }.to_be();
+    let mut raw = [0u8; 6];
+    userspace::read_user_bytes(addr_ptr, &mut raw)?;
     Ok(crate::net::SocketAddr::v4(
-        crate::net::Ipv4Address(ip_bytes),
-        port,
+        crate::net::Ipv4Address([raw[0], raw[1], raw[2], raw[3]]),
+        u16::from_be_bytes([raw[4], raw[5]]),
     ))
 }
 
@@ -3577,22 +3548,20 @@ fn copy_sockaddr_out(addr_ptr: usize, addrlen_ptr: usize, addr: &[u8]) -> Result
 
 /// SYS_SOCKET_SEND: Send data on a connected socket.
 fn sys_socket_send(fd: usize, buf_ptr: usize, buf_len: usize) -> SyscallResult {
-    validate_user_buffer(buf_ptr, buf_len)?;
-    // SAFETY: buf_ptr validated above as non-null, in user-space, within size
-    // limits.
-    let data = unsafe { core::slice::from_raw_parts(buf_ptr as *const u8, buf_len) };
-    with_socket_fd(fd, |s| s.send(data, None))?.map_err(socket_err)
+    let data = userspace::read_user_vec(buf_ptr, buf_len, userspace::MAX_USER_MESSAGE)?;
+    with_socket_fd(fd, |s| s.send(&data, None))?.map_err(socket_err)
 }
 
 /// SYS_SOCKET_RECV: Receive data from a socket.
 fn sys_socket_recv(fd: usize, buf_ptr: usize, buf_len: usize) -> SyscallResult {
     validate_user_buffer(buf_ptr, buf_len)?;
-    // SAFETY: buf_ptr validated above as non-null, in user-space, within size
-    // limits.
-    let buf = unsafe { core::slice::from_raw_parts_mut(buf_ptr as *mut u8, buf_len) };
-    with_socket_fd(fd, |s| s.recv(buf))?
+    // Received into a kernel buffer, then copied out fault-tolerantly (N-43).
+    let mut kbuf = alloc::vec![0u8; buf_len.min(userspace::USER_COPY_CHUNK)];
+    let n = with_socket_fd(fd, |s| s.recv(&mut kbuf))?
         .map(|(n, _)| n)
-        .map_err(socket_err)
+        .map_err(socket_err)?;
+    userspace::write_user_bytes(buf_ptr, &kbuf[..n])?;
+    Ok(n)
 }
 
 /// SYS_SOCKET_CLOSE: Close a socket fd. The socket itself closes when the

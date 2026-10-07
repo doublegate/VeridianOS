@@ -4,7 +4,6 @@
 //! creation, termination, and state management.
 
 use alloc::format;
-use core::slice;
 
 use super::{validate_user_buffer, validate_user_string_ptr, SyscallError, SyscallResult};
 #[cfg(target_arch = "x86_64")]
@@ -473,11 +472,11 @@ pub fn sys_thread_setaffinity(tid: usize, cpuset_ptr: usize, cpuset_size: usize)
         ThreadId(tid as u64)
     };
 
-    // Read CPU set from user space
-    // SAFETY: cpuset_ptr was validated as non-zero and cpuset_size > 0
-    // above. The caller must provide a valid, readable user-space buffer
-    // of at least cpuset_size bytes containing the CPU affinity mask.
-    let cpuset = unsafe { slice::from_raw_parts(cpuset_ptr as *const u8, cpuset_size) };
+    // Read the CPU set from user space: at most 128 bytes (1024 CPUs) are
+    // meaningful, copied through the fault-tolerant reader. This read used
+    // to borrow `cpuset_size` user bytes unvalidated (N-43).
+    let mut cpuset = alloc::vec![0u8; cpuset_size.min(128)];
+    super::userspace::read_user_bytes(cpuset_ptr, &mut cpuset)?;
 
     // Extract CPU mask from cpuset (simplified)
     let cpu_mask = if cpuset_size >= 8 {
@@ -983,11 +982,12 @@ pub fn sys_getenv(
     }
 
     // Read the variable name from user space
-    validate_user_buffer(name_ptr, name_len)?;
-    // SAFETY: name_ptr validated by validate_user_buffer above as non-null and in
-    // user-space.
-    let name_bytes = unsafe { slice::from_raw_parts(name_ptr as *const u8, name_len) };
-    let name = core::str::from_utf8(name_bytes).map_err(|_| SyscallError::InvalidArgument)?;
+    if name_len > 4096 {
+        return Err(SyscallError::InvalidArgument);
+    }
+    let mut name_bytes = alloc::vec![0u8; name_len];
+    super::userspace::read_user_bytes(name_ptr, &mut name_bytes)?;
+    let name = core::str::from_utf8(&name_bytes).map_err(|_| SyscallError::InvalidArgument)?;
 
     // Look up in the current process's env_vars
     let process = current_process().ok_or(SyscallError::InvalidState)?;
@@ -1006,13 +1006,11 @@ pub fn sys_getenv(
             return Ok(val_len); // Return required length so caller can retry
         }
 
-        // Write value + NUL to user buffer
-        validate_user_buffer(buf_ptr, val_len + 1)?;
-        // SAFETY: buf_ptr validated by validate_user_buffer above as non-null and in
-        // user-space.
-        let buf = unsafe { slice::from_raw_parts_mut(buf_ptr as *mut u8, val_len + 1) };
-        buf[..val_len].copy_from_slice(value.as_bytes());
-        buf[val_len] = 0;
+        // Write value + NUL to user buffer (fault-tolerant, N-43).
+        let mut out = alloc::vec::Vec::with_capacity(val_len + 1);
+        out.extend_from_slice(value.as_bytes());
+        out.push(0);
+        super::userspace::write_user_bytes(buf_ptr, &out)?;
 
         Ok(val_len)
     } else {

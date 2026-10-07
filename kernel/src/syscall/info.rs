@@ -46,12 +46,12 @@ const UTSNAME_SIZE: usize = UTSNAME_LENGTH * 6;
 pub fn sys_uname(buf: usize) -> SyscallResult {
     validate_user_buffer(buf, UTSNAME_SIZE)?;
 
-    let user_buf = buf as *mut u8;
+    // Built in a kernel buffer and copied out once (N-43).
+    let mut out = [0u8; UTSNAME_SIZE];
 
     // Helper: write a string into a fixed-size field, NUL-padded.
-    let write_field = |offset: usize, value: &[u8]| {
-        let field =
-            unsafe { core::slice::from_raw_parts_mut(user_buf.add(offset), UTSNAME_LENGTH) };
+    let mut write_field = |offset: usize, value: &[u8]| {
+        let field = &mut out[offset..offset + UTSNAME_LENGTH];
         let len = core::cmp::min(value.len(), UTSNAME_LENGTH - 1);
         field[..len].copy_from_slice(&value[..len]);
         // Zero the rest
@@ -78,5 +78,6 @@ pub fn sys_uname(buf: usize) -> SyscallResult {
     // domainname (6th field) -- empty string (no NIS domain)
     write_field(UTSNAME_LENGTH * 5, b"");
 
+    super::userspace::write_user_bytes(buf, &out)?;
     Ok(0)
 }

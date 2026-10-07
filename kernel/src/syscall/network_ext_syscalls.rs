@@ -52,9 +52,10 @@ pub(super) fn sys_net_sendto(
         super::validate_user_buffer(addr_ptr, addr_len)?;
     }
 
-    // SAFETY: buf_ptr validated by validate_user_buffer above as non-null and
-    // within user-space.
-    let data = unsafe { core::slice::from_raw_parts(buf_ptr as *const u8, buf_len) };
+    // The datagram is copied in whole through the fault-tolerant reader (N-43).
+    let data =
+        super::userspace::read_user_vec(buf_ptr, buf_len, super::userspace::MAX_USER_MESSAGE)?;
+    let data = &data[..];
 
     let dest = if addr_ptr != 0 {
         Some(parse_sockaddr(addr_ptr, addr_len)?)
@@ -95,9 +96,9 @@ pub(super) fn sys_net_recvfrom(
 ) -> SyscallResult {
     super::validate_user_buffer(buf_ptr, buf_len)?;
 
-    // SAFETY: buf_ptr validated by validate_user_buffer above as non-null and
-    // within user-space.
-    let buf = unsafe { core::slice::from_raw_parts_mut(buf_ptr as *mut u8, buf_len) };
+    // Received into a kernel buffer, then copied out once (N-43).
+    let mut kbuf = alloc::vec![0u8; buf_len.min(super::userspace::MAX_USER_MESSAGE)];
+    let buf = &mut kbuf[..];
 
     let (n, src_addr) = match socket_handle(fd)? {
         SocketHandle::Inet(id) => {
@@ -113,6 +114,7 @@ pub(super) fn sys_net_recvfrom(
         ),
     };
 
+    super::userspace::write_user_bytes(buf_ptr, &kbuf[..n])?;
     if let (true, Some(addr)) = (addr_ptr != 0, src_addr) {
         write_sockaddr(addr_ptr, &addr)?;
     }

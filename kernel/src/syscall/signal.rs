@@ -66,6 +66,11 @@ pub struct SigAction {
     pub sa_mask: u64, // offset 24
 }
 
+// SAFETY: repr(C), four 8-byte integer fields at offsets 0/8/16/24, no padding.
+// The handler and restorer are plain addresses validated where they are used,
+// not Rust function pointers.
+unsafe impl crate::syscall::userspace::UserPod for SigAction {}
+
 // Compile-time assertion: Linux x86_64 struct sigaction is 32 bytes.
 const _: () = assert!(core::mem::size_of::<SigAction>() == 32);
 
@@ -120,9 +125,7 @@ pub fn sys_sigaction(signum: usize, act_ptr: usize, oldact_ptr: usize) -> Syscal
 
     // Install the new handler from act_ptr
     if act_ptr != 0 {
-        // SAFETY: act_ptr was validated as non-null, in user-space, and
-        // aligned for SigAction above. We read the new handler address.
-        let new_act = unsafe { *(act_ptr as *const SigAction) };
+        let new_act: SigAction = super::userspace::read_user(act_ptr)?;
         proc.set_signal_handler(signum, new_act.sa_handler as u64)
             .map_err(|_| SyscallError::InvalidArgument)?;
     }
@@ -150,19 +153,13 @@ pub fn sys_sigprocmask(how: usize, set_ptr: usize, oldset_ptr: usize) -> Syscall
     // Write old mask to user space if requested
     if oldset_ptr != 0 {
         validate_user_ptr_typed::<u64>(oldset_ptr)?;
-        // SAFETY: oldset_ptr was validated as non-null, in user-space, and
-        // aligned for u64 above. We write the previous signal mask.
-        unsafe {
-            *(oldset_ptr as *mut u64) = old_mask;
-        }
+        super::userspace::write_user::<u64>(oldset_ptr, old_mask)?;
     }
 
     // Apply new mask if a set pointer was provided
     if set_ptr != 0 {
         validate_user_ptr_typed::<u64>(set_ptr)?;
-        // SAFETY: set_ptr was validated as non-null, in user-space, and
-        // aligned for u64 above. We read the new mask value.
-        let new_bits = unsafe { *(set_ptr as *const u64) };
+        let new_bits: u64 = super::userspace::read_user(set_ptr)?;
 
         let updated_mask = match how {
             SIG_BLOCK => old_mask | new_bits,
@@ -198,8 +195,7 @@ pub fn sys_sigsuspend(mask_ptr: usize) -> SyscallResult {
 
     let proc = process::current_process().ok_or(SyscallError::InvalidState)?;
 
-    // SAFETY: mask_ptr was validated above.
-    let temp_mask = unsafe { *(mask_ptr as *const u64) };
+    let temp_mask: u64 = super::userspace::read_user(mask_ptr)?;
 
     // Save current mask and apply temporary mask
     let old_mask = proc.get_signal_mask();

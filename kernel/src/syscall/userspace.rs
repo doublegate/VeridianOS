@@ -378,6 +378,23 @@ pub fn read_user_bytes(addr: usize, dst: &mut [u8]) -> Result<(), SyscallError> 
     unsafe { raw_copy(dst.as_mut_ptr(), addr as *const u8, dst.len()) }
 }
 
+/// Largest single message (a datagram, a Wayland request) copied whole into
+/// the kernel by [`read_user_vec`].
+pub(crate) const MAX_USER_MESSAGE: usize = 1024 * 1024;
+
+/// Copy `len` bytes of user memory at `addr` into a new kernel buffer, for
+/// data that must be handled in one piece (a datagram, a protocol message).
+/// More than `max` bytes is `InvalidArgument` (EMSGSIZE-like), so a caller
+/// cannot make the kernel allocate without bound.
+pub fn read_user_vec(addr: usize, len: usize, max: usize) -> Result<Vec<u8>, SyscallError> {
+    if len > max {
+        return Err(SyscallError::InvalidArgument);
+    }
+    let mut buf = alloc::vec![0u8; len];
+    read_user_bytes(addr, &mut buf)?;
+    Ok(buf)
+}
+
 /// Bounce-buffer size for bulk transfers between the kernel and user memory.
 pub(crate) const USER_COPY_CHUNK: usize = 64 * 1024;
 

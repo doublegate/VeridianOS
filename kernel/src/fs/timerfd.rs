@@ -47,6 +47,9 @@ pub struct Timespec {
     pub tv_nsec: i64,
 }
 
+// SAFETY: repr(C), two i64 fields, no padding: every bit pattern is a value.
+unsafe impl crate::syscall::userspace::UserPod for Timespec {}
+
 impl Timespec {
     pub fn to_ns(&self) -> u64 {
         (self.tv_sec as u64)
@@ -68,6 +71,9 @@ pub struct Itimerspec {
     /// Initial expiration time.
     pub it_value: Timespec,
 }
+
+// SAFETY: repr(C), two UserPod Timespec fields, no padding.
+unsafe impl crate::syscall::userspace::UserPod for Itimerspec {}
 
 /// Internal timerfd state.
 struct TimerFdInstance {
