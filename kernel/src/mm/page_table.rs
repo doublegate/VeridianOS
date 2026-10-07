@@ -710,32 +710,51 @@ impl PageMapper {
         new_flags: PageFlags,
     ) -> Result<PageFlags, KernelError> {
         let breakdown = VirtualAddressBreakdown::new(page);
+        // A leaf that becomes user-accessible needs USER on every level
+        // above it too (x86_64 checks all four). The tables may have been
+        // created for a kernel-only leaf -- a PROT_NONE mapping -- so mprotect
+        // to PROT_READ|PROT_WRITE left user code faulting on a present page
+        // (musl's thread stacks: mmap PROT_NONE, then mprotect). Never in
+        // the kernel half.
+        let grant_user =
+            new_flags.contains(PageFlags::USER) && usize::from(breakdown.l4_index) < 256;
+        let add_user = |entry: &mut PageTableEntry| {
+            if grant_user && !entry.flags().contains(PageFlags::USER) {
+                if let Some(addr) = entry.addr() {
+                    entry.set_addr(addr, entry.flags() | PageFlags::USER);
+                }
+            }
+        };
 
         // SAFETY: Same invariants as other PageMapper methods.
-        let l4_table = unsafe { &*self.l4_table };
-        let l4_entry = &l4_table[breakdown.l4_index];
+        let l4_table = unsafe { &mut *self.l4_table };
+        let l4_entry = &mut l4_table[breakdown.l4_index];
         if !l4_entry.is_present() {
             return Err(KernelError::UnmappedMemory {
                 addr: page.as_u64() as usize,
             });
         }
 
+        add_user(l4_entry);
         let l3_phys = l3_phys_from_entry(l4_entry, page)?;
         // SAFETY: Physical address from a present L4 entry, converted to virtual via
         // identity-mapped region.
-        let l3_table = unsafe { &*(super::phys_to_virt_addr(l3_phys as u64) as *const PageTable) };
-        let l3_entry = &l3_table[breakdown.l3_index];
+        let l3_table =
+            unsafe { &mut *(super::phys_to_virt_addr(l3_phys as u64) as *mut PageTable) };
+        let l3_entry = &mut l3_table[breakdown.l3_index];
         if !l3_entry.is_present() {
             return Err(KernelError::UnmappedMemory {
                 addr: page.as_u64() as usize,
             });
         }
 
+        add_user(l3_entry);
         let l2_phys = l3_phys_from_entry(l3_entry, page)?;
         // SAFETY: Physical address from a present L3 entry, converted to virtual via
         // identity-mapped region.
-        let l2_table = unsafe { &*(super::phys_to_virt_addr(l2_phys as u64) as *const PageTable) };
-        let l2_entry = &l2_table[breakdown.l2_index];
+        let l2_table =
+            unsafe { &mut *(super::phys_to_virt_addr(l2_phys as u64) as *mut PageTable) };
+        let l2_entry = &mut l2_table[breakdown.l2_index];
         if !l2_entry.is_present() {
             return Err(KernelError::UnmappedMemory {
                 addr: page.as_u64() as usize,
@@ -750,6 +769,7 @@ impl PageMapper {
             });
         }
 
+        add_user(l2_entry);
         let l1_phys = l3_phys_from_entry(l2_entry, page)?;
         // SAFETY: Physical address from a present L2 entry, converted to virtual via
         // identity-mapped region.

@@ -658,6 +658,27 @@ static void test_memory_protection(void)
     }
     report("mprotect_restore_and_enomem", ok, "contents lost or no ENOMEM for a hole");
 
+    /* PROT_NONE -> read-write in fresh page tables (musl's thread stacks:
+     * mmap PROT_NONE, mprotect all but the guard). The tables created for
+     * the kernel-only pages lacked the user bit, which mprotect did not
+     * add, so the writes faulted. In a child, since that is the failure. */
+    pid_t gp = fork();
+    if (gp == 0) {
+        const size_t len = 4UL << 20;
+        volatile char *m = mmap(0, len, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        if (m == MAP_FAILED || mprotect((char *)m + 8192, len - 8192, PROT_READ | PROT_WRITE) != 0)
+            _exit(2);
+        for (size_t off = 8192; off < len; off += 1UL << 20)
+            m[off] = 1;
+        m[len - 1] = 1;
+        _exit(0);
+    }
+    int gst = 0;
+    int gok = gp > 0 && waitpid(gp, &gst, 0) == gp && WIFEXITED(gst) && WEXITSTATUS(gst) == 0;
+    static char gwhy[48];
+    snprintf(gwhy, sizeof(gwhy), "status=0x%x", gst);
+    report("mprotect_none_to_rw_fresh_tables", gok, gwhy);
+
     /* Absurd sizes fail cleanly instead of halting the kernel. */
     void *huge = mmap(0, 1UL << 46, PROT_READ, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     void *huge2 = mmap(0, (size_t)-4096, PROT_READ, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
