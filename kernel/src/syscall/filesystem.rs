@@ -208,74 +208,93 @@ pub fn sys_open(path: usize, flags: usize, mode: usize) -> SyscallResult {
         }
     }
 
-    // Get current process
+    open_path(path_str, flags, mode)
+}
+
+/// Open `path` with Linux `open(2)` semantics (shared by open and openat).
+///
+/// - O_CREAT|O_EXCL fails with EEXIST if the name exists, and a lost create
+///   race is EEXIST or a plain open, never ENOENT;
+/// - O_TRUNC truncates (openat used to skip it, and musl routes every open()
+///   through openat) and reports a failure;
+/// - O_NOFOLLOW refuses a final symlink (ELOOP), O_DIRECTORY anything but a
+///   directory (ENOTDIR), and a directory cannot be opened for writing (EISDIR)
+///   (N-116).
+fn open_path(path: &str, flags: usize, mode: usize) -> SyscallResult {
+    const O_DIRECTORY: usize = 0x1_0000;
+    const O_NOFOLLOW: usize = 0x2_0000;
+    const O_CLOEXEC: usize = 0x8_0000;
+    use crate::fs::NodeType;
+
     let process = process::current_process().ok_or(SyscallError::InvalidState)?;
-
-    // Convert flags. O_CLOEXEC (0x80000) is handled separately.
     let open_flags = OpenFlags::from_bits(flags as u32).ok_or(SyscallError::InvalidArgument)?;
-    let cloexec = (flags & 0x80000) != 0; // O_CLOEXEC
+    let cloexec = flags & O_CLOEXEC != 0;
+    let follow = flags & O_NOFOLLOW == 0;
 
-    // Open the file through VFS
-    match vfs()?.open(path_str, open_flags) {
+    let (node, created) = match vfs()?.open_follow(path, open_flags, follow) {
         Ok(node) => {
-            require_open_access(&node, &open_flags)?;
-
-            // Handle O_TRUNC on existing files
-            if open_flags.truncate {
-                let _ = node.truncate(0);
+            if open_flags.create && open_flags.exclusive {
+                return Err(SyscallError::FileExists);
             }
-
-            // Create file with path stored for dirfd resolution
-            let file = crate::fs::file::File::new_with_path(
-                node,
-                open_flags,
-                alloc::string::String::from(path_str),
-            );
-
-            // Add to process file table (with O_CLOEXEC if specified)
-            let file_table = process.file_table.lock();
-            match file_table.open_with_flags(alloc::sync::Arc::new(file), cloexec) {
-                Ok(fd_num) => Ok(fd_num),
-                Err(_) => Err(SyscallError::OutOfMemory),
-            }
+            (node, false)
         }
-        Err(e) => {
-            // Only a missing name may be created; any other failure (EACCES
-            // from a directory without search permission, ENOTDIR, ELOOP)
-            // is reported as itself. Every failure used to read as ENOENT
-            // (review of the v0.26.0 stack, PR #15).
-            if open_flags.create && is_not_found(&e) {
-                let perms = creation_perms(mode);
-                let (parent_path, name) = split_path(path_str)?;
-                require_dir_write(path_str)?;
-                let vfs_guard = vfs()?;
-                let parent = match vfs_guard.resolve_path(&parent_path) {
-                    Ok(p) => p,
-                    Err(_) => {
-                        return Err(SyscallError::ResourceNotFound);
-                    }
-                };
-                match parent.create(&name, perms) {
-                    Ok(node) => {
-                        own_new_node(&node);
-                        let file = crate::fs::file::File::new_with_path(
-                            node,
-                            open_flags,
-                            alloc::string::String::from(path_str),
-                        );
-                        let file_table = process.file_table.lock();
-                        match file_table.open_with_flags(alloc::sync::Arc::new(file), cloexec) {
-                            Ok(fd_num) => Ok(fd_num),
-                            Err(_) => Err(SyscallError::OutOfMemory),
-                        }
-                    }
-                    Err(_) => Err(SyscallError::ResourceNotFound),
+        // Only a missing name may be created; any other failure (EACCES
+        // from a directory without search permission, ENOTDIR, ELOOP) is
+        // reported as itself.
+        Err(e) if open_flags.create && is_not_found(&e) => {
+            let perms = creation_perms(mode);
+            let (parent_path, name) = split_path(path)?;
+            require_dir_write(path)?;
+            let parent = vfs()?.resolve_path(&parent_path).map_err(map_resolve_err)?;
+            match parent.create(&name, perms) {
+                Ok(node) => {
+                    own_new_node(&node);
+                    (node, true)
                 }
-            } else {
-                Err(map_resolve_err(e))
+                // Another opener created it between the lookup and here.
+                Err(crate::error::KernelError::FsError(crate::error::FsError::AlreadyExists))
+                    if !open_flags.exclusive =>
+                {
+                    (
+                        vfs()?
+                            .open_follow(path, open_flags, follow)
+                            .map_err(map_resolve_err)?,
+                        false,
+                    )
+                }
+                Err(crate::error::KernelError::FsError(crate::error::FsError::AlreadyExists)) => {
+                    return Err(SyscallError::FileExists);
+                }
+                Err(e) => return Err(map_resolve_err(e)),
             }
         }
+        Err(e) => return Err(map_resolve_err(e)),
+    };
+
+    let node_type = node.node_type();
+    if !follow && node_type == NodeType::Symlink {
+        return Err(SyscallError::SymlinkLoop);
     }
+    if flags & O_DIRECTORY != 0 && node_type != NodeType::Directory {
+        return Err(SyscallError::NotADirectory);
+    }
+    if open_flags.write && node_type == NodeType::Directory {
+        return Err(SyscallError::IsADirectory);
+    }
+    if !created {
+        require_open_access(&node, &open_flags)?;
+    }
+    if open_flags.truncate && open_flags.write && !created && node_type == NodeType::File {
+        node.truncate(0).map_err(map_resolve_err)?;
+    }
+
+    // The path is kept for dirfd resolution and device identification.
+    let file =
+        crate::fs::file::File::new_with_path(node, open_flags, alloc::string::String::from(path));
+    let file_table = process.file_table.lock();
+    file_table
+        .open_with_flags(alloc::sync::Arc::new(file), cloexec)
+        .map_err(|_| SyscallError::OutOfMemory)
 }
 
 /// Close a file descriptor
@@ -909,7 +928,16 @@ pub(crate) fn map_resolve_err(e: crate::error::KernelError) -> SyscallError {
             SyscallError::ResourceNotFound
         }
         crate::error::KernelError::FsError(crate::error::FsError::NotADirectory) => {
-            SyscallError::InvalidArgument
+            SyscallError::NotADirectory
+        }
+        crate::error::KernelError::FsError(crate::error::FsError::IsADirectory) => {
+            SyscallError::IsADirectory
+        }
+        crate::error::KernelError::FsError(crate::error::FsError::AlreadyExists) => {
+            SyscallError::FileExists
+        }
+        crate::error::KernelError::FsError(crate::error::FsError::NoSpace) => {
+            SyscallError::OutOfMemory
         }
         crate::error::KernelError::FsError(crate::error::FsError::PermissionDenied) => {
             SyscallError::PermissionDenied
@@ -1247,46 +1275,108 @@ pub fn sys_ioctl(fd: usize, cmd: usize, arg: usize) -> SyscallResult {
 /// # Returns
 /// 0 on success
 pub fn sys_kill(pid: usize, signal: usize) -> SyscallResult {
-    let pid_i = pid as isize;
+    // kill(2) used to update a separate bookkeeping table (the process
+    // server's) and never reach a process, with no permission check and
+    // process groups scanned only up to pid 1024 (N-92).
+    let sig = i32::try_from(signal)
+        .ok()
+        .filter(|s| (0..=31).contains(s))
+        .ok_or(SyscallError::InvalidArgument)?;
+    let caller = crate::process::current_process().ok_or(SyscallError::InvalidState)?;
 
-    if pid_i == 0 {
-        // pid == 0: send to every process in the caller's process group
-        let caller = crate::process::current_process().ok_or(SyscallError::InvalidState)?;
-        let my_pgid = caller.pgid.load(core::sync::atomic::Ordering::Relaxed);
-        send_signal_to_pgid(my_pgid, signal as i32)
-    } else if pid_i < 0 {
-        // pid < 0: send to process group |pid|
-        let pgid = (-pid_i) as u64;
-        send_signal_to_pgid(pgid, signal as i32)
-    } else {
-        // pid > 0: send to specific process
-        let process_server = crate::services::process_server::get_process_server();
-        match process_server.send_signal(crate::process::ProcessId(pid as u64), signal as i32) {
-            Ok(()) => Ok(0),
-            Err(_) => Err(SyscallError::ProcessNotFound),
+    match pid as isize {
+        p if p > 0 => kill_one(&caller, crate::process::ProcessId(p as u64), sig),
+        0 => kill_matching(&caller, sig, |p| {
+            p.pgid.load(core::sync::atomic::Ordering::Relaxed)
+                == caller.pgid.load(core::sync::atomic::Ordering::Relaxed)
+        }),
+        // Every process the caller may signal except init and itself.
+        -1 => kill_matching(&caller, sig, |p| p.pid.0 != 1 && p.pid != caller.pid),
+        p => {
+            let pgid = p.unsigned_abs() as u64;
+            kill_matching(&caller, sig, |p| {
+                p.pgid.load(core::sync::atomic::Ordering::Relaxed) == pgid
+            })
         }
     }
 }
 
-/// Send a signal to every process in the given process group.
-fn send_signal_to_pgid(pgid: u64, signal: i32) -> SyscallResult {
-    use crate::process::table;
+/// Whether `caller` may signal `target` (Linux: root, or a matching uid).
+fn may_signal(caller: &crate::process::Process, target: &crate::process::Process) -> bool {
+    caller.uid() == 0 || caller.uid() == target.uid()
+}
 
-    let mut found = false;
-    let process_server = crate::services::process_server::get_process_server();
-    for pid_val in 1..=1024u64 {
-        let pid = crate::process::ProcessId(pid_val);
-        if let Some(proc) = table::get_process(pid) {
-            if proc.pgid.load(core::sync::atomic::Ordering::Relaxed) == pgid {
-                let _ = process_server.send_signal(pid, signal);
-                found = true;
-            }
+/// Signal one process; `sig` 0 only checks that it exists and may be
+/// signalled.
+pub(crate) fn kill_one(
+    caller: &crate::process::Process,
+    pid: crate::process::ProcessId,
+    sig: i32,
+) -> SyscallResult {
+    let target = crate::process::table::get_process(pid).ok_or(SyscallError::ProcessNotFound)?;
+    if !target.is_alive() {
+        return Err(SyscallError::ProcessNotFound);
+    }
+    if !may_signal(caller, &target) {
+        return Err(SyscallError::OperationNotPermitted);
+    }
+    if sig == 0 {
+        return Ok(0);
+    }
+    // A signal the caller sends itself whose action ends the process must
+    // leave through the exit path: tearing the process down here would
+    // return into the address space just freed.
+    if target.pid == caller.pid && terminates(caller, sig) {
+        return super::process::exit_current(0, sig as u32);
+    }
+    crate::process::exit::kill_process(pid, sig)
+        .map(|_| 0)
+        .map_err(|_| SyscallError::ProcessNotFound)
+}
+
+/// Whether delivering `sig` to `process` would end it (default action
+/// terminate or core dump, or SIGKILL).
+fn terminates(process: &crate::process::Process, sig: i32) -> bool {
+    use crate::process::exit::{default_signal_action, signals, SignalAction};
+    if sig == signals::SIGKILL {
+        return true;
+    }
+    let handler = process.get_signal_handler(sig as usize).unwrap_or(0);
+    handler == 0
+        && matches!(
+            default_signal_action(sig),
+            SignalAction::Terminate | SignalAction::CoreDump | SignalAction::Default
+        )
+}
+
+/// Signal every process selected by `pred` that the caller may signal.
+/// ESRCH if none matched, EPERM if all matches were refused.
+fn kill_matching(
+    caller: &crate::process::Process,
+    sig: i32,
+    pred: impl Fn(&crate::process::Process) -> bool,
+) -> SyscallResult {
+    let mut targets = alloc::vec::Vec::new();
+    crate::process::table::PROCESS_TABLE.for_each(|p| {
+        if p.is_alive() && pred(p) {
+            targets.push(p.pid);
+        }
+    });
+    if targets.is_empty() {
+        return Err(SyscallError::ProcessNotFound);
+    }
+    // The caller last, so it is still alive to signal the others.
+    targets.sort_by_key(|&p| p == caller.pid);
+    let mut sent = false;
+    for pid in targets {
+        if kill_one(caller, pid, sig).is_ok() {
+            sent = true;
         }
     }
-    if found {
+    if sent {
         Ok(0)
     } else {
-        Err(SyscallError::ProcessNotFound)
+        Err(SyscallError::OperationNotPermitted)
     }
 }
 
@@ -2538,63 +2628,7 @@ pub fn sys_openat(dirfd: usize, path_ptr: usize, flags: usize, mode: usize) -> S
         }
     }
 
-    // Delegate to sys_open using the resolved absolute path.
-    // We write the path to a temporary kernel buffer, then call the existing
-    // sys_open logic. Since sys_open reads from a user pointer, we use the
-    // VFS directly instead.
-    let proc = process::current_process().ok_or(SyscallError::InvalidState)?;
-    let open_flags = OpenFlags::from_bits(flags as u32).ok_or(SyscallError::InvalidArgument)?;
-    let cloexec = (flags & 0x80000) != 0; // O_CLOEXEC
-
-    match vfs()?.open(&abs_path, open_flags) {
-        Ok(node) => {
-            // openat had no permission check at all; musl routes every
-            // open() through it.
-            require_open_access(&node, &open_flags)?;
-            // Store the path so ioctl dispatch can identify device types
-            // (e.g., DRM fds opened via openat need path for "dri/" check).
-            let file = crate::fs::file::File::new_with_path(
-                node,
-                open_flags,
-                alloc::string::String::from(abs_path.as_str()),
-            );
-            let file_table = proc.file_table.lock();
-            match file_table.open_with_flags(alloc::sync::Arc::new(file), cloexec) {
-                Ok(fd_num) => Ok(fd_num),
-                Err(_) => Err(SyscallError::OutOfMemory),
-            }
-        }
-        Err(e) => {
-            // As in sys_open: create only a missing name, report the rest.
-            if open_flags.create && is_not_found(&e) {
-                let perms = creation_perms(mode);
-                let (parent_path, name) = split_path(&abs_path)?;
-                require_dir_write(&abs_path)?;
-                let vfs_guard = vfs()?;
-                let parent = vfs_guard
-                    .resolve_path(&parent_path)
-                    .map_err(|_| SyscallError::ResourceNotFound)?;
-                match parent.create(&name, perms) {
-                    Ok(node) => {
-                        own_new_node(&node);
-                        let file = crate::fs::file::File::new_with_path(
-                            node,
-                            open_flags,
-                            alloc::string::String::from(abs_path.as_str()),
-                        );
-                        let file_table = proc.file_table.lock();
-                        match file_table.open_with_flags(alloc::sync::Arc::new(file), cloexec) {
-                            Ok(fd_num) => Ok(fd_num),
-                            Err(_) => Err(SyscallError::OutOfMemory),
-                        }
-                    }
-                    Err(_) => Err(SyscallError::ResourceNotFound),
-                }
-            } else {
-                Err(map_resolve_err(e))
-            }
-        }
-    }
+    open_path(&abs_path, flags, mode)
 }
 
 /// Stat a file relative to a directory fd (syscall 191).

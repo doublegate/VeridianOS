@@ -307,6 +307,14 @@ pub trait VfsNode: Send + Sync {
         })
     }
 
+    /// A stable identity for the file this node names, `(filesystem,
+    /// inode)`, for filesystems that build a new node object on every
+    /// lookup (BlockFS). `None` (the default) means node objects are shared,
+    /// so the node's address identifies the file.
+    fn file_identity(&self) -> Option<(u64, u64)> {
+        None
+    }
+
     /// Create a symbolic link in this directory.
     ///
     /// Creates a new symlink entry named `name` in this directory node
@@ -854,6 +862,17 @@ impl Vfs {
     ///
     /// Checks MAC policy before allowing access.
     pub fn open(&self, path: &str, flags: OpenFlags) -> Result<Arc<dyn VfsNode>, KernelError> {
+        self.open_follow(path, flags, true)
+    }
+
+    /// Like [`Self::open`]; `follow_last = false` returns a symlink at the
+    /// final component itself (O_NOFOLLOW).
+    pub fn open_follow(
+        &self,
+        path: &str,
+        flags: OpenFlags,
+        follow_last: bool,
+    ) -> Result<Arc<dyn VfsNode>, KernelError> {
         // Determine access type from flags
         let access = if flags.write {
             crate::security::AccessType::Write
@@ -868,7 +887,7 @@ impl Vfs {
 
         // MAC is checked on the canonical path, after `..` and symlinks are
         // resolved, never on the path as written (FS-SEC-01).
-        let (node, canonical) = self.resolve_canonical(path, &self.get_cwd(), true)?;
+        let (node, canonical) = self.resolve_canonical(path, &self.get_cwd(), follow_last)?;
         crate::security::mac::check_file_access(&canonical, access, pid)?;
         Ok(node)
     }

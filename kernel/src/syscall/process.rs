@@ -197,6 +197,17 @@ pub fn sys_exec(path_ptr: usize, argv_ptr: usize, envp_ptr: usize) -> SyscallRes
 /// If no current thread is found (e.g., called from a context without a
 /// proper task), halts the CPU as a last resort.
 pub fn sys_exit(exit_code: usize) -> SyscallResult {
+    exit_current(exit_code as i32, 0)
+}
+
+/// Terminate the calling process: with `exit_code`, or killed by
+/// `term_signal` when it is nonzero (reported to `wait` as WIFSIGNALED).
+pub(crate) fn exit_current(exit_code: i32, term_signal: u32) -> SyscallResult {
+    if term_signal != 0 {
+        if let Some(process) = current_process() {
+            process.set_term_signal(term_signal);
+        }
+    }
     // Check for boot return context FIRST, before exit_thread/exit_process.
     // Both of those call sched::exit_task() which does a context switch and
     // never returns, preventing boot_return_to_kernel from being reached.
@@ -214,7 +225,7 @@ pub fn sys_exit(exit_code: usize) -> SyscallResult {
             // so the parent's pipe read never gets EOF -- causing hangs in
             // command substitution `$(cmd)` where the parent waits for EOF.
             if let Some(process) = current_process() {
-                process.set_exit_code(exit_code as i32);
+                process.set_exit_code(exit_code);
 
                 #[cfg(feature = "alloc")]
                 {
@@ -252,11 +263,11 @@ pub fn sys_exit(exit_code: usize) -> SyscallResult {
     }
 
     // Normal path: exit_thread calls sched::exit_task (never returns).
-    exit_thread(exit_code as i32);
+    exit_thread(exit_code);
 
     // exit_thread returned, meaning current_thread() was None.
     // Fall back to exit_process which calls sched::exit_task too.
-    exit_process(exit_code as i32);
+    exit_process(exit_code);
 
     // No boot context, no scheduler — halt as a last resort.
     loop {
@@ -306,7 +317,19 @@ pub fn sys_wait(pid: isize, status_ptr: usize, options: usize) -> SyscallResult 
             }
             Ok(child_pid.0 as usize)
         }
-        Err(_) => Err(SyscallError::ResourceNotFound),
+        Err(e) => Err(wait_error(e)),
+    }
+}
+
+/// Errno for a failed wait: ECHILD when there is nothing to wait for (it
+/// was ENOENT, so loops that wait until ECHILD never ended; N-99), EINTR
+/// when a signal interrupted it.
+pub(crate) fn wait_error(e: crate::error::KernelError) -> SyscallError {
+    match e {
+        crate::error::KernelError::NotFound { .. } => SyscallError::NoChildProcess,
+        // The wait loop reports a signal interruption as WouldBlock.
+        crate::error::KernelError::WouldBlock => SyscallError::Interrupted,
+        _ => SyscallError::InvalidArgument,
     }
 }
 
@@ -1001,5 +1024,122 @@ pub fn sys_getenv(
         Ok(val_len)
     } else {
         Err(SyscallError::ResourceNotFound)
+    }
+}
+
+/// The process that owns thread `tid`, if any.
+fn process_of_thread(tid: usize) -> Option<ProcessId> {
+    let mut owner = None;
+    crate::process::table::PROCESS_TABLE.for_each(|p| {
+        if owner.is_none() && p.get_thread(crate::process::ThreadId(tid as u64)).is_some() {
+            owner = Some(p.pid);
+        }
+    });
+    owner
+}
+
+/// tkill(2): signal a thread. Signals are process-directed until per-thread
+/// signal state exists (N-109), so this signals the thread's process; musl
+/// uses it for raise() and abort() (N-103).
+pub fn sys_tkill(tid: usize, signal: usize) -> SyscallResult {
+    let caller = current_process().ok_or(SyscallError::InvalidState)?;
+    let pid = process_of_thread(tid).ok_or(SyscallError::ProcessNotFound)?;
+    let sig = i32::try_from(signal)
+        .ok()
+        .filter(|s| (0..=31).contains(s))
+        .ok_or(SyscallError::InvalidArgument)?;
+    super::filesystem::kill_one(&caller, pid, sig)
+}
+
+/// tgkill(2): like tkill, but the thread must belong to process `tgid`.
+pub fn sys_tgkill(tgid: usize, tid: usize, signal: usize) -> SyscallResult {
+    if process_of_thread(tid) != Some(ProcessId(tgid as u64)) {
+        return Err(SyscallError::ProcessNotFound);
+    }
+    sys_tkill(tid, signal)
+}
+
+/// waitid(2) for P_ALL and P_PID, with WEXITED, WSTOPPED, WCONTINUED and
+/// WNOHANG (N-103). The result is written as a Linux `siginfo_t`.
+pub fn sys_waitid(idtype: usize, id: usize, infop: usize, options: usize) -> SyscallResult {
+    use crate::process::exit::WaitOptions;
+    const P_ALL: usize = 0;
+    const P_PID: usize = 1;
+    const WNOHANG: usize = 1;
+    const WSTOPPED: usize = 2;
+    const WEXITED: usize = 4;
+    const WCONTINUED: usize = 8;
+    const WNOWAIT: usize = 0x0100_0000;
+
+    let pid = match idtype {
+        P_ALL => None,
+        P_PID if id > 0 => Some(ProcessId(id as u64)),
+        // Process groups and pidfds come with the process-model rework.
+        _ => return Err(SyscallError::InvalidArgument),
+    };
+    if options & (WEXITED | WSTOPPED | WCONTINUED) == 0 || options & WNOWAIT != 0 {
+        return Err(SyscallError::InvalidArgument);
+    }
+    let (child, status) = crate::process::exit::wait_process_with_options(
+        pid,
+        WaitOptions {
+            no_hang: options & WNOHANG != 0,
+            untraced: options & WSTOPPED != 0,
+            continued: options & WCONTINUED != 0,
+        },
+    )
+    .map_err(wait_error)?;
+
+    if infop != 0 {
+        let info = waitid_siginfo(child.0, status);
+        // SAFETY: copy_to_user validates that infop is writable user memory.
+        unsafe { crate::syscall::userspace::copy_to_user(infop, &info) }?;
+    }
+    Ok(0)
+}
+
+/// A Linux `siginfo_t` (128 bytes) for a waitid result; all zero when no
+/// child changed state (WNOHANG).
+fn waitid_siginfo(pid: u64, status: i32) -> [u8; 128] {
+    const SIGCHLD: i32 = 17;
+    const CLD_EXITED: i32 = 1;
+    const CLD_KILLED: i32 = 2;
+    const CLD_DUMPED: i32 = 3;
+    let mut info = [0u8; 128];
+    if pid == 0 {
+        return info;
+    }
+    let (code, value) = if status & 0x7f == 0 {
+        (CLD_EXITED, (status >> 8) & 0xff)
+    } else if status & 0x80 != 0 {
+        (CLD_DUMPED, status & 0x7f)
+    } else {
+        (CLD_KILLED, status & 0x7f)
+    };
+    info[0..4].copy_from_slice(&SIGCHLD.to_ne_bytes()); // si_signo
+    info[8..12].copy_from_slice(&code.to_ne_bytes()); // si_code
+    info[16..20].copy_from_slice(&(pid as i32).to_ne_bytes()); // si_pid
+    info[24..28].copy_from_slice(&value.to_ne_bytes()); // si_status
+    info
+}
+
+#[cfg(test)]
+mod waitid_tests {
+    use super::waitid_siginfo;
+
+    fn field(info: &[u8; 128], at: usize) -> i32 {
+        i32::from_ne_bytes(info[at..at + 4].try_into().unwrap())
+    }
+
+    #[test]
+    fn siginfo_encodes_exit_kill_and_nothing() {
+        let exited = waitid_siginfo(42, 3 << 8);
+        assert_eq!((field(&exited, 0), field(&exited, 8)), (17, 1));
+        assert_eq!((field(&exited, 16), field(&exited, 24)), (42, 3));
+        let killed = waitid_siginfo(7, 9);
+        assert_eq!((field(&killed, 8), field(&killed, 24)), (2, 9));
+        let dumped = waitid_siginfo(7, 0x8b);
+        assert_eq!((field(&dumped, 8), field(&dumped, 24)), (3, 11));
+        assert!(waitid_siginfo(0, 0).iter().all(|&b| b == 0));
     }
 }

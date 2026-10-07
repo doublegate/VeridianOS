@@ -96,6 +96,11 @@ binaries in a KDE rootfs built before v0.26.0 still contain both defects. Rebuil
 `tools/cross/` pipeline (`build-musl.sh` first) before using the KDE session. The BusyBox rootfs is
 not affected, because it uses the native libc.
 
+v0.27 adds native calls 355-359 for `prctl`, `flock`, `tkill`, `tgkill` and `waitid` to the musl
+patch (N-103). Binaries built with an older patch still get `prctl` (the kernel recognises it) and
+`flock`/`fsync` (told apart by argument), but their `tkill`, `tgkill` and `waitid` reach unrelated
+native calls, so `raise()` and `abort()` do not work in them until they are rebuilt.
+
 ### Some socket calls still read user buffers directly (N-43)
 
 `send`, `recv`, `sendto`, `recvfrom` and `sendmsg` read the caller's buffer through a raw slice after

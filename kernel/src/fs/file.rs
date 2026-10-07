@@ -167,10 +167,16 @@ impl File {
         matches!(self.node.device_id(), Some((major, _)) if major == crate::fs::devfs::DRM_MAJOR)
     }
 
-    /// The flock(2) table key of this file's node: the node's identity,
-    /// stable while this open file (and so the node) exists.
+    /// The flock(2) table key of the file: its (filesystem, inode) identity
+    /// where the filesystem has one, else the shared node's address. Either
+    /// is stable while this open file exists, and the lock is released when
+    /// it closes.
     pub fn flock_key(&self) -> u64 {
-        Arc::as_ptr(&self.node) as *const () as u64
+        match self.node.file_identity() {
+            // Two opens of one BlockFS file get different node objects.
+            Some((fs, ino)) => fs ^ ino.wrapping_mul(0x9E37_79B9_7F4A_7C15),
+            None => Arc::as_ptr(&self.node) as *const () as u64,
+        }
     }
 
     /// Create a new file structure

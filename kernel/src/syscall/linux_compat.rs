@@ -386,6 +386,8 @@ pub(crate) fn to_linux_errno(err: super::SyscallError) -> isize {
     // Linux errno constants (negated for return values)
     const LINUX_EPERM: isize = -1;
     const LINUX_ENOENT: isize = -2;
+    const LINUX_ESRCH: isize = -3;
+    const LINUX_ECHILD: isize = -10;
     const LINUX_EINTR: isize = -4;
     const LINUX_ENOMEM: isize = -12;
     const LINUX_EACCES: isize = -13;
@@ -428,7 +430,7 @@ pub(crate) fn to_linux_errno(err: super::SyscallError) -> isize {
         SyscallError::CapabilityDelegationDenied => LINUX_EPERM,
         SyscallError::UnmappedMemory => LINUX_EFAULT,
         SyscallError::AccessDenied => LINUX_EACCES,
-        SyscallError::ProcessNotFound => LINUX_ENOENT,
+        SyscallError::ProcessNotFound => LINUX_ESRCH,
         SyscallError::FileExists => LINUX_EEXIST,
         SyscallError::BadFileDescriptor => LINUX_EBADF,
         SyscallError::IoError => LINUX_EIO,
@@ -444,6 +446,8 @@ pub(crate) fn to_linux_errno(err: super::SyscallError) -> isize {
         SyscallError::CrossDevice => LINUX_EXDEV,
         SyscallError::NotASocket => LINUX_ENOTSOCK,
         SyscallError::ProtocolOptionNotAvailable => LINUX_ENOPROTOOPT,
+        SyscallError::NoChildProcess => LINUX_ECHILD,
+        SyscallError::OperationNotPermitted => LINUX_EPERM,
     }
 }
 
@@ -492,7 +496,7 @@ pub(crate) fn is_faccessat(linux_num: usize) -> bool {
 
 /// prctl(2) subset. Options a program can rely on for its correctness or
 /// security are refused (EINVAL) until implemented, never faked (N-151).
-fn sys_prctl(option: usize, arg2: usize) -> SyscallResult {
+pub(crate) fn sys_prctl(option: usize, arg2: usize) -> SyscallResult {
     const PR_SET_NAME: usize = 15;
     const PR_GET_NAME: usize = 16;
     const PR_SET_TIMERSLACK: usize = 29;

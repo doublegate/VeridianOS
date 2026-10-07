@@ -709,6 +709,88 @@ static void test_fork_inheritance(void)
     report("sigprocmask_same_buffer", applied, "mask not applied or oldset wrong");
 }
 
+/* --- open(2) flags (N-116) and kill(2) (N-92, N-99). -------------------- */
+static void test_open_flags(void)
+{
+    unlink("/tmp/of_x");
+    int fd = open("/tmp/of_x", O_CREAT | O_EXCL | O_RDWR, 0644);
+    int created = fd >= 0 && write(fd, "0123456789", 10) == 10;
+    if (fd >= 0)
+        close(fd);
+    errno = 0;
+    int ex = open("/tmp/of_x", O_CREAT | O_EXCL | O_RDWR, 0644);
+    int ex_errno = errno;
+    /* openat with O_TRUNC truncates (it used to skip it). */
+    int tfd = openat(AT_FDCWD, "/tmp/of_x", O_WRONLY | O_TRUNC);
+    struct stat stt;
+    int truncated = tfd >= 0 && fstat(tfd, &stt) == 0 && stt.st_size == 0;
+    if (tfd >= 0)
+        close(tfd);
+    errno = 0;
+    int nd = open("/tmp/of_x", O_RDONLY | O_DIRECTORY);
+    int nd_errno = errno;
+    symlink("/tmp/of_x", "/tmp/of_link");
+    errno = 0;
+    int nf = open("/tmp/of_link", O_RDONLY | O_NOFOLLOW);
+    int nf_errno = errno;
+    errno = 0;
+    int dw = open("/tmp", O_WRONLY);
+    int dw_errno = errno;
+    static char why[128];
+    snprintf(why, sizeof(why), "created=%d excl=%d/%d trunc=%d dir=%d/%d nofollow=%d/%d dirw=%d/%d",
+             created, ex, ex_errno, truncated, nd, nd_errno, nf, nf_errno, dw, dw_errno);
+    report("open_excl_trunc_directory_nofollow",
+           created && ex == -1 && ex_errno == EEXIST && truncated && nd == -1 &&
+               nd_errno == ENOTDIR && nf == -1 && nf_errno == ELOOP && dw == -1 &&
+               dw_errno == EISDIR,
+           why);
+}
+
+static void test_kill(void)
+{
+    /* A non-root process may not signal a root one (EPERM). Signal 0
+     * checks permission without delivering anything. */
+    pid_t pid = fork();
+    if (pid == 0) {
+        pid_t parent = getppid();
+        if (setuid(1000) != 0)
+            _exit(2);
+        errno = 0;
+        int r = kill(parent, 0);
+        _exit(r == -1 && errno == EPERM ? 0 : 1);
+    }
+    int st = 0;
+    int eperm = pid > 0 && waitpid(pid, &st, 0) == pid && WIFEXITED(st) && WEXITSTATUS(st) == 0;
+
+    /* kill reaches the real process, and the parent sees the signal. */
+    pid = fork();
+    if (pid == 0) {
+        kill(getpid(), SIGTERM);
+        _exit(0);
+    }
+    int st2 = 0;
+    int self = pid > 0 && waitpid(pid, &st2, 0) == pid && WIFSIGNALED(st2) &&
+               WTERMSIG(st2) == SIGTERM;
+
+    /* No such process: ESRCH; nothing left to wait for: ECHILD. */
+    errno = 0;
+    int esrch = kill(99999, 0) == -1 && errno == ESRCH;
+    /* Checked in a fresh child, which has no children of its own. */
+    pid = fork();
+    if (pid == 0) {
+        errno = 0;
+        int r = waitpid(-1, NULL, 0);
+        _exit(r == -1 && errno == ECHILD ? 0 : 1);
+    }
+    int st3 = 0;
+    int echild = pid > 0 && waitpid(pid, &st3, 0) == pid && WIFEXITED(st3) &&
+                 WEXITSTATUS(st3) == 0;
+    static char why[96];
+    snprintf(why, sizeof(why), "eperm=%d(0x%x) self=%d(0x%x) esrch=%d echild=%d", eperm, st, self,
+             st2, esrch, echild);
+    report("kill_permissions_esrch_echild", eperm && self && esrch && echild, why);
+}
+
 /* --- Directory rename (FS-PERF-03): the node moves, ".." follows. ----- */
 static void test_rename_directory(void)
 {
@@ -995,6 +1077,8 @@ int main(int argc, char **argv)
     test_map_fixed_limits();
     test_memory_protection();
     test_fork_inheritance();
+    test_open_flags();
+    test_kill();
     test_rename_directory();
     test_closed_stdio();
     test_unix_bind_connect();

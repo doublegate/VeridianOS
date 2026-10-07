@@ -14,7 +14,8 @@
 # QEMU runs in the background and is killed when done (never `timeout`).
 #
 # Usage: scripts/run-rootfs-tests.sh [prompt-wait-seconds]
-# Env:   LOG_DIR (default target/boot-logs), ROOTFS (default
+# Env:   REQUIRE_MUSL=1 (musl_runtime_test must be present),
+#        LOG_DIR (default target/boot-logs), ROOTFS (default
 #        target/rootfs-blockfs.img), TEST_WAIT (seconds for the suite, 120),
 #        SMP (CPU count, default 1)
 set -u
@@ -81,6 +82,12 @@ sleep 2
 printf '/bin/audit_runtime_test\r' >&3
 wait_for 'AUDIT-RUNTIME: [0-9]+/[0-9]+' "$test_wait"
 sleep 1
+# musl-built checks: run if the image has them (REQUIRE_MUSL=1 makes their
+# absence a failure). The prompt is the kernel shell (vsh), which has no
+# conditionals, so a missing binary just never prints a result.
+printf '/bin/musl_runtime_test\r' >&3
+wait_for 'MUSL-RUNTIME: [0-9]+/[0-9]+|vsh: command not found' 60
+sleep 1
 finish
 
 status=PASS
@@ -92,9 +99,16 @@ if [[ $audit =~ ([0-9]+)/([0-9]+) ]]; then
 else
     status=FAIL
 fi
+musl="$(grep -aoE 'MUSL-RUNTIME: [0-9]+/[0-9]+' "$log" | tail -1)"
+if [[ $musl =~ ([0-9]+)/([0-9]+) ]]; then
+    [[ ${BASH_REMATCH[1]} == "${BASH_REMATCH[2]}" ]] || status=FAIL
+else
+    musl="MUSL-RUNTIME: absent"
+    [[ ${REQUIRE_MUSL:-0} == 1 ]] && status=FAIL
+fi
 grep -aqE 'KERNEL PANIC|panicked at' "$log" && status=FAIL
 
-echo "$status rootfs: ${busybox:-no BusyBox result}; ${audit:-no AUDIT-RUNTIME result}"
+echo "$status rootfs: ${busybox:-no BusyBox result}; ${audit:-no AUDIT-RUNTIME result}; ${musl:-no MUSL-RUNTIME result}"
 if [[ $status != PASS ]]; then
     grep -aE 'FAIL|KERNEL PANIC|panicked at' "$log" | head -30
     echo "log: $log"

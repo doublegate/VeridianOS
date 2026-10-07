@@ -452,6 +452,10 @@ impl BlockFsNode {
 }
 
 impl VfsNode for BlockFsNode {
+    fn file_identity(&self) -> Option<(u64, u64)> {
+        Some((Arc::as_ptr(&self.fs) as u64, self.inode_num as u64))
+    }
+
     fn node_type(&self) -> NodeType {
         self.metadata()
             .map(|m| m.node_type)

@@ -46,6 +46,16 @@
 
 ### Security
 
+- **`kill` signals real processes (N-92).** It used to update a separate bookkeeping table and
+  never reach the target, with no permission check: `kill -9` could not stop a program, and
+  any user could "signal" any process. It now applies the signal, requires root or a matching
+  uid (EPERM), reports ESRCH and ECHILD, handles process groups and `kill(-1)` over the whole
+  process table, and a process that kills itself exits through the normal path.
+- **`open` honours O_EXCL, O_TRUNC, O_NOFOLLOW and O_DIRECTORY (N-116).** `O_CREAT|O_EXCL`
+  opened an existing file (breaking `mkstemp` and lock files in `/tmp`), `openat` never
+  truncated (and musl sends every `open` through it), and a final symlink was followed even
+  with O_NOFOLLOW. Opening a directory for writing is EISDIR; a lost create race is EEXIST or a
+  plain open, never ENOENT.
 - **File offsets cannot exhaust kernel memory (N-122).** A write at a huge offset made ramfs
   or tmpfs allocate the whole range and abort the kernel; RAM-backed files are limited to
   1 GiB (EFBIG), growth fails with ENOSPC instead of aborting, tmpfs charges space
@@ -89,11 +99,21 @@
 
 ### Fixed
 
+- **musl programs reach the right system calls (N-103, N-151).** musl passed `prctl`, `flock`,
+  `tkill`, `tgkill` and `waitid` through unmapped, so they landed on unrelated native calls
+  (`prctl` became `unlink` of a small integer, `abort()` became `select`). The musl patch maps
+  them to new native calls 355-359, `waitid` is implemented, and `prctl` sent by binaries
+  built with the old patch is still recognised. A new `musl_runtime_test`, built against the
+  patched musl and run in CI, checks these paths, which the native-libc suite never covered.
+- **A musl parent survives a forked child (FS base).** After a child ran, the parent returned
+  to user mode with the child's FS base, so its first TLS access (the stack canary) faulted.
 - **`sigprocmask` with the same buffer for both sets applies the new mask (N-97).**
-- **`flock` works for Linux-ABI programs and `fsync` is never mistaken for it (N-120).**
-  Syscall 73 used to be a silent no-op whenever its second argument looked like a lock
-  operation. A lock belongs to the open file and is released on its last close or when its
-  process exits.
+- **`flock` works and `fsync` is never mistaken for it (N-120).** Both are syscall 73 (musl
+  remaps Linux `fsync` onto native `fsync` and passes `flock` through); the second argument now
+  decides, as a lock operation is never 0 and both C libraries pass 0 for `fsync`. The native
+  libc's `flock` was a stub that always succeeded. A lock belongs to the open file and is
+  released on its last close or when its process exits; locks are keyed by (filesystem,
+  inode), so two opens of one file conflict as they should.
 - **No more serial output for every page fault and `open` (N-176, N-130).** The bring-up
   tracing is behind the new `trace` feature.
 - **PCI configuration reads no longer transmute arbitrary offsets into an enum (N-155).**

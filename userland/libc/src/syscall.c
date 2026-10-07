@@ -110,8 +110,20 @@ int unlink(const char *pathname)
 
 int fsync(int fd)
 {
+    /* The explicit 0 tells the kernel this is fsync, not flock: both are
+     * syscall 73, distinguished by the second argument (N-120). */
     return (int)__syscall_ret(
-        veridian_syscall1(SYS_FS_FSYNC, fd));
+        veridian_syscall2(SYS_FS_FSYNC, fd, 0));
+}
+
+int flock(int fd, int operation)
+{
+    /* Syscall 73 with a nonzero operation is flock (0 would mean fsync). */
+    if (operation == 0) {
+        errno = EINVAL;
+        return -1;
+    }
+    return (int)__syscall_ret(veridian_syscall2(SYS_FS_FSYNC, fd, operation));
 }
 
 void sync(void)

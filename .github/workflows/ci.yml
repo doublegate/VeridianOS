@@ -596,13 +596,17 @@ jobs:
                   key: ${{ steps.toolchain-cache.outputs.cache-primary-key }}
             - name: Build kernel
               run: ./build-kernel.sh x86_64 dev
+            # The patched musl (as KDE uses) for musl_runtime_test, so musl's
+            # syscall remapping is exercised and not only the native libc.
+            - name: Build patched musl
+              run: ./tools/cross/build-musl.sh
             - name: Build BusyBox rootfs
               run: |
                   export PATH=/opt/veridian/toolchain/bin:$PATH
                   ./scripts/build-busybox-rootfs.sh all
                   ./scripts/build-busybox-rootfs.sh blockfs
             - name: Run runtime suite
-              run: scripts/run-rootfs-tests.sh 900
+              run: REQUIRE_MUSL=1 scripts/run-rootfs-tests.sh 900
             - name: Upload log
               if: always()
               uses: actions/upload-artifact@v4

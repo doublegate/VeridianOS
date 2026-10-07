@@ -2246,6 +2246,13 @@ pub fn boot_run_forked_child(
     let saved_kernel_rsp = unsafe { (*per_cpu).kernel_rsp };
     // SAFETY: same per-CPU pointer as above.
     let saved_user_rsp = unsafe { (*per_cpu).user_rsp };
+    // The parent's syscall frame pointer and TLS base: the child's syscalls
+    // overwrite the first and its user code may change the second, and the
+    // parent returns to user mode with neither restored otherwise. A musl
+    // parent then faulted on %fs:0x28 (its stack canary) after the child.
+    // SAFETY: same per-CPU pointer as above.
+    let saved_syscall_frame = unsafe { (*per_cpu).syscall_frame };
+    let saved_fs_base = x86_64::registers::model_specific::FsBase::read();
 
     // Set child as the current boot process
     crate::process::set_boot_current(child_pid, child_tid);
@@ -2328,7 +2335,9 @@ pub fn boot_run_forked_child(
     unsafe {
         (*per_cpu).kernel_rsp = saved_kernel_rsp;
         (*per_cpu).user_rsp = saved_user_rsp;
+        (*per_cpu).syscall_frame = saved_syscall_frame;
     }
+    x86_64::registers::model_specific::FsBase::write(saved_fs_base);
 
     // Restore parent as current boot process
     crate::process::set_boot_current(parent_pid, parent_tid);

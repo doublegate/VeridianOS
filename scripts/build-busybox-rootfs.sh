@@ -433,6 +433,23 @@ phase_rootfs() {
         exit 1
     fi
 
+    # The same kind of checks for programs built against the patched musl
+    # (as KDE is), so musl's syscall remapping is exercised too. Built when
+    # the musl sysroot exists (tools/cross/build-musl.sh).
+    local musl_cc="${PROJECT_ROOT}/target/veridian-sysroot/bin/x86_64-veridian-musl-gcc"
+    if [ -x "$musl_cc" ] && [ -f "${PROJECT_ROOT}/target/veridian-sysroot/usr/lib/libc.a" ]; then
+        echo -n "    musl_runtime_test... "
+        if "$musl_cc" -O2 -Wall -o "$BUILD_DIR/bin/musl_runtime_test" \
+                "${TESTS_DIR}/musl_runtime_test.c" 2>&1; then
+            echo "OK"
+        else
+            echo "FAILED"
+            exit 1
+        fi
+    else
+        echo "    musl_runtime_test... skipped (no musl sysroot; run tools/cross/build-musl.sh)"
+    fi
+
     # Copy source files for native compilation on VeridianOS
     echo "  Adding program source for native compilation..."
     mkdir -p "$BUILD_DIR/usr/src"

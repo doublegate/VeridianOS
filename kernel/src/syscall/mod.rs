@@ -567,6 +567,16 @@ pub enum Syscall {
     SetRobustList = 353,
     ClockNanosleep = 354,
 
+    // Linux calls musl used to pass through unmapped, landing on unrelated
+    // native syscalls (N-103: prctl 157 = FileUnlink, tkill 200 =
+    // FileSelect, tgkill 234 = FbSwap, waitid 247 = WlGetEvents; flock 73
+    // shares FsFsync). The musl patch maps them here.
+    Prctl = 355,
+    Flock = 356,
+    Tkill = 357,
+    Tgkill = 358,
+    Waitid = 359,
+
     // Event/timer notification fds (KDE/Wayland infrastructure)
     Getrandom = 330,
     EventfdCreate = 331,
@@ -640,6 +650,11 @@ pub enum SyscallError {
     NotASocket = -88,
     /// Unknown or unsupported socket option (ENOPROTOOPT, errno 92).
     ProtocolOptionNotAvailable = -92,
+    /// No child process to wait for (ECHILD, errno 10; N-99).
+    NoChildProcess = -110,
+    /// Operation not permitted for this caller (EPERM, errno 1): signals,
+    /// credentials, process groups. File access denials stay EACCES.
+    OperationNotPermitted = -111,
 }
 
 impl From<IpcError> for SyscallError {
@@ -1160,15 +1175,23 @@ fn dispatch_native_abi(
     // Linux setsockopt(54) collides with VeridianOS FileSeek(54).
     // musl maps it to 254. So 54 is always FileSeek. (No fix needed)
 
-    // Linux flock(73) collides with VeridianOS FsFsync(73), and musl does
-    // not remap flock. The caller's ABI decides, not its arguments: a
-    // heuristic on arg2 used to make flock a silent no-op and could swallow
-    // a native fsync whose stale rsi happened to be 1-15 (N-120).
-    if syscall_num == 73
-        && crate::process::current_process()
-            .is_some_and(|p| crate::syscall::linux_compat::is_linux_abi(&p))
-    {
+    // Syscall 73 is both fsync and flock: native FsFsync is 73, the musl
+    // patch remaps Linux fsync (74) to it, and musl passes Linux flock (73)
+    // through unchanged. Both C libraries make the second argument decide:
+    // musl zero-pads unused syscall arguments, the native libc's fsync
+    // passes an explicit 0, and a flock operation is never 0
+    // (LOCK_SH/EX/UN = 1/2/8). Every process uses the native numbering,
+    // because musl remaps before the syscall instruction, so the
+    // `linux_abi` flag cannot tell them apart (N-120).
+    if syscall_num == 73 && arg2 != 0 {
         return sys_flock(arg1, arg2);
+    }
+    // musl binaries built before the remap fix send prctl as 157, which is
+    // FileUnlink here. A prctl option is a small integer and a path pointer
+    // never is (nothing is mapped below 0x1000), so the first argument
+    // tells them apart (N-103).
+    if syscall_num == 157 && arg1 < crate::mm::user_layout::USER_SPACE_START {
+        return linux_compat::sys_prctl(arg1, arg2);
     }
 
     // ---------------------------------------------------------------
@@ -1758,6 +1781,11 @@ fn handle_syscall(
         Syscall::SetTidAddress => sys_set_tid_address(arg1),
         Syscall::SetRobustList => sys_set_robust_list(arg1, arg2),
         Syscall::ClockNanosleep => sys_clock_nanosleep(arg1, arg2, arg3, arg4),
+        Syscall::Prctl => linux_compat::sys_prctl(arg1, arg2),
+        Syscall::Flock => sys_flock(arg1, arg2),
+        Syscall::Tkill => process::sys_tkill(arg1, arg2),
+        Syscall::Tgkill => process::sys_tgkill(arg1, arg2, arg3),
+        Syscall::Waitid => process::sys_waitid(arg1, arg2, arg3, arg4),
 
         _ => Err(SyscallError::InvalidSyscall),
     }
@@ -3315,6 +3343,11 @@ impl TryFrom<usize> for Syscall {
             352 => Ok(Syscall::SetTidAddress),
             353 => Ok(Syscall::SetRobustList),
             354 => Ok(Syscall::ClockNanosleep),
+            355 => Ok(Syscall::Prctl),
+            356 => Ok(Syscall::Flock),
+            357 => Ok(Syscall::Tkill),
+            358 => Ok(Syscall::Tgkill),
+            359 => Ok(Syscall::Waitid),
 
             _ => Err(()),
         }
