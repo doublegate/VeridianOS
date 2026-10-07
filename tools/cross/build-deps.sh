@@ -274,6 +274,8 @@ build_xkbcommon() {
             --default-library=static \
             -Denable-wayland=false \
             -Denable-x11=false \
+            -Denable-tools=false \
+            -Denable-bash-completion=false \
             -Denable-docs=false && \
         ninja -j"${JOBS}" && \
         ninja install)

@@ -110,6 +110,25 @@ build_dbus() {
     log "D-Bus: done."
 }
 
+# ── Fix dbus-1.pc for CMake consumers ─────────────────────────────────
+# D-Bus's DBus1Config.cmake turns every non-include pkg-config C flag into
+# an INTERFACE_COMPILE_DEFINITION, and the meson build (1.16) puts -pthread
+# in Cflags, so Qt's moc got "-D-pthread" ("macro names must be
+# identifiers"). -pthread stays in Libs, where it matters for a static
+# link. Idempotent, so it also repairs an existing install.
+fix_dbus_pc() {
+    local pc="${SYSROOT}/usr/lib/pkgconfig/dbus-1.pc"
+    [[ -f "${pc}" ]] || return 0
+    local tmp="${pc}.tmp"
+    sed -E '/^Cflags:/ s/[[:space:]]-pthread\b//g' "${pc}" > "${tmp}"
+    [[ -s "${tmp}" ]] || die "rewriting ${pc} produced an empty file"
+    mv "${tmp}" "${pc}"
+    if grep -q '^Cflags:.*-pthread' "${pc}"; then
+        die "could not remove -pthread from ${pc} Cflags"
+    fi
+    log "dbus-1.pc: -pthread kept in Libs only."
+}
+
 # ── Create D-Bus config for VeridianOS ────────────────────────────────
 create_dbus_config() {
     local conf_dir="${SYSROOT}/etc/dbus-1"
@@ -186,6 +205,7 @@ main() {
     [[ -f "${SYSROOT}/usr/lib/libexpat.a" ]] || die "expat not found. Run build-deps.sh first."
 
     build_dbus
+    fix_dbus_pc
     create_dbus_config
     verify
     log "=== D-Bus build complete ==="

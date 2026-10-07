@@ -208,21 +208,38 @@ build_mesa() {
     # Step 1: Create base archives from .so object files.
     # Use find instead of glob: Mesa generates dot-prefixed .o files
     # (e.g. .._entry.c.o) that shell globs skip by default.
-    find "${mesa_bld}/src/mapi/shared-glapi/libglapi.so.0.0.0.p" -name '*.o' -print0 \
-        | xargs -0 ar rcs "${SYSROOT}/usr/lib/libglapi.a"
+    # Mesa 25+ builds glapi as a static library (linked into libgallium);
+    # older Mesa had it as libglapi.so.
+    if [[ -f "${mesa_bld}/src/mesa/glapi/shared-glapi/libglapi.a" ]]; then
+        # Meson leaves it a thin archive (member paths only), so it is
+        # rewritten as a real one rather than copied.
+        rm -f "${SYSROOT}/usr/lib/libglapi.a"
+        printf 'create %s\naddlib %s\nsave\nend\n' "${SYSROOT}/usr/lib/libglapi.a" \
+            "${mesa_bld}/src/mesa/glapi/shared-glapi/libglapi.a" | ar -M
+        ranlib "${SYSROOT}/usr/lib/libglapi.a"
+    else
+        find "${mesa_bld}/src/mapi/shared-glapi/libglapi.so.0.0.0.p" -name '*.o' -print0 \
+            | xargs -0 ar rcs "${SYSROOT}/usr/lib/libglapi.a"
+    fi
 
     local tmp_egl="${mesa_bld}/libEGL_base.a"
     find "${mesa_bld}/src/egl/libEGL.so.1.0.0.p" -name '*.o' -print0 \
         | xargs -0 ar rcs "${tmp_egl}"
 
+    # Mesa 24.3+ moved the DRI backend out of libgbm into a loadable
+    # dri_gbm.so module; a static libgbm carries its objects too.
     local tmp_gbm="${mesa_bld}/libgbm_base.a"
-    find "${mesa_bld}/src/gbm/libgbm.so.1.0.0.p" -name '*.o' -print0 \
+    find "${mesa_bld}/src/gbm/libgbm.so.1.0.0.p" "${mesa_bld}/src/gbm/backends/dri/dri_gbm.so.p" \
+        -name '*.o' -print0 2>/dev/null \
         | xargs -0 ar rcs "${tmp_gbm}"
 
     # The public gl* entry points (glDisable, glViewport, ...) are in the
     # es2api object, not in glapi: without it every GLES2 user fails to link.
     local tmp_gles="${mesa_bld}/libGLESv2_base.a"
-    find "${mesa_bld}/src/mapi/es2api/libGLESv2.so.2.0.0.p" -name '*.o' -print0 \
+    # src/mesa/glapi/es2api since Mesa 25, src/mapi/es2api before.
+    local es2_dir="${mesa_bld}/src/mesa/glapi/es2api/libGLESv2.so.2.0.0.p"
+    [[ -d "${es2_dir}" ]] || es2_dir="${mesa_bld}/src/mapi/es2api/libGLESv2.so.2.0.0.p"
+    find "${es2_dir}" -name '*.o' -print0 \
         | xargs -0 ar rcs "${tmp_gles}"
 
     # Step 2: Create combined gallium archive from all Mesa internal static libs
@@ -257,6 +274,9 @@ build_mesa() {
         "${mesa_bld}/src/loader/libloader.a" \
         "${mesa_bld}/src/util/libmesa_util.a" \
         "${mesa_bld}/src/util/libmesa_util_sse41.a" \
+        "${mesa_bld}/src/util/libmesa_util_simd.a" \
+        "${mesa_bld}/src/util/libmesa_util_clflush.a" \
+        "${mesa_bld}/src/util/libmesa_util_clflushopt.a" \
         "${mesa_bld}/src/util/blake3/libblake3.a" \
         "${mesa_bld}/src/util/libxmlconfig.a" \
         "${mesa_bld}/src/c11/impl/libmesa_util_c11.a" \
@@ -304,7 +324,8 @@ build_mesa() {
           "${SYSROOT}/usr/lib/libGLESv2.so"* \
           "${SYSROOT}/usr/lib/libgbm.so"* \
           "${SYSROOT}/usr/lib/libglapi.so"* \
-          "${SYSROOT}/usr/lib/libgallium"*.so*
+          "${SYSROOT}/usr/lib/libgallium"*.so* \
+          "${SYSROOT}/usr/lib/gbm/dri_gbm.so"
 
     # Rewrite pkg-config files with proper static link dependencies.
     # Mesa's generated .pc files assume shared linking; for static builds

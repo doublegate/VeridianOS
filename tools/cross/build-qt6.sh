@@ -80,43 +80,40 @@ build_host_qt() {
 # ── 2. Install VeridianOS QPA plugin into Qt source tree ──────────────
 install_qpa_plugin() {
     local src="${BUILD_DIR}/qtbase-everywhere-src-${QT_VER}"
-    local qpa_dir="${src}/src/plugins/platforms/veridian"
-    if [[ -d "${qpa_dir}" ]]; then
-        log "QPA plugin: already installed in Qt source."
-        return 0
-    fi
+    local platforms="${src}/src/plugins/platforms"
+    local qpa_dir="${platforms}/veridian"
 
+    # Refreshed on every run from userland/qt6/qpa (sources, metadata and its
+    # qtbase-internal CMakeLists.txt), so the tree never keeps a stale copy.
+    # It used to be copied once, with a generated CMakeLists.txt naming
+    # veridian_*.cpp files that do not exist, and was never added to the
+    # platforms list, so the plugin was never built.
     log "Installing VeridianOS QPA plugin into Qt source..."
+    rm -rf "${qpa_dir}"
     mkdir -p "${qpa_dir}"
-    cp "${PROJECT_ROOT}/userland/qt6/qpa/"*.cpp "${qpa_dir}/" 2>/dev/null || true
-    cp "${PROJECT_ROOT}/userland/qt6/qpa/"*.h "${qpa_dir}/" 2>/dev/null || true
+    cp "${PROJECT_ROOT}/userland/qt6/qpa/"*.cpp "${PROJECT_ROOT}/userland/qt6/qpa/"*.h \
+       "${PROJECT_ROOT}/userland/qt6/qpa/veridian.json" \
+       "${PROJECT_ROOT}/userland/qt6/qpa/CMakeLists.txt" "${qpa_dir}/"
 
-    # Create CMakeLists.txt for the QPA plugin
-    cat > "${qpa_dir}/CMakeLists.txt" << 'CMAKE'
-qt_internal_add_plugin(QVeridianIntegrationPlugin
-    OUTPUT_NAME qveridian
-    PLUGIN_TYPE platforms
-    DEFAULT_IF "veridian" IN_LIST QT_QPA_PLATFORMS
-    SOURCES
-        veridian_integration.cpp veridian_integration.h
-        veridian_window.cpp veridian_window.h
-        veridian_screen.cpp veridian_screen.h
-        veridian_backingstore.cpp veridian_backingstore.h
-        veridian_egl.cpp veridian_egl.h
-    LIBRARIES
-        Qt::Core
-        Qt::CorePrivate
-        Qt::Gui
-        Qt::GuiPrivate
-)
+    # Build it with qtbase: it needs the Wayland client and EGL that qtbase
+    # already uses for its own Wayland plugin.
+    if ! grep -q "add_subdirectory(veridian)" "${platforms}/CMakeLists.txt"; then
+        cat >> "${platforms}/CMakeLists.txt" << 'CMAKE'
+if(QT_FEATURE_wayland AND QT_FEATURE_egl)
+    add_subdirectory(veridian) # VeridianOS platform (tools/cross/build-qt6.sh)
+endif()
 CMAKE
+    fi
+    grep -q "add_subdirectory(veridian)" "${platforms}/CMakeLists.txt" \
+        || die "could not add the veridian platform to ${platforms}/CMakeLists.txt"
 
     log "QPA plugin: installed."
 }
 
 # ── 3. Cross-compile Qt 6 (static) ───────────────────────────────────
 build_qt_cross() {
-    if [[ -f "${SYSROOT}/usr/lib/libQt6Core.a" ]]; then
+    # qtbase is complete only with the VeridianOS platform plugin it builds.
+    if [[ -f "${SYSROOT}/usr/lib/libQt6Core.a" && -f "${SYSROOT}/usr/plugins/platforms/libqveridian.a" ]]; then
         log "Qt 6 cross-build: already installed."
         return 0
     fi
@@ -400,16 +397,22 @@ build_qt_declarative() {
     # failed link aborts the install and KF6 cannot find Qt6Quick. The
     # build-time tools (qmltyperegistrar, qmlcachegen, ...) are outside this
     # block and come from host-qt.
+    # The apps block is `if(NOT (ANDROID OR WASM OR IOS ...))`; the platform
+    # list grows between releases (6.12 added OHOS), so it is matched by
+    # pattern and must occur exactly once.
     local tools_cml="${src}/tools/CMakeLists.txt"
-    local apps_if='if(NOT (ANDROID OR WASM OR IOS OR VISIONOS OR rtems))'
-    local apps_if_cross='if(NOT (ANDROID OR WASM OR IOS OR VISIONOS OR rtems OR CMAKE_CROSSCOMPILING))'
-    if ! grep -qF "${apps_if_cross}" "${tools_cml}"; then
-        [[ $(grep -cF "${apps_if}" "${tools_cml}") -eq 1 ]] || \
-            die "unexpected ${tools_cml}: cannot gate target apps"
-        python3 -c 'import sys; p, a, b = sys.argv[1:]; s = open(p).read(); open(p, "w").write(s.replace(a, b))' \
-            "${tools_cml}" "${apps_if}" "${apps_if_cross}"
-        grep -qF "${apps_if_cross}" "${tools_cml}" || die "failed to patch ${tools_cml}"
-    fi
+    python3 - "${tools_cml}" <<'PYEOF' || die "unexpected ${tools_cml}: cannot gate target apps"
+import re, sys
+p = sys.argv[1]
+s = open(p).read()
+if "OR CMAKE_CROSSCOMPILING))" in s:
+    sys.exit(0)
+pat = re.compile(r"^if\(NOT \((ANDROID OR WASM OR IOS[^()]*)\)\)$", re.M)
+if len(pat.findall(s)) != 1:
+    sys.exit(1)
+open(p, "w").write(pat.sub(r"if(NOT (\1 OR CMAKE_CROSSCOMPILING))", s))
+PYEOF
+    grep -q "OR CMAKE_CROSSCOMPILING))" "${tools_cml}" || die "failed to patch ${tools_cml}"
 
     export PKG_CONFIG_PATH="${SYSROOT}/usr/lib/pkgconfig:${SYSROOT}/usr/share/pkgconfig"
     export PKG_CONFIG_SYSROOT_DIR=""
@@ -577,6 +580,13 @@ verify() {
             errors=$((errors + 1))
         fi
     done
+    # The VeridianOS platform plugin (userland/qt6/qpa), built with qtbase.
+    if [[ -f "${SYSROOT}/usr/plugins/platforms/libqveridian.a" ]]; then
+        log "  OK: platforms/libqveridian.a"
+    else
+        log "  MISSING: platforms/libqveridian.a"
+        errors=$((errors + 1))
+    fi
     for tool in moc rcc uic; do
         # Qt 6 installs these in libexec/ (bin/ only holds user-facing tools).
         if [[ -f "${BUILD_DIR}/host-qt/libexec/${tool}" || -f "${BUILD_DIR}/host-qt/bin/${tool}" ]]; then
