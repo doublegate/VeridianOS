@@ -410,6 +410,8 @@ pub struct Thread {
     /// Signals sent to this thread alone (tkill, tgkill, faults), same layout.
     /// Process-directed signals pend on the process.
     pub sigpending: AtomicU64,
+    /// Queued real-time signals behind `sigpending` (N-209).
+    pub rt_queue: super::signals::RtQueue,
 
     /// The mask to restore when the handler that interrupted `sigsuspend`
     /// returns (`has_saved_sigmask` says whether one is saved).
@@ -530,6 +532,7 @@ impl Thread {
             clear_tid: AtomicUsize::new(0),
             sigmask: AtomicU64::new(0),
             sigpending: AtomicU64::new(0),
+            rt_queue: super::signals::RtQueue::new(),
             saved_sigmask: AtomicU64::new(0),
             has_saved_sigmask: AtomicBool::new(false),
             detached: AtomicBool::new(false),

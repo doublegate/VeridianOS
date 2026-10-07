@@ -408,10 +408,10 @@ pub fn default_signal_action(signal: i32) -> SignalAction {
 /// Send a signal to a process (kill syscall)
 pub fn kill_process(pid: ProcessId, signal: i32) -> Result<(), KernelError> {
     // Validate signal number
-    if !(0..=31).contains(&signal) {
+    if !(0..=super::signals::NSIG as i32).contains(&signal) {
         return Err(KernelError::InvalidArgument {
             name: "signal",
-            value: "signal number out of range (0-31)",
+            value: "signal number out of range (0-64)",
         });
     }
 
@@ -439,7 +439,7 @@ pub fn kill_process(pid: ProcessId, signal: i32) -> Result<(), KernelError> {
     // D3): queued, ignored ones dropped, SIGKILL at once.
     #[cfg(feature = "alloc")]
     if process.dispatched.load(Ordering::Acquire)
-        && super::signals::send_to_process(&process, signal as usize)
+        && super::signals::send_to_process(&process, signal as usize)?
     {
         return Ok(());
     }

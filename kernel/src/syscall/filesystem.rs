@@ -1636,9 +1636,9 @@ pub fn sys_kill(pid: usize, signal: usize) -> SyscallResult {
     // kill(2) used to update a separate bookkeeping table (the process
     // server's) and never reach a process, with no permission check and
     // process groups scanned only up to pid 1024 (N-92).
-    let sig = i32::try_from(signal)
-        .ok()
-        .filter(|s| (0..=31).contains(s))
+    // An int: its low 32 bits. Signals 1..=64 (0 tests for existence).
+    let sig = Some(signal as u32 as i32)
+        .filter(|s| (0..=crate::process::signals::NSIG as i32).contains(s))
         .ok_or(SyscallError::InvalidArgument)?;
     let caller = crate::process::current_process().ok_or(SyscallError::InvalidState)?;
 

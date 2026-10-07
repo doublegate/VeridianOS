@@ -41,6 +41,93 @@ pub const fn sig_bit(sig: usize) -> u64 {
     }
 }
 
+/// The highest signal number (Linux `_NSIG`); 1..=NSIG are valid.
+pub const NSIG: usize = 64;
+
+/// The first real-time signal (the kernel's SIGRTMIN; C libraries reserve
+/// the first few, musl 32-34). Real-time signals queue: each send is
+/// delivered once, where a standard signal sent twice before delivery is
+/// delivered once (N-209).
+pub const SIGRTMIN: usize = 32;
+
+/// Instances of one real-time signal a process or thread can have queued;
+/// beyond it a send fails with EAGAIN, as Linux does at RLIMIT_SIGPENDING.
+pub const RT_QUEUE_MAX: u32 = 1024;
+
+/// A real-time signal's queue is full (`RT_QUEUE_MAX`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct QueueFull;
+
+/// Queued instances of each real-time signal, beside the pending set's
+/// bit: the bit stays set while any instance is queued. Changed under its
+/// lock together with the bit, so a send cannot be lost between a delivery
+/// taking the last instance and clearing the bit.
+pub struct RtQueue(spin::Mutex<[u32; NSIG - SIGRTMIN + 1]>);
+
+impl RtQueue {
+    pub const fn new() -> Self {
+        Self(spin::Mutex::new([0; NSIG - SIGRTMIN + 1]))
+    }
+
+    /// Queue one instance of `sig` in `pending`. A standard signal only
+    /// sets its bit. `QueueFull` (EAGAIN) when the real-time queue is full.
+    pub fn push(
+        &self,
+        pending: &core::sync::atomic::AtomicU64,
+        sig: usize,
+    ) -> Result<(), QueueFull> {
+        if sig < SIGRTMIN {
+            pending.fetch_or(sig_bit(sig), Ordering::AcqRel);
+            return Ok(());
+        }
+        let mut counts = self.0.lock();
+        let count = &mut counts[sig - SIGRTMIN];
+        if *count >= RT_QUEUE_MAX {
+            return Err(QueueFull);
+        }
+        *count += 1;
+        pending.fetch_or(sig_bit(sig), Ordering::AcqRel);
+        Ok(())
+    }
+
+    /// Take one instance of `sig` off `pending`: whether there was one.
+    /// The bit stays while real-time instances remain.
+    pub fn take(&self, pending: &core::sync::atomic::AtomicU64, sig: usize) -> bool {
+        let bit = sig_bit(sig);
+        if sig < SIGRTMIN {
+            return pending.fetch_and(!bit, Ordering::AcqRel) & bit != 0;
+        }
+        let mut counts = self.0.lock();
+        if pending.load(Ordering::Acquire) & bit == 0 {
+            return false;
+        }
+        let count = &mut counts[sig - SIGRTMIN];
+        *count = count.saturating_sub(1);
+        if *count == 0 {
+            pending.fetch_and(!bit, Ordering::AcqRel);
+        }
+        true
+    }
+
+    /// Drop every queued instance and pending bit (exec, a discarded
+    /// signal).
+    pub fn clear(&self, pending: &core::sync::atomic::AtomicU64, bits: u64) {
+        let mut counts = self.0.lock();
+        for sig in SIGRTMIN..=NSIG {
+            if bits & sig_bit(sig) != 0 {
+                counts[sig - SIGRTMIN] = 0;
+            }
+        }
+        pending.fetch_and(!bits, Ordering::AcqRel);
+    }
+}
+
+impl Default for RtQueue {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 pub const SIGKILL: usize = 9;
 pub const SIGCHLD: usize = 17;
 pub const SIGCONT: usize = 18;
@@ -195,15 +282,16 @@ pub fn park_while_stopped() {
     }
 }
 
-/// Send `sig` to a dispatched process. Returns false if the process has no
-/// running threads (the caller falls back to the old path).
+/// Send `sig` to a dispatched process. `Ok(false)` if the process has no
+/// running threads (the caller falls back to the old path); `WouldBlock`
+/// (EAGAIN) if a real-time signal's queue is full.
 #[cfg(feature = "alloc")]
-pub fn send_to_process(process: &Process, sig: usize) -> bool {
+pub fn send_to_process(process: &Process, sig: usize) -> Result<bool, crate::error::KernelError> {
     use crate::sched::dispatch;
 
     let tasks = dispatch::tasks_of(process.pid.0);
     if tasks.is_empty() {
-        return false;
+        return Ok(false);
     }
     job_control_on_send(process, sig);
     if sig == SIGKILL {
@@ -214,17 +302,18 @@ pub fn send_to_process(process: &Process, sig: usize) -> bool {
             Ordering::Acquire,
         );
     } else if ignored(process, sig) {
-        return true;
+        return Ok(true);
     } else {
         process
-            .pending_signals
-            .fetch_or(sig_bit(sig), Ordering::AcqRel);
+            .rt_queue
+            .push(&process.pending_signals, sig)
+            .map_err(|_| crate::error::KernelError::WouldBlock)?;
     }
     for task in &tasks {
         dispatch::wake(task);
     }
     dispatch::PROCESS_EVENTS.wake_all();
-    true
+    Ok(true)
 }
 
 /// Send `sig` to `process` from inside the kernel (SIGCHLD to a parent,
@@ -233,29 +322,38 @@ pub fn send_to_process(process: &Process, sig: usize) -> bool {
 /// dropped instead of pending and interrupting waits (N-98).
 pub fn notify(process: &Process, sig: usize) {
     #[cfg(feature = "alloc")]
-    if process.dispatched.load(Ordering::Acquire) && send_to_process(process, sig) {
+    if process.dispatched.load(Ordering::Acquire) && send_to_process(process, sig).unwrap_or(true) {
         return;
     }
     let _ = process.send_signal(sig);
 }
 
-/// Send `sig` to one thread of a dispatched process (tkill, tgkill).
+/// Send `sig` to one thread of a dispatched process (tkill, tgkill);
+/// `WouldBlock` (EAGAIN) if a real-time signal's queue is full.
 #[cfg(feature = "alloc")]
-pub fn send_to_thread(process: &Process, thread: &Thread, sig: usize) {
+pub fn send_to_thread(
+    process: &Process,
+    thread: &Thread,
+    sig: usize,
+) -> Result<(), crate::error::KernelError> {
     if sig == SIGKILL {
-        send_to_process(process, sig);
-        return;
+        send_to_process(process, sig)?;
+        return Ok(());
     }
     job_control_on_send(process, sig);
     if ignored(process, sig) {
-        return;
+        return Ok(());
     }
-    thread.sigpending.fetch_or(sig_bit(sig), Ordering::AcqRel);
+    thread
+        .rt_queue
+        .push(&thread.sigpending, sig)
+        .map_err(|_| crate::error::KernelError::WouldBlock)?;
     for task in crate::sched::dispatch::tasks_of(process.pid.0) {
         if task.owner() == Some((process.pid.0, thread.tid.0)) {
             crate::sched::dispatch::wake(&task);
         }
     }
+    Ok(())
 }
 
 /// Signals `thread` of `process` could take now (pending, not blocked).
@@ -282,9 +380,10 @@ fn dequeue(process: &Process, thread: &Thread) -> Option<usize> {
         return None;
     }
     let sig = ready.trailing_zeros() as usize + 1;
-    let bit = sig_bit(sig);
-    if thread.sigpending.fetch_and(!bit, Ordering::AcqRel) & bit == 0 {
-        process.pending_signals.fetch_and(!bit, Ordering::AcqRel);
+    // The thread's own instance first; a real-time signal's bit stays set
+    // while more instances are queued (N-209).
+    if !thread.rt_queue.take(&thread.sigpending, sig) {
+        process.rt_queue.take(&process.pending_signals, sig);
     }
     Some(sig)
 }

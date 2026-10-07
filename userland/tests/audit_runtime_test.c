@@ -2015,6 +2015,57 @@ static void test_memfd(void)
     report("memfd_create_file_and_seals", fails == 0, why);
 }
 
+/* --- Signals 32-64 (N-209): EINVAL before, though musl's pthread_cancel
+ * uses 33. Real-time signals queue, standard ones do not. ------------- */
+static volatile int rt_hits, std_hits;
+static void on_rt(int sig) { (void)sig; rt_hits++; }
+static void on_std(int sig) { (void)sig; std_hits++; }
+
+static void test_realtime_signals(void)
+{
+    int fails = 0;
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = on_rt;
+    if (sigaction(SIGRTMIN + 1, &sa, NULL) != 0 || sigaction(SIGRTMAX, &sa, NULL) != 0)
+        fails |= 1;
+    sa.sa_handler = on_std;
+    sigaction(SIGUSR2, &sa, NULL);
+
+    sigset_t block, old;
+    sigemptyset(&block);
+    sigaddset(&block, SIGRTMIN + 1);
+    sigaddset(&block, SIGUSR2);
+    sigprocmask(SIG_BLOCK, &block, &old);
+    for (int i = 0; i < 3; i++) {
+        if (kill(getpid(), SIGRTMIN + 1) != 0 || kill(getpid(), SIGUSR2) != 0)
+            fails |= 2;
+    }
+    sigprocmask(SIG_SETMASK, &old, NULL);
+    for (int i = 0; i < 8 && rt_hits < 3; i++)
+        getpid();                               /* returns to user mode */
+    if (rt_hits != 3)
+        fails |= 4;                             /* each instance once */
+    if (std_hits != 1)
+        fails |= 8;                             /* merged */
+    kill(getpid(), SIGRTMAX);
+    if (rt_hits != 4)
+        fails |= 16;
+    errno = 0;
+    if (sigaction(65, &sa, NULL) != -1 || errno != EINVAL)
+        fails |= 32;
+    errno = 0;
+    if (kill(getpid(), 65) != -1 || errno != EINVAL)
+        fails |= 64;
+    sa.sa_handler = SIG_DFL;
+    sigaction(SIGRTMIN + 1, &sa, NULL);
+    sigaction(SIGRTMAX, &sa, NULL);
+    sigaction(SIGUSR2, &sa, NULL);
+    static char why[64];
+    snprintf(why, sizeof(why), "bitmask of failures %d (rt %d, std %d)", fails, rt_hits, std_hits);
+    report("realtime_signals_queue", fails == 0, why);
+}
+
 int main(int argc, char **argv)
 {
     setvbuf(stdout, NULL, _IONBF, 0);
@@ -2063,6 +2114,7 @@ int main(int argc, char **argv)
     test_positioned_io_and_truncate();
     test_exec_environment();
     test_memfd();
+    test_realtime_signals();
     printf("AUDIT-RUNTIME: %d/%d\n", passed, total);
     return passed == total ? 0 : 1;
 }

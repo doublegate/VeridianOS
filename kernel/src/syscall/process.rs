@@ -1155,9 +1155,9 @@ fn process_of_thread(tid: usize) -> Option<ProcessId> {
 pub fn sys_tkill(tid: usize, signal: usize) -> SyscallResult {
     let caller = current_process().ok_or(SyscallError::InvalidState)?;
     let pid = process_of_thread(tid).ok_or(SyscallError::ProcessNotFound)?;
-    let sig = i32::try_from(signal)
-        .ok()
-        .filter(|s| (0..=31).contains(s))
+    // An int: its low 32 bits. Signals 1..=64 (0 tests for existence).
+    let sig = Some(signal as u32 as i32)
+        .filter(|s| (0..=crate::process::signals::NSIG as i32).contains(s))
         .ok_or(SyscallError::InvalidArgument)?;
     // A thread of a dispatched process gets the signal itself (sprint D3):
     // existence and permission as for kill, then queued for that thread.
@@ -1170,7 +1170,8 @@ pub fn sys_tkill(tid: usize, signal: usize) -> SyscallResult {
             {
                 if let Some(thread) = target.get_thread(ThreadId(tid as u64)) {
                     super::filesystem::kill_one(&caller, pid, 0)?;
-                    crate::process::signals::send_to_thread(&target, &thread, sig as usize);
+                    crate::process::signals::send_to_thread(&target, &thread, sig as usize)
+                        .map_err(super::map_kernel_error)?;
                     return Ok(0);
                 }
             }

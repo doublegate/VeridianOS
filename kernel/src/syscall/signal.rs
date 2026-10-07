@@ -91,9 +91,9 @@ const _: () = assert!(core::mem::size_of::<SigAction>() == 32);
 /// # Returns
 /// 0 on success.
 pub fn sys_sigaction(signum: usize, act_ptr: usize, oldact_ptr: usize) -> SyscallResult {
-    // Signals 1-31. SIGKILL and SIGSTOP can be queried but not changed
-    // (EINVAL, as Linux; it was EACCES even for a query, N-105).
-    if signum == 0 || signum > 31 {
+    // Signals 1-64 (N-209). SIGKILL and SIGSTOP can be queried but not
+    // changed (EINVAL, as Linux; it was EACCES even for a query, N-105).
+    if signum == 0 || signum > crate::process::signals::NSIG {
         return Err(SyscallError::InvalidArgument);
     }
     if act_ptr != 0 && (signum == 9 || signum == 19) {

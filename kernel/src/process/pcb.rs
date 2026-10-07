@@ -178,14 +178,17 @@ pub struct Process {
 
     /// Signal handlers (signal number -> handler action)
     /// 0 = default, 1 = ignore, other values = handler address
-    pub signal_handlers: Mutex<[u64; 32]>,
+    pub signal_handlers: Mutex<[u64; super::signals::NSIG + 1]>,
 
     /// The rest of each signal's action: (sa_flags, sa_restorer, sa_mask),
     /// kept so sigaction returns what was set (N-95) and for delivery.
-    pub signal_action_extra: Mutex<[(u64, u64, u64); 32]>,
+    pub signal_action_extra: Mutex<[(u64, u64, u64); super::signals::NSIG + 1]>,
 
     /// Pending signals bitmap
     pub pending_signals: AtomicU64,
+
+    /// Queued real-time signals behind `pending_signals` (N-209).
+    pub rt_queue: super::signals::RtQueue,
 
     /// Signal mask (blocked signals)
     pub signal_mask: AtomicU64,
@@ -301,9 +304,10 @@ impl Process {
             env_vars: Mutex::new(BTreeMap::new()),
             #[cfg(feature = "alloc")]
             exe_path: Mutex::new(String::new()),
-            signal_handlers: Mutex::new([0u64; 32]),
-            signal_action_extra: Mutex::new([(0, 0, 0); 32]),
+            signal_handlers: Mutex::new([0u64; super::signals::NSIG + 1]),
+            signal_action_extra: Mutex::new([(0, 0, 0); super::signals::NSIG + 1]),
             pending_signals: AtomicU64::new(0),
+            rt_queue: super::signals::RtQueue::new(),
             signal_mask: AtomicU64::new(0),
             umask: AtomicU32::new(0o022),
             tls_fs_base: AtomicU64::new(0),
@@ -456,23 +460,26 @@ impl Process {
         // Caught signals revert to their default action; ignored ones stay
         // ignored (POSIX exec), so a parent's SIG_IGN still applies.
         let mut handlers = self.signal_handlers.lock();
-        for handler in handlers.iter_mut() {
-            if *handler != 1 {
+        let mut ignored = 0u64;
+        for (sig, handler) in handlers.iter_mut().enumerate() {
+            if *handler == 1 {
+                ignored |= super::signals::sig_bit(sig);
+            } else {
                 *handler = 0; // 0 = default action
             }
         }
-        *self.signal_action_extra.lock() = [(0, 0, 0); 32];
-        // Clear pending signals that were ignored
-        self.pending_signals.store(0, Ordering::Release);
+        *self.signal_action_extra.lock() = [(0, 0, 0); super::signals::NSIG + 1];
+        // Pending signals survive exec (POSIX), except the ignored ones.
+        self.rt_queue.clear(&self.pending_signals, ignored);
     }
 
     /// Set a signal handler
     /// handler: 0 = default, 1 = ignore, other = handler address
     pub fn set_signal_handler(&self, signum: usize, handler: u64) -> Result<u64, KernelError> {
-        if signum >= 32 {
+        if signum > super::signals::NSIG {
             return Err(KernelError::InvalidArgument {
                 name: "signum",
-                value: "signal number out of range (0-31)",
+                value: "signal number out of range (0-64)",
             });
         }
         // SIGKILL (9) and SIGSTOP (19) cannot be caught or ignored
@@ -489,7 +496,7 @@ impl Process {
 
     /// Get a signal handler
     pub fn get_signal_handler(&self, signum: usize) -> Option<u64> {
-        if signum >= 32 {
+        if signum > super::signals::NSIG {
             return None;
         }
         Some(self.signal_handlers.lock()[signum])
@@ -497,21 +504,25 @@ impl Process {
 
     /// Send a signal to this process
     pub fn send_signal(&self, signum: usize) -> Result<(), KernelError> {
-        if signum >= 32 {
+        if signum > super::signals::NSIG {
             return Err(KernelError::InvalidArgument {
                 name: "signum",
-                value: "signal number out of range (0-31)",
+                value: "signal number out of range (0-64)",
             });
         }
-        // Linux set layout: bit `signum - 1` (N-96).
-        self.pending_signals
-            .fetch_or(super::signals::sig_bit(signum), Ordering::AcqRel);
-        Ok(())
+        if signum == 0 {
+            return Ok(());
+        }
+        // Linux set layout: bit `signum - 1` (N-96); real-time signals
+        // queue (N-209), EAGAIN when the queue is full.
+        self.rt_queue
+            .push(&self.pending_signals, signum)
+            .map_err(|_| KernelError::WouldBlock)
     }
 
     /// Check if a signal is pending
     pub fn is_signal_pending(&self, signum: usize) -> bool {
-        if signum >= 32 {
+        if signum > super::signals::NSIG {
             return false;
         }
         let pending = self.pending_signals.load(Ordering::Acquire);
@@ -534,10 +545,7 @@ impl Process {
 
     /// Clear a pending signal
     pub fn clear_pending_signal(&self, signum: usize) {
-        if signum < 32 {
-            let mask = !super::signals::sig_bit(signum);
-            self.pending_signals.fetch_and(mask, Ordering::AcqRel);
-        }
+        self.rt_queue.take(&self.pending_signals, signum);
     }
 
     /// Set signal mask (returns old mask)
@@ -745,7 +753,7 @@ mod tests {
     #[test]
     fn test_signal_handler_invalid_signal() {
         let proc = make_process(21, "sig_invalid");
-        assert_eq!(proc.get_signal_handler(32), None);
+        assert_eq!(proc.get_signal_handler(65), None);
         assert_eq!(proc.get_signal_handler(100), None);
     }
 
@@ -781,7 +789,7 @@ mod tests {
     #[test]
     fn test_set_signal_handler_out_of_range() {
         let proc = make_process(25, "sig_range");
-        let result = proc.set_signal_handler(32, 1);
+        let result = proc.set_signal_handler(65, 1);
         assert!(result.is_err());
     }
 
@@ -795,7 +803,58 @@ mod tests {
     #[test]
     fn test_send_signal_invalid() {
         let proc = make_process(27, "sig_send_inv");
-        assert!(proc.send_signal(32).is_err());
+        assert!(proc.send_signal(65).is_err());
+        assert!(proc.set_signal_handler(65, 0x1000).is_err());
+        assert_eq!(proc.get_signal_handler(65), None);
+    }
+
+    /// Signals 32-64 exist (musl's pthread_cancel uses 33) and real-time
+    /// signals queue: each send is delivered once, while a standard signal
+    /// sent twice before delivery is delivered once (N-209).
+    #[test]
+    fn real_time_signals_queue() {
+        let proc = make_process(29, "sig_rt");
+        proc.set_signal_handler(64, 0x1000).unwrap();
+        assert_eq!(proc.get_signal_handler(64), Some(0x1000));
+        for _ in 0..3 {
+            proc.send_signal(33).unwrap();
+            proc.send_signal(2).unwrap();
+        }
+        let mut taken = alloc::vec::Vec::new();
+        while let Some(sig) = proc.get_next_pending_signal() {
+            proc.clear_pending_signal(sig);
+            taken.push(sig);
+        }
+        assert_eq!(taken, alloc::vec![2, 33, 33, 33]);
+    }
+
+    #[test]
+    fn real_time_queue_is_bounded() {
+        let proc = make_process(30, "sig_rt_full");
+        for _ in 0..crate::process::signals::RT_QUEUE_MAX {
+            proc.send_signal(40).unwrap();
+        }
+        assert!(matches!(proc.send_signal(40), Err(KernelError::WouldBlock)));
+        // A standard signal never queues, so never fills.
+        for _ in 0..2000 {
+            proc.send_signal(10).unwrap();
+        }
+    }
+
+    #[test]
+    fn exec_keeps_pending_signals_except_ignored() {
+        let proc = make_process(31, "sig_exec");
+        proc.set_signal_handler(10, 1).unwrap(); // SIG_IGN
+        proc.set_signal_handler(12, 0x2000).unwrap();
+        proc.send_signal(10).unwrap();
+        proc.send_signal(12).unwrap();
+        proc.send_signal(35).unwrap();
+        proc.reset_signal_handlers();
+        assert!(!proc.is_signal_pending(10));
+        assert!(proc.is_signal_pending(12));
+        assert!(proc.is_signal_pending(35));
+        assert_eq!(proc.get_signal_handler(10), Some(1));
+        assert_eq!(proc.get_signal_handler(12), Some(0));
     }
 
     #[test]
@@ -862,8 +921,8 @@ mod tests {
         // All handlers should be reset to default
         assert_eq!(proc.get_signal_handler(2), Some(0));
         assert_eq!(proc.get_signal_handler(15), Some(0));
-        // Pending signals should be cleared
-        assert!(!proc.is_signal_pending(5));
+        // A pending signal survives exec (POSIX execve).
+        assert!(proc.is_signal_pending(5));
     }
 
     // --- Process identity tests ---

@@ -2,6 +2,13 @@
 
 ### Added
 
+- **Signals 32 to 64, queued (N-209).** Only signals 1-31 existed: `sigaction`, `kill`, `tkill` and
+  `tgkill` refused the rest with EINVAL, though musl's `pthread_cancel` sends signal 33. All 64 now
+  work, and real-time signals (32-64) queue as POSIX requires: each send is delivered once, where
+  a standard signal sent twice before delivery is delivered once; a queue holds 1024 instances
+  (EAGAIN beyond). Pending signals now survive exec, as POSIX requires, except ignored ones. The
+  native libc defines `_NSIG` 65 and `SIGRTMIN`/`SIGRTMAX`. Runtime test `realtime_signals_queue`;
+  host tests for queuing, the bound and exec.
 - **memfd_create and file seals (N-229).** `memfd_create` returned an eventfd registry id that was
   never installed as an fd, so every caller (Wayland clients, Qt) got a number that named nothing.
   It now creates a read-write fd on an anonymous file that can be sized, read, written and mapped,

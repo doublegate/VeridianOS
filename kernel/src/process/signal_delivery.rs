@@ -318,10 +318,10 @@ pub fn deliver_signal(
     thread: &Thread,
     signum: usize,
 ) -> Result<bool, KernelError> {
-    if signum == 0 || signum > 31 {
+    if signum == 0 || signum > super::signals::NSIG {
         return Err(KernelError::InvalidArgument {
             name: "signum",
-            value: "signal number out of range (1-31)",
+            value: "signal number out of range (1-64)",
         });
     }
 

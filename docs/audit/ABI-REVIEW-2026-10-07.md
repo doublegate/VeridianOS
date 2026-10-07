@@ -53,7 +53,7 @@ renumbering; **X2** = the Linux syscall completion program (`docs/compat/COMPATI
 
 | ID | Sev | Call | Finding | Fix | Target |
 |---|---|---|---|---|---|
-| N-209 | High C | rt_sigaction, kill, tkill, tgkill | Signals 32-64 are EINVAL; musl's `pthread_cancel` uses 33 | 64-entry tables (the sigset is already 64-bit) | D3 |
+| N-209 | High C | rt_sigaction, kill, tkill, tgkill | Signals 32-64 are EINVAL; musl's `pthread_cancel` uses 33 | 64-entry tables (the sigset is already 64-bit) | v0.27; **fixed**: signals 1-64 in sigaction, kill, tkill, tgkill and delivery (`NSIG`); real-time signals (32-64) queue per process and per thread -- each send delivered once, EAGAIN beyond 1024 queued -- while standard ones merge; pending signals survive exec except ignored ones (they were all dropped); kill/tkill read their int argument's low 32 bits; the native libc has `_NSIG` 65 and `SIGRTMIN`/`SIGRTMAX` |
 | N-210 | High C | clone | Only the CLONE_THREAD form is accepted; fork/vfork-style clone (musl `posix_spawn`, so `system`/`popen`) is EINVAL; newsp 0 is EFAULT | route non-thread clones to fork/vfork | D3 |
 | N-211 | High C | execve | A NULL or empty envp inherits the parent's environment (`env -i` leaks it) | empty means empty | v0.27; **fixed**: a NULL or empty envp is an empty environment (runtime tests `execve_empty_envp_is_empty`, `execve_null_envp_is_empty`) |
 | N-212 | Medium C | int arguments | pid_t/int arguments use the full 64-bit register (a zero-extended -1 is pid 4294967295) in wait4, kill, waitid, setpgid, getpgid, getsid, tkill, tgkill | `as i32` first | X2 (process) |

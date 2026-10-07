@@ -60,8 +60,14 @@ typedef volatile int sig_atomic_t;
 #define SIGPWR      30      /* Power failure */
 #define SIGSYS      31      /* Bad system call */
 
-/** Number of signals (1-based, signal 0 is reserved for error checking) */
-#define _NSIG       32
+/** Real-time signals: 32-64, queued (each send delivered once). This
+ *  library reserves none of them (glibc and musl reserve the first few). */
+#define SIGRTMIN    32
+#define SIGRTMAX    64
+
+/** One more than the highest signal number (signal 0 is reserved for
+ *  error checking), as in glibc and musl */
+#define _NSIG       65
 #define NSIG        _NSIG
 
 /* ========================================================================= */
