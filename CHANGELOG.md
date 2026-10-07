@@ -1,5 +1,29 @@
 ## [Unreleased]
 
+### Added
+
+- **Multiprocessor bring-up (stage S1, `smp` feature; ADR 0004).** Built with
+  `FEATURES=smp`, the kernel starts the other CPUs on every architecture:
+  - x86_64 uses INIT-SIPI-SIPI and a real-to-long-mode trampoline, and gives each CPU its own
+    GDT and TSS;
+  - AArch64 uses PSCI `CPU_ON` over HVC or SMC;
+  - RISC-V uses SBI HSM `hart_start`.
+
+  Secondary CPUs come online and idle; they run no tasks yet. QEMU `-smp 4` brings 4/4 online
+  on all three architectures. CI boots each architecture both with and without the feature.
+- **Per-CPU blocks on every architecture:**
+  - only CPU 0 advances the global clock;
+  - the x86 Local APIC is used without a lock;
+  - the x86 syscall frame pointer is per CPU (N-35);
+  - RISC-V works when OpenSBI boots on a hart other than 0.
+- **Two new boot tests** check per-CPU identity and ticks, and that uptime follows the hardware
+  clock (36 in total).
+
+### Changed
+
+- The AArch64 kernel is linked at 0x40200000 (was 0x40080000), so QEMU has room to load the
+  device tree below it.
+
 ### Security
 
 - **Package signatures use real FIPS 204 ML-DSA-65 verification (N-55).** The previous

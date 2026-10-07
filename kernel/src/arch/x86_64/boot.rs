@@ -73,6 +73,20 @@ pub struct BootFramebufferInfo {
     pub is_bgr: bool,
 }
 
+/// Whether the physical range `[start, end)` lies inside one region the
+/// firmware memory map reports as usable RAM.
+pub fn phys_range_usable(start: u64, end: u64) -> bool {
+    // SAFETY: BOOT_INFO is written once during early boot and only read
+    // afterwards.
+    #[allow(static_mut_refs)]
+    let Some(boot_info) = (unsafe { BOOT_INFO.as_ref() }) else {
+        return false;
+    };
+    boot_info.memory_regions.iter().any(|r| {
+        r.kind == bootloader_api::info::MemoryRegionKind::Usable && r.start <= start && end <= r.end
+    })
+}
+
 /// Extract framebuffer information from the UEFI boot info.
 ///
 /// Returns `None` if BootInfo is unavailable or has no framebuffer.

@@ -482,13 +482,20 @@ jobs:
     # Boot every architecture in QEMU and require BOOTOK plus a complete
     # in-kernel test tally. Nothing else in CI ever runs the kernel (C1).
     boot-tests:
-        name: Boot (${{ matrix.arch }})
+        name: Boot (${{ matrix.arch }}${{ matrix.smp && ', smp' || '' }})
         runs-on: ubuntu-latest
         needs: quick-checks
         strategy:
             fail-fast: false
             matrix:
                 arch: [x86_64, aarch64, riscv64]
+                # smp: the `smp` feature build on 4 CPUs, which must all come
+                # online; otherwise the default build on one CPU.
+                smp: [false, true]
+        env:
+            FEATURES: ${{ matrix.smp && 'smp' || '' }}
+            SMP: ${{ matrix.smp && '4' || '1' }}
+            EXPECT_CPUS: ${{ matrix.smp && '4' || '' }}
         steps:
             - uses: actions/checkout@v4
             - name: Install Rust
@@ -504,9 +511,9 @@ jobs:
                       ~/.cargo/registry/cache/
                       ~/.cargo/git/db/
                       target/
-                  key: ubuntu-cargo-boot-${{ matrix.arch }}-${{ hashFiles('**/Cargo.lock') }}
+                  key: ubuntu-cargo-boot-${{ matrix.arch }}-${{ matrix.smp }}-${{ hashFiles('**/Cargo.lock') }}
                   restore-keys: |
-                      ubuntu-cargo-boot-${{ matrix.arch }}-
+                      ubuntu-cargo-boot-${{ matrix.arch }}-${{ matrix.smp }}-
             - name: Install QEMU
               run: |
                   sudo apt-get update
@@ -525,7 +532,7 @@ jobs:
               if: always()
               uses: actions/upload-artifact@v4
               with:
-                  name: boot-log-${{ matrix.arch }}
+                  name: boot-log-${{ matrix.arch }}-${{ matrix.smp && 'smp' || 'up' }}
                   path: target/boot-logs/
 
     # User-space runtime suite: the BusyBox self-test plus audit_runtime_test

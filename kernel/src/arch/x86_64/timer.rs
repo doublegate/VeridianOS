@@ -22,10 +22,13 @@ pub fn tick() {
 
     // Only the timekeeping CPU advances the tick count, uptime and the
     // timer wheel; every CPU ticks at the same rate (see is_timekeeper).
-    if crate::arch::percpu::is_timekeeper() {
-        TICKS.fetch_add(1, Ordering::Relaxed);
-        crate::timer::timer_tick(super::apic::timer_period_ms());
+    if !crate::arch::percpu::is_timekeeper() {
+        // Secondary CPUs run no tasks yet (SMP stage S1, ADR 0004), and the
+        // scheduler they would tick is CPU 0's.
+        return;
     }
+    TICKS.fetch_add(1, Ordering::Relaxed);
+    crate::timer::timer_tick(super::apic::timer_period_ms());
 
     // Trigger scheduler tick. Use try_lock to avoid deadlock: if the
     // scheduler lock is already held (e.g., we interrupted mid-schedule),

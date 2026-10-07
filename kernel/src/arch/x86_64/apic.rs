@@ -378,6 +378,29 @@ impl LocalApic {
         self.write(LAPIC_ICR_LOW, 0x00004600 | startup_page as u32);
     }
 
+    /// Write the ICR for `dest` and wait until the IPI has been accepted
+    /// (Delivery Status, bit 12, clears), as Linux's
+    /// `safe_apic_wait_icr_idle` does. Returns false on a timeout.
+    fn icr_send_wait(&self, dest: u8, low: u32) -> bool {
+        self.write(LAPIC_ICR_HIGH, (dest as u32) << 24);
+        self.write(LAPIC_ICR_LOW, low);
+        let start = super::tsc::read();
+        let limit = super::tsc::hz() / 100; // 10 ms
+        while self.read(LAPIC_ICR_LOW) & (1 << 12) != 0 {
+            if super::tsc::read().wrapping_sub(start) > limit {
+                return false;
+            }
+            core::hint::spin_loop();
+        }
+        true
+    }
+
+    /// Clear the Error Status Register (a write arms it, then a read).
+    fn clear_esr(&self) -> u32 {
+        self.write(LAPIC_ESR, 0);
+        self.read(LAPIC_ESR)
+    }
+
     /// Broadcast IPI to all CPUs except self.
     pub fn send_ipi_all_excluding_self(&self, vector: u8) {
         // Shorthand = 11 (all excluding self), no destination field needed.
@@ -754,6 +777,83 @@ pub fn send_startup_ipi(dest: u8, startup_page: u8) -> KernelResult<()> {
             Ok(())
         }
         None => Err(KernelError::NotInitialized { subsystem: "APIC" }),
+    }
+}
+
+/// Busy-wait `us` microseconds on the TSC.
+fn udelay(us: u64) {
+    let start = super::tsc::read();
+    let ticks = super::tsc::hz() / 1_000_000 * us;
+    while super::tsc::read().wrapping_sub(start) < ticks {
+        core::hint::spin_loop();
+    }
+}
+
+/// Whether firmware left the Local APIC in x2APIC mode (MMIO disabled;
+/// this driver is xAPIC only).
+pub fn x2apic_enabled() -> bool {
+    rdmsr(IA32_APIC_BASE_MSR) & (1 << 10) != 0
+}
+
+/// Start the CPU with Local APIC ID `apic_id` at physical page
+/// `vector_page` (`page << 12` is the trampoline): INIT assert and
+/// de-assert, 10 ms, then two STARTUP IPIs 200 us apart, with the timings of
+/// the SDM's MP initialisation sequence (Vol. 3A, "MP Initialization").
+/// Both SIPIs are always sent: one that arrives after the CPU left
+/// wait-for-SIPI is ignored, and one that was missed needs the second.
+pub fn start_ap(apic_id: u8, vector_page: u8) -> Result<(), &'static str> {
+    let l = lapic().ok_or("APIC not initialized")?;
+    l.clear_esr();
+    if !l.icr_send_wait(apic_id, 0x0000_C500) {
+        return Err("INIT assert not delivered");
+    }
+    if !l.icr_send_wait(apic_id, 0x0000_8500) {
+        return Err("INIT de-assert not delivered");
+    }
+    udelay(10_000);
+    for _ in 0..2 {
+        l.clear_esr();
+        if !l.icr_send_wait(apic_id, 0x0000_4600 | vector_page as u32) {
+            return Err("STARTUP IPI not delivered");
+        }
+        udelay(200);
+        if l.clear_esr() & 0xEF != 0 {
+            return Err("APIC error after STARTUP IPI");
+        }
+    }
+    Ok(())
+}
+
+/// Set up the calling secondary CPU's Local APIC: mask the LVT entries,
+/// software-enable it, accept all priorities. Lock-free (its own LAPIC).
+pub fn init_local_secondary() {
+    if let Some(l) = lapic() {
+        l.mask_all_lvt();
+        l.enable();
+        l.set_task_priority(0);
+    }
+}
+
+/// Start the calling secondary CPU's tick, in the mode and at the period
+/// the boot CPU chose.
+pub fn start_local_timer() {
+    let Some(l) = lapic() else { return };
+    if !APIC_TIMER_ACTIVE.load(Ordering::Acquire) {
+        return;
+    }
+    let period = DEADLINE_PERIOD_TSC.load(Ordering::Relaxed);
+    if period != 0 {
+        l.setup_deadline_timer(APIC_TIMER_VECTOR);
+        let first = super::tsc::read() + period;
+        crate::arch::percpu::set_timer_next(first);
+        write_tsc_deadline(first);
+        return;
+    }
+    let tpm = APIC_TICKS_PER_MS.load(Ordering::Relaxed) as u64;
+    let hz = APIC_TIMER_HZ.load(Ordering::Relaxed).max(1) as u64;
+    let count = tpm * 1000 / hz;
+    if count != 0 && count <= u32::MAX as u64 {
+        l.setup_timer(APIC_TIMER_VECTOR, 0x03, count as u32);
     }
 }
 

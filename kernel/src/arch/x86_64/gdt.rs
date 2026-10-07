@@ -153,6 +153,52 @@ pub fn init() {
     }
 }
 
+/// Give the calling secondary CPU its own GDT and TSS (with its own RSP0
+/// and IST stacks) and load them. A TSS cannot be shared: `ltr` marks its
+/// descriptor busy, and a second CPU's `ltr` of a busy TSS raises #GP. The
+/// selector layout is the boot CPU's, so the STAR MSR values and the IDT
+/// selectors are the same on every CPU. The tables and stacks come from
+/// the kernel heap, which every process page table maps.
+#[cfg(feature = "alloc")]
+pub fn init_ap() {
+    use alloc::boxed::Box;
+
+    use x86_64::instructions::{
+        segmentation::{Segment, CS, DS, SS},
+        tables::load_tss,
+    };
+
+    fn stack() -> VirtAddr {
+        let mem: &'static mut [u8] = alloc::vec![0u8; TSS_STACK_SIZE].leak();
+        VirtAddr::new((mem.as_ptr() as u64 + TSS_STACK_SIZE as u64) & !0xF)
+    }
+
+    let tss: &'static mut TaskStateSegment = Box::leak(Box::new(TaskStateSegment::new()));
+    tss.privilege_stack_table[0] = stack();
+    tss.interrupt_stack_table[DOUBLE_FAULT_IST_INDEX as usize] = stack();
+    tss.interrupt_stack_table[PAGE_FAULT_IST_INDEX as usize] = stack();
+    tss.interrupt_stack_table[GENERAL_IST_INDEX as usize] = stack();
+    tss.interrupt_stack_table[HARDWARE_IRQ_IST_INDEX as usize] = stack();
+    let tss: &'static TaskStateSegment = tss;
+
+    let gdt: &'static mut GlobalDescriptorTable = Box::leak(Box::new(GlobalDescriptorTable::new()));
+    let code = gdt.append(Descriptor::kernel_code_segment());
+    let data = gdt.append(Descriptor::kernel_data_segment());
+    let tss_sel = gdt.append(Descriptor::tss_segment(tss));
+    gdt.append(Descriptor::user_data_segment());
+    gdt.append(Descriptor::user_code_segment());
+    let gdt: &'static GlobalDescriptorTable = gdt;
+    gdt.load();
+    // SAFETY: the selectors index the GDT just loaded, which lives for the
+    // kernel's lifetime (leaked), as does the TSS it describes.
+    unsafe {
+        CS::set_reg(code);
+        DS::set_reg(data);
+        SS::set_reg(data);
+        load_tss(tss_sel);
+    }
+}
+
 /// Returns a reference to the GDT selectors (kernel and user mode).
 ///
 /// Must only be called after `init()` has been called. The lazy_static

@@ -2844,6 +2844,62 @@ fn run_usercopy_tests(passed: &mut u32, failed: &mut u32) {
         let ok = ticks >= 5 && elapsed < 50;
         report_test("timer_interrupts_and_clock", ok, passed, failed);
     }
+
+    // Test 35: every CPU that came online has its own per-CPU block (the
+    // right logical id, a distinct hardware id) and, where secondaries run
+    // a timer, has taken ticks on it. Trivially true on one CPU (SMP stage
+    // S1, ADR 0004).
+    {
+        use crate::arch::percpu::arch_cpu_ptr;
+        let online = crate::arch::smp_boot::online_cpus() as usize;
+        let start_ms = crate::timer::get_uptime_ms();
+        while crate::timer::get_uptime_ms().saturating_sub(start_ms) < 20 {
+            core::hint::spin_loop();
+        }
+        let mut ok = true;
+        for cpu in 0..online {
+            // SAFETY: read-only snapshot of static per-CPU blocks; each
+            // field is written only by its own CPU.
+            let (id, hw, ticks) = unsafe {
+                let p = arch_cpu_ptr(cpu);
+                (
+                    core::ptr::read_volatile(&(*p).cpu_id),
+                    core::ptr::read_volatile(&(*p).hw_id),
+                    core::ptr::read_volatile(&(*p).local_ticks),
+                )
+            };
+            ok &= id as usize == cpu;
+            for other in 0..cpu {
+                // SAFETY: as above.
+                ok &= unsafe { core::ptr::read_volatile(&(*arch_cpu_ptr(other)).hw_id) } != hw;
+            }
+            // AArch64 secondaries run no timer before the MMU is on (N-28).
+            if cpu > 0 && !cfg!(target_arch = "aarch64") {
+                ok &= ticks > 0;
+            }
+        }
+        report_test("smp_cpus_online_and_ticking", ok, passed, failed);
+    }
+
+    // Test 36: kernel uptime advances at the rate of the hardware clock.
+    // With several CPUs ticking, only the timekeeper may advance it, or it
+    // runs N times fast.
+    {
+        let hw0 = crate::arch::timer::monotonic_ns();
+        let up0 = crate::timer::get_uptime_ms();
+        let mut spins = 0u64;
+        while crate::arch::timer::monotonic_ns().saturating_sub(hw0) < 100_000_000
+            && spins < 4_000_000_000
+        {
+            core::hint::spin_loop();
+            spins += 1;
+        }
+        let hw_ms = crate::arch::timer::monotonic_ns().saturating_sub(hw0) / 1_000_000;
+        let up_ms = crate::timer::get_uptime_ms().saturating_sub(up0);
+        // Within 30% of the hardware clock (ticks are 1 ms; QEMU TCG jitters).
+        let ok = hw_ms >= 100 && up_ms * 10 >= hw_ms * 7 && up_ms * 10 <= hw_ms * 13;
+        report_test("uptime_tracks_hw_clock", ok, passed, failed);
+    }
 }
 
 #[cfg(not(feature = "alloc"))]

@@ -23,6 +23,8 @@ pub mod multiboot;
 pub mod pat;
 pub mod rtc;
 pub mod serial;
+#[cfg(all(feature = "smp", target_os = "none"))]
+pub mod smp;
 pub mod syscall;
 pub mod timer;
 pub mod tsc;
