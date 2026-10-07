@@ -43,6 +43,18 @@
 
 - The AArch64 kernel is linked at 0x40200000 (was 0x40080000), so QEMU has room to load the
   device tree below it.
+- **CI gates releases on the tests (N-159, N-160).** Release artifacts and the CI summary now
+  require the host unit tests, the boot tests and the rootfs runtime suite; previously a release
+  was packaged even when they failed. The release profile is booted on all three architectures
+  (`PROFILE=release scripts/boot-test.sh`). Clippy runs on the three bare-metal targets as built,
+  and the 40-entry lint allow-list (which included `static_mut_refs`) is gone. The release
+  README no longer gives an x86_64 QEMU command that cannot work or the wrong licence.
+- **Documentation states what is in effect (N-145, N-146, N-163, N-165).** README, the
+  architecture overview, the book and the allocator design no longer claim user-space drivers,
+  lock-free allocation, sub-microsecond IPC, ML-KEM, or active KPTI/KASLR/SMEP/SMAP/retpoline.
+  `docs/KNOWN-LIMITATIONS.md` now covers every open finding of both audits and the real-hardware
+  research. The shell's `kpti` command reports KPTI inactive, since CR3 is never switched; it
+  used to report "Meltdown mitigation: enabled".
 
 ### Security
 

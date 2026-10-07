@@ -32,13 +32,13 @@ VeridianOS intentionally prioritizes architectural clarity over feature velocity
 
 - **Microkernel architecture** -- Designed for a minimal trusted computing base with drivers and services in user space; today they run in the kernel (critique C6, see [`docs/KNOWN-LIMITATIONS.md`](docs/KNOWN-LIMITATIONS.md))
 - **Written in Rust** -- Memory safety without garbage collection; strict unsafe code policy
-- **Capability-based security** -- 64-bit unforgeable tokens for all resource access with O(1) lookup, hierarchical delegation, and cascading revocation
+- **Capability-based security** -- 64-bit tokens with generation counters, O(1) lookup, hierarchical delegation and cascading revocation. Capabilities guard IPC, memory sharing and process creation; files, sockets and devices use ordinary Unix permissions, and cascading revocation does not yet follow every grant path (N-89)
 - **IPC** -- Register-sized, kernel-buffered (up to 16 KiB) and shared-region message tiers, capability-checked. Not yet reachable from user programs: native syscalls 0-7 are routed to the Linux compatibility layer (audit N-33, fix planned for v0.28)
-- **Formal verification** -- 38 Kani proof harnesses and 6 TLA+ specifications covering boot chain, IPC, memory allocation, and capability invariants
+- **Formal verification** -- 38 Kani proof harnesses and 6 TLA+ specifications for boot chain, IPC, memory allocation and capability invariants. They prove standalone models rather than the kernel's own functions, and CI runs neither (N-163)
 
 ### Platform
 
-- **Multi-architecture** -- Full support for x86_64 (UEFI), AArch64, and RISC-V 64 (OpenSBI)
+- **Multi-architecture** -- x86_64 (UEFI), AArch64 and RISC-V 64 (OpenSBI) boot and pass the in-kernel tests under QEMU. User programs run only on x86_64; AArch64 runs with the MMU off; none has run on real hardware yet ([`docs/KNOWN-LIMITATIONS.md`](docs/KNOWN-LIMITATIONS.md))
 - **Self-hosting** -- Native GCC 14.2 and Rust compiler toolchain; BusyBox 1.36.1 with 95 applets compiled on-target
 - **Package management** -- DPLL SAT dependency resolver, ports system, reproducible builds, Ed25519 package signing
 - **Complete C library** -- Full stdio/stdlib/string/unistd with POSIX headers, math library, and architecture-specific setjmp/longjmp
@@ -57,18 +57,18 @@ VeridianOS intentionally prioritizes architectural clarity over feature velocity
 
 ### Infrastructure
 
-- **Networking** -- TCP/IP dual-stack (IPv4 + IPv6), zero-copy DMA, E1000 NIC driver, TCP Reno/Cubic/SACK, DNS, DHCP, VLAN, bonding, netfilter firewall with conntrack/NAT, RIP/OSPF routing, WiFi 802.11, Bluetooth L2CAP/RFCOMM, VPN tunnels, TLS 1.3, SSH, HTTP, QUIC, WireGuard, mDNS
+- **Networking** -- Protocol code for TCP/IP dual-stack (IPv4 + IPv6), E1000 and virtio-net drivers, TCP Reno/Cubic/SACK, DNS, DHCP, VLAN, bonding, netfilter firewall with conntrack/NAT, RIP/OSPF routing, WiFi 802.11, Bluetooth L2CAP/RFCOMM, VPN tunnels, TLS 1.3, SSH, HTTP, QUIC, WireGuard, mDNS. User-space INET sockets do not work yet and TCP is incomplete (N-64 to N-76, NET-INC-01); loopback and Unix sockets work
 - **Virtualization** -- Intel VMX hypervisor with VMCS/EPT, KVM API compatibility, QEMU device model with live migration, VFIO PCI passthrough, SR-IOV, CPU/memory/PCI hotplug
-- **Containers** -- OCI runtime with PID/mount/network/UTS namespaces, cgroup memory+CPU, overlay filesystem, seccomp BPF, veth networking
+- **Containers** -- OCI runtime structures, namespace and cgroup bookkeeping, overlay filesystem, seccomp BPF and veth code. Namespaces are not enforced yet (VIRT-INC-01) and the seccomp filter is never consulted
 - **Cloud-native** -- CRI/CNI/CSI interfaces, service mesh with mTLS and SPIFFE identity, L4/L7 load balancer, cloud-init metadata service
 - **Enterprise** -- LDAP v3, Kerberos v5, NFS v4, SMB2/3, iSCSI initiator, software RAID 0/1/5
 
 ### Security
 
-- **Defense in depth** -- KPTI shadow page tables, KASLR, stack canaries, SMEP/SMAP, retpoline, W^X enforcement, guard pages
+- **Defense in depth** -- NX/W^X page protections from `mmap`/`mprotect` flags, guarded kernel stacks on x86_64, checked user-memory access. KPTI, KASLR, stack canaries, SMEP/SMAP and retpoline exist as code but are not active (N-145, N-146, N-15)
 - **Post-quantum cryptography** -- ML-DSA-65 signature verification (FIPS 204, checked against NIST ACVP vectors); an experimental, non-standard Kyber KEM (N-57); alongside ChaCha20-Poly1305, Ed25519, X25519
-- **Hardware security** -- TPM 2.0 integration, secure boot verification, IOMMU protection
-- **Mandatory access control** -- Policy parser, RBAC, MLS enforcement, structured audit logging
+- **Hardware security** -- TPM 2.0 and secure-boot verification code; IOMMU tables are parsed but DMA isolation is not enabled (N-77)
+- **Mandatory access control** -- Policy parser, RBAC/MLS model and audit logging; enforcement is path-blind and partial (N-152)
 
 ### Developer Tools
 
@@ -275,14 +275,14 @@ See [Unsafe Policy](docs/UNSAFE-POLICY.md) for the full policy.
 
 ## Security
 
-Security is a foundational design principle, not a bolt-on layer:
+Security is a foundational design goal. What is in effect today, and what is not, is listed in [`docs/KNOWN-LIMITATIONS.md`](docs/KNOWN-LIMITATIONS.md):
 
-- **Capability-based access control** -- Fine-grained, unforgeable permissions for all resources
-- **Memory safety** -- Rust ownership guarantees plus KPTI, KASLR, SMEP/SMAP, W^X, and guard pages
+- **Capability-based access control** -- Fine-grained permissions for IPC, memory sharing and process creation
+- **Memory safety** -- Rust ownership guarantees, NX/W^X page protections and guarded kernel stacks (KPTI, KASLR and SMEP/SMAP are not active yet: N-145, N-146, N-15)
 - **Post-quantum cryptography** -- ML-DSA-65 verification (FIPS 204) and an experimental, non-standard Kyber KEM (N-57) alongside classical algorithms
-- **Mandatory access control** -- Policy-driven RBAC and MLS enforcement
-- **Hardware security** -- TPM 2.0, secure boot chain, IOMMU isolation
-- **Formal verification** -- Kani proofs for critical kernel invariants; TLA+ specifications for protocol correctness
+- **Mandatory access control** -- Policy-driven RBAC and MLS model (enforcement partial, N-152)
+- **Hardware security** -- TPM 2.0 and secure boot chain code; no IOMMU isolation yet (N-77)
+- **Formal verification** -- Kani proofs and TLA+ specifications of kernel models (not yet of the kernel's own code, and not run in CI: N-163)
 
 ---
 

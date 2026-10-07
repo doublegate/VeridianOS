@@ -700,7 +700,8 @@ fn kernel_init_stage3_impl() -> KernelResult<()> {
         kprintln!("[BOOTSTRAP] Virtualization subsystem initialized");
     }
 
-    // Initialize KPTI shadow page tables (Meltdown mitigation)
+    // Build the KPTI shadow page tables. Nothing loads them yet, so this is
+    // not a Meltdown mitigation (N-145).
     #[cfg(target_arch = "x86_64")]
     {
         kprintln!("[BOOTSTRAP] Initializing KPTI shadow page tables...");

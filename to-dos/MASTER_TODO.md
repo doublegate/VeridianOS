@@ -56,8 +56,10 @@ What does not work yet: `docs/KNOWN-LIMITATIONS.md`.
     - Huge pages: MEM-ARCH-01.
     - Real AArch64/RISC-V heaps: MEM-SEC-03.
     - Kernel stack guard pages: N-26.
-  - [ ] **D0, urgent fixes reachable today** (re-evaluation, `docs/audit/AUDIT-REEVALUATION-2026-10-07.md`;
-    do first, each with a regression test):
+  - [x] **D0, urgent fixes reachable today** (re-evaluation, `docs/audit/AUDIT-REEVALUATION-2026-10-07.md`;
+    do first, each with a regression test). Done 2026-10-07: runtime suites native 41/41 and musl
+    6/6 (`musl_runtime_test`, CI `REQUIRE_MUSL=1`); remainders of partly fixed items (N-99, N-105,
+    N-120 blocking, N-143) moved to D:
     - Gemini issue-triage workflow on `main` (N-158); CI release/summary gates and three-target clippy
       (N-159, N-160).
     - Memory: `prot` honoured by mmap/brk, PROT_NONE, W^X, `max_prot` for mprotect, bounded mmap length

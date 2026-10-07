@@ -14,14 +14,17 @@ VeridianOS is a modern microkernel operating system written entirely in Rust, em
 
 This book serves as the comprehensive guide for understanding, building, and contributing to VeridianOS.
 
+Parts of the book describe the design rather than the current state. What is not yet in effect is
+listed in [Known Limitations](https://github.com/doublegate/VeridianOS/blob/main/docs/KNOWN-LIMITATIONS.md).
+
 ## Key Features
 
-- **Capability-based security** - Unforgeable 64-bit tokens for all resource access with O(1) lookup
-- **Microkernel architecture** - Minimal kernel with drivers and services in user space
+- **Capability-based security** - 64-bit tokens with generation counters and O(1) lookup, guarding IPC, memory sharing and process creation
+- **Microkernel architecture** - Designed for drivers and services in user space; today they still run in the kernel (C6)
 - **Written in Rust** - Memory safety without garbage collection, 99%+ SAFETY comment coverage
-- **High performance** - Lock-free algorithms, zero-copy IPC (<1us latency)
-- **Multi-architecture** - x86_64, AArch64, and RISC-V support (all boot to Stage 6)
-- **Security focused** - Post-quantum crypto (ML-DSA-65 verification per FIPS 204; experimental non-standard Kyber, N-57), KASLR, SMEP/SMAP, MAC/RBAC
+- **Performance-oriented design** - Per-CPU frame caches, shared-region (zero-copy) IPC, an EEVDF/real-time/deadline scheduling policy
+- **Multi-architecture** - x86_64, AArch64 and RISC-V all boot to Stage 6 under QEMU; user programs run on x86_64 only so far
+- **Security focused** - Post-quantum crypto (ML-DSA-65 verification per FIPS 204; experimental non-standard Kyber, N-57), NX/W^X page protections, MAC/RBAC model
 - **KDE Plasma 6 desktop** - Cross-compiled from source with Qt 6.8.3, KDE Frameworks 6.12.0
 - **Self-hosting** - Native GCC 14.2, binutils, make, ninja, vpkg toolchain
 - **Modern package management** - Source and binary package support
@@ -32,7 +35,7 @@ This book serves as the comprehensive guide for understanding, building, and con
 Traditional monolithic kernels face challenges in security, reliability, and maintainability. VeridianOS addresses these challenges through:
 
 1. **Microkernel Design**: Only essential services run in kernel space, minimizing the attack surface
-2. **Capability-Based Security**: Fine-grained access control with unforgeable capability tokens
+2. **Capability-Based Security**: Fine-grained access control with capability tokens
 3. **Memory Safety**: Rust's ownership system prevents entire classes of vulnerabilities
 4. **Modern Architecture**: Designed for contemporary hardware with multi-core, NUMA, and heterogeneous computing support
 

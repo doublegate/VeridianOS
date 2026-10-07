@@ -1,13 +1,13 @@
 # Security Architecture
 
-VeridianOS implements defense-in-depth with multiple layers of security, from hardware features to application sandboxing. This document describes the security architecture and threat model.
+VeridianOS is designed for defense-in-depth with multiple layers of security, from hardware features to application sandboxing. This document describes the target security architecture and threat model; several layers are not in effect yet (drivers run in the kernel, and KPTI, KASLR, SMEP/SMAP and IOMMU isolation are inactive). See [Known Limitations](https://github.com/doublegate/VeridianOS/blob/main/docs/KNOWN-LIMITATIONS.md).
 
 ## Security Principles
 
 ### 1. Principle of Least Privilege
 Every component runs with minimal required permissions:
 - Microkernel has minimal privileged code
-- Drivers run in user space
+- Drivers run in user space (design goal; today they run in the kernel, C6)
 - Applications start with no capabilities
 
 ### 2. Complete Mediation
@@ -143,10 +143,10 @@ Process Address Space:
 ### Memory Safety Features
 
 1. **W^X Enforcement**: Pages either writable or executable, never both
-2. **ASLR**: Address space randomization
+2. **ASLR**: Address space randomization (planned)
 3. **Guard Pages**: Detect stack/heap overflows
 4. **NX Bit**: Non-executable data pages
-5. **SMEP/SMAP**: Supervisor mode execution/access prevention
+5. **SMEP/SMAP**: Supervisor mode execution/access prevention (planned, N-15)
 
 ## Hardware Security Integration
 

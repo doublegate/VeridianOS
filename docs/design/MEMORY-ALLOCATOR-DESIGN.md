@@ -108,7 +108,9 @@ pub struct BitmapAllocator {
 - **Bit Manipulation**: Use POPCNT, TZCNT for fast searches
 - **Cache Line Alignment**: 64-bit atomic operations
 - **Search Optimization**: Remember last allocation position
-- **Lock-Free**: Atomic compare-and-swap operations
+- **Locking**: Not lock-free. The allocator sits behind the global `FRAME_ALLOCATOR` mutex, with
+  per-CPU frame caches in front of it (MEM-PERF-01); most callers still take the global lock
+  per frame (see `docs/audit/AUDIT-REEVALUATION-2026-10-07.md`)
 
 ### Implementation
 ```rust
@@ -400,7 +402,7 @@ pub struct MemoryWatermarks {
 ### Key Implementation Details
 - Hybrid allocator fully operational with bitmap/buddy threshold at 512 frames
 - NUMA-aware allocation working for multi-node systems
-- Lock-free bitmap operations using atomic compare-and-swap
+- Bitmap operations run under the global `FRAME_ALLOCATOR` lock (the earlier "lock-free" claim was wrong)
 - Performance targets achieved (< 1μs for allocations)
 
 ## Open Questions

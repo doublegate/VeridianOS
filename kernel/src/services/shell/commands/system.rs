@@ -1457,17 +1457,25 @@ impl BuiltinCommand for KptiCommand {
 
         #[cfg(target_arch = "x86_64")]
         {
-            let active = crate::arch::x86_64::kpti::is_active();
+            use crate::arch::x86_64::kpti;
             crate::println!(
                 "KPTI (Kernel Page Table Isolation): {}",
-                if active { "ACTIVE" } else { "INACTIVE" }
+                if kpti::is_active() {
+                    "ACTIVE"
+                } else {
+                    "INACTIVE"
+                }
             );
-            if active {
-                crate::println!("Shadow page tables: created");
-                crate::println!("Meltdown mitigation: enabled");
-            } else {
-                crate::println!("Shadow page tables: not initialized");
-                crate::println!("Note: CR3 switching disabled for performance");
+            crate::println!(
+                "Shadow page tables: {}",
+                if kpti::shadow_tables_built() {
+                    "built"
+                } else {
+                    "not built"
+                }
+            );
+            if !kpti::is_active() {
+                crate::println!("Meltdown mitigation: none (CR3 is never switched; N-145)");
             }
         }
 
