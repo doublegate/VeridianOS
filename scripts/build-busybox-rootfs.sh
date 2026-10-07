@@ -115,6 +115,7 @@ phase_headers() {
     cflags+=" -Wno-unused-parameter -Wno-implicit-function-declaration"
 
     local obj_count=0
+    local failed=""
     for src in "$libc_src"/*.c; do
         [ -f "$src" ] || continue
         local name
@@ -125,8 +126,15 @@ phase_headers() {
             obj_count=$((obj_count + 1))
         else
             echo "FAILED"
+            failed+=" $name.c"
         fi
     done
+    # A libc missing objects links programs that fail at run time, far from
+    # the cause, so any source that does not compile stops the build (C2).
+    if [ -n "$failed" ]; then
+        echo "  ERROR: libc sources failed to compile:$failed"
+        exit 1
+    fi
 
     # Create libc.a
     "$TOOLCHAIN_PREFIX/bin/x86_64-veridian-ar" rcs "$libc_build/libc.a" "$libc_build"/*.o
@@ -390,6 +398,17 @@ phase_rootfs() {
         else
             echo "FAILED"
         fi
+    fi
+
+    # The runtime audit suite run by scripts/run-rootfs-tests.sh. Built here
+    # so a full rebuild never drops it; a failure stops the build (C1).
+    echo -n "    audit_runtime_test... "
+    if "$CC" -static -O2 -Wall -L"${SYSROOT}/usr/lib" -o "$BUILD_DIR/bin/audit_runtime_test" \
+            "${TESTS_DIR}/audit_runtime_test.c" 2>&1; then
+        echo "OK"
+    else
+        echo "FAILED"
+        exit 1
     fi
 
     # Copy source files for native compilation on VeridianOS
