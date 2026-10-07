@@ -317,7 +317,7 @@ pub fn sys_close(fd: usize) -> SyscallResult {
     let file_table = process.file_table.lock();
     match file_table.close(fd) {
         Ok(_) => Ok(0),
-        Err(_) => Err(SyscallError::InvalidArgument),
+        Err(e) => Err(super::map_kernel_error(e)),
     }
 }
 
@@ -608,7 +608,7 @@ fn file_read_to_user(file: &crate::fs::file::File, buf: usize, count: usize) -> 
         Ok(n) => Ok(n),
         Err(crate::error::KernelError::BrokenPipe) => Ok(0),
         Err(crate::error::KernelError::WouldBlock) => Err(SyscallError::WouldBlock),
-        Err(_) => Err(SyscallError::InvalidState),
+        Err(e) => Err(super::map_kernel_error(e)),
     })
 }
 
@@ -620,7 +620,7 @@ fn file_write_from_user(file: &crate::fs::file::File, buf: usize, count: usize) 
         Ok(n) => Ok(n),
         Err(crate::error::KernelError::BrokenPipe) => Err(SyscallError::BrokenPipe),
         Err(crate::error::KernelError::WouldBlock) => Err(SyscallError::WouldBlock),
-        Err(_) => Err(SyscallError::InvalidState),
+        Err(e) => Err(super::map_kernel_error(e)),
     })
 }
 
@@ -654,7 +654,7 @@ pub fn sys_seek(fd: usize, offset: isize, whence: usize) -> SyscallResult {
     // Perform seek
     match file_desc.seek(seek_from) {
         Ok(new_pos) => Ok(new_pos as usize),
-        Err(_) => Err(SyscallError::InvalidState),
+        Err(e) => Err(super::map_kernel_error(e)),
     }
 }
 
@@ -675,10 +675,7 @@ pub fn sys_stat(fd: usize, stat_buf: usize) -> SyscallResult {
     let file_desc = file_table.get(fd).ok_or(SyscallError::InvalidArgument)?;
 
     // Get metadata and write to user buffer
-    let metadata = file_desc
-        .node
-        .metadata()
-        .map_err(|_| SyscallError::InvalidState)?;
+    let metadata = file_desc.node.metadata().map_err(super::map_kernel_error)?;
     let stat = fill_stat(&metadata);
 
     super::userspace::write_user(stat_buf, stat)?;
@@ -701,7 +698,7 @@ pub fn sys_truncate(fd: usize, size: usize) -> SyscallResult {
     // Truncate file
     match file_desc.node.truncate(size) {
         Ok(_) => Ok(0),
-        Err(_) => Err(SyscallError::InvalidState),
+        Err(e) => Err(super::map_kernel_error(e)),
     }
 }
 
@@ -800,7 +797,7 @@ pub fn sys_mount(
     // Mount filesystem
     match vfs()?.mount_by_type(mount_path, fs_type_str, flags as u32) {
         Ok(_) => Ok(0),
-        Err(_) => Err(SyscallError::InvalidState),
+        Err(e) => Err(super::map_kernel_error(e)),
     }
 }
 
@@ -846,7 +843,7 @@ pub fn sys_unmount(mount_point: usize) -> SyscallResult {
     // Unmount filesystem
     match vfs()?.unmount(mount_path) {
         Ok(_) => Ok(0),
-        Err(_) => Err(SyscallError::InvalidState),
+        Err(e) => Err(super::map_kernel_error(e)),
     }
 }
 
@@ -856,7 +853,7 @@ pub fn sys_unmount(mount_point: usize) -> SyscallResult {
 pub fn sys_sync() -> SyscallResult {
     match vfs()?.sync() {
         Ok(_) => Ok(0),
-        Err(_) => Err(SyscallError::InvalidState),
+        Err(e) => Err(super::map_kernel_error(e)),
     }
 }
 
@@ -877,7 +874,7 @@ pub fn sys_fsync(fd: usize) -> SyscallResult {
     // Sync all filesystems (BlockFS syncs dirty blocks to disk)
     match vfs()?.sync() {
         Ok(_) => Ok(0),
-        Err(_) => Err(SyscallError::InvalidState),
+        Err(e) => Err(super::map_kernel_error(e)),
     }
 }
 
@@ -1020,7 +1017,7 @@ pub fn sys_dup(fd: usize) -> SyscallResult {
     let file_table = proc.file_table.lock();
     match file_table.dup(fd) {
         Ok(new_fd) => Ok(new_fd),
-        Err(_) => Err(SyscallError::InvalidArgument),
+        Err(e) => Err(super::map_kernel_error(e)),
     }
 }
 
@@ -1037,7 +1034,7 @@ pub fn sys_dup2(old_fd: usize, new_fd: usize) -> SyscallResult {
     let file_table = proc.file_table.lock();
     match file_table.dup2(old_fd, new_fd) {
         Ok(()) => Ok(new_fd),
-        Err(_) => Err(SyscallError::InvalidArgument),
+        Err(e) => Err(super::map_kernel_error(e)),
     }
 }
 
@@ -1116,9 +1113,7 @@ pub fn sys_chdir(path_ptr: usize) -> SyscallResult {
     {
         let cwd = thread.fs().cwd.lock().clone();
         let vfs = vfs()?;
-        let node = vfs
-            .resolve_from(&path, &cwd)
-            .map_err(|_| SyscallError::ResourceNotFound)?;
+        let node = vfs.resolve_from(&path, &cwd).map_err(map_resolve_err)?;
         if node.node_type() != crate::fs::NodeType::Directory {
             return Err(SyscallError::InvalidArgument);
         }
@@ -1519,7 +1514,7 @@ pub(crate) fn require_owner_or_root(
     if uid == 0 {
         return Ok(());
     }
-    let meta = node.metadata().map_err(|_| SyscallError::InvalidState)?;
+    let meta = node.metadata().map_err(super::map_kernel_error)?;
     if meta.uid == uid {
         Ok(())
     } else {
@@ -1608,7 +1603,7 @@ fn rename_entry(old: &str, new: &str) -> SyscallResult {
         // permission on the directory itself.
         if old_parent_path != new_parent_path {
             let (uid, gid) = caller_creds();
-            let meta = src.metadata().map_err(|_| SyscallError::InvalidState)?;
+            let meta = src.metadata().map_err(super::map_kernel_error)?;
             if uid != 0 && !meta.permissions.can_write(uid, gid, meta.uid, meta.gid) {
                 return Err(SyscallError::PermissionDenied);
             }
@@ -1638,7 +1633,7 @@ pub(crate) fn require_dir_write(path: &str) -> Result<(), SyscallError> {
     }
     let (parent, _) = split_path(path)?;
     let dir = vfs()?.resolve_path(&parent).map_err(map_resolve_err)?;
-    let meta = dir.metadata().map_err(|_| SyscallError::InvalidState)?;
+    let meta = dir.metadata().map_err(super::map_kernel_error)?;
     let p = meta.permissions;
     if p.can_write(uid, gid, meta.uid, meta.gid) && p.can_run(uid, gid, meta.uid, meta.gid) {
         Ok(())
@@ -1662,7 +1657,7 @@ pub(crate) fn require_may_remove(path: &str) -> Result<(), SyscallError> {
         .resolve_path(&parent)
         .map_err(map_resolve_err)?
         .metadata()
-        .map_err(|_| SyscallError::InvalidState)?;
+        .map_err(super::map_kernel_error)?;
     if !dir_meta.permissions.sticky || dir_meta.uid == uid {
         return Ok(());
     }
@@ -1670,7 +1665,7 @@ pub(crate) fn require_may_remove(path: &str) -> Result<(), SyscallError> {
         .resolve_path_no_follow(path)
         .map_err(map_resolve_err)?
         .metadata()
-        .map_err(|_| SyscallError::InvalidState)?;
+        .map_err(super::map_kernel_error)?;
     if entry_meta.uid == uid {
         Ok(())
     } else {
@@ -1695,7 +1690,7 @@ pub fn sys_stat_path(path_ptr: usize, stat_buf: usize) -> SyscallResult {
     let vfs = vfs()?;
     let node = vfs.resolve_path(&path).map_err(map_resolve_err)?;
 
-    let metadata = node.metadata().map_err(|_| SyscallError::InvalidState)?;
+    let metadata = node.metadata().map_err(super::map_kernel_error)?;
     let stat = fill_stat(&metadata);
 
     super::userspace::write_user(stat_buf, stat)?;
@@ -1735,7 +1730,7 @@ pub fn sys_lstat(path_ptr: usize, stat_buf: usize) -> SyscallResult {
     let vfs = vfs()?;
     match vfs.resolve_path_no_follow(&path) {
         Ok(node) => {
-            let metadata = node.metadata().map_err(|_| SyscallError::InvalidState)?;
+            let metadata = node.metadata().map_err(super::map_kernel_error)?;
             let stat = fill_stat(&metadata);
             super::userspace::write_user(stat_buf, stat)?;
             Ok(0)
@@ -1877,7 +1872,7 @@ fn access_path(path: &str, mode: usize) -> SyscallResult {
 
     // For non-zero mode, check permissions against metadata
     if mode != 0 {
-        let metadata = node.metadata().map_err(|_| SyscallError::InvalidState)?;
+        let metadata = node.metadata().map_err(super::map_kernel_error)?;
 
         // Determine the caller's uid.  Root (uid 0) bypasses all checks.
         let caller_uid = crate::process::current_process()
@@ -1931,7 +1926,7 @@ pub fn sys_unlink(path_ptr: usize) -> SyscallResult {
 
     match vfs.unlink(&path) {
         Ok(()) => Ok(0),
-        Err(_) => Err(SyscallError::ResourceNotFound),
+        Err(e) => Err(super::map_kernel_error(e)),
     }
 }
 
@@ -1963,21 +1958,21 @@ pub fn sys_fcntl(fd: usize, cmd: usize, arg: usize) -> SyscallResult {
             // Duplicate fd to lowest available >= arg
             match file_table.dup_at_least(fd, arg, false) {
                 Ok(new_fd) => Ok(new_fd),
-                Err(_) => Err(SyscallError::InvalidArgument),
+                Err(e) => Err(super::map_kernel_error(e)),
             }
         }
         F_DUPFD_CLOEXEC => {
             // Duplicate fd to lowest available >= arg, with close-on-exec
             match file_table.dup_at_least(fd, arg, true) {
                 Ok(new_fd) => Ok(new_fd),
-                Err(_) => Err(SyscallError::InvalidArgument),
+                Err(e) => Err(super::map_kernel_error(e)),
             }
         }
         F_GETFD => {
             // Get close-on-exec flag via FileTable API
             match file_table.get_cloexec(fd) {
                 Ok(cloexec) => Ok(if cloexec { FD_CLOEXEC } else { 0 }),
-                Err(_) => Err(SyscallError::InvalidArgument),
+                Err(e) => Err(super::map_kernel_error(e)),
             }
         }
         F_SETFD => {
@@ -2127,11 +2122,9 @@ pub fn sys_opendir(path_ptr: usize) -> SyscallResult {
     let vfs = vfs()?;
 
     // Verify path exists and is a directory
-    let node = vfs
-        .resolve_path(&path)
-        .map_err(|_| SyscallError::ResourceNotFound)?;
+    let node = vfs.resolve_path(&path).map_err(map_resolve_err)?;
 
-    let metadata = node.metadata().map_err(|_| SyscallError::InvalidState)?;
+    let metadata = node.metadata().map_err(super::map_kernel_error)?;
     if metadata.node_type != crate::fs::NodeType::Directory {
         return Err(SyscallError::InvalidArgument);
     }
@@ -2142,7 +2135,7 @@ pub fn sys_opendir(path_ptr: usize) -> SyscallResult {
     let file_table = proc.file_table.lock();
     match file_table.open(alloc::sync::Arc::new(file)) {
         Ok(fd) => Ok(fd),
-        Err(_) => Err(SyscallError::OutOfMemory),
+        Err(e) => Err(super::map_kernel_error(e)),
     }
 }
 
@@ -2462,9 +2455,7 @@ pub fn sys_truncate_path(path_ptr: usize, size: usize) -> SyscallResult {
     let path = read_user_path(path_ptr)?;
 
     let vfs = vfs()?;
-    let node = vfs
-        .resolve_path(&path)
-        .map_err(|_| SyscallError::ResourceNotFound)?;
+    let node = vfs.resolve_path(&path).map_err(map_resolve_err)?;
 
     node.truncate(size)
         .map_err(|_| SyscallError::InvalidArgument)?;
@@ -2722,11 +2713,9 @@ pub fn sys_fstatat(dirfd: usize, path_ptr: usize, stat_buf: usize, _flags: usize
     validate_user_ptr_typed::<FileStat>(stat_buf)?;
 
     let vfs = vfs()?;
-    let node = vfs
-        .resolve_path(&abs_path)
-        .map_err(|_| SyscallError::ResourceNotFound)?;
+    let node = vfs.resolve_path(&abs_path).map_err(map_resolve_err)?;
 
-    let metadata = node.metadata().map_err(|_| SyscallError::InvalidState)?;
+    let metadata = node.metadata().map_err(super::map_kernel_error)?;
     let stat = fill_stat(&metadata);
     super::userspace::write_user(stat_buf, stat)?;
     Ok(0)
@@ -2741,8 +2730,7 @@ pub fn sys_unlinkat(dirfd: usize, path_ptr: usize, _flags: usize) -> SyscallResu
     require_may_remove(&abs_path)?;
 
     let vfs = vfs()?;
-    vfs.unlink(&abs_path)
-        .map_err(|_| SyscallError::ResourceNotFound)?;
+    vfs.unlink(&abs_path).map_err(super::map_kernel_error)?;
 
     Ok(0)
 }
@@ -2757,7 +2745,7 @@ pub fn sys_mkdirat(dirfd: usize, path_ptr: usize, mode: usize) -> SyscallResult 
     let vfs_guard = vfs()?;
     let node = vfs_guard
         .mkdir(&abs_path, permissions)
-        .map_err(|_| SyscallError::InvalidState)?;
+        .map_err(super::map_kernel_error)?;
     own_new_node(&node);
 
     Ok(0)
@@ -2791,10 +2779,7 @@ pub fn sys_pread(fd: usize, buf: usize, count: usize, offset: usize) -> SyscallR
     // a chunk at a time through a kernel buffer (N-43).
     let mut at = offset;
     super::userspace::produce_to_user(buf, count, true, |kbuf| {
-        let n = file
-            .node
-            .read(at, kbuf)
-            .map_err(|_| SyscallError::InvalidState)?;
+        let n = file.node.read(at, kbuf).map_err(super::map_kernel_error)?;
         at += n;
         Ok(n)
     })
@@ -2815,10 +2800,7 @@ pub fn sys_pwrite(fd: usize, buf: usize, count: usize, offset: usize) -> Syscall
     // Write at `offset` through the VfsNode, a chunk at a time (N-43).
     let mut at = offset;
     super::userspace::consume_from_user(buf, count, true, |kbuf| {
-        let n = file
-            .node
-            .write(at, kbuf)
-            .map_err(|_| SyscallError::InvalidState)?;
+        let n = file.node.write(at, kbuf).map_err(super::map_kernel_error)?;
         at += n;
         Ok(n)
     })

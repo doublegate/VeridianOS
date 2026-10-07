@@ -1438,6 +1438,22 @@ static void test_exec_permission(void)
     r = execve("/tmp", dargs, env);
     int dir_eacces = r == -1 && errno == EACCES;
 
+    /* Executable but not a program: ENOEXEC (N-127), caller unharmed. */
+    const char *junk = "/tmp/noexec_junk";
+    int jfd = open(junk, O_CREAT | O_WRONLY | O_TRUNC, 0755);
+    if (jfd >= 0) {
+        if (write(jfd, "junk\n", 5) < 0) {
+            /* checked through the exec result */
+        }
+        close(jfd);
+    }
+    chmod(junk, 0755);
+    char *jargs[] = {(char *)junk, NULL};
+    errno = 0;
+    r = execve(junk, jargs, env);
+    int noexec = r == -1 && errno == ENOEXEC;
+    unlink(junk);
+
     /* Non-root, mode 0700 owned by root: EACCES in the child. */
     chmod(path, 0700);
     pid_t pid = fork();
@@ -1463,11 +1479,11 @@ static void test_exec_permission(void)
     int control = WIFEXITED(st) && WEXITSTATUS(st) == 1;
     unlink(path);
 
-    static char why[96];
-    snprintf(why, sizeof(why), "root=%d dir=%d user=%d control=%d(st=%#x)", root_eacces,
-             dir_eacces, user_eacces, control, st);
+    static char why[112];
+    snprintf(why, sizeof(why), "root=%d dir=%d noexec=%d user=%d control=%d(st=%#x)",
+             root_eacces, dir_eacces, noexec, user_eacces, control, st);
     report("exec_requires_execute_permission",
-           root_eacces && dir_eacces && user_eacces && control, why);
+           root_eacces && dir_eacces && noexec && user_eacces && control, why);
 }
 
 /* N-140: MAP_SHARED anonymous memory stays shared with a forked child,

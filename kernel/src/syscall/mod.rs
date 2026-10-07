@@ -657,6 +657,18 @@ pub enum SyscallError {
     /// Operation not permitted for this caller (EPERM, errno 1): signals,
     /// credentials, process groups. File access denials stay EACCES.
     OperationNotPermitted = -111,
+    /// No space left on the device (ENOSPC, errno 28; N-127).
+    NoSpace = -112,
+    /// Resource busy, e.g. already mounted (EBUSY, errno 16).
+    Busy = -113,
+    /// File too large (EFBIG, errno 27).
+    FileTooLarge = -114,
+    /// Operation not supported by this object (EOPNOTSUPP, errno 95).
+    NotSupported = -115,
+    /// No such device or filesystem type (ENODEV, errno 19).
+    NoDevice = -116,
+    /// Not an executable format (ENOEXEC, errno 8).
+    ExecFormat = -117,
 }
 
 impl From<IpcError> for SyscallError {
@@ -711,11 +723,27 @@ pub fn map_kernel_error(err: crate::error::KernelError) -> SyscallError {
             FsError::ReadOnly => SyscallError::PermissionDenied,
             FsError::InvalidPath => SyscallError::InvalidArgument,
             FsError::NoRootFs => SyscallError::ResourceNotFound,
-            FsError::TooManyOpenFiles => SyscallError::OutOfMemory,
+            FsError::TooManyOpenFiles => SyscallError::ResourceLimitExceeded,
             FsError::CrossDevice => SyscallError::CrossDevice,
-            _ => SyscallError::InvalidState,
+            // One errno per cause (N-127); no catch-all, so a new FsError
+            // variant has to be given one.
+            FsError::AlreadyMounted => SyscallError::Busy,
+            FsError::NotMounted => SyscallError::InvalidArgument,
+            FsError::UnknownFsType => SyscallError::NoDevice,
+            FsError::NotSupported => SyscallError::NotSupported,
+            FsError::NotASymlink => SyscallError::InvalidArgument,
+            FsError::FileTooLarge => SyscallError::FileTooLarge,
+            FsError::CorruptedData => SyscallError::IoError,
+            FsError::SymlinkLoop => SyscallError::SymlinkLoop,
+            FsError::NoSpace => SyscallError::NoSpace,
         },
         KernelError::OutOfMemory { .. } => SyscallError::OutOfMemory,
+        KernelError::InvalidArgument { .. } => SyscallError::InvalidArgument,
+        KernelError::OperationNotSupported { .. } => SyscallError::NotSupported,
+        KernelError::ResourceExhausted { .. } => SyscallError::OutOfMemory,
+        KernelError::UnmappedMemory { .. } | KernelError::InvalidAddress { .. } => {
+            SyscallError::InvalidPointer
+        }
         KernelError::PermissionDenied { .. } => SyscallError::PermissionDenied,
         KernelError::AlreadyExists { .. } => SyscallError::FileExists,
         KernelError::NotFound { .. } => SyscallError::ResourceNotFound,

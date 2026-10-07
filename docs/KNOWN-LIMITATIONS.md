@@ -111,16 +111,15 @@ What remains:
 - **sigreturn on AArch64 and RISC-V does not sanitise registers (N-170).** PSTATE and `sstatus`
   are restored as given, latent until those architectures have user mode.
 - **wait (N-99):** no process-group waits, WUNTRACED/WCONTINUED are wrong, `waitid(WNOWAIT)`
-  returns EINVAL, and file errors are mostly reported as ENOENT (N-127).
+  returns EINVAL. (File errors now carry their own errno, N-127.)
 
 ### Processes, exec and credentials
 
 - **Directory fds are paths (N-115 remainder).** `*at()` calls resolve their directory fd
   through a path string rather than the open directory, so a directory renamed after it was
   opened is looked up by its old name.
-- **exec (N-101 remainder):** a multithreaded process cannot exec (EAGAIN, above), and a corrupt
-  image is reported as EINVAL rather than ENOEXEC. Fork children are runnable before setup
-  completes (N-110).
+- **exec (N-101 remainder):** a multithreaded process cannot exec (EAGAIN, above). Fork children
+  are runnable before setup completes (N-110).
 - **Credentials (N-131, planned v0.30):** one uid and gid per process; no effective, saved or
   filesystem ids, no supplementary groups, no Linux capabilities. `chdir` does not check search
   permission.

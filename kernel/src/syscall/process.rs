@@ -217,7 +217,12 @@ pub fn sys_exec(path_ptr: usize, argv_ptr: usize, envp_ptr: usize) -> SyscallRes
             Err(SyscallError::InvalidState)
         }
         // Report the real cause (not-found, bad image, out of memory);
-        // every failure used to surface as ENOENT.
+        // every failure used to surface as ENOENT. An image that does not
+        // parse is ENOEXEC, as on Linux.
+        Err(crate::error::KernelError::InvalidArgument {
+            name: "elf" | "interpreter",
+            ..
+        }) => Err(SyscallError::ExecFormat),
         Err(e) => Err(super::map_kernel_error(e)),
     }
 }

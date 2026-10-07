@@ -189,6 +189,11 @@
 
 ### Fixed
 
+- **File system calls reported most errors as EINVAL or ENOENT (N-127).** read, write, lseek,
+  fstat, truncate, mount, sync, the fd-table calls and the path lookups now return the errno of
+  the actual cause: ENOSPC, EMFILE, EBUSY, EFBIG, EOPNOTSUPP, ENODEV and EIO are new, symlink
+  loops give ELOOP, and an exec of a file that is not a program gives ENOEXEC instead of EINVAL.
+  Host test `filesystem_errors_keep_their_errno`; the exec runtime test checks ENOEXEC.
 - **pty writes lost data and signalled under a lock (N-128).** With output processing on, a
   newline that did not fit was dropped while the write still reported every byte written, and a
   full buffer failed the whole write after part of it had been queued. ^C and ^Z sent their

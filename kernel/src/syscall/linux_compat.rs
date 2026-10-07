@@ -410,6 +410,12 @@ pub(crate) fn to_linux_errno(err: super::SyscallError) -> isize {
     const LINUX_EMFILE: isize = -24;
     const LINUX_ENOTSOCK: isize = -88;
     const LINUX_ENOPROTOOPT: isize = -92;
+    const LINUX_ENOSPC: isize = -28;
+    const LINUX_EBUSY: isize = -16;
+    const LINUX_EFBIG: isize = -27;
+    const LINUX_EOPNOTSUPP: isize = -95;
+    const LINUX_ENODEV: isize = -19;
+    const LINUX_ENOEXEC: isize = -8;
 
     match err {
         SyscallError::InvalidSyscall => LINUX_ENOSYS,
@@ -448,6 +454,12 @@ pub(crate) fn to_linux_errno(err: super::SyscallError) -> isize {
         SyscallError::ProtocolOptionNotAvailable => LINUX_ENOPROTOOPT,
         SyscallError::NoChildProcess => LINUX_ECHILD,
         SyscallError::OperationNotPermitted => LINUX_EPERM,
+        SyscallError::NoSpace => LINUX_ENOSPC,
+        SyscallError::Busy => LINUX_EBUSY,
+        SyscallError::FileTooLarge => LINUX_EFBIG,
+        SyscallError::NotSupported => LINUX_EOPNOTSUPP,
+        SyscallError::NoDevice => LINUX_ENODEV,
+        SyscallError::ExecFormat => LINUX_ENOEXEC,
     }
 }
 
@@ -627,5 +639,31 @@ mod tests {
         let result = handle_linux_stub(LINUX_SIGALTSTACK, 0, 0);
         assert!(result.is_some());
         assert!(result.unwrap().is_ok());
+    }
+
+    /// N-127: filesystem errors reach user space as the Linux errno of
+    /// their cause, not EINVAL or ENOENT for everything.
+    #[test]
+    fn filesystem_errors_keep_their_errno() {
+        use crate::error::{FsError, KernelError};
+        let errno =
+            |e: FsError| to_linux_errno(super::super::map_kernel_error(KernelError::FsError(e)));
+        assert_eq!(errno(FsError::NoSpace), -28);
+        assert_eq!(errno(FsError::TooManyOpenFiles), -24);
+        assert_eq!(errno(FsError::AlreadyMounted), -16);
+        assert_eq!(errno(FsError::FileTooLarge), -27);
+        assert_eq!(errno(FsError::NotSupported), -95);
+        assert_eq!(errno(FsError::UnknownFsType), -19);
+        assert_eq!(errno(FsError::SymlinkLoop), -40);
+        assert_eq!(errno(FsError::CorruptedData), -5);
+        assert_eq!(errno(FsError::BadFileDescriptor), -9);
+        assert_eq!(errno(FsError::ReadOnly), -13);
+        assert_eq!(to_linux_errno(SyscallError::ExecFormat), -8);
+        assert_eq!(
+            to_linux_errno(super::super::map_kernel_error(
+                KernelError::UnmappedMemory { addr: 0 }
+            )),
+            -14
+        );
     }
 }
