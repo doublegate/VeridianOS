@@ -445,6 +445,11 @@ pub struct VirtualMapping {
     /// Backing physical frames (if mapped)
     #[cfg(feature = "alloc")]
     pub physical_frames: Vec<super::FrameNumber>,
+    /// Whether mprotect may make this mapping writable (Linux's
+    /// VM_MAYWRITE). False for a shared mapping of a file it may never
+    /// write -- opened read-only, or a memfd sealed against writes -- so a
+    /// read-only mapping cannot be upgraded past the seal.
+    pub may_write: bool,
 }
 
 impl VirtualMapping {
@@ -478,6 +483,7 @@ impl VirtualMapping {
             flags,
             #[cfg(feature = "alloc")]
             physical_frames: Vec::new(),
+            may_write: true,
         }
     }
 
@@ -1206,6 +1212,7 @@ impl VirtualAddressSpace {
         at: Option<VirtualAddress>,
         frames: &[FrameNumber],
         flags: PageFlags,
+        may_write: bool,
     ) -> Result<VirtualAddress, KernelError> {
         let release_from = |i: usize| {
             for &frame in &frames[i..] {
@@ -1245,6 +1252,7 @@ impl VirtualAddressSpace {
                     addr: start.0 as usize,
                 });
             };
+            mapping.may_write = may_write;
             for (i, &frame) in frames.iter().enumerate() {
                 let va = VirtualAddress(start.0 + (i as u64) * 4096);
                 let page_flags = mapper.translate_page(va).map_or(flags, |(_, f)| f);
@@ -1270,7 +1278,7 @@ impl VirtualAddressSpace {
             }
         }
         #[cfg(test)]
-        let _ = release_from;
+        let _ = (release_from, may_write);
         Ok(start)
     }
 
@@ -1483,6 +1491,8 @@ impl VirtualAddressSpace {
             mapping_type: MappingType::Device,
             flags,
             physical_frames,
+            // Borrowed: protect_region keeps it to its grant.
+            may_write: true,
         };
         self.mappings.lock().insert(vaddr, mapping);
 
@@ -1564,6 +1574,8 @@ impl VirtualAddressSpace {
                 mapping_type: MappingType::SharedRegion,
                 flags,
                 physical_frames: frames.to_vec(),
+                // Borrowed: protect_region keeps it to its grant.
+                may_write: true,
             },
         );
         Ok(start)
@@ -2313,6 +2325,14 @@ impl VirtualAddressSpace {
                     addr: addr as usize,
                 });
             };
+            // A shared file mapping that may never write (a read-only fd, a
+            // write-sealed memfd) stays read-only: mprotect would otherwise
+            // write past the seal (Linux: VM_MAYWRITE, EACCES).
+            if !m.may_write && new_flags.contains(PageFlags::WRITABLE) {
+                return Err(KernelError::PermissionDenied {
+                    operation: "mprotect: mapping may not be written",
+                });
+            }
             if !m.owns_frames() {
                 let gains_write = new_flags.contains(PageFlags::WRITABLE)
                     && !m.flags.contains(PageFlags::WRITABLE);

@@ -194,10 +194,16 @@ pub fn sys_mmap(
             {
                 let frames = frames.map_err(super::map_kernel_error)?;
                 let at = is_fixed.then_some(VirtualAddress(addr as u64));
+                // May mprotect make it writable later? Not through a
+                // read-only fd, nor past a write seal.
+                let write_sealed = file.node.seals().is_some_and(|s| {
+                    s & (crate::fs::seals::WRITE | crate::fs::seals::FUTURE_WRITE) != 0
+                });
+                let may_write = file.flags.write && !write_sealed;
                 let start = proc
                     .memory_space
                     .lock()
-                    .map_shared_frames(at, &frames, page_flags)
+                    .map_shared_frames(at, &frames, page_flags, may_write)
                     .map_err(|_| SyscallError::OutOfMemory)?;
                 return Ok(start.as_usize());
             }

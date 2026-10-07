@@ -222,6 +222,10 @@
 
 ### Security
 
+- **A write seal holds against mprotect (N-254).** A read-only shared mapping of a write-sealed
+  memfd could be made writable with `mprotect`, writing past the seal. Such mappings now carry
+  Linux's "may never write" mark and `mprotect` refuses them (EACCES). Found by the automated
+  security review of the N-230 change.
 - **ptrace writes reach the tracee only (N-252).** POKETEXT/POKEDATA wrote into the physical
   frame behind the tracee's page, which after a fork is shared with its parent and siblings, so a
   breakpoint set in a child also changed its parent. A shared page is now copied first, as a

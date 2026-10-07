@@ -2058,6 +2058,10 @@ static void test_memfd(void)
         char *ro = mmap(NULL, 4096, PROT_READ, MAP_SHARED, fd, 0);
         if (ro == MAP_FAILED || ro[0] != 'p')
             sfails |= 256;                      /* read-only still fine */
+        errno = 0;
+        if (ro != MAP_FAILED &&
+            (mprotect(ro, 4096, PROT_READ | PROT_WRITE) != -1 || errno != EACCES))
+            sfails |= 4096;                     /* no upgrade past the seal */
         if (ro != MAP_FAILED)
             munmap(ro, 4096);
     }
