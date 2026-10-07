@@ -1864,7 +1864,8 @@ fn sys_getrandom(buf_ptr: usize, buflen: usize, _flags: usize) -> SyscallResult 
 /// - `buf_size`: Size of the buffer in bytes.
 ///
 /// # Returns
-/// Number of bytes written to buf, or 0 when no more entries.
+/// Number of bytes written to buf, or 0 when no more entries. A buffer too
+/// small for the next entry is EINVAL.
 fn sys_getdents64(fd: usize, buf_ptr: usize, buf_size: usize) -> SyscallResult {
     if buf_size == 0 {
         return Err(SyscallError::InvalidArgument);
@@ -1886,7 +1887,7 @@ fn sys_getdents64(fd: usize, buf_ptr: usize, buf_size: usize) -> SyscallResult {
     }
 
     // Records are built in a kernel buffer and copied out once (N-43).
-    let (out, idx) = build_dirents64(&entries, pos, buf_size);
+    let (out, idx) = build_dirents64(&entries, pos, buf_size)?;
 
     userspace::write_user_bytes(buf_ptr, &out)?;
 
@@ -1913,12 +1914,13 @@ fn dirent64_type(node_type: crate::fs::NodeType) -> u8 {
 
 /// Build `linux_dirent64` records for `entries[pos..]`, as many as fit in
 /// `buf_size` bytes. Returns the records and the index of the first entry
-/// not included.
+/// not included (no records at all past the last entry), or EINVAL if not
+/// even the first remaining record fits.
 fn build_dirents64(
     entries: &[crate::fs::DirEntry],
     pos: usize,
     buf_size: usize,
-) -> (alloc::vec::Vec<u8>, usize) {
+) -> Result<(alloc::vec::Vec<u8>, usize), SyscallError> {
     let mut offset = 0usize;
     let mut idx = pos;
     let mut out: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
@@ -1958,7 +1960,13 @@ fn build_dirents64(
         offset += reclen;
         idx += 1;
     }
-    (out, idx)
+    if out.is_empty() && pos < entries.len() {
+        // Linux: EINVAL when the buffer cannot hold the next record. An
+        // empty result here used to read as end of directory, so a short
+        // buffer silently truncated the listing.
+        return Err(SyscallError::InvalidArgument);
+    }
+    Ok((out, idx))
 }
 
 /// prlimit64 syscall -- get/set resource limits for a process.
@@ -4432,7 +4440,7 @@ mod tests {
             dir_entry("abcd", NodeType::Symlink, 7),
         ];
         // 19 + 1 + 1 = 21 -> 24; 19 + 9 + 1 = 29 -> 32; 19 + 4 + 1 = 24.
-        let (buf, next) = build_dirents64(&entries, 0, 4096);
+        let (buf, next) = build_dirents64(&entries, 0, 4096).unwrap();
         assert_eq!(next, 3);
         assert_eq!(buf.len(), 24 + 32 + 24);
         let recs = parse_dirents(&buf);
@@ -4447,15 +4455,24 @@ mod tests {
         assert!(buf[24 + 19 + 9..56].iter().all(|&b| b == 0));
 
         // A buffer that ends inside a record stops before it.
-        let (buf, next) = build_dirents64(&entries, 0, 24 + 31);
+        let (buf, next) = build_dirents64(&entries, 0, 24 + 31).unwrap();
         assert_eq!((buf.len(), next), (24, 1));
         // Resuming at an index continues from there.
-        let (buf, next) = build_dirents64(&entries, 2, 24);
+        let (buf, next) = build_dirents64(&entries, 2, 24).unwrap();
         assert_eq!((buf.len(), next), (24, 3));
         assert_eq!(parse_dirents(&buf)[0].4, "abcd");
-        // Nothing left, or no room for even one record.
-        assert_eq!(build_dirents64(&entries, 3, 4096), (alloc::vec![], 3));
-        assert_eq!(build_dirents64(&entries, 0, 23), (alloc::vec![], 0));
+        // Nothing left is end of directory; no room for even one record is
+        // EINVAL, as on Linux, not a short directory.
+        assert_eq!(build_dirents64(&entries, 3, 4096), Ok((alloc::vec![], 3)));
+        assert_eq!(build_dirents64(&entries, 7, 4096), Ok((alloc::vec![], 7)));
+        assert_eq!(
+            build_dirents64(&entries, 0, 23),
+            Err(SyscallError::InvalidArgument)
+        );
+        assert_eq!(
+            build_dirents64(&entries, 1, 31),
+            Err(SyscallError::InvalidArgument)
+        );
     }
 
     /// d_off is the position to seek to for the next entry. A directory
@@ -4470,11 +4487,11 @@ mod tests {
             dir_entry("bb", NodeType::File, 0),
             dir_entry("ccc", NodeType::File, 0),
         ];
-        let (buf, _) = build_dirents64(&entries, 0, 4096);
+        let (buf, _) = build_dirents64(&entries, 0, 4096).unwrap();
         let offs: alloc::vec::Vec<u64> = parse_dirents(&buf).iter().map(|r| r.1).collect();
         assert_eq!(offs, [1, 2, 3]);
         // Resuming at the d_off of the first record yields the second.
-        let (buf, _) = build_dirents64(&entries, offs[0] as usize, 4096);
+        let (buf, _) = build_dirents64(&entries, offs[0] as usize, 4096).unwrap();
         let recs = parse_dirents(&buf);
         assert_eq!(recs[0].4, "bb");
         assert_eq!(recs[0].1, 2);
