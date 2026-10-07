@@ -292,6 +292,38 @@ pub fn search_path(name: &str) -> Option<String> {
     None
 }
 
+/// Read the file at `path` for exec: it must be a regular file the caller
+/// (`uid`, `gid`) may execute -- root needs at least one execute bit, as on
+/// Linux -- or the result is `PermissionDenied` (EACCES). The check and the
+/// read use the same resolved node, so the file cannot be swapped between
+/// them (N-101).
+#[cfg(feature = "alloc")]
+fn read_executable(path: &str, uid: u32, gid: u32) -> Result<Vec<u8>, KernelError> {
+    let node = crate::fs::get_vfs()
+        .resolve_path(path)
+        .map_err(|_| KernelError::FsError(crate::error::FsError::NotFound))?;
+    let meta = node.metadata()?;
+    if !may_execute(&meta, uid, gid) {
+        return Err(KernelError::PermissionDenied { operation: "exec" });
+    }
+    let mut data = alloc::vec![0u8; meta.size];
+    let n = node.read(0, &mut data)?;
+    data.truncate(n);
+    Ok(data)
+}
+
+/// Whether `uid`/`gid` may execute a node with metadata `meta`.
+#[cfg(feature = "alloc")]
+fn may_execute(meta: &crate::fs::Metadata, uid: u32, gid: u32) -> bool {
+    let perms = &meta.permissions;
+    meta.node_type == crate::fs::NodeType::File
+        && if uid == 0 {
+            perms.owner_exec || perms.group_exec || perms.other_exec
+        } else {
+            perms.can_run(uid, gid, meta.uid, meta.gid)
+        }
+}
+
 /// Execute a new program in current process
 ///
 /// Replaces the current process image with a new program.
@@ -303,7 +335,7 @@ pub fn search_path(name: &str) -> Option<String> {
 /// if the path does not start with `/`, standard directories are searched.
 #[cfg(feature = "alloc")]
 pub fn exec_process(path: &str, argv: &[&str], envp: &[&str]) -> Result<(), KernelError> {
-    use crate::{elf::ElfLoader, fs};
+    use crate::elf::ElfLoader;
 
     let process = super::current_process().ok_or(KernelError::ProcessNotFound { pid: 0 })?;
     let current_thread = super::current_thread().ok_or(KernelError::ThreadNotFound { tid: 0 })?;
@@ -315,30 +347,9 @@ pub fn exec_process(path: &str, argv: &[&str], envp: &[&str]) -> Result<(), Kern
         String::from(path)
     };
 
-    // Execute permission (N-101): a regular file the caller may execute;
-    // root needs at least one execute bit, as on Linux.
-    {
-        let node = fs::get_vfs()
-            .resolve_path(&resolved_path)
-            .map_err(|_| KernelError::FsError(crate::error::FsError::NotFound))?;
-        let meta = node.metadata()?;
-        let perms = &meta.permissions;
-        let uid = process.uid();
-        let gid = process.gid();
-        let allowed = meta.node_type == fs::NodeType::File
-            && if uid == 0 {
-                perms.owner_exec || perms.group_exec || perms.other_exec
-            } else {
-                perms.can_run(uid, gid, meta.uid, meta.gid)
-            };
-        if !allowed {
-            return Err(KernelError::PermissionDenied { operation: "exec" });
-        }
-    }
-
-    // Step 1: Load new program from filesystem
-    let file_data = fs::read_file(&resolved_path)
-        .map_err(|_| KernelError::FsError(crate::error::FsError::NotFound))?;
+    // Step 1: Load new program from filesystem, checking execute
+    // permission on the node that is read (N-101).
+    let file_data = read_executable(&resolved_path, process.uid(), process.gid())?;
 
     // Step 1b: Check for shebang (#!) and delegate to interpreter if found
     if let Some((interpreter, opt_arg)) = parse_shebang(&file_data) {
@@ -377,6 +388,25 @@ pub fn exec_process(path: &str, argv: &[&str], envp: &[&str]) -> Result<(), Kern
                 name: "elf",
                 value: "not a loadable ELF image",
             })?;
+
+    // The interpreter (PT_INTERP) is opened, permission-checked and parsed
+    // before the point of no return as well, as Linux does: a missing or
+    // non-executable loader fails the exec with the old image intact.
+    let interp: Option<(Vec<u8>, crate::elf::ElfBinary)> =
+        match (&elf_binary.dynamic, &elf_binary.interpreter) {
+            (true, Some(path)) => {
+                let data = read_executable(path, process.uid(), process.gid())?;
+                let parsed =
+                    ElfLoader::new()
+                        .parse(&data)
+                        .map_err(|_| KernelError::InvalidArgument {
+                            name: "interpreter",
+                            value: "not a loadable ELF image",
+                        })?;
+                Some((data, parsed))
+            }
+            _ => None,
+        };
 
     // Point of no return: from clear() on, a failure cannot go back to the
     // old image. The process is then killed with SIGSEGV at the system-call
@@ -423,9 +453,14 @@ pub fn exec_process(path: &str, argv: &[&str], envp: &[&str]) -> Result<(), Kern
         let (final_entry, aux_vector) = {
             if elf_binary.dynamic && elf_binary.interpreter.is_some() {
                 // Dynamically linked -- load interpreter and build aux vector
+                let (interp_data, interp_elf) =
+                    interp.as_ref().ok_or(KernelError::InvalidArgument {
+                        name: "dynamic",
+                        value: "interpreter was not read",
+                    })?;
                 let dyn_info = crate::elf::dynamic::prepare_dynamic_linking(
-                    &file_data,
                     &elf_binary,
+                    interp_elf,
                     elf_binary.load_base,
                 )?
                 .ok_or(KernelError::InvalidArgument {
@@ -436,11 +471,9 @@ pub fn exec_process(path: &str, argv: &[&str], envp: &[&str]) -> Result<(), Kern
                 // Load interpreter LOAD segments into the process address space.
                 // The interpreter is a separate ELF loaded at its own base address
                 // (distinct from the main binary) to avoid overlap.
-                let interp_data = fs::read_file(&dyn_info.interp_path)
-                    .map_err(|_| KernelError::FsError(crate::error::FsError::NotFound))?;
                 {
                     let mut memory_space = process.memory_space.lock();
-                    let _interp_entry = ElfLoader::load(&interp_data, &mut memory_space)?;
+                    let _interp_entry = ElfLoader::load(interp_data, &mut memory_space)?;
                 }
 
                 // Entry point is the interpreter, not the main binary
@@ -932,5 +965,38 @@ mod tests {
                 assert_eq!(lowest, top - total);
             }
         }
+    }
+
+    fn meta(node_type: crate::fs::NodeType, mode: u32, uid: u32, gid: u32) -> crate::fs::Metadata {
+        crate::fs::Metadata {
+            node_type,
+            size: 0,
+            permissions: crate::fs::Permissions::from_mode(mode),
+            uid,
+            gid,
+            created: 0,
+            modified: 0,
+            accessed: 0,
+            inode: 1,
+        }
+    }
+
+    /// N-101: exec needs a regular file with an execute bit the caller
+    /// holds; root needs any execute bit, and never a directory.
+    #[test]
+    fn exec_permission_follows_linux_rules() {
+        use crate::fs::NodeType;
+        let file = NodeType::File;
+        // Root: any execute bit, but at least one.
+        assert!(!may_execute(&meta(file, 0o644, 0, 0), 0, 0));
+        assert!(may_execute(&meta(file, 0o001, 5, 5), 0, 0));
+        assert!(!may_execute(&meta(NodeType::Directory, 0o755, 0, 0), 0, 0));
+        // Owner, group and other classes.
+        assert!(may_execute(&meta(file, 0o700, 1000, 1000), 1000, 1000));
+        assert!(!may_execute(&meta(file, 0o700, 0, 0), 1000, 1000));
+        assert!(may_execute(&meta(file, 0o710, 0, 100), 1000, 100));
+        assert!(may_execute(&meta(file, 0o701, 0, 0), 1000, 1000));
+        // The owner class decides for the owner, even if others may run it.
+        assert!(!may_execute(&meta(file, 0o611, 1000, 0), 1000, 1000));
     }
 }

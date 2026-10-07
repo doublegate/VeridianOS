@@ -209,13 +209,15 @@ pub fn build_aux_vector(
 /// process. If the binary is statically linked, returns `None`.
 ///
 /// # Arguments
-/// * `_elf_data`   - Raw bytes of the ELF file (reserved for future use).
 /// * `elf_binary`  - Pre-parsed ELF binary metadata.
+/// * `interp_elf`  - The interpreter, already read (with its execute permission
+///   checked) and parsed by the caller, so the image whose entry is used here
+///   is the one that gets loaded.
 /// * `load_base`   - Base address where the main binary was loaded.
 #[cfg(feature = "alloc")]
 pub fn prepare_dynamic_linking(
-    _elf_data: &[u8],
     elf_binary: &ElfBinary,
+    interp_elf: &ElfBinary,
     load_base: u64,
 ) -> Result<Option<DynamicLinkerInfo>, KernelError> {
     // Check whether the binary has an interpreter.
@@ -223,13 +225,6 @@ pub fn prepare_dynamic_linking(
         Some(path) => path.clone(),
         None => return Ok(None), // Statically linked.
     };
-
-    // Load the interpreter ELF binary from the filesystem.
-    let interp_elf =
-        super::load_elf_from_file(&interp_path).map_err(|_| KernelError::NotFound {
-            resource: "interpreter",
-            id: 0,
-        })?;
 
     let interp_base = interp_elf.load_base;
     let interp_entry = interp_elf.entry_point;
