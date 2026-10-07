@@ -8,7 +8,7 @@ use alloc::{collections::BTreeMap, format, string::String, sync::Arc, vec, vec::
 
 use spin::RwLock;
 
-use crate::error::KernelError;
+use crate::error::{FsError, KernelError};
 
 #[cfg(target_arch = "aarch64")]
 pub mod bare_lock;
@@ -36,6 +36,33 @@ pub mod nfs;
 pub mod smb;
 
 pub use file::{File, FileDescriptor, FileTable, OpenFlags, SeekFrom};
+
+/// Largest file a RAM-backed filesystem (ramfs, tmpfs) will hold. Without a
+/// bound, one write at a huge offset made the kernel allocate the whole
+/// range and abort (N-122).
+pub const MAX_RAM_FILE_SIZE: usize = 1 << 30;
+
+/// The end of a write of `len` bytes at `offset`, if the file may grow to it.
+pub(crate) fn ram_write_end(offset: usize, len: usize) -> Result<usize, KernelError> {
+    offset
+        .checked_add(len)
+        .filter(|&end| end <= MAX_RAM_FILE_SIZE)
+        .ok_or(KernelError::FsError(FsError::FileTooLarge))
+}
+
+/// Grow `data` to `new_len` zero-filled bytes, failing (ENOSPC) instead of
+/// aborting when the heap cannot provide them.
+pub(crate) fn grow_ram_file(data: &mut Vec<u8>, new_len: usize) -> Result<(), KernelError> {
+    if new_len > MAX_RAM_FILE_SIZE {
+        return Err(KernelError::FsError(FsError::FileTooLarge));
+    }
+    if new_len > data.len() {
+        data.try_reserve_exact(new_len - data.len())
+            .map_err(|_| KernelError::FsError(FsError::NoSpace))?;
+        data.resize(new_len, 0);
+    }
+    Ok(())
+}
 
 /// Maximum path length
 pub const PATH_MAX: usize = 4096;

@@ -3788,9 +3788,10 @@ fn sys_socket_pair(
 /// flock(2): a whole-file advisory lock on an open file (N-120).
 ///
 /// Locks are keyed by the open node's identity, which is unique across
-/// filesystems (inode numbers are not), owned by the process, and dropped
-/// when it exits. A conflicting lock returns EWOULDBLOCK even without
-/// LOCK_NB until flock waits on a wait queue (ADR 0006, sprint D).
+/// filesystems (inode numbers are not), and released when the open file is
+/// closed for the last time or its process exits. A conflicting lock returns
+/// EWOULDBLOCK even without LOCK_NB until flock waits on a wait queue (ADR
+/// 0006, sprint D).
 fn sys_flock(fd: usize, operation: usize) -> SyscallResult {
     let process = crate::process::current_process().ok_or(SyscallError::InvalidState)?;
     let file = process
@@ -3798,9 +3799,21 @@ fn sys_flock(fd: usize, operation: usize) -> SyscallResult {
         .lock()
         .get(fd)
         .ok_or(SyscallError::BadFileDescriptor)?;
-    let key = alloc::sync::Arc::as_ptr(&file.node) as *const () as u64;
-    match crate::fs::flock::flock(key, process.pid.0, operation as u32) {
-        Ok(()) => Ok(0),
+    let op = operation as u32;
+    match crate::fs::flock::flock(file.flock_key(), process.pid.0, op) {
+        Ok(()) => {
+            // The open file owns the lock: it is released when the file is
+            // closed for the last time (File::drop), so a lock can never
+            // outlive the node its key names (review of N-120).
+            let owner = if op & !crate::fs::flock::LOCK_NB == crate::fs::flock::LOCK_UN {
+                0
+            } else {
+                process.pid.0
+            };
+            file.flock_owner
+                .store(owner, core::sync::atomic::Ordering::Release);
+            Ok(0)
+        }
         Err(crate::error::KernelError::WouldBlock) => Err(SyscallError::WouldBlock),
         Err(_) => Err(SyscallError::InvalidArgument),
     }

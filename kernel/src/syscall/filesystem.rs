@@ -566,6 +566,8 @@ pub fn sys_seek(fd: usize, offset: isize, whence: usize) -> SyscallResult {
 
     // Convert whence to SeekFrom
     let seek_from = match whence {
+        // A negative absolute offset is EINVAL, not a huge position (N-122).
+        0 if offset < 0 => return Err(SyscallError::InvalidArgument),
         0 => SeekFrom::Start(offset as usize),
         1 => SeekFrom::Current(offset),
         2 => SeekFrom::End(offset),

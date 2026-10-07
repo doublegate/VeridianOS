@@ -1,7 +1,7 @@
 //! File descriptors and file operations
 
 use alloc::{string::String, sync::Arc, vec::Vec};
-use core::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 
 #[cfg(not(target_arch = "aarch64"))]
 use spin::RwLock;
@@ -144,6 +144,20 @@ pub struct File {
     /// Absolute path this file was opened with (for dirfd resolution in *at
     /// syscalls)
     pub path: Option<String>,
+
+    /// Pid whose flock(2) lock is held through this open file (0: none).
+    /// The lock is released when the open file goes away, so it can never
+    /// outlive the node it is keyed by (N-120 review).
+    pub flock_owner: AtomicU64,
+}
+
+impl Drop for File {
+    fn drop(&mut self) {
+        let owner = *self.flock_owner.get_mut();
+        if owner != 0 {
+            let _ = crate::fs::flock::flock(self.flock_key(), owner, crate::fs::flock::LOCK_UN);
+        }
+    }
 }
 
 impl File {
@@ -151,6 +165,12 @@ impl File {
     /// decided by the node itself rather than the path it was opened with.
     pub fn is_drm_device(&self) -> bool {
         matches!(self.node.device_id(), Some((major, _)) if major == crate::fs::devfs::DRM_MAJOR)
+    }
+
+    /// The flock(2) table key of this file's node: the node's identity,
+    /// stable while this open file (and so the node) exists.
+    pub fn flock_key(&self) -> u64 {
+        Arc::as_ptr(&self.node) as *const () as u64
     }
 
     /// Create a new file structure
@@ -163,6 +183,7 @@ impl File {
             position: RwLock::new(0),
             refcount: RwLock::new(1),
             path: None,
+            flock_owner: AtomicU64::new(0),
         }
     }
 
@@ -176,6 +197,7 @@ impl File {
             position: RwLock::new(0),
             refcount: RwLock::new(1),
             path: Some(path),
+            flock_owner: AtomicU64::new(0),
         }
     }
 
@@ -222,7 +244,7 @@ impl File {
             SeekFrom::Start(offset) => offset,
             SeekFrom::Current(offset) => {
                 if offset < 0 {
-                    pos.checked_sub((-offset) as usize)
+                    pos.checked_sub(offset.unsigned_abs())
                         .ok_or(KernelError::InvalidArgument {
                             name: "offset",
                             value: "seek before start of file",
@@ -238,7 +260,7 @@ impl File {
             SeekFrom::End(offset) => {
                 let metadata = self.node.metadata()?;
                 if offset < 0 {
-                    metadata.size.checked_sub((-offset) as usize).ok_or(
+                    metadata.size.checked_sub(offset.unsigned_abs()).ok_or(
                         KernelError::InvalidArgument {
                             name: "offset",
                             value: "seek before start of file",

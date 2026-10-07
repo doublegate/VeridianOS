@@ -155,18 +155,10 @@ impl VfsNode for RamNode {
             return Err(KernelError::FsError(FsError::NotAFile));
         }
 
+        let end = super::ram_write_end(offset, data.len())?;
         let mut file_data = self.data.write();
-
-        // Extend file if necessary
-        if offset > file_data.len() {
-            file_data.resize(offset, 0);
-        }
-
-        // Write data
-        if offset + data.len() > file_data.len() {
-            file_data.resize(offset + data.len(), 0);
-        }
-        file_data[offset..offset + data.len()].copy_from_slice(data);
+        super::grow_ram_file(&mut file_data, end)?;
+        file_data[offset..end].copy_from_slice(data);
 
         // Update metadata
         let mut metadata = self.metadata.write();
@@ -310,7 +302,11 @@ impl VfsNode for RamNode {
         }
 
         let mut data = self.data.write();
-        data.resize(size, 0);
+        if size > data.len() {
+            super::grow_ram_file(&mut data, size)?;
+        } else {
+            data.truncate(size);
+        }
 
         let mut metadata = self.metadata.write();
         metadata.size = size;
@@ -548,6 +544,19 @@ mod tests {
     use alloc::vec;
 
     use super::*;
+
+    // --- Offsets and sizes (N-122) ---
+
+    #[test]
+    fn huge_offsets_fail_instead_of_allocating() {
+        let fs = RamFs::new();
+        let f = fs.root().create("f", Permissions::default()).unwrap();
+        assert!(f.write(1 << 40, b"x").is_err(), "write past the size limit");
+        assert!(f.write(usize::MAX, b"xy").is_err(), "offset + len overflow");
+        assert!(f.truncate(usize::MAX).is_err(), "truncate past the limit");
+        assert_eq!(f.write(0, b"ok").unwrap(), 2);
+        assert_eq!(f.metadata().unwrap().size, 2);
+    }
 
     // --- Hard links (N-45) ---
 

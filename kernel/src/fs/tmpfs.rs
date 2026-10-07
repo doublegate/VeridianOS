@@ -126,15 +126,28 @@ impl TmpNode {
 
     /// Check if writing `additional` bytes would exceed the size limit.
     /// Returns Ok(()) if within limits, Err if exceeded.
-    fn check_space(&self, additional: usize) -> Result<(), KernelError> {
-        if self.size_limit == 0 {
-            return Ok(()); // No limit
+    /// Charge `additional` bytes to the filesystem, atomically: a separate
+    /// check and add let concurrent writers exceed the limit (N-122).
+    fn reserve_space(&self, additional: usize) -> Result<(), KernelError> {
+        if additional == 0 {
+            return Ok(());
         }
-        let current = self.bytes_used.load(Ordering::Relaxed);
-        if current.saturating_add(additional) > self.size_limit {
-            return Err(KernelError::FsError(FsError::NoSpace));
-        }
-        Ok(())
+        let limit = self.size_limit;
+        self.bytes_used
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |cur| {
+                let new = cur.checked_add(additional)?;
+                (limit == 0 || new <= limit).then_some(new)
+            })
+            .map(|_| ())
+            .map_err(|_| KernelError::FsError(FsError::NoSpace))
+    }
+
+    fn release_space(&self, bytes: usize) {
+        let _ = self
+            .bytes_used
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |cur| {
+                Some(cur.saturating_sub(bytes))
+            });
     }
 }
 
@@ -194,31 +207,16 @@ impl VfsNode for TmpNode {
             return Err(KernelError::FsError(FsError::NotAFile));
         }
 
+        let end = super::ram_write_end(offset, data.len())?;
         let mut file_data = self.data.write();
-        let old_len = file_data.len();
+        let growth = end.saturating_sub(file_data.len());
 
-        // Calculate new size after write
-        let new_len = core::cmp::max(old_len, offset + data.len());
-        let growth = new_len.saturating_sub(old_len);
-
-        // Check space before expanding
-        if growth > 0 {
-            self.check_space(growth)?;
+        self.reserve_space(growth)?;
+        if let Err(e) = super::grow_ram_file(&mut file_data, end) {
+            self.release_space(growth);
+            return Err(e);
         }
-
-        // Extend file if necessary
-        if offset > file_data.len() {
-            file_data.resize(offset, 0);
-        }
-        if offset + data.len() > file_data.len() {
-            file_data.resize(offset + data.len(), 0);
-        }
-        file_data[offset..offset + data.len()].copy_from_slice(data);
-
-        // Update bytes used counter
-        if growth > 0 {
-            self.bytes_used.fetch_add(growth, Ordering::Relaxed);
-        }
+        file_data[offset..end].copy_from_slice(data);
 
         let mut metadata = self.metadata.write();
         metadata.size = file_data.len();
@@ -361,17 +359,16 @@ impl VfsNode for TmpNode {
         if size > old_len {
             // Growing: check space
             let growth = size - old_len;
-            self.check_space(growth)?;
-            data.resize(size, 0);
-            self.bytes_used.fetch_add(growth, Ordering::Relaxed);
+            self.reserve_space(growth)?;
+            if let Err(e) = super::grow_ram_file(&mut data, size) {
+                self.release_space(growth);
+                return Err(e);
+            }
         } else if size < old_len {
             // Shrinking: reclaim space
             let freed = old_len - size;
             data.truncate(size);
-            let prev = self.bytes_used.fetch_sub(freed, Ordering::Relaxed);
-            if prev < freed {
-                self.bytes_used.store(0, Ordering::Relaxed);
-            }
+            self.release_space(freed);
         }
 
         let mut metadata = self.metadata.write();

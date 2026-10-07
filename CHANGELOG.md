@@ -46,6 +46,10 @@
 
 ### Security
 
+- **File offsets cannot exhaust kernel memory (N-122).** A write at a huge offset made ramfs
+  or tmpfs allocate the whole range and abort the kernel; RAM-backed files are limited to
+  1 GiB (EFBIG), growth fails with ENOSPC instead of aborting, tmpfs charges space
+  atomically, and `lseek` rejects negative absolute offsets.
 - **Forked children keep their parent's credentials (N-93).** A process that dropped to an
   unprivileged user forked children running as root, in `/`, with default umask, signal
   handlers and mask. They now inherit uid, gid, working directory, umask, handlers and mask.
@@ -88,7 +92,8 @@
 - **`sigprocmask` with the same buffer for both sets applies the new mask (N-97).**
 - **`flock` works for Linux-ABI programs and `fsync` is never mistaken for it (N-120).**
   Syscall 73 used to be a silent no-op whenever its second argument looked like a lock
-  operation. Locks are released when their process exits.
+  operation. A lock belongs to the open file and is released on its last close or when its
+  process exits.
 - **No more serial output for every page fault and `open` (N-176, N-130).** The bring-up
   tracing is behind the new `trace` feature.
 - **PCI configuration reads no longer transmute arbitrary offsets into an enum (N-155).**
