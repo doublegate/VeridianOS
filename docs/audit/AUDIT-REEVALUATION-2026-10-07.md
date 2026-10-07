@@ -1,0 +1,194 @@
+# Audit re-evaluation, 2026-10-07 (supplement)
+
+A second, whole-tree review on `feat/v0.27` (after sprint C), done by seven read-only reviewers,
+one per area. They were given `AUDIT-VERIFICATION-2026-10-05.md` and asked for new findings only,
+or corrections where a recorded status was wrong. Each finding cites code; **C** = confirmed by
+tracing the code, **S** = suspected (needs a test), **L** = latent (unreachable until the
+execution-model rework of ADR 0006 or SMP S2/S3 makes it reachable).
+
+This file is the tracking list for the IDs it adds (N-64 to N-181). Status changes go in the
+Status column here; the 2026-10-05 file keeps tracking N-01 to N-63. Targets refer to the plan in
+`to-dos/MASTER_TODO.md` (sprints D0, D, E, F, G of v0.27.0 and the v0.28+ items).
+
+## Status corrections to the 2026-10-05 audit
+
+| ID | Recorded | Actual | Evidence |
+|---|---|---|---|
+| IPC-INC-01 | fixed | partly: only `sys_ipc_send` was fixed | `sys_ipc_receive` passes the raw token as an endpoint id (`syscall/mod.rs:2803-2811`); `sys_ipc_call` passes the capability as the target (`2828-2829`); `sync_call` waits for its reply on endpoint id == its own pid (`ipc/sync.rs:114-115`) |
+| N-47 | two endpoint objects | three or four unrelated objects per endpoint | see N-81 |
+| N-30 | fixed | not effective | exec builds the filtered capability space and drops it (`syscall/process.rs:111-117`); see N-94 |
+| MEM-PERF-01 | fixed | partly | per-CPU caches exist, but only `perf/bench.rs` frees through them; mmap, brk, munmap, COW, fork and teardown take `FRAME_ALLOCATOR` per frame (`mm/vas.rs:1101,1372,1609`) |
+| MEM-SEC-01 | fixed | fixed, with dead residue | `mm/user_validation.rs:18-92` `translate_address` still dereferences physical addresses; it has no callers: delete it |
+
+## Networking and drivers (N-64 to N-78)
+
+| ID | Sev | Finding | Fix | Target |
+|---|---|---|---|---|
+| N-64 | Critical C | `bind`/`connect` decode a private 6-byte address format, not `struct sockaddr_in` (`syscall/mod.rs:3487-3499`, used at 3559, 3597); `sendto` uses the correct decoder | `parse_sockaddr` everywhere, check `addr_len`, EAFNOSUPPORT; delete the old format and its test (`mod.rs:4386`) | F1 |
+| N-65 | Critical C | UDP cannot send or receive: `Socket::send/send_to` use a fresh unbound `UdpSocket` (`net/socket.rs:328,351`); the UDP header is never put on the wire (`net/udp.rs:176-182`); bind never registers the socket; a connected UDP socket receives through TCP (`socket.rs:390-393`) | one UDP endpoint per socket, registered on bind or auto-bound; build datagrams with `udp::send_packet` | F1 |
+| N-66 | High C | UDP receive is LIFO (`udp.rs:272`), a port-0 socket captures every datagram (`udp.rs:327`), no address/peer filter, checksum not verified | `VecDeque`, demux on (addr, port) + peer filter, verify checksum | F1 |
+| N-67 | High C | UDP checksum has no IPv6 pseudo-header (`udp.rs:68`; mandatory per RFC 8200 8.1) and sends 0 instead of 0xFFFF | shared RFC 1071 helper with v4/v6 pseudo-headers (also N-08) | F1 |
+| N-68 | High C | Socket errno all EIO, `WouldBlock` included (`network_ext_syscalls.rs:68,105`); `setsockopt` accepts and ignores everything (`socket.rs:722`); INET sockets always POLLOUT, never POLLIN (`net/socket_fd.rs:145`) | `KernelError -> errno` for sockets; per-socket readiness; per-socket wait queues | F1, F2 |
+| N-69 | Critical C | Received packets are processed only from the kernel shell's idle `read_line` (`services/shell/mod.rs:1039`); the IRQ path in `drivers/network.rs` prints from IRQ context, takes a non-IRQ-safe lock and fills a queue nothing reads | network thread woken by the NIC interrupt with a timer fallback; delete the second path | F2 |
+| N-70 | High C | An ARP miss sends unicast IP to the broadcast MAC (`net/ip.rs:390-395`) | per-neighbour pending queue (3 packets), EHOSTUNREACH after retries | F3 |
+| N-71 | Medium C | ARP cache accepts any sender (`arp.rs:134`), never expires (`arp::tick` uncalled), prints on the receive path | RFC 826 merge rule, reject group/zero MACs, tick from the timer | F3 |
+| N-72 | Medium C | IPv4 receive: no header checksum, destination or fragment checks (`ethernet.rs:120-140`, `ip.rs:144`); ICMP dropped; DF always set; length cast to `u16` (`ip.rs:359`); over-MTU sends silently dropped | validate; drop or bound-reassemble fragments; ICMPv4 echo/errors; EMSGSIZE | F1, F3 |
+| N-73 | High C | Legacy virtio-pci queue clamped to 256 while the device uses its own size (`drivers/virtio/queue.rs:153-157`, `set_queue_size` no-op `virtio/mod.rs:170`): the device writes past the ring | size rings from the device or refuse > 256 | F4 |
+| N-74 | Medium C | virtio-blk spins up to 10M iterations holding `VIRTIO_BLK` (`blk.rs:433-447`, N-52 again); spin-count timeout; FLUSH negotiated (`:185`) never sent | interrupt completion, time-based timeout, `flush` in the block trait called by BlockFS sync | F5 |
+| N-75 | Medium C/S | e1000e (0x10D3) driven as 8254x: EERD bit layout wrong, MAC reads as zero (`net/integration.rs:72-86`, `e1000.rs:189`); BAR mapped via `phys_to_virt`, not `map_mmio` | read RAL0/RAH0 or drop 0x10D3; `map_mmio` | F2 |
+| N-76 | High C | TCP (for NET-INC-01): ESTABLISHED appends payload without a sequence check (`tcp.rs:306`, RFC 5961 injection); RST generation wrong (`tcp.rs:604`); ISN is a global counter (`tcp.rs:615`, RFC 6528); demux ignores local address/port; `Socket::connect` sends no SYN (`socket.rs:228-236`) | part of the TCP decision (smoltcp vs in-house) | F3 |
+| N-77 | Low C | DNS `resolve` never sends (`dns.rs:968-985`), sequential query IDs; DMA pool unused (`net/mod.rs:233`); IOMMU parse-only (no DMA isolation) | wire with random IDs; document IOMMU in KNOWN-LIMITATIONS | F3, G |
+| N-78 | Medium C | Per-packet copies (3 on receive, 4-5 on transmit), a kick per packet, no EVENT_IDX, one global `DEVICES` lock; AArch64 uses `dmb ish` where DMA needs outer-shareable barriers (S) | one buffer with headroom; batched reposts; EVENT_IDX; per-device locks; `dma_rmb/wmb` helpers | F4 |
+
+## IPC and capabilities (N-79 to N-91)
+
+IPC is unreachable from user space until the v0.28 ABI work (N-33); except N-88 these are latent.
+
+| ID | Sev | Finding | Fix | Target |
+|---|---|---|---|---|
+| N-79 | High C | Receive/call/reply paths use tokens and pids as endpoint ids (the remainder of IPC-INC-01, see above) | one capability-to-endpoint helper checking the right; one-shot reply capability (seL4 reply objects) | v0.28 IPC |
+| N-80 | High C | Any process can send to any endpoint by number: non-endpoint capabilities skip the endpoint check (`ipc/sync.rs:200-215`), SEND is the WRITE bit (`cap/ipc_integration.rs:24`) which heap/stack capabilities carry (`cap/inheritance.rs:177-206`); `sys_ipc_reply` trusts a user-supplied caller (`mod.rs:2835`) | rights typed per object | v0.28 IPC |
+| N-81 | High C | One endpoint is several objects: registry endpoint vs capability endpoint (`ipc_integration.rs:45,155`), receive reads `ipc::registry` (`fast_path.rs:295`), slow paths an unfilled registry, the initial endpoint (`inheritance.rs:165`) none | capability holds `Arc<Endpoint>` owning the queues | v0.28 IPC |
+| N-82 | High C | Delivered messages are lost: two different function-local `PROCESS_MESSAGES` statics (`ipc/message_passing.rs:336,347`); waiters stay listed after spurious wakes (`316-323`, `channel.rs:161-174`) | per-endpoint queues; message buffer in the receiver's thread record | v0.28 IPC |
+| N-83 | High C | `EndpointRegistry::get` returns `&'static` into a by-value `BTreeMap` (`message_passing.rs:199-208`): IPC-SEC-01 again if filled | delete the registry (N-81) | v0.28 IPC |
+| N-84 | High C | Fast-path receive "blocks" a copy (`TaskProcessAdapter`, `sched/process_compat.rs:62-100`; `fast_path.rs:193-197`): never blocks, returns a zero message as success (`217-223`), timeout ignored; `find_process` frees the previous adapter under concurrent callers (`220-230`) | blocking on the real task (ADR 0006 wait queues); retire the adapter | D, v0.28 IPC |
+| N-85 | Med-High C | Waking by PID scans every endpoint queue (`ipc_blocking.rs:343-358`) and wakes the main thread without a state check (`240-280`) | wake = remove waiter + Blocked->Ready under the queue lock, honouring `on_cpu` | D |
+| N-86 | Medium C | Capability transfer locks the sender's then the receiver's space (`message_passing.rs:248`, `cap_transfer.rs:52`): self-send deadlocks, AB/BA on SMP | fixed lock order or no outer lock | v0.28 IPC |
+| N-87 | Medium C | Unbounded/unaccounted kernel memory: no rollback in `create_capability` (`cap/manager.rs:180-195`); 1024-message preallocation (`channel.rs:72`); ~16 MiB pinnable per endpoint; `REVOCATION_LIST` only grows; revoked entries count toward quota; shared-region quota reset by fork | accounting and rollback, byte budgets | v0.28 IPC |
+| N-88 | High C/S | POSIX shared memory (syscalls 210-212): no access control; truncate frees frames that may be mapped (`ipc/posix_shm.rs:216-240`); `shm_close` never called; unlinked names still open (`134-142`); 256 x 256 MiB | fd/capability-backed objects, refuse truncate while mapped, charge memory | G |
+| N-89 | Medium C | Revocation gaps: grants mint roots, not delegations (`ipc/zero_copy.rs:199-207`); `share_rights` ignores validity (`129-137`); `sys_capability_revoke` checks no holder (`cap/revocation.rs:212-224`); IDs recycled with generation 0 (`cap/manager.rs:185,438`) | derivation tree as the only authority; no recycling while held | v0.28 IPC |
+| N-90 | Low-Med C | Design claims unmet: rate limiting uncalled, no per-CPU capability cache, receive timeout ignored, no IPC priority inheritance, no lock-free rings, `sys_ipc_bind_endpoint` a no-op | correct the docs; implement with the redesign | G, v0.28 |
+| N-91 | Medium C | IPC hot path takes the global scheduler lock three times plus a dozen global locks, clones 16 KiB per retry (`sync.rs:146`), allocates per reply, wakes all waiters, and keeps the sender lost-wakeup window (`sync.rs:154`) | the redesign: per-endpoint lock, direct switch with time-slice donation on call (seL4 fast path) | v0.28 IPC |
+
+## Syscalls and process lifecycle (N-92 to N-114)
+
+| ID | Sev | Finding | Fix | Target |
+|---|---|---|---|---|
+| N-92 | Critical C | `kill` reaches a bookkeeping table, never a process (`syscall/filesystem.rs:1247-1266`, `services/process_server.rs:384-422`); no permission check; pid -1 treated as group 1; group scan only 1..=1024; listed as implemented (`docs/compat/LINUX-SYSCALL-COVERAGE.md:73`) | route to `process::exit::kill_process` with EPERM/ESRCH; groups via the process table | D0 |
+| N-93 | Critical C | Forked children run as root in `/` with default umask, handlers and mask (`process/fork.rs:51,154`; `pcb.rs:862-863`) | copy uid/gid, `ThreadFs`, handlers, mask; runtime test | D0 |
+| N-94 | High C | exec keeps every capability (N-30 ineffective, see above) | install the filtered space after the point of no return | D0 |
+| N-95 | High C | Native libc `struct sigaction` is 24 bytes, the kernel writes 32 (`userland/libc/include/veridian/signal.h:178-188`, `syscall/signal.rs:57-66`): `signal()` overwrites the caller's stack; flags/mask/restorer discarded | Linux k_sigaction layout everywhere; store all fields | D0 |
+| N-96 | High C | Signal-set bit layout: kernel and native libc use bit n, musl bit n-1 (`pcb.rs:437-487`, `signal.rs:173`) | bit (sig-1) everywhere | D |
+| N-97 | Medium C | `sigprocmask` writes `oldset` before reading `set` (`signal.rs:154-161`) | read first | D0 |
+| N-98 | High C | Ignored/default-ignore signals stay pending (SIGCHLD, `exit.rs:56,455,510`); futex/wait/sigsuspend treat any pending bit as EINTR (`futex.rs:239-249`, `exit.rs:246-250`) | drop ignored signals at generation; test pending & ~mask | D |
+| N-99 | High C | wait: every error ENOENT (`syscall/process.rs:324`), no ECHILD/ESRCH in the errno table (`linux_compat.rs:415-431`), no process-group waits (`291-297`), wrong WUNTRACED/WCONTINUED (`exit.rs:168,176`), killed children report exit 0, faults report exit 139 | Linux wait status encoding; errno per call | D |
+| N-100 | High C | `arch_prctl(ARCH_SET_FS)` writes a non-canonical address to the MSR: #GP in ring 0 from any process (`syscall/arch_prctl.rs:57-70`) | EPERM above the user limit | D0 |
+| N-101 | Medium C | exec failures after `clear()` return to an empty address space (`process/creation.rs:360`); no execute-permission check; other threads not killed first | build the new space aside and swap; fatal after the point of no return | D |
+| N-102 | High C | Native libc threads cannot work: clone returns through a C epilogue (`libc/src/syscall.c:231`, `pthread.c:470-490`); join keys on the cleared tid (`pthread.c:190`); global errno (`errno.c:17`); `sigpending`/`sigsuspend` stubs | assembly clone stub; TCB-based join; TLS errno | D |
+| N-103 | Medium C | musl `tkill`/`tgkill`/`waitid` fall through the remap to unrelated native syscalls (musl patch :173, `syscall/mod.rs:1175`): `abort()` calls select; `accept4` loses SOCK_CLOEXEC | intercept explicitly until X1 | D0 |
+| N-104 | Medium C | futex timeout read as raw ticks from a timespec (`futex.rs:163`); absolute WAIT_BITSET treated as relative | timespec conversion, clock-correct semantics | D |
+| N-105 | Low C | `rt_sigaction` refuses SIGKILL queries and signals 32-64 (breaks musl SIGCANCEL); `sigaltstack` fakes success | Linux semantics | D |
+| N-106 | Critical L | exit and exit_group share one native number and the non-boot `sys_exit` never makes the process a zombie (`syscall/process.rs:270`, `process/mod.rs:280-309`) | thread exit vs group exit; last thread runs process exit | D (D2) |
+| N-107 | Critical L | wait/exit wakeup lost: the waiter blocks its task, exit wakes only a Blocked *process* (`exit.rs:241` vs `62,463,517`); check-then-block window | per-process child wait queue with prepare-to-wait | D (D2) |
+| N-108 | Critical L | Teardown frees the address space and every thread's kernel stack, including running ones (`exit.rs:528-560`) | exiting flag, kick CPUs, teardown after every thread is off-CPU | D (D2) |
+| N-109 | High C | Signal mask/pending, clear_child_tid, robust list and FS base are per process, not per thread (`pcb.rs:150-178`, `usermode.rs:69`, `process.rs:173`) | move to `Thread`; shared pending for process-directed signals | D |
+| N-110 | Medium C | Fork children are runnable before setup completes; capabilities inherited twice (`fork.rs:255-265`, `syscall/process.rs:26-37`) | finish before enqueueing | D |
+| N-111 | Medium L | Concurrent waits can reap one child twice (`exit.rs:141-160`) | Zombie->Dead CAS before reaping | D |
+| N-112 | Medium S | Reparenting races exit notification (`exit.rs:615-630`); without pid 1 orphans leak | a tasklist lock; kernel reaper for orphans | D |
+| N-113 | High C/L | Signal frames: trampoline on the NX user stack (`signal_delivery.rs:742`), no red zone, misaligned, RFLAGS restored verbatim (IOPL), no canonical RIP check | restorer-based frame on the kernel-stack frame, sanitised (with N-170) | D3 |
+| N-114 | Low C | Thread user stacks placed by global tid (`thread.rs:~866`); clone maps 256 KiB even with `newsp`; main thread tid != pid; futex keys (pid, vaddr) break MAP_SHARED futexes | Linux layout and keys | D |
+
+## Filesystems (N-115 to N-131)
+
+| ID | Sev | Finding | Fix | Target |
+|---|---|---|---|---|
+| N-115 | High C | Relative paths resolve against a global cwd set by the kernel shell, not the caller's (`syscall/filesystem.rs:2486-2492`, `fs/mod.rs:721,808,829-905`); dirfds resolve through a path string (`filesystem.rs:2505-2510`) | cwd and dirfds as node handles; delete `Vfs.cwd` | D |
+| N-116 | High C | `O_EXCL` ignored (`fs/file.rs:96-114`); `openat` never truncates (`filesystem.rs:2547-2562`); create races map to ENOENT; no `O_NOFOLLOW`/`O_DIRECTORY` | lookup-or-create node operation under the directory lock (also the N-51 primitive) | D0 (flags), v0.29 FS (op) |
+| N-117 | High C | BlockFS frees and reuses an inode that is unlinked but still open (`fs/blockfs.rs:1721-1726`, `658-667`): one user's fd reads another's new file | in-memory inode cache with open counts, orphan list | v0.29 FS (G: interim refuse-free while open) |
+| N-118 | High L | Spinlocks held across I/O, user copies and waits: file table (`filesystem.rs:392-398,509-513,564-579`, `memory.rs:225-233`), file position (`file.rs:185-216`), BlockFS fs/cache/disk locks across virtio polling (`blockfs.rs:461-468,700-712`), console spin (`devfs.rs:107-132`) | drop the table lock after the fd lookup (`Arc<File>`); sleeping locks; cache I/O-in-progress state | D |
+| N-119 | High C | No real blocking: blocking pipe reads return EAGAIN (`filesystem.rs:465`), full pipes short-write, no PIPE_BUF atomicity (`pipe.rs:136-148`), pipes are not S_ISFIFO, `O_NONBLOCK` unused, eventfd/signalfd/timerfd spin 30 s, lock waits return EAGAIN, an empty pty read returns EOF (`pty.rs:145-154`) | wait queues (ADR 0006) with reader/writer counts | D |
+| N-120 | High C | Syscall 73 returns success whenever arg2 is 1-15 (`syscall/mod.rs:1168-1171`): `flock` is a no-op and `fsync` can be swallowed; `fs/flock.rs` unwired; inotify ENOSYS; xattrs keyed by inode number across filesystems | remap flock (as N-37); key locks by (fs, ino) | D0 |
+| N-121 | High C | `sync` is not durable or crash-consistent: no FLUSH (`blockfs.rs:107-125`); data written in place before metadata, freed blocks reused before commit (`752-760`); fsync is a whole-fs sync under the write lock | FLUSH barriers; no reuse before commit; journal or shadow superblock (new ADR) | F5, v0.29 FS |
+| N-122 | High C | Offset/size DoS: a write at a huge offset makes ramfs/tmpfs allocate the range and abort (`ramfs.rs:151-174`, `tmpfs.rs:192-220`); `offset + len` overflow panics; SEEK_CUR with `isize::MIN`; negative SEEK_SET accepted; tmpfs space check racy | maximum file size (EFBIG), checked arithmetic, `try_reserve`, EINVAL | D0 |
+| N-123 | Medium C | On-disk structures unvalidated: BlockFS checks only the magic, block pointers unchecked (`blockfs.rs:837-866`); ext4 shift/division/overflow/unbounded extent recursion (`ext4.rs:122-128,331,349-350,396-447`); FAT32 out-of-bounds (`fat32.rs:164-174`); ext4/FAT not mountable; whole-file reread per `read`; shell `mkfs` prints "done" and does nothing | validation pass at mount, fuzz targets; fix or remove `mkfs` | G |
+| N-124 | Medium C | `getdents64` re-reads the whole directory and seeks by index (`syscall/mod.rs:1869-1900`): `rm -r` skips entries; O(n^2) | stable cookies | v0.29 FS |
+| N-125 | Medium C | File mmap is an eager private copy, read errors ignored (`memory.rs:225-250`); MAP_SHARED incoherent; not in KNOWN-LIMITATIONS | page cache keyed by (fs, ino, pgoff); document now | v0.29 FS, G (doc) |
+| N-126 | Medium C | `O_APPEND` not atomic across opens (`file.rs:207-213`); large writes interleave | per-inode write lock | v0.29 FS |
+| N-127 | Low-Med C | File errors collapsed to InvalidState/ENOENT (`filesystem.rs:532-547`) | errno per cause | D |
+| N-128 | Medium C | pty: signals sent under the input lock (`pty.rs:158-170,193-210`); OPOST drops `\n` but reports success (`343-353`); partial-write counts lost | lock order; honest counts | D |
+| N-129 | Low S | Mount gated by any memory capability (`filesystem.rs:691-708`); no canonicalisation or EBUSY; type `blockfs` mounts an empty RAM fs | CAP_SYS_ADMIN-equivalent check; validation | G |
+| N-130 | Medium C | No dentry cache (`..` and symlinks re-walk from root, `fs/mod.rs:568-627`); BlockFS linear directory scan, 12-block directory cap (`blockfs.rs:2192`); every open prints its path to serial (`filesystem.rs:198-209,2525-2536`), also an information leak | dcache; hashed directories; remove the tracing (D0) | D0 (trace), v0.29 FS |
+| N-131 | Low-Med C | One uid/gid per process: no euid/fsuid/supplementary groups (`pcb.rs:210-226`); `chdir` checks no search permission on the target | credentials model (X3) | v0.30 |
+
+## Memory management (N-132 to N-144)
+
+| ID | Sev | Finding | Fix | Target |
+|---|---|---|---|---|
+| N-132 | High C | `mmap`/`brk` ignore `prot`: anonymous, shared and heap pages are writable and executable, PROT_NONE pages accessible, the W^X check cosmetic (`syscall/memory.rs:53-63,104,176`, `vas.rs:424,1844,1867`) | build PTE flags from `prot`, NX unless PROT_EXEC, no PTE for PROT_NONE; per-mapping `max_prot` | D0 |
+| N-133 | High C | One unprivileged `mmap` panics the kernel: `Vec::with_capacity(num_pages)` before any check (`vas.rs:1094`), `size + 4095` overflow (`1720,1067`), file path `vec![0; len]` (`memory.rs:232`); the mmap cursor is unbounded (`vas.rs:1725,2338,2380`) and can walk into L4 slot 256, where `l2_entry_for` grants USER on kernel tables (`page_table.rs:~430`) | bound length and cursor (CAS, `is_user_range`, rollback), budget; refuse USER at L4 >= 256 | D0 |
+| N-134 | High S | The physical map is placed by the bootloader inside the user range (usually L4[3]); `MAP_FIXED` there marks shared physmap tables USER and links user pages into every address space | physmap at a fixed kernel-half address; refuse USER below kernel-owned slots; delete the dead `HEAP_START` copy (`vas.rs:687-699,773,817-826`) | D0 |
+| N-135 | High C | `mprotect`: PROT_NONE revokes nothing (`vas.rs:1894`); read-only shared regions and device mappings can be made writable (no `max_prot`); only the first page checked (`memory.rs:345`); metadata only when the start matches (`vas.rs:1920`); one flush per page | `max_prot`, mapping split, batched flush | D0 |
+| N-136 | Medium C | Stack growth unbounded (limit recomputed from the grown size, `page_fault.rs:282,320`) and rewrites an existing mapping's flags to RW (`vas.rs:2162`); one map entry per grown page | RLIMIT_STACK + guard gap; refuse growth into mappings; extend one mapping | D0 |
+| N-137 | Medium C | brk into a `MAP_FIXED` region leaks frames per call (`vas.rs:1848`); `map_region` partial failure leaks (`1153`) | reserve the heap range; unwind on error | D0 |
+| N-138 | High L | Fault path uses `try_lock` on the address space (`page_fault.rs:142,185,230,264,309`): spurious SIGSEGV with threads; the spinlock is held across eager allocation, zeroing and file I/O (`memory.rs:177-266`) | sleeping reader/writer address-space lock (mmap_lock), per-VMA later | D |
+| N-139 | High L | TLB shootdown waits for CPUs spinning with interrupts off on the same locks: deadlock (`tlb.rs:151`); syscalls run with IF=0 throughout | interrupts on in syscalls; mmu_gather-style deferred frees; flush after dropping locks | D (D5) |
+| N-140 | Medium C | `MAP_SHARED` anonymous memory becomes copy-on-write at fork (`vas.rs:453,931-958`) | share writable through `frame_refs` | D |
+| N-141 | Low-Med C | `MAP_FIXED` over a mapping fails with ENOMEM (`vas.rs:1081`); munmap across mappings/holes EINVAL (`1426-1450`) | Linux semantics | D |
+| N-142 | Low-Med C | Frame allocator: `mark_frame_used` ignores buddy ranges (`frame_allocator.rs:1052`); more than 8 regions are folded and RAM lost (`mm/mod.rs:229`, `bootloader.rs`); a reserved buddy block gives a false OOM (`1027-1037`); dead reserve functions | handle buddy ranges; dynamic region count | G |
+| N-143 | Medium C | Performance: flushes on not-present to present (`vas.rs:1153-1162,1849,2183`); broadcast shootdowns without an mm CPU mask, full flush on receipt; O(n) mapping scans (`vas.rs:1556,1081,1426,1593`); eager allocation with a per-page `Vec<FrameNumber>`; `frame_refs` global lock per free; redundant page loop in user validation (`userspace.rs:56`); double copy in file mmap | remove needless flushes; per-mm CPU mask + ranged flush; range-indexed mappings; lazy anonymous memory; per-frame refcount array | D (flushes), v0.29 MM |
+| N-144 | Low S | `write_user` can copy padding bytes to user space; frame allocator locks not IRQ-safe; kernel stacks need physically contiguous frames (`kstack.rs:160`) | no-padding bound (zerocopy); irq-save locks; map stacks from single frames | G |
+
+## Security, unsafe code, CI and documentation (N-145 to N-165)
+
+| ID | Sev | Finding | Fix | Target |
+|---|---|---|---|---|
+| N-145 | High C | KPTI never switches CR3 (`arch/x86_64/kpti.rs:246-257`; no CR3 in `syscall.rs`); its shadow table maps L4[511] with USER (`kpti.rs:178,186`); the shell and README claim Meltdown mitigation | report the truth now; real KPTI (trampoline, PCID) or an explicit unsupported-CPU decision via `IA32_ARCH_CAPABILITIES` | D0 (truth), G |
+| N-146 | High C | KASLR, stack canaries, retpoline and Spectre mitigations are claimed but inactive: `security::init` is never called (`bootstrap.rs:475-480`); static relocation; no `-Zstack-protector`; `RETPOLINE_ENABLED = false` (`spectre.rs:392`); no IBPB, RSB fill, VERW, UMIP, eIBRS | KNOWN-LIMITATIONS + docs now; enable `-Zretpoline`, `-Zstack-protector=strong`, eIBRS/AutoIBRS, IBPB on address-space switch, UMIP | D0 (truth), G |
+| N-147 | Med-High C | A package header panics the kernel before any signature check (`pkg/mod.rs:473`, unchecked `sig_offset + sig_size` then slicing) | checked arithmetic, `.get()`, fuzz target | D0 |
+| N-148 | Medium C | A second package verifier accepts a 4-byte marker (`pkg/build_package.rs:235-252`; `repo_server.rs:367` zero key) | real Ed25519 or delete | G |
+| N-149 | Medium C | CSPRNG seeded only by timer jitter on AArch64, RISC-V and x86 without RDRAND (`arch/entropy.rs:146`) | RNDR, Zkr `seed`, virtio-rng; fast key erasure | G |
+| N-150 | Medium C | TLS 1.3 client accepts any CertificateVerify (`net/tls/handshake.rs:493`), chain checked by CN strings (`certificate.rs:220`) | document; verify signatures or use rustls | G |
+| N-151 | Medium C | `prctl` returns success for every option (`syscall/linux_compat.rs:513`): NO_NEW_PRIVS/seccomp fail open; seccomp `evaluate` never called | EINVAL for unimplemented options; implement the name options | D0 |
+| N-152 | Medium C | MAC is path-blind and its capability step only logs, flooding the audit ring (`security/mac/mod.rs:853-886`, `audit.rs:381`) | document; drop the per-access audit; labels before claims | G |
+| N-153 | Low-Med C | Passwords: 10 PBKDF2 iterations in dev builds, 10k in release, not stored with the hash (`auth.rs:303`); built-in root/veridian (`905`); non-constant-time compare (`351`); TOTP not RFC 6238 (`487`); display manager accepts root with any password (`display_manager.rs:313`) | stored cost, OWASP-level iterations (or argon2), `ct_eq_bytes`, RFC 6238, no default credentials | G |
+| N-154 | Medium C | Crypto not constant time and without known-answer tests: Ed25519 scalar multiplication branches on secrets (`crypto/asymmetric.rs:547`); table AES and branching GF multiply (`symmetric.rs:32,142`); duplicate AEADs in `net/tls/cipher.rs` | KATs now; RustCrypto ed25519/x25519/chacha20poly1305/aes-gcm | G |
+| N-155 | Medium C | `transmute::<u16, PciConfigRegister>` of arbitrary offsets is undefined behaviour (`drivers/pci.rs:759,763`) | pass raw offsets | D0 |
+| N-156 | Medium L | `&'static mut` escapes: `process_compat::current_process/find_process` (`62,198`), RISC-V `get_ready_queue` (`queue.rs:595`) | retired with the old scheduler (D) | D |
+| N-157 | Low C | `rtc.rs:288` transmutes an atomic `usize` into `fn()` | `Option<fn()>` behind a lock | G |
+| N-158 | High C | The Gemini issue-triage workflow lets any issue author drive an agent holding shell, an app token, `issues: write`, `id-token: write` and the API key ("PromptPwnd"); mutable `@v0` action. Issue workflows run from the default branch | delete it or gate on OWNER/MEMBER, remove shell tools, SHA-pin; must land on `main` | D0 (main) |
+| N-159 | High C | Releases and the CI summary ignore the test jobs (`ci.yml:617,860,898-901`); the release profile is never booted; the release README gives a failing QEMU command and the wrong licence (`ci.yml:668`) | tests in both `needs`; boot the release build; fix the text | D0 |
+| N-160 | Medium C | CI clippy lints only `x86_64-unknown-none` with a 40-entry allow-list including `static_mut_refs` (`ci.yml:111`) | the three-target clippy from AGENTS.md | D0 |
+| N-161 | Low C/S | CI's `RUSTFLAGS` replaces `.cargo/config.toml` target flags (`ci.yml:73`): CI AArch64 kernels differ from local ones | move flags to target JSONs or merge | G |
+| N-162 | Medium C | Coverage can never fail (`ci.yml:360,427`, `fail_ci_if_error: false`) | blocking job, ratcheting threshold | G |
+| N-163 | Medium C | Kani/TLA+ never run in CI; harnesses prove standalone models, whose token layout does not match `cap/token.rs` | KNOWN-LIMITATIONS now; harnesses on real functions + CI job | D0 (doc), G |
+| N-164 | Low-Med C | Supply chain: BusyBox/musl/`tools/cross` downloads unchecksummed (`build-busybox-rootfs.sh:63`); `cargo audit` covers one of five lockfiles; no Dependabot; no top-level `permissions:`; tag-pinned actions; broad cache restore keys | checksums, audit all lockfiles, permissions, SHA pins | G |
+| N-165 | Medium C | Documentation claims not yet in KNOWN-LIMITATIONS: "all drivers in user space" (`ARCHITECTURE-OVERVIEW.md:177`, book security page), "lock-free" allocator (`MEMORY-ALLOCATOR-DESIGN.md:111,403`, overview 275,293, book intro 22), "IPC <1us achieved" (overview 362), ML-KEM (445), "unforgeable tokens for all resource access" (README:35), plus N-145/146/150-152/163 | correct now | D0 |
+
+## Architecture layer (N-166 to N-181)
+
+| ID | Sev | Finding | Fix | Target |
+|---|---|---|---|---|
+| N-166 | Critical C/L | Ring-3 entries treat GS two ways: `syscall_entry` swaps, interrupt/exception handlers do not, and `this_arch_cpu_ptr` guesses (`percpu.rs:158-168`, `idt.rs:24`). With task switching a task can return to ring 3 with the kernel GS base, letting user code rewrite `kernel_rsp` | assembly entry stubs (Linux `entry_64.S`): conditional swapgs + `lfence` (CVE-2019-1125), kernel always on the per-CPU GS; paranoid entry only for NMI/#MC/#DB | D (D2 prerequisite) |
+| N-167 | High L | User RSP and the syscall frame pointer are per CPU (`syscall.rs:110,141,183`): a blocked syscall's values are overwritten by the next task's syscall | full pt_regs on the thread's kernel stack; frame derived from the stack top | D (D2) |
+| N-168 | High C | Exception handlers need the boot return context; without it they halt the CPU (`idt.rs:331-343,428-439,521-533,671-683`): any user fault is a DoS under D2 | ring-3 faults signal/exit through the normal return path; ring-0 faults panic and stop the other CPUs | D (D2) |
+| N-169 | High C | IST used for #PF, #GP, #UD, #DE, #NP, #SS, #AC, #SX and every IRQ (`idt.rs:44-121`), on unguarded 20 KiB static stacks (`gdt.rs:57-92`): nesting or scheduling corrupts the live frame | IST only for #DF/NMI/#MC on guarded stacks; #DF reports kstack guard hits | D (D2/D3) |
+| N-170 | High C/L | sigreturn restores privileged state unchecked: x86 RFLAGS/RIP (`signal_delivery.rs:908-909`), AArch64 PSTATE allows EL1 (`979`), RISC-V `sstatus` SPP (`1079`) | per-arch user-register sanitiser used by sigreturn, ptrace, exec, clone | D (x86), E |
+| N-171 | High L | `sysretq` with an unchecked RCX (`syscall.rs:218-224`, CVE-2012-0217 pattern) | SYSRET eligibility test, IRET fallback | D (D2) |
+| N-172 | Medium L | APs skip `init_syscall` (LSTAR/STAR/SFMASK) and XSETBV (`x86_64/smp.rs` `ap_init`): first syscall on an AP jumps to RIP 0 in ring 0 | shared `cpu_init_local()` for BSP and APs | D (D5) |
+| N-173 | Medium C/L | IPIs: logical id used as xAPIC destination (`sched/smp.rs:426`), vector 0 (`smp.rs:554,561,728`, `scheduler.rs:905`, `load_balance.rs:261`) and 0xFF (`633`); ICR written in two steps with interrupts on (`apic.rs:357-363`) | `hw_id` mapping, a real vector, irq-save; x2APIC | D (D5) |
+| N-174 | Medium C | x2APIC handover not detected (`apic.rs:567-645`), MADT type 9 ignored, I/O APIC address hard-coded (`apic.rs:112`), overrides ignored; no IDT gates for spurious, LVT error or device vectors; `irq::dispatch` unconnected | x2APIC, MADT-driven I/O APIC, generic vector stubs | F2 (device IRQs), G |
+| N-175 | Medium C | No handlers for NMI, #MC, #DB, #NM, #MF, #XM; `breakpoint_handler` prints under a lock | SIGFPE for #XM/#MF; NMI on its own IST, lockless; #MC logs banks and panics; panic stops other CPUs | D |
+| N-176 | Medium C | Every page fault writes ~45 bytes to the serial port (`idt.rs:229-258`), a VM exit each | debug feature or lock-free ring | D0 |
+| N-177 | Medium C | AArch64 EL2 entry leaves VPIDR/VMPIDR, CPTR_EL2, MDCR_EL2, HSTR_EL2 unset and writes SCTLR_EL1 = 0 (RES1 bits) | Linux `el2_setup.h`, INIT_SCTLR | E |
+| N-178 | Low-Med C | AArch64 and RISC-V kernels use FP/SIMD (720-byte IRQ frames); the x86 syscall entry still saves xmm0-15 | soft-float targets; per-task user FP; drop the x86 XMM save with XSAVE | D (x86), E |
+| N-179 | Low C | Timer wheel advances 1 ms per tick regardless of lost ticks (`x86_64/timer.rs:31`, `timer/mod.rs:382-392`); TSC invariance unchecked; no cross-CPU TSC sync; PIT loops without timeout | advance by elapsed time; checks; timeouts | D (D5), G |
+| N-180 | Low C | `smp_boot` continues after a failed start (ADR 0004 says stop): two CPUs can share a stack; AP stacks unguarded | `break`; `mm::kstack` stacks | D (D5) |
+| N-181 | Low C | The old x86 `context_switch` is unsound (non-naked, two asm blocks, `popfq` before the stack switch) | delete with the old scheduler | D |
+
+## Recommended order (summary)
+
+The reviewers converge on the same dependency order:
+
+1. **D0, before the process-model work** — defects reachable today, mostly small: the triage
+   workflow on `main` (N-158), CI gates (N-159, N-160), `mmap`/`brk`/`mprotect` (N-132 to N-137),
+   `arch_prctl` (N-100), fork credentials (N-93), exec capabilities (N-94), `kill` (N-92),
+   `sigaction` layout and `sigprocmask` (N-95, N-97), musl intercepts (N-103), syscall 73
+   (N-120), file-offset DoS and open flags (N-122, N-116 flags), the package header (N-147),
+   `prctl` (N-151), PCI transmute (N-155), page-fault serial output and open tracing (N-176,
+   N-130 trace), and truthful documentation (N-145, N-146, N-163, N-165).
+2. **D, the process model** — the x86 entry layer first (N-166 to N-169, N-171), then the
+   dispatcher and the new scheduler, exit/wait/signal core (N-106 to N-111), wait queues and the
+   no-spinlock-across-blocking rule (N-118, N-119, N-138), XSAVE, threads (N-102), then SMP
+   S2/S3 (N-139, N-172, N-173, N-180).
+3. **E, F, G** as in `MASTER_TODO.md`; IPC, filesystem and memory-management architecture work
+   moves to v0.28 and v0.29.

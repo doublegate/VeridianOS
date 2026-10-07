@@ -137,6 +137,57 @@ client exists yet to share them with.
 `cap_lookup` measures 93 ns in a dev build: within the 100 ns target, but only just. Release-build
 numbers have not been recorded.
 
+### Hardening features are not active (N-145, N-146, N-15; planned v0.27 sprint G)
+
+Present as code but not in effect, despite older documentation:
+
+- **KPTI:** a shadow page table is built, but CR3 is never switched on entry or exit, and the
+  shadow maps the kernel image user-accessible. On CPUs affected by Meltdown, a process can read
+  kernel memory, including the physical map.
+- **KASLR:** the kernel is linked and loaded at a fixed address.
+- **Stack canaries:** no stack-protector instrumentation is compiled in.
+- **Retpoline, IBRS/eIBRS, IBPB, RSB filling, MDS clearing, UMIP:** not enabled.
+- **SMEP/SMAP:** not enabled (N-15).
+
+### Network sockets do not work from user programs (N-64 to N-69; planned v0.27 sprint F)
+
+`bind` and `connect` misread `struct sockaddr_in`, UDP datagrams are neither sent nor received
+through the socket layer, TCP `connect` reports success without a handshake, and received packets
+are processed only while the kernel shell waits for input. Loopback and Unix sockets are not
+affected.
+
+### File mmap is a private copy (N-125)
+
+A file mapping is copied in full at `mmap` time. `MAP_SHARED` writes never reach the file, and
+two processes mapping one file do not see each other's changes.
+
+### Memory protection flags (N-132, N-135; planned v0.27 sprint D0)
+
+`mmap` and `brk` ignore `prot`: anonymous, shared and heap pages are mapped writable and
+executable, and `PROT_NONE` does not remove access. `mprotect` cannot revoke access.
+
+### Security policy features are partial (N-150 to N-152, N-88)
+
+- The TLS 1.3 client does not verify certificate signatures or the server's CertificateVerify.
+- MAC labels every file and user process alike; its capability step only logs.
+- `prctl` reports success for every option, so `PR_SET_NO_NEW_PRIVS` and `PR_SET_SECCOMP` have no
+  effect, and the seccomp filter is never consulted.
+- POSIX shared memory objects have no access control.
+
+### No DMA isolation (N-77)
+
+The IOMMU tables are parsed but translation is never enabled; devices can DMA anywhere.
+
+### Formal verification covers models, not the kernel (N-163)
+
+The Kani harnesses prove properties of standalone models (whose capability token layout differs
+from `cap/token.rs`), and neither Kani nor TLC runs in CI.
+
+### Entropy on AArch64 and RISC-V (N-149)
+
+The CSPRNG is seeded only from timer jitter on AArch64, RISC-V and x86 CPUs without RDRAND, which
+is close to deterministic under QEMU TCG.
+
 ## Measurement caveat
 
 Before v0.26.0, every in-kernel benchmark divided TSC ticks by 2 (an assumed 2 GHz clock). On the

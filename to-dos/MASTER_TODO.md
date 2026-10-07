@@ -56,25 +56,85 @@ What does not work yet: `docs/KNOWN-LIMITATIONS.md`.
     - Huge pages: MEM-ARCH-01.
     - Real AArch64/RISC-V heaps: MEM-SEC-03.
     - Kernel stack guard pages: N-26.
-  - [ ] **D, process model (C5):**
-    - Scheduler-dispatched, preemptible ring-3 tasks (a context switch must not hold the
-      scheduler lock across the switch).
-    - SMP stage S2: per-CPU run queues, idle tasks and work stealing on the secondaries
-      (SCHED-PERF-01, SMP-PERF-01), per-CPU RUNNING_TASK; then S3, user tasks on every CPU and
-      `smp` on by default. N-51, N-52.
-    - User threads.
-    - XSAVE FPU state: N-41.
-    - N-46, N-50, N-54, W-13.
-  - [ ] **E, user mode beyond x86_64:** AArch64 MMU, caches and EL0 (N-28); RISC-V U-mode.
-  - [ ] **F, protocols and policy:**
-    - TCP: NET-INC-01, N-08, N-20.
-    - WireGuard: NET-INC-02.
-    - NVMe queues.
-    - Priority inheritance: SCHED-INC-01. Deadline scheduling: SCHED-INC-02.
-    - Namespaces: VIRT-INC-01.
+  - [ ] **D0, urgent fixes reachable today** (re-evaluation, `docs/audit/AUDIT-REEVALUATION-2026-10-07.md`;
+    do first, each with a regression test):
+    - Gemini issue-triage workflow on `main` (N-158); CI release/summary gates and three-target clippy
+      (N-159, N-160).
+    - Memory: `prot` honoured by mmap/brk, PROT_NONE, W^X, `max_prot` for mprotect, bounded mmap length
+      and cursor, no USER at kernel slots, physmap out of the user range, stack-growth limit, brk/map
+      leaks (N-132 to N-137).
+    - Process: fork credentials/cwd/handlers (N-93), exec capability filter (N-94), `kill` to real
+      processes (N-92), `arch_prctl` canonical check (N-100), `sigaction` layout and `sigprocmask`
+      order (N-95, N-97), musl `tkill`/`tgkill`/`waitid` intercepts (N-103), `prctl` fail-closed
+      (N-151).
+    - Files: syscall 73 heuristic (N-120), offset/size DoS (N-122), O_EXCL/O_TRUNC/O_NOFOLLOW/
+      O_DIRECTORY (N-116 flags).
+    - Package header overflow (N-147), PCI transmute (N-155), per-fault and per-open serial output
+      (N-176, N-130).
+    - Truthful claims: KNOWN-LIMITATIONS "hardening not active" (KPTI, KASLR, canaries, retpoline,
+      Spectre, SMEP/SMAP), TLS, MAC, seccomp, Kani/TLA+, file mmap; README/book/overview corrections
+      (N-145, N-146, N-150, N-152, N-163, N-165).
+  - [ ] **D, process model and scheduler (C5; ADR 0006 + ADR 0007):**
+    - [x] Scheduler policy core: EEVDF fair, FIFO/RR with bandwidth limit, SCHED_DEADLINE (CBS),
+      PELT-style load, SMP placement/balancing (`sched/policy/`, 36 host tests).
+    - [ ] x86 entry layer first: assembly stubs with symmetric swapgs + lfence, per-thread pt_regs
+      on the kernel stack, IST only for #DF/NMI/#MC, SYSRET eligibility with IRET fallback,
+      exit-to-user loop (need_resched, signals), user-register sanitiser (N-166 to N-171, N-175).
+    - [ ] D1/D2 dispatcher: switch primitive, boot task + idle, kernel threads, user tasks
+      dispatched by the scheduler on their own kernel stacks; launch from boot/shell/KDE as
+      spawn + wait; exit vs exit_group, process exit by the last thread, teardown after every
+      thread is off-CPU, child wait queue (N-106 to N-111); fork/wait; XSAVE switching (N-41).
+    - [ ] Blocking: wait-queue primitive, sleep queue, no spinlock held across I/O, user copies
+      or waits; file table lock dropped after fd lookup; sleeping address-space lock (N-118,
+      N-119, N-138); pipes with reader/writer counts and PIPE_BUF atomicity; futex queues with
+      timespec timeouts (N-104).
+    - [ ] D3: timer preemption of ring 3; device IRQs on the kernel stack; signal delivery on
+      return to user with restorer frames (N-113); per-thread signal state (N-109); ignored
+      signals dropped at generation (N-98); sigset layout (N-96); wait status and errno (N-99,
+      N-127); exec atomic swap (N-101); relative paths per thread (N-115); MAP_SHARED anon and
+      MAP_FIXED semantics (N-140, N-141); pty fixes (N-128); thread placement (N-114).
+    - [ ] Threads: clone through the dispatcher, native libc clone stub, TCB join, TLS errno
+      (N-102); N-46, N-50, N-54.
+    - [ ] D4: nested boot dispatch and `BOOT_RETURN_*` removed; old scheduler, `queue.rs`,
+      `percpu_queue.rs`, `deadline.rs`, `process_compat`, old `context_switch` retired (N-84,
+      N-85, N-156, N-181).
+    - [ ] D5, SMP S2/S3: per-CPU run queues and current task, idle and balancing on every CPU,
+      `cpu_init_local()` on APs (N-172), IPI fixes (N-173), interrupts enabled in syscalls with
+      deferred frees and per-mm TLB masks (N-139, N-143 flushes), smp_boot stop + guarded AP
+      stacks (N-180), timer advance by elapsed time (N-179), `smp` on by default; N-51, N-52.
+    - [ ] Syscalls `sched_setattr/getattr`, `sched_setscheduler`, `nice`/`setpriority`, real
+      `sched_setaffinity`/`getaffinity`, `sched_yield` on the new policy (SCHED-INC-02 resolved
+      by the deadline class).
+  - [ ] **E, user mode beyond x86_64:** AArch64 MMU, caches and EL0 (N-28) with Linux-style EL2
+    and SCTLR setup (N-177); RISC-V U-mode (N-14); soft-float kernels on both (N-178); register
+    sanitiser on both (N-170); kernel stack guard pages on both (N-26).
+  - [ ] **F, networking, storage and protocols:**
+    - F1 socket layer: sockaddr decoding, UDP send/receive/demux/checksum, errno and readiness
+      (N-64 to N-68, N-72).
+    - F2 network thread with NIC interrupts and per-socket wait queues (N-69, N-75); generic
+      device-interrupt vectors, x2APIC and MADT-driven I/O APIC (N-174).
+    - F3 TCP: decide smoltcp (no_std, 0BSD) vs in-house, then NET-INC-01, N-08, N-20, N-70,
+      N-71, N-76, DNS (N-77).
+    - F4 virtqueues: device-sized rings, EVENT_IDX, batched kicks, DMA barriers, fewer copies
+      (N-73, N-78, N-58).
+    - F5 storage: interrupt-driven NVMe and virtio-blk, FLUSH from BlockFS sync, durable fsync
+      (N-52, N-74, N-121 durability), then NVMe queues.
+    - WireGuard (NET-INC-02) after F1/F2; priority inheritance (SCHED-INC-01) through the policy
+      boost; namespaces (VIRT-INC-01).
+  - [ ] **G, hardening and correctness:** enable retpoline, stack protector, eIBRS/AutoIBRS, IBPB,
+    UMIP, SMEP/SMAP (N-15) and decide KPTI (N-145, N-146); entropy sources and fast key erasure
+    (N-149); crypto KATs and RustCrypto primitives (N-154); package verifier cleanup (N-148);
+    passwords (N-153); POSIX shm access control (N-88); on-disk validation and fuzzing, `mkfs`
+    (N-123); BlockFS open-unlinked inodes (N-117 interim); mount checks (N-129); frame allocator
+    regions (N-142); `write_user` padding and IRQ-safe allocator locks (N-144); RTC fn pointer
+    (N-157); CI flags, blocking coverage, real Kani harnesses, supply chain (N-161 to N-164).
   - [ ] **Release:** tri-arch boot with `-smp 4`, runtime suite, CHANGELOG, tag.
 - [ ] **v0.28.0:** one Linux ABI with VeridianOS IPC in its own range (X1, fixes N-33), plus the
   process, signal, time and file syscall tiers.
+  - [ ] **IPC redesign** (makes IPC reachable and correct): one endpoint object held by capabilities,
+    typed rights, per-endpoint sender/receiver wait queues, one-shot reply capabilities and a direct
+    switch with time-slice donation on call, notifications, accounting and rollback, the derivation
+    tree as sole authority (N-79 to N-91, IPC-INC-01 remainder, N-47).
   - [ ] **Package signing keys (N-55 follow-up).** Today no post-quantum key is provisioned, so a
     policy requiring the PQ signature refuses every package.
     - Key hierarchy: an offline maintainer root key (ML-DSA-65 seed, plus Ed25519) that only
@@ -90,6 +150,13 @@ What does not work yet: `docs/KNOWN-LIMITATIONS.md`.
       happens if the root is lost or compromised.
 - [ ] **v0.29.0 - v0.31.0:** the rest of the Linux/POSIX syscall surface, loader/vDSO/TTY/procfs,
   and LTP and open_posix in CI. See `docs/compat/COMPATIBILITY-PLAN.md`.
+  - [ ] **v0.29 filesystem architecture:** node-based path API with lookup-or-create (N-116, N-51),
+    inode cache with open counts and orphan list (N-117), crash consistency ADR (journal or shadow
+    superblock; N-121), page cache and shared mmap (N-125), dentry cache and hashed directories
+    (N-130), stable getdents cookies (N-124), atomic O_APPEND (N-126).
+  - [ ] **v0.29 memory architecture:** lazy anonymous memory, range-indexed mappings, per-frame
+    refcount array, ranged per-mm TLB flushes, per-VMA locks (N-143).
+  - [ ] **v0.30 credentials:** real/effective/saved/fs ids and groups (N-131).
 - [ ] **C6 (staged from v0.28):** move drivers, protocols and codecs out of the kernel.
 - [ ] **C7:** serve a native user-space Wayland client; frame-backed `wl_shm` (DRV-PERF-01,
   DESK-ARCH-01).
