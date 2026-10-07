@@ -548,6 +548,22 @@ pub fn exec_process(path: &str, argv: &[&str], envp: &[&str]) -> Result<(), Kern
         file_table.close_on_exec();
     }
 
+    // Step 5b: Only capabilities marked PRESERVE_EXEC survive exec (N-30).
+    // The filtered space used to be built in sys_exec and then dropped, so
+    // every capability survived (N-94). Done here, after the last step that
+    // can fail, so a failed exec leaves the caller's capabilities intact.
+    {
+        let filtered = crate::cap::CapabilitySpace::new();
+        {
+            let old = process.capability_space.lock();
+            if crate::cap::inheritance::exec_inherit_capabilities(&old, &filtered).is_err() {
+                println!("[WARN] exec: some PRESERVE_EXEC capabilities were not kept");
+            }
+        }
+        let old = core::mem::replace(&mut *process.capability_space.lock(), filtered);
+        drop(old);
+    }
+
     // Step 6: Reset signal handlers to defaults
     process.reset_signal_handlers();
 

@@ -627,6 +627,8 @@ pub fn cleanup_process(process: &Process) {
             );
         }
         file_table.close_all();
+        // flock/fcntl locks die with their owner (N-120).
+        crate::fs::flock::cleanup_process_locks(process.pid.0);
     }
 
     // Reparent children to init if not zombie

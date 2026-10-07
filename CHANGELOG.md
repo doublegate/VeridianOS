@@ -46,6 +46,18 @@
 
 ### Security
 
+- **Forked children keep their parent's credentials (N-93).** A process that dropped to an
+  unprivileged user forked children running as root, in `/`, with default umask, signal
+  handlers and mask. They now inherit uid, gid, working directory, umask, handlers and mask.
+- **exec drops capabilities not marked for exec (N-94).** The filtered capability space was
+  built and then discarded, so every capability survived exec; it is now installed once the
+  new image is in place.
+- **`arch_prctl(ARCH_SET_FS)` refuses non-user addresses (N-100)**, which faulted the kernel.
+- **`prctl` fails closed (N-151).** It reported success for every option, so
+  `PR_SET_NO_NEW_PRIVS` and `PR_SET_SECCOMP` appeared to take effect; only the name and
+  timer-slack options are accepted now.
+- **A malformed package header no longer halts the kernel (N-147)** before its signature is
+  checked.
 - **Memory protections are enforced (N-132 to N-137).** `mmap` and `brk` used to ignore
   `prot`: anonymous, shared and heap memory was writable and executable, and `PROT_NONE` gave
   full access. Page flags now follow `prot` (no-execute unless `PROT_EXEC`), `mprotect` can
@@ -73,6 +85,13 @@
 
 ### Fixed
 
+- **`sigprocmask` with the same buffer for both sets applies the new mask (N-97).**
+- **`flock` works for Linux-ABI programs and `fsync` is never mistaken for it (N-120).**
+  Syscall 73 used to be a silent no-op whenever its second argument looked like a lock
+  operation. Locks are released when their process exits.
+- **No more serial output for every page fault and `open` (N-176, N-130).** The bring-up
+  tracing is behind the new `trace` feature.
+- **PCI configuration reads no longer transmute arbitrary offsets into an enum (N-155).**
 - **A child killed by a signal is reported as such (N-99, part).** `wait` reported a process
   killed by SIGSEGV or SIGKILL as a normal exit with status 0; it now reports `WIFSIGNALED`,
   `WTERMSIG` and, for core-dumping signals, `WCOREDUMP`.

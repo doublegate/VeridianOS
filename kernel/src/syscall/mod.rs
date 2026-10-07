@@ -789,7 +789,7 @@ pub extern "C" fn syscall_handler(
             sys_faccessat(arg1, arg2, arg3, arg4)
         } else if let Some(syscall) = linux_compat::translate_linux_syscall(syscall_num) {
             handle_syscall(syscall, arg1, arg2, arg3, arg4, arg5)
-        } else if let Some(result) = linux_compat::handle_linux_stub(syscall_num) {
+        } else if let Some(result) = linux_compat::handle_linux_stub(syscall_num, arg1, arg2) {
             result
         } else {
             // SAFETY: Writing to COM1 I/O port for diagnostic output.
@@ -1160,14 +1160,15 @@ fn dispatch_native_abi(
     // Linux setsockopt(54) collides with VeridianOS FileSeek(54).
     // musl maps it to 254. So 54 is always FileSeek. (No fix needed)
 
-    // Linux flock(73) collides with VeridianOS FsFsync(73).
-    // musl does not remap flock, so it arrives as raw 73.
-    // flock(fd, operation) has arg2 = LOCK_SH(1)/LOCK_EX(2)/LOCK_UN(8)/LOCK_NB(4)
-    // fsync(fd) has no meaningful arg2 (undefined/0).
-    // Heuristic: if arg2 is a valid flock operation (1-15), treat as flock.
-    if syscall_num == 73 && arg2 > 0 && arg2 <= 15 {
-        // Accept flock silently (no-op -- VeridianOS doesn't have file locking)
-        return Ok(0);
+    // Linux flock(73) collides with VeridianOS FsFsync(73), and musl does
+    // not remap flock. The caller's ABI decides, not its arguments: a
+    // heuristic on arg2 used to make flock a silent no-op and could swallow
+    // a native fsync whose stale rsi happened to be 1-15 (N-120).
+    if syscall_num == 73
+        && crate::process::current_process()
+            .is_some_and(|p| crate::syscall::linux_compat::is_linux_abi(&p))
+    {
+        return sys_flock(arg1, arg2);
     }
 
     // ---------------------------------------------------------------
@@ -1185,7 +1186,7 @@ fn dispatch_native_abi(
                 sys_faccessat(arg1, arg2, arg3, arg4)
             } else if let Some(syscall) = linux_compat::translate_linux_syscall(syscall_num) {
                 handle_syscall(syscall, arg1, arg2, arg3, arg4, arg5)
-            } else if let Some(result) = linux_compat::handle_linux_stub(syscall_num) {
+            } else if let Some(result) = linux_compat::handle_linux_stub(syscall_num, arg1, arg2) {
                 result
             } else {
                 // SAFETY: Writing to COM1 I/O port for diagnostic output.
@@ -3782,6 +3783,27 @@ fn sys_socket_pair(
         return Err(e);
     }
     Ok(0)
+}
+
+/// flock(2): a whole-file advisory lock on an open file (N-120).
+///
+/// Locks are keyed by the open node's identity, which is unique across
+/// filesystems (inode numbers are not), owned by the process, and dropped
+/// when it exits. A conflicting lock returns EWOULDBLOCK even without
+/// LOCK_NB until flock waits on a wait queue (ADR 0006, sprint D).
+fn sys_flock(fd: usize, operation: usize) -> SyscallResult {
+    let process = crate::process::current_process().ok_or(SyscallError::InvalidState)?;
+    let file = process
+        .file_table
+        .lock()
+        .get(fd)
+        .ok_or(SyscallError::BadFileDescriptor)?;
+    let key = alloc::sync::Arc::as_ptr(&file.node) as *const () as u64;
+    match crate::fs::flock::flock(key, process.pid.0, operation as u32) {
+        Ok(()) => Ok(0),
+        Err(crate::error::KernelError::WouldBlock) => Err(SyscallError::WouldBlock),
+        Err(_) => Err(SyscallError::InvalidArgument),
+    }
 }
 
 #[cfg(test)]

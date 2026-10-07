@@ -147,30 +147,38 @@ pub fn sys_sigaction(signum: usize, act_ptr: usize, oldact_ptr: usize) -> Syscal
 pub fn sys_sigprocmask(how: usize, set_ptr: usize, oldset_ptr: usize) -> SyscallResult {
     let process = process::current_process().ok_or(SyscallError::InvalidState)?;
 
-    // Save old mask before modifying
-    let old_mask = process.get_signal_mask();
+    // Read the new set before writing the old one: callers commonly pass
+    // the same buffer for both (`sigprocmask(SIG_BLOCK, &s, &s)`), and
+    // writing first made the call apply the old mask (N-97).
+    let new_bits: Option<u64> = if set_ptr != 0 {
+        validate_user_ptr_typed::<u64>(set_ptr)?;
+        Some(super::userspace::read_user(set_ptr)?)
+    } else {
+        None
+    };
+    let updated = |old: u64| -> Result<u64, SyscallError> {
+        let Some(bits) = new_bits else {
+            return Ok(old);
+        };
+        let mask = match how {
+            SIG_BLOCK => old | bits,
+            SIG_UNBLOCK => old & !bits,
+            SIG_SETMASK => bits,
+            _ => return Err(SyscallError::InvalidArgument),
+        };
+        // SIGKILL (bit 9) and SIGSTOP (bit 19) cannot be blocked
+        Ok(mask & !((1u64 << 9) | (1u64 << 19)))
+    };
 
-    // Write old mask to user space if requested
+    let old_mask = process.get_signal_mask();
+    let new_mask = updated(old_mask)?;
+
     if oldset_ptr != 0 {
         validate_user_ptr_typed::<u64>(oldset_ptr)?;
         super::userspace::write_user::<u64>(oldset_ptr, old_mask)?;
     }
-
-    // Apply new mask if a set pointer was provided
-    if set_ptr != 0 {
-        validate_user_ptr_typed::<u64>(set_ptr)?;
-        let new_bits: u64 = super::userspace::read_user(set_ptr)?;
-
-        let updated_mask = match how {
-            SIG_BLOCK => old_mask | new_bits,
-            SIG_UNBLOCK => old_mask & !new_bits,
-            SIG_SETMASK => new_bits,
-            _ => return Err(SyscallError::InvalidArgument),
-        };
-
-        // SIGKILL (bit 9) and SIGSTOP (bit 19) cannot be blocked
-        let sanitized = updated_mask & !((1u64 << 9) | (1u64 << 19));
-        process.set_signal_mask(sanitized);
+    if new_bits.is_some() {
+        process.set_signal_mask(new_mask);
     }
 
     Ok(0)

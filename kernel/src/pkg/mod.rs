@@ -467,17 +467,20 @@ impl PackageManager {
         }
 
         // Step 2: Extract signatures
-        let sig_offset = header.signature_offset as usize;
-        let sig_size = header.signature_size as usize;
-
-        if sig_offset + sig_size > package_data.len() {
-            return Err(KernelError::InvalidArgument {
-                name: "signature_offset",
-                value: "out_of_bounds",
-            });
-        }
-
-        let sig_data = &package_data[sig_offset..sig_offset + sig_size];
+        // Header fields are untrusted (the package comes from a mirror):
+        // an overflowing offset + size panicked the kernel before any
+        // signature was checked (N-147). Checked arithmetic, then `get`.
+        let out_of_bounds = KernelError::InvalidArgument {
+            name: "signature_offset",
+            value: "out_of_bounds",
+        };
+        let range = signature_range(
+            header.signature_offset,
+            header.signature_size,
+            package_data.len(),
+        )
+        .ok_or(out_of_bounds)?;
+        let sig_data = &package_data[range];
         let signatures =
             PackageSignatures::from_bytes(sig_data).map_err(|_| KernelError::InvalidArgument {
                 name: "signatures",
@@ -1144,8 +1147,26 @@ fn install_file(path: &str, data: &[u8], mode: u32) -> PkgResult<()> {
     Ok(())
 }
 
+/// The byte range of a package's signature block, if it lies within the
+/// package (N-147: header fields are untrusted).
+fn signature_range(offset: u64, size: u64, len: usize) -> Option<core::ops::Range<usize>> {
+    let start = usize::try_from(offset).ok()?;
+    let end = start.checked_add(usize::try_from(size).ok()?)?;
+    (end <= len).then_some(start..end)
+}
+
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn signature_range_rejects_overflow_and_overrun() {
+        assert_eq!(signature_range(10, 20, 100), Some(10..30));
+        assert_eq!(signature_range(90, 20, 100), None);
+        assert_eq!(signature_range(u64::MAX, 2, 100), None);
+        assert_eq!(signature_range(1, u64::MAX, 100), None);
+        assert_eq!(signature_range(100, 0, 100), Some(100..100));
+    }
+
     #[allow(unused_imports)]
     use alloc::vec;
 

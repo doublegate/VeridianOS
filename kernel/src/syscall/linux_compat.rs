@@ -490,7 +490,38 @@ pub(crate) fn is_faccessat(linux_num: usize) -> bool {
     linux_num == LINUX_FACCESSAT || linux_num == LINUX_FACCESSAT2
 }
 
-pub(crate) fn handle_linux_stub(linux_num: usize) -> Option<SyscallResult> {
+/// prctl(2) subset. Options a program can rely on for its correctness or
+/// security are refused (EINVAL) until implemented, never faked (N-151).
+fn sys_prctl(option: usize, arg2: usize) -> SyscallResult {
+    const PR_SET_NAME: usize = 15;
+    const PR_GET_NAME: usize = 16;
+    const PR_SET_TIMERSLACK: usize = 29;
+    const PR_GET_TIMERSLACK: usize = 30;
+    match option {
+        // Advisory only.
+        PR_SET_NAME | PR_SET_TIMERSLACK => Ok(0),
+        PR_GET_TIMERSLACK => Ok(50_000),
+        PR_GET_NAME => {
+            let thread =
+                crate::process::current_thread().ok_or(super::SyscallError::InvalidState)?;
+            let mut name = [0u8; 16];
+            let bytes = thread.name.as_bytes();
+            let n = bytes.len().min(15);
+            name[..n].copy_from_slice(&bytes[..n]);
+            // SAFETY: copy_to_user validates that arg2 is writable user memory.
+            unsafe { super::userspace::copy_to_user(arg2, &name) }
+                .map_err(|_| super::SyscallError::InvalidPointer)?;
+            Ok(0)
+        }
+        _ => Err(super::SyscallError::InvalidArgument),
+    }
+}
+
+pub(crate) fn handle_linux_stub(
+    linux_num: usize,
+    arg1: usize,
+    arg2: usize,
+) -> Option<SyscallResult> {
     match linux_num {
         // sigaltstack: musl calls this during signal init. Return success.
         LINUX_SIGALTSTACK => Some(Ok(0)),
@@ -508,9 +539,9 @@ pub(crate) fn handle_linux_stub(linux_num: usize) -> Option<SyscallResult> {
         LINUX_SCHED_GET_PRIORITY_MAX => Some(Ok(0)),
         // sched_get_priority_min: Return 0 for SCHED_OTHER.
         LINUX_SCHED_GET_PRIORITY_MIN => Some(Ok(0)),
-        // prctl: process control operations. Most are optional; return 0 (success)
-        // for common operations like PR_SET_NAME, PR_GET_NAME, PR_SET_TIMERSLACK.
-        LINUX_PRCTL => Some(Ok(0)),
+        // prctl: the cosmetic options work; everything else fails closed, so
+        // PR_SET_NO_NEW_PRIVS / PR_SET_SECCOMP are not silently ignored (N-151).
+        LINUX_PRCTL => Some(sys_prctl(arg1, arg2)),
         // sched_setaffinity/getaffinity: CPU affinity. Return success (single-CPU stub).
         LINUX_SCHED_SETAFFINITY => Some(Ok(0)),
         LINUX_SCHED_GETAFFINITY => {
@@ -565,7 +596,7 @@ mod tests {
         assert!(is_faccessat(269));
         assert!(is_faccessat(439));
         assert!(!is_faccessat(260));
-        assert!(handle_linux_stub(439).is_none());
+        assert!(handle_linux_stub(439, 0, 0).is_none());
     }
 
     #[test]
@@ -589,7 +620,7 @@ mod tests {
 
     #[test]
     fn test_sigaltstack_stub() {
-        let result = handle_linux_stub(LINUX_SIGALTSTACK);
+        let result = handle_linux_stub(LINUX_SIGALTSTACK, 0, 0);
         assert!(result.is_some());
         assert!(result.unwrap().is_ok());
     }

@@ -15,6 +15,9 @@ alloc = []
 smp = []
 test-kernel = ["qemu-exit"]
 net_debug = []
+# Raw serial tracing of every page fault and every open() (bring-up aid;
+# each byte is a VM exit, so it is off by default; N-176, N-130).
+trace = []
 benchmarks = []
 integration-tests = []
 qemu-exit = []

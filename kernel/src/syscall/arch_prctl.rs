@@ -18,6 +18,11 @@ use crate::{arch::context::ThreadContext, process, syscall::SyscallError};
 const ARCH_SET_FS: usize = 0x1002;
 const ARCH_GET_FS: usize = 0x1003;
 
+/// Whether `addr` may become a user FS/GS base: user space only.
+fn fs_base_allowed(addr: usize) -> bool {
+    addr < crate::mm::user_layout::USER_SPACE_END
+}
+
 /// Set or get the current thread's TLS base register.
 ///
 /// # Arguments
@@ -47,6 +52,12 @@ pub fn sys_arch_prctl(code: usize, addr: usize) -> Result<isize, SyscallError> {
 
     match code {
         ARCH_SET_FS => {
+            // A non-canonical value makes WRMSR #GP in ring 0, i.e. any
+            // process could halt the kernel (N-100). Linux allows only
+            // addresses below the top of user space (EPERM otherwise).
+            if !fs_base_allowed(addr) {
+                return Err(SyscallError::PermissionDenied);
+            }
             ctx.set_tls_base(addr as u64);
 
             // Also write the MSR immediately so the FS base is active when
@@ -82,5 +93,19 @@ pub fn sys_arch_prctl(code: usize, addr: usize) -> Result<isize, SyscallError> {
             Ok(0)
         }
         _ => Err(SyscallError::InvalidArgument),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::fs_base_allowed;
+
+    #[test]
+    fn fs_base_must_be_user_space() {
+        assert!(fs_base_allowed(0));
+        assert!(fs_base_allowed(0x7fff_f000_0000));
+        assert!(!fs_base_allowed(0x8000_0000_0000)); // non-canonical
+        assert!(!fs_base_allowed(0xffff_8000_0000_0000)); // kernel half
+        assert!(!fs_base_allowed(usize::MAX));
     }
 }

@@ -195,7 +195,7 @@ pub fn sys_open(path: usize, flags: usize, mode: usize) -> SyscallResult {
     let path_str = path_owned.as_str();
 
     // Trace ALL open calls during kwin bringup
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(all(target_arch = "x86_64", feature = "trace"))]
     {
         // SAFETY: Writing to COM1 for diagnostic output.
         unsafe {
@@ -2522,8 +2522,8 @@ pub fn sys_openat(dirfd: usize, path_ptr: usize, flags: usize, mode: usize) -> S
     let rel_path = read_user_path(path_ptr)?;
     let abs_path = resolve_at_path(dirfd, &rel_path)?;
 
-    // Trace ALL openat calls during kwin bringup
-    #[cfg(target_arch = "x86_64")]
+    // Trace openat calls (kwin bring-up aid; `trace` feature only).
+    #[cfg(all(target_arch = "x86_64", feature = "trace"))]
     {
         // SAFETY: Writing to COM1 for diagnostic output.
         unsafe {

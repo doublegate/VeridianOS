@@ -226,6 +226,7 @@ extern "x86-interrupt" fn page_fault_handler(
     // FIRST: Emit a raw serial byte to prove we reached the handler.
     // This comes before ANY other operation to diagnose IST issues.
     // SAFETY: Port I/O write to COM1 for diagnostic.
+    #[cfg(feature = "trace")]
     unsafe {
         core::arch::asm!("out dx, al", in("dx") 0x3F8u16, in("al") b'!', options(nomem, nostack));
     }
@@ -247,6 +248,7 @@ extern "x86-interrupt" fn page_fault_handler(
     // accessible from the IST/TSS stack and can trigger secondary faults
     // escalating to Double Fault.
     // SAFETY: Port I/O writes to COM1 (0x3F8) for diagnostic serial output.
+    #[cfg(feature = "trace")]
     unsafe {
         raw_serial_str(b"PF! cr2=0x");
         raw_serial_hex(cr2_val);

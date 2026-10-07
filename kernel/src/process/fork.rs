@@ -48,9 +48,13 @@ pub fn fork_process() -> Result<ProcessId, KernelError> {
     let current_thread = super::current_thread().ok_or(KernelError::ThreadNotFound { tid: 0 })?;
 
     // Create new process as copy of current
+    // The child has its parent's credentials: a process that dropped to
+    // an unprivileged uid used to fork children running as root (N-93).
     let new_process = ProcessBuilder::new(format!("{}-fork", current_process.name))
         .parent(current_process.pid)
         .priority(*current_process.priority.lock())
+        .uid(current_process.uid())
+        .gid(current_process.gid())
         .build();
 
     let new_pid = new_process.pid;
@@ -148,6 +152,16 @@ pub fn fork_process() -> Result<ProcessId, KernelError> {
             .store(parent_sid, core::sync::atomic::Ordering::Release);
     }
 
+    // Signal dispositions and the blocked mask are inherited (POSIX fork);
+    // pending signals are not.
+    *new_process.signal_handlers.lock() = *current_process.signal_handlers.lock();
+    new_process.signal_mask.store(
+        current_process
+            .signal_mask
+            .load(core::sync::atomic::Ordering::Acquire),
+        core::sync::atomic::Ordering::Release,
+    );
+
     // Create thread in new process matching current thread
     let new_thread = {
         let ctx = current_thread.context.lock();
@@ -160,6 +174,9 @@ pub fn fork_process() -> Result<ProcessId, KernelError> {
         .kernel_stack_size(current_thread.kernel_stack.size)
         .priority(current_thread.priority)
         .cpu_affinity(current_thread.get_affinity())
+        // Working directory and umask are copied, not reset to "/" and 022
+        // (N-93); a copy, because the child's later chdir is its own.
+        .fs(super::thread::ThreadFs::clone_copy(&current_thread.fs))
         .build()?;
 
         // Copy thread context for child process.

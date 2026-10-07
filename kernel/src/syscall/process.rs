@@ -103,19 +103,8 @@ pub fn sys_exec(path_ptr: usize, argv_ptr: usize, envp_ptr: usize) -> SyscallRes
         }
     }
 
-    // Get current process capability space before exec
-    let current = current_process().ok_or(SyscallError::InvalidState)?;
-    let old_cap_space = current.capability_space.lock();
-
-    // Create new capability space for exec'd process
-    let new_cap_space = crate::cap::CapabilitySpace::new();
-
-    // Inherit only capabilities marked for exec preservation
-    if let Err(_e) =
-        crate::cap::inheritance::exec_inherit_capabilities(&old_cap_space, &new_cap_space)
-    {
-        println!("[WARN] Failed to inherit capabilities during exec");
-    }
+    // exec_process keeps only PRESERVE_EXEC capabilities once the new
+    // image is in place (N-30, N-94).
 
     // Convert to slices for exec_process
     #[cfg(feature = "alloc")]
@@ -124,10 +113,6 @@ pub fn sys_exec(path_ptr: usize, argv_ptr: usize, envp_ptr: usize) -> SyscallRes
     use alloc::vec::Vec;
     let argv_refs: Vec<&str> = argv.iter().map(|s| s.as_str()).collect();
     let envp_refs: Vec<&str> = envp.iter().map(|s| s.as_str()).collect();
-
-    // Drop the capability space lock before exec_process, which diverges
-    // via enter_usermode (-> !) on success, leaking any held lock guards.
-    drop(old_cap_space);
 
     match exec_process(&path, &argv_refs, &envp_refs) {
         Ok(_) => {

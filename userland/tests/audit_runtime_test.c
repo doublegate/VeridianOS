@@ -671,6 +671,44 @@ static void test_memory_protection(void)
            why);
 }
 
+/* --- fork inherits credentials and cwd; sigprocmask in place (N-93, N-97). */
+static void test_fork_inheritance(void)
+{
+    pid_t pid = fork();
+    if (pid == 0) {
+        if (chdir("/tmp") != 0 || setgid(1000) != 0 || setuid(1000) != 0)
+            _exit(2);
+        pid_t g = fork();
+        if (g == 0) {
+            char cwd[64];
+            int ok = getuid() == 1000 && getgid() == 1000 && getcwd(cwd, sizeof(cwd)) &&
+                     strcmp(cwd, "/tmp") == 0;
+            _exit(ok ? 0 : 1);
+        }
+        int st = 0;
+        if (g < 0 || waitpid(g, &st, 0) != g)
+            _exit(3);
+        _exit(WIFEXITED(st) ? WEXITSTATUS(st) : 4);
+    }
+    int status = 0;
+    int ok = pid > 0 && waitpid(pid, &status, 0) == pid && WIFEXITED(status) &&
+             WEXITSTATUS(status) == 0;
+    static char why[48];
+    snprintf(why, sizeof(why), "child status 0x%x", status);
+    report("fork_inherits_uid_gid_cwd", ok, why);
+
+    sigset_t s, cur, saved;
+    sigprocmask(SIG_SETMASK, NULL, &saved);
+    sigemptyset(&s);
+    sigaddset(&s, SIGUSR1);
+    /* Same buffer for set and oldset: the new mask must still be applied. */
+    int r = sigprocmask(SIG_BLOCK, &s, &s);
+    sigprocmask(SIG_SETMASK, NULL, &cur);
+    int applied = r == 0 && sigismember(&cur, SIGUSR1) == 1 && sigismember(&s, SIGUSR1) == 0;
+    sigprocmask(SIG_SETMASK, &saved, NULL);
+    report("sigprocmask_same_buffer", applied, "mask not applied or oldset wrong");
+}
+
 /* --- Directory rename (FS-PERF-03): the node moves, ".." follows. ----- */
 static void test_rename_directory(void)
 {
@@ -956,6 +994,7 @@ int main(int argc, char **argv)
     test_timed_waits();
     test_map_fixed_limits();
     test_memory_protection();
+    test_fork_inheritance();
     test_rename_directory();
     test_closed_stdio();
     test_unix_bind_connect();
