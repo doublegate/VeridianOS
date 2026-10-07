@@ -91,6 +91,10 @@ jobs:
               core.setOutput('command', 'review');
               const additionalContext = request.replace(/^@gemini-cli \/review/, '').trim();
               core.setOutput('additional_context', additionalContext);
+            } else if (request.startsWith("@gemini-cli /triage")) {
+              // Triage was removed (N-158); answer with the fallthrough
+              // comment instead of running it as a general invoke.
+              core.setOutput('command', 'fallthrough');
             } else if (request.startsWith("@gemini-cli")) {
               core.setOutput('command', 'invoke');
               const additionalContext = request.replace(/^@gemini-cli/, '').trim();
