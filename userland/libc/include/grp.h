@@ -25,6 +25,7 @@ struct group *getgrnam(const char *name);
 struct group *getgrgid(gid_t gid);
 int getgrouplist(const char *user, gid_t group, gid_t *groups, int *ngroups);
 int initgroups(const char *user, gid_t group);
+int setgroups(size_t size, const gid_t *list);
 
 /** Rewind the group database to the beginning. */
 void setgrent(void);

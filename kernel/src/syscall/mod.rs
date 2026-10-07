@@ -753,6 +753,17 @@ fn handle_syscall(
         Syscall::Getegid => sys_getegid(),
         Syscall::Setuid => sys_setuid(arg1),
         Syscall::Setgid => sys_setgid(arg1),
+        Syscall::Setreuid => process::sys_setreuid(arg1, arg2),
+        Syscall::Setregid => process::sys_setregid(arg1, arg2),
+        Syscall::Setresuid => process::sys_setresuid(arg1, arg2, arg3),
+        Syscall::Getresuid => process::sys_getresuid(arg1, arg2, arg3),
+        Syscall::Setresgid => process::sys_setresgid(arg1, arg2, arg3),
+        Syscall::Getresgid => process::sys_getresgid(arg1, arg2, arg3),
+        Syscall::Getgroups => process::sys_getgroups(arg1, arg2),
+        Syscall::Setgroups => process::sys_setgroups(arg1, arg2),
+        Syscall::Fchdir => sys_fchdir(arg1),
+        Syscall::Chroot => sys_chroot(arg1),
+        Syscall::Utimensat => sys_utimensat(arg1, arg2, arg3, arg4),
 
         // Process group / session syscalls
         Syscall::Setpgid => sys_setpgid(arg1, arg2),
@@ -1213,7 +1224,9 @@ fn handle_syscall(
         Syscall::Waitid => process::sys_waitid(arg1, arg2, arg3, arg4),
         Syscall::RtSigpending => signal::sys_sigpending(arg1, arg2),
         Syscall::Ppoll => linux_compat::handle_ppoll(arg1, arg2, arg3),
-        Syscall::Faccessat | Syscall::Faccessat2 => sys_faccessat(arg1, arg2, arg3, arg4),
+        // faccessat has no flags argument; faccessat2 adds one.
+        Syscall::Faccessat => sys_faccessat(arg1, arg2, arg3, 0),
+        Syscall::Faccessat2 => sys_faccessat(arg1, arg2, arg3, arg4),
         // Not implemented yet; callers fall back (musl: statx -> fstatat,
         // clone3 -> clone, mremap ENOMEM -> mmap + copy).
         Syscall::Mremap => Err(SyscallError::OutOfMemory),

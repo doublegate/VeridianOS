@@ -183,6 +183,12 @@ int setuid(uid_t uid);
 int setgid(gid_t gid);
 int seteuid(uid_t euid);
 int setegid(gid_t egid);
+int setreuid(uid_t ruid, uid_t euid);
+int setregid(gid_t rgid, gid_t egid);
+int setresuid(uid_t ruid, uid_t euid, uid_t suid);
+int setresgid(gid_t rgid, gid_t egid, gid_t sgid);
+int getresuid(uid_t *ruid, uid_t *euid, uid_t *suid);
+int getresgid(gid_t *rgid, gid_t *egid, gid_t *sgid);
 int getgroups(int size, gid_t list[]);
 
 /** Get login name of the user. */

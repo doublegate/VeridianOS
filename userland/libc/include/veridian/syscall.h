@@ -15,6 +15,7 @@
 #define VERIDIAN_SYSCALL_H
 
 #include <stdint.h>
+#include <errno.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -23,6 +24,19 @@ extern "C" {
 /* ========================================================================= */
 /* Syscall Numbers                                                           */
 /* ========================================================================= */
+
+/*
+ * A raw system call result in the POSIX convention: a negative value is
+ * -errno, so set errno and return -1; anything else is the result.
+ */
+static inline long __syscall_ret(long r)
+{
+    if (r < 0) {
+        errno = (int)(-r);
+        return -1;
+    }
+    return r;
+}
 
 /* System call numbers: generated from abi/syscalls.map (ADR 0009). */
 #include <veridian/sysno.h>

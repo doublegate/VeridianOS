@@ -53,8 +53,7 @@ pub fn fork_process() -> Result<ProcessId, KernelError> {
     let new_process = ProcessBuilder::new(format!("{}-fork", current_process.name))
         .parent(current_process.pid)
         .priority(*current_process.priority.lock())
-        .uid(current_process.uid())
-        .gid(current_process.gid())
+        .credentials(current_process.credentials())
         .build();
 
     let new_pid = new_process.pid;

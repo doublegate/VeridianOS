@@ -28,14 +28,7 @@ struct _DIR {
 /* Helper: translate raw syscall result                                      */
 /* ========================================================================= */
 
-static inline long __syscall_ret(long r)
-{
-    if (r < 0) {
-        errno = (int)(-r);
-        return -1;
-    }
-    return r;
-}
+/* __syscall_ret: <veridian/syscall.h>. */
 
 /* ========================================================================= */
 /* Public API                                                                */

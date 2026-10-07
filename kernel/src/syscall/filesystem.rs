@@ -231,12 +231,12 @@ fn open_path(path: &str, flags: usize, mode: usize) -> SyscallResult {
     let cloexec = flags & O_CLOEXEC != 0;
     let follow = flags & O_NOFOLLOW == 0;
 
-    let (node, created) = match vfs()?.open_follow(path, open_flags, follow) {
-        Ok(node) => {
+    let (node, created, canonical) = match vfs()?.open_follow_canonical(path, open_flags, follow) {
+        Ok((node, canonical)) => {
             if open_flags.create && open_flags.exclusive {
                 return Err(SyscallError::FileExists);
             }
-            (node, false)
+            (node, false, Some(canonical))
         }
         // Only a missing name may be created; any other failure (EACCES
         // from a directory without search permission, ENOTDIR, ELOOP) is
@@ -249,18 +249,16 @@ fn open_path(path: &str, flags: usize, mode: usize) -> SyscallResult {
             match parent.create(&name, perms) {
                 Ok(node) => {
                     own_new_node(&node);
-                    (node, true)
+                    (node, true, None)
                 }
                 // Another opener created it between the lookup and here.
                 Err(crate::error::KernelError::FsError(crate::error::FsError::AlreadyExists))
                     if !open_flags.exclusive =>
                 {
-                    (
-                        vfs()?
-                            .open_follow(path, open_flags, follow)
-                            .map_err(map_resolve_err)?,
-                        false,
-                    )
+                    let (node, canonical) = vfs()?
+                        .open_follow_canonical(path, open_flags, follow)
+                        .map_err(map_resolve_err)?;
+                    (node, false, Some(canonical))
                 }
                 Err(crate::error::KernelError::FsError(crate::error::FsError::AlreadyExists)) => {
                     return Err(SyscallError::FileExists);
@@ -288,9 +286,17 @@ fn open_path(path: &str, flags: usize, mode: usize) -> SyscallResult {
         node.truncate(0).map_err(map_resolve_err)?;
     }
 
-    // The path is kept for dirfd resolution and device identification.
-    let file =
-        crate::fs::file::File::new_with_path(node, open_flags, alloc::string::String::from(path));
+    // The file records the canonical path of what it opened (in the whole
+    // tree) for fchdir and dirfd resolution: the path as written could be
+    // relative, and would be re-resolved against a later cwd (N-204).
+    let canonical = match canonical {
+        Some(c) => c,
+        None => vfs()?
+            .resolve_canonical(path, &vfs()?.get_cwd(), false)
+            .map(|(_, c)| c)
+            .unwrap_or_else(|_| alloc::string::String::from(path)),
+    };
+    let file = crate::fs::file::File::new_with_path(node, open_flags, canonical);
     let file_table = process.file_table.lock();
     file_table
         .open_with_flags(alloc::sync::Arc::new(file), cloexec)
@@ -1177,16 +1183,185 @@ pub fn sys_chdir(path_ptr: usize) -> SyscallResult {
     #[cfg(feature = "alloc")]
     {
         let cwd = thread.fs().cwd.lock().clone();
-        let vfs = vfs()?;
-        let node = vfs.resolve_from(&path, &cwd).map_err(map_resolve_err)?;
-        if node.node_type() != crate::fs::NodeType::Directory {
-            return Err(SyscallError::InvalidArgument);
-        }
-        // Update per-thread cwd
-        let normalized = crate::process::cwd::resolve_path(&path, &cwd);
-        *thread.fs().cwd.lock() = normalized;
-        Ok(0)
+        let (node, canonical) = vfs()?
+            .resolve_canonical(&path, &cwd, true)
+            .map_err(map_resolve_err)?;
+        enter_directory(&thread, &node, &canonical)
     }
+}
+
+/// Make `node` (at canonical path `canonical` in the whole tree) the
+/// thread's working directory: it must be a directory the caller may
+/// search. The working directory is kept as the canonical path relative to
+/// the root, so a symlink or ".." in the argument is resolved once and
+/// getcwd reports the real directory.
+#[cfg(feature = "alloc")]
+fn enter_directory(
+    thread: &process::Thread,
+    node: &alloc::sync::Arc<dyn crate::fs::VfsNode>,
+    canonical: &str,
+) -> SyscallResult {
+    if node.node_type() != crate::fs::NodeType::Directory {
+        return Err(SyscallError::NotADirectory);
+    }
+    let creds = caller_creds();
+    if creds.euid != 0 {
+        let meta = node.metadata().map_err(super::map_kernel_error)?;
+        if !meta
+            .permissions
+            .can_run(creds.euid, creds.gid_for(meta.gid), meta.uid, meta.gid)
+        {
+            return Err(SyscallError::PermissionDenied);
+        }
+    }
+    let fs = thread.fs();
+    let root = fs.root.lock().clone();
+    *fs.cwd.lock() = crate::fs::root_relative(canonical, &root);
+    Ok(0)
+}
+
+/// utimensat's special `tv_nsec` values.
+const UTIME_NOW: i64 = (1 << 30) - 1;
+const UTIME_OMIT: i64 = (1 << 30) - 2;
+
+/// One utimensat time ([tv_sec, tv_nsec]) as the seconds to store, or
+/// `None` to leave it (UTIME_OMIT). Times before 1970 are stored as 0, the
+/// earliest the filesystems represent.
+fn utime_spec(spec: [i64; 2], now: u64) -> Result<Option<u64>, SyscallError> {
+    match spec[1] {
+        UTIME_NOW => Ok(Some(now)),
+        UTIME_OMIT => Ok(None),
+        0..=999_999_999 => Ok(Some(spec[0].max(0) as u64)),
+        _ => Err(SyscallError::InvalidArgument),
+    }
+}
+
+/// utimensat(dirfd, path, times, flags) (N-249); with a NULL path it acts
+/// on `dirfd` itself (futimens). NULL `times` sets both to now. Setting
+/// explicit times needs the owner (or root, EPERM otherwise); setting the
+/// current time also allows a caller with write permission (EACCES).
+pub fn sys_utimensat(
+    dirfd: usize,
+    path_ptr: usize,
+    times_ptr: usize,
+    flags: usize,
+) -> SyscallResult {
+    if flags & !AT_SYMLINK_NOFOLLOW_FLAG != 0 {
+        return Err(SyscallError::InvalidArgument);
+    }
+    let node = if path_ptr == 0 {
+        let proc = process::current_process().ok_or(SyscallError::InvalidState)?;
+        let table = proc.file_table.lock();
+        table
+            .get(dirfd as u32 as usize)
+            .ok_or(SyscallError::BadFileDescriptor)?
+            .node
+            .clone()
+    } else {
+        let path = resolve_at_path(dirfd, &read_user_path(path_ptr)?)?;
+        let vfs = vfs()?;
+        if flags & AT_SYMLINK_NOFOLLOW_FLAG != 0 {
+            vfs.resolve_path_no_follow(&path)
+        } else {
+            vfs.resolve_path(&path)
+        }
+        .map_err(map_resolve_err)?
+    };
+    let specs = if times_ptr == 0 {
+        None
+    } else {
+        Some(super::userspace::read_user::<[[i64; 2]; 2]>(times_ptr)?)
+    };
+    let now = crate::arch::timer::get_timestamp_secs();
+    let (atime, mtime) = match specs {
+        None => (Some(now), Some(now)),
+        Some([a, m]) => (utime_spec(a, now)?, utime_spec(m, now)?),
+    };
+    let only_now = specs.is_none_or(|[a, m]| a[1] == UTIME_NOW && m[1] == UTIME_NOW);
+    let creds = caller_creds();
+    let meta = node.metadata().map_err(super::map_kernel_error)?;
+    if creds.euid != 0 && meta.uid != creds.euid {
+        if !only_now {
+            return Err(SyscallError::OperationNotPermitted);
+        }
+        if !meta
+            .permissions
+            .can_write(creds.euid, creds.gid_for(meta.gid), meta.uid, meta.gid)
+        {
+            return Err(SyscallError::PermissionDenied);
+        }
+    }
+    if atime.is_none() && mtime.is_none() {
+        return Ok(0);
+    }
+    node.set_times(atime, mtime)
+        .map_err(super::map_kernel_error)?;
+    Ok(0)
+}
+
+/// fchdir: change to the directory an open fd refers to (N-250).
+pub fn sys_fchdir(fd: usize) -> SyscallResult {
+    let thread = process::current_thread().ok_or(SyscallError::InvalidState)?;
+    let proc = process::current_process().ok_or(SyscallError::InvalidState)?;
+    let (node, path) = {
+        let table = proc.file_table.lock();
+        let file = table
+            .get(fd as u32 as usize)
+            .ok_or(SyscallError::BadFileDescriptor)?;
+        (file.node.clone(), file.path.clone())
+    };
+    let path = path.ok_or(SyscallError::NotADirectory)?;
+    #[cfg(not(feature = "alloc"))]
+    {
+        let _ = (thread, node, path);
+        return Err(SyscallError::InvalidState);
+    }
+    #[cfg(feature = "alloc")]
+    enter_directory(&thread, &node, &path)
+}
+
+/// chroot (N-250): make `path` the root for every later lookup of this
+/// process's threads that share its filesystem state (and of children,
+/// which inherit it). Root only (EPERM), as without CAP_SYS_CHROOT on
+/// Linux. The working directory stays where it is if it is under the new
+/// root; otherwise it becomes the new root, where Linux would leave it
+/// outside (the classic way out of a chroot).
+pub fn sys_chroot(path_ptr: usize) -> SyscallResult {
+    let path = read_user_path(path_ptr)?;
+    if caller_creds().euid != 0 {
+        return Err(SyscallError::OperationNotPermitted);
+    }
+    let thread = process::current_thread().ok_or(SyscallError::InvalidState)?;
+    let fs = thread.fs();
+    let cwd = fs.cwd.lock().clone();
+    let (node, new_root) = vfs()?
+        .resolve_canonical(&path, &cwd, true)
+        .map_err(map_resolve_err)?;
+    if node.node_type() != crate::fs::NodeType::Directory {
+        return Err(SyscallError::NotADirectory);
+    }
+    let old_root = fs.root.lock().clone();
+    // The working directory in the whole tree, then seen from the new root.
+    let cwd_global = if old_root == "/" {
+        cwd
+    } else if cwd == "/" {
+        old_root
+    } else {
+        alloc::format!("{}{}", old_root, cwd)
+    };
+    let new_cwd = if new_root == "/" {
+        cwd_global
+    } else if cwd_global == new_root {
+        alloc::string::String::from("/")
+    } else {
+        match cwd_global.strip_prefix(new_root.as_str()) {
+            Some(rest) if rest.starts_with('/') => alloc::string::String::from(rest),
+            _ => alloc::string::String::from("/"),
+        }
+    };
+    *fs.root.lock() = new_root;
+    *fs.cwd.lock() = new_cwd;
+    Ok(0)
 }
 
 /// I/O control operations on a file descriptor
@@ -1419,9 +1594,14 @@ pub fn sys_kill(pid: usize, signal: usize) -> SyscallResult {
     }
 }
 
-/// Whether `caller` may signal `target` (Linux: root, or a matching uid).
+/// Whether `caller` may signal `target` (Linux kill(2)): root, or the
+/// sender's real or effective uid is the target's real or saved uid.
 fn may_signal(caller: &crate::process::Process, target: &crate::process::Process) -> bool {
-    caller.uid() == 0 || caller.uid() == target.uid()
+    let (c, t) = (caller.credentials(), target.credentials());
+    c.euid == 0
+        || [c.ruid, c.euid]
+            .iter()
+            .any(|&id| id == t.ruid || id == t.suid)
 }
 
 /// Signal one process; `sig` 0 only checks that it exists and may be
@@ -1541,10 +1721,13 @@ pub(crate) fn read_user_path(ptr: usize) -> Result<alloc::string::String, Syscal
         .map_err(|_| SyscallError::InvalidArgument)
 }
 
-/// Credentials of the calling process: (uid, gid). Kernel context, with no
-/// process, acts as root.
-fn caller_creds() -> (u32, u32) {
-    process::current_process().map_or((0, 0), |p| (p.uid(), p.gid()))
+/// Credentials of the calling process. Kernel context, with no process,
+/// acts as root. Checks use the effective IDs, and a file's group grants
+/// access to any process in that group (`Credentials::gid_for`).
+fn caller_creds() -> crate::process::creds::Credentials {
+    process::current_process().map_or(crate::process::creds::Credentials::new(0, 0), |p| {
+        p.credentials()
+    })
 }
 
 /// Permissions for a new node: the requested `mode` minus the calling
@@ -1564,7 +1747,8 @@ pub(crate) fn creation_perms(mode: usize) -> Permissions {
 /// again would chown whatever is at that name by then -- a user could swap
 /// in a hard link to a root-owned file and take ownership of it.
 pub(crate) fn own_new_node(node: &alloc::sync::Arc<dyn crate::fs::VfsNode>) {
-    let (uid, gid) = caller_creds();
+    let creds = caller_creds();
+    let (uid, gid) = (creds.euid, creds.egid);
     if uid != 0 || gid != 0 {
         let _ = node.chown(Some(uid), Some(gid));
     }
@@ -1575,7 +1759,7 @@ pub(crate) fn own_new_node(node: &alloc::sync::Arc<dyn crate::fs::VfsNode>) {
 pub(crate) fn require_owner_or_root(
     node: &alloc::sync::Arc<dyn crate::fs::VfsNode>,
 ) -> Result<(), SyscallError> {
-    let (uid, _) = caller_creds();
+    let uid = caller_creds().euid;
     if uid == 0 {
         return Ok(());
     }
@@ -1594,13 +1778,15 @@ pub(crate) fn require_open_access(
     node: &alloc::sync::Arc<dyn crate::fs::VfsNode>,
     flags: &OpenFlags,
 ) -> Result<(), SyscallError> {
-    let (uid, gid) = caller_creds();
+    let creds = caller_creds();
+    let uid = creds.euid;
     if uid == 0 {
         return Ok(());
     }
     let meta = node
         .metadata()
         .map_err(|_| SyscallError::PermissionDenied)?;
+    let gid = creds.gid_for(meta.gid);
     let p = meta.permissions;
     if flags.read && !p.can_read(uid, gid, meta.uid, meta.gid) {
         return Err(SyscallError::PermissionDenied);
@@ -1667,8 +1853,9 @@ fn rename_entry(old: &str, new: &str) -> SyscallResult {
         // Moving it to another parent rewrites its "..", which needs write
         // permission on the directory itself.
         if old_parent_path != new_parent_path {
-            let (uid, gid) = caller_creds();
+            let creds = caller_creds();
             let meta = src.metadata().map_err(super::map_kernel_error)?;
+            let (uid, gid) = (creds.euid, creds.gid_for(meta.gid));
             if uid != 0 && !meta.permissions.can_write(uid, gid, meta.uid, meta.gid) {
                 return Err(SyscallError::PermissionDenied);
             }
@@ -1692,13 +1879,15 @@ fn rename_entry(old: &str, new: &str) -> SyscallResult {
 /// Creating or removing a directory entry needs write and search
 /// permission on the directory holding it (FS-SEC-02).
 pub(crate) fn require_dir_write(path: &str) -> Result<(), SyscallError> {
-    let (uid, gid) = caller_creds();
+    let creds = caller_creds();
+    let uid = creds.euid;
     if uid == 0 {
         return Ok(());
     }
     let (parent, _) = split_path(path)?;
     let dir = vfs()?.resolve_path(&parent).map_err(map_resolve_err)?;
     let meta = dir.metadata().map_err(super::map_kernel_error)?;
+    let gid = creds.gid_for(meta.gid);
     let p = meta.permissions;
     if p.can_write(uid, gid, meta.uid, meta.gid) && p.can_run(uid, gid, meta.uid, meta.gid) {
         Ok(())
@@ -1712,7 +1901,7 @@ pub(crate) fn require_dir_write(path: &str) -> Result<(), SyscallError> {
 /// directory is sticky, must own the entry or the directory (or be root).
 pub(crate) fn require_may_remove(path: &str) -> Result<(), SyscallError> {
     require_dir_write(path)?;
-    let (uid, _) = caller_creds();
+    let uid = caller_creds().euid;
     if uid == 0 {
         return Ok(());
     }
@@ -1916,50 +2105,71 @@ pub fn sys_readlink(path_ptr: usize, buf: usize, bufsiz: usize) -> SyscallResult
 /// 0 if accessible, error otherwise.
 pub fn sys_access(path_ptr: usize, mode: usize) -> SyscallResult {
     let path = read_user_path(path_ptr)?;
-    access_path(&path, mode)
+    access_path(&path, mode, 0)
 }
 
-/// faccessat / faccessat2: `access` relative to a directory fd.
-///
-/// `flags` (AT_EACCESS, AT_SYMLINK_NOFOLLOW) are accepted; real and
-/// effective IDs are the same here and symlinks are always followed.
-pub fn sys_faccessat(dirfd: usize, path_ptr: usize, mode: usize, _flags: usize) -> SyscallResult {
+/// faccessat (3 arguments, no flags) and faccessat2 (with `flags`):
+/// `access` relative to a directory fd.
+pub fn sys_faccessat(dirfd: usize, path_ptr: usize, mode: usize, flags: usize) -> SyscallResult {
     let path = read_user_path(path_ptr)?;
     let path = resolve_at_path(dirfd, &path)?;
-    access_path(&path, mode)
+    access_path(&path, mode, flags)
 }
 
-fn access_path(path: &str, mode: usize) -> SyscallResult {
-    let vfs = vfs()?;
+const AT_EACCESS: usize = 0x200;
+const AT_SYMLINK_NOFOLLOW_FLAG: usize = 0x100;
 
-    // Check if the file exists (F_OK = 0)
-    let node = vfs.resolve_path(path).map_err(map_resolve_err)?;
-
-    // For non-zero mode, check permissions against metadata
-    if mode != 0 {
-        let metadata = node.metadata().map_err(super::map_kernel_error)?;
-
-        // Determine the caller's uid.  Root (uid 0) bypasses all checks.
-        let caller_uid = crate::process::current_process()
-            .map(|p| p.uid())
-            .unwrap_or(0);
-
-        if caller_uid != 0 {
-            let perms = &metadata.permissions;
-            // R_OK=4, W_OK=2, X_OK=1
-            if mode & 4 != 0 && !perms.other_read {
-                return Err(SyscallError::PermissionDenied);
-            }
-            if mode & 2 != 0 && !perms.other_write {
-                return Err(SyscallError::PermissionDenied);
-            }
-            if mode & 1 != 0 && !perms.other_exec {
-                return Err(SyscallError::PermissionDenied);
-            }
-        }
+/// Whether access mode `mode` (R_OK 4, W_OK 2, X_OK 1) is granted to a
+/// process with IDs (uid, gid as `gid_for` chose it) on a file with `meta`.
+/// Root may read and write anything and execute anything with an execute
+/// bit set, or any directory, as on Linux.
+fn access_granted(
+    uid: u32,
+    gid: u32,
+    meta: &crate::fs::Metadata,
+    is_dir: bool,
+    mode: usize,
+) -> bool {
+    let p = &meta.permissions;
+    if uid == 0 {
+        let any_x = p.owner_exec || p.group_exec || p.other_exec;
+        return mode & 1 == 0 || any_x || is_dir;
     }
+    (mode & 4 == 0 || p.can_read(uid, gid, meta.uid, meta.gid))
+        && (mode & 2 == 0 || p.can_write(uid, gid, meta.uid, meta.gid))
+        && (mode & 1 == 0 || p.can_run(uid, gid, meta.uid, meta.gid))
+}
 
-    Ok(0)
+/// access(2): checked with the real IDs (the effective ones with
+/// AT_EACCESS), owner, then group (any of the process's groups), then
+/// other bits. It checked only the "other" bits (N-193).
+fn access_path(path: &str, mode: usize, flags: usize) -> SyscallResult {
+    if mode & !7 != 0 || flags & !(AT_EACCESS | AT_SYMLINK_NOFOLLOW_FLAG) != 0 {
+        return Err(SyscallError::InvalidArgument);
+    }
+    let vfs = vfs()?;
+    let node = if flags & AT_SYMLINK_NOFOLLOW_FLAG != 0 {
+        vfs.resolve_path_no_follow(path)
+    } else {
+        vfs.resolve_path(path)
+    }
+    .map_err(map_resolve_err)?;
+    if mode == 0 {
+        return Ok(0); // F_OK: it exists
+    }
+    let meta = node.metadata().map_err(super::map_kernel_error)?;
+    let creds = caller_creds();
+    let (uid, gid) = if flags & AT_EACCESS != 0 {
+        (creds.euid, creds.gid_for(meta.gid))
+    } else {
+        (creds.ruid, creds.real_gid_for(meta.gid))
+    };
+    let is_dir = node.node_type() == crate::fs::NodeType::Directory;
+    if access_granted(uid, gid, &meta, is_dir, mode) {
+        Ok(0)
+    } else {
+        Err(SyscallError::PermissionDenied)
+    }
 }
 
 /// Rename a file or directory (syscall 154).
@@ -2768,7 +2978,8 @@ pub(crate) fn resolve_at_path(
         return Ok(String::from(path));
     }
 
-    if dirfd == AT_FDCWD {
+    // dirfd is an int: compare its low 32 bits, sign-extended or not.
+    if dirfd as u32 as i32 == AT_FDCWD as u32 as i32 {
         // Relative to CWD
         let cwd = if let Some(vfs) = try_get_vfs() {
             vfs.get_cwd()
@@ -2781,18 +2992,18 @@ pub(crate) fn resolve_at_path(
             Ok(alloc::format!("{}/{}", cwd, path))
         }
     } else {
-        // Relative to directory fd — look up the fd in the file table
+        // Relative to the directory the fd refers to: EBADF if it is not
+        // open, ENOTDIR if it is not a directory (N-204).
         let proc = process::current_process().ok_or(SyscallError::InvalidState)?;
         let file_table = proc.file_table.lock();
-        let file = file_table.get(dirfd).ok_or(SyscallError::InvalidArgument)?;
-
-        // Use the stored path if available, otherwise fall back to "/"
-        let dir_path = if let Some(ref p) = file.path {
-            String::from(p.as_str())
-        } else {
-            // No stored path — fall back to root (best effort)
-            String::from("/")
-        };
+        let file = file_table
+            .get(dirfd as u32 as usize)
+            .ok_or(SyscallError::BadFileDescriptor)?;
+        if file.node.node_type() != crate::fs::NodeType::Directory {
+            return Err(SyscallError::NotADirectory);
+        }
+        let global = file.path.as_deref().ok_or(SyscallError::NotADirectory)?;
+        let dir_path = crate::fs::root_relative(global, &vfs()?.get_root());
 
         if dir_path.ends_with('/') {
             Ok(alloc::format!("{}{}", dir_path, path))
@@ -2996,7 +3207,7 @@ pub(crate) fn chown_node(
     if uid.is_none() && gid.is_none() {
         return Ok(0);
     }
-    if caller_creds().0 != 0 {
+    if caller_creds().euid != 0 {
         return Err(SyscallError::PermissionDenied);
     }
     node.chown(uid, gid).map_err(super::map_kernel_error)?;
@@ -3095,5 +3306,50 @@ mod tests {
         assert_eq!(pipe2_flags(0x8_0800), Ok((true, true)));
         assert_eq!(pipe2_flags(0x2000), Err(SyscallError::InvalidArgument));
         assert_eq!(pipe2_flags(1), Err(SyscallError::InvalidArgument));
+    }
+
+    fn meta(mode: u32, uid: u32, gid: u32) -> crate::fs::Metadata {
+        crate::fs::Metadata {
+            node_type: crate::fs::NodeType::File,
+            size: 0,
+            permissions: Permissions::from_mode(mode),
+            uid,
+            gid,
+            created: 0,
+            modified: 0,
+            accessed: 0,
+            inode: 0,
+        }
+    }
+
+    /// access(2) uses owner, then group, then other bits (it checked only
+    /// "other", so a 0700 file failed for its owner), and root needs an
+    /// execute bit to execute (N-193).
+    #[test]
+    fn access_uses_owner_group_other_precedence() {
+        let m = meta(0o750, 1000, 100);
+        assert!(access_granted(1000, 100, &m, false, 7));
+        assert!(access_granted(2000, 100, &m, false, 4 | 1));
+        assert!(!access_granted(2000, 100, &m, false, 2));
+        assert!(!access_granted(2000, 200, &m, false, 4));
+        assert!(access_granted(0, 0, &m, false, 7));
+        let noexec = meta(0o644, 1000, 100);
+        assert!(!access_granted(0, 0, &noexec, false, 1));
+        assert!(access_granted(0, 0, &noexec, true, 1));
+    }
+
+    /// utimensat times: UTIME_NOW, UTIME_OMIT, a valid time, and EINVAL
+    /// for an out-of-range tv_nsec.
+    #[test]
+    fn utime_spec_follows_utimensat() {
+        assert_eq!(utime_spec([5, UTIME_NOW], 100), Ok(Some(100)));
+        assert_eq!(utime_spec([5, UTIME_OMIT], 100), Ok(None));
+        assert_eq!(utime_spec([1234, 500], 100), Ok(Some(1234)));
+        assert_eq!(utime_spec([-10, 0], 100), Ok(Some(0)));
+        assert_eq!(
+            utime_spec([1, 1_000_000_000], 100),
+            Err(SyscallError::InvalidArgument)
+        );
+        assert_eq!(utime_spec([1, -1], 100), Err(SyscallError::InvalidArgument));
     }
 }

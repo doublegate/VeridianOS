@@ -376,6 +376,15 @@ pub trait VfsNode: Send + Sync {
         Err(KernelError::NotImplemented { feature: "chown" })
     }
 
+    /// Set the access and/or modification time (seconds); `None` leaves
+    /// that time unchanged. Permission checks are the caller's job
+    /// (utimensat, N-249).
+    fn set_times(&self, _atime: Option<u64>, _mtime: Option<u64>) -> Result<(), KernelError> {
+        Err(KernelError::NotImplemented {
+            feature: "set_times",
+        })
+    }
+
     /// Poll readiness for I/O multiplexing (poll/epoll).
     ///
     /// Returns a bitmask of ready events using POLL* constants:
@@ -564,17 +573,36 @@ impl MountTable {
     /// re-walking the shortened canonical path from the root. Every
     /// component that is not last must be a directory.
     ///
-    /// With `creds = Some((uid, gid))` every directory searched -- for a
+    /// With `creds = Some(credentials)` every directory searched -- for a
     /// name or for `..` -- must grant that caller search (execute)
     /// permission, as POSIX requires; otherwise the walk fails with
     /// `PermissionDenied`. `None` is the kernel's own lookups, and root.
+    #[cfg(test)]
     fn resolve(
         &self,
         path: &str,
         cwd: &str,
         follow_last: bool,
         symlink_depth: usize,
-        creds: Option<(u32, u32)>,
+        creds: Option<crate::process::creds::Credentials>,
+    ) -> Result<(Arc<dyn VfsNode>, String), KernelError> {
+        self.resolve_in(path, cwd, "/", follow_last, symlink_depth, creds)
+    }
+
+    /// `resolve` under a root directory (chroot). `root` is a canonical
+    /// path in the whole tree; `path` when absolute, and `cwd`, are
+    /// relative to it. Absolute paths and absolute symlink targets start at
+    /// the root and `..` stops there, so no lookup leaves it. The canonical
+    /// path returned is in the whole tree (for MAC and mount checks); see
+    /// `root_relative` for the process's view.
+    fn resolve_in(
+        &self,
+        path: &str,
+        cwd: &str,
+        root: &str,
+        follow_last: bool,
+        symlink_depth: usize,
+        creds: Option<crate::process::creds::Credentials>,
     ) -> Result<(Arc<dyn VfsNode>, String), KernelError> {
         use alloc::collections::VecDeque;
 
@@ -592,7 +620,8 @@ impl MountTable {
             q.extend(split(path));
             q
         };
-        let mut canon: Vec<String> = Vec::new();
+        let root_canon: Vec<String> = split(root).into_iter().collect();
+        let mut canon: Vec<String> = root_canon.clone();
         let mut node = self.walk_canonical(&canon)?;
         let mut links = symlink_depth;
 
@@ -602,16 +631,22 @@ impl MountTable {
             if node.node_type() != NodeType::Directory {
                 return Err(KernelError::FsError(crate::error::FsError::NotADirectory));
             }
-            if let Some((uid, gid)) = creds {
+            if let Some(c) = creds {
                 let meta = node.metadata()?;
-                if !meta.permissions.can_run(uid, gid, meta.uid, meta.gid) {
+                if !meta
+                    .permissions
+                    .can_run(c.euid, c.gid_for(meta.gid), meta.uid, meta.gid)
+                {
                     return Err(KernelError::FsError(
                         crate::error::FsError::PermissionDenied,
                     ));
                 }
             }
             if component == ".." {
-                canon.pop();
+                // ".." of the root is the root itself.
+                if canon.len() > root_canon.len() {
+                    canon.pop();
+                }
                 node = self.walk_canonical(&canon)?;
                 continue;
             }
@@ -634,7 +669,7 @@ impl MountTable {
                 // in front of whatever was still pending.
                 canon.pop();
                 if target.starts_with('/') {
-                    canon.clear();
+                    canon = root_canon.clone();
                 }
                 let mut spliced = split(&target);
                 spliced.extend(pending.drain(..));
@@ -670,10 +705,27 @@ impl MountTable {
 /// The credentials whose search permission a path walk checks: the calling
 /// process's, or `None` (no check) for root and for kernel context with no
 /// current process.
-fn search_creds() -> Option<(u32, u32)> {
+fn search_creds() -> Option<crate::process::creds::Credentials> {
     crate::process::current_process()
-        .map(|p| (p.uid(), p.gid()))
-        .filter(|&(uid, _)| uid != 0)
+        .map(|p| p.credentials())
+        .filter(|c| c.euid != 0)
+}
+
+/// `path`, a canonical path in the whole tree, as seen from inside `root`
+/// (the inverse of `resolve_in`'s mapping): "/jail/a" is "/a" under root
+/// "/jail". A path outside the root (which a lookup never produces) is
+/// returned whole.
+pub(crate) fn root_relative(path: &str, root: &str) -> String {
+    if root == "/" {
+        return String::from(path);
+    }
+    if path == root {
+        return String::from("/");
+    }
+    match path.strip_prefix(root) {
+        Some(rest) if rest.starts_with('/') => String::from(rest),
+        _ => String::from(path),
+    }
 }
 
 /// `/` followed by the components joined with `/`; `/` for none.
@@ -825,7 +877,7 @@ impl Vfs {
         follow_last: bool,
     ) -> Result<(Arc<dyn VfsNode>, String), KernelError> {
         self.snapshot()
-            .resolve(path, cwd, follow_last, 0, search_creds())
+            .resolve_in(path, cwd, &self.get_root(), follow_last, 0, search_creds())
     }
 
     /// Inner path resolution with configurable symlink behavior.
@@ -842,7 +894,14 @@ impl Vfs {
         symlink_depth: usize,
     ) -> Result<Arc<dyn VfsNode>, KernelError> {
         self.snapshot()
-            .resolve(path, cwd, follow_last, symlink_depth, search_creds())
+            .resolve_in(
+                path,
+                cwd,
+                &self.get_root(),
+                follow_last,
+                symlink_depth,
+                search_creds(),
+            )
             .map(|(node, _)| node)
     }
 
@@ -858,6 +917,16 @@ impl Vfs {
             return thread.fs().cwd.lock().clone();
         }
         self.cwd.read().clone()
+    }
+
+    /// The root directory lookups start from: the calling user thread's
+    /// (chroot), or "/" in kernel context.
+    pub fn get_root(&self) -> String {
+        #[cfg(feature = "alloc")]
+        if let Some(thread) = crate::process::current_thread() {
+            return thread.fs().root.lock().clone();
+        }
+        String::from("/")
     }
 
     /// Set current working directory
@@ -889,6 +958,18 @@ impl Vfs {
         flags: OpenFlags,
         follow_last: bool,
     ) -> Result<Arc<dyn VfsNode>, KernelError> {
+        self.open_follow_canonical(path, flags, follow_last)
+            .map(|(node, _)| node)
+    }
+
+    /// [`Self::open_follow`], also returning the node's canonical path in
+    /// the whole tree (what an open file records for `fchdir` and `*at`).
+    pub fn open_follow_canonical(
+        &self,
+        path: &str,
+        flags: OpenFlags,
+        follow_last: bool,
+    ) -> Result<(Arc<dyn VfsNode>, String), KernelError> {
         // Determine access type from flags
         let access = if flags.write {
             crate::security::AccessType::Write
@@ -905,7 +986,7 @@ impl Vfs {
         // resolved, never on the path as written (FS-SEC-01).
         let (node, canonical) = self.resolve_canonical(path, &self.get_cwd(), follow_last)?;
         crate::security::mac::check_file_access(&canonical, access, pid)?;
-        Ok(node)
+        Ok((node, canonical))
     }
 
     /// Create a directory
@@ -1613,6 +1694,38 @@ mod tests {
         assert_eq!(canonical, "/a/b/x");
     }
 
+    /// chroot (N-250): under root /jail, absolute paths, `..` and
+    /// absolute symlink targets stay inside it.
+    #[test]
+    fn lookups_under_a_root_never_leave_it() {
+        let vfs = make_vfs_with_root();
+        let root = vfs.root_fs().unwrap().root();
+        root.create("secret", Permissions::default()).unwrap();
+        let jail = root.mkdir("jail", Permissions::default()).unwrap();
+        let etc = jail.mkdir("etc", Permissions::default()).unwrap();
+        etc.create("passwd", Permissions::default()).unwrap();
+        jail.symlink("out", "/secret").unwrap();
+        jail.symlink("up", "../../secret").unwrap();
+        let table = vfs.snapshot();
+        let r = |path: &str, cwd: &str| {
+            table
+                .resolve_in(path, cwd, "/jail", true, 0, None)
+                .map(|(_, canon)| canon)
+        };
+        assert_eq!(r("/etc/passwd", "/").unwrap(), "/jail/etc/passwd");
+        assert_eq!(r("/../../etc/passwd", "/").unwrap(), "/jail/etc/passwd");
+        assert_eq!(r("passwd", "/etc").unwrap(), "/jail/etc/passwd");
+        assert_eq!(r("..", "/").unwrap(), "/jail");
+        // /secret exists outside the jail only.
+        assert!(r("/secret", "/").is_err());
+        assert!(r("/out", "/").is_err());
+        assert!(r("/up", "/").is_err());
+        assert_eq!(root_relative("/jail/etc/passwd", "/jail"), "/etc/passwd");
+        assert_eq!(root_relative("/jail", "/jail"), "/");
+        assert_eq!(root_relative("/jailbreak", "/jail"), "/jailbreak");
+        assert_eq!(root_relative("/a/b", "/"), "/a/b");
+    }
+
     #[test]
     fn dotdot_through_missing_or_file_component_fails() {
         // Each component before ".." must exist and be a directory; a
@@ -1643,7 +1756,7 @@ mod tests {
             .unwrap();
         open.create("f", Permissions::from_mode(0o644)).unwrap();
         let table = vfs.snapshot();
-        let other = Some((1000, 1000));
+        let other = Some(crate::process::creds::Credentials::new(1000, 1000));
         // Root-owned 0700: another user cannot pass through it, even to a
         // world-readable file, and not by ".." either.
         assert!(matches!(

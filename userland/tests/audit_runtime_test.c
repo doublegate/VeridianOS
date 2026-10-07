@@ -13,6 +13,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <grp.h>
 #include <poll.h>
 #include <pthread.h>
 #include <stdio.h>
@@ -1640,6 +1641,157 @@ static void test_stop_continue(void)
            stopped && frozen && once && continued && resumed && tstp && killed, why);
 }
 
+/* --- Credentials, chroot, fchdir, utimensat (N-248 to N-250). ---------
+ * Each check runs in a child, so changed IDs, root or cwd never leak into
+ * the rest of the suite. A child reports failures as a bitmask exit code. */
+static int child_result(pid_t pid)
+{
+    int status = 0;
+    if (waitpid(pid, &status, 0) != pid)
+        return 254;
+    return WIFEXITED(status) ? WEXITSTATUS(status) : 255;
+}
+
+static void report_child(const char *name, pid_t pid)
+{
+    int code = child_result(pid);
+    static char why[64];
+    snprintf(why, sizeof(why), "child exit code %d (bitmask of failures)", code);
+    report(name, code == 0, why);
+}
+
+static void test_credentials_and_paths(void)
+{
+    /* A setuid-root style process: real 1000, effective and saved 0. It
+     * can drop the effective ID and take it back through the saved one;
+     * once all three are 1000 it cannot. seteuid used to report success
+     * without changing anything. */
+    pid_t pid = fork();
+    if (pid == 0) {
+        int f = 0;
+        uid_t r, e, s;
+        if (setresuid(1000, 0, 0) != 0) f |= 1;
+        if (seteuid(1000) != 0 || geteuid() != 1000) f |= 2;
+        if (seteuid(0) != 0 || geteuid() != 0) f |= 4;
+        if (getresuid(&r, &e, &s) != 0 || r != 1000 || e != 0 || s != 0) f |= 8;
+        if (setresuid(1000, 1000, 1000) != 0) f |= 16;
+        if (seteuid(0) == 0 || errno != EPERM) f |= 32;
+        _exit(f);
+    }
+    report_child("saved_uid_round_trip_and_final_drop", pid);
+
+    /* Supplementary groups grant group access; only root may set them. */
+    write_file("/tmp/audit_grp", "g", 0640);
+    chown("/tmp/audit_grp", 0, 20);
+    pid = fork();
+    if (pid == 0) {
+        int f = 0;
+        gid_t list[4] = {0};
+        gid_t want[2] = {20, 30};
+        if (setgroups(2, want) != 0) f |= 1;
+        if (getgroups(0, NULL) != 2) f |= 2;
+        if (getgroups(4, list) != 2 || list[0] != 20 || list[1] != 30) f |= 4;
+        if (setgid(100) != 0 || setuid(1000) != 0) f |= 8;
+        int fd = open("/tmp/audit_grp", O_RDONLY);
+        if (fd < 0) f |= 16;
+        else close(fd);
+        if (setgroups(0, NULL) == 0 || errno != EPERM) f |= 32;
+        _exit(f);
+    }
+    report_child("supplementary_groups_grant_access", pid);
+    pid = fork();
+    if (pid == 0) {
+        setgroups(0, NULL);
+        if (setgid(100) != 0 || setuid(1000) != 0)
+            _exit(100);
+        _exit(open("/tmp/audit_grp", O_RDONLY) >= 0 ? 1 : 0);
+    }
+    report_child("no_group_no_group_access", pid);
+
+    /* access(2): owner bits for the owner (it checked only "other"). */
+    write_file("/tmp/audit_owned", "o", 0700);
+    chown("/tmp/audit_owned", 1000, 1000);
+    write_file("/tmp/audit_noexec", "n", 0644);
+    pid = fork();
+    if (pid == 0) {
+        int f = 0;
+        if (access("/tmp/audit_noexec", X_OK) == 0) f |= 1; /* root needs an x bit */
+        if (setuid(1000) != 0) _exit(100);
+        if (access("/tmp/audit_owned", R_OK | W_OK | X_OK) != 0) f |= 2;
+        _exit(f);
+    }
+    report_child("access_uses_owner_bits", pid);
+
+    /* chroot: lookups stay inside, including "..", absolute paths and
+     * absolute symlink targets; only root may call it. */
+    mkdir("/tmp/audit_jail", 0755);
+    mkdir("/tmp/audit_jail/etc", 0755);
+    write_file("/tmp/audit_jail/etc/hello", "jail", 0644);
+    write_file("/tmp/audit_outside", "out", 0644);
+    unlink("/tmp/audit_jail/link");
+    symlink("/etc", "/tmp/audit_jail/link");
+    pid = fork();
+    if (pid == 0) {
+        int f = 0;
+        char buf[64];
+        if (chroot("/tmp/audit_jail") != 0) _exit(100);
+        if (chdir("/") != 0) f |= 1;
+        int fd = open("/etc/hello", O_RDONLY);
+        if (fd < 0) f |= 2;
+        else close(fd);
+        if (open("/../../tmp/audit_outside", O_RDONLY) >= 0) f |= 4;
+        if (open("/link/hello", O_RDONLY) < 0) f |= 8;
+        if (!getcwd(buf, sizeof(buf)) || strcmp(buf, "/") != 0) f |= 16;
+        if (chdir("..") != 0 || !getcwd(buf, sizeof(buf)) || strcmp(buf, "/") != 0) f |= 32;
+        if (setuid(1000) != 0 || chroot("/") == 0 || errno != EPERM) f |= 64;
+        _exit(f);
+    }
+    report_child("chroot_confines_lookups", pid);
+
+    /* fchdir: to an open directory; ENOTDIR for a file, EBADF for a bad fd. */
+    pid = fork();
+    if (pid == 0) {
+        int f = 0;
+        char buf[64];
+        int dfd = open("/tmp", O_RDONLY | O_DIRECTORY);
+        int ffd = open("/tmp/audit_outside", O_RDONLY);
+        if (dfd < 0 || ffd < 0) _exit(100);
+        if (chdir("/") != 0 || fchdir(dfd) != 0) f |= 1;
+        if (!getcwd(buf, sizeof(buf)) || strcmp(buf, "/tmp") != 0) f |= 2;
+        if (fchdir(ffd) == 0 || errno != ENOTDIR) f |= 4;
+        if (fchdir(999) == 0 || errno != EBADF) f |= 8;
+        _exit(f);
+    }
+    report_child("fchdir_changes_directory", pid);
+
+    /* utimensat / futimens: explicit times, UTIME_OMIT, and EPERM for a
+     * non-owner setting explicit times (they did nothing). */
+    write_file("/tmp/audit_times", "t", 0666);
+    chmod("/tmp/audit_times", 0666); /* past the umask: writable by others */
+    struct timespec ts[2] = {{1000, 0}, {2000, 0}};
+    struct stat st = {0};
+    int ok = utimensat(AT_FDCWD, "/tmp/audit_times", ts, 0) == 0 &&
+             stat("/tmp/audit_times", &st) == 0 && st.st_atime == 1000 && st.st_mtime == 2000;
+    int fd = open("/tmp/audit_times", O_RDONLY);
+    struct timespec omit[2] = {{0, UTIME_OMIT}, {3000, 0}};
+    ok = ok && fd >= 0 && futimens(fd, omit) == 0 && stat("/tmp/audit_times", &st) == 0 &&
+         st.st_atime == 1000 && st.st_mtime == 3000;
+    if (fd >= 0)
+        close(fd);
+    static char why_t[80];
+    snprintf(why_t, sizeof(why_t), "atime %ld mtime %ld", (long)st.st_atime, (long)st.st_mtime);
+    report("utimensat_sets_times", ok, why_t);
+    pid = fork();
+    if (pid == 0) {
+        int f = 0;
+        if (setuid(1001) != 0) _exit(100);
+        if (utimensat(AT_FDCWD, "/tmp/audit_times", ts, 0) == 0 || errno != EPERM) f |= 1;
+        if (utimensat(AT_FDCWD, "/tmp/audit_times", NULL, 0) != 0) f |= 2; /* writable */
+        _exit(f);
+    }
+    report_child("utimensat_owner_rules", pid);
+}
+
 int main(int argc, char **argv)
 {
     setvbuf(stdout, NULL, _IONBF, 0);
@@ -1682,6 +1834,7 @@ int main(int argc, char **argv)
     test_shared_anon_fork();
     test_map_fixed_replace();
     test_stop_continue();
+    test_credentials_and_paths();
     printf("AUDIT-RUNTIME: %d/%d\n", passed, total);
     return passed == total ? 0 : 1;
 }

@@ -473,6 +473,17 @@ impl VfsNode for RamNode {
         Ok(())
     }
 
+    fn set_times(&self, atime: Option<u64>, mtime: Option<u64>) -> Result<(), KernelError> {
+        let mut metadata = self.metadata.write();
+        if let Some(atime) = atime {
+            metadata.accessed = atime;
+        }
+        if let Some(mtime) = mtime {
+            metadata.modified = mtime;
+        }
+        Ok(())
+    }
+
     fn chown(&self, uid: Option<u32>, gid: Option<u32>) -> Result<(), KernelError> {
         let mut metadata = self.metadata.write();
         if let Some(uid) = uid {

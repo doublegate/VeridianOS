@@ -197,6 +197,10 @@ mode_t umask(mode_t mask);
  */
 int mknod(const char *pathname, mode_t mode, dev_t dev);
 
+/* utimensat/futimens tv_nsec values: set to now, or leave unchanged. */
+#define UTIME_NOW  ((1L << 30) - 1L)
+#define UTIME_OMIT ((1L << 30) - 2L)
+
 /**
  * Change file timestamps with nanosecond precision.
  *

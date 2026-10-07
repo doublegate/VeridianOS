@@ -199,7 +199,7 @@ What does not work yet: `docs/KNOWN-LIMITATIONS.md`.
     `abi/syscalls.map`, VeridianOS calls from 1024 (fixes N-33), stock musl, every caller and
     the kernel's embedded code moved; rootfs suite and tri-arch boot pass. Handler review:
     N-182 to N-250 (`docs/audit/ABI-REVIEW-2026-10-07.md`), N-182 to N-189 fixed.
-  - [ ] **Credentials and paths (N-248 to N-250, pulled forward from v0.30 at the user's
+  - [x] **Credentials and paths (N-248 to N-250, pulled forward from v0.30 at the user's
     request):** setresuid/setresgid/getres*id, setreuid/setregid, setgroups/getgroups, permission
     checks on effective ids and groups; fchdir; chroot through the path resolver; utimensat.
     Native libc and musl use them.

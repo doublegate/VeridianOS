@@ -140,9 +140,11 @@ What remains:
   opened is looked up by its old name.
 - **exec (N-101 remainder):** a multithreaded process cannot exec (EAGAIN, above). Fork children
   are runnable before setup completes (N-110).
-- **Credentials (N-131, planned v0.30):** one uid and gid per process; no effective, saved or
-  filesystem ids, no supplementary groups, no Linux capabilities. `chdir` does not check search
-  permission.
+- **Credentials (N-131 remainder, planned v0.30):** real, effective and saved IDs and
+  supplementary groups exist (N-248), but there are no filesystem IDs, no Linux capabilities
+  (privilege is effective uid 0) and setuid/setgid bits are not honoured by exec.
+- **chroot (N-250):** a working directory outside the new root is moved to the root, where Linux
+  would leave it outside.
 
 ### One CPU runs work (SMP stages S2/S3; planned v0.27 sprint D5)
 

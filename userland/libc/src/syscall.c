@@ -29,19 +29,7 @@
 /* Helper: translate raw syscall result to POSIX return value                */
 /* ========================================================================= */
 
-/*
- * Most VeridianOS syscalls return >= 0 on success and a negative errno
- * value on failure.  __syscall_ret() translates that into the POSIX
- * convention: success value unchanged, failure returns -1 with errno set.
- */
-static inline long __syscall_ret(long r)
-{
-    if (r < 0) {
-        errno = (int)(-r);
-        return -1;
-    }
-    return r;
-}
+/* __syscall_ret: <veridian/syscall.h>. */
 
 /* ========================================================================= */
 /* File I/O                                                                  */

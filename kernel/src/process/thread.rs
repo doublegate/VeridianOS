@@ -36,10 +36,14 @@ use crate::{
 #[cfg(feature = "alloc")]
 #[derive(Debug)]
 pub struct ThreadFs {
-    /// Current working directory path. Protected by a spinlock because
-    /// it can be read from syscall paths (getcwd) and modified from
-    /// others (chdir) concurrently.
+    /// Current working directory, relative to `root` (what getcwd
+    /// reports). Protected by a spinlock because it can be read from
+    /// syscall paths (getcwd) and modified from others (chdir)
+    /// concurrently.
     pub cwd: Mutex<alloc::string::String>,
+    /// Root directory (chroot), as a canonical path in the whole tree; "/"
+    /// unless the process called chroot. Path lookups never leave it.
+    pub root: Mutex<alloc::string::String>,
     /// File creation mask (umask). Atomic because it can be read/written
     /// from concurrent syscall paths without holding a lock.
     pub umask: AtomicU32,
@@ -53,15 +57,17 @@ impl ThreadFs {
     pub fn new_root() -> Arc<Self> {
         Arc::new(Self {
             cwd: Mutex::new(alloc::string::String::from("/")),
+            root: Mutex::new(alloc::string::String::from("/")),
             umask: AtomicU32::new(0o022),
         })
     }
 
-    /// Filesystem state starting in `cwd`, umask 0o022: a new process's
-    /// first thread starts in its creator's directory.
-    pub fn with_cwd(cwd: alloc::string::String) -> Arc<Self> {
+    /// Filesystem state starting in `cwd` under `root`, umask 0o022: a new
+    /// process's first thread starts in its creator's directories.
+    pub fn with_cwd(cwd: alloc::string::String, root: alloc::string::String) -> Arc<Self> {
         Arc::new(Self {
             cwd: Mutex::new(cwd),
+            root: Mutex::new(root),
             umask: AtomicU32::new(0o022),
         })
     }
@@ -82,6 +88,7 @@ impl ThreadFs {
     pub fn clone_copy(src: &Arc<Self>) -> Arc<Self> {
         Arc::new(Self {
             cwd: Mutex::new(src.cwd.lock().clone()),
+            root: Mutex::new(src.root.lock().clone()),
             umask: AtomicU32::new(src.umask.load(Ordering::Acquire)),
         })
     }

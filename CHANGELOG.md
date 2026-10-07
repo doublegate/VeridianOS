@@ -2,6 +2,19 @@
 
 ### Added
 
+- **Credentials (N-248).** Processes have real, effective and saved user and group IDs and up
+  to 64 supplementary groups, changed by Linux's rules: `setresuid`/`setresgid`,
+  `setreuid`/`setregid`, `setuid`/`setgid`, `getresuid`/`getresgid`, `getgroups`/`setgroups`.
+  File access, path search, exec, `kill` and `ptrace` use the effective IDs and every group of
+  the process. In the native libc, `seteuid`, `setegid` and `initgroups` used to report success
+  without changing anything; `getgrouplist` now reads `/etc/group`.
+- **chroot, fchdir and utimensat (N-249, N-250).** `chroot` gives a process a root directory that
+  the path resolver never leaves, through `..`, absolute paths or absolute symlinks. `fchdir`
+  changes to an open directory. `utimensat` (and `futimens`, `utimes`) set access and
+  modification times on ramfs, tmpfs and BlockFS. All three were stubs in the native libc.
+- **util-linux libblkid and libmount (2.42.4)** are built into the KDE sysroot. KF6 6.30's
+  KCoreAddons requires libmount, and KIO and Solid now build their mount-point and fstab support
+  instead of having it patched out.
 - **Waits sleep (blocking step of sprint D).** A new dispatcher primitive, `wait_event`, puts a
   task to sleep on a wait queue until its condition holds, a deadline passes (a sleeper list the
   timer tick wakes) or a signal arrives. On it:
@@ -176,6 +189,14 @@
 
 ### Security
 
+- **The native libc inflater overflowed a stack array on crafted streams.** A dynamic Huffman
+  block may declare 288 length and 32 distance codes, though only 286 and 30 exist; the 320 code
+  lengths were written into a 316-entry array. A crafted zlib stream, or a PNG carrying one,
+  overwrote the stack. Such blocks are now rejected, as zlib does. The PNG decoder also refuses
+  headers the specification forbids. Both are tested under AddressSanitizer.
+- **access() checked only the "other" permission bits (N-193).** It now uses owner, group and
+  other bits with the real IDs (effective with AT_EACCESS), and root needs an execute bit to
+  execute.
 - **ptrace needs a tracer relationship (N-187).** Any process could read and write any other
   process's memory with PTRACE_PEEK/POKE. Now TRACEME makes the parent the tracer, ATTACH
   requires the same uid or root and refuses a traced or own process, DETACH ends it, and an
@@ -276,6 +297,12 @@
 
 ### Fixed
 
+- **chdir resolves to the real directory and checks search permission;** `*at` calls report
+  EBADF for a bad directory fd and ENOTDIR for a non-directory, and an fd records the canonical
+  path it opened rather than the path as written (N-204).
+- **The native libc passes `socket()`'s protocol,** which the kernel now checks.
+- **KWin 6.7.5 needs no session patch:** upstream opens the DRM device itself; the build checks
+  that it still does.
 - **Linux numbers reach the Linux call (N-182, N-183).** The musl remap sent dup3 to pipe2,
   epoll_create1 to dup3, epoll_ctl to epoll_create, sigaltstack to setsid, getppid to getpgid,
   pipe2 to inotify_init1 and execveat/mlock2/copy_file_range to the timerfd calls, and swapped

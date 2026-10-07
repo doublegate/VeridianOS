@@ -24,6 +24,7 @@ use crate::println;
 
 // Re-export submodules
 pub mod creation;
+pub mod creds;
 pub mod cwd;
 pub mod exit;
 pub mod fork;

@@ -712,77 +712,138 @@ pub fn sys_setpriority(which: usize, who: usize, priority: usize) -> SyscallResu
 // Identity syscalls (170-175)
 // ============================================================================
 
-/// Get real user ID (SYS_getuid = 102)
+/// getuid: the real user ID.
 pub fn sys_getuid() -> SyscallResult {
     let proc = current_process().ok_or(SyscallError::InvalidState)?;
-    Ok(proc.uid() as usize)
+    Ok(proc.credentials().ruid as usize)
 }
 
-/// Get effective user ID (SYS_geteuid = 107)
-///
-/// VeridianOS does not yet distinguish real/effective UIDs, so this returns
-/// the same value as getuid.
+/// geteuid: the effective user ID.
 pub fn sys_geteuid() -> SyscallResult {
-    sys_getuid()
+    let proc = current_process().ok_or(SyscallError::InvalidState)?;
+    Ok(proc.credentials().euid as usize)
 }
 
-/// Get real group ID (SYS_getgid = 104)
+/// getgid: the real group ID.
 pub fn sys_getgid() -> SyscallResult {
     let proc = current_process().ok_or(SyscallError::InvalidState)?;
-    Ok(proc.gid() as usize)
+    Ok(proc.credentials().rgid as usize)
 }
 
-/// Get effective group ID (SYS_getegid = 108)
+/// getegid: the effective group ID.
 pub fn sys_getegid() -> SyscallResult {
-    sys_getgid()
+    let proc = current_process().ok_or(SyscallError::InvalidState)?;
+    Ok(proc.credentials().egid as usize)
 }
 
-/// Set user ID (SYS_setuid = 105)
-///
-/// Only uid 0 (root) can change to a different UID. Non-root processes
-/// may only "set" their uid to the current value (a no-op).
+/// An ID argument: uid_t/gid_t is 32 bits, so the upper half of the
+/// register is ignored, as on Linux.
+fn id_arg(arg: usize) -> u32 {
+    arg as u32
+}
+
+/// setuid: Linux rules (`Credentials::setuid`).
 pub fn sys_setuid(uid: usize) -> SyscallResult {
     let proc = current_process().ok_or(SyscallError::InvalidState)?;
-    let current_uid = proc.uid();
-    let new_uid = uid as u32;
-
-    // Non-root can only set uid to current value (no-op)
-    if current_uid != 0 && new_uid != current_uid {
-        return Err(SyscallError::PermissionDenied);
-    }
-
-    // If already the requested uid, nothing to do
-    if new_uid == current_uid {
-        return Ok(0);
-    }
-
-    // Root changing uid.
-    proc.set_uid(new_uid);
+    proc.update_credentials(|c| c.setuid(id_arg(uid)))?;
     Ok(0)
 }
 
-/// Set group ID (SYS_setgid = 106)
-///
-/// Only uid 0 (root) can change to a different GID. Non-root processes
-/// may only "set" their gid to the current value (a no-op).
+/// setgid: Linux rules (`Credentials::setgid`).
 pub fn sys_setgid(gid: usize) -> SyscallResult {
     let proc = current_process().ok_or(SyscallError::InvalidState)?;
-    let current_uid = proc.uid();
-    let current_gid = proc.gid();
-    let new_gid = gid as u32;
+    proc.update_credentials(|c| c.setgid(id_arg(gid)))?;
+    Ok(0)
+}
 
-    // Non-root can only set gid to current value (no-op)
-    if current_uid != 0 && new_gid != current_gid {
-        return Err(SyscallError::PermissionDenied);
+/// setreuid(ruid, euid); -1 leaves an ID unchanged.
+pub fn sys_setreuid(r: usize, e: usize) -> SyscallResult {
+    let proc = current_process().ok_or(SyscallError::InvalidState)?;
+    proc.update_credentials(|c| c.setreuid(id_arg(r), id_arg(e)))?;
+    Ok(0)
+}
+
+/// setregid(rgid, egid); -1 leaves an ID unchanged.
+pub fn sys_setregid(r: usize, e: usize) -> SyscallResult {
+    let proc = current_process().ok_or(SyscallError::InvalidState)?;
+    proc.update_credentials(|c| c.setregid(id_arg(r), id_arg(e)))?;
+    Ok(0)
+}
+
+/// setresuid(ruid, euid, suid); -1 leaves an ID unchanged.
+pub fn sys_setresuid(r: usize, e: usize, s: usize) -> SyscallResult {
+    let proc = current_process().ok_or(SyscallError::InvalidState)?;
+    proc.update_credentials(|c| c.setresuid(id_arg(r), id_arg(e), id_arg(s)))?;
+    Ok(0)
+}
+
+/// setresgid(rgid, egid, sgid); -1 leaves an ID unchanged.
+pub fn sys_setresgid(r: usize, e: usize, s: usize) -> SyscallResult {
+    let proc = current_process().ok_or(SyscallError::InvalidState)?;
+    proc.update_credentials(|c| c.setresgid(id_arg(r), id_arg(e), id_arg(s)))?;
+    Ok(0)
+}
+
+/// getresuid / getresgid: write the three IDs (each a 4-byte uid_t) to
+/// the three pointers.
+fn write_id_triple(ids: [u32; 3], ptrs: [usize; 3]) -> SyscallResult {
+    for (id, ptr) in ids.into_iter().zip(ptrs) {
+        super::userspace::write_user::<u32>(ptr, id)?;
     }
+    Ok(0)
+}
 
-    // If already the requested gid, nothing to do
-    if new_gid == current_gid {
-        return Ok(0);
+pub fn sys_getresuid(r: usize, e: usize, s: usize) -> SyscallResult {
+    let c = current_process()
+        .ok_or(SyscallError::InvalidState)?
+        .credentials();
+    write_id_triple([c.ruid, c.euid, c.suid], [r, e, s])
+}
+
+pub fn sys_getresgid(r: usize, e: usize, s: usize) -> SyscallResult {
+    let c = current_process()
+        .ok_or(SyscallError::InvalidState)?
+        .credentials();
+    write_id_triple([c.rgid, c.egid, c.sgid], [r, e, s])
+}
+
+/// getgroups(size, list): with size 0, the number of supplementary
+/// groups; otherwise copies them (EINVAL if `size` is too small).
+pub fn sys_getgroups(size: usize, list: usize) -> SyscallResult {
+    let c = current_process()
+        .ok_or(SyscallError::InvalidState)?
+        .credentials();
+    let groups = c.groups();
+    let size = size as u32 as i32;
+    if size < 0 {
+        return Err(SyscallError::InvalidArgument);
     }
+    if size == 0 {
+        return Ok(groups.len());
+    }
+    if (size as usize) < groups.len() {
+        return Err(SyscallError::InvalidArgument);
+    }
+    for (i, &g) in groups.iter().enumerate() {
+        super::userspace::write_user::<u32>(list + i * 4, g)?;
+    }
+    Ok(groups.len())
+}
 
-    // Root changing gid.
-    proc.set_gid(new_gid);
+/// setgroups(size, list): replace the supplementary groups (root only;
+/// EINVAL above NGROUPS_MAX).
+pub fn sys_setgroups(size: usize, list: usize) -> SyscallResult {
+    use crate::process::creds::NGROUPS_MAX;
+    let size = size as u32 as i32;
+    if size < 0 || size as usize > NGROUPS_MAX {
+        return Err(SyscallError::InvalidArgument);
+    }
+    let mut groups = [0u32; NGROUPS_MAX];
+    for (i, slot) in groups.iter_mut().take(size as usize).enumerate() {
+        *slot = super::userspace::read_user::<u32>(list + i * 4)?;
+    }
+    let proc = current_process().ok_or(SyscallError::InvalidState)?;
+    proc.update_credentials(|c| c.setgroups(&groups[..size as usize]))?;
     Ok(0)
 }
 

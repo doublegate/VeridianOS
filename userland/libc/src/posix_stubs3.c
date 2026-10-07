@@ -29,6 +29,9 @@
 #include <stdio.h>
 #include <sys/types.h>
 #include <unistd.h>
+#include <limits.h>
+#include <grp.h>
+#include <veridian/syscall.h>
 
 /* ========================================================================= */
 /* libgen.h -- basename() and dirname()                                      */
@@ -320,12 +323,60 @@ int mkfifo(const char *pathname, mode_t mode)
 }
 
 /* seteuid / setegid / setreuid / setregid / getgroups / setgroups */
-int seteuid(uid_t uid)   { (void)uid; return 0; }
-int setegid(gid_t gid)   { (void)gid; return 0; }
-int setreuid(uid_t ruid, uid_t euid) { (void)ruid; (void)euid; return 0; }
-int setregid(gid_t rgid, gid_t egid) { (void)rgid; (void)egid; return 0; }
-int getgroups(int size, gid_t list[]) { (void)size; (void)list; return 0; }
-int setgroups(size_t size, const gid_t *list) { (void)size; (void)list; return 0; }
+/* Credentials (N-248): the kernel keeps real, effective and saved IDs and
+ * the supplementary groups and enforces the Linux rules. These reported
+ * success without changing anything. (uid_t)-1 leaves an ID unchanged. */
+int seteuid(uid_t uid)
+{
+    return (int)__syscall_ret(veridian_syscall3(SYS_setresuid, -1L, (long)uid, -1L));
+}
+
+int setegid(gid_t gid)
+{
+    return (int)__syscall_ret(veridian_syscall3(SYS_setresgid, -1L, (long)gid, -1L));
+}
+
+int setreuid(uid_t ruid, uid_t euid)
+{
+    return (int)__syscall_ret(veridian_syscall2(SYS_setreuid, (long)ruid, (long)euid));
+}
+
+int setregid(gid_t rgid, gid_t egid)
+{
+    return (int)__syscall_ret(veridian_syscall2(SYS_setregid, (long)rgid, (long)egid));
+}
+
+int setresuid(uid_t ruid, uid_t euid, uid_t suid)
+{
+    return (int)__syscall_ret(
+        veridian_syscall3(SYS_setresuid, (long)ruid, (long)euid, (long)suid));
+}
+
+int setresgid(gid_t rgid, gid_t egid, gid_t sgid)
+{
+    return (int)__syscall_ret(
+        veridian_syscall3(SYS_setresgid, (long)rgid, (long)egid, (long)sgid));
+}
+
+int getresuid(uid_t *ruid, uid_t *euid, uid_t *suid)
+{
+    return (int)__syscall_ret(veridian_syscall3(SYS_getresuid, ruid, euid, suid));
+}
+
+int getresgid(gid_t *rgid, gid_t *egid, gid_t *sgid)
+{
+    return (int)__syscall_ret(veridian_syscall3(SYS_getresgid, rgid, egid, sgid));
+}
+
+int getgroups(int size, gid_t list[])
+{
+    return (int)__syscall_ret(veridian_syscall2(SYS_getgroups, (long)size, list));
+}
+
+int setgroups(size_t size, const gid_t *list)
+{
+    return (int)__syscall_ret(veridian_syscall2(SYS_setgroups, (long)size, list));
+}
 
 /* dup3() -- dup2 with flags */
 int dup3(int oldfd, int newfd, int flags)
@@ -953,16 +1004,34 @@ struct group *getgrent(void)
     return (struct group *)0;
 }
 
+/* The groups `user` belongs to: `group` first, then every /etc/group entry
+ * that lists the user. Returns the count, or -1 when it does not fit in
+ * *ngroups (which is then set to the count needed), as glibc does. It
+ * reported only `group`. */
 int getgrouplist(const char *user, gid_t group, gid_t *groups, int *ngroups)
 {
-    (void)user;
-    if (groups && *ngroups >= 1) {
-        groups[0] = group;
-        *ngroups = 1;
-        return 1;
+    int n = 0, cap = *ngroups;
+    struct group *gr;
+
+    if (n < cap)
+        groups[n] = group;
+    n++;
+    setgrent();
+    while ((gr = getgrent()) != NULL) {
+        if (gr->gr_gid == group || !gr->gr_mem)
+            continue;
+        for (char **m = gr->gr_mem; *m; m++) {
+            if (strcmp(*m, user) == 0) {
+                if (n < cap)
+                    groups[n] = gr->gr_gid;
+                n++;
+                break;
+            }
+        }
     }
-    *ngroups = 1;
-    return -1;
+    endgrent();
+    *ngroups = n;
+    return n <= cap ? n : -1;
 }
 
 /* --- Time functions ------------------------------------------------------ */
@@ -1063,21 +1132,19 @@ int sigsuspend(const sigset_t *mask)
     return -1;
 }
 
+/* Both did nothing and reported success (N-249). */
 int utimensat(int dirfd, const char *pathname,
               const struct timespec times[2], int flags)
 {
-    (void)dirfd;
-    (void)pathname;
-    (void)times;
-    (void)flags;
-    return 0;
+    return (int)__syscall_ret(
+        veridian_syscall4(SYS_utimensat, (long)dirfd, pathname, times, (long)flags));
 }
 
 int futimens(int fd, const struct timespec times[2])
 {
-    (void)fd;
-    (void)times;
-    return 0;
+    /* A NULL path makes utimensat act on the fd itself. */
+    return (int)__syscall_ret(
+        veridian_syscall4(SYS_utimensat, (long)fd, 0L, times, 0L));
 }
 
 /* --- fnmatch ------------------------------------------------------------- */
@@ -1616,27 +1683,30 @@ ssize_t recvmsg(int sockfd, struct msghdr *msg, int flags)
     return (ssize_t)ret;
 }
 
+/* Set the supplementary groups to those `user` belongs to (plus `group`).
+ * It did nothing and reported success. */
 int initgroups(const char *user, gid_t group)
 {
-    (void)user;
-    (void)group;
-    return 0;
+    gid_t groups[NGROUPS_MAX];
+    int n = NGROUPS_MAX;
+
+    if (getgrouplist(user, group, groups, &n) < 0) {
+        errno = EINVAL;  /* more groups than the kernel holds */
+        return -1;
+    }
+    return setgroups((size_t)n, groups);
 }
 
 /* endgrent() is implemented above with setgrent()/getgrent(). */
 
 int chroot(const char *path)
 {
-    (void)path;
-    errno = ENOSYS;
-    return -1;
+    return (int)__syscall_ret(veridian_syscall1(SYS_chroot, path));
 }
 
 int fchdir(int fd)
 {
-    (void)fd;
-    errno = ENOSYS;
-    return -1;
+    return (int)__syscall_ret(veridian_syscall1(SYS_fchdir, (long)fd));
 }
 
 int settimeofday(const struct timeval *tv, const struct timezone *tz)

@@ -152,11 +152,10 @@ pub struct Process {
     /// Creation timestamp
     pub created_at: u64,
 
-    /// User ID. Atomic because processes are shared through `Arc`.
-    uid: AtomicU32,
-
-    /// Group ID.
-    gid: AtomicU32,
+    /// User and group IDs and supplementary groups (N-248). A lock
+    /// because processes are shared through `Arc` and a set*id call
+    /// updates several fields at once.
+    creds: Mutex<super::creds::Credentials>,
 
     /// Process group ID (initialized to pid)
     pub pgid: AtomicU64,
@@ -234,24 +233,35 @@ impl Process {
         *self.parent.lock() = parent;
     }
 
-    /// User ID.
+    /// A copy of the credentials. Permission checks use the effective IDs
+    /// and `Credentials::gid_for`.
+    pub fn credentials(&self) -> super::creds::Credentials {
+        *self.creds.lock()
+    }
+
+    /// Change the credentials atomically; `f` enforces the set*id rules.
+    pub fn update_credentials<R>(&self, f: impl FnOnce(&mut super::creds::Credentials) -> R) -> R {
+        f(&mut self.creds.lock())
+    }
+
+    /// Real user ID.
     pub fn uid(&self) -> u32 {
-        self.uid.load(Ordering::Acquire)
+        self.creds.lock().ruid
     }
 
-    /// Set the user ID (callers enforce setuid rules).
-    pub fn set_uid(&self, uid: u32) {
-        self.uid.store(uid, Ordering::Release);
+    /// Effective user ID, the one permission checks use.
+    pub fn euid(&self) -> u32 {
+        self.creds.lock().euid
     }
 
-    /// Group ID.
+    /// Real group ID.
     pub fn gid(&self) -> u32 {
-        self.gid.load(Ordering::Acquire)
+        self.creds.lock().rgid
     }
 
-    /// Set the group ID (callers enforce setgid rules).
-    pub fn set_gid(&self, gid: u32) {
-        self.gid.store(gid, Ordering::Release);
+    /// Effective group ID.
+    pub fn egid(&self) -> u32 {
+        self.creds.lock().egid
     }
 
     /// Create a new process
@@ -284,8 +294,7 @@ impl Process {
             cpu_time: AtomicU64::new(0),
             memory_stats: MemoryStats::default(),
             created_at: crate::arch::timer::get_ticks(),
-            uid: AtomicU32::new(0),
-            gid: AtomicU32::new(0),
+            creds: Mutex::new(super::creds::Credentials::new(0, 0)),
             pgid: AtomicU64::new(pid.0),
             tracer: AtomicU64::new(0),
             sid: AtomicU64::new(pid.0),
@@ -925,8 +934,7 @@ pub struct ProcessBuilder {
     name: String,
     parent: Option<ProcessId>,
     priority: ProcessPriority,
-    uid: u32,
-    gid: u32,
+    creds: super::creds::Credentials,
 }
 
 #[cfg(feature = "alloc")]
@@ -937,8 +945,7 @@ impl ProcessBuilder {
             name,
             parent: None,
             priority: ProcessPriority::Normal,
-            uid: 0,
-            gid: 0,
+            creds: super::creds::Credentials::new(0, 0),
         }
     }
 
@@ -954,15 +961,9 @@ impl ProcessBuilder {
         self
     }
 
-    /// Set user ID
-    pub fn uid(mut self, uid: u32) -> Self {
-        self.uid = uid;
-        self
-    }
-
-    /// Set group ID
-    pub fn gid(mut self, gid: u32) -> Self {
-        self.gid = gid;
+    /// Set the credentials (a forked child takes its parent's).
+    pub fn credentials(mut self, creds: super::creds::Credentials) -> Self {
+        self.creds = creds;
         self
     }
 
@@ -976,8 +977,7 @@ impl ProcessBuilder {
     pub fn build(self) -> Process {
         let pid = super::alloc_pid();
         let process = Process::new(pid, self.parent, self.name, self.priority);
-        process.set_uid(self.uid);
-        process.set_gid(self.gid);
+        process.update_credentials(|c| *c = self.creds);
         process
     }
 
@@ -989,8 +989,7 @@ impl ProcessBuilder {
     pub fn build_with_address_space(self) -> Result<Process, KernelError> {
         let pid = super::alloc_pid();
         let process = Process::new(pid, self.parent, self.name, self.priority);
-        process.set_uid(self.uid);
-        process.set_gid(self.gid);
+        process.update_credentials(|c| *c = self.creds);
 
         // Initialize the virtual address space with a real page table root
         // and kernel space mappings

@@ -15,6 +15,8 @@
 
 #define _GNU_SOURCE
 #include <errno.h>
+#include <grp.h>
+#include <sys/stat.h>
 #include <poll.h>
 #include <sys/eventfd.h>
 #include <stdint.h>
@@ -637,6 +639,56 @@ static void test_unix_socket_wakeups(void)
     report("musl_unix_socket_wakeups", got_a && got_b && WIFEXITED(st) && WEXITSTATUS(st) == 0, why);
 }
 
+/* musl's own paths to the credential, chroot and timestamp calls
+ * (setresuid behind seteuid, utimensat behind futimens, getgrouplist):
+ * N-248 to N-250. Each runs in a child so the changes do not leak. */
+static void test_creds_and_paths(void)
+{
+    pid_t pid = fork();
+    if (pid == 0) {
+        int f = 0;
+        gid_t g[2] = {20, 30}, got[4];
+        uid_t r, e, s;
+        if (setgroups(2, g) != 0 || getgroups(4, got) != 2 || got[1] != 30) f |= 1;
+        if (setresuid(1000, 0, 0) != 0 || seteuid(1000) != 0 || geteuid() != 1000) f |= 2;
+        if (seteuid(0) != 0 || getresuid(&r, &e, &s) != 0 || r != 1000 || e != 0) f |= 4;
+        if (setuid(1000) != 0 || seteuid(0) == 0 || errno != EPERM) f |= 8;
+        _exit(f);
+    }
+    int st = 0;
+    waitpid(pid, &st, 0);
+    static char why[48];
+    snprintf(why, sizeof(why), "exit %d", WIFEXITED(st) ? WEXITSTATUS(st) : 255);
+    report("musl_setresuid_seteuid_groups", WIFEXITED(st) && WEXITSTATUS(st) == 0, why);
+
+    mkdir("/tmp/musl_jail", 0755);
+    FILE *fp = fopen("/tmp/musl_jail/inside", "w");
+    if (fp) fclose(fp);
+    pid = fork();
+    if (pid == 0) {
+        int f = 0;
+        char buf[32];
+        if (chroot("/tmp/musl_jail") != 0 || chdir("/") != 0) f |= 1;
+        if (access("/inside", F_OK) != 0) f |= 2;
+        if (access("/../tmp", F_OK) == 0) f |= 4;
+        if (!getcwd(buf, sizeof(buf)) || strcmp(buf, "/") != 0) f |= 8;
+        _exit(f);
+    }
+    st = 0;
+    waitpid(pid, &st, 0);
+    snprintf(why, sizeof(why), "exit %d", WIFEXITED(st) ? WEXITSTATUS(st) : 255);
+    report("musl_chroot", WIFEXITED(st) && WEXITSTATUS(st) == 0, why);
+
+    int fd = open("/tmp/musl_jail/inside", O_RDWR);
+    struct timespec ts[2] = {{1111, 0}, {2222, 0}};
+    struct stat sb = {0};
+    int ok = fd >= 0 && futimens(fd, ts) == 0 && fstat(fd, &sb) == 0 &&
+             sb.st_atime == 1111 && sb.st_mtime == 2222;
+    if (fd >= 0) close(fd);
+    snprintf(why, sizeof(why), "atime %ld mtime %ld", (long)sb.st_atime, (long)sb.st_mtime);
+    report("musl_futimens", ok, why);
+}
+
 int main(void)
 {
     test_fsync();
@@ -654,6 +706,7 @@ int main(void)
     test_blocking_io();
     test_pipe_write_semantics();
     test_unix_socket_wakeups();
+    test_creds_and_paths();
     printf("MUSL-RUNTIME: %d/%d\n", passed, total);
     return passed == total ? 0 : 1;
 }

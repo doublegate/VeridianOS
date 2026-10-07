@@ -404,11 +404,24 @@ int utime(const char *filename, const struct utimbuf *times)
 /* ========================================================================= */
 
 #include <sys/time.h>
+#include <sys/stat.h>
+#include <fcntl.h>
 
+/* Through utimensat; it did nothing (N-249). */
 int utimes(const char *filename, const struct timeval times[2])
 {
-    (void)filename; (void)times;
-    return 0;
+    struct timespec ts[2];
+    if (times) {
+        for (int i = 0; i < 2; i++) {
+            if (times[i].tv_usec < 0 || times[i].tv_usec >= 1000000) {
+                errno = EINVAL;
+                return -1;
+            }
+            ts[i].tv_sec = times[i].tv_sec;
+            ts[i].tv_nsec = times[i].tv_usec * 1000;
+        }
+    }
+    return utimensat(AT_FDCWD, filename, times ? ts : NULL, 0);
 }
 
 /* ========================================================================= */
@@ -652,33 +665,15 @@ int getnameinfo(const struct sockaddr *sa, socklen_t salen,
 
 #include <veridian/syscall.h>
 
-/*
- * Helper shared with posix_stubs3.c: translate a raw syscall return value
- * to the POSIX convention (negative -> errno + return -1).
- * (Cannot use the static __syscall_ret from syscall.c here since that file
- * is compiled separately; we duplicate the one-liner inline.)
- */
-static inline long __sock_ret(long r)
-{
-    if (r < 0) {
-        errno = (int)(-r);
-        return -1L;
-    }
-    return r;
-}
 
 /*
- * socket() -- create an endpoint for communication.
- *
- * Kernel args: (domain, sock_type)
- * The protocol argument is not forwarded (kernel derives it from domain +
- * sock_type); ignored here following the same approach as Linux glibc.
+ * socket() -- create an endpoint for communication (Linux socket: the
+ * kernel checks the protocol and honours SOCK_NONBLOCK / SOCK_CLOEXEC).
  */
 int socket(int domain, int type, int protocol)
 {
-    (void)protocol;
-    long ret = veridian_syscall2(SYS_socket, domain, type);
-    return (int)__sock_ret(ret);
+    long ret = veridian_syscall3(SYS_socket, domain, type, protocol);
+    return (int)__syscall_ret(ret);
 }
 
 /*
@@ -689,7 +684,7 @@ int socket(int domain, int type, int protocol)
 int connect(int sockfd, const struct sockaddr *addr, socklen_t addrlen)
 {
     long ret = veridian_syscall3(SYS_connect, sockfd, addr, addrlen);
-    return (int)__sock_ret(ret);
+    return (int)__syscall_ret(ret);
 }
 
 /*
@@ -700,7 +695,7 @@ int connect(int sockfd, const struct sockaddr *addr, socklen_t addrlen)
 int bind(int sockfd, const struct sockaddr *addr, socklen_t addrlen)
 {
     long ret = veridian_syscall3(SYS_bind, sockfd, addr, addrlen);
-    return (int)__sock_ret(ret);
+    return (int)__syscall_ret(ret);
 }
 
 /*
@@ -711,7 +706,7 @@ int bind(int sockfd, const struct sockaddr *addr, socklen_t addrlen)
 int listen(int sockfd, int backlog)
 {
     long ret = veridian_syscall2(SYS_listen, sockfd, backlog);
-    return (int)__sock_ret(ret);
+    return (int)__syscall_ret(ret);
 }
 
 /*
@@ -742,7 +737,7 @@ long send(int sockfd, const void *buf, unsigned long len, int flags)
 {
     (void)flags;
     long ret = veridian_syscall3(SYS_SOCKET_SEND, sockfd, buf, len);
-    return __sock_ret(ret);
+    return __syscall_ret(ret);
 }
 
 /*
@@ -755,7 +750,7 @@ long recv(int sockfd, void *buf, unsigned long len, int flags)
 {
     (void)flags;
     long ret = veridian_syscall3(SYS_SOCKET_RECV, sockfd, buf, len);
-    return __sock_ret(ret);
+    return __syscall_ret(ret);
 }
 
 /*
@@ -768,7 +763,7 @@ int setsockopt(int sockfd, int level, int optname,
 {
     long ret = veridian_syscall5(SYS_setsockopt,
                                   sockfd, level, optname, optval, optlen);
-    return (int)__sock_ret(ret);
+    return (int)__syscall_ret(ret);
 }
 
 /*
@@ -805,7 +800,7 @@ int shutdown(int sockfd, int how)
 #define SHUT_RDWR_LOCAL 2
     if (how == SHUT_RDWR_LOCAL) {
         long ret = veridian_syscall1(SYS_SOCKET_CLOSE, sockfd);
-        return (int)__sock_ret(ret);
+        return (int)__syscall_ret(ret);
     }
     /* Half-shutdown not supported; succeed silently. */
     (void)sockfd;

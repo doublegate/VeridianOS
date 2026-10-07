@@ -542,6 +542,11 @@ impl VfsNode for BlockFsNode {
         fs.chown_inode(self.inode_num, uid, gid)
     }
 
+    fn set_times(&self, atime: Option<u64>, mtime: Option<u64>) -> Result<(), KernelError> {
+        let mut fs = self.fs.write();
+        fs.set_times_inode(self.inode_num, atime, mtime)
+    }
+
     fn as_any(&self) -> Option<&dyn core::any::Any> {
         Some(self)
     }
@@ -1875,6 +1880,30 @@ impl BlockFsInner {
         inode.mode = type_bits | perm_bits;
         inode.ctime = crate::arch::timer::read_hw_timestamp() as u32;
 
+        Ok(())
+    }
+
+    /// Set an inode's access and/or modification time. On-disk times are
+    /// 32-bit seconds; later times are clamped to the largest, as Linux
+    /// clamps to what a filesystem can store.
+    fn set_times_inode(
+        &mut self,
+        inode_num: u32,
+        atime: Option<u64>,
+        mtime: Option<u64>,
+    ) -> Result<(), KernelError> {
+        let inode = self
+            .inode_table
+            .get_mut(inode_num as usize)
+            .ok_or(KernelError::FsError(FsError::NotFound))?;
+        let clamp = |t: u64| t.min(u32::MAX as u64) as u32;
+        if let Some(atime) = atime {
+            inode.atime = clamp(atime);
+        }
+        if let Some(mtime) = mtime {
+            inode.mtime = clamp(mtime);
+        }
+        inode.ctime = crate::arch::timer::read_hw_timestamp() as u32;
         Ok(())
     }
 

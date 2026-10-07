@@ -100,11 +100,14 @@ pub fn create_process_with_options(
     let start_cwd = crate::fs::try_get_vfs()
         .map(|vfs| vfs.get_cwd())
         .unwrap_or_else(|| String::from("/"));
+    let start_root = crate::fs::try_get_vfs()
+        .map(|vfs| vfs.get_root())
+        .unwrap_or_else(|| String::from("/"));
     let main_thread =
         ThreadBuilder::new(pid, format!("{}-main", options.name), options.entry_point)
             .user_stack_size(options.user_stack_size)
             .kernel_stack_size(options.kernel_stack_size)
-            .fs(super::thread::ThreadFs::with_cwd(start_cwd))
+            .fs(super::thread::ThreadFs::with_cwd(start_cwd, start_root))
             .build()?;
 
     let tid = main_thread.tid;
@@ -298,12 +301,12 @@ pub fn search_path(name: &str) -> Option<String> {
 /// read use the same resolved node, so the file cannot be swapped between
 /// them (N-101).
 #[cfg(feature = "alloc")]
-fn read_executable(path: &str, uid: u32, gid: u32) -> Result<Vec<u8>, KernelError> {
+fn read_executable(path: &str, creds: &super::creds::Credentials) -> Result<Vec<u8>, KernelError> {
     let node = crate::fs::get_vfs()
         .resolve_path(path)
         .map_err(|_| KernelError::FsError(crate::error::FsError::NotFound))?;
     let meta = node.metadata()?;
-    if !may_execute(&meta, uid, gid) {
+    if !may_execute(&meta, creds.euid, creds.gid_for(meta.gid)) {
         return Err(KernelError::PermissionDenied { operation: "exec" });
     }
     let mut data = alloc::vec![0u8; meta.size];
@@ -349,7 +352,7 @@ pub fn exec_process(path: &str, argv: &[&str], envp: &[&str]) -> Result<(), Kern
 
     // Step 1: Load new program from filesystem, checking execute
     // permission on the node that is read (N-101).
-    let file_data = read_executable(&resolved_path, process.uid(), process.gid())?;
+    let file_data = read_executable(&resolved_path, &process.credentials())?;
 
     // Step 1b: Check for shebang (#!) and delegate to interpreter if found
     if let Some((interpreter, opt_arg)) = parse_shebang(&file_data) {
@@ -395,7 +398,7 @@ pub fn exec_process(path: &str, argv: &[&str], envp: &[&str]) -> Result<(), Kern
     let interp: Option<(Vec<u8>, crate::elf::ElfBinary)> =
         match (&elf_binary.dynamic, &elf_binary.interpreter) {
             (true, Some(path)) => {
-                let data = read_executable(path, process.uid(), process.gid())?;
+                let data = read_executable(path, &process.credentials())?;
                 let parsed =
                     ElfLoader::new()
                         .parse(&data)

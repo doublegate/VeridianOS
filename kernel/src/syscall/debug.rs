@@ -198,19 +198,27 @@ fn phys_to_kernel_vaddr(phys_addr: usize) -> usize {
 /// # Returns
 /// Request-specific value on success, or error.
 /// Whether a process may attach to `target`: never to itself or to a
-/// process that already has a tracer, and only to its own uid's processes
-/// unless it is root (Linux's EPERM cases, without capabilities).
+/// process that already has a tracer; and unless it is root, the target's
+/// real, effective and saved IDs must all be the caller's real ones (Linux
+/// `ptrace_may_access` without capabilities), so a setuid program running
+/// privileged cannot be traced.
 fn may_attach(
     caller_pid: u64,
-    caller_uid: u32,
+    caller: &process::creds::Credentials,
     target_pid: u64,
-    target_uid: u32,
+    target: &process::creds::Credentials,
     target_tracer: u64,
 ) -> Result<(), SyscallError> {
     if target_pid == caller_pid || target_tracer != 0 {
         return Err(SyscallError::OperationNotPermitted);
     }
-    if caller_uid != 0 && caller_uid != target_uid {
+    let same_user = [target.ruid, target.euid, target.suid]
+        .iter()
+        .all(|&id| id == caller.ruid)
+        && [target.rgid, target.egid, target.sgid]
+            .iter()
+            .all(|&id| id == caller.rgid);
+    if caller.euid != 0 && !same_user {
         return Err(SyscallError::OperationNotPermitted);
     }
     Ok(())
@@ -255,9 +263,9 @@ pub fn sys_ptrace(request: usize, pid: usize, addr: usize, data: usize) -> Sysca
                 .ok_or(SyscallError::ProcessNotFound)?;
             may_attach(
                 caller_pid,
-                caller.uid(),
+                &caller.credentials(),
                 target.pid.0,
-                target.uid(),
+                &target.credentials(),
                 target.tracer.load(Ordering::Acquire),
             )?;
             // Lost race with another tracer: EPERM, as above.
@@ -327,23 +335,23 @@ pub fn sys_ptrace(request: usize, pid: usize, addr: usize, data: usize) -> Sysca
 mod tests {
     use super::*;
 
-    /// ptrace ATTACH: not to oneself or an already traced process, and
-    /// only to one's own uid unless root.
+    /// ptrace ATTACH: not to oneself or an already traced process; only
+    /// to a process whose IDs are all the caller's, unless root.
     #[test]
-    fn attach_needs_same_uid_or_root_and_no_tracer() {
-        assert_eq!(may_attach(10, 1000, 20, 1000, 0), Ok(()));
-        assert_eq!(may_attach(10, 0, 20, 1000, 0), Ok(()));
-        assert_eq!(
-            may_attach(10, 1000, 20, 1001, 0),
-            Err(SyscallError::OperationNotPermitted)
-        );
-        assert_eq!(
-            may_attach(10, 1000, 10, 1000, 0),
-            Err(SyscallError::OperationNotPermitted)
-        );
-        assert_eq!(
-            may_attach(10, 0, 20, 1000, 30),
-            Err(SyscallError::OperationNotPermitted)
-        );
+    fn attach_needs_same_ids_or_root_and_no_tracer() {
+        use process::creds::Credentials;
+        let user = Credentials::new(1000, 100);
+        let root = Credentials::new(0, 0);
+        let other = Credentials::new(1001, 100);
+        let mut setuid_root = Credentials::new(1000, 100);
+        setuid_root.euid = 0;
+        setuid_root.suid = 0;
+        assert_eq!(may_attach(10, &user, 20, &user, 0), Ok(()));
+        assert_eq!(may_attach(10, &root, 20, &user, 0), Ok(()));
+        let eperm = Err(SyscallError::OperationNotPermitted);
+        assert_eq!(may_attach(10, &user, 20, &other, 0), eperm);
+        assert_eq!(may_attach(10, &user, 20, &setuid_root, 0), eperm);
+        assert_eq!(may_attach(10, &user, 10, &user, 0), eperm);
+        assert_eq!(may_attach(10, &root, 20, &user, 30), eperm);
     }
 }

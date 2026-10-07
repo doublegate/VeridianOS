@@ -26,6 +26,8 @@ pub mod sysno {
     pub const SYS_PROCESS_GET_PRIORITY: usize = 1042;
     pub const SYS_getcwd: usize = 79;
     pub const SYS_chdir: usize = 80;
+    pub const SYS_fchdir: usize = 81;
+    pub const SYS_chroot: usize = 161;
     pub const SYS_kill: usize = 62;
     pub const SYS_umask: usize = 95;
     pub const SYS_uname: usize = 63;
@@ -102,6 +104,7 @@ pub mod sysno {
     pub const SYS_symlinkat: usize = 266;
     pub const SYS_readlink: usize = 89;
     pub const SYS_readlinkat: usize = 267;
+    pub const SYS_utimensat: usize = 280;
     pub const SYS_unlink: usize = 87;
     pub const SYS_unlinkat: usize = 263;
     pub const SYS_poll: usize = 7;
@@ -147,6 +150,14 @@ pub mod sysno {
     pub const SYS_getegid: usize = 108;
     pub const SYS_setuid: usize = 105;
     pub const SYS_setgid: usize = 106;
+    pub const SYS_setreuid: usize = 113;
+    pub const SYS_setregid: usize = 114;
+    pub const SYS_setresuid: usize = 117;
+    pub const SYS_getresuid: usize = 118;
+    pub const SYS_setresgid: usize = 119;
+    pub const SYS_getresgid: usize = 120;
+    pub const SYS_getgroups: usize = 115;
+    pub const SYS_setgroups: usize = 116;
     pub const SYS_setpgid: usize = 109;
     pub const SYS_getpgid: usize = 121;
     pub const SYS_getpgrp: usize = 111;
