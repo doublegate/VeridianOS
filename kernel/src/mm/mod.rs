@@ -140,7 +140,7 @@ pub enum PageSize {
 }
 
 /// Page flags
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PageFlags(u64);
 
 impl PageFlags {

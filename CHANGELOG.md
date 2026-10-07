@@ -28,6 +28,8 @@
 - **Copy-on-write fork (MEM-PERF-03, PROC-ARCH-01; ADR 0005).** Fork shares the parent's
   pages instead of copying them. The first write by either side takes a private copy, and
   shared frames are freed by their last owner. `/proc/meminfo` reports `CowShared`.
+  `mprotect` and the loader keep a shared frame read-only; granting write access makes it
+  copy-on-write rather than writable in both processes.
 
 - **RISC-V has a real kernel heap (MEM-SEC-03).** It uses the same linked-list allocator as
   x86_64 instead of a bump allocator that never reused freed memory. AArch64 follows once its

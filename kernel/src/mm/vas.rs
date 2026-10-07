@@ -21,6 +21,35 @@ use super::{
 };
 use crate::error::KernelError;
 
+/// The flags to install on a present user page when changing its protection
+/// to `requested`, keeping copy-on-write intact: a frame shared by a fork is
+/// never mapped writable. A writable request on a shared (or still-COW) page
+/// becomes read-only + COW, so the first write copies; a read-only request
+/// drops COW (the frame stays shared and read-only, so a later writable
+/// request sees it shared again). `None` when the page is not mapped.
+fn cow_safe_flags(
+    mapper: &PageMapper,
+    page: VirtualAddress,
+    requested: PageFlags,
+) -> Option<PageFlags> {
+    let (frame, old) = mapper.translate_page(page).ok()?;
+    Some(cow_flags_for(
+        old,
+        requested,
+        super::frame_refs::is_shared(frame),
+    ))
+}
+
+/// Pure rule behind [`cow_safe_flags`].
+fn cow_flags_for(old: PageFlags, requested: PageFlags, shared: bool) -> PageFlags {
+    let requested = requested.without(PageFlags::COW);
+    if requested.contains(PageFlags::WRITABLE) && (shared || old.contains(PageFlags::COW)) {
+        requested.without(PageFlags::WRITABLE) | PageFlags::COW
+    } else {
+        requested
+    }
+}
+
 /// Frame allocator wrapper implementing the page_table::FrameAllocator trait.
 /// Delegates to the global FRAME_ALLOCATOR.
 struct VasFrameAllocator;
@@ -1566,11 +1595,10 @@ impl VirtualAddressSpace {
             .ok_or(KernelError::InvalidAddress {
                 addr: vaddr as usize,
             })?;
-        if !mapping.flags.contains(PageFlags::WRITABLE) {
-            return Err(KernelError::PermissionDenied {
-                operation: "write to a read-only copy-on-write page",
-            });
-        }
+        // COW in a PTE means "logically writable, frame shared": every path
+        // that changes protection goes through `cow_safe_flags`, so the bit
+        // is never left on a page the process may not write (the mapping's
+        // own flags can be stale after an mprotect of part of it).
         let index = ((page - mapping.start.0) / 4096) as usize;
         let writable = flags.without(PageFlags::COW) | PageFlags::WRITABLE;
 
@@ -1881,7 +1909,9 @@ impl VirtualAddressSpace {
         for i in 0..num_pages {
             let vaddr = VirtualAddress(start.0 + (i as u64) * 4096);
             // Ignore errors for pages that aren't mapped in the hardware tables
-            let _ = mapper.update_page_flags(vaddr, new_flags);
+            if let Some(flags) = cow_safe_flags(&mapper, vaddr, new_flags) {
+                let _ = mapper.update_page_flags(vaddr, flags);
+            }
             crate::mm::tlb::flush_page(vaddr.0);
         }
 
@@ -2134,7 +2164,9 @@ impl VirtualAddressSpace {
                     // overlapping LOAD segments sharing a boundary page).
                     // Update flags to the union of old and new, then free
                     // the unused frame we just allocated.
-                    let _ = mapper.update_page_flags(vaddr_obj, flags);
+                    if let Some(flags) = cow_safe_flags(&mapper, vaddr_obj, flags) {
+                        let _ = mapper.update_page_flags(vaddr_obj, flags);
+                    }
                     crate::mm::note_free_failure(
                         FRAME_ALLOCATOR.lock().free_frames(frame, 1),
                         frame,
@@ -2360,6 +2392,23 @@ pub fn map_physical_region_user(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn protection_change_keeps_shared_frames_copy_on_write() {
+        let rw = PageFlags::PRESENT | PageFlags::USER | PageFlags::WRITABLE;
+        let ro = PageFlags::PRESENT | PageFlags::USER;
+        let cow = ro | PageFlags::COW;
+        // mprotect(PROT_WRITE) on a page a fork still shares: no direct write.
+        assert_eq!(cow_flags_for(cow, rw, true), cow);
+        // A shared frame made read-only earlier (COW dropped) stays protected.
+        assert_eq!(cow_flags_for(ro, rw, true), cow);
+        // Still marked COW but no longer shared: the fault path finishes it.
+        assert_eq!(cow_flags_for(cow, rw, false), cow);
+        // Read-only request drops COW; the PTE stays read-only.
+        assert_eq!(cow_flags_for(cow, ro, true), ro);
+        // A caller cannot set COW itself; private frames become writable.
+        assert_eq!(cow_flags_for(ro, rw | PageFlags::COW, false), rw);
+    }
 
     // --- MappingType tests ---
 
