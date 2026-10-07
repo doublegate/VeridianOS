@@ -105,9 +105,22 @@ What does not work yet: `docs/KNOWN-LIMITATIONS.md`.
     - [ ] Syscalls `sched_setattr/getattr`, `sched_setscheduler`, `nice`/`setpriority`, real
       `sched_setaffinity`/`getaffinity`, `sched_yield` on the new policy (SCHED-INC-02 resolved
       by the deadline class).
-  - [ ] **E, user mode beyond x86_64:** AArch64 MMU, caches and EL0 (N-28) with Linux-style EL2
-    and SCTLR setup (N-177); RISC-V U-mode (N-14); soft-float kernels on both (N-178); register
-    sanitiser on both (N-170); kernel stack guard pages on both (N-26).
+  - [ ] **E, user mode beyond x86_64** (also the boot-critical hardware items, since they coincide
+    with turning the MMU on; `ref-docs/HARDWARE-AARCH64.md`, `ref-docs/HARDWARE-RISCV64.md`):
+    - AArch64: save x0-x3 (DTB) and validate, early VBAR, Linux-style EL2/SCTLR setup on boot and
+      secondary paths (HA-01, HA-02, HA-14, HA-15, N-177); arm64 Image header and flat binary
+      (HA-03); position-independent early boot with the kernel at a high TTBR1 VA, MMU and caches
+      on before the first lock, TCR.IPS from PARange, 48-bit TTBR0 (HA-04, HA-16, N-28); cache
+      maintenance primitives and DMA coherency (HA-25); ASIDs (HA-26); memory map from `/memory`
+      and reservations (HA-17); EL0 entry/exit and SVC dispatch; register sanitiser (N-170).
+    - RISC-V: zero BSS, hart lottery, `sstatus.FS` (HR-01, HR-19, HR-20); RISC-V Image header and
+      relocatable or MMU-early boot (HR-02, HR-03); `satp` mode probe with Sv39 default and
+      3/4/5-level tables from the boot hart's cpu node (HR-08, HR-09); RISC-V PTE encoder with A/D,
+      Svpbmt/XTheadMae (HR-10, HR-11); remove raw 0x1000_0000 stores and QEMU-only probes (HR-04
+      to HR-06); memory map from the DT (HR-07); external interrupts (scause 9) handled, not fatal
+      (HR-31); IPIs by hart id (HR-33); U-mode with `tp` via `sscratch` (N-14); `sstatus` SPP
+      sanitiser (N-170).
+    - Both: soft-float kernels (N-178), kernel stack guard pages (N-26).
   - [ ] **F, networking, storage and protocols:**
     - F1 socket layer: sockaddr decoding, UDP send/receive/demux/checksum, errno and readiness
       (N-64 to N-68, N-72).
@@ -128,6 +141,42 @@ What does not work yet: `docs/KNOWN-LIMITATIONS.md`.
     (N-123); BlockFS open-unlinked inodes (N-117 interim); mount checks (N-129); frame allocator
     regions (N-142); `write_user` padding and IRQ-safe allocator locks (N-144); RTC fn pointer
     (N-157); CI flags, blocking coverage, real Kani harnesses, supply chain (N-161 to N-164).
+  - [ ] **H, real hardware** (`ref-docs/HARDWARE-{X86_64,AARCH64,RISCV64}.md`: HX-01..34,
+    HA-01..30, HR-01..40; items already in E are not repeated):
+    - Shared infrastructure: one FDT parser (cells, ranges, `dma-ranges`, interrupt cells,
+      `/chosen`, `reserved-memory`; fuzzed) and ACPI table parsers (MADT, FADT, MCFG, SPCR, DBG2,
+      HPET, SRAT, DMAR, GTDT, PPTT, IORT); a console framework (SPCR/DBG2/`stdout-path`, PL011,
+      ns16550/DW with `reg-shift`/`reg-io-width`, SBI DBCN, GOP fallback, probes that never read
+      absent ports); a DMA API (coherent and non-coherent, Zicbom/T-Head/SiFive and Arm cache
+      maintenance, bus-address translation); generic PCIe ECAM (MCFG / `pci-host-ecam-generic`)
+      with correct BAR sizing and MSI/MSI-X; QEMU-only devices (virtio-mmio, fw_cfg/ramfb) probed
+      only from firmware tables.
+    - x86_64: PIT-less timer calibration (CPUID 15h/16h, MSR 0xCE, HPET, PM timer) and LAPIC
+      against TSC (HX-01, HX-21); runtime-sized heap (HX-02); console selection (HX-03); ACPI
+      before APIC, x2APIC, MADT-driven I/O APIC (HX-04, N-174); 32-bit APIC IDs and dynamic CPU
+      count (HX-05); trampoline reservation and 4 KiB low mapping (HX-06); full memory map and
+      SRAT nodes (HX-07); MAXPHYADDR, kernel-owned page tables with UC MMIO and one WC
+      framebuffer, PAT sequence (HX-08 to HX-10); PCI segments and BARs (HX-11 to HX-13); FADT
+      power/reset/century, AML interpreter choice (HX-14 to HX-16, HX-28); no legacy VGA
+      (HX-17); xHCI and AHCI BIOS handoff, USB HID, NVMe shutdown (HX-18, HX-29, HX-30); IOMMU
+      state and RMRRs (HX-19); NMI/#MC, microcode, mitigations, idle/P-states, thermal (HX-22 to
+      HX-27); supported-hardware list and NIC drivers (HX-20); EFI system table, SMBIOS, crash
+      capture (HX-31 to HX-34).
+    - AArch64: earlycon and console drivers (HA-05, HA-06); GICv2 from the DT and GICv3/ITS
+      (HA-07 to HA-11, HA-28); timer frequency and INTID from the DT (HA-12, HA-13, HA-27); full
+      MPIDR ids, PSCI features/off/reset, spin-table (HA-21, HA-22); dma-ranges (HA-29);
+      Spectre/SSBD (HA-30); errata and CPU-feature survey (PAN, LSE, PAuth, BTI); big.LITTLE
+      capacity for scheduler placement; UEFI + ACPI entry for SystemReady servers (HA-24);
+      PCIe and SMMUv3 (HA-20). First board: Raspberry Pi 4, then Pi 5, RK3588, a server.
+    - RISC-V: PLIC from the DT with contexts from `interrupts-extended`, APLIC/IMSIC (HR-12 to
+      HR-14); timebase and Sstc from the boot hart (HR-15, HR-16); SBI hygiene and HSM with
+      physical addresses (HR-17, HR-18, HR-27); no M-mode CSRs (HR-21); entropy (HR-22); PCIe
+      (HR-34); SiFive errata, ASIDs, vector state, SRST shutdown, idle suspend, IOMMU (HR-29 to
+      HR-40); cache topology from the DT (HR-26). First board: VisionFive 2, then Unmatched, then a
+      T-Head board.
+    - CI: the QEMU validation matrices from the three documents (flat-Image loads at two
+      addresses, `gic-version=3`, `virtualization=on`, `-M sifive_u`, `sv48=off`, `aia=`, no
+      PIT/HPET, no COM1, `pxb-pcie`, x2APIC above 255 CPUs) as boot jobs.
   - [ ] **Release:** tri-arch boot with `-smp 4`, runtime suite, CHANGELOG, tag.
 - [ ] **v0.28.0:** one Linux ABI with VeridianOS IPC in its own range (X1, fixes N-33), plus the
   process, signal, time and file syscall tiers.

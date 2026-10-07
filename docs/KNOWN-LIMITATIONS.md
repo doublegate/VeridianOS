@@ -188,6 +188,22 @@ from `cap/token.rs`), and neither Kani nor TLC runs in CI.
 The CSPRNG is seeded only from timer jitter on AArch64, RISC-V and x86 CPUs without RDRAND, which
 is close to deterministic under QEMU TCG.
 
+### Runs only under QEMU (planned v0.27 sprints E and H)
+
+Every architecture depends on QEMU-specific addresses and devices, and AArch64 and RISC-V can
+only be loaded as ELF files at one fixed address. Real-hardware requirements and the bring-up
+order are in `ref-docs/HARDWARE-X86_64.md`, `ref-docs/HARDWARE-AARCH64.md` and
+`ref-docs/HARDWARE-RISCV64.md`. In short:
+
+- **x86_64:** needs a 16550 at 0x3F8 and an 8254 PIT (the console reads endless 0xFF bytes
+  without one, and timer calibration can hang), at least ~1.5 GiB of RAM, xAPIC handover and at
+  most 16 CPUs.
+- **AArch64:** discards the device-tree pointer, has no Image header, runs only at 0x40200000
+  with the MMU off, and hard-codes the QEMU UART, GIC and RAM layout.
+- **RISC-V:** never zeroes BSS (relies on the ELF loader), has no Image header, writes to
+  0x1000_0000 (a clock controller on the HiFive Unmatched), uses x86-format page-table
+  entries, and treats device interrupts as fatal.
+
 ## Measurement caveat
 
 Before v0.26.0, every in-kernel benchmark divided TSC ticks by 2 (an assumed 2 GHz clock). On the
