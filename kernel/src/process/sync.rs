@@ -590,9 +590,12 @@ impl PiMutex {
         if self.try_lock() {
             // We acquired the lock. Save our current priority.
             if let Some(task) = get_current_task_ptr() {
-                // SAFETY: We just acquired the lock, so we are the only
-                // writer to original_priority at this point.
                 let mut orig = self.original_priority.lock();
+                // SAFETY: `task` is the scheduler's current task, i.e. the
+                // task executing this code; tasks are leaked boxes that stay
+                // allocated while they run, so the read is of live memory.
+                // We just acquired the lock, so we are the only writer to
+                // original_priority at this point.
                 unsafe {
                     *orig = Some((*task).priority);
                 }
@@ -614,6 +617,8 @@ impl PiMutex {
             if self.try_lock() {
                 if let Some(task) = get_current_task_ptr() {
                     let mut orig = self.original_priority.lock();
+                    // SAFETY: as above -- `task` is the currently running
+                    // task, which stays allocated while it runs.
                     unsafe {
                         *orig = Some((*task).priority);
                     }
@@ -665,6 +670,8 @@ impl PiMutex {
 
         // Get current task's priority
         let my_priority = if let Some(task) = get_current_task_ptr() {
+            // SAFETY: `task` is the currently running task (this caller),
+            // which stays allocated while it runs.
             unsafe { (*task).priority }
         } else {
             return;

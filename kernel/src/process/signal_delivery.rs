@@ -148,6 +148,8 @@ unsafe fn write_to_user_stack(
         return;
     }
 
+    // SAFETY: pt_root is the non-zero L4 physical address owned by
+    // `memory_space`, which is what create_mapper_from_root requires.
     let mapper = unsafe { crate::mm::vas::create_mapper_from_root_pub(pt_root) };
     if let Ok((frame, _flags)) = mapper.translate_page(VirtualAddress(vaddr as u64)) {
         let page_offset = vaddr & 0xFFF;
@@ -181,6 +183,8 @@ unsafe fn write_bytes_to_user_stack(
         return;
     }
 
+    // SAFETY: pt_root is the non-zero L4 physical address owned by
+    // `memory_space`, which is what create_mapper_from_root requires.
     let mapper = unsafe { crate::mm::vas::create_mapper_from_root_pub(pt_root) };
     if let Ok((frame, _flags)) = mapper.translate_page(VirtualAddress(vaddr as u64)) {
         let page_offset = vaddr & 0xFFF;
@@ -214,6 +218,8 @@ unsafe fn read_from_user_stack(
         return None;
     }
 
+    // SAFETY: pt_root is the non-zero L4 physical address owned by
+    // `memory_space`, which is what create_mapper_from_root requires.
     let mapper = unsafe { crate::mm::vas::create_mapper_from_root_pub(pt_root) };
     if let Ok((frame, _flags)) = mapper.translate_page(VirtualAddress(vaddr as u64)) {
         let page_offset = vaddr & 0xFFF;
@@ -248,6 +254,8 @@ unsafe fn read_bytes_from_user_stack(
         return false;
     }
 
+    // SAFETY: pt_root is the non-zero L4 physical address owned by
+    // `memory_space`, which is what create_mapper_from_root requires.
     let mapper = unsafe { crate::mm::vas::create_mapper_from_root_pub(pt_root) };
     if let Ok((frame, _flags)) = mapper.translate_page(VirtualAddress(vaddr as u64)) {
         let page_offset = vaddr & 0xFFF;

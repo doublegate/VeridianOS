@@ -82,12 +82,13 @@ pub fn sys_exec(path_ptr: usize, argv_ptr: usize, envp_ptr: usize) -> SyscallRes
     // envp (string data + NUL terminators + pointer slots). If the combined
     // size exceeds ARG_MAX (131072 bytes), returns E2BIG.
     //
+    let mut arg_total_bytes: usize = 0;
     // SAFETY: argv_ptr and envp_ptr are user-space pointers to null-terminated
     // arrays of string pointers. copy_string_array_from_user_tracked handles
     // null pointer checks internally and bounds-checks string lengths.
-    let mut arg_total_bytes: usize = 0;
     let argv = unsafe { copy_string_array_from_user_tracked(argv_ptr, &mut arg_total_bytes)? };
 
+    // SAFETY: as for argv above -- the callee validates every user pointer.
     let mut envp = unsafe { copy_string_array_from_user_tracked(envp_ptr, &mut arg_total_bytes)? };
 
     // If envp is empty (NULL pointer from user-space), inherit the parent

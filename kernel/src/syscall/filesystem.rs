@@ -1726,6 +1726,8 @@ pub fn sys_lstat(path_ptr: usize, stat_buf: usize) -> SyscallResult {
                     st_ctime_nsec: 0,
                     __unused: [0; 3],
                 };
+                // SAFETY: stat_buf was validated as non-null, in user-space,
+                // and aligned (same check as the success path above).
                 unsafe {
                     core::ptr::write(stat_buf as *mut FileStat, fake_stat);
                 }

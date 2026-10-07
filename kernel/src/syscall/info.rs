@@ -50,6 +50,10 @@ pub fn sys_uname(buf: usize) -> SyscallResult {
 
     // Helper: write a string into a fixed-size field, NUL-padded.
     let write_field = |offset: usize, value: &[u8]| {
+        // SAFETY: `buf` was validated above as a user-space range of
+        // UTSNAME_SIZE bytes, and every caller passes an offset with
+        // offset + UTSNAME_LENGTH <= UTSNAME_SIZE. NOTE: validation is a range
+        // check only; an unmapped user page faults on the write.
         let field =
             unsafe { core::slice::from_raw_parts_mut(user_buf.add(offset), UTSNAME_LENGTH) };
         let len = core::cmp::min(value.len(), UTSNAME_LENGTH - 1);

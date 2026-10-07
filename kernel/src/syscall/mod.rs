@@ -739,6 +739,8 @@ pub extern "C" fn syscall_handler(
     // flooding serial output during normal operation.
     #[cfg(target_arch = "x86_64")]
     if count < 500 {
+        // SAFETY: COM1 (port 0x3F8) is present on the x86_64 platforms this
+        // kernel targets, which is the raw_serial_* contract.
         unsafe {
             crate::arch::x86_64::idt::raw_serial_str(b"SC#");
             crate::arch::x86_64::idt::raw_serial_hex(syscall_num as u64);
@@ -885,6 +887,8 @@ pub extern "C" fn syscall_handler(
     // Diagnostic: print syscall results for first 500 calls
     #[cfg(target_arch = "x86_64")]
     if count < 500 {
+        // SAFETY: COM1 (port 0x3F8) is present on the x86_64 platforms this
+        // kernel targets, which is the raw_serial_* contract.
         unsafe {
             crate::arch::x86_64::idt::raw_serial_str(b"  =>");
             crate::arch::x86_64::idt::raw_serial_hex(ret as u64);

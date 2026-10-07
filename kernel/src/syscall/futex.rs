@@ -67,6 +67,8 @@ struct FutexWaiter {
 // dequeued.  Send/Sync are required so the BTreeMap can live in a static
 // Mutex, which is safe because all accesses are serialised by the spinlock.
 unsafe impl Send for FutexWaiter {}
+// SAFETY: as for Send above -- every access to the task pointer is
+// serialised by the bucket spinlock or happens after dequeue.
 unsafe impl Sync for FutexWaiter {}
 
 /// Waiters for one hash bucket.
@@ -603,6 +605,10 @@ fn boot_futex_spin(
 
     for _ in 0..MAX_SPINS {
         // Re-check the futex word
+        // SAFETY: sys_futex_wait validated uaddr as non-null, 4-byte aligned
+        // and inside user space before calling here, and the parent's
+        // address space is active. NOTE: the mapping is not re-verified; an
+        // unmapped page would fault on this read.
         let cur = unsafe { core::ptr::read_volatile(uaddr as *const u32) };
         if cur != expected {
             return Ok(0);
@@ -675,6 +681,9 @@ fn boot_futex_spin(
             let sched = crate::sched::scheduler::current_scheduler();
             sched.lock().enqueue(t);
         };
+        // SAFETY: child_task was handed out by the scheduler and is off the
+        // run queue, so this code exclusively holds it and the leaked Task
+        // allocation is live; it is only read here.
         let (regs, child_pid, child_tid, cr3) = unsafe {
             let task_ref = child_task.as_ref();
 
@@ -734,12 +743,18 @@ fn boot_futex_spin(
         let saved_canary = BOOT_STACK_CANARY.load(Ordering::SeqCst);
 
         let per_cpu = crate::arch::x86_64::syscall::per_cpu_data_ptr();
+        // SAFETY: per_cpu points to this CPU's PerCpuData, initialized during
+        // boot and live for the kernel lifetime; we are in syscall context on
+        // this CPU, so nothing else writes it concurrently.
         let saved_kernel_rsp = unsafe { (*per_cpu).kernel_rsp };
+        // SAFETY: same per-CPU pointer as above.
         let saved_user_rsp = unsafe { (*per_cpu).user_rsp };
 
         // Save parent's FS_BASE.  boot_return_to_kernel zeroes FS via
         // `mov fs, ax`, which clears FS_BASE.  We restore it after the
         // child dispatch so the parent's TLS remains correct.
+        // SAFETY: RDMSR of IA32_FS_BASE (0xC0000100) in Ring 0 only reads the
+        // current FS base.
         let saved_fs_base: u64 = unsafe {
             let lo: u32;
             let hi: u32;
@@ -762,11 +777,19 @@ fn boot_futex_spin(
 
         // Rebalance swapgs: we are in syscall context (GS.base=per_cpu_data).
         // enter_forked_child_returnable expects KernelGsBase=per_cpu_data.
+        // SAFETY: in syscall context GS.base is per_cpu_data, so swapgs moves
+        // it to KernelGsBase as the dispatch below requires; it is swapped
+        // back immediately after the child yields.
         unsafe { core::arch::asm!("swapgs", options(nomem, nostack)) };
 
         let kernel_rsp_ptr = per_cpu as u64;
 
         // Dispatch child to user mode (blocks until boot_return_to_kernel)
+        // SAFETY: `regs` is a local ForkChildRegs in kernel memory, mapped in
+        // every address space; cr3 is the child's non-zero page table root
+        // (checked above); kernel_rsp_ptr is this CPU's PerCpuData; GS was
+        // just put in the state the dispatch expects, and the parent's boot
+        // return context was saved above for restoration afterwards.
         unsafe {
             crate::arch::x86_64::usermode::enter_forked_child_returnable(
                 &regs,
@@ -776,9 +799,13 @@ fn boot_futex_spin(
         }
 
         // Child yielded back. Restore GS state.
+        // SAFETY: undoes the swapgs before the dispatch, returning GS.base to
+        // per_cpu_data for the rest of this syscall.
         unsafe { core::arch::asm!("swapgs", options(nomem, nostack)) };
 
         // Restore parent's FS_BASE (zeroed by boot_return_to_kernel)
+        // SAFETY: WRMSR of IA32_FS_BASE in Ring 0 with the value read from
+        // the same MSR above, so it is a canonical address.
         unsafe {
             core::arch::asm!(
                 "wrmsr",
@@ -790,6 +817,8 @@ fn boot_futex_spin(
         }
 
         // Restore parent's per-CPU state
+        // SAFETY: same per-CPU pointer as above; the child has yielded, so
+        // this CPU is back in the parent's syscall and is the only writer.
         unsafe {
             (*per_cpu).kernel_rsp = saved_kernel_rsp;
             (*per_cpu).user_rsp = saved_user_rsp;

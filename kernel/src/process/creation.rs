@@ -609,6 +609,8 @@ unsafe fn write_bytes_to_user_stack(
         return;
     }
 
+    // SAFETY: pt_root is the non-zero L4 physical address owned by
+    // `memory_space`, which is what create_mapper_from_root requires.
     let mapper = unsafe { super::super::mm::vas::create_mapper_from_root_pub(pt_root) };
 
     // Write in page-sized chunks to handle data that crosses page boundaries.

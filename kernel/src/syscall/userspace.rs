@@ -152,7 +152,10 @@ pub unsafe fn copy_slice_to_user(user_ptr: usize, data: &[u8]) -> Result<(), Sys
 /// This function reads from user-provided pointers and must validate them
 pub unsafe fn copy_string_array_from_user(array_ptr: usize) -> Result<Vec<String>, SyscallError> {
     let mut cumulative = 0usize;
-    copy_string_array_from_user_tracked(array_ptr, &mut cumulative)
+    // SAFETY: the callee validates every pointer it reads; it has no
+    // precondition beyond being called from syscall context, which this
+    // function's contract passes on.
+    unsafe { copy_string_array_from_user_tracked(array_ptr, &mut cumulative) }
 }
 
 /// Copy a null-terminated string array from user space with cumulative
@@ -182,7 +185,12 @@ pub unsafe fn copy_string_array_from_user_tracked(
     // Read pointers until we hit null
     loop {
         validate_user_ptr(current_ptr as *const usize, 8)?; // 64-bit pointer
-        let string_ptr = ptr::read_volatile(current_ptr as *const usize);
+                                                            // SAFETY: validate_user_ptr confirmed the 8 bytes are non-null and
+                                                            // lie entirely below USER_SPACE_END. It does NOT prove the page is
+                                                            // mapped (an unmapped page faults into the page-fault handler) or
+                                                            // that `current_ptr` is 8-byte aligned (x86_64 tolerates an
+                                                            // unaligned load; Rust's read_volatile formally requires alignment).
+        let string_ptr = unsafe { ptr::read_volatile(current_ptr as *const usize) };
 
         if string_ptr == 0 {
             break;
@@ -193,7 +201,9 @@ pub unsafe fn copy_string_array_from_user_tracked(
             return Err(SyscallError::ArgumentListTooLong);
         }
 
-        let string = copy_string_from_user(string_ptr)?;
+        // SAFETY: copy_string_from_user is fault-tolerant and validates
+        // `string_ptr` itself; it has no additional precondition.
+        let string = unsafe { copy_string_from_user(string_ptr)? };
 
         // Account for string bytes + NUL terminator + one 8-byte pointer
         let entry_cost = string.len() + 1 + core::mem::size_of::<usize>();
