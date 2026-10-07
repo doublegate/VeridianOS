@@ -1485,7 +1485,7 @@ mod tests {
         assert!(b.rename("h", &b, "d").is_err(), "file over directory");
         assert!(b.rename("d", &b, "h").is_err(), "directory over file");
         d.create("x", Permissions::default()).unwrap();
-        let e = b.mkdir("e", Permissions::default()).unwrap();
+        b.mkdir("e", Permissions::default()).unwrap();
         assert!(b.rename("e", &b, "d").is_err(), "over non-empty directory");
         assert!(b.rename(".", &b, "z").is_err());
 

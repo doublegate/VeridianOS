@@ -115,7 +115,7 @@ static const char g_default_lang[] = "en";
 struct hb_language_impl_t {
     const char *s;
 };
-static struct hb_language_impl_t g_lang_en = { "en" };
+static struct hb_language_impl_t g_lang_en = { g_default_lang };
 static struct hb_language_impl_t g_lang_custom[16];
 static int g_lang_count = 0;
 
@@ -222,18 +222,45 @@ hb_direction_t hb_script_get_horizontal_direction(hb_script_t script)
 /* Language                                                                  */
 /* ========================================================================= */
 
+/*
+ * BCP 47 tags in HarfBuzz's canonical form: lower case, '-' for '_', and
+ * ending at the first character a tag cannot contain (so "de_DE.UTF-8"
+ * from a locale becomes "de-de"). Writes at most cap - 1 characters.
+ */
+static int canon_lang(const char *str, int len, char *out, int cap)
+{
+    int n = 0;
+    for (int i = 0; i < len && n < cap - 1; i++) {
+        char c = str[i];
+        if (c >= 'A' && c <= 'Z')
+            c = (char)(c - 'A' + 'a');
+        else if (c == '_')
+            c = '-';
+        else if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-'))
+            break;
+        out[n++] = c;
+    }
+    out[n] = '\0';
+    return n;
+}
+
 hb_language_t hb_language_from_string(const char *str, int len)
 {
     int i;
+    char canon[64];
 
     if (!str || len == 0)
         return (hb_language_t)&g_lang_en;
 
     if (len < 0)
         len = (int)strlen(str);
+    len = canon_lang(str, len, canon, (int)sizeof(canon));
+    str = canon;
+    if (len == 0)
+        return (hb_language_t)&g_lang_en;
 
     /* Check existing languages */
-    if (len == 2 && str[0] == 'e' && str[1] == 'n')
+    if (strcmp(canon, g_default_lang) == 0)
         return (hb_language_t)&g_lang_en;
 
     for (i = 0; i < g_lang_count; i++) {
@@ -264,8 +291,24 @@ const char *hb_language_to_string(hb_language_t language)
     return language->s;
 }
 
+/*
+ * The language of the process locale, as HarfBuzz derives it from
+ * LC_CTYPE: the first of LC_ALL, LC_CTYPE and LANG that is set. The C and
+ * POSIX locales name no language, so they give the default ("en").
+ */
 hb_language_t hb_language_get_default(void)
 {
+    static const char *const vars[] = { "LC_ALL", "LC_CTYPE", "LANG" };
+
+    for (unsigned int i = 0; i < sizeof(vars) / sizeof(vars[0]); i++) {
+        const char *v = getenv(vars[i]);
+        if (v && *v) {
+            if (strcmp(v, "C") == 0 || strncmp(v, "C.", 2) == 0 ||
+                strcmp(v, "POSIX") == 0)
+                break;
+            return hb_language_from_string(v, -1);
+        }
+    }
     return (hb_language_t)&g_lang_en;
 }
 

@@ -103,13 +103,18 @@ static du_int __udivmoddi4(du_int a, du_int b, du_int *rem)
         return 1;
     }
 
-    /* Count leading zeros to align divisor */
+    /*
+     * Here b < a, so the quotient has at most sr + 1 bits, where sr is
+     * the divisor's alignment shift. The bits of a above position sr form
+     * a value with fewer bits than b, so they are the starting remainder
+     * and the long division only visits bits sr..0.
+     */
     int sr = __builtin_clzll(b) - __builtin_clzll(a);
     du_int q = 0;
-    du_int r = 0;
+    du_int r = sr == 63 ? 0 : a >> (sr + 1);
 
     /* Binary long division */
-    for (int i = 63; i >= 0; i--) {
+    for (int i = sr; i >= 0; i--) {
         r = (r << 1) | ((a >> i) & 1);
         if (r >= b) {
             r -= b;
@@ -202,15 +207,21 @@ static tu_int __udivmodti4(tu_int a, tu_int b, tu_int *rem)
         return 1;
     }
 
-    /* Use __builtin_clzll on the high/low halves */
+    /* 128-bit leading zeros from __builtin_clzll on the halves; the
+     * division then starts at the divisor's alignment shift, as above. */
     utwords ua, ub;
     ua.all = a;
     ub.all = b;
+    int clz_a = ua.s.high ? __builtin_clzll(ua.s.high)
+                          : 64 + __builtin_clzll(ua.s.low);
+    int clz_b = ub.s.high ? __builtin_clzll(ub.s.high)
+                          : 64 + __builtin_clzll(ub.s.low);
+    int sr = clz_b - clz_a;
 
     tu_int q = 0;
-    tu_int r = 0;
+    tu_int r = sr == 127 ? 0 : a >> (sr + 1);
 
-    for (int i = 127; i >= 0; i--) {
+    for (int i = sr; i >= 0; i--) {
         r = (r << 1) | ((a >> i) & 1);
         if (r >= b) {
             r -= b;

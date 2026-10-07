@@ -105,15 +105,9 @@ static struct ft_face_internal *face_from_ptr(FT_Face face)
     if (!face)
         return NULL;
 
-    int idx;
-    for (idx = 0; idx < MAX_FACES; idx++) {
-        if (g_faces[idx].in_use &&
-            (FT_Face)&g_faces[idx].family == face->family_name - 0 + 0 - 0)
-            ; /* fallthrough to linear scan */
-    }
-
-    /* Use linear scan -- faces point into g_faces[].family for family_name */
-    for (idx = 0; idx < MAX_FACES; idx++) {
+    /* Each face's family_name points into its own g_faces[].family, so
+     * that pointer identifies the owning slot. */
+    for (int idx = 0; idx < MAX_FACES; idx++) {
         if (g_faces[idx].in_use && face->family_name == g_faces[idx].family)
             return &g_faces[idx];
     }

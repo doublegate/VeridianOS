@@ -6,7 +6,9 @@
  *
  * libpng 1.6.x shim.
  * Implements PNG reading using zlib inflate for IDAT decompression.
- * Parses IHDR, IDAT, IEND chunks.  Supports 8-bit RGB and RGBA.
+ * Parses IHDR, IDAT, IEND chunks and decodes every color type and bit
+ * depth, non-interlaced and Adam7, into rows in the file's own pixel
+ * format (transforms such as png_set_expand are recorded but not applied).
  * Write functions are stubs.
  */
 
@@ -34,6 +36,16 @@ struct png_struct_def {
     size_t         idat_capacity;
     /* Transform flags */
     int            transforms;
+    /* Image header, copied from IHDR by png_read_info */
+    int            have_ihdr;
+    png_uint_32    width;
+    png_uint_32    height;
+    int            interlace;
+    unsigned int   pixel_bits;    /* bits per pixel: channels * bit depth */
+    size_t         rowbytes;
+    /* Decoded image (height * rowbytes) and the png_read_row cursor */
+    unsigned char *pixels;
+    png_uint_32    next_row;
 };
 
 struct png_info_def {
@@ -104,6 +116,7 @@ void png_destroy_read_struct(png_structpp png_ptr_ptr,
 {
     if (png_ptr_ptr && *png_ptr_ptr) {
         free((*png_ptr_ptr)->idat_buf);
+        free((*png_ptr_ptr)->pixels);
         free(*png_ptr_ptr);
         *png_ptr_ptr = NULL;
     }
@@ -236,10 +249,20 @@ void png_read_info(png_structrp png_ptr, png_inforp info_ptr)
                 case PNG_COLOR_TYPE_RGB_ALPHA:  info_ptr->channels = 4; break;
                 default:                        info_ptr->channels = 1; break;
                 }
-                info_ptr->rowbytes = (png_size_t)info_ptr->width *
-                                     info_ptr->channels *
-                                     ((png_size_t)info_ptr->bit_depth / 8);
+                /* Sub-byte depths pack several pixels per byte, so round
+                 * the row up to whole bytes. */
+                info_ptr->rowbytes = ((png_size_t)info_ptr->width *
+                                      info_ptr->channels *
+                                      (png_size_t)info_ptr->bit_depth + 7) / 8;
                 info_ptr->valid = 1;
+
+                png_ptr->have_ihdr = 1;
+                png_ptr->width = info_ptr->width;
+                png_ptr->height = info_ptr->height;
+                png_ptr->interlace = info_ptr->interlace_type;
+                png_ptr->pixel_bits = (unsigned int)info_ptr->channels *
+                                      (unsigned int)info_ptr->bit_depth;
+                png_ptr->rowbytes = info_ptr->rowbytes;
 
                 /* Skip remaining + CRC */
                 if (length > 13) {
@@ -350,118 +373,136 @@ static void unfilter_row(unsigned char *row, const unsigned char *prev,
     }
 }
 
-void png_read_image(png_structrp png_ptr, png_bytepp image)
+/* Adam7 pass origins and steps (PNG spec, section 8.2) */
+static const unsigned char adam7_x0[7] = { 0, 4, 0, 2, 0, 1, 0 };
+static const unsigned char adam7_y0[7] = { 0, 0, 4, 0, 2, 0, 1 };
+static const unsigned char adam7_dx[7] = { 8, 8, 4, 4, 2, 2, 1 };
+static const unsigned char adam7_dy[7] = { 8, 8, 8, 4, 4, 2, 2 };
+
+/* Copy pixel `sx` of `src` to pixel `dx` of `dst`, both pixel_bits wide. */
+static void copy_pixel(unsigned char *dst, size_t dx,
+                       const unsigned char *src, size_t sx,
+                       unsigned int pixel_bits)
 {
-    png_infop info;
+    if (pixel_bits >= 8) {
+        size_t n = pixel_bits / 8;
+        memcpy(dst + dx * n, src + sx * n, n);
+        return;
+    }
+    /* 1, 2 or 4 bits, packed most significant first */
+    size_t sbit = sx * pixel_bits, dbit = dx * pixel_bits;
+    unsigned int mask = (1u << pixel_bits) - 1;
+    unsigned int v = (src[sbit / 8] >> (8 - pixel_bits - sbit % 8)) & mask;
+    unsigned int shift = 8 - pixel_bits - (unsigned int)(dbit % 8);
+    dst[dbit / 8] = (unsigned char)((dst[dbit / 8] & ~(mask << shift)) |
+                                    (v << shift));
+}
+
+/*
+ * Inflate the IDAT stream, undo the per-row filters and (for Adam7)
+ * scatter the seven passes into png_ptr->pixels. Returns 0 on success.
+ * Every size comes from IHDR, and the stream must inflate to exactly the
+ * size the header implies.
+ */
+static int decode_image(png_structrp png_ptr)
+{
+    size_t rb = png_ptr->rowbytes, raw_size = 0, pos = 0;
+    unsigned int bits = png_ptr->pixel_bits;
+    size_t bpp = bits >= 8 ? bits / 8 : 1;  /* filter byte distance */
+    png_uint_32 w = png_ptr->width, h = png_ptr->height;
+    int passes = png_ptr->interlace == PNG_INTERLACE_ADAM7 ? 7 : 1;
     unsigned char *raw;
-    unsigned long raw_size;
-    size_t rowbytes;
-    int bpp;
-    png_uint_32 y;
-    size_t pos;
+    z_stream strm;
+    int ret;
 
-    if (png_ptr == NULL || image == NULL)
-        return;
-    if (png_ptr->idat_buf == NULL || png_ptr->idat_size == 0)
-        return;
+    if (png_ptr->pixels)
+        return 0;
+    if (!png_ptr->have_ihdr || w == 0 || h == 0 || bits == 0 || bits > 64 ||
+        png_ptr->idat_buf == NULL || png_ptr->idat_size == 0 ||
+        rb > ((size_t)1 << 28) / h)
+        return -1;
 
-    /* We need the info from a prior png_read_info call.
-     * Since we don't store a back-pointer to info, use io_ptr
-     * or just assume standard layout from the first read. */
-
-    /* Decompress the IDAT data using raw inflate (no zlib header) */
-    /* PNG uses zlib-wrapped deflate, so use inflateInit (not inflateInit2) */
-    {
-        z_stream strm;
-        int ret;
-
-        /* Estimate raw size: height * (rowbytes + 1 filter byte) */
-        /* We don't have info_ptr here, so allocate generously */
-        raw_size = png_ptr->idat_size * 4;
-        if (raw_size < 65536)
-            raw_size = 65536;
-        raw = (unsigned char *)malloc(raw_size);
-        if (raw == NULL)
-            return;
-
-        memset(&strm, 0, sizeof(strm));
-        strm.next_in = png_ptr->idat_buf;
-        strm.avail_in = (unsigned int)png_ptr->idat_size;
-        strm.next_out = raw;
-        strm.avail_out = (unsigned int)raw_size;
-
-        ret = inflateInit(&strm);
-        if (ret != Z_OK) {
-            free(raw);
-            return;
-        }
-
-        ret = inflate(&strm, Z_FINISH);
-        raw_size = strm.total_out;
-        inflateEnd(&strm);
-
-        if (ret != Z_STREAM_END && ret != Z_OK) {
-            free(raw);
-            return;
-        }
+    /* Raw size: per pass, rows * (1 filter byte + packed row bytes) */
+    for (int p = 0; p < passes; p++) {
+        size_t pw = passes == 1 ? w
+                  : (w + adam7_dx[p] - 1 - adam7_x0[p]) / adam7_dx[p];
+        size_t ph = passes == 1 ? h
+                  : (h + adam7_dy[p] - 1 - adam7_y0[p]) / adam7_dy[p];
+        if (w <= adam7_x0[p] || h <= adam7_y0[p])
+            pw = ph = 0;
+        if (pw && ph)
+            raw_size += ph * (1 + (pw * bits + 7) / 8);
     }
 
-    /* Now defilter rows.  Each row in the raw data is:
-     * [filter_byte] [rowbytes of pixel data]
-     * We need to know rowbytes, but we only have the raw data.
-     * Infer from the total: raw_size = height * (rowbytes + 1) */
-    /* We'll iterate image[] array and fill rows */
-    pos = 0;
-    y = 0;
-    /* Determine rowbytes from first row -- we need an external hint.
-     * Look at image[0] pointer spacing if available, but generally
-     * callers set this up from info. We'll just trust the data. */
+    png_ptr->pixels = (unsigned char *)calloc(h, rb);
+    raw = (unsigned char *)malloc(raw_size);
+    if (png_ptr->pixels == NULL || raw == NULL)
+        goto fail;
 
-    /* Try to figure out dimensions from raw_size.
-     * If caller provided image[0..height-1], we assume they know height.
-     * We walk raw data row by row. */
-    while (pos < raw_size && image[y] != NULL) {
-        int filter = raw[pos++];
+    memset(&strm, 0, sizeof(strm));
+    strm.next_in = png_ptr->idat_buf;
+    strm.avail_in = (unsigned int)png_ptr->idat_size;
+    strm.next_out = raw;
+    strm.avail_out = (unsigned int)raw_size;
+    if (inflateInit(&strm) != Z_OK)
+        goto fail;
+    ret = inflate(&strm, Z_FINISH);
+    inflateEnd(&strm);
+    if ((ret != Z_STREAM_END && ret != Z_OK) || strm.total_out != raw_size)
+        goto fail;
 
-        /* Determine rowbytes by looking at how much data until next filter byte
-         * or end of data.  This is a heuristic. */
-        /* Actually, the user allocates image rows with known rowbytes from
-         * png_get_rowbytes(). We can compute from available info. */
-        /* For now, copy what's available until the next row */
-        rowbytes = 0;
-        {
-            /* Scan forward for a reasonable rowbytes value */
-            /* Use remaining_data / remaining_rows as estimate */
-            size_t remaining = raw_size - pos;
-            /* This is imperfect without the info struct, but functional
-             * when called correctly after png_read_info. */
-            /* Assume max 8192 pixels wide, 4 channels, 1 byte each */
-            size_t test_rb;
-            for (test_rb = remaining; test_rb > 0; test_rb--) {
-                /* If test_rb divides remaining data evenly with filter bytes */
-                if ((remaining + 1) % (test_rb + 1) == 0)
-                    break;
-            }
-            if (test_rb == 0) test_rb = remaining;
-            rowbytes = test_rb;
-            if (rowbytes > remaining) rowbytes = remaining;
+    for (int p = 0; p < passes; p++) {
+        size_t pw, ph, prb;
+        if (passes == 1) {
+            pw = w;
+            ph = h;
+        } else {
+            if (w <= adam7_x0[p] || h <= adam7_y0[p])
+                continue;
+            pw = (w + adam7_dx[p] - 1 - adam7_x0[p]) / adam7_dx[p];
+            ph = (h + adam7_dy[p] - 1 - adam7_y0[p]) / adam7_dy[p];
         }
-
-        if (pos + rowbytes > raw_size)
-            rowbytes = raw_size - pos;
-
-        memcpy(image[y], raw + pos, rowbytes);
-        bpp = 1;  /* minimum bytes per pixel */
-
-        /* Unfilter */
-        unfilter_row(image[y], (y > 0) ? image[y - 1] : NULL,
-                     rowbytes, bpp, filter);
-
-        pos += rowbytes;
-        y++;
+        prb = (pw * bits + 7) / 8;
+        const unsigned char *prev = NULL;
+        for (size_t y = 0; y < ph; y++) {
+            int filter = raw[pos];
+            unsigned char *row = raw + pos + 1;
+            if (filter > 4)
+                goto fail;
+            unfilter_row(row, prev, prb, (int)bpp, filter);
+            if (passes == 1) {
+                memcpy(png_ptr->pixels + y * rb, row, rb);
+            } else {
+                size_t dy = adam7_y0[p] + y * adam7_dy[p];
+                for (size_t x = 0; x < pw; x++)
+                    copy_pixel(png_ptr->pixels + dy * rb,
+                               adam7_x0[p] + x * adam7_dx[p], row, x, bits);
+            }
+            prev = row;
+            pos += 1 + prb;
+        }
     }
 
     free(raw);
+    return 0;
+
+fail:
+    free(raw);
+    free(png_ptr->pixels);
+    png_ptr->pixels = NULL;
+    return -1;
+}
+
+void png_read_image(png_structrp png_ptr, png_bytepp image)
+{
+    if (png_ptr == NULL || image == NULL || decode_image(png_ptr) != 0)
+        return;
+    for (png_uint_32 y = 0; y < png_ptr->height; y++) {
+        if (image[y])
+            memcpy(image[y], png_ptr->pixels + (size_t)y * png_ptr->rowbytes,
+                   png_ptr->rowbytes);
+    }
+    png_ptr->next_row = png_ptr->height;
 }
 
 void png_read_end(png_structrp png_ptr, png_inforp info_ptr)
@@ -470,21 +511,29 @@ void png_read_end(png_structrp png_ptr, png_inforp info_ptr)
     (void)info_ptr;
 }
 
+/* Rows come out of the decoded image in order; an Adam7 image is fully
+ * assembled first, so each row is final (libpng's display_row semantics). */
 void png_read_row(png_structrp png_ptr, png_bytep row,
                   png_bytep display_row)
 {
-    (void)png_ptr;
-    (void)row;
-    (void)display_row;
+    if (png_ptr == NULL || png_ptr->next_row >= png_ptr->height ||
+        decode_image(png_ptr) != 0)
+        return;
+    const unsigned char *src =
+        png_ptr->pixels + (size_t)png_ptr->next_row * png_ptr->rowbytes;
+    if (row)
+        memcpy(row, src, png_ptr->rowbytes);
+    if (display_row)
+        memcpy(display_row, src, png_ptr->rowbytes);
+    png_ptr->next_row++;
 }
 
 void png_read_rows(png_structrp png_ptr, png_bytepp row,
                    png_bytepp display_row, png_uint_32 num_rows)
 {
-    (void)png_ptr;
-    (void)row;
-    (void)display_row;
-    (void)num_rows;
+    for (png_uint_32 i = 0; i < num_rows; i++)
+        png_read_row(png_ptr, row ? row[i] : NULL,
+                     display_row ? display_row[i] : NULL);
 }
 
 /* ========================================================================= */

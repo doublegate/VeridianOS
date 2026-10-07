@@ -890,7 +890,6 @@ int inflate(z_streamp strm, int flush)
 {
     struct inflate_state *is;
     struct bit_reader br;
-    const unsigned char *in_start;
     unsigned int in_skip = 0;
     unsigned int out_pos = 0;
     int ret;
@@ -903,7 +902,6 @@ int inflate(z_streamp strm, int flush)
         return Z_BUF_ERROR;
 
     is = (struct inflate_state *)strm->state;
-    in_start = strm->next_in;
 
     /* Skip zlib header if needed */
     if (is->wrap == 1 && !is->done) {

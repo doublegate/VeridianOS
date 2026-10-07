@@ -510,17 +510,31 @@ fn persist_event(event: &AuditEvent) {
     let serialized = event.serialize();
     let bytes = serialized.as_bytes();
 
-    // VFS is only available on bare-metal; skip persistence in host tests.
-    #[cfg(not(test))]
-    {
-        // Try to append to the audit log file; ignore errors if VFS is not
-        // mounted or the path does not exist yet.
-        if crate::fs::append_file(AUDIT_LOG_PATH, bytes).is_ok() {
-            AUDIT_STATS.record_persisted();
-        }
+    // Try to append to the audit log file; ignore errors if VFS is not
+    // mounted or the path does not exist yet.
+    if append_persisted(AUDIT_LOG_PATH, bytes) {
+        AUDIT_STATS.record_persisted();
     }
-    #[cfg(test)]
-    let _ = bytes;
+}
+
+/// Append `bytes` to the audit log at `path`: through the VFS on the
+/// kernel, into an in-memory log in host tests (which have no VFS), so the
+/// persistence path and its statistics are exercised there too.
+#[cfg(not(test))]
+fn append_persisted(path: &str, bytes: &[u8]) -> bool {
+    crate::fs::append_file(path, bytes).is_ok()
+}
+
+#[cfg(test)]
+static TEST_PERSISTED: spin::Mutex<alloc::vec::Vec<(alloc::string::String, alloc::vec::Vec<u8>)>> =
+    spin::Mutex::new(alloc::vec::Vec::new());
+
+#[cfg(test)]
+fn append_persisted(path: &str, bytes: &[u8]) -> bool {
+    TEST_PERSISTED
+        .lock()
+        .push((alloc::string::String::from(path), bytes.to_vec()));
+    true
 }
 
 // ---------------------------------------------------------------------------
@@ -846,6 +860,32 @@ mod tests {
         assert_eq!(event.pid, 123);
         assert_eq!(event.uid, 1000);
         assert!(event.result);
+    }
+
+    /// Persistence goes through the same path and statistics on the host
+    /// (an in-memory log) as on the kernel (the VFS file).
+    #[test]
+    fn test_events_are_persisted_to_the_audit_log() {
+        let event = AuditEvent::new(
+            AuditEventType::ProcessCreate,
+            789,
+            1000,
+            AuditAction::Create,
+            "process",
+            true,
+            "persist-probe",
+        );
+        let before = get_detailed_stats().persisted_events;
+        persist_event(&event);
+        assert!(get_detailed_stats().persisted_events > before);
+        // Other tests persist events concurrently, so look for this one.
+        let expected = event.serialize();
+        let log = TEST_PERSISTED.lock();
+        assert!(
+            log.iter()
+                .any(|(path, bytes)| path == AUDIT_LOG_PATH
+                    && bytes.as_slice() == expected.as_bytes())
+        );
     }
 
     #[test]

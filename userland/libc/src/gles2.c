@@ -1549,8 +1549,13 @@ void glUniform4ui(GLint location, GLuint v0, GLuint v1, GLuint v2, GLuint v3)
 
 void glGetProgramBinary(GLuint program, GLsizei bufSize, GLsizei *length,
                         GLenum *binaryFormat, void *binary)
-{ (void)program; (void)bufSize; (void)binary;
-  if (length) *length = 0; if (binaryFormat) *binaryFormat = 0; }
+{
+    (void)program; (void)bufSize; (void)binary;
+    if (length)
+        *length = 0;
+    if (binaryFormat)
+        *binaryFormat = 0;
+}
 
 void glProgramBinary(GLuint program, GLenum binaryFormat,
                      const void *binary, GLsizei length)
