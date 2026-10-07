@@ -88,16 +88,13 @@ phase_headers() {
         [ -f "$f" ] || continue
         cp "$f" "$dst_inc/"
     done
-    # Subdirectories
-    for subdir in sys arpa netinet veridian; do
-        if [ -d "$src_inc/$subdir" ]; then
-            mkdir -p "$dst_inc/$subdir"
-            for f in "$src_inc/$subdir"/*.h; do
-                [ -f "$f" ] || continue
-                cp "$f" "$dst_inc/$subdir/"
-            done
-        fi
-    done
+    # Every subdirectory (a fixed list once left net/ out, which only a
+    # fresh sysroot such as CI's exposed).
+    (cd "$src_inc" && find . -mindepth 2 -name '*.h' -print0) |
+        while IFS= read -r -d '' f; do
+            mkdir -p "$dst_inc/$(dirname "$f")"
+            cp "$src_inc/$f" "$dst_inc/$f"
+        done
 
     # Rebuild libc.a with posix_stubs3.c
     echo "  Rebuilding libc.a..."

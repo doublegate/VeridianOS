@@ -59,6 +59,8 @@
 
 ### Fixed
 
+- **The rootfs build installs every libc header subdirectory.** A fixed list left out
+  `net/`, which only a fresh sysroot (CI's) exposed as a BusyBox build failure.
 - **Hard links on ramfs and tmpfs are real links (N-45).** `link()` used to copy the file,
   so the two names diverged on the next write. It also copied files from other filesystems
   instead of returning EXDEV. Both names now refer to one node.
