@@ -5,10 +5,7 @@
 
 #![allow(clippy::needless_lifetimes, mismatched_lifetime_syntaxes)]
 
-use core::{
-    cell::UnsafeCell,
-    sync::atomic::{AtomicPtr, Ordering},
-};
+use core::sync::atomic::{AtomicPtr, Ordering};
 
 use spin::Mutex;
 
@@ -150,10 +147,16 @@ impl<T> Drop for OnceLock<T> {
 
 /// Lazy initialization with function (Rust 2024 compatible)
 ///
-/// Similar to std::sync::LazyLock but for no_std
+/// Similar to std::sync::LazyLock but for no_std. The init function sits
+/// behind a spin lock that is held while it runs, so it runs exactly once
+/// even when several callers force the value at the same time. The previous
+/// version kept it in an `UnsafeCell` and relied on `OnceLock::get_or_init`,
+/// which can run its closure in two racing callers: both took `&mut` to the
+/// cell (a data race) and the second panicked (adjudication of
+/// gemini-code-assist comments on PR #1).
 pub struct LazyLock<T, F = fn() -> T> {
     cell: OnceLock<T>,
-    init: UnsafeCell<Option<F>>,
+    init: Mutex<Option<F>>,
 }
 
 impl<T: 'static, F: FnOnce() -> T> LazyLock<T, F> {
@@ -161,29 +164,24 @@ impl<T: 'static, F: FnOnce() -> T> LazyLock<T, F> {
     pub const fn new(init: F) -> Self {
         Self {
             cell: OnceLock::new(),
-            init: UnsafeCell::new(Some(init)),
+            init: Mutex::new(Some(init)),
         }
     }
 
     /// Force initialization and get reference
     pub fn force(&self) -> &T {
-        self.cell.get_or_init(|| {
-            // SAFETY: Access to the UnsafeCell is safe here because `get_or_init`
-            // on the inner OnceLock guarantees that this closure is called at most
-            // once. The OnceLock's compare_exchange in `set()` ensures that even
-            // if multiple threads race to call `force()`, only one will execute
-            // this closure. After `take()` extracts the init function, subsequent
-            // calls to `force()` will find the OnceLock already initialized and
-            // skip this closure entirely.
-            let init = unsafe { &mut *self.init.get() };
-            match init.take() {
-                Some(f) => f(),
-                // Panic is intentional: this is a logic error. The OnceLock
-                // guarantees single-init, so reaching None means the internal
-                // invariant was violated (a bug in the LazyLock implementation).
-                None => panic!("LazyLock initialization function called twice"),
-            }
-        })
+        if let Some(value) = self.cell.get() {
+            return value;
+        }
+        let mut init = self.init.lock();
+        // Another caller may have finished while this one waited.
+        if let Some(value) = self.cell.get() {
+            return value;
+        }
+        let f = init
+            .take()
+            .expect("LazyLock: init function missing while the value is unset");
+        self.cell.get_or_init(f)
     }
 }
 
@@ -194,17 +192,6 @@ impl<T: 'static, F: FnOnce() -> T> core::ops::Deref for LazyLock<T, F> {
         self.force()
     }
 }
-
-// SAFETY: LazyLock<T, F> can be sent across threads if both T and F are Send.
-// The inner OnceLock handles synchronization for the value, and the init
-// function F is only accessed once (consumed via take()) so transferring
-// ownership is safe.
-unsafe impl<T: Send, F: Send> Send for LazyLock<T, F> {}
-// SAFETY: LazyLock<T, F> can be shared across threads if T: Sync and F: Send.
-// The OnceLock provides the synchronization for concurrent access to T. F must
-// be Send (not Sync) because it is consumed exactly once via the UnsafeCell;
-// the OnceLock's atomic CAS ensures only one thread executes the init closure.
-unsafe impl<T: Sync, F: Send> Sync for LazyLock<T, F> {}
 
 /// Safe global state with mutex (Rust 2024 compatible)
 pub struct GlobalState<T> {
@@ -284,6 +271,19 @@ mod tests {
     use alloc::string::String;
 
     use super::*;
+
+    #[test]
+    fn lazy_lock_runs_init_once_and_derefs() {
+        use core::sync::atomic::{AtomicUsize, Ordering};
+        static RUNS: AtomicUsize = AtomicUsize::new(0);
+        static LAZY: LazyLock<u32> = LazyLock::new(|| {
+            RUNS.fetch_add(1, Ordering::SeqCst);
+            42
+        });
+        assert_eq!(*LAZY, 42);
+        assert_eq!(*LAZY.force(), 42);
+        assert_eq!(RUNS.load(Ordering::SeqCst), 1);
+    }
 
     #[test]
     fn test_once_lock() {

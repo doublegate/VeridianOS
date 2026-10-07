@@ -29,6 +29,10 @@ struct RamNode {
     /// Inode number
     inode: u64,
 
+    /// Which `RamFs` instance this node belongs to. Every instance's nodes
+    /// downcast to `RamNode`, so this is what tells two mounts apart.
+    fs_id: u64,
+
     /// Parent directory inode (for ".." entries)
     /// Parent directory inode (".."); changes when a rename moves this
     /// directory.
@@ -37,7 +41,7 @@ struct RamNode {
 
 impl RamNode {
     /// Create a new file node
-    fn new_file(inode: u64, parent_inode: u64, permissions: Permissions) -> Self {
+    fn new_file(inode: u64, parent_inode: u64, fs_id: u64, permissions: Permissions) -> Self {
         Self {
             node_type: NodeType::File,
             data: RwLock::new(Vec::new()),
@@ -54,12 +58,13 @@ impl RamNode {
                 inode,
             }),
             inode,
+            fs_id,
             parent_inode: core::sync::atomic::AtomicU64::new(parent_inode),
         }
     }
 
     /// Create a new directory node
-    fn new_directory(inode: u64, parent_inode: u64, permissions: Permissions) -> Self {
+    fn new_directory(inode: u64, parent_inode: u64, fs_id: u64, permissions: Permissions) -> Self {
         Self {
             node_type: NodeType::Directory,
             data: RwLock::new(Vec::new()),
@@ -76,6 +81,7 @@ impl RamNode {
                 inode,
             }),
             inode,
+            fs_id,
             parent_inode: core::sync::atomic::AtomicU64::new(parent_inode),
         }
     }
@@ -83,7 +89,7 @@ impl RamNode {
     /// Create a new symbolic link node.
     ///
     /// The target path is stored in the node's `data` field.
-    fn new_symlink(inode: u64, parent_inode: u64, target: &str) -> Self {
+    fn new_symlink(inode: u64, parent_inode: u64, fs_id: u64, target: &str) -> Self {
         let target_bytes = Vec::from(target.as_bytes());
         let size = target_bytes.len();
         Self {
@@ -102,6 +108,7 @@ impl RamNode {
                 inode,
             }),
             inode,
+            fs_id,
             parent_inode: core::sync::atomic::AtomicU64::new(parent_inode),
         }
     }
@@ -224,7 +231,12 @@ impl VfsNode for RamNode {
         }
 
         let inode = NEXT_INODE.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-        let new_file = Arc::new(RamNode::new_file(inode, self.inode, permissions));
+        let new_file = Arc::new(RamNode::new_file(
+            inode,
+            self.inode,
+            self.fs_id,
+            permissions,
+        ));
         children.insert(String::from(name), new_file.clone());
 
         Ok(new_file as Arc<dyn VfsNode>)
@@ -246,7 +258,12 @@ impl VfsNode for RamNode {
         }
 
         let inode = NEXT_INODE.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-        let new_dir = Arc::new(RamNode::new_directory(inode, self.inode, permissions));
+        let new_dir = Arc::new(RamNode::new_directory(
+            inode,
+            self.inode,
+            self.fs_id,
+            permissions,
+        ));
         children.insert(String::from(name), new_dir.clone());
 
         Ok(new_dir as Arc<dyn VfsNode>)
@@ -305,6 +322,7 @@ impl VfsNode for RamNode {
         let np = new_parent
             .as_any()
             .and_then(|a| a.downcast_ref::<RamNode>())
+            .filter(|np| np.fs_id == self.fs_id)
             .ok_or(KernelError::FsError(FsError::CrossDevice))?;
         if np.node_type != NodeType::Directory {
             return Err(KernelError::FsError(FsError::NotADirectory));
@@ -412,6 +430,7 @@ impl VfsNode for RamNode {
         let new_node = Arc::new(RamNode::new_file(
             inode,
             self.inode,
+            self.fs_id,
             target_meta.permissions,
         ));
 
@@ -440,7 +459,7 @@ impl VfsNode for RamNode {
         }
 
         let inode = NEXT_INODE.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-        let new_symlink = Arc::new(RamNode::new_symlink(inode, self.inode, target));
+        let new_symlink = Arc::new(RamNode::new_symlink(inode, self.inode, self.fs_id, target));
         children.insert(String::from(name), new_symlink.clone());
 
         Ok(new_symlink as Arc<dyn VfsNode>)
@@ -480,6 +499,9 @@ impl VfsNode for RamNode {
 /// Global inode counter
 static NEXT_INODE: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(1);
 
+/// Source of `RamNode::fs_id`, one per `RamFs` instance.
+static NEXT_FS_ID: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(1);
+
 /// RAM filesystem
 pub struct RamFs {
     root: Arc<RamNode>,
@@ -489,10 +511,12 @@ impl RamFs {
     /// Create a new RAM filesystem
     pub fn new() -> Self {
         let root_inode = NEXT_INODE.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        let fs_id = NEXT_FS_ID.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         // Root directory's parent is itself (standard POSIX behavior)
         let root = Arc::new(RamNode::new_directory(
             root_inode,
             root_inode,
+            fs_id,
             Permissions::default(),
         ));
 
@@ -937,5 +961,27 @@ mod tests {
             result.err().expect("expected Err"),
             KernelError::FsError(FsError::NotADirectory)
         );
+    }
+
+    /// Two ramfs instances are two devices even though both downcast to
+    /// `RamNode` (review of the v0.26.0 stack, PR #11).
+    #[test]
+    fn test_rename_across_ramfs_instances_is_cross_device() {
+        let a = RamFs::new();
+        let b = RamFs::new();
+        let root_a = a.root();
+        let root_b = b.root();
+        root_a.create("f", Permissions::default()).unwrap();
+        assert_eq!(
+            root_a.rename("f", &root_b, "g").err(),
+            Some(KernelError::FsError(FsError::CrossDevice))
+        );
+        assert!(root_a.lookup("f").is_ok());
+        assert!(root_b.lookup("g").is_err());
+
+        // Within one instance, subdirectories are the same device.
+        let sub = root_a.mkdir("d", Permissions::default()).unwrap();
+        root_a.rename("f", &sub, "g").unwrap();
+        assert!(sub.lookup("g").is_ok());
     }
 }

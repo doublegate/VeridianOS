@@ -18,7 +18,7 @@
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use super::{Syscall, SyscallResult};
+use super::{Syscall, SyscallError, SyscallResult};
 
 // =========================================================================
 // Per-process Linux ABI tracking
@@ -440,6 +440,7 @@ pub(crate) fn to_linux_errno(err: super::SyscallError) -> isize {
     const LINUX_E2BIG: isize = -7;
     const LINUX_EMFILE: isize = -24;
     const LINUX_ENOTSOCK: isize = -88;
+    const LINUX_ENOPROTOOPT: isize = -92;
 
     match err {
         SyscallError::InvalidSyscall => LINUX_ENOSYS,
@@ -475,6 +476,7 @@ pub(crate) fn to_linux_errno(err: super::SyscallError) -> isize {
         SyscallError::SymlinkLoop => LINUX_ELOOP,
         SyscallError::CrossDevice => LINUX_EXDEV,
         SyscallError::NotASocket => LINUX_ENOTSOCK,
+        SyscallError::ProtocolOptionNotAvailable => LINUX_ENOPROTOOPT,
     }
 }
 
@@ -484,29 +486,31 @@ pub(crate) fn to_linux_errno(err: super::SyscallError) -> isize {
 /// ppoll(fds, nfds, timespec*, sigmask, sigsetsize)
 /// We ignore the sigmask and convert timespec to milliseconds.
 pub(crate) fn handle_ppoll(fds_ptr: usize, nfds: usize, timespec_ptr: usize) -> SyscallResult {
-    // Convert timespec* to milliseconds for poll()
-    let timeout_ms: usize = if timespec_ptr == 0 {
-        // NULL timespec = infinite wait (represented as -1 in poll)
-        usize::MAX // Will be treated as negative i32 in sys_poll
+    // A NULL timespec waits forever (a negative timeout to sys_poll).
+    let timeout_ms = if timespec_ptr == 0 {
+        usize::MAX
     } else {
-        // Read timespec {tv_sec: i64, tv_nsec: i64} from user space
-        if super::validate_user_buffer(timespec_ptr, 16).is_ok() {
-            // SAFETY: timespec_ptr validated above as 16 bytes in user space.
-            let tv_sec = unsafe { *(timespec_ptr as *const i64) };
-            let tv_nsec = unsafe { *((timespec_ptr + 8) as *const i64) };
-            if tv_sec < 0 {
-                usize::MAX // infinite
-            } else {
-                let ms = (tv_sec as u64)
-                    .saturating_mul(1000)
-                    .saturating_add((tv_nsec as u64) / 1_000_000);
-                ms as usize
-            }
-        } else {
-            0 // Invalid pointer, use zero timeout
-        }
+        // Fault-tolerant read: a bad pointer is EFAULT, as on Linux, not a
+        // raw dereference and not a silent zero timeout (review of the
+        // v0.26.0 stack, PR #14).
+        let [tv_sec, tv_nsec] = super::userspace::read_user::<[i64; 2]>(timespec_ptr)?;
+        ppoll_timeout_ms(tv_sec, tv_nsec)?
     };
     super::filesystem::sys_poll(fds_ptr, nfds, timeout_ms)
+}
+
+/// ppoll's timespec as a poll timeout in milliseconds, rounded down.
+/// Linux rejects a negative `tv_sec` or a `tv_nsec` outside 0..1e9 with
+/// EINVAL.
+fn ppoll_timeout_ms(tv_sec: i64, tv_nsec: i64) -> Result<usize, SyscallError> {
+    if tv_sec < 0 || !(0..1_000_000_000).contains(&tv_nsec) {
+        return Err(SyscallError::InvalidArgument);
+    }
+    let ms = (tv_sec as u64)
+        .saturating_mul(1000)
+        .saturating_add(tv_nsec as u64 / 1_000_000);
+    // Keep it below the "infinite" encoding (negative as i32 in sys_poll).
+    Ok(ms.min(i32::MAX as u64) as usize)
 }
 
 /// Handle a Linux-numbered syscall that has no VeridianOS equivalent.
@@ -571,6 +575,19 @@ pub(crate) fn handle_linux_stub(linux_num: usize) -> Option<SyscallResult> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ppoll_timespec_is_validated_like_linux() {
+        assert_eq!(ppoll_timeout_ms(1, 500_000_000), Ok(1500));
+        assert_eq!(ppoll_timeout_ms(0, 999_999), Ok(0));
+        assert_eq!(ppoll_timeout_ms(-1, 0), Err(SyscallError::InvalidArgument));
+        assert_eq!(ppoll_timeout_ms(0, -1), Err(SyscallError::InvalidArgument));
+        assert_eq!(
+            ppoll_timeout_ms(0, 1_000_000_000),
+            Err(SyscallError::InvalidArgument)
+        );
+        assert_eq!(ppoll_timeout_ms(i64::MAX, 0), Ok(i32::MAX as usize));
+    }
 
     /// W-15: 269 is faccessat (never fchownat), 260 is fchownat, and
     /// faccessat2 is a real access check rather than an unconditional Ok.

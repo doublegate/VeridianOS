@@ -313,10 +313,21 @@ pub fn init_syscall() {
     )
     .expect("failed to configure STAR MSR segment selectors");
 
-    // SFMASK: mask the IF flag during SYSCALL so we enter with interrupts
-    // disabled. This prevents interrupt handlers from firing before we have
-    // switched to the kernel stack.
-    SFMask::write(RFlags::INTERRUPT_FLAG);
+    // SFMASK: flags cleared on SYSCALL entry. IF, so we enter with
+    // interrupts disabled until we are on the kernel stack. DF, because the
+    // Rust ABI and every `rep movs`/`rep stos` in the kernel assume it is
+    // clear: a user `std; syscall` otherwise made the user-copy routine copy
+    // downwards, outside the range it validated (review of the v0.26.0
+    // stack, PR #8). TF, AC and NT for the same reason Linux masks them:
+    // user single-stepping, alignment checks and nested-task state must not
+    // carry into kernel code.
+    SFMask::write(
+        RFlags::INTERRUPT_FLAG
+            | RFlags::DIRECTION_FLAG
+            | RFlags::TRAP_FLAG
+            | RFlags::ALIGNMENT_CHECK
+            | RFlags::NESTED_TASK,
+    );
 
     // Set up per-CPU data for swapgs.
     // KernelGsBase is swapped with GsBase on the `swapgs` instruction.

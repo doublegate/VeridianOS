@@ -3,7 +3,8 @@
  * 33 boot tests never exercise: process and thread exit/reaping, the libc
  * allocator under threads, scanf field widths, fd numbering, rename and
  * permission enforcement for a non-root user, sticky directories, sockets
- * as per-process fds and SCM_RIGHTS.
+ * as per-process fds and SCM_RIGHTS, directory search permission, and the
+ * direction flag across a system call.
  *
  * Run as root from a BusyBox shell: /bin/audit_runtime_test [threads]
  * Prints one "PASS <name>" or "FAIL <name>: <why>" line per check and a
@@ -20,6 +21,7 @@
 #include <sys/mman.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/un.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
@@ -115,13 +117,18 @@ static void test_allocator(void)
 {
     pthread_t t[4];
     int ok = 1;
-    for (int i = 0; i < 4; i++)
-        if (pthread_create(&t[i], NULL, alloc_worker, (void *)(long)(i + 1)) != 0)
-            ok = 0;
+    int created = 0;
+    /* Join only the threads that were created: t[i] is unset after a
+     * failed pthread_create (review of the v0.26.0 stack, PR #9). */
     for (int i = 0; i < 4; i++) {
+        if (pthread_create(&t[created], NULL, alloc_worker, (void *)(long)(i + 1)) != 0)
+            ok = 0;
+        else
+            created++;
+    }
+    for (int i = 0; i < created; i++) {
         void *r = NULL;
-        pthread_join(t[i], &r);
-        if (r)
+        if (pthread_join(t[i], &r) != 0 || r)
             ok = 0;
     }
     report("malloc_threads_4x20000", ok, "allocation failed or thread error");
@@ -194,7 +201,7 @@ static void test_rename(void)
              rename("/tmp/audit_src", "/tmp/audit_dst") == 0 &&
              read_file("/tmp/audit_dst", buf, sizeof(buf)) == 0 &&
              strcmp(buf, "moved") == 0 && access("/tmp/audit_src", F_OK) != 0;
-    struct stat st;
+    struct stat st = {0};
     int st_ok = stat("/tmp/audit_dst", &st) == 0;
     static char why_mv[96];
     snprintf(why_mv, sizeof(why_mv), "content/old-name ok=%d stat=%d mode=%o", ok, st_ok,
@@ -237,7 +244,7 @@ static void test_nonroot_permissions(void)
     snprintf(why, sizeof(why), "child exit code %d (bitmask of failures)", code);
     report("nonroot_open_chmod_chown_denied", code == 0, why);
 
-    struct stat st;
+    struct stat st = {0};
     int ok = stat("/tmp/audit_secret", &st) == 0 && (st.st_mode & 0777) == 0600;
     static char why_sec[64];
     snprintf(why_sec, sizeof(why_sec), "mode is %o, expected 600", (unsigned)(st.st_mode & 07777));
@@ -253,7 +260,7 @@ static void test_sticky_dir(void)
                 chmod("/tmp/audit_open", 0777) == 0 &&
                 write_file("/tmp/audit_sticky/rootfile", "r", 0644) == 0 &&
                 write_file("/tmp/audit_open/rootfile", "r", 0644) == 0;
-    struct stat st;
+    struct stat st = {0};
     int sticky_set = stat("/tmp/audit_sticky", &st) == 0 && (st.st_mode & 01000);
 
     pid_t pid = fork();
@@ -290,7 +297,7 @@ static void test_umask(void)
 {
     mode_t old = umask(022);
     unlink("/tmp/audit_umask");
-    struct stat st;
+    struct stat st = {0};
     int ok = write_file("/tmp/audit_umask", "u", 0666) == 0 &&
              stat("/tmp/audit_umask", &st) == 0 && (st.st_mode & 0777) == 0644;
     umask(old);
@@ -473,6 +480,230 @@ static void test_rename_directory(void)
            why);
 }
 
+/* --- A closed standard descriptor is closed (review of the v0.26.0 stack):
+ * write(2) after close(2) must fail with EBADF, not reach the serial
+ * console. Run in a child so the test's own stderr is untouched. ---------- */
+static void test_closed_stdio(void)
+{
+    pid_t pid = fork();
+    if (pid == 0) {
+        close(2);
+        errno = 0;
+        ssize_t w = write(2, "x", 1);
+        _exit(w == -1 && errno == EBADF ? 0 : 1);
+    }
+    int status = 0;
+    int ok = pid > 0 && waitpid(pid, &status, 0) == pid && WIFEXITED(status) &&
+             WEXITSTATUS(status) == 0;
+    report("closed_stderr_is_ebadf", ok, "write(2) after close(2) did not fail with EBADF");
+}
+
+/* --- AF_UNIX bind/connect by path (review of the v0.26.0 stack): bind
+ * read the name from the start of the sockaddr, family bytes included, so
+ * nothing could connect to the path that was bound. ----------------------- */
+static void test_unix_bind_connect(void)
+{
+    struct sockaddr_un sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sun_family = AF_UNIX;
+    strcpy(sa.sun_path, "/tmp/audit_bind.sock");
+    unlink(sa.sun_path);
+    char buf[8] = {0};
+    int srv = socket(AF_UNIX, SOCK_STREAM, 0);
+    int cli = socket(AF_UNIX, SOCK_STREAM, 0);
+    int ok = srv >= 0 && cli >= 0 &&
+             bind(srv, (struct sockaddr *)&sa, sizeof(sa)) == 0 && listen(srv, 1) == 0 &&
+             connect(cli, (struct sockaddr *)&sa, sizeof(sa)) == 0;
+    int conn = ok ? accept(srv, NULL, NULL) : -1;
+    ok = ok && conn >= 0 && write(cli, "hi", 2) == 2 && read(conn, buf, sizeof(buf)) == 2 &&
+         memcmp(buf, "hi", 2) == 0;
+    /* A path nobody bound is not reachable. */
+    struct sockaddr_un other = sa;
+    strcpy(other.sun_path, "/tmp/audit_nobody.sock");
+    int cli2 = socket(AF_UNIX, SOCK_STREAM, 0);
+    ok = ok && cli2 >= 0 && connect(cli2, (struct sockaddr *)&other, sizeof(other)) != 0;
+    if (conn >= 0)
+        close(conn);
+    if (cli2 >= 0)
+        close(cli2);
+    if (srv >= 0)
+        close(srv);
+    if (cli >= 0)
+        close(cli);
+    report("unix_bind_connect_by_path", ok, "bind/listen/connect/accept by path failed");
+}
+
+/* --- Socket API details fixed in review of the v0.26.0 stack (PR #10). -- */
+static void test_socket_api_details(void)
+{
+    int sv[2] = {-1, -1};
+    int type = 0;
+    socklen_t len = sizeof(type);
+    char buf[8];
+
+    /* socketpair honours the type: datagrams keep their boundaries. */
+    int ok = socketpair(AF_UNIX, SOCK_DGRAM, 0, sv) == 0 && write(sv[0], "ab", 2) == 2 &&
+             write(sv[0], "cd", 2) == 2 && read(sv[1], buf, sizeof(buf)) == 2;
+    ok = ok && getsockopt(sv[0], SOL_SOCKET, SO_TYPE, &type, &len) == 0 && type == SOCK_DGRAM &&
+         len == sizeof(type);
+    if (sv[0] >= 0) { close(sv[0]); close(sv[1]); }
+    report("socketpair_dgram_type_and_so_type", ok, "datagram boundaries or SO_TYPE wrong");
+
+    /* An unknown option is ENOPROTOOPT, not a fake success. */
+    ok = socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0;
+    len = sizeof(type);
+    errno = 0;
+    ok = ok && getsockopt(sv[0], SOL_SOCKET, 0x7fff, &type, &len) == -1 && errno == ENOPROTOOPT;
+    report("getsockopt_unknown_is_enoprotoopt", ok, "unknown option did not fail with ENOPROTOOPT");
+
+    /* An empty stream send queues nothing, so the peer does not see EOF. */
+    ok = sv[0] >= 0 && send(sv[0], "", 0, 0) == 0 && write(sv[0], "z", 1) == 1 &&
+         read(sv[1], buf, sizeof(buf)) == 1 && buf[0] == 'z';
+    report("empty_stream_send_is_not_eof", ok, "an empty send reached the peer as EOF");
+
+    /* SCM_RIGHTS with fd -1 is EBADF. */
+    {
+        char data = 'x';
+        struct iovec iov = {&data, 1};
+        union { struct cmsghdr h; char b[CMSG_SPACE(sizeof(int))]; } ctl;
+        memset(&ctl, 0, sizeof(ctl));
+        struct msghdr m;
+        memset(&m, 0, sizeof(m));
+        m.msg_iov = &iov;
+        m.msg_iovlen = 1;
+        m.msg_control = ctl.b;
+        m.msg_controllen = sizeof(ctl.b);
+        struct cmsghdr *c = CMSG_FIRSTHDR(&m);
+        c->cmsg_level = SOL_SOCKET;
+        c->cmsg_type = SCM_RIGHTS;
+        c->cmsg_len = CMSG_LEN(sizeof(int));
+        int bad = -1;
+        memcpy(CMSG_DATA(c), &bad, sizeof(int));
+        errno = 0;
+        ok = sv[0] >= 0 && sendmsg(sv[0], &m, 0) == -1 && errno == EBADF;
+        report("sendmsg_bad_fd_is_ebadf", ok, "SCM_RIGHTS with fd -1 did not fail with EBADF");
+    }
+    if (sv[0] >= 0) { close(sv[0]); close(sv[1]); }
+
+    /* accept reports an AF_UNIX address and honours addrlen. */
+    struct sockaddr_un sa, peer;
+    memset(&sa, 0, sizeof(sa));
+    sa.sun_family = AF_UNIX;
+    strcpy(sa.sun_path, "/tmp/audit_accept.sock");
+    unlink(sa.sun_path);
+    int srv = socket(AF_UNIX, SOCK_STREAM, 0), cli = socket(AF_UNIX, SOCK_STREAM, 0);
+    socklen_t plen = sizeof(peer);
+    memset(&peer, 0x55, sizeof(peer));
+    ok = srv >= 0 && cli >= 0 && bind(srv, (struct sockaddr *)&sa, sizeof(sa)) == 0 &&
+         listen(srv, 1) == 0 && connect(cli, (struct sockaddr *)&sa, sizeof(sa)) == 0;
+    int setup_ok = ok;
+    errno = 0;
+    int conn = ok ? accept(srv, (struct sockaddr *)&peer, &plen) : -1;
+    int accept_errno = errno;
+    ok = ok && conn >= 0 && plen >= sizeof(sa_family_t) && peer.sun_family == AF_UNIX;
+    if (conn >= 0) close(conn);
+    if (srv >= 0) close(srv);
+    if (cli >= 0) close(cli);
+    static char why_acc[96];
+    snprintf(why_acc, sizeof(why_acc), "setup %d, accept %d (errno %d), addrlen %u, family %u",
+             setup_ok, conn, accept_errno, (unsigned)plen, (unsigned)peer.sun_family);
+    report("accept_reports_unix_address", ok, why_acc);
+}
+
+/* --- Search permission on directories (FS-SEC-02, review of the v0.26.0
+ * stack): a non-root user cannot reach a file through a 0700 directory it
+ * does not own, even when the file itself is world-readable. ---------- */
+static void test_dir_search_permission(void)
+{
+    mkdir("/tmp/audit_private", 0700); /* root-owned */
+    write_file("/tmp/audit_private/open", "visible", 0644);
+    chmod("/tmp/audit_private", 0700);
+    pid_t pid = fork();
+    if (pid == 0) {
+        struct stat st = {0};
+        if (setuid(1000) != 0)
+            _exit(100);
+        errno = 0;
+        int fd = open("/tmp/audit_private/open", O_RDONLY);
+        int open_errno = errno; /* before stat() can overwrite it */
+        int stat_ok = stat("/tmp/audit_private/open", &st) == 0;
+        if (fd < 0 && open_errno == EACCES && !stat_ok)
+            _exit(0);
+        /* Encode what happened: bit 7 = open succeeded, bit 6 = stat
+         * succeeded, low bits = open's errno. */
+        _exit((fd >= 0 ? 0x80 : 0) | (stat_ok ? 0x40 : 0) | (open_errno & 0x3f));
+    }
+    int status = 0;
+    int ok = pid > 0 && waitpid(pid, &status, 0) == pid && WIFEXITED(status) &&
+             WEXITSTATUS(status) == 0;
+    static char why_dir[96];
+    snprintf(why_dir, sizeof(why_dir),
+             "uid 1000 under a 0700 dir: open %s (errno %d), stat %s",
+             (WEXITSTATUS(status) & 0x80) ? "succeeded" : "failed", WEXITSTATUS(status) & 0x3f,
+             (WEXITSTATUS(status) & 0x40) ? "succeeded" : "failed");
+    report("dir_search_permission_enforced", ok, why_dir);
+}
+
+/* --- The kernel ignores the caller's direction flag (review of the v0.26.0
+ * stack): a system call made with DF set must not copy below the user
+ * buffer it validated. Before the fix the kernel ran with the user's DF; an
+ * RFLAGS probe in the syscall handler read 0x446 for this call. This check
+ * is a smoke test only: it also passed on the unfixed kernel, where DF was
+ * clear again by the time the wait path copied the status out (what clears
+ * it was not determined). ------------------------------------------------ */
+#define DF_GUARD 64
+#define VERIDIAN_SYS_WAIT 14 /* Syscall::ProcessWait */
+
+static long raw_syscall4_df(long nr, long a, long b, long c, long d)
+{
+#if defined(__x86_64__)
+    register long rax __asm__("rax") = nr;
+    register long rdi __asm__("rdi") = a;
+    register long rsi __asm__("rsi") = b;
+    register long rdx __asm__("rdx") = c;
+    register long r10 __asm__("r10") = d;
+    __asm__ volatile("std\n\tsyscall\n\tcld"
+                     : "+r"(rax)
+                     : "r"(rdi), "r"(rsi), "r"(rdx), "r"(r10)
+                     : "rcx", "r11", "memory", "cc");
+    return rax;
+#else
+    (void)nr; (void)a; (void)b; (void)c; (void)d;
+    return -1;
+#endif
+}
+
+static void test_direction_flag(void)
+{
+#if defined(__x86_64__)
+    /* The native wait call stores the status through the kernel's
+     * validated user copy (`rep movsb`). With DF set that copy ran
+     * downwards from the status address. Raw numbers are the native ABI;
+     * only 0-7 are translated as Linux numbers (N-33). */
+    unsigned char area[DF_GUARD + sizeof(int) + DF_GUARD];
+    memset(area, 0x55, sizeof(area));
+    /* Let the child become a zombie first, so the wait does not block: a
+     * blocked wait resumes through a context switch that restores RFLAGS
+     * and would hide the user's DF. */
+    pid_t pid = fork();
+    if (pid == 0)
+        _exit(42);
+    struct timespec nap = {0, 200 * 1000 * 1000};
+    nanosleep(&nap, NULL);
+    long r = raw_syscall4_df(VERIDIAN_SYS_WAIT, pid, (long)(area + DF_GUARD), 0, 0);
+    int status;
+    memcpy(&status, area + DF_GUARD, sizeof(status));
+    int guards = 1;
+    for (int i = 0; i < DF_GUARD; i++)
+        guards &= area[i] == 0x55 && area[DF_GUARD + sizeof(int) + i] == 0x55;
+    int ok = r == pid && guards && WIFEXITED(status) && WEXITSTATUS(status) == 42;
+    static char why[96];
+    snprintf(why, sizeof(why), "wait with DF set: ret %ld, guards %s, status 0x%x", r,
+             guards ? "intact" : "OVERWRITTEN", (unsigned)status);
+    report("syscall_ignores_user_direction_flag", ok, why);
+#endif
+}
+
 int main(int argc, char **argv)
 {
     setvbuf(stdout, NULL, _IONBF, 0);
@@ -493,6 +724,11 @@ int main(int argc, char **argv)
     test_timed_waits();
     test_map_fixed_limits();
     test_rename_directory();
+    test_closed_stdio();
+    test_unix_bind_connect();
+    test_socket_api_details();
+    test_dir_search_permission();
+    test_direction_flag();
     printf("AUDIT-RUNTIME: %d/%d\n", passed, total);
     return passed == total ? 0 : 1;
 }

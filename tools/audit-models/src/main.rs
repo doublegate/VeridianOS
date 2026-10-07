@@ -315,6 +315,9 @@ pub fn bench_fork_cow_latency() -> (Duration, Duration, f64) {
             );
         }
     }
+    // Keep the copies observable so the optimizer cannot drop them as dead
+    // stores (review of the v0.26.0 stack, PR #7).
+    std::hint::black_box(&child_frames);
     let dur_deep = start_deep.elapsed();
 
     // 2. True Copy-on-Write PTE cloning (8 bytes per PTE)
@@ -324,6 +327,7 @@ pub fn bench_fork_cow_latency() -> (Duration, Duration, f64) {
         pte_table[i] = ((i as u64) << 12) | 0x1; // PRESENT, WRITABLE cleared
                                                  // (read-only)
     }
+    std::hint::black_box(&pte_table);
     let dur_cow = start_cow.elapsed();
 
     let speedup = dur_deep.as_nanos() as f64 / dur_cow.as_nanos().max(1) as f64;
@@ -1130,8 +1134,11 @@ pub fn test_syscall_rate_limiter_underflow() {
     }
 
     impl FlawedRateLimiter {
-        fn check_flawed(&self) -> bool {
+        /// The flawed check-then-decrement. `between` runs after the load and
+        /// before the decrement, so a test can force the racing interleaving.
+        fn check_flawed(&self, between: impl FnOnce()) -> bool {
             let current = self.tokens.load(Ordering::Relaxed);
+            between();
             if current > 0 {
                 self.tokens.fetch_sub(1, Ordering::Relaxed);
                 true
@@ -1159,36 +1166,34 @@ pub fn test_syscall_rate_limiter_underflow() {
         }
     }
 
-    // Run race scenario across trials with synchronized thread release
-    let mut underflow_observed = false;
-    for _ in 0..500 {
-        let limiter = Arc::new(FlawedRateLimiter {
-            tokens: AtomicU64::new(10),
-        });
-        let barrier = Arc::new(Barrier::new(8));
-        let mut handles = Vec::new();
-        for _ in 0..8 {
-            let l = Arc::clone(&limiter);
-            let b = Arc::clone(&barrier);
-            handles.push(thread::spawn(move || {
-                b.wait();
-                for _ in 0..50 {
-                    let _ = l.check_flawed();
-                }
-            }));
-        }
-        for h in handles {
-            h.join().unwrap();
-        }
-        let final_tokens = limiter.tokens.load(Ordering::Relaxed);
-        if final_tokens > 10_000 {
-            underflow_observed = true;
-            println!(
-                "  - Underflow observed! Final tokens wrapped to 0x{:016x} ({})",
-                final_tokens, final_tokens
-            );
-            break;
-        }
+    // Deterministic interleaving (review of the v0.26.0 stack, PR #7): it
+    // used to rely on the host scheduler exposing the race in one of 500
+    // trials, so the assertion could fail with no change to the model. Here
+    // both workers load the last token, meet at a barrier, and only then
+    // decrement -- exactly the interleaving check_flawed() permits.
+    let limiter = Arc::new(FlawedRateLimiter {
+        tokens: AtomicU64::new(1),
+    });
+    let barrier = Arc::new(Barrier::new(2));
+    let mut handles = Vec::new();
+    for _ in 0..2 {
+        let l = Arc::clone(&limiter);
+        let b = Arc::clone(&barrier);
+        // Both load 1, wait for each other, then both decrement.
+        handles.push(thread::spawn(move || l.check_flawed(|| {
+            b.wait();
+        })));
+    }
+    for h in handles {
+        h.join().unwrap();
+    }
+    let final_tokens = limiter.tokens.load(Ordering::Relaxed);
+    let underflow_observed = final_tokens > 10_000;
+    if underflow_observed {
+        println!(
+            "  - Underflow reproduced: final tokens wrapped to 0x{:016x} ({})",
+            final_tokens, final_tokens
+        );
     }
 
     // Verify fixed rate limiter never underflows
@@ -1271,8 +1276,11 @@ pub fn bench_futex_global_lock_contention() -> (Duration, Duration, f64, usize) 
     let mut lost_updates = 0;
 
     for _ in 0..10 {
-        let mut futex_word = Box::new(0u32);
-        let raw_ptr = futex_word.as_mut() as *mut u32 as usize;
+        // A separate relaxed load and store on an atomic models the
+        // non-atomic read-modify-write without a Rust data race: volatile
+        // accesses to a plain u32 from two threads were undefined behaviour
+        // (review of the v0.26.0 stack, PR #7).
+        let futex_word = Arc::new(std::sync::atomic::AtomicU32::new(0));
         let ready = Arc::new(AtomicUsize::new(0));
         let start_signal = Arc::new(AtomicBool::new(false));
         let mut handles = Vec::new();
@@ -1280,17 +1288,15 @@ pub fn bench_futex_global_lock_contention() -> (Duration, Duration, f64, usize) 
         for _ in 0..2 {
             let r = Arc::clone(&ready);
             let s = Arc::clone(&start_signal);
+            let w = Arc::clone(&futex_word);
             handles.push(thread::spawn(move || {
                 r.fetch_add(1, Ordering::Release);
                 while !s.load(Ordering::Acquire) {
                     core::hint::spin_loop();
                 }
                 for _ in 0..WAKE_OP_ITERS {
-                    unsafe {
-                        let cur = core::ptr::read_volatile(raw_ptr as *const u32);
-                        let new_val = cur.wrapping_add(1);
-                        core::ptr::write_volatile(raw_ptr as *mut u32, new_val);
-                    }
+                    let cur = w.load(Ordering::Relaxed);
+                    w.store(cur.wrapping_add(1), Ordering::Relaxed);
                 }
             }));
         }
@@ -1301,7 +1307,7 @@ pub fn bench_futex_global_lock_contention() -> (Duration, Duration, f64, usize) 
         for h in handles {
             h.join().unwrap();
         }
-        final_val = *futex_word;
+        final_val = futex_word.load(Ordering::Relaxed);
         lost_updates = (WAKE_OP_ITERS * 2).saturating_sub(final_val as usize);
         if lost_updates > 0 {
             break;

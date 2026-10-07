@@ -609,6 +609,11 @@ pub fn cleanup_process(process: &Process) {
         process.ipc_endpoints.lock().clear();
     }
 
+    // Drop DRM page-flip events and pending flips this process owned, so
+    // departed DRM masters do not accumulate queued events. Independent of
+    // the IPC cleanup above.
+    crate::graphics::gpu_accel::purge_drm_owner(process.pid.0);
+
     // Close all open file descriptors.
     // Log a warning if the process has more than 3 fds open (stdin/stdout/stderr).
     // This helps identify fd leaks during heavy workloads like BusyBox compilation

@@ -195,6 +195,13 @@ static INTERFACE_CONFIG: Mutex<InterfaceConfig> = Mutex::new(InterfaceConfig {
     gateway: None,
 });
 
+/// The interface the current configuration's routes were installed on.
+/// The primary interface can change between two reconfigurations (eth0
+/// goes down, eth1 comes up), so the old routes must be removed from the
+/// interface they were put on, not from today's primary (review of the
+/// v0.26.0 stack, PR #15). Locked only while INTERFACE_CONFIG is held.
+static APPLIED_IFACE: Mutex<Option<String>> = Mutex::new(None);
+
 /// Get the currently configured interface IP address.
 pub fn get_interface_ip() -> Ipv4Address {
     INTERFACE_CONFIG.lock().ip_addr
@@ -209,33 +216,29 @@ pub fn get_interface_config() -> InterfaceConfig {
 ///
 /// Also installs the routes the configuration implies on the primary
 /// interface: the connected subnet and, with a gateway, the default route.
-/// Both replace earlier routes for the same prefix, so lease renewals do not
-/// pile up duplicates.
+/// The routes the previous configuration installed are removed first, so a
+/// lost gateway or a moved subnet leaves nothing stale and lease renewals do
+/// not pile up duplicates; routes added any other way are kept.
 pub fn set_interface_config(ip: Ipv4Address, mask: Ipv4Address, gw: Option<Ipv4Address>) {
+    let iface = super::device::primary_device_name();
     {
+        // Held across the route update so two reconfigurations cannot
+        // interleave their remove/add steps. Nothing takes ROUTES and then
+        // INTERFACE_CONFIG, so the order is safe.
         let mut config = INTERFACE_CONFIG.lock();
+        let old = *config;
         config.ip_addr = ip;
         config.subnet_mask = mask;
         config.gateway = gw;
-    }
-
-    if let Some(iface) = super::device::primary_device_name() {
-        if mask != Ipv4Address::ANY {
-            add_route(RouteEntry {
-                destination: Ipv4Address::from_u32(ip.to_u32() & mask.to_u32()),
-                netmask: mask,
-                gateway: None,
-                interface: iface.clone(),
-            });
-        }
-        if let Some(gateway) = gw {
-            add_route(RouteEntry {
-                destination: Ipv4Address::ANY,
-                netmask: Ipv4Address::ANY,
-                gateway: Some(gateway),
-                interface: iface,
-            });
-        }
+        let mut applied = APPLIED_IFACE.lock();
+        replace_interface_routes(
+            &mut ROUTES.lock(),
+            &old,
+            applied.as_deref(),
+            &config,
+            iface.as_deref(),
+        );
+        *applied = iface;
     }
 
     println!(
@@ -256,9 +259,60 @@ static ROUTES: Mutex<Vec<RouteEntry>> = Mutex::new(Vec::new());
 
 /// Add a route, replacing any route for the same prefix.
 pub fn add_route(entry: RouteEntry) {
-    let mut routes = ROUTES.lock();
+    insert_route(&mut ROUTES.lock(), entry);
+}
+
+fn insert_route(routes: &mut Vec<RouteEntry>, entry: RouteEntry) {
     routes.retain(|r| !(r.destination == entry.destination && r.netmask == entry.netmask));
     routes.push(entry);
+}
+
+/// The routes an interface configuration installs on `iface`: the
+/// connected subnet (when a mask is set) and the default route (when a
+/// gateway is set).
+fn config_routes(config: &InterfaceConfig, iface: &str) -> Vec<RouteEntry> {
+    let mut routes = Vec::new();
+    if config.subnet_mask != Ipv4Address::ANY {
+        routes.push(RouteEntry {
+            destination: Ipv4Address::from_u32(
+                config.ip_addr.to_u32() & config.subnet_mask.to_u32(),
+            ),
+            netmask: config.subnet_mask,
+            gateway: None,
+            interface: String::from(iface),
+        });
+    }
+    if let Some(gateway) = config.gateway {
+        routes.push(RouteEntry {
+            destination: Ipv4Address::ANY,
+            netmask: Ipv4Address::ANY,
+            gateway: Some(gateway),
+            interface: String::from(iface),
+        });
+    }
+    routes
+}
+
+/// Swap the routes `old` installed on `old_iface` for those `new` implies
+/// on `new_iface` (either may be absent). Only exact copies of `old`'s
+/// routes are removed, so static routes, and a static route that has since
+/// replaced one of them, survive. Review of the v0.26.0 stack, PRs #12, #15.
+fn replace_interface_routes(
+    routes: &mut Vec<RouteEntry>,
+    old: &InterfaceConfig,
+    old_iface: Option<&str>,
+    new: &InterfaceConfig,
+    new_iface: Option<&str>,
+) {
+    if let Some(iface) = old_iface {
+        let stale = config_routes(old, iface);
+        routes.retain(|r| !stale.contains(r));
+    }
+    if let Some(iface) = new_iface {
+        for entry in config_routes(new, iface) {
+            insert_route(routes, entry);
+        }
+    }
 }
 
 /// Lookup route for destination: the longest matching prefix (NET-ARCH-01;
@@ -436,6 +490,76 @@ mod tests {
         assert_eq!(routes.len(), before + 1, "a renewal replaces, not appends");
         assert!(routes.contains(&r([192, 0, 2, 254])));
         ROUTES.lock().retain(|x| x.interface != "test0");
+    }
+
+    fn config(ip: [u8; 4], mask: [u8; 4], gw: Option<[u8; 4]>) -> InterfaceConfig {
+        InterfaceConfig {
+            ip_addr: Ipv4Address(ip),
+            subnet_mask: Ipv4Address(mask),
+            gateway: gw.map(Ipv4Address),
+        }
+    }
+
+    /// Reconfiguring an interface removes exactly the routes its previous
+    /// configuration installed and keeps static routes (review of the
+    /// v0.26.0 stack, PR #12: a lost gateway or moved subnet used to leave
+    /// the old default and connected routes behind).
+    #[test]
+    fn reconfiguration_replaces_only_derived_routes() {
+        let old = config([10, 0, 2, 15], [255, 255, 255, 0], Some([10, 0, 2, 2]));
+        let new = config([192, 168, 1, 20], [255, 255, 0, 0], None);
+        let static_route = route(
+            [172, 16, 0, 0],
+            [255, 240, 0, 0],
+            Some([10, 0, 2, 9]),
+            "eth0",
+        );
+        let other_iface = route([10, 0, 2, 0], [255, 255, 255, 0], None, "eth1");
+        let mut routes = Vec::new();
+        replace_interface_routes(
+            &mut routes,
+            &config([0; 4], [0; 4], None),
+            None,
+            &old,
+            Some("eth0"),
+        );
+        routes.push(static_route.clone());
+        routes.push(other_iface.clone());
+        assert_eq!(routes.len(), 4);
+
+        replace_interface_routes(&mut routes, &old, Some("eth0"), &new, Some("eth0"));
+
+        assert!(!routes.contains(&route([10, 0, 2, 0], [255, 255, 255, 0], None, "eth0")));
+        assert!(
+            routes.iter().all(|r| r.netmask != Ipv4Address::ANY),
+            "default gone"
+        );
+        assert!(routes.contains(&route([192, 168, 0, 0], [255, 255, 0, 0], None, "eth0")));
+        assert!(routes.contains(&static_route));
+        assert!(routes.contains(&other_iface));
+        assert_eq!(routes.len(), 3);
+
+        // Renewing the same lease changes nothing and adds no duplicates.
+        replace_interface_routes(&mut routes, &new, Some("eth0"), &new, Some("eth0"));
+        assert_eq!(routes.len(), 3);
+    }
+
+    #[test]
+    fn reconfiguration_on_a_new_primary_removes_the_old_interfaces_routes() {
+        // The lease moved from eth0 to eth1: eth0's derived routes must go,
+        // although today's primary is eth1.
+        let lease = config([10, 0, 2, 15], [255, 255, 255, 0], Some([10, 0, 2, 2]));
+        let mut routes = Vec::new();
+        replace_interface_routes(
+            &mut routes,
+            &config([0; 4], [0; 4], None),
+            None,
+            &lease,
+            Some("eth0"),
+        );
+        replace_interface_routes(&mut routes, &lease, Some("eth0"), &lease, Some("eth1"));
+        assert_eq!(routes.len(), 2);
+        assert!(routes.iter().all(|r| r.interface == "eth1"));
     }
 
     fn packet(ihl: u8, total_length: u16, payload: &[u8], padding: usize) -> Vec<u8> {

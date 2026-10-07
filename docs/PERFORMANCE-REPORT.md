@@ -185,7 +185,8 @@ the global allocator it is meant to speed up (894 vs 448 ns). Every call took th
 around all 16 caches, and a refill took the global allocator lock while still holding it
 (MEM-PERF-01). The v0.21.0 run above showed the same inversion, in the old units.
 
-Host-target unit tests at baseline: **4,284 passed, 0 failed**; after Sprint B: **4,413 passed, 0 failed**
+Host-target unit tests at baseline: **4,284 passed, 0 failed**; after Sprint B: **4,413 passed, 0 failed**; at release, after the review fixes: **4,472 passed, 0 failed** (1 deliberately ignored, pinning N-47)
 (`cargo test --lib --features alloc -p veridian-kernel --target x86_64-unknown-linux-gnu`).
 The "Host-Target Tests" section above is out of date: the host build compiles, and
-`[INIT] Results: 29/29 passed` plus BOOTOK hold on all three architectures.
+`[INIT] Results: 34/34 passed` plus BOOTOK hold on all three architectures (29/29 in the v0.21.0
+run above; v0.26.0 added five boot tests).

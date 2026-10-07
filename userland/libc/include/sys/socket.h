@@ -66,6 +66,7 @@ extern "C" {
 
 /* Message flags */
 #define MSG_PEEK        0x02
+#define MSG_CTRUNC      0x08
 #define MSG_WAITALL     0x100
 #define MSG_DONTWAIT    0x40
 #define MSG_NOSIGNAL    0x4000

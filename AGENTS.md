@@ -37,7 +37,7 @@ pkill -9 -f qemu-system; sleep 2; qemu-system-x86_64 ...
 
 ## VeridianOS Overview
 
-Next-generation microkernel OS in Rust. Capability-based security, user-space drivers, multi-arch (x86_64, AArch64, RISC-V). All phases (0-12) complete, v0.26.0. See CLAUDE.local.md for current state and `docs/audit/AUDIT-VERIFICATION-2026-10-05.md` for the open audit remediation checklist.
+Next-generation microkernel OS in Rust. Capability-based security, user-space drivers as the design goal (today they run in ring 0, critique C6; see docs/KNOWN-LIMITATIONS.md), multi-arch (x86_64, AArch64, RISC-V). All phases (0-12) complete, v0.26.0. See CLAUDE.local.md for current state and `docs/audit/AUDIT-VERIFICATION-2026-10-05.md` for the open audit remediation checklist.
 
 ## Essential Commands
 
@@ -108,7 +108,7 @@ qemu-system-riscv64 -M virt -m 256M -bios default \
 | AArch64 | Direct `-kernel` | None | `target/aarch64-unknown-none/debug/veridian-kernel` | N/A (TCG) |
 | RISC-V | `-kernel` + `-bios default` | OpenSBI | `target/riscv64gc-unknown-none-elf/debug/veridian-kernel` | N/A (TCG) |
 
-**Expected**: All 3 archs boot Stage 6 BOOTOK, 29/29 tests. x86_64 shows Ring 3 entry.
+**Expected**: All 3 archs boot Stage 6 BOOTOK, 34/34 tests. x86_64 shows Ring 3 entry.
 
 #### QEMU 10.2 Pitfalls
 - **DO NOT** use `timeout` -- causes "drive exists" errors. Use background+kill: `cmd </dev/null > log 2>&1 &; PID=$!; sleep N; kill $PID`
@@ -117,7 +117,7 @@ qemu-system-riscv64 -M virt -m 256M -bios default \
 - **DO NOT** use `-drive` without explicit ID -- conflicts with pflash
 - **DO NOT** use `-cdrom` alongside `-drive` on same bus
 - **DO NOT** use `cargo run` for x86_64 -- wrong runner
-- **ALWAYS** `pkill -9 -f qemu-system; sleep 3` before re-running
+- **ALWAYS** run `pkill -9 -f qemu-system` as its own command (Rule #1), then `sleep 3` as a separate command, before re-running
 - **ALWAYS** use `-enable-kvm` for x86_64 (TCG is ~100x slower)
 
 **PS/2 keyboard**: Polling (ports 0x64/0x60). APIC replaces PIC so IRQ-based keyboard doesn't work. Input from both serial and keyboard.
@@ -133,12 +133,12 @@ cargo clippy --target targets/x86_64-veridian.json -p veridian-kernel $BS -- -D 
 cargo clippy --target aarch64-unknown-none -p veridian-kernel $BS -- -D warnings
 cargo clippy --target riscv64gc-unknown-none-elf -p veridian-kernel $BS -- -D warnings
 
-# Host-target unit tests (4,284 passing). Plain `cargo test` does not work:
+# Host-target unit tests (4,472 passing). Plain `cargo test` does not work:
 # .cargo/config.toml defaults the target to bare metal.
 cargo test --lib --features alloc -p veridian-kernel --target x86_64-unknown-linux-gnu
 
 # In-kernel boot tests: boot each arch in QEMU (commands above) and check for
-# "[INIT] Results: 29/29 passed" followed by BOOTOK.
+# "[INIT] Results: 34/34 passed" followed by BOOTOK.
 ```
 
 ### Development Tools
@@ -153,9 +153,9 @@ cargo install bootimage cargo-xbuild cargo-watch cargo-expand cargo-audit cargo-
 
 ### Microkernel Design
 - **Core**: Memory management, scheduling, IPC, hardware abstraction
-- **User-space drivers**: Capability-controlled MMIO, interrupt forwarding, IOMMU DMA
+- **User-space drivers (design goal, C6)**: Capability-controlled MMIO, interrupt forwarding, IOMMU DMA. Today drivers run in ring 0 inside the kernel (docs/KNOWN-LIMITATIONS.md)
 - **Zero-copy IPC**: Shared memory mapping, <1us fast path
-- **Security**: 64-bit capability tokens, post-quantum ready (ML-KEM, ML-DSA)
+- **Security**: 64-bit capability tokens, post-quantum (Kyber/ML-KEM; Dilithium3 with pre-FIPS 204 sizes, N-55)
 
 ### Memory Layout (x86_64)
 ```
@@ -168,8 +168,8 @@ Kernel: 0xFFFF_8000_0000_0000 - 0xFFFF_FFFF_FFFF_FFFF (128 TB)
 ### Project Structure
 ```
 kernel/src/{arch/, mm/, sched/, cap/, ipc/, syscall/, process/, perf/, desktop/, browser/}
-drivers/          # User-space driver processes
-services/         # System services (VFS, network, CRI/CNI/CSI)
+kernel/src/drivers/   # Device drivers (in the kernel today; user-space drivers are planned, critique C6)
+kernel/src/services/  # System services: shell, VFS glue, CRI/CNI/CSI (also in the kernel)
 userland/         # User applications and libraries
   libc/           # C library shims
   qt6/            # Qt 6 QPA plugin and shims
@@ -203,8 +203,10 @@ pub fn init() -> Result<(), Error> {
 pub fn with_manager<R, F: FnOnce(&Manager) -> R>(f: F) -> Option<R> { MANAGER.with(f) }
 // For mutation: GlobalState<RwLock<Manager>> with .with(|lock| { let mut m = lock.write(); f(&mut m) })
 ```
-120+ static mut eliminated. 7 justified remain (early boot, per-CPU, heap) with SAFETY docs:
-`PER_CPU_DATA`, `READY_QUEUE_STATIC`, `HEAP_MEMORY`, `BOOT_INFO`, `EARLY_SERIAL`, `KERNEL_STACK`/`STACK`
+120+ static mut eliminated. The justified ones left (early boot, per-CPU, heap) carry SAFETY docs:
+`PER_CPU_DATA`, `READY_QUEUE_STATIC`, `HEAP_MEMORY`, `BOOT_INFO`, `EARLY_SERIAL`. The TSS stacks
+became an `UnsafeCell` wrapper (`IstStack`, `arch/x86_64/gdt.rs`) in v0.26.0; new code must not add
+`static mut`.
 
 ### CI/CD Configuration
 - GitHub Actions: job consolidation, cargo caching, RUSTFLAGS="-D warnings", rustsec audit

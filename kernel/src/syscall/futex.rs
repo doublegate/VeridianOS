@@ -616,24 +616,26 @@ fn boot_futex_spin(
         }
 
         // Try to dequeue a ready child task and dispatch it.
-        // Skip the parent's own task (tid==parent_tid) -- we only want
-        // child threads spawned by clone().
+        // Only the parent's own clone() threads qualify: another process's
+        // task or a kernel task would otherwise run in ring 3 under the
+        // parent's boot context (review of the v0.26.0 stack, PR #14).
         let child_task = {
             let sched = crate::sched::scheduler::current_scheduler();
             let slock = sched.lock();
             let mut found = None;
-            // Drain up to 8 tasks looking for a non-parent task.
-            // Re-enqueue any parent tasks we accidentally dequeue.
+            // Drain a bounded number of tasks looking for a sibling thread;
+            // every task that does not qualify goes back on the queue.
             let mut skipped = alloc::vec::Vec::new();
-            for _ in 0..8 {
+            for _ in 0..BOOT_DISPATCH_SCAN {
                 match slock.pick_next() {
                     Some(t) => {
-                        let tid = unsafe { t.as_ref().tid };
-                        if tid != parent_tid {
+                        // SAFETY: a task handed out by the scheduler is valid
+                        // while we hold it; we only read its ids.
+                        let (pid, tid) = unsafe { (t.as_ref().pid, t.as_ref().tid) };
+                        if is_boot_dispatchable(pid, tid, parent_pid, parent_tid) {
                             found = Some(t);
                             break;
                         }
-                        // Parent task -- save to re-enqueue
                         skipped.push(t);
                     }
                     None => break,
@@ -667,18 +669,30 @@ fn boot_futex_spin(
         };
 
         // Extract the child's thread context for user-mode dispatch.
+        // `child_task` is already off the run queue, so every path that does
+        // not dispatch it must put it back, or it is lost for good.
+        let requeue = |t| {
+            let sched = crate::sched::scheduler::current_scheduler();
+            sched.lock().enqueue(t);
+        };
         let (regs, child_pid, child_tid, cr3) = unsafe {
             let task_ref = child_task.as_ref();
 
             // Find the child's ThreadContext via the process table.
             let proc = match crate::process::get_process(task_ref.pid) {
                 Some(p) => p,
-                None => continue,
+                None => {
+                    requeue(child_task);
+                    continue;
+                }
             };
 
             let thread = match proc.get_thread(task_ref.tid) {
                 Some(t) => t,
-                None => continue,
+                None => {
+                    requeue(child_task);
+                    continue;
+                }
             };
 
             let ctx = thread.context.lock();
@@ -710,6 +724,7 @@ fn boot_futex_spin(
         };
 
         if cr3 == 0 {
+            requeue(child_task);
             continue;
         }
 
@@ -816,6 +831,24 @@ fn boot_futex_spin(
     Err(SyscallError::WouldBlock)
 }
 
+/// How many ready tasks boot dispatch examines per spin when looking for one
+/// of the parent's threads.
+#[cfg(target_arch = "x86_64")]
+const BOOT_DISPATCH_SCAN: usize = 64;
+
+/// Whether boot dispatch may run the task (`pid`, `tid`) while the boot-path
+/// parent (`parent_pid`, `parent_tid`) waits: only the parent's own sibling
+/// threads, never the parent thread itself.
+#[cfg(any(target_arch = "x86_64", test))]
+fn is_boot_dispatchable(
+    pid: crate::process::ProcessId,
+    tid: crate::process::thread::ThreadId,
+    parent_pid: crate::process::ProcessId,
+    parent_tid: crate::process::thread::ThreadId,
+) -> bool {
+    pid == parent_pid && tid != parent_tid
+}
+
 /// Stub for non-x86_64 architectures.
 #[cfg(not(target_arch = "x86_64"))]
 fn boot_futex_spin(
@@ -863,6 +896,19 @@ fn wake_op_eval(encoded: u32, old: u32) -> Result<(u32, bool), SyscallError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn boot_dispatch_takes_only_the_parents_sibling_threads() {
+        use crate::process::{thread::ThreadId, ProcessId};
+        let (ppid, ptid) = (ProcessId(5), ThreadId(5));
+        // A sibling thread of the parent qualifies.
+        assert!(is_boot_dispatchable(ProcessId(5), ThreadId(6), ppid, ptid));
+        // The parent thread itself does not.
+        assert!(!is_boot_dispatchable(ProcessId(5), ThreadId(5), ppid, ptid));
+        // Another process's thread, or a kernel task, does not.
+        assert!(!is_boot_dispatchable(ProcessId(7), ThreadId(8), ppid, ptid));
+        assert!(!is_boot_dispatchable(ProcessId(0), ThreadId(1), ppid, ptid));
+    }
 
     /// Linux's FUTEX_OP() macro.
     const fn futex_op(op: u32, oparg: u32, cmp: u32, cmparg: u32) -> u32 {

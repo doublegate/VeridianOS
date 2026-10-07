@@ -1,5 +1,9 @@
 # Complete README Update and CI Workflow Fixes
 
+> **Historical document.** This is the description of PR #4 as submitted in November 2025. Its
+> status figures were not accurate even then: 18 `static mut` remained at the time. For the current
+> state see [`CHANGELOG.md`](../../CHANGELOG.md) and [`docs/KNOWN-LIMITATIONS.md`](../KNOWN-LIMITATIONS.md).
+
 ## 📋 Overview
 
 This PR contains comprehensive documentation updates and critical CI workflow fixes to enable continuous integration for VeridianOS. The changes bring the project documentation up-to-date with the November 2025 status (all 6 development phases complete + Rust 2024 migration) and fix all CI failures.
@@ -38,11 +42,11 @@ This PR contains comprehensive documentation updates and critical CI workflow fi
 
 **Key Additions:**
 ```markdown
-### ✨ Rust 2024 Migration (100% Complete)
+### ✨ Rust 2024 Migration (in progress at the time of this PR)
 
 | Milestone | Status | Details |
 |-----------|--------|---------|
-| **Static Mut Elimination** | ✅ 100% | 120+ references eliminated |
+| **Static Mut Elimination** | Partial | 120+ eliminated; 18 remained when this PR was opened |
 | **Compiler Warnings** | ✅ 67% reduction | 144 → 51 (unused vars only) |
 | **Code Safety** | ✅ 100% | Zero unsafe data races |
 | **Edition Compatibility** | ✅ 100% | Fully Rust 2024 compliant |

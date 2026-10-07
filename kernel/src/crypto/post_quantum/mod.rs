@@ -148,6 +148,12 @@ fn expand_seed(seed: &[u8], len: usize) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
+    // Only the bare-metal tests below use these; on the host they would be
+    // unused imports.
+    #[cfg(target_os = "none")]
+    use super::{
+        dilithium::DilithiumSigningKey, kyber::KyberSecretKey, DilithiumLevel, KyberLevel,
+    };
 
     // These tests require bare-metal PRNG initialization for deterministic results.
     // The simplified post-quantum implementations produce non-deterministic output

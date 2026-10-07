@@ -439,15 +439,6 @@ pub(crate) fn path_is_under(path: &str, mount: &str) -> bool {
         || (path.starts_with(mount) && path.as_bytes().get(mount.len()) == Some(&b'/'))
 }
 
-/// The part of normalized `path` below `mount` (empty for the mount root).
-fn path_relative_to_mount<'a>(path: &'a str, mount: &str) -> &'a str {
-    if mount == "/" {
-        path
-    } else {
-        &path[mount.len().min(path.len())..]
-    }
-}
-
 /// An immutable view of the mounted filesystems (FS-PERF-02).
 ///
 /// Path resolution works on a snapshot: it clones the `Arc` under a short
@@ -514,93 +505,146 @@ impl Vfs {
 }
 
 impl MountTable {
-    /// Resolution core (FS-SEC-01). The path is made absolute and its `.`
-    /// and `..` components are removed lexically *before* the mount table is
-    /// consulted, so `..` cannot stay pinned inside a mount, and the mount
-    /// is chosen by whole path components (longest match), so `/devices`
-    /// is not served by a filesystem mounted at `/dev`.
+    /// Resolution core (FS-SEC-01), component by component as POSIX
+    /// specifies.
+    ///
+    /// `..` is applied in order, after the components before it, so it
+    /// removes the directory a symlink *resolved to*: with `link -> b/c`,
+    /// `/a/link/../x` is `/a/b/x`. The earlier implementation removed `..`
+    /// lexically before looking at any component and returned `/a/x`, so
+    /// checks made on the canonical path could concern a different object
+    /// (review of the v0.26.0 stack, PR #9).
+    ///
+    /// The canonical path is kept as components with no `.`, `..` or
+    /// followed symlink. A mount is entered when that path equals its
+    /// mount point (whole components, so `/devices` is never served by a
+    /// filesystem at `/dev`), and `..` leaves a mount the same way, by
+    /// re-walking the shortened canonical path from the root. Every
+    /// component that is not last must be a directory.
+    ///
+    /// With `creds = Some((uid, gid))` every directory searched -- for a
+    /// name or for `..` -- must grant that caller search (execute)
+    /// permission, as POSIX requires; otherwise the walk fails with
+    /// `PermissionDenied`. `None` is the kernel's own lookups, and root.
     fn resolve(
         &self,
         path: &str,
         cwd: &str,
         follow_last: bool,
         symlink_depth: usize,
+        creds: Option<(u32, u32)>,
     ) -> Result<(Arc<dyn VfsNode>, String), KernelError> {
-        if symlink_depth > SYMLINK_MAX_DEPTH {
-            return Err(KernelError::FsError(crate::error::FsError::SymlinkLoop));
+        use alloc::collections::VecDeque;
+
+        let split = |p: &str| -> VecDeque<String> {
+            p.split('/')
+                .filter(|c| !c.is_empty() && *c != ".")
+                .map(String::from)
+                .collect()
+        };
+
+        let mut pending = if path.starts_with('/') {
+            split(path)
+        } else {
+            let mut q = split(cwd);
+            q.extend(split(path));
+            q
+        };
+        let mut canon: Vec<String> = Vec::new();
+        let mut node = self.walk_canonical(&canon)?;
+        let mut links = symlink_depth;
+
+        while let Some(component) = pending.pop_front() {
+            // Whatever is being searched -- for a name or for ".." -- must
+            // be a directory: "/a/file/.." is ENOTDIR, as in POSIX.
+            if node.node_type() != NodeType::Directory {
+                return Err(KernelError::FsError(crate::error::FsError::NotADirectory));
+            }
+            if let Some((uid, gid)) = creds {
+                let meta = node.metadata()?;
+                if !meta.permissions.can_run(uid, gid, meta.uid, meta.gid) {
+                    return Err(KernelError::FsError(
+                        crate::error::FsError::PermissionDenied,
+                    ));
+                }
+            }
+            if component == ".." {
+                canon.pop();
+                node = self.walk_canonical(&canon)?;
+                continue;
+            }
+            canon.push(component);
+            let canon_path = join_components(&canon);
+            node = match self.mounts.get(&canon_path) {
+                Some(fs) => fs.root(),
+                None => node.lookup(canon.last().map(String::as_str).unwrap_or(""))?,
+            };
+
+            let is_last = pending.is_empty();
+            if node.node_type() == NodeType::Symlink && (!is_last || follow_last) {
+                links += 1;
+                if links > SYMLINK_MAX_DEPTH {
+                    return Err(KernelError::FsError(crate::error::FsError::SymlinkLoop));
+                }
+                let target = node.readlink()?;
+                // The target replaces the link: relative to the link's own
+                // directory, or to the root if absolute. Its components go
+                // in front of whatever was still pending.
+                canon.pop();
+                if target.starts_with('/') {
+                    canon.clear();
+                }
+                let mut spliced = split(&target);
+                spliced.extend(pending.drain(..));
+                pending = spliced;
+                node = self.walk_canonical(&canon)?;
+            }
         }
 
+        Ok((node, join_components(&canon)))
+    }
+
+    /// The node at canonical components `canon` (no `.`, `..` or symlinks),
+    /// entering mounts by whole-path match.
+    fn walk_canonical(&self, canon: &[String]) -> Result<Arc<dyn VfsNode>, KernelError> {
         let root_fs = self
             .root_fs
             .as_ref()
             .ok_or(KernelError::FsError(crate::error::FsError::NoRootFs))?;
-
-        let path = normalize_path(path, cwd);
-
-        let mount = self
-            .mounts
-            .iter()
-            .filter(|(mount_path, _)| path_is_under(&path, mount_path))
-            .max_by_key(|(mount_path, _)| mount_path.len());
-        let (mount_path, start) = match mount {
-            Some((mount_path, fs)) => (mount_path.as_str(), fs.root()),
-            None => ("/", root_fs.root()),
-        };
-
-        self.traverse_path(start, mount_path, &path, follow_last, symlink_depth)
-    }
-
-    /// Walk the normalized absolute `path` from `node`, the root of the
-    /// filesystem mounted at `mount_path`.
-    ///
-    /// When a component is a symlink that must be followed, its target --
-    /// taken relative to the symlink's own directory unless absolute -- is
-    /// spliced in front of the remaining components and the result is
-    /// resolved from scratch, so mounts and `..` inside the target are
-    /// handled exactly like a path the caller wrote.
-    fn traverse_path(
-        &self,
-        mut node: Arc<dyn VfsNode>,
-        mount_path: &str,
-        path: &str,
-        follow_last: bool,
-        symlink_depth: usize,
-    ) -> Result<(Arc<dyn VfsNode>, String), KernelError> {
-        let relative = path_relative_to_mount(path, mount_path);
-        let components: Vec<&str> = relative.split('/').filter(|s| !s.is_empty()).collect();
-        let last_idx = components.len().saturating_sub(1);
-
-        for (idx, component) in components.iter().enumerate() {
-            node = node.lookup(component)?;
-
-            let is_last = idx == last_idx;
-            if node.node_type() == NodeType::Symlink && (!is_last || follow_last) {
-                let target = node.readlink()?;
-
-                // Absolute path of the directory holding the symlink.
-                let mut link_dir = String::from(mount_path);
-                for c in &components[..idx] {
-                    if !link_dir.ends_with('/') {
-                        link_dir.push('/');
-                    }
-                    link_dir.push_str(c);
-                }
-
-                let mut spliced = if target.starts_with('/') {
-                    target
-                } else {
-                    format!("{}/{}", link_dir, target)
-                };
-                for c in &components[idx + 1..] {
-                    spliced.push('/');
-                    spliced.push_str(c);
-                }
-                return self.resolve(&spliced, "/", follow_last, symlink_depth + 1);
-            }
+        let mut node = root_fs.root();
+        let mut path = String::new();
+        for c in canon {
+            path.push('/');
+            path.push_str(c);
+            node = match self.mounts.get(&path) {
+                Some(fs) => fs.root(),
+                None => node.lookup(c)?,
+            };
         }
-
-        Ok((node, String::from(path)))
+        Ok(node)
     }
+}
+
+/// The credentials whose search permission a path walk checks: the calling
+/// process's, or `None` (no check) for root and for kernel context with no
+/// current process.
+fn search_creds() -> Option<(u32, u32)> {
+    crate::process::current_process()
+        .map(|p| (p.uid(), p.gid()))
+        .filter(|&(uid, _)| uid != 0)
+}
+
+/// `/` followed by the components joined with `/`; `/` for none.
+fn join_components(canon: &[String]) -> String {
+    if canon.is_empty() {
+        return String::from("/");
+    }
+    let mut path = String::new();
+    for c in canon {
+        path.push('/');
+        path.push_str(c);
+    }
+    path
 }
 
 impl Default for Vfs {
@@ -713,6 +757,21 @@ impl Vfs {
             .unwrap_or_else(|| String::from("/"))
     }
 
+    /// The mount point holding the directory entry `name` in `parent`, with
+    /// `parent` resolved canonically (symlinks, `.` and `..` followed; the
+    /// entry itself is not). A rename must compare these rather than the
+    /// paths as written: a symlink in the parent path can point into another
+    /// mount (review of the v0.26.0 stack, PR #11).
+    pub fn entry_mount_point(&self, parent: &str, name: &str) -> Result<String, KernelError> {
+        let (_, canon) = self.resolve_canonical(parent, &self.get_cwd(), true)?;
+        let entry = if canon == "/" {
+            alloc::format!("/{}", name)
+        } else {
+            alloc::format!("{}/{}", canon, name)
+        };
+        Ok(self.mount_point_of(&entry))
+    }
+
     /// Resolve a path, returning the node together with its canonical
     /// absolute path (all `.`, `..` and followed symlinks removed). Access
     /// checks must use this path: checking the path as written lets a
@@ -723,7 +782,8 @@ impl Vfs {
         cwd: &str,
         follow_last: bool,
     ) -> Result<(Arc<dyn VfsNode>, String), KernelError> {
-        self.snapshot().resolve(path, cwd, follow_last, 0)
+        self.snapshot()
+            .resolve(path, cwd, follow_last, 0, search_creds())
     }
 
     /// Inner path resolution with configurable symlink behavior.
@@ -740,7 +800,7 @@ impl Vfs {
         symlink_depth: usize,
     ) -> Result<Arc<dyn VfsNode>, KernelError> {
         self.snapshot()
-            .resolve(path, cwd, follow_last, symlink_depth)
+            .resolve(path, cwd, follow_last, symlink_depth, search_creds())
             .map(|(node, _)| node)
     }
 
@@ -1027,7 +1087,14 @@ pub fn init() {
                     if let Ok(f) = etc.create("os-release", Permissions::default()) {
                         f.write(
                             0,
-                            b"NAME=\"VeridianOS\"\nVERSION=\"0.26.0\"\nID=veridian\nPRETTY_NAME=\"VeridianOS v0.26.0\"\n",
+                            concat!(
+                                "NAME=\"VeridianOS\"\nVERSION=\"",
+                                env!("CARGO_PKG_VERSION"),
+                                "\"\nID=veridian\nPRETTY_NAME=\"VeridianOS v",
+                                env!("CARGO_PKG_VERSION"),
+                                "\"\n"
+                            )
+                            .as_bytes(),
                         )
                         .ok();
                     }
@@ -1403,6 +1470,29 @@ mod tests {
     }
 
     #[test]
+    fn blockfs_rename_onto_own_hard_link_keeps_both() {
+        // Each BlockFS lookup returns a fresh node, so identity must be the
+        // inode number, not the Arc (review of the v0.26.0 stack, PR #9).
+        // POSIX: renaming one link onto another link of the same file does
+        // nothing.
+        let fs = blockfs::BlockFs::format(4096, 256).unwrap();
+        let root = fs.root();
+        let f = root.create("f", Permissions::default()).unwrap();
+        f.write(0, b"data").unwrap();
+        root.link("alias", root.lookup("f").unwrap()).unwrap();
+        root.rename("alias", &root, "f").unwrap();
+        root.rename("f", &root, "f").unwrap();
+        let mut buf = [0u8; 4];
+        root.lookup("f").unwrap().read(0, &mut buf).unwrap();
+        assert_eq!(&buf, b"data");
+        assert!(root.lookup("alias").is_ok());
+        assert_eq!(
+            root.lookup("f").unwrap().metadata().unwrap().inode,
+            root.lookup("alias").unwrap().metadata().unwrap().inode
+        );
+    }
+
+    #[test]
     fn rename_refuses_another_tmpfs_instance() {
         // Moving data between tmpfs mounts would bypass the destination's
         // size limit.
@@ -1440,6 +1530,88 @@ mod tests {
     }
 
     // --- Path resolution (FS-SEC-01) ---
+
+    #[test]
+    fn dotdot_applies_after_symlink_expansion() {
+        // POSIX order (review of the v0.26.0 stack, PR #9): with
+        // /a/link -> b/c, "/a/link/../x" is /a/b/x, not /a/x.
+        let vfs = make_vfs_with_root();
+        let root = vfs.root_fs().unwrap().root();
+        let a = root.mkdir("a", Permissions::default()).unwrap();
+        let b = a.mkdir("b", Permissions::default()).unwrap();
+        b.mkdir("c", Permissions::default()).unwrap();
+        b.create("x", Permissions::default()).unwrap();
+        a.create("x", Permissions::default()).unwrap();
+        a.symlink("link", "b/c").unwrap();
+        let (_, canonical) = vfs.resolve_canonical("/a/link/../x", "/", true).unwrap();
+        assert_eq!(canonical, "/a/b/x");
+        // An absolute target restarts at the root.
+        a.symlink("abs", "/a/b/c").unwrap();
+        let (_, canonical) = vfs.resolve_canonical("/a/abs/../x", "/", true).unwrap();
+        assert_eq!(canonical, "/a/b/x");
+    }
+
+    #[test]
+    fn dotdot_through_missing_or_file_component_fails() {
+        // Each component before ".." must exist and be a directory; a
+        // lexical "/a/missing/.." used to resolve to "/a".
+        let vfs = make_vfs_with_root();
+        let root = vfs.root_fs().unwrap().root();
+        let a = root.mkdir("a", Permissions::default()).unwrap();
+        a.create("file", Permissions::default()).unwrap();
+        assert!(vfs.resolve_path("/a/missing/..").is_err());
+        assert!(vfs.resolve_path("/a/file/..").is_err());
+        assert!(vfs.resolve_path("/a/./../a").is_ok());
+        // ".." above the root stays at the root.
+        let (_, canonical) = vfs.resolve_canonical("/../../a", "/", true).unwrap();
+        assert_eq!(canonical, "/a");
+    }
+
+    #[test]
+    fn walk_requires_search_permission_on_every_directory() {
+        // Review of the v0.26.0 stack, PR #9: the walk never checked the
+        // execute bit, so a mode-0700 directory hid nothing below it.
+        let vfs = make_vfs_with_root();
+        let root = vfs.root_fs().unwrap().root();
+        let private = root
+            .mkdir("private", Permissions::from_mode(0o700))
+            .unwrap();
+        let open = private
+            .mkdir("open", Permissions::from_mode(0o755))
+            .unwrap();
+        open.create("f", Permissions::from_mode(0o644)).unwrap();
+        let table = vfs.snapshot();
+        let other = Some((1000, 1000));
+        // Root-owned 0700: another user cannot pass through it, even to a
+        // world-readable file, and not by ".." either.
+        assert!(matches!(
+            table.resolve("/private/open/f", "/", true, 0, other),
+            Err(KernelError::FsError(
+                crate::error::FsError::PermissionDenied
+            ))
+        ));
+        assert!(table.resolve("/private/..", "/", true, 0, other).is_err());
+        // The directory itself can still be named (its parent is searchable).
+        assert!(table.resolve("/private", "/", true, 0, other).is_ok());
+        // Kernel context and root are unaffected.
+        assert!(table.resolve("/private/open/f", "/", true, 0, None).is_ok());
+        // Execute without read is enough to pass through a directory.
+        let x_only = root.mkdir("xonly", Permissions::from_mode(0o711)).unwrap();
+        x_only.create("g", Permissions::from_mode(0o644)).unwrap();
+        assert!(table.resolve("/xonly/g", "/", true, 0, other).is_ok());
+    }
+
+    #[test]
+    fn symlink_loop_is_detected() {
+        let vfs = make_vfs_with_root();
+        let root = vfs.root_fs().unwrap().root();
+        root.symlink("p", "q").unwrap();
+        root.symlink("q", "p").unwrap();
+        assert_eq!(
+            vfs.resolve_path("/p").err(),
+            Some(KernelError::FsError(crate::error::FsError::SymlinkLoop))
+        );
+    }
 
     #[test]
     fn normalize_path_removes_dots() {
@@ -1482,6 +1654,23 @@ mod tests {
         vfs.mount(String::from("/mnt"), Arc::new(ramfs::RamFs::new()))
             .unwrap();
         assert!(vfs.resolve_path("/mnt/../top").is_ok());
+    }
+
+    #[test]
+    fn entry_mount_point_follows_symlinked_parent() {
+        let vfs = make_vfs_with_root();
+        let root = vfs.root_fs().unwrap().root();
+        root.mkdir("mnt", Permissions::default()).unwrap();
+        vfs.mount(String::from("/mnt"), Arc::new(ramfs::RamFs::new()))
+            .unwrap();
+        root.symlink("link", "/mnt").unwrap();
+        // The path as written is fooled by the symlink...
+        assert_eq!(vfs.mount_point_of("/link/g"), "/");
+        // ...the canonical parent is not.
+        assert_eq!(vfs.entry_mount_point("/link", "g").unwrap(), "/mnt");
+        assert_eq!(vfs.entry_mount_point("/", "f").unwrap(), "/");
+        // A mount point belongs to its own mount, so renaming it stays EXDEV.
+        assert_eq!(vfs.entry_mount_point("/", "mnt").unwrap(), "/mnt");
     }
 
     #[test]
@@ -1692,7 +1881,7 @@ mod tests {
         let before = vfs.snapshot();
         vfs.unmount("/tmp").unwrap();
         // The old snapshot still sees the mount; new walks do not.
-        assert!(before.resolve("/tmp/f", "/", true, 0).is_ok());
+        assert!(before.resolve("/tmp/f", "/", true, 0, None).is_ok());
         assert!(vfs.resolve_path("/tmp/f").is_err());
         assert!(vfs.mounted("/tmp").is_none());
     }

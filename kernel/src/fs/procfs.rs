@@ -413,8 +413,9 @@ impl VfsNode for ProcNode {
 /// Format one `/proc/<pid>/maps` line in the Linux layout:
 /// `start-end perms offset dev inode [label]`.
 ///
-/// Mappings are anonymous (offset 0, device 00:00, inode 0), so consumers
-/// such as Mesa and Qt that parse this file see well-formed private mappings.
+/// Mappings are anonymous (offset 0, device 00:00, inode 0). Shared
+/// mappings (`MAP_SHARED`, IPC shared regions, device memory) are marked `s`
+/// and the rest `p`, as Linux does.
 fn format_maps_line(
     start: u64,
     size: usize,
@@ -434,14 +435,20 @@ fn format_maps_line(
     } else {
         'x'
     };
+    // Shared mappings used to be reported as private (review of the v0.26.0
+    // stack, PR #7).
+    let share = match mapping_type {
+        MappingType::Shared | MappingType::SharedRegion | MappingType::Device => 's',
+        _ => 'p',
+    };
     let label = match mapping_type {
         MappingType::Stack => " [stack]",
         MappingType::Heap => " [heap]",
         _ => "",
     };
     format!(
-        "{:08x}-{:08x} r{}{}p 00000000 00:00 0{}\n",
-        start, end, write, exec, label
+        "{:08x}-{:08x} r{}{}{} 00000000 00:00 0{}\n",
+        start, end, write, exec, share, label
     )
 }
 
@@ -692,5 +699,12 @@ mod tests {
             format_maps_line(0x40_1000, 0x1000, rx, MappingType::Code),
             "00401000-00402000 r-xp 00000000 00:00 0\n"
         );
+        // Shared mappings are `s`, not `p`.
+        for ty in [MappingType::Shared, MappingType::SharedRegion] {
+            assert_eq!(
+                format_maps_line(0x4000_0000, 0x1000, rw, ty),
+                "40000000-40001000 rw-s 00000000 00:00 0\n"
+            );
+        }
     }
 }

@@ -100,7 +100,10 @@ pub fn listen(fd: usize, backlog: usize) -> Result<usize, SyscallError> {
 
 /// Accept a connection on a socket.
 pub fn accept(fd: usize) -> Result<usize, SyscallError> {
-    let ret = unsafe { syscall1(SYS_SOCKET_ACCEPT, fd) };
+    // The kernel takes (fd, addr, addrlen); pass NULLs explicitly so it
+    // does not read stale rsi/rdx as an address buffer.
+    // SAFETY: plain syscall; no user buffers are passed.
+    let ret = unsafe { syscall3(SYS_SOCKET_ACCEPT, fd, 0, 0) };
     syscall_result(ret)
 }
 
@@ -195,7 +198,12 @@ pub fn getsockopt(
     optname: usize,
     optval: *mut u8,
 ) -> Result<usize, SyscallError> {
-    let ret = unsafe { super::syscall4(SYS_NET_GETSOCKOPT, fd, level, optname, optval as usize) };
+    // The kernel takes an optlen pointer as the fifth argument; pass NULL
+    // explicitly rather than leaving whatever r8 holds.
+    // SAFETY: plain syscall; the kernel validates optval and treats a NULL
+    // optlen as "write the full int".
+    let ret =
+        unsafe { super::syscall5(SYS_NET_GETSOCKOPT, fd, level, optname, optval as usize, 0) };
     syscall_result(ret)
 }
 

@@ -20,7 +20,7 @@ The authoritative security policy is maintained in the repository root:
 
 ### Cryptographic Services
 - ChaCha20-Poly1305, Ed25519, X25519, SHA-256
-- Post-quantum: ML-KEM (Kyber), ML-DSA (Dilithium)
+- Post-quantum: ML-KEM (Kyber), Dilithium3 (round-3 sizes; not yet the FIPS 204 ML-DSA encoding, N-55)
 - TLS 1.3, SSH, WireGuard VPN
 - Hardware CSPRNG (RDRAND with CPUID check)
 

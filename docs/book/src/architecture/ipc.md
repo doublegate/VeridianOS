@@ -2,7 +2,7 @@
 
 > **Status (v0.26.0):** the IPC paths are implemented in the kernel but **not reachable from user space**. Native syscall numbers 0-7 are routed to the Linux compatibility layer, so no user program can send, receive or share memory through IPC yet (audit N-33). They are verified by host unit tests only. Making them reachable is part of the v0.28 ABI work. Latency figures measure in-kernel helpers, not a process-to-process round trip.
 
-VeridianOS implements a high-performance IPC system that forms the core of the microkernel architecture. All communication between processes, including system services and drivers, uses this unified IPC mechanism.
+VeridianOS implements a high-performance IPC system intended to form the core of the microkernel architecture. In the intended architecture, all communication between processes, including system services and user-space drivers, uses this unified IPC mechanism. Today system services and drivers run in the kernel and call each other directly (see Known Limitations, C6), and user programs cannot reach IPC at all (N-33).
 
 ## Design Principles
 

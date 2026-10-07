@@ -20,7 +20,8 @@ the audit plan.
 The native IPC syscalls 0-7 are send, receive, call, reply, create endpoint, bind, share memory and
 map memory. The native dispatcher routes all eight numbers to the Linux compatibility layer, where
 they mean read, write, open, close, stat, fstat, lstat and poll. This is because Qt and libstdc++
-issue raw Linux numbers. So no user program can use VeridianOS IPC today.
+issue raw Linux numbers. So no user program can use VeridianOS IPC today. Inside the kernel, the synchronous send path also looks endpoints up in a registry that
+nothing fills (N-47), so it cannot reach any endpoint either.
 
 - **Verification is host-only.** The v0.26 IPC work (shared regions that really share their frames,
   the 16 KiB buffered message tier, capability checks with rights attenuation, and the receive
@@ -48,12 +49,21 @@ nested boot-time process context. A long wait therefore delays other processes o
 
 Only the boot CPU runs on every architecture. SMP bring-up, per-CPU run queues and TLB shootdown are
 v0.27 work. Lock-free and per-CPU structures are single-CPU-safe but have not run on more than one
-CPU.
+CPU. Some state that must be per-CPU is still global: the x86_64 saved syscall
+frame (`SYSCALL_FRAME_PTR`, N-35) is one example, and directory permission checks that resolve the
+path separately from the operation (N-51) are another.
 
 ### AArch64 runs with the MMU and caches off (N-28, planned v0.27)
 
 All memory is treated as Device memory, so the filesystems use `fs::bare_lock`, which does not
 actually lock. This blocks SMP and EL0 (user mode) on AArch64. RISC-V has no user mode yet either.
+
+### FPU and vector registers are not saved across switches (N-41, planned v0.27)
+
+No x87, SSE or AVX state is saved or restored when the CPU switches between processes, although
+AVX and AVX-512 are enabled. Two processes that both use vector registers can corrupt, and read,
+each other's values. The fix (XSAVE, with the area sized from CPUID) is part of the v0.27 process
+model work (C5).
 
 ### Kernel stacks have no guard pages (N-26, planned v0.27)
 
@@ -74,6 +84,33 @@ sync. Clean blocks are cached within a bound (16 MiB on x86_64, 1 MiB elsewhere)
 A region's frames are freed only when no process maps it. Mappings that a child inherits through
 `fork` are not counted, so registered regions are kept for the life of the system. This leaks
 memory, but it cannot free memory that is still in use.
+
+### KDE binaries in existing images predate the musl and shim fixes (N-37, N-42)
+
+v0.26.0 fixes the musl syscall-number patch (`faccessat` was delivered as `fchownat`, so a root
+access check changed the file's owner; errors were translated twice) and the ctype table of the
+glibc compatibility shim. These are build inputs: the kwin_wayland, plasmashell and dbus-daemon
+binaries in a KDE rootfs built before v0.26.0 still contain both defects. Rebuild them with the
+`tools/cross/` pipeline (`build-musl.sh` first) before using the KDE session. The BusyBox rootfs is
+not affected, because it uses the native libc.
+
+### Some socket calls still read user buffers directly (N-43)
+
+`send`, `recv`, `sendto`, `recvfrom` and `sendmsg` read the caller's buffer through a raw slice after
+a range check. An unmapped page inside that range kills the process instead of returning EFAULT.
+Socket addresses, lengths and control messages already use the fault-tolerant copies.
+
+### Unix socket options and flags (N-48)
+
+Only the first control message is parsed, SOCK_CLOEXEC and SOCK_NONBLOCK are ignored at creation,
+`setsockopt` on a Unix socket is accepted and ignored, and peers are reported unnamed.
+
+### Package signatures are not FIPS 204 ML-DSA (N-55)
+
+The Dilithium signatures used for packages have the round-3 Dilithium3 sizes (3293-byte signature,
+4000-byte secret key), not FIPS 204 ML-DSA-65's (3309 and 4032). They do not interoperate with
+standard ML-DSA implementations. Moving to the FIPS 204 encoding, verified against NIST known-answer
+tests, is planned for v0.27.
 
 ### Unix sockets cannot pass Unix sockets
 

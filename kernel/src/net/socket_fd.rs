@@ -185,7 +185,8 @@ mod tests {
 
     #[test]
     fn empty_messages_count_against_the_buffer() {
-        let (a, b) = unix_socket::socketpair(UnixSocketType::Stream, 1).unwrap();
+        // Datagram: an empty stream send queues nothing at all.
+        let (a, b) = unix_socket::socketpair(UnixSocketType::Datagram, 1).unwrap();
         let mut sent = 0usize;
         while unix_socket::socket_send(a, b"", None).is_ok() {
             sent += 1;

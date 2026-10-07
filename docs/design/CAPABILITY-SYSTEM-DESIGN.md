@@ -497,12 +497,15 @@ capabilities with spread IDs; x86_64 under KVM, dev build, calibrated TSC):
 
 | Table | avg | max |
 |---|---|---|
-| Two-level L1/L2 (v0.25) | 364 ns | 1000 ns |
-| Hash table (v0.26) | 169 ns | 191 ns |
+| Two-level L1/L2 (v0.25) | 202 ns | not recorded |
+| Hash table (v0.26) | 93 ns | 112 ns |
 
-The 100 ns target is not met in a dev build. The earlier `cap_validate`
-benchmark that reported a pass compared two constants and measured no
-capability code.
+The hash table meets the 100 ns target in a dev build, narrowly; release-build
+figures have not been recorded. These are the calibrated values from
+`docs/PERFORMANCE-REPORT.md`. This page used to show 364 ns and 169 ns, which
+were the same runs converted with the old fixed 2 GHz clock, 1.8x too high.
+The earlier `cap_validate` benchmark that reported a pass compared two
+constants and measured no capability code.
 
 ### Memory Layout
 - Cache-line aligned structures

@@ -285,4 +285,29 @@ mod tests {
         assert_eq!(stats.receive_count, 0);
         assert_eq!(stats.fast_path_percentage, 0);
     }
+
+    /// N-33 pin. Endpoints are created in `ipc::registry`, but the send and
+    /// receive paths `sync_send`/`sync_receive` use (`message_passing::
+    /// send_to_endpoint`/`receive_from_endpoint`) look them up in
+    /// `message_passing::ENDPOINT_REGISTRY`, which nothing ever populates.
+    /// So every send fails with `EndpointNotFound`. Un-ignore this when the
+    /// IPC rework unifies the registries (review of the v0.26.0 stack,
+    /// PR #8).
+    #[cfg(feature = "alloc")]
+    #[test]
+    #[ignore = "N-33: native IPC unreachable; endpoint registries split"]
+    fn endpoint_from_registry_round_trips_through_send_path() {
+        crate::ipc::registry::init();
+        let (id, _cap) = crate::ipc::registry::create_endpoint(ProcessId(1)).unwrap();
+        assert!(
+            crate::ipc::message_passing::ENDPOINT_REGISTRY
+                .get(id)
+                .is_some(),
+            "endpoint {} is missing from the registry the send path uses",
+            id
+        );
+        crate::ipc::message_passing::send_to_endpoint(Message::small(0, 7), id).unwrap();
+        let received = crate::ipc::message_passing::receive_from_endpoint(id, false).unwrap();
+        assert_eq!(received.opcode(), 7);
+    }
 }

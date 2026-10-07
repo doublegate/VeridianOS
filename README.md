@@ -12,7 +12,7 @@
 [![Coverage](https://codecov.io/gh/doublegate/VeridianOS/branch/main/graph/badge.svg)](https://codecov.io/gh/doublegate/VeridianOS)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE-MIT)
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE-APACHE)
-[![Discord](https://img.shields.io/discord/123456789?label=Discord&logo=discord)](https://discord.gg/WGcgrnuVHt)
+[![Discord](https://img.shields.io/badge/Discord-join-5865F2?logo=discord&logoColor=white)](https://discord.gg/WGcgrnuVHt)
 
 </div>
 
@@ -30,7 +30,7 @@ VeridianOS intentionally prioritizes architectural clarity over feature velocity
 
 ### Core
 
-- **Microkernel architecture** -- Minimal trusted computing base with all drivers and services in user space
+- **Microkernel architecture** -- Designed for a minimal trusted computing base with drivers and services in user space; today they run in the kernel (critique C6, see [`docs/KNOWN-LIMITATIONS.md`](docs/KNOWN-LIMITATIONS.md))
 - **Written in Rust** -- Memory safety without garbage collection; strict unsafe code policy
 - **Capability-based security** -- 64-bit unforgeable tokens for all resource access with O(1) lookup, hierarchical delegation, and cascading revocation
 - **IPC** -- Register-sized, kernel-buffered (up to 16 KiB) and shared-region message tiers, capability-checked. Not yet reachable from user programs: native syscalls 0-7 are routed to the Linux compatibility layer (audit N-33, fix planned for v0.28)
@@ -66,7 +66,7 @@ VeridianOS intentionally prioritizes architectural clarity over feature velocity
 ### Security
 
 - **Defense in depth** -- KPTI shadow page tables, KASLR, stack canaries, SMEP/SMAP, retpoline, W^X enforcement, guard pages
-- **Post-quantum cryptography** -- ML-DSA-65 (Dilithium) and ML-KEM (Kyber) alongside ChaCha20-Poly1305, Ed25519, X25519
+- **Post-quantum cryptography** -- Dilithium3 (round-3 sizes, not yet the FIPS 204 ML-DSA-65 encoding; N-55) and Kyber/ML-KEM alongside ChaCha20-Poly1305, Ed25519, X25519
 - **Hardware security** -- TPM 2.0 integration, secure boot verification, IOMMU protection
 - **Mandatory access control** -- Policy parser, RBAC, MLS enforcement, structured audit logging
 
@@ -96,29 +96,36 @@ The design goal is a microkernel that provides only memory management, schedulin
 | Metric | Value |
 | --- | --- |
 | Build | 0 errors, 0 warnings across all 3 architectures |
-| Boot tests | 29/29 (Stage 6 BOOTOK on all architectures) |
-| Host-target unit tests | 4,095 passing |
-| CI pipeline | 11/11 jobs green (GitHub Actions + Codecov) |
-| Unsafe code | 7 justified `static mut`; 99%+ unsafe blocks have SAFETY documentation |
+| Boot tests | 34/34 (Stage 6 BOOTOK on all architectures) |
+| Host-target unit tests | 4,475 passing, 1 ignored on purpose (pins N-47) |
+| In-guest runtime suite | `audit_runtime_test` 27/27 and BusyBox all-pass on the BlockFS root (x86_64) |
+| CI pipeline | GitHub Actions + Codecov; patch coverage of the v0.26.0 changes 75% (gaps tracked) |
+| Unsafe code | 5 justified `static mut` (early serial, boot info, heap, per-CPU data, ready queue); unsafe blocks carry SAFETY comments |
+
+Figures as of v0.26.0 (2026-10-06); sources: [`docs/PERFORMANCE-REPORT.md`](docs/PERFORMANCE-REPORT.md),
+[`CHANGELOG.md`](CHANGELOG.md).
 
 ### Architecture Support
 
 | Architecture | Boot Method | Status |
 | --- | --- | --- |
-| x86_64 | UEFI via OVMF | 100% functional -- 1280x800 UEFI GOP, Ring 3 entry, native compilation |
-| AArch64 | Direct kernel loading | 100% functional -- PL011 UART, signal frames, virtio-MMIO |
-| RISC-V 64 | OpenSBI | 100% functional -- Sv48 page tables, full signal delivery |
+| x86_64 | UEFI via OVMF | Boots to BOOTOK (34/34); 1280x800 UEFI GOP, Ring 3 user programs, native compilation |
+| AArch64 | Direct kernel loading | Boots to BOOTOK (34/34); PL011 UART, virtio-MMIO, BlockFS root. No user mode yet: the MMU is off (N-28) |
+| RISC-V 64 | OpenSBI | Boots to BOOTOK (34/34); Sv48 page tables, virtio-MMIO, BlockFS root. No user mode yet |
 
-### Performance (Achieved)
+### Performance
 
-| Metric | Target | Achieved |
+Measured with the in-kernel `perf` command: x86_64 under KVM on an i9-10850K, dev build, calibrated
+TSC. Method and full tables: [`docs/PERFORMANCE-REPORT.md`](docs/PERFORMANCE-REPORT.md).
+
+| Metric | Target | Measured (avg) |
 | --- | --- | --- |
-| IPC latency | < 1us | not measured: IPC is not reachable from user space yet (N-33); in-kernel helpers only |
-| Context switch | < 10us | < 10us |
-| Memory allocation | < 1us | < 500ns (slab allocator) |
-| Capability lookup | O(1) | O(1) (two-level cache) |
-| Concurrent processes | 1000+ | 1000+ |
-| TLB shootdown | < 5us/CPU | 4.2us/CPU |
+| IPC latency | < 1us | not measured: IPC is not reachable from user space yet (N-33) |
+| Context switch | < 10us | not measured |
+| Frame allocation | < 1us | 62 ns per-CPU cache, 272 ns global allocator |
+| Capability lookup | < 100 ns | 93 ns (hash table) |
+| Concurrent processes | 1000+ | not measured |
+| TLB shootdown | < 5us/CPU | not applicable: one CPU runs, shootdown has no callers yet (MEM-SEC-02, v0.27) |
 
 ---
 
@@ -260,7 +267,7 @@ Helpful diagrams:
 
 ## Unsafe Code Policy
 
-Unsafe Rust is permitted only to enforce higher-level invariants and is strictly controlled. Every unsafe block requires a `// SAFETY:` comment documenting the invariant it upholds. Coverage exceeds 100% (410 comments for 389 unsafe blocks).
+Unsafe Rust is permitted only to enforce higher-level invariants and is strictly controlled. Every unsafe block requires a `// SAFETY:` comment documenting the invariant it upholds (at the last count, 410 such comments for 389 unsafe blocks; some blocks carry more than one).
 
 See [Unsafe Policy](docs/UNSAFE-POLICY.md) for the full policy.
 
@@ -272,7 +279,7 @@ Security is a foundational design principle, not a bolt-on layer:
 
 - **Capability-based access control** -- Fine-grained, unforgeable permissions for all resources
 - **Memory safety** -- Rust ownership guarantees plus KPTI, KASLR, SMEP/SMAP, W^X, and guard pages
-- **Post-quantum cryptography** -- ML-DSA-65, ML-KEM alongside classical algorithms
+- **Post-quantum cryptography** -- Dilithium3 (pre-FIPS 204 sizes, N-55) and Kyber/ML-KEM alongside classical algorithms
 - **Mandatory access control** -- Policy-driven RBAC and MLS enforcement
 - **Hardware security** -- TPM 2.0, secure boot chain, IOMMU isolation
 - **Formal verification** -- Kani proofs for critical kernel invariants; TLA+ specifications for protocol correctness

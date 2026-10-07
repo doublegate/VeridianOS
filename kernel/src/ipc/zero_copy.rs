@@ -66,12 +66,7 @@ pub fn zero_copy_transfer(
         return Err(IpcError::InvalidMemoryRegion);
     }
     let rights = share_rights(from_pid, region).ok_or(IpcError::PermissionDenied)?;
-    // The receiver gets no more than the sender holds.
-    let permission = if rights.contains(crate::cap::memory_integration::MemoryRights::WRITE) {
-        Permission::Write
-    } else {
-        Permission::Read
-    };
+    let permission = transfer_permission(rights).ok_or(IpcError::PermissionDenied)?;
 
     let to_vaddr = match flags.transfer_type {
         TransferType::Share => region.map(to_pid, None, permission)?,
@@ -100,6 +95,24 @@ pub fn zero_copy_transfer(
         .fetch_add(elapsed, Ordering::Relaxed);
 
     Ok(to_vaddr)
+}
+
+/// The mapping permission a receiver gets from the sender's shareable
+/// `rights`: never more than the sender holds. `Permission::Write` implies
+/// read, so it needs both READ and WRITE; READ alone gives `Read`; without
+/// READ there is nothing to grant. EXECUTE is deliberately dropped (an
+/// attenuation). Review of the v0.26.0 stack, PR #12.
+fn transfer_permission(rights: crate::cap::Rights) -> Option<Permission> {
+    use crate::cap::memory_integration::MemoryRights;
+
+    match (
+        rights.contains(MemoryRights::READ),
+        rights.contains(MemoryRights::WRITE),
+    ) {
+        (true, true) => Some(Permission::Write),
+        (true, false) => Some(Permission::Read),
+        (false, _) => None,
+    }
 }
 
 /// The rights `pid` may pass on for `region`: the union of its memory
@@ -248,5 +261,26 @@ mod tests {
         };
 
         assert_eq!(flags.transfer_type, TransferType::Share);
+    }
+
+    /// The receiver gets exactly what the sender holds: READ+WRITE gives
+    /// Write, READ alone gives Read, and no READ gives nothing. SHARE-only
+    /// used to give Read and WRITE without READ gave read+write (review of
+    /// the v0.26.0 stack, PR #12).
+    #[test]
+    fn transfer_permission_never_amplifies() {
+        use crate::cap::memory_integration::MemoryRights as M;
+        let cases = [
+            (M::SHARE, None),
+            (M::SHARE | M::WRITE, None),
+            (M::SHARE | M::EXECUTE, None),
+            (M::SHARE | M::WRITE | M::EXECUTE, None),
+            (M::SHARE | M::READ, Some(Permission::Read)),
+            (M::SHARE | M::READ | M::EXECUTE, Some(Permission::Read)),
+            (M::SHARE | M::READ | M::WRITE, Some(Permission::Write)),
+        ];
+        for (rights, expected) in cases {
+            assert_eq!(transfer_permission(rights), expected, "{:?}", rights);
+        }
     }
 }

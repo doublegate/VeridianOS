@@ -153,6 +153,19 @@ fn serial_try_read_byte() -> Option<u8> {
     }
 }
 
+/// Whether a read, write or terminal ioctl on standard descriptor `fd`
+/// (0-2) with no file-table entry may fall back to the serial console.
+/// Only while it is still the implicit console: after `close(fd)` the
+/// descriptor is closed and must fail with EBADF (review of the v0.26.0
+/// stack, PR #9). Without a process (kernel boot context) the console is
+/// always available.
+fn console_fallback_allowed(fd: usize) -> bool {
+    match process::current_process() {
+        Some(proc) => proc.file_table.lock().is_implicit_console(fd),
+        None => fd < 3,
+    }
+}
+
 /// Maximum buffer size for serial I/O fallback (64 KB).
 /// Prevents unbounded kernel-side loops for large writes.
 const SERIAL_IO_MAX_SIZE: usize = 64 * 1024;
@@ -226,9 +239,12 @@ pub fn sys_open(path: usize, flags: usize, mode: usize) -> SyscallResult {
                 Err(_) => Err(SyscallError::OutOfMemory),
             }
         }
-        Err(_) => {
-            // If O_CREAT is set, create the file in its parent directory
-            if open_flags.create {
+        Err(e) => {
+            // Only a missing name may be created; any other failure (EACCES
+            // from a directory without search permission, ENOTDIR, ELOOP)
+            // is reported as itself. Every failure used to read as ENOENT
+            // (review of the v0.26.0 stack, PR #15).
+            if open_flags.create && is_not_found(&e) {
                 let perms = creation_perms(mode);
                 let (parent_path, name) = split_path(path_str)?;
                 require_dir_write(path_str)?;
@@ -256,7 +272,7 @@ pub fn sys_open(path: usize, flags: usize, mode: usize) -> SyscallResult {
                     Err(_) => Err(SyscallError::ResourceNotFound),
                 }
             } else {
-                Err(SyscallError::ResourceNotFound)
+                Err(map_resolve_err(e))
             }
         }
     }
@@ -327,6 +343,9 @@ pub fn sys_read(fd: usize, buffer: usize, count: usize) -> SyscallResult {
             }
         }
 
+        if !console_fallback_allowed(fd) {
+            return Err(SyscallError::BadFileDescriptor);
+        }
         // Fallback: read from serial UART, respecting terminal state.
         let read_count = count.min(SERIAL_IO_MAX_SIZE);
         // SAFETY: buffer is non-zero (checked above). We limit the size
@@ -510,6 +529,9 @@ pub fn sys_write(fd: usize, buffer: usize, count: usize) -> SyscallResult {
             }
         }
 
+        if !console_fallback_allowed(fd) {
+            return Err(SyscallError::BadFileDescriptor);
+        }
         // Fallback: write directly to serial UART
         let write_count = count.min(SERIAL_IO_MAX_SIZE);
         // SAFETY: buffer is non-zero (checked above). We limit the size
@@ -953,6 +975,15 @@ fn fill_stat(metadata: &crate::fs::Metadata) -> FileStat {
 /// Map a `KernelError` from VFS path resolution to the most appropriate
 /// `SyscallError`, preserving important distinctions like ELOOP and
 /// ENOENT.
+/// Whether a lookup failed because the final name does not exist, the only
+/// failure O_CREAT may turn into a create.
+fn is_not_found(e: &crate::error::KernelError) -> bool {
+    matches!(
+        e,
+        crate::error::KernelError::FsError(crate::error::FsError::NotFound)
+    )
+}
+
 pub(crate) fn map_resolve_err(e: crate::error::KernelError) -> SyscallError {
     match e {
         crate::error::KernelError::FsError(crate::error::FsError::SymlinkLoop) => {
@@ -1184,6 +1215,14 @@ pub fn sys_ioctl(fd: usize, cmd: usize, arg: usize) -> SyscallResult {
     );
     if is_terminal_cmd && fd > 2 {
         return Err(SyscallError::NotATerminal);
+    }
+    // A closed standard descriptor is not a terminal; it is not open at all.
+    if is_terminal_cmd {
+        let has_entry =
+            process::current_process().is_some_and(|p| p.file_table.lock().get(fd).is_some());
+        if !has_entry && !console_fallback_allowed(fd) {
+            return Err(SyscallError::BadFileDescriptor);
+        }
     }
 
     match cmd {
@@ -1474,12 +1513,21 @@ fn rename_entry(old: &str, new: &str) -> SyscallResult {
     }
 
     let vfs = vfs()?;
-    if vfs.mount_point_of(old) != vfs.mount_point_of(new) {
+    let (old_parent_path, old_name) = split_path(old)?;
+    let (new_parent_path, new_name) = split_path(new)?;
+    // Compared on canonical parents: the parents are resolved with symlinks
+    // followed below, so a string comparison let a symlink into another
+    // mount through (review of the v0.26.0 stack, PR #11).
+    let old_mount = vfs
+        .entry_mount_point(&old_parent_path, &old_name)
+        .map_err(map_resolve_err)?;
+    let new_mount = vfs
+        .entry_mount_point(&new_parent_path, &new_name)
+        .map_err(map_resolve_err)?;
+    if old_mount != new_mount {
         return Err(SyscallError::CrossDevice);
     }
     let src = vfs.resolve_path_no_follow(old).map_err(map_resolve_err)?;
-    let (old_parent_path, old_name) = split_path(old)?;
-    let (new_parent_path, new_name) = split_path(new)?;
 
     if src.node_type() == crate::fs::NodeType::Directory {
         // A directory cannot move into its own subtree (POSIX: EINVAL).
@@ -1966,7 +2014,7 @@ pub fn sys_pipe2(pipe_fds_ptr: usize, flags: usize) -> SyscallResult {
         .open_with_flags(alloc::sync::Arc::new(write_file), cloexec)
         .map_err(|_| {
             // Clean up read fd on failure
-            let _ = file_table.close(read_fd);
+            file_table.close_on_rollback(read_fd, "pipe");
             SyscallError::OutOfMemory
         })?;
 
@@ -2609,9 +2657,9 @@ pub fn sys_openat(dirfd: usize, path_ptr: usize, flags: usize, mode: usize) -> S
                 Err(_) => Err(SyscallError::OutOfMemory),
             }
         }
-        Err(_) => {
-            // If O_CREAT, create the file
-            if open_flags.create {
+        Err(e) => {
+            // As in sys_open: create only a missing name, report the rest.
+            if open_flags.create && is_not_found(&e) {
                 let perms = creation_perms(mode);
                 let (parent_path, name) = split_path(&abs_path)?;
                 require_dir_write(&abs_path)?;
@@ -2636,7 +2684,7 @@ pub fn sys_openat(dirfd: usize, path_ptr: usize, flags: usize, mode: usize) -> S
                     Err(_) => Err(SyscallError::ResourceNotFound),
                 }
             } else {
-                Err(SyscallError::ResourceNotFound)
+                Err(map_resolve_err(e))
             }
         }
     }

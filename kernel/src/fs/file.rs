@@ -350,6 +350,14 @@ impl FileTable {
             .compare_exchange(fd, fd + 1, Ordering::AcqRel, Ordering::Relaxed);
     }
 
+    /// Whether `fd` (0-2) is still the implicit serial console: it has no
+    /// table entry and has not been closed or replaced. A standard
+    /// descriptor that was closed is NOT the console; I/O on it must fail
+    /// with EBADF instead of falling back to serial.
+    pub fn is_implicit_console(&self, fd: FileDescriptor) -> bool {
+        fd < 3 && self.console_fds.load(Ordering::Acquire) & (1u8 << fd) != 0
+    }
+
     /// `fd` now refers to something other than the implicit console.
     fn release_console_fd(&self, fd: FileDescriptor) {
         if fd < 3 {
@@ -430,6 +438,16 @@ impl FileTable {
             .get(fd)?
             .as_ref()
             .map(|entry| (entry.file.clone(), entry.cloexec))
+    }
+
+    /// Close an fd this syscall installed a moment ago, while undoing a
+    /// failed operation. A failure means a broken invariant (the fd was
+    /// just created), so it is logged rather than discarded with `let _`
+    /// (agy review of the v0.26.0 stack, PR #15).
+    pub fn close_on_rollback(&self, fd: FileDescriptor, context: &str) {
+        if let Err(e) = self.close(fd) {
+            crate::println!("[FD] {}: rolling back fd {} failed: {:?}", context, fd, e);
+        }
     }
 
     /// Close a file descriptor
@@ -753,6 +771,19 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn closed_standard_fd_is_no_longer_the_console() {
+        // After close(1), I/O on fd 1 must fail (EBADF) rather than fall
+        // back to the serial console (review of the v0.26.0 stack, PR #9).
+        let table = FileTable::new();
+        assert!((0..3).all(|fd| table.is_implicit_console(fd)));
+        table.close(1).unwrap();
+        assert!(!table.is_implicit_console(1));
+        assert!(table.is_implicit_console(0) && table.is_implicit_console(2));
+        assert!(table.close(1).is_err(), "closing it again is EBADF");
+        assert!(!table.is_implicit_console(3));
     }
 
     #[test]

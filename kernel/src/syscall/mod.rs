@@ -116,15 +116,21 @@ fn validate_user_string_ptr(ptr: usize) -> Result<(), SyscallError> {
 }
 
 /// The sixth syscall argument, which the 5-argument handlers do not receive.
-/// On x86_64 it is r9, saved in the syscall frame; 0 elsewhere.
-fn syscall_arg6() -> usize {
-    #[cfg(target_arch = "x86_64")]
+/// On x86_64 it is r9, saved in the syscall frame. Elsewhere it is not
+/// captured yet, and callers that need it must fail rather than act on a
+/// made-up 0: FUTEX_WAKE_OP would store 0 to `*uaddr2` and FUTEX_WAIT_BITSET
+/// would wait on an empty bitset (review of the v0.26.0 stack, PR #9). Only
+/// x86_64 has user mode today, so this is not yet reachable elsewhere.
+fn syscall_arg6() -> Result<usize, SyscallError> {
+    #[cfg(all(target_arch = "x86_64", target_os = "none"))]
     {
-        crate::arch::x86_64::syscall::get_syscall_frame().map_or(0, |frame| frame.r9 as usize)
+        crate::arch::x86_64::syscall::get_syscall_frame()
+            .map(|frame| frame.r9 as usize)
+            .ok_or(SyscallError::NotImplemented)
     }
-    #[cfg(not(target_arch = "x86_64"))]
+    #[cfg(not(all(target_arch = "x86_64", target_os = "none")))]
     {
-        0
+        Err(SyscallError::NotImplemented)
     }
 }
 
@@ -632,6 +638,8 @@ pub enum SyscallError {
     SymlinkLoop = -40,
     /// Socket operation on a descriptor that is not a socket (ENOTSOCK).
     NotASocket = -88,
+    /// Unknown or unsupported socket option (ENOPROTOOPT, errno 92).
+    ProtocolOptionNotAvailable = -92,
 }
 
 impl From<IpcError> for SyscallError {
@@ -752,7 +760,10 @@ pub extern "C" fn syscall_handler(
     // Rate limiting check
     if !SYSCALL_RATE_LIMITER.check() {
         SYSCALL_ERRORS.fetch_add(1, Ordering::Relaxed);
-        return SyscallError::WouldBlock as i32 as isize;
+        // Through the shared conversion like every other error: the raw
+        // VeridianOS value (-6) is not EAGAIN (-11) to musl (review of the
+        // v0.26.0 stack, PR #15).
+        return linux_compat::to_linux_errno(SyscallError::WouldBlock);
     }
 
     // Get caller PID for audit logging
@@ -1370,7 +1381,7 @@ fn handle_syscall(
         Syscall::SocketClose => sys_socket_close(arg1),
         // Linux ABI: socketpair(domain, type, protocol, sv[2])
         // arg1=domain, arg2=type, arg3=protocol, arg4=sv pointer
-        Syscall::SocketPair => sys_socket_pair(arg1, arg2, arg4),
+        Syscall::SocketPair => sys_socket_pair(arg1, arg2, arg3, arg4),
 
         // Graphics / framebuffer (Phase 6)
         Syscall::FbGetInfo => sys_fb_get_info(arg1),
@@ -1395,7 +1406,7 @@ fn handle_syscall(
         Syscall::NetGetSockName => sys_net_getsockname(arg1, arg2, arg3),
         Syscall::NetGetPeerName => sys_net_getpeername(arg1, arg2, arg3),
         Syscall::NetSetSockOpt => sys_net_setsockopt(arg1, arg2, arg3, arg4, arg5),
-        Syscall::NetGetSockOpt => sys_net_getsockopt(arg1, arg2, arg3, arg4),
+        Syscall::NetGetSockOpt => sys_net_getsockopt(arg1, arg2, arg3, arg4, arg5),
 
         // Resource limits (Phase 6.5)
         Syscall::GetRlimit => memory::sys_getrlimit(arg1, arg2),
@@ -1427,29 +1438,25 @@ fn handle_syscall(
             let fd = arg3 as i32;
             let event_ptr = arg4;
 
-            // Debug: trace epoll_ctl args
-            #[cfg(target_arch = "x86_64")]
-            unsafe {
-                crate::arch::x86_64::idt::raw_serial_str(b"[EPOLL_CTL] epfd=");
-                crate::arch::x86_64::idt::raw_serial_hex(epoll_fd as u64);
-                crate::arch::x86_64::idt::raw_serial_str(b" op=");
-                crate::arch::x86_64::idt::raw_serial_hex(op as u64);
-                crate::arch::x86_64::idt::raw_serial_str(b" fd=");
-                crate::arch::x86_64::idt::raw_serial_hex(fd as u64);
-                crate::arch::x86_64::idt::raw_serial_str(b" ev=");
-                crate::arch::x86_64::idt::raw_serial_hex(event_ptr as u64);
-                crate::arch::x86_64::idt::raw_serial_str(b"\n");
-            }
-
             let epoll_id = resolve_epoll_id(epoll_fd)?;
+            // struct epoll_event is packed (12 bytes on x86_64): copied
+            // field by field through the fault-tolerant reader rather than
+            // borrowed from user memory (review of the v0.26.0 stack).
             let event = if event_ptr != 0 {
-                validate_user_ptr_typed::<crate::net::epoll::EpollEvent>(event_ptr)?;
-                // SAFETY: event_ptr validated as aligned, non-null, and in user-space above.
-                Some(unsafe { &*(event_ptr as *const crate::net::epoll::EpollEvent) })
+                let mut raw = [0u8; 12];
+                userspace::read_user_bytes(event_ptr, &mut raw)?;
+                let mut events = [0u8; 4];
+                let mut data = [0u8; 8];
+                events.copy_from_slice(&raw[..4]);
+                data.copy_from_slice(&raw[4..]);
+                Some(crate::net::epoll::EpollEvent {
+                    events: u32::from_ne_bytes(events),
+                    data: u64::from_ne_bytes(data),
+                })
             } else {
                 None
             };
-            crate::net::epoll::epoll_ctl(epoll_id, op, fd, event)
+            crate::net::epoll::epoll_ctl(epoll_id, op, fd, event.as_ref())
                 .map(|_| 0)
                 .map_err(|_| SyscallError::InvalidArgument)
         }
@@ -1520,10 +1527,10 @@ fn handle_syscall(
                 3 => futex::sys_futex_requeue(arg1, arg3, arg5, 0).map(|v| v as usize),
                 // FUTEX_WAKE_OP(uaddr, val, val2 = arg4, uaddr2, encoded op = val3).
                 // Passing 0 for the encoded op meant "*uaddr2 = 0" on every call.
-                5 => futex::sys_futex_wake_op(arg1, arg3, arg5, arg4, syscall_arg6())
+                5 => futex::sys_futex_wake_op(arg1, arg3, arg5, arg4, syscall_arg6()?)
                     .map(|v| v as usize),
                 // FUTEX_WAIT_BITSET: the bitset is val3 (arg6).
-                9 => futex::sys_futex_wait(arg1, arg3 as u32, arg4, syscall_arg6(), arg2)
+                9 => futex::sys_futex_wait(arg1, arg3 as u32, arg4, syscall_arg6()?, arg2)
                     .map(|v| v as usize),
                 _ => Err(SyscallError::InvalidArgument),
             }
@@ -2245,11 +2252,13 @@ fn sys_sendmsg(socket_fd: usize, msghdr_ptr: usize, _flags: usize) -> SyscallRes
 
     // Parse ancillary data for SCM_RIGHTS: the passed fds must be open in
     // the sender's table, and what travels is the open files themselves.
-    let rights = if control_len >= 16 && control_ptr != 0 {
+    let rights = if control_len >= CMSGHDR_SIZE && control_ptr != 0 {
         validate_user_buffer(control_ptr, control_len)?;
-        match parse_scm_rights(control_ptr, control_len) {
-            Some(fds) => Some(files_for_fds(&fds)?),
-            None => None,
+        let fds = parse_scm_rights(control_ptr, control_len)?;
+        if fds.is_empty() {
+            None
+        } else {
+            Some(files_for_fds(&fds)?)
         }
     } else {
         None
@@ -2262,15 +2271,21 @@ fn sys_sendmsg(socket_fd: usize, msghdr_ptr: usize, _flags: usize) -> SyscallRes
     })?
 }
 
-/// Look up each fd in the caller's table (EBADF if any is not open).
-fn files_for_fds(fds: &[u32]) -> Result<crate::net::unix_socket::ScmRights, SyscallError> {
+/// An fd from an SCM_RIGHTS array as a table index; a negative fd is EBADF.
+fn scm_fd_index(fd: i32) -> Result<usize, SyscallError> {
+    usize::try_from(fd).map_err(|_| SyscallError::BadFileDescriptor)
+}
+
+/// Look up each fd in the caller's table (EBADF if any is negative or not
+/// open).
+fn files_for_fds(fds: &[i32]) -> Result<crate::net::unix_socket::ScmRights, SyscallError> {
     let process = crate::process::current_process().ok_or(SyscallError::InvalidState)?;
     let table = process.file_table.lock();
     let files = fds
         .iter()
         .map(|&fd| {
             table
-                .get(fd as usize)
+                .get(scm_fd_index(fd)?)
                 .ok_or(SyscallError::BadFileDescriptor)
         })
         .collect::<Result<alloc::vec::Vec<_>, _>>()?;
@@ -2298,46 +2313,54 @@ const SCM_RIGHTS_TYPE: i32 = 1;
 /// Most fds accepted in one SCM_RIGHTS message (Linux: SCM_MAX_FD = 253).
 const SCM_MAX_FDS: usize = 16;
 
-/// Parse the fd array of an SCM_RIGHTS control message. `control_ptr` must
-/// have been validated for `control_len` bytes; `cmsg_len` comes from user
-/// memory and is checked against that length before anything past the
-/// header is read.
-fn parse_scm_rights(control_ptr: usize, control_len: usize) -> Option<alloc::vec::Vec<u32>> {
+/// Parse the fd array of the first control message at `control_ptr`
+/// (`control_len` bytes of user memory). `cmsg_len` comes from user memory
+/// and is checked against `control_len` before anything past the header is
+/// read.
+///
+/// Mirrors Linux `__scm_send`/`scm_fp_copy` (review of the v0.26.0 stack,
+/// PR #10): a `cmsg_len` shorter than the header or past the buffer is
+/// EINVAL; a message for another level is skipped (empty result); an
+/// unsupported SOL_SOCKET type (including SCM_CREDENTIALS, not modelled) is
+/// EINVAL; more than `SCM_MAX_FDS` fds is EINVAL. Negative fds are returned
+/// as-is so that `files_for_fds` fails the send with EBADF -- they used to
+/// be dropped silently. An empty result means "no rights to pass".
+fn parse_scm_rights(
+    control_ptr: usize,
+    control_len: usize,
+) -> Result<alloc::vec::Vec<i32>, SyscallError> {
     if control_len < CMSGHDR_SIZE {
-        return None;
+        return Err(SyscallError::InvalidArgument);
     }
-    // SAFETY: control_ptr was validated by the caller for control_len >= 16
-    // bytes; user memory has no alignment guarantee, hence read_unaligned.
-    let (cmsg_len, level, kind) = unsafe {
-        (
-            core::ptr::read_unaligned(control_ptr as *const u64) as usize,
-            core::ptr::read_unaligned((control_ptr + 8) as *const i32),
-            core::ptr::read_unaligned((control_ptr + 12) as *const i32),
-        )
-    };
-    if level != SOL_SOCKET_LEVEL || kind != SCM_RIGHTS_TYPE {
-        return None;
-    }
+    let mut hdr = [0u8; CMSGHDR_SIZE];
+    userspace::read_user_bytes(control_ptr, &mut hdr)?;
+    let cmsg_len = u64::from_ne_bytes([
+        hdr[0], hdr[1], hdr[2], hdr[3], hdr[4], hdr[5], hdr[6], hdr[7],
+    ]);
+    let level = i32::from_ne_bytes([hdr[8], hdr[9], hdr[10], hdr[11]]);
+    let kind = i32::from_ne_bytes([hdr[12], hdr[13], hdr[14], hdr[15]]);
+    let cmsg_len = usize::try_from(cmsg_len).map_err(|_| SyscallError::InvalidArgument)?;
     if cmsg_len < CMSGHDR_SIZE || cmsg_len > control_len {
-        return None;
+        return Err(SyscallError::InvalidArgument);
+    }
+    if level != SOL_SOCKET_LEVEL {
+        return Ok(alloc::vec::Vec::new());
+    }
+    if kind != SCM_RIGHTS_TYPE {
+        return Err(SyscallError::InvalidArgument);
     }
     let fd_count = (cmsg_len - CMSGHDR_SIZE) / 4;
-    if fd_count == 0 || fd_count > SCM_MAX_FDS {
-        return None;
+    if fd_count > SCM_MAX_FDS {
+        return Err(SyscallError::InvalidArgument);
     }
-    let fds: alloc::vec::Vec<u32> = (0..fd_count)
-        .map(|i| {
-            // SAFETY: CMSGHDR_SIZE + 4 * i + 4 <= cmsg_len <= control_len.
-            unsafe { core::ptr::read_unaligned((control_ptr + CMSGHDR_SIZE + 4 * i) as *const i32) }
-        })
-        .filter(|&fd| fd >= 0)
-        .map(|fd| fd as u32)
-        .collect();
-    if fds.is_empty() {
-        None
-    } else {
-        Some(fds)
-    }
+    let mut raw = [0u8; 4 * SCM_MAX_FDS];
+    let raw = &mut raw[..4 * fd_count];
+    // CMSGHDR_SIZE + 4 * fd_count <= cmsg_len <= control_len.
+    userspace::read_user_bytes(control_ptr + CMSGHDR_SIZE, raw)?;
+    Ok(raw
+        .chunks_exact(4)
+        .map(|c| i32::from_ne_bytes([c[0], c[1], c[2], c[3]]))
+        .collect())
 }
 
 /// recvmsg syscall -- receives data with optional ancillary data (SCM_RIGHTS).
@@ -2410,7 +2433,10 @@ fn sys_recvmsg(socket_fd: usize, msghdr_ptr: usize, _flags: usize) -> SyscallRes
     // many as the control buffer can report; the rest are dropped (closed),
     // as Linux does when it truncates the control message.
     let mut wrote_control = false;
+    let mut sent_fds = 0usize;
+    let mut delivered_fds = 0usize;
     if let Some(scm) = rights {
+        sent_fds = scm.files.len();
         let room = if control_ptr != 0 && control_len >= CMSGHDR_SIZE {
             (control_len - CMSGHDR_SIZE) / 4
         } else {
@@ -2427,10 +2453,12 @@ fn sys_recvmsg(socket_fd: usize, msghdr_ptr: usize, _flags: usize) -> SyscallRes
         }
         if !fds.is_empty() {
             wrote_control = write_scm_rights(control_ptr, control_len, &fds, msghdr_ptr);
-            if !wrote_control {
+            if wrote_control {
+                delivered_fds = fds.len();
+            } else {
                 // The receiver could never learn these fds: undo.
                 for &fd in &fds {
-                    let _ = table.close(fd as usize);
+                    table.close_on_rollback(fd as usize, "recvmsg");
                 }
             }
         }
@@ -2440,8 +2468,30 @@ fn sys_recvmsg(socket_fd: usize, msghdr_ptr: usize, _flags: usize) -> SyscallRes
         // stale bytes. SAFETY: msghdr_ptr was validated for 56 bytes above.
         unsafe { core::ptr::write_unaligned((msghdr_ptr as *mut usize).add(5), 0) };
     }
+    // msg_flags is always written, so the caller never reads back what it
+    // left there, and carries MSG_CTRUNC when fds were dropped (review of
+    // the v0.26.0 stack, PR #10).
+    userspace::write_user::<i32>(
+        msghdr_ptr + MSGHDR_FLAGS_OFFSET,
+        recvmsg_flags(sent_fds, delivered_fds),
+    )?;
 
     Ok(received)
+}
+
+/// `MSG_CTRUNC`: control data was discarded for lack of room.
+const MSG_CTRUNC: i32 = 0x8;
+/// Offset of `int msg_flags` in the LP64 `struct msghdr`.
+const MSGHDR_FLAGS_OFFSET: usize = 48;
+
+/// `msg_flags` for a recvmsg that received `sent` passed fds and could
+/// deliver `delivered` of them.
+fn recvmsg_flags(sent: usize, delivered: usize) -> i32 {
+    if delivered < sent {
+        MSG_CTRUNC
+    } else {
+        0
+    }
 }
 
 /// Write SCM_RIGHTS fds into the user's msg_control buffer as one cmsghdr
@@ -2454,26 +2504,23 @@ fn write_scm_rights(
     msghdr_ptr: usize,
 ) -> bool {
     let needed = CMSGHDR_SIZE + fds.len() * 4;
-    if needed > control_len || validate_user_buffer(control_ptr, needed).is_err() {
+    if needed > control_len {
         return false;
     }
-    // SAFETY: [control_ptr, control_ptr + needed) was validated as user
-    // memory just above; unaligned writes because user memory has no
-    // alignment guarantee.
-    unsafe {
-        core::ptr::write_unaligned(control_ptr as *mut u64, needed as u64);
-        core::ptr::write_unaligned((control_ptr + 8) as *mut i32, SOL_SOCKET_LEVEL);
-        core::ptr::write_unaligned((control_ptr + 12) as *mut i32, SCM_RIGHTS_TYPE);
-        for (i, &fd) in fds.iter().enumerate() {
-            core::ptr::write_unaligned((control_ptr + CMSGHDR_SIZE + 4 * i) as *mut i32, fd as i32);
-        }
+    // Built in a kernel buffer and copied out with the fault-tolerant
+    // routine; the raw unaligned stores this replaces faulted in the kernel
+    // on an unmapped page (agy review of the v0.26.0 stack, PR #10).
+    let mut cmsg = alloc::vec::Vec::with_capacity(needed);
+    cmsg.extend_from_slice(&(needed as u64).to_ne_bytes());
+    cmsg.extend_from_slice(&SOL_SOCKET_LEVEL.to_ne_bytes());
+    cmsg.extend_from_slice(&SCM_RIGHTS_TYPE.to_ne_bytes());
+    for &fd in fds {
+        cmsg.extend_from_slice(&(fd as i32).to_ne_bytes());
     }
-    // SAFETY: msghdr_ptr was validated by the caller for the 56-byte
-    // msghdr; msg_controllen is the sixth usize-sized field.
-    unsafe {
-        core::ptr::write_unaligned((msghdr_ptr as *mut usize).add(5), needed);
-    }
-    true
+    // msg_controllen is the sixth usize-sized field of the 56-byte msghdr.
+    userspace::write_user_bytes(control_ptr, &cmsg).is_ok()
+        && userspace::write_user::<usize>(msghdr_ptr + 5 * core::mem::size_of::<usize>(), needed)
+            .is_ok()
 }
 
 /// Build a message from `len` bytes of user memory at `ptr`, choosing the
@@ -2554,7 +2601,12 @@ fn message_to_user(msg: &Message, buf: usize, cap: usize) -> SyscallResult {
             }
             userspace::write_user_bytes(buf, pod_bytes(&m.header))?;
             let fits = m.payload.len().min(cap - HEADER);
-            userspace::write_user_bytes(buf + HEADER, &m.payload[..fits])?;
+            // The header write above already validated `buf` as user memory,
+            // but the sum is still checked rather than trusted.
+            let payload_at = buf
+                .checked_add(HEADER)
+                .ok_or(SyscallError::InvalidPointer)?;
+            userspace::write_user_bytes(payload_at, &m.payload[..fits])?;
             Ok(HEADER + m.payload.len())
         }
         Message::Large(m) => {
@@ -2798,7 +2850,15 @@ fn sys_ipc_share_memory(
         Ok(cap) => Ok(cap.to_u64() as usize),
         Err(_) => {
             // Nobody can reach the region: drop it (frees its frames).
-            let _ = shared_memory::unregister_region(base as u64);
+            if let Err(e) = shared_memory::unregister_region(base as u64) {
+                // It was registered just above; failing here means the
+                // registry changed underneath us.
+                crate::println!(
+                    "[IPC] share: unregistering region {:#x} failed: {:?}",
+                    base,
+                    e
+                );
+            }
             Err(SyscallError::OutOfMemory)
         }
     }
@@ -3158,24 +3218,49 @@ impl TryFrom<usize> for Syscall {
 
 /// Read a null-terminated name string from user space (for shm/socket paths).
 fn read_user_name(ptr: usize, max_len: usize) -> Result<alloc::string::String, SyscallError> {
-    validate_user_string_ptr(ptr)?;
-    // SAFETY: ptr was validated as non-null and in user-space.
-    let bytes = unsafe {
-        let mut buf = alloc::vec::Vec::new();
-        let mut p = ptr as *const u8;
-        for _ in 0..max_len {
-            let byte = *p;
-            if byte == 0 {
-                break;
-            }
-            buf.push(byte);
-            p = p.add(1);
-        }
-        buf
-    };
-    core::str::from_utf8(&bytes)
+    userspace::read_user_cstr(ptr, max_len)
+}
+
+/// `sizeof(struct sockaddr_un)`: a 2-byte family and a 108-byte path.
+const SOCKADDR_UN_LEN: usize = 110;
+
+/// The path in a `struct sockaddr_un` of `addr_len` bytes.
+///
+/// `sun_path` starts after the 2-byte family; it ends at the first NUL or
+/// at `addr_len`, whichever is first (Linux accepts both). The family must
+/// be AF_UNIX. Abstract names (leading NUL) and unnamed addresses are not
+/// supported and are rejected. `bind` used to read the name from offset 0,
+/// so every bind registered the family bytes as the path (review of the
+/// v0.26.0 stack, PR #14).
+fn parse_sockaddr_un(raw: &[u8]) -> Result<alloc::string::String, SyscallError> {
+    if raw.len() <= 2 || raw.len() > SOCKADDR_UN_LEN {
+        return Err(SyscallError::InvalidArgument);
+    }
+    if usize::from(u16::from_ne_bytes([raw[0], raw[1]])) != AF_UNIX {
+        return Err(SyscallError::InvalidArgument);
+    }
+    let path = &raw[2..];
+    let end = path.iter().position(|&b| b == 0).unwrap_or(path.len());
+    if end == 0 {
+        return Err(SyscallError::InvalidArgument);
+    }
+    core::str::from_utf8(&path[..end])
         .map(alloc::string::String::from)
         .map_err(|_| SyscallError::InvalidArgument)
+}
+
+/// Copy a `struct sockaddr_un` of `addr_len` bytes from user memory and
+/// return its path.
+fn read_sockaddr_un(
+    addr_ptr: usize,
+    addr_len: usize,
+) -> Result<alloc::string::String, SyscallError> {
+    if addr_len <= 2 || addr_len > SOCKADDR_UN_LEN {
+        return Err(SyscallError::InvalidArgument);
+    }
+    let mut raw = [0u8; SOCKADDR_UN_LEN];
+    userspace::read_user_bytes(addr_ptr, &mut raw[..addr_len])?;
+    parse_sockaddr_un(&raw[..addr_len])
 }
 
 /// SYS_SHM_OPEN: Create or open a named shared memory object.
@@ -3358,7 +3443,7 @@ fn sys_socket_create(domain: usize, sock_type: usize) -> SyscallResult {
 }
 
 /// SYS_SOCKET_BIND: Bind a socket to an address/path.
-fn sys_socket_bind(fd: usize, addr_ptr: usize, _addr_len: usize) -> SyscallResult {
+fn sys_socket_bind(fd: usize, addr_ptr: usize, addr_len: usize) -> SyscallResult {
     match with_socket_fd(fd, SocketNode::handle)? {
         SocketHandle::Inet(id) => {
             let addr = read_inet_addr(addr_ptr)?;
@@ -3368,7 +3453,7 @@ fn sys_socket_bind(fd: usize, addr_ptr: usize, _addr_len: usize) -> SyscallResul
             Ok(0)
         }
         SocketHandle::Unix(id) => {
-            let path = read_user_name(addr_ptr, crate::net::unix_socket::UNIX_PATH_MAX)?;
+            let path = read_sockaddr_un(addr_ptr, addr_len)?;
             crate::net::unix_socket::socket_bind(id, &path)
                 .map(|()| 0)
                 .map_err(|_| SyscallError::InvalidState)
@@ -3406,10 +3491,7 @@ fn sys_socket_connect(fd: usize, addr_ptr: usize, addr_len: usize) -> SyscallRes
             Ok(0)
         }
         SocketHandle::Unix(id) => {
-            // addr_len includes the sa_family, so path_len = addr_len - 2.
-            let min_len = if addr_len > 2 { addr_len } else { 4 };
-            validate_user_buffer(addr_ptr, min_len)?;
-            let path = read_user_name(addr_ptr + 2, crate::net::unix_socket::UNIX_PATH_MAX)?;
+            let path = read_sockaddr_un(addr_ptr, addr_len)?;
             crate::net::unix_socket::socket_connect(id, &path)
                 .map(|()| 0)
                 // ENOENT: no socket bound at that path.
@@ -3421,8 +3503,10 @@ fn sys_socket_connect(fd: usize, addr_ptr: usize, addr_len: usize) -> SyscallRes
 /// SYS_SOCKET_ACCEPT: Accept a pending connection and return an fd for it.
 ///
 /// Linux ABI: `accept4(fd, addr, addrlen_ptr, flags)`.
-/// `addr_ptr` and `addrlen_ptr` are optional (may be 0). When non-null, the
-/// peer address is written back in sockaddr_in format.
+/// `addr_ptr` is optional (may be 0). When non-null, `addrlen_ptr` must
+/// point at the buffer size: at most that many bytes of the peer address
+/// (sockaddr_in, or an unnamed sockaddr_un for Unix sockets) are written,
+/// and its full length is stored back in `*addrlen_ptr`.
 fn sys_socket_accept(fd: usize, addr_ptr: usize, addrlen_ptr: usize) -> SyscallResult {
     match with_socket_fd(fd, SocketNode::handle)? {
         SocketHandle::Inet(id) => {
@@ -3439,24 +3523,56 @@ fn sys_socket_accept(fd: usize, addr_ptr: usize, addrlen_ptr: usize) -> SyscallR
             )
             .map_err(|_| SyscallError::OutOfMemory)?;
             let new_fd = install_socket(SocketHandle::Inet(new_id))?;
-
-            if addr_ptr != 0 && addrlen_ptr != 0 {
-                let _ = network_ext_syscalls::write_sockaddr(addr_ptr, &remote);
-                if validate_user_buffer(addrlen_ptr, 4).is_ok() {
-                    // SAFETY: addrlen_ptr validated above.
-                    unsafe {
-                        *(addrlen_ptr as *mut u32) = 16; // sizeof(sockaddr_in)
-                    }
-                }
-            }
-            Ok(new_fd)
+            let peer = network_ext_syscalls::sockaddr_in_bytes(&remote);
+            finish_accept(new_fd, addr_ptr, addrlen_ptr, &peer)
         }
         SocketHandle::Unix(id) => {
             let (new_id, _connecting_id) =
                 crate::net::unix_socket::socket_accept(id).map_err(socket_err)?;
-            install_socket(SocketHandle::Unix(new_id))
+            let new_fd = install_socket(SocketHandle::Unix(new_id))?;
+            // The peer of an accepted Unix connection is reported unnamed:
+            // sun_family only, length 2 (bound client paths are not
+            // tracked).
+            finish_accept(
+                new_fd,
+                addr_ptr,
+                addrlen_ptr,
+                &(AF_UNIX as u16).to_ne_bytes(),
+            )
         }
     }
+}
+
+/// Report the peer address of an accepted connection and return its fd.
+/// If the address cannot be written the caller would never learn about
+/// the fd, so it is closed and the error returned, as Linux does.
+fn finish_accept(new_fd: usize, addr_ptr: usize, addrlen_ptr: usize, peer: &[u8]) -> SyscallResult {
+    if let Err(e) = copy_sockaddr_out(addr_ptr, addrlen_ptr, peer) {
+        if let Some(p) = crate::process::current_process() {
+            p.file_table.lock().close_on_rollback(new_fd, "accept");
+        }
+        return Err(e);
+    }
+    Ok(new_fd)
+}
+
+/// Copy a socket address out to user space with Linux `move_addr_to_user`
+/// semantics: read `*addrlen` (a socklen_t, negative is EINVAL), copy at
+/// most that many bytes of `addr`, then store the full length so the caller
+/// can see truncation. `addr_ptr == 0` means the caller wants no address.
+///
+/// accept used to write a whole 16-byte sockaddr_in regardless of the
+/// caller's buffer, overflowing a smaller one, and nothing for a Unix
+/// socket (review of the v0.26.0 stack, PR #10). Both pointers go through
+/// the fault-handled user-copy routines, so neither needs to be aligned.
+fn copy_sockaddr_out(addr_ptr: usize, addrlen_ptr: usize, addr: &[u8]) -> Result<(), SyscallError> {
+    if addr_ptr == 0 {
+        return Ok(());
+    }
+    let len = userspace::read_user::<u32>(addrlen_ptr)? as i32;
+    let len = usize::try_from(len).map_err(|_| SyscallError::InvalidArgument)?;
+    userspace::write_user_bytes(addr_ptr, &addr[..len.min(addr.len())])?;
+    userspace::write_user::<u32>(addrlen_ptr, addr.len() as u32)
 }
 
 /// SYS_SOCKET_SEND: Send data on a connected socket.
@@ -3493,15 +3609,37 @@ fn sys_socket_close(fd: usize) -> SyscallResult {
     result
 }
 
+/// The Unix socket type for `socketpair(domain, sock_type, protocol, sv)`:
+/// AF_UNIX only, protocol 0 or PF_UNIX (as Linux accepts), and the type
+/// mapped like socket() does. The type and protocol used to be ignored, so
+/// a SOCK_DGRAM pair silently got stream semantics (review of the v0.26.0
+/// stack, PR #10). SOCK_CLOEXEC / SOCK_NONBLOCK are masked off and not yet
+/// honoured, as for socket().
+fn socketpair_type(
+    domain: usize,
+    sock_type: usize,
+    protocol: usize,
+) -> Result<crate::net::unix_socket::UnixSocketType, SyscallError> {
+    if domain != AF_UNIX || (protocol != 0 && protocol != AF_UNIX) {
+        return Err(SyscallError::InvalidArgument);
+    }
+    to_unix_socket_type(sock_type)
+}
+
 /// SYS_SOCKET_PAIR: Create a connected socket pair.
 ///
 /// # Arguments
 /// - domain: AF_UNIX only
+/// - sock_type: SOCK_STREAM or SOCK_DGRAM (plus flags)
+/// - protocol: 0 or PF_UNIX
 /// - result_ptr: user-space pointer to `int sv[2]`
-fn sys_socket_pair(domain: usize, _sock_type: usize, result_ptr: usize) -> SyscallResult {
-    if domain != AF_UNIX {
-        return Err(SyscallError::InvalidArgument);
-    }
+fn sys_socket_pair(
+    domain: usize,
+    sock_type: usize,
+    protocol: usize,
+    result_ptr: usize,
+) -> SyscallResult {
+    let utype = socketpair_type(domain, sock_type, protocol)?;
     // Linux writes int sv[2] (two i32 values = 8 bytes).
     validate_user_buffer(result_ptr, 2 * core::mem::size_of::<i32>())?;
 
@@ -3510,27 +3648,30 @@ fn sys_socket_pair(domain: usize, _sock_type: usize, result_ptr: usize) -> Sysca
         .unwrap_or(0);
 
     let (id_a, id_b) =
-        crate::net::unix_socket::socketpair(crate::net::unix_socket::UnixSocketType::Stream, pid)
-            .map_err(|_| SyscallError::OutOfMemory)?;
+        crate::net::unix_socket::socketpair(utype, pid).map_err(|_| SyscallError::OutOfMemory)?;
     let fd_a = install_socket(SocketHandle::Unix(id_a));
     let fd_b = install_socket(SocketHandle::Unix(id_b));
     let (fd_a, fd_b) = match (fd_a, fd_b) {
         (Ok(a), Ok(b)) => (a, b),
         (Ok(a), Err(e)) | (Err(e), Ok(a)) => {
             if let Some(p) = crate::process::current_process() {
-                let _ = p.file_table.lock().close(a);
+                p.file_table.lock().close_on_rollback(a, "socketpair");
             }
             return Err(e);
         }
         (Err(e), Err(_)) => return Err(e),
     };
 
-    // SAFETY: result_ptr validated above as non-null and in user-space.
-    // Write as i32 to match Linux ABI (int sv[2]).
-    unsafe {
-        let ptr = result_ptr as *mut i32;
-        *ptr = fd_a as i32;
-        *ptr.add(1) = fd_b as i32;
+    // int sv[2] through the fault-handled user copy: `sv` need not be
+    // aligned or mapped. If it cannot be written the caller can never learn
+    // the fds, so close them, as Linux does.
+    if let Err(e) = userspace::write_user_slice::<i32>(result_ptr, &[fd_a as i32, fd_b as i32]) {
+        if let Some(p) = crate::process::current_process() {
+            let table = p.file_table.lock();
+            table.close_on_rollback(fd_a, "socketpair");
+            table.close_on_rollback(fd_b, "socketpair");
+        }
+        return Err(e);
     }
     Ok(0)
 }
@@ -3538,6 +3679,48 @@ fn sys_socket_pair(domain: usize, _sock_type: usize, result_ptr: usize) -> Sysca
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // --- Numbers the musl remap patch relies on (review of the v0.26.0
+    // stack, PR #8) ---
+
+    #[test]
+    fn missing_sixth_argument_is_an_error_not_zero() {
+        // No syscall frame (host test, or an architecture that does not
+        // capture it): the futex ops that need val3 must fail, not use 0.
+        assert_eq!(syscall_arg6(), Err(SyscallError::NotImplemented));
+    }
+
+    #[test]
+    fn sockaddr_un_path_starts_after_the_family() {
+        let mut sa = alloc::vec::Vec::from((AF_UNIX as u16).to_ne_bytes());
+        sa.extend_from_slice(b"/tmp/sock\0garbage");
+        assert_eq!(parse_sockaddr_un(&sa).unwrap(), "/tmp/sock");
+        // Without a NUL, addr_len bounds the path.
+        assert_eq!(parse_sockaddr_un(&sa[..2 + 4]).unwrap(), "/tmp");
+        // Unnamed, abstract, wrong family, oversized.
+        assert!(parse_sockaddr_un(&sa[..2]).is_err());
+        let mut abs = alloc::vec::Vec::from((AF_UNIX as u16).to_ne_bytes());
+        abs.extend_from_slice(b"\0name");
+        assert!(parse_sockaddr_un(&abs).is_err());
+        let mut inet = alloc::vec::Vec::from(2u16.to_ne_bytes());
+        inet.extend_from_slice(b"/tmp/sock\0");
+        assert!(parse_sockaddr_un(&inet).is_err());
+        assert!(parse_sockaddr_un(&[0u8; SOCKADDR_UN_LEN + 1]).is_err());
+    }
+
+    #[test]
+    fn musl_remap_targets_have_the_expected_meaning() {
+        // tools/cross/musl-patches/0001-veridian-syscall-remap.patch.
+        // faccessat (Linux 269) is left unmapped: it must not be a native
+        // number, so it reaches the faccessat fallback. It used to be
+        // remapped to 347, native fchownat, which chowned the file.
+        assert!(Syscall::try_from(269).is_err());
+        assert!(linux_compat::is_faccessat(269));
+        assert_eq!(Syscall::try_from(347), Ok(Syscall::Fchownat)); // Linux 260
+        assert_eq!(Syscall::try_from(191), Ok(Syscall::FileFstatat)); // Linux 262
+        assert_eq!(Syscall::try_from(260), Ok(Syscall::GetRlimit)); // Linux 97
+        assert_eq!(Syscall::try_from(261), Ok(Syscall::SetRlimit)); // Linux 160
+    }
 
     // --- SCM_RIGHTS control messages (Linux LP64 cmsghdr) ---
 
@@ -3557,7 +3740,19 @@ mod tests {
         let b = cmsg(16 + 8, 1, 1, &[5, 7]);
         assert_eq!(
             parse_scm_rights(b.as_ptr() as usize, b.len()),
-            Some(alloc::vec![5, 7])
+            Ok(alloc::vec![5, 7])
+        );
+    }
+
+    /// A negative fd is kept so files_for_fds fails the send with EBADF,
+    /// instead of being dropped from the array (review of the v0.26.0
+    /// stack, PR #10).
+    #[test]
+    fn scm_rights_keeps_negative_fds() {
+        let b = cmsg(16 + 8, 1, 1, &[5, -1]);
+        assert_eq!(
+            parse_scm_rights(b.as_ptr() as usize, b.len()),
+            Ok(alloc::vec![5, -1])
         );
     }
 
@@ -3565,17 +3760,156 @@ mod tests {
     fn scm_rights_rejects_len_past_buffer() {
         // cmsg_len claims 4 fds but the validated buffer holds 1.
         let b = cmsg(16 + 16, 1, 1, &[5]);
-        assert_eq!(parse_scm_rights(b.as_ptr() as usize, b.len()), None);
+        assert_eq!(
+            parse_scm_rights(b.as_ptr() as usize, b.len()),
+            Err(SyscallError::InvalidArgument)
+        );
+        // Shorter than the header (Linux CMSG_OK fails: EINVAL).
+        let b = cmsg(8, 1, 1, &[]);
+        assert_eq!(
+            parse_scm_rights(b.as_ptr() as usize, 16),
+            Err(SyscallError::InvalidArgument)
+        );
     }
 
     #[test]
-    fn scm_rights_rejects_other_levels_and_types() {
+    fn scm_rights_level_and_type() {
+        // Linux skips control messages for other levels.
         let b = cmsg(20, 0, 1, &[5]);
-        assert_eq!(parse_scm_rights(b.as_ptr() as usize, b.len()), None);
-        let b = cmsg(20, 1, 2, &[5]); // SCM_CREDENTIALS
-        assert_eq!(parse_scm_rights(b.as_ptr() as usize, b.len()), None);
-        let b = cmsg(8, 1, 1, &[]); // shorter than the header
-        assert_eq!(parse_scm_rights(b.as_ptr() as usize, 16), None);
+        assert_eq!(
+            parse_scm_rights(b.as_ptr() as usize, b.len()),
+            Ok(alloc::vec![])
+        );
+        // An unsupported SOL_SOCKET type is EINVAL (SCM_CREDENTIALS = 2).
+        let b = cmsg(20, 1, 2, &[5]);
+        assert_eq!(
+            parse_scm_rights(b.as_ptr() as usize, b.len()),
+            Err(SyscallError::InvalidArgument)
+        );
+    }
+
+    #[test]
+    fn scm_rights_fd_count_limits() {
+        // An empty SCM_RIGHTS passes nothing, as on Linux.
+        let b = cmsg(16, 1, 1, &[]);
+        assert_eq!(
+            parse_scm_rights(b.as_ptr() as usize, b.len()),
+            Ok(alloc::vec![])
+        );
+        let fds = [3i32; SCM_MAX_FDS + 1];
+        let b = cmsg((16 + 4 * fds.len()) as u64, 1, 1, &fds);
+        assert_eq!(
+            parse_scm_rights(b.as_ptr() as usize, b.len()),
+            Err(SyscallError::InvalidArgument)
+        );
+    }
+
+    /// recvmsg reports dropped fds with MSG_CTRUNC (review of the v0.26.0
+    /// stack, PR #10).
+    #[test]
+    fn recvmsg_flags_report_control_truncation() {
+        assert_eq!(MSG_CTRUNC, 0x8);
+        assert_eq!(recvmsg_flags(0, 0), 0);
+        assert_eq!(recvmsg_flags(2, 2), 0);
+        assert_eq!(recvmsg_flags(3, 1), MSG_CTRUNC);
+        assert_eq!(recvmsg_flags(1, 0), MSG_CTRUNC);
+    }
+
+    /// socketpair honours the type and accepts protocol 0 or PF_UNIX only
+    /// (review of the v0.26.0 stack, PR #10).
+    #[test]
+    fn socketpair_type_maps_type_and_protocol() {
+        use crate::net::unix_socket::UnixSocketType;
+        assert_eq!(
+            socketpair_type(AF_UNIX, SOCK_STREAM, 0),
+            Ok(UnixSocketType::Stream)
+        );
+        assert_eq!(
+            socketpair_type(AF_UNIX, SOCK_DGRAM | 0x80000, 0),
+            Ok(UnixSocketType::Datagram)
+        );
+        assert_eq!(
+            socketpair_type(AF_UNIX, SOCK_DGRAM, AF_UNIX),
+            Ok(UnixSocketType::Datagram)
+        );
+        assert_eq!(
+            socketpair_type(AF_UNIX, 7, 0),
+            Err(SyscallError::InvalidArgument)
+        );
+        assert_eq!(
+            socketpair_type(AF_UNIX, SOCK_STREAM, 6),
+            Err(SyscallError::InvalidArgument)
+        );
+        assert_eq!(
+            socketpair_type(2, SOCK_STREAM, 0),
+            Err(SyscallError::InvalidArgument)
+        );
+    }
+
+    /// accept copies at most *addrlen bytes and stores the full length
+    /// (review of the v0.26.0 stack, PR #10).
+    #[test]
+    fn sockaddr_out_honours_addrlen() {
+        let addr: [u8; 16] = core::array::from_fn(|i| i as u8 + 1);
+        // Room for everything; misaligned socklen_t.
+        let mut out = [0u8; 16];
+        let mut len = [0u8; 5];
+        len[1..5].copy_from_slice(&64u32.to_ne_bytes());
+        let len_ptr = len.as_mut_ptr() as usize + 1;
+        assert_eq!(
+            copy_sockaddr_out(out.as_mut_ptr() as usize, len_ptr, &addr),
+            Ok(())
+        );
+        assert_eq!(out, addr);
+        assert_eq!(u32::from_ne_bytes([len[1], len[2], len[3], len[4]]), 16);
+
+        // A 1-byte buffer gets 1 byte, and learns the real length.
+        let mut out = [0xEEu8; 4];
+        let mut l = 1u32;
+        assert_eq!(
+            copy_sockaddr_out(
+                out.as_mut_ptr() as usize,
+                &mut l as *mut u32 as usize,
+                &addr
+            ),
+            Ok(())
+        );
+        assert_eq!(out, [1, 0xEE, 0xEE, 0xEE]);
+        assert_eq!(l, 16);
+
+        // Unnamed AF_UNIX: length 2.
+        let mut out = [0u8; 110];
+        let mut l = 110u32;
+        let unnamed = (AF_UNIX as u16).to_ne_bytes();
+        assert_eq!(
+            copy_sockaddr_out(
+                out.as_mut_ptr() as usize,
+                &mut l as *mut u32 as usize,
+                &unnamed
+            ),
+            Ok(())
+        );
+        assert_eq!(l, 2);
+        assert_eq!(u16::from_ne_bytes([out[0], out[1]]), AF_UNIX as u16);
+
+        // Negative *addrlen is EINVAL; no address buffer means no copy.
+        let mut l = u32::MAX;
+        assert_eq!(
+            copy_sockaddr_out(
+                out.as_mut_ptr() as usize,
+                &mut l as *mut u32 as usize,
+                &addr
+            ),
+            Err(SyscallError::InvalidArgument)
+        );
+        assert_eq!(copy_sockaddr_out(0, 0, &addr), Ok(()));
+    }
+
+    #[test]
+    fn fd_index_rejects_negative() {
+        assert_eq!(scm_fd_index(-1), Err(SyscallError::BadFileDescriptor));
+        assert_eq!(scm_fd_index(i32::MIN), Err(SyscallError::BadFileDescriptor));
+        assert_eq!(scm_fd_index(7), Ok(7));
     }
 
     // --- Rate limiter (SYS-PERF-01) ---

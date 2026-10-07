@@ -325,17 +325,15 @@ impl Default for RpcRegistry {
     }
 }
 
-/// Global RPC registry
-static GLOBAL_REGISTRY: RwLock<Option<RpcRegistry>> = RwLock::new(None);
+/// Global RPC registry. One static: `init` used to fill a second one that
+/// `get_registry` never read (gemini-code-assist on PR #1).
+static REGISTRY_STORAGE: OnceLock<RpcRegistry> = OnceLock::new();
 
 /// Initialize RPC framework
 pub fn init() {
-    *GLOBAL_REGISTRY.write() = Some(RpcRegistry::new());
+    REGISTRY_STORAGE.get_or_init(RpcRegistry::new);
     crate::println!("[RPC] RPC framework initialized (stub)");
 }
-
-/// Global RPC registry
-static REGISTRY_STORAGE: OnceLock<RpcRegistry> = OnceLock::new();
 
 /// Get global RPC registry
 pub fn get_registry() -> &'static RpcRegistry {
@@ -345,6 +343,14 @@ pub fn get_registry() -> &'static RpcRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn init_and_getter_share_one_registry() {
+        init();
+        let first = get_registry() as *const RpcRegistry;
+        init();
+        assert!(core::ptr::eq(first, get_registry()));
+    }
 
     #[test]
     fn test_rpc_registry() {

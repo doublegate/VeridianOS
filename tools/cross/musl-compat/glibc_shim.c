@@ -29,19 +29,23 @@
  * -------------------------------------------------------------------------- */
 #include <ctype.h>
 
-/* glibc ctype mask bits (from glibc's ctype.h / ctype-info.c) */
-#define _GU  0x0001  /* UPPER */
-#define _GL  0x0002  /* LOWER */
-#define _GA  0x0004  /* ALPHA */
-#define _GD  0x0008  /* DIGIT */
-#define _GX  0x0010  /* XDIGIT */
-#define _GS  0x0020  /* SPACE */
-#define _GP  0x0040  /* PRINT */
-#define _GG  0x0080  /* GRAPH */
-#define _GB  0x0100  /* BLANK (space/tab) */
-#define _GC  0x0200  /* CNTRL */
-#define _GN  0x0400  /* PUNCT */
-#define _GW  0x0800  /* ALNUM */
+/* glibc ctype mask bits: glibc's _ISbit() values on a little-endian host
+ * (ctype.h: bit < 8 ? (1 << bit) << 8 : (1 << bit) >> 8), which is what the
+ * glibc-built libstdc++.a tests. Plain low bits made ' ' read as upper and
+ * 'A' as not upper (review of the v0.26.0 stack, PR #14). Checked against the
+ * host glibc by test-ctype-table.sh. */
+#define _GU  0x0100  /* UPPER  (_ISupper)  */
+#define _GL  0x0200  /* LOWER  (_ISlower)  */
+#define _GA  0x0400  /* ALPHA  (_ISalpha)  */
+#define _GD  0x0800  /* DIGIT  (_ISdigit)  */
+#define _GX  0x1000  /* XDIGIT (_ISxdigit) */
+#define _GS  0x2000  /* SPACE  (_ISspace)  */
+#define _GP  0x4000  /* PRINT  (_ISprint)  */
+#define _GG  0x8000  /* GRAPH  (_ISgraph)  */
+#define _GB  0x0001  /* BLANK  (_ISblank)  */
+#define _GC  0x0002  /* CNTRL  (_IScntrl)  */
+#define _GN  0x0004  /* PUNCT  (_ISpunct)  */
+#define _GW  0x0008  /* ALNUM  (_ISalnum)  */
 
 /*
  * Static ctype table indexed by (char + 128).  384 entries total
@@ -348,6 +352,22 @@ int __loc_is_allocated(struct __locale_struct *loc) {
  * on musl too and every executable then fails to link. musl's gettext
  * has no such cache, so a plain counter is the whole contract. */
 int _nl_msg_cat_cntr = 0;
+
+/* Override musl's __duplocale too. musl's copies only its own 48-byte
+ * struct, so a duplicate (libstdc++'s _S_clone_c_locale) had heap garbage
+ * where glibc keeps __ctype_b at 0x68, and every copy leaked because
+ * __loc_is_allocated() says nothing is allocated. Every locale this shim
+ * hands out is the static C locale, and LC_GLOBAL_LOCALE is the C locale in
+ * a static musl binary, so the duplicate is the same object (review of the
+ * v0.26.0 stack, PR #14). */
+struct __locale_struct *__duplocale(struct __locale_struct *old) {
+    (void)old;
+    return (struct __locale_struct *)(void *)&_glibc_c_locale;
+}
+
+struct __locale_struct *duplocale(struct __locale_struct *old) {
+    return __duplocale(old);
+}
 
 /* Public alias -- musl declares newlocale with locale_t = struct __locale_struct* */
 struct __locale_struct *newlocale(int mask, const char *name,

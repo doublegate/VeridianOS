@@ -59,6 +59,9 @@ pub fn register_drivers() -> Result<(), KernelError> {
                 // Get BAR0 (MMIO base address)
                 if let Some(bar0) = device.bars.first() {
                     if let Some(address) = bar0.get_memory_address() {
+                        // The NIC DMAs its rings and buffers: firmware need not
+                        // have left bus mastering (or memory decoding) on.
+                        bus.enable_bus_master(device.location);
                         if try_register_e1000(address).is_ok() {
                             device_count += 1;
                         }
@@ -76,6 +79,9 @@ pub fn register_drivers() -> Result<(), KernelError> {
 
                 if let Some(bar0) = device.bars.first() {
                     if let Some(address) = bar0.get_memory_address() {
+                        // The NIC DMAs its rings and buffers: firmware need not
+                        // have left bus mastering (or memory decoding) on.
+                        bus.enable_bus_master(device.location);
                         if try_register_e1000(address).is_ok() {
                             device_count += 1;
                         }
@@ -101,6 +107,9 @@ pub fn register_drivers() -> Result<(), KernelError> {
                 // modern (memory BAR, capability-list) layout is not supported.
                 match device.bars.first().and_then(|bar| bar.get_io_address()) {
                     Some(io_base) => {
+                        // Registers are behind the I/O BAR and the rings are
+                        // DMA: enable both before the driver touches either.
+                        bus.enable_io_bus_master(device.location);
                         if register_virtio_net(VirtioNetDriver::new_pci(io_base as u16)).is_ok() {
                             device_count += 1;
                         }

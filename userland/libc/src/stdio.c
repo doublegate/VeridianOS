@@ -1020,16 +1020,32 @@ int printf(const char *fmt, ...)
  * into `nb` so that strto*() cannot read past the field width. Returns the
  * number of bytes copied.
  */
-static size_t __scan_field(const char *s, size_t width, char *nb, size_t nbsize)
+static size_t __scan_field(const char *s, size_t width, char *nb, size_t nbsize,
+                           size_t *skipped)
 {
-    size_t lim = nbsize - 1;
-    if (width && width < lim)
-        lim = width;
-    size_t n = 0;
-    while (n < lim && s[n] && !isspace((unsigned char)s[n])) {
-        nb[n] = s[n];
-        n++;
+    /* Copy at most `width` characters (all of them count, as in C) into nb.
+     * Redundant leading zeros are consumed without being copied, so a
+     * number padded past the 63-byte buffer still parses. One zero is kept
+     * (two before an 'x'), so %i/%o/%x read exactly what they did before (review
+     * of the v0.26.0 stack, PR #9). *skipped reports how many were dropped,
+     * so the caller can advance its input by skipped + parsed length. */
+    size_t avail = width ? width : (size_t)-1;
+    size_t i = 0, n = 0, lim = nbsize - 1;
+    if (avail && (s[0] == '+' || s[0] == '-')) {
+        nb[n++] = s[0];
+        i++;
     }
+    size_t zeros_from = i, j = i;
+    while (j < avail && s[j] == '0')
+        j++;
+    /* Keep one zero, or two before an 'x' so "000x1f" stays octal 0
+     * followed by "x1f" instead of becoming the hex prefix "0x". */
+    size_t keep = (j < avail && (s[j] == 'x' || s[j] == 'X')) ? 2 : 1;
+    if (j - zeros_from > keep)
+        i = j - keep;
+    *skipped = i - zeros_from;
+    while (n < lim && i < avail && s[i] && !isspace((unsigned char)s[i]))
+        nb[n++] = s[i++];
     nb[n] = '\0';
     return n;
 }
@@ -1094,11 +1110,12 @@ int sscanf(const char *str, const char *fmt, ...)
         case 'd':
         case 'i': {
             while (isspace((unsigned char)*s)) s++;
-            __scan_field(s, width, nb, sizeof(nb));
+            size_t skipped;
+            __scan_field(s, width, nb, sizeof(nb), &skipped);
             char *end;
             long long val = strtoll(nb, &end, *fmt == 'i' ? 0 : 10);
             if (end == nb) goto done_sscanf;
-            s += end - nb;
+            s += skipped + (end - nb);
             if (suppress) break;
             switch (length) {
             case 2:  *va_arg(ap, long long *) = val; break;
@@ -1116,11 +1133,12 @@ int sscanf(const char *str, const char *fmt, ...)
         case 'o': {
             while (isspace((unsigned char)*s)) s++;
             int base = (*fmt == 'u') ? 10 : (*fmt == 'o') ? 8 : 16;
-            __scan_field(s, width, nb, sizeof(nb));
+            size_t skipped;
+            __scan_field(s, width, nb, sizeof(nb), &skipped);
             char *end;
             unsigned long long val = strtoull(nb, &end, base);
             if (end == nb) goto done_sscanf;
-            s += end - nb;
+            s += skipped + (end - nb);
             if (suppress) break;
             switch (length) {
             case 2:  *va_arg(ap, unsigned long long *) = val; break;
@@ -1236,14 +1254,16 @@ int vfscanf(FILE *stream, const char *fmt, va_list ap)
             if (c == EOF)
                 goto done_vfscanf;
 
-            /* Read digits into a small buffer. */
+            /* Read digits into a small buffer, honouring the field width
+             * (sign included): "%2d%d" splits "1234" into 12 and 34. */
             char numbuf[24];
             int ni = 0;
-            if (c == '-' || c == '+') {
+            int limit = (width > 0 && width < 23) ? (int)width : 23;
+            if ((c == '-' || c == '+') && ni < limit) {
                 numbuf[ni++] = (char)c;
                 c = fgetc(stream);
             }
-            while (c != EOF && c >= '0' && c <= '9' && ni < 23) {
+            while (c != EOF && c >= '0' && c <= '9' && ni < limit) {
                 numbuf[ni++] = (char)c;
                 c = fgetc(stream);
             }

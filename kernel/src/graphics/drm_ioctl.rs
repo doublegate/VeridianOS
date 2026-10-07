@@ -1869,9 +1869,11 @@ fn handle_mode_obj_get_properties(arg: *mut u8) -> Result<i32, KernelError> {
 ///
 /// Accepts a batch of property changes and applies them atomically.
 /// For our virtual DRM device, we parse the commit to track active FB_ID
-/// on the primary plane (for future scanout), and always return success.
+/// on the primary plane (for future scanout).
 /// If DRM_MODE_ATOMIC_TEST_ONLY is set, we validate without applying.
-/// If DRM_MODE_PAGE_FLIP_EVENT is set, we queue a page flip completion event.
+/// If DRM_MODE_PAGE_FLIP_EVENT is set, we queue a page flip completion event;
+/// when that event cannot be queued the commit fails with EAGAIN and no
+/// state is applied.
 fn handle_mode_atomic(arg: *mut u8, pid: u64) -> Result<i32, KernelError> {
     if arg.is_null() {
         return Err(KernelError::OperationNotSupported {
@@ -1887,6 +1889,21 @@ fn handle_mode_atomic(arg: *mut u8, pid: u64) -> Result<i32, KernelError> {
 
     let is_test = atomic.flags & DRM_MODE_ATOMIC_TEST_ONLY != 0;
     let wants_event = atomic.flags & DRM_MODE_PAGE_FLIP_EVENT != 0;
+
+    /// The virtual device's only CRTC, which carries the completion event.
+    const EVENT_CRTC: u32 = 1;
+
+    // Refuse the whole commit up front when its completion event cannot be
+    // queued (owner's event queue full, flip pending, CRTC missing). Doing
+    // this after the KMS apply would leave the new state in place while the
+    // client waits forever for an event that never comes (review of the
+    // v0.26.0 stack, PR #8).
+    if wants_event
+        && !is_test
+        && !gpu_accel::with_page_flip(|pf| pf.can_queue_flip(EVENT_CRTC, pid)).unwrap_or(false)
+    {
+        return Err(KernelError::WouldBlock);
+    }
 
     // Parse the commit to find FB_ID / ACTIVE property updates. Layout:
     // objs_ptr has count_objs u32 IDs, count_props_ptr has per-object
@@ -1953,19 +1970,26 @@ fn handle_mode_atomic(arg: *mut u8, pid: u64) -> Result<i32, KernelError> {
     // after requesting the flip so that a drm_event_vblank is queued for
     // the caller to read from the DRM fd.
     if wants_event && !is_test {
-        gpu_accel::with_page_flip(|pf| {
-            let crtc_id = 1u32;
+        let queued = gpu_accel::with_page_flip(|pf| {
             let ok = pf.request_flip(PageFlipRequest {
-                crtc_id,
+                crtc_id: EVENT_CRTC,
                 fb_id: 0, // FB tracked above
                 user_data: atomic.user_data,
                 owner_pid: pid,
             });
             if ok {
                 let ts_ns = crate::timer::get_uptime_ms() * 1_000_000;
-                pf.handle_vblank(crtc_id, ts_ns);
+                pf.handle_vblank(EVENT_CRTC, ts_ns);
             }
-        });
+            ok
+        })
+        .unwrap_or(false);
+        // The check above makes this unreachable under the current
+        // single-threaded DRM path, but never report success for an event
+        // that was not queued.
+        if !queued {
+            return Err(KernelError::WouldBlock);
+        }
     }
 
     Ok(0)
@@ -2150,6 +2174,70 @@ mod tests {
         // 1025 properties exceed the per-commit cap, so the commit is
         // rejected before any property is read.
         assert!(handle_mode_atomic(buf.as_mut_ptr() as *mut u8, 0).is_err());
+    }
+
+    /// A commit asking for a completion event that cannot be queued fails
+    /// and applies nothing; once the owner's queue drains it succeeds
+    /// (review of the v0.26.0 stack, PR #8). This is the only host test
+    /// that touches the global KMS / page-flip managers.
+    #[test]
+    fn atomic_with_full_event_queue_fails_without_applying() {
+        if gpu_accel::with_kms(|_| ()).is_none() {
+            gpu_accel::init();
+            gpu_accel::init_virtual_drm_device();
+        }
+        const OWNER: u64 = 0xD12A_0001;
+        let fb_before = gpu_accel::with_kms(|kms| kms.crtcs[0].fb_id).unwrap();
+        gpu_accel::with_page_flip(|pf| {
+            for i in 0..gpu_accel::MAX_PENDING_EVENTS_PER_OWNER as u64 {
+                pf.vblank_events.push(gpu_accel::VblankEvent {
+                    sequence: i,
+                    timestamp_ns: 0,
+                    crtc_id: 1,
+                    user_data: 0,
+                    owner_pid: OWNER,
+                });
+            }
+        })
+        .unwrap();
+
+        let objs = [1u32];
+        let counts = [1u32];
+        let props = [PROP_ID_FB_ID];
+        let values = [0x77u64];
+        let commit = DrmModeAtomic {
+            flags: DRM_MODE_PAGE_FLIP_EVENT,
+            count_objs: 1,
+            objs_ptr: objs.as_ptr() as u64,
+            count_props_ptr: counts.as_ptr() as u64,
+            props_ptr: props.as_ptr() as u64,
+            prop_values_ptr: values.as_ptr() as u64,
+            reserved: 0,
+            user_data: 0xBEEF,
+        };
+        let mut buf = bounce(commit);
+        assert!(matches!(
+            handle_mode_atomic(buf.as_mut_ptr() as *mut u8, OWNER),
+            Err(KernelError::WouldBlock)
+        ));
+        assert_eq!(
+            gpu_accel::with_kms(|kms| kms.crtcs[0].fb_id).unwrap(),
+            fb_before
+        );
+
+        // Draining the queue (here by purging the owner) makes room again.
+        gpu_accel::purge_drm_owner(OWNER);
+        let mut buf = bounce(commit);
+        assert_eq!(
+            handle_mode_atomic(buf.as_mut_ptr() as *mut u8, OWNER).unwrap(),
+            0
+        );
+        assert_eq!(
+            gpu_accel::with_kms(|kms| kms.crtcs[0].fb_id).unwrap(),
+            Some(0x77)
+        );
+        assert!(gpu_accel::has_pending_drm_events(OWNER));
+        gpu_accel::purge_drm_owner(OWNER);
     }
 
     /// W-11: GEM handles are usable only by processes granted them.

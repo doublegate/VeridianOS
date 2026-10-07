@@ -382,7 +382,16 @@ pub fn socket_send(socket_id: u64, data: &[u8], rights: Option<ScmRights>) -> Ke
         expected: "connected",
         actual: "not connected",
     })?;
+    let is_stream = socket.socket_type == UnixSocketType::Stream;
     drop(sockets);
+
+    // A stream has no record boundaries, so a send with no bytes and no
+    // files transfers nothing. Queuing it would make the peer's recv return
+    // 0, which reads as EOF, and would charge MSG_OVERHEAD per empty send
+    // (review of the v0.26.0 stack, PR #10). Datagrams keep empty messages.
+    if is_stream && data.is_empty() && rights.as_ref().is_none_or(|r| r.files.is_empty()) {
+        return Ok(0);
+    }
 
     // Deliver to peer's receive buffer.
     let mut sockets = UNIX_SOCKETS.lock();
@@ -446,6 +455,11 @@ pub fn socket_recv(socket_id: u64, buf: &mut [u8]) -> KernelResult<(usize, Optio
     // The files are returned to the caller, so they are released (if
     // unused) after this lock is dropped.
     Ok((copy_len, msg.rights))
+}
+
+/// The type of socket `socket_id`, if it exists.
+pub fn socket_type(socket_id: u64) -> Option<UnixSocketType> {
+    UNIX_SOCKETS.lock().get(&socket_id).map(|s| s.socket_type)
 }
 
 /// Create an anonymous connected socket pair (socketpair).
@@ -597,4 +611,39 @@ pub fn socket_poll_readiness(socket_id: u64) -> u16 {
     }
 
     events
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A zero-length stream send carries nothing, so it must not queue a
+    /// message: the peer's recv would return 0, which reads as EOF (review
+    /// of the v0.26.0 stack, PR #10).
+    #[test]
+    fn empty_stream_send_queues_nothing() {
+        let (a, b) = socketpair(UnixSocketType::Stream, 1).unwrap();
+        for _ in 0..1_000 {
+            assert_eq!(socket_send(a, &[], None), Ok(0));
+        }
+        let mut buf = [0u8; 8];
+        assert!(matches!(
+            socket_recv(b, &mut buf),
+            Err(KernelError::WouldBlock)
+        ));
+        assert_eq!(UNIX_SOCKETS.lock().get(&b).unwrap().recv_buffer_used, 0);
+        socket_close(a).unwrap();
+        socket_close(b).unwrap();
+    }
+
+    /// A zero-length datagram is a real message and still queues.
+    #[test]
+    fn empty_datagram_send_still_queues() {
+        let (a, b) = socketpair(UnixSocketType::Datagram, 1).unwrap();
+        assert_eq!(socket_send(a, &[], None), Ok(0));
+        let mut buf = [0u8; 8];
+        assert!(matches!(socket_recv(b, &mut buf), Ok((0, None))));
+        socket_close(a).unwrap();
+        socket_close(b).unwrap();
+    }
 }

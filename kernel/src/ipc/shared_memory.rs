@@ -267,6 +267,33 @@ impl SharedRegion {
         Ok(virtual_base)
     }
 
+    /// Record that `process` inherited a mapping of this region at
+    /// `virtual_base`, as fork does: `clone_from` already copied the
+    /// parent's page-table entries, so only the bookkeeping is done here.
+    /// Without it the child was invisible to `mapping_count`, and
+    /// `unregister_region`'s busy check could pass while the child still
+    /// mapped the frames (review of the v0.26.0 stack, PR #13).
+    pub fn register_inherited(
+        &self,
+        process: ProcessId,
+        virtual_base: VirtualAddress,
+        permissions: Permission,
+    ) -> Result<()> {
+        let mut mappings = self.mappings.lock();
+        if mappings.contains_key(&process) {
+            return Err(IpcError::InvalidMemoryRegion);
+        }
+        mappings.insert(
+            process,
+            RegionMapping {
+                virtual_base,
+                permissions,
+            },
+        );
+        self.ref_count.fetch_add(1, Ordering::Relaxed);
+        Ok(())
+    }
+
     /// Unmap region from a process. The page-table entries are removed and
     /// flushed page by page; the frames stay with the region.
     pub fn unmap(&self, process: ProcessId) -> Result<()> {
@@ -340,9 +367,13 @@ impl Drop for SharedRegion {
         }
         let page_size = PageSize::Small as usize;
         let first = crate::mm::FrameNumber::new(self.physical_base.as_u64() / page_size as u64);
-        let _ = crate::mm::FRAME_ALLOCATOR
-            .lock()
-            .free_frames(first, self.size / page_size);
+        crate::mm::note_free_failure(
+            crate::mm::FRAME_ALLOCATOR
+                .lock()
+                .free_frames(first, self.size / page_size),
+            first,
+            "shared region drop",
+        );
     }
 }
 
@@ -414,6 +445,49 @@ mod tests {
         assert!(Permission::ReadWriteExecute.can_read());
         assert!(Permission::ReadWriteExecute.can_write());
         assert!(Permission::ReadWriteExecute.can_execute());
+    }
+
+    /// A region with no real frames behind it, for bookkeeping tests. The
+    /// caller must not let it drop (Drop would free its "frames").
+    fn fake_region(base: u64) -> SharedRegion {
+        SharedRegion {
+            id: REGION_COUNTER.fetch_add(1, Ordering::Relaxed),
+            physical_base: PhysicalAddress::new(base),
+            size: 4096,
+            owner: ProcessId(1),
+            mappings: Mutex::new(BTreeMap::new()),
+            ref_count: AtomicU32::new(0),
+            cache_policy: CachePolicy::WriteBack,
+            numa_node: None,
+        }
+    }
+
+    #[test]
+    fn register_inherited_counts_the_child_and_keeps_region_busy() {
+        // An address no real region uses, so the global registry is safe.
+        let base = 0xDEAD_0000_0000;
+        let region = register_region(fake_region(base));
+        assert_eq!(region.mapping_count(), 0);
+
+        let child = ProcessId(4242);
+        let at = VirtualAddress::new(0x4000_0000);
+        region
+            .register_inherited(child, at, Permission::Write)
+            .unwrap();
+        assert_eq!(region.mapping_count(), 1);
+        assert_eq!(region.get_mapping(child), Some(at));
+        // A second registration for the same process is refused.
+        assert!(region
+            .register_inherited(child, at, Permission::Write)
+            .is_err());
+        assert_eq!(region.mapping_count(), 1);
+        // The child's mapping keeps the region registered.
+        assert_eq!(unregister_region(base), Err(IpcError::ResourceBusy));
+
+        // Clean up without running Drop on fake frames.
+        let removed = REGISTRY.lock().remove(&base).unwrap();
+        drop(removed);
+        core::mem::forget(region);
     }
 
     // These tests require the global FRAME_ALLOCATOR to be initialized with

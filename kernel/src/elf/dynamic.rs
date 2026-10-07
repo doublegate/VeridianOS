@@ -234,10 +234,16 @@ pub fn prepare_dynamic_linking(
     let interp_base = interp_elf.load_base;
     let interp_entry = interp_elf.entry_point;
 
-    // The program headers are located at load_base + phoff. For a standard
-    // ELF the PHDR segment points to them. Use load_base as the phdr address
-    // for now; the kernel stack setup will place them correctly.
-    let phdr_addr = load_base;
+    // AT_PHDR is the program header table's address, from PT_PHDR or the
+    // PT_LOAD holding e_phoff -- not load_base, which is the ELF header.
+    // `load_base` may differ from the binary's linked base; shift by that.
+    let phdr_addr = elf_binary
+        .phdr_address()
+        .ok_or(KernelError::InvalidArgument {
+            name: "e_phoff",
+            value: "program header address overflows",
+        })?
+        .wrapping_add(load_base.wrapping_sub(elf_binary.load_base));
 
     // Build auxiliary vector. AT_RANDOM and AT_EXECFN addresses will be set
     // up later when the user stack is constructed.

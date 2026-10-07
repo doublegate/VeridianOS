@@ -707,27 +707,17 @@ int listen(int sockfd, int backlog)
 /*
  * accept() -- accept a connection on a socket.
  *
- * The kernel's SYS_SOCKET_ACCEPT takes only the listening socket_id and
- * returns the new connected socket_id.  addr/addrlen output is not filled
- * by the kernel at this time; we zero them out to avoid stale data.
- *
- * Kernel args: (socket_id)
+ * Kernel args: (fd, addr_ptr, addrlen_ptr)
+ * When addr is non-NULL the kernel reads *addrlen, writes at most that many
+ * bytes of the peer address (an unnamed AF_UNIX address for Unix sockets),
+ * and stores the full address length back into *addrlen.
  */
 int accept(int sockfd, struct sockaddr *addr, socklen_t *addrlen)
 {
-    /* No address buffers are passed: the kernel would otherwise read its
-     * address arguments from leftover register contents. */
-    long ret = veridian_syscall3(SYS_SOCKET_ACCEPT, sockfd, 0, 0);
+    long ret = veridian_syscall3(SYS_SOCKET_ACCEPT, sockfd, addr, addrlen);
     if (ret < 0) {
         errno = (int)(-ret);
         return -1;
-    }
-    /* Clear addr output so callers don't see stale data. */
-    if (addr && addrlen && *addrlen > 0) {
-        unsigned int i;
-        for (i = 0; i < *addrlen; i++)
-            ((unsigned char *)addr)[i] = 0;
-        *addrlen = 0;
     }
     return (int)ret;
 }
@@ -774,21 +764,19 @@ int setsockopt(int sockfd, int level, int optname,
 /*
  * getsockopt() -- get options on sockets.
  *
- * Kernel args: (fd, level, optname, optval_ptr)
- * The optlen pointer is not forwarded; the kernel writes a fixed 4-byte value.
+ * Kernel args: (fd, level, optname, optval_ptr, optlen_ptr)
+ * The kernel reads *optlen, copies at most that many bytes and stores the
+ * length it wrote back into *optlen.
  */
 int getsockopt(int sockfd, int level, int optname,
                void *optval, unsigned int *optlen)
 {
-    long ret = veridian_syscall4(SYS_NET_GETSOCKOPT,
-                                  sockfd, level, optname, optval);
+    long ret = veridian_syscall5(SYS_NET_GETSOCKOPT,
+                                  sockfd, level, optname, optval, optlen);
     if (ret < 0) {
         errno = (int)(-ret);
         return -1;
     }
-    /* Kernel writes 4 bytes; reflect that in *optlen if provided. */
-    if (optlen)
-        *optlen = 4;
     return 0;
 }
 

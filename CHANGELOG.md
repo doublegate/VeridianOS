@@ -10,8 +10,9 @@ v0.26.0 remediates the findings of the 2026-10-05 performance and quality audit
 (`docs/PERFORMANCE_AND_QUALITY_AUDIT_MATRIX.md`).
 
 Each finding was first re-verified against the code; the per-finding results are in
-`docs/audit/AUDIT-VERIFICATION-2026-10-05.md`. Verification also found 34 defects the audit missed
-(N-01..N-34), and the same file tracks all of them.
+`docs/audit/AUDIT-VERIFICATION-2026-10-05.md`. Verification found 34 defects the audit missed
+(N-01..N-34), and the bot review of the release found 22 more (N-35..N-56). The same file tracks all
+of them: 33 are fixed and 23 are open, each with its planned release.
 
 **Status:**
 
@@ -23,9 +24,10 @@ Each finding was first re-verified against the code; the per-finding results are
 and allocators, scheduler, filesystem and networking are faster. Documentation now matches what the
 code does.
 
-**Compared with v0.25.2:** 234 files changed (+20,620 / -7,669). Host unit tests rise from 4,284 to
-4,413, in-kernel boot tests from 29 to 34 on all three architectures, and a new in-guest runtime
-suite (`audit_runtime_test`) runs 18 checks on the BlockFS root.
+**Compared with v0.25.2:** 264 files changed (+30,637 / -8,094). Host unit tests rise from 4,284 to
+4,472 (one more is ignored on purpose: it pins N-47), in-kernel boot tests from 29 to 34 on all
+three architectures, and a new in-guest runtime suite (`audit_runtime_test`) runs 27 checks on the
+BlockFS root.
 
 #### Security (P0)
 
@@ -150,6 +152,100 @@ Times are from the in-kernel `perf` command (x86_64/KVM), now in calibrated nano
 - **New `Reviewer Self-Test` job.** It runs the reviewer's self-test.
 - **Security Audit fixed.** The job runs a pinned prebuilt `cargo-audit` instead of building it
   unlocked. That build had started failing on the pinned nightly.
+
+#### Fixes from the release review
+
+The release was reviewed as nine stacked pull requests (#14, #7-#13, and #15 for the fixes).
+Copilot reviewed parts 1-8. It was requested twice on part 9, which holds the fixes, but did not
+review it; CodeRabbit and the Antigravity reviewer did. The Antigravity reviewer covered every part,
+and CodeRabbit was rate-limited for most of the run. Every review thread was answered with the fixing commit or a
+reason, then resolved. Fixed:
+
+- **Syscall entry and user memory**
+  - SFMASK now also clears DF, TF, AC and NT. A user `std; syscall` used to run kernel copies
+    downwards (N-36).
+  - User strings, ppoll's timespec, socket addresses, lengths and control messages are copied with
+    the fault-tolerant routines.
+  - Recovery from a fault on a user address no longer leaves GS swapped the wrong way (N-39).
+  - Typed reads from user memory require a `UserPod` type, so `bool` and enums cannot be produced
+    from arbitrary bytes.
+- **Paths:** POSIX component-wise resolution (`..` after symlink expansion), and search permission is
+  checked on every directory walked (N-40).
+- **Sockets**
+  - AF_UNIX `bind` read the path from the family field (N-38).
+  - An empty stream send no longer looks like EOF to the peer.
+  - `sendmsg` returns EBADF/EINVAL for bad SCM_RIGHTS, and `recvmsg` sets `msg_flags`/MSG_CTRUNC.
+  - `socketpair` honours its type, and Unix `getsockopt` answers SO_TYPE/SO_ERROR (anything else is
+    ENOPROTOOPT).
+  - `accept` honours `*addrlen` and reports the peer. The libc `accept` and `getsockopt` wrappers
+    changed to match.
+- **Storage**
+  - BlockFS refuses a device smaller than the filesystem and never syncs past its end.
+  - BlockFS rename runs every check before changing anything.
+  - Removing a BlockFS directory frees its inode and blocks, and every removal returns its inode
+    to the free count, which used to underflow after enough deletions (N-44).
+  - ramfs rejects a rename across instances with EXDEV.
+  - virtio-blk quarantines a completion that is not its request.
+  - The NVMe self-test always restores the blocks it wrote, and reports a failure as a failure.
+- **Network**
+  - PCI bus mastering is enabled before the e1000 and legacy virtio-net bring-up.
+  - e1000 init fails on a reset timeout and leaks rather than frees DMA memory the device may still
+    use.
+  - Reconfiguring an interface replaces only the routes it created.
+- **Scheduling and processes**
+  - CFS removes a task by the key it was filed under.
+  - Every expired timer fires, and callbacks run outside the wheel lock.
+  - Boot dispatch runs only the parent's threads and loses none.
+  - clone writes both TIDs before the child exists.
+  - fork fails cleanly on a page-table mapping error.
+  - A forked child's shared-region mappings are counted.
+  - AT_PHDR is taken from the program headers (three sites), and the TLS block honours `p_align`.
+- **DRM and IPC**
+  - An atomic flip whose event cannot be queued fails with EAGAIN instead of reporting success.
+  - An exiting process's page-flip state is purged.
+  - A zero-copy receiver gets exactly the sender's access.
+- **KDE toolchain inputs (N-37, N-42)**
+  - The musl syscall patch delivered `faccessat` as `fchownat` (a root access check changed the
+    file's owner), mis-mapped `fchownat`, `newfstatat`, `getrlimit` and `setrlimit`, and translated
+    errors twice.
+  - The glibc shim's ctype masks were wrong for libstdc++.
+  - **These fix the build inputs only.** KDE binaries in an image built before v0.26.0 keep both
+    defects until the `tools/cross/` pipeline is rerun. The BusyBox rootfs uses the native libc and
+    is not affected.
+- **Second review round (on the fixes themselves)**
+  - A rate-limited syscall now returns EAGAIN in Linux numbering.
+  - `epoll_ctl` and SCM_RIGHTS control messages are copied with the fault-tolerant routines.
+  - The futex operations that need a sixth argument fail with ENOSYS where it is not captured.
+  - ELF program-header addresses are computed with overflow checks.
+  - AT_PHNUM and AT_PHENT come from the ELF header.
+  - Interface routes are removed from the interface they were installed on.
+  - The TSS stacks are no longer `static mut`.
+  - `sscanf` reads integers with long zero padding.
+  - Two debug traces are gone from the epoll and exec paths.
+  - The key store and RPC registry each had two globals, so the one `init` filled was never the one
+    callers got; `LazyLock` could run its initializer twice under contention (a data race).
+  - The README's status and performance tables state measured figures and what is not measured,
+    instead of targets presented as results.
+  - `open()` reports the real lookup error (EACCES, ENOTDIR, ELOOP) instead of ENOENT for all of
+    them, and O_CREAT creates only a name that is missing.
+  - Frees in `Drop` and rollback paths log a failure instead of discarding it.
+  - The version string shown by `uname`, `/etc/os-release`, the desktop and the shell comes from
+    `Cargo.toml`. `uname` had reported 0.5.0.
+- **Reviewer**
+  - Fork pull requests from any outside contributor now need approval before a workflow runs, which
+    is what protects the self-hosted runner.
+  - The reviewer's job timeout covers its retry budget, and trimming the archive keeps the history.
+
+Deferred with audit IDs:
+
+- the FPU/vector state, which is not saved across switches (N-41, v0.27);
+- the global syscall frame pointer (N-35, SMP);
+- raw buffer reads in send/recv (N-43);
+- the remaining socket options (N-48);
+- fork leaks on late errors (N-46);
+- the split IPC endpoint registries (N-47), and two IPC races that are unreachable today (N-49,
+  N-50), and parent-directory permission checks that are separate from the operation (N-51, SMP), the NVMe lock held while polling (N-52), shared-region fragments
+  after a partial munmap (N-53) and boot futex waits that do not run a forked child (N-54).
 
 #### Known limitations and deferrals
 

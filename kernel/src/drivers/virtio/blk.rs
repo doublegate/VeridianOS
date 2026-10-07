@@ -449,15 +449,20 @@ impl VirtioBlkDevice {
             }
         }
 
-        // Consume the used entry
+        // Consume the used entry. Only a completion naming our chain head
+        // proves the device is done with the chain and the request frames;
+        // on a mismatch or an invalid id it may still own both, so quarantine
+        // them as the timeout path does (review of the v0.26.0 stack, PR #12).
         let used = self.queue.poll_used();
-        self.queue.free_chain(desc_header);
-        if used.is_none() {
+        if !completion_is_ours(used, desc_header) {
+            core::mem::forget(self.frames.take());
+            self.failed = true;
             return Err(KernelError::HardwareError {
                 device: "virtio-blk",
-                code: 0x02, // Used ring entry invalid
+                code: 0x02, // Used ring entry invalid or not ours
             });
         }
+        self.queue.free_chain(desc_header);
 
         let status = self.frames.as_ref().map_or(0xFF, |f| f.status());
         match status {
@@ -654,6 +659,13 @@ fn enable_bus_master(device: &crate::drivers::pci::PciDevice) {
     }
 }
 
+/// Whether a used-ring element completes the request whose chain starts at
+/// `head`. Only one request is in flight at a time, so any other id (or an
+/// id the queue rejected as out of range, `None`) is a device fault.
+fn completion_is_ours(used: Option<(u16, u32)>, head: u16) -> bool {
+    matches!(used, Some((id, _)) if id == head)
+}
+
 /// Get a reference to the global virtio-blk device, if initialized.
 pub fn get_device() -> Option<&'static Mutex<VirtioBlkDevice>> {
     VIRTIO_BLK.get()
@@ -662,4 +674,16 @@ pub fn get_device() -> Option<&'static Mutex<VirtioBlkDevice>> {
 /// Check if a virtio-blk device has been initialized.
 pub fn is_initialized() -> bool {
     VIRTIO_BLK.get().is_some()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn completion_must_name_the_request_head() {
+        assert!(completion_is_ours(Some((3, 513)), 3));
+        assert!(!completion_is_ours(Some((4, 513)), 3));
+        assert!(!completion_is_ours(None, 3));
+    }
 }

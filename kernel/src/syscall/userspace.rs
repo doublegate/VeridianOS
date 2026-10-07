@@ -2,8 +2,6 @@
 //!
 //! Safe functions for copying data between kernel and user space.
 
-use core::{slice, str};
-
 use super::SyscallError;
 
 /// Maximum string length we'll copy from user space
@@ -79,48 +77,52 @@ pub fn validate_user_ptr_compat(ptr: usize, size: usize) -> Result<(), SyscallEr
 /// Copy a null-terminated string from user space
 ///
 /// # Safety
-/// This function reads from user-provided pointers and must validate them
+/// Kept `unsafe` for its callers; the copy itself is fault-tolerant and
+/// validated (see [`read_user_cstr`]).
 pub unsafe fn copy_string_from_user(user_ptr: usize) -> Result<String, SyscallError> {
-    validate_user_ptr(user_ptr as *const u8, 1)?;
+    read_user_cstr(user_ptr, MAX_USER_STRING_LEN - 1)
+}
 
-    // Find string length by looking for null terminator
-    let mut len = 0;
-    let mut ptr = user_ptr as *const u8;
-
-    while len < MAX_USER_STRING_LEN {
-        // Validate each page as we cross boundaries
-        if len % 4096 == 0 {
-            validate_user_ptr(ptr, 1)?;
+/// Read a NUL-terminated UTF-8 string of at most `max_len` bytes (not
+/// counting the NUL) from user memory.
+///
+/// The string is read in chunks that never cross a page boundary, each
+/// through [`read_user_bytes`], so an unmapped page fails with EFAULT
+/// instead of faulting in the kernel, and nothing past the terminating
+/// NUL's page is touched. The previous readers dereferenced the user
+/// pointer directly (review of the v0.26.0 stack, PR #14). A string with
+/// no NUL within `max_len` bytes is `InvalidArgument`.
+pub fn read_user_cstr(addr: usize, max_len: usize) -> Result<String, SyscallError> {
+    const PAGE: usize = 4096;
+    let mut out: Vec<u8> = Vec::new();
+    let mut cursor = addr;
+    let mut chunk = [0u8; 256];
+    // max_len bytes of text plus the NUL.
+    while out.len() <= max_len {
+        let to_page_end = PAGE - (cursor % PAGE);
+        let want = to_page_end.min(chunk.len()).min(max_len + 1 - out.len());
+        read_user_bytes(cursor, &mut chunk[..want])?;
+        if let Some(nul) = chunk[..want].iter().position(|&b| b == 0) {
+            out.extend_from_slice(&chunk[..nul]);
+            return String::from_utf8(out).map_err(|_| SyscallError::InvalidArgument);
         }
-
-        let byte = ptr::read_volatile(ptr);
-        if byte == 0 {
-            break;
-        }
-
-        len += 1;
-        ptr = ptr.offset(1);
+        out.extend_from_slice(&chunk[..want]);
+        cursor = cursor
+            .checked_add(want)
+            .ok_or(SyscallError::InvalidPointer)?;
     }
-
-    if len >= MAX_USER_STRING_LEN {
-        return Err(SyscallError::InvalidArgument);
-    }
-
-    // Copy the string
-    let slice = slice::from_raw_parts(user_ptr as *const u8, len);
-    use alloc::string::String;
-    let string = String::from(str::from_utf8(slice).map_err(|_| SyscallError::InvalidArgument)?);
-
-    Ok(string)
+    Err(SyscallError::InvalidArgument)
 }
 
 /// Copy data from user space to kernel space
 ///
 /// # Safety
-/// This function reads from user-provided pointers and must validate them
+/// Kept `unsafe` for its callers; the copy is validated (see [`read_user`]),
+/// and `T: UserPod` guarantees any bytes user space supplies form a valid
+/// `T`.
 pub unsafe fn copy_from_user<T>(user_ptr: usize) -> Result<T, SyscallError>
 where
-    T: Copy,
+    T: UserPod,
 {
     read_user::<T>(user_ptr)
 }
@@ -134,16 +136,6 @@ where
     T: Copy,
 {
     write_user::<T>(user_ptr, *value)
-}
-
-/// Copy a byte slice from user space
-///
-/// # Safety
-/// This function reads from user-provided pointers and must validate them
-pub unsafe fn copy_slice_from_user(user_ptr: usize, len: usize) -> Result<Vec<u8>, SyscallError> {
-    let mut data = alloc::vec![0u8; len];
-    read_user_bytes(user_ptr, &mut data)?;
-    Ok(data)
 }
 
 /// Copy a byte slice to user space
@@ -293,14 +285,53 @@ pub fn cmpxchg_user_u32(addr: usize, old: u32, new: u32) -> Result<u32, SyscallE
     }
 }
 
+/// Types that can be built from arbitrary bytes copied out of user memory.
+///
+/// [`read_user`], [`read_user_index`] and [`copy_from_user`] accept only
+/// these, because user space controls every byte they copy. A bound of
+/// plain `Copy` admitted `bool`, `char`, enums, `NonZero*` and references,
+/// for which most bit patterns are undefined behaviour (review of the
+/// v0.26.0 stack, PR #8):
+///
+/// ```compile_fail,E0277
+/// let _ = veridian_kernel::read_user::<bool>(0x1000);
+/// ```
+///
+/// while a plain integer is accepted:
+///
+/// ```no_run
+/// let _ = veridian_kernel::read_user::<u32>(0x1000);
+/// ```
+///
+/// # Safety
+///
+/// Implement only for types for which every bit pattern of
+/// `size_of::<Self>()` bytes is a valid value: integers, arrays of
+/// `UserPod`, and `#[repr(C)]` structs whose fields are all `UserPod` and
+/// that have no padding.
+pub unsafe trait UserPod: Copy {}
+
+macro_rules! impl_user_pod {
+    ($($t:ty),* $(,)?) => {
+        // SAFETY: every bit pattern is a valid value of a primitive integer.
+        $(unsafe impl UserPod for $t {})*
+    };
+}
+
+impl_user_pod!(u8, u16, u32, u64, u128, usize, i8, i16, i32, i64, i128, isize);
+
+// SAFETY: an array has no padding between elements, so every bit pattern
+// is valid when it is valid for each element.
+unsafe impl<T: UserPod, const N: usize> UserPod for [T; N] {}
+
 /// Read a `T` from user memory at `addr`.
-pub fn read_user<T: Copy>(addr: usize) -> Result<T, SyscallError> {
+pub fn read_user<T: UserPod>(addr: usize) -> Result<T, SyscallError> {
     let size = core::mem::size_of::<T>();
     validate_user_ptr(addr as *const u8, size)?;
     let mut value = core::mem::MaybeUninit::<T>::uninit();
     // SAFETY: the user range [addr, addr + size) was validated above and the
-    // destination is a local of exactly `size` bytes. Callers read plain-data
-    // ioctl/syscall structs, for which any bit pattern is a valid value.
+    // destination is a local of exactly `size` bytes. `T: UserPod`, so any
+    // bit pattern user space supplies is a valid `T`.
     unsafe {
         raw_copy(value.as_mut_ptr() as *mut u8, addr as *const u8, size)?;
         Ok(value.assume_init())
@@ -327,7 +358,7 @@ pub fn write_user_slice<T: Copy>(addr: usize, items: &[T]) -> Result<(), Syscall
 }
 
 /// Read element `index` of a user array of `T` starting at `addr`.
-pub fn read_user_index<T: Copy>(addr: usize, index: usize) -> Result<T, SyscallError> {
+pub fn read_user_index<T: UserPod>(addr: usize, index: usize) -> Result<T, SyscallError> {
     let offset = index
         .checked_mul(core::mem::size_of::<T>())
         .ok_or(SyscallError::InvalidPointer)?;
@@ -404,7 +435,10 @@ pub fn ioctl_bounce<T, E>(
     Ok(result)
 }
 
-#[cfg(test)]
+// Host only: these tests pass stack buffers as "user" pointers, which are
+// kernel-half addresses under the bare-metal harness, where boot tests
+// cover the accessors instead (review of the v0.26.0 stack, PR #8).
+#[cfg(all(test, not(target_os = "none")))]
 mod accessor_tests {
     use super::*;
 
@@ -436,6 +470,48 @@ mod accessor_tests {
         assert_eq!(u32::from_ne_bytes(out), 7);
         write_user_bytes(base, b"abc").unwrap();
         assert_eq!(&buf[1..4], b"abc");
+    }
+
+    /// The UserPod types other callers read: integers and arrays of them
+    /// (e.g. a timespec as `[i64; 2]`).
+    #[test]
+    fn user_pod_arrays_and_signed_integers_read_back() {
+        let mut buf = [0u8; 40];
+        let base = buf.as_mut_ptr() as usize + 3;
+        write_user::<[i64; 2]>(base, [-5, 7]).unwrap();
+        assert_eq!(read_user::<[i64; 2]>(base).unwrap(), [-5, 7]);
+        assert_eq!(read_user::<i64>(base).unwrap(), -5);
+        assert_eq!(read_user_index::<usize>(base, 1).unwrap(), 7);
+        // SAFETY: as for read_user; the address is a valid host buffer.
+        assert_eq!(
+            unsafe { copy_from_user::<[u32; 2]>(base) }.unwrap()[0],
+            -5i32 as u32
+        );
+    }
+
+    #[test]
+    fn read_user_cstr_reads_across_chunks_and_enforces_the_limit() {
+        // Longer than one 256-byte chunk, from a misaligned start.
+        let mut text = alloc::vec![b'x'; 700];
+        text.push(0);
+        let mut buf = alloc::vec![0u8; 1];
+        buf.extend_from_slice(&text);
+        let addr = buf.as_ptr() as usize + 1;
+        assert_eq!(read_user_cstr(addr, 700).unwrap().len(), 700);
+        // One byte over the limit: the NUL is never reached.
+        assert_eq!(
+            read_user_cstr(addr, 699),
+            Err(SyscallError::InvalidArgument)
+        );
+        assert!(read_user_cstr(0, 10).is_err());
+        assert!(read_user_cstr(KERNEL_ADDR, 10).is_err());
+        // The source covers max_len + 1 bytes: the reader copies that
+        // much in one chunk before it looks for the NUL.
+        let bad = [0xffu8, 0, 0, 0, 0];
+        assert_eq!(
+            read_user_cstr(bad.as_ptr() as usize, 4),
+            Err(SyscallError::InvalidArgument)
+        );
     }
 
     /// Encode a Linux ioctl number: dir(2) | size(14) | type(8) | nr(8).
