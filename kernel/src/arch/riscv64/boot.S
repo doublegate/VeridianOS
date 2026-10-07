@@ -6,12 +6,21 @@
 veridian_dtb_pa:
     .dword 0
 
+.global veridian_boot_hartid
+# Hart id of the boot hart, which SBI passes in a0. It need not be 0
+# (OpenSBI picks the boot hart), so it is saved before the registers are
+# cleared below.
+veridian_boot_hartid:
+    .dword 0
+
 .section .text.boot
 .global _start
 
 _start:
     la t0, veridian_dtb_pa
     sd a1, 0(t0)
+    la t0, veridian_boot_hartid
+    sd a0, 0(t0)
 
     # Use SBI console putchar (ecall) for output
     # SBI legacy extension: function ID 0x01 for putchar

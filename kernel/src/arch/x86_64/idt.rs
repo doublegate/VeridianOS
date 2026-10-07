@@ -23,7 +23,7 @@ use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame, Pag
 /// `boot_return_to_kernel`.
 unsafe fn gs_to_syscall_state() {
     let gs_base = x86_64::registers::model_specific::GsBase::read().as_u64();
-    if gs_base != crate::arch::x86_64::syscall::per_cpu_data_ptr() as u64 {
+    if !crate::arch::percpu::is_arch_cpu_block(gs_base) {
         // SAFETY: the caller's contract; swapgs only exchanges the GS base
         // MSRs.
         unsafe { core::arch::asm!("swapgs", options(nomem, nostack)) };

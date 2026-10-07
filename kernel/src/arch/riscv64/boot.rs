@@ -9,8 +9,24 @@ use core::arch::global_asm;
 // Include the assembly boot code
 global_asm!(include_str!("boot.S"));
 
+extern "C" {
+    /// Boot hart id saved by boot.S from `a0`.
+    static veridian_boot_hartid: u64;
+}
+
+/// Hardware id of the boot hart.
+pub fn boot_hartid() -> u64 {
+    // SAFETY: written once by boot.S before any Rust code runs; read-only
+    // afterwards.
+    unsafe { core::ptr::addr_of!(veridian_boot_hartid).read_volatile() }
+}
+
 #[no_mangle]
 pub extern "C" fn _start_rust() -> ! {
+    // The boot hart is logical CPU 0; `tp` now points at its per-CPU block.
+    // SAFETY: first Rust code on the boot hart, before anything reads `tp`.
+    unsafe { crate::arch::percpu::install(0, boot_hartid() as u32) };
+
     // SAFETY: sbi_putchar invokes the SBI legacy console putchar (ecall with
     // a7=0x01). Used for early boot output before any Rust infrastructure is
     // available. Always safe to call from supervisor mode.

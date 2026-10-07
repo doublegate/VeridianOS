@@ -9,12 +9,7 @@
 
 #![allow(function_casts_as_integer)]
 
-use core::{
-    cell::UnsafeCell,
-    sync::atomic::{AtomicU64, Ordering},
-};
-
-use crate::syscall::syscall_handler;
+use crate::{arch::percpu::this_arch_cpu_ptr, syscall::syscall_handler};
 
 /// Saved user register frame from SYSCALL entry.
 ///
@@ -43,28 +38,30 @@ pub struct SyscallFrame {
     pub rcx: u64, // User RIP (clobbered by SYSCALL)
 }
 
-/// Kernel stack pointer after all user registers are saved in syscall_entry.
-/// Points to a valid `SyscallFrame` during syscall handler execution.
-/// Set to 0 outside of syscall context.
-static SYSCALL_FRAME_PTR: AtomicU64 = AtomicU64::new(0);
-
-/// Get a reference to the saved syscall register frame.
+/// Get a reference to the saved syscall register frame of the syscall this
+/// CPU is executing.
 ///
 /// Only valid during syscall handler execution. Returns `None` if called
-/// outside of a syscall context.
+/// outside of a syscall context. The pointer is per CPU (`gs:[0x10]`), so
+/// with more than one CPU a syscall never reads another CPU's frame (N-35).
 ///
 /// # Safety
 /// The returned reference points to the kernel stack. It is valid only while
 /// the syscall handler is executing (before registers are popped on return).
 pub fn get_syscall_frame() -> Option<&'static SyscallFrame> {
-    let ptr = SYSCALL_FRAME_PTR.load(Ordering::Acquire);
+    let cpu = this_arch_cpu_ptr();
+    if !crate::arch::percpu::is_arch_cpu_block(cpu as u64) {
+        return None;
+    }
+    // SAFETY: `cpu` is this CPU's block (checked); only this CPU writes it.
+    let ptr = unsafe { (*cpu).syscall_frame };
     if ptr == 0 {
         return None;
     }
-    // SAFETY: SYSCALL_FRAME_PTR is set by syscall_entry to point to the
-    // kernel stack after all registers are pushed. The pointer is valid
-    // for the duration of the syscall handler. The SyscallFrame layout
-    // matches the exact push order in the assembly.
+    // SAFETY: syscall_entry stores the kernel stack address after all
+    // registers are pushed, and clears it before they are popped, so a
+    // non-zero value is a live SyscallFrame for the duration of the
+    // handler. The layout matches the push order in the assembly.
     Some(unsafe { &*(ptr as *const SyscallFrame) })
 }
 
@@ -72,49 +69,27 @@ pub fn get_syscall_frame() -> Option<&'static SyscallFrame> {
 ///
 /// Only valid during syscall handler execution.
 pub fn get_saved_user_rsp() -> u64 {
-    // SAFETY: PER_CPU_AREA.user_rsp is set by syscall_entry (mov gs:[0x8], rsp)
-    // before switching to the kernel stack. It is valid during syscall handling.
-    unsafe { (*PER_CPU_AREA.0.get()).user_rsp }
+    // SAFETY: this CPU's block; syscall_entry stores user_rsp (gs:[0x8])
+    // before switching to the kernel stack.
+    unsafe { (*this_arch_cpu_ptr()).user_rsp }
 }
 
-/// Per-CPU data accessed via GS segment register during syscall entry/exit.
-///
-/// The `syscall_entry` naked asm reads `kernel_rsp` from `gs:[0x0]` and saves
-/// `user_rsp` to `gs:[0x8]`. This struct must be `#[repr(C)]` to guarantee
-/// field layout matches the assembly offsets.
-#[repr(C)]
-pub struct PerCpuData {
-    /// Kernel stack pointer (offset 0x0) -- loaded into RSP on syscall entry
-    pub kernel_rsp: u64,
-    /// User stack pointer (offset 0x8) -- saved from RSP on syscall entry
-    pub user_rsp: u64,
-}
-
-#[repr(transparent)]
-pub(super) struct PerCpuDataCell(UnsafeCell<PerCpuData>);
-
-// SAFETY: Per-CPU data is only accessed via GS register from the current CPU
-// during syscall entry/exit. On a single-CPU system (our current QEMU config),
-// there are no concurrent accesses. The naked asm in syscall_entry uses
-// `mov gs:[offset]` which does not go through Rust's aliasing rules.
-unsafe impl Sync for PerCpuDataCell {}
-
-pub(super) static PER_CPU_AREA: PerCpuDataCell = PerCpuDataCell(UnsafeCell::new(PerCpuData {
-    kernel_rsp: 0,
-    user_rsp: 0,
-}));
+/// Per-CPU data accessed via GS during syscall entry/exit: the architecture
+/// per-CPU block (`kernel_rsp` at `gs:[0x0]`, `user_rsp` at `gs:[0x8]`,
+/// `syscall_frame` at `gs:[0x10]`).
+pub type PerCpuData = crate::arch::percpu::ArchCpu;
 
 // CR3 switching removed: Process page tables now contain complete kernel
 // mapping (L4 entries 256-511 copied from boot tables), so syscalls run
 // with user CR3 active. This eliminates the GP fault on CR3 restore that
 // occurred when switching back to incompatible user page tables.
 
-/// Get a mutable pointer to the per-CPU data.
+/// Get a mutable pointer to the calling CPU's per-CPU data.
 ///
-/// Used to update `kernel_rsp` on context switch and to set up KernelGsBase
-/// during init. The returned pointer is valid for the lifetime of the kernel.
+/// Used to update `kernel_rsp` on context switch. The returned pointer is
+/// valid for the lifetime of the kernel.
 pub fn per_cpu_data_ptr() -> *mut PerCpuData {
-    PER_CPU_AREA.0.get()
+    this_arch_cpu_ptr()
 }
 
 /// x86_64 SYSCALL instruction entry point
@@ -163,7 +138,7 @@ pub unsafe extern "C" fn syscall_entry() {
         // RSP now points to the complete SyscallFrame on the kernel stack.
         // fork_process() reads this to give the child a copy of the parent's
         // live registers instead of the stale ThreadContext from exec/load.
-        "mov [{frame_ptr}], rsp",
+        "mov gs:[0x10], rsp",        // this CPU's frame pointer (N-35)
 
         // Save user SSE registers (xmm0-xmm15).
         // The kernel is compiled with +sse2 and LLVM may use XMM registers
@@ -205,7 +180,7 @@ pub unsafe extern "C" fn syscall_entry() {
 
         // Clear frame pointer now that handler has returned.
         // This prevents stale pointer use outside syscall context.
-        "mov qword ptr [{frame_ptr}], 0",
+        "mov qword ptr gs:[0x10], 0",
 
         // Restore user SSE registers (xmm0-xmm15)
         "movdqu xmm0,  [rsp]",
@@ -249,7 +224,6 @@ pub unsafe extern "C" fn syscall_entry() {
         "sysretq",
 
         handler = sym syscall_handler,
-        frame_ptr = sym SYSCALL_FRAME_PTR,
     );
 }
 
@@ -265,7 +239,7 @@ pub unsafe extern "C" fn syscall_entry() {
 /// Must be called after `gdt::init()` and before any user-mode transitions.
 pub fn init_syscall() {
     use x86_64::registers::{
-        model_specific::{Efer, EferFlags, KernelGsBase, LStar, SFMask, Star},
+        model_specific::{Efer, EferFlags, LStar, SFMask, Star},
         rflags::RFlags,
     };
 
@@ -338,6 +312,10 @@ pub fn init_syscall() {
     // kernel mappings (L4 entries 256-511), so syscalls run with user CR3
     // and can directly access kernel data structures.
 
-    let per_cpu_addr = per_cpu_data_ptr() as u64;
-    KernelGsBase::write(x86_64::VirtAddr::new(per_cpu_addr));
+    // The boot CPU is logical CPU 0; its hardware id is the initial APIC ID.
+    // SAFETY: CPUID leaf 1 is unprivileged and side-effect free.
+    let apic_id = unsafe { core::arch::x86_64::__cpuid(1).ebx >> 24 };
+    // SAFETY: runs once on the boot CPU, before any syscall or other use of
+    // its per-CPU block.
+    unsafe { crate::arch::percpu::install(0, apic_id) };
 }

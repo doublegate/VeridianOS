@@ -5,6 +5,8 @@
 //! interface (serial, boot, context switching, interrupts) that the
 //! architecture-independent kernel code uses.
 
+pub mod percpu;
+
 #[cfg(target_arch = "x86_64")]
 pub mod x86_64;
 

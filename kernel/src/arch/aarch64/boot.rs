@@ -32,6 +32,15 @@ pub unsafe extern "C" fn _start_rust() -> ! {
         uart_write_str("[BOOT] Preparing to enter kernel_main...\n");
     }
 
+    // The boot CPU is logical CPU 0; TPIDR_EL1 now points at its per-CPU
+    // block. Its hardware id is the MPIDR affinity (Aff0..Aff2).
+    let mpidr: u64;
+    // SAFETY: reading MPIDR_EL1 at EL1 has no side effects.
+    unsafe { core::arch::asm!("mrs {}, mpidr_el1", out(reg) mpidr, options(nomem, nostack)) };
+    // SAFETY: first Rust code on the boot CPU, before anything reads
+    // TPIDR_EL1.
+    unsafe { crate::arch::percpu::install(0, (mpidr & 0x00FF_FFFF) as u32) };
+
     // Arm boot-stack overflow detection before anything deep runs.
     crate::arch::stack_canary::install();
 

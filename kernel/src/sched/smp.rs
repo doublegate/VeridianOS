@@ -410,50 +410,11 @@ pub fn current_cpu_id() -> u8 {
     if !SECONDARY_CPUS_ONLINE.load(core::sync::atomic::Ordering::Acquire) {
         return 0;
     }
-    #[cfg(target_arch = "x86_64")]
-    {
-        // SAFETY: CPUID leaf 0x1 is an unprivileged read-only instruction.
-        // The initial APIC ID is in bits 31:24 of EBX. This is safe to call
-        // at any time on x86_64.
-        unsafe {
-            use core::arch::x86_64::__cpuid;
-            let cpuid = __cpuid(0x1);
-            ((cpuid.ebx >> 24) & 0xFF) as u8
-        }
-    }
-
-    #[cfg(target_arch = "aarch64")]
-    {
-        // SAFETY: MPIDR_EL1 is a read-only system register accessible from
-        // EL1 (kernel mode). Bits [7:0] (Aff0) contain the CPU thread ID
-        // within the core. Reading has no side effects.
-        unsafe {
-            let mpidr: u64;
-            core::arch::asm!("mrs {}, MPIDR_EL1", out(reg) mpidr);
-            (mpidr & 0xFF) as u8
-        }
-    }
-
-    #[cfg(any(target_arch = "riscv32", target_arch = "riscv64"))]
-    {
-        // The kernel runs in S-mode, where reading the M-mode CSR mhartid is
-        // an illegal instruction (it was, and restarted boot -- N-13). The
-        // logical CPU ID lives in `tp` instead: boot.S zeroes it on the BSP,
-        // and secondary harts will set it when they are brought up.
-        //
-        // INVARIANT (N-14): `tp` is the user thread pointer in U-mode, so it
-        // is attacker-controlled on entry from user space. Any trap path
-        // from U-mode must swap the kernel `tp` back in (kept in sscratch
-        // while user code runs, as Linux does) before reaching code that
-        // calls this. There is no U-mode entry on riscv64 yet.
-        // SAFETY: reading a general-purpose register has no side effects;
-        // the kernel does not use `tp` for thread-local storage.
-        unsafe {
-            let cpu: usize;
-            core::arch::asm!("mv {}, tp", out(reg) cpu, options(nomem, nostack));
-            cpu as u8
-        }
-    }
+    // Each CPU's logical id is in its architecture per-CPU block, reached
+    // through a register (x86 GS-base MSRs, TPIDR_EL1, tp); see
+    // arch::percpu. Hardware ids (APIC ID, MPIDR, hartid) are not logical
+    // ids and are never used as indices.
+    crate::arch::percpu::this_cpu_id() as u8
 }
 
 /// Send inter-processor interrupt

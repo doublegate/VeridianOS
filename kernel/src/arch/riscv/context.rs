@@ -286,8 +286,9 @@ pub unsafe extern "C" fn context_switch(current: *mut RiscVContext, next: *const
             "sd sp, 8(a0)",
             // Save global pointer
             "sd gp, 16(a0)",
-            // Save thread pointer
-            "sd tp, 24(a0)",
+            // tp is not part of the kernel context: it holds this CPU's
+            // per-CPU block (arch::percpu) and stays put across switches.
+            // The slot at 24 is the thread's user TLS pointer.
             // Save temporary registers
             "sd t0, 32(a0)",
             "sd t1, 40(a0)",
@@ -346,7 +347,6 @@ pub unsafe extern "C" fn context_switch(current: *mut RiscVContext, next: *const
             "ld ra, 0(a1)",
             "ld sp, 8(a1)",
             "ld gp, 16(a1)",
-            "ld tp, 24(a1)",
             // Load temporary registers
             "ld t0, 32(a1)",
             "ld t1, 40(a1)",
@@ -545,14 +545,12 @@ pub fn restore_fpu_state(state: &FpuState) {
 /// needed for per-CPU data structures.
 #[allow(dead_code)] // SMP API -- needed for multi-hart support
 pub fn hart_id() -> usize {
-    // mhartid is an M-mode CSR and traps in S-mode; the kernel keeps the
-    // logical CPU ID in `tp` (see sched::smp::current_cpu_id).
-    // SAFETY: reading a general-purpose register has no side effects.
-    unsafe {
-        let id: usize;
-        asm!("mv {}, tp", out(reg) id, options(nomem, nostack));
-        id
-    }
+    // mhartid is an M-mode CSR and traps in S-mode; the hart id is kept in
+    // the per-CPU block that `tp` points at (arch::percpu).
+    let cpu = crate::arch::percpu::this_arch_cpu_ptr();
+    // SAFETY: `tp` points at this hart's ARCH_CPUS block from the first
+    // Rust instruction on; `hw_id` is written before the hart runs.
+    unsafe { (*cpu).hw_id as usize }
 }
 
 /// Load context for first time (no previous context to save)
@@ -587,7 +585,6 @@ pub unsafe extern "C" fn load_context(context: *const RiscVContext) {
             "ld ra, 0(a0)",
             "ld sp, 8(a0)",
             "ld gp, 16(a0)",
-            "ld tp, 24(a0)",
             // Load temporary registers
             "ld t0, 32(a0)",
             "ld t1, 40(a0)",
