@@ -507,6 +507,10 @@ impl VfsNode for EpollNode {
         NodeType::CharDevice
     }
 
+    fn is_stream(&self) -> bool {
+        true
+    }
+
     fn read(&self, _offset: usize, _buffer: &mut [u8]) -> Result<usize, KernelError> {
         Err(KernelError::PermissionDenied {
             operation: "read epoll",

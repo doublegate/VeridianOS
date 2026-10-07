@@ -57,6 +57,11 @@ impl VfsNode for DevNode {
         self.node_type
     }
 
+    /// Terminals are streams; null, zero and random take any offset.
+    fn is_stream(&self) -> bool {
+        matches!(self.name.as_str(), "console" | "tty0")
+    }
+
     fn read(&self, _offset: usize, buffer: &mut [u8]) -> Result<usize, KernelError> {
         // Special handling for common devices
         match self.name.as_str() {

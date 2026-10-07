@@ -189,6 +189,16 @@
 
 ### Security
 
+- **pread/pwrite, truncate/ftruncate and mkdir check access (N-190 to N-192).** `pwrite` worked
+  through a read-only fd and `pread` through a write-only one, `ftruncate` through any fd,
+  `truncate` and `mkdir` checked no permission at all, so any user could empty a file it could
+  not write or create directories anywhere. They now follow Linux: EBADF for the wrong access
+  mode, EINVAL from `ftruncate` unless the fd is a regular file open for writing, EACCES without
+  write permission on the file (`truncate`) or the parent (`mkdir`, after EEXIST as `mkdir -p`
+  expects), EINVAL for a negative offset or length, EISDIR for a directory. Pipes, sockets,
+  terminals and event fds are streams (`VfsNode::is_stream`): `pread`, `pwrite` and `lseek` on
+  them are ESPIPE, and a pipe reports `S_IFIFO` instead of a character device. Runtime tests
+  `pread_pwrite_ftruncate_checks`, `nonroot_truncate_mkdir_denied`.
 - **Kernel path lookups no longer use the calling process's root (N-251).** Every lookup used
   the current thread's root, working directory and credentials, so kernel code running during a
   system call -- the audit log, the package manager -- resolved paths inside a chrooted caller's

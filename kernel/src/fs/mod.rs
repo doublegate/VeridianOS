@@ -400,6 +400,13 @@ pub trait VfsNode: Send + Sync {
         0x0001 | 0x0004 // POLLIN | POLLOUT
     }
 
+    /// Whether the node is a stream with no file position -- a pipe,
+    /// socket, terminal or event object -- so lseek, pread and pwrite on
+    /// it are ESPIPE, as for Linux's nonseekable files.
+    fn is_stream(&self) -> bool {
+        matches!(self.node_type(), NodeType::Pipe | NodeType::Socket)
+    }
+
     /// Whether every readiness change of this node calls
     /// [`crate::sched::dispatch::io_event`]. Waiters on such a node sleep
     /// until woken; on any other they also re-check periodically.

@@ -692,6 +692,10 @@ impl crate::fs::VfsNode for SerialConsoleNode {
         crate::fs::NodeType::CharDevice
     }
 
+    fn is_stream(&self) -> bool {
+        true
+    }
+
     fn read(&self, _offset: usize, buffer: &mut [u8]) -> Result<usize, KernelError> {
         // Blocking read from serial (same logic as sys_read stdin fallback)
         #[cfg(target_arch = "x86_64")]

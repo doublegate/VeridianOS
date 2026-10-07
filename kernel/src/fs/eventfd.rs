@@ -265,6 +265,10 @@ impl VfsNode for EventFdNode {
         NodeType::CharDevice
     }
 
+    fn is_stream(&self) -> bool {
+        true
+    }
+
     fn read(&self, _offset: usize, buffer: &mut [u8]) -> Result<usize, KernelError> {
         if buffer.len() < 8 {
             return Err(KernelError::InvalidArgument {

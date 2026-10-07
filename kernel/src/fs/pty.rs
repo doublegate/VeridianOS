@@ -519,6 +519,10 @@ impl VfsNode for PtyMasterNode {
         NodeType::CharDevice
     }
 
+    fn is_stream(&self) -> bool {
+        true
+    }
+
     /// Read bytes produced by the slave (the program's stdout/stderr).
     fn read(&self, _offset: usize, buffer: &mut [u8]) -> Result<usize, KernelError> {
         self.master.read(buffer)
@@ -609,6 +613,10 @@ impl PtySlaveNode {
 impl VfsNode for PtySlaveNode {
     fn node_type(&self) -> NodeType {
         NodeType::CharDevice
+    }
+
+    fn is_stream(&self) -> bool {
+        true
     }
 
     /// Read bytes that the master wrote (keyboard input / program stdin).

@@ -1811,6 +1811,91 @@ static void test_credentials_and_paths(void)
     report_child("utimensat_owner_rules", pid);
 }
 
+/* --- pread/pwrite, truncate/ftruncate and mkdir checks (N-190..N-192):
+ * the access mode was ignored (pwrite worked through O_RDONLY), streams
+ * accepted an offset, lengths were unsigned, truncate and mkdir checked no
+ * permission. Error order as Linux's ksys_pread64/do_sys_ftruncate. ---- */
+static void test_positioned_io_and_truncate(void)
+{
+    int fails = 0;
+    char c = 'x';
+    write_file("/tmp/audit_pio", "abcdef", 0644);
+    int rd = open("/tmp/audit_pio", O_RDONLY);
+    errno = 0;
+    if (pwrite(rd, &c, 1, 0) != -1 || errno != EBADF)
+        fails |= 1;                             /* not open for writing */
+    errno = 0;
+    if (ftruncate(rd, 0) != -1 || errno != EINVAL)
+        fails |= 2;                             /* not open for writing */
+    errno = 0;
+    if (pread(rd, &c, 1, -1) != -1 || errno != EINVAL)
+        fails |= 4;                             /* negative offset */
+    close(rd);
+    int wr = open("/tmp/audit_pio", O_WRONLY);
+    errno = 0;
+    if (pread(wr, &c, 1, 0) != -1 || errno != EBADF)
+        fails |= 8;                             /* not open for reading */
+    errno = 0;
+    if (ftruncate(wr, -1) != -1 || errno != EINVAL)
+        fails |= 16;                            /* negative length */
+    if (ftruncate(wr, 3) != 0)
+        fails |= 32;
+    close(wr);
+    int p[2];
+    if (pipe(p) == 0) {
+        errno = 0;
+        if (pread(p[0], &c, 1, 0) != -1 || errno != ESPIPE)
+            fails |= 64;                        /* a stream has no offset */
+        errno = 0;
+        if (pwrite(p[1], &c, 1, 0) != -1 || errno != ESPIPE)
+            fails |= 128;
+        errno = 0;
+        if (lseek(p[0], 0, SEEK_SET) != -1 || errno != ESPIPE)
+            fails |= 2048;
+        struct stat pst = {0};
+        if (fstat(p[0], &pst) != 0 || !S_ISFIFO(pst.st_mode))
+            fails |= 4096;                      /* a pipe is a FIFO */
+        close(p[0]);
+        close(p[1]);
+    } else {
+        fails |= 64;
+    }
+    errno = 0;
+    if (truncate("/tmp", 0) != -1 || errno != EISDIR)
+        fails |= 256;
+    errno = 0;
+    if (truncate("/tmp/audit_pio", -1) != -1 || errno != EINVAL)
+        fails |= 512;
+    struct stat st = {0};
+    if (stat("/tmp/audit_pio", &st) != 0 || st.st_size != 3)
+        fails |= 1024;
+    static char why[64];
+    snprintf(why, sizeof(why), "bitmask of failures %d", fails);
+    report("pread_pwrite_ftruncate_checks", fails == 0, why);
+
+    /* As a user: no write permission on the file or the directory. */
+    write_file("/tmp/audit_ro", "data", 0644);  /* root-owned */
+    mkdir("/tmp/audit_rodir", 0755);
+    rmdir("/tmp/audit_rodir/sub");
+    pid_t pid = fork();
+    if (pid == 0) {
+        int child_fails = 0;
+        if (setuid(1000) != 0)
+            _exit(100);
+        errno = 0;
+        if (truncate("/tmp/audit_ro", 0) != -1 || errno != EACCES)
+            child_fails |= 1;
+        errno = 0;
+        if (mkdir("/tmp/audit_rodir/sub", 0755) != -1 || errno != EACCES)
+            child_fails |= 2;
+        _exit(child_fails);
+    }
+    report_child("nonroot_truncate_mkdir_denied", pid);
+    int kept = stat("/tmp/audit_ro", &st) == 0 && st.st_size == 4 &&
+               stat("/tmp/audit_rodir/sub", &st) != 0;
+    report("nonroot_truncate_mkdir_left_no_trace", kept, "file truncated or directory created");
+}
+
 int main(int argc, char **argv)
 {
     setvbuf(stdout, NULL, _IONBF, 0);
@@ -1854,6 +1939,7 @@ int main(int argc, char **argv)
     test_map_fixed_replace();
     test_stop_continue();
     test_credentials_and_paths();
+    test_positioned_io_and_truncate();
     printf("AUDIT-RUNTIME: %d/%d\n", passed, total);
     return passed == total ? 0 : 1;
 }

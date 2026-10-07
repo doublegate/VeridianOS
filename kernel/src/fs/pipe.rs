@@ -241,7 +241,7 @@ impl PipeReadNode {
 
 impl VfsNode for PipeReadNode {
     fn node_type(&self) -> NodeType {
-        NodeType::CharDevice
+        NodeType::Pipe
     }
 
     fn read(&self, _offset: usize, buffer: &mut [u8]) -> Result<usize, KernelError> {
@@ -277,7 +277,7 @@ impl VfsNode for PipeReadNode {
     fn metadata(&self) -> Result<Metadata, KernelError> {
         Ok(Metadata {
             size: 0,
-            node_type: NodeType::CharDevice,
+            node_type: NodeType::Pipe,
             permissions: Permissions::from_mode(0o444),
             uid: 0,
             gid: 0,
@@ -339,7 +339,7 @@ impl PipeWriteNode {
 
 impl VfsNode for PipeWriteNode {
     fn node_type(&self) -> NodeType {
-        NodeType::CharDevice
+        NodeType::Pipe
     }
 
     fn read(&self, _offset: usize, _buffer: &mut [u8]) -> Result<usize, KernelError> {
@@ -371,7 +371,7 @@ impl VfsNode for PipeWriteNode {
     fn metadata(&self) -> Result<Metadata, KernelError> {
         Ok(Metadata {
             size: 0,
-            node_type: NodeType::CharDevice,
+            node_type: NodeType::Pipe,
             permissions: Permissions::from_mode(0o222),
             uid: 0,
             gid: 0,

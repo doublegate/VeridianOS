@@ -298,6 +298,10 @@ impl VfsNode for SignalFdNode {
         NodeType::CharDevice
     }
 
+    fn is_stream(&self) -> bool {
+        true
+    }
+
     fn read(&self, _offset: usize, buffer: &mut [u8]) -> Result<usize, KernelError> {
         if buffer.len() < 128 {
             return Err(KernelError::InvalidArgument {

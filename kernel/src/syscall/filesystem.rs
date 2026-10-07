@@ -707,6 +707,10 @@ pub fn sys_seek(fd: usize, offset: isize, whence: usize) -> SyscallResult {
         .lock()
         .get(fd)
         .ok_or(SyscallError::BadFileDescriptor)?;
+    // A pipe, socket or terminal has no position (N-190).
+    if file_desc.node.is_stream() {
+        return Err(SyscallError::IllegalSeek);
+    }
 
     // Convert whence to SeekFrom
     let seek_from = match whence {
@@ -753,28 +757,33 @@ pub fn sys_stat(fd: usize, stat_buf: usize) -> SyscallResult {
     Ok(0)
 }
 
-/// Truncate a file
-///
-/// # Arguments
-/// - fd: File descriptor
-/// - size: New file size
-pub fn sys_truncate(fd: usize, size: usize) -> SyscallResult {
-    // Get current process
-    let process = process::current_process().ok_or(SyscallError::InvalidState)?;
+/// An `loff_t` argument (an offset or a length): negative is EINVAL.
+fn file_offset(value: usize) -> Result<usize, SyscallError> {
+    if (value as i64) < 0 {
+        Err(SyscallError::InvalidArgument)
+    } else {
+        Ok(value)
+    }
+}
 
-    // Get file descriptor
+/// ftruncate: the fd must be a regular file open for writing, else EINVAL;
+/// a negative length is EINVAL before the fd is looked at (N-191).
+pub fn sys_ftruncate(fd: usize, length: usize) -> SyscallResult {
+    let length = file_offset(length)?;
+    let process = process::current_process().ok_or(SyscallError::InvalidState)?;
     // Lookup only; the lock is not held over the operation (N-118).
-    let file_desc = process
+    let file = process
         .file_table
         .lock()
         .get(fd)
         .ok_or(SyscallError::BadFileDescriptor)?;
-
-    // Truncate file
-    match file_desc.node.truncate(size) {
-        Ok(_) => Ok(0),
-        Err(e) => Err(super::map_kernel_error(e)),
+    if file.node.node_type() != crate::fs::NodeType::File || !file.flags.write {
+        return Err(SyscallError::InvalidArgument);
     }
+    file.node
+        .truncate(length)
+        .map(|_| 0)
+        .map_err(super::map_kernel_error)
 }
 
 /// Create a directory
@@ -783,23 +792,25 @@ pub fn sys_truncate(fd: usize, size: usize) -> SyscallResult {
 /// - path: Path to new directory
 /// - mode: Directory permissions
 pub fn sys_mkdir(path: usize, mode: usize) -> SyscallResult {
-    // Validate path pointer is in user space
-    validate_user_string_ptr(path)?;
-
     // Copied in through the fault-tolerant reader (N-43).
-    let path_owned = read_user_path(path)?;
-    let path_str = path_owned.as_str();
+    make_directory(&read_user_path(path)?, mode)
+}
 
-    // Create directory through VFS
-    let permissions = creation_perms(mode);
-    let vfs_guard = vfs()?;
-    match vfs_guard.mkdir(path_str, permissions) {
-        Ok(node) => {
-            own_new_node(&node);
-            Ok(0)
-        }
-        Err(e) => Err(super::map_kernel_error(e)),
+/// mkdir and mkdirat, in Linux's order: an existing name (a symlink is not
+/// followed) is EEXIST, which `mkdir -p` relies on, before write and search
+/// permission on the parent is required (N-192: mkdir checked none).
+fn make_directory(path: &str, mode: usize) -> SyscallResult {
+    match vfs()?.resolve_path_no_follow(path) {
+        Ok(_) => return Err(SyscallError::FileExists),
+        Err(e) if is_not_found(&e) => {}
+        Err(e) => return Err(map_resolve_err(e)),
     }
+    require_dir_write(path)?;
+    let node = vfs()?
+        .mkdir(path, creation_perms(mode))
+        .map_err(super::map_kernel_error)?;
+    own_new_node(&node);
+    Ok(0)
 }
 
 /// Remove a directory
@@ -2798,17 +2809,23 @@ pub fn sys_umask(mask: usize) -> SyscallResult {
     }
 }
 
-/// Truncate a file by path (syscall 188).
-pub fn sys_truncate_path(path_ptr: usize, size: usize) -> SyscallResult {
+/// truncate: set the length of the regular file at `path` (EISDIR for a
+/// directory, EINVAL for anything else), which needs write permission on
+/// it; a negative length is EINVAL before the lookup (N-191).
+pub fn sys_truncate(path_ptr: usize, length: usize) -> SyscallResult {
+    let length = file_offset(length)?;
     let path = read_user_path(path_ptr)?;
-
-    let vfs = vfs()?;
-    let node = vfs.resolve_path(&path).map_err(map_resolve_err)?;
-
-    node.truncate(size)
-        .map_err(|_| SyscallError::InvalidArgument)?;
-
-    Ok(0)
+    let node = vfs()?.resolve_path(&path).map_err(map_resolve_err)?;
+    match node.node_type() {
+        crate::fs::NodeType::File => {}
+        crate::fs::NodeType::Directory => return Err(SyscallError::IsADirectory),
+        _ => return Err(SyscallError::InvalidArgument),
+    }
+    // As opening it for writing would need (N-191).
+    require_open_access(&node, &OpenFlags::write_only())?;
+    node.truncate(length)
+        .map(|_| 0)
+        .map_err(super::map_kernel_error)
 }
 
 /// Poll file descriptors for readiness (syscall 189).
@@ -3121,17 +3138,7 @@ pub fn sys_unlinkat(dirfd: usize, path_ptr: usize, _flags: usize) -> SyscallResu
 /// Create a directory relative to a directory fd (syscall 193).
 pub fn sys_mkdirat(dirfd: usize, path_ptr: usize, mode: usize) -> SyscallResult {
     let rel_path = read_user_path(path_ptr)?;
-    let abs_path = resolve_at_path(dirfd, &rel_path)?;
-    require_dir_write(&abs_path)?;
-
-    let permissions = creation_perms(mode);
-    let vfs_guard = vfs()?;
-    let node = vfs_guard
-        .mkdir(&abs_path, permissions)
-        .map_err(super::map_kernel_error)?;
-    own_new_node(&node);
-
-    Ok(0)
+    make_directory(&resolve_at_path(dirfd, &rel_path)?, mode)
 }
 
 /// Rename a file relative to directory fds (syscall 194).
@@ -3146,14 +3153,15 @@ pub fn sys_renameat(
     rename_entry(&old_abs, &new_abs)
 }
 
-/// Read from a file descriptor at a given offset without changing position
-/// (syscall 195).
-pub fn sys_pread(fd: usize, buf: usize, count: usize, offset: usize) -> SyscallResult {
-    if count == 0 {
-        return Ok(0);
-    }
-    validate_user_buffer(buf, count)?;
-
+/// The file behind `fd` for pread/pwrite, in Linux's order: a negative
+/// offset is EINVAL, then an unknown fd EBADF, then a stream (pipe, socket,
+/// terminal, event fd), which has no offset, ESPIPE (N-190). The access
+/// mode is the caller's check.
+fn positioned_file(
+    fd: usize,
+    offset: usize,
+) -> Result<alloc::sync::Arc<crate::fs::file::File>, SyscallError> {
+    file_offset(offset)?;
     let proc = process::current_process().ok_or(SyscallError::InvalidState)?;
     // Lookup only; the lock is not held over the operation (N-118).
     let file = proc
@@ -3161,6 +3169,26 @@ pub fn sys_pread(fd: usize, buf: usize, count: usize, offset: usize) -> SyscallR
         .lock()
         .get(fd)
         .ok_or(SyscallError::BadFileDescriptor)?;
+    if file.node.is_stream() {
+        return Err(SyscallError::IllegalSeek);
+    }
+    Ok(file)
+}
+
+/// Read from a file descriptor at a given offset without changing position
+/// (syscall 195).
+pub fn sys_pread(fd: usize, buf: usize, count: usize, offset: usize) -> SyscallResult {
+    let file = positioned_file(fd, offset)?;
+    if !file.flags.read {
+        return Err(SyscallError::BadFileDescriptor);
+    }
+    if file.node.node_type() == crate::fs::NodeType::Directory {
+        return Err(SyscallError::IsADirectory);
+    }
+    if count == 0 {
+        return Ok(0);
+    }
+    validate_user_buffer(buf, count)?;
 
     // Read at `offset` through the VfsNode, bypassing the File position,
     // a chunk at a time through a kernel buffer (N-43).
@@ -3175,18 +3203,14 @@ pub fn sys_pread(fd: usize, buf: usize, count: usize, offset: usize) -> SyscallR
 /// Write to a file descriptor at a given offset without changing position
 /// (syscall 196).
 pub fn sys_pwrite(fd: usize, buf: usize, count: usize, offset: usize) -> SyscallResult {
+    let file = positioned_file(fd, offset)?;
+    if !file.flags.write {
+        return Err(SyscallError::BadFileDescriptor);
+    }
     if count == 0 {
         return Ok(0);
     }
     validate_user_buffer(buf, count)?;
-
-    let proc = process::current_process().ok_or(SyscallError::InvalidState)?;
-    // Lookup only; the lock is not held over the operation (N-118).
-    let file = proc
-        .file_table
-        .lock()
-        .get(fd)
-        .ok_or(SyscallError::BadFileDescriptor)?;
 
     // Write at `offset` through the VfsNode, a chunk at a time (N-43).
     let mut at = offset;
@@ -3334,6 +3358,22 @@ pub fn sys_select(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// loff_t is signed: a negative offset or length (as a register value)
+    /// is EINVAL, not a huge unsigned one (N-190, N-191).
+    #[test]
+    fn negative_file_offsets_are_invalid() {
+        assert_eq!(file_offset(0), Ok(0));
+        assert_eq!(file_offset(i64::MAX as usize), Ok(i64::MAX as usize));
+        assert_eq!(
+            file_offset(-1i64 as usize),
+            Err(SyscallError::InvalidArgument)
+        );
+        assert_eq!(
+            file_offset(i64::MIN as usize),
+            Err(SyscallError::InvalidArgument)
+        );
+    }
 
     /// pipe2 takes Linux O_CLOEXEC (0x80000) and O_NONBLOCK (0x800); it
     /// tested 0x2000, which no C library sends, and accepted anything.
