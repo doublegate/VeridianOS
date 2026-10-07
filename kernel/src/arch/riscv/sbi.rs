@@ -11,13 +11,15 @@ const SBI_EXT_BASE: usize = 0x10;
 const SBI_EXT_TIMER: usize = 0x54494D45; // "TIME"
 const SBI_EXT_IPI: usize = 0x735049; // "sPI"
 const SBI_EXT_RFENCE: usize = 0x52464E43; // "RFNC"
-#[allow(dead_code)] // SBI extension ID per RISC-V SBI spec
 const SBI_EXT_HSM: usize = 0x48534D; // "HSM"
 #[allow(dead_code)] // SBI extension ID per RISC-V SBI spec
 const SBI_EXT_SRST: usize = 0x53525354; // "SRST"
 
 /// SBI function IDs for timer extension
 const SBI_TIMER_SET_TIMER: usize = 0;
+
+/// SBI HSM function IDs (hart state management).
+const SBI_HSM_HART_START: usize = 0;
 
 /// SBI return value
 #[derive(Debug, Clone, Copy)]
@@ -85,6 +87,19 @@ pub fn get_sbi_impl_version() -> SbiRet {
 }
 
 /// Check if an SBI extension is available
+/// Whether the firmware implements hart state management (needed to start
+/// secondary harts).
+pub fn has_hsm() -> bool {
+    probe_extension(SBI_EXT_HSM)
+}
+
+/// Start stopped hart `hartid` at physical address `start_addr` in S-mode
+/// with the MMU off, `a0 = hartid` and `a1 = opaque` (SBI HSM `hart_start`).
+/// Asynchronous: success means the hart will start, not that it has.
+pub fn hart_start(hartid: usize, start_addr: usize, opaque: usize) -> SbiRet {
+    sbi_call(SBI_EXT_HSM, SBI_HSM_HART_START, hartid, start_addr, opaque)
+}
+
 pub fn probe_extension(extension_id: usize) -> bool {
     let ret = sbi_call(SBI_EXT_BASE, 3, extension_id, 0, 0);
     ret.value != 0

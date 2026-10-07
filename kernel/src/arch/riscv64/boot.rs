@@ -21,6 +21,27 @@ pub fn boot_hartid() -> u64 {
     unsafe { core::ptr::addr_of!(veridian_boot_hartid).read_volatile() }
 }
 
+/// Rust entry of a secondary hart (from `veridian_hart_entry` in boot.S).
+/// Defined in every build because boot.S references it; harts are only
+/// started with the `smp` feature.
+#[no_mangle]
+extern "C" fn veridian_secondary_rust(
+    hartid: usize,
+    args: &'static crate::arch::smp_boot::ApBootArgs,
+) -> ! {
+    let cpu = args.cpu_id.load(core::sync::atomic::Ordering::Acquire) as usize;
+    // SAFETY: first Rust code on this hart; `cpu` is the logical id the
+    // boot hart assigned it, and nothing else touches that block now.
+    unsafe { crate::arch::percpu::install(cpu, hartid as u32) };
+    #[cfg(feature = "smp")]
+    crate::arch::smp_boot::ap_main();
+    #[cfg(not(feature = "smp"))]
+    loop {
+        // SAFETY: waits for an interrupt; supervisor interrupts are off.
+        unsafe { core::arch::asm!("wfi", options(nomem, nostack)) };
+    }
+}
+
 #[no_mangle]
 pub extern "C" fn _start_rust() -> ! {
     // The boot hart is logical CPU 0; `tp` now points at its per-CPU block.

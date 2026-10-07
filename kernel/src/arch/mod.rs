@@ -6,6 +6,34 @@
 //! architecture-independent kernel code uses.
 
 pub mod percpu;
+pub mod smp_boot;
+
+/// Architecture side of secondary-CPU bring-up (see `smp_boot`).
+#[cfg(all(feature = "smp", target_arch = "riscv64", target_os = "none"))]
+pub(crate) use riscv64::smp as smp_arch;
+
+/// Architectures whose secondary bring-up is not implemented yet describe
+/// no secondaries, so the boot CPU runs alone.
+#[cfg(all(feature = "smp", not(all(target_arch = "riscv64", target_os = "none"))))]
+pub(crate) mod smp_arch {
+    use alloc::vec::Vec;
+
+    use super::smp_boot::ApBootArgs;
+
+    pub fn enumerate_secondaries() -> Vec<u32> {
+        Vec::new()
+    }
+    pub fn prepare_boot_args(_args: &ApBootArgs) {}
+    pub fn start_ap(_hw: u32, _args: &'static ApBootArgs) -> Result<(), &'static str> {
+        Err("not implemented on this architecture")
+    }
+    pub fn ap_init() {}
+    pub fn idle() -> ! {
+        loop {
+            core::hint::spin_loop();
+        }
+    }
+}
 
 #[cfg(target_arch = "x86_64")]
 pub mod x86_64;

@@ -10,7 +10,9 @@
 #
 # Usage: scripts/boot-test.sh <x86_64|aarch64|riscv64> [max-seconds]
 # Env:   SETTLE (default 20), LOG_DIR (default target/boot-logs),
-#        QEMU_EXTRA (extra QEMU arguments), SMP (CPU count, default 1)
+#        QEMU_EXTRA (extra QEMU arguments), SMP (CPU count, default 1),
+#        EXPECT_CPUS (require "[SMP] N/N CPUs online" with N = this value;
+#        for kernels built with FEATURES=smp)
 set -u
 
 arch="${1:?usage: boot-test.sh <x86_64|aarch64|riscv64> [max-seconds]}"
@@ -84,6 +86,10 @@ else
     status=FAIL
 fi
 grep -aqE 'KERNEL PANIC|panicked at|BOOTFAIL' "$log" && status=FAIL
+if [[ -n ${EXPECT_CPUS:-} ]]; then
+    grep -aq "\[SMP\] ${EXPECT_CPUS}/${EXPECT_CPUS} CPUs online" "$log" || status=FAIL
+    tally="$tally; $(grep -aoE '\[SMP\] [0-9]+/[0-9]+ CPUs online' "$log" | tail -1)"
+fi
 
 echo "$status $arch: BOOTOK=$(grep -ac BOOTOK "$log") after ${waited}s; ${tally:-no test tally}"
 if [[ $status != PASS ]]; then

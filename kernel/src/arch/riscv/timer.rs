@@ -125,6 +125,22 @@ pub fn start(hz: u32) {
     );
 }
 
+/// Start this hart's tick, at the period the boot hart configured (a
+/// secondary hart). Interrupt delivery still needs sstatus.SIE.
+pub fn start_secondary() {
+    let period = PERIOD.load(Ordering::Relaxed);
+    if period == 0 {
+        return;
+    }
+    let first = read_time() + period;
+    crate::arch::percpu::set_timer_next(first);
+    arm(first);
+    // SAFETY: sets sie.STIE on this hart only.
+    unsafe {
+        core::arch::asm!("csrs sie, {0}", in(reg) SIE_STIE, options(nomem, nostack));
+    }
+}
+
 /// Handle a supervisor timer interrupt (called from the trap handler).
 ///
 /// Re-arms by whole periods so the tick does not drift, skipping ticks that

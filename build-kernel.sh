@@ -47,8 +47,14 @@ build_arch() {
         BUILD_DIR="debug"
     fi
 
+    # Extra cargo features from the environment, e.g. FEATURES=smp.
+    FEATURE_FLAGS=""
+    if [ -n "${FEATURES:-}" ]; then
+        FEATURE_FLAGS="--features ${FEATURES}"
+    fi
+
     # All architectures need -Zbuild-std for bare metal targets
-    if cargo build $RELEASE_FLAG --target "$target" -p veridian-kernel -Zbuild-std=core,compiler_builtins,alloc; then
+    if cargo build $RELEASE_FLAG $FEATURE_FLAGS --target "$target" -p veridian-kernel -Zbuild-std=core,compiler_builtins,alloc; then
         echo -e "${GREEN}$arch build successful!${NC}"
 
         # For x86_64, create bootable disk image using bootloader 0.11+

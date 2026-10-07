@@ -88,3 +88,21 @@ _start:
 1:
     wfi
     j 1b
+
+# Secondary hart entry (SBI HSM hart_start): S-mode, satp = 0, sstatus.SIE =
+# 0, a0 = hartid, a1 = &ApBootArgs (arch/smp_boot.rs). Takes the stack and
+# the per-CPU block from the boot args, installs the trap vector, then
+# enters Rust.
+.global veridian_hart_entry
+veridian_hart_entry:
+    csrw sie, zero
+    csrw sip, zero
+    ld sp, 8(a1)
+    ld tp, 16(a1)
+    csrw sscratch, zero
+    la t0, veridian_riscv_trap
+    csrw stvec, t0
+    call veridian_secondary_rust
+2:
+    wfi
+    j 2b

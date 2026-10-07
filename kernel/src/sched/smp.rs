@@ -313,11 +313,12 @@ static CPU_TOPOLOGY: Mutex<CpuTopology> = Mutex::new(CpuTopology {
 
 /// Initialize SMP support
 pub fn init() {
-    kprintln!("[SMP] Initializing SMP support (BSP only)...");
-
-    // All architectures currently use simplified BSP-only initialization.
-    // Complex topology detection and AP wakeup deferred to Phase 3+.
-
+    // With the `smp` feature, start the other CPUs (stage S1: they park in
+    // an idle loop and run no tasks yet). Without it, the boot CPU runs
+    // alone, as on a single-CPU machine.
+    #[cfg(feature = "smp")]
+    crate::arch::smp_boot::bring_up_secondaries();
+    #[cfg(not(feature = "smp"))]
     kprintln!("[SMP] SMP initialized (BSP only)");
 }
 
