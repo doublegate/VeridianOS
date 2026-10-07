@@ -184,12 +184,13 @@ pub unsafe fn copy_string_array_from_user_tracked(
 
     // Read pointers until we hit null
     loop {
-        validate_user_ptr(current_ptr as *const usize, 8)?; // 64-bit pointer
-                                                            // SAFETY: validate_user_ptr confirmed the 8 bytes are non-null and
-                                                            // lie entirely below USER_SPACE_END. It does NOT prove the page is
-                                                            // mapped (an unmapped page faults into the page-fault handler) or
-                                                            // that `current_ptr` is 8-byte aligned (x86_64 tolerates an
-                                                            // unaligned load; Rust's read_volatile formally requires alignment).
+        // 64-bit pointer
+        validate_user_ptr(current_ptr as *const usize, 8)?;
+        // SAFETY: validate_user_ptr confirmed the 8 bytes are non-null and
+        // lie entirely below USER_SPACE_END. It does NOT prove the page is
+        // mapped (an unmapped page faults into the page-fault handler) or
+        // that `current_ptr` is 8-byte aligned (x86_64 tolerates an
+        // unaligned load; Rust's read_volatile formally requires alignment).
         let string_ptr = unsafe { ptr::read_volatile(current_ptr as *const usize) };
 
         if string_ptr == 0 {
