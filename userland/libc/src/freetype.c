@@ -18,6 +18,7 @@
 #include <freetype/ftbitmap.h>
 #include <freetype/ftmodapi.h>
 #include <freetype/ftsizes.h>
+#include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
 

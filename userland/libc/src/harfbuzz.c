@@ -12,6 +12,7 @@
 
 #include <harfbuzz/hb.h>
 #include <harfbuzz/hb-ft.h>
+#include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
 
