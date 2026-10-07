@@ -136,7 +136,7 @@
   Coverage: 133 Linux calls implemented (118 before, as calls reachable only through the musl
   remap now count).
 - **Every handler behind a Linux number was reviewed against Linux.** About 80 differences are
-  recorded as N-182 to N-250 in `docs/audit/ABI-REVIEW-2026-10-07.md`; those fixed here are listed
+  recorded as N-182 to N-251 in `docs/audit/ABI-REVIEW-2026-10-07.md`; those fixed here are listed
   under Security and Fixed, the rest are scheduled.
 - **Builds treat warnings as errors.** The native libc is built with `-Wall -Wextra -Werror`,
   the rootfs programs and test suites with `-Wall -Wextra`, and the cross-compiler wrapper and
@@ -189,6 +189,16 @@
 
 ### Security
 
+- **Kernel path lookups no longer use the calling process's root (N-251).** Every lookup used
+  the current thread's root, working directory and credentials, so kernel code running during a
+  system call -- the audit log, the package manager -- resolved paths inside a chrooted caller's
+  tree (a chrooted process could have the audit log written to a file it owns) and with its
+  permissions. `Vfs` methods now always use the kernel's view; system calls, exec and the program
+  loader use an explicit caller view (`Vfs::as_caller()`), which does not fall back to the kernel's,
+  so a missing operation fails to compile instead of escaping the chroot. `mount` and `umount`
+  resolve their target in the caller's view and require a directory. Found by the automated
+  security review; tests `kernel_lookups_ignore_the_callers_root`,
+  `caller_mounts_are_placed_inside_its_root`.
 - **A directory fd can no longer act on a different directory.** `fchdir` and `*at` calls
   checked the fd's directory but resolved the path it was opened by, so after that directory was
   renamed and another created at its old name they acted on the newcomer. The recorded path must

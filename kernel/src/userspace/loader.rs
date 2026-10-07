@@ -57,7 +57,9 @@ pub fn load_user_program(
 ) -> Result<ProcessId, KernelError> {
     // Open the file
     let file_node = get_vfs()
-        .open(path, crate::fs::file::OpenFlags::read_only())
+        .as_caller()
+        .open_follow_canonical(path, crate::fs::file::OpenFlags::read_only(), true)
+        .map(|(node, _)| node)
         .map_err(|_| KernelError::NotFound {
             resource: "program file",
             id: 0,
@@ -402,7 +404,13 @@ fn load_dynamic_linker(
 
     // Read the interpreter from filesystem
     let file_node = get_vfs()
-        .open(interpreter_path, crate::fs::file::OpenFlags::read_only())
+        .as_caller()
+        .open_follow_canonical(
+            interpreter_path,
+            crate::fs::file::OpenFlags::read_only(),
+            true,
+        )
+        .map(|(node, _)| node)
         .map_err(|_| KernelError::NotFound {
             resource: "interpreter",
             id: 0,

@@ -97,12 +97,12 @@ pub fn create_process_with_options(
     // Create the main thread
     // The new process starts in its creator's working directory: the
     // kernel shell's after a `cd`, or the calling thread's (N-115).
-    let start_cwd = crate::fs::try_get_vfs()
-        .map(|vfs| vfs.get_cwd())
-        .unwrap_or_else(|| String::from("/"));
-    let start_root = crate::fs::try_get_vfs()
-        .map(|vfs| vfs.get_root())
-        .unwrap_or_else(|| String::from("/"));
+    let (start_cwd, start_root) = crate::fs::try_get_vfs()
+        .map(|vfs| {
+            let ctx = vfs.caller_context();
+            (ctx.cwd, ctx.root)
+        })
+        .unwrap_or_else(|| (String::from("/"), String::from("/")));
     let main_thread =
         ThreadBuilder::new(pid, format!("{}-main", options.name), options.entry_point)
             .user_stack_size(options.user_stack_size)
@@ -253,11 +253,14 @@ pub fn parse_shebang(data: &[u8]) -> Option<(String, Option<String>)> {
 /// the default search directories: `/bin`, `/usr/bin`, `/usr/local/bin`.
 #[cfg(feature = "alloc")]
 pub fn search_path(name: &str) -> Option<String> {
-    use crate::fs;
+    // In the caller's view: under its root, from its working directory.
+    let file_exists = |path: &str| {
+        crate::fs::try_get_vfs().is_some_and(|vfs| vfs.as_caller().resolve_path(path).is_ok())
+    };
 
     // If name already contains a slash, treat it as a path
     if name.contains('/') {
-        if fs::file_exists(name) {
+        if file_exists(name) {
             return Some(String::from(name));
         }
         return None;
@@ -276,7 +279,7 @@ pub fn search_path(name: &str) -> Option<String> {
                 continue;
             }
             let full_path = format!("{}/{}", dir, name);
-            if fs::file_exists(&full_path) {
+            if file_exists(&full_path) {
                 return Some(full_path);
             }
         }
@@ -286,7 +289,7 @@ pub fn search_path(name: &str) -> Option<String> {
 
         for dir in DEFAULT_SEARCH_DIRS {
             let full_path = format!("{}/{}", dir, name);
-            if fs::file_exists(&full_path) {
+            if file_exists(&full_path) {
                 return Some(full_path);
             }
         }
@@ -303,6 +306,7 @@ pub fn search_path(name: &str) -> Option<String> {
 #[cfg(feature = "alloc")]
 fn read_executable(path: &str, creds: &super::creds::Credentials) -> Result<Vec<u8>, KernelError> {
     let node = crate::fs::get_vfs()
+        .as_caller()
         .resolve_path(path)
         .map_err(|_| KernelError::FsError(crate::error::FsError::NotFound))?;
     let meta = node.metadata()?;

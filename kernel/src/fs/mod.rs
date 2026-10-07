@@ -702,13 +702,132 @@ impl MountTable {
     }
 }
 
-/// The credentials whose search permission a path walk checks: the calling
-/// process's, or `None` (no check) for root and for kernel context with no
-/// current process.
-fn search_creds() -> Option<crate::process::creds::Credentials> {
-    crate::process::current_process()
-        .map(|p| p.credentials())
-        .filter(|c| c.euid != 0)
+/// Whose view of the tree a path lookup uses (N-251). A kernel subsystem
+/// (audit, logging, the package manager) must see the real tree whichever
+/// thread is current -- with the caller's root a chrooted process could
+/// make the audit log land in a file it owns, and with its permissions
+/// make logging fail -- while a system call must see exactly the caller's.
+/// `Vfs` methods use the kernel's view; `Vfs::as_caller` gives the
+/// caller's.
+#[derive(Debug, Clone)]
+pub struct PathContext {
+    /// Where relative paths start, relative to `root`.
+    pub cwd: String,
+    /// The root directory, as a canonical path in the whole tree.
+    pub root: String,
+    /// Whose search permission a walk checks; `None` checks none.
+    pub creds: Option<crate::process::creds::Credentials>,
+    /// The process MAC policy is checked for (0: the kernel).
+    pub pid: u64,
+}
+
+/// The VFS as the calling thread sees it (see [`PathContext`]). It does
+/// not dereference to `Vfs`: an operation it lacks is a compile error in
+/// the system call that wants it, never a silent lookup in the kernel's
+/// view, which would escape a chroot and skip permission checks.
+pub struct CallerView<'a> {
+    vfs: &'a Vfs,
+    ctx: PathContext,
+}
+
+impl<'a> CallerView<'a> {
+    /// The caller's context.
+    pub fn context(&self) -> &PathContext {
+        &self.ctx
+    }
+
+    /// The VFS itself, for operations on the mount table rather than on
+    /// paths (mount, unmount, sync).
+    pub fn global(&self) -> &'a Vfs {
+        self.vfs
+    }
+
+    /// The caller's working directory, relative to its root.
+    pub fn get_cwd(&self) -> String {
+        self.ctx.cwd.clone()
+    }
+
+    /// The caller's root, as a canonical path in the whole tree.
+    pub fn get_root(&self) -> String {
+        self.ctx.root.clone()
+    }
+
+    pub fn resolve_path(&self, path: &str) -> Result<Arc<dyn VfsNode>, KernelError> {
+        self.vfs
+            .lookup(&self.ctx, path, &self.ctx.cwd, true)
+            .map(|(n, _)| n)
+    }
+
+    pub fn resolve_path_no_follow(&self, path: &str) -> Result<Arc<dyn VfsNode>, KernelError> {
+        self.vfs
+            .lookup(&self.ctx, path, &self.ctx.cwd, false)
+            .map(|(n, _)| n)
+    }
+
+    /// [`Vfs::resolve_canonical`] in the caller's view; `cwd` is relative
+    /// to the caller's root.
+    pub fn resolve_canonical(
+        &self,
+        path: &str,
+        cwd: &str,
+        follow_last: bool,
+    ) -> Result<(Arc<dyn VfsNode>, String), KernelError> {
+        self.vfs.lookup(&self.ctx, path, cwd, follow_last)
+    }
+
+    pub fn open_follow_canonical(
+        &self,
+        path: &str,
+        flags: OpenFlags,
+        follow_last: bool,
+    ) -> Result<(Arc<dyn VfsNode>, String), KernelError> {
+        self.vfs.open_in(&self.ctx, path, flags, follow_last)
+    }
+
+    pub fn entry_mount_point(&self, parent: &str, name: &str) -> Result<String, KernelError> {
+        self.vfs.entry_mount_point_in(&self.ctx, parent, name)
+    }
+
+    pub fn mkdir(
+        &self,
+        path: &str,
+        permissions: Permissions,
+    ) -> Result<Arc<dyn VfsNode>, KernelError> {
+        self.vfs.mkdir_in(&self.ctx, path, permissions)
+    }
+
+    pub fn unlink(&self, path: &str) -> Result<(), KernelError> {
+        self.vfs.unlink_in(&self.ctx, path)
+    }
+
+    /// The canonical path in the whole tree of the directory `path` names:
+    /// what the mount table is keyed by. Without this a chrooted
+    /// `mount("/")` would name the real root.
+    fn mount_target(&self, path: &str) -> Result<String, KernelError> {
+        let (node, canonical) = self.vfs.lookup(&self.ctx, path, &self.ctx.cwd, true)?;
+        if node.node_type() != NodeType::Directory {
+            return Err(KernelError::FsError(FsError::NotADirectory));
+        }
+        Ok(canonical)
+    }
+
+    /// [`Vfs::mount_by_type`] at the directory `path` names for the caller.
+    pub fn mount_by_type(&self, path: &str, fs_type: &str, flags: u32) -> Result<(), KernelError> {
+        let target = self.mount_target(path)?;
+        self.vfs.mount_by_type(&target, fs_type, flags)
+    }
+
+    /// [`Vfs::unmount`] of the mount at the directory `path` names for the
+    /// caller.
+    pub fn unmount(&self, path: &str) -> Result<(), KernelError> {
+        let target = self.mount_target(path)?;
+        self.vfs.unmount(&target)
+    }
+
+    /// Flush every filesystem; not path-dependent.
+    pub fn sync(&self) -> Result<(), KernelError> {
+        self.vfs.sync()
+    }
 }
 
 /// `path`, a canonical path in the whole tree, as seen from inside `root`
@@ -810,23 +929,78 @@ impl Vfs {
         })
     }
 
+    /// The kernel's own view of the tree: the whole tree, the kernel
+    /// shell's working directory, no search-permission checks, MAC as the
+    /// kernel.
+    pub fn kernel_context(&self) -> PathContext {
+        PathContext {
+            cwd: self.cwd.read().clone(),
+            root: String::from("/"),
+            creds: None,
+            pid: 0,
+        }
+    }
+
+    /// The calling thread's view: its working directory and root
+    /// (chroot), its process's credentials for search permission (none
+    /// for root) and its pid for MAC. Without a current thread or process
+    /// (the kernel shell) that part is the kernel's.
+    pub fn caller_context(&self) -> PathContext {
+        let mut ctx = self.kernel_context();
+        #[cfg(feature = "alloc")]
+        if let Some(thread) = crate::process::current_thread() {
+            let fs = thread.fs();
+            ctx.cwd = fs.cwd.lock().clone();
+            ctx.root = fs.root.lock().clone();
+        }
+        if let Some(process) = crate::process::current_process() {
+            ctx.pid = process.pid.0;
+            ctx.creds = Some(process.credentials()).filter(|c| c.euid != 0);
+        }
+        ctx
+    }
+
+    /// Lookups as the calling thread: what system calls, exec and the
+    /// program loader use for paths a program supplied.
+    pub fn as_caller(&self) -> CallerView<'_> {
+        CallerView {
+            vfs: self,
+            ctx: self.caller_context(),
+        }
+    }
+
+    /// Resolve `path` (relative paths from `cwd`) in `ctx`'s view: the
+    /// node and its canonical path in the whole tree.
+    fn lookup(
+        &self,
+        ctx: &PathContext,
+        path: &str,
+        cwd: &str,
+        follow_last: bool,
+    ) -> Result<(Arc<dyn VfsNode>, String), KernelError> {
+        self.snapshot()
+            .resolve_in(path, cwd, &ctx.root, follow_last, 0, ctx.creds)
+    }
+
     /// Resolve a path to a VFS node, following symlinks (including the
     /// final component).
     pub fn resolve_path(&self, path: &str) -> Result<Arc<dyn VfsNode>, KernelError> {
-        self.resolve_path_inner(path, &self.get_cwd(), true, 0)
+        let ctx = self.kernel_context();
+        self.lookup(&ctx, path, &ctx.cwd, true).map(|(n, _)| n)
     }
 
     /// Resolve a path to a VFS node without following the final symlink
     /// component. Intermediate symlinks are still followed. Used by
     /// `lstat()` and `readlink()`.
     pub fn resolve_path_no_follow(&self, path: &str) -> Result<Arc<dyn VfsNode>, KernelError> {
-        self.resolve_path_inner(path, &self.get_cwd(), false, 0)
+        let ctx = self.kernel_context();
+        self.lookup(&ctx, path, &ctx.cwd, false).map(|(n, _)| n)
     }
 
-    /// Resolve a path to a VFS node using an explicit cwd (per-thread FS
-    /// state).
+    /// Resolve a path to a VFS node using an explicit cwd.
     pub fn resolve_from(&self, path: &str, cwd: &str) -> Result<Arc<dyn VfsNode>, KernelError> {
-        self.resolve_path_inner(path, cwd, true, 0)
+        self.lookup(&self.kernel_context(), path, cwd, true)
+            .map(|(n, _)| n)
     }
 
     /// Resolve a path to a VFS node using an explicit cwd, without
@@ -836,12 +1010,14 @@ impl Vfs {
         path: &str,
         cwd: &str,
     ) -> Result<Arc<dyn VfsNode>, KernelError> {
-        self.resolve_path_inner(path, cwd, false, 0)
+        self.lookup(&self.kernel_context(), path, cwd, false)
+            .map(|(n, _)| n)
     }
 
-    /// The mount point (normalized path) that serves `path`.
+    /// The mount point that serves `path`, a canonical path in the whole
+    /// tree.
     pub fn mount_point_of(&self, path: &str) -> String {
-        let path = normalize_path(path, &self.get_cwd());
+        let path = normalize_path(path, "/");
         self.snapshot()
             .mounts
             .keys()
@@ -857,7 +1033,17 @@ impl Vfs {
     /// paths as written: a symlink in the parent path can point into another
     /// mount (review of the v0.26.0 stack, PR #11).
     pub fn entry_mount_point(&self, parent: &str, name: &str) -> Result<String, KernelError> {
-        let (_, canon) = self.resolve_canonical(parent, &self.get_cwd(), true)?;
+        let ctx = self.kernel_context();
+        self.entry_mount_point_in(&ctx, parent, name)
+    }
+
+    fn entry_mount_point_in(
+        &self,
+        ctx: &PathContext,
+        parent: &str,
+        name: &str,
+    ) -> Result<String, KernelError> {
+        let (_, canon) = self.lookup(ctx, parent, &ctx.cwd, true)?;
         let entry = if canon == "/" {
             alloc::format!("/{}", name)
         } else {
@@ -876,57 +1062,14 @@ impl Vfs {
         cwd: &str,
         follow_last: bool,
     ) -> Result<(Arc<dyn VfsNode>, String), KernelError> {
-        self.snapshot()
-            .resolve_in(path, cwd, &self.get_root(), follow_last, 0, search_creds())
+        self.lookup(&self.kernel_context(), path, cwd, follow_last)
     }
 
-    /// Inner path resolution with configurable symlink behavior.
-    ///
-    /// - `follow_last`: if `true`, a symlink at the final component is
-    ///   resolved. If `false`, the symlink node itself is returned.
-    /// - `symlink_depth`: current nesting depth for loop detection. Returns
-    ///   `FsError::SymlinkLoop` when it exceeds `SYMLINK_MAX_DEPTH`.
-    fn resolve_path_inner(
-        &self,
-        path: &str,
-        cwd: &str,
-        follow_last: bool,
-        symlink_depth: usize,
-    ) -> Result<Arc<dyn VfsNode>, KernelError> {
-        self.snapshot()
-            .resolve_in(
-                path,
-                cwd,
-                &self.get_root(),
-                follow_last,
-                symlink_depth,
-                search_creds(),
-            )
-            .map(|(node, _)| node)
-    }
-
-    /// Get current working directory
-    /// The working directory relative paths resolve against: the calling
-    /// user thread's own (N-115), or, in kernel context (the kernel shell),
-    /// the VFS-wide one. Every path lookup in a system call used the
-    /// VFS-wide directory, so `chdir` in a program changed what `getcwd`
-    /// reported but not where its relative paths went.
+    /// The kernel's working directory (the kernel shell's `cd`). A user
+    /// thread's own is in `ThreadFs` and reached through `as_caller`
+    /// (N-115).
     pub fn get_cwd(&self) -> String {
-        #[cfg(feature = "alloc")]
-        if let Some(thread) = crate::process::current_thread() {
-            return thread.fs().cwd.lock().clone();
-        }
         self.cwd.read().clone()
-    }
-
-    /// The root directory lookups start from: the calling user thread's
-    /// (chroot), or "/" in kernel context.
-    pub fn get_root(&self) -> String {
-        #[cfg(feature = "alloc")]
-        if let Some(thread) = crate::process::current_thread() {
-            return thread.fs().root.lock().clone();
-        }
-        String::from("/")
     }
 
     /// Set current working directory
@@ -970,22 +1113,25 @@ impl Vfs {
         flags: OpenFlags,
         follow_last: bool,
     ) -> Result<(Arc<dyn VfsNode>, String), KernelError> {
-        // Determine access type from flags
+        self.open_in(&self.kernel_context(), path, flags, follow_last)
+    }
+
+    fn open_in(
+        &self,
+        ctx: &PathContext,
+        path: &str,
+        flags: OpenFlags,
+        follow_last: bool,
+    ) -> Result<(Arc<dyn VfsNode>, String), KernelError> {
         let access = if flags.write {
             crate::security::AccessType::Write
         } else {
             crate::security::AccessType::Read
         };
-
-        // Get current process PID for MAC check (0 = kernel context)
-        let pid = crate::process::current_process()
-            .map(|p| p.pid.0)
-            .unwrap_or(0);
-
         // MAC is checked on the canonical path, after `..` and symlinks are
         // resolved, never on the path as written (FS-SEC-01).
-        let (node, canonical) = self.resolve_canonical(path, &self.get_cwd(), follow_last)?;
-        crate::security::mac::check_file_access(&canonical, access, pid)?;
+        let (node, canonical) = self.lookup(ctx, path, &ctx.cwd, follow_last)?;
+        crate::security::mac::check_file_access(&canonical, access, ctx.pid)?;
         Ok((node, canonical))
     }
 
@@ -1000,20 +1146,29 @@ impl Vfs {
         path: &str,
         permissions: Permissions,
     ) -> Result<Arc<dyn VfsNode>, KernelError> {
+        self.mkdir_in(&self.kernel_context(), path, permissions)
+    }
+
+    fn mkdir_in(
+        &self,
+        ctx: &PathContext,
+        path: &str,
+        permissions: Permissions,
+    ) -> Result<Arc<dyn VfsNode>, KernelError> {
         // Parse the path once and use that single result both for the MAC
         // check and for the creation, so they cannot disagree: the parent
         // is resolved canonically (following symlinks) and the policy sees
         // the path the directory is really created at. Normalizing also
         // removes trailing slashes, `.` and `..`, so the final name is
         // never one of those.
-        let path = normalize_path(path, &self.get_cwd());
+        let path = normalize_path(path, &ctx.cwd);
         if path == "/" {
             return Err(KernelError::FsError(crate::error::FsError::AlreadyExists));
         }
         let pos = path.rfind('/').unwrap_or(0);
         let (parent_path, name) = (&path[..pos.max(1)], &path[pos + 1..]);
 
-        let (parent, canonical_parent) = self.resolve_canonical(parent_path, "/", true)?;
+        let (parent, canonical_parent) = self.lookup(ctx, parent_path, "/", true)?;
         let target = if canonical_parent == "/" {
             format!("/{}", name)
         } else {
@@ -1021,16 +1176,21 @@ impl Vfs {
         };
 
         // MAC check: creating a directory requires Write access
-        let pid = crate::process::current_process()
-            .map(|p| p.pid.0)
-            .unwrap_or(0);
-        crate::security::mac::check_file_access(&target, crate::security::AccessType::Write, pid)?;
+        crate::security::mac::check_file_access(
+            &target,
+            crate::security::AccessType::Write,
+            ctx.pid,
+        )?;
 
         parent.mkdir(name, permissions)
     }
 
     /// Remove a file or directory
     pub fn unlink(&self, path: &str) -> Result<(), KernelError> {
+        self.unlink_in(&self.kernel_context(), path)
+    }
+
+    fn unlink_in(&self, ctx: &PathContext, path: &str) -> Result<(), KernelError> {
         // Split path into parent and name
         let (parent_path, name) = if let Some(pos) = path.rfind('/') {
             if pos == 0 {
@@ -1042,10 +1202,7 @@ impl Vfs {
             return Err(KernelError::FsError(crate::error::FsError::InvalidPath));
         };
 
-        // Get parent directory
-        let parent = self.resolve_path(parent_path)?;
-
-        // Remove from parent
+        let (parent, _) = self.lookup(ctx, parent_path, &ctx.cwd, true)?;
         parent.unlink(name)
     }
 
@@ -1846,6 +2003,87 @@ mod tests {
         assert_eq!(vfs.entry_mount_point("/", "f").unwrap(), "/");
         // A mount point belongs to its own mount, so renaming it stays EXDEV.
         assert_eq!(vfs.entry_mount_point("/", "mnt").unwrap(), "/mnt");
+    }
+
+    /// A view as a thread chrooted to "/jail" would have it.
+    fn jailed(vfs: &Vfs) -> CallerView<'_> {
+        CallerView {
+            vfs,
+            ctx: PathContext {
+                cwd: String::from("/"),
+                root: String::from("/jail"),
+                creds: None,
+                pid: 0,
+            },
+        }
+    }
+
+    #[test]
+    fn kernel_lookups_ignore_the_callers_root() {
+        // N-251: a kernel subsystem (the audit log) resolving "/var/log/x"
+        // while a chrooted thread was current resolved it inside the
+        // chroot, into a file the process controls.
+        let vfs = make_vfs_with_root();
+        let root = vfs.root_fs().unwrap().root();
+        root.create("log", Permissions::default()).unwrap();
+        let jail = root.mkdir("jail", Permissions::default()).unwrap();
+        jail.create("log", Permissions::default()).unwrap();
+        let real = root.lookup("log").unwrap().metadata().unwrap().inode;
+        let fake = jail.lookup("log").unwrap().metadata().unwrap().inode;
+
+        let kernel = vfs.resolve_path("/log").unwrap();
+        assert_eq!(kernel.metadata().unwrap().inode, real);
+        let (_, canonical) = vfs
+            .open_follow_canonical("/log", OpenFlags::read_only(), true)
+            .unwrap();
+        assert_eq!(canonical, "/log");
+
+        let caller = jailed(&vfs).resolve_path("/log").unwrap();
+        assert_eq!(caller.metadata().unwrap().inode, fake);
+        let (_, canonical) = jailed(&vfs)
+            .open_follow_canonical("/log", OpenFlags::read_only(), true)
+            .unwrap();
+        assert_eq!(canonical, "/jail/log");
+        // ".." stops at the caller's root.
+        assert_eq!(
+            jailed(&vfs)
+                .resolve_path("/../../log")
+                .unwrap()
+                .metadata()
+                .unwrap()
+                .inode,
+            fake
+        );
+    }
+
+    #[test]
+    fn kernel_context_has_no_caller_identity() {
+        let vfs = make_vfs_with_root();
+        let ctx = vfs.kernel_context();
+        assert_eq!(ctx.root, "/");
+        assert!(ctx.creds.is_none());
+        assert_eq!(ctx.pid, 0);
+    }
+
+    #[test]
+    fn caller_mounts_are_placed_inside_its_root() {
+        // A chrooted mount("/") named the real root (and failed as
+        // already mounted); it must mount over the chroot's "/".
+        let vfs = make_vfs_with_root();
+        let root = vfs.root_fs().unwrap().root();
+        let jail = root.mkdir("jail", Permissions::default()).unwrap();
+        jail.mkdir("mnt", Permissions::default()).unwrap();
+        jail.create("file", Permissions::default()).unwrap();
+
+        jailed(&vfs).mount_by_type("/mnt", "ramfs", 0).unwrap();
+        assert_eq!(vfs.mount_point_of("/jail/mnt/x"), "/jail/mnt");
+        assert_eq!(vfs.mount_point_of("/mnt"), "/");
+        // Not a directory, and not there at all.
+        assert!(jailed(&vfs).mount_by_type("/file", "ramfs", 0).is_err());
+        assert!(jailed(&vfs).mount_by_type("/none", "ramfs", 0).is_err());
+
+        jailed(&vfs).unmount("/mnt").unwrap();
+        assert_eq!(vfs.mount_point_of("/jail/mnt/x"), "/");
     }
 
     #[test]

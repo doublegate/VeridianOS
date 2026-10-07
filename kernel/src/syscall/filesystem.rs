@@ -170,10 +170,14 @@ fn console_fallback_allowed(fd: usize) -> bool {
 /// Prevents unbounded kernel-side loops for large writes.
 const SERIAL_IO_MAX_SIZE: usize = 64 * 1024;
 
-/// Helper to get the VFS instance, returning a syscall error instead of
-/// panicking if the VFS subsystem has not been initialized yet.
-pub(crate) fn vfs() -> Result<&'static crate::fs::Vfs, SyscallError> {
-    try_get_vfs().ok_or(SyscallError::InvalidState)
+/// The VFS as the calling thread sees it (its cwd, root and permissions;
+/// N-251), or a syscall error instead of a panic if the VFS subsystem has
+/// not been initialized yet. Every path a program supplies is resolved
+/// through this.
+pub(crate) fn vfs() -> Result<crate::fs::CallerView<'static>, SyscallError> {
+    try_get_vfs()
+        .map(|v| v.as_caller())
+        .ok_or(SyscallError::InvalidState)
 }
 
 #[cfg(feature = "alloc")]
@@ -3018,7 +3022,7 @@ pub(crate) fn resolve_at_path(
     // dirfd is an int: compare its low 32 bits, sign-extended or not.
     if dirfd as u32 as i32 == AT_FDCWD as u32 as i32 {
         // Relative to CWD
-        let cwd = if let Some(vfs) = try_get_vfs() {
+        let cwd = if let Ok(vfs) = vfs() {
             vfs.get_cwd()
         } else {
             String::from("/")
@@ -3212,7 +3216,7 @@ pub(crate) fn split_path(
         Ok((parent, name))
     } else {
         // No slash — parent is CWD
-        let cwd = if let Some(vfs) = try_get_vfs() {
+        let cwd = if let Ok(vfs) = vfs() {
             vfs.get_cwd()
         } else {
             String::from("/")
