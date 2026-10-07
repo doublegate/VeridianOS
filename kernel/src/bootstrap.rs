@@ -1950,41 +1950,13 @@ pub(crate) fn run_user_process(pid: crate::process::ProcessId) {
     // When the user process calls sys_exit, boot_return_to_kernel()
     // restores the saved context and this call "returns" normally.
     //
-    // DEBUG: Print TSS stack addresses and IDT handler addresses before entering
-    // Ring 3.
-    crate::arch::x86_64::gdt::debug_print_tss_stacks();
-    // SAFETY: debug_idt_handler_addr reads the live IDT within its limit and
-    // the raw_serial_* helpers write COM1 (port 0x3F8), which is present on
-    // the x86_64 platforms this kernel targets.
-    unsafe {
-        let pf_addr = crate::arch::x86_64::gdt::debug_idt_handler_addr(14); // #PF = vector 14
-        let df_addr = crate::arch::x86_64::gdt::debug_idt_handler_addr(8); // #DF = vector 8
-        let gp_addr = crate::arch::x86_64::gdt::debug_idt_handler_addr(13); // #GP = vector 13
-        crate::arch::x86_64::idt::raw_serial_str(b"[IDT] PF_handler=0x");
-        crate::arch::x86_64::idt::raw_serial_hex(pf_addr);
-        crate::arch::x86_64::idt::raw_serial_str(b" GP_handler=0x");
-        crate::arch::x86_64::idt::raw_serial_hex(gp_addr);
-        crate::arch::x86_64::idt::raw_serial_str(b" DF_handler=0x");
-        crate::arch::x86_64::idt::raw_serial_hex(df_addr);
-        crate::arch::x86_64::idt::raw_serial_str(b"\n");
-    }
-    // DEBUG: Verify IST stacks and handler code are mapped in the process
-    // page table (pt_root). Walk each critical kernel address through the
-    // process L4 to confirm it's present before entering Ring 3.
-    crate::arch::x86_64::gdt::debug_verify_ist_in_cr3(pt_root);
-
-    // IST write test and Ring 0 PF trigger test removed -- both confirmed
-    // IST stacks are properly mapped (PASS). The DF was caused by hardware
-    // interrupts (APIC timer, etc.) firing from Ring 3 without IST, falling
-    // back to TSS.RSP0 which was stale/unmapped in the process CR3. Fixed
-    // by adding IST to all hardware IRQ vectors (32, 33, 48, 49, 50).
-    let tss_rsp0 = crate::arch::x86_64::gdt::get_kernel_stack();
+    // `enter_usermode_returnable` makes the stack below its saved context
+    // this CPU's entry stack (syscall and TSS.RSP0).
+    #[cfg(feature = "trace")]
     // SAFETY: writing diagnostics to COM1 (port 0x3F8), which is present on
     // the x86_64 platforms this kernel targets.
     unsafe {
-        crate::arch::x86_64::idt::raw_serial_str(b"[BOOT] TSS_RSP0=0x");
-        crate::arch::x86_64::idt::raw_serial_hex(tss_rsp0);
-        crate::arch::x86_64::idt::raw_serial_str(b" entry=0x");
+        crate::arch::x86_64::idt::raw_serial_str(b"[BOOT] entry=0x");
         crate::arch::x86_64::idt::raw_serial_hex(entry_point);
         crate::arch::x86_64::idt::raw_serial_str(b" usp=0x");
         crate::arch::x86_64::idt::raw_serial_hex(user_stack_ptr);
@@ -1992,20 +1964,6 @@ pub(crate) fn run_user_process(pid: crate::process::ProcessId) {
         crate::arch::x86_64::idt::raw_serial_hex(pt_root);
         crate::arch::x86_64::idt::raw_serial_str(b"\n");
     }
-
-    // Update TSS.RSP0 to the current boot stack. Hardware exceptions from
-    // Ring 3 (page faults, GPF, timer IRQ, etc.) load RSP from TSS.RSP0 for
-    // the privilege-level switch. enter_usermode_returnable will save the
-    // current RSP as per-CPU kernel_rsp (for SYSCALL), but TSS.RSP0 (for
-    // hardware interrupts) must also be updated.
-    //
-    // Read current RSP -- this is our boot stack which is guaranteed mapped.
-    let current_rsp: u64;
-    // SAFETY: copying RSP into a register has no side effects.
-    unsafe {
-        core::arch::asm!("mov {}, rsp", out(reg) current_rsp, options(nomem, nostack));
-    }
-    crate::arch::x86_64::gdt::set_kernel_stack(current_rsp);
 
     // Re-initialize FPU/AVX state before entering usermode.
     // VEX-encoded instructions (AVX) in user binaries require CR4.OSXSAVE
@@ -2015,14 +1973,11 @@ pub(crate) fn run_user_process(pid: crate::process::ProcessId) {
     // This idempotent re-init ensures the state is correct.
     crate::arch::x86_64::context::init_fpu();
 
-    let per_cpu = crate::arch::x86_64::syscall::per_cpu_data_ptr();
-    let kernel_rsp_ptr = per_cpu as u64;
     // SAFETY: All preconditions for enter_usermode_returnable are met:
     // - entry_point is in the process's user-space page tables
     // - user_stack_top points to the top of the user stack
     // - CS/SS are valid Ring 3 selectors from the GDT
     // - pt_root is a valid L4 page table with kernel mappings preserved
-    // - kernel_rsp_ptr points to the per-CPU kernel_rsp field
     unsafe {
         crate::arch::x86_64::usermode::enter_usermode_returnable(
             entry_point,
@@ -2030,7 +1985,6 @@ pub(crate) fn run_user_process(pid: crate::process::ProcessId) {
             user_cs,
             user_ss,
             pt_root,
-            kernel_rsp_ptr,
         );
     }
 }
@@ -2157,7 +2111,8 @@ fn run_user_process_scheduled(pid: crate::process::ProcessId) {
 /// has never been scheduled. This function:
 /// 1. Saves and restores the parent's boot return context (BOOT_RETURN globals)
 /// 2. Saves and restores the parent's BOOT_CURRENT PID/TID
-/// 3. Handles swapgs rebalancing (we're inside a syscall handler)
+/// 3. Saves and restores the parent's per-CPU entry stack, frame pointer and
+///    TLS base
 /// 4. Runs the child to completion via `enter_forked_child_returnable`
 ///
 /// Returns `true` if the child was run, `false` if not in boot context.
@@ -2258,17 +2213,8 @@ pub fn boot_run_forked_child(
     // Set child as the current boot process
     crate::process::set_boot_current(child_pid, child_tid);
 
-    // Rebalance swapgs: we're inside a syscall handler where GS.base = per_cpu_data
-    // and KernelGsBase = 0 (from parent's syscall_entry swapgs). enter_usermode
-    // needs KernelGsBase = per_cpu_data so the child's syscall_entry can load
-    // kernel_rsp. swapgs swaps them: GS.base → 0, KernelGsBase → per_cpu_data.
-    // SAFETY: Rebalancing swapgs so KernelGsBase holds per_cpu_data for the
-    // child's syscall_entry. We are in a syscall context with known GS state.
-    unsafe { core::arch::asm!("swapgs", options(nomem, nostack)) };
-
-    let kernel_rsp_ptr = per_cpu as u64;
-
-    // Diagnostic: show key registers being passed to child
+    // Diagnostic (`trace` feature): key registers being passed to the child.
+    #[cfg(feature = "trace")]
     // SAFETY: Writing directly to the serial port for low-level debug output.
     // The raw_serial_* functions use port I/O that is always safe in kernel mode.
     unsafe {
@@ -2284,19 +2230,14 @@ pub fn boot_run_forked_child(
     }
 
     // SAFETY: All preconditions for enter_forked_child_returnable are met:
-    // regs contains the child's saved register state, cr3 is a valid page table,
-    // and kernel_rsp_ptr points to the per-CPU data for syscall re-entry.
+    // regs contains the child's saved register state and cr3 is a valid page
+    // table. GS_BASE holds the per-CPU block (ring 0), as it requires.
     unsafe {
-        crate::arch::x86_64::usermode::enter_forked_child_returnable(&regs, cr3, kernel_rsp_ptr);
+        crate::arch::x86_64::usermode::enter_forked_child_returnable(&regs, cr3);
     }
 
-    // Child exited, boot_return_to_kernel brought us back here.
-    // boot_return_to_kernel did swapgs (balancing child's syscall_entry swapgs)
-    // and zeroed GS. Now: GS.base=0, KernelGsBase=per_cpu_data.
-    // swapgs to restore parent's syscall handler state: GS.base=per_cpu_data.
-    // SAFETY: Restoring GS.base to per_cpu_data after child exit. The GS state
-    // is known (GS.base=0, KernelGsBase=per_cpu_data) from boot_return_to_kernel.
-    unsafe { core::arch::asm!("swapgs", options(nomem, nostack)) };
+    // Child exited; boot_return_to_kernel brought us back here, still with
+    // the per-CPU block in GS_BASE.
 
     // Boot CR3 is restored. Free the child's page table hierarchy frames
     // (deferred from cleanup_process -- see vas.rs clear() comment).
@@ -2334,7 +2275,7 @@ pub fn boot_run_forked_child(
     // SAFETY: per_cpu is a valid pointer (same as saved above). Restoring the
     // saved values that were overwritten during child dispatch.
     unsafe {
-        (*per_cpu).kernel_rsp = saved_kernel_rsp;
+        crate::arch::percpu::set_entry_stack(saved_kernel_rsp);
         (*per_cpu).user_rsp = saved_user_rsp;
         (*per_cpu).syscall_frame = saved_syscall_frame;
     }

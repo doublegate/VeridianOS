@@ -195,18 +195,16 @@ pub fn fork_process() -> Result<ProcessId, KernelError> {
 
             #[cfg(target_arch = "x86_64")]
             {
-                use crate::arch::x86_64::syscall::{get_saved_user_rsp, get_syscall_frame};
+                use crate::arch::x86_64::syscall::get_syscall_frame;
 
                 if let Some(frame) = get_syscall_frame() {
                     // Populate child context from live parent registers.
                     // Start with a clone for fields not in the frame (cr3, segments, etc.)
                     *new_ctx = (*ctx).clone();
 
-                    // User RIP: RCX was clobbered by SYSCALL to hold the return address
-                    new_ctx.set_instruction_pointer(frame.rcx as usize);
-
-                    // User RSP: saved to per-CPU data by syscall_entry
-                    new_ctx.set_stack_pointer(get_saved_user_rsp() as usize);
+                    // User RIP and RSP: where this syscall returns to.
+                    new_ctx.set_instruction_pointer(frame.rip as usize);
+                    new_ctx.set_stack_pointer(frame.rsp as usize);
 
                     // Return value: fork returns 0 in child
                     new_ctx.set_return_value(0);
@@ -227,9 +225,10 @@ pub fn fork_process() -> Result<ProcessId, KernelError> {
                     new_ctx.r9 = frame.r9;
                     new_ctx.r10 = frame.r10;
 
-                    // User RFLAGS: R11 was clobbered by SYSCALL to hold RFLAGS
+                    // R11 as the parent will see it (SYSCALL put RFLAGS there)
+                    // and the RFLAGS the syscall returns with.
                     new_ctx.r11 = frame.r11;
-                    new_ctx.rflags = frame.r11;
+                    new_ctx.rflags = frame.rflags;
 
                     // RCX holds user RIP (already set via set_instruction_pointer)
                     new_ctx.rcx = frame.rcx;

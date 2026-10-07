@@ -285,6 +285,7 @@ pub fn ap_init() {
     crate::arch::smp_boot::ap_stage(10);
     super::gdt::init_ap();
     super::idt::init();
+    super::trap::enable_machine_check();
     super::pat::init();
     crate::arch::smp_boot::ap_stage(11);
     super::apic::init_local_secondary();

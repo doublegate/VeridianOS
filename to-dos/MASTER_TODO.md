@@ -79,9 +79,10 @@ What does not work yet: `docs/KNOWN-LIMITATIONS.md`.
   - [ ] **D, process model and scheduler (C5; ADR 0006 + ADR 0007):**
     - [x] Scheduler policy core: EEVDF fair, FIFO/RR with bandwidth limit, SCHED_DEADLINE (CBS),
       PELT-style load, SMP placement/balancing (`sched/policy/`, 36 host tests).
-    - [ ] x86 entry layer first: assembly stubs with symmetric swapgs + lfence, per-thread pt_regs
-      on the kernel stack, IST only for #DF/NMI/#MC, SYSRET eligibility with IRET fallback,
-      exit-to-user loop (need_resched, signals), user-register sanitiser (N-166 to N-171, N-175).
+    - [x] x86 entry layer first: assembly stubs with symmetric swapgs + lfence, one TrapFrame for
+      syscalls and traps, IST only for #DF/NMI/#MC, SYSRET eligibility with IRET fallback,
+      exit-to-user hook, user-register sanitiser (N-166, N-169 to N-171, N-175; ADR 0008).
+      Per-thread frames (N-167) and the no-launch-context fault path (N-168) finish with D2.
     - [ ] D1/D2 dispatcher: switch primitive, boot task + idle, kernel threads, user tasks
       dispatched by the scheduler on their own kernel stacks; launch from boot/shell/KDE as
       spawn + wait; exit vs exit_group, process exit by the last thread, teardown after every

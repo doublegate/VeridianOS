@@ -73,18 +73,16 @@ replace this in sprint D. Until then:
 - **Exit and wait (N-106 to N-112)** are correct only because everything is nested; the
   non-nested paths lose wakeups, can reap a child twice and free running threads' stacks.
 
-### The x86_64 entry layer needs rewriting (N-166 to N-171, N-175; sprint D)
+### x86_64 entry layer remainders (N-167, N-168; sprint D2)
 
-- Interrupt and exception entries from ring 3 do not `swapgs` while the syscall entry does
-  (N-166). With task switching, user code could run on the kernel GS base.
-- The IST mechanism is used for #PF, #GP, #UD and every IRQ, on 20 KiB static stacks without
-  guard pages (N-169): a nested fault reuses the live stack.
-- An exception in user mode halts the CPU unless the boot return context exists (N-168).
-- The user RSP and syscall frame pointer are kept per CPU rather than per thread (N-167, N-35).
-- `sysretq` is used without checking that RCX is canonical (N-171, the CVE-2012-0217 pattern).
-  Latent: user code cannot yet choose the return address freely.
-- There are no handlers for NMI, #MC, #DB, #NM, #MF or #XM (N-175, HX-22): a machine check shuts
-  the CPU down and an NMI from a watchdog or BMC is fatal.
+The entry layer was rebuilt in v0.27 (ADR 0008): one register frame for every entry, symmetric
+`swapgs`, IST only for #DF, NMI and #MC, checked `sysretq`, sanitised user registers, and
+handlers for every exception. What remains depends on the dispatcher:
+
+- The syscall frame pointer and user RSP scratch are per CPU, not per thread (N-167, N-35).
+- A fault in user code is handled by returning to the context that launched the program; without
+  one (none exists today outside that model) it stops the CPU (N-168).
+- A fatal kernel fault stops only the faulting CPU; the others keep running until SMP stage S2.
 
 ### Signals (N-96, N-98, N-99, N-104, N-105, N-113, N-170; sprint D)
 
@@ -94,10 +92,9 @@ replace this in sprint D. Until then:
   pending set, and futex, wait and sigsuspend treat any pending bit as EINTR.
 - **Signal frames (N-113).** The return trampoline is written to the (non-executable) user stack,
   the frame skips the red zone and is not 16-byte aligned.
-- **sigreturn does not sanitise registers (N-170).** On x86_64 the saved RFLAGS is restored as
-  given, IOPL included, so a process can grant itself port I/O; RIP is not checked to be
-  canonical. AArch64 and RISC-V have the same defect for PSTATE and `sstatus`, latent until they
-  have user mode.
+- **sigreturn on AArch64 and RISC-V does not sanitise registers (N-170).** PSTATE and `sstatus`
+  are restored as given, latent until those architectures have user mode. On x86_64 RFLAGS and
+  RIP are sanitised since v0.27 (ADR 0008).
 - **Real-time signals 32-64** cannot be installed and `sigaltstack` reports success without effect
   (N-105). Futex timeouts are read as raw ticks and absolute `FUTEX_WAIT_BITSET` timeouts are
   treated as relative (N-104).

@@ -2,9 +2,10 @@
 //!
 //! One `ArchCpu` per logical CPU, in a static array that exists from the
 //! first instruction (no heap). Each CPU finds its own block through a
-//! register: `KernelGsBase`/`GS_BASE` on x86_64, `TPIDR_EL1` on AArch64, `tp`
-//! on RISC-V. Entry assembly addresses fields by fixed offset, so the layout
-//! is ABI (asserted below).
+//! register: `GS_BASE` on x86_64 (while in ring 0; ring-3 entries and exits
+//! swap it with `KernelGsBase`), `TPIDR_EL1` on AArch64, `tp` on RISC-V. Entry
+//! assembly addresses fields by fixed offset, so the layout is ABI (asserted
+//! below).
 //!
 //! Logical CPU ids are dense: 0 is the CPU that booted the kernel, whatever
 //! its hardware id, and secondaries are numbered by the boot CPU in firmware
@@ -44,6 +45,10 @@ pub struct ArchCpu {
     pub local_ticks: u64,
     /// Inter-processor interrupts this CPU has taken.
     pub ipis: u64,
+    /// x86_64: address of this CPU's TSS.RSP0 slot (`gs:[0x40]`), the stack
+    /// the CPU switches to for an interrupt or exception from ring 3. Kept
+    /// equal to `kernel_rsp` by [`set_entry_stack`].
+    pub rsp0_slot: u64,
 }
 
 const _: () = {
@@ -56,7 +61,8 @@ const _: () = {
     assert!(core::mem::offset_of!(ArchCpu, timer_next) == 0x28);
     assert!(core::mem::offset_of!(ArchCpu, local_ticks) == 0x30);
     assert!(core::mem::offset_of!(ArchCpu, ipis) == 0x38);
-    assert!(core::mem::size_of::<ArchCpu>() == 64);
+    assert!(core::mem::offset_of!(ArchCpu, rsp0_slot) == 0x40);
+    assert!(core::mem::size_of::<ArchCpu>() == 128);
 };
 
 /// Interior-mutable slot of [`ARCH_CPUS`].
@@ -80,6 +86,7 @@ impl ArchCpuCell {
             timer_next: 0,
             local_ticks: 0,
             ipis: 0,
+            rsp0_slot: 0,
         }))
     }
 
@@ -131,8 +138,14 @@ pub unsafe fn install(cpu: usize, hw_id: u32) {
         (*p).cpu_id = cpu as u32;
         (*p).hw_id = hw_id;
     }
+    // Ring 0 runs with the block in GS_BASE; KernelGsBase holds the user
+    // value (0: user code cannot set it) until a ring-3 entry swaps them.
     #[cfg(all(target_arch = "x86_64", target_os = "none"))]
-    x86_64::registers::model_specific::KernelGsBase::write(x86_64::VirtAddr::new(p as u64));
+    {
+        use x86_64::registers::model_specific::{GsBase, KernelGsBase};
+        GsBase::write(x86_64::VirtAddr::new(p as u64));
+        KernelGsBase::write(x86_64::VirtAddr::new(0));
+    }
     #[cfg(all(target_arch = "aarch64", target_os = "none"))]
     // SAFETY: TPIDR_EL1 is the kernel's per-CPU register; the value is a
     // valid 'static block.
@@ -149,10 +162,12 @@ pub unsafe fn install(cpu: usize, hw_id: u32) {
 
 /// Pointer to the calling CPU's block.
 ///
-/// x86_64 keeps the block in `KernelGsBase` outside a syscall and in
-/// `GS_BASE` inside one (`swapgs`), so whichever of the two holds a block
-/// address is used. Neither MSR read causes a VM exit under KVM, unlike
-/// CPUID. User code cannot point GS at kernel memory (no `ARCH_SET_GS`, no
+/// x86_64 keeps the block in `GS_BASE` whenever ring 0 runs. In the few
+/// instructions between a `swapgs` and the `sysretq`/`iretq` that follows
+/// (or before the `swapgs` of an entry) it is in `KernelGsBase`; an NMI or
+/// machine check can arrive there, so whichever MSR holds a block address
+/// is used. Neither MSR read causes a VM exit under KVM, unlike CPUID. User
+/// code cannot point GS at kernel memory (no `ARCH_SET_GS`, no
 /// CR4.FSGSBASE), so the range check cannot be fooled.
 #[inline]
 pub fn this_arch_cpu_ptr() -> *mut ArchCpu {
@@ -227,6 +242,47 @@ pub fn advance_timer(now: u64, period: u64) -> u64 {
     }
 }
 
+/// x86_64: make `top` the kernel stack this CPU enters on from ring 3, both
+/// through `syscall` (`kernel_rsp`) and through an interrupt or exception
+/// (TSS.RSP0). `top` must be 16-byte aligned.
+#[cfg(target_arch = "x86_64")]
+pub fn set_entry_stack(top: u64) {
+    let cpu = this_arch_cpu();
+    // SAFETY: this CPU's own block; `rsp0_slot` is 0 or the address of this
+    // CPU's TSS.RSP0 field, which lives for the kernel's lifetime and is
+    // read by the CPU only on a ring-3 entry, which cannot happen while
+    // ring 0 runs here.
+    unsafe {
+        (*cpu).kernel_rsp = top;
+        let slot = (*cpu).rsp0_slot;
+        if slot != 0 {
+            // The TSS is packed: RSP0 sits at offset 4, so the field is
+            // only 4-byte aligned.
+            core::ptr::write_unaligned(slot as *mut u64, top);
+        }
+    }
+}
+
+/// x86_64: the kernel stack this CPU enters on from ring 3.
+#[cfg(target_arch = "x86_64")]
+pub fn entry_stack() -> u64 {
+    // SAFETY: this CPU's own block.
+    unsafe { (*this_arch_cpu()).kernel_rsp }
+}
+
+/// x86_64: record where this CPU's TSS.RSP0 lives (GDT setup, once per CPU).
+///
+/// # Safety
+///
+/// `slot` must be the address of the RSP0 field of the TSS loaded on CPU
+/// `cpu`, valid for the kernel's lifetime.
+#[cfg(target_arch = "x86_64")]
+pub unsafe fn set_rsp0_slot(cpu: usize, slot: u64) {
+    // SAFETY: per the contract; the block is written only by its own CPU or
+    // by the boot CPU before that CPU starts.
+    unsafe { (*arch_cpu_ptr(cpu)).rsp0_slot = slot };
+}
+
 /// Count an inter-processor interrupt taken by this CPU (from its IPI
 /// handler).
 pub fn note_ipi() {
@@ -278,7 +334,32 @@ mod tests {
             assert_eq!(unsafe { (*arch_cpu_ptr(i)).cpu_id }, i as u32);
         }
         assert!(!is_arch_cpu_block(0));
-        let end = arch_cpu_ptr(MAX_CPUS - 1) as u64 + 64;
+        let end = arch_cpu_ptr(MAX_CPUS - 1) as u64 + core::mem::size_of::<ArchCpu>() as u64;
         assert!(!is_arch_cpu_block(end));
+    }
+
+    /// The TSS is `packed(4)`, so its RSP0 field is only 4-byte aligned;
+    /// writing it as an aligned u64 panicked in the first nested child run.
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn entry_stack_reaches_the_packed_tss_rsp0() {
+        use alloc::boxed::Box;
+
+        let tss = Box::into_raw(Box::new(x86_64::structures::tss::TaskStateSegment::new()));
+        // SAFETY: test-only; `tss` is a live heap TSS, and only this test
+        // uses CPU 0's RSP0 slot on the host.
+        unsafe {
+            let slot = core::ptr::addr_of_mut!((*tss).privilege_stack_table[0]) as u64;
+            assert_eq!(slot - tss as u64, 4, "RSP0 follows a 4-byte reserved field");
+            let saved = ((*arch_cpu_ptr(0)).rsp0_slot, (*arch_cpu_ptr(0)).kernel_rsp);
+            set_rsp0_slot(0, slot);
+            set_entry_stack(0xFFFF_E000_0001_0000);
+            assert_eq!(entry_stack(), 0xFFFF_E000_0001_0000);
+            let rsp0 = core::ptr::addr_of!((*tss).privilege_stack_table[0]).read_unaligned();
+            assert_eq!(rsp0.as_u64(), 0xFFFF_E000_0001_0000);
+            (*arch_cpu_ptr(0)).rsp0_slot = saved.0;
+            (*arch_cpu_ptr(0)).kernel_rsp = saved.1;
+            drop(Box::from_raw(tss));
+        }
     }
 }

@@ -1091,6 +1091,58 @@ static void test_direction_flag(void)
 #endif
 }
 
+/* --- Exceptions in user code (N-168, N-175). ------------------------------
+ * Each trap kills only the child that caused it, with the signal Linux
+ * sends; the parent and the kernel carry on. */
+static int child_traps(int which)
+{
+    pid_t pid = fork();
+    if (pid == 0) {
+        switch (which) {
+        case 0: /* #UD -> SIGILL */
+            __asm__ volatile("ud2");
+            break;
+        case 1: /* #DE -> SIGFPE (asm: GCC rewrites 1 / x as a branch) */
+            __asm__ volatile("xor %%edx, %%edx\n\tmov $1, %%eax\n\txor %%ecx, %%ecx\n\tdiv %%ecx"
+                             ::: "eax", "ecx", "edx");
+            break;
+        case 2: /* #BP from int3 (a DPL-3 gate) -> SIGTRAP */
+            __asm__ volatile("int3");
+            break;
+        case 3: /* privileged instruction, #GP -> SIGSEGV */
+            __asm__ volatile("hlt");
+            break;
+        case 4: /* int to a kernel-only vector, #GP -> SIGSEGV */
+            __asm__ volatile("int $0x30");
+            break;
+        }
+        _exit(0);
+    }
+    int st = 0;
+    if (pid < 0 || waitpid(pid, &st, 0) != pid)
+        return -1;
+    last_status = st;
+    return WIFSIGNALED(st) ? WTERMSIG(st) : 0;
+}
+
+static void test_traps(void)
+{
+    static const struct {
+        const char *name;
+        int sig;
+    } cases[] = {
+        {"trap_ud2_sigill", SIGILL},       {"trap_divide_sigfpe", SIGFPE},
+        {"trap_int3_sigtrap", SIGTRAP},    {"trap_hlt_sigsegv", SIGSEGV},
+        {"trap_kernel_vector_sigsegv", SIGSEGV},
+    };
+    for (int i = 0; i < 5; i++) {
+        int sig = child_traps(i);
+        static char why[64];
+        snprintf(why, sizeof(why), "got signal %d (status 0x%x)", sig, last_status);
+        report(cases[i].name, sig == cases[i].sig, why);
+    }
+}
+
 int main(int argc, char **argv)
 {
     setvbuf(stdout, NULL, _IONBF, 0);
@@ -1123,6 +1175,7 @@ int main(int argc, char **argv)
     test_socket_api_details();
     test_dir_search_permission();
     test_direction_flag();
+    test_traps();
     printf("AUDIT-RUNTIME: %d/%d\n", passed, total);
     return passed == total ? 0 : 1;
 }

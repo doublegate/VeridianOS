@@ -886,6 +886,17 @@ fn restore_signal_frame_x86_64(
     // valid. We copy the struct by value.
     let frame: SignalFrame = unsafe { core::ptr::read(frame_bytes.as_ptr() as *const SignalFrame) };
 
+    // The frame is user memory: a process may have rewritten it. Only a user
+    // RIP and RSP are accepted, and RFLAGS keeps only the bits user code can
+    // set itself, so sigreturn cannot raise IOPL or set system flags (N-170).
+    use crate::arch::x86_64::trap::{is_user_address, sanitize_user_rflags};
+    if !is_user_address(frame.rip) || !is_user_address(frame.rsp) {
+        return Err(KernelError::InvalidArgument {
+            name: "frame_ptr",
+            value: "signal frame holds a non-user RIP or RSP",
+        });
+    }
+
     // Restore the thread context
     {
         let mut ctx = thread.context.lock();
@@ -906,7 +917,7 @@ fn restore_signal_frame_x86_64(
         ctx.r14 = frame.r14;
         ctx.r15 = frame.r15;
         ctx.rip = frame.rip;
-        ctx.rflags = frame.rflags;
+        ctx.rflags = sanitize_user_rflags(frame.rflags);
     }
 
     // Restore the signal mask

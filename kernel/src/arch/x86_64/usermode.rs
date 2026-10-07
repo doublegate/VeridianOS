@@ -86,9 +86,13 @@ pub unsafe fn enter_usermode(entry_point: u64, user_stack: u64, user_cs: u64, us
             // Set data segment registers to user data selector
             "mov ds, {ss:r}",
             "mov es, {ss:r}",
-            // Clear FS and GS. Writing 0 to FS zeros FS_BASE (MSR 0xC0000100).
+            // No interrupt from here to the iretq: after the swapgs below it
+            // would see a ring-0 CS with the user GS base.
+            "cli",
+            // Clear FS. Writing 0 to FS zeros FS_BASE (MSR 0xC0000100). GS
+            // is left alone: loading a selector would clear the GS base,
+            // which holds the per-CPU block until the swapgs.
             "mov fs, {zero:x}",
-            "mov gs, {zero:x}",
             // Build iretq frame on current kernel stack FIRST, before wrmsr.
             // wrmsr uses ECX (MSR number), EDX:EAX (value) as IMPLICIT operands.
             // All iretq frame values must be pushed BEFORE wrmsr, because wrmsr
@@ -123,6 +127,8 @@ pub unsafe fn enter_usermode(entry_point: u64, user_stack: u64, user_cs: u64, us
             "mov ecx, 0xC0000100",
             "wrmsr",
             "3:",
+            // Ring 0 keeps the per-CPU block in GS_BASE; ring 3 gets its own.
+            "swapgs",
             "iretq",
             ss = in(reg) user_ss,
             rsp = in(reg) user_stack,
@@ -150,22 +156,22 @@ pub unsafe fn enter_usermode(entry_point: u64, user_stack: u64, user_cs: u64, us
 /// - `user_cs`: User CS selector (Ring 3)
 /// - `user_ss`: User SS selector (Ring 3)
 /// - `process_cr3`: Physical address of the process's L4 page table
-/// - `kernel_rsp_ptr`: Pointer to per-CPU kernel_rsp (written after context
-///   save)
+///
+/// The stack below the saved context becomes this CPU's entry stack from
+/// ring 3 (`kernel_rsp` and TSS.RSP0).
 ///
 /// # Safety
 /// Same requirements as `enter_usermode`, plus:
 /// - `process_cr3` must be a valid L4 page table with both user and kernel
 ///   mappings
-/// - `kernel_rsp_ptr` must point to a valid u64 for storing the kernel RSP
+/// - GS_BASE must hold this CPU's per-CPU block (always so in ring 0)
 #[unsafe(naked)]
 pub unsafe extern "C" fn enter_usermode_returnable(
-    _entry_point: u64,    // rdi
-    _user_stack: u64,     // rsi
-    _user_cs: u64,        // rdx
-    _user_ss: u64,        // rcx
-    _process_cr3: u64,    // r8
-    _kernel_rsp_ptr: u64, // r9
+    _entry_point: u64, // rdi
+    _user_stack: u64,  // rsi
+    _user_cs: u64,     // rdx
+    _user_ss: u64,     // rcx
+    _process_cr3: u64, // r8
 ) {
     core::arch::naked_asm!(
         // Save callee-saved registers (System V ABI)
@@ -201,22 +207,19 @@ pub unsafe extern "C" fn enter_usermode_returnable(
         "lea r12, [rip + {boot_rsp}]",
         "mov [r12], rsp",
 
-        // Update per-CPU kernel_rsp via pointer passed in r9
-        // This value is 16-byte aligned, ensuring syscall handlers get
-        // correct SSE alignment for movaps instructions.
-        "mov [r9], rsp",
-
-        // Also update TSS.RSP0 so that hardware interrupts/exceptions from
-        // Ring 3 use the same kernel stack. SYSCALL uses per-CPU kernel_rsp
-        // (via GS segment), but hardware exceptions (#PF, #GP, timer IRQ)
-        // use TSS.RSP0. Without this update, TSS.RSP0 points to the static
-        // boot KERNEL_STACK which may cause issues after CR3 switch.
-        "lea r12, [rip + {tss_rsp0_ptr}]",
-        "mov r12, [r12]",       // r12 = address of TSS.RSP0
+        // This stack becomes the CPU's entry stack from ring 3: syscall
+        // (gs:[0x0]) and interrupts/exceptions (TSS.RSP0, via gs:[0x40]).
+        // 16-byte aligned, as syscall_entry requires.
+        "mov gs:[0x0], rsp",
+        "mov r12, gs:[0x40]",
         "test r12, r12",
         "jz 2f",
-        "mov [r12], rsp",       // TSS.RSP0 = current RSP
+        "mov [r12], rsp",
         "2:",
+
+        // No interrupt until the iretq: after the swapgs it would see a
+        // ring-0 CS with the user GS base.
+        "cli",
 
         // Switch to process page tables
         "mov cr3, r8",
@@ -238,13 +241,13 @@ pub unsafe extern "C" fn enter_usermode_returnable(
         "shl rdx, 32",
         "or r12, rdx",           // r12 = full 64-bit FS_BASE
 
-        // Set segment registers for user mode
+        // Set segment registers for user mode. GS is not loaded: that would
+        // clear the GS base, which holds the per-CPU block until the swapgs.
         "mov eax, r8d",          // user_ss value
         "mov ds, ax",
         "mov es, ax",
         "xor eax, eax",
         "mov fs, ax",            // Zeros FS_BASE (will be restored below)
-        "mov gs, ax",
 
         // Restore FS_BASE via wrmsr if it was non-zero.
         // Without this, musl _start dereferences %fs:offset for TLS
@@ -265,13 +268,13 @@ pub unsafe extern "C" fn enter_usermode_returnable(
         "push r9",        // CS  (user_cs, saved in r9)
         "push rdi",       // RIP (entry point)
 
+        "swapgs",
         "iretq",
 
         boot_cr3 = sym BOOT_RETURN_CR3,
         boot_rsp = sym BOOT_RETURN_RSP,
         boot_canary = sym BOOT_STACK_CANARY,
         canary_magic = const BOOT_CANARY_MAGIC,
-        tss_rsp0_ptr = sym crate::arch::x86_64::gdt::TSS_RSP0_PTR,
     );
 }
 
@@ -319,7 +322,6 @@ pub struct ForkChildRegs {
 pub unsafe extern "C" fn enter_forked_child_returnable(
     _regs: *const ForkChildRegs, // rdi
     _process_cr3: u64,           // rsi
-    _kernel_rsp_ptr: u64,        // rdx
 ) {
     core::arch::naked_asm!(
         // ---- save boot context (same layout as enter_usermode_returnable) ----
@@ -348,19 +350,29 @@ pub unsafe extern "C" fn enter_forked_child_returnable(
         // Stash regs pointer in r15 (already saved on boot stack)
         "mov r15, rdi",
 
-        // Update per-CPU kernel_rsp
-        "mov [rdx], rsp",
+        // This stack becomes the CPU's entry stack from ring 3: syscall
+        // (gs:[0x0]) and interrupts/exceptions (TSS.RSP0, via gs:[0x40]).
+        // 16-byte aligned, as syscall_entry requires.
+        "mov gs:[0x0], rsp",
+        "mov r12, gs:[0x40]",
+        "test r12, r12",
+        "jz 2f",
+        "mov [r12], rsp",
+        "2:",
+
+        // No interrupt until the iretq (see enter_usermode_returnable).
+        "cli",
 
         // Switch to child's page tables
         "mov cr3, rsi",
 
-        // Set segment registers for user mode
+        // Set segment registers for user mode (not GS: see
+        // enter_usermode_returnable).
         "mov eax, 0x2B",
         "mov ds, ax",
         "mov es, ax",
         "xor eax, eax",
         "mov fs, ax",
-        "mov gs, ax",
 
         // Set FS_BASE from ForkChildRegs.fs_base (offset 144).
         // CLONE_SETTLS requires the child thread to have its own TLS base.
@@ -376,11 +388,29 @@ pub unsafe extern "C" fn enter_forked_child_returnable(
         "2:",
 
         // ---- build iretq frame from ForkChildRegs ----
+        // The saved context may have been written by sigreturn from user
+        // memory: RFLAGS keeps only user bits (no IOPL, N-170) and a RIP or
+        // RSP outside user space becomes 0, so the child faults in ring 3
+        // instead of the iretq faulting in ring 0.
+        "mov rcx, {user_end}",
         "push 0x2B",                    // SS  (user data segment)
-        "push qword ptr [r15 + 8]",    // RSP (user stack)
-        "push qword ptr [r15 + 16]",   // RFLAGS
+        "mov rax, [r15 + 8]",
+        "cmp rax, rcx",
+        "jb 4f",
+        "xor eax, eax",
+        "4:",
+        "push rax",                     // RSP (user stack)
+        "mov rax, [r15 + 16]",
+        "and rax, {rflags_mask}",
+        "or rax, {rflags_fixed}",
+        "push rax",                     // RFLAGS
         "push 0x33",                    // CS  (user code segment)
-        "push qword ptr [r15 + 0]",    // RIP (entry point)
+        "mov rax, [r15 + 0]",
+        "cmp rax, rcx",
+        "jb 5f",
+        "xor eax, eax",
+        "5:",
+        "push rax",                     // RIP
 
         // ---- restore ALL GPRs from struct (r15 = pointer, loaded last) ----
         "mov rax, [r15 + 24]",
@@ -399,12 +429,16 @@ pub unsafe extern "C" fn enter_forked_child_returnable(
         "mov r14, [r15 + 128]",
         "mov r15, [r15 + 136]",        // pointer gone — must be last
 
+        "swapgs",
         "iretq",
 
         boot_cr3 = sym BOOT_RETURN_CR3,
         boot_rsp = sym BOOT_RETURN_RSP,
         boot_canary = sym BOOT_STACK_CANARY,
         canary_magic = const BOOT_CANARY_MAGIC,
+        user_end = const crate::arch::x86_64::trap::USER_END,
+        rflags_mask = const crate::arch::x86_64::trap::USER_RFLAGS_MASK,
+        rflags_fixed = const crate::arch::x86_64::trap::USER_RFLAGS_FIXED,
     );
 }
 
@@ -413,10 +447,10 @@ pub unsafe extern "C" fn enter_forked_child_returnable(
 ///
 /// Called from `sys_exit` after cleaning up the exiting process. This function:
 /// 1. Restores the boot CR3 (switching back to boot page tables)
-/// 2. Restores kernel segment registers (DS, ES, FS, GS cleared)
-/// 3. Does `swapgs` to balance the swapgs from `syscall_entry`
-/// 4. Restores RSP to the saved value (past the callee-saved pushes)
-/// 5. Pops callee-saved registers and returns to the caller of
+/// 2. Restores kernel segment registers (DS, ES; FS cleared). GS is left alone:
+///    ring 0 keeps the per-CPU block in GS_BASE throughout.
+/// 3. Restores RSP to the saved value (past the callee-saved pushes)
+/// 4. Pops callee-saved registers and returns to the caller of
 ///    `enter_usermode_returnable`
 ///
 /// # Safety
@@ -499,15 +533,12 @@ pub unsafe fn boot_return_to_kernel() -> ! {
     // SAFETY: cr3 is the boot page table address saved before entering user
     // mode. rsp points to the stack with 8 bytes of alignment padding and
     // 6 callee-saved registers, with the return address below them. We
-    // restore kernel segment registers and
-    // balance the swapgs from syscall_entry. The swapgs must come BEFORE
-    // clearing GS so we don't corrupt KERNEL_GS_BASE. After restoring RSP
-    // and popping registers, ret returns to the caller of
-    // enter_usermode_returnable.
+    // restore kernel segment registers, restore RSP and pop the registers;
+    // ret returns to the caller of enter_usermode_returnable.
     //
     // CRITICAL FIX FOR OPT-LEVEL S/Z/3: The optimizer was allocating RSP
     // to RAX, which then got clobbered by `xor eax,eax` used for zeroing
-    // FS/GS. We now explicitly allocate RSP to RCX and CR3 to RDX, both
+    // FS. We now explicitly allocate RSP to RCX and CR3 to RDX, both
     // of which are preserved across the segment register operations. This
     // is the ONLY way to prevent the optimizer from reusing RAX.
     // Forwarded from this function's contract: the saved RSP/CR3 are valid,
@@ -515,13 +546,13 @@ pub unsafe fn boot_return_to_kernel() -> ! {
     unsafe {
         asm!(
             "mov cr3, rdx",       // Restore boot page tables (CR3 in RDX)
-            "swapgs",              // Balance syscall_entry's swapgs (before touching GS!)
+            // GS is not touched: ring 0 keeps the per-CPU block in GS_BASE
+            // throughout, and this runs in ring 0 (syscall or trap context).
             "mov ax, 0x10",       // Kernel data segment (GDT index 2, RPL 0)
             "mov ds, ax",         // Restore kernel DS
             "mov es, ax",         // Restore kernel ES
-            "xor eax, eax",       // Zero FS and GS (clobbers RAX but NOT RCX/RDX!)
+            "xor eax, eax",       // Zero FS (clobbers RAX but NOT RCX/RDX!)
             "mov fs, ax",
-            "mov gs, ax",
             "mov rsp, rcx",       // Restore saved boot RSP (RSP in RCX, safe!)
             "add rsp, 8",         // Skip alignment padding from enter_usermode_returnable
             "pop r15",
@@ -946,15 +977,8 @@ pub fn try_enter_usermode() -> Result<(), crate::error::KernelError> {
     let kernel_stack_phys = kernel_stack_frame.as_u64() * FRAME_SIZE as u64;
     let kernel_stack_top = phys_offset_val + kernel_stack_phys + (4 * FRAME_SIZE as u64);
 
-    // Write kernel_rsp to per-CPU data so syscall_entry can find it
-    let per_cpu = crate::arch::x86_64::syscall::per_cpu_data_ptr();
-    // SAFETY: per_cpu_data_ptr() returns a valid pointer to the static
-    // PerCpuData. We are in single-threaded bootstrap context. Setting
-    // kernel_rsp before entering user mode is required for syscall_entry
-    // to have a valid kernel stack.
-    unsafe {
-        (*per_cpu).kernel_rsp = kernel_stack_top;
-    }
+    // The stack syscall_entry and ring-3 interrupts (TSS.RSP0) enter on.
+    crate::arch::percpu::set_entry_stack(kernel_stack_top);
 
     // Step 7: Enter user mode
     // User entry point = start of code at 0x400000

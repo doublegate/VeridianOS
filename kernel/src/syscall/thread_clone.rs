@@ -175,8 +175,8 @@ pub fn sys_thread_clone(
         // instead of the instruction after the clone() syscall.
         #[cfg(target_arch = "x86_64")]
         if let Some(frame) = crate::arch::x86_64::syscall::get_syscall_frame() {
-            child_ctx.rip = frame.rcx; // RCX = user RIP (saved by SYSCALL)
-            child_ctx.rflags = frame.r11; // R11 = user RFLAGS (saved by SYSCALL)
+            child_ctx.rip = frame.rip;
+            child_ctx.rflags = frame.rflags;
             child_ctx.rbx = frame.rbx;
             child_ctx.rbp = frame.rbp;
             child_ctx.r12 = frame.r12;

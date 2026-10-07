@@ -744,6 +744,10 @@ fn boot_futex_spin(
         let saved_kernel_rsp = unsafe { (*per_cpu).kernel_rsp };
         // SAFETY: same per-CPU pointer as above.
         let saved_user_rsp = unsafe { (*per_cpu).user_rsp };
+        // The child's syscalls replace the frame pointer; the parent's
+        // syscall still needs its own (sixth argument, fork, return).
+        // SAFETY: same per-CPU pointer as above.
+        let saved_syscall_frame = unsafe { (*per_cpu).syscall_frame };
 
         // Save parent's FS_BASE.  boot_return_to_kernel zeroes FS via
         // `mov fs, ax`, which clears FS_BASE.  We restore it after the
@@ -770,33 +774,15 @@ fn boot_futex_spin(
         // child's next syscall.
         BOOT_CLONE_YIELD_PENDING.store(true, Ordering::Release);
 
-        // Rebalance swapgs: we are in syscall context (GS.base=per_cpu_data).
-        // enter_forked_child_returnable expects KernelGsBase=per_cpu_data.
-        // SAFETY: in syscall context GS.base is per_cpu_data, so swapgs moves
-        // it to KernelGsBase as the dispatch below requires; it is swapped
-        // back immediately after the child yields.
-        unsafe { core::arch::asm!("swapgs", options(nomem, nostack)) };
-
-        let kernel_rsp_ptr = per_cpu as u64;
-
         // Dispatch child to user mode (blocks until boot_return_to_kernel)
         // SAFETY: `regs` is a local ForkChildRegs in kernel memory, mapped in
         // every address space; cr3 is the child's non-zero page table root
-        // (checked above); kernel_rsp_ptr is this CPU's PerCpuData; GS was
-        // just put in the state the dispatch expects, and the parent's boot
-        // return context was saved above for restoration afterwards.
+        // (checked above); GS_BASE holds the per-CPU block (ring 0), and the
+        // parent's boot return context was saved above for restoration
+        // afterwards.
         unsafe {
-            crate::arch::x86_64::usermode::enter_forked_child_returnable(
-                &regs,
-                cr3,
-                kernel_rsp_ptr,
-            );
+            crate::arch::x86_64::usermode::enter_forked_child_returnable(&regs, cr3);
         }
-
-        // Child yielded back. Restore GS state.
-        // SAFETY: undoes the swapgs before the dispatch, returning GS.base to
-        // per_cpu_data for the rest of this syscall.
-        unsafe { core::arch::asm!("swapgs", options(nomem, nostack)) };
 
         // Restore parent's FS_BASE (zeroed by boot_return_to_kernel)
         // SAFETY: WRMSR of IA32_FS_BASE in Ring 0 with the value read from
@@ -815,9 +801,10 @@ fn boot_futex_spin(
         // SAFETY: same per-CPU pointer as above; the child has yielded, so
         // this CPU is back in the parent's syscall and is the only writer.
         unsafe {
-            (*per_cpu).kernel_rsp = saved_kernel_rsp;
             (*per_cpu).user_rsp = saved_user_rsp;
+            (*per_cpu).syscall_frame = saved_syscall_frame;
         }
+        crate::arch::percpu::set_entry_stack(saved_kernel_rsp);
 
         // Restore parent as boot-current
         crate::process::set_boot_current(parent_pid, parent_tid);

@@ -742,17 +742,20 @@ pub extern "C" fn syscall_handler(
     crate::arch::x86_64::kpti::on_syscall_entry();
 
     // Track syscall count and last syscall info (for PF handler diagnostics)
-    #[cfg_attr(not(target_arch = "x86_64"), allow(unused_variables))]
+    #[cfg_attr(
+        not(all(target_arch = "x86_64", feature = "trace")),
+        allow(unused_variables)
+    )]
     let count = SYSCALL_COUNT.fetch_add(1, Ordering::Relaxed);
     LAST_SYSCALL_NUM.store(syscall_num as u64, Ordering::Relaxed);
     LAST_SYSCALL_ARG1.store(arg1 as u64, Ordering::Relaxed);
     LAST_SYSCALL_ARG2.store(arg2 as u64, Ordering::Relaxed);
 
-    // Diagnostic: print first 500 syscalls via raw serial for KDE bringup.
-    // Uses unbuffered port I/O so output appears immediately regardless of
-    // serial mode (-serial stdio vs -serial file:).  Limit to 500 to avoid
-    // flooding serial output during normal operation.
-    #[cfg(target_arch = "x86_64")]
+    // Diagnostic (`trace` feature): the first 500 syscalls via raw serial,
+    // unbuffered so output appears immediately regardless of serial mode.
+    // Off by default: it costs a port write per byte and shows every
+    // process's arguments on the console.
+    #[cfg(all(target_arch = "x86_64", feature = "trace"))]
     if count < 500 {
         // SAFETY: COM1 (port 0x3F8) is present on the x86_64 platforms this
         // kernel targets, which is the raw_serial_* contract.
@@ -899,8 +902,8 @@ pub extern "C" fn syscall_handler(
         }
     };
 
-    // Diagnostic: print syscall results for first 500 calls
-    #[cfg(target_arch = "x86_64")]
+    // Diagnostic (`trace` feature): results of the first 500 syscalls.
+    #[cfg(all(target_arch = "x86_64", feature = "trace"))]
     if count < 500 {
         // SAFETY: COM1 (port 0x3F8) is present on the x86_64 platforms this
         // kernel targets, which is the raw_serial_* contract.
@@ -938,9 +941,9 @@ pub extern "C" fn syscall_handler(
             if let Some(thread) = crate::process::current_thread() {
                 if let Some(frame) = crate::arch::x86_64::syscall::get_syscall_frame() {
                     let mut ctx = thread.context.lock();
-                    ctx.rip = frame.rcx; // RCX = user RIP (saved by SYSCALL)
-                    ctx.rflags = frame.r11; // R11 = user RFLAGS
-                    ctx.rsp = crate::arch::x86_64::syscall::get_saved_user_rsp();
+                    ctx.rip = frame.rip;
+                    ctx.rflags = frame.rflags;
+                    ctx.rsp = frame.rsp;
                     ctx.rax = ret as u64; // syscall return value
                     ctx.rbx = frame.rbx;
                     ctx.rbp = frame.rbp;

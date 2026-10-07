@@ -857,6 +857,7 @@ impl ThreadBuilder {
             );
         })?;
         let kernel_frame = kstack.frame;
+        #[cfg_attr(not(feature = "trace"), allow(unused_variables))]
         let kernel_stack_phys = kernel_frame.as_addr().as_usize();
         let kernel_stack_usable_base = kstack.base;
 
@@ -905,6 +906,7 @@ impl ThreadBuilder {
             thread.context.lock().set_tls_base(base as u64);
         }
 
+        #[cfg(feature = "trace")]
         crate::println!(
             "[THREAD] Allocated stacks for tid {}: user={:#x}..{:#x}, kernel={:#x}..{:#x} \
              (phys={:#x})",
@@ -915,13 +917,6 @@ impl ThreadBuilder {
             kernel_stack_usable_base + kernel_stack_size,
             kernel_stack_phys,
         );
-
-        #[cfg(target_arch = "x86_64")]
-        // SAFETY: raw_serial_str writes directly to the COM1 serial port (0x3F8).
-        // This is safe to call at any point during kernel execution.
-        unsafe {
-            crate::arch::x86_64::idt::raw_serial_str(b"[THREAD] build() returning Ok\n");
-        }
 
         Ok(thread)
     }

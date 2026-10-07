@@ -1372,13 +1372,11 @@ fn run_user_process_from_shell(pid: crate::process::ProcessId) -> i32 {
         // When the user process calls sys_exit, this call returns normally
         // with the exit code.
         //
-        let kernel_rsp_ptr = crate::arch::x86_64::syscall::per_cpu_data_ptr() as u64;
         // SAFETY: All preconditions for enter_usermode_returnable are met:
         // - entry_point is in the process's user-space page tables
         // - user_stack_ptr points to the top of the user stack
         // - CS/SS are valid Ring 3 selectors from the GDT
         // - pt_root is a valid L4 page table with kernel mappings preserved
-        // - kernel_rsp_ptr points to the per-CPU kernel_rsp field
         unsafe {
             crate::arch::x86_64::usermode::enter_usermode_returnable(
                 entry_point,
@@ -1386,7 +1384,6 @@ fn run_user_process_from_shell(pid: crate::process::ProcessId) -> i32 {
                 user_cs,
                 user_ss,
                 pt_root,
-                kernel_rsp_ptr,
             );
         }
 

@@ -6,7 +6,6 @@
 #![no_std]
 #![cfg_attr(all(test, target_os = "none"), no_main)]
 #![feature(custom_test_frameworks)]
-#![feature(abi_x86_interrupt)]
 #![cfg_attr(target_os = "none", feature(alloc_error_handler))]
 // naked_functions is stable since Rust 1.88.0, no feature flag needed
 // Custom test runner only for bare-metal; host target uses standard #[test] harness.

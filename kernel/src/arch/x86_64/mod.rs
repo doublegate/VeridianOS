@@ -27,6 +27,7 @@ pub mod serial;
 pub mod smp;
 pub mod syscall;
 pub mod timer;
+pub mod trap;
 pub mod tsc;
 #[cfg(target_os = "none")]
 pub(crate) mod usercopy;
@@ -60,7 +61,6 @@ pub fn init() {
 
     println!("[ARCH] Starting GDT init...");
     gdt::init();
-    gdt::init_tss_rsp0_ptr();
     println!("[ARCH] GDT initialized");
 
     // Initialize SYSCALL/SYSRET support (must be after GDT init so that
@@ -71,6 +71,7 @@ pub fn init() {
 
     println!("[ARCH] Starting IDT init...");
     idt::init();
+    trap::enable_machine_check();
     println!("[ARCH] IDT initialized");
 
     // Initialize PIC (8259) before enabling interrupts

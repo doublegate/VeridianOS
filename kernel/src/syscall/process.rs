@@ -123,10 +123,8 @@ pub fn sys_exec(path_ptr: usize, argv_ptr: usize, envp_ptr: usize) -> SyscallRes
             #[cfg(target_arch = "x86_64")]
             // SAFETY: current_thread() returns the thread that called exec.
             // Its context was updated by exec_process with the new entry
-            // point and stack pointer. swapgs undoes the swapgs from
-            // syscall_entry so GS_BASE/KERNEL_GS_BASE are correct for
-            // user mode. enter_usermode builds an iretq frame and
-            // transitions to Ring 3.
+            // point and stack pointer. enter_usermode builds an iretq frame,
+            // swaps GS to the user value and transitions to Ring 3.
             unsafe {
                 let current_thread =
                     crate::process::current_thread().expect("no current thread after exec");
@@ -167,10 +165,6 @@ pub fn sys_exec(path_ptr: usize, argv_ptr: usize, envp_ptr: usize) -> SyscallRes
                         );
                     }
                 }
-
-                // Undo the swapgs from syscall_entry so GS_BASE and
-                // KERNEL_GS_BASE are correct for user mode.
-                core::arch::asm!("swapgs");
 
                 crate::arch::x86_64::usermode::enter_usermode(
                     entry, stack, 0x33, // User CS (Ring 3)

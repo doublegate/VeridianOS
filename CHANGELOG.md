@@ -58,6 +58,25 @@
 
 ### Security
 
+- **x86_64 kernel entry rebuilt (N-166, N-169, N-170, N-171, N-175; ADR 0008).**
+  - **One frame and dispatcher.** Every exception and interrupt enters through an assembly stub
+    and one Rust dispatcher, and the system call builds the same register frame.
+  - **GS base.** The GS base is swapped exactly once on each ring-3 entry and exit, with an
+    `lfence` against the SWAPGS speculation issue. Until now it depended on how a context was
+    entered.
+  - **Stacks.** IST stacks are used only for #DF, NMI and #MC. Page faults and interrupts no
+    longer share four unguarded 20 KiB stacks, where a nested fault overwrote the live frame.
+  - **Return to user.** `sysretq` is used only for a canonical user return address, with an
+    `iretq` fallback. Every return to user mode sanitises RFLAGS, RIP and RSP, so sigreturn can
+    no longer raise IOPL and grant a process port I/O.
+  - **Exceptions.** User exceptions kill the process with the signal Linux sends (SIGILL,
+    SIGFPE, SIGTRAP, SIGBUS or SIGSEGV), where several previously halted the CPU. NMI, #MC,
+    #DB, #NM, #MF and #XM now have handlers. Machine checks are delivered as #MC instead of
+    shutting the CPU down.
+  - **Tests.** Runtime tests check each trap.
+- **Syscall arguments are no longer printed to the console.** The first 500 system calls and
+  their results, nested-child registers and thread stack addresses were written to the serial
+  port in every build; they now need the `trace` feature.
 - **`kill` signals real processes (N-92).** It used to update a separate bookkeeping table and
   never reach the target, with no permission check: `kill -9` could not stop a program, and
   any user could "signal" any process. It now applies the signal, requires root or a matching
