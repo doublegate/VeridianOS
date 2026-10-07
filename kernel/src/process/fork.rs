@@ -155,6 +155,7 @@ pub fn fork_process() -> Result<ProcessId, KernelError> {
     // Signal dispositions and the blocked mask are inherited (POSIX fork);
     // pending signals are not.
     *new_process.signal_handlers.lock() = *current_process.signal_handlers.lock();
+    *new_process.signal_action_extra.lock() = *current_process.signal_action_extra.lock();
     new_process.signal_mask.store(
         current_process
             .signal_mask

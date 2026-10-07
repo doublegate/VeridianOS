@@ -153,6 +153,10 @@ pub struct Process {
     /// 0 = default, 1 = ignore, other values = handler address
     pub signal_handlers: Mutex<[u64; 32]>,
 
+    /// The rest of each signal's action: (sa_flags, sa_restorer, sa_mask),
+    /// kept so sigaction returns what was set (N-95) and for delivery.
+    pub signal_action_extra: Mutex<[(u64, u64, u64); 32]>,
+
     /// Pending signals bitmap
     pub pending_signals: AtomicU64,
 
@@ -262,6 +266,7 @@ impl Process {
             #[cfg(feature = "alloc")]
             exe_path: Mutex::new(String::new()),
             signal_handlers: Mutex::new([0u64; 32]),
+            signal_action_extra: Mutex::new([(0, 0, 0); 32]),
             pending_signals: AtomicU64::new(0),
             signal_mask: AtomicU64::new(0),
             umask: AtomicU32::new(0o022),
@@ -413,10 +418,15 @@ impl Process {
 
     /// Reset all signal handlers to default (used during exec)
     pub fn reset_signal_handlers(&self) {
+        // Caught signals revert to their default action; ignored ones stay
+        // ignored (POSIX exec), so a parent's SIG_IGN still applies.
         let mut handlers = self.signal_handlers.lock();
         for handler in handlers.iter_mut() {
-            *handler = 0; // 0 = default action
+            if *handler != 1 {
+                *handler = 0; // 0 = default action
+            }
         }
+        *self.signal_action_extra.lock() = [(0, 0, 0); 32];
         // Clear pending signals that were ignored
         self.pending_signals.store(0, Ordering::Release);
     }

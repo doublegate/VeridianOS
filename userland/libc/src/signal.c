@@ -17,13 +17,37 @@
 /* sigaction                                                                 */
 /* ========================================================================= */
 
+/* The kernel's sigaction layout (Linux x86_64, 32 bytes). The public
+ * struct sigaction is 24 bytes, so passing it directly let the kernel
+ * write 8 bytes past the caller's `oldact` (N-95). */
+struct k_sigaction {
+    void *handler;
+    unsigned long flags;
+    void *restorer;
+    unsigned long mask;
+};
+
 int sigaction(int signum, const struct sigaction *act,
               struct sigaction *oldact)
 {
-    long ret = veridian_syscall3(SYS_SIGACTION, signum, act, oldact);
+    struct k_sigaction kact, kold;
+    if (act) {
+        kact.handler = (void *)act->sa_handler;
+        kact.flags = (unsigned long)(unsigned int)act->sa_flags;
+        kact.restorer = 0;
+        kact.mask = (unsigned long)act->sa_mask;
+    }
+    long ret = veridian_syscall3(SYS_SIGACTION, signum, act ? &kact : 0,
+                                 oldact ? &kold : 0);
     if (ret < 0) {
         errno = (int)(-ret);
         return -1;
+    }
+    if (oldact) {
+        memset(oldact, 0, sizeof(*oldact));
+        oldact->sa_handler = (sighandler_t)kold.handler;
+        oldact->sa_flags = (int)kold.flags;
+        oldact->sa_mask = (sigset_t)kold.mask;
     }
     return 0;
 }

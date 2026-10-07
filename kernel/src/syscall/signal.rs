@@ -91,43 +91,47 @@ const _: () = assert!(core::mem::size_of::<SigAction>() == 32);
 /// # Returns
 /// 0 on success.
 pub fn sys_sigaction(signum: usize, act_ptr: usize, oldact_ptr: usize) -> SyscallResult {
-    // Validate signal number (1-31, cannot change SIGKILL=9 or SIGSTOP=19)
+    // Signals 1-31. SIGKILL and SIGSTOP can be queried but not changed
+    // (EINVAL, as Linux; it was EACCES even for a query, N-105).
     if signum == 0 || signum > 31 {
         return Err(SyscallError::InvalidArgument);
     }
-    if signum == 9 || signum == 19 {
-        return Err(SyscallError::PermissionDenied);
+    if act_ptr != 0 && (signum == 9 || signum == 19) {
+        return Err(SyscallError::InvalidArgument);
     }
 
-    // Validate pointers if non-null
-    if act_ptr != 0 {
+    // Read the new action first: act and oldact may be the same buffer.
+    let new_act: Option<SigAction> = if act_ptr != 0 {
         validate_user_ptr_typed::<SigAction>(act_ptr)?;
-    }
-    if oldact_ptr != 0 {
-        validate_user_ptr_typed::<SigAction>(oldact_ptr)?;
-    }
+        Some(super::userspace::read_user(act_ptr)?)
+    } else {
+        None
+    };
 
     let proc = process::current_process().ok_or(SyscallError::InvalidState)?;
 
-    // Return the previous handler via oldact_ptr
+    // The whole previous action, not just the handler: flags, restorer and
+    // mask used to come back as zero (N-95).
     if oldact_ptr != 0 {
+        validate_user_ptr_typed::<SigAction>(oldact_ptr)?;
         let old_handler = proc.get_signal_handler(signum).unwrap_or(0);
+        let (flags, restorer, mask) = proc.signal_action_extra.lock()[signum];
         super::userspace::write_user(
             oldact_ptr,
             SigAction {
                 sa_handler: old_handler as usize,
-                sa_flags: 0,
-                sa_restorer: 0,
-                sa_mask: 0,
+                sa_flags: flags,
+                sa_restorer: restorer as usize,
+                sa_mask: mask,
             },
         )?;
     }
 
-    // Install the new handler from act_ptr
-    if act_ptr != 0 {
-        let new_act: SigAction = super::userspace::read_user(act_ptr)?;
-        proc.set_signal_handler(signum, new_act.sa_handler as u64)
+    if let Some(act) = new_act {
+        proc.set_signal_handler(signum, act.sa_handler as u64)
             .map_err(|_| SyscallError::InvalidArgument)?;
+        proc.signal_action_extra.lock()[signum] =
+            (act.sa_flags, act.sa_restorer as u64, act.sa_mask);
     }
 
     Ok(0)

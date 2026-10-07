@@ -99,6 +99,11 @@
 
 ### Fixed
 
+- **`sigaction` no longer overwrites its caller's stack (N-95).** The native libc passed its
+  24-byte `struct sigaction` where the kernel reads and writes 32 bytes, so every `signal()`
+  call corrupted 8 bytes after its local; flags, restorer and mask were also discarded and
+  reported as 0. The libc now translates, the kernel keeps the whole action, SIG_IGN survives
+  exec as POSIX requires, and SIGKILL/SIGSTOP can be queried (changing them is EINVAL).
 - **musl programs reach the right system calls (N-103, N-151).** musl passed `prctl`, `flock`,
   `tkill`, `tgkill` and `waitid` through unmapped, so they landed on unrelated native calls
   (`prctl` became `unlink` of a small integer, `abort()` became `select`). The musl patch maps

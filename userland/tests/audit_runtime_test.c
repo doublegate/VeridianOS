@@ -791,6 +791,43 @@ static void test_kill(void)
     report("kill_permissions_esrch_echild", eperm && self && esrch && echild, why);
 }
 
+/* --- sigaction keeps the whole action and fits its struct (N-95, N-105). - */
+static void on_usr1(int sig) { (void)sig; }
+
+static void test_sigaction(void)
+{
+    /* A guard after `old`: the kernel used to write 32 bytes into the
+     * 24-byte struct and overwrite whatever followed it. */
+    struct {
+        struct sigaction old;
+        unsigned long guard;
+    } box;
+    box.guard = 0xA5A5A5A5A5A5A5A5UL;
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = on_usr1;
+    sa.sa_flags = SA_RESTART;
+    sigemptyset(&sa.sa_mask);
+    sigaddset(&sa.sa_mask, SIGUSR2);
+    int r1 = sigaction(SIGUSR1, &sa, NULL);
+    int r2 = sigaction(SIGUSR1, NULL, &box.old);
+    int kept = r1 == 0 && r2 == 0 && box.old.sa_handler == on_usr1 &&
+               (box.old.sa_flags & SA_RESTART) && sigismember(&box.old.sa_mask, SIGUSR2) == 1;
+    int guard_ok = box.guard == 0xA5A5A5A5A5A5A5A5UL;
+    signal(SIGUSR1, SIG_DFL);
+    /* SIGKILL may be queried; changing it is EINVAL. */
+    struct sigaction q;
+    int query = sigaction(SIGKILL, NULL, &q);
+    errno = 0;
+    int set = sigaction(SIGKILL, &sa, NULL);
+    int set_errno = errno;
+    static char why[96];
+    snprintf(why, sizeof(why), "kept=%d guard=%d query=%d set=%d/%d", kept, guard_ok, query, set,
+             set_errno);
+    report("sigaction_roundtrip", kept && guard_ok && query == 0 && set == -1 && set_errno == EINVAL,
+           why);
+}
+
 /* --- Directory rename (FS-PERF-03): the node moves, ".." follows. ----- */
 static void test_rename_directory(void)
 {
@@ -1079,6 +1116,7 @@ int main(int argc, char **argv)
     test_fork_inheritance();
     test_open_flags();
     test_kill();
+    test_sigaction();
     test_rename_directory();
     test_closed_stdio();
     test_unix_bind_connect();
