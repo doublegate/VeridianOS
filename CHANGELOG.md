@@ -17,8 +17,16 @@
   so the two names diverged on the next write. It also copied files from other filesystems
   instead of returning EXDEV. Both names now refer to one node.
 
+- **Capability revocation cascades (CAP-INC-02).** A delegated capability now has its own ID,
+  recorded under its parent. Revoking one delegation leaves the parent intact, and revoking
+  the parent also revokes every capability derived from it. Previously a delegation reused the
+  parent's ID, so revoking any copy revoked them all, and the cascade never ran.
+- **tmpfs releases a file's space when the last link or open file goes.** Freeing it at
+  unlink let a hard link keep data beyond the size limit.
+
 ### Removed
 
+- The unused slab allocator and `mm/vmm.rs` (MEM-INC-02).
 - The unused in-kernel `stdlib` module (1,018 lines with no callers).
 
 ---
