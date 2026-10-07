@@ -381,6 +381,42 @@ mod manager_tests {
         assert!(revocation::is_revoked(grandchild));
     }
 
+    /// The per-capability delegation limit counts delegations still held:
+    /// one a process gave up (here, its space dropped, as on exit) is
+    /// collected, so a long-running server can keep delegating to
+    /// short-lived clients. Delegations held at once are still bounded.
+    #[test]
+    fn delegation_limit_counts_only_held_delegations() {
+        let server = space::CapabilitySpace::new();
+        let obj = object::ObjectRef::Process {
+            pid: ProcessId(9876),
+        };
+        let mgr = manager::cap_manager();
+        let root = mgr
+            .create_capability(obj, token::Rights::READ | token::Rights::GRANT, &server)
+            .unwrap();
+        for _ in 0..1100 {
+            let client = space::CapabilitySpace::new();
+            mgr.delegate(root, &server, &client, token::Rights::READ)
+                .unwrap();
+        }
+        let mut held = alloc::vec::Vec::new();
+        let mut refused = false;
+        for _ in 0..1100 {
+            let client = space::CapabilitySpace::new();
+            match mgr.delegate(root, &server, &client, token::Rights::READ) {
+                Ok(_) => held.push(client),
+                Err(manager::CapError::QuotaExceeded) => {
+                    refused = true;
+                    break;
+                }
+                Err(e) => panic!("unexpected {e:?}"),
+            }
+        }
+        assert!(refused, "held delegations must stay bounded");
+        assert_eq!(held.len(), 1024);
+    }
+
     #[test]
     fn test_capability_check() {
         let cap_space = space::CapabilitySpace::new();

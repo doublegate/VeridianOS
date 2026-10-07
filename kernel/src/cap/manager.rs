@@ -2,7 +2,7 @@
 //!
 //! Manages capability creation, delegation, and revocation across the system.
 
-use core::sync::atomic::{AtomicU64, AtomicU8, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 
 use super::{
     object::ObjectRef,
@@ -96,6 +96,8 @@ struct RegistryEntry {
     object: ObjectRef,
     generation: AtomicU8,
     revoked: bool,
+    /// Capability spaces holding this capability (see `hold`).
+    holders: AtomicU32,
 }
 
 /// Global capability manager
@@ -182,6 +184,7 @@ impl CapabilityManager {
                 object: object.clone(),
                 generation: AtomicU8::new(0),
                 revoked: false,
+                holders: AtomicU32::new(0),
             };
             self.registry.write().insert(id, entry);
         }
@@ -245,7 +248,9 @@ impl CapabilityManager {
                     return Ok(token);
                 }
             }
-            if children.len() >= MAX_DELEGATIONS {
+            if children.len() >= MAX_DELEGATIONS
+                && self.collect_unheld_delegations(cap.id()) >= MAX_DELEGATIONS
+            {
                 return Err(CapError::QuotaExceeded);
             }
         }
@@ -289,6 +294,9 @@ impl CapabilityManager {
                     object: object.clone(),
                     generation: AtomicU8::new(0),
                     revoked: false,
+                    // In flight: held by this call until the target space
+                    // holds it, so a concurrent collection cannot take it.
+                    holders: AtomicU32::new(1),
                 },
             );
             super::revocation::record_derivation(cap.id(), id);
@@ -308,6 +316,9 @@ impl CapabilityManager {
             self.id_allocator.recycle(new_cap.id());
             return Err(CapError::OutOfMemory);
         }
+        // The target holds it now; drop the in-flight reference.
+        #[cfg(feature = "alloc")]
+        self.release(new_cap.id());
 
         self.stats
             .capabilities_delegated
@@ -317,6 +328,58 @@ impl CapabilityManager {
         crate::security::audit::log_capability_op(0, cap.id(), 0);
 
         Ok(new_cap)
+    }
+
+    /// A capability space now holds capability `id`. Called by
+    /// `CapabilitySpace` for every entry it gains (insert, fork copy);
+    /// tokens the registry does not know are ignored.
+    pub(crate) fn hold(&self, id: u64) {
+        #[cfg(feature = "alloc")]
+        if let Some(entry) = self.registry.read().get(&id) {
+            entry.holders.fetch_add(1, Ordering::AcqRel);
+        }
+        #[cfg(not(feature = "alloc"))]
+        let _ = id;
+    }
+
+    /// A capability space no longer holds capability `id` (remove, clear,
+    /// drop).
+    pub(crate) fn release(&self, id: u64) {
+        #[cfg(feature = "alloc")]
+        if let Some(entry) = self.registry.read().get(&id) {
+            let _ = entry
+                .holders
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |h| {
+                    Some(h.saturating_sub(1))
+                });
+        }
+        #[cfg(not(feature = "alloc"))]
+        let _ = id;
+    }
+
+    /// Forget delegations of `parent` that no space holds any more and that
+    /// have no delegations of their own (a delegation with children stays,
+    /// so revoking `parent` still reaches them). Returns how many
+    /// delegations `parent` has left. This is what keeps MAX_DELEGATIONS a
+    /// limit on delegations in use: without it, those held by processes
+    /// that have exited would use it up for good. IDs are not recycled, so
+    /// no new capability can match a revocation-list entry of an old one.
+    #[cfg(feature = "alloc")]
+    fn collect_unheld_delegations(&self, parent: u64) -> usize {
+        let mut registry = self.registry.write();
+        let children = super::revocation::get_children(parent);
+        let mut left = children.len();
+        for child in children {
+            let unheld = registry
+                .get(&child)
+                .is_none_or(|e| e.holders.load(Ordering::Acquire) == 0);
+            if unheld && super::revocation::get_children(child).is_empty() {
+                registry.remove(&child);
+                super::revocation::cleanup_capability(child);
+                left -= 1;
+            }
+        }
+        left
     }
 
     /// Revoke a capability globally, together with every capability
