@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Boot one architecture's dev kernel in QEMU and check the in-kernel tests.
+# Boot one architecture's kernel in QEMU and check the in-kernel tests.
 #
 # Passes when the serial log shows BOOTOK, the boot-test tally is complete
 # ("Results: N/N passed"), and nothing panicked during a settle period after
@@ -12,7 +12,8 @@
 # Env:   SETTLE (default 20), LOG_DIR (default target/boot-logs),
 #        QEMU_EXTRA (extra QEMU arguments), SMP (CPU count, default 1),
 #        EXPECT_CPUS (require "[SMP] N/N CPUs online" with N = this value;
-#        for kernels built with FEATURES=smp)
+#        for kernels built with FEATURES=smp), PROFILE (debug or release,
+#        default debug; release boots the `./build-kernel.sh <arch> release` build)
 set -u
 
 arch="${1:?usage: boot-test.sh <x86_64|aarch64|riscv64> [max-seconds]}"
@@ -23,6 +24,11 @@ log_dir="${LOG_DIR:-$root/target/boot-logs}"
 mkdir -p "$log_dir"
 log="$log_dir/boot-$arch.log"
 smp="${SMP:-1}"
+profile="${PROFILE:-debug}"
+case "$profile" in
+debug | release) ;;
+*) echo "PROFILE must be debug or release"; exit 2 ;;
+esac
 read -r -a extra <<<"${QEMU_EXTRA:-}"
 
 find_ovmf() {
@@ -38,7 +44,7 @@ find_ovmf() {
 case "$arch" in
 x86_64)
     ovmf="$(find_ovmf)" || { echo "FAIL x86_64: no OVMF firmware found"; exit 2; }
-    img="$root/target/x86_64-veridian/debug/veridian-uefi.img"
+    img="$root/target/x86_64-veridian/$profile/veridian-uefi.img"
     accel=(-cpu qemu64)
     [[ -w /dev/kvm ]] && accel=(-enable-kvm -cpu host)
     # shellcheck disable=SC2054  # commas belong to QEMU option values
@@ -48,11 +54,11 @@ x86_64)
         -device ide-hd,drive=disk0 -m 2048M)
     ;;
 aarch64)
-    img="$root/target/aarch64-unknown-none/debug/veridian-kernel"
+    img="$root/target/aarch64-unknown-none/$profile/veridian-kernel"
     cmd=(qemu-system-aarch64 -M virt -cpu cortex-a72 -smp "$smp" -m 256M -kernel "$img")
     ;;
 riscv64)
-    img="$root/target/riscv64gc-unknown-none-elf/debug/veridian-kernel"
+    img="$root/target/riscv64gc-unknown-none-elf/$profile/veridian-kernel"
     cmd=(qemu-system-riscv64 -M virt -smp "$smp" -m 256M -bios default -kernel "$img")
     ;;
 *)
@@ -60,7 +66,7 @@ riscv64)
     exit 2
     ;;
 esac
-[[ -r $img ]] || { echo "FAIL $arch: $img not built (./build-kernel.sh $arch dev)"; exit 2; }
+[[ -r $img ]] || { echo "FAIL $arch: $img not built (./build-kernel.sh $arch ${profile/debug/dev})"; exit 2; }
 
 "${cmd[@]}" -serial stdio -display none "${extra[@]}" </dev/null >"$log" 2>&1 &
 pid=$!
