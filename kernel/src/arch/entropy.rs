@@ -67,11 +67,11 @@ pub fn read_timestamp() -> u64 {
 /// Returns `false` if CPUID is unavailable or the bit is not set.
 #[cfg(target_arch = "x86_64")]
 fn cpu_has_rdrand() -> bool {
+    let ecx: u32;
     // SAFETY: CPUID with EAX=1 is a read-only, side-effect-free instruction
     // that returns CPU feature information. It is always available on x86_64
     // (CPUID support is mandatory in long mode). RBX is saved and restored
     // because LLVM reserves it as a frame pointer and CPUID clobbers it.
-    let ecx: u32;
     unsafe {
         core::arch::asm!(
             "push rbx",

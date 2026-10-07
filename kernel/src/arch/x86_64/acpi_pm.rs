@@ -467,6 +467,9 @@ pub fn acpi_pm_init() -> KernelResult<()> {
 /// Attempt to parse FADT from ACPI table hierarchy.
 fn parse_fadt_from_tables() -> Option<FadtPmInfo> {
     // Access boot info to get RSDP, then walk RSDT/XSDT looking for FACP.
+    // SAFETY: BOOT_INFO is a static mut written once during early boot (in
+    // the entry point) and only read afterwards; this shared read cannot
+    // race with that single write.
     #[allow(static_mut_refs)]
     let rsdp_phys = unsafe {
         super::boot::BOOT_INFO
@@ -1052,8 +1055,9 @@ pub fn acpi_shutdown_s5() -> KernelResult<()> {
     // If we're still here, the power off did not succeed. Halt.
     println!("[ACPI-PM] WARNING: S5 power off did not take effect, halting");
 
-    // SAFETY: HLT in an infinite loop as a last resort.
     loop {
+        // SAFETY: HLT in an infinite loop as a last resort. HLT only idles
+        // the CPU until the next interrupt; it touches no memory or stack.
         unsafe {
             core::arch::asm!("hlt", options(nomem, nostack));
         }

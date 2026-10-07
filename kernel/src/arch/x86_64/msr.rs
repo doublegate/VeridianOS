@@ -60,6 +60,8 @@ pub fn phys_to_virt(phys: usize) -> Option<usize> {
         // Fallback: try BOOT_INFO directly (only safe during early boot
         // before user-mode setup, when the bootloader's page tables are
         // still active).
+        // SAFETY: BOOT_INFO is a static mut written once in the entry point
+        // and only read afterwards, so this shared read cannot race a write.
         #[allow(static_mut_refs)]
         let boot_info = unsafe { crate::arch::x86_64::boot::BOOT_INFO.as_ref()? };
         let offset = boot_info.physical_memory_offset.into_option()?;

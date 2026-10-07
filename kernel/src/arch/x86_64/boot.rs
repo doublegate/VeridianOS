@@ -101,17 +101,27 @@ pub fn get_framebuffer_info() -> Option<BootFramebufferInfo> {
 // the parent module (arch/x86_64/mod.rs) to avoid duplication.
 use super::{inb, outb};
 
+/// Write a string to a 16550 UART by polling its line status register.
+///
+/// # Safety
+///
+/// `base` must be the I/O base of a present 16550-compatible UART (data
+/// register at `base`, line status register at `base + 5`).
 #[inline]
 unsafe fn write_str(base: u16, s: &str) {
     for byte in s.bytes() {
         // Wait for transmit buffer to be empty
         loop {
-            let status = inb(base + 5);
+            // SAFETY: forwarded from this function's contract: base + 5 is
+            // the UART's line status register.
+            let status = unsafe { inb(base + 5) };
             if (status & 0x20) != 0 {
                 break;
             }
         }
         // Send byte
-        outb(base, byte);
+        // SAFETY: forwarded from this function's contract: `base` is the
+        // UART's transmit data register.
+        unsafe { outb(base, byte) };
     }
 }

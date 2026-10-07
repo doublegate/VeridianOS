@@ -208,6 +208,9 @@ pub fn debug_idt_handler_addr(vector: u8) -> u64 {
     }
 
     let entry_ptr = (idt_base + entry_offset) as *const u8;
+    // SAFETY: `idt_base` comes from IDTR, so it is the live, mapped IDT the
+    // CPU itself uses, and the bounds check above keeps the 16-byte entry at
+    // `entry_offset` inside its `limit`. The bytes are only read.
     unsafe {
         let offset_low = u16::from_le_bytes([*entry_ptr, *entry_ptr.add(1)]);
         let offset_mid = u16::from_le_bytes([*entry_ptr.add(6), *entry_ptr.add(7)]);
@@ -243,6 +246,7 @@ pub fn debug_verify_ist_in_cr3(process_cr3: u64) {
     // per-CPU kernel_rsp after enter_usermode_returnable). This is the
     // critical stack used for hardware interrupts WITHOUT IST (timer, etc.).
     let current_rsp: u64;
+    // SAFETY: copying RSP into a register has no side effects.
     unsafe {
         core::arch::asm!("mov {}, rsp", out(reg) current_rsp, options(nomem, nostack));
     }
@@ -384,6 +388,12 @@ pub fn debug_verify_ist_in_cr3(process_cr3: u64) {
 /// called from the scheduler with interrupts disabled, ensuring no concurrent
 /// access.
 pub fn set_kernel_stack(stack_top: u64) {
+    // SAFETY: the TSS is a boot-initialized static that lives for the whole
+    // kernel lifetime, so the pointer is valid. Callers are the scheduler
+    // with interrupts disabled, so no other code reads or writes the field
+    // concurrently. NOTE: the pointer is derived from a shared reference to
+    // a `lazy_static` value that has no `UnsafeCell`; the write is outside
+    // Rust's aliasing rules and relies on the compiler not caching RSP0.
     unsafe {
         let tss_ptr = &*TSS as *const TaskStateSegment as *mut TaskStateSegment;
         (*tss_ptr).privilege_stack_table[0] = VirtAddr::new(stack_top);

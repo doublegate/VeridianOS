@@ -23,23 +23,28 @@ unsafe fn uart_write_bytes_asm(ptr: *const u8, len: usize) {
     // Use inline assembly to perform the entire operation
     // Pass UART address as an input rather than loading it in assembly
     let uart_addr: usize = 0x0900_0000;
-    core::arch::asm!(
-        "mov {i}, #0",                    // Initialize counter
-        "1:",                             // Loop start
-        "cmp {i}, {len}",                 // Compare counter with length
-        "b.ge 2f",                        // Branch if counter >= length
-        "ldrb {byte:w}, [{ptr}, {i}]",   // Load byte from string[i]
-        "strb {byte:w}, [{uart}]",       // Store byte to UART
-        "add {i}, {i}, #1",               // Increment counter
-        "b 1b",                           // Branch back to loop
-        "2:",                             // End
-        ptr = in(reg) ptr,
-        len = in(reg) len,
-        uart = in(reg) uart_addr,
-        i = out(reg) _,
-        byte = out(reg) _,
-        options(nostack, preserves_flags)
-    );
+    // SAFETY: forwarded from this function's contract: `ptr` is readable for
+    // `len` bytes (the loop reads offsets 0..len only) and the PL011 data
+    // register at 0x09000000 is mapped, so each store transmits one byte.
+    unsafe {
+        core::arch::asm!(
+            "mov {i}, #0",                    // Initialize counter
+            "1:",                             // Loop start
+            "cmp {i}, {len}",                 // Compare counter with length
+            "b.ge 2f",                        // Branch if counter >= length
+            "ldrb {byte:w}, [{ptr}, {i}]",   // Load byte from string[i]
+            "strb {byte:w}, [{uart}]",       // Store byte to UART
+            "add {i}, {i}, #1",               // Increment counter
+            "b 1b",                           // Branch back to loop
+            "2:",                             // End
+            ptr = in(reg) ptr,
+            len = in(reg) len,
+            uart = in(reg) uart_addr,
+            i = out(reg) _,
+            byte = out(reg) _,
+            options(nostack, preserves_flags)
+        )
+    };
 }
 
 /// Print a string directly to UART
@@ -62,7 +67,9 @@ pub fn direct_print_str(s: &str) {
 /// machine). This function writes each byte of `s` directly to the
 /// UART data register via assembly MMIO stores.
 pub unsafe fn uart_write_str(s: &str) {
-    uart_write_bytes_asm(s.as_ptr(), s.len());
+    // SAFETY: `s` is a valid buffer of `s.len()` bytes, and the UART mapping
+    // is forwarded from this function's contract.
+    unsafe { uart_write_bytes_asm(s.as_ptr(), s.len()) };
 }
 
 /// Print a single character directly to UART

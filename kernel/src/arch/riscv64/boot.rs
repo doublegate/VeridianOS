@@ -37,12 +37,22 @@ pub extern "C" fn _start_rust() -> ! {
 }
 
 /// SBI console putchar using ecall
+///
+/// # Safety
+///
+/// Must run in S-mode under SBI firmware (OpenSBI) that implements the
+/// legacy console_putchar extension.
 #[inline]
 unsafe fn sbi_putchar(ch: u8) {
-    core::arch::asm!(
-        "ecall",
-        in("a0") ch as usize,     // Character to print
-        in("a7") 0x01usize,       // SBI function ID 0x01 = console_putchar (legacy)
-        options(nostack, nomem)
-    );
+    // SAFETY: the SBI legacy console_putchar call (a7 = 1) only asks the
+    // firmware to print one character; it touches no kernel memory. SBI
+    // firmware is present per this function's contract.
+    unsafe {
+        core::arch::asm!(
+            "ecall",
+            in("a0") ch as usize,     // Character to print
+            in("a7") 0x01usize,       // SBI function ID 0x01 = console_putchar (legacy)
+            options(nostack, nomem)
+        )
+    };
 }

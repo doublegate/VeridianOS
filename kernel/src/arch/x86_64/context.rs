@@ -256,117 +256,129 @@ impl crate::arch::context::ThreadContext for X86_64Context {
 ///
 /// # Safety
 /// This function manipulates CPU state directly and must be called
-/// with interrupts disabled.
+/// with interrupts disabled. `current` must be valid for writes of an
+/// `X86_64Context`, and `next` must point to a valid `X86_64Context` whose
+/// CR3, RSP, RIP and RFLAGS describe a resumable kernel context.
 #[no_mangle]
 pub unsafe extern "C" fn context_switch(current: *mut X86_64Context, next: *const X86_64Context) {
     // Save current context
-    asm!(
-        // Save general purpose registers
-        "mov [rdi + 0x00], r15",
-        "mov [rdi + 0x08], r14",
-        "mov [rdi + 0x10], r13",
-        "mov [rdi + 0x18], r12",
-        "mov [rdi + 0x20], r11",
-        "mov [rdi + 0x28], r10",
-        "mov [rdi + 0x30], r9",
-        "mov [rdi + 0x38], r8",
-        "mov [rdi + 0x40], rdi",
-        "mov [rdi + 0x48], rsi",
-        "mov [rdi + 0x50], rbp",
-        "mov [rdi + 0x58], rbx",
-        "mov [rdi + 0x60], rdx",
-        "mov [rdi + 0x68], rcx",
-        "mov [rdi + 0x70], rax",
+    // SAFETY: forwarded from this function's contract: `current` is valid
+    // for writes of a whole X86_64Context (every offset stored to is a field
+    // of it) and interrupts are disabled, so the save is not interleaved.
+    unsafe {
+        asm!(
+            // Save general purpose registers
+            "mov [rdi + 0x00], r15",
+            "mov [rdi + 0x08], r14",
+            "mov [rdi + 0x10], r13",
+            "mov [rdi + 0x18], r12",
+            "mov [rdi + 0x20], r11",
+            "mov [rdi + 0x28], r10",
+            "mov [rdi + 0x30], r9",
+            "mov [rdi + 0x38], r8",
+            "mov [rdi + 0x40], rdi",
+            "mov [rdi + 0x48], rsi",
+            "mov [rdi + 0x50], rbp",
+            "mov [rdi + 0x58], rbx",
+            "mov [rdi + 0x60], rdx",
+            "mov [rdi + 0x68], rcx",
+            "mov [rdi + 0x70], rax",
 
-        // Save stack pointer
-        "mov [rdi + 0x78], rsp",
+            // Save stack pointer
+            "mov [rdi + 0x78], rsp",
 
-        // Save FS base (TLS) to tls_base field at offset 0xB0 (176)
-        "mov ecx, 0xC0000100",
-        "rdmsr",
-        "shl rdx, 32",
-        "or rax, rdx",
-        "mov [rdi + 0xB0], rax",
+            // Save FS base (TLS) to tls_base field at offset 0xB0 (176)
+            "mov ecx, 0xC0000100",
+            "rdmsr",
+            "shl rdx, 32",
+            "or rax, rdx",
+            "mov [rdi + 0xB0], rax",
 
-        // Save return address as RIP
-        "mov rax, [rsp]",
-        "mov [rdi + 0x80], rax",
+            // Save return address as RIP
+            "mov rax, [rsp]",
+            "mov [rdi + 0x80], rax",
 
-        // Save RFLAGS
-        "pushfq",
-        "pop rax",
-        "mov [rdi + 0x88], rax",
+            // Save RFLAGS
+            "pushfq",
+            "pop rax",
+            "mov [rdi + 0x88], rax",
 
-        in("rdi") current,
-        in("rsi") next,
-        lateout("rax") _,
-        lateout("rcx") _,
-        lateout("rdx") _,
-    );
+            in("rdi") current,
+            in("rsi") next,
+            lateout("rax") _,
+            lateout("rcx") _,
+            lateout("rdx") _,
+        )
+    };
 
     // Load new context
-    asm!(
-        // Load new CR3 (offset 0xA0 = 160 = cr3 field) if different
-        "mov rax, [rsi + 0xA0]",
-        "mov rcx, cr3",
-        "cmp rax, rcx",
-        "je 2f",
-        "mov cr3, rax",
-        "2:",
+    // SAFETY: forwarded from this function's contract: `next` points to a
+    // valid X86_64Context describing a resumable kernel context (valid CR3,
+    // stack and return address), and interrupts are disabled.
+    unsafe {
+        asm!(
+            // Load new CR3 (offset 0xA0 = 160 = cr3 field) if different
+            "mov rax, [rsi + 0xA0]",
+            "mov rcx, cr3",
+            "cmp rax, rcx",
+            "je 2f",
+            "mov cr3, rax",
+            "2:",
 
-        // Load general purpose registers
-        "mov r15, [rsi + 0x00]",
-        "mov r14, [rsi + 0x08]",
-        "mov r13, [rsi + 0x10]",
-        "mov r12, [rsi + 0x18]",
-        "mov r11, [rsi + 0x20]",
-        "mov r10, [rsi + 0x28]",
-        "mov r9,  [rsi + 0x30]",
-        "mov r8,  [rsi + 0x38]",
-        "mov rdi, [rsi + 0x40]",
-        // Skip rsi for now
-        "mov rbp, [rsi + 0x50]",
-        "mov rbx, [rsi + 0x58]",
-        "mov rdx, [rsi + 0x60]",
-        "mov rcx, [rsi + 0x68]",
-        "mov rax, [rsi + 0x70]",
+            // Load general purpose registers
+            "mov r15, [rsi + 0x00]",
+            "mov r14, [rsi + 0x08]",
+            "mov r13, [rsi + 0x10]",
+            "mov r12, [rsi + 0x18]",
+            "mov r11, [rsi + 0x20]",
+            "mov r10, [rsi + 0x28]",
+            "mov r9,  [rsi + 0x30]",
+            "mov r8,  [rsi + 0x38]",
+            "mov rdi, [rsi + 0x40]",
+            // Skip rsi for now
+            "mov rbp, [rsi + 0x50]",
+            "mov rbx, [rsi + 0x58]",
+            "mov rdx, [rsi + 0x60]",
+            "mov rcx, [rsi + 0x68]",
+            "mov rax, [rsi + 0x70]",
 
-        // Load RFLAGS
-        "push qword ptr [rsi + 0x88]",
-        "popfq",
+            // Load RFLAGS
+            "push qword ptr [rsi + 0x88]",
+            "popfq",
 
-        // Load stack pointer
-        "mov rsp, [rsi + 0x78]",
+            // Load stack pointer
+            "mov rsp, [rsi + 0x78]",
 
-        // Push return address
-        "push qword ptr [rsi + 0x80]",
+            // Push return address
+            "push qword ptr [rsi + 0x80]",
 
-        // Restore FS base (TLS) from tls_base field at offset 0xB0 (176)
-        "mov ecx, 0xC0000100",
-        "mov rax, [rsi + 0xB0]",
-        "mov rdx, rax",
-        "shr rdx, 32",
-        "wrmsr",
+            // Restore FS base (TLS) from tls_base field at offset 0xB0 (176)
+            "mov ecx, 0xC0000100",
+            "mov rax, [rsi + 0xB0]",
+            "mov rdx, rax",
+            "shr rdx, 32",
+            "wrmsr",
 
-        // Finally load rsi
-        "mov rsi, [rsi + 0x48]",
+            // Finally load rsi
+            "mov rsi, [rsi + 0x48]",
 
-        // Return to new context
-        "ret",
+            // Return to new context
+            "ret",
 
-        in("rsi") next,
-        lateout("rax") _,
-        lateout("rcx") _,
-        lateout("rdx") _,
-        lateout("r8") _,
-        lateout("r9") _,
-        lateout("r10") _,
-        lateout("r11") _,
-        lateout("r12") _,
-        lateout("r13") _,
-        lateout("r14") _,
-        lateout("r15") _,
-    );
+            in("rsi") next,
+            lateout("rax") _,
+            lateout("rcx") _,
+            lateout("rdx") _,
+            lateout("r8") _,
+            lateout("r9") _,
+            lateout("r10") _,
+            lateout("r11") _,
+            lateout("r12") _,
+            lateout("r13") _,
+            lateout("r14") _,
+            lateout("r15") _,
+        )
+    };
 }
 
 /// Switch context using the ThreadContext interface.
@@ -581,63 +593,74 @@ impl Default for X86_64Context {
 // SAFETY: X86_64Context can be safely sent between threads
 // The FPU state pointer is either null or points to thread-local data
 unsafe impl Send for X86_64Context {}
+// SAFETY: `&X86_64Context` exposes only plain integer register values and
+// the `fpu_state` raw pointer, which no code dereferences (it is always
+// null today; FPU state is saved through `save_fpu_state`). Shared access
+// therefore cannot cause a data race.
 unsafe impl Sync for X86_64Context {}
 
 /// Load context for first time (no previous context to save)
 ///
 /// # Safety
 /// This function manipulates CPU state directly and must be called
-/// with interrupts disabled.
+/// with interrupts disabled. `context` must point to a valid
+/// `X86_64Context` whose CR3 (or 0), segment selectors, RSP, RIP and RFLAGS
+/// describe a resumable kernel context.
 #[no_mangle]
 pub unsafe extern "C" fn load_context(context: *const X86_64Context) {
     // Load context directly using inline assembly
     // For kernel-to-kernel context switch, we can use a simpler approach
-    asm!(
-        // rdi = context pointer
+    // SAFETY: forwarded from this function's contract: `context` points to a
+    // valid X86_64Context describing a resumable kernel context, and
+    // interrupts are disabled.
+    unsafe {
+        asm!(
+            // rdi = context pointer
 
-        // Load CR3 (page table) first if not zero
-        "mov rax, [rdi + 160]", // cr3
-        "test rax, rax",
-        "jz 2f",
-        "mov cr3, rax",
-        "2:",
+            // Load CR3 (page table) first if not zero
+            "mov rax, [rdi + 160]", // cr3
+            "test rax, rax",
+            "jz 2f",
+            "mov cr3, rax",
+            "2:",
 
-        // Load segment registers
-        "mov ax, [rdi + 148]", // ds
-        "mov ds, ax",
-        "mov ax, [rdi + 150]", // es
-        "mov es, ax",
+            // Load segment registers
+            "mov ax, [rdi + 148]", // ds
+            "mov ds, ax",
+            "mov ax, [rdi + 150]", // es
+            "mov es, ax",
 
-        // Load stack pointer and push return address
-        "mov rsp, [rdi + 120]",
-        "push qword ptr [rdi + 128]", // Push RIP as return address
+            // Load stack pointer and push return address
+            "mov rsp, [rdi + 120]",
+            "push qword ptr [rdi + 128]", // Push RIP as return address
 
-        // Load RFLAGS
-        "push qword ptr [rdi + 136]",
-        "popfq",
+            // Load RFLAGS
+            "push qword ptr [rdi + 136]",
+            "popfq",
 
-        // Load general purpose registers
-        "mov r15, [rdi]",
-        "mov r14, [rdi + 8]",
-        "mov r13, [rdi + 16]",
-        "mov r12, [rdi + 24]",
-        "mov r11, [rdi + 32]",
-        "mov r10, [rdi + 40]",
-        "mov r9,  [rdi + 48]",
-        "mov r8,  [rdi + 56]",
-        "mov rsi, [rdi + 72]",
-        "mov rbp, [rdi + 80]",
-        "mov rbx, [rdi + 88]",
-        "mov rdx, [rdi + 96]",
-        "mov rcx, [rdi + 104]",
-        "mov rax, [rdi + 112]",
+            // Load general purpose registers
+            "mov r15, [rdi]",
+            "mov r14, [rdi + 8]",
+            "mov r13, [rdi + 16]",
+            "mov r12, [rdi + 24]",
+            "mov r11, [rdi + 32]",
+            "mov r10, [rdi + 40]",
+            "mov r9,  [rdi + 48]",
+            "mov r8,  [rdi + 56]",
+            "mov rsi, [rdi + 72]",
+            "mov rbp, [rdi + 80]",
+            "mov rbx, [rdi + 88]",
+            "mov rdx, [rdi + 96]",
+            "mov rcx, [rdi + 104]",
+            "mov rax, [rdi + 112]",
 
-        // Load final register
-        "mov rdi, [rdi + 64]",
+            // Load final register
+            "mov rdi, [rdi + 64]",
 
-        // Return to loaded context (RIP was pushed earlier)
-        "ret",
-        in("rdi") context,
-        options(noreturn)
-    );
+            // Return to loaded context (RIP was pushed earlier)
+            "ret",
+            in("rdi") context,
+            options(noreturn)
+        )
+    };
 }
