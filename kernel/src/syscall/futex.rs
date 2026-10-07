@@ -160,10 +160,7 @@ pub fn sys_futex_wait(
             return Err(SyscallError::InvalidArgument);
         }
         validate_user_ptr(timeout_ptr as *const u64, core::mem::size_of::<u64>())?;
-        // SAFETY: `timeout_ptr` has been validated as a properly-aligned,
-        // mapped, user-space pointer to a u64.  Volatile read is used because
-        // the caller could theoretically share this memory with another thread.
-        let rel = unsafe { core::ptr::read_volatile(timeout_ptr as *const u64) };
+        let rel: u64 = super::userspace::read_user(timeout_ptr)?;
         // If op uses absolute time (FUTEX_CLOCK_REALTIME bit), treat rel as absolute
         // ticks
         if (op & 0x100) != 0 {
@@ -605,11 +602,9 @@ fn boot_futex_spin(
 
     for _ in 0..MAX_SPINS {
         // Re-check the futex word
-        // SAFETY: sys_futex_wait validated uaddr as non-null, 4-byte aligned
-        // and inside user space before calling here, and the parent's
-        // address space is active. NOTE: the mapping is not re-verified; an
-        // unmapped page would fault on this read.
-        let cur = unsafe { core::ptr::read_volatile(uaddr as *const u32) };
+        // Re-read fault-tolerantly: the word may have been unmapped since
+        // the first check (N-43).
+        let cur: u32 = super::userspace::read_user(uaddr)?;
         if cur != expected {
             return Ok(0);
         }

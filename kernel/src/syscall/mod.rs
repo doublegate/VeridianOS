@@ -1613,13 +1613,7 @@ fn handle_syscall(
                 )
             })
             .map_err(|_| SyscallError::InvalidState)?;
-            // SAFETY: info_ptr validated by validate_user_buffer(info_ptr, 12) above.
-            unsafe {
-                let ptr = info_ptr as *mut u32;
-                ptr.write(info.0);
-                ptr.add(1).write(info.1);
-                ptr.add(2).write(info.2);
-            }
+            userspace::write_user::<[u32; 3]>(info_ptr, [info.0, info.1, info.2])?;
             Ok(0)
         }
         Syscall::AudioStart => {

@@ -430,6 +430,7 @@ const RLIM_INFINITY: u64 = u64::MAX;
 
 /// rlimit structure (matches POSIX)
 #[repr(C)]
+#[derive(Clone, Copy)]
 struct Rlimit {
     rlim_cur: u64, // soft limit
     rlim_max: u64, // hard limit
@@ -469,15 +470,13 @@ pub fn sys_getrlimit(resource: usize, rlim_ptr: usize) -> SyscallResult {
     };
 
     // Write the rlimit struct to user space
-    let rlim = rlim_ptr as *mut Rlimit;
-    // SAFETY: rlim_ptr was validated above as non-null, outside the null
-    // guard page and with size_of::<Rlimit>() bytes below USER_SPACE_END.
-    // NOTE: that is a range check only -- alignment and mapping are not
-    // verified, so an unmapped page faults on the write.
-    unsafe {
-        (*rlim).rlim_cur = cur;
-        (*rlim).rlim_max = max;
-    }
+    super::userspace::write_user(
+        rlim_ptr,
+        Rlimit {
+            rlim_cur: cur,
+            rlim_max: max,
+        },
+    )?;
 
     Ok(0)
 }
@@ -497,12 +496,7 @@ pub fn sys_setrlimit(resource: usize, rlim_ptr: usize) -> SyscallResult {
     }
     validate_user_pointer(rlim_ptr, core::mem::size_of::<Rlimit>())?;
 
-    let rlim = rlim_ptr as *const Rlimit;
-    // SAFETY: rlim_ptr was validated above as non-null and with
-    // size_of::<Rlimit>() bytes below USER_SPACE_END. NOTE: a range check
-    // only -- alignment and mapping are not verified, so an unmapped page
-    // faults on the read.
-    let (cur, max) = unsafe { ((*rlim).rlim_cur, (*rlim).rlim_max) };
+    let [cur, max]: [u64; 2] = super::userspace::read_user(rlim_ptr)?;
 
     // Validate: soft limit must not exceed hard limit
     if cur > max {

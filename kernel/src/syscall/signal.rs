@@ -112,15 +112,15 @@ pub fn sys_sigaction(signum: usize, act_ptr: usize, oldact_ptr: usize) -> Syscal
     // Return the previous handler via oldact_ptr
     if oldact_ptr != 0 {
         let old_handler = proc.get_signal_handler(signum).unwrap_or(0);
-        // SAFETY: oldact_ptr was validated as non-null, in user-space, and
-        // aligned for SigAction above. We write the previous handler state.
-        unsafe {
-            let old_act = oldact_ptr as *mut SigAction;
-            (*old_act).sa_handler = old_handler as usize;
-            (*old_act).sa_flags = 0;
-            (*old_act).sa_restorer = 0;
-            (*old_act).sa_mask = 0;
-        }
+        super::userspace::write_user(
+            oldact_ptr,
+            SigAction {
+                sa_handler: old_handler as usize,
+                sa_flags: 0,
+                sa_restorer: 0,
+                sa_mask: 0,
+            },
+        )?;
     }
 
     // Install the new handler from act_ptr

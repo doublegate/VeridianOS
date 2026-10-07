@@ -635,29 +635,9 @@ pub fn sys_mkdir(path: usize, mode: usize) -> SyscallResult {
     // Validate path pointer is in user space
     validate_user_string_ptr(path)?;
 
-    // Get path string
-    // SAFETY: path was validated as non-null and in user-space above. We read
-    // user-space pointer until null terminator or 4096-byte limit. The
-    // caller must provide a valid null-terminated string.
-    let path_bytes = unsafe {
-        let mut bytes = Vec::new();
-        let mut ptr = path as *const u8;
-
-        for _ in 0..4096 {
-            let byte = *ptr;
-            if byte == 0 {
-                break;
-            }
-            bytes.push(byte);
-            ptr = ptr.add(1);
-        }
-        bytes
-    };
-
-    let path_str = match core::str::from_utf8(&path_bytes) {
-        Ok(s) => s,
-        Err(_) => return Err(SyscallError::InvalidArgument),
-    };
+    // Copied in through the fault-tolerant reader (N-43).
+    let path_owned = read_user_path(path)?;
+    let path_str = path_owned.as_str();
 
     // Create directory through VFS
     let permissions = creation_perms(mode);
@@ -730,51 +710,13 @@ pub fn sys_mount(
         return Err(SyscallError::PermissionDenied);
     }
 
-    // Get mount point path
-    // SAFETY: mount_point was validated as non-zero above. We read bytes
-    // from the user-space pointer until null terminator or 4096-byte limit.
-    let mount_path_bytes = unsafe {
-        let mut bytes = Vec::new();
-        let mut ptr = mount_point as *const u8;
+    // Copied in through the fault-tolerant reader (N-43).
+    let mount_path_owned = read_user_path(mount_point)?;
+    let mount_path = mount_path_owned.as_str();
 
-        for _ in 0..4096 {
-            let byte = *ptr;
-            if byte == 0 {
-                break;
-            }
-            bytes.push(byte);
-            ptr = ptr.add(1);
-        }
-        bytes
-    };
-
-    let mount_path = match core::str::from_utf8(&mount_path_bytes) {
-        Ok(s) => s,
-        Err(_) => return Err(SyscallError::InvalidArgument),
-    };
-
-    // Get filesystem type
-    // SAFETY: fs_type was validated as non-zero above. We read bytes from
-    // the user-space pointer until null terminator or 256-byte limit.
-    let fs_type_bytes = unsafe {
-        let mut bytes = Vec::new();
-        let mut ptr = fs_type as *const u8;
-
-        for _ in 0..256 {
-            let byte = *ptr;
-            if byte == 0 {
-                break;
-            }
-            bytes.push(byte);
-            ptr = ptr.add(1);
-        }
-        bytes
-    };
-
-    let fs_type_str = match core::str::from_utf8(&fs_type_bytes) {
-        Ok(s) => s,
-        Err(_) => return Err(SyscallError::InvalidArgument),
-    };
+    // Copied in through the fault-tolerant reader (N-43).
+    let fs_type_owned = crate::syscall::userspace::read_user_cstr(fs_type, 255)?;
+    let fs_type_str = fs_type_owned.as_str();
 
     // Mount filesystem
     match vfs()?.mount_by_type(mount_path, fs_type_str, flags as u32) {
@@ -818,28 +760,9 @@ pub fn sys_unmount(mount_point: usize) -> SyscallResult {
         return Err(SyscallError::PermissionDenied);
     }
 
-    // Get mount point path
-    // SAFETY: mount_point was validated as non-zero above. We read bytes
-    // from the user-space pointer until null terminator or 4096-byte limit.
-    let mount_path_bytes = unsafe {
-        let mut bytes = Vec::new();
-        let mut ptr = mount_point as *const u8;
-
-        for _ in 0..4096 {
-            let byte = *ptr;
-            if byte == 0 {
-                break;
-            }
-            bytes.push(byte);
-            ptr = ptr.add(1);
-        }
-        bytes
-    };
-
-    let mount_path = match core::str::from_utf8(&mount_path_bytes) {
-        Ok(s) => s,
-        Err(_) => return Err(SyscallError::InvalidArgument),
-    };
+    // Copied in through the fault-tolerant reader (N-43).
+    let mount_path_owned = read_user_path(mount_point)?;
+    let mount_path = mount_path_owned.as_str();
 
     // Unmount filesystem
     match vfs()?.unmount(mount_path) {
@@ -1986,13 +1909,15 @@ pub fn sys_pipe2(pipe_fds_ptr: usize, flags: usize) -> SyscallResult {
             SyscallError::OutOfMemory
         })?;
 
-    // Write [read_fd, write_fd] to user buffer as i32 (C int).
-    // SAFETY: pipe_fds_ptr was validated above as non-null and in user
-    // space with sufficient size for two i32 values.
-    unsafe {
-        let fds = pipe_fds_ptr as *mut i32;
-        *fds = read_fd as i32;
-        *fds.add(1) = write_fd as i32;
+    // Write [read_fd, write_fd] to user buffer as i32 (C int), through the
+    // fault-tolerant writer (N-43). An unwritable buffer leaves the caller
+    // without the fds, so they are closed again.
+    if let Err(e) =
+        crate::syscall::userspace::write_user(pipe_fds_ptr, [read_fd as i32, write_fd as i32])
+    {
+        file_table.close_on_rollback(write_fd, "pipe");
+        file_table.close_on_rollback(read_fd, "pipe");
+        return Err(e);
     }
 
     Ok(0)
@@ -2433,6 +2358,23 @@ pub fn sys_poll(fds_ptr: usize, nfds: usize, timeout_ms: usize) -> SyscallResult
     }
 
     validate_user_buffer(fds_ptr, nfds * core::mem::size_of::<PollFd>())?;
+    // The pollfd array is copied in once and written back on return, never
+    // accessed in place (N-43).
+    let mut pollfds = Vec::with_capacity(nfds);
+    for i in 0..nfds {
+        pollfds.push(crate::syscall::userspace::read_user_index::<PollFd>(
+            fds_ptr, i,
+        )?);
+    }
+    let write_back = |pollfds: &[PollFd]| -> Result<(), SyscallError> {
+        for (i, pfd) in pollfds.iter().enumerate() {
+            crate::syscall::userspace::write_user(
+                fds_ptr + i * core::mem::size_of::<PollFd>(),
+                *pfd,
+            )?;
+        }
+        Ok(())
+    };
 
     let timeout_i32 = if in_boot_coop {
         0i32
@@ -2452,9 +2394,7 @@ pub fn sys_poll(fds_ptr: usize, nfds: usize, timeout_ms: usize) -> SyscallResult
         let file_table = proc.file_table.lock();
         let mut ready_count = 0usize;
 
-        for i in 0..nfds {
-            // SAFETY: fds_ptr was validated above and PollFd is repr(C).
-            let pollfd = unsafe { &mut *((fds_ptr as *mut PollFd).add(i)) };
+        for pollfd in pollfds.iter_mut() {
             pollfd.revents = 0;
 
             if pollfd.fd < 0 {
@@ -2490,11 +2430,13 @@ pub fn sys_poll(fds_ptr: usize, nfds: usize, timeout_ms: usize) -> SyscallResult
         drop(file_table);
 
         if ready_count > 0 || timeout_i32 == 0 {
+            write_back(&pollfds)?;
             return Ok(ready_count);
         }
 
         // Timeout expired?
         if crate::timer::get_uptime_ms() - start >= max_wait_ms {
+            write_back(&pollfds)?;
             return Ok(0);
         }
 
@@ -2522,6 +2464,9 @@ struct PollFd {
     events: i16,
     revents: i16,
 }
+
+// SAFETY: i32 + two i16, no padding (size 8); every bit pattern is valid.
+unsafe impl crate::syscall::userspace::UserPod for PollFd {}
 
 /// Resolve a path relative to a directory fd.
 ///

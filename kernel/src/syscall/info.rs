@@ -21,14 +21,8 @@ pub fn sys_get_kernel_info(buf: usize) -> SyscallResult {
 
     let version_info = get_version_info();
 
-    // Copy the version info to the user buffer
-    // SAFETY: buf was validated as non-null, in user-space, properly sized,
-    // and aligned for KernelVersionInfo above. The struct is Copy and
-    // repr(C), so the write through the pointer is well-defined.
-    unsafe {
-        let user_buf = buf as *mut KernelVersionInfo;
-        *user_buf = version_info;
-    }
+    // Fault-tolerant copy (N-43); the struct has no implicit padding.
+    crate::syscall::userspace::write_user(buf, version_info)?;
 
     Ok(size_of::<KernelVersionInfo>())
 }

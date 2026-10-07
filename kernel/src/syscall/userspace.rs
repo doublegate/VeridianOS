@@ -185,13 +185,7 @@ pub unsafe fn copy_string_array_from_user_tracked(
     // Read pointers until we hit null
     loop {
         // 64-bit pointer
-        validate_user_ptr(current_ptr as *const usize, 8)?;
-        // SAFETY: validate_user_ptr confirmed the 8 bytes are non-null and
-        // lie entirely below USER_SPACE_END. It does NOT prove the page is
-        // mapped (an unmapped page faults into the page-fault handler) or
-        // that `current_ptr` is 8-byte aligned (x86_64 tolerates an
-        // unaligned load; Rust's read_volatile formally requires alignment).
-        let string_ptr = unsafe { ptr::read_volatile(current_ptr as *const usize) };
+        let string_ptr: usize = read_user(current_ptr)?;
 
         if string_ptr == 0 {
             break;
@@ -223,8 +217,6 @@ pub unsafe fn copy_string_array_from_user_tracked(
 
     Ok(strings)
 }
-
-use core::ptr;
 
 #[cfg(feature = "alloc")]
 extern crate alloc;
@@ -259,7 +251,7 @@ unsafe fn raw_copy(dst: *mut u8, src: *const u8, len: usize) -> Result<(), Sysca
     {
         // SAFETY: forwarded from this function's contract; user and kernel
         // ranges never overlap.
-        unsafe { ptr::copy_nonoverlapping(src, dst, len) };
+        unsafe { core::ptr::copy_nonoverlapping(src, dst, len) };
         Ok(())
     }
 }
