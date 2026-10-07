@@ -83,7 +83,6 @@ pub mod sched;
 pub mod security;
 pub mod serial;
 pub mod services;
-pub mod stdlib;
 pub mod sync;
 mod syscall;
 pub mod sysfs;
