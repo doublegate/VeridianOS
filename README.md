@@ -66,7 +66,7 @@ VeridianOS intentionally prioritizes architectural clarity over feature velocity
 ### Security
 
 - **Defense in depth** -- KPTI shadow page tables, KASLR, stack canaries, SMEP/SMAP, retpoline, W^X enforcement, guard pages
-- **Post-quantum cryptography** -- Dilithium3 (round-3 sizes, not yet the FIPS 204 ML-DSA-65 encoding; N-55) and Kyber/ML-KEM alongside ChaCha20-Poly1305, Ed25519, X25519
+- **Post-quantum cryptography** -- ML-DSA-65 signature verification (FIPS 204, checked against NIST ACVP vectors); an experimental, non-standard Kyber KEM (N-57); alongside ChaCha20-Poly1305, Ed25519, X25519
 - **Hardware security** -- TPM 2.0 integration, secure boot verification, IOMMU protection
 - **Mandatory access control** -- Policy parser, RBAC, MLS enforcement, structured audit logging
 
@@ -279,7 +279,7 @@ Security is a foundational design principle, not a bolt-on layer:
 
 - **Capability-based access control** -- Fine-grained, unforgeable permissions for all resources
 - **Memory safety** -- Rust ownership guarantees plus KPTI, KASLR, SMEP/SMAP, W^X, and guard pages
-- **Post-quantum cryptography** -- Dilithium3 (pre-FIPS 204 sizes, N-55) and Kyber/ML-KEM alongside classical algorithms
+- **Post-quantum cryptography** -- ML-DSA-65 verification (FIPS 204) and an experimental, non-standard Kyber KEM (N-57) alongside classical algorithms
 - **Mandatory access control** -- Policy-driven RBAC and MLS enforcement
 - **Hardware security** -- TPM 2.0, secure boot chain, IOMMU isolation
 - **Formal verification** -- Kani proofs for critical kernel invariants; TLA+ specifications for protocol correctness

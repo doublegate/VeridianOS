@@ -105,12 +105,20 @@ Socket addresses, lengths and control messages already use the fault-tolerant co
 Only the first control message is parsed, SOCK_CLOEXEC and SOCK_NONBLOCK are ignored at creation,
 `setsockopt` on a Unix socket is accepted and ignored, and peers are reported unnamed.
 
-### Package signatures are not FIPS 204 ML-DSA (N-55)
+### No post-quantum package signing key is provisioned (N-55)
 
-The Dilithium signatures used for packages have the round-3 Dilithium3 sizes (3293-byte signature,
-4000-byte secret key), not FIPS 204 ML-DSA-65's (3309 and 4032). They do not interoperate with
-standard ML-DSA implementations. Moving to the FIPS 204 encoding, verified against NIST known-answer
-tests, is planned for v0.27.
+Packages are verified with Ed25519. The kernel has a real FIPS 204 ML-DSA-65 verifier (checked
+against NIST ACVP vectors), but no ML-DSA package-signing key has been generated and embedded, so a
+policy that requires a post-quantum signature rejects every package. Up to v0.26.0 the
+"post-quantum" verifier was not a lattice verifier and accepted forged signatures, and its trusted
+key was a placeholder. The default policy never required it, so installs were gated by Ed25519
+alone.
+
+### The Kyber KEM is not FIPS 203 ML-KEM (N-57)
+
+`crypto/post_quantum/kyber.rs` expands seeds with SHA-256 rather than SHAKE and does not implement
+FIPS 203. It does not interoperate with ML-KEM and should not be relied on for confidentiality.
+Nothing in the kernel uses it for real traffic.
 
 ### Unix sockets cannot pass Unix sockets
 

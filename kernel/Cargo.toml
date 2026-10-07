@@ -24,6 +24,9 @@ linked_list_allocator.workspace = true
 lazy_static.workspace = true
 bitflags.workspace = true
 log.workspace = true
+# FIPS 204 ML-DSA (package signature verification, N-55). Pure Rust,
+# no_std, forbid(unsafe_code); default features (getrandom, pkcs8) off.
+ml-dsa = { version = "0.1.1", default-features = false, features = ["alloc"] }
 
 # Architecture-specific dependencies
 [target.'cfg(target_arch = "x86_64")'.dependencies]

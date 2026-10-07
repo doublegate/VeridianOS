@@ -10,11 +10,13 @@ pub mod audit;
 pub mod audit_enhanced;
 pub mod auth;
 pub mod boot;
-pub mod dilithium;
 pub mod fuzzing;
 pub mod kaslr;
 pub mod mac;
 pub mod memory_protection;
+pub mod mldsa;
+#[cfg(test)]
+mod mldsa_vectors;
 pub mod smep_smap;
 pub mod spectre;
 pub mod stack_canary;

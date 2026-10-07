@@ -30,7 +30,7 @@ pub mod statistics;
 pub mod testing;
 pub mod toml_parser;
 
-use alloc::{collections::BTreeMap, string::String, vec, vec::Vec};
+use alloc::{collections::BTreeMap, string::String, vec::Vec};
 
 use spin::Mutex;
 
@@ -539,18 +539,27 @@ impl PackageManager {
             });
         }
 
-        // Step 6: Verify Dilithium (post-quantum) signature if policy requires it.
+        // Step 6: Verify the ML-DSA-65 (FIPS 204) signature if policy
+        // requires it. With no provisioned key this fails closed.
         if self.signature_policy.require_post_quantum {
-            let dilithium_valid = verify_dilithium_signature(
-                content_to_verify,
-                &signatures.dilithium_sig,
-                &get_trusted_dilithium_pubkey(),
-            );
-
-            if !dilithium_valid {
-                crate::println!("[PKG] REJECT: Dilithium signature verification failed");
+            let Some(pq_key) = trusted_mldsa_public_key() else {
+                crate::println!(
+                    "[PKG] REJECT: post-quantum signature required, but no ML-DSA key is \
+                     provisioned"
+                );
                 return Err(KernelError::PermissionDenied {
-                    operation: "verify Dilithium signature",
+                    operation: "verify ML-DSA signature (no trusted key)",
+                });
+            };
+            if !crate::security::mldsa::verify(
+                pq_key,
+                content_to_verify,
+                PKG_MLDSA_CONTEXT,
+                &signatures.dilithium_sig,
+            ) {
+                crate::println!("[PKG] REJECT: ML-DSA-65 signature verification failed");
+                return Err(KernelError::PermissionDenied {
+                    operation: "verify ML-DSA signature",
                 });
             }
         }
@@ -558,7 +567,7 @@ impl PackageManager {
         crate::println!(
             "[PKG] Package signature verification passed (Ed25519{})",
             if self.signature_policy.require_post_quantum {
-                " + Dilithium"
+                " + ML-DSA-65"
             } else {
                 ""
             }
@@ -835,65 +844,22 @@ pub fn with_package_manager<R, F: FnOnce(&mut PackageManager) -> R>(f: F) -> Opt
 // Signature Verification Helpers
 // ============================================================================
 
-/// Trusted Dilithium public key (post-quantum ML-DSA-65)
+/// FIPS 204 context string bound into every package ML-DSA signature, so a
+/// signature made for another purpose with the same key cannot be replayed
+/// as a package signature.
+const PKG_MLDSA_CONTEXT: &[u8] = b"veridian-pkg-v1";
+
+/// The trusted ML-DSA-65 public key for package signatures, if one has been
+/// provisioned.
 ///
-/// This returns the embedded ML-DSA-65 (Dilithium3) public key for package
-/// signature verification. In production, this key would be:
-/// - Embedded at kernel build time from a secure key ceremony
-/// - Stored in TPM/secure enclave for hardware-backed verification
-/// - Part of the kernel's trusted computing base
-///
-/// Key size: 1952 bytes per NIST FIPS 204 specification
-fn get_trusted_dilithium_pubkey() -> Vec<u8> {
-    use crate::crypto::pq_params::dilithium::level3::PUBLIC_KEY_SIZE;
-
-    // ML-DSA-65 public key embedded at build time
-    // This is a deterministically generated test key for development
-    // Production builds MUST replace this with a real key ceremony output
-    let mut key = vec![0u8; PUBLIC_KEY_SIZE];
-
-    // Seed the key with deterministic bytes for reproducible testing
-    // Real key would be loaded from secure storage or compiled-in
-    let seed: [u8; 32] = [
-        0x56, 0x65, 0x72, 0x69, 0x64, 0x69, 0x61, 0x6e, // "Veridian"
-        0x4f, 0x53, 0x2d, 0x50, 0x4b, 0x47, 0x2d, 0x4b, // "OS-PKG-K"
-        0x45, 0x59, 0x2d, 0x53, 0x45, 0x45, 0x44, 0x00, // "EY-SEED\0"
-        0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, // Version 1
-    ];
-
-    // Expand seed into full public key using deterministic derivation
-    // This is for testing only - real keys use proper key generation
-    for (i, key_byte) in key.iter_mut().enumerate() {
-        // Simple expansion: hash(seed || counter)
-        let counter = i as u8;
-        let idx = i % 32;
-        *key_byte = seed[idx].wrapping_add(counter).wrapping_mul(0x6D);
-    }
-
-    // Set magic bytes to identify key type
-    key[0] = 0x4D; // 'M' for ML-DSA
-    key[1] = 0x44; // 'D'
-    key[2] = 0x36; // '6' for level 6 (65)
-    key[3] = 0x35; // '5'
-
-    key
-}
-
-/// Verify Dilithium (ML-DSA) signature.
-///
-/// Structural verification of a Dilithium/ML-DSA signature. A full algebraic
-/// verification (NTT, matrix operations) is not yet implemented; this checks
-/// that the signature components have valid structure and reasonable entropy.
-fn verify_dilithium_signature(message: &[u8], signature: &[u8], public_key: &[u8]) -> bool {
-    // Delegate to the dedicated Dilithium/ML-DSA module which performs
-    // FIPS 204 structural verification with hash-based binding.
-    match crate::security::dilithium::verify(public_key, message, signature) {
-        Ok(valid) => valid,
-        Err(_e) => {
-            crate::println!("[PKG] Dilithium verification error: {:?}", _e);
-            false
-        }
-    }
+/// None is: there has been no key ceremony. This used to return a
+/// placeholder built from a byte formula and stamped "MD65", which a real
+/// verifier can never accept and the old fake verifier never checked
+/// (N-55). Until a key is provisioned, a policy that requires a
+/// post-quantum signature rejects every package; the default policy relies
+/// on Ed25519 alone.
+fn trusted_mldsa_public_key() -> Option<&'static [u8]> {
+    None
 }
 
 // ============================================================================

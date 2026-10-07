@@ -1,34 +1,20 @@
 //! Post-Quantum Cryptography
 //!
-//! Implements ML-DSA (Dilithium) signatures and ML-KEM (Kyber) key
-//! encapsulation.
+//! **Not standards-compliant; do not rely on it.** The Kyber key
+//! encapsulation here is an in-tree sketch: it expands seeds with SHA-256
+//! instead of SHAKE and does not implement FIPS 203 ML-KEM, so it neither
+//! interoperates with ML-KEM nor carries its security argument (N-57). It is
+//! kept, behind its own tests, until it is replaced by a vetted FIPS 203
+//! implementation.
 //!
-//! ## NIST Standards Compliance
-//!
-//! This module implements algorithms selected by NIST for post-quantum
-//! cryptography:
-//! - **ML-DSA (FIPS 204)**: Module-Lattice-Based Digital Signature Algorithm
+//! ML-DSA signatures are not here: verification is `security::mldsa`, a
+//! wrapper over the RustCrypto `ml-dsa` crate checked against NIST ACVP
+//! vectors. The in-tree Dilithium that used to live in this module could
+//! not round-trip its own signatures and was removed (N-55).
 
 // Post-quantum cryptography -- covers sub-module constants per NIST specs
 #![allow(dead_code)]
-//!   - Replaces Dilithium after standardization
-//!   - Provides quantum-resistant digital signatures
-//!   - Security levels: 2, 3, 5 (128, 192, 256-bit equivalents)
-//! - **ML-KEM (FIPS 203)**: Module-Lattice-Based Key Encapsulation Mechanism
-//!   - Replaces Kyber after standardization
-//!   - Provides quantum-resistant key exchange
-//!   - Security levels: 512, 768, 1024 (128, 192, 256-bit equivalents)
-//!
-//! ## Implementation Status
-//!
-//! **Current**: Lattice-based implementations with NTT polynomial arithmetic
-//! **Production Requirements**:
-//! - Full NIST-compliant algorithm implementations
-//! - Constant-time operations to prevent timing attacks
-//! - Proper random number generation from hardware
-//! - Side-channel attack mitigations
-//! - FIPS 140-3 validation for cryptographic modules
-//!
+
 //! ## Integration with Classical Cryptography
 //!
 //! Hybrid key exchange combines classical (X25519) and post-quantum (Kyber) to
@@ -37,7 +23,6 @@
 //! - Backward compatibility during transition period
 //! - Meet-in-the-middle security guarantees
 
-mod dilithium;
 mod hybrid;
 pub mod kyber;
 
@@ -46,14 +31,6 @@ use alloc::vec::Vec;
 // ============================================================================
 // Shared Types
 // ============================================================================
-
-/// Dilithium security levels
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum DilithiumLevel {
-    Level2, // ~128 bits security
-    Level3, // ~192 bits security
-    Level5, // ~256 bits security
-}
 
 /// Kyber security levels
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -151,25 +128,11 @@ mod tests {
     // Only the bare-metal tests below use these; on the host they would be
     // unused imports.
     #[cfg(target_os = "none")]
-    use super::{
-        dilithium::DilithiumSigningKey, kyber::KyberSecretKey, DilithiumLevel, KyberLevel,
-    };
+    use super::{kyber::KyberSecretKey, KyberLevel};
 
     // These tests require bare-metal PRNG initialization for deterministic results.
     // The simplified post-quantum implementations produce non-deterministic output
     // without the full kernel entropy sources available on the host target.
-    #[cfg(target_os = "none")]
-    #[test]
-    fn test_dilithium_signing() {
-        let signing_key = DilithiumSigningKey::generate(DilithiumLevel::Level2).unwrap();
-        let verifying_key = signing_key.verifying_key();
-
-        let message = b"Hello, Post-Quantum World!";
-        let signature = signing_key.sign(message).unwrap();
-
-        assert!(verifying_key.verify(message, &signature).unwrap());
-    }
-
     #[cfg(target_os = "none")]
     #[test]
     fn test_kyber_kem() {
