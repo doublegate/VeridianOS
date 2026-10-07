@@ -1447,16 +1447,9 @@ fn handle_syscall(
             // field by field through the fault-tolerant reader rather than
             // borrowed from user memory (review of the v0.26.0 stack).
             let event = if event_ptr != 0 {
-                let mut raw = [0u8; 12];
+                let mut raw = [0u8; EPOLL_EVENT_BYTES];
                 userspace::read_user_bytes(event_ptr, &mut raw)?;
-                let mut events = [0u8; 4];
-                let mut data = [0u8; 8];
-                events.copy_from_slice(&raw[..4]);
-                data.copy_from_slice(&raw[4..]);
-                Some(crate::net::epoll::EpollEvent {
-                    events: u32::from_ne_bytes(events),
-                    data: u64::from_ne_bytes(data),
-                })
+                Some(epoll_event_from_bytes(&raw))
             } else {
                 None
             };
@@ -1470,13 +1463,7 @@ fn handle_syscall(
             let max_events = arg3;
             let timeout_ms = arg4 as i32;
             let epoll_id = resolve_epoll_id(epoll_fd)?;
-            // Linux caps maxevents at INT_MAX / sizeof(struct epoll_event);
-            // the byte count must not wrap (W-16).
-            let event_size = core::mem::size_of::<crate::net::epoll::EpollEvent>();
-            if max_events == 0 || max_events > i32::MAX as usize / event_size {
-                return Err(SyscallError::InvalidArgument);
-            }
-            validate_user_buffer(events_ptr, max_events * event_size)?;
+            validate_user_buffer(events_ptr, epoll_events_buffer_len(max_events)?)?;
             // Events are gathered in a kernel array (at most 1024 per call,
             // as a short count is always allowed) and copied out packed,
             // through the fault-tolerant writer (N-43).
@@ -1486,13 +1473,7 @@ fn handle_syscall(
             ];
             let n = crate::net::epoll::epoll_wait(epoll_id, &mut events, timeout_ms)
                 .map_err(|_| SyscallError::InvalidArgument)?;
-            let mut out = alloc::vec::Vec::with_capacity(n * event_size);
-            for ev in &events[..n] {
-                let (flags, data) = (ev.events, ev.data);
-                out.extend_from_slice(&flags.to_ne_bytes());
-                out.extend_from_slice(&data.to_ne_bytes());
-            }
-            userspace::write_user_bytes(events_ptr, &out)?;
+            userspace::write_user_bytes(events_ptr, &epoll_events_to_bytes(&events[..n]))?;
             Ok(n)
         }
         // Process groups / sessions (Phase 6.5) -- delegate to existing
@@ -1808,6 +1789,42 @@ fn resolve_epoll_id(fd: usize) -> Result<u32, SyscallError> {
     Ok(epoll_node.epoll_id())
 }
 
+/// `sizeof(struct epoll_event)`: packed `u32 events` + `u64 data`.
+const EPOLL_EVENT_BYTES: usize = core::mem::size_of::<crate::net::epoll::EpollEvent>();
+
+/// Decode a user `struct epoll_event`.
+fn epoll_event_from_bytes(raw: &[u8; EPOLL_EVENT_BYTES]) -> crate::net::epoll::EpollEvent {
+    let mut events = [0u8; 4];
+    let mut data = [0u8; 8];
+    events.copy_from_slice(&raw[..4]);
+    data.copy_from_slice(&raw[4..]);
+    crate::net::epoll::EpollEvent {
+        events: u32::from_ne_bytes(events),
+        data: u64::from_ne_bytes(data),
+    }
+}
+
+/// Bytes of the user buffer epoll_wait may fill for `max_events` events.
+/// Linux caps maxevents at INT_MAX / sizeof(struct epoll_event); the byte
+/// count must not wrap (W-16). Zero is EINVAL as well.
+fn epoll_events_buffer_len(max_events: usize) -> Result<usize, SyscallError> {
+    if max_events == 0 || max_events > i32::MAX as usize / EPOLL_EVENT_BYTES {
+        return Err(SyscallError::InvalidArgument);
+    }
+    Ok(max_events * EPOLL_EVENT_BYTES)
+}
+
+/// `events` as the packed user array epoll_wait returns.
+fn epoll_events_to_bytes(events: &[crate::net::epoll::EpollEvent]) -> alloc::vec::Vec<u8> {
+    let mut out = alloc::vec::Vec::with_capacity(events.len() * EPOLL_EVENT_BYTES);
+    for ev in events {
+        let (flags, data) = (ev.events, ev.data);
+        out.extend_from_slice(&flags.to_ne_bytes());
+        out.extend_from_slice(&data.to_ne_bytes());
+    }
+    out
+}
+
 /// getrandom syscall -- fills user buffer with cryptographically secure random
 /// bytes.
 ///
@@ -1847,7 +1864,8 @@ fn sys_getrandom(buf_ptr: usize, buflen: usize, _flags: usize) -> SyscallResult 
 /// - `buf_size`: Size of the buffer in bytes.
 ///
 /// # Returns
-/// Number of bytes written to buf, or 0 when no more entries.
+/// Number of bytes written to buf, or 0 when no more entries. A buffer too
+/// small for the next entry is EINVAL.
 fn sys_getdents64(fd: usize, buf_ptr: usize, buf_size: usize) -> SyscallResult {
     if buf_size == 0 {
         return Err(SyscallError::InvalidArgument);
@@ -1868,9 +1886,43 @@ fn sys_getdents64(fd: usize, buf_ptr: usize, buf_size: usize) -> SyscallResult {
         return Ok(0);
     }
 
+    // Records are built in a kernel buffer and copied out once (N-43).
+    let (out, idx) = build_dirents64(&entries, pos, buf_size)?;
+
+    userspace::write_user_bytes(buf_ptr, &out)?;
+
+    // Advance file position
+    if idx > pos {
+        let _ = file_desc.seek(crate::fs::SeekFrom::Start(idx));
+    }
+
+    Ok(out.len())
+}
+
+/// `d_type` of a `linux_dirent64` for a node of type `node_type`.
+fn dirent64_type(node_type: crate::fs::NodeType) -> u8 {
+    match node_type {
+        crate::fs::NodeType::File => 8,        // DT_REG
+        crate::fs::NodeType::Directory => 4,   // DT_DIR
+        crate::fs::NodeType::CharDevice => 2,  // DT_CHR
+        crate::fs::NodeType::BlockDevice => 6, // DT_BLK
+        crate::fs::NodeType::Symlink => 10,    // DT_LNK
+        crate::fs::NodeType::Pipe => 1,        // DT_FIFO
+        crate::fs::NodeType::Socket => 12,     // DT_SOCK
+    }
+}
+
+/// Build `linux_dirent64` records for `entries[pos..]`, as many as fit in
+/// `buf_size` bytes. Returns the records and the index of the first entry
+/// not included (no records at all past the last entry), or EINVAL if not
+/// even the first remaining record fits.
+fn build_dirents64(
+    entries: &[crate::fs::DirEntry],
+    pos: usize,
+    buf_size: usize,
+) -> Result<(alloc::vec::Vec<u8>, usize), SyscallError> {
     let mut offset = 0usize;
     let mut idx = pos;
-    // Records are built in a kernel buffer and copied out once (N-43).
     let mut out: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
 
     while idx < entries.len() {
@@ -1885,16 +1937,6 @@ fn sys_getdents64(fd: usize, buf_ptr: usize, buf_size: usize) -> SyscallResult {
             break;
         }
 
-        let d_type: u8 = match entry.node_type {
-            crate::fs::NodeType::File => 8,        // DT_REG
-            crate::fs::NodeType::Directory => 4,   // DT_DIR
-            crate::fs::NodeType::CharDevice => 2,  // DT_CHR
-            crate::fs::NodeType::BlockDevice => 6, // DT_BLK
-            crate::fs::NodeType::Symlink => 10,    // DT_LNK
-            crate::fs::NodeType::Pipe => 1,        // DT_FIFO
-            crate::fs::NodeType::Socket => 12,     // DT_SOCK
-        };
-
         // d_ino (use inode from entry, default 1)
         let ino = if entry.inode == 0 {
             (idx + 1) as u64
@@ -1902,12 +1944,15 @@ fn sys_getdents64(fd: usize, buf_ptr: usize, buf_size: usize) -> SyscallResult {
             entry.inode
         };
         out.extend_from_slice(&ino.to_ne_bytes());
-        // d_off (offset to next entry)
-        out.extend_from_slice(&((offset + reclen) as u64).to_ne_bytes());
+        // d_off: the directory position of the next entry. Positions are
+        // entry indices (see the seek in sys_getdents64), and musl's
+        // telldir/seekdir hand d_off to lseek; this used to be the byte
+        // offset of the next record in this buffer.
+        out.extend_from_slice(&((idx + 1) as u64).to_ne_bytes());
         // d_reclen
         out.extend_from_slice(&(reclen as u16).to_ne_bytes());
         // d_type
-        out.push(d_type);
+        out.push(dirent64_type(entry.node_type));
         // d_name (NUL-terminated), then zero padding to reclen
         out.extend_from_slice(name_bytes);
         out.resize(offset + reclen, 0);
@@ -1915,15 +1960,13 @@ fn sys_getdents64(fd: usize, buf_ptr: usize, buf_size: usize) -> SyscallResult {
         offset += reclen;
         idx += 1;
     }
-
-    userspace::write_user_bytes(buf_ptr, &out)?;
-
-    // Advance file position
-    if idx > pos {
-        let _ = file_desc.seek(crate::fs::SeekFrom::Start(idx));
+    if out.is_empty() && pos < entries.len() {
+        // Linux: EINVAL when the buffer cannot hold the next record. An
+        // empty result here used to read as end of directory, so a short
+        // buffer silently truncated the listing.
+        return Err(SyscallError::InvalidArgument);
     }
-
-    Ok(offset)
+    Ok((out, idx))
 }
 
 /// prlimit64 syscall -- get/set resource limits for a process.
@@ -2321,6 +2364,21 @@ fn parse_scm_rights(
     }
     let mut hdr = [0u8; CMSGHDR_SIZE];
     userspace::read_user_bytes(control_ptr, &mut hdr)?;
+    let fd_count = scm_rights_fd_count(&hdr, control_len)?;
+    let mut raw = [0u8; 4 * SCM_MAX_FDS];
+    let raw = &mut raw[..4 * fd_count];
+    // CMSGHDR_SIZE + 4 * fd_count <= cmsg_len <= control_len.
+    userspace::read_user_bytes(control_ptr + CMSGHDR_SIZE, raw)?;
+    Ok(decode_scm_fds(raw))
+}
+
+/// The number of fds announced by the cmsghdr `hdr` at the start of a
+/// `control_len`-byte control buffer, with the checks `parse_scm_rights`
+/// documents. 0 means nothing to pass (another level, or an empty array).
+fn scm_rights_fd_count(
+    hdr: &[u8; CMSGHDR_SIZE],
+    control_len: usize,
+) -> Result<usize, SyscallError> {
     let cmsg_len = u64::from_ne_bytes([
         hdr[0], hdr[1], hdr[2], hdr[3], hdr[4], hdr[5], hdr[6], hdr[7],
     ]);
@@ -2331,7 +2389,7 @@ fn parse_scm_rights(
         return Err(SyscallError::InvalidArgument);
     }
     if level != SOL_SOCKET_LEVEL {
-        return Ok(alloc::vec::Vec::new());
+        return Ok(0);
     }
     if kind != SCM_RIGHTS_TYPE {
         return Err(SyscallError::InvalidArgument);
@@ -2340,14 +2398,39 @@ fn parse_scm_rights(
     if fd_count > SCM_MAX_FDS {
         return Err(SyscallError::InvalidArgument);
     }
-    let mut raw = [0u8; 4 * SCM_MAX_FDS];
-    let raw = &mut raw[..4 * fd_count];
-    // CMSGHDR_SIZE + 4 * fd_count <= cmsg_len <= control_len.
-    userspace::read_user_bytes(control_ptr + CMSGHDR_SIZE, raw)?;
-    Ok(raw
-        .chunks_exact(4)
+    Ok(fd_count)
+}
+
+/// The native-endian `int` fds of an SCM_RIGHTS payload (a trailing
+/// partial fd is ignored).
+fn decode_scm_fds(raw: &[u8]) -> alloc::vec::Vec<i32> {
+    raw.chunks_exact(4)
         .map(|c| i32::from_ne_bytes([c[0], c[1], c[2], c[3]]))
-        .collect())
+        .collect()
+}
+
+/// How many fds a `control_len`-byte control buffer at `control_ptr` can
+/// report in one SCM_RIGHTS message (0 without a usable buffer).
+fn scm_rights_room(control_ptr: usize, control_len: usize) -> usize {
+    if control_ptr != 0 && control_len >= CMSGHDR_SIZE {
+        (control_len - CMSGHDR_SIZE) / 4
+    } else {
+        0
+    }
+}
+
+/// One SCM_RIGHTS cmsghdr carrying `fds`, laid out as `parse_scm_rights`
+/// reads it; `cmsg_len` is the whole message length.
+fn scm_rights_cmsg(fds: &[u32]) -> alloc::vec::Vec<u8> {
+    let needed = CMSGHDR_SIZE + fds.len() * 4;
+    let mut cmsg = alloc::vec::Vec::with_capacity(needed);
+    cmsg.extend_from_slice(&(needed as u64).to_ne_bytes());
+    cmsg.extend_from_slice(&SOL_SOCKET_LEVEL.to_ne_bytes());
+    cmsg.extend_from_slice(&SCM_RIGHTS_TYPE.to_ne_bytes());
+    for &fd in fds {
+        cmsg.extend_from_slice(&(fd as i32).to_ne_bytes());
+    }
+    cmsg
 }
 
 /// recvmsg syscall -- receives data with optional ancillary data (SCM_RIGHTS).
@@ -2366,14 +2449,14 @@ fn sys_recvmsg(socket_fd: usize, msghdr_ptr: usize, _flags: usize) -> SyscallRes
         return Err(SyscallError::InvalidArgument);
     }
 
+    let iov_at = |i| userspace::read_user_index::<[usize; 2]>(iov_ptr, i);
+
     // Calculate total receive buffer size from iovec
-    let mut total_buf_len: usize = 0;
-    if iov_len > 0 && iov_ptr != 0 {
-        for i in 0..iov_len {
-            let [_, len]: [usize; 2] = userspace::read_user_index(iov_ptr, i)?;
-            total_buf_len = total_buf_len.saturating_add(len);
-        }
-    }
+    let total_buf_len = if iov_len > 0 && iov_ptr != 0 {
+        iovs_total_len(iov_len, iov_at)?
+    } else {
+        0
+    };
 
     // Allocate a temporary kernel buffer to receive into
     let mut recv_buf = alloc::vec![0u8; total_buf_len.min(65536)];
@@ -2383,19 +2466,13 @@ fn sys_recvmsg(socket_fd: usize, msghdr_ptr: usize, _flags: usize) -> SyscallRes
         with_socket_fd(socket_fd, |s| s.recv(&mut recv_buf))?.map_err(socket_err)?;
 
     // Scatter received data into iovec buffers
-    let mut offset = 0usize;
     if iov_len > 0 && iov_ptr != 0 {
-        for i in 0..iov_len {
-            if offset >= received {
-                break;
-            }
-            let [base, len]: [usize; 2] = userspace::read_user_index(iov_ptr, i)?;
-            if len > 0 && base != 0 {
-                let copy_len = (received - offset).min(len);
-                userspace::write_user_bytes(base, &recv_buf[offset..offset + copy_len])?;
-                offset += copy_len;
-            }
-        }
+        scatter_iovs(
+            &recv_buf[..received],
+            iov_len,
+            iov_at,
+            userspace::write_user_bytes,
+        )?;
     }
 
     // Passed files become new fds in the receiver's own table -- only as
@@ -2406,11 +2483,7 @@ fn sys_recvmsg(socket_fd: usize, msghdr_ptr: usize, _flags: usize) -> SyscallRes
     let mut delivered_fds = 0usize;
     if let Some(scm) = rights {
         sent_fds = scm.files.len();
-        let room = if control_ptr != 0 && control_len >= CMSGHDR_SIZE {
-            (control_len - CMSGHDR_SIZE) / 4
-        } else {
-            0
-        };
+        let room = scm_rights_room(control_ptr, control_len);
         let process = crate::process::current_process().ok_or(SyscallError::InvalidState)?;
         let table = process.file_table.lock();
         let mut fds = alloc::vec::Vec::with_capacity(scm.files.len().min(room));
@@ -2466,6 +2539,44 @@ fn recvmsg_flags(sent: usize, delivered: usize) -> i32 {
     }
 }
 
+/// Sum of the lengths of the `iov_count` iovec entries `iov_at` yields
+/// (`[iov_base, iov_len]`), saturating.
+fn iovs_total_len(
+    iov_count: usize,
+    mut iov_at: impl FnMut(usize) -> Result<[usize; 2], SyscallError>,
+) -> Result<usize, SyscallError> {
+    let mut total = 0usize;
+    for i in 0..iov_count {
+        let [_, len] = iov_at(i)?;
+        total = total.saturating_add(len);
+    }
+    Ok(total)
+}
+
+/// Copy `data` into the iovec entries `iov_at` yields, in order, through
+/// `write(base, bytes)`. Entries with a zero base or length are skipped,
+/// and no entry is read once `data` is used up. Returns the bytes copied.
+fn scatter_iovs(
+    data: &[u8],
+    iov_count: usize,
+    mut iov_at: impl FnMut(usize) -> Result<[usize; 2], SyscallError>,
+    mut write: impl FnMut(usize, &[u8]) -> Result<(), SyscallError>,
+) -> Result<usize, SyscallError> {
+    let mut offset = 0usize;
+    for i in 0..iov_count {
+        if offset >= data.len() {
+            break;
+        }
+        let [base, len] = iov_at(i)?;
+        if len > 0 && base != 0 {
+            let copy_len = (data.len() - offset).min(len);
+            write(base, &data[offset..offset + copy_len])?;
+            offset += copy_len;
+        }
+    }
+    Ok(offset)
+}
+
 /// Write SCM_RIGHTS fds into the user's msg_control buffer as one cmsghdr
 /// and set msg_controllen. Returns false (writing nothing) if the buffer is
 /// too small or not valid user memory.
@@ -2482,13 +2593,7 @@ fn write_scm_rights(
     // Built in a kernel buffer and copied out with the fault-tolerant
     // routine; the raw unaligned stores this replaces faulted in the kernel
     // on an unmapped page (agy review of the v0.26.0 stack, PR #10).
-    let mut cmsg = alloc::vec::Vec::with_capacity(needed);
-    cmsg.extend_from_slice(&(needed as u64).to_ne_bytes());
-    cmsg.extend_from_slice(&SOL_SOCKET_LEVEL.to_ne_bytes());
-    cmsg.extend_from_slice(&SCM_RIGHTS_TYPE.to_ne_bytes());
-    for &fd in fds {
-        cmsg.extend_from_slice(&(fd as i32).to_ne_bytes());
-    }
+    let cmsg = scm_rights_cmsg(fds);
     // msg_controllen is the sixth usize-sized field of the 56-byte msghdr.
     userspace::write_user_bytes(control_ptr, &cmsg).is_ok()
         && userspace::write_user::<usize>(msghdr_ptr + 5 * core::mem::size_of::<usize>(), needed)
@@ -2511,33 +2616,64 @@ fn message_from_user(
     ptr: usize,
     len: usize,
 ) -> Result<Message, SyscallError> {
-    use crate::ipc::message::{BufferedMessage, MAX_BUFFERED_PAYLOAD};
+    use crate::ipc::message::BufferedMessage;
 
-    const SMALL: usize = core::mem::size_of::<SmallMessage>();
-    if len == 0 {
-        return Err(SyscallError::InvalidArgument);
-    }
-    if len <= SMALL {
-        let mut bytes = [0u8; SMALL];
-        userspace::read_user_bytes(ptr, &mut bytes[..len])?;
-        // SAFETY: SmallMessage is repr(C) plain data (u64, u32, u32,
-        // [u64; 4]) without padding, so every byte pattern is a valid value;
-        // read_unaligned imposes no alignment on the stack buffer.
-        let mut msg: SmallMessage =
-            unsafe { core::ptr::read_unaligned(bytes.as_ptr() as *const SmallMessage) };
-        if let Some(cap) = capability {
-            msg.capability = cap;
+    match message_tier(len)? {
+        MessageTier::Small => {
+            let mut bytes = [0u8; SMALL_MESSAGE_BYTES];
+            userspace::read_user_bytes(ptr, &mut bytes[..len])?;
+            Ok(Message::Small(small_message_from_bytes(&bytes, capability)))
         }
-        return Ok(Message::Small(msg));
+        MessageTier::Buffered => {
+            let mut payload = alloc::vec![0u8; len];
+            userspace::read_user_bytes(ptr, &mut payload)?;
+            BufferedMessage::new(capability.unwrap_or(0), 0, payload)
+                .map(Message::Buffered)
+                .ok_or(SyscallError::InvalidArgument)
+        }
     }
-    if len > MAX_BUFFERED_PAYLOAD {
-        return Err(SyscallError::InvalidArgument);
+}
+
+/// `sizeof(SmallMessage)`: the largest message passed by value.
+const SMALL_MESSAGE_BYTES: usize = core::mem::size_of::<SmallMessage>();
+
+/// How `message_from_user` carries a message of a given length.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MessageTier {
+    /// By value, zero-padded to `SMALL_MESSAGE_BYTES`.
+    Small,
+    /// Copied into a kernel buffer.
+    Buffered,
+}
+
+/// The tier for a `len`-byte message: empty and over-`MAX_BUFFERED_PAYLOAD`
+/// messages are EINVAL (the latter need a shared region).
+fn message_tier(len: usize) -> Result<MessageTier, SyscallError> {
+    use crate::ipc::message::MAX_BUFFERED_PAYLOAD;
+
+    match len {
+        0 => Err(SyscallError::InvalidArgument),
+        1..=SMALL_MESSAGE_BYTES => Ok(MessageTier::Small),
+        _ if len > MAX_BUFFERED_PAYLOAD => Err(SyscallError::InvalidArgument),
+        _ => Ok(MessageTier::Buffered),
     }
-    let mut payload = alloc::vec![0u8; len];
-    userspace::read_user_bytes(ptr, &mut payload)?;
-    BufferedMessage::new(capability.unwrap_or(0), 0, payload)
-        .map(Message::Buffered)
-        .ok_or(SyscallError::InvalidArgument)
+}
+
+/// A small message from its bytes; `capability`, when given, replaces the
+/// capability the sender wrote.
+fn small_message_from_bytes(
+    bytes: &[u8; SMALL_MESSAGE_BYTES],
+    capability: Option<u64>,
+) -> SmallMessage {
+    // SAFETY: SmallMessage is repr(C) plain data (u64, u32, u32, [u64; 4])
+    // without padding, so every byte pattern is a valid value;
+    // read_unaligned imposes no alignment on the byte array.
+    let mut msg: SmallMessage =
+        unsafe { core::ptr::read_unaligned(bytes.as_ptr() as *const SmallMessage) };
+    if let Some(cap) = capability {
+        msg.capability = cap;
+    }
+    msg
 }
 
 /// Bytes of a `repr(C)` plain-data value.
@@ -3351,10 +3487,15 @@ pub(super) fn socket_err(e: crate::error::KernelError) -> SyscallError {
 fn read_inet_addr(addr_ptr: usize) -> Result<crate::net::SocketAddr, SyscallError> {
     let mut raw = [0u8; 6];
     userspace::read_user_bytes(addr_ptr, &mut raw)?;
-    Ok(crate::net::SocketAddr::v4(
+    Ok(inet_addr_from_bytes(&raw))
+}
+
+/// Decode an INET address passed as (4 address bytes, big-endian port).
+fn inet_addr_from_bytes(raw: &[u8; 6]) -> crate::net::SocketAddr {
+    crate::net::SocketAddr::v4(
         crate::net::Ipv4Address([raw[0], raw[1], raw[2], raw[3]]),
         u16::from_be_bytes([raw[4], raw[5]]),
-    ))
+    )
 }
 
 /// Convert user-space socket type to UnixSocketType.
@@ -3771,6 +3912,207 @@ mod tests {
         );
     }
 
+    fn cmsg_hdr(len: u64, level: i32, kind: i32) -> [u8; CMSGHDR_SIZE] {
+        let mut h = [0u8; CMSGHDR_SIZE];
+        h.copy_from_slice(&cmsg(len, level, kind, &[]));
+        h
+    }
+
+    #[test]
+    fn scm_rights_fd_count_from_header() {
+        assert_eq!(scm_rights_fd_count(&cmsg_hdr(16 + 12, 1, 1), 64), Ok(3));
+        // A trailing partial fd does not count.
+        assert_eq!(scm_rights_fd_count(&cmsg_hdr(16 + 6, 1, 1), 64), Ok(1));
+        // cmsg_len exactly at the buffer end is fine, one past is not.
+        assert_eq!(scm_rights_fd_count(&cmsg_hdr(24, 1, 1), 24), Ok(2));
+        assert_eq!(
+            scm_rights_fd_count(&cmsg_hdr(25, 1, 1), 24),
+            Err(SyscallError::InvalidArgument)
+        );
+        assert_eq!(
+            scm_rights_fd_count(&cmsg_hdr(15, 1, 1), 64),
+            Err(SyscallError::InvalidArgument)
+        );
+        // Another level is skipped before its type is looked at.
+        assert_eq!(scm_rights_fd_count(&cmsg_hdr(20, 41, 99), 64), Ok(0));
+        assert_eq!(
+            scm_rights_fd_count(&cmsg_hdr(20, 1, 2), 64),
+            Err(SyscallError::InvalidArgument)
+        );
+        let max = (16 + 4 * SCM_MAX_FDS) as u64;
+        assert_eq!(
+            scm_rights_fd_count(&cmsg_hdr(max, 1, 1), 1024),
+            Ok(SCM_MAX_FDS)
+        );
+        assert_eq!(
+            scm_rights_fd_count(&cmsg_hdr(max + 4, 1, 1), 1024),
+            Err(SyscallError::InvalidArgument)
+        );
+        // A huge cmsg_len that the buffer length does not rule out is
+        // still EINVAL (too many fds), not an overflow.
+        assert_eq!(
+            scm_rights_fd_count(&cmsg_hdr(u64::MAX, 1, 1), usize::MAX),
+            Err(SyscallError::InvalidArgument)
+        );
+    }
+
+    #[test]
+    fn scm_fds_decode_native_ints() {
+        let mut raw = alloc::vec::Vec::new();
+        for fd in [0i32, 9, -1, i32::MAX] {
+            raw.extend_from_slice(&fd.to_ne_bytes());
+        }
+        raw.push(0xFF); // partial trailing fd
+        assert_eq!(decode_scm_fds(&raw), alloc::vec![0, 9, -1, i32::MAX]);
+        assert!(decode_scm_fds(&[]).is_empty());
+    }
+
+    #[test]
+    fn scm_rights_room_counts_whole_fds() {
+        assert_eq!(scm_rights_room(0x1000, 16), 0);
+        assert_eq!(scm_rights_room(0x1000, 19), 0);
+        assert_eq!(scm_rights_room(0x1000, 20), 1);
+        assert_eq!(scm_rights_room(0x1000, 16 + 4 * 5 + 3), 5);
+        // No buffer, or one shorter than a header.
+        assert_eq!(scm_rights_room(0, 64), 0);
+        assert_eq!(scm_rights_room(0x1000, 15), 0);
+        assert_eq!(scm_rights_room(0x1000, 0), 0);
+    }
+
+    /// What recvmsg writes is what sendmsg parses.
+    #[test]
+    fn scm_rights_cmsg_round_trips() {
+        let b = scm_rights_cmsg(&[3, 4, 10]);
+        assert_eq!(b.len(), 16 + 12);
+        assert_eq!(b, cmsg(28, 1, 1, &[3, 4, 10]));
+        assert_eq!(
+            parse_scm_rights(b.as_ptr() as usize, b.len()),
+            Ok(alloc::vec![3, 4, 10])
+        );
+        assert_eq!(scm_rights_cmsg(&[]), cmsg(16, 1, 1, &[]));
+    }
+
+    #[test]
+    fn write_scm_rights_sets_controllen_or_writes_nothing() {
+        // msghdr as 7 usize words; msg_controllen is word 5.
+        let mut hdr = [usize::MAX; 7];
+        let mut control = [0xEEu8; 32];
+        let hdr_ptr = hdr.as_mut_ptr() as usize;
+        assert!(write_scm_rights(
+            control.as_mut_ptr() as usize,
+            control.len(),
+            &[7, 8],
+            hdr_ptr
+        ));
+        assert_eq!(hdr[5], 24);
+        assert_eq!(&control[..24], &cmsg(24, 1, 1, &[7, 8])[..]);
+        assert!(control[24..].iter().all(|&b| b == 0xEE));
+
+        // Too small: nothing written, msg_controllen untouched.
+        let mut hdr = [usize::MAX; 7];
+        let mut control = [0xEEu8; 23];
+        assert!(!write_scm_rights(
+            control.as_mut_ptr() as usize,
+            control.len(),
+            &[7, 8],
+            hdr.as_mut_ptr() as usize
+        ));
+        assert_eq!(hdr[5], usize::MAX);
+        assert!(control.iter().all(|&b| b == 0xEE));
+    }
+
+    #[test]
+    fn scm_rights_rejects_short_control_buffer() {
+        let b = cmsg(16, 1, 1, &[]);
+        assert_eq!(
+            parse_scm_rights(b.as_ptr() as usize, CMSGHDR_SIZE - 1),
+            Err(SyscallError::InvalidArgument)
+        );
+    }
+
+    // --- iovec gather/scatter ---
+
+    fn iovs(entries: &[[usize; 2]]) -> impl FnMut(usize) -> Result<[usize; 2], SyscallError> + '_ {
+        move |i| entries.get(i).copied().ok_or(SyscallError::InvalidPointer)
+    }
+
+    #[test]
+    fn iovs_total_len_sums_and_saturates() {
+        assert_eq!(iovs_total_len(0, iovs(&[])), Ok(0));
+        assert_eq!(
+            iovs_total_len(3, iovs(&[[1, 4], [0, 7], [2, 0]])),
+            Ok(11),
+            "a null base still counts, as before"
+        );
+        assert_eq!(
+            iovs_total_len(2, iovs(&[[1, usize::MAX], [2, 5]])),
+            Ok(usize::MAX)
+        );
+        // An unreadable entry fails the call.
+        assert_eq!(
+            iovs_total_len(2, iovs(&[[1, 4]])),
+            Err(SyscallError::InvalidPointer)
+        );
+    }
+
+    #[test]
+    fn scatter_iovs_fills_in_order_and_skips_empty_entries() {
+        let data: alloc::vec::Vec<u8> = (1..=10).collect();
+        let mut writes = alloc::vec::Vec::new();
+        let n = scatter_iovs(
+            &data,
+            4,
+            iovs(&[[0x100, 3], [0, 5], [0x200, 0], [0x300, 100]]),
+            |base, bytes| {
+                writes.push((base, alloc::vec::Vec::from(bytes)));
+                Ok(())
+            },
+        );
+        assert_eq!(n, Ok(10));
+        assert_eq!(
+            writes,
+            alloc::vec![
+                (0x100, alloc::vec![1, 2, 3]),
+                (0x300, alloc::vec![4, 5, 6, 7, 8, 9, 10]),
+            ]
+        );
+    }
+
+    #[test]
+    fn scatter_iovs_stops_reading_entries_once_data_is_placed() {
+        // Entry 1 is unreadable but never needed: 2 bytes fit in entry 0.
+        let mut out = alloc::vec::Vec::new();
+        assert_eq!(
+            scatter_iovs(&[9, 8], 5, iovs(&[[0x100, 4]]), |_, b| {
+                out.extend_from_slice(b);
+                Ok(())
+            }),
+            Ok(2)
+        );
+        assert_eq!(out, [9, 8]);
+        // Nothing received: no entry is read at all.
+        assert_eq!(scatter_iovs(&[], 5, iovs(&[]), |_, _| Ok(())), Ok(0));
+        // More data than room: the excess is dropped.
+        assert_eq!(
+            scatter_iovs(&[1, 2, 3], 1, iovs(&[[0x100, 2]]), |_, _| Ok(())),
+            Ok(2)
+        );
+    }
+
+    #[test]
+    fn scatter_iovs_propagates_errors() {
+        assert_eq!(
+            scatter_iovs(&[1, 2, 3], 2, iovs(&[[0x100, 1]]), |_, _| Ok(())),
+            Err(SyscallError::InvalidPointer)
+        );
+        assert_eq!(
+            scatter_iovs(&[1], 1, iovs(&[[0x100, 1]]), |_, _| Err(
+                SyscallError::UnmappedMemory
+            )),
+            Err(SyscallError::UnmappedMemory)
+        );
+    }
+
     /// recvmsg reports dropped fds with MSG_CTRUNC (review of the v0.26.0
     /// stack, PR #10).
     #[test]
@@ -3877,6 +4219,282 @@ mod tests {
         assert_eq!(scm_fd_index(-1), Err(SyscallError::BadFileDescriptor));
         assert_eq!(scm_fd_index(i32::MIN), Err(SyscallError::BadFileDescriptor));
         assert_eq!(scm_fd_index(7), Ok(7));
+    }
+
+    // --- IPC message size tiers (IPC-ARCH-02) ---
+
+    #[test]
+    fn message_tier_boundaries() {
+        use crate::ipc::message::MAX_BUFFERED_PAYLOAD;
+        assert_eq!(SMALL_MESSAGE_BYTES, 48);
+        assert_eq!(message_tier(0), Err(SyscallError::InvalidArgument));
+        assert_eq!(message_tier(1), Ok(MessageTier::Small));
+        assert_eq!(message_tier(SMALL_MESSAGE_BYTES), Ok(MessageTier::Small));
+        assert_eq!(
+            message_tier(SMALL_MESSAGE_BYTES + 1),
+            Ok(MessageTier::Buffered)
+        );
+        assert_eq!(
+            message_tier(MAX_BUFFERED_PAYLOAD),
+            Ok(MessageTier::Buffered)
+        );
+        assert_eq!(
+            message_tier(MAX_BUFFERED_PAYLOAD + 1),
+            Err(SyscallError::InvalidArgument)
+        );
+        assert_eq!(message_tier(usize::MAX), Err(SyscallError::InvalidArgument));
+    }
+
+    fn small_bytes(msg: &SmallMessage) -> [u8; SMALL_MESSAGE_BYTES] {
+        let mut b = [0u8; SMALL_MESSAGE_BYTES];
+        b.copy_from_slice(pod_bytes(msg));
+        b
+    }
+
+    #[test]
+    fn small_message_capability_is_replaced_only_when_given() {
+        let sent = SmallMessage::new(0x1111, 7)
+            .with_flags(3)
+            .with_data(0, 0xAA)
+            .with_data(3, 0xDD);
+        let bytes = small_bytes(&sent);
+        assert_eq!(small_message_from_bytes(&bytes, None), sent);
+        let got = small_message_from_bytes(&bytes, Some(0x9999));
+        assert_eq!(got.capability, 0x9999);
+        assert_eq!((got.opcode, got.flags, got.data), (7, 3, sent.data));
+    }
+
+    #[test]
+    fn message_from_user_picks_the_tier_and_pads_short_messages() {
+        // A short small message is zero-padded.
+        let raw = 0x0102_0304_0506_0708u64.to_ne_bytes();
+        match message_from_user(Some(5), raw.as_ptr() as usize, raw.len()) {
+            Ok(Message::Small(m)) => {
+                assert_eq!(m.capability, 5, "the validated capability wins");
+                assert_eq!((m.opcode, m.flags, m.data), (0, 0, [0; 4]));
+            }
+            _ => panic!("expected a small message"),
+        }
+        let full = small_bytes(&SmallMessage::new(1, 2).with_data(1, 9));
+        match message_from_user(None, full.as_ptr() as usize, full.len()) {
+            Ok(Message::Small(m)) => assert_eq!(m, SmallMessage::new(1, 2).with_data(1, 9)),
+            _ => panic!("expected a small message"),
+        }
+        // One byte more is buffered, with the capability in the header.
+        let payload = [0x5Au8; SMALL_MESSAGE_BYTES + 1];
+        match message_from_user(Some(77), payload.as_ptr() as usize, payload.len()) {
+            Ok(Message::Buffered(m)) => {
+                assert_eq!(m.payload, payload);
+                assert_eq!(m.header.capability, 77);
+                assert_eq!(m.header.total_size, payload.len() as u64);
+            }
+            _ => panic!("expected a buffered message"),
+        }
+        assert!(matches!(
+            message_from_user(None, payload.as_ptr() as usize, 0),
+            Err(SyscallError::InvalidArgument)
+        ));
+    }
+
+    #[test]
+    fn message_to_user_copies_and_truncates() {
+        use crate::ipc::message::{BufferedMessage, MessageHeader};
+        const HEADER: usize = core::mem::size_of::<MessageHeader>();
+
+        let small = SmallMessage::new(4, 5).with_data(2, 6);
+        let mut out = [0u8; SMALL_MESSAGE_BYTES + 4];
+        assert_eq!(
+            message_to_user(&Message::Small(small), out.as_mut_ptr() as usize, out.len()),
+            Ok(SMALL_MESSAGE_BYTES)
+        );
+        assert_eq!(&out[..SMALL_MESSAGE_BYTES], &small_bytes(&small)[..]);
+        // A small message never goes into a shorter buffer.
+        assert_eq!(
+            message_to_user(&Message::Small(small), out.as_mut_ptr() as usize, 47),
+            Err(SyscallError::InvalidArgument)
+        );
+
+        let payload: alloc::vec::Vec<u8> = (0..100).collect();
+        let msg = Message::Buffered(BufferedMessage::new(8, 0, payload.clone()).unwrap());
+        // Room for the header and 10 payload bytes: the full length is
+        // reported so the receiver sees what it missed.
+        let mut out = [0xEEu8; HEADER + 12];
+        assert_eq!(
+            message_to_user(&msg, out.as_mut_ptr() as usize, HEADER + 10),
+            Ok(HEADER + 100)
+        );
+        assert_eq!(&out[HEADER..HEADER + 10], &payload[..10]);
+        assert_eq!(&out[HEADER + 10..], &[0xEE, 0xEE]);
+        assert_eq!(u64::from_ne_bytes(out[..8].try_into().unwrap()), 8);
+        assert_eq!(
+            message_to_user(&msg, out.as_mut_ptr() as usize, HEADER - 1),
+            Err(SyscallError::InvalidArgument)
+        );
+    }
+
+    // --- epoll_event layout ---
+
+    #[test]
+    fn epoll_event_is_packed_and_round_trips() {
+        use crate::net::epoll::EpollEvent;
+        assert_eq!(EPOLL_EVENT_BYTES, 12);
+        let mut raw = [0u8; 12];
+        raw[..4].copy_from_slice(&0x8000_0011u32.to_ne_bytes());
+        raw[4..].copy_from_slice(&0xDEAD_BEEF_0000_0042u64.to_ne_bytes());
+        let ev = epoll_event_from_bytes(&raw);
+        let (events, data) = (ev.events, ev.data);
+        assert_eq!((events, data), (0x8000_0011, 0xDEAD_BEEF_0000_0042));
+
+        let second = EpollEvent { events: 1, data: 2 };
+        let bytes = epoll_events_to_bytes(&[ev, second]);
+        assert_eq!(bytes.len(), 24);
+        assert_eq!(&bytes[..12], &raw);
+        assert_eq!(&bytes[12..16], &1u32.to_ne_bytes());
+        assert_eq!(&bytes[16..], &2u64.to_ne_bytes());
+        assert!(epoll_events_to_bytes(&[]).is_empty());
+    }
+
+    /// W-16: the byte count for maxevents must not wrap.
+    #[test]
+    fn epoll_buffer_len_bounds_maxevents() {
+        let cap = i32::MAX as usize / 12;
+        assert_eq!(epoll_events_buffer_len(1), Ok(12));
+        assert_eq!(epoll_events_buffer_len(cap), Ok(cap * 12));
+        assert_eq!(
+            epoll_events_buffer_len(cap + 1),
+            Err(SyscallError::InvalidArgument)
+        );
+        assert_eq!(
+            epoll_events_buffer_len(0),
+            Err(SyscallError::InvalidArgument)
+        );
+        assert_eq!(
+            epoll_events_buffer_len(usize::MAX),
+            Err(SyscallError::InvalidArgument)
+        );
+    }
+
+    #[test]
+    fn inet_addr_is_address_then_big_endian_port() {
+        let a = inet_addr_from_bytes(&[10, 0, 2, 15, 0x1F, 0x90]);
+        assert_eq!(
+            a,
+            crate::net::SocketAddr::v4(crate::net::Ipv4Address([10, 0, 2, 15]), 8080)
+        );
+        let raw = [192u8, 168, 1, 1, 0, 53];
+        assert_eq!(
+            read_inet_addr(raw.as_ptr() as usize),
+            Ok(inet_addr_from_bytes(&raw))
+        );
+        assert!(read_inet_addr(0).is_err());
+    }
+
+    // --- getdents64 records ---
+
+    fn dir_entry(name: &str, node_type: crate::fs::NodeType, inode: u64) -> crate::fs::DirEntry {
+        crate::fs::DirEntry {
+            name: alloc::string::String::from(name),
+            node_type,
+            inode,
+        }
+    }
+
+    /// (d_ino, d_off, d_reclen, d_type, name) of each record in `buf`.
+    fn parse_dirents(buf: &[u8]) -> alloc::vec::Vec<(u64, u64, usize, u8, alloc::string::String)> {
+        let mut out = alloc::vec::Vec::new();
+        let mut at = 0;
+        while at < buf.len() {
+            let rec = &buf[at..];
+            let reclen = u16::from_ne_bytes([rec[16], rec[17]]) as usize;
+            let name_end = rec[19..reclen].iter().position(|&b| b == 0).unwrap();
+            out.push((
+                u64::from_ne_bytes(rec[..8].try_into().unwrap()),
+                u64::from_ne_bytes(rec[8..16].try_into().unwrap()),
+                reclen,
+                rec[18],
+                alloc::string::String::from_utf8(rec[19..19 + name_end].to_vec()).unwrap(),
+            ));
+            at += reclen;
+        }
+        out
+    }
+
+    #[test]
+    fn dirent64_types_match_linux() {
+        use crate::fs::NodeType;
+        assert_eq!(dirent64_type(NodeType::Pipe), 1);
+        assert_eq!(dirent64_type(NodeType::CharDevice), 2);
+        assert_eq!(dirent64_type(NodeType::Directory), 4);
+        assert_eq!(dirent64_type(NodeType::BlockDevice), 6);
+        assert_eq!(dirent64_type(NodeType::File), 8);
+        assert_eq!(dirent64_type(NodeType::Symlink), 10);
+        assert_eq!(dirent64_type(NodeType::Socket), 12);
+    }
+
+    #[test]
+    fn dirents64_are_aligned_terminated_and_bounded() {
+        use crate::fs::NodeType;
+        let entries = [
+            dir_entry(".", NodeType::Directory, 0),
+            dir_entry("hello.txt", NodeType::File, 42),
+            dir_entry("abcd", NodeType::Symlink, 7),
+        ];
+        // 19 + 1 + 1 = 21 -> 24; 19 + 9 + 1 = 29 -> 32; 19 + 4 + 1 = 24.
+        let (buf, next) = build_dirents64(&entries, 0, 4096).unwrap();
+        assert_eq!(next, 3);
+        assert_eq!(buf.len(), 24 + 32 + 24);
+        let recs = parse_dirents(&buf);
+        assert_eq!(recs.len(), 3);
+        // A missing inode number becomes index + 1.
+        assert_eq!((recs[0].0, recs[0].2, recs[0].3), (1, 24, 4));
+        assert_eq!(recs[0].4, ".");
+        assert_eq!((recs[1].0, recs[1].2, recs[1].3), (42, 32, 8));
+        assert_eq!(recs[1].4, "hello.txt");
+        assert_eq!((recs[2].0, recs[2].3), (7, 10));
+        // Padding after the name is zeroed.
+        assert!(buf[24 + 19 + 9..56].iter().all(|&b| b == 0));
+
+        // A buffer that ends inside a record stops before it.
+        let (buf, next) = build_dirents64(&entries, 0, 24 + 31).unwrap();
+        assert_eq!((buf.len(), next), (24, 1));
+        // Resuming at an index continues from there.
+        let (buf, next) = build_dirents64(&entries, 2, 24).unwrap();
+        assert_eq!((buf.len(), next), (24, 3));
+        assert_eq!(parse_dirents(&buf)[0].4, "abcd");
+        // Nothing left is end of directory; no room for even one record is
+        // EINVAL, as on Linux, not a short directory.
+        assert_eq!(build_dirents64(&entries, 3, 4096), Ok((alloc::vec![], 3)));
+        assert_eq!(build_dirents64(&entries, 7, 4096), Ok((alloc::vec![], 7)));
+        assert_eq!(
+            build_dirents64(&entries, 0, 23),
+            Err(SyscallError::InvalidArgument)
+        );
+        assert_eq!(
+            build_dirents64(&entries, 1, 31),
+            Err(SyscallError::InvalidArgument)
+        );
+    }
+
+    /// d_off is the position to seek to for the next entry. A directory
+    /// fd's position is an entry index, and musl's telldir/seekdir pass
+    /// d_off straight to lseek, so it must be an index, not a byte offset
+    /// into this call's buffer.
+    #[test]
+    fn dirent64_d_off_is_the_next_entry_index() {
+        use crate::fs::NodeType;
+        let entries = [
+            dir_entry("a", NodeType::File, 0),
+            dir_entry("bb", NodeType::File, 0),
+            dir_entry("ccc", NodeType::File, 0),
+        ];
+        let (buf, _) = build_dirents64(&entries, 0, 4096).unwrap();
+        let offs: alloc::vec::Vec<u64> = parse_dirents(&buf).iter().map(|r| r.1).collect();
+        assert_eq!(offs, [1, 2, 3]);
+        // Resuming at the d_off of the first record yields the second.
+        let (buf, _) = build_dirents64(&entries, offs[0] as usize, 4096).unwrap();
+        let recs = parse_dirents(&buf);
+        assert_eq!(recs[0].4, "bb");
+        assert_eq!(recs[0].1, 2);
     }
 
     // --- Rate limiter (SYS-PERF-01) ---

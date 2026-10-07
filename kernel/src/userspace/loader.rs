@@ -250,28 +250,8 @@ pub fn load_user_program(
     // __init_tls crashes immediately after entering user mode.
     #[cfg(not(target_arch = "riscv64"))]
     if let Some(process) = crate::process::get_process(pid) {
-        use crate::elf::dynamic::{AuxType, AuxVecEntry};
-
         // Build auxiliary vector from parsed ELF binary.
-        // AT_PHDR must point to the program header table in memory: musl's
-        // __init_libc iterates the program headers via AT_PHDR to find
-        // PT_TLS, PT_GNU_STACK, etc., and misparses (then crashes) if it
-        // points anywhere else. phdr_vaddr() takes it from PT_PHDR or the
-        // PT_LOAD that holds e_phoff; load_base + e_phoff is only the
-        // fallback for a table outside every segment.
-        let phdr_addr = binary.phdr_address().ok_or(KernelError::InvalidArgument {
-            name: "e_phoff",
-            value: "program header address overflows",
-        })?;
-
-        let auxv = vec![
-            AuxVecEntry::new(AuxType::AtPhdr, phdr_addr),
-            AuxVecEntry::new(AuxType::AtPhent, binary.phentsize as u64),
-            AuxVecEntry::new(AuxType::AtPhnum, binary.phnum as u64),
-            AuxVecEntry::new(AuxType::AtPagesz, 0x1000),
-            AuxVecEntry::new(AuxType::AtEntry, binary.entry_point),
-            AuxVecEntry::new(AuxType::AtNull, 0),
-        ];
+        let auxv = exec_auxv(&binary)?;
 
         // Re-setup the user stack with auxv included. The initial stack was
         // set up by create_process_with_options with None for auxv. We rebuild
@@ -388,6 +368,40 @@ pub fn load_user_program(
     }
 
     Ok(pid)
+}
+
+/// The program's address of its own program header table, for AT_PHDR.
+#[cfg(all(feature = "alloc", not(target_arch = "riscv64")))]
+fn phdr_auxv_value(binary: &crate::elf::ElfBinary) -> Result<u64, KernelError> {
+    binary.phdr_address().ok_or(KernelError::InvalidArgument {
+        name: "e_phoff",
+        value: "program header address overflows",
+    })
+}
+
+/// The auxiliary vector a loaded ELF program starts with.
+///
+/// AT_PHDR must point to the program header table in memory: musl's
+/// __init_libc iterates the program headers via AT_PHDR to find PT_TLS,
+/// PT_GNU_STACK, etc., and misparses (then crashes) if it points anywhere
+/// else. phdr_address() takes it from PT_PHDR or the PT_LOAD that holds
+/// e_phoff; load_base + e_phoff is only the fallback for a table outside
+/// every segment. AT_PHNUM and AT_PHENT are e_phnum and e_phentsize, which
+/// can differ from the parsed segments.
+#[cfg(all(feature = "alloc", not(target_arch = "riscv64")))]
+fn exec_auxv(
+    binary: &crate::elf::ElfBinary,
+) -> Result<Vec<crate::elf::dynamic::AuxVecEntry>, KernelError> {
+    use crate::elf::dynamic::{AuxType, AuxVecEntry};
+
+    Ok(vec![
+        AuxVecEntry::new(AuxType::AtPhdr, phdr_auxv_value(binary)?),
+        AuxVecEntry::new(AuxType::AtPhent, binary.phentsize as u64),
+        AuxVecEntry::new(AuxType::AtPhnum, binary.phnum as u64),
+        AuxVecEntry::new(AuxType::AtPagesz, 0x1000),
+        AuxVecEntry::new(AuxType::AtEntry, binary.entry_point),
+        AuxVecEntry::new(AuxType::AtNull, 0),
+    ])
 }
 
 /// Load the dynamic linker/interpreter for dynamically linked binaries
@@ -509,6 +523,22 @@ fn setup_auxiliary_vector(
     main_binary: &crate::elf::ElfBinary,
     interp_base: u64,
 ) -> Result<(), KernelError> {
+    let _auxv = interp_auxv(main_binary, interp_base)?;
+
+    // The auxiliary vector would typically be pushed onto the stack
+    // after the environment pointers. For now, we just prepare the data.
+    // The actual stack setup happens in the setup_args function.
+
+    Ok(())
+}
+
+/// The (type, value) auxiliary vector for a dynamic linker loaded at
+/// `interp_base` to start `main_binary`.
+#[cfg(all(feature = "alloc", not(target_arch = "riscv64")))]
+fn interp_auxv(
+    main_binary: &crate::elf::ElfBinary,
+    interp_base: u64,
+) -> Result<Vec<(u64, u64)>, KernelError> {
     // Auxiliary vector types (from Linux elf.h)
     const AT_NULL: u64 = 0; // End of vector
     const AT_PHDR: u64 = 3; // Program headers for program
@@ -523,35 +553,21 @@ fn setup_auxiliary_vector(
     const AT_EGID: u64 = 14; // Effective group ID
 
     // Build auxiliary vector entries
-    let _auxv: Vec<(u64, u64)> = vec![
+    Ok(vec![
         (AT_PAGESZ, 0x1000),                 // Page size
         (AT_BASE, interp_base),              // Interpreter base
         (AT_ENTRY, main_binary.entry_point), // Main program entry
         // e_phnum/e_phentsize, which can differ from the parsed segments.
         (AT_PHNUM, main_binary.phnum as u64),
         (AT_PHENT, main_binary.phentsize as u64),
-        (
-            AT_PHDR,
-            main_binary
-                .phdr_address()
-                .ok_or(KernelError::InvalidArgument {
-                    name: "e_phoff",
-                    value: "program header address overflows",
-                })?,
-        ), /* Program headers address (not the ELF
-            * header at load_base) */
+        // Program headers address (not the ELF header at load_base)
+        (AT_PHDR, phdr_auxv_value(main_binary)?),
         (AT_UID, 0), // Root user
         (AT_EUID, 0),
         (AT_GID, 0),
         (AT_EGID, 0),
         (AT_NULL, 0), // End of auxv
-    ];
-
-    // The auxiliary vector would typically be pushed onto the stack
-    // after the environment pointers. For now, we just prepare the data.
-    // The actual stack setup happens in the setup_args function.
-
-    Ok(())
+    ])
 }
 
 /// Create a minimal init process when no init binary is available
@@ -775,5 +791,109 @@ impl crate::fs::VfsNode for SerialConsoleNode {
         Err(KernelError::OperationNotSupported {
             operation: "truncate on serial console",
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::elf::{
+        dynamic::{AuxType, AuxVecEntry},
+        ElfBinary, ElfSegment, SegmentType,
+    };
+
+    fn seg(segment_type: SegmentType, vaddr: u64, offset: u64, filesz: u64) -> ElfSegment {
+        ElfSegment {
+            segment_type,
+            virtual_addr: vaddr,
+            physical_addr: vaddr,
+            file_offset: offset,
+            file_size: filesz,
+            memory_size: filesz,
+            flags: 0,
+            alignment: 0x1000,
+        }
+    }
+
+    /// A static binary linked at 0x400000 whose headers sit in the first
+    /// PT_LOAD at file offset 64, with e_phnum and e_phentsize that differ
+    /// from the parsed segments.
+    fn binary() -> ElfBinary {
+        ElfBinary {
+            entry_point: 0x40_1234,
+            load_base: 0x40_0000,
+            load_size: 0x2000,
+            phoff: 64,
+            phnum: 9,
+            phentsize: 56,
+            segments: vec![
+                seg(SegmentType::Load, 0x40_0000, 0, 0x1000),
+                seg(SegmentType::Load, 0x40_1000, 0x1000, 0x1000),
+            ],
+            interpreter: None,
+            dynamic: false,
+        }
+    }
+
+    fn pairs(auxv: &[AuxVecEntry]) -> Vec<(AuxType, u64)> {
+        auxv.iter().map(|e| (e.type_id, e.value)).collect()
+    }
+
+    #[test]
+    fn exec_auxv_describes_the_loaded_program() {
+        let auxv = exec_auxv(&binary()).unwrap();
+        assert_eq!(
+            pairs(&auxv),
+            vec![
+                (AuxType::AtPhdr, 0x40_0040),
+                (AuxType::AtPhent, 56),
+                (AuxType::AtPhnum, 9),
+                (AuxType::AtPagesz, 0x1000),
+                (AuxType::AtEntry, 0x40_1234),
+                (AuxType::AtNull, 0),
+            ]
+        );
+    }
+
+    /// AT_PHDR comes from PT_PHDR when there is one, not from e_phoff.
+    #[test]
+    fn exec_auxv_prefers_pt_phdr() {
+        let mut b = binary();
+        b.segments
+            .push(seg(SegmentType::Phdr, 0x40_0100, 0x100, 9 * 56));
+        let auxv = exec_auxv(&b).unwrap();
+        assert_eq!(pairs(&auxv)[0], (AuxType::AtPhdr, 0x40_0100));
+    }
+
+    /// No segment holds the table and load_base + e_phoff overflows: the
+    /// load fails instead of handing musl a wrapped AT_PHDR.
+    #[test]
+    fn exec_auxv_rejects_an_unaddressable_header_table() {
+        let mut b = binary();
+        b.segments = vec![seg(SegmentType::Load, 0x40_0000, 0x1000, 0x1000)];
+        b.load_base = u64::MAX - 0x10;
+        assert!(exec_auxv(&b).is_err());
+        assert!(interp_auxv(&b, 0x7F00_0000_0000).is_err());
+    }
+
+    #[test]
+    fn interp_auxv_adds_base_and_ids() {
+        let auxv = interp_auxv(&binary(), 0x7F00_0000_0000).unwrap();
+        assert_eq!(
+            auxv,
+            vec![
+                (6, 0x1000),
+                (7, 0x7F00_0000_0000),
+                (9, 0x40_1234),
+                (5, 9),
+                (4, 56),
+                (3, 0x40_0040),
+                (11, 0),
+                (12, 0),
+                (13, 0),
+                (14, 0),
+                (0, 0),
+            ]
+        );
     }
 }

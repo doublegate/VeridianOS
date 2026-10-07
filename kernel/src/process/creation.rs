@@ -681,49 +681,20 @@ pub(crate) fn setup_exec_stack(
     let stack_size = memory_space.user_stack_size();
     let stack_top = stack_base + stack_size;
 
+    let layout = exec_stack_layout(stack_top, argv, envp, aux_vector);
+
     // ---- Phase 1: Write strings from the top of the stack downward ----
-    let mut string_sp = stack_top;
-
-    // Write envp strings and record their user-space addresses
-    let mut envp_addrs: Vec<usize> = Vec::with_capacity(envp.len());
-    for &env in envp.iter().rev() {
-        let bytes = env.as_bytes();
-        string_sp -= bytes.len() + 1; // +1 for null terminator
-                                      // SAFETY: string_sp is within the stack mapping. We write the string
-                                      // bytes followed by a null terminator.
+    for &(addr, bytes) in &layout.strings {
+        // SAFETY: addr is within the stack mapping. We write the string
+        // bytes followed by a null terminator.
         unsafe {
-            write_bytes_to_user_stack(&memory_space, string_sp, bytes);
-            write_bytes_to_user_stack(&memory_space, string_sp + bytes.len(), &[0]);
+            write_bytes_to_user_stack(&memory_space, addr, bytes);
+            write_bytes_to_user_stack(&memory_space, addr + bytes.len(), &[0]);
         }
-        envp_addrs.push(string_sp);
     }
-    envp_addrs.reverse();
 
-    // Write argv strings and record their user-space addresses
-    let mut argv_addrs: Vec<usize> = Vec::with_capacity(argv.len());
-    for &arg in argv.iter().rev() {
-        let bytes = arg.as_bytes();
-        string_sp -= bytes.len() + 1;
-        // SAFETY: string_sp is within the stack mapping.
-        unsafe {
-            write_bytes_to_user_stack(&memory_space, string_sp, bytes);
-            write_bytes_to_user_stack(&memory_space, string_sp + bytes.len(), &[0]);
-        }
-        argv_addrs.push(string_sp);
-    }
-    argv_addrs.reverse();
-
-    // ---- Phase 2: Align and write pointer arrays ----
-    // Align to 16 bytes
-    let mut sp = string_sp & !0xF;
-
-    // Ensure space for: argc + argv ptrs + NULL + envp ptrs + NULL + auxv entries
-    // Each auxv entry is 2 usizes (type, value)
-    let auxv_slots = aux_vector.map(|v| v.len() * 2).unwrap_or(0);
-    let ptrs_needed = 1 + argv.len() + 1 + envp.len() + 1 + auxv_slots;
-    sp -= ptrs_needed * core::mem::size_of::<usize>();
-    // Re-align to 16 bytes (ABI requirement)
-    sp &= !0xF;
+    // ---- Phase 2: Write the pointer block ----
+    let sp = layout.sp;
 
     // DIAGNOSTIC: Check if sp is still within stack bounds
     if sp < stack_base {
@@ -739,62 +710,165 @@ pub(crate) fn setup_exec_stack(
         });
     }
 
-    let mut write_pos = sp;
-
-    // Write argc
-    // SAFETY: write_pos is within the stack region.
-    unsafe {
-        write_to_user_stack(&memory_space, write_pos, argv.len());
-    }
-    write_pos += core::mem::size_of::<usize>();
-
-    // Write argv pointers
-    for &addr in &argv_addrs {
-        // SAFETY: write_pos is within the stack region.
+    // argc, argv pointers + NULL, envp pointers + NULL, auxv pairs.
+    for (i, &word) in layout.words.iter().enumerate() {
+        // SAFETY: the words fill the block exec_stack_layout reserved
+        // between sp and the strings, and sp >= stack_base was checked
+        // above, so every write is within the stack region.
         unsafe {
-            write_to_user_stack(&memory_space, write_pos, addr);
-        }
-        write_pos += core::mem::size_of::<usize>();
-    }
-    // NULL terminator for argv
-    // SAFETY: write_pos is within the stack region.
-    unsafe {
-        write_to_user_stack(&memory_space, write_pos, 0);
-    }
-    write_pos += core::mem::size_of::<usize>();
-
-    // Write envp pointers
-    for &addr in &envp_addrs {
-        // SAFETY: write_pos is within the stack region.
-        unsafe {
-            write_to_user_stack(&memory_space, write_pos, addr);
-        }
-        write_pos += core::mem::size_of::<usize>();
-    }
-    // NULL terminator for envp
-    // SAFETY: write_pos is within the stack region.
-    unsafe {
-        write_to_user_stack(&memory_space, write_pos, 0);
-    }
-    write_pos += core::mem::size_of::<usize>();
-
-    // Write auxiliary vector (if present, for dynamically linked binaries)
-    if let Some(auxv) = aux_vector {
-        for entry in auxv {
-            // Each aux entry is two usize values: type, value
-            // SAFETY: write_pos is within the stack region, reserved in
-            // ptrs_needed calculation above.
-            unsafe {
-                write_to_user_stack(&memory_space, write_pos, entry.type_id as usize);
-            }
-            write_pos += core::mem::size_of::<usize>();
-            // SAFETY: write_pos is within the stack region.
-            unsafe {
-                write_to_user_stack(&memory_space, write_pos, entry.value as usize);
-            }
-            write_pos += core::mem::size_of::<usize>();
+            write_to_user_stack(&memory_space, sp + i * core::mem::size_of::<usize>(), word);
         }
     }
 
     Ok(sp)
+}
+
+/// The initial user stack of an exec: where each argv/envp string goes,
+/// the stack pointer, and the words written upward from it.
+#[cfg(feature = "alloc")]
+pub(crate) struct ExecStackLayout<'a> {
+    /// Each string's address; a NUL follows it on the stack.
+    pub(crate) strings: Vec<(usize, &'a [u8])>,
+    /// The initial stack pointer (16-byte aligned), pointing at argc.
+    pub(crate) sp: usize,
+    /// argc, argv pointers, NULL, envp pointers, NULL, then each auxv
+    /// entry as (type, value).
+    pub(crate) words: Vec<usize>,
+}
+
+/// Lay out the stack [`setup_exec_stack`] writes below `stack_top`. Pure:
+/// nothing is written, and the bounds check is left to the caller.
+#[cfg(feature = "alloc")]
+pub(crate) fn exec_stack_layout<'a>(
+    stack_top: usize,
+    argv: &[&'a str],
+    envp: &[&'a str],
+    aux_vector: Option<&[crate::elf::dynamic::AuxVecEntry]>,
+) -> ExecStackLayout<'a> {
+    let mut strings = Vec::with_capacity(argv.len() + envp.len());
+    let mut string_sp = stack_top;
+
+    // envp strings go above the argv strings; their addresses are recorded
+    // in list order.
+    let mut envp_addrs: Vec<usize> = Vec::with_capacity(envp.len());
+    for &env in envp.iter().rev() {
+        let bytes = env.as_bytes();
+        string_sp -= bytes.len() + 1; // +1 for null terminator
+        strings.push((string_sp, bytes));
+        envp_addrs.push(string_sp);
+    }
+    envp_addrs.reverse();
+
+    let mut argv_addrs: Vec<usize> = Vec::with_capacity(argv.len());
+    for &arg in argv.iter().rev() {
+        let bytes = arg.as_bytes();
+        string_sp -= bytes.len() + 1;
+        strings.push((string_sp, bytes));
+        argv_addrs.push(string_sp);
+    }
+    argv_addrs.reverse();
+
+    // Align to 16 bytes
+    let mut sp = string_sp & !0xF;
+
+    // Ensure space for: argc + argv ptrs + NULL + envp ptrs + NULL + auxv entries
+    // Each auxv entry is 2 usizes (type, value)
+    let auxv_slots = aux_vector.map(|v| v.len() * 2).unwrap_or(0);
+    let ptrs_needed = 1 + argv.len() + 1 + envp.len() + 1 + auxv_slots;
+    sp -= ptrs_needed * core::mem::size_of::<usize>();
+    // Re-align to 16 bytes (ABI requirement)
+    sp &= !0xF;
+
+    let mut words = Vec::with_capacity(ptrs_needed);
+    words.push(argv.len());
+    words.extend_from_slice(&argv_addrs);
+    words.push(0);
+    words.extend_from_slice(&envp_addrs);
+    words.push(0);
+    if let Some(auxv) = aux_vector {
+        for entry in auxv {
+            words.push(entry.type_id as usize);
+            words.push(entry.value as usize);
+        }
+    }
+
+    ExecStackLayout { strings, sp, words }
+}
+
+#[cfg(test)]
+mod tests {
+    use alloc::vec;
+
+    use super::*;
+    use crate::elf::dynamic::{AuxType, AuxVecEntry};
+
+    const TOP: usize = 0x7FFF_F000;
+
+    /// The string written at `addr` in `layout`.
+    fn string_at<'a>(layout: &ExecStackLayout<'a>, addr: usize) -> &'a [u8] {
+        layout
+            .strings
+            .iter()
+            .find(|&&(a, _)| a == addr)
+            .map(|&(_, s)| s)
+            .expect("pointer to a laid-out string")
+    }
+
+    #[test]
+    fn exec_stack_layout_matches_the_sysv_abi() {
+        let auxv = [
+            AuxVecEntry::new(AuxType::AtPagesz, 0x1000),
+            AuxVecEntry::new(AuxType::AtEntry, 0x40_1000),
+            AuxVecEntry::new(AuxType::AtNull, 0),
+        ];
+        let layout = exec_stack_layout(TOP, &["/bin/sh", "-c"], &["HOME=/"], Some(&auxv));
+
+        // argc, argv[0..2], NULL, envp[0], NULL, three auxv pairs.
+        assert_eq!(layout.words.len(), 1 + 2 + 1 + 1 + 1 + 6);
+        assert_eq!(layout.words[0], 2);
+        assert_eq!(string_at(&layout, layout.words[1]), b"/bin/sh");
+        assert_eq!(string_at(&layout, layout.words[2]), b"-c");
+        assert_eq!(layout.words[3], 0);
+        assert_eq!(string_at(&layout, layout.words[4]), b"HOME=/");
+        assert_eq!(layout.words[5], 0);
+        assert_eq!(&layout.words[6..], &[6, 0x1000, 9, 0x40_1000, 0, 0]);
+
+        // Strings fill the top of the stack, envp above argv, each list
+        // in order upward, each followed by its NUL.
+        assert_eq!(layout.words[4], TOP - "HOME=/".len() - 1);
+        assert_eq!(layout.words[2], layout.words[4] - "-c".len() - 1);
+        assert_eq!(layout.words[1], layout.words[2] - "/bin/sh".len() - 1);
+
+        // sp is 16-byte aligned and the pointer block ends below the
+        // lowest string.
+        assert_eq!(layout.sp % 16, 0);
+        let lowest = layout.strings.iter().map(|&(a, _)| a).min().unwrap();
+        assert!(layout.sp + layout.words.len() * 8 <= lowest);
+    }
+
+    #[test]
+    fn exec_stack_layout_without_arguments_or_auxv() {
+        let layout = exec_stack_layout(TOP, &[], &[], None);
+        assert!(layout.strings.is_empty());
+        assert_eq!(layout.words, vec![0, 0, 0]);
+        // 3 words from a 16-aligned top, rounded down to 16 bytes.
+        assert_eq!(layout.sp, TOP - 32);
+    }
+
+    /// The stack pointer stays 16-byte aligned whatever the string
+    /// lengths, and never overlaps the strings.
+    #[test]
+    fn exec_stack_layout_alignment_for_any_string_length() {
+        let args = ["a", "bb", "ccc", "dddd", "eeeee", "ffffff", "ggggggg"];
+        for n in 0..args.len() {
+            for top in [TOP, TOP - 3, TOP - 8] {
+                let layout = exec_stack_layout(top, &args[..n], &args[n..], None);
+                assert_eq!(layout.sp % 16, 0);
+                let lowest = layout.strings.iter().map(|&(a, _)| a).min().unwrap_or(top);
+                assert!(layout.sp + layout.words.len() * 8 <= lowest);
+                let total: usize = args.iter().map(|s| s.len() + 1).sum();
+                assert_eq!(lowest, top - total);
+            }
+        }
+    }
 }

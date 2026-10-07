@@ -207,15 +207,13 @@ pub(super) fn sys_net_getsockopt(
         SocketHandle::Unix(id) => {
             let ty =
                 crate::net::unix_socket::socket_type(id).ok_or(SyscallError::BadFileDescriptor)?;
-            let value = unix_sockopt(level, optname, ty)?.to_ne_bytes();
-            // As Linux: copy at most *optlen bytes and store the length
-            // copied. A NULL optlen is tolerated (the full int is written),
-            // matching the INET path, which never reads it.
-            let n = if optlen_ptr != 0 {
-                sockopt_copy_len(super::userspace::read_user::<u32>(optlen_ptr)?)?
+            let value = unix_sockopt(level, optname, ty)?;
+            let optlen = if optlen_ptr != 0 {
+                Some(super::userspace::read_user::<u32>(optlen_ptr)?)
             } else {
-                value.len()
+                None
             };
+            let (value, n) = int_sockopt_out(value, optlen)?;
             super::userspace::write_user_bytes(optval_ptr, &value[..n])?;
             if optlen_ptr != 0 {
                 super::userspace::write_user::<u32>(optlen_ptr, n as u32)?;
@@ -258,6 +256,20 @@ fn sockopt_copy_len(optlen: u32) -> Result<usize, SyscallError> {
     Ok((len as usize).min(core::mem::size_of::<i32>()))
 }
 
+/// The bytes of an `int` option `value` and how many of them to copy for
+/// the caller's `*optlen` (`None` for a NULL optlen pointer). As Linux:
+/// copy at most *optlen bytes and store the length copied. A NULL optlen
+/// is tolerated (the full int is written), matching the INET path, which
+/// never reads it.
+fn int_sockopt_out(value: i32, optlen: Option<u32>) -> Result<([u8; 4], usize), SyscallError> {
+    let bytes = value.to_ne_bytes();
+    let n = match optlen {
+        Some(len) => sockopt_copy_len(len)?,
+        None => bytes.len(),
+    };
+    Ok((bytes, n))
+}
+
 /// Infer sockaddr length from sa_family when the actual length is unavailable
 /// (e.g., sendto where arg6 is lost due to 5-arg handler limit).
 fn infer_sockaddr_len(addr_ptr: usize) -> Result<usize, SyscallError> {
@@ -267,13 +279,17 @@ fn infer_sockaddr_len(addr_ptr: usize) -> Result<usize, SyscallError> {
     // v0.26.0 stack, PR #7).
     let mut fam = [0u8; 2];
     super::userspace::read_user_bytes(addr_ptr, &mut fam)?;
-    let family = u16::from_ne_bytes(fam);
-    Ok(match family {
+    Ok(sockaddr_len_for_family(u16::from_ne_bytes(fam)))
+}
+
+/// `sizeof` the socket address structure for address family `family`.
+fn sockaddr_len_for_family(family: u16) -> usize {
+    match family {
         2 => 16,  // AF_INET: sizeof(sockaddr_in)
         10 => 28, // AF_INET6: sizeof(sockaddr_in6)
         1 => 110, // AF_UNIX: sizeof(sockaddr_un)
         _ => 128, // Conservative default
-    })
+    }
 }
 
 /// Parse a sockaddr_in from user space.
@@ -289,6 +305,12 @@ fn parse_sockaddr(
     // struct sockaddr_in { u16 family, u16 port_be, u32 addr_be, u8 zero[8] }
     let mut raw = [0u8; 8];
     super::userspace::read_user_bytes(addr_ptr, &mut raw)?;
+    sockaddr_in_from_bytes(&raw)
+}
+
+/// Decode the first 8 bytes of a `struct sockaddr_in` (family, port,
+/// address); a family other than AF_INET is EINVAL.
+fn sockaddr_in_from_bytes(raw: &[u8; 8]) -> Result<crate::net::SocketAddr, SyscallError> {
     let family = u16::from_ne_bytes([raw[0], raw[1]]);
     if family != 2 {
         // AF_INET = 2
@@ -415,6 +437,93 @@ mod tests {
         assert_eq!(u32::from_ne_bytes([len[1], len[2], len[3], len[4]]), 2);
         assert_eq!(len[0], 0xAA);
         assert_eq!(len[5], 0xAA);
+    }
+
+    #[test]
+    fn int_sockopt_out_honours_optlen() {
+        let v = 0x0102_0304i32;
+        assert_eq!(int_sockopt_out(v, None), Ok((v.to_ne_bytes(), 4)));
+        assert_eq!(int_sockopt_out(v, Some(16)), Ok((v.to_ne_bytes(), 4)));
+        assert_eq!(int_sockopt_out(v, Some(2)), Ok((v.to_ne_bytes(), 2)));
+        assert_eq!(int_sockopt_out(v, Some(0)), Ok((v.to_ne_bytes(), 0)));
+        // A negative socklen_t is EINVAL.
+        assert_eq!(
+            int_sockopt_out(v, Some(0x8000_0000)),
+            Err(SyscallError::InvalidArgument)
+        );
+    }
+
+    #[test]
+    fn sockaddr_len_for_each_family() {
+        assert_eq!(sockaddr_len_for_family(1), 110);
+        assert_eq!(sockaddr_len_for_family(2), 16);
+        assert_eq!(sockaddr_len_for_family(10), 28);
+        assert_eq!(sockaddr_len_for_family(0), 128);
+        assert_eq!(sockaddr_len_for_family(u16::MAX), 128);
+    }
+
+    #[test]
+    fn sockaddr_in_decodes_and_round_trips() {
+        let addr = crate::net::SocketAddr {
+            ip: crate::net::IpAddress::V4(crate::net::Ipv4Address([192, 0, 2, 7])),
+            port: 0xABCD,
+        };
+        let bytes = sockaddr_in_bytes(&addr);
+        let mut head = [0u8; 8];
+        head.copy_from_slice(&bytes[..8]);
+        assert_eq!(sockaddr_in_from_bytes(&head), Ok(addr));
+        // Through user memory, from an unaligned address.
+        let mut buf = [0u8; 17];
+        buf[1..].copy_from_slice(&bytes);
+        assert_eq!(parse_sockaddr(buf.as_ptr() as usize + 1, 16), Ok(addr));
+        // Not AF_INET.
+        head[..2].copy_from_slice(&1u16.to_ne_bytes());
+        assert_eq!(
+            sockaddr_in_from_bytes(&head),
+            Err(SyscallError::InvalidArgument)
+        );
+        assert!(parse_sockaddr(0xFFFF_8000_0000_1000, 16).is_err());
+    }
+
+    /// An IPv6 address has no sockaddr_in form; it is reported as
+    /// 0.0.0.0 with the port kept.
+    #[test]
+    fn sockaddr_in_bytes_of_non_v4_is_unspecified() {
+        let addr = crate::net::SocketAddr {
+            ip: crate::net::IpAddress::V6(crate::net::Ipv6Address::UNSPECIFIED),
+            port: 443,
+        };
+        let b = sockaddr_in_bytes(&addr);
+        assert_eq!(u16::from_ne_bytes([b[0], b[1]]), 2);
+        assert_eq!(&b[2..4], &443u16.to_be_bytes());
+        assert!(b[4..].iter().all(|&z| z == 0));
+    }
+
+    #[test]
+    fn write_sockaddr_copies_sixteen_bytes_unaligned() {
+        let addr = crate::net::SocketAddr {
+            ip: crate::net::IpAddress::V4(crate::net::Ipv4Address([10, 1, 2, 3])),
+            port: 53,
+        };
+        let mut out = [0xAAu8; 18];
+        assert_eq!(write_sockaddr(out.as_mut_ptr() as usize + 1, &addr), Ok(()));
+        assert_eq!(&out[1..17], &sockaddr_in_bytes(&addr));
+        assert_eq!((out[0], out[17]), (0xAA, 0xAA));
+        assert!(write_sockaddr(0, &addr).is_err());
+    }
+
+    /// The address buffers are validated before the fd is looked up, so a
+    /// kernel pointer fails without touching any socket state.
+    #[test]
+    fn name_queries_validate_buffers_first() {
+        let mut len = [0u8; 4];
+        let len_ptr = len.as_mut_ptr() as usize;
+        let kernel = 0xFFFF_8000_0000_1000;
+        assert!(sys_net_getsockname(0, kernel, len_ptr).is_err());
+        assert!(sys_net_getpeername(0, kernel, len_ptr).is_err());
+        let mut addr = [0u8; 16];
+        assert!(sys_net_getsockname(0, addr.as_mut_ptr() as usize, kernel).is_err());
+        assert!(sys_net_getpeername(0, addr.as_mut_ptr() as usize, kernel).is_err());
     }
 
     #[test]
