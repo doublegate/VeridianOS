@@ -334,19 +334,21 @@ pub fn fork_process_with(opts: &ForkOptions) -> Result<(ProcessId, super::Thread
     // The TID stores happen before the child can run. CLONE_CHILD_SETTID
     // writes the child's memory only: a copy-on-write page is copied first
     // (a CLONE_VM child shares the frame, so the parent sees it too, as on
-    // Linux).
+    // Linux). They are ordinary user stores, so page protection applies,
+    // and as on Linux (put_user, result unused) a store that cannot be made
+    // is skipped rather than failing a clone whose child already exists.
     let tid_bytes = (new_tid.0 as u32).to_ne_bytes();
     if let Some(ptr) = opts.child_settid {
-        new_process
+        let _ = new_process
             .memory_space
             .lock()
-            .write_bytes_private(ptr as u64, &tid_bytes)?;
+            .write_bytes_private(ptr as u64, &tid_bytes, false);
     }
     if let Some(ptr) = opts.parent_settid {
-        current_process
+        let _ = current_process
             .memory_space
             .lock()
-            .write_bytes_private(ptr as u64, &tid_bytes)?;
+            .write_bytes_private(ptr as u64, &tid_bytes, false);
     }
 
     // The calling thread's blocked mask (per thread, N-109).

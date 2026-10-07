@@ -222,6 +222,15 @@
 
 ### Security
 
+- **Kernel writes for ptrace and clone stay in user memory (N-255).** ptrace POKETEXT/POKEDATA
+  wrote through whatever frame the tracee's page tables mapped, and kernel pages are mapped in
+  every address space, so a tracer could write kernel memory; it could also write device memory
+  and shared pages its tracee may not write, such as a write-sealed memfd. The address must now
+  be inside one of the tracee's user mappings: device memory is refused, and shared pages only
+  while the mapping is writable. clone's TID stores now honour page protection and, as on Linux,
+  are skipped rather than failing a clone whose child already exists. PEEKTEXT/PEEKDATA refuse
+  device memory and return EIO for an unmapped address. Found by the automated security review
+  of the N-252 change.
 - **A write seal holds against mprotect (N-254).** A read-only shared mapping of a write-sealed
   memfd could be made writable with `mprotect`, writing past the seal. Such mappings now carry
   Linux's "may never write" mark and `mprotect` refuses them (EACCES). Found by the automated

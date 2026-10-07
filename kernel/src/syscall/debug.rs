@@ -82,10 +82,15 @@ fn ptrace_peek(target_pid: process::ProcessId, addr: usize) -> Result<usize, Sys
     let target = process::find_process(target_pid).ok_or(SyscallError::ProcessNotFound)?;
     let memory_space = target.memory_space.lock();
 
-    // Find the mapping that contains this address
+    // Find the mapping that contains this address: EIO for none, as
+    // Linux's ptrace_access_vm, and for device memory, whose reads can
+    // have side effects and which the physical map need not cover.
     let mapping = memory_space
         .find_mapping(VirtualAddress(addr as u64))
-        .ok_or(SyscallError::InvalidArgument)?;
+        .ok_or(SyscallError::IoError)?;
+    if mapping.mapping_type == crate::mm::vas::MappingType::Device {
+        return Err(SyscallError::IoError);
+    }
 
     // Calculate which page and offset within the mapping
     let page_offset_in_mapping = (addr as u64 - mapping.start.0) as usize;
@@ -94,7 +99,7 @@ fn ptrace_peek(target_pid: process::ProcessId, addr: usize) -> Result<usize, Sys
 
     // Verify we have physical frames recorded
     if page_index >= mapping.physical_frames.len() {
-        return Err(SyscallError::InvalidArgument);
+        return Err(SyscallError::IoError);
     }
 
     // Get the physical frame number and compute the physical address
@@ -125,8 +130,9 @@ fn ptrace_peek(target_pid: process::ProcessId, addr: usize) -> Result<usize, Sys
 /// Into the tracee only: a page it still shares with another process after
 /// fork (copy-on-write, or read-only like its code) is copied first. The
 /// word was written into the shared frame itself, so a breakpoint set in a
-/// child also landed in its parent. Read-only pages may be written, as
-/// ptrace allows (breakpoints in code).
+/// child also landed in its parent. Read-only private pages may be written,
+/// as ptrace allows (breakpoints in code); kernel addresses, device memory
+/// and shared pages the tracee may not write are refused.
 fn ptrace_poke(
     target_pid: process::ProcessId,
     addr: usize,
@@ -137,8 +143,9 @@ fn ptrace_poke(
     #[cfg(feature = "alloc")]
     {
         memory_space
-            .write_bytes_private(addr as u64, &value.to_ne_bytes())
-            // EIO for an unmapped address, as Linux's ptrace_access_vm.
+            .write_bytes_private(addr as u64, &value.to_ne_bytes(), true)
+            // EIO for an unmapped or refused address, as Linux's
+            // ptrace_access_vm.
             .map_err(|_| SyscallError::IoError)
     }
     #[cfg(not(feature = "alloc"))]

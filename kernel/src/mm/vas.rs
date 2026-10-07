@@ -408,6 +408,61 @@ pub enum MappingType {
     SharedRegion,
 }
 
+/// How a write the kernel makes into one address space (ptrace POKE,
+/// clone's SETTID stores) may reach a page.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PrivateWrite {
+    /// The frame is this address space's to write (or meant for every
+    /// sharer, for a writable shared mapping).
+    InPlace,
+    /// The frame is shared with another address space: copy it first.
+    Copy,
+    /// Not writable this way.
+    Denied,
+}
+
+/// Whether `page` is a user page (kernel pages are mapped in every
+/// address space and must never be reached through a user address).
+fn is_user_page(page: u64) -> bool {
+    use super::user_layout::{USER_SPACE_END, USER_SPACE_START};
+    page >= USER_SPACE_START as u64 && page < USER_SPACE_END as u64
+}
+
+/// The rule for [`PrivateWrite`], as Linux's `check_vma_flags`: device
+/// memory is never written; a shared page only while its mapping is
+/// writable, even when forced (a FOLL_FORCE write to a shared mapping
+/// without VM_WRITE fails, so a write-sealed or read-only memfd stays
+/// unchanged); a private page needs write access or copy-on-write unless
+/// forced, and is copied first while another address space shares it.
+fn private_write_policy(
+    kind: MappingType,
+    may_write: bool,
+    flags: PageFlags,
+    shared_frame: bool,
+    force: bool,
+) -> PrivateWrite {
+    match kind {
+        MappingType::Device => PrivateWrite::Denied,
+        MappingType::Shared | MappingType::SharedRegion => {
+            if may_write && flags.contains(PageFlags::WRITABLE) {
+                PrivateWrite::InPlace
+            } else {
+                PrivateWrite::Denied
+            }
+        }
+        _ => {
+            let writable = flags.contains(PageFlags::WRITABLE) || flags.contains(PageFlags::COW);
+            if !force && !writable {
+                PrivateWrite::Denied
+            } else if shared_frame {
+                PrivateWrite::Copy
+            } else {
+                PrivateWrite::InPlace
+            }
+        }
+    }
+}
+
 /// Page flags for a user mapping with POSIX protection `prot` (N-132).
 ///
 /// Readable pages are present and user-accessible; `PROT_WRITE` adds
@@ -1892,32 +1947,25 @@ impl VirtualAddressSpace {
         Ok(true)
     }
 
-    /// Make the page at `vaddr` this address space's own and return its
-    /// frame: a frame still shared with another address space -- after a
-    /// fork, copy-on-write or read-only -- is replaced by a private copy
+    /// Make the user page at `vaddr` this address space's to write and
+    /// return its frame, for writes the kernel makes into one address
+    /// space only (ptrace POKE, clone's SETTID stores), which must not
+    /// reach other address spaces: a private frame still shared after a
+    /// fork -- copy-on-write or read-only -- is replaced by a private copy
     /// with the same access (a copy-on-write page becomes plainly
-    /// writable). MAP_SHARED and shared-region pages stay shared: writes
-    /// through them are meant to reach every sharer. For writes the kernel
-    /// makes into one address space only (ptrace POKE, clone's
-    /// CHILD_SETTID), which must not reach the other sharers.
+    /// writable). The page must belong to a user mapping of this address
+    /// space; kernel addresses, device memory and shared pages the mapping
+    /// may not write now are refused ([`private_write_policy`]). `force`
+    /// (ptrace) also reaches read-only and PROT_NONE private pages.
     #[cfg(feature = "alloc")]
-    pub fn private_frame(&self, vaddr: u64) -> Result<FrameNumber, KernelError> {
+    pub fn private_frame(&self, vaddr: u64, force: bool) -> Result<FrameNumber, KernelError> {
         let page = vaddr & !0xFFF;
         let root = self.page_table_root.load(Ordering::Acquire);
         let bad = KernelError::InvalidAddress {
             addr: vaddr as usize,
         };
-        if root == 0 {
+        if root == 0 || !is_user_page(page) {
             return Err(bad);
-        }
-        // SAFETY: as in resolve_cow_fault: this address space's L4 table,
-        // changed only under the mappings lock taken below.
-        let mut mapper = unsafe { create_mapper_from_root(root) };
-        let (frame, flags) = mapper
-            .translate_page(VirtualAddress(page))
-            .map_err(|_| bad)?;
-        if !super::frame_refs::is_shared(frame) {
-            return Ok(frame);
         }
         let mut mappings = self.mappings.lock();
         let mapping = mappings
@@ -1926,29 +1974,51 @@ impl VirtualAddressSpace {
             .ok_or(KernelError::InvalidAddress {
                 addr: vaddr as usize,
             })?;
-        if matches!(
+        // SAFETY: as in resolve_cow_fault: this address space's L4 table,
+        // changed only under the mappings lock held here.
+        let mut mapper = unsafe { create_mapper_from_root(root) };
+        let (frame, flags) = mapper
+            .translate_page(VirtualAddress(page))
+            .map_err(|_| bad)?;
+        let shared = super::frame_refs::is_shared(frame);
+        match private_write_policy(
             mapping.mapping_type,
-            MappingType::Shared | MappingType::SharedRegion
+            mapping.may_write,
+            flags,
+            shared,
+            force,
         ) {
-            return Ok(frame);
+            PrivateWrite::Denied => Err(KernelError::PermissionDenied {
+                operation: "write to a page the mapping does not allow",
+            }),
+            PrivateWrite::InPlace => Ok(frame),
+            PrivateWrite::Copy => {
+                let index = ((page - mapping.start.0) / 4096) as usize;
+                let private = if flags.contains(PageFlags::COW) {
+                    flags.without(PageFlags::COW) | PageFlags::WRITABLE
+                } else {
+                    flags
+                };
+                let copy =
+                    replace_with_copy(&mut mapper, mapping, index, page, frame, flags, private)?;
+                drop(mappings);
+                release_after_copy(page, frame);
+                Ok(copy)
+            }
         }
-        let index = ((page - mapping.start.0) / 4096) as usize;
-        let private = if flags.contains(PageFlags::COW) {
-            flags.without(PageFlags::COW) | PageFlags::WRITABLE
-        } else {
-            flags
-        };
-        let copy = replace_with_copy(&mut mapper, mapping, index, page, frame, flags, private)?;
-        drop(mappings);
-        release_after_copy(page, frame);
-        Ok(copy)
     }
 
     /// Write `data` at `vaddr` into this address space only (see
-    /// [`Self::private_frame`]), whatever the pages' protection, as ptrace
-    /// may. Every page must be mapped (InvalidAddress otherwise).
+    /// [`Self::private_frame`]; `force` as there). Every page must be
+    /// mapped and writable this way, or nothing past the failing page is
+    /// written.
     #[cfg(feature = "alloc")]
-    pub fn write_bytes_private(&self, vaddr: u64, data: &[u8]) -> Result<(), KernelError> {
+    pub fn write_bytes_private(
+        &self,
+        vaddr: u64,
+        data: &[u8],
+        force: bool,
+    ) -> Result<(), KernelError> {
         let mut done = 0usize;
         while done < data.len() {
             let at = vaddr
@@ -1958,10 +2028,11 @@ impl VirtualAddressSpace {
                 })?;
             let offset = (at & 0xFFF) as usize;
             let n = (4096 - offset).min(data.len() - done);
-            let frame = self.private_frame(at)?;
-            // SAFETY: `frame` is RAM this address space alone maps (just
-            // made private), reached through the physical map; `offset + n`
-            // stays within the 4 KiB page.
+            let frame = self.private_frame(at, force)?;
+            // SAFETY: `frame` is RAM (device memory is refused) that this
+            // address space alone maps, or a shared page its mapping may
+            // write, reached through the physical map; `offset + n` stays
+            // within the 4 KiB page.
             unsafe {
                 core::ptr::copy_nonoverlapping(
                     data[done..].as_ptr(),
@@ -2924,6 +2995,50 @@ mod tests {
     use alloc::vec;
 
     use super::*;
+
+    #[test]
+    fn kernel_writes_respect_mapping_kind_and_protection() {
+        use PrivateWrite::{Copy, Denied, InPlace};
+        let rw = user_prot_flags(0x3);
+        let ro = user_prot_flags(0x1);
+        let none = user_prot_flags(0);
+        let cow = ro | PageFlags::COW;
+        let policy = |kind, may_write, flags, shared, force| {
+            private_write_policy(kind, may_write, flags, shared, force)
+        };
+
+        // Device frames are never written through the physical map.
+        assert_eq!(policy(MappingType::Device, true, rw, false, true), Denied);
+        // Shared pages: only where the mapping is writable now, forced or
+        // not (Linux refuses FOLL_FORCE on a shared mapping without
+        // VM_WRITE); a write-sealed memfd stays sealed.
+        for kind in [MappingType::Shared, MappingType::SharedRegion] {
+            assert_eq!(policy(kind, true, rw, true, false), InPlace);
+            assert_eq!(policy(kind, true, ro, true, true), Denied);
+            assert_eq!(policy(kind, false, rw, true, true), Denied);
+        }
+        // Private pages: a plain write needs write access or copy-on-write.
+        assert_eq!(policy(MappingType::Data, true, rw, false, false), InPlace);
+        assert_eq!(policy(MappingType::Data, true, cow, true, false), Copy);
+        assert_eq!(policy(MappingType::Code, true, ro, true, false), Denied);
+        assert_eq!(policy(MappingType::Data, true, none, false, false), Denied);
+        // A forced write (ptrace) reaches read-only and PROT_NONE private
+        // pages, into this address space alone.
+        assert_eq!(policy(MappingType::Code, true, ro, true, true), Copy);
+        assert_eq!(policy(MappingType::Code, true, ro, false, true), InPlace);
+        assert_eq!(policy(MappingType::Data, true, none, false, true), InPlace);
+    }
+
+    #[test]
+    fn kernel_writes_stay_in_the_user_range() {
+        assert!(!is_user_page(0));
+        assert!(is_user_page(
+            crate::mm::user_layout::USER_SPACE_START as u64
+        ));
+        assert!(!is_user_page(crate::mm::user_layout::USER_SPACE_END as u64));
+        assert!(!is_user_page(0xFFFF_8000_0000_0000));
+        assert!(!is_user_page(0xFFFF_FFFF_8010_0000));
+    }
 
     #[test]
     fn prot_flags_follow_posix_protection() {
