@@ -2321,6 +2321,21 @@ fn parse_scm_rights(
     }
     let mut hdr = [0u8; CMSGHDR_SIZE];
     userspace::read_user_bytes(control_ptr, &mut hdr)?;
+    let fd_count = scm_rights_fd_count(&hdr, control_len)?;
+    let mut raw = [0u8; 4 * SCM_MAX_FDS];
+    let raw = &mut raw[..4 * fd_count];
+    // CMSGHDR_SIZE + 4 * fd_count <= cmsg_len <= control_len.
+    userspace::read_user_bytes(control_ptr + CMSGHDR_SIZE, raw)?;
+    Ok(decode_scm_fds(raw))
+}
+
+/// The number of fds announced by the cmsghdr `hdr` at the start of a
+/// `control_len`-byte control buffer, with the checks `parse_scm_rights`
+/// documents. 0 means nothing to pass (another level, or an empty array).
+fn scm_rights_fd_count(
+    hdr: &[u8; CMSGHDR_SIZE],
+    control_len: usize,
+) -> Result<usize, SyscallError> {
     let cmsg_len = u64::from_ne_bytes([
         hdr[0], hdr[1], hdr[2], hdr[3], hdr[4], hdr[5], hdr[6], hdr[7],
     ]);
@@ -2331,7 +2346,7 @@ fn parse_scm_rights(
         return Err(SyscallError::InvalidArgument);
     }
     if level != SOL_SOCKET_LEVEL {
-        return Ok(alloc::vec::Vec::new());
+        return Ok(0);
     }
     if kind != SCM_RIGHTS_TYPE {
         return Err(SyscallError::InvalidArgument);
@@ -2340,14 +2355,39 @@ fn parse_scm_rights(
     if fd_count > SCM_MAX_FDS {
         return Err(SyscallError::InvalidArgument);
     }
-    let mut raw = [0u8; 4 * SCM_MAX_FDS];
-    let raw = &mut raw[..4 * fd_count];
-    // CMSGHDR_SIZE + 4 * fd_count <= cmsg_len <= control_len.
-    userspace::read_user_bytes(control_ptr + CMSGHDR_SIZE, raw)?;
-    Ok(raw
-        .chunks_exact(4)
+    Ok(fd_count)
+}
+
+/// The native-endian `int` fds of an SCM_RIGHTS payload (a trailing
+/// partial fd is ignored).
+fn decode_scm_fds(raw: &[u8]) -> alloc::vec::Vec<i32> {
+    raw.chunks_exact(4)
         .map(|c| i32::from_ne_bytes([c[0], c[1], c[2], c[3]]))
-        .collect())
+        .collect()
+}
+
+/// How many fds a `control_len`-byte control buffer at `control_ptr` can
+/// report in one SCM_RIGHTS message (0 without a usable buffer).
+fn scm_rights_room(control_ptr: usize, control_len: usize) -> usize {
+    if control_ptr != 0 && control_len >= CMSGHDR_SIZE {
+        (control_len - CMSGHDR_SIZE) / 4
+    } else {
+        0
+    }
+}
+
+/// One SCM_RIGHTS cmsghdr carrying `fds`, laid out as `parse_scm_rights`
+/// reads it; `cmsg_len` is the whole message length.
+fn scm_rights_cmsg(fds: &[u32]) -> alloc::vec::Vec<u8> {
+    let needed = CMSGHDR_SIZE + fds.len() * 4;
+    let mut cmsg = alloc::vec::Vec::with_capacity(needed);
+    cmsg.extend_from_slice(&(needed as u64).to_ne_bytes());
+    cmsg.extend_from_slice(&SOL_SOCKET_LEVEL.to_ne_bytes());
+    cmsg.extend_from_slice(&SCM_RIGHTS_TYPE.to_ne_bytes());
+    for &fd in fds {
+        cmsg.extend_from_slice(&(fd as i32).to_ne_bytes());
+    }
+    cmsg
 }
 
 /// recvmsg syscall -- receives data with optional ancillary data (SCM_RIGHTS).
@@ -2366,14 +2406,14 @@ fn sys_recvmsg(socket_fd: usize, msghdr_ptr: usize, _flags: usize) -> SyscallRes
         return Err(SyscallError::InvalidArgument);
     }
 
+    let iov_at = |i| userspace::read_user_index::<[usize; 2]>(iov_ptr, i);
+
     // Calculate total receive buffer size from iovec
-    let mut total_buf_len: usize = 0;
-    if iov_len > 0 && iov_ptr != 0 {
-        for i in 0..iov_len {
-            let [_, len]: [usize; 2] = userspace::read_user_index(iov_ptr, i)?;
-            total_buf_len = total_buf_len.saturating_add(len);
-        }
-    }
+    let total_buf_len = if iov_len > 0 && iov_ptr != 0 {
+        iovs_total_len(iov_len, iov_at)?
+    } else {
+        0
+    };
 
     // Allocate a temporary kernel buffer to receive into
     let mut recv_buf = alloc::vec![0u8; total_buf_len.min(65536)];
@@ -2383,19 +2423,13 @@ fn sys_recvmsg(socket_fd: usize, msghdr_ptr: usize, _flags: usize) -> SyscallRes
         with_socket_fd(socket_fd, |s| s.recv(&mut recv_buf))?.map_err(socket_err)?;
 
     // Scatter received data into iovec buffers
-    let mut offset = 0usize;
     if iov_len > 0 && iov_ptr != 0 {
-        for i in 0..iov_len {
-            if offset >= received {
-                break;
-            }
-            let [base, len]: [usize; 2] = userspace::read_user_index(iov_ptr, i)?;
-            if len > 0 && base != 0 {
-                let copy_len = (received - offset).min(len);
-                userspace::write_user_bytes(base, &recv_buf[offset..offset + copy_len])?;
-                offset += copy_len;
-            }
-        }
+        scatter_iovs(
+            &recv_buf[..received],
+            iov_len,
+            iov_at,
+            userspace::write_user_bytes,
+        )?;
     }
 
     // Passed files become new fds in the receiver's own table -- only as
@@ -2406,11 +2440,7 @@ fn sys_recvmsg(socket_fd: usize, msghdr_ptr: usize, _flags: usize) -> SyscallRes
     let mut delivered_fds = 0usize;
     if let Some(scm) = rights {
         sent_fds = scm.files.len();
-        let room = if control_ptr != 0 && control_len >= CMSGHDR_SIZE {
-            (control_len - CMSGHDR_SIZE) / 4
-        } else {
-            0
-        };
+        let room = scm_rights_room(control_ptr, control_len);
         let process = crate::process::current_process().ok_or(SyscallError::InvalidState)?;
         let table = process.file_table.lock();
         let mut fds = alloc::vec::Vec::with_capacity(scm.files.len().min(room));
@@ -2466,6 +2496,44 @@ fn recvmsg_flags(sent: usize, delivered: usize) -> i32 {
     }
 }
 
+/// Sum of the lengths of the `iov_count` iovec entries `iov_at` yields
+/// (`[iov_base, iov_len]`), saturating.
+fn iovs_total_len(
+    iov_count: usize,
+    mut iov_at: impl FnMut(usize) -> Result<[usize; 2], SyscallError>,
+) -> Result<usize, SyscallError> {
+    let mut total = 0usize;
+    for i in 0..iov_count {
+        let [_, len] = iov_at(i)?;
+        total = total.saturating_add(len);
+    }
+    Ok(total)
+}
+
+/// Copy `data` into the iovec entries `iov_at` yields, in order, through
+/// `write(base, bytes)`. Entries with a zero base or length are skipped,
+/// and no entry is read once `data` is used up. Returns the bytes copied.
+fn scatter_iovs(
+    data: &[u8],
+    iov_count: usize,
+    mut iov_at: impl FnMut(usize) -> Result<[usize; 2], SyscallError>,
+    mut write: impl FnMut(usize, &[u8]) -> Result<(), SyscallError>,
+) -> Result<usize, SyscallError> {
+    let mut offset = 0usize;
+    for i in 0..iov_count {
+        if offset >= data.len() {
+            break;
+        }
+        let [base, len] = iov_at(i)?;
+        if len > 0 && base != 0 {
+            let copy_len = (data.len() - offset).min(len);
+            write(base, &data[offset..offset + copy_len])?;
+            offset += copy_len;
+        }
+    }
+    Ok(offset)
+}
+
 /// Write SCM_RIGHTS fds into the user's msg_control buffer as one cmsghdr
 /// and set msg_controllen. Returns false (writing nothing) if the buffer is
 /// too small or not valid user memory.
@@ -2482,13 +2550,7 @@ fn write_scm_rights(
     // Built in a kernel buffer and copied out with the fault-tolerant
     // routine; the raw unaligned stores this replaces faulted in the kernel
     // on an unmapped page (agy review of the v0.26.0 stack, PR #10).
-    let mut cmsg = alloc::vec::Vec::with_capacity(needed);
-    cmsg.extend_from_slice(&(needed as u64).to_ne_bytes());
-    cmsg.extend_from_slice(&SOL_SOCKET_LEVEL.to_ne_bytes());
-    cmsg.extend_from_slice(&SCM_RIGHTS_TYPE.to_ne_bytes());
-    for &fd in fds {
-        cmsg.extend_from_slice(&(fd as i32).to_ne_bytes());
-    }
+    let cmsg = scm_rights_cmsg(fds);
     // msg_controllen is the sixth usize-sized field of the 56-byte msghdr.
     userspace::write_user_bytes(control_ptr, &cmsg).is_ok()
         && userspace::write_user::<usize>(msghdr_ptr + 5 * core::mem::size_of::<usize>(), needed)
@@ -3768,6 +3830,207 @@ mod tests {
         assert_eq!(
             parse_scm_rights(b.as_ptr() as usize, b.len()),
             Err(SyscallError::InvalidArgument)
+        );
+    }
+
+    fn cmsg_hdr(len: u64, level: i32, kind: i32) -> [u8; CMSGHDR_SIZE] {
+        let mut h = [0u8; CMSGHDR_SIZE];
+        h.copy_from_slice(&cmsg(len, level, kind, &[]));
+        h
+    }
+
+    #[test]
+    fn scm_rights_fd_count_from_header() {
+        assert_eq!(scm_rights_fd_count(&cmsg_hdr(16 + 12, 1, 1), 64), Ok(3));
+        // A trailing partial fd does not count.
+        assert_eq!(scm_rights_fd_count(&cmsg_hdr(16 + 6, 1, 1), 64), Ok(1));
+        // cmsg_len exactly at the buffer end is fine, one past is not.
+        assert_eq!(scm_rights_fd_count(&cmsg_hdr(24, 1, 1), 24), Ok(2));
+        assert_eq!(
+            scm_rights_fd_count(&cmsg_hdr(25, 1, 1), 24),
+            Err(SyscallError::InvalidArgument)
+        );
+        assert_eq!(
+            scm_rights_fd_count(&cmsg_hdr(15, 1, 1), 64),
+            Err(SyscallError::InvalidArgument)
+        );
+        // Another level is skipped before its type is looked at.
+        assert_eq!(scm_rights_fd_count(&cmsg_hdr(20, 41, 99), 64), Ok(0));
+        assert_eq!(
+            scm_rights_fd_count(&cmsg_hdr(20, 1, 2), 64),
+            Err(SyscallError::InvalidArgument)
+        );
+        let max = (16 + 4 * SCM_MAX_FDS) as u64;
+        assert_eq!(
+            scm_rights_fd_count(&cmsg_hdr(max, 1, 1), 1024),
+            Ok(SCM_MAX_FDS)
+        );
+        assert_eq!(
+            scm_rights_fd_count(&cmsg_hdr(max + 4, 1, 1), 1024),
+            Err(SyscallError::InvalidArgument)
+        );
+        // A huge cmsg_len that the buffer length does not rule out is
+        // still EINVAL (too many fds), not an overflow.
+        assert_eq!(
+            scm_rights_fd_count(&cmsg_hdr(u64::MAX, 1, 1), usize::MAX),
+            Err(SyscallError::InvalidArgument)
+        );
+    }
+
+    #[test]
+    fn scm_fds_decode_native_ints() {
+        let mut raw = alloc::vec::Vec::new();
+        for fd in [0i32, 9, -1, i32::MAX] {
+            raw.extend_from_slice(&fd.to_ne_bytes());
+        }
+        raw.push(0xFF); // partial trailing fd
+        assert_eq!(decode_scm_fds(&raw), alloc::vec![0, 9, -1, i32::MAX]);
+        assert!(decode_scm_fds(&[]).is_empty());
+    }
+
+    #[test]
+    fn scm_rights_room_counts_whole_fds() {
+        assert_eq!(scm_rights_room(0x1000, 16), 0);
+        assert_eq!(scm_rights_room(0x1000, 19), 0);
+        assert_eq!(scm_rights_room(0x1000, 20), 1);
+        assert_eq!(scm_rights_room(0x1000, 16 + 4 * 5 + 3), 5);
+        // No buffer, or one shorter than a header.
+        assert_eq!(scm_rights_room(0, 64), 0);
+        assert_eq!(scm_rights_room(0x1000, 15), 0);
+        assert_eq!(scm_rights_room(0x1000, 0), 0);
+    }
+
+    /// What recvmsg writes is what sendmsg parses.
+    #[test]
+    fn scm_rights_cmsg_round_trips() {
+        let b = scm_rights_cmsg(&[3, 4, 10]);
+        assert_eq!(b.len(), 16 + 12);
+        assert_eq!(b, cmsg(28, 1, 1, &[3, 4, 10]));
+        assert_eq!(
+            parse_scm_rights(b.as_ptr() as usize, b.len()),
+            Ok(alloc::vec![3, 4, 10])
+        );
+        assert_eq!(scm_rights_cmsg(&[]), cmsg(16, 1, 1, &[]));
+    }
+
+    #[test]
+    fn write_scm_rights_sets_controllen_or_writes_nothing() {
+        // msghdr as 7 usize words; msg_controllen is word 5.
+        let mut hdr = [usize::MAX; 7];
+        let mut control = [0xEEu8; 32];
+        let hdr_ptr = hdr.as_mut_ptr() as usize;
+        assert!(write_scm_rights(
+            control.as_mut_ptr() as usize,
+            control.len(),
+            &[7, 8],
+            hdr_ptr
+        ));
+        assert_eq!(hdr[5], 24);
+        assert_eq!(&control[..24], &cmsg(24, 1, 1, &[7, 8])[..]);
+        assert!(control[24..].iter().all(|&b| b == 0xEE));
+
+        // Too small: nothing written, msg_controllen untouched.
+        let mut hdr = [usize::MAX; 7];
+        let mut control = [0xEEu8; 23];
+        assert!(!write_scm_rights(
+            control.as_mut_ptr() as usize,
+            control.len(),
+            &[7, 8],
+            hdr.as_mut_ptr() as usize
+        ));
+        assert_eq!(hdr[5], usize::MAX);
+        assert!(control.iter().all(|&b| b == 0xEE));
+    }
+
+    #[test]
+    fn scm_rights_rejects_short_control_buffer() {
+        let b = cmsg(16, 1, 1, &[]);
+        assert_eq!(
+            parse_scm_rights(b.as_ptr() as usize, CMSGHDR_SIZE - 1),
+            Err(SyscallError::InvalidArgument)
+        );
+    }
+
+    // --- iovec gather/scatter ---
+
+    fn iovs(entries: &[[usize; 2]]) -> impl FnMut(usize) -> Result<[usize; 2], SyscallError> + '_ {
+        move |i| entries.get(i).copied().ok_or(SyscallError::InvalidPointer)
+    }
+
+    #[test]
+    fn iovs_total_len_sums_and_saturates() {
+        assert_eq!(iovs_total_len(0, iovs(&[])), Ok(0));
+        assert_eq!(
+            iovs_total_len(3, iovs(&[[1, 4], [0, 7], [2, 0]])),
+            Ok(11),
+            "a null base still counts, as before"
+        );
+        assert_eq!(
+            iovs_total_len(2, iovs(&[[1, usize::MAX], [2, 5]])),
+            Ok(usize::MAX)
+        );
+        // An unreadable entry fails the call.
+        assert_eq!(
+            iovs_total_len(2, iovs(&[[1, 4]])),
+            Err(SyscallError::InvalidPointer)
+        );
+    }
+
+    #[test]
+    fn scatter_iovs_fills_in_order_and_skips_empty_entries() {
+        let data: alloc::vec::Vec<u8> = (1..=10).collect();
+        let mut writes = alloc::vec::Vec::new();
+        let n = scatter_iovs(
+            &data,
+            4,
+            iovs(&[[0x100, 3], [0, 5], [0x200, 0], [0x300, 100]]),
+            |base, bytes| {
+                writes.push((base, alloc::vec::Vec::from(bytes)));
+                Ok(())
+            },
+        );
+        assert_eq!(n, Ok(10));
+        assert_eq!(
+            writes,
+            alloc::vec![
+                (0x100, alloc::vec![1, 2, 3]),
+                (0x300, alloc::vec![4, 5, 6, 7, 8, 9, 10]),
+            ]
+        );
+    }
+
+    #[test]
+    fn scatter_iovs_stops_reading_entries_once_data_is_placed() {
+        // Entry 1 is unreadable but never needed: 2 bytes fit in entry 0.
+        let mut out = alloc::vec::Vec::new();
+        assert_eq!(
+            scatter_iovs(&[9, 8], 5, iovs(&[[0x100, 4]]), |_, b| {
+                out.extend_from_slice(b);
+                Ok(())
+            }),
+            Ok(2)
+        );
+        assert_eq!(out, [9, 8]);
+        // Nothing received: no entry is read at all.
+        assert_eq!(scatter_iovs(&[], 5, iovs(&[]), |_, _| Ok(())), Ok(0));
+        // More data than room: the excess is dropped.
+        assert_eq!(
+            scatter_iovs(&[1, 2, 3], 1, iovs(&[[0x100, 2]]), |_, _| Ok(())),
+            Ok(2)
+        );
+    }
+
+    #[test]
+    fn scatter_iovs_propagates_errors() {
+        assert_eq!(
+            scatter_iovs(&[1, 2, 3], 2, iovs(&[[0x100, 1]]), |_, _| Ok(())),
+            Err(SyscallError::InvalidPointer)
+        );
+        assert_eq!(
+            scatter_iovs(&[1], 1, iovs(&[[0x100, 1]]), |_, _| Err(
+                SyscallError::UnmappedMemory
+            )),
+            Err(SyscallError::UnmappedMemory)
         );
     }
 
