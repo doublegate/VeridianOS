@@ -330,7 +330,7 @@ Fixes #456
 
 ### Getting Help
 
-- **Discord**: [#dev-help](https://discord.gg/veridian)
+- **Discord**: [#dev-help](https://discord.gg/WGcgrnuVHt)
 - **Matrix**: #veridian-dev:matrix.org
 - **Mailing List**: dev@veridian-os.org
 
@@ -401,7 +401,7 @@ cargo bench
 If you have questions not covered here:
 
 1. Check the [FAQ](docs/FAQ.md)
-2. Ask on [Discord](https://discord.gg/veridian)
+2. Ask on [Discord](https://discord.gg/WGcgrnuVHt)
 3. Email [dev@veridian-os.org](mailto:dev@veridian-os.org)
 
 Thank you for contributing to VeridianOS! Your efforts help build a better operating system for everyone.

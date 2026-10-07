@@ -169,7 +169,7 @@ See our [Development Setup Guide](../getting-started/dev-setup.md). Basic steps:
 
 - **Documentation**: This book and GitHub docs
 - **GitHub Issues**: For bugs and features
-- **Discord**: [discord.gg/veridian](https://discord.gg/veridian)
+- **Discord**: [discord.gg/WGcgrnuVHt](https://discord.gg/WGcgrnuVHt)
 - **Mailing List**: dev@veridian-os.org
 
 ## Philosophy Questions

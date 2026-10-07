@@ -75,7 +75,7 @@ This book is organized into several sections:
 VeridianOS is an open-source project welcoming contributions from developers worldwide. Whether you're interested in kernel development, system programming, or just learning about operating systems, there's a place for you in our community.
 
 - **GitHub**: [github.com/doublegate/VeridianOS](https://github.com/doublegate/VeridianOS)
-- **Discord**: [discord.gg/veridian](https://discord.gg/veridian)
+- **Discord**: [discord.gg/WGcgrnuVHt](https://discord.gg/WGcgrnuVHt)
 - **Documentation**: [doublegate.github.io/VeridianOS](https://doublegate.github.io/VeridianOS)
 
 ## License

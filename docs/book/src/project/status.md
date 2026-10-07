@@ -117,4 +117,4 @@ Current state: ELF loader maps kwin_wayland into user memory, musl `_start` entr
 - **GitHub**: [github.com/doublegate/VeridianOS](https://github.com/doublegate/VeridianOS)
 - **GitHub Pages**: [doublegate.github.io/VeridianOS](https://doublegate.github.io/VeridianOS)
 - **CHANGELOG**: [CHANGELOG.md](https://github.com/doublegate/VeridianOS/blob/main/CHANGELOG.md)
-- **Discord**: [discord.gg/veridian](https://discord.gg/veridian)
+- **Discord**: [discord.gg/WGcgrnuVHt](https://discord.gg/WGcgrnuVHt)

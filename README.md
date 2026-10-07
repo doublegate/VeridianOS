@@ -294,7 +294,7 @@ Contributions are welcome. Please see the [Contributing Guide](CONTRIBUTING.md) 
 
 ## Community
 
-- [Discord Server](https://discord.gg/24KbHS4C) -- Real-time chat
+- [Discord Server](https://discord.gg/WGcgrnuVHt) -- Real-time chat
 - [Issue Tracker](https://github.com/doublegate/VeridianOS/issues) -- Bug reports and feature requests
 
 ---
