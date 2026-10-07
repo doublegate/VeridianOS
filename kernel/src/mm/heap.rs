@@ -186,9 +186,14 @@ impl SlabAllocator {
         let slab_area_size = heap_size - metadata_size;
 
         // Initialize fallback allocator with metadata area
-        self.fallback
-            .lock()
-            .init(heap_start as *mut u8, metadata_size);
+        // SAFETY: forwarded from this function's contract: heap_start is
+        // valid and the first `metadata_size` (< heap_size) bytes are
+        // available, and this runs once, so the region is not already in use.
+        unsafe {
+            self.fallback
+                .lock()
+                .init(heap_start as *mut u8, metadata_size);
+        }
 
         // Initialize slabs
         let mut current_addr = heap_start + metadata_size;

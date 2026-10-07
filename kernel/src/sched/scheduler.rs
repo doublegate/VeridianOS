@@ -821,7 +821,11 @@ use alloc::collections::BTreeMap;
 /// by the mutex.
 #[derive(Clone, Copy)]
 struct SendTaskPtr(NonNull<Task>);
+// SAFETY: Task pointers in the registry are only accessed under the
+// TASK_REGISTRY mutex. Tasks are pinned in memory (Box::leak) and outlive
+// their registry entries, so moving the pointer across CPUs is sound.
 unsafe impl Send for SendTaskPtr {}
+// SAFETY: as for Send -- cross-CPU access is serialized by the mutex.
 unsafe impl Sync for SendTaskPtr {}
 
 /// Global PID-to-Task pointer registry.

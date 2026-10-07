@@ -44,7 +44,10 @@ impl UnsafeBumpAllocator {
             let uart = 0x10000000 as *mut u8;
             let msg = b"[ALLOC] init called\n";
             for &byte in msg {
-                core::ptr::write_volatile(uart, byte);
+                // SAFETY: 0x10000000 is the 16550 UART data register on the
+                // QEMU virt machine; the kernel accesses it by physical
+                // address here, as the early-boot console does.
+                unsafe { core::ptr::write_volatile(uart, byte) };
             }
         }
         #[cfg(target_arch = "aarch64")]
@@ -54,7 +57,10 @@ impl UnsafeBumpAllocator {
             let msg: &[u8] = b"[ALLOC] init called\n";
             let mut i = 0;
             while i < msg.len() {
-                core::ptr::write_volatile(uart, msg[i]);
+                // SAFETY: 0x09000000 is the PL011 UART data register on the
+                // QEMU virt machine; the kernel accesses it by physical
+                // address here, as direct_uart does.
+                unsafe { core::ptr::write_volatile(uart, msg[i]) };
                 i += 1;
             }
         }
@@ -76,7 +82,8 @@ impl UnsafeBumpAllocator {
             let uart = 0x10000000 as *mut u8;
             let msg = b"[ALLOC] init done\n";
             for &byte in msg {
-                core::ptr::write_volatile(uart, byte);
+                // SAFETY: 16550 UART data register on QEMU virt (see above).
+                unsafe { core::ptr::write_volatile(uart, byte) };
             }
         }
         #[cfg(target_arch = "aarch64")]
@@ -85,7 +92,8 @@ impl UnsafeBumpAllocator {
             let msg: &[u8] = b"[ALLOC] init done\n";
             let mut i = 0;
             while i < msg.len() {
-                core::ptr::write_volatile(uart, msg[i]);
+                // SAFETY: PL011 UART data register on QEMU virt (see above).
+                unsafe { core::ptr::write_volatile(uart, msg[i]) };
                 i += 1;
             }
         }
@@ -102,6 +110,10 @@ impl UnsafeBumpAllocator {
     }
 }
 
+// SAFETY: `alloc` returns either null or a block of `layout.size()` bytes
+// aligned to `layout.align()` inside the region handed to `init()`, claimed
+// exclusively by a CAS on `next`, so no two live allocations overlap.
+// `dealloc` is a no-op, which never invalidates a live block.
 unsafe impl GlobalAlloc for UnsafeBumpAllocator {
     #[inline(always)]
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
@@ -120,7 +132,9 @@ unsafe impl GlobalAlloc for UnsafeBumpAllocator {
                 let uart = 0x10000000 as *mut u8;
                 let msg = b"[ALLOC] First allocation attempt\n";
                 for &byte in msg {
-                    core::ptr::write_volatile(uart, byte);
+                    // SAFETY: 16550 UART data register on QEMU virt, accessed
+                    // by physical address as in init().
+                    unsafe { core::ptr::write_volatile(uart, byte) };
                 }
             }
         }
@@ -132,7 +146,9 @@ unsafe impl GlobalAlloc for UnsafeBumpAllocator {
                 let uart = 0x10000000 as *mut u8;
                 let msg = b"[ALLOC] ERROR: Allocator not initialized (start=0)\n";
                 for &byte in msg {
-                    core::ptr::write_volatile(uart, byte);
+                    // SAFETY: 16550 UART data register on QEMU virt, accessed
+                    // by physical address as in init().
+                    unsafe { core::ptr::write_volatile(uart, byte) };
                 }
             }
             return ptr::null_mut();

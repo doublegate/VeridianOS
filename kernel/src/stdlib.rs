@@ -27,7 +27,9 @@ pub(crate) mod memory {
         let layout = core::alloc::Layout::from_size_align(size, 8)
             .unwrap_or_else(|_| core::alloc::Layout::from_size_align(1, 1).expect("1-byte layout"));
 
-        alloc::alloc::alloc(layout)
+        // SAFETY: `layout` has a non-zero size (`size != 0` was checked, and
+        // the fallback layout is 1 byte), which is all `alloc` requires.
+        unsafe { alloc::alloc::alloc(layout) }
     }
 
     /// Allocate zeroed memory
@@ -46,7 +48,9 @@ pub(crate) mod memory {
         let layout = core::alloc::Layout::from_size_align(total_size, 8)
             .unwrap_or_else(|_| core::alloc::Layout::from_size_align(1, 1).expect("1-byte layout"));
 
-        alloc::alloc::alloc_zeroed(layout)
+        // SAFETY: `layout` has a non-zero size (`total_size != 0` was
+        // checked, and the fallback layout is 1 byte).
+        unsafe { alloc::alloc::alloc_zeroed(layout) }
     }
 
     /// Reallocate memory
@@ -54,26 +58,38 @@ pub(crate) mod memory {
     /// # Safety
     /// `ptr` must be null or a pointer previously returned by
     /// `malloc`/`calloc`. The old allocation is freed; do not use `ptr`
-    /// after this call. WARNING: current implementation assumes max 1KB old
-    /// allocation size.
+    /// after this call. WARNING: the old size is not tracked, so the old
+    /// allocation must be readable for at least `min(new_size, 1024)` bytes.
     pub(crate) unsafe fn realloc(ptr: *mut u8, new_size: usize) -> *mut u8 {
         if ptr.is_null() {
-            return malloc(new_size);
+            // SAFETY: `malloc` has no input preconditions; the obligation to
+            // free the result passes to this function's caller.
+            return unsafe { malloc(new_size) };
         }
 
         if new_size == 0 {
-            free(ptr);
+            // SAFETY: forwarded from this function's contract: `ptr` is a
+            // live pointer from `malloc`/`calloc` and is not used again.
+            unsafe { free(ptr) };
             return ptr::null_mut();
         }
 
         // For now, allocate new and copy (in real implementation, try to expand in
         // place)
-        let new_ptr = malloc(new_size);
+        // SAFETY: `malloc` has no input preconditions.
+        let new_ptr = unsafe { malloc(new_size) };
         if !new_ptr.is_null() {
             // Copy old data (we don't know the old size, so this is a limitation)
             // In a real implementation, we'd track allocation sizes
-            ptr::copy_nonoverlapping(ptr, new_ptr, new_size.min(1024)); // Assume max 1KB copy
-            free(ptr);
+            // SAFETY: `new_ptr` is a fresh allocation of `new_size` bytes, so
+            // it is writable for `min(new_size, 1024)` bytes and cannot
+            // overlap `ptr`. Readability of `ptr` for that many bytes is a
+            // stated precondition of this function. `ptr` is live and is not
+            // used after `free`, also per this function's contract.
+            unsafe {
+                ptr::copy_nonoverlapping(ptr, new_ptr, new_size.min(1024)); // Assume max 1KB copy
+                free(ptr);
+            }
         }
 
         new_ptr
@@ -89,7 +105,12 @@ pub(crate) mod memory {
             // In real implementation, we'd track allocation size
             // Layout(1, 1) is always valid: size > 0, align is power of 2
             let layout = core::alloc::Layout::from_size_align(1, 1).expect("1-byte layout");
-            alloc::alloc::dealloc(ptr, layout);
+            // SAFETY: forwarded from this function's contract: `ptr` came
+            // from `malloc`/`calloc` and has not been freed. NOTE: the layout
+            // passed here (1, 1) does not match the allocating layout
+            // (size, 8), which `GlobalAlloc::dealloc` requires. This is a
+            // known limitation of the untracked-size design, not upheld here.
+            unsafe { alloc::alloc::dealloc(ptr, layout) };
         }
     }
 
@@ -99,7 +120,9 @@ pub(crate) mod memory {
     /// `dest` and `src` must be valid for `n` bytes.  The regions must not
     /// overlap; use `memmove` for overlapping copies.
     pub(crate) unsafe fn memcpy(dest: *mut u8, src: *const u8, n: usize) -> *mut u8 {
-        ptr::copy_nonoverlapping(src, dest, n);
+        // SAFETY: forwarded from this function's contract: both regions are
+        // valid for `n` bytes and do not overlap.
+        unsafe { ptr::copy_nonoverlapping(src, dest, n) };
         dest
     }
 
@@ -108,7 +131,9 @@ pub(crate) mod memory {
     /// # Safety
     /// `dest` and `src` must be valid for `n` bytes.  Regions may overlap.
     pub(crate) unsafe fn memmove(dest: *mut u8, src: *const u8, n: usize) -> *mut u8 {
-        ptr::copy(src, dest, n);
+        // SAFETY: forwarded from this function's contract: both regions are
+        // valid for `n` bytes; `ptr::copy` permits overlap.
+        unsafe { ptr::copy(src, dest, n) };
         dest
     }
 
@@ -117,7 +142,9 @@ pub(crate) mod memory {
     /// # Safety
     /// `dest` must be valid for writing `n` bytes.
     pub(crate) unsafe fn memset(dest: *mut u8, value: i32, n: usize) -> *mut u8 {
-        ptr::write_bytes(dest, value as u8, n);
+        // SAFETY: forwarded from this function's contract: `dest` is valid
+        // for writing `n` bytes.
+        unsafe { ptr::write_bytes(dest, value as u8, n) };
         dest
     }
 
@@ -126,8 +153,10 @@ pub(crate) mod memory {
     /// # Safety
     /// Both `s1` and `s2` must be valid for reading `n` bytes.
     pub(crate) unsafe fn memcmp(s1: *const u8, s2: *const u8, n: usize) -> i32 {
-        let slice1 = slice::from_raw_parts(s1, n);
-        let slice2 = slice::from_raw_parts(s2, n);
+        // SAFETY: forwarded from this function's contract: both pointers are
+        // valid for reading `n` bytes, and the slices are only read.
+        let (slice1, slice2) =
+            unsafe { (slice::from_raw_parts(s1, n), slice::from_raw_parts(s2, n)) };
 
         for i in 0..n {
             match slice1[i].cmp(&slice2[i]) {
@@ -151,7 +180,10 @@ pub(crate) mod string {
     /// `s` must point to a valid, NUL-terminated C string.
     pub(crate) unsafe fn strlen(s: *const u8) -> usize {
         let mut len = 0;
-        while *s.add(len) != 0 {
+        // SAFETY: forwarded from this function's contract: `s` is
+        // NUL-terminated, so every offset up to and including the terminator
+        // is readable, and the loop stops there.
+        while unsafe { *s.add(len) } != 0 {
             len += 1;
         }
         len
@@ -165,8 +197,14 @@ pub(crate) mod string {
     pub(crate) unsafe fn strcpy(dest: *mut u8, src: *const u8) -> *mut u8 {
         let mut i = 0;
         loop {
-            let c = *src.add(i);
-            *dest.add(i) = c;
+            // SAFETY: forwarded from this function's contract: `src` is
+            // NUL-terminated and `dest` has room for all of it including the
+            // terminator; the loop stops after copying the terminator.
+            let c = unsafe {
+                let c = *src.add(i);
+                *dest.add(i) = c;
+                c
+            };
             if c == 0 {
                 break;
             }
@@ -183,8 +221,14 @@ pub(crate) mod string {
     pub(crate) unsafe fn strncpy(dest: *mut u8, src: *const u8, n: usize) -> *mut u8 {
         let mut i = 0;
         while i < n {
-            let c = *src.add(i);
-            *dest.add(i) = c;
+            // SAFETY: forwarded from this function's contract: `i < n`,
+            // `dest` is writable for `n` bytes, and `src` is readable up to
+            // `n` bytes or its NUL terminator, which ends the loop.
+            let c = unsafe {
+                let c = *src.add(i);
+                *dest.add(i) = c;
+                c
+            };
             if c == 0 {
                 break;
             }
@@ -193,7 +237,9 @@ pub(crate) mod string {
 
         // Pad with zeros if necessary
         while i < n {
-            *dest.add(i) = 0;
+            // SAFETY: forwarded from this function's contract: `dest` is
+            // writable for `n` bytes and `i < n`.
+            unsafe { *dest.add(i) = 0 };
             i += 1;
         }
 
@@ -206,8 +252,13 @@ pub(crate) mod string {
     /// Both `dest` and `src` must be NUL-terminated.  `dest` must have
     /// room for its current content plus the entirety of `src` plus NUL.
     pub(crate) unsafe fn strcat(dest: *mut u8, src: *const u8) -> *mut u8 {
-        let dest_len = strlen(dest);
-        strcpy(dest.add(dest_len), src);
+        // SAFETY: forwarded from this function's contract: `dest` and `src`
+        // are NUL-terminated and `dest` has room for its content plus all of
+        // `src`, so `dest + strlen(dest)` is valid for the copy.
+        unsafe {
+            let dest_len = strlen(dest);
+            strcpy(dest.add(dest_len), src);
+        }
         dest
     }
 
@@ -218,8 +269,10 @@ pub(crate) mod string {
     pub(crate) unsafe fn strcmp(s1: *const u8, s2: *const u8) -> i32 {
         let mut i = 0;
         loop {
-            let c1 = *s1.add(i);
-            let c2 = *s2.add(i);
+            // SAFETY: forwarded from this function's contract: both strings
+            // are NUL-terminated, and the loop returns at the first mismatch
+            // or terminator, so no read goes past either terminator.
+            let (c1, c2) = unsafe { (*s1.add(i), *s2.add(i)) };
 
             if c1 != c2 {
                 return if c1 < c2 { -1 } else { 1 };
@@ -240,8 +293,10 @@ pub(crate) mod string {
     /// or until a NUL terminator is found.
     pub(crate) unsafe fn strncmp(s1: *const u8, s2: *const u8, n: usize) -> i32 {
         for i in 0..n {
-            let c1 = *s1.add(i);
-            let c2 = *s2.add(i);
+            // SAFETY: forwarded from this function's contract: both are
+            // readable up to `n` bytes or their NUL terminator; `i < n` and
+            // the loop returns at the first terminator or mismatch.
+            let (c1, c2) = unsafe { (*s1.add(i), *s2.add(i)) };
 
             if c1 != c2 {
                 return if c1 < c2 { -1 } else { 1 };
@@ -264,9 +319,12 @@ pub(crate) mod string {
         let mut i = 0;
 
         loop {
-            let ch = *s.add(i);
+            // SAFETY: forwarded from this function's contract: `s` is
+            // NUL-terminated and the loop stops at the terminator.
+            let ch = unsafe { *s.add(i) };
             if ch == target {
-                return s.add(i);
+                // SAFETY: offset `i` was just read, so it is in bounds.
+                return unsafe { s.add(i) };
             }
             if ch == 0 {
                 break;
@@ -283,19 +341,28 @@ pub(crate) mod string {
     /// Both `haystack` and `needle` must point to valid, NUL-terminated C
     /// strings.
     pub(crate) unsafe fn strstr(haystack: *const u8, needle: *const u8) -> *const u8 {
-        let needle_len = strlen(needle);
+        // SAFETY: forwarded from this function's contract: `needle` is
+        // NUL-terminated.
+        let needle_len = unsafe { strlen(needle) };
         if needle_len == 0 {
             return haystack;
         }
 
-        let haystack_len = strlen(haystack);
+        // SAFETY: forwarded from this function's contract: `haystack` is
+        // NUL-terminated.
+        let haystack_len = unsafe { strlen(haystack) };
         if needle_len > haystack_len {
             return ptr::null();
         }
 
         for i in 0..=(haystack_len - needle_len) {
-            if strncmp(haystack.add(i), needle, needle_len) == 0 {
-                return haystack.add(i);
+            // SAFETY: `i <= haystack_len - needle_len`, so `haystack + i` has
+            // at least `needle_len` readable bytes before the terminator, and
+            // `needle` has exactly `needle_len` bytes before its terminator.
+            unsafe {
+                if strncmp(haystack.add(i), needle, needle_len) == 0 {
+                    return haystack.add(i);
+                }
             }
         }
 
@@ -374,7 +441,9 @@ pub(crate) mod io {
             return -1;
         }
 
-        drop(Box::from_raw(file));
+        // SAFETY: forwarded from this function's contract: `file` came from
+        // `open` (i.e. `Box::into_raw`) and has not been closed.
+        drop(unsafe { Box::from_raw(file) });
         0
     }
 
@@ -388,8 +457,10 @@ pub(crate) mod io {
             return -1;
         }
 
-        let file_ref = &mut *file;
-        let buffer = slice::from_raw_parts_mut(buf, count);
+        // SAFETY: forwarded from this function's contract: `file` is a live
+        // `File` from `open` with no other active reference, and `buf` is
+        // valid for writing `count` bytes.
+        let (file_ref, buffer) = unsafe { (&mut *file, slice::from_raw_parts_mut(buf, count)) };
 
         match file_ref.node.read(file_ref.position, buffer) {
             Ok(bytes_read) => {
@@ -410,8 +481,10 @@ pub(crate) mod io {
             return -1;
         }
 
-        let file_ref = &mut *file;
-        let buffer = slice::from_raw_parts(buf, count);
+        // SAFETY: forwarded from this function's contract: `file` is a live
+        // `File` from `open` with no other active reference, and `buf` is
+        // valid for reading `count` bytes.
+        let (file_ref, buffer) = unsafe { (&mut *file, slice::from_raw_parts(buf, count)) };
 
         match file_ref.node.write(file_ref.position, buffer) {
             Ok(bytes_written) => {
@@ -431,7 +504,9 @@ pub(crate) mod io {
             return -1;
         }
 
-        let file_ref = &mut *file;
+        // SAFETY: forwarded from this function's contract: `file` is a live
+        // `File` from `open` with no other active reference.
+        let file_ref = unsafe { &mut *file };
 
         let new_position = match whence {
             SEEK_SET => {
@@ -583,10 +658,11 @@ pub(crate) mod process {
     pub(crate) unsafe fn wait(status: *mut i32) -> i32 {
         match crate::process::wait_for_child(None) {
             Ok((pid, exit_status)) => {
-                // SAFETY: Caller guarantees `status` is null or a valid
-                // writable i32 pointer.  We check for null before writing.
                 if !status.is_null() {
-                    *status = exit_status;
+                    // SAFETY: forwarded from this function's contract:
+                    // `status` is null or a valid, writable, aligned `i32`;
+                    // null was excluded just above.
+                    unsafe { *status = exit_status };
                 }
                 pid.0 as i32
             }

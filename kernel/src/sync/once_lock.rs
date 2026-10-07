@@ -63,7 +63,7 @@ impl<T> OnceLock<T> {
             // a valid, heap-allocated `T`. The caller guarantees exclusive access,
             // so creating a mutable reference does not alias any existing references.
             // The Acquire load ensures we see the fully initialized data.
-            Some(&mut *ptr)
+            Some(unsafe { &mut *ptr })
         }
     }
 
