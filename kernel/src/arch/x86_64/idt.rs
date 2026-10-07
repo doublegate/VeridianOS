@@ -613,6 +613,7 @@ extern "x86-interrupt" fn sched_wake_handler(_stack_frame: InterruptStackFrame) 
     // Wake handler: a remote CPU placed a task on our run queue and sent this
     // IPI to break us out of HLT. No action needed beyond EOI -- the scheduler
     // will pick up the new task on the next scheduling decision.
+    crate::arch::percpu::note_ipi();
     crate::arch::x86_64::apic::send_eoi();
 }
 

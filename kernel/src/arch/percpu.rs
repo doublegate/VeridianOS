@@ -36,6 +36,14 @@ pub struct ArchCpu {
     /// Hardware id: APIC ID (x86_64), MPIDR affinity (AArch64), hartid
     /// (RISC-V).
     pub hw_id: u32,
+    /// Deadline of this CPU's next tick, in the tick source's units. The
+    /// compare registers (IA32_TSC_DEADLINE, CNTV_CVAL_EL0, stimecmp) are
+    /// per CPU, so the bookkeeping is too.
+    pub timer_next: u64,
+    /// Timer interrupts this CPU has taken.
+    pub local_ticks: u64,
+    /// Inter-processor interrupts this CPU has taken.
+    pub ipis: u64,
 }
 
 const _: () = {
@@ -45,6 +53,9 @@ const _: () = {
     assert!(core::mem::offset_of!(ArchCpu, self_ptr) == 0x18);
     assert!(core::mem::offset_of!(ArchCpu, cpu_id) == 0x20);
     assert!(core::mem::offset_of!(ArchCpu, hw_id) == 0x24);
+    assert!(core::mem::offset_of!(ArchCpu, timer_next) == 0x28);
+    assert!(core::mem::offset_of!(ArchCpu, local_ticks) == 0x30);
+    assert!(core::mem::offset_of!(ArchCpu, ipis) == 0x38);
     assert!(core::mem::size_of::<ArchCpu>() == 64);
 };
 
@@ -66,6 +77,9 @@ impl ArchCpuCell {
             self_ptr: 0,
             cpu_id,
             hw_id: 0,
+            timer_next: 0,
+            local_ticks: 0,
+            ipis: 0,
         }))
     }
 
@@ -174,6 +188,67 @@ pub fn this_arch_cpu_ptr() -> *mut ArchCpu {
     {
         arch_cpu_ptr(0)
     }
+}
+
+/// The calling CPU's block, or the boot CPU's before `install` has run
+/// (only the boot CPU runs then).
+#[inline]
+pub fn this_arch_cpu() -> *mut ArchCpu {
+    let p = this_arch_cpu_ptr();
+    if is_arch_cpu_block(p as u64) {
+        p
+    } else {
+        arch_cpu_ptr(0)
+    }
+}
+
+/// Count a timer interrupt on this CPU and advance its deadline by
+/// `period` from the one previously armed (from `now` if none was),
+/// skipping whole periods already in the past so missed ticks do not fire
+/// as a burst. Returns the new deadline to program. Call only from this
+/// CPU's timer interrupt.
+pub fn advance_timer(now: u64, period: u64) -> u64 {
+    let cpu = this_arch_cpu();
+    // SAFETY: this CPU's own block, touched only by this CPU's timer
+    // interrupt or by its timer start with interrupts off.
+    unsafe {
+        let base = if (*cpu).timer_next == 0 {
+            now
+        } else {
+            (*cpu).timer_next
+        };
+        let mut next = base.wrapping_add(period);
+        if next <= now {
+            next = now + period;
+        }
+        (*cpu).timer_next = next;
+        (*cpu).local_ticks = (*cpu).local_ticks.wrapping_add(1);
+        next
+    }
+}
+
+/// Count an inter-processor interrupt taken by this CPU (from its IPI
+/// handler).
+pub fn note_ipi() {
+    let cpu = this_arch_cpu();
+    // SAFETY: this CPU's own block, written only by this CPU's interrupt
+    // handlers.
+    unsafe { (*cpu).ipis = (*cpu).ipis.wrapping_add(1) };
+}
+
+/// Set this CPU's armed deadline (timer start).
+pub fn set_timer_next(deadline: u64) {
+    // SAFETY: as in `advance_timer`.
+    unsafe { (*this_arch_cpu()).timer_next = deadline };
+}
+
+/// Whether the calling CPU keeps global time. Exactly one CPU advances the
+/// uptime clock and the timer wheel; with every CPU ticking at the same
+/// rate, each would otherwise add its own period and time would run N
+/// times fast (Linux has one `tick_do_timer_cpu` for the same reason).
+#[inline]
+pub fn is_timekeeper() -> bool {
+    this_cpu_id() == 0
 }
 
 /// Logical id of the calling CPU, read from its block.

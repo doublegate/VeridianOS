@@ -18,7 +18,7 @@
 //!
 //! Each hart has two contexts: M-mode (even) and S-mode (odd).
 //! For hart N: M-mode context = N*2, S-mode context = N*2 + 1.
-//! On hart 0: S-mode context = 1.
+//! The boot hart's S-mode context is used; the boot hart need not be hart 0.
 
 use core::sync::atomic::{fence, Ordering};
 
@@ -382,7 +382,12 @@ impl Plic {
 /// Returns `KernelError::AlreadyExists` if the PLIC has already been
 /// initialized.
 pub fn init() -> KernelResult<()> {
-    let hart_id: u32 = 0; // Boot hart
+    // The boot hart's context. OpenSBI picks the boot hart, which need
+    // not be hart 0 (on QEMU virt the S-mode context is 2 * hart + 1).
+    #[cfg(target_arch = "riscv64")]
+    let hart_id = crate::arch::riscv64::boot::boot_hartid() as u32;
+    #[cfg(not(target_arch = "riscv64"))]
+    let hart_id: u32 = 0;
 
     let plic = Plic::new(PLIC_BASE, MAX_SOURCES - 1, hart_id);
     plic.reset();

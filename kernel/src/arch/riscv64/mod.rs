@@ -127,14 +127,24 @@ fn read_mmu_type(dtb_pa: u64) {
     }
 }
 
-/// scause: interrupt bit, and the supervisor timer interrupt code.
+/// scause: interrupt bit, and the supervisor software (IPI) and timer
+/// interrupt codes.
 const SCAUSE_INTERRUPT: usize = 1 << 63;
+const IRQ_S_SOFT: usize = 1;
 const IRQ_S_TIMER: usize = 5;
 
 /// Rust side of the trap vector. Returns only for handled interrupts.
 extern "C" fn riscv_trap(scause: usize, sepc: usize, stval: usize) {
     if scause == SCAUSE_INTERRUPT | IRQ_S_TIMER {
         super::riscv::timer::handle_interrupt();
+        return;
+    }
+    if scause == SCAUSE_INTERRUPT | IRQ_S_SOFT {
+        // An IPI (SBI send_ipi sets sip.SSIP). Acknowledge it by clearing
+        // SSIP, or it stays pending and traps again on return.
+        // SAFETY: clears only the supervisor software-interrupt pending bit.
+        unsafe { core::arch::asm!("csrc sip, {0}", in(reg) 2usize, options(nomem, nostack)) };
+        crate::arch::percpu::note_ipi();
         return;
     }
     riscv_fatal_trap(scause, sepc, stval)

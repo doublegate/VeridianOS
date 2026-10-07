@@ -18,8 +18,6 @@ static TICKS: AtomicU64 = AtomicU64::new(0);
 static PERIOD: AtomicU64 = AtomicU64::new(0);
 /// Tick period in milliseconds.
 static PERIOD_MS: AtomicU64 = AtomicU64::new(0);
-/// Deadline currently armed.
-static NEXT: AtomicU64 = AtomicU64::new(0);
 
 /// CNTV_CTL_EL0: ENABLE, with IMASK clear.
 const CTL_ENABLE: u64 = 1;
@@ -50,7 +48,7 @@ pub fn start(hz: u32) -> crate::error::KernelResult<()> {
     PERIOD.store(period, Ordering::Relaxed);
     PERIOD_MS.store((1000 / hz.max(1) as u64).max(1), Ordering::Relaxed);
     let first = counter() + period;
-    NEXT.store(first, Ordering::Relaxed);
+    crate::arch::percpu::set_timer_next(first);
     set_compare(first);
     // SAFETY: enables the EL1 virtual timer with its interrupt unmasked.
     unsafe {
@@ -81,10 +79,12 @@ pub fn handle_interrupt() {
     // Only this handler writes TICKS, so a plain load and store suffice. An
     // atomic read-modify-write would use exclusive load/store, which is not
     // architecturally reliable while the MMU is off (N-28).
-    TICKS.store(
-        TICKS.load(Ordering::Relaxed).wrapping_add(1),
-        Ordering::Relaxed,
-    );
+    if crate::arch::percpu::is_timekeeper() {
+        TICKS.store(
+            TICKS.load(Ordering::Relaxed).wrapping_add(1),
+            Ordering::Relaxed,
+        );
+    }
     let period = PERIOD.load(Ordering::Relaxed);
     if period == 0 {
         // Not started: silence the timer.
@@ -92,12 +92,11 @@ pub fn handle_interrupt() {
         unsafe { core::arch::asm!("msr cntv_ctl_el0, xzr", "isb", options(nostack)) };
         return;
     }
-    let now = counter();
-    let mut next = NEXT.load(Ordering::Relaxed).wrapping_add(period);
-    if next <= now {
-        next = now + period;
-    }
-    NEXT.store(next, Ordering::Relaxed);
+    // Per-CPU deadline (CNTV_CVAL_EL0 is per CPU); only the timekeeping
+    // CPU advances global time.
+    let next = crate::arch::percpu::advance_timer(counter(), period);
     set_compare(next);
-    crate::timer::timer_tick(PERIOD_MS.load(Ordering::Relaxed));
+    if crate::arch::percpu::is_timekeeper() {
+        crate::timer::timer_tick(PERIOD_MS.load(Ordering::Relaxed));
+    }
 }

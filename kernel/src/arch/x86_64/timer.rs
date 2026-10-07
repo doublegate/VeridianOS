@@ -17,13 +17,15 @@ pub fn get_ticks() -> u64 {
 /// deadlock if the scheduler lock is already held (e.g., we interrupted
 /// mid-schedule).
 pub fn tick() {
-    TICKS.fetch_add(1, Ordering::Relaxed);
-
     // In TSC-deadline mode the timer is one-shot: arm the next tick first.
     super::apic::rearm_deadline_timer();
 
-    // Advance kernel uptime and the timer wheel by one timer period.
-    crate::timer::timer_tick(super::apic::timer_period_ms());
+    // Only the timekeeping CPU advances the tick count, uptime and the
+    // timer wheel; every CPU ticks at the same rate (see is_timekeeper).
+    if crate::arch::percpu::is_timekeeper() {
+        TICKS.fetch_add(1, Ordering::Relaxed);
+        crate::timer::timer_tick(super::apic::timer_period_ms());
+    }
 
     // Trigger scheduler tick. Use try_lock to avoid deadlock: if the
     // scheduler lock is already held (e.g., we interrupted mid-schedule),
