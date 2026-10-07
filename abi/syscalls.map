@@ -1,0 +1,305 @@
+# VeridianOS system call numbers (ADR 0009).
+#
+# The single source of the user ABI: every kernel `Syscall` variant, the
+# Linux x86_64 system call it implements (its number comes from
+# abi/linux/syscall_64.tbl), or `private N` for a VeridianOS call with no
+# Linux equivalent. Private numbers are 1024 + the call's pre-v0.27 native
+# number, far above Linux's range (471 in v7.2), and never change.
+#
+# tools/compat/gen_syscalls.py turns this file into
+#   kernel/src/syscall/numbers.rs              (the enum and its decoder)
+#   userland/libc/include/veridian/sysno.h     (SYS_* for the native libc)
+#   userland/abi/syscall_numbers.rs            (SYS_* for rust-std and vsh)
+# and `gen_syscalls.py --check` fails CI when any of them is stale.
+#
+# Format: one call per line, either
+#   <linux name>                 a Linux call: the kernel variant is the name
+#                                in CamelCase (rt_sigaction -> RtSigaction),
+#                                the C and Rust constant SYS_<linux name>
+#   <Variant> private <number>   a VeridianOS call: the constant is
+#                                SYS_<VARIANT_IN_UPPER_SNAKE_CASE>
+# Each call has exactly one name in each language.
+# A `## Heading` line starts a group (a comment in the generated enum).
+
+## VeridianOS IPC
+IpcSend                 private 1024
+IpcReceive              private 1025
+IpcCall                 private 1026
+IpcReply                private 1027
+IpcCreateEndpoint       private 1028
+IpcBindEndpoint         private 1029
+IpcShareMemory          private 1030
+IpcMapMemory            private 1031
+
+## Process management
+sched_yield
+exit_group
+fork
+execve
+wait4
+getpid
+getppid
+ProcessSetPriority      private 1041
+ProcessGetPriority      private 1042
+getcwd
+chdir
+fchdir
+chroot
+kill
+umask
+uname
+ProcessGetenv           private 1229
+waitid
+prctl
+ptrace
+
+## Memory
+mmap
+munmap
+mprotect
+brk
+madvise
+mremap
+memfd_create
+
+## Capabilities
+CapabilityGrant         private 1054
+CapabilityRevoke        private 1055
+
+## Threads
+ThreadCreate            private 1064
+exit
+ThreadJoin              private 1066
+gettid
+ThreadSetAffinity       private 1068
+ThreadGetAffinity       private 1069
+clone
+clone3
+set_tid_address
+set_robust_list
+rseq
+arch_prctl
+tkill
+tgkill
+
+## Files
+open
+openat
+close
+read
+write
+lseek
+pread64
+pwrite64
+readv
+writev
+fstat
+stat
+lstat
+newfstatat
+statx
+statfs
+fstatfs
+ftruncate
+truncate
+fallocate
+dup
+dup2
+dup3
+pipe
+pipe2
+ioctl
+fcntl
+flock
+access
+faccessat
+faccessat2
+chmod
+fchmod
+fchmodat
+chown
+fchown
+fchownat
+mknod
+rename
+renameat
+link
+linkat
+symlink
+symlinkat
+readlink
+readlinkat
+utimensat
+unlink
+unlinkat
+poll
+ppoll
+select
+getdents64
+
+## Directories
+mkdir
+mkdirat
+rmdir
+DirOpendir              private 1086
+DirReaddir              private 1087
+DirClosedir             private 1088
+
+## Filesystems
+FsMount                 private 1094
+FsUnmount               private 1095
+sync
+fsync
+fdatasync
+
+## Kernel information
+KernelGetInfo           private 1104
+sysinfo
+getrusage
+
+## Packages
+PkgInstall              private 1114
+PkgRemove               private 1115
+PkgQuery                private 1116
+PkgList                 private 1117
+PkgUpdate               private 1118
+
+## Time
+TimeGetUptime           private 1124
+TimeCreateTimer         private 1125
+TimeCancelTimer         private 1126
+clock_gettime
+clock_getres
+clock_nanosleep
+nanosleep
+gettimeofday
+
+## Signals
+rt_sigaction
+rt_sigprocmask
+rt_sigsuspend
+rt_sigreturn
+rt_sigpending
+sigaltstack
+
+## Identity
+getuid
+geteuid
+getgid
+getegid
+setuid
+setgid
+setreuid
+setregid
+setresuid
+getresuid
+setresgid
+getresgid
+getgroups
+setgroups
+
+## Process groups and sessions
+setpgid
+getpgid
+getpgrp
+setsid
+getsid
+TcSetPgrp               private 1298
+TcGetPgrp               private 1299
+
+## Scheduling
+sched_setscheduler
+sched_getscheduler
+sched_get_priority_max
+sched_get_priority_min
+sched_setaffinity
+sched_getaffinity
+
+## Futexes
+futex
+FutexWait               private 1225
+FutexWake               private 1226
+
+## Shared memory
+ShmOpen                 private 1234
+ShmUnlink               private 1235
+ShmTruncate             private 1236
+
+## Sockets
+socket
+bind
+listen
+connect
+accept
+accept4
+SocketSend              private 1249
+SocketRecv              private 1250
+SocketClose             private 1251
+socketpair
+sendto
+recvfrom
+getsockname
+getpeername
+setsockopt
+getsockopt
+sendmsg
+recvmsg
+
+## Framebuffer and input
+FbGetInfo               private 1254
+FbMap                   private 1255
+InputPoll               private 1256
+InputRead               private 1257
+FbSwap                  private 1258
+
+## Wayland
+WlConnect               private 1264
+WlDisconnect            private 1265
+WlSendMessage           private 1266
+WlRecvMessage           private 1267
+WlCreateShmPool         private 1268
+WlCreateSurface         private 1269
+WlCommitSurface         private 1270
+WlGetEvents             private 1271
+
+## Resource limits
+getrlimit
+setrlimit
+prlimit64
+
+## epoll
+epoll_create1
+epoll_ctl
+epoll_wait
+epoll_pwait
+
+## Pseudo-terminals
+OpenPty                 private 1304
+GrantPty                private 1305
+UnlockPty               private 1306
+PtsName                 private 1307
+
+## Audio
+AudioOpen               private 1344
+AudioClose              private 1345
+AudioWrite              private 1346
+AudioSetVolume          private 1347
+AudioGetInfo            private 1348
+AudioStart              private 1349
+AudioStop               private 1350
+AudioPause              private 1351
+
+## Event, timer and signal descriptors
+getrandom
+eventfd2
+EventfdRead             private 1356
+EventfdWrite            private 1357
+timerfd_create
+timerfd_settime
+timerfd_gettime
+signalfd4
+
+## inotify
+inotify_init1
+inotify_add_watch
+inotify_rm_watch

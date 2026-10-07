@@ -120,6 +120,8 @@ sqlite_mcp_server.db
 *.elf
 *.sym
 *.map
+# The syscall table source (tools/compat/gen_syscalls.py), not a linker map.
+!abi/syscalls.map
 
 # Bootloader/GRUB artifacts
 isofiles/
