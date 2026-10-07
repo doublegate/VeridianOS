@@ -491,10 +491,22 @@ struct BuddyBlock {
     next: Option<*mut BuddyBlock>,
 }
 
+/// Alignment, in frames, of a buddy region's start (2 MiB).
+const BUDDY_BASE_ALIGN: u64 = 512;
+
 impl BuddyAllocator {
     fn new(start_frame: FrameNumber, frame_count: usize) -> Self {
+        // Start on a 512-frame (2 MiB) boundary so blocks of 512 frames and
+        // up are naturally aligned, which huge pages need; this gives up at
+        // most 511 frames. Block addresses and buddies are computed relative
+        // to the start (`buddy_of`).
+        let aligned = (start_frame.as_u64() + BUDDY_BASE_ALIGN - 1) & !(BUDDY_BASE_ALIGN - 1);
+        let frame_count = frame_count.saturating_sub((aligned - start_frame.as_u64()) as usize);
+        let start_frame = FrameNumber::new(aligned);
         // Round down to nearest power of 2 (keep as-is if already power of 2)
-        let total_frames = if frame_count.is_power_of_two() {
+        let total_frames = if frame_count == 0 {
+            0
+        } else if frame_count.is_power_of_two() {
             frame_count
         } else {
             frame_count.next_power_of_two() / 2
@@ -512,7 +524,7 @@ impl BuddyAllocator {
 
         // Only initialize buddy allocator when alloc is available
         #[cfg(feature = "alloc")]
-        {
+        if total_frames != 0 {
             allocator.free_lists[max_order] = Mutex::new(Some(BuddyBlock {
                 frame: start_frame,
                 next: None,
@@ -520,6 +532,22 @@ impl BuddyAllocator {
         }
 
         allocator
+    }
+
+    /// The buddy of the block at `frame` of size `1 << order`, relative to
+    /// the region start. The old `frame ^ (1 << order)` on absolute frame
+    /// numbers was right only for a region starting on a multiple of its
+    /// size, so blocks of an arbitrarily placed region never merged back.
+    fn buddy_of(&self, frame: FrameNumber, order: usize) -> FrameNumber {
+        let base = self.start_frame.as_u64();
+        FrameNumber::new(base + ((frame.as_u64() - base) ^ (1u64 << order)))
+    }
+
+    /// Whether `[frame, frame + count)` lies inside this region.
+    fn owns(&self, frame: FrameNumber, count: usize) -> bool {
+        let base = self.start_frame.as_u64();
+        let end = base + self.total_frames as u64;
+        frame.as_u64() >= base && frame.as_u64().saturating_add(count as u64) <= end
     }
 
     /// Get the order (power of 2) for a given frame count
@@ -593,13 +621,20 @@ impl BuddyAllocator {
             if order >= self.free_lists.len() {
                 return Err(FrameAllocatorError::InvalidSize);
             }
+            // Not ours: refuse rather than put a foreign frame on a free list
+            // (free_frames tries every allocator in turn).
+            if !self.owns(frame, 1 << order) {
+                return Err(FrameAllocatorError::InvalidFrame);
+            }
 
             // Try to merge with buddy
             let mut current_frame = frame;
             let mut current_order = order;
 
-            while current_order < self.free_lists.len() - 1 {
-                let buddy_frame = FrameNumber::new(current_frame.as_u64() ^ (1 << current_order));
+            while current_order < self.free_lists.len() - 1
+                && (1usize << (current_order + 1)) <= self.total_frames
+            {
+                let buddy_frame = self.buddy_of(current_frame, current_order);
 
                 // Check if buddy is free
                 let mut list = self.free_lists[current_order].lock();
@@ -1468,6 +1503,32 @@ mod tests {
             .allocate(10)
             .expect("re-allocation after free should succeed");
         assert_eq!(frame2.as_u64(), frame.as_u64());
+    }
+
+    /// A buddy region that does not start on a block boundary still merges
+    /// freed blocks back (buddies are relative to the region), its large
+    /// blocks are naturally aligned (2 MiB for 512 frames, for huge pages),
+    /// and it refuses frames that are not its own.
+    #[test]
+    fn buddy_unaligned_region_merges_and_aligns() {
+        let allocator = BuddyAllocator::new(FrameNumber::new(3), 2048);
+        let total = allocator.total_frames;
+        assert!(total.is_power_of_two() && total >= 512);
+        let big = allocator.allocate(512).expect("512 frames");
+        assert_eq!(big.as_u64() % 512, 0, "a 512-frame block is 2 MiB aligned");
+        allocator.free(big, 512).unwrap();
+        let one = allocator.allocate(1).expect("one frame");
+        allocator.free(one, 1).unwrap();
+        assert_eq!(allocator.free_count(), total);
+        let all = allocator
+            .allocate(total)
+            .expect("freed blocks merge back into the whole region");
+        allocator.free(all, total).unwrap();
+        // Frames outside the region are rejected, not added to a free list.
+        assert!(allocator.free(FrameNumber::new(1), 1).is_err());
+        assert!(allocator
+            .free(FrameNumber::new(all.as_u64() + total as u64), 1)
+            .is_err());
     }
 
     #[test]
