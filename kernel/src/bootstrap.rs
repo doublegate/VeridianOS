@@ -1945,15 +1945,12 @@ pub(crate) fn run_user_process(pid: crate::process::ProcessId) {
     // When the user process calls sys_exit, boot_return_to_kernel()
     // restores the saved context and this call "returns" normally.
     //
-    // SAFETY: All preconditions for enter_usermode_returnable are met:
-    // - entry_point is in the process's user-space page tables
-    // - user_stack_top points to the top of the user stack
-    // - CS/SS are valid Ring 3 selectors from the GDT
-    // - pt_root is a valid L4 page table with kernel mappings preserved
-    // - kernel_rsp_ptr points to the per-CPU kernel_rsp field
     // DEBUG: Print TSS stack addresses and IDT handler addresses before entering
     // Ring 3.
     crate::arch::x86_64::gdt::debug_print_tss_stacks();
+    // SAFETY: debug_idt_handler_addr reads the live IDT within its limit and
+    // the raw_serial_* helpers write COM1 (port 0x3F8), which is present on
+    // the x86_64 platforms this kernel targets.
     unsafe {
         let pf_addr = crate::arch::x86_64::gdt::debug_idt_handler_addr(14); // #PF = vector 14
         let df_addr = crate::arch::x86_64::gdt::debug_idt_handler_addr(8); // #DF = vector 8
@@ -1976,8 +1973,9 @@ pub(crate) fn run_user_process(pid: crate::process::ProcessId) {
     // interrupts (APIC timer, etc.) firing from Ring 3 without IST, falling
     // back to TSS.RSP0 which was stale/unmapped in the process CR3. Fixed
     // by adding IST to all hardware IRQ vectors (32, 33, 48, 49, 50).
-    // SAFETY: Reading TSS.RSP0 and writing to COM1 for diagnostics.
     let tss_rsp0 = crate::arch::x86_64::gdt::get_kernel_stack();
+    // SAFETY: writing diagnostics to COM1 (port 0x3F8), which is present on
+    // the x86_64 platforms this kernel targets.
     unsafe {
         crate::arch::x86_64::idt::raw_serial_str(b"[BOOT] TSS_RSP0=0x");
         crate::arch::x86_64::idt::raw_serial_hex(tss_rsp0);
@@ -1998,6 +1996,7 @@ pub(crate) fn run_user_process(pid: crate::process::ProcessId) {
     //
     // Read current RSP -- this is our boot stack which is guaranteed mapped.
     let current_rsp: u64;
+    // SAFETY: copying RSP into a register has no side effects.
     unsafe {
         core::arch::asm!("mov {}, rsp", out(reg) current_rsp, options(nomem, nostack));
     }
@@ -2013,6 +2012,12 @@ pub(crate) fn run_user_process(pid: crate::process::ProcessId) {
 
     let per_cpu = crate::arch::x86_64::syscall::per_cpu_data_ptr();
     let kernel_rsp_ptr = per_cpu as u64;
+    // SAFETY: All preconditions for enter_usermode_returnable are met:
+    // - entry_point is in the process's user-space page tables
+    // - user_stack_top points to the top of the user stack
+    // - CS/SS are valid Ring 3 selectors from the GDT
+    // - pt_root is a valid L4 page table with kernel mappings preserved
+    // - kernel_rsp_ptr points to the per-CPU kernel_rsp field
     unsafe {
         crate::arch::x86_64::usermode::enter_usermode_returnable(
             entry_point,
@@ -2235,6 +2240,7 @@ pub fn boot_run_forked_child(
     // initialized during boot. We read kernel_rsp and user_rsp to save/restore
     // across the child dispatch.
     let saved_kernel_rsp = unsafe { (*per_cpu).kernel_rsp };
+    // SAFETY: same per-CPU pointer as above.
     let saved_user_rsp = unsafe { (*per_cpu).user_rsp };
 
     // Set child as the current boot process

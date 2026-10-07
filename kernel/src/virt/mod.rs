@@ -268,6 +268,8 @@ pub fn cpu_supports_vmx() -> bool {
     #[cfg(target_arch = "x86_64")]
     {
         let ecx: u32;
+        // SAFETY: CPUID leaf 1 is always available on x86_64 and only reads
+        // feature flags; RBX is saved/restored because LLVM reserves it.
         unsafe {
             core::arch::asm!(
                 "push rbx", "mov eax, 1", "cpuid", "pop rbx",
@@ -283,9 +285,17 @@ pub fn cpu_supports_vmx() -> bool {
 }
 
 #[cfg(target_arch = "x86_64")]
+/// Read a model-specific register.
+///
+/// # Safety
+///
+/// Must run in Ring 0, and `msr` must be an MSR that exists on this CPU
+/// (otherwise RDMSR raises #GP).
 pub(crate) unsafe fn read_msr(msr: u32) -> u64 {
     let low: u32;
     let high: u32;
+    // SAFETY: forwarded from this function's contract: Ring 0 and an
+    // existing MSR.
     unsafe {
         core::arch::asm!("rdmsr", in("ecx") msr, out("eax") low, out("edx") high, options(nomem, nostack));
     }
@@ -293,9 +303,17 @@ pub(crate) unsafe fn read_msr(msr: u32) -> u64 {
 }
 
 #[cfg(target_arch = "x86_64")]
+/// Write a model-specific register.
+///
+/// # Safety
+///
+/// Must run in Ring 0; `msr` must exist on this CPU and accept `value`
+/// (otherwise WRMSR raises #GP), and the write must not break invariants the
+/// rest of the kernel relies on.
 pub(crate) unsafe fn write_msr(msr: u32, value: u64) {
     let low = value as u32;
     let high = (value >> 32) as u32;
+    // SAFETY: forwarded from this function's contract.
     unsafe {
         core::arch::asm!("wrmsr", in("ecx") msr, in("eax") low, in("edx") high, options(nomem, nostack));
     }

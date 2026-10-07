@@ -277,15 +277,35 @@ fn com2_init() {
 #[cfg(not(target_os = "none"))]
 fn com2_init() {}
 
+/// Write a byte to an I/O port.
+///
+/// # Safety
+///
+/// `port` must be a register of the COM2 UART (or another device for which
+/// writing `val` is harmless).
 #[cfg(target_os = "none")]
 unsafe fn outb(port: u16, val: u8) {
-    core::arch::asm!("out dx, al", in("dx") port, in("al") val, options(nostack, preserves_flags));
+    // SAFETY: forwarded from this function's contract: `port` is a valid I/O
+    // port of the COM2 UART.
+    unsafe {
+        core::arch::asm!("out dx, al", in("dx") port, in("al") val, options(nostack, preserves_flags))
+    };
 }
 
+/// Read a byte from an I/O port.
+///
+/// # Safety
+///
+/// `port` must be a register of the COM2 UART (or another device for which
+/// a read has no harmful side effect).
 #[cfg(target_os = "none")]
 unsafe fn inb(port: u16) -> u8 {
     let val: u8;
-    core::arch::asm!("in al, dx", out("al") val, in("dx") port, options(nostack, preserves_flags));
+    // SAFETY: forwarded from this function's contract: `port` is a valid I/O
+    // port of the COM2 UART.
+    unsafe {
+        core::arch::asm!("in al, dx", out("al") val, in("dx") port, options(nostack, preserves_flags))
+    };
     val
 }
 

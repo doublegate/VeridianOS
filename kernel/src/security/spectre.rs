@@ -111,8 +111,8 @@ fn detect_features() {
 
     #[cfg(target_os = "none")]
     {
-        // SAFETY: CPUID is read-only. We save/restore RBX for LLVM.
         let edx_val: u32;
+        // SAFETY: CPUID is read-only. We save/restore RBX for LLVM.
         unsafe {
             core::arch::asm!(
                 "push rbx",
