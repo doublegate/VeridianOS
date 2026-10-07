@@ -2,6 +2,14 @@
 
 ### Added
 
+- **Job control (sprint D3, N-99).** SIGSTOP, SIGTSTP, SIGTTIN and SIGTTOU with the default action
+  stop every thread of the process (each parks on its way back to user mode; a system call the
+  stop interrupted runs again afterwards), and SIGCONT continues it whatever its action. A stop
+  signal discards a pending SIGCONT and the reverse; SIGKILL ends a stopped process. The parent
+  gets SIGCHLD (unless it set SA_NOCLDSTOP) and `wait` reports each stop (WUNTRACED) and continue
+  (WCONTINUED) once. `wait` and `waitid` can now wait for a process group (`pid` 0 or below -1,
+  `P_PGID`), `waitid` without WEXITED skips exits, and its siginfo carries CLD_STOPPED and
+  CLD_CONTINUED. These signals used to be dropped. Runtime test `stop_continue_and_group_wait`.
 - **Multiprocessor bring-up (stage S1, `smp` feature; ADR 0004).** Built with
   `FEATURES=smp`, the kernel starts the other CPUs on every architecture:
   - x86_64 uses INIT-SIPI-SIPI and a real-to-long-mode trampoline, and gives each CPU its own

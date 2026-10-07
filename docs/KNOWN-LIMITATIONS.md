@@ -97,11 +97,16 @@ Since sprint D3, dispatched threads on x86_64 take signals as Linux does:
 - **Delivery.** Handlers run on a Linux `rt_sigframe` with SA_RESTORER, and SA_RESTART,
   SA_NODEFER and SA_RESETHAND are honoured. `sigsuspend` and `sigpending` work, and a fault
   reaches an installed handler (N-96, N-98, N-113).
+- **Job control.** Stop signals stop every thread of the process, SIGCONT continues it, and the
+  parent sees both through SIGCHLD and `wait` (WUNTRACED, WCONTINUED, process-group waits).
 
 What remains:
 
-- **Stop and continue are not implemented.** SIGSTOP, SIGTSTP, SIGTTIN and SIGTTOU are ignored
-  rather than stopping the process, and SIGCONT does nothing; there is no job control.
+- **Job control is partial.** A stopped thread parks at its next return to user mode, so one
+  blocked in a system call stays there until it returns; the parent is told at once rather than
+  after every thread has stopped. Orphaned process groups are not exempt from SIGTSTP, SIGTTIN
+  and SIGTTOU, and background reads and writes on a terminal raise neither (no line discipline
+  yet).
 - **Handlers save x87/SSE state only.** The signal frame holds an FXSAVE image, so the upper
   halves of AVX registers are not preserved across a handler that uses them.
 - **`siginfo` carries only the signal number.** No sender pid or uid, no fault address.
@@ -110,8 +115,8 @@ What remains:
   `FUTEX_WAIT_BITSET` timeouts are treated as relative (N-104).
 - **sigreturn on AArch64 and RISC-V does not sanitise registers (N-170).** PSTATE and `sstatus`
   are restored as given, latent until those architectures have user mode.
-- **wait (N-99):** no process-group waits, WUNTRACED/WCONTINUED are wrong, `waitid(WNOWAIT)`
-  returns EINVAL. (File errors now carry their own errno, N-127.)
+- **wait (N-99 remainder):** `waitid(WNOWAIT)` returns EINVAL, and `wait4` reports no resource
+  usage.
 
 ### Processes, exec and credentials
 

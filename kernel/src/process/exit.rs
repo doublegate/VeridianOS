@@ -92,6 +92,8 @@ pub struct WaitOptions {
     pub untraced: bool,
     /// Also return if a stopped child has been resumed (WCONTINUED)
     pub continued: bool,
+    /// Do not report exited children (waitid without WEXITED)
+    pub skip_exited: bool,
 }
 
 impl WaitOptions {
@@ -99,16 +101,59 @@ impl WaitOptions {
     pub fn no_hang() -> Self {
         Self {
             no_hang: true,
-            untraced: false,
-            continued: false,
+            ..Self::default()
         }
     }
+}
+
+/// Which children a wait is for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WaitFilter {
+    /// Any child (`pid == -1`, `P_ALL`).
+    Any,
+    /// One child (`pid > 0`, `P_PID`).
+    Pid(ProcessId),
+    /// Children in a process group (`pid == 0` or `pid < -1`, `P_PGID`;
+    /// N-99).
+    Group(u64),
+}
+
+impl WaitFilter {
+    fn matches(self, child: ProcessId) -> bool {
+        match self {
+            Self::Any => true,
+            Self::Pid(p) => p == child,
+            Self::Group(g) => {
+                table::get_process(child).is_some_and(|c| c.pgid.load(Ordering::Acquire) == g)
+            }
+        }
+    }
+}
+
+/// The stop or continue report of `child` that `options` asks for, if any
+/// (not consumed).
+fn job_report_for(child: &super::Process, options: WaitOptions) -> Option<u32> {
+    let r = child.job_report.load(Ordering::Acquire);
+    let stop = r != 0 && r & 0xff == 0x7f;
+    let cont = r == 0xffff;
+    ((options.untraced && stop) || (options.continued && cont)).then_some(r)
 }
 
 /// Wait for child process with options
 #[cfg(feature = "alloc")]
 pub fn wait_process_with_options(
     pid: Option<ProcessId>,
+    options: WaitOptions,
+) -> Result<(ProcessId, i32), KernelError> {
+    wait_children(pid.map_or(WaitFilter::Any, WaitFilter::Pid), options)
+}
+
+/// Wait for a child selected by `filter` to change state: exit (unless
+/// `skip_exited`), stop (`untraced`) or continue (`continued`). Each stop
+/// or continue is reported once.
+#[cfg(feature = "alloc")]
+pub fn wait_children(
+    filter: WaitFilter,
     options: WaitOptions,
 ) -> Result<(ProcessId, i32), KernelError> {
     let current = super::current_process().ok_or(KernelError::NotInitialized {
@@ -133,8 +178,7 @@ pub fn wait_process_with_options(
 
         for child_pid in &children {
             // Check if this child matches our pid filter
-            let matches_filter = pid.is_none() || pid == Some(*child_pid);
-            if !matches_filter {
+            if !filter.matches(*child_pid) {
                 continue;
             }
 
@@ -144,7 +188,7 @@ pub fn wait_process_with_options(
                 let child_state = child.get_state();
 
                 // Check for zombie (exited)
-                if child_state == ProcessState::Zombie {
+                if child_state == ProcessState::Zombie && !options.skip_exited {
                     // Reap the zombie
                     let exit_code = child.get_exit_code();
 
@@ -168,28 +212,30 @@ pub fn wait_process_with_options(
                     return Ok((*child_pid, wait_status));
                 }
 
-                // Check for stopped child if WUNTRACED is set
-                if options.untraced && child_state == ProcessState::Blocked {
-                    // Return status indicating stopped (signal number in bits 8-15)
-                    // Use 0x7f as the stopped indicator with SIGSTOP (19)
-                    let status = 0x7f | (19 << 8);
-                    return Ok((*child_pid, status));
-                }
-
-                // Check for continued child if WCONTINUED is set
-                if options.continued && child_state == ProcessState::Running {
-                    // Return status indicating continued
-                    let status = 0xffff; // WIFCONTINUED indicator
-                    return Ok((*child_pid, status));
+                // A stop (WUNTRACED) or continue (WCONTINUED), reported
+                // once: whoever clears it reports it (N-99).
+                if let Some(r) = job_report_for(&child, options) {
+                    if child
+                        .job_report
+                        .compare_exchange(r, 0, Ordering::AcqRel, Ordering::Acquire)
+                        .is_ok()
+                    {
+                        return Ok((*child_pid, r as i32));
+                    }
                 }
             }
         }
 
         // No matching child found
-        if pid.is_some() && !matching_child_exists {
-            return Err(KernelError::ProcessNotFound {
-                pid: pid.unwrap_or(ProcessId(0)).0,
-            });
+        if !matching_child_exists {
+            return match filter {
+                WaitFilter::Pid(p) => Err(KernelError::ProcessNotFound { pid: p.0 }),
+                // No child in the group: ECHILD, as for no children.
+                _ => Err(KernelError::NotFound {
+                    resource: "child process",
+                    id: 0,
+                }),
+            };
         }
 
         // No zombie children found
@@ -204,19 +250,20 @@ pub fn wait_process_with_options(
         // back to user mode).
         #[cfg(feature = "alloc")]
         if crate::sched::dispatch::current_owner().is_some() {
-            let filter = pid;
             sched::dispatch::PROCESS_EVENTS.wait_until(|| {
                 super::wait_interrupted()
                     || table::PROCESS_TABLE
                         .find_children(current_pid)
                         .iter()
-                        .filter(|c| filter.is_none() || filter == Some(**c))
+                        .filter(|c| filter.matches(**c))
                         .any(|c| {
                             // A zombie is reapable once its last task is off
                             // the CPU and its page tables are gone.
                             table::get_process(*c).is_none_or(|p| {
-                                p.get_state() == ProcessState::Zombie
-                                    && sched::dispatch::tasks_of(c.0).is_empty()
+                                (p.get_state() == ProcessState::Zombie
+                                    && !options.skip_exited
+                                    && sched::dispatch::tasks_of(c.0).is_empty())
+                                    || job_report_for(&p, options).is_some()
                             })
                         })
             });
@@ -236,8 +283,7 @@ pub fn wait_process_with_options(
         {
             let mut ran_child = false;
             for child_pid in &children {
-                let matches_filter = pid.is_none() || pid == Some(*child_pid);
-                if !matches_filter {
+                if !filter.matches(*child_pid) {
                     continue;
                 }
                 if let Some(child) = table::get_process(*child_pid) {
@@ -267,9 +313,8 @@ pub fn wait_process_with_options(
 
         // Normal scheduler path: block and wait for child to wake us.
         println!(
-            "[PROCESS] Process {} blocking in wait() for child {}",
-            current_pid.0,
-            pid.map_or(-1, |p| p.0 as i64)
+            "[PROCESS] Process {} blocking in wait() for {:?}",
+            current_pid.0, filter
         );
 
         sched::block_process(current_pid);

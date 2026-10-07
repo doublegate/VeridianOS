@@ -328,14 +328,23 @@ pub(crate) fn exit_current(exit_code: i32, term_signal: u32) -> SyscallResult {
 /// - status_ptr: Pointer to store exit status
 /// - options: Wait options bitmask (WNOHANG=1, WUNTRACED=2, WCONTINUED=8)
 pub fn sys_wait(pid: isize, status_ptr: usize, options: usize) -> SyscallResult {
-    use crate::{process::exit::WaitOptions, syscall::userspace::copy_to_user};
+    use crate::{
+        process::exit::{WaitFilter, WaitOptions},
+        syscall::userspace::copy_to_user,
+    };
 
-    let wait_pid = if pid == -1 {
-        None
-    } else if pid > 0 {
-        Some(ProcessId(pid as u64))
-    } else {
-        return Err(SyscallError::InvalidArgument);
+    // -1 any child, > 0 that child, 0 the caller's process group, < -1 the
+    // group -pid (N-99).
+    let filter = match pid {
+        -1 => WaitFilter::Any,
+        p if p > 0 => WaitFilter::Pid(ProcessId(p as u64)),
+        0 => WaitFilter::Group(
+            current_process()
+                .ok_or(SyscallError::InvalidState)?
+                .pgid
+                .load(core::sync::atomic::Ordering::Acquire),
+        ),
+        p => WaitFilter::Group(p.unsigned_abs() as u64),
     };
 
     // Parse options bitmask into WaitOptions struct
@@ -347,9 +356,10 @@ pub fn sys_wait(pid: isize, status_ptr: usize, options: usize) -> SyscallResult 
         no_hang: (options & WNOHANG) != 0,
         untraced: (options & WUNTRACED) != 0,
         continued: (options & WCONTINUED) != 0,
+        skip_exited: false,
     };
 
-    let wait_result = crate::process::exit::wait_process_with_options(wait_pid, wait_options);
+    let wait_result = crate::process::exit::wait_children(filter, wait_options);
 
     match wait_result {
         Ok((child_pid, exit_status)) => {
@@ -1131,30 +1141,40 @@ pub fn sys_tgkill(tgid: usize, tid: usize, signal: usize) -> SyscallResult {
 /// waitid(2) for P_ALL and P_PID, with WEXITED, WSTOPPED, WCONTINUED and
 /// WNOHANG (N-103). The result is written as a Linux `siginfo_t`.
 pub fn sys_waitid(idtype: usize, id: usize, infop: usize, options: usize) -> SyscallResult {
-    use crate::process::exit::WaitOptions;
+    use crate::process::exit::{WaitFilter, WaitOptions};
     const P_ALL: usize = 0;
     const P_PID: usize = 1;
+    const P_PGID: usize = 2;
     const WNOHANG: usize = 1;
     const WSTOPPED: usize = 2;
     const WEXITED: usize = 4;
     const WCONTINUED: usize = 8;
     const WNOWAIT: usize = 0x0100_0000;
 
-    let pid = match idtype {
-        P_ALL => None,
-        P_PID if id > 0 => Some(ProcessId(id as u64)),
-        // Process groups and pidfds come with the process-model rework.
+    let filter = match idtype {
+        P_ALL => WaitFilter::Any,
+        P_PID if id > 0 => WaitFilter::Pid(ProcessId(id as u64)),
+        // id 0: the caller's own group.
+        P_PGID if id == 0 => WaitFilter::Group(
+            current_process()
+                .ok_or(SyscallError::InvalidState)?
+                .pgid
+                .load(core::sync::atomic::Ordering::Acquire),
+        ),
+        P_PGID => WaitFilter::Group(id as u64),
+        // pidfds come later.
         _ => return Err(SyscallError::InvalidArgument),
     };
     if options & (WEXITED | WSTOPPED | WCONTINUED) == 0 || options & WNOWAIT != 0 {
         return Err(SyscallError::InvalidArgument);
     }
-    let (child, status) = crate::process::exit::wait_process_with_options(
-        pid,
+    let (child, status) = crate::process::exit::wait_children(
+        filter,
         WaitOptions {
             no_hang: options & WNOHANG != 0,
             untraced: options & WSTOPPED != 0,
             continued: options & WCONTINUED != 0,
+            skip_exited: options & WEXITED == 0,
         },
     )
     .map_err(wait_error)?;
@@ -1174,11 +1194,18 @@ fn waitid_siginfo(pid: u64, status: i32) -> [u8; 128] {
     const CLD_EXITED: i32 = 1;
     const CLD_KILLED: i32 = 2;
     const CLD_DUMPED: i32 = 3;
+    const CLD_STOPPED: i32 = 5;
+    const CLD_CONTINUED: i32 = 6;
+    const SIGCONT: i32 = 18;
     let mut info = [0u8; 128];
     if pid == 0 {
         return info;
     }
-    let (code, value) = if status & 0x7f == 0 {
+    let (code, value) = if status == 0xffff {
+        (CLD_CONTINUED, SIGCONT)
+    } else if status & 0xff == 0x7f {
+        (CLD_STOPPED, (status >> 8) & 0xff)
+    } else if status & 0x7f == 0 {
         (CLD_EXITED, (status >> 8) & 0xff)
     } else if status & 0x80 != 0 {
         (CLD_DUMPED, status & 0x7f)
@@ -1210,5 +1237,10 @@ mod waitid_tests {
         let dumped = waitid_siginfo(7, 0x8b);
         assert_eq!((field(&dumped, 8), field(&dumped, 24)), (3, 11));
         assert!(waitid_siginfo(0, 0).iter().all(|&b| b == 0));
+        // Stopped by SIGTSTP, and continued (N-99).
+        let stopped = waitid_siginfo(7, 0x7f | (20 << 8));
+        assert_eq!((field(&stopped, 8), field(&stopped, 24)), (5, 20));
+        let continued = waitid_siginfo(7, 0xffff);
+        assert_eq!((field(&continued, 8), field(&continued, 24)), (6, 18));
     }
 }

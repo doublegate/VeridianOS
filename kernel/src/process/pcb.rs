@@ -128,6 +128,19 @@ pub struct Process {
     /// to user mode or wakeup, and the last one tears the process down.
     pub kill_pending: AtomicU32,
 
+    /// Job control (D3): the signal that stopped the process, 0 while it
+    /// runs. Its threads park on their way back to user mode until SIGCONT
+    /// or SIGKILL.
+    pub stop_signal: AtomicU32,
+
+    /// Counts SIGCONTs, so a stop decided before a SIGCONT arrived is not
+    /// applied after it.
+    pub cont_seq: AtomicU32,
+
+    /// A stop or continue the parent has not collected with `wait` yet, as
+    /// a wait status (`0x7f | sig << 8` or `0xffff`); 0 for none.
+    pub job_report: AtomicU32,
+
     /// CPU time used (in microseconds)
     pub cpu_time: AtomicU64,
 
@@ -266,6 +279,9 @@ impl Process {
             term_signal: AtomicU32::new(0),
             dispatched: core::sync::atomic::AtomicBool::new(false),
             kill_pending: AtomicU32::new(0),
+            stop_signal: AtomicU32::new(0),
+            cont_seq: AtomicU32::new(0),
+            job_report: AtomicU32::new(0),
             cpu_time: AtomicU64::new(0),
             memory_stats: MemoryStats::default(),
             created_at: crate::arch::timer::get_ticks(),

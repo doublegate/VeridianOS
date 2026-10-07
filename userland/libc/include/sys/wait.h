@@ -63,6 +63,9 @@ extern "C" {
 /** Also report stopped children. */
 #define WUNTRACED   2
 
+/** Also report children resumed by SIGCONT. */
+#define WCONTINUED  8
+
 /* ========================================================================= */
 /* Function declarations                                                     */
 /* ========================================================================= */

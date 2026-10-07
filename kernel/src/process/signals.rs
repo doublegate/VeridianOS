@@ -12,12 +12,18 @@
 //!   interrupts a wait (N-98); everything else pends and wakes the target.
 //! - **Delivery** happens on the way back to user mode, through the frame on
 //!   the thread's kernel stack: default actions run there (terminate, with a
-//!   core flag for the core-dumping signals; stop and continue are not
-//!   implemented and are ignored); a handler gets a Linux `rt_sigframe` on the
-//!   user stack -- return address (the SA_RESTORER trampoline), `ucontext` with
-//!   the interrupted registers and mask, `siginfo`, and the FXSAVE image of the
-//!   x87/SSE state -- and runs with `sa_mask` and the signal itself blocked
-//!   (N-113). SA_RESTART restarts a system call that a signal interrupted.
+//!   core flag for the core-dumping signals; stop); a handler gets a Linux
+//!   `rt_sigframe` on the user stack -- return address (the SA_RESTORER
+//!   trampoline), `ucontext` with the interrupted registers and mask,
+//!   `siginfo`, and the FXSAVE image of the x87/SSE state -- and runs with
+//!   `sa_mask` and the signal itself blocked (N-113). SA_RESTART restarts a
+//!   system call that a signal interrupted.
+//! - **Job control.** A stop signal with the default action stops the whole
+//!   process when a thread takes it: the parent gets SIGCHLD (unless it set
+//!   SA_NOCLDSTOP) and a `WUNTRACED` report, and every thread parks at its next
+//!   return to user mode. SIGCONT continues the process when it is sent,
+//!   whatever its action, and discards pending stop signals; a stop signal
+//!   discards a pending SIGCONT. SIGKILL ends a stopped process.
 //! - **rt_sigreturn** restores the registers (sanitised: user selectors and
 //!   RFLAGS bits, user RIP and RSP), the mask and the FPU image (MXCSR reserved
 //!   bits cleared so FXRSTOR cannot fault in ring 0).
@@ -36,7 +42,15 @@ pub const fn sig_bit(sig: usize) -> u64 {
 }
 
 pub const SIGKILL: usize = 9;
+pub const SIGCHLD: usize = 17;
+pub const SIGCONT: usize = 18;
 pub const SIGSTOP: usize = 19;
+
+/// SIGSTOP, SIGTSTP, SIGTTIN, SIGTTOU.
+pub const STOP_SIGNALS: u64 = sig_bit(19) | sig_bit(20) | sig_bit(21) | sig_bit(22);
+
+/// `sa_flags` bit: no SIGCHLD when a child stops or continues.
+const SA_NOCLDSTOP: u64 = 1;
 
 /// Signals no mask can block.
 pub const UNBLOCKABLE: u64 = sig_bit(SIGKILL) | sig_bit(SIGSTOP);
@@ -87,16 +101,97 @@ pub const fn default_action(sig: usize) -> DefaultAction {
 
 /// Whether sending `sig` to `process` would only be ignored (SIG_IGN, or
 /// SIG_DFL with a default action of ignore). Such a signal is dropped when
-/// generated (N-98). Stop and continue are not implemented yet and count
-/// as ignored, rather than terminating the process.
+/// generated (N-98). SIGCONT's continuing happens when it is sent, so with
+/// the default action nothing is left to deliver.
 pub fn ignored(process: &Process, sig: usize) -> bool {
     match process.get_signal_handler(sig).unwrap_or(SIG_DFL) {
         SIG_IGN => true,
         SIG_DFL => matches!(
             default_action(sig),
-            DefaultAction::Ignore | DefaultAction::Stop | DefaultAction::Continue
+            DefaultAction::Ignore | DefaultAction::Continue
         ),
         _ => false,
+    }
+}
+
+/// Generation-time job-control effects of `sig` on `process`: SIGCONT
+/// continues it and discards pending stops; a stop signal discards a
+/// pending SIGCONT.
+#[cfg(feature = "alloc")]
+fn job_control_on_send(process: &Process, sig: usize) {
+    if sig == SIGCONT {
+        process
+            .pending_signals
+            .fetch_and(!STOP_SIGNALS, Ordering::AcqRel);
+        for thread in process.threads.lock().values() {
+            thread.sigpending.fetch_and(!STOP_SIGNALS, Ordering::AcqRel);
+        }
+        // Bump first: a stop being decided right now sees the change and
+        // backs out (`stop_process`).
+        process.cont_seq.fetch_add(1, Ordering::SeqCst);
+        if process.stop_signal.swap(0, Ordering::SeqCst) != 0 {
+            process.job_report.store(0xffff, Ordering::Release);
+            notify_parent_job(process);
+        }
+        crate::sched::dispatch::PROCESS_EVENTS.wake_all();
+    } else if sig_bit(sig) & STOP_SIGNALS != 0 {
+        let cont = !sig_bit(SIGCONT);
+        process.pending_signals.fetch_and(cont, Ordering::AcqRel);
+        for thread in process.threads.lock().values() {
+            thread.sigpending.fetch_and(cont, Ordering::AcqRel);
+        }
+    }
+}
+
+/// Tell `process`'s parent that it stopped or continued: SIGCHLD unless
+/// the parent asked for none (SA_NOCLDSTOP), and a wakeup for `wait`.
+#[cfg(feature = "alloc")]
+fn notify_parent_job(process: &Process) {
+    if let Some(parent) = process.parent().and_then(super::table::get_process) {
+        let nocldstop = parent.signal_action_extra.lock()[SIGCHLD].0 & SA_NOCLDSTOP != 0;
+        if !nocldstop {
+            notify(&parent, SIGCHLD);
+        }
+    }
+    crate::sched::dispatch::PROCESS_EVENTS.wake_all();
+}
+
+/// Stop `process` with `sig`, unless a SIGCONT came after `seq` was read
+/// (the stop signal was taken before it, so the continue wins).
+#[cfg(all(feature = "alloc", target_arch = "x86_64"))]
+fn stop_process(process: &Process, sig: usize, seq: u32) {
+    if process
+        .stop_signal
+        .compare_exchange(0, sig as u32, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return; // already stopped
+    }
+    if process.cont_seq.load(Ordering::SeqCst) != seq {
+        let _ =
+            process
+                .stop_signal
+                .compare_exchange(sig as u32, 0, Ordering::SeqCst, Ordering::SeqCst);
+        return;
+    }
+    process
+        .job_report
+        .store(0x7f | ((sig as u32) << 8), Ordering::Release);
+    notify_parent_job(process);
+}
+
+/// Park the calling thread while its process is stopped; returns once it
+/// is continued or has a fatal signal to act on.
+#[cfg(feature = "alloc")]
+pub fn park_while_stopped() {
+    let stopped = || {
+        super::current_process().is_some_and(|p| {
+            p.stop_signal.load(Ordering::Acquire) != 0
+                && p.kill_pending.load(Ordering::Acquire) == 0
+        })
+    };
+    while stopped() {
+        crate::sched::dispatch::PROCESS_EVENTS.wait_until(|| !stopped());
     }
 }
 
@@ -110,6 +205,7 @@ pub fn send_to_process(process: &Process, sig: usize) -> bool {
     if tasks.is_empty() {
         return false;
     }
+    job_control_on_send(process, sig);
     if sig == SIGKILL {
         let _ = process.kill_pending.compare_exchange(
             0,
@@ -150,6 +246,7 @@ pub fn send_to_thread(process: &Process, thread: &Thread, sig: usize) {
         send_to_process(process, sig);
         return;
     }
+    job_control_on_send(process, sig);
     if ignored(process, sig) {
         return;
     }
@@ -447,6 +544,9 @@ mod frame {
     /// is terminated.
     pub fn deliver_on_return(f: &mut TrapFrame) {
         loop {
+            // A stopped process's threads wait here; SIGKILL ends them.
+            park_while_stopped();
+            super::super::user_return_check();
             // Decide with the references in a scope of their own: exiting
             // must not leave an Arc behind on this stack.
             let fatal = {
@@ -456,6 +556,7 @@ mod frame {
                 ) else {
                     return;
                 };
+                let seq = process.cont_seq.load(Ordering::SeqCst);
                 let Some(sig) = dequeue(&process, &thread) else {
                     // sigsuspend ended without a handler to restore its
                     // mask: put the saved one back now.
@@ -473,6 +574,16 @@ mod frame {
                     SIG_IGN => None,
                     SIG_DFL => match default_action(sig) {
                         DefaultAction::Terminate | DefaultAction::CoreDump => Some(sig),
+                        DefaultAction::Stop => {
+                            // A system call the stop interrupted runs again
+                            // once the process continues, as on Linux.
+                            if f.vector == SYSCALL_VECTOR && f.rax == EINTR_RAX {
+                                f.rax = f.error_code;
+                                f.rip = f.rip.wrapping_sub(2);
+                            }
+                            stop_process(&process, sig, seq);
+                            None
+                        }
                         _ => None,
                     },
                     addr => {

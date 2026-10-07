@@ -1577,6 +1577,67 @@ static void test_map_fixed_replace(void)
            replaced && hole && span && reuse && empty && cursor, why);
 }
 
+/* D3 job control and N-99: SIGSTOP stops every thread of the child and
+ * waitpid(WUNTRACED) reports it once; SIGCONT resumes it and
+ * waitpid(WCONTINUED) reports that; SIGKILL ends a stopped child; a
+ * process-group wait finds a child by its group. */
+static void test_stop_continue(void)
+{
+    volatile unsigned long *ctr =
+        mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    if (ctr == MAP_FAILED) {
+        report("stop_continue_and_group_wait", 0, "mmap failed");
+        return;
+    }
+    ctr[0] = 0;
+    pid_t pid = fork();
+    if (pid == 0) {
+        if (setpgid(0, 0) != 0)
+            _exit(3);
+        for (;;)
+            ctr[0]++;
+    }
+    struct timespec ms20 = {0, 20 * 1000 * 1000};
+    /* Let it run, so a stop is observable. */
+    for (int i = 0; i < 100 && ctr[0] == 0; i++)
+        nanosleep(&ms20, NULL);
+    int st = 0;
+
+    kill(pid, SIGSTOP);
+    pid_t r = waitpid(pid, &st, WUNTRACED);
+    int stopped = r == pid && WIFSTOPPED(st) && WSTOPSIG(st) == SIGSTOP;
+    unsigned long a = ctr[0];
+    nanosleep(&ms20, NULL);
+    nanosleep(&ms20, NULL);
+    int frozen = ctr[0] == a;
+    /* Reported once: a second WNOHANG wait sees nothing new. */
+    int once = waitpid(pid, &st, WUNTRACED | WNOHANG) == 0;
+
+    kill(pid, SIGCONT);
+    r = waitpid(pid, &st, WCONTINUED);
+    int continued = r == pid && WIFCONTINUED(st);
+    unsigned long b = ctr[0];
+    for (int i = 0; i < 100 && ctr[0] == b; i++)
+        nanosleep(&ms20, NULL);
+    int resumed = ctr[0] != b;
+
+    /* Stopped again, then killed: SIGKILL ends it; the wait goes by the
+     * child's own process group. */
+    kill(pid, SIGTSTP);
+    r = waitpid(-pid, &st, WUNTRACED);
+    int tstp = r == pid && WIFSTOPPED(st) && WSTOPSIG(st) == SIGTSTP;
+    kill(pid, SIGKILL);
+    r = waitpid(-pid, &st, 0);
+    int killed = r == pid && WIFSIGNALED(st) && WTERMSIG(st) == SIGKILL;
+    munmap((void *)ctr, 4096);
+
+    static char why[112];
+    snprintf(why, sizeof(why), "stop=%d frozen=%d once=%d cont=%d resumed=%d tstp=%d kill=%d",
+             stopped, frozen, once, continued, resumed, tstp, killed);
+    report("stop_continue_and_group_wait",
+           stopped && frozen && once && continued && resumed && tstp && killed, why);
+}
+
 int main(int argc, char **argv)
 {
     setvbuf(stdout, NULL, _IONBF, 0);
@@ -1618,6 +1679,7 @@ int main(int argc, char **argv)
     test_exec_permission();
     test_shared_anon_fork();
     test_map_fixed_replace();
+    test_stop_continue();
     printf("AUDIT-RUNTIME: %d/%d\n", passed, total);
     return passed == total ? 0 : 1;
 }
