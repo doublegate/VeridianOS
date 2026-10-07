@@ -58,7 +58,7 @@ What does not work yet: `docs/KNOWN-LIMITATIONS.md`.
 - **x86_64**: 0 errors, 0 warnings, Stage 6 BOOTOK, 34/34 tests
 - **AArch64**: 0 errors, 0 warnings, Stage 6 BOOTOK, 34/34 tests
 - **RISC-V**: 0 errors, 0 warnings, Stage 6 BOOTOK, 34/34 tests
-- **Host-target unit tests**: 4,472 passing (Codecov integrated)
+- **Host-target unit tests**: 4,475 passing (Codecov integrated)
 - **In-guest runtime suite**: `audit_runtime_test` 27/27 and BusyBox 27/27 on the BlockFS root
 - **CI pipeline**: 11/11 jobs passing
 
