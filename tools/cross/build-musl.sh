@@ -50,11 +50,23 @@ download_musl() {
 }
 
 # ── Extract ───────────────────────────────────────────────────────────
+# Identity of the patch set: the .patch files plus this script (which
+# writes veridian_syscall_map.h). A tree patched with anything else is
+# re-extracted, so a changed patch can never be silently skipped.
+patch_stamp() {
+    cat "${PATCH_DIR}"/*.patch "${BASH_SOURCE[0]}" 2>/dev/null | sha256sum | cut -d' ' -f1
+}
+
 extract_musl() {
     local src="${BUILD_DIR}/musl-${MUSL_VERSION}"
+    local marker="${src}/.veridian_patched"
     if [[ -d "${src}" ]]; then
-        log "Source already extracted."
-        return 0
+        if [[ -f "${marker}" && "$(cat "${marker}")" == "$(patch_stamp)" ]]; then
+            log "Source already extracted."
+            return 0
+        fi
+        log "Patch set changed (or tree not fully patched): re-extracting."
+        rm -rf "${src}" "${BUILD_DIR}/build"
     fi
     log "Extracting..."
     tar -xzf "${BUILD_DIR}/musl-${MUSL_VERSION}.tar.gz" -C "${BUILD_DIR}"
@@ -66,7 +78,7 @@ extract_musl() {
 patch_musl() {
     local src="${BUILD_DIR}/musl-${MUSL_VERSION}"
     local marker="${src}/.veridian_patched"
-    if [[ -f "${marker}" ]]; then
+    if [[ -f "${marker}" && "$(cat "${marker}")" == "$(patch_stamp)" ]]; then
         log "Already patched."
         return 0
     fi
@@ -245,7 +257,7 @@ patch_musl() {
 #endif /* _VERIDIAN_SYSCALL_MAP_H */
 HEADER
 
-    touch "${marker}"
+    patch_stamp > "${marker}"
     log "Patches applied."
 }
 
