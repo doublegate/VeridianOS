@@ -166,6 +166,16 @@ pub fn sys_nanosleep(req_ptr: usize, rem_ptr: usize) -> SyscallResult {
         return Err(SyscallError::InvalidArgument);
     }
 
+    // A dispatched thread really sleeps (see `sleep_until`).
+    #[cfg(feature = "alloc")]
+    if crate::sched::dispatch::current_owner().is_some() {
+        let total = (req.tv_sec as u64)
+            .saturating_mul(1_000_000_000)
+            .saturating_add(req.tv_nsec as u64);
+        let deadline = crate::sched::dispatch::clock_ns().saturating_add(total);
+        return sleep_until(deadline, rem_ptr);
+    }
+
     let sleep_ms = (req.tv_sec as u64) * 1000 + (req.tv_nsec as u64) / 1_000_000;
 
     // Boot-path cooperative dispatch: skip the spin loop so the child
@@ -198,6 +208,73 @@ pub fn sys_nanosleep(req_ptr: usize, rem_ptr: usize) -> SyscallResult {
         super::userspace::write_user(rem_ptr, zero)?;
     }
 
+    Ok(0)
+}
+
+/// Sleep the calling dispatched thread until `deadline` (`monotonic_ns`):
+/// off the run queue until the timer wakes it, or a signal does -- then
+/// EINTR, with the time left written to `rem_ptr` (if non-zero) as Linux
+/// does. On completion `rem_ptr` gets zero.
+#[cfg(feature = "alloc")]
+pub(crate) fn sleep_until(deadline: u64, rem_ptr: usize) -> SyscallResult {
+    use crate::sched::dispatch;
+    static SLEEP: dispatch::WaitQueue = dispatch::WaitQueue::new();
+    let interrupted = matches!(
+        dispatch::wait_event(&SLEEP, Some(deadline), || false),
+        Err(dispatch::WaitError::Interrupted)
+    );
+    if rem_ptr != 0 {
+        let left = if interrupted {
+            deadline.saturating_sub(dispatch::clock_ns())
+        } else {
+            0
+        };
+        let rem = Timespec {
+            tv_sec: (left / 1_000_000_000) as i64,
+            tv_nsec: (left % 1_000_000_000) as i64,
+        };
+        super::userspace::write_user(rem_ptr, rem)?;
+    }
+    if interrupted {
+        Err(SyscallError::Interrupted)
+    } else {
+        Ok(0)
+    }
+}
+
+/// `clock_nanosleep` (Linux 230): a relative sleep, or with TIMER_ABSTIME
+/// (flags bit 0) until an absolute time on the clock. Both clocks count
+/// from boot (REALTIME has no epoch yet), so an absolute time is a
+/// `monotonic_ns` deadline. An absolute sleep never writes `rem`.
+pub fn sys_clock_nanosleep(
+    clock_id: usize,
+    flags: usize,
+    req_ptr: usize,
+    rem_ptr: usize,
+) -> SyscallResult {
+    const TIMER_ABSTIME: usize = 1;
+    if clock_id != CLOCK_MONOTONIC && clock_id != CLOCK_REALTIME {
+        return Err(SyscallError::InvalidArgument);
+    }
+    if flags & TIMER_ABSTIME == 0 {
+        return sys_nanosleep(req_ptr, rem_ptr);
+    }
+    let req: Timespec = super::userspace::read_user(req_ptr)?;
+    if req.tv_sec < 0 || req.tv_nsec < 0 || req.tv_nsec >= 1_000_000_000 {
+        return Err(SyscallError::InvalidArgument);
+    }
+    let deadline = (req.tv_sec as u64)
+        .saturating_mul(1_000_000_000)
+        .saturating_add(req.tv_nsec as u64);
+    #[cfg(feature = "alloc")]
+    if crate::sched::dispatch::current_owner().is_some() {
+        return sleep_until(deadline, 0);
+    }
+    while crate::timer::monotonic_ns() < deadline {
+        if crate::sched::wait_for_interrupt_in_syscall() {
+            return Err(SyscallError::Interrupted);
+        }
+    }
     Ok(0)
 }
 

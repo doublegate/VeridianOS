@@ -669,6 +669,8 @@ pub enum SyscallError {
     NoDevice = -116,
     /// Not an executable format (ENOEXEC, errno 8).
     ExecFormat = -117,
+    /// A timed wait ran out (ETIMEDOUT, errno 110).
+    TimedOut = -118,
 }
 
 impl From<IpcError> for SyscallError {
@@ -1573,19 +1575,41 @@ fn handle_syscall(
             // private == shared.
             let cmd = (arg2 as u32) & 0x7F;
             match cmd {
-                // FUTEX_WAIT: wait if *uaddr == val
-                0 => futex::sys_futex_wait(arg1, arg3 as u32, arg4, 0, arg2).map(|v| v as usize),
+                // FUTEX_WAIT: wait if *uaddr == val; the timeout is a
+                // relative timespec (N-104).
+                0 => {
+                    let deadline = futex::linux_timeout(arg4, false)?;
+                    futex::futex_wait_until(
+                        arg1,
+                        arg3 as u32,
+                        deadline,
+                        futex::FUTEX_WAIT_BITSET_MATCH_ANY,
+                    )
+                    .map(|v| v as usize)
+                }
                 // FUTEX_WAKE: wake up to val waiters
                 1 => futex::sys_futex_wake(arg1, arg3, 0).map(|v| v as usize),
-                // FUTEX_REQUEUE: wake val waiters, requeue rest to uaddr2
-                3 => futex::sys_futex_requeue(arg1, arg3, arg5, 0).map(|v| v as usize),
+                // FUTEX_REQUEUE: wake val waiters, move up to val2 (arg4)
+                // of the rest to uaddr2. The count was passed as 0, so
+                // nobody moved.
+                3 => futex::sys_futex_requeue(arg1, arg3, arg5, arg4).map(|v| v as usize),
+                // FUTEX_CMP_REQUEUE: the same, if *uaddr still equals val3.
+                4 => futex::sys_futex_cmp_requeue(arg1, arg3, arg5, arg4, syscall_arg6()? as u32)
+                    .map(|v| v as usize),
                 // FUTEX_WAKE_OP(uaddr, val, val2 = arg4, uaddr2, encoded op = val3).
                 // Passing 0 for the encoded op meant "*uaddr2 = 0" on every call.
                 5 => futex::sys_futex_wake_op(arg1, arg3, arg5, arg4, syscall_arg6()?)
                     .map(|v| v as usize),
-                // FUTEX_WAIT_BITSET: the bitset is val3 (arg6).
-                9 => futex::sys_futex_wait(arg1, arg3 as u32, arg4, syscall_arg6()?, arg2)
-                    .map(|v| v as usize),
+                // FUTEX_WAIT_BITSET: the bitset is val3 (arg6), and the
+                // timeout is an absolute time (N-104).
+                9 => {
+                    let bitset = syscall_arg6()? as u32;
+                    if bitset == 0 {
+                        return Err(SyscallError::InvalidArgument);
+                    }
+                    let deadline = futex::linux_timeout(arg4, true)?;
+                    futex::futex_wait_until(arg1, arg3 as u32, deadline, bitset).map(|v| v as usize)
+                }
                 _ => Err(SyscallError::InvalidArgument),
             }
         }
@@ -1818,7 +1842,7 @@ fn handle_syscall(
         Syscall::MemfdCreate => sys_memfd_create(arg1, arg2),
         Syscall::SetTidAddress => sys_set_tid_address(arg1),
         Syscall::SetRobustList => sys_set_robust_list(arg1, arg2),
-        Syscall::ClockNanosleep => sys_clock_nanosleep(arg1, arg2, arg3, arg4),
+        Syscall::ClockNanosleep => time::sys_clock_nanosleep(arg1, arg2, arg3, arg4),
         Syscall::Prctl => linux_compat::sys_prctl(arg1, arg2),
         Syscall::Flock => sys_flock(arg1, arg2),
         Syscall::Tkill => process::sys_tkill(arg1, arg2),
@@ -2291,25 +2315,6 @@ fn sys_set_robust_list(head_ptr: usize, len: usize) -> SyscallResult {
     let proc = crate::process::current_process().ok_or(SyscallError::InvalidState)?;
     proc.set_robust_list(head_ptr);
     Ok(0)
-}
-
-/// clock_nanosleep syscall -- sleep with clock selection.
-///
-/// Linux ABI: `clock_nanosleep(clockid, flags, request, remain)`
-/// musl maps Linux 230 -> VeridianOS 354.
-///
-/// We ignore clockid (always use monotonic) and flags (TIMER_ABSTIME not
-/// supported), delegating to the existing nanosleep implementation.
-fn sys_clock_nanosleep(
-    _clockid: usize,
-    _flags: usize,
-    req_ptr: usize,
-    rem_ptr: usize,
-) -> SyscallResult {
-    // Delegate to nanosleep -- ignores clockid and flags for now.
-    // TIMER_ABSTIME (flags=1) would require reading the clock and computing
-    // relative sleep, but for MVP this is acceptable.
-    time::sys_nanosleep(req_ptr, rem_ptr)
 }
 
 /// sendmsg syscall -- sends data with optional ancillary data (SCM_RIGHTS).

@@ -103,22 +103,32 @@ pub fn eventfd_read(efd_id: u32) -> Result<u64, SyscallError> {
             .ok_or(SyscallError::BadFileDescriptor)?;
 
         if instance.counter > 0 {
-            return if instance.semaphore {
+            let val = if instance.semaphore {
                 instance.counter = instance.counter.saturating_sub(1);
-                Ok(1)
+                1
             } else {
                 let val = instance.counter;
                 instance.counter = 0;
-                Ok(val)
+                val
             };
+            drop(registry);
+            io_changed(); // room for a blocked writer
+            return Ok(val);
         }
 
         if instance.nonblock {
             return Err(SyscallError::WouldBlock);
         }
 
-        // Release lock before yielding
+        // Release lock before waiting
         drop(registry);
+
+        // A dispatched reader sleeps until a write (no 30 s cap).
+        #[cfg(feature = "alloc")]
+        if crate::sched::dispatch::current_owner().is_some() {
+            sleep_until_ready(|| is_readable(efd_id) || !exists(efd_id))?;
+            continue;
+        }
 
         if crate::timer::get_uptime_ms() - start >= MAX_BLOCK_MS {
             return Err(SyscallError::WouldBlock);
@@ -150,6 +160,8 @@ pub fn eventfd_write(efd_id: u32, value: u64) -> SyscallResult {
 
         if instance.counter <= max - value {
             instance.counter = instance.counter.saturating_add(value);
+            drop(registry);
+            io_changed(); // data for a blocked reader
             return Ok(0);
         }
 
@@ -159,11 +171,44 @@ pub fn eventfd_write(efd_id: u32, value: u64) -> SyscallResult {
 
         drop(registry);
 
+        #[cfg(feature = "alloc")]
+        if crate::sched::dispatch::current_owner().is_some() {
+            sleep_until_ready(|| {
+                !exists(efd_id)
+                    || EVENTFD_REGISTRY
+                        .lock()
+                        .get(&efd_id)
+                        .is_some_and(|i| i.counter <= max - value)
+            })?;
+            continue;
+        }
+
         if crate::timer::get_uptime_ms() - start >= MAX_BLOCK_MS {
             return Err(SyscallError::WouldBlock);
         }
 
         crate::sched::yield_cpu();
+    }
+}
+
+/// Report a counter change to blocked readers, writers and pollers.
+fn io_changed() {
+    #[cfg(feature = "alloc")]
+    crate::sched::dispatch::io_event();
+}
+
+fn exists(efd_id: u32) -> bool {
+    EVENTFD_REGISTRY.lock().contains_key(&efd_id)
+}
+
+/// Sleep until `ready` holds (woken by `io_changed`); EINTR if a signal
+/// must be acted on first.
+#[cfg(feature = "alloc")]
+fn sleep_until_ready(ready: impl FnMut() -> bool) -> Result<(), SyscallError> {
+    use crate::sched::dispatch;
+    match dispatch::wait_event(&dispatch::IO_EVENTS, None, ready) {
+        Err(dispatch::WaitError::Interrupted) => Err(SyscallError::Interrupted),
+        _ => Ok(()),
     }
 }
 
@@ -188,6 +233,8 @@ pub fn eventfd_close(efd_id: u32) -> SyscallResult {
     registry
         .remove(&efd_id)
         .ok_or(SyscallError::BadFileDescriptor)?;
+    drop(registry);
+    io_changed();
     Ok(0)
 }
 
@@ -269,6 +316,10 @@ impl VfsNode for EventFdNode {
             events |= 0x0004; // POLLOUT
         }
         events
+    }
+
+    fn wakes_io_waiters(&self) -> bool {
+        true // every counter change calls io_changed
     }
 
     fn metadata(&self) -> Result<Metadata, KernelError> {

@@ -2,6 +2,21 @@
 
 ### Added
 
+- **Waits sleep (blocking step of sprint D).** A new dispatcher primitive, `wait_event`, puts a
+  task to sleep on a wait queue until its condition holds, a deadline passes (a sleeper list the
+  timer tick wakes) or a signal arrives. On it:
+  - `nanosleep` and `clock_nanosleep` (now with TIMER_ABSTIME), `sigsuspend` and timerfd reads
+    sleep until their deadline or a signal; an interrupted `nanosleep` reports the time left;
+  - futex waits sleep on keyed queues and are woken directly. FUTEX_REQUEUE moves the waiters it
+    should (the requeue count was passed as 0) and FUTEX_CMP_REQUEUE exists. A futex in
+    MAP_SHARED memory is keyed by its physical address, so processes sharing it meet (N-114).
+    Linux timeouts are timespecs, relative for FUTEX_WAIT and absolute for WAIT_BITSET, and
+    expire with ETIMEDOUT (N-104);
+  - pipe and eventfd reads and writes sleep until the other end acts, and `poll`/`epoll_wait`
+    sleep between scans with no 30 s cap on an infinite wait.
+
+  These all used to poll: re-check, yield or halt, re-check. musl runtime tests
+  `musl_sleeps_block_and_wake`, `musl_futex_queues` and `musl_blocking_io_wakes`.
 - **Job control (sprint D3, N-99).** SIGSTOP, SIGTSTP, SIGTTIN and SIGTTOU with the default action
   stop every thread of the process (each parks on its way back to user mode; a system call the
   stop interrupted runs again afterwards), and SIGCONT continues it whatever its action. A stop
@@ -197,6 +212,12 @@
 
 ### Fixed
 
+- **A sleeping read stopped every other thread's file calls (N-118).** `read` held the process
+  file-table spinlock across the read, and file position locks were held across reads of pipes
+  and eventfds; once such a read could sleep, a write from another thread spun on the lock
+  forever. The table lock now covers only the descriptor lookup (read, write, seek, fstat,
+  truncate, pread, pwrite), and streams (pipes, sockets, character devices) take no position
+  lock. A bad descriptor in those calls is EBADF instead of EINVAL.
 - **Every thread cost a 256 KiB stack it never used (N-114).** `clone` requires the caller's
   stack, yet the kernel also mapped a stack of its own for each new thread, placed by thread id.
   It no longer does; a child forked from such a thread still gets a full stack size for a later

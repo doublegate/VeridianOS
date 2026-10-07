@@ -391,6 +391,13 @@ pub trait VfsNode: Send + Sync {
         0x0001 | 0x0004 // POLLIN | POLLOUT
     }
 
+    /// Whether every readiness change of this node calls
+    /// [`crate::sched::dispatch::io_event`]. Waiters on such a node sleep
+    /// until woken; on any other they also re-check periodically.
+    fn wakes_io_waiters(&self) -> bool {
+        false
+    }
+
     /// Downcast to `&dyn core::any::Any` for type-specific operations.
     ///
     /// Used by syscall handlers that need to extract implementation-specific

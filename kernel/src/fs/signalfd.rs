@@ -229,6 +229,20 @@ pub fn signalfd_read(sfd_id: u32) -> Result<SignalfdSiginfo, SyscallError> {
         }
 
         drop(registry);
+        // A dispatched reader sleeps, re-checking periodically: signals
+        // reach the pending list from several paths that do not all report
+        // it yet.
+        #[cfg(feature = "alloc")]
+        if crate::sched::dispatch::current_owner().is_some() {
+            use crate::sched::dispatch;
+            let until = dispatch::clock_ns().saturating_add(dispatch::IO_RECHECK_NS);
+            if let Err(dispatch::WaitError::Interrupted) =
+                dispatch::wait_event(&dispatch::IO_EVENTS, Some(until), || is_readable(sfd_id))
+            {
+                return Err(SyscallError::Interrupted);
+            }
+            continue;
+        }
         if crate::timer::get_uptime_ms() - start >= MAX_BLOCK_MS {
             return Err(SyscallError::WouldBlock);
         }

@@ -15,6 +15,9 @@
 
 #define _GNU_SOURCE
 #include <errno.h>
+#include <poll.h>
+#include <sys/eventfd.h>
+#include <stdint.h>
 #include <pthread.h>
 #include <sched.h>
 #include <fcntl.h>
@@ -27,6 +30,7 @@
 #include <sys/prctl.h>
 #include <sys/wait.h>
 #include <sys/syscall.h>
+#include <time.h>
 #include <unistd.h>
 
 static int passed, total;
@@ -315,6 +319,209 @@ static void test_thread_fork_exec(void)
     report("musl_thread_fork_exec", created && (long)res == 1, why);
 }
 
+/* Blocking sprint: sleeps leave the run queue until the timer or a
+ * signal wakes them. A signal ends nanosleep with EINTR and the time
+ * left; TIMER_ABSTIME sleeps until the absolute time. */
+static volatile sig_atomic_t sleep_usr1;
+static void on_sleep_usr1(int s)
+{
+    (void)s;
+    sleep_usr1 = 1;
+}
+
+static long long mono_ns(void)
+{
+    struct timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    return (long long)t.tv_sec * 1000000000LL + t.tv_nsec;
+}
+
+static void test_sleeps(void)
+{
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = on_sleep_usr1; /* no SA_RESTART */
+    sigaction(SIGUSR1, &sa, 0);
+    sleep_usr1 = 0;
+
+    pid_t parent = getpid();
+    pid_t pid = fork();
+    if (pid == 0) {
+        struct timespec d = {0, 100 * 1000 * 1000};
+        nanosleep(&d, 0);
+        kill(parent, SIGUSR1);
+        _exit(0);
+    }
+    struct timespec req = {3, 0}, rem = {0, 0};
+    long long t0 = mono_ns();
+    int r = nanosleep(&req, &rem);
+    long long slept = mono_ns() - t0;
+    int eintr = r == -1 && errno == EINTR && sleep_usr1;
+    int rem_ok = rem.tv_sec >= 1 && rem.tv_sec <= 2;
+    waitpid(pid, 0, 0);
+
+    /* Absolute: wake no earlier than the target. */
+    struct timespec now, abs;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    long long target = (long long)now.tv_sec * 1000000000LL + now.tv_nsec + 150000000LL;
+    abs.tv_sec = target / 1000000000LL;
+    abs.tv_nsec = target % 1000000000LL;
+    int ar = clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &abs, 0);
+    long long late = mono_ns() - target;
+    int abs_ok = ar == 0 && late >= 0 && late < 1000000000LL;
+
+    /* Relative: at least the time asked for. */
+    struct timespec d = {0, 50 * 1000 * 1000};
+    t0 = mono_ns();
+    int rr = nanosleep(&d, 0);
+    long long took = mono_ns() - t0;
+    int rel_ok = rr == 0 && took >= 50000000LL;
+
+    signal(SIGUSR1, SIG_DFL);
+    static char why[112];
+    snprintf(why, sizeof(why), "eintr=%d rem=%ld slept_ms=%lld abs=%d late_ms=%lld rel=%d", eintr,
+             (long)rem.tv_sec, slept / 1000000, abs_ok, late / 1000000, rel_ok);
+    report("musl_sleeps_block_and_wake", eintr && rem_ok && abs_ok && rel_ok, why);
+}
+
+/* Blocking sprint: futex waits sleep on keyed queues. Condition variable
+ * broadcast (musl requeues), a timed wait ends with ETIMEDOUT (N-104),
+ * and a futex in MAP_SHARED memory is shared across fork (N-114). */
+static pthread_mutex_t cv_m = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t cv = PTHREAD_COND_INITIALIZER;
+static int cv_go, cv_woke;
+
+static void *cv_waiter(void *arg)
+{
+    (void)arg;
+    pthread_mutex_lock(&cv_m);
+    while (!cv_go)
+        pthread_cond_wait(&cv, &cv_m);
+    cv_woke++;
+    pthread_mutex_unlock(&cv_m);
+    return 0;
+}
+
+static void test_futex_queues(void)
+{
+    /* Broadcast to four waiters. */
+    pthread_t t[4];
+    int created = 0;
+    for (int i = 0; i < 4; i++)
+        created += pthread_create(&t[i], 0, cv_waiter, 0) == 0;
+    struct timespec ms50 = {0, 50 * 1000 * 1000};
+    nanosleep(&ms50, 0);
+    pthread_mutex_lock(&cv_m);
+    cv_go = 1;
+    pthread_cond_broadcast(&cv);
+    pthread_mutex_unlock(&cv_m);
+    for (int i = 0; i < created; i++)
+        pthread_join(t[i], 0);
+    int broadcast = created == 4 && cv_woke == 4;
+
+    /* Timed wait with nobody signalling. */
+    struct timespec abs;
+    clock_gettime(CLOCK_REALTIME, &abs);
+    long long t0 = mono_ns();
+    abs.tv_nsec += 100 * 1000 * 1000;
+    if (abs.tv_nsec >= 1000000000) {
+        abs.tv_sec++;
+        abs.tv_nsec -= 1000000000;
+    }
+    pthread_mutex_lock(&cv_m);
+    int tr = pthread_cond_timedwait(&cv, &cv_m, &abs);
+    pthread_mutex_unlock(&cv_m);
+    long long waited = mono_ns() - t0;
+    int timed = tr == ETIMEDOUT && waited >= 90000000LL;
+
+    /* Shared futex across fork: the child waits, the parent wakes it. */
+    volatile int *w = mmap(0, 4096, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    int shared = 0;
+    long woke = -1;
+    if (w != MAP_FAILED) {
+        *w = 0;
+        pid_t pid = fork();
+        if (pid == 0) {
+            long r = syscall(SYS_futex, w, 0 /* FUTEX_WAIT */, 0, 0, 0, 0);
+            _exit(r == 0 ? 0 : (errno == EAGAIN ? 2 : 1));
+        }
+        struct timespec ms100 = {0, 100 * 1000 * 1000};
+        nanosleep(&ms100, 0);
+        *w = 1;
+        woke = syscall(SYS_futex, w, 1 /* FUTEX_WAKE */, 1, 0, 0, 0);
+        int st = 0;
+        waitpid(pid, &st, 0);
+        shared = woke == 1 && WIFEXITED(st) && WEXITSTATUS(st) == 0;
+        munmap((void *)w, 4096);
+    }
+
+    static char why[112];
+    snprintf(why, sizeof(why), "broadcast=%d(%d) timed=%d(r=%d ms=%lld) shared=%d(woke=%ld)",
+             broadcast, cv_woke, timed, tr, waited / 1000000, shared, woke);
+    report("musl_futex_queues", broadcast && timed && shared, why);
+}
+
+/* Blocking sprint: a blocked pipe read, an infinite poll and a blocked
+ * eventfd read each sleep until another thread or process acts. */
+static int io_wfd = -1, io_efd = -1;
+static void *io_writer(void *arg)
+{
+    (void)arg;
+    struct timespec ms80 = {0, 80 * 1000 * 1000};
+    nanosleep(&ms80, 0);
+    if (write(io_wfd, "x", 1) != 1)
+        return (void *)1L;
+    nanosleep(&ms80, 0);
+    uint64_t one = 1;
+    if (write(io_efd, &one, sizeof(one)) != sizeof(one))
+        return (void *)2L;
+    return 0;
+}
+
+static void test_blocking_io(void)
+{
+    int fds[2];
+    if (pipe(fds) != 0) {
+        report("musl_blocking_io_wakes", 0, "pipe failed");
+        return;
+    }
+    io_wfd = fds[1];
+    io_efd = eventfd(0, 0);
+    pthread_t t;
+    int created = io_efd >= 0 && pthread_create(&t, 0, io_writer, 0) == 0;
+
+    char c = 0;
+    long long t0 = mono_ns();
+    int got_pipe = created && read(fds[0], &c, 1) == 1 && c == 'x';
+    long long pipe_ms = (mono_ns() - t0) / 1000000;
+
+    uint64_t v = 0;
+    int got_efd = created && read(io_efd, &v, sizeof(v)) == sizeof(v) && v == 1;
+    if (created)
+        pthread_join(t, 0);
+
+    /* Infinite poll on a pipe a child writes to later. */
+    pid_t pid = fork();
+    if (pid == 0) {
+        struct timespec ms80 = {0, 80 * 1000 * 1000};
+        nanosleep(&ms80, 0);
+        _exit(write(fds[1], "y", 1) == 1 ? 0 : 1);
+    }
+    struct pollfd pfd = {fds[0], POLLIN, 0};
+    int pr = poll(&pfd, 1, -1);
+    int polled = pr == 1 && (pfd.revents & POLLIN) && read(fds[0], &c, 1) == 1 && c == 'y';
+    waitpid(pid, 0, 0);
+    close(fds[0]);
+    close(fds[1]);
+    if (io_efd >= 0)
+        close(io_efd);
+
+    static char why[96];
+    snprintf(why, sizeof(why), "pipe=%d(%lldms) eventfd=%d poll=%d", got_pipe, pipe_ms, got_efd,
+             polled);
+    report("musl_blocking_io_wakes", got_pipe && pipe_ms >= 50 && got_efd && polled, why);
+}
+
 int main(void)
 {
     test_fsync();
@@ -327,6 +534,9 @@ int main(void)
     test_thread_guards();
     test_signals();
     test_thread_fork_exec();
+    test_sleeps();
+    test_futex_queues();
+    test_blocking_io();
     printf("MUSL-RUNTIME: %d/%d\n", passed, total);
     return passed == total ? 0 : 1;
 }

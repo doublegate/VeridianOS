@@ -12,6 +12,12 @@ use spin::Mutex;
 
 use crate::error::KernelError;
 
+/// Wake whoever waits on a pipe: data or space appeared, or an end closed.
+fn pipe_event() {
+    #[cfg(feature = "alloc")]
+    crate::sched::dispatch::io_event();
+}
+
 /// Default pipe capacity (64 KB).
 const PIPE_CAPACITY: usize = 64 * 1024;
 
@@ -98,23 +104,28 @@ impl PipeReader {
 
     /// Non-blocking read: return immediately if no data available.
     pub fn try_read(&self, buf: &mut [u8]) -> Result<usize, KernelError> {
-        let mut pipe = self.inner.lock();
-        if pipe.buffer.is_empty() {
-            if pipe.write_closed {
-                return Ok(0); // EOF
+        let to_read = {
+            let mut pipe = self.inner.lock();
+            if pipe.buffer.is_empty() {
+                if pipe.write_closed {
+                    return Ok(0); // EOF
+                }
+                return Err(KernelError::WouldBlock);
             }
-            return Err(KernelError::WouldBlock);
-        }
-        let to_read = buf.len().min(pipe.buffer.len());
-        for byte in buf.iter_mut().take(to_read) {
-            *byte = pipe.buffer.pop_front().unwrap_or(0);
-        }
+            let to_read = buf.len().min(pipe.buffer.len());
+            for byte in buf.iter_mut().take(to_read) {
+                *byte = pipe.buffer.pop_front().unwrap_or(0);
+            }
+            to_read
+        };
+        pipe_event(); // room for a waiting writer
         Ok(to_read)
     }
 
     /// Close the read end.
     pub fn close(&self) {
         self.inner.lock().read_closed = true;
+        pipe_event();
     }
 
     /// Check if there is data available to read.
@@ -135,17 +146,23 @@ impl PipeWriter {
     /// Returns the number of bytes written. Returns an error if the read
     /// end has been closed (broken pipe).
     pub fn write(&self, data: &[u8]) -> Result<usize, KernelError> {
-        let mut pipe = self.inner.lock();
-        if pipe.read_closed {
-            return Err(KernelError::BrokenPipe);
-        }
-        if pipe.write_closed {
-            return Err(KernelError::BrokenPipe);
-        }
-        let available = pipe.capacity.saturating_sub(pipe.buffer.len());
-        let to_write = data.len().min(available);
-        for &byte in &data[..to_write] {
-            pipe.buffer.push_back(byte);
+        let to_write = {
+            let mut pipe = self.inner.lock();
+            if pipe.read_closed {
+                return Err(KernelError::BrokenPipe);
+            }
+            if pipe.write_closed {
+                return Err(KernelError::BrokenPipe);
+            }
+            let available = pipe.capacity.saturating_sub(pipe.buffer.len());
+            let to_write = data.len().min(available);
+            for &byte in &data[..to_write] {
+                pipe.buffer.push_back(byte);
+            }
+            to_write
+        };
+        if to_write > 0 {
+            pipe_event(); // data for a waiting reader
         }
         Ok(to_write)
     }
@@ -166,6 +183,7 @@ impl PipeWriter {
     /// Close the write end.
     pub fn close(&self) {
         self.inner.lock().write_closed = true;
+        pipe_event();
     }
 }
 
@@ -241,6 +259,10 @@ impl VfsNode for PipeReadNode {
             }
         }
         events
+    }
+
+    fn wakes_io_waiters(&self) -> bool {
+        true
     }
 
     fn metadata(&self) -> Result<Metadata, KernelError> {
@@ -331,6 +353,10 @@ impl VfsNode for PipeWriteNode {
             events |= 0x0004; // POLLOUT -- space available
         }
         events
+    }
+
+    fn wakes_io_waiters(&self) -> bool {
+        true
     }
 
     fn metadata(&self) -> Result<Metadata, KernelError> {

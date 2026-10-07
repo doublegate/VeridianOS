@@ -346,7 +346,19 @@ pub fn epoll_wait(
         effective_timeout as u64
     };
 
+    // A dispatched waiter sleeps between scans, with no cap on an infinite
+    // wait. Registered fds include types that do not report readiness
+    // changes yet, so it also re-checks periodically.
+    #[cfg(feature = "alloc")]
+    let dispatched = crate::sched::dispatch::current_owner().is_some();
+    #[cfg(feature = "alloc")]
+    let deadline = (effective_timeout > 0).then(|| {
+        crate::sched::dispatch::clock_ns().saturating_add(effective_timeout as u64 * 1_000_000)
+    });
+
     loop {
+        #[cfg(feature = "alloc")]
+        let seq = crate::sched::dispatch::io_seq();
         let count = {
             let mut reg_guard = EPOLL_REGISTRY.lock();
             let reg = reg_guard
@@ -366,6 +378,17 @@ pub fn epoll_wait(
 
         if count > 0 || effective_timeout == 0 {
             return Ok(count);
+        }
+
+        #[cfg(feature = "alloc")]
+        if dispatched {
+            use crate::sched::dispatch::{wait_io, WaitError};
+            match wait_io(seq, deadline, false) {
+                Ok(()) => continue,
+                Err(WaitError::TimedOut) => return Ok(0),
+                // Interrupted by a signal: the caller reports EINTR.
+                Err(WaitError::Interrupted) => return Err(KernelError::WouldBlock),
+            }
         }
 
         if crate::timer::get_uptime_ms() - start >= max_wait_ms {

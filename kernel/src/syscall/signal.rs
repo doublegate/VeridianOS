@@ -253,7 +253,10 @@ pub fn sys_sigsuspend(mask_ptr: usize) -> SyscallResult {
         thread.has_saved_sigmask.store(true, Ordering::Release);
         drop(thread);
         drop(proc);
-        while !crate::sched::wait_for_interrupt_in_syscall() {}
+        // Sleeps until a signal to act on wakes it; nothing else does.
+        static SUSPENDED: crate::sched::dispatch::WaitQueue =
+            crate::sched::dispatch::WaitQueue::new();
+        let _ = crate::sched::dispatch::wait_event(&SUSPENDED, None, || false);
         return Err(SyscallError::Interrupted);
     }
 

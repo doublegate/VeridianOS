@@ -199,6 +199,54 @@ static CURRENT: [AtomicPtr<Task>; 1] = [const { AtomicPtr::new(core::ptr::null_m
 /// `wait` and the program launchers wait here.
 pub static PROCESS_EVENTS: WaitQueue = WaitQueue::new();
 
+/// Woken whenever a file object changes readiness (pipes today; the other
+/// file types are re-checked periodically until they wake it too). Blocking
+/// read, write and poll sleep here.
+pub static IO_EVENTS: WaitQueue = WaitQueue::new();
+
+/// Counts readiness changes, so a waiter can tell whether one happened
+/// since it last looked.
+static IO_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// Report a readiness change on some file object (see [`IO_EVENTS`]).
+pub fn io_event() {
+    IO_SEQ.fetch_add(1, Ordering::AcqRel);
+    if started() {
+        IO_EVENTS.wake_all();
+    }
+}
+
+/// The readiness-change count; take it before scanning file objects and
+/// pass it to [`wait_io`].
+pub fn io_seq() -> u64 {
+    IO_SEQ.load(Ordering::Acquire)
+}
+
+/// Re-check interval for file objects that do not report their readiness
+/// changes yet ([`crate::fs::VfsNode::wakes_io_waiters`]).
+pub const IO_RECHECK_NS: u64 = 10_000_000;
+
+/// Sleep after a readiness scan (poll, epoll) found nothing ready: until a
+/// file object reports a change since `seq`, `deadline` (`monotonic_ns`)
+/// passes (`TimedOut`), or a signal must be acted on (`Interrupted`). With
+/// `precise` false -- some scanned object does not wake waiters -- it also
+/// returns after [`IO_RECHECK_NS`]. `Ok` means: scan again.
+pub fn wait_io(seq: u64, deadline: Option<u64>, precise: bool) -> Result<(), WaitError> {
+    let recheck = (!precise).then(|| now().saturating_add(IO_RECHECK_NS));
+    let until = match (deadline, recheck) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (a, b) => a.or(b),
+    };
+    match wait_event(&IO_EVENTS, until, || io_seq() != seq) {
+        Err(WaitError::TimedOut) if deadline.is_none_or(|d| now() < d) => Ok(()),
+        r => r,
+    }
+}
+
+/// Tasks sleeping in [`wait_event`] with a deadline, woken by the timer
+/// tick once it passes (`monotonic_ns` deadline, task).
+static SLEEPERS: Mutex<Vec<(u64, Arc<Task>)>> = Mutex::new(Vec::new());
+
 /// Every live task except the idle tasks, by key.
 static TASKS: Mutex<BTreeMap<TaskKey, Arc<Task>>> = Mutex::new(BTreeMap::new());
 
@@ -641,6 +689,132 @@ pub fn tick() {
                 st.need_resched = true;
             }
         }
+    }
+    wake_expired_sleepers();
+}
+
+/// Wake the sleepers whose deadline has passed (interrupt context). Locks
+/// are only tried: an interrupted holder keeps them, and a sleeper not
+/// woken now is woken on a later tick.
+fn wake_expired_sleepers() {
+    let t = now();
+    let Some(mut sleepers) = SLEEPERS.try_lock() else {
+        return;
+    };
+    let mut i = 0;
+    while i < sleepers.len() {
+        if sleepers[i].0 <= t && try_wake(&sleepers[i].1) {
+            sleepers.swap_remove(i);
+        } else {
+            i += 1;
+        }
+    }
+}
+
+/// [`wake`] for interrupt context: returns false, changing nothing, when
+/// the run queue lock is held (the caller retries later). A task that is
+/// not blocked counts as woken.
+fn try_wake(task: &Arc<Task>) -> bool {
+    let Some(mut guard) = CPUS[0].try_lock() else {
+        return false;
+    };
+    if task
+        .state
+        .compare_exchange(
+            State::Blocked as u8,
+            State::Ready as u8,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        )
+        .is_err()
+    {
+        return true;
+    }
+    if let Some(st) = guard.as_mut() {
+        if !st.rq.contains(task.key) {
+            let t = now();
+            st.rq.enqueue(task.key, *task.entity.lock(), t);
+            if st.rq.should_preempt(task.key, t) {
+                st.need_resched = true;
+            }
+        }
+    }
+    true
+}
+
+fn add_sleeper(deadline: u64, t: Arc<Task>) {
+    let irq = irq_save();
+    SLEEPERS.lock().push((deadline, t));
+    irq_restore(irq);
+}
+
+fn remove_sleeper(t: &Arc<Task>) {
+    let irq = irq_save();
+    SLEEPERS.lock().retain(|(_, s)| !Arc::ptr_eq(s, t));
+    irq_restore(irq);
+}
+
+/// Why a [`wait_event`] ended without its condition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WaitError {
+    /// A signal must be acted on (the caller fails with EINTR and unwinds).
+    Interrupted,
+    /// The deadline passed.
+    TimedOut,
+}
+
+/// The current `monotonic_ns` clock, for [`wait_event`] deadlines.
+pub fn clock_ns() -> u64 {
+    now()
+}
+
+/// Sleep until `cond` holds, a signal must be acted on, or `deadline`
+/// (`monotonic_ns`; see [`clock_ns`]) passes. The task really blocks:
+/// whoever makes `cond` true calls `wq.wake_all()` (or `wake_one`), a
+/// signal wakes every task of its process, and the timer wakes the task at
+/// its deadline. `cond` is checked after the task is queued, so a wake in
+/// between is never lost. Outside a dispatched task it polls.
+///
+/// The caller must hold no spinlock: the task sleeps here.
+pub fn wait_event(
+    wq: &WaitQueue,
+    deadline: Option<u64>,
+    mut cond: impl FnMut() -> bool,
+) -> Result<(), WaitError> {
+    let check = |cond: &mut dyn FnMut() -> bool| {
+        if cond() {
+            Some(Ok(()))
+        } else if crate::process::wait_interrupted() {
+            Some(Err(WaitError::Interrupted))
+        } else if deadline.is_some_and(|d| now() >= d) {
+            Some(Err(WaitError::TimedOut))
+        } else {
+            None
+        }
+    };
+    let Some(me) = current().filter(|_| current_owner().is_some() || started()) else {
+        loop {
+            if let Some(r) = check(&mut cond) {
+                return r;
+            }
+            core::hint::spin_loop();
+        }
+    };
+    loop {
+        me.set_state(State::Blocked);
+        wq.add(me.clone());
+        if let Some(d) = deadline {
+            add_sleeper(d, me.clone());
+        }
+        if let Some(r) = check(&mut cond) {
+            cancel_block(&me);
+            wq.remove(&me);
+            remove_sleeper(&me);
+            return r;
+        }
+        block_current();
+        wq.remove(&me);
+        remove_sleeper(&me);
     }
 }
 

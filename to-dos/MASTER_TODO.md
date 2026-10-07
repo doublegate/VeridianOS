@@ -96,7 +96,10 @@ What does not work yet: `docs/KNOWN-LIMITATIONS.md`.
     - [ ] Blocking: wait-queue primitive, sleep queue, no spinlock held across I/O, user copies
       or waits; file table lock dropped after fd lookup; sleeping address-space lock (N-118,
       N-119, N-138); pipes with reader/writer counts and PIPE_BUF atomicity; futex queues with
-      timespec timeouts (N-104).
+      timespec timeouts (N-104). Done: `wait_event` + timer sleepers, sleeping nanosleep/
+      clock_nanosleep/sigsuspend/timerfd/futex/pipe/eventfd/poll/epoll, futex requeue and shared
+      keys, N-104, file-table lock after lookup and stream position lock (N-118 part). Open:
+      N-138, BlockFS/console locks over I/O, PIPE_BUF, readiness wakeups for sockets/ptys.
     - [ ] D3: timer preemption of ring 3 (done: `dispatch::preempt_user` on trap and syscall
       exit; kill acted on in every dispatched wait); device IRQs on the kernel stack (done, ADR 0008);
       signal delivery with rt_sigframe/restorer, per-thread mask/pending, ignored dropped, Linux

@@ -13,7 +13,6 @@ use alloc::{collections::BTreeMap, vec::Vec};
 use spin::Mutex;
 
 use crate::{
-    arch::timer::get_ticks,
     process, sched,
     syscall::{userspace::validate_user_ptr, SyscallError},
 };
@@ -49,7 +48,7 @@ const FUTEX_WAKE_OP: u32 = 5;
 
 /// Special bitset value that matches any waiter, equivalent to plain
 /// `FUTEX_WAKE`.  Linux defines this as `FUTEX_BITSET_MATCH_ANY`.
-const FUTEX_WAIT_BITSET_MATCH_ANY: u32 = 0xFFFF_FFFF;
+pub(crate) const FUTEX_WAIT_BITSET_MATCH_ANY: u32 = 0xFFFF_FFFF;
 
 // Futex wait queue keyed by (pid, uaddr)
 type FutexKey = (u64, usize);
@@ -152,7 +151,8 @@ pub fn sys_futex_wait(
         FUTEX_WAIT_BITSET_MATCH_ANY
     };
 
-    // Optional timeout: expect a u64 ticks value
+    // Optional timeout: the native ABI passes a u64 of milliseconds,
+    // relative, or absolute since boot with bit 8 of `op`.
     let deadline = if timeout_ptr != 0 {
         if aux != 0 && op_base != FUTEX_WAIT_BITSET && aux != core::mem::size_of::<u64>() {
             // For plain WAIT the caller must supply sizeof(u64) to document
@@ -160,25 +160,66 @@ pub fn sys_futex_wait(
             return Err(SyscallError::InvalidArgument);
         }
         validate_user_ptr(timeout_ptr as *const u64, core::mem::size_of::<u64>())?;
-        let rel: u64 = super::userspace::read_user(timeout_ptr)?;
-        // If op uses absolute time (FUTEX_CLOCK_REALTIME bit), treat rel as absolute
-        // ticks
+        let ms: u64 = super::userspace::read_user(timeout_ptr)?;
+        let ns = ms.saturating_mul(1_000_000);
         if (op & 0x100) != 0 {
-            Some(rel)
+            Some(ns)
         } else {
-            Some(get_ticks().saturating_add(rel))
+            Some(crate::timer::monotonic_ns().saturating_add(ns))
         }
     } else {
         None
     };
+    futex_wait_until(uaddr, expected, deadline, bitset_mask)
+}
 
-    // A thread running as its own dispatcher task (stage D2) waits through
-    // the dispatcher. The old paths below would either block on the old
-    // scheduler, which never runs, or run sibling threads nested from their
-    // saved context -- a second copy of a thread that is already running.
+/// A Linux futex timeout: the `struct timespec` at `ptr` (none if null),
+/// relative to now, or with `absolute` a time on the monotonic clock
+/// (FUTEX_WAIT_BITSET; REALTIME has no epoch yet and counts from boot
+/// too). Returns the `monotonic_ns` deadline (N-104: these used to be read
+/// as raw ticks).
+pub(crate) fn linux_timeout(ptr: usize, absolute: bool) -> Result<Option<u64>, SyscallError> {
+    if ptr == 0 {
+        return Ok(None);
+    }
+    let [sec, nsec]: [i64; 2] = super::userspace::read_user(ptr)?;
+    if sec < 0 || !(0..1_000_000_000).contains(&nsec) {
+        return Err(SyscallError::InvalidArgument);
+    }
+    let ns = (sec as u64)
+        .saturating_mul(1_000_000_000)
+        .saturating_add(nsec as u64);
+    Ok(Some(if absolute {
+        ns
+    } else {
+        crate::timer::monotonic_ns().saturating_add(ns)
+    }))
+}
+
+/// Wait on the futex word at `uaddr` while it holds `expected`, until
+/// woken (by a wake whose bitset meets `bitset`), until `deadline`
+/// (`monotonic_ns`; ETIMEDOUT), or until a signal must be acted on (EINTR).
+pub(crate) fn futex_wait_until(
+    uaddr: usize,
+    expected: u32,
+    deadline: Option<u64>,
+    bitset_mask: u32,
+) -> Result<isize, SyscallError> {
+    if uaddr == 0 || uaddr & 0x3 != 0 || bitset_mask == 0 {
+        return Err(SyscallError::InvalidArgument);
+    }
+    validate_user_ptr(uaddr as *const u32, core::mem::size_of::<u32>())?;
+    if crate::syscall::userspace::read_user::<u32>(uaddr)? != expected {
+        return Err(SyscallError::WouldBlock);
+    }
+
+    // A thread running as its own dispatcher task (stage D2) sleeps on a
+    // keyed wait (see `dwait`). The old paths below would either block on
+    // the old scheduler, which never runs, or run sibling threads nested
+    // from their saved context.
     #[cfg(feature = "alloc")]
     if crate::sched::dispatch::current_owner().is_some() {
-        return dispatched_futex_wait(uaddr, expected, deadline);
+        return dwait(uaddr, expected, deadline, bitset_mask);
     }
 
     let pid = process::current_process()
@@ -260,9 +301,8 @@ pub fn sys_futex_wait(
 
     // Check timeout after wake
     if let Some(deadline) = deadline {
-        let now = get_ticks();
-        if now >= deadline {
-            return remove_self(SyscallError::WouldBlock);
+        if crate::timer::monotonic_ns() >= deadline {
+            return remove_self(SyscallError::TimedOut);
         }
     }
 
@@ -305,6 +345,11 @@ pub fn sys_futex_wake(
     } else {
         wake_bitset as u32
     };
+
+    #[cfg(feature = "alloc")]
+    if crate::sched::dispatch::current_owner().is_some() {
+        return dwake(uaddr, num_wake, wake_bits);
+    }
 
     let pid = process::current_process()
         .ok_or(SyscallError::InvalidState)?
@@ -492,6 +537,11 @@ pub fn sys_futex_requeue(
     validate_user_ptr(uaddr as *const u32, core::mem::size_of::<u32>())?;
     validate_user_ptr(uaddr2 as *const u32, core::mem::size_of::<u32>())?;
 
+    #[cfg(feature = "alloc")]
+    if crate::sched::dispatch::current_owner().is_some() {
+        return drequeue(uaddr, wake_count, uaddr2, requeue_count, None);
+    }
+
     let pid = process::current_process()
         .ok_or(SyscallError::InvalidState)?
         .pid
@@ -563,28 +613,201 @@ pub fn sys_futex_requeue(
 // Boot-path futex spin for processes launched outside the scheduler
 // ============================================================================
 
-/// FUTEX_WAIT for a dispatched thread: re-check the word and let other
-/// tasks run until it changes, the deadline passes, or the process receives
-/// a fatal signal. Wakers need not find it: it polls (a futex wait queue
-/// with direct wakeup replaces this with the blocking primitives).
+/// A dispatched thread waiting on a futex. It sleeps on its own wait
+/// queue until a waker sets `woken`; FUTEX_REQUEUE moves the entry to
+/// another key without touching the sleeper.
 #[cfg(feature = "alloc")]
-fn dispatched_futex_wait(
+struct DWaiter {
+    key: FutexKey,
+    bitset: u32,
+    woken: alloc::sync::Arc<core::sync::atomic::AtomicBool>,
+    wq: alloc::sync::Arc<sched::dispatch::WaitQueue>,
+}
+
+/// Dispatched futex waiters, hashed by key like `FUTEX_TABLE`.
+#[cfg(feature = "alloc")]
+static DFUTEX: [crate::mm::cache_aligned::CacheAligned<Mutex<Vec<DWaiter>>>; FUTEX_BUCKETS] =
+    [const { crate::mm::cache_aligned::CacheAligned::new(Mutex::new(Vec::new())) }; FUTEX_BUCKETS];
+
+/// Key of the futex word at `uaddr` for the calling process: the physical
+/// address when the word is in `MAP_SHARED` memory, so waiters in every
+/// process mapping it meet (N-114), otherwise (pid, address).
+#[cfg(feature = "alloc")]
+fn futex_key(uaddr: usize) -> Result<FutexKey, SyscallError> {
+    /// The "pid" of keys for shared memory.
+    const SHARED: u64 = u64::MAX;
+    let proc = process::current_process().ok_or(SyscallError::InvalidState)?;
+    let shared = proc
+        .memory_space
+        .lock()
+        .shared_phys_addr(crate::mm::VirtualAddress(uaddr as u64));
+    Ok(match shared {
+        Some(phys) => (SHARED, phys as usize),
+        None => (proc.pid.0, uaddr),
+    })
+}
+
+/// Take up to `n` waiters on `key` whose bitset meets `bitset` out of
+/// `list`, marking them woken; returns their queues.
+#[cfg(feature = "alloc")]
+fn take_waiters(
+    list: &mut Vec<DWaiter>,
+    key: FutexKey,
+    bitset: u32,
+    n: usize,
+) -> Vec<alloc::sync::Arc<sched::dispatch::WaitQueue>> {
+    let mut woken = Vec::new();
+    let mut i = 0;
+    while i < list.len() && woken.len() < n {
+        if list[i].key == key && list[i].bitset & bitset != 0 {
+            let w = list.remove(i);
+            w.woken.store(true, core::sync::atomic::Ordering::Release);
+            woken.push(w.wq);
+        } else {
+            i += 1;
+        }
+    }
+    woken
+}
+
+/// FUTEX_WAIT for a dispatched thread: queued under the bucket lock after
+/// re-checking the word (a wake that changed it either came first, and we
+/// return EAGAIN, or finds us queued), then asleep until woken, the
+/// deadline (ETIMEDOUT) or a signal (EINTR). It used to poll the word.
+#[cfg(feature = "alloc")]
+fn dwait(
     uaddr: usize,
     expected: u32,
     deadline: Option<u64>,
+    bitset: u32,
 ) -> Result<isize, SyscallError> {
-    loop {
-        let cur: u32 = super::userspace::read_user(uaddr)?;
-        if cur != expected {
-            return Ok(0);
-        }
-        if deadline.is_some_and(|dl| get_ticks() >= dl) {
+    use alloc::sync::Arc;
+    use core::sync::atomic::{AtomicBool, Ordering};
+
+    use sched::dispatch::{self, WaitError};
+
+    let key = futex_key(uaddr)?;
+    let woken = Arc::new(AtomicBool::new(false));
+    let wq = Arc::new(dispatch::WaitQueue::new());
+    {
+        let mut list = DFUTEX[bucket_index(key)].lock();
+        if super::userspace::read_user::<u32>(uaddr)? != expected {
             return Err(SyscallError::WouldBlock);
         }
-        if crate::sched::dispatch::wait_in_syscall() {
-            return Err(SyscallError::Interrupted);
+        list.push(DWaiter {
+            key,
+            bitset,
+            woken: woken.clone(),
+            wq: wq.clone(),
+        });
+    }
+    let result = dispatch::wait_event(&wq, deadline, || woken.load(Ordering::Acquire));
+    if result.is_ok() {
+        return Ok(0);
+    }
+    // Timed out or interrupted: leave the queue -- wherever a requeue put
+    // us -- unless a waker took us first, which counts as woken.
+    let mut found = false;
+    for b in DFUTEX.iter() {
+        let mut list = b.lock();
+        if let Some(i) = list.iter().position(|w| Arc::ptr_eq(&w.woken, &woken)) {
+            list.remove(i);
+            found = true;
+            break;
         }
     }
+    if !found && woken.load(Ordering::Acquire) {
+        return Ok(0);
+    }
+    Err(match result {
+        Err(WaitError::TimedOut) => SyscallError::TimedOut,
+        _ => SyscallError::Interrupted,
+    })
+}
+
+/// FUTEX_WAKE for dispatched waiters.
+#[cfg(feature = "alloc")]
+fn dwake(uaddr: usize, n: usize, bitset: u32) -> Result<isize, SyscallError> {
+    let key = futex_key(uaddr)?;
+    let queues = take_waiters(&mut DFUTEX[bucket_index(key)].lock(), key, bitset, n);
+    for q in &queues {
+        q.wake_all();
+    }
+    Ok(queues.len() as isize)
+}
+
+/// FUTEX_REQUEUE / FUTEX_CMP_REQUEUE for dispatched waiters: wake up to
+/// `nwake` on `uaddr` and move up to `nmove` more to `uaddr2`. With `cmp`,
+/// nothing happens (EAGAIN) unless `*uaddr` still equals it.
+#[cfg(feature = "alloc")]
+fn drequeue(
+    uaddr: usize,
+    nwake: usize,
+    uaddr2: usize,
+    nmove: usize,
+    cmp: Option<u32>,
+) -> Result<isize, SyscallError> {
+    let (k1, k2) = (futex_key(uaddr)?, futex_key(uaddr2)?);
+    let (i1, i2) = (bucket_index(k1), bucket_index(k2));
+    // Both buckets in index order, so opposite requeues cannot deadlock.
+    let (mut lo, mut hi) = match i1.cmp(&i2) {
+        core::cmp::Ordering::Less => (DFUTEX[i1].lock(), Some(DFUTEX[i2].lock())),
+        core::cmp::Ordering::Greater => {
+            let hi = DFUTEX[i2].lock();
+            (DFUTEX[i1].lock(), Some(hi))
+        }
+        core::cmp::Ordering::Equal => (DFUTEX[i1].lock(), None),
+    };
+    if let Some(v) = cmp {
+        if super::userspace::read_user::<u32>(uaddr)? != v {
+            return Err(SyscallError::WouldBlock);
+        }
+    }
+    let woken = take_waiters(&mut lo, k1, FUTEX_WAIT_BITSET_MATCH_ANY, nwake);
+    let mut moved = 0usize;
+    let mut i = 0;
+    while i < lo.len() && moved < nmove {
+        if lo[i].key == k1 {
+            let mut w = lo.remove(i);
+            w.key = k2;
+            match hi.as_mut() {
+                Some(h) => h.push(w),
+                None => lo.push(w),
+            }
+            moved += 1;
+        } else {
+            i += 1;
+        }
+    }
+    drop(hi);
+    drop(lo);
+    for q in &woken {
+        q.wake_all();
+    }
+    Ok((woken.len() + moved) as isize)
+}
+
+/// FUTEX_CMP_REQUEUE: requeue only if `*uaddr == cmp` (EAGAIN otherwise).
+pub fn sys_futex_cmp_requeue(
+    uaddr: usize,
+    nwake: usize,
+    uaddr2: usize,
+    nmove: usize,
+    cmp: u32,
+) -> Result<isize, SyscallError> {
+    if uaddr == 0 || uaddr & 0x3 != 0 || uaddr2 == 0 || uaddr2 & 0x3 != 0 {
+        return Err(SyscallError::InvalidArgument);
+    }
+    validate_user_ptr(uaddr as *const u32, core::mem::size_of::<u32>())?;
+    validate_user_ptr(uaddr2 as *const u32, core::mem::size_of::<u32>())?;
+    #[cfg(feature = "alloc")]
+    if crate::sched::dispatch::current_owner().is_some() {
+        return drequeue(uaddr, nwake, uaddr2, nmove, Some(cmp));
+    }
+    if crate::syscall::userspace::read_user::<u32>(uaddr)? != cmp {
+        return Err(SyscallError::WouldBlock);
+    }
+    sys_futex_requeue(uaddr, nwake, uaddr2, nmove)
 }
 
 /// Cooperative futex wait for boot-launched processes.
@@ -644,8 +867,8 @@ fn boot_futex_spin(
 
         // Check timeout
         if let Some(dl) = deadline {
-            if get_ticks() >= dl {
-                return Err(SyscallError::WouldBlock);
+            if crate::timer::monotonic_ns() >= dl {
+                return Err(SyscallError::TimedOut);
             }
         }
 

@@ -416,6 +416,7 @@ pub(crate) fn to_linux_errno(err: super::SyscallError) -> isize {
     const LINUX_EOPNOTSUPP: isize = -95;
     const LINUX_ENODEV: isize = -19;
     const LINUX_ENOEXEC: isize = -8;
+    const LINUX_ETIMEDOUT: isize = -110;
 
     match err {
         SyscallError::InvalidSyscall => LINUX_ENOSYS,
@@ -460,6 +461,7 @@ pub(crate) fn to_linux_errno(err: super::SyscallError) -> isize {
         SyscallError::NotSupported => LINUX_EOPNOTSUPP,
         SyscallError::NoDevice => LINUX_ENODEV,
         SyscallError::ExecFormat => LINUX_ENOEXEC,
+        SyscallError::TimedOut => LINUX_ETIMEDOUT,
     }
 }
 

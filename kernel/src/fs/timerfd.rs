@@ -245,6 +245,13 @@ pub fn timerfd_read(tfd_id: u32) -> Result<u64, SyscallError> {
             }
             // Timer not armed and blocking -- wait for it to be armed
             drop(registry);
+            #[cfg(feature = "alloc")]
+            if crate::sched::dispatch::current_owner().is_some() {
+                sleep_until_ns(
+                    crate::sched::dispatch::clock_ns() + crate::sched::dispatch::IO_RECHECK_NS,
+                )?;
+                continue;
+            }
             if crate::timer::get_uptime_ms() - start >= MAX_BLOCK_MS {
                 return Err(SyscallError::WouldBlock);
             }
@@ -283,7 +290,15 @@ pub fn timerfd_read(tfd_id: u32) -> Result<u64, SyscallError> {
         }
 
         // Release lock, yield, and retry
+        let next_expiry = instance.next_expiry_ns;
         drop(registry);
+        // A dispatched reader sleeps until the next expiry (no 30 s cap).
+        #[cfg(feature = "alloc")]
+        if crate::sched::dispatch::current_owner().is_some() {
+            sleep_until_ns(next_expiry)?;
+            continue;
+        }
+        let _ = next_expiry;
         if crate::timer::get_uptime_ms() - start >= MAX_BLOCK_MS {
             return Err(SyscallError::WouldBlock);
         }
@@ -291,6 +306,18 @@ pub fn timerfd_read(tfd_id: u32) -> Result<u64, SyscallError> {
         if crate::sched::wait_for_interrupt_in_syscall() {
             return Err(SyscallError::Interrupted);
         }
+    }
+}
+
+/// Sleep the calling dispatched thread until `deadline` (`monotonic_ns`);
+/// EINTR if a signal must be acted on first.
+#[cfg(feature = "alloc")]
+fn sleep_until_ns(deadline: u64) -> Result<(), SyscallError> {
+    use crate::sched::dispatch;
+    static TIMERFD_SLEEP: dispatch::WaitQueue = dispatch::WaitQueue::new();
+    match dispatch::wait_event(&TIMERFD_SLEEP, Some(deadline), || false) {
+        Err(dispatch::WaitError::Interrupted) => Err(SyscallError::Interrupted),
+        _ => Ok(()),
     }
 }
 

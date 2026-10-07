@@ -405,10 +405,15 @@ pub fn sys_read(fd: usize, buffer: usize, count: usize) -> SyscallResult {
     // parent reads from a pipe that the child writes to.
     let proc = process::current_process().ok_or(SyscallError::InvalidState)?;
 
-    // First attempt: try reading directly.
+    // First attempt: try reading directly. The file table lock covers only
+    // the lookup: a read can sleep (an empty eventfd), and a lock held over
+    // it stopped every other thread's file system calls (N-118).
     {
-        let file_table = proc.file_table.lock();
-        let file_desc = file_table.get(fd).ok_or(SyscallError::InvalidArgument)?;
+        let file_desc = proc
+            .file_table
+            .lock()
+            .get(fd)
+            .ok_or(SyscallError::BadFileDescriptor)?;
         match file_read_to_user(&file_desc, buffer, count) {
             Err(SyscallError::WouldBlock) => {
                 // Pipe empty with write end open -- fall through to try
@@ -426,25 +431,32 @@ pub fn sys_read(fd: usize, buffer: usize, count: usize) -> SyscallResult {
     // (N-119). O_NONBLOCK still gets EAGAIN.
     #[cfg(feature = "alloc")]
     if crate::sched::dispatch::current_owner().is_some() {
+        let mut retry_now = false;
         loop {
+            // The file table lock is held only for the lookup: never across
+            // the user copy or the wait (N-118).
+            let file_desc = proc
+                .file_table
+                .lock()
+                .get(fd)
+                .ok_or(SyscallError::BadFileDescriptor)?;
+            if file_desc
+                .nonblock
+                .load(core::sync::atomic::Ordering::Acquire)
             {
-                let file_table = proc.file_table.lock();
-                let file_desc = file_table.get(fd).ok_or(SyscallError::InvalidArgument)?;
-                if file_desc
-                    .nonblock
-                    .load(core::sync::atomic::Ordering::Acquire)
-                {
-                    return Err(SyscallError::WouldBlock);
-                }
-                match file_read_to_user(&file_desc, buffer, count) {
-                    Err(SyscallError::WouldBlock) => {}
-                    other => return other,
-                }
+                return Err(SyscallError::WouldBlock);
             }
-            // No lock held while waiting; a signal ends the wait (EINTR).
-            if crate::sched::wait_for_interrupt_in_syscall() {
-                return Err(SyscallError::Interrupted);
+            match file_read_to_user(&file_desc, buffer, count) {
+                Err(SyscallError::WouldBlock) => {}
+                other => return other,
             }
+            // Sleep until readable (data, EOF or error); a signal ends the
+            // wait (EINTR).
+            wait_ready(
+                &file_desc,
+                (POLLIN | POLLHUP | POLLERR) as u16,
+                &mut retry_now,
+            )?;
         }
     }
 
@@ -574,27 +586,55 @@ fn write_fd(
     buffer: usize,
     count: usize,
 ) -> Option<SyscallResult> {
+    #[cfg(feature = "alloc")]
+    let mut retry_now = false;
     loop {
-        let result = {
-            let file_table = proc.file_table.lock();
-            let file_desc = file_table.get(fd)?;
-            let blocking = !file_desc
-                .nonblock
-                .load(core::sync::atomic::Ordering::Acquire);
-            let result = file_write_from_user(&file_desc, buffer, count);
-            if !(blocking && matches!(result, Err(SyscallError::WouldBlock))) {
-                return Some(result);
-            }
-            result
-        };
+        // Looked up under the file table lock, written without it (N-118).
+        let file_desc = proc.file_table.lock().get(fd)?;
+        let blocking = !file_desc
+            .nonblock
+            .load(core::sync::atomic::Ordering::Acquire);
+        let result = file_write_from_user(&file_desc, buffer, count);
+        if !(blocking && matches!(result, Err(SyscallError::WouldBlock))) {
+            return Some(result);
+        }
         #[cfg(feature = "alloc")]
         if crate::sched::dispatch::current_owner().is_some() {
-            if crate::sched::wait_for_interrupt_in_syscall() {
-                return Some(Err(SyscallError::Interrupted));
+            if let Err(e) = wait_ready(&file_desc, (POLLOUT | POLLERR) as u16, &mut retry_now) {
+                return Some(Err(e));
             }
             continue;
         }
         return Some(result);
+    }
+}
+
+/// Sleep until `file` reports one of `mask` (poll bits), a signal must be
+/// acted on (EINTR), or -- for a file type that does not wake waiters
+/// itself -- a short re-check interval passes. `retry_now` carries state
+/// between calls: when the last wait ended because the file looked ready
+/// but the operation still blocked, this one sleeps for the interval
+/// instead, so a node whose readiness and I/O disagree cannot spin.
+#[cfg(feature = "alloc")]
+fn wait_ready(
+    file: &crate::fs::file::File,
+    mask: u16,
+    retry_now: &mut bool,
+) -> Result<(), SyscallError> {
+    use crate::sched::dispatch::{self, WaitError};
+    const RECHECK_NS: u64 = 10_000_000;
+    let rearm = core::mem::take(retry_now);
+    let deadline = (rearm || !file.node.wakes_io_waiters())
+        .then(|| dispatch::clock_ns().saturating_add(RECHECK_NS));
+    match dispatch::wait_event(&dispatch::IO_EVENTS, deadline, || {
+        !rearm && file.node.poll_readiness() & mask != 0
+    }) {
+        Ok(()) => {
+            *retry_now = true;
+            Ok(())
+        }
+        Err(WaitError::TimedOut) => Ok(()),
+        Err(WaitError::Interrupted) => Err(SyscallError::Interrupted),
     }
 }
 
@@ -638,8 +678,12 @@ pub fn sys_seek(fd: usize, offset: isize, whence: usize) -> SyscallResult {
     let process = process::current_process().ok_or(SyscallError::InvalidState)?;
 
     // Get file descriptor
-    let file_table = process.file_table.lock();
-    let file_desc = file_table.get(fd).ok_or(SyscallError::InvalidArgument)?;
+    // Lookup only; the lock is not held over the operation (N-118).
+    let file_desc = process
+        .file_table
+        .lock()
+        .get(fd)
+        .ok_or(SyscallError::BadFileDescriptor)?;
 
     // Convert whence to SeekFrom
     let seek_from = match whence {
@@ -671,8 +715,12 @@ pub fn sys_stat(fd: usize, stat_buf: usize) -> SyscallResult {
     let process = process::current_process().ok_or(SyscallError::InvalidState)?;
 
     // Get file descriptor
-    let file_table = process.file_table.lock();
-    let file_desc = file_table.get(fd).ok_or(SyscallError::InvalidArgument)?;
+    // Lookup only; the lock is not held over the operation (N-118).
+    let file_desc = process
+        .file_table
+        .lock()
+        .get(fd)
+        .ok_or(SyscallError::BadFileDescriptor)?;
 
     // Get metadata and write to user buffer
     let metadata = file_desc.node.metadata().map_err(super::map_kernel_error)?;
@@ -692,8 +740,12 @@ pub fn sys_truncate(fd: usize, size: usize) -> SyscallResult {
     let process = process::current_process().ok_or(SyscallError::InvalidState)?;
 
     // Get file descriptor
-    let file_table = process.file_table.lock();
-    let file_desc = file_table.get(fd).ok_or(SyscallError::InvalidArgument)?;
+    // Lookup only; the lock is not held over the operation (N-118).
+    let file_desc = process
+        .file_table
+        .lock()
+        .get(fd)
+        .ok_or(SyscallError::BadFileDescriptor)?;
 
     // Truncate file
     match file_desc.node.truncate(size) {
@@ -2164,8 +2216,12 @@ pub fn sys_readdir(fd: usize, entry_buf: usize, buf_size: usize) -> SyscallResul
     validate_user_buffer(entry_buf, buf_size)?;
 
     let proc = process::current_process().ok_or(SyscallError::InvalidState)?;
-    let file_table = proc.file_table.lock();
-    let file_desc = file_table.get(fd).ok_or(SyscallError::InvalidArgument)?;
+    // Lookup only; the lock is not held over the operation (N-118).
+    let file_desc = proc
+        .file_table
+        .lock()
+        .get(fd)
+        .ok_or(SyscallError::BadFileDescriptor)?;
 
     // Read all directory entries from the VFS node
     let entries = file_desc
@@ -2418,8 +2474,12 @@ pub fn sys_chmod(path_ptr: usize, mode: usize) -> SyscallResult {
 /// Change file permissions by fd (syscall 186).
 pub fn sys_fchmod(fd: usize, mode: usize) -> SyscallResult {
     let proc = process::current_process().ok_or(SyscallError::InvalidState)?;
-    let file_table = proc.file_table.lock();
-    let file = file_table.get(fd).ok_or(SyscallError::InvalidArgument)?;
+    // Lookup only; the lock is not held over the operation (N-118).
+    let file = proc
+        .file_table
+        .lock()
+        .get(fd)
+        .ok_or(SyscallError::BadFileDescriptor)?;
     require_owner_or_root(&file.node)?;
 
     let perms = Permissions::from_mode(mode as u32);
@@ -2491,6 +2551,12 @@ pub fn sys_poll(fds_ptr: usize, nfds: usize, timeout_ms: usize) -> SyscallResult
 
     if nfds == 0 {
         // timeout_ms > 0 means sleep for that duration (like usleep via poll)
+        #[cfg(feature = "alloc")]
+        if (timeout_ms as i32) > 0 && crate::sched::dispatch::current_owner().is_some() {
+            let deadline = crate::sched::dispatch::clock_ns()
+                .saturating_add((timeout_ms as i32 as u64).saturating_mul(1_000_000));
+            return super::time::sleep_until(deadline, 0);
+        }
         if (timeout_ms as i32) > 0 && !in_boot_coop {
             let start = crate::timer::get_uptime_ms();
             while crate::timer::get_uptime_ms() - start < timeout_ms as u64 {
@@ -2539,7 +2605,20 @@ pub fn sys_poll(fds_ptr: usize, nfds: usize, timeout_ms: usize) -> SyscallResult
         timeout_i32 as u64
     };
 
+    // A dispatched poller sleeps between scans (no cap on an infinite
+    // wait): woken when a file object reports a change, at the deadline,
+    // or by a signal.
+    #[cfg(feature = "alloc")]
+    let dispatched = crate::sched::dispatch::current_owner().is_some();
+    #[cfg(feature = "alloc")]
+    let deadline = (timeout_i32 > 0)
+        .then(|| crate::sched::dispatch::clock_ns().saturating_add(timeout_i32 as u64 * 1_000_000));
+
     loop {
+        #[cfg(feature = "alloc")]
+        let seq = crate::sched::dispatch::io_seq();
+        #[cfg(feature = "alloc")]
+        let mut precise = true;
         let proc = process::current_process().ok_or(SyscallError::InvalidState)?;
         let file_table = proc.file_table.lock();
         let mut ready_count = 0usize;
@@ -2552,6 +2631,10 @@ pub fn sys_poll(fds_ptr: usize, nfds: usize, timeout_ms: usize) -> SyscallResult
             }
 
             if let Some(file) = file_table.get(pollfd.fd as usize) {
+                #[cfg(feature = "alloc")]
+                {
+                    precise &= file.node.wakes_io_waiters();
+                }
                 let readiness = file.node.poll_readiness();
                 if pollfd.events & POLLIN != 0 && readiness & 0x0001 != 0 {
                     pollfd.revents |= POLLIN;
@@ -2582,6 +2665,19 @@ pub fn sys_poll(fds_ptr: usize, nfds: usize, timeout_ms: usize) -> SyscallResult
         if ready_count > 0 || timeout_i32 == 0 {
             write_back(&pollfds)?;
             return Ok(ready_count);
+        }
+
+        #[cfg(feature = "alloc")]
+        if dispatched {
+            use crate::sched::dispatch::{wait_io, WaitError};
+            match wait_io(seq, deadline, precise) {
+                Ok(()) => continue,
+                Err(WaitError::TimedOut) => {
+                    write_back(&pollfds)?;
+                    return Ok(0);
+                }
+                Err(WaitError::Interrupted) => return Err(SyscallError::Interrupted),
+            }
         }
 
         // Timeout expired?
@@ -2772,8 +2868,12 @@ pub fn sys_pread(fd: usize, buf: usize, count: usize, offset: usize) -> SyscallR
     validate_user_buffer(buf, count)?;
 
     let proc = process::current_process().ok_or(SyscallError::InvalidState)?;
-    let file_table = proc.file_table.lock();
-    let file = file_table.get(fd).ok_or(SyscallError::InvalidArgument)?;
+    // Lookup only; the lock is not held over the operation (N-118).
+    let file = proc
+        .file_table
+        .lock()
+        .get(fd)
+        .ok_or(SyscallError::BadFileDescriptor)?;
 
     // Read at `offset` through the VfsNode, bypassing the File position,
     // a chunk at a time through a kernel buffer (N-43).
@@ -2794,8 +2894,12 @@ pub fn sys_pwrite(fd: usize, buf: usize, count: usize, offset: usize) -> Syscall
     validate_user_buffer(buf, count)?;
 
     let proc = process::current_process().ok_or(SyscallError::InvalidState)?;
-    let file_table = proc.file_table.lock();
-    let file = file_table.get(fd).ok_or(SyscallError::InvalidArgument)?;
+    // Lookup only; the lock is not held over the operation (N-118).
+    let file = proc
+        .file_table
+        .lock()
+        .get(fd)
+        .ok_or(SyscallError::BadFileDescriptor)?;
 
     // Write at `offset` through the VfsNode, a chunk at a time (N-43).
     let mut at = offset;

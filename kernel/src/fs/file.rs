@@ -215,10 +215,25 @@ impl File {
             });
         }
 
+        if self.is_stream() {
+            return self.node.read(0, buffer);
+        }
         let mut pos = self.position.write();
         let bytes_read = self.node.read(*pos, buffer)?;
         *pos += bytes_read;
         Ok(bytes_read)
+    }
+
+    /// Whether the file is a stream -- pipe, socket, character device,
+    /// eventfd and the like -- with no file position. Its reads and writes
+    /// take no position lock: a read that sleeps (an empty pipe or eventfd)
+    /// used to hold the lock, so a writer of the same open file, from
+    /// another thread or a forked child, spun on it forever (N-118).
+    fn is_stream(&self) -> bool {
+        !matches!(
+            self.node.node_type(),
+            super::NodeType::File | super::NodeType::Directory | super::NodeType::BlockDevice
+        )
     }
 
     /// Write to the file
@@ -229,6 +244,9 @@ impl File {
             });
         }
 
+        if self.is_stream() {
+            return self.node.write(0, data);
+        }
         let mut pos = self.position.write();
 
         if self.flags.append {

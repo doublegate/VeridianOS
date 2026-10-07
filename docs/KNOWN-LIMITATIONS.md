@@ -56,13 +56,13 @@ work. User code is preempted when its slice ends (D3). What is still missing:
 
 - **The kernel is not preemptible.** A task is switched only on its way back to user mode or
   when it waits, so a long system call keeps the CPU until it returns or waits.
-- **Waits poll (N-119, blocking step of sprint D).** A system call that waits re-checks its
-  condition each time another task has run, or after the next interrupt: correct, but busier
-  than a wait queue with a direct wakeup. Pipes, futexes, `poll`, `nanosleep` and the rest have
-  no wait queues yet. Some waits are also still wrong:
+- **Some waits still re-check instead of being woken (blocking step of sprint D).** Sleeps,
+  futexes, pipes, eventfd, timerfd, `sigsuspend`, `wait` and job-control stops sleep until woken.
+  `poll`, `epoll_wait` and blocking reads of sockets, ptys, signalfd and other descriptors that
+  do not report readiness changes yet sleep too but re-check every 10 ms. `select` reports every
+  open descriptor as ready. Other waits are still wrong:
   - a pipe write that only partly fits returns a short count instead of waiting for the rest,
     and PIPE_BUF writes are not atomic;
-  - eventfd, signalfd and timerfd waits spin for up to 30 s;
   - an empty pty read returns end-of-file, and a write to a full pty fails with EAGAIN instead
     of waiting (it returns a short count when part fits; N-128);
   - `flock` without `LOCK_NB` fails with EWOULDBLOCK instead of waiting (N-120).
@@ -114,8 +114,7 @@ What remains:
   halves of AVX registers are not preserved across a handler that uses them.
 - **`siginfo` carries only the signal number.** No sender pid or uid, no fault address.
 - **Real-time signals 32-64** cannot be installed, there is no queueing, and `sigaltstack` reports
-  success without effect (N-105). Futex timeouts are read as raw ticks and absolute
-  `FUTEX_WAIT_BITSET` timeouts are treated as relative (N-104).
+  success without effect (N-105).
 - **sigreturn on AArch64 and RISC-V does not sanitise registers (N-170).** PSTATE and `sstatus`
   are restored as given, latent until those architectures have user mode.
 - **wait (N-99 remainder):** `waitid(WNOWAIT)` returns EINVAL, and `wait4` reports no resource

@@ -1656,6 +1656,25 @@ impl VirtualAddressSpace {
         }
     }
 
+    /// The physical address behind `addr` when it lies in a `MAP_SHARED`
+    /// mapping (whose frames other processes may map too), else `None`.
+    /// Futexes in shared memory are keyed by it (N-114).
+    #[cfg(feature = "alloc")]
+    pub fn shared_phys_addr(&self, addr: VirtualAddress) -> Option<u64> {
+        let mappings = self.mappings.lock();
+        let (_, m) = mappings
+            .range(..=addr)
+            .next_back()
+            .filter(|(_, m)| m.contains(addr))?;
+        if m.mapping_type != MappingType::Shared {
+            return None;
+        }
+        let frame = m
+            .physical_frames
+            .get(((addr.0 - m.start.0) / 4096) as usize)?;
+        Some((frame.as_u64() << 12) | (addr.0 & 0xfff))
+    }
+
     /// Find mapping for address
     #[cfg(feature = "alloc")]
     pub fn find_mapping(&self, addr: VirtualAddress) -> Option<VirtualMapping> {
