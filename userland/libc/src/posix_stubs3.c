@@ -1032,10 +1032,14 @@ int prctl(int option, unsigned long arg2, unsigned long arg3,
 
 #include <signal.h>
 
+#include <veridian/syscall.h>
+
+/* Wait with `mask` until a signal is caught (native 122); always ends
+ * with EINTR. It returned at once without waiting. */
 int sigsuspend(const sigset_t *mask)
 {
-    (void)mask;
-    errno = EINTR;
+    long ret = veridian_syscall1(SYS_SIGSUSPEND, (long)mask);
+    errno = ret < 0 ? (int)(-ret) : EINTR;
     return -1;
 }
 

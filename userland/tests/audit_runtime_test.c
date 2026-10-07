@@ -1241,6 +1241,136 @@ static void test_blocking_pipe(void)
     report("pipe_read_blocks_for_writer", n == 1 && c == 'x' && eof == 0, why);
 }
 
+/* --- Signal handlers (sprint D3; N-96, N-98, N-109, N-113). ------------- */
+static volatile int d3_usr1_count, d3_usr2_count;
+static void d3_on_usr1(int sig) { (void)sig; d3_usr1_count++; }
+static void d3_on_usr2(int sig)
+{
+    /* Clobber the FP registers: the interrupted code must not notice. */
+    volatile double x = 1.0;
+    for (int i = 0; i < 64; i++)
+        x = x * 1.000001 + 0.5;
+    (void)sig;
+    d3_usr2_count++;
+}
+static void d3_on_segv(int sig) { (void)sig; _exit(42); }
+
+static int d3_install(int sig, void (*fn)(int), int flags)
+{
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = fn;
+    sa.sa_flags = flags;
+    sigemptyset(&sa.sa_mask);
+    return sigaction(sig, &sa, 0);
+}
+
+static void test_signal_handlers(void)
+{
+    /* A handler runs on the way back from the kill that raised it. */
+    d3_usr1_count = 0;
+    d3_install(SIGUSR1, d3_on_usr1, 0);
+    kill(getpid(), SIGUSR1);
+    report("signal_handler_runs", d3_usr1_count == 1, "handler did not run");
+
+    /* A blocked signal waits; unblocking delivers it (Linux set layout). */
+    sigset_t set, old;
+    sigemptyset(&set);
+    sigaddset(&set, SIGUSR1);
+    sigprocmask(SIG_BLOCK, &set, &old);
+    kill(getpid(), SIGUSR1);
+    int held = d3_usr1_count == 1;
+    sigprocmask(SIG_SETMASK, &old, 0);
+    report("signal_mask_blocks_then_delivers", held && d3_usr1_count == 2, "mask not honoured");
+
+    /* Asynchronous handlers interrupt FP work without corrupting it. */
+    d3_usr2_count = 0;
+    d3_install(SIGUSR2, d3_on_usr2, 0);
+    pid_t parent = getpid();
+    pid_t pid = fork();
+    if (pid == 0) {
+        for (int i = 0; i < 20; i++) {
+            struct timespec ts = {0, 2 * 1000 * 1000};
+            nanosleep(&ts, 0);
+            kill(parent, SIGUSR2);
+        }
+        _exit(0);
+    }
+    double a = 0.0, expect = 0.0;
+    for (int i = 1; i <= 2000000; i++)
+        a += 1.0 / (double)i;
+    for (int i = 1; i <= 2000000; i++)
+        expect += 1.0 / (double)i;
+    int st = 0;
+    /* The sender's signals interrupt the wait (no SA_RESTART): retry, so
+     * none is still in flight when the next test starts. */
+    while (waitpid(pid, &st, 0) < 0 && errno == EINTR)
+        ;
+    static char why[80];
+    snprintf(why, sizeof(why), "handlers=%d fp_equal=%d", d3_usr2_count, a == expect);
+    report("signal_handlers_preserve_fp_state", a == expect && d3_usr2_count > 0, why);
+
+    /* SA_RESTART restarts an interrupted wait; without it, EINTR. */
+    for (int restart = 1; restart >= 0; restart--) {
+        d3_install(SIGUSR1, d3_on_usr1, restart ? SA_RESTART : 0);
+        pid_t slow = fork();
+        if (slow == 0) {
+            struct timespec ts = {0, 120 * 1000 * 1000};
+            nanosleep(&ts, 0);
+            _exit(5);
+        }
+        pid_t poker = fork();
+        if (poker == 0) {
+            struct timespec ts = {0, 30 * 1000 * 1000};
+            nanosleep(&ts, 0);
+            kill(parent, SIGUSR1);
+            _exit(0);
+        }
+        int s2 = 0;
+        errno = 0;
+        pid_t r = waitpid(slow, &s2, 0);
+        int e = errno;
+        if (r != slow)
+            while (waitpid(slow, &s2, 0) < 0 && errno == EINTR)
+                ;
+        while (waitpid(poker, 0, 0) < 0 && errno == EINTR)
+            ;
+        static char why2[64];
+        snprintf(why2, sizeof(why2), "r=%d errno=%d", (int)r, e);
+        if (restart)
+            report("signal_sa_restart_restarts_wait", r == slow && WEXITSTATUS(s2) == 5, why2);
+        else
+            report("signal_without_restart_eintr", r == -1 && e == EINTR, why2);
+    }
+
+    /* SIGCHLD's default action is to ignore it: it must not end a sleep
+     * (N-98). */
+    signal(SIGCHLD, SIG_DFL);
+    pid = fork();
+    if (pid == 0)
+        _exit(0);
+    struct timespec ts = {0, 40 * 1000 * 1000};
+    int slept = nanosleep(&ts, 0);
+    waitpid(pid, 0, 0);
+    report("sigchld_default_does_not_interrupt", slept == 0, "nanosleep was interrupted");
+
+    /* A fault reaches an installed SIGSEGV handler. */
+    pid = fork();
+    if (pid == 0) {
+        d3_install(SIGSEGV, d3_on_segv, 0);
+        *(volatile int *)8 = 1;
+        _exit(1);
+    }
+    st = 0;
+    waitpid(pid, &st, 0);
+    static char why3[48];
+    snprintf(why3, sizeof(why3), "status=0x%x", st);
+    report("sigsegv_handler_runs", WIFEXITED(st) && WEXITSTATUS(st) == 42, why3);
+
+    signal(SIGUSR1, SIG_DFL);
+    signal(SIGUSR2, SIG_DFL);
+}
+
 int main(int argc, char **argv)
 {
     setvbuf(stdout, NULL, _IONBF, 0);
@@ -1277,6 +1407,7 @@ int main(int argc, char **argv)
     test_preemption();
     test_kill_sleeping();
     test_blocking_pipe();
+    test_signal_handlers();
     printf("AUDIT-RUNTIME: %d/%d\n", passed, total);
     return passed == total ? 0 : 1;
 }

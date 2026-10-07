@@ -165,6 +165,13 @@ pub fn sys_thread_clone(
 
     let thread = builder.build().map_err(|_| SyscallError::InvalidState)?;
     let tid = thread.tid;
+    // A new thread starts with its creator's blocked mask (N-109).
+    thread.sigmask.store(
+        current_thread
+            .sigmask
+            .load(core::sync::atomic::Ordering::Acquire),
+        core::sync::atomic::Ordering::Release,
+    );
 
     // Override context with cloned registers so the child returns 0 from clone.
     //

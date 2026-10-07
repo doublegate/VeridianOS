@@ -318,7 +318,37 @@ fn exit_to_user(f: &mut TrapFrame) {
     #[cfg(feature = "alloc")]
     crate::sched::dispatch::preempt_user();
     crate::process::user_return_check();
+    #[cfg(feature = "alloc")]
+    if crate::sched::dispatch::current_owner().is_some() {
+        crate::process::signals::deliver_on_return(f);
+    }
     sanitize_user_frame(f);
+}
+
+/// A fault signal for a dispatched thread whose handler is installed and
+/// not blocked is queued for that thread and delivered on the way back
+/// (SIGSEGV handlers, SIGFPE handlers...). Returns false when the fault
+/// must kill the process instead (default action, ignored, or blocked:
+/// Linux forces the default for a blocked or ignored synchronous signal).
+fn queue_fault_signal(sig: u32) -> bool {
+    #[cfg(feature = "alloc")]
+    if crate::sched::dispatch::current_owner().is_some() {
+        if let (Some(process), Some(thread)) = (
+            crate::process::current_process(),
+            crate::process::current_thread(),
+        ) {
+            let sig = sig as usize;
+            let bit = crate::process::signals::sig_bit(sig);
+            let handler = process.get_signal_handler(sig).unwrap_or(0);
+            let blocked = thread.sigmask.load(Ordering::Acquire) & bit != 0;
+            if handler > 1 && !blocked {
+                thread.sigpending.fetch_or(bit, Ordering::AcqRel);
+                return true;
+            }
+        }
+    }
+    let _ = sig;
+    false
 }
 
 /// Mark the faulting user process as killed by `signal` and return to the
@@ -448,6 +478,9 @@ fn exception(f: &mut TrapFrame, user: bool) {
             raw_serial_str(b" err=0x");
             raw_serial_hex(f.error_code);
             raw_serial_str(b"\n");
+        }
+        if queue_fault_signal(exception_signal(f.vector)) {
+            return;
         }
         kill_user(exception_signal(f.vector), false);
     }
@@ -619,6 +652,9 @@ fn page_fault(f: &mut TrapFrame, user: bool) {
             raw_serial_str(b" ec=0x");
             raw_serial_hex(ec);
             raw_serial_str(b"\n");
+        }
+        if queue_fault_signal(11) {
+            return;
         }
         kill_user(11, true);
     }

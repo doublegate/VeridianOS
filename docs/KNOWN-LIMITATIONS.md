@@ -65,17 +65,14 @@ work. User code is preempted when its slice ends (D3). What is still missing:
   - eventfd, signalfd and timerfd waits spin for up to 30 s;
   - an empty pty read returns end-of-file;
   - `flock` without `LOCK_NB` fails with EWOULDBLOCK instead of waiting (N-120).
-- **Signals are only fatal or ignored.** A fatal signal to a dispatched process is acted on by
-  its threads at their next return to user mode or wait. Handlers, stop/continue and
-  per-thread delivery come with the rest of D3 (N-96, N-98, N-109, N-113).
 - **exec from a multithreaded process fails with EAGAIN.** The other threads would keep running
   on the page tables exec replaces; stopping them first is N-101.
 - **Native libc threads (N-102).** The native C library's `clone` returns through a C epilogue
   and `errno` is one global, so its `pthread_create` still does not work (musl's does). Two
   fixes are therefore tested by unit tests only: LIBC-SEC-01 (the allocator lock in `stdlib.c`)
   and PROC-SEC-02 (deferred reaping of an exiting thread's stack).
-- **Per-thread state is per process (N-109):** signal mask and pending set, `clear_child_tid`,
-  the robust-list head and the FS base.
+- **Some per-thread state is per process (N-109):** the robust-list head and the FS base
+  registered through `arch_prctl` (the signal mask and pending set are per thread since D3).
 - **Old binaries.** KDE binaries built before the v0.27 musl patch map `pthread_exit` to a
   process exit.
 
@@ -91,20 +88,27 @@ handlers for every exception. What remains depends on the dispatcher:
   with the old scheduler in D4.
 - A fatal kernel fault stops only the faulting CPU; the others keep running until SMP stage S2.
 
-### Signals (N-96, N-98, N-99, N-104, N-105, N-113, N-170; sprint D)
+### Signals (N-99, N-104, N-105, N-170; sprint D)
 
-- **Signal-set bit layout (N-96).** The kernel and native libc use bit *n* for signal *n*, musl
-  uses bit *n-1*. A musl program's `sigprocmask` therefore blocks the neighbouring signal.
-- **Ignored signals stay pending (N-98).** SIGCHLD and other default-ignored signals stay in the
-  pending set, and futex, wait and sigsuspend treat any pending bit as EINTR.
-- **Signal frames (N-113).** The return trampoline is written to the (non-executable) user stack,
-  the frame skips the red zone and is not 16-byte aligned.
+Since sprint D3, dispatched threads on x86_64 take signals as Linux does:
+- **Sets and state.** Sets use the Linux layout. Each thread has its own mask and pending set.
+  Ignored signals are dropped when sent.
+- **Delivery.** Handlers run on a Linux `rt_sigframe` with SA_RESTORER, and SA_RESTART,
+  SA_NODEFER and SA_RESETHAND are honoured. `sigsuspend` and `sigpending` work, and a fault
+  reaches an installed handler (N-96, N-98, N-113).
+
+What remains:
+
+- **Stop and continue are not implemented.** SIGSTOP, SIGTSTP, SIGTTIN and SIGTTOU are ignored
+  rather than stopping the process, and SIGCONT does nothing; there is no job control.
+- **Handlers save x87/SSE state only.** The signal frame holds an FXSAVE image, so the upper
+  halves of AVX registers are not preserved across a handler that uses them.
+- **`siginfo` carries only the signal number.** No sender pid or uid, no fault address.
+- **Real-time signals 32-64** cannot be installed, there is no queueing, and `sigaltstack` reports
+  success without effect (N-105). Futex timeouts are read as raw ticks and absolute
+  `FUTEX_WAIT_BITSET` timeouts are treated as relative (N-104).
 - **sigreturn on AArch64 and RISC-V does not sanitise registers (N-170).** PSTATE and `sstatus`
-  are restored as given, latent until those architectures have user mode. On x86_64 RFLAGS and
-  RIP are sanitised since v0.27 (ADR 0008).
-- **Real-time signals 32-64** cannot be installed and `sigaltstack` reports success without effect
-  (N-105). Futex timeouts are read as raw ticks and absolute `FUTEX_WAIT_BITSET` timeouts are
-  treated as relative (N-104).
+  are restored as given, latent until those architectures have user mode.
 - **wait (N-99):** no process-group waits, WUNTRACED/WCONTINUED are wrong, `waitid(WNOWAIT)`
   returns EINVAL, and file errors are mostly reported as ENOENT (N-127).
 

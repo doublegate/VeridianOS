@@ -576,6 +576,8 @@ pub enum Syscall {
     Tkill = 357,
     Tgkill = 358,
     Waitid = 359,
+    /// rt_sigpending: signals pending for the caller while blocked.
+    SigPending = 360,
 
     // Event/timer notification fds (KDE/Wayland infrastructure)
     Getrandom = 330,
@@ -1794,6 +1796,7 @@ fn handle_syscall(
         Syscall::Tkill => process::sys_tkill(arg1, arg2),
         Syscall::Tgkill => process::sys_tgkill(arg1, arg2, arg3),
         Syscall::Waitid => process::sys_waitid(arg1, arg2, arg3, arg4),
+        Syscall::SigPending => signal::sys_sigpending(arg1, arg2),
 
         _ => Err(SyscallError::InvalidSyscall),
     }
@@ -3356,6 +3359,7 @@ impl TryFrom<usize> for Syscall {
             357 => Ok(Syscall::Tkill),
             358 => Ok(Syscall::Tgkill),
             359 => Ok(Syscall::Waitid),
+            360 => Ok(Syscall::SigPending),
 
             _ => Err(()),
         }

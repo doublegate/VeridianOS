@@ -99,9 +99,17 @@ int getloadavg(double loadavg[], int nelem)
 /* sigpending                                                                */
 /* ========================================================================= */
 
+#include <veridian/syscall.h>
+
+/* The signals pending while blocked (native 360, rt_sigpending). It
+ * reported none. */
 int sigpending(sigset_t *set)
 {
-    if (set) *set = 0;
+    long ret = veridian_syscall2(360, (long)set, (long)sizeof(*set));
+    if (ret < 0) {
+        errno = (int)(-ret);
+        return -1;
+    }
     return 0;
 }
 

@@ -46,6 +46,24 @@ pub fn get_syscall_frame() -> Option<&'static SyscallFrame> {
     Some(unsafe { &*(ptr as *const SyscallFrame) })
 }
 
+/// Run `f` on the frame of the system call this CPU is executing, mutably
+/// (rt_sigreturn rewrites the registers the call returns with). `None`
+/// outside a system call.
+pub fn with_syscall_frame<R>(f: impl FnOnce(&mut SyscallFrame) -> R) -> Option<R> {
+    let cpu = this_arch_cpu_ptr();
+    if !crate::arch::percpu::is_arch_cpu_block(cpu as u64) {
+        return None;
+    }
+    // SAFETY: this CPU's block; only this CPU writes it.
+    let ptr = unsafe { (*cpu).syscall_frame };
+    if ptr == 0 {
+        return None;
+    }
+    // SAFETY: as in get_syscall_frame; the frame belongs to the system call
+    // running on this CPU, which is the only code touching it now.
+    Some(f(unsafe { &mut *(ptr as *mut SyscallFrame) }))
+}
+
 /// Per-CPU data accessed via GS during syscall entry/exit: the architecture
 /// per-CPU block (`kernel_rsp` at `gs:[0x0]`, `user_rsp` at `gs:[0x8]`,
 /// `syscall_frame` at `gs:[0x10]`).
@@ -72,6 +90,11 @@ extern "C" fn syscall_exit_prepare(frame: &mut SyscallFrame) -> u64 {
     // A thread whose process received a fatal signal (or an exit_group by
     // another thread) leaves here instead of returning.
     crate::process::user_return_check();
+    // Pending signals: default actions, or a handler frame (sprint D3).
+    #[cfg(feature = "alloc")]
+    if crate::sched::dispatch::current_owner().is_some() {
+        crate::process::signals::deliver_on_return(frame);
+    }
     super::trap::sanitize_user_frame(frame);
     let sysret_ok = frame.rcx == frame.rip
         && frame.r11 == frame.rflags
@@ -125,28 +148,6 @@ pub unsafe extern "C" fn syscall_entry() {
         "push r15",
         "mov gs:[0x10], rsp",         // this CPU's frame pointer (N-35)
 
-        // User SSE registers (xmm0-xmm15). The kernel itself is built
-        // soft-float, but a parent's registers must survive a nested child
-        // run inside its syscall until user vector state is switched per
-        // task with XSAVE (N-41).
-        "sub rsp, 256",
-        "movdqu [rsp],      xmm0",
-        "movdqu [rsp+0x10], xmm1",
-        "movdqu [rsp+0x20], xmm2",
-        "movdqu [rsp+0x30], xmm3",
-        "movdqu [rsp+0x40], xmm4",
-        "movdqu [rsp+0x50], xmm5",
-        "movdqu [rsp+0x60], xmm6",
-        "movdqu [rsp+0x70], xmm7",
-        "movdqu [rsp+0x80], xmm8",
-        "movdqu [rsp+0x90], xmm9",
-        "movdqu [rsp+0xa0], xmm10",
-        "movdqu [rsp+0xb0], xmm11",
-        "movdqu [rsp+0xc0], xmm12",
-        "movdqu [rsp+0xd0], xmm13",
-        "movdqu [rsp+0xe0], xmm14",
-        "movdqu [rsp+0xf0], xmm15",
-
         // SYSCALL ABI (rax = number, rdi rsi rdx r10 r8 = args) to the C
         // ABI (rdi = number, rsi rdx rcx r8 r9 = args).
         "xchg rdi, rax",
@@ -162,29 +163,11 @@ pub unsafe extern "C" fn syscall_entry() {
         // arrive from here to the return, or it would see a ring-0 CS
         // with the user GS base after the swapgs.
         "cli",
-        "mov [rsp + 256 + {rax_off}], rax",   // result into frame.rax
+        "mov [rsp + {rax_off}], rax",         // result into frame.rax
         "mov qword ptr gs:[0x10], 0",
-        "lea rdi, [rsp + 256]",
+        "mov rdi, rsp",
         "call {prepare}",
         "test eax, eax",                      // flags survive until the jz
-
-        "movdqu xmm0,  [rsp]",
-        "movdqu xmm1,  [rsp+0x10]",
-        "movdqu xmm2,  [rsp+0x20]",
-        "movdqu xmm3,  [rsp+0x30]",
-        "movdqu xmm4,  [rsp+0x40]",
-        "movdqu xmm5,  [rsp+0x50]",
-        "movdqu xmm6,  [rsp+0x60]",
-        "movdqu xmm7,  [rsp+0x70]",
-        "movdqu xmm8,  [rsp+0x80]",
-        "movdqu xmm9,  [rsp+0x90]",
-        "movdqu xmm10, [rsp+0xa0]",
-        "movdqu xmm11, [rsp+0xb0]",
-        "movdqu xmm12, [rsp+0xc0]",
-        "movdqu xmm13, [rsp+0xd0]",
-        "movdqu xmm14, [rsp+0xe0]",
-        "movdqu xmm15, [rsp+0xf0]",
-        "lea rsp, [rsp + 256]",
         "pop r15",
         "pop r14",
         "pop r13",

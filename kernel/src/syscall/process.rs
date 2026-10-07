@@ -1095,6 +1095,23 @@ pub fn sys_tkill(tid: usize, signal: usize) -> SyscallResult {
         .ok()
         .filter(|s| (0..=31).contains(s))
         .ok_or(SyscallError::InvalidArgument)?;
+    // A thread of a dispatched process gets the signal itself (sprint D3):
+    // existence and permission as for kill, then queued for that thread.
+    #[cfg(feature = "alloc")]
+    if sig != 0 {
+        if let Some(target) = crate::process::get_process(pid) {
+            if target
+                .dispatched
+                .load(core::sync::atomic::Ordering::Acquire)
+            {
+                if let Some(thread) = target.get_thread(ThreadId(tid as u64)) {
+                    super::filesystem::kill_one(&caller, pid, 0)?;
+                    crate::process::signals::send_to_thread(&target, &thread, sig as usize);
+                    return Ok(0);
+                }
+            }
+        }
+    }
     super::filesystem::kill_one(&caller, pid, sig)
 }
 

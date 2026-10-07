@@ -98,7 +98,9 @@ What does not work yet: `docs/KNOWN-LIMITATIONS.md`.
       N-119, N-138); pipes with reader/writer counts and PIPE_BUF atomicity; futex queues with
       timespec timeouts (N-104).
     - [ ] D3: timer preemption of ring 3 (done: `dispatch::preempt_user` on trap and syscall
-      exit; kill acted on in every dispatched wait); device IRQs on the kernel stack (done, ADR 0008); signal delivery on
+      exit; kill acted on in every dispatched wait); device IRQs on the kernel stack (done, ADR 0008);
+      signal delivery with rt_sigframe/restorer, per-thread mask/pending, ignored dropped, Linux
+      set layout (done: N-96, N-98, N-109 part, N-113; stop/continue and RT signals remain); signal delivery on
       return to user with restorer frames (N-113); per-thread signal state (N-109); ignored
       signals dropped at generation (N-98); sigset layout (N-96); wait status and errno (N-99,
       N-127); exec atomic swap (N-101); relative paths per thread (N-115); MAP_SHARED anon and

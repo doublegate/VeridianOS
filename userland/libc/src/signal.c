@@ -27,14 +27,27 @@ struct k_sigaction {
     unsigned long mask;
 };
 
+/* The kernel returns from a handler to `restorer`, which issues
+ * rt_sigreturn (native 123); as on Linux x86_64 it is required
+ * (SA_RESTORER). */
+#define SA_RESTORER 0x04000000UL
+void __veridian_restore_rt(void);
+__asm__(".text\n"
+        ".global __veridian_restore_rt\n"
+        ".type __veridian_restore_rt,@function\n"
+        "__veridian_restore_rt:\n"
+        "    movl $123, %eax\n"
+        "    syscall\n"
+        "    hlt\n");
+
 int sigaction(int signum, const struct sigaction *act,
               struct sigaction *oldact)
 {
     struct k_sigaction kact, kold;
     if (act) {
         kact.handler = (void *)act->sa_handler;
-        kact.flags = (unsigned long)(unsigned int)act->sa_flags;
-        kact.restorer = 0;
+        kact.flags = (unsigned long)(unsigned int)act->sa_flags | SA_RESTORER;
+        kact.restorer = (void *)__veridian_restore_rt;
         kact.mask = (unsigned long)act->sa_mask;
     }
     long ret = veridian_syscall3(SYS_SIGACTION, signum, act ? &kact : 0,
@@ -46,7 +59,7 @@ int sigaction(int signum, const struct sigaction *act,
     if (oldact) {
         memset(oldact, 0, sizeof(*oldact));
         oldact->sa_handler = (sighandler_t)kold.handler;
-        oldact->sa_flags = (int)kold.flags;
+        oldact->sa_flags = (int)(kold.flags & ~SA_RESTORER);
         oldact->sa_mask = (sigset_t)kold.mask;
     }
     return 0;

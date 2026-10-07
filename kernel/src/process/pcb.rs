@@ -479,9 +479,9 @@ impl Process {
                 value: "signal number out of range (0-31)",
             });
         }
-        // Set the signal bit in pending signals
-        let mask = 1u64 << signum;
-        self.pending_signals.fetch_or(mask, Ordering::AcqRel);
+        // Linux set layout: bit `signum - 1` (N-96).
+        self.pending_signals
+            .fetch_or(super::signals::sig_bit(signum), Ordering::AcqRel);
         Ok(())
     }
 
@@ -493,7 +493,7 @@ impl Process {
         let pending = self.pending_signals.load(Ordering::Acquire);
         let mask = self.signal_mask.load(Ordering::Acquire);
         let effective_pending = pending & !mask;
-        (effective_pending & (1u64 << signum)) != 0
+        (effective_pending & super::signals::sig_bit(signum)) != 0
     }
 
     /// Get the next pending signal (lowest numbered, unmasked)
@@ -504,14 +504,14 @@ impl Process {
         if effective_pending == 0 {
             return None;
         }
-        // Find lowest set bit
-        Some(effective_pending.trailing_zeros() as usize)
+        // Lowest set bit; bit n is signal n + 1.
+        Some(effective_pending.trailing_zeros() as usize + 1)
     }
 
     /// Clear a pending signal
     pub fn clear_pending_signal(&self, signum: usize) {
         if signum < 32 {
-            let mask = !(1u64 << signum);
+            let mask = !super::signals::sig_bit(signum);
             self.pending_signals.fetch_and(mask, Ordering::AcqRel);
         }
     }
@@ -519,8 +519,7 @@ impl Process {
     /// Set signal mask (returns old mask)
     pub fn set_signal_mask(&self, new_mask: u64) -> u64 {
         // Cannot mask SIGKILL (9) or SIGSTOP (19)
-        let protected = (1u64 << 9) | (1u64 << 19);
-        let actual_mask = new_mask & !protected;
+        let actual_mask = new_mask & !super::signals::UNBLOCKABLE;
         self.signal_mask.swap(actual_mask, Ordering::AcqRel)
     }
 
@@ -783,8 +782,8 @@ mod tests {
         // Before masking, signal is pending
         assert!(proc.is_signal_pending(3));
 
-        // Mask signal 3
-        proc.set_signal_mask(1u64 << 3);
+        // Mask signal 3 (Linux layout: bit 2; N-96)
+        proc.set_signal_mask(1u64 << 2);
 
         // Now it should NOT be seen as pending (masked)
         assert!(!proc.is_signal_pending(3));
@@ -799,8 +798,9 @@ mod tests {
 
         // SIGKILL and SIGSTOP should NOT be masked
         let mask = proc.get_signal_mask();
-        assert_eq!(mask & (1u64 << 9), 0, "SIGKILL should not be maskable");
-        assert_eq!(mask & (1u64 << 19), 0, "SIGSTOP should not be maskable");
+        // Linux layout: signal n is bit n - 1 (N-96).
+        assert_eq!(mask & (1u64 << 8), 0, "SIGKILL should not be maskable");
+        assert_eq!(mask & (1u64 << 18), 0, "SIGSTOP should not be maskable");
     }
 
     #[test]

@@ -387,6 +387,18 @@ pub struct Thread {
 
     /// clear_tid pointer for CLONE_CHILD_CLEARTID
     pub clear_tid: AtomicUsize,
+
+    /// Signals this thread blocks (Linux layout: bit `sig - 1`; N-96, N-109).
+    pub sigmask: AtomicU64,
+
+    /// Signals sent to this thread alone (tkill, tgkill, faults), same layout.
+    /// Process-directed signals pend on the process.
+    pub sigpending: AtomicU64,
+
+    /// The mask to restore when the handler that interrupted `sigsuspend`
+    /// returns (`has_saved_sigmask` says whether one is saved).
+    pub saved_sigmask: AtomicU64,
+    pub has_saved_sigmask: AtomicBool,
     /// Detached flag (pthread_detach)
     pub detached: AtomicBool,
     /// Filesystem view (cwd, umask)
@@ -500,6 +512,10 @@ impl Thread {
             fpu_used: AtomicU32::new(0),
             task_ptr: Mutex::new(TaskPtr(None)),
             clear_tid: AtomicUsize::new(0),
+            sigmask: AtomicU64::new(0),
+            sigpending: AtomicU64::new(0),
+            saved_sigmask: AtomicU64::new(0),
+            has_saved_sigmask: AtomicBool::new(false),
             detached: AtomicBool::new(false),
             fs,
         }

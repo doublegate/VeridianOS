@@ -342,16 +342,13 @@ pub fn sys_read(fd: usize, buffer: usize, count: usize) -> SyscallResult {
     // Validate buffer is in user space
     validate_user_buffer(buffer, count)?;
 
-    // For stdin (fd 0), try file table first, then fall back to serial
-    if fd == 0 {
-        // Try the file table first if we have a process context
-        if let Some(proc) = process::current_process() {
-            let file_table = proc.file_table.lock();
-            if let Some(file_desc) = file_table.get(fd) {
-                return file_read_to_user(&file_desc, buffer, count);
-            }
-        }
-
+    // For stdin (fd 0): an open file (a pipe, a tty) is read like any other
+    // fd below -- including waiting for a pipe writer, which returning here
+    // skipped (`head` on a pipe got an error instead of the data). Only a
+    // process without one falls back to the serial console.
+    let stdin_open =
+        fd == 0 && process::current_process().is_some_and(|p| p.file_table.lock().get(0).is_some());
+    if fd == 0 && !stdin_open {
         if !console_fallback_allowed(fd) {
             return Err(SyscallError::BadFileDescriptor);
         }
@@ -1387,7 +1384,14 @@ pub(crate) fn kill_one(
     // A signal the caller sends itself whose action ends the process must
     // leave through the exit path: tearing the process down here would
     // return into the address space just freed.
-    if target.pid == caller.pid && terminates(caller, sig) {
+    // (A dispatched process queues it instead and acts on it at the
+    // system-call exit, honouring its mask; sprint D3.)
+    if target.pid == caller.pid
+        && terminates(caller, sig)
+        && !target
+            .dispatched
+            .load(core::sync::atomic::Ordering::Acquire)
+    {
         return super::process::exit_current(0, sig as u32);
     }
     crate::process::exit::kill_process(pid, sig)

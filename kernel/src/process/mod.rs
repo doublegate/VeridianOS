@@ -32,6 +32,7 @@ pub mod memory;
 pub mod pcb;
 pub mod session;
 pub mod signal_delivery;
+pub mod signals;
 pub mod sync;
 pub mod table;
 pub mod thread;
@@ -409,8 +410,14 @@ pub fn user_task_reaped(pid: u64, _tid: u64) {
 /// and fail with EINTR: its process has a fatal signal to act on. The
 /// signal is acted on at the system-call exit, once the call has unwound.
 pub fn wait_interrupted() -> bool {
-    dispatched_context().is_some()
-        && current_process().is_some_and(|p| p.kill_pending.load(Ordering::Acquire) != 0)
+    if dispatched_context().is_none() {
+        return false;
+    }
+    let (Some(process), Some(thread)) = (current_process(), current_thread()) else {
+        return false;
+    };
+    process.kill_pending.load(Ordering::Acquire) != 0
+        || signals::deliverable(&process, &thread) != 0
 }
 
 /// Run on every return to user mode of a dispatched thread: a thread whose

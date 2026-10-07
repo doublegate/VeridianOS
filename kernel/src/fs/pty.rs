@@ -198,7 +198,10 @@ impl PtyMaster {
             crate::process::table::PROCESS_TABLE.for_each(|proc| {
                 let proc_pgid = proc.pgid.load(Ordering::Acquire);
                 if proc_pgid == fg_pgid && proc.is_alive() {
-                    if let Err(_e) = proc.send_signal(signal as usize) {
+                    if let Err(_e) = {
+                        crate::process::signals::notify(proc, signal as usize);
+                        Ok::<(), crate::error::KernelError>(())
+                    } {
                         crate::println!(
                             "[PTY] Warning: failed to send signal {} to PID {}: {:?}",
                             signal,

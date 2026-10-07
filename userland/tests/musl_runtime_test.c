@@ -244,6 +244,47 @@ static void test_thread_guards(void)
     report("musl_clone_tls_and_exec_guards", ok, why);
 }
 
+/* Signal handlers as musl installs them (SA_RESTORER, __restore_rt), and
+ * musl's set layout (bit sig - 1): a mask naming SIGUSR1 must block
+ * SIGUSR1, not the signal next to it (N-96). */
+static volatile int got;
+static void on_sig(int sig) { got = sig; }
+
+static void test_signals(void)
+{
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = on_sig;
+    sigaction(SIGUSR1, &sa, 0);
+    sigaction(SIGUSR2, &sa, 0);
+
+    got = 0;
+    raise(SIGUSR1);
+    int ran = got == SIGUSR1;
+
+    sigset_t set, pend;
+    sigemptyset(&set);
+    sigaddset(&set, SIGUSR1);
+    sigprocmask(SIG_BLOCK, &set, 0);
+    got = 0;
+    raise(SIGUSR1);
+    int blocked = got == 0;
+    raise(SIGUSR2); /* the neighbour must still get through */
+    int neighbour = got == SIGUSR2;
+    sigemptyset(&pend);
+    int pending = sigpending(&pend) == 0 && sigismember(&pend, SIGUSR1) == 1;
+    got = 0;
+    sigprocmask(SIG_UNBLOCK, &set, 0);
+    int delivered = got == SIGUSR1;
+
+    static char why[80];
+    snprintf(why, sizeof(why), "ran=%d blocked=%d neighbour=%d pending=%d delivered=%d", ran, blocked,
+             neighbour, pending, delivered);
+    report("musl_signal_handler_and_mask", ran && blocked && neighbour && delivered, why);
+    signal(SIGUSR1, SIG_DFL);
+    signal(SIGUSR2, SIG_DFL);
+}
+
 int main(void)
 {
     test_fsync();
@@ -254,6 +295,7 @@ int main(void)
     test_mprotect();
     test_threads();
     test_thread_guards();
+    test_signals();
     printf("MUSL-RUNTIME: %d/%d\n", passed, total);
     return passed == total ? 0 : 1;
 }

@@ -53,7 +53,10 @@ pub fn exit_process(exit_code: i32) {
         if let Some(parent_pid) = process.parent() {
             if let Some(parent) = table::get_process(parent_pid) {
                 // Send SIGCHLD to parent (POSIX: delivered on child exit)
-                if let Err(_e) = parent.send_signal(signals::SIGCHLD as usize) {
+                if let Err(_e) = {
+                    super::signals::notify(&parent, signals::SIGCHLD as usize);
+                    Ok::<(), KernelError>(())
+                } {
                     println!(
                         "[PROCESS] Warning: Failed to send SIGCHLD to parent {}: {:?}",
                         parent_pid.0, _e
@@ -203,7 +206,7 @@ pub fn wait_process_with_options(
         if crate::sched::dispatch::current_owner().is_some() {
             let filter = pid;
             sched::dispatch::PROCESS_EVENTS.wait_until(|| {
-                current.kill_pending.load(Ordering::Acquire) != 0
+                super::wait_interrupted()
                     || table::PROCESS_TABLE
                         .find_children(current_pid)
                         .iter()
@@ -217,7 +220,9 @@ pub fn wait_process_with_options(
                             })
                         })
             });
-            if current.kill_pending.load(Ordering::Acquire) != 0 {
+            // A signal to act on (fatal, or caught: EINTR, or a restart
+            // with SA_RESTART).
+            if super::wait_interrupted() {
                 return Err(KernelError::WouldBlock);
             }
             continue;
@@ -385,6 +390,15 @@ pub fn kill_process(pid: ProcessId, signal: i32) -> Result<(), KernelError> {
 
     println!("[PROCESS] Sending signal {} to process {}", signal, pid.0);
 
+    // A dispatched process takes its signals on its own threads (sprint
+    // D3): queued, ignored ones dropped, SIGKILL at once.
+    #[cfg(feature = "alloc")]
+    if process.dispatched.load(Ordering::Acquire)
+        && super::signals::send_to_process(&process, signal as usize)
+    {
+        return Ok(());
+    }
+
     // Queue the signal to the process
     process.send_signal(signal as usize)?;
 
@@ -539,7 +553,10 @@ fn notify_parent_sigchld(process: &Process) {
     if let Some(parent_pid) = process.parent() {
         if let Some(parent) = table::get_process(parent_pid) {
             // Send SIGCHLD to parent (POSIX: delivered on child state change)
-            if let Err(_e) = parent.send_signal(signals::SIGCHLD as usize) {
+            if let Err(_e) = {
+                super::signals::notify(&parent, signals::SIGCHLD as usize);
+                Ok::<(), KernelError>(())
+            } {
                 println!(
                     "[PROCESS] Warning: Failed to send SIGCHLD to parent {}: {:?}",
                     parent_pid.0, _e
@@ -615,7 +632,10 @@ fn force_terminate_process(process: &Process, signal: i32) -> Result<(), KernelE
     if let Some(parent_pid) = process.parent() {
         if let Some(parent) = table::get_process(parent_pid) {
             // Send SIGCHLD to parent
-            if let Err(_e) = parent.send_signal(signals::SIGCHLD as usize) {
+            if let Err(_e) = {
+                super::signals::notify(&parent, signals::SIGCHLD as usize);
+                Ok::<(), KernelError>(())
+            } {
                 println!(
                     "[PROCESS] Warning: Failed to send SIGCHLD to parent {}: {:?}",
                     parent_pid.0, _e

@@ -45,6 +45,21 @@
     through the normal exit path.
   - **Tests.** The runtime suites now run entirely on the dispatcher, and a new musl test
     checks concurrent pthreads with a mutex, `pthread_join` and `pthread_exit`.
+- **Signal handlers (sprint D3; N-96, N-98, N-109, N-113).** Dispatched threads on x86_64 take
+  signals as Linux does:
+  - **Sets and state.** Sets use the Linux layout (bit `sig - 1`) in the kernel and the native
+    C library alike. Each thread has its own mask and pending set.
+  - **Generation.** An ignored signal is dropped when sent, so a default-ignored SIGCHLD no
+    longer interrupts waits. Other signals pend and wake their target.
+  - **Delivery.** On the way back to user mode, the default actions run, or a handler gets a
+    Linux `rt_sigframe` (restorer return address, `ucontext` with the interrupted registers and
+    mask, `siginfo`, FXSAVE image) with `sa_mask` and the signal blocked. SA_RESTART, SA_NODEFER
+    and SA_RESETHAND work, and a fault reaches an installed SIGSEGV/SIGFPE handler.
+  - **rt_sigreturn** restores registers (sanitised), mask and FPU state (MXCSR checked).
+  - **sigsuspend and sigpending** work.
+  - **Native libc.** The native C library installs a restorer (SA_RESTORER), and its
+    `sigpending` and `sigsuspend` are real system calls instead of stubs.
+  - **Tests.** Seven runtime tests (native and musl).
 - **User code is preempted (stage D3).** When the tick finds a task's slice used up (EEVDF, 3 ms
   base slice), the task gives up the CPU on its way back to user mode, from an interrupt or a
   system call. A program that computes without system calls no longer keeps the CPU from
@@ -173,6 +188,14 @@
   bounce buffers, and messages and datagrams are capped at 1 MiB.
 
 ### Fixed
+
+- **musl `sigpending()` suspended the caller.** The musl patch mapped Linux 127 (rt_sigpending)
+  to the native sigsuspend, so `sigpending` waited for a signal and consumed it; Linux 130
+  (rt_sigsuspend) was not mapped at all. 127 now maps to the new native sigpending (360) and
+  130 to sigsuspend (122). KDE binaries built before this need a rebuild.
+- **A pipe on stdin did not block.** `read(0, ...)` returned from a special case before the
+  blocking path, so `head` on a pipe whose writer had not written yet failed (`$(sort f | head
+  -n 1)` came back empty).
 
 - **`mprotect` from PROT_NONE to read-write left the memory inaccessible.** A user-accessible
   leaf needs the user bit at every page-table level; `mprotect` set it only on the leaf, so

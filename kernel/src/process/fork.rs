@@ -251,6 +251,13 @@ pub fn fork_process() -> Result<ProcessId, KernelError> {
     };
 
     let new_tid = new_thread.tid;
+    // The calling thread's blocked mask (per thread, N-109).
+    new_thread.sigmask.store(
+        current_thread
+            .sigmask
+            .load(core::sync::atomic::Ordering::Acquire),
+        core::sync::atomic::Ordering::Release,
+    );
     new_process.add_thread(new_thread)?;
 
     // Add to parent's children list

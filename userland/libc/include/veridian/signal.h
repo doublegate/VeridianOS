@@ -128,11 +128,15 @@ static inline int sigfillset(sigset_t *set)
     return 0;
 }
 
+/* Sets use the Linux layout, bit (signum - 1), the same as the kernel
+ * and musl (it was bit signum, so masks named the neighbouring signal;
+ * N-96). */
+
 /** Add signal to set */
 static inline int sigaddset(sigset_t *set, int signum)
 {
     if (!set || signum < 1 || signum >= _NSIG) return -1;
-    *set |= (uint64_t)1 << signum;
+    *set |= (uint64_t)1 << (signum - 1);
     return 0;
 }
 
@@ -140,7 +144,7 @@ static inline int sigaddset(sigset_t *set, int signum)
 static inline int sigdelset(sigset_t *set, int signum)
 {
     if (!set || signum < 1 || signum >= _NSIG) return -1;
-    *set &= ~((uint64_t)1 << signum);
+    *set &= ~((uint64_t)1 << (signum - 1));
     return 0;
 }
 
@@ -148,7 +152,7 @@ static inline int sigdelset(sigset_t *set, int signum)
 static inline int sigismember(const sigset_t *set, int signum)
 {
     if (!set || signum < 1 || signum >= _NSIG) return -1;
-    return (*set & ((uint64_t)1 << signum)) ? 1 : 0;
+    return (*set & ((uint64_t)1 << (signum - 1))) ? 1 : 0;
 }
 
 /* ========================================================================= */

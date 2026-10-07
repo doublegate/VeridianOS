@@ -170,11 +170,16 @@ pub fn sys_sigprocmask(how: usize, set_ptr: usize, oldset_ptr: usize) -> Syscall
             SIG_SETMASK => bits,
             _ => return Err(SyscallError::InvalidArgument),
         };
-        // SIGKILL (bit 9) and SIGSTOP (bit 19) cannot be blocked
-        Ok(mask & !((1u64 << 9) | (1u64 << 19)))
+        // SIGKILL and SIGSTOP cannot be blocked (Linux layout, N-96).
+        Ok(mask & !crate::process::signals::UNBLOCKABLE)
     };
 
-    let old_mask = process.get_signal_mask();
+    // The mask is per thread (N-109).
+    let thread = process::current_thread();
+    let old_mask = match &thread {
+        Some(t) => t.sigmask.load(core::sync::atomic::Ordering::Acquire),
+        None => process.get_signal_mask(),
+    };
     let new_mask = updated(old_mask)?;
 
     if oldset_ptr != 0 {
@@ -182,9 +187,36 @@ pub fn sys_sigprocmask(how: usize, set_ptr: usize, oldset_ptr: usize) -> Syscall
         super::userspace::write_user::<u64>(oldset_ptr, old_mask)?;
     }
     if new_bits.is_some() {
-        process.set_signal_mask(new_mask);
+        match &thread {
+            Some(t) => {
+                crate::process::signals::set_mask(&process, t, new_mask);
+            }
+            None => {
+                process.set_signal_mask(new_mask);
+            }
+        }
     }
 
+    Ok(0)
+}
+
+/// rt_sigpending (native 360): the signals pending for the calling thread
+/// that it blocks (thread and process sets), written as a 64-bit Linux set.
+pub fn sys_sigpending(set_ptr: usize, size: usize) -> SyscallResult {
+    use core::sync::atomic::Ordering;
+    if size != 0 && size != 8 {
+        return Err(SyscallError::InvalidArgument);
+    }
+    validate_user_ptr_typed::<u64>(set_ptr)?;
+    let proc = process::current_process().ok_or(SyscallError::InvalidState)?;
+    let set = match process::current_thread() {
+        Some(t) => {
+            (t.sigpending.load(Ordering::Acquire) | proc.pending_signals.load(Ordering::Acquire))
+                & t.sigmask.load(Ordering::Acquire)
+        }
+        None => proc.pending_signals.load(Ordering::Acquire) & proc.get_signal_mask(),
+    };
+    super::userspace::write_user::<u64>(set_ptr, set)?;
     Ok(0)
 }
 
@@ -209,9 +241,25 @@ pub fn sys_sigsuspend(mask_ptr: usize) -> SyscallResult {
 
     let temp_mask: u64 = super::userspace::read_user(mask_ptr)?;
 
+    // A dispatched thread waits with the temporary mask until a signal it
+    // does not block arrives; the mask in force before is put back when
+    // the handler returns (it goes into the handler's frame), as Linux.
+    #[cfg(feature = "alloc")]
+    if crate::sched::dispatch::current_owner().is_some() {
+        use core::sync::atomic::Ordering;
+        let thread = process::current_thread().ok_or(SyscallError::InvalidState)?;
+        let old = crate::process::signals::set_mask(&proc, &thread, temp_mask);
+        thread.saved_sigmask.store(old, Ordering::Release);
+        thread.has_saved_sigmask.store(true, Ordering::Release);
+        drop(thread);
+        drop(proc);
+        while !crate::sched::wait_for_interrupt_in_syscall() {}
+        return Err(SyscallError::Interrupted);
+    }
+
     // Save current mask and apply temporary mask
     let old_mask = proc.get_signal_mask();
-    let sanitized = temp_mask & !((1u64 << 9) | (1u64 << 19));
+    let sanitized = temp_mask & !crate::process::signals::UNBLOCKABLE;
     proc.set_signal_mask(sanitized);
 
     // Check if there's already a pending unblocked signal
@@ -248,6 +296,19 @@ pub fn sys_sigsuspend(mask_ptr: usize) -> SyscallResult {
 /// state; the normal syscall return path will resume at the interrupted
 /// instruction).
 pub fn sys_sigreturn(frame_ptr: usize) -> SyscallResult {
+    // A dispatched thread: Linux rt_sigreturn, restoring into the live
+    // system call frame (the frame address comes from the user RSP, not
+    // from an argument). An unusable frame kills the thread with SIGSEGV.
+    #[cfg(all(feature = "alloc", target_arch = "x86_64"))]
+    if crate::sched::dispatch::current_owner().is_some() {
+        return match crate::arch::x86_64::syscall::with_syscall_frame(
+            crate::process::signals::rt_sigreturn,
+        ) {
+            Some(Some(rax)) => Ok(rax as usize),
+            _ => super::process::exit_current(0, 11),
+        };
+    }
+
     if frame_ptr == 0 {
         return Err(SyscallError::InvalidArgument);
     }
