@@ -32,6 +32,8 @@ pub mod load_balance;
 pub mod metrics;
 pub mod numa;
 pub mod percpu_queue;
+#[cfg(feature = "alloc")]
+pub mod policy;
 pub mod process_compat;
 pub mod queue;
 pub mod runtime;
