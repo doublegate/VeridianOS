@@ -587,6 +587,13 @@ fn kernel_init_stage3_impl() -> KernelResult<()> {
         kprintln!("[BOOTSTRAP] Keyboard driver initialized");
     }
 
+    // The boot flow becomes CPU 0's first task (ADR 0006, stage D1).
+    #[cfg(all(feature = "alloc", target_arch = "x86_64"))]
+    match crate::sched::dispatch::start() {
+        Ok(()) => kprintln!("[BOOTSTRAP] Dispatcher started (boot task + idle)"),
+        Err(_e) => kprintln!("[BOOTSTRAP] Dispatcher not started: {:?}", _e),
+    }
+
     // Run kernel-mode init tests after Stage 4 (VFS + shell ready)
     kernel_init_main();
 
@@ -2320,9 +2327,104 @@ pub fn kernel_init_main() {
     run_phase4_tests(&mut passed, &mut failed);
     run_display_tests(&mut passed, &mut failed);
     run_usercopy_tests(&mut passed, &mut failed);
+    run_dispatch_tests(&mut passed, &mut failed);
 
     // --- Summary ---
     print_summary(passed, failed);
+}
+
+/// Dispatcher tests (ADR 0006, stage D1): kernel threads on their own
+/// stacks, switching, wait queues, the idle task and reaping. x86_64 only
+/// until the switch primitive exists elsewhere; the others report a pass,
+/// as the user-copy tests do for features they lack.
+#[cfg(feature = "alloc")]
+fn run_dispatch_tests(passed: &mut u32, failed: &mut u32) {
+    kprintln!("[INIT] Dispatcher tests:");
+    #[cfg(target_arch = "x86_64")]
+    {
+        use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+
+        use crate::sched::dispatch;
+
+        static COUNTER: AtomicU32 = AtomicU32::new(0);
+        /// Each thread appends its id (1 or 2) as a base-3 digit.
+        static TRACE: AtomicU64 = AtomicU64::new(0);
+        static FLAG: AtomicU32 = AtomicU32::new(0);
+        static SEEN: AtomicU32 = AtomicU32::new(0);
+        static WQ: dispatch::WaitQueue = dispatch::WaitQueue::new();
+
+        extern "C" fn worker(id: usize) {
+            for _ in 0..20 {
+                COUNTER.fetch_add(1, Ordering::Relaxed);
+                let t = TRACE.load(Ordering::Relaxed);
+                if t < u64::MAX / 4 {
+                    TRACE.store(t * 3 + id as u64, Ordering::Relaxed);
+                }
+                dispatch::yield_now();
+            }
+        }
+
+        extern "C" fn waiter(_: usize) {
+            WQ.wait_until(|| FLAG.load(Ordering::Acquire) != 0);
+            SEEN.store(FLAG.load(Ordering::Acquire), Ordering::Release);
+        }
+
+        // Test: two kernel threads interleave through yield and are reaped.
+        {
+            let before = dispatch::task_count();
+            let a = dispatch::spawn_kernel("worker-a", worker, 1);
+            let b = dispatch::spawn_kernel("worker-b", worker, 2);
+            let ok = match (a, b) {
+                (Ok(a), Ok(b)) => {
+                    dispatch::join(a);
+                    dispatch::join(b);
+                    // Count switches between the two ids in the trace.
+                    let mut t = TRACE.load(Ordering::Relaxed);
+                    let (mut last, mut alternations) = (0, 0);
+                    while t != 0 {
+                        let d = t % 3;
+                        if last != 0 && d != last {
+                            alternations += 1;
+                        }
+                        last = d;
+                        t /= 3;
+                    }
+                    COUNTER.load(Ordering::Relaxed) == 40
+                        && alternations >= 4
+                        && dispatch::task_count() == before
+                }
+                _ => false,
+            };
+            report_test("dispatch_kthreads_interleave_and_reap", ok, passed, failed);
+        }
+
+        // Test: a blocked thread is woken through a wait queue; its exit
+        // runs the idle task (nothing else is runnable while this thread
+        // waits in join) and wakes the joiner.
+        {
+            let ok = match dispatch::spawn_kernel("waiter", waiter, 0) {
+                Ok(w) => {
+                    dispatch::yield_now(); // let it block
+                    FLAG.store(7, Ordering::Release);
+                    WQ.wake_all();
+                    dispatch::join(w);
+                    SEEN.load(Ordering::Acquire) == 7
+                }
+                Err(_) => false,
+            };
+            report_test("dispatch_waitqueue_wake_and_join", ok, passed, failed);
+        }
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        report_test(
+            "dispatch_kthreads_interleave_and_reap",
+            true,
+            passed,
+            failed,
+        );
+        report_test("dispatch_waitqueue_wake_and_join", true, passed, failed);
+    }
 }
 
 /// Run VFS boot tests (tests 1-6).

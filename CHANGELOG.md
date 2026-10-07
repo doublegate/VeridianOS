@@ -20,7 +20,19 @@
   online CPU and waits for all of them before the frames are reused: x86 by IPI with
   acknowledgement, RISC-V through SBI RFENCE, AArch64 with broadcast TLB maintenance.
   Address-space teardown used to free frames before flushing.
-- **Three new boot tests** (37 in total) check:
+- **Task dispatcher, stage D1 (ADR 0006).** On x86_64 the boot flow becomes CPU 0's first
+  task, with an idle task beside it, and kernel threads run on their own guarded kernel
+  stacks. The run queue is the ADR 0007 policy (EEVDF, real-time and deadline classes).
+  - **Switching.** `schedule()` holds no lock across a switch. The outgoing task stays marked
+    `on_cpu` until the incoming one has finished switching.
+  - **Waiting.** Wait queues use a prepare-to-wait protocol, so a wake between the condition
+    check and the switch is not lost.
+  - **Exit.** An exited thread is reaped, and its stack freed, after it has left the CPU.
+  - **Tests.** Two boot tests (41 in total) check interleaving through `yield_now`, wait-queue
+    wakeups, the idle task, and reaping.
+
+  User programs still run nested in the boot task until stage D2.
+- **Three new boot tests** (39 in total with the two added earlier in this cycle) check:
   - per-CPU identity and ticks;
   - that uptime follows the hardware clock;
   - that a TLB shootdown is confirmed by every CPU.

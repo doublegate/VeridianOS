@@ -26,6 +26,8 @@
 // ---- Submodule declarations ----
 
 pub mod deadline;
+#[cfg(feature = "alloc")]
+pub mod dispatch;
 pub mod init;
 pub mod ipc_blocking;
 pub mod load_balance;

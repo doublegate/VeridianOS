@@ -36,6 +36,8 @@ pub fn tick() {
     if let Some(mut sched) = crate::sched::scheduler::current_scheduler().try_lock() {
         sched.tick();
     }
+    #[cfg(feature = "alloc")]
+    crate::sched::dispatch::tick();
 }
 
 /// Setup timer for periodic interrupts

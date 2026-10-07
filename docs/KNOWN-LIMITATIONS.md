@@ -49,12 +49,12 @@ nothing fills (N-47), so it cannot reach any endpoint either.
 
 ### User processes are not scheduled (C5, ADR 0006; planned v0.27 sprint D)
 
-User programs (x86_64 only) do not run as scheduler tasks. Each one runs nested inside the kernel
-shell's boot context: `fork` runs the child to completion, or until it waits, before the parent
-continues, and the scheduler itself is never started. The new dispatcher (ADR 0006: per-thread
-kernel stacks, `switch_stacks`, an idle task) and the scheduling policy (ADR 0007: EEVDF fair
-class, FIFO/RR real-time, SCHED_DEADLINE, implemented and host-tested in `kernel/src/sched/policy/`)
-replace this in sprint D. Until then:
+User programs (x86_64 only) do not run as scheduler tasks yet. Kernel threads do (stage D1:
+`sched/dispatch.rs`, with the boot flow, an idle task, wait queues and reaping), but each user
+program still runs nested inside the kernel shell's boot task: `fork` runs the child to
+completion, or until it waits, before the parent continues. Stage D2 gives user threads their
+own tasks on the dispatcher (ADR 0006) and the scheduling policy (ADR 0007: EEVDF fair class,
+FIFO/RR real-time, SCHED_DEADLINE). Until then:
 
 - **No timer preemption of user code, and none inside system calls (W-13).** On x86_64 a system
   call that waits (poll, epoll, nanosleep, futex, timerfd) halts with interrupts enabled, but the

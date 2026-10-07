@@ -83,7 +83,10 @@ What does not work yet: `docs/KNOWN-LIMITATIONS.md`.
       syscalls and traps, IST only for #DF/NMI/#MC, SYSRET eligibility with IRET fallback,
       exit-to-user hook, user-register sanitiser (N-166, N-169 to N-171, N-175; ADR 0008).
       Per-thread frames (N-167) and the no-launch-context fault path (N-168) finish with D2.
-    - [ ] D1/D2 dispatcher: switch primitive, boot task + idle, kernel threads, user tasks
+    - [x] D1: switch primitive (`switch_stacks`), boot task + idle, kernel threads on guarded
+      stacks, wait queues (prepare-to-wait), reaping after `on_cpu` clears (`sched/dispatch.rs`,
+      2 boot tests).
+    - [ ] D2 dispatcher: user tasks
       dispatched by the scheduler on their own kernel stacks; launch from boot/shell/KDE as
       spawn + wait; exit vs exit_group, process exit by the last thread, teardown after every
       thread is off-CPU, child wait queue (N-106 to N-111); fork/wait; XSAVE switching (N-41).

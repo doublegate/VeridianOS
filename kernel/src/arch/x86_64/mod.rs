@@ -25,6 +25,8 @@ pub mod rtc;
 pub mod serial;
 #[cfg(all(feature = "smp", target_os = "none"))]
 pub mod smp;
+#[cfg(feature = "alloc")]
+pub mod switch;
 pub mod syscall;
 pub mod timer;
 pub mod trap;
