@@ -102,6 +102,9 @@ impl EventBuffer {
 // SAFETY: EventBuffer uses atomic head/tail. Single producer (poll_all)
 // and single consumer (read_event).
 unsafe impl Send for EventBuffer {}
+// SAFETY: the fields are a plain-data array and atomics. The only mutation
+// of `buf` goes through `push(&mut self)`; `&self` methods only read, so
+// shared references cannot race on the array.
 unsafe impl Sync for EventBuffer {}
 
 static EVENT_BUFFER: spin::Mutex<EventBuffer> = spin::Mutex::new(EventBuffer::new());

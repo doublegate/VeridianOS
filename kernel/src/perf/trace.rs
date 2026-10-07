@@ -215,6 +215,8 @@ pub(crate) fn dump_trace(count: usize) {
     }
 
     let total: usize = (0..MAX_TRACE_CPUS)
+        // SAFETY: tracing is still disabled here (re-enabled below), so no
+        // CPU is writing a ring; the shared reference only reads write_idx.
         .map(|cpu| unsafe { (*TRACE_RINGS.0[cpu].get()).total_events() })
         .sum();
     crate::println!("=== Total events recorded: {} ===", total);
@@ -227,6 +229,10 @@ pub(crate) fn dump_trace(count: usize) {
 /// Get total events across all CPUs
 pub(crate) fn total_events() -> usize {
     (0..MAX_TRACE_CPUS)
+        // SAFETY: only the atomic write_idx is read, so the value is never
+        // torn. NOTE: tracing may be enabled, so another CPU can hold a
+        // `&mut TraceRing` in record() while this shared reference exists;
+        // that overlap is formally outside Rust's aliasing rules.
         .map(|cpu| unsafe { (*TRACE_RINGS.0[cpu].get()).total_events() })
         .sum()
 }

@@ -1047,12 +1047,13 @@ impl VirtualAddressSpace {
 
         // Zero all allocated frames through the kernel physical memory window.
         // POSIX requires brk/mmap(MAP_ANONYMOUS) pages to be zero-filled.
-        // SAFETY: Each frame is a valid physical address returned by the frame
-        // allocator. phys_to_virt_addr maps it into the kernel's identity-mapped
-        // physical memory window, which is always accessible in kernel context.
         for &frame in &physical_frames {
             let phys_addr = frame.as_u64() << 12;
             let virt = crate::mm::phys_to_virt_addr(phys_addr) as *mut u8;
+            // SAFETY: Each frame is a valid physical address returned by the
+            // frame allocator and not yet mapped anywhere else.
+            // phys_to_virt_addr maps it into the kernel's physical memory
+            // window, which is always accessible in kernel context.
             unsafe {
                 core::ptr::write_bytes(virt, 0, 4096);
             }
@@ -2008,11 +2009,11 @@ impl VirtualAddressSpace {
 
         // Zero the frame before mapping. POSIX requires freshly mapped pages
         // to be zero-filled, and the ELF loader relies on this for BSS.
-        // SAFETY: frame is a valid physical address just allocated by the
-        // frame allocator. phys_to_virt_addr maps it into the kernel's
-        // identity-mapped physical memory window.
         let phys_addr = frame.as_u64() << 12;
         let virt = crate::mm::phys_to_virt_addr(phys_addr) as *mut u8;
+        // SAFETY: frame is a valid physical address just allocated by the
+        // frame allocator. phys_to_virt_addr maps it into the kernel's
+        // physical memory window, so the 4 KiB page is writable and unshared.
         unsafe {
             core::ptr::write_bytes(virt, 0, 4096);
         }

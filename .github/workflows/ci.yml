@@ -18,8 +18,16 @@ env:
     RUST_BACKTRACE: 1
     CARGO_TERM_COLOR: always
     CARGO_INCREMENTAL: 0
-    # Clippy lint allowances for kernel development - these are style/pedantic issues, not correctness
-    # See individual comments for rationale. All critical warnings remain enabled.
+    # Clippy lint allowances for the host-target kernel clippy run: mostly
+    # style, complexity and unused-code lints that are noisy for a no_std
+    # kernel checked on the host. No clippy::correctness lint is allowed here,
+    # and nothing from the workspace [lints] table (unsafe_op_in_unsafe_fn,
+    # clippy::missing_safety_doc, clippy::undocumented_unsafe_blocks) is
+    # overridden, so those stay enforced. Not every entry is pure style:
+    # static_mut_refs, unused_unsafe and the clippy::suspicious lints
+    # (arc_with_non_send_sync, macro_metavars_in_unsafe,
+    # missing_transmute_annotations) are allowed only to keep this run quiet
+    # and are candidates for removal.
     CLIPPY_ALLOW: >-
         -A unused_variables
         -A unused_imports
@@ -29,9 +37,7 @@ env:
         -A static_mut_refs
         -A unreachable_code
         -A clippy::new_without_default
-        -A clippy::missing_safety_doc
         -A clippy::needless_range_loop
-        -A clippy::uninit_vec
         -A clippy::redundant_closure
         -A clippy::type_complexity
         -A clippy::too_many_arguments
@@ -57,7 +63,6 @@ env:
         -A clippy::arc_with_non_send_sync
         -A clippy::op_ref
         -A clippy::macro_metavars_in_unsafe
-        -A clippy::not_unsafe_ptr_arg_deref
         -A clippy::precedence
         -A clippy::collapsible_if
         -A clippy::collapsible_else_if

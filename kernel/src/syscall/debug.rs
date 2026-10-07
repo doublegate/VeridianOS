@@ -106,15 +106,16 @@ fn ptrace_peek(target_pid: process::ProcessId, addr: usize) -> Result<usize, Sys
     // On AArch64/RISC-V, physical memory is identity-mapped during boot.
     let kernel_vaddr = phys_to_kernel_vaddr(phys_addr);
 
-    // SAFETY: The physical address was obtained from a valid VAS mapping
-    // with allocated frames. The kernel virtual address is the kernel's
-    // identity/offset mapping of physical memory. We read a usize-aligned
-    // word (ptrace semantics allow unaligned reads in practice, but we
-    // require alignment here for safety).
+    // ptrace semantics allow unaligned reads in practice, but we require
+    // alignment here for safety.
     if !kernel_vaddr.is_multiple_of(core::mem::align_of::<usize>()) {
         return Err(SyscallError::InvalidArgument);
     }
 
+    // SAFETY: The physical address was obtained from a valid VAS mapping
+    // with allocated frames. The kernel virtual address is the kernel's
+    // identity/offset mapping of physical memory, and it is usize-aligned
+    // (checked above).
     let value = unsafe { *(kernel_vaddr as *const usize) };
     Ok(value)
 }

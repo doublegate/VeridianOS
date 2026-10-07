@@ -129,7 +129,12 @@ fn free_stack_frames(frame: crate::mm::FrameNumber, page_count: usize) {
 #[derive(Debug)]
 pub struct TaskPtr(Option<NonNull<Task>>);
 
+// SAFETY: TaskPtr has no accessor and its field is private; the wrapped
+// pointer is never read or dereferenced (today it is only constructed as
+// `TaskPtr(None)` inside a Mutex), so moving it across CPUs is sound.
 unsafe impl Send for TaskPtr {}
+// SAFETY: as for Send -- `&TaskPtr` exposes nothing that reaches the
+// pointee, so sharing it cannot cause a data race.
 unsafe impl Sync for TaskPtr {}
 
 /// Thread ID type

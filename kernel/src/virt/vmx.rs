@@ -303,6 +303,8 @@ pub fn vmx_enable() -> Result<(), VmError> {
         return Err(VmError::VmxNotSupported);
     }
 
+    // SAFETY: CPUID reported VMX support just above, so IA32_FEATURE_CONTROL
+    // exists and RDMSR of it in Ring 0 cannot #GP.
     let feature_control = unsafe { super::read_msr(IA32_FEATURE_CONTROL) };
     let lock_bit = feature_control & 1;
     let vmx_outside_smx = (feature_control >> 2) & 1;
@@ -310,9 +312,12 @@ pub fn vmx_enable() -> Result<(), VmError> {
         return Err(VmError::VmxNotSupported);
     }
     if lock_bit == 0 {
+        // SAFETY: the MSR is unlocked (bit 0 clear), so setting the lock and
+        // VMX-outside-SMX bits is a permitted write; it only enables VMXON.
         unsafe { super::write_msr(IA32_FEATURE_CONTROL, feature_control | (1 << 2) | 1) };
     }
 
+    // SAFETY: VMX is supported (checked above), so IA32_VMX_BASIC exists.
     let vmx_basic = unsafe { super::read_msr(IA32_VMX_BASIC) };
     let revision_id = (vmx_basic & 0x7FFF_FFFF) as u32;
 
@@ -415,6 +420,9 @@ pub fn vmcs_revision_id() -> Option<u32> {
 
 #[cfg(target_arch = "x86_64")]
 fn adjust_controls(msr: u32, desired: u32) -> u32 {
+    // SAFETY: callers pass IA32_VMX_* capability MSRs from setup_vmcs, which
+    // runs only with an active VMCS, so VMX is supported and these MSRs
+    // exist. NOTE: `msr` itself is not checked to be one of them.
     let msr_val = unsafe { super::read_msr(msr) };
     let required = msr_val as u32;
     let allowed = (msr_val >> 32) as u32;
@@ -591,8 +599,11 @@ pub fn setup_vmcs(_vmcs: &Vmcs, _guest_entry: u64, _guest_stack: u64) -> Result<
 
 #[cfg(target_arch = "x86_64")]
 pub fn vm_launch() -> Result<VmExitReason, VmError> {
-    // SAFETY: VMLAUNCH transfers to guest. If it fails, we return error.
     let success: u8;
+    // SAFETY: VMLAUNCH transfers to guest. If it fails, we return error.
+    // NOTE: this safe fn does not check that VMX operation is active and a
+    // VMCS is current (outside VMX operation VMLAUNCH raises #UD); on a VM
+    // exit the CPU resumes at the VMCS HOST_RIP (vm_exit_handler), not here.
     unsafe {
         core::arch::asm!("vmlaunch", "setna {success}", success = out(reg_byte) success, options(nostack));
     }
@@ -609,8 +620,10 @@ pub fn vm_launch() -> Result<VmExitReason, VmError> {
 
 #[cfg(target_arch = "x86_64")]
 pub fn vm_resume() -> Result<VmExitReason, VmError> {
-    // SAFETY: VMRESUME transfers back to guest.
     let success: u8;
+    // SAFETY: VMRESUME transfers back to guest. The same caveats as
+    // vm_launch apply: VMX operation and a launched current VMCS are not
+    // checked here, and a VM exit resumes at HOST_RIP, not here.
     unsafe {
         core::arch::asm!("vmresume", "setna {success}", success = out(reg_byte) success, options(nostack));
     }

@@ -189,10 +189,11 @@ fn write_fwcfg_dma(selector: u16, data: *const u8, length: u32) -> Result<(), Ke
     // Poll for completion (control field becomes 0 when done).
     // Use raw pointer arithmetic to avoid referencing a packed field.
     let control_ptr = core::ptr::addr_of!(dma_access.control);
-    // SAFETY: Reading the DMA control field to check completion. The
-    // field is modified by the hypervisor (QEMU) when the DMA completes.
-    // read_unaligned handles the packed struct alignment.
     for _ in 0..1_000_000 {
+        // SAFETY: Reading the DMA control field to check completion. The
+        // field is modified by the hypervisor (QEMU) when the DMA completes.
+        // control_ptr points into the live local `dma_access`, and
+        // read_unaligned handles the packed struct alignment.
         let val = unsafe { core::ptr::read_unaligned(control_ptr) };
         if val == 0 {
             return Ok(());

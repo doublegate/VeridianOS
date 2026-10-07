@@ -49,6 +49,8 @@ pub struct Framebuffer {
 // only accessed while the Mutex is held, preventing data races. The
 // underlying memory-mapped region is valid for the kernel's lifetime.
 unsafe impl Send for Framebuffer {}
+// SAFETY: see the Send impl above: the pointer is only dereferenced while
+// the Mutex<Framebuffer> is held, so shared references cannot race.
 unsafe impl Sync for Framebuffer {}
 
 impl Framebuffer {

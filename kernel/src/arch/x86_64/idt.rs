@@ -539,7 +539,11 @@ extern "x86-interrupt" fn general_protection_fault_handler(
 /// Port 0x3F8 must be a valid COM1 data register.
 pub(crate) unsafe fn raw_serial_str(s: &[u8]) {
     for &b in s {
-        core::arch::asm!("out dx, al", in("dx") 0x3F8u16, in("al") b, options(nomem, nostack));
+        // SAFETY: forwarded from this function's contract: port 0x3F8 is the
+        // COM1 data register, so the OUT only transmits a byte.
+        unsafe {
+            core::arch::asm!("out dx, al", in("dx") 0x3F8u16, in("al") b, options(nomem, nostack));
+        }
     }
 }
 
@@ -556,7 +560,11 @@ pub(crate) unsafe fn raw_serial_hex(val: u64) {
         if nibble != 0 || started || i == 0 {
             started = true;
             let b = HEX[nibble];
-            core::arch::asm!("out dx, al", in("dx") 0x3F8u16, in("al") b, options(nomem, nostack));
+            // SAFETY: forwarded from this function's contract: port 0x3F8 is
+            // the COM1 data register, so the OUT only transmits a byte.
+            unsafe {
+                core::arch::asm!("out dx, al", in("dx") 0x3F8u16, in("al") b, options(nomem, nostack));
+            }
         }
     }
 }
@@ -637,15 +645,20 @@ extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: InterruptStac
 /// # Safety
 /// Must only be called from exception handlers with valid stack frames.
 unsafe fn exception_kill_user(name: &[u8], stack_frame: &InterruptStackFrame) {
-    raw_serial_str(b"FATAL:");
-    raw_serial_str(name);
-    raw_serial_str(b" rip=0x");
-    raw_serial_hex(stack_frame.instruction_pointer.as_u64());
-    raw_serial_str(b" cs=0x");
-    raw_serial_hex(stack_frame.code_segment.0 as u64);
-    raw_serial_str(b" rsp=0x");
-    raw_serial_hex(stack_frame.stack_pointer.as_u64());
-    raw_serial_str(b"\n");
+    // SAFETY: port 0x3F8 is the COM1 data register on the x86_64 platforms
+    // this kernel targets (QEMU q35/pc and PC hardware), which is the
+    // raw_serial_* contract.
+    unsafe {
+        raw_serial_str(b"FATAL:");
+        raw_serial_str(name);
+        raw_serial_str(b" rip=0x");
+        raw_serial_hex(stack_frame.instruction_pointer.as_u64());
+        raw_serial_str(b" cs=0x");
+        raw_serial_hex(stack_frame.code_segment.0 as u64);
+        raw_serial_str(b" rsp=0x");
+        raw_serial_hex(stack_frame.stack_pointer.as_u64());
+        raw_serial_str(b"\n");
+    }
 
     let cs = stack_frame.code_segment.0;
     if (cs & 3) == 3 {
@@ -655,9 +668,16 @@ unsafe fn exception_kill_user(name: &[u8], stack_frame: &InterruptStackFrame) {
             process.set_state(crate::process::pcb::ProcessState::Zombie);
         }
         if crate::arch::x86_64::usermode::has_boot_return_context() {
-            raw_serial_str(b"[EXC_KILL] boot_return\n");
-            gs_to_syscall_state();
-            crate::arch::x86_64::usermode::boot_return_to_kernel();
+            // SAFETY: forwarded from this function's contract: we are in an
+            // exception handler (Ring 0, interrupts disabled) on a valid
+            // stack frame. has_boot_return_context() just confirmed that
+            // BOOT_RETURN_RSP/CR3 are valid, and gs_to_syscall_state() runs
+            // immediately before boot_return_to_kernel(), as both require.
+            unsafe {
+                raw_serial_str(b"[EXC_KILL] boot_return\n");
+                gs_to_syscall_state();
+                crate::arch::x86_64::usermode::boot_return_to_kernel();
+            }
         }
     }
 }

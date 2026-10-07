@@ -515,12 +515,16 @@ impl ElfLoader {
                 break;
             }
 
-            // SAFETY: entry_offset + entry_size <= data.len() was checked above.
-            // i64 and u64 are primitive types that can be read from any byte
-            // alignment on the platforms we support. The values are copied out
-            // immediately.
-            let tag = unsafe { *(data[entry_offset..].as_ptr() as *const i64) };
-            let value = unsafe { *(data[entry_offset + 8..].as_ptr() as *const u64) };
+            // SAFETY: entry_offset + entry_size (16) <= data.len() was checked
+            // above, so both 8-byte fields are in bounds. read_unaligned is
+            // used because ELF data in a byte buffer has no alignment
+            // guarantee; every bit pattern is a valid i64/u64.
+            let tag =
+                unsafe { core::ptr::read_unaligned(data[entry_offset..].as_ptr() as *const i64) };
+            // SAFETY: as above, for the second field at entry_offset + 8.
+            let value = unsafe {
+                core::ptr::read_unaligned(data[entry_offset + 8..].as_ptr() as *const u64)
+            };
 
             match tag {
                 0 => break, // DT_NULL - end of dynamic section
@@ -674,15 +678,23 @@ impl ElfLoader {
             // Parse symbol entry
             // SAFETY: sym_offset + sym_entry_size (24) <= data.len() was checked
             // above. Each field is read at its correct offset within the Elf64_Sym
-            // structure layout. The primitive types (u32, u16, u64) are copied out
-            // immediately. Alignment is handled by reading through pointer casts
-            // of packed ELF data.
-            let name_idx = unsafe { *(data[sym_offset..].as_ptr() as *const u32) };
+            // structure layout. read_unaligned is used because ELF data in a
+            // byte buffer has no alignment guarantee; every bit pattern is a
+            // valid integer.
+            let name_idx =
+                unsafe { core::ptr::read_unaligned(data[sym_offset..].as_ptr() as *const u32) };
             let info = data[sym_offset + 4];
             let other = data[sym_offset + 5];
-            let shndx = unsafe { *(data[sym_offset + 6..].as_ptr() as *const u16) };
-            let value = unsafe { *(data[sym_offset + 8..].as_ptr() as *const u64) };
-            let size = unsafe { *(data[sym_offset + 16..].as_ptr() as *const u64) };
+            // SAFETY: as above, for the u16 at sym_offset + 6.
+            let shndx =
+                unsafe { core::ptr::read_unaligned(data[sym_offset + 6..].as_ptr() as *const u16) };
+            // SAFETY: as above, for the u64 at sym_offset + 8.
+            let value =
+                unsafe { core::ptr::read_unaligned(data[sym_offset + 8..].as_ptr() as *const u64) };
+            // SAFETY: as above, for the u64 at sym_offset + 16.
+            let size = unsafe {
+                core::ptr::read_unaligned(data[sym_offset + 16..].as_ptr() as *const u64)
+            };
 
             // Get symbol name from string table
             let name = if (name_idx as usize) < strtab_size {

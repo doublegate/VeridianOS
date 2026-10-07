@@ -66,6 +66,11 @@ pub struct LockFreeQueue<T> {
 // SAFETY: LockFreeQueue uses atomic operations for all shared state.
 // The queue is designed for concurrent access from multiple CPUs.
 unsafe impl<T: Send> Send for LockFreeQueue<T> {}
+// SAFETY: push() touches only atomics plus a freshly boxed node, so any
+// number of CPUs may push through `&self`, and values of `T: Send` move
+// between CPUs. pop() is sound only with a single consumer at a time, which
+// is a documented usage rule of this MPSC type that `Sync` does not enforce:
+// two concurrent pop() calls could both take the same node's value.
 unsafe impl<T: Send> Sync for LockFreeQueue<T> {}
 
 impl<T> LockFreeQueue<T> {

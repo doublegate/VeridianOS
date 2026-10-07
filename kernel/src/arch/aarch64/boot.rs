@@ -23,9 +23,14 @@ pub unsafe extern "C" fn _start_rust() -> ! {
     use crate::arch::aarch64::direct_uart::uart_write_str;
 
     // Write startup messages
-    uart_write_str("[BOOT] AArch64 Rust entry point reached\n");
-    uart_write_str("[BOOT] Stack initialized and BSS cleared\n");
-    uart_write_str("[BOOT] Preparing to enter kernel_main...\n");
+    // SAFETY: with the MMU disabled (this function's contract) physical
+    // address 0x09000000 is directly accessible, and it is the PL011 UART on
+    // the QEMU virt machine this boot path targets.
+    unsafe {
+        uart_write_str("[BOOT] AArch64 Rust entry point reached\n");
+        uart_write_str("[BOOT] Stack initialized and BSS cleared\n");
+        uart_write_str("[BOOT] Preparing to enter kernel_main...\n");
+    }
 
     // Arm boot-stack overflow detection before anything deep runs.
     crate::arch::stack_canary::install();
@@ -34,5 +39,9 @@ pub unsafe extern "C" fn _start_rust() -> ! {
     extern "C" {
         fn kernel_main() -> !;
     }
-    kernel_main()
+    // SAFETY: kernel_main is the kernel's `extern "C" fn() -> !` entry point
+    // defined in main.rs; it takes no arguments and expects exactly the
+    // state this function's contract provides (stack set up, BSS cleared,
+    // EL1).
+    unsafe { kernel_main() }
 }

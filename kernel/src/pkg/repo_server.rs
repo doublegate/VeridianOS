@@ -462,6 +462,8 @@ fn push_u64(out: &mut String, mut val: u64) {
         val /= 10;
     }
     // Reverse the digits we just pushed
+    // SAFETY: bytes[start..] are the ASCII digits pushed above; reversing
+    // ASCII bytes keeps the String valid UTF-8.
     let bytes = unsafe { out.as_bytes_mut() };
     bytes[start..].reverse();
 }

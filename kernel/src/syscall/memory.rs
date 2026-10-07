@@ -250,6 +250,8 @@ pub fn sys_mmap(
                 // kernel's physical memory window (phys_to_virt_addr).
                 let pt_root = memory_space.get_page_table();
                 if pt_root != 0 {
+                    // SAFETY: pt_root is the non-zero L4 physical address owned
+                    // by `memory_space`, as create_mapper_from_root requires.
                     let mapper = unsafe { crate::mm::vas::create_mapper_from_root_pub(pt_root) };
                     for page_off in (0..aligned_len).step_by(PAGE_SIZE) {
                         let vaddr = mapped_addr + page_off;
@@ -259,6 +261,10 @@ pub fn sys_mmap(
                             let phys_addr = frame.as_u64() << 12;
                             let virt = crate::mm::phys_to_virt_addr(phys_addr);
                             let copy_len = PAGE_SIZE.min(buf.len() - page_off);
+                            // SAFETY: `frame` backs the page-aligned user page at
+                            // `vaddr`, so its kernel-window address is writable
+                            // for PAGE_SIZE >= copy_len bytes; the source is
+                            // buf[page_off..page_off + copy_len], in bounds.
                             unsafe {
                                 core::ptr::copy_nonoverlapping(
                                     buf[page_off..].as_ptr(),
@@ -464,6 +470,10 @@ pub fn sys_getrlimit(resource: usize, rlim_ptr: usize) -> SyscallResult {
 
     // Write the rlimit struct to user space
     let rlim = rlim_ptr as *mut Rlimit;
+    // SAFETY: rlim_ptr was validated above as non-null, outside the null
+    // guard page and with size_of::<Rlimit>() bytes below USER_SPACE_END.
+    // NOTE: that is a range check only -- alignment and mapping are not
+    // verified, so an unmapped page faults on the write.
     unsafe {
         (*rlim).rlim_cur = cur;
         (*rlim).rlim_max = max;
@@ -488,6 +498,10 @@ pub fn sys_setrlimit(resource: usize, rlim_ptr: usize) -> SyscallResult {
     validate_user_pointer(rlim_ptr, core::mem::size_of::<Rlimit>())?;
 
     let rlim = rlim_ptr as *const Rlimit;
+    // SAFETY: rlim_ptr was validated above as non-null and with
+    // size_of::<Rlimit>() bytes below USER_SPACE_END. NOTE: a range check
+    // only -- alignment and mapping are not verified, so an unmapped page
+    // faults on the read.
     let (cur, max) = unsafe { ((*rlim).rlim_cur, (*rlim).rlim_max) };
 
     // Validate: soft limit must not exceed hard limit

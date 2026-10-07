@@ -63,13 +63,6 @@ const BOOT_CANARY_MAGIC: u64 = 0xDEAD_BEEF_CAFE_BABE;
 ///   first syscall or interrupt will crash due to invalid kernel stack
 /// - The GDT must contain valid Ring 3 segments at the specified selectors
 pub unsafe fn enter_usermode(entry_point: u64, user_stack: u64, user_cs: u64, user_ss: u64) -> ! {
-    // SAFETY: We build the iretq frame on the current kernel stack.
-    // iretq expects (from top of stack): RIP, CS, RFLAGS, RSP, SS.
-    // We set DS and ES to the user data selector and clear FS/GS.
-    // RFLAGS = 0x202: bit 1 (reserved, always 1) + bit 9 (IF = interrupts enabled).
-    // The caller guarantees all arguments point to valid mapped memory and
-    // the GDT/TSS/per-CPU data are properly configured.
-    //
     // If the process has TLS (fs_base != 0), set FS_BASE via wrmsr AFTER
     // clearing the FS selector. Writing 0 to FS zeros FS_BASE, so the
     // wrmsr must come after to re-establish TLS.
@@ -80,58 +73,68 @@ pub unsafe fn enter_usermode(entry_point: u64, user_stack: u64, user_cs: u64, us
     let fs_lo = fs_base as u32;
     let fs_hi = (fs_base >> 32) as u32;
 
-    asm!(
-        // Set data segment registers to user data selector
-        "mov ds, {ss:r}",
-        "mov es, {ss:r}",
-        // Clear FS and GS. Writing 0 to FS zeros FS_BASE (MSR 0xC0000100).
-        "mov fs, {zero:x}",
-        "mov gs, {zero:x}",
-        // Build iretq frame on current kernel stack FIRST, before wrmsr.
-        // wrmsr uses ECX (MSR number), EDX:EAX (value) as IMPLICIT operands.
-        // All iretq frame values must be pushed BEFORE wrmsr, because wrmsr
-        // clobbers EAX/ECX/EDX.
-        //
-        // CRITICAL: fs_lo and fs_hi are bound to EAX and EDX via explicit
-        // register constraints (`in("eax")` / `in("edx")`). This prevents
-        // the compiler from allocating them to ECX, which gets overwritten
-        // by `mov ecx, 0xC0000100`. Without this, the release optimizer can
-        // allocate fs_hi to ECX, causing `mov edx, ecx` to load 0xC0000100
-        // instead of the actual fs_hi value, which makes wrmsr write a
-        // non-canonical address to FS_BASE and triggers a GP fault.
-        //
-        //   [RSP+0]  RIP    - user entry point
-        //   [RSP+8]  CS     - user code segment (Ring 3)
-        //   [RSP+16] RFLAGS - IF set (0x202)
-        //   [RSP+24] RSP    - user stack pointer
-        //   [RSP+32] SS     - user stack segment (Ring 3)
-        "push {ss}",       // SS
-        "push {rsp}",      // RSP (user stack)
-        "push {rflags}",   // RFLAGS (IF enabled)
-        "push {cs}",       // CS
-        "push {rip}",      // RIP (entry point)
-        // Now restore FS_BASE for TLS if non-zero. All operand values are safely
-        // on the stack. fs_lo is already in EAX, fs_hi is already in EDX.
-        // Only ECX needs to be loaded with the MSR number.
-        "test edx, edx",
-        "jnz 2f",
-        "test eax, eax",
-        "jz 3f",
-        "2:",
-        "mov ecx, 0xC0000100",
-        "wrmsr",
-        "3:",
-        "iretq",
-        ss = in(reg) user_ss,
-        rsp = in(reg) user_stack,
-        rflags = in(reg) 0x202u64,
-        cs = in(reg) user_cs,
-        rip = in(reg) entry_point,
-        zero = in(reg) 0u64,
-        in("eax") fs_lo,
-        in("edx") fs_hi,
-        options(noreturn)
-    );
+    // SAFETY: We build the iretq frame on the current kernel stack.
+    // iretq expects (from top of stack): RIP, CS, RFLAGS, RSP, SS.
+    // We set DS and ES to the user data selector and clear FS/GS.
+    // RFLAGS = 0x202: bit 1 (reserved, always 1) + bit 9 (IF = interrupts enabled).
+    // Forwarded from this function's contract: the caller guarantees the
+    // entry point and stack are mapped USER-accessible in the loaded CR3,
+    // the selectors are valid Ring 3 GDT segments, and per-CPU kernel_rsp is
+    // set.
+    unsafe {
+        asm!(
+            // Set data segment registers to user data selector
+            "mov ds, {ss:r}",
+            "mov es, {ss:r}",
+            // Clear FS and GS. Writing 0 to FS zeros FS_BASE (MSR 0xC0000100).
+            "mov fs, {zero:x}",
+            "mov gs, {zero:x}",
+            // Build iretq frame on current kernel stack FIRST, before wrmsr.
+            // wrmsr uses ECX (MSR number), EDX:EAX (value) as IMPLICIT operands.
+            // All iretq frame values must be pushed BEFORE wrmsr, because wrmsr
+            // clobbers EAX/ECX/EDX.
+            //
+            // CRITICAL: fs_lo and fs_hi are bound to EAX and EDX via explicit
+            // register constraints (`in("eax")` / `in("edx")`). This prevents
+            // the compiler from allocating them to ECX, which gets overwritten
+            // by `mov ecx, 0xC0000100`. Without this, the release optimizer can
+            // allocate fs_hi to ECX, causing `mov edx, ecx` to load 0xC0000100
+            // instead of the actual fs_hi value, which makes wrmsr write a
+            // non-canonical address to FS_BASE and triggers a GP fault.
+            //
+            //   [RSP+0]  RIP    - user entry point
+            //   [RSP+8]  CS     - user code segment (Ring 3)
+            //   [RSP+16] RFLAGS - IF set (0x202)
+            //   [RSP+24] RSP    - user stack pointer
+            //   [RSP+32] SS     - user stack segment (Ring 3)
+            "push {ss}",       // SS
+            "push {rsp}",      // RSP (user stack)
+            "push {rflags}",   // RFLAGS (IF enabled)
+            "push {cs}",       // CS
+            "push {rip}",      // RIP (entry point)
+            // Now restore FS_BASE for TLS if non-zero. All operand values are safely
+            // on the stack. fs_lo is already in EAX, fs_hi is already in EDX.
+            // Only ECX needs to be loaded with the MSR number.
+            "test edx, edx",
+            "jnz 2f",
+            "test eax, eax",
+            "jz 3f",
+            "2:",
+            "mov ecx, 0xC0000100",
+            "wrmsr",
+            "3:",
+            "iretq",
+            ss = in(reg) user_ss,
+            rsp = in(reg) user_stack,
+            rflags = in(reg) 0x202u64,
+            cs = in(reg) user_cs,
+            rip = in(reg) entry_point,
+            zero = in(reg) 0u64,
+            in("eax") fs_lo,
+            in("edx") fs_hi,
+            options(noreturn)
+        )
+    };
 }
 
 /// Enter user mode with the ability to return when the process exits.
@@ -444,18 +447,22 @@ pub unsafe fn boot_return_to_kernel() -> ! {
     let canary: u64;
 
     // Load values with explicit register assignments to prevent optimization
-    asm!(
-        "mov {rsp}, [{rsp_addr}]",
-        "mov {cr3}, [{cr3_addr}]",
-        "mov {canary}, [{canary_addr}]",
-        rsp = out(reg) rsp,
-        cr3 = out(reg) cr3,
-        canary = out(reg) canary,
-        rsp_addr = in(reg) &BOOT_RETURN_RSP,
-        cr3_addr = in(reg) &BOOT_RETURN_CR3,
-        canary_addr = in(reg) &BOOT_STACK_CANARY,
-        options(nostack, preserves_flags)
-    );
+    // SAFETY: the three address operands are references to this module's
+    // atomics, so each load reads a valid, aligned u64 in kernel BSS.
+    unsafe {
+        asm!(
+            "mov {rsp}, [{rsp_addr}]",
+            "mov {cr3}, [{cr3_addr}]",
+            "mov {canary}, [{canary_addr}]",
+            rsp = out(reg) rsp,
+            cr3 = out(reg) cr3,
+            canary = out(reg) canary,
+            rsp_addr = in(reg) &BOOT_RETURN_RSP,
+            cr3_addr = in(reg) &BOOT_RETURN_CR3,
+            canary_addr = in(reg) &BOOT_STACK_CANARY,
+            options(nostack, preserves_flags)
+        )
+    };
 
     // Apply black_box to prevent further optimization
     let rsp = core::hint::black_box(rsp);
@@ -466,12 +473,18 @@ pub unsafe fn boot_return_to_kernel() -> ! {
     // FIX 3: Validate stack canary before restoring context
     // If the canary doesn't match, the boot stack has been corrupted
     if canary != BOOT_CANARY_MAGIC {
-        crate::arch::x86_64::idt::raw_serial_str(b"[BOOT_RETURN] FATAL: Stack canary mismatch!\n");
-        crate::arch::x86_64::idt::raw_serial_str(b"Expected: 0x");
-        crate::arch::x86_64::idt::raw_serial_hex(BOOT_CANARY_MAGIC);
-        crate::arch::x86_64::idt::raw_serial_str(b"\nGot:      0x");
-        crate::arch::x86_64::idt::raw_serial_hex(canary);
-        crate::arch::x86_64::idt::raw_serial_str(b"\n");
+        // SAFETY: port 0x3F8 is the COM1 data register on the x86_64
+        // platforms this kernel targets, which is the raw_serial_* contract.
+        unsafe {
+            crate::arch::x86_64::idt::raw_serial_str(
+                b"[BOOT_RETURN] FATAL: Stack canary mismatch!\n",
+            );
+            crate::arch::x86_64::idt::raw_serial_str(b"Expected: 0x");
+            crate::arch::x86_64::idt::raw_serial_hex(BOOT_CANARY_MAGIC);
+            crate::arch::x86_64::idt::raw_serial_str(b"\nGot:      0x");
+            crate::arch::x86_64::idt::raw_serial_hex(canary);
+            crate::arch::x86_64::idt::raw_serial_str(b"\n");
+        }
         panic!("Stack canary mismatch - boot context corrupted");
     }
 
@@ -497,28 +510,32 @@ pub unsafe fn boot_return_to_kernel() -> ! {
     // FS/GS. We now explicitly allocate RSP to RCX and CR3 to RDX, both
     // of which are preserved across the segment register operations. This
     // is the ONLY way to prevent the optimizer from reusing RAX.
-    asm!(
-        "mov cr3, rdx",       // Restore boot page tables (CR3 in RDX)
-        "swapgs",              // Balance syscall_entry's swapgs (before touching GS!)
-        "mov ax, 0x10",       // Kernel data segment (GDT index 2, RPL 0)
-        "mov ds, ax",         // Restore kernel DS
-        "mov es, ax",         // Restore kernel ES
-        "xor eax, eax",       // Zero FS and GS (clobbers RAX but NOT RCX/RDX!)
-        "mov fs, ax",
-        "mov gs, ax",
-        "mov rsp, rcx",       // Restore saved boot RSP (RSP in RCX, safe!)
-        "add rsp, 8",         // Skip alignment padding from enter_usermode_returnable
-        "pop r15",
-        "pop r14",
-        "pop r13",
-        "pop r12",
-        "pop rbx",
-        "pop rbp",
-        "ret",                 // Return to caller of enter_usermode_returnable
-        in("rcx") rsp,        // RSP MUST be in RCX (preserved across xor eax,eax)
-        in("rdx") cr3,        // CR3 MUST be in RDX (preserved across xor eax,eax)
-        options(noreturn)
-    );
+    // Forwarded from this function's contract: the saved RSP/CR3 are valid,
+    // we are on the syscall kernel stack, and the boot frame is intact.
+    unsafe {
+        asm!(
+            "mov cr3, rdx",       // Restore boot page tables (CR3 in RDX)
+            "swapgs",              // Balance syscall_entry's swapgs (before touching GS!)
+            "mov ax, 0x10",       // Kernel data segment (GDT index 2, RPL 0)
+            "mov ds, ax",         // Restore kernel DS
+            "mov es, ax",         // Restore kernel ES
+            "xor eax, eax",       // Zero FS and GS (clobbers RAX but NOT RCX/RDX!)
+            "mov fs, ax",
+            "mov gs, ax",
+            "mov rsp, rcx",       // Restore saved boot RSP (RSP in RCX, safe!)
+            "add rsp, 8",         // Skip alignment padding from enter_usermode_returnable
+            "pop r15",
+            "pop r14",
+            "pop r13",
+            "pop r12",
+            "pop rbx",
+            "pop rbp",
+            "ret",                 // Return to caller of enter_usermode_returnable
+            in("rcx") rsp,        // RSP MUST be in RCX (preserved across xor eax,eax)
+            in("rdx") cr3,        // CR3 MUST be in RDX (preserved across xor eax,eax)
+            options(noreturn)
+        )
+    };
 }
 
 /// Check whether a boot return context is available.
@@ -605,7 +622,7 @@ unsafe fn map_user_page(
     // Read current CR3 to get the PML4 physical address
     let cr3: u64;
     // SAFETY: Reading CR3 is always valid in kernel mode.
-    asm!("mov {}, cr3", out(reg) cr3);
+    unsafe { asm!("mov {}, cr3", out(reg) cr3) };
     let pml4_phys = cr3 & 0x000F_FFFF_FFFF_F000;
 
     // Extract page table indices from the virtual address
@@ -616,29 +633,44 @@ unsafe fn map_user_page(
 
     // Walk PML4 -> PDPT
     let pml4_virt = (pml4_phys + phys_offset_val) as *mut u64;
-    let pml4_entry = pml4_virt.add(pml4_idx);
-    let pdpt_phys = ensure_table_present(pml4_entry, phys_offset_val)?;
+    // SAFETY: CR3 names the live PML4, which is mapped at pml4_phys +
+    // phys_offset_val (the offset is correct per this function's contract);
+    // the index is masked to 0..512, so the entry is inside that page.
+    let pml4_entry = unsafe { pml4_virt.add(pml4_idx) };
+    // SAFETY: pml4_entry is a valid, mapped PTE slot (see above).
+    let pdpt_phys = unsafe { ensure_table_present(pml4_entry, phys_offset_val)? };
 
     // Walk PDPT -> PD
     let pdpt_virt = (pdpt_phys + phys_offset_val) as *mut u64;
-    let pdpt_entry = pdpt_virt.add(pdpt_idx);
-    let pd_phys = ensure_table_present(pdpt_entry, phys_offset_val)?;
+    // SAFETY: pdpt_phys is a present table frame returned by
+    // ensure_table_present, mapped via the physical memory offset; the index
+    // is masked to 0..512.
+    let pdpt_entry = unsafe { pdpt_virt.add(pdpt_idx) };
+    // SAFETY: pdpt_entry is a valid, mapped PTE slot (see above).
+    let pd_phys = unsafe { ensure_table_present(pdpt_entry, phys_offset_val)? };
 
     // Walk PD -> PT
     let pd_virt = (pd_phys + phys_offset_val) as *mut u64;
-    let pd_entry = pd_virt.add(pd_idx);
-    let pt_phys = ensure_table_present(pd_entry, phys_offset_val)?;
+    // SAFETY: as for the PDPT level: a present, mapped table frame and an
+    // index masked to 0..512.
+    let pd_entry = unsafe { pd_virt.add(pd_idx) };
+    // SAFETY: pd_entry is a valid, mapped PTE slot (see above).
+    let pt_phys = unsafe { ensure_table_present(pd_entry, phys_offset_val)? };
 
     // Set the leaf PT entry
     let pt_virt = (pt_phys + phys_offset_val) as *mut u64;
-    let pt_entry = pt_virt.add(pt_idx);
     // SAFETY: pt_entry points into a valid page table mapped via the physical
-    // memory offset. We write the leaf mapping: physical frame + flags.
-    pt_entry.write_volatile(phys_frame_addr | flags);
+    // memory offset (index masked to 0..512). We write the leaf mapping:
+    // physical frame + flags. The caller guarantees no conflicting mapping
+    // exists and that the frame is a valid page-aligned address.
+    unsafe {
+        let pt_entry = pt_virt.add(pt_idx);
+        pt_entry.write_volatile(phys_frame_addr | flags);
+    }
 
     // Flush TLB for this address
     // SAFETY: invlpg invalidates the TLB entry for virt_addr. No side effects.
-    asm!("invlpg [{}]", in(reg) virt_addr);
+    unsafe { asm!("invlpg [{}]", in(reg) virt_addr) };
 
     Ok(())
 }
@@ -655,18 +687,19 @@ unsafe fn ensure_table_present(
     entry_ptr: *mut u64,
     phys_offset_val: u64,
 ) -> Result<u64, crate::error::KernelError> {
-    // SAFETY: entry_ptr was computed from a valid page table base + index,
-    // both within the physical memory mapping provided by the bootloader.
-    let entry = entry_ptr.read_volatile();
+    // SAFETY: forwarded from this function's contract: entry_ptr points to a
+    // valid page table entry in mapped memory.
+    let entry = unsafe { entry_ptr.read_volatile() };
 
     if (entry & PTE_PRESENT) != 0 {
         // Table already exists. Ensure USER bit is set on intermediate entries
         // so user-mode accesses can traverse the hierarchy.
         let updated = entry | PTE_USER | PTE_WRITABLE;
         if updated != entry {
-            // SAFETY: Updating flags on an existing present entry is safe.
-            // We only add USER and WRITABLE bits to intermediate tables.
-            entry_ptr.write_volatile(updated);
+            // SAFETY: entry_ptr is a valid PTE slot per this function's
+            // contract. We only add USER and WRITABLE bits to intermediate
+            // tables of a present entry.
+            unsafe { entry_ptr.write_volatile(updated) };
         }
         Ok(pte_phys_addr(entry))
     } else {
@@ -682,14 +715,16 @@ unsafe fn ensure_table_present(
         // Zero the new table
         let frame_virt = (frame_phys + phys_offset_val) as *mut u8;
         // SAFETY: frame_virt points to a freshly allocated 4KiB frame mapped
-        // via the physical memory offset. write_bytes zeroes the entire page.
-        core::ptr::write_bytes(frame_virt, 0, 4096);
+        // via the physical memory offset (correct per this function's
+        // contract). write_bytes zeroes the entire page.
+        unsafe { core::ptr::write_bytes(frame_virt, 0, 4096) };
 
         // Write the entry: physical address + PRESENT + WRITABLE + USER
         let new_entry = frame_phys | PTE_PRESENT | PTE_WRITABLE | PTE_USER;
-        // SAFETY: entry_ptr points to a valid PTE slot. Writing a new entry
-        // that points to our freshly zeroed frame is safe.
-        entry_ptr.write_volatile(new_entry);
+        // SAFETY: entry_ptr points to a valid PTE slot (this function's
+        // contract). Writing a new entry that points to our freshly zeroed
+        // frame is safe.
+        unsafe { entry_ptr.write_volatile(new_entry) };
 
         Ok(frame_phys)
     }
@@ -711,8 +746,9 @@ unsafe fn is_page_table_frame(phys_offset: u64, pml4_phys: u64, phys: u64) -> bo
 
     let pml4_virt = (pml4_phys + phys_offset) as *const u64;
     for i in 0..512 {
-        // SAFETY: pml4_virt + i is within the PML4 page, mapped via phys_offset.
-        let pml4_entry = pml4_virt.add(i).read_volatile();
+        // SAFETY: pml4_virt + i (i < 512) is within the PML4 page, mapped via
+        // phys_offset; both are valid per this function's contract.
+        let pml4_entry = unsafe { pml4_virt.add(i).read_volatile() };
         if (pml4_entry & PTE_PRESENT) == 0 {
             continue;
         }
@@ -723,8 +759,9 @@ unsafe fn is_page_table_frame(phys_offset: u64, pml4_phys: u64, phys: u64) -> bo
 
         let pdpt_virt = (pdpt_phys + phys_offset) as *const u64;
         for j in 0..512 {
-            // SAFETY: pdpt_virt + j is within the PDPT page.
-            let pdpt_entry = pdpt_virt.add(j).read_volatile();
+            // SAFETY: pdpt_virt + j (j < 512) is within the PDPT page, a
+            // present table frame mapped via phys_offset.
+            let pdpt_entry = unsafe { pdpt_virt.add(j).read_volatile() };
             if (pdpt_entry & PTE_PRESENT) == 0 {
                 continue;
             }
@@ -738,8 +775,9 @@ unsafe fn is_page_table_frame(phys_offset: u64, pml4_phys: u64, phys: u64) -> bo
 
             let pd_virt = (pd_phys + phys_offset) as *const u64;
             for k in 0..512 {
-                // SAFETY: pd_virt + k is within the PD page.
-                let pd_entry = pd_virt.add(k).read_volatile();
+                // SAFETY: pd_virt + k (k < 512) is within the PD page, a
+                // present table frame mapped via phys_offset.
+                let pd_entry = unsafe { pd_virt.add(k).read_volatile() };
                 if (pd_entry & PTE_PRESENT) == 0 {
                     continue;
                 }
@@ -783,7 +821,10 @@ unsafe fn allocate_safe_frame(
         // Check all allocated frames in the range
         let mut overlaps = false;
         for f in 0..count as u64 {
-            if is_page_table_frame(phys_offset, pml4_phys, phys + f * FRAME_SIZE as u64) {
+            // SAFETY: forwarded from this function's contract: phys_offset
+            // and pml4_phys are valid, as is_page_table_frame requires.
+            if unsafe { is_page_table_frame(phys_offset, pml4_phys, phys + f * FRAME_SIZE as u64) }
+            {
                 overlaps = true;
                 break;
             }
@@ -858,6 +899,7 @@ pub fn try_enter_usermode() -> Result<(), crate::error::KernelError> {
     let code_frame = unsafe { allocate_safe_frame(phys_offset_val, pml4_phys, 1)? };
     let code_phys = code_frame.as_u64() * FRAME_SIZE as u64;
 
+    // SAFETY: as for `code_frame`: phys_offset_val and pml4_phys are valid.
     let stack_frame = unsafe { allocate_safe_frame(phys_offset_val, pml4_phys, 1)? };
     let stack_phys = stack_frame.as_u64() * FRAME_SIZE as u64;
 
