@@ -8,13 +8,21 @@
 pub mod percpu;
 pub mod smp_boot;
 
+#[cfg(all(feature = "smp", target_arch = "aarch64", target_os = "none"))]
+pub(crate) use aarch64::smp as smp_arch;
 /// Architecture side of secondary-CPU bring-up (see `smp_boot`).
 #[cfg(all(feature = "smp", target_arch = "riscv64", target_os = "none"))]
 pub(crate) use riscv64::smp as smp_arch;
 
 /// Architectures whose secondary bring-up is not implemented yet describe
 /// no secondaries, so the boot CPU runs alone.
-#[cfg(all(feature = "smp", not(all(target_arch = "riscv64", target_os = "none"))))]
+#[cfg(all(
+    feature = "smp",
+    not(all(
+        any(target_arch = "riscv64", target_arch = "aarch64"),
+        target_os = "none"
+    ))
+))]
 pub(crate) mod smp_arch {
     use alloc::vec::Vec;
 

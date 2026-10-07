@@ -8,6 +8,28 @@ use core::arch::global_asm;
 // Include the assembly boot code
 global_asm!(include_str!("boot.S"));
 
+/// Rust entry of a secondary CPU (from `veridian_secondary_entry` in
+/// boot.S, which already set the stack and TPIDR_EL1). Defined in every
+/// build because boot.S references it; CPUs are only started with the
+/// `smp` feature.
+#[no_mangle]
+extern "C" fn veridian_secondary_rust(args: &'static crate::arch::smp_boot::ApBootArgs) -> ! {
+    let cpu = args.cpu_id.load(core::sync::atomic::Ordering::Acquire) as usize;
+    let mpidr: u64;
+    // SAFETY: reading MPIDR_EL1 at EL1 has no side effects.
+    unsafe { core::arch::asm!("mrs {}, mpidr_el1", out(reg) mpidr, options(nomem, nostack)) };
+    // SAFETY: first Rust code on this CPU; `cpu` is the logical id the boot
+    // CPU assigned it, and nothing else touches that block now.
+    unsafe { crate::arch::percpu::install(cpu, (mpidr & 0x00FF_FFFF) as u32) };
+    #[cfg(feature = "smp")]
+    crate::arch::smp_boot::ap_main();
+    #[cfg(not(feature = "smp"))]
+    loop {
+        // SAFETY: waits for an event; interrupts are masked.
+        unsafe { core::arch::asm!("wfe", options(nomem, nostack)) };
+    }
+}
+
 /// Entry point from assembly code
 ///
 /// # Safety

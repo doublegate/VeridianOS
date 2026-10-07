@@ -11,7 +11,10 @@ pub mod direct_uart;
 pub mod entry;
 pub mod exceptions;
 pub mod gic;
+pub mod psci;
 pub mod serial;
+#[cfg(feature = "smp")]
+pub mod smp;
 pub mod timer;
 pub mod usermode;
 

@@ -121,7 +121,7 @@ ls target/x86_64-veridian/debug/bootimage-veridian-kernel.bin
 ### Other Architectures
 
 AArch64 and RISC-V use the raw kernel binary directly:
-- AArch64: Load at 0x40080000
+- AArch64: Load at 0x40200000
 - RISC-V: Load with OpenSBI
 
 ## Build Artifacts

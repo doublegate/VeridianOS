@@ -2,8 +2,11 @@ ENTRY(_start)
 
 SECTIONS
 {
-    /* QEMU loads the kernel at 0x40080000 for -machine virt */
-    . = 0x40080000;
+    /* 2 MiB into RAM (0x40000000 on QEMU virt), like the Linux arm64 text
+     * offset. For a bare-metal ELF QEMU puts the device tree at the start of
+     * RAM only if it fits below the image, and the virt DTB is 1 MiB, so the
+     * old base of 0x40080000 (512 KiB) left the kernel without one. */
+    . = 0x40200000;
     
     .text : ALIGN(4K) {
         KEEP(*(.text.boot))

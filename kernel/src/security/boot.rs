@@ -237,7 +237,7 @@ fn get_kernel_extent() -> (usize, usize) {
     let kernel_start: usize = 0xFFFFFFFF80100000;
 
     #[cfg(target_arch = "aarch64")]
-    let kernel_start: usize = 0x40080000; // QEMU virt machine load address
+    let kernel_start: usize = 0x40200000; // aarch64 link.ld base
 
     #[cfg(target_arch = "riscv64")]
     let kernel_start: usize = 0x80200000; // OpenSBI jump address
