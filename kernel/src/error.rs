@@ -213,6 +213,8 @@ pub enum FsError {
     /// Refused by the object's own state, not by permission bits (EPERM):
     /// a sealed memfd, for one
     OperationNotPermitted,
+    /// In use (EBUSY): F_SEAL_WRITE on a memfd that is mapped shared
+    Busy,
 }
 
 /// Result type alias for kernel operations

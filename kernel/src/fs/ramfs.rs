@@ -33,17 +33,11 @@ struct RamNode {
     /// downcast to `RamNode`, so this is what tells two mounts apart.
     fs_id: u64,
 
+    /// Parent directory inode (for ".." entries)
     /// Parent directory inode (".."); changes when a rename moves this
     /// directory.
     parent_inode: core::sync::atomic::AtomicU64,
-
-    /// The file's seals (`fs::seals`), or `UNSEALABLE` for anything but a
-    /// memfd (N-229).
-    seals: core::sync::atomic::AtomicU32,
 }
-
-/// `RamNode::seals` of a node that cannot be sealed.
-const UNSEALABLE: u32 = 1 << 31;
 
 impl RamNode {
     /// Create a new file node
@@ -66,7 +60,6 @@ impl RamNode {
             inode,
             fs_id,
             parent_inode: core::sync::atomic::AtomicU64::new(parent_inode),
-            seals: core::sync::atomic::AtomicU32::new(UNSEALABLE),
         }
     }
 
@@ -90,7 +83,6 @@ impl RamNode {
             inode,
             fs_id,
             parent_inode: core::sync::atomic::AtomicU64::new(parent_inode),
-            seals: core::sync::atomic::AtomicU32::new(UNSEALABLE),
         }
     }
 
@@ -118,7 +110,6 @@ impl RamNode {
             inode,
             fs_id,
             parent_inode: core::sync::atomic::AtomicU64::new(parent_inode),
-            seals: core::sync::atomic::AtomicU32::new(UNSEALABLE),
         }
     }
 }
@@ -166,13 +157,6 @@ impl VfsNode for RamNode {
 
         let end = super::ram_write_end(offset, data.len())?;
         let mut file_data = self.data.write();
-        let seals = self.seals.load(core::sync::atomic::Ordering::Acquire);
-        if seals != UNSEALABLE
-            && (seals & (super::seals::WRITE | super::seals::FUTURE_WRITE) != 0
-                || (seals & super::seals::GROW != 0 && end > file_data.len()))
-        {
-            return Err(KernelError::FsError(FsError::OperationNotPermitted));
-        }
         super::grow_ram_file(&mut file_data, end)?;
         file_data[offset..end].copy_from_slice(data);
 
@@ -318,13 +302,6 @@ impl VfsNode for RamNode {
         }
 
         let mut data = self.data.write();
-        let seals = self.seals.load(core::sync::atomic::Ordering::Acquire);
-        if seals != UNSEALABLE
-            && ((seals & super::seals::SHRINK != 0 && size < data.len())
-                || (seals & super::seals::GROW != 0 && size > data.len()))
-        {
-            return Err(KernelError::FsError(FsError::OperationNotPermitted));
-        }
         if size > data.len() {
             super::grow_ram_file(&mut data, size)?;
         } else {
@@ -491,47 +468,8 @@ impl VfsNode for RamNode {
 
     fn chmod(&self, permissions: Permissions) -> Result<(), KernelError> {
         let mut metadata = self.metadata.write();
-        let seals = self.seals.load(core::sync::atomic::Ordering::Acquire);
-        if seals != UNSEALABLE
-            && seals & super::seals::EXEC != 0
-            && (metadata.permissions.to_mode() ^ permissions.to_mode()) & 0o111 != 0
-        {
-            return Err(KernelError::FsError(FsError::OperationNotPermitted));
-        }
         metadata.permissions = permissions;
         metadata.modified = crate::arch::timer::get_timestamp_secs();
-        Ok(())
-    }
-
-    fn seals(&self) -> Option<u32> {
-        let seals = self.seals.load(core::sync::atomic::Ordering::Acquire);
-        (seals != UNSEALABLE).then_some(seals)
-    }
-
-    fn add_seals(&self, add: u32) -> Result<(), KernelError> {
-        if add & !super::seals::ALL != 0 {
-            return Err(KernelError::InvalidArgument {
-                name: "seals",
-                value: "unknown seal",
-            });
-        }
-        // Under the data and metadata locks (in write()'s order), so a
-        // write, truncate or chmod cannot slip in between its check of the
-        // seals and its own change.
-        let _data = self.data.write();
-        let _metadata = self.metadata.write();
-        let seals = self.seals.load(core::sync::atomic::Ordering::Acquire);
-        if seals == UNSEALABLE {
-            return Err(KernelError::InvalidArgument {
-                name: "seals",
-                value: "file cannot be sealed",
-            });
-        }
-        if seals & super::seals::SEAL != 0 {
-            return Err(KernelError::FsError(FsError::OperationNotPermitted));
-        }
-        self.seals
-            .store(seals | add, core::sync::atomic::Ordering::Release);
         Ok(())
     }
 
@@ -562,42 +500,18 @@ impl VfsNode for RamNode {
 /// Global inode counter
 static NEXT_INODE: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(1);
 
+/// A fresh inode number from the RAM filesystems' counter, for in-memory
+/// files outside them (memfds) so their numbers never collide.
+pub(crate) fn next_inode() -> u64 {
+    NEXT_INODE.fetch_add(1, core::sync::atomic::Ordering::Relaxed)
+}
+
 /// Source of `RamNode::fs_id`, one per `RamFs` instance.
 static NEXT_FS_ID: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(1);
 
 /// RAM filesystem
 pub struct RamFs {
     root: Arc<RamNode>,
-}
-
-/// A regular file in no directory and no mounted filesystem, as
-/// memfd_create makes (N-229); it lives while an fd refers to it. With
-/// `sealable` false it starts sealed against further seals, as Linux does
-/// without MFD_ALLOW_SEALING; `initial_seals` (F_SEAL_EXEC for
-/// MFD_NOEXEC_SEAL) apply otherwise.
-pub fn anonymous_file(
-    permissions: Permissions,
-    uid: u32,
-    gid: u32,
-    sealable: bool,
-    initial_seals: u32,
-) -> Arc<dyn VfsNode> {
-    let inode = NEXT_INODE.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-    let fs_id = NEXT_FS_ID.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-    let node = RamNode::new_file(inode, inode, fs_id, permissions);
-    {
-        let mut metadata = node.metadata.write();
-        metadata.uid = uid;
-        metadata.gid = gid;
-    }
-    let seals = if sealable {
-        initial_seals & super::seals::ALL
-    } else {
-        super::seals::SEAL
-    };
-    node.seals
-        .store(seals, core::sync::atomic::Ordering::Release);
-    Arc::new(node)
 }
 
 impl RamFs {
@@ -647,79 +561,6 @@ mod tests {
     use alloc::vec;
 
     use super::*;
-
-    // --- memfd seals (N-229) ---
-
-    fn eperm<T: core::fmt::Debug>(r: Result<T, KernelError>) -> bool {
-        matches!(r, Err(KernelError::FsError(FsError::OperationNotPermitted)))
-    }
-
-    #[test]
-    fn only_memfds_can_be_sealed() {
-        let fs = RamFs::new();
-        let f = fs.root().create("f", Permissions::default()).unwrap();
-        assert_eq!(f.seals(), None);
-        assert!(matches!(
-            f.add_seals(crate::fs::seals::WRITE),
-            Err(KernelError::InvalidArgument { .. })
-        ));
-        // Without MFD_ALLOW_SEALING a memfd is sealed against seals.
-        let m = anonymous_file(Permissions::from_mode(0o777), 0, 0, false, 0);
-        assert_eq!(m.seals(), Some(crate::fs::seals::SEAL));
-        assert!(eperm(m.add_seals(crate::fs::seals::WRITE)));
-        assert_eq!(m.write(0, b"data").unwrap(), 4);
-    }
-
-    #[test]
-    fn seals_refuse_what_they_seal() {
-        use crate::fs::seals;
-        let m = anonymous_file(Permissions::from_mode(0o777), 1000, 100, true, 0);
-        let meta = m.metadata().unwrap();
-        assert_eq!(
-            (meta.uid, meta.gid, meta.node_type),
-            (1000, 100, NodeType::File)
-        );
-        assert_eq!(m.seals(), Some(0));
-        m.truncate(8).unwrap();
-
-        m.add_seals(seals::SHRINK).unwrap();
-        assert!(eperm(m.truncate(4)));
-        m.truncate(16).unwrap();
-
-        m.add_seals(seals::GROW).unwrap();
-        assert!(eperm(m.truncate(32)));
-        assert!(eperm(m.write(15, b"xy")), "write past the end grows");
-        assert_eq!(m.write(0, b"in"), Ok(2));
-
-        m.add_seals(seals::WRITE).unwrap();
-        assert!(eperm(m.write(0, b"x")));
-        assert_eq!(m.metadata().unwrap().size, 16);
-
-        assert!(matches!(
-            m.add_seals(0x40),
-            Err(KernelError::InvalidArgument { .. })
-        ));
-        m.add_seals(seals::SEAL).unwrap();
-        assert!(eperm(m.add_seals(seals::EXEC)));
-        assert_eq!(
-            m.seals(),
-            Some(seals::SHRINK | seals::GROW | seals::WRITE | seals::SEAL)
-        );
-    }
-
-    #[test]
-    fn exec_seal_fixes_the_execute_bits() {
-        let m = anonymous_file(
-            Permissions::from_mode(0o666),
-            0,
-            0,
-            true,
-            crate::fs::seals::EXEC,
-        );
-        assert!(eperm(m.chmod(Permissions::from_mode(0o766))));
-        m.chmod(Permissions::from_mode(0o600)).unwrap();
-        assert_eq!(m.metadata().unwrap().permissions.to_mode() & 0o777, 0o600);
-    }
 
     // --- Offsets and sizes (N-122) ---
 

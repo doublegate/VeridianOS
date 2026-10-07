@@ -2013,6 +2013,70 @@ static void test_memfd(void)
     static char why[64];
     snprintf(why, sizeof(why), "bitmask of failures %d", fails);
     report("memfd_create_file_and_seals", fails == 0, why);
+
+    /* MAP_SHARED of a memfd maps its own pages (N-230): two mappings,
+     * write() and a forked child all see one copy -- a Wayland buffer. */
+    int sfails = 0;
+    fd = memfd_create("shared", MFD_ALLOW_SEALING);
+    if (fd < 0 || ftruncate(fd, 8192) != 0) {
+        report("memfd_shared_mappings", 0, "setup failed");
+        return;
+    }
+    char *a = mmap(NULL, 8192, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    char *b = mmap(NULL, 8192, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    if (a == MAP_FAILED || b == MAP_FAILED || a == b)
+        sfails |= 1;
+    else {
+        strcpy(a + 5000, "one copy");
+        if (strcmp(b + 5000, "one copy") != 0)
+            sfails |= 2;                        /* mapping to mapping */
+        char got[9] = {0};
+        if (pread(fd, got, 8, 5000) != 8 || strcmp(got, "one copy") != 0)
+            sfails |= 4;                        /* mapping to read() */
+        if (pwrite(fd, "pw", 2, 0) != 2 || a[0] != 'p' || b[1] != 'w')
+            sfails |= 8;                        /* write() to mappings */
+        pid_t pid = fork();
+        if (pid == 0) {
+            a[100] = 'C';                       /* the child's mapping */
+            _exit(0);
+        }
+        int cst = 0;
+        waitpid(pid, &cst, 0);
+        if (b[100] != 'C')
+            sfails |= 16;                       /* shared across fork */
+        errno = 0;
+        if (fcntl(fd, F_ADD_SEALS, F_SEAL_WRITE) != -1 || errno != EBUSY)
+            sfails |= 32;                       /* mapped: EBUSY */
+        munmap(a, 8192);
+        munmap(b, 8192);
+        if (fcntl(fd, F_ADD_SEALS, F_SEAL_WRITE) != 0)
+            sfails |= 64;                       /* unmapped: allowed */
+        errno = 0;
+        if (mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0) != MAP_FAILED ||
+            errno != EPERM)
+            sfails |= 128;                      /* write-sealed */
+        char *ro = mmap(NULL, 4096, PROT_READ, MAP_SHARED, fd, 0);
+        if (ro == MAP_FAILED || ro[0] != 'p')
+            sfails |= 256;                      /* read-only still fine */
+        if (ro != MAP_FAILED)
+            munmap(ro, 4096);
+    }
+    close(fd);
+    /* mmap's own checks: offset alignment, the fd, its access mode. */
+    errno = 0;
+    if (mmap(NULL, 4096, PROT_READ, MAP_PRIVATE, 999, 0) != MAP_FAILED || errno != EBADF)
+        sfails |= 512;                          /* was silently anonymous */
+    fd = open("/tmp/audit_seal", O_RDONLY);
+    errno = 0;
+    if (mmap(NULL, 4096, PROT_READ, MAP_PRIVATE, fd, 100) != MAP_FAILED || errno != EINVAL)
+        sfails |= 1024;
+    errno = 0;
+    if (mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0) != MAP_FAILED ||
+        errno != EACCES)
+        sfails |= 2048;                         /* O_RDONLY */
+    close(fd);
+    snprintf(why, sizeof(why), "bitmask of failures %d", sfails);
+    report("memfd_shared_mappings", sfails == 0, why);
 }
 
 /* --- Signals 32-64 (N-209): EINVAL before, though musl's pthread_cancel

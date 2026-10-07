@@ -29,6 +29,9 @@ exposed were fixed (N-182 to N-189); the rest are listed, with their targets, in
 
 - **Blocking.** select never blocks; recvfrom, accept, sendmsg and recvmsg never block on a
   blocking socket; non-blocking eventfd, timerfd and signalfd reads block (N-194, N-232, N-235).
+- **MAP_SHARED of regular files** is a private copy: a write through the mapping does not reach
+  the file or other mappings. Only memfds share their pages (N-230); the rest needs the v0.29
+  page cache.
 - **clone across processes.** A `clone` without CLONE_THREAD makes a process (fork, vfork,
   `posix_spawn`); with CLONE_VM it shares the parent's memory page by page as it is at the
   clone, so a mapping either side adds or removes afterwards is its own (enough for vfork and

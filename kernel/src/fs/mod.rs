@@ -21,6 +21,8 @@ pub mod fat32;
 pub mod file;
 pub mod flock;
 pub mod inotify;
+#[cfg(feature = "alloc")]
+pub mod memfd;
 pub mod pipe;
 pub mod procfs;
 pub mod pty;
@@ -421,6 +423,24 @@ pub trait VfsNode: Send + Sync {
             name: "seals",
             value: "file cannot be sealed",
         })
+    }
+
+    /// The frames holding pages `[first_page, first_page + count)` of the
+    /// file, for a MAP_SHARED mapping that maps the file's own pages, so it
+    /// and every other mapping, read and write see one copy (N-230). Each
+    /// frame returned has gained an owner (`mm::frame_refs`) that the
+    /// mapping releases when unmapped. `writable`: the mapping may write
+    /// (refused under F_SEAL_WRITE). `None`: the node has no such pages,
+    /// and a MAP_SHARED mapping of it is a private copy (a page cache is
+    /// v0.29 work).
+    #[cfg(feature = "alloc")]
+    fn share_pages(
+        &self,
+        _first_page: usize,
+        _count: usize,
+        _writable: bool,
+    ) -> Option<Result<Vec<crate::mm::FrameNumber>, KernelError>> {
+        None
     }
 
     /// Whether every readiness change of this node calls

@@ -1193,6 +1193,87 @@ impl VirtualAddressSpace {
         self.map_region_inner(start, size, mapping_type, flags, true)
     }
 
+    /// Map `frames` -- pages another object owns, such as a memfd's (N-230)
+    /// -- as one MAP_SHARED mapping, at `at` (replacing what is there, as
+    /// MAP_FIXED) or at an address the kernel chooses. The region is set up
+    /// as an anonymous shared one would be, and its fresh frames are then
+    /// exchanged for `frames`. The caller has given each of `frames` one
+    /// more owner (`frame_refs::share`); unmapping releases it, and on
+    /// failure the owners not handed to the mapping are released here.
+    #[cfg(feature = "alloc")]
+    pub fn map_shared_frames(
+        &self,
+        at: Option<VirtualAddress>,
+        frames: &[FrameNumber],
+        flags: PageFlags,
+    ) -> Result<VirtualAddress, KernelError> {
+        let release_from = |i: usize| {
+            for &frame in &frames[i..] {
+                if super::frame_refs::release(frame) {
+                    crate::mm::note_free_failure(
+                        FRAME_ALLOCATOR.lock().free_frames(frame, 1),
+                        frame,
+                        "vas",
+                    );
+                }
+            }
+        };
+        let size = frames.len() * 4096;
+        let placed = match at {
+            Some(start) => self
+                .map_region_fixed(start, size, MappingType::Shared, Some(flags))
+                .map(|_| start),
+            None => self.mmap_flags(size, MappingType::Shared, Some(flags)),
+        };
+        let start = match placed {
+            Ok(start) => start,
+            Err(e) => {
+                release_from(0);
+                return Err(e);
+            }
+        };
+        #[cfg(not(test))]
+        {
+            let root = self.page_table_root.load(Ordering::Acquire);
+            // SAFETY: this address space's L4 table; the mappings lock taken
+            // below serialises changes to it.
+            let mut mapper = unsafe { create_mapper_from_root(root) };
+            let mut mappings = self.mappings.lock();
+            let Some(mapping) = mappings.get_mut(&start) else {
+                release_from(0);
+                return Err(KernelError::InvalidAddress {
+                    addr: start.0 as usize,
+                });
+            };
+            for (i, &frame) in frames.iter().enumerate() {
+                let va = VirtualAddress(start.0 + (i as u64) * 4096);
+                let page_flags = mapper.translate_page(va).map_or(flags, |(_, f)| f);
+                let _ = mapper.unmap_page(va);
+                super::tlb::flush_page(va.0);
+                if let Err(e) = mapper.map_page(va, frame, page_flags, &mut VasFrameAllocator) {
+                    // Frames from `i` on were not handed to the mapping;
+                    // the fresh one at `i` stays recorded and is freed with
+                    // the mapping.
+                    release_from(i);
+                    return Err(e);
+                }
+                if let Some(slot) = mapping.physical_frames.get_mut(i) {
+                    let fresh = core::mem::replace(slot, frame);
+                    if super::frame_refs::release(fresh) {
+                        crate::mm::note_free_failure(
+                            FRAME_ALLOCATOR.lock().free_frames(fresh, 1),
+                            fresh,
+                            "vas",
+                        );
+                    }
+                }
+            }
+        }
+        #[cfg(test)]
+        let _ = release_from;
+        Ok(start)
+    }
+
     #[cfg(feature = "alloc")]
     fn map_region_inner(
         &self,

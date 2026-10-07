@@ -450,6 +450,7 @@ pub fn map_kernel_error(err: crate::error::KernelError) -> SyscallError {
             FsError::SymlinkLoop => SyscallError::SymlinkLoop,
             FsError::NoSpace => SyscallError::NoSpace,
             FsError::OperationNotPermitted => SyscallError::OperationNotPermitted,
+            FsError::Busy => SyscallError::Busy,
         },
         KernelError::OutOfMemory { .. } => SyscallError::OutOfMemory,
         KernelError::InvalidArgument { .. } => SyscallError::InvalidArgument,
@@ -1659,7 +1660,7 @@ fn sys_memfd_create(name_ptr: usize, flags: usize) -> SyscallResult {
     // MFD_NOEXEC_SEAL: not executable, the mode's execute bits sealed, and
     // sealable as with MFD_ALLOW_SEALING.
     let noexec = flags & MFD_NOEXEC_SEAL != 0;
-    let node = crate::fs::ramfs::anonymous_file(
+    let node = crate::fs::memfd::MemfdNode::new(
         crate::fs::Permissions::from_mode(if noexec { 0o666 } else { 0o777 }),
         creds.euid,
         creds.egid,

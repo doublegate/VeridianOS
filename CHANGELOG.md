@@ -2,6 +2,14 @@
 
 ### Added
 
+- **Shared mappings of memfds (N-230).** A memfd's pages are now physical frames the file owns,
+  and `mmap(MAP_SHARED)` maps those frames themselves, so every mapping, `read` and `write` see
+  one copy (and a child keeps sharing it after fork) -- how a Wayland client and its compositor
+  share a buffer; it was a private copy. F_SEAL_WRITE is EBUSY while the memfd is mapped, and a
+  write-sealed memfd cannot be mapped writable. `mmap` also checks file mappings as Linux does:
+  EBADF for a closed fd (it silently became anonymous memory), EINVAL for an unaligned offset,
+  EACCES for the wrong access mode, ENODEV for a directory or stream. MAP_SHARED of other files
+  is still a copy until the v0.29 page cache. Runtime test `memfd_shared_mappings`.
 - **fork- and vfork-style clone, and vfork (N-210).** Only thread-creating `clone` existed, so
   musl's and glibc's `posix_spawn` -- and with it `system` and `popen` -- failed with EINVAL, and
   `vfork` was missing (the native libc's was a `fork`). `clone` without CLONE_THREAD now makes a

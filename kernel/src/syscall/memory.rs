@@ -161,6 +161,49 @@ pub fn sys_mmap(
     // The page flags follow `prot`: no-execute unless PROT_EXEC, read-only
     // unless PROT_WRITE, no user access for PROT_NONE (N-132).
     let page_flags = crate::mm::vas::user_prot_flags(prot);
+
+    // A file mapping, checked as Linux does (N-230): the offset is page
+    // aligned (EINVAL), the fd is open (EBADF; a closed one silently became
+    // anonymous memory), open for reading, and for a writable shared
+    // mapping open for writing too (EACCES); a directory or a stream cannot
+    // be mapped (ENODEV).
+    #[cfg(feature = "alloc")]
+    if !is_anonymous && !is_drm_mmap {
+        if offset & (PAGE_SIZE - 1) != 0 {
+            return Err(SyscallError::InvalidArgument);
+        }
+        let file = proc
+            .file_table
+            .lock()
+            .get(fd)
+            .ok_or(SyscallError::BadFileDescriptor)?;
+        if !file.flags.read || (shared && prot & PROT_WRITE != 0 && !file.flags.write) {
+            return Err(SyscallError::PermissionDenied);
+        }
+        if file.node.node_type() == crate::fs::NodeType::Directory || file.node.is_stream() {
+            return Err(SyscallError::NoDevice);
+        }
+        // A file whose own pages can be mapped (a memfd) is, for
+        // MAP_SHARED: the mapping and every other one, read and write see
+        // one copy. Other files are still copied (a page cache is v0.29).
+        if shared {
+            let pages = length.div_ceil(PAGE_SIZE);
+            if let Some(frames) =
+                file.node
+                    .share_pages(offset / PAGE_SIZE, pages, prot & PROT_WRITE != 0)
+            {
+                let frames = frames.map_err(super::map_kernel_error)?;
+                let at = is_fixed.then_some(VirtualAddress(addr as u64));
+                let start = proc
+                    .memory_space
+                    .lock()
+                    .map_shared_frames(at, &frames, page_flags)
+                    .map_err(|_| SyscallError::OutOfMemory)?;
+                return Ok(start.as_usize());
+            }
+        }
+    }
+
     let memory_space = proc.memory_space.lock();
 
     let mapped_addr = if is_fixed {
