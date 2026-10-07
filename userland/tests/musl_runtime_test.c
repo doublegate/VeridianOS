@@ -29,6 +29,7 @@
 #include <sys/mman.h>
 #include <sys/prctl.h>
 #include <sys/wait.h>
+#include <sys/socket.h>
 #include <sys/syscall.h>
 #include <time.h>
 #include <unistd.h>
@@ -599,6 +600,43 @@ static void test_pipe_write_semantics(void)
     report("musl_pipe_write_whole_and_atomic", whole && atomic && total == 2 * 64 * 4096, why);
 }
 
+/* Blocking sprint: Unix sockets report readiness changes, so a blocked
+ * read and an infinite poll wake as soon as the peer writes. */
+static void test_unix_socket_wakeups(void)
+{
+    int sv[2];
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) != 0) {
+        report("musl_unix_socket_wakeups", 0, "socketpair failed");
+        return;
+    }
+    pid_t pid = fork();
+    if (pid == 0) {
+        close(sv[0]);
+        struct timespec ms60 = {0, 60 * 1000 * 1000};
+        nanosleep(&ms60, 0);
+        if (write(sv[1], "a", 1) != 1)
+            _exit(1);
+        nanosleep(&ms60, 0);
+        _exit(write(sv[1], "b", 1) == 1 ? 0 : 2);
+    }
+    close(sv[1]);
+    char c = 0;
+    long long t0 = mono_ns();
+    int got_a = read(sv[0], &c, 1) == 1 && c == 'a';
+    long long waited = mono_ns() - t0;
+    struct pollfd pfd = {sv[0], POLLIN, 0};
+    int pr = poll(&pfd, 1, -1);
+    int got_b = pr == 1 && read(sv[0], &c, 1) == 1 && c == 'b';
+    int st = 0;
+    waitpid(pid, &st, 0);
+    close(sv[0]);
+    static char why[112];
+    snprintf(why, sizeof(why), "read=%d(%lldms) poll=%d(pr=%d rev=%#x c=%c) child=%d", got_a,
+             waited / 1000000, got_b, pr, pfd.revents, c ? c : '0',
+             WIFEXITED(st) ? WEXITSTATUS(st) : -1);
+    report("musl_unix_socket_wakeups", got_a && got_b && WIFEXITED(st) && WEXITSTATUS(st) == 0, why);
+}
+
 int main(void)
 {
     test_fsync();
@@ -615,6 +653,7 @@ int main(void)
     test_futex_queues();
     test_blocking_io();
     test_pipe_write_semantics();
+    test_unix_socket_wakeups();
     printf("MUSL-RUNTIME: %d/%d\n", passed, total);
     return passed == total ? 0 : 1;
 }

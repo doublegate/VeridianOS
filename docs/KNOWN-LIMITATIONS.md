@@ -58,7 +58,7 @@ work. User code is preempted when its slice ends (D3). What is still missing:
   when it waits, so a long system call keeps the CPU until it returns or waits.
 - **Some waits still re-check instead of being woken (blocking step of sprint D).** Sleeps,
   futexes, pipes, eventfd, timerfd, `sigsuspend`, `wait` and job-control stops sleep until woken.
-  `poll`, `epoll_wait` and blocking reads of sockets, ptys, signalfd and other descriptors that
+  `poll`, `epoll_wait` and blocking reads of INET sockets, ptys, signalfd and other descriptors that
   do not report readiness changes yet sleep too but re-check every 10 ms. `select` reports every
   open descriptor as ready. Other waits are still wrong:
   - an empty pty read returns end-of-file, and a write to a full pty fails with EAGAIN instead

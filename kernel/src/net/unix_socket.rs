@@ -183,6 +183,18 @@ static PATH_REGISTRY: Mutex<BTreeMap<String, u64>> = Mutex::new(BTreeMap::new())
 // Socket API
 // ---------------------------------------------------------------------------
 
+/// Reports a readiness change (data, room, a connection, a close) to
+/// blocked readers, writers and pollers when dropped. Declared first in a
+/// function, it drops last, after the function's own locks.
+struct ReadinessChange;
+
+impl Drop for ReadinessChange {
+    fn drop(&mut self) {
+        #[cfg(feature = "alloc")]
+        crate::sched::dispatch::io_event();
+    }
+}
+
 /// Create a new Unix domain socket.
 ///
 /// Returns the socket ID.
@@ -241,6 +253,7 @@ pub fn socket_bind(socket_id: u64, path: &str) -> KernelResult<()> {
 
 /// Start listening for incoming connections (stream sockets only).
 pub fn socket_listen(socket_id: u64, backlog: usize) -> KernelResult<()> {
+    let _changed = ReadinessChange;
     let mut sockets = UNIX_SOCKETS.lock();
     let socket = sockets.get_mut(&socket_id).ok_or(KernelError::NotFound {
         resource: "unix_socket",
@@ -271,6 +284,7 @@ pub fn socket_listen(socket_id: u64, backlog: usize) -> KernelResult<()> {
 /// Returns Ok(()) on success. The connection is immediately established
 /// (no three-way handshake for local sockets).
 pub fn socket_connect(socket_id: u64, path: &str) -> KernelResult<()> {
+    let _changed = ReadinessChange;
     // Find the target socket by path.
     let target_id = {
         let paths = PATH_REGISTRY.lock();
@@ -324,6 +338,7 @@ pub fn socket_connect(socket_id: u64, path: &str) -> KernelResult<()> {
 /// Creates a new connected socket and returns its ID along with the
 /// connecting socket's ID.
 pub fn socket_accept(listen_socket_id: u64) -> KernelResult<(u64, u64)> {
+    let _changed = ReadinessChange;
     let mut sockets = UNIX_SOCKETS.lock();
 
     let listen = sockets
@@ -365,6 +380,7 @@ pub fn socket_accept(listen_socket_id: u64) -> KernelResult<(u64, u64)> {
 
 /// Send data on a connected socket.
 pub fn socket_send(socket_id: u64, data: &[u8], rights: Option<ScmRights>) -> KernelResult<usize> {
+    let _changed = ReadinessChange;
     let sockets = UNIX_SOCKETS.lock();
     let socket = sockets.get(&socket_id).ok_or(KernelError::NotFound {
         resource: "unix_socket",
@@ -433,24 +449,37 @@ pub fn socket_send(socket_id: u64, data: &[u8], rights: Option<ScmRights>) -> Ke
 ///
 /// Returns the number of bytes received and optional SCM_RIGHTS data.
 pub fn socket_recv(socket_id: u64, buf: &mut [u8]) -> KernelResult<(usize, Option<ScmRights>)> {
+    let _changed = ReadinessChange;
     let mut sockets = UNIX_SOCKETS.lock();
     let socket = sockets.get_mut(&socket_id).ok_or(KernelError::NotFound {
         resource: "unix_socket",
         id: socket_id,
     })?;
 
-    if socket.shutdown_read {
-        return Ok((0, None)); // EOF
-    }
-
-    let msg = socket
-        .recv_buffer
-        .pop_front()
-        .ok_or(KernelError::WouldBlock)?;
+    // Data the peer sent before it closed is still read; end-of-file
+    // comes once it is drained (it used to be discarded).
+    let Some(mut msg) = socket.recv_buffer.pop_front() else {
+        return if socket.shutdown_read {
+            Ok((0, None)) // EOF
+        } else {
+            Err(KernelError::WouldBlock)
+        };
+    };
 
     let copy_len = buf.len().min(msg.data.len());
     buf[..copy_len].copy_from_slice(&msg.data[..copy_len]);
     socket.recv_buffer_used = socket.recv_buffer_used.saturating_sub(msg.charge());
+    // A stream is bytes, not messages: what did not fit stays queued for
+    // the next read (it used to be dropped). A datagram is truncated.
+    if socket.socket_type == UnixSocketType::Stream && copy_len < msg.data.len() {
+        let rest = UnixMessage {
+            data: msg.data.split_off(copy_len),
+            rights: None,
+            sender: msg.sender,
+        };
+        socket.recv_buffer_used += rest.charge();
+        socket.recv_buffer.push_front(rest);
+    }
 
     // The files are returned to the caller, so they are released (if
     // unused) after this lock is dropped.
@@ -486,6 +515,7 @@ pub fn socketpair(socket_type: UnixSocketType, owner_pid: u64) -> KernelResult<(
 
 /// Close a Unix socket.
 pub fn socket_close(socket_id: u64) -> KernelResult<()> {
+    let _changed = ReadinessChange;
     let mut sockets = UNIX_SOCKETS.lock();
 
     let removed = sockets.remove(&socket_id);
@@ -515,6 +545,7 @@ pub fn socket_close(socket_id: u64) -> KernelResult<()> {
 
 /// Send a datagram to a named socket (connectionless).
 pub fn socket_sendto(socket_id: u64, data: &[u8], dest_path: &str) -> KernelResult<usize> {
+    let _changed = ReadinessChange;
     if data.len() > UNIX_DGRAM_MAX {
         return Err(KernelError::InvalidArgument {
             name: "data",
@@ -645,5 +676,42 @@ mod tests {
         assert!(matches!(socket_recv(b, &mut buf), Ok((0, None))));
         socket_close(a).unwrap();
         socket_close(b).unwrap();
+    }
+
+    /// Data sent before the peer closed is read before end-of-file.
+    #[test]
+    fn data_before_close_is_read_before_eof() {
+        let (a, b) = socketpair(UnixSocketType::Stream, 1).unwrap();
+        assert_eq!(socket_send(a, b"bye", None), Ok(3));
+        socket_close(a).unwrap();
+        let mut buf = [0u8; 8];
+        assert!(matches!(socket_recv(b, &mut buf), Ok((3, None))));
+        assert_eq!(&buf[..3], b"bye");
+        assert!(matches!(socket_recv(b, &mut buf), Ok((0, None))));
+        socket_close(b).unwrap();
+    }
+
+    /// A short stream read leaves the rest queued; a datagram is cut.
+    #[test]
+    fn short_reads_keep_stream_bytes_and_cut_datagrams() {
+        let (a, b) = socketpair(UnixSocketType::Stream, 1).unwrap();
+        socket_send(a, b"abcdef", None).unwrap();
+        let mut two = [0u8; 2];
+        assert!(matches!(socket_recv(b, &mut two), Ok((2, None))));
+        let mut rest = [0u8; 8];
+        assert!(matches!(socket_recv(b, &mut rest), Ok((4, None))));
+        assert_eq!(&rest[..4], b"cdef");
+        socket_close(a).unwrap();
+        socket_close(b).unwrap();
+
+        let (c, d) = socketpair(UnixSocketType::Datagram, 1).unwrap();
+        socket_send(c, b"abcdef", None).unwrap();
+        assert!(matches!(socket_recv(d, &mut two), Ok((2, None))));
+        assert!(matches!(
+            socket_recv(d, &mut rest),
+            Err(KernelError::WouldBlock)
+        ));
+        socket_close(c).unwrap();
+        socket_close(d).unwrap();
     }
 }

@@ -146,6 +146,11 @@ impl VfsNode for SocketNode {
         }
     }
 
+    fn wakes_io_waiters(&self) -> bool {
+        // Unix sockets report every change; INET sockets do not yet.
+        matches!(self.handle, SocketHandle::Unix(_))
+    }
+
     fn as_any(&self) -> Option<&dyn core::any::Any> {
         Some(self)
     }

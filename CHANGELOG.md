@@ -212,6 +212,13 @@
 
 ### Fixed
 
+- **Unix socket reads lost data.** Data the peer sent just before closing was discarded (a read
+  returned end-of-file while it was still queued), and a stream read into a buffer smaller than
+  a queued message dropped the rest of the message. Buffered data is now read before end-of-file,
+  and a short stream read leaves the remainder queued (datagrams are still truncated). Unix
+  sockets also report every readiness change, so blocked reads and `poll` wake at once. Host
+  tests `data_before_close_is_read_before_eof` and
+  `short_reads_keep_stream_bytes_and_cut_datagrams`; musl runtime test `musl_unix_socket_wakeups`.
 - **Pipe writes were short and could interleave.** A blocking write to a pipe, socket or terminal
   returned as soon as the buffer filled, with however much had fit; it now waits until all of it
   is written (a signal or a closed reader returns the count so far). Writes of up to PIPE_BUF

@@ -100,7 +100,8 @@ What does not work yet: `docs/KNOWN-LIMITATIONS.md`.
       clock_nanosleep/sigsuspend/timerfd/futex/pipe/eventfd/poll/epoll, futex requeue and shared
       keys, N-104, file-table lock after lookup and stream position lock (N-118 part), sleeping
       address-space lock (N-138), whole blocking writes and PIPE_BUF atomicity. Open:
-      BlockFS/console locks over I/O, readiness wakeups for sockets/ptys.
+      BlockFS/console locks over I/O, readiness wakeups for INET sockets and ptys (Unix
+      sockets done).
     - [ ] D3: timer preemption of ring 3 (done: `dispatch::preempt_user` on trap and syscall
       exit; kill acted on in every dispatched wait); device IRQs on the kernel stack (done, ADR 0008);
       signal delivery with rt_sigframe/restorer, per-thread mask/pending, ignored dropped, Linux
