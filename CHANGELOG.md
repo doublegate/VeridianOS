@@ -189,6 +189,11 @@
 
 ### Security
 
+- **A directory fd can no longer act on a different directory.** `fchdir` and `*at` calls
+  checked the fd's directory but resolved the path it was opened by, so after that directory was
+  renamed and another created at its old name they acted on the newcomer. The recorded path must
+  now still name the same directory (ENOENT otherwise). Found by the automated security review;
+  runtime test `fchdir_never_enters_a_replacement`.
 - **The native libc inflater overflowed a stack array on crafted streams.** A dynamic Huffman
   block may declare 288 length and 32 distance codes, though only 286 and 30 exist; the 320 code
   lengths were written into a 316-entry array. A crafted zlib stream, or a PNG carrying one,

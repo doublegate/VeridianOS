@@ -1764,6 +1764,25 @@ static void test_credentials_and_paths(void)
     }
     report_child("fchdir_changes_directory", pid);
 
+    /* A directory renamed after it was opened, with another created at its
+     * old name: fchdir must never land in the newcomer (the fd's recorded
+     * path no longer names its directory; this fails closed with ENOENT). */
+    pid = fork();
+    if (pid == 0) {
+        char buf[64];
+        rmdir("/tmp/audit_swap");
+        rmdir("/tmp/audit_swap_moved");
+        if (mkdir("/tmp/audit_swap", 0755) != 0) _exit(100);
+        int dfd = open("/tmp/audit_swap", O_RDONLY | O_DIRECTORY);
+        if (dfd < 0 || rename("/tmp/audit_swap", "/tmp/audit_swap_moved") != 0 ||
+            mkdir("/tmp/audit_swap", 0755) != 0)
+            _exit(101);
+        if (fchdir(dfd) == 0 && getcwd(buf, sizeof(buf)) && strcmp(buf, "/tmp/audit_swap") == 0)
+            _exit(1);
+        _exit(0);
+    }
+    report_child("fchdir_never_enters_a_replacement", pid);
+
     /* utimensat / futimens: explicit times, UTIME_OMIT, and EPERM for a
      * non-owner setting explicit times (they did nothing). */
     write_file("/tmp/audit_times", "t", 0666);

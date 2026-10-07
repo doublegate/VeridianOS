@@ -1299,18 +1299,55 @@ pub fn sys_utimensat(
     Ok(0)
 }
 
+/// The fd's recorded path, as seen from the caller's root, provided it
+/// still names the object the fd refers to. Files are reached by path
+/// strings (N-115), so a directory renamed after it was opened, with
+/// another put at its old name, would otherwise let `fchdir` or an `*at`
+/// call check one directory and act on the other; that case is ENOENT.
+fn fd_directory_path(file: &crate::fs::file::File) -> Result<alloc::string::String, SyscallError> {
+    if file.node.node_type() != crate::fs::NodeType::Directory {
+        return Err(SyscallError::NotADirectory);
+    }
+    let global = file.path.as_deref().ok_or(SyscallError::NotADirectory)?;
+    let vfs = vfs()?;
+    let root = vfs.get_root();
+    let path = crate::fs::root_relative(global, &root);
+    let (now, canonical) = vfs
+        .resolve_canonical(&path, "/", true)
+        .map_err(|_| SyscallError::ResourceNotFound)?;
+    let same = canonical == global
+        && now.node_type() == crate::fs::NodeType::Directory
+        && match (now.metadata(), file.node.metadata()) {
+            (Ok(a), Ok(b)) => a.inode == b.inode,
+            _ => false,
+        };
+    if same {
+        Ok(path)
+    } else {
+        Err(SyscallError::ResourceNotFound)
+    }
+}
+
 /// fchdir: change to the directory an open fd refers to (N-250).
 pub fn sys_fchdir(fd: usize) -> SyscallResult {
     let thread = process::current_thread().ok_or(SyscallError::InvalidState)?;
     let proc = process::current_process().ok_or(SyscallError::InvalidState)?;
-    let (node, path) = {
-        let table = proc.file_table.lock();
-        let file = table
-            .get(fd as u32 as usize)
-            .ok_or(SyscallError::BadFileDescriptor)?;
-        (file.node.clone(), file.path.clone())
+    let file = proc
+        .file_table
+        .lock()
+        .get(fd as u32 as usize)
+        .ok_or(SyscallError::BadFileDescriptor)?;
+    let (node, path) = (file.node.clone(), fd_directory_path(&file)?);
+    // `path` is relative to the root; enter_directory wants the whole-tree
+    // path it maps back.
+    let root = vfs()?.get_root();
+    let path = if root == "/" {
+        path
+    } else if path == "/" {
+        root
+    } else {
+        alloc::format!("{}{}", root, path)
     };
-    let path = path.ok_or(SyscallError::NotADirectory)?;
     #[cfg(not(feature = "alloc"))]
     {
         let _ = (thread, node, path);
@@ -2995,15 +3032,13 @@ pub(crate) fn resolve_at_path(
         // Relative to the directory the fd refers to: EBADF if it is not
         // open, ENOTDIR if it is not a directory (N-204).
         let proc = process::current_process().ok_or(SyscallError::InvalidState)?;
-        let file_table = proc.file_table.lock();
-        let file = file_table
+        // The table lock is not held across the path lookup.
+        let file = proc
+            .file_table
+            .lock()
             .get(dirfd as u32 as usize)
             .ok_or(SyscallError::BadFileDescriptor)?;
-        if file.node.node_type() != crate::fs::NodeType::Directory {
-            return Err(SyscallError::NotADirectory);
-        }
-        let global = file.path.as_deref().ok_or(SyscallError::NotADirectory)?;
-        let dir_path = crate::fs::root_relative(global, &vfs()?.get_root());
+        let dir_path = fd_directory_path(&file)?;
 
         if dir_path.ends_with('/') {
             Ok(alloc::format!("{}{}", dir_path, path))

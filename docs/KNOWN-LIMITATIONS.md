@@ -135,9 +135,10 @@ What remains:
 
 ### Processes, exec and credentials
 
-- **Directory fds are paths (N-115 remainder).** `*at()` calls resolve their directory fd
-  through a path string rather than the open directory, so a directory renamed after it was
-  opened is looked up by its old name.
+- **Directory fds are paths (N-115 remainder).** `*at()` calls and `fchdir` reach their
+  directory fd through the canonical path recorded at open, not the open directory. If the
+  directory is renamed afterwards they fail with ENOENT (where Linux would still use it); they
+  never act on a different directory that now has the old name.
 - **exec (N-101 remainder):** a multithreaded process cannot exec (EAGAIN, above). Fork children
   are runnable before setup completes (N-110).
 - **Credentials (N-131 remainder, planned v0.30):** real, effective and saved IDs and
