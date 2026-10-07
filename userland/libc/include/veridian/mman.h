@@ -45,6 +45,9 @@ extern "C" {
 /** Alias for MAP_ANONYMOUS */
 #define MAP_ANON        MAP_ANONYMOUS
 
+/** Back an anonymous mapping with 2 MiB pages (Linux value) */
+#define MAP_HUGETLB     0x40000
+
 /* ========================================================================= */
 /* Return Values                                                             */
 /* ========================================================================= */

@@ -33,6 +33,10 @@
   x86_64 instead of a bump allocator that never reused freed memory. AArch64 follows once its
   MMU is enabled.
 
+- **2 MiB pages (MEM-ARCH-01).** `mmap(MAP_HUGETLB)` backs an anonymous mapping with 2 MiB pages.
+  The old huge-page path wrote the HUGE bit into an L1 entry, where it means PAT, used frames
+  that were not 2 MiB aligned, and leaked 511 of every 512 frames on unmap.
+
 ### Changed
 
 - The AArch64 kernel is linked at 0x40200000 (was 0x40080000), so QEMU has room to load the

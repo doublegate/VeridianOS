@@ -39,6 +39,8 @@ pub const MAP_PRIVATE: usize = 0x02;
 pub const MAP_FIXED: usize = 0x10;
 /// The mapping is not backed by any file (zero-filled).
 pub const MAP_ANONYMOUS: usize = 0x20;
+/// Back an anonymous mapping with 2 MiB pages (Linux value).
+pub const MAP_HUGETLB: usize = 0x40000;
 
 /// Sentinel value indicating a failed mapping.
 pub const MAP_FAILED: usize = usize::MAX;
@@ -180,6 +182,13 @@ pub fn sys_mmap(
             .map_region(VirtualAddress(addr as u64), length, mapping_type)
             .map_err(|_| SyscallError::OutOfMemory)?;
         addr
+    } else if is_anonymous && flags & MAP_HUGETLB != 0 {
+        // 2 MiB pages (MEM-ARCH-01): a 2 MiB-aligned address, the length
+        // rounded up to 2 MiB.
+        memory_space
+            .mmap_huge(length, mapping_type)
+            .map_err(|_| SyscallError::OutOfMemory)?
+            .as_usize()
     } else {
         // Kernel-chosen address: use VAS.mmap() which bumps next_mmap_addr
         let vaddr = memory_space

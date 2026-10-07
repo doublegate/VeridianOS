@@ -390,14 +390,15 @@ impl PageMapper {
         }
     }
 
-    /// Map a page to a frame
-    pub fn map_page(
+    /// Walk to the L2 entry for `page`, creating the L3 and L2 tables if
+    /// needed (with USER on the intermediate entries for a user mapping).
+    /// Refuses to descend through a 1 GiB leaf.
+    fn l2_entry_for(
         &mut self,
         page: VirtualAddress,
-        frame: FrameNumber,
         flags: PageFlags,
         allocator: &mut impl FrameAllocator,
-    ) -> Result<(), KernelError> {
+    ) -> Result<*mut PageTableEntry, KernelError> {
         let breakdown = VirtualAddressBreakdown::new(page);
 
         // Get L4 table
@@ -452,6 +453,13 @@ impl PageMapper {
             unsafe { &mut *(super::phys_to_virt_addr(l3_phys.as_u64()) as *mut PageTable) };
         let l3_entry = &mut l3_table[breakdown.l3_index];
 
+        if l3_entry.is_present() && l3_entry.flags().contains(PageFlags::HUGE) {
+            return Err(KernelError::AlreadyExists {
+                resource: "page mapping (1 GiB page)",
+                id: page.as_u64(),
+            });
+        }
+
         // Get or create L2 table
         if !l3_entry.is_present() {
             let frame =
@@ -482,7 +490,85 @@ impl PageMapper {
         // identity-mapped region.
         let l2_table =
             unsafe { &mut *(super::phys_to_virt_addr(l2_phys.as_u64()) as *mut PageTable) };
-        let l2_entry = &mut l2_table[breakdown.l2_index];
+        Ok(&mut l2_table[breakdown.l2_index] as *mut PageTableEntry)
+    }
+
+    /// Map a 2 MiB page: an L2 leaf (HUGE) for the 512 frames starting at
+    /// `frame`. `page` and `frame` must be 2 MiB aligned (MEM-ARCH-01).
+    pub fn map_huge_2m(
+        &mut self,
+        page: VirtualAddress,
+        frame: FrameNumber,
+        flags: PageFlags,
+        allocator: &mut impl FrameAllocator,
+    ) -> Result<(), KernelError> {
+        if page.as_u64() & 0x1F_FFFF != 0 || frame.as_u64() & 0x1FF != 0 {
+            return Err(KernelError::InvalidArgument {
+                name: "huge page",
+                value: "address or frame not 2 MiB aligned",
+            });
+        }
+        // SAFETY: the pointer is to an entry of a live page table reached
+        // through the physical map; this mapper has exclusive access.
+        let l2_entry = unsafe { &mut *self.l2_entry_for(page, flags, allocator)? };
+        if l2_entry.is_present() {
+            return Err(KernelError::AlreadyExists {
+                resource: "page mapping",
+                id: page.as_u64(),
+            });
+        }
+        l2_entry.set(frame, flags | PageFlags::HUGE | PageFlags::PRESENT);
+        Ok(())
+    }
+
+    /// Unmap a 2 MiB page installed by [`Self::map_huge_2m`]; returns its
+    /// first frame. The caller flushes the TLB on every CPU.
+    pub fn unmap_huge_2m(&mut self, page: VirtualAddress) -> Result<FrameNumber, KernelError> {
+        let breakdown = VirtualAddressBreakdown::new(page);
+        // SAFETY: as in translate_page; exclusive access per PageMapper::new.
+        let l4_table = unsafe { &*self.l4_table };
+        let l3_phys = l3_phys_from_entry(&l4_table[breakdown.l4_index], page)?;
+        // SAFETY: a present L4 entry's table, through the physical map.
+        let l3_table = unsafe { &*(super::phys_to_virt_addr(l3_phys) as *const PageTable) };
+        let l2_phys = l3_phys_from_entry(&l3_table[breakdown.l3_index], page)?;
+        // SAFETY: a present L3 entry's table, through the physical map.
+        let l2_table = unsafe { &mut *(super::phys_to_virt_addr(l2_phys) as *mut PageTable) };
+        let entry = &mut l2_table[breakdown.l2_index];
+        if !entry.is_present() || !entry.flags().contains(PageFlags::HUGE) {
+            return Err(KernelError::UnmappedMemory {
+                addr: page.as_u64() as usize,
+            });
+        }
+        let frame = entry.frame().ok_or(KernelError::UnmappedMemory {
+            addr: page.as_u64() as usize,
+        })?;
+        entry.clear();
+        Ok(frame)
+    }
+
+    /// Map a page to a frame
+    pub fn map_page(
+        &mut self,
+        page: VirtualAddress,
+        frame: FrameNumber,
+        flags: PageFlags,
+        allocator: &mut impl FrameAllocator,
+    ) -> Result<(), KernelError> {
+        let breakdown = VirtualAddressBreakdown::new(page);
+        let intermediate_flags = if flags.contains(PageFlags::USER) {
+            PageFlags::PRESENT | PageFlags::WRITABLE | PageFlags::USER
+        } else {
+            PageFlags::PRESENT | PageFlags::WRITABLE
+        };
+        // SAFETY: the pointer is to an entry of a live page table reached
+        // through the physical map; this mapper has exclusive access.
+        let l2_entry = unsafe { &mut *self.l2_entry_for(page, flags, allocator)? };
+        if l2_entry.is_present() && l2_entry.flags().contains(PageFlags::HUGE) {
+            return Err(KernelError::AlreadyExists {
+                resource: "page mapping (2 MiB page)",
+                id: page.as_u64(),
+            });
+        }
 
         // Get or create L1 table
         if !l2_entry.is_present() {
@@ -577,6 +663,16 @@ impl PageMapper {
                 addr: page.as_u64() as usize,
             });
         }
+        // A 2 MiB leaf: the 4 KiB frame within it (flags keep HUGE).
+        if l2_entry.flags().contains(PageFlags::HUGE) {
+            let base = l2_entry.frame().ok_or(KernelError::UnmappedMemory {
+                addr: page.as_u64() as usize,
+            })?;
+            return Ok((
+                FrameNumber::new(base.as_u64() + (page.as_u64() >> 12 & 0x1FF)),
+                l2_entry.flags(),
+            ));
+        }
 
         let l1_phys = l2_entry.addr().ok_or(KernelError::InvalidState {
             expected: "L2 entry has address",
@@ -634,6 +730,14 @@ impl PageMapper {
         if !l2_entry.is_present() {
             return Err(KernelError::UnmappedMemory {
                 addr: page.as_u64() as usize,
+            });
+        }
+        if l2_entry.flags().contains(PageFlags::HUGE) {
+            // A 2 MiB leaf has no L1 table below it; treating the data page
+            // as one would rewrite user memory.
+            return Err(KernelError::InvalidArgument {
+                name: "page",
+                value: "inside a 2 MiB page",
             });
         }
 
@@ -697,6 +801,13 @@ impl PageMapper {
         if !l2_entry.is_present() {
             return Err(KernelError::UnmappedMemory {
                 addr: page.as_u64() as usize,
+            });
+        }
+        if l2_entry.flags().contains(PageFlags::HUGE) {
+            // Part of a 2 MiB page: unmapped whole, by unmap_huge_2m.
+            return Err(KernelError::InvalidArgument {
+                name: "page",
+                value: "inside a 2 MiB page",
             });
         }
 

@@ -132,6 +132,58 @@ static void test_cow(void)
     free(heap);
 }
 
+/* --- 2 MiB pages through mmap(MAP_HUGETLB) (MEM-ARCH-01). -------------
+ * Map 4 MiB, use every 2 MiB page, check fork gives the child its own
+ * copy, and that munmap returns all 1024 frames (MemFree is back). */
+static long mem_free_kb(void)
+{
+    char info[1024];
+    int fd = open("/proc/meminfo", O_RDONLY);
+    if (fd < 0)
+        return -1;
+    ssize_t n = read(fd, info, sizeof(info) - 1);
+    close(fd);
+    if (n <= 0)
+        return -1;
+    info[n] = 0;
+    const char *m = strstr(info, "MemFree:");
+    return m ? atol(m + 8) : -1;
+}
+
+static void test_huge_pages(void)
+{
+    const size_t len = 4u << 20;
+    long before = mem_free_kb();
+    unsigned char *p = mmap(NULL, len, PROT_READ | PROT_WRITE,
+                            MAP_PRIVATE | MAP_ANONYMOUS | MAP_HUGETLB, -1, 0);
+    if (p == MAP_FAILED) {
+        report("mmap_huge_pages", 0, "mmap(MAP_HUGETLB) failed");
+        return;
+    }
+    int ok = ((unsigned long)p & ((2u << 20) - 1)) == 0;
+    for (size_t off = 0; off < len; off += 4096)
+        p[off] = (unsigned char)(off >> 12);
+    for (size_t off = 0; off < len; off += 4096)
+        ok = ok && p[off] == (unsigned char)(off >> 12);
+    int zero_ok = p[1] == 0 && p[len - 1] == 0;
+    pid_t pid = fork();
+    if (pid == 0) {
+        p[0] = 0xAA;
+        _exit(p[4096] == 1 && p[0] == 0xAA ? 0 : 1);
+    }
+    int status = 0;
+    int child_ok = pid > 0 && waitpid(pid, &status, 0) == pid && WIFEXITED(status) &&
+                   WEXITSTATUS(status) == 0;
+    int parent_ok = p[0] == 0;
+    int unmap_ok = munmap(p, len) == 0;
+    long after = mem_free_kb();
+    int freed_ok = before > 0 && after >= before - 64; /* small slack for tables */
+    static char why[128];
+    snprintf(why, sizeof(why), "aligned+rw %d zero %d child %d parent %d unmap %d free %ld -> %ld kB",
+             ok, zero_ok, child_ok, parent_ok, unmap_ok, before, after);
+    report("mmap_huge_pages", ok && zero_ok && child_ok && parent_ok && unmap_ok && freed_ok, why);
+}
+
 /* --- Joinable and detached thread exit (PROC-SEC-02). ------------------ */
 static void *thread_ret(void *arg)
 {
@@ -790,6 +842,7 @@ int main(int argc, char **argv)
     }
     test_fork_exit();
     test_cow();
+    test_huge_pages();
     test_rename();
     test_nonroot_permissions();
     test_sticky_dir();

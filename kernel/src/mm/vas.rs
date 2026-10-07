@@ -67,6 +67,26 @@ pub unsafe fn create_mapper_from_root_pub(page_table_root: u64) -> PageMapper {
     unsafe { create_mapper_from_root(page_table_root) }
 }
 
+/// Size of a huge page.
+const HUGE_PAGE_SIZE: u64 = 2 * 1024 * 1024;
+
+/// Remove the translations of `mapping`: one L2 leaf per 2 MiB page for a
+/// huge mapping (`PageFlags::HUGE`), each 4 KiB page otherwise. Pages that
+/// were never installed are skipped, as the callers always did.
+fn unmap_mapping_pages(mapper: &mut PageMapper, mapping: &VirtualMapping) {
+    if mapping.flags.contains(PageFlags::HUGE) {
+        let mut addr = mapping.start.0;
+        while addr < mapping.start.0 + mapping.size as u64 {
+            let _ = mapper.unmap_huge_2m(VirtualAddress(addr));
+            addr += HUGE_PAGE_SIZE;
+        }
+    } else {
+        for i in 0..mapping.size / 4096 {
+            let _ = mapper.unmap_page(VirtualAddress(mapping.start.0 + (i as u64) * 4096));
+        }
+    }
+}
+
 /// Whether `virt` is mapped in the hierarchy rooted at `root`, counting a
 /// 1 GiB or 2 MiB leaf as mapped. (`PageMapper` does not understand huge
 /// pages, which the bootloader's direct map uses.)
@@ -830,6 +850,48 @@ impl VirtualAddressSpace {
                 // Every frame gains an owner here, so whichever side releases
                 // it last frees it.
                 let _ = num_pages;
+
+                // Huge pages are not shared copy-on-write (ADR 0005): the
+                // child gets its own 2 MiB copy.
+                if mapping.flags.contains(PageFlags::HUGE) {
+                    let mut child_mapping = mapping.clone();
+                    child_mapping.physical_frames.clear();
+                    child_mappings.insert(*addr, child_mapping.clone());
+                    let Some(&src) = mapping.physical_frames.first() else {
+                        continue;
+                    };
+                    let copy = FRAME_ALLOCATOR
+                        .lock()
+                        .allocate_frames(mapping.physical_frames.len(), None)
+                        .map_err(|_| KernelError::OutOfMemory {
+                            requested: mapping.size,
+                            available: 0,
+                        })?;
+                    // Recorded first, so a failure below is torn down by
+                    // clone_from like any partial copy.
+                    child_mapping.physical_frames = (0..mapping.physical_frames.len() as u64)
+                        .map(|i| FrameNumber::new(copy.as_u64() + i))
+                        .collect();
+                    child_mappings.insert(*addr, child_mapping);
+                    if copy.as_u64() % 512 != 0 {
+                        return Err(KernelError::OutOfMemory {
+                            requested: mapping.size,
+                            available: 0,
+                        });
+                    }
+                    // SAFETY: both 2 MiB ranges are RAM in the physical map;
+                    // `copy` was just allocated and is not mapped anywhere.
+                    unsafe {
+                        core::ptr::copy_nonoverlapping(
+                            super::phys_to_virt_addr(src.as_u64() << 12) as *const u8,
+                            super::phys_to_virt_addr(copy.as_u64() << 12) as *mut u8,
+                            mapping.size,
+                        );
+                    }
+                    child_mapper.map_huge_2m(mapping.start, copy, mapping.flags, &mut alloc)?;
+                    continue;
+                }
+
                 let mut child_mapping = mapping.clone();
                 child_mapping.physical_frames = mapping.physical_frames.clone();
                 for &frame in &child_mapping.physical_frames {
@@ -907,11 +969,7 @@ impl VirtualAddressSpace {
                 let mut mapper = unsafe { create_mapper_from_root(pt_root) };
 
                 for (_, mapping) in mappings.iter() {
-                    let num_pages = mapping.size / 4096;
-                    for i in 0..num_pages {
-                        let vaddr = VirtualAddress(mapping.start.0 + (i as u64) * 4096);
-                        let _ = mapper.unmap_page(vaddr);
-                    }
+                    unmap_mapping_pages(&mut mapper, mapping);
                 }
             }
 
@@ -1251,13 +1309,10 @@ impl VirtualAddressSpace {
             // ensuring exclusive page table modification for this VAS.
             let mut mapper = unsafe { create_mapper_from_root(pt_root) };
 
-            for i in 0..num_pages {
-                let vaddr = VirtualAddress(mapping.start.0 + (i as u64) * 4096);
-                // Ignore errors from unmap_page -- the page may not have been
-                // installed in the hardware table (e.g., if map_region was
-                // called before the page table root was set).
-                let _ = mapper.unmap_page(vaddr);
-            }
+            // Errors are ignored: a page may not have been installed in the
+            // hardware table (e.g., if map_region was called before the page
+            // table root was set).
+            unmap_mapping_pages(&mut mapper, &mapping);
         }
 
         // Flush TLB for the unmapped range using batched flushes
@@ -1349,6 +1404,19 @@ impl VirtualAddressSpace {
             }
         };
 
+        // A 2 MiB page is unmapped whole; splitting one is not supported.
+        if mappings
+            .get(&containing_key)
+            .is_some_and(|m| m.flags.contains(PageFlags::HUGE))
+            && (unmap_start != containing_key.0
+                || unmap_size as u64 != mappings[&containing_key].size as u64)
+        {
+            return Err(KernelError::InvalidArgument {
+                name: "munmap range",
+                value: "part of a huge-page mapping",
+            });
+        }
+
         // Remove the containing mapping from BTreeMap
         let mapping = mappings
             .remove(&containing_key)
@@ -1368,9 +1436,14 @@ impl VirtualAddressSpace {
         if pt_root != 0 {
             // SAFETY: pt_root is a valid L4 page table address set during VAS::init().
             let mut mapper = unsafe { create_mapper_from_root(pt_root) };
-            for i in unmap_page_start..unmap_page_end {
-                let vaddr = VirtualAddress(m_start + (i as u64) * 4096);
-                let _ = mapper.unmap_page(vaddr);
+            if mapping.flags.contains(PageFlags::HUGE) {
+                // Only whole huge mappings get here (checked above).
+                unmap_mapping_pages(&mut mapper, &mapping);
+            } else {
+                for i in unmap_page_start..unmap_page_end {
+                    let vaddr = VirtualAddress(m_start + (i as u64) * 4096);
+                    let _ = mapper.unmap_page(vaddr);
+                }
             }
         }
 
@@ -1853,11 +1926,7 @@ impl VirtualAddressSpace {
                 let mut mapper = unsafe { create_mapper_from_root(pt_root) };
 
                 for (_, mapping) in mappings.iter() {
-                    let num_pages = mapping.size / 4096;
-                    for i in 0..num_pages {
-                        let vaddr = VirtualAddress(mapping.start.0 + (i as u64) * 4096);
-                        let _ = mapper.unmap_page(vaddr);
-                    }
+                    unmap_mapping_pages(&mut mapper, mapping);
                 }
             }
 
@@ -1936,11 +2005,7 @@ impl VirtualAddressSpace {
 
                 for addr in &to_remove {
                     if let Some(mapping) = mappings.get(addr) {
-                        let num_pages = mapping.size / 4096;
-                        for i in 0..num_pages {
-                            let vaddr = VirtualAddress(mapping.start.0 + (i as u64) * 4096);
-                            let _ = mapper.unmap_page(vaddr);
-                        }
+                        unmap_mapping_pages(&mut mapper, mapping);
                     }
                 }
             }
@@ -2091,58 +2156,143 @@ impl VirtualAddressSpace {
     /// for large contiguous allocations (heap, framebuffer, DMA).
     ///
     /// The virtual address must be 2MB-aligned.
-    pub fn map_huge_page(&mut self, vaddr: usize, flags: PageFlags) -> Result<(), KernelError> {
-        const HUGE_PAGE_SIZE: usize = 2 * 1024 * 1024; // 2MB
-        const HUGE_PAGE_FRAMES: usize = HUGE_PAGE_SIZE / 4096; // 512
+    pub fn map_huge_page(&self, vaddr: usize, flags: PageFlags) -> Result<(), KernelError> {
+        self.map_huge_region(vaddr, HUGE_PAGE_SIZE as usize, flags, MappingType::Data)
+    }
 
-        if vaddr & (HUGE_PAGE_SIZE - 1) != 0 {
+    /// Map `size` bytes (a multiple of 2 MiB) at the 2 MiB-aligned `vaddr`
+    /// as huge pages (MEM-ARCH-01): each 2 MiB is an L2 leaf over 512
+    /// contiguous, 2 MiB-aligned, zeroed frames. One mapping records every
+    /// frame (so the per-frame free paths release all of them) and carries
+    /// `PageFlags::HUGE` (so unmapping removes the leaves).
+    pub fn map_huge_region(
+        &self,
+        vaddr: usize,
+        size: usize,
+        flags: PageFlags,
+        mapping_type: MappingType,
+    ) -> Result<(), KernelError> {
+        const HUGE_PAGE_FRAMES: usize = (HUGE_PAGE_SIZE / 4096) as usize; // 512
+
+        if vaddr as u64 & (HUGE_PAGE_SIZE - 1) != 0
+            || size == 0
+            || size as u64 & (HUGE_PAGE_SIZE - 1) != 0
+        {
             return Err(KernelError::InvalidArgument {
-                name: "vaddr",
-                value: "not 2MB aligned for huge page",
+                name: "huge page region",
+                value: "address or size not a multiple of 2 MiB",
             });
         }
-
-        // Allocate 512 contiguous frames (2MB).
-        let frame = FRAME_ALLOCATOR
-            .lock()
-            .allocate_frames(HUGE_PAGE_FRAMES, None)
-            .map_err(|_| KernelError::OutOfMemory {
-                requested: HUGE_PAGE_SIZE,
-                available: 0,
-            })?;
-
-        // Zero the huge page.
-        let phys_addr = frame.as_u64() * 4096;
-        let virt = crate::mm::phys_to_virt_addr(phys_addr) as *mut u8;
-        // SAFETY: freshly allocated contiguous frames in kernel physical memory window.
-        unsafe {
-            core::ptr::write_bytes(virt, 0, HUGE_PAGE_SIZE);
-        }
-
-        // Install the 2MB mapping with HUGE flag.
-        let huge_flags = PageFlags(flags.0 | PageFlags::HUGE.0);
-        let vaddr_obj = VirtualAddress(vaddr as u64);
-
         let pt_root = self.page_table_root.load(Ordering::Acquire);
-        if pt_root != 0 {
-            // SAFETY: Same as map_page -- pt_root is a valid L4 page table.
-            let mut mapper = unsafe { create_mapper_from_root(pt_root) };
-            let mut alloc = VasFrameAllocator;
-            mapper.map_page(vaddr_obj, frame, huge_flags, &mut alloc)?;
-            crate::mm::tlb::flush_page(vaddr as u64);
+        // SAFETY: Same as map_page -- pt_root is this address space's L4.
+        let mut mapper = (pt_root != 0).then(|| unsafe { create_mapper_from_root(pt_root) });
+
+        let release = |frame: FrameNumber| {
+            let allocator = FRAME_ALLOCATOR.lock();
+            for i in 0..HUGE_PAGE_FRAMES as u64 {
+                let f = FrameNumber::new(frame.as_u64() + i);
+                crate::mm::note_free_failure(allocator.free_frames(f, 1), f, "vas");
+            }
+        };
+
+        let mut chunks: Vec<FrameNumber> = Vec::with_capacity(size / HUGE_PAGE_SIZE as usize);
+        let mut failure = None;
+        for c in 0..size / HUGE_PAGE_SIZE as usize {
+            let chunk_va = VirtualAddress(vaddr as u64 + c as u64 * HUGE_PAGE_SIZE);
+            // 512 frames from the buddy allocator, whose blocks of that size
+            // are 2 MiB aligned (its region starts on a 2 MiB boundary);
+            // checked anyway, since an L2 leaf requires it.
+            let frame = match FRAME_ALLOCATOR
+                .lock()
+                .allocate_frames(HUGE_PAGE_FRAMES, None)
+            {
+                Ok(f) if f.as_u64() % HUGE_PAGE_FRAMES as u64 == 0 => f,
+                Ok(f) => {
+                    release(f);
+                    failure = Some(KernelError::OutOfMemory {
+                        requested: size,
+                        available: 0,
+                    });
+                    break;
+                }
+                Err(_) => {
+                    failure = Some(KernelError::OutOfMemory {
+                        requested: size,
+                        available: 0,
+                    });
+                    break;
+                }
+            };
+            // SAFETY: freshly allocated contiguous frames in the physical map.
+            unsafe {
+                core::ptr::write_bytes(
+                    super::phys_to_virt_addr(frame.as_u64() * 4096) as *mut u8,
+                    0,
+                    HUGE_PAGE_SIZE as usize,
+                );
+            }
+            if let Some(m) = mapper.as_mut() {
+                if let Err(e) = m.map_huge_2m(chunk_va, frame, flags, &mut VasFrameAllocator) {
+                    release(frame);
+                    failure = Some(e);
+                    break;
+                }
+            }
+            chunks.push(frame);
         }
 
-        // Record the mapping.
+        if let Some(e) = failure {
+            // Undo the chunks already mapped.
+            for (c, &frame) in chunks.iter().enumerate() {
+                if let Some(m) = mapper.as_mut() {
+                    let _ =
+                        m.unmap_huge_2m(VirtualAddress(vaddr as u64 + c as u64 * HUGE_PAGE_SIZE));
+                }
+                crate::mm::tlb::flush_all();
+                release(frame);
+            }
+            return Err(e);
+        }
+        crate::mm::tlb::flush_all();
+
         #[cfg(feature = "alloc")]
         {
-            let mut mappings = self.mappings.lock();
-            let mut new_mapping = VirtualMapping::new(vaddr_obj, HUGE_PAGE_SIZE, MappingType::Data);
-            new_mapping.physical_frames.push(frame);
-            new_mapping.flags = huge_flags;
-            mappings.insert(vaddr_obj, new_mapping);
+            let mut new_mapping =
+                VirtualMapping::new(VirtualAddress(vaddr as u64), size, mapping_type);
+            new_mapping.physical_frames = chunks
+                .iter()
+                .flat_map(|f| {
+                    (0..HUGE_PAGE_FRAMES as u64).map(move |i| FrameNumber::new(f.as_u64() + i))
+                })
+                .collect();
+            new_mapping.flags = flags | PageFlags::HUGE;
+            self.mappings
+                .lock()
+                .insert(VirtualAddress(vaddr as u64), new_mapping);
         }
 
         Ok(())
+    }
+
+    /// Like [`Self::mmap`], but backed by 2 MiB pages: `size` is rounded up
+    /// to 2 MiB and the address is 2 MiB aligned (`mmap(MAP_HUGETLB)`).
+    #[cfg(feature = "alloc")]
+    pub fn mmap_huge(
+        &self,
+        size: usize,
+        mapping_type: MappingType,
+    ) -> Result<VirtualAddress, KernelError> {
+        let size = (size as u64).div_ceil(HUGE_PAGE_SIZE) * HUGE_PAGE_SIZE;
+        let base = self
+            .next_mmap_addr
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |next| {
+                Some(next.next_multiple_of(HUGE_PAGE_SIZE) + size)
+            })
+            .map(|prev| prev.next_multiple_of(HUGE_PAGE_SIZE))
+            .unwrap_or(0);
+        let flags = VirtualMapping::new(VirtualAddress(base), 0, mapping_type).flags;
+        self.map_huge_region(base as usize, size as usize, flags, mapping_type)?;
+        Ok(VirtualAddress(base))
     }
 }
 
