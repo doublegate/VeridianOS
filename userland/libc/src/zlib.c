@@ -765,6 +765,12 @@ static int inflate_blocks(struct bit_reader *br,
                 hlit += 257;
                 hdist += 1;
                 hclen += 4;
+                /* The fields can encode 288 and 32, but only 286 length and
+                 * 30 distance codes exist (RFC 1951 3.2.7; zlib: "too many
+                 * length or distance symbols"). Accepting more wrote past
+                 * `lengths`. */
+                if (hlit > 286 || hdist > 30)
+                    return Z_DATA_ERROR;
 
                 memset(cl_lens, 0, sizeof(cl_lens));
                 for (i = 0; i < hclen; i++) {

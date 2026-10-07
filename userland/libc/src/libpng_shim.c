@@ -61,6 +61,42 @@ struct png_info_def {
     int            valid;  /* 1 if IHDR has been read */
 };
 
+/*
+ * Whether IHDR describes an image the PNG specification allows (section
+ * 11.2.2): a known colour type with one of its bit depths, compression and
+ * filter method 0, interlace 0 or 1, and a size of 1 to 2^31 - 1. Any
+ * other header would make the row and pixel arithmetic meaningless.
+ */
+static int ihdr_valid(png_uint_32 width, png_uint_32 height, int bit_depth,
+                      int color_type, int compression, int filter,
+                      int interlace)
+{
+    int ok_depth;
+
+    if (width == 0 || height == 0 || width > 0x7fffffffu ||
+        height > 0x7fffffffu || compression != 0 || filter != 0 ||
+        (interlace != 0 && interlace != 1))
+        return 0;
+    switch (color_type) {
+    case PNG_COLOR_TYPE_GRAY:
+        ok_depth = bit_depth == 1 || bit_depth == 2 || bit_depth == 4 ||
+                   bit_depth == 8 || bit_depth == 16;
+        break;
+    case PNG_COLOR_TYPE_PALETTE:
+        ok_depth = bit_depth == 1 || bit_depth == 2 || bit_depth == 4 ||
+                   bit_depth == 8;
+        break;
+    case PNG_COLOR_TYPE_RGB:
+    case PNG_COLOR_TYPE_GRAY_ALPHA:
+    case PNG_COLOR_TYPE_RGB_ALPHA:
+        ok_depth = bit_depth == 8 || bit_depth == 16;
+        break;
+    default:
+        return 0;
+    }
+    return ok_depth;
+}
+
 /* PNG signature */
 static const unsigned char png_sig[8] = {
     137, 80, 78, 71, 13, 10, 26, 10
@@ -239,6 +275,15 @@ void png_read_info(png_structrp png_ptr, png_inforp info_ptr)
                 info_ptr->compression_type = ihdr[10];
                 info_ptr->filter_type = ihdr[11];
                 info_ptr->interlace_type = ihdr[12];
+                if (!ihdr_valid(info_ptr->width, info_ptr->height,
+                                ihdr[8], ihdr[9], ihdr[10], ihdr[11],
+                                ihdr[12])) {
+                    /* Not an image this decoder (or the spec) knows:
+                     * leave the header invalid so nothing decodes it. */
+                    info_ptr->valid = 0;
+                    png_ptr->have_ihdr = 0;
+                    break;
+                }
 
                 /* Calculate channels and rowbytes */
                 switch (info_ptr->color_type) {

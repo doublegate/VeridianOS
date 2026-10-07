@@ -40,6 +40,8 @@ for ct, depths in [(0,[1,2,4,8,16]),(2,[8,16]),(3,[1,2,4,8]),(4,[8,16]),(6,[8,16
         for il in (0, 1):
             for (w, h) in [(1,1),(5,3),(13,11),(33,9)]:
                 cases.append((ct, d, il, w, h))
+# Headers the spec forbids: the decoder must refuse them (rows untouched).
+invalid = [(0, 3, 0, 8, 4), (2, 4, 0, 8, 4), (5, 8, 0, 8, 4), (6, 8, 2, 8, 4)]
 with open(os.path.join(out, "list.txt"), "w") as L:
     for n, (ct, d, il, w, h) in enumerate(cases):
         bits = CH[ct] * d; bpp = max(1, bits // 8)
@@ -60,8 +62,16 @@ with open(os.path.join(out, "list.txt"), "w") as L:
         png = b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr) + chunk(b"tEXt", b"k\0v") + extra + idats + chunk(b"IEND", b"")
         open(os.path.join(out, f"{n}.png"), "wb").write(png)
         open(os.path.join(out, f"{n}.raw"), "wb").write(b"".join(pack(r, bits) for r in img))
-        L.write(f"{n} {ct} {d} {il} {w} {h}\n")
-print(len(cases), "cases")
+        L.write(f"{n} {ct} {d} {il} {w} {h} 1\n")
+    for k, (ct, d, il, w, h) in enumerate(invalid):
+        n = len(cases) + k
+        raw = bytes(h * (1 + w * 8))
+        z = zlib.compress(raw)
+        ihdr = struct.pack(">IIBBBBB", w, h, d, ct, 0, 0, il)
+        png = b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr) + chunk(b"IDAT", z) + chunk(b"IEND", b"")
+        open(os.path.join(out, f"{n}.png"), "wb").write(png)
+        L.write(f"{n} {ct} {d} {il} {w} {h} 0\n")
+print(len(cases) + len(invalid), "cases")
 PY
 cat > "$work/t.c" <<'C'
 #include <stdio.h>
@@ -70,13 +80,26 @@ cat > "$work/t.c" <<'C'
 #include <png.h>
 static void rd(png_structp p, png_bytep b, size_t n) { if (fread(b, 1, n, (FILE *)png_get_io_ptr(p)) != n) memset(b, 0, n); }
 int main(int argc, char **argv) {
-    char path[512]; int n, ct, d, il; unsigned w, h, bad = 0, total = 0;
+    char path[512]; int n, ct, d, il, valid; unsigned w, h, bad = 0, total = 0;
     snprintf(path, sizeof path, "%s/list.txt", argv[1]);
     FILE *L = fopen(path, "r");
-    while (fscanf(L, "%d %d %d %d %u %u", &n, &ct, &d, &il, &w, &h) == 6) {
+    while (fscanf(L, "%d %d %d %d %u %u %d", &n, &ct, &d, &il, &w, &h, &valid) == 7) {
         snprintf(path, sizeof path, "%s/%d.png", argv[1], n); FILE *f = fopen(path, "rb");
         png_structp p = png_create_read_struct("1.6", NULL, NULL, NULL); png_infop i = png_create_info_struct(p);
         png_set_read_fn(p, f, rd); png_read_info(p, i);
+        if (!valid) {
+            /* Refused: no header, and reading writes nothing. */
+            unsigned char guard[64]; png_bytep rows[64];
+            memset(guard, 0xAB, sizeof guard);
+            for (unsigned y = 0; y < h; y++) rows[y] = guard;
+            png_read_image(p, rows);
+            int ok = png_get_IHDR(p, i, NULL, NULL, NULL, NULL, NULL, NULL, NULL) == 0 &&
+                     guard[0] == 0xAB && guard[63] == 0xAB;
+            total++;
+            if (!ok) { bad++; printf("FAIL invalid header case %d accepted\n", n); }
+            png_destroy_read_struct(&p, &i, NULL); fclose(f);
+            continue;
+        }
         size_t rb = png_get_rowbytes(p, i);
         unsigned char *img = calloc(h, rb); png_bytep rows[64];
         for (unsigned y = 0; y < h; y++) rows[y] = img + y * rb;
@@ -95,5 +118,6 @@ for src in libpng_shim zlib; do
     cc -O2 -Wall -Wextra -Wno-unused-parameter -Werror -I"$work/inc" \
         -c "$lib/src/$src.c" -o "$work/$src.o"
 done
-cc -O1 -I"$work/inc" -o "$work/t" "$work/t.c" "$work/libpng_shim.o" "$work/zlib.o"
-"$work/t" "$work/data"
+cc -O1 -g -fsanitize=address,undefined -fno-sanitize-recover=all -I"$work/inc" \
+    -o "$work/t" "$work/t.c" "$lib/src/libpng_shim.c" "$lib/src/zlib.c"
+ASAN_OPTIONS=detect_leaks=0 "$work/t" "$work/data"
