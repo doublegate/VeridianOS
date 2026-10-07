@@ -1723,6 +1723,12 @@ fn blit_back_buffer(
                     let b = pixel & 0xFF;
                     let swapped = 0xFF00_0000 | (b << 16) | (g << 8) | r;
                     let dst_offset = y * fb_stride + x * 4;
+                    // SAFETY: fb_ptr is valid for stride*height bytes (the
+                    // same assumption as the BGR path above); y < fb_height
+                    // and x < fb_width keep the 4-byte pixel inside its row.
+                    // The u32 store assumes a 4-byte-aligned framebuffer base
+                    // and a stride that is a multiple of 4, which holds for
+                    // the 32bpp boot framebuffers but is not checked here.
                     unsafe {
                         (fb_ptr.add(dst_offset) as *mut u32).write(swapped);
                     }

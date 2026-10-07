@@ -106,6 +106,9 @@ impl DeviceEventBuffer {
 // SAFETY: DeviceEventBuffer uses atomic head/tail. Single producer
 // (route_events) and single consumer (read).
 unsafe impl Send for DeviceEventBuffer {}
+// SAFETY: the fields are a plain-data array and atomics. The only mutation
+// of `buf` goes through `push(&mut self)`; `&self` methods only read, so
+// shared references cannot race on the array.
 unsafe impl Sync for DeviceEventBuffer {}
 
 // ---------------------------------------------------------------------------

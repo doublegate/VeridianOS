@@ -105,6 +105,8 @@ fn read_serial_x86_64() -> Option<u8> {
     }
     if (status & 1) != 0 {
         let data: u8;
+        // SAFETY: reading the COM1 data register (port 0x3F8) after LSR
+        // reported data ready; the IN only consumes one received byte.
         unsafe {
             core::arch::asm!(
                 "in al, dx",

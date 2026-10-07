@@ -126,6 +126,9 @@ mod x86_64_impl {
     // The push side (interrupt handler) is single-producer and pop side
     // (shell loop) is single-consumer, making concurrent access safe.
     unsafe impl Send for KeyBuffer {}
+    // SAFETY: the fields are a plain byte array and atomics. The only
+    // mutation of `buf` goes through `push(&mut self)`; `&self` methods only
+    // read, so shared references cannot race on the array.
     unsafe impl Sync for KeyBuffer {}
 
     static KEY_BUFFER: Mutex<KeyBuffer> = Mutex::new(KeyBuffer::new());

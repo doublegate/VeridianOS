@@ -892,11 +892,25 @@ impl VirtioGpuDriver {
         let avail_ptr = (ring_ptr + desc_size) as *mut VirtqAvail;
         let used_ptr = (ring_ptr + desc_size + avail_size) as *mut VirtqUsed;
 
-        // SAFETY: These pointers come from a just-allocated, zeroed region that
-        // is large enough and properly aligned (Vec guarantees alignment for u8).
-        // The region is leaked so it outlives the driver.
+        // SAFETY: These pointers come from a just-allocated, zeroed region of
+        // ring_pages * 4096 bytes that is leaked so it outlives the driver,
+        // and all-zero bytes are a valid value for these plain-integer ring
+        // structs. `descriptors` covers exactly desc_size bytes at the start.
+        // NOT fully upheld (pre-existing, see N-56 report): VirtqAvail and
+        // VirtqUsed are declared with fixed 256-entry arrays while the
+        // offsets assume `qs` entries, so for qs < 256 the `avail` reference
+        // overlaps `used`, and for some qs (e.g. 150) the fixed-size
+        // VirtqUsed extends past the allocation (qs = 256, QEMU's
+        // virtio-gpu queue size, stays in bounds); `used_ptr` sits at
+        // desc_size + 6 + 2*qs, which is only 2-byte aligned although
+        // VirtqUsed needs 4; and a `Vec<u8>` guarantees only 1-byte
+        // alignment for the base.
         let descriptors = unsafe { core::slice::from_raw_parts_mut(desc_ptr, qs) };
+        // SAFETY: see above; avail_ptr points into the leaked region (with
+        // the overlap caveat noted there).
         let avail = unsafe { &mut *avail_ptr };
+        // SAFETY: see above; used_ptr points into the leaked region (with
+        // the size and alignment caveats noted there).
         let used = unsafe { &mut *used_ptr };
 
         let vq = Virtqueue::new(descriptors, avail, used, queue_size);
