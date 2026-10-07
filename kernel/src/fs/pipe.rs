@@ -159,8 +159,9 @@ impl PipeWriter {
                 return Err(KernelError::BrokenPipe);
             }
             let available = pipe.capacity.saturating_sub(pipe.buffer.len());
-            // A write of up to PIPE_BUF bytes goes in whole or waits.
-            if data.len() <= PIPE_BUF && available < data.len() {
+            // A write of up to PIPE_BUF bytes goes in whole or waits (one
+            // larger than the whole pipe could never go in whole).
+            if data.len() <= PIPE_BUF.min(pipe.capacity) && available < data.len() {
                 return Err(KernelError::WouldBlock);
             }
             let to_write = data.len().min(available);
@@ -457,6 +458,23 @@ mod tests {
         let mut buf = [0u8; 32];
         let n = reader.read(&mut buf).unwrap();
         assert_eq!(n, 16);
+    }
+
+    /// A write of up to PIPE_BUF bytes is never split: with too little
+    /// room it waits (WouldBlock) and leaves the buffer unchanged.
+    #[test]
+    fn test_pipe_buf_writes_are_atomic() {
+        let (reader, writer) = create_pipe_with_capacity(8192).unwrap();
+        assert_eq!(writer.write(&[1u8; 6000]).unwrap(), 6000);
+        assert!(matches!(
+            writer.write(&[2u8; 4096]),
+            Err(KernelError::WouldBlock)
+        ));
+        let mut buf = [0u8; 8192];
+        assert_eq!(reader.try_read(&mut buf).unwrap(), 6000);
+        assert_eq!(writer.write(&[2u8; 4096]).unwrap(), 4096);
+        // Larger than PIPE_BUF: may be split.
+        assert_eq!(writer.write(&[3u8; 5000]).unwrap(), 4096);
     }
 
     #[test]

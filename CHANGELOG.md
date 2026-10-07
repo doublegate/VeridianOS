@@ -220,9 +220,9 @@
 - **A page fault that met a held address-space lock killed the thread (N-138).** The fault path
   could only `try_lock` the address space, so a fault while another thread of the process held
   it (in `mmap`, say) failed and the thread got SIGSEGV. The address space is now a sleeping
-  mutex (`sync::SleepMutex`): the fault waits for the holder. It is refused only when the
-  faulting thread holds the lock itself, where waiting would deadlock. Host tests for the
-  mutex.
+  mutex (`sync::SleepMutex`): a fault taken in user mode waits for the holder. A fault in
+  kernel mode (a system call copying user memory, possibly under a spinlock) never sleeps; it
+  only tries the lock and gives EFAULT if it is held. Host tests for the mutex.
 - **A sleeping read stopped every other thread's file calls (N-118).** `read` held the process
   file-table spinlock across the read, and file position locks were held across reads of pipes
   and eventfds; once such a read could sleep, a write from another thread spun on the lock

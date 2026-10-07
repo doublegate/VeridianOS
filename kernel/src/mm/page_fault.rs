@@ -104,7 +104,7 @@ fn try_demand_page(info: &PageFaultInfo) -> Result<(), KernelError> {
     let process = crate::process::current_process().ok_or(KernelError::NotInitialized {
         subsystem: "process",
     })?;
-    try_demand_page_in(&process, info)
+    try_demand_page_in(&process, info, info.was_user_mode)
 }
 
 /// Resolve a fault the kernel took while copying to or from user memory
@@ -125,18 +125,25 @@ pub fn resolve_user_copy_fault(info: &PageFaultInfo) -> bool {
         return false;
     };
     if info.reason != PageFaultReason::NotPresent {
-        return info.was_write && resolve_cow_in(&process, info).is_ok();
+        return info.was_write && resolve_cow_in(&process, info, false).is_ok();
     }
     let as_user = PageFaultInfo {
         was_user_mode: true,
         ..*info
     };
-    try_demand_page_in(&process, &as_user).is_ok()
+    // Never sleeps: the system call may hold a spinlock (security review
+    // of d1e2b47); a held address-space lock gives EFAULT, as before.
+    try_demand_page_in(&process, &as_user, false).is_ok()
 }
 
+/// `may_sleep`: whether the address-space lock may be waited for. Only a
+/// fault taken in user mode may: the thread holds no kernel lock then. A
+/// fault in kernel mode -- a system call copying user memory, perhaps under
+/// a spinlock -- only tries it.
 fn try_demand_page_in(
     process: &crate::process::Process,
     info: &PageFaultInfo,
+    may_sleep: bool,
 ) -> Result<(), KernelError> {
     let vaddr = VirtualAddress::new(info.faulting_address);
 
@@ -147,7 +154,7 @@ fn try_demand_page_in(
     let memory_space =
         process
             .memory_space
-            .lock_unless_mine()
+            .lock_if_may_sleep(may_sleep)
             .ok_or(KernelError::NotInitialized {
                 subsystem: "memory_space (held by this thread)",
             })?;
@@ -187,13 +194,12 @@ fn try_demand_page_in(
                 drop(memory_space);
 
                 let page_addr = (info.faulting_address & !(PAGE_SIZE as u64 - 1)) as usize;
-                let mut memory_space_mut =
-                    process
-                        .memory_space
-                        .lock_unless_mine()
-                        .ok_or(KernelError::NotInitialized {
-                            subsystem: "memory_space (lock held, map)",
-                        })?;
+                let mut memory_space_mut = process
+                    .memory_space
+                    .lock_if_may_sleep(may_sleep)
+                    .ok_or(KernelError::NotInitialized {
+                        subsystem: "memory_space (lock held, map)",
+                    })?;
                 memory_space_mut.map_page(page_addr, m.flags)?;
 
                 Ok(())
@@ -221,25 +227,24 @@ fn try_copy_on_write(info: &PageFaultInfo) -> Result<(), KernelError> {
     let process = crate::process::current_process().ok_or(KernelError::NotInitialized {
         subsystem: "process",
     })?;
-    resolve_cow_in(&process, info)
+    resolve_cow_in(&process, info, info.was_user_mode)
 }
 
 /// Resolve a write to a copy-on-write page of `process` (see
-/// `VirtualAddressSpace::resolve_cow_fault`). Refused only when this thread
-/// holds the address-space lock itself (see `try_demand_page_in`).
+/// `VirtualAddressSpace::resolve_cow_fault`). `may_sleep` as for
+/// `try_demand_page_in`.
 fn resolve_cow_in(
     process: &crate::process::Process,
     info: &PageFaultInfo,
+    may_sleep: bool,
 ) -> Result<(), KernelError> {
     #[cfg(feature = "alloc")]
     {
-        let memory_space =
-            process
-                .memory_space
-                .lock_unless_mine()
-                .ok_or(KernelError::NotInitialized {
-                    subsystem: "memory_space (lock held)",
-                })?;
+        let memory_space = process.memory_space.lock_if_may_sleep(may_sleep).ok_or(
+            KernelError::NotInitialized {
+                subsystem: "memory_space (lock held)",
+            },
+        )?;
         if memory_space.resolve_cow_fault(info.faulting_address)? {
             return Ok(());
         }
@@ -267,11 +272,13 @@ fn try_stack_growth(info: &PageFaultInfo) -> Result<(), KernelError> {
     let process = crate::process::current_process().ok_or(KernelError::NotInitialized {
         subsystem: "process",
     })?;
+    // Only user-mode faults get here (checked above): no kernel lock held.
+    let may_sleep = true;
 
     let memory_space =
         process
             .memory_space
-            .lock_unless_mine()
+            .lock_if_may_sleep(may_sleep)
             .ok_or(KernelError::NotInitialized {
                 subsystem: "memory_space (lock held, stack)",
             })?;
@@ -330,7 +337,7 @@ fn try_stack_growth(info: &PageFaultInfo) -> Result<(), KernelError> {
     let mut memory_space_mut =
         process
             .memory_space
-            .lock_unless_mine()
+            .lock_if_may_sleep(may_sleep)
             .ok_or(KernelError::NotInitialized {
                 subsystem: "memory_space (lock held, stack map)",
             })?;

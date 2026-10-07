@@ -86,6 +86,17 @@ impl<T> SleepMutex<T> {
         Some(self.lock())
     }
 
+    /// [`Self::lock_unless_mine`] when the caller may sleep, otherwise only
+    /// [`Self::try_lock`]: code that may hold a spinlock must never sleep,
+    /// or everything spinning on that spinlock stops with it.
+    pub fn lock_if_may_sleep(&self, may_sleep: bool) -> Option<SleepMutexGuard<'_, T>> {
+        if may_sleep {
+            self.lock_unless_mine()
+        } else {
+            self.try_lock()
+        }
+    }
+
     /// The value, through exclusive access to the lock itself.
     pub fn get_mut(&mut self) -> &mut T {
         self.data.get_mut()
