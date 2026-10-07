@@ -335,6 +335,11 @@
 - **tmpfs releases a file's space when the last link or open file goes.** Freeing it at
   unlink let a hard link keep data beyond the size limit.
 
+- **getdents64 `d_off` is the next entry's position.** It was a byte offset inside the
+  caller's buffer, so `seekdir(telldir())` jumped to the wrong entry. A buffer too small
+  for the next record now returns EINVAL, as on Linux, instead of reporting end of
+  directory.
+
 ### Removed
 
 - The unused slab allocator and `mm/vmm.rs` (MEM-INC-02).
