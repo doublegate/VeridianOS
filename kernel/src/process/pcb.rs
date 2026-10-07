@@ -116,6 +116,9 @@ pub struct Process {
     /// Exit code (set when process exits)
     pub exit_code: AtomicU32,
 
+    /// Signal that terminated the process (0: it exited normally).
+    pub term_signal: AtomicU32,
+
     /// CPU time used (in microseconds)
     pub cpu_time: AtomicU64,
 
@@ -247,6 +250,7 @@ impl Process {
             ipc_endpoints: Mutex::new(BTreeMap::new()),
             children: Mutex::new(Vec::new()),
             exit_code: AtomicU32::new(0),
+            term_signal: AtomicU32::new(0),
             cpu_time: AtomicU64::new(0),
             memory_stats: MemoryStats::default(),
             created_at: crate::arch::timer::get_ticks(),
@@ -361,6 +365,19 @@ impl Process {
     /// Get exit code
     pub fn get_exit_code(&self) -> i32 {
         self.exit_code.load(Ordering::Acquire) as i32
+    }
+
+    /// Record that signal `sig` terminated the process.
+    pub fn set_term_signal(&self, sig: u32) {
+        self.term_signal.store(sig & 0x7f, Ordering::Release);
+    }
+
+    /// The POSIX/Linux wait status for this (exited) process.
+    pub fn wait_status(&self) -> i32 {
+        wait_status(
+            self.get_exit_code(),
+            self.term_signal.load(Ordering::Acquire),
+        )
     }
 
     /// Set process priority
@@ -499,8 +516,33 @@ impl Drop for Process {
     }
 }
 
+/// Linux wait-status encoding (N-99): a normal exit is `code << 8`
+/// (`WIFEXITED`, `WEXITSTATUS`); death by signal is the signal number in the
+/// low 7 bits (`WIFSIGNALED`, `WTERMSIG`), with 0x80 set when the signal
+/// dumps core by default (`WCOREDUMP`).
+pub fn wait_status(exit_code: i32, term_signal: u32) -> i32 {
+    match term_signal & 0x7f {
+        0 => (exit_code & 0xff) << 8,
+        sig => {
+            // SIGQUIT, SIGILL, SIGTRAP, SIGABRT, SIGBUS, SIGFPE, SIGSEGV,
+            // SIGXCPU, SIGXFSZ, SIGSYS default to a core dump.
+            let core = matches!(sig, 3 | 4 | 5 | 6 | 7 | 8 | 11 | 24 | 25 | 31);
+            sig as i32 | if core { 0x80 } else { 0 }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn wait_status_encodes_exit_and_signal() {
+        assert_eq!(wait_status(3, 0), 0x300); // WIFEXITED, WEXITSTATUS 3
+        assert_eq!(wait_status(0, 9), 9); // WIFSIGNALED, SIGKILL, no core
+        assert_eq!(wait_status(0, 11), 0x8b); // SIGSEGV with WCOREDUMP
+        assert_eq!(wait_status(0, 15), 15);
+        assert_eq!(wait_status(0x1ff, 0), 0xff00);
+    }
+
     use super::*;
 
     fn make_process(pid: u64, name: &str) -> Process {

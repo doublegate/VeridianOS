@@ -46,6 +46,15 @@
 
 ### Security
 
+- **Memory protections are enforced (N-132 to N-137).** `mmap` and `brk` used to ignore
+  `prot`: anonymous, shared and heap memory was writable and executable, and `PROT_NONE` gave
+  full access. Page flags now follow `prot` (no-execute unless `PROT_EXEC`), `mprotect` can
+  revoke access, checks that the whole range is mapped, and cannot give borrowed device or
+  shared-region mappings rights they were not granted. A huge `mmap` or `brk` length used to
+  halt the kernel; it now fails with ENOMEM, the mmap cursor cannot leave user space, and no
+  user mapping can be created in the kernel half. The physical memory map moved from a
+  lower-half slot inside the user address range to the base of the kernel half. Stack growth
+  has a fixed limit and a 1 MiB guard gap, and `brk` can no longer run into another mapping.
 - **x86_64 kernel stacks have guard pages (N-26).** Each thread's kernel stack is mapped into
   its own slot of a dedicated region with unmapped pages below it, so an overflow faults
   instead of silently overwriting the neighbouring frame in the physical map. Freeing a stack
@@ -64,6 +73,9 @@
 
 ### Fixed
 
+- **A child killed by a signal is reported as such (N-99, part).** `wait` reported a process
+  killed by SIGSEGV or SIGKILL as a normal exit with status 0; it now reports `WIFSIGNALED`,
+  `WTERMSIG` and, for core-dumping signals, `WCOREDUMP`.
 - **The rootfs build installs every libc header subdirectory.** A fixed list left out
   `net/`, which only a fresh sysroot (CI's) exposed as a BusyBox build failure.
 - **Hard links on ramfs and tmpfs are real links (N-45).** `link()` used to copy the file,

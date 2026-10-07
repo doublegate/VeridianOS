@@ -90,9 +90,13 @@ pub fn sys_mmap(
     flags: usize,
     fd_or_packed: usize,
 ) -> SyscallResult {
-    // Validate length
+    // Validate length: non-zero, and no larger than user space, so a huge
+    // request fails here instead of reaching any allocation (N-133).
     if length == 0 {
         return Err(SyscallError::InvalidArgument);
+    }
+    if length > crate::mm::user_layout::USER_SPACE_END {
+        return Err(SyscallError::OutOfMemory);
     }
 
     // Validate protection flags (only low 3 bits valid)
@@ -174,25 +178,33 @@ pub fn sys_mmap(
     }
 
     let mapping_type = prot_to_mapping_type(prot, shared);
+    // The page flags follow `prot`: no-execute unless PROT_EXEC, read-only
+    // unless PROT_WRITE, no user access for PROT_NONE (N-132).
+    let page_flags = crate::mm::vas::user_prot_flags(prot);
     let memory_space = proc.memory_space.lock();
 
     let mapped_addr = if is_fixed {
         // MAP_FIXED: map at the exact requested address
         memory_space
-            .map_region(VirtualAddress(addr as u64), length, mapping_type)
+            .map_region_flags(
+                VirtualAddress(addr as u64),
+                length,
+                mapping_type,
+                Some(page_flags),
+            )
             .map_err(|_| SyscallError::OutOfMemory)?;
         addr
     } else if is_anonymous && flags & MAP_HUGETLB != 0 {
         // 2 MiB pages (MEM-ARCH-01): a 2 MiB-aligned address, the length
         // rounded up to 2 MiB.
         memory_space
-            .mmap_huge(length, mapping_type)
+            .mmap_huge_flags(length, mapping_type, page_flags)
             .map_err(|_| SyscallError::OutOfMemory)?
             .as_usize()
     } else {
-        // Kernel-chosen address: use VAS.mmap() which bumps next_mmap_addr
+        // Kernel-chosen address at the (bounded) mmap cursor.
         let vaddr = memory_space
-            .mmap(length, mapping_type)
+            .mmap_flags(length, mapping_type, Some(page_flags))
             .map_err(|_| SyscallError::OutOfMemory)?;
         vaddr.as_usize()
     };
@@ -340,16 +352,15 @@ pub fn sys_mprotect(addr: usize, length: usize, prot: usize) -> SyscallResult {
         return Err(SyscallError::PermissionDenied);
     }
 
-    // Verify the mapping exists in the process's address space
+    // protect_region checks that every page of the range is mapped
+    // (ENOMEM, as Linux) and that borrowed mappings gain no rights (N-135).
     let memory_space = proc.memory_space.lock();
-    let _mapping = memory_space
-        .find_mapping(VirtualAddress(addr as u64))
-        .ok_or(SyscallError::InvalidArgument)?;
-
-    // Update hardware page table entries
     memory_space
         .protect_region(VirtualAddress(addr as u64), length, prot)
-        .map_err(|_| SyscallError::InvalidArgument)?;
+        .map_err(|e| match e {
+            crate::error::KernelError::PermissionDenied { .. } => SyscallError::PermissionDenied,
+            _ => SyscallError::OutOfMemory,
+        })?;
 
     Ok(0)
 }

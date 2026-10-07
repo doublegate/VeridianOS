@@ -160,7 +160,8 @@ pub fn wait_process_with_options(
                     // Normal exit: low 7 bits = 0, bits 8-15 = exit code
                     // WIFEXITED(s) = (s & 0x7f) == 0
                     // WEXITSTATUS(s) = (s >> 8) & 0xff
-                    let wait_status = (exit_code & 0xff) << 8;
+                    // Exit code or terminating signal (N-99).
+                    let wait_status = child.wait_status();
                     return Ok((*child_pid, wait_status));
                 }
 
@@ -373,7 +374,7 @@ pub fn kill_process(pid: ProcessId, signal: i32) -> Result<(), KernelError> {
     match signal {
         signals::SIGKILL => {
             // SIGKILL always terminates immediately
-            force_terminate_process(&process)?;
+            force_terminate_process(&process, signal)?;
         }
         signals::SIGSTOP => {
             // SIGSTOP always stops immediately
@@ -393,7 +394,7 @@ pub fn kill_process(pid: ProcessId, signal: i32) -> Result<(), KernelError> {
                 }
                 SignalAction::Terminate | SignalAction::CoreDump => {
                     // For default terminate/core dump actions, do it now
-                    force_terminate_process(&process)?;
+                    force_terminate_process(&process, signal)?;
                 }
                 SignalAction::Stop => {
                     process.set_state(ProcessState::Blocked);
@@ -430,7 +431,7 @@ pub fn kill_process(pid: ProcessId, signal: i32) -> Result<(), KernelError> {
                 }
                 SignalAction::Default => {
                     // Should not reach here, but handle it as terminate
-                    force_terminate_process(&process)?;
+                    force_terminate_process(&process, signal)?;
                 }
             }
         }
@@ -473,9 +474,10 @@ fn notify_parent_sigchld(process: &Process) {
 // ============================================================================
 
 /// Force terminate a process (used by SIGKILL and unhandled fatal signals)
-fn force_terminate_process(process: &Process) -> Result<(), KernelError> {
+fn force_terminate_process(process: &Process, signal: i32) -> Result<(), KernelError> {
     let _pid = process.pid;
     println!("[PROCESS] Force terminating process {}", _pid.0);
+    process.set_term_signal(signal as u32);
 
     // Mark all threads as exited
     #[cfg(feature = "alloc")]

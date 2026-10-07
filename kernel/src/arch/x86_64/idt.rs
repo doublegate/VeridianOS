@@ -417,7 +417,7 @@ extern "x86-interrupt" fn page_fault_handler(
         if let Some(thread) = crate::process::current_thread() {
             thread.set_state(crate::process::thread::ThreadState::Zombie);
         } else if let Some(process) = crate::process::current_process() {
-            process.set_exit_code(128 + 11); // SIGSEGV
+            process.set_term_signal(11); // killed by SIGSEGV (N-99)
             process.set_state(crate::process::pcb::ProcessState::Zombie);
         }
 
@@ -514,7 +514,7 @@ extern "x86-interrupt" fn general_protection_fault_handler(
         }
 
         if let Some(process) = crate::process::current_process() {
-            process.set_exit_code(128 + 11); // SIGSEGV equivalent
+            process.set_term_signal(11); // killed by SIGSEGV (N-99)
             process.set_state(crate::process::pcb::ProcessState::Zombie);
         }
 
@@ -665,7 +665,7 @@ unsafe fn exception_kill_user(name: &[u8], stack_frame: &InterruptStackFrame) {
     if (cs & 3) == 3 {
         // User-mode fault: kill process and return to boot context.
         if let Some(process) = crate::process::current_process() {
-            process.set_exit_code(128 + 11);
+            process.set_term_signal(11); // killed by SIGSEGV (N-99)
             process.set_state(crate::process::pcb::ProcessState::Zombie);
         }
         if crate::arch::x86_64::usermode::has_boot_return_context() {

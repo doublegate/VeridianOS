@@ -401,6 +401,15 @@ impl PageMapper {
     ) -> Result<*mut PageTableEntry, KernelError> {
         let breakdown = VirtualAddressBreakdown::new(page);
 
+        // The upper half belongs to the kernel and its tables are shared by
+        // every address space: a user mapping there would mark them USER for
+        // all processes (N-133).
+        if flags.contains(PageFlags::USER) && usize::from(breakdown.l4_index) >= 256 {
+            return Err(KernelError::PermissionDenied {
+                operation: "user mapping in the kernel half",
+            });
+        }
+
         // Get L4 table
         // SAFETY: `self.l4_table` was provided by the caller of `PageMapper::new`
         // who guaranteed it points to a valid, mapped, 4096-byte-aligned page table

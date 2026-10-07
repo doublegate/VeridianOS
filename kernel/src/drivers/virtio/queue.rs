@@ -450,8 +450,8 @@ fn phys_to_kernel_virt(phys: u64) -> usize {
         if let Some(virt) = crate::arch::x86_64::msr::phys_to_virt(phys as usize) {
             return virt;
         }
-        // Fallback: assume identity mapping in the higher-half window
-        (phys + 0xFFFF_8000_0000_0000) as usize
+        // Fallback: the kernel's physical map.
+        crate::mm::phys_to_virt_addr(phys) as usize
     }
 
     #[cfg(not(target_arch = "x86_64"))]

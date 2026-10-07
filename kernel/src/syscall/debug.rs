@@ -164,9 +164,8 @@ fn ptrace_poke(
 fn phys_to_kernel_vaddr(phys_addr: usize) -> usize {
     #[cfg(target_arch = "x86_64")]
     {
-        // x86_64: physical memory is mapped at 0xFFFF_8000_0000_0000
-        // via the bootloader's physical memory offset
-        phys_addr + 0xFFFF_8000_0000_0000
+        // x86_64: through the physical map, wherever the bootloader put it.
+        crate::mm::phys_to_virt_addr(phys_addr as u64) as usize
     }
     #[cfg(target_arch = "aarch64")]
     {

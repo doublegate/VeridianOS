@@ -52,6 +52,13 @@ const _STACK_GUARD_SIZE: usize = PAGE_SIZE;
 /// cc1 (GCC compiler proper) uses deep recursion for complex expressions.
 const MAX_STACK_GROWTH: usize = 8 * 1024 * 1024;
 
+/// Largest total user stack: the default initial stack plus the growth
+/// allowance, fixed (not measured from the current size; N-136).
+const STACK_LIMIT: usize = crate::process::creation::DEFAULT_USER_STACK_SIZE + MAX_STACK_GROWTH;
+
+/// Gap kept free below a growing stack (Linux `stack_guard_gap`).
+const STACK_GUARD_GAP: u64 = 1024 * 1024;
+
 /// Main page fault handler.
 ///
 /// Dispatches the fault to the appropriate sub-handler:
@@ -278,9 +285,10 @@ fn try_stack_growth(info: &PageFaultInfo) -> Result<(), KernelError> {
         });
     }
 
-    // Check the fault isn't beyond the maximum growable region.
-    let max_total_stack = stack_size as usize + MAX_STACK_GROWTH;
-    let absolute_bottom = stack_top.saturating_sub(max_total_stack as u64);
+    // The stack may span at most STACK_LIMIT below its top in total.
+    // (This used to be measured from the already-grown size, so the limit
+    // moved down with every growth and the stack had none; N-136.)
+    let absolute_bottom = stack_top.saturating_sub(STACK_LIMIT as u64);
     if fault < absolute_bottom {
         // Too far below the stack -- real SIGSEGV.
         return Err(KernelError::InvalidAddress {
@@ -296,6 +304,19 @@ fn try_stack_growth(info: &PageFaultInfo) -> Result<(), KernelError> {
         return Err(KernelError::InvalidAddress {
             addr: fault as usize,
         });
+    }
+
+    // Never grow into, or within a guard gap of, another mapping: growing
+    // over one rewrote its protection to read-write (N-136; Linux keeps
+    // `stack_guard_gap`, 1 MiB).
+    #[cfg(feature = "alloc")]
+    {
+        let gap_bottom = fault_page.saturating_sub(STACK_GUARD_GAP);
+        if !memory_space.range_is_free(gap_bottom, stack_bottom) {
+            return Err(KernelError::InvalidAddress {
+                addr: fault as usize,
+            });
+        }
     }
 
     // Drop the lock and re-acquire as mutable to map pages.

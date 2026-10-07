@@ -400,6 +400,29 @@ pub enum MappingType {
     SharedRegion,
 }
 
+/// Page flags for a user mapping with POSIX protection `prot` (N-132).
+///
+/// Readable pages are present and user-accessible; `PROT_WRITE` adds
+/// writable, and everything not `PROT_EXEC` is no-execute. `PROT_NONE`
+/// keeps the page present but supervisor-only, so any user access faults
+/// while the frame and its contents stay in place for a later `mprotect`.
+pub fn user_prot_flags(prot: usize) -> PageFlags {
+    const PROT_WRITE: usize = 0x2;
+    const PROT_EXEC: usize = 0x4;
+    const PROT_RWX: usize = 0x7;
+    let mut f = PageFlags::PRESENT;
+    if prot & PROT_RWX != 0 {
+        f |= PageFlags::USER;
+    }
+    if prot & PROT_WRITE != 0 {
+        f |= PageFlags::WRITABLE;
+    }
+    if prot & PROT_EXEC == 0 {
+        f |= PageFlags::NO_EXECUTE;
+    }
+    f
+}
+
 /// Virtual memory mapping
 #[derive(Debug, Clone)]
 pub struct VirtualMapping {
@@ -421,7 +444,9 @@ impl VirtualMapping {
     pub fn new(start: VirtualAddress, size: usize, mapping_type: MappingType) -> Self {
         let flags = match mapping_type {
             MappingType::Code => PageFlags::PRESENT | PageFlags::USER,
-            MappingType::Data => PageFlags::PRESENT | PageFlags::WRITABLE | PageFlags::USER,
+            MappingType::Data => {
+                PageFlags::PRESENT | PageFlags::WRITABLE | PageFlags::USER | PageFlags::NO_EXECUTE
+            }
             MappingType::Stack => {
                 PageFlags::PRESENT | PageFlags::WRITABLE | PageFlags::USER | PageFlags::NO_EXECUTE
             }
@@ -429,7 +454,9 @@ impl VirtualMapping {
                 PageFlags::PRESENT | PageFlags::WRITABLE | PageFlags::USER | PageFlags::NO_EXECUTE
             }
             MappingType::File => PageFlags::PRESENT | PageFlags::USER,
-            MappingType::Shared => PageFlags::PRESENT | PageFlags::WRITABLE | PageFlags::USER,
+            MappingType::Shared => {
+                PageFlags::PRESENT | PageFlags::WRITABLE | PageFlags::USER | PageFlags::NO_EXECUTE
+            }
             MappingType::Device => PageFlags::PRESENT | PageFlags::WRITABLE | PageFlags::NO_CACHE,
             MappingType::SharedRegion => {
                 PageFlags::PRESENT | PageFlags::WRITABLE | PageFlags::USER | PageFlags::NO_EXECUTE
@@ -1055,7 +1082,7 @@ impl VirtualAddressSpace {
         self.page_table_root.load(Ordering::Acquire)
     }
 
-    /// Map a region of virtual memory
+    /// Map a region of virtual memory with the default flags of its type.
     #[cfg(feature = "alloc")]
     pub fn map_region(
         &self,
@@ -1063,48 +1090,70 @@ impl VirtualAddressSpace {
         size: usize,
         mapping_type: MappingType,
     ) -> Result<(), KernelError> {
+        self.map_region_flags(start, size, mapping_type, None)
+    }
+
+    /// Map a region of virtual memory: allocate zeroed frames and install
+    /// them with `flags` (or the type's default flags).
+    ///
+    /// Every size is checked before anything is allocated, and a failure
+    /// part-way through unwinds the page-table entries and frames installed
+    /// so far (N-133, N-137): a huge length is an error, not a kernel panic.
+    #[cfg(feature = "alloc")]
+    pub fn map_region_flags(
+        &self,
+        start: VirtualAddress,
+        size: usize,
+        mapping_type: MappingType,
+        flags: Option<PageFlags>,
+    ) -> Result<(), KernelError> {
+        let too_big = KernelError::OutOfMemory {
+            requested: size,
+            available: 0,
+        };
         // Align to page boundary
         let aligned_start = VirtualAddress(start.0 & !(4096 - 1));
-        let aligned_size = ((size + 4095) / 4096) * 4096;
+        let aligned_size = size.checked_add(4095).map(|s| s & !4095).ok_or(too_big)?;
+        if aligned_size == 0 || aligned_start.0.checked_add(aligned_size as u64).is_none() {
+            return Err(too_big);
+        }
 
-        let mapping = VirtualMapping::new(aligned_start, aligned_size, mapping_type);
+        let mut mapping = VirtualMapping::new(aligned_start, aligned_size, mapping_type);
+        if let Some(f) = flags {
+            mapping.flags = f;
+        }
 
         let mut mappings = self.mappings.lock();
 
-        // Check for overlaps using standard interval overlap test:
         // [a_start, a_end) and [b_start, b_end) overlap iff
-        // a_start < b_end AND b_start < a_end.
-        // The previous check missed containment (new fully contains existing)
-        // and falsely rejected adjacent mappings (end == start).
-        let b_start = aligned_start.0;
-        let b_end = aligned_start.0 + aligned_size as u64;
-        for (_, existing) in mappings.iter() {
-            let a_start = existing.start.0;
-            let a_end = existing.start.0 + existing.size as u64;
-            if a_start < b_end && b_start < a_end {
-                return Err(KernelError::AlreadyExists {
-                    resource: "address range",
-                    id: aligned_start.0,
-                });
-            }
+        // a_start < b_end && b_start < a_end.
+        if Self::overlaps(
+            &mappings,
+            aligned_start.0,
+            aligned_start.0 + aligned_size as u64,
+        ) {
+            return Err(KernelError::AlreadyExists {
+                resource: "address range",
+                id: aligned_start.0,
+            });
         }
 
-        // Allocate physical frames for the mapping
         let num_pages = aligned_size / 4096;
-        let mut physical_frames = Vec::with_capacity(num_pages);
+        // Fallible: a length the heap cannot index is OutOfMemory, not an
+        // allocation-failure abort.
+        let mut physical_frames = Vec::new();
+        physical_frames
+            .try_reserve_exact(num_pages)
+            .map_err(|_| too_big)?;
 
-        // Allocate all frames first (hold FRAME_ALLOCATOR lock briefly).
-        // On partial failure, free any already-allocated frames before
-        // returning the error. Without this cleanup, OOM during a large
-        // mmap would permanently leak every frame allocated before the
-        // failing one.
+        // Allocate all frames first (FRAME_ALLOCATOR held briefly); on
+        // failure free the ones already taken.
         {
             let frame_allocator = FRAME_ALLOCATOR.lock();
             for _ in 0..num_pages {
                 match frame_allocator.allocate_frames(1, None) {
                     Ok(frame) => physical_frames.push(frame),
                     Err(_) => {
-                        // Free all frames allocated so far
                         for &f in &physical_frames {
                             frame_allocator.free_frames(f, 1).ok();
                         }
@@ -1115,59 +1164,68 @@ impl VirtualAddressSpace {
                     }
                 }
             }
-        } // Drop frame allocator lock before page table operations
-
-        // Zero all allocated frames through the kernel physical memory window.
-        // POSIX requires brk/mmap(MAP_ANONYMOUS) pages to be zero-filled.
-        for &frame in &physical_frames {
-            let phys_addr = frame.as_u64() << 12;
-            let virt = crate::mm::phys_to_virt_addr(phys_addr) as *mut u8;
-            // SAFETY: Each frame is a valid physical address returned by the
-            // frame allocator and not yet mapped anywhere else.
-            // phys_to_virt_addr maps it into the kernel's physical memory
-            // window, which is always accessible in kernel context.
-            unsafe {
-                core::ptr::write_bytes(virt, 0, 4096);
-            }
         }
 
-        // Wire mappings into the architecture page table
+        // POSIX requires anonymous pages to be zero-filled.
+        for &frame in &physical_frames {
+            let virt = crate::mm::phys_to_virt_addr(frame.as_u64() << 12) as *mut u8;
+            // SAFETY: each frame was just allocated and is not mapped
+            // anywhere; the physical map makes it accessible to the kernel.
+            unsafe { core::ptr::write_bytes(virt, 0, 4096) };
+        }
+
         let pt_root = self.page_table_root.load(Ordering::Acquire);
         if pt_root != 0 {
-            // SAFETY: `pt_root` is a non-zero physical address of an L4 page
-            // table that was set during VAS::init() or inherited from a valid
-            // parent address space. The address is identity-mapped in the
-            // kernel's physical memory window. We hold the mappings lock,
-            // ensuring exclusive page table modification for this VAS.
+            // SAFETY: `pt_root` is this address space's L4 table (set by
+            // init or inherited), reached through the physical map; the
+            // mappings lock serialises changes to it.
             let mut mapper = unsafe { create_mapper_from_root(pt_root) };
             let mut alloc = VasFrameAllocator;
-
             for (i, &frame) in physical_frames.iter().enumerate() {
                 let vaddr = VirtualAddress(aligned_start.0 + (i as u64) * 4096);
-                // Intermediate page tables may need frame allocation, which
-                // VasFrameAllocator provides by locking FRAME_ALLOCATOR
-                // internally. This is safe because we already dropped our
-                // earlier lock on FRAME_ALLOCATOR above.
-                mapper.map_page(vaddr, frame, mapping.flags, &mut alloc)?;
+                if let Err(e) = mapper.map_page(vaddr, frame, mapping.flags, &mut alloc) {
+                    // Unwind: the pages mapped so far were never visible to
+                    // any other CPU's TLB as anything else, so removing the
+                    // entries and freeing every frame is enough.
+                    for j in 0..i {
+                        let _ =
+                            mapper.unmap_page(VirtualAddress(aligned_start.0 + (j as u64) * 4096));
+                    }
+                    super::tlb::flush_all();
+                    let frame_allocator = FRAME_ALLOCATOR.lock();
+                    for &f in &physical_frames {
+                        frame_allocator.free_frames(f, 1).ok();
+                    }
+                    return Err(e);
+                }
             }
-
-            // Flush TLB for the entire mapped range using batched flushes.
-            // TlbFlushBatch accumulates up to 16 addresses and issues a full
-            // TLB flush if more are needed, reducing individual invlpg overhead.
-            let mut tlb_batch = TlbFlushBatch::new();
-            for i in 0..num_pages {
-                let vaddr = aligned_start.0 + (i as u64) * 4096;
-                tlb_batch.add(vaddr);
-            }
-            tlb_batch.flush();
+            // Not-present -> present needs no TLB flush on x86 (no negative
+            // caching); RISC-V needs a local fence for the new entries
+            // (N-143).
+            #[cfg(target_arch = "riscv64")]
+            super::tlb::flush_all();
         }
 
-        // Record the mapping in our tracking structure
-        let mut mapping = mapping;
         mapping.physical_frames = physical_frames;
-
         mappings.insert(aligned_start, mapping);
         Ok(())
+    }
+
+    /// Whether any mapping overlaps `[start, end)`.
+    #[cfg(feature = "alloc")]
+    fn overlaps(mappings: &BTreeMap<VirtualAddress, VirtualMapping>, start: u64, end: u64) -> bool {
+        // Mappings do not overlap each other, so only the last one starting
+        // before `end` can reach into the range.
+        mappings
+            .range(..VirtualAddress(end))
+            .next_back()
+            .is_some_and(|(_, m)| m.start.0 + m.size as u64 > start)
+    }
+
+    /// Whether `[start, end)` is free of mappings.
+    #[cfg(feature = "alloc")]
+    pub fn range_is_free(&self, start: u64, end: u64) -> bool {
+        !Self::overlaps(&self.mappings.lock(), start, end)
     }
 
     /// Map specific physical frames into user space at a chosen virtual
@@ -1251,10 +1309,7 @@ impl VirtualAddressSpace {
         let size = frames.len() * 4096;
         let start = match at {
             Some(addr) => addr,
-            None => VirtualAddress(
-                self.next_mmap_addr
-                    .fetch_add(size as u64, Ordering::Relaxed),
-            ),
+            None => VirtualAddress(self.reserve_mmap_range(size, 4096)?.0),
         };
         if start.0 % 4096 != 0 || !super::user_layout::is_user_range(start.0 as usize, size) {
             return Err(KernelError::InvalidArgument {
@@ -1552,13 +1607,14 @@ impl VirtualAddressSpace {
     /// Find mapping for address
     #[cfg(feature = "alloc")]
     pub fn find_mapping(&self, addr: VirtualAddress) -> Option<VirtualMapping> {
+        // Mappings never overlap: the only candidate is the last one that
+        // starts at or below `addr` (O(log n), was a linear scan; N-143).
         let mappings = self.mappings.lock();
-        for (_, mapping) in mappings.iter() {
-            if mapping.contains(addr) {
-                return Some(mapping.clone());
-            }
-        }
-        None
+        mappings
+            .range(..=addr)
+            .next_back()
+            .filter(|(_, m)| m.contains(addr))
+            .map(|(_, m)| m.clone())
     }
 
     /// Resolve a write fault at `vaddr` on a copy-on-write page.
@@ -1719,17 +1775,70 @@ impl VirtualAddressSpace {
         size: usize,
         mapping_type: MappingType,
     ) -> Result<VirtualAddress, KernelError> {
-        let aligned_size = ((size + 4095) / 4096) * 4096;
-        let addr = VirtualAddress(
-            self.next_mmap_addr
-                .fetch_add(aligned_size as u64, Ordering::Relaxed),
-        );
+        self.mmap_flags(size, mapping_type, None)
+    }
 
+    /// Reserve `size` bytes (rounded up to `align`) at the mmap cursor.
+    ///
+    /// The cursor only moves forward within user space (N-133): a request
+    /// that would leave it is refused without moving it.
+    fn reserve_mmap_range(&self, size: usize, align: u64) -> Result<(u64, u64), KernelError> {
+        let refused = KernelError::OutOfMemory {
+            requested: size,
+            available: 0,
+        };
+        let size = (size as u64)
+            .checked_next_multiple_of(align)
+            .filter(|&s| s != 0)
+            .ok_or(refused)?;
+        let mut cur = self.next_mmap_addr.load(Ordering::Acquire);
+        loop {
+            let base = cur.checked_next_multiple_of(align).ok_or(refused)?;
+            let end = base.checked_add(size).ok_or(refused)?;
+            if !crate::mm::user_layout::is_user_range(base as usize, size as usize) {
+                return Err(refused);
+            }
+            match self.next_mmap_addr.compare_exchange_weak(
+                cur,
+                end,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return Ok((base, size)),
+                Err(now) => cur = now,
+            }
+        }
+    }
+
+    /// Give back a reservation if nothing was reserved after it.
+    fn unreserve_mmap_range(&self, base: u64, size: u64) {
+        let _ = self.next_mmap_addr.compare_exchange(
+            base + size,
+            base,
+            Ordering::AcqRel,
+            Ordering::Relaxed,
+        );
+    }
+
+    /// Like [`Self::mmap`], with explicit page flags (from `prot`).
+    pub fn mmap_flags(
+        &self,
+        size: usize,
+        mapping_type: MappingType,
+        flags: Option<PageFlags>,
+    ) -> Result<VirtualAddress, KernelError> {
+        let (base, size) = self.reserve_mmap_range(size, 4096)?;
         // Skip physical page mapping in host tests (no frame allocator available)
         #[cfg(all(feature = "alloc", not(test)))]
-        self.map_region(addr, aligned_size, mapping_type)?;
-
-        Ok(addr)
+        if let Err(e) =
+            self.map_region_flags(VirtualAddress(base), size as usize, mapping_type, flags)
+        {
+            self.unreserve_mmap_range(base, size);
+            return Err(e);
+        }
+        #[cfg(any(not(feature = "alloc"), test))]
+        let _ = (mapping_type, flags);
+        Ok(VirtualAddress(base))
     }
 
     /// Return the base address of the user heap region.
@@ -1803,9 +1912,25 @@ impl VirtualAddressSpace {
     fn brk_extend_heap(&self, old_page: u64, new_page: u64) -> Result<(), KernelError> {
         let delta_pages = (new_page - old_page) as usize;
         let start_addr = VirtualAddress(old_page * 4096);
+        let refused = KernelError::OutOfMemory {
+            requested: delta_pages.saturating_mul(4096),
+            available: 0,
+        };
+        // The new heap pages must be user space and must not run into
+        // another mapping (a MAP_FIXED region above the break): mapping over
+        // it failed half-way and leaked every frame (N-137).
+        let end = new_page.checked_mul(4096).ok_or(refused)?;
+        if !super::user_layout::is_user_range(start_addr.0 as usize, (end - start_addr.0) as usize)
+            || !self.range_is_free(start_addr.0, end)
+        {
+            return Err(refused);
+        }
 
         // Allocate physical frames
-        let mut new_frames = Vec::with_capacity(delta_pages);
+        let mut new_frames = Vec::new();
+        new_frames
+            .try_reserve_exact(delta_pages)
+            .map_err(|_| refused)?;
         {
             let frame_allocator = FRAME_ALLOCATOR.lock();
             for _ in 0..delta_pages {
@@ -1841,13 +1966,26 @@ impl VirtualAddressSpace {
             // SAFETY: pt_root is a valid L4 page table address set during VAS::init().
             let mut mapper = unsafe { create_mapper_from_root(pt_root) };
             let mut alloc = VasFrameAllocator;
-            let flags = PageFlags::PRESENT | PageFlags::WRITABLE | PageFlags::USER;
+            // The heap is data: never executable (N-132).
+            let flags =
+                PageFlags::PRESENT | PageFlags::WRITABLE | PageFlags::USER | PageFlags::NO_EXECUTE;
 
             for (i, &frame) in new_frames.iter().enumerate() {
                 let vaddr = VirtualAddress(start_addr.0 + (i as u64) * 4096);
-                mapper.map_page(vaddr, frame, flags, &mut alloc)?;
-                crate::mm::tlb::flush_page(vaddr.0);
+                if let Err(e) = mapper.map_page(vaddr, frame, flags, &mut alloc) {
+                    for j in 0..i {
+                        let _ = mapper.unmap_page(VirtualAddress(start_addr.0 + (j as u64) * 4096));
+                    }
+                    crate::mm::tlb::flush_all();
+                    let frame_allocator = FRAME_ALLOCATOR.lock();
+                    for &f in &new_frames {
+                        frame_allocator.free_frames(f, 1).ok();
+                    }
+                    return Err(e);
+                }
             }
+            #[cfg(target_arch = "riscv64")]
+            crate::mm::tlb::flush_all();
         }
 
         // Extend existing heap mapping or create initial one
@@ -1864,7 +2002,8 @@ impl VirtualAddressSpace {
             let total_size = ((new_page - heap_start_page) as usize) * 4096;
             let mut mapping = VirtualMapping::new(heap_key, total_size, MappingType::Heap);
             mapping.physical_frames = new_frames;
-            mapping.flags = PageFlags::PRESENT | PageFlags::WRITABLE | PageFlags::USER;
+            mapping.flags =
+                PageFlags::PRESENT | PageFlags::WRITABLE | PageFlags::USER | PageFlags::NO_EXECUTE;
             mappings.insert(heap_key, mapping);
         }
 
@@ -1889,36 +2028,68 @@ impl VirtualAddressSpace {
         if pt_root == 0 {
             return Ok(()); // No page tables, nothing to update
         }
+        let unmapped = KernelError::UnmappedMemory {
+            addr: start.0 as usize,
+        };
+        let size = size.checked_add(4095).map(|s| s & !4095).ok_or(unmapped)?;
+        let end = start.0.checked_add(size as u64).ok_or(unmapped)?;
+        let new_flags = user_prot_flags(prot);
 
-        // Convert POSIX prot flags to hardware PageFlags
-        let mut new_flags = PageFlags::PRESENT | PageFlags::USER;
-        if prot & 0x2 != 0 {
-            // PROT_WRITE
-            new_flags |= PageFlags::WRITABLE;
-        }
-        if prot & 0x4 == 0 {
-            // !PROT_EXEC -> NO_EXECUTE
-            new_flags |= PageFlags::NO_EXECUTE;
+        // The whole range must be mapped (Linux: ENOMEM), and frames this
+        // space only borrows -- device memory, IPC shared regions -- may
+        // not gain rights they were not granted (N-135).
+        let mut mappings = self.mappings.lock();
+        let mut addr = start.0;
+        while addr < end {
+            let Some((_, m)) = mappings
+                .range(..=VirtualAddress(addr))
+                .next_back()
+                .filter(|(_, m)| m.contains(VirtualAddress(addr)))
+            else {
+                return Err(KernelError::UnmappedMemory {
+                    addr: addr as usize,
+                });
+            };
+            if !m.owns_frames() {
+                let gains_write = new_flags.contains(PageFlags::WRITABLE)
+                    && !m.flags.contains(PageFlags::WRITABLE);
+                let gains_exec = !new_flags.contains(PageFlags::NO_EXECUTE);
+                if gains_write || gains_exec {
+                    return Err(KernelError::PermissionDenied {
+                        operation: "mprotect beyond a borrowed mapping's grant",
+                    });
+                }
+            }
+            addr = m.end().0.min(end);
         }
 
-        // SAFETY: pt_root is a valid identity-mapped L4 page table. We hold the
-        // mappings lock implicitly via the caller's &self borrow.
+        // SAFETY: pt_root is this space's L4 table reached through the
+        // physical map; the mappings lock (held) serialises updates.
         let mut mapper = unsafe { create_mapper_from_root(pt_root) };
-
-        let num_pages = (size + 4095) / 4096;
+        let num_pages = size / 4096;
         for i in 0..num_pages {
             let vaddr = VirtualAddress(start.0 + (i as u64) * 4096);
-            // Ignore errors for pages that aren't mapped in the hardware tables
             if let Some(flags) = cow_safe_flags(&mapper, vaddr, new_flags) {
                 let _ = mapper.update_page_flags(vaddr, flags);
             }
-            crate::mm::tlb::flush_page(vaddr.0);
+        }
+        // One shootdown for the range rather than one per page.
+        if num_pages <= 16 {
+            let pages: alloc::vec::Vec<u64> =
+                (0..num_pages as u64).map(|i| start.0 + i * 4096).collect();
+            super::tlb::flush_pages(&pages);
+        } else {
+            super::tlb::flush_all();
         }
 
-        // Update the mapping metadata flags too
-        let mut mappings = self.mappings.lock();
-        if let Some(mapping) = mappings.get_mut(&start) {
-            mapping.flags = new_flags;
+        // Record the protection on every mapping the range covers whole.
+        // (A mapping only partly covered keeps its old flags: the page
+        // tables are authoritative, and splitting comes with the range-
+        // indexed mapping tree, N-143.)
+        for (_, m) in mappings.range_mut(..VirtualAddress(end)) {
+            if m.start.0 >= start.0 && m.end().0 <= end {
+                m.flags = new_flags;
+            }
         }
 
         Ok(())
@@ -2331,16 +2502,23 @@ impl VirtualAddressSpace {
         size: usize,
         mapping_type: MappingType,
     ) -> Result<VirtualAddress, KernelError> {
-        let size = (size as u64).div_ceil(HUGE_PAGE_SIZE) * HUGE_PAGE_SIZE;
-        let base = self
-            .next_mmap_addr
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |next| {
-                Some(next.next_multiple_of(HUGE_PAGE_SIZE) + size)
-            })
-            .map(|prev| prev.next_multiple_of(HUGE_PAGE_SIZE))
-            .unwrap_or(0);
-        let flags = VirtualMapping::new(VirtualAddress(base), 0, mapping_type).flags;
-        self.map_huge_region(base as usize, size as usize, flags, mapping_type)?;
+        let flags = VirtualMapping::new(VirtualAddress(0), 0, mapping_type).flags;
+        self.mmap_huge_flags(size, mapping_type, flags)
+    }
+
+    /// Like [`Self::mmap_huge`], with explicit page flags (from `prot`).
+    #[cfg(feature = "alloc")]
+    pub fn mmap_huge_flags(
+        &self,
+        size: usize,
+        mapping_type: MappingType,
+        flags: PageFlags,
+    ) -> Result<VirtualAddress, KernelError> {
+        let (base, size) = self.reserve_mmap_range(size, HUGE_PAGE_SIZE)?;
+        if let Err(e) = self.map_huge_region(base as usize, size as usize, flags, mapping_type) {
+            self.unreserve_mmap_range(base, size);
+            return Err(e);
+        }
         Ok(VirtualAddress(base))
     }
 }
@@ -2373,12 +2551,11 @@ pub fn map_physical_region_user(
     let memory_space = proc.memory_space.lock();
 
     // Allocate a virtual address range from the mmap region
-    let aligned_size = ((size + 4095) / 4096) * 4096;
-    let vaddr = VirtualAddress(
-        memory_space
-            .next_mmap_addr
-            .fetch_add(aligned_size as u64, Ordering::Relaxed),
-    );
+    let (base, reserved) = memory_space
+        .reserve_mmap_range(size, 4096)
+        .map_err(|_| crate::syscall::SyscallError::OutOfMemory)?;
+    let aligned_size = reserved as usize;
+    let vaddr = VirtualAddress(base);
 
     // Map the physical frames
     #[cfg(feature = "alloc")]
@@ -2392,6 +2569,24 @@ pub fn map_physical_region_user(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn prot_flags_follow_posix_protection() {
+        let none = user_prot_flags(0);
+        assert!(none.contains(PageFlags::PRESENT) && !none.contains(PageFlags::USER));
+        let r = user_prot_flags(0x1);
+        assert!(r.contains(PageFlags::USER) && r.contains(PageFlags::NO_EXECUTE));
+        assert!(!r.contains(PageFlags::WRITABLE));
+        let rw = user_prot_flags(0x3);
+        assert!(rw.contains(PageFlags::WRITABLE) && rw.contains(PageFlags::NO_EXECUTE));
+        let rx = user_prot_flags(0x5);
+        assert!(!rx.contains(PageFlags::NO_EXECUTE) && !rx.contains(PageFlags::WRITABLE));
+        // Default data/shared mappings are no longer executable.
+        let data = VirtualMapping::new(VirtualAddress(0x1000), 0x1000, MappingType::Data);
+        assert!(data.flags.contains(PageFlags::NO_EXECUTE));
+        let shared = VirtualMapping::new(VirtualAddress(0x1000), 0x1000, MappingType::Shared);
+        assert!(shared.flags.contains(PageFlags::NO_EXECUTE));
+    }
 
     #[test]
     fn protection_change_keeps_shared_frames_copy_on_write() {

@@ -16,6 +16,8 @@
 #include <poll.h>
 #include <pthread.h>
 #include <stdio.h>
+#include <signal.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
@@ -572,6 +574,103 @@ static void test_map_fixed_limits(void)
            ok_top && guard == MAP_FAILED && kern == MAP_FAILED && span == MAP_FAILED, why);
 }
 
+/* --- Memory protection (N-132 to N-137). -------------------------------
+ * Each probe runs in a child that must die on its access; reaching _exit(0)
+ * means the access was allowed. */
+static int last_status;
+
+static int child_faults(int which)
+{
+    pid_t pid = fork();
+    if (pid == 0) {
+        volatile unsigned char *p;
+        switch (which) {
+        case 0: /* write to a PROT_READ mapping */
+            p = mmap(0, 4096, PROT_READ, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+            if (p == MAP_FAILED)
+                _exit(2);
+            p[0] = 1;
+            break;
+        case 1: /* read a PROT_NONE mapping */
+            p = mmap(0, 4096, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+            if (p == MAP_FAILED)
+                _exit(2);
+            (void)p[0];
+            break;
+        case 2: { /* execute from a PROT_READ|PROT_WRITE mapping */
+            p = mmap(0, 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+            if (p == MAP_FAILED)
+                _exit(2);
+            p[0] = 0xC3; /* ret */
+            ((void (*)(void))(unsigned long)p)();
+            break;
+        }
+        case 3: { /* execute from the brk heap */
+            unsigned char *h = sbrk(4096);
+            if (h == (void *)-1)
+                _exit(2);
+            h[0] = 0xC3;
+            ((void (*)(void))(unsigned long)h)();
+            break;
+        }
+        case 4: /* read after mprotect(PROT_NONE) */
+            p = mmap(0, 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+            if (p == MAP_FAILED || mprotect((void *)p, 4096, PROT_NONE) != 0)
+                _exit(2);
+            (void)p[0];
+            break;
+        }
+        _exit(0);
+    }
+    int status = 0;
+    if (pid < 0 || waitpid(pid, &status, 0) != pid)
+        return 0;
+    last_status = status;
+    /* Killed by SIGSEGV, reported as such (N-99). */
+    return WIFSIGNALED(status) && WTERMSIG(status) == SIGSEGV;
+}
+
+static void test_memory_protection(void)
+{
+    static const char *names[] = {
+        "mmap_prot_read_blocks_write", "mmap_prot_none_blocks_read",
+        "mmap_rw_not_executable", "brk_heap_not_executable",
+        "mprotect_none_revokes_access",
+    };
+    for (int i = 0; i < 5; i++) {
+        int ok = child_faults(i);
+        static char why[64];
+        snprintf(why, sizeof(why), "access was allowed (wait status 0x%x)", last_status);
+        report(names[i], ok, why);
+    }
+
+    /* mprotect round trip keeps the contents; partly unmapped -> ENOMEM. */
+    int *q = mmap(0, 8192, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    int ok = q != MAP_FAILED;
+    if (ok) {
+        q[0] = 1234;
+        ok = mprotect(q, 4096, PROT_NONE) == 0 && mprotect(q, 4096, PROT_READ | PROT_WRITE) == 0 &&
+             q[0] == 1234;
+        munmap((char *)q + 4096, 4096);
+        errno = 0;
+        ok = ok && mprotect(q, 8192, PROT_READ) != 0 && errno == ENOMEM;
+        munmap(q, 4096);
+    }
+    report("mprotect_restore_and_enomem", ok, "contents lost or no ENOMEM for a hole");
+
+    /* Absurd sizes fail cleanly instead of halting the kernel. */
+    void *huge = mmap(0, 1UL << 46, PROT_READ, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    void *huge2 = mmap(0, (size_t)-4096, PROT_READ, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    void *brk_huge = sbrk((intptr_t)1 << 45);
+    void *after = mmap(0, 4096, PROT_READ, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    static char why[96];
+    snprintf(why, sizeof(why), "huge=%p huge2=%p brk=%p after=%p", huge, huge2, brk_huge, after);
+    report("mmap_brk_huge_lengths_fail_cleanly",
+           huge == MAP_FAILED && huge2 == MAP_FAILED && brk_huge == (void *)-1 &&
+               after != MAP_FAILED,
+           why);
+}
+
 /* --- Directory rename (FS-PERF-03): the node moves, ".." follows. ----- */
 static void test_rename_directory(void)
 {
@@ -856,6 +955,7 @@ int main(int argc, char **argv)
     test_sockets();
     test_timed_waits();
     test_map_fixed_limits();
+    test_memory_protection();
     test_rename_directory();
     test_closed_stdio();
     test_unix_bind_connect();

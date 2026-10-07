@@ -48,8 +48,12 @@ use veridian_kernel::*;
 #[cfg(target_arch = "x86_64")]
 const BOOTLOADER_CONFIG: BootloaderConfig = {
     let mut config = BootloaderConfig::new_default();
-    // Map physical memory for kernel access (required for page table management)
-    config.mappings.physical_memory = Some(Mapping::Dynamic);
+    // Map physical memory for kernel access (required for page table
+    // management) at the base of the kernel half. `Dynamic` placed it in a
+    // lower-half slot (usually L4[3]) inside the user address range, where
+    // a MAP_FIXED mapping could mark the shared physical-map tables USER
+    // and link user pages into every address space (N-134).
+    config.mappings.physical_memory = Some(Mapping::FixedAddress(0xFFFF_8000_0000_0000));
     config.kernel_stack_size = 128 * 1024; // 128 KiB kernel stack
     config
 };
