@@ -7,7 +7,6 @@
 #   breeze                   the Qt style, KWin decoration, cursors, colours
 #   plasma-activities-stats, kactivitymanagerd
 #   libplasma, plasma5support, layer-shell-qt, libkscreen, libksysguard
-#   polkit-qt-1              Qt bindings of polkit (build-dbus.sh)
 #   kscreenlocker            the screen locker (Linux-PAM, build-deps.sh)
 #   milou                    KRunner's result list
 #   plasma-workspace         plasmashell, the session, libkworkspace
@@ -39,7 +38,6 @@ JOBS="${JOBS:-$(nproc)}"
 
 PLASMA_VER="6.7.5"
 PLASMA_URL_BASE="https://download.kde.org/stable/plasma/${PLASMA_VER}"
-POLKIT_QT_VER="0.201.1"
 # Corrosion (CMake's Rust integration) for the build host: kdeplasma-addons
 # builds a Rust helper. A tag archive; its checksum pinned when first
 # downloaded (tag v0.6.1 is commit 1499b14e).
@@ -82,14 +80,6 @@ plasma() {
     apply_patches "${SCRIPT_DIR}/plasma-patches/${name}" "${src}"
     kde_cmake "${name}" "${src}" "$@"
     echo "${stamp}" > "${BUILD_DIR}/${name}-build/.veridian-version"
-}
-
-build_polkit_qt() {
-    component_installed polkit-qt-1 "${POLKIT_QT_VER}" && return 0
-    local src
-    src="$(kde_fetch "polkit-qt-1-${POLKIT_QT_VER}" "https://download.kde.org/stable/polkit-qt-1" plasma.sha256)"
-    kde_cmake polkit-qt-1 "${src}" -DQT_MAJOR_VERSION=6 -DBUILD_EXAMPLES=OFF
-    echo "${POLKIT_QT_VER}" > "${BUILD_DIR}/polkit-qt-1-build/.veridian-version"
 }
 
 build_host_corrosion() {
@@ -182,7 +172,7 @@ main() {
     plasma layer-shell-qt
     plasma libkscreen
     plasma libksysguard
-    build_polkit_qt
+    # polkit-qt-1 comes from build-kf6.sh, before KAuth.
     plasma kscreenlocker
     plasma milou
     # No X11 session: it needs an X server. X11 support itself is on

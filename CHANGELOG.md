@@ -411,6 +411,12 @@
   IDs, as Linux records them at socketpair, listen and connect. Programs that check who is on the
   other end -- D-Bus's EXTERNAL authentication, kdesu's daemon socket -- had nothing to check.
   Runtime test `musl_peercred`.
+- **KDE: KAuth had no backend, and kdesu checked its socket loosely.** polkit-qt-1 was built
+  after KAuth, so KAuth built no backend and Plasma's privileged helpers (fonts, date and time,
+  backlight) could not run; it is now built first, and a KAuth without its polkit backend is
+  rebuilt. KSu's configure check for `struct ucred` failed under musl (it needs `_GNU_SOURCE`),
+  so kdesu fell back to checking its daemon socket's owner by path; the check now passes and the
+  build fails if it does not. KDED, QCA and KWallet are built before KIO, which looks for them.
 - **Passwords are compared in constant time, and failed attempts lock for ten minutes.** The
   account store compared password hashes with `==`, which stops at the first differing byte; it
   now uses the constant-time comparison. Five failed attempts locked an account until reboot,

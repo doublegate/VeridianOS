@@ -32,6 +32,7 @@ KIRIGAMI_ADDONS_VER="1.15.0"
 # QtKeychain (ksshaskpass): a tag archive, checksum pinned when first
 # downloaded (tag 0.17.0 is commit 85835a63).
 QTKEYCHAIN_VER="0.17.0"
+POLKIT_QT_VER="0.201.1"
 
 log() { echo "[build-kf6] $*"; }
 die() { echo "[build-kf6] ERROR: $*" >&2; exit 1; }
@@ -274,7 +275,8 @@ build_tier2() {
     build_kf_module KCompletion
     build_kf_module KNotifications
     build_kf_module KJobWidgets
-    build_kf_module KAuth
+    build_polkit_qt
+    build_kauth
     build_kf_module KConfigWidgets
     build_kf_module KService
     build_kf_module Solid
@@ -285,9 +287,17 @@ build_tier3() {
     build_kf_module KDeclarative
     build_kf_module KXmlGui
     build_kf_module KBookmarks
-    # KIO requires KCrash and KDBusAddons.
+    # KIO requires KCrash and KDBusAddons, and uses KDED (proxies,
+    # cookies) and KWallet when they are there at configure time: they
+    # come first (they were built after it, so KIO was configured without).
     build_kf_module KCrash
     build_kf_module KDBusAddons
+    build_kf_module KDED
+    build_qca
+    # KWallet: secret storage -- the library, the ksecretd and kwalletd
+    # daemons (libgcrypt from build-deps.sh) and kwallet-query. GpgME
+    # wallets are optional and not in the sysroot.
+    build_kf_module KWallet
     build_kf_module KIO
     # KCMUtils requires the org.kde.kirigami QML module.
     build_kf_module Kirigami
@@ -303,11 +313,6 @@ build_tier4() {
     build_kf_module Sonnet -- -DSONNET_NO_BACKENDS=ON
     # KTextWidgets: text editing widgets. No text-to-speech engine.
     build_kf_module KTextWidgets -- -DWITH_TEXT_TO_SPEECH=OFF
-    build_qca
-    # KWallet: secret storage -- the library, the ksecretd and kwalletd
-    # daemons (libgcrypt from build-deps.sh) and kwallet-query. GpgME
-    # wallets are optional and not in the sysroot.
-    build_kf_module KWallet
     build_qtkeychain
     # Attica: Open Collaboration Services client, required by KNewStuff
     build_kf_module Attica
@@ -319,7 +324,6 @@ build_tier4() {
     build_kf_module KParts
     # KTextEditor: the editor component (plasma-workspace requires it).
     build_kf_module KTextEditor
-    build_kf_module KDED
     # Prison: barcode/QR code library (used by some Plasma applets)
     build_kf_module Prison
     # KSvg: SVG rendering for Plasma themes
@@ -333,10 +337,66 @@ build_tier4() {
     # No utempter: VeridianOS keeps no utmp login records (nothing reads
     # them yet), so terminals are not recorded there.
     build_kf_module KPty -- -DCMAKE_DISABLE_FIND_PACKAGE_UTEMPTER=ON
-    build_kf_module KSu kdesu
+    build_ksu
     # Image format plugins for Qt (PSD, XCF, TGA, QOI, ...); no external
     # codec libraries yet (AVIF, HEIF, JPEG XL, OpenEXR, RAW).
     build_kf_module KImageFormats
+}
+
+# ── polkit-qt-1 and KAuth ─────────────────────────────────────────────
+# KAuth runs privileged helpers (Plasma's KCMs: fonts, date and time,
+# backlight) through a backend; its only backend here is polkit, through
+# polkit-qt-1 (polkit itself from build-dbus.sh). polkit-qt-1 was built in
+# the Plasma phase, after KAuth, which then built no backend at all ("No
+# valid KAuth backends will be built"). An install without the backend
+# plugin is rebuilt.
+build_polkit_qt() {
+    if [[ -f "${SYSROOT}/usr/lib/cmake/PolkitQt6-1/PolkitQt6-1Config.cmake" ]]; then
+        log "polkit-qt-1: already installed."
+        return 0
+    fi
+    local src
+    src="$(kde_fetch "polkit-qt-1-${POLKIT_QT_VER}" "https://download.kde.org/stable/polkit-qt-1" plasma.sha256)"
+    kde_cmake polkit-qt-1 "${src}" -DQT_MAJOR_VERSION=6 -DBUILD_EXAMPLES=OFF
+    [[ -f "${SYSROOT}/usr/lib/cmake/PolkitQt6-1/PolkitQt6-1Config.cmake" ]] ||
+        die "polkit-qt-1: CMake config not installed"
+}
+
+build_kauth() {
+    local backend="${SYSROOT}/usr/lib/qt6/plugins/kf6/kauth/backend/kauth_backend_plugin.so"
+    if kf_config KAuth >/dev/null && [[ -f "${backend}" ]]; then
+        log "KAuth: already installed."
+        return 0
+    fi
+    local src
+    src="$(kde_fetch "kauth-${KF_VER}" "${KF_URL_BASE}" kf6.sha256)"
+    patch_kf_source KAuth "${src}"
+    kde_cmake KAuth "${src}" -DKAUTH_BACKEND_NAME=POLKITQT6-1
+    [[ -f "${backend}" ]] || die "KAuth: no polkit backend plugin installed"
+    kf_config KAuth >/dev/null || die "KF6 KAuth: CMake config not installed"
+}
+
+# ── KSu ───────────────────────────────────────────────────────────────
+# kdesu checks that the daemon's socket belongs to the user through
+# SO_PEERCRED, which needs `struct ucred`: musl declares it only under
+# _GNU_SOURCE, which the C configure check does not define, so the check
+# failed and kdesu fell back to its "sloppy" owner check (an lstat of the
+# socket path). The marker records a build made with the check passing; an
+# older install is rebuilt.
+build_ksu() {
+    local marker="${SYSROOT}/usr/lib/cmake/KF6Su/.veridian-peercred"
+    if kf_config KSu >/dev/null && [[ -f "${marker}" ]]; then
+        log "KSu: already installed."
+        return 0
+    fi
+    local src
+    src="$(kde_fetch "kdesu-${KF_VER}" "${KF_URL_BASE}" kf6.sha256)"
+    patch_kf_source KSu "${src}"
+    kde_cmake KSu "${src}" -DCMAKE_REQUIRED_DEFINITIONS=-D_GNU_SOURCE
+    grep -Eq '^HAVE_STRUCT_UCRED:INTERNAL=(1|TRUE)$' "${BUILD_DIR}/KSu-build/CMakeCache.txt" ||
+        die "KSu: struct ucred not found; kdesu would use its sloppy socket check"
+    kf_config KSu >/dev/null || die "KF6 KSu: CMake config not installed"
+    : > "${marker}"
 }
 
 # ── QtKeychain ────────────────────────────────────────────────────────
