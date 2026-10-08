@@ -133,6 +133,11 @@ static void test_prctl(void)
         if (waitpid(child, &st, 0) != child || !WIFEXITED(st) || WEXITSTATUS(st) != 0) f |= 32;
         errno = 0;
         if (prctl(0x7fff, 0, 0, 0, 0) != -1 || errno != EINVAL) f |= 64;
+        /* PR_SET_DUMPABLE: 0 and 1 only; the flag reads back. */
+        if (prctl(PR_GET_DUMPABLE, 0, 0, 0, 0) != 1) f |= 128;
+        if (prctl(PR_SET_DUMPABLE, 0, 0, 0, 0) != 0 || prctl(PR_GET_DUMPABLE, 0, 0, 0, 0) != 0)
+            f |= 128;
+        if (prctl(PR_SET_DUMPABLE, 2, 0, 0, 0) != -1 || errno != EINVAL) f |= 128;
         _exit(f);
     }
     int st = 0;
@@ -302,15 +307,16 @@ static void test_clocks_and_usage(void)
     report("musl_clocks_and_usage", f == 0, why);
 }
 
-/* The --ids mode: this program's IDs, AT_SECURE and command name, for
- * test_setuid_exec. */
+/* The --ids mode: this program's IDs, AT_SECURE, dumpable flag and
+ * command name, for test_setuid_exec. */
 static int print_ids(void)
 {
     uid_t r, e, s;
     char comm[16] = {0};
     getresuid(&r, &e, &s);
     prctl(PR_GET_NAME, comm, 0, 0, 0);
-    printf("%u %u %u %lu %s\n", r, e, s, getauxval(AT_SECURE), comm);
+    printf("%u %u %u %lu %d %s\n", r, e, s, getauxval(AT_SECURE),
+           prctl(PR_GET_DUMPABLE, 0, 0, 0, 0), comm);
     return 0;
 }
 
@@ -386,9 +392,9 @@ static void test_setuid_exec(const char *self)
              ok_copy, chmodded, (unsigned)(sb.st_mode & 07777), gained, st_gained, kept, st_kept,
              shared, st_shared);
     report("musl_setuid_exec",
-           chmodded && st_gained == 0 && strcmp(gained, "1000 0 0 1 suid_ids") == 0
-               && st_kept == 0 && strcmp(kept, "1000 1000 1000 0 suid_ids") == 0
-               && st_shared == 0 && strcmp(shared, "1000 1000 1000 0 suid_ids") == 0,
+           chmodded && st_gained == 0 && strcmp(gained, "1000 0 0 1 0 suid_ids") == 0
+               && st_kept == 0 && strcmp(kept, "1000 1000 1000 0 1 suid_ids") == 0
+               && st_shared == 0 && strcmp(shared, "1000 1000 1000 0 1 suid_ids") == 0,
            why);
 
     /* The owner (1000) writing its own set-user-ID file clears the bit;

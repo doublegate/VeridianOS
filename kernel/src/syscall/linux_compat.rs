@@ -136,6 +136,8 @@ pub(crate) fn sys_prctl(
 
     use crate::process::thread::{comm_from, COMM_LEN};
 
+    const PR_GET_DUMPABLE: usize = 3;
+    const PR_SET_DUMPABLE: usize = 4;
     const PR_SET_NAME: usize = 15;
     const PR_GET_NAME: usize = 16;
     const PR_SET_TIMERSLACK: usize = 29;
@@ -155,6 +157,22 @@ pub(crate) fn sys_prctl(
         PR_GET_NAME => {
             let comm = *thread()?.comm.lock();
             super::userspace::write_user_bytes(arg2, &comm)?;
+            Ok(0)
+        }
+        // Whether the process's user may trace it (only 0 and 1 are
+        // settable, as on Linux).
+        PR_GET_DUMPABLE => Ok(crate::process::current_process()
+            .ok_or(super::SyscallError::InvalidState)?
+            .dumpable
+            .load(Ordering::Acquire) as usize),
+        PR_SET_DUMPABLE => {
+            if arg2 > 1 {
+                return Err(super::SyscallError::InvalidArgument);
+            }
+            crate::process::current_process()
+                .ok_or(super::SyscallError::InvalidState)?
+                .dumpable
+                .store(arg2 == 1, Ordering::Release);
             Ok(0)
         }
         // Advisory only.

@@ -52,7 +52,11 @@
   nothing; each thread now has Linux's command name (15 bytes), set at creation, by exec (the
   program's file name, or the script's) and by PR_SET_NAME, and inherited by threads and fork
   children. PR_SET_NO_NEW_PRIVS and PR_GET_NO_NEW_PRIVS exist with Linux's argument checks;
-  the flag is one-way and inherited. Runtime test `musl_prctl`.
+  the flag is one-way and inherited. PR_SET_DUMPABLE and PR_GET_DUMPABLE exist too
+  (ssh-agent, gpg-agent and kdesud use them to keep their user's other processes out): only
+  root may ptrace a non-dumpable process or read its robust list, fork keeps the flag, and exec
+  clears it for a set-ID program or one the caller cannot read, setting it otherwise, as Linux
+  does. Runtime test `musl_prctl`.
 - **Password checks for PAM: `veridian_auth` and pam_veridian.** A VeridianOS system call
   (private 1352) checks a password, reports an account's state, or changes a password, against
   the kernel's account store, so passwords never leave the kernel and there is no

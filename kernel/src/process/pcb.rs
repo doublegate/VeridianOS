@@ -183,6 +183,11 @@ pub struct Process {
     /// anything that waits.
     pub cred_guard: Mutex<()>,
 
+    /// Linux's mm dumpable flag (PR_SET_DUMPABLE): when clear, only root
+    /// may ptrace the process or read its robust list. Inherited on fork,
+    /// set by exec as `install_exec_credentials` decides.
+    pub dumpable: core::sync::atomic::AtomicBool,
+
     /// CPU time of the process's exited threads (its live threads' is the
     /// dispatcher's), and of its children it has waited for, with theirs
     /// (Linux's signal_struct sums; N-218, N-223).
@@ -329,6 +334,7 @@ impl Process {
             pgid: AtomicU64::new(pid.0),
             tracer: AtomicU64::new(0),
             cred_guard: Mutex::new(()),
+            dumpable: core::sync::atomic::AtomicBool::new(true),
             cpu_exited: Mutex::new(crate::sched::cputime::CpuTimes::ZERO),
             cpu_children: Mutex::new(crate::sched::cputime::CpuTimes::ZERO),
             peak_rss_pages: core::sync::atomic::AtomicUsize::new(0),

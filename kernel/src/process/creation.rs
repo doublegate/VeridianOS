@@ -305,6 +305,18 @@ pub fn search_path(name: &str) -> Option<String> {
     None
 }
 
+/// What exec learned from the program file about the credentials and
+/// dumpability of the new image.
+#[cfg(feature = "alloc")]
+struct ExecIds {
+    /// The owner a set-user-ID file offers.
+    set_uid: Option<u32>,
+    /// The group a set-group-ID file (with group execute) offers.
+    set_gid: Option<u32>,
+    /// The caller may read the program (and its loader).
+    readable: bool,
+}
+
 /// Install the credentials a program runs with (Linux's
 /// cred_guard_mutex section of exec): `set_ids` are the owner and group a
 /// set-user-ID or set-group-ID file offers, granted unless the thread asked
@@ -315,11 +327,7 @@ pub fn search_path(name: &str) -> Option<String> {
 /// attached before is seen here, and one attaching after sees the new
 /// credentials.
 #[cfg(feature = "alloc")]
-fn install_exec_credentials(
-    process: &super::Process,
-    thread: &super::Thread,
-    (set_uid, set_gid): (Option<u32>, Option<u32>),
-) {
+fn install_exec_credentials(process: &super::Process, thread: &super::Thread, ids: ExecIds) {
     use core::sync::atomic::Ordering;
 
     let _guard = process.cred_guard.lock();
@@ -332,8 +340,16 @@ fn install_exec_credentials(
     let fs_shared = thread.fs().users.load(Ordering::Acquire) > 1;
     let may_gain =
         !thread.no_new_privs.load(Ordering::Acquire) && !traced_unprivileged && !fs_shared;
-    let creds = process.credentials().after_exec(set_uid, set_gid, may_gain);
+    let creds = process
+        .credentials()
+        .after_exec(ids.set_uid, ids.set_gid, may_gain);
     process.update_credentials(|c| *c = creds);
+    // Linux's begin_new_exec: a process running with other effective IDs
+    // than its real ones, or a program it could not read, may not be
+    // traced or have its memory read by its user (PR_GET_DUMPABLE 0);
+    // otherwise exec makes it dumpable again.
+    let dumpable = ids.readable && creds.euid == creds.ruid && creds.egid == creds.rgid;
+    process.dumpable.store(dumpable, Ordering::Release);
 }
 
 /// The last component of `path` (Linux's kbasename).
@@ -475,13 +491,25 @@ pub fn exec_process(path: &str, argv: &[&str], envp: &[&str]) -> Result<(), Kern
     // A set-user-ID or set-group-ID program runs as its file's owner or
     // group (Linux's bprm_fill_uid): the IDs the file offers, read with the
     // file. Whether they are granted is decided when they are installed.
+    // A program (or loader) the caller may run but not read must not be
+    // readable through the process either (Linux's would_dump).
     let set_ids = {
+        let creds = process.credentials();
+        let readable = |meta: &crate::fs::Metadata| {
+            meta.permissions
+                .can_read(creds.euid, creds.gid_for(meta.gid), meta.uid, meta.gid)
+        };
         let meta = file_node.metadata()?;
         let perms = meta.permissions;
-        (
-            perms.set_uid.then_some(meta.uid),
-            (perms.set_gid && perms.group_exec).then_some(meta.gid),
-        )
+        let interp_readable = match &interp {
+            Some((node, ..)) => readable(&node.metadata()?),
+            None => true,
+        };
+        ExecIds {
+            set_uid: perms.set_uid.then_some(meta.uid),
+            set_gid: (perms.set_gid && perms.group_exec).then_some(meta.gid),
+            readable: readable(&meta) && interp_readable,
+        }
     };
 
     // Point of no return: from clear() on, a failure cannot go back to the

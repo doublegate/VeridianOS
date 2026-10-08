@@ -195,6 +195,13 @@ pub fn fork_process_with(opts: &ForkOptions) -> Result<(ProcessId, super::Thread
         new_process
             .sid
             .store(parent_sid, core::sync::atomic::Ordering::Release);
+        // So is the dumpable flag (the memory it protects is copied).
+        new_process.dumpable.store(
+            current_process
+                .dumpable
+                .load(core::sync::atomic::Ordering::Acquire),
+            core::sync::atomic::Ordering::Release,
+        );
     }
 
     // Signal dispositions and the blocked mask are inherited (POSIX fork);

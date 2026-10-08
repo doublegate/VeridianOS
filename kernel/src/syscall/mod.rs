@@ -1869,12 +1869,16 @@ fn sys_get_robust_list(tid: usize, head_out: usize, len_out: usize) -> SyscallRe
         crate::process::table::PROCESS_TABLE.for_each(|p| {
             if found.is_none() {
                 if let Some(t) = p.get_thread(crate::process::ThreadId(tid as u64)) {
-                    found = Some((p.credentials(), t));
+                    found = Some((
+                        p.credentials(),
+                        p.dumpable.load(core::sync::atomic::Ordering::Acquire),
+                        t,
+                    ));
                 }
             }
         });
-        let (target_creds, thread) = found.ok_or(SyscallError::ProcessNotFound)?;
-        if !debug::may_access(&caller.credentials(), &target_creds) {
+        let (target_creds, target_dumpable, thread) = found.ok_or(SyscallError::ProcessNotFound)?;
+        if !debug::may_access(&caller.credentials(), &target_creds, target_dumpable) {
             return Err(SyscallError::OperationNotPermitted);
         }
         thread

@@ -205,8 +205,12 @@ fn may_attach(
     target_pid: u64,
     target: &process::creds::Credentials,
     target_tracer: u64,
+    target_dumpable: bool,
 ) -> Result<(), SyscallError> {
-    if target_pid == caller_pid || target_tracer != 0 || !may_access(caller, target) {
+    if target_pid == caller_pid
+        || target_tracer != 0
+        || !may_access(caller, target, target_dumpable)
+    {
         return Err(SyscallError::OperationNotPermitted);
     }
     Ok(())
@@ -214,11 +218,12 @@ fn may_attach(
 
 /// Linux `ptrace_may_access` without capabilities: root, or the target's
 /// real, effective and saved IDs are all the caller's real ones (so a
-/// setuid program running privileged is out of reach). Also guards
-/// get_robust_list.
+/// setuid program running privileged is out of reach) and the target is
+/// dumpable (PR_SET_DUMPABLE). Also guards get_robust_list.
 pub(super) fn may_access(
     caller: &process::creds::Credentials,
     target: &process::creds::Credentials,
+    target_dumpable: bool,
 ) -> bool {
     let same_user = [target.ruid, target.euid, target.suid]
         .iter()
@@ -226,7 +231,7 @@ pub(super) fn may_access(
         && [target.rgid, target.egid, target.sgid]
             .iter()
             .all(|&id| id == caller.rgid);
-    caller.euid == 0 || same_user
+    caller.euid == 0 || (same_user && target_dumpable)
 }
 
 /// The process `pid` if the caller is its tracer; ESRCH otherwise, as
@@ -277,6 +282,7 @@ pub fn sys_ptrace(request: usize, pid: usize, addr: usize, data: usize) -> Sysca
                 target.pid.0,
                 &target.credentials(),
                 target.tracer.load(Ordering::Acquire),
+                target.dumpable.load(Ordering::Acquire),
             )?;
             // Lost race with another tracer: EPERM, as above.
             target
@@ -356,12 +362,16 @@ mod tests {
         let mut setuid_root = Credentials::new(1000, 100);
         setuid_root.euid = 0;
         setuid_root.suid = 0;
-        assert_eq!(may_attach(10, &user, 20, &user, 0), Ok(()));
-        assert_eq!(may_attach(10, &root, 20, &user, 0), Ok(()));
+        assert_eq!(may_attach(10, &user, 20, &user, 0, true), Ok(()));
+        assert_eq!(may_attach(10, &root, 20, &user, 0, true), Ok(()));
         let eperm = Err(SyscallError::OperationNotPermitted);
-        assert_eq!(may_attach(10, &user, 20, &other, 0), eperm);
-        assert_eq!(may_attach(10, &user, 20, &setuid_root, 0), eperm);
-        assert_eq!(may_attach(10, &user, 10, &user, 0), eperm);
-        assert_eq!(may_attach(10, &root, 20, &user, 30), eperm);
+        assert_eq!(may_attach(10, &user, 20, &other, 0, true), eperm);
+        assert_eq!(may_attach(10, &user, 20, &setuid_root, 0, true), eperm);
+        assert_eq!(may_attach(10, &user, 10, &user, 0, true), eperm);
+        assert_eq!(may_attach(10, &root, 20, &user, 30, true), eperm);
+        // A process that made itself non-dumpable (PR_SET_DUMPABLE 0), or
+        // exec'd a set-ID or unreadable program, only root may trace.
+        assert_eq!(may_attach(10, &user, 20, &user, 0, false), eperm);
+        assert_eq!(may_attach(10, &root, 20, &user, 0, false), Ok(()));
     }
 }
