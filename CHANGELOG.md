@@ -264,6 +264,12 @@
 
 ### Changed
 
+- **mkfs-blockfs keeps modes, owners and symlinks.** Images gave every file 0755 or 0644 and
+  every directory 0755, dropping set-ID and sticky bits, and copied each symlink's target in its
+  place (every BusyBox applet link was a full copy of BusyBox). Files and directories now keep
+  their permission bits, symlinks are stored as BlockFS symlinks, `--attrs FILE` sets owners and
+  modes by image path (a path missing from the image is an error), and the inode table is sized
+  for the tree being imaged.
 - **Linux system call numbers are the only user ABI (X1, ADR 0009).** A call Linux has uses
   Linux's x86_64 number and name (`write` is 1); a VeridianOS-only call (IPC, capabilities,
   packages, framebuffer, Wayland, audio) has a private number from 1024. `abi/syscalls.map` is
