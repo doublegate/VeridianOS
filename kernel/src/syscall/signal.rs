@@ -298,6 +298,61 @@ pub fn sys_sigsuspend(mask_ptr: usize) -> SyscallResult {
 /// 0 on success (the thread context has been restored to the pre-signal
 /// state; the normal syscall return path will resume at the interrupted
 /// instruction).
+/// sigaltstack(ss, old_ss) (N-222): set and/or report the calling thread's
+/// alternate signal stack, as Linux does: the new settings are read first
+/// (EFAULT), then applied (EPERM while running on the alternate stack,
+/// EINVAL for unknown modes, ENOMEM below MINSIGSTKSZ), then the previous
+/// ones written out. `stack_t` is { ss_sp: u64, ss_flags: i32, pad, ss_size:
+/// u64 }, 24 bytes.
+pub fn sys_sigaltstack(ss: usize, old_ss: usize) -> SyscallResult {
+    use crate::{
+        process::signals::{AltStackError, AltStackRequest},
+        syscall::userspace::{read_user_bytes, write_user_bytes},
+    };
+
+    let thread = process::current_thread().ok_or(SyscallError::InvalidState)?;
+    // The caller's stack pointer decides SS_ONSTACK and EPERM.
+    #[cfg(all(target_arch = "x86_64", target_os = "none"))]
+    let sp = crate::arch::x86_64::syscall::get_syscall_frame().map_or(0, |f| f.rsp);
+    #[cfg(not(all(target_arch = "x86_64", target_os = "none")))]
+    let sp = 0u64;
+
+    let request = if ss != 0 {
+        let mut raw = [0u8; 24];
+        read_user_bytes(ss, &mut raw)?;
+        let word = |at: usize| u64::from_ne_bytes(raw[at..at + 8].try_into().unwrap_or([0; 8]));
+        Some(AltStackRequest {
+            sp: word(0),
+            flags: i32::from_ne_bytes(raw[8..12].try_into().unwrap_or([0; 4])),
+            size: word(16),
+        })
+    } else {
+        None
+    };
+
+    let previous = {
+        let mut alt = thread.altstack.lock();
+        let previous = alt.report(sp);
+        if let Some(request) = request {
+            alt.set(request, sp).map_err(|e| match e {
+                AltStackError::OnStack => SyscallError::OperationNotPermitted,
+                AltStackError::Invalid => SyscallError::InvalidArgument,
+                AltStackError::TooSmall => SyscallError::OutOfMemory,
+            })?;
+        }
+        previous
+    };
+
+    if old_ss != 0 {
+        let mut raw = [0u8; 24];
+        raw[0..8].copy_from_slice(&previous.sp.to_ne_bytes());
+        raw[8..12].copy_from_slice(&previous.flags.to_ne_bytes());
+        raw[16..24].copy_from_slice(&previous.size.to_ne_bytes());
+        write_user_bytes(old_ss, &raw)?;
+    }
+    Ok(0)
+}
+
 pub fn sys_sigreturn(frame_ptr: usize) -> SyscallResult {
     // A dispatched thread: Linux rt_sigreturn, restoring into the live
     // system call frame (the frame address comes from the user RSP, not

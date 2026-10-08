@@ -66,7 +66,7 @@ renumbering; **X2** = the Linux syscall completion program (`docs/compat/COMPATI
 | N-219 | Medium C | clock_gettime, gettimeofday | CLOCK_REALTIME counts from boot, not 1970 | RTC epoch offset | X2 (time) |
 | N-220 | Low C | gettimeofday | NULL tv is EFAULT; tz never written | allow NULL, zero tz | X2 (time) |
 | N-221 | Medium C | sched_* | Stubs: set calls succeed without effect, get calls return 0, getaffinity writes nothing; the native affinity calls take (tid, ptr, size), not Linux's (pid, size, ptr) | policy table, affinity through the native handlers | D (scheduling syscalls) |
-| N-222 | Medium C | sigaltstack | Succeeds without doing anything, never writes `old_ss` | per-thread alternate stack, SA_ONSTACK | D3 |
+| N-222 | Medium C | sigaltstack | Succeeds without doing anything, never writes `old_ss` | per-thread alternate stack, SA_ONSTACK | v0.27; **fixed**: a per-thread alternate stack with Linux's rules (SS_ONSTACK while on it, EPERM changing it there, EINVAL for unknown modes, ENOMEM below MINSIGSTKSZ, SS_AUTODISARM); SA_ONSTACK handlers run on it (a frame that does not fit is SIGSEGV), `uc_stack` records it and rt_sigreturn restores it; new threads start without one, fork keeps it, exec clears it; native libc `stack_t` and `sigaltstack()` |
 | N-223 | Medium C | sysinfo, getrusage | ENOSYS; musl `sysconf(_SC_PHYS_PAGES)` reads an uninitialised struct | implement | X2 (system) |
 | N-224 | Medium C | getrlimit, setrlimit, prlimit64 | Most resources EINVAL; setrlimit has no effect; prlimit64 ignores the pid | per-process limits | X2 (process) |
 | N-225 | Medium C | set_robust_list | Stored per process, never walked at thread death | per thread, walked in exit | D (threads) |

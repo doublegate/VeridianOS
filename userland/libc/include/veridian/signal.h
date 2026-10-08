@@ -331,6 +331,34 @@ int sigpending(sigset_t *set);
  */
 int sigsuspend(const sigset_t *mask);
 
+/* ------------------------------------------------------------------------- */
+/* Alternate signal stacks                                                   */
+/* ------------------------------------------------------------------------- */
+
+/** An alternate signal stack (Linux layout, 24 bytes). */
+typedef struct {
+    void *ss_sp;        /* Lowest address of the stack */
+    int ss_flags;       /* SS_ONSTACK, SS_DISABLE, SS_AUTODISARM */
+    size_t ss_size;     /* Size in bytes */
+} stack_t;
+
+#define SS_ONSTACK      1           /* Running on the alternate stack */
+#define SS_DISABLE      2           /* No alternate stack */
+#define SS_AUTODISARM   (1U << 31)  /* Disarmed while a handler runs on it */
+#define MINSIGSTKSZ     2048        /* Smallest stack sigaltstack accepts */
+#define SIGSTKSZ        8192        /* A size that suffices for most handlers */
+
+/**
+ * Set and/or report the calling thread's alternate signal stack, which
+ * handlers installed with SA_ONSTACK run on.
+ *
+ * @param ss        New stack (NULL to query only).
+ * @param old_ss    Receives the previous stack (NULL to discard).
+ * @return 0 on success, -1 on error (EPERM while running on the stack,
+ *         EINVAL for unknown flags, ENOMEM below MINSIGSTKSZ).
+ */
+int sigaltstack(const stack_t *ss, stack_t *old_ss);
+
 #ifdef __cplusplus
 }
 #endif

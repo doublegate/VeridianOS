@@ -1241,7 +1241,7 @@ fn handle_syscall(
         | Syscall::Fallocate
         | Syscall::Statfs
         | Syscall::Fstatfs => Err(SyscallError::NotImplemented),
-        Syscall::Sigaltstack => Ok(0),
+        Syscall::Sigaltstack => signal::sys_sigaltstack(arg1, arg2),
         Syscall::SchedSetscheduler
         | Syscall::SchedGetscheduler
         | Syscall::SchedGetPriorityMax

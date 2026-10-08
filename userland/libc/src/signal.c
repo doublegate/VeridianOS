@@ -70,6 +70,22 @@ int sigaction(int signum, const struct sigaction *act,
 }
 
 /* ========================================================================= */
+/* sigaltstack                                                               */
+/* ========================================================================= */
+
+_Static_assert(sizeof(stack_t) == 24, "stack_t must match the kernel's layout");
+
+int sigaltstack(const stack_t *ss, stack_t *old_ss)
+{
+    long ret = veridian_syscall2(SYS_sigaltstack, ss, old_ss);
+    if (ret < 0) {
+        errno = (int)(-ret);
+        return -1;
+    }
+    return 0;
+}
+
+/* ========================================================================= */
 /* sigprocmask                                                               */
 /* ========================================================================= */
 

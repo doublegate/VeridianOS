@@ -417,6 +417,9 @@ pub struct Thread {
     /// returns (`has_saved_sigmask` says whether one is saved).
     pub saved_sigmask: AtomicU64,
     pub has_saved_sigmask: AtomicBool,
+    /// The alternate signal stack (sigaltstack; N-222). A new thread has
+    /// none; fork copies the parent thread's.
+    pub altstack: Mutex<super::signals::SigAltStack>,
     /// Detached flag (pthread_detach)
     pub detached: AtomicBool,
     /// Filesystem view (cwd, umask)
@@ -535,6 +538,7 @@ impl Thread {
             rt_queue: super::signals::RtQueue::new(),
             saved_sigmask: AtomicU64::new(0),
             has_saved_sigmask: AtomicBool::new(false),
+            altstack: Mutex::new(super::signals::SigAltStack::default()),
             detached: AtomicBool::new(false),
             fs,
         }

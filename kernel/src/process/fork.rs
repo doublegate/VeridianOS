@@ -351,13 +351,15 @@ pub fn fork_process_with(opts: &ForkOptions) -> Result<(ProcessId, super::Thread
             .write_bytes_private(ptr as u64, &tid_bytes, false);
     }
 
-    // The calling thread's blocked mask (per thread, N-109).
+    // The calling thread's blocked mask (per thread, N-109) and alternate
+    // signal stack (N-222; a fork or vfork child keeps both).
     new_thread.sigmask.store(
         current_thread
             .sigmask
             .load(core::sync::atomic::Ordering::Acquire),
         core::sync::atomic::Ordering::Release,
     );
+    *new_thread.altstack.lock() = *current_thread.altstack.lock();
     new_process.add_thread(new_thread)?;
 
     // Add to parent's children list

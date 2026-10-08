@@ -295,6 +295,49 @@ static void test_signals(void)
 
 /* N-114: a thread runs on its own stack (no kernel-chosen one is mapped
  * for it), and a child it forks can still exec. */
+/* sigaltstack with musl's wrapper (N-222): an SA_ONSTACK handler runs on
+ * the alternate stack and sees SS_ONSTACK; SS_AUTODISARM disarms the stack
+ * during the handler and rt_sigreturn re-arms it. */
+static char musl_alt[4 * SIGSTKSZ];
+static volatile uintptr_t musl_alt_sp;
+static volatile int musl_alt_flags;
+static void on_alt(int sig)
+{
+    int local;
+    stack_t now;
+    (void)sig;
+    musl_alt_sp = (uintptr_t)&local;
+    musl_alt_flags = sigaltstack(0, &now) == 0 ? now.ss_flags : -1;
+}
+
+static void test_sigaltstack(void)
+{
+    stack_t st = {.ss_sp = musl_alt, .ss_size = sizeof(musl_alt), .ss_flags = 0}, q;
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = on_alt;
+    sa.sa_flags = SA_ONSTACK;
+    sigaction(SIGUSR1, &sa, 0);
+
+    int set = sigaltstack(&st, 0) == 0;
+    raise(SIGUSR1);
+    int on = musl_alt_sp > (uintptr_t)musl_alt &&
+             musl_alt_sp - (uintptr_t)musl_alt <= sizeof(musl_alt) &&
+             (musl_alt_flags & SS_ONSTACK);
+    st.ss_flags = SS_AUTODISARM;
+    sigaltstack(&st, 0);
+    raise(SIGUSR1);
+    int disarmed = (musl_alt_flags & SS_DISABLE) != 0;
+    int rearmed = sigaltstack(0, &q) == 0 && q.ss_sp == musl_alt && (q.ss_flags & SS_AUTODISARM);
+    st.ss_flags = SS_DISABLE;
+    sigaltstack(&st, 0);
+    signal(SIGUSR1, SIG_DFL);
+
+    static char why[80];
+    snprintf(why, sizeof(why), "set=%d on=%d disarmed=%d rearmed=%d", set, on, disarmed, rearmed);
+    report("musl_sigaltstack", set && on && disarmed && rearmed, why);
+}
+
 static void *fork_exec_from_thread(void *arg)
 {
     (void)arg;
@@ -734,6 +777,7 @@ int main(void)
     test_unix_socket_wakeups();
     test_creds_and_paths();
     test_spawn();
+    test_sigaltstack();
     printf("MUSL-RUNTIME: %d/%d\n", passed, total);
     return passed == total ? 0 : 1;
 }

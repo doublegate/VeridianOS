@@ -650,8 +650,10 @@ pub fn exec_process(path: &str, argv: &[&str], envp: &[&str]) -> Result<(), Kern
         drop(old);
     }
 
-    // Step 6: Reset signal handlers to defaults
+    // Step 6: Reset signal handlers to defaults, and the alternate signal
+    // stack (it was in the old image), as Linux does.
     process.reset_signal_handlers();
+    *current_thread.altstack.lock() = super::signals::SigAltStack::default();
 
     // The image is replaced: a parent waiting in vfork may run again; the
     // memory it shared with this process is no longer this process's.

@@ -155,6 +155,134 @@ const SA_RESTART: u64 = 0x1000_0000;
 const SA_NODEFER: u64 = 0x4000_0000;
 #[cfg(target_arch = "x86_64")]
 const SA_RESETHAND: u64 = 0x8000_0000;
+/// Run the handler on the alternate signal stack (sigaltstack).
+#[cfg(target_arch = "x86_64")]
+const SA_ONSTACK: u64 = 0x0800_0000;
+
+/// `stack_t.ss_flags`: the thread is running on its alternate stack.
+pub const SS_ONSTACK: i32 = 1;
+/// `stack_t.ss_flags`: no alternate stack.
+pub const SS_DISABLE: i32 = 2;
+/// `stack_t.ss_flags`: disarm the alternate stack while a handler runs on
+/// it, re-arming it when the handler returns (Linux 4.7).
+pub const SS_AUTODISARM: i32 = i32::MIN;
+/// The smallest alternate stack sigaltstack accepts (x86_64 MINSIGSTKSZ).
+pub const MINSIGSTKSZ: u64 = 2048;
+
+/// The fields of Linux `stack_t`: a sigaltstack request, or the state saved
+/// in a signal frame's `uc_stack`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct AltStackRequest {
+    pub sp: u64,
+    pub flags: i32,
+    pub size: u64,
+}
+
+/// Why sigaltstack refused a change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AltStackError {
+    /// The thread is running on the alternate stack (EPERM).
+    OnStack,
+    /// Unknown mode bits, or a stack that wraps the address space (EINVAL).
+    Invalid,
+    /// Smaller than MINSIGSTKSZ (ENOMEM).
+    TooSmall,
+}
+
+/// A thread's alternate signal stack (sigaltstack, N-222). Linux keeps it
+/// per thread: a new thread starts without one, a fork child inherits it,
+/// exec clears it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SigAltStack {
+    sp: u64,
+    size: u64,
+    /// The flags last set (SS_AUTODISARM is reported back as given).
+    flags: i32,
+}
+
+impl Default for SigAltStack {
+    fn default() -> Self {
+        Self {
+            sp: 0,
+            size: 0,
+            flags: SS_DISABLE,
+        }
+    }
+}
+
+impl SigAltStack {
+    /// Whether `sp` is on the stack, which grows down from `sp + size`.
+    fn on_stack(&self, sp: u64) -> bool {
+        self.size != 0 && sp > self.sp && sp - self.sp <= self.size
+    }
+
+    /// `stack_t.ss_flags` as sigaltstack reports them for a thread whose
+    /// user stack pointer is `sp`.
+    pub fn flags_at(&self, sp: u64) -> i32 {
+        let state = if self.size == 0 {
+            SS_DISABLE
+        } else if self.on_stack(sp) {
+            SS_ONSTACK
+        } else {
+            0
+        };
+        state | (self.flags & SS_AUTODISARM)
+    }
+
+    /// The first address above the stack, if one is set.
+    pub fn top(&self) -> Option<u64> {
+        (self.size != 0).then(|| self.sp + self.size)
+    }
+
+    /// The state to report: base, flags (for stack pointer `sp`) and size.
+    pub fn report(&self, sp: u64) -> AltStackRequest {
+        AltStackRequest {
+            sp: self.sp,
+            flags: self.flags_at(sp),
+            size: self.size,
+        }
+    }
+
+    /// sigaltstack(`req`) by a thread whose user stack pointer is `sp`.
+    pub fn set(&mut self, req: AltStackRequest, sp: u64) -> Result<(), AltStackError> {
+        if self.on_stack(sp) {
+            return Err(AltStackError::OnStack);
+        }
+        let mode = req.flags & !SS_AUTODISARM;
+        if mode != 0 && mode != SS_DISABLE && mode != SS_ONSTACK {
+            return Err(AltStackError::Invalid);
+        }
+        if mode == SS_DISABLE {
+            self.sp = 0;
+            self.size = 0;
+        } else {
+            if req.size < MINSIGSTKSZ {
+                return Err(AltStackError::TooSmall);
+            }
+            req.sp.checked_add(req.size).ok_or(AltStackError::Invalid)?;
+            self.sp = req.sp;
+            self.size = req.size;
+        }
+        self.flags = req.flags;
+        Ok(())
+    }
+
+    /// A handler is being entered: returns the state to save in the
+    /// frame's `uc_stack` (the settings as made, as Linux's
+    /// save_altstack_ex; rt_sigreturn restores them), and with
+    /// SS_AUTODISARM disarms the stack while the handler runs.
+    pub fn enter_handler(&mut self) -> AltStackRequest {
+        let saved = AltStackRequest {
+            sp: self.sp,
+            flags: self.flags,
+            size: self.size,
+        };
+        if self.flags & SS_AUTODISARM != 0 {
+            *self = Self::default();
+        }
+        saved
+    }
+}
 
 /// Linux EINTR, as a system call returns it in rax.
 #[cfg(target_arch = "x86_64")]
@@ -527,10 +655,24 @@ mod frame {
             f.rip = f.rip.wrapping_sub(2);
         }
 
-        // Layout below the red zone: FXSAVE image (16-aligned; 64 for
-        // headroom), then the frame, aligned so that RSP + 8 is 16-aligned
-        // at handler entry, as after a call.
-        let Some(below) = f.rsp.checked_sub(RED_ZONE + FXSAVE_SIZE as u64) else {
+        // The stack: with SA_ONSTACK the alternate one, from its top, if it
+        // is armed and the thread is not already on it (N-222); otherwise
+        // the interrupted one, below its red zone.
+        let alt = *thread.altstack.lock();
+        let state = alt.flags_at(f.rsp);
+        let switch = flags & SA_ONSTACK != 0 && state & (SS_DISABLE | SS_ONSTACK) == 0;
+        let base = match (switch, alt.top()) {
+            (true, Some(top)) => top,
+            _ => match f.rsp.checked_sub(RED_ZONE) {
+                Some(below_red_zone) => below_red_zone,
+                None => return false,
+            },
+        };
+
+        // Layout: FXSAVE image (16-aligned; 64 for headroom), then the
+        // frame, aligned so that RSP + 8 is 16-aligned at handler entry, as
+        // after a call.
+        let Some(below) = base.checked_sub(FXSAVE_SIZE as u64) else {
             return false;
         };
         let fp_addr = below & !63;
@@ -539,6 +681,11 @@ mod frame {
         };
         let frame_addr = (frame_end & !15).wrapping_sub(8);
         if !is_user_address(frame_addr) || frame_addr < 0x1000 {
+            return false;
+        }
+        // A frame on the alternate stack must fit in it (Linux: a nested
+        // signal stack overflow is SIGSEGV).
+        if (switch || state & SS_ONSTACK != 0) && alt.flags_at(frame_addr) & SS_ONSTACK == 0 {
             return false;
         }
 
@@ -593,9 +740,18 @@ mod frame {
             fpstate: fp_addr,
             ..Default::default()
         };
+        // The alternate stack settings, restored by rt_sigreturn; with
+        // SS_AUTODISARM it is disarmed while the handler runs.
+        let saved_alt = thread.altstack.lock().enter_handler();
         let frame = RtSigFrame {
             pretcode: restorer,
             uc: UContext {
+                uc_stack: StackT {
+                    ss_sp: saved_alt.sp,
+                    ss_flags: saved_alt.flags,
+                    pad: 0,
+                    ss_size: saved_alt.size,
+                },
                 uc_mcontext: sc,
                 uc_sigmask: old_mask,
                 ..Default::default()
@@ -769,6 +925,18 @@ mod frame {
         f.rflags = sc.eflags;
         sanitize_user_frame(f);
         set_mask(&process, &thread, frame.uc.uc_sigmask);
+        // The alternate stack settings the handler was entered with. As on
+        // Linux (restore_altstack), a setting that cannot be made now is
+        // dropped rather than failing the return.
+        let uc_stack = frame.uc.uc_stack;
+        let _ = thread.altstack.lock().set(
+            AltStackRequest {
+                sp: uc_stack.ss_sp,
+                flags: uc_stack.ss_flags,
+                size: uc_stack.ss_size,
+            },
+            f.rsp,
+        );
         Some(sc.rax)
     }
 }
@@ -797,5 +965,74 @@ mod tests {
         assert_eq!(default_action(19), DefaultAction::Stop); // SIGSTOP
         assert_eq!(default_action(18), DefaultAction::Continue); // SIGCONT
         assert_eq!(default_action(10), DefaultAction::Terminate); // SIGUSR1
+    }
+
+    fn stack(sp: u64, flags: i32, size: u64) -> AltStackRequest {
+        AltStackRequest { sp, flags, size }
+    }
+
+    #[test]
+    fn altstack_reports_linux_flags() {
+        let mut alt = SigAltStack::default();
+        // No alternate stack: disabled, whatever the stack pointer.
+        assert_eq!(alt.flags_at(0x7000), SS_DISABLE);
+        alt.set(stack(0x10000, 0, 0x4000), 0x7000).unwrap();
+        // A stack grows down from sp + size: inside means above sp, at
+        // most sp + size.
+        assert_eq!(alt.flags_at(0x7000), 0);
+        assert_eq!(alt.flags_at(0x10000), 0);
+        assert_eq!(alt.flags_at(0x10001), SS_ONSTACK);
+        assert_eq!(alt.flags_at(0x14000), SS_ONSTACK);
+        assert_eq!(alt.flags_at(0x14001), 0);
+        // SS_AUTODISARM is reported along with the state.
+        alt.set(stack(0x10000, SS_AUTODISARM, 0x4000), 0x7000)
+            .unwrap();
+        assert_eq!(alt.flags_at(0x7000), SS_AUTODISARM);
+        assert_eq!(alt.flags_at(0x12000), SS_ONSTACK | SS_AUTODISARM);
+    }
+
+    #[test]
+    fn altstack_changes_follow_linux_rules() {
+        let mut alt = SigAltStack::default();
+        // Smaller than MINSIGSTKSZ: ENOMEM. Unknown mode bits: EINVAL.
+        assert_eq!(
+            alt.set(stack(0x10000, 0, MINSIGSTKSZ - 1), 0),
+            Err(AltStackError::TooSmall)
+        );
+        assert_eq!(
+            alt.set(stack(0x10000, 4, 0x4000), 0),
+            Err(AltStackError::Invalid)
+        );
+        // SS_ONSTACK as the mode is accepted (old programs pass it) and
+        // means enabled.
+        alt.set(stack(0x10000, SS_ONSTACK, 0x4000), 0).unwrap();
+        assert_eq!(alt.top(), Some(0x14000));
+        // Not while running on it: EPERM.
+        assert_eq!(
+            alt.set(stack(0x20000, 0, 0x4000), 0x12000),
+            Err(AltStackError::OnStack)
+        );
+        // SS_DISABLE takes effect whatever size is passed.
+        alt.set(stack(0x99, SS_DISABLE, 1), 0x7000).unwrap();
+        assert_eq!(alt.top(), None);
+        assert_eq!(alt.flags_at(0x7000), SS_DISABLE);
+    }
+
+    #[test]
+    fn altstack_autodisarm_resets_for_the_handler() {
+        let mut alt = SigAltStack::default();
+        alt.set(stack(0x10000, SS_AUTODISARM, 0x4000), 0).unwrap();
+        // Delivery records the settings (for uc_stack) and disarms them.
+        let saved = alt.enter_handler();
+        assert_eq!(saved, stack(0x10000, SS_AUTODISARM, 0x4000));
+        assert_eq!(alt.top(), None);
+        // rt_sigreturn restores them.
+        alt.set(saved, 0x7000).unwrap();
+        assert_eq!(alt.top(), Some(0x14000));
+        // Without SS_AUTODISARM the stack stays armed.
+        alt.set(stack(0x10000, 0, 0x4000), 0).unwrap();
+        let saved = alt.enter_handler();
+        assert_eq!(saved, stack(0x10000, 0, 0x4000));
+        assert_eq!(alt.top(), Some(0x14000));
     }
 }

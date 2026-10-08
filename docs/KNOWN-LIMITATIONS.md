@@ -130,12 +130,9 @@ What remains:
 - **Handlers save x87/SSE state only.** The signal frame holds an FXSAVE image, so the upper
   halves of AVX registers are not preserved across a handler that uses them.
 - **`siginfo` carries only the signal number.** No sender pid or uid, no fault address.
-- **Real-time signals 32-64** cannot be installed, there is no queueing, and `sigaltstack` reports
-  success without effect (N-105).
 - **sigreturn on AArch64 and RISC-V does not sanitise registers (N-170).** PSTATE and `sstatus`
   are restored as given, latent until those architectures have user mode.
-- **wait (N-99 remainder):** `waitid(WNOWAIT)` returns EINVAL, and `wait4` reports no resource
-  usage.
+- **wait (N-99 remainder):** `wait4` and `waitid` report no resource usage (N-213, N-223).
 
 ### Processes, exec and credentials
 

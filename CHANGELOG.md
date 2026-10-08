@@ -2,6 +2,13 @@
 
 ### Added
 
+- **Alternate signal stacks (N-222).** `sigaltstack` used to report success without doing
+  anything. It now keeps a per-thread alternate stack with Linux's rules: handlers installed with
+  `SA_ONSTACK` run on it, it reports `SS_ONSTACK` while in use and refuses changes then (EPERM),
+  `SS_AUTODISARM` disarms it for the duration of a handler, and `rt_sigreturn` restores it. New
+  threads start without one, fork children keep it, exec clears it. The native libc gains
+  `stack_t` and `sigaltstack()`.
+
 - **Shared mappings of memfds (N-230).** A memfd's pages are now physical frames the file owns,
   and `mmap(MAP_SHARED)` maps those frames themselves, so every mapping, `read` and `write` see
   one copy (and a child keeps sharing it after fork) -- how a Wayland client and its compositor

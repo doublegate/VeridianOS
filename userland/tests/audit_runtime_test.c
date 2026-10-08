@@ -2307,6 +2307,95 @@ static void test_wait_and_groups(void)
     report("getcwd_wait_and_groups", fails == 0, why);
 }
 
+/* --- sigaltstack: handlers on the alternate stack (N-222). -------------- */
+
+static char alt_mem[4 * SIGSTKSZ];
+static volatile uintptr_t alt_handler_sp;
+static volatile int alt_handler_flags, alt_handler_eperm;
+
+static void alt_handler(int sig)
+{
+    int local;
+    stack_t now, other;
+    (void)sig;
+    alt_handler_sp = (uintptr_t)&local;
+    alt_handler_flags = sigaltstack(NULL, &now) == 0 ? now.ss_flags : -1;
+    other.ss_sp = alt_mem;
+    other.ss_size = sizeof(alt_mem);
+    other.ss_flags = 0;
+    alt_handler_eperm = sigaltstack(&other, NULL) == -1 && errno == EPERM;
+}
+
+static int alt_contains(uintptr_t sp)
+{
+    return sp > (uintptr_t)alt_mem && sp - (uintptr_t)alt_mem <= sizeof(alt_mem);
+}
+
+static void test_sigaltstack(void)
+{
+    stack_t st, q;
+    struct sigaction sa;
+
+    /* No stack at first; size and flag errors. */
+    int initial = sigaltstack(NULL, &q) == 0 && (q.ss_flags & SS_DISABLE);
+    st.ss_sp = alt_mem;
+    st.ss_size = MINSIGSTKSZ - 1;
+    st.ss_flags = 0;
+    int small = sigaltstack(&st, NULL) == -1 && errno == ENOMEM;
+    st.ss_size = sizeof(alt_mem);
+    st.ss_flags = 4;
+    int badflags = sigaltstack(&st, NULL) == -1 && errno == EINVAL;
+    report("sigaltstack_errors", initial && small && badflags,
+           "expected SS_DISABLE, then ENOMEM and EINVAL");
+
+    /* A handler with SA_ONSTACK runs on the alternate stack, sees
+     * SS_ONSTACK, and may not change the stack there (EPERM). */
+    st.ss_flags = 0;
+    int set = sigaltstack(&st, NULL) == 0;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = alt_handler;
+    sa.sa_flags = SA_ONSTACK;
+    sigaction(SIGUSR1, &sa, NULL);
+    alt_handler_sp = 0;
+    raise(SIGUSR1);
+    int on_alt = alt_contains(alt_handler_sp) && (alt_handler_flags & SS_ONSTACK) &&
+                 alt_handler_eperm;
+    /* Without SA_ONSTACK the handler stays on the normal stack. */
+    sa.sa_flags = 0;
+    sigaction(SIGUSR2, &sa, NULL);
+    alt_handler_sp = 0;
+    raise(SIGUSR2);
+    int off_alt = alt_handler_sp != 0 && !alt_contains(alt_handler_sp);
+    report("sigaltstack_handler", set && on_alt && off_alt,
+           "SA_ONSTACK handler not on the alternate stack, or the plain one was");
+
+    /* SS_AUTODISARM: disarmed while the handler runs, armed again after. */
+    st.ss_flags = (int)SS_AUTODISARM;
+    sigaltstack(&st, NULL);
+    raise(SIGUSR1);
+    int disarmed = (alt_handler_flags & SS_DISABLE) && alt_contains(alt_handler_sp);
+    int rearmed = sigaltstack(NULL, &q) == 0 && q.ss_sp == (void *)alt_mem &&
+                  q.ss_size == sizeof(alt_mem) && (q.ss_flags & (int)SS_AUTODISARM);
+    report("sigaltstack_autodisarm", disarmed && rearmed,
+           "SS_AUTODISARM did not disarm in the handler or re-arm after it");
+
+    /* A fork child keeps the stack; SS_DISABLE removes it. */
+    pid_t child = fork();
+    if (child == 0) {
+        _exit(sigaltstack(NULL, &q) == 0 && q.ss_sp == (void *)alt_mem ? 0 : 1);
+    }
+    int status = -1;
+    waitpid(child, &status, 0);
+    st.ss_flags = SS_DISABLE;
+    int disabled = sigaltstack(&st, NULL) == 0 && sigaltstack(NULL, &q) == 0 &&
+                   (q.ss_flags & SS_DISABLE);
+    signal(SIGUSR1, SIG_DFL);
+    signal(SIGUSR2, SIG_DFL);
+    report("sigaltstack_fork_disable",
+           WIFEXITED(status) && WEXITSTATUS(status) == 0 && disabled,
+           "fork child lost the stack, or SS_DISABLE did not take effect");
+}
+
 int main(int argc, char **argv)
 {
     setvbuf(stdout, NULL, _IONBF, 0);
@@ -2358,6 +2447,7 @@ int main(int argc, char **argv)
     test_realtime_signals();
     test_vfork_and_clone();
     test_wait_and_groups();
+    test_sigaltstack();
     printf("AUDIT-RUNTIME: %d/%d\n", passed, total);
     return passed == total ? 0 : 1;
 }
