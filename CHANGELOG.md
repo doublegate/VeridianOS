@@ -40,7 +40,8 @@
   limit; another process's limits need root or a matching real user and group). They are
   enforced as on Linux: open descriptors (EMFILE), file size (a write is shortened at the limit,
   and one starting there fails with EFBIG and SIGXFSZ), processes and threads per user (EAGAIN),
-  address space and data (mmap ENOMEM, brk unchanged), stack growth, CPU time (SIGXCPU, then
+  address space and data (mmap ENOMEM, brk unchanged, mprotect making private memory
+  writable ENOMEM), stack growth, CPU time (SIGXCPU, then
   SIGKILL at the hard limit), nice and real-time priority (the scheduling calls now allow what
   RLIMIT_NICE and RLIMIT_RTPRIO grant), and queued real-time signals per user (tkill and tgkill
   fail with EAGAIN; kill still makes the signal pending). The native C library's getrlimit and

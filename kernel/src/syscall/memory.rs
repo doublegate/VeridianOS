@@ -492,6 +492,28 @@ pub fn sys_mprotect(addr: usize, length: usize, prot: usize) -> SyscallResult {
     // protect_region checks that every page of the range is mapped
     // (ENOMEM, as Linux) and that borrowed mappings gain no rights (N-135).
     let memory_space = proc.memory_space.lock();
+
+    // Private memory made writable becomes data: ENOMEM past RLIMIT_DATA,
+    // as Linux's mprotect_fixup (which refuses only when the data limit,
+    // not the address-space one, is what the change would break).
+    #[cfg(feature = "alloc")]
+    if prot & PROT_WRITE != 0 {
+        let end = (addr as u64)
+            .saturating_add(length as u64)
+            .div_ceil(PAGE_SIZE as u64)
+            * PAGE_SIZE as u64;
+        let gained = memory_space.data_bytes_gained(addr as u64, end);
+        if gained > 0 {
+            let limits = proc.limits();
+            let usage = memory_space.vm_usage(0, 0);
+            if !process::rlimit::may_expand_vm(&limits, usage, gained, true)
+                && process::rlimit::may_expand_vm(&limits, usage, gained, false)
+            {
+                return Err(SyscallError::OutOfMemory);
+            }
+        }
+    }
+
     memory_space
         .protect_region(VirtualAddress(addr as u64), length, prot)
         .map_err(|e| match e {

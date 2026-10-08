@@ -833,6 +833,32 @@ impl VirtualAddressSpace {
             .sum()
     }
 
+    /// The bytes of `[start, end)` that making writable would turn into
+    /// data for RLIMIT_DATA (Linux's mprotect_fixup): in private mappings,
+    /// not the stack, that are not writable now.
+    #[cfg(feature = "alloc")]
+    pub fn data_bytes_gained(&self, start: u64, end: u64) -> u64 {
+        self.mappings
+            .lock()
+            .values()
+            .filter(|m| {
+                !m.flags.contains(PageFlags::WRITABLE)
+                    && !matches!(
+                        m.mapping_type,
+                        MappingType::Stack
+                            | MappingType::Shared
+                            | MappingType::Device
+                            | MappingType::SharedRegion
+                    )
+            })
+            .map(|m| {
+                (m.start.0 + m.size as u64)
+                    .min(end)
+                    .saturating_sub(m.start.0.max(start))
+            })
+            .sum()
+    }
+
     /// The size of the user mappings, leaving out whatever of them lies in
     /// `[skip_start, skip_end)` (a MAP_FIXED request replaces that part):
     /// what RLIMIT_AS and RLIMIT_DATA are checked against.
