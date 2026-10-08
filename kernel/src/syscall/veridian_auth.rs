@@ -10,8 +10,9 @@
 //!   pass `secret` = NULL to set it without the old one.
 //!
 //! CHECK and ACCOUNT return an `AUTH_*` result code (failures are results,
-//! not errors); CHANGE returns 0 or an error. The passwords never leave the
-//! kernel (`security::auth`, PBKDF2): there is no /etc/shadow to read.
+//! not errors); CHANGE returns 0 or an error, and writes the account files
+//! (`security::accounts`: /etc/shadow, mode 0600): EIO if they cannot be
+//! written, though the new password is already in effect.
 //!
 //! Root may act on any account. Any other caller only on its own: the
 //! account the user database names for the caller's real user ID, as
@@ -156,7 +157,9 @@ pub fn sys_veridian_auth(
                 let old = old.as_str().ok_or(SyscallError::PermissionDenied)?;
                 auth.change_password(name, old, new)
             };
-            changed.map(|()| 0).map_err(super::map_kernel_error)
+            changed.map_err(super::map_kernel_error)?;
+            crate::security::accounts::save().map_err(|_| SyscallError::IoError)?;
+            Ok(0)
         }
     }
 }

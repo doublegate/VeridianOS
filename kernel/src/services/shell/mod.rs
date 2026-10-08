@@ -1200,6 +1200,39 @@ impl Shell {
         crate::drivers::input::read_char()
     }
 
+    /// Read a password after printing `prompt`, without echoing it: Enter
+    /// ends it, Backspace removes a character, Ctrl-C or Ctrl-D cancels
+    /// (`None`). At most `crate::security::crypt::MAX_KEY` bytes are kept;
+    /// the buffer is wiped once copied out.
+    pub(crate) fn read_secret(prompt: &str) -> Option<String> {
+        crate::print!("{}", prompt);
+        crate::graphics::fbcon::flush();
+        let mut buf: Vec<u8> = Vec::new();
+        let result = loop {
+            let Some(byte) = Self::read_char() else {
+                core::hint::spin_loop();
+                continue;
+            };
+            match byte {
+                b'\r' | b'\n' => break String::from_utf8(buf.clone()).ok(),
+                0x03 | 0x04 => break None,
+                0x08 | 0x7f => {
+                    buf.pop();
+                }
+                b if b >= 0x20 && buf.len() < crate::security::crypt::MAX_KEY => buf.push(b),
+                _ => {}
+            }
+        };
+        for byte in buf.iter_mut() {
+            // SAFETY: `byte` is a valid, aligned reference into `buf`;
+            // volatile so the wipe is not dropped as a dead store.
+            unsafe { core::ptr::write_volatile(byte, 0) };
+        }
+        crate::print!("\n");
+        crate::graphics::fbcon::flush();
+        result
+    }
+
     /// Handle a signal delivered to the shell or its foreground job.
     ///
     /// Dispatches to the appropriate handler based on the signal number.

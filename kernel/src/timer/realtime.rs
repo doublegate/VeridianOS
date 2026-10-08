@@ -7,10 +7,20 @@
 //! from boot (AArch64 and RISC-V have no RTC driver yet; they run no user
 //! programs either).
 
-use core::sync::atomic::{AtomicI64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 
 /// Wall time minus monotonic time, in nanoseconds.
 static OFFSET_NS: AtomicI64 = AtomicI64::new(0);
+
+/// Whether the wall clock has been set (from an RTC, or by clock_settime
+/// or settimeofday): before that it counts from boot, not from 1970.
+static KNOWN: AtomicBool = AtomicBool::new(false);
+
+/// Whether the wall clock reads the real date. Decisions that depend on
+/// the date (account expiry) must not trust it otherwise.
+pub fn is_known() -> bool {
+    KNOWN.load(Ordering::Acquire)
+}
 
 const NS_PER_SEC: i64 = 1_000_000_000;
 
@@ -40,6 +50,7 @@ pub fn set_now_ns(wall_ns: i64) -> i64 {
     let mono = super::monotonic_ns().min(i64::MAX as u64) as i64;
     let new = wall_ns.saturating_sub(mono);
     let old = OFFSET_NS.swap(new, Ordering::AcqRel);
+    KNOWN.store(true, Ordering::Release);
     SET_COUNT.fetch_add(1, Ordering::AcqRel);
     new.saturating_sub(old)
 }
@@ -60,6 +71,7 @@ pub fn set_from_rtc(epoch_secs: u64, mono_ns: u64) {
         wall.saturating_sub(mono_ns.min(i64::MAX as u64) as i64),
         Ordering::Release,
     );
+    KNOWN.store(true, Ordering::Release);
 }
 
 /// Serializes the tests that move the (global) wall clock.

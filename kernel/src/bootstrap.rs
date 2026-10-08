@@ -655,6 +655,9 @@ fn kernel_init_stage3_impl() -> KernelResult<()> {
     {
         crate::syscall::userland_ext::users::init_user_db();
         kprintln!("[BOOTSTRAP] User database initialized");
+        // The accounts on the root filesystem (/etc/passwd, /etc/shadow;
+        // N-131): there is no built-in password.
+        crate::security::accounts::load();
     }
 
     // Initialize PTY subsystem (needed by desktop terminal emulator)

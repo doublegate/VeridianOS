@@ -391,23 +391,22 @@ Page protections now follow `prot` (fixed in v0.27, N-132 to N-137). What remain
   seccomp filter itself is never consulted.
 - POSIX shared memory objects have no access control (N-88).
 
-### Default credentials and password storage (N-153; sprint G)
+### Accounts and passwords (N-131, N-153)
 
-- The kernel creates the account `root` with the password `veridian` at boot.
-- The graphical display manager accepts `root` with **any** non-empty password.
-- Password hashes use 10 PBKDF2 iterations in dev builds and 10,000 in release builds, the count is
-  not stored with the hash, and TOTP does not follow RFC 6238.
-- Two user stores do not agree. The kernel's account store (`security::auth`), which holds the
-  passwords that `veridian_auth` and pam_veridian check, has only `root`. The shell's user
-  database (`useradd`, `id`), which maps names to user IDs, creates accounts with no password in
-  the account store, and the shell's `passwd` reports success without changing anything. So only
-  root can authenticate through PAM (the KDE session runs as root). Unifying them is part of the
-  credentials work (N-131).
-- **The KDE screen lock is not a protection.** It checks passwords through pam_veridian, so it
-  unlocks with root's built-in password `veridian`. The account store lives only in memory: a
-  password changed through `veridian_auth` is back to `veridian` after the next boot.
-- pam_veridian cannot check a second factor: an account with MFA enabled fails PAM
-  authentication.
+Accounts live in `/etc/passwd` and `/etc/shadow` (SHA-512-crypt, the form musl's crypt reads),
+loaded at boot and rewritten on every change (`security::accounts`). There is no built-in password:
+until one is set -- `passwd` on the kernel console, or `VERIDIAN_ROOT_PASSWORD` when building the
+KDE root filesystem -- nobody can log in with a password, the screen lock included. What remains:
+
+- **The kernel console has no login.** Whoever can type at the serial or VGA console runs the
+  kernel shell, with full control; `su` and `sudo` there are stubs.
+- The failed-attempt lockout is kept in memory, so a reboot clears it.
+- `useradd` gives a user a group ID equal to its user ID but writes no `/etc/group` entry, and the
+  supplementary groups of `/etc/group` are not applied at login.
+- TOTP does not follow RFC 6238, and pam_veridian cannot check a second factor: an account with
+  MFA enabled fails PAM authentication.
+- New hashes use 1000 rounds in dev builds (5000, the standard count, in release builds); the count
+  is stored with each hash.
 
 Do not expose a VeridianOS system to untrusted users or networks.
 

@@ -16,6 +16,12 @@
 # tools/cross/rootfs/attrs gives: the set-user-ID helpers (pkexec,
 # polkit-agent-helper-1, dbus-daemon-launch-helper) among them.
 #
+# /etc/shadow (mode 0600) gives every account of etc/passwd no password,
+# except root when VERIDIAN_ROOT_PASSWORD is set: its SHA-512-crypt hash
+# (openssl passwd -6, read from stdin so the password is in no process's
+# arguments). Without it nobody can log in with a password -- the screen
+# lock included -- until `passwd` on the kernel console sets one (N-131).
+#
 # Prerequisites: build-all-kde.sh up to the plasma phase.
 
 set -euo pipefail
@@ -74,7 +80,9 @@ stage_elf() {
     chmod 755 "${STAGING}/$2"
 }
 
-is_elf() { [[ "$(head -c 4 "$1")" == $'\x7fELF' ]]; }
+# Compared as hex: a command substitution drops NUL bytes (with a warning
+# per file), so the raw bytes cannot be compared.
+is_elf() { [[ "$(head -c 4 "$1" | od -An -tx1 | tr -d ' \n')" == 7f454c46 ]]; }
 
 # Every ELF program the build installed (scripts in usr/bin are build
 # helpers: *-config, code generators).
@@ -142,6 +150,36 @@ copy_data() {
         "${STAGING}/etc/veridian/session.conf"
 }
 
+# /etc/shadow: a line per account of /etc/passwd, none with a password but
+# root's when VERIDIAN_ROOT_PASSWORD is set. The kernel reads it at boot and
+# rewrites it when a password changes (security::accounts).
+make_shadow() {
+    local shadow="${STAGING}/etc/shadow" today name hash
+    today=$(( $(date -u +%s) / 86400 ))
+    : > "${shadow}"
+    chmod 600 "${shadow}"
+    while IFS=: read -r name _; do
+        [[ -n "${name}" ]] || continue
+        hash='!'
+        if [[ "${name}" == root && -n "${VERIDIAN_ROOT_PASSWORD:-}" ]]; then
+            command -v openssl >/dev/null || die "openssl is needed to hash VERIDIAN_ROOT_PASSWORD"
+            hash=$(printf '%s\n' "${VERIDIAN_ROOT_PASSWORD}" | openssl passwd -6 -stdin) \
+                || die "hashing the root password failed"
+            [[ "${hash}" == "\$6\$"* ]] || die "unexpected root password hash form"
+        fi
+        if [[ "${hash}" == '!' ]]; then
+            printf '%s:!:::::::\n' "${name}" >> "${shadow}"
+        else
+            printf '%s:%s:%s:0:99999:7:::\n' "${name}" "${hash}" "${today}" >> "${shadow}"
+        fi
+    done < "${STAGING}/etc/passwd"
+    if [[ -n "${VERIDIAN_ROOT_PASSWORD:-}" ]]; then
+        log "root password set from VERIDIAN_ROOT_PASSWORD"
+    else
+        log "root has no password: set one with \`passwd\` on the kernel console (or VERIDIAN_ROOT_PASSWORD)"
+    fi
+}
+
 # GLib reads compiled schemas only; the host GLib tools (build-dbus.sh)
 # compile the staged ones.
 compile_schemas() {
@@ -188,7 +226,7 @@ verify() {
     local errors=0 item
     for item in "${REQUIRED_PROGRAMS[@]}" lib/ld-musl-x86_64.so.1 \
                 etc/veridian/session.conf etc/fonts/fonts.conf etc/ssl/openssl.cnf \
-                etc/passwd etc/group etc/pam.d/kde etc/pam.d/polkit-1 etc/pam.d/other \
+                etc/passwd etc/group etc/shadow etc/pam.d/kde etc/pam.d/polkit-1 etc/pam.d/other \
                 usr/lib/security/pam_veridian.so usr/lib/security/pam_deny.so \
                 usr/share/X11/xkb/rules/evdev usr/share/alsa/alsa.conf \
                 usr/share/dbus-1/session.conf usr/share/libinput \
@@ -243,6 +281,7 @@ main() {
     copy_programs
     copy_libraries
     copy_data
+    make_shadow
     compile_schemas
     check_host_paths
     verify

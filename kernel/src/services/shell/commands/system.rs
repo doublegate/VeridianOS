@@ -1953,7 +1953,7 @@ impl BuiltinCommand for UseraddCommand {
         "useradd"
     }
     fn description(&self) -> &str {
-        "Add a user account"
+        "Add a user account (no password until passwd sets one)"
     }
     fn execute(&self, args: &[String], _shell: &Shell) -> CommandResult {
         if args.is_empty() {
@@ -1961,19 +1961,41 @@ impl BuiltinCommand for UseraddCommand {
             return CommandResult::Success(1);
         }
         let username = &args[0];
-        let result = crate::syscall::userland_ext::with_user_db_mut(|db| {
-            match db.add_user(username, 1000, None) {
-                Ok(uid) => {
-                    crate::println!("User '{}' created with uid {}", username, uid);
-                    0
-                }
-                Err(e) => {
-                    crate::println!("useradd: failed to add user '{}': {:?}", username, e);
-                    1
-                }
-            }
+        let Some(auth) = crate::security::auth::try_auth_manager() else {
+            crate::println!("useradd: no account store");
+            return CommandResult::Success(1);
+        };
+        // The user's own group ID equals its user ID (USERGROUPS_ENAB).
+        let added = crate::syscall::userland_ext::with_user_db_mut(|db| {
+            let uid = db.next_free_uid();
+            db.add_user(username, uid, Some(uid))
         });
-        CommandResult::Success(result.unwrap_or(1))
+        let uid = match added {
+            Some(Ok(uid)) => uid,
+            Some(Err(e)) => {
+                crate::println!("useradd: cannot add '{}': {:?}", username, e);
+                return CommandResult::Success(1);
+            }
+            None => {
+                crate::println!("useradd: no user database");
+                return CommandResult::Success(1);
+            }
+        };
+        if let Err(e) = auth.add_account(username, uid) {
+            crate::println!("useradd: cannot add '{}': {:?}", username, e);
+            return CommandResult::Success(1);
+        }
+        if let Err(e) = crate::security::accounts::save() {
+            crate::println!("useradd: account files not written: {:?}", e);
+            return CommandResult::Success(1);
+        }
+        crate::println!(
+            "User '{}' created with uid {} (no password: set one with passwd {})",
+            username,
+            uid,
+            username
+        );
+        CommandResult::Success(0)
     }
 }
 
@@ -1991,18 +2013,24 @@ impl BuiltinCommand for UserdelCommand {
             return CommandResult::Success(1);
         }
         let username = &args[0];
-        let result =
-            crate::syscall::userland_ext::with_user_db_mut(|db| match db.remove_user(username) {
-                Ok(()) => {
-                    crate::println!("User '{}' removed", username);
-                    0
-                }
-                Err(e) => {
-                    crate::println!("userdel: failed to remove user '{}': {:?}", username, e);
-                    1
-                }
-            });
-        CommandResult::Success(result.unwrap_or(1))
+        if username == "root" {
+            crate::println!("userdel: refusing to delete root");
+            return CommandResult::Success(1);
+        }
+        let removed = crate::syscall::userland_ext::with_user_db_mut(|db| db.remove_user(username));
+        if !matches!(removed, Some(Ok(()))) {
+            crate::println!("userdel: user '{}' does not exist", username);
+            return CommandResult::Success(1);
+        }
+        if let Some(auth) = crate::security::auth::try_auth_manager() {
+            let _ = auth.delete_user(username);
+        }
+        if let Err(e) = crate::security::accounts::save() {
+            crate::println!("userdel: account files not written: {:?}", e);
+            return CommandResult::Success(1);
+        }
+        crate::println!("User '{}' removed", username);
+        CommandResult::Success(0)
     }
 }
 
@@ -2012,19 +2040,63 @@ impl BuiltinCommand for PasswdCommand {
         "passwd"
     }
     fn description(&self) -> &str {
-        "Change user password"
+        "Set a user's password (-l lock, -u unlock)"
     }
     fn execute(&self, args: &[String], _shell: &Shell) -> CommandResult {
-        let username = if args.is_empty() { "root" } else { &args[0] };
-        let exists = crate::syscall::userland_ext::with_user_db(|db| {
-            db.get_user_by_name(username).is_some()
-        })
-        .unwrap_or(false);
-        if !exists {
+        let (lock, rest) = match args.first().map(String::as_str) {
+            Some("-l") => (Some(true), &args[1..]),
+            Some("-u") => (Some(false), &args[1..]),
+            _ => (None, args),
+        };
+        let username = rest.first().map_or("root", String::as_str);
+        let Some(auth) = crate::security::auth::try_auth_manager() else {
+            crate::println!("passwd: no account store");
+            return CommandResult::Success(1);
+        };
+        if !auth.has_account(username) {
             crate::println!("passwd: user '{}' does not exist", username);
             return CommandResult::Success(1);
         }
-        crate::println!("passwd: password updated for '{}'", username);
+        let changed = match lock {
+            Some(locked) => auth.set_password_lock(username, locked),
+            None => {
+                // The kernel console is the administrator's: the old
+                // password is not asked for, as `passwd user` by root.
+                let Some(first) = crate::services::shell::Shell::read_secret("New password: ")
+                else {
+                    crate::println!("passwd: cancelled");
+                    return CommandResult::Success(1);
+                };
+                let Some(second) =
+                    crate::services::shell::Shell::read_secret("Retype new password: ")
+                else {
+                    crate::println!("passwd: cancelled");
+                    return CommandResult::Success(1);
+                };
+                if first != second {
+                    crate::println!("passwd: passwords do not match; unchanged");
+                    return CommandResult::Success(1);
+                }
+                auth.reset_password(username, &first)
+            }
+        };
+        if let Err(e) = changed {
+            crate::println!("passwd: unchanged: {}", e);
+            return CommandResult::Success(1);
+        }
+        if let Err(e) = crate::security::accounts::save() {
+            crate::println!("passwd: in effect until reboot, but not saved: {:?}", e);
+            return CommandResult::Success(1);
+        }
+        crate::println!(
+            "passwd: {} for '{}'",
+            match lock {
+                Some(true) => "password locked",
+                Some(false) => "password unlocked",
+                None => "password updated",
+            },
+            username
+        );
         CommandResult::Success(0)
     }
 }

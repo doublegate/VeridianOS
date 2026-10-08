@@ -1,7 +1,9 @@
 //! User/Group Management
 //!
-//! Implements user and group database management equivalent to
-//! /etc/passwd, /etc/shadow, and /etc/group.
+//! The user database: names, user IDs, homes and shells, as /etc/passwd
+//! holds them, and groups as /etc/group. Passwords are not here: they are
+//! the account store's (`security::auth`, /etc/shadow), and
+//! `security::accounts` loads and saves both (N-131).
 
 #[cfg(feature = "alloc")]
 extern crate alloc;
@@ -11,7 +13,7 @@ use alloc::{collections::BTreeMap, string::String, vec::Vec};
 
 use spin::RwLock;
 
-use super::helpers::{parse_u32, parse_u64, push_u32_str, push_u64_str};
+use super::helpers::{parse_u32, push_u32_str};
 use crate::sync::once_lock::GlobalState;
 
 static USER_DB: GlobalState<RwLock<UserDatabase>> = GlobalState::new();
@@ -161,106 +163,6 @@ impl UserEntry {
 }
 
 // ============================================================================
-// Shadow Entry
-// ============================================================================
-
-/// Shadow password entry (equivalent to struct spwd)
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ShadowEntry {
-    /// Username
-    pub username: String,
-    /// Hashed password (or "!" for locked, "*" for no login)
-    pub password_hash: String,
-    /// Days since epoch of last password change
-    pub last_change: u64,
-    /// Minimum days between password changes
-    pub min_days: u64,
-    /// Maximum days between password changes
-    pub max_days: u64,
-    /// Days before expiry to warn user
-    pub warn_days: u64,
-    /// Days after expiry until account is disabled
-    pub inactive_days: u64,
-    /// Absolute expiry date (days since epoch, 0 = never)
-    pub expire_date: u64,
-}
-
-impl ShadowEntry {
-    /// Create a new shadow entry with a locked password
-    pub fn new_locked(username: &str) -> Self {
-        Self {
-            username: String::from(username),
-            password_hash: String::from("!"),
-            last_change: 0,
-            min_days: 0,
-            max_days: 99999,
-            warn_days: 7,
-            inactive_days: 0,
-            expire_date: 0,
-        }
-    }
-
-    /// Create a shadow entry with a hashed password
-    pub fn with_password(username: &str, hash: &str) -> Self {
-        Self {
-            username: String::from(username),
-            password_hash: String::from(hash),
-            last_change: 0,
-            min_days: 0,
-            max_days: 99999,
-            warn_days: 7,
-            inactive_days: 0,
-            expire_date: 0,
-        }
-    }
-
-    /// Serialize to /etc/shadow format
-    pub fn to_shadow_line(&self) -> String {
-        let mut line = String::new();
-        line.push_str(&self.username);
-        line.push(':');
-        line.push_str(&self.password_hash);
-        line.push(':');
-        push_u64_str(&mut line, self.last_change);
-        line.push(':');
-        push_u64_str(&mut line, self.min_days);
-        line.push(':');
-        push_u64_str(&mut line, self.max_days);
-        line.push(':');
-        push_u64_str(&mut line, self.warn_days);
-        line.push(':');
-        push_u64_str(&mut line, self.inactive_days);
-        line.push(':');
-        push_u64_str(&mut line, self.expire_date);
-        line.push(':');
-        line
-    }
-
-    /// Parse from /etc/shadow format line
-    pub fn from_shadow_line(line: &str) -> Result<Self, UserGroupError> {
-        let parts: Vec<&str> = line.split(':').collect();
-        if parts.len() < 8 {
-            return Err(UserGroupError::ParseError);
-        }
-        Ok(Self {
-            username: String::from(parts[0]),
-            password_hash: String::from(parts[1]),
-            last_change: parse_u64(parts[2]).unwrap_or(0),
-            min_days: parse_u64(parts[3]).unwrap_or(0),
-            max_days: parse_u64(parts[4]).unwrap_or(99999),
-            warn_days: parse_u64(parts[5]).unwrap_or(7),
-            inactive_days: parse_u64(parts[6]).unwrap_or(0),
-            expire_date: parse_u64(parts[7]).unwrap_or(0),
-        })
-    }
-
-    /// Check if account is locked
-    pub fn is_locked(&self) -> bool {
-        self.password_hash.starts_with('!') || self.password_hash.starts_with('*')
-    }
-}
-
-// ============================================================================
 // Group Entry
 // ============================================================================
 
@@ -339,13 +241,11 @@ impl GroupEntry {
 // User Database
 // ============================================================================
 
-/// User database (manages /etc/passwd + /etc/shadow)
+/// User database (/etc/passwd)
 #[derive(Debug)]
 pub struct UserDatabase {
     /// User entries indexed by UID
     users: BTreeMap<u32, UserEntry>,
-    /// Shadow entries indexed by username
-    shadows: BTreeMap<String, ShadowEntry>,
     /// Username to UID mapping
     name_to_uid: BTreeMap<String, u32>,
     /// Next available UID
@@ -363,7 +263,6 @@ impl UserDatabase {
     pub fn new() -> Self {
         let mut db = Self {
             users: BTreeMap::new(),
-            shadows: BTreeMap::new(),
             name_to_uid: BTreeMap::new(),
             next_uid: 1000,
         };
@@ -378,10 +277,6 @@ impl UserDatabase {
         };
         db.users.insert(ROOT_UID, root);
         db.name_to_uid.insert(String::from("root"), ROOT_UID);
-        db.shadows.insert(
-            String::from("root"),
-            ShadowEntry::with_password("root", "$6$veridian$rootpasswordhash"),
-        );
         db
     }
 
@@ -426,8 +321,6 @@ impl UserDatabase {
         let entry = UserEntry::new(username, uid, gid);
         self.users.insert(uid, entry);
         self.name_to_uid.insert(String::from(username), uid);
-        self.shadows
-            .insert(String::from(username), ShadowEntry::new_locked(username));
         if uid >= self.next_uid {
             self.next_uid = uid + 1;
         }
@@ -441,7 +334,6 @@ impl UserDatabase {
             .remove(username)
             .ok_or(UserGroupError::UserNotFound)?;
         self.users.remove(&uid);
-        self.shadows.remove(username);
         Ok(())
     }
 
@@ -457,25 +349,6 @@ impl UserDatabase {
             .and_then(|uid| self.users.get(uid))
     }
 
-    /// Set password for a user
-    pub fn set_password(&mut self, username: &str, hash: &str) -> Result<(), UserGroupError> {
-        let shadow = self
-            .shadows
-            .get_mut(username)
-            .ok_or(UserGroupError::UserNotFound)?;
-        shadow.password_hash = String::from(hash);
-        Ok(())
-    }
-
-    /// Verify password hash for a user
-    pub fn verify_password(&self, username: &str, hash: &str) -> Result<bool, UserGroupError> {
-        let shadow = self
-            .shadows
-            .get(username)
-            .ok_or(UserGroupError::UserNotFound)?;
-        Ok(shadow.password_hash == hash)
-    }
-
     /// Get total number of users
     pub fn user_count(&self) -> usize {
         self.users.len()
@@ -486,16 +359,6 @@ impl UserDatabase {
         let mut output = String::new();
         for user in self.users.values() {
             output.push_str(&user.to_passwd_line());
-            output.push('\n');
-        }
-        output
-    }
-
-    /// Serialize to /etc/shadow format
-    pub fn to_shadow_file(&self) -> String {
-        let mut output = String::new();
-        for shadow in self.shadows.values() {
-            output.push_str(&shadow.to_shadow_line());
             output.push('\n');
         }
         output
@@ -520,24 +383,19 @@ impl UserDatabase {
         Ok(count)
     }
 
-    /// Parse /etc/shadow file content
-    pub fn load_shadow(&mut self, content: &str) -> Result<usize, UserGroupError> {
-        let mut count = 0usize;
-        for line in content.lines() {
-            let trimmed = line.trim();
-            if trimmed.is_empty() || trimmed.starts_with('#') {
-                continue;
-            }
-            let entry = ShadowEntry::from_shadow_line(trimmed)?;
-            self.shadows.insert(entry.username.clone(), entry);
-            count += 1;
-        }
-        Ok(count)
+    /// The user ID useradd gives next: the lowest free one from 1000.
+    pub fn next_free_uid(&self) -> u32 {
+        (self.next_uid.max(1000)..)
+            .find(|uid| !self.users.contains_key(uid))
+            .unwrap_or(self.next_uid)
     }
 
-    /// Get the shadow entry for a user
-    pub fn get_shadow(&self, username: &str) -> Option<&ShadowEntry> {
-        self.shadows.get(username)
+    /// Every (name, user ID) pair, for the account store.
+    pub fn name_uid_pairs(&self) -> Vec<(String, u32)> {
+        self.users
+            .values()
+            .map(|u| (u.username.clone(), u.uid))
+            .collect()
     }
 
     /// List all usernames

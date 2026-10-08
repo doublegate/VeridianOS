@@ -6,10 +6,12 @@
 //! - Security audit framework
 //! - Secure boot verification
 
+pub mod accounts;
 pub mod audit;
 pub mod audit_enhanced;
 pub mod auth;
 pub mod boot;
+pub mod crypt;
 pub mod fuzzing;
 pub mod kaslr;
 pub mod mac;

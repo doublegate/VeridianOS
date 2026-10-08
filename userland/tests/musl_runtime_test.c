@@ -44,6 +44,9 @@
 #include <sys/signalfd.h>
 #include <sys/syscall.h>
 #include <sys/uio.h>
+#include <shadow.h>
+#include <crypt.h>
+#include <pwd.h>
 #include <sys/random.h>
 #include <linux/futex.h>
 #include <sys/timerfd.h>
@@ -1051,6 +1054,50 @@ static void test_file_calls(void)
     static char why[64];
     snprintf(why, sizeof(why), "st=%#x", st);
     report("musl_file_calls", exited_zero(st), why);
+}
+
+/* Accounts (N-131): veridian_auth sets and checks a password, the kernel
+ * saves it to /etc/shadow (0600, root's), and musl's getspnam + crypt -- what
+ * BusyBox's login and su use -- verify the kernel's hash. Each run sets a new
+ * password: the image keeps the last run's. */
+#define SYS_VERIDIAN_AUTH_NR 1352
+
+static int acct_other_user(void)
+{
+    if (setresuid(4400, 4400, 4400) != 0) return 1;
+    int f = 0;
+    errno = 0;
+    if (syscall(SYS_VERIDIAN_AUTH_NR, 0, "root", "x", NULL) != -1 || errno != EPERM) f |= 2;
+    errno = 0;
+    if (open("/etc/shadow", O_RDONLY) != -1 || errno != EACCES) f |= 4;
+    return f;
+}
+
+static void test_accounts(void)
+{
+    int f = 0;
+    char pw[64];
+    snprintf(pw, sizeof(pw), "Run-%ld-%d", (long)time(NULL), (int)getpid());
+    if (syscall(SYS_VERIDIAN_AUTH_NR, 2, "root", NULL, pw) != 0) f |= 1;
+    if (syscall(SYS_VERIDIAN_AUTH_NR, 0, "root", pw, NULL) != 0) f |= 2;
+    if (syscall(SYS_VERIDIAN_AUTH_NR, 0, "root", "not-it", NULL) != 1) f |= 2;
+    struct stat st;
+    if (stat("/etc/shadow", &st) != 0 || (st.st_mode & 07777) != 0600 || st.st_uid != 0) f |= 4;
+    struct spwd *sp = getspnam("root");
+    if (!sp || strncmp(sp->sp_pwdp, "$6$", 3) != 0) f |= 8;
+    else {
+        const char *c = crypt(pw, sp->sp_pwdp);
+        if (!c || strcmp(c, sp->sp_pwdp) != 0) f |= 16;
+        c = crypt("not-it", sp->sp_pwdp);
+        if (c && strcmp(c, sp->sp_pwdp) == 0) f |= 16;
+    }
+    struct passwd *pwent = getpwnam("root");
+    if (!pwent || pwent->pw_uid != 0) f |= 32;
+    int st2 = in_child(acct_other_user);
+    if (!exited_zero(st2)) f |= 64;
+    static char why[64];
+    snprintf(why, sizeof(why), "fail=%#x st=%#x", f, st2);
+    report("musl_accounts", f == 0, why);
 }
 
 /* The --ids mode: this program's IDs, AT_SECURE, dumpable flag and
@@ -2769,6 +2816,7 @@ int main(int argc, char **argv)
     test_sigpipe();
     test_memory_calls();
     test_file_calls();
+    test_accounts();
     printf("MUSL-RUNTIME: %d/%d\n", passed, total);
     return passed == total ? 0 : 1;
 }

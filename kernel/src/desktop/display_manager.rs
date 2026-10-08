@@ -304,19 +304,23 @@ impl LoginScreen {
 
     /// Attempt authentication using the security subsystem.
     pub fn authenticate(&mut self) -> bool {
-        // Delegate to security::auth
-        #[cfg(feature = "alloc")]
-        {
-            let _username = &self.username_buffer;
-            let _password = &self.password_buffer;
-            // In a real system, call crate::security::auth::authenticate()
-            // For now, accept "root" with any non-empty password
-            if self.username_buffer == "root" && !self.password_buffer.is_empty() {
+        // The account store (N-131); it accepted "root" with any non-empty
+        // password.
+        use crate::security::auth::AuthResult;
+        let result = crate::security::auth::try_auth_manager()
+            .map(|auth| auth.authenticate(&self.username_buffer, &self.password_buffer));
+        let message = match result {
+            Some(AuthResult::Success) => {
                 self.set_auth_result(true, "");
                 return true;
             }
-        }
-        self.set_auth_result(false, "Invalid credentials");
+            Some(AuthResult::AccountLocked) => "Account locked",
+            Some(AuthResult::AccountExpired) => "Account expired",
+            Some(AuthResult::PasswordExpired) => "Password expired: change it on the console",
+            Some(AuthResult::MfaRequired) => "A second factor is required",
+            _ => "Invalid credentials",
+        };
+        self.set_auth_result(false, message);
         false
     }
 }
@@ -901,10 +905,24 @@ mod tests {
         assert_eq!(ls.username_buffer, "a");
     }
 
+    /// Root with the password "pass" in the (global) account store.
+    fn root_with_password() {
+        let _ = crate::security::auth::init();
+        let auth = crate::security::auth::get_auth_manager();
+        let _ = auth.add_account("root", 0);
+        // Fails harmlessly when another test already set the same one.
+        let _ = auth.reset_password("root", "pass");
+    }
+
+    /// The login screen checks the account store: the right password logs
+    /// in, a wrong one does not (it accepted root with any password).
     #[test]
     fn test_login_screen_authenticate_root() {
+        root_with_password();
         let mut ls = LoginScreen::new();
         ls.username_buffer = String::from("root");
+        ls.password_buffer = String::from("wrong");
+        assert!(!ls.authenticate());
         ls.password_buffer = String::from("pass");
         assert!(ls.authenticate());
         assert_eq!(ls.state, LoginField::Success);
@@ -983,6 +1001,7 @@ mod tests {
 
     #[test]
     fn test_display_manager_handle_key() {
+        root_with_password();
         let mut dm = DisplayManager::new();
         // Type "root\tpass\n"
         for c in b"root" {

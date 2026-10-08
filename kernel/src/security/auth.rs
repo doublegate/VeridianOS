@@ -1,45 +1,63 @@
-//! Authentication Framework
+//! Authentication: the account store behind `veridian_auth`, pam_veridian
+//! and the login screens (N-131).
 //!
-//! Provides user authentication, password hashing, and multi-factor
-//! authentication.
+//! # Accounts
 //!
-//! # Features
+//! An account is a line of `/etc/shadow` (shadow(5)): the password hash in
+//! SHA-512-crypt form (`security::crypt`, the form musl's crypt(3) reads,
+//! so BusyBox's `login` and `su` check the same passwords), an
+//! administrator's lock as a `!` before it (`passwd -l`), and the aging
+//! fields, in days since 1970, read as pam_unix reads them: an expiry date,
+//! a forced change (last change 0), a maximum age after which the password
+//! must be changed and an inactivity period after which the account is
+//! expired, and a minimum age before a user may change it again. User IDs
+//! and names come from `/etc/passwd` (the user database); previous hashes
+//! from `/etc/security/opasswd` (pam_pwhistory's file); second-factor
+//! secrets from `/etc/veridian/mfa`. `security::accounts` loads and saves
+//! the files.
 //!
-//! - PBKDF2-HMAC-SHA256 password hashing with configurable iterations
-//! - Password complexity enforcement via configurable policy
-//! - Password history tracking (prevent reuse of last N passwords)
-//! - Account expiration with timestamp-based checks
-//! - Multi-factor authentication (TOTP-like)
-//! - Account lockout after configurable failed attempts
+//! There is no built-in password: an account whose line has none (`!`,
+//! `*`, or no line at all) cannot be logged in to with a password until one
+//! is set (`passwd` on the console, or the rootfs build's
+//! `VERIDIAN_ROOT_PASSWORD`).
 //!
-//! # No-Heap Design
-//!
-//! All data structures use fixed-size stack/static buffers to avoid heap
-//! allocations during boot. This prevents corruption of the bump allocator
-//! on architectures (e.g., RISC-V) where the heap is not yet fully
-//! initialized when the auth module runs.
+//! Failed attempts lock an account for [`AuthManager::LOCKOUT_SECS`]
+//! (pam_faillock's default); that count lives in memory only.
+
+extern crate alloc;
+
+use alloc::{
+    collections::BTreeMap,
+    string::{String, ToString},
+    vec::Vec,
+};
 
 use spin::RwLock;
 
 use crate::{
     crypto::hash::{sha256, Hash256},
     error::KernelError,
+    security::crypt,
     sync::once_lock::OnceLock,
 };
 
 /// User identifier
 pub type UserId = u32;
 
-/// Maximum number of user accounts.
-///
-/// Kept small (16) to avoid stack overflow during init on x86_64 where the
-/// kernel stack is limited. The AccountDatabase ([Option<UserAccount>; N])
-/// is constructed on the stack before being moved into the OnceLock static.
-/// At ~320 bytes per UserAccount, 16 entries = ~5KB which fits safely.
-const MAX_ACCOUNTS: usize = 16;
-
-/// Maximum number of previous passwords to remember per account.
+/// Most previous passwords remembered per account.
 const MAX_PASSWORD_HISTORY: usize = 5;
+
+/// SHA-512-crypt rounds for new hashes: the standard 5000, or the
+/// specification's minimum in unoptimized (dev) kernels, where 5000 rounds
+/// take seconds. The count is stored with each hash, so either build
+/// checks the other's.
+#[cfg(debug_assertions)]
+const HASH_ROUNDS: u32 = 1000;
+#[cfg(not(debug_assertions))]
+const HASH_ROUNDS: u32 = crypt::DEFAULT_ROUNDS;
+
+/// shadow(5)'s "no maximum age" (pam_unix also treats -1 as none).
+const NO_MAX_AGE: u64 = 99_999;
 
 // ---------------------------------------------------------------------------
 // Authentication Result
@@ -108,6 +126,13 @@ impl PasswordPolicy {
     /// Returns `Ok(())` if the password meets all requirements, or
     /// `Err` with a description of the first failing requirement.
     pub fn validate_password(&self, password: &str) -> Result<(), KernelError> {
+        // SHA-512-crypt hashes at most this much (musl's limit too).
+        if password.len() > crate::security::crypt::MAX_KEY {
+            return Err(KernelError::InvalidArgument {
+                name: "password",
+                value: "too long",
+            });
+        }
         if password.len() < self.min_length {
             return Err(KernelError::InvalidArgument {
                 name: "password",
@@ -152,25 +177,17 @@ impl PasswordPolicy {
 }
 
 // ---------------------------------------------------------------------------
-// PBKDF2-HMAC-SHA256 (zero-heap implementation)
+// HMAC-SHA256 (TOTP)
 // ---------------------------------------------------------------------------
 
 /// SHA-256 block size in bytes.
 const BLOCK_SIZE: usize = 64;
 
-/// Maximum message size for HMAC inner hash.
-///
-/// The largest message passed to `hmac_sha256` is either:
-/// - In `pbkdf2_hmac_sha256`: salt (up to 32 bytes) + 4-byte counter = 36 bytes
-/// - In `check_totp_window`: 8-byte counter
-/// - In `change_password` history check: 32-byte hash used as salt + 4 = 36
-///   bytes
-///
-/// Total inner buffer: BLOCK_SIZE (64) + max_message (36) = 100.
-/// We use 192 to leave headroom for future callers.
+/// Maximum message size for HMAC inner hash: the only caller,
+/// `check_totp_window`, passes an 8-byte counter.
 const HMAC_INNER_BUF_SIZE: usize = 192;
 
-/// HMAC-SHA256 implementation for PBKDF2 (no heap allocation).
+/// HMAC-SHA256 for the TOTP check (no heap allocation).
 ///
 /// Computes HMAC(key, message) = SHA256((key XOR opad) || SHA256((key XOR ipad)
 /// || message))
@@ -221,149 +238,161 @@ fn hmac_sha256(key: &[u8], message: &[u8]) -> Hash256 {
     sha256(&outer_buf[..BLOCK_SIZE + 32])
 }
 
-/// PBKDF2-HMAC-SHA256 key derivation (no heap allocation).
-///
-/// Derives a 256-bit key from `password` and `salt` using `iterations`
-/// rounds of HMAC-SHA256 with XOR accumulation (RFC 8018, Section 5.2).
-///
-/// # Panics
-///
-/// Panics if `salt.len() > 128` (extremely unlikely for real usage).
-fn pbkdf2_hmac_sha256(password: &[u8], salt: &[u8], iterations: u32) -> Hash256 {
-    // For a single 32-byte block (which is all we need for Hash256):
-    // U1 = HMAC(password, salt || INT(1))
-    // U2 = HMAC(password, U1)
-    // ...
-    // result = U1 XOR U2 XOR ... XOR Uc
-
-    // Build salt || counter on stack (salt up to 128 bytes + 4 bytes counter)
-    let mut salt_with_counter = [0u8; 128 + 4];
-    assert!(salt.len() <= 128, "pbkdf2: salt too large for stack buffer");
-    salt_with_counter[..salt.len()].copy_from_slice(salt);
-    salt_with_counter[salt.len()..salt.len() + 4].copy_from_slice(&1u32.to_be_bytes());
-    let salt_counter_len = salt.len() + 4;
-
-    let u1 = hmac_sha256(password, &salt_with_counter[..salt_counter_len]);
-    let mut result = *u1.as_bytes();
-    let mut prev = u1;
-
-    for _ in 1..iterations {
-        let u_next = hmac_sha256(password, prev.as_bytes());
-        // XOR accumulate
-        for (r, u) in result.iter_mut().zip(u_next.as_bytes().iter()) {
-            *r ^= u;
-        }
-        prev = u_next;
-    }
-
-    Hash256(result)
-}
-
-// ---------------------------------------------------------------------------
-// User Credential (legacy compat)
-// ---------------------------------------------------------------------------
-
-/// User credential
-#[derive(Debug, Clone)]
-#[allow(dead_code)]
-pub struct Credential {
-    pub username: &'static str,
-    pub(crate) password_hash: Hash256,
-    pub(crate) salt: [u8; 32],
-}
-
 // ---------------------------------------------------------------------------
 // User Account
 // ---------------------------------------------------------------------------
 
-/// User account information (fixed-size, no heap allocation).
+/// The aging fields of a shadow line, in days since 1970 (`None`: empty).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Aging {
+    /// Day of the last password change; 0 forces a change at next login.
+    pub last_change: Option<u64>,
+    /// Days before a user may change the password again.
+    pub min_days: Option<u64>,
+    /// Days after which the password must be changed.
+    pub max_days: Option<u64>,
+    /// Days of warning before the password expires.
+    pub warn_days: Option<u64>,
+    /// Days after the password expires that it may still be changed at
+    /// login; after them the account is expired.
+    pub inactive_days: Option<u64>,
+    /// Day on which the account expires.
+    pub expire_day: Option<u64>,
+}
+
+/// What the aging fields say about an account on `today`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgeState {
+    Valid,
+    /// The password must be changed (PAM's new-authtok-required).
+    PasswordExpired,
+    /// The account has expired, by date or by inactivity.
+    AccountExpired,
+}
+
+impl Aging {
+    /// pam_unix's reading of the fields (check_shadow_expiry) on `today`
+    /// (`None`: the date is not known). Without the date, an account with
+    /// an expiry date or a maximum password age cannot be shown to be
+    /// valid, so it counts as expired (fail closed); a forced change
+    /// needs no date.
+    pub fn state(&self, today: Option<u64>) -> AgeState {
+        let finite_max = self.max_days.is_some_and(|m| m < NO_MAX_AGE);
+        if self.last_change == Some(0) {
+            // An expiry date overrides; without the date it cannot be
+            // checked, so it does too.
+            let expired = self
+                .expire_day
+                .is_some_and(|e| today.is_none_or(|t| t >= e));
+            return if expired {
+                AgeState::AccountExpired
+            } else {
+                AgeState::PasswordExpired
+            };
+        }
+        let Some(today) = today else {
+            return if self.expire_day.is_some() || finite_max && self.last_change.is_some() {
+                AgeState::AccountExpired
+            } else {
+                AgeState::Valid
+            };
+        };
+        if self.expire_day.is_some_and(|e| today >= e) {
+            return AgeState::AccountExpired;
+        }
+        let Some(last) = self.last_change else {
+            return AgeState::Valid;
+        };
+        match self.max_days {
+            Some(max) if max < NO_MAX_AGE && today > last.saturating_add(max) => {
+                let inactive_end = self
+                    .inactive_days
+                    .map(|i| last.saturating_add(max).saturating_add(i));
+                if inactive_end.is_some_and(|end| today > end) {
+                    AgeState::AccountExpired
+                } else {
+                    AgeState::PasswordExpired
+                }
+            }
+            _ => AgeState::Valid,
+        }
+    }
+
+    /// Whether the minimum age forbids a user's change on `today` (refused
+    /// when it cannot be checked: a minimum age and no date).
+    pub fn too_soon_to_change(&self, today: Option<u64>) -> bool {
+        match (self.last_change, self.min_days) {
+            (Some(last), Some(min)) if last != 0 && min > 0 => {
+                today.is_none_or(|t| t < last.saturating_add(min))
+            }
+            _ => false,
+        }
+    }
+}
+
+/// Today, in days since 1970, if the wall clock knows the date.
+pub fn today() -> Option<u64> {
+    crate::timer::realtime::is_known()
+        .then(|| (crate::timer::realtime::now_ns().max(0) as u64) / 86_400_000_000_000)
+}
+
+/// A user account.
 #[derive(Debug, Clone)]
 pub struct UserAccount {
     pub user_id: UserId,
-    pub username: &'static str,
-    pub(crate) password_hash: Hash256,
-    pub salt: [u8; 32],
-    /// Locked by an administrator: until unlocked.
-    pub locked: bool,
+    pub username: String,
+    /// The shadow password field: a `$6$` hash; `!` before it while an
+    /// administrator has locked the password; anything else (`!`, `*`,
+    /// empty) matches no password.
+    pub(crate) password: String,
     /// Locked after too many failed attempts: until this time (seconds
-    /// since boot), as Linux's pam_faillock does, so mistyping cannot lock
-    /// an account for good.
+    /// since boot), so mistyping cannot lock an account for good.
     pub locked_until: Option<u64>,
     pub failed_attempts: u32,
     pub mfa_enabled: bool,
     pub mfa_secret: Option<[u8; 32]>,
-    /// Account expiration timestamp (seconds since boot). `None` = never
-    /// expires.
-    pub expires_at: Option<u64>,
-    /// Password history: stores (hash, salt) pairs of previous passwords.
-    pub(crate) password_history: [Option<(Hash256, [u8; 32])>; MAX_PASSWORD_HISTORY],
-    /// Number of valid entries in `password_history`.
-    pub password_history_len: usize,
+    pub aging: Aging,
+    /// Previous password hashes, oldest first (pam_pwhistory's remember).
+    pub(crate) password_history: Vec<String>,
 }
 
 impl UserAccount {
-    /// PBKDF2 iteration count for password hashing.
-    /// Reduced in debug builds because QEMU is slow.
-    #[cfg(debug_assertions)]
-    const PBKDF2_ITERATIONS: u32 = 10;
-    #[cfg(not(debug_assertions))]
-    const PBKDF2_ITERATIONS: u32 = 10_000;
-
-    /// Create new user account
-    pub fn new(user_id: UserId, username: &'static str, password: &str) -> Self {
-        let (password_hash, salt) = Self::hash_password(password);
-
+    /// A new account with no password (it cannot be logged in to until one
+    /// is set), as useradd creates one.
+    pub fn new(user_id: UserId, username: &str) -> Self {
         Self {
             user_id,
-            username,
-            password_hash,
-            salt,
-            locked: false,
+            username: username.to_string(),
+            password: String::from("!"),
             locked_until: None,
             failed_attempts: 0,
             mfa_enabled: false,
             mfa_secret: None,
-            expires_at: None,
-            password_history: [None; MAX_PASSWORD_HISTORY],
-            password_history_len: 0,
+            aging: Aging::default(),
+            password_history: Vec::new(),
         }
     }
 
-    /// Hash password with PBKDF2-HMAC-SHA256.
-    fn hash_password(password: &str) -> (Hash256, [u8; 32]) {
-        use crate::crypto::random::get_random;
-
-        let rng = get_random();
-        let mut salt = [0u8; 32];
-        if let Err(_e) = rng.fill_bytes(&mut salt) {
-            crate::kprintln!(
-                "[AUTH] Warning: RNG fill_bytes failed for password salt, using zeroed salt"
-            );
-        }
-
-        let hash = pbkdf2_hmac_sha256(password.as_bytes(), &salt, Self::PBKDF2_ITERATIONS);
-
-        (hash, salt)
+    /// Whether a password is set (a hash, locked or not).
+    pub fn has_password(&self) -> bool {
+        self.password.trim_start_matches('!').starts_with("$6$")
     }
 
-    /// Hash password with a specific salt (for verification).
-    fn hash_password_with_salt(password: &str, salt: &[u8; 32]) -> Hash256 {
-        pbkdf2_hmac_sha256(password.as_bytes(), salt, Self::PBKDF2_ITERATIONS)
+    /// Whether an administrator has locked the password.
+    pub fn password_locked(&self) -> bool {
+        self.password.starts_with('!') && self.has_password()
     }
 
     /// Verify password (in constant time: the comparison does not reveal
-    /// how much of the hash matched).
+    /// how much of the hash matched). A locked or unset password matches
+    /// nothing.
     pub fn verify_password(&self, password: &str) -> bool {
-        let computed = Self::hash_password_with_salt(password, &self.salt);
-        crate::crypto::constant_time::ct_eq_bytes(
-            computed.as_bytes(),
-            self.password_hash.as_bytes(),
-        ) == 1
+        crypt::verify_password(password, &self.password)
     }
 
-    /// Whether the account is locked at `now`: by an administrator, or by
-    /// failed attempts whose lockout has not run out (one that has is
-    /// cleared, with the failure count).
+    /// Whether the account is locked at `now` (seconds since boot): by an
+    /// administrator, or by failed attempts whose lockout has not run out
+    /// (one that has is cleared, with the failure count).
     fn lock_active(&mut self, now: u64) -> bool {
         match self.locked_until {
             Some(until) if now < until => return true,
@@ -373,86 +402,52 @@ impl UserAccount {
             }
             None => {}
         }
-        self.locked
+        self.password_locked()
     }
 
-    /// Check if the account has expired.
-    pub fn is_expired(&self) -> bool {
-        if let Some(expires_at) = self.expires_at {
-            let now = crate::arch::timer::get_timestamp_secs();
-            now >= expires_at
-        } else {
-            false
-        }
-    }
-
-    /// Set account expiration time.
-    pub fn set_expiration(&mut self, expires_at: Option<u64>) {
-        self.expires_at = expires_at;
-    }
-
-    /// Change password with history tracking.
-    ///
-    /// Checks that the new password is not the current password and not in
-    /// the password history. The `history_size` parameter controls how many
-    /// old (hash, salt) pairs to retain.
+    /// Set a new password: refused if it is the current one or among the
+    /// last `history_size`; the current hash joins the history. The last
+    /// change becomes `today` (if the date is known).
     pub fn change_password(
         &mut self,
         new_password: &str,
         history_size: usize,
+        today: Option<u64>,
     ) -> Result<(), KernelError> {
-        // Check if new password matches current password
         if self.verify_password(new_password) {
             return Err(KernelError::InvalidArgument {
                 name: "password",
                 value: "must differ from current password",
             });
         }
-
-        // Check new password against history using stored (hash, salt) pairs
-        let reused = self.password_history[..self.password_history_len]
+        let keep = history_size.min(MAX_PASSWORD_HISTORY);
+        let recent = self.password_history.len().saturating_sub(keep);
+        if self.password_history[recent..]
             .iter()
-            .any(|entry| {
-                if let Some((old_hash, old_salt)) = entry {
-                    let candidate = Self::hash_password_with_salt(new_password, old_salt);
-                    crate::crypto::constant_time::ct_eq_bytes(
-                        candidate.as_bytes(),
-                        old_hash.as_bytes(),
-                    ) == 1
-                } else {
-                    false
-                }
-            });
-
-        if reused {
+            .any(|old| crypt::verify_password(new_password, old))
+        {
             return Err(KernelError::InvalidArgument {
                 name: "password",
                 value: "matches a recent password in history",
             });
         }
-
-        // Save current (hash, salt) to history (fixed-size ring buffer)
-        let effective_size = history_size.min(MAX_PASSWORD_HISTORY);
-        if effective_size > 0 {
-            if self.password_history_len >= effective_size {
-                // Shift entries left to make room (drop oldest)
-                for i in 0..effective_size - 1 {
-                    self.password_history[i] = self.password_history[i + 1];
-                }
-                self.password_history[effective_size - 1] = Some((self.password_hash, self.salt));
-                self.password_history_len = effective_size;
-            } else {
-                self.password_history[self.password_history_len] =
-                    Some((self.password_hash, self.salt));
-                self.password_history_len += 1;
-            }
+        let hash = crypt::hash_password(new_password, HASH_ROUNDS).ok_or(
+            KernelError::InvalidArgument {
+                name: "password",
+                value: "too long",
+            },
+        )?;
+        if keep > 0 && self.has_password() {
+            self.password_history
+                .push(self.password.trim_start_matches('!').to_string());
+            let excess = self.password_history.len().saturating_sub(keep);
+            self.password_history.drain(..excess);
         }
-
-        // Generate new salt and hash
-        let (new_hash, new_salt) = Self::hash_password(new_password);
-        self.password_hash = new_hash;
-        self.salt = new_salt;
-
+        self.password = hash;
+        // Without the date (no RTC read yet: AArch64 and RISC-V have no
+        // driver) no change day is recorded; writing 0 would mean "change
+        // it now" to shadow(5).
+        self.aging.last_change = today.filter(|&t| t > 0);
         Ok(())
     }
 
@@ -525,129 +520,42 @@ impl UserAccount {
 }
 
 // ---------------------------------------------------------------------------
-// Fixed-Size Account Database
-// ---------------------------------------------------------------------------
-
-/// A fixed-size account database that avoids heap allocation.
-///
-/// Stores up to [`MAX_ACCOUNTS`] user accounts in a static array.
-/// Lookup is O(n) but n is bounded by MAX_ACCOUNTS (64), which is
-/// acceptable for a kernel authentication module.
-struct AccountDatabase {
-    entries: [Option<UserAccount>; MAX_ACCOUNTS],
-    count: usize,
-}
-
-impl AccountDatabase {
-    /// Create an empty account database.
-    const fn new() -> Self {
-        // const-compatible initialization for array of Option<UserAccount>
-        // We cannot use [None; MAX_ACCOUNTS] because UserAccount is not Copy,
-        // so we build the array manually with a const block.
-        const NONE: Option<UserAccount> = None;
-        Self {
-            entries: [NONE; MAX_ACCOUNTS],
-            count: 0,
-        }
-    }
-
-    /// Look up an account by username (immutable).
-    fn get(&self, username: &str) -> Option<&UserAccount> {
-        self.entries[..self.count]
-            .iter()
-            .flatten()
-            .find(|account| account.username == username)
-    }
-
-    /// Look up an account by username (mutable).
-    fn get_mut(&mut self, username: &str) -> Option<&mut UserAccount> {
-        self.entries[..self.count]
-            .iter_mut()
-            .flatten()
-            .find(|account| account.username == username)
-    }
-
-    /// Check if a username exists.
-    fn contains_key(&self, username: &str) -> bool {
-        self.get(username).is_some()
-    }
-
-    /// Insert a new account. Returns `Err` if the database is full.
-    fn insert(&mut self, account: UserAccount) -> Result<(), KernelError> {
-        if self.count >= MAX_ACCOUNTS {
-            return Err(KernelError::ResourceExhausted {
-                resource: "account_database",
-            });
-        }
-
-        // Find first empty slot (there is guaranteed to be one since count <
-        // MAX_ACCOUNTS)
-        for entry in &mut self.entries {
-            if entry.is_none() {
-                *entry = Some(account);
-                self.count += 1;
-                return Ok(());
-            }
-        }
-
-        // Should not be reached if count is maintained correctly
-        Err(KernelError::ResourceExhausted {
-            resource: "account_database",
-        })
-    }
-
-    /// Remove an account by username. Returns the removed account, or `None`.
-    fn remove(&mut self, username: &str) -> Option<UserAccount> {
-        for entry in &mut self.entries {
-            if let Some(account) = entry {
-                if account.username == username {
-                    let removed = entry.take();
-                    self.count -= 1;
-                    return removed;
-                }
-            }
-        }
-        None
-    }
-
-    /// Iterate over all accounts (immutable).
-    fn iter(&self) -> impl Iterator<Item = &UserAccount> {
-        self.entries.iter().filter_map(|e| e.as_ref())
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Authentication Manager
 // ---------------------------------------------------------------------------
 
 /// Authentication manager
 pub struct AuthManager {
-    accounts: RwLock<AccountDatabase>,
-    next_user_id: RwLock<u32>,
+    accounts: RwLock<BTreeMap<String, UserAccount>>,
     max_failed_attempts: u32,
     password_policy: RwLock<PasswordPolicy>,
 }
 
+fn not_found() -> KernelError {
+    KernelError::NotFound {
+        resource: "user",
+        id: 0,
+    }
+}
+
 impl AuthManager {
-    /// Create new authentication manager
     /// How long failed attempts lock an account (pam_faillock's default
     /// unlock_time).
     pub const LOCKOUT_SECS: u64 = 600;
 
-    pub fn new() -> Self {
+    /// An empty store (accounts come from the files once the root
+    /// filesystem is up).
+    pub const fn new() -> Self {
         Self {
-            accounts: RwLock::new(AccountDatabase::new()),
-            next_user_id: RwLock::new(1000), // Start UIDs at 1000
+            accounts: RwLock::new(BTreeMap::new()),
             max_failed_attempts: 5,
             password_policy: RwLock::new(PasswordPolicy::relaxed()),
         }
     }
 
     /// Create with a specific password policy.
-    pub fn with_policy(policy: PasswordPolicy) -> Self {
+    pub const fn with_policy(policy: PasswordPolicy) -> Self {
         Self {
-            accounts: RwLock::new(AccountDatabase::new()),
-            next_user_id: RwLock::new(1000),
+            accounts: RwLock::new(BTreeMap::new()),
             max_failed_attempts: 5,
             password_policy: RwLock::new(policy),
         }
@@ -663,60 +571,62 @@ impl AuthManager {
         *self.password_policy.read()
     }
 
-    /// Create new user account.
-    ///
-    /// Validates the password against the active policy before creating
-    /// the account.
-    pub fn create_user(
-        &self,
-        username: &'static str,
-        password: &str,
-    ) -> Result<UserId, KernelError> {
-        // Validate password against policy
-        let policy = *self.password_policy.read();
-        policy.validate_password(password)?;
-
+    /// Add an account for user `user_id` named `username`, with no password
+    /// (useradd). EEXIST for a name already present.
+    pub fn add_account(&self, username: &str, user_id: UserId) -> Result<(), KernelError> {
         let mut accounts = self.accounts.write();
-
-        // Check if username already exists
         if accounts.contains_key(username) {
             return Err(KernelError::AlreadyExists {
                 resource: "user",
-                id: 0, // Username lookup, no specific ID
+                id: user_id as u64,
             });
         }
+        accounts.insert(username.to_string(), UserAccount::new(user_id, username));
+        Ok(())
+    }
 
-        // Allocate new user ID
-        let user_id = {
-            let mut next_id = self.next_user_id.write();
-            let id = *next_id;
-            *next_id += 1;
-            id
-        };
+    /// Whether an account named `username` exists.
+    pub fn has_account(&self, username: &str) -> bool {
+        self.accounts.read().contains_key(username)
+    }
 
-        // Create account
-        let account = UserAccount::new(user_id, username, password);
-
-        accounts.insert(account)?;
-
-        Ok(user_id)
+    /// Whether account `username` has a password set (locked or not).
+    pub fn has_password(&self, username: &str) -> bool {
+        self.accounts
+            .read()
+            .get(username)
+            .is_some_and(UserAccount::has_password)
     }
 
     /// Authenticate user.
     ///
-    /// Checks account lock, expiration, password, and MFA status.
+    /// Checks the lock, the expiry, the password, its age and MFA.
     pub fn authenticate(&self, username: &str, password: &str) -> AuthResult {
-        self.authenticate_at(username, password, crate::arch::timer::get_timestamp_secs())
+        self.authenticate_at(
+            username,
+            password,
+            crate::arch::timer::get_timestamp_secs(),
+            today(),
+        )
     }
 
     /// [`authenticate`](Self::authenticate) at time `now` (seconds since
-    /// boot).
-    fn authenticate_at(&self, username: &str, password: &str, now: u64) -> AuthResult {
+    /// boot) on day `today`.
+    fn authenticate_at(
+        &self,
+        username: &str,
+        password: &str,
+        now: u64,
+        today: Option<u64>,
+    ) -> AuthResult {
         let mut accounts = self.accounts.write();
         let Some(account) = accounts.get_mut(username) else {
             return AuthResult::InvalidCredentials;
         };
-        match self.check_password(account, password, now) {
+        match self.check_password(account, password, now, today) {
+            AuthResult::Success if account.aging.state(today) == AgeState::PasswordExpired => {
+                AuthResult::PasswordExpired
+            }
             AuthResult::Success if account.mfa_enabled => AuthResult::MfaRequired,
             AuthResult::Success => {
                 crate::security::audit::log_auth_attempt(0, account.user_id, username, true);
@@ -726,20 +636,26 @@ impl AuthManager {
         }
     }
 
-    /// Check `password` against `account` at time `now`, as every
-    /// password check must: refused while the account is locked or
+    /// Check `password` against `account` at time `now` on day `today`, as
+    /// every password check must: refused while the account is locked or
     /// expired; a failure is counted and logged, and enough of them lock
     /// the account for [`LOCKOUT_SECS`](Self::LOCKOUT_SECS); a success
     /// clears the count. `Success` means only that the password is right.
-    fn check_password(&self, account: &mut UserAccount, password: &str, now: u64) -> AuthResult {
+    fn check_password(
+        &self,
+        account: &mut UserAccount,
+        password: &str,
+        now: u64,
+        today: Option<u64>,
+    ) -> AuthResult {
         let fail = |account: &UserAccount| {
-            crate::security::audit::log_auth_attempt(0, account.user_id, account.username, false);
+            crate::security::audit::log_auth_attempt(0, account.user_id, &account.username, false);
         };
         if account.lock_active(now) {
             fail(account);
             return AuthResult::AccountLocked;
         }
-        if account.is_expired() {
+        if account.aging.state(today) == AgeState::AccountExpired {
             fail(account);
             return AuthResult::AccountExpired;
         }
@@ -757,8 +673,8 @@ impl AuthManager {
     }
 
     /// The state of an account without checking a password (PAM's account
-    /// management): `Success`, `AccountLocked`, `AccountExpired`, or
-    /// `InvalidCredentials` for no such account.
+    /// management): `Success`, `AccountLocked`, `AccountExpired`,
+    /// `PasswordExpired`, or `InvalidCredentials` for no such account.
     pub fn account_status(&self, username: &str) -> AuthResult {
         let now = crate::arch::timer::get_timestamp_secs();
         let mut accounts = self.accounts.write();
@@ -766,25 +682,24 @@ impl AuthManager {
             return AuthResult::InvalidCredentials;
         };
         if account.lock_active(now) {
-            AuthResult::AccountLocked
-        } else if account.is_expired() {
-            AuthResult::AccountExpired
-        } else {
-            AuthResult::Success
+            return AuthResult::AccountLocked;
+        }
+        match account.aging.state(today()) {
+            AgeState::AccountExpired => AuthResult::AccountExpired,
+            AgeState::PasswordExpired => AuthResult::PasswordExpired,
+            AgeState::Valid => AuthResult::Success,
         }
     }
 
     /// Set a user's password without the old one (the administrator's
-    /// passwd): the policy and the reuse history still apply.
+    /// passwd): the policy and the reuse history still apply, the minimum
+    /// age does not, and an administrator's lock is lifted.
     pub fn reset_password(&self, username: &str, new_password: &str) -> Result<(), KernelError> {
         let policy = *self.password_policy.read();
         policy.validate_password(new_password)?;
         let mut accounts = self.accounts.write();
-        let account = accounts.get_mut(username).ok_or(KernelError::NotFound {
-            resource: "user",
-            id: 0,
-        })?;
-        account.change_password(new_password, policy.history_size)
+        let account = accounts.get_mut(username).ok_or_else(not_found)?;
+        account.change_password(new_password, policy.history_size, today())
     }
 
     /// Authenticate with MFA
@@ -808,14 +723,14 @@ impl AuthManager {
         AuthResult::InvalidCredentials
     }
 
-    /// Change a user's password.
+    /// Change a user's password with the old one.
     ///
-    /// Validates the new password against the active policy and checks
-    /// password history to prevent reuse. The old password is checked as a
-    /// login is ([`check_password`](Self::check_password): lockout, failure
-    /// count, audit), or this would be a way to guess it without limit; an
-    /// account that needs a second factor cannot change its password with
-    /// the old one alone.
+    /// The old password is checked as a login is
+    /// ([`check_password`](Self::check_password): lockout, failure count,
+    /// audit), or this would be a way to guess it without limit; an account
+    /// that needs a second factor cannot change its password with the old
+    /// one alone; the minimum age applies (pam_unix: too soon); an expired
+    /// password may be changed (that is how it is renewed).
     pub fn change_password(
         &self,
         username: &str,
@@ -827,128 +742,223 @@ impl AuthManager {
             old_password,
             new_password,
             crate::arch::timer::get_timestamp_secs(),
+            today(),
         )
     }
 
-    /// [`change_password`](Self::change_password) at time `now`.
+    /// [`change_password`](Self::change_password) at time `now` on day
+    /// `today`.
     fn change_password_at(
         &self,
         username: &str,
         old_password: &str,
         new_password: &str,
         now: u64,
+        today: Option<u64>,
     ) -> Result<(), KernelError> {
         let policy = *self.password_policy.read();
-
-        // Validate new password against policy
         policy.validate_password(new_password)?;
 
         let mut accounts = self.accounts.write();
-        let account = accounts.get_mut(username).ok_or(KernelError::NotFound {
-            resource: "user",
-            id: 0,
-        })?;
-        match self.check_password(account, old_password, now) {
+        let account = accounts.get_mut(username).ok_or_else(not_found)?;
+        let denied = KernelError::PermissionDenied {
+            operation: "change_password",
+        };
+        match self.check_password(account, old_password, now, today) {
             AuthResult::Success if !account.mfa_enabled => {
-                account.change_password(new_password, policy.history_size)
+                if account.aging.too_soon_to_change(today) {
+                    return Err(denied);
+                }
+                account.change_password(new_password, policy.history_size, today)
             }
-            _ => Err(KernelError::PermissionDenied {
-                operation: "change_password",
-            }),
+            _ => Err(denied),
         }
     }
 
-    /// Set account expiration.
+    /// Set the day an account expires (`None`: never).
     pub fn set_account_expiration(
         &self,
         username: &str,
-        expires_at: Option<u64>,
+        expire_day: Option<u64>,
     ) -> Result<(), KernelError> {
         let mut accounts = self.accounts.write();
+        let account = accounts.get_mut(username).ok_or_else(not_found)?;
+        account.aging.expire_day = expire_day;
+        Ok(())
+    }
 
-        if let Some(account) = accounts.get_mut(username) {
-            account.set_expiration(expires_at);
-            Ok(())
-        } else {
-            Err(KernelError::NotFound {
-                resource: "user",
-                id: 0,
-            })
+    /// Lock (`passwd -l`) or unlock (`passwd -u`) a password; unlocking
+    /// also clears a failure lockout. Locking an account with no password
+    /// changes nothing.
+    pub fn set_password_lock(&self, username: &str, locked: bool) -> Result<(), KernelError> {
+        let mut accounts = self.accounts.write();
+        let account = accounts.get_mut(username).ok_or_else(not_found)?;
+        if account.has_password() {
+            let hash = account.password.trim_start_matches('!').to_string();
+            account.password = if locked {
+                alloc::format!("!{}", hash)
+            } else {
+                hash
+            };
         }
+        if !locked {
+            account.locked_until = None;
+            account.failed_attempts = 0;
+        }
+        Ok(())
     }
 
     /// Enable MFA for user
     pub fn enable_mfa(&self, username: &str) -> Result<[u8; 32], KernelError> {
         let mut accounts = self.accounts.write();
-
-        if let Some(account) = accounts.get_mut(username) {
-            Ok(account.enable_mfa())
-        } else {
-            Err(KernelError::NotFound {
-                resource: "user",
-                id: 0, // Username lookup, no specific ID
-            })
-        }
+        let account = accounts.get_mut(username).ok_or_else(not_found)?;
+        Ok(account.enable_mfa())
     }
 
-    /// Unlock user account
+    /// Clear a failure lockout.
     pub fn unlock_account(&self, username: &str) -> Result<(), KernelError> {
         let mut accounts = self.accounts.write();
-
-        if let Some(account) = accounts.get_mut(username) {
-            account.locked = false;
-            account.locked_until = None;
-            account.failed_attempts = 0;
-            Ok(())
-        } else {
-            Err(KernelError::NotFound {
-                resource: "user",
-                id: 0, // Username lookup, no specific ID
-            })
-        }
+        let account = accounts.get_mut(username).ok_or_else(not_found)?;
+        account.locked_until = None;
+        account.failed_attempts = 0;
+        Ok(())
     }
 
     /// Delete user account
     pub fn delete_user(&self, username: &str) -> Result<(), KernelError> {
-        let mut accounts = self.accounts.write();
-
-        accounts
+        self.accounts
+            .write()
             .remove(username)
             .map(|_| ())
-            .ok_or(KernelError::NotFound {
-                resource: "user",
-                id: 0, // Username lookup, no specific ID
-            })
+            .ok_or_else(not_found)
     }
 
-    /// List all usernames. Returns an iterator-friendly fixed-size collection.
-    ///
-    /// Since we cannot return `Vec<String>` without heap allocation, callers
-    /// should use `with_users` or iterate via the returned array.
-    pub fn list_usernames(&self, buf: &mut [Option<&str>]) -> usize {
-        let accounts = self.accounts.read();
-        let mut i = 0;
-        for account in accounts.iter() {
-            if i >= buf.len() {
-                break;
-            }
-            buf[i] = Some(account.username);
-            i += 1;
-        }
-        i
+    /// The account names, in order.
+    pub fn usernames(&self) -> Vec<String> {
+        self.accounts.read().keys().cloned().collect()
     }
 
-    /// Get user by ID
-    pub fn get_user_by_id(&self, user_id: UserId) -> Option<&'static str> {
-        let accounts = self.accounts.read();
+    /// The name of user `user_id`.
+    pub fn get_user_by_id(&self, user_id: UserId) -> Option<String> {
+        self.accounts
+            .read()
+            .values()
+            .find(|a| a.user_id == user_id)
+            .map(|a| a.username.clone())
+    }
 
-        for account in accounts.iter() {
-            if account.user_id == user_id {
-                return Some(account.username);
+    // -- Files ------------------------------------------------------------
+
+    /// Replace the accounts with those of the files: `shadow`
+    /// (`/etc/shadow`), `opasswd` (`/etc/security/opasswd`) and `mfa`
+    /// (`/etc/veridian/mfa`); `users` lists the user database's (name,
+    /// uid) pairs, and every user gets an account -- with no password if
+    /// `shadow` has no line for it. A shadow line for a name the user
+    /// database does not know is dropped (it has no user ID). Malformed
+    /// lines are skipped; how many were is returned.
+    pub fn load(
+        &self,
+        users: &[(String, UserId)],
+        shadow: &str,
+        opasswd: &str,
+        mfa: &str,
+    ) -> usize {
+        let mut bad = 0;
+        let mut accounts = BTreeMap::new();
+        for (name, uid) in users {
+            accounts.insert(name.clone(), UserAccount::new(*uid, name));
+        }
+        for line in shadow.lines().filter(|l| !l.trim().is_empty()) {
+            match parse_shadow_line(line) {
+                Some((name, password, aging)) => {
+                    if let Some(account) = accounts.get_mut(name) {
+                        account.password = password.to_string();
+                        account.aging = aging;
+                    }
+                }
+                None => bad += 1,
             }
         }
+        for line in opasswd.lines().filter(|l| !l.trim().is_empty()) {
+            // pam_pwhistory: name:uid:count:hash,hash,...
+            let fields: Vec<&str> = line.split(':').collect();
+            match (fields.first(), fields.get(3)) {
+                (Some(name), Some(hashes)) => {
+                    if let Some(account) = accounts.get_mut(*name) {
+                        account.password_history = hashes
+                            .split(',')
+                            .filter(|h| h.starts_with("$6$"))
+                            .map(String::from)
+                            .collect();
+                        let excess = account
+                            .password_history
+                            .len()
+                            .saturating_sub(MAX_PASSWORD_HISTORY);
+                        account.password_history.drain(..excess);
+                    }
+                }
+                _ => bad += 1,
+            }
+        }
+        for line in mfa.lines().filter(|l| !l.trim().is_empty()) {
+            let parsed = line
+                .split_once(':')
+                .and_then(|(name, hex)| Some((name, decode_hex32(hex.trim())?)));
+            match parsed {
+                Some((name, secret)) => {
+                    if let Some(account) = accounts.get_mut(name) {
+                        account.mfa_secret = Some(secret);
+                        account.mfa_enabled = true;
+                    }
+                }
+                None => bad += 1,
+            }
+        }
+        *self.accounts.write() = accounts;
+        bad
+    }
 
-        None
+    /// `/etc/shadow`, one line per account, in name order.
+    pub fn shadow_file(&self) -> String {
+        let mut out = String::new();
+        for account in self.accounts.read().values() {
+            out.push_str(&shadow_line(account));
+            out.push('\n');
+        }
+        out
+    }
+
+    /// `/etc/security/opasswd`: the accounts with a password history.
+    pub fn opasswd_file(&self) -> String {
+        let mut out = String::new();
+        for a in self.accounts.read().values() {
+            if !a.password_history.is_empty() {
+                out.push_str(&alloc::format!(
+                    "{}:{}:{}:{}\n",
+                    a.username,
+                    a.user_id,
+                    a.password_history.len(),
+                    a.password_history.join(",")
+                ));
+            }
+        }
+        out
+    }
+
+    /// `/etc/veridian/mfa`: the accounts with a second factor.
+    pub fn mfa_file(&self) -> String {
+        let mut out = String::new();
+        for a in self.accounts.read().values() {
+            if let Some(secret) = a.mfa_secret {
+                out.push_str(&a.username);
+                out.push(':');
+                for b in secret {
+                    out.push_str(&alloc::format!("{:02x}", b));
+                }
+                out.push('\n');
+            }
+        }
+        out
     }
 }
 
@@ -958,6 +968,64 @@ impl Default for AuthManager {
     }
 }
 
+/// A day count field of a shadow line (`None` for empty or -1).
+fn parse_day(field: &str) -> Result<Option<u64>, ()> {
+    match field {
+        "" | "-1" => Ok(None),
+        f => f.parse().map(Some).map_err(|_| ()),
+    }
+}
+
+/// `name:password:lastchg:min:max:warn:inactive:expire:reserved`, the last
+/// fields optional; `None` for a malformed line.
+fn parse_shadow_line(line: &str) -> Option<(&str, &str, Aging)> {
+    let f: Vec<&str> = line.split(':').collect();
+    if f.len() < 2 || f[0].is_empty() {
+        return None;
+    }
+    let day = |i: usize| parse_day(f.get(i).copied().unwrap_or(""));
+    Some((
+        f[0],
+        f[1],
+        Aging {
+            last_change: day(2).ok()?,
+            min_days: day(3).ok()?,
+            max_days: day(4).ok()?,
+            warn_days: day(5).ok()?,
+            inactive_days: day(6).ok()?,
+            expire_day: day(7).ok()?,
+        },
+    ))
+}
+
+/// An account's shadow line.
+fn shadow_line(a: &UserAccount) -> String {
+    let day = |d: Option<u64>| d.map_or_else(String::new, |d| d.to_string());
+    let g = &a.aging;
+    alloc::format!(
+        "{}:{}:{}:{}:{}:{}:{}:{}:",
+        a.username,
+        a.password,
+        day(g.last_change),
+        day(g.min_days),
+        day(g.max_days),
+        day(g.warn_days),
+        day(g.inactive_days),
+        day(g.expire_day)
+    )
+}
+
+fn decode_hex32(hex: &str) -> Option<[u8; 32]> {
+    if hex.len() != 64 {
+        return None;
+    }
+    let mut out = [0u8; 32];
+    for (i, byte) in out.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(hex.get(2 * i..2 * i + 2)?, 16).ok()?;
+    }
+    Some(out)
+}
+
 // ---------------------------------------------------------------------------
 // Global State
 // ---------------------------------------------------------------------------
@@ -965,7 +1033,9 @@ impl Default for AuthManager {
 /// Global authentication manager
 static AUTH_MANAGER: OnceLock<AuthManager> = OnceLock::new();
 
-/// Initialize authentication framework
+/// Initialize authentication framework: an empty store, filled from the
+/// account files once the root filesystem is mounted
+/// (`security::accounts::load`). There is no built-in account or password.
 pub fn init() -> Result<(), KernelError> {
     AUTH_MANAGER
         .set(AuthManager::new())
@@ -973,20 +1043,7 @@ pub fn init() -> Result<(), KernelError> {
             resource: "auth_manager",
             id: 0,
         })?;
-
-    // Create default root account (uses relaxed policy for initial setup)
-    let auth_manager = get_auth_manager();
-    if let Err(_e) = auth_manager.create_user("root", "veridian") {
-        crate::kprintln!("[AUTH] Warning: Failed to create default root account");
-    }
-
-    crate::println!("[AUTH] Authentication framework initialized");
-    crate::println!("[AUTH] Default root user created");
-    crate::println!(
-        "[AUTH] PBKDF2-HMAC-SHA256 with {} iterations",
-        UserAccount::PBKDF2_ITERATIONS
-    );
-
+    crate::println!("[AUTH] Authentication framework initialized (SHA-512-crypt)");
     Ok(())
 }
 
@@ -1013,20 +1070,31 @@ pub fn validate_password(password: &str) -> Result<(), KernelError> {
 mod tests {
     use super::*;
 
+    /// A store with `name` (uid 1000) whose password is `password`.
+    fn with_user(name: &str, password: &str) -> AuthManager {
+        let auth = AuthManager::new();
+        auth.add_account(name, 1000).unwrap();
+        auth.reset_password(name, password).unwrap();
+        auth
+    }
+
+    const NOW: u64 = 100;
+    const DAY: u64 = 20_000;
+    const TODAY: Option<u64> = Some(DAY);
+
     #[test]
     fn test_password_hashing() {
-        let account = UserAccount::new(1000, "test", "password123");
-
+        let mut account = UserAccount::new(1000, "test");
+        assert!(!account.verify_password(""));
+        account.change_password("password123", 0, TODAY).unwrap();
+        assert!(account.password.starts_with("$6$"));
         assert!(account.verify_password("password123"));
         assert!(!account.verify_password("wrongpassword"));
     }
 
     #[test]
     fn test_authentication() {
-        let auth = AuthManager::new();
-
-        let _ = auth.create_user("alice", "secret");
-
+        let auth = with_user("alice", "secret");
         assert_eq!(auth.authenticate("alice", "secret"), AuthResult::Success);
         assert_eq!(
             auth.authenticate("alice", "wrong"),
@@ -1038,18 +1106,26 @@ mod tests {
         );
     }
 
+    /// No built-in password: an account without one cannot be logged in
+    /// to with any password, the empty one included.
+    #[test]
+    fn accounts_without_a_password_admit_nobody() {
+        let auth = AuthManager::new();
+        auth.add_account("root", 0).unwrap();
+        for guess in ["", "veridian", "root", "!"] {
+            assert_eq!(
+                auth.authenticate_at("root", guess, NOW, TODAY),
+                AuthResult::InvalidCredentials
+            );
+        }
+    }
+
     #[test]
     fn test_account_locking() {
-        let auth = AuthManager::new();
-
-        let _ = auth.create_user("bob", "password");
-
-        // Try wrong password multiple times
+        let auth = with_user("bob", "password");
         for _ in 0..5 {
             let _ = auth.authenticate("bob", "wrong");
         }
-
-        // Account should now be locked
         assert_eq!(
             auth.authenticate("bob", "password"),
             AuthResult::AccountLocked
@@ -1057,28 +1133,42 @@ mod tests {
     }
 
     /// Failed attempts lock an account for LOCKOUT_SECS, not for good; an
-    /// administrator's lock stays.
+    /// administrator's lock stays until lifted.
     #[test]
     fn failure_lockout_runs_out() {
-        let auth = AuthManager::new();
-        let _ = auth.create_user("carol", "password");
+        let auth = with_user("carol", "password");
         for _ in 0..5 {
-            let _ = auth.authenticate_at("carol", "wrong", 100);
+            let _ = auth.authenticate_at("carol", "wrong", NOW, TODAY);
         }
         assert_eq!(
-            auth.authenticate_at("carol", "password", 100 + AuthManager::LOCKOUT_SECS - 1),
+            auth.authenticate_at(
+                "carol",
+                "password",
+                NOW + AuthManager::LOCKOUT_SECS - 1,
+                TODAY
+            ),
             AuthResult::AccountLocked
         );
         assert_eq!(
-            auth.authenticate_at("carol", "password", 100 + AuthManager::LOCKOUT_SECS),
+            auth.authenticate_at("carol", "password", NOW + AuthManager::LOCKOUT_SECS, TODAY),
             AuthResult::Success
         );
-        // A fresh count: four failures do not lock it again.
         for _ in 0..4 {
-            let _ = auth.authenticate_at("carol", "wrong", 1000);
+            let _ = auth.authenticate_at("carol", "wrong", 1000, TODAY);
         }
         assert_eq!(
-            auth.authenticate_at("carol", "password", 1000),
+            auth.authenticate_at("carol", "password", 1000, TODAY),
+            AuthResult::Success
+        );
+        auth.set_password_lock("carol", true).unwrap();
+        assert_eq!(
+            auth.authenticate_at("carol", "password", 5000, TODAY),
+            AuthResult::AccountLocked
+        );
+        assert!(auth.shadow_file().starts_with("carol:!$6$"));
+        auth.set_password_lock("carol", false).unwrap();
+        assert_eq!(
+            auth.authenticate_at("carol", "password", 5000, TODAY),
             AuthResult::Success
         );
     }
@@ -1088,33 +1178,27 @@ mod tests {
     /// change it even with the right one.
     #[test]
     fn password_change_cannot_guess_past_the_lockout() {
-        let auth = AuthManager::new();
-        let _ = auth.create_user("erin", "password");
+        let auth = with_user("erin", "password");
         for _ in 0..5 {
             assert!(auth
-                .change_password_at("erin", "guess", "new-password", 100)
+                .change_password_at("erin", "guess", "new-password", NOW, TODAY)
                 .is_err());
         }
         assert!(auth
-            .change_password_at("erin", "password", "new-password", 101)
+            .change_password_at("erin", "password", "new-password", NOW + 1, TODAY)
             .is_err());
-        assert_eq!(
-            auth.authenticate_at("erin", "password", 101),
-            AuthResult::AccountLocked
-        );
-        let later = 100 + AuthManager::LOCKOUT_SECS;
-        auth.change_password_at("erin", "password", "new-password", later)
+        let later = NOW + AuthManager::LOCKOUT_SECS;
+        auth.change_password_at("erin", "password", "new-password", later, TODAY)
             .unwrap();
         assert_eq!(
-            auth.authenticate_at("erin", "new-password", later),
+            auth.authenticate_at("erin", "new-password", later, TODAY),
             AuthResult::Success
         );
     }
 
     #[test]
     fn account_status_and_reset_password() {
-        let auth = AuthManager::new();
-        let _ = auth.create_user("dave", "password");
+        let auth = with_user("dave", "password");
         assert_eq!(auth.account_status("dave"), AuthResult::Success);
         assert_eq!(
             auth.account_status("nobody"),
@@ -1125,90 +1209,177 @@ mod tests {
             auth.authenticate("dave", "another-password"),
             AuthResult::Success
         );
-        // The account's rules still apply: the new password must differ.
+        // The new password must differ.
         assert!(auth.reset_password("dave", "another-password").is_err());
         assert!(auth.reset_password("nobody", "x-password").is_err());
     }
 
+    /// Password history (pam_pwhistory's remember), with a policy that
+    /// keeps some.
     #[test]
-    fn test_pbkdf2_hmac_sha256() {
-        // Test that PBKDF2 produces consistent output
-        let salt = [0x42u8; 32];
-        let hash1 = pbkdf2_hmac_sha256(b"test_password", &salt, 10);
-        let hash2 = pbkdf2_hmac_sha256(b"test_password", &salt, 10);
-        assert_eq!(hash1, hash2);
+    fn history_refuses_recent_passwords() {
+        let auth = AuthManager::with_policy(PasswordPolicy {
+            history_size: 2,
+            ..PasswordPolicy::relaxed()
+        });
+        auth.add_account("hal", 1000).unwrap();
+        for p in ["one", "two", "three"] {
+            auth.reset_password("hal", p).unwrap();
+        }
+        // The current one and the two before it are refused.
+        for p in ["one", "two", "three"] {
+            assert!(auth.reset_password("hal", p).is_err(), "{}", p);
+        }
+        // After another change "one" is no longer among the two kept.
+        auth.reset_password("hal", "four").unwrap();
+        auth.reset_password("hal", "one").unwrap();
+        assert!(auth.opasswd_file().starts_with("hal:1000:2:$6$"));
+    }
 
-        // Different passwords produce different hashes
-        let hash3 = pbkdf2_hmac_sha256(b"different_password", &salt, 10);
-        assert_ne!(hash1, hash3);
+    /// The aging fields as pam_unix reads them.
+    #[test]
+    fn aging_follows_shadow() {
+        let age = |last, max, inactive, expire| Aging {
+            last_change: last,
+            max_days: max,
+            inactive_days: inactive,
+            expire_day: expire,
+            ..Aging::default()
+        };
+        assert_eq!(age(None, None, None, None).state(TODAY), AgeState::Valid);
+        assert_eq!(
+            age(Some(0), None, None, None).state(TODAY),
+            AgeState::PasswordExpired
+        );
+        assert_eq!(
+            age(None, None, None, Some(DAY)).state(TODAY),
+            AgeState::AccountExpired
+        );
+        assert_eq!(
+            age(None, None, None, Some(DAY + 1)).state(TODAY),
+            AgeState::Valid
+        );
+        let old = DAY - 100;
+        assert_eq!(
+            age(Some(old), Some(99_999), None, None).state(TODAY),
+            AgeState::Valid
+        );
+        assert_eq!(
+            age(Some(old), Some(90), None, None).state(TODAY),
+            AgeState::PasswordExpired
+        );
+        assert_eq!(
+            age(Some(old), Some(90), Some(5), None).state(TODAY),
+            AgeState::AccountExpired
+        );
+        assert_eq!(
+            age(Some(old), Some(90), Some(20), None).state(TODAY),
+            AgeState::PasswordExpired
+        );
+        let min = Aging {
+            last_change: Some(DAY - 1),
+            min_days: Some(7),
+            ..Aging::default()
+        };
+        assert!(min.too_soon_to_change(TODAY));
+        assert!(!min.too_soon_to_change(Some(DAY + 6)));
+        // Without the date, aging that needs it fails closed.
+        assert!(min.too_soon_to_change(None));
+        assert_eq!(age(None, None, None, None).state(None), AgeState::Valid);
+        assert_eq!(
+            age(None, None, None, Some(DAY + 1000)).state(None),
+            AgeState::AccountExpired
+        );
+        assert_eq!(
+            age(Some(old), Some(90), None, None).state(None),
+            AgeState::AccountExpired
+        );
+        assert_eq!(
+            age(Some(old), Some(99_999), None, None).state(None),
+            AgeState::Valid
+        );
+        assert_eq!(
+            age(Some(0), None, None, None).state(None),
+            AgeState::PasswordExpired
+        );
+    }
+
+    /// A forced change: the right password reports PasswordExpired, and a
+    /// change renews it.
+    #[test]
+    fn forced_change_is_reported_and_renewed() {
+        let auth = with_user("ivy", "password");
+        // The same line with a last change of 0 ("change it now").
+        let line = auth.shadow_file();
+        let mut fields: Vec<&str> = line.trim_end().split(':').collect();
+        fields[2] = "0";
+        auth.load(&[(String::from("ivy"), 1000)], &fields.join(":"), "", "");
+        assert_eq!(
+            auth.authenticate_at("ivy", "password", NOW, TODAY),
+            AuthResult::PasswordExpired
+        );
+        auth.change_password_at("ivy", "password", "renewed", NOW, TODAY)
+            .unwrap();
+        assert_eq!(
+            auth.authenticate_at("ivy", "renewed", NOW, TODAY),
+            AuthResult::Success
+        );
+    }
+
+    /// The files round-trip; every user of the database has an account,
+    /// one with no shadow line has no password, and a shadow line for an
+    /// unknown name is dropped.
+    #[test]
+    fn files_round_trip() {
+        let auth = with_user("jo", "password");
+        auth.add_account("ken", 1001).unwrap();
+        auth.set_account_expiration("ken", Some(30_000)).unwrap();
+        let secret = auth.enable_mfa("ken").unwrap();
+        let (shadow, opasswd, mfa) = (auth.shadow_file(), auth.opasswd_file(), auth.mfa_file());
+        let users = [
+            (String::from("jo"), 1000),
+            (String::from("ken"), 1001),
+            (String::from("lee"), 1002),
+        ];
+        let loaded = AuthManager::new();
+        let shadow = alloc::format!("{}ghost:$6$x$y:::::::\nbroken\n", shadow);
+        assert_eq!(loaded.load(&users, &shadow, &opasswd, &mfa), 1);
+        assert_eq!(
+            loaded.authenticate_at("jo", "password", NOW, TODAY),
+            AuthResult::Success
+        );
+        assert_eq!(
+            loaded.authenticate_at("ken", "", NOW, TODAY),
+            AuthResult::InvalidCredentials
+        );
+        assert!(loaded.has_account("lee") && !loaded.has_account("ghost"));
+        assert_eq!(loaded.usernames(), ["jo", "ken", "lee"]);
+        let ken = loaded.accounts.read().get("ken").cloned().unwrap();
+        assert_eq!(ken.aging.expire_day, Some(30_000));
+        assert_eq!(ken.mfa_secret, Some(secret));
+        assert!(loaded.shadow_file().contains("ken:!::::::30000:"));
     }
 
     #[test]
     fn test_hmac_sha256() {
-        // Basic HMAC test: same key+message = same output
         let key = b"secret_key";
         let msg = b"hello world";
-        let h1 = hmac_sha256(key, msg);
-        let h2 = hmac_sha256(key, msg);
-        assert_eq!(h1, h2);
-
-        // Different message = different HMAC
-        let h3 = hmac_sha256(key, b"different message");
-        assert_ne!(h1, h3);
+        assert_eq!(hmac_sha256(key, msg), hmac_sha256(key, msg));
+        assert_ne!(
+            hmac_sha256(key, msg),
+            hmac_sha256(key, b"different message")
+        );
     }
 
     #[test]
     fn test_password_policy_validation() {
         let policy = PasswordPolicy::default_policy();
-
-        // Too short
         assert!(policy.validate_password("Ab1").is_err());
-
-        // Missing uppercase
         assert!(policy.validate_password("abcdefg1").is_err());
-
-        // Missing lowercase
         assert!(policy.validate_password("ABCDEFG1").is_err());
-
-        // Missing digit
         assert!(policy.validate_password("Abcdefgh").is_err());
-
-        // Valid password
         assert!(policy.validate_password("Abcdefg1").is_ok());
-    }
-
-    #[test]
-    fn test_account_expiration() {
-        let mut account = UserAccount::new(1000, "exptest", "password");
-
-        // No expiration: not expired
-        assert!(!account.is_expired());
-
-        // Set expiration in the past (0 = already expired since boot time > 0 in tests,
-        // but on fresh boot timestamp may be 0, so use a small value)
-        account.set_expiration(Some(0));
-        // This may or may not be expired depending on boot time;
-        // just verify the field was set
-        assert_eq!(account.expires_at, Some(0));
-    }
-
-    #[test]
-    fn test_password_change_reuse() {
-        let mut account = UserAccount::new(1000, "chgtest", "original");
-
-        // Changing to the same password should fail
-        let result = account.change_password("original", 5);
-        assert!(result.is_err());
-
-        // Changing to a different password should succeed
-        let result = account.change_password("newpassword", 5);
-        assert!(result.is_ok());
-
-        // Password history should have one entry
-        assert_eq!(account.password_history_len, 1);
-
-        // Verify new password works
-        assert!(account.verify_password("newpassword"));
-        assert!(!account.verify_password("original"));
+        let long = alloc::format!("Ab1{}", "x".repeat(crypt::MAX_KEY));
+        assert!(policy.validate_password(&long).is_err());
     }
 }

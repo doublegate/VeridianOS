@@ -393,6 +393,18 @@
 
 ### Security
 
+- **No built-in password; accounts on disk (N-131, N-153).** The kernel created `root` with the
+  password `veridian` at every boot, kept accounts only in memory, and the graphical display
+  manager accepted root with any password, so the KDE screen lock protected nothing. Accounts now
+  live in `/etc/passwd` and `/etc/shadow` (mode 0600), loaded at boot and rewritten atomically after
+  every change, with password history in `/etc/security/opasswd`. Hashes are SHA-512-crypt with
+  the round count stored, the form musl's crypt(3) reads, so BusyBox's `login` and `su` check the
+  same passwords as PAM; shadow's aging fields apply, failing closed while the date is unknown.
+  The kernel shell and the account store were two user databases; they are one, and the shell's
+  `passwd` (which reported success without changing anything) sets passwords, prompting without
+  echo, with `-l` and `-u` to lock and unlock. Nobody can log in with a password until one is
+  set: `passwd` on the console, or `VERIDIAN_ROOT_PASSWORD` when building the KDE root filesystem.
+  Runtime test `musl_accounts`.
 - **Passwords are compared in constant time, and failed attempts lock for ten minutes.** The
   account store compared password hashes with `==`, which stops at the first differing byte; it
   now uses the constant-time comparison. Five failed attempts locked an account until reboot,

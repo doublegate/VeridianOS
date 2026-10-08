@@ -44,8 +44,8 @@ pub use ptrace::{
 };
 #[allow(unused_imports)]
 pub use users::{
-    init_user_db, with_user_db, with_user_db_mut, GroupDatabase, GroupEntry, ShadowEntry,
-    UserDatabase, UserEntry, UserGroupError,
+    init_user_db, with_user_db, with_user_db_mut, GroupDatabase, GroupEntry, UserDatabase,
+    UserEntry, UserGroupError,
 };
 
 // ============================================================================
@@ -359,14 +359,6 @@ mod tests {
         let parsed = UserEntry::from_passwd_line(&line).unwrap();
         assert_eq!(parsed.username, "alice");
         assert_eq!(parsed.uid, 1000);
-    }
-
-    #[test]
-    fn test_shadow_entry() {
-        let shadow = ShadowEntry::new_locked("alice");
-        assert!(shadow.is_locked());
-        let shadow2 = ShadowEntry::with_password("alice", "$6$salt$hash");
-        assert!(!shadow2.is_locked());
     }
 
     #[test]

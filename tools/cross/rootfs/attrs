@@ -14,5 +14,8 @@
 /etc/polkit-1/rules.d                        102 0    0750
 /usr/share/polkit-1/rules.d                  102 0    0750
 
+# Password hashes (N-131): root only.
+/etc/shadow                                  0   0    0600
+
 /root                                        0   0    0700
 /tmp                                         0   0    1777

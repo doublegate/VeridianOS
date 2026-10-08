@@ -1,9 +1,10 @@
 /*
  * pam_veridian -- PAM authentication against the VeridianOS account store.
  *
- * Passwords live in the kernel (PBKDF2, security::auth); there is no
- * /etc/shadow. This module asks the kernel through veridian_auth
- * (kernel/src/syscall/veridian_auth.rs):
+ * The kernel keeps the accounts (security::auth, loaded from and saved to
+ * /etc/shadow in SHA-512-crypt form by security::accounts). This module
+ * asks it through veridian_auth (kernel/src/syscall/veridian_auth.rs), so
+ * the failure lockout and password history apply to every caller:
  *
  *   auth      the password the conversation supplies (PAM_AUTHTOK)
  *   account   whether the account is usable (not locked or expired)
