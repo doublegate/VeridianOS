@@ -561,7 +561,15 @@ pub extern "C" fn syscall_handler(
     // private numbers from 1024 for VeridianOS-only calls. An unknown
     // number is ENOSYS, as on Linux.
     let result = match Syscall::try_from(syscall_num) {
-        Ok(syscall) => handle_syscall(syscall, arg1, arg2, arg3, arg4, arg5),
+        Ok(syscall) => {
+            let result = handle_syscall(syscall, arg1, arg2, arg3, arg4, arg5);
+            if result == Err(SyscallError::BrokenPipe) && raises_sigpipe(syscall, arg3, arg4) {
+                crate::process::signals::send_to_current(
+                    crate::process::exit::signals::SIGPIPE as usize,
+                );
+            }
+            result
+        }
         Err(()) => Err(SyscallError::InvalidSyscall),
     };
 
@@ -658,6 +666,20 @@ pub extern "C" fn syscall_handler(
     }
 
     ret
+}
+
+/// Whether EPIPE from `syscall` comes with SIGPIPE for the caller, as on
+/// Linux: from a write always (pipe_write; a socket written with write),
+/// from a send unless its flags (`arg3` for sendmsg, `arg4` for sendto)
+/// carry MSG_NOSIGNAL.
+fn raises_sigpipe(syscall: Syscall, arg3: usize, arg4: usize) -> bool {
+    const MSG_NOSIGNAL: usize = 0x4000;
+    match syscall {
+        Syscall::Write | Syscall::Writev | Syscall::SocketSend => true,
+        Syscall::Sendto => arg4 & MSG_NOSIGNAL == 0,
+        Syscall::Sendmsg => arg3 & MSG_NOSIGNAL == 0,
+        _ => false,
+    }
 }
 
 /// Handle individual system calls

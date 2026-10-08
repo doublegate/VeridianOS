@@ -620,13 +620,26 @@ fn write_fd(
             Ok(n) if blocking && stream && dispatched && done + n < count => done += n,
             Ok(n) => return Some(Ok(done + n)),
             Err(SyscallError::WouldBlock) if blocking && dispatched => {}
-            Err(_) if done > 0 => return Some(Ok(done)),
+            Err(e) if done > 0 => {
+                sigpipe_after_partial_write(&file_desc, e);
+                return Some(Ok(done));
+            }
             Err(e) => return Some(Err(e)),
         }
         #[cfg(feature = "alloc")]
         if let Err(e) = wait_ready(&file_desc, POLLOUT | POLLERR, &mut retry_now) {
             return Some(if done > 0 { Ok(done) } else { Err(e) });
         }
+    }
+}
+
+/// A write to a pipe that loses its last reader after part of the data went
+/// in still raises SIGPIPE, as Linux's pipe_write does; the caller gets the
+/// count written. (A socket raises it only when nothing was sent, and an
+/// EPIPE with nothing written is signalled by the system call dispatcher.)
+fn sigpipe_after_partial_write(file: &crate::fs::file::File, error: SyscallError) {
+    if error == SyscallError::BrokenPipe && file.node.node_type() == crate::fs::NodeType::Pipe {
+        crate::process::signals::send_to_current(crate::process::exit::signals::SIGPIPE as usize);
     }
 }
 
@@ -2769,6 +2782,11 @@ pub fn sys_writev(fd: usize, iov_ptr: usize, iovcnt: usize) -> SyscallResult {
             Err(e) => {
                 // If we already wrote some data, return what we have
                 if total_written > 0 {
+                    if let Some(file) =
+                        process::current_process().and_then(|p| p.file_table.lock().get(fd))
+                    {
+                        sigpipe_after_partial_write(&file, e);
+                    }
                     break;
                 }
                 return Err(e);

@@ -578,6 +578,12 @@
 
 ### Fixed
 
+- **SIGPIPE.** A write to a pipe with no reader failed with EPIPE but raised no signal, so a
+  program that relies on SIGPIPE to stop (a producer in a pipeline whose consumer exited) kept
+  running. EPIPE from write, writev, send, sendto and sendmsg now raises SIGPIPE, except a send
+  passing MSG_NOSIGNAL, and a pipe write that loses its reader part-way raises it too, as on
+  Linux. A Unix stream socket whose peer has closed now fails a send with EPIPE; it reported an
+  invalid-state error. Runtime test `musl_sigpipe`.
 - **KDE cross pipeline:** SQLite was built without a SONAME, so Qt's SQL plugin recorded the
   sysroot's path to it and could never load on the target; it now has its historical SONAME,
   `libsqlite3.so.0`. kded6 compiled in the build host's path to kconf_update. Build tools

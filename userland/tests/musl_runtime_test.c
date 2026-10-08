@@ -485,6 +485,11 @@ static int rl_memory(void)
         f |= 16;
     p = mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
     if (p == MAP_FAILED) f |= 32;
+    /* ... nor private memory made writable later. */
+    p = mmap(NULL, 4096, PROT_READ, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    errno = 0;
+    if (p == MAP_FAILED || mprotect(p, 4096, PROT_READ | PROT_WRITE) != -1 || errno != ENOMEM)
+        f |= 128;
     void *brk0 = sbrk(0);
     if (sbrk(1 << 20) != (void *)-1 || sbrk(0) != brk0) f |= 64;
     return f;
@@ -609,6 +614,77 @@ static void test_rlimits(void)
     snprintf(why, sizeof(why), "fail=%#x st=%#x,%#x,%#x,%#x,%#x,%#x,%#x", f, codes[0], codes[1],
              codes[2], codes[4], codes[6], codes[7], codes[8]);
     report("musl_rlimits", f == 0, why);
+}
+
+/* SIGPIPE (Linux): a write or send that fails with EPIPE raises it, unless
+ * a send passes MSG_NOSIGNAL; a pipe raises it even after a partial write. */
+static int sp_pipe_default(void)
+{
+    int p[2];
+    if (pipe(p) != 0) return 1;
+    close(p[0]);
+    (void)!write(p[1], "x", 1); /* SIGPIPE: terminates */
+    return 2;
+}
+
+static int sp_ignored(void)
+{
+    int f = 0, p[2], s[2];
+    signal(SIGPIPE, SIG_IGN);
+    if (pipe(p) != 0) return 1;
+    close(p[0]);
+    errno = 0;
+    if (write(p[1], "x", 1) != -1 || errno != EPIPE) f |= 2;
+    struct iovec iov = {(void *)"xy", 2};
+    errno = 0;
+    if (writev(p[1], &iov, 1) != -1 || errno != EPIPE) f |= 2;
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, s) != 0) return f | 4;
+    close(s[1]);
+    errno = 0;
+    if (send(s[0], "x", 1, 0) != -1 || errno != EPIPE) f |= 8;
+    errno = 0;
+    if (write(s[0], "x", 1) != -1 || errno != EPIPE) f |= 8;
+    return f;
+}
+
+static volatile sig_atomic_t sigpipes;
+
+static void count_sigpipe(int sig)
+{
+    (void)sig;
+    sigpipes++;
+}
+
+static int sp_nosignal(void)
+{
+    int f = 0, s[2];
+    signal(SIGPIPE, count_sigpipe);
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, s) != 0) return 1;
+    close(s[1]);
+    errno = 0;
+    if (send(s[0], "x", 1, MSG_NOSIGNAL) != -1 || errno != EPIPE || sigpipes != 0) f |= 2;
+    struct msghdr mh = {0};
+    struct iovec iov = {(void *)"x", 1};
+    mh.msg_iov = &iov;
+    mh.msg_iovlen = 1;
+    errno = 0;
+    if (sendmsg(s[0], &mh, MSG_NOSIGNAL) != -1 || errno != EPIPE || sigpipes != 0) f |= 4;
+    errno = 0;
+    if (send(s[0], "x", 1, 0) != -1 || errno != EPIPE || sigpipes != 1) f |= 8;
+    return f;
+}
+
+static void test_sigpipe(void)
+{
+    int f = 0;
+    int st = in_child(sp_pipe_default);
+    if (!WIFSIGNALED(st) || WTERMSIG(st) != SIGPIPE) f |= 1;
+    int a = in_child(sp_ignored), b = in_child(sp_nosignal);
+    if (!exited_zero(a)) f |= 2;
+    if (!exited_zero(b)) f |= 4;
+    static char why[96];
+    snprintf(why, sizeof(why), "fail=%#x st=%#x,%#x,%#x", f, st, a, b);
+    report("musl_sigpipe", f == 0, why);
 }
 
 /* The --ids mode: this program's IDs, AT_SECURE, dumpable flag and
@@ -2324,6 +2400,7 @@ int main(int argc, char **argv)
     test_setuid_exec("/bin/musl_runtime_test");
     test_clocks_and_usage();
     test_rlimits();
+    test_sigpipe();
     printf("MUSL-RUNTIME: %d/%d\n", passed, total);
     return passed == total ? 0 : 1;
 }

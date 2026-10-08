@@ -387,7 +387,12 @@ pub fn socket_send(socket_id: u64, data: &[u8], rights: Option<ScmRights>) -> Ke
         id: socket_id,
     })?;
 
+    // A stream shut down for writing -- by shutdown(SHUT_WR), or because
+    // its peer closed -- is EPIPE, as on Linux (the caller adds SIGPIPE).
     if socket.shutdown_write {
+        if socket.socket_type == UnixSocketType::Stream {
+            return Err(KernelError::BrokenPipe);
+        }
         return Err(KernelError::InvalidState {
             expected: "write enabled",
             actual: "shutdown for writing",
@@ -411,12 +416,21 @@ pub fn socket_send(socket_id: u64, data: &[u8], rights: Option<ScmRights>) -> Ke
 
     // Deliver to peer's receive buffer.
     let mut sockets = UNIX_SOCKETS.lock();
-    let peer = sockets.get_mut(&peer_id).ok_or(KernelError::NotFound {
-        resource: "unix_socket",
-        id: peer_id,
-    })?;
+    let Some(peer) = sockets.get_mut(&peer_id) else {
+        return Err(if is_stream {
+            KernelError::BrokenPipe
+        } else {
+            KernelError::NotFound {
+                resource: "unix_socket",
+                id: peer_id,
+            }
+        });
+    };
 
     if peer.shutdown_read {
+        if is_stream {
+            return Err(KernelError::BrokenPipe);
+        }
         return Err(KernelError::InvalidState {
             expected: "read enabled",
             actual: "peer shutdown for reading",
@@ -676,6 +690,24 @@ mod tests {
         assert!(matches!(socket_recv(b, &mut buf), Ok((0, None))));
         socket_close(a).unwrap();
         socket_close(b).unwrap();
+    }
+
+    /// Sending on a stream whose peer has closed is EPIPE (Linux's
+    /// unix_stream_sendmsg); a datagram socket keeps its own error.
+    #[test]
+    fn stream_send_to_closed_peer_is_broken_pipe() {
+        let (a, b) = socketpair(UnixSocketType::Stream, 1).unwrap();
+        socket_close(b).unwrap();
+        assert_eq!(socket_send(a, b"x", None), Err(KernelError::BrokenPipe));
+        socket_close(a).unwrap();
+
+        let (c, d) = socketpair(UnixSocketType::Datagram, 1).unwrap();
+        socket_close(d).unwrap();
+        assert!(!matches!(
+            socket_send(c, b"x", None),
+            Ok(_) | Err(KernelError::BrokenPipe)
+        ));
+        socket_close(c).unwrap();
     }
 
     /// Data sent before the peer closed is read before end-of-file.
