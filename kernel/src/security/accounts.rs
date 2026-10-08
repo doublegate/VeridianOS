@@ -19,21 +19,48 @@
 extern crate alloc;
 
 use alloc::{string::String, sync::Arc, vec::Vec};
+use core::sync::atomic::{AtomicBool, Ordering};
 
 use crate::{
     error::KernelError,
     fs::{Permissions, VfsNode},
+    sync::sleep_mutex::SleepMutex,
 };
+
+/// Serializes saves: each takes the state and writes every file under it,
+/// so two saves cannot interleave their temporary files, and the last one
+/// written holds the newest state. It may sleep (the writes and the sync
+/// wait for the disk), so it is not a spinlock.
+static SAVE_LOCK: SleepMutex<()> = SleepMutex::new(());
+
+/// Set when a file existed but was not fully read (unreadable, not UTF-8,
+/// or malformed lines): saving would replace it with the part that was
+/// read, losing the rest, so saves are refused until the files are fixed
+/// and the system restarted.
+static LOAD_INCOMPLETE: AtomicBool = AtomicBool::new(false);
 
 pub const PASSWD: &str = "/etc/passwd";
 pub const SHADOW: &str = "/etc/shadow";
 pub const OPASSWD: &str = "/etc/security/opasswd";
 pub const MFA: &str = "/etc/veridian/mfa";
 
-/// A file's text, if it exists and is UTF-8.
+/// A file's text: empty if it does not exist; `None` if it exists but
+/// cannot be read as UTF-8 text.
 fn read_text(path: &str) -> Option<String> {
+    if !crate::fs::file_exists(path) {
+        return Some(String::new());
+    }
     let bytes = crate::fs::read_file(path).ok()?;
     String::from_utf8(bytes).ok()
+}
+
+/// [`read_text`], recording a file that exists but was not read.
+fn read_or_mark(path: &str) -> String {
+    read_text(path).unwrap_or_else(|| {
+        crate::println!("[AUTH] {}: cannot be read", path);
+        LOAD_INCOMPLETE.store(true, Ordering::Release);
+        String::new()
+    })
 }
 
 /// Load the account files into the user database and the account store.
@@ -43,24 +70,24 @@ pub fn load() {
     let Some(auth) = super::auth::try_auth_manager() else {
         return;
     };
-    if let Some(passwd) = read_text(PASSWD) {
-        let loaded = crate::syscall::userland_ext::with_user_db_mut(|db| db.load_passwd(&passwd));
-        if let Some(Err(e)) = loaded {
-            crate::println!(
-                "[AUTH] {}: malformed line ({:?}); kept what parsed",
-                PASSWD,
-                e
-            );
-        }
-    }
+    let passwd = read_or_mark(PASSWD);
+    let skipped =
+        crate::syscall::userland_ext::with_user_db_mut(|db| db.load_passwd(&passwd).1).unwrap_or(0);
     let users =
         crate::syscall::userland_ext::with_user_db(|db| db.name_uid_pairs()).unwrap_or_default();
-    let shadow = read_text(SHADOW).unwrap_or_default();
-    let opasswd = read_text(OPASSWD).unwrap_or_default();
-    let mfa = read_text(MFA).unwrap_or_default();
-    let bad = auth.load(&users, &shadow, &opasswd, &mfa);
+    let shadow = read_or_mark(SHADOW);
+    let opasswd = read_or_mark(OPASSWD);
+    let mfa = read_or_mark(MFA);
+    let bad = skipped + auth.load(&users, &shadow, &opasswd, &mfa);
     if bad > 0 {
         crate::println!("[AUTH] {} malformed account line(s) skipped", bad);
+        LOAD_INCOMPLETE.store(true, Ordering::Release);
+    }
+    if LOAD_INCOMPLETE.load(Ordering::Acquire) {
+        crate::println!(
+            "[AUTH] the account files were not fully read: changes will not be saved until they \
+             are fixed"
+        );
     }
     let without: Vec<String> = auth
         .usernames()
@@ -87,6 +114,12 @@ pub fn load() {
 /// Write the account files from the user database and the account store,
 /// then sync the filesystem.
 pub fn save() -> Result<(), KernelError> {
+    if LOAD_INCOMPLETE.load(Ordering::Acquire) {
+        return Err(KernelError::PermissionDenied {
+            operation: "save accounts: the files were not fully read at boot",
+        });
+    }
+    let _saving = SAVE_LOCK.lock();
     let auth =
         super::auth::try_auth_manager().ok_or(KernelError::NotInitialized { subsystem: "auth" })?;
     let passwd = crate::syscall::userland_ext::with_user_db(|db| db.to_passwd_file()).ok_or(

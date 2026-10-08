@@ -40,6 +40,7 @@
 #include <spawn.h>
 #include <sys/wait.h>
 #include <sys/socket.h>
+#include <sys/un.h>
 #include <sys/auxv.h>
 #include <sys/signalfd.h>
 #include <sys/syscall.h>
@@ -1098,6 +1099,66 @@ static void test_accounts(void)
     static char why[64];
     snprintf(why, sizeof(why), "fail=%#x st=%#x", f, st2);
     report("musl_accounts", f == 0, why);
+}
+
+/* SO_PEERCRED (N-236): a socketpair's ends see their creator; across
+ * connect, each side sees the other's process and effective IDs. */
+static int pc_client(void)
+{
+    if (setresgid(4501, 4501, 4501) != 0 || setresuid(4500, 4500, 4500) != 0) return 1;
+    int s = socket(AF_UNIX, SOCK_STREAM, 0);
+    struct sockaddr_un a = {.sun_family = AF_UNIX};
+    strcpy(a.sun_path, "/tmp/musl_peercred.sock");
+    if (s < 0 || connect(s, (struct sockaddr *)&a, sizeof(a)) != 0) return 2;
+    struct ucred c;
+    socklen_t len = sizeof(c);
+    if (getsockopt(s, SOL_SOCKET, SO_PEERCRED, &c, &len) != 0 || len != sizeof(c)) return 3;
+    if (c.pid != getppid() || c.uid != 0 || c.gid != 0) return 4;
+    char x;
+    (void)!read(s, &x, 1); /* until the server is done */
+    return 0;
+}
+
+static void test_peercred(void)
+{
+    int f = 0, sv[2];
+    struct ucred c;
+    socklen_t len = sizeof(c);
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) != 0) f |= 1;
+    else {
+        if (getsockopt(sv[0], SOL_SOCKET, SO_PEERCRED, &c, &len) != 0 || len != sizeof(c)
+            || c.pid != getpid() || c.uid != geteuid() || c.gid != getegid())
+            f |= 2;
+        /* A short buffer gets the start of it. */
+        len = 4;
+        if (getsockopt(sv[1], SOL_SOCKET, SO_PEERCRED, &c, &len) != 0 || len != 4) f |= 2;
+        close(sv[0]);
+        close(sv[1]);
+    }
+    int l = socket(AF_UNIX, SOCK_STREAM, 0);
+    struct sockaddr_un a = {.sun_family = AF_UNIX};
+    strcpy(a.sun_path, "/tmp/musl_peercred.sock");
+    unlink(a.sun_path);
+    len = sizeof(c);
+    if (getsockopt(l, SOL_SOCKET, SO_PEERCRED, &c, &len) != 0 || c.pid != 0 || c.uid != 65534) f |= 4;
+    if (bind(l, (struct sockaddr *)&a, sizeof(a)) != 0 || listen(l, 1) != 0) f |= 8;
+    pid_t pid = fork();
+    if (pid == 0)
+        _exit(pc_client());
+    int s = accept(l, NULL, NULL);
+    len = sizeof(c);
+    if (s < 0 || getsockopt(s, SOL_SOCKET, SO_PEERCRED, &c, &len) != 0 || c.pid != pid
+        || c.uid != 4500 || c.gid != 4501)
+        f |= 16;
+    if (s >= 0) close(s);
+    int st = 0;
+    waitpid(pid, &st, 0);
+    if (!exited_zero(st)) f |= 32;
+    close(l);
+    unlink(a.sun_path);
+    static char why[64];
+    snprintf(why, sizeof(why), "fail=%#x st=%#x", f, st);
+    report("musl_peercred", f == 0, why);
 }
 
 /* The --ids mode: this program's IDs, AT_SECURE, dumpable flag and
@@ -2817,6 +2878,7 @@ int main(int argc, char **argv)
     test_memory_calls();
     test_file_calls();
     test_accounts();
+    test_peercred();
     printf("MUSL-RUNTIME: %d/%d\n", passed, total);
     return passed == total ? 0 : 1;
 }

@@ -623,11 +623,14 @@ impl AuthManager {
         let Some(account) = accounts.get_mut(username) else {
             return AuthResult::InvalidCredentials;
         };
+        // A second factor comes before anything else a right password
+        // leads to: "expired, must change" reads as authenticated to PAM
+        // callers (a screen locker), so it must not skip the factor.
         match self.check_password(account, password, now, today) {
+            AuthResult::Success if account.mfa_enabled => AuthResult::MfaRequired,
             AuthResult::Success if account.aging.state(today) == AgeState::PasswordExpired => {
                 AuthResult::PasswordExpired
             }
-            AuthResult::Success if account.mfa_enabled => AuthResult::MfaRequired,
             AuthResult::Success => {
                 crate::security::audit::log_auth_attempt(0, account.user_id, username, true);
                 AuthResult::Success
@@ -711,10 +714,13 @@ impl AuthManager {
             return result;
         }
 
-        // Verify MFA token
+        // Verify MFA token; an expired password is reported only after it.
         let accounts = self.accounts.read();
         if let Some(account) = accounts.get(username) {
             if account.verify_mfa_token(mfa_token) {
+                if account.aging.state(today()) == AgeState::PasswordExpired {
+                    return AuthResult::PasswordExpired;
+                }
                 crate::security::audit::log_auth_attempt(0, account.user_id, username, true);
                 return AuthResult::Success;
             }
@@ -1323,6 +1329,23 @@ mod tests {
         assert_eq!(
             auth.authenticate_at("ivy", "renewed", NOW, TODAY),
             AuthResult::Success
+        );
+    }
+
+    /// A second factor is asked for before an expired password is
+    /// reported: "must change" counts as authenticated to PAM callers.
+    #[test]
+    fn mfa_comes_before_password_expiry() {
+        let auth = with_user("max", "password");
+        auth.enable_mfa("max").unwrap();
+        let line = auth.shadow_file();
+        let mut fields: Vec<&str> = line.trim_end().split(':').collect();
+        fields[2] = "0";
+        let mfa = auth.mfa_file();
+        auth.load(&[(String::from("max"), 1000)], &fields.join(":"), "", &mfa);
+        assert_eq!(
+            auth.authenticate_at("max", "password", NOW, TODAY),
+            AuthResult::MfaRequired
         );
     }
 

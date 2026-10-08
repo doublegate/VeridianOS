@@ -144,10 +144,60 @@ pub struct UnixSocket {
     pub shutdown_write: bool,
     /// Owning process ID.
     pub owner_pid: u64,
+    /// The credentials the peer had when the connection was made
+    /// (SO_PEERCRED): the other end's creator for a socketpair, the
+    /// listener's at listen() for a connecting socket, the connecting
+    /// process's at connect() for an accepted one. `None` unconnected.
+    pub peer_cred: Option<PeerCred>,
+    /// This socket's own credentials when it last listened or connected:
+    /// what its peer is given.
+    pub own_cred: PeerCred,
+}
+
+/// A process's credentials as SO_PEERCRED reports them (`struct ucred`):
+/// its process ID and effective user and group IDs.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PeerCred {
+    pub pid: i32,
+    pub uid: u32,
+    pub gid: u32,
+}
+
+impl PeerCred {
+    /// What SO_PEERCRED reports with no peer: process 0 and the overflow
+    /// user and group (Linux's overflowuid and overflowgid).
+    pub const NONE: Self = Self {
+        pid: 0,
+        uid: 65534,
+        gid: 65534,
+    };
+
+    /// The calling process's (root with process 0 in kernel context).
+    pub fn current() -> Self {
+        crate::process::current_process().map_or(
+            Self {
+                pid: 0,
+                uid: 0,
+                gid: 0,
+            },
+            |p| {
+                let c = p.credentials();
+                Self {
+                    pid: p.pid.0 as i32,
+                    uid: c.euid,
+                    gid: c.egid,
+                }
+            },
+        )
+    }
 }
 
 impl UnixSocket {
-    fn new(id: u64, socket_type: UnixSocketType, owner_pid: u64) -> Self {
+    /// A socket of `socket_type` owned by `owner_pid` with credentials
+    /// `own_cred` (taken before the socket lock: the process's locks are
+    /// never taken under it).
+    fn new(id: u64, socket_type: UnixSocketType, owner_pid: u64, own_cred: PeerCred) -> Self {
         Self {
             id,
             socket_type,
@@ -162,8 +212,19 @@ impl UnixSocket {
             shutdown_read: false,
             shutdown_write: false,
             owner_pid,
+            peer_cred: None,
+            own_cred,
         }
     }
+}
+
+/// The credentials of the peer of socket `socket_id` (SO_PEERCRED), or
+/// [`PeerCred::NONE`] if it has none.
+pub fn peer_cred(socket_id: u64) -> Option<PeerCred> {
+    UNIX_SOCKETS
+        .lock()
+        .get(&socket_id)
+        .map(|s| s.peer_cred.unwrap_or(PeerCred::NONE))
 }
 
 // ---------------------------------------------------------------------------
@@ -208,7 +269,7 @@ pub fn socket_create(socket_type: UnixSocketType, owner_pid: u64) -> KernelResul
     drop(sockets);
 
     let id = NEXT_SOCKET_ID.fetch_add(1, Ordering::Relaxed);
-    let socket = UnixSocket::new(id, socket_type, owner_pid);
+    let socket = UnixSocket::new(id, socket_type, owner_pid, PeerCred::current());
 
     UNIX_SOCKETS.lock().insert(id, socket);
     Ok(id)
@@ -254,6 +315,7 @@ pub fn socket_bind(socket_id: u64, path: &str) -> KernelResult<()> {
 /// Start listening for incoming connections (stream sockets only).
 pub fn socket_listen(socket_id: u64, backlog: usize) -> KernelResult<()> {
     let _changed = ReadinessChange;
+    let cred = PeerCred::current();
     let mut sockets = UNIX_SOCKETS.lock();
     let socket = sockets.get_mut(&socket_id).ok_or(KernelError::NotFound {
         resource: "unix_socket",
@@ -276,6 +338,9 @@ pub fn socket_listen(socket_id: u64, backlog: usize) -> KernelResult<()> {
 
     socket.backlog = backlog.min(UNIX_BACKLOG_MAX);
     socket.state = UnixSocketState::Listening;
+    // What connecting sockets will see as their peer's (Linux's
+    // init_peercred at listen).
+    socket.own_cred = cred;
     Ok(())
 }
 
@@ -294,6 +359,7 @@ pub fn socket_connect(socket_id: u64, path: &str) -> KernelResult<()> {
         })?
     };
 
+    let cred = PeerCred::current();
     let mut sockets = UNIX_SOCKETS.lock();
 
     // Verify target is listening.
@@ -321,6 +387,7 @@ pub fn socket_connect(socket_id: u64, path: &str) -> KernelResult<()> {
         id: target_id,
     })?;
     target.pending_connections.push_back(socket_id);
+    let listener_cred = target.own_cred;
 
     // Mark the connecting socket as connected (peer will be set on accept).
     let socket = sockets.get_mut(&socket_id).ok_or(KernelError::NotFound {
@@ -329,6 +396,10 @@ pub fn socket_connect(socket_id: u64, path: &str) -> KernelResult<()> {
     })?;
     socket.peer_id = Some(target_id);
     socket.state = UnixSocketState::Connected;
+    // The client sees the listener's credentials; the accepted socket will
+    // see the client's as they are now.
+    socket.peer_cred = Some(listener_cred);
+    socket.own_cred = cred;
 
     Ok(())
 }
@@ -361,16 +432,18 @@ pub fn socket_accept(listen_socket_id: u64) -> KernelResult<(u64, u64)> {
         .ok_or(KernelError::WouldBlock)?;
 
     let owner_pid = listen.owner_pid;
+    let listener_cred = listen.own_cred;
 
     // Create a new server-side socket for this connection.
     let new_id = NEXT_SOCKET_ID.fetch_add(1, Ordering::Relaxed);
-    let mut new_socket = UnixSocket::new(new_id, UnixSocketType::Stream, owner_pid);
+    let mut new_socket = UnixSocket::new(new_id, UnixSocketType::Stream, owner_pid, listener_cred);
     new_socket.state = UnixSocketState::Connected;
     new_socket.peer_id = Some(connecting_id);
 
     // Update the connecting socket's peer to point to the new server socket.
     if let Some(connecting) = sockets.get_mut(&connecting_id) {
         connecting.peer_id = Some(new_id);
+        new_socket.peer_cred = Some(connecting.own_cred);
     }
 
     sockets.insert(new_id, new_socket);
@@ -512,13 +585,17 @@ pub fn socketpair(socket_type: UnixSocketType, owner_pid: u64) -> KernelResult<(
     let id_a = NEXT_SOCKET_ID.fetch_add(1, Ordering::Relaxed);
     let id_b = NEXT_SOCKET_ID.fetch_add(1, Ordering::Relaxed);
 
-    let mut sock_a = UnixSocket::new(id_a, socket_type, owner_pid);
-    let mut sock_b = UnixSocket::new(id_b, socket_type, owner_pid);
+    let cred = PeerCred::current();
+    let mut sock_a = UnixSocket::new(id_a, socket_type, owner_pid, cred);
+    let mut sock_b = UnixSocket::new(id_b, socket_type, owner_pid, cred);
 
     sock_a.state = UnixSocketState::Connected;
     sock_a.peer_id = Some(id_b);
     sock_b.state = UnixSocketState::Connected;
     sock_b.peer_id = Some(id_a);
+    // Each end's peer is the creator.
+    sock_a.peer_cred = Some(sock_b.own_cred);
+    sock_b.peer_cred = Some(sock_a.own_cred);
 
     let mut sockets = UNIX_SOCKETS.lock();
     sockets.insert(id_a, sock_a);
@@ -690,6 +767,21 @@ mod tests {
         assert!(matches!(socket_recv(b, &mut buf), Ok((0, None))));
         socket_close(a).unwrap();
         socket_close(b).unwrap();
+    }
+
+    /// SO_PEERCRED: a socketpair's ends see their creator; an unconnected
+    /// socket sees no one (process 0, the overflow IDs).
+    #[test]
+    fn peer_credentials_are_recorded() {
+        let (a, b) = socketpair(UnixSocketType::Stream, 1).unwrap();
+        assert_eq!(peer_cred(a), Some(PeerCred::current()));
+        assert_eq!(peer_cred(b), Some(PeerCred::current()));
+        let lone = socket_create(UnixSocketType::Stream, 1).unwrap();
+        assert_eq!(peer_cred(lone), Some(PeerCred::NONE));
+        assert_eq!(peer_cred(u64::MAX), None);
+        for s in [a, b, lone] {
+            socket_close(s).unwrap();
+        }
     }
 
     /// Sending on a stream whose peer has closed is EPIPE (Linux's

@@ -204,6 +204,24 @@ pub(super) fn sys_net_getsockopt(
         }
         // This used to report success without writing optval (review of
         // the v0.26.0 stack, PR #10).
+        SocketHandle::Unix(id) if (level, optname) == (SOL_SOCKET, SO_PEERCRED) => {
+            // struct ucred { pid_t pid; uid_t uid; gid_t gid; }: at most
+            // *optlen bytes of it, and *optlen set to what was copied.
+            let cred =
+                crate::net::unix_socket::peer_cred(id).ok_or(SyscallError::BadFileDescriptor)?;
+            let mut bytes = [0u8; 12];
+            bytes[..4].copy_from_slice(&cred.pid.to_ne_bytes());
+            bytes[4..8].copy_from_slice(&cred.uid.to_ne_bytes());
+            bytes[8..].copy_from_slice(&cred.gid.to_ne_bytes());
+            let len = super::userspace::read_user::<u32>(optlen_ptr)? as i32;
+            if len < 0 {
+                return Err(SyscallError::InvalidArgument);
+            }
+            let n = (len as usize).min(bytes.len());
+            super::userspace::write_user_bytes(optval_ptr, &bytes[..n])?;
+            super::userspace::write_user::<u32>(optlen_ptr, n as u32)?;
+            Ok(0)
+        }
         SocketHandle::Unix(id) => {
             let ty =
                 crate::net::unix_socket::socket_type(id).ok_or(SyscallError::BadFileDescriptor)?;
@@ -226,6 +244,8 @@ pub(super) fn sys_net_getsockopt(
 const SOL_SOCKET: usize = 1;
 const SO_TYPE: usize = 3;
 const SO_ERROR: usize = 4;
+/// The peer's credentials, `struct ucred` (Unix sockets).
+const SO_PEERCRED: usize = 17;
 
 /// The `int` value of option (`level`, `optname`) on a Unix socket of type
 /// `ty`. Only SOL_SOCKET SO_ERROR (no pending error is tracked, so 0) and

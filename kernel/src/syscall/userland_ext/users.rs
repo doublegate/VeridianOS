@@ -364,15 +364,20 @@ impl UserDatabase {
         output
     }
 
-    /// Parse /etc/passwd file content
-    pub fn load_passwd(&mut self, content: &str) -> Result<usize, UserGroupError> {
+    /// Add the users of /etc/passwd content: (loaded, malformed lines
+    /// skipped).
+    pub fn load_passwd(&mut self, content: &str) -> (usize, usize) {
         let mut count = 0usize;
+        let mut bad = 0usize;
         for line in content.lines() {
             let trimmed = line.trim();
             if trimmed.is_empty() || trimmed.starts_with('#') {
                 continue;
             }
-            let entry = UserEntry::from_passwd_line(trimmed)?;
+            let Ok(entry) = UserEntry::from_passwd_line(trimmed) else {
+                bad += 1;
+                continue;
+            };
             self.name_to_uid.insert(entry.username.clone(), entry.uid);
             if entry.uid >= self.next_uid {
                 self.next_uid = entry.uid + 1;
@@ -380,7 +385,7 @@ impl UserDatabase {
             self.users.insert(entry.uid, entry);
             count += 1;
         }
-        Ok(count)
+        (count, bad)
     }
 
     /// The user ID useradd gives next: the lowest free one from 1000.

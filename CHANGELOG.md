@@ -404,7 +404,13 @@
   `passwd` (which reported success without changing anything) sets passwords, prompting without
   echo, with `-l` and `-u` to lock and unlock. Nobody can log in with a password until one is
   set: `passwd` on the console, or `VERIDIAN_ROOT_PASSWORD` when building the KDE root filesystem.
-  Runtime test `musl_accounts`.
+  Saves are serialized, and none is made if the files were not fully read at boot (it would
+  replace them with the part that was). A second factor is asked for before an expired password
+  is reported, which PAM callers treat as authenticated. Runtime test `musl_accounts`.
+- **SO_PEERCRED (N-236).** Unix sockets report their peer's process and effective user and group
+  IDs, as Linux records them at socketpair, listen and connect. Programs that check who is on the
+  other end -- D-Bus's EXTERNAL authentication, kdesu's daemon socket -- had nothing to check.
+  Runtime test `musl_peercred`.
 - **Passwords are compared in constant time, and failed attempts lock for ten minutes.** The
   account store compared password hashes with `==`, which stops at the first differing byte; it
   now uses the constant-time comparison. Five failed attempts locked an account until reboot,
