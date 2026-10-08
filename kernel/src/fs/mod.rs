@@ -255,6 +255,28 @@ pub struct DirEntry {
     pub inode: u64,
 }
 
+/// Readiness bits as Linux reports them: POLLIN (1) comes with POLLRDNORM
+/// (0x40) and POLLOUT (4) with POLLWRNORM (0x100), as Linux's pipes, sockets
+/// and regular files set them, whichever of a pair a node reports.
+pub fn normalize_poll_bits(bits: u16) -> u16 {
+    const IN: u16 = 0x001 | 0x040;
+    const OUT: u16 = 0x004 | 0x100;
+    let mut bits = bits;
+    if bits & IN != 0 {
+        bits |= IN;
+    }
+    if bits & OUT != 0 {
+        bits |= OUT;
+    }
+    bits
+}
+
+/// A node's readiness for poll, select and epoll ([`normalize_poll_bits`]
+/// of [`VfsNode::poll_readiness`]).
+pub fn poll_bits(node: &dyn VfsNode) -> u16 {
+    normalize_poll_bits(node.poll_readiness())
+}
+
 /// VFS node operations trait
 pub trait VfsNode: Send + Sync {
     /// Node type query (also serves as vtable slot padding for AArch64)

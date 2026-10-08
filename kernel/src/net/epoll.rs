@@ -23,6 +23,11 @@
 //! An epoll file can watch another one (it is readable while the other has
 //! events); a registration that would make a cycle, or nest more than
 //! [`MAX_NESTS`] deep, is ELOOP.
+//!
+//! A wait scans its instance's registrations (there is no ready list until
+//! per-object wake-ups), looking at the files with no lock held. Each user
+//! may hold [`MAX_USER_WATCHES`] registrations, which bounds that work and
+//! the memory they take (ENOSPC past it, as Linux's `max_user_watches`).
 
 extern crate alloc;
 
@@ -39,9 +44,44 @@ use crate::{
     fs::{file::File, DirEntry, Metadata, NodeType, Permissions, VfsNode},
 };
 
-/// Registrations one epoll instance may hold (Linux limits watches per user
-/// through `max_user_watches`; past it, ENOSPC).
-const MAX_WATCHES: usize = 65_536;
+/// Registrations one user may hold across all epoll instances; past it,
+/// ENOSPC. Linux's `max_user_watches` (4% of low memory by default) is
+/// fixed here: every wait scans its instance's registrations (there is no
+/// ready list until per-object wake-ups), so this also bounds that work.
+pub const MAX_USER_WATCHES: usize = 16_384;
+
+/// Registrations held per user (uid).
+static USER_WATCHES: Mutex<BTreeMap<u32, usize>> = Mutex::new(BTreeMap::new());
+
+/// One registration charged to its instance's owner, released when the
+/// registration goes (DEL, its file closed, or the instance closed).
+struct WatchCharge {
+    uid: u32,
+}
+
+impl WatchCharge {
+    fn take(uid: u32) -> Option<Self> {
+        let mut watches = USER_WATCHES.lock();
+        let held = watches.entry(uid).or_insert(0);
+        if *held >= MAX_USER_WATCHES {
+            return None;
+        }
+        *held += 1;
+        Some(Self { uid })
+    }
+}
+
+impl Drop for WatchCharge {
+    fn drop(&mut self) {
+        let mut watches = USER_WATCHES.lock();
+        if let Some(held) = watches.get_mut(&self.uid) {
+            *held -= 1;
+            if *held == 0 {
+                watches.remove(&self.uid);
+            }
+        }
+    }
+}
 
 /// Deepest chain of epoll files watching epoll files (Linux EP_MAX_NESTS).
 pub const MAX_NESTS: usize = 4;
@@ -146,7 +186,7 @@ pub enum CtlError {
     NotPollable,
     /// ELOOP: the registration would make a cycle or nest too deep.
     Loop,
-    /// ENOSPC: the instance holds [`MAX_WATCHES`] registrations.
+    /// ENOSPC: the owner holds [`MAX_USER_WATCHES`] registrations.
     NoSpace,
 }
 
@@ -171,10 +211,12 @@ struct Interest {
     last: u32,
     last_seq: u64,
     last_ns: u64,
+    /// Counted against the instance owner's limit while it exists.
+    _charge: WatchCharge,
 }
 
 impl Interest {
-    fn new(file: &Arc<File>, event: &EpollEvent) -> Self {
+    fn new(file: &Arc<File>, event: &EpollEvent, charge: WatchCharge) -> Self {
         let mut interest = Self {
             file: Arc::downgrade(file),
             events: 0,
@@ -184,6 +226,7 @@ impl Interest {
             last: 0,
             last_seq: 0,
             last_ns: 0,
+            _charge: charge,
         };
         interest.set(event);
         interest
@@ -232,7 +275,7 @@ fn edge_reports(
 
 /// Readiness of an open file, as epoll bits.
 fn readiness(file: &File) -> u32 {
-    file.node.poll_readiness() as u32 & READINESS
+    crate::fs::poll_bits(&*file.node) as u32 & READINESS
 }
 
 fn io_seq() -> u64 {
@@ -276,6 +319,8 @@ pub struct EpollNode {
     /// The epoll files that registered this one (weakly; pruned as they
     /// go or stop watching), for the nesting limit on the path above it.
     watchers: Mutex<Vec<Weak<File>>>,
+    /// The user its registrations are charged to (its creator's uid).
+    owner: u32,
 }
 
 /// Serialises adding epoll files to epoll files, so two concurrent adds
@@ -293,6 +338,7 @@ impl EpollNode {
         Self {
             interest: Mutex::new(BTreeMap::new()),
             watchers: Mutex::new(Vec::new()),
+            owner: crate::process::current_process().map_or(0, |p| p.uid()),
         }
     }
 
@@ -370,13 +416,16 @@ impl EpollNode {
                 if interest.contains_key(&key) {
                     return Err(CtlError::Exists);
                 }
-                if interest.len() >= MAX_WATCHES {
-                    interest.retain(|_, i| i.file.strong_count() > 0);
-                    if interest.len() >= MAX_WATCHES {
-                        return Err(CtlError::NoSpace);
+                let charge = match WatchCharge::take(self.owner) {
+                    Some(charge) => charge,
+                    None => {
+                        // Registrations whose file went still count until
+                        // dropped: drop them and try once more.
+                        interest.retain(|_, i| i.file.strong_count() > 0);
+                        WatchCharge::take(self.owner).ok_or(CtlError::NoSpace)?
                     }
-                }
-                interest.insert(key, Interest::new(target, &event));
+                };
+                interest.insert(key, Interest::new(target, &event, charge));
             }
             (EPOLL_CTL_MOD, Some(event)) => {
                 let entry = interest.get_mut(&key).ok_or(CtlError::NotFound)?;
@@ -499,33 +548,53 @@ impl EpollNode {
             precise: true,
             wake_at: None,
         };
+        // The live registrations are taken under the lock; their files are
+        // looked at with no lock held (a node's poll takes its own locks, a
+        // nested epoll file is scanned in turn), and the lock is taken again
+        // to record what was reported. Registrations whose file is gone are
+        // dropped here.
+        let live: Vec<(Key, Arc<File>)> = {
+            let mut interest = self.interest.lock();
+            interest.retain(|_, entry| entry.file.strong_count() > 0);
+            interest
+                .iter()
+                .filter(|(_, entry)| !entry.disabled)
+                .filter_map(|(key, entry)| Some((*key, entry.file.upgrade()?)))
+                .collect()
+        };
+        let looked: Vec<(Key, u32, bool)> = live
+            .iter()
+            .map(|(key, file)| {
+                let (bits, announces, ready_at) = match Self::of(file) {
+                    Some(_) if depth >= MAX_NESTS => (0, true, None),
+                    Some(nested) => {
+                        let mut one = [EpollEvent { events: 0, data: 0 }];
+                        let sub = nested.scan_at(&mut one, false, seq, now, depth + 1);
+                        let bits = if sub.count > 0 { EPOLLIN } else { 0 };
+                        (bits, sub.precise, sub.wake_at)
+                    }
+                    None => (
+                        readiness(file),
+                        file.node.wakes_io_waiters(),
+                        file.node.ready_at_ns(),
+                    ),
+                };
+                scan.precise &= announces;
+                scan.wake_at = [scan.wake_at, ready_at].into_iter().flatten().min();
+                (*key, bits, announces)
+            })
+            .collect();
+        drop(live);
+
         let mut interest = self.interest.lock();
-        interest.retain(|_, entry| {
-            let Some(file) = entry.file.upgrade() else {
-                return false;
-            };
-            if entry.disabled {
-                return true;
-            }
-            let (bits, announces, ready_at) = match Self::of(&file) {
-                Some(_) if depth >= MAX_NESTS => (0, true, None),
-                Some(nested) => {
-                    let mut one = [EpollEvent { events: 0, data: 0 }];
-                    let sub = nested.scan_at(&mut one, false, seq, now, depth + 1);
-                    let bits = if sub.count > 0 { EPOLLIN } else { 0 };
-                    (bits, sub.precise, sub.wake_at)
-                }
-                None => (
-                    readiness(&file),
-                    file.node.wakes_io_waiters(),
-                    file.node.ready_at_ns(),
-                ),
-            };
-            scan.precise &= announces;
-            scan.wake_at = [scan.wake_at, ready_at].into_iter().flatten().min();
+        for (key, bits, announces) in looked {
             if scan.count >= out.len() {
-                return true;
+                break;
             }
+            // Removed, or disabled by another wait, meanwhile.
+            let Some(entry) = interest.get_mut(&key).filter(|e| !e.disabled) else {
+                continue;
+            };
             let ready = bits & entry.events;
             let edge = entry.mode & EPOLLET != 0;
             if collect {
@@ -533,7 +602,7 @@ impl EpollNode {
                 entry.last &= ready;
             }
             if ready == 0 {
-                return true;
+                continue;
             }
             let report = !edge
                 || edge_reports(
@@ -558,8 +627,7 @@ impl EpollNode {
                     entry.disabled = entry.mode & EPOLLONESHOT != 0;
                 }
             }
-            true
-        });
+        }
         scan
     }
 
@@ -1109,23 +1177,50 @@ mod tests {
         let (pipe, probe) = Probe::file(NodeType::Pipe, true);
         probe.set(EPOLLIN);
         let last = files.last().unwrap();
-        EpollNode::of(last)
-            .unwrap()
-            .interest
-            .lock()
-            .insert(key(0, &pipe), Interest::new(&pipe, &ev(EPOLLIN, 0)));
+        EpollNode::of(last).unwrap().interest.lock().insert(
+            key(0, &pipe),
+            Interest::new(&pipe, &ev(EPOLLIN, 0), WatchCharge::take(0).unwrap()),
+        );
         for w in files.windows(2) {
-            EpollNode::of(&w[0])
-                .unwrap()
-                .interest
-                .lock()
-                .insert(key(0, &w[1]), Interest::new(&w[1], &ev(EPOLLIN, 0)));
+            EpollNode::of(&w[0]).unwrap().interest.lock().insert(
+                key(0, &w[1]),
+                Interest::new(&w[1], &ev(EPOLLIN, 0), WatchCharge::take(0).unwrap()),
+            );
         }
         assert_eq!(EpollNode::of(&files[0]).unwrap().poll_readiness(), 0);
         assert_eq!(
             EpollNode::of(&files[2]).unwrap().poll_readiness(),
             EPOLLIN as u16
         );
+    }
+
+    #[test]
+    fn watches_are_limited_per_user_and_released() {
+        // A uid of its own, so other tests' registrations do not count.
+        let uid = 0x5EED;
+        let held: Vec<WatchCharge> = (0..MAX_USER_WATCHES)
+            .map(|_| WatchCharge::take(uid).unwrap())
+            .collect();
+        assert!(WatchCharge::take(uid).is_none());
+        assert!(WatchCharge::take(uid + 1).is_some());
+        drop(held);
+        assert!(WatchCharge::take(uid).is_some());
+        assert!(!USER_WATCHES.lock().contains_key(&uid));
+    }
+
+    /// A registration charged against the limit releases its charge when
+    /// its file goes, so closing descriptors gives the room back.
+    #[test]
+    fn closed_files_give_their_watches_back() {
+        let epf = epoll_file();
+        let ep = EpollNode::of(&epf).unwrap();
+        let (file, _) = Probe::file(NodeType::Pipe, true);
+        EpollNode::ctl(&epf, EPOLL_CTL_ADD, 3, &file, Some(&ev(EPOLLIN, 0))).unwrap();
+        assert_eq!(ep.len(), 1);
+        drop(file);
+        let mut none: [EpollEvent; 0] = [];
+        ep.scan(&mut none, true, 0, 0);
+        assert!(ep.is_empty());
     }
 
     #[test]

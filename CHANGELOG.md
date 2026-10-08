@@ -274,6 +274,13 @@
   range and added its addresses unchecked, so an ELF file whose PT_LOAD ran past the end of the
   file, or whose sizes overflowed, crashed the kernel on exec. Such files now fail with ENOEXEC
   (host tests in `elf::image`).
+- **epoll registrations are limited per user, and scans hold no lock while polling.** Moving
+  the epoll instance into its file dropped the old system-wide caps (256 instances of 1024
+  registrations), so one process could register millions of watches and exhaust kernel memory,
+  and every wait polled them all under the instance's lock. Each user may now hold 16,384
+  registrations (ENOSPC past it, as Linux's `max_user_watches`), charged per registration and
+  given back when it goes; a wait takes a snapshot of the registrations under the lock and looks
+  at their files with no lock held.
 - **Signal frames written by the AArch64 and RISC-V delivery respect copy-on-write (N-257).**
   That code wrote frames through the physical map into whatever frame backed the user stack, so
   a page shared after fork or held in a file's page cache would have changed for every process
