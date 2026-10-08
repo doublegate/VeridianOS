@@ -37,7 +37,11 @@ VERIDIAN_HOST_TOOLS="${VERIDIAN_HOST_TOOLS:-${VERIDIAN_PREFIX}/host-tools}"
 # sysroot's libraries (written by lib/cross-env.sh; ADR 0010).
 VERIDIAN_RUN_TARGET="${VERIDIAN_HOST_TOOLS}/bin/veridian-run-target"
 
+# Exported, so the CMake toolchain files (which fall back to /opt/veridian)
+# and every child build see the same locations: with VERIDIAN_PREFIX set
+# elsewhere, an unexported toolchain path silently meant the default one.
 export VERIDIAN_PREFIX VERIDIAN_CROSS_DIR VERIDIAN_SYSROOT VERIDIAN_HOST_TOOLS VERIDIAN_CROSS_BUILD VERIDIAN_SOURCES
+export VERIDIAN_TARGET VERIDIAN_TOOLCHAIN VERIDIAN_CC VERIDIAN_CXX VERIDIAN_RUN_TARGET
 export VERIDIAN_TARGET VERIDIAN_TOOLCHAIN VERIDIAN_CC VERIDIAN_CXX VERIDIAN_RUN_TARGET
 # Autotools finds ${VERIDIAN_TARGET}-ar, -ranlib, -strip and the rest by
 # name on PATH.
