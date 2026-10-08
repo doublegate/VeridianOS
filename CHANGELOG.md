@@ -16,6 +16,10 @@
   truncating or deleting the file drops its cache. `/proc/meminfo` `Cached:` reports it (it
   showed the frame allocator's per-CPU lists). Runtime tests `musl_page_cache` and
   `musl_program_pages_shared`.
+- **Dynamically linked programs run.** The BusyBox root filesystem ships musl's dynamic loader
+  (`/lib/ld-musl-x86_64.so.1`) and the shared C++ runtime; `musl_dynamic_program` runs a
+  dynamically linked C++ program that throws, runs threads with `thread_local` destructors and
+  `dlopen`s a C++ library.
 
 - **Alternate signal stacks (N-222).** `sigaltstack` used to report success without doing
   anything. It now keeps a per-thread alternate stack with Linux's rules: handlers installed with

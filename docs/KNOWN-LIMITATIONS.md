@@ -323,8 +323,9 @@ two processes mapping one file do not see each other's changes.
 - **No vDSO:** `clock_gettime` and friends are real system calls; the auxiliary vector has no
   AT_SYSINFO_EHDR.
 - **No setuid exec:** set-user-ID and set-group-ID bits are not applied by `exec`.
-- **Dynamically linked programs** need musl's dynamic loader, `/lib/ld-musl-x86_64.so.1`, which the
-  root filesystem does not ship yet (the next step of ADR 0010).
+- **Dynamically linked programs** run with musl's loader, which the BusyBox root filesystem ships
+  with the shared C++ runtime (`libstdc++.so.6`, `libgcc_s.so.1`). Programs built against glibc
+  do not run: there is no glibc and no `ld-linux-x86-64.so.2`.
 - **Shared file pages** exist for BlockFS files only; private mappings of files on other
   filesystems are copies. Cached pages are never evicted under memory pressure; a file's pages stay
   cached until it is written, truncated or deleted (v0.29).

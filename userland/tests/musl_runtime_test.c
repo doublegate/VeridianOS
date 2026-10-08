@@ -925,6 +925,46 @@ static void test_program_pages_shared(void)
     unlink(copy);
 }
 
+/* A dynamically linked C++ program (ADR 0010): the kernel starts it in
+ * musl's loader, which maps libstdc++ and libgcc_s; it throws and catches,
+ * runs a thread with a thread_local destructor and dlopens a C++ library
+ * (userland/tests/musl_dynamic_test.cpp). Its one line of output says how
+ * each went. */
+static void test_dynamic_program(void)
+{
+    extern char **environ;
+    int fds[2];
+    if (pipe(fds) != 0) {
+        report("musl_dynamic_program", 0, "pipe failed");
+        return;
+    }
+    posix_spawn_file_actions_t actions;
+    posix_spawn_file_actions_init(&actions);
+    posix_spawn_file_actions_adddup2(&actions, fds[1], 1);
+    posix_spawn_file_actions_addclose(&actions, fds[0]);
+    char *args[] = {"musl_dynamic_test", NULL};
+    pid_t pid = -1;
+    int spawned = posix_spawn(&pid, "/bin/musl_dynamic_test", &actions, NULL, args, environ);
+    posix_spawn_file_actions_destroy(&actions);
+    close(fds[1]);
+    static char out[256];
+    size_t len = 0;
+    ssize_t n;
+    while (len < sizeof(out) - 1 && (n = read(fds[0], out + len, sizeof(out) - 1 - len)) > 0)
+        len += (size_t)n;
+    out[len] = 0;
+    close(fds[0]);
+    int status = -1;
+    int exited = spawned == 0 && waitpid(pid, &status, 0) == pid;
+    char *nl = strchr(out, '\n');
+    if (nl)
+        *nl = 0;
+    static char why[320];
+    snprintf(why, sizeof(why), "spawn=%d status=%#x output: %s", spawned, status, out);
+    report("musl_dynamic_program",
+           exited && WIFEXITED(status) && WEXITSTATUS(status) == 0 && strstr(out, " OK"), why);
+}
+
 int main(int argc, char **argv)
 {
     test_auxv(argc > 0 ? argv[0] : NULL);
@@ -949,6 +989,7 @@ int main(int argc, char **argv)
     test_sigaltstack();
     test_page_cache();
     test_program_pages_shared();
+    test_dynamic_program();
     printf("MUSL-RUNTIME: %d/%d\n", passed, total);
     return passed == total ? 0 : 1;
 }

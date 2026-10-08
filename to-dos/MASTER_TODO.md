@@ -90,8 +90,9 @@ What does not work yet: `docs/KNOWN-LIMITATIONS.md`.
     - [x] Toolchain: shared musl (`/lib/ld-musl-x86_64.so.1`), GCC with shared libstdc++ and
       libgcc_s, dynamic linking by default; verified on the build host through musl's loader,
       including `dlopen` of a C++ shared object. CI builds and caches it.
-    - [ ] Dynamic programs in VeridianOS: the loader and the shared runtime in the root
-      filesystem; runtime tests of a dynamically linked program and of `dlopen`.
+    - [x] Dynamic programs in VeridianOS: musl's loader and the shared C++ runtime in the root
+      filesystem; `musl_dynamic_program` runs a dynamically linked C++ program (exceptions,
+      threads, thread_local, `dlopen` of a C++ library).
     - [ ] KDE pipeline with shared libraries; static workarounds removed; rootfs with `/lib`.
     - Later (sprint G / v0.29): ASLR, vDSO, eviction of cached pages, writable MAP_SHARED of files.
   - [ ] **D, process model and scheduler (C5; ADR 0006 + ADR 0007):**

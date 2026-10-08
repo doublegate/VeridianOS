@@ -457,13 +457,47 @@ phase_rootfs() {
     # The same kind of checks for programs built against musl, with the
     # toolchain KDE is built with (tools/cross/build-musl.sh, then
     # build-musl-toolchain.sh; paths from tools/cross/veridian-paths.sh).
-    local musl_cc
+    local musl_cc musl_cxx musl_strip musl_sysroot
     musl_cc="$(source "${PROJECT_ROOT}/tools/cross/veridian-paths.sh" && echo "$VERIDIAN_CC")"
+    musl_cxx="$(source "${PROJECT_ROOT}/tools/cross/veridian-paths.sh" && echo "$VERIDIAN_CXX")"
+    musl_strip="${musl_cc%-gcc}-strip"
+    musl_sysroot="$(source "${PROJECT_ROOT}/tools/cross/veridian-paths.sh" && echo "$VERIDIAN_SYSROOT")"
     if [ -x "$musl_cc" ]; then
         echo -n "    musl_runtime_test... "
         # A static PIE: the kernel picks its address (ADR 0010).
         if "$musl_cc" -static-pie -O2 -Wall -Wextra -o "$BUILD_DIR/bin/musl_runtime_test" \
                 "${TESTS_DIR}/musl_runtime_test.c" 2>&1; then
+            echo "OK"
+        else
+            echo "FAILED"
+            exit 1
+        fi
+
+        # Dynamic linking (ADR 0010): musl's loader and the shared C++
+        # runtime, stripped, and a dynamically linked C++ program that
+        # dlopens a C++ library (musl_runtime_test runs it). The loader is
+        # a copy of libc.so, which is both: the image builder copies the
+        # target of a symlink, and the sysroot's absolute link would be
+        # resolved on the build host. musl answers a libc.so dependency
+        # itself, so /usr/lib needs no second copy.
+        echo -n "    dynamic loader and C++ runtime... "
+        mkdir -p "$BUILD_DIR/lib" "$BUILD_DIR/usr/lib"
+        if "$musl_strip" --strip-unneeded -o "$BUILD_DIR/lib/ld-musl-x86_64.so.1" \
+                "${musl_sysroot}/usr/lib/libc.so" \
+            && "$musl_strip" --strip-unneeded -o "$BUILD_DIR/usr/lib/libstdc++.so.6" \
+                "$(readlink -f "${musl_sysroot}/usr/lib/libstdc++.so.6")" \
+            && "$musl_strip" --strip-unneeded -o "$BUILD_DIR/usr/lib/libgcc_s.so.1" \
+                "${musl_sysroot}/usr/lib/libgcc_s.so.1"; then
+            echo "OK"
+        else
+            echo "FAILED"
+            exit 1
+        fi
+        echo -n "    musl_dynamic_test... "
+        if "$musl_cxx" -O2 -Wall -Wextra -fPIC -shared -o "$BUILD_DIR/usr/lib/libveridian_dltest.so" \
+                "${TESTS_DIR}/musl_dltest_lib.cpp" 2>&1 \
+            && "$musl_cxx" -O2 -Wall -Wextra -pthread -o "$BUILD_DIR/bin/musl_dynamic_test" \
+                "${TESTS_DIR}/musl_dynamic_test.cpp" 2>&1; then
             echo "OK"
         else
             echo "FAILED"
