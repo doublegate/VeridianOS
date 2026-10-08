@@ -445,10 +445,18 @@ fn online_mask() -> u64 {
     }
 }
 
+/// Linux's sched_getaffinity length rule: the buffer holds at least one
+/// bit per CPU and is whole longs. Compared in bytes: `len * 8` overflows
+/// for a huge `len` (a debug-build panic any caller could trigger; security
+/// review of the N-221 change).
+fn affinity_len_valid(len: usize, cpus: usize) -> bool {
+    len >= cpus.div_ceil(8) && len.is_multiple_of(8)
+}
+
 /// sched_getaffinity(pid, len, mask): the bytes written (the kernel's mask
 /// size), as the raw system call returns.
 pub fn sys_sched_getaffinity(pid: usize, len: usize, mask: usize) -> SyscallResult {
-    if len * 8 < crate::sched::dispatch::online_cpus() || !len.is_multiple_of(8) {
+    if !affinity_len_valid(len, crate::sched::dispatch::online_cpus()) {
         return Err(SyscallError::InvalidArgument);
     }
     let (_, _, thread) = target(pid, SyscallError::ProcessNotFound)?;
@@ -691,6 +699,17 @@ mod tests {
         assert!(reserve_deadline(&a, &none).is_ok());
         assert_eq!(*DL_BANDWIDTH.lock(), 0);
         *DL_BANDWIDTH.lock() = saved;
+    }
+
+    #[test]
+    fn affinity_lengths_are_checked_without_overflow() {
+        assert!(affinity_len_valid(8, 1));
+        assert!(affinity_len_valid(128, 64));
+        assert!(!affinity_len_valid(0, 1));
+        assert!(!affinity_len_valid(4, 1));
+        assert!(!affinity_len_valid(8, 65));
+        assert!(!affinity_len_valid(usize::MAX, 1));
+        assert!(affinity_len_valid(usize::MAX - 7, 1));
     }
 
     #[test]

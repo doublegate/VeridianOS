@@ -732,6 +732,14 @@ pub fn cleanup_process(process: &Process) {
     // A parent waiting in vfork for this child may resume.
     process.release_vfork_parent();
 
+    // SCHED_DEADLINE reservations of every thread go back, whatever path
+    // ended them (each thread's own exit already did; idempotent), so a
+    // lost one can never hold admission control's bandwidth for good.
+    #[cfg(feature = "alloc")]
+    for thread in process.threads.lock().values() {
+        crate::syscall::scheduling::thread_exit(thread);
+    }
+
     // Release memory (VAS-tracked data frames + page table subtrees)
     {
         let mut memory_space = process.memory_space.lock();
