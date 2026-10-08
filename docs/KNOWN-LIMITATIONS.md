@@ -55,6 +55,17 @@ exposed were fixed (N-182 to N-189); the rest are listed, with their targets, in
   first stack is mapped whatever the limit, and exec does not size argument space from it.
   Queued real-time signals stay charged to the real user the first one was charged to, even if
   the process changes its real user before they are delivered.
+- **Memory calls.** mremap, madvise, munmap, mprotect and brk follow Linux (N-240 to N-246),
+  except: MADV_FREE keeps the pages (memory is never reclaimed under pressure, which Linux
+  permits); MADV_COLLAPSE and the guard-page advice (Linux 6.13) are EINVAL; MADV_REMOVE on a
+  MAP_SHARED regular file zeroes only this process's copy (such a mapping is a private copy until
+  the v0.29 page cache); MREMAP_DONTUNMAP takes only private anonymous memory (Linux 5.7's rule);
+  moving the heap with mremap leaves the program break where it was; and mappings that Linux
+  would merge (two adjacent mmaps alike in every way) stay separate, so an mremap spanning both
+  is EFAULT.
+- **Futexes.** The priority-inheritance operations (FUTEX_LOCK_PI and the rest) are ENOSYS, so
+  musl reports PTHREAD_PRIO_INHERIT mutexes unsupported; they need the scheduler's priority
+  boosting (sprint F).
 - **Errnos.** Many errors come back as EINVAL where Linux is specific (N-202, N-212 to N-216,
   N-234, N-238).
 

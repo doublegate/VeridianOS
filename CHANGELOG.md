@@ -578,6 +578,24 @@
 
 ### Fixed
 
+- **Memory system calls (N-240 to N-246).** mremap answered ENOMEM to everything (musl's
+  realloc then copied); it now shrinks and grows in place, moves mappings by moving their pages
+  (MREMAP_MAYMOVE, MREMAP_FIXED, MREMAP_DONTUNMAP) and maps a shared mapping a second time,
+  with grown pages zero, the file's next pages or a memfd's own. madvise succeeded without
+  effect; MADV_DONTNEED now zeroes private anonymous memory and restores private file mappings
+  from their file, MADV_REMOVE zeroes shared memory, MADV_DONTFORK and MADV_WIPEONFORK change what
+  fork gives the child, and Linux's argument checks apply. munmap and mprotect rejected lengths
+  over 256 MiB and address 0 and answered EACCES for kernel addresses; they follow Linux now,
+  and a partial mprotect splits the mapping instead of leaving it with the old protection
+  recorded. Lowering the program break frees the pages above it (it was ignored). Runtime test
+  `musl_memory_calls`.
+- **Partial munmap of a read-only shared mapping.** The pieces left by unmapping part of a
+  mapping were rebuilt from its type alone, so what remained of a mapping of a read-only file
+  or write-sealed memfd lost its no-write mark and mprotect could make it writable. The pieces
+  keep every attribute now.
+- **getrandom** stopped at 256 bytes per call and ignored its flags (N-244); it fills the whole
+  request (a signal ends it at a page boundary) and rejects unknown flags. **futex** gains
+  FUTEX_WAKE_BITSET, and unknown and priority-inheritance operations are ENOSYS (N-226).
 - **SIGPIPE.** A write to a pipe with no reader failed with EPIPE but raised no signal, so a
   program that relies on SIGPIPE to stop (a producer in a pipeline whose consumer exited) kept
   running. EPIPE from write, writev, send, sendto and sendmsg now raises SIGPIPE, except a send

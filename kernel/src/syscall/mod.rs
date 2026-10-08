@@ -969,10 +969,12 @@ fn handle_syscall(
             // arg1=uaddr, arg2=op, arg3=val, arg4=timeout/val2, arg5=uaddr2
             // Linux futex(uaddr, op, val, timeout|val2, uaddr2, val3).
             // val3 (arg6) is not a handler parameter; it is read from the
-            // saved syscall frame. Mask off FUTEX_PRIVATE_FLAG (bit 7 = 128)
-            // -- VeridianOS is single-address-space per process, so
-            // private == shared.
-            let cmd = (arg2 as u32) & 0x7F;
+            // saved syscall frame. The command is the op without
+            // FUTEX_PRIVATE_FLAG (128) and FUTEX_CLOCK_REALTIME (256), as
+            // Linux's FUTEX_CMD_MASK: any other bit makes an unknown
+            // command (ENOSYS), not a different one. Futex words are keyed
+            // by (process, address), so private and shared are the same.
+            let cmd = (arg2 as u32) & !(0x80 | 0x100);
             // FUTEX_CLOCK_REALTIME: a WAIT_BITSET deadline is on the wall
             // clock. Linux accepts it only on waits (ENOSYS otherwise).
             let realtime = arg2 & 0x100 != 0;
@@ -1022,7 +1024,21 @@ fn handle_syscall(
                     )?;
                     futex::futex_wait_until(arg1, arg3 as u32, deadline, bitset).map(|v| v as usize)
                 }
-                _ => Err(SyscallError::InvalidArgument),
+                // FUTEX_WAKE_BITSET: wake up to val waiters whose wait
+                // bitset shares a bit with val3 (N-226); 0 is EINVAL.
+                10 => {
+                    let bitset = syscall_arg6()? as u32;
+                    if bitset == 0 {
+                        return Err(SyscallError::InvalidArgument);
+                    }
+                    futex::sys_futex_wake(arg1, arg3, bitset as usize).map(|v| v as usize)
+                }
+                // FUTEX_FD (removed from Linux in 2.6.26), the
+                // priority-inheritance operations (LOCK_PI, UNLOCK_PI,
+                // TRYLOCK_PI, WAIT_REQUEUE_PI, CMP_REQUEUE_PI, LOCK_PI2:
+                // docs/KNOWN-LIMITATIONS.md) and unknown commands: ENOSYS,
+                // as Linux's do_futex. musl reports PI mutexes unsupported.
+                _ => Err(SyscallError::NotImplemented),
             }
         }
 
@@ -1188,10 +1204,8 @@ fn handle_syscall(
         Syscall::InotifyInit1 => Err(SyscallError::NotImplemented),
         Syscall::InotifyAddWatch => Err(SyscallError::NotImplemented),
         Syscall::InotifyRmWatch => Err(SyscallError::NotImplemented),
-        Syscall::Madvise => {
-            // madvise is advisory -- always succeed (no-op).
-            Ok(0)
-        }
+        #[cfg(feature = "alloc")]
+        Syscall::Madvise => memory::sys_madvise(arg1, arg2, arg3),
 
         // *at() syscalls -- dirfd-relative path operations for musl
         Syscall::Fchmodat => sys_fchmodat(arg1, arg2, arg3),
@@ -1215,9 +1229,8 @@ fn handle_syscall(
         // faccessat has no flags argument; faccessat2 adds one.
         Syscall::Faccessat => sys_faccessat(arg1, arg2, arg3, 0),
         Syscall::Faccessat2 => sys_faccessat(arg1, arg2, arg3, arg4),
-        // Not implemented yet; callers fall back (musl: statx -> fstatat,
-        // clone3 -> clone, mremap ENOMEM -> mmap + copy).
-        Syscall::Mremap => Err(SyscallError::OutOfMemory),
+        #[cfg(feature = "alloc")]
+        Syscall::Mremap => memory::sys_mremap(arg1, arg2, arg3, arg4, arg5),
         #[cfg(feature = "alloc")]
         Syscall::Getrusage => usage::sys_getrusage(arg1, arg2),
         #[cfg(feature = "alloc")]
@@ -1462,31 +1475,60 @@ fn epoll_events_to_bytes(events: &[crate::net::epoll::EpollEvent]) -> alloc::vec
     out
 }
 
-/// getrandom syscall -- fills user buffer with cryptographically secure random
-/// bytes.
-///
-/// # Arguments
-/// - `buf_ptr`: User-space buffer to fill.
-/// - `buflen`: Number of bytes to generate.
-/// - `flags`: 0 for blocking (always succeeds), GRND_NONBLOCK (1) for
-///   non-blocking.
-fn sys_getrandom(buf_ptr: usize, buflen: usize, _flags: usize) -> SyscallResult {
-    if buflen == 0 {
-        return Ok(0);
+/// getrandom(buf, count, flags) (N-244), as Linux: GRND_NONBLOCK, GRND_RANDOM
+/// (the same pool since Linux 5.6) and GRND_INSECURE, any other bit or
+/// INSECURE with RANDOM EINVAL. The kernel generator is seeded before user
+/// space runs, so a call never blocks. Up to MAX_RW_COUNT bytes, a block at
+/// a time through a kernel buffer (N-43); at each page boundary a pending
+/// signal ends the call with the count so far, and the CPU is given up if
+/// the slice ran out. A fault returns the count so far, EFAULT if none.
+fn sys_getrandom(buf_ptr: usize, buflen: usize, flags: usize) -> SyscallResult {
+    const GRND_NONBLOCK: usize = 1;
+    const GRND_RANDOM: usize = 2;
+    const GRND_INSECURE: usize = 4;
+    /// Linux's MAX_RW_COUNT on x86_64 (INT_MAX rounded down to a page).
+    const MAX_RW_COUNT: usize = 0x7fff_f000;
+    const BLOCK: usize = 256;
+    if flags & !(GRND_NONBLOCK | GRND_RANDOM | GRND_INSECURE) != 0
+        || flags & (GRND_INSECURE | GRND_RANDOM) == GRND_INSECURE | GRND_RANDOM
+    {
+        return Err(SyscallError::InvalidArgument);
     }
-    // Cap at 256 bytes per call to avoid holding the RNG lock too long
-    let len = buflen.min(256);
-    validate_user_buffer(buf_ptr, len)?;
-
+    let len = buflen.min(MAX_RW_COUNT);
     let rng = crate::crypto::random::get_random();
-    // Filled in a kernel buffer and copied out (N-43).
-    let mut buf = [0u8; 256];
-    rng.fill_bytes(&mut buf[..len])
-        .map_err(|_| SyscallError::IoError)?;
-    userspace::write_user_bytes(buf_ptr, &buf[..len])?;
+    let mut buf = [0u8; BLOCK];
+    let mut done = 0;
+    while done < len {
+        let n = (len - done).min(BLOCK);
+        if rng.fill_bytes(&mut buf[..n]).is_err() {
+            buf.fill(0);
+            return if done > 0 {
+                Ok(done)
+            } else {
+                Err(SyscallError::IoError)
+            };
+        }
+        let copied = userspace::write_user_bytes(buf_ptr.wrapping_add(done), &buf[..n]);
+        if copied.is_err() {
+            buf.fill(0);
+            return if done > 0 {
+                Ok(done)
+            } else {
+                Err(SyscallError::InvalidPointer)
+            };
+        }
+        done += n;
+        if done < len && done % 4096 == 0 {
+            if crate::process::wait_interrupted() {
+                break;
+            }
+            #[cfg(feature = "alloc")]
+            crate::sched::dispatch::preempt_user();
+        }
+    }
     // The random bytes are not left on the kernel stack.
     buf.fill(0);
-    Ok(len)
+    Ok(done)
 }
 
 /// getdents64 syscall -- read directory entries in Linux struct linux_dirent64

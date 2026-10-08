@@ -44,6 +44,8 @@
 #include <sys/signalfd.h>
 #include <sys/syscall.h>
 #include <sys/uio.h>
+#include <sys/random.h>
+#include <linux/futex.h>
 #include <sys/timerfd.h>
 #include <time.h>
 #include <unistd.h>
@@ -490,8 +492,10 @@ static int rl_memory(void)
     errno = 0;
     if (p == MAP_FAILED || mprotect(p, 4096, PROT_READ | PROT_WRITE) != -1 || errno != ENOMEM)
         f |= 128;
-    void *brk0 = sbrk(0);
-    if (sbrk(1 << 20) != (void *)-1 || sbrk(0) != brk0) f |= 64;
+    /* The raw call: musl's sbrk refuses any increment by itself. A
+     * refused brk returns the unchanged break. */
+    long brk0 = syscall(SYS_brk, 0);
+    if (syscall(SYS_brk, brk0 + (1 << 20)) != brk0) f |= 64;
     return f;
 }
 
@@ -685,6 +689,270 @@ static void test_sigpipe(void)
     static char why[96];
     snprintf(why, sizeof(why), "fail=%#x st=%#x,%#x,%#x", f, st, a, b);
     report("musl_sigpipe", f == 0, why);
+}
+
+/* munmap, mprotect, brk, mremap, madvise, getrandom and futex bitsets
+ * (N-240, N-242, N-243, N-244, N-246, N-226), as Linux. */
+
+#define PG 4096
+
+static int touch_faults(volatile char *p, int write)
+{
+    pid_t pid = fork();
+    if (pid == 0) {
+        if (write)
+            *p = 1;
+        else
+            (void)*p;
+        _exit(0);
+    }
+    int st = 0;
+    waitpid(pid, &st, 0);
+    return WIFSIGNALED(st) && WTERMSIG(st) == SIGSEGV;
+}
+
+static int mm_args(void)
+{
+    int f = 0;
+    char *p = mmap(NULL, 3 * PG, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (p == MAP_FAILED) return 1;
+    /* munmap: address 0 and an empty range are fine, length 0 is not. */
+    if (munmap(NULL, PG) != 0) f |= 2;
+    errno = 0;
+    if (munmap(p, 0) != -1 || errno != EINVAL) f |= 2;
+    errno = 0;
+    if (munmap(p + 1, PG) != -1 || errno != EINVAL) f |= 2;
+    errno = 0;
+    if (munmap((void *)0x7ffffffff000UL, 2 * PG) != -1 || errno != EINVAL) f |= 2;
+    /* Lengths past 256 MiB are fine. */
+    if (munmap((void *)0x600000000000UL, 512UL << 20) != 0) f |= 4;
+    return f;
+}
+
+static int mm_protect(void)
+{
+    int f = 0;
+    char *p = mmap(NULL, 3 * PG, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (p == MAP_FAILED) return 1;
+    /* mprotect: zero length succeeds; unmapped or outside is ENOMEM. */
+    if (mprotect(p, 0, PROT_READ) != 0) f |= 8;
+    errno = 0;
+    if (mprotect(NULL, PG, PROT_READ) != -1 || errno != ENOMEM) f |= 8;
+    errno = 0;
+    if (mprotect((void *)0xffff800000000000UL, PG, PROT_READ) != -1 || errno != ENOMEM) f |= 8;
+    /* A partial mprotect protects exactly its pages. */
+    if (mprotect(p + PG, PG, PROT_READ) != 0) f |= 16;
+    p[0] = 1;
+    p[2 * PG] = 1;
+    if (!touch_faults(p + PG, 1) || touch_faults(p + PG, 0)) f |= 16;
+    return f;
+}
+
+static int mm_brk(void)
+{
+    int f = 0;
+    /* brk goes down as well as up; the pages above it go. (The raw call:
+     * musl's sbrk refuses any increment by itself.) */
+    char *b0 = (char *)syscall(SYS_brk, 0);
+    char *top = b0 + 16 * PG;
+    if ((char *)syscall(SYS_brk, top) != top) return f | 32;
+    b0[15 * PG] = 1;
+    if ((char *)syscall(SYS_brk, b0) != b0) f |= 64;
+    if (!touch_faults(b0 + 15 * PG, 0)) {
+        f |= 128;
+        /* Diagnose: the mappings around the break. */
+        printf("mm_brk: break %p, page %p still mapped; maps:\n", (void *)b0, (void *)(b0 + 15 * PG));
+        FILE *maps = fopen("/proc/self/maps", "r");
+        char line[160];
+        while (maps && fgets(line, sizeof(line), maps))
+            if (strncmp(line, "2000", 4) == 0 || strstr(line, "heap"))
+                printf("  %s", line);
+        if (maps)
+            fclose(maps);
+        fflush(stdout);
+    }
+    return f;
+}
+
+static int mm_mremap(void)
+{
+    int f = 0;
+    char *p = mmap(NULL, 4 * PG, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (p == MAP_FAILED) return 1;
+    memset(p, 'a', 4 * PG);
+    /* Shrink in place; grow in place into the freed pages, zeroed. */
+    if (mremap(p, 4 * PG, 2 * PG, 0) != p) f |= 2;
+    if (!touch_faults(p + 3 * PG, 0)) f |= 2;
+    if (mremap(p, 2 * PG, 4 * PG, 0) != p || p[PG] != 'a' || p[3 * PG] != 0) f |= 4;
+    /* No room after, no MAYMOVE: ENOMEM. With it: moved, contents kept. */
+    char *q = mmap(NULL, 3 * PG, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    memset(q, 'q', 3 * PG);
+    errno = 0;
+    if (mremap(q, PG, 2 * PG, 0) != MAP_FAILED || errno != ENOMEM) f |= 8;
+    char *m = mremap(q, PG, 8 * PG, MREMAP_MAYMOVE);
+    if (m == MAP_FAILED || m == q || m[0] != 'q' || m[7 * PG] != 0 || q[PG] != 'q') f |= 16;
+    if (m != MAP_FAILED && !touch_faults(q, 0)) f |= 16;
+    /* FIXED to a chosen place, replacing what is there. */
+    char *t = mmap(NULL, 2 * PG, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (m != MAP_FAILED && mremap(m, PG, PG, MREMAP_MAYMOVE | MREMAP_FIXED, t) != t) f |= 32;
+    if (t[0] != 'q') f |= 32;
+    /* DONTUNMAP: moved, and the old place reads as zero. */
+    char *d = mremap(p, PG, PG, MREMAP_MAYMOVE | MREMAP_DONTUNMAP);
+    if (d == MAP_FAILED || d[0] != 'a' || p[0] != 0) f |= 64;
+    /* Invalid requests. */
+    errno = 0;
+    if (mremap(p, PG, PG, MREMAP_FIXED, t) != MAP_FAILED || errno != EINVAL) f |= 128;
+    errno = 0;
+    if (mremap(p, 0, PG, MREMAP_MAYMOVE) != MAP_FAILED || errno != EINVAL) f |= 128;
+    errno = 0;
+    if (mremap((void *)0x500000000000UL, PG, 2 * PG, MREMAP_MAYMOVE) != MAP_FAILED || errno != EFAULT)
+        f |= 128;
+    /* Old length 0 on a shared mapping: the same pages, twice. */
+    char *s = mmap(NULL, PG, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    char *s2 = mremap(s, 0, PG, MREMAP_MAYMOVE);
+    if (s2 == MAP_FAILED || s2 == s) f |= 256;
+    else {
+        s[10] = 'S';
+        if (s2[10] != 'S') f |= 256;
+    }
+    /* A file mapping grows with the file's next pages. */
+    int fd = open("/tmp/musl_mremap", O_CREAT | O_RDWR | O_TRUNC, 0644);
+    char page[PG];
+    for (int i = 0; i < 3; i++) {
+        memset(page, '0' + i, PG);
+        (void)!write(fd, page, PG);
+    }
+    char *fm = mmap(NULL, PG, PROT_READ, MAP_PRIVATE, fd, 0);
+    char *fg = fm == MAP_FAILED ? MAP_FAILED : mremap(fm, PG, 3 * PG, MREMAP_MAYMOVE);
+    if (fg == MAP_FAILED || fg[0] != '0' || fg[PG] != '1' || fg[2 * PG] != '2') f |= 512;
+    close(fd);
+    unlink("/tmp/musl_mremap");
+    /* realloc of a large block keeps its contents (musl uses mremap). */
+    char *big = malloc(1 << 20);
+    memset(big, 'r', 1 << 20);
+    big = realloc(big, 4 << 20);
+    if (!big || big[(1 << 20) - 1] != 'r') f |= 1024;
+    free(big);
+    return f;
+}
+
+static int mm_madvise(void)
+{
+    int f = 0;
+    char *p = mmap(NULL, 2 * PG, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (p == MAP_FAILED) return 1;
+    memset(p, 'x', 2 * PG);
+    /* DONTNEED: private anonymous memory reads as zero again. */
+    if (madvise(p, PG, MADV_DONTNEED) != 0 || p[0] != 0 || p[PG] != 'x') f |= 2;
+    /* ... a private file mapping as the file. */
+    int fd = open("/tmp/musl_madvise", O_CREAT | O_RDWR | O_TRUNC, 0644);
+    memset(p, 'F', PG);
+    (void)!write(fd, p, PG);
+    char *fm = mmap(NULL, PG, PROT_READ | PROT_WRITE, MAP_PRIVATE, fd, 0);
+    if (fm == MAP_FAILED) f |= 4;
+    else {
+        fm[0] = 'w';
+        if (madvise(fm, PG, MADV_DONTNEED) != 0 || fm[0] != 'F') f |= 4;
+        errno = 0;
+        if (madvise(fm, PG, MADV_FREE) != -1 || errno != EINVAL) f |= 8;
+    }
+    close(fd);
+    unlink("/tmp/musl_madvise");
+    /* REMOVE: shared only; zeroes it. */
+    errno = 0;
+    if (madvise(p, PG, MADV_REMOVE) != -1 || errno != EINVAL) f |= 16;
+    char *s = mmap(NULL, PG, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    s[0] = 's';
+    if (madvise(s, PG, MADV_REMOVE) != 0 || s[0] != 0) f |= 16;
+    /* Shared memory keeps its contents through DONTNEED. */
+    s[0] = 's';
+    if (madvise(s, PG, MADV_DONTNEED) != 0 || s[0] != 's') f |= 16;
+    /* WIPEONFORK: the child sees zero, the parent keeps its data. */
+    p[PG] = 'w';
+    if (madvise(p + PG, PG, MADV_WIPEONFORK) != 0) f |= 32;
+    pid_t pid = fork();
+    if (pid == 0)
+        _exit(p[PG] == 0 ? 0 : 1);
+    int st = 0;
+    waitpid(pid, &st, 0);
+    if (!WIFEXITED(st) || WEXITSTATUS(st) != 0 || p[PG] != 'w') f |= 32;
+    errno = 0;
+    if (madvise(s, PG, MADV_WIPEONFORK) != -1 || errno != EINVAL) f |= 32;
+    /* DONTFORK: the child does not have it. */
+    if (madvise(s, PG, MADV_DONTFORK) != 0 || !touch_faults(s, 0)) f |= 64;
+    /* Errors: unknown advice, an unaligned start, an unmapped range;
+     * a zero length and hints succeed. */
+    errno = 0;
+    if (madvise(p, PG, 999) != -1 || errno != EINVAL) f |= 128;
+    errno = 0;
+    if (madvise(p + 1, PG, MADV_NORMAL) != -1 || errno != EINVAL) f |= 128;
+    errno = 0;
+    if (madvise((void *)0x500000000000UL, PG, MADV_WILLNEED) != -1 || errno != ENOMEM) f |= 128;
+    if (madvise(p, 0, MADV_DONTNEED) != 0 || madvise(p, 2 * PG, MADV_HUGEPAGE) != 0) f |= 128;
+    return f;
+}
+
+static volatile int bitset_waiting;
+static int bitset_word;
+
+static void *bitset_waiter(void *arg)
+{
+    (void)arg;
+    bitset_waiting = 1;
+    syscall(SYS_futex, &bitset_word, FUTEX_WAIT_BITSET | FUTEX_PRIVATE_FLAG, 0, NULL, NULL, 2);
+    return NULL;
+}
+
+static int mm_random_futex(void)
+{
+    int f = 0;
+    /* getrandom: whole requests, flags checked. */
+    static unsigned char buf[1 << 20];
+    if (getrandom(buf, sizeof(buf), 0) != (ssize_t)sizeof(buf)) f |= 2;
+    if (getrandom(buf, 16, GRND_NONBLOCK) != 16) f |= 2;
+    errno = 0;
+    if (getrandom(buf, 16, 0x8) != -1 || errno != EINVAL) f |= 4;
+    errno = 0;
+    if (getrandom(buf, 16, GRND_RANDOM | 4) != -1 || errno != EINVAL) f |= 4;
+    /* futex: WAKE_BITSET wakes only waiters sharing a bit; PI and unknown
+     * commands are ENOSYS. */
+    pthread_t t;
+    pthread_create(&t, NULL, bitset_waiter, NULL);
+    while (!bitset_waiting)
+        sched_yield();
+    struct timespec ms = {0, 20 * 1000 * 1000};
+    nanosleep(&ms, NULL);
+    if (syscall(SYS_futex, &bitset_word, FUTEX_WAKE_BITSET, 1, NULL, NULL, 1) != 0) f |= 8;
+    long woken = 0;
+    for (int i = 0; i < 100 && woken == 0; i++) {
+        woken = syscall(SYS_futex, &bitset_word, FUTEX_WAKE_BITSET, 1, NULL, NULL, 2);
+        if (woken == 0)
+            nanosleep(&ms, NULL);
+    }
+    if (woken != 1) f |= 8;
+    pthread_join(t, NULL);
+    errno = 0;
+    if (syscall(SYS_futex, &bitset_word, FUTEX_WAKE_BITSET, 1, NULL, NULL, 0) != -1 || errno != EINVAL)
+        f |= 16;
+    errno = 0;
+    if (syscall(SYS_futex, &bitset_word, FUTEX_LOCK_PI, 0, NULL, NULL, 0) != -1 || errno != ENOSYS)
+        f |= 32;
+    errno = 0;
+    if (syscall(SYS_futex, &bitset_word, 0x200 | FUTEX_WAKE, 1, NULL, NULL, 0) != -1 || errno != ENOSYS)
+        f |= 32;
+    return f;
+}
+
+static void test_memory_calls(void)
+{
+    int (*const parts[])(void) = {mm_args, mm_protect, mm_brk, mm_mremap, mm_madvise, mm_random_futex};
+    int st[6], f = 0;
+    for (int i = 0; i < 6; i++)
+        if (!exited_zero(st[i] = in_child(parts[i]))) f |= 1 << i;
+    static char why[128];
+    snprintf(why, sizeof(why), "fail=%#x st=%#x,%#x,%#x,%#x,%#x,%#x", f, st[0], st[1], st[2], st[3],
+             st[4], st[5]);
+    report("musl_memory_calls", f == 0, why);
 }
 
 /* The --ids mode: this program's IDs, AT_SECURE, dumpable flag and
@@ -2401,6 +2669,7 @@ int main(int argc, char **argv)
     test_clocks_and_usage();
     test_rlimits();
     test_sigpipe();
+    test_memory_calls();
     printf("MUSL-RUNTIME: %d/%d\n", passed, total);
     return passed == total ? 0 : 1;
 }
