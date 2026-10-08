@@ -149,8 +149,10 @@ pub struct File {
     /// syscalls)
     pub path: Option<String>,
 
-    /// The flock(2) owner identity (this open file's address) while it
-    /// holds a flock lock, else 0; its last close releases the lock.
+    /// The flock(2) owner identity (this open file's address) once the file
+    /// has asked for a flock lock, else 0. Set before any lock is taken and
+    /// never cleared, so the last close releases whatever the file holds
+    /// (review of N-120 and N-207).
     pub flock_owner: AtomicU64,
 }
 

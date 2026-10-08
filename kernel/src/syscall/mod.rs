@@ -3161,7 +3161,7 @@ fn sys_socket_pair(
 /// lock is granted, or fails with EINTR if a signal must be handled first
 /// (N-207).
 fn sys_flock(fd: usize, operation: usize) -> SyscallResult {
-    use crate::fs::flock::{flock, LOCK_EX, LOCK_NB, LOCK_SH, LOCK_UN};
+    use crate::fs::flock::{flock, LOCK_EX, LOCK_NB, LOCK_SH};
     let process = crate::process::current_process().ok_or(SyscallError::InvalidState)?;
     let file = process
         .file_table
@@ -3172,6 +3172,15 @@ fn sys_flock(fd: usize, operation: usize) -> SyscallResult {
     let op = operation as u32;
     let key = file.flock_key();
     let owner = alloc::sync::Arc::as_ptr(&file) as u64;
+    // The open file notes that it uses flock before it can hold a lock,
+    // and never forgets it, so its last close (File::drop) always releases
+    // whatever it holds. Recording "held" after the fact raced with another
+    // thread's flock on the same file and could leave a lock no close
+    // would release.
+    if matches!(op & !LOCK_NB, LOCK_SH | LOCK_EX) {
+        file.flock_owner
+            .store(owner, core::sync::atomic::Ordering::Release);
+    }
     let result = match flock(key, owner, op) {
         #[cfg(feature = "alloc")]
         Err(crate::error::KernelError::WouldBlock)
@@ -3186,20 +3195,6 @@ fn sys_flock(fd: usize, operation: usize) -> SyscallResult {
         Err(_) => Err(SyscallError::InvalidArgument),
         Ok(()) => Ok(()),
     };
-    // The open file records that it holds a lock, so its last close
-    // (File::drop) releases it; a lock never outlives the node its key
-    // names (review of N-120).
-    // After a valid operation the file holds a lock exactly when it was
-    // LOCK_SH or LOCK_EX and succeeded (a failed conversion gave the old
-    // one up).
-    let kind = op & !LOCK_NB;
-    if matches!(kind, LOCK_SH | LOCK_EX | LOCK_UN) {
-        let held = kind != LOCK_UN && result.is_ok();
-        file.flock_owner.store(
-            if held { owner } else { 0 },
-            core::sync::atomic::Ordering::Release,
-        );
-    }
     result.map(|()| 0)
 }
 
