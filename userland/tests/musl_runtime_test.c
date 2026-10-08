@@ -1420,6 +1420,74 @@ static void test_tids(void)
     report("musl_tids", leader && distinct && child, why);
 }
 
+/* N-207: flock locks belong to open files (two opens in one process
+ * conflict, a dup shares the lock), a blocking request sleeps until the
+ * holder lets go, and a signal interrupts it with EINTR. */
+static void test_flock_blocking(void)
+{
+    static char why[160];
+    const char *path = "/tmp/musl_flock_blocking";
+    int a = open(path, O_CREAT | O_RDWR, 0644);
+    int b = open(path, O_RDWR);
+    int held = a >= 0 && b >= 0 && flock(a, LOCK_EX) == 0;
+    errno = 0;
+    int per_file = held && flock(b, LOCK_EX | LOCK_NB) == -1 && errno == EWOULDBLOCK;
+    int d = dup(a);
+    int shared = flock(d, LOCK_EX | LOCK_NB) == 0;
+    close(d);
+
+    /* The child waits for the lock the parent holds; the parent lets go
+     * after 40 ms. */
+    int fds[2];
+    pipe(fds);
+    pid_t pid = fork();
+    if (pid == 0) {
+        int c = open(path, O_RDWR);
+        long long t0 = mono_ns();
+        int ok = c >= 0 && flock(c, LOCK_EX) == 0;
+        long waited = (long)((mono_ns() - t0) / 1000000);
+        (void)!write(fds[1], &waited, sizeof(waited));
+        _exit(ok ? 0 : 1);
+    }
+    struct timespec d40 = {0, 40000000};
+    nanosleep(&d40, NULL);
+    flock(a, LOCK_UN);
+    int status = -1;
+    long waited = -1;
+    int child_ok = pid > 0 && waitpid(pid, &status, 0) == pid && WIFEXITED(status)
+                   && WEXITSTATUS(status) == 0 && read(fds[0], &waited, sizeof(waited)) == sizeof(waited);
+    int slept = child_ok && waited >= 30;
+
+    /* A signal interrupts the wait: EINTR (no SA_RESTART). */
+    flock(a, LOCK_EX);
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = epoll_on_usr1;
+    sigaction(SIGUSR1, &sa, NULL);
+    epoll_sig_seen = 0;
+    pid_t parent = getpid();
+    pid = fork();
+    if (pid == 0) {
+        struct timespec d30 = {0, 30000000};
+        nanosleep(&d30, NULL);
+        _exit(kill(parent, SIGUSR1) == 0 ? 0 : 1);
+    }
+    errno = 0;
+    int eintr = flock(b, LOCK_EX) == -1 && errno == EINTR && epoll_sig_seen;
+    waitpid(pid, &status, 0);
+    sa.sa_handler = SIG_DFL;
+    sigaction(SIGUSR1, &sa, NULL);
+
+    snprintf(why, sizeof(why), "per_file=%d shared=%d child=%d (waited %ld ms) eintr=%d",
+             per_file, shared, child_ok, waited, eintr);
+    report("musl_flock_blocking", per_file && shared && slept && eintr, why);
+    close(fds[0]);
+    close(fds[1]);
+    close(a);
+    close(b);
+    unlink(path);
+}
+
 int main(int argc, char **argv)
 {
     test_auxv(argc > 0 ? argv[0] : NULL);
@@ -1451,6 +1519,7 @@ int main(int argc, char **argv)
     test_select();
     test_arch_prctl();
     test_tids();
+    test_flock_blocking();
     printf("MUSL-RUNTIME: %d/%d\n", passed, total);
     return passed == total ? 0 : 1;
 }

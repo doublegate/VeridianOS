@@ -3155,38 +3155,52 @@ fn sys_socket_pair(
     Ok(0)
 }
 
-/// flock(2): a whole-file advisory lock on an open file (N-120).
-///
-/// Locks are keyed by the open node's identity, which is unique across
-/// filesystems (inode numbers are not), and released when the open file is
-/// closed for the last time or its process exits. A conflicting lock returns
-/// EWOULDBLOCK even without LOCK_NB until flock waits on a wait queue (ADR
-/// 0006, sprint D).
+/// flock(fd, operation): a whole-file lock owned by the open file (dups and
+/// fork children share it; another open of the file does not), released at
+/// its last close. Without LOCK_NB a conflicting request sleeps until the
+/// lock is granted, or fails with EINTR if a signal must be handled first
+/// (N-207).
 fn sys_flock(fd: usize, operation: usize) -> SyscallResult {
+    use crate::fs::flock::{flock, LOCK_EX, LOCK_NB, LOCK_SH, LOCK_UN};
     let process = crate::process::current_process().ok_or(SyscallError::InvalidState)?;
     let file = process
         .file_table
         .lock()
         .get(fd)
         .ok_or(SyscallError::BadFileDescriptor)?;
+    drop(process);
     let op = operation as u32;
-    match crate::fs::flock::flock(file.flock_key(), process.pid.0, op) {
-        Ok(()) => {
-            // The open file owns the lock: it is released when the file is
-            // closed for the last time (File::drop), so a lock can never
-            // outlive the node its key names (review of N-120).
-            let owner = if op & !crate::fs::flock::LOCK_NB == crate::fs::flock::LOCK_UN {
-                0
-            } else {
-                process.pid.0
-            };
-            file.flock_owner
-                .store(owner, core::sync::atomic::Ordering::Release);
-            Ok(0)
+    let key = file.flock_key();
+    let owner = alloc::sync::Arc::as_ptr(&file) as u64;
+    let result = match flock(key, owner, op) {
+        #[cfg(feature = "alloc")]
+        Err(crate::error::KernelError::WouldBlock)
+            if op & LOCK_NB == 0 && crate::sched::dispatch::current_owner().is_some() =>
+        {
+            crate::sched::dispatch::wait_event(&crate::fs::flock::FLOCK_WAITERS, None, || {
+                flock(key, owner, op | LOCK_NB).is_ok()
+            })
+            .map_err(|_| SyscallError::Interrupted)
         }
         Err(crate::error::KernelError::WouldBlock) => Err(SyscallError::WouldBlock),
         Err(_) => Err(SyscallError::InvalidArgument),
+        Ok(()) => Ok(()),
+    };
+    // The open file records that it holds a lock, so its last close
+    // (File::drop) releases it; a lock never outlives the node its key
+    // names (review of N-120).
+    // After a valid operation the file holds a lock exactly when it was
+    // LOCK_SH or LOCK_EX and succeeded (a failed conversion gave the old
+    // one up).
+    let kind = op & !LOCK_NB;
+    if matches!(kind, LOCK_SH | LOCK_EX | LOCK_UN) {
+        let held = kind != LOCK_UN && result.is_ok();
+        file.flock_owner.store(
+            if held { owner } else { 0 },
+            core::sync::atomic::Ordering::Release,
+        );
     }
+    result.map(|()| 0)
 }
 
 #[cfg(test)]

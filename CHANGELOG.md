@@ -21,6 +21,13 @@
   dynamically linked C++ program that throws, runs threads with `thread_local` destructors and
   `dlopen`s a C++ library.
 
+- **flock waits, and its locks belong to open files (N-207).** flock without LOCK_NB failed with
+  EWOULDBLOCK instead of waiting; it now sleeps until the lock is granted, or fails with EINTR
+  for a signal. Locks were owned by the process, so two opens of one file in a process did not
+  conflict and a process exit dropped locks its fork child still held; they are now owned by the
+  open file, as on Linux, and a lock conversion drops the old lock first. Runtime test
+  `musl_flock_blocking`.
+
 - **Thread IDs follow Linux (N-217).** A process's first thread had its own ID, unlike its
   PID, and thread IDs came from a separate counter, so a thread could have another process's
   PID as its ID. Process and thread IDs now share one counter, and the first thread of a new or

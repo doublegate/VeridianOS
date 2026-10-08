@@ -149,9 +149,8 @@ pub struct File {
     /// syscalls)
     pub path: Option<String>,
 
-    /// Pid whose flock(2) lock is held through this open file (0: none).
-    /// The lock is released when the open file goes away, so it can never
-    /// outlive the node it is keyed by (N-120 review).
+    /// The flock(2) owner identity (this open file's address) while it
+    /// holds a flock lock, else 0; its last close releases the lock.
     pub flock_owner: AtomicU64,
 }
 

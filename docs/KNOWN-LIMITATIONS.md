@@ -83,13 +83,12 @@ work. User code is preempted when its slice ends (D3). What is still missing:
   edge-triggered epoll registration may report again after unrelated I/O (users of EPOLLET
   read until EAGAIN, so this costs a wake-up, not correctness). Other waits are still wrong:
   - an empty pty read returns end-of-file, and a write to a full pty fails with EAGAIN instead
-    of waiting (it returns a short count when part fits; N-128);
-  - `flock` without `LOCK_NB` fails with EWOULDBLOCK instead of waiting (N-120).
+    of waiting (it returns a short count when part fits; N-128).
 - **exec from a multithreaded process fails with EAGAIN.** The other threads would keep running
   on the page tables exec replaces; stopping them first is N-101.
-- **Thread ids and futex keys (N-114 remainder).** A main thread's id differs from its process
-  id (Linux makes them equal), and futex waits poll the futex word instead of queueing on a key
-  (so waits in shared memory between processes work, but every waiter polls).
+- **Futex keys (N-114 remainder).** Futex waits poll the futex word instead of queueing on a key
+  (so waits in shared memory between processes work, but every waiter polls). (A main thread's
+  id now equals its process id, N-217.)
 - **Native libc threads (N-102).** The native C library's `clone` returns through a C epilogue
   and `errno` is one global, so its `pthread_create` still does not work (musl's does). Two
   fixes are therefore tested by unit tests only: LIBC-SEC-01 (the allocator lock in `stdlib.c`)
