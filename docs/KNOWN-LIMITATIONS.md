@@ -27,8 +27,8 @@ behind one found about 80 differences. The security-relevant ones and those the 
 exposed were fixed (N-182 to N-189); the rest are listed, with their targets, in
 [`docs/audit/ABI-REVIEW-2026-10-07.md`](audit/ABI-REVIEW-2026-10-07.md). The most visible:
 
-- **Blocking.** select never blocks; recvfrom, accept, sendmsg and recvmsg never block on a
-  blocking socket (N-194, N-235).
+- **Blocking.** recvfrom, accept, sendmsg and recvmsg never block on a blocking socket
+  (N-235).
 - **MAP_SHARED of regular files** is a private copy: a write through the mapping does not reach
   the file or other mappings. Only memfds share their pages (N-230); the rest needs the v0.29
   page cache.
@@ -77,9 +77,9 @@ work. User code is preempted when its slice ends (D3). What is still missing:
   when it waits, so a long system call keeps the CPU until it returns or waits.
 - **Some waits still re-check instead of being woken (blocking step of sprint D).** Sleeps,
   futexes, pipes, eventfd, timerfd, signalfd, `sigsuspend`, `wait` and job-control stops sleep
-  until woken. `poll`, `epoll_wait` and blocking reads of INET sockets, ptys and other
+  until woken. `poll`, `select`, `epoll_wait` and blocking reads of INET sockets, ptys and other
   descriptors that do not report readiness changes yet sleep too but re-check every 10 ms.
-  `select` reports every open descriptor as ready. Without per-object wake-ups, an
+  Without per-object wake-ups, an
   edge-triggered epoll registration may report again after unrelated I/O (users of EPOLLET
   read until EAGAIN, so this costs a wake-up, not correctness). Other waits are still wrong:
   - an empty pty read returns end-of-file, and a write to a full pty fails with EAGAIN instead

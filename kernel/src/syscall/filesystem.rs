@@ -11,6 +11,7 @@
 
 #![allow(clippy::unnecessary_cast)]
 
+use super::multiplex::{POLLERR, POLLHUP, POLLIN, POLLOUT};
 #[allow(unused_imports)]
 use super::{
     validate_user_buffer, validate_user_ptr_typed, validate_user_string_ptr, SyscallError,
@@ -462,11 +463,7 @@ pub fn sys_read(fd: usize, buffer: usize, count: usize) -> SyscallResult {
             }
             // Sleep until readable (data, EOF or error); a signal ends the
             // wait (EINTR).
-            wait_ready(
-                &file_desc,
-                (POLLIN | POLLHUP | POLLERR) as u16,
-                &mut retry_now,
-            )?;
+            wait_ready(&file_desc, POLLIN | POLLHUP | POLLERR, &mut retry_now)?;
         }
     }
 
@@ -626,7 +623,7 @@ fn write_fd(
             Err(e) => return Some(Err(e)),
         }
         #[cfg(feature = "alloc")]
-        if let Err(e) = wait_ready(&file_desc, (POLLOUT | POLLERR) as u16, &mut retry_now) {
+        if let Err(e) = wait_ready(&file_desc, POLLOUT | POLLERR, &mut retry_now) {
             return Some(if done > 0 { Ok(done) } else { Err(e) });
         }
     }
@@ -2871,205 +2868,6 @@ pub fn sys_truncate(path_ptr: usize, length: usize) -> SyscallResult {
         .map_err(super::map_kernel_error)
 }
 
-/// Poll file descriptors for readiness (syscall 189).
-///
-/// Poll file descriptors for I/O readiness using VfsNode::poll_readiness().
-///
-/// Checks each fd's actual buffer state (pipe occupancy, write-end closed,
-/// etc.) rather than always reporting ready. Supports timeout via busy-wait
-/// with scheduler yield (same approach as nanosleep).
-///
-/// # Arguments
-/// - `fds_ptr`: Pointer to array of PollFd structs.
-/// - `nfds`: Number of entries.
-/// - `timeout_ms`: Timeout in milliseconds. 0 = non-blocking poll, negative (as
-///   i32) = infinite wait, positive = wait up to N ms.
-pub fn sys_poll(fds_ptr: usize, nfds: usize, timeout_ms: usize) -> SyscallResult {
-    // Boot-path cooperative dispatch: when a child thread is dispatched from
-    // boot_futex_spin, the syscall handler yields back to the parent after
-    // each syscall. If we spin-loop here for the full timeout, the
-    // cooperative scheduler is blocked and no other threads can run. Treat
-    // the call as non-blocking (single poll pass) so the child yields
-    // promptly and the event loop makes progress across multiple dispatches.
-    #[cfg(target_arch = "x86_64")]
-    let in_boot_coop = crate::arch::x86_64::usermode::BOOT_CLONE_YIELD_PENDING
-        .load(core::sync::atomic::Ordering::Acquire);
-    #[cfg(not(target_arch = "x86_64"))]
-    let in_boot_coop = false;
-
-    if nfds == 0 {
-        // timeout_ms > 0 means sleep for that duration (like usleep via poll)
-        #[cfg(feature = "alloc")]
-        if (timeout_ms as i32) > 0 && crate::sched::dispatch::current_owner().is_some() {
-            let deadline = crate::sched::dispatch::clock_ns()
-                .saturating_add((timeout_ms as i32 as u64).saturating_mul(1_000_000));
-            return super::time::sleep_until(deadline, 0);
-        }
-        if (timeout_ms as i32) > 0 && !in_boot_coop {
-            let start = crate::timer::get_uptime_ms();
-            while crate::timer::get_uptime_ms() - start < timeout_ms as u64 {
-                // Enable interrupts briefly to let APIC timer advance
-                // UPTIME_MS (see epoll::epoll_wait for full rationale).
-                if crate::sched::wait_for_interrupt_in_syscall() {
-                    return Err(SyscallError::Interrupted);
-                }
-            }
-        }
-        return Ok(0);
-    }
-    if nfds > 256 {
-        return Err(SyscallError::InvalidArgument);
-    }
-
-    validate_user_buffer(fds_ptr, nfds * core::mem::size_of::<PollFd>())?;
-    // The pollfd array is copied in once and written back on return, never
-    // accessed in place (N-43).
-    let mut pollfds = Vec::with_capacity(nfds);
-    for i in 0..nfds {
-        pollfds.push(crate::syscall::userspace::read_user_index::<PollFd>(
-            fds_ptr, i,
-        )?);
-    }
-    let write_back = |pollfds: &[PollFd]| -> Result<(), SyscallError> {
-        for (i, pfd) in pollfds.iter().enumerate() {
-            crate::syscall::userspace::write_user(
-                fds_ptr + i * core::mem::size_of::<PollFd>(),
-                *pfd,
-            )?;
-        }
-        Ok(())
-    };
-
-    let timeout_i32 = if in_boot_coop {
-        0i32
-    } else {
-        timeout_ms as i32
-    };
-    let start = crate::timer::get_uptime_ms();
-    // Cap infinite wait to 30 seconds to prevent permanent hangs
-    let max_wait_ms: u64 = if timeout_i32 < 0 {
-        30_000
-    } else {
-        timeout_i32 as u64
-    };
-
-    // A dispatched poller sleeps between scans (no cap on an infinite
-    // wait): woken when a file object reports a change, at the deadline,
-    // or by a signal.
-    #[cfg(feature = "alloc")]
-    let dispatched = crate::sched::dispatch::current_owner().is_some();
-    #[cfg(feature = "alloc")]
-    let deadline = (timeout_i32 > 0)
-        .then(|| crate::sched::dispatch::clock_ns().saturating_add(timeout_i32 as u64 * 1_000_000));
-
-    loop {
-        #[cfg(feature = "alloc")]
-        let seq = crate::sched::dispatch::io_seq();
-        #[cfg(feature = "alloc")]
-        let mut precise = true;
-        #[cfg(feature = "alloc")]
-        let mut wake_at: Option<u64> = None;
-        let proc = process::current_process().ok_or(SyscallError::InvalidState)?;
-        let file_table = proc.file_table.lock();
-        let mut ready_count = 0usize;
-
-        for pollfd in pollfds.iter_mut() {
-            pollfd.revents = 0;
-
-            if pollfd.fd < 0 {
-                continue;
-            }
-
-            if let Some(file) = file_table.get(pollfd.fd as usize) {
-                #[cfg(feature = "alloc")]
-                {
-                    precise &= file.node.wakes_io_waiters();
-                    wake_at = [wake_at, file.node.ready_at_ns()]
-                        .into_iter()
-                        .flatten()
-                        .min();
-                }
-                let readiness = file.node.poll_readiness();
-                if pollfd.events & POLLIN != 0 && readiness & 0x0001 != 0 {
-                    pollfd.revents |= POLLIN;
-                }
-                if pollfd.events & POLLOUT != 0 && readiness & 0x0004 != 0 {
-                    pollfd.revents |= POLLOUT;
-                }
-                // POLLERR and POLLHUP always delivered regardless of events mask
-                if readiness & 0x0008 != 0 {
-                    pollfd.revents |= POLLERR;
-                }
-                if readiness & 0x0010 != 0 {
-                    pollfd.revents |= POLLHUP;
-                }
-                if pollfd.revents != 0 {
-                    ready_count += 1;
-                }
-            } else {
-                // Not an open fd in this process. Sockets are fds now, so
-                // there is no global-socket-id fallback (W-14).
-                pollfd.revents = POLLNVAL;
-                ready_count += 1;
-            }
-        }
-        // Drop file_table lock before yielding
-        drop(file_table);
-
-        if ready_count > 0 || timeout_i32 == 0 {
-            write_back(&pollfds)?;
-            return Ok(ready_count);
-        }
-
-        #[cfg(feature = "alloc")]
-        if dispatched {
-            use crate::sched::dispatch::{wait_io, WaitError};
-            match wait_io(seq, deadline, precise, wake_at) {
-                Ok(()) => continue,
-                Err(WaitError::TimedOut) => {
-                    write_back(&pollfds)?;
-                    return Ok(0);
-                }
-                Err(WaitError::Interrupted) => return Err(SyscallError::Interrupted),
-            }
-        }
-
-        // Timeout expired?
-        if crate::timer::get_uptime_ms() - start >= max_wait_ms {
-            write_back(&pollfds)?;
-            return Ok(0);
-        }
-
-        // Enable interrupts briefly so the APIC timer ISR can fire and
-        // advance UPTIME_MS.  Without this, the monotonic clock is frozen
-        // (SFMASK clears IF on syscall entry) and time-based fds such as
-        // timerfd never become readable.  See epoll::epoll_wait for the
-        // detailed rationale.
-        if crate::sched::wait_for_interrupt_in_syscall() {
-            return Err(SyscallError::Interrupted);
-        }
-    }
-}
-
-/// Poll event flags
-const POLLIN: i16 = 0x001;
-const POLLOUT: i16 = 0x004;
-const POLLERR: i16 = 0x008;
-const POLLHUP: i16 = 0x010;
-const POLLNVAL: i16 = 0x020;
-
-/// Poll file descriptor structure (matches C struct pollfd).
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct PollFd {
-    fd: i32,
-    events: i16,
-    revents: i16,
-}
-
-// SAFETY: i32 + two i16, no padding (size 8); every bit pattern is valid.
-unsafe impl crate::syscall::userspace::UserPod for PollFd {}
-
 /// Resolve a path relative to a directory fd.
 ///
 /// If `dirfd == AT_FDCWD`, uses the process CWD. Otherwise resolves the
@@ -3350,58 +3148,6 @@ pub fn sys_fchown(fd: usize, uid: usize, gid: usize) -> SyscallResult {
 pub fn sys_mknod(path_ptr: usize, _mode: usize, _dev: usize) -> SyscallResult {
     let _path = read_user_path(path_ptr)?;
     Err(SyscallError::PermissionDenied)
-}
-
-/// Synchronous I/O multiplexing (syscall 200).
-///
-/// Scans fd_set bitmaps for set bits and checks whether the corresponding
-/// file descriptors exist in the current process's file table. Files and
-/// pipes are always considered ready (same simplification as `sys_poll`).
-pub fn sys_select(
-    nfds: usize,
-    readfds_ptr: usize,
-    writefds_ptr: usize,
-    _exceptfds_ptr: usize,
-    _timeout_ptr: usize,
-) -> SyscallResult {
-    // fd_set is a bitmap: 1 bit per fd, packed into usize-width words.
-    // FD_SETSIZE is typically 1024, but we cap at nfds.
-    let nfds = nfds.min(1024);
-    if nfds == 0 {
-        return Ok(0);
-    }
-
-    // Number of bytes needed for the bitmap
-    let bytes_needed = nfds.div_ceil(8);
-    let mut ready_count: usize = 0;
-
-    // Helper: scan an fd_set bitmap and count ready fds.
-    // All existing fds are considered ready (files/pipes always ready).
-    let process = crate::process::current_process().ok_or(SyscallError::InvalidState)?;
-    let file_table = process.file_table.lock();
-
-    for fdset_ptr in [readfds_ptr, writefds_ptr] {
-        if fdset_ptr == 0 {
-            continue;
-        }
-        // Copied in, updated, and copied back out (N-43).
-        let mut set = alloc::vec![0u8; bytes_needed];
-        super::userspace::read_user_bytes(fdset_ptr, &mut set)?;
-        for fd in 0..nfds {
-            let (byte_idx, bit) = (fd / 8, 1u8 << (fd % 8));
-            if set[byte_idx] & bit != 0 {
-                if file_table.get(fd).is_some() {
-                    ready_count += 1;
-                } else {
-                    // Clear the bit for fds that don't exist
-                    set[byte_idx] &= !bit;
-                }
-            }
-        }
-        super::userspace::write_user_bytes(fdset_ptr, &set)?;
-    }
-
-    Ok(ready_count)
 }
 
 #[cfg(test)]

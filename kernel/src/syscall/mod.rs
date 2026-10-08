@@ -261,6 +261,10 @@ use self::debug::*;
 mod memory;
 use self::memory::*;
 
+// poll, ppoll, select, pselect6
+mod multiplex;
+use self::multiplex::{sys_poll, sys_ppoll, sys_pselect6, sys_select};
+
 // Import user space utilities
 mod arch_prctl;
 mod futex;
@@ -810,6 +814,8 @@ fn handle_syscall(
         Syscall::Fchown => sys_fchown(arg1, arg2, arg3),
         Syscall::Mknod => sys_mknod(arg1, arg2, arg3),
         Syscall::Select => sys_select(arg1, arg2, arg3, arg4, arg5),
+        // pselect6(nfds, readfds, writefds, exceptfds, timeout, sig)
+        Syscall::Pselect6 => sys_pselect6(arg1, arg2, arg3, arg4, arg5, syscall_arg6()?),
         // Futex entrypoint: dispatch all futex ops (wait/wake/requeue/bitset/wake_op)
         Syscall::FutexWait => {
             futex::sys_futex_dispatch(arg1, arg2, arg3, arg4, arg5).map(|v| v as usize)
@@ -1147,7 +1153,7 @@ fn handle_syscall(
         Syscall::Tgkill => process::sys_tgkill(arg1, arg2, arg3),
         Syscall::Waitid => process::sys_waitid(arg1, arg2, arg3, arg4),
         Syscall::RtSigpending => signal::sys_sigpending(arg1, arg2),
-        Syscall::Ppoll => linux_compat::handle_ppoll(arg1, arg2, arg3, arg4, arg5),
+        Syscall::Ppoll => sys_ppoll(arg1, arg2, arg3, arg4, arg5),
         // faccessat has no flags argument; faccessat2 adds one.
         Syscall::Faccessat => sys_faccessat(arg1, arg2, arg3, 0),
         Syscall::Faccessat2 => sys_faccessat(arg1, arg2, arg3, arg4),

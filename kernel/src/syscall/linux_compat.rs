@@ -5,7 +5,7 @@
 //! calling convention: errno values for errors, and the few calls whose
 //! handlers exist only for the Linux interface (ppoll, prctl).
 
-use super::{SyscallError, SyscallResult};
+use super::SyscallResult;
 
 /// Translate a VeridianOS SyscallError to a Linux errno value.
 ///
@@ -121,45 +121,6 @@ pub(crate) fn to_linux_errno(err: super::SyscallError) -> isize {
     }
 }
 
-/// ppoll(fds, nfds, timeout, sigmask, sigsetsize): poll with a timespec
-/// timeout and, for the wait, the given signal mask (N-258).
-pub(crate) fn handle_ppoll(
-    fds_ptr: usize,
-    nfds: usize,
-    timespec_ptr: usize,
-    sigmask_ptr: usize,
-    sigsetsize: usize,
-) -> SyscallResult {
-    // A NULL timespec waits forever (a negative timeout to sys_poll).
-    let timeout_ms = if timespec_ptr == 0 {
-        usize::MAX
-    } else {
-        // Fault-tolerant read: a bad pointer is EFAULT, as on Linux, not a
-        // raw dereference and not a silent zero timeout (review of the
-        // v0.26.0 stack, PR #14).
-        let [tv_sec, tv_nsec] = super::userspace::read_user::<[i64; 2]>(timespec_ptr)?;
-        ppoll_timeout_ms(tv_sec, tv_nsec)?
-    };
-    let mask = super::signal::begin_wait_sigmask(sigmask_ptr, sigsetsize)?;
-    let result = super::filesystem::sys_poll(fds_ptr, nfds, timeout_ms);
-    mask.end(&result);
-    result
-}
-
-/// ppoll's timespec as a poll timeout in milliseconds, rounded down.
-/// Linux rejects a negative `tv_sec` or a `tv_nsec` outside 0..1e9 with
-/// EINVAL.
-fn ppoll_timeout_ms(tv_sec: i64, tv_nsec: i64) -> Result<usize, SyscallError> {
-    if tv_sec < 0 || !(0..1_000_000_000).contains(&tv_nsec) {
-        return Err(SyscallError::InvalidArgument);
-    }
-    let ms = (tv_sec as u64)
-        .saturating_mul(1000)
-        .saturating_add(tv_nsec as u64 / 1_000_000);
-    // Keep it below the "infinite" encoding (negative as i32 in sys_poll).
-    Ok(ms.min(i32::MAX as u64) as usize)
-}
-
 /// prctl(2) subset. Options a program can rely on for its correctness or
 /// security are refused (EINVAL) until implemented, never faked (N-151).
 pub(crate) fn sys_prctl(option: usize, arg2: usize) -> SyscallResult {
@@ -193,20 +154,7 @@ pub(crate) fn sys_prctl(option: usize, arg2: usize) -> SyscallResult {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
-    #[test]
-    fn ppoll_timespec_is_validated_like_linux() {
-        assert_eq!(ppoll_timeout_ms(1, 500_000_000), Ok(1500));
-        assert_eq!(ppoll_timeout_ms(0, 999_999), Ok(0));
-        assert_eq!(ppoll_timeout_ms(-1, 0), Err(SyscallError::InvalidArgument));
-        assert_eq!(ppoll_timeout_ms(0, -1), Err(SyscallError::InvalidArgument));
-        assert_eq!(
-            ppoll_timeout_ms(0, 1_000_000_000),
-            Err(SyscallError::InvalidArgument)
-        );
-        assert_eq!(ppoll_timeout_ms(i64::MAX, 0), Ok(i32::MAX as usize));
-    }
+    use super::{super::SyscallError, *};
 
     /// N-127: filesystem errors reach user space as the Linux errno of
     /// their cause, not EINVAL or ENOENT for everything.

@@ -111,6 +111,7 @@ pub mod sysno {
     pub const SYS_poll: usize = 7;
     pub const SYS_ppoll: usize = 271;
     pub const SYS_select: usize = 23;
+    pub const SYS_pselect6: usize = 270;
     pub const SYS_getdents64: usize = 217;
     pub const SYS_mkdir: usize = 83;
     pub const SYS_mkdirat: usize = 258;

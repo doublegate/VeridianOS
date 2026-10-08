@@ -21,6 +21,14 @@
   dynamically linked C++ program that throws, runs threads with `thread_local` destructors and
   `dlopen`s a C++ library.
 
+- **select waits, and pselect6 exists (N-194).** select reported every open descriptor ready at
+  once and ignored its timeout and exceptfds. select and the new pselect6 now share poll's wait:
+  they sleep until a descriptor is ready, the timeout passes or a signal arrives, report
+  readable, writable and exceptional descriptors as Linux does, fail with EBADF for a closed
+  descriptor and EINVAL for a bad timeout, and write the time left back; pselect6 applies its
+  signal mask for the wait. poll takes up to 1024 descriptors (it stopped at 256) and reports
+  POLLRDNORM and POLLWRNORM (N-206). Runtime test `musl_select`.
+
 - **epoll follows Linux (N-234, N-245).** The instance is its file, so duplicates and fork
   children share it. A registration belongs to the descriptor number and the open file it named:
   it goes away when the open file is closed for good, not when the number is reused, and keeps

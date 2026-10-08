@@ -121,6 +121,7 @@
 #define SYS_poll                         7
 #define SYS_ppoll                        271
 #define SYS_select                       23
+#define SYS_pselect6                     270
 #define SYS_getdents64                   217
 /* Directories */
 #define SYS_mkdir                        83

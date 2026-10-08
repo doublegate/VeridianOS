@@ -136,6 +136,7 @@ unlinkat
 poll
 ppoll
 select
+pselect6
 getdents64
 
 ## Directories

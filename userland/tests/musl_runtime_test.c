@@ -32,6 +32,7 @@
 #include <sys/file.h>
 #include <sys/mman.h>
 #include <sys/prctl.h>
+#include <sys/select.h>
 #include <spawn.h>
 #include <sys/wait.h>
 #include <sys/socket.h>
@@ -1262,6 +1263,105 @@ static void test_epoll(void)
     unlink("/tmp/musl_epoll_file");
 }
 
+/* N-194, N-206: select waits and reports readiness as Linux does (it
+ * reported every open descriptor ready at once); pselect6 applies its
+ * signal mask for the wait; poll reports POLLRDNORM. */
+static void test_select(void)
+{
+    static char why[256];
+    int p[2];
+    pipe(p);
+    fd_set r, w;
+    struct timeval tv;
+
+    /* Nothing to read: a timed select waits and returns 0, and the raw
+     * call writes the time left back (zero here). */
+    FD_ZERO(&r);
+    FD_SET(p[0], &r);
+    long tv_raw[2] = {0, 40000};
+    long long t0 = mono_ns();
+    int idle = syscall(SYS_select, p[0] + 1, &r, NULL, NULL, tv_raw) == 0 && !FD_ISSET(p[0], &r);
+    long waited_ms = (long)((mono_ns() - t0) / 1000000);
+    int timed = idle && waited_ms >= 35 && tv_raw[0] == 0 && tv_raw[1] == 0;
+
+    /* Readable and writable. */
+    (void)!write(p[1], "x", 1);
+    FD_ZERO(&r);
+    FD_ZERO(&w);
+    FD_SET(p[0], &r);
+    FD_SET(p[1], &w);
+    FD_SET(p[0], &w);
+    tv.tv_sec = 0;
+    tv.tv_usec = 0;
+    int n = select(p[1] + 1, &r, &w, NULL, &tv);
+    int ready = n == 2 && FD_ISSET(p[0], &r) && FD_ISSET(p[1], &w) && !FD_ISSET(p[0], &w);
+    char c;
+    (void)!read(p[0], &c, 1);
+
+    /* A blocking select wakes when another process writes. */
+    pid_t pid = fork();
+    if (pid == 0) {
+        struct timespec d = {0, 30000000};
+        nanosleep(&d, NULL);
+        _exit(write(p[1], "y", 1) == 1 ? 0 : 1);
+    }
+    FD_ZERO(&r);
+    FD_SET(p[0], &r);
+    int woke = select(p[0] + 1, &r, NULL, NULL, NULL) == 1 && FD_ISSET(p[0], &r);
+    int status;
+    waitpid(pid, &status, 0);
+    (void)!read(p[0], &c, 1);
+
+    /* Errors: a closed descriptor is EBADF, a bad timeval EINVAL. */
+    FD_ZERO(&r);
+    FD_SET(p[1] + 5, &r);
+    tv.tv_sec = 0;
+    tv.tv_usec = 0;
+    errno = 0;
+    int ebadf = select(p[1] + 6, &r, NULL, NULL, &tv) == -1 && errno == EBADF;
+    long bad_tv[2] = {0, 1000000};
+    FD_ZERO(&r);
+    errno = 0;
+    int einval = syscall(SYS_select, 1, &r, NULL, NULL, bad_tv) == -1 && errno == EINVAL;
+
+    /* pselect: SIGUSR1 blocked and pending, let through for the wait. */
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = epoll_on_usr1;
+    sigaction(SIGUSR1, &sa, NULL);
+    sigset_t usr1, none, now;
+    sigemptyset(&usr1);
+    sigaddset(&usr1, SIGUSR1);
+    sigemptyset(&none);
+    sigprocmask(SIG_BLOCK, &usr1, NULL);
+    epoll_sig_seen = 0;
+    kill(getpid(), SIGUSR1);
+    FD_ZERO(&r);
+    FD_SET(p[0], &r);
+    struct timespec second = {1, 0};
+    errno = 0;
+    int ps = pselect(p[0] + 1, &r, NULL, NULL, &second, &none) == -1 && errno == EINTR
+             && epoll_sig_seen;
+    sigprocmask(SIG_BLOCK, NULL, &now);
+    ps = ps && sigismember(&now, SIGUSR1) == 1;
+    sigprocmask(SIG_UNBLOCK, &usr1, NULL);
+    sa.sa_handler = SIG_DFL;
+    sigaction(SIGUSR1, &sa, NULL);
+
+    /* poll: POLLRDNORM alone is reported. */
+    (void)!write(p[1], "z", 1);
+    struct pollfd pfd = {p[0], POLLRDNORM, 0};
+    int rdnorm = poll(&pfd, 1, 0) == 1 && pfd.revents == POLLRDNORM;
+
+    snprintf(why, sizeof(why),
+             "timed=%d (%ld ms, left %ld.%06ld) ready=%d (n=%d) woke=%d ebadf=%d einval=%d "
+             "pselect=%d rdnorm=%d",
+             timed, waited_ms, tv_raw[0], tv_raw[1], ready, n, woke, ebadf, einval, ps, rdnorm);
+    report("musl_select", timed && ready && woke && ebadf && einval && ps && rdnorm, why);
+    close(p[0]);
+    close(p[1]);
+}
+
 int main(int argc, char **argv)
 {
     test_auxv(argc > 0 ? argv[0] : NULL);
@@ -1290,6 +1390,7 @@ int main(int argc, char **argv)
     test_event_fds();
     test_signalfd();
     test_epoll();
+    test_select();
     printf("MUSL-RUNTIME: %d/%d\n", passed, total);
     return passed == total ? 0 : 1;
 }
