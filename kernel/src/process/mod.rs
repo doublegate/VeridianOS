@@ -59,11 +59,11 @@ pub const MAX_PROCESSES: usize = 1024;
 /// Maximum threads per process
 pub const MAX_THREADS_PER_PROCESS: usize = 256;
 
-/// Process ID allocator
-static NEXT_PID: AtomicU64 = AtomicU64::new(1);
-
-/// Thread ID allocator
-static NEXT_TID: AtomicU64 = AtomicU64::new(1);
+/// Process and thread IDs share one space, as on Linux: a process's first
+/// thread has the process's ID as its thread ID (`ThreadBuilder::tid`), and
+/// every other thread an ID no process has, so gettid, tkill and tgkill name
+/// threads and processes without ambiguity (N-217).
+static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
 /// Boot-launched process tracking.
 ///
@@ -126,12 +126,13 @@ pub fn clear_boot_current() {
 
 /// Allocate a new process ID
 pub fn alloc_pid() -> ProcessId {
-    ProcessId(NEXT_PID.fetch_add(1, Ordering::Relaxed))
+    ProcessId(NEXT_ID.fetch_add(1, Ordering::Relaxed))
 }
 
-/// Allocate a new thread ID
+/// Allocate a new thread ID for a thread other than a process's first
+/// (from the same space as process IDs).
 pub fn alloc_tid() -> ThreadId {
-    ThreadId(NEXT_TID.fetch_add(1, Ordering::Relaxed))
+    ThreadId(NEXT_ID.fetch_add(1, Ordering::Relaxed))
 }
 
 /// Initialize process management subsystem without creating init process

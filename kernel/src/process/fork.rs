@@ -216,6 +216,9 @@ pub fn fork_process_with(opts: &ForkOptions) -> Result<(ProcessId, super::Thread
             current_thread.name.clone(),
             ctx.get_instruction_pointer(),
         )
+        // The child's only thread is its first: its ID is the child's
+        // (N-217).
+        .tid(super::ThreadId(new_pid.0))
         // A clone thread has no kernel-chosen stack (it runs on its own);
         // the child's main thread still needs a size for a later exec.
         .user_stack_size(

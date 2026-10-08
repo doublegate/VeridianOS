@@ -105,6 +105,7 @@ pub fn create_process_with_options(
         .unwrap_or_else(|| (String::from("/"), String::from("/")));
     let main_thread =
         ThreadBuilder::new(pid, format!("{}-main", options.name), options.entry_point)
+            .tid(super::ThreadId(pid.0))
             .user_stack_size(options.user_stack_size)
             .kernel_stack_size(options.kernel_stack_size)
             .fs(super::thread::ThreadFs::with_cwd(start_cwd, start_root))

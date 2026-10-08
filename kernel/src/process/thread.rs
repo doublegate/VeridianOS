@@ -778,6 +778,7 @@ pub struct ThreadBuilder {
     clear_tid: usize,
     tls_base: Option<usize>,
     fs: Option<Arc<ThreadFs>>,
+    tid: Option<ThreadId>,
 }
 
 #[cfg(feature = "alloc")]
@@ -800,6 +801,7 @@ impl ThreadBuilder {
             clear_tid: 0,
             tls_base: None,
             fs: None,
+            tid: None,
         }
     }
 
@@ -844,6 +846,13 @@ impl ThreadBuilder {
         self
     }
 
+    /// Give the thread this ID instead of a new one: a process's first
+    /// thread takes the process's ID (N-217).
+    pub fn tid(mut self, tid: ThreadId) -> Self {
+        self.tid = Some(tid);
+        self
+    }
+
     /// Set the TLS (Thread-Local Storage) base address for the new thread.
     ///
     /// This corresponds to `CLONE_SETTLS` on Linux or `arch_prctl(ARCH_SET_FS)`
@@ -871,7 +880,7 @@ impl ThreadBuilder {
     /// Stack pointers are set to the top of each allocated region since stacks
     /// grow downward on all supported architectures (x86_64, AArch64, RISC-V).
     pub fn build(self) -> Result<Thread, KernelError> {
-        let tid = super::alloc_tid();
+        let tid = self.tid.unwrap_or_else(super::alloc_tid);
 
         // Calculate page counts for stacks
         let user_stack_pages = self.user_stack_size.div_ceil(FRAME_SIZE);

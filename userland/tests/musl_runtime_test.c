@@ -1362,6 +1362,64 @@ static void test_select(void)
     close(p[1]);
 }
 
+/* N-215: arch_prctl refuses an FS base outside user space with EPERM, as
+ * Linux (it was EACCES), and leaves the thread's TLS alone; GET_FS reports
+ * the base the thread runs with; an unknown code is EINVAL. */
+static void test_arch_prctl(void)
+{
+    static char why[128];
+    static __thread int tls_probe = 7;
+    unsigned long base = 0;
+    int got = syscall(SYS_arch_prctl, 0x1003 /* ARCH_GET_FS */, &base) == 0 && base != 0;
+    errno = 0;
+    int eperm = syscall(SYS_arch_prctl, 0x1002 /* ARCH_SET_FS */, 0x800000000000UL) == -1
+                && errno == EPERM;
+    unsigned long after = 0;
+    int kept = syscall(SYS_arch_prctl, 0x1003, &after) == 0 && after == base && tls_probe == 7;
+    errno = 0;
+    int einval = syscall(SYS_arch_prctl, 0x9999, 0) == -1 && errno == EINVAL;
+    snprintf(why, sizeof(why), "get=%d eperm=%d kept=%d einval=%d", got, eperm, kept, einval);
+    report("musl_arch_prctl", got && eperm && kept && einval, why);
+}
+
+/* N-217: thread IDs and process IDs share one space, as on Linux: the
+ * first thread's ID is the process's, other threads get IDs no process has,
+ * and a fork child's thread ID is its own PID. */
+static pid_t tid_of_thread;
+static void *record_tid(void *arg)
+{
+    (void)arg;
+    tid_of_thread = (pid_t)syscall(SYS_gettid);
+    return NULL;
+}
+
+static void test_tids(void)
+{
+    static char why[160];
+    int leader = syscall(SYS_gettid) == getpid();
+    pthread_t t;
+    int made = pthread_create(&t, NULL, record_tid, NULL) == 0 && pthread_join(t, NULL) == 0;
+    int distinct = made && tid_of_thread > 0 && tid_of_thread != getpid();
+    int fds[2];
+    pipe(fds);
+    pid_t pid = fork();
+    if (pid == 0) {
+        pid_t pair[2] = {getpid(), (pid_t)syscall(SYS_gettid)};
+        (void)!write(fds[1], pair, sizeof(pair));
+        _exit(0);
+    }
+    pid_t pair[2] = {0, 0};
+    int status;
+    int got = read(fds[0], pair, sizeof(pair)) == sizeof(pair);
+    waitpid(pid, &status, 0);
+    int child = got && pair[0] == pid && pair[1] == pid && pid != tid_of_thread;
+    close(fds[0]);
+    close(fds[1]);
+    snprintf(why, sizeof(why), "leader=%d thread tid %d (pid %d) child pid %d tid %d", leader,
+             (int)tid_of_thread, (int)getpid(), (int)pair[0], (int)pair[1]);
+    report("musl_tids", leader && distinct && child, why);
+}
+
 int main(int argc, char **argv)
 {
     test_auxv(argc > 0 ? argv[0] : NULL);
@@ -1391,6 +1449,8 @@ int main(int argc, char **argv)
     test_signalfd();
     test_epoll();
     test_select();
+    test_arch_prctl();
+    test_tids();
     printf("MUSL-RUNTIME: %d/%d\n", passed, total);
     return passed == total ? 0 : 1;
 }

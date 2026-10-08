@@ -21,6 +21,12 @@
   dynamically linked C++ program that throws, runs threads with `thread_local` destructors and
   `dlopen`s a C++ library.
 
+- **Thread IDs follow Linux (N-217).** A process's first thread had its own ID, unlike its
+  PID, and thread IDs came from a separate counter, so a thread could have another process's
+  PID as its ID. Process and thread IDs now share one counter, and the first thread of a new or
+  forked process has the process's ID. `arch_prctl(ARCH_SET_FS)` outside user space is EPERM as
+  on Linux (it was EACCES; N-215). Runtime tests `musl_tids` and `musl_arch_prctl`.
+
 - **select waits, and pselect6 exists (N-194).** select reported every open descriptor ready at
   once and ignored its timeout and exceptfds. select and the new pselect6 now share poll's wait:
   they sleep until a descriptor is ready, the timeout passes or a signal arrives, report

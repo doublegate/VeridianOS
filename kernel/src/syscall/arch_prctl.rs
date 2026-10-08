@@ -56,7 +56,7 @@ pub fn sys_arch_prctl(code: usize, addr: usize) -> Result<isize, SyscallError> {
             // process could halt the kernel (N-100). Linux allows only
             // addresses below the top of user space (EPERM otherwise).
             if !fs_base_allowed(addr) {
-                return Err(SyscallError::PermissionDenied);
+                return Err(SyscallError::OperationNotPermitted);
             }
             ctx.set_tls_base(addr as u64);
 
