@@ -161,6 +161,7 @@ pub mod sysno {
     pub const SYS_getresgid: usize = 120;
     pub const SYS_getgroups: usize = 115;
     pub const SYS_setgroups: usize = 116;
+    pub const SYS_VERIDIAN_AUTH: usize = 1352;
     pub const SYS_setpgid: usize = 109;
     pub const SYS_getpgid: usize = 121;
     pub const SYS_getpgrp: usize = 111;

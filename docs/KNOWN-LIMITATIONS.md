@@ -366,6 +366,14 @@ Page protections now follow `prot` (fixed in v0.27, N-132 to N-137). What remain
 - The graphical display manager accepts `root` with **any** non-empty password.
 - Password hashes use 10 PBKDF2 iterations in dev builds and 10,000 in release builds, the count is
   not stored with the hash, and TOTP does not follow RFC 6238.
+- Two user stores do not agree. The kernel's account store (`security::auth`), which holds the
+  passwords that `veridian_auth` and pam_veridian check, has only `root`. The shell's user
+  database (`useradd`, `id`), which maps names to user IDs, creates accounts with no password in
+  the account store, and the shell's `passwd` reports success without changing anything. So only
+  root can authenticate through PAM (the KDE session runs as root). Unifying them is part of the
+  credentials work (N-131).
+- pam_veridian cannot check a second factor: an account with MFA enabled fails PAM
+  authentication.
 
 Do not expose a VeridianOS system to untrusted users or networks.
 

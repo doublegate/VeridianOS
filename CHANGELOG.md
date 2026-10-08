@@ -37,6 +37,14 @@
   program's file name, or the script's) and by PR_SET_NAME, and inherited by threads and fork
   children. PR_SET_NO_NEW_PRIVS and PR_GET_NO_NEW_PRIVS exist with Linux's argument checks;
   the flag is one-way and inherited. Runtime test `musl_prctl`.
+- **Password checks for PAM: `veridian_auth` and pam_veridian.** A VeridianOS system call
+  (private 1352) checks a password, reports an account's state, or changes a password, against
+  the kernel's account store, so passwords never leave the kernel and there is no
+  `/etc/shadow`. Root may act on any account and anyone else only on its own (by real user ID),
+  as Linux's `unix_chkpwd` allows, so a user can neither guess another's password nor lock that
+  account by failing. `userland/pam_veridian` is the Linux-PAM module over it (auth, account,
+  password), built into the KDE sysroot; the screen locker (PAM service `kde`) and polkit
+  (`polkit-1`) authenticate with it.
 - **Scheduling calls take effect (N-221).** sched_setscheduler, sched_getscheduler and the
   affinity calls were stubs that returned 0. Each thread now has Linux's scheduling parameters --
   policy (SCHED_OTHER, FIFO, RR, BATCH, IDLE, DEADLINE), real-time priority, nice value and
@@ -324,6 +332,11 @@
 
 ### Security
 
+- **Passwords are compared in constant time, and failed attempts lock for ten minutes.** The
+  account store compared password hashes with `==`, which stops at the first differing byte; it
+  now uses the constant-time comparison. Five failed attempts locked an account until reboot,
+  which a screen locker would turn into a lockout of the session's user; the lock now lasts 600
+  seconds (pam_faillock's default) and is separate from an administrator's lock.
 - **A malformed executable no longer panics the kernel.** The loader sliced each segment's file
   range and added its addresses unchecked, so an ELF file whose PT_LOAD ran past the end of the
   file, or whose sizes overflowed, crashed the kernel on exec. Such files now fail with ENOEXEC

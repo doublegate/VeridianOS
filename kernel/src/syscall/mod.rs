@@ -264,6 +264,9 @@ use self::memory::*;
 // Scheduling policy, priority and affinity (N-221)
 pub(crate) mod scheduling;
 
+// Password checks for pam_veridian
+mod veridian_auth;
+
 // poll, ppoll, select, pselect6
 mod multiplex;
 use self::multiplex::{sys_poll, sys_ppoll, sys_pselect6, sys_select};
@@ -1152,6 +1155,7 @@ fn handle_syscall(
         Syscall::GetRobustList => sys_get_robust_list(arg1, arg2, arg3),
         Syscall::ClockNanosleep => time::sys_clock_nanosleep(arg1, arg2, arg3, arg4),
         Syscall::Prctl => linux_compat::sys_prctl(arg1, arg2, arg3, arg4, arg5),
+        Syscall::VeridianAuth => veridian_auth::sys_veridian_auth(arg1, arg2, arg3, arg4),
         Syscall::Flock => sys_flock(arg1, arg2),
         Syscall::Tkill => process::sys_tkill(arg1, arg2),
         Syscall::Tgkill => process::sys_tgkill(arg1, arg2, arg3),

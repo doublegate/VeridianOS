@@ -283,7 +283,12 @@ pub struct UserAccount {
     pub username: &'static str,
     pub(crate) password_hash: Hash256,
     pub salt: [u8; 32],
+    /// Locked by an administrator: until unlocked.
     pub locked: bool,
+    /// Locked after too many failed attempts: until this time (seconds
+    /// since boot), as Linux's pam_faillock does, so mistyping cannot lock
+    /// an account for good.
+    pub locked_until: Option<u64>,
     pub failed_attempts: u32,
     pub mfa_enabled: bool,
     pub mfa_secret: Option<[u8; 32]>,
@@ -314,6 +319,7 @@ impl UserAccount {
             password_hash,
             salt,
             locked: false,
+            locked_until: None,
             failed_attempts: 0,
             mfa_enabled: false,
             mfa_secret: None,
@@ -345,10 +351,29 @@ impl UserAccount {
         pbkdf2_hmac_sha256(password.as_bytes(), salt, Self::PBKDF2_ITERATIONS)
     }
 
-    /// Verify password
+    /// Verify password (in constant time: the comparison does not reveal
+    /// how much of the hash matched).
     pub fn verify_password(&self, password: &str) -> bool {
         let computed = Self::hash_password_with_salt(password, &self.salt);
-        computed == self.password_hash
+        crate::crypto::constant_time::ct_eq_bytes(
+            computed.as_bytes(),
+            self.password_hash.as_bytes(),
+        ) == 1
+    }
+
+    /// Whether the account is locked at `now`: by an administrator, or by
+    /// failed attempts whose lockout has not run out (one that has is
+    /// cleared, with the failure count).
+    fn lock_active(&mut self, now: u64) -> bool {
+        match self.locked_until {
+            Some(until) if now < until => return true,
+            Some(_) => {
+                self.locked_until = None;
+                self.failed_attempts = 0;
+            }
+            None => {}
+        }
+        self.locked
     }
 
     /// Check if the account has expired.
@@ -605,6 +630,10 @@ pub struct AuthManager {
 
 impl AuthManager {
     /// Create new authentication manager
+    /// How long failed attempts lock an account (pam_faillock's default
+    /// unlock_time).
+    pub const LOCKOUT_SECS: u64 = 600;
+
     pub fn new() -> Self {
         Self {
             accounts: RwLock::new(AccountDatabase::new()),
@@ -677,11 +706,17 @@ impl AuthManager {
     ///
     /// Checks account lock, expiration, password, and MFA status.
     pub fn authenticate(&self, username: &str, password: &str) -> AuthResult {
+        self.authenticate_at(username, password, crate::arch::timer::get_timestamp_secs())
+    }
+
+    /// [`authenticate`](Self::authenticate) at time `now` (seconds since
+    /// boot).
+    fn authenticate_at(&self, username: &str, password: &str, now: u64) -> AuthResult {
         let mut accounts = self.accounts.write();
 
         if let Some(account) = accounts.get_mut(username) {
             // Check if account is locked
-            if account.locked {
+            if account.lock_active(now) {
                 // Log the failed attempt
                 crate::security::audit::log_auth_attempt(0, account.user_id, username, false);
                 return AuthResult::AccountLocked;
@@ -714,9 +749,9 @@ impl AuthManager {
                 // Log failed authentication
                 crate::security::audit::log_auth_attempt(0, account.user_id, username, false);
 
-                // Lock account if max attempts exceeded
+                // Lock account if max attempts exceeded, for a while
                 if account.failed_attempts >= self.max_failed_attempts {
-                    account.locked = true;
+                    account.locked_until = Some(now.saturating_add(Self::LOCKOUT_SECS));
                     return AuthResult::AccountLocked;
                 }
 
@@ -725,6 +760,37 @@ impl AuthManager {
         }
 
         AuthResult::InvalidCredentials
+    }
+
+    /// The state of an account without checking a password (PAM's account
+    /// management): `Success`, `AccountLocked`, `AccountExpired`, or
+    /// `InvalidCredentials` for no such account.
+    pub fn account_status(&self, username: &str) -> AuthResult {
+        let now = crate::arch::timer::get_timestamp_secs();
+        let mut accounts = self.accounts.write();
+        let Some(account) = accounts.get_mut(username) else {
+            return AuthResult::InvalidCredentials;
+        };
+        if account.lock_active(now) {
+            AuthResult::AccountLocked
+        } else if account.is_expired() {
+            AuthResult::AccountExpired
+        } else {
+            AuthResult::Success
+        }
+    }
+
+    /// Set a user's password without the old one (the administrator's
+    /// passwd): the policy and the reuse history still apply.
+    pub fn reset_password(&self, username: &str, new_password: &str) -> Result<(), KernelError> {
+        let policy = *self.password_policy.read();
+        policy.validate_password(new_password)?;
+        let mut accounts = self.accounts.write();
+        let account = accounts.get_mut(username).ok_or(KernelError::NotFound {
+            resource: "user",
+            id: 0,
+        })?;
+        account.change_password(new_password, policy.history_size)
     }
 
     /// Authenticate with MFA
@@ -824,6 +890,7 @@ impl AuthManager {
 
         if let Some(account) = accounts.get_mut(username) {
             account.locked = false;
+            account.locked_until = None;
             account.failed_attempts = 0;
             Ok(())
         } else {
@@ -916,6 +983,11 @@ pub fn init() -> Result<(), KernelError> {
     Ok(())
 }
 
+/// The global authentication manager, if initialized.
+pub fn try_auth_manager() -> Option<&'static AuthManager> {
+    AUTH_MANAGER.get()
+}
+
 /// Get global authentication manager
 pub fn get_auth_manager() -> &'static AuthManager {
     AUTH_MANAGER.get().expect("Auth manager not initialized")
@@ -975,6 +1047,52 @@ mod tests {
             auth.authenticate("bob", "password"),
             AuthResult::AccountLocked
         );
+    }
+
+    /// Failed attempts lock an account for LOCKOUT_SECS, not for good; an
+    /// administrator's lock stays.
+    #[test]
+    fn failure_lockout_runs_out() {
+        let auth = AuthManager::new();
+        let _ = auth.create_user("carol", "password");
+        for _ in 0..5 {
+            let _ = auth.authenticate_at("carol", "wrong", 100);
+        }
+        assert_eq!(
+            auth.authenticate_at("carol", "password", 100 + AuthManager::LOCKOUT_SECS - 1),
+            AuthResult::AccountLocked
+        );
+        assert_eq!(
+            auth.authenticate_at("carol", "password", 100 + AuthManager::LOCKOUT_SECS),
+            AuthResult::Success
+        );
+        // A fresh count: four failures do not lock it again.
+        for _ in 0..4 {
+            let _ = auth.authenticate_at("carol", "wrong", 1000);
+        }
+        assert_eq!(
+            auth.authenticate_at("carol", "password", 1000),
+            AuthResult::Success
+        );
+    }
+
+    #[test]
+    fn account_status_and_reset_password() {
+        let auth = AuthManager::new();
+        let _ = auth.create_user("dave", "password");
+        assert_eq!(auth.account_status("dave"), AuthResult::Success);
+        assert_eq!(
+            auth.account_status("nobody"),
+            AuthResult::InvalidCredentials
+        );
+        auth.reset_password("dave", "another-password").unwrap();
+        assert_eq!(
+            auth.authenticate("dave", "another-password"),
+            AuthResult::Success
+        );
+        // The account's rules still apply: the new password must differ.
+        assert!(auth.reset_password("dave", "another-password").is_err());
+        assert!(auth.reset_password("nobody", "x-password").is_err());
     }
 
     #[test]

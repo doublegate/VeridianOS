@@ -178,6 +178,7 @@
 #define SYS_getresgid                    120
 #define SYS_getgroups                    115
 #define SYS_setgroups                    116
+#define SYS_VERIDIAN_AUTH                1352
 /* Process groups and sessions */
 #define SYS_setpgid                      109
 #define SYS_getpgid                      121

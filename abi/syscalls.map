@@ -200,6 +200,7 @@ setresgid
 getresgid
 getgroups
 setgroups
+VeridianAuth            private 1352
 
 ## Process groups and sessions
 setpgid
