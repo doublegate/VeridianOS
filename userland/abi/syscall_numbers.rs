@@ -55,6 +55,7 @@ pub mod sysno {
     pub const SYS_clone3: usize = 435;
     pub const SYS_set_tid_address: usize = 218;
     pub const SYS_set_robust_list: usize = 273;
+    pub const SYS_get_robust_list: usize = 274;
     pub const SYS_rseq: usize = 334;
     pub const SYS_arch_prctl: usize = 158;
     pub const SYS_tkill: usize = 200;

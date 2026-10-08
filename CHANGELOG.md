@@ -21,6 +21,13 @@
   dynamically linked C++ program that throws, runs threads with `thread_local` destructors and
   `dlopen`s a C++ library.
 
+- **Robust mutexes recover when their owner dies (N-225).** set_robust_list stored the list per
+  process and nothing ever read it, so a process-shared robust mutex held by a thread that died
+  stayed locked for good. The list is now per thread and walked when the thread exits (for any
+  reason), as Linux does: mutexes it held are marked owner-died and a waiter is woken, so the
+  next locker gets EOWNERDEAD and can recover. get_robust_list is added. Runtime test
+  `musl_robust_futex`.
+
 - **flock waits, and its locks belong to open files (N-207).** flock without LOCK_NB failed with
   EWOULDBLOCK instead of waiting; it now sleeps until the lock is granted, or fails with EINTR
   for a signal. Locks were owned by the process, so two opens of one file in a process did not

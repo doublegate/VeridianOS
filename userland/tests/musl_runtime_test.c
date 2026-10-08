@@ -1488,6 +1488,76 @@ static void test_flock_blocking(void)
     unlink(path);
 }
 
+/* N-225: a robust, process-shared mutex whose owner dies holding it is
+ * handed to the next locker with EOWNERDEAD (the kernel walks the dead
+ * thread's robust list), including one already waiting for it; the list
+ * is per thread and get_robust_list reports it. */
+static void test_robust_futex(void)
+{
+    static char why[192];
+    int mfd = memfd_create("robust", 0);
+    pthread_mutex_t *m = MAP_FAILED;
+    if (mfd >= 0 && ftruncate(mfd, 4096) == 0)
+        m = mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, mfd, 0);
+    if (m == MAP_FAILED) {
+        report("musl_robust_futex", 0, "shared memory failed");
+        return;
+    }
+    pthread_mutexattr_t a;
+    pthread_mutexattr_init(&a);
+    pthread_mutexattr_setpshared(&a, PTHREAD_PROCESS_SHARED);
+    pthread_mutexattr_setrobust(&a, PTHREAD_MUTEX_ROBUST);
+    pthread_mutex_init(m, &a);
+
+    /* The child takes the lock and dies holding it; the parent is already
+     * waiting. */
+    int fds[2];
+    pipe(fds);
+    pid_t pid = fork();
+    if (pid == 0) {
+        pthread_mutex_lock(m);
+        (void)!write(fds[1], "L", 1);
+        struct timespec d = {0, 50000000};
+        nanosleep(&d, NULL);
+        _exit(0);
+    }
+    char c;
+    (void)!read(fds[0], &c, 1);
+    int r = pthread_mutex_lock(m);
+    int owner_dead = r == EOWNERDEAD;
+    int recovered = owner_dead && pthread_mutex_consistent(m) == 0 && pthread_mutex_unlock(m) == 0
+                    && pthread_mutex_lock(m) == 0 && pthread_mutex_unlock(m) == 0;
+    int status;
+    waitpid(pid, &status, 0);
+    /* musl registered the parent's list at its first robust lock. */
+    long head = 0, len = 0;
+    int listed = syscall(SYS_get_robust_list, 0, &head, &len) == 0 && head != 0 && len == 24;
+
+    /* Killed holding it (no waiter yet): the next lock is EOWNERDEAD. */
+    pid = fork();
+    if (pid == 0) {
+        pthread_mutex_lock(m);
+        (void)!write(fds[1], "L", 1);
+        for (;;)
+            pause();
+    }
+    (void)!read(fds[0], &c, 1);
+    kill(pid, SIGKILL);
+    waitpid(pid, &status, 0);
+    int r2 = pthread_mutex_lock(m);
+    int killed = r2 == EOWNERDEAD && pthread_mutex_consistent(m) == 0 && pthread_mutex_unlock(m) == 0;
+
+    errno = 0;
+    int bad_len = syscall(SYS_set_robust_list, head, 16) == -1 && errno == EINVAL;
+    snprintf(why, sizeof(why), "listed=%d (len %ld) lock=%d recovered=%d killed=%d (%d) bad_len=%d",
+             listed, len, r, recovered, killed, r2, bad_len);
+    report("musl_robust_futex", listed && owner_dead && recovered && killed && bad_len, why);
+    munmap(m, 4096);
+    close(mfd);
+    close(fds[0]);
+    close(fds[1]);
+}
+
 int main(int argc, char **argv)
 {
     test_auxv(argc > 0 ? argv[0] : NULL);
@@ -1520,6 +1590,7 @@ int main(int argc, char **argv)
     test_arch_prctl();
     test_tids();
     test_flock_blocking();
+    test_robust_futex();
     printf("MUSL-RUNTIME: %d/%d\n", passed, total);
     return passed == total ? 0 : 1;
 }

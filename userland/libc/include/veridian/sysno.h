@@ -64,6 +64,7 @@
 #define SYS_clone3                       435
 #define SYS_set_tid_address              218
 #define SYS_set_robust_list              273
+#define SYS_get_robust_list              274
 #define SYS_rseq                         334
 #define SYS_arch_prctl                   158
 #define SYS_tkill                        200

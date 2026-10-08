@@ -220,10 +220,6 @@ pub struct Process {
     /// User-space address to zero and futex-wake on thread exit
     /// (set by set_tid_address syscall, used by pthread_join).
     pub clear_child_tid: AtomicU64,
-
-    /// User-space address of robust futex list head
-    /// (set by set_robust_list syscall for cleanup on abnormal exit).
-    pub robust_list_head: AtomicU64,
 }
 
 /// Memory usage statistics
@@ -328,7 +324,6 @@ impl Process {
             tls_fs_base: AtomicU64::new(0),
             container_id: AtomicU64::new(0),
             clear_child_tid: AtomicU64::new(0),
-            robust_list_head: AtomicU64::new(0),
         }
     }
 
@@ -450,13 +445,6 @@ impl Process {
     /// pthread_join to detect thread completion.
     pub fn set_clear_child_tid(&self, addr: usize) {
         self.clear_child_tid.store(addr as u64, Ordering::Release);
-    }
-
-    /// Set user-space address of the robust futex list head.
-    /// Called by set_robust_list syscall; the kernel walks this list on
-    /// abnormal thread exit to unlock any held robust mutexes.
-    pub fn set_robust_list(&self, addr: usize) {
-        self.robust_list_head.store(addr as u64, Ordering::Release);
     }
 
     /// Get mutable reference to memory space

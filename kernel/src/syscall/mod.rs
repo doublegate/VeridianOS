@@ -1146,6 +1146,7 @@ fn handle_syscall(
         Syscall::MemfdCreate => sys_memfd_create(arg1, arg2),
         Syscall::SetTidAddress => sys_set_tid_address(arg1),
         Syscall::SetRobustList => sys_set_robust_list(arg1, arg2),
+        Syscall::GetRobustList => sys_get_robust_list(arg1, arg2, arg3),
         Syscall::ClockNanosleep => time::sys_clock_nanosleep(arg1, arg2, arg3, arg4),
         Syscall::Prctl => linux_compat::sys_prctl(arg1, arg2),
         Syscall::Flock => sys_flock(arg1, arg2),
@@ -1796,30 +1797,55 @@ fn sys_set_tid_address(tidptr: usize) -> SyscallResult {
     Ok(tid)
 }
 
-/// set_robust_list syscall -- register robust futex list head for cleanup on
-/// abnormal thread termination.
-///
-/// musl calls this during thread initialization. If a thread holding a
-/// robust futex dies, the kernel walks the list and marks the futexes as
-/// owner-died (FUTEX_OWNER_DIED) so waiting threads can recover.
-///
-/// # Arguments
-/// - `head_ptr`: Pointer to `struct robust_list_head` in user space.
-/// - `len`: Size of the structure (must match kernel expectation).
-///
-/// # Returns
-/// 0 on success.
+/// set_robust_list(head, len): the calling thread's robust futex list,
+/// walked when it exits (N-225). `len` must be
+/// `sizeof(struct robust_list_head)`; the pointer is only stored, as Linux
+/// does (a bad one ends the walk).
 fn sys_set_robust_list(head_ptr: usize, len: usize) -> SyscallResult {
-    // Expected size: 3 * sizeof(void*) = 24 bytes on 64-bit
-    if len != 24 {
+    use crate::process::robust_list::ROBUST_LIST_HEAD_SIZE;
+    if len != ROBUST_LIST_HEAD_SIZE {
         return Err(SyscallError::InvalidArgument);
     }
-    if head_ptr != 0 {
-        validate_user_pointer(head_ptr, len)?;
-    }
+    let thread = crate::process::current_thread().ok_or(SyscallError::InvalidState)?;
+    thread
+        .robust_list
+        .store(head_ptr, core::sync::atomic::Ordering::Release);
+    Ok(0)
+}
 
-    let proc = crate::process::current_process().ok_or(SyscallError::InvalidState)?;
-    proc.set_robust_list(head_ptr);
+/// get_robust_list(tid, head_ptr, len_ptr): the robust list of the thread
+/// `tid` (0: the caller), for a caller allowed to trace it (ESRCH, EPERM).
+fn sys_get_robust_list(tid: usize, head_out: usize, len_out: usize) -> SyscallResult {
+    use crate::process::robust_list::ROBUST_LIST_HEAD_SIZE;
+    let tid = tid as u32 as i32;
+    let head = if tid == 0 {
+        let thread = crate::process::current_thread().ok_or(SyscallError::InvalidState)?;
+        thread
+            .robust_list
+            .load(core::sync::atomic::Ordering::Acquire)
+    } else {
+        if tid < 0 {
+            return Err(SyscallError::ProcessNotFound);
+        }
+        let caller = crate::process::current_process().ok_or(SyscallError::InvalidState)?;
+        let mut found = None;
+        crate::process::table::PROCESS_TABLE.for_each(|p| {
+            if found.is_none() {
+                if let Some(t) = p.get_thread(crate::process::ThreadId(tid as u64)) {
+                    found = Some((p.credentials(), t));
+                }
+            }
+        });
+        let (target_creds, thread) = found.ok_or(SyscallError::ProcessNotFound)?;
+        if !debug::may_access(&caller.credentials(), &target_creds) {
+            return Err(SyscallError::OperationNotPermitted);
+        }
+        thread
+            .robust_list
+            .load(core::sync::atomic::Ordering::Acquire)
+    };
+    userspace::write_user(head_out, head as u64)?;
+    userspace::write_user(len_out, ROBUST_LIST_HEAD_SIZE as u64)?;
     Ok(0)
 }
 

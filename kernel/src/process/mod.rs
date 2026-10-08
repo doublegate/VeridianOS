@@ -31,6 +31,7 @@ pub mod fork;
 pub mod lifecycle;
 pub mod memory;
 pub mod pcb;
+pub mod robust_list;
 pub mod session;
 pub mod signal_delivery;
 pub mod signals;
@@ -454,8 +455,11 @@ pub fn exit_thread(exit_code: i32) {
             thread.tid.0, exit_code
         );
 
-        // Handle CLONE_CHILD_CLEARTID first, while the thread is intact:
-        // clear *clear_tid and wake one futex waiter (best effort).
+        // Robust futexes the thread still holds (N-225), then
+        // CLONE_CHILD_CLEARTID, while the thread is intact: clear
+        // *clear_tid and wake one futex waiter (best effort).
+        #[cfg(feature = "alloc")]
+        robust_list::exit_thread(&thread);
         let clear_ptr = thread.clear_tid.load(core::sync::atomic::Ordering::Acquire);
         if clear_ptr != 0 {
             let _ = crate::syscall::userspace::write_user(clear_ptr, 0u32);

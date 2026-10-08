@@ -78,6 +78,7 @@ clone
 clone3
 set_tid_address
 set_robust_list
+get_robust_list
 rseq
 arch_prctl
 tkill

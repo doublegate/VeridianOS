@@ -206,19 +206,27 @@ fn may_attach(
     target: &process::creds::Credentials,
     target_tracer: u64,
 ) -> Result<(), SyscallError> {
-    if target_pid == caller_pid || target_tracer != 0 {
+    if target_pid == caller_pid || target_tracer != 0 || !may_access(caller, target) {
         return Err(SyscallError::OperationNotPermitted);
     }
+    Ok(())
+}
+
+/// Linux `ptrace_may_access` without capabilities: root, or the target's
+/// real, effective and saved IDs are all the caller's real ones (so a
+/// setuid program running privileged is out of reach). Also guards
+/// get_robust_list.
+pub(super) fn may_access(
+    caller: &process::creds::Credentials,
+    target: &process::creds::Credentials,
+) -> bool {
     let same_user = [target.ruid, target.euid, target.suid]
         .iter()
         .all(|&id| id == caller.ruid)
         && [target.rgid, target.egid, target.sgid]
             .iter()
             .all(|&id| id == caller.rgid);
-    if caller.euid != 0 && !same_user {
-        return Err(SyscallError::OperationNotPermitted);
-    }
-    Ok(())
+    caller.euid == 0 || same_user
 }
 
 /// The process `pid` if the caller is its tracer; ESRCH otherwise, as

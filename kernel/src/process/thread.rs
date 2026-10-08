@@ -420,6 +420,9 @@ pub struct Thread {
     /// The alternate signal stack (sigaltstack; N-222). A new thread has
     /// none; fork copies the parent thread's.
     pub altstack: Mutex<super::signals::SigAltStack>,
+    /// The robust futex list head (set_robust_list; N-225), walked when the
+    /// thread exits. A new thread has none; exec clears it.
+    pub robust_list: AtomicUsize,
     /// Detached flag (pthread_detach)
     pub detached: AtomicBool,
     /// Filesystem view (cwd, umask)
@@ -539,6 +542,7 @@ impl Thread {
             saved_sigmask: AtomicU64::new(0),
             has_saved_sigmask: AtomicBool::new(false),
             altstack: Mutex::new(super::signals::SigAltStack::default()),
+            robust_list: AtomicUsize::new(0),
             detached: AtomicBool::new(false),
             fs,
         }

@@ -574,6 +574,10 @@ pub fn exec_process(path: &str, argv: &[&str], envp: &[&str]) -> Result<(), Kern
     // stack (it was in the old image), as Linux does.
     process.reset_signal_handlers();
     *current_thread.altstack.lock() = super::signals::SigAltStack::default();
+    // The robust list was in the old image too (N-225).
+    current_thread
+        .robust_list
+        .store(0, core::sync::atomic::Ordering::Release);
 
     // The image is replaced: a parent waiting in vfork may run again; the
     // memory it shared with this process is no longer this process's.
