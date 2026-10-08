@@ -572,10 +572,28 @@ jobs:
                   key: ${{ steps.toolchain-cache.outputs.cache-primary-key }}
             - name: Build kernel
               run: ./build-kernel.sh x86_64 dev
-            # The patched musl (as KDE uses) for musl_runtime_test, so musl's
-            # syscall remapping is exercised and not only the native libc.
-            - name: Build patched musl
+            # musl and the musl cross toolchain the KDE pipeline compiles
+            # with, for musl_runtime_test (a static PIE, ADR 0010), so the
+            # musl start-up path and not only the native libc is exercised.
+            # The toolchain takes ~25 minutes; it is cached, and the script
+            # only rebuilds it when its stamp (sources, build steps, musl)
+            # differs.
+            - name: Build musl
               run: ./tools/cross/build-musl.sh
+            - name: Restore musl toolchain
+              id: musl-toolchain-cache
+              uses: actions/cache/restore@v4
+              with:
+                  path: /opt/veridian/musl-toolchain
+                  key: veridian-musl-toolchain-${{ hashFiles('tools/cross/build-musl-toolchain.sh', 'tools/cross/build-musl.sh', 'tools/cross/musl-patches/**', 'tools/cross/veridian-paths.sh', 'scripts/build-cross-toolchain.sh') }}
+            - name: Build musl toolchain
+              run: ./tools/cross/build-musl-toolchain.sh
+            - name: Save musl toolchain
+              if: steps.musl-toolchain-cache.outputs.cache-hit != 'true'
+              uses: actions/cache/save@v4
+              with:
+                  path: /opt/veridian/musl-toolchain
+                  key: ${{ steps.musl-toolchain-cache.outputs.cache-primary-key }}
             - name: Build BusyBox rootfs
               run: |
                   export PATH=/opt/veridian/toolchain/bin:$PATH

@@ -1,3 +1,4 @@
+# shellcheck shell=bash
 # Where the cross-built artifacts live. Sourced by every tools/cross script.
 #
 # Deliberately NOT under target/: Cargo owns that directory and `cargo clean`
@@ -8,6 +9,8 @@
 # Each location can be overridden from the environment.
 
 VERIDIAN_PREFIX="${VERIDIAN_PREFIX:-/opt/veridian}"
+# This directory (the build scripts, toolchain files and patches).
+VERIDIAN_CROSS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # musl libc plus every library the KDE stack installs. (Not
 # /opt/veridian/sysroot/<arch>: that is the generic toolchain/ files' layout.)
 VERIDIAN_SYSROOT="${VERIDIAN_SYSROOT:-${VERIDIAN_PREFIX}/musl-sysroot}"
@@ -17,5 +20,29 @@ VERIDIAN_CROSS_BUILD="${VERIDIAN_CROSS_BUILD:-${VERIDIAN_PREFIX}/cross-build}"
 # rebuild never downloads again.
 VERIDIAN_SOURCES="${VERIDIAN_SOURCES:-${VERIDIAN_PREFIX}/sources}"
 
-export VERIDIAN_PREFIX VERIDIAN_SYSROOT VERIDIAN_CROSS_BUILD VERIDIAN_SOURCES
+# The cross toolchain every phase after musl compiles with
+# (build-musl-toolchain.sh): GCC and binutils for this triple, with
+# libstdc++ built for the musl in the sysroot.
+VERIDIAN_TARGET="${VERIDIAN_TARGET:-x86_64-veridian-linux-musl}"
+VERIDIAN_TOOLCHAIN="${VERIDIAN_TOOLCHAIN:-${VERIDIAN_PREFIX}/musl-toolchain}"
+VERIDIAN_CC="${VERIDIAN_TOOLCHAIN}/bin/${VERIDIAN_TARGET}-gcc"
+VERIDIAN_CXX="${VERIDIAN_TOOLCHAIN}/bin/${VERIDIAN_TARGET}-g++"
+
+# Programs the build runs on the host (code generators such as
+# wayland-scanner), apart from the target sysroot. Native meson
+# dependencies (dependency(..., native: true)) see its .pc files.
+VERIDIAN_HOST_TOOLS="${VERIDIAN_HOST_TOOLS:-${VERIDIAN_PREFIX}/host-tools}"
+
+export VERIDIAN_PREFIX VERIDIAN_CROSS_DIR VERIDIAN_SYSROOT VERIDIAN_HOST_TOOLS VERIDIAN_CROSS_BUILD VERIDIAN_SOURCES
+export VERIDIAN_TARGET VERIDIAN_TOOLCHAIN VERIDIAN_CC VERIDIAN_CXX
+# Autotools finds ${VERIDIAN_TARGET}-ar, -ranlib, -strip and the rest by
+# name on PATH.
+for _veridian_bin in "${VERIDIAN_TOOLCHAIN}/bin" "${VERIDIAN_HOST_TOOLS}/bin"; do
+    case ":${PATH}:" in
+        *":${_veridian_bin}:"*) ;;
+        *) export PATH="${_veridian_bin}:${PATH}" ;;
+    esac
+done
+unset _veridian_bin
+export PKG_CONFIG_PATH_FOR_BUILD="${VERIDIAN_HOST_TOOLS}/lib/pkgconfig:${VERIDIAN_HOST_TOOLS}/share/pkgconfig"
 mkdir -p "${VERIDIAN_SOURCES}" "${VERIDIAN_CROSS_BUILD}"

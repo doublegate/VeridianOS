@@ -454,15 +454,16 @@ phase_rootfs() {
         exit 1
     fi
 
-    # The same kind of checks for programs built against the patched musl
-    # (as KDE is), so musl's syscall remapping is exercised too. Built when
-    # the musl sysroot exists (tools/cross/build-musl.sh).
-    # The musl sysroot of tools/cross (veridian-paths.sh).
-    local musl_sysroot="${VERIDIAN_SYSROOT:-/opt/veridian/musl-sysroot}"
-    local musl_cc="${musl_sysroot}/bin/x86_64-veridian-musl-gcc"
-    if [ -x "$musl_cc" ] && [ -f "${musl_sysroot}/usr/lib/libc.a" ]; then
+    # The same kind of checks for programs built against musl, with the
+    # toolchain KDE is built with (tools/cross/build-musl.sh, then
+    # build-musl-toolchain.sh; paths from tools/cross/veridian-paths.sh).
+    local musl_cc
+    musl_cc="$(source "${PROJECT_ROOT}/tools/cross/veridian-paths.sh" && echo "$VERIDIAN_CC")"
+    if [ -x "$musl_cc" ]; then
         echo -n "    musl_runtime_test... "
-        if "$musl_cc" -O2 -Wall -Wextra -o "$BUILD_DIR/bin/musl_runtime_test" \
+        # Static: the toolchain links dynamically by default, and the root
+        # filesystem has no dynamic loader yet.
+        if "$musl_cc" -static -O2 -Wall -Wextra -o "$BUILD_DIR/bin/musl_runtime_test" \
                 "${TESTS_DIR}/musl_runtime_test.c" 2>&1; then
             echo "OK"
         else
@@ -470,7 +471,7 @@ phase_rootfs() {
             exit 1
         fi
     else
-        echo "    musl_runtime_test... skipped (no musl sysroot; run tools/cross/build-musl.sh)"
+        echo "    musl_runtime_test... skipped (no musl toolchain; run tools/cross/build-musl.sh and build-musl-toolchain.sh)"
     fi
 
     # Copy source files for native compilation on VeridianOS

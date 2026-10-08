@@ -3,17 +3,22 @@
 #
 # This script downloads and cross-compiles musl libc 1.2.6 with the patches
 # in musl-patches/ (no syscall patch since ADR 0009: the kernel speaks the
-# Linux ABI)
-# to produce a static libc.a and C headers in the sysroot.
+# Linux ABI): the C library, static and shared, its dynamic loader, and the
+# C headers, in the sysroot.
 #
 # Prerequisites:
 #   - GCC cross-compiler (x86_64-linux-musl or host gcc for static target)
 #   - curl (or wget) for downloading source
 #
-# Output:
-#   $SYSROOT/usr/lib/libc.a
-#   $SYSROOT/usr/include/ (POSIX headers)
-#   $SYSROOT/bin/x86_64-veridian-musl-gcc (wrapper script)
+# Output (installed for /usr, staged into the sysroot):
+#   $SYSROOT/usr/lib/libc.a, libc.so and the crt objects
+#   $SYSROOT/lib/ld-musl-x86_64.so.1 (the dynamic loader: a link to
+#     /usr/lib/libc.so, which is both; ADR 0010)
+#   $SYSROOT/usr/include/ (C library and Linux UAPI headers)
+#   $SYSROOT/.musl-stamp (what this musl was built from)
+#
+# The host GCC builds musl itself (musl needs no C library to build);
+# build-musl-toolchain.sh then builds the cross compiler against it.
 
 set -euo pipefail
 
@@ -21,7 +26,6 @@ MUSL_VERSION="1.2.6"
 MUSL_URL="https://musl.libc.org/releases/musl-${MUSL_VERSION}.tar.gz"
 MUSL_SHA256="d585fd3b613c66151fc3249e8ed44f77020cb5e6c1e635a616d3f9f82460512a"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 # shellcheck source=veridian-paths.sh
 source "${SCRIPT_DIR}/veridian-paths.sh"
 BUILD_DIR="${VERIDIAN_CROSS_BUILD}/musl"
@@ -29,8 +33,7 @@ SYSROOT="${VERIDIAN_SYSROOT}"
 PATCH_DIR="${SCRIPT_DIR}/musl-patches"
 JOBS="${JOBS:-$(nproc)}"
 
-# Host GCC for cross-compilation. If a musl cross-compiler is available,
-# prefer it; otherwise fall back to the system gcc targeting x86_64.
+# musl is freestanding code: the host GCC builds it for x86_64.
 CROSS_CC="${CROSS_CC:-gcc}"
 
 log() { echo "[build-musl] $*"; }
@@ -91,6 +94,7 @@ extract_musl() {
         rm -rf "${src}" "${BUILD_DIR}/build"
     fi
     log "Extracting..."
+    mkdir -p "${BUILD_DIR}"
     tar -xzf "${VERIDIAN_SOURCES}/musl-${MUSL_VERSION}.tar.gz" -C "${BUILD_DIR}"
 }
 
@@ -112,9 +116,6 @@ patch_musl() {
         done
     fi
 
-    # Generate syscall number remapping header.
-    # musl uses Linux syscall numbers from arch/x86_64/bits/syscall.h.in.
-    # We create an overlay that redefines the critical ones to VeridianOS numbers.
     patch_stamp > "${marker}"
     log "Patches applied."
 }
@@ -129,14 +130,19 @@ configure_musl() {
     fi
     mkdir -p "${build}"
     log "Configuring musl for VeridianOS..."
+    # For /usr on the target, staged into the sysroot by install_musl, with
+    # the dynamic loader in /lib (where every dynamically linked program
+    # asks for it). No musl-gcc wrapper: the cross toolchain is built
+    # against this sysroot.
     (cd "${build}" && \
         "${src}/configure" \
-            --prefix="${SYSROOT}/usr" \
-            --syslibdir="${SYSROOT}/usr/lib" \
-            --disable-shared \
+            --prefix=/usr \
+            --syslibdir=/lib \
+            --enable-shared \
             --enable-static \
+            --disable-wrapper \
             CC="${CROSS_CC}" \
-            CFLAGS="-O2 -fPIC -DVERIDIAN_OS=1" \
+            CFLAGS="-O2 -fPIC" \
     )
 }
 
@@ -152,10 +158,10 @@ install_musl() {
     local build="${BUILD_DIR}/build"
     log "Installing to ${SYSROOT}..."
     mkdir -p "${SYSROOT}/usr"
-    make -C "${build}" install
-
-    # Create the musl-gcc wrapper script
-    create_wrapper
+    make -C "${build}" install DESTDIR="${SYSROOT}"
+    # What this musl is, next to it (the build tree is disposable): the
+    # cross toolchain rebuilds when it changes.
+    patch_stamp > "${SYSROOT}/.musl-stamp"
 }
 
 # ── Linux UAPI headers ────────────────────────────────────────────────
@@ -178,155 +184,33 @@ install_linux_headers() {
     done
 }
 
-# ── Wrapper Scripts ───────────────────────────────────────────────────
-create_wrapper() {
-    local gcc_wrapper="${SYSROOT}/bin/x86_64-veridian-musl-gcc"
-    local gxx_wrapper="${SYSROOT}/bin/x86_64-veridian-musl-g++"
-    local compat_dir="${SCRIPT_DIR}/musl-compat"
-    mkdir -p "${SYSROOT}/bin"
-
-    # Detect GCC version and internal include path
-    local gcc_ver
-    gcc_ver=$(${CROSS_CC} -dumpversion 2>/dev/null || echo "15.2.1")
-    local gcc_dir="/usr/lib/gcc/x86_64-pc-linux-gnu/${gcc_ver}"
-    if [[ ! -d "${gcc_dir}" ]]; then
-        # Try common alternative paths
-        gcc_dir=$(${CROSS_CC} -print-search-dirs 2>/dev/null | grep install | awk '{print $2}' || echo "/usr/lib/gcc/x86_64-pc-linux-gnu/${gcc_ver}")
-    fi
-
-    # ── C wrapper ────────────────────────────────────────────────
-    cat > "${gcc_wrapper}" << 'WRAPPER'
-#!/usr/bin/env bash
-# musl-gcc wrapper for VeridianOS cross-compilation
-SYSROOT="$(cd "$(dirname "$0")/.." && pwd)"
-GCC_DIR="PLACEHOLDER_GCC_DIR"
-
-COMPILE_ONLY=0
-SHARED=0
-for arg in "$@"; do
-    case "$arg" in
-        -c|-S|-E) COMPILE_ONLY=1 ;;
-        -shared) SHARED=1 ;;
-    esac
-done
-
-if [[ $COMPILE_ONLY -eq 1 ]]; then
-    exec gcc --sysroot="${SYSROOT}" -nostdinc \
-        -isystem "${GCC_DIR}/include" \
-        -isystem "${SYSROOT}/usr/include" \
-        -static "$@"
-elif [[ $SHARED -eq 1 ]]; then
-    exec gcc --sysroot="${SYSROOT}" -nostdinc \
-        -isystem "${GCC_DIR}/include" \
-        -isystem "${SYSROOT}/usr/include" \
-        -L"${SYSROOT}/usr/lib" -nostdlib "$@" -lc
-else
-    exec gcc --sysroot="${SYSROOT}" -nostdinc \
-        -isystem "${GCC_DIR}/include" \
-        -isystem "${SYSROOT}/usr/include" \
-        -L"${SYSROOT}/usr/lib" -static -nostdlib \
-        "${SYSROOT}/usr/lib/crt1.o" "${SYSROOT}/usr/lib/crti.o" \
-        "$@" -lc "${SYSROOT}/usr/lib/crtn.o"
-fi
-WRAPPER
-    sed -i "s|PLACEHOLDER_GCC_DIR|${gcc_dir}|" "${gcc_wrapper}"
-    chmod +x "${gcc_wrapper}"
-
-    # ── C++ wrapper ──────────────────────────────────────────────
-    cat > "${gxx_wrapper}" << 'WRAPPER'
-#!/usr/bin/env bash
-# musl-g++ wrapper for VeridianOS cross-compilation
-# Uses system GCC's libstdc++ with musl libc + glibc shim for missing symbols
-GCC_DIR="PLACEHOLDER_GCC_DIR"
-GCC_VER="PLACEHOLDER_GCC_VER"
-SYSROOT="$(cd "$(dirname "$0")/.." && pwd)"
-
-COMPILE_ONLY=0
-SHARED=0
-for arg in "$@"; do
-    case "$arg" in
-        -c|-S|-E) COMPILE_ONLY=1 ;;
-        -shared) SHARED=1 ;;
-    esac
-done
-
-COMMON_FLAGS=(
-    -nostdinc
-    -include "${SYSROOT}/usr/include/compat/glibc_compat.h"
-    -isystem /usr/include/c++/${GCC_VER}
-    -isystem /usr/include/c++/${GCC_VER}/x86_64-pc-linux-gnu
-    -isystem ${GCC_DIR}/include
-    -isystem ${GCC_DIR}/include-fixed
-    -isystem "${SYSROOT}/usr/include"
-)
-
-if [[ $COMPILE_ONLY -eq 1 ]]; then
-    exec g++ "${COMMON_FLAGS[@]}" "$@"
-elif [[ $SHARED -eq 1 ]]; then
-    exec g++ "${COMMON_FLAGS[@]}" -nostdlib \
-        -L"${SYSROOT}/usr/lib" -L/usr/lib "$@" \
-        -lstdc++ -lglibc_shim -lc -lpthread -lgcc -lgcc_eh \
-        -lpthread -lc -lglibc_shim
-else
-    exec g++ "${COMMON_FLAGS[@]}" -static -nostdlib \
-        "${SYSROOT}/usr/lib/crt1.o" "${SYSROOT}/usr/lib/crti.o" \
-        -L"${SYSROOT}/usr/lib" -L/usr/lib "$@" \
-        -lstdc++ -lglibc_shim -lc -lpthread -lgcc -lgcc_eh \
-        -lpthread -lc -lglibc_shim "${SYSROOT}/usr/lib/crtn.o"
-fi
-WRAPPER
-    sed -i "s|PLACEHOLDER_GCC_DIR|${gcc_dir}|" "${gxx_wrapper}"
-    sed -i "s|PLACEHOLDER_GCC_VER|${gcc_ver}|" "${gxx_wrapper}"
-    chmod +x "${gxx_wrapper}"
-
-    # ── Install glibc compat files ───────────────────────────────
-    if [[ -d "${compat_dir}" ]]; then
-        mkdir -p "${SYSROOT}/usr/include/compat"
-        cp "${compat_dir}/glibc_compat.h" "${SYSROOT}/usr/include/compat/"
-        cp "${compat_dir}/glibc_shim.c" "${SYSROOT}/usr/lib/"
-
-        # Compile the glibc shim
-        "${gcc_wrapper}" -c -O2 -fPIC \
-            -o "${SYSROOT}/usr/lib/glibc_shim.o" \
-            "${SYSROOT}/usr/lib/glibc_shim.c"
-        ar rcs "${SYSROOT}/usr/lib/libglibc_shim.a" \
-            "${SYSROOT}/usr/lib/glibc_shim.o"
-        log "Installed glibc compat shim."
-    fi
-
-    # Also create convenience symlinks for common tools
-    for tool in ar ranlib strip objdump; do
-        if command -v "x86_64-linux-musl-${tool}" &>/dev/null; then
-            ln -sf "$(command -v "x86_64-linux-musl-${tool}")" \
-                "${SYSROOT}/bin/x86_64-veridian-${tool}"
-        elif command -v "${tool}" &>/dev/null; then
-            ln -sf "$(command -v "${tool}")" \
-                "${SYSROOT}/bin/x86_64-veridian-${tool}"
-        fi
-    done
-
-    log "Wrapper scripts: ${gcc_wrapper}, ${gxx_wrapper}"
-}
-
 # ── Verify ────────────────────────────────────────────────────────────
 verify_install() {
     log "Verifying installation..."
     local errors=0
     for f in \
         "${SYSROOT}/usr/lib/libc.a" \
+        "${SYSROOT}/usr/lib/libc.so" \
         "${SYSROOT}/usr/include/stdio.h" \
         "${SYSROOT}/usr/include/stdlib.h" \
         "${SYSROOT}/usr/include/unistd.h" \
         "${SYSROOT}/usr/include/pthread.h" \
         "${SYSROOT}/usr/include/sys/socket.h" \
         "${SYSROOT}/usr/include/sys/epoll.h" \
-        "${SYSROOT}/bin/x86_64-veridian-musl-gcc" \
+        "${SYSROOT}/usr/include/linux/limits.h" \
+        "${SYSROOT}/usr/lib/crt1.o" \
     ; do
         if [[ ! -f "$f" ]]; then
             log "  MISSING: $f"
             errors=$((errors + 1))
         fi
     done
+
+    # The loader is a link to libc.so, absolute as on the target.
+    if [[ "$(readlink "${SYSROOT}/lib/ld-musl-x86_64.so.1")" != "/usr/lib/libc.so" ]]; then
+        log "  MISSING: ${SYSROOT}/lib/ld-musl-x86_64.so.1 -> /usr/lib/libc.so"
+        errors=$((errors + 1))
+    fi
 
     if [[ $errors -eq 0 ]]; then
         log "All files present. musl libc ready."
