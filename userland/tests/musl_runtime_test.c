@@ -19,6 +19,7 @@
 #include <grp.h>
 #include <sys/stat.h>
 #include <poll.h>
+#include <sys/epoll.h>
 #include <sys/eventfd.h>
 #include <stdint.h>
 #include <pthread.h>
@@ -1116,6 +1117,151 @@ static void test_signalfd(void)
     close(bfd);
 }
 
+/* N-234, N-245: epoll follows Linux -- its errors, registrations that
+ * live as long as the open file (not the descriptor number), edge-triggered
+ * and one-shot reports, nested epoll files, and epoll_pwait/epoll_pwait2/
+ * ppoll with a signal mask for the wait. */
+static volatile sig_atomic_t epoll_sig_seen;
+static void epoll_on_usr1(int sig)
+{
+    (void)sig;
+    epoll_sig_seen = 1;
+}
+
+static void test_epoll(void)
+{
+    static char why[256];
+    struct epoll_event e = {EPOLLIN, {.u64 = 0}}, out[4];
+
+    /* Errors. */
+    errno = 0;
+    int e_flags = epoll_create1(1) == -1 && errno == EINVAL;
+    errno = 0;
+    int e_size = syscall(SYS_epoll_create, 0) == -1 && errno == EINVAL;
+    int ep = epoll_create1(EPOLL_CLOEXEC);
+    int regular = open("/tmp/musl_epoll_file", O_CREAT | O_RDWR | O_TRUNC, 0644);
+    int p[2];
+    pipe(p);
+    errno = 0;
+    int e_perm = epoll_ctl(ep, EPOLL_CTL_ADD, regular, &e) == -1 && errno == EPERM;
+    errno = 0;
+    int e_self = epoll_ctl(ep, EPOLL_CTL_ADD, ep, &e) == -1 && errno == EINVAL;
+    errno = 0;
+    int e_notep = epoll_ctl(p[0], EPOLL_CTL_ADD, p[1], &e) == -1 && errno == EINVAL;
+    errno = 0;
+    int e_noent = epoll_ctl(ep, EPOLL_CTL_MOD, p[0], &e) == -1 && errno == ENOENT;
+    int added = epoll_ctl(ep, EPOLL_CTL_ADD, p[0], &e) == 0;
+    errno = 0;
+    int e_exist = epoll_ctl(ep, EPOLL_CTL_ADD, p[0], &e) == -1 && errno == EEXIST;
+    errno = 0;
+    int e_badf = epoll_ctl(ep, EPOLL_CTL_DEL, 999, &e) == -1 && errno == EBADF;
+    errno = 0;
+    int e_wait = epoll_wait(p[0], out, 4, 0) == -1 && errno == EINVAL;
+    int errors = e_flags && e_size && e_perm && e_self && e_notep && e_noent && added && e_exist
+                 && e_badf && e_wait;
+    epoll_ctl(ep, EPOLL_CTL_DEL, p[0], NULL);
+
+    /* A registration lives as long as the open file: a duplicate keeps it
+     * reporting after the registered number is closed. */
+    int d = dup(p[0]);
+    e.events = EPOLLIN;
+    e.data.u64 = 77;
+    epoll_ctl(ep, EPOLL_CTL_ADD, p[0], &e);
+    close(p[0]);
+    (void)!write(p[1], "x", 1);
+    int n = epoll_wait(ep, out, 4, 0);
+    int survives = n == 1 && out[0].data.u64 == 77;
+    /* Still readable when its last descriptor closes: nothing reports. */
+    close(d);
+    int gone = epoll_wait(ep, out, 4, 0) == 0;
+    char c;
+    close(p[1]);
+
+    /* Edge-triggered: an always-writable pipe end reports once. */
+    pipe(p);
+    e.events = EPOLLOUT | EPOLLET;
+    epoll_ctl(ep, EPOLL_CTL_ADD, p[1], &e);
+    int et = epoll_wait(ep, out, 4, 0) == 1 && epoll_wait(ep, out, 4, 0) == 0;
+    epoll_ctl(ep, EPOLL_CTL_DEL, p[1], NULL);
+    /* One-shot: once, until re-armed. */
+    e.events = EPOLLOUT | EPOLLONESHOT;
+    epoll_ctl(ep, EPOLL_CTL_ADD, p[1], &e);
+    int os = epoll_wait(ep, out, 4, 0) == 1 && epoll_wait(ep, out, 4, 0) == 0
+             && epoll_ctl(ep, EPOLL_CTL_MOD, p[1], &e) == 0 && epoll_wait(ep, out, 4, 0) == 1;
+    epoll_ctl(ep, EPOLL_CTL_DEL, p[1], NULL);
+
+    /* Nested: an epoll file watching another is readable when it is. */
+    int inner = epoll_create1(0);
+    e.events = EPOLLIN;
+    epoll_ctl(inner, EPOLL_CTL_ADD, p[0], &e);
+    e.data.u64 = 5;
+    epoll_ctl(ep, EPOLL_CTL_ADD, inner, &e);
+    int nested_idle = epoll_wait(ep, out, 4, 0) == 0;
+    (void)!write(p[1], "z", 1);
+    int nested = nested_idle && epoll_wait(ep, out, 4, 0) == 1 && out[0].data.u64 == 5;
+    errno = 0;
+    int loop = epoll_ctl(inner, EPOLL_CTL_ADD, ep, &e) == -1 && errno == ELOOP;
+    epoll_ctl(ep, EPOLL_CTL_DEL, inner, NULL);
+    close(inner);
+    (void)!read(p[0], &c, 1);
+
+    /* epoll_pwait2: a timespec timeout. */
+    struct timespec ts = {0, 30000000};
+    long long t0 = mono_ns();
+    int pw2 = syscall(SYS_epoll_pwait2, ep, out, 4, &ts, NULL, 8) == 0
+              && (mono_ns() - t0) / 1000000 >= 25;
+
+    /* The wait's signal mask: SIGUSR1 is blocked, pending, and let through
+     * only for the wait; the handler runs, the call is EINTR, and SIGUSR1
+     * is blocked again afterwards. */
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = epoll_on_usr1;
+    sigaction(SIGUSR1, &sa, NULL);
+    sigset_t usr1, none, now;
+    sigemptyset(&usr1);
+    sigaddset(&usr1, SIGUSR1);
+    sigemptyset(&none);
+    sigprocmask(SIG_BLOCK, &usr1, NULL);
+    kill(getpid(), SIGUSR1);
+    int still_pending = !epoll_sig_seen;
+    errno = 0;
+    int pw = epoll_pwait(ep, out, 4, 1000, &none) == -1 && errno == EINTR && epoll_sig_seen;
+    sigprocmask(SIG_BLOCK, NULL, &now);
+    int restored = sigismember(&now, SIGUSR1) == 1;
+    /* The same through ppoll. */
+    epoll_sig_seen = 0;
+    kill(getpid(), SIGUSR1);
+    struct pollfd pfd = {p[0], POLLIN, 0};
+    struct timespec second = {1, 0};
+    errno = 0;
+    int pp = ppoll(&pfd, 1, &second, &none) == -1 && errno == EINTR && epoll_sig_seen;
+    sigprocmask(SIG_BLOCK, NULL, &now);
+    pp = pp && sigismember(&now, SIGUSR1) == 1;
+    /* sigsetsize must be 8. */
+    errno = 0;
+    int bad_size = syscall(SYS_epoll_pwait, ep, out, 4, 0, &none, 4) == -1 && errno == EINVAL;
+    sigprocmask(SIG_UNBLOCK, &usr1, NULL);
+    sa.sa_handler = SIG_DFL;
+    sigaction(SIGUSR1, &sa, NULL);
+
+    snprintf(why, sizeof(why),
+             "errors=%d (%d%d%d%d%d%d%d%d%d%d) survives=%d gone=%d et=%d oneshot=%d nested=%d "
+             "eloop=%d pwait2=%d pwait=%d/%d/%d ppoll=%d sigsetsize=%d",
+             errors, e_flags, e_size, e_perm, e_self, e_notep, e_noent, added, e_exist, e_badf,
+             e_wait, survives, gone, et, os, nested, loop, pw2, still_pending, pw, restored, pp,
+             bad_size);
+    report("musl_epoll",
+           errors && survives && gone && et && os && nested && loop && pw2 && still_pending && pw
+               && restored && pp && bad_size,
+           why);
+    close(p[0]);
+    close(p[1]);
+    close(ep);
+    close(regular);
+    unlink("/tmp/musl_epoll_file");
+}
+
 int main(int argc, char **argv)
 {
     test_auxv(argc > 0 ? argv[0] : NULL);
@@ -1143,6 +1289,7 @@ int main(int argc, char **argv)
     test_dynamic_program();
     test_event_fds();
     test_signalfd();
+    test_epoll();
     printf("MUSL-RUNTIME: %d/%d\n", passed, total);
     return passed == total ? 0 : 1;
 }

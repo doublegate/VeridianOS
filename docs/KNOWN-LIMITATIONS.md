@@ -79,7 +79,9 @@ work. User code is preempted when its slice ends (D3). What is still missing:
   futexes, pipes, eventfd, timerfd, signalfd, `sigsuspend`, `wait` and job-control stops sleep
   until woken. `poll`, `epoll_wait` and blocking reads of INET sockets, ptys and other
   descriptors that do not report readiness changes yet sleep too but re-check every 10 ms.
-  `select` reports every open descriptor as ready. Other waits are still wrong:
+  `select` reports every open descriptor as ready. Without per-object wake-ups, an
+  edge-triggered epoll registration may report again after unrelated I/O (users of EPOLLET
+  read until EAGAIN, so this costs a wake-up, not correctness). Other waits are still wrong:
   - an empty pty read returns end-of-file, and a write to a full pty fails with EAGAIN instead
     of waiting (it returns a short count when part fits; N-128);
   - `flock` without `LOCK_NB` fails with EWOULDBLOCK instead of waiting (N-120).

@@ -212,10 +212,12 @@ pub mod sysno {
     pub const SYS_getrlimit: usize = 97;
     pub const SYS_setrlimit: usize = 160;
     pub const SYS_prlimit64: usize = 302;
+    pub const SYS_epoll_create: usize = 213;
     pub const SYS_epoll_create1: usize = 291;
     pub const SYS_epoll_ctl: usize = 233;
     pub const SYS_epoll_wait: usize = 232;
     pub const SYS_epoll_pwait: usize = 281;
+    pub const SYS_epoll_pwait2: usize = 441;
     pub const SYS_OPEN_PTY: usize = 1304;
     pub const SYS_GRANT_PTY: usize = 1305;
     pub const SYS_UNLOCK_PTY: usize = 1306;

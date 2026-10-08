@@ -21,6 +21,17 @@
   dynamically linked C++ program that throws, runs threads with `thread_local` destructors and
   `dlopen`s a C++ library.
 
+- **epoll follows Linux (N-234, N-245).** The instance is its file, so duplicates and fork
+  children share it. A registration belongs to the descriptor number and the open file it named:
+  it goes away when the open file is closed for good, not when the number is reused, and keeps
+  reporting while a duplicate holds the file open. EPOLLET is edge-triggered (it was level-
+  triggered, so mio/tokio, which register every socket for EPOLLIN|EPOLLOUT|EPOLLET, spun on
+  writable sockets) and EPOLLONESHOT disables until re-armed. epoll_ctl returns Linux's errors
+  (EEXIST, ENOENT, EBADF, EPERM for regular files, ELOOP for cycles and deep nesting; everything
+  was EINVAL), an epoll file can watch another, and every readiness bit is reported.
+  `epoll_pwait` applies its signal mask for the wait, `epoll_create` and `epoll_pwait2` are
+  added, and `ppoll` honours its signal mask too (N-258). Runtime test `musl_epoll`.
+
 - **eventfd, timerfd and signalfd follow Linux (N-232, N-233).** Their NONBLOCK flag is the
   open file's, so `fcntl` reports and changes it, and a blocking read, `poll` or `epoll_wait`
   sleeps until the object is ready: an eventfd write or a signal wakes the waiters, and a timerfd

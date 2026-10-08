@@ -285,6 +285,68 @@ pub fn sys_sigsuspend(mask_ptr: usize) -> SyscallResult {
     Err(SyscallError::Interrupted)
 }
 
+/// The temporary signal mask of a wait (ppoll, epoll_pwait, epoll_pwait2),
+/// installed by [`begin_wait_sigmask`] and ended by [`WaitSigmask::end`].
+#[must_use]
+pub(crate) struct WaitSigmask {
+    old: Option<u64>,
+}
+
+/// Install `*mask_ptr`, a sigset of `size` bytes (which must be 8: EINVAL
+/// otherwise), as the calling thread's mask for one wait; NULL installs
+/// nothing. The mask in force before is saved as sigsuspend saves it.
+pub(crate) fn begin_wait_sigmask(
+    mask_ptr: usize,
+    size: usize,
+) -> Result<WaitSigmask, SyscallError> {
+    if mask_ptr == 0 {
+        return Ok(WaitSigmask { old: None });
+    }
+    if size != 8 {
+        return Err(SyscallError::InvalidArgument);
+    }
+    let mask: u64 = super::userspace::read_user(mask_ptr)?;
+    let proc = process::current_process().ok_or(SyscallError::InvalidState)?;
+    let thread = process::current_thread().ok_or(SyscallError::InvalidState)?;
+    let old = crate::process::signals::set_mask(&proc, &thread, mask);
+    thread
+        .saved_sigmask
+        .store(old, core::sync::atomic::Ordering::Release);
+    thread
+        .has_saved_sigmask
+        .store(true, core::sync::atomic::Ordering::Release);
+    Ok(WaitSigmask { old: Some(old) })
+}
+
+impl WaitSigmask {
+    /// The wait returned `result`. Interrupted by a signal, the saved mask
+    /// comes back on the way to user mode -- after the handler, whose frame
+    /// records it -- as Linux does; otherwise it comes back now, so a
+    /// signal only the temporary mask let through stays pending.
+    pub(crate) fn end(self, result: &SyscallResult) {
+        let Some(old) = self.old else {
+            return;
+        };
+        #[cfg(all(feature = "alloc", target_arch = "x86_64"))]
+        if *result == Err(SyscallError::Interrupted)
+            && crate::sched::dispatch::current_owner().is_some()
+        {
+            return;
+        }
+        #[cfg(not(all(feature = "alloc", target_arch = "x86_64")))]
+        let _ = result;
+        if let (Some(proc), Some(thread)) = (process::current_process(), process::current_thread())
+        {
+            if thread
+                .has_saved_sigmask
+                .swap(false, core::sync::atomic::Ordering::AcqRel)
+            {
+                crate::process::signals::set_mask(&proc, &thread, old);
+            }
+        }
+    }
+}
+
 /// Return from a signal handler trampoline (syscall 123).
 ///
 /// Called by the signal trampoline code after a signal handler returns.

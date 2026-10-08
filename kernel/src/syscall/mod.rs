@@ -867,70 +867,44 @@ fn handle_syscall(
         Syscall::Getrlimit => memory::sys_getrlimit(arg1, arg2),
         Syscall::Setrlimit => memory::sys_setrlimit(arg1, arg2),
 
-        // epoll I/O multiplexing (Phase 6.5)
-        Syscall::EpollCreate1 => {
-            let _flags = arg1; // epoll_create1 flags (EPOLL_CLOEXEC)
-            let cloexec = (arg1 & 0x80000) != 0; // EPOLL_CLOEXEC = O_CLOEXEC
-            let pid = crate::process::current_process()
-                .map(|p| p.pid.0)
-                .unwrap_or(0);
-            let epoll_id =
-                crate::net::epoll::epoll_create(pid).map_err(|_| SyscallError::OutOfMemory)?;
-            // Wrap as VfsNode for real fd semantics
-            let node: alloc::sync::Arc<dyn crate::fs::VfsNode> =
-                alloc::sync::Arc::new(crate::net::epoll::EpollNode::new(epoll_id));
-            let file = crate::fs::file::File::new(node, crate::fs::OpenFlags::read_write());
-            let proc = crate::process::current_process().ok_or(SyscallError::InvalidState)?;
-            let file_table = proc.file_table.lock();
-            let fd = file_table
-                .open_with_flags(alloc::sync::Arc::new(file), cloexec)
-                .map_err(|_| SyscallError::OutOfMemory)?;
-            Ok(fd)
+        // epoll (N-234, N-245): the instance is its file.
+        Syscall::EpollCreate => {
+            if arg1 as i32 <= 0 {
+                return Err(SyscallError::InvalidArgument);
+            }
+            sys_epoll_create1(0)
         }
-        Syscall::EpollCtl => {
-            let epoll_fd = arg1;
-            let op = arg2 as u32;
-            let fd = arg3 as i32;
-            let event_ptr = arg4;
-
-            let epoll_id = resolve_epoll_id(epoll_fd)?;
-            // struct epoll_event is packed (12 bytes on x86_64): copied
-            // field by field through the fault-tolerant reader rather than
-            // borrowed from user memory (review of the v0.26.0 stack).
-            let event = if event_ptr != 0 {
-                let mut raw = [0u8; EPOLL_EVENT_BYTES];
-                userspace::read_user_bytes(event_ptr, &mut raw)?;
-                Some(epoll_event_from_bytes(&raw))
-            } else {
+        Syscall::EpollCreate1 => sys_epoll_create1(arg1),
+        Syscall::EpollCtl => sys_epoll_ctl(arg1, arg2, arg3, arg4),
+        Syscall::EpollWait => sys_epoll_wait(arg1, arg2, arg3, epoll_timeout_ms(arg4)),
+        // epoll_pwait(epfd, events, maxevents, timeout, sigmask, sigsetsize)
+        Syscall::EpollPwait => {
+            let size = if arg5 != 0 { syscall_arg6()? } else { 0 };
+            let mask = signal::begin_wait_sigmask(arg5, size)?;
+            let result = sys_epoll_wait(arg1, arg2, arg3, epoll_timeout_ms(arg4));
+            mask.end(&result);
+            result
+        }
+        // epoll_pwait2: the timeout is a timespec (NULL: none).
+        Syscall::EpollPwait2 => {
+            let timeout = if arg4 == 0 {
                 None
+            } else {
+                let [sec, nsec] = userspace::read_user::<[i64; 2]>(arg4)?;
+                if sec < 0 || !(0..1_000_000_000).contains(&nsec) {
+                    return Err(SyscallError::InvalidArgument);
+                }
+                Some(
+                    (sec as u64)
+                        .saturating_mul(1_000_000_000)
+                        .saturating_add(nsec as u64),
+                )
             };
-            crate::net::epoll::epoll_ctl(epoll_id, op, fd, event.as_ref())
-                .map(|_| 0)
-                .map_err(|_| SyscallError::InvalidArgument)
-        }
-        Syscall::EpollWait | Syscall::EpollPwait => {
-            let epoll_fd = arg1;
-            let events_ptr = arg2;
-            let max_events = arg3;
-            let timeout_ms = arg4 as i32;
-            let epoll_id = resolve_epoll_id(epoll_fd)?;
-            validate_user_buffer(events_ptr, epoll_events_buffer_len(max_events)?)?;
-            // Events are gathered in a kernel array (at most 1024 per call,
-            // as a short count is always allowed) and copied out packed,
-            // through the fault-tolerant writer (N-43).
-            let mut events = alloc::vec![
-                crate::net::epoll::EpollEvent { events: 0, data: 0 };
-                max_events.min(1024)
-            ];
-            let n =
-                crate::net::epoll::epoll_wait(epoll_id, &mut events, timeout_ms).map_err(|e| {
-                    match e {
-                        crate::error::KernelError::WouldBlock => SyscallError::Interrupted,
-                        _ => SyscallError::InvalidArgument,
-                    }
-                })?;
-            userspace::write_user_bytes(events_ptr, &epoll_events_to_bytes(&events[..n]))?;
-            Ok(n)
+            let size = if arg5 != 0 { syscall_arg6()? } else { 0 };
+            let mask = signal::begin_wait_sigmask(arg5, size)?;
+            let result = sys_epoll_wait(arg1, arg2, arg3, timeout);
+            mask.end(&result);
+            result
         }
         // Process groups / sessions (Phase 6.5) -- delegate to existing
         // implementations which also back the older syscall numbers 176-180.
@@ -1173,7 +1147,7 @@ fn handle_syscall(
         Syscall::Tgkill => process::sys_tgkill(arg1, arg2, arg3),
         Syscall::Waitid => process::sys_waitid(arg1, arg2, arg3, arg4),
         Syscall::RtSigpending => signal::sys_sigpending(arg1, arg2),
-        Syscall::Ppoll => linux_compat::handle_ppoll(arg1, arg2, arg3),
+        Syscall::Ppoll => linux_compat::handle_ppoll(arg1, arg2, arg3, arg4, arg5),
         // faccessat has no flags argument; faccessat2 adds one.
         Syscall::Faccessat => sys_faccessat(arg1, arg2, arg3, 0),
         Syscall::Faccessat2 => sys_faccessat(arg1, arg2, arg3, arg4),
@@ -1281,16 +1255,99 @@ fn resolve_timerfd_id(fd: usize) -> Result<u32, SyscallError> {
     Ok(tfd_node.tfd_id())
 }
 
-/// Resolve a file descriptor to an internal epoll ID.
-fn resolve_epoll_id(fd: usize) -> Result<u32, SyscallError> {
+/// epoll_create1(flags): EPOLL_CLOEXEC is the only flag (EINVAL otherwise).
+#[cfg(feature = "alloc")]
+fn sys_epoll_create1(flags: usize) -> SyscallResult {
+    use crate::net::epoll::{EpollNode, EPOLL_CLOEXEC};
+    if flags & !(EPOLL_CLOEXEC as usize) != 0 {
+        return Err(SyscallError::InvalidArgument);
+    }
+    let file = crate::fs::file::File::new(
+        alloc::sync::Arc::new(EpollNode::new()),
+        crate::fs::OpenFlags::read_write(),
+    );
     let proc = crate::process::current_process().ok_or(SyscallError::InvalidState)?;
-    let file_table = proc.file_table.lock();
-    let file = file_table.get(fd).ok_or(SyscallError::BadFileDescriptor)?;
-    let any = file.node.as_any().ok_or(SyscallError::BadFileDescriptor)?;
-    let epoll_node = any
-        .downcast_ref::<crate::net::epoll::EpollNode>()
-        .ok_or(SyscallError::BadFileDescriptor)?;
-    Ok(epoll_node.epoll_id())
+    let fd = proc
+        .file_table
+        .lock()
+        .open_with_flags(alloc::sync::Arc::new(file), flags != 0)
+        .map_err(|_| SyscallError::OutOfMemory)?;
+    Ok(fd)
+}
+
+/// The open file behind `fd` in the calling process (EBADF if none).
+fn current_file(fd: usize) -> Result<alloc::sync::Arc<crate::fs::file::File>, SyscallError> {
+    if fd > i32::MAX as usize {
+        return Err(SyscallError::BadFileDescriptor);
+    }
+    let proc = crate::process::current_process().ok_or(SyscallError::InvalidState)?;
+    let file = proc.file_table.lock().get(fd);
+    file.ok_or(SyscallError::BadFileDescriptor)
+}
+
+/// epoll_ctl(epfd, op, fd, event), with Linux's checks in Linux's order:
+/// the event (EFAULT, for ADD and MOD), both descriptors (EBADF), a target
+/// without readiness (EPERM), then the rest ([`crate::net::epoll::CtlError`]).
+#[cfg(feature = "alloc")]
+fn sys_epoll_ctl(epfd: usize, op: usize, fd: usize, event_ptr: usize) -> SyscallResult {
+    use crate::net::epoll::{CtlError, EpollNode, EPOLL_CTL_ADD, EPOLL_CTL_MOD};
+    let op = op as u32;
+    // struct epoll_event is packed (12 bytes on x86_64): copied field by
+    // field through the fault-tolerant reader rather than borrowed from
+    // user memory (review of the v0.26.0 stack).
+    let event = if op == EPOLL_CTL_ADD || op == EPOLL_CTL_MOD {
+        let mut raw = [0u8; EPOLL_EVENT_BYTES];
+        userspace::read_user_bytes(event_ptr, &mut raw)?;
+        Some(epoll_event_from_bytes(&raw))
+    } else {
+        None
+    };
+    let ep_file = current_file(epfd)?;
+    let target = current_file(fd)?;
+    EpollNode::ctl(&ep_file, op, fd as i32, &target, event.as_ref())
+        .map(|()| 0)
+        .map_err(|e| match e {
+            CtlError::Invalid => SyscallError::InvalidArgument,
+            CtlError::Exists => SyscallError::FileExists,
+            CtlError::NotFound => SyscallError::ResourceNotFound,
+            CtlError::NotPollable => SyscallError::OperationNotPermitted,
+            CtlError::Loop => SyscallError::SymlinkLoop,
+            CtlError::NoSpace => SyscallError::NoSpace,
+        })
+}
+
+/// An epoll_wait timeout in milliseconds as a wait limit: negative waits
+/// without one.
+fn epoll_timeout_ms(timeout: usize) -> Option<u64> {
+    let ms = timeout as i32;
+    (ms >= 0).then(|| ms as u64 * 1_000_000)
+}
+
+/// epoll_wait and its variants: up to `max_events` events into the user
+/// array, waiting up to `timeout_ns` (`None`: no limit). maxevents is
+/// checked first (EINVAL), then the array (EFAULT), then the descriptor
+/// (EBADF, EINVAL if not an epoll file).
+#[cfg(feature = "alloc")]
+fn sys_epoll_wait(
+    epfd: usize,
+    events_ptr: usize,
+    max_events: usize,
+    timeout_ns: Option<u64>,
+) -> SyscallResult {
+    use crate::net::epoll::{EpollEvent, EpollNode};
+    validate_user_buffer(events_ptr, epoll_events_buffer_len(max_events)?)?;
+    let file = current_file(epfd)?;
+    let ep = EpollNode::of(&file).ok_or(SyscallError::InvalidArgument)?;
+    // Events are gathered in a kernel array (at most 1024 per call, as a
+    // short count is always allowed) and copied out packed, through the
+    // fault-tolerant writer (N-43).
+    let mut events = alloc::vec![EpollEvent { events: 0, data: 0 }; max_events.min(1024)];
+    let n = ep.wait(&mut events, timeout_ns).map_err(|e| match e {
+        crate::error::KernelError::WouldBlock => SyscallError::Interrupted,
+        _ => SyscallError::InvalidArgument,
+    })?;
+    userspace::write_user_bytes(events_ptr, &epoll_events_to_bytes(&events[..n]))?;
+    Ok(n)
 }
 
 /// `sizeof(struct epoll_event)`: packed `u32 events` + `u64 data`.

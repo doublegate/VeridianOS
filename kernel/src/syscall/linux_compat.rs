@@ -121,12 +121,15 @@ pub(crate) fn to_linux_errno(err: super::SyscallError) -> isize {
     }
 }
 
-/// Handle ppoll by converting its timespec to an integer timeout and
-/// delegating to sys_poll.
-///
-/// ppoll(fds, nfds, timespec*, sigmask, sigsetsize)
-/// We ignore the sigmask and convert timespec to milliseconds.
-pub(crate) fn handle_ppoll(fds_ptr: usize, nfds: usize, timespec_ptr: usize) -> SyscallResult {
+/// ppoll(fds, nfds, timeout, sigmask, sigsetsize): poll with a timespec
+/// timeout and, for the wait, the given signal mask (N-258).
+pub(crate) fn handle_ppoll(
+    fds_ptr: usize,
+    nfds: usize,
+    timespec_ptr: usize,
+    sigmask_ptr: usize,
+    sigsetsize: usize,
+) -> SyscallResult {
     // A NULL timespec waits forever (a negative timeout to sys_poll).
     let timeout_ms = if timespec_ptr == 0 {
         usize::MAX
@@ -137,7 +140,10 @@ pub(crate) fn handle_ppoll(fds_ptr: usize, nfds: usize, timespec_ptr: usize) -> 
         let [tv_sec, tv_nsec] = super::userspace::read_user::<[i64; 2]>(timespec_ptr)?;
         ppoll_timeout_ms(tv_sec, tv_nsec)?
     };
-    super::filesystem::sys_poll(fds_ptr, nfds, timeout_ms)
+    let mask = super::signal::begin_wait_sigmask(sigmask_ptr, sigsetsize)?;
+    let result = super::filesystem::sys_poll(fds_ptr, nfds, timeout_ms);
+    mask.end(&result);
+    result
 }
 
 /// ppoll's timespec as a poll timeout in milliseconds, rounded down.

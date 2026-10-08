@@ -238,10 +238,12 @@
 #define SYS_setrlimit                    160
 #define SYS_prlimit64                    302
 /* epoll */
+#define SYS_epoll_create                 213
 #define SYS_epoll_create1                291
 #define SYS_epoll_ctl                    233
 #define SYS_epoll_wait                   232
 #define SYS_epoll_pwait                  281
+#define SYS_epoll_pwait2                 441
 /* Pseudo-terminals */
 #define SYS_OPEN_PTY                     1304
 #define SYS_GRANT_PTY                    1305

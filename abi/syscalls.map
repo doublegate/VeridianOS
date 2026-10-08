@@ -269,10 +269,12 @@ setrlimit
 prlimit64
 
 ## epoll
+epoll_create
 epoll_create1
 epoll_ctl
 epoll_wait
 epoll_pwait
+epoll_pwait2
 
 ## Pseudo-terminals
 OpenPty                 private 1304
