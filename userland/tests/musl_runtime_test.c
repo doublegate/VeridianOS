@@ -1,12 +1,13 @@
 /*
- * musl_runtime_test -- in-guest checks for programs built against the
- * patched musl (tools/cross/build-musl.sh), as the KDE binaries are.
+ * musl_runtime_test -- in-guest checks for programs built against musl
+ * (tools/cross/build-musl.sh), as the KDE binaries are.
  *
- * audit_runtime_test is built with VeridianOS's own C library, so it never
- * exercises musl's syscall remapping. This program does: fsync and flock
- * (which share native syscall 73), prctl, raise/abort (tkill), waitid, the
- * memory protections, and threads (which run as tasks of their own since
- * stage D2), each as musl issues them.
+ * audit_runtime_test is built with VeridianOS's own C library. This program
+ * exercises what musl does its own way: fsync and flock, prctl, raise/abort
+ * (tkill), waitid, the memory protections, threads (tasks of their own
+ * since stage D2), and process start-up. It is built as a static PIE, so
+ * the kernel loads it at a base of its choosing and musl relocates it from
+ * the auxiliary vector before main runs (ADR 0010).
  *
  * Run from a BusyBox shell: /bin/musl_runtime_test
  * Prints "PASS <name>" or "FAIL <name>: <why>" per check and a final
@@ -33,6 +34,7 @@
 #include <spawn.h>
 #include <sys/wait.h>
 #include <sys/socket.h>
+#include <sys/auxv.h>
 #include <sys/syscall.h>
 #include <time.h>
 #include <unistd.h>
@@ -758,8 +760,175 @@ static void test_spawn(void)
     report("musl_system", WIFEXITED(st) && WEXITSTATUS(st) == 6, why);
 }
 
-int main(void)
+/* The auxiliary vector (ADR 0010), as getauxval reads it. */
+static void test_auxv(const char *argv0)
 {
+    const unsigned char *random = (const unsigned char *)getauxval(AT_RANDOM);
+    const char *execfn = (const char *)getauxval(AT_EXECFN);
+    const char *platform = (const char *)getauxval(AT_PLATFORM);
+    int random_set = 0;
+    for (int i = 0; random && i < 16; i++)
+        random_set |= random[i];
+    int ok = getauxval(AT_PAGESZ) == 4096 && random_set && execfn && argv0
+             && strcmp(execfn, argv0) == 0 && platform && strcmp(platform, "x86_64") == 0
+             && getauxval(AT_PHDR) != 0 && getauxval(AT_PHNUM) > 0
+             && getauxval(AT_PHENT) == 56 && getauxval(AT_ENTRY) != 0
+             && getauxval(AT_UID) == getuid() && getauxval(AT_EUID) == geteuid()
+             && getauxval(AT_GID) == getgid() && getauxval(AT_EGID) == getegid()
+             && getauxval(AT_SECURE) == 0 && getauxval(AT_HWCAP) != 0
+             && getauxval(AT_MINSIGSTKSZ) >= 1024 && getauxval(AT_CLKTCK) == 100;
+    static char why[160];
+    snprintf(why, sizeof(why),
+             "pagesz=%lu random_set=%d execfn=%s platform=%s phdr=%#lx phnum=%lu entry=%#lx "
+             "hwcap=%#lx minsig=%lu",
+             getauxval(AT_PAGESZ), random_set, execfn ? execfn : "(null)",
+             platform ? platform : "(null)", getauxval(AT_PHDR), getauxval(AT_PHNUM),
+             getauxval(AT_ENTRY), getauxval(AT_HWCAP), getauxval(AT_MINSIGSTKSZ));
+    report("musl_auxv", ok, why);
+}
+
+/* This program is a static PIE: the kernel put it at its PIE base
+ * (0x5555_5555_4000), and musl relocated it before main, so code, data and
+ * the pointers in data all refer to addresses there. */
+static const char *const pie_string = "relocated";
+static void test_pie(void)
+{
+    uintptr_t code = (uintptr_t)&test_pie;
+    uintptr_t data = (uintptr_t)&pie_string;
+    uintptr_t entry = getauxval(AT_ENTRY);
+    int ok = code >= 0x555555554000UL && code < 0x555565554000UL && data > code
+             && entry >= 0x555555554000UL && entry < code + 0x10000000UL
+             && strcmp(pie_string, "relocated") == 0;
+    static char why[96];
+    snprintf(why, sizeof(why), "code=%#lx data=%#lx entry=%#lx", (unsigned long)code,
+             (unsigned long)data, (unsigned long)entry);
+    report("musl_pie_loaded", ok, why);
+}
+
+/* A /proc/meminfo field, in kB (-1 if missing). */
+static long meminfo_kb(const char *key)
+{
+    char info[2048];
+    int fd = open("/proc/meminfo", O_RDONLY);
+    ssize_t n = fd >= 0 ? read(fd, info, sizeof(info) - 1) : -1;
+    if (fd >= 0)
+        close(fd);
+    if (n <= 0)
+        return -1;
+    info[n] = 0;
+    const char *at = strstr(info, key);
+    return at ? atol(at + strlen(key)) : -1;
+}
+
+/* Private file mappings share the file's cached pages (ADR 0010): the
+ * first mapping fills the cache, a second process mapping the file adds
+ * nothing and sees the same bytes, a write to a private mapping stays in
+ * it (copy-on-write), and writing the file drops its cache so a new
+ * mapping sees the new contents. */
+static void test_page_cache(void)
+{
+    enum { PAGES = 16, SIZE = PAGES * 4096 };
+    const char *path = "/tmp/musl_page_cache";
+    static unsigned char data[SIZE];
+    for (int i = 0; i < SIZE; i++)
+        data[i] = (unsigned char)(i / 4096 + 'a');
+    int fd = open(path, O_CREAT | O_RDWR | O_TRUNC, 0644);
+    if (fd < 0 || write(fd, data, SIZE) != SIZE) {
+        report("musl_page_cache", 0, "file setup failed");
+        return;
+    }
+    long c0 = meminfo_kb("Cached:");
+    unsigned char *a = mmap(0, SIZE, PROT_READ, MAP_PRIVATE, fd, 0);
+    long c1 = meminfo_kb("Cached:");
+    int fds[2];
+    if (a == MAP_FAILED || pipe(fds) != 0) {
+        report("musl_page_cache", 0, "mmap or pipe failed");
+        return;
+    }
+    pid_t pid = fork();
+    if (pid == 0) {
+        unsigned char *b = mmap(0, SIZE, PROT_READ | PROT_WRITE, MAP_PRIVATE, fd, 0);
+        long c2 = meminfo_kb("Cached:");
+        int same = b != MAP_FAILED && memcmp(b, data, SIZE) == 0;
+        if (b != MAP_FAILED)
+            b[100] = 'Z';
+        int isolated = b != MAP_FAILED && b[100] == 'Z' && a[100] == 'a';
+        (void)!write(fds[1], &c2, sizeof(c2));
+        _exit(same && isolated ? 0 : 1);
+    }
+    int status = -1;
+    long c2 = -1;
+    int child_ok = pid > 0 && waitpid(pid, &status, 0) == pid && WIFEXITED(status)
+                   && WEXITSTATUS(status) == 0 && read(fds[0], &c2, sizeof(c2)) == sizeof(c2);
+    unsigned char first = 0;
+    int file_kept = pread(fd, &first, 1, 100) == 1 && first == 'a' && a[100] == 'a';
+    /* Writing the file drops its cache; a new mapping sees the write. */
+    int written = pwrite(fd, "Q", 1, 100) == 1;
+    long c3 = meminfo_kb("Cached:");
+    unsigned char *c = mmap(0, SIZE, PROT_READ, MAP_PRIVATE, fd, 0);
+    int fresh = c != MAP_FAILED && c[100] == 'Q';
+    int ok = c1 - c0 == SIZE / 1024 && c2 == c1 && child_ok && file_kept && written
+             && c3 == c0 && fresh;
+    static char why[160];
+    snprintf(why, sizeof(why),
+             "Cached kB: before %ld, mapped %ld, child %ld, after write %ld; child_ok=%d "
+             "file_kept=%d fresh=%d",
+             c0, c1, c2, c3, child_ok, file_kept, fresh);
+    report("musl_page_cache", ok, why);
+    munmap(a, SIZE);
+    if (c != MAP_FAILED)
+        munmap(c, SIZE);
+    close(fds[0]);
+    close(fds[1]);
+    close(fd);
+    unlink(path);
+}
+
+/* Programs share their pages through the cache too (the loader maps a
+ * program's whole-file pages from it): the first run of a program nothing
+ * has run yet fills the cache, a second run adds nothing. The program is
+ * a fresh copy of BusyBox, so none of it is cached before. */
+static int run_true(const char *path)
+{
+    extern char **environ;
+    char *args[] = {"busybox", "true", NULL};
+    pid_t pid;
+    int status;
+    return posix_spawn(&pid, path, NULL, NULL, args, environ) == 0
+           && waitpid(pid, &status, 0) == pid && WIFEXITED(status) && WEXITSTATUS(status) == 0;
+}
+
+static void test_program_pages_shared(void)
+{
+    const char *copy = "/tmp/musl_busybox_copy";
+    int in = open("/bin/busybox", O_RDONLY);
+    int out = open(copy, O_CREAT | O_WRONLY | O_TRUNC, 0755);
+    static char buf[65536];
+    ssize_t n = 0;
+    int copied = in >= 0 && out >= 0;
+    while (copied && (n = read(in, buf, sizeof(buf))) > 0)
+        copied = write(out, buf, n) == n;
+    copied = copied && n == 0;
+    if (in >= 0)
+        close(in);
+    if (out >= 0)
+        close(out);
+    long c0 = meminfo_kb("Cached:");
+    int first = copied && run_true(copy);
+    long c1 = meminfo_kb("Cached:");
+    int second = first && run_true(copy);
+    long c2 = meminfo_kb("Cached:");
+    static char why[112];
+    snprintf(why, sizeof(why), "copied %d runs %d/%d, Cached kB %ld, %ld, %ld", copied, first,
+             second, c0, c1, c2);
+    report("musl_program_pages_shared", first && second && c1 > c0 && c2 == c1, why);
+    unlink(copy);
+}
+
+int main(int argc, char **argv)
+{
+    test_auxv(argc > 0 ? argv[0] : NULL);
+    test_pie();
     test_fsync();
     test_flock();
     test_prctl();
@@ -778,6 +947,8 @@ int main(void)
     test_creds_and_paths();
     test_spawn();
     test_sigaltstack();
+    test_page_cache();
+    test_program_pages_shared();
     printf("MUSL-RUNTIME: %d/%d\n", passed, total);
     return passed == total ? 0 : 1;
 }

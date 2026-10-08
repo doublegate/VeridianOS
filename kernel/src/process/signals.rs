@@ -517,7 +517,7 @@ fn dequeue(process: &Process, thread: &Thread) -> Option<usize> {
 }
 
 #[cfg(target_arch = "x86_64")]
-pub use frame::{deliver_on_return, rt_sigreturn};
+pub use frame::{deliver_on_return, rt_sigreturn, MIN_SIGNAL_FRAME};
 
 #[cfg(target_arch = "x86_64")]
 mod frame {
@@ -615,6 +615,14 @@ mod frame {
     const RED_ZONE: u64 = 128;
     /// FXSAVE image size.
     const FXSAVE_SIZE: usize = 512;
+
+    /// The most stack one signal frame takes (`setup_frame`): the FXSAVE
+    /// image with up to 63 bytes of alignment, the frame, and the alignment
+    /// that leaves RSP + 8 16-byte aligned, rounded up to 16. Reported to
+    /// programs as AT_MINSIGSTKSZ, as Linux does on x86.
+    pub const MIN_SIGNAL_FRAME: u64 =
+        ((FXSAVE_SIZE + 63 + core::mem::size_of::<RtSigFrame>() + 15 + 8) as u64)
+            .next_multiple_of(16);
 
     /// A 16-byte-aligned FXSAVE buffer.
     #[repr(C, align(16))]

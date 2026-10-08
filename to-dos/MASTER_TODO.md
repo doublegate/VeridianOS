@@ -76,6 +76,24 @@ What does not work yet: `docs/KNOWN-LIMITATIONS.md`.
     - Truthful claims: KNOWN-LIMITATIONS "hardening not active" (KPTI, KASLR, canaries, retpoline,
       Spectre, SMEP/SMAP), TLS, MAC, seccomp, Kani/TLA+, file mmap; README/book/overview corrections
       (N-145, N-146, N-150, N-152, N-163, N-165).
+  - [ ] **DL, dynamic linking (ADR 0010; X3 loader pulled forward from v0.29, 2026-10-08).** KDE
+    switches from static archives to shared libraries loaded by musl's dynamic linker:
+    - [x] Program loader: every PT_LOAD validated before exec commits (malformed files fail, the
+      kernel no longer panics on them), page plan with shared-page merging, PIE programs at
+      `0x5555_5555_4000`, the interpreter in the mmap area; one path for exec and the initial
+      loader. Full Linux auxv for every program (AT_RANDOM, AT_HWCAP/HWCAP2, AT_CLKTCK, AT_UID..
+      AT_EGID, AT_SECURE, AT_EXECFN, AT_PLATFORM, AT_MINSIGSTKSZ). Runtime: `musl_auxv`,
+      `musl_pie_loaded` (the musl suite runs as a static PIE).
+    - [x] Shared file pages: a page cache per BlockFS file (`mm::page_cache`) for private file
+      mappings and loaded program segments, read-only or copy-on-write; dropped when the file
+      changes or its inode is freed. Runtime: `musl_page_cache`, `musl_program_pages_shared`.
+    - [x] Toolchain: shared musl (`/lib/ld-musl-x86_64.so.1`), GCC with shared libstdc++ and
+      libgcc_s, dynamic linking by default; verified on the build host through musl's loader,
+      including `dlopen` of a C++ shared object. CI builds and caches it.
+    - [ ] Dynamic programs in VeridianOS: the loader and the shared runtime in the root
+      filesystem; runtime tests of a dynamically linked program and of `dlopen`.
+    - [ ] KDE pipeline with shared libraries; static workarounds removed; rootfs with `/lib`.
+    - Later (sprint G / v0.29): ASLR, vDSO, eviction of cached pages, writable MAP_SHARED of files.
   - [ ] **D, process model and scheduler (C5; ADR 0006 + ADR 0007):**
     - [x] Scheduler policy core: EEVDF fair, FIFO/RR with bandwidth limit, SCHED_DEADLINE (CBS),
       PELT-style load, SMP placement/balancing (`sched/policy/`, 36 host tests).
@@ -286,7 +304,7 @@ What does not work yet: `docs/KNOWN-LIMITATIONS.md`.
 
 ### Phase 2: User Space Foundation (100% COMPLETE)
 - [x] VFS: RamFS, DevFS, ProcFS, BlockFS with ext2-style directories
-- [x] ELF loader with dynamic linking and relocations
+- [x] ELF loader with dynamic linking and relocations (the dynamic part could not run a program until v0.27, ADR 0010)
 - [x] Driver framework: PCI/USB bus, network, storage, console, GPU
 - [x] Init system with service management
 - [x] Shell with 20+ built-in commands

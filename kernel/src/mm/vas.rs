@@ -1268,6 +1268,83 @@ impl VirtualAddressSpace {
         Ok(start)
     }
 
+    /// Put file pages from a page cache (`mm::page_cache`, ADR 0010) into
+    /// the mapping that starts at `start`: page `i` of it gets `frames[i]`
+    /// in place of the fresh frame it was mapped with, read-only, or
+    /// copy-on-write where the mapping may write, so the cached page itself
+    /// never changes. `None` keeps the fresh (zero) page. Each frame comes
+    /// with an owner for this mapping; on failure, the owners not handed
+    /// over are released here.
+    #[cfg(feature = "alloc")]
+    pub fn install_file_pages(
+        &self,
+        start: VirtualAddress,
+        frames: &[Option<FrameNumber>],
+    ) -> Result<(), KernelError> {
+        let release_from = |i: usize| {
+            for frame in frames[i..].iter().flatten() {
+                if super::frame_refs::release(*frame) {
+                    crate::mm::note_free_failure(
+                        FRAME_ALLOCATOR.lock().free_frames(*frame, 1),
+                        *frame,
+                        "vas",
+                    );
+                }
+            }
+        };
+        #[cfg(not(test))]
+        {
+            let root = self.page_table_root.load(Ordering::Acquire);
+            // SAFETY: this address space's L4 table; the mappings lock taken
+            // below serialises changes to it.
+            let mut mapper = unsafe { create_mapper_from_root(root) };
+            let mut mappings = self.mappings.lock();
+            let Some(mapping) = mappings.get_mut(&start) else {
+                release_from(0);
+                return Err(KernelError::InvalidAddress {
+                    addr: start.0 as usize,
+                });
+            };
+            for (i, frame) in frames.iter().enumerate() {
+                let Some(frame) = *frame else { continue };
+                let va = VirtualAddress(start.0 + (i as u64) * 4096);
+                let (Ok((_, current)), Some(slot)) = (
+                    mapper.translate_page(va),
+                    mapping.physical_frames.get_mut(i),
+                ) else {
+                    release_from(i);
+                    return Err(KernelError::InvalidAddress {
+                        addr: va.0 as usize,
+                    });
+                };
+                let flags = if current.contains(PageFlags::WRITABLE) {
+                    current.without(PageFlags::WRITABLE) | PageFlags::COW
+                } else {
+                    current
+                };
+                let _ = mapper.unmap_page(va);
+                super::tlb::flush_page(va.0);
+                if let Err(e) = mapper.map_page(va, frame, flags, &mut VasFrameAllocator) {
+                    // The fresh frame at `i` stays recorded and is freed
+                    // with the mapping.
+                    release_from(i);
+                    return Err(e);
+                }
+                let fresh = core::mem::replace(slot, frame);
+                if super::frame_refs::release(fresh) {
+                    crate::mm::note_free_failure(
+                        FRAME_ALLOCATOR.lock().free_frames(fresh, 1),
+                        fresh,
+                        "vas",
+                    );
+                }
+            }
+        }
+        #[cfg(test)]
+        release_from(frames.len());
+        Ok(())
+    }
+
     #[cfg(feature = "alloc")]
     fn map_region_inner(
         &self,
@@ -2073,6 +2150,15 @@ impl VirtualAddressSpace {
                 Err(now) => cur = now,
             }
         }
+    }
+
+    /// Take `size` bytes (page-rounded) of the mmap area without mapping
+    /// anything: an address for the caller to map at with
+    /// [`Self::map_region_fixed`], as exec does for the program
+    /// interpreter (ADR 0010).
+    pub fn reserve_mmap_area(&self, size: usize) -> Result<VirtualAddress, KernelError> {
+        self.reserve_mmap_range(size, 4096)
+            .map(|(base, _)| VirtualAddress(base))
     }
 
     /// Give back a reservation if nothing was reserved after it.

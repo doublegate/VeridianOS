@@ -98,8 +98,10 @@ impl VfsNode for ProcNode {
                         let total_kb = stats.total_frames * 4; // 4KB per frame
                         let free_kb = stats.free_frames * 4;
                         let used_kb = total_kb.saturating_sub(free_kb);
-                        let cached_kb = stats.cached_frames * 4;
-                        let available_kb = free_kb + cached_kb;
+                        // Cached: the file page cache (ADR 0010). Frames on
+                        // the allocator's per-CPU lists are free memory too.
+                        let cached_kb = crate::mm::page_cache::cached_pages() * 4;
+                        let available_kb = free_kb + stats.cached_frames * 4;
                         let buffers_kb = 0usize;
                         let slab_kb = 0usize;
 
@@ -119,8 +121,9 @@ impl VfsNode for ProcNode {
                             cached_kb,
                             slab_kb,
                             used_kb,
-                            // Frames shared copy-on-write between processes
-                            // (each counted once).
+                            // Frames with more than one owner (each counted
+                            // once): shared copy-on-write after fork, or a
+                            // cached file page that processes map.
                             crate::mm::frame_refs::shared_frames() * 4,
                         )
                     }

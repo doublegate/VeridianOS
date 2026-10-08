@@ -15,6 +15,8 @@ pub mod frame_refs;
 pub mod heap;
 pub mod ksm;
 pub mod kstack;
+#[cfg(feature = "alloc")]
+pub mod page_cache;
 pub mod page_fault;
 pub mod page_table;
 pub mod tlb;

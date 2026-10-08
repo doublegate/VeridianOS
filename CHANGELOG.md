@@ -2,6 +2,21 @@
 
 ### Added
 
+- **Program loading for dynamic linking (ADR 0010).** The ELF loader plans every image before
+  exec commits: each PT_LOAD is checked against the file and user space, pages two segments share
+  get both, and position-independent programs load at `0x5555_5555_4000`. A program with
+  PT_INTERP starts in its interpreter, loaded in the mmap area, as Linux does. Every program now
+  gets Linux's auxiliary vector (AT_RANDOM, AT_HWCAP, AT_CLKTCK, AT_UID to AT_EGID, AT_SECURE,
+  AT_EXECFN, AT_PLATFORM, AT_MINSIGSTKSZ and the rest); static programs had none and dynamic ones
+  an incomplete one with an AT_PHNUM of 1. exec and the initial program loader share the code.
+  The musl runtime suite now runs as a static PIE (`musl_auxv`, `musl_pie_loaded`).
+- **Shared file pages (ADR 0010).** A BlockFS file keeps the pages processes map in a page cache:
+  private file mappings and the pages of loaded programs use the cached frames, read-only or
+  copy-on-write, so every process running a program or mapping a file shares one copy. Writing,
+  truncating or deleting the file drops its cache. `/proc/meminfo` `Cached:` reports it (it
+  showed the frame allocator's per-CPU lists). Runtime tests `musl_page_cache` and
+  `musl_program_pages_shared`.
+
 - **Alternate signal stacks (N-222).** `sigaltstack` used to report success without doing
   anything. It now keeps a per-thread alternate stack with Linux's rules: handlers installed with
   `SA_ONSTACK` run on it, it reports `SS_ONSTACK` while in use and refuses changes then (EPERM),
@@ -229,6 +244,10 @@
 
 ### Security
 
+- **A malformed executable no longer panics the kernel.** The loader sliced each segment's file
+  range and added its addresses unchecked, so an ELF file whose PT_LOAD ran past the end of the
+  file, or whose sizes overflowed, crashed the kernel on exec. Such files now fail with ENOEXEC
+  (host tests in `elf::image`).
 - **Fork no longer shares a slice of user memory between parent and child (N-256).** Every new
   address space and every fork copied the L4 entry of a kernel heap that has not lived there since
   bootloader 0.9 (`0x4400_0000_0000`, a 512 GiB slot of user space). A program that mapped memory

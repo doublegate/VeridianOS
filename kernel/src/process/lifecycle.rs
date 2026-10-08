@@ -11,7 +11,9 @@
 // Re-export wait_process (used by parent module re-exports)
 #[cfg(feature = "alloc")]
 #[allow(unused_imports)]
-pub(crate) use super::creation::setup_exec_stack as setup_exec_stack_pub;
+pub(crate) use super::creation::{
+    read_executable, setup_exec_stack as setup_exec_stack_pub, setup_static_tls,
+};
 #[cfg(feature = "alloc")]
 pub use super::exit::wait_process;
 pub use super::{

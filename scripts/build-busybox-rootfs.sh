@@ -461,9 +461,8 @@ phase_rootfs() {
     musl_cc="$(source "${PROJECT_ROOT}/tools/cross/veridian-paths.sh" && echo "$VERIDIAN_CC")"
     if [ -x "$musl_cc" ]; then
         echo -n "    musl_runtime_test... "
-        # Static: the toolchain links dynamically by default, and the root
-        # filesystem has no dynamic loader yet.
-        if "$musl_cc" -static -O2 -Wall -Wextra -o "$BUILD_DIR/bin/musl_runtime_test" \
+        # A static PIE: the kernel picks its address (ADR 0010).
+        if "$musl_cc" -static-pie -O2 -Wall -Wextra -o "$BUILD_DIR/bin/musl_runtime_test" \
                 "${TESTS_DIR}/musl_runtime_test.c" 2>&1; then
             echo "OK"
         else

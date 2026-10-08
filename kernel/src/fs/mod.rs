@@ -425,6 +425,15 @@ pub trait VfsNode: Send + Sync {
         })
     }
 
+    /// The page cache of the file (`mm::page_cache`, ADR 0010): its pages,
+    /// shared by every private mapping of the file and every program
+    /// segment loaded from it (see `mm::page_cache::file_pages`). `None`:
+    /// the filesystem has no page cache, and the pages are copied.
+    #[cfg(feature = "alloc")]
+    fn page_cache(&self) -> Option<alloc::sync::Arc<crate::mm::page_cache::FileCache>> {
+        None
+    }
+
     /// The frames holding pages `[first_page, first_page + count)` of the
     /// file, for a MAP_SHARED mapping that maps the file's own pages, so it
     /// and every other mapping, read and write see one copy (N-230). Each

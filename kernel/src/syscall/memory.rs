@@ -210,33 +210,70 @@ pub fn sys_mmap(
         }
     }
 
+    // A private mapping of a file whose filesystem keeps a page cache maps
+    // the cached pages, shared read-only or copy-on-write (ADR 0010). They
+    // are taken before the address space is locked: filling them reads the
+    // file. The file is taken out of the table, which is not held across
+    // the read (N-118).
+    #[cfg(feature = "alloc")]
+    let cached: Option<alloc::vec::Vec<Option<crate::mm::FrameNumber>>> =
+        if !is_anonymous && !is_drm_mmap && private {
+            let file = proc
+                .file_table
+                .lock()
+                .get(fd)
+                .ok_or(SyscallError::BadFileDescriptor)?;
+            crate::mm::page_cache::file_pages(
+                &*file.node,
+                offset / PAGE_SIZE,
+                length.div_ceil(PAGE_SIZE),
+            )
+            .transpose()
+            .map_err(super::map_kernel_error)?
+        } else {
+            None
+        };
+    #[cfg(not(feature = "alloc"))]
+    let cached: Option<()> = None;
+
     let memory_space = proc.memory_space.lock();
 
-    let mapped_addr = if is_fixed {
-        // MAP_FIXED: map at the exact requested address, replacing what
-        // is there (N-141).
-        memory_space
-            .map_region_fixed(
-                VirtualAddress(addr as u64),
-                length,
-                mapping_type,
-                Some(page_flags),
-            )
-            .map_err(|_| SyscallError::OutOfMemory)?;
-        addr
-    } else if is_anonymous && flags & MAP_HUGETLB != 0 {
-        // 2 MiB pages (MEM-ARCH-01): a 2 MiB-aligned address, the length
-        // rounded up to 2 MiB.
-        memory_space
-            .mmap_huge_flags(length, mapping_type, page_flags)
-            .map_err(|_| SyscallError::OutOfMemory)?
-            .as_usize()
-    } else {
-        // Kernel-chosen address at the (bounded) mmap cursor.
-        let vaddr = memory_space
-            .mmap_flags(length, mapping_type, Some(page_flags))
-            .map_err(|_| SyscallError::OutOfMemory)?;
-        vaddr.as_usize()
+    let mapped = (|| -> Result<usize, SyscallError> {
+        Ok(if is_fixed {
+            // MAP_FIXED: map at the exact requested address, replacing what
+            // is there (N-141).
+            memory_space
+                .map_region_fixed(
+                    VirtualAddress(addr as u64),
+                    length,
+                    mapping_type,
+                    Some(page_flags),
+                )
+                .map_err(|_| SyscallError::OutOfMemory)?;
+            addr
+        } else if is_anonymous && flags & MAP_HUGETLB != 0 {
+            // 2 MiB pages (MEM-ARCH-01): a 2 MiB-aligned address, the length
+            // rounded up to 2 MiB.
+            memory_space
+                .mmap_huge_flags(length, mapping_type, page_flags)
+                .map_err(|_| SyscallError::OutOfMemory)?
+                .as_usize()
+        } else {
+            // Kernel-chosen address at the (bounded) mmap cursor.
+            let vaddr = memory_space
+                .mmap_flags(length, mapping_type, Some(page_flags))
+                .map_err(|_| SyscallError::OutOfMemory)?;
+            vaddr.as_usize()
+        })
+    })();
+    let mapped_addr = match mapped {
+        Ok(addr) => addr,
+        Err(e) => {
+            // Owners of cached pages no mapping took go back.
+            #[cfg(feature = "alloc")]
+            crate::mm::page_cache::release(cached.iter().flatten().flatten().copied());
+            return Err(e);
+        }
     };
 
     // For file-backed mappings, read file contents into the mapped pages
@@ -263,9 +300,22 @@ pub fn sys_mmap(
                     .map_physical_region(fb_phys, aligned_len, VirtualAddress(mapped_addr as u64))
                     .map_err(|_| SyscallError::OutOfMemory)?;
             }
+        } else if let Some(frames) = cached {
+            // The cached pages replace the fresh ones; pages past the end of
+            // the file stay zero.
+            #[cfg(feature = "alloc")]
+            if let Err(e) =
+                memory_space.install_file_pages(VirtualAddress(mapped_addr as u64), &frames)
+            {
+                let _ = memory_space.unmap_region(VirtualAddress(mapped_addr as u64));
+                return Err(super::map_kernel_error(e));
+            }
+            #[cfg(not(feature = "alloc"))]
+            let _ = frames;
         } else {
-            let file_table = proc.file_table.lock();
-            if let Some(file) = file_table.get(fd) {
+            // Taken out of the table, which is not held across the read.
+            let file = proc.file_table.lock().get(fd);
+            if let Some(file) = file {
                 // Read file data for the requested range.
                 // IMPORTANT: Read directly from the VFS node at the specified offset
                 // instead of using file.seek()+file.read(), which would corrupt the

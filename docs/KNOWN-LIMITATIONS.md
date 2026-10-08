@@ -316,6 +316,19 @@ affected. Below the socket layer:
 A file mapping is copied in full at `mmap` time. `MAP_SHARED` writes never reach the file, and
 two processes mapping one file do not see each other's changes.
 
+### Program loading (ADR 0010)
+
+- **No address-space randomisation:** PIE programs load at `0x5555_5555_4000`, the interpreter and
+  mmap regions at the bottom of the mmap area, stacks at the top (sprint G).
+- **No vDSO:** `clock_gettime` and friends are real system calls; the auxiliary vector has no
+  AT_SYSINFO_EHDR.
+- **No setuid exec:** set-user-ID and set-group-ID bits are not applied by `exec`.
+- **Dynamically linked programs** need musl's dynamic loader, `/lib/ld-musl-x86_64.so.1`, which the
+  root filesystem does not ship yet (the next step of ADR 0010).
+- **Shared file pages** exist for BlockFS files only; private mappings of files on other
+  filesystems are copies. Cached pages are never evicted under memory pressure; a file's pages stay
+  cached until it is written, truncated or deleted (v0.29).
+
 ### Memory mapping semantics (N-140 to N-143, N-88; sprints D and G)
 
 Page protections now follow `prot` (fixed in v0.27, N-132 to N-137). What remains:

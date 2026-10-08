@@ -456,6 +456,12 @@ impl VfsNode for BlockFsNode {
         Some((Arc::as_ptr(&self.fs) as u64, self.inode_num as u64))
     }
 
+    fn page_cache(&self) -> Option<Arc<crate::mm::page_cache::FileCache>> {
+        let fs = self.fs.read();
+        let meta = fs.get_metadata(self.inode_num).ok()?;
+        (meta.node_type == NodeType::File).then(|| fs.page_cache.file(self.inode_num as u64))
+    }
+
     fn node_type(&self) -> NodeType {
         self.metadata()
             .map(|m| m.node_type)
@@ -608,6 +614,9 @@ pub struct BlockFsInner {
     device_blocks: u64,
     /// Whether the backend accepts writes, sampled when attached.
     disk_writable: bool,
+    /// Pages of files shared by the processes that map them (ADR 0010),
+    /// dropped whenever a file's data changes or its inode is freed.
+    page_cache: crate::mm::page_cache::PageCacheTable,
 }
 
 impl BlockFsInner {
@@ -645,6 +654,7 @@ impl BlockFsInner {
             disk: None,
             device_blocks: 0,
             disk_writable: false,
+            page_cache: crate::mm::page_cache::PageCacheTable::new(),
         };
 
         // Create "." and ".." entries in the root directory (both point to inode 0)
@@ -667,8 +677,10 @@ impl BlockFsInner {
     fn allocate_inode(&mut self) -> Option<u32> {
         for (idx, inode) in self.inode_table.iter().enumerate() {
             if inode.links_count == 0 && idx > 0 {
-                // Don't allocate root
+                // Don't allocate root. A cache of the inode's previous file
+                // must not serve the new one.
                 self.superblock.free_inodes -= 1;
+                self.page_cache.invalidate(idx as u64);
                 return Some(idx as u32);
             }
         }
@@ -1084,6 +1096,7 @@ impl BlockFsInner {
             disk: None,
             device_blocks: 0,
             disk_writable: false,
+            page_cache: crate::mm::page_cache::PageCacheTable::new(),
         };
         fs.attach_disk(backend)?;
 
@@ -1287,6 +1300,7 @@ impl BlockFsInner {
         offset: usize,
         data: &[u8],
     ) -> Result<usize, KernelError> {
+        self.page_cache.invalidate(inode_num as u64);
         // Collect block information in multiple passes to avoid borrow conflicts
         let mut blocks_needed: Vec<(usize, usize, usize)> = Vec::new();
         let mut current_offset = offset;
@@ -1780,6 +1794,7 @@ impl BlockFsInner {
     }
 
     fn truncate_inode(&mut self, inode_num: u32, size: usize) -> Result<(), KernelError> {
+        self.page_cache.invalidate(inode_num as u64);
         let old_size = {
             let inode = self
                 .inode_table
@@ -2379,6 +2394,7 @@ impl BlockFsInner {
 
     /// Free all data blocks belonging to an inode (direct + indirect).
     fn free_inode_blocks(&mut self, inode_num: u32) -> Result<(), KernelError> {
+        self.page_cache.invalidate(inode_num as u64);
         // Free direct blocks
         for i in 0..DIRECT_BLOCKS {
             let block_num = self.inode_table[inode_num as usize].direct_blocks[i];

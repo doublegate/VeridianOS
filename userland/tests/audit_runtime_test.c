@@ -98,15 +98,20 @@ static void test_cow(void)
         return;
     }
     memset(heap, 'p', 8192);
+    /* CowShared counts every frame with more than one owner, once: the
+     * baseline includes this program's text, shared with the page cache
+     * (ADR 0010). */
+    int shared_before = cow_shared_kb();
     pid_t pid = fork();
     if (pid < 0) {
         report("fork_copy_on_write_isolation", 0, "fork failed");
         return;
     }
     if (pid == 0) {
-        /* While the parent is alive the pages are shared, which
-         * /proc/meminfo reports as CowShared (a deep-copying fork shows 0). */
-        if (cow_shared_kb() <= 0)
+        /* While the parent is alive its data pages are shared too, which
+         * /proc/meminfo reports as more CowShared (a deep-copying fork
+         * adds nothing). */
+        if (cow_shared_kb() <= shared_before)
             _exit(5);
         cow_global = 99;
         stack_buf[0] = 'S';
@@ -121,14 +126,14 @@ static void test_cow(void)
                    WEXITSTATUS(status) == 0;
     int parent_ok = cow_global == 7 && stack_buf[0] == 's' && heap[0] == 'p' &&
                     heap[4096] == 'p';
-    /* With the child gone nothing is shared any more: owner counts drop. */
+    /* With the child gone its sharing ends: owner counts drop back. */
     int shared_after = cow_shared_kb();
-    parent_ok = parent_ok && shared_after == 0;
+    parent_ok = parent_ok && shared_after == shared_before;
     cow_global = 8; /* the last owner just regains write access */
     parent_ok = parent_ok && cow_global == 8;
     static char why[96];
-    snprintf(why, sizeof(why), "child %d (status 0x%x) parent %d, CowShared %d kB after", child_ok,
-             (unsigned)status, parent_ok, shared_after);
+    snprintf(why, sizeof(why), "child %d (status 0x%x) parent %d, CowShared %d kB before, %d after",
+             child_ok, (unsigned)status, parent_ok, shared_before, shared_after);
     report("fork_copy_on_write_isolation", child_ok && parent_ok, why);
     close(fds[0]);
     close(fds[1]);

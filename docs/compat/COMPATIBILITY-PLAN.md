@@ -124,9 +124,11 @@ Each group lands with its LTP cases. The counts are "missing" entries in the cov
 ## X3. What Linux programs assume beyond syscalls (alongside X2)
 
 - **Loader**
-  - Dynamic linking through PT_INTERP, shebang scripts, and setuid exec with AT_SECURE.
-  - A full auxv. Missing today: AT_SYSINFO_EHDR, AT_HWCAP/AT_HWCAP2, AT_CLKTCK, AT_SECURE,
-    AT_PLATFORM and AT_MINSIGSTKSZ.
+  - Dynamic linking through PT_INTERP, shebang scripts, and setuid exec with AT_SECURE. Done in
+    v0.27 (ADR 0010): PT_INTERP, PIE programs and the interpreter loaded and validated, shebang
+    scripts. Missing: setuid exec (AT_SECURE is set when the effective IDs differ from the real
+    ones).
+  - A full auxv. Done in v0.27 (ADR 0010) except AT_SYSINFO_EHDR, which needs the vDSO.
   - A vDSO and ASLR.
 - **TTY**
   - A line discipline and every termios ioctl.
