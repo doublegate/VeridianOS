@@ -142,7 +142,8 @@ CMAKE
 # ── 3. Cross-compile qtbase ───────────────────────────────────────────
 build_qtbase() {
     if [[ -f "${SYSROOT}/usr/lib/libQt6Core.so" && \
-          -f "${SYSROOT}/usr/lib/qt6/plugins/platforms/libqveridian.so" ]]; then
+          -f "${SYSROOT}/usr/lib/qt6/plugins/platforms/libqveridian.so" && \
+          -f "${SYSROOT}/usr/lib/qt6/plugins/platforms/libqxcb.so" ]]; then
         log "qtbase: already installed."
         return 0
     fi
@@ -195,6 +196,8 @@ build_qtbase() {
             -no-feature-tslib \
             -feature-libinput \
             -feature-xkbcommon \
+            -feature-xkbcommon-x11 \
+            -feature-xcb \
             -feature-wayland-client \
             -system-zlib \
             -system-freetype \

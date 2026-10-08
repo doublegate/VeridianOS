@@ -23,6 +23,8 @@
 | No cameras | Prison's scanner and any camera use need V4L2 devices, which the kernel does not provide | None |
 | No text-to-speech engine | Qt Speech is built without speech-dispatcher or flite | None |
 | No X11 applications | KWin is built with `KWIN_BUILD_X11=OFF`; XWayland is deferred | Wayland applications only |
+| X11 client libraries without an X server | libxcb, libX11 and friends are built (tools/cross/build-x11.sh) because Qt's xcb plugin, KWindowSystem's X11 API, libplasma and libkscreen use them unconditionally; the Plasma session itself is Wayland-only (`WITH_X11_SESSION=OFF`, X11 mouse/touchpad KCMs off) | None needed; the X11 code paths stay idle without `DISPLAY` |
+| polkit session tracking via ConsoleKit | polkit 127 is built with `session_tracking=ConsoleKit` (no logind/elogind on VeridianOS), and nothing provides ConsoleKit, so polkit cannot tell an active local session from an inactive one; `allow_active` rules do not grant | Administrator actions authenticate through the agent (pkexec, polkit-agent-helper-1 with PAM) |
 
 ### Data & Sync
 

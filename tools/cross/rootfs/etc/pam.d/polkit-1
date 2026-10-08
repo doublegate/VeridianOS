@@ -1,0 +1,5 @@
+# polkit-agent-helper-1 and pkexec.
+auth      include  system-auth
+account   include  system-auth
+password  include  system-auth
+session   include  system-auth

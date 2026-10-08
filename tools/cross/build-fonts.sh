@@ -8,10 +8,12 @@
 #   4. Build Fontconfig (needs FreeType + expat), with its configuration
 #      in /etc/fonts on the target
 #   5. Install the DejaVu fonts and their fontconfig rules
+#   6. Build libXft (client-side fonts for X11 clients; ksmserver), with
+#      libXrender from build-x11.sh
 #
 # Built and staged as lib/cross-env.sh describes; gperf is built for the
 # host tools first.
-# Prerequisites: build-deps.sh (zlib, bzip2, libpng, expat).
+# Prerequisites: build-deps.sh (zlib, bzip2, libpng, expat), build-x11.sh.
 
 set -euo pipefail
 
@@ -36,6 +38,9 @@ DEJAVU_SHA256="fa9ca4d13871dd122f61258a80d01751d603b4d3ee14095d65453b4e846e17d7"
 # (E0FFBD975397F77A32AB76ECB6301D9E1BBEAC08).
 GPERF_VER="3.3"
 GPERF_SHA256="fd87e0aba7e43ae054837afd6cd4db03a3f2693deb3619085e6ed9d8d9604ad8"
+# libXft: checksums/x11.sha256 (verified against Thomas E. Dickey's
+# signature, 19882D92DDA4C400C22C0D56CC2AF4472167BE03).
+XFT_VER="2.3.9"
 
 log() { echo "[build-fonts] $*"; }
 die() { echo "[build-fonts] ERROR: $*" >&2; exit 1; }
@@ -160,11 +165,21 @@ install_fonts() {
     done
 }
 
+# ── 6. libXft ────────────────────────────────────────────────────────
+build_libxft() {
+    installed libXft.so libXft && return 0
+    fetch "libXft-${XFT_VER}.tar.xz" \
+        "https://xorg.freedesktop.org/archive/individual/lib/libXft-${XFT_VER}.tar.xz" \
+        "libXft-${XFT_VER}" "$(listed_sha256 x11.sha256 "libXft-${XFT_VER}.tar.xz")"
+    log "Building libXft ${XFT_VER}..."
+    (cd "${BUILD_DIR}/libXft-${XFT_VER}" && ./configure "${COMMON_CONFIGURE[@]}" && make_install)
+}
+
 # ── Verify ────────────────────────────────────────────────────────────
 verify() {
     log "Verifying font stack..."
     local errors=0 item
-    for item in usr/lib/libfreetype.so usr/lib/libharfbuzz.so usr/lib/libfontconfig.so \
+    for item in usr/lib/libfreetype.so usr/lib/libharfbuzz.so usr/lib/libfontconfig.so usr/lib/libXft.so \
                 etc/fonts/fonts.conf etc/fonts/conf.d/57-dejavu-sans.conf \
                 usr/share/fonts/dejavu/DejaVuSans.ttf usr/share/fonts/dejavu/DejaVuSansMono.ttf; do
         if [[ -e "${SYSROOT}/${item}" ]]; then
@@ -190,6 +205,7 @@ main() {
     build_freetype_pass2
     build_fontconfig
     install_fonts
+    build_libxft
     verify
     log "=== Font stack build complete ==="
 }

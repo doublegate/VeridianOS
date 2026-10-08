@@ -7,10 +7,14 @@
 # and the shared libraries, plugins and QML modules (ADR 0010), the data under
 # /usr/share (keymaps, ALSA configuration, fonts and fontconfig rules, D-Bus
 # configuration and services, libinput quirks, icons, sounds, Plasma
-# packages, translations) and the configuration under /etc. Build-only
-# files stay behind: headers, pkg-config and CMake files, development links,
-# documentation, and scripts that only serve builds. The staging tree
-# becomes a BlockFS image (tools/mkfs-blockfs).
+# packages, translations) and the configuration under /etc, with the root
+# filesystem's own files (tools/cross/rootfs: accounts, PAM services).
+# Build-only files stay behind: headers, pkg-config and CMake files,
+# development links, documentation, and scripts that only serve builds.
+# No program may depend on a build-host path. The staging tree becomes a
+# BlockFS image (tools/mkfs-blockfs) with the owners and modes
+# tools/cross/rootfs/attrs gives: the set-user-ID helpers (pkexec,
+# polkit-agent-helper-1, dbus-daemon-launch-helper) among them.
 #
 # Prerequisites: build-all-kde.sh up to the plasma phase.
 
@@ -24,13 +28,21 @@ SYSROOT="${VERIDIAN_SYSROOT}"
 STAGING="${PROJECT_ROOT}/target/rootfs-kde-staging"
 OUTPUT="${PROJECT_ROOT}/target/rootfs-kde-blockfs.img"
 MKFS_DIR="${PROJECT_ROOT}/tools/mkfs-blockfs"
+ROOTFS_FILES="${SCRIPT_DIR}/rootfs"
 
 # Programs the session cannot start without.
 REQUIRED_PROGRAMS=(
     usr/bin/kwin_wayland
     usr/bin/plasmashell
+    usr/bin/startplasma-wayland
+    usr/bin/plasma_session
+    usr/bin/ksmserver
     usr/bin/dbus-daemon
     usr/bin/dbus-run-session
+    usr/bin/pkexec
+    usr/lib/polkit-1/polkitd
+    usr/lib/polkit-1/polkit-agent-helper-1
+    usr/lib/libexec/kscreenlocker_greet
 )
 
 # Build-only parts of /usr/share and /usr/lib.
@@ -49,7 +61,7 @@ die() { echo "[rootfs-kde] ERROR: $*" >&2; exit 1; }
 prepare_staging() {
     log "Preparing staging directory..."
     rm -rf "${STAGING}"
-    mkdir -p "${STAGING}"/{usr/bin,usr/lib,usr/share,etc,run,tmp,var/cache/fontconfig,var/lib/dbus}
+    mkdir -p "${STAGING}"/{usr/bin,usr/lib,usr/share,etc,root,run,tmp,var/cache/fontconfig,var/lib/dbus}
 }
 
 STRIP="${VERIDIAN_TOOLCHAIN}/bin/${VERIDIAN_TARGET}-strip"
@@ -83,9 +95,9 @@ copy_programs() {
 
 # musl's dynamic loader, and every shared library, plugin and QML plugin
 # (ADR 0010). A library directly in /usr/lib goes in once, under its
-# SONAME, the name programs ask for: the image builder turns symlinks into
-# copies, so the version links (libfoo.so.1 -> libfoo.so.1.2.3) would each
-# be a full copy, and the development link (libfoo.so) serves only builds.
+# SONAME, the name programs ask for (the loader asks for nothing else, so
+# the version links, libfoo.so.1.2.3 behind libfoo.so.1, and the development
+# link, libfoo.so, serve only builds).
 # Plugins and modules in subdirectories keep their paths (they are opened
 # by path). The loader is musl's libc.so itself, which also answers a
 # libc.so dependency, so /usr/lib gets no second copy.
@@ -123,6 +135,8 @@ copy_data() {
         --exclude='*.so' --exclude='*.so.*' --exclude='/lib/libexec' --exclude='*.prl' \
         "${SYSROOT}/usr/lib" "${STAGING}/usr/"
     rsync -a "${SYSROOT}/etc/" "${STAGING}/etc/"
+    # The root filesystem's own: accounts and PAM services.
+    rsync -a "${ROOTFS_FILES}/etc/" "${STAGING}/etc/"
     # The session configuration (userland/integration).
     install -Dm644 "${PROJECT_ROOT}/userland/integration/default-session.conf" \
         "${STAGING}/etc/veridian/session.conf"
@@ -137,11 +151,45 @@ compile_schemas() {
         die "glib-compile-schemas failed"
 }
 
+# No staged program or library may name a build-host path as a dependency
+# or library search path: the dynamic loader would look for it on the
+# target (a library without a SONAME, linked by path, records its path).
+check_host_paths() {
+    log "Checking dependencies for build-host paths..."
+    local file bad=0 found
+    while IFS= read -r -d '' file; do
+        is_elf "${file}" || continue
+        # A dependency named by absolute path, or a search path under a
+        # build-host directory (/usr/lib, the target's own, is harmless). A
+        # failing readelf or awk stops the build (pipefail), so the check
+        # cannot pass by not running.
+        found="$("${READELF}" -d "${file}" |
+            awk '(/\(NEEDED\)/ && /\[\//) ||
+                 (/\((RPATH|RUNPATH)\)/ && /[ :[]\/(opt|home|tmp)\//)')"
+        if [[ -n "${found}" ]]; then
+            log "  ${file#"${STAGING}/"}: ${found}"
+            bad=$((bad + 1))
+        fi
+    done < <(find "${STAGING}" -type f -print0)
+    # Symlinks go into the image as they are: one into a build-host
+    # directory would point nowhere on the target.
+    while IFS= read -r -d '' file; do
+        found="$(readlink "${file}")"
+        if [[ "${found}" =~ ^/(opt|home|tmp)/ ]]; then
+            log "  ${file#"${STAGING}/"} -> ${found}"
+            bad=$((bad + 1))
+        fi
+    done < <(find "${STAGING}" -type l -print0)
+    [[ ${bad} -eq 0 ]] || die "${bad} files depend on build-host paths"
+}
+
 verify() {
     log "Verifying rootfs..."
     local errors=0 item
     for item in "${REQUIRED_PROGRAMS[@]}" lib/ld-musl-x86_64.so.1 \
                 etc/veridian/session.conf etc/fonts/fonts.conf etc/ssl/openssl.cnf \
+                etc/passwd etc/group etc/pam.d/kde etc/pam.d/polkit-1 etc/pam.d/other \
+                usr/lib/security/pam_veridian.so usr/lib/security/pam_deny.so \
                 usr/share/X11/xkb/rules/evdev usr/share/alsa/alsa.conf \
                 usr/share/dbus-1/session.conf usr/share/libinput \
                 usr/share/fonts/dejavu/DejaVuSans.ttf; do
@@ -166,8 +214,8 @@ build_image() {
     img_mb=$(( staging_mb * 3 / 2 ))
     (( img_mb >= 256 )) || img_mb=256
     log "  Staging: ${staging_mb} MB, image: ${img_mb} MB"
-    "${mkfs}" --populate "${STAGING}" --output "${OUTPUT}" --size "${img_mb}" ||
-        die "mkfs-blockfs failed"
+    "${mkfs}" --populate "${STAGING}" --attrs "${ROOTFS_FILES}/attrs" \
+        --output "${OUTPUT}" --size "${img_mb}" || die "mkfs-blockfs failed"
     log "Image: ${OUTPUT} ($(stat -c%s "${OUTPUT}") bytes)"
 }
 
@@ -196,6 +244,7 @@ main() {
     copy_libraries
     copy_data
     compile_schemas
+    check_host_paths
     verify
     build_image
     print_qemu_cmd

@@ -48,6 +48,16 @@
   account by failing. `userland/pam_veridian` is the Linux-PAM module over it (auth, account,
   password), built into the KDE sysroot; the screen locker (PAM service `kde`) and polkit
   (`polkit-1`) authenticate with it.
+- **KDE Plasma builds on shared libraries.** The Plasma phase of the cross pipeline completes,
+  through plasma-desktop. Added for it: the X11 client libraries KDE expects even without an X
+  server (libXrender, libXcursor, libICE, libSM, libxkbfile, libXft; plasma-workspace is built
+  with X11 support for ksmserver, which the Wayland session uses, but no X11 session), polkit 127
+  with polkit-qt-1, Linux-PAM, libgudev and libwacom, KDE Frameworks' qqc2-desktop-style and
+  Kirigami Addons. Every new source is checked against its signature or published checksum.
+  The KDE root filesystem carries accounts (`/etc/passwd`, `/etc/group`), PAM services that
+  refuse anything unconfigured, and the set-user-ID helpers (pkexec, polkit-agent-helper-1,
+  dbus-daemon-launch-helper); its assembly fails if any program depends on a build-host path.
+
 - **Scheduling calls take effect (N-221).** sched_setscheduler, sched_getscheduler and the
   affinity calls were stubs that returned 0. Each thread now has Linux's scheduling parameters --
   policy (SCHED_OTHER, FIFO, RR, BATCH, IDLE, DEADLINE), real-time priority, nice value and
@@ -528,6 +538,13 @@
 
 ### Fixed
 
+- **KDE cross pipeline:** SQLite was built without a SONAME, so Qt's SQL plugin recorded the
+  sysroot's path to it and could never load on the target; it now has its historical SONAME,
+  `libsqlite3.so.0`. kded6 compiled in the build host's path to kconf_update. Build tools
+  imported from earlier packages were not run through the target launcher when the package's
+  CMake config called `find_dependency()` after defining them (KDocTools' meinproc6, so a
+  package with documentation ran it with the host's libraries); every imported tool is wrapped
+  now. plasma-desktop compiled the sysroot's path to the XKB data into its keyboard settings.
 - **No executable stacks, and a warning-free userland build.** The VeridianOS GCC target never
   emitted `.note.GNU-stack`, nor did the crt objects, so every program the cross toolchain
   linked got an executable stack and ld warned for each. The target now marks objects as FreeBSD

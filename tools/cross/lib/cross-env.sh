@@ -46,7 +46,8 @@ COMMON_CONFIGURE=(
 # exe_wrapper, CMake's emulator and wrappers of imported tools): dynamic
 # programs go through musl's loader with the sysroot's libraries only
 # (musl's default path would reach the host's glibc libraries in /usr/lib),
-# Qt's plugins from the sysroot; static ones run directly.
+# with Qt's plugins and shared data (XDG_DATA_DIRS: KDocTools' DocBook
+# customization, for instance) from the sysroot; static ones run directly.
 mkdir -p "$(dirname "${VERIDIAN_RUN_TARGET}")"
 cat > "${VERIDIAN_RUN_TARGET}.tmp" <<RUNEOF
 #!/bin/sh
@@ -54,7 +55,8 @@ cat > "${VERIDIAN_RUN_TARGET}.tmp" <<RUNEOF
 prog="\$1"
 shift
 if "${VERIDIAN_TOOLCHAIN}/bin/${HOST}-readelf" -l "\$prog" 2>/dev/null | grep -q 'program interpreter'; then
-    QT_PLUGIN_PATH="${SYSROOT}/usr/lib/qt6/plugins" exec "${SYSROOT}/usr/lib/libc.so" \\
+    QT_PLUGIN_PATH="${SYSROOT}/usr/lib/qt6/plugins" XDG_DATA_DIRS="${SYSROOT}/usr/share" \\
+        exec "${SYSROOT}/usr/lib/libc.so" \\
         --library-path "${SYSROOT}/usr/lib" "\$prog" "\$@"
 fi
 exec "\$prog" "\$@"

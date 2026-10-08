@@ -1,0 +1,18 @@
+# Owners and modes in the KDE root filesystem (tools/mkfs-blockfs --attrs):
+# PATH UID GID [MODE]. The staging tree belongs to whoever built it and the
+# image gives everything to root; these are the exceptions. A path missing
+# from the image fails the build.
+
+# Set-user-ID helpers: pkexec and polkit's authentication agent helper
+# (PAM service polkit-1), and D-Bus's system service launcher, which only
+# the bus (group messagebus) may run.
+/usr/bin/pkexec                              0   0    4755
+/usr/lib/polkit-1/polkit-agent-helper-1      0   0    4755
+/usr/libexec/dbus-daemon-launch-helper       0   81   4750
+
+# polkit's rules, readable only by polkitd.
+/etc/polkit-1/rules.d                        102 0    0750
+/usr/share/polkit-1/rules.d                  102 0    0750
+
+/root                                        0   0    0700
+/tmp                                         0   0    1777

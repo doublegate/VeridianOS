@@ -4,7 +4,10 @@
 # Build order follows the KF6 dependency chain. Shared (ADR 0010), for /usr, staged
 # into the sysroot (lib/cross-env.sh); Qt's directory layout for plugins
 # and QML (lib/kde-build.sh). Tarball checksums: KDE's
-# published ones (checksums/kf6.sha256).
+# published ones (checksums/kf6.sha256; qqc2-desktop-style and Kirigami
+# Addons also verified against their signatures, Nicolas Fella's
+# 90A968ACA84537CC27B99EAF2C8DF587A6D4AAC1 and Carl Schwan's
+# 39FFA93CAE9C6AFC212AD00202325448204E452A, both in KDE's release keyring).
 #
 # Prerequisites: build-qt6.sh (Qt 6 in the sysroot, host Qt).
 
@@ -24,6 +27,8 @@ PWP_VER="1.23.0"
 # QCoro (C++ coroutines for Qt; plasma-workspace), Alpine's checksum.
 QCORO_VER="0.13.0"
 QCORO_SHA256="4bff7513c5c8e301b66308df05795043b1792ed16381a484e5c990171b8ff19e"
+# Kirigami Addons (released on its own; Plasma's settings pages use it).
+KIRIGAMI_ADDONS_VER="1.15.0"
 
 log() { echo "[build-kf6] $*"; }
 die() { echo "[build-kf6] ERROR: $*" >&2; exit 1; }
@@ -53,6 +58,22 @@ patch_kf_source() {
             replace_once "${src}/src/runtime/kwalletd/secretserviceclient.cpp" \
                 '{"type", SECRET_SCHEMA_ATTRIBUTE_STRING}}};' \
                 '{"type", SECRET_SCHEMA_ATTRIBUTE_STRING}}, 0, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr};'
+            ;;
+        KDED)
+            # kded6 runs kconf_update at its installed path; the expression
+            # names the build's wrapper for it (cmake/VeridianTargetTools.cmake),
+            # a build-host path that would be compiled into the program.
+            # shellcheck disable=SC2016 # CMake syntax, not shell expansions
+            replace_once "${src}/src/CMakeLists.txt" \
+                'KCONF_UPDATE_EXE="$<TARGET_FILE:KF6::kconf_update>"' \
+                'KCONF_UPDATE_EXE="${KDE_INSTALL_FULL_LIBEXECDIR_KF}/kconf_update"'
+            ;;
+        KDocTools)
+            # docbookl10nhelper runs while KDocTools builds: through the
+            # runner (meinproc6 already runs by target name).
+            python3 -I "${SCRIPT_DIR}/deps-patches/cmake_run_built_tools.py" \
+                "${src}/src/CMakeLists.txt" KF6::docbookl10nhelper \
+                || die "failed to patch KDocTools' tool commands"
             ;;
         BreezeIcons)
             # Its icon tools run during the build: through the runner.
@@ -138,8 +159,9 @@ build_qca() {
         -DUSE_RELATIVE_PATHS=ON
     # Relocatable: its targets name the headers relative to the package
     # (it exported /usr/include/..., the build host's, otherwise).
-    [[ -f "${targets}" ]] && ! grep -q 'INTERFACE_INCLUDE_DIRECTORIES "/usr/' "${targets}" ||
+    if [[ ! -f "${targets}" ]] || grep -q 'INTERFACE_INCLUDE_DIRECTORIES "/usr/' "${targets}"; then
         die "QCA did not install a relocatable Qca-qt6Targets.cmake"
+    fi
 }
 
 # ── QCoro ─────────────────────────────────────────────────────────────
@@ -168,11 +190,16 @@ build_tier1() {
     # It generates icons with Python and lxml (host-python-requirements.txt).
     host_python
     build_kf_module BreezeIcons breeze-icons -- -DPython_EXECUTABLE="${HOST_PYTHON}"
+    # KDocTools: the KDE handbooks (DocBook, build-deps.sh), installed with
+    # paths relative to the DocBook files so they hold on VeridianOS too.
+    build_kf_module KDocTools -- -DRELOCATABLE_DOCBOOK_FILES=ON
     # Required by plasma-workspace: syntax highlighting (KTextEditor),
     # holidays (calendar), charts (system monitor applets), and
     # NetworkManagerQt (libnm from build-dbus.sh).
     build_ksyntaxhighlighting
     build_kf_module KHolidays
+    # Unit conversion (plasma5support's weather data engines).
+    build_kf_module KUnitConversion
     build_kf_module KQuickCharts
     build_kf_module NetworkManagerQt networkmanager-qt
     build_qcoro
@@ -216,11 +243,27 @@ build_ksyntaxhighlighting() {
     kf_config KSyntaxHighlighting >/dev/null || die "KF6 KSyntaxHighlighting: CMake config not installed"
 }
 
+# KWindowSystem with its X11 API (KX11Extras, KWindowInfo), which libplasma
+# and libkscreen use without guards; its Wayland platform plugin serves the
+# session. An install without the X11 API is rebuilt.
+build_kwindowsystem() {
+    if kf_config KWindowSystem >/dev/null && \
+       [[ -f "${SYSROOT}/usr/include/KF6/KWindowSystem/KX11Extras" ]]; then
+        log "KWindowSystem: already installed."
+        return 0
+    fi
+    local src
+    src="$(kde_fetch "kwindowsystem-${KF_VER}" "${KF_URL_BASE}" kf6.sha256)"
+    patch_kf_source KWindowSystem "${src}"
+    kde_cmake KWindowSystem "${src}" -DKWINDOWSYSTEM_X11=ON -DKWINDOWSYSTEM_WAYLAND=ON
+    [[ -f "${SYSROOT}/usr/include/KF6/KWindowSystem/KX11Extras" ]] ||
+        die "KWindowSystem: X11 API not installed"
+}
+
 # Tier 2: Depends on Tier 1
 build_tier2() {
     build_kf_module KIconThemes
-    # KWindowSystem: Wayland (its platform plugin); no X11 server here.
-    build_kf_module KWindowSystem -- -DKWINDOWSYSTEM_X11=OFF
+    build_kwindowsystem
     # KIdleTime: required by KWin. Wayland (its poller plugin).
     build_kf_module KIdleTime
     build_kf_module KGlobalAccel
@@ -277,6 +320,25 @@ build_tier4() {
     build_kf_module Prison
     # KSvg: SVG rendering for Plasma themes
     build_kf_module KSvg
+    # The Qt Quick Controls style that draws QML applications and KCMs
+    # with the desktop's widget style (Breeze).
+    build_kf_module QQC2DesktopStyle qqc2-desktop-style
+    build_kirigami_addons
+}
+
+# ── Kirigami Addons ───────────────────────────────────────────────────
+# Its own release series: the QML components (form cards, dialogs, date
+# pickers) Plasma's KCMs and plasma-desktop are written with.
+build_kirigami_addons() {
+    if kf_config KirigamiAddons >/dev/null; then
+        log "KirigamiAddons: already installed."
+        return 0
+    fi
+    local src
+    src="$(kde_fetch "kirigami-addons-${KIRIGAMI_ADDONS_VER}" \
+        "https://download.kde.org/stable/kirigami-addons" kf6.sha256)"
+    kde_cmake KirigamiAddons "${src}"
+    kf_config KirigamiAddons >/dev/null || die "Kirigami Addons: CMake config not installed"
 }
 
 # ── Verify ────────────────────────────────────────────────────────────
@@ -286,13 +348,13 @@ verify() {
     # Every module this script builds: a failed build has already stopped
     # it, so a missing config here means an install went wrong.
     for mod in KConfig KCoreAddons KI18n KGuiAddons KWidgetsAddons KColorScheme KArchive \
-               KCodecs KItemViews BreezeIcons KSyntaxHighlighting KHolidays KQuickCharts \
+               KCodecs KItemViews BreezeIcons KSyntaxHighlighting KHolidays KUnitConversion KQuickCharts \
                NetworkManagerQt KIconThemes KWindowSystem KIdleTime \
                KGlobalAccel KPackage KCompletion KNotifications KJobWidgets KAuth \
                KConfigWidgets KService Solid KDeclarative KXmlGui KBookmarks KCrash \
                KDBusAddons KIO Kirigami KCMUtils KItemModels Sonnet KTextWidgets KWallet \
                Attica KNewStuff KRunner KStatusNotifierItem KNotifyConfig KParts KTextEditor KDED \
-               Prison KSvg; do
+               Prison KSvg QQC2DesktopStyle KirigamiAddons; do
         if kf_config "${mod}" >/dev/null; then
             log "  OK: ${mod}"
         else

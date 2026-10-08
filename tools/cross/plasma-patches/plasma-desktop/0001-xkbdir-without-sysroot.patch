@@ -1,0 +1,24 @@
+VeridianOS: XKBDIR without the sysroot prefix pkgconf adds
+
+pkg_get_variable returns xkb_base with PKG_CONFIG_SYSROOT_DIR prefixed
+(pkgconf), but XKBDIR is compiled into tastenbrett as the target's
+run-time path and the configure check prefixes CMAKE_SYSROOT itself.
+
+--- a/ConfigureChecks.cmake	2026-10-08 09:49:45.492615003 -0400
++++ b/ConfigureChecks.cmake	2026-10-08 09:49:45.502072978 -0400
+@@ -1,6 +1,15 @@
+ set(CMAKE_MODULE_PATH ${CMAKE_CURRENT_SOURCE_DIR}/cmake/modules ${CMAKE_MODULE_PATH} )
+ 
+ pkg_get_variable(XKBDIR xkeyboard-config xkb_base)
++# pkgconf prefixes PKG_CONFIG_SYSROOT_DIR to path variables; XKBDIR is the
++# target's run-time path (tastenbrett compiles it in), so drop the prefix.
++if (CMAKE_CROSSCOMPILING AND CMAKE_SYSROOT AND XKBDIR)
++    string(FIND "${XKBDIR}" "${CMAKE_SYSROOT}/" _xkb_sysroot)
++    if (_xkb_sysroot EQUAL 0)
++        string(LENGTH "${CMAKE_SYSROOT}" _xkb_sysroot_len)
++        string(SUBSTRING "${XKBDIR}" ${_xkb_sysroot_len} -1 XKBDIR)
++    endif()
++endif()
+ if (NOT XKBDIR)
+     message(FATAL_ERROR "Couldn't find xkb_base using pkg-config: is xkeyboard-config installed?")
+ elseif (CMAKE_CROSSCOMPILING)

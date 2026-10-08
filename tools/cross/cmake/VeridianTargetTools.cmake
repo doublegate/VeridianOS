@@ -53,19 +53,21 @@ function(_veridian_tt_wrap target)
     set_property(TARGET ${target} PROPERTY _VERIDIAN_TT_DONE TRUE)
 endfunction()
 
-function(_veridian_tt_wrap_new before after)
-    foreach(target IN LISTS after)
-        if(NOT target IN_LIST before)
-            _veridian_tt_wrap(${target})
-        endif()
+function(_veridian_tt_wrap_all)
+    get_property(targets DIRECTORY PROPERTY IMPORTED_TARGETS)
+    foreach(target IN LISTS targets)
+        _veridian_tt_wrap(${target})
     endforeach()
 endfunction()
 
 # A macro, so that find_package's results land in the caller's scope as
 # usual; the previous find_package stays reachable as _find_package.
+# Every imported executable not yet wrapped is wrapped afterwards (each
+# once): a package's config often calls find_dependency() after creating
+# its targets, and that nested find_package shares this macro's variables,
+# so a before/after comparison missed the outer package's tools
+# (KF6::meinproc6, created before KF6DocTools' find_dependency(Qt6Core)).
 macro(find_package)
-    get_property(_veridian_tt_before DIRECTORY PROPERTY IMPORTED_TARGETS)
     _find_package(${ARGV})
-    get_property(_veridian_tt_after DIRECTORY PROPERTY IMPORTED_TARGETS)
-    _veridian_tt_wrap_new("${_veridian_tt_before}" "${_veridian_tt_after}")
+    _veridian_tt_wrap_all()
 endmacro()

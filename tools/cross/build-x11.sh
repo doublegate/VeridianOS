@@ -2,21 +2,32 @@
 # Build the X11 client libraries for VeridianOS (shared, ADR 0010)
 #
 # There is no X server (XWayland is deferred: docs/KNOWN-LIMITATIONS.md),
-# but KDE needs the client side: KWin compiles against the XCB headers even
-# with KWIN_BUILD_X11=OFF (its effect handler includes its X11 event-filter
-# headers unconditionally, upstream too), and the screen locker
-# (kscreenlocker) links libX11 and libxcb.
+# but KDE needs the client side, as every distribution builds it: Qt's X11
+# platform plugin (xcb) and xkbcommon's X11 part, KWindowSystem's X11 API,
+# which libplasma and libkscreen use without guards; KWin compiles against
+# the XCB headers even with KWIN_BUILD_X11=OFF; the screen locker links
+# libX11. This phase runs before build-deps.sh, which builds
+# libxkbcommon-x11 against it.
 #
 #   xorgproto, xtrans             protocol and transport headers
 #   xcb-proto                     the XCB protocol descriptions and the
 #                                 Python xcbgen module libxcb's build runs
 #                                 (its pkg-config file is sysroot-aware)
 #   libXau, libXdmcp, libxcb      the XCB core
-#   libX11, libXext, libXfixes, libXi, libXtst
-#   xcb-util, xcb-util-keysyms
+#   libX11, libXext, libXfixes, libXrender, libXcursor (cursor themes for
+#   KDE's platform theme), libXi, libXtst
+#   libICE, libSM                 X session management (ksmserver)
+#   libxkbfile                    keymap files (plasma-desktop's keyboard
+#                                 settings)
+#   xcb-util, xcb-util-keysyms, xcb-util-image, xcb-util-renderutil,
+#   xcb-util-wm, xcb-util-cursor (Qt's xcb plugin, plasma-desktop)
 #
-# Checksums: checksums/x11.sha256. Built and staged as lib/cross-env.sh
-# describes. Prerequisites: build-deps.sh; a host Python 3.
+# Checksums: checksums/x11.sha256 (the xcb-util releases verified against
+# Alan Coopersmith's signatures, 4A193C06D35E7C670FA4EF0BA2FB9E081F2D130E and
+# 3AB285232C46AE43D8E192F4DAB0F78EA6E7E2D2, as libXrender; libXcursor against
+# Thomas E. Dickey's, 19882D92DDA4C400C22C0D56CC2AF4472167BE03). Built and staged as
+# lib/cross-env.sh describes. Prerequisites: the musl toolchain; a host
+# Python 3.
 
 set -euo pipefail
 
@@ -134,6 +145,16 @@ build_libxfixes() {
     autotools_x11 libXfixes-6.0.2 lib
 }
 
+build_libxrender() {
+    installed libXrender.so libXrender && return 0
+    autotools_x11 libXrender-0.9.12 lib
+}
+
+build_libxcursor() {
+    installed libXcursor.so libXcursor && return 0
+    autotools_x11 libXcursor-1.2.3 lib
+}
+
 build_libxi() {
     installed libXi.so libXi && return 0
     autotools_x11 libXi-1.8.3 lib --disable-specs --disable-docs
@@ -142,6 +163,27 @@ build_libxi() {
 build_libxtst() {
     installed libXtst.so libXtst && return 0
     autotools_x11 libXtst-1.2.5 lib --disable-specs
+}
+
+build_libxkbfile() {
+    installed libxkbfile.so libxkbfile && return 0
+    local src
+    src="$(x11_fetch libxkbfile-1.2.0 lib)"
+    log "Building libxkbfile 1.2.0..."
+    meson_build "${src}" "${BUILD_DIR}/libxkbfile-build"
+}
+
+# libSM names clients in the XSMP specification's own format (address,
+# time, process ID, sequence), not by UUID: libuuid comes later
+# (build-deps.sh).
+build_libice() {
+    installed libICE.so libICE && return 0
+    autotools_x11 libICE-1.1.2 lib --disable-docs --disable-specs
+}
+
+build_libsm() {
+    installed libSM.so libSM && return 0
+    autotools_x11 libSM-1.2.6 lib --disable-docs --without-libuuid
 }
 
 build_xcb_util() {
@@ -154,13 +196,35 @@ build_xcb_util_keysyms() {
     autotools_x11 xcb-util-keysyms-0.4.1 lib
 }
 
+build_xcb_util_image() {
+    installed libxcb-image.so xcb-util-image && return 0
+    autotools_x11 xcb-util-image-0.4.1 lib
+}
+
+build_xcb_util_renderutil() {
+    installed libxcb-render-util.so xcb-util-renderutil && return 0
+    autotools_x11 xcb-util-renderutil-0.3.10 lib
+}
+
+build_xcb_util_wm() {
+    installed libxcb-icccm.so xcb-util-wm && return 0
+    autotools_x11 xcb-util-wm-0.4.2 lib
+}
+
+build_xcb_util_cursor() {
+    installed libxcb-cursor.so xcb-util-cursor && return 0
+    autotools_x11 xcb-util-cursor-0.1.6 lib
+}
+
 # ── Verify ────────────────────────────────────────────────────────────
 verify() {
     log "Verifying X11 client libraries..."
     local errors=0 item
     for item in lib/libxcb.so lib/libX11.so lib/libX11-xcb.so lib/libXau.so lib/libXdmcp.so \
-                lib/libXext.so lib/libXfixes.so lib/libXi.so lib/libXtst.so \
-                lib/libxcb-util.so lib/libxcb-keysyms.so lib/libxcb-xkb.so lib/libxcb-xinput.so \
+                lib/libXext.so lib/libXfixes.so lib/libXrender.so lib/libXcursor.so lib/libXi.so lib/libXtst.so \
+                lib/libICE.so lib/libSM.so lib/libxkbfile.so \
+                lib/libxcb-util.so lib/libxcb-keysyms.so lib/libxcb-image.so lib/libxcb-render-util.so \
+                lib/libxcb-icccm.so lib/libxcb-ewmh.so lib/libxcb-cursor.so lib/libxcb-xkb.so lib/libxcb-xinput.so \
                 include/xcb/xcb.h include/X11/Xlib.h include/X11/Xlib-xcb.h \
                 share/pkgconfig/xcb-proto.pc share/pkgconfig/xproto.pc; do
         if [[ -e "${SYSROOT}/usr/${item}" ]]; then
@@ -186,10 +250,19 @@ main() {
     build_libx11
     build_libxext
     build_libxfixes
+    build_libxrender
+    build_libxcursor
     build_libxi
     build_libxtst
+    build_libice
+    build_libsm
+    build_libxkbfile
     build_xcb_util
     build_xcb_util_keysyms
+    build_xcb_util_image
+    build_xcb_util_renderutil
+    build_xcb_util_wm
+    build_xcb_util_cursor
     verify
     log "=== X11 client libraries complete ==="
 }

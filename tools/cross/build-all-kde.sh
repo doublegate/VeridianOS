@@ -42,7 +42,7 @@ export JOBS="${JOBS:-$(nproc)}"
 
 # Phase names in order
 # Wayland before Mesa: Mesa's EGL has a Wayland platform.
-PHASES=(musl toolchain deps wayland x11 mesa fonts dbus qt6 kf6 kwin plasma rootfs)
+PHASES=(musl toolchain x11 deps wayland mesa fonts dbus qt6 kf6 kwin plasma rootfs)
 
 # Map phase names to scripts
 declare -A PHASE_SCRIPTS=(

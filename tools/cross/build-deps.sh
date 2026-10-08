@@ -16,6 +16,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 # shellcheck source=veridian-paths.sh
 source "${SCRIPT_DIR}/veridian-paths.sh"
 BUILD_DIR="${VERIDIAN_CROSS_BUILD}/deps"
@@ -123,6 +124,30 @@ LIBQALCULATE_VER="5.13.1"
 LIBQALCULATE_SHA256="cf8d3eaf3d85030115701e997b6585e69573e71add88e7758486c5d1b01d3cc3"
 LIBNDP_VER="1.9"
 LIBNDP_SHA256="e564f5914a6b1b799c3afa64c258824a801c1b79a29e2fe6525b682249c65261"
+# Plasma's prerequisites. Boost (headers only: kactivitymanagerd), libnl and
+# lm-sensors' libsensors (libksysguard's network and sensor plugins),
+# Linux-PAM (the screen locker, polkit), duktape (polkit's JavaScript rules
+# engine), libxslt and the DocBook DTD and stylesheets (KDocTools).
+# Checksums: Boost, libnl and libxslt as published with the release;
+# Linux-PAM's tarball verified against its maintainer's signature (Dmitry V.
+# Levin, 7BECFE3AF7B280BB52FF77F104BA4521C996DDE1); lm-sensors, duktape and
+# the DocBook files as first downloaded.
+BOOST_VER="1.92.0"
+BOOST_SHA256="ea7b982002cc9dfbe59b0b217b206f470dc75f3de0bb2973d844118934d82411"
+LIBNL_VER="3.12.0"
+LIBNL_SHA256="fc51ca7196f1a3f5fdf6ffd3864b50f4f9c02333be28be4eeca057e103c0dd18"
+LM_SENSORS_VER="3.6.2"
+LM_SENSORS_SHA256="c6a0587e565778a40d88891928bf8943f27d353f382d5b745a997d635978a8f0"
+LINUX_PAM_VER="1.7.3"
+LINUX_PAM_SHA256="2ce4765fd49df6693771ef2941f81e33d8ee14b94a81a5c7b369aa3b137b85a5"
+DUKTAPE_VER="2.7.0"
+DUKTAPE_SHA256="90f8d2fa8b5567c6899830ddef2c03f3c27960b11aca222fa17aa7ac613c2890"
+LIBXSLT_VER="1.1.45"
+LIBXSLT_SHA256="9acfe68419c4d06a45c550321b3212762d92f41465062ca4ea19e632ee5d216e"
+DOCBOOK_XML_VER="4.5"
+DOCBOOK_XML_SHA256="4e4e037a2b83c98c6c94818390d4bdd3f6e10f6ec62dd79188594e26190dc7b4"
+DOCBOOK_XSL_VER="1.79.2"
+DOCBOOK_XSL_SHA256="ee8b9eca0b7a8f89075832a2da7534bce8c5478fc8fc2676f512d5d87d832102"
 # Barcodes for KF6 Prison (QR codes in Plasma's clipboard, Data Matrix,
 # PDF417 and scanning): libqrencode and libdmtx as Git tag archives (their
 # own site is gone, and both carry CMake builds), zxing-cpp as its release
@@ -310,7 +335,7 @@ build_xkeyboard_config() {
 
 # ── libxkbcommon ──────────────────────────────────────────────────────
 build_xkbcommon() {
-    installed libxkbcommon.so libxkbcommon && return 0
+    installed libxkbcommon-x11.so libxkbcommon && return 0
     # Releases are GitHub tags now (xkbcommon.org no longer hosts tarballs).
     fetch "libxkbcommon-${XKBCOMMON_VER}.tar.gz" \
         "https://github.com/xkbcommon/libxkbcommon/archive/refs/tags/xkbcommon-${XKBCOMMON_VER}.tar.gz" \
@@ -320,7 +345,7 @@ build_xkbcommon() {
         -Dxkb-config-root=/usr/share/X11/xkb \
         -Dx-locale-root=/usr/share/X11/locale \
         -Denable-wayland=false \
-        -Denable-x11=false \
+        -Denable-x11=true \
         -Denable-tools=false \
         -Denable-bash-completion=false \
         -Denable-docs=false
@@ -328,14 +353,22 @@ build_xkbcommon() {
 
 # ── SQLite ────────────────────────────────────────────────────────────
 build_sqlite() {
-    installed libsqlite3.so SQLite && return 0
+    # An earlier build without a SONAME is replaced.
+    if [[ -f "${SYSROOT}/usr/lib/libsqlite3.so" ]] &&
+       "${VERIDIAN_TOOLCHAIN}/bin/${VERIDIAN_TARGET}-readelf" -d "${SYSROOT}/usr/lib/libsqlite3.so" |
+           grep -q 'Library soname: \[libsqlite3.so.0\]'; then
+        log "SQLite: already installed."
+        return 0
+    fi
     fetch "sqlite-${SQLITE_VER}.tar.gz" \
         "https://www.sqlite.org/${SQLITE_YEAR}/sqlite-autoconf-${SQLITE_VER}.tar.gz" \
         "sqlite-autoconf-${SQLITE_VER}" "${SQLITE_SHA256}"
     log "Building SQLite..."
     # Column metadata: Qt's SQL driver uses sqlite3_column_table_name16;
     # unlock notification: it waits on locked tables with it. Distributions
-    # build SQLite with both.
+    # build SQLite with both, and with the historical SONAME: without one
+    # (SQLite's default) a program linked by path records the build host's
+    # path as its dependency.
     (cd "${BUILD_DIR}/sqlite-autoconf-${SQLITE_VER}" && \
         CFLAGS="-O2 -fPIC -DSQLITE_THREADSAFE=1 -DSQLITE_ENABLE_COLUMN_METADATA=1 -DSQLITE_ENABLE_UNLOCK_NOTIFY=1" \
         ./configure \
@@ -343,7 +376,8 @@ build_sqlite() {
             --prefix=/usr \
             --enable-shared \
             --disable-static \
-            --disable-readline && \
+            --disable-readline \
+            --soname=legacy && \
         make_install)
 }
 
@@ -820,6 +854,136 @@ build_zxing() {
         -DZXING_UNIT_TESTS=OFF
 }
 
+# ── Plasma prerequisites ──────────────────────────────────────────────
+# Boost: its headers (kactivitymanagerd uses header-only libraries).
+build_boost() {
+    if [[ -f "${SYSROOT}/usr/include/boost/version.hpp" ]]; then
+        log "Boost headers: already installed."
+        return 0
+    fi
+    fetch "boost-${BOOST_VER}-b2-nodocs.tar.xz" \
+        "https://github.com/boostorg/boost/releases/download/boost-${BOOST_VER}/boost-${BOOST_VER}-b2-nodocs.tar.xz" \
+        "boost-${BOOST_VER}" "${BOOST_SHA256}"
+    log "Installing Boost ${BOOST_VER} headers..."
+    mkdir -p "${SYSROOT}/usr/include"
+    cp -a "${BUILD_DIR}/boost-${BOOST_VER}/boost" "${SYSROOT}/usr/include/"
+}
+
+build_libnl() {
+    installed libnl-3.so libnl && return 0
+    fetch "libnl-${LIBNL_VER}.tar.gz" \
+        "https://github.com/thom311/libnl/releases/download/libnl${LIBNL_VER//./_}/libnl-${LIBNL_VER}.tar.gz" \
+        "libnl-${LIBNL_VER}" "${LIBNL_SHA256}"
+    log "Building libnl ${LIBNL_VER}..."
+    (cd "${BUILD_DIR}/libnl-${LIBNL_VER}" && \
+        ./configure "${COMMON_CONFIGURE[@]}" --disable-cli && \
+        make_install)
+}
+
+# libsensors (the library and the `sensors` program; the Perl detection
+# scripts are installed as data). Its parser is generated with the host's
+# flex and bison.
+build_lm_sensors() {
+    installed libsensors.so lm-sensors && return 0
+    fetch "lm-sensors-${LM_SENSORS_VER}.tar.gz" \
+        "https://github.com/lm-sensors/lm-sensors/archive/refs/tags/V${LM_SENSORS_VER//./-}.tar.gz" \
+        "lm-sensors-${LM_SENSORS_VER//./-}" "${LM_SENSORS_SHA256}"
+    log "Building lm-sensors ${LM_SENSORS_VER}..."
+    local args=(PREFIX=/usr CC="${CC}" AR="${AR}" BUILD_STATIC_LIB=0 EXLDFLAGS=
+                MACHINE=x86_64 PROG_EXTRA=)
+    make -C "${BUILD_DIR}/lm-sensors-${LM_SENSORS_VER//./-}" -j"${JOBS}" "${args[@]}" user
+    make -C "${BUILD_DIR}/lm-sensors-${LM_SENSORS_VER//./-}" "${args[@]}" \
+        DESTDIR="${SYSROOT}" user_install
+}
+
+# Linux-PAM: the modules VeridianOS can use (pam_unix against /etc/shadow,
+# pam_deny, pam_permit, ...). Its manual pages need DocBook tooling at build
+# time and are not built; the example programs are not installed.
+# pam_veridian: PAM authentication against the kernel's account store
+# (userland/pam_veridian), with the system call numbers the kernel uses
+# (<veridian/sysno.h>, generated from abi/syscalls.map). Rebuilt when its
+# source or the numbers are newer than the module.
+build_pam_veridian() {
+    local src="${PROJECT_ROOT}/userland/pam_veridian/pam_veridian.c"
+    local sysno="${PROJECT_ROOT}/userland/libc/include/veridian/sysno.h"
+    local out="${SYSROOT}/usr/lib/security/pam_veridian.so"
+    if [[ -f "${out}" && "${out}" -nt "${src}" && "${out}" -nt "${sysno}" ]]; then
+        log "pam_veridian: already installed."
+        return 0
+    fi
+    log "Building pam_veridian..."
+    mkdir -p "$(dirname "${out}")"
+    "${VERIDIAN_CC}" -shared -fPIC -O2 -Wall -Wextra -Werror \
+        -o "${out}" "${src}" -lpam || die "pam_veridian did not build"
+}
+
+build_linux_pam() {
+    installed libpam.so Linux-PAM && return 0
+    fetch "Linux-PAM-${LINUX_PAM_VER}.tar.xz" \
+        "https://github.com/linux-pam/linux-pam/releases/download/v${LINUX_PAM_VER}/Linux-PAM-${LINUX_PAM_VER}.tar.xz" \
+        "Linux-PAM-${LINUX_PAM_VER}" "${LINUX_PAM_SHA256}"
+    log "Building Linux-PAM ${LINUX_PAM_VER}..."
+    meson_build "${BUILD_DIR}/Linux-PAM-${LINUX_PAM_VER}" "${BUILD_DIR}/linux-pam-build" \
+        -Ddocs=disabled \
+        -Dexamples=false \
+        -Daudit=disabled \
+        -Dselinux=disabled \
+        -Dlogind=disabled \
+        -Delogind=disabled \
+        -Dnis=disabled \
+        -Deconf=disabled \
+        -Dpam_userdb=disabled
+}
+
+# duktape: polkit's JavaScript engine for authorization rules.
+build_duktape() {
+    installed libduktape.so duktape && return 0
+    fetch "duktape-${DUKTAPE_VER}.tar.xz" \
+        "https://github.com/svaarala/duktape/releases/download/v${DUKTAPE_VER}/duktape-${DUKTAPE_VER}.tar.xz" \
+        "duktape-${DUKTAPE_VER}" "${DUKTAPE_SHA256}"
+    log "Building duktape ${DUKTAPE_VER}..."
+    local args=(-f Makefile.sharedlibrary CC="${CC}" INSTALL_PREFIX=/usr LIBDIR=/lib)
+    make -C "${BUILD_DIR}/duktape-${DUKTAPE_VER}" -j"${JOBS}" "${args[@]}"
+    make -C "${BUILD_DIR}/duktape-${DUKTAPE_VER}" "${args[@]}" DESTDIR="${SYSROOT}" install
+}
+
+build_libxslt() {
+    installed libxslt.so libxslt && return 0
+    fetch "libxslt-${LIBXSLT_VER}.tar.xz" \
+        "https://download.gnome.org/sources/libxslt/${LIBXSLT_VER%.*}/libxslt-${LIBXSLT_VER}.tar.xz" \
+        "libxslt-${LIBXSLT_VER}" "${LIBXSLT_SHA256}"
+    log "Building libxslt ${LIBXSLT_VER}..."
+    (cd "${BUILD_DIR}/libxslt-${LIBXSLT_VER}" && \
+        ./configure "${COMMON_CONFIGURE[@]}" --without-python --without-crypto && \
+        make_install)
+}
+
+# The DocBook XML 4.5 DTD and the DocBook XSL stylesheets (data; KDocTools
+# turns the KDE handbooks into help pages with them), where KDocTools and
+# libxml2 catalogs look for them.
+install_docbook() {
+    local dtd="${SYSROOT}/usr/share/xml/docbook/xml-dtd-${DOCBOOK_XML_VER}"
+    local xsl="${SYSROOT}/usr/share/xml/docbook/xsl-stylesheets"
+    if [[ -f "${dtd}/docbookx.dtd" && -f "${xsl}/VERSION" ]]; then
+        log "DocBook: already installed."
+        return 0
+    fi
+    local zip="${VERIDIAN_SOURCES}/docbook-xml-${DOCBOOK_XML_VER}.zip"
+    [[ -f "${zip}" ]] || curl -fsSL -o "${zip}" \
+        "https://archive.docbook.org/xml/${DOCBOOK_XML_VER}/docbook-xml-${DOCBOOK_XML_VER}.zip" ||
+        die "download failed: docbook-xml-${DOCBOOK_XML_VER}.zip"
+    echo "${DOCBOOK_XML_SHA256}  ${zip}" | sha256sum -c --quiet - || die "docbook-xml: checksum mismatch"
+    rm -rf "${dtd}"
+    mkdir -p "${dtd}"
+    python3 -I -m zipfile -e "${zip}" "${dtd}"
+    fetch "docbook-xsl-nons-${DOCBOOK_XSL_VER}.tar.bz2" \
+        "https://github.com/docbook/xslt10-stylesheets/releases/download/release%2F${DOCBOOK_XSL_VER}/docbook-xsl-nons-${DOCBOOK_XSL_VER}.tar.bz2" \
+        "docbook-xsl-nons-${DOCBOOK_XSL_VER}" "${DOCBOOK_XSL_SHA256}"
+    rm -rf "${xsl}"
+    mkdir -p "$(dirname "${xsl}")"
+    cp -a "${BUILD_DIR}/docbook-xsl-nons-${DOCBOOK_XSL_VER}" "${xsl}"
+}
+
 # ── Root certificates ─────────────────────────────────────────────────
 install_cacert() {
     local dest="${SYSROOT}/etc/ssl/certs/ca-certificates.crt"
@@ -842,7 +1006,9 @@ verify() {
                 libudev.so libinput.so libblkid.so libmount.so libuuid.so libgpg-error.so libgcrypt.so \
                 libvulkan.so libogg.so libvorbis.so libvorbisfile.so libasound.so libcanberra.so \
                 libgmp.so libmpfr.so libicuuc.so libicui18n.so libicudata.so libcurl.so \
-                libqalculate.so libndp.so libqrencode.so libdmtx.so libZXing.so libdisplay-info.so libxcvt.so liblcms2.so libei.so libeis.so \
+                libqalculate.so libndp.so libqrencode.so libdmtx.so libZXing.so libnl-3.so libsensors.so libpam.so security/pam_veridian.so \
+                libduktape.so libxslt.so ../include/boost/version.hpp \
+                ../share/xml/docbook/xml-dtd-4.5/docbookx.dtd ../share/xml/docbook/xsl-stylesheets/VERSION libdisplay-info.so libxcvt.so liblcms2.so libei.so libeis.so \
                 ../share/hwdata/pnp.ids ../../etc/ssl/certs/ca-certificates.crt \
                 ../share/X11/xkb/rules/evdev ../share/alsa/alsa.conf ../share/libinput \
                 ../../etc/ssl/openssl.cnf; do
@@ -907,6 +1073,14 @@ main() {
     build_qrencode
     build_libdmtx
     build_zxing
+    build_boost
+    build_libnl
+    build_lm_sensors
+    build_linux_pam
+    build_pam_veridian
+    build_duktape
+    build_libxslt
+    install_docbook
     install_cacert
 
     verify

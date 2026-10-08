@@ -1,0 +1,9 @@
+# Passwords are checked by the kernel (pam_veridian, veridian_auth): there
+# is no /etc/shadow. A failed attempt waits two seconds; repeated failures
+# lock the account for a while, in the kernel.
+auth      required  pam_faildelay.so delay=2000000
+auth      required  pam_veridian.so
+account   required  pam_veridian.so
+password  required  pam_veridian.so
+session   required  pam_limits.so
+session   required  pam_env.so
