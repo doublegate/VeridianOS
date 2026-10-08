@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Qt 6.12: make xored()'s block-size bound visible to the optimizer.
 
 qcryptographichash.cpp's xored() (HMAC key padding) gives "hints for the
@@ -14,21 +13,20 @@ its lambda.)
 
 Usage: qt_hmac_bound.py <src/corelib/tools/qcryptographichash.cpp>
 """
+
 import sys
+from pathlib import Path
 
 path = sys.argv[1]
-text = open(path).read()
+text = Path(path).read_text()
 old = (
-    '    // some hints for the optimizer:\n'
-    '    Q_ASSERT(block.size() >= minHashBlockSize());\n'
-    '    Q_ASSERT(block.size() <= maxHashBlockSize());\n'
-    '    Q_ASSERT(block.size() % gcdHashBlockSize() == 0);\n'
+    "    // some hints for the optimizer:\n"
+    "    Q_ASSERT(block.size() >= minHashBlockSize());\n"
+    "    Q_ASSERT(block.size() <= maxHashBlockSize());\n"
+    "    Q_ASSERT(block.size() % gcdHashBlockSize() == 0);\n"
 )
-new = old + (
-    '    if (block.size() > maxHashBlockSize())\n'
-    '        Q_UNREACHABLE();\n'
-)
+new = old + ("    if (block.size() > maxHashBlockSize())\n        Q_UNREACHABLE();\n")
 if new not in text:
     if text.count(old) != 1:
         sys.exit(f"{path}: unexpected source for xored()")
-    open(path, "w").write(text.replace(old, new))
+    Path(path).write_text(text.replace(old, new))

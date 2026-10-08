@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Fix two kinds of meson lint in upstream build files.
 
 version-checks SRC MIN
@@ -17,11 +16,15 @@ copy-config FILE...
 Every change must find what it expects; a file that no longer matches
 stops the build.
 """
+
 import os
 import re
 import sys
+from pathlib import Path
 
-CHECK = re.compile(r"^(\s*)if meson\.version\(\)\.version_compare\('>=\s*([0-9.]+)'\)\s*$")
+CHECK = re.compile(
+    r"^(\s*)if meson\.version\(\)\.version_compare\('>=\s*([0-9.]+)'\)\s*$"
+)
 
 
 def version(text):
@@ -60,7 +63,7 @@ def version_checks(src, minimum):
             if name not in ("meson.build",):
                 continue
             path = os.path.join(root, name)
-            lines = open(path).read().splitlines(keepends=True)
+            lines = Path(path).read_text().splitlines(keepends=True)
             i, out, touched = 0, [], False
             while i < len(lines):
                 m = CHECK.match(lines[i])
@@ -69,28 +72,31 @@ def version_checks(src, minimum):
                     i += 1
                     continue
                 else_at, end = block_end(lines, i)
-                body = lines[i + 1:else_at if else_at is not None else end]
+                body = lines[i + 1 : else_at if else_at is not None else end]
                 # Re-indent the kept branch to the if's own indentation
                 # (nested lines keep their relative depth).
-                base = min((len(l) - len(l.lstrip("\t ")) for l in body if l.strip()), default=0)
+                base = min(
+                    (len(l) - len(l.lstrip("\t ")) for l in body if l.strip()),
+                    default=0,
+                )
                 cut = base - len(m.group(1))
                 out.extend(l[cut:] if l.strip() else l for l in body)
                 i, touched = end + 1, True
                 changed += 1
             if touched:
-                open(path, "w").write("".join(out))
+                Path(path).write_text("".join(out))
     return changed
 
 
 def copy_config(paths):
     for path in paths:
-        text = open(path).read()
+        text = Path(path).read_text()
         old, new = "    configuration: configuration_data(),\n", "    copy: true,\n"
         if new in text and old not in text:
             continue
         if text.count(old) != 1:
             sys.exit(f"{path}: expected one empty configuration_data()")
-        open(path, "w").write(text.replace(old, new))
+        Path(path).write_text(text.replace(old, new))
 
 
 if __name__ == "__main__":
@@ -101,10 +107,11 @@ if __name__ == "__main__":
         for root, _, files in os.walk(src):
             for name in files:
                 if name == "meson.build":
-                    for n, line in enumerate(open(os.path.join(root, name)), 1):
-                        m = CHECK.match(line)
-                        if m and version(m.group(2)) <= minimum:
-                            remaining.append(f"{root}/{name}:{n}")
+                    with open(os.path.join(root, name)) as build_file:
+                        for n, line in enumerate(build_file, 1):
+                            m = CHECK.match(line)
+                            if m and version(m.group(2)) <= minimum:
+                                remaining.append(f"{root}/{name}:{n}")
         if remaining:
             sys.exit("unhandled version checks: " + ", ".join(remaining))
     elif sys.argv[1] == "copy-config":

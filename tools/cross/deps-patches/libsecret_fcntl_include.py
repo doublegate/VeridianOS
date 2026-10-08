@@ -5,14 +5,16 @@ open and its flags in <fcntl.h>; include it.
 
 Usage: python3 libsecret_fcntl_include.py <libsecret>/libsecret/secret-file-collection.c
 """
+
 import sys
+from pathlib import Path
 
 p = sys.argv[1]
-s = open(p).read()
+s = Path(p).read_text()
 old = "#include <sys/file.h>\n"
 new = "#include <sys/file.h>\n#include <fcntl.h>\n"
 if new in s:
     sys.exit(0)  # already patched
 if s.count(old) != 1:
     sys.exit("unexpected secret-file-collection.c")
-open(p, "w").write(s.replace(old, new))
+Path(p).write_text(s.replace(old, new))
