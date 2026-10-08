@@ -540,7 +540,9 @@ impl Process {
         // queue (N-209), EAGAIN when the queue is full.
         self.rt_queue
             .push(&self.pending_signals, signum)
-            .map_err(|_| KernelError::WouldBlock)
+            .map_err(|_| KernelError::WouldBlock)?;
+        crate::fs::signalfd::signal_generated();
+        Ok(())
     }
 
     /// Check if a signal is pending

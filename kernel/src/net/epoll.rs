@@ -166,10 +166,14 @@ impl EpollInstance {
     /// (via `poll_fd_readiness`). For level-triggered fds, events fire
     /// every time the condition is true. For edge-triggered, events fire
     /// only on state transitions (simplified: fire once then require re-arm
-    /// via EPOLL_CTL_MOD).
-    fn poll_events(&mut self, events: &mut [EpollEvent]) -> usize {
+    /// via EPOLL_CTL_MOD). Also returns whether every fd scanned reports its
+    /// readiness changes and the earliest time one becomes ready by itself,
+    /// for the wait ([`crate::sched::dispatch::wait_io`]).
+    fn poll_events(&mut self, events: &mut [EpollEvent]) -> (usize, bool, Option<u64>) {
         let max_events = events.len();
         let mut count = 0;
+        let mut precise = true;
+        let mut wake_at: Option<u64> = None;
 
         for entry in self.interest.values_mut() {
             if count >= max_events {
@@ -185,7 +189,9 @@ impl EpollInstance {
                 continue;
             }
 
-            let ready = poll_fd_readiness(entry.fd);
+            let (ready, wakes, ready_at) = poll_fd_readiness(entry.fd);
+            precise &= wakes;
+            wake_at = [wake_at, ready_at].into_iter().flatten().min();
 
             // If the fd returns only ERR|HUP (meaning it's not found in any
             // registry -- stale/closed fd), silently disable it to prevent
@@ -213,7 +219,7 @@ impl EpollInstance {
             }
         }
 
-        count
+        (count, precise, wake_at)
     }
 }
 
@@ -347,8 +353,9 @@ pub fn epoll_wait(
     };
 
     // A dispatched waiter sleeps between scans, with no cap on an infinite
-    // wait. Registered fds include types that do not report readiness
-    // changes yet, so it also re-checks periodically.
+    // wait, until a registered fd reports a change, becomes ready by itself
+    // (a timerfd's expiry), or -- if one does not report its changes yet --
+    // a periodic re-check.
     #[cfg(feature = "alloc")]
     let dispatched = crate::sched::dispatch::current_owner().is_some();
     #[cfg(feature = "alloc")]
@@ -359,7 +366,7 @@ pub fn epoll_wait(
     loop {
         #[cfg(feature = "alloc")]
         let seq = crate::sched::dispatch::io_seq();
-        let count = {
+        let (count, precise, wake_at) = {
             let mut reg_guard = EPOLL_REGISTRY.lock();
             let reg = reg_guard
                 .as_mut()
@@ -379,11 +386,13 @@ pub fn epoll_wait(
         if count > 0 || effective_timeout == 0 {
             return Ok(count);
         }
+        #[cfg(not(feature = "alloc"))]
+        let _ = (precise, wake_at);
 
         #[cfg(feature = "alloc")]
         if dispatched {
             use crate::sched::dispatch::{wait_io, WaitError};
-            match wait_io(seq, deadline, false) {
+            match wait_io(seq, deadline, precise, wake_at) {
                 Ok(()) => continue,
                 Err(WaitError::TimedOut) => return Ok(0),
                 // Interrupted by a signal: the caller reports EINTR.
@@ -439,18 +448,20 @@ pub fn epoll_destroy(epoll_id: u32) -> Result<(), KernelError> {
 /// and returns the matching event flags. Also checks special fd types
 /// (eventfd, timerfd, signalfd) which use pseudo-fd IDs from their own
 /// registries.
-fn poll_fd_readiness(fd: i32) -> u32 {
+fn poll_fd_readiness(fd: i32) -> (u32, bool, Option<u64>) {
     if fd < 0 {
-        return EPOLLERR | EPOLLHUP;
+        return (EPOLLERR | EPOLLHUP, true, None);
     }
 
     let proc = match crate::process::current_process() {
         Some(p) => p,
-        None => return EPOLLERR,
+        None => return (EPOLLERR, true, None),
     };
 
     let file_table = proc.file_table.lock();
     if let Some(file) = file_table.get(fd as usize) {
+        let wakes = file.node.wakes_io_waiters();
+        let ready_at = file.node.ready_at_ns();
         // VfsNode-backed fd (timerfd, epoll, pipe, regular file, etc.)
         let readiness = file.node.poll_readiness() as u32;
         let mut ready = 0u32;
@@ -466,13 +477,13 @@ fn poll_fd_readiness(fd: i32) -> u32 {
         if readiness & 0x0010 != 0 {
             ready |= EPOLLHUP;
         }
-        return ready;
+        return (ready, wakes, ready_at);
     }
     drop(file_table);
 
     // Not an open fd in this process. Sockets are fds now, so there is no
     // global-socket-id fallback (W-14).
-    EPOLLERR | EPOLLHUP
+    (EPOLLERR | EPOLLHUP, true, None)
 }
 
 // ============================================================================

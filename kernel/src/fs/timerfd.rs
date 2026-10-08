@@ -11,8 +11,11 @@
 //! - Read via standard `read(2)` on returned fd
 //!
 //! ## Semantics
-//! - **read**: Returns the number of expirations since last read as a u64.
-//!   Returns EAGAIN if no expirations and non-blocking, otherwise blocks.
+//! - **read**: Returns the number of expirations since last read as a u64, or
+//!   EAGAIN if there were none. The read itself never blocks: TFD_NONBLOCK is a
+//!   property of the open file, and a blocking read waits in the generic read
+//!   path, which sleeps until the next expiry (`VfsNode::ready_at_ns`) or a
+//!   change from `timerfd_settime` (N-232).
 //! - Timer resolution is based on kernel uptime (TSC-derived).
 
 #![allow(dead_code)]
@@ -30,6 +33,9 @@ const MAX_TIMERFD_INSTANCES: usize = 4096;
 /// Clock IDs (subset of POSIX clocks).
 pub const CLOCK_REALTIME: u32 = 0;
 pub const CLOCK_MONOTONIC: u32 = 1;
+/// CLOCK_BOOTTIME: monotonic time including suspend; with no suspend it is
+/// CLOCK_MONOTONIC.
+pub const CLOCK_BOOTTIME: u32 = 7;
 
 /// TFD_NONBLOCK: Return EAGAIN instead of blocking.
 pub const TFD_NONBLOCK: u32 = 0x800;
@@ -38,6 +44,9 @@ pub const TFD_CLOEXEC: u32 = 0x80000;
 
 /// TFD_TIMER_ABSTIME: Interpret new_value.it_value as absolute time.
 pub const TFD_TIMER_ABSTIME: u32 = 1;
+/// TFD_TIMER_CANCEL_ON_SET: with a CLOCK_REALTIME absolute timer, end early
+/// when the clock is set. Accepted; the clock is never set.
+pub const TFD_TIMER_CANCEL_ON_SET: u32 = 2;
 
 /// Time specification matching `struct timespec` layout.
 #[repr(C)]
@@ -60,6 +69,11 @@ impl Timespec {
     pub fn is_zero(&self) -> bool {
         self.tv_sec == 0 && self.tv_nsec == 0
     }
+
+    /// A time Linux accepts: not negative, nanoseconds below a second.
+    pub fn is_valid(&self) -> bool {
+        self.tv_sec >= 0 && (0..1_000_000_000).contains(&self.tv_nsec)
+    }
 }
 
 /// Timer interval specification matching `struct itimerspec`.
@@ -79,8 +93,6 @@ unsafe impl crate::syscall::userspace::UserPod for Itimerspec {}
 struct TimerFdInstance {
     /// Clock type (CLOCK_REALTIME or CLOCK_MONOTONIC).
     clock_id: u32,
-    /// Whether non-blocking mode is active.
-    nonblock: bool,
     /// Current timer specification.
     spec: Itimerspec,
     /// Absolute expiration time in nanoseconds (monotonic).
@@ -89,8 +101,6 @@ struct TimerFdInstance {
     expirations: u64,
     /// Whether the timer is armed.
     armed: bool,
-    /// Owner process ID.
-    owner_pid: u64,
 }
 
 /// Global registry of timerfd instances.
@@ -113,24 +123,18 @@ fn monotonic_now_ns() -> u64 {
 /// # Returns
 /// The timerfd ID on success.
 pub fn timerfd_create(clockid: u32, flags: u32) -> SyscallResult {
-    if clockid != CLOCK_REALTIME && clockid != CLOCK_MONOTONIC {
+    if !matches!(clockid, CLOCK_REALTIME | CLOCK_MONOTONIC | CLOCK_BOOTTIME)
+        || flags & !(TFD_NONBLOCK | TFD_CLOEXEC) != 0
+    {
         return Err(SyscallError::InvalidArgument);
     }
 
-    let pid = crate::process::current_process()
-        .map(|p| p.pid.0)
-        .unwrap_or(0);
-
-    let nonblock = (flags & TFD_NONBLOCK) != 0;
-
     let instance = TimerFdInstance {
         clock_id: clockid,
-        nonblock,
         spec: Itimerspec::default(),
         next_expiry_ns: 0,
         expirations: 0,
         armed: false,
-        owner_pid: pid,
     };
 
     let id = NEXT_TIMERFD_ID.fetch_add(1, Ordering::Relaxed) as u32;
@@ -143,197 +147,133 @@ pub fn timerfd_create(clockid: u32, flags: u32) -> SyscallResult {
     Ok(id as usize)
 }
 
-/// Arm or disarm a timerfd.
-///
-/// # Arguments
-/// - `tfd_id`: Timer fd ID.
-/// - `flags`: `TFD_TIMER_ABSTIME` for absolute time.
-/// - `new_spec`: New timer specification.
-///
-/// # Returns
-/// The previous timer specification via `old_spec` (if non-null).
+/// Count the expirations up to `now` (the next expiry of a periodic timer
+/// moves on; a one-shot timer disarms).
+fn update(instance: &mut TimerFdInstance, now: u64) {
+    if !instance.armed || now < instance.next_expiry_ns {
+        return;
+    }
+    let interval_ns = instance.spec.it_interval.to_ns();
+    if interval_ns > 0 {
+        let periods = 1 + (now - instance.next_expiry_ns) / interval_ns;
+        instance.expirations = instance.expirations.saturating_add(periods);
+        instance.next_expiry_ns = instance
+            .next_expiry_ns
+            .saturating_add(periods.saturating_mul(interval_ns));
+    } else {
+        instance.expirations = instance.expirations.saturating_add(1);
+        instance.armed = false;
+    }
+}
+
+/// The setting as `timerfd_gettime` reports it: the time left until the
+/// next expiry, and the interval.
+fn current(instance: &TimerFdInstance, now: u64) -> Itimerspec {
+    if !instance.armed {
+        return Itimerspec {
+            it_interval: instance.spec.it_interval,
+            ..Default::default()
+        };
+    }
+    let remaining_ns = instance.next_expiry_ns.saturating_sub(now);
+    Itimerspec {
+        it_interval: instance.spec.it_interval,
+        it_value: Timespec {
+            tv_sec: (remaining_ns / 1_000_000_000) as i64,
+            tv_nsec: (remaining_ns % 1_000_000_000) as i64,
+        },
+    }
+}
+
+/// Arm (or, with a zero `it_value`, disarm) a timerfd: `it_value` relative,
+/// or absolute with TFD_TIMER_ABSTIME. The previous setting (as
+/// `timerfd_gettime` would have reported it) goes to `old_spec`. EINVAL for
+/// unknown flags or an invalid time.
 pub fn timerfd_settime(
     tfd_id: u32,
     flags: u32,
     new_spec: &Itimerspec,
     old_spec: Option<&mut Itimerspec>,
 ) -> SyscallResult {
+    if flags & !(TFD_TIMER_ABSTIME | TFD_TIMER_CANCEL_ON_SET) != 0
+        || !new_spec.it_value.is_valid()
+        || !new_spec.it_interval.is_valid()
+    {
+        return Err(SyscallError::InvalidArgument);
+    }
+    let now = monotonic_now_ns();
     let mut registry = TIMERFD_REGISTRY.lock();
     let instance = registry
         .get_mut(&tfd_id)
         .ok_or(SyscallError::BadFileDescriptor)?;
-
-    // Return old value if requested
+    update(instance, now);
     if let Some(old) = old_spec {
-        *old = instance.spec;
+        *old = current(instance, now);
     }
 
     instance.spec = *new_spec;
     instance.expirations = 0;
-
-    if new_spec.it_value.is_zero() {
-        // Disarm the timer
-        instance.armed = false;
-        instance.next_expiry_ns = 0;
-    } else {
-        instance.armed = true;
-        let now = monotonic_now_ns();
-
-        if (flags & TFD_TIMER_ABSTIME) != 0 {
-            // Absolute time
-            instance.next_expiry_ns = new_spec.it_value.to_ns();
-        } else {
-            // Relative time
-            instance.next_expiry_ns = now.saturating_add(new_spec.it_value.to_ns());
-        }
-    }
-
+    instance.armed = !new_spec.it_value.is_zero();
+    instance.next_expiry_ns = match (instance.armed, flags & TFD_TIMER_ABSTIME != 0) {
+        (false, _) => 0,
+        (true, true) => new_spec.it_value.to_ns(),
+        (true, false) => now.saturating_add(new_spec.it_value.to_ns()),
+    };
+    drop(registry);
+    // Waiters sleep until the old expiry: they recompute it.
+    io_changed();
     Ok(0)
 }
 
-/// Get the current timer specification.
+/// The current setting: the time left until the next expiry, and the
+/// interval.
 pub fn timerfd_gettime(tfd_id: u32) -> Result<Itimerspec, SyscallError> {
-    let registry = TIMERFD_REGISTRY.lock();
-    let instance = registry
-        .get(&tfd_id)
-        .ok_or(SyscallError::BadFileDescriptor)?;
-
-    if !instance.armed {
-        return Ok(Itimerspec::default());
-    }
-
     let now = monotonic_now_ns();
-    let remaining_ns = instance.next_expiry_ns.saturating_sub(now);
-
-    Ok(Itimerspec {
-        it_interval: instance.spec.it_interval,
-        it_value: Timespec {
-            tv_sec: (remaining_ns / 1_000_000_000) as i64,
-            tv_nsec: (remaining_ns % 1_000_000_000) as i64,
-        },
-    })
+    let mut registry = TIMERFD_REGISTRY.lock();
+    let instance = registry
+        .get_mut(&tfd_id)
+        .ok_or(SyscallError::BadFileDescriptor)?;
+    update(instance, now);
+    Ok(current(instance, now))
 }
 
-/// Read from a timerfd -- returns number of expirations since last read.
-///
-/// Checks the timer against current time and accumulates expirations.
-/// If nonblock is set, returns EAGAIN immediately when no expirations.
-/// In blocking mode, busy-waits with scheduler yield until the timer
-/// fires (capped at 30s to prevent permanent hangs).
+/// Read a timerfd: the number of expirations since the last read (then 0),
+/// or WouldBlock (EAGAIN) if there were none. Never blocks (see the module
+/// documentation).
 pub fn timerfd_read(tfd_id: u32) -> Result<u64, SyscallError> {
-    let start = crate::timer::get_uptime_ms();
-    const MAX_BLOCK_MS: u64 = 30_000;
-
-    // During boot-path cooperative dispatch a blocking read must not wait:
-    // the child has to yield back so the dispatcher can make progress (as
-    // nanosleep does). Otherwise each read could stall boot for 30 s (W-13).
-    #[cfg(target_arch = "x86_64")]
-    let in_boot_coop = crate::arch::x86_64::usermode::BOOT_CLONE_YIELD_PENDING
-        .load(core::sync::atomic::Ordering::Acquire);
-    #[cfg(not(target_arch = "x86_64"))]
-    let in_boot_coop = false;
-
-    loop {
-        let mut registry = TIMERFD_REGISTRY.lock();
-        let instance = registry
-            .get_mut(&tfd_id)
-            .ok_or(SyscallError::BadFileDescriptor)?;
-
-        if !instance.armed {
-            if instance.nonblock || in_boot_coop {
-                return Err(SyscallError::WouldBlock);
-            }
-            // Timer not armed and blocking -- wait for it to be armed
-            drop(registry);
-            #[cfg(feature = "alloc")]
-            if crate::sched::dispatch::current_owner().is_some() {
-                sleep_until_ns(
-                    crate::sched::dispatch::clock_ns() + crate::sched::dispatch::IO_RECHECK_NS,
-                )?;
-                continue;
-            }
-            if crate::timer::get_uptime_ms() - start >= MAX_BLOCK_MS {
-                return Err(SyscallError::WouldBlock);
-            }
-            // Enable interrupts so APIC timer advances UPTIME_MS
-            if crate::sched::wait_for_interrupt_in_syscall() {
-                return Err(SyscallError::Interrupted);
-            }
-            continue;
-        }
-
-        // Check for expirations against current TSC-based time
-        let now = monotonic_now_ns();
-        if now >= instance.next_expiry_ns {
-            let interval_ns = instance.spec.it_interval.to_ns();
-            if interval_ns > 0 {
-                let elapsed = now - instance.next_expiry_ns;
-                let extra_expirations = elapsed / interval_ns;
-                instance.expirations = instance.expirations.saturating_add(1 + extra_expirations);
-                instance.next_expiry_ns = instance
-                    .next_expiry_ns
-                    .saturating_add((1 + extra_expirations) * interval_ns);
-            } else {
-                instance.expirations = instance.expirations.saturating_add(1);
-                instance.armed = false;
-            }
-        }
-
-        if instance.expirations > 0 {
-            let count = instance.expirations;
-            instance.expirations = 0;
-            return Ok(count);
-        }
-
-        if instance.nonblock || in_boot_coop {
-            return Err(SyscallError::WouldBlock);
-        }
-
-        // Release lock, yield, and retry
-        let next_expiry = instance.next_expiry_ns;
-        drop(registry);
-        // A dispatched reader sleeps until the next expiry (no 30 s cap).
-        #[cfg(feature = "alloc")]
-        if crate::sched::dispatch::current_owner().is_some() {
-            sleep_until_ns(next_expiry)?;
-            continue;
-        }
-        let _ = next_expiry;
-        if crate::timer::get_uptime_ms() - start >= MAX_BLOCK_MS {
-            return Err(SyscallError::WouldBlock);
-        }
-        // Enable interrupts so APIC timer advances UPTIME_MS
-        if crate::sched::wait_for_interrupt_in_syscall() {
-            return Err(SyscallError::Interrupted);
-        }
+    let now = monotonic_now_ns();
+    let mut registry = TIMERFD_REGISTRY.lock();
+    let instance = registry
+        .get_mut(&tfd_id)
+        .ok_or(SyscallError::BadFileDescriptor)?;
+    update(instance, now);
+    match core::mem::take(&mut instance.expirations) {
+        0 => Err(SyscallError::WouldBlock),
+        count => Ok(count),
     }
 }
 
-/// Sleep the calling dispatched thread until `deadline` (`monotonic_ns`);
-/// EINTR if a signal must be acted on first.
-#[cfg(feature = "alloc")]
-fn sleep_until_ns(deadline: u64) -> Result<(), SyscallError> {
-    use crate::sched::dispatch;
-    static TIMERFD_SLEEP: dispatch::WaitQueue = dispatch::WaitQueue::new();
-    match dispatch::wait_event(&TIMERFD_SLEEP, Some(deadline), || false) {
-        Err(dispatch::WaitError::Interrupted) => Err(SyscallError::Interrupted),
-        _ => Ok(()),
-    }
-}
-
-/// Query whether a timerfd is readable (timer has expired).
-/// Used by epoll to check readiness without consuming data.
+/// Whether a read would return expirations now.
 pub fn is_readable(tfd_id: u32) -> bool {
     let registry = TIMERFD_REGISTRY.lock();
-    let instance = match registry.get(&tfd_id) {
-        Some(i) => i,
-        None => return false,
-    };
-    if !instance.armed {
-        return false;
-    }
-    let now = monotonic_now_ns();
-    now >= instance.next_expiry_ns || instance.expirations > 0
+    registry
+        .get(&tfd_id)
+        .is_some_and(|i| i.expirations > 0 || (i.armed && monotonic_now_ns() >= i.next_expiry_ns))
+}
+
+/// When the timer next expires, if it is armed and has no expirations
+/// waiting to be read (`VfsNode::ready_at_ns`).
+pub fn next_expiry(tfd_id: u32) -> Option<u64> {
+    let registry = TIMERFD_REGISTRY.lock();
+    registry
+        .get(&tfd_id)
+        .filter(|i| i.armed && i.expirations == 0)
+        .map(|i| i.next_expiry_ns)
+}
+
+fn io_changed() {
+    #[cfg(feature = "alloc")]
+    crate::sched::dispatch::io_event();
 }
 
 /// Close (destroy) a timerfd instance.
@@ -411,6 +351,14 @@ impl VfsNode for TimerFdNode {
         events
     }
 
+    fn wakes_io_waiters(&self) -> bool {
+        true // timerfd_settime calls io_event; expiries are ready_at_ns
+    }
+
+    fn ready_at_ns(&self) -> Option<u64> {
+        next_expiry(self.tfd_id)
+    }
+
     fn metadata(&self) -> Result<Metadata, KernelError> {
         Ok(Metadata {
             size: 0,
@@ -477,6 +425,82 @@ mod tests {
     /// The registry is a process-wide static: tests that reset it must not
     /// run concurrently, or one test's reset removes another's instance.
     static TEST_SERIAL: spin::Mutex<()> = spin::Mutex::new(());
+
+    fn spec(value_s: i64, value_ns: i64, interval_s: i64) -> Itimerspec {
+        Itimerspec {
+            it_interval: Timespec {
+                tv_sec: interval_s,
+                tv_nsec: 0,
+            },
+            it_value: Timespec {
+                tv_sec: value_s,
+                tv_nsec: value_ns,
+            },
+        }
+    }
+
+    /// N-232 and Linux's rules: invalid times and flags are EINVAL; the
+    /// old value is the time that was left; a read before the expiry is
+    /// EAGAIN (it never blocks); waiters are told when it expires.
+    #[test]
+    fn timerfd_settime_follows_linux() {
+        let _serial = TEST_SERIAL.lock();
+        TIMERFD_REGISTRY.lock().clear();
+        assert_eq!(
+            timerfd_create(CLOCK_MONOTONIC, 0x4),
+            Err(SyscallError::InvalidArgument)
+        );
+        assert!(timerfd_create(CLOCK_BOOTTIME, TFD_CLOEXEC).is_ok());
+        let id = timerfd_create(CLOCK_MONOTONIC, 0).unwrap() as u32;
+
+        let bad = |sp: Itimerspec, flags| timerfd_settime(id, flags, &sp, None);
+        assert_eq!(
+            bad(spec(1, 1_000_000_000, 0), 0),
+            Err(SyscallError::InvalidArgument)
+        );
+        assert_eq!(bad(spec(-1, 0, 0), 0), Err(SyscallError::InvalidArgument));
+        assert_eq!(bad(spec(0, -5, 0), 0), Err(SyscallError::InvalidArgument));
+        assert_eq!(bad(spec(1, 0, -1), 0), Err(SyscallError::InvalidArgument));
+        assert_eq!(bad(spec(1, 0, 0), 0x8), Err(SyscallError::InvalidArgument));
+
+        timerfd_settime(id, 0, &spec(100, 0, 0), None).unwrap();
+        assert_eq!(timerfd_read(id), Err(SyscallError::WouldBlock));
+        assert!(next_expiry(id).is_some_and(|t| t > monotonic_now_ns()));
+        let mut old = Itimerspec::default();
+        timerfd_settime(id, 0, &spec(0, 0, 0), Some(&mut old)).unwrap();
+        // The time left (host tests: a clock that does not advance).
+        assert!(old.it_value.tv_sec >= 98 && old.it_value.tv_sec <= 100);
+        assert_eq!(next_expiry(id), None);
+    }
+
+    /// Expirations are counted against the clock: a periodic timer counts
+    /// every period that passed and moves on; a one-shot timer counts once
+    /// and disarms.
+    #[test]
+    fn expirations_follow_the_clock() {
+        let mut t = TimerFdInstance {
+            clock_id: CLOCK_MONOTONIC,
+            spec: Itimerspec {
+                it_interval: Timespec {
+                    tv_sec: 0,
+                    tv_nsec: 100,
+                },
+                it_value: Timespec::default(),
+            },
+            next_expiry_ns: 1000,
+            expirations: 0,
+            armed: true,
+        };
+        update(&mut t, 999);
+        assert_eq!((t.expirations, t.next_expiry_ns), (0, 1000));
+        update(&mut t, 1350);
+        assert_eq!((t.expirations, t.next_expiry_ns, t.armed), (4, 1400, true));
+        assert_eq!(current(&t, 1350).it_value.tv_nsec, 50);
+        t.spec.it_interval = Timespec::default();
+        update(&mut t, 1400);
+        assert_eq!((t.expirations, t.armed), (5, false));
+        assert_eq!(current(&t, 2000).it_value, Timespec::default());
+    }
 
     #[test]
     fn test_timerfd_create_monotonic() {

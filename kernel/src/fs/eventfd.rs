@@ -4,16 +4,16 @@
 //! epoll-based event loops (Qt6, glib). Supports both counter and
 //! semaphore semantics.
 //!
-//! ## Syscall Interface
-//! - `eventfd_create(initval, flags) -> fd`  (syscall 330)
-//! - Read/write via standard `read(2)` / `write(2)` on returned fd
-//!
 //! ## Semantics
-//! - **write**: Adds the 8-byte unsigned integer to the internal counter.
-//!   Blocks (or returns EAGAIN) if the counter would overflow `u64::MAX - 1`.
+//! - **write**: Adds the 8-byte unsigned integer to the internal counter, or
+//!   fails with EAGAIN if the counter would pass `u64::MAX - 1`.
 //! - **read**: Returns the current counter as an 8-byte unsigned integer and
 //!   resets it to zero. In semaphore mode, returns 1 and decrements by 1.
-//!   Blocks (or returns EAGAIN) if the counter is zero.
+//!   EAGAIN if the counter is zero.
+//!
+//! The operations here never block: EFD_NONBLOCK is a property of the open
+//! file (as `fcntl` sees it), and a blocking read or write waits in the
+//! generic read/write path, which every counter change wakes (N-232).
 
 #![allow(dead_code)]
 
@@ -31,7 +31,7 @@ const MAX_EVENTFD_INSTANCES: usize = 4096;
 pub const EFD_SEMAPHORE: u32 = 1;
 /// EFD_NONBLOCK flag: reads/writes return EAGAIN instead of blocking.
 pub const EFD_NONBLOCK: u32 = 0x800;
-/// EFD_CLOEXEC flag: set close-on-exec (tracked but not enforced in kernel).
+/// EFD_CLOEXEC flag: set close-on-exec.
 pub const EFD_CLOEXEC: u32 = 0x80000;
 
 /// Internal eventfd instance.
@@ -40,10 +40,6 @@ struct EventFdInstance {
     counter: u64,
     /// Whether semaphore mode is active.
     semaphore: bool,
-    /// Whether non-blocking mode is active.
-    nonblock: bool,
-    /// Owner process ID.
-    owner_pid: u64,
 }
 
 /// Global registry of eventfd instances, keyed by a monotonic ID.
@@ -52,27 +48,16 @@ static EVENTFD_REGISTRY: Mutex<BTreeMap<u32, EventFdInstance>> = Mutex::new(BTre
 /// Next ID for eventfd allocation.
 static NEXT_EVENTFD_ID: AtomicU64 = AtomicU64::new(1);
 
-/// Create a new eventfd.
-///
-/// # Arguments
-/// - `initval`: Initial counter value.
-/// - `flags`: Combination of `EFD_SEMAPHORE`, `EFD_NONBLOCK`, `EFD_CLOEXEC`.
-///
-/// # Returns
-/// The eventfd ID (used as a pseudo-fd) on success.
+/// Create a new eventfd with counter `initval` and `flags` (EFD_SEMAPHORE,
+/// EFD_NONBLOCK, EFD_CLOEXEC; anything else is EINVAL). Returns its
+/// internal ID; the caller makes the file (and applies NONBLOCK/CLOEXEC).
 pub fn eventfd_create(initval: u32, flags: u32) -> SyscallResult {
-    let pid = crate::process::current_process()
-        .map(|p| p.pid.0)
-        .unwrap_or(0);
-
-    let semaphore = (flags & EFD_SEMAPHORE) != 0;
-    let nonblock = (flags & EFD_NONBLOCK) != 0;
-
+    if flags & !(EFD_SEMAPHORE | EFD_NONBLOCK | EFD_CLOEXEC) != 0 {
+        return Err(SyscallError::InvalidArgument);
+    }
     let instance = EventFdInstance {
         counter: initval as u64,
-        semaphore,
-        nonblock,
-        owner_pid: pid,
+        semaphore: (flags & EFD_SEMAPHORE) != 0,
     };
 
     let id = NEXT_EVENTFD_ID.fetch_add(1, Ordering::Relaxed) as u32;
@@ -85,135 +70,51 @@ pub fn eventfd_create(initval: u32, flags: u32) -> SyscallResult {
     Ok(id as usize)
 }
 
-/// Read from an eventfd. Returns the counter value as a u64.
-///
-/// In normal mode: returns the full counter and resets to 0.
-/// In semaphore mode: returns 1 and decrements by 1.
-/// If counter is 0 and nonblock is set, returns EAGAIN (WouldBlock).
-/// If blocking mode, busy-waits with scheduler yield until counter > 0
-/// (capped at 30s to prevent permanent hangs).
+/// Read an eventfd: the full counter, reset to 0 (in semaphore mode 1, the
+/// counter decremented). WouldBlock (EAGAIN) if the counter is 0.
 pub fn eventfd_read(efd_id: u32) -> Result<u64, SyscallError> {
-    let start = crate::timer::get_uptime_ms();
-    const MAX_BLOCK_MS: u64 = 30_000;
-
-    loop {
-        let mut registry = EVENTFD_REGISTRY.lock();
-        let instance = registry
-            .get_mut(&efd_id)
-            .ok_or(SyscallError::BadFileDescriptor)?;
-
-        if instance.counter > 0 {
-            let val = if instance.semaphore {
-                instance.counter = instance.counter.saturating_sub(1);
-                1
-            } else {
-                let val = instance.counter;
-                instance.counter = 0;
-                val
-            };
-            drop(registry);
-            io_changed(); // room for a blocked writer
-            return Ok(val);
-        }
-
-        if instance.nonblock {
-            return Err(SyscallError::WouldBlock);
-        }
-
-        // Release lock before waiting
-        drop(registry);
-
-        // A dispatched reader sleeps until a write (no 30 s cap).
-        #[cfg(feature = "alloc")]
-        if crate::sched::dispatch::current_owner().is_some() {
-            sleep_until_ready(|| is_readable(efd_id) || !exists(efd_id))?;
-            continue;
-        }
-
-        if crate::timer::get_uptime_ms() - start >= MAX_BLOCK_MS {
-            return Err(SyscallError::WouldBlock);
-        }
-
-        crate::sched::yield_cpu();
+    let mut registry = EVENTFD_REGISTRY.lock();
+    let instance = registry
+        .get_mut(&efd_id)
+        .ok_or(SyscallError::BadFileDescriptor)?;
+    if instance.counter == 0 {
+        return Err(SyscallError::WouldBlock);
     }
+    let val = if instance.semaphore {
+        instance.counter -= 1;
+        1
+    } else {
+        core::mem::take(&mut instance.counter)
+    };
+    drop(registry);
+    io_changed(); // room for a blocked writer
+    Ok(val)
 }
 
-/// Write to an eventfd. Adds `value` to the internal counter.
-///
-/// If the addition would overflow `u64::MAX - 1`, returns EAGAIN when
-/// nonblock is set, otherwise busy-waits until a read drains the counter
-/// enough (capped at 30s).
+/// Add `value` to an eventfd's counter. EINVAL for `u64::MAX`; WouldBlock
+/// (EAGAIN) if the counter would pass `u64::MAX - 1`.
 pub fn eventfd_write(efd_id: u32, value: u64) -> SyscallResult {
     if value == u64::MAX {
         return Err(SyscallError::InvalidArgument);
     }
-
-    let start = crate::timer::get_uptime_ms();
-    const MAX_BLOCK_MS: u64 = 30_000;
-    let max = u64::MAX - 1;
-
-    loop {
-        let mut registry = EVENTFD_REGISTRY.lock();
-        let instance = registry
-            .get_mut(&efd_id)
-            .ok_or(SyscallError::BadFileDescriptor)?;
-
-        if instance.counter <= max - value {
-            instance.counter = instance.counter.saturating_add(value);
-            drop(registry);
-            io_changed(); // data for a blocked reader
-            return Ok(0);
-        }
-
-        if instance.nonblock {
-            return Err(SyscallError::WouldBlock);
-        }
-
-        drop(registry);
-
-        #[cfg(feature = "alloc")]
-        if crate::sched::dispatch::current_owner().is_some() {
-            sleep_until_ready(|| {
-                !exists(efd_id)
-                    || EVENTFD_REGISTRY
-                        .lock()
-                        .get(&efd_id)
-                        .is_some_and(|i| i.counter <= max - value)
-            })?;
-            continue;
-        }
-
-        if crate::timer::get_uptime_ms() - start >= MAX_BLOCK_MS {
-            return Err(SyscallError::WouldBlock);
-        }
-
-        crate::sched::yield_cpu();
+    let mut registry = EVENTFD_REGISTRY.lock();
+    let instance = registry
+        .get_mut(&efd_id)
+        .ok_or(SyscallError::BadFileDescriptor)?;
+    if instance.counter > u64::MAX - 1 - value {
+        return Err(SyscallError::WouldBlock);
     }
+    instance.counter += value;
+    drop(registry);
+    io_changed(); // data for a blocked reader
+    Ok(0)
 }
 
-/// Report a counter change to blocked readers, writers and pollers.
 fn io_changed() {
     #[cfg(feature = "alloc")]
     crate::sched::dispatch::io_event();
 }
 
-fn exists(efd_id: u32) -> bool {
-    EVENTFD_REGISTRY.lock().contains_key(&efd_id)
-}
-
-/// Sleep until `ready` holds (woken by `io_changed`); EINTR if a signal
-/// must be acted on first.
-#[cfg(feature = "alloc")]
-fn sleep_until_ready(ready: impl FnMut() -> bool) -> Result<(), SyscallError> {
-    use crate::sched::dispatch;
-    match dispatch::wait_event(&dispatch::IO_EVENTS, None, ready) {
-        Err(dispatch::WaitError::Interrupted) => Err(SyscallError::Interrupted),
-        _ => Ok(()),
-    }
-}
-
-/// Query whether an eventfd is readable (counter > 0).
-/// Used by epoll to check readiness without consuming data.
 pub fn is_readable(efd_id: u32) -> bool {
     let registry = EVENTFD_REGISTRY.lock();
     registry.get(&efd_id).is_some_and(|i| i.counter > 0)
@@ -445,6 +346,22 @@ mod tests {
         // Should fail after close
         assert!(eventfd_read(id).is_err());
         assert!(eventfd_close(id).is_err());
+    }
+
+    /// N-232: the operations never block, whatever the flags: a blocking
+    /// read waits in the generic read path, which knows the file's
+    /// O_NONBLOCK. Unknown flags are EINVAL.
+    #[test]
+    fn eventfd_operations_never_block_and_flags_are_checked() {
+        let _serial = TEST_SERIAL.lock();
+        EVENTFD_REGISTRY.lock().clear();
+
+        let id = eventfd_create(0, 0).unwrap() as u32;
+        assert_eq!(eventfd_read(id), Err(SyscallError::WouldBlock));
+        eventfd_write(id, u64::MAX - 1).unwrap();
+        assert_eq!(eventfd_write(id, 1), Err(SyscallError::WouldBlock));
+        assert_eq!(eventfd_read(id), Ok(u64::MAX - 1));
+        assert_eq!(eventfd_create(0, 0x4), Err(SyscallError::InvalidArgument));
     }
 
     #[test]

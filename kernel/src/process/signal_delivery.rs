@@ -139,74 +139,41 @@ const TRAMPOLINE_SIZE: usize = SIGRETURN_TRAMPOLINE.len();
 // Physical memory write/read helpers (same pattern as creation.rs)
 // ============================================================================
 
-/// Write a value to a user-space address via the physical memory window.
+/// Write a value to a user-space address of `memory_space`.
 ///
 /// # Safety
 ///
-/// `vaddr` must be a valid mapped address in the process's VAS with write
-/// permissions. The caller must ensure no concurrent access to this memory.
+/// `vaddr` must be a user address the process may write. The caller must
+/// ensure no concurrent access to this memory.
 #[cfg(feature = "alloc")]
 unsafe fn write_to_user_stack(
     memory_space: &crate::mm::VirtualAddressSpace,
     vaddr: usize,
     value: usize,
 ) {
-    use crate::mm::VirtualAddress;
-
-    let pt_root = memory_space.get_page_table();
-    if pt_root == 0 {
-        return;
-    }
-
-    // SAFETY: pt_root is the non-zero L4 physical address owned by
-    // `memory_space`, which is what create_mapper_from_root requires.
-    let mapper = unsafe { crate::mm::vas::create_mapper_from_root_pub(pt_root) };
-    if let Ok((frame, _flags)) = mapper.translate_page(VirtualAddress(vaddr as u64)) {
-        let page_offset = vaddr & 0xFFF;
-        let phys_addr = (frame.as_u64() << 12) + page_offset as u64;
-        // SAFETY: phys_addr is converted to a kernel-accessible virtual
-        // address via phys_to_virt_addr (required on x86_64 where physical
-        // memory is mapped at a dynamic offset, not identity-mapped).
-        unsafe {
-            let virt = crate::mm::phys_to_virt_addr(phys_addr);
-            core::ptr::write(virt as *mut usize, value);
-        }
-    }
+    // SAFETY: as this function's own contract.
+    unsafe { write_bytes_to_user_stack(memory_space, vaddr, &value.to_ne_bytes()) }
 }
 
-/// Write a byte slice to a user-space address via the physical memory window.
+/// Write a byte slice to a user-space address of `memory_space`.
+///
+/// The write goes through
+/// [`crate::mm::VirtualAddressSpace::write_bytes_private`], so a frame this
+/// address space shares -- copy-on-write after a fork, or a page of a file's
+/// page cache -- is copied first and the write never reaches another process. A
+/// page the process may not write is left untouched, as an unmapped one is.
 ///
 /// # Safety
 ///
-/// Same requirements as `write_to_user_stack`. The range
-/// `[vaddr, vaddr+data.len())` must be within a single mapped page.
+/// `vaddr` must be a user address the process may write. The caller must
+/// ensure no concurrent access to this memory.
 #[cfg(feature = "alloc")]
 unsafe fn write_bytes_to_user_stack(
     memory_space: &crate::mm::VirtualAddressSpace,
     vaddr: usize,
     data: &[u8],
 ) {
-    use crate::mm::VirtualAddress;
-
-    let pt_root = memory_space.get_page_table();
-    if pt_root == 0 {
-        return;
-    }
-
-    // SAFETY: pt_root is the non-zero L4 physical address owned by
-    // `memory_space`, which is what create_mapper_from_root requires.
-    let mapper = unsafe { crate::mm::vas::create_mapper_from_root_pub(pt_root) };
-    if let Ok((frame, _flags)) = mapper.translate_page(VirtualAddress(vaddr as u64)) {
-        let page_offset = vaddr & 0xFFF;
-        let phys_addr = (frame.as_u64() << 12) + page_offset as u64;
-        // SAFETY: phys_addr is converted to a kernel-accessible virtual
-        // address via phys_to_virt_addr. The destination has at least
-        // data.len() bytes available within the page.
-        unsafe {
-            let virt = crate::mm::phys_to_virt_addr(phys_addr);
-            core::ptr::copy_nonoverlapping(data.as_ptr(), virt as *mut u8, data.len());
-        }
-    }
+    let _ = memory_space.write_bytes_private(vaddr as u64, data, false);
 }
 
 /// Read a `usize` value from a user-space address via the physical memory

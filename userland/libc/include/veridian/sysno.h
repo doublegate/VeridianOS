@@ -258,12 +258,12 @@
 #define SYS_AUDIO_PAUSE                  1351
 /* Event, timer and signal descriptors */
 #define SYS_getrandom                    318
+#define SYS_eventfd                      284
 #define SYS_eventfd2                     290
-#define SYS_EVENTFD_READ                 1356
-#define SYS_EVENTFD_WRITE                1357
 #define SYS_timerfd_create               283
 #define SYS_timerfd_settime              286
 #define SYS_timerfd_gettime              287
+#define SYS_signalfd                     282
 #define SYS_signalfd4                    289
 /* inotify */
 #define SYS_inotify_init1                294

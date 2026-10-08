@@ -292,12 +292,12 @@ AudioPause              private 1351
 
 ## Event, timer and signal descriptors
 getrandom
+eventfd
 eventfd2
-EventfdRead             private 1356
-EventfdWrite            private 1357
 timerfd_create
 timerfd_settime
 timerfd_gettime
+signalfd
 signalfd4
 
 ## inotify

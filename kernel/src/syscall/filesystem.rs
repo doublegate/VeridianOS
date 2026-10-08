@@ -647,8 +647,14 @@ fn wait_ready(
     use crate::sched::dispatch::{self, WaitError};
     const RECHECK_NS: u64 = 10_000_000;
     let rearm = core::mem::take(retry_now);
-    let deadline = (rearm || !file.node.wakes_io_waiters())
+    let recheck = (rearm || !file.node.wakes_io_waiters())
         .then(|| dispatch::clock_ns().saturating_add(RECHECK_NS));
+    // A node that becomes ready by itself (a timerfd's expiry) is woken for
+    // then.
+    let deadline = [recheck, file.node.ready_at_ns()]
+        .into_iter()
+        .flatten()
+        .min();
     match dispatch::wait_event(&dispatch::IO_EVENTS, deadline, || {
         !rearm && file.node.poll_readiness() & mask != 0
     }) {
@@ -2961,6 +2967,8 @@ pub fn sys_poll(fds_ptr: usize, nfds: usize, timeout_ms: usize) -> SyscallResult
         let seq = crate::sched::dispatch::io_seq();
         #[cfg(feature = "alloc")]
         let mut precise = true;
+        #[cfg(feature = "alloc")]
+        let mut wake_at: Option<u64> = None;
         let proc = process::current_process().ok_or(SyscallError::InvalidState)?;
         let file_table = proc.file_table.lock();
         let mut ready_count = 0usize;
@@ -2976,6 +2984,10 @@ pub fn sys_poll(fds_ptr: usize, nfds: usize, timeout_ms: usize) -> SyscallResult
                 #[cfg(feature = "alloc")]
                 {
                     precise &= file.node.wakes_io_waiters();
+                    wake_at = [wake_at, file.node.ready_at_ns()]
+                        .into_iter()
+                        .flatten()
+                        .min();
                 }
                 let readiness = file.node.poll_readiness();
                 if pollfd.events & POLLIN != 0 && readiness & 0x0001 != 0 {
@@ -3012,7 +3024,7 @@ pub fn sys_poll(fds_ptr: usize, nfds: usize, timeout_ms: usize) -> SyscallResult
         #[cfg(feature = "alloc")]
         if dispatched {
             use crate::sched::dispatch::{wait_io, WaitError};
-            match wait_io(seq, deadline, precise) {
+            match wait_io(seq, deadline, precise, wake_at) {
                 Ok(()) => continue,
                 Err(WaitError::TimedOut) => {
                     write_back(&pollfds)?;

@@ -1317,6 +1317,11 @@ impl VirtualAddressSpace {
                         addr: va.0 as usize,
                     });
                 };
+                // A read-only page keeps its flags: the cache holds an owner
+                // of the frame, so it is shared for as long as it is cached,
+                // and every later write path -- mprotect (`cow_safe_flags`),
+                // the COW fault, kernel writes (`private_frame`) -- copies
+                // a shared frame first. COW stays "logically writable".
                 let flags = if current.contains(PageFlags::WRITABLE) {
                     current.without(PageFlags::WRITABLE) | PageFlags::COW
                 } else {
@@ -1341,7 +1346,10 @@ impl VirtualAddressSpace {
             }
         }
         #[cfg(test)]
-        release_from(frames.len());
+        {
+            let _ = start;
+            release_from(frames.len());
+        }
         Ok(())
     }
 

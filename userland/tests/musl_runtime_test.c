@@ -35,7 +35,9 @@
 #include <sys/wait.h>
 #include <sys/socket.h>
 #include <sys/auxv.h>
+#include <sys/signalfd.h>
 #include <sys/syscall.h>
+#include <sys/timerfd.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -823,7 +825,8 @@ static long meminfo_kb(const char *key)
 /* Private file mappings share the file's cached pages (ADR 0010): the
  * first mapping fills the cache, a second process mapping the file adds
  * nothing and sees the same bytes, a write to a private mapping stays in
- * it (copy-on-write), and writing the file drops its cache so a new
+ * it (copy-on-write) -- also after mprotect makes a read-only mapping of
+ * a cached page writable -- and writing the file drops its cache so a new
  * mapping sees the new contents. */
 static void test_page_cache(void)
 {
@@ -853,15 +856,22 @@ static void test_page_cache(void)
         if (b != MAP_FAILED)
             b[100] = 'Z';
         int isolated = b != MAP_FAILED && b[100] == 'Z' && a[100] == 'a';
+        /* A read-only mapping of a cached page made writable copies it on
+         * the first write: the cache, and so a new mapping, keep the file. */
+        int upgraded = mprotect(a, 4096, PROT_READ | PROT_WRITE) == 0;
+        if (upgraded)
+            a[200] = 'M';
+        unsigned char *d = mmap(0, 4096, PROT_READ, MAP_PRIVATE, fd, 0);
+        int cache_kept = upgraded && a[200] == 'M' && d != MAP_FAILED && d[200] == 'a';
         (void)!write(fds[1], &c2, sizeof(c2));
-        _exit(same && isolated ? 0 : 1);
+        _exit(same && isolated && cache_kept ? 0 : 1);
     }
     int status = -1;
     long c2 = -1;
     int child_ok = pid > 0 && waitpid(pid, &status, 0) == pid && WIFEXITED(status)
                    && WEXITSTATUS(status) == 0 && read(fds[0], &c2, sizeof(c2)) == sizeof(c2);
     unsigned char first = 0;
-    int file_kept = pread(fd, &first, 1, 100) == 1 && first == 'a' && a[100] == 'a';
+    int file_kept = pread(fd, &first, 1, 100) == 1 && first == 'a' && a[100] == 'a' && a[200] == 'a';
     /* Writing the file drops its cache; a new mapping sees the write. */
     int written = pwrite(fd, "Q", 1, 100) == 1;
     long c3 = meminfo_kb("Cached:");
@@ -965,6 +975,147 @@ static void test_dynamic_program(void)
            exited && WIFEXITED(status) && WEXITSTATUS(status) == 0 && strstr(out, " OK"), why);
 }
 
+/* N-232: an event object created non-blocking is non-blocking as a file
+ * (its reads used to block in the generic path), O_NONBLOCK set later by
+ * fcntl works, and blocking reads wake: an eventfd write from another
+ * process, a timerfd expiry (poll and read sleep until it). */
+static void test_event_fds(void)
+{
+    static char why[192];
+    int efd = eventfd(0, EFD_NONBLOCK);
+    uint64_t v = 0;
+    errno = 0;
+    int nb_read = efd >= 0 && read(efd, &v, 8) == -1 && errno == EAGAIN;
+    int nb_flag = efd >= 0 && (fcntl(efd, F_GETFL) & O_NONBLOCK) != 0;
+
+    int bfd = eventfd(0, 0);
+    int set_nb = bfd >= 0 && fcntl(bfd, F_SETFL, O_NONBLOCK) == 0;
+    errno = 0;
+    int set_nb_read = set_nb && read(bfd, &v, 8) == -1 && errno == EAGAIN;
+    fcntl(bfd, F_SETFL, 0);
+    pid_t pid = fork();
+    if (pid == 0) {
+        struct timespec d = {0, 30000000};
+        nanosleep(&d, NULL);
+        uint64_t one = 7;
+        _exit(write(bfd, &one, 8) == 8 ? 0 : 1);
+    }
+    v = 0;
+    int blocking_read = pid > 0 && read(bfd, &v, 8) == 8 && v == 7;
+    int status = -1;
+    waitpid(pid, &status, 0);
+    /* The original eventfd(initval) call: eventfd2 without flags. */
+    int lfd = syscall(SYS_eventfd, 3);
+    v = 0;
+    int legacy = lfd >= 0 && (fcntl(lfd, F_GETFL) & O_NONBLOCK) == 0 && read(lfd, &v, 8) == 8
+                 && v == 3;
+
+    int tfd = timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK | TFD_CLOEXEC);
+    errno = 0;
+    int t_nb = tfd >= 0 && read(tfd, &v, 8) == -1 && errno == EAGAIN;
+    struct itimerspec bad = {{0, 0}, {0, 1000000000}};
+    errno = 0;
+    int t_einval = timerfd_settime(tfd, 0, &bad, NULL) == -1 && errno == EINVAL;
+    struct itimerspec soon = {{0, 0}, {0, 40000000}};
+    long long t0 = mono_ns();
+    timerfd_settime(tfd, 0, &soon, NULL);
+    struct pollfd pfd = {tfd, POLLIN, 0};
+    int polled = poll(&pfd, 1, 2000) == 1 && (pfd.revents & POLLIN);
+    long long waited_ms = (mono_ns() - t0) / 1000000;
+    int t_poll = polled && waited_ms >= 35 && waited_ms < 1000 && read(tfd, &v, 8) == 8 && v == 1;
+    /* A blocking read sleeps until the expiry. */
+    int bt = timerfd_create(CLOCK_MONOTONIC, 0);
+    t0 = mono_ns();
+    timerfd_settime(bt, 0, &soon, NULL);
+    int t_block = read(bt, &v, 8) == 8 && v == 1 && (mono_ns() - t0) / 1000000 >= 35;
+
+    snprintf(why, sizeof(why),
+             "efd nonblock read=%d flag=%d; F_SETFL=%d read=%d; blocking=%d; tfd nonblock=%d "
+             "einval=%d poll=%d (%lld ms) blocking=%d; eventfd=%d",
+             nb_read, nb_flag, set_nb, set_nb_read, blocking_read, t_nb, t_einval, t_poll,
+             waited_ms, t_block, legacy);
+    report("musl_event_fds",
+           nb_read && nb_flag && set_nb && set_nb_read && blocking_read && t_nb && t_einval
+               && t_poll && t_block && legacy,
+           why);
+    close(lfd);
+    close(efd);
+    close(bfd);
+    close(tfd);
+    close(bt);
+}
+
+/* N-233: a signalfd reads the signals pending for the reader in its mask
+ * (blocked, so not delivered), poll reports them, the mask can be changed
+ * through the fd, sizemask must be the kernel's sigset size, and a blocking
+ * read wakes when a signal arrives. */
+static void test_signalfd(void)
+{
+    static char why[192];
+    sigset_t set, old;
+    sigemptyset(&set);
+    sigaddset(&set, SIGUSR1);
+    sigaddset(&set, SIGUSR2);
+    sigprocmask(SIG_BLOCK, &set, &old);
+
+    sigset_t usr1;
+    sigemptyset(&usr1);
+    sigaddset(&usr1, SIGUSR1);
+    int sfd = signalfd(-1, &usr1, SFD_NONBLOCK | SFD_CLOEXEC);
+    struct signalfd_siginfo info;
+    errno = 0;
+    int empty = sfd >= 0 && read(sfd, &info, sizeof(info)) == -1 && errno == EAGAIN;
+    kill(getpid(), SIGUSR1);
+    struct pollfd pfd = {sfd, POLLIN, 0};
+    int polled = poll(&pfd, 1, 1000) == 1 && (pfd.revents & POLLIN);
+    int got = read(sfd, &info, sizeof(info)) == sizeof(info) && info.ssi_signo == SIGUSR1;
+    errno = 0;
+    int consumed = read(sfd, &info, sizeof(info)) == -1 && errno == EAGAIN;
+
+    /* The mask, changed through the fd: now SIGUSR2. */
+    sigset_t usr2;
+    sigemptyset(&usr2);
+    sigaddset(&usr2, SIGUSR2);
+    int same_fd = signalfd(sfd, &usr2, 0) == sfd;
+    kill(getpid(), SIGUSR2);
+    int got2 = read(sfd, &info, sizeof(info)) == sizeof(info) && info.ssi_signo == SIGUSR2;
+    /* The original signalfd(fd, mask, sizemask) call: signalfd4 without
+     * flags, so a blocking descriptor. */
+    int lsfd = syscall(SYS_signalfd, -1, &usr2, 8);
+    kill(getpid(), SIGUSR2);
+    int legacy = lsfd >= 0 && (fcntl(lsfd, F_GETFL) & O_NONBLOCK) == 0
+                 && read(lsfd, &info, sizeof(info)) == sizeof(info) && info.ssi_signo == SIGUSR2;
+    /* sizemask must be 8 (the kernel's sigset_t). */
+    errno = 0;
+    int bad_size = syscall(SYS_signalfd4, -1, &usr1, 4, 0) == -1 && errno == EINVAL;
+
+    /* A blocking read wakes when the signal arrives from another process. */
+    int bfd = signalfd(-1, &usr1, 0);
+    pid_t pid = fork();
+    if (pid == 0) {
+        struct timespec d = {0, 30000000};
+        nanosleep(&d, NULL);
+        _exit(kill(getppid(), SIGUSR1) == 0 ? 0 : 1);
+    }
+    int blocking = pid > 0 && read(bfd, &info, sizeof(info)) == sizeof(info)
+                   && info.ssi_signo == SIGUSR1;
+    int status = -1;
+    waitpid(pid, &status, 0);
+
+    sigprocmask(SIG_SETMASK, &old, NULL);
+    snprintf(why, sizeof(why),
+             "empty=%d poll=%d got=%d consumed=%d same_fd=%d got2=%d signalfd=%d bad_size=%d "
+             "blocking=%d",
+             empty, polled, got, consumed, same_fd, got2, legacy, bad_size, blocking);
+    report("musl_signalfd",
+           empty && polled && got && consumed && same_fd && got2 && legacy && bad_size
+               && blocking,
+           why);
+    close(lsfd);
+    close(sfd);
+    close(bfd);
+}
+
 int main(int argc, char **argv)
 {
     test_auxv(argc > 0 ? argv[0] : NULL);
@@ -990,6 +1141,8 @@ int main(int argc, char **argv)
     test_page_cache();
     test_program_pages_shared();
     test_dynamic_program();
+    test_event_fds();
+    test_signalfd();
     printf("MUSL-RUNTIME: %d/%d\n", passed, total);
     return passed == total ? 0 : 1;
 }

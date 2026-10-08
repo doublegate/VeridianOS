@@ -230,13 +230,17 @@ pub const IO_RECHECK_NS: u64 = 10_000_000;
 /// file object reports a change since `seq`, `deadline` (`monotonic_ns`)
 /// passes (`TimedOut`), or a signal must be acted on (`Interrupted`). With
 /// `precise` false -- some scanned object does not wake waiters -- it also
-/// returns after [`IO_RECHECK_NS`]. `Ok` means: scan again.
-pub fn wait_io(seq: u64, deadline: Option<u64>, precise: bool) -> Result<(), WaitError> {
+/// returns after [`IO_RECHECK_NS`], and at `wake_at`, when a scanned object
+/// becomes ready by itself (`VfsNode::ready_at_ns`). `Ok` means: scan
+/// again.
+pub fn wait_io(
+    seq: u64,
+    deadline: Option<u64>,
+    precise: bool,
+    wake_at: Option<u64>,
+) -> Result<(), WaitError> {
     let recheck = (!precise).then(|| now().saturating_add(IO_RECHECK_NS));
-    let until = match (deadline, recheck) {
-        (Some(a), Some(b)) => Some(a.min(b)),
-        (a, b) => a.or(b),
-    };
+    let until = [deadline, recheck, wake_at].into_iter().flatten().min();
     match wait_event(&IO_EVENTS, until, || io_seq() != seq) {
         Err(WaitError::TimedOut) if deadline.is_none_or(|d| now() < d) => Ok(()),
         r => r,

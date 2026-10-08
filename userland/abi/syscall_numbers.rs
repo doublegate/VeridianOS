@@ -229,12 +229,12 @@ pub mod sysno {
     pub const SYS_AUDIO_STOP: usize = 1350;
     pub const SYS_AUDIO_PAUSE: usize = 1351;
     pub const SYS_getrandom: usize = 318;
+    pub const SYS_eventfd: usize = 284;
     pub const SYS_eventfd2: usize = 290;
-    pub const SYS_EVENTFD_READ: usize = 1356;
-    pub const SYS_EVENTFD_WRITE: usize = 1357;
     pub const SYS_timerfd_create: usize = 283;
     pub const SYS_timerfd_settime: usize = 286;
     pub const SYS_timerfd_gettime: usize = 287;
+    pub const SYS_signalfd: usize = 282;
     pub const SYS_signalfd4: usize = 289;
     pub const SYS_inotify_init1: usize = 294;
     pub const SYS_inotify_add_watch: usize = 254;

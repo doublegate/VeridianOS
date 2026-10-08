@@ -459,6 +459,14 @@ pub trait VfsNode: Send + Sync {
         false
     }
 
+    /// When this node becomes ready by itself, with no event to wake
+    /// waiters (a timerfd's next expiry), as `dispatch::clock_ns`: read,
+    /// poll and epoll sleep no longer than that. `None`: only events change
+    /// its readiness.
+    fn ready_at_ns(&self) -> Option<u64> {
+        None
+    }
+
     /// Downcast to `&dyn core::any::Any` for type-specific operations.
     ///
     /// Used by syscall handlers that need to extract implementation-specific

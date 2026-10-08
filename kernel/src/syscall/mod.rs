@@ -1088,57 +1088,19 @@ fn handle_syscall(
         // getrandom(buf, buflen, flags) -> bytes_written
         Syscall::Getrandom => sys_getrandom(arg1, arg2, arg3),
 
-        // eventfd syscall -- creates VfsNode-backed fd for musl compat
-        Syscall::Eventfd2 => {
-            let initval = arg1 as u32;
-            let flags = arg2 as u32;
-            let cloexec = (flags & crate::fs::eventfd::EFD_CLOEXEC) != 0;
-            // Create the internal eventfd instance
-            let efd_id = crate::fs::eventfd::eventfd_create(initval, flags)? as u32;
-            // Wrap as VfsNode for real fd semantics (read/write/close/epoll)
-            let node: alloc::sync::Arc<dyn crate::fs::VfsNode> =
-                alloc::sync::Arc::new(crate::fs::eventfd::EventFdNode::new(efd_id));
-            let file = crate::fs::file::File::new(node, crate::fs::OpenFlags::read_write());
-            let proc = crate::process::current_process().ok_or(SyscallError::InvalidState)?;
-            let file_table = proc.file_table.lock();
-            let fd = file_table
-                .open_with_flags(alloc::sync::Arc::new(file), cloexec)
-                .map_err(|_| SyscallError::OutOfMemory)?;
-            Ok(fd)
-        }
-        // EventfdRead/EventfdWrite kept for backward compat with internal callers
-        // but musl programs will use read()/write() via VfsNode path
-        Syscall::EventfdRead => {
-            let efd_id = arg1 as u32;
-            let buf_ptr = arg2;
-            validate_user_buffer(buf_ptr, 8)?;
-            let val = crate::fs::eventfd::eventfd_read(efd_id)?;
-            userspace::write_user::<u64>(buf_ptr, val)?;
-            Ok(8)
-        }
-        Syscall::EventfdWrite => {
-            let efd_id = arg1 as u32;
-            let buf_ptr = arg2;
-            validate_user_buffer(buf_ptr, 8)?;
-            let val: u64 = userspace::read_user(buf_ptr)?;
-            crate::fs::eventfd::eventfd_write(efd_id, val)
-        }
-
-        // timerfd syscalls -- create returns VfsNode-backed fd
+        // eventfd2(initval, flags), timerfd_create(clockid, flags): the
+        // NONBLOCK flag is the file's, as fcntl sees it (N-232).
+        Syscall::Eventfd2 => sys_eventfd2(arg1, arg2),
+        // eventfd(initval): eventfd2 without flags.
+        Syscall::Eventfd => sys_eventfd2(arg1, 0),
         Syscall::TimerfdCreate => {
-            let clockid = arg1 as u32;
             let flags = arg2 as u32;
-            let cloexec = (flags & crate::fs::timerfd::TFD_CLOEXEC) != 0;
-            let tfd_id = crate::fs::timerfd::timerfd_create(clockid, flags)? as u32;
-            let node: alloc::sync::Arc<dyn crate::fs::VfsNode> =
-                alloc::sync::Arc::new(crate::fs::timerfd::TimerFdNode::new(tfd_id));
-            let file = crate::fs::file::File::new(node, crate::fs::OpenFlags::read_write());
-            let proc = crate::process::current_process().ok_or(SyscallError::InvalidState)?;
-            let file_table = proc.file_table.lock();
-            let fd = file_table
-                .open_with_flags(alloc::sync::Arc::new(file), cloexec)
-                .map_err(|_| SyscallError::OutOfMemory)?;
-            Ok(fd)
+            let tfd_id = crate::fs::timerfd::timerfd_create(arg1 as u32, flags)? as u32;
+            install_event_file(
+                alloc::sync::Arc::new(crate::fs::timerfd::TimerFdNode::new(tfd_id)),
+                flags & crate::fs::timerfd::TFD_NONBLOCK != 0,
+                flags & crate::fs::timerfd::TFD_CLOEXEC != 0,
+            )
         }
         // timerfd_settime/gettime: musl passes the real fd, so we look up
         // the internal tfd_id via as_any() downcast on the VfsNode.
@@ -1173,27 +1135,12 @@ fn handle_syscall(
             Ok(0)
         }
 
-        // signalfd syscall -- creates VfsNode-backed fd
-        Syscall::Signalfd4 => {
-            let fd_arg = arg1 as i32;
-            let mask = arg2 as u64;
-            let flags = arg3 as u32;
-            let cloexec = (flags & crate::fs::signalfd::SFD_CLOEXEC) != 0;
-            let sfd_id = crate::fs::signalfd::signalfd_create(fd_arg, mask, flags)? as u32;
-            // If updating an existing signalfd (fd_arg != -1), return the same fd
-            if fd_arg != -1 {
-                return Ok(fd_arg as usize);
-            }
-            let node: alloc::sync::Arc<dyn crate::fs::VfsNode> =
-                alloc::sync::Arc::new(crate::fs::signalfd::SignalFdNode::new(sfd_id));
-            let file = crate::fs::file::File::new(node, crate::fs::OpenFlags::read_write());
-            let proc = crate::process::current_process().ok_or(SyscallError::InvalidState)?;
-            let file_table = proc.file_table.lock();
-            let fd = file_table
-                .open_with_flags(alloc::sync::Arc::new(file), cloexec)
-                .map_err(|_| SyscallError::OutOfMemory)?;
-            Ok(fd)
-        }
+        // signalfd4(fd, mask, sizemask, flags) (N-233): the mask is a
+        // sigset_t in user memory, sizemask its size (8); fd -1 makes a new
+        // signalfd, an existing signalfd's fd gets the new mask.
+        Syscall::Signalfd4 => sys_signalfd4(arg1, arg2, arg3, arg4),
+        // signalfd(fd, mask, sizemask): signalfd4 without flags.
+        Syscall::Signalfd => sys_signalfd4(arg1, arg2, arg3, 0),
 
         // sendmsg/recvmsg -- delegate to unix socket module for SCM_RIGHTS
         Syscall::Sendmsg => sys_sendmsg(arg1, arg2, arg3),
@@ -1251,6 +1198,72 @@ fn handle_syscall(
 
         _ => Err(SyscallError::InvalidSyscall),
     }
+}
+
+/// eventfd2(initval, flags): the NONBLOCK flag is the file's, as fcntl
+/// sees it (N-232).
+#[cfg(feature = "alloc")]
+fn sys_eventfd2(initval: usize, flags: usize) -> SyscallResult {
+    let flags = flags as u32;
+    let efd_id = crate::fs::eventfd::eventfd_create(initval as u32, flags)? as u32;
+    install_event_file(
+        alloc::sync::Arc::new(crate::fs::eventfd::EventFdNode::new(efd_id)),
+        flags & crate::fs::eventfd::EFD_NONBLOCK != 0,
+        flags & crate::fs::eventfd::EFD_CLOEXEC != 0,
+    )
+}
+
+/// signalfd4(fd, mask, sizemask, flags) (N-233): a new signalfd for the
+/// signals in `*mask`, or, given a signalfd, a new mask for it.
+#[cfg(feature = "alloc")]
+fn sys_signalfd4(fd: usize, mask_ptr: usize, sizemask: usize, flags: usize) -> SyscallResult {
+    use crate::fs::signalfd::{SignalFdNode, SFD_CLOEXEC, SFD_NONBLOCK};
+    let (fd, flags) = (fd as i32, flags as u32);
+    if sizemask != 8 || flags & !(SFD_NONBLOCK | SFD_CLOEXEC) != 0 {
+        return Err(SyscallError::InvalidArgument);
+    }
+    let mask: u64 = userspace::read_user(mask_ptr)?;
+    if fd != -1 {
+        let proc = crate::process::current_process().ok_or(SyscallError::InvalidState)?;
+        let file = proc
+            .file_table
+            .lock()
+            .get(fd as usize)
+            .ok_or(SyscallError::BadFileDescriptor)?;
+        let node = file
+            .node
+            .as_any()
+            .and_then(|any| any.downcast_ref::<SignalFdNode>())
+            .ok_or(SyscallError::InvalidArgument)?;
+        node.set_mask(mask);
+        return Ok(fd as usize);
+    }
+    install_event_file(
+        alloc::sync::Arc::new(SignalFdNode::new(mask)),
+        flags & SFD_NONBLOCK != 0,
+        flags & SFD_CLOEXEC != 0,
+    )
+}
+
+/// Put an event object (eventfd, timerfd, signalfd) in the calling
+/// process's file table: readable and writable, O_NONBLOCK and FD_CLOEXEC
+/// as the creating call's flags ask.
+#[cfg(feature = "alloc")]
+fn install_event_file(
+    node: alloc::sync::Arc<dyn crate::fs::VfsNode>,
+    nonblock: bool,
+    cloexec: bool,
+) -> SyscallResult {
+    let mut flags = crate::fs::OpenFlags::read_write();
+    flags.nonblock = nonblock;
+    let file = crate::fs::file::File::new(node, flags);
+    let proc = crate::process::current_process().ok_or(SyscallError::InvalidState)?;
+    let fd = proc
+        .file_table
+        .lock()
+        .open_with_flags(alloc::sync::Arc::new(file), cloexec)
+        .map_err(|_| SyscallError::OutOfMemory)?;
+    Ok(fd)
 }
 
 /// Resolve a file descriptor to an internal timerfd ID.

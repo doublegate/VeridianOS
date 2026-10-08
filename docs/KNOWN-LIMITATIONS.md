@@ -28,7 +28,7 @@ exposed were fixed (N-182 to N-189); the rest are listed, with their targets, in
 [`docs/audit/ABI-REVIEW-2026-10-07.md`](audit/ABI-REVIEW-2026-10-07.md). The most visible:
 
 - **Blocking.** select never blocks; recvfrom, accept, sendmsg and recvmsg never block on a
-  blocking socket; non-blocking eventfd, timerfd and signalfd reads block (N-194, N-232, N-235).
+  blocking socket (N-194, N-235).
 - **MAP_SHARED of regular files** is a private copy: a write through the mapping does not reach
   the file or other mappings. Only memfds share their pages (N-230); the rest needs the v0.29
   page cache.
@@ -76,10 +76,10 @@ work. User code is preempted when its slice ends (D3). What is still missing:
 - **The kernel is not preemptible.** A task is switched only on its way back to user mode or
   when it waits, so a long system call keeps the CPU until it returns or waits.
 - **Some waits still re-check instead of being woken (blocking step of sprint D).** Sleeps,
-  futexes, pipes, eventfd, timerfd, `sigsuspend`, `wait` and job-control stops sleep until woken.
-  `poll`, `epoll_wait` and blocking reads of INET sockets, ptys, signalfd and other descriptors that
-  do not report readiness changes yet sleep too but re-check every 10 ms. `select` reports every
-  open descriptor as ready. Other waits are still wrong:
+  futexes, pipes, eventfd, timerfd, signalfd, `sigsuspend`, `wait` and job-control stops sleep
+  until woken. `poll`, `epoll_wait` and blocking reads of INET sockets, ptys and other
+  descriptors that do not report readiness changes yet sleep too but re-check every 10 ms.
+  `select` reports every open descriptor as ready. Other waits are still wrong:
   - an empty pty read returns end-of-file, and a write to a full pty fails with EAGAIN instead
     of waiting (it returns a short count when part fits; N-128);
   - `flock` without `LOCK_NB` fails with EWOULDBLOCK instead of waiting (N-120).

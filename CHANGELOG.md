@@ -21,6 +21,17 @@
   dynamically linked C++ program that throws, runs threads with `thread_local` destructors and
   `dlopen`s a C++ library.
 
+- **eventfd, timerfd and signalfd follow Linux (N-232, N-233).** Their NONBLOCK flag is the
+  open file's, so `fcntl` reports and changes it, and a blocking read, `poll` or `epoll_wait`
+  sleeps until the object is ready: an eventfd write or a signal wakes the waiters, and a timerfd
+  wait sleeps to the timer's next expiry. signalfd works: it read the mask pointer as the mask
+  and the size as the flags, and was never readable; it now returns the reader's pending signals
+  in its mask as `signalfd_siginfo` records, and signalfd4 on an existing signalfd changes its
+  mask. timerfd checks its clock, flags and times (EINVAL), `timerfd_settime` returns the old
+  setting, and CLOCK_BOOTTIME and TFD_TIMER_CANCEL_ON_SET are accepted. The original `eventfd`
+  and `signalfd` calls are added; the native-only eventfd read and write calls are removed.
+  Runtime tests `musl_event_fds` and `musl_signalfd`.
+
 - **Alternate signal stacks (N-222).** `sigaltstack` used to report success without doing
   anything. It now keeps a per-thread alternate stack with Linux's rules: handlers installed with
   `SA_ONSTACK` run on it, it reports `SS_ONSTACK` while in use and refuses changes then (EPERM),
@@ -252,6 +263,13 @@
   range and added its addresses unchecked, so an ELF file whose PT_LOAD ran past the end of the
   file, or whose sizes overflowed, crashed the kernel on exec. Such files now fail with ENOEXEC
   (host tests in `elf::image`).
+- **Signal frames written by the AArch64 and RISC-V delivery respect copy-on-write (N-257).**
+  That code wrote frames through the physical map into whatever frame backed the user stack, so
+  a page shared after fork or held in a file's page cache would have changed for every process
+  sharing it. It was not reachable (x86_64 delivers signals through `write_user_bytes`, the other
+  architectures have no user mode yet); it now writes through `write_bytes_private`, which copies
+  a shared page first. `musl_page_cache` also checks that a read-only mapping of a cached page
+  made writable with `mprotect` copies the page.
 - **Fork no longer shares a slice of user memory between parent and child (N-256).** Every new
   address space and every fork copied the L4 entry of a kernel heap that has not lived there since
   bootloader 0.9 (`0x4400_0000_0000`, a 512 GiB slot of user space). A program that mapped memory

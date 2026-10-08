@@ -503,18 +503,18 @@ pub enum Syscall {
     // Event, timer and signal descriptors
     /// Linux `getrandom`
     Getrandom = 318,
+    /// Linux `eventfd`
+    Eventfd = 284,
     /// Linux `eventfd2`
     Eventfd2 = 290,
-    /// VeridianOS only
-    EventfdRead = 1356,
-    /// VeridianOS only
-    EventfdWrite = 1357,
     /// Linux `timerfd_create`
     TimerfdCreate = 283,
     /// Linux `timerfd_settime`
     TimerfdSettime = 286,
     /// Linux `timerfd_gettime`
     TimerfdGettime = 287,
+    /// Linux `signalfd`
+    Signalfd = 282,
     /// Linux `signalfd4`
     Signalfd4 = 289,
 
@@ -678,7 +678,9 @@ impl TryFrom<usize> for Syscall {
             273 => Ok(Syscall::SetRobustList),
             280 => Ok(Syscall::Utimensat),
             281 => Ok(Syscall::EpollPwait),
+            282 => Ok(Syscall::Signalfd),
             283 => Ok(Syscall::TimerfdCreate),
+            284 => Ok(Syscall::Eventfd),
             285 => Ok(Syscall::Fallocate),
             286 => Ok(Syscall::TimerfdSettime),
             287 => Ok(Syscall::TimerfdGettime),
@@ -762,8 +764,6 @@ impl TryFrom<usize> for Syscall {
             1349 => Ok(Syscall::AudioStart),
             1350 => Ok(Syscall::AudioStop),
             1351 => Ok(Syscall::AudioPause),
-            1356 => Ok(Syscall::EventfdRead),
-            1357 => Ok(Syscall::EventfdWrite),
             _ => Err(()),
         }
     }
@@ -995,12 +995,12 @@ impl Syscall {
             Syscall::AudioStop => None,
             Syscall::AudioPause => None,
             Syscall::Getrandom => Some("getrandom"),
+            Syscall::Eventfd => Some("eventfd"),
             Syscall::Eventfd2 => Some("eventfd2"),
-            Syscall::EventfdRead => None,
-            Syscall::EventfdWrite => None,
             Syscall::TimerfdCreate => Some("timerfd_create"),
             Syscall::TimerfdSettime => Some("timerfd_settime"),
             Syscall::TimerfdGettime => Some("timerfd_gettime"),
+            Syscall::Signalfd => Some("signalfd"),
             Syscall::Signalfd4 => Some("signalfd4"),
             Syscall::InotifyInit1 => Some("inotify_init1"),
             Syscall::InotifyAddWatch => Some("inotify_add_watch"),
@@ -1234,12 +1234,12 @@ pub(crate) const ALL: &[Syscall] = &[
     Syscall::AudioStop,
     Syscall::AudioPause,
     Syscall::Getrandom,
+    Syscall::Eventfd,
     Syscall::Eventfd2,
-    Syscall::EventfdRead,
-    Syscall::EventfdWrite,
     Syscall::TimerfdCreate,
     Syscall::TimerfdSettime,
     Syscall::TimerfdGettime,
+    Syscall::Signalfd,
     Syscall::Signalfd4,
     Syscall::InotifyInit1,
     Syscall::InotifyAddWatch,

@@ -436,6 +436,7 @@ pub fn send_to_process(process: &Process, sig: usize) -> Result<bool, crate::err
             .rt_queue
             .push(&process.pending_signals, sig)
             .map_err(|_| crate::error::KernelError::WouldBlock)?;
+        crate::fs::signalfd::signal_generated();
     }
     for task in &tasks {
         dispatch::wake(task);
@@ -476,6 +477,7 @@ pub fn send_to_thread(
         .rt_queue
         .push(&thread.sigpending, sig)
         .map_err(|_| crate::error::KernelError::WouldBlock)?;
+    crate::fs::signalfd::signal_generated();
     for task in crate::sched::dispatch::tasks_of(process.pid.0) {
         if task.owner() == Some((process.pid.0, thread.tid.0)) {
             crate::sched::dispatch::wake(&task);
@@ -489,6 +491,37 @@ pub fn deliverable(process: &Process, thread: &Thread) -> u64 {
     let pending =
         thread.sigpending.load(Ordering::Acquire) | process.pending_signals.load(Ordering::Acquire);
     pending & !thread.sigmask.load(Ordering::Acquire)
+}
+
+/// Whether the calling thread has a signal pending -- its own or its
+/// process's -- in `mask`, blocked or not (signalfd readiness).
+pub fn pending_in(mask: u64) -> bool {
+    let (Some(process), Some(thread)) = (super::current_process(), super::current_thread()) else {
+        return false;
+    };
+    (thread.sigpending.load(Ordering::Acquire) | process.pending_signals.load(Ordering::Acquire))
+        & mask
+        != 0
+}
+
+/// Take the calling thread's lowest pending signal in `mask` -- the
+/// thread's own instance first, then its process's -- blocked or not, as a
+/// signalfd read does: it is consumed, not delivered. A real-time signal's
+/// instances come one at a time (N-209).
+pub fn take_pending_in(mask: u64) -> Option<usize> {
+    let process = super::current_process()?;
+    let thread = super::current_thread()?;
+    let pending =
+        thread.sigpending.load(Ordering::Acquire) | process.pending_signals.load(Ordering::Acquire);
+    let ready = pending & mask;
+    if ready == 0 {
+        return None;
+    }
+    let sig = ready.trailing_zeros() as usize + 1;
+    if !thread.rt_queue.take(&thread.sigpending, sig) {
+        process.rt_queue.take(&process.pending_signals, sig);
+    }
+    Some(sig)
 }
 
 /// Replace the calling thread's mask (UNBLOCKABLE is never blocked).
