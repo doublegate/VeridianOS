@@ -526,7 +526,6 @@ mod tests {
     #[test]
     fn timerfd_settime_follows_linux() {
         let _serial = TEST_SERIAL.lock();
-        TIMERFD_REGISTRY.lock().clear();
         assert_eq!(
             timerfd_create(CLOCK_MONOTONIC, 0x4),
             Err(SyscallError::InvalidArgument)
@@ -588,7 +587,6 @@ mod tests {
     #[test]
     fn test_timerfd_create_monotonic() {
         let _serial = TEST_SERIAL.lock();
-        TIMERFD_REGISTRY.lock().clear();
 
         let id = timerfd_create(CLOCK_MONOTONIC, 0).unwrap();
         assert!(id > 0);
@@ -597,7 +595,6 @@ mod tests {
     #[test]
     fn test_timerfd_create_invalid_clock() {
         let _serial = TEST_SERIAL.lock();
-        TIMERFD_REGISTRY.lock().clear();
 
         assert!(timerfd_create(99, 0).is_err());
     }
@@ -605,7 +602,6 @@ mod tests {
     #[test]
     fn test_timerfd_disarm() {
         let _serial = TEST_SERIAL.lock();
-        TIMERFD_REGISTRY.lock().clear();
 
         let id = timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK).unwrap() as u32;
 
@@ -630,7 +626,6 @@ mod tests {
     #[test]
     fn test_timerfd_gettime_disarmed() {
         let _serial = TEST_SERIAL.lock();
-        TIMERFD_REGISTRY.lock().clear();
 
         let id = timerfd_create(CLOCK_MONOTONIC, 0).unwrap() as u32;
         let current = timerfd_gettime(id).unwrap();
@@ -640,7 +635,6 @@ mod tests {
     #[test]
     fn test_timerfd_close() {
         let _serial = TEST_SERIAL.lock();
-        TIMERFD_REGISTRY.lock().clear();
 
         let id = timerfd_create(CLOCK_MONOTONIC, 0).unwrap() as u32;
         timerfd_close(id).unwrap();
