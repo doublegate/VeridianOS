@@ -173,9 +173,13 @@ TimeCreateTimer         private 1125
 TimeCancelTimer         private 1126
 clock_gettime
 clock_getres
+clock_settime
 clock_nanosleep
 nanosleep
 gettimeofday
+settimeofday
+time
+times
 
 ## Signals
 rt_sigaction

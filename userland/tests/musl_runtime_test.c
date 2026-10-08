@@ -33,6 +33,9 @@
 #include <sys/mman.h>
 #include <sys/prctl.h>
 #include <sys/resource.h>
+#include <sys/sysinfo.h>
+#include <sys/time.h>
+#include <sys/times.h>
 #include <sys/select.h>
 #include <spawn.h>
 #include <sys/wait.h>
@@ -141,6 +144,162 @@ static void test_prctl(void)
            set == 0 && get == 0 && strcmp(name, "musltest") == 0
                && strcmp(cut, "a-name-longer-t") == 0 && WIFEXITED(st) && WEXITSTATUS(st) == 0,
            why);
+}
+
+/* Spin for at least `ms` of CPU time on this thread. */
+static void burn_cpu(long ms)
+{
+    struct timespec start, now;
+    clock_gettime(CLOCK_THREAD_CPUTIME_ID, &start);
+    do {
+        for (volatile int i = 0; i < 10000; i++)
+            ;
+        clock_gettime(CLOCK_THREAD_CPUTIME_ID, &now);
+    } while ((now.tv_sec - start.tv_sec) * 1000 + (now.tv_nsec - start.tv_nsec) / 1000000 < ms);
+}
+
+static long long ms_of(struct timespec t)
+{
+    return (long long)t.tv_sec * 1000 + t.tv_nsec / 1000000;
+}
+
+static int cond_waited;
+static pthread_mutex_t cond_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t cond_never = PTHREAD_COND_INITIALIZER;
+
+/* Clocks (N-218 to N-220) and resource usage (N-223, N-213): the wall
+ * clock counts from 1970; CPU clocks advance with work, also through
+ * clock_getcpuclockid and pthread_getcpuclockid; resolution is reported;
+ * gettimeofday takes NULL; only root sets the clock; absolute
+ * CLOCK_REALTIME deadlines (clock_nanosleep, a condition wait, which
+ * musl times with FUTEX_CLOCK_REALTIME) end when the wall clock reaches
+ * them; a TFD_TIMER_CANCEL_ON_SET timerfd sees the clock set; getrusage,
+ * times, wait4's rusage and sysinfo report real numbers. */
+static void test_clocks_and_usage(void)
+{
+    int f = 0;
+    struct timespec rt, mono, res, a, b;
+    if (clock_gettime(CLOCK_REALTIME, &rt) != 0 || rt.tv_sec < 1700000000) f |= 1;
+    if (clock_gettime(CLOCK_MONOTONIC, &mono) != 0 || clock_gettime(CLOCK_BOOTTIME, &a) != 0) f |= 1;
+    if (clock_getres(CLOCK_MONOTONIC, &res) != 0 || res.tv_sec != 0 || res.tv_nsec != 1) f |= 2;
+    errno = 0;
+    if (clock_gettime(12, &a) != -1 || errno != EINVAL) f |= 2;
+
+    clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &a);
+    burn_cpu(30);
+    clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &b);
+    if (ms_of(b) - ms_of(a) < 30) f |= 4;
+    clockid_t pclk, tclk;
+    struct timespec pc, tc;
+    if (clock_getcpuclockid(getpid(), &pclk) != 0 || clock_gettime(pclk, &pc) != 0
+        || ms_of(pc) < ms_of(b))
+        f |= 8;
+    if (pthread_getcpuclockid(pthread_self(), &tclk) != 0 || clock_gettime(tclk, &tc) != 0
+        || ms_of(tc) < 30)
+        f |= 8;
+    if (clock() <= 0) f |= 8;
+
+    struct timeval tv;
+    struct timezone tz;
+    if (gettimeofday(&tv, NULL) != 0 || tv.tv_sec < 1700000000 || gettimeofday(NULL, &tz) != 0)
+        f |= 16;
+
+    /* Root sets the clock (and puts it back); a user may not. */
+    clock_gettime(CLOCK_REALTIME, &rt);
+    struct timespec moved = {rt.tv_sec + 3600, rt.tv_nsec};
+    int set_ok = clock_settime(CLOCK_REALTIME, &moved) == 0;
+    clock_gettime(CLOCK_REALTIME, &a);
+    moved.tv_sec -= 3600;
+    clock_settime(CLOCK_REALTIME, &moved);
+    if (!set_ok || a.tv_sec < rt.tv_sec + 3599) f |= 32;
+    pid_t pid = fork();
+    if (pid == 0) {
+        setresuid(1000, 1000, 1000);
+        _exit(clock_settime(CLOCK_REALTIME, &moved) == -1 && errno == EPERM ? 0 : 1);
+    }
+    int st = 0;
+    waitpid(pid, &st, 0);
+    if (!WIFEXITED(st) || WEXITSTATUS(st) != 0) f |= 32;
+
+    /* Absolute wall-clock deadlines end on time. */
+    clock_gettime(CLOCK_MONOTONIC, &a);
+    clock_gettime(CLOCK_REALTIME, &rt);
+    rt.tv_nsec += 50000000;
+    if (rt.tv_nsec >= 1000000000) {
+        rt.tv_sec++;
+        rt.tv_nsec -= 1000000000;
+    }
+    int slept = clock_nanosleep(CLOCK_REALTIME, TIMER_ABSTIME, &rt, NULL);
+    clock_gettime(CLOCK_MONOTONIC, &b);
+    if (slept != 0 || ms_of(b) - ms_of(a) < 40 || ms_of(b) - ms_of(a) > 2000) f |= 64;
+    clock_gettime(CLOCK_REALTIME, &rt);
+    rt.tv_nsec += 50000000;
+    if (rt.tv_nsec >= 1000000000) {
+        rt.tv_sec++;
+        rt.tv_nsec -= 1000000000;
+    }
+    pthread_mutex_lock(&cond_lock);
+    clock_gettime(CLOCK_MONOTONIC, &a);
+    while (!cond_waited) {
+        if (pthread_cond_timedwait(&cond_never, &cond_lock, &rt) == ETIMEDOUT)
+            break;
+    }
+    clock_gettime(CLOCK_MONOTONIC, &b);
+    pthread_mutex_unlock(&cond_lock);
+    if (ms_of(b) - ms_of(a) < 40 || ms_of(b) - ms_of(a) > 2000) f |= 128;
+
+    /* A wall-clock timerfd armed to cancel on a clock change sees one. */
+    int tfd = timerfd_create(CLOCK_REALTIME, TFD_NONBLOCK);
+    clock_gettime(CLOCK_REALTIME, &rt);
+    struct itimerspec its = {{0, 0}, {rt.tv_sec + 100, 0}};
+    uint64_t ticks;
+    if (tfd < 0 || timerfd_settime(tfd, TFD_TIMER_ABSTIME | TFD_TIMER_CANCEL_ON_SET, &its, NULL) != 0)
+        f |= 256;
+    clock_gettime(CLOCK_REALTIME, &rt);
+    clock_settime(CLOCK_REALTIME, &rt);
+    errno = 0;
+    if (read(tfd, &ticks, sizeof(ticks)) != -1 || errno != ECANCELED) f |= 256;
+    if (read(tfd, &ticks, sizeof(ticks)) != -1 || errno != EAGAIN) f |= 256;
+    close(tfd);
+
+    /* Usage. */
+    struct rusage ru;
+    if (getrusage(RUSAGE_SELF, &ru) != 0 || ru.ru_utime.tv_sec * 1000 + ru.ru_utime.tv_usec / 1000
+                                                  + ru.ru_stime.tv_sec * 1000
+                                                  + ru.ru_stime.tv_usec / 1000
+                                              < 30
+        || ru.ru_maxrss <= 0)
+        f |= 512;
+    errno = 0;
+    if (getrusage(7, &ru) != -1 || errno != EINVAL) f |= 512;
+    pid = fork();
+    if (pid == 0) {
+        burn_cpu(40);
+        _exit(0);
+    }
+    struct rusage child_ru;
+    if (wait4(pid, &st, 0, &child_ru) != pid
+        || child_ru.ru_utime.tv_sec * 1000 + child_ru.ru_utime.tv_usec / 1000
+                   + child_ru.ru_stime.tv_sec * 1000 + child_ru.ru_stime.tv_usec / 1000
+               < 40)
+        f |= 1024;
+    if (getrusage(RUSAGE_CHILDREN, &ru) != 0
+        || ru.ru_utime.tv_sec * 1000 + ru.ru_utime.tv_usec / 1000 + ru.ru_stime.tv_sec * 1000
+                   + ru.ru_stime.tv_usec / 1000
+               < 40)
+        f |= 1024;
+    struct tms tm;
+    clock_t since_boot = times(&tm);
+    if (since_boot <= 0 || tm.tms_utime + tm.tms_stime < 3 || tm.tms_cutime + tm.tms_cstime < 4)
+        f |= 2048;
+    struct sysinfo si;
+    if (sysinfo(&si) != 0 || si.totalram == 0 || si.freeram == 0 || si.freeram > si.totalram
+        || si.procs == 0 || si.mem_unit != 1 || si.uptime <= 0)
+        f |= 4096;
+
+    static char why[64];
+    snprintf(why, sizeof(why), "fail=%#x", f);
+    report("musl_clocks_and_usage", f == 0, why);
 }
 
 /* The --ids mode: this program's IDs, AT_SECURE and command name, for
@@ -1853,6 +2012,7 @@ int main(int argc, char **argv)
     test_robust_futex();
     test_sched();
     test_setuid_exec("/bin/musl_runtime_test");
+    test_clocks_and_usage();
     printf("MUSL-RUNTIME: %d/%d\n", passed, total);
     return passed == total ? 0 : 1;
 }

@@ -287,7 +287,8 @@ extern "C" fn trap_dispatch(f: &mut TrapFrame) {
         32 => pic_timer(),
         33 => keyboard(),
         34..=47 => pic_other(f.vector),
-        48 => apic_timer(),
+        // The tick is charged as user time if it interrupted ring 3.
+        48 => apic_timer(f.cs & 3 == 3),
         49 => {
             crate::mm::tlb::service_pending();
             super::apic::send_eoi();
@@ -685,10 +686,10 @@ fn keyboard() {
     pic_eoi(33);
 }
 
-/// Local APIC timer.
-fn apic_timer() {
+/// Local APIC timer, which interrupted user mode if `user`.
+fn apic_timer(user: bool) {
     crate::perf::count_interrupt();
-    super::timer::tick();
+    super::timer::tick(user);
     super::apic::send_eoi();
 }
 

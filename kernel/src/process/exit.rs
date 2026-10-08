@@ -150,17 +150,46 @@ pub fn wait_process_with_options(
     pid: Option<ProcessId>,
     options: WaitOptions,
 ) -> Result<(ProcessId, i32), KernelError> {
-    wait_children(pid.map_or(WaitFilter::Any, WaitFilter::Pid), options)
+    wait_children(pid.map_or(WaitFilter::Any, WaitFilter::Pid), options).map(|w| (w.pid, w.status))
+}
+
+/// What a wait reports about a child (pid 0: nothing yet, under WNOHANG).
+#[cfg(feature = "alloc")]
+#[derive(Debug, Clone, Copy)]
+pub struct Waited {
+    pub pid: ProcessId,
+    pub status: i32,
+    /// The child's CPU time and its waited-for children's (wait4 and
+    /// waitid's rusage, as Linux's getrusage(RUSAGE_BOTH) of the child).
+    pub usage: crate::sched::cputime::CpuTimes,
+    /// The larger of the child's peak resident set and its children's.
+    pub maxrss_pages: usize,
+}
+
+#[cfg(feature = "alloc")]
+impl Waited {
+    fn of(child: &super::Process, status: i32) -> Self {
+        Self {
+            pid: child.pid,
+            status,
+            usage: child.cpu_times().plus(child.children_cpu_times()),
+            maxrss_pages: child.peak_rss_pages().max(child.children_peak_rss_pages()),
+        }
+    }
+
+    const NOTHING: Self = Self {
+        pid: ProcessId(0),
+        status: 0,
+        usage: crate::sched::cputime::CpuTimes::ZERO,
+        maxrss_pages: 0,
+    };
 }
 
 /// Wait for a child selected by `filter` to change state: exit (unless
 /// `skip_exited`), stop (`untraced`) or continue (`continued`). Each stop
 /// or continue is reported once.
 #[cfg(feature = "alloc")]
-pub fn wait_children(
-    filter: WaitFilter,
-    options: WaitOptions,
-) -> Result<(ProcessId, i32), KernelError> {
+pub fn wait_children(filter: WaitFilter, options: WaitOptions) -> Result<Waited, KernelError> {
     let current = super::current_process().ok_or(KernelError::NotInitialized {
         subsystem: "current process",
     })?;
@@ -195,10 +224,12 @@ pub fn wait_children(
                 // Check for zombie (exited)
                 if child_state == ProcessState::Zombie && !options.skip_exited {
                     if options.keep {
-                        return Ok((*child_pid, child.wait_status()));
+                        return Ok(Waited::of(&child, child.wait_status()));
                     }
                     // Reap the zombie
                     let exit_code = child.get_exit_code();
+                    current.add_reaped_child_cpu(&child);
+                    let waited = Waited::of(&child, child.wait_status());
 
                     // Remove from children list
                     current.children.lock().retain(|&p| p != *child_pid);
@@ -216,22 +247,21 @@ pub fn wait_children(
                     // WIFEXITED(s) = (s & 0x7f) == 0
                     // WEXITSTATUS(s) = (s >> 8) & 0xff
                     // Exit code or terminating signal (N-99).
-                    let wait_status = child.wait_status();
-                    return Ok((*child_pid, wait_status));
+                    return Ok(waited);
                 }
 
                 // A stop (WUNTRACED) or continue (WCONTINUED), reported
                 // once: whoever clears it reports it (N-99).
                 if let Some(r) = job_report_for(&child, options) {
                     if options.keep {
-                        return Ok((*child_pid, r as i32));
+                        return Ok(Waited::of(&child, r as i32));
                     }
                     if child
                         .job_report
                         .compare_exchange(r, 0, Ordering::AcqRel, Ordering::Acquire)
                         .is_ok()
                     {
-                        return Ok((*child_pid, r as i32));
+                        return Ok(Waited::of(&child, r as i32));
                     }
                 }
             }
@@ -252,7 +282,7 @@ pub fn wait_children(
         // No zombie children found
         if options.no_hang {
             // WNOHANG: return immediately with (0, 0) to indicate no child changed state
-            return Ok((ProcessId(0), 0));
+            return Ok(Waited::NOTHING);
         }
 
         // A dispatched process waits for a child to change state; its
@@ -561,6 +591,8 @@ pub fn exit_dispatched(exit_code: i32, group: bool) -> ! {
         super::robust_list::exit_thread(&thread);
         crate::syscall::scheduling::thread_exit(&thread);
         thread.release_fs();
+        // The thread's CPU time stays with the process.
+        process.add_exited_cpu(dispatch::take_current_usage());
         let clear_ptr = thread.clear_tid.load(Ordering::Acquire);
         if clear_ptr != 0 {
             let _ = crate::syscall::userspace::write_user(clear_ptr, 0u32);
@@ -741,7 +773,9 @@ pub fn cleanup_process(process: &Process) {
         crate::syscall::scheduling::thread_exit(thread);
     }
 
-    // Release memory (VAS-tracked data frames + page table subtrees)
+    // Release memory (VAS-tracked data frames + page table subtrees), its
+    // size kept as the peak resident set first.
+    process.note_rss();
     {
         let mut memory_space = process.memory_space.lock();
         // Clear all mappings

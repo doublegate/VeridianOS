@@ -153,9 +153,13 @@
 #define SYS_TIME_CANCEL_TIMER            1126
 #define SYS_clock_gettime                228
 #define SYS_clock_getres                 229
+#define SYS_clock_settime                227
 #define SYS_clock_nanosleep              230
 #define SYS_nanosleep                    35
 #define SYS_gettimeofday                 96
+#define SYS_settimeofday                 164
+#define SYS_time                         201
+#define SYS_times                        100
 /* Signals */
 #define SYS_rt_sigaction                 13
 #define SYS_rt_sigprocmask               14

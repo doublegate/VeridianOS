@@ -545,7 +545,12 @@ fn generate_loadavg() -> String {
         .unwrap_or(1);
 
     // Linux format: 1min 5min 15min running/total last_pid
-    format!("0.00 0.00 0.00 {}/{} {}\n", running, total, last_pid)
+    let [one, five, fifteen] =
+        crate::sched::loadavg::averages().map(crate::sched::loadavg::format_parts);
+    format!(
+        "{}.{:02} {}.{:02} {}.{:02} {}/{} {}\n",
+        one.0, one.1, five.0, five.1, fifteen.0, fifteen.1, running, total, last_pid
+    )
 }
 
 /// Read CPUID vendor ID string (x86_64 only).

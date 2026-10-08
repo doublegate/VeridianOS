@@ -456,18 +456,15 @@ int waitid(idtype_t idtype, id_t id, siginfo_t *infop, int options)
 }
 
 /*
- * wait3() / wait4() -- BSD-style wait. The native wait syscall carries no
- * resource accounting, so a requested rusage is reported as all zeros,
- * which is what getrusage() reports for children here too.
+ * wait3() / wait4() -- BSD-style wait, with the child's resource usage
+ * (the kernel fills it, as on Linux).
  */
 #include <sys/resource.h>
 
 pid_t wait4(pid_t pid, int *wstatus, int options, struct rusage *rusage)
 {
-    pid_t r = waitpid(pid, wstatus, options);
-    if (r > 0 && rusage)
-        memset(rusage, 0, sizeof(*rusage));
-    return r;
+    return (pid_t)__syscall_ret(
+        veridian_syscall4(SYS_wait4, pid, wstatus, options, rusage));
 }
 
 pid_t wait3(int *wstatus, int options, struct rusage *rusage)
@@ -1071,30 +1068,15 @@ char *strptime(const char *s, const char *format, struct tm *tm)
 #include <sys/times.h>
 #include <sched.h>
 
+/* sysinfo() and times(): the kernel's figures (they were made up). */
 int sysinfo(struct sysinfo *info)
 {
-    if (info == NULL) {
-        errno = EFAULT;
-        return -1;
-    }
-    memset(info, 0, sizeof(*info));
-    info->uptime = 60;
-    info->totalram = 256 * 1024 * 1024UL;
-    info->freeram = 128 * 1024 * 1024UL;
-    info->procs = 1;
-    info->mem_unit = 1;
-    return 0;
+    return (int)__syscall_ret(veridian_syscall1(SYS_sysinfo, info));
 }
 
 clock_t times(struct tms *buf)
 {
-    if (buf) {
-        buf->tms_utime = 0;
-        buf->tms_stime = 0;
-        buf->tms_cutime = 0;
-        buf->tms_cstime = 0;
-    }
-    return (clock_t)0;
+    return (clock_t)__syscall_ret(veridian_syscall1(SYS_times, buf));
 }
 
 int sched_getaffinity(pid_t pid, size_t cpusetsize, cpu_set_t *mask)

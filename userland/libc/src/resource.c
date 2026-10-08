@@ -7,12 +7,14 @@
  * Stub implementations of resource limit and usage functions.
  * getrlimit() returns RLIM_INFINITY for all resources.
  * setrlimit() is a no-op returning 0.
- * getrusage() zeroes the output structure.
+ * getrusage() reports the kernel's accounting.
  */
 
 #include <sys/resource.h>
 #include <string.h>
 #include <errno.h>
+#include <veridian/syscall.h>
+#include <veridian/sysno.h>
 
 int getrlimit(int resource, struct rlimit *rlp)
 {
@@ -40,14 +42,5 @@ int setrlimit(int resource, const struct rlimit *rlp)
 
 int getrusage(int who, struct rusage *usage)
 {
-    if (!usage) {
-        errno = EINVAL;
-        return -1;
-    }
-
-    (void)who;
-
-    /* Zero everything — no real accounting yet. */
-    memset(usage, 0, sizeof(*usage));
-    return 0;
+    return (int)__syscall_ret(veridian_syscall2(SYS_getrusage, who, usage));
 }

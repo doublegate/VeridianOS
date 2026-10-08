@@ -25,12 +25,14 @@
 
 // ---- Submodule declarations ----
 
+pub mod cputime;
 pub mod deadline;
 #[cfg(feature = "alloc")]
 pub mod dispatch;
 pub mod init;
 pub mod ipc_blocking;
 pub mod load_balance;
+pub mod loadavg;
 pub mod metrics;
 pub mod numa;
 pub mod percpu_queue;

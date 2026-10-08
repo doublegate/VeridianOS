@@ -807,6 +807,19 @@ impl VirtualAddressSpace {
         result
     }
 
+    /// The user pages this address space has frames for (its resident set:
+    /// getrusage's ru_maxrss).
+    #[cfg(feature = "alloc")]
+    pub fn resident_pages(&self) -> usize {
+        const KERNEL_SPACE_START: u64 = 0xFFFF_8000_0000_0000;
+        self.mappings
+            .lock()
+            .values()
+            .filter(|m| m.start.0 < KERNEL_SPACE_START)
+            .map(|m| m.physical_frames.len())
+            .sum()
+    }
+
     /// Resolve every copy-on-write page of the user mappings now, as a
     /// write fault on each would.
     #[cfg(feature = "alloc")]

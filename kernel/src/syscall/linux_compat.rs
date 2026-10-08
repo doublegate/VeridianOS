@@ -62,6 +62,7 @@ pub(crate) fn to_linux_errno(err: super::SyscallError) -> isize {
     const LINUX_EISCONN: isize = -106;
     const LINUX_EINPROGRESS: isize = -115;
     const LINUX_ECONNRESET: isize = -104;
+    const LINUX_ECANCELED: isize = -125;
 
     match err {
         SyscallError::InvalidSyscall => LINUX_ENOSYS,
@@ -118,6 +119,7 @@ pub(crate) fn to_linux_errno(err: super::SyscallError) -> isize {
         SyscallError::AlreadyConnected => LINUX_EISCONN,
         SyscallError::InProgress => LINUX_EINPROGRESS,
         SyscallError::ConnectionReset => LINUX_ECONNRESET,
+        SyscallError::Canceled => LINUX_ECANCELED,
     }
 }
 

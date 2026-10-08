@@ -37,7 +37,15 @@ exposed were fixed (N-182 to N-189); the rest are listed, with their targets, in
   clone, so a mapping either side adds or removes afterwards is its own (enough for vfork and
   `posix_spawn`, whose child only execs or exits). CLONE_FILES and CLONE_SIGHAND between
   processes (a shared fd or signal-handler table) are refused (N-210).
-- **Time.** CLOCK_REALTIME counts from boot, not 1970, and only clocks 0 and 1 exist (N-218, N-219).
+- **Time.** Every Linux clock exists and CLOCK_REALTIME counts from 1970 (N-218, N-219), with
+  these differences: a sleep or futex wait until an absolute CLOCK_REALTIME time does not move
+  when the clock is set afterwards (timerfds do); sleeping on a process CPU clock is ENOTSUP;
+  there is no leap-second offset, so CLOCK_TAI reads as UTC; BOOTTIME equals MONOTONIC, as there
+  is no suspend; and AArch64 and RISC-V have no RTC driver, so their wall clock starts at the
+  epoch (they run no user programs yet). adjtimex and clock_adjtime do not exist.
+- **Resource usage.** getrusage, times and wait4 report CPU time (split into user and system
+  time by tick samples), peak resident set and context switches; page-fault, block I/O, IPC and
+  signal counts are zero.
 - **Errnos.** Many errors come back as EINVAL where Linux is specific (N-202, N-212 to N-216,
   N-234, N-238).
 

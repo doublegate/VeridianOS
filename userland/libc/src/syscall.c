@@ -241,8 +241,9 @@ int arch_prctl(int code, unsigned long addr)
 
 pid_t waitpid(pid_t pid, int *wstatus, int options)
 {
+    /* wait4 reads its fourth argument: no rusage wanted. */
     return (pid_t)__syscall_ret(
-        veridian_syscall3(SYS_wait4, pid, wstatus, options));
+        veridian_syscall4(SYS_wait4, pid, wstatus, options, 0));
 }
 
 pid_t wait(int *wstatus)

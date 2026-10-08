@@ -345,6 +345,17 @@ pub(crate) fn exit_current(exit_code: i32, term_signal: u32) -> SyscallResult {
 /// - status_ptr: Pointer to store exit status
 /// - options: Wait options bitmask (WNOHANG=1, WUNTRACED=2, WCONTINUED=8)
 pub fn sys_wait(pid: isize, status_ptr: usize, options: usize) -> SyscallResult {
+    sys_wait4(pid, status_ptr, options, 0)
+}
+
+/// wait4: [`sys_wait`], and the child's resource usage (with its own
+/// waited-for children's) at `rusage_ptr` if not NULL (N-213).
+pub fn sys_wait4(
+    pid: isize,
+    status_ptr: usize,
+    options: usize,
+    rusage_ptr: usize,
+) -> SyscallResult {
     use crate::{
         process::exit::{WaitFilter, WaitOptions},
         syscall::userspace::copy_to_user,
@@ -387,17 +398,21 @@ pub fn sys_wait(pid: isize, status_ptr: usize, options: usize) -> SyscallResult 
     let wait_result = crate::process::exit::wait_children(filter, wait_options);
 
     match wait_result {
-        Ok((child_pid, exit_status)) => {
-            // Write the status if a child was reported: WNOHANG with
-            // nothing to report returns 0 and leaves it alone (N-213).
-            if status_ptr != 0 && child_pid.0 != 0 {
-                // SAFETY: status_ptr is non-zero; copy_to_user validates it is within
-                // user-space.
-                unsafe {
-                    copy_to_user(status_ptr, &exit_status)?;
+        Ok(waited) => {
+            // Write the status and usage if a child was reported: WNOHANG
+            // with nothing to report returns 0 and leaves them alone
+            // (N-213).
+            if waited.pid.0 != 0 {
+                if status_ptr != 0 {
+                    // SAFETY: status_ptr is non-zero; copy_to_user validates it is within
+                    // user-space.
+                    unsafe {
+                        copy_to_user(status_ptr, &waited.status)?;
+                    }
                 }
+                super::usage::write_rusage(rusage_ptr, waited.usage, waited.maxrss_pages)?;
             }
-            Ok(child_pid.0 as usize)
+            Ok(waited.pid.0 as usize)
         }
         Err(e) => Err(wait_error(e)),
     }
@@ -1258,7 +1273,13 @@ fn positive_id(raw: usize) -> Result<usize, SyscallError> {
 
 /// waitid(2) for P_ALL and P_PID, with WEXITED, WSTOPPED, WCONTINUED and
 /// WNOHANG (N-103). The result is written as a Linux `siginfo_t`.
-pub fn sys_waitid(idtype: usize, id: usize, infop: usize, options: usize) -> SyscallResult {
+pub fn sys_waitid(
+    idtype: usize,
+    id: usize,
+    infop: usize,
+    options: usize,
+    rusage_ptr: usize,
+) -> SyscallResult {
     use crate::process::exit::{WaitFilter, WaitOptions};
     const P_ALL: usize = 0;
     const P_PID: usize = 1;
@@ -1290,7 +1311,7 @@ pub fn sys_waitid(idtype: usize, id: usize, infop: usize, options: usize) -> Sys
     {
         return Err(SyscallError::InvalidArgument);
     }
-    let (child, status) = crate::process::exit::wait_children(
+    let waited = crate::process::exit::wait_children(
         filter,
         WaitOptions {
             no_hang: options & WNOHANG != 0,
@@ -1304,9 +1325,12 @@ pub fn sys_waitid(idtype: usize, id: usize, infop: usize, options: usize) -> Sys
     .map_err(wait_error)?;
 
     if infop != 0 {
-        let info = waitid_siginfo(child.0, status);
+        let info = waitid_siginfo(waited.pid.0, waited.status);
         // SAFETY: copy_to_user validates that infop is writable user memory.
         unsafe { crate::syscall::userspace::copy_to_user(infop, &info) }?;
+    }
+    if waited.pid.0 != 0 {
+        super::usage::write_rusage(rusage_ptr, waited.usage, waited.maxrss_pages)?;
     }
     Ok(0)
 }

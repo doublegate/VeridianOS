@@ -173,12 +173,23 @@ pub fn sys_futex_wait(
     futex_wait_until(uaddr, expected, deadline, bitset_mask)
 }
 
+/// How a Linux futex timeout is meant.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FutexTimeout {
+    /// Relative to now (FUTEX_WAIT, whatever clock flag it has).
+    Relative,
+    /// An absolute time on CLOCK_MONOTONIC (FUTEX_WAIT_BITSET).
+    Monotonic,
+    /// An absolute time on CLOCK_REALTIME (FUTEX_WAIT_BITSET with
+    /// FUTEX_CLOCK_REALTIME: musl's timed mutex, condition and semaphore
+    /// waits).
+    Realtime,
+}
+
 /// A Linux futex timeout: the `struct timespec` at `ptr` (none if null),
-/// relative to now, or with `absolute` a time on the monotonic clock
-/// (FUTEX_WAIT_BITSET; REALTIME has no epoch yet and counts from boot
-/// too). Returns the `monotonic_ns` deadline (N-104: these used to be read
-/// as raw ticks).
-pub(crate) fn linux_timeout(ptr: usize, absolute: bool) -> Result<Option<u64>, SyscallError> {
+/// read as `kind` says (Linux's futex_init_timeout). Returns the
+/// `monotonic_ns` deadline (N-104: these used to be read as raw ticks).
+pub(crate) fn linux_timeout(ptr: usize, kind: FutexTimeout) -> Result<Option<u64>, SyscallError> {
     if ptr == 0 {
         return Ok(None);
     }
@@ -189,10 +200,12 @@ pub(crate) fn linux_timeout(ptr: usize, absolute: bool) -> Result<Option<u64>, S
     let ns = (sec as u64)
         .saturating_mul(1_000_000_000)
         .saturating_add(nsec as u64);
-    Ok(Some(if absolute {
-        ns
-    } else {
-        crate::timer::monotonic_ns().saturating_add(ns)
+    Ok(Some(match kind {
+        FutexTimeout::Relative => crate::timer::monotonic_ns().saturating_add(ns),
+        FutexTimeout::Monotonic => ns,
+        FutexTimeout::Realtime => {
+            crate::timer::realtime::monotonic_at(ns.min(i64::MAX as u64) as i64)
+        }
     }))
 }
 

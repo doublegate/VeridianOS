@@ -16,7 +16,7 @@ pub fn get_ticks() -> u64 {
 /// preemptive scheduling. Uses `try_lock()` on the scheduler to avoid
 /// deadlock if the scheduler lock is already held (e.g., we interrupted
 /// mid-schedule).
-pub fn tick() {
+pub fn tick(user: bool) {
     // In TSC-deadline mode the timer is one-shot: arm the next tick first.
     super::apic::rearm_deadline_timer();
 
@@ -37,7 +37,9 @@ pub fn tick() {
         sched.tick();
     }
     #[cfg(feature = "alloc")]
-    crate::sched::dispatch::tick();
+    crate::sched::dispatch::tick(user);
+    #[cfg(not(feature = "alloc"))]
+    let _ = user;
 }
 
 /// Setup timer for periodic interrupts

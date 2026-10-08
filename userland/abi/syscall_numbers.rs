@@ -138,9 +138,13 @@ pub mod sysno {
     pub const SYS_TIME_CANCEL_TIMER: usize = 1126;
     pub const SYS_clock_gettime: usize = 228;
     pub const SYS_clock_getres: usize = 229;
+    pub const SYS_clock_settime: usize = 227;
     pub const SYS_clock_nanosleep: usize = 230;
     pub const SYS_nanosleep: usize = 35;
     pub const SYS_gettimeofday: usize = 96;
+    pub const SYS_settimeofday: usize = 164;
+    pub const SYS_time: usize = 201;
+    pub const SYS_times: usize = 100;
     pub const SYS_rt_sigaction: usize = 13;
     pub const SYS_rt_sigprocmask: usize = 14;
     pub const SYS_rt_sigsuspend: usize = 130;

@@ -183,6 +183,16 @@ pub struct Process {
     /// anything that waits.
     pub cred_guard: Mutex<()>,
 
+    /// CPU time of the process's exited threads (its live threads' is the
+    /// dispatcher's), and of its children it has waited for, with theirs
+    /// (Linux's signal_struct sums; N-218, N-223).
+    cpu_exited: Mutex<crate::sched::cputime::CpuTimes>,
+    cpu_children: Mutex<crate::sched::cputime::CpuTimes>,
+    /// The largest resident set seen (pages), and the largest of the
+    /// children waited for (getrusage ru_maxrss).
+    peak_rss_pages: core::sync::atomic::AtomicUsize,
+    children_peak_rss_pages: core::sync::atomic::AtomicUsize,
+
     /// Session ID (initialized to pid)
     pub sid: AtomicU64,
 
@@ -319,6 +329,10 @@ impl Process {
             pgid: AtomicU64::new(pid.0),
             tracer: AtomicU64::new(0),
             cred_guard: Mutex::new(()),
+            cpu_exited: Mutex::new(crate::sched::cputime::CpuTimes::ZERO),
+            cpu_children: Mutex::new(crate::sched::cputime::CpuTimes::ZERO),
+            peak_rss_pages: core::sync::atomic::AtomicUsize::new(0),
+            children_peak_rss_pages: core::sync::atomic::AtomicUsize::new(0),
             sid: AtomicU64::new(pid.0),
             env_vars: Mutex::new(BTreeMap::new()),
             #[cfg(feature = "alloc")]
@@ -412,6 +426,60 @@ impl Process {
     /// Update CPU time
     pub fn add_cpu_time(&self, microseconds: u64) {
         self.cpu_time.fetch_add(microseconds, Ordering::Relaxed);
+    }
+
+    /// A thread of this process exited having used `times`.
+    pub fn add_exited_cpu(&self, times: crate::sched::cputime::CpuTimes) {
+        let mut sum = self.cpu_exited.lock();
+        *sum = sum.plus(times);
+    }
+
+    /// The CPU time the process has used: its exited threads' and its live
+    /// threads' (getrusage RUSAGE_SELF, CLOCK_PROCESS_CPUTIME_ID).
+    pub fn cpu_times(&self) -> crate::sched::cputime::CpuTimes {
+        let exited = *self.cpu_exited.lock();
+        #[cfg(feature = "alloc")]
+        let exited = exited.plus(crate::sched::dispatch::process_tasks_cpu(self.pid.0));
+        exited
+    }
+
+    /// The CPU time of the children waited for and their own children
+    /// (getrusage RUSAGE_CHILDREN, times' cutime and cstime).
+    pub fn children_cpu_times(&self) -> crate::sched::cputime::CpuTimes {
+        *self.cpu_children.lock()
+    }
+
+    /// A child was reaped: its time and its children's count as this
+    /// process's children's, and its peak resident set as theirs.
+    pub fn add_reaped_child_cpu(&self, child: &Self) {
+        let theirs = child.cpu_times().plus(child.children_cpu_times());
+        let mut sum = self.cpu_children.lock();
+        *sum = sum.plus(theirs);
+        let peak = child.peak_rss_pages().max(child.children_peak_rss_pages());
+        self.children_peak_rss_pages
+            .fetch_max(peak, Ordering::Relaxed);
+    }
+
+    /// The largest resident set seen, in pages, counting the current one
+    /// while the process still has its memory.
+    pub fn peak_rss_pages(&self) -> usize {
+        self.note_rss();
+        self.peak_rss_pages.load(Ordering::Relaxed)
+    }
+
+    /// The largest resident set of the children waited for, in pages.
+    pub fn children_peak_rss_pages(&self) -> usize {
+        self.children_peak_rss_pages.load(Ordering::Relaxed)
+    }
+
+    /// Record the current resident set in the peak (on reads, and before
+    /// the memory goes at exit).
+    pub fn note_rss(&self) {
+        #[cfg(feature = "alloc")]
+        if let Some(space) = self.memory_space.try_lock() {
+            self.peak_rss_pages
+                .fetch_max(space.resident_pages(), Ordering::Relaxed);
+        }
     }
 
     /// Get total CPU time

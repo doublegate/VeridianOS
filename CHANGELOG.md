@@ -21,6 +21,19 @@
   dynamically linked C++ program that throws, runs threads with `thread_local` destructors and
   `dlopen`s a C++ library.
 
+- **Clocks, CPU time and resource usage (N-218 to N-220, N-223, N-213).** CLOCK_REALTIME
+  counted from boot and only clocks 0 and 1 existed, so musl's `clock()` failed and every wall
+  time was in 1970. The wall clock now starts from the RTC (x86_64) and is set by
+  clock_settime and settimeofday (root only); every Linux clock exists, including the process
+  and thread CPU-time clocks and those clock_getcpuclockid and pthread_getcpuclockid make. The
+  dispatcher charges each task the time it runs and samples user or kernel mode at each tick,
+  which getrusage (now implemented), times (new), wait4 and waitid report, with the peak
+  resident set and context switches. sysinfo is implemented, and the load averages (Linux's
+  calc_load) replace the constant 0.00 in /proc/loadavg. Absolute CLOCK_REALTIME deadlines --
+  clock_nanosleep, FUTEX_CLOCK_REALTIME waits (musl's timed mutex, condition and semaphore
+  waits) and timerfds -- are converted to the monotonic clock; timerfds follow clock changes,
+  and TFD_TIMER_CANCEL_ON_SET reads fail with ECANCELED after one. gettimeofday accepts NULL.
+  Runtime test `musl_clocks_and_usage`.
 - **Set-user-ID and set-group-ID programs.** Files had no set-ID bits at all (chmod 4755 lost
   them). They are now kept by every filesystem and reported by stat, and exec follows Linux's
   rules: a set-user-ID file runs with its owner as effective user, a set-group-ID file with

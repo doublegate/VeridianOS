@@ -104,6 +104,8 @@ pub struct Task {
     /// The user thread this task runs, as (pid, tid); `None` for kernel
     /// tasks.
     owner: Option<(u64, u64)>,
+    /// CPU time the task has used (N-218).
+    usage: super::cputime::CpuUsage,
     /// User vector state (x87/SSE/AVX), switched eagerly: the kernel itself
     /// is soft-float, so only tasks that run user code need it. Same access
     /// rule as `saved_sp`.
@@ -136,6 +138,7 @@ impl Task {
             arch: UnsafeCell::new(ArchState::default()),
             stack,
             owner: None,
+            usage: super::cputime::CpuUsage::new(),
             #[cfg(target_arch = "x86_64")]
             xsave: UnsafeCell::new(None),
         }
@@ -184,6 +187,18 @@ struct CpuSched {
     /// The task this CPU just switched away from, until `finish_switch`.
     prev: Option<Arc<Task>>,
     need_resched: bool,
+    /// When `current`'s running was last charged to it.
+    acct_start: u64,
+}
+
+impl CpuSched {
+    /// Charge the running task up to `now`.
+    fn charge(&mut self, now: u64) {
+        self.current
+            .usage
+            .charge(now.saturating_sub(self.acct_start));
+        self.acct_start = now;
+    }
 }
 
 /// Per-CPU dispatch state; only CPU 0 dispatches until stage D5.
@@ -355,6 +370,7 @@ pub fn start() -> Result<(), KernelError> {
             idle,
             prev: None,
             need_resched: false,
+            acct_start: t,
         });
         STARTED.store(true, Ordering::Release);
         Ok(())
@@ -451,6 +467,7 @@ pub fn schedule() {
         let st = guard.as_mut().expect("dispatching CPU has state");
         st.need_resched = false;
         let t = now();
+        st.charge(t);
         let next = match st.rq.pick_next(t) {
             Some(key) => lookup(key).expect("queued task is registered"),
             None => st.idle.clone(),
@@ -459,7 +476,10 @@ pub fn schedule() {
             None
         } else {
             let prev = core::mem::replace(&mut st.current, next.clone());
-            if prev.state() == State::Running {
+            // Still running: preempted; otherwise it blocked or exited.
+            let preempted = prev.state() == State::Running;
+            prev.usage.switched(!preempted);
+            if preempted {
                 prev.set_state(State::Ready);
             }
             next.set_state(State::Running);
@@ -677,10 +697,11 @@ pub fn join(key: TaskKey) {
     EXITED.wait_until(|| lookup(key).is_none());
 }
 
-/// Timer tick on this CPU (interrupt context). Marks the running task for
-/// rescheduling when the policy says so; the switch itself happens at the
-/// next scheduling point.
-pub fn tick() {
+/// Timer tick on this CPU (interrupt context), which interrupted user mode
+/// if `user`. Charges the running task its time and the tick sample, and
+/// marks it for rescheduling when the policy says so; the switch itself
+/// happens at the next scheduling point.
+pub fn tick(user: bool) {
     if !started() {
         return;
     }
@@ -689,7 +710,11 @@ pub fn tick() {
     };
     if let Some(mut guard) = CPUS[cpu].try_lock() {
         if let Some(st) = guard.as_mut() {
-            if st.rq.tick(now()) {
+            let t = now();
+            st.charge(t);
+            st.current.usage.tick(user);
+            super::loadavg::tick(t, st.rq.nr_running() as u64);
+            if st.rq.tick(t) {
                 st.need_resched = true;
             }
         }
@@ -994,6 +1019,59 @@ pub fn online_cpus() -> usize {
 }
 
 /// Live tasks running threads of process `pid`.
+/// The CPU time of `task`, with the slice it is running now if it is this
+/// CPU's current task.
+fn task_cpu(task: &Task) -> super::cputime::CpuTimes {
+    let mut times = task.usage.snapshot();
+    if let Some(cpu) = this_cpu() {
+        let irq = irq_save();
+        if let Some(st) = CPUS[cpu].lock().as_ref() {
+            if st.current.key == task.key {
+                times.runtime_ns = times
+                    .runtime_ns
+                    .saturating_add(now().saturating_sub(st.acct_start));
+            }
+        }
+        irq_restore(irq);
+    }
+    times
+}
+
+/// The CPU time of the user thread `owner` (pid, tid), if a task runs it.
+pub fn thread_cpu(owner: (u64, u64)) -> Option<super::cputime::CpuTimes> {
+    let task = TASKS
+        .lock()
+        .values()
+        .find(|t| t.owner == Some(owner))
+        .cloned()?;
+    Some(task_cpu(&task))
+}
+
+/// The CPU time of the live threads of process `pid` (the process adds what
+/// its exited threads used).
+pub fn process_tasks_cpu(pid: u64) -> super::cputime::CpuTimes {
+    tasks_of(pid)
+        .iter()
+        .fold(super::cputime::CpuTimes::default(), |sum, t| {
+            sum.plus(task_cpu(t))
+        })
+}
+
+/// The running task's CPU time, taken from it (it is exiting: the process
+/// keeps the total, so it is counted once).
+pub fn take_current_usage() -> super::cputime::CpuTimes {
+    let Some(cpu) = this_cpu() else {
+        return super::cputime::CpuTimes::default();
+    };
+    let irq = irq_save();
+    let taken = CPUS[cpu].lock().as_mut().map(|st| {
+        st.charge(now());
+        st.current.usage.take()
+    });
+    irq_restore(irq);
+    taken.unwrap_or_default()
+}
+
 pub fn tasks_of(pid: u64) -> Vec<Arc<Task>> {
     TASKS
         .lock()

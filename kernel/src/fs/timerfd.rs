@@ -101,6 +101,12 @@ struct TimerFdInstance {
     expirations: u64,
     /// Whether the timer is armed.
     armed: bool,
+    /// Armed with an absolute time on CLOCK_REALTIME: the expiry follows
+    /// the wall clock when it is set ([`clock_was_set`]).
+    wall_absolute: bool,
+    /// With TFD_TIMER_CANCEL_ON_SET: the wall clock's set count when armed;
+    /// a read after the clock was set fails once with ECANCELED.
+    cancel_on_set: Option<u64>,
 }
 
 /// Global registry of timerfd instances.
@@ -135,6 +141,8 @@ pub fn timerfd_create(clockid: u32, flags: u32) -> SyscallResult {
         next_expiry_ns: 0,
         expirations: 0,
         armed: false,
+        wall_absolute: false,
+        cancel_on_set: None,
     };
 
     let id = NEXT_TIMERFD_ID.fetch_add(1, Ordering::Relaxed) as u32;
@@ -214,8 +222,18 @@ pub fn timerfd_settime(
     instance.spec = *new_spec;
     instance.expirations = 0;
     instance.armed = !new_spec.it_value.is_zero();
-    instance.next_expiry_ns = match (instance.armed, flags & TFD_TIMER_ABSTIME != 0) {
+    let absolute = flags & TFD_TIMER_ABSTIME != 0;
+    let on_wall_clock = absolute && instance.clock_id == CLOCK_REALTIME;
+    instance.wall_absolute = instance.armed && on_wall_clock;
+    instance.cancel_on_set =
+        (instance.armed && on_wall_clock && flags & TFD_TIMER_CANCEL_ON_SET != 0)
+            .then(crate::timer::realtime::set_count);
+    instance.next_expiry_ns = match (instance.armed, absolute) {
         (false, _) => 0,
+        // A wall time: the monotonic time the wall clock will read it.
+        (true, true) if on_wall_clock => crate::timer::realtime::monotonic_at(
+            new_spec.it_value.to_ns().min(i64::MAX as u64) as i64,
+        ),
         (true, true) => new_spec.it_value.to_ns(),
         (true, false) => now.saturating_add(new_spec.it_value.to_ns()),
     };
@@ -246,6 +264,16 @@ pub fn timerfd_read(tfd_id: u32) -> Result<u64, SyscallError> {
     let instance = registry
         .get_mut(&tfd_id)
         .ok_or(SyscallError::BadFileDescriptor)?;
+    // The wall clock was set under a TFD_TIMER_CANCEL_ON_SET timer: once
+    // per change, as Linux's timerfd_canceled.
+    let set = crate::timer::realtime::set_count();
+    if let Some(armed_at) = instance.cancel_on_set {
+        if armed_at != set {
+            instance.cancel_on_set = Some(set);
+            instance.expirations = 0;
+            return Err(SyscallError::Canceled);
+        }
+    }
     update(instance, now);
     match core::mem::take(&mut instance.expirations) {
         0 => Err(SyscallError::WouldBlock),
@@ -253,12 +281,34 @@ pub fn timerfd_read(tfd_id: u32) -> Result<u64, SyscallError> {
     }
 }
 
+/// The wall clock moved by `delta_ns`: timers armed at an absolute wall
+/// time keep it (their monotonic expiry moves the other way), and waiters
+/// are woken (a TFD_TIMER_CANCEL_ON_SET timer's read now fails).
+pub fn clock_was_set(delta_ns: i64) {
+    {
+        let mut registry = TIMERFD_REGISTRY.lock();
+        for instance in registry.values_mut().filter(|i| i.armed && i.wall_absolute) {
+            instance.next_expiry_ns = if delta_ns >= 0 {
+                instance.next_expiry_ns.saturating_sub(delta_ns as u64)
+            } else {
+                instance
+                    .next_expiry_ns
+                    .saturating_add(delta_ns.unsigned_abs())
+            };
+        }
+    }
+    io_changed();
+}
+
 /// Whether a read would return expirations now.
 pub fn is_readable(tfd_id: u32) -> bool {
     let registry = TIMERFD_REGISTRY.lock();
-    registry
-        .get(&tfd_id)
-        .is_some_and(|i| i.expirations > 0 || (i.armed && monotonic_now_ns() >= i.next_expiry_ns))
+    registry.get(&tfd_id).is_some_and(|i| {
+        i.expirations > 0
+            || (i.armed && monotonic_now_ns() >= i.next_expiry_ns)
+            || i.cancel_on_set
+                .is_some_and(|at| at != crate::timer::realtime::set_count())
+    })
 }
 
 /// When the timer next expires, if it is armed and has no expirations
@@ -330,6 +380,8 @@ impl VfsNode for TimerFdNode {
         }
         let val = timerfd_read(self.tfd_id).map_err(|e| match e {
             SyscallError::WouldBlock => KernelError::WouldBlock,
+            // The wall clock was set under a TFD_TIMER_CANCEL_ON_SET timer.
+            SyscallError::Canceled => KernelError::FsError(crate::error::FsError::Canceled),
             _ => KernelError::FsError(crate::error::FsError::BadFileDescriptor),
         })?;
         buffer[..8].copy_from_slice(&val.to_le_bytes());
@@ -422,6 +474,35 @@ impl Drop for TimerFdNode {
 mod tests {
     use super::*;
 
+    /// An absolute CLOCK_REALTIME timer keeps its wall time when the clock
+    /// is set, and with TFD_TIMER_CANCEL_ON_SET its next read fails with
+    /// ECANCELED, once.
+    #[test]
+    fn wall_clock_timers_follow_clock_changes() {
+        let _clock = crate::timer::realtime::TEST_CLOCK_LOCK.lock();
+        let id = timerfd_create(CLOCK_REALTIME, 0).unwrap() as u32;
+        let wall_now = crate::timer::realtime::now_ns();
+        let at = wall_now + 10_000_000_000;
+        let spec = Itimerspec {
+            it_interval: Timespec::default(),
+            it_value: Timespec {
+                tv_sec: at / 1_000_000_000,
+                tv_nsec: at % 1_000_000_000,
+            },
+        };
+        timerfd_settime(id, TFD_TIMER_ABSTIME | TFD_TIMER_CANCEL_ON_SET, &spec, None).unwrap();
+        let before = next_expiry(id).unwrap();
+        // The clock jumps 4 s forward: the timer fires 4 s sooner.
+        let delta = crate::timer::realtime::set_now_ns(wall_now + 4_000_000_000);
+        clock_was_set(delta);
+        assert_eq!(next_expiry(id).unwrap(), before - 4_000_000_000);
+        assert!(is_readable(id));
+        assert_eq!(timerfd_read(id), Err(SyscallError::Canceled));
+        assert_eq!(timerfd_read(id), Err(SyscallError::WouldBlock));
+        crate::timer::realtime::set_now_ns(wall_now);
+        TIMERFD_REGISTRY.lock().remove(&id);
+    }
+
     /// The registry is a process-wide static: tests that reset it must not
     /// run concurrently, or one test's reset removes another's instance.
     static TEST_SERIAL: spin::Mutex<()> = spin::Mutex::new(());
@@ -490,6 +571,8 @@ mod tests {
             next_expiry_ns: 1000,
             expirations: 0,
             armed: true,
+            wall_absolute: false,
+            cancel_on_set: None,
         };
         update(&mut t, 999);
         assert_eq!((t.expirations, t.next_expiry_ns), (0, 1000));

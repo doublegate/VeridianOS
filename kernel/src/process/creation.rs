@@ -489,7 +489,9 @@ pub fn exec_process(path: &str, argv: &[&str], envp: &[&str]) -> Result<(), Kern
     // exit (Linux force_sigsegv), instead of returning into an emptied
     // address space (N-101).
     let committed = (|| -> Result<_, KernelError> {
-        // Step 2: Clear current address space and load new program
+        // Step 2: Clear current address space and load new program; the
+        // old image's size stays in the peak resident set, as on Linux.
+        process.note_rss();
         *process.exe_path.lock() = resolved_path.clone();
         let loaded = {
             let mut memory_space = process.memory_space.lock();

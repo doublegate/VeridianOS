@@ -267,6 +267,9 @@ pub(crate) mod scheduling;
 // Password checks for pam_veridian
 mod veridian_auth;
 
+// getrusage, times, sysinfo (N-223)
+mod usage;
+
 // poll, ppoll, select, pselect6
 mod multiplex;
 use self::multiplex::{sys_poll, sys_ppoll, sys_pselect6, sys_select};
@@ -392,6 +395,8 @@ pub enum SyscallError {
     AlreadyConnected = -127,
     InProgress = -128,
     ConnectionReset = -129,
+    /// ECANCELED: a timerfd's wall clock was set (TFD_TIMER_CANCEL_ON_SET).
+    Canceled = -130,
 }
 
 impl From<IpcError> for SyscallError {
@@ -461,6 +466,7 @@ pub fn map_kernel_error(err: crate::error::KernelError) -> SyscallError {
             FsError::NoSpace => SyscallError::NoSpace,
             FsError::OperationNotPermitted => SyscallError::OperationNotPermitted,
             FsError::Busy => SyscallError::Busy,
+            FsError::Canceled => SyscallError::Canceled,
         },
         KernelError::OutOfMemory { .. } => SyscallError::OutOfMemory,
         KernelError::InvalidArgument { .. } => SyscallError::InvalidArgument,
@@ -678,7 +684,7 @@ fn handle_syscall(
         Syscall::Fork => sys_fork(),
         Syscall::Vfork => process::sys_vfork(),
         Syscall::Execve => sys_exec(arg1, arg2, arg3),
-        Syscall::Wait4 => sys_wait(arg1 as isize, arg2, arg3),
+        Syscall::Wait4 => sys_wait4(arg1 as isize, arg2, arg3, arg4),
         Syscall::Getpid => sys_getpid(),
         Syscall::Getppid => sys_getppid(),
         Syscall::ProcessSetPriority => sys_setpriority(arg1, arg2, arg3),
@@ -758,6 +764,9 @@ fn handle_syscall(
         Syscall::ClockGetres => sys_clock_getres(arg1, arg2),
         Syscall::Nanosleep => sys_nanosleep(arg1, arg2),
         Syscall::Gettimeofday => sys_gettimeofday(arg1, arg2),
+        Syscall::Settimeofday => sys_settimeofday(arg1, arg2),
+        Syscall::ClockSettime => sys_clock_settime(arg1, arg2),
+        Syscall::Time => sys_time(arg1),
 
         // Identity syscalls
         Syscall::Getuid => sys_getuid(),
@@ -937,11 +946,17 @@ fn handle_syscall(
             // -- VeridianOS is single-address-space per process, so
             // private == shared.
             let cmd = (arg2 as u32) & 0x7F;
+            // FUTEX_CLOCK_REALTIME: a WAIT_BITSET deadline is on the wall
+            // clock. Linux accepts it only on waits (ENOSYS otherwise).
+            let realtime = arg2 & 0x100 != 0;
+            if realtime && cmd != 0 && cmd != 9 {
+                return Err(SyscallError::NotImplemented);
+            }
             match cmd {
                 // FUTEX_WAIT: wait if *uaddr == val; the timeout is a
                 // relative timespec (N-104).
                 0 => {
-                    let deadline = futex::linux_timeout(arg4, false)?;
+                    let deadline = futex::linux_timeout(arg4, futex::FutexTimeout::Relative)?;
                     futex::futex_wait_until(
                         arg1,
                         arg3 as u32,
@@ -970,7 +985,14 @@ fn handle_syscall(
                     if bitset == 0 {
                         return Err(SyscallError::InvalidArgument);
                     }
-                    let deadline = futex::linux_timeout(arg4, true)?;
+                    let deadline = futex::linux_timeout(
+                        arg4,
+                        if realtime {
+                            futex::FutexTimeout::Realtime
+                        } else {
+                            futex::FutexTimeout::Monotonic
+                        },
+                    )?;
                     futex::futex_wait_until(arg1, arg3 as u32, deadline, bitset).map(|v| v as usize)
                 }
                 _ => Err(SyscallError::InvalidArgument),
@@ -1159,7 +1181,7 @@ fn handle_syscall(
         Syscall::Flock => sys_flock(arg1, arg2),
         Syscall::Tkill => process::sys_tkill(arg1, arg2),
         Syscall::Tgkill => process::sys_tgkill(arg1, arg2, arg3),
-        Syscall::Waitid => process::sys_waitid(arg1, arg2, arg3, arg4),
+        Syscall::Waitid => process::sys_waitid(arg1, arg2, arg3, arg4, arg5),
         Syscall::RtSigpending => signal::sys_sigpending(arg1, arg2),
         Syscall::Ppoll => sys_ppoll(arg1, arg2, arg3, arg4, arg5),
         // faccessat has no flags argument; faccessat2 adds one.
@@ -1168,9 +1190,13 @@ fn handle_syscall(
         // Not implemented yet; callers fall back (musl: statx -> fstatat,
         // clone3 -> clone, mremap ENOMEM -> mmap + copy).
         Syscall::Mremap => Err(SyscallError::OutOfMemory),
-        Syscall::Getrusage
-        | Syscall::Sysinfo
-        | Syscall::Rseq
+        #[cfg(feature = "alloc")]
+        Syscall::Getrusage => usage::sys_getrusage(arg1, arg2),
+        #[cfg(feature = "alloc")]
+        Syscall::Sysinfo => usage::sys_sysinfo(arg1),
+        #[cfg(feature = "alloc")]
+        Syscall::Times => usage::sys_times(arg1),
+        Syscall::Rseq
         | Syscall::Statx
         | Syscall::Clone3
         | Syscall::Fallocate
