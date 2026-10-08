@@ -1,14 +1,19 @@
 #!/usr/bin/env bash
-# Build Qt 6 (static) for VeridianOS
+# Build Qt 6 for VeridianOS
 #
-# Minimal static build: QtCore + QtGui + QtWidgets + QtWayland + QtDBus.
-# Integrates the VeridianOS QPA plugin from userland/qt6/qpa/.
+# A host Qt (${VERIDIAN_HOST_TOOLS}/qt6: moc, rcc, uic, qtwaylandscanner,
+# qsb, qmlcachegen, ...) runs Qt's code generators; the target Qt is
+# shared (ADR 0010), configured for /usr (Qt's directories laid out as distributions
+# do, under /usr/lib/qt6) and staged into the sysroot (-extprefix).
+# qtbase also builds the VeridianOS QPA plugin from userland/qt6/qpa/.
 #
-# This is the hardest phase. Qt 6 is ~25M LOC; even a minimal static
-# build is a significant cross-compilation effort.
+# Modules: qtbase, qtshadertools, qtdeclarative, qtsvg, qt5compat,
+# qtsensors, qtwayland, qtpositioning, qtlocation, qttools (UiTools for
+# the target, Linguist's tools on the host). Tarball checksums are the
+# ones Qt publishes.
 #
-# Prerequisites:
-#   - musl libc + all C dependencies + Mesa + Wayland + font stack + D-Bus
+# Prerequisites: build-deps.sh, build-mesa.sh, build-wayland.sh,
+# build-fonts.sh, build-dbus.sh.
 
 set -euo pipefail
 
@@ -17,162 +22,184 @@ PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 # shellcheck source=veridian-paths.sh
 source "${SCRIPT_DIR}/veridian-paths.sh"
 BUILD_DIR="${VERIDIAN_CROSS_BUILD}/qt6"
-SYSROOT="${VERIDIAN_SYSROOT}"
-TOOLCHAIN="${SCRIPT_DIR}/cmake-toolchain-veridian.cmake"
 JOBS="${JOBS:-$(nproc)}"
 
 QT_VER="6.12.0"
 QT_MAJOR="6.12"
 # archive/ is permanent; official_releases/ drops a version once it is superseded.
 QT_BASE_URL="https://download.qt.io/archive/qt/${QT_MAJOR}/${QT_VER}/submodules"
+declare -A QT_SHA256=(
+    [qtbase]="a951bd163c7b80fc6b8c88d7668fb56abf91c152373e13c10666763238131307"
+    [qtshadertools]="c7d84f436e1aaef39fdcadebf2bd71bdf24dc69497e13f2e0198873cbbfea2ab"
+    [qtdeclarative]="311f3a2603e1973bb59baef9dfa740a376de713157d4782ee043681e889c9260"
+    [qtsvg]="e4ab39534ec97987b1b9b60ef7f4d3253d5912a69f8c713a01753174a4029331"
+    [qt5compat]="78cf1c283795312a7fa31c73eb7f7f556b48374adc484f10ad5a3c0bcb59264e"
+    [qtsensors]="861df58be8808cef777a1b531d7bec804d25733ec34e8ebbdafbe27040319090"
+    [qtwayland]="ae14d9bcf1bb3c300a3ab2e6a53f50284e5c6c966a4ac4cc5aedcb1bc74e4d02"
+    [qttools]="8dab8f3611496486a470ad5f115ceea584f36bc22a2b8b6f6ebdbafbb8160693"
+    [qtpositioning]="b060d410fac7413b05a0e7938bbf3325f7ad08d7df14af3956270f0696e76763"
+    [qtlocation]="218696d57c9eb95e8756e9fda62a8eabf94badc507db5f6e8ab9a640c4b0f50d"
+    [qtwebsockets]="21690a365cd5fbfa8dea051473e98968df9f4eca0121fed7481d1215b7455a31"
+    [qtspeech]="9a60ce5bee54a9343740feab2582bffb996812f43d6c5585aade26dbd04933db"
+    [qtmultimedia]="3143f53b64257ba2a0685c940f5dce476c75871ff86b516de45cfd54ea93a62d"
+)
+QT_HOST="${VERIDIAN_HOST_TOOLS}/qt6"
 
 log() { echo "[build-qt6] $*"; }
 die() { echo "[build-qt6] ERROR: $*" >&2; exit 1; }
 
-mkdir -p "${BUILD_DIR}"
+# shellcheck source=lib/cross-env.sh
+source "${SCRIPT_DIR}/lib/cross-env.sh"
 
-fetch() {
-    local name="$1" url="$2" dir="$3"
-    local tarball="${VERIDIAN_SOURCES}/${name}.tar.xz"
-    if [[ ! -f "${tarball}" ]]; then
-        log "Downloading ${name}..."
-        { curl -fsSL -o "${tarball}.part" "${url}" || wget -q -O "${tarball}.part" "${url}"; } && [[ -s "${tarball}.part" ]] && mv "${tarball}.part" "${tarball}" || { rm -f "${tarball}.part"; echo "download failed: ${url}" >&2; exit 1; }
-    fi
-    if [[ ! -d "${BUILD_DIR}/${dir}" ]]; then
-        log "Extracting ${name}..."
-        tar -xf "${tarball}" -C "${BUILD_DIR}"
-    fi
+# qt_src MODULE: a fresh, checked source tree of MODULE (its path is echoed).
+qt_src() {
+    local name="$1-everywhere-src-${QT_VER}"
+    fetch "${name}.tar.xz" "${QT_BASE_URL}/${name}.tar.xz" "${name}" "${QT_SHA256[$1]}" >&2
+    echo "${BUILD_DIR}/${name}"
 }
 
-# ── 1. Build host Qt (full, with GUI/Widgets/DBus) ───────────────────
-# Qt cross-compilation requires native tools (moc, rcc, uic) and full
-# host Qt libraries for building submodule host tools (qsb, qmlcachegen).
+# A native build: none of the target environment.
+host_env() {
+    env -u CC -u CXX -u AR -u RANLIB -u NM -u STRIP -u CFLAGS -u CXXFLAGS \
+        -u PKG_CONFIG_LIBDIR -u PKG_CONFIG_SYSROOT_DIR "$@"
+}
+
+# ── 1. Host Qt ────────────────────────────────────────────────────────
+# Qt cross-compilation requires native tools (moc, rcc, uic,
+# qtwaylandscanner) and host Qt libraries for building the other modules'
+# host tools (qsb, qmlcachegen).
 build_host_qt() {
-    local host_prefix="${BUILD_DIR}/host-qt"
-    if [[ -f "${host_prefix}/libexec/moc" ]]; then
+    if [[ -x "${QT_HOST}/libexec/moc" && -x "${QT_HOST}/libexec/qtwaylandscanner" ]]; then
         log "Host Qt: already built."
         return 0
     fi
-    fetch "qtbase-everywhere-src-${QT_VER}" \
-        "${QT_BASE_URL}/qtbase-everywhere-src-${QT_VER}.tar.xz" \
-        "qtbase-everywhere-src-${QT_VER}"
-
-    local src="${BUILD_DIR}/qtbase-everywhere-src-${QT_VER}"
+    local src
+    src="$(qt_src qtbase)"
     local bld="${BUILD_DIR}/host-qt-build"
-    log "Building host Qt (full)..."
+    log "Building host Qt..."
     rm -rf "${bld}"
     mkdir -p "${bld}"
-    (cd "${bld}" && \
-        "${src}/configure" \
-            -prefix "${host_prefix}" \
+    (cd "${bld}" && host_env "${src}/configure" \
+            -prefix "${QT_HOST}" \
             -release \
             -nomake examples \
             -nomake tests \
             -dbus-linked \
             -gui \
             -widgets \
-            -- -DFEATURE_system_textmarkdownreader=OFF && \
-        cmake --build . --parallel "${JOBS}" && \
-        cmake --install .)
-    log "Host Qt: done."
+            -feature-qtwaylandscanner \
+            -no-feature-system-textmarkdownreader && \
+        host_env cmake --build . --parallel "${JOBS}" && \
+        host_env cmake --install .)
+    [[ -x "${QT_HOST}/libexec/qtwaylandscanner" ]] || die "host Qt has no qtwaylandscanner"
 }
 
-# ── 2. Install VeridianOS QPA plugin into Qt source tree ──────────────
-install_qpa_plugin() {
-    local src="${BUILD_DIR}/qtbase-everywhere-src-${QT_VER}"
-    local platforms="${src}/src/plugins/platforms"
-    local qpa_dir="${platforms}/veridian"
+# host_qt_module MODULE TOOL [CMAKE OPTIONS...]: MODULE's host tools into
+# the host Qt.
+host_qt_module() {
+    local module="$1" tool="$2"
+    shift 2
+    if [[ -x "${QT_HOST}/bin/${tool}" || -x "${QT_HOST}/libexec/${tool}" ]]; then
+        log "Host ${module}: already built."
+        return 0
+    fi
+    local src
+    src="$(qt_src "${module}")"
+    local bld="${BUILD_DIR}/host-${module}-build"
+    log "Building host ${module}..."
+    rm -rf "${bld}"
+    host_env cmake -S "${src}" -B "${bld}" \
+        -DCMAKE_PREFIX_PATH="${QT_HOST}" \
+        -DCMAKE_INSTALL_PREFIX="${QT_HOST}" \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DBUILD_SHARED_LIBS=ON \
+        -DBUILD_TESTING=OFF \
+        -DQT_BUILD_TESTS=OFF \
+        -DQT_BUILD_EXAMPLES=OFF \
+        "$@"
+    host_env cmake --build "${bld}" --parallel "${JOBS}"
+    host_env cmake --install "${bld}"
+}
 
-    # Refreshed on every run from userland/qt6/qpa (sources, metadata and its
-    # qtbase-internal CMakeLists.txt), so the tree never keeps a stale copy.
-    # It used to be copied once, with a generated CMakeLists.txt naming
-    # veridian_*.cpp files that do not exist, and was never added to the
-    # platforms list, so the plugin was never built.
+# ── 2. VeridianOS QPA plugin, in the qtbase tree ──────────────────────
+install_qpa_plugin() {
+    local platforms="$1/src/plugins/platforms"
+    # Sources, metadata and its qtbase-internal CMakeLists.txt from
+    # userland/qt6/qpa, built with qtbase: it needs the Wayland client and
+    # EGL that qtbase already uses for its own Wayland plugin.
     log "Installing VeridianOS QPA plugin into Qt source..."
-    rm -rf "${qpa_dir}"
-    mkdir -p "${qpa_dir}"
+    mkdir -p "${platforms}/veridian"
     cp "${PROJECT_ROOT}/userland/qt6/qpa/"*.cpp "${PROJECT_ROOT}/userland/qt6/qpa/"*.h \
        "${PROJECT_ROOT}/userland/qt6/qpa/veridian.json" \
-       "${PROJECT_ROOT}/userland/qt6/qpa/CMakeLists.txt" "${qpa_dir}/"
-
-    # Build it with qtbase: it needs the Wayland client and EGL that qtbase
-    # already uses for its own Wayland plugin.
-    if ! grep -q "add_subdirectory(veridian)" "${platforms}/CMakeLists.txt"; then
-        cat >> "${platforms}/CMakeLists.txt" << 'CMAKE'
+       "${PROJECT_ROOT}/userland/qt6/qpa/CMakeLists.txt" "${platforms}/veridian/"
+    cat >> "${platforms}/CMakeLists.txt" << 'CMAKE'
 if(QT_FEATURE_wayland AND QT_FEATURE_egl)
     add_subdirectory(veridian) # VeridianOS platform (tools/cross/build-qt6.sh)
 endif()
 CMAKE
-    fi
-    grep -q "add_subdirectory(veridian)" "${platforms}/CMakeLists.txt" \
-        || die "could not add the veridian platform to ${platforms}/CMakeLists.txt"
-
-    log "QPA plugin: installed."
 }
 
-# ── 3. Cross-compile Qt 6 (static) ───────────────────────────────────
-build_qt_cross() {
-    # qtbase is complete only with the VeridianOS platform plugin it builds.
-    if [[ -f "${SYSROOT}/usr/lib/libQt6Core.a" && -f "${SYSROOT}/usr/plugins/platforms/libqveridian.a" ]]; then
-        log "Qt 6 cross-build: already installed."
+# ── 3. Cross-compile qtbase ───────────────────────────────────────────
+build_qtbase() {
+    if [[ -f "${SYSROOT}/usr/lib/libQt6Core.so" && \
+          -f "${SYSROOT}/usr/lib/qt6/plugins/platforms/libqveridian.so" ]]; then
+        log "qtbase: already installed."
         return 0
     fi
+    local src
+    src="$(qt_src qtbase)"
+    local bld="${BUILD_DIR}/cross-qtbase-build"
+    install_qpa_plugin "${src}"
+    python3 -I "${SCRIPT_DIR}/deps-patches/qt_cmake_private_libexec.py" \
+        "${src}/cmake/QtWrapperScriptHelpers.cmake" || die "failed to patch Qt's wrapper scripts"
+    # GCC 16 -Wstringop-overflow in HMAC key padding: the block-size bound
+    # was an assert only (see the script).
+    python3 -I "${SCRIPT_DIR}/deps-patches/qt_hmac_bound.py" \
+        "${src}/src/corelib/tools/qcryptographichash.cpp" || die "failed to patch qcryptographichash.cpp"
+    apply_patches "${SCRIPT_DIR}/qt6-patches" "${src}"
 
-    local src="${BUILD_DIR}/qtbase-everywhere-src-${QT_VER}"
-    local bld="${BUILD_DIR}/cross-qt-build"
-    local host_prefix="${BUILD_DIR}/host-qt"
-
-    log "Cross-compiling Qt 6 ${QT_VER} (static) for VeridianOS..."
+    # QT_EMBED_TOOLCHAIN_COMPILER: Qt's toolchain file records the
+    # compilers, as for a native build. Qt leaves them out when cross
+    # compiling, yet qt-cmake-private (qt-configure-module) passes
+    # QT_USE_ORIGINAL_COMPILER, which only that recorded part reads, so every
+    # module build reported it unused. They are the toolchain's compilers.
+    log "Cross-compiling qtbase ${QT_VER}..."
     rm -rf "${bld}"
     mkdir -p "${bld}"
-
-    # Apply VeridianOS patches if present
-    local patch_dir="${SCRIPT_DIR}/qt6-patches"
-    if [[ -d "${patch_dir}" ]]; then
-        local marker="${src}/.veridian_patched"
-        if [[ ! -f "${marker}" ]]; then
-            for patch in "${patch_dir}"/*.patch; do
-                [[ -f "$patch" ]] || continue
-                log "Applying $(basename "$patch")..."
-                (cd "${src}" && patch -p1 < "$patch")
-            done
-            touch "${marker}"
-        fi
-    fi
-
-    export PKG_CONFIG_PATH="${SYSROOT}/usr/lib/pkgconfig:${SYSROOT}/usr/share/pkgconfig"
-    export PKG_CONFIG_SYSROOT_DIR=""
-
     (cd "${bld}" && \
         "${src}/configure" \
-            -prefix "${SYSROOT}/usr" \
-            -static \
+            -prefix /usr \
+            -extprefix "${SYSROOT}/usr" \
+            -archdatadir lib/qt6 \
+            -datadir share/qt6 \
+            -sysconfdir /etc/xdg \
+            -shared \
             -release \
             -opensource -confirm-license \
-            -qt-host-path "${host_prefix}" \
+            -qt-host-path "${QT_HOST}" \
             -platform linux-g++ \
             -xplatform linux-g++ \
             -opengl es2 \
             -egl \
             -openssl-linked \
             -feature-sql \
-            -sql-sqlite \
-            -no-feature-testlib \
+            -system-sqlite \
+            -feature-testlib \
             -no-feature-system-doubleconversion \
-            -no-zstd \
             -no-feature-system-libb2 \
-            -no-feature-textmarkdownreader \
-            -no-feature-textmarkdownwriter \
-            -no-feature-accessibility-atspi-bridge \
-            -no-feature-mtdev \
+            -no-feature-system-textmarkdownreader \
+            -feature-zstd \
+            -no-feature-brotli \
+            -feature-accessibility-atspi-bridge \
+            -feature-mtdev \
             -no-feature-tslib \
             -feature-libinput \
+            -feature-xkbcommon \
             -feature-wayland-client \
-            -no-feature-brotli \
             -system-zlib \
             -system-freetype \
             -system-harfbuzz \
-            -qt-pcre \
+            -system-pcre \
             -system-libpng \
             -system-libjpeg \
             -fontconfig \
@@ -180,451 +207,120 @@ build_qt_cross() {
             -nomake examples \
             -nomake tests \
             -- \
-            -DCMAKE_TOOLCHAIN_FILE="${TOOLCHAIN}" \
+            -DCMAKE_TOOLCHAIN_FILE="${CMAKE_TOOLCHAIN_KDE}" \
+            -DQT_EMBED_TOOLCHAIN_COMPILER=ON \
             -DCMAKE_IGNORE_PREFIX_PATH="${CMAKE_IGNORE_PREFIX_PATH:-/home/linuxbrew/.linuxbrew}" && \
         cmake --build . --parallel "${JOBS}" && \
         cmake --install .)
-    log "Qt 6 cross-build: done."
 }
 
-# ── 4a. Build host QtWayland scanner ──────────────────────────────────
-# The host Qt was built without GUI, so we can't use cmake to build the
-# full QtWayland module natively. Instead, compile qtwaylandscanner
-# manually against host QtCore and install cmake package configs.
-build_host_qt_wayland() {
-    local host_prefix="${BUILD_DIR}/host-qt"
-    if [[ -f "${host_prefix}/libexec/qtwaylandscanner" ]]; then
-        log "Host QtWayland scanner: already built."
-        return 0
-    fi
-    # Since Qt 6.10 the scanner, WaylandClient and the Wayland QPA plugin
-    # live in qtbase (fetched by build_host_qt); qtwayland keeps only the
-    # compositor and a few extra plugins. A host qtbase that found the
-    # host's wayland-scanner has built the tool already (checked above).
-    local src="${BUILD_DIR}/qtbase-everywhere-src-${QT_VER}/src/tools/qtwaylandscanner/qtwaylandscanner.cpp"
-    log "Building host qtwaylandscanner..."
-    mkdir -p "${host_prefix}/libexec"
-    g++ -std=c++17 -O2 \
-        -I"${host_prefix}/include" \
-        -I"${host_prefix}/include/QtCore" \
-        "${src}" \
-        -L"${host_prefix}/lib" \
-        -Wl,-rpath,"${host_prefix}/lib" \
-        -lQt6Core \
-        -lpthread -ldl \
-        -o "${host_prefix}/libexec/qtwaylandscanner"
-
-    # Create cmake package config for cross-compilation to find the scanner
-    local cmake_dir="${host_prefix}/lib/cmake/Qt6WaylandScannerTools"
-    mkdir -p "${cmake_dir}"
-    cat > "${cmake_dir}/Qt6WaylandScannerToolsTargets.cmake" << EOF
-if(NOT TARGET Qt6::qtwaylandscanner)
-    add_executable(Qt6::qtwaylandscanner IMPORTED GLOBAL)
-    set_target_properties(Qt6::qtwaylandscanner PROPERTIES
-        IMPORTED_LOCATION "${host_prefix}/libexec/qtwaylandscanner"
-    )
-endif()
-EOF
-    cat > "${cmake_dir}/Qt6WaylandScannerToolsConfig.cmake" << 'CMAKEEOF'
-if(NOT DEFINED QT_DEFAULT_MAJOR_VERSION)
-    set(QT_DEFAULT_MAJOR_VERSION 6)
-endif()
-set(Qt6WaylandScannerTools_FOUND TRUE)
-get_filename_component(_qt6_wst_dir "${CMAKE_CURRENT_LIST_DIR}" ABSOLUTE)
-include("${_qt6_wst_dir}/Qt6WaylandScannerToolsTargets.cmake")
-unset(_qt6_wst_dir)
-CMAKEEOF
-    cat > "${cmake_dir}/Qt6WaylandScannerToolsConfigVersion.cmake" << VEREOF
-set(PACKAGE_VERSION "${QT_VER}")
-set(PACKAGE_VERSION_EXACT FALSE)
-set(PACKAGE_VERSION_COMPATIBLE TRUE)
-if("\${PACKAGE_FIND_VERSION}" VERSION_EQUAL "${QT_VER}")
-    set(PACKAGE_VERSION_EXACT TRUE)
-endif()
-VEREOF
-    log "Host QtWayland scanner: done."
-}
-
-# ── 4b. Build QtWayland (cross) ──────────────────────────────────────
-build_qt_wayland() {
-    # libQt6WaylandClient.a now comes from qtbase, so a stamp marks this
-    # module (the remaining qtwayland plugins) as done.
-    if [[ -f "${BUILD_DIR}/qtwayland.done" ]]; then
-        log "QtWayland: already installed."
-        return 0
-    fi
-    fetch "qtwayland-everywhere-src-${QT_VER}" \
-        "${QT_BASE_URL}/qtwayland-everywhere-src-${QT_VER}.tar.xz" \
-        "qtwayland-everywhere-src-${QT_VER}"
-
-    local src="${BUILD_DIR}/qtwayland-everywhere-src-${QT_VER}"
-    local bld="${BUILD_DIR}/qtwayland-build"
-    local host_prefix="${BUILD_DIR}/host-qt"
-    log "Building QtWayland ${QT_VER}..."
+# qt_module MODULE LIBRARY [CONFIGURE OPTIONS...]: a further Qt module,
+# configured against the staged qtbase with Qt's own qt-configure-module
+# (same prefix, staging directory, toolchain and host Qt).
+qt_module() {
+    local module="$1" library="$2"
+    shift 2
+    installed "${library}" "${module}" && return 0
+    local src
+    src="$(qt_src "${module}")"
+    local bld="${BUILD_DIR}/${module}-build"
+    log "Building ${module} ${QT_VER}..."
     rm -rf "${bld}"
     mkdir -p "${bld}"
-
-    export PKG_CONFIG_PATH="${SYSROOT}/usr/lib/pkgconfig:${SYSROOT}/usr/share/pkgconfig"
-    export PKG_CONFIG_SYSROOT_DIR=""
-
     (cd "${bld}" && \
-        cmake "${src}" \
-            -DCMAKE_TOOLCHAIN_FILE="${TOOLCHAIN}" \
-            -DCMAKE_PREFIX_PATH="${SYSROOT}/usr" \
-            -DCMAKE_INSTALL_PREFIX="${SYSROOT}/usr" \
-            -DQT_HOST_PATH:PATH="${host_prefix}" \
-            -DQT_HOST_PATH_CMAKE_DIR:PATH="${host_prefix}/lib/cmake" \
-            -DBUILD_SHARED_LIBS=OFF \
-            -DBUILD_TESTING=OFF \
-            -DQT_BUILD_EXAMPLES=OFF \
-            -DQT_FORCE_BUILD_TOOLS=OFF \
-            -DQT_FEATURE_wayland_server=OFF \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_IGNORE_PREFIX_PATH="${CMAKE_IGNORE_PREFIX_PATH:-/home/linuxbrew/.linuxbrew}" && \
+        "${SYSROOT}/usr/bin/qt-configure-module" "${src}" "$@" && \
         cmake --build . --parallel "${JOBS}" && \
         cmake --install .)
-    touch "${BUILD_DIR}/qtwayland.done"
-    log "QtWayland: done."
-}
-
-# ── 5. Build QtShaderTools ────────────────────────────────────────────
-# Required by QtQuick for runtime shader compilation.
-build_qt_shadertools() {
-    if [[ -f "${SYSROOT}/usr/lib/libQt6ShaderTools.a" ]]; then
-        log "QtShaderTools: already installed."
-        return 0
-    fi
-    fetch "qtshadertools-everywhere-src-${QT_VER}" \
-        "${QT_BASE_URL}/qtshadertools-everywhere-src-${QT_VER}.tar.xz" \
-        "qtshadertools-everywhere-src-${QT_VER}"
-
-    local src="${BUILD_DIR}/qtshadertools-everywhere-src-${QT_VER}"
-    local bld="${BUILD_DIR}/qtshadertools-build"
-    local host_prefix="${BUILD_DIR}/host-qt"
-
-    # First build qsb tool for host (code generator)
-    if [[ ! -f "${host_prefix}/bin/qsb" ]] && \
-       [[ ! -f "${host_prefix}/libexec/qsb" ]]; then
-        log "Building host QtShaderTools (qsb tool)..."
-        local host_bld="${BUILD_DIR}/host-qtshadertools-build"
-        rm -rf "${host_bld}"
-        mkdir -p "${host_bld}"
-        # Host build: drop the cross pkg-config search path exported by the
-        # cross steps above, or sysroot (musl) headers leak into host code.
-        (unset PKG_CONFIG_PATH PKG_CONFIG_LIBDIR PKG_CONFIG_SYSROOT_DIR && \
-            cd "${host_bld}" && \
-            cmake "${src}" \
-                -DCMAKE_PREFIX_PATH="${host_prefix}" \
-                -DCMAKE_INSTALL_PREFIX="${host_prefix}" \
-                -DBUILD_SHARED_LIBS=ON \
-                -DBUILD_TESTING=OFF \
-                -DQT_BUILD_TESTS=OFF && \
-            cmake --build . --parallel "${JOBS}" && \
-            cmake --install .)
-        log "Host QtShaderTools: done."
-    fi
-
-    log "Building QtShaderTools ${QT_VER}..."
-    rm -rf "${bld}"
-    mkdir -p "${bld}"
-
-    export PKG_CONFIG_PATH="${SYSROOT}/usr/lib/pkgconfig:${SYSROOT}/usr/share/pkgconfig"
-    export PKG_CONFIG_SYSROOT_DIR=""
-
-    (cd "${bld}" && \
-        cmake "${src}" \
-            -DCMAKE_TOOLCHAIN_FILE="${TOOLCHAIN}" \
-            -DCMAKE_PREFIX_PATH="${SYSROOT}/usr" \
-            -DCMAKE_INSTALL_PREFIX="${SYSROOT}/usr" \
-            -DQT_HOST_PATH:PATH="${host_prefix}" \
-            -DQT_HOST_PATH_CMAKE_DIR:PATH="${host_prefix}/lib/cmake" \
-            -DBUILD_SHARED_LIBS=OFF \
-            -DBUILD_TESTING=OFF \
-            -DQT_BUILD_EXAMPLES=OFF \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_IGNORE_PREFIX_PATH="${CMAKE_IGNORE_PREFIX_PATH:-/home/linuxbrew/.linuxbrew}" && \
-        cmake --build . --parallel "${JOBS}" && \
-        cmake --install . --prefix "${SYSROOT}/usr")
-    log "QtShaderTools: done."
-}
-
-# ── 6. Build QtDeclarative (QML + Quick) ─────────────────────────────
-# Provides QtQml and QtQuick, required by KDE Plasma shell.
-build_qt_declarative() {
-    if [[ -f "${SYSROOT}/usr/lib/libQt6Qml.a" ]]; then
-        log "QtDeclarative: already installed."
-        return 0
-    fi
-    fetch "qtdeclarative-everywhere-src-${QT_VER}" \
-        "${QT_BASE_URL}/qtdeclarative-everywhere-src-${QT_VER}.tar.xz" \
-        "qtdeclarative-everywhere-src-${QT_VER}"
-
-    local src="${BUILD_DIR}/qtdeclarative-everywhere-src-${QT_VER}"
-    local bld="${BUILD_DIR}/qtdeclarative-build"
-    local host_prefix="${BUILD_DIR}/host-qt"
-
-    # Build host QML tools (qmlcachegen, qmltyperegistrar, etc.)
-    if [[ ! -f "${host_prefix}/bin/qmlcachegen" ]] && \
-       [[ ! -f "${host_prefix}/libexec/qmlcachegen" ]]; then
-        log "Building host QtDeclarative tools..."
-        local host_bld="${BUILD_DIR}/host-qtdeclarative-build"
-        rm -rf "${host_bld}"
-        mkdir -p "${host_bld}"
-        # Host build: drop the cross pkg-config search path exported by the
-        # cross steps above, or sysroot (musl) headers leak into host code.
-        (unset PKG_CONFIG_PATH PKG_CONFIG_LIBDIR PKG_CONFIG_SYSROOT_DIR && \
-            cd "${host_bld}" && \
-            cmake "${src}" \
-                -DCMAKE_PREFIX_PATH="${host_prefix}" \
-                -DCMAKE_INSTALL_PREFIX="${host_prefix}" \
-                -DBUILD_SHARED_LIBS=ON \
-                -DBUILD_TESTING=OFF \
-                -DQT_BUILD_TESTS=OFF \
-                -DQT_BUILD_EXAMPLES=OFF && \
-            cmake --build . --parallel "${JOBS}" && \
-            cmake --install .)
-        log "Host QtDeclarative tools: done."
-    fi
-
-    log "Building QtDeclarative ${QT_VER}..."
-    rm -rf "${bld}"
-    mkdir -p "${bld}"
-
-    # Skip the target-side apps in tools/ (qml, qmleasing, qmlscene,
-    # svgtoqml, ...) when cross-compiling. They fail to link against static
-    # Mesa/udev, and their install rules sit in tools/cmake_install.cmake
-    # ahead of later CMake package configs (Qt6QmlModels etc.), so one
-    # failed link aborts the install and KF6 cannot find Qt6Quick. The
-    # build-time tools (qmltyperegistrar, qmlcachegen, ...) are outside this
-    # block and come from host-qt.
-    # The apps block is `if(NOT (ANDROID OR WASM OR IOS ...))`; the platform
-    # list grows between releases (6.12 added OHOS), so it is matched by
-    # pattern and must occur exactly once.
-    local tools_cml="${src}/tools/CMakeLists.txt"
-    python3 - "${tools_cml}" <<'PYEOF' || die "unexpected ${tools_cml}: cannot gate target apps"
-import re, sys
-p = sys.argv[1]
-s = open(p).read()
-if "OR CMAKE_CROSSCOMPILING))" in s:
-    sys.exit(0)
-pat = re.compile(r"^if\(NOT \((ANDROID OR WASM OR IOS[^()]*)\)\)$", re.M)
-if len(pat.findall(s)) != 1:
-    sys.exit(1)
-open(p, "w").write(pat.sub(r"if(NOT (\1 OR CMAKE_CROSSCOMPILING))", s))
-PYEOF
-    grep -q "OR CMAKE_CROSSCOMPILING))" "${tools_cml}" || die "failed to patch ${tools_cml}"
-
-    export PKG_CONFIG_PATH="${SYSROOT}/usr/lib/pkgconfig:${SYSROOT}/usr/share/pkgconfig"
-    export PKG_CONFIG_SYSROOT_DIR=""
-
-    (cd "${bld}" && \
-        cmake "${src}" \
-            -DCMAKE_TOOLCHAIN_FILE="${TOOLCHAIN}" \
-            -DCMAKE_PREFIX_PATH="${SYSROOT}/usr" \
-            -DCMAKE_INSTALL_PREFIX="${SYSROOT}/usr" \
-            -DQT_HOST_PATH:PATH="${host_prefix}" \
-            -DQT_HOST_PATH_CMAKE_DIR:PATH="${host_prefix}/lib/cmake" \
-            -DBUILD_SHARED_LIBS=OFF \
-            -DBUILD_TESTING=OFF \
-            -DQT_BUILD_EXAMPLES=OFF \
-            -DQT_FORCE_BUILD_TOOLS=OFF \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_IGNORE_PREFIX_PATH="${CMAKE_IGNORE_PREFIX_PATH:-/home/linuxbrew/.linuxbrew}" && \
-        cmake --build . --parallel "${JOBS}" -- -k || true && \
-        cmake --install . --prefix "${SYSROOT}/usr" 2>/dev/null || true)
-    # Tool binaries (qml, qmlpreview, etc.) may fail to link when cross-
-    # compiling due to static Mesa link complexity. The libraries themselves
-    # build successfully and are installed. Host tools (from host-qt) are
-    # used for code generation instead.
-
-    # Copy any .a libraries the install step missed (due to failed tool binaries)
-    for lib in "${bld}"/lib/libQt6*.a; do
-        [[ -f "$lib" ]] || continue
-        local base
-        base=$(basename "$lib")
-        if [[ ! -f "${SYSROOT}/usr/lib/${base}" ]]; then
-            log "  Manually copying ${base}..."
-            cp "$lib" "${SYSROOT}/usr/lib/"
-        fi
-    done
-
-    if [[ ! -f "${SYSROOT}/usr/lib/libQt6Qml.a" ]]; then
-        die "QtDeclarative build failed: libQt6Qml.a not produced"
-    fi
-    log "QtDeclarative: done."
-}
-
-# ── 7. Build QtSvg ───────────────────────────────────────────────────
-# SVG support used by KDE icons and themes.
-build_qt_svg() {
-    if [[ -f "${SYSROOT}/usr/lib/libQt6Svg.a" ]]; then
-        log "QtSvg: already installed."
-        return 0
-    fi
-    fetch "qtsvg-everywhere-src-${QT_VER}" \
-        "${QT_BASE_URL}/qtsvg-everywhere-src-${QT_VER}.tar.xz" \
-        "qtsvg-everywhere-src-${QT_VER}"
-
-    local src="${BUILD_DIR}/qtsvg-everywhere-src-${QT_VER}"
-    local bld="${BUILD_DIR}/qtsvg-build"
-    local host_prefix="${BUILD_DIR}/host-qt"
-    log "Building QtSvg ${QT_VER}..."
-    rm -rf "${bld}"
-    mkdir -p "${bld}"
-
-    export PKG_CONFIG_PATH="${SYSROOT}/usr/lib/pkgconfig:${SYSROOT}/usr/share/pkgconfig"
-    export PKG_CONFIG_SYSROOT_DIR=""
-
-    (cd "${bld}" && \
-        cmake "${src}" \
-            -DCMAKE_TOOLCHAIN_FILE="${TOOLCHAIN}" \
-            -DCMAKE_PREFIX_PATH="${SYSROOT}/usr" \
-            -DCMAKE_INSTALL_PREFIX="${SYSROOT}/usr" \
-            -DQT_HOST_PATH:PATH="${host_prefix}" \
-            -DQT_HOST_PATH_CMAKE_DIR:PATH="${host_prefix}/lib/cmake" \
-            -DBUILD_SHARED_LIBS=OFF \
-            -DBUILD_TESTING=OFF \
-            -DQT_BUILD_EXAMPLES=OFF \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_IGNORE_PREFIX_PATH="${CMAKE_IGNORE_PREFIX_PATH:-/home/linuxbrew/.linuxbrew}" && \
-        cmake --build . --parallel "${JOBS}" && \
-        cmake --install .)
-    log "QtSvg: done."
-}
-
-# Qt 5 compatibility module (QTextCodec, QRegExp, ...), required by KWin.
-build_qt_5compat() {
-    if [[ -f "${SYSROOT}/usr/lib/libQt6Core5Compat.a" ]]; then
-        log "Qt5Compat: already installed."
-        return 0
-    fi
-    fetch "qt5compat-everywhere-src-${QT_VER}" \
-        "${QT_BASE_URL}/qt5compat-everywhere-src-${QT_VER}.tar.xz" \
-        "qt5compat-everywhere-src-${QT_VER}"
-
-    local src="${BUILD_DIR}/qt5compat-everywhere-src-${QT_VER}"
-    local bld="${BUILD_DIR}/qt5compat-build"
-    local host_prefix="${BUILD_DIR}/host-qt"
-    log "Building Qt5Compat ${QT_VER}..."
-    rm -rf "${bld}"
-    mkdir -p "${bld}"
-
-    export PKG_CONFIG_PATH="${SYSROOT}/usr/lib/pkgconfig:${SYSROOT}/usr/share/pkgconfig"
-    export PKG_CONFIG_SYSROOT_DIR=""
-
-    (cd "${bld}" && \
-        cmake "${src}" \
-            -DCMAKE_TOOLCHAIN_FILE="${TOOLCHAIN}" \
-            -DCMAKE_PREFIX_PATH="${SYSROOT}/usr" \
-            -DCMAKE_INSTALL_PREFIX="${SYSROOT}/usr" \
-            -DQT_HOST_PATH:PATH="${host_prefix}" \
-            -DQT_HOST_PATH_CMAKE_DIR:PATH="${host_prefix}/lib/cmake" \
-            -DBUILD_SHARED_LIBS=OFF \
-            -DBUILD_TESTING=OFF \
-            -DQT_BUILD_EXAMPLES=OFF \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_IGNORE_PREFIX_PATH="${CMAKE_IGNORE_PREFIX_PATH:-/home/linuxbrew/.linuxbrew}" && \
-        cmake --build . --parallel "${JOBS}" && \
-        cmake --install .)
-    log "Qt5Compat: done."
-}
-
-# Qt Sensors (orientation sensor), required by KWin core.
-build_qt_sensors() {
-    if [[ -f "${SYSROOT}/usr/lib/libQt6Sensors.a" ]]; then
-        log "QtSensors: already installed."
-        return 0
-    fi
-    fetch "qtsensors-everywhere-src-${QT_VER}" \
-        "${QT_BASE_URL}/qtsensors-everywhere-src-${QT_VER}.tar.xz" \
-        "qtsensors-everywhere-src-${QT_VER}"
-
-    local src="${BUILD_DIR}/qtsensors-everywhere-src-${QT_VER}"
-    local bld="${BUILD_DIR}/qtsensors-build"
-    local host_prefix="${BUILD_DIR}/host-qt"
-    log "Building QtSensors ${QT_VER}..."
-    rm -rf "${bld}"
-    mkdir -p "${bld}"
-
-    export PKG_CONFIG_PATH="${SYSROOT}/usr/lib/pkgconfig:${SYSROOT}/usr/share/pkgconfig"
-    export PKG_CONFIG_SYSROOT_DIR=""
-
-    (cd "${bld}" && \
-        cmake "${src}" \
-            -DCMAKE_TOOLCHAIN_FILE="${TOOLCHAIN}" \
-            -DCMAKE_PREFIX_PATH="${SYSROOT}/usr" \
-            -DCMAKE_INSTALL_PREFIX="${SYSROOT}/usr" \
-            -DQT_HOST_PATH:PATH="${host_prefix}" \
-            -DQT_HOST_PATH_CMAKE_DIR:PATH="${host_prefix}/lib/cmake" \
-            -DBUILD_SHARED_LIBS=OFF \
-            -DBUILD_TESTING=OFF \
-            -DQT_BUILD_EXAMPLES=OFF \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_IGNORE_PREFIX_PATH="${CMAKE_IGNORE_PREFIX_PATH:-/home/linuxbrew/.linuxbrew}" && \
-        cmake --build . --parallel "${JOBS}" && \
-        cmake --install .)
-    log "QtSensors: done."
+    [[ -f "${SYSROOT}/usr/lib/${library}" ]] || die "${module}: ${library} not installed"
 }
 
 # ── Verify ────────────────────────────────────────────────────────────
 verify() {
     log "Verifying Qt 6 installation..."
-    local errors=0
-    for lib in libQt6Core.a libQt6Gui.a libQt6Widgets.a libQt6DBus.a libQt6WaylandClient.a libQt6Qml.a libQt6Quick.a libQt6QmlModels.a libQt6ShaderTools.a libQt6Svg.a libQt6SvgWidgets.a libQt6Core5Compat.a libQt6Sensors.a; do
-        if [[ -f "${SYSROOT}/usr/lib/${lib}" ]]; then
-            local size
-            size=$(stat -c%s "${SYSROOT}/usr/lib/${lib}" 2>/dev/null || echo "?")
-            log "  OK: ${lib} (${size} bytes)"
+    local errors=0 item
+    for item in libQt6Core.so libQt6Gui.so libQt6Widgets.so libQt6DBus.so libQt6Test.so \
+                libQt6WaylandClient.so libQt6Qml.so libQt6Quick.so libQt6QmlModels.so \
+                libQt6ShaderTools.so libQt6Svg.so libQt6SvgWidgets.so libQt6Core5Compat.so \
+                libQt6Sensors.so libQt6WaylandCompositor.so libQt6Positioning.so libQt6Location.so \
+                libQt6UiTools.so libQt6WebSockets.so libQt6TextToSpeech.so \
+                libQt6Multimedia.so \
+                qt6/plugins/platforms/libqveridian.so; do
+        if [[ -f "${SYSROOT}/usr/lib/${item}" ]]; then
+            log "  OK: ${item}"
         else
-            log "  MISSING: ${lib}"
+            log "  MISSING: ${item}"
             errors=$((errors + 1))
         fi
     done
-    # The VeridianOS platform plugin (userland/qt6/qpa), built with qtbase.
-    if [[ -f "${SYSROOT}/usr/plugins/platforms/libqveridian.a" ]]; then
-        log "  OK: platforms/libqveridian.a"
-    else
-        log "  MISSING: platforms/libqveridian.a"
-        errors=$((errors + 1))
-    fi
-    for tool in moc rcc uic; do
-        # Qt 6 installs these in libexec/ (bin/ only holds user-facing tools).
-        if [[ -f "${BUILD_DIR}/host-qt/libexec/${tool}" || -f "${BUILD_DIR}/host-qt/bin/${tool}" ]]; then
-            log "  OK: host ${tool}"
+    for item in moc rcc uic qtwaylandscanner qmlcachegen qsb lrelease lconvert; do
+        if [[ -x "${QT_HOST}/libexec/${item}" || -x "${QT_HOST}/bin/${item}" ]]; then
+            log "  OK: host ${item}"
         else
-            log "  MISSING: host ${tool}"
+            log "  MISSING: host ${item}"
             errors=$((errors + 1))
         fi
     done
-    if [[ $errors -gt 0 ]]; then
-        die "${errors} items missing!"
-    fi
-    log "Qt 6 static build ready."
+    [[ $errors -eq 0 ]] || die "${errors} items missing!"
+    log "Qt 6 ready."
 }
 
-# ── Main ──────────────────────────────────────────────────────────────
 main() {
-    log "=== Building Qt 6 ${QT_VER} (static) for VeridianOS ==="
+    log "=== Building Qt 6 ${QT_VER} for VeridianOS ==="
     log "Sysroot: ${SYSROOT}"
-
-    [[ -f "${SYSROOT}/usr/lib/libc.a" ]] || die "musl libc not found. Run build-musl.sh first."
-    [[ -f "${SYSROOT}/usr/lib/libz.a" ]] || die "zlib not found. Run build-deps.sh first."
-    [[ -f "${SYSROOT}/usr/lib/libfreetype.a" ]] || die "FreeType not found. Run build-fonts.sh first."
-    [[ -f "${SYSROOT}/usr/lib/libdbus-1.a" ]] || die "D-Bus not found. Run build-dbus.sh first."
-    [[ -f "${SYSROOT}/usr/lib/libwayland-client.a" ]] || die "Wayland not found. Run build-wayland.sh first."
+    local need
+    for need in libz.so libfreetype.so libdbus-1.so libwayland-client.so libEGL.so libatspi.so; do
+        [[ -f "${SYSROOT}/usr/lib/${need}" ]] || die "${need} not found (run the earlier phases first)."
+    done
 
     build_host_qt
-    # The host scanner must exist before the cross qtbase: since Qt 6.10
-    # qtbase builds WaylandClient and needs it.
-    build_host_qt_wayland
-    install_qpa_plugin
-    build_qt_cross
-    build_qt_shadertools
-    build_qt_declarative
-    build_qt_svg
-    build_qt_5compat
-    build_qt_sensors
-    build_qt_wayland
+    host_qt_module qtshadertools qsb
+    host_qt_module qtdeclarative qmlcachegen
+    # Qt Linguist's tools (lconvert, lrelease): the KDE builds turn their
+    # translations into .qm files with them.
+    host_qt_module qttools lrelease \
+        -DFEATURE_linguist=ON \
+        -DFEATURE_assistant=OFF \
+        -DFEATURE_designer=OFF \
+        -DFEATURE_distancefieldgenerator=OFF \
+        -DFEATURE_pixeltool=OFF \
+        -DFEATURE_qdbus=OFF \
+        -DFEATURE_qdoc=OFF \
+        -DFEATURE_qtdiag=OFF \
+        -DFEATURE_qtplugininfo=OFF
+    build_qtbase
+    qt_module qtshadertools libQt6ShaderTools.so
+    qt_module qtdeclarative libQt6Qml.so
+    qt_module qtsvg libQt6Svg.so
+    qt_module qt5compat libQt6Core5Compat.so
+    qt_module qtsensors libQt6Sensors.so
+    qt_module qtwayland libQt6WaylandCompositor.so
+    # Positioning and Location: plasma-workspace requires both.
+    qt_module qtpositioning libQt6Positioning.so
+    qt_module qtlocation libQt6Location.so
+    # WebSockets: QCoro's QCoro6WebSockets (build-kf6.sh).
+    qt_module qtwebsockets libQt6WebSockets.so
+    # Multimedia: Prison's barcode scanner (KF6PrisonScanner), Plasma's QML
+    # media types, and Qt Speech's audio output.
+    qt_module qtmultimedia libQt6Multimedia.so
+    # TextToSpeech: KTextEditor requires it (KTextWidgets uses it).
+    qt_module qtspeech libQt6TextToSpeech.so
+    # Qt UiTools (KWin requires it); none of qttools' programs. CMP0174:
+    # qttools records an SBOM version for libclang, empty when (as here)
+    # libclang is not used; NEW keeps it an empty string, as intended.
+    qt_module qttools libQt6UiTools.so \
+        -no-feature-assistant \
+        -no-feature-designer \
+        -no-feature-distancefieldgenerator \
+        -no-feature-kmap2qmap \
+        -no-feature-linguist \
+        -no-feature-pixeltool \
+        -no-feature-qdbus \
+        -no-feature-qdoc \
+        -no-feature-qev \
+        -no-feature-qtattributionsscanner \
+        -no-feature-qtdiag \
+        -no-feature-qtplugininfo \
+        -- -DCMAKE_POLICY_DEFAULT_CMP0174=NEW
     verify
     log "=== Qt 6 build complete ==="
 }

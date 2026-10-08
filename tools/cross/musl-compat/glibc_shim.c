@@ -520,12 +520,66 @@ long long ftello64(FILE *stream) {
     return (long long)ftello(stream);
 }
 
-/* __cxa_thread_atexit_impl - thread-local destructor registration.
- * musl provides __cxa_thread_atexit but GCC's libstdc++ references _impl. */
+/* __cxa_thread_atexit_impl - thread_local destructor registration (the
+ * glibc interface). The libstdc++ linked here was built for glibc, so its
+ * __cxa_thread_atexit calls this; this used to call __cxa_thread_atexit
+ * back, which recursed until the stack overflowed, and made C programs
+ * (which have no __cxa_thread_atexit) fail to link the shim.
+ *
+ * Each thread keeps a LIFO list of destructors under a pthread key whose
+ * destructor runs them at thread exit; the main thread's list runs from an
+ * atexit handler, since key destructors do not run on exit(). Destructors
+ * registered while the list runs are run too. */
+
+struct veridian_tls_dtor {
+    void (*func)(void *);
+    void *obj;
+    struct veridian_tls_dtor *next;
+};
+
+static pthread_key_t veridian_tls_dtor_key;
+static pthread_once_t veridian_tls_dtor_once = PTHREAD_ONCE_INIT;
+
+static void veridian_run_tls_dtors(void *head)
+{
+    struct veridian_tls_dtor *d = head;
+    while (d) {
+        struct veridian_tls_dtor *next = d->next;
+        d->func(d->obj);
+        free(d);
+        d = next;
+    }
+}
+
+static void veridian_run_main_tls_dtors(void)
+{
+    void *head;
+    while ((head = pthread_getspecific(veridian_tls_dtor_key)) != NULL) {
+        pthread_setspecific(veridian_tls_dtor_key, NULL);
+        veridian_run_tls_dtors(head);
+    }
+}
+
+static void veridian_tls_dtor_init(void)
+{
+    pthread_key_create(&veridian_tls_dtor_key, veridian_run_tls_dtors);
+    atexit(veridian_run_main_tls_dtors);
+}
+
 int __cxa_thread_atexit_impl(void (*func)(void *), void *obj, void *dso_handle) {
-    /* Forward to musl's __cxa_thread_atexit */
-    extern int __cxa_thread_atexit(void (*)(void *), void *, void *);
-    return __cxa_thread_atexit(func, obj, dso_handle);
+    (void)dso_handle;
+    pthread_once(&veridian_tls_dtor_once, veridian_tls_dtor_init);
+    struct veridian_tls_dtor *d = malloc(sizeof(*d));
+    if (!d)
+        return -1;
+    d->func = func;
+    d->obj = obj;
+    d->next = pthread_getspecific(veridian_tls_dtor_key);
+    if (pthread_setspecific(veridian_tls_dtor_key, d) != 0) {
+        free(d);
+        return -1;
+    }
+    return 0;
 }
 
 /* pthread_*_clock* - glibc extensions for clock-specific pthread operations.

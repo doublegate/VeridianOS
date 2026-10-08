@@ -3,12 +3,13 @@
 #
 # Runs all build phases in dependency order:
 #   Phase 1: musl libc
+#   Phase 1b: musl cross toolchain (GCC, binutils, libstdc++ for musl)
 #   Phase 2: C library dependencies (zlib, pcre2, etc.)
-#   Phase 3: Mesa software rendering (softpipe)
-#   Phase 4: Wayland libraries
+#   Phase 3: Wayland libraries
+#   Phase 4: Mesa software rendering (softpipe, EGL on Wayland)
 #   Phase 5: Font stack (FreeType, HarfBuzz, Fontconfig)
 #   Phase 6: D-Bus
-#   Phase 7: Qt 6 (static)
+#   Phase 7: Qt 6
 #   Phase 8: KDE Frameworks 6
 #   Phase 9: KWin compositor
 #   Phase 10: Plasma Desktop + rootfs assembly
@@ -40,14 +41,17 @@ source "${SCRIPT_DIR}/veridian-paths.sh"
 export JOBS="${JOBS:-$(nproc)}"
 
 # Phase names in order
-PHASES=(musl deps mesa wayland fonts dbus qt6 kf6 kwin plasma rootfs)
+# Wayland before Mesa: Mesa's EGL has a Wayland platform.
+PHASES=(musl toolchain deps wayland x11 mesa fonts dbus qt6 kf6 kwin plasma rootfs)
 
 # Map phase names to scripts
 declare -A PHASE_SCRIPTS=(
     [musl]="${SCRIPT_DIR}/build-musl.sh"
+    [toolchain]="${SCRIPT_DIR}/build-musl-toolchain.sh"
     [deps]="${SCRIPT_DIR}/build-deps.sh"
     [mesa]="${SCRIPT_DIR}/build-mesa.sh"
     [wayland]="${SCRIPT_DIR}/build-wayland.sh"
+    [x11]="${SCRIPT_DIR}/build-x11.sh"
     [fonts]="${SCRIPT_DIR}/build-fonts.sh"
     [dbus]="${SCRIPT_DIR}/build-dbus.sh"
     [qt6]="${SCRIPT_DIR}/build-qt6.sh"
@@ -81,18 +85,20 @@ snapshot_sysroot() {
     printf '%s\t%s\n' "${phase}" "$(date -Is)" > "${VERIDIAN_SNAPSHOTS}/sysroot-latest.txt"
     echo "[snapshot] sysroot after ${phase}: ${out} ($(du -h "${out}" | cut -f1))"
 
-    # The toolchain, once per compiler version.
-    local tc="${VERIDIAN_PREFIX}/toolchain"
-    local cc="${tc}/bin/x86_64-veridian-gcc"
-    if [[ -x "${cc}" ]]; then
-        local tcout
-        tcout="${VERIDIAN_SNAPSHOTS}/toolchain-gcc$("${cc}" -dumpversion).tar.zst"
+    # The toolchains, once per compiler version: the native one
+    # (scripts/build-cross-toolchain.sh) and the musl one this pipeline
+    # builds with.
+    local dir cc tcout
+    for dir in toolchain:x86_64-veridian-gcc "$(basename "${VERIDIAN_TOOLCHAIN}"):${VERIDIAN_TARGET}-gcc"; do
+        cc="${VERIDIAN_PREFIX}/${dir%%:*}/bin/${dir#*:}"
+        [[ -x "${cc}" ]] || continue
+        tcout="${VERIDIAN_SNAPSHOTS}/${dir%%:*}-gcc$("${cc}" -dumpversion).tar.zst"
         if [[ ! -f "${tcout}" ]]; then
-            tar -C "${VERIDIAN_PREFIX}" --zstd -cf "${tcout}.tmp" toolchain
+            tar -C "${VERIDIAN_PREFIX}" --zstd -cf "${tcout}.tmp" "${dir%%:*}"
             mv "${tcout}.tmp" "${tcout}"
             echo "[snapshot] toolchain: ${tcout}"
         fi
-    fi
+    done
 }
 ONLY_PHASE=""
 for arg in "$@"; do

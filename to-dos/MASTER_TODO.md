@@ -94,6 +94,10 @@ What does not work yet: `docs/KNOWN-LIMITATIONS.md`.
       filesystem; `musl_dynamic_program` runs a dynamically linked C++ program (exceptions,
       threads, thread_local, `dlopen` of a C++ library).
     - [ ] KDE pipeline with shared libraries; static workarounds removed; rootfs with `/lib`.
+    - [ ] Media backend for the KDE stack: Qt Multimedia is built for Prison, Qt Speech and QML
+      but has no backend; add FFmpeg (shared) and an audio path (ALSA now, PipeWire later),
+      then Qt Multimedia's FFmpeg plugin; cameras need kernel V4L2
+      (`userland/integration/KNOWN-LIMITATIONS.md`).
     - Later (sprint G / v0.29): ASLR, vDSO, eviction of cached pages, writable MAP_SHARED of files.
   - [ ] **D, process model and scheduler (C5; ADR 0006 + ADR 0007):**
     - [x] Scheduler policy core: EEVDF fair, FIFO/RR with bandwidth limit, SCHED_DEADLINE (CBS),

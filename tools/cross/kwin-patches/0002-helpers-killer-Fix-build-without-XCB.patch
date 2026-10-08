@@ -1,0 +1,89 @@
+From edc7254068d346961b2e92f1348df12465b01878 Mon Sep 17 00:00:00 2001
+From: Vlad Zahorodnii <vlad.zahorodnii@kde.org>
+Date: Tue, 6 Oct 2026 12:18:41 +0300
+Subject: [PATCH] helpers/killer: Fix build without XCB
+
+CCBUG: 526689
+---
+ src/helpers/killer/CMakeLists.txt |  5 ++++-
+ src/helpers/killer/killer.cpp     | 13 +++++++++----
+ 2 files changed, 13 insertions(+), 5 deletions(-)
+
+diff --git a/src/helpers/killer/CMakeLists.txt b/src/helpers/killer/CMakeLists.txt
+index 22607eed0d4..d09f6bc008f 100644
+--- a/src/helpers/killer/CMakeLists.txt
++++ b/src/helpers/killer/CMakeLists.txt
+@@ -13,11 +13,14 @@ target_link_libraries(kwin_killer_helper
+     KF6::Service
+     KF6::WidgetsAddons
+     KF6::WindowSystem
+-    Qt::GuiPrivate
+     Qt::Widgets
+     Qt::Concurrent
+ )
+ 
++if (KWIN_BUILD_X11)
++    target_link_libraries(kwin_killer_helper Qt::GuiPrivate)
++endif()
++
+ ecm_qt_declare_logging_category(kwin_killer_helper
+     HEADER debug.h
+     IDENTIFIER KWIN_KILLER
+diff --git a/src/helpers/killer/killer.cpp b/src/helpers/killer/killer.cpp
+index c142b3524a9..8c1eb5f8782 100644
+--- a/src/helpers/killer/killer.cpp
++++ b/src/helpers/killer/killer.cpp
+@@ -31,10 +31,10 @@
+ 
+ #include <QtConcurrentRun>
+ 
+-#include <qpa/qplatformwindow_p.h>
+-
++#if KWIN_BUILD_X11
+ #include <private/qtx11extras_p.h>
+ #include <xcb/xcb.h>
++#endif
+ 
+ #include <cerrno>
+ #include <csignal>
+@@ -156,8 +156,6 @@ int main(int argc, char *argv[])
+ 
+     parser.process(app);
+ 
+-    const bool isX11 = app.platformName() == QLatin1StringView("xcb");
+-
+     QString hostname = parser.value(hostNameOption);
+     bool pid_ok = false;
+     pid_t pid = parser.value(pidOption).toULong(&pid_ok);
+@@ -165,11 +163,16 @@ int main(int argc, char *argv[])
+     QString appname = parser.value(applicationNameOption);
+     QString windowHandle = parser.value(widOption);
+ 
++#if KWIN_BUILD_X11
++    const bool isX11 = app.platformName() == QLatin1StringView("xcb");
+     bool time_ok = false;
+     xcb_timestamp_t timestamp = parser.value(timestampOption).toULong(&time_ok);
++#endif
+ 
+     if (!pid_ok || pid == 0 || windowHandle.isEmpty()
++#if KWIN_BUILD_X11
+         || (isX11 && (!time_ok || timestamp == XCB_CURRENT_TIME))
++#endif
+         || hostname.isEmpty() || windowName.isEmpty() || appname.isEmpty()) {
+         fprintf(stdout, "%s\n", qPrintable(i18n("This helper utility is not supposed to be called directly.")));
+         parser.showHelp(1);
+@@ -189,9 +192,11 @@ int main(int argc, char *argv[])
+     dialog.setPid(pid);
+     dialog.setHostName(hostname);
+ 
++#if KWIN_BUILD_X11
+     if (isX11) {
+         QX11Info::setAppUserTime(timestamp);
+     }
++#endif
+ 
+     QObject::connect(&dialog, &KillDialog::terminateRequested, &dialog, [&dialog, pid, &hostname, &isLocal] {
+         if (!isLocal) {
+-- 
+GitLab
+

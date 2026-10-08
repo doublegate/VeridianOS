@@ -1,27 +1,27 @@
 # Meson cross-compilation file for VeridianOS (x86_64)
 #
-# Usage:
-#   meson setup build --cross-file=tools/cross/meson-cross-veridian.txt
-#
-# NOTE: Paths reference $VERIDIAN_SYSROOT which defaults to
-#       /opt/veridian/musl-sysroot (tools/cross/veridian-paths.sh). Set VERIDIAN_SYSROOT
-#       environment variable to override.
+# A template: the build scripts replace @SYSROOT@, @TOOLCHAIN@, @TARGET@ and
+# @RUN_TARGET@ with the values of tools/cross/veridian-paths.sh and pass the
+# result to meson setup --cross-file.
 
 [binaries]
-# The musl-gcc wrapper handles sysroot flags internally
-c = '@SYSROOT@/bin/x86_64-veridian-musl-gcc'
-cpp = '@SYSROOT@/bin/x86_64-veridian-musl-g++'
-ar = 'ar'
-strip = 'strip'
+c = '@TOOLCHAIN@/bin/@TARGET@-gcc'
+cpp = '@TOOLCHAIN@/bin/@TARGET@-g++'
+ar = '@TOOLCHAIN@/bin/@TARGET@-ar'
+strip = '@TOOLCHAIN@/bin/@TARGET@-strip'
 pkg-config = 'pkg-config'
-
-[built-in options]
-c_args = []
-c_link_args = ['-static']
+# Programs a build compiles for VeridianOS and runs (generators, tests)
+# run through musl's loader with the sysroot's libraries.
+exe_wrapper = '@RUN_TARGET@'
 
 [properties]
+# Meson sets PKG_CONFIG_SYSROOT_DIR from sys_root, placing the /usr paths
+# of the staged .pc files in the sysroot.
 sys_root = '@SYSROOT@'
 pkg_config_libdir = '@SYSROOT@/usr/lib/pkgconfig:@SYSROOT@/usr/share/pkgconfig'
+# The build host is x86_64 Linux too, so meson would run target programs
+# directly; they must go through exe_wrapper, or they would load the
+# host's libraries (a host musl loader would find its glibc libstdc++).
 needs_exe_wrapper = true
 
 [host_machine]

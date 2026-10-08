@@ -1,449 +1,144 @@
 #!/usr/bin/env bash
 # Build Mesa with softpipe for VeridianOS
 #
-# Produces EGL, GLES2, GBM, and DRM libraries using Mesa's
-# softpipe gallium driver (pure software rendering, no GPU needed).
+# EGL (Wayland and surfaceless platforms), OpenGL ES 2, GBM and libdrm from
+# Mesa's softpipe gallium driver (software rendering, no GPU needed), and
+# libepoxy on top of them. Shared libraries (ADR 0010), built and staged
+# as lib/cross-env.sh describes.
 #
-# Prerequisites:
-#   - musl libc + zlib + libexpat built (with -fPIC)
-#   - musl-g++ wrapper with glibc_shim (for Mesa's C++ code)
-#   - meson + ninja + python3-mako
+# Prerequisites: build-deps.sh (zlib, expat), build-wayland.sh (libwayland,
+# wayland-protocols, the host wayland-scanner); meson, ninja, python3-mako.
 #
-# Output (all static archives for static Qt6 linking):
-#   $SYSROOT/usr/lib/libdrm.a
-#   $SYSROOT/usr/lib/libEGL.a
-#   $SYSROOT/usr/lib/libGLESv2.a
-#   $SYSROOT/usr/lib/libgbm.a
-#   $SYSROOT/usr/lib/libglapi.a
+# Output: libdrm, libEGL, libGLESv2, libgbm (with gbm/dri_gbm.so), Mesa's
+# gallium library and libepoxy in $SYSROOT/usr/lib.
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 # shellcheck source=veridian-paths.sh
 source "${SCRIPT_DIR}/veridian-paths.sh"
 BUILD_DIR="${VERIDIAN_CROSS_BUILD}/mesa"
-SYSROOT="${VERIDIAN_SYSROOT}"
 JOBS="${JOBS:-$(nproc)}"
-CC="${SYSROOT}/bin/x86_64-veridian-musl-gcc"
-CXX="${SYSROOT}/bin/x86_64-veridian-musl-g++"
 
+# Checksums pinned when first downloaded.
 LIBDRM_VER="2.4.134"
+LIBDRM_SHA256="ac5e74d157830eb8bee44c6a6bf3ad49774ef0dd2a72bdad74a8f20308b52a95"
 MESA_VER="26.2.4"
+MESA_SHA256="bce5f7fbebb934373b86c999a064d52fb5065878dc57f287f95346648ec832e9"
 LIBEPOXY_VER="1.5.10"
+LIBEPOXY_SHA256="072cda4b59dd098bba8c2363a6247299db1fa89411dc221c8b81b8ee8192e623"
 
 log() { echo "[build-mesa] $*"; }
 die() { echo "[build-mesa] ERROR: $*" >&2; exit 1; }
 
-mkdir -p "${BUILD_DIR}"
-
-# ── Fetch helper ──────────────────────────────────────────────────────
-fetch() {
-    local name="$1" url="$2" dir="$3"
-    local tarball="${VERIDIAN_SOURCES}/${name}.tar.xz"
-    if [[ ! -f "${tarball}" ]]; then
-        log "Downloading ${name}..."
-        { curl -fsSL -o "${tarball}.part" "${url}" || wget -q -O "${tarball}.part" "${url}"; } && [[ -s "${tarball}.part" ]] && mv "${tarball}.part" "${tarball}" || { rm -f "${tarball}.part"; echo "download failed: ${url}" >&2; exit 1; }
-    fi
-    if [[ ! -d "${BUILD_DIR}/${dir}" ]]; then
-        log "Extracting ${name}..."
-        tar -xf "${tarball}" -C "${BUILD_DIR}"
-    fi
-}
-
-# ── Generate meson cross file with resolved sysroot ──────────────────
-# Uses -fPIC so static archives can be linked into Mesa's shared objects.
-generate_meson_cross() {
-    local cross_file="${BUILD_DIR}/meson-cross.txt"
-    cat > "${cross_file}" << CROSSEOF
-[binaries]
-c = '${CC}'
-cpp = '${CXX}'
-ar = 'ar'
-strip = 'strip'
-pkg-config = 'pkg-config'
-
-[built-in options]
-c_args = ['-fPIC']
-c_link_args = []
-cpp_args = ['-fPIC']
-cpp_link_args = []
-
-[properties]
-sys_root = '${SYSROOT}'
-pkg_config_libdir = '${SYSROOT}/usr/lib/pkgconfig:${SYSROOT}/usr/share/pkgconfig'
-needs_exe_wrapper = true
-
-[host_machine]
-system = 'linux'
-cpu_family = 'x86_64'
-cpu = 'x86_64'
-endian = 'little'
-CROSSEOF
-    echo "${cross_file}"
-}
+# shellcheck source=lib/cross-env.sh
+source "${SCRIPT_DIR}/lib/cross-env.sh"
 
 # ── 1. libdrm ────────────────────────────────────────────────────────
 build_libdrm() {
-    if [[ -f "${SYSROOT}/usr/lib/libdrm.a" ]]; then
-        log "libdrm: already installed."
-        return 0
-    fi
-    fetch "libdrm-${LIBDRM_VER}" \
+    installed libdrm.so libdrm && return 0
+    fetch "libdrm-${LIBDRM_VER}.tar.xz" \
         "https://dri.freedesktop.org/libdrm/libdrm-${LIBDRM_VER}.tar.xz" \
-        "libdrm-${LIBDRM_VER}"
-
-    local src="${BUILD_DIR}/libdrm-${LIBDRM_VER}"
-    local bld="${BUILD_DIR}/libdrm-build"
-    local cross_file
-    cross_file="$(generate_meson_cross)"
-
+        "libdrm-${LIBDRM_VER}" "${LIBDRM_SHA256}"
     log "Building libdrm ${LIBDRM_VER}..."
-    rm -rf "${bld}"
-    mkdir -p "${bld}"
-    (cd "${bld}" && \
-        meson setup "${src}" \
-            --cross-file="${cross_file}" \
-            --prefix="${SYSROOT}/usr" \
-            --default-library=static \
-            -Dintel=disabled \
-            -Dradeon=disabled \
-            -Damdgpu=disabled \
-            -Dnouveau=disabled \
-            -Dvmwgfx=disabled \
-            -Dfreedreno=disabled \
-            -Dvc4=disabled \
-            -Detnaviv=disabled \
-            -Dexynos=disabled \
-            -Dtests=false \
-            -Dman-pages=disabled \
-            -Dvalgrind=disabled \
-            -Dcairo-tests=disabled \
-            -Dudev=false && \
-        ninja -j"${JOBS}" && \
-        ninja install)
-    log "libdrm: done."
+    meson_build "${BUILD_DIR}/libdrm-${LIBDRM_VER}" "${BUILD_DIR}/libdrm-build" \
+        -Dintel=disabled \
+        -Dradeon=disabled \
+        -Damdgpu=disabled \
+        -Dnouveau=disabled \
+        -Dvmwgfx=disabled \
+        -Dfreedreno=disabled \
+        -Dvc4=disabled \
+        -Detnaviv=disabled \
+        -Dexynos=disabled \
+        -Dtests=false \
+        -Dman-pages=disabled \
+        -Dvalgrind=disabled \
+        -Dcairo-tests=disabled \
+        -Dudev=false
 }
 
 # ── 2. Mesa (softpipe) ──────────────────────────────────────────────
 build_mesa() {
-    if [[ -f "${SYSROOT}/usr/lib/libEGL.a" ]] && \
-       [[ -f "${SYSROOT}/usr/lib/libGLESv2.a" ]]; then
-        log "Mesa: already installed."
-        return 0
-    fi
-    fetch "mesa-${MESA_VER}" \
+    installed libEGL.so Mesa && return 0
+    fetch "mesa-${MESA_VER}.tar.xz" \
         "https://archive.mesa3d.org/mesa-${MESA_VER}.tar.xz" \
-        "mesa-${MESA_VER}"
+        "mesa-${MESA_VER}" "${MESA_SHA256}"
 
     local src="${BUILD_DIR}/mesa-${MESA_VER}"
     local bld="${BUILD_DIR}/mesa-build"
-    local cross_file
-    cross_file="$(generate_meson_cross)"
-
-    # Apply VeridianOS patches if present
-    local patch_dir="${SCRIPT_DIR}/mesa-patches"
-    if [[ -d "${patch_dir}" ]]; then
-        local marker="${src}/.veridian_patched"
-        if [[ ! -f "${marker}" ]]; then
-            for patch in "${patch_dir}"/*.patch; do
-                [[ -f "$patch" ]] || continue
-                log "Applying $(basename "$patch")..."
-                (cd "${src}" && patch -p1 < "$patch")
-            done
-            touch "${marker}"
-        fi
-    fi
-
     log "Building Mesa ${MESA_VER} (softpipe)..."
-    rm -rf "${bld}"
-    mkdir -p "${bld}"
+    # shared-glapi must be enabled (Mesa requires it for EGL + GLES2). The
+    # Wayland platform: Qt and KDE programs render with EGL on Wayland;
+    # with softpipe, EGL hands the compositor wl_shm buffers. The TLS
+    # dialect is GCC's default, stated so Mesa need not probe it.
+    meson_build "${src}" "${bld}" \
+        -Dc_args="${CFLAGS} -mtls-dialect=gnu" \
+        -Dcpp_args="${CXXFLAGS} -mtls-dialect=gnu" \
+        -Dplatforms=wayland \
+        -Dgallium-drivers=softpipe \
+        -Dvulkan-drivers= \
+        -Dglx=disabled \
+        -Degl=enabled \
+        -Dgles1=disabled \
+        -Dgles2=enabled \
+        -Dopengl=false \
+        -Dshared-glapi=enabled \
+        -Dllvm=disabled \
+        -Dgbm=enabled \
+        -Dglvnd=disabled \
+        -Dvalgrind=disabled \
+        -Dlibunwind=disabled \
+        -Dlmsensors=disabled \
+        -Dbuild-tests=false \
+        -Dselinux=false \
+        -Dxlib-lease=disabled \
+        -Dgallium-va=disabled \
+        -Dvideo-codecs= \
+        -Dpower8=disabled \
+        -Dzstd=disabled
+}
 
-    export PKG_CONFIG_PATH="${SYSROOT}/usr/lib/pkgconfig:${SYSROOT}/usr/share/pkgconfig"
-    export PKG_CONFIG_SYSROOT_DIR="${SYSROOT}"
-
-    # Build Mesa with --default-library=static for internal libraries.
-    # shared-glapi must be enabled (Mesa requires it for EGL + GLES2).
-    # Mesa 25+ removed the dri3, osmesa, gallium-vdpau, gallium-xa and
-    # gallium-nine options (and the features), so they are no longer passed.
-    # NOTE: Mesa hardcodes EGL/GBM/GLES2/glapi as shared_library() in its
-    # meson.build, so --default-library=static only affects internal libs.
-    # We create static archives from the .so object files in a post-step.
-    (cd "${bld}" && \
-        meson setup "${src}" \
-            --cross-file="${cross_file}" \
-            --prefix="${SYSROOT}/usr" \
-            --default-library=static \
-            -Dplatforms= \
-            -Dgallium-drivers=softpipe \
-            -Dvulkan-drivers= \
-            -Dglx=disabled \
-            -Degl=enabled \
-            -Dgles1=disabled \
-            -Dgles2=enabled \
-            -Dopengl=false \
-            -Dshared-glapi=enabled \
-            -Dllvm=disabled \
-            -Dgbm=enabled \
-            -Dglvnd=disabled \
-            -Dvalgrind=disabled \
-            -Dlibunwind=disabled \
-            -Dlmsensors=disabled \
-            -Dbuild-tests=false \
-            -Dselinux=false \
-            -Dxlib-lease=disabled \
-            -Dgallium-va=disabled \
-            -Dvideo-codecs= \
-            -Dpower8=disabled \
-            -Dzstd=disabled && \
-        ninja -j"${JOBS}" && \
-        ninja install)
-
-    # Mesa hardcodes EGL/GBM/GLES2/glapi as shared_library() in meson,
-    # ignoring --default-library=static. Create static archives from the
-    # compiled object files, then remove the .so files from the sysroot.
-    log "Creating static archives from Mesa shared library objects..."
-    local mesa_bld="${bld}"
-
-    # Step 1: Create base archives from .so object files.
-    # Use find instead of glob: Mesa generates dot-prefixed .o files
-    # (e.g. .._entry.c.o) that shell globs skip by default.
-    # Mesa 25+ builds glapi as a static library (linked into libgallium);
-    # older Mesa had it as libglapi.so.
-    if [[ -f "${mesa_bld}/src/mesa/glapi/shared-glapi/libglapi.a" ]]; then
-        # Meson leaves it a thin archive (member paths only), so it is
-        # rewritten as a real one rather than copied.
-        rm -f "${SYSROOT}/usr/lib/libglapi.a"
-        printf 'create %s\naddlib %s\nsave\nend\n' "${SYSROOT}/usr/lib/libglapi.a" \
-            "${mesa_bld}/src/mesa/glapi/shared-glapi/libglapi.a" | ar -M
-        ranlib "${SYSROOT}/usr/lib/libglapi.a"
-    else
-        find "${mesa_bld}/src/mapi/shared-glapi/libglapi.so.0.0.0.p" -name '*.o' -print0 \
-            | xargs -0 ar rcs "${SYSROOT}/usr/lib/libglapi.a"
-    fi
-
-    local tmp_egl="${mesa_bld}/libEGL_base.a"
-    find "${mesa_bld}/src/egl/libEGL.so.1.0.0.p" -name '*.o' -print0 \
-        | xargs -0 ar rcs "${tmp_egl}"
-
-    # Mesa 24.3+ moved the DRI backend out of libgbm into a loadable
-    # dri_gbm.so module; a static libgbm carries its objects too.
-    local tmp_gbm="${mesa_bld}/libgbm_base.a"
-    find "${mesa_bld}/src/gbm/libgbm.so.1.0.0.p" "${mesa_bld}/src/gbm/backends/dri/dri_gbm.so.p" \
-        -name '*.o' -print0 2>/dev/null \
-        | xargs -0 ar rcs "${tmp_gbm}"
-
-    # The public gl* entry points (glDisable, glViewport, ...) are in the
-    # es2api object, not in glapi: without it every GLES2 user fails to link.
-    local tmp_gles="${mesa_bld}/libGLESv2_base.a"
-    # src/mesa/glapi/es2api since Mesa 25, src/mapi/es2api before.
-    local es2_dir="${mesa_bld}/src/mesa/glapi/es2api/libGLESv2.so.2.0.0.p"
-    [[ -d "${es2_dir}" ]] || es2_dir="${mesa_bld}/src/mapi/es2api/libGLESv2.so.2.0.0.p"
-    find "${es2_dir}" -name '*.o' -print0 \
-        | xargs -0 ar rcs "${tmp_gles}"
-
-    # Step 2: Create combined gallium archive from all Mesa internal static libs
-    # Also collect the DRI target objects (contains dri_loader_get_extensions)
-    local tmp_dri="${mesa_bld}/libdri_target.a"
-    local dri_target_dir="${mesa_bld}/src/gallium/targets/dri"
-    find "${dri_target_dir}" -name '*.o' -print0 2>/dev/null \
-        | xargs -0 ar rcs "${tmp_dri}" 2>/dev/null || true
-
-    local gallium_archive="${SYSROOT}/usr/lib/libmesa_gallium.a"
-    rm -f "${gallium_archive}"
-    local tmp_mri="${mesa_bld}/combine.mri"
-    echo "create ${gallium_archive}" > "${tmp_mri}"
-    for lib in \
-        "${mesa_bld}/src/gallium/auxiliary/libgallium.a" \
-        "${mesa_bld}/src/gallium/auxiliary/libgalliumvl.a" \
-        "${mesa_bld}/src/gallium/drivers/softpipe/libsoftpipe.a" \
-        "${mesa_bld}/src/gallium/frontends/dri/libdri.a" \
-        "${mesa_bld}/src/gallium/winsys/sw/dri/libswdri.a" \
-        "${mesa_bld}/src/gallium/winsys/sw/kms-dri/libswkmsdri.a" \
-        "${mesa_bld}/src/gallium/winsys/sw/null/libws_null.a" \
-        "${mesa_bld}/src/gallium/winsys/sw/wrapper/libwsw.a" \
-        "${mesa_bld}/src/gallium/auxiliary/pipe-loader/libpipe_loader_static.a" \
-        "${mesa_bld}/src/mesa/libmesa.a" \
-        "${mesa_bld}/src/mesa/libmesa_sse41.a" \
-        "${mesa_bld}/src/compiler/libcompiler.a" \
-        "${mesa_bld}/src/compiler/nir/libnir.a" \
-        "${mesa_bld}/src/compiler/glsl/libglsl.a" \
-        "${mesa_bld}/src/compiler/glsl/glcpp/libglcpp.a" \
-        "${mesa_bld}/src/compiler/spirv/libvtn.a" \
-        "${mesa_bld}/src/compiler/isaspec/libisaspec.a" \
-        "${mesa_bld}/src/loader/libloader.a" \
-        "${mesa_bld}/src/util/libmesa_util.a" \
-        "${mesa_bld}/src/util/libmesa_util_sse41.a" \
-        "${mesa_bld}/src/util/libmesa_util_simd.a" \
-        "${mesa_bld}/src/util/libmesa_util_clflush.a" \
-        "${mesa_bld}/src/util/libmesa_util_clflushopt.a" \
-        "${mesa_bld}/src/util/blake3/libblake3.a" \
-        "${mesa_bld}/src/util/libxmlconfig.a" \
-        "${mesa_bld}/src/c11/impl/libmesa_util_c11.a" \
-        "${tmp_dri}" \
-    ; do
-        [[ -f "$lib" ]] && echo "addlib $lib" >> "${tmp_mri}"
-    done
-    echo "save" >> "${tmp_mri}"
-    echo "end" >> "${tmp_mri}"
-    ar -M < "${tmp_mri}"
-    ranlib "${gallium_archive}"
-    rm -f "${tmp_mri}"
-
-    # Step 3: Create "fat" archives -- each public library (EGL, GBM, GLES2)
-    # includes all Mesa internals so consumers get a self-contained static
-    # library without needing to know about Mesa's internal architecture.
-    # This is critical because cmake Find modules (FindEGL.cmake, etc.) only
-    # link -lEGL, not the full dependency chain.
-    # Helper: create fat archive = base + gallium + glapi
-    _create_fat_archive() {
-        local output="$1" base="$2"
-        local mri="${mesa_bld}/fat_$(basename "$output" .a).mri"
-        echo "create ${output}" > "${mri}"
-        echo "addlib ${base}" >> "${mri}"
-        echo "addlib ${gallium_archive}" >> "${mri}"
-        echo "addlib ${SYSROOT}/usr/lib/libglapi.a" >> "${mri}"
-        echo "save" >> "${mri}"
-        echo "end" >> "${mri}"
-        ar -M < "${mri}"
-        ranlib "${output}"
-        rm -f "${mri}"
-    }
-
-    _create_fat_archive "${SYSROOT}/usr/lib/libEGL.a" "${tmp_egl}"
-    _create_fat_archive "${SYSROOT}/usr/lib/libgbm.a" "${tmp_gbm}"
-    # GLES2: the es2api entry points, plus gallium and glapi behind them
-    _create_fat_archive "${SYSROOT}/usr/lib/libGLESv2.a" "${tmp_gles}"
-    nm "${SYSROOT}/usr/lib/libGLESv2.a" 2>/dev/null | grep -q ' T glViewport$' || \
-        die "libGLESv2.a has no GLES2 entry points"
-
-    rm -f "${tmp_egl}" "${tmp_gbm}" "${tmp_gles}" "${tmp_dri}"
-
-    # Remove .so files -- we want ONLY static archives in the sysroot
-    rm -f "${SYSROOT}/usr/lib/libEGL.so"* \
-          "${SYSROOT}/usr/lib/libGLESv2.so"* \
-          "${SYSROOT}/usr/lib/libgbm.so"* \
-          "${SYSROOT}/usr/lib/libglapi.so"* \
-          "${SYSROOT}/usr/lib/libgallium"*.so* \
-          "${SYSROOT}/usr/lib/gbm/dri_gbm.so"
-
-    # Rewrite pkg-config files with proper static link dependencies.
-    # Mesa's generated .pc files assume shared linking; for static builds
-    # consumers need the full internal dependency chain.
-    cat > "${SYSROOT}/usr/lib/pkgconfig/egl.pc" << PCEOF
-prefix=${SYSROOT}/usr
-includedir=\${prefix}/include
-libdir=\${prefix}/lib
-
-Name: egl
-Description: Mesa EGL Library (static)
-Version: ${MESA_VER}
-Requires.private: libdrm >= 2.4.75
-Libs: -L\${libdir} -lEGL
-Libs.private: -lmesa_gallium -lglapi -ldrm -lexpat -lz -lpthread -lm -ldl
-Cflags: -I\${includedir}
-PCEOF
-    cat > "${SYSROOT}/usr/lib/pkgconfig/glesv2.pc" << PCEOF
-prefix=${SYSROOT}/usr
-includedir=\${prefix}/include
-libdir=\${prefix}/lib
-
-Name: glesv2
-Description: Mesa OpenGL ES 2.0 library (static)
-Version: ${MESA_VER}
-Libs: -L\${libdir} -lGLESv2
-Libs.private: -lmesa_gallium -lglapi -lpthread -lm -ldl
-Cflags: -I\${includedir}
-PCEOF
-    cat > "${SYSROOT}/usr/lib/pkgconfig/gbm.pc" << PCEOF
-prefix=${SYSROOT}/usr
-includedir=\${prefix}/include
-libdir=\${prefix}/lib
-
-Name: gbm
-Description: Mesa gbm library (static)
-Version: ${MESA_VER}
-Libs: -L\${libdir} -lgbm
-Libs.private: -lmesa_gallium -lglapi -ldrm -lexpat -lz -lpthread -lm -ldl
-Cflags: -I\${includedir}
-PCEOF
-    log "Mesa: done."
+# ── 3. libepoxy (GL function pointer manager, required by KWin) ──────
+# EGL + GLES only: no GLX, no X11.
+build_libepoxy() {
+    installed libepoxy.so libepoxy && return 0
+    fetch "libepoxy-${LIBEPOXY_VER}.tar.xz" \
+        "https://download.gnome.org/sources/libepoxy/${LIBEPOXY_VER%.*}/libepoxy-${LIBEPOXY_VER}.tar.xz" \
+        "libepoxy-${LIBEPOXY_VER}" "${LIBEPOXY_SHA256}"
+    log "Building libepoxy ${LIBEPOXY_VER}..."
+    meson_build "${BUILD_DIR}/libepoxy-${LIBEPOXY_VER}" "${BUILD_DIR}/libepoxy-build" \
+        -Dglx=no \
+        -Dx11=false \
+        -Degl=yes \
+        -Dtests=false \
+        -Ddocs=false
 }
 
 # ── Verify ────────────────────────────────────────────────────────────
 verify() {
     log "Verifying Mesa installation..."
-    local errors=0
-    for lib in libdrm.a libEGL.a libGLESv2.a libgbm.a libglapi.a libmesa_gallium.a; do
-        if [[ -f "${SYSROOT}/usr/lib/${lib}" ]]; then
-            local size
-            size=$(stat -c%s "${SYSROOT}/usr/lib/${lib}" 2>/dev/null || echo "?")
-            log "  OK: ${lib} (${size} bytes)"
+    local errors=0 item
+    for item in lib/libdrm.so lib/libEGL.so lib/libGLESv2.so lib/libgbm.so \
+                lib/gbm/dri_gbm.so lib/libepoxy.so include/EGL/egl.h include/GLES2/gl2.h \
+                include/gbm.h include/xf86drm.h; do
+        if [[ -f "${SYSROOT}/usr/${item}" ]]; then
+            log "  OK: ${item}"
         else
-            log "  MISSING: ${lib}"
+            log "  MISSING: ${item}"
             errors=$((errors + 1))
         fi
     done
-    for hdr in EGL/egl.h GLES2/gl2.h gbm.h xf86drm.h; do
-        if [[ -f "${SYSROOT}/usr/include/${hdr}" ]]; then
-            log "  OK: include/${hdr}"
-        else
-            log "  MISSING: include/${hdr}"
-            errors=$((errors + 1))
-        fi
-    done
-    if [[ $errors -gt 0 ]]; then
-        die "${errors} items missing!"
-    fi
+    [[ $errors -eq 0 ]] || die "${errors} items missing!"
     log "Mesa software rendering stack ready."
-}
-
-# ── Main ──────────────────────────────────────────────────────────────
-# ── libepoxy (GL function pointer manager, required by KWin) ─────────
-# EGL + GLES only: no GLX, no X11. Static, dispatching to the Mesa
-# archives above.
-build_libepoxy() {
-    if [[ -f "${SYSROOT}/usr/lib/libepoxy.a" ]]; then
-        log "libepoxy: already installed."
-        return 0
-    fi
-    fetch "libepoxy-${LIBEPOXY_VER}" \
-        "https://download.gnome.org/sources/libepoxy/${LIBEPOXY_VER%.*}/libepoxy-${LIBEPOXY_VER}.tar.xz" \
-        "libepoxy-${LIBEPOXY_VER}"
-
-    local src="${BUILD_DIR}/libepoxy-${LIBEPOXY_VER}"
-    local bld="${BUILD_DIR}/libepoxy-build"
-    local cross_file
-    cross_file="$(generate_meson_cross)"
-
-    log "Building libepoxy ${LIBEPOXY_VER}..."
-    rm -rf "${bld}"
-    mkdir -p "${bld}"
-    (cd "${bld}" && \
-        meson setup "${src}" \
-            --cross-file="${cross_file}" \
-            --prefix="${SYSROOT}/usr" \
-            --default-library=static \
-            -Dglx=no \
-            -Dx11=false \
-            -Degl=yes \
-            -Dtests=false \
-            -Ddocs=false && \
-        ninja -j"${JOBS}" && \
-        ninja install)
-    [[ -f "${SYSROOT}/usr/lib/libepoxy.a" ]] || die "libepoxy.a not installed"
-    log "libepoxy: done."
 }
 
 main() {
     log "=== Building Mesa softpipe for VeridianOS ==="
     log "Sysroot: ${SYSROOT}"
-
-    # Verify prerequisites
-    [[ -f "${SYSROOT}/usr/lib/libc.a" ]] || die "musl libc not found. Run build-musl.sh first."
-    [[ -f "${SYSROOT}/usr/lib/libz.a" ]] || die "zlib not found. Run build-deps.sh first."
-    [[ -f "${SYSROOT}/usr/lib/libexpat.a" ]] || die "expat not found. Run build-deps.sh first."
-    [[ -f "${CXX}" ]] || die "C++ cross-compiler not found at ${CXX}"
+    [[ -f "${SYSROOT}/usr/lib/libz.so" ]] || die "zlib not found. Run build-deps.sh first."
+    [[ -f "${SYSROOT}/usr/lib/libexpat.so" ]] || die "expat not found. Run build-deps.sh first."
+    [[ -f "${SYSROOT}/usr/lib/libwayland-client.so" ]] || die "Wayland not found. Run build-wayland.sh first."
     command -v meson &>/dev/null || die "meson not found."
     command -v ninja &>/dev/null || die "ninja not found."
     python3 -c "import mako" 2>/dev/null || die "python3-mako not found."

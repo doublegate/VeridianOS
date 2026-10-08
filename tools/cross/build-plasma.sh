@@ -64,6 +64,7 @@ cmake_build() {
     export PKG_CONFIG_SYSROOT_DIR=""
 
     log "Building ${name}..."
+    fix_static_find_deps
     relax_qt_test "${src}/CMakeLists.txt"
     rm -rf "${bld}"
     mkdir -p "${bld}"
@@ -84,9 +85,8 @@ cmake_build() {
             -DKF_SKIP_PO_PROCESSING=ON \
             -DCMAKE_PROJECT_INCLUDE="${SCRIPT_DIR}/wayland-scanner-target.cmake" \
             "${extra_args[@]}" && \
-        cmake --build . --parallel "${JOBS}" -- -k || true && \
-        cmake --install . --prefix "${SYSROOT}/usr" 2>/dev/null || \
-        cmake --install . --prefix "${SYSROOT}/usr" --component Devel 2>/dev/null || true)
+        cmake --build . --parallel "${JOBS}" && \
+        cmake --install . --prefix "${SYSROOT}/usr") || die "${name} build failed (log above)"
     log "${name}: done."
 }
 
@@ -213,9 +213,28 @@ build_layer_shell_qt() {
 
     local layer_src="${BUILD_DIR}/layer-shell-qt-${PLASMA_VER}"
 
-    # Patch SHARED -> STATIC
-    sed -i 's/add_library(LayerShellQtInterface SHARED/add_library(LayerShellQtInterface STATIC/' \
-        "${layer_src}/src/CMakeLists.txt" 2>/dev/null || true
+    # The "layer-shell" Wayland shell-integration plugin (which plasmashell's
+    # panels need) is built as a shared module upstream; a static Qt needs
+    # it as a static plugin (QT_STATICPLUGIN, imported by the program with
+    # Q_IMPORT_PLUGIN) installed as an archive.
+    python3 - "${layer_src}/src/CMakeLists.txt" <<'PYEOF' || die "failed to make the layer-shell plugin static"
+import sys
+p = sys.argv[1]
+s = open(p).read()
+for old, new in (
+    ("add_library(layer-shell SHARED qwaylandlayershellintegrationplugin.cpp)\n",
+     "add_library(layer-shell STATIC qwaylandlayershellintegrationplugin.cpp)\n"
+     "target_compile_definitions(layer-shell PRIVATE QT_STATICPLUGIN)\n"),
+    ("install(TARGETS layer-shell\n        LIBRARY DESTINATION",
+     "install(TARGETS layer-shell\n        ARCHIVE DESTINATION"),
+):
+    if new in s:
+        continue
+    if s.count(old) != 1:
+        sys.exit("unexpected layer-shell-qt src/CMakeLists.txt")
+    s = s.replace(old, new)
+open(p, "w").write(s)
+PYEOF
 
     cmake_build "layer-shell-qt" "${layer_src}"
 

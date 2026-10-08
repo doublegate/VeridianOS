@@ -32,9 +32,13 @@ VERIDIAN_CXX="${VERIDIAN_TOOLCHAIN}/bin/${VERIDIAN_TARGET}-g++"
 # wayland-scanner), apart from the target sysroot. Native meson
 # dependencies (dependency(..., native: true)) see its .pc files.
 VERIDIAN_HOST_TOOLS="${VERIDIAN_HOST_TOOLS:-${VERIDIAN_PREFIX}/host-tools}"
+# Runs a VeridianOS program on the build host -- a code generator a build
+# compiled, or a configure check -- through musl's dynamic loader with the
+# sysroot's libraries (written by lib/cross-env.sh; ADR 0010).
+VERIDIAN_RUN_TARGET="${VERIDIAN_HOST_TOOLS}/bin/veridian-run-target"
 
 export VERIDIAN_PREFIX VERIDIAN_CROSS_DIR VERIDIAN_SYSROOT VERIDIAN_HOST_TOOLS VERIDIAN_CROSS_BUILD VERIDIAN_SOURCES
-export VERIDIAN_TARGET VERIDIAN_TOOLCHAIN VERIDIAN_CC VERIDIAN_CXX
+export VERIDIAN_TARGET VERIDIAN_TOOLCHAIN VERIDIAN_CC VERIDIAN_CXX VERIDIAN_RUN_TARGET
 # Autotools finds ${VERIDIAN_TARGET}-ar, -ranlib, -strip and the rest by
 # name on PATH.
 for _veridian_bin in "${VERIDIAN_TOOLCHAIN}/bin" "${VERIDIAN_HOST_TOOLS}/bin"; do

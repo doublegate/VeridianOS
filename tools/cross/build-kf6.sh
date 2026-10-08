@@ -1,315 +1,228 @@
 #!/usr/bin/env bash
-# Build KDE Frameworks 6 (minimal subset) for VeridianOS
+# Build KDE Frameworks 6 (the subset KWin and Plasma need) for VeridianOS
 #
-# Build order follows KF6 dependency chain. Only the modules needed
-# by KWin + Plasma Desktop are built.
+# Build order follows the KF6 dependency chain. Shared (ADR 0010), for /usr, staged
+# into the sysroot (lib/cross-env.sh); Qt's directory layout for plugins
+# and QML (lib/kde-build.sh). Tarball checksums: KDE's
+# published ones (checksums/kf6.sha256).
 #
-# Prerequisites:
-#   - Qt 6 (static) installed in sysroot
+# Prerequisites: build-qt6.sh (Qt 6 in the sysroot, host Qt).
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 # shellcheck source=veridian-paths.sh
 source "${SCRIPT_DIR}/veridian-paths.sh"
 BUILD_DIR="${VERIDIAN_CROSS_BUILD}/kf6"
-SYSROOT="${VERIDIAN_SYSROOT}"
-TOOLCHAIN="${SCRIPT_DIR}/cmake-toolchain-veridian.cmake"
-HOST_QT="${VERIDIAN_CROSS_BUILD}/qt6/host-qt"
 JOBS="${JOBS:-$(nproc)}"
 
 KF_VER="6.30.0"
-KF_MAJOR="${KF_VER%.*}"
-KF_URL_BASE="https://download.kde.org/stable/frameworks/${KF_MAJOR}"
+KF_URL_BASE="https://download.kde.org/stable/frameworks/${KF_VER%.*}"
+# QCA (Qt Cryptographic Architecture): KWallet's ksecretd needs it.
+QCA_VER="2.3.12"
+PWP_VER="1.23.0"
+# QCoro (C++ coroutines for Qt; plasma-workspace), Alpine's checksum.
+QCORO_VER="0.13.0"
+QCORO_SHA256="4bff7513c5c8e301b66308df05795043b1792ed16381a484e5c990171b8ff19e"
 
 log() { echo "[build-kf6] $*"; }
 die() { echo "[build-kf6] ERROR: $*" >&2; exit 1; }
-# shellcheck source=lib/cmake-source-fixes.sh
-source "${SCRIPT_DIR}/lib/cmake-source-fixes.sh"
 
-mkdir -p "${BUILD_DIR}"
+# shellcheck source=lib/cross-env.sh
+source "${SCRIPT_DIR}/lib/cross-env.sh"
+# shellcheck source=lib/kde-build.sh
+source "${SCRIPT_DIR}/lib/kde-build.sh"
 
-fetch() {
-    local name="$1" url="$2" dir="$3"
-    local tarball="${VERIDIAN_SOURCES}/${name}.tar.xz"
-    if [[ ! -f "${tarball}" ]]; then
-        log "Downloading ${name}..."
-        { curl -fsSL -o "${tarball}.part" "${url}" || wget -q -O "${tarball}.part" "${url}"; } && [[ -s "${tarball}.part" ]] && mv "${tarball}.part" "${tarball}" || { rm -f "${tarball}.part"; echo "download failed: ${url}" >&2; exit 1; }
-    fi
-    if [[ ! -d "${BUILD_DIR}/${dir}" ]]; then
-        log "Extracting ${name}..."
-        tar -xf "${tarball}" -C "${BUILD_DIR}"
-    fi
-}
 
-# Common cmake flags for all KF6 modules
-cmake_build() {
-    local name="$1"
-    local src="$2"
-    shift 2
-    local extra_args=("$@")
-    local bld="${BUILD_DIR}/${name}-build"
-
-    # KDE installs cmake configs as KF6<Name> where Name drops the K prefix
-    # e.g. KConfig -> KF6Config, KCoreAddons -> KF6CoreAddons
-    # Exception: KCMUtils -> KF6KCMUtils (K is part of the acronym KCM)
-    local cmake_name="${name#K}"  # Strip leading K: KConfig -> Config
-    if [[ -f "${SYSROOT}/usr/lib/cmake/KF6${cmake_name}/KF6${cmake_name}Config.cmake" ]] || \
-       [[ -f "${SYSROOT}/usr/lib/cmake/KF6${name}/KF6${name}Config.cmake" ]]; then
-        log "${name}: already installed."
-        return 0
-    fi
-
-    export PKG_CONFIG_PATH="${SYSROOT}/usr/lib/pkgconfig:${SYSROOT}/usr/share/pkgconfig"
-    export PKG_CONFIG_LIBDIR="${SYSROOT}/usr/lib/pkgconfig:${SYSROOT}/usr/share/pkgconfig"
-    export PKG_CONFIG_SYSROOT_DIR=""
-
-    log "Building KF6 ${name}..."
-    rm -rf "${bld}"
-    mkdir -p "${bld}"
-    (cd "${bld}" && \
-        cmake "${src}" \
-            -DCMAKE_TOOLCHAIN_FILE="${TOOLCHAIN}" \
-            -DCMAKE_PREFIX_PATH="${SYSROOT}/usr" \
-            -DCMAKE_INSTALL_PREFIX="${SYSROOT}/usr" \
-            -DECM_DIR="${SYSROOT}/usr/share/ECM/cmake" \
-            -DQT_HOST_PATH:PATH="${HOST_QT}" \
-            -DQT_HOST_PATH_CMAKE_DIR:PATH="${HOST_QT}/lib/cmake" \
-            -DBUILD_SHARED_LIBS=OFF \
-            -DBUILD_TESTING=OFF \
-            -DBUILD_QCH=OFF \
-            -DBUILD_DESIGNERPLUGIN=OFF \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_IGNORE_PREFIX_PATH="${CMAKE_IGNORE_PREFIX_PATH:-/home/linuxbrew/.linuxbrew}" \
-            "${extra_args[@]}" && \
-        cmake --build . --parallel "${JOBS}" -- -k || true && \
-        cmake --install . 2>/dev/null || \
-        cmake --install . --component Devel 2>/dev/null || true)
-
-    # Copy any .a libraries that the install step missed (due to failed executables)
-    for lib in "${bld}"/lib/libKF6*.a; do
-        [[ -f "$lib" ]] || continue
-        local base
-        base=$(basename "$lib")
-        if [[ ! -f "${SYSROOT}/usr/lib/${base}" ]]; then
-            log "  Manually copying ${base}..."
-            cp "$lib" "${SYSROOT}/usr/lib/"
-        fi
-    done
-
-    # Generate missing Targets.cmake from built .a files
-    local cmake_name="${name#K}"
-    local cmake_dir=""
-    for d in "${SYSROOT}/usr/lib/cmake/KF6${cmake_name}" "${SYSROOT}/usr/lib/cmake/KF6${name}"; do
-        [[ -d "$d" ]] && cmake_dir="$d" && break
-    done
-    if [[ -n "${cmake_dir}" ]] && [[ ! -f "${cmake_dir}/KF6${cmake_name}Targets.cmake" ]] && [[ ! -f "${cmake_dir}/KF6${name}Targets.cmake" ]]; then
-        # Auto-generate minimal targets file from built .a libraries
-        local targets_file="${cmake_dir}/KF6${cmake_name}Targets.cmake"
-        [[ -d "${SYSROOT}/usr/lib/cmake/KF6${name}" ]] && targets_file="${cmake_dir}/KF6${name}Targets.cmake"
-        log "  Generating ${targets_file##*/}..."
-        {
-            echo "# Auto-generated targets for VeridianOS cross-build"
-            for lib in "${SYSROOT}"/usr/lib/libKF6${cmake_name}*.a "${SYSROOT}"/usr/lib/libKF6${name}*.a; do
-                [[ -f "$lib" ]] || continue
-                local base tgt alias_name
-                base=$(basename "$lib" .a)  # e.g. libKF6IconThemes -> KF6IconThemes
-                tgt="${base#lib}"           # KF6IconThemes
-                # KDE namespace: KF6IconThemes -> KF6::IconThemes
-                alias_name="${tgt/KF6/KF6::}"  # KF6::IconThemes
-                echo "if(NOT TARGET ${tgt})"
-                echo "  add_library(${tgt} STATIC IMPORTED)"
-                echo "  set_target_properties(${tgt} PROPERTIES"
-                echo "    IMPORTED_LOCATION \"\${CMAKE_CURRENT_LIST_DIR}/../../../lib/${base}.a\""
-                echo "    INTERFACE_INCLUDE_DIRECTORIES \"\${CMAKE_CURRENT_LIST_DIR}/../../../include/KF6/${cmake_name};\${CMAKE_CURRENT_LIST_DIR}/../../../include/KF6/${name}\""
-                echo "  )"
-                echo "endif()"
-                if [[ "${alias_name}" != "${tgt}" ]]; then
-                    echo "if(NOT TARGET ${alias_name})"
-                    echo "  add_library(${alias_name} INTERFACE IMPORTED)"
-                    echo "  set_target_properties(${alias_name} PROPERTIES"
-                    echo "    INTERFACE_LINK_LIBRARIES ${tgt}"
-                    echo "  )"
-                    echo "endif()"
-                fi
-            done
-        } > "${targets_file}"
-    fi
-
-    # Verify cmake config was installed (library or header-only module)
-    if [[ -f "${SYSROOT}/usr/lib/cmake/KF6${cmake_name}/KF6${cmake_name}Config.cmake" ]] || \
-       [[ -f "${SYSROOT}/usr/lib/cmake/KF6${name}/KF6${name}Config.cmake" ]]; then
-        log "KF6 ${name}: done."
-    else
-        log "KF6 ${name}: cmake config not installed!"
-        return 1
-    fi
-}
-
-# ── Install VeridianOS KF6 backend files ──────────────────────────────
-install_veridian_backends() {
-    local kf6_src="${PROJECT_ROOT}/userland/kf6"
-    if [[ ! -d "${kf6_src}" ]]; then
-        log "No userland/kf6/ directory -- skipping backend integration."
-        return 0
-    fi
-    log "Copying VeridianOS KF6 backends to sysroot..."
-    mkdir -p "${SYSROOT}/usr/src/veridian-kf6"
-    cp "${kf6_src}"/*.cpp "${SYSROOT}/usr/src/veridian-kf6/" 2>/dev/null || true
-    cp "${kf6_src}"/*.h "${SYSROOT}/usr/src/veridian-kf6/" 2>/dev/null || true
-    log "KF6 backends copied."
-}
-
-# ── 0. Extra CMake Modules (host only) ────────────────────────────────
-build_ecm() {
-    if [[ -d "${SYSROOT}/usr/share/ECM" ]]; then
-        log "ECM: already installed."
-        return 0
-    fi
-    fetch "extra-cmake-modules-${KF_VER}" \
-        "${KF_URL_BASE}/extra-cmake-modules-${KF_VER}.tar.xz" \
-        "extra-cmake-modules-${KF_VER}"
-
-    local src="${BUILD_DIR}/extra-cmake-modules-${KF_VER}"
-    local bld="${BUILD_DIR}/ecm-build"
-    log "Building ECM..."
-    rm -rf "${bld}"
-    mkdir -p "${bld}"
-    (cd "${bld}" && \
-        cmake "${src}" \
-            -DCMAKE_INSTALL_PREFIX="${SYSROOT}/usr" \
-            -DBUILD_TESTING=OFF \
-            -DBUILD_HTML_DOCS=OFF \
-            -DBUILD_MAN_DOCS=OFF && \
-        cmake --build . --parallel "${JOBS}" && \
-        cmake --install .)
-    log "ECM: done."
-}
-
-# ── KF6 Module Builds (in dependency order) ───────────────────────────
-
-# Common extra cmake args to avoid system package leakage
-KF_COMMON_ARGS=(
-    -DBUILD_PYTHON_BINDINGS=OFF
-    -DCMAKE_DISABLE_FIND_PACKAGE_Shiboken6=ON
-    -DCMAKE_DISABLE_FIND_PACKAGE_Qt6LinguistTools=ON
-    -DKF_SKIP_PO_PROCESSING=ON
-    -DWITH_X11=OFF
-    -DWITH_WAYLAND=OFF
-    -DWITH_BZIP2=OFF
-    -DWITH_LIBLZMA=OFF
-    -DWITH_LIBZSTD=OFF
-    -DCMAKE_DISABLE_FIND_PACKAGE_BZip2=ON
-    -DCMAKE_DISABLE_FIND_PACKAGE_LibLZMA=ON
-    -DCMAKE_DISABLE_FIND_PACKAGE_LibZstd=ON
-    -DCMAKE_PROJECT_INCLUDE="${SCRIPT_DIR}/wayland-scanner-target.cmake"
-    # Qt6 QML/Quick now available in sysroot -- enable QML where useful
-    -DBUILD_DESIGNERPLUGIN=OFF
-    -DUSE_BreezeIcons=OFF
-    -DCMAKE_DISABLE_FIND_PACKAGE_Canberra=ON
-    -DCMAKE_DISABLE_FIND_PACKAGE_Phonon4Qt6=ON
-    -DCMAKE_DISABLE_FIND_PACKAGE_LIBGIT2=ON
-)
-
-# Helper: fetch + cmake_build a KF6 module by name
-# Source fixes for upstream static-build bugs, applied idempotently after
-# extraction. Each one drops a single known line, and fails loudly if the
-# upstream file no longer looks the way the fix expects.
 patch_kf_source() {
     local mod="$1" src="$2"
-    relax_qt_test "${src}/CMakeLists.txt"
     case "${mod}" in
-        KPackage)
-            # 6.12 installs kpackage_common_STATIC when BUILD_SHARED_LIBS is
-            # off, but nothing defines that target, so configure fails.
-            local f="${src}/src/kpackage/CMakeLists.txt"
-            local line='    install(TARGETS kpackage_common_STATIC EXPORT KF6PackageTargets ${KF_INSTALL_TARGETS_DEFAULT_ARGS})'
-            if grep -qF "${line}" "${f}"; then
-                python3 -c 'import sys; p, l = sys.argv[1:]; s = open(p).read(); open(p, "w").write(s.replace(l + "\n", ""))' \
-                    "${f}" "${line}"
-                ! grep -qF "${line}" "${f}" || die "failed to patch ${f}"
-            fi
+        KWallet)
+            local f="${src}/src/runtime/ksecretd/CMakeLists.txt"
+            # Its autotests are added whatever BUILD_TESTING says.
+            replace_once "${f}" $'\nadd_subdirectory(autotests)\n' \
+                $'\nif(BUILD_TESTING)\n    add_subdirectory(autotests)\nendif()\n'
+            # musl declares explicit_bzero under _GNU_SOURCE (glibc by
+            # default); g++ defines it for the real C++ source, but the C
+            # test of check_symbol_exists does not, so the check missed it
+            # and secrets were wiped by the fallback loop.
+            local check='check_symbol_exists(explicit_bzero "string.h" KSECRETD_HAVE_EXPLICIT_BZERO)'
+            replace_once "${f}" "${check}" $'set(CMAKE_REQUIRED_DEFINITIONS -D_GNU_SOURCE)\n'"${check}"
+            # libsecret's SecretSchema ends in eight reserved fields; the
+            # initializer leaves them out (-Wmissing-field-initializers).
+            replace_once "${src}/src/runtime/kwalletd/secretserviceclient.cpp" \
+                '{"type", SECRET_SCHEMA_ATTRIBUTE_STRING}}};' \
+                '{"type", SECRET_SCHEMA_ATTRIBUTE_STRING}}, 0, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr};'
             ;;
-        KNotifications)
-            # 6.12 makes libcanberra REQUIRED; the sources already build
-            # without it (guarded by TARGET Canberra::Canberra), and the
-            # sysroot has no libcanberra (Canberra is disabled above).
-            local f="${src}/CMakeLists.txt"
-            if grep -qF 'find_package(Canberra REQUIRED)' "${f}"; then
-                python3 -c 'import sys; p = sys.argv[1]; s = open(p).read(); open(p, "w").write(s.replace("find_package(Canberra REQUIRED)", "find_package(Canberra)"))' "${f}"
-            fi
-            grep -qF 'find_package(Canberra)' "${f}" || die "failed to patch ${f}"
+        BreezeIcons)
+            # Its icon tools run during the build: through the runner.
+            python3 -I "${SCRIPT_DIR}/deps-patches/cmake_run_built_tools.py" \
+                "${src}/icons/CMakeLists.txt" generate-symbolic-dark qrcAlias \
+                || die "failed to patch breeze-icons' tool commands"
             ;;
     esac
 }
 
+# build_kf_module NAME [TARBALL_BASE] [-- CMAKE OPTIONS...]
 build_kf_module() {
     local mod="$1"
     shift
-    local extra=("$@")
-    local lower
-    lower=$(echo "${mod}" | tr '[:upper:]' '[:lower:]')
-    local pkg="${lower}-${KF_VER}"
-    fetch "${pkg}" "${KF_URL_BASE}/${pkg}.tar.xz" "${pkg}"
-    patch_kf_source "${mod}" "${BUILD_DIR}/${pkg}"
-    cmake_build "${mod}" "${BUILD_DIR}/${pkg}" "${KF_COMMON_ARGS[@]}" "${extra[@]}"
+    local base
+    base="$(echo "${mod}" | tr '[:upper:]' '[:lower:]')"
+    if [[ $# -gt 0 && "$1" != "--" ]]; then
+        base="$1"
+        shift
+    fi
+    [[ "${1:-}" == "--" ]] && shift
+    if kf_config "${mod}" >/dev/null; then
+        log "${mod}: already installed."
+        return 0
+    fi
+    local src
+    src="$(kde_fetch "${base}-${KF_VER}" "${KF_URL_BASE}" kf6.sha256)"
+    patch_kf_source "${mod}" "${src}"
+    kde_cmake "${mod}" "${src}" "$@"
+    kf_config "${mod}" >/dev/null || die "KF6 ${mod}: CMake config not installed"
 }
 
-# Helper: fetch + cmake_build with custom tarball name (for non-standard naming)
-build_kf_module_custom() {
-    local mod="$1"
-    local tarball_base="$2"
-    shift 2
-    local extra=("$@")
-    local pkg="${tarball_base}-${KF_VER}"
-    fetch "${pkg}" "${KF_URL_BASE}/${pkg}.tar.xz" "${pkg}"
-    cmake_build "${mod}" "${BUILD_DIR}/${pkg}" "${KF_COMMON_ARGS[@]}" "${extra[@]}"
+# ── Extra CMake Modules ───────────────────────────────────────────────
+build_ecm() {
+    if [[ -f "${SYSROOT}/usr/share/ECM/cmake/ECMConfig.cmake" ]]; then
+        log "ECM: already installed."
+        return 0
+    fi
+    local src
+    src="$(kde_fetch "extra-cmake-modules-${KF_VER}" "${KF_URL_BASE}" kf6.sha256)"
+    # The Qt directories are given, not queried (lib/kde-build.sh); the
+    # metatypes one could not be.
+    python3 -I "${SCRIPT_DIR}/deps-patches/ecm_metatypes_dir.py" \
+        "${src}/kde-modules/KDEInstallDirs6.cmake" || die "failed to patch ECM KDEInstallDirs6.cmake"
+    log "Building ECM..."
+    cmake_build "${src}" "${BUILD_DIR}/ecm-build" \
+        -DBUILD_TESTING=OFF \
+        -DBUILD_HTML_DOCS=OFF \
+        -DBUILD_MAN_DOCS=OFF
 }
 
-# Tier 1: No KF dependencies
-build_tier1() {
-    local modules=(KConfig KCoreAddons KI18n KGuiAddons KWidgetsAddons
-                   KColorScheme KArchive KCodecs KItemViews)
-    for mod in "${modules[@]}"; do
-        build_kf_module "${mod}"
-    done
-}
-
-# ── Plasma Wayland Protocols (needed by KWindowSystem) ────────────────
+# ── Plasma Wayland Protocols (KWindowSystem, KWin, Plasma) ────────────
 build_plasma_wayland_protocols() {
     if [[ -d "${SYSROOT}/usr/lib/cmake/PlasmaWaylandProtocols" ]]; then
         log "PlasmaWaylandProtocols: already installed."
         return 0
     fi
-    local PWP_VER="1.23.0"
-    local pkg="plasma-wayland-protocols-${PWP_VER}"
-    fetch "${pkg}" \
-        "https://download.kde.org/stable/plasma-wayland-protocols/${pkg}.tar.xz" \
-        "${pkg}"
+    local src
+    src="$(kde_fetch "plasma-wayland-protocols-${PWP_VER}" \
+        "https://download.kde.org/stable/plasma-wayland-protocols" kf6.sha256)"
+    kde_cmake PlasmaWaylandProtocols "${src}"
+}
 
-    local bld="${BUILD_DIR}/plasma-wayland-protocols-build"
-    log "Building PlasmaWaylandProtocols..."
-    rm -rf "${bld}"
-    mkdir -p "${bld}"
-    (cd "${bld}" && \
-        cmake "${BUILD_DIR}/${pkg}" \
-            -DCMAKE_INSTALL_PREFIX="${SYSROOT}/usr" \
-            -DECM_DIR="${SYSROOT}/usr/share/ECM/cmake" \
-            -DBUILD_TESTING=OFF && \
-        cmake --build . --parallel "${JOBS}" && \
-        cmake --install .)
-    log "PlasmaWaylandProtocols: done."
+# ── QCA ───────────────────────────────────────────────────────────────
+# With its OpenSSL provider (a plugin QCA loads); KWallet's ksecretd needs it.
+build_qca() {
+    local targets="${SYSROOT}/usr/lib/cmake/Qca-qt6/Qca-qt6Targets.cmake"
+    # An install that exports absolute paths names the build host's /usr.
+    if [[ -f "${targets}" ]] && ! grep -q 'INTERFACE_INCLUDE_DIRECTORIES "/usr/' "${targets}"; then
+        log "QCA: already installed."
+        return 0
+    fi
+    local src
+    src="$(kde_fetch "qca-${QCA_VER}" "https://download.kde.org/stable/qca/${QCA_VER}" kf6.sha256)"
+    # QcaConfig.cmake.in tests @BUILD_SHARED_LIBRARIES@, which no variable
+    # is called, so the installed config always takes its static branch.
+    replace_once "${src}/QcaConfig.cmake.in" '@BUILD_SHARED_LIBRARIES@' '@BUILD_SHARED_LIBS@'
+    kde_cmake QCA "${src}" \
+        -DBUILD_WITH_QT6=ON \
+        -DBUILD_TESTS=OFF \
+        -DBUILD_TOOLS=OFF \
+        -DWITH_ossl_PLUGIN=yes \
+        -DUSE_RELATIVE_PATHS=ON
+    # Relocatable: its targets name the headers relative to the package
+    # (it exported /usr/include/..., the build host's, otherwise).
+    [[ -f "${targets}" ]] && ! grep -q 'INTERFACE_INCLUDE_DIRECTORIES "/usr/' "${targets}" ||
+        die "QCA did not install a relocatable Qca-qt6Targets.cmake"
+}
+
+# ── QCoro ─────────────────────────────────────────────────────────────
+build_qcoro() {
+    if [[ -f "${SYSROOT}/usr/lib/cmake/QCoro6/QCoro6Config.cmake" ]]; then
+        log "QCoro: already installed."
+        return 0
+    fi
+    fetch "qcoro-${QCORO_VER}.tar.gz" "https://github.com/qcoro/qcoro/archive/refs/tags/v${QCORO_VER}.tar.gz" \
+        "qcoro-${QCORO_VER}" "${QCORO_SHA256}"
+    kde_cmake QCoro "${BUILD_DIR}/qcoro-${QCORO_VER}" \
+        -DUSE_QT_VERSION=6 \
+        -DQCORO_BUILD_EXAMPLES=OFF
+    [[ -f "${SYSROOT}/usr/lib/cmake/QCoro6/QCoro6Config.cmake" ]] || die "QCoro did not install QCoro6Config.cmake"
+}
+
+# Tier 1: No KF dependencies
+build_tier1() {
+    local mod
+    for mod in KConfig KCoreAddons KI18n KGuiAddons KWidgetsAddons KColorScheme \
+               KArchive KCodecs KItemViews; do
+        build_kf_module "${mod}"
+    done
+    # Breeze icons, compiled into a library the icon loader uses
+    # (KIconThemes, USE_BreezeIcons).
+    # It generates icons with Python and lxml (host-python-requirements.txt).
+    host_python
+    build_kf_module BreezeIcons breeze-icons -- -DPython_EXECUTABLE="${HOST_PYTHON}"
+    # Required by plasma-workspace: syntax highlighting (KTextEditor),
+    # holidays (calendar), charts (system monitor applets), and
+    # NetworkManagerQt (libnm from build-dbus.sh).
+    build_ksyntaxhighlighting
+    build_kf_module KHolidays
+    build_kf_module KQuickCharts
+    build_kf_module NetworkManagerQt networkmanager-qt
+    build_qcoro
+}
+
+# KSyntaxHighlighting compiles its highlighting definitions during the build
+# with katehighlightingindexer, a Qt program. Cross-compiling, upstream builds
+# that as a native sub-project, which inherits the target compilers from this
+# environment (CC/CXX) and so builds a musl program against the host Qt. The
+# indexer is built here for the host instead -- host compilers, the host Qt,
+# ECM from the sysroot -- and passed as KATEHIGHLIGHTINGINDEXER_EXECUTABLE,
+# upstream's option for this, as wayland-scanner is a host build.
+KATE_INDEXER="${VERIDIAN_HOST_TOOLS}/bin/katehighlightingindexer"
+build_ksyntaxhighlighting() {
+    if kf_config KSyntaxHighlighting >/dev/null; then
+        log "KSyntaxHighlighting: already installed."
+        return 0
+    fi
+    local src bld="${BUILD_DIR}/katehighlightingindexer-host"
+    src="$(kde_fetch "syntax-highlighting-${KF_VER}" "${KF_URL_BASE}" kf6.sha256)"
+    if [[ ! -x "${KATE_INDEXER}" || "$(cat "${KATE_INDEXER}.version" 2>/dev/null)" != "${KF_VER}" ]]; then
+        log "Building katehighlightingindexer ${KF_VER} (host)..."
+        rm -rf "${bld}"
+        (unset CC CXX AR RANLIB NM STRIP CFLAGS CXXFLAGS LDFLAGS \
+               PKG_CONFIG_LIBDIR PKG_CONFIG_PATH PKG_CONFIG_SYSROOT_DIR && \
+            cmake -S "${src}" -B "${bld}" \
+                -DCMAKE_BUILD_TYPE=Release \
+                -DKSYNTAXHIGHLIGHTING_USE_GUI=OFF \
+                -DBUILD_TESTING=OFF \
+                -DBUILD_QCH=OFF \
+                -DQT_MAJOR_VERSION=6 \
+                -DECM_DIR="${SYSROOT}/usr/share/ECM/cmake" \
+                -DCMAKE_PREFIX_PATH="${VERIDIAN_HOST_TOOLS}/qt6" && \
+            cmake --build "${bld}" --target katehighlightingindexer -j"${JOBS}") \
+            || die "host katehighlightingindexer build failed"
+        install -Dm755 "${bld}/bin/katehighlightingindexer" "${KATE_INDEXER}"
+        echo "${KF_VER}" > "${KATE_INDEXER}.version"
+    fi
+    patch_kf_source KSyntaxHighlighting "${src}"
+    kde_cmake KSyntaxHighlighting "${src}" -DKATEHIGHLIGHTINGINDEXER_EXECUTABLE="${KATE_INDEXER}"
+    kf_config KSyntaxHighlighting >/dev/null || die "KF6 KSyntaxHighlighting: CMake config not installed"
 }
 
 # Tier 2: Depends on Tier 1
 build_tier2() {
     build_kf_module KIconThemes
-    # KWindowSystem: disable X11 & Wayland platform plugins (MODULE .so incompatible with static)
-    build_kf_module KWindowSystem -DKWINDOWSYSTEM_X11=OFF -DKWINDOWSYSTEM_WAYLAND=OFF
-    # KIdleTime: required by KWin. No X11; its Wayland plugin talks to the
-    # compositor at runtime and is not needed to build KWin.
-    build_kf_module KIdleTime -DWITH_X11=OFF -DWITH_WAYLAND=OFF
+    # KWindowSystem: Wayland (its platform plugin); no X11 server here.
+    build_kf_module KWindowSystem -- -DKWINDOWSYSTEM_X11=OFF
+    # KIdleTime: required by KWin. Wayland (its poller plugin).
+    build_kf_module KIdleTime
     build_kf_module KGlobalAccel
     build_kf_module KPackage
     build_kf_module KCompletion
@@ -323,132 +236,79 @@ build_tier2() {
 
 # Tier 3: Depends on Tier 1+2
 build_tier3() {
-    build_kf_module KDeclarative || log "KDeclarative: skipped (optional for cross-build)"
+    build_kf_module KDeclarative
     build_kf_module KXmlGui
     build_kf_module KBookmarks
-    # KIO requires KCrash and KDBusAddons, so they are built first here
-    # (build_tier4 then finds them already installed).
+    # KIO requires KCrash and KDBusAddons.
     build_kf_module KCrash
     build_kf_module KDBusAddons
-    # KIO and KCMUtils have deep dependency chains
-    build_kf_module KIO || log "KIO: skipped (optional for cross-build)"
-    build_kf_module KCMUtils || log "KCMUtils: skipped (optional for cross-build)"
+    build_kf_module KIO
+    # KCMUtils requires the org.kde.kirigami QML module.
+    build_kf_module Kirigami
+    build_kf_module KCMUtils
 }
 
 # Tier 4: Additional modules needed by plasma-workspace
 build_tier4() {
-    # KCrash: crash reporting (depends on KCoreAddons)
-    build_kf_module KCrash
-
-    # KDBusAddons: D-Bus utilities (depends on KCoreAddons)
-    build_kf_module KDBusAddons
-
-    # Sonnet: spell-checking framework, required by KTextWidgets. Built for
-    # real (no spell-check backend in the sysroot, so it has no plugins);
-    # the March build used an untracked header-only stub instead.
-    build_kf_module Sonnet -DSONNET_NO_BACKENDS=ON
-
-    # KTextWidgets: text editing widgets (depends on Completion, ConfigWidgets, I18n, Sonnet)
-    # TextToSpeech disabled.
-    build_kf_module KTextWidgets \
-        -DWITH_TEXT_TO_SPEECH=OFF
-
-    # KWallet: secret storage framework (lib only, no daemon)
-    build_kf_module KWallet \
-        -DCMAKE_DISABLE_FIND_PACKAGE_Gpgmepp=ON \
-        -DCMAKE_DISABLE_FIND_PACKAGE_QGpgmeQt6=ON \
-        -DCMAKE_DISABLE_FIND_PACKAGE_Qca-qt6=ON \
-        -DBUILD_KWALLETD=OFF \
-        -DBUILD_KWALLET_QUERY=OFF || log "KWallet: skipped (optional)"
-
-    # KNewStuff: content download framework (depends on KPackage, KArchive, KI18n)
-    build_kf_module KNewStuff || log "KNewStuff: skipped (optional)"
-
-    # KRunner: desktop search framework (depends on KConfig, KCoreAddons, KI18n)
-    build_kf_module KRunner || log "KRunner: skipped (optional)"
-
-    # KStatusNotifierItem: system tray protocol
-    build_kf_module KStatusNotifierItem || log "KStatusNotifierItem: skipped (optional)"
-
-    # KNotifyConfig: notification config UI (depends on KNotifications, KIO)
-    build_kf_module KNotifyConfig || log "KNotifyConfig: skipped (optional)"
-
-    # KParts: document framework (depends on KIO, KXmlGui)
-    build_kf_module KParts || log "KParts: skipped (optional)"
-
-    # KDED: KDE Daemon framework
-    build_kf_module KDED || log "KDED: skipped (optional)"
-
-    # Prison: barcode/QR code library (optional, used by some Plasma applets)
-    build_kf_module Prison || log "Prison: skipped (optional)"
-
-    # KItemModels: proxy model classes
-    build_kf_module KItemModels || log "KItemModels: skipped (optional)"
-
-    # Kirigami: QtQuick component framework (needed by many Plasma QML files)
-    # Special: tarball is "kirigami" not "kkirigami2"; cmake config is KF6Kirigami2
-    build_kf_module_custom "Kirigami2" "kirigami" || log "Kirigami: skipped (optional)"
-
-    # KSvg: SVG rendering for Plasma themes (depends on KConfig, KColorScheme, Qt6Svg)
-    build_kf_module KSvg || log "KSvg: skipped (optional)"
+    # KItemModels: proxy model classes (KRunner links them)
+    build_kf_module KItemModels
+    # Sonnet: spell checking, required by KTextWidgets. No spell-check
+    # backend (Hunspell, Aspell) is in the sysroot.
+    build_kf_module Sonnet -- -DSONNET_NO_BACKENDS=ON
+    # KTextWidgets: text editing widgets. No text-to-speech engine.
+    build_kf_module KTextWidgets -- -DWITH_TEXT_TO_SPEECH=OFF
+    build_qca
+    # KWallet: secret storage -- the library, the ksecretd and kwalletd
+    # daemons (libgcrypt from build-deps.sh) and kwallet-query. GpgME
+    # wallets are optional and not in the sysroot.
+    build_kf_module KWallet
+    # Attica: Open Collaboration Services client, required by KNewStuff
+    build_kf_module Attica
+    build_kf_module KNewStuff
+    build_kf_module KRunner
+    build_kf_module KStatusNotifierItem
+    # KNotifyConfig: notification settings, with sound preview (Canberra)
+    build_kf_module KNotifyConfig
+    build_kf_module KParts
+    # KTextEditor: the editor component (plasma-workspace requires it).
+    build_kf_module KTextEditor
+    build_kf_module KDED
+    # Prison: barcode/QR code library (used by some Plasma applets)
+    build_kf_module Prison
+    # KSvg: SVG rendering for Plasma themes
+    build_kf_module KSvg
 }
 
 # ── Verify ────────────────────────────────────────────────────────────
 verify() {
     log "Verifying KF6 installation..."
-    local errors=0
-    local optional_errors=0
-
-    # Required modules (core KF6 for KWin + Plasma)
-    for cmake_name in Config CoreAddons I18n GuiAddons WidgetsAddons ColorScheme \
-                      Archive Codecs ItemViews IconThemes WindowSystem GlobalAccel \
-                      Package Completion JobWidgets Auth ConfigWidgets Notifications \
-                      Service Solid XmlGui Bookmarks; do
-        if [[ -f "${SYSROOT}/usr/lib/cmake/KF6${cmake_name}/KF6${cmake_name}Config.cmake" ]]; then
-            log "  OK: KF6${cmake_name}"
+    local errors=0 mod
+    # Every module this script builds: a failed build has already stopped
+    # it, so a missing config here means an install went wrong.
+    for mod in KConfig KCoreAddons KI18n KGuiAddons KWidgetsAddons KColorScheme KArchive \
+               KCodecs KItemViews BreezeIcons KSyntaxHighlighting KHolidays KQuickCharts \
+               NetworkManagerQt KIconThemes KWindowSystem KIdleTime \
+               KGlobalAccel KPackage KCompletion KNotifications KJobWidgets KAuth \
+               KConfigWidgets KService Solid KDeclarative KXmlGui KBookmarks KCrash \
+               KDBusAddons KIO Kirigami KCMUtils KItemModels Sonnet KTextWidgets KWallet \
+               Attica KNewStuff KRunner KStatusNotifierItem KNotifyConfig KParts KTextEditor KDED \
+               Prison KSvg; do
+        if kf_config "${mod}" >/dev/null; then
+            log "  OK: ${mod}"
         else
-            log "  MISSING: KF6${cmake_name}"
+            log "  MISSING: ${mod}"
             errors=$((errors + 1))
         fi
     done
-
-    # Tier 4 modules (needed by plasma-workspace, best-effort)
-    for cmake_name in Crash DBusAddons TextWidgets Wallet NewStuff Runner \
-                      StatusNotifierItem NotifyConfig Parts ItemModels Svg; do
-        if [[ -f "${SYSROOT}/usr/lib/cmake/KF6${cmake_name}/KF6${cmake_name}Config.cmake" ]]; then
-            log "  OK: KF6${cmake_name}"
-        else
-            log "  OPTIONAL: KF6${cmake_name} (not installed)"
-            optional_errors=$((optional_errors + 1))
-        fi
-    done
-
-    # Deep optional modules
-    for cmake_name in KIO KCMUtils Declarative KDED; do
-        if [[ -f "${SYSROOT}/usr/lib/cmake/KF6${cmake_name}/KF6${cmake_name}Config.cmake" ]]; then
-            log "  OK: KF6${cmake_name}"
-        else
-            log "  OPTIONAL: KF6${cmake_name} (not installed)"
-            optional_errors=$((optional_errors + 1))
-        fi
-    done
-
-    if [[ $errors -gt 0 ]]; then
-        die "${errors} required modules missing!"
-    fi
-    if [[ $optional_errors -gt 0 ]]; then
-        log "${optional_errors} optional modules not installed"
-    fi
+    [[ $errors -eq 0 ]] || die "${errors} modules missing!"
     log "KDE Frameworks 6 ready."
 }
 
-# ── Main ──────────────────────────────────────────────────────────────
 main() {
     log "=== Building KDE Frameworks 6 ${KF_VER} for VeridianOS ==="
     log "Sysroot: ${SYSROOT}"
-
-    [[ -f "${SYSROOT}/usr/lib/libQt6Core.a" ]] || die "Qt6 not found. Run build-qt6.sh first."
-    [[ -d "${HOST_QT}/libexec" ]] || die "Host Qt tools not found. Run build-qt6.sh first."
+    [[ -f "${SYSROOT}/usr/lib/libQt6Core.so" ]] || die "Qt6 not found. Run build-qt6.sh first."
+    [[ -x "${VERIDIAN_HOST_TOOLS}/qt6/libexec/moc" ]] || die "Host Qt not found. Run build-qt6.sh first."
 
     build_ecm
     build_plasma_wayland_protocols
@@ -456,7 +316,6 @@ main() {
     build_tier2
     build_tier3
     build_tier4
-    install_veridian_backends
     verify
     log "=== KF6 build complete ==="
 }

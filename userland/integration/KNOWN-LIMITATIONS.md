@@ -15,6 +15,15 @@
 | OpenGL ES 2.0 only | No OpenGL 3.x/4.x core profile support | KWin's GLES2 backend handles this transparently |
 | Complex script rendering | Arabic/Devanagari ligature rendering may have edge cases | Install additional fonts; Latin/CJK fully supported |
 
+### Media, cameras and X11 (v0.27 shared-library build)
+
+| Limitation | Details | Workaround |
+|-----------|---------|------------|
+| No media playback backend | Qt Multimedia is built (Prison's barcode scanner, Qt Speech and Plasma's QML media types link it) but without a backend: no FFmpeg or GStreamer plugin and no PulseAudio/PipeWire audio, so nothing plays audio or video | None yet; a backend (FFmpeg plus an ALSA or PipeWire audio path) is a planned follow-up |
+| No cameras | Prison's scanner and any camera use need V4L2 devices, which the kernel does not provide | None |
+| No text-to-speech engine | Qt Speech is built without speech-dispatcher or flite | None |
+| No X11 applications | KWin is built with `KWIN_BUILD_X11=OFF`; XWayland is deferred | Wayland applications only |
+
 ### Data & Sync
 
 | Limitation | Details | Workaround |
