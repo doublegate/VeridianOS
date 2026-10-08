@@ -575,6 +575,49 @@ static void test_map_fixed_limits(void)
            ok_top && guard == MAP_FAILED && kern == MAP_FAILED && span == MAP_FAILED, why);
 }
 
+/* Memory anywhere in the lower half is the process's own, including
+ * 0x4444_4444_0000, which a stale kernel-heap address used to make fork
+ * share between parent and child (their page tables for that whole
+ * 512 GiB slot). The child must see a copy, and a page it maps there must
+ * not appear in the parent. */
+static void test_lower_half_fork_isolation(void)
+{
+    volatile int *p = mmap((void *)0x444444440000UL, 4096, PROT_READ | PROT_WRITE,
+                           MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
+    if (p == MAP_FAILED) {
+        report("lower_half_fork_isolation", 0, "mmap at 0x444444440000 failed");
+        return;
+    }
+    *p = 1;
+    pid_t pid = fork();
+    if (pid == 0) {
+        int saw = *p;
+        *p = 2;
+        void *q = mmap((void *)0x444444441000UL, 4096, PROT_READ | PROT_WRITE,
+                       MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
+        if (q != MAP_FAILED)
+            *(volatile int *)q = 3;
+        _exit(saw == 1 && q != MAP_FAILED ? 0 : 1);
+    }
+    int status = -1;
+    int waited = pid > 0 && waitpid(pid, &status, 0) == pid;
+    /* The child's page must not exist here: writing from it is EFAULT. */
+    int fds[2];
+    int unmapped = 0;
+    if (pipe(fds) == 0) {
+        errno = 0;
+        unmapped = write(fds[1], (void *)0x444444441000UL, 1) == -1 && errno == EFAULT;
+        close(fds[0]);
+        close(fds[1]);
+    }
+    static char why[96];
+    snprintf(why, sizeof(why), "parent=%d child_status=%x child_page_unmapped=%d", *p,
+             status, unmapped);
+    report("lower_half_fork_isolation",
+           waited && WIFEXITED(status) && WEXITSTATUS(status) == 0 && *p == 1 && unmapped, why);
+    munmap((void *)p, 4096);
+}
+
 /* --- Memory protection (N-132 to N-137). -------------------------------
  * Each probe runs in a child that must die on its access; reaching _exit(0)
  * means the access was allowed. */
@@ -2419,6 +2462,7 @@ int main(int argc, char **argv)
     test_sockets();
     test_timed_waits();
     test_map_fixed_limits();
+    test_lower_half_fork_isolation();
     test_memory_protection();
     test_fork_inheritance();
     test_open_flags();

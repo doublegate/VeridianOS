@@ -49,9 +49,6 @@ pub const HEAP_SIZE: usize = 1024 * 1024 * 1024;
 #[cfg(not(target_arch = "x86_64"))]
 pub const HEAP_SIZE: usize = 8 * 1024 * 1024;
 
-/// Kernel heap start address (re-exported from architecture module)
-pub const HEAP_START: usize = crate::arch::HEAP_START;
-
 /// Return the virtual address of the last byte of the HEAP_MEMORY array.
 ///
 /// Used by the memory management init code when `__kernel_end` translation

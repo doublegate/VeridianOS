@@ -3053,6 +3053,38 @@ fn run_usercopy_tests(passed: &mut u32, failed: &mut u32) {
         };
         report_test("kernel_stack_guard_page", ok, passed, failed);
     }
+
+    // A new address space's lower half (user space) is empty: no kernel
+    // entry is shared into it, so all of it is the process's own. A stale
+    // kernel-heap slot (L4 136) used to be copied in and shared by fork.
+    // x86_64 only: AArch64 and RISC-V have no user address spaces yet
+    // (`VirtualAddressSpace::init` fails there); the check is enabled for
+    // them with user mode in sprint E (N-28, N-14).
+    #[cfg(target_arch = "x86_64")]
+    {
+        let mut vas = crate::mm::vas::VirtualAddressSpace::new();
+        let init = vas.init();
+        let root = vas.get_page_table();
+        let first_present = (init.is_ok() && root != 0).then(|| {
+            // SAFETY: the root table `init` just allocated, through the
+            // physical map; only read here.
+            let l4 = unsafe {
+                &*(crate::mm::phys_to_virt_addr(root) as *const crate::mm::page_table::PageTable)
+            };
+            (0..256).find(|&i| l4[i].is_present())
+        });
+        let ok = first_present == Some(None);
+        if !ok {
+            kprintln!(
+                "    init ok: {}, root {:#x}, first user-half entry present: {:?}",
+                init.is_ok(),
+                root,
+                first_present
+            );
+        }
+        vas.destroy();
+        report_test("user_half_starts_empty", ok, passed, failed);
+    }
 }
 
 #[cfg(not(feature = "alloc"))]

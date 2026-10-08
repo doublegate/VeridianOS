@@ -129,9 +129,6 @@ pub fn serial_init() -> crate::serial::Pl011Uart {
     crate::serial::Pl011Uart::new(0x0900_0000)
 }
 
-/// Kernel heap start address (16MB into QEMU virt RAM at 0x40000000)
-pub const HEAP_START: usize = 0x41000000;
-
 /// Flush TLB for a specific virtual address. Called via
 /// `crate::arch::tlb_flush_address()`.
 pub fn tlb_flush_address(addr: u64) {

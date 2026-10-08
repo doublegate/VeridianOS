@@ -341,9 +341,6 @@ pub unsafe fn inl(port: u16) -> u32 {
     unsafe { x86_64::instructions::port::Port::new(port).read() }
 }
 
-/// Kernel heap start address (mapped by bootloader 0.9)
-pub const HEAP_START: usize = 0x444444440000;
-
 /// Flush TLB for a specific virtual address. Called via
 /// `crate::arch::tlb_flush_address()`.
 pub fn tlb_flush_address(addr: u64) {

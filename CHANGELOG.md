@@ -229,6 +229,13 @@
 
 ### Security
 
+- **Fork no longer shares a slice of user memory between parent and child (N-256).** Every new
+  address space and every fork copied the L4 entry of a kernel heap that has not lived there since
+  bootloader 0.9 (`0x4400_0000_0000`, a 512 GiB slot of user space). A program that mapped memory
+  there and forked shared those page tables with its child, without copy-on-write, and the child's
+  page copies were written into the parent's tables. Nothing is copied into the user half of an
+  address space now. Boot test `user_half_starts_empty`, runtime test
+  `lower_half_fork_isolation`.
 - **Kernel writes for ptrace and clone stay in user memory (N-255).** ptrace POKETEXT/POKEDATA
   wrote through whatever frame the tracee's page tables mapped, and kernel pages are mapped in
   every address space, so a tracer could write kernel memory; it could also write device memory

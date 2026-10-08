@@ -696,8 +696,8 @@ impl VirtualAddressSpace {
     /// Map kernel space into this address space.
     ///
     /// Copies the upper-half L4 entries (indices 256-511) from the current
-    /// (boot) page tables into this VAS's L4, plus the bootloader's physical
-    /// memory mapping entry (which may be in the lower half). This shares the
+    /// (boot) page tables into this VAS's L4; the lower half, user space,
+    /// starts empty and is the process's own. This shares the
     /// kernel's code, data, heap, MMIO, and physical memory access with the
     /// new process, so that the kernel remains accessible during syscalls
     /// (which run with the user's CR3).
@@ -763,34 +763,6 @@ impl VirtualAddressSpace {
             for i in 256..PAGE_TABLE_ENTRIES {
                 if boot_l4[i].is_present() {
                     new_l4[i] = boot_l4[i];
-                }
-            }
-
-            // Also copy the bootloader's physical memory mapping L4 entry.
-            // On x86_64, PHYS_MEM_OFFSET is typically in the lower half
-            // (e.g. 0x180_0000_0000 = L4 index 3). Without this, syscalls
-            // running with the user's CR3 cannot access physical memory via
-            // phys_to_virt_addr(), causing page faults in kernel code.
-            let phys_offset = super::PHYS_MEM_OFFSET.load(core::sync::atomic::Ordering::Acquire);
-            if phys_offset != 0 {
-                let phys_l4_idx = ((phys_offset >> 39) & 0x1FF) as usize;
-                if phys_l4_idx < 256 && boot_l4[phys_l4_idx].is_present() {
-                    new_l4[phys_l4_idx] = boot_l4[phys_l4_idx];
-                }
-            }
-
-            // Copy the kernel heap L4 entry. The bootloader maps the kernel
-            // heap at HEAP_START (0x444444440000, L4 index 136). Without this,
-            // kernel code running on the process's CR3 (interrupt handlers,
-            // syscalls) cannot access heap-allocated data structures (alloc,
-            // BTreeMap, Vec, etc.), causing page faults that escalate to
-            // double faults.
-            #[cfg(all(target_arch = "x86_64", target_os = "none"))]
-            {
-                let heap_start = crate::arch::x86_64::HEAP_START as u64;
-                let heap_l4_idx = ((heap_start >> 39) & 0x1FF) as usize;
-                if heap_l4_idx < 256 && boot_l4[heap_l4_idx].is_present() {
-                    new_l4[heap_l4_idx] = boot_l4[heap_l4_idx];
                 }
             }
         }
@@ -878,11 +850,9 @@ impl VirtualAddressSpace {
     ///
     /// Only frames clone_from allocated are freed: borrowed mappings
     /// (device memory, shared regions) and kernel-space entries belong to
-    /// the parent, as do the lower-half L4 entries copied from it.
+    /// the parent. Every lower-half L4 entry is the child's own.
     #[cfg(feature = "alloc")]
     fn discard_partial_clone(&mut self) {
-        use super::page_table::PageTable;
-
         const KERNEL_SPACE_START: u64 = 0xFFFF_8000_0000_0000;
 
         let root = self.page_table_root.swap(0, Ordering::AcqRel);
@@ -908,25 +878,6 @@ impl VirtualAddressSpace {
             return;
         }
 
-        // SAFETY: `root` is the child's own L4 table, allocated by
-        // clone_from and never loaded into CR3, so nothing else uses it.
-        let l4 = unsafe { &mut *(super::phys_to_virt_addr(root) as *mut PageTable) };
-        // Unshare the lower-half entries clone_from copied from the parent
-        // so freeing the user tables below cannot free the parent's.
-        let phys_offset = super::PHYS_MEM_OFFSET.load(Ordering::Acquire);
-        if phys_offset != 0 {
-            let idx = ((phys_offset >> 39) & 0x1FF) as usize;
-            if idx < 256 {
-                l4[idx].clear();
-            }
-        }
-        #[cfg(all(target_arch = "x86_64", target_os = "none"))]
-        {
-            let idx = ((crate::arch::x86_64::HEAP_START as u64 >> 39) & 0x1FF) as usize;
-            if idx < 256 {
-                l4[idx].clear();
-            }
-        }
         free_user_page_table_frames(root);
     }
 
@@ -954,26 +905,6 @@ impl VirtualAddressSpace {
 
             for i in 256..PAGE_TABLE_ENTRIES {
                 child_l4[i] = parent_l4[i];
-            }
-
-            // Also copy the bootloader's physical memory mapping L4 entry
-            // (may be in the lower half, e.g. L4 index 3 for 0x180_0000_0000).
-            let phys_offset = super::PHYS_MEM_OFFSET.load(core::sync::atomic::Ordering::Acquire);
-            if phys_offset != 0 {
-                let phys_l4_idx = ((phys_offset >> 39) & 0x1FF) as usize;
-                if phys_l4_idx < 256 {
-                    child_l4[phys_l4_idx] = parent_l4[phys_l4_idx];
-                }
-            }
-
-            // Copy the kernel heap L4 entry (HEAP_START, lower half).
-            #[cfg(all(target_arch = "x86_64", target_os = "none"))]
-            {
-                let heap_start = crate::arch::x86_64::HEAP_START as u64;
-                let heap_l4_idx = ((heap_start >> 39) & 0x1FF) as usize;
-                if heap_l4_idx < 256 {
-                    child_l4[heap_l4_idx] = parent_l4[heap_l4_idx];
-                }
             }
 
             // Step 3: Deep-copy user-space pages.
