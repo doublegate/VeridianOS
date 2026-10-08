@@ -13,6 +13,10 @@
 #   plasma-workspace         plasmashell, the session, libkworkspace
 #   powerdevil, plasma-integration, qqc2-breeze-style
 #   plasma-desktop           the desktop containment, panels, KCMs
+#   polkit-kde-agent-1       asks for the password polkit needs
+#   systemsettings, kde-cli-tools, kscreen, kmenuedit, kinfocenter
+#   kwrited, ksystemstats, plasma-systemmonitor, kdeplasma-addons
+#   kwallet-pam, ksshaskpass, aurorae
 #   ocean-sound-theme, plasma-workspace-wallpapers
 #
 # Shared (ADR 0010), for /usr, staged into the sysroot (lib/cross-env.sh);
@@ -36,6 +40,13 @@ JOBS="${JOBS:-$(nproc)}"
 PLASMA_VER="6.7.5"
 PLASMA_URL_BASE="https://download.kde.org/stable/plasma/${PLASMA_VER}"
 POLKIT_QT_VER="0.201.1"
+# Corrosion (CMake's Rust integration) for the build host: kdeplasma-addons
+# builds a Rust helper. A tag archive; its checksum pinned when first
+# downloaded (tag v0.6.1 is commit 1499b14e).
+CORROSION_VER="0.6.1"
+# The Rust toolchain for it, pinned (the repository's rust-toolchain.toml
+# pins the kernel's nightly, which would otherwise apply).
+RUST_VER="1.99.0"
 
 log() { echo "[build-plasma] $*"; }
 die() { echo "[build-plasma] ERROR: $*" >&2; exit 1; }
@@ -81,6 +92,46 @@ build_polkit_qt() {
     echo "${POLKIT_QT_VER}" > "${BUILD_DIR}/polkit-qt-1-build/.veridian-version"
 }
 
+build_host_corrosion() {
+    local prefix="${VERIDIAN_HOST_TOOLS}/corrosion"
+    if [[ -f "${prefix}/lib/cmake/Corrosion/CorrosionConfig.cmake" &&
+          "$(cat "${prefix}/.veridian-version" 2>/dev/null)" == "${CORROSION_VER}" ]]; then
+        log "Corrosion: already installed."
+        return 0
+    fi
+    fetch "corrosion-${CORROSION_VER}.tar.gz" \
+        "https://github.com/corrosion-rs/corrosion/archive/refs/tags/v${CORROSION_VER}.tar.gz" \
+        "corrosion-${CORROSION_VER}" "$(listed_sha256 plasma.sha256 "corrosion-${CORROSION_VER}.tar.gz")"
+    log "Building Corrosion ${CORROSION_VER} (host)..."
+    local bld="${BUILD_DIR}/corrosion-host-build"
+    if ! host_env cmake -S "${BUILD_DIR}/corrosion-${CORROSION_VER}" -B "${bld}" \
+            -DCMAKE_INSTALL_PREFIX="${prefix}" -DCORROSION_BUILD_TESTS=OFF ||
+       ! host_env cmake --build "${bld}" --parallel "${JOBS}" ||
+       ! host_env cmake --install "${bld}"; then
+        die "Corrosion did not build"
+    fi
+    echo "${CORROSION_VER}" > "${prefix}/.veridian-version"
+}
+
+# kdeplasma-addons, whose QMK keyboard helper (kameleon-qmk-helper) is Rust:
+# built for x86_64-unknown-linux-musl (VeridianOS runs Linux programs) and
+# linked by the cross compiler against the sysroot's shared C library, like
+# every other program (ADR 0010), not statically with Rust's own musl. Its
+# crates come from crates.io as its Cargo.lock pins them (checksummed);
+# rustup adds the musl standard library to the pinned toolchain if missing.
+build_kdeplasma_addons() {
+    build_host_corrosion
+    (
+        export CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER="${VERIDIAN_CC}"
+        export CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_RUSTFLAGS="-C target-feature=-crt-static"
+        export RUSTUP_TOOLCHAIN="${RUST_VER}"
+        plasma kdeplasma-addons \
+            -DCorrosion_DIR="${VERIDIAN_HOST_TOOLS}/corrosion/lib/cmake/Corrosion" \
+            -DRust_CARGO_TARGET=x86_64-unknown-linux-musl \
+            -DRust_RUSTUP_INSTALL_MISSING_TARGET=ON
+    )
+}
+
 # The VeridianOS session scripts the kernel starts the desktop with
 # (kernel/src/desktop/kde_session.rs: /usr/share/veridian/veridian-kde-init.sh).
 install_veridian_session() {
@@ -101,6 +152,11 @@ verify() {
                 usr/lib/qt6/plugins/styles/breeze6.so \
                 usr/share/plasma/shells/org.kde.plasma.desktop \
                 usr/share/plasma/look-and-feel/org.kde.breeze.desktop \
+                usr/bin/systemsettings usr/lib/libexec/polkit-kde-authentication-agent-1 \
+                usr/bin/kioclient usr/bin/kmenuedit usr/bin/kinfocenter usr/bin/kwrited \
+                usr/bin/ksystemstats usr/bin/plasma-systemmonitor usr/bin/ksshaskpass \
+                usr/lib/qt6/plugins/kf6/kded/kscreen.so usr/lib/security/pam_kwallet5.so \
+                usr/lib/libexec/kf6/kameleon-qmk-helper usr/lib/libexec/plasma-apply-aurorae \
                 usr/share/veridian/veridian-kde-init.sh; do
         if [[ -e "${SYSROOT}/${item}" ]]; then
             log "  OK: ${item}"
@@ -146,6 +202,19 @@ main() {
     plasma plasma-desktop \
         -DBUILD_KCM_MOUSE_X11=OFF \
         -DBUILD_KCM_TOUCHPAD_X11=OFF
+    plasma polkit-kde-agent-1
+    plasma systemsettings
+    plasma kde-cli-tools
+    plasma kscreen
+    plasma kmenuedit
+    plasma kinfocenter
+    plasma kwrited
+    plasma ksystemstats
+    plasma plasma-systemmonitor
+    build_kdeplasma_addons
+    plasma kwallet-pam
+    plasma ksshaskpass
+    plasma aurorae
     plasma ocean-sound-theme
     plasma plasma-workspace-wallpapers
     install_veridian_session

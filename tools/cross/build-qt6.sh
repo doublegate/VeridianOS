@@ -58,12 +58,6 @@ qt_src() {
     echo "${BUILD_DIR}/${name}"
 }
 
-# A native build: none of the target environment.
-host_env() {
-    env -u CC -u CXX -u AR -u RANLIB -u NM -u STRIP -u CFLAGS -u CXXFLAGS \
-        -u PKG_CONFIG_LIBDIR -u PKG_CONFIG_SYSROOT_DIR "$@"
-}
-
 # ── 1. Host Qt ────────────────────────────────────────────────────────
 # Qt cross-compilation requires native tools (moc, rcc, uic,
 # qtwaylandscanner) and host Qt libraries for building the other modules'

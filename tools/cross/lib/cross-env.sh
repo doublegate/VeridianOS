@@ -148,6 +148,12 @@ make_install() {
     rm -f "${SYSROOT}"/usr/lib/*.la
 }
 
+# A native build: none of the target environment.
+host_env() {
+    env -u CC -u CXX -u AR -u RANLIB -u NM -u STRIP -u CFLAGS -u CXXFLAGS \
+        -u PKG_CONFIG_LIBDIR -u PKG_CONFIG_SYSROOT_DIR "$@"
+}
+
 # meson without the target pkg-config environment (for autotools): the
 # cross file gives meson the sysroot and search path for the target, and
 # a native dependency (wayland-scanner) must not be looked up in the

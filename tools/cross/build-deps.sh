@@ -64,6 +64,10 @@ MTDEV_SHA256="a107adad2101fecac54ac7f9f0e0a0dd155d954193da55c2340c97f2ff1d814e"
 # and watches for hotplug, which is what KWin, libinput and Qt need.
 LIBUDEV_ZERO_VER="1.0.5"
 LIBUDEV_ZERO_SHA256="bf4372f79ddbe6b0e266a3d2994ffac7018a7edf4f87632aecb5176565d96138"
+# libusb (kinfocenter's USB page): verified against Tormod Volden's
+# signature (C68187379B23DE9EFC46651E2C80FF56C6830A0E).
+LIBUSB_VER="1.0.30"
+LIBUSB_SHA256="fea36f34f9156400209595e300840767ab1a385ede1dc7ee893015aea9c6dbaf"
 LIBINPUT_VER="1.32.0"
 LIBINPUT_SHA256="7dd6c1ca964c86eb6810ccd6639cda634e68bdca43bf3afec39e94e942fac8d4"
 # KWin's display and input libraries: libdisplay-info (EDID parsing; signed
@@ -434,6 +438,19 @@ build_libudev() {
         "libudev-zero-${LIBUDEV_ZERO_VER}" "${LIBUDEV_ZERO_SHA256}"
     log "Building libudev-zero ${LIBUDEV_ZERO_VER}..."
     meson_build "${BUILD_DIR}/libudev-zero-${LIBUDEV_ZERO_VER}" "${BUILD_DIR}/libudev-zero-build"
+}
+
+# ── libusb (kinfocenter) ──────────────────────────────────────────────
+# Device enumeration and hotplug through libudev (libudev-zero, above).
+build_libusb() {
+    installed libusb-1.0.so libusb && return 0
+    fetch "libusb-${LIBUSB_VER}.tar.bz2" \
+        "https://github.com/libusb/libusb/releases/download/v${LIBUSB_VER}/libusb-${LIBUSB_VER}.tar.bz2" \
+        "libusb-${LIBUSB_VER}" "${LIBUSB_SHA256}"
+    log "Building libusb ${LIBUSB_VER}..."
+    (cd "${BUILD_DIR}/libusb-${LIBUSB_VER}" && \
+        ./configure "${COMMON_CONFIGURE[@]}" --enable-udev --disable-examples-build --disable-tests-build && \
+        make_install)
 }
 
 # ── libinput ──────────────────────────────────────────────────────────
@@ -1006,7 +1023,7 @@ verify() {
                 libudev.so libinput.so libblkid.so libmount.so libuuid.so libgpg-error.so libgcrypt.so \
                 libvulkan.so libogg.so libvorbis.so libvorbisfile.so libasound.so libcanberra.so \
                 libgmp.so libmpfr.so libicuuc.so libicui18n.so libicudata.so libcurl.so \
-                libqalculate.so libndp.so libqrencode.so libdmtx.so libZXing.so libnl-3.so libsensors.so libpam.so security/pam_veridian.so \
+                libqalculate.so libndp.so libqrencode.so libdmtx.so libZXing.so libnl-3.so libsensors.so libpam.so security/pam_veridian.so libusb-1.0.so \
                 libduktape.so libxslt.so ../include/boost/version.hpp \
                 ../share/xml/docbook/xml-dtd-4.5/docbookx.dtd ../share/xml/docbook/xsl-stylesheets/VERSION libdisplay-info.so libxcvt.so liblcms2.so libei.so libeis.so \
                 ../share/hwdata/pnp.ids ../../etc/ssl/certs/ca-certificates.crt \
@@ -1050,6 +1067,7 @@ main() {
     build_libevdev
     build_mtdev
     build_libudev
+    build_libusb
     build_libinput
     build_hwdata
     build_libdisplay_info

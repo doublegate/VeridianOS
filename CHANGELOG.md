@@ -75,6 +75,13 @@
   The KDE root filesystem carries accounts (`/etc/passwd`, `/etc/group`), PAM services that
   refuse anything unconfigured, and the set-user-ID helpers (pkexec, polkit-agent-helper-1,
   dbus-daemon-launch-helper); its assembly fails if any program depends on a build-host path.
+  The session's applications and services followed: System Settings, the polkit
+  authentication agent, kde-cli-tools, KScreen, kmenuedit, kinfocenter, kwrited, ksystemstats,
+  the system monitor, kdeplasma-addons, kwallet-pam, ksshaskpass and Aurorae, with the
+  frameworks and libraries they need (KPty, KSu, KImageFormats, QtKeychain, libusb).
+  kdeplasma-addons' QMK keyboard helper is Rust: Corrosion (built for the host) drives a pinned
+  Rust toolchain targeting x86_64-unknown-linux-musl, linked dynamically against the sysroot's
+  C library like every other program.
 
 - **Scheduling calls take effect (N-221).** sched_setscheduler, sched_getscheduler and the
   affinity calls were stubs that returned 0. Each thread now has Linux's scheduling parameters --

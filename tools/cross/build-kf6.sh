@@ -29,6 +29,9 @@ QCORO_VER="0.13.0"
 QCORO_SHA256="4bff7513c5c8e301b66308df05795043b1792ed16381a484e5c990171b8ff19e"
 # Kirigami Addons (released on its own; Plasma's settings pages use it).
 KIRIGAMI_ADDONS_VER="1.15.0"
+# QtKeychain (ksshaskpass): a tag archive, checksum pinned when first
+# downloaded (tag 0.17.0 is commit 85835a63).
+QTKEYCHAIN_VER="0.17.0"
 
 log() { echo "[build-kf6] $*"; }
 die() { echo "[build-kf6] ERROR: $*" >&2; exit 1; }
@@ -305,6 +308,7 @@ build_tier4() {
     # daemons (libgcrypt from build-deps.sh) and kwallet-query. GpgME
     # wallets are optional and not in the sysroot.
     build_kf_module KWallet
+    build_qtkeychain
     # Attica: Open Collaboration Services client, required by KNewStuff
     build_kf_module Attica
     build_kf_module KNewStuff
@@ -324,6 +328,33 @@ build_tier4() {
     # with the desktop's widget style (Breeze).
     build_kf_module QQC2DesktopStyle qqc2-desktop-style
     build_kirigami_addons
+    # Pseudo-terminals (kwrited, Konsole) and running programs as another
+    # user (kdesu, through kde-cli-tools).
+    # No utempter: VeridianOS keeps no utmp login records (nothing reads
+    # them yet), so terminals are not recorded there.
+    build_kf_module KPty -- -DCMAKE_DISABLE_FIND_PACKAGE_UTEMPTER=ON
+    build_kf_module KSu kdesu
+    # Image format plugins for Qt (PSD, XCF, TGA, QOI, ...); no external
+    # codec libraries yet (AVIF, HEIF, JPEG XL, OpenEXR, RAW).
+    build_kf_module KImageFormats
+}
+
+# ── QtKeychain ────────────────────────────────────────────────────────
+# Passwords in the desktop's secret service (KWallet's ksecretd, through
+# libsecret).
+build_qtkeychain() {
+    if [[ -f "${SYSROOT}/usr/lib/cmake/Qt6Keychain/Qt6KeychainConfig.cmake" ]]; then
+        log "QtKeychain: already installed."
+        return 0
+    fi
+    fetch "qtkeychain-${QTKEYCHAIN_VER}.tar.gz" \
+        "https://github.com/frankosterfeld/qtkeychain/archive/refs/tags/${QTKEYCHAIN_VER}.tar.gz" \
+        "qtkeychain-${QTKEYCHAIN_VER}" "$(listed_sha256 kf6.sha256 "qtkeychain-${QTKEYCHAIN_VER}.tar.gz")"
+    kde_cmake QtKeychain "${BUILD_DIR}/qtkeychain-${QTKEYCHAIN_VER}" \
+        -DBUILD_WITH_QT5=OFF \
+        -DBUILD_TEST_APPLICATION=OFF
+    [[ -f "${SYSROOT}/usr/lib/cmake/Qt6Keychain/Qt6KeychainConfig.cmake" ]] ||
+        die "QtKeychain: CMake config not installed"
 }
 
 # ── Kirigami Addons ───────────────────────────────────────────────────
@@ -354,7 +385,7 @@ verify() {
                KConfigWidgets KService Solid KDeclarative KXmlGui KBookmarks KCrash \
                KDBusAddons KIO Kirigami KCMUtils KItemModels Sonnet KTextWidgets KWallet \
                Attica KNewStuff KRunner KStatusNotifierItem KNotifyConfig KParts KTextEditor KDED \
-               Prison KSvg QQC2DesktopStyle KirigamiAddons; do
+               Prison KSvg QQC2DesktopStyle KirigamiAddons KPty KSu KImageFormats; do
         if kf_config "${mod}" >/dev/null; then
             log "  OK: ${mod}"
         else
