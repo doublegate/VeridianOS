@@ -273,8 +273,19 @@ impl Process {
     }
 
     /// Change the credentials atomically; `f` enforces the set*id rules.
+    /// As Linux's commit_creds, a change of the effective user or group
+    /// makes the process non-dumpable: memory it read with the old
+    /// identity (a dropped root's secrets) must not become readable to the
+    /// new one through ptrace. exec decides dumpability itself afterwards.
     pub fn update_credentials<R>(&self, f: impl FnOnce(&mut super::creds::Credentials) -> R) -> R {
-        f(&mut self.creds.lock())
+        let mut creds = self.creds.lock();
+        let (euid, egid) = (creds.euid, creds.egid);
+        let result = f(&mut creds);
+        if creds.euid != euid || creds.egid != egid {
+            self.dumpable
+                .store(false, core::sync::atomic::Ordering::Release);
+        }
+        result
     }
 
     /// Real user ID.
@@ -699,6 +710,19 @@ mod tests {
             alloc::string::String::from(name),
             ProcessPriority::Normal,
         )
+    }
+
+    /// A change of effective user or group makes the process non-dumpable
+    /// (Linux's commit_creds); other credential changes leave it.
+    #[test]
+    fn effective_id_changes_clear_dumpable() {
+        use core::sync::atomic::Ordering;
+        let proc = make_process(3, "creds");
+        assert!(proc.dumpable.load(Ordering::Acquire));
+        proc.update_credentials(|c| c.setgroups(&[5]).unwrap());
+        assert!(proc.dumpable.load(Ordering::Acquire));
+        proc.update_credentials(|c| c.setuid(1000).unwrap());
+        assert!(!proc.dumpable.load(Ordering::Acquire));
     }
 
     // --- ProcessState tests ---
