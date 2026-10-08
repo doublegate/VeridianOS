@@ -352,7 +352,15 @@ pub fn start_thread(
     process
         .dispatched
         .store(true, core::sync::atomic::Ordering::Release);
-    crate::sched::dispatch::spawn_user((process.pid.0, thread.tid.0), &frame, cr3, fs_base, area)?;
+    let policy = thread.sched.lock().to_policy();
+    crate::sched::dispatch::spawn_user(
+        (process.pid.0, thread.tid.0),
+        &frame,
+        cr3,
+        fs_base,
+        area,
+        policy,
+    )?;
     Ok(())
 }
 
@@ -460,6 +468,8 @@ pub fn exit_thread(exit_code: i32) {
         // *clear_tid and wake one futex waiter (best effort).
         #[cfg(feature = "alloc")]
         robust_list::exit_thread(&thread);
+        #[cfg(feature = "alloc")]
+        crate::syscall::scheduling::thread_exit(&thread);
         let clear_ptr = thread.clear_tid.load(core::sync::atomic::Ordering::Acquire);
         if clear_ptr != 0 {
             let _ = crate::syscall::userspace::write_user(clear_ptr, 0u32);
@@ -568,7 +578,11 @@ pub fn create_thread(
             use thread::ThreadBuilder;
 
             // Build thread with real stack allocation via ThreadBuilder
+            let sched = current_thread()
+                .map(|t| t.sched.lock().for_child())
+                .unwrap_or_default();
             let thread = ThreadBuilder::new(process.pid, String::from("user_thread"), entry_point)
+                .sched(sched)
                 .user_stack_size(1024 * 1024) // 1MB user stack
                 .kernel_stack_size(64 * 1024) // 64KB kernel stack
                 .build()?;

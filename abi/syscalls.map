@@ -213,10 +213,17 @@ TcGetPgrp               private 1299
 ## Scheduling
 sched_setscheduler
 sched_getscheduler
+sched_setparam
+sched_getparam
+sched_setattr
+sched_getattr
 sched_get_priority_max
 sched_get_priority_min
+sched_rr_get_interval
 sched_setaffinity
 sched_getaffinity
+getpriority
+setpriority
 
 ## Futexes
 futex

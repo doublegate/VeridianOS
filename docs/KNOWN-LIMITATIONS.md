@@ -159,7 +159,8 @@ use logical ids as APIC destinations and vector 0 (N-173), a TLB shootdown can d
 CPU spinning with interrupts off (N-139), `smp_boot` continues after a failed start (N-180), the
 timer wheel assumes no lost ticks (N-179), and directory permission checks resolve the path
 separately from the operation (N-51). Lock-free and per-CPU structures are single-CPU-safe but have
-not run on more than one CPU (N-59).
+not run on more than one CPU (N-59). Programs see this: sched_getaffinity and the processor count
+report one CPU, and an affinity mask without CPU 0 is EINVAL.
 
 ### Only x86_64 runs user programs (N-28, N-14; planned v0.27 sprint E)
 

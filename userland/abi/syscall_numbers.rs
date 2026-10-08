@@ -170,10 +170,17 @@ pub mod sysno {
     pub const SYS_TC_GET_PGRP: usize = 1299;
     pub const SYS_sched_setscheduler: usize = 144;
     pub const SYS_sched_getscheduler: usize = 145;
+    pub const SYS_sched_setparam: usize = 142;
+    pub const SYS_sched_getparam: usize = 143;
+    pub const SYS_sched_setattr: usize = 314;
+    pub const SYS_sched_getattr: usize = 315;
     pub const SYS_sched_get_priority_max: usize = 146;
     pub const SYS_sched_get_priority_min: usize = 147;
+    pub const SYS_sched_rr_get_interval: usize = 148;
     pub const SYS_sched_setaffinity: usize = 203;
     pub const SYS_sched_getaffinity: usize = 204;
+    pub const SYS_getpriority: usize = 140;
+    pub const SYS_setpriority: usize = 141;
     pub const SYS_futex: usize = 202;
     pub const SYS_FUTEX_WAIT: usize = 1225;
     pub const SYS_FUTEX_WAKE: usize = 1226;

@@ -73,6 +73,12 @@ impl Entity {
         }
     }
 
+    /// Take a new policy (a task off any queue), keeping its fair lag.
+    pub fn set_policy(&mut self, policy: Policy) {
+        self.fair.weight = weight_of(policy);
+        self.policy = policy;
+    }
+
     /// Effective real-time state (own priority or the boost, whichever is
     /// higher).
     fn rt(&self) -> RtEntity {
@@ -354,16 +360,20 @@ impl RunQueue {
         }
     }
 
-    /// Change a queued task's policy, keeping its fair lag.
+    /// Change a queued (or running) task's policy, keeping its fair lag. A
+    /// running task stays the current one; whether it should now give way is
+    /// the caller's question ([`Self::peek`]).
     pub fn set_policy(&mut self, key: TaskKey, policy: Policy, now: u64) -> bool {
+        let curr = self.curr == Some(key);
         let Some(mut e) = self.dequeue(key, now) else {
             return false;
         };
-        let was_curr = self.curr.is_none();
-        e.fair.weight = weight_of(policy);
-        e.policy = policy;
+        e.set_policy(policy);
         self.enqueue(key, e, now);
-        let _ = was_curr;
+        if curr {
+            self.curr = Some(key);
+            self.exec_start = now;
+        }
         true
     }
 
@@ -571,6 +581,27 @@ mod tests {
         assert_eq!(rq.pick_next(0), Some(1));
         rq.set_boost(1, None, MS);
         assert_eq!(rq.pick_next(MS), Some(2));
+    }
+
+    /// The running task changing its own policy (sched_setscheduler on
+    /// itself) stays the current task, with the new class and weight.
+    #[test]
+    fn set_policy_keeps_the_running_task_current() {
+        let mut rq = RunQueue::new();
+        rq.enqueue(1, normal(), 0);
+        rq.enqueue(2, normal(), 0);
+        let running = rq.pick_next(0).unwrap();
+        assert!(rq.set_policy(running, Policy::Fifo { prio: 10 }, MS));
+        assert_eq!(rq.current(), Some(running));
+        assert_eq!(rq.class_of(running), Some(Class::RealTime));
+        // A queued task's nice changes its weight.
+        let other = 3 - running;
+        assert!(rq.set_policy(other, Policy::Normal { nice: 10 }, MS));
+        assert_eq!(rq.current(), Some(running));
+        assert!(!rq.set_policy(9, Policy::Idle, MS));
+        let mut e = normal();
+        e.set_policy(Policy::Batch { nice: -5 });
+        assert_eq!(e.fair.weight, fair::weight_for_nice(-5));
     }
 
     #[test]

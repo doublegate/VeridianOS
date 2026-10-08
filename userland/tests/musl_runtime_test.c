@@ -32,6 +32,7 @@
 #include <sys/file.h>
 #include <sys/mman.h>
 #include <sys/prctl.h>
+#include <sys/resource.h>
 #include <sys/select.h>
 #include <spawn.h>
 #include <sys/wait.h>
@@ -1558,6 +1559,124 @@ static void test_robust_futex(void)
     close(fds[1]);
 }
 
+/* N-221: scheduling policies, priorities and affinity follow Linux (musl's
+ * sched_setscheduler/getscheduler/setparam/getparam return ENOSYS by design,
+ * since Linux's are per thread; the system calls are used directly): the
+ * calls report what was set (they were stubs returning 0), validate their
+ * arguments, admit SCHED_DEADLINE reservations up to 95% of the CPU, reset
+ * real-time policies in children with SCHED_RESET_ON_FORK, report the CPUs
+ * that run tasks, and refuse unprivileged changes with EPERM/EACCES. */
+struct test_sched_attr {
+    uint32_t size, policy;
+    uint64_t flags;
+    int32_t nice;
+    uint32_t priority;
+    uint64_t runtime, deadline, period;
+};
+
+static void test_sched(void)
+{
+    static char why[256];
+    struct sched_param sp = {0};
+    int normal = (int)syscall(SYS_sched_getscheduler, 0) == SCHED_OTHER && (int)syscall(SYS_sched_getparam, 0, &sp) == 0
+                 && sp.sched_priority == 0;
+    int range = sched_get_priority_max(SCHED_FIFO) == 99 && sched_get_priority_min(SCHED_RR) == 1
+                && sched_get_priority_max(SCHED_OTHER) == 0;
+    errno = 0;
+    int bad_policy = sched_get_priority_max(42) == -1 && errno == EINVAL;
+    sp.sched_priority = 0;
+    errno = 0;
+    int bad_prio = (int)syscall(SYS_sched_setscheduler, 0, SCHED_FIFO, &sp) == -1 && errno == EINVAL;
+
+    sp.sched_priority = 10;
+    int fifo = (int)syscall(SYS_sched_setscheduler, 0, SCHED_FIFO, &sp) == 0 && (int)syscall(SYS_sched_getscheduler, 0) == SCHED_FIFO
+               && (int)syscall(SYS_sched_getparam, 0, &sp) == 0 && sp.sched_priority == 10;
+    sp.sched_priority = 20;
+    int setparam = (int)syscall(SYS_sched_setparam, 0, &sp) == 0 && (int)syscall(SYS_sched_getparam, 0, &sp) == 0
+                   && sp.sched_priority == 20;
+
+    /* SCHED_RR with reset-on-fork: the child starts as SCHED_OTHER. */
+    sp.sched_priority = 5;
+    int rr = (int)syscall(SYS_sched_setscheduler, 0, SCHED_RR | SCHED_RESET_ON_FORK, &sp) == 0
+             && (int)syscall(SYS_sched_getscheduler, 0) == (SCHED_RR | SCHED_RESET_ON_FORK);
+    struct timespec slice = {0, 0};
+    int quantum = sched_rr_get_interval(0, &slice) == 0 && slice.tv_sec == 0
+                  && slice.tv_nsec == 100000000;
+    pid_t pid = fork();
+    if (pid == 0)
+        _exit((int)syscall(SYS_sched_getscheduler, 0) == SCHED_OTHER ? 0 : 1);
+    int status = -1;
+    int reset = pid > 0 && waitpid(pid, &status, 0) == pid && WIFEXITED(status)
+                && WEXITSTATUS(status) == 0;
+
+    /* SCHED_DEADLINE through sched_setattr, then admission control. */
+    struct test_sched_attr a = {sizeof(a), 6, 0, 0, 0, 1000000, 10000000, 10000000};
+    int dl = syscall(SYS_sched_setattr, 0, &a, 0) == 0;
+    struct test_sched_attr g;
+    memset(&g, 0, sizeof(g));
+    dl = dl && syscall(SYS_sched_getattr, 0, &g, sizeof(g), 0) == 0 && g.policy == 6
+         && g.runtime == 1000000 && g.deadline == 10000000 && g.period == 10000000;
+    pid = fork();
+    if (pid == 0) {
+        /* 90% more does not fit next to the parent's 10%. */
+        struct test_sched_attr big = {sizeof(big), 6, 0, 0, 0, 9000000, 10000000, 10000000};
+        errno = 0;
+        int busy = syscall(SYS_sched_setattr, 0, &big, 0) == -1 && errno == EBUSY;
+        _exit(busy ? 0 : 1);
+    }
+    int admission = pid > 0 && waitpid(pid, &status, 0) == pid && WIFEXITED(status)
+                    && WEXITSTATUS(status) == 0;
+
+    /* Back to SCHED_OTHER with a nice value, read through getpriority. */
+    struct test_sched_attr n = {sizeof(n), SCHED_OTHER, 0, 5, 0, 0, 0, 0};
+    errno = 0;
+    int nice5 = syscall(SYS_sched_setattr, 0, &n, 0) == 0 && getpriority(PRIO_PROCESS, 0) == 5
+                && errno == 0 && setpriority(PRIO_PROCESS, 0, 3) == 0
+                && getpriority(PRIO_PROCESS, 0) == 3;
+
+    /* One CPU runs tasks: the mask and the processor count say so. */
+    cpu_set_t set;
+    CPU_ZERO(&set);
+    int aff = sched_getaffinity(0, sizeof(set), &set) == 0 && CPU_COUNT(&set) == 1
+              && CPU_ISSET(0, &set) && sysconf(_SC_NPROCESSORS_ONLN) == 1;
+    CPU_ZERO(&set);
+    CPU_SET(1, &set);
+    errno = 0;
+    int aff_einval = sched_setaffinity(0, sizeof(set), &set) == -1 && errno == EINVAL;
+    CPU_ZERO(&set);
+    CPU_SET(0, &set);
+    int aff_set = sched_setaffinity(0, sizeof(set), &set) == 0;
+
+    /* Unprivileged: no real-time policy (EPERM), no lower nice (EACCES). */
+    pid = fork();
+    if (pid == 0) {
+        if (setgid(1000) != 0 || setuid(1000) != 0)
+            _exit(2);
+        struct sched_param p;
+        memset(&p, 0, sizeof(p));
+        p.sched_priority = 1;
+        errno = 0;
+        int eperm = (int)syscall(SYS_sched_setscheduler, 0, SCHED_FIFO, &p) == -1 && errno == EPERM;
+        errno = 0;
+        int eacces = setpriority(PRIO_PROCESS, 0, -5) == -1 && errno == EACCES;
+        int higher = setpriority(PRIO_PROCESS, 0, 10) == 0;
+        _exit(eperm && eacces && higher ? 0 : 1);
+    }
+    int unpriv = pid > 0 && waitpid(pid, &status, 0) == pid && WIFEXITED(status)
+                 && WEXITSTATUS(status) == 0;
+    setpriority(PRIO_PROCESS, 0, 0);
+
+    snprintf(why, sizeof(why),
+             "normal=%d range=%d einval=%d/%d fifo=%d setparam=%d rr=%d quantum=%d reset=%d "
+             "dl=%d admission=%d nice=%d aff=%d/%d/%d unpriv=%d",
+             normal, range, bad_policy, bad_prio, fifo, setparam, rr, quantum, reset, dl,
+             admission, nice5, aff, aff_einval, aff_set, unpriv);
+    report("musl_sched",
+           normal && range && bad_policy && bad_prio && fifo && setparam && rr && quantum && reset
+               && dl && admission && nice5 && aff && aff_einval && aff_set && unpriv,
+           why);
+}
+
 int main(int argc, char **argv)
 {
     test_auxv(argc > 0 ? argv[0] : NULL);
@@ -1591,6 +1710,7 @@ int main(int argc, char **argv)
     test_tids();
     test_flock_blocking();
     test_robust_futex();
+    test_sched();
     printf("MUSL-RUNTIME: %d/%d\n", passed, total);
     return passed == total ? 0 : 1;
 }

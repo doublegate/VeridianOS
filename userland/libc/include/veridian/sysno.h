@@ -189,10 +189,17 @@
 /* Scheduling */
 #define SYS_sched_setscheduler           144
 #define SYS_sched_getscheduler           145
+#define SYS_sched_setparam               142
+#define SYS_sched_getparam               143
+#define SYS_sched_setattr                314
+#define SYS_sched_getattr                315
 #define SYS_sched_get_priority_max       146
 #define SYS_sched_get_priority_min       147
+#define SYS_sched_rr_get_interval        148
 #define SYS_sched_setaffinity            203
 #define SYS_sched_getaffinity            204
+#define SYS_getpriority                  140
+#define SYS_setpriority                  141
 /* Futexes */
 #define SYS_futex                        202
 #define SYS_FUTEX_WAIT                   1225

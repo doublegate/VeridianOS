@@ -423,6 +423,10 @@ pub struct Thread {
     /// The robust futex list head (set_robust_list; N-225), walked when the
     /// thread exits. A new thread has none; exec clears it.
     pub robust_list: AtomicUsize,
+    /// Scheduling policy and parameters (sched_setscheduler, sched_setattr,
+    /// setpriority; N-221). The dispatcher task running the thread follows
+    /// them.
+    pub sched: Mutex<SchedParams>,
     /// Detached flag (pthread_detach)
     pub detached: AtomicBool,
     /// Filesystem view (cwd, umask)
@@ -543,6 +547,7 @@ impl Thread {
             has_saved_sigmask: AtomicBool::new(false),
             altstack: Mutex::new(super::signals::SigAltStack::default()),
             robust_list: AtomicUsize::new(0),
+            sched: Mutex::new(SchedParams::default()),
             detached: AtomicBool::new(false),
             fs,
         }
@@ -744,6 +749,84 @@ impl Thread {
     }
 }
 
+/// Linux scheduling policies (`SCHED_*`).
+pub const SCHED_NORMAL: u32 = 0;
+pub const SCHED_FIFO: u32 = 1;
+pub const SCHED_RR: u32 = 2;
+pub const SCHED_BATCH: u32 = 3;
+pub const SCHED_IDLE: u32 = 5;
+pub const SCHED_DEADLINE: u32 = 6;
+
+/// A thread's scheduling parameters, as Linux keeps them: the policy, the
+/// real-time priority, the nice value (kept across policy changes, so a
+/// thread returning to SCHED_NORMAL gets its nice back), the deadline
+/// reservation, and SCHED_RESET_ON_FORK.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SchedParams {
+    pub policy: u32,
+    /// 1..=99 for SCHED_FIFO and SCHED_RR, 0 otherwise.
+    pub rt_priority: u8,
+    /// -20..=19.
+    pub nice: i8,
+    /// SCHED_DEADLINE's validated reservation.
+    pub deadline: Option<crate::sched::policy::dl::DlEntity>,
+    pub reset_on_fork: bool,
+}
+
+impl Default for SchedParams {
+    fn default() -> Self {
+        Self {
+            policy: SCHED_NORMAL,
+            rt_priority: 0,
+            nice: 0,
+            deadline: None,
+            reset_on_fork: false,
+        }
+    }
+}
+
+impl SchedParams {
+    /// The policy the dispatcher runs the thread with.
+    pub fn to_policy(&self) -> crate::sched::policy::Policy {
+        use crate::sched::policy::Policy;
+        match (self.policy, self.deadline) {
+            (SCHED_FIFO, _) => Policy::Fifo {
+                prio: self.rt_priority,
+            },
+            (SCHED_RR, _) => Policy::RoundRobin {
+                prio: self.rt_priority,
+            },
+            (SCHED_BATCH, _) => Policy::Batch { nice: self.nice },
+            (SCHED_IDLE, _) => Policy::Idle,
+            (SCHED_DEADLINE, Some(dl)) => Policy::Deadline(dl),
+            _ => Policy::Normal { nice: self.nice },
+        }
+    }
+
+    /// What a new thread or fork child starts with: the same parameters,
+    /// except that SCHED_RESET_ON_FORK returns a real-time or deadline
+    /// policy to SCHED_NORMAL and a negative nice to 0 (and is itself
+    /// cleared), as Linux's sched_fork. A deadline reservation is never
+    /// inherited (Linux refuses to fork a SCHED_DEADLINE task without the
+    /// reset; the creator keeps its own).
+    pub fn for_child(&self) -> Self {
+        let mut child = *self;
+        if self.reset_on_fork {
+            if matches!(self.policy, SCHED_FIFO | SCHED_RR | SCHED_DEADLINE) {
+                child.policy = SCHED_NORMAL;
+                child.rt_priority = 0;
+            }
+            child.nice = child.nice.max(0);
+            child.reset_on_fork = false;
+        }
+        if child.policy == SCHED_DEADLINE {
+            child.policy = SCHED_NORMAL;
+        }
+        child.deadline = None;
+        child
+    }
+}
+
 /// Builder for creating new threads with specific configurations.
 ///
 /// `ThreadBuilder` follows the builder pattern to construct a `Thread`
@@ -782,6 +865,7 @@ pub struct ThreadBuilder {
     clear_tid: usize,
     tls_base: Option<usize>,
     fs: Option<Arc<ThreadFs>>,
+    sched: SchedParams,
     tid: Option<ThreadId>,
 }
 
@@ -806,6 +890,7 @@ impl ThreadBuilder {
             tls_base: None,
             fs: None,
             tid: None,
+            sched: SchedParams::default(),
         }
     }
 
@@ -852,6 +937,13 @@ impl ThreadBuilder {
 
     /// Give the thread this ID instead of a new one: a process's first
     /// thread takes the process's ID (N-217).
+    /// The thread's scheduling parameters (a new thread inherits its
+    /// creator's: [`SchedParams::for_child`]).
+    pub fn sched(mut self, sched: SchedParams) -> Self {
+        self.sched = sched;
+        self
+    }
+
     pub fn tid(mut self, tid: ThreadId) -> Self {
         self.tid = Some(tid);
         self
@@ -949,6 +1041,7 @@ impl ThreadBuilder {
             .store(kernel_stack_pages, Ordering::Release);
 
         thread.priority = self.priority;
+        *thread.sched.lock() = self.sched;
         thread.set_affinity(self.cpu_affinity);
         thread.clear_tid.store(self.clear_tid, Ordering::Release);
         if let Some(base) = self.tls_base {

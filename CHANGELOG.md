@@ -21,6 +21,16 @@
   dynamically linked C++ program that throws, runs threads with `thread_local` destructors and
   `dlopen`s a C++ library.
 
+- **Scheduling calls take effect (N-221).** sched_setscheduler, sched_getscheduler and the
+  affinity calls were stubs that returned 0. Each thread now has Linux's scheduling parameters --
+  policy (SCHED_OTHER, FIFO, RR, BATCH, IDLE, DEADLINE), real-time priority, nice value and
+  SCHED_RESET_ON_FORK -- which the dispatcher runs it with, which threads and fork children
+  inherit, and which these calls set and report with Linux's checks: EINVAL for bad arguments,
+  EPERM or EACCES for unprivileged changes, EBUSY past SCHED_DEADLINE's 95% admission limit.
+  sched_setparam, sched_getparam, sched_setattr, sched_getattr, sched_rr_get_interval,
+  getpriority and setpriority are added; sched_getaffinity reports the CPUs that run tasks (one,
+  until SMP). Runtime test `musl_sched`.
+
 - **Robust mutexes recover when their owner dies (N-225).** set_robust_list stored the list per
   process and nothing ever read it, so a process-shared robust mutex held by a thread that died
   stayed locked for good. The list is now per thread and walked when the thread exits (for any

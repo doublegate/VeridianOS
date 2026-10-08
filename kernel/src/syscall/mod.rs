@@ -261,6 +261,9 @@ use self::debug::*;
 mod memory;
 use self::memory::*;
 
+// Scheduling policy, priority and affinity (N-221)
+pub(crate) mod scheduling;
+
 // poll, ppoll, select, pselect6
 mod multiplex;
 use self::multiplex::{sys_poll, sys_ppoll, sys_pselect6, sys_select};
@@ -1170,12 +1173,20 @@ fn handle_syscall(
         | Syscall::Statfs
         | Syscall::Fstatfs => Err(SyscallError::NotImplemented),
         Syscall::Sigaltstack => signal::sys_sigaltstack(arg1, arg2),
-        Syscall::SchedSetscheduler
-        | Syscall::SchedGetscheduler
-        | Syscall::SchedGetPriorityMax
-        | Syscall::SchedGetPriorityMin
-        | Syscall::SchedSetaffinity
-        | Syscall::SchedGetaffinity => Ok(0),
+        // Scheduling policy, priority and affinity (N-221).
+        Syscall::SchedSetscheduler => scheduling::sys_sched_setscheduler(arg1, arg2, arg3),
+        Syscall::SchedGetscheduler => scheduling::sys_sched_getscheduler(arg1),
+        Syscall::SchedSetparam => scheduling::sys_sched_setparam(arg1, arg2),
+        Syscall::SchedGetparam => scheduling::sys_sched_getparam(arg1, arg2),
+        Syscall::SchedSetattr => scheduling::sys_sched_setattr(arg1, arg2, arg3),
+        Syscall::SchedGetattr => scheduling::sys_sched_getattr(arg1, arg2, arg3, arg4),
+        Syscall::SchedGetPriorityMax => scheduling::sys_sched_get_priority_max(arg1),
+        Syscall::SchedGetPriorityMin => scheduling::sys_sched_get_priority_min(arg1),
+        Syscall::SchedRrGetInterval => scheduling::sys_sched_rr_get_interval(arg1, arg2),
+        Syscall::SchedSetaffinity => scheduling::sys_sched_setaffinity(arg1, arg2, arg3),
+        Syscall::SchedGetaffinity => scheduling::sys_sched_getaffinity(arg1, arg2, arg3),
+        Syscall::Getpriority => scheduling::sys_getpriority(arg1, arg2),
+        Syscall::Setpriority => scheduling::sys_setpriority(arg1, arg2, arg3),
 
         _ => Err(SyscallError::InvalidSyscall),
     }

@@ -908,7 +908,7 @@ pub fn current_owner() -> Option<(u64, u64)> {
 
 /// Start a user thread as a task: its first switch-in enters ring 3 with
 /// `frame`, on address space `cr3`, with TLS base `fs_base` and vector
-/// state `xsave`.
+/// state `xsave`, scheduled with the thread's `policy`.
 #[cfg(target_arch = "x86_64")]
 pub fn spawn_user(
     owner: (u64, u64),
@@ -916,10 +916,11 @@ pub fn spawn_user(
     cr3: u64,
     fs_base: u64,
     xsave: crate::arch::x86_64::switch::xsave::Area,
+    policy: Policy,
 ) -> Result<TaskKey, KernelError> {
     #[cfg(not(target_os = "none"))]
     {
-        let _ = (owner, frame, cr3, fs_base, xsave);
+        let _ = (owner, frame, cr3, fs_base, xsave, policy);
         Err(KernelError::NotImplemented {
             feature: "user tasks on the host",
         })
@@ -934,7 +935,7 @@ pub fn spawn_user(
         }
         let stack = crate::mm::kstack::allocate(KTHREAD_STACK_PAGES)?;
         let top = stack.base + stack.pages * 4096;
-        let mut task = Task::new(alloc_key(), "user", Policy::default(), Some(stack));
+        let mut task = Task::new(alloc_key(), "user", policy, Some(stack));
         task.owner = Some(owner);
         *task.xsave.get_mut() = Some(xsave);
         // SAFETY: the stack was just allocated for this task and is unused.
@@ -954,6 +955,42 @@ pub fn spawn_user(
         irq_restore(irq);
         Ok(key)
     }
+}
+
+/// Run the task of user thread `owner` (pid, tid) with `policy` from now on
+/// (sched_setscheduler and friends; N-221). A queued or running task is
+/// requeued in its new class, keeping its fair lag, and the CPU is asked to
+/// reschedule (a raised priority may now preempt, a lowered one yield); a
+/// sleeping one takes the policy when it wakes. No task (the thread does
+/// not run under the dispatcher): nothing to change.
+pub fn set_policy(owner: (u64, u64), policy: Policy) {
+    let Some(task) = TASKS
+        .lock()
+        .values()
+        .find(|t| t.owner == Some(owner))
+        .cloned()
+    else {
+        return;
+    };
+    let irq = irq_save();
+    let mut queued = false;
+    for cpu in CPUS.iter() {
+        if let Some(st) = cpu.lock().as_mut() {
+            if st.rq.set_policy(task.key, policy, now()) {
+                queued = true;
+                st.need_resched = true;
+            }
+        }
+    }
+    if !queued {
+        task.entity.lock().set_policy(policy);
+    }
+    irq_restore(irq);
+}
+
+/// Number of CPUs that run tasks (sched_getaffinity's online set).
+pub fn online_cpus() -> usize {
+    CPUS.len()
 }
 
 /// Live tasks running threads of process `pid`.
