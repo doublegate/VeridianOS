@@ -305,6 +305,37 @@ pub fn search_path(name: &str) -> Option<String> {
     None
 }
 
+/// Install the credentials a program runs with (Linux's
+/// cred_guard_mutex section of exec): `set_ids` are the owner and group a
+/// set-user-ID or set-group-ID file offers, granted unless the thread asked
+/// for no new privileges, a tracer without privilege is attached, or
+/// another process shares this one's directories and umask (CLONE_FS: it
+/// could redirect the privileged program; LSM_UNSAFE_SHARE). Decided and
+/// installed under `cred_guard`, which ptrace attach takes too: a tracer
+/// attached before is seen here, and one attaching after sees the new
+/// credentials.
+#[cfg(feature = "alloc")]
+fn install_exec_credentials(
+    process: &super::Process,
+    thread: &super::Thread,
+    (set_uid, set_gid): (Option<u32>, Option<u32>),
+) {
+    use core::sync::atomic::Ordering;
+
+    let _guard = process.cred_guard.lock();
+    let traced_unprivileged = match process.tracer.load(Ordering::Acquire) {
+        0 => false,
+        tracer => super::table::get_process(super::ProcessId(tracer)).is_none_or(|t| t.euid() != 0),
+    };
+    // exec runs only in a single-threaded process, so this thread is the
+    // process's only user of its filesystem state.
+    let fs_shared = thread.fs().users.load(Ordering::Acquire) > 1;
+    let may_gain =
+        !thread.no_new_privs.load(Ordering::Acquire) && !traced_unprivileged && !fs_shared;
+    let creds = process.credentials().after_exec(set_uid, set_gid, may_gain);
+    process.update_credentials(|c| *c = creds);
+}
+
 /// The last component of `path` (Linux's kbasename).
 #[cfg(feature = "alloc")]
 fn basename(path: &str) -> &str {
@@ -442,24 +473,15 @@ pub fn exec_process(path: &str, argv: &[&str], envp: &[&str]) -> Result<(), Kern
     };
 
     // A set-user-ID or set-group-ID program runs as its file's owner or
-    // group (Linux's bprm_fill_uid), unless the thread asked for no new
-    // privileges or a tracer without privilege is watching it.
-    let exec_creds = {
+    // group (Linux's bprm_fill_uid): the IDs the file offers, read with the
+    // file. Whether they are granted is decided when they are installed.
+    let set_ids = {
         let meta = file_node.metadata()?;
         let perms = meta.permissions;
-        let set_uid = perms.set_uid.then_some(meta.uid);
-        let set_gid = (perms.set_gid && perms.group_exec).then_some(meta.gid);
-        let traced_unprivileged = match process.tracer.load(core::sync::atomic::Ordering::Acquire) {
-            0 => false,
-            tracer => {
-                super::table::get_process(super::ProcessId(tracer)).is_none_or(|t| t.euid() != 0)
-            }
-        };
-        let may_gain = !current_thread
-            .no_new_privs
-            .load(core::sync::atomic::Ordering::Acquire)
-            && !traced_unprivileged;
-        process.credentials().after_exec(set_uid, set_gid, may_gain)
+        (
+            perms.set_uid.then_some(meta.uid),
+            (perms.set_gid && perms.group_exec).then_some(meta.gid),
+        )
     };
 
     // Point of no return: from clear() on, a failure cannot go back to the
@@ -520,7 +542,7 @@ pub fn exec_process(path: &str, argv: &[&str], envp: &[&str]) -> Result<(), Kern
         // The program's credentials, before the stack: AT_SECURE (and so
         // the loader's refusal of LD_PRELOAD and LD_LIBRARY_PATH) follows
         // from them.
-        process.update_credentials(|c| *c = exec_creds);
+        install_exec_credentials(&process, &current_thread, set_ids);
 
         // Step 3: Setup new stack with arguments, environment, and aux vector
         let stack_top = setup_exec_stack(&process, argv, envp, &resolved_path, &loaded.aux)?;

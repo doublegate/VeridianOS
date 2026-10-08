@@ -16,7 +16,8 @@
  * Failed attempts lock an account for a while, in the kernel.
  *
  * Built by tools/cross/build-deps.sh (after Linux-PAM), with SYS_* from the
- * generated <veridian/sysno.h>.
+ * generated <veridian/sysno.h> (abi/syscalls.map), which needs nothing else
+ * of the native C library.
  */
 
 #define PAM_SM_AUTH
@@ -30,9 +31,7 @@
 #include <syslog.h>
 #include <unistd.h>
 
-#ifndef SYS_VERIDIAN_AUTH
-#error "build with -include userland/libc/include/veridian/sysno.h"
-#endif
+#include "../libc/include/veridian/sysno.h"
 
 /* Operations and results (kernel/src/syscall/veridian_auth.rs). */
 enum { AUTH_CHECK = 0, AUTH_ACCOUNT = 1, AUTH_CHANGE = 2 };
@@ -44,6 +43,11 @@ enum {
     AUTH_NEW_PASSWORD = 4,
     AUTH_MFA_REQUIRED = 5,
 };
+
+/* Set by authentication when the password was right but has expired, so
+ * account management makes the application ask for a new one rather than
+ * letting the expired password through. */
+#define PAM_DATA_NEW_AUTHTOK "pam_veridian_new_authtok"
 
 static long veridian_auth(long op, const char *name, const char *secret, const char *new_secret)
 {
@@ -85,7 +89,12 @@ PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc, cons
         return errno_to_pam(pamh, "auth");
     switch (r) {
     case AUTH_OK:
-    case AUTH_NEW_PASSWORD: /* right password; account management asks for a new one */
+        return PAM_SUCCESS;
+    case AUTH_NEW_PASSWORD:
+        /* Right but expired: account management must report it (it fails
+         * closed if the mark cannot be recorded). */
+        if (pam_set_data(pamh, PAM_DATA_NEW_AUTHTOK, (void *)1, NULL) != PAM_SUCCESS)
+            return PAM_SYSTEM_ERR;
         return PAM_SUCCESS;
     case AUTH_LOCKED:
         pam_syslog(pamh, LOG_NOTICE, "account %s is locked", user);
@@ -123,8 +132,11 @@ PAM_EXTERN int pam_sm_acct_mgmt(pam_handle_t *pamh, int flags, int argc, const c
     long r = veridian_auth(AUTH_ACCOUNT, user, NULL, NULL);
     if (r < 0)
         return errno_to_pam(pamh, "account");
+    const void *expired = NULL;
     switch (r) {
     case AUTH_OK:
+        if (pam_get_data(pamh, PAM_DATA_NEW_AUTHTOK, &expired) == PAM_SUCCESS && expired)
+            return PAM_NEW_AUTHTOK_REQD;
         return PAM_SUCCESS;
     case AUTH_LOCKED:
         return PAM_PERM_DENIED;

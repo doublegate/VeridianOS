@@ -47,6 +47,12 @@ pub struct ThreadFs {
     /// File creation mask (umask). Atomic because it can be read/written
     /// from concurrent syscall paths without holding a lock.
     pub umask: AtomicU32,
+    /// The threads using this state (Linux's fs->users): each thread
+    /// counts itself from creation until it is dropped. More than the
+    /// threads of one process means another process can change this one's
+    /// directories and umask (CLONE_FS), so exec grants no set-ID
+    /// privilege (LSM_UNSAFE_SHARE).
+    pub users: AtomicUsize,
 }
 
 #[cfg(feature = "alloc")]
@@ -59,6 +65,7 @@ impl ThreadFs {
             cwd: Mutex::new(alloc::string::String::from("/")),
             root: Mutex::new(alloc::string::String::from("/")),
             umask: AtomicU32::new(0o022),
+            users: AtomicUsize::new(0),
         })
     }
 
@@ -69,6 +76,7 @@ impl ThreadFs {
             cwd: Mutex::new(cwd),
             root: Mutex::new(root),
             umask: AtomicU32::new(0o022),
+            users: AtomicUsize::new(0),
         })
     }
 
@@ -90,6 +98,7 @@ impl ThreadFs {
             cwd: Mutex::new(src.cwd.lock().clone()),
             root: Mutex::new(src.root.lock().clone()),
             umask: AtomicU32::new(src.umask.load(Ordering::Acquire)),
+            users: AtomicUsize::new(0),
         })
     }
 }
@@ -435,6 +444,10 @@ pub struct Thread {
     /// thread's name at creation, its program's file name after exec, or
     /// what PR_SET_NAME set (N-227). Threads and fork children inherit it.
     pub comm: Mutex<[u8; COMM_LEN]>,
+    /// The thread no longer counts as a user of its filesystem state
+    /// ([`Thread::release_fs`]).
+    #[cfg(feature = "alloc")]
+    fs_released: AtomicBool,
     /// Detached flag (pthread_detach)
     pub detached: AtomicBool,
     /// Filesystem view (cwd, umask)
@@ -521,6 +534,15 @@ pub struct ThreadParams {
     pub kernel_stack_size: usize,
 }
 
+/// A thread that goes without exiting (a process torn down whole) stops
+/// using its filesystem state here.
+#[cfg(feature = "alloc")]
+impl Drop for Thread {
+    fn drop(&mut self) {
+        self.release_fs();
+    }
+}
+
 impl Thread {
     /// Create a new thread
     #[cfg(feature = "alloc")]
@@ -545,6 +567,7 @@ impl Thread {
         );
 
         let comm = comm_from(name.as_bytes());
+        fs.users.fetch_add(1, Ordering::AcqRel);
         Self {
             tid,
             process,
@@ -574,6 +597,7 @@ impl Thread {
             sched: Mutex::new(SchedParams::default()),
             no_new_privs: AtomicBool::new(false),
             comm: Mutex::new(comm),
+            fs_released: AtomicBool::new(false),
             detached: AtomicBool::new(false),
             fs,
         }
@@ -772,6 +796,16 @@ impl Thread {
     #[cfg(feature = "alloc")]
     pub fn fs(&self) -> Arc<ThreadFs> {
         self.fs.clone()
+    }
+
+    /// Stop counting as a user of the filesystem state ([`ThreadFs::users`]),
+    /// once: when the thread exits (Linux's exit_fs), or when it is dropped
+    /// without having exited.
+    #[cfg(feature = "alloc")]
+    pub fn release_fs(&self) {
+        if !self.fs_released.swap(true, Ordering::AcqRel) {
+            self.fs.users.fetch_sub(1, Ordering::AcqRel);
+        }
     }
 }
 

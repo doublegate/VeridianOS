@@ -256,6 +256,7 @@ pub fn sys_ptrace(request: usize, pid: usize, addr: usize, data: usize) -> Sysca
         PtraceRequest::TraceMe => {
             // The parent becomes the tracer; a process can be traced once.
             let parent = caller.parent().ok_or(SyscallError::OperationNotPermitted)?;
+            let _guard = caller.cred_guard.lock();
             caller
                 .tracer
                 .compare_exchange(0, parent.0, Ordering::AcqRel, Ordering::Acquire)
@@ -266,6 +267,10 @@ pub fn sys_ptrace(request: usize, pid: usize, addr: usize, data: usize) -> Sysca
         PtraceRequest::Attach => {
             let target = process::find_process(process::ProcessId(pid as u64))
                 .ok_or(SyscallError::ProcessNotFound)?;
+            // Checked and attached under the target's credential guard, as
+            // a set-ID exec decides under it: the target's credentials
+            // cannot change between the check and the attach.
+            let _guard = target.cred_guard.lock();
             may_attach(
                 caller_pid,
                 &caller.credentials(),

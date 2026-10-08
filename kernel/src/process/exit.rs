@@ -560,6 +560,7 @@ pub fn exit_dispatched(exit_code: i32, group: bool) -> ! {
         // CLONE_CHILD_CLEARTID: clear the TID word and wake a joiner.
         super::robust_list::exit_thread(&thread);
         crate::syscall::scheduling::thread_exit(&thread);
+        thread.release_fs();
         let clear_ptr = thread.clear_tid.load(Ordering::Acquire);
         if clear_ptr != 0 {
             let _ = crate::syscall::userspace::write_user(clear_ptr, 0u32);

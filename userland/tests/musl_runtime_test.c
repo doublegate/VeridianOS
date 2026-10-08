@@ -155,20 +155,24 @@ static int print_ids(void)
     return 0;
 }
 
-/* Run `path --ids` as user 1000, optionally under no_new_privs; its
- * output line in `out`. */
-static int run_ids_as_user(const char *path, int nnp, char *out, size_t len)
+/* How run_ids_as_user starts the program: plainly, under no_new_privs, or
+ * in a child that shares this process's directories and umask (CLONE_FS). */
+enum ids_run { IDS_PLAIN, IDS_NO_NEW_PRIVS, IDS_SHARED_FS };
+
+/* Run `path --ids` as user 1000; its output line in `out`. */
+static int run_ids_as_user(const char *path, enum ids_run how, char *out, size_t len)
 {
     int fds[2];
     if (pipe(fds) != 0)
         return -1;
-    pid_t pid = fork();
+    pid_t pid = how == IDS_SHARED_FS ? (pid_t)syscall(SYS_clone, CLONE_FS | SIGCHLD, 0, 0, 0, 0)
+                                     : fork();
     if (pid == 0) {
         dup2(fds[1], 1);
         close(fds[0]);
         if (setresuid(1000, 1000, 1000) != 0)
             _exit(2);
-        if (nnp && prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0)
+        if (how == IDS_NO_NEW_PRIVS && prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0)
             _exit(3);
         execl(path, "suid_ids", "--ids", (char *)0);
         _exit(4);
@@ -190,8 +194,9 @@ static int run_ids_as_user(const char *path, int nnp, char *out, size_t len)
 
 /* Set-user-ID programs (Linux's bprm_fill_uid): a root-owned 04755 copy of
  * this program, run by user 1000, runs with effective and saved user 0 and
- * AT_SECURE (so the loader ignores LD_PRELOAD); under no_new_privs it gains
- * nothing; the command name is the file's. A write by a non-root owner and
+ * AT_SECURE (so the loader ignores LD_PRELOAD); under no_new_privs, or when
+ * another process shares its directories and umask (LSM_UNSAFE_SHARE), it
+ * gains nothing; the command name is the file's. A write by a non-root owner and
  * any chown clear the bit (file_remove_privs, chown). */
 static void test_setuid_exec(const char *self)
 {
@@ -214,14 +219,17 @@ static void test_setuid_exec(const char *self)
     int chmodded = ok_copy && chmod(copy, 04755) == 0 && stat(copy, &sb) == 0
                    && (sb.st_mode & 07777) == 04755;
 
-    static char gained[64], kept[64], why[200];
-    int st_gained = run_ids_as_user(copy, 0, gained, sizeof(gained));
-    int st_kept = run_ids_as_user(copy, 1, kept, sizeof(kept));
-    snprintf(why, sizeof(why), "copy=%d chmod=%d mode=%o gained='%s'/%d nnp='%s'/%d", ok_copy,
-             chmodded, (unsigned)(sb.st_mode & 07777), gained, st_gained, kept, st_kept);
+    static char gained[64], kept[64], shared[64], why[320];
+    int st_gained = run_ids_as_user(copy, IDS_PLAIN, gained, sizeof(gained));
+    int st_kept = run_ids_as_user(copy, IDS_NO_NEW_PRIVS, kept, sizeof(kept));
+    int st_shared = run_ids_as_user(copy, IDS_SHARED_FS, shared, sizeof(shared));
+    snprintf(why, sizeof(why), "copy=%d chmod=%d mode=%o gained='%s'/%d nnp='%s'/%d fs='%s'/%d",
+             ok_copy, chmodded, (unsigned)(sb.st_mode & 07777), gained, st_gained, kept, st_kept,
+             shared, st_shared);
     report("musl_setuid_exec",
            chmodded && st_gained == 0 && strcmp(gained, "1000 0 0 1 suid_ids") == 0
-               && st_kept == 0 && strcmp(kept, "1000 1000 1000 0 suid_ids") == 0,
+               && st_kept == 0 && strcmp(kept, "1000 1000 1000 0 suid_ids") == 0
+               && st_shared == 0 && strcmp(shared, "1000 1000 1000 0 suid_ids") == 0,
            why);
 
     /* The owner (1000) writing its own set-user-ID file clears the bit;

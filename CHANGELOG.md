@@ -26,7 +26,10 @@
   rules: a set-user-ID file runs with its owner as effective user, a set-group-ID file with
   group execute with its group, the saved IDs take the effective ones, and AT_SECURE tells the
   dynamic loader to ignore LD_PRELOAD and LD_LIBRARY_PATH. Nothing is gained under
-  no_new_privs or while traced by an unprivileged tracer. The bits go when a non-root caller
+  no_new_privs, while traced by an unprivileged tracer, or while another process shares the
+  program's directories and umask (CLONE_FS), as Linux's LSM_UNSAFE_SHARE; exec decides and
+  installs the credentials under a per-process guard that ptrace attach also takes (Linux's
+  cred_guard_mutex), so a tracer cannot attach in between. The bits go when a non-root caller
   writes or truncates the file (set-group-ID only where it means set-group-ID), on any chown of
   a non-directory, and set-group-ID when a caller outside the file's group chmods it. A file's
   owner may now change its group to one it belongs to (POSIX `_POSIX_CHOWN_RESTRICTED`); chmod
@@ -267,9 +270,11 @@
 - **mkfs-blockfs keeps modes, owners and symlinks.** Images gave every file 0755 or 0644 and
   every directory 0755, dropping set-ID and sticky bits, and copied each symlink's target in its
   place (every BusyBox applet link was a full copy of BusyBox). Files and directories now keep
-  their permission bits, symlinks are stored as BlockFS symlinks, `--attrs FILE` sets owners and
-  modes by image path (a path missing from the image is an error), and the inode table is sized
-  for the tree being imaged.
+  their permission bits within 0755 (so private files stay private, and a builder's
+  group-writable umask or set-ID file never becomes a writable or set-ID file owned by root),
+  symlinks are stored as BlockFS symlinks, `--attrs FILE` sets owners and any other mode by
+  image path (a path missing from the image is an error), and the inode table is sized for the
+  tree being imaged.
 - **Linux system call numbers are the only user ABI (X1, ADR 0009).** A call Linux has uses
   Linux's x86_64 number and name (`write` is 1); a VeridianOS-only call (IPC, capabilities,
   packages, framebuffer, Wayland, audio) has a private number from 1024. `abi/syscalls.map` is
@@ -342,7 +347,9 @@
   account store compared password hashes with `==`, which stops at the first differing byte; it
   now uses the constant-time comparison. Five failed attempts locked an account until reboot,
   which a screen locker would turn into a lockout of the session's user; the lock now lasts 600
-  seconds (pam_faillock's default) and is separate from an administrator's lock.
+  seconds (pam_faillock's default) and is separate from an administrator's lock. Changing a
+  password checks the old one the same way (it skipped the lockout and the failure count, so
+  it could be used to guess the password without limit).
 - **A malformed executable no longer panics the kernel.** The loader sliced each segment's file
   range and added its addresses unchecked, so an ELF file whose PT_LOAD ran past the end of the
   file, or whose sizes overflowed, crashed the kernel on exec. Such files now fail with ENOEXEC

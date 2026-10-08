@@ -713,52 +713,46 @@ impl AuthManager {
     /// boot).
     fn authenticate_at(&self, username: &str, password: &str, now: u64) -> AuthResult {
         let mut accounts = self.accounts.write();
-
-        if let Some(account) = accounts.get_mut(username) {
-            // Check if account is locked
-            if account.lock_active(now) {
-                // Log the failed attempt
-                crate::security::audit::log_auth_attempt(0, account.user_id, username, false);
-                return AuthResult::AccountLocked;
-            }
-
-            // Check if account has expired
-            if account.is_expired() {
-                crate::security::audit::log_auth_attempt(0, account.user_id, username, false);
-                return AuthResult::AccountExpired;
-            }
-
-            // Verify password
-            if account.verify_password(password) {
-                // Reset failed attempts on successful login
-                account.failed_attempts = 0;
-
-                // Check if MFA is required
-                if account.mfa_enabled {
-                    return AuthResult::MfaRequired;
-                }
-
-                // Log successful authentication
+        let Some(account) = accounts.get_mut(username) else {
+            return AuthResult::InvalidCredentials;
+        };
+        match self.check_password(account, password, now) {
+            AuthResult::Success if account.mfa_enabled => AuthResult::MfaRequired,
+            AuthResult::Success => {
                 crate::security::audit::log_auth_attempt(0, account.user_id, username, true);
-
-                return AuthResult::Success;
-            } else {
-                // Increment failed attempts
-                account.failed_attempts += 1;
-
-                // Log failed authentication
-                crate::security::audit::log_auth_attempt(0, account.user_id, username, false);
-
-                // Lock account if max attempts exceeded, for a while
-                if account.failed_attempts >= self.max_failed_attempts {
-                    account.locked_until = Some(now.saturating_add(Self::LOCKOUT_SECS));
-                    return AuthResult::AccountLocked;
-                }
-
-                return AuthResult::InvalidCredentials;
+                AuthResult::Success
             }
+            other => other,
         }
+    }
 
+    /// Check `password` against `account` at time `now`, as every
+    /// password check must: refused while the account is locked or
+    /// expired; a failure is counted and logged, and enough of them lock
+    /// the account for [`LOCKOUT_SECS`](Self::LOCKOUT_SECS); a success
+    /// clears the count. `Success` means only that the password is right.
+    fn check_password(&self, account: &mut UserAccount, password: &str, now: u64) -> AuthResult {
+        let fail = |account: &UserAccount| {
+            crate::security::audit::log_auth_attempt(0, account.user_id, account.username, false);
+        };
+        if account.lock_active(now) {
+            fail(account);
+            return AuthResult::AccountLocked;
+        }
+        if account.is_expired() {
+            fail(account);
+            return AuthResult::AccountExpired;
+        }
+        if account.verify_password(password) {
+            account.failed_attempts = 0;
+            return AuthResult::Success;
+        }
+        account.failed_attempts += 1;
+        fail(account);
+        if account.failed_attempts >= self.max_failed_attempts {
+            account.locked_until = Some(now.saturating_add(Self::LOCKOUT_SECS));
+            return AuthResult::AccountLocked;
+        }
         AuthResult::InvalidCredentials
     }
 
@@ -817,12 +811,32 @@ impl AuthManager {
     /// Change a user's password.
     ///
     /// Validates the new password against the active policy and checks
-    /// password history to prevent reuse.
+    /// password history to prevent reuse. The old password is checked as a
+    /// login is ([`check_password`](Self::check_password): lockout, failure
+    /// count, audit), or this would be a way to guess it without limit; an
+    /// account that needs a second factor cannot change its password with
+    /// the old one alone.
     pub fn change_password(
         &self,
         username: &str,
         old_password: &str,
         new_password: &str,
+    ) -> Result<(), KernelError> {
+        self.change_password_at(
+            username,
+            old_password,
+            new_password,
+            crate::arch::timer::get_timestamp_secs(),
+        )
+    }
+
+    /// [`change_password`](Self::change_password) at time `now`.
+    fn change_password_at(
+        &self,
+        username: &str,
+        old_password: &str,
+        new_password: &str,
+        now: u64,
     ) -> Result<(), KernelError> {
         let policy = *self.password_policy.read();
 
@@ -830,24 +844,17 @@ impl AuthManager {
         policy.validate_password(new_password)?;
 
         let mut accounts = self.accounts.write();
-
-        if let Some(account) = accounts.get_mut(username) {
-            // Verify old password first
-            if !account.verify_password(old_password) {
-                return Err(KernelError::PermissionDenied {
-                    operation: "change_password",
-                });
+        let account = accounts.get_mut(username).ok_or(KernelError::NotFound {
+            resource: "user",
+            id: 0,
+        })?;
+        match self.check_password(account, old_password, now) {
+            AuthResult::Success if !account.mfa_enabled => {
+                account.change_password(new_password, policy.history_size)
             }
-
-            // Change password with history check
-            account.change_password(new_password, policy.history_size)?;
-
-            Ok(())
-        } else {
-            Err(KernelError::NotFound {
-                resource: "user",
-                id: 0,
-            })
+            _ => Err(KernelError::PermissionDenied {
+                operation: "change_password",
+            }),
         }
     }
 
@@ -1072,6 +1079,34 @@ mod tests {
         }
         assert_eq!(
             auth.authenticate_at("carol", "password", 1000),
+            AuthResult::Success
+        );
+    }
+
+    /// Changing a password checks the old one as a login does: wrong
+    /// guesses count and lock the account, and a locked account cannot
+    /// change it even with the right one.
+    #[test]
+    fn password_change_cannot_guess_past_the_lockout() {
+        let auth = AuthManager::new();
+        let _ = auth.create_user("erin", "password");
+        for _ in 0..5 {
+            assert!(auth
+                .change_password_at("erin", "guess", "new-password", 100)
+                .is_err());
+        }
+        assert!(auth
+            .change_password_at("erin", "password", "new-password", 101)
+            .is_err());
+        assert_eq!(
+            auth.authenticate_at("erin", "password", 101),
+            AuthResult::AccountLocked
+        );
+        let later = 100 + AuthManager::LOCKOUT_SECS;
+        auth.change_password_at("erin", "password", "new-password", later)
+            .unwrap();
+        assert_eq!(
+            auth.authenticate_at("erin", "new-password", later),
             AuthResult::Success
         );
     }

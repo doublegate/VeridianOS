@@ -470,6 +470,8 @@ pub fn exit_thread(exit_code: i32) {
         robust_list::exit_thread(&thread);
         #[cfg(feature = "alloc")]
         crate::syscall::scheduling::thread_exit(&thread);
+        #[cfg(feature = "alloc")]
+        thread.release_fs();
         let clear_ptr = thread.clear_tid.load(core::sync::atomic::Ordering::Acquire);
         if clear_ptr != 0 {
             let _ = crate::syscall::userspace::write_user(clear_ptr, 0u32);

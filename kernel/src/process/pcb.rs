@@ -176,6 +176,13 @@ pub struct Process {
     /// inherited on fork, as on Linux.
     pub tracer: AtomicU64,
 
+    /// Linux's cred_guard_mutex: exec decides and installs set-ID
+    /// credentials under it, and ptrace attaches under it, so a tracer
+    /// either attaches first (and exec grants no privilege) or sees the new
+    /// credentials (and may not attach). Held only briefly, never across
+    /// anything that waits.
+    pub cred_guard: Mutex<()>,
+
     /// Session ID (initialized to pid)
     pub sid: AtomicU64,
 
@@ -311,6 +318,7 @@ impl Process {
             creds: Mutex::new(super::creds::Credentials::new(0, 0)),
             pgid: AtomicU64::new(pid.0),
             tracer: AtomicU64::new(0),
+            cred_guard: Mutex::new(()),
             sid: AtomicU64::new(pid.0),
             env_vars: Mutex::new(BTreeMap::new()),
             #[cfg(feature = "alloc")]

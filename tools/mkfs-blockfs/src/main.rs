@@ -445,8 +445,8 @@ impl BlockFsBuilder {
     }
 
     /// Populate from a host directory tree. Every file and directory keeps
-    /// its host permission bits, set-user-ID, set-group-ID and sticky
-    /// included; owners are root until `--attrs` says otherwise. Symlinks
+    /// its host permission bits within 0755 ([`host_mode`]); owners other
+    /// than root and any other mode come from `--attrs`. Symlinks
     /// stay symlinks, with their targets as written (an absolute one names
     /// a path in the image, which is mounted as the root). Returns each
     /// image path's inode.
@@ -649,13 +649,17 @@ fn count_entries(dir: &Path) -> usize {
     count
 }
 
-/// The permission bits (`0o7777`: with set-user-ID, set-group-ID and
-/// sticky) of the host file at `path`, following symlinks; `default` if it
-/// cannot be read.
+/// The permission bits an image entry takes from the host file at `path`
+/// (`default` if it cannot be read): read and execute for everyone and
+/// write for the owner, as far as the host file has them, and nothing
+/// more. Everything lands owned by root, so a builder's group-writable
+/// umask or a file set-user-ID to the builder must not turn into a
+/// root-owned writable or set-user-ID-root file; set-ID, sticky and
+/// group or other write bits come only from `--attrs`.
 fn host_mode(path: &Path, default: u16) -> u16 {
     use std::os::unix::fs::PermissionsExt;
     fs::metadata(path)
-        .map(|m| (m.permissions().mode() & 0o7777) as u16)
+        .map(|m| (m.permissions().mode() & 0o755) as u16)
         .unwrap_or(default)
 }
 
@@ -874,9 +878,9 @@ mod tests {
         assert!(parse_attr_line("/x -1 0").is_err());
     }
 
-    /// Host modes survive into the image, set-user-ID and sticky included,
-    /// symlinks stay symlinks, and an attributes file sets owners and modes
-    /// by image path.
+    /// Host modes survive into the image within 0755, symlinks stay
+    /// symlinks, and an attributes file sets owners and modes by image
+    /// path.
     #[test]
     fn populate_keeps_modes_and_applies_attrs() {
         use std::os::unix::fs::PermissionsExt;
@@ -897,19 +901,26 @@ mod tests {
         let mut b = BlockFsBuilder::new(1024, 64);
         let paths = b.populate_from_dir(&root, 0);
         let mode = |b: &BlockFsBuilder, p: &str| b.inodes[paths[p] as usize].mode;
-        assert_eq!(mode(&b, "/usr/bin/helper"), S_IFREG | set_id_mode as u16);
+        // Host modes are kept within 0755: no set-ID, sticky or group or
+        // other write bits from the build tree.
+        assert_eq!(mode(&b, "/usr/bin/helper"), S_IFREG | 0o755);
         // A symlink stays one, holding its target.
         let alias = &b.inodes[paths["/usr/bin/alias"] as usize];
         assert_eq!(
             (alias.mode, alias.size),
             (S_IFLNK | 0o777, "helper".len() as u32)
         );
-        assert_eq!(mode(&b, "/tmp"), S_IFDIR | 0o1777);
+        assert_eq!(mode(&b, "/tmp"), S_IFDIR | 0o755);
 
+        // Special modes are granted only through the attributes file.
         let n = b
-            .apply_attrs(&paths, "# owners\n/usr/bin/helper 0 27 4750\n/tmp/ 0 0\n")
+            .apply_attrs(
+                &paths,
+                "# owners\n/usr/bin/helper 0 27 4750\n/tmp/ 0 0 1777\n",
+            )
             .unwrap();
         assert_eq!(n, 2);
+        assert_eq!(mode(&b, "/tmp"), S_IFDIR | 0o1777);
         let helper = &b.inodes[paths["/usr/bin/helper"] as usize];
         assert_eq!(
             (helper.uid, helper.gid, helper.mode),
