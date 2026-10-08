@@ -427,6 +427,14 @@ pub struct Thread {
     /// setpriority; N-221). The dispatcher task running the thread follows
     /// them.
     pub sched: Mutex<SchedParams>,
+    /// prctl(PR_SET_NO_NEW_PRIVS): exec never grants this thread more
+    /// privilege (no setuid or setgid). It cannot be cleared, and every
+    /// thread and process the thread creates inherits it.
+    pub no_new_privs: AtomicBool,
+    /// The command name (Linux `comm`): up to 15 bytes and a NUL, the
+    /// thread's name at creation, its program's file name after exec, or
+    /// what PR_SET_NAME set (N-227). Threads and fork children inherit it.
+    pub comm: Mutex<[u8; COMM_LEN]>,
     /// Detached flag (pthread_detach)
     pub detached: AtomicBool,
     /// Filesystem view (cwd, umask)
@@ -485,6 +493,21 @@ impl Stack {
     }
 }
 
+/// The size of a command name with its NUL (Linux TASK_COMM_LEN).
+pub const COMM_LEN: usize = 16;
+
+/// `name` as a command name: its first 15 bytes, NUL-padded.
+pub fn comm_from(name: &[u8]) -> [u8; COMM_LEN] {
+    let mut comm = [0u8; COMM_LEN];
+    let n = name
+        .iter()
+        .take(COMM_LEN - 1)
+        .position(|&b| b == 0)
+        .unwrap_or(name.len().min(COMM_LEN - 1));
+    comm[..n].copy_from_slice(&name[..n]);
+    comm
+}
+
 /// Thread creation parameters
 #[cfg(feature = "alloc")]
 pub struct ThreadParams {
@@ -521,6 +544,7 @@ impl Thread {
             kernel_stack_base + kernel_stack_size,
         );
 
+        let comm = comm_from(name.as_bytes());
         Self {
             tid,
             process,
@@ -548,6 +572,8 @@ impl Thread {
             altstack: Mutex::new(super::signals::SigAltStack::default()),
             robust_list: AtomicUsize::new(0),
             sched: Mutex::new(SchedParams::default()),
+            no_new_privs: AtomicBool::new(false),
+            comm: Mutex::new(comm),
             detached: AtomicBool::new(false),
             fs,
         }

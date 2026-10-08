@@ -1151,7 +1151,7 @@ fn handle_syscall(
         Syscall::SetRobustList => sys_set_robust_list(arg1, arg2),
         Syscall::GetRobustList => sys_get_robust_list(arg1, arg2, arg3),
         Syscall::ClockNanosleep => time::sys_clock_nanosleep(arg1, arg2, arg3, arg4),
-        Syscall::Prctl => linux_compat::sys_prctl(arg1, arg2),
+        Syscall::Prctl => linux_compat::sys_prctl(arg1, arg2, arg3, arg4, arg5),
         Syscall::Flock => sys_flock(arg1, arg2),
         Syscall::Tkill => process::sys_tkill(arg1, arg2),
         Syscall::Tgkill => process::sys_tgkill(arg1, arg2, arg3),
@@ -1590,11 +1590,7 @@ fn sys_fchmodat(dirfd: usize, path_ptr: usize, mode: usize) -> SyscallResult {
     let node = vfs
         .resolve_path(&abs_path)
         .map_err(filesystem::map_resolve_err)?;
-    filesystem::require_owner_or_root(&node)?;
-    let perms = crate::fs::Permissions::from_mode(mode as u32);
-    node.chmod(perms)
-        .map_err(|_| SyscallError::InvalidArgument)?;
-    Ok(0)
+    filesystem::chmod_node(&node, mode)
 }
 
 /// fchownat syscall -- chown relative to a directory fd.

@@ -98,13 +98,38 @@ pub enum NodeType {
 /// parent-before-child. Callers of `VfsNode::rename` must hold it.
 pub(crate) static RENAME_LOCK: spin::Mutex<()> = spin::Mutex::new(());
 
+/// After a write or truncate of `node` by the calling process: drop the
+/// set-user-ID and set-group-ID bits as [`Permissions::after_write`] says.
+/// Regular files only; a failure to read or change the mode leaves it.
+pub fn remove_privs_after_write(node: &dyn VfsNode) {
+    if node.node_type() != NodeType::File {
+        return;
+    }
+    let Some(process) = crate::process::current_process() else {
+        return;
+    };
+    let creds = process.credentials();
+    if creds.euid == 0 {
+        return;
+    }
+    let Ok(meta) = node.metadata() else {
+        return;
+    };
+    if let Some(kept) = meta
+        .permissions
+        .after_write(creds.euid, creds.in_group(meta.gid))
+    {
+        let _ = node.chmod(kept);
+    }
+}
+
 /// Names that can never be a rename source or target.
 pub(crate) fn is_special_name(name: &str) -> bool {
     name.is_empty() || name == "." || name == ".."
 }
 
 /// File permissions (Unix-style)
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Permissions {
     pub owner_read: bool,
     pub owner_write: bool,
@@ -118,6 +143,13 @@ pub struct Permissions {
     /// Sticky bit (S_ISVTX): in a directory, only an entry's owner, the
     /// directory's owner or root may remove or rename the entry.
     pub sticky: bool,
+    /// Set-user-ID bit (S_ISUID): exec runs the program with its owner as
+    /// the effective user.
+    pub set_uid: bool,
+    /// Set-group-ID bit (S_ISGID): exec runs the program with its group as
+    /// the effective group (with group execute permission; without it the
+    /// bit marks mandatory locking, which Linux no longer honours).
+    pub set_gid: bool,
 }
 
 impl Permissions {
@@ -134,6 +166,8 @@ impl Permissions {
             other_write: false,
             other_exec: true,
             sticky: false,
+            set_uid: false,
+            set_gid: false,
         }
     }
 
@@ -150,6 +184,8 @@ impl Permissions {
             other_write: false,
             other_exec: false,
             sticky: false,
+            set_uid: false,
+            set_gid: false,
         }
     }
 
@@ -168,6 +204,8 @@ impl Permissions {
             (self.other_write, 0o002),
             (self.other_exec, 0o001),
             (self.sticky, 0o1000),
+            (self.set_gid, 0o2000),
+            (self.set_uid, 0o4000),
         ]
         .iter()
         .filter(|(set, _)| *set)
@@ -187,7 +225,40 @@ impl Permissions {
             other_write: (mode & 0o002) != 0,
             other_exec: (mode & 0o001) != 0,
             sticky: (mode & 0o1000) != 0,
+            set_gid: (mode & 0o2000) != 0,
+            set_uid: (mode & 0o4000) != 0,
         }
+    }
+
+    /// Linux's file_remove_privs: the permissions a file keeps after a
+    /// write or truncate by `uid` (`in_group`: the writer belongs to the
+    /// file's group). Root keeps the bits (CAP_FSETID); anyone else drops
+    /// set-user-ID, and set-group-ID where it means set-group-ID (group
+    /// execute set) or the writer is outside the group. `None` when nothing
+    /// changes.
+    pub fn after_write(&self, uid: u32, in_group: bool) -> Option<Self> {
+        if uid == 0 {
+            return None;
+        }
+        let mut kept = *self;
+        kept.set_uid = false;
+        if self.group_exec || !in_group {
+            kept.set_gid = false;
+        }
+        (kept != *self).then_some(kept)
+    }
+
+    /// The permissions a non-directory keeps when its owner or group
+    /// changes (Linux's chown, whoever calls it): no set-user-ID, and no
+    /// set-group-ID with group execute (without it the bit marks mandatory
+    /// locking and stays). `None` when nothing changes.
+    pub fn after_chown(&self) -> Option<Self> {
+        let mut kept = *self;
+        kept.set_uid = false;
+        if self.group_exec {
+            kept.set_gid = false;
+        }
+        (kept != *self).then_some(kept)
     }
 
     /// Check if the given uid/gid has read access.
@@ -1918,9 +1989,49 @@ mod tests {
 
     #[test]
     fn permissions_mode_round_trip_includes_sticky() {
-        for mode in [0o1777, 0o755, 0o1700, 0o644, 0o0] {
+        for mode in [
+            0o1777, 0o755, 0o1700, 0o644, 0o0, 0o4755, 0o2755, 0o6711, 0o7777,
+        ] {
             assert_eq!(Permissions::from_mode(mode).to_mode(), mode);
         }
+        let p = Permissions::from_mode(0o6755);
+        assert!(p.set_uid && p.set_gid && !p.sticky);
+    }
+
+    /// Linux's file_remove_privs: a write by anyone but root drops
+    /// set-user-ID; set-group-ID goes with group execute or when the writer
+    /// is outside the group, and stays as a locking mark otherwise.
+    #[test]
+    fn writes_drop_set_id_bits_except_for_root() {
+        let suid = Permissions::from_mode(0o4755);
+        assert_eq!(suid.after_write(0, false), None);
+        assert_eq!(suid.after_write(1000, true).unwrap().to_mode(), 0o755);
+        let sgid = Permissions::from_mode(0o2755);
+        assert_eq!(sgid.after_write(1000, true).unwrap().to_mode(), 0o755);
+        let lock_mark = Permissions::from_mode(0o2644);
+        assert_eq!(lock_mark.after_write(1000, true), None);
+        assert_eq!(lock_mark.after_write(1000, false).unwrap().to_mode(), 0o644);
+        assert_eq!(Permissions::from_mode(0o644).after_write(1000, false), None);
+    }
+
+    /// chown drops set-user-ID always and set-group-ID with group execute.
+    #[test]
+    fn chown_drops_set_id_bits() {
+        assert_eq!(
+            Permissions::from_mode(0o6755)
+                .after_chown()
+                .unwrap()
+                .to_mode(),
+            0o755
+        );
+        assert_eq!(
+            Permissions::from_mode(0o6744)
+                .after_chown()
+                .unwrap()
+                .to_mode(),
+            0o2744
+        );
+        assert_eq!(Permissions::from_mode(0o1777).after_chown(), None);
     }
 
     /// Helper: create a Vfs with a ramfs root filesystem already mounted.

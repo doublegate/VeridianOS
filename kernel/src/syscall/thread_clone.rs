@@ -238,10 +238,18 @@ pub fn sys_thread_clone(
 
     let thread = builder.build().map_err(|_| SyscallError::InvalidState)?;
     let tid = thread.tid;
-    // A new thread starts with its creator's blocked mask (N-109).
+    // A new thread starts with its creator's blocked mask (N-109), command
+    // name (N-227) and no_new_privs, as Linux copies them.
     thread.sigmask.store(
         current_thread
             .sigmask
+            .load(core::sync::atomic::Ordering::Acquire),
+        core::sync::atomic::Ordering::Release,
+    );
+    *thread.comm.lock() = *current_thread.comm.lock();
+    thread.no_new_privs.store(
+        current_thread
+            .no_new_privs
             .load(core::sync::atomic::Ordering::Acquire),
         core::sync::atomic::Ordering::Release,
     );

@@ -289,6 +289,7 @@ fn open_path(path: &str, flags: usize, mode: usize) -> SyscallResult {
     }
     if open_flags.truncate && open_flags.write && !created && node_type == NodeType::File {
         node.truncate(0).map_err(map_resolve_err)?;
+        crate::fs::remove_privs_after_write(&*node);
     }
 
     // The file records the canonical path of what it opened (in the whole
@@ -798,8 +799,9 @@ pub fn sys_ftruncate(fd: usize, length: usize) -> SyscallResult {
     }
     file.node
         .truncate(length)
-        .map(|_| 0)
-        .map_err(super::map_kernel_error)
+        .map_err(super::map_kernel_error)?;
+    crate::fs::remove_privs_after_write(&*file.node);
+    Ok(0)
 }
 
 /// Create a directory
@@ -1823,19 +1825,35 @@ pub(crate) fn own_new_node(node: &alloc::sync::Arc<dyn crate::fs::VfsNode>) {
 
 /// chmod-style operations: only the owner or root may change a node's
 /// mode (FS-SEC-02).
-pub(crate) fn require_owner_or_root(
+pub(crate) fn chmod_node(
     node: &alloc::sync::Arc<dyn crate::fs::VfsNode>,
-) -> Result<(), SyscallError> {
-    let uid = caller_creds().euid;
-    if uid == 0 {
-        return Ok(());
-    }
+    mode: usize,
+) -> SyscallResult {
+    let creds = caller_creds();
     let meta = node.metadata().map_err(super::map_kernel_error)?;
-    if meta.uid == uid {
-        Ok(())
-    } else {
-        Err(SyscallError::PermissionDenied)
+    let perms = chmod_perms(&creds, meta.uid, meta.gid, mode)?;
+    node.chmod(perms).map_err(super::map_kernel_error)?;
+    Ok(0)
+}
+
+/// The mode a chmod by `creds` stores on a file owned by `uid`:`gid`.
+/// EPERM unless the caller owns the file or is root; and as Linux's
+/// setattr_copy, a caller other than root outside the file's group cannot
+/// set the set-group-ID bit (it is dropped, not refused).
+pub(crate) fn chmod_perms(
+    creds: &crate::process::creds::Credentials,
+    uid: u32,
+    gid: u32,
+    mode: usize,
+) -> Result<Permissions, SyscallError> {
+    if creds.euid != 0 && creds.euid != uid {
+        return Err(SyscallError::OperationNotPermitted);
     }
+    let mut perms = Permissions::from_mode(mode as u32 & 0o7777);
+    if creds.euid != 0 && !creds.in_group(gid) {
+        perms.set_gid = false;
+    }
+    Ok(perms)
 }
 
 /// Check that the caller may open `node` with `flags`, using the POSIX
@@ -2799,15 +2817,8 @@ pub fn sys_symlink(target_ptr: usize, link_ptr: usize) -> SyscallResult {
 pub fn sys_chmod(path_ptr: usize, mode: usize) -> SyscallResult {
     let path = read_user_path(path_ptr)?;
 
-    let vfs = vfs()?;
-    let node = vfs.resolve_path(&path).map_err(map_resolve_err)?;
-    require_owner_or_root(&node)?;
-
-    let perms = Permissions::from_mode(mode as u32);
-    node.chmod(perms)
-        .map_err(|_| SyscallError::InvalidArgument)?;
-
-    Ok(0)
+    let node = vfs()?.resolve_path(&path).map_err(map_resolve_err)?;
+    chmod_node(&node, mode)
 }
 
 /// Change file permissions by fd (syscall 186).
@@ -2819,14 +2830,7 @@ pub fn sys_fchmod(fd: usize, mode: usize) -> SyscallResult {
         .lock()
         .get(fd)
         .ok_or(SyscallError::BadFileDescriptor)?;
-    require_owner_or_root(&file.node)?;
-
-    let perms = Permissions::from_mode(mode as u32);
-    file.node
-        .chmod(perms)
-        .map_err(|_| SyscallError::InvalidArgument)?;
-
-    Ok(0)
+    chmod_node(&file.node, mode)
 }
 
 /// Set file creation mask (syscall 187).
@@ -2863,9 +2867,9 @@ pub fn sys_truncate(path_ptr: usize, length: usize) -> SyscallResult {
     }
     // As opening it for writing would need (N-191).
     require_open_access(&node, &OpenFlags::write_only())?;
-    node.truncate(length)
-        .map(|_| 0)
-        .map_err(super::map_kernel_error)
+    node.truncate(length).map_err(super::map_kernel_error)?;
+    crate::fs::remove_privs_after_write(&*node);
+    Ok(0)
 }
 
 /// Resolve a path relative to a directory fd.
@@ -3061,11 +3065,13 @@ pub fn sys_pwrite(fd: usize, buf: usize, count: usize, offset: usize) -> Syscall
 
     // Write at `offset` through the VfsNode, a chunk at a time (N-43).
     let mut at = offset;
-    super::userspace::consume_from_user(buf, count, true, |kbuf| {
+    let written = super::userspace::consume_from_user(buf, count, true, |kbuf| {
         let n = file.node.write(at, kbuf).map_err(super::map_kernel_error)?;
         at += n;
         Ok(n)
-    })
+    })?;
+    crate::fs::remove_privs_after_write(&*file.node);
+    Ok(written)
 }
 
 /// Helper: split a path into (parent_dir, basename).
@@ -3106,8 +3112,28 @@ fn chown_id(id: usize) -> Option<u32> {
     (id != u32::MAX).then_some(id)
 }
 
-/// Apply a chown to `node`. Only root may change ownership (FS-SEC-02);
-/// this used to be a no-op that reported success.
+/// Whether `creds` may give a file owned by `file_uid`:`file_gid` the
+/// owner `uid` and group `gid` (`None`: unchanged), as Linux's chown_ok and
+/// chgrp_ok with _POSIX_CHOWN_RESTRICTED: root may do anything; the owner
+/// may keep the owner and set the group to one it belongs to.
+pub(crate) fn may_chown(
+    creds: &crate::process::creds::Credentials,
+    file_uid: u32,
+    file_gid: u32,
+    uid: Option<u32>,
+    gid: Option<u32>,
+) -> bool {
+    if creds.euid == 0 {
+        return true;
+    }
+    let owner = creds.euid == file_uid;
+    let uid_ok = uid.is_none_or(|u| owner && u == file_uid);
+    let gid_ok = gid.is_none_or(|g| owner && (g == file_gid || creds.in_group(g)));
+    uid_ok && gid_ok
+}
+
+/// Apply a chown to `node` ([`may_chown`], EPERM otherwise; FS-SEC-02).
+/// This used to be a no-op that reported success.
 pub(crate) fn chown_node(
     node: &alloc::sync::Arc<dyn crate::fs::VfsNode>,
     uid: usize,
@@ -3117,10 +3143,19 @@ pub(crate) fn chown_node(
     if uid.is_none() && gid.is_none() {
         return Ok(0);
     }
-    if caller_creds().euid != 0 {
-        return Err(SyscallError::PermissionDenied);
+    let meta = node.metadata().map_err(super::map_kernel_error)?;
+    if !may_chown(&caller_creds(), meta.uid, meta.gid, uid, gid) {
+        return Err(SyscallError::OperationNotPermitted);
     }
     node.chown(uid, gid).map_err(super::map_kernel_error)?;
+    // A non-directory that changes hands loses set-user-ID and
+    // set-group-ID (`Permissions::after_chown`).
+    let meta = node.metadata().map_err(super::map_kernel_error)?;
+    if meta.node_type != crate::fs::NodeType::Directory {
+        if let Some(kept) = meta.permissions.after_chown() {
+            node.chmod(kept).map_err(super::map_kernel_error)?;
+        }
+    }
     Ok(0)
 }
 
@@ -3153,6 +3188,61 @@ pub fn sys_mknod(path_ptr: usize, _mode: usize, _dev: usize) -> SyscallResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::process::creds::Credentials;
+
+    /// A user 1000 in group 100 and supplementary group 20.
+    fn user() -> Credentials {
+        let mut c = Credentials::new(0, 0);
+        c.setgroups(&[20]).unwrap();
+        c.setresgid(100, 100, 100).unwrap();
+        c.setresuid(1000, 1000, 1000).unwrap();
+        c
+    }
+
+    /// chmod: the owner or root (EPERM for others); set-group-ID is
+    /// dropped for a non-root caller outside the file's group.
+    #[test]
+    fn chmod_follows_linux_rules() {
+        let u = user();
+        assert_eq!(
+            chmod_perms(&u, 0, 0, 0o644),
+            Err(SyscallError::OperationNotPermitted)
+        );
+        assert_eq!(
+            chmod_perms(&u, 1000, 100, 0o6755).unwrap().to_mode(),
+            0o6755
+        );
+        assert_eq!(chmod_perms(&u, 1000, 20, 0o2755).unwrap().to_mode(), 0o2755);
+        assert_eq!(chmod_perms(&u, 1000, 7, 0o6755).unwrap().to_mode(), 0o4755);
+        let root = Credentials::new(0, 0);
+        assert_eq!(
+            chmod_perms(&root, 1000, 7, 0o2755).unwrap().to_mode(),
+            0o2755
+        );
+        // File type bits in the argument are ignored.
+        assert_eq!(
+            chmod_perms(&u, 1000, 100, 0o100644).unwrap().to_mode(),
+            0o644
+        );
+    }
+
+    /// chown: root anything; the owner only its own groups, never the user.
+    #[test]
+    fn chown_is_restricted_to_root_and_owner_chgrp() {
+        let u = user();
+        assert!(may_chown(&u, 1000, 100, None, Some(20)));
+        assert!(may_chown(&u, 1000, 100, Some(1000), Some(100)));
+        assert!(!may_chown(&u, 1000, 100, None, Some(7)));
+        assert!(!may_chown(&u, 1000, 100, Some(1001), None));
+        assert!(!may_chown(&u, 1001, 100, None, Some(100)));
+        assert!(may_chown(
+            &Credentials::new(0, 0),
+            1001,
+            7,
+            Some(5),
+            Some(9)
+        ));
+    }
 
     /// loff_t is signed: a negative offset or length (as a register value)
     /// is EINVAL, not a huge unsigned one (N-190, N-191).

@@ -114,6 +114,25 @@ pub fn read_user_cstr(addr: usize, max_len: usize) -> Result<String, SyscallErro
     Err(SyscallError::InvalidArgument)
 }
 
+/// Linux's `strncpy_from_user`: copy the string at `addr` into `dst`, up
+/// to its NUL or `dst.len()` bytes, whichever comes first; the bytes copied
+/// (without a NUL). As in [`read_user_cstr`], no read crosses into a page
+/// past the one holding the NUL, and an unmapped page is EFAULT.
+pub fn strncpy_from_user(addr: usize, dst: &mut [u8]) -> Result<usize, SyscallError> {
+    const PAGE: usize = 4096;
+    let mut done = 0;
+    while done < dst.len() {
+        let cursor = addr.checked_add(done).ok_or(SyscallError::InvalidPointer)?;
+        let want = (PAGE - cursor % PAGE).min(dst.len() - done);
+        read_user_bytes(cursor, &mut dst[done..done + want])?;
+        if let Some(nul) = dst[done..done + want].iter().position(|&b| b == 0) {
+            return Ok(done + nul);
+        }
+        done += want;
+    }
+    Ok(done)
+}
+
 /// Copy data from user space to kernel space
 ///
 /// # Safety

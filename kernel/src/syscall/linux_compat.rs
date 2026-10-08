@@ -123,26 +123,55 @@ pub(crate) fn to_linux_errno(err: super::SyscallError) -> isize {
 
 /// prctl(2) subset. Options a program can rely on for its correctness or
 /// security are refused (EINVAL) until implemented, never faked (N-151).
-pub(crate) fn sys_prctl(option: usize, arg2: usize) -> SyscallResult {
+pub(crate) fn sys_prctl(
+    option: usize,
+    arg2: usize,
+    arg3: usize,
+    arg4: usize,
+    arg5: usize,
+) -> SyscallResult {
+    use core::sync::atomic::Ordering;
+
+    use crate::process::thread::{comm_from, COMM_LEN};
+
     const PR_SET_NAME: usize = 15;
     const PR_GET_NAME: usize = 16;
     const PR_SET_TIMERSLACK: usize = 29;
     const PR_GET_TIMERSLACK: usize = 30;
+    const PR_SET_NO_NEW_PRIVS: usize = 38;
+    const PR_GET_NO_NEW_PRIVS: usize = 39;
+    let thread = || crate::process::current_thread().ok_or(super::SyscallError::InvalidState);
     match option {
-        // Advisory only.
-        PR_SET_NAME | PR_SET_TIMERSLACK => Ok(0),
-        PR_GET_TIMERSLACK => Ok(50_000),
-        PR_GET_NAME => {
-            let thread =
-                crate::process::current_thread().ok_or(super::SyscallError::InvalidState)?;
-            let mut name = [0u8; 16];
-            let bytes = thread.name.as_bytes();
-            let n = bytes.len().min(15);
-            name[..n].copy_from_slice(&bytes[..n]);
-            // SAFETY: copy_to_user validates that arg2 is writable user memory.
-            unsafe { super::userspace::copy_to_user(arg2, &name) }
-                .map_err(|_| super::SyscallError::InvalidPointer)?;
+        // The thread's command name (N-227): up to 15 bytes of the string,
+        // EFAULT for a bad pointer.
+        PR_SET_NAME => {
+            let mut name = [0u8; COMM_LEN - 1];
+            let n = super::userspace::strncpy_from_user(arg2, &mut name)?;
+            *thread()?.comm.lock() = comm_from(&name[..n]);
             Ok(0)
+        }
+        PR_GET_NAME => {
+            let comm = *thread()?.comm.lock();
+            super::userspace::write_user_bytes(arg2, &comm)?;
+            Ok(0)
+        }
+        // Advisory only.
+        PR_SET_TIMERSLACK => Ok(0),
+        PR_GET_TIMERSLACK => Ok(50_000),
+        // exec grants no privilege from now on; one way only, and Linux's
+        // argument checks.
+        PR_SET_NO_NEW_PRIVS => {
+            if arg2 != 1 || arg3 != 0 || arg4 != 0 || arg5 != 0 {
+                return Err(super::SyscallError::InvalidArgument);
+            }
+            thread()?.no_new_privs.store(true, Ordering::Release);
+            Ok(0)
+        }
+        PR_GET_NO_NEW_PRIVS => {
+            if arg2 != 0 || arg3 != 0 || arg4 != 0 || arg5 != 0 {
+                return Err(super::SyscallError::InvalidArgument);
+            }
+            Ok(thread()?.no_new_privs.load(Ordering::Acquire) as usize)
         }
         _ => Err(super::SyscallError::InvalidArgument),
     }

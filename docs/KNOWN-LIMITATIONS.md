@@ -143,9 +143,11 @@ What remains:
   never act on a different directory that now has the old name.
 - **exec (N-101 remainder):** a multithreaded process cannot exec (EAGAIN, above). Fork children
   are runnable before setup completes (N-110).
-- **Credentials (N-131 remainder, planned v0.30):** real, effective and saved IDs and
-  supplementary groups exist (N-248), but there are no filesystem IDs, no Linux capabilities
-  (privilege is effective uid 0) and setuid/setgid bits are not honoured by exec.
+- **Credentials (N-131 remainder, planned v0.30):** real, effective and saved IDs,
+  supplementary groups (N-248) and set-user-ID/set-group-ID exec exist, but there are no
+  filesystem IDs and no Linux capabilities (privilege is effective uid 0). A directory's
+  set-group-ID bit is kept but not acted on: new entries take the creator's group, not the
+  directory's.
 - **chroot (N-250):** a working directory outside the new root is moved to the root, where Linux
   would leave it outside.
 
@@ -363,7 +365,7 @@ Page protections now follow `prot` (fixed in v0.27, N-132 to N-137). What remain
 - The kernel creates the account `root` with the password `veridian` at boot.
 - The graphical display manager accepts `root` with **any** non-empty password.
 - Password hashes use 10 PBKDF2 iterations in dev builds and 10,000 in release builds, the count is
-  not stored with the hash, the comparison is not constant-time, and TOTP does not follow RFC 6238.
+  not stored with the hash, and TOTP does not follow RFC 6238.
 
 Do not expose a VeridianOS system to untrusted users or networks.
 

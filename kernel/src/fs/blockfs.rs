@@ -2416,46 +2416,10 @@ impl BlockFsInner {
 }
 
 fn permissions_to_mode(perms: Permissions, is_dir: bool) -> u16 {
-    let mut mode = 0u16;
-
-    if is_dir {
-        mode |= 0x4000;
-    } else {
-        mode |= 0x8000;
-    }
-
-    if perms.owner_read {
-        mode |= 0o400;
-    }
-    if perms.owner_write {
-        mode |= 0o200;
-    }
-    if perms.owner_exec {
-        mode |= 0o100;
-    }
-    if perms.group_read {
-        mode |= 0o040;
-    }
-    if perms.group_write {
-        mode |= 0o020;
-    }
-    if perms.group_exec {
-        mode |= 0o010;
-    }
-    if perms.other_read {
-        mode |= 0o004;
-    }
-    if perms.other_write {
-        mode |= 0o002;
-    }
-    if perms.other_exec {
-        mode |= 0o001;
-    }
-    if perms.sticky {
-        mode |= 0o1000;
-    }
-
-    mode
+    let type_bits: u16 = if is_dir { 0x4000 } else { 0x8000 };
+    // The twelve permission bits: rwx for owner, group and others, sticky,
+    // set-group-ID and set-user-ID.
+    type_bits | (perms.to_mode() & 0o7777) as u16
 }
 
 /// A shared zero block for reads of unmaterialized (sparse) blocks.

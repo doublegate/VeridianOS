@@ -79,6 +79,28 @@ impl Credentials {
         }
     }
 
+    /// The credentials a program runs with after exec (Linux's
+    /// bprm_fill_uid and cap_bprm_creds_from_file). `set_uid` is the
+    /// owner of a set-user-ID file, `set_gid` the group of a set-group-ID
+    /// file with group execute; they become the effective IDs if
+    /// `may_gain` (not under no_new_privs, not traced by an unprivileged
+    /// tracer). The saved IDs then take the effective ones, whether or not
+    /// they changed. The real IDs and supplementary groups stay.
+    pub fn after_exec(&self, set_uid: Option<u32>, set_gid: Option<u32>, may_gain: bool) -> Self {
+        let mut new = *self;
+        if may_gain {
+            if let Some(uid) = set_uid {
+                new.euid = uid;
+            }
+            if let Some(gid) = set_gid {
+                new.egid = gid;
+            }
+        }
+        new.suid = new.euid;
+        new.sgid = new.egid;
+        new
+    }
+
     /// setresuid(r, e, s): `UNCHANGED` keeps a value. Unprivileged, each
     /// new value must be one of the current real, effective or saved IDs.
     pub fn setresuid(&mut self, r: u32, e: u32, s: u32) -> Result<(), SyscallError> {
@@ -228,6 +250,32 @@ mod tests {
     use super::*;
 
     const U: u32 = UNCHANGED;
+
+    #[test]
+    fn exec_of_a_setuid_program_takes_its_owner() {
+        let user = Credentials::new(1000, 100);
+        // pkexec: setuid root.
+        let c = user.after_exec(Some(0), None, true);
+        assert_eq!((c.ruid, c.euid, c.suid), (1000, 0, 0));
+        assert_eq!((c.rgid, c.egid, c.sgid), (100, 100, 100));
+        // setgid with group execute.
+        let c = user.after_exec(None, Some(5), true);
+        assert_eq!((c.rgid, c.egid, c.sgid), (100, 5, 5));
+        // no_new_privs or an unprivileged tracer: nothing is gained.
+        let c = user.after_exec(Some(0), Some(5), false);
+        assert_eq!((c.euid, c.suid, c.egid, c.sgid), (1000, 1000, 100, 100));
+    }
+
+    #[test]
+    fn exec_sets_the_saved_ids_from_the_effective_ones() {
+        // A setuid-root program that dropped to the user with seteuid:
+        // exec of an ordinary program leaves the root saved ID behind.
+        let mut c = Credentials::new(1000, 100);
+        c.euid = 1000;
+        c.suid = 0;
+        let c = c.after_exec(None, None, true);
+        assert_eq!((c.ruid, c.euid, c.suid), (1000, 1000, 1000));
+    }
 
     #[test]
     fn root_drops_privilege_for_good_with_setuid() {

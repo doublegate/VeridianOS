@@ -103,19 +103,150 @@ static void test_flock(void)
     close(fd);
 }
 
-/* prctl reaches prctl (it used to land on native unlink; N-103), the
- * name options work and security options fail closed (N-151). */
+/* prctl reaches prctl (it used to land on native unlink; N-103); the
+ * command name is stored (cut at 15 bytes) and read back (N-227);
+ * no_new_privs is set one way, with Linux's argument checks, and inherited
+ * by a fork child; unknown options fail closed (N-151). */
 static void test_prctl(void)
 {
-    char name[16] = {0};
+    char name[16] = {0}, cut[16] = {0};
     int set = prctl(PR_SET_NAME, "musltest", 0, 0, 0);
     int get = prctl(PR_GET_NAME, name, 0, 0, 0);
-    errno = 0;
-    int nnp = prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
-    int nnp_errno = errno;
-    static char why[80];
-    snprintf(why, sizeof(why), "set=%d get=%d nnp=%d/%d", set, get, nnp, nnp_errno);
-    report("musl_prctl", set == 0 && get == 0 && nnp == -1 && nnp_errno == EINVAL, why);
+    prctl(PR_SET_NAME, "a-name-longer-than-fifteen", 0, 0, 0);
+    prctl(PR_GET_NAME, cut, 0, 0, 0);
+    prctl(PR_SET_NAME, "musltest", 0, 0, 0);
+    pid_t pid = fork();
+    if (pid == 0) {
+        int f = 0;
+        if (prctl(PR_GET_NO_NEW_PRIVS, 0, 0, 0, 0) != 0) f |= 1;
+        if (prctl(PR_SET_NO_NEW_PRIVS, 2, 0, 0, 0) != -1 || errno != EINVAL) f |= 2;
+        if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0) f |= 4;
+        if (prctl(PR_GET_NO_NEW_PRIVS, 0, 0, 0, 0) != 1) f |= 8;
+        if (prctl(PR_GET_NO_NEW_PRIVS, 1, 0, 0, 0) != -1 || errno != EINVAL) f |= 16;
+        pid_t child = fork();
+        if (child == 0)
+            _exit(prctl(PR_GET_NO_NEW_PRIVS, 0, 0, 0, 0) == 1 ? 0 : 1);
+        int st = 0;
+        if (waitpid(child, &st, 0) != child || !WIFEXITED(st) || WEXITSTATUS(st) != 0) f |= 32;
+        errno = 0;
+        if (prctl(0x7fff, 0, 0, 0, 0) != -1 || errno != EINVAL) f |= 64;
+        _exit(f);
+    }
+    int st = 0;
+    waitpid(pid, &st, 0);
+    static char why[96];
+    snprintf(why, sizeof(why), "set=%d get=%d name=%s cut=%s nnp-child=%d", set, get, name, cut,
+             WIFEXITED(st) ? WEXITSTATUS(st) : 255);
+    report("musl_prctl",
+           set == 0 && get == 0 && strcmp(name, "musltest") == 0
+               && strcmp(cut, "a-name-longer-t") == 0 && WIFEXITED(st) && WEXITSTATUS(st) == 0,
+           why);
+}
+
+/* The --ids mode: this program's IDs, AT_SECURE and command name, for
+ * test_setuid_exec. */
+static int print_ids(void)
+{
+    uid_t r, e, s;
+    char comm[16] = {0};
+    getresuid(&r, &e, &s);
+    prctl(PR_GET_NAME, comm, 0, 0, 0);
+    printf("%u %u %u %lu %s\n", r, e, s, getauxval(AT_SECURE), comm);
+    return 0;
+}
+
+/* Run `path --ids` as user 1000, optionally under no_new_privs; its
+ * output line in `out`. */
+static int run_ids_as_user(const char *path, int nnp, char *out, size_t len)
+{
+    int fds[2];
+    if (pipe(fds) != 0)
+        return -1;
+    pid_t pid = fork();
+    if (pid == 0) {
+        dup2(fds[1], 1);
+        close(fds[0]);
+        if (setresuid(1000, 1000, 1000) != 0)
+            _exit(2);
+        if (nnp && prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0)
+            _exit(3);
+        execl(path, "suid_ids", "--ids", (char *)0);
+        _exit(4);
+    }
+    close(fds[1]);
+    size_t n = 0;
+    ssize_t r;
+    while (n < len - 1 && (r = read(fds[0], out + n, len - 1 - n)) > 0)
+        n += (size_t)r;
+    out[n] = 0;
+    close(fds[0]);
+    int st = 0;
+    waitpid(pid, &st, 0);
+    char *nl = strchr(out, '\n');
+    if (nl)
+        *nl = 0;
+    return WIFEXITED(st) ? WEXITSTATUS(st) : 255;
+}
+
+/* Set-user-ID programs (Linux's bprm_fill_uid): a root-owned 04755 copy of
+ * this program, run by user 1000, runs with effective and saved user 0 and
+ * AT_SECURE (so the loader ignores LD_PRELOAD); under no_new_privs it gains
+ * nothing; the command name is the file's. A write by a non-root owner and
+ * any chown clear the bit (file_remove_privs, chown). */
+static void test_setuid_exec(const char *self)
+{
+    const char *copy = "/tmp/suid_ids";
+    int ok_copy = 0;
+    int in = open(self, O_RDONLY), outfd = open(copy, O_WRONLY | O_CREAT | O_TRUNC, 0755);
+    if (in >= 0 && outfd >= 0) {
+        char buf[4096];
+        ssize_t n;
+        ok_copy = 1;
+        while ((n = read(in, buf, sizeof(buf))) > 0)
+            if (write(outfd, buf, (size_t)n) != n)
+                ok_copy = 0;
+    }
+    if (in >= 0)
+        close(in);
+    if (outfd >= 0)
+        close(outfd);
+    struct stat sb = {0};
+    int chmodded = ok_copy && chmod(copy, 04755) == 0 && stat(copy, &sb) == 0
+                   && (sb.st_mode & 07777) == 04755;
+
+    static char gained[64], kept[64], why[200];
+    int st_gained = run_ids_as_user(copy, 0, gained, sizeof(gained));
+    int st_kept = run_ids_as_user(copy, 1, kept, sizeof(kept));
+    snprintf(why, sizeof(why), "copy=%d chmod=%d mode=%o gained='%s'/%d nnp='%s'/%d", ok_copy,
+             chmodded, (unsigned)(sb.st_mode & 07777), gained, st_gained, kept, st_kept);
+    report("musl_setuid_exec",
+           chmodded && st_gained == 0 && strcmp(gained, "1000 0 0 1 suid_ids") == 0
+               && st_kept == 0 && strcmp(kept, "1000 1000 1000 0 suid_ids") == 0,
+           why);
+
+    /* The owner (1000) writing its own set-user-ID file clears the bit;
+     * so does root changing the owner. */
+    int f = 0;
+    if (chown(copy, 1000, (gid_t)-1) != 0 || stat(copy, &sb) != 0 || (sb.st_mode & 07777) != 0755)
+        f |= 1;
+    if (chmod(copy, 04755) != 0)
+        f |= 2;
+    pid_t pid = fork();
+    if (pid == 0) {
+        if (setresuid(1000, 1000, 1000) != 0)
+            _exit(1);
+        int fd = open(copy, O_WRONLY | O_APPEND);
+        _exit(fd >= 0 && write(fd, "", 1) == 1 ? 0 : 2);
+    }
+    int st = 0;
+    waitpid(pid, &st, 0);
+    if (!WIFEXITED(st) || WEXITSTATUS(st) != 0)
+        f |= 4;
+    if (stat(copy, &sb) != 0 || (sb.st_mode & 07777) != 0755)
+        f |= 8;
+    snprintf(why, sizeof(why), "fail=%d mode=%o", f, (unsigned)(sb.st_mode & 07777));
+    report("musl_setuid_cleared", f == 0, why);
+    unlink(copy);
 }
 
 /* raise() and abort() go through tkill (N-103): the child must die by the
@@ -1679,6 +1810,8 @@ static void test_sched(void)
 
 int main(int argc, char **argv)
 {
+    if (argc >= 2 && strcmp(argv[1], "--ids") == 0)
+        return print_ids();
     test_auxv(argc > 0 ? argv[0] : NULL);
     test_pie();
     test_fsync();
@@ -1711,6 +1844,7 @@ int main(int argc, char **argv)
     test_flock_blocking();
     test_robust_futex();
     test_sched();
+    test_setuid_exec("/bin/musl_runtime_test");
     printf("MUSL-RUNTIME: %d/%d\n", passed, total);
     return passed == total ? 0 : 1;
 }

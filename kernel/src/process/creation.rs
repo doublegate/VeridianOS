@@ -305,6 +305,12 @@ pub fn search_path(name: &str) -> Option<String> {
     None
 }
 
+/// The last component of `path` (Linux's kbasename).
+#[cfg(feature = "alloc")]
+fn basename(path: &str) -> &str {
+    path.rsplit('/').next().unwrap_or(path)
+}
+
 /// Read the file at `path` for exec: it must be a regular file the caller
 /// (`uid`, `gid`) may execute -- root needs at least one execute bit, as on
 /// Linux -- or the result is `PermissionDenied` (EACCES). The check and the
@@ -391,8 +397,12 @@ pub fn exec_process(path: &str, argv: &[&str], envp: &[&str]) -> Result<(), Kern
             new_argv.extend_from_slice(&argv[1..]);
         }
 
-        // Recursively exec the interpreter
-        return exec_process(&interpreter, &new_argv, envp);
+        // Recursively exec the interpreter; the set-user-ID and
+        // set-group-ID bits of the script itself are ignored, as on Linux,
+        // and the command name is the script's (N-227).
+        exec_process(&interpreter, &new_argv, envp)?;
+        *current_thread.comm.lock() = super::thread::comm_from(basename(&resolved_path).as_bytes());
+        return Ok(());
     }
 
     // Validate and plan the image before touching the current address
@@ -429,6 +439,27 @@ pub fn exec_process(path: &str, argv: &[&str], envp: &[&str]) -> Result<(), Kern
             Some((node, data, parsed))
         }
         None => None,
+    };
+
+    // A set-user-ID or set-group-ID program runs as its file's owner or
+    // group (Linux's bprm_fill_uid), unless the thread asked for no new
+    // privileges or a tracer without privilege is watching it.
+    let exec_creds = {
+        let meta = file_node.metadata()?;
+        let perms = meta.permissions;
+        let set_uid = perms.set_uid.then_some(meta.uid);
+        let set_gid = (perms.set_gid && perms.group_exec).then_some(meta.gid);
+        let traced_unprivileged = match process.tracer.load(core::sync::atomic::Ordering::Acquire) {
+            0 => false,
+            tracer => {
+                super::table::get_process(super::ProcessId(tracer)).is_none_or(|t| t.euid() != 0)
+            }
+        };
+        let may_gain = !current_thread
+            .no_new_privs
+            .load(core::sync::atomic::Ordering::Acquire)
+            && !traced_unprivileged;
+        process.credentials().after_exec(set_uid, set_gid, may_gain)
     };
 
     // Point of no return: from clear() on, a failure cannot go back to the
@@ -485,6 +516,11 @@ pub fn exec_process(path: &str, argv: &[&str], envp: &[&str]) -> Result<(), Kern
         if interp.is_none() {
             setup_static_tls(&process, &elf_binary, &file_data);
         }
+
+        // The program's credentials, before the stack: AT_SECURE (and so
+        // the loader's refusal of LD_PRELOAD and LD_LIBRARY_PATH) follows
+        // from them.
+        process.update_credentials(|c| *c = exec_creds);
 
         // Step 3: Setup new stack with arguments, environment, and aux vector
         let stack_top = setup_exec_stack(&process, argv, envp, &resolved_path, &loaded.aux)?;
@@ -578,6 +614,8 @@ pub fn exec_process(path: &str, argv: &[&str], envp: &[&str]) -> Result<(), Kern
     current_thread
         .robust_list
         .store(0, core::sync::atomic::Ordering::Release);
+    // The command name is the program's file name (N-227).
+    *current_thread.comm.lock() = super::thread::comm_from(basename(&resolved_path).as_bytes());
 
     // The image is replaced: a parent waiting in vfork may run again; the
     // memory it shared with this process is no longer this process's.

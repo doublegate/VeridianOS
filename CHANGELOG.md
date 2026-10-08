@@ -21,6 +21,22 @@
   dynamically linked C++ program that throws, runs threads with `thread_local` destructors and
   `dlopen`s a C++ library.
 
+- **Set-user-ID and set-group-ID programs.** Files had no set-ID bits at all (chmod 4755 lost
+  them). They are now kept by every filesystem and reported by stat, and exec follows Linux's
+  rules: a set-user-ID file runs with its owner as effective user, a set-group-ID file with
+  group execute with its group, the saved IDs take the effective ones, and AT_SECURE tells the
+  dynamic loader to ignore LD_PRELOAD and LD_LIBRARY_PATH. Nothing is gained under
+  no_new_privs or while traced by an unprivileged tracer. The bits go when a non-root caller
+  writes or truncates the file (set-group-ID only where it means set-group-ID), on any chown of
+  a non-directory, and set-group-ID when a caller outside the file's group chmods it. A file's
+  owner may now change its group to one it belongs to (POSIX `_POSIX_CHOWN_RESTRICTED`); chmod
+  and chown by anyone else fail with EPERM, as on Linux (they were EACCES). Runtime tests
+  `musl_setuid_exec` and `musl_setuid_cleared`.
+- **prctl names threads and sets no_new_privs (N-227).** PR_SET_NAME reported success and stored
+  nothing; each thread now has Linux's command name (15 bytes), set at creation, by exec (the
+  program's file name, or the script's) and by PR_SET_NAME, and inherited by threads and fork
+  children. PR_SET_NO_NEW_PRIVS and PR_GET_NO_NEW_PRIVS exist with Linux's argument checks;
+  the flag is one-way and inherited. Runtime test `musl_prctl`.
 - **Scheduling calls take effect (N-221).** sched_setscheduler, sched_getscheduler and the
   affinity calls were stubs that returned 0. Each thread now has Linux's scheduling parameters --
   policy (SCHED_OTHER, FIFO, RR, BATCH, IDLE, DEADLINE), real-time priority, nice value and

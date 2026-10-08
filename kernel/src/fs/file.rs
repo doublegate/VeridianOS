@@ -262,6 +262,7 @@ impl File {
 
         let bytes_written = self.node.write(*pos, data)?;
         *pos += bytes_written;
+        super::remove_privs_after_write(&*self.node);
         Ok(bytes_written)
     }
 
