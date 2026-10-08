@@ -726,6 +726,22 @@ static int mm_args(void)
     if (munmap((void *)0x7ffffffff000UL, 2 * PG) != -1 || errno != EINVAL) f |= 2;
     /* Lengths past 256 MiB are fine. */
     if (munmap((void *)0x600000000000UL, 512UL << 20) != 0) f |= 4;
+    /* MAP_SHARED_VALIDATE checks its flags; MAP_FIXED_NOREPLACE does not
+     * replace (N-241). */
+    char *v = mmap(NULL, PG, PROT_READ, MAP_SHARED_VALIDATE | MAP_ANONYMOUS, -1, 0);
+    if (v == MAP_FAILED) f |= 8;
+    errno = 0;
+    if (mmap(NULL, PG, PROT_READ, MAP_SHARED_VALIDATE | MAP_ANONYMOUS | 0x200, -1, 0) != MAP_FAILED
+        || errno != EOPNOTSUPP)
+        f |= 8;
+    errno = 0;
+    if (mmap(p, PG, PROT_READ, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE, -1, 0) != MAP_FAILED
+        || errno != EEXIST)
+        f |= 16;
+    munmap(p + 2 * PG, PG);
+    if (mmap(p + 2 * PG, PG, PROT_READ, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE, -1, 0)
+        != p + 2 * PG)
+        f |= 16;
     return f;
 }
 
@@ -864,6 +880,12 @@ static int mm_madvise(void)
     char *s = mmap(NULL, PG, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
     s[0] = 's';
     if (madvise(s, PG, MADV_REMOVE) != 0 || s[0] != 0) f |= 16;
+    /* ... and not on what may not be written: a read-only file. */
+    int ro = open("/bin/musl_runtime_test", O_RDONLY);
+    char *rom = ro < 0 ? MAP_FAILED : mmap(NULL, PG, PROT_READ, MAP_SHARED, ro, 0);
+    errno = 0;
+    if (rom == MAP_FAILED || madvise(rom, PG, MADV_REMOVE) != -1 || errno != EACCES) f |= 16;
+    if (ro >= 0) close(ro);
     /* Shared memory keeps its contents through DONTNEED. */
     s[0] = 's';
     if (madvise(s, PG, MADV_DONTNEED) != 0 || s[0] != 's') f |= 16;
@@ -894,12 +916,19 @@ static int mm_madvise(void)
 
 static volatile int bitset_waiting;
 static int bitset_word;
+static volatile long bitset_result = 99, bitset_errno;
 
 static void *bitset_waiter(void *arg)
 {
     (void)arg;
+    /* An absolute deadline, so a missed wake fails the test, not hangs it. */
+    struct timespec until;
+    clock_gettime(CLOCK_MONOTONIC, &until);
+    until.tv_sec += 5;
     bitset_waiting = 1;
-    syscall(SYS_futex, &bitset_word, FUTEX_WAIT_BITSET | FUTEX_PRIVATE_FLAG, 0, NULL, NULL, 2);
+    bitset_result = syscall(SYS_futex, &bitset_word, FUTEX_WAIT_BITSET | FUTEX_PRIVATE_FLAG, 0,
+                            &until, NULL, 2);
+    bitset_errno = errno;
     return NULL;
 }
 
@@ -929,8 +958,13 @@ static int mm_random_futex(void)
         if (woken == 0)
             nanosleep(&ms, NULL);
     }
-    if (woken != 1) f |= 8;
     pthread_join(t, NULL);
+    if (woken != 1 || bitset_result != 0) {
+        f |= 8;
+        printf("mm_random_futex: woken %ld, wait returned %ld errno %ld\n", woken, bitset_result,
+               bitset_errno);
+        fflush(stdout);
+    }
     errno = 0;
     if (syscall(SYS_futex, &bitset_word, FUTEX_WAKE_BITSET, 1, NULL, NULL, 0) != -1 || errno != EINVAL)
         f |= 16;
@@ -953,6 +987,70 @@ static void test_memory_calls(void)
     snprintf(why, sizeof(why), "fail=%#x st=%#x,%#x,%#x,%#x,%#x,%#x", f, st[0], st[1], st[2], st[3],
              st[4], st[5]);
     report("musl_memory_calls", f == 0, why);
+}
+
+/* unlink, rmdir, unlinkat, fstatat and path arguments (N-195, N-196,
+ * N-203), as Linux. */
+static int fs_paths(void)
+{
+    int f = 0;
+    struct stat st;
+    mkdir("/tmp/fsx", 0755);
+    if (chdir("/tmp/fsx") != 0) return 1;
+    /* A relative path; a directory is EISDIR to unlink, a file ENOTDIR to
+     * rmdir; AT_REMOVEDIR removes a directory. */
+    close(open("rel", O_CREAT | O_WRONLY, 0644));
+    if (unlink("rel") != 0 || access("rel", F_OK) == 0) f |= 2;
+    mkdir("d", 0755);
+    close(open("file", O_CREAT | O_WRONLY, 0644));
+    errno = 0;
+    if (unlink("d") != -1 || errno != EISDIR) f |= 4;
+    errno = 0;
+    if (rmdir("file") != -1 || errno != ENOTDIR) f |= 4;
+    errno = 0;
+    if (unlink("file/") != -1 || errno != ENOTDIR) f |= 4;
+    errno = 0;
+    if (unlinkat(AT_FDCWD, "d", 0x1) != -1 || errno != EINVAL) f |= 8;
+    errno = 0;
+    if (rmdir(".") != -1 || errno != EINVAL) f |= 8;
+    errno = 0;
+    if (rmdir("/") != -1 || errno != EBUSY) f |= 8;
+    if (unlinkat(AT_FDCWD, "d/", AT_REMOVEDIR) != 0 || access("d", F_OK) == 0) f |= 16;
+    /* A symlink is removed, not its target; stat follows it, lstat and
+     * AT_SYMLINK_NOFOLLOW do not. */
+    if (symlink("file", "link") != 0) f |= 32;
+    if (stat("link", &st) != 0 || !S_ISREG(st.st_mode)) f |= 32;
+    if (lstat("link", &st) != 0 || !S_ISLNK(st.st_mode)) f |= 32;
+    if (fstatat(AT_FDCWD, "link", &st, AT_SYMLINK_NOFOLLOW) != 0 || !S_ISLNK(st.st_mode)) f |= 32;
+    if (unlink("link") != 0 || access("file", F_OK) != 0) f |= 32;
+    /* AT_EMPTY_PATH stats the fd itself; an empty path without it is
+     * ENOENT; unknown flags EINVAL; a trailing slash needs a directory. */
+    int fd = open("file", O_RDONLY);
+    if (fstatat(fd, "", &st, AT_EMPTY_PATH) != 0 || !S_ISREG(st.st_mode)) f |= 64;
+    errno = 0;
+    if (fstatat(fd, "", &st, 0) != -1 || errno != ENOENT) f |= 64;
+    errno = 0;
+    if (fstatat(AT_FDCWD, "file", &st, 0x4) != -1 || errno != EINVAL) f |= 64;
+    errno = 0;
+    if (stat("file/", &st) != -1 || errno != ENOTDIR) f |= 64;
+    close(fd);
+    /* A path with no terminator within PATH_MAX is ENAMETOOLONG. */
+    static char longpath[5000];
+    memset(longpath, 'a', sizeof(longpath) - 1);
+    errno = 0;
+    if (stat(longpath, &st) != -1 || errno != ENAMETOOLONG) f |= 128;
+    unlink("file");
+    chdir("/");
+    rmdir("/tmp/fsx");
+    return f;
+}
+
+static void test_file_calls(void)
+{
+    int st = in_child(fs_paths);
+    static char why[64];
+    snprintf(why, sizeof(why), "st=%#x", st);
+    report("musl_file_calls", exited_zero(st), why);
 }
 
 /* The --ids mode: this program's IDs, AT_SECURE, dumpable flag and
@@ -2670,6 +2768,7 @@ int main(int argc, char **argv)
     test_rlimits();
     test_sigpipe();
     test_memory_calls();
+    test_file_calls();
     printf("MUSL-RUNTIME: %d/%d\n", passed, total);
     return passed == total ? 0 : 1;
 }

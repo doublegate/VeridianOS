@@ -587,12 +587,23 @@
   fork gives the child, and Linux's argument checks apply. munmap and mprotect rejected lengths
   over 256 MiB and address 0 and answered EACCES for kernel addresses; they follow Linux now,
   and a partial mprotect splits the mapping instead of leaving it with the old protection
-  recorded. Lowering the program break frees the pages above it (it was ignored). Runtime test
-  `musl_memory_calls`.
+  recorded. Lowering the program break frees the pages above it (it was ignored). mmap accepts
+  MAP_SHARED_VALIDATE (EOPNOTSUPP for a flag it does not know) and MAP_FIXED_NOREPLACE (EEXIST),
+  both of which failed with EINVAL. Runtime test `musl_memory_calls`.
+- **unlink, rmdir, unlinkat and the stat family (N-195, N-196, N-203).** unlink refused a
+  relative path, nothing checked whether the target was a file or a directory, and AT_REMOVEDIR
+  was ignored; they now follow Linux's do_unlinkat and do_rmdir (EISDIR, ENOTDIR, ENOTEMPTY,
+  EBUSY, and a symlink is removed rather than its target). newfstatat honours
+  AT_SYMLINK_NOFOLLOW (symlinks were always followed) and AT_EMPTY_PATH. An empty path is ENOENT
+  and a path without a terminator within PATH_MAX is ENAMETOOLONG (it was cut short and used).
+  lstat no longer reports a missing Wayland socket as an existing one, and fstatat and lstat no
+  longer print every path to the serial console. Runtime test `musl_file_calls`.
 - **Partial munmap of a read-only shared mapping.** The pieces left by unmapping part of a
   mapping were rebuilt from its type alone, so what remained of a mapping of a read-only file
   or write-sealed memfd lost its no-write mark and mprotect could make it writable. The pieces
-  keep every attribute now.
+  keep every attribute now. A MAP_SHARED mapping of an ordinary file opened read-only was never
+  marked at all (only memfds were); it is, so mprotect(PROT_WRITE) on it fails with EACCES, as
+  on Linux.
 - **getrandom** stopped at 256 bytes per call and ignored its flags (N-244); it fills the whole
   request (a signal ends it at a page boundary) and rejects unknown flags. **futex** gains
   FUTEX_WAKE_BITSET, and unknown and priority-inheritance operations are ENOSYS (N-226).

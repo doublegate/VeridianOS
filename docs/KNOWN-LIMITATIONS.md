@@ -63,6 +63,10 @@ exposed were fixed (N-182 to N-189); the rest are listed, with their targets, in
   moving the heap with mremap leaves the program break where it was; and mappings that Linux
   would merge (two adjacent mmaps alike in every way) stay separate, so an mremap spanning both
   is EFAULT.
+- **W^X.** A mapping is never writable and executable at once: mmap and mprotect with
+  PROT_WRITE|PROT_EXEC fail with EACCES, where Linux allows it (N-241, kept by design). A JIT
+  must write code through a writable mapping and run it from an executable one (a second
+  mapping of a memfd, or mprotect between the two).
 - **Futexes.** The priority-inheritance operations (FUTEX_LOCK_PI and the rest) are ENOSYS, so
   musl reports PTHREAD_PRIO_INHERIT mutexes unsupported; they need the scheduler's priority
   boosting (sprint F).
@@ -399,6 +403,9 @@ Page protections now follow `prot` (fixed in v0.27, N-132 to N-137). What remain
   the account store, and the shell's `passwd` reports success without changing anything. So only
   root can authenticate through PAM (the KDE session runs as root). Unifying them is part of the
   credentials work (N-131).
+- **The KDE screen lock is not a protection.** It checks passwords through pam_veridian, so it
+  unlocks with root's built-in password `veridian`. The account store lives only in memory: a
+  password changed through `veridian_auth` is back to `veridian` after the next boot.
 - pam_veridian cannot check a second factor: an account with MFA enabled fails PAM
   authentication.
 

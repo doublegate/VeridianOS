@@ -851,14 +851,7 @@ fn make_directory(path: &str, mode: usize) -> SyscallResult {
 /// # Arguments
 /// - path: Path to directory to remove
 pub fn sys_rmdir(path: usize) -> SyscallResult {
-    let path_str = read_user_path(path)?;
-    require_may_remove(&path_str)?;
-
-    // Remove directory through VFS
-    match vfs()?.unlink(&path_str) {
-        Ok(_) => Ok(0),
-        Err(e) => Err(super::map_kernel_error(e)),
-    }
+    sys_unlinkat(AT_FDCWD, path, AT_REMOVEDIR)
 }
 
 /// Mount a filesystem
@@ -1776,6 +1769,18 @@ fn kill_matching(
 /// Helper: read a NUL-terminated path from user space into an alloc::String.
 #[cfg(feature = "alloc")]
 pub(crate) fn read_user_path(ptr: usize) -> Result<alloc::string::String, SyscallError> {
+    // An empty path names nothing (ENOENT), as Linux's getname (N-203).
+    let path = read_user_path_or_empty(ptr)?;
+    if path.is_empty() {
+        return Err(SyscallError::ResourceNotFound);
+    }
+    Ok(path)
+}
+
+/// A path argument that may be empty (calls taking AT_EMPTY_PATH). A path
+/// with no terminator within PATH_MAX (4096 bytes, the NUL included) is
+/// ENAMETOOLONG; it used to be cut off and used (N-203).
+pub(crate) fn read_user_path_or_empty(ptr: usize) -> Result<alloc::string::String, SyscallError> {
     validate_user_string_ptr(ptr)?;
 
     // Copy through the fault-tolerant accessor in chunks that never cross a
@@ -1786,6 +1791,7 @@ pub(crate) fn read_user_path(ptr: usize) -> Result<alloc::string::String, Syscal
     const PAGE: usize = 4096;
     let mut bytes = Vec::new();
     let mut addr = ptr;
+    let mut terminated = false;
     'copy: while bytes.len() < PATH_MAX {
         let in_page = PAGE - (addr % PAGE);
         let mut chunk = [0u8; 64];
@@ -1793,11 +1799,15 @@ pub(crate) fn read_user_path(ptr: usize) -> Result<alloc::string::String, Syscal
         crate::syscall::userspace::read_user_bytes(addr, &mut chunk[..n])?;
         for &b in &chunk[..n] {
             if b == 0 {
+                terminated = true;
                 break 'copy;
             }
             bytes.push(b);
         }
         addr += n;
+    }
+    if !terminated {
+        return Err(SyscallError::NameTooLong);
     }
 
     core::str::from_utf8(&bytes)
@@ -2038,17 +2048,7 @@ pub(crate) fn require_may_remove(path: &str) -> Result<(), SyscallError> {
 /// # Returns
 /// 0 on success.
 pub fn sys_stat_path(path_ptr: usize, stat_buf: usize) -> SyscallResult {
-    validate_user_ptr_typed::<FileStat>(stat_buf)?;
-    let path = read_user_path(path_ptr)?;
-
-    let vfs = vfs()?;
-    let node = vfs.resolve_path(&path).map_err(map_resolve_err)?;
-
-    let metadata = node.metadata().map_err(super::map_kernel_error)?;
-    let stat = fill_stat(&metadata);
-
-    super::userspace::write_user(stat_buf, stat)?;
-    Ok(0)
+    sys_fstatat(AT_FDCWD, path_ptr, stat_buf, 0)
 }
 
 /// Stat a file by path without following the final symlink (syscall 151).
@@ -2064,75 +2064,9 @@ pub fn sys_stat_path(path_ptr: usize, stat_buf: usize) -> SyscallResult {
 /// # Returns
 /// 0 on success.
 pub fn sys_lstat(path_ptr: usize, stat_buf: usize) -> SyscallResult {
-    validate_user_ptr_typed::<FileStat>(stat_buf)?;
-    let path = read_user_path(path_ptr)?;
-
-    // Trace lstat calls during kwin bringup
-    #[cfg(target_arch = "x86_64")]
-    {
-        // SAFETY: Writing to COM1 for diagnostic output.
-        unsafe {
-            crate::arch::x86_64::idt::raw_serial_str(b"[LSTAT] ");
-            let show_len = path.len().min(80);
-            for &b in &path.as_bytes()[..show_len] {
-                crate::arch::x86_64::idt::raw_serial_str(&[b]);
-            }
-            crate::arch::x86_64::idt::raw_serial_str(b"\n");
-        }
-    }
-
-    let vfs = vfs()?;
-    match vfs.resolve_path_no_follow(&path) {
-        Ok(node) => {
-            let metadata = node.metadata().map_err(super::map_kernel_error)?;
-            let stat = fill_stat(&metadata);
-            super::userspace::write_user(stat_buf, stat)?;
-            Ok(0)
-        }
-        Err(_) => {
-            // Workaround for wayland display socket creation:
-            // kwin's musl wrapper has a bug where stat() returning ENOENT
-            // is misinterpreted as a non-ENOENT error (likely due to double
-            // __syscall_ret application in the musl remap wrapper). This
-            // prevents kwin from finding a free wayland display number.
-            //
-            // For paths matching /run/user/0/wayland-N (without .lock),
-            // return a fake stat indicating S_IFSOCK. This tells wayland
-            // "stale socket from previous run" which triggers the correct
-            // unlink+rebind path instead of the broken ENOENT path.
-            if path.starts_with("/run/user/")
-                && path.contains("wayland-")
-                && !path.ends_with(".lock")
-            {
-                // S_IFSOCK (0xC000) | 0o755
-                let fake_stat = FileStat {
-                    st_dev: 0,
-                    st_ino: 0xFFFF,
-                    st_nlink: 1,
-                    st_mode: 0xC1ED, // S_IFSOCK | 0755
-                    st_uid: 0,
-                    st_gid: 0,
-                    __pad0: 0,
-                    st_rdev: 0,
-                    st_size: 0,
-                    st_blksize: 4096,
-                    st_blocks: 0,
-                    st_atime: 0,
-                    st_atime_nsec: 0,
-                    st_mtime: 0,
-                    st_mtime_nsec: 0,
-                    st_ctime: 0,
-                    st_ctime_nsec: 0,
-                    __unused: [0; 3],
-                };
-                super::userspace::write_user(stat_buf, fake_stat)?;
-                return Ok(0);
-            }
-            Err(map_resolve_err(crate::error::KernelError::FsError(
-                crate::error::FsError::NotFound,
-            )))
-        }
-    }
+    // A missing Wayland socket used to stat as a socket here, a workaround
+    // for a musl remapping bug that ADR 0009 removed.
+    sys_fstatat(AT_FDCWD, path_ptr, stat_buf, AT_SYMLINK_NOFOLLOW)
 }
 
 /// Read the target of a symbolic link (syscall 152).
@@ -2294,15 +2228,7 @@ pub fn sys_rename(old_ptr: usize, new_ptr: usize) -> SyscallResult {
 /// # Returns
 /// 0 on success.
 pub fn sys_unlink(path_ptr: usize) -> SyscallResult {
-    let path = read_user_path(path_ptr)?;
-    require_may_remove(&path)?;
-
-    let vfs = vfs()?;
-
-    match vfs.unlink(&path) {
-        Ok(()) => Ok(0),
-        Err(e) => Err(super::map_kernel_error(e)),
-    }
+    sys_unlinkat(AT_FDCWD, path_ptr, 0)
 }
 
 /// File descriptor control (syscall 158).
@@ -2805,6 +2731,13 @@ pub fn sys_writev(fd: usize, iov_ptr: usize, iovcnt: usize) -> SyscallResult {
 /// Must match the C-side `#define AT_FDCWD (-100)` in syscall.h.
 const AT_FDCWD: usize = (-100isize) as usize;
 
+/// unlinkat: remove a directory (rmdir).
+const AT_REMOVEDIR: usize = 0x200;
+/// Do not follow a final symlink.
+const AT_SYMLINK_NOFOLLOW: usize = 0x100;
+/// An empty path names the dirfd itself.
+const AT_EMPTY_PATH: usize = 0x1000;
+
 /// Create a hard link (syscall 155).
 ///
 /// Creates a new directory entry `new_path` pointing to the same file as
@@ -2983,47 +2916,102 @@ pub fn sys_openat(dirfd: usize, path_ptr: usize, flags: usize, mode: usize) -> S
     open_path(&abs_path, flags, mode)
 }
 
-/// Stat a file relative to a directory fd (syscall 191).
-pub fn sys_fstatat(dirfd: usize, path_ptr: usize, stat_buf: usize, _flags: usize) -> SyscallResult {
-    let rel_path = read_user_path(path_ptr)?;
-    let abs_path = resolve_at_path(dirfd, &rel_path)?;
-
-    // Trace fstatat calls during kwin bringup
-    #[cfg(target_arch = "x86_64")]
-    {
-        // SAFETY: Writing to COM1 for diagnostic output.
-        unsafe {
-            crate::arch::x86_64::idt::raw_serial_str(b"[STAT] ");
-            let show_len = abs_path.len().min(80);
-            for &b in &abs_path.as_bytes()[..show_len] {
-                crate::arch::x86_64::idt::raw_serial_str(&[b]);
-            }
-            crate::arch::x86_64::idt::raw_serial_str(b"\n");
-        }
+/// newfstatat(dirfd, path, buf, flags) (N-196), and stat and lstat
+/// through it, as Linux's vfs_fstatat: AT_SYMLINK_NOFOLLOW stats a final
+/// symlink itself (it was always followed), AT_EMPTY_PATH with an empty
+/// path stats `dirfd` itself -- any kind of file -- or the cwd,
+/// AT_NO_AUTOMOUNT is accepted (there is no automounting); other flags are
+/// EINVAL. A trailing slash follows a final symlink and needs a directory
+/// (ENOTDIR).
+pub fn sys_fstatat(dirfd: usize, path_ptr: usize, stat_buf: usize, flags: usize) -> SyscallResult {
+    const AT_NO_AUTOMOUNT: usize = 0x800;
+    if flags & !(AT_SYMLINK_NOFOLLOW | AT_NO_AUTOMOUNT | AT_EMPTY_PATH) != 0 {
+        return Err(SyscallError::InvalidArgument);
     }
-
+    let rel_path = if flags & AT_EMPTY_PATH != 0 {
+        read_user_path_or_empty(path_ptr)?
+    } else {
+        read_user_path(path_ptr)?
+    };
     validate_user_ptr_typed::<FileStat>(stat_buf)?;
 
     let vfs = vfs()?;
-    let node = vfs.resolve_path(&abs_path).map_err(map_resolve_err)?;
+    let node = if rel_path.is_empty() {
+        if dirfd as u32 as i32 == AT_FDCWD as u32 as i32 {
+            vfs.resolve_path(&vfs.get_cwd()).map_err(map_resolve_err)?
+        } else {
+            let proc = process::current_process().ok_or(SyscallError::InvalidState)?;
+            let file = proc
+                .file_table
+                .lock()
+                .get(dirfd as u32 as usize)
+                .ok_or(SyscallError::BadFileDescriptor)?;
+            file.node.clone()
+        }
+    } else {
+        let abs_path = resolve_at_path(dirfd, &rel_path)?;
+        let trailing_slash = rel_path.ends_with('/');
+        let node = if flags & AT_SYMLINK_NOFOLLOW != 0 && !trailing_slash {
+            vfs.resolve_path_no_follow(&abs_path)
+        } else {
+            vfs.resolve_path(&abs_path)
+        }
+        .map_err(map_resolve_err)?;
+        if trailing_slash && node.node_type() != crate::fs::NodeType::Directory {
+            return Err(SyscallError::NotADirectory);
+        }
+        node
+    };
 
     let metadata = node.metadata().map_err(super::map_kernel_error)?;
-    let stat = fill_stat(&metadata);
-    super::userspace::write_user(stat_buf, stat)?;
+    super::userspace::write_user(stat_buf, fill_stat(&metadata))?;
     Ok(0)
 }
 
-/// Unlink a file relative to a directory fd (syscall 192).
-///
-/// If flags contains AT_REMOVEDIR (0x200), acts like rmdir.
-pub fn sys_unlinkat(dirfd: usize, path_ptr: usize, _flags: usize) -> SyscallResult {
+/// unlinkat(dirfd, path, flags) (N-195), and unlink and rmdir through it,
+/// as Linux's do_unlinkat and do_rmdir: a relative path is resolved
+/// against the cwd or `dirfd` (unlink used to refuse a path without `/`).
+/// AT_REMOVEDIR removes a directory -- ENOTDIR for anything else, EINVAL
+/// for `.`, ENOTEMPTY for `..`, EBUSY for `/` -- and without it a directory
+/// is EISDIR, as is `.`, `..` or `/`, and a trailing slash on anything but
+/// a directory is ENOTDIR. The last component is not followed: a symlink
+/// is removed, not its target. Other flags are EINVAL.
+pub fn sys_unlinkat(dirfd: usize, path_ptr: usize, flags: usize) -> SyscallResult {
+    if flags & !AT_REMOVEDIR != 0 {
+        return Err(SyscallError::InvalidArgument);
+    }
+    let remove_dir = flags & AT_REMOVEDIR != 0;
     let rel_path = read_user_path(path_ptr)?;
-    let abs_path = resolve_at_path(dirfd, &rel_path)?;
+    let trimmed = rel_path.trim_end_matches('/');
+    let trailing_slash = trimmed.len() != rel_path.len();
+    let last = trimmed.rsplit('/').next().unwrap_or("");
+    if trimmed.is_empty() {
+        // "/" (or "//"): the root.
+        return Err(if remove_dir {
+            SyscallError::Busy
+        } else {
+            SyscallError::IsADirectory
+        });
+    }
+    match (remove_dir, last) {
+        (true, ".") => return Err(SyscallError::InvalidArgument),
+        (true, "..") => return Err(SyscallError::DirectoryNotEmpty),
+        (false, "." | "..") => return Err(SyscallError::IsADirectory),
+        _ => {}
+    }
+    let abs_path = resolve_at_path(dirfd, trimmed)?;
+    let node = vfs()?
+        .resolve_path_no_follow(&abs_path)
+        .map_err(map_resolve_err)?;
+    let is_dir = node.node_type() == crate::fs::NodeType::Directory;
+    match (remove_dir, is_dir) {
+        (true, false) => return Err(SyscallError::NotADirectory),
+        (false, true) => return Err(SyscallError::IsADirectory),
+        (false, false) if trailing_slash => return Err(SyscallError::NotADirectory),
+        _ => {}
+    }
     require_may_remove(&abs_path)?;
-
-    let vfs = vfs()?;
-    vfs.unlink(&abs_path).map_err(super::map_kernel_error)?;
-
+    vfs()?.unlink(&abs_path).map_err(super::map_kernel_error)?;
     Ok(0)
 }
 

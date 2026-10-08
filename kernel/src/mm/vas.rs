@@ -2322,17 +2322,34 @@ impl VirtualAddressSpace {
         Ok(())
     }
 
-    /// MADV_REMOVE (N-243): zero the pages of `[start, end)` that lie in
-    /// shared mappings -- a hole punched in the memory every sharer sees.
+    /// MADV_REMOVE (N-243): zero the pages of `[start, end)` -- a hole
+    /// punched in the memory every sharer sees. Every mapping in the range
+    /// must be shared (`InvalidArgument`) and writable-capable
+    /// (`PermissionDenied`: a read-only file or a write-sealed memfd),
+    /// checked under the same lock as the zeroing, so no other thread can
+    /// swap a sealed mapping in between; nothing is zeroed on refusal.
     #[cfg(feature = "alloc")]
-    pub fn zero_shared_pages(&self, start: u64, end: u64) {
+    pub fn zero_shared_pages(&self, start: u64, end: u64) -> Result<(), KernelError> {
         let mappings = self.mappings.lock();
         for (_, m) in mappings.range(..VirtualAddress(end)).rev() {
             if m.end().0 <= start {
                 break;
             }
             if m.mapping_type != MappingType::Shared {
-                continue;
+                return Err(KernelError::InvalidArgument {
+                    name: "MADV_REMOVE",
+                    value: "not a shared mapping",
+                });
+            }
+            if !m.may_write {
+                return Err(KernelError::PermissionDenied {
+                    operation: "MADV_REMOVE on a mapping that may not be written",
+                });
+            }
+        }
+        for (_, m) in mappings.range(..VirtualAddress(end)).rev() {
+            if m.end().0 <= start {
+                break;
             }
             let from = start.max(m.start.0);
             let to = end.min(m.end().0);
@@ -2345,6 +2362,7 @@ impl VirtualAddressSpace {
                 }
             }
         }
+        Ok(())
     }
 
     /// MADV_DONTFORK/DOFORK and MADV_WIPEONFORK/KEEPONFORK (N-243): set the
