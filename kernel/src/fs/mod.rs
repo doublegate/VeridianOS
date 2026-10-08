@@ -98,6 +98,50 @@ pub enum NodeType {
 /// parent-before-child. Callers of `VfsNode::rename` must hold it.
 pub(crate) static RENAME_LOCK: spin::Mutex<()> = spin::Mutex::new(());
 
+/// How much of a `len`-byte write at `pos` a file-size limit of `limit`
+/// bytes allows (Linux's generic_write_check_limits): `None` if the write
+/// starts at or past the limit (EFBIG), otherwise the bytes up to it.
+pub fn fsize_allowed(limit: u64, pos: usize, len: usize) -> Option<usize> {
+    let room = limit.checked_sub(pos as u64).filter(|&r| r > 0)?;
+    Some(len.min(room.min(usize::MAX as u64) as usize))
+}
+
+/// RLIMIT_FSIZE (N-224) for the calling process writing `len` bytes at
+/// `pos` of `node`: the bytes it may write. Only regular files are
+/// limited. A write that would start at or past the limit sends the caller
+/// SIGXFSZ and fails with EFBIG; one that crosses it is shortened. A
+/// zero-length write is never refused.
+pub fn check_fsize(node: &dyn VfsNode, pos: usize, len: usize) -> Result<usize, KernelError> {
+    if len == 0 || node.node_type() != NodeType::File {
+        return Ok(len);
+    }
+    let Some(process) = crate::process::current_process() else {
+        return Ok(len);
+    };
+    let limit = process.limits().cur(crate::process::rlimit::RLIMIT_FSIZE);
+    fsize_allowed(limit, pos, len).ok_or_else(|| {
+        crate::process::signals::send_to_current(crate::process::exit::signals::SIGXFSZ as usize);
+        KernelError::FsError(FsError::FileTooLarge)
+    })
+}
+
+/// RLIMIT_FSIZE for setting the size of `node` to `size` (truncate,
+/// ftruncate; Linux's inode_newsize_ok): growing a regular file past the
+/// limit sends SIGXFSZ and fails with EFBIG.
+pub fn check_fsize_truncate(node: &dyn VfsNode, size: usize) -> Result<(), KernelError> {
+    if node.node_type() != NodeType::File || node.metadata().is_ok_and(|m| size <= m.size) {
+        return Ok(());
+    }
+    let Some(process) = crate::process::current_process() else {
+        return Ok(());
+    };
+    if size as u64 > process.limits().cur(crate::process::rlimit::RLIMIT_FSIZE) {
+        crate::process::signals::send_to_current(crate::process::exit::signals::SIGXFSZ as usize);
+        return Err(KernelError::FsError(FsError::FileTooLarge));
+    }
+    Ok(())
+}
+
 /// After a write or truncate of `node` by the calling process: drop the
 /// set-user-ID and set-group-ID bits as [`Permissions::after_write`] says.
 /// Regular files only; a failure to read or change the mode leaves it.
@@ -1860,6 +1904,17 @@ pub fn append_file(path: &str, data: &[u8]) -> Result<usize, KernelError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// RLIMIT_FSIZE arithmetic (Linux's generic_write_check_limits).
+    #[test]
+    fn fsize_limit_shortens_or_refuses_writes() {
+        assert_eq!(fsize_allowed(u64::MAX, 1 << 40, 4096), Some(4096));
+        assert_eq!(fsize_allowed(1000, 0, 4096), Some(1000));
+        assert_eq!(fsize_allowed(1000, 990, 4096), Some(10));
+        assert_eq!(fsize_allowed(1000, 1000, 1), None);
+        assert_eq!(fsize_allowed(1000, 2000, 1), None);
+        assert_eq!(fsize_allowed(0, 0, 1), None);
+    }
 
     /// FS-PERF-03: the same rename behaviour on every filesystem that
     /// implements it.

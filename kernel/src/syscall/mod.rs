@@ -270,6 +270,9 @@ mod veridian_auth;
 // getrusage, times, sysinfo (N-223)
 mod usage;
 
+// getrlimit, setrlimit, prlimit64 (N-224)
+mod limits;
+
 // poll, ppoll, select, pselect6
 mod multiplex;
 use self::multiplex::{sys_poll, sys_ppoll, sys_pselect6, sys_select};
@@ -885,8 +888,10 @@ fn handle_syscall(
         Syscall::Getsockopt => sys_net_getsockopt(arg1, arg2, arg3, arg4, arg5),
 
         // Resource limits (Phase 6.5)
-        Syscall::Getrlimit => memory::sys_getrlimit(arg1, arg2),
-        Syscall::Setrlimit => memory::sys_setrlimit(arg1, arg2),
+        #[cfg(feature = "alloc")]
+        Syscall::Getrlimit => limits::sys_getrlimit(arg1, arg2),
+        #[cfg(feature = "alloc")]
+        Syscall::Setrlimit => limits::sys_setrlimit(arg1, arg2),
 
         // epoll (N-234, N-245): the instance is its file.
         Syscall::EpollCreate => {
@@ -1156,7 +1161,8 @@ fn handle_syscall(
 
         // musl libc compatibility syscalls
         Syscall::Getdents64 => sys_getdents64(arg1, arg2, arg3),
-        Syscall::Prlimit64 => sys_prlimit64(arg1, arg2, arg3, arg4),
+        #[cfg(feature = "alloc")]
+        Syscall::Prlimit64 => limits::sys_prlimit64(arg1, arg2, arg3, arg4),
         Syscall::InotifyInit1 => Err(SyscallError::NotImplemented),
         Syscall::InotifyAddWatch => Err(SyscallError::NotImplemented),
         Syscall::InotifyRmWatch => Err(SyscallError::NotImplemented),
@@ -1284,7 +1290,7 @@ fn install_event_file(
         .file_table
         .lock()
         .open_with_flags(alloc::sync::Arc::new(file), cloexec)
-        .map_err(|_| SyscallError::OutOfMemory)?;
+        .map_err(map_kernel_error)?;
     Ok(fd)
 }
 
@@ -1319,7 +1325,7 @@ fn sys_epoll_create1(flags: usize) -> SyscallResult {
         .file_table
         .lock()
         .open_with_flags(alloc::sync::Arc::new(file), flags != 0)
-        .map_err(|_| SyscallError::OutOfMemory)?;
+        .map_err(map_kernel_error)?;
     Ok(fd)
 }
 
@@ -1576,34 +1582,6 @@ fn build_dirents64(
         return Err(SyscallError::InvalidArgument);
     }
     Ok((out, idx))
-}
-
-/// prlimit64 syscall -- get/set resource limits for a process.
-///
-/// Combines getrlimit and setrlimit in one call. musl uses this for both.
-///
-/// # Arguments
-/// - `pid`: Process ID (0 = current process).
-/// - `resource`: RLIMIT_* constant.
-/// - `new_rlim_ptr`: Pointer to new Rlimit (0 = don't set).
-/// - `old_rlim_ptr`: Pointer to receive old Rlimit (0 = don't get).
-fn sys_prlimit64(
-    _pid: usize,
-    resource: usize,
-    new_rlim_ptr: usize,
-    old_rlim_ptr: usize,
-) -> SyscallResult {
-    // Get old limits if requested
-    if old_rlim_ptr != 0 {
-        memory::sys_getrlimit(resource, old_rlim_ptr)?;
-    }
-
-    // Set new limits if requested
-    if new_rlim_ptr != 0 {
-        memory::sys_setrlimit(resource, new_rlim_ptr)?;
-    }
-
-    Ok(0)
 }
 
 /// fchmodat syscall -- chmod relative to a directory fd.

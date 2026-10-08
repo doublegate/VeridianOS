@@ -562,6 +562,19 @@ impl VirtualMapping {
     pub fn end(&self) -> VirtualAddress {
         VirtualAddress(self.start.0 + self.size as u64)
     }
+
+    /// Whether RLIMIT_DATA counts this mapping (Linux's is_data_mapping):
+    /// private, writable and not the stack.
+    pub fn is_data(&self) -> bool {
+        self.flags.contains(PageFlags::WRITABLE)
+            && !matches!(
+                self.mapping_type,
+                MappingType::Stack
+                    | MappingType::Shared
+                    | MappingType::Device
+                    | MappingType::SharedRegion
+            )
+    }
 }
 
 /// Virtual Address Space for a process
@@ -818,6 +831,28 @@ impl VirtualAddressSpace {
             .filter(|m| m.start.0 < KERNEL_SPACE_START)
             .map(|m| m.physical_frames.len())
             .sum()
+    }
+
+    /// The size of the user mappings, leaving out whatever of them lies in
+    /// `[skip_start, skip_end)` (a MAP_FIXED request replaces that part):
+    /// what RLIMIT_AS and RLIMIT_DATA are checked against.
+    #[cfg(feature = "alloc")]
+    pub fn vm_usage(&self, skip_start: u64, skip_end: u64) -> VmUsage {
+        const KERNEL_SPACE_START: u64 = 0xFFFF_8000_0000_0000;
+        let mut usage = VmUsage::default();
+        for m in self.mappings.lock().values() {
+            if m.start.0 >= KERNEL_SPACE_START {
+                continue;
+            }
+            let end = m.start.0 + m.size as u64;
+            let overlap = end.min(skip_end).saturating_sub(m.start.0.max(skip_start));
+            let bytes = m.size as u64 - overlap;
+            usage.total += bytes;
+            if m.is_data() {
+                usage.data += bytes;
+            }
+        }
+        usage
     }
 
     /// Resolve every copy-on-write page of the user mappings now, as a
@@ -2917,6 +2952,17 @@ impl VirtualAddressSpace {
         }
         Ok(VirtualAddress(base))
     }
+}
+
+/// The bytes of user mappings in an address space, as Linux counts them for
+/// its total_vm and data_vm.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct VmUsage {
+    /// Every user mapping (RLIMIT_AS).
+    pub total: u64,
+    /// Private writable mappings other than the stack, the heap included
+    /// (RLIMIT_DATA).
+    pub data: u64,
 }
 
 /// Virtual address space statistics

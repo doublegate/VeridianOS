@@ -919,11 +919,8 @@ fn handle_prime_handle_to_fd(arg: *mut u8, pid: u64) -> Result<i32, KernelError>
     );
 
     let file_table = proc.file_table.lock();
-    let new_fd = file_table.open(alloc::sync::Arc::new(file)).map_err(|_| {
-        KernelError::ResourceExhausted {
-            resource: "file descriptors",
-        }
-    })?;
+    // EMFILE at RLIMIT_NOFILE, as Linux's drm_prime_handle_to_fd_ioctl.
+    let new_fd = file_table.open(alloc::sync::Arc::new(file))?;
 
     prime.fd = new_fd as i32;
 

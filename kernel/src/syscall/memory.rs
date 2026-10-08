@@ -62,6 +62,26 @@ fn prot_to_mapping_type(prot: usize, shared: bool) -> MappingType {
     }
 }
 
+/// RLIMIT_AS and RLIMIT_DATA (Linux's may_expand_vm): ENOMEM unless the
+/// process may map `bytes` more, not counting what it maps in
+/// `[skip_start, skip_end)` (the part a MAP_FIXED request replaces).
+/// `data`: the new memory is private and writable.
+#[cfg(feature = "alloc")]
+fn may_expand_vm(
+    proc: &process::Process,
+    vas: &crate::mm::VirtualAddressSpace,
+    (skip_start, skip_end): (u64, u64),
+    bytes: u64,
+    data: bool,
+) -> Result<(), SyscallError> {
+    let usage = vas.vm_usage(skip_start, skip_end);
+    if process::rlimit::may_expand_vm(&proc.limits(), usage, bytes, data) {
+        Ok(())
+    } else {
+        Err(SyscallError::OutOfMemory)
+    }
+}
+
 // ============================================================================
 // Syscall implementations
 // ============================================================================
@@ -200,9 +220,24 @@ pub fn sys_mmap(
                     s & (crate::fs::seals::WRITE | crate::fs::seals::FUTURE_WRITE) != 0
                 });
                 let may_write = file.flags.write && !write_sealed;
-                let start = proc
-                    .memory_space
-                    .lock()
+                let vas = proc.memory_space.lock();
+                let bytes = (pages * PAGE_SIZE) as u64;
+                let skip = at.map_or((0, 0), |a| (a.0, a.0 + bytes));
+                if let Err(e) = may_expand_vm(&proc, &vas, skip, bytes, false) {
+                    // Give back the owners share_pages added (the memfd
+                    // keeps its own).
+                    for &frame in &frames {
+                        if crate::mm::frame_refs::release(frame) {
+                            crate::mm::note_free_failure(
+                                crate::mm::FRAME_ALLOCATOR.lock().free_frames(frame, 1),
+                                frame,
+                                "mmap",
+                            );
+                        }
+                    }
+                    return Err(e);
+                }
+                let start = vas
                     .map_shared_frames(at, &frames, page_flags, may_write)
                     .map_err(|_| SyscallError::OutOfMemory)?;
                 return Ok(start.as_usize());
@@ -237,6 +272,28 @@ pub fn sys_mmap(
     let cached: Option<()> = None;
 
     let memory_space = proc.memory_space.lock();
+
+    // RLIMIT_AS and RLIMIT_DATA, for the pages the mapping will take.
+    #[cfg(feature = "alloc")]
+    {
+        const HUGE: usize = 2 * 1024 * 1024;
+        let unit = if is_anonymous && !is_fixed && flags & MAP_HUGETLB != 0 {
+            HUGE
+        } else {
+            PAGE_SIZE
+        };
+        let bytes = length.div_ceil(unit).saturating_mul(unit) as u64;
+        let skip = if is_fixed {
+            (addr as u64, addr as u64 + bytes)
+        } else {
+            (0, 0)
+        };
+        let data = private && prot & PROT_WRITE != 0;
+        if let Err(e) = may_expand_vm(&proc, &memory_space, skip, bytes, data) {
+            crate::mm::page_cache::release(cached.iter().flatten().flatten().copied());
+            return Err(e);
+        }
+    }
 
     let mapped = (|| -> Result<usize, SyscallError> {
         Ok(if is_fixed {
@@ -481,6 +538,16 @@ pub fn sys_brk(addr: usize) -> SyscallResult {
             // Return current break (unchanged) to signal failure.
             return Ok(memory_space.brk(None).as_usize());
         }
+        // RLIMIT_AS and RLIMIT_DATA for the pages the heap grows by.
+        #[cfg(feature = "alloc")]
+        {
+            let page = PAGE_SIZE as u64;
+            let current = memory_space.brk(None).0.div_ceil(page);
+            let grow = requested.div_ceil(page).saturating_sub(current) * page;
+            if grow > 0 && may_expand_vm(&proc, &memory_space, (0, 0), grow, true).is_err() {
+                return Ok(memory_space.brk(None).as_usize());
+            }
+        }
 
         // Page-align the request upward for efficiency.
         // The VAS brk() handles sub-page increments, but page-aligning here
@@ -491,106 +558,4 @@ pub fn sys_brk(addr: usize) -> SyscallResult {
     let result = memory_space.brk(new_break);
 
     Ok(result.as_usize())
-}
-
-// ============================================================================
-// Resource limits (POSIX getrlimit / setrlimit)
-// ============================================================================
-
-/// POSIX resource limit identifiers
-const RLIMIT_AS: usize = 9; // Address space size
-const RLIMIT_DATA: usize = 2; // Data segment size (heap)
-const RLIMIT_STACK: usize = 3; // Stack size
-const RLIMIT_NOFILE: usize = 7; // Max open files
-const RLIMIT_FSIZE: usize = 1; // Max file size
-
-/// RLIM_INFINITY -- unlimited
-const RLIM_INFINITY: u64 = u64::MAX;
-
-/// rlimit structure (matches POSIX)
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct Rlimit {
-    rlim_cur: u64, // soft limit
-    rlim_max: u64, // hard limit
-}
-
-/// Get resource limits (syscall 260).
-///
-/// # Arguments
-/// - `resource`: RLIMIT_* constant
-/// - `rlim_ptr`: Pointer to user-space Rlimit struct to fill
-pub fn sys_getrlimit(resource: usize, rlim_ptr: usize) -> SyscallResult {
-    if rlim_ptr == 0 {
-        return Err(SyscallError::InvalidArgument);
-    }
-    validate_user_pointer(rlim_ptr, core::mem::size_of::<Rlimit>())?;
-
-    let (cur, max) = match resource {
-        RLIMIT_AS => {
-            let limit = MAX_USER_HEAP_SIZE;
-            (limit, limit)
-        }
-        RLIMIT_DATA => {
-            let limit = MAX_USER_HEAP_SIZE;
-            (limit, limit)
-        }
-        RLIMIT_STACK => {
-            let stack_size = 8 * 1024 * 1024u64; // 8MB default
-            (stack_size, stack_size)
-        }
-        RLIMIT_NOFILE => {
-            let max = crate::fs::file::MAX_FDS as u64;
-            (max, max)
-        }
-        RLIMIT_FSIZE => {
-            (RLIM_INFINITY, RLIM_INFINITY) // no file size limit
-        }
-        _ => return Err(SyscallError::InvalidArgument),
-    };
-
-    // Write the rlimit struct to user space
-    super::userspace::write_user(
-        rlim_ptr,
-        Rlimit {
-            rlim_cur: cur,
-            rlim_max: max,
-        },
-    )?;
-
-    Ok(0)
-}
-
-/// Set resource limits (syscall 261).
-///
-/// Currently only validates and acknowledges -- actual enforcement is via
-/// the existing per-resource constants. Future: per-process configurable
-/// limits.
-///
-/// # Arguments
-/// - `resource`: RLIMIT_* constant
-/// - `rlim_ptr`: Pointer to user-space Rlimit struct with new values
-pub fn sys_setrlimit(resource: usize, rlim_ptr: usize) -> SyscallResult {
-    if rlim_ptr == 0 {
-        return Err(SyscallError::InvalidArgument);
-    }
-    validate_user_pointer(rlim_ptr, core::mem::size_of::<Rlimit>())?;
-
-    let [cur, max]: [u64; 2] = super::userspace::read_user(rlim_ptr)?;
-
-    // Validate: soft limit must not exceed hard limit
-    if cur > max {
-        return Err(SyscallError::InvalidArgument);
-    }
-
-    // Validate the resource type is known
-    match resource {
-        RLIMIT_AS | RLIMIT_DATA | RLIMIT_STACK | RLIMIT_NOFILE | RLIMIT_FSIZE => {}
-        _ => return Err(SyscallError::InvalidArgument),
-    }
-
-    // Acknowledge the request (limits are currently global constants).
-    // Per-process configurable limits deferred to later sprint.
-    let _ = (cur, max);
-    Ok(0)
 }

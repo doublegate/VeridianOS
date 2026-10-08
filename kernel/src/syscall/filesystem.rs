@@ -306,7 +306,7 @@ fn open_path(path: &str, flags: usize, mode: usize) -> SyscallResult {
     let file_table = process.file_table.lock();
     file_table
         .open_with_flags(alloc::sync::Arc::new(file), cloexec)
-        .map_err(|_| SyscallError::OutOfMemory)
+        .map_err(super::map_kernel_error)
 }
 
 /// Close a file descriptor
@@ -696,6 +696,7 @@ fn file_write_from_user(file: &crate::fs::file::File, buf: usize, count: usize) 
     if !file.flags.write {
         return Err(SyscallError::BadFileDescriptor);
     }
+    let count = file.fsize_room(count).map_err(super::map_kernel_error)?;
     super::userspace::consume_from_user(buf, count, true, |kbuf| match file.write(kbuf) {
         Ok(n) => Ok(n),
         Err(crate::error::KernelError::BrokenPipe) => Err(SyscallError::BrokenPipe),
@@ -797,6 +798,7 @@ pub fn sys_ftruncate(fd: usize, length: usize) -> SyscallResult {
     if file.node.node_type() != crate::fs::NodeType::File || !file.flags.write {
         return Err(SyscallError::InvalidArgument);
     }
+    crate::fs::check_fsize_truncate(&*file.node, length).map_err(super::map_kernel_error)?;
     file.node
         .truncate(length)
         .map_err(super::map_kernel_error)?;
@@ -2460,14 +2462,14 @@ pub fn sys_pipe2(pipe_fds_ptr: usize, flags: usize) -> SyscallResult {
 
     let read_fd = file_table
         .open_with_flags(alloc::sync::Arc::new(read_file), cloexec)
-        .map_err(|_| SyscallError::OutOfMemory)?;
+        .map_err(super::map_kernel_error)?;
 
     let write_fd = file_table
         .open_with_flags(alloc::sync::Arc::new(write_file), cloexec)
-        .map_err(|_| {
+        .map_err(|e| {
             // Clean up read fd on failure
             file_table.close_on_rollback(read_fd, "pipe");
-            SyscallError::OutOfMemory
+            super::map_kernel_error(e)
         })?;
 
     // Write [read_fd, write_fd] to user buffer as i32 (C int), through the
@@ -2727,18 +2729,38 @@ pub fn sys_writev(fd: usize, iov_ptr: usize, iovcnt: usize) -> SyscallResult {
     validate_user_buffer(iov_ptr, iov_size)?;
 
     let mut total_written = 0usize;
+    let iovs = (0..iovcnt)
+        .map(|i| super::userspace::read_user_index::<Iovec>(iov_ptr, i))
+        .collect::<Result<alloc::vec::Vec<_>, _>>()?;
 
-    for i in 0..iovcnt {
-        let iov: Iovec = super::userspace::read_user_index(iov_ptr, i)?;
+    // RLIMIT_FSIZE applies to the vector as one write: only a write that
+    // starts at the limit is refused (EFBIG, SIGXFSZ), and the segments
+    // stop where it is reached.
+    let total = iovs
+        .iter()
+        .fold(0usize, |t, iov| t.saturating_add(iov.iov_len));
+    let file = process::current_process().and_then(|p| p.file_table.lock().get(fd));
+    let mut room = match file {
+        Some(file) if file.flags.write => {
+            file.fsize_room(total).map_err(super::map_kernel_error)?
+        }
+        _ => total,
+    };
 
-        if iov.iov_len == 0 {
+    for iov in iovs {
+        let len = iov.iov_len.min(room);
+        if len == 0 {
+            if room == 0 {
+                break;
+            }
             continue;
         }
 
         // Delegate to existing sys_write for each segment
-        match sys_write(fd, iov.iov_base, iov.iov_len) {
+        match sys_write(fd, iov.iov_base, len) {
             Ok(n) => {
                 total_written += n;
+                room -= n.min(room);
                 // Short write means buffer full or error
                 if n < iov.iov_len {
                     break;
@@ -2867,6 +2889,7 @@ pub fn sys_truncate(path_ptr: usize, length: usize) -> SyscallResult {
     }
     // As opening it for writing would need (N-191).
     require_open_access(&node, &OpenFlags::write_only())?;
+    crate::fs::check_fsize_truncate(&*node, length).map_err(super::map_kernel_error)?;
     node.truncate(length).map_err(super::map_kernel_error)?;
     crate::fs::remove_privs_after_write(&*node);
     Ok(0)
@@ -3063,7 +3086,10 @@ pub fn sys_pwrite(fd: usize, buf: usize, count: usize, offset: usize) -> Syscall
     }
     validate_user_buffer(buf, count)?;
 
-    // Write at `offset` through the VfsNode, a chunk at a time (N-43).
+    // RLIMIT_FSIZE for the whole write, then at `offset` through the
+    // VfsNode, a chunk at a time (N-43).
+    let count =
+        crate::fs::check_fsize(&*file.node, offset, count).map_err(super::map_kernel_error)?;
     let mut at = offset;
     let written = super::userspace::consume_from_user(buf, count, true, |kbuf| {
         let n = file.node.write(at, kbuf).map_err(super::map_kernel_error)?;

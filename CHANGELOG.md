@@ -34,6 +34,20 @@
   waits) and timerfds -- are converted to the monotonic clock; timerfds follow clock changes,
   and TFD_TIMER_CANCEL_ON_SET reads fail with ECANCELED after one. gettimeofday accepts NULL.
   Runtime test `musl_clocks_and_usage`.
+- **Resource limits (N-224).** getrlimit returned fixed numbers for five resources, setrlimit
+  did nothing and prlimit64 ignored its pid. Each process now has Linux's sixteen limits,
+  inherited on fork and kept across exec, changed under Linux's rules (only root raises a hard
+  limit; another process's limits need root or a matching real user and group). They are
+  enforced as on Linux: open descriptors (EMFILE), file size (a write is shortened at the limit,
+  and one starting there fails with EFBIG and SIGXFSZ), processes and threads per user (EAGAIN),
+  address space and data (mmap ENOMEM, brk unchanged), stack growth, CPU time (SIGXCPU, then
+  SIGKILL at the hard limit), nice and real-time priority (the scheduling calls now allow what
+  RLIMIT_NICE and RLIMIT_RTPRIO grant), and queued real-time signals per user (tkill and tgkill
+  fail with EAGAIN; kill still makes the signal pending). The native C library's getrlimit and
+  setrlimit, which were stubs, call the kernel, and it gains prlimit, getpriority and
+  setpriority. A full descriptor table now fails with EMFILE everywhere: open, pipe, openpty,
+  epoll_create, eventfd, timerfd_create and signalfd reported ENOMEM, and a
+  DRM PRIME export reported an unrelated error. Runtime test `musl_rlimits`.
 - **Set-user-ID and set-group-ID programs.** Files had no set-ID bits at all (chmod 4755 lost
   them). They are now kept by every filesystem and reported by stat, and exec follows Linux's
   rules: a set-user-ID file runs with its owner as effective user, a set-group-ID file with

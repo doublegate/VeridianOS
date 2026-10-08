@@ -46,6 +46,15 @@ exposed were fixed (N-182 to N-189); the rest are listed, with their targets, in
 - **Resource usage.** getrusage, times and wait4 report CPU time (split into user and system
   time by tick samples), peak resident set and context switches; page-fault, block I/O, IPC and
   signal counts are zero.
+- **Resource limits** (N-224). All sixteen limits are kept per process, inherited on fork and
+  kept across exec, with Linux's prlimit64 rules. NOFILE, FSIZE, NPROC, AS, DATA, STACK (stack
+  growth), CPU, NICE, RTPRIO and SIGPENDING are enforced as Linux enforces them. CORE, MEMLOCK
+  and MSGQUEUE limit facilities that do not exist yet (core files, mlock, POSIX message queues).
+  LOCKS and RSS are ignored, as Linux ignores them. RTTIME is not enforced: a real-time thread
+  that never blocks is not stopped. The stack limit applies to stack growth only; the 256 KiB
+  first stack is mapped whatever the limit, and exec does not size argument space from it.
+  Queued real-time signals stay charged to the real user the first one was charged to, even if
+  the process changes its real user before they are delivered.
 - **Errnos.** Many errors come back as EINVAL where Linux is specific (N-202, N-212 to N-216,
   N-234, N-238).
 
@@ -141,7 +150,6 @@ What remains:
 - **`siginfo` carries only the signal number.** No sender pid or uid, no fault address.
 - **sigreturn on AArch64 and RISC-V does not sanitise registers (N-170).** PSTATE and `sstatus`
   are restored as given, latent until those architectures have user mode.
-- **wait (N-99 remainder):** `wait4` and `waitid` report no resource usage (N-213, N-223).
 
 ### Processes, exec and credentials
 

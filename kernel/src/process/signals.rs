@@ -50,42 +50,160 @@ pub const NSIG: usize = 64;
 /// delivered once (N-209).
 pub const SIGRTMIN: usize = 32;
 
-/// Instances of one real-time signal a process or thread can have queued;
-/// beyond it a send fails with EAGAIN, as Linux does at RLIMIT_SIGPENDING.
+/// Real-time signals a user may have queued by default (RLIMIT_SIGPENDING's
+/// initial value; Linux sizes it from memory, typically in the thousands).
 pub const RT_QUEUE_MAX: u32 = 1024;
 
-/// A real-time signal's queue is full (`RT_QUEUE_MAX`).
+/// A real-time signal could not be queued: its receiver's real user has
+/// RLIMIT_SIGPENDING signals queued already.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct QueueFull;
+
+/// Who pays for a queued real-time signal (Linux's __sigqueue_alloc): the
+/// receiving process's real user, up to that process's RLIMIT_SIGPENDING.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Charge {
+    pub uid: u32,
+    pub limit: u64,
+}
+
+impl Charge {
+    /// What a signal sent to `process` is charged to.
+    pub fn of(process: &Process) -> Self {
+        Self {
+            uid: process.credentials().ruid,
+            limit: process.limits().cur(super::rlimit::RLIMIT_SIGPENDING),
+        }
+    }
+
+    /// No limit (tests).
+    #[cfg(test)]
+    pub const UNLIMITED: Self = Self {
+        uid: u32::MAX,
+        limit: u64::MAX,
+    };
+}
+
+/// What a real-time send does when its user's queue is full.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Overflow {
+    /// Fail with EAGAIN: tkill, tgkill, sigqueue (Linux: a real-time signal
+    /// whose si_code is not SI_USER).
+    Fail,
+    /// Still make the signal pending, without another queued instance:
+    /// kill and signals the kernel sends (Linux's "silent loss of
+    /// information").
+    Merge,
+}
+
+/// Real-time signals queued per real user, against RLIMIT_SIGPENDING.
+#[cfg(feature = "alloc")]
+static QUEUED_BY_USER: spin::Mutex<alloc::collections::BTreeMap<u32, u64>> =
+    spin::Mutex::new(alloc::collections::BTreeMap::new());
+
+/// Charge one queued signal to `charge.uid` if it stays within the limit.
+fn charge_user(charge: Charge) -> bool {
+    #[cfg(feature = "alloc")]
+    {
+        let mut queued = QUEUED_BY_USER.lock();
+        let count = queued.entry(charge.uid).or_insert(0);
+        if *count >= charge.limit {
+            return false;
+        }
+        *count += 1;
+    }
+    let _ = charge;
+    true
+}
+
+/// Give back `n` queued signals charged to `uid`.
+fn uncharge_user(uid: u32, n: u64) {
+    #[cfg(feature = "alloc")]
+    if n > 0 {
+        let mut queued = QUEUED_BY_USER.lock();
+        if let Some(count) = queued.get_mut(&uid) {
+            *count = count.saturating_sub(n);
+            if *count == 0 {
+                queued.remove(&uid);
+            }
+        }
+    }
+    let _ = (uid, n);
+}
+
+/// Real-time signals the user `uid` has queued (tests, procfs).
+pub fn queued_by_user(uid: u32) -> u64 {
+    #[cfg(feature = "alloc")]
+    return QUEUED_BY_USER.lock().get(&uid).copied().unwrap_or(0);
+    #[cfg(not(feature = "alloc"))]
+    {
+        let _ = uid;
+        0
+    }
+}
+
+struct RtCounts {
+    /// Queued instances of each real-time signal.
+    counts: [u32; NSIG - SIGRTMIN + 1],
+    /// The user the queued instances are charged to: the receiver's real
+    /// user when the first was queued. Instances keep that charge until
+    /// taken, even if the process changes its real user meanwhile.
+    uid: u32,
+}
+
+impl RtCounts {
+    fn total(&self) -> u64 {
+        self.counts.iter().map(|&c| c as u64).sum()
+    }
+}
 
 /// Queued instances of each real-time signal, beside the pending set's
 /// bit: the bit stays set while any instance is queued. Changed under its
 /// lock together with the bit, so a send cannot be lost between a delivery
-/// taking the last instance and clearing the bit.
-pub struct RtQueue(spin::Mutex<[u32; NSIG - SIGRTMIN + 1]>);
+/// taking the last instance and clearing the bit. Every queued instance is
+/// charged to a user (RLIMIT_SIGPENDING) until it is taken, cleared or the
+/// queue is dropped.
+pub struct RtQueue(spin::Mutex<RtCounts>);
 
 impl RtQueue {
     pub const fn new() -> Self {
-        Self(spin::Mutex::new([0; NSIG - SIGRTMIN + 1]))
+        Self(spin::Mutex::new(RtCounts {
+            counts: [0; NSIG - SIGRTMIN + 1],
+            uid: 0,
+        }))
     }
 
-    /// Queue one instance of `sig` in `pending`. A standard signal only
-    /// sets its bit. `QueueFull` (EAGAIN) when the real-time queue is full.
+    /// Queue one instance of `sig` in `pending`, charged as `charge` says.
+    /// A standard signal only sets its bit. Past the user's limit,
+    /// `Overflow::Fail` is `QueueFull` (EAGAIN) and `Overflow::Merge` sets
+    /// the bit alone: the signal is delivered once more only if no instance
+    /// is queued.
     pub fn push(
         &self,
         pending: &core::sync::atomic::AtomicU64,
         sig: usize,
+        charge: Charge,
+        overflow: Overflow,
     ) -> Result<(), QueueFull> {
         if sig < SIGRTMIN {
             pending.fetch_or(sig_bit(sig), Ordering::AcqRel);
             return Ok(());
         }
-        let mut counts = self.0.lock();
-        let count = &mut counts[sig - SIGRTMIN];
-        if *count >= RT_QUEUE_MAX {
+        let mut q = self.0.lock();
+        let charge = if q.total() > 0 {
+            Charge {
+                uid: q.uid,
+                ..charge
+            }
+        } else {
+            charge
+        };
+        if q.counts[sig - SIGRTMIN] < u32::MAX && charge_user(charge) {
+            q.uid = charge.uid;
+            q.counts[sig - SIGRTMIN] += 1;
+        } else if overflow == Overflow::Fail {
             return Err(QueueFull);
         }
-        *count += 1;
         pending.fetch_or(sig_bit(sig), Ordering::AcqRel);
         Ok(())
     }
@@ -97,12 +215,16 @@ impl RtQueue {
         if sig < SIGRTMIN {
             return pending.fetch_and(!bit, Ordering::AcqRel) & bit != 0;
         }
-        let mut counts = self.0.lock();
+        let mut q = self.0.lock();
         if pending.load(Ordering::Acquire) & bit == 0 {
             return false;
         }
-        let count = &mut counts[sig - SIGRTMIN];
-        *count = count.saturating_sub(1);
+        let uid = q.uid;
+        let count = &mut q.counts[sig - SIGRTMIN];
+        if *count > 0 {
+            *count -= 1;
+            uncharge_user(uid, 1);
+        }
         if *count == 0 {
             pending.fetch_and(!bit, Ordering::AcqRel);
         }
@@ -112,13 +234,22 @@ impl RtQueue {
     /// Drop every queued instance and pending bit (exec, a discarded
     /// signal).
     pub fn clear(&self, pending: &core::sync::atomic::AtomicU64, bits: u64) {
-        let mut counts = self.0.lock();
+        let mut q = self.0.lock();
+        let mut dropped = 0;
         for sig in SIGRTMIN..=NSIG {
             if bits & sig_bit(sig) != 0 {
-                counts[sig - SIGRTMIN] = 0;
+                dropped += core::mem::take(&mut q.counts[sig - SIGRTMIN]) as u64;
             }
         }
+        uncharge_user(q.uid, dropped);
         pending.fetch_and(!bits, Ordering::AcqRel);
+    }
+}
+
+impl Drop for RtQueue {
+    fn drop(&mut self) {
+        let q = self.0.get_mut();
+        uncharge_user(q.uid, q.total());
     }
 }
 
@@ -411,8 +542,9 @@ pub fn park_while_stopped() {
 }
 
 /// Send `sig` to a dispatched process. `Ok(false)` if the process has no
-/// running threads (the caller falls back to the old path); `WouldBlock`
-/// (EAGAIN) if a real-time signal's queue is full.
+/// running threads (the caller falls back to the old path). Past
+/// RLIMIT_SIGPENDING a real-time signal pends without queueing another
+/// instance, as kill does on Linux.
 #[cfg(feature = "alloc")]
 pub fn send_to_process(process: &Process, sig: usize) -> Result<bool, crate::error::KernelError> {
     use crate::sched::dispatch;
@@ -432,10 +564,13 @@ pub fn send_to_process(process: &Process, sig: usize) -> Result<bool, crate::err
     } else if ignored(process, sig) {
         return Ok(true);
     } else {
-        process
-            .rt_queue
-            .push(&process.pending_signals, sig)
-            .map_err(|_| crate::error::KernelError::WouldBlock)?;
+        // kill: past RLIMIT_SIGPENDING the signal still pends (Linux).
+        let _ = process.rt_queue.push(
+            &process.pending_signals,
+            sig,
+            Charge::of(process),
+            Overflow::Merge,
+        );
         crate::fs::signalfd::signal_generated();
     }
     for task in &tasks {
@@ -457,6 +592,21 @@ pub fn notify(process: &Process, sig: usize) {
     let _ = process.send_signal(sig);
 }
 
+/// Send `sig` to the calling thread from inside the kernel (Linux's
+/// send_sig(sig, current, 0)): SIGXFSZ for a write past RLIMIT_FSIZE.
+pub fn send_to_current(sig: usize) {
+    let (Some(process), Some(thread)) = (super::current_process(), super::current_thread()) else {
+        return;
+    };
+    #[cfg(feature = "alloc")]
+    if process.dispatched.load(Ordering::Acquire) {
+        let _ = send_to_thread(&process, &thread, sig);
+        return;
+    }
+    let _ = thread;
+    let _ = process.send_signal(sig);
+}
+
 /// Send `sig` to one thread of a dispatched process (tkill, tgkill);
 /// `WouldBlock` (EAGAIN) if a real-time signal's queue is full.
 #[cfg(feature = "alloc")]
@@ -475,7 +625,7 @@ pub fn send_to_thread(
     }
     thread
         .rt_queue
-        .push(&thread.sigpending, sig)
+        .push(&thread.sigpending, sig, Charge::of(process), Overflow::Fail)
         .map_err(|_| crate::error::KernelError::WouldBlock)?;
     crate::fs::signalfd::signal_generated();
     for task in crate::sched::dispatch::tasks_of(process.pid.0) {

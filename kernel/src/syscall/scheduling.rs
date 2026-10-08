@@ -6,11 +6,13 @@
 //! As on Linux these name a thread (pid 0: the caller), whose parameters are
 //! kept in `Thread::sched`; the dispatcher runs the thread's task with them
 //! (`dispatch::set_policy`). There are no capabilities yet, so "privileged"
-//! is root, and RLIMIT_RTPRIO and RLIMIT_NICE are 0 (Linux's defaults): an
-//! unprivileged caller may not take a real-time or deadline policy, lower
-//! its nice value, leave SCHED_IDLE or clear SCHED_RESET_ON_FORK, and may
-//! change only threads of its own user (EPERM). SCHED_DEADLINE goes
-//! through admission control (95% of each CPU; EBUSY past it).
+//! is root. An unprivileged caller may lower a nice value only as far as
+//! the target process's RLIMIT_NICE allows, take a real-time policy or
+//! priority only up to its RLIMIT_RTPRIO (both 0 by default, as on Linux),
+//! never take SCHED_DEADLINE, leave SCHED_IDLE only if RLIMIT_NICE allows
+//! its current nice value, never clear SCHED_RESET_ON_FORK, and change only
+//! threads of its own user (EPERM). SCHED_DEADLINE goes through admission
+//! control (95% of each CPU; EBUSY past it).
 
 use alloc::{sync::Arc, vec::Vec};
 
@@ -65,9 +67,49 @@ struct Request {
     reset_on_fork: bool,
 }
 
-/// Validate `req` against the thread's current parameters `cur` and the
-/// caller's privilege, as Linux's __sched_setscheduler; the new parameters.
-fn decide(cur: &SchedParams, req: &Request, privileged: bool) -> Result<SchedParams, SyscallError> {
+/// What the target process's resource limits allow an unprivileged caller.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Allowance {
+    /// The lowest nice value RLIMIT_NICE permits (`rlimit::nice_floor`).
+    nice_floor: i32,
+    /// RLIMIT_RTPRIO: the highest real-time priority.
+    rtprio: u64,
+}
+
+impl Allowance {
+    /// Linux's defaults: no lowering of nice, no real-time priority.
+    #[cfg(test)]
+    const NONE: Self = Self {
+        nice_floor: 20,
+        rtprio: 0,
+    };
+
+    /// The allowance of process `pid`'s limits (the defaults if it is gone).
+    fn of(pid: u64) -> Self {
+        let limits = crate::process::find_process(crate::process::ProcessId(pid))
+            .map(|p| p.limits())
+            .unwrap_or_default();
+        Self {
+            nice_floor: crate::process::rlimit::nice_floor(&limits),
+            rtprio: limits.cur(crate::process::rlimit::RLIMIT_RTPRIO),
+        }
+    }
+
+    /// Linux's can_nice.
+    fn can_nice(&self, nice: i8) -> bool {
+        nice as i32 >= self.nice_floor
+    }
+}
+
+/// Validate `req` against the thread's current parameters `cur`, the
+/// caller's privilege and what the target's limits allow, as Linux's
+/// __sched_setscheduler; the new parameters.
+fn decide(
+    cur: &SchedParams,
+    req: &Request,
+    privileged: bool,
+    allow: Allowance,
+) -> Result<SchedParams, SyscallError> {
     let rt = matches!(req.policy, SCHED_FIFO | SCHED_RR);
     if !matches!(
         req.policy,
@@ -95,16 +137,21 @@ fn decide(cur: &SchedParams, req: &Request, privileged: bool) -> Result<SchedPar
     if !privileged {
         let fair = matches!(req.policy, SCHED_NORMAL | SCHED_BATCH | SCHED_IDLE);
         let perm = SyscallError::OperationNotPermitted;
-        if fair && nice < cur.nice {
+        if fair && nice < cur.nice && !allow.can_nice(nice) {
             return Err(perm);
         }
-        if rt && (req.policy != cur.policy || req.priority > cur.rt_priority as u32) {
-            return Err(perm);
+        if rt {
+            if req.policy != cur.policy && allow.rtprio == 0 {
+                return Err(perm);
+            }
+            if req.priority > cur.rt_priority as u32 && req.priority as u64 > allow.rtprio {
+                return Err(perm);
+            }
         }
         if req.policy == SCHED_DEADLINE {
             return Err(perm);
         }
-        if cur.policy == SCHED_IDLE && req.policy != SCHED_IDLE {
+        if cur.policy == SCHED_IDLE && req.policy != SCHED_IDLE && !allow.can_nice(cur.nice) {
             return Err(perm);
         }
         if cur.reset_on_fork && !req.reset_on_fork {
@@ -194,7 +241,7 @@ fn set(
     let me = caller()?;
     let mut params = thread.sched.lock();
     let request = req(&params)?;
-    let new = decide(&params, &request, me.euid == 0)?;
+    let new = decide(&params, &request, me.euid == 0, Allowance::of(owner_pid))?;
     if !same_owner(&me, &owner) {
         return Err(SyscallError::OperationNotPermitted);
     }
@@ -542,7 +589,8 @@ pub fn sys_getpriority(which: usize, who: usize) -> SyscallResult {
 }
 
 /// setpriority(which, who, nice): the nice value of every thread named.
-/// EPERM for another user's thread, EACCES for lowering it unprivileged.
+/// EPERM for another user's thread, EACCES for lowering it unprivileged
+/// past what RLIMIT_NICE allows.
 pub fn sys_setpriority(which: usize, who: usize, nice: usize) -> SyscallResult {
     let nice = (nice as u32 as i32).clamp(-20, 19) as i8;
     let targets = priority_targets(which, who)?;
@@ -556,8 +604,9 @@ pub fn sys_setpriority(which: usize, who: usize, nice: usize) -> SyscallResult {
             result = Err(SyscallError::OperationNotPermitted);
             continue;
         }
+        let allow = Allowance::of(pid);
         let mut params = thread.sched.lock();
-        if nice < params.nice && me.euid != 0 {
+        if nice < params.nice && me.euid != 0 && !allow.can_nice(nice) {
             result = Err(SyscallError::PermissionDenied);
             continue;
         }
@@ -586,7 +635,7 @@ mod tests {
     #[test]
     fn policies_and_priorities_are_validated_like_linux() {
         let cur = SchedParams::default();
-        let ok = |r: Request| decide(&cur, &r, true);
+        let ok = |r: Request| decide(&cur, &r, true, Allowance::NONE);
         assert_eq!(ok(req(SCHED_FIFO, 50)).unwrap().rt_priority, 50);
         assert_eq!(ok(req(SCHED_RR, 99)).unwrap().policy, SCHED_RR);
         assert_eq!(ok(req(SCHED_FIFO, 0)), Err(SyscallError::InvalidArgument));
@@ -611,7 +660,12 @@ mod tests {
         n.nice = Some(40);
         assert_eq!(ok(n).unwrap().nice, 19);
         let niced = SchedParams { nice: 7, ..cur };
-        assert_eq!(decide(&niced, &req(SCHED_NORMAL, 0), true).unwrap().nice, 7);
+        assert_eq!(
+            decide(&niced, &req(SCHED_NORMAL, 0), true, Allowance::NONE)
+                .unwrap()
+                .nice,
+            7
+        );
     }
 
     #[test]
@@ -620,7 +674,7 @@ mod tests {
             nice: 5,
             ..SchedParams::default()
         };
-        let user = |c: &SchedParams, r: Request| decide(c, &r, false);
+        let user = |c: &SchedParams, r: Request| decide(c, &r, false, Allowance::NONE);
         let perm = Err(SyscallError::OperationNotPermitted);
         assert_eq!(user(&cur, req(SCHED_FIFO, 1)).map(|_| ()), perm);
         let mut lower = req(SCHED_NORMAL, 0);
@@ -652,6 +706,53 @@ mod tests {
             ..cur
         };
         assert_eq!(user(&reset, req(SCHED_NORMAL, 0)).map(|_| ()), perm);
+    }
+
+    #[test]
+    fn resource_limits_widen_what_unprivileged_callers_may_do() {
+        let cur = SchedParams {
+            nice: 5,
+            ..SchedParams::default()
+        };
+        // RLIMIT_NICE 30: nice down to -10, not past it.
+        let nice = Allowance {
+            nice_floor: -10,
+            rtprio: 0,
+        };
+        let perm = Err(SyscallError::OperationNotPermitted);
+        let to = |n: i32| {
+            let mut r = req(SCHED_NORMAL, 0);
+            r.nice = Some(n);
+            decide(&cur, &r, false, nice).map(|p| p.nice)
+        };
+        assert_eq!(to(-10), Ok(-10));
+        assert_eq!(to(-11), perm);
+        // ... and leaving SCHED_IDLE at an allowed nice value.
+        let idle = SchedParams {
+            policy: SCHED_IDLE,
+            ..cur
+        };
+        assert!(decide(&idle, &req(SCHED_NORMAL, 0), false, nice).is_ok());
+        // RLIMIT_RTPRIO 20: a real-time policy up to priority 20.
+        let rt = Allowance {
+            nice_floor: 20,
+            rtprio: 20,
+        };
+        assert_eq!(
+            decide(&cur, &req(SCHED_FIFO, 20), false, rt).map(|p| p.rt_priority),
+            Ok(20)
+        );
+        assert_eq!(
+            decide(&cur, &req(SCHED_FIFO, 21), false, rt).map(|_| ()),
+            Err(SyscallError::OperationNotPermitted)
+        );
+        // A thread already above the limit may stay there.
+        let high = SchedParams {
+            policy: SCHED_RR,
+            rt_priority: 50,
+            ..cur
+        };
+        assert!(decide(&high, &req(SCHED_RR, 40), false, rt).is_ok());
     }
 
     #[test]

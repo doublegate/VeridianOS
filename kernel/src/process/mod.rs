@@ -31,6 +31,7 @@ pub mod fork;
 pub mod lifecycle;
 pub mod memory;
 pub mod pcb;
+pub mod rlimit;
 pub mod robust_list;
 pub mod session;
 pub mod signal_delivery;
@@ -438,6 +439,9 @@ pub extern "C" fn user_return_check() {
     #[cfg(feature = "alloc")]
     if dispatched_context().is_some() {
         if let Some(process) = current_process() {
+            // RLIMIT_CPU: SIGXCPU or SIGKILL, acted on just below or by
+            // the signal delivery that follows.
+            rlimit::check_cpu(&process);
             let sig = process.kill_pending.load(Ordering::Acquire);
             if sig == exit::GROUP_EXIT_PENDING {
                 drop(process);

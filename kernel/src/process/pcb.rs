@@ -188,6 +188,12 @@ pub struct Process {
     /// set by exec as `install_exec_credentials` decides.
     pub dumpable: core::sync::atomic::AtomicBool,
 
+    /// Resource limits (N-224): inherited on fork, kept across exec.
+    rlimits: Mutex<super::rlimit::Limits>,
+    /// RLIMIT_CPU's soft and hard values in nanoseconds, for the return to
+    /// user mode to check without the lock (u64::MAX: none).
+    pub cpu_limit_ns: [core::sync::atomic::AtomicU64; 2],
+
     /// CPU time of the process's exited threads (its live threads' is the
     /// dispatcher's), and of its children it has waited for, with theirs
     /// (Linux's signal_struct sums; N-218, N-223).
@@ -272,6 +278,67 @@ impl Process {
         *self.creds.lock()
     }
 
+    /// The process's resource limits.
+    pub fn limits(&self) -> super::rlimit::Limits {
+        *self.rlimits.lock()
+    }
+
+    /// Set resource limit `resource` (`Limits::set`'s rules), and apply it
+    /// where it is enforced from cached values; the old value.
+    pub fn set_rlimit(
+        &self,
+        resource: usize,
+        new: super::rlimit::Rlimit,
+        privileged: bool,
+    ) -> Result<super::rlimit::Rlimit, crate::syscall::SyscallError> {
+        let old = self.rlimits.lock().set(resource, new, privileged)?;
+        self.apply_rlimit(resource, new);
+        Ok(old)
+    }
+
+    /// Take all of `limits` (fork: the parent's).
+    pub fn inherit_limits(&self, limits: super::rlimit::Limits) {
+        *self.rlimits.lock() = limits;
+        for resource in [super::rlimit::RLIMIT_NOFILE, super::rlimit::RLIMIT_CPU] {
+            if let Ok(value) = limits.get(resource) {
+                self.apply_rlimit(resource, value);
+            }
+        }
+    }
+
+    /// RLIMIT_CPU's soft limit was reached and SIGXCPU sent: move it one
+    /// second on (up to the hard limit), so the signal comes again each
+    /// further second of CPU time, as Linux's check_process_timers.
+    pub fn bump_cpu_soft_limit(&self) {
+        use super::rlimit::RLIMIT_CPU;
+        let mut limits = self.rlimits.lock();
+        let Ok(mut value) = limits.get(RLIMIT_CPU) else {
+            return;
+        };
+        if value.cur < value.max {
+            value.cur += 1;
+            let _ = limits.set(RLIMIT_CPU, value, true);
+        }
+        drop(limits);
+        self.apply_rlimit(RLIMIT_CPU, value);
+    }
+
+    fn apply_rlimit(&self, resource: usize, value: super::rlimit::Rlimit) {
+        use super::rlimit::{RLIMIT_CPU, RLIMIT_NOFILE};
+        match resource {
+            RLIMIT_NOFILE => self
+                .file_table
+                .lock()
+                .set_limit(value.cur.min(usize::MAX as u64) as usize),
+            RLIMIT_CPU => {
+                let ns = |secs: u64| secs.saturating_mul(1_000_000_000);
+                self.cpu_limit_ns[0].store(ns(value.cur), Ordering::Release);
+                self.cpu_limit_ns[1].store(ns(value.max), Ordering::Release);
+            }
+            _ => {}
+        }
+    }
+
     /// Change the credentials atomically; `f` enforces the set*id rules.
     /// As Linux's commit_creds, a change of the effective user or group
     /// makes the process non-dumpable: memory it read with the old
@@ -346,6 +413,11 @@ impl Process {
             tracer: AtomicU64::new(0),
             cred_guard: Mutex::new(()),
             dumpable: core::sync::atomic::AtomicBool::new(true),
+            rlimits: Mutex::new(super::rlimit::Limits::defaults()),
+            cpu_limit_ns: [
+                core::sync::atomic::AtomicU64::new(u64::MAX),
+                core::sync::atomic::AtomicU64::new(u64::MAX),
+            ],
             cpu_exited: Mutex::new(crate::sched::cputime::CpuTimes::ZERO),
             cpu_children: Mutex::new(crate::sched::cputime::CpuTimes::ZERO),
             peak_rss_pages: core::sync::atomic::AtomicUsize::new(0),
@@ -618,10 +690,14 @@ impl Process {
             return Ok(());
         }
         // Linux set layout: bit `signum - 1` (N-96); real-time signals
-        // queue (N-209), EAGAIN when the queue is full.
-        self.rt_queue
-            .push(&self.pending_signals, signum)
-            .map_err(|_| KernelError::WouldBlock)?;
+        // queue (N-209) up to RLIMIT_SIGPENDING, past which they pend
+        // without another instance, as kill does on Linux.
+        let _ = self.rt_queue.push(
+            &self.pending_signals,
+            signum,
+            super::signals::Charge::of(self),
+            super::signals::Overflow::Merge,
+        );
         crate::fs::signalfd::signal_generated();
         Ok(())
     }
@@ -948,16 +1024,39 @@ mod tests {
     }
 
     #[test]
-    fn real_time_queue_is_bounded() {
+    fn real_time_queue_is_bounded_per_user() {
+        use crate::process::{
+            rlimit::{Rlimit, RLIMIT_SIGPENDING},
+            signals::{queued_by_user, sig_bit},
+        };
+        let uid = 4242;
         let proc = make_process(30, "sig_rt_full");
-        for _ in 0..crate::process::signals::RT_QUEUE_MAX {
+        proc.update_credentials(|c| *c = crate::process::creds::Credentials::new(uid, uid));
+        proc.set_rlimit(RLIMIT_SIGPENDING, Rlimit { cur: 3, max: 3 }, false)
+            .unwrap();
+        for _ in 0..5 {
             proc.send_signal(40).unwrap();
         }
-        assert!(matches!(proc.send_signal(40), Err(KernelError::WouldBlock)));
+        // Three are queued and charged to the user; kill-style sends past
+        // the limit pend without queueing.
+        assert_eq!(queued_by_user(uid), 3);
+        assert!(proc.pending_signals.load(Ordering::Acquire) & sig_bit(40) != 0);
         // A standard signal never queues, so never fills.
         for _ in 0..2000 {
             proc.send_signal(10).unwrap();
         }
+        let mut delivered = 0;
+        while proc.is_signal_pending(40) {
+            proc.clear_pending_signal(40);
+            delivered += 1;
+        }
+        assert_eq!(delivered, 3);
+        assert_eq!(queued_by_user(uid), 0);
+        // Dropping a process gives its queued signals back.
+        proc.send_signal(41).unwrap();
+        assert_eq!(queued_by_user(uid), 1);
+        drop(proc);
+        assert_eq!(queued_by_user(uid), 0);
     }
 
     #[test]

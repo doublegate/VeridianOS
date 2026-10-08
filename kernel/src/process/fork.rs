@@ -94,6 +94,9 @@ pub fn fork_process_with(opts: &ForkOptions) -> Result<(ProcessId, super::Thread
     let current_process =
         super::current_process().ok_or(KernelError::ProcessNotFound { pid: 0 })?;
 
+    // RLIMIT_NPROC: EAGAIN, as Linux.
+    super::rlimit::check_nproc(&current_process).map_err(|_| KernelError::WouldBlock)?;
+
     let current_thread = super::current_thread().ok_or(KernelError::ThreadNotFound { tid: 0 })?;
 
     // Create new process as copy of current
@@ -195,6 +198,8 @@ pub fn fork_process_with(opts: &ForkOptions) -> Result<(ProcessId, super::Thread
         new_process
             .sid
             .store(parent_sid, core::sync::atomic::Ordering::Release);
+        // So are the resource limits (N-224).
+        new_process.inherit_limits(current_process.limits());
         // So is the dumpable flag (the memory it protects is copied).
         new_process.dumpable.store(
             current_process

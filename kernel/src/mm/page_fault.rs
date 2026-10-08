@@ -48,14 +48,6 @@ pub struct PageFaultInfo {
 /// Default stack guard region size (one page below the mapped stack).
 const _STACK_GUARD_SIZE: usize = PAGE_SIZE;
 
-/// Maximum stack growth beyond initial allocation (8 MiB).
-/// cc1 (GCC compiler proper) uses deep recursion for complex expressions.
-const MAX_STACK_GROWTH: usize = 8 * 1024 * 1024;
-
-/// Largest total user stack: the default initial stack plus the growth
-/// allowance, fixed (not measured from the current size; N-136).
-const STACK_LIMIT: usize = crate::process::creation::DEFAULT_USER_STACK_SIZE + MAX_STACK_GROWTH;
-
 /// Gap kept free below a growing stack (Linux `stack_guard_gap`).
 const STACK_GUARD_GAP: u64 = 1024 * 1024;
 
@@ -258,9 +250,11 @@ fn resolve_cow_in(
 
 /// Try to resolve the fault by growing the user stack.
 ///
-/// The stack grows downward. If the faulting address is within one
-/// [`MAX_STACK_GROWTH`] below the current stack mapping and above the stack
-/// guard page, we extend the stack by mapping new pages.
+/// The stack grows downward. If the faulting address is below the current
+/// stack mapping, the whole stack would stay within the process's
+/// RLIMIT_STACK (8 MiB by default; Linux's acct_stack_growth) and the new
+/// pages within RLIMIT_AS, and no other mapping is within the guard gap,
+/// we extend the stack by mapping new pages.
 fn try_stack_growth(info: &PageFaultInfo) -> Result<(), KernelError> {
     // Stack growth only applies to user-mode faults.
     if !info.was_user_mode {
@@ -295,10 +289,12 @@ fn try_stack_growth(info: &PageFaultInfo) -> Result<(), KernelError> {
         });
     }
 
-    // The stack may span at most STACK_LIMIT below its top in total.
+    // The stack may span at most RLIMIT_STACK below its top in total.
     // (This used to be measured from the already-grown size, so the limit
     // moved down with every growth and the stack had none; N-136.)
-    let absolute_bottom = stack_top.saturating_sub(STACK_LIMIT as u64);
+    let limits = process.limits();
+    let absolute_bottom =
+        stack_top.saturating_sub(limits.cur(crate::process::rlimit::RLIMIT_STACK));
     if fault < absolute_bottom {
         // Too far below the stack -- real SIGSEGV.
         return Err(KernelError::InvalidAddress {
@@ -322,7 +318,11 @@ fn try_stack_growth(info: &PageFaultInfo) -> Result<(), KernelError> {
     #[cfg(feature = "alloc")]
     {
         let gap_bottom = fault_page.saturating_sub(STACK_GUARD_GAP);
-        if !memory_space.range_is_free(gap_bottom, stack_bottom) {
+        let usage = memory_space.vm_usage(0, 0);
+        let bytes = (pages_needed * PAGE_SIZE) as u64;
+        if !memory_space.range_is_free(gap_bottom, stack_bottom)
+            || !crate::process::rlimit::may_expand_vm(&limits, usage, bytes, false)
+        {
             return Err(KernelError::InvalidAddress {
                 addr: fault as usize,
             });

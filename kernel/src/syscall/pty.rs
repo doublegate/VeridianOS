@@ -87,12 +87,12 @@ pub fn sys_openpty(master_fd_ptr: usize, slave_fd_ptr: usize) -> SyscallResult {
 
     let master_fd = file_table
         .open(master_file)
-        .map_err(|_| SyscallError::OutOfMemory)?;
+        .map_err(super::map_kernel_error)?;
 
-    let slave_fd = file_table.open(slave_file).map_err(|_| {
+    let slave_fd = file_table.open(slave_file).map_err(|e| {
         // Roll back the master fd on failure.
         file_table.close_on_rollback(master_fd, "openpty");
-        SyscallError::OutOfMemory
+        super::map_kernel_error(e)
     })?;
 
     // Write the fd numbers to user space (fault-tolerant, N-43).

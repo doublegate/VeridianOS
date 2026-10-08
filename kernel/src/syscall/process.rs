@@ -91,9 +91,8 @@ pub(crate) fn sys_fork_with(opts: &crate::process::fork::ForkOptions) -> Syscall
             // which is EAGAIN in user space -- the POSIX-correct errno
             // for fork() when the process limit is reached.
             match e {
-                crate::error::KernelError::ResourceExhausted { .. } => {
-                    Err(SyscallError::WouldBlock)
-                }
+                crate::error::KernelError::ResourceExhausted { .. }
+                | crate::error::KernelError::WouldBlock => Err(SyscallError::WouldBlock),
                 _ => Err(SyscallError::OutOfMemory),
             }
         }

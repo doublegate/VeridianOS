@@ -43,6 +43,7 @@
 #include <sys/auxv.h>
 #include <sys/signalfd.h>
 #include <sys/syscall.h>
+#include <sys/uio.h>
 #include <sys/timerfd.h>
 #include <time.h>
 #include <unistd.h>
@@ -305,6 +306,309 @@ static void test_clocks_and_usage(void)
     static char why[64];
     snprintf(why, sizeof(why), "fail=%#x", f);
     report("musl_clocks_and_usage", f == 0, why);
+}
+
+/* Resource limits (N-224): each limit is set in a child of its own, which
+ * reports through its exit status (0: as Linux) or how it died. */
+
+static volatile sig_atomic_t rt_caught;
+static int xcpu_pipe = -1;
+
+static void count_rt(int sig)
+{
+    (void)sig;
+    rt_caught++;
+}
+
+static void note_xcpu(int sig)
+{
+    (void)sig;
+    char c = 'x';
+    (void)!write(xcpu_pipe, &c, 1);
+}
+
+static int recurse_deep(int depth)
+{
+    volatile char frame[4096];
+    frame[0] = (char)depth;
+    return depth == 0 ? frame[0] : recurse_deep(depth - 1) + frame[0];
+}
+
+/* Run `fn` in a child; its wait status. */
+static int in_child(int (*fn)(void))
+{
+    pid_t pid = fork();
+    if (pid == 0)
+        _exit(fn());
+    int st = -1;
+    if (pid < 0 || waitpid(pid, &st, 0) != pid)
+        return -1;
+    return st;
+}
+
+static int exited_zero(int st)
+{
+    return st != -1 && WIFEXITED(st) && WEXITSTATUS(st) == 0;
+}
+
+static int rl_query(void)
+{
+    int f = 0;
+    struct rlimit r, old;
+    if (getrlimit(RLIMIT_NOFILE, &r) != 0 || r.rlim_cur != 1024 || r.rlim_max != 1024) f |= 1;
+    if (getrlimit(RLIMIT_STACK, &r) != 0 || r.rlim_cur != 8u << 20) f |= 1;
+    if (getrlimit(RLIMIT_CORE, &r) != 0 || r.rlim_cur != 0 || r.rlim_max != RLIM_INFINITY) f |= 1;
+    errno = 0;
+    if (getrlimit(RLIM_NLIMITS, &r) != -1 || errno != EINVAL) f |= 2;
+    /* Soft above hard. */
+    r.rlim_cur = 10;
+    r.rlim_max = 5;
+    errno = 0;
+    if (setrlimit(RLIMIT_CORE, &r) != -1 || errno != EINVAL) f |= 2;
+    /* prlimit reads back and swaps in one call. */
+    r.rlim_cur = 100;
+    r.rlim_max = 200;
+    if (prlimit(0, RLIMIT_CORE, &r, &old) != 0 || old.rlim_cur != 0
+        || prlimit(getpid(), RLIMIT_CORE, NULL, &old) != 0 || old.rlim_cur != 100
+        || old.rlim_max != 200)
+        f |= 4;
+    errno = 0;
+    if (prlimit(999999, RLIMIT_CORE, NULL, &old) != -1 || errno != ESRCH) f |= 8;
+    /* Without privilege: no hard limit raised, no other user's process
+     * (a root child; there is no pid 1 to ask about). */
+    int hold[2] = {-1, -1};
+    if (pipe(hold) != 0) f |= 32;
+    pid_t root_child = fork();
+    if (root_child == 0) {
+        /* Lives until the parent closes its end (it cannot kill a root
+         * process once it has dropped privilege). */
+        char c;
+        close(hold[1]);
+        (void)!read(hold[0], &c, 1);
+        _exit(0);
+    }
+    close(hold[0]);
+    if (setresuid(4320, 4320, 4320) != 0) f |= 16;
+    r.rlim_cur = 100;
+    r.rlim_max = 300;
+    errno = 0;
+    if (setrlimit(RLIMIT_CORE, &r) != -1 || errno != EPERM) f |= 16;
+    errno = 0;
+    if (root_child < 0 || prlimit(root_child, RLIMIT_CORE, NULL, &old) != -1 || errno != EPERM)
+        f |= 32;
+    close(hold[1]);
+    if (root_child > 0)
+        waitpid(root_child, NULL, 0);
+    return f;
+}
+
+static int rl_nofile(void)
+{
+    int f = 0;
+    struct rlimit r = {8, 8};
+    if (setrlimit(RLIMIT_NOFILE, &r) != 0) return 1;
+    int fd, last = -1;
+    errno = 0;
+    while ((fd = open("/dev/null", O_RDONLY)) >= 0)
+        last = fd;
+    if (errno != EMFILE || last != 7) f |= 2;
+    errno = 0;
+    if (dup2(0, 8) != -1 || errno != EBADF) f |= 4;
+    errno = 0;
+    if (fcntl(0, F_DUPFD, 8) != -1 || errno != EINVAL) f |= 4;
+    close(last);
+    if (dup2(0, 7) != 7) f |= 8;
+    r.rlim_cur = r.rlim_max = 1 << 20;
+    errno = 0;
+    if (setrlimit(RLIMIT_NOFILE, &r) != -1 || errno != EPERM) f |= 16;
+    return f;
+}
+
+static int rl_fsize_ignored(void)
+{
+    int f = 0;
+    signal(SIGXFSZ, SIG_IGN);
+    struct rlimit r = {100, 100};
+    if (setrlimit(RLIMIT_FSIZE, &r) != 0) return 1;
+    int fd = open("/tmp/musl_fsize", O_CREAT | O_RDWR | O_TRUNC, 0644);
+    char buf[150];
+    memset(buf, 'f', sizeof(buf));
+    /* A write crossing the limit is shortened; one at it fails. */
+    if (write(fd, buf, sizeof(buf)) != 100) f |= 2;
+    errno = 0;
+    if (write(fd, buf, 1) != -1 || errno != EFBIG) f |= 4;
+    errno = 0;
+    if (pwrite(fd, buf, 10, 200) != -1 || errno != EFBIG) f |= 8;
+    if (pwrite(fd, buf, 10, 95) != 5) f |= 8;
+    errno = 0;
+    if (ftruncate(fd, 200) != -1 || errno != EFBIG) f |= 16;
+    if (ftruncate(fd, 50) != 0) f |= 16;
+    /* writev counts the vector as one write. */
+    lseek(fd, 90, SEEK_SET);
+    struct iovec iov[2] = {{buf, 5}, {buf, 20}};
+    if (writev(fd, iov, 2) != 10) f |= 32;
+    close(fd);
+    unlink("/tmp/musl_fsize");
+    return f;
+}
+
+static int rl_fsize_signal(void)
+{
+    struct rlimit r = {10, 10};
+    setrlimit(RLIMIT_FSIZE, &r);
+    int fd = open("/tmp/musl_fsize2", O_CREAT | O_RDWR | O_TRUNC, 0644);
+    unlink("/tmp/musl_fsize2");
+    char buf[20] = {0};
+    (void)!write(fd, buf, 10);
+    (void)!write(fd, buf, 1); /* SIGXFSZ, default action: core */
+    return 1;
+}
+
+static int rl_memory(void)
+{
+    int f = 0;
+    struct rlimit r = {1u << 30, 1u << 30};
+    if (setrlimit(RLIMIT_AS, &r) != 0) return 1;
+    errno = 0;
+    if (mmap(NULL, 2u << 30, PROT_READ, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0) != MAP_FAILED
+        || errno != ENOMEM)
+        f |= 2;
+    void *p = mmap(NULL, 1 << 20, PROT_READ, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (p == MAP_FAILED) f |= 4;
+    else munmap(p, 1 << 20);
+    /* RLIMIT_DATA 0: no private writable memory, brk included. */
+    r.rlim_cur = r.rlim_max = 0;
+    if (setrlimit(RLIMIT_DATA, &r) != 0) f |= 8;
+    errno = 0;
+    if (mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0) != MAP_FAILED
+        || errno != ENOMEM)
+        f |= 16;
+    p = mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    if (p == MAP_FAILED) f |= 32;
+    void *brk0 = sbrk(0);
+    if (sbrk(1 << 20) != (void *)-1 || sbrk(0) != brk0) f |= 64;
+    return f;
+}
+
+static int rl_stack(void)
+{
+    struct rlimit r = {512u << 10, 512u << 10};
+    setrlimit(RLIMIT_STACK, &r);
+    return recurse_deep(256) == 12345; /* 1 MiB of frames: SIGSEGV */
+}
+
+static void *rl_thread(void *arg)
+{
+    return arg;
+}
+
+static int rl_nproc(void)
+{
+    int f = 0;
+    if (setresuid(4321, 4321, 4321) != 0) return 1;
+    struct rlimit r = {1, 1};
+    if (setrlimit(RLIMIT_NPROC, &r) != 0) return 2;
+    errno = 0;
+    pid_t pid = fork();
+    if (pid == 0) _exit(0);
+    if (pid != -1 || errno != EAGAIN) f |= 4;
+    pthread_t t;
+    if (pthread_create(&t, NULL, rl_thread, NULL) != EAGAIN) f |= 8;
+    return f;
+}
+
+static int rl_priorities(void)
+{
+    int f = 0;
+    struct rlimit r = {25, 25};
+    if (setrlimit(RLIMIT_NICE, &r) != 0) return 1;
+    r.rlim_cur = r.rlim_max = 10;
+    if (setrlimit(RLIMIT_RTPRIO, &r) != 0) return 1;
+    if (setresuid(4322, 4322, 4322) != 0) return 1;
+    /* RLIMIT_NICE 25: down to nice -5, not past it. */
+    if (setpriority(PRIO_PROCESS, 0, 10) != 0) f |= 2;
+    if (setpriority(PRIO_PROCESS, 0, -5) != 0) f |= 4;
+    errno = 0;
+    if (getpriority(PRIO_PROCESS, 0) != -5 || errno != 0) f |= 4;
+    errno = 0;
+    if (setpriority(PRIO_PROCESS, 0, -6) != -1 || errno != EACCES) f |= 8;
+    /* RLIMIT_RTPRIO 10: SCHED_FIFO up to priority 10. */
+    struct sched_param sp = {.sched_priority = 11};
+    errno = 0;
+    if (syscall(SYS_sched_setscheduler, 0, SCHED_FIFO, &sp) != -1 || errno != EPERM) f |= 16;
+    sp.sched_priority = 10;
+    if (syscall(SYS_sched_setscheduler, 0, SCHED_FIFO, &sp) != 0) f |= 32;
+    sp.sched_priority = 0;
+    syscall(SYS_sched_setscheduler, 0, SCHED_OTHER, &sp);
+    return f;
+}
+
+static int rl_sigpending(void)
+{
+    int f = 0;
+    int sig = SIGRTMIN + 1;
+    struct rlimit r = {2, 2};
+    if (setrlimit(RLIMIT_SIGPENDING, &r) != 0) return 1;
+    if (setresuid(4323, 4323, 4323) != 0) return 1;
+    signal(sig, count_rt);
+    sigset_t set;
+    sigemptyset(&set);
+    sigaddset(&set, sig);
+    sigprocmask(SIG_BLOCK, &set, NULL);
+    pid_t me = getpid(), tid = gettid();
+    if (syscall(SYS_tgkill, me, tid, sig) != 0 || syscall(SYS_tgkill, me, tid, sig) != 0) f |= 2;
+    errno = 0;
+    if (syscall(SYS_tgkill, me, tid, sig) != -1 || errno != EAGAIN) f |= 4;
+    /* kill() past the limit still succeeds: the signal pends on the
+     * process without a queued instance. The two queued for the thread and
+     * the process's one are delivered: three, as on Linux. */
+    if (kill(me, sig) != 0) f |= 8;
+    sigprocmask(SIG_UNBLOCK, &set, NULL);
+    if (rt_caught != 3) f |= 16;
+    return f;
+}
+
+static int rl_cpu(void)
+{
+    /* SIGXCPU at the soft limit (1 s), caught; SIGKILL at the hard (2 s). */
+    signal(SIGXCPU, note_xcpu);
+    struct rlimit r = {1, 2};
+    setrlimit(RLIMIT_CPU, &r);
+    burn_cpu(10000);
+    return 1;
+}
+
+static void test_rlimits(void)
+{
+    int f = 0, st, codes[9] = {0};
+    if (!exited_zero(codes[0] = in_child(rl_query))) f |= 1;
+    if (!exited_zero(codes[1] = in_child(rl_nofile))) f |= 2;
+    if (!exited_zero(codes[2] = in_child(rl_fsize_ignored))) f |= 4;
+    st = in_child(rl_fsize_signal);
+    if (!WIFSIGNALED(st) || WTERMSIG(st) != SIGXFSZ) f |= 8;
+    if (!exited_zero(codes[4] = in_child(rl_memory))) f |= 16;
+    st = in_child(rl_stack);
+    if (!WIFSIGNALED(st) || WTERMSIG(st) != SIGSEGV) f |= 32;
+    if (!exited_zero(codes[6] = in_child(rl_nproc))) f |= 64;
+    if (!exited_zero(codes[7] = in_child(rl_priorities))) f |= 128;
+    if (!exited_zero(codes[8] = in_child(rl_sigpending))) f |= 256;
+    int fds[2];
+    if (pipe(fds) == 0) {
+        xcpu_pipe = fds[1];
+        st = in_child(rl_cpu);
+        close(fds[1]);
+        char c = 0;
+        if (!WIFSIGNALED(st) || WTERMSIG(st) != SIGKILL || read(fds[0], &c, 1) != 1 || c != 'x')
+            f |= 512;
+        close(fds[0]);
+    } else {
+        f |= 512;
+    }
+    /* Each child's wait status (exit code << 8): which checks failed. */
+    static char why[160];
+    snprintf(why, sizeof(why), "fail=%#x st=%#x,%#x,%#x,%#x,%#x,%#x,%#x", f, codes[0], codes[1],
+             codes[2], codes[4], codes[6], codes[7], codes[8]);
+    report("musl_rlimits", f == 0, why);
 }
 
 /* The --ids mode: this program's IDs, AT_SECURE, dumpable flag and
@@ -2019,6 +2323,7 @@ int main(int argc, char **argv)
     test_sched();
     test_setuid_exec("/bin/musl_runtime_test");
     test_clocks_and_usage();
+    test_rlimits();
     printf("MUSL-RUNTIME: %d/%d\n", passed, total);
     return passed == total ? 0 : 1;
 }
