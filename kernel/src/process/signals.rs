@@ -142,55 +142,217 @@ pub fn queued_by_user(uid: u32) -> u64 {
     }
 }
 
-struct RtCounts {
-    /// Queued instances of each real-time signal.
-    counts: [u32; NSIG - SIGRTMIN + 1],
-    /// The user the queued instances are charged to: the receiver's real
-    /// user when the first was queued. Instances keep that charge until
-    /// taken, even if the process changes its real user meanwhile.
-    uid: u32,
+/// `si_code` values (Linux): who or what sent a signal.
+pub const SI_USER: i32 = 0;
+pub const SI_KERNEL: i32 = 0x80;
+pub const SI_QUEUE: i32 = -1;
+pub const SI_TKILL: i32 = -6;
+/// SIGCHLD `si_code`: how the child changed state.
+pub const CLD_EXITED: i32 = 1;
+pub const CLD_KILLED: i32 = 2;
+pub const CLD_DUMPED: i32 = 3;
+pub const CLD_STOPPED: i32 = 5;
+pub const CLD_CONTINUED: i32 = 6;
+/// Fault `si_code`s (x86 exceptions).
+pub const SEGV_MAPERR: i32 = 1;
+pub const SEGV_ACCERR: i32 = 2;
+pub const FPE_INTDIV: i32 = 1;
+pub const FPE_FLTDIV: i32 = 3;
+pub const FPE_FLTOVF: i32 = 4;
+pub const FPE_FLTUND: i32 = 5;
+pub const FPE_FLTRES: i32 = 6;
+pub const FPE_FLTINV: i32 = 7;
+pub const ILL_ILLOPN: i32 = 2;
+pub const BUS_ADRALN: i32 = 1;
+pub const TRAP_TRACE: i32 = 2;
+
+/// Linux `siginfo_t` (x86_64, 128 bytes): signo, errno, code, then a union
+/// whose members the constructors below fill: kill and sigqueue have the
+/// sender's pid and real uid at byte 16 and the queued value at 24; SIGCHLD
+/// has the child's pid, uid, status and user/system time; a fault has the
+/// address at 16.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SigInfo {
+    pub si_signo: i32,
+    pub si_errno: i32,
+    pub si_code: i32,
+    pub pad: i32,
+    pub fields: [u64; 14],
 }
 
-impl RtCounts {
-    fn total(&self) -> u64 {
-        self.counts.iter().map(|&c| c as u64).sum()
+const _: () = assert!(core::mem::size_of::<SigInfo>() == 128);
+
+// SAFETY: repr(C), integers only, no padding bytes (the explicit `pad`
+// fills the gap before the 8-byte-aligned union); any bytes are a value.
+unsafe impl crate::syscall::userspace::UserPod for SigInfo {}
+
+impl SigInfo {
+    fn with(sig: usize, code: i32) -> Self {
+        Self {
+            si_signo: sig as i32,
+            si_code: code,
+            ..Default::default()
+        }
+    }
+
+    /// Sent by a process (kill: SI_USER; tkill and tgkill: SI_TKILL) whose
+    /// pid and real user are `pid` and `uid`.
+    pub fn from_process(sig: usize, code: i32, pid: u64, uid: u32) -> Self {
+        let mut info = Self::with(sig, code);
+        info.fields[0] = pid as u32 as u64 | (uid as u64) << 32;
+        info
+    }
+
+    /// Sent by the calling process to itself or another (SI_USER), as
+    /// Linux's kill and its kernel-internal send_sig(sig, task, 0) do.
+    pub fn from_current(sig: usize, code: i32) -> Self {
+        match super::current_process() {
+            Some(p) => Self::from_process(sig, code, p.pid.0, p.credentials().ruid),
+            None => Self::kernel(sig),
+        }
+    }
+
+    /// Sent by the kernel itself (SI_KERNEL).
+    pub fn kernel(sig: usize) -> Self {
+        Self::with(sig, SI_KERNEL)
+    }
+
+    /// A child's state change (`code` is a CLD_ value): its pid, real user,
+    /// status (exit code, or the signal) and CPU times in clock ticks.
+    pub fn child(sig: usize, code: i32, child: &Process, status: i32) -> Self {
+        let mut info = Self::from_process(sig, code, child.pid.0, child.credentials().ruid);
+        info.fields[1] = status as u32 as u64;
+        let (user, system) = child.cpu_times().user_system_ns();
+        // clock_t in USER_HZ (100) ticks, as times() reports them.
+        info.fields[2] = user / 10_000_000;
+        info.fields[3] = system / 10_000_000;
+        info
+    }
+
+    /// `child` ended (its exit signal is `sig`, normally SIGCHLD):
+    /// CLD_EXITED with its exit code, or CLD_KILLED / CLD_DUMPED with the
+    /// signal that ended it.
+    pub fn child_exited(sig: usize, child: &Process) -> Self {
+        let term = child.term_signal.load(Ordering::Acquire) & 0x7f;
+        let (code, status) = if term == 0 {
+            (CLD_EXITED, child.get_exit_code() & 0xff)
+        } else if super::pcb::wait_status(0, term) & 0x80 != 0 {
+            (CLD_DUMPED, term as i32)
+        } else {
+            (CLD_KILLED, term as i32)
+        };
+        Self::child(sig, code, child, status)
+    }
+
+    /// A hardware fault at `addr` (`code` is a SEGV_, FPE_, ILL_, BUS_ or
+    /// TRAP_ value; SI_KERNEL when there is none).
+    pub fn fault(sig: usize, code: i32, addr: u64) -> Self {
+        let mut info = Self::with(sig, code);
+        info.fields[0] = addr;
+        info
+    }
+
+    /// The signal a queued record is for.
+    pub fn signo(&self) -> usize {
+        self.si_signo as u32 as usize
+    }
+
+    /// Sender's pid (kill, sigqueue, SIGCHLD).
+    pub fn pid(&self) -> u32 {
+        self.fields[0] as u32
+    }
+
+    /// Sender's real user (kill, sigqueue, SIGCHLD).
+    pub fn uid(&self) -> u32 {
+        (self.fields[0] >> 32) as u32
+    }
+
+    /// The fault address (SIGSEGV, SIGBUS, SIGILL, SIGFPE, SIGTRAP).
+    pub fn addr(&self) -> u64 {
+        self.fields[0]
+    }
+
+    /// The sigval of a queued signal (si_int / si_ptr).
+    pub fn value(&self) -> u64 {
+        self.fields[1]
+    }
+
+    /// SIGCHLD: the child's status (si_status).
+    pub fn status(&self) -> i32 {
+        self.fields[1] as u32 as i32
+    }
+
+    /// SIGCHLD: the child's user and system time in clock ticks.
+    pub fn times(&self) -> (u64, u64) {
+        (self.fields[2], self.fields[3])
+    }
+
+    /// Whether this records a hardware fault (the union holds an address).
+    pub fn is_fault(&self) -> bool {
+        matches!(self.si_signo, 4 | 5 | 7 | 8 | 11) && self.si_code > 0 && self.si_code < SI_KERNEL
     }
 }
 
-/// Queued instances of each real-time signal, beside the pending set's
-/// bit: the bit stays set while any instance is queued. Changed under its
-/// lock together with the bit, so a send cannot be lost between a delivery
-/// taking the last instance and clearing the bit. Every queued instance is
-/// charged to a user (RLIMIT_SIGPENDING) until it is taken, cleared or the
-/// queue is dropped.
-pub struct RtQueue(spin::Mutex<RtCounts>);
+struct Queued {
+    /// The siginfo of every pending signal instance, oldest first: one per
+    /// pending standard signal (the first sender's: a standard signal sent
+    /// again while pending is not queued twice), one per queued instance of
+    /// a real-time signal.
+    infos: alloc::collections::VecDeque<SigInfo>,
+    /// Real-time instances in `infos`, each charged to `uid`.
+    rt: u64,
+    /// The user the queued real-time instances are charged to: the
+    /// receiver's real user when the first was queued. Instances keep that
+    /// charge until taken, even if the process changes its real user
+    /// meanwhile.
+    uid: u32,
+}
+
+/// Pending signal instances with their siginfo, beside the pending set's
+/// bits: a bit stays set while any instance of its signal is queued.
+/// Changed under its lock together with the bits, so a send cannot be lost
+/// between a delivery taking the last instance and clearing the bit. Every
+/// queued real-time instance is charged to a user (RLIMIT_SIGPENDING) until
+/// it is taken, cleared or the queue is dropped.
+pub struct RtQueue(spin::Mutex<Queued>);
 
 impl RtQueue {
     pub const fn new() -> Self {
-        Self(spin::Mutex::new(RtCounts {
-            counts: [0; NSIG - SIGRTMIN + 1],
+        Self(spin::Mutex::new(Queued {
+            infos: alloc::collections::VecDeque::new(),
+            rt: 0,
             uid: 0,
         }))
     }
 
-    /// Queue one instance of `sig` in `pending`, charged as `charge` says.
-    /// A standard signal only sets its bit. Past the user's limit,
-    /// `Overflow::Fail` is `QueueFull` (EAGAIN) and `Overflow::Merge` sets
-    /// the bit alone: the signal is delivered once more only if no instance
-    /// is queued.
+    /// Make `info.si_signo` pending in `pending` with `info`, charged as
+    /// `charge` says. A standard signal already pending keeps its first
+    /// siginfo. A real-time signal queues another instance; past the
+    /// user's limit, `Overflow::Fail` is `QueueFull` (EAGAIN) and
+    /// `Overflow::Merge` sets the bit alone: the signal is delivered once
+    /// more only if no instance is queued.
     pub fn push(
         &self,
         pending: &core::sync::atomic::AtomicU64,
-        sig: usize,
+        info: SigInfo,
         charge: Charge,
         overflow: Overflow,
     ) -> Result<(), QueueFull> {
+        let sig = info.signo();
+        let bit = sig_bit(sig);
+        let mut q = self.0.lock();
         if sig < SIGRTMIN {
-            pending.fetch_or(sig_bit(sig), Ordering::AcqRel);
+            if pending.load(Ordering::Acquire) & bit == 0 {
+                // A pending bit cleared without the queue (job control)
+                // leaves its record behind: drop it for the new one.
+                q.infos.retain(|i| i.signo() != sig);
+                q.infos.push_back(info);
+                pending.fetch_or(bit, Ordering::AcqRel);
+            }
             return Ok(());
         }
-        let mut q = self.0.lock();
-        let charge = if q.total() > 0 {
+        let charge = if q.rt > 0 {
             Charge {
                 uid: q.uid,
                 ..charge
@@ -198,49 +360,54 @@ impl RtQueue {
         } else {
             charge
         };
-        if q.counts[sig - SIGRTMIN] < u32::MAX && charge_user(charge) {
+        if charge_user(charge) {
             q.uid = charge.uid;
-            q.counts[sig - SIGRTMIN] += 1;
+            q.rt += 1;
+            q.infos.push_back(info);
         } else if overflow == Overflow::Fail {
             return Err(QueueFull);
         }
-        pending.fetch_or(sig_bit(sig), Ordering::AcqRel);
+        pending.fetch_or(bit, Ordering::AcqRel);
         Ok(())
     }
 
-    /// Take one instance of `sig` off `pending`: whether there was one.
-    /// The bit stays while real-time instances remain.
-    pub fn take(&self, pending: &core::sync::atomic::AtomicU64, sig: usize) -> bool {
+    /// Take one instance of `sig` off `pending`, with its siginfo; None if
+    /// it is not pending. A real-time signal's bit stays while instances
+    /// remain. A signal pending without a record (one merged past the
+    /// queue limit) comes with an SI_USER siginfo that names no sender, as
+    /// on Linux.
+    pub fn take(&self, pending: &core::sync::atomic::AtomicU64, sig: usize) -> Option<SigInfo> {
         let bit = sig_bit(sig);
-        if sig < SIGRTMIN {
-            return pending.fetch_and(!bit, Ordering::AcqRel) & bit != 0;
-        }
         let mut q = self.0.lock();
         if pending.load(Ordering::Acquire) & bit == 0 {
-            return false;
+            return None;
         }
-        let uid = q.uid;
-        let count = &mut q.counts[sig - SIGRTMIN];
-        if *count > 0 {
-            *count -= 1;
-            uncharge_user(uid, 1);
-        }
-        if *count == 0 {
+        let info = match q.infos.iter().position(|i| i.signo() == sig) {
+            Some(at) => {
+                let info = q.infos.remove(at).unwrap_or_default();
+                if sig >= SIGRTMIN {
+                    q.rt -= 1;
+                    uncharge_user(q.uid, 1);
+                }
+                info
+            }
+            None => SigInfo::with(sig, SI_USER),
+        };
+        if sig < SIGRTMIN || !q.infos.iter().any(|i| i.signo() == sig) {
             pending.fetch_and(!bit, Ordering::AcqRel);
         }
-        true
+        Some(info)
     }
 
-    /// Drop every queued instance and pending bit (exec, a discarded
-    /// signal).
+    /// Drop every pending instance of the signals in `bits` (exec, a
+    /// discarded signal, job control).
     pub fn clear(&self, pending: &core::sync::atomic::AtomicU64, bits: u64) {
         let mut q = self.0.lock();
-        let mut dropped = 0;
-        for sig in SIGRTMIN..=NSIG {
-            if bits & sig_bit(sig) != 0 {
-                dropped += core::mem::take(&mut q.counts[sig - SIGRTMIN]) as u64;
-            }
-        }
+        let rt_before = q.infos.iter().filter(|i| i.signo() >= SIGRTMIN).count();
+        q.infos.retain(|i| bits & sig_bit(i.signo()) == 0);
+        let rt_after = q.infos.iter().filter(|i| i.signo() >= SIGRTMIN).count();
+        let dropped = (rt_before - rt_after) as u64;
+        q.rt -= dropped;
         uncharge_user(q.uid, dropped);
         pending.fetch_and(!bits, Ordering::AcqRel);
     }
@@ -249,7 +416,7 @@ impl RtQueue {
 impl Drop for RtQueue {
     fn drop(&mut self) {
         let q = self.0.get_mut();
-        uncharge_user(q.uid, q.total());
+        uncharge_user(q.uid, q.rt);
     }
 }
 
@@ -467,36 +634,38 @@ pub fn ignored(process: &Process, sig: usize) -> bool {
 fn job_control_on_send(process: &Process, sig: usize) {
     if sig == SIGCONT {
         process
-            .pending_signals
-            .fetch_and(!STOP_SIGNALS, Ordering::AcqRel);
+            .rt_queue
+            .clear(&process.pending_signals, STOP_SIGNALS);
         for thread in process.threads.lock().values() {
-            thread.sigpending.fetch_and(!STOP_SIGNALS, Ordering::AcqRel);
+            thread.rt_queue.clear(&thread.sigpending, STOP_SIGNALS);
         }
         // Bump first: a stop being decided right now sees the change and
         // backs out (`stop_process`).
         process.cont_seq.fetch_add(1, Ordering::SeqCst);
         if process.stop_signal.swap(0, Ordering::SeqCst) != 0 {
             process.job_report.store(0xffff, Ordering::Release);
-            notify_parent_job(process);
+            notify_parent_job(process, CLD_CONTINUED, SIGCONT as i32);
         }
         crate::sched::dispatch::PROCESS_EVENTS.wake_all();
     } else if sig_bit(sig) & STOP_SIGNALS != 0 {
-        let cont = !sig_bit(SIGCONT);
-        process.pending_signals.fetch_and(cont, Ordering::AcqRel);
+        let cont = sig_bit(SIGCONT);
+        process.rt_queue.clear(&process.pending_signals, cont);
         for thread in process.threads.lock().values() {
-            thread.sigpending.fetch_and(cont, Ordering::AcqRel);
+            thread.rt_queue.clear(&thread.sigpending, cont);
         }
     }
 }
 
-/// Tell `process`'s parent that it stopped or continued: SIGCHLD unless
-/// the parent asked for none (SA_NOCLDSTOP), and a wakeup for `wait`.
+/// Tell `process`'s parent that it stopped or continued (`code`
+/// CLD_STOPPED with the stop signal, or CLD_CONTINUED with SIGCONT, as
+/// `status`): SIGCHLD unless the parent asked for none (SA_NOCLDSTOP), and
+/// a wakeup for `wait`.
 #[cfg(feature = "alloc")]
-fn notify_parent_job(process: &Process) {
+fn notify_parent_job(process: &Process, code: i32, status: i32) {
     if let Some(parent) = process.parent().and_then(super::table::get_process) {
         let nocldstop = parent.signal_action_extra.lock()[SIGCHLD].0 & SA_NOCLDSTOP != 0;
         if !nocldstop {
-            notify(&parent, SIGCHLD);
+            notify_info(&parent, SigInfo::child(SIGCHLD, code, process, status));
         }
     }
     crate::sched::dispatch::PROCESS_EVENTS.wake_all();
@@ -523,7 +692,7 @@ fn stop_process(process: &Process, sig: usize, seq: u32) {
     process
         .job_report
         .store(0x7f | ((sig as u32) << 8), Ordering::Release);
-    notify_parent_job(process);
+    notify_parent_job(process, CLD_STOPPED, sig as i32);
 }
 
 /// Park the calling thread while its process is stopped; returns once it
@@ -541,14 +710,37 @@ pub fn park_while_stopped() {
     }
 }
 
-/// Send `sig` to a dispatched process. `Ok(false)` if the process has no
-/// running threads (the caller falls back to the old path). Past
-/// RLIMIT_SIGPENDING a real-time signal pends without queueing another
-/// instance, as kill does on Linux.
+/// Send `sig` to a dispatched process from the kernel (SI_KERNEL); see
+/// [`send_info_to_process`].
 #[cfg(feature = "alloc")]
 pub fn send_to_process(process: &Process, sig: usize) -> Result<bool, crate::error::KernelError> {
+    send_info_to_process(process, SigInfo::kernel(sig))
+}
+
+/// The overflow rule for a send with `info` (Linux's override_rlimit): a
+/// queued signal from a process (sigqueue, tkill: a negative si_code) fails
+/// with EAGAIN past RLIMIT_SIGPENDING; kill and the kernel's own signals
+/// still pend.
+fn overflow_of(info: &SigInfo) -> Overflow {
+    if info.si_code < 0 {
+        Overflow::Fail
+    } else {
+        Overflow::Merge
+    }
+}
+
+/// Send `info.si_signo` with `info` to a dispatched process. `Ok(false)` if
+/// the process has no running threads (the caller falls back to the old
+/// path); `WouldBlock` (EAGAIN) if a queued real-time signal would exceed
+/// RLIMIT_SIGPENDING (see [`overflow_of`]).
+#[cfg(feature = "alloc")]
+pub fn send_info_to_process(
+    process: &Process,
+    info: SigInfo,
+) -> Result<bool, crate::error::KernelError> {
     use crate::sched::dispatch;
 
+    let sig = info.signo();
     let tasks = dispatch::tasks_of(process.pid.0);
     if tasks.is_empty() {
         return Ok(false);
@@ -564,13 +756,15 @@ pub fn send_to_process(process: &Process, sig: usize) -> Result<bool, crate::err
     } else if ignored(process, sig) {
         return Ok(true);
     } else {
-        // kill: past RLIMIT_SIGPENDING the signal still pends (Linux).
-        let _ = process.rt_queue.push(
-            &process.pending_signals,
-            sig,
-            Charge::of(process),
-            Overflow::Merge,
-        );
+        process
+            .rt_queue
+            .push(
+                &process.pending_signals,
+                info,
+                Charge::of(process),
+                overflow_of(&info),
+            )
+            .map_err(|_| crate::error::KernelError::WouldBlock)?;
         crate::fs::signalfd::signal_generated();
     }
     for task in &tasks {
@@ -580,43 +774,55 @@ pub fn send_to_process(process: &Process, sig: usize) -> Result<bool, crate::err
     Ok(true)
 }
 
-/// Send `sig` to `process` from inside the kernel (SIGCHLD to a parent,
-/// terminal signals to a foreground group): through the dispatched path
-/// when the process runs on its own threads, so an ignored signal is
-/// dropped instead of pending and interrupting waits (N-98).
+/// Send `sig` to `process` from inside the kernel (terminal signals to a
+/// foreground group, resource limits): see [`notify_info`].
 pub fn notify(process: &Process, sig: usize) {
+    notify_info(process, SigInfo::kernel(sig));
+}
+
+/// Send `info` to `process` from inside the kernel (SIGCHLD to a parent,
+/// with the child's state): through the dispatched path when the process
+/// runs on its own threads, so an ignored signal is dropped instead of
+/// pending and interrupting waits (N-98).
+pub fn notify_info(process: &Process, info: SigInfo) {
     #[cfg(feature = "alloc")]
-    if process.dispatched.load(Ordering::Acquire) && send_to_process(process, sig).unwrap_or(true) {
+    if process.dispatched.load(Ordering::Acquire)
+        && send_info_to_process(process, info).unwrap_or(true)
+    {
         return;
     }
-    let _ = process.send_signal(sig);
+    let _ = process.send_signal_info(info);
 }
 
 /// Send `sig` to the calling thread from inside the kernel (Linux's
-/// send_sig(sig, current, 0)): SIGXFSZ for a write past RLIMIT_FSIZE.
+/// send_sig(sig, current, 0): SI_USER from the caller itself): SIGXFSZ for
+/// a write past RLIMIT_FSIZE, SIGPIPE.
 pub fn send_to_current(sig: usize) {
     let (Some(process), Some(thread)) = (super::current_process(), super::current_thread()) else {
         return;
     };
+    let info = SigInfo::from_process(sig, SI_USER, process.pid.0, process.credentials().ruid);
     #[cfg(feature = "alloc")]
     if process.dispatched.load(Ordering::Acquire) {
-        let _ = send_to_thread(&process, &thread, sig);
+        let _ = send_to_thread(&process, &thread, info);
         return;
     }
     let _ = thread;
-    let _ = process.send_signal(sig);
+    let _ = process.send_signal_info(info);
 }
 
-/// Send `sig` to one thread of a dispatched process (tkill, tgkill);
-/// `WouldBlock` (EAGAIN) if a real-time signal's queue is full.
+/// Send `info.si_signo` with `info` to one thread of a dispatched process
+/// (tkill, tgkill, rt_tgsigqueueinfo); `WouldBlock` (EAGAIN) if a queued
+/// real-time signal would exceed RLIMIT_SIGPENDING (see [`overflow_of`]).
 #[cfg(feature = "alloc")]
 pub fn send_to_thread(
     process: &Process,
     thread: &Thread,
-    sig: usize,
+    info: SigInfo,
 ) -> Result<(), crate::error::KernelError> {
+    let sig = info.signo();
     if sig == SIGKILL {
-        send_to_process(process, sig)?;
+        send_info_to_process(process, info)?;
         return Ok(());
     }
     job_control_on_send(process, sig);
@@ -625,7 +831,12 @@ pub fn send_to_thread(
     }
     thread
         .rt_queue
-        .push(&thread.sigpending, sig, Charge::of(process), Overflow::Fail)
+        .push(
+            &thread.sigpending,
+            info,
+            Charge::of(process),
+            overflow_of(&info),
+        )
         .map_err(|_| crate::error::KernelError::WouldBlock)?;
     crate::fs::signalfd::signal_generated();
     for task in crate::sched::dispatch::tasks_of(process.pid.0) {
@@ -654,24 +865,30 @@ pub fn pending_in(mask: u64) -> bool {
         != 0
 }
 
-/// Take the calling thread's lowest pending signal in `mask` -- the
-/// thread's own instance first, then its process's -- blocked or not, as a
-/// signalfd read does: it is consumed, not delivered. A real-time signal's
-/// instances come one at a time (N-209).
-pub fn take_pending_in(mask: u64) -> Option<usize> {
-    let process = super::current_process()?;
-    let thread = super::current_thread()?;
-    let pending =
-        thread.sigpending.load(Ordering::Acquire) | process.pending_signals.load(Ordering::Acquire);
-    let ready = pending & mask;
+/// Take the lowest signal of `ready` pending for `thread` -- its own
+/// instance first, then its process's -- with its siginfo. A real-time
+/// signal's instances come one at a time, oldest first (N-209). None if
+/// another thread took it first.
+fn take_lowest(process: &Process, thread: &Thread, ready: u64) -> Option<SigInfo> {
     if ready == 0 {
         return None;
     }
     let sig = ready.trailing_zeros() as usize + 1;
-    if !thread.rt_queue.take(&thread.sigpending, sig) {
-        process.rt_queue.take(&process.pending_signals, sig);
-    }
-    Some(sig)
+    thread
+        .rt_queue
+        .take(&thread.sigpending, sig)
+        .or_else(|| process.rt_queue.take(&process.pending_signals, sig))
+}
+
+/// Take the calling thread's lowest pending signal in `mask`, blocked or
+/// not, as a signalfd read or sigtimedwait does: it is consumed, not
+/// delivered.
+pub fn take_pending_in(mask: u64) -> Option<SigInfo> {
+    let process = super::current_process()?;
+    let thread = super::current_thread()?;
+    let pending =
+        thread.sigpending.load(Ordering::Acquire) | process.pending_signals.load(Ordering::Acquire);
+    take_lowest(&process, &thread, pending & mask)
 }
 
 /// Replace the calling thread's mask (UNBLOCKABLE is never blocked).
@@ -683,20 +900,11 @@ pub fn set_mask(process: &Process, thread: &Thread, mask: u64) -> u64 {
     thread.sigmask.swap(mask, Ordering::AcqRel)
 }
 
-/// Take the lowest deliverable signal off the pending sets.
+/// Take the lowest deliverable signal off the pending sets, with its
+/// siginfo.
 #[cfg(target_arch = "x86_64")]
-fn dequeue(process: &Process, thread: &Thread) -> Option<usize> {
-    let ready = deliverable(process, thread);
-    if ready == 0 {
-        return None;
-    }
-    let sig = ready.trailing_zeros() as usize + 1;
-    // The thread's own instance first; a real-time signal's bit stays set
-    // while more instances are queued (N-209).
-    if !thread.rt_queue.take(&thread.sigpending, sig) {
-        process.rt_queue.take(&process.pending_signals, sig);
-    }
-    Some(sig)
+fn dequeue(process: &Process, thread: &Thread) -> Option<SigInfo> {
+    take_lowest(process, thread, deliverable(process, thread))
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -764,17 +972,6 @@ mod frame {
         pub uc_sigmask: u64,
     }
 
-    /// Linux `siginfo_t` (128 bytes): signo, errno, code, then a union.
-    #[repr(C)]
-    #[derive(Clone, Copy, Default)]
-    pub(super) struct SigInfo {
-        pub si_signo: i32,
-        pub si_errno: i32,
-        pub si_code: i32,
-        pub pad: i32,
-        pub fields: [u64; 14],
-    }
-
     /// Linux `struct rt_sigframe` (x86_64): the handler's return address
     /// first, so the frame address is the handler's entry RSP.
     #[repr(C)]
@@ -820,28 +1017,35 @@ mod frame {
         }
     }
 
-    /// Build the handler frame for `sig` on the user stack and point `f`
-    /// at the handler. Returns false if the frame cannot be written (the
-    /// caller then kills the thread with SIGSEGV).
+    /// Build the handler frame for `info`'s signal on the user stack and
+    /// point `f` at the handler. Returns false if the frame cannot be
+    /// written (the caller then kills the thread with SIGSEGV).
     fn setup_frame(
         f: &mut TrapFrame,
         process: &Process,
         thread: &Thread,
-        sig: usize,
+        info: SigInfo,
         handler: u64,
         flags: u64,
         restorer: u64,
         sa_mask: u64,
     ) -> bool {
+        let sig = info.signo();
         if flags & SA_RESTORER == 0 || !is_user_address(restorer) || !is_user_address(handler) {
             return false;
         }
 
         // A system call the signal interrupted is restarted with SA_RESTART
-        // (rewind over the 2-byte `syscall`, put the number back in rax);
-        // otherwise it returns EINTR. The context saved below must be the
-        // one the handler returns to.
-        if f.vector == SYSCALL_VECTOR && f.rax == EINTR_RAX && flags & SA_RESTART != 0 {
+        // (rewind over the 2-byte `syscall`, put the number back in rax),
+        // unless it is one that returns EINTR after a handler regardless
+        // (`no_restart`); otherwise it returns EINTR. The context saved
+        // below must be the one the handler returns to.
+        let no_restart = thread.no_restart.swap(false, Ordering::AcqRel);
+        if f.vector == SYSCALL_VECTOR
+            && f.rax == EINTR_RAX
+            && flags & SA_RESTART != 0
+            && !no_restart
+        {
             f.rax = f.error_code;
             f.rip = f.rip.wrapping_sub(2);
         }
@@ -947,10 +1151,7 @@ mod frame {
                 uc_sigmask: old_mask,
                 ..Default::default()
             },
-            info: SigInfo {
-                si_signo: sig as i32,
-                ..Default::default()
-            },
+            info,
         };
         if crate::syscall::userspace::write_user_bytes(frame_addr as usize, bytes_of(&frame))
             .is_err()
@@ -1003,7 +1204,8 @@ mod frame {
                     return;
                 };
                 let seq = process.cont_seq.load(Ordering::SeqCst);
-                let Some(sig) = dequeue(&process, &thread) else {
+                let Some(info) = dequeue(&process, &thread) else {
+                    thread.no_restart.store(false, Ordering::Release);
                     // sigsuspend ended without a handler to restore its
                     // mask: put the saved one back now.
                     if thread.has_saved_sigmask.swap(false, Ordering::AcqRel) {
@@ -1015,6 +1217,7 @@ mod frame {
                     }
                     return;
                 };
+                let sig = info.signo();
                 let handler = process.get_signal_handler(sig).unwrap_or(SIG_DFL);
                 match handler {
                     SIG_IGN => None,
@@ -1023,6 +1226,7 @@ mod frame {
                         DefaultAction::Stop => {
                             // A system call the stop interrupted runs again
                             // once the process continues, as on Linux.
+                            thread.no_restart.store(false, Ordering::Release);
                             if f.vector == SYSCALL_VECTOR && f.rax == EINTR_RAX {
                                 f.rax = f.error_code;
                                 f.rip = f.rip.wrapping_sub(2);
@@ -1034,7 +1238,7 @@ mod frame {
                     },
                     addr => {
                         let (flags, restorer, mask) = process.signal_action_extra.lock()[sig];
-                        if setup_frame(f, &process, &thread, sig, addr, flags, restorer, mask) {
+                        if setup_frame(f, &process, &thread, info, addr, flags, restorer, mask) {
                             sanitize_user_frame(f);
                             return;
                         }
@@ -1156,6 +1360,151 @@ mod tests {
         assert_eq!(default_action(19), DefaultAction::Stop); // SIGSTOP
         assert_eq!(default_action(18), DefaultAction::Continue); // SIGCONT
         assert_eq!(default_action(10), DefaultAction::Terminate); // SIGUSR1
+    }
+
+    fn queued(sig: usize, value: u64) -> SigInfo {
+        let mut info = SigInfo::from_process(sig, SI_QUEUE, 7, 1000);
+        info.fields[1] = value;
+        info
+    }
+
+    /// Each queued real-time instance keeps its own siginfo, oldest first
+    /// (sigqueue values arrive in order).
+    #[test]
+    fn real_time_instances_keep_their_siginfo() {
+        let q = RtQueue::new();
+        let pending = core::sync::atomic::AtomicU64::new(0);
+        for v in 1..=3 {
+            q.push(&pending, queued(40, v), Charge::UNLIMITED, Overflow::Fail)
+                .unwrap();
+        }
+        let values: alloc::vec::Vec<u64> = (0..3)
+            .map(|_| q.take(&pending, 40).unwrap().value())
+            .collect();
+        assert_eq!(values, [1, 2, 3]);
+        assert_eq!(q.take(&pending, 40), None);
+        assert_eq!(pending.load(Ordering::Acquire), 0);
+    }
+
+    /// A standard signal sent again while pending keeps the first
+    /// sender's siginfo, and is taken once.
+    #[test]
+    fn standard_signal_keeps_first_siginfo() {
+        let q = RtQueue::new();
+        let pending = core::sync::atomic::AtomicU64::new(0);
+        q.push(
+            &pending,
+            SigInfo::from_process(10, SI_USER, 42, 0),
+            Charge::UNLIMITED,
+            Overflow::Merge,
+        )
+        .unwrap();
+        q.push(
+            &pending,
+            SigInfo::from_process(10, SI_USER, 43, 0),
+            Charge::UNLIMITED,
+            Overflow::Merge,
+        )
+        .unwrap();
+        let info = q.take(&pending, 10).unwrap();
+        assert_eq!((info.pid(), info.si_code), (42, SI_USER));
+        assert_eq!(q.take(&pending, 10), None);
+        // Pending again later: the new sender, not a stale record.
+        q.push(
+            &pending,
+            SigInfo::from_process(10, SI_USER, 44, 0),
+            Charge::UNLIMITED,
+            Overflow::Merge,
+        )
+        .unwrap();
+        assert_eq!(q.take(&pending, 10).unwrap().pid(), 44);
+    }
+
+    /// A bit cleared without the queue (as job control used to) leaves no
+    /// stale siginfo for the next send.
+    #[test]
+    fn cleared_signal_leaves_no_stale_siginfo() {
+        let q = RtQueue::new();
+        let pending = core::sync::atomic::AtomicU64::new(0);
+        q.push(
+            &pending,
+            SigInfo::from_process(18, SI_USER, 5, 0),
+            Charge::UNLIMITED,
+            Overflow::Merge,
+        )
+        .unwrap();
+        pending.fetch_and(!sig_bit(18), Ordering::AcqRel);
+        q.push(
+            &pending,
+            SigInfo::kernel(18),
+            Charge::UNLIMITED,
+            Overflow::Merge,
+        )
+        .unwrap();
+        assert_eq!(q.take(&pending, 18).unwrap().si_code, SI_KERNEL);
+        // clear() drops records and bits together.
+        q.push(&pending, queued(33, 9), Charge::UNLIMITED, Overflow::Fail)
+            .unwrap();
+        q.clear(&pending, sig_bit(33));
+        assert_eq!(q.take(&pending, 33), None);
+    }
+
+    /// Past the queue limit a kill-style send pends without a record and
+    /// is delivered with an SI_USER siginfo naming no sender.
+    #[test]
+    fn merged_signal_comes_without_sender() {
+        let q = RtQueue::new();
+        let pending = core::sync::atomic::AtomicU64::new(0);
+        let full = Charge {
+            uid: 0xfeed,
+            limit: 0,
+        };
+        assert_eq!(
+            q.push(&pending, queued(50, 1), full, Overflow::Fail),
+            Err(QueueFull)
+        );
+        q.push(
+            &pending,
+            SigInfo::from_process(50, SI_USER, 9, 0),
+            full,
+            Overflow::Merge,
+        )
+        .unwrap();
+        let info = q.take(&pending, 50).unwrap();
+        assert_eq!((info.signo(), info.si_code, info.pid()), (50, SI_USER, 0));
+        assert_eq!(pending.load(Ordering::Acquire), 0);
+    }
+
+    /// The siginfo union members sit where Linux puts them.
+    #[test]
+    fn siginfo_union_is_linux_layout() {
+        let bytes = |i: &SigInfo| -> [u8; 128] {
+            let mut b = [0u8; 128];
+            // SAFETY: SigInfo is 128 bytes of plain integers.
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    i as *const SigInfo as *const u8,
+                    b.as_mut_ptr(),
+                    128,
+                )
+            };
+            b
+        };
+        let i32_at =
+            |b: &[u8; 128], at: usize| i32::from_le_bytes(b[at..at + 4].try_into().unwrap());
+        let u64_at =
+            |b: &[u8; 128], at: usize| u64::from_le_bytes(b[at..at + 8].try_into().unwrap());
+        // kill / sigqueue: si_pid 16, si_uid 20, si_value 24.
+        let b = bytes(&queued(40, 0x55));
+        assert_eq!(i32_at(&b, 0), 40);
+        assert_eq!(i32_at(&b, 8), SI_QUEUE);
+        assert_eq!(i32_at(&b, 16), 7);
+        assert_eq!(i32_at(&b, 20), 1000);
+        assert_eq!(u64_at(&b, 24), 0x55);
+        // A fault: si_addr 16.
+        let b = bytes(&SigInfo::fault(11, SEGV_ACCERR, 0x1234_0000));
+        assert_eq!(i32_at(&b, 8), SEGV_ACCERR);
+        assert_eq!(u64_at(&b, 16), 0x1234_0000);
     }
 
     fn stack(sp: u64, flags: i32, size: u64) -> AltStackRequest {

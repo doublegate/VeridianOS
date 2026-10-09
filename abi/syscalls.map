@@ -187,6 +187,9 @@ rt_sigprocmask
 rt_sigsuspend
 rt_sigreturn
 rt_sigpending
+rt_sigtimedwait
+rt_sigqueueinfo
+rt_tgsigqueueinfo
 sigaltstack
 
 ## Identity

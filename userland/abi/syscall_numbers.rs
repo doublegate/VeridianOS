@@ -150,6 +150,9 @@ pub mod sysno {
     pub const SYS_rt_sigsuspend: usize = 130;
     pub const SYS_rt_sigreturn: usize = 15;
     pub const SYS_rt_sigpending: usize = 127;
+    pub const SYS_rt_sigtimedwait: usize = 128;
+    pub const SYS_rt_sigqueueinfo: usize = 129;
+    pub const SYS_rt_tgsigqueueinfo: usize = 297;
     pub const SYS_sigaltstack: usize = 131;
     pub const SYS_getuid: usize = 102;
     pub const SYS_geteuid: usize = 107;

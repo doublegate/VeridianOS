@@ -162,7 +162,9 @@ What remains:
   yet).
 - **Handlers save x87/SSE state only.** The signal frame holds an FXSAVE image, so the upper
   halves of AVX registers are not preserved across a handler that uses them.
-- **`siginfo` carries only the signal number.** No sender pid or uid, no fault address.
+- **No timer or I/O siginfo.** POSIX timers (timer_create) and SIGIO (F_SETOWN, O_ASYNC) do
+  not exist yet, so no signal arrives with SI_TIMER or POLL_* information; kill, tkill,
+  sigqueue, SIGCHLD and fault signals carry Linux's siginfo (N-259).
 - **sigreturn on AArch64 and RISC-V does not sanitise registers (N-170).** PSTATE and `sstatus`
   are restored as given, latent until those architectures have user mode.
 

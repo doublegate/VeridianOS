@@ -13,6 +13,7 @@ use core::sync::atomic::Ordering;
 
 use super::{
     pcb::{Process, ProcessState},
+    signals::SigInfo,
     table,
     thread::ThreadId,
     ProcessId,
@@ -55,7 +56,10 @@ pub fn exit_process(exit_code: i32) {
                 // Send SIGCHLD to parent (POSIX: delivered on child exit)
                 if let Err(_e) = {
                     if exit_signal(&process) != 0 {
-                        super::signals::notify(&parent, exit_signal(&process));
+                        super::signals::notify_info(
+                            &parent,
+                            super::signals::SigInfo::child_exited(exit_signal(&process), &process),
+                        );
                     }
                     Ok::<(), KernelError>(())
                 } {
@@ -448,6 +452,12 @@ pub fn default_signal_action(signal: i32) -> SignalAction {
 
 /// Send a signal to a process (kill syscall)
 pub fn kill_process(pid: ProcessId, signal: i32) -> Result<(), KernelError> {
+    kill_process_info(pid, signal, SigInfo::kernel(signal as usize))
+}
+
+/// [`kill_process`] with the siginfo the target sees: kill(2) passes the
+/// sender (SI_USER, its pid and real user), the kernel SI_KERNEL.
+pub fn kill_process_info(pid: ProcessId, signal: i32, info: SigInfo) -> Result<(), KernelError> {
     // Validate signal number
     if !(0..=super::signals::NSIG as i32).contains(&signal) {
         return Err(KernelError::InvalidArgument {
@@ -480,13 +490,13 @@ pub fn kill_process(pid: ProcessId, signal: i32) -> Result<(), KernelError> {
     // D3): queued, ignored ones dropped, SIGKILL at once.
     #[cfg(feature = "alloc")]
     if process.dispatched.load(Ordering::Acquire)
-        && super::signals::send_to_process(&process, signal as usize)?
+        && super::signals::send_info_to_process(&process, info)?
     {
         return Ok(());
     }
 
     // Queue the signal to the process
-    process.send_signal(signal as usize)?;
+    process.send_signal_info(info)?;
 
     // Determine the action to take
     let handler = process.get_signal_handler(signal as usize).unwrap_or(0);
@@ -511,7 +521,15 @@ pub fn kill_process(pid: ProcessId, signal: i32) -> Result<(), KernelError> {
             println!("[PROCESS] Process {} stopped by SIGSTOP", pid.0);
 
             // Notify parent with SIGCHLD (POSIX: child stopped)
-            notify_parent_sigchld(&process, signals::SIGCHLD as usize);
+            notify_parent_sigchld(
+                &process,
+                SigInfo::child(
+                    signals::SIGCHLD as usize,
+                    super::signals::CLD_STOPPED,
+                    &process,
+                    signals::SIGSTOP,
+                ),
+            );
         }
         _ => {
             // Handle based on action
@@ -530,7 +548,15 @@ pub fn kill_process(pid: ProcessId, signal: i32) -> Result<(), KernelError> {
                     println!("[PROCESS] Process {} stopped by signal {}", pid.0, signal);
 
                     // Notify parent with SIGCHLD (POSIX: child stopped)
-                    notify_parent_sigchld(&process, signals::SIGCHLD as usize);
+                    notify_parent_sigchld(
+                        &process,
+                        SigInfo::child(
+                            signals::SIGCHLD as usize,
+                            super::signals::CLD_STOPPED,
+                            &process,
+                            signal,
+                        ),
+                    );
                 }
                 SignalAction::Continue => {
                     if process.get_state() == ProcessState::Blocked {
@@ -539,7 +565,15 @@ pub fn kill_process(pid: ProcessId, signal: i32) -> Result<(), KernelError> {
                         println!("[PROCESS] Process {} continued by signal {}", pid.0, signal);
 
                         // Notify parent with SIGCHLD (POSIX: child continued)
-                        notify_parent_sigchld(&process, signals::SIGCHLD as usize);
+                        notify_parent_sigchld(
+                            &process,
+                            SigInfo::child(
+                                signals::SIGCHLD as usize,
+                                super::signals::CLD_CONTINUED,
+                                &process,
+                                signals::SIGCONT,
+                            ),
+                        );
                     }
                     process.clear_pending_signal(signal as usize);
                 }
@@ -625,7 +659,10 @@ pub fn exit_dispatched(exit_code: i32, group: bool) -> ! {
         if !others_alive {
             cleanup_process(&process);
             process.set_state(ProcessState::Zombie);
-            notify_parent_sigchld(&process, exit_signal(&process));
+            notify_parent_sigchld(
+                &process,
+                SigInfo::child_exited(exit_signal(&process), &process),
+            );
         }
         dispatch::PROCESS_EVENTS.wake_all();
     }
@@ -642,19 +679,20 @@ fn exit_signal(process: &Process) -> usize {
     process.exit_signal.load(Ordering::Acquire) as usize
 }
 
-/// Send `sig` (SIGCHLD, or the child's exit signal; 0 sends nothing) to
-/// the parent of `process` and wake it if blocked.
+/// Send `info` (SIGCHLD, or the child's exit signal, with the child's state
+/// change; signal 0 sends nothing) to the parent of `process` and wake it
+/// if blocked.
 ///
 /// Called when a child process exits, stops, or continues. This is the
 /// unified notification path: `exit_process` and `kill_process` (for Stop
 /// and Continue actions) both funnel through here.
-fn notify_parent_sigchld(process: &Process, sig: usize) {
+fn notify_parent_sigchld(process: &Process, info: SigInfo) {
     if let Some(parent_pid) = process.parent() {
         if let Some(parent) = table::get_process(parent_pid) {
             // Signal the parent (POSIX: delivered on child state change)
             if let Err(_e) = {
-                if sig != 0 {
-                    super::signals::notify(&parent, sig);
+                if info.signo() != 0 {
+                    super::signals::notify_info(&parent, info);
                 }
                 Ok::<(), KernelError>(())
             } {
@@ -735,7 +773,10 @@ fn force_terminate_process(process: &Process, signal: i32) -> Result<(), KernelE
             // Send SIGCHLD to parent
             if let Err(_e) = {
                 if exit_signal(process) != 0 {
-                    super::signals::notify(&parent, exit_signal(process));
+                    super::signals::notify_info(
+                        &parent,
+                        super::signals::SigInfo::child_exited(exit_signal(process), process),
+                    );
                 }
                 Ok::<(), KernelError>(())
             } {

@@ -48,6 +48,7 @@
 #include <shadow.h>
 #include <crypt.h>
 #include <pwd.h>
+#include <setjmp.h>
 #include <sys/random.h>
 #include <linux/futex.h>
 #include <sys/timerfd.h>
@@ -693,6 +694,253 @@ static void test_sigpipe(void)
     static char why[96];
     snprintf(why, sizeof(why), "fail=%#x st=%#x,%#x,%#x", f, st, a, b);
     report("musl_sigpipe", f == 0, why);
+}
+
+/* Every signal carries its siginfo (D3): sigqueue values arrive in send
+ * order with SI_QUEUE and the sender; kill is SI_USER and raise SI_TKILL;
+ * sigtimedwait takes a pending or arriving signal or times out (EAGAIN);
+ * SIGCHLD says how the child ended; a fault gives its code and address;
+ * an SA_RESTART handler does not restart sigsuspend; rt_sigqueueinfo
+ * refuses to pose as kill for another process; queued sends past
+ * RLIMIT_SIGPENDING fail with EAGAIN while kill still pends. */
+static volatile int si_values[4], si_n, si_code_seen, si_pid_seen, si_status_seen;
+static volatile int si_usr2_seen;
+
+static void on_info(int sig, siginfo_t *si, void *uc)
+{
+    (void)sig;
+    (void)uc;
+    if (si_n < 4)
+        si_values[si_n] = si->si_value.sival_int;
+    si_n++;
+    si_code_seen = si->si_code;
+    si_pid_seen = si->si_pid;
+    si_status_seen = si->si_status;
+}
+
+static void on_usr2_count(int sig)
+{
+    (void)sig;
+    si_usr2_seen++;
+}
+
+static sigjmp_buf si_jump;
+static volatile int si_fault_code;
+static volatile uintptr_t si_fault_addr;
+
+static void on_segv_info(int sig, siginfo_t *si, void *uc)
+{
+    (void)sig;
+    (void)uc;
+    si_fault_code = si->si_code;
+    si_fault_addr = (uintptr_t)si->si_addr;
+    siglongjmp(si_jump, 1);
+}
+
+static int si_child_exit7(void)
+{
+    return 7;
+}
+
+static int si_restart_child_body(pid_t parent)
+{
+    struct timespec t = {0, 200 * 1000 * 1000};
+    nanosleep(&t, 0);
+    kill(parent, SIGUSR1);
+    nanosleep(&t, 0);
+    kill(parent, SIGUSR2);
+    return 0;
+}
+
+static int si_queue_child_body(pid_t parent)
+{
+    struct timespec t = {0, 100 * 1000 * 1000};
+    nanosleep(&t, 0);
+    union sigval v = {.sival_int = 4242};
+    return sigqueue(parent, SIGRTMIN + 5, v) == 0 ? 0 : 1;
+}
+
+static void test_siginfo(void)
+{
+    /* volatile: kept across the siglongjmp out of the SIGSEGV handler. */
+    volatile int f = 0;
+    struct sigaction sa;
+    sigset_t set, empty;
+    sigemptyset(&empty);
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_sigaction = on_info;
+    sa.sa_flags = SA_SIGINFO;
+    int rt = SIGRTMIN + 3;
+    sigaction(rt, &sa, 0);
+    sigaction(SIGUSR1, &sa, 0);
+
+    /* 1: queued values in order, SI_QUEUE, the sender's pid. */
+    sigemptyset(&set);
+    sigaddset(&set, rt);
+    sigprocmask(SIG_BLOCK, &set, 0);
+    for (int v = 11; v <= 33; v += 11) {
+        union sigval sv = {.sival_int = v};
+        if (sigqueue(getpid(), rt, sv) != 0) f |= 1;
+    }
+    si_n = 0;
+    sigprocmask(SIG_UNBLOCK, &set, 0);
+    if (si_n != 3 || si_values[0] != 11 || si_values[1] != 22 || si_values[2] != 33) f |= 2;
+    if (si_code_seen != SI_QUEUE || si_pid_seen != getpid()) f |= 4;
+
+    /* 2: kill is SI_USER, raise (tkill) SI_TKILL. */
+    si_code_seen = 99;
+    kill(getpid(), SIGUSR1);
+    if (si_code_seen != SI_USER || si_pid_seen != getpid()) f |= 8;
+    si_code_seen = 99;
+    raise(SIGUSR1);
+    if (si_code_seen != SI_TKILL) f |= 0x10;
+
+    /* 3: sigtimedwait takes a pending one with its value; nothing pending
+     * and a zero or short timeout is EAGAIN. */
+    sigemptyset(&set);
+    sigaddset(&set, SIGUSR2);
+    sigprocmask(SIG_BLOCK, &set, 0);
+    union sigval sv77 = {.sival_int = 77};
+    sigqueue(getpid(), SIGUSR2, sv77);
+    siginfo_t si;
+    struct timespec zero = {0, 0}, short_wait = {0, 50 * 1000 * 1000};
+    memset(&si, 0, sizeof(si));
+    if (sigtimedwait(&set, &si, &zero) != SIGUSR2 || si.si_value.sival_int != 77 ||
+        si.si_code != SI_QUEUE)
+        f |= 0x20;
+    errno = 0;
+    if (sigtimedwait(&set, &si, &zero) != -1 || errno != EAGAIN) f |= 0x40;
+    struct timespec t0, t1;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    errno = 0;
+    int r = sigtimedwait(&set, &si, &short_wait);
+    clock_gettime(CLOCK_MONOTONIC, &t1);
+    long ms = (t1.tv_sec - t0.tv_sec) * 1000 + (t1.tv_nsec - t0.tv_nsec) / 1000000;
+    if (r != -1 || errno != EAGAIN || ms < 40) f |= 0x80;
+    sigprocmask(SIG_UNBLOCK, &set, 0);
+
+    /* 4: sigwaitinfo wakes for a signal another process queues. */
+    int rq = SIGRTMIN + 5;
+    sigemptyset(&set);
+    sigaddset(&set, rq);
+    sigprocmask(SIG_BLOCK, &set, 0);
+    pid_t parent = getpid(), q = fork();
+    if (q == 0)
+        _exit(si_queue_child_body(parent));
+    memset(&si, 0, sizeof(si));
+    int got_rq;
+    do {
+        got_rq = sigwaitinfo(&set, &si);
+    } while (got_rq == -1 && errno == EINTR);
+    if (got_rq != rq || si.si_value.sival_int != 4242 || si.si_pid != q) f |= 0x100;
+    int qst = 0;
+    waitpid(q, &qst, 0);
+    sigprocmask(SIG_UNBLOCK, &set, 0);
+
+    /* 5: SIGCHLD says CLD_EXITED, the status and the child. */
+    sigaction(SIGCHLD, &sa, 0);
+    si_code_seen = 0;
+    pid_t c = fork();
+    if (c == 0)
+        _exit(si_child_exit7());
+    int cst = 0;
+    waitpid(c, &cst, 0);
+    for (int i = 0; i < 100 && si_code_seen == 0; i++) {
+        struct timespec t = {0, 10 * 1000 * 1000};
+        nanosleep(&t, 0);
+    }
+    if (si_code_seen != CLD_EXITED || si_status_seen != 7 || si_pid_seen != c) f |= 0x200;
+    signal(SIGCHLD, SIG_DFL);
+
+    /* 6: a SIGSEGV handler sees SEGV_ACCERR and the address. */
+    struct sigaction sv;
+    memset(&sv, 0, sizeof(sv));
+    sv.sa_sigaction = on_segv_info;
+    sv.sa_flags = SA_SIGINFO | SA_NODEFER;
+    sigaction(SIGSEGV, &sv, 0);
+    char *ro = mmap(0, 4096, PROT_READ, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    si_fault_code = 0;
+    if (ro != MAP_FAILED && sigsetjmp(si_jump, 1) == 0)
+        *(volatile char *)(ro + 8) = 1;
+    if (si_fault_code != SEGV_ACCERR || si_fault_addr != (uintptr_t)(ro + 8)) f |= 0x400;
+    munmap(ro, 4096);
+    signal(SIGSEGV, SIG_DFL);
+
+    /* 7: an SA_RESTART handler does not restart sigsuspend: it returns
+     * EINTR after the first signal, before the child's second. */
+    struct sigaction rs;
+    memset(&rs, 0, sizeof(rs));
+    rs.sa_sigaction = on_info;
+    rs.sa_flags = SA_SIGINFO | SA_RESTART;
+    sigaction(SIGUSR1, &rs, 0);
+    signal(SIGUSR2, on_usr2_count);
+    sigemptyset(&set);
+    sigaddset(&set, SIGUSR1);
+    sigaddset(&set, SIGUSR2);
+    sigprocmask(SIG_BLOCK, &set, 0);
+    si_usr2_seen = 0;
+    parent = getpid();
+    pid_t rc = fork();
+    if (rc == 0)
+        _exit(si_restart_child_body(parent));
+    errno = 0;
+    int sr = sigsuspend(&empty);
+    int restart_ok = sr == -1 && errno == EINTR && si_usr2_seen == 0;
+    sigprocmask(SIG_UNBLOCK, &set, 0);
+    int rcs = 0;
+    while (waitpid(rc, &rcs, 0) == -1 && errno == EINTR) {
+    }
+    if (!restart_ok) f |= 0x800;
+    signal(SIGUSR1, SIG_DFL);
+    signal(SIGUSR2, SIG_DFL);
+
+    /* 8: rt_sigqueueinfo may not pose as kill (si_code >= 0) for another
+     * process, but may for itself. */
+    pid_t holder = fork();
+    if (holder == 0) {
+        pause();
+        _exit(0);
+    }
+    siginfo_t forged;
+    memset(&forged, 0, sizeof(forged));
+    forged.si_code = SI_USER;
+    errno = 0;
+    if (syscall(SYS_rt_sigqueueinfo, holder, SIGUSR1, &forged) != -1 || errno != EPERM) f |= 0x1000;
+    signal(SIGUSR1, SIG_IGN);
+    if (syscall(SYS_rt_sigqueueinfo, getpid(), SIGUSR1, &forged) != 0) f |= 0x1000;
+    signal(SIGUSR1, SIG_DFL);
+    kill(holder, SIGKILL);
+    waitpid(holder, 0, 0);
+
+    /* 9: past RLIMIT_SIGPENDING sigqueue is EAGAIN; kill still pends. */
+    int rl = SIGRTMIN + 7;
+    struct rlimit old_rl, two = {2, 2};
+    getrlimit(RLIMIT_SIGPENDING, &old_rl);
+    pid_t lim = fork();
+    if (lim == 0) {
+        int g = 0;
+        sigset_t b;
+        sigemptyset(&b);
+        sigaddset(&b, rl);
+        sigprocmask(SIG_BLOCK, &b, 0);
+        if (setrlimit(RLIMIT_SIGPENDING, &two) != 0) g |= 1;
+        union sigval z = {0};
+        if (sigqueue(getpid(), rl, z) != 0 || sigqueue(getpid(), rl, z) != 0) g |= 2;
+        errno = 0;
+        if (sigqueue(getpid(), rl, z) != -1 || errno != EAGAIN) g |= 4;
+        if (kill(getpid(), rl) != 0) g |= 8;
+        _exit(g);
+    }
+    int lst = 0;
+    waitpid(lim, &lst, 0);
+    if (!exited_zero(lst)) f |= 0x2000;
+
+    static char why[160];
+    snprintf(why, sizeof(why), "fail=%#x n=%d code=%d q=%#x l=%#x segv=%d@%#lx ro=%#lx", f, si_n,
+             si_code_seen, qst, lst, si_fault_code, (unsigned long)si_fault_addr,
+             (unsigned long)(uintptr_t)ro);
+    report("musl_siginfo", f == 0, why);
+    signal(rt, SIG_DFL);
 }
 
 /* munmap, mprotect, brk, mremap, madvise, getrandom and futex bitsets
@@ -2879,6 +3127,7 @@ int main(int argc, char **argv)
     test_file_calls();
     test_accounts();
     test_peercred();
+    test_siginfo();
     printf("MUSL-RUNTIME: %d/%d\n", passed, total);
     return passed == total ? 0 : 1;
 }

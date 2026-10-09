@@ -220,6 +220,182 @@ pub fn sys_sigpending(set_ptr: usize, size: usize) -> SyscallResult {
     Ok(0)
 }
 
+/// Read the siginfo a sigqueue caller passes for signal `sig`, applying
+/// Linux's rule: a process may not pose as the kernel, or as kill or tkill
+/// from another process -- a non-negative si_code, or SI_TKILL, is EPERM
+/// unless the caller signals itself (`own`).
+#[cfg(feature = "alloc")]
+fn queued_siginfo(
+    uinfo: usize,
+    sig: usize,
+    own: bool,
+) -> Result<crate::process::signals::SigInfo, SyscallError> {
+    use crate::process::signals::{SigInfo, SI_TKILL};
+    validate_user_ptr_typed::<SigInfo>(uinfo)?;
+    let mut info: SigInfo = super::userspace::read_user(uinfo)?;
+    if (info.si_code >= 0 || info.si_code == SI_TKILL) && !own {
+        return Err(SyscallError::OperationNotPermitted);
+    }
+    info.si_signo = sig as i32;
+    Ok(info)
+}
+
+/// A signal number argument: 0 (existence and permission only) to NSIG.
+fn signal_number(sig: usize) -> Result<usize, SyscallError> {
+    let sig = sig as u32 as i32;
+    if (0..=crate::process::signals::NSIG as i32).contains(&sig) {
+        Ok(sig as usize)
+    } else {
+        Err(SyscallError::InvalidArgument)
+    }
+}
+
+/// rt_sigqueueinfo(tgid, sig, info): send `sig` to process `tgid` with the
+/// caller's siginfo (sigqueue passes SI_QUEUE, its pid and uid, and the
+/// value). Permission as kill; EAGAIN when the real-time queue is full.
+#[cfg(feature = "alloc")]
+pub fn sys_rt_sigqueueinfo(tgid: usize, sig: usize, uinfo: usize) -> SyscallResult {
+    let tgid = super::process::positive_id(tgid).map_err(|_| SyscallError::ProcessNotFound)?;
+    let sig = signal_number(sig)?;
+    let caller = process::current_process().ok_or(SyscallError::InvalidState)?;
+    let pid = process::ProcessId(tgid as u64);
+    let info = queued_siginfo(uinfo, sig, caller.pid == pid)?;
+    // Existence and permission first (sig 0 stops there).
+    super::filesystem::kill_one(&caller, pid, 0)?;
+    if sig == 0 {
+        return Ok(0);
+    }
+    if let Some(target) = process::get_process(pid) {
+        if target
+            .dispatched
+            .load(core::sync::atomic::Ordering::Acquire)
+        {
+            return match crate::process::signals::send_info_to_process(&target, info) {
+                Ok(true) => Ok(0),
+                Ok(false) => super::filesystem::send_info(pid, sig as i32, info),
+                Err(crate::error::KernelError::WouldBlock) => Err(SyscallError::WouldBlock),
+                Err(_) => Err(SyscallError::ProcessNotFound),
+            };
+        }
+    }
+    super::filesystem::send_info(pid, sig as i32, info)
+}
+
+/// rt_tgsigqueueinfo(tgid, tid, sig, info): as rt_sigqueueinfo, to thread
+/// `tid` of process `tgid` (pthread_sigqueue).
+#[cfg(feature = "alloc")]
+pub fn sys_rt_tgsigqueueinfo(tgid: usize, tid: usize, sig: usize, uinfo: usize) -> SyscallResult {
+    let tgid = super::process::positive_id(tgid)?;
+    let tid = super::process::positive_id(tid)?;
+    let sig = signal_number(sig)?;
+    let caller = process::current_process().ok_or(SyscallError::InvalidState)?;
+    let pid = process::ProcessId(tgid as u64);
+    let info = queued_siginfo(uinfo, sig, caller.pid == pid)?;
+    if super::process::process_of_thread(tid) != Some(pid) {
+        return Err(SyscallError::ProcessNotFound);
+    }
+    super::filesystem::kill_one(&caller, pid, 0)?;
+    if sig == 0 {
+        return Ok(0);
+    }
+    let target = process::get_process(pid).ok_or(SyscallError::ProcessNotFound)?;
+    if target
+        .dispatched
+        .load(core::sync::atomic::Ordering::Acquire)
+    {
+        let thread = target
+            .get_thread(process::ThreadId(tid as u64))
+            .ok_or(SyscallError::ProcessNotFound)?;
+        return crate::process::signals::send_to_thread(&target, &thread, info)
+            .map(|_| 0)
+            .map_err(|e| match e {
+                crate::error::KernelError::WouldBlock => SyscallError::WouldBlock,
+                _ => SyscallError::ProcessNotFound,
+            });
+    }
+    super::filesystem::send_info(pid, sig as i32, info)
+}
+
+/// rt_sigtimedwait(set, info, timeout, sigsetsize): take one of the
+/// signals in `set` (SIGKILL and SIGSTOP excepted) that is pending for the
+/// calling thread, or wait for one -- at most `timeout` (a relative
+/// timespec; NULL waits without limit, zero polls) -- and return its
+/// number, its siginfo written to `info` if non-NULL. While waiting the
+/// signals in `set` are unblocked, so their arrival wakes the thread;
+/// another signal it does not block ends the wait with EINTR (and is then
+/// delivered). EAGAIN when the time runs out.
+#[cfg(feature = "alloc")]
+pub fn sys_rt_sigtimedwait(
+    set_ptr: usize,
+    info_ptr: usize,
+    timeout_ptr: usize,
+    size: usize,
+) -> SyscallResult {
+    use core::sync::atomic::Ordering;
+
+    use crate::{
+        process::signals::{self, SigInfo},
+        sched::dispatch,
+    };
+
+    if size != 8 {
+        return Err(SyscallError::InvalidArgument);
+    }
+    validate_user_ptr_typed::<u64>(set_ptr)?;
+    let set: u64 = super::userspace::read_user(set_ptr)?;
+    let set = set & !signals::UNBLOCKABLE;
+    let timeout_ns = if timeout_ptr == 0 {
+        None
+    } else {
+        validate_user_ptr_typed::<[i64; 2]>(timeout_ptr)?;
+        let [sec, nsec]: [i64; 2] = super::userspace::read_user(timeout_ptr)?;
+        if sec < 0 || !(0..1_000_000_000).contains(&nsec) {
+            return Err(SyscallError::InvalidArgument);
+        }
+        Some(
+            (sec as u64)
+                .saturating_mul(1_000_000_000)
+                .saturating_add(nsec as u64),
+        )
+    };
+    let taken = |info: SigInfo| -> SyscallResult {
+        if info_ptr != 0 {
+            validate_user_ptr_typed::<SigInfo>(info_ptr)?;
+            super::userspace::write_user(info_ptr, info)?;
+        }
+        Ok(info.signo())
+    };
+
+    if let Some(info) = signals::take_pending_in(set) {
+        return taken(info);
+    }
+    if timeout_ns == Some(0) || dispatch::current_owner().is_none() {
+        return Err(SyscallError::WouldBlock);
+    }
+
+    // Wait with the waited-for signals unblocked (Linux's real_blocked),
+    // then put the mask back before taking one, so none is delivered to a
+    // handler instead.
+    let proc = process::current_process().ok_or(SyscallError::InvalidState)?;
+    let thread = process::current_thread().ok_or(SyscallError::InvalidState)?;
+    let old = thread.sigmask.load(Ordering::Acquire);
+    signals::set_mask(&proc, &thread, old & !set);
+    let deadline = timeout_ns.map(|ns| dispatch::clock_ns().saturating_add(ns));
+    static WAITERS: dispatch::WaitQueue = dispatch::WaitQueue::new();
+    let waited = dispatch::wait_event(&WAITERS, deadline, || signals::pending_in(set));
+    signals::set_mask(&proc, &thread, old);
+    drop(thread);
+    drop(proc);
+
+    match signals::take_pending_in(set) {
+        Some(info) => taken(info),
+        None => match waited {
+            Err(dispatch::WaitError::TimedOut) => Err(SyscallError::WouldBlock),
+            _ => Err(SyscallError::Interrupted),
+        },
+    }
+}
+
 /// Atomically set signal mask and suspend until a signal arrives (syscall 122).
 ///
 /// Saves the current signal mask, replaces it with the provided mask, then

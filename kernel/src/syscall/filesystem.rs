@@ -1711,9 +1711,30 @@ pub(crate) fn kill_one(
     {
         return super::process::exit_current(0, sig as u32);
     }
-    crate::process::exit::kill_process(pid, sig)
+    // The target sees the sender: SI_USER, the caller's pid and real user.
+    let info = crate::process::signals::SigInfo::from_process(
+        sig as usize,
+        crate::process::signals::SI_USER,
+        caller.pid.0,
+        caller.credentials().ruid,
+    );
+    send_info(pid, sig, info)
+}
+
+/// Make `sig` pending for process `pid` with `info` (the caller checked
+/// existence and permission): EAGAIN when a queued real-time signal would
+/// exceed RLIMIT_SIGPENDING.
+pub(crate) fn send_info(
+    pid: crate::process::ProcessId,
+    sig: i32,
+    info: crate::process::signals::SigInfo,
+) -> SyscallResult {
+    crate::process::exit::kill_process_info(pid, sig, info)
         .map(|_| 0)
-        .map_err(|_| SyscallError::ProcessNotFound)
+        .map_err(|e| match e {
+            crate::error::KernelError::WouldBlock => SyscallError::WouldBlock,
+            _ => SyscallError::ProcessNotFound,
+        })
 }
 
 /// Whether delivering `sig` to `process` would end it (default action

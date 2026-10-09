@@ -426,6 +426,11 @@ pub struct Thread {
     /// returns (`has_saved_sigmask` says whether one is saved).
     pub saved_sigmask: AtomicU64,
     pub has_saved_sigmask: AtomicBool,
+    /// The system call a signal just interrupted returns EINTR even to a
+    /// handler with SA_RESTART (sigsuspend, sigtimedwait, sleeps, poll and
+    /// friends, as Linux's ERESTARTNOHAND and plain EINTR). Set by the
+    /// system call dispatcher, consumed by the next signal delivery.
+    pub no_restart: AtomicBool,
     /// The alternate signal stack (sigaltstack; N-222). A new thread has
     /// none; fork copies the parent thread's.
     pub altstack: Mutex<super::signals::SigAltStack>,
@@ -592,6 +597,7 @@ impl Thread {
             rt_queue: super::signals::RtQueue::new(),
             saved_sigmask: AtomicU64::new(0),
             has_saved_sigmask: AtomicBool::new(false),
+            no_restart: AtomicBool::new(false),
             altstack: Mutex::new(super::signals::SigAltStack::default()),
             robust_list: AtomicUsize::new(0),
             sched: Mutex::new(SchedParams::default()),

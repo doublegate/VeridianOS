@@ -60,7 +60,9 @@ const STACK_GUARD_GAP: u64 = 1024 * 1024;
 ///    private copy and remap as writable.
 /// 3. **Stack growth** -- the faulting address is just below the current stack
 ///    mapping; extend the stack downward.
-/// 4. If none of the above apply, deliver SIGSEGV / return an error.
+/// 4. If none of the above apply, return an error. The caller (the
+///    architecture's trap handler) sends the signal: it knows the cause and
+///    builds the siginfo, so a fault is signalled exactly once.
 pub fn handle_page_fault(info: PageFaultInfo) -> Result<(), KernelError> {
     // Attempt demand paging first.
     if let Ok(()) = try_demand_page(&info) {
@@ -80,7 +82,9 @@ pub fn handle_page_fault(info: PageFaultInfo) -> Result<(), KernelError> {
     }
 
     // None of the handlers could resolve the fault.
-    signal_segv(&info)
+    Err(KernelError::InvalidAddress {
+        addr: info.faulting_address as usize,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -351,28 +355,6 @@ fn try_stack_growth(info: &PageFaultInfo) -> Result<(), KernelError> {
     memory_space_mut.set_stack_size(new_size);
 
     Ok(())
-}
-
-/// Deliver SIGSEGV to the faulting process or return an error for kernel
-/// faults.
-fn signal_segv(info: &PageFaultInfo) -> Result<(), KernelError> {
-    if info.was_user_mode {
-        // Attempt to deliver SIGSEGV to the process.
-        if let Some(process) = crate::process::current_process() {
-            use crate::process::exit::signals::SIGSEGV;
-            if let Err(_e) = crate::process::exit::kill_process(process.pid, SIGSEGV) {
-                kprintln!(
-                    "[MM] Warning: Failed to deliver SIGSEGV to pid {}: {:?}",
-                    process.pid,
-                    _e
-                );
-            }
-        }
-    }
-
-    Err(KernelError::InvalidAddress {
-        addr: info.faulting_address as usize,
-    })
 }
 
 // ---------------------------------------------------------------------------

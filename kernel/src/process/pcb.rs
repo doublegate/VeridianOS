@@ -678,8 +678,16 @@ impl Process {
         }
     }
 
-    /// Send a signal to this process
+    /// Send a signal to this process from the kernel (SI_KERNEL).
     pub fn send_signal(&self, signum: usize) -> Result<(), KernelError> {
+        self.send_signal_info(super::signals::SigInfo::kernel(signum))
+    }
+
+    /// Make `info.si_signo` pending for this process with `info` (the old,
+    /// undispatched path; dispatched processes go through
+    /// `signals::send_info_to_process`).
+    pub fn send_signal_info(&self, info: super::signals::SigInfo) -> Result<(), KernelError> {
+        let signum = info.signo();
         if signum > super::signals::NSIG {
             return Err(KernelError::InvalidArgument {
                 name: "signum",
@@ -694,7 +702,7 @@ impl Process {
         // without another instance, as kill does on Linux.
         let _ = self.rt_queue.push(
             &self.pending_signals,
-            signum,
+            info,
             super::signals::Charge::of(self),
             super::signals::Overflow::Merge,
         );
@@ -727,7 +735,7 @@ impl Process {
 
     /// Clear a pending signal
     pub fn clear_pending_signal(&self, signum: usize) {
-        self.rt_queue.take(&self.pending_signals, signum);
+        let _ = self.rt_queue.take(&self.pending_signals, signum);
     }
 
     /// Set signal mask (returns old mask)

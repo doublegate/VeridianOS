@@ -563,6 +563,11 @@ pub extern "C" fn syscall_handler(
     let result = match Syscall::try_from(syscall_num) {
         Ok(syscall) => {
             let result = handle_syscall(syscall, arg1, arg2, arg3, arg4, arg5);
+            if result == Err(SyscallError::Interrupted) && never_restarted(syscall) {
+                if let Some(thread) = crate::process::current_thread() {
+                    thread.no_restart.store(true, Ordering::Release);
+                }
+            }
             if result == Err(SyscallError::BrokenPipe) && raises_sigpipe(syscall, arg3, arg4) {
                 crate::process::signals::send_to_current(
                     crate::process::exit::signals::SIGPIPE as usize,
@@ -680,6 +685,28 @@ fn raises_sigpipe(syscall: Syscall, arg3: usize, arg4: usize) -> bool {
         Syscall::Sendmsg => arg3 & MSG_NOSIGNAL == 0,
         _ => false,
     }
+}
+
+/// System calls a signal handler never restarts, SA_RESTART or not: they
+/// return EINTR after it (Linux: sigsuspend and the sleeps and polls,
+/// ERESTARTNOHAND or a restart block; sigtimedwait, plain EINTR). A
+/// restarted sigsuspend would wait again after the handler it was waiting
+/// for.
+fn never_restarted(syscall: Syscall) -> bool {
+    matches!(
+        syscall,
+        Syscall::RtSigsuspend
+            | Syscall::RtSigtimedwait
+            | Syscall::Nanosleep
+            | Syscall::ClockNanosleep
+            | Syscall::Poll
+            | Syscall::Ppoll
+            | Syscall::Select
+            | Syscall::Pselect6
+            | Syscall::EpollWait
+            | Syscall::EpollPwait
+            | Syscall::EpollPwait2
+    )
 }
 
 /// Handle individual system calls
@@ -1225,6 +1252,12 @@ fn handle_syscall(
         Syscall::Tgkill => process::sys_tgkill(arg1, arg2, arg3),
         Syscall::Waitid => process::sys_waitid(arg1, arg2, arg3, arg4, arg5),
         Syscall::RtSigpending => signal::sys_sigpending(arg1, arg2),
+        #[cfg(feature = "alloc")]
+        Syscall::RtSigtimedwait => signal::sys_rt_sigtimedwait(arg1, arg2, arg3, arg4),
+        #[cfg(feature = "alloc")]
+        Syscall::RtSigqueueinfo => signal::sys_rt_sigqueueinfo(arg1, arg2, arg3),
+        #[cfg(feature = "alloc")]
+        Syscall::RtTgsigqueueinfo => signal::sys_rt_tgsigqueueinfo(arg1, arg2, arg3, arg4),
         Syscall::Ppoll => sys_ppoll(arg1, arg2, arg3, arg4, arg5),
         // faccessat has no flags argument; faccessat2 adds one.
         Syscall::Faccessat => sys_faccessat(arg1, arg2, arg3, 0),
@@ -3364,6 +3397,9 @@ mod tests {
             (110, Syscall::Getppid),
             (121, Syscall::Getpgid),
             (127, Syscall::RtSigpending),
+            (128, Syscall::RtSigtimedwait),
+            (129, Syscall::RtSigqueueinfo),
+            (297, Syscall::RtTgsigqueueinfo),
             (130, Syscall::RtSigsuspend),
             (131, Syscall::Sigaltstack),
             (157, Syscall::Prctl),

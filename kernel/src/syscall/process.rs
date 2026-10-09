@@ -1209,7 +1209,7 @@ pub fn sys_getenv(
 }
 
 /// The process that owns thread `tid`, if any.
-fn process_of_thread(tid: usize) -> Option<ProcessId> {
+pub(super) fn process_of_thread(tid: usize) -> Option<ProcessId> {
     let mut owner = None;
     crate::process::table::PROCESS_TABLE.for_each(|p| {
         if owner.is_none() && p.get_thread(crate::process::ThreadId(tid as u64)).is_some() {
@@ -1242,7 +1242,13 @@ pub fn sys_tkill(tid: usize, signal: usize) -> SyscallResult {
             {
                 if let Some(thread) = target.get_thread(ThreadId(tid as u64)) {
                     super::filesystem::kill_one(&caller, pid, 0)?;
-                    crate::process::signals::send_to_thread(&target, &thread, sig as usize)
+                    let info = crate::process::signals::SigInfo::from_process(
+                        sig as usize,
+                        crate::process::signals::SI_TKILL,
+                        caller.pid.0,
+                        caller.credentials().ruid,
+                    );
+                    crate::process::signals::send_to_thread(&target, &thread, info)
                         .map_err(super::map_kernel_error)?;
                     return Ok(0);
                 }
@@ -1263,7 +1269,7 @@ pub fn sys_tgkill(tgid: usize, tid: usize, signal: usize) -> SyscallResult {
 
 /// A pid_t argument that must name one thread or process: the register's
 /// low 32 bits, positive (EINVAL otherwise, as Linux; N-212).
-fn positive_id(raw: usize) -> Result<usize, SyscallError> {
+pub(super) fn positive_id(raw: usize) -> Result<usize, SyscallError> {
     match raw as u32 as i32 {
         id if id > 0 => Ok(id as usize),
         _ => Err(SyscallError::InvalidArgument),

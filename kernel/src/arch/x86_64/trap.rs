@@ -331,25 +331,89 @@ fn exit_to_user(f: &mut TrapFrame) {
 /// (SIGSEGV handlers, SIGFPE handlers...). Returns false when the fault
 /// must kill the process instead (default action, ignored, or blocked:
 /// Linux forces the default for a blocked or ignored synchronous signal).
-fn queue_fault_signal(sig: u32) -> bool {
+fn queue_fault_signal(info: crate::process::signals::SigInfo) -> bool {
     #[cfg(feature = "alloc")]
     if crate::sched::dispatch::current_owner().is_some() {
         if let (Some(process), Some(thread)) = (
             crate::process::current_process(),
             crate::process::current_thread(),
         ) {
-            let sig = sig as usize;
-            let bit = crate::process::signals::sig_bit(sig);
+            use crate::process::signals;
+            let sig = info.signo();
+            let bit = signals::sig_bit(sig);
             let handler = process.get_signal_handler(sig).unwrap_or(0);
             let blocked = thread.sigmask.load(Ordering::Acquire) & bit != 0;
             if handler > 1 && !blocked {
-                thread.sigpending.fetch_or(bit, Ordering::AcqRel);
+                let _ = thread.rt_queue.push(
+                    &thread.sigpending,
+                    info,
+                    signals::Charge::of(&process),
+                    signals::Overflow::Merge,
+                );
                 return true;
             }
         }
     }
-    let _ = sig;
+    let _ = info;
     false
+}
+
+/// The `si_code` of a floating-point exception from its status bits
+/// (`err`: the x87 status word or MXCSR flags, without the masked ones),
+/// as Linux's fpu__exception_code chooses it; SI_KERNEL when none is set.
+fn fp_exception_code(err: u32) -> i32 {
+    use crate::process::signals::*;
+    if err & 0x001 != 0 {
+        FPE_FLTINV
+    } else if err & 0x004 != 0 {
+        FPE_FLTDIV
+    } else if err & 0x008 != 0 {
+        FPE_FLTOVF
+    } else if err & 0x012 != 0 {
+        FPE_FLTUND
+    } else if err & 0x020 != 0 {
+        FPE_FLTRES
+    } else {
+        SI_KERNEL
+    }
+}
+
+/// The unmasked exception bits of the user's x87 (#MF) or SSE (#XM)
+/// state, still in the CPU (the kernel uses no floating point).
+fn fp_exception_bits(vector: u64) -> u32 {
+    if vector == 19 {
+        let mut mxcsr: u32 = 0;
+        // SAFETY: STMXCSR stores the 4-byte MXCSR to a valid local.
+        unsafe {
+            core::arch::asm!("stmxcsr [{}]", in(reg) &mut mxcsr, options(nostack, preserves_flags));
+        }
+        (mxcsr & 0x3f) & !((mxcsr >> 7) & 0x3f)
+    } else {
+        let (mut sw, mut cw): (u16, u16) = (0, 0);
+        // SAFETY: FNSTSW/FNSTCW store 2-byte words to valid locals and do
+        // not raise pending x87 exceptions.
+        unsafe {
+            core::arch::asm!("fnstsw [{}]", in(reg) &mut sw, options(nostack, preserves_flags));
+            core::arch::asm!("fnstcw [{}]", in(reg) &mut cw, options(nostack, preserves_flags));
+        }
+        (sw as u32 & 0x3f) & !(cw as u32 & 0x3f)
+    }
+}
+
+/// The siginfo Linux gives a user exception's signal: the code that names
+/// the cause and, for the ones that have it, the faulting instruction.
+fn exception_siginfo(vector: u64, rip: u64) -> crate::process::signals::SigInfo {
+    use crate::process::signals::*;
+    let sig = exception_signal(vector) as usize;
+    let (code, addr) = match vector {
+        0 => (FPE_INTDIV, rip),
+        1 => (TRAP_TRACE, rip),
+        6 => (ILL_ILLOPN, rip),
+        16 | 19 => (fp_exception_code(fp_exception_bits(vector)), rip),
+        17 => (BUS_ADRALN, 0),
+        _ => (SI_KERNEL, 0),
+    };
+    SigInfo::fault(sig, code, addr)
 }
 
 /// Mark the faulting user process as killed by `signal` and return to the
@@ -480,7 +544,7 @@ fn exception(f: &mut TrapFrame, user: bool) {
             raw_serial_hex(f.error_code);
             raw_serial_str(b"\n");
         }
-        if queue_fault_signal(exception_signal(f.vector)) {
+        if queue_fault_signal(exception_siginfo(f.vector, f.rip)) {
             return;
         }
         kill_user(exception_signal(f.vector), false);
@@ -654,7 +718,13 @@ fn page_fault(f: &mut TrapFrame, user: bool) {
             raw_serial_hex(ec);
             raw_serial_str(b"\n");
         }
-        if queue_fault_signal(11) {
+        // A protection violation (present page) or no mapping at cr2.
+        let code = if ec & 1 != 0 {
+            crate::process::signals::SEGV_ACCERR
+        } else {
+            crate::process::signals::SEGV_MAPERR
+        };
+        if queue_fault_signal(crate::process::signals::SigInfo::fault(11, code, cr2)) {
             return;
         }
         kill_user(11, true);
@@ -923,5 +993,37 @@ mod tests {
         assert_eq!(exception_signal(17), 7); // #AC -> SIGBUS
         assert_eq!(exception_signal(3), 5); // #BP -> SIGTRAP
         assert_eq!(exception_signal(19), 8); // #XM -> SIGFPE
+    }
+
+    #[test]
+    fn fp_exception_codes_follow_linux() {
+        use crate::process::signals::*;
+        assert_eq!(fp_exception_code(0x01), FPE_FLTINV); // invalid wins
+        assert_eq!(fp_exception_code(0x05), FPE_FLTINV);
+        assert_eq!(fp_exception_code(0x04), FPE_FLTDIV);
+        assert_eq!(fp_exception_code(0x08), FPE_FLTOVF);
+        assert_eq!(fp_exception_code(0x10), FPE_FLTUND);
+        assert_eq!(fp_exception_code(0x02), FPE_FLTUND); // denormal
+        assert_eq!(fp_exception_code(0x20), FPE_FLTRES);
+        assert_eq!(fp_exception_code(0), SI_KERNEL);
+    }
+
+    #[test]
+    fn exception_siginfo_names_the_cause() {
+        use crate::process::signals::*;
+        let de = exception_siginfo(0, 0x40_1000);
+        assert_eq!(
+            (de.signo(), de.si_code, de.addr()),
+            (8, FPE_INTDIV, 0x40_1000)
+        );
+        let ud = exception_siginfo(6, 0x40_2000);
+        assert_eq!(
+            (ud.signo(), ud.si_code, ud.addr()),
+            (4, ILL_ILLOPN, 0x40_2000)
+        );
+        let gp = exception_siginfo(13, 0x40_3000);
+        assert_eq!((gp.signo(), gp.si_code, gp.addr()), (11, SI_KERNEL, 0));
+        let ac = exception_siginfo(17, 0x40_4000);
+        assert_eq!((ac.signo(), ac.si_code), (7, BUS_ADRALN));
     }
 }

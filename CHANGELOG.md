@@ -2,6 +2,18 @@
 
 ### Added
 
+- **Signals carry their siginfo; sigqueue and sigtimedwait (N-259).** Every pending signal
+  instance has its Linux `siginfo_t`: a real-time signal one per send, in order, a standard signal
+  its first sender's. kill gives SI_USER and tkill/tgkill SI_TKILL with the sender's pid and real
+  user; sigqueue (rt_sigqueueinfo, rt_tgsigqueueinfo, new) SI_QUEUE with its value; SIGCHLD how
+  the child exited, was killed, dumped core, stopped or continued, with its status and CPU times;
+  faults their code and address (SEGV_MAPERR/ACCERR, FPE_* from the x87 and SSE status,
+  ILL_ILLOPN, BUS_ADRALN), and a fault is signalled once (a SIGSEGV handler ran a second time,
+  for a copy the memory manager sent without siginfo). SA_SIGINFO handlers and signalfd see it;
+  handlers used to get only the signal number. rt_sigtimedwait (new) takes a pending signal or
+  waits for one, with a timeout. sigqueue to another process may not pose as kill (EPERM), and
+  fails with EAGAIN past RLIMIT_SIGPENDING. Runtime test `musl_siginfo`.
+
 - **Program loading for dynamic linking (ADR 0010).** The ELF loader plans every image before
   exec commits: each PT_LOAD is checked against the file and user space, pages two segments share
   get both, and position-independent programs load at `0x5555_5555_4000`. A program with
@@ -602,6 +614,11 @@
 
 ### Fixed
 
+- **SA_RESTART no longer restarts sigsuspend, sleeps and polls (N-260).** A signal handler with
+  SA_RESTART restarted every interrupted system call, so sigsuspend went back to waiting after
+  the very handler it waited for, and nanosleep, poll, select and epoll_wait started over with
+  their full timeout. As on Linux, these (and sigtimedwait) now return EINTR after a handler;
+  read, write and the other restartable calls are unchanged.
 - **Memory system calls (N-240 to N-246).** mremap answered ENOMEM to everything (musl's
   realloc then copied); it now shrinks and grows in place, moves mappings by moving their pages
   (MREMAP_MAYMOVE, MREMAP_FIXED, MREMAP_DONTUNMAP) and maps a shared mapping a second time,

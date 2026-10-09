@@ -166,6 +166,9 @@
 #define SYS_rt_sigsuspend                130
 #define SYS_rt_sigreturn                 15
 #define SYS_rt_sigpending                127
+#define SYS_rt_sigtimedwait              128
+#define SYS_rt_sigqueueinfo              129
+#define SYS_rt_tgsigqueueinfo            297
 #define SYS_sigaltstack                  131
 /* Identity */
 #define SYS_getuid                       102

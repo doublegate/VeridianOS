@@ -70,11 +70,32 @@ pub struct SignalfdSiginfo {
 const _: () = assert!(core::mem::size_of::<SignalfdSiginfo>() == 128);
 
 impl SignalfdSiginfo {
-    fn for_signal(signo: usize) -> Self {
+    /// The record for a signal taken with `si`, its fields chosen as
+    /// Linux's signalfd_copyinfo does by the kind of signal: a fault gives
+    /// its address; SIGCHLD the child's pid, user, status and times; any
+    /// other the sender's pid and user, and a queued one (negative si_code)
+    /// its value.
+    fn for_signal(si: &crate::process::signals::SigInfo) -> Self {
+        use crate::process::signals::{CLD_CONTINUED, SIGCHLD};
         // SAFETY: all-zero bytes are a valid value of this repr(C) struct of
         // integers.
         let mut info: Self = unsafe { core::mem::zeroed() };
-        info.ssi_signo = signo as u32;
+        info.ssi_signo = si.signo() as u32;
+        info.ssi_errno = si.si_errno;
+        info.ssi_code = si.si_code;
+        if si.is_fault() {
+            info.ssi_addr = si.addr();
+        } else {
+            info.ssi_pid = si.pid();
+            info.ssi_uid = si.uid();
+            if si.signo() == SIGCHLD && (1..=CLD_CONTINUED).contains(&si.si_code) {
+                info.ssi_status = si.status();
+                (info.ssi_utime, info.ssi_stime) = si.times();
+            } else if si.si_code < 0 {
+                info.ssi_int = si.value() as u32 as i32;
+                info.ssi_ptr = si.value();
+            }
+        }
         info
     }
 
@@ -153,10 +174,10 @@ impl VfsNode for SignalFdNode {
         let mask = self.mask();
         let mut done = 0;
         for chunk in buffer.chunks_exact_mut(128) {
-            let Some(signo) = crate::process::signals::take_pending_in(mask) else {
+            let Some(si) = crate::process::signals::take_pending_in(mask) else {
                 break;
             };
-            chunk.copy_from_slice(SignalfdSiginfo::for_signal(signo).as_bytes());
+            chunk.copy_from_slice(SignalfdSiginfo::for_signal(&si).as_bytes());
             done += 128;
         }
         if done == 0 {
@@ -255,12 +276,38 @@ mod tests {
         assert_eq!(node.mask(), sig_bit(12));
     }
 
+    fn u32_at(bytes: &[u8; 128], at: usize) -> u32 {
+        u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap())
+    }
+
+    fn u64_at(bytes: &[u8; 128], at: usize) -> u64 {
+        u64::from_le_bytes(bytes[at..at + 8].try_into().unwrap())
+    }
+
+    /// `struct signalfd_siginfo` offsets: signo 0, code 8, pid 12, uid 16,
+    /// status 40, int 44, ptr 48, utime 56, stime 64, addr 72.
     #[test]
     fn siginfo_is_linux_layout() {
-        let info = SignalfdSiginfo::for_signal(10);
-        let bytes = info.as_bytes();
-        assert_eq!(&bytes[..4], &10u32.to_le_bytes());
-        assert!(bytes[4..].iter().all(|&b| b == 0));
+        use crate::process::signals::{SigInfo, SI_QUEUE, SI_USER};
+        let kill = SignalfdSiginfo::for_signal(&SigInfo::from_process(10, SI_USER, 42, 1000));
+        let bytes = kill.as_bytes();
+        assert_eq!(u32_at(bytes, 0), 10);
+        assert_eq!(u32_at(bytes, 8), SI_USER as u32);
+        assert_eq!(u32_at(bytes, 12), 42);
+        assert_eq!(u32_at(bytes, 16), 1000);
+        assert_eq!(u64_at(bytes, 48), 0);
+        // A queued signal carries its value as si_int and si_ptr.
+        let mut queued = SigInfo::from_process(40, SI_QUEUE, 7, 0);
+        queued.fields[1] = 0x1234_5678_9abc;
+        let bytes = *SignalfdSiginfo::for_signal(&queued).as_bytes();
+        assert_eq!(u32_at(&bytes, 8), SI_QUEUE as u32);
+        assert_eq!(u32_at(&bytes, 44), 0x5678_9abc);
+        assert_eq!(u64_at(&bytes, 48), 0x1234_5678_9abc);
+        // A fault carries its address and no sender.
+        let fault = SigInfo::fault(11, crate::process::signals::SEGV_MAPERR, 0xdead_0000);
+        let bytes = *SignalfdSiginfo::for_signal(&fault).as_bytes();
+        assert_eq!(u64_at(&bytes, 72), 0xdead_0000);
+        assert_eq!(u32_at(&bytes, 12), 0);
     }
 
     /// A buffer too small for one record is EINVAL; with no current

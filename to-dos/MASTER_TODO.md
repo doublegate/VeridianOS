@@ -128,7 +128,8 @@ What does not work yet: `docs/KNOWN-LIMITATIONS.md`.
     - [ ] D3: timer preemption of ring 3 (done: `dispatch::preempt_user` on trap and syscall
       exit; kill acted on in every dispatched wait); device IRQs on the kernel stack (done, ADR 0008);
       signal delivery with rt_sigframe/restorer, per-thread mask/pending, ignored dropped, Linux
-      set layout (done: N-96, N-98, N-109 part, N-113; stop/continue done; RT signals remain); signal delivery on
+      set layout (done: N-96, N-98, N-109 part, N-113; stop/continue done; siginfo, sigqueue and sigtimedwait
+      done, N-259; no SA_RESTART restart of sigsuspend/sleeps/polls, N-260); signal delivery on
       return to user with restorer frames (N-113); per-thread signal state (N-109); ignored
       signals dropped at generation (N-98); sigset layout (N-96); wait status and errno (N-99 done except
       WNOWAIT/rusage; N-127 done); exec permission and fatal-after-clear (done, N-101; multithreaded exec remains); relative paths per thread (N-115); MAP_SHARED anon (done, N-140) and
