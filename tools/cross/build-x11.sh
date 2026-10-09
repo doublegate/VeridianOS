@@ -45,9 +45,11 @@ source "${SCRIPT_DIR}/lib/cross-env.sh"
 
 XORG_URL="https://xorg.freedesktop.org/archive/individual"
 
-# x11_fetch NAME-VERSION SUBDIR: a fresh, checked source tree (path echoed).
+# x11_fetch NAME-VERSION SUBDIR: a fresh, checked source tree (path echoed),
+# with the package's patches (pkg-patches/NAME/) applied.
 x11_fetch() {
     fetch "$1.tar.xz" "${XORG_URL}/$2/$1.tar.xz" "$1" "$(listed_sha256 x11.sha256 "$1.tar.xz")" >&2
+    apply_pkg_patches "${1%-*}" "${BUILD_DIR}/$1" >&2
     echo "${BUILD_DIR}/$1"
 }
 
@@ -55,16 +57,35 @@ x11_fetch() {
 # build host: musl's malloc(0) returns a unique pointer, not NULL.
 X11_CACHE=(xorg_cv_malloc0_returns_null=no)
 
+# The documentation tools the X.Org macros look for (XORG_WITH_XMLTO, _FOP,
+# _ASCIIDOC, _DOXYGEN, _XSLTPROC), off: the documentation is not built
+# (no xmlto or fop on the build host, which the macros warn about), so
+# none is wanted.
+X11_NO_DOC_TOOLS=(--without-xmlto --without-fop --without-asciidoc --without-doxygen
+                  --without-xsltproc)
+
+# autotools_x11_src SRC NAME-VERSION [CONFIGURE OPTIONS...]: configure,
+# build and stage the X.Org package in SRC, with the common options it
+# accepts (xtrans, headers only, has no --enable-shared) and without its
+# documentation tools.
+autotools_x11_src() {
+    local src="$1" name="$2"
+    shift 2
+    local common=()
+    mapfile -t common < <(known_options "${src}" "${COMMON_CONFIGURE[@]}" "${X11_NO_DOC_TOOLS[@]}")
+    log "Building ${name}..."
+    (cd "${src}" && \
+        ./configure "${common[@]}" "${X11_CACHE[@]}" "$@" && \
+        make_install)
+}
+
 # autotools_x11 NAME-VERSION SUBDIR [CONFIGURE OPTIONS...]
 autotools_x11() {
     local name="$1" subdir="$2"
     shift 2
     local src
     src="$(x11_fetch "${name}" "${subdir}")"
-    log "Building ${name}..."
-    (cd "${src}" && \
-        ./configure "${COMMON_CONFIGURE[@]}" "${X11_CACHE[@]}" "$@" && \
-        make_install)
+    autotools_x11_src "${src}" "${name}" "$@"
 }
 
 # ── Headers ───────────────────────────────────────────────────────────
@@ -118,9 +139,14 @@ build_libxcb() {
     installed libxcb.so libxcb && return 0
     # The C bindings are generated from the protocol XML by the host's
     # Python; the extensions KDE's clients use are the defaults.
-    PYTHON=python3 autotools_x11 libxcb-1.17.0 lib \
+    local src
+    src="$(x11_fetch libxcb-1.17.0 lib)"
+    python3 -I "${SCRIPT_DIR}/deps-patches/libxcb_dot_warning.py" "${src}" ||
+        die "failed to patch libxcb's configure"
+    python3 -I "${SCRIPT_DIR}/deps-patches/libxcb_unused_tmp.py" "${src}" ||
+        die "failed to patch libxcb's code generator"
+    PYTHON=python3 autotools_x11_src "${src}" libxcb-1.17.0 \
         --disable-devel-docs \
-        --without-doxygen \
         --enable-xinput \
         --enable-xkb
 }
@@ -157,7 +183,11 @@ build_libxcursor() {
 
 build_libxi() {
     installed libXi.so libXi && return 0
-    autotools_x11 libXi-1.8.3 lib --disable-specs --disable-docs
+    local src
+    src="$(x11_fetch libXi-1.8.3 lib)"
+    python3 -I "${SCRIPT_DIR}/deps-patches/libxi_man_warning.py" "${src}" ||
+        die "failed to patch libXi's configure"
+    autotools_x11_src "${src}" libXi-1.8.3 --disable-specs --disable-docs
 }
 
 build_libxtst() {

@@ -40,6 +40,7 @@ fetch_wayland() {
     fetch "wayland-${WAYLAND_VER}.tar.xz" "${WAYLAND_URL}" "wayland-${WAYLAND_VER}" "${WAYLAND_SHA256}"
     python3 -I "${SCRIPT_DIR}/deps-patches/meson_lint.py" version-checks \
         "${BUILD_DIR}/wayland-${WAYLAND_VER}" 0.64.0 || die "failed to patch Wayland's meson files"
+    apply_pkg_patches wayland "${BUILD_DIR}/wayland-${WAYLAND_VER}"
 }
 
 # ── 1. wayland-scanner (host) ─────────────────────────────────────────

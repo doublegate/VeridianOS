@@ -37,7 +37,6 @@ BUILD_DIR="${VERIDIAN_CROSS_BUILD}/plasma"
 JOBS="${JOBS:-$(nproc)}"
 
 PLASMA_VER="6.7.5"
-PLASMA_URL_BASE="https://download.kde.org/stable/plasma/${PLASMA_VER}"
 # Corrosion (CMake's Rust integration) for the build host: kdeplasma-addons
 # builds a Rust helper. A tag archive; its checksum pinned when first
 # downloaded (tag v0.6.1 is commit 1499b14e).
@@ -53,34 +52,6 @@ die() { echo "[build-plasma] ERROR: $*" >&2; exit 1; }
 source "${SCRIPT_DIR}/lib/cross-env.sh"
 # shellcheck source=lib/kde-build.sh
 source "${SCRIPT_DIR}/lib/kde-build.sh"
-
-# component_installed NAME STAMP: NAME was built as STAMP (version and
-# options) and every file
-# its install wrote (CMake's install manifest, which lists them without the
-# DESTDIR) is still in the sysroot.
-component_installed() {
-    local bld="${BUILD_DIR}/$1-build" file
-    [[ "$(cat "${bld}/.veridian-version" 2>/dev/null)" == "$2" && -s "${bld}/install_manifest.txt" ]] || return 1
-    while IFS= read -r file; do
-        [[ -e "${SYSROOT}${file}" || -L "${SYSROOT}${file}" ]] || return 1
-    done < "${bld}/install_manifest.txt"
-    log "$1: already installed."
-}
-
-# plasma NAME [CMAKE OPTIONS...]: build and stage one Plasma component,
-# with its patches (plasma-patches/NAME/, each explaining itself) applied to
-# the fresh source tree.
-plasma() {
-    local name="$1"
-    shift
-    local stamp="${PLASMA_VER} $*"
-    component_installed "${name}" "${stamp}" && return 0
-    local src
-    src="$(kde_fetch "${name}-${PLASMA_VER}" "${PLASMA_URL_BASE}" plasma.sha256)"
-    apply_patches "${SCRIPT_DIR}/plasma-patches/${name}" "${src}"
-    kde_cmake "${name}" "${src}" "$@"
-    echo "${stamp}" > "${BUILD_DIR}/${name}-build/.veridian-version"
-}
 
 build_host_corrosion() {
     local prefix="${VERIDIAN_HOST_TOOLS}/corrosion"
@@ -122,12 +93,16 @@ build_kdeplasma_addons() {
     )
 }
 
-# The VeridianOS session scripts the kernel starts the desktop with
-# (kernel/src/desktop/kde_session.rs: /usr/share/veridian/veridian-kde-init.sh).
+# The VeridianOS scripts that run on the system: the session script the
+# kernel starts the desktop with (kernel/src/desktop/kde_session.rs:
+# /usr/share/veridian/veridian-kde-init.sh) and the session profiler. The
+# other scripts in userland/integration run on the build host (rootfs and
+# XWayland builds, QEMU launcher, the QMP-driven test suite).
 install_veridian_session() {
     local script
-    for script in "${PROJECT_ROOT}"/userland/integration/*.sh; do
-        install -Dm755 "${script}" "${SYSROOT}/usr/share/veridian/$(basename "${script}")"
+    for script in veridian-kde-init.sh kde-perf-profile.sh; do
+        install -Dm755 "${PROJECT_ROOT}/userland/integration/${script}" \
+            "${SYSROOT}/usr/share/veridian/${script}"
     done
 }
 
@@ -179,25 +154,52 @@ main() {
     # (lib/kde-build.sh turns it off by default): ksmserver, which the
     # Wayland session runs for logout and shutdown and whose D-Bus
     # interface plasma-desktop requires, is built only with it.
+    # Optional parts declined: usage telemetry (UserFeedback), file search
+    # (Baloo, not built), installing software from KRunner and the
+    # launcher (PackageKit, AppStream: there is no package manager behind
+    # them) and wallpaper orientation from EXIF data (KExiv2).
     plasma plasma-workspace \
         -DWITH_X11=ON \
         -DWITH_X11_SESSION=OFF \
         -DGLIBC_LOCALE=OFF \
-        -DGLIBC_LOCALE_GEN=OFF
+        -DGLIBC_LOCALE_GEN=OFF \
+        -DCMAKE_DISABLE_FIND_PACKAGE_KF6UserFeedback=ON \
+        -DCMAKE_DISABLE_FIND_PACKAGE_KF6Baloo=ON \
+        -DCMAKE_DISABLE_FIND_PACKAGE_PackageKitQt6=ON \
+        -DCMAKE_DISABLE_FIND_PACKAGE_AppStreamQt=ON \
+        -DCMAKE_DISABLE_FIND_PACKAGE_KExiv2Qt6=ON
     plasma powerdevil
-    plasma plasma-integration -DBUILD_QT5=OFF -DBUILD_QT6=ON
+    # The fonts and the desktop portal are run-time requirements (no
+    # package provides a CMake configuration for them on any system); the
+    # rootfs carries its fonts (build-fonts.sh) and has no portal.
+    plasma plasma-integration -DBUILD_QT5=OFF -DBUILD_QT6=ON \
+        -DCMAKE_DISABLE_FIND_PACKAGE_FontNotoSans=ON \
+        -DCMAKE_DISABLE_FIND_PACKAGE_FontNotoColorEmoji=ON \
+        -DCMAKE_DISABLE_FIND_PACKAGE_FontHack=ON \
+        -DCMAKE_DISABLE_FIND_PACKAGE_XDGDesktopPortalKDE=ON
     plasma qqc2-breeze-style
     # The mouse and touchpad KCMs' X11 backends configure the X server's
     # input drivers (xorg-libinput, xorg-server): there is no X server.
+    # Declined: online accounts (KAccounts), the game controller KCM
+    # (SDL2), file search (Baloo), software installation (PackageKit), the
+    # emoji font check (run time) and screen casting's QML module (kpipewire
+    # waits for PipeWire, above).
     plasma plasma-desktop \
         -DBUILD_KCM_MOUSE_X11=OFF \
-        -DBUILD_KCM_TOUCHPAD_X11=OFF
+        -DBUILD_KCM_TOUCHPAD_X11=OFF \
+        -DCMAKE_DISABLE_FIND_PACKAGE_KAccounts6=ON \
+        -DCMAKE_DISABLE_FIND_PACKAGE_SDL2=ON \
+        -DCMAKE_DISABLE_FIND_PACKAGE_KF6Baloo=ON \
+        -DCMAKE_DISABLE_FIND_PACKAGE_PackageKitQt6=ON \
+        -DCMAKE_DISABLE_FIND_PACKAGE_FontNotoColorEmoji=ON \
+        -DCMAKE_DISABLE_FIND_PACKAGE_org.kde.pipewire-QMLModule=ON
     plasma polkit-kde-agent-1
     plasma systemsettings
     plasma kde-cli-tools
     plasma kscreen
     plasma kmenuedit
-    plasma kinfocenter
+    # Its PipeWire page needs PipeWire (not built yet).
+    plasma kinfocenter -DCMAKE_DISABLE_FIND_PACKAGE_pipewire=ON
     plasma kwrited
     plasma ksystemstats
     plasma plasma-systemmonitor

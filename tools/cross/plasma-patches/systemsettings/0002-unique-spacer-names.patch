@@ -1,0 +1,28 @@
+VeridianOS: unique spacer names in externalModule.ui
+
+The form has two spacers named "horizontalSpacer" and two named
+"verticalSpacer"; uic renames the second of each and warns ("The name
+'horizontalSpacer' (QSpacerItem) is already in use, defaulting to
+'horizontalSpacer1'"). They now have unique names (the next free Qt
+Designer suffixes). Nothing refers to them by name.
+
+--- a/app/externalModule.ui
++++ b/app/externalModule.ui
+@@ -72,7 +72,7 @@
+       </widget>
+      </item>
+      <item>
+-      <spacer name="horizontalSpacer">
++      <spacer name="horizontalSpacer_4">
+        <property name="orientation">
+         <enum>Qt::Horizontal</enum>
+        </property>
+@@ -87,7 +87,7 @@
+     </layout>
+    </item>
+    <item>
+-    <spacer name="verticalSpacer">
++    <spacer name="verticalSpacer_2">
+      <property name="orientation">
+       <enum>Qt::Vertical</enum>
+      </property>

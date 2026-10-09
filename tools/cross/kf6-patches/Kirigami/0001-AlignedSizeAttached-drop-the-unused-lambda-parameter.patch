@@ -1,0 +1,21 @@
+VeridianOS: AlignedSizeAttached: drop the unused lambda parameter
+
+GCC reported unused parameter 'window' [-Wunused-parameter] in the
+QQuickItem::windowChanged handler in src/primitives/alignedsizeattached.cpp:22.
+The lambda reads the window from m_item->window() (the same object the
+signal carries); declare it without the parameter, which Qt's connect()
+accepts for a slot taking fewer arguments than the signal. No behaviour
+change.
+
+diff -ru a/src/primitives/alignedsizeattached.cpp b/src/primitives/alignedsizeattached.cpp
+--- a/src/primitives/alignedsizeattached.cpp	2026-10-08 17:32:51.031542309 -0400
++++ b/src/primitives/alignedsizeattached.cpp	2026-10-08 17:32:51.165275619 -0400
+@@ -19,7 +19,7 @@
+         return;
+     }
+ 
+-    connect(m_item, &QQuickItem::windowChanged, this, [this](QQuickWindow *window) {
++    connect(m_item, &QQuickItem::windowChanged, this, [this]() {
+         if (m_window) {
+             m_window->removeEventFilter(this);
+         }

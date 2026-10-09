@@ -1,0 +1,125 @@
+VeridianOS: explicit checks where GCC sees a possible NULL dereference
+
+GCC reported -Wnull-dereference ("potential null pointer dereference") at
+seven places. The build defines DBUS_DISABLE_ASSERT, so _dbus_assert() and
+_dbus_assert_not_reached() expand to nothing and the "impossible" paths they
+guard really do fall through to a NULL dereference:
+
+- dbus/dbus-marshal-recursive.c (_dbus_type_reader_recurse): for an
+  unexpected type code (or a variant in a types-only reader) klass stays
+  NULL and klass->recurse is called. Now an explicit _dbus_abort() (the
+  assert-enabled build already aborts in _dbus_assert_not_reached()).
+- bus/services.c (bus_service_swap_owner, bus_service_remove_owner): the
+  second link of an owner queue known to hold more than one owner comes
+  from _dbus_list_get_next_link(), which may return NULL. Now checked; the
+  impossible case fails the operation with DBUS_ERROR_FAILED, the same way
+  the surrounding failures (return FALSE with error set) are handled.
+- bus/services.c (bus_service_remove_owner): removing a connection that is
+  not in the queue dereferenced the NULL result of
+  _bus_service_find_owner_link(). Now there is nothing to remove and it
+  returns TRUE.
+- dbus/dbus-sysdeps-unix.c (_dbus_write_socket_with_unix_fds_two):
+  CMSG_FIRSTHDR() returns NULL when msg_controllen is smaller than a
+  cmsghdr. msg_controllen is CMSG_SPACE() of a non-empty payload, so that
+  cannot happen, but the result is now checked (errno EINVAL, return -1,
+  the function's error convention) instead of dereferenced.
+
+All valid inputs take exactly the paths they took before; only the paths
+that previously crashed on a NULL pointer change, to a defined failure.
+
+Not offered upstream: upstream answers the same GCC warning with an
+assertion (bus/services.c, commit b90b838c, MR !275), which this build
+compiles out. The public-API side of the first item is 0002, which is
+prepared for upstream.
+
+
+diff -ru a/bus/services.c b/bus/services.c
+--- a/bus/services.c	2026-10-08 16:56:36.353577477 -0400
++++ b/bus/services.c	2026-10-08 16:58:31.153339170 -0400
+@@ -1083,8 +1083,16 @@
+       link = _dbus_list_get_first_link (&service->owners);
+       _dbus_assert (link != NULL);
+       link = _dbus_list_get_next_link (&service->owners, link);
+-      _dbus_assert (link != NULL);
+-      _dbus_assert (link->data != NULL);
++      /* The queue has more than one owner (checked above), so the second
++       * link exists. */
++      if (link == NULL || link->data == NULL)
++        {
++          _dbus_assert_not_reached ("Service has more than one owner but no second owner");
++          dbus_set_error (error, DBUS_ERROR_FAILED,
++                          "Internal error: owner queue of %s is inconsistent",
++                          service->name);
++          return FALSE;
++        }
+ 
+       new_owner = (BusOwner *)link->data;
+       new_owner_conn = new_owner->conn;
+@@ -1153,7 +1161,12 @@
+       /* This function is only valid to call if connection owns service.
+        * If that's the case, we should always find connection in the
+        * list of owners. */
+-      _dbus_assert (link != NULL);
++      if (link == NULL)
++        {
++          _dbus_assert_not_reached ("Tried to remove an owner that is not in the queue");
++          /* Nothing to remove. */
++          return TRUE;
++        }
+       _dbus_list_unlink (&service->owners, link);
+       temp_owner = (BusOwner *)link->data;
+       bus_owner_unref (temp_owner); 
+@@ -1182,8 +1195,16 @@
+       link = _dbus_list_get_first_link (&service->owners);
+       _dbus_assert (link != NULL);
+       link = _dbus_list_get_next_link (&service->owners, link);
+-      _dbus_assert (link != NULL);
+-      _dbus_assert (link->data != NULL);
++      /* The queue has more than one owner (checked above), so the second
++       * link exists. */
++      if (link == NULL || link->data == NULL)
++        {
++          _dbus_assert_not_reached ("Service has more than one owner but no second owner");
++          dbus_set_error (error, DBUS_ERROR_FAILED,
++                          "Internal error: owner queue of %s is inconsistent",
++                          service->name);
++          return FALSE;
++        }
+ 
+       new_owner = (BusOwner *)link->data;
+       new_owner_conn = new_owner->conn;
+diff -ru a/dbus/dbus-marshal-recursive.c b/dbus/dbus-marshal-recursive.c
+--- a/dbus/dbus-marshal-recursive.c	2026-10-08 16:56:36.322076171 -0400
++++ b/dbus/dbus-marshal-recursive.c	2026-10-08 16:58:31.153083610 -0400
+@@ -1028,7 +1028,13 @@
+       _dbus_assert_not_reached ("don't yet handle recursing into this type");
+     }
+ 
+-  _dbus_assert (klass != NULL);
++  /* Every valid type was handled above; the other cases are programming
++   * errors that _dbus_assert_not_reached() reports. When assertions are
++   * compiled out it does nothing, so stop here instead of calling through
++   * a NULL class. */
++  if (klass == NULL)
++    _dbus_abort ();
++
+   _dbus_assert (klass == all_reader_classes[klass->id]);
+ 
+   (* klass->recurse) (sub, reader);
+diff -ru a/dbus/dbus-sysdeps-unix.c b/dbus/dbus-sysdeps-unix.c
+--- a/dbus/dbus-sysdeps-unix.c	2026-10-08 16:56:36.379955389 -0400
++++ b/dbus/dbus-sysdeps-unix.c	2026-10-08 16:58:31.153676163 -0400
+@@ -651,6 +651,13 @@
+       memset(m.msg_control, 0, m.msg_controllen);
+ 
+       cm = CMSG_FIRSTHDR(&m);
++      /* msg_controllen is CMSG_SPACE() of a non-empty payload, so there is
++       * room for the header; CMSG_FIRSTHDR() only returns NULL otherwise. */
++      if (cm == NULL)
++        {
++          errno = EINVAL;
++          return -1;
++        }
+       cm->cmsg_level = SOL_SOCKET;
+       cm->cmsg_type = SCM_RIGHTS;
+       cm->cmsg_len = CMSG_LEN(n_fds * sizeof(int));

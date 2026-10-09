@@ -1,0 +1,179 @@
+VeridianOS: port the agent's async result from GSimpleAsyncResult to GTask
+
+GCC reported -Wdeprecated-declarations for g_simple_async_result_new()
+(agent/polkitqtlistener.cpp), g_simple_async_result_complete() and
+g_simple_async_result_set_error() (agent/polkitqt1-agent-session.cpp) and
+g_simple_async_result_propagate_error() (agent/listeneradapter.cpp).
+GSimpleAsyncResult is deprecated since GLib 2.46 in favour of GTask, which
+the project's minimum GLib (2.36) already has.
+
+The change:
+- polkit_qt_listener_initiate_authentication() creates the result with
+  g_task_new() on the same source object, callback and user data. No
+  cancellable is attached, as before: a GTask with one would turn a
+  cancelled request into G_IO_ERROR_CANCELLED on its own, whereas
+  cancellation is handled through cancelled_cb and the agent still
+  completes the request. The source tag stays agent_listener, as before.
+- AsyncResult holds a GTask. GTask returns an error together with the
+  completion, so setError() keeps the GError and setCompleted() returns it
+  with g_task_return_error(), or g_task_return_boolean(TRUE) when there was
+  none. The usage contract (setError() then setCompleted()) is unchanged.
+- initiate_authentication_finish() returns g_task_propagate_boolean():
+  FALSE with the error set if the agent reported one, TRUE otherwise, as
+  before.
+
+Interface change: AsyncResult's constructor (public header
+agent/polkitqt1-agent-session.h, documented \internal) and the private
+ListenerAdapter method now take a GTask * instead of a GSimpleAsyncResult *.
+Only polkit-qt-1 itself constructs AsyncResult; agents such as
+polkit-kde-agent-1 only receive one and call setError()/setCompleted(),
+which are unchanged.
+
+Behaviour differences: when an agent completes the request from inside
+initiateAuthentication() itself (e.g. polkit-kde-agent's "another client is
+already authenticating" path), GTask delivers the callback from an idle on
+the next main-context iteration instead of re-entrantly, as GIO requires of
+async results; and an AsyncResult destroyed without ever being completed
+now makes GLib report it as a critical warning (g_critical: the GTask was
+finalized without returning; the request was left unanswered before as
+well).
+
+--- a/agent/polkitqt1-agent-session.h	2026-10-08 17:12:53.670061084 -0400
++++ b/agent/polkitqt1-agent-session.h	2026-10-08 17:14:00.160031481 -0400
+@@ -12,7 +12,7 @@
+ #include "polkitqt1-identity.h"
+ #include "polkitqt1-agent-export.h"
+ 
+-typedef struct _GSimpleAsyncResult GSimpleAsyncResult;
++typedef struct _GTask GTask;
+ typedef struct _PolkitAgentSession PolkitAgentSession;
+ 
+ namespace PolkitQt1
+@@ -31,12 +31,12 @@
+ 
+ /**
+  * \internal
+- * \brief Encapsulation of GSimpleAsyncResult to QObject class
++ * \brief Encapsulation of GTask to QObject class
+  */
+ class POLKITQT1_AGENT_EXPORT AsyncResult
+ {
+ public:
+-    explicit AsyncResult(GSimpleAsyncResult *result);
++    explicit AsyncResult(GTask *result);
+     virtual ~AsyncResult();
+ 
+     /**
+--- a/agent/polkitqt1-agent-session.cpp	2026-10-08 17:12:53.696856280 -0400
++++ b/agent/polkitqt1-agent-session.cpp	2026-10-08 17:14:06.089988568 -0400
+@@ -124,18 +124,23 @@
+ class AsyncResult::Private
+ {
+ public:
+-    Private(GSimpleAsyncResult *r) : result(r) {};
++    Private(GTask *r) : result(r) {};
+ 
+-    GSimpleAsyncResult *result;
++    GTask *result;
++    // A GTask's error is returned together with its completion, so the
++    // error set by setError() is kept until setCompleted().
++    GError *error = nullptr;
+ };
+ 
+-AsyncResult::AsyncResult(GSimpleAsyncResult *result)
++AsyncResult::AsyncResult(GTask *result)
+         : d(new Private(result))
+ {
+ }
+ 
+ AsyncResult::~AsyncResult()
+ {
++    if (d->error)
++        g_error_free(d->error);
+     if (d->result)
+         g_object_unref(d->result);
+ }
+@@ -144,7 +149,13 @@
+ {
+     if (d->result == nullptr)
+         return;
+-    g_simple_async_result_complete(d->result);
++    if (d->error) {
++        // g_task_return_error() takes ownership of the error
++        g_task_return_error(d->result, d->error);
++        d->error = nullptr;
++    } else {
++        g_task_return_boolean(d->result, TRUE);
++    }
+     // Assure that completed won't be called twice
+     g_object_unref(d->result);
+     d->result = nullptr;
+@@ -153,5 +164,6 @@
+ void AsyncResult::setError(const QString &text)
+ {
+     Q_ASSERT(d->result);
+-    g_simple_async_result_set_error(d->result, POLKIT_ERROR, POLKIT_ERROR_FAILED, "%s", text.toUtf8().data());
++    g_clear_error(&d->error);
++    d->error = g_error_new(POLKIT_ERROR, POLKIT_ERROR_FAILED, "%s", text.toUtf8().data());
+ }
+--- a/agent/listeneradapter_p.h	2026-10-08 17:12:53.720159097 -0400
++++ b/agent/listeneradapter_p.h	2026-10-08 17:14:08.119973876 -0400
+@@ -17,7 +17,7 @@
+ typedef struct _GList GList;
+ typedef struct _GCancellable GCancellable;
+ typedef struct _GAsyncResult GAsyncResult;
+-typedef struct _GSimpleAsyncResult GSimpleAsyncResult;
++typedef struct _GTask GTask;
+ typedef struct _GError GError;
+ typedef int gboolean;
+ typedef char gchar;
+@@ -46,7 +46,7 @@
+             const gchar          *cookie,
+             GList                *identities,
+             GCancellable         *cancellable,
+-            GSimpleAsyncResult   *result);
++            GTask                *result);
+ 
+     gboolean polkit_qt_listener_initiate_authentication_finish(PolkitAgentListener  *listener,
+             GAsyncResult         *res,
+--- a/agent/listeneradapter.cpp	2026-10-08 17:12:53.740143056 -0400
++++ b/agent/listeneradapter.cpp	2026-10-08 17:14:10.766954715 -0400
+@@ -67,7 +67,7 @@
+         const gchar          *cookie,
+         GList                *identities,
+         GCancellable         *cancellable,
+-        GSimpleAsyncResult *result)
++        GTask                *result)
+ {
+     qDebug() << "polkit_qt_listener_initiate_authentication callback for " << listener;
+ 
+@@ -99,11 +99,8 @@
+ {
+     qDebug() << "polkit_qt_listener_initiate_authentication_finish callback for " << listener;
+ 
+-    GSimpleAsyncResult *simple = G_SIMPLE_ASYNC_RESULT(res);
+-    if (g_simple_async_result_propagate_error(simple, error)) {
+-        return false;
+-    }
+-    return true;
++    // FALSE with *error set if the agent reported an error, TRUE otherwise
++    return g_task_propagate_boolean(G_TASK(res), error);
+ }
+ 
+ void ListenerAdapter::cancelled_cb(PolkitAgentListener *listener)
+--- a/agent/polkitqtlistener.cpp	2026-10-08 17:12:53.760523368 -0400
++++ b/agent/polkitqtlistener.cpp	2026-10-08 17:14:35.526775389 -0400
+@@ -108,8 +108,11 @@
+     }
+ 
+     // The result of asynchronous method will be created here and it will be pushed to the listener.
+-    GSimpleAsyncResult *result = g_simple_async_result_new((GObject *) listener, callback, user_data, agent_listener);
+-    qDebug() << "GSimpleAsyncResult:" << result;
++    // No cancellable on the task: cancellation is handled above through
++    // cancelled_cb, and the agent still completes the task afterwards.
++    GTask *result = g_task_new(listener, nullptr, callback, user_data);
++    g_task_set_source_tag(result, agent_listener);
++    qDebug() << "GTask:" << result;
+ 
+     ListenerAdapter::instance()->polkit_qt_listener_initiate_authentication(agent_listener,
+             action_id,

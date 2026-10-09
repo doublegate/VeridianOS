@@ -1,0 +1,33 @@
+VeridianOS: kdesu: read --attach/--embed only when they are defined (X11)
+
+GCC reported -Wunused-but-set-variable for 'winid' in main()
+(kdesu/kdesu.cpp): with WITH_X11 off, the only use of winid (attaching the
+password dialog with KWindowSystem::setMainWindow()) is compiled out.
+
+The --attach and --embed options are themselves registered only under
+WITH_X11, yet main() always queried them. QCommandLineParser::isSet() on
+an option that was never added prints "QCommandLineParser: option not
+defined" for each, so every kdesu run in a build without X11 logged two
+spurious warnings. The winid/attach parsing is now under WITH_X11 like the
+option definitions and the code that uses the result. X11 builds are
+unchanged.
+
+--- a/kdesu/kdesu.cpp	2026-10-08 17:28:19.357747419 -0400
++++ b/kdesu/kdesu.cpp	2026-10-08 17:28:38.764601701 -0400
+@@ -283,6 +283,8 @@
+     bool keep = !p.isSet(QStringLiteral("n")) && have_daemon;
+     bool terminal = p.isSet(QStringLiteral("t"));
+     bool withIgnoreButton = !p.isSet(QStringLiteral("noignorebutton"));
++#if WITH_X11
++    // --attach and --embed are only defined, and the winid only used, with X11
+     int winid = -1;
+     bool attach = p.isSet(QStringLiteral("attach"));
+     if (attach) {
+@@ -301,6 +303,7 @@
+             qCWarning(category) << "Specified winid to attach to is not a valid number";
+         }
+     }
++#endif
+ 
+     QList<QByteArray> env;
+     QByteArray options;

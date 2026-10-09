@@ -1,0 +1,290 @@
+VeridianOS: give the gperf lookup function internal linkage
+
+GCC reported "no previous prototype for 'in_word_set'
+[-Wmissing-prototypes]" (shape_to_id.gperf:80, in the generated
+cursor/shape_to_id.c). gperf emits the lookup function without a storage
+class and has no option to make it static, so it was an external symbol
+with no declaration (kept out of the library's exports only by
+-export-symbols-regex). A static declaration is added to the gperf
+declarations section; the definition that follows then has internal
+linkage, which is what the function is: it is used only by
+cursor_shape_to_id() in the same file. <string.h> is included first for
+size_t (gperf >= 3.1 declares len as size_t).
+
+The build host has no gperf, and shape_to_id.c ships pre-generated
+(gperf 3.3), so the same change is made to shape_to_id.c, with the
+"#line N" references to the .gperf file after the insertion moved down by
+the two added lines, exactly as gperf would emit them. The .gperf hunk
+comes first so that shape_to_id.c ends up newer and make does not try to
+regenerate it. No behaviour change.
+
+
+diff -ru a/cursor/shape_to_id.gperf b/cursor/shape_to_id.gperf
+--- a/cursor/shape_to_id.gperf	2026-10-08 17:20:02.330127181 -0400
++++ b/cursor/shape_to_id.gperf	2026-10-08 17:20:02.393296821 -0400
+@@ -1,5 +1,7 @@
+ struct shape_mapping { const char *name; int number; };
+ const int cursor_shape_to_id(const char *name);
++#include <string.h>
++static struct shape_mapping *in_word_set(const char *str, size_t len);
+ %%
+ X_cursor,0
+ arrow,1
+diff -ru a/cursor/shape_to_id.c b/cursor/shape_to_id.c
+--- a/cursor/shape_to_id.c	2026-10-08 17:20:02.342872351 -0400
++++ b/cursor/shape_to_id.c	2026-10-08 17:20:02.393834509 -0400
+@@ -33,6 +33,8 @@
+ struct shape_mapping { const char *name; int number; };
+ const int cursor_shape_to_id(const char *name);
+ #include <string.h>
++static struct shape_mapping *in_word_set(const char *str, size_t len);
++#include <string.h>
+ 
+ #define TOTAL_KEYWORDS 77
+ #define MIN_WORD_LENGTH 3
+@@ -117,159 +119,159 @@
+ #endif
+   static struct shape_mapping wordlist[] =
+     {
+-#line 67 "shape_to_id.gperf"
++#line 69 "shape_to_id.gperf"
+       {"star",63},
+-#line 55 "shape_to_id.gperf"
++#line 57 "shape_to_id.gperf"
+       {"rtl_logo",51},
+-#line 8 "shape_to_id.gperf"
++#line 10 "shape_to_id.gperf"
+       {"boat",4},
+-#line 74 "shape_to_id.gperf"
++#line 76 "shape_to_id.gperf"
+       {"top_tee",70},
+-#line 73 "shape_to_id.gperf"
+-      {"top_side",69},
+ #line 75 "shape_to_id.gperf"
++      {"top_side",69},
++#line 77 "shape_to_id.gperf"
+       {"trek",71},
+-#line 71 "shape_to_id.gperf"
++#line 73 "shape_to_id.gperf"
+       {"top_left_corner",67},
+-#line 72 "shape_to_id.gperf"
++#line 74 "shape_to_id.gperf"
+       {"top_right_corner",68},
+-#line 31 "shape_to_id.gperf"
++#line 33 "shape_to_id.gperf"
+       {"gobbler",27},
+-#line 13 "shape_to_id.gperf"
++#line 15 "shape_to_id.gperf"
+       {"bottom_tee",9},
+-#line 12 "shape_to_id.gperf"
++#line 14 "shape_to_id.gperf"
+       {"bottom_side",8},
+-#line 10 "shape_to_id.gperf"
++#line 12 "shape_to_id.gperf"
+       {"bottom_left_corner",6},
+-#line 11 "shape_to_id.gperf"
++#line 13 "shape_to_id.gperf"
+       {"bottom_right_corner",7},
+-#line 19 "shape_to_id.gperf"
++#line 21 "shape_to_id.gperf"
+       {"cross",15},
+-#line 69 "shape_to_id.gperf"
++#line 71 "shape_to_id.gperf"
+       {"tcross",65},
+-#line 38 "shape_to_id.gperf"
++#line 40 "shape_to_id.gperf"
+       {"left_ptr",34},
+-#line 21 "shape_to_id.gperf"
++#line 23 "shape_to_id.gperf"
+       {"crosshair",17},
+-#line 14 "shape_to_id.gperf"
++#line 16 "shape_to_id.gperf"
+       {"box_spiral",10},
+-#line 68 "shape_to_id.gperf"
++#line 70 "shape_to_id.gperf"
+       {"target",64},
+-#line 40 "shape_to_id.gperf"
++#line 42 "shape_to_id.gperf"
+       {"left_tee",36},
+-#line 39 "shape_to_id.gperf"
++#line 41 "shape_to_id.gperf"
+       {"left_side",35},
+-#line 15 "shape_to_id.gperf"
++#line 17 "shape_to_id.gperf"
+       {"center_ptr",11},
+-#line 20 "shape_to_id.gperf"
++#line 22 "shape_to_id.gperf"
+       {"cross_reverse",16},
+-#line 70 "shape_to_id.gperf"
++#line 72 "shape_to_id.gperf"
+       {"top_left_arrow",66},
+-#line 35 "shape_to_id.gperf"
++#line 37 "shape_to_id.gperf"
+       {"heart",31},
+-#line 63 "shape_to_id.gperf"
++#line 65 "shape_to_id.gperf"
+       {"shuttle",59},
+-#line 56 "shape_to_id.gperf"
++#line 58 "shape_to_id.gperf"
+       {"sailboat",52},
+-#line 60 "shape_to_id.gperf"
++#line 62 "shape_to_id.gperf"
+       {"sb_right_arrow",56},
+-#line 46 "shape_to_id.gperf"
++#line 48 "shape_to_id.gperf"
+       {"mouse",42},
+-#line 62 "shape_to_id.gperf"
++#line 64 "shape_to_id.gperf"
+       {"sb_v_double_arrow",58},
+-#line 43 "shape_to_id.gperf"
++#line 45 "shape_to_id.gperf"
+       {"lr_angle",39},
+-#line 5 "shape_to_id.gperf"
++#line 7 "shape_to_id.gperf"
+       {"arrow",1},
+-#line 9 "shape_to_id.gperf"
++#line 11 "shape_to_id.gperf"
+       {"bogosity",5},
+-#line 41 "shape_to_id.gperf"
++#line 43 "shape_to_id.gperf"
+       {"leftbutton",37},
+-#line 59 "shape_to_id.gperf"
++#line 61 "shape_to_id.gperf"
+       {"sb_left_arrow",55},
+-#line 49 "shape_to_id.gperf"
++#line 51 "shape_to_id.gperf"
+       {"plus",45},
+-#line 37 "shape_to_id.gperf"
++#line 39 "shape_to_id.gperf"
+       {"iron_cross",33},
+-#line 64 "shape_to_id.gperf"
++#line 66 "shape_to_id.gperf"
+       {"sizing",60},
+-#line 42 "shape_to_id.gperf"
++#line 44 "shape_to_id.gperf"
+       {"ll_angle",38},
+-#line 51 "shape_to_id.gperf"
++#line 53 "shape_to_id.gperf"
+       {"right_ptr",47},
+-#line 17 "shape_to_id.gperf"
++#line 19 "shape_to_id.gperf"
+       {"clock",13},
+-#line 23 "shape_to_id.gperf"
++#line 25 "shape_to_id.gperf"
+       {"dot",19},
+-#line 53 "shape_to_id.gperf"
++#line 55 "shape_to_id.gperf"
+       {"right_tee",49},
+-#line 52 "shape_to_id.gperf"
++#line 54 "shape_to_id.gperf"
+       {"right_side",48},
+-#line 6 "shape_to_id.gperf"
++#line 8 "shape_to_id.gperf"
+       {"based_arrow_down",2},
+-#line 78 "shape_to_id.gperf"
++#line 80 "shape_to_id.gperf"
+       {"ur_angle",74},
+-#line 16 "shape_to_id.gperf"
++#line 18 "shape_to_id.gperf"
+       {"circle",12},
+-#line 58 "shape_to_id.gperf"
++#line 60 "shape_to_id.gperf"
+       {"sb_h_double_arrow",54},
+-#line 4 "shape_to_id.gperf"
++#line 6 "shape_to_id.gperf"
+       {"X_cursor",0},
+-#line 50 "shape_to_id.gperf"
++#line 52 "shape_to_id.gperf"
+       {"question_arrow",46},
+-#line 61 "shape_to_id.gperf"
++#line 63 "shape_to_id.gperf"
+       {"sb_up_arrow",57},
+-#line 44 "shape_to_id.gperf"
++#line 46 "shape_to_id.gperf"
+       {"man",40},
+-#line 7 "shape_to_id.gperf"
++#line 9 "shape_to_id.gperf"
+       {"based_arrow_up",3},
+-#line 18 "shape_to_id.gperf"
++#line 20 "shape_to_id.gperf"
+       {"coffee_mug",14},
+-#line 47 "shape_to_id.gperf"
++#line 49 "shape_to_id.gperf"
+       {"pencil",43},
+-#line 76 "shape_to_id.gperf"
++#line 78 "shape_to_id.gperf"
+       {"ul_angle",72},
+-#line 80 "shape_to_id.gperf"
++#line 82 "shape_to_id.gperf"
+       {"xterm",76},
+-#line 54 "shape_to_id.gperf"
++#line 56 "shape_to_id.gperf"
+       {"rightbutton",50},
+-#line 66 "shape_to_id.gperf"
++#line 68 "shape_to_id.gperf"
+       {"spraycan",62},
+-#line 32 "shape_to_id.gperf"
++#line 34 "shape_to_id.gperf"
+       {"gumby",28},
+-#line 48 "shape_to_id.gperf"
++#line 50 "shape_to_id.gperf"
+       {"pirate",44},
+-#line 29 "shape_to_id.gperf"
++#line 31 "shape_to_id.gperf"
+       {"exchange",25},
+-#line 36 "shape_to_id.gperf"
++#line 38 "shape_to_id.gperf"
+       {"icon",32},
+-#line 79 "shape_to_id.gperf"
++#line 81 "shape_to_id.gperf"
+       {"watch",75},
+-#line 77 "shape_to_id.gperf"
++#line 79 "shape_to_id.gperf"
+       {"umbrella",73},
+-#line 25 "shape_to_id.gperf"
++#line 27 "shape_to_id.gperf"
+       {"double_arrow",21},
+-#line 57 "shape_to_id.gperf"
++#line 59 "shape_to_id.gperf"
+       {"sb_down_arrow",53},
+-#line 30 "shape_to_id.gperf"
++#line 32 "shape_to_id.gperf"
+       {"fleur",26},
+-#line 65 "shape_to_id.gperf"
++#line 67 "shape_to_id.gperf"
+       {"spider",61},
+-#line 34 "shape_to_id.gperf"
++#line 36 "shape_to_id.gperf"
+       {"hand2",30},
+-#line 33 "shape_to_id.gperf"
++#line 35 "shape_to_id.gperf"
+       {"hand1",29},
+-#line 24 "shape_to_id.gperf"
+-      {"dotbox",20},
+ #line 26 "shape_to_id.gperf"
++      {"dotbox",20},
++#line 28 "shape_to_id.gperf"
+       {"draft_large",22},
+-#line 22 "shape_to_id.gperf"
++#line 24 "shape_to_id.gperf"
+       {"diamond_cross",18},
+-#line 27 "shape_to_id.gperf"
++#line 29 "shape_to_id.gperf"
+       {"draft_small",23},
+-#line 45 "shape_to_id.gperf"
++#line 47 "shape_to_id.gperf"
+       {"middlebutton",41},
+-#line 28 "shape_to_id.gperf"
++#line 30 "shape_to_id.gperf"
+       {"draped_box",24}
+     };
+ #if (defined __GNUC__ && __GNUC__ + (__GNUC_MINOR__ >= 6) > 4) || (defined __clang__ && __clang_major__ >= 3)
+@@ -530,7 +532,7 @@
+     }
+   return (struct shape_mapping *) 0;
+ }
+-#line 81 "shape_to_id.gperf"
++#line 83 "shape_to_id.gperf"
+ 
+ const int cursor_shape_to_id(const char *name) {
+ 	struct shape_mapping *mapping = in_word_set(name, strlen(name));

@@ -1,0 +1,44 @@
+VeridianOS: ewmh: xcb_ewmh_init_atoms_replies() accepts a NULL cookie array
+
+Completes 0003: xcb_ewmh_init_atoms() now returns NULL when an
+allocation fails (as it already did for a connection without screens),
+but xcb_ewmh_init_atoms_replies() indexed the cookie array unchecked, so
+the documented xcb_ewmh_init_atoms_replies(ewmh, xcb_ewmh_init_atoms(c,
+ewmh), e) sequence still crashed. It now returns 0 for a NULL array;
+both return values are documented in the header. (Prepared for
+upstream, gitlab.freedesktop.org/xorg/lib/libxcb-wm.)
+
+--- a/ewmh/ewmh.c.m4
++++ b/ewmh/ewmh.c.m4
+@@ -593,6 +593,10 @@
+   uint8_t ret = 1;
+   xcb_intern_atom_reply_t *reply;
+ 
++  /* xcb_ewmh_init_atoms() failed */
++  if(!ewmh_cookies)
++    return 0;
++
+   for(atom_nbr = 0; atom_nbr < NB_EWMH_ATOMS + ewmh->nb_screens; atom_nbr++)
+     if((reply = xcb_intern_atom_reply(ewmh->connection, ewmh_cookies[atom_nbr], e)))
+       {
+--- a/ewmh/xcb_ewmh.h.m4
++++ b/ewmh/xcb_ewmh.h.m4
+@@ -358,7 +358,7 @@
+  * @param c The connection to the X server
+  * @param ewmh The information relative to EWMH
+  * @param screen_nbr The screen number
+- * @return The cookies corresponding to EWMH atoms
++ * @return The cookies corresponding to EWMH atoms, or NULL on failure
+  */
+ xcb_intern_atom_cookie_t *xcb_ewmh_init_atoms(xcb_connection_t *c,
+                                               xcb_ewmh_connection_t *ewmh);
+@@ -368,7 +368,8 @@
+  * previously sent
+  *
+  * @param emwh The information relative to EWMH
+- * @param ewmh_cookies The cookies corresponding to EWMH atoms
++ * @param ewmh_cookies The cookies corresponding to EWMH atoms (if NULL,
++ *        as returned by xcb_ewmh_init_atoms() on failure, 0 is returned)
+  * @param e Error if any
+  * @return Return 1 on success, 0 otherwise
+  */

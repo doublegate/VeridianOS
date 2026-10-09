@@ -1,0 +1,130 @@
+VeridianOS: fix KIO compiler warnings (dead code, unused parameters, deprecated libxml2 call)
+
+GCC reported, for the VeridianOS cross build (musl, libxml2 2.15.4):
+
+- src/core/kmountpoint.cpp: 's_mountIdCache' defined but not used
+  [-Wunused-variable]. The MountIdCache struct and its Q_GLOBAL_STATIC are
+  only used by the HAVE_STATX_MNT_ID_UNIQUE branch of
+  KMountPoint::currentMountPointForUniqueId(); move them under the same
+  condition. No behaviour change.
+- src/core/workerinterface.cpp: 'readFilesize_t' defined but not used
+  [-Wunused-function]. The static helper has no caller; remove it.
+- src/kpasswdserver/kpasswdserver.cpp: unused parameter 'usertime'
+  [-Wunused-parameter] (4x). It is only read under #if HAVE_X11, so mark it
+  [[maybe_unused]]. No behaviour change.
+- src/kioworkers/help/main.cpp, main_ghelp.cpp: 'xmlSubstituteEntitiesDefault'
+  is deprecated [-Wdeprecated-declarations]. The documented replacement is the
+  XML_PARSE_NOENT parser option. Every parse the help workers perform already
+  passes it explicitly: KDocTools::transform() reads the document with
+  xmlCtxtReadFile(..., XML_PARSE_NOENT | XML_PARSE_DTDLOAD | XML_PARSE_NONET),
+  and libxslt loads stylesheets, imports and document() inputs with
+  XSLT_PARSE_OPTIONS (XML_PARSE_NOENT | ...). libxml2 sets
+  ctxt->replaceEntities from those options, overriding the global default, so
+  the global call has no effect; remove it. No behaviour change.
+
+diff -ru a/src/core/kmountpoint.cpp b/src/core/kmountpoint.cpp
+--- a/src/core/kmountpoint.cpp	2026-10-08 16:56:31.040997259 -0400
++++ b/src/core/kmountpoint.cpp	2026-10-08 16:56:41.032304973 -0400
+@@ -611,6 +611,8 @@
+     return Ptr();
+ }
+ 
++// The cache is only consulted for unique mount ids (statx STATX_MNT_ID_UNIQUE).
++#if HAVE_STATX_MNT_ID_UNIQUE
+ namespace
+ {
+ // Small process-wide cache of unique-mount-id -> mount point. A STATX_MNT_ID_UNIQUE
+@@ -698,6 +700,7 @@
+ };
+ }
+ Q_GLOBAL_STATIC(MountIdCache, s_mountIdCache)
++#endif // HAVE_STATX_MNT_ID_UNIQUE
+ 
+ KMountPoint::Ptr KMountPoint::currentMountPointForUniqueId(quint64 uniqueMountId)
+ {
+diff -ru a/src/core/workerinterface.cpp b/src/core/workerinterface.cpp
+--- a/src/core/workerinterface.cpp	2026-10-08 16:56:31.058997118 -0400
++++ b/src/core/workerinterface.cpp	2026-10-08 16:56:41.032486877 -0400
+@@ -35,13 +35,6 @@
+     delete m_connection;
+ }
+ 
+-static KIO::filesize_t readFilesize_t(QDataStream &stream)
+-{
+-    KIO::filesize_t result;
+-    stream >> result;
+-    return result;
+-}
+-
+ bool WorkerInterface::dispatch()
+ {
+     Q_ASSERT(m_connection);
+diff -ru a/src/kioworkers/help/main.cpp b/src/kioworkers/help/main.cpp
+--- a/src/kioworkers/help/main.cpp	2026-10-08 16:56:31.080231939 -0400
++++ b/src/kioworkers/help/main.cpp	2026-10-08 16:59:44.416792340 -0400
+@@ -53,7 +53,10 @@
+     }
+ 
+     LIBXML_TEST_VERSION
+-    xmlSubstituteEntitiesDefault(1);
++    // Entity substitution is requested per parse: KDocTools::transform() reads the
++    // document with XML_PARSE_NOENT and libxslt loads stylesheets with
++    // XSLT_PARSE_OPTIONS (which include XML_PARSE_NOENT), so the deprecated global
++    // default xmlSubstituteEntitiesDefault(1) is not needed.
+     xmlLoadExtDtdDefaultValue = 1;
+     exsltRegisterAll();
+ 
+diff -ru a/src/kioworkers/help/main_ghelp.cpp b/src/kioworkers/help/main_ghelp.cpp
+--- a/src/kioworkers/help/main_ghelp.cpp	2026-10-08 16:56:31.104202412 -0400
++++ b/src/kioworkers/help/main_ghelp.cpp	2026-10-08 16:59:44.416821787 -0400
+@@ -46,7 +46,10 @@
+     }
+ 
+     LIBXML_TEST_VERSION
+-    xmlSubstituteEntitiesDefault(1);
++    // Entity substitution is requested per parse: KDocTools::transform() reads the
++    // document with XML_PARSE_NOENT and libxslt loads stylesheets with
++    // XSLT_PARSE_OPTIONS (which include XML_PARSE_NOENT), so the deprecated global
++    // default xmlSubstituteEntitiesDefault(1) is not needed.
+     xmlLoadExtDtdDefaultValue = 1;
+     exsltRegisterAll();
+ 
+diff -ru a/src/kpasswdserver/kpasswdserver.cpp b/src/kpasswdserver/kpasswdserver.cpp
+--- a/src/kpasswdserver/kpasswdserver.cpp	2026-10-08 16:56:31.125887012 -0400
++++ b/src/kpasswdserver/kpasswdserver.cpp	2026-10-08 16:59:44.416736132 -0400
+@@ -216,7 +216,7 @@
+ }
+ 
+ // deprecated method, not used anymore. TODO KF6: REMOVE
+-QByteArray KPasswdServer::checkAuthInfo(const QByteArray &data, qlonglong windowId, qlonglong usertime)
++QByteArray KPasswdServer::checkAuthInfo(const QByteArray &data, qlonglong windowId, [[maybe_unused]] qlonglong usertime)
+ {
+     KIO::AuthInfo info;
+     QDataStream stream(data);
+@@ -274,7 +274,7 @@
+     return data2;
+ }
+ 
+-qlonglong KPasswdServer::checkAuthInfoAsync(KIO::AuthInfo info, qlonglong windowId, qlonglong usertime)
++qlonglong KPasswdServer::checkAuthInfoAsync(KIO::AuthInfo info, qlonglong windowId, [[maybe_unused]] qlonglong usertime)
+ {
+ #if HAVE_X11
+     if (usertime != 0) {
+@@ -332,7 +332,7 @@
+ }
+ 
+ // deprecated method, not used anymore. TODO KF6: REMOVE
+-QByteArray KPasswdServer::queryAuthInfo(const QByteArray &data, const QString &errorMsg, qlonglong windowId, qlonglong seqNr, qlonglong usertime)
++QByteArray KPasswdServer::queryAuthInfo(const QByteArray &data, const QString &errorMsg, qlonglong windowId, qlonglong seqNr, [[maybe_unused]] qlonglong usertime)
+ {
+     KIO::AuthInfo info;
+     QDataStream stream(data);
+@@ -374,7 +374,7 @@
+     return QByteArray(); // return value is going to be ignored
+ }
+ 
+-qlonglong KPasswdServer::queryAuthInfoAsync(const KIO::AuthInfo &info, const QString &errorMsg, qlonglong windowId, qlonglong seqNr, qlonglong usertime)
++qlonglong KPasswdServer::queryAuthInfoAsync(const KIO::AuthInfo &info, const QString &errorMsg, qlonglong windowId, qlonglong seqNr, [[maybe_unused]] qlonglong usertime)
+ {
+     qCDebug(category) << "User =" << info.username << ", WindowId =" << windowId << "seqNr =" << seqNr << ", errorMsg =" << errorMsg;
+ 

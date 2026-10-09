@@ -1,0 +1,29 @@
+VeridianOS: include <poll.h>, poll()'s POSIX header
+
+debug_console.cpp and utils/filedescriptor.cpp include <sys/poll.h>, a
+glibc alias; musl redirects it to <poll.h> with a warning ("#warning
+redirecting incorrect #include <sys/poll.h> to <poll.h>"). They now
+include <poll.h>, which declares the same poll() on every system.
+
+--- a/src/debug_console.cpp
++++ b/src/debug_console.cpp
+@@ -65,7 +65,7 @@
+ 
+ #include <fcntl.h>
+ #include <functional>
+-#include <sys/poll.h>
++#include <poll.h>
+ 
+ namespace KWin
+ {
+--- a/src/utils/filedescriptor.cpp
++++ b/src/utils/filedescriptor.cpp
+@@ -11,7 +11,7 @@
+ 
+ #include <fcntl.h>
+ #include <sys/ioctl.h>
+-#include <sys/poll.h>
++#include <poll.h>
+ #include <unistd.h>
+ #include <utility>
+ 

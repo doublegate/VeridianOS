@@ -1,0 +1,124 @@
+VeridianOS: fix ksystemstats warnings (unchecked opens, uninitialised meminfo, dead stores)
+
+GCC reported:
+- -Wunused-result on QFile::open() of /proc/diskstats (disks.cpp),
+  /proc/cpuinfo and /proc/stat (linuxcpuplugin.cpp) and /proc/meminfo
+  (memory/linuxbackend.cpp). A failed open is now handled: the disk, cpu
+  and memory update() return early (same as the existing "file does not
+  exist" path in disks.cpp), the cpu constructor logs with
+  KSYSTEMSTATS_CPU and carries on so m_allCpus is still created.
+- -Wmaybe-uninitialized on all eight counters in
+  LinuxMemoryBackend::update(). Real bug: any field missing from
+  /proc/meminfo (MemAvailable before Linux 3.14, or a minimal procfs such
+  as VeridianOS's) left the variable uninitialised and its stack garbage
+  was published as a sensor value. They now start at 0.
+- -Wunused-but-set-variable 'tccd' in addSensorsAmd(). The array was only
+  written, never read (the CCD mapping is still a TODO). It was also a real
+  out-of-bounds write: it is indexed by the number in the hwmon feature
+  name ("temp3".."temp10" for Tccd1..Tccd8), so Tccd6..Tccd8 wrote
+  tccd[8..10] past the end of the 8-element stack array. The dead array is
+  removed; Tccd sensors are still recognised (no "unrecognised sensor"
+  warning), as before.
+- -Wunused-but-set-variable 'gpuCounter' in NvidiaSmiProcess::query():
+  counted but never read; removed.
+
+Behaviour is otherwise unchanged.
+
+diff -ru a/plugins/cpu/linuxcpuplugin.cpp b/plugins/cpu/linuxcpuplugin.cpp
+--- a/plugins/cpu/linuxcpuplugin.cpp	2026-10-08 16:57:08.283588849 -0400
++++ b/plugins/cpu/linuxcpuplugin.cpp	2026-10-08 16:57:57.002115190 -0400
+@@ -80,7 +80,10 @@
+ 
+     // Parse /proc/cpuinfo for information about cpus
+     QFile cpuinfo(path);
+-    cpuinfo.open(QIODevice::ReadOnly);
++    if (!cpuinfo.open(QIODevice::ReadOnly)) {
++        // Continue without per-cpu objects; the all-cpus object below is still needed by update().
++        qCWarning(KSYSTEMSTATS_CPU) << "Could not open" << path << cpuinfo.errorString();
++    }
+ 
+     int cpuCount = 0;
+     QList<CpuInfo> cpus;
+@@ -160,7 +163,10 @@
+     // Parse /proc/stat to get usage values. The format is described at
+     // https://www.kernel.org/doc/html/latest/filesystems/proc.html#miscellaneous-kernel-statistics-in-proc-stat
+     QFile stat(QStringLiteral("/proc/stat"));
+-    stat.open(QIODevice::ReadOnly);
++    if (!stat.open(QIODevice::ReadOnly)) {
++        qCWarning(KSYSTEMSTATS_CPU) << "Could not open /proc/stat" << stat.errorString();
++        return;
++    }
+     for (QByteArray line = stat.readLine(); !line.isNull(); line = stat.readLine()) {
+         auto values = line.simplified().split(' ');
+         if (!line.startsWith("cpu")) {
+@@ -247,7 +253,6 @@
+     int featureNumber = 0;
+     sensors_feature const * tctl = nullptr;
+     sensors_feature const * tdie = nullptr;
+-    sensors_feature const * tccd[8] = {nullptr};
+     while (sensors_feature const * feature = sensors_get_features(chipName, &featureNumber)) {
+         const QByteArray name (feature->name);
+         if (feature->type != SENSORS_FEATURE_TEMP || !name.startsWith("temp")) {
+@@ -262,7 +267,7 @@
+         } else if (qstrcmp(label, "Tdie") == 0 || qstrcmp(label, "temp2") == 0) {
+             tdie = feature;
+         } else if (qstrncmp(label, "Tccd", 4) == 0) {
+-            tccd[name.mid(4).toUInt()] = feature;
++            // Per-CCD temperatures are recognised but not used yet (see the TODO below).
+         } else {
+             qCWarning(KSYSTEMSTATS_CPU) << "Unrecognised temmperature sensor: " << label;
+         }
+diff -ru a/plugins/disks/disks.cpp b/plugins/disks/disks.cpp
+--- a/plugins/disks/disks.cpp	2026-10-08 16:57:08.265578158 -0400
++++ b/plugins/disks/disks.cpp	2026-10-08 16:57:57.000700088 -0400
+@@ -360,7 +360,9 @@
+     if (!diskstats.exists()) {
+         return;
+     }
+-    diskstats.open(QIODevice::ReadOnly | QIODevice::Text);
++    if (!diskstats.open(QIODevice::ReadOnly | QIODevice::Text)) {
++        return;
++    }
+     /* procfs-diskstats (See https://www.kernel.org/doc/Documentation/ABI/testing/procfs-diskstats)
+     The /proc/diskstats file displays the I/O statistics
+     of block devices. Each line contains the following 14
+diff -ru a/plugins/gpu/NvidiaSmiProcess.cpp b/plugins/gpu/NvidiaSmiProcess.cpp
+--- a/plugins/gpu/NvidiaSmiProcess.cpp	2026-10-08 16:57:08.337408395 -0400
++++ b/plugins/gpu/NvidiaSmiProcess.cpp	2026-10-08 16:57:57.002305696 -0400
+@@ -41,7 +41,6 @@
+     queryProcess.setArguments({QStringLiteral("--query")});
+     queryProcess.start();
+ 
+-    int gpuCounter = 0;
+     int tLimitShDn;
+     auto data = m_queryResult.end();
+ 
+@@ -62,7 +61,6 @@
+             data = m_queryResult.emplace(m_queryResult.end());
+             // nvidia-smi has to much zeros compared to linux, remove line break
+             data->pciPath = line.mid(strlen("GPU 0000")).chopped(1).toLower();
+-            gpuCounter++;
+         }
+ 
+         if ((readMemory || readMaxClocks) && !line.startsWith("        ")) {
+diff -ru a/plugins/memory/linuxbackend.cpp b/plugins/memory/linuxbackend.cpp
+--- a/plugins/memory/linuxbackend.cpp	2026-10-08 16:57:08.316213761 -0400
++++ b/plugins/memory/linuxbackend.cpp	2026-10-08 16:57:57.002214561 -0400
+@@ -24,12 +24,15 @@
+     }
+ 
+     QFile meminfo(QStringLiteral("/proc/meminfo"));
+-    meminfo.open(QIODevice::ReadOnly);
++    if (!meminfo.open(QIODevice::ReadOnly)) {
++        return;
++    }
+     // The format of the file is as follows:
+     // Fieldname:[whitespace]value kB
+     // A description of the fields can be found at 
+     // https://www.kernel.org/doc/html/latest/filesystems/proc.html#meminfo
+-    unsigned long long total, free, available, buffer, cache, slab, swapTotal, swapFree;
++    // A field missing from the file (older kernels lack MemAvailable, for instance) counts as 0.
++    unsigned long long total = 0, free = 0, available = 0, buffer = 0, cache = 0, slab = 0, swapTotal = 0, swapFree = 0;
+     for (QByteArray line = meminfo.readLine(); !line.isEmpty(); line = meminfo.readLine()) {
+         int colonIndex = line.indexOf(':');
+         const auto fields = line.simplified().split(' ');

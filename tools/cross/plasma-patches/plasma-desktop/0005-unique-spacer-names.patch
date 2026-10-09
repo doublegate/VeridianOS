@@ -1,0 +1,28 @@
+VeridianOS: unique spacer names in dateandtime.ui
+
+Three spacers in the date and time form are named "horizontalSpacer";
+uic renames the second and third and warns ("The name 'horizontalSpacer'
+(QSpacerItem) is already in use, defaulting to 'horizontalSpacer1'").
+They now have unique names (_2, _3, as Qt Designer names copies). Nothing
+refers to them by name.
+
+--- a/kcms/dateandtime/dateandtime.ui
++++ b/kcms/dateandtime/dateandtime.ui
+@@ -70,7 +70,7 @@
+        <item>
+         <layout class="QHBoxLayout" name="horizontalLayout">
+          <item>
+-          <spacer name="horizontalSpacer">
++          <spacer name="horizontalSpacer_2">
+            <property name="orientation">
+             <enum>Qt::Orientation::Horizontal</enum>
+            </property>
+@@ -106,7 +106,7 @@
+           </widget>
+          </item>
+          <item>
+-          <spacer name="horizontalSpacer">
++          <spacer name="horizontalSpacer_3">
+            <property name="orientation">
+             <enum>Qt::Orientation::Horizontal</enum>
+            </property>

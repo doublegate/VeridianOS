@@ -1,0 +1,22 @@
+VeridianOS: TreeViewPlugin: say so when its embedded QML files are missing
+
+Follows 0001, which resolves the module's QML files under the resource
+prefix ECM gives them (":/qt/qml/org/kde/kirigamiaddons/treeview"). If a
+later ECM or Qt changed that prefix, every lookup would quietly fail and
+TreeViewDecoration would be registered with a URL that does not exist,
+noticed only when a QML file uses it. registerTypes() now checks that the
+base file is there and prints a warning naming the path otherwise. No
+change while the files are where 0001 expects them.
+
+--- a/src/treeview/treeviewplugin.cpp
++++ b/src/treeview/treeviewplugin.cpp
+@@ -35,6 +35,9 @@
+ {
+     Q_ASSERT(QLatin1String(uri) == QLatin1String("org.kde.kirigamiaddons.treeview"));
+     const QString style = QQuickStyle::name();
++    if (!QFile::exists(resolveFilePath(QStringLiteral("TreeViewDecoration.qml")))) {
++        qWarning("TreeViewPlugin: %s is not in the plugin's resources", qPrintable(resolveFilePath(QStringLiteral("TreeViewDecoration.qml"))));
++    }
+ 
+ 
+ #if !defined(Q_OS_ANDROID) && !defined(Q_OS_IOS)

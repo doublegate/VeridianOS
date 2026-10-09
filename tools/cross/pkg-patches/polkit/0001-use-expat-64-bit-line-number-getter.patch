@@ -1,0 +1,50 @@
+VeridianOS: use XML_GetCurrentLineNumber64() with expat >= 2.9.0
+
+GCC reported -Wdeprecated-declarations twice in
+src/polkitbackend/polkitbackendactionpool.c: expat 2.9.0 deprecates
+XML_GetCurrentLineNumber() ("please use XML_GetCurrentLineNumber64
+instead"); the replacement returns the same line number as uint64_t and
+does not wrap on 32-bit platforms. Both call sites (the "skipping unknown
+tag" warning and the parse-error message) now go through a local macro
+that picks XML_GetCurrentLineNumber64() on expat >= 2.9.0 and the old
+function otherwise, so the file still builds against older expat. The
+value is still cast to int for the existing "%d" formats; behaviour is
+unchanged.
+
+
+diff -ru a/src/polkitbackend/polkitbackendactionpool.c b/src/polkitbackend/polkitbackendactionpool.c
+--- a/src/polkitbackend/polkitbackendactionpool.c	2026-10-08 16:59:37.600597922 -0400
++++ b/src/polkitbackend/polkitbackendactionpool.c	2026-10-08 16:59:44.693977198 -0400
+@@ -24,6 +24,14 @@
+ #include <string.h>
+ #include <expat.h>
+ 
++/* XML_GetCurrentLineNumber() is deprecated since expat 2.9.0 in favour of
++ * XML_GetCurrentLineNumber64(), which does not wrap on 32-bit platforms. */
++#if XML_MAJOR_VERSION > 2 || (XML_MAJOR_VERSION == 2 && XML_MINOR_VERSION >= 9)
++#define POLKIT_XML_LINE_NUMBER(parser) XML_GetCurrentLineNumber64 (parser)
++#else
++#define POLKIT_XML_LINE_NUMBER(parser) XML_GetCurrentLineNumber (parser)
++#endif
++
+ #ifdef ENABLE_GETTEXT
+ #include <locale.h>
+ #include <glib/gi18n.h>
+@@ -872,7 +880,7 @@
+   if (state == STATE_NONE)
+     {
+       g_warning ("skipping unknown tag <%s> at line %d",
+-                 el, (int) XML_GetCurrentLineNumber (pd->parser));
++                 el, (int) POLKIT_XML_LINE_NUMBER (pd->parser));
+       state = STATE_UNKNOWN_TAG;
+     }
+ 
+@@ -1163,7 +1171,7 @@
+                        POLKIT_ERROR,
+                        POLKIT_ERROR_FAILED,
+                        "%d: parse error: %s",
+-                       (int) XML_GetCurrentLineNumber (pd.parser),
++                       (int) POLKIT_XML_LINE_NUMBER (pd.parser),
+                        XML_ErrorString (XML_GetErrorCode (pd.parser)));
+         }
+       XML_ParserFree (pd.parser);

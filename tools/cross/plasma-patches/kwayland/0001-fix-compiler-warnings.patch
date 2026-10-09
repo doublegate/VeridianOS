@@ -1,0 +1,244 @@
+VeridianOS: fix compiler warnings in the KWayland client library
+
+GCC reported, in src/client:
+
+- -Wsubobject-linkage (buffer_p.h, surface_p.h): Buffer::Private and
+  Surface::Private hold WaylandPointer<wl_buffer, wl_buffer_destroy> and
+  WaylandPointer<wl_surface, wl_surface_destroy>. Those destroy functions are
+  static inline in the generated wayland-client-protocol.h, so the template
+  instantiations have internal linkage, while the classes live in headers
+  shared by several translation units (buffer.cpp/shm_pool.cpp,
+  surface.cpp/surface_p.cpp). The deleters are now destroyWlBuffer() and
+  destroyWlSurface(), hidden functions with external linkage declared in the
+  headers and defined in buffer.cpp and surface.cpp, which call the protocol
+  functions.
+- -Wmissing-field-initializers (pointer.cpp, touch.cpp, surface.cpp,
+  xdgshell_stable.cpp, plasmawindowmanagement.cpp): the listener structs did
+  not name the newer events. None of them can arrive at the versions the
+  registry binds (wl_seat <= 5, wl_compositor <= 4, xdg_wm_base 1,
+  org_kde_plasma_window_management <= 18), so the entries are spelled out as
+  nullptr with a comment saying why; the structs were already zero-filled.
+- -Wunused-parameter (plasmawindowmanagement.cpp, stackingOrderCallback):
+  the no-op callback's parameters are marked [[maybe_unused]], as the
+  file's other no-op callback (virtualDesktopChangedCallback) already is.
+- -Woverloaded-virtual (xdgshell_p.h, reported for the base declarations):
+  the XdgShellStable, XdgShellUnstableV5 and XdgShellUnstableV6 Private
+  classes override some getXdgPopup() overloads and so hid the others. Each
+  now has `using XdgShell::Private::getXdgPopup;`, the same way they already
+  re-expose the base conversion operators. Calls go through an
+  XdgShell::Private pointer, so dispatch is unchanged.
+
+Behaviour is unchanged.
+
+diff -ru a/src/client/buffer.cpp b/src/client/buffer.cpp
+--- a/src/client/buffer.cpp	2026-10-08 16:56:51.964036509 -0400
++++ b/src/client/buffer.cpp	2026-10-08 16:58:50.001914608 -0400
+@@ -15,6 +15,11 @@
+ {
+ namespace Client
+ {
++void destroyWlBuffer(wl_buffer *buffer)
++{
++    wl_buffer_destroy(buffer);
++}
++
+ #ifndef K_DOXYGEN
+ const struct wl_buffer_listener Buffer::Private::s_listener = {Buffer::Private::releasedCallback};
+ #endif
+diff -ru a/src/client/buffer_p.h b/src/client/buffer_p.h
+--- a/src/client/buffer_p.h	2026-10-08 16:56:51.944752615 -0400
++++ b/src/client/buffer_p.h	2026-10-08 16:58:48.268928026 -0400
+@@ -14,6 +14,12 @@
+ {
+ namespace Client
+ {
++// wl_buffer_destroy() is static inline in the generated protocol header, so a
++// WaylandPointer instantiated with it would have internal linkage in a class
++// this header shares between translation units. Destroy through a function
++// with external linkage instead.
++Q_DECL_HIDDEN void destroyWlBuffer(wl_buffer *buffer);
++
+ class Q_DECL_HIDDEN Buffer::Private
+ {
+ public:
+@@ -22,7 +28,7 @@
+     void destroy();
+ 
+     ShmPool *shm;
+-    WaylandPointer<wl_buffer, wl_buffer_destroy> nativeBuffer;
++    WaylandPointer<wl_buffer, destroyWlBuffer> nativeBuffer;
+     bool released;
+     QSize size;
+     int32_t stride;
+diff -ru a/src/client/plasmawindowmanagement.cpp b/src/client/plasmawindowmanagement.cpp
+--- a/src/client/plasmawindowmanagement.cpp	2026-10-08 16:56:52.073031604 -0400
++++ b/src/client/plasmawindowmanagement.cpp	2026-10-08 16:59:16.698839680 -0400
+@@ -295,7 +295,9 @@
+     });
+ }
+ 
+-void PlasmaWindowManagement::Private::stackingOrderCallback(void *data, org_kde_plasma_window_management *interface, wl_array *ids)
++void PlasmaWindowManagement::Private::stackingOrderCallback([[maybe_unused]] void *data,
++                                                            [[maybe_unused]] org_kde_plasma_window_management *interface,
++                                                            [[maybe_unused]] wl_array *ids)
+ {
+     // This is no-op since setStackingOrder(const QList<quint32> &ids) is deprecated since 5.73,
+     // but we can't remove this method because it's needed in
+@@ -473,6 +475,9 @@
+     activityLeftCallback,
+     resourceNameChangedCallback,
+     clientGeometryCallback,
++    // mapped: version 21 event; the registry binds
++    // org_kde_plasma_window_management at version 18 at most, so it is never sent.
++    nullptr,
+ };
+ 
+ void PlasmaWindow::Private::appmenuChangedCallback(void *data, org_kde_plasma_window *window, const char *service_name, const char *object_path)
+diff -ru a/src/client/pointer.cpp b/src/client/pointer.cpp
+--- a/src/client/pointer.cpp	2026-10-08 16:56:52.033832762 -0400
++++ b/src/client/pointer.cpp	2026-10-08 16:59:12.116743546 -0400
+@@ -68,8 +68,21 @@
+     wl_pointer_add_listener(pointer, &s_listener, this);
+ }
+ 
+-const wl_pointer_listener Pointer::Private::s_listener =
+-    {enterCallback, leaveCallback, motionCallback, buttonCallback, axisCallback, frameCallback, axisSourceCallback, axisStopCallback, axisDiscreteCallback};
++// axis_value120 (version 8), axis_relative_direction (version 9) and warp
++// (version 11) are newer wl_pointer events; the registry binds wl_seat at version 5 at most, so
++// they are never sent.
++const wl_pointer_listener Pointer::Private::s_listener = {enterCallback,
++                                                         leaveCallback,
++                                                         motionCallback,
++                                                         buttonCallback,
++                                                         axisCallback,
++                                                         frameCallback,
++                                                         axisSourceCallback,
++                                                         axisStopCallback,
++                                                         axisDiscreteCallback,
++                                                         nullptr,
++                                                         nullptr,
++                                                         nullptr};
+ 
+ Pointer::Pointer(QObject *parent)
+     : QObject(parent)
+diff -ru a/src/client/surface.cpp b/src/client/surface.cpp
+--- a/src/client/surface.cpp	2026-10-08 16:56:52.005790851 -0400
++++ b/src/client/surface.cpp	2026-10-08 16:59:00.028837010 -0400
+@@ -20,6 +20,11 @@
+ namespace Client
+ {
+ 
++void destroyWlSurface(wl_surface *surface)
++{
++    wl_surface_destroy(surface);
++}
++
+ QList<Surface *> Surface::Private::s_surfaces = QList<Surface *>();
+ 
+ Surface::Private::Private(Surface *q)
+@@ -83,7 +88,10 @@
+ #ifndef K_DOXYGEN
+ const struct wl_callback_listener Surface::Private::s_listener = {frameCallback};
+ 
+-const struct wl_surface_listener Surface::Private::s_surfaceListener = {enterCallback, leaveCallback};
++// preferred_buffer_scale and preferred_buffer_transform are wl_surface version 6
++// events; the registry binds wl_compositor at version 4 at most, so they are
++// never sent.
++const struct wl_surface_listener Surface::Private::s_surfaceListener = {enterCallback, leaveCallback, nullptr, nullptr};
+ #endif
+ 
+ void Surface::Private::removeOutput(Output *o)
+diff -ru a/src/client/surface_p.h b/src/client/surface_p.h
+--- a/src/client/surface_p.h	2026-10-08 16:56:51.989049672 -0400
++++ b/src/client/surface_p.h	2026-10-08 16:58:52.907892112 -0400
+@@ -15,13 +15,19 @@
+ {
+ namespace Client
+ {
++// wl_surface_destroy() is static inline in the generated protocol header, so a
++// WaylandPointer instantiated with it would have internal linkage in a class
++// this header shares between translation units. Destroy through a function
++// with external linkage instead.
++Q_DECL_HIDDEN void destroyWlSurface(wl_surface *surface);
++
+ class Q_DECL_HIDDEN Surface::Private
+ {
+ public:
+     Private(Surface *q);
+     void setupFrameCallback();
+ 
+-    WaylandPointer<wl_surface, wl_surface_destroy> surface;
++    WaylandPointer<wl_surface, destroyWlSurface> surface;
+     bool frameCallbackInstalled = false;
+     QSize size;
+     bool foreign = false;
+diff -ru a/src/client/touch.cpp b/src/client/touch.cpp
+--- a/src/client/touch.cpp	2026-10-08 16:56:52.055212266 -0400
++++ b/src/client/touch.cpp	2026-10-08 16:59:14.219727295 -0400
+@@ -124,7 +124,9 @@
+     wl_touch_add_listener(touch, &s_listener, this);
+ }
+ 
+-const wl_touch_listener Touch::Private::s_listener = {downCallback, upCallback, motionCallback, frameCallback, cancelCallback};
++// shape and orientation are wl_touch version 6 events; the registry binds
++// wl_seat at version 5 at most, so they are never sent.
++const wl_touch_listener Touch::Private::s_listener = {downCallback, upCallback, motionCallback, frameCallback, cancelCallback, nullptr, nullptr};
+ 
+ void Touch::Private::downCallback(void *data, wl_touch *touch, uint32_t serial, uint32_t time, wl_surface *surface, int32_t id, wl_fixed_t x, wl_fixed_t y)
+ {
+diff -ru a/src/client/xdgshell_stable.cpp b/src/client/xdgshell_stable.cpp
+--- a/src/client/xdgshell_stable.cpp	2026-10-08 16:56:52.113768304 -0400
++++ b/src/client/xdgshell_stable.cpp	2026-10-08 16:59:31.950590384 -0400
+@@ -26,6 +26,7 @@
+ 
+     XdgShellPopup *getXdgPopup(Surface *surface, XdgShellSurface *parentSurface, const XdgPositioner &positioner, QObject *parent) override;
+     XdgShellPopup *getXdgPopup(Surface *surface, XdgShellPopup *parentSurface, const XdgPositioner &positioner, QObject *parent) override;
++    using XdgShell::Private::getXdgPopup;
+ 
+     using XdgShell::Private::operator xdg_shell *;
+     using XdgShell::Private::operator zxdg_shell_v6 *;
+@@ -285,7 +286,10 @@
+     static const struct xdg_surface_listener s_surfaceListener;
+ };
+ 
+-const struct xdg_toplevel_listener XdgTopLevelStable::Private::s_toplevelListener = {configureCallback, closeCallback};
++// configure_bounds (version 4) and wm_capabilities (version 5) are newer
++// xdg_toplevel events; the registry binds xdg_wm_base at version 1, so they are
++// never sent.
++const struct xdg_toplevel_listener XdgTopLevelStable::Private::s_toplevelListener = {configureCallback, closeCallback, nullptr, nullptr};
+ 
+ const struct xdg_surface_listener XdgTopLevelStable::Private::s_surfaceListener = {surfaceConfigureCallback};
+ 
+@@ -524,7 +528,9 @@
+     static const struct xdg_surface_listener s_surfaceListener;
+ };
+ 
+-const struct xdg_popup_listener XdgShellPopupStable::Private::s_popupListener = {configureCallback, popupDoneCallback};
++// repositioned is an xdg_popup version 3 event; the registry binds xdg_wm_base
++// at version 1, so it is never sent.
++const struct xdg_popup_listener XdgShellPopupStable::Private::s_popupListener = {configureCallback, popupDoneCallback, nullptr};
+ 
+ const struct xdg_surface_listener XdgShellPopupStable::Private::s_surfaceListener = {
+     surfaceConfigureCallback,
+diff -ru a/src/client/xdgshell_v5.cpp b/src/client/xdgshell_v5.cpp
+--- a/src/client/xdgshell_v5.cpp	2026-10-08 16:57:49.745827117 -0400
++++ b/src/client/xdgshell_v5.cpp	2026-10-08 16:59:26.508632385 -0400
+@@ -24,6 +24,7 @@
+     bool isValid() const override;
+     XdgShellSurface *getXdgSurface(Surface *surface, QObject *parent) override;
+     XdgShellPopup *getXdgPopup(Surface *surface, Surface *parentSurface, Seat *seat, quint32 serial, const QPoint &parentPos, QObject *parent) override;
++    using XdgShell::Private::getXdgPopup;
+ 
+     using XdgShell::Private::operator xdg_wm_base *;
+     using XdgShell::Private::operator zxdg_shell_v6 *;
+diff -ru a/src/client/xdgshell_v6.cpp b/src/client/xdgshell_v6.cpp
+--- a/src/client/xdgshell_v6.cpp	2026-10-08 16:57:49.764382187 -0400
++++ b/src/client/xdgshell_v6.cpp	2026-10-08 16:59:28.326618352 -0400
+@@ -28,6 +28,7 @@
+ 
+     XdgShellPopup *getXdgPopup(Surface *surface, XdgShellSurface *parentSurface, const XdgPositioner &positioner, QObject *parent) override;
+     XdgShellPopup *getXdgPopup(Surface *surface, XdgShellPopup *parentSurface, const XdgPositioner &positioner, QObject *parent) override;
++    using XdgShell::Private::getXdgPopup;
+ 
+     using XdgShell::Private::operator xdg_wm_base *;
+     using XdgShell::Private::operator xdg_shell *;

@@ -1,0 +1,59 @@
+VeridianOS: KPty: copy utmp fields with a bounded memcpy instead of strncpy
+
+GCC reported 'strncpy' specified bound N equals destination size
+[-Wstringop-truncation] for the utmp(x) fields ut_name, ut_host, ut_line and
+ut_id in KPty::login() and ut_line in KPty::logout() (src/kpty.cpp:477, 481,
+493, 495, 583; built on musl without utempter and without login()).
+
+These fields are fixed-width and deliberately not NUL-terminated (man 4
+utmp), and the record is memset() to zero just before, so strncpy() was used
+only for "copy at most sizeof(field) bytes". That is now written as
+memcpy(field, src, strnlen(src, sizeof(field))), which stores exactly the
+same bytes (strncpy's zero padding was already provided by the memset) and
+states the intent. No behaviour change.
+
+diff -ru a/src/kpty.cpp b/src/kpty.cpp
+--- a/src/kpty.cpp	2026-10-08 17:17:22.315988472 -0400
++++ b/src/kpty.cpp	2026-10-08 17:17:22.353588502 -0400
+@@ -471,14 +471,15 @@
+     struct utmp l_struct;
+ #endif
+     memset(&l_struct, 0, sizeof(l_struct));
+-    // note: strncpy without terminators _is_ correct here. man 4 utmp
++    // note: the utmp string fields are fixed-width and need no terminator (man 4 utmp);
++    // the struct is zeroed above, so copying at most sizeof(field) bytes is enough.
+ 
+     if (user) {
+-        strncpy(l_struct.ut_name, user, sizeof(l_struct.ut_name));
++        memcpy(l_struct.ut_name, user, strnlen(user, sizeof(l_struct.ut_name)));
+     }
+ 
+     if (remotehost) {
+-        strncpy(l_struct.ut_host, remotehost, sizeof(l_struct.ut_host));
++        memcpy(l_struct.ut_host, remotehost, strnlen(remotehost, sizeof(l_struct.ut_host)));
+ #if HAVE_STRUCT_UTMP_UT_SYSLEN
+         l_struct.ut_syslen = qMin(strlen(remotehost), sizeof(l_struct.ut_host));
+ #endif
+@@ -490,9 +491,10 @@
+     if (!memcmp(str_ptr, "/dev/", 5)) {
+         str_ptr += 5;
+     }
+-    strncpy(l_struct.ut_line, str_ptr, sizeof(l_struct.ut_line));
++    memcpy(l_struct.ut_line, str_ptr, strnlen(str_ptr, sizeof(l_struct.ut_line)));
+ #if HAVE_STRUCT_UTMP_UT_ID
+-    strncpy(l_struct.ut_id, str_ptr + strlen(str_ptr) - sizeof(l_struct.ut_id), sizeof(l_struct.ut_id));
++    const char *id_ptr = str_ptr + strlen(str_ptr) - sizeof(l_struct.ut_id);
++    memcpy(l_struct.ut_id, id_ptr, strnlen(id_ptr, sizeof(l_struct.ut_id)));
+ #endif
+ #endif
+ 
+@@ -580,7 +582,8 @@
+ #endif
+     memset(&l_struct, 0, sizeof(l_struct));
+ 
+-    strncpy(l_struct.ut_line, str_ptr, sizeof(l_struct.ut_line));
++    // fixed-width field, no terminator needed (man 4 utmp); the struct is zeroed above
++    memcpy(l_struct.ut_line, str_ptr, strnlen(str_ptr, sizeof(l_struct.ut_line)));
+ 
+ #if HAVE_UTMPX
+     utmpxname(_PATH_UTMPX);

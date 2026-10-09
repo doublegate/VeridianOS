@@ -1,0 +1,19 @@
+VeridianOS: libplasma: GENERATE_PLUGIN_SOURCE instead of the deprecated NO_PLUGIN
+
+ECM warned (author warning) for src/declarativeimports: "The NO_PLUGIN
+argument to ecm_add_qml_module is deprecated for Qt 6; ... Use
+GENERATE_PLUGIN_SOURCE instead." In ECMQmlModule6.cmake, NO_PLUGIN does
+nothing but set GENERATE_PLUGIN_SOURCE, so naming that option builds the
+same module.
+
+--- a/src/declarativeimports/CMakeLists.txt
++++ b/src/declarativeimports/CMakeLists.txt
+@@ -17,7 +17,7 @@
+     )
+ ENDFOREACH(infileName)
+ 
+-ecm_add_qml_module(org_kde_plasmacomponents3 URI "org.kde.plasma.components" VERSION 3.0 NO_PLUGIN)
++ecm_add_qml_module(org_kde_plasmacomponents3 URI "org.kde.plasma.components" VERSION 3.0 GENERATE_PLUGIN_SOURCE)
+ file(GLOB _public_qml "${CMAKE_CURRENT_BINARY_DIR}/plasmacomponents3/*.qml")
+ ecm_target_qml_sources(org_kde_plasmacomponents3 VERSION 3.0 SOURCES ${_public_qml})
+ file(GLOB _mobiletextselection_qml "${CMAKE_CURRENT_BINARY_DIR}/plasmacomponents3/mobiletextselection/*.qml" "${CMAKE_CURRENT_BINARY_DIR}/plasmacomponents3/mobiletextselection/qmldir")

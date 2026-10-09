@@ -1,0 +1,21 @@
+VeridianOS: _XkbReadKeyActions reports BadAlloc when out of memory
+
+For a reply with 248 or more key actions the per-key action counts are
+read into a buffer from Xmallocarray(), whose result was not checked.
+_XkbCopyFromReadBuffer() refuses a NULL destination, so nothing was
+written through the null pointer, but the failure was reported as
+BadLength (a malformed reply) instead of BadAlloc. It now returns
+BadAlloc, as the function already does when resizing a key's actions
+fails. (Prepared for upstream, gitlab.freedesktop.org/xorg/lib/libx11.)
+
+--- a/src/xkb/XKBGetMap.c
++++ b/src/xkb/XKBGetMap.c
+@@ -255,6 +255,8 @@
+             numDesc = numDescBuf;
+         else
+             numDesc = Xmallocarray(nKeyActs, sizeof(CARD8));
++        if (numDesc == NULL)
++            return BadAlloc;
+ 
+         if (!_XkbCopyFromReadBuffer(buf, (char *) numDesc, nKeyActs)) {
+             ret = BadLength;

@@ -1,0 +1,21 @@
+VeridianOS: drop the unused SessionManager pointer in main()
+
+GCC reported -Wunused-variable for 'sessionManager' in main()
+(src/main.cpp). The SessionManager is created for its constructor's side
+effect (connecting to QGuiApplication::saveStateRequest) and is owned by
+the application object; the pointer was never used. The object is still
+created, only the local variable is removed. Behaviour is unchanged.
+
+diff -ru a/src/main.cpp b/src/main.cpp
+--- a/src/main.cpp	2026-10-08 17:29:57.651663489 -0400
++++ b/src/main.cpp	2026-10-08 17:30:29.495785820 -0400
+@@ -93,7 +93,8 @@
+     aboutData.processCommandLine(parser.get());
+     CommandLineArguments::setCommandLineParser(parser);
+ 
+-    auto sessionManager = new SessionManager(&app);
++    // owned by app; it only has to exist to answer session save requests
++    new SessionManager(&app);
+ 
+     QQmlApplicationEngine engine;
+     engine.rootContext()->setContextObject(new KLocalizedQmlContext(&engine));

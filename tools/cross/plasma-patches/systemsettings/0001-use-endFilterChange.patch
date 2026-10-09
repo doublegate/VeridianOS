@@ -1,0 +1,24 @@
+VeridianOS: use endFilterChange() instead of invalidateRowsFilter()
+
+GCC reported -Wdeprecated-declarations for
+QSortFilterProxyModel::invalidateRowsFilter() in
+MenuProxyModel::setShowIrrelevantModules() (app/MenuProxyModel.cpp): "Use
+begin/endFilterChange(QSortFilterProxyModel::Direction::Rows) instead".
+The function already calls beginFilterChange() before changing the filter
+state; it now closes with endFilterChange(Direction::Rows). In Qt both
+invalidateRowsFilter() and endFilterChange(Rows) call
+filter_changed(Direction::Rows), so behaviour is unchanged.
+(QSortFilterProxyModel::Direction needs Qt 6.10; the build uses 6.12.)
+
+diff -ru a/app/MenuProxyModel.cpp b/app/MenuProxyModel.cpp
+--- a/app/MenuProxyModel.cpp	2026-10-08 17:29:57.608323463 -0400
++++ b/app/MenuProxyModel.cpp	2026-10-08 17:30:26.084810961 -0400
+@@ -113,7 +113,7 @@
+     }
+     beginFilterChange(); // Qt 6.9 API
+     m_showIrrelevantModules = show;
+-    invalidateRowsFilter();
++    endFilterChange(QSortFilterProxyModel::Direction::Rows);
+ }
+ 
+ bool MenuProxyModel::showIrrelevantModules() const

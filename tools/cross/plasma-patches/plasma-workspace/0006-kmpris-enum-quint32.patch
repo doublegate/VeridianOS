@@ -1,0 +1,39 @@
+VeridianOS: libkmpris enums' underlying type spelled as Qt's quint32
+
+The three Q_ENUM_NS Status enums in playercontainer.h have the underlying
+type std::uint32_t. qmltyperegistrar records an enum's underlying type by
+name and knows Qt's and the builtin integer type names, not the <cstdint>
+aliases, so the QML type information had none ("std::uint32_t is used as
+enum type but cannot be found", three times). They now use quint32, Qt's
+name for the same type (unsigned 32-bit): values, size and ABI are
+unchanged.
+
+--- a/libkmpris/playercontainer.h
++++ b/libkmpris/playercontainer.h
+@@ -25,7 +25,7 @@
+ namespace LoopStatus
+ {
+ QML_ELEMENT
+-KMPRIS_EXPORT Q_NAMESPACE enum KMPRIS_EXPORT Status : std::uint32_t {
++KMPRIS_EXPORT Q_NAMESPACE enum KMPRIS_EXPORT Status : quint32 {
+     Unknown = 0,
+     None,
+     Playlist,
+@@ -37,7 +37,7 @@
+ namespace ShuffleStatus
+ {
+ QML_ELEMENT
+-KMPRIS_EXPORT Q_NAMESPACE enum KMPRIS_EXPORT Status : std::uint32_t {
++KMPRIS_EXPORT Q_NAMESPACE enum KMPRIS_EXPORT Status : quint32 {
+     Unknown = 0,
+     Off,
+     On,
+@@ -48,7 +48,7 @@
+ namespace PlaybackStatus
+ {
+ QML_ELEMENT
+-KMPRIS_EXPORT Q_NAMESPACE enum KMPRIS_EXPORT Status : std::uint32_t {
++KMPRIS_EXPORT Q_NAMESPACE enum KMPRIS_EXPORT Status : quint32 {
+     Unknown = 0,
+     Stopped,
+     Playing,

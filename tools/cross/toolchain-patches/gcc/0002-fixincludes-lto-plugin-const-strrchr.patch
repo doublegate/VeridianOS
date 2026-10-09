@@ -1,0 +1,64 @@
+VeridianOS: fixincludes, lto-plugin: const-correct strrchr results
+
+GCC reported (the host compiler defaults to C23, where glibc's strrchr
+returns const char * for a const char * argument):
+
+  fixincludes/fixincl.c:747:22: warning: initialization discards 'const'
+    qualifier from pointer target type [-Wdiscarded-qualifiers]
+    (twice: fixincl is built for the build and for the host)
+  lto-plugin/lto-plugin.c:1100:5 and 1152:5: warning: assignment
+    discards 'const' qualifier from pointer target type
+    [-Wdiscarded-qualifiers]
+
+fixincl.c: extract_quoted_files() took the file name as const char *
+but writes into it (it cuts the name at its last '/' to get the
+directory).  Its only caller passes pz_curr_file, a char * buffer, so
+the parameter is now char * (pz_file_name), the '/' search runs on that,
+and pz_fixed_file stays a const char * so it can still point at "." when
+the name has no directory.  Same writes, same output.
+
+lto-plugin.c: process_symtab() and process_symtab_extension() only read
+the suffix that strrchr finds (sscanf), so 's' becomes const char *.
+
+No behaviour change.
+
+diff -ru a/fixincludes/fixincl.c b/fixincludes/fixincl.c
+--- a/fixincludes/fixincl.c	2026-08-07 03:46:05.348212316 -0400
++++ b/fixincludes/fixincl.c	2026-10-08 17:01:18.301772867 -0400
+@@ -740,11 +740,12 @@
+ 
+ 
+ static void
+-extract_quoted_files (char* pz_data, 
+-                      const char* pz_fixed_file,
++extract_quoted_files (char* pz_data,
++                      char* pz_file_name,
+                       regmatch_t* p_re_match)
+ {
+-  char *pz_dir_end = strrchr (pz_fixed_file, '/');
++  const char *pz_fixed_file = pz_file_name;
++  char *pz_dir_end = strrchr (pz_file_name, '/');
+   char *pz_incl_quot = pz_data;
+ 
+   if (VLEVEL( VERB_APPLIES ))
+diff -ru a/lto-plugin/lto-plugin.c b/lto-plugin/lto-plugin.c
+--- a/lto-plugin/lto-plugin.c	2026-08-07 03:46:11.266769203 -0400
++++ b/lto-plugin/lto-plugin.c	2026-10-08 17:01:31.505671773 -0400
+@@ -1091,7 +1091,7 @@
+ process_symtab (void *data, const char *name, off_t offset, off_t length)
+ {
+   struct plugin_objfile *obj = (struct plugin_objfile *)data;
+-  char *s;
++  const char *s;
+   char *secdatastart, *secdata;
+ 
+   if (!startswith (name, ".gnu.lto_.symtab"))
+@@ -1143,7 +1143,7 @@
+ 			  off_t length)
+ {
+   struct plugin_objfile *obj = (struct plugin_objfile *)data;
+-  char *s;
++  const char *s;
+   char *secdatastart, *secdata;
+ 
+   if (!startswith (name, ".gnu.lto_.ext_symtab"))

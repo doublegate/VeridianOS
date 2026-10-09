@@ -1,0 +1,75 @@
+VeridianOS: fix compiler warnings in the KDE platform theme
+
+GCC reported, in qt6/src/platformtheme:
+
+- -Wunused-result for QTemporaryFile::open() in
+  KHintsSettings::loadPalettes() (khintssettings.cpp). The portal's color
+  groups are written into a KConfig backed by a temporary file. When the
+  file cannot be created, fileName() is null, and openConfig() with an
+  empty name and SimpleConfig gives an in-memory config (KConfig
+  documents this), which serves just as well. That fallback is now
+  explicit (the result of open() picks the name); behaviour is unchanged
+  in both cases.
+- -Wdeprecated-declarations for emitting QGuiApplication::paletteChanged()
+  in KHintsSettings::slotNotifyChange() (khintssettings.cpp). The manual
+  emit worked around a Qt 5 bug where QApplication::setPalette() did not
+  emit the signal. In Qt 6, QApplication::setPalette(palette) calls
+  QGuiApplication::setPalette(), which emits paletteChanged() itself when
+  the palette changes (QGuiApplicationPrivate::handlePaletteChanged()), and
+  the code right below already sends QEvent::ApplicationPaletteChange, the
+  documented replacement. The redundant emit is removed; listeners still get
+  the signal once per change instead of twice, and no longer when the new
+  palette equals the current one (Qt only emits on an actual change).
+- -Wdeprecated-declarations for QVariant(QVariant::Type) in the
+  SystemTrayMenu constructor (kdeplatformsystemtrayicon.cpp). Ported to
+  QVariant(QMetaType::fromType<bool>()), which is what the deprecated
+  constructor forwards to; behaviour is unchanged.
+
+--- a/qt6/src/platformtheme/kdeplatformsystemtrayicon.cpp
++++ b/qt6/src/platformtheme/kdeplatformsystemtrayicon.cpp
+@@ -16,9 +16,9 @@
+ 
+ SystemTrayMenu::SystemTrayMenu()
+     : QPlatformMenu()
+-    , m_enabled(QVariant::Bool)
+-    , m_visible(QVariant::Bool)
+-    , m_separatorsCollapsible(QVariant::Bool)
++    , m_enabled(QMetaType::fromType<bool>())
++    , m_visible(QMetaType::fromType<bool>())
++    , m_separatorsCollapsible(QMetaType::fromType<bool>())
+     , m_tag(0)
+ {
+ }
+--- a/qt6/src/platformtheme/khintssettings.cpp
++++ b/qt6/src/platformtheme/khintssettings.cpp
+@@ -249,12 +249,10 @@
+         // QApplication::setPalette and QGuiApplication::setPalette are different functions
+         // and non virtual. Call the correct one
+         if (qobject_cast<QApplication *>(QCoreApplication::instance())) {
+-            QPalette palette = *m_palettes[QPlatformTheme::SystemPalette];
+-            QApplication::setPalette(palette);
+-            // QTBUG QGuiApplication::paletteChanged() signal is only emitted by QGuiApplication
+-            // so things like SystemPalette QtQuick item that use it won't notice a palette
+-            // change when a QApplication which causes e.g. QML System Settings modules to not update
+-            Q_EMIT qApp->paletteChanged(palette);
++            // Qt 6's QApplication::setPalette() goes through QGuiApplication::setPalette(),
++            // which emits QGuiApplication::paletteChanged() itself, so the Qt 5 era
++            // workaround of emitting it here as well is no longer needed.
++            QApplication::setPalette(*m_palettes[QPlatformTheme::SystemPalette]);
+         } else if (qobject_cast<QGuiApplication *>(QCoreApplication::instance())) {
+             QGuiApplication::setPalette(*m_palettes[QPlatformTheme::SystemPalette]);
+         }
+@@ -434,9 +432,10 @@
+     if (mUsePortal && mKdeGlobalsPortal.contains(QStringLiteral("org.kde.kdeglobals.Colors:View"))) {
+         // Construct a temporary KConfig file containing color setting so we can create a KColorScheme from it
+         QTemporaryFile file;
+-        file.open();
+-
+-        KSharedConfigPtr tempConfig = KSharedConfig::openConfig(file.fileName(), KConfig::SimpleConfig);
++        // Without the file, an empty name gives an in-memory config, which serves as well.
++        const QString tempName = file.open() ? file.fileName() : QString();
++
++        KSharedConfigPtr tempConfig = KSharedConfig::openConfig(tempName, KConfig::SimpleConfig);
+         for (auto groupIt = mKdeGlobalsPortal.constBegin(); groupIt != mKdeGlobalsPortal.constEnd(); ++groupIt) {
+             if (groupIt.key().startsWith(QStringLiteral("org.kde.kdeglobals.Colors:"))) {
+                 KConfigGroup tempGroup(tempConfig, groupIt.key().right(groupIt.key().length() - QStringLiteral("org.kde.kdeglobals.").length()));

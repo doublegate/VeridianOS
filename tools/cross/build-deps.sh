@@ -128,7 +128,20 @@ LIBQALCULATE_VER="5.13.1"
 LIBQALCULATE_SHA256="cf8d3eaf3d85030115701e997b6585e69573e71add88e7758486c5d1b01d3cc3"
 LIBNDP_VER="1.9"
 LIBNDP_SHA256="e564f5914a6b1b799c3afa64c258824a801c1b79a29e2fe6525b682249c65261"
-# Plasma's prerequisites. Boost (headers only: kactivitymanagerd), libnl and
+# Programs Plasma runs (not libraries it links): socat (kwallet-pam's
+# pam_kwallet_init hands the login to kwalletd through it), xdg-user-dirs
+# (plasma-desktop: the user's Desktop, Documents, ... folders) and jq
+# (libkscreen: kscreen-doctor's shell completion). Checksums: xdg-user-dirs
+# and jq as published with the release; socat (whose site publishes none, and
+# serves no valid TLS certificate) as recorded by Arch Linux's package of the
+# same version.
+SOCAT_VER="1.8.1.3"
+SOCAT_SHA256="06602ffd591e98c75b3dc1d66f0f19136cc666b0b2d95caad987d6ab2cb28097"
+XDG_USER_DIRS_VER="0.20"
+XDG_USER_DIRS_SHA256="b8e34286278f4fef3e1bfe9685c395ccc0eb50c14d3a2fb4953dd00fbfd3af39"
+JQ_VER="1.8.2"
+JQ_SHA256="71b8d6e8f5fe81f6c6d0d110e3892251f6ce76ed095abd315e26e6e1193af3af"
+# Plasma's prerequisites. Boost (Boost.Range, header-only: kactivitymanagerd), libnl and
 # lm-sensors' libsensors (libksysguard's network and sensor plugins),
 # Linux-PAM (the screen locker, polkit), duktape (polkit's JavaScript rules
 # engine), libxslt and the DocBook DTD and stylesheets (KDocTools).
@@ -137,7 +150,7 @@ LIBNDP_SHA256="e564f5914a6b1b799c3afa64c258824a801c1b79a29e2fe6525b682249c65261"
 # Levin, 7BECFE3AF7B280BB52FF77F104BA4521C996DDE1); lm-sensors, duktape and
 # the DocBook files as first downloaded.
 BOOST_VER="1.92.0"
-BOOST_SHA256="ea7b982002cc9dfbe59b0b217b206f470dc75f3de0bb2973d844118934d82411"
+BOOST_SHA256="9bed76128d4e46755dbe818487788c6fceb6f72b378f4daa49b7e1e600d9088d"
 LIBNL_VER="3.12.0"
 LIBNL_SHA256="fc51ca7196f1a3f5fdf6ffd3864b50f4f9c02333be28be4eeca057e103c0dd18"
 LM_SENSORS_VER="3.6.2"
@@ -376,6 +389,7 @@ build_sqlite() {
     (cd "${BUILD_DIR}/sqlite-autoconf-${SQLITE_VER}" && \
         CFLAGS="-O2 -fPIC -DSQLITE_THREADSAFE=1 -DSQLITE_ENABLE_COLUMN_METADATA=1 -DSQLITE_ENABLE_UNLOCK_NOTIFY=1" \
         ./configure \
+            --build="${BUILD_TRIPLET}" \
             --host="${HOST}" \
             --prefix=/usr \
             --enable-shared \
@@ -447,6 +461,8 @@ build_libusb() {
     fetch "libusb-${LIBUSB_VER}.tar.bz2" \
         "https://github.com/libusb/libusb/releases/download/v${LIBUSB_VER}/libusb-${LIBUSB_VER}.tar.bz2" \
         "libusb-${LIBUSB_VER}" "${LIBUSB_SHA256}"
+    python3 -I "${SCRIPT_DIR}/deps-patches/libtool_grep_escape.py" \
+        "${BUILD_DIR}/libusb-${LIBUSB_VER}/configure" || die "failed to patch libusb configure"
     log "Building libusb ${LIBUSB_VER}..."
     (cd "${BUILD_DIR}/libusb-${LIBUSB_VER}" && \
         ./configure "${COMMON_CONFIGURE[@]}" --enable-udev --disable-examples-build --disable-tests-build && \
@@ -563,10 +579,17 @@ build_libmount() {
     fetch "util-linux-${UTIL_LINUX_VER}.tar.gz" \
         "https://cdn.kernel.org/pub/linux/utils/util-linux/v${UTIL_LINUX_VER%.*}/util-linux-${UTIL_LINUX_VER}.tar.xz" \
         "util-linux-${UTIL_LINUX_VER}" "${UTIL_LINUX_SHA256}"
+    local src="${BUILD_DIR}/util-linux-${UTIL_LINUX_VER}"
     log "Building libblkid, libmount and libuuid ${UTIL_LINUX_VER}..."
-    (cd "${BUILD_DIR}/util-linux-${UTIL_LINUX_VER}" && \
+    # --disable-all-programs: the libraries alone (configure reports it as
+    # a warning unless patched; see the script). hwclock is one of those
+    # programs, so its CMOS access is not wanted either.
+    python3 -I "${SCRIPT_DIR}/deps-patches/util_linux_all_programs_notice.py" "${src}" ||
+        die "failed to patch util-linux's configure"
+    (cd "${src}" && \
         ./configure "${COMMON_CONFIGURE[@]}" \
             --disable-all-programs \
+            --disable-hwclock-cmos \
             --enable-libblkid \
             --enable-libmount \
             --enable-libuuid \
@@ -583,6 +606,7 @@ build_libmount() {
             --without-cryptsetup \
             --without-econf \
             --without-ncursesw \
+            --without-ncurses \
             --without-tinfo \
             --without-selinux \
             --without-audit && \
@@ -726,10 +750,13 @@ build_gmp() {
     # Its build runs generator programs on the host (CC_FOR_BUILD). GMP
     # 6.3.0 is C17 code: its configure tests declare functions without
     # prototypes, which C23 (GCC 15's default) rejects, so every compiler
-    # "fails" without -std=gnu17.
+    # "fails" without -std=gnu17. Whether vsnprintf() works is a run test,
+    # which a cross build cannot run: musl's is C99-conforming, as GMP's
+    # check expects.
     (cd "${BUILD_DIR}/gmp-${GMP_VER}" && \
         CC_FOR_BUILD="gcc -std=gnu17" CFLAGS="${CFLAGS} -std=gnu17" \
-            ./configure "${COMMON_CONFIGURE[@]}" --with-pic && \
+            ./configure "${COMMON_CONFIGURE[@]}" --with-pic \
+            gmp_cv_func_vsnprintf=yes && \
         make_install)
 }
 
@@ -738,6 +765,8 @@ build_mpfr() {
     fetch "mpfr-${MPFR_VER}.tar.xz" "https://ftp.gnu.org/gnu/mpfr/mpfr-${MPFR_VER}.tar.xz" \
         "mpfr-${MPFR_VER}" "${MPFR_SHA256}"
     log "Building MPFR ${MPFR_VER}..."
+    python3 -I "${SCRIPT_DIR}/deps-patches/mpfr_nloop.py" "${BUILD_DIR}/mpfr-${MPFR_VER}" ||
+        die "failed to patch MPFR"
     (cd "${BUILD_DIR}/mpfr-${MPFR_VER}" && ./configure "${COMMON_CONFIGURE[@]}" && make_install)
 }
 
@@ -750,6 +779,7 @@ build_icu() {
         "https://github.com/unicode-org/icu/releases/download/release-${ICU_VER}/icu4c-${ICU_VER}-sources.tgz" \
         icu "${ICU_SHA256}"
     local src="${BUILD_DIR}/icu/source" host_bld="${BUILD_DIR}/icu-host" bld="${BUILD_DIR}/icu-cross"
+    apply_pkg_patches icu "${src}"
     log "Building ICU ${ICU_VER} (host tools)..."
     rm -rf "${host_bld}" "${bld}"
     mkdir -p "${host_bld}" "${bld}"
@@ -769,11 +799,15 @@ build_icu() {
 
 # ── curl ──────────────────────────────────────────────────────────────
 # With OpenSSL and the system root certificates. No public suffix list
-# (libpsl): it serves only curl's cookie engine.
+# (libpsl): it serves only curl's cookie engine. Its user, libqalculate,
+# fetches exchange rates from fixed ASCII host names over HTTPS, so no
+# internationalized host names (libidn2) and no LDAP; both named here, as
+# configure warns about each library it looks for and does not find.
 build_curl() {
     installed libcurl.so curl && return 0
     fetch "curl-${CURL_VER}.tar.xz" "https://curl.se/download/curl-${CURL_VER}.tar.xz" \
         "curl-${CURL_VER}" "${CURL_SHA256}"
+    apply_pkg_patches curl "${BUILD_DIR}/curl-${CURL_VER}"
     log "Building curl ${CURL_VER}..."
     (cd "${BUILD_DIR}/curl-${CURL_VER}" && \
         ./configure "${COMMON_CONFIGURE[@]}" \
@@ -781,6 +815,9 @@ build_curl() {
             --with-zlib \
             --with-zstd \
             --without-libpsl \
+            --without-libidn2 \
+            --disable-ldap \
+            --disable-ldaps \
             --with-ca-bundle=/etc/ssl/certs/ca-certificates.crt \
             --with-ca-path=/etc/ssl/certs \
             --disable-docs && \
@@ -825,6 +862,7 @@ build_qrencode() {
     # under current policies.
     replace_once "${BUILD_DIR}/libqrencode-${QRENCODE_VER}/CMakeLists.txt" \
         'cmake_minimum_required(VERSION 3.1.0)' 'cmake_minimum_required(VERSION 3.1.0...3.31)'
+    apply_pkg_patches libqrencode "${BUILD_DIR}/libqrencode-${QRENCODE_VER}"
     log "Building libqrencode ${QRENCODE_VER}..."
     # The library; its qrencode tool (PNG output) is not used.
     cmake_build "${BUILD_DIR}/libqrencode-${QRENCODE_VER}" "${BUILD_DIR}/qrencode-build" \
@@ -872,18 +910,22 @@ build_zxing() {
 }
 
 # ── Plasma prerequisites ──────────────────────────────────────────────
-# Boost: its headers (kactivitymanagerd uses header-only libraries).
+# Boost: the libraries KDE uses (Boost.Range, header-only: kactivitymanagerd)
+# with the ones they need, installed by Boost's CMake build so the sysroot
+# has Boost's own CMake package (BoostConfig.cmake): CMake 4 no longer has a
+# FindBoost module (policy CMP0167). Nothing is compiled.
 build_boost() {
-    if [[ -f "${SYSROOT}/usr/include/boost/version.hpp" ]]; then
-        log "Boost headers: already installed."
+    if [[ -f "${SYSROOT}/usr/lib/cmake/Boost-${BOOST_VER}/BoostConfig.cmake" ]]; then
+        log "Boost: already installed."
         return 0
     fi
-    fetch "boost-${BOOST_VER}-b2-nodocs.tar.xz" \
-        "https://github.com/boostorg/boost/releases/download/boost-${BOOST_VER}/boost-${BOOST_VER}-b2-nodocs.tar.xz" \
+    fetch "boost-${BOOST_VER}-cmake.tar.xz" \
+        "https://github.com/boostorg/boost/releases/download/boost-${BOOST_VER}/boost-${BOOST_VER}-cmake.tar.xz" \
         "boost-${BOOST_VER}" "${BOOST_SHA256}"
-    log "Installing Boost ${BOOST_VER} headers..."
-    mkdir -p "${SYSROOT}/usr/include"
-    cp -a "${BUILD_DIR}/boost-${BOOST_VER}/boost" "${SYSROOT}/usr/include/"
+    log "Installing Boost ${BOOST_VER} (Boost.Range)..."
+    cmake_build "${BUILD_DIR}/boost-${BOOST_VER}" "${BUILD_DIR}/boost-build" \
+        -DBOOST_INCLUDE_LIBRARIES=range \
+        -DBUILD_TESTING=OFF
 }
 
 build_libnl() {
@@ -892,8 +934,16 @@ build_libnl() {
         "https://github.com/thom311/libnl/releases/download/libnl${LIBNL_VER//./_}/libnl-${LIBNL_VER}.tar.gz" \
         "libnl-${LIBNL_VER}" "${LIBNL_SHA256}"
     log "Building libnl ${LIBNL_VER}..."
+    # Bison's own mode, not POSIX yacc (`bison -y` warned on every %code),
+    # and its grammars without deprecated directives.
+    python3 -I "${SCRIPT_DIR}/deps-patches/libnl_bison.py" "${BUILD_DIR}/libnl-${LIBNL_VER}" ||
+        die "failed to patch libnl's grammars"
+    # No unit tests (they need the check library, which is not built);
+    # libnl has no option to say so, and warns, unless patched.
+    python3 -I "${SCRIPT_DIR}/deps-patches/libnl_unit_tests_option.py" "${BUILD_DIR}/libnl-${LIBNL_VER}" ||
+        die "failed to patch libnl's configure"
     (cd "${BUILD_DIR}/libnl-${LIBNL_VER}" && \
-        ./configure "${COMMON_CONFIGURE[@]}" --disable-cli && \
+        ./configure "${COMMON_CONFIGURE[@]}" --disable-cli --disable-unit-tests YACC=bison && \
         make_install)
 }
 
@@ -939,6 +989,7 @@ build_linux_pam() {
     fetch "Linux-PAM-${LINUX_PAM_VER}.tar.xz" \
         "https://github.com/linux-pam/linux-pam/releases/download/v${LINUX_PAM_VER}/Linux-PAM-${LINUX_PAM_VER}.tar.xz" \
         "Linux-PAM-${LINUX_PAM_VER}" "${LINUX_PAM_SHA256}"
+    apply_pkg_patches linux-pam "${BUILD_DIR}/Linux-PAM-${LINUX_PAM_VER}"
     log "Building Linux-PAM ${LINUX_PAM_VER}..."
     meson_build "${BUILD_DIR}/Linux-PAM-${LINUX_PAM_VER}" "${BUILD_DIR}/linux-pam-build" \
         -Ddocs=disabled \
@@ -958,10 +1009,71 @@ build_duktape() {
     fetch "duktape-${DUKTAPE_VER}.tar.xz" \
         "https://github.com/svaarala/duktape/releases/download/v${DUKTAPE_VER}/duktape-${DUKTAPE_VER}.tar.xz" \
         "duktape-${DUKTAPE_VER}" "${DUKTAPE_SHA256}"
+    apply_pkg_patches duktape "${BUILD_DIR}/duktape-${DUKTAPE_VER}"
     log "Building duktape ${DUKTAPE_VER}..."
     local args=(-f Makefile.sharedlibrary CC="${CC}" INSTALL_PREFIX=/usr LIBDIR=/lib)
     make -C "${BUILD_DIR}/duktape-${DUKTAPE_VER}" -j"${JOBS}" "${args[@]}"
     make -C "${BUILD_DIR}/duktape-${DUKTAPE_VER}" "${args[@]}" DESTDIR="${SYSROOT}" install
+}
+
+# socat, for pam_kwallet_init. No readline (not in the sysroot; socat's
+# interactive line editing) or libwrap (TCP wrappers).
+build_socat() {
+    if [[ -x "${SYSROOT}/usr/bin/socat" ]]; then
+        log "socat: already installed."
+        return 0
+    fi
+    fetch "socat-${SOCAT_VER}.tar.gz" \
+        "http://www.dest-unreach.org/socat/download/socat-${SOCAT_VER}.tar.gz" \
+        "socat-${SOCAT_VER}" "${SOCAT_SHA256}"
+    log "Building socat ${SOCAT_VER}..."
+    # It builds no libraries, and its configure reports the shared/static
+    # options as unrecognized: only the common options it knows. No OpenSSL
+    # (socat 1.8.1's OpenSSL code does not build with OpenSSL 4, and only its
+    # local sockets are used).
+    local src="${BUILD_DIR}/socat-${SOCAT_VER}" common=()
+    apply_pkg_patches socat "${src}"
+    mapfile -t common < <(known_options "${src}" "${COMMON_CONFIGURE[@]}")
+    (cd "${src}" && \
+        ./configure "${common[@]}" --disable-readline --disable-libwrap --disable-openssl && \
+        make_install)
+}
+
+# xdg-user-dirs (xdg-user-dir, xdg-user-dirs-update and the default
+# directory names), for plasma-desktop. No manual pages (DocBook tools).
+build_xdg_user_dirs() {
+    if [[ -x "${SYSROOT}/usr/bin/xdg-user-dir" ]]; then
+        log "xdg-user-dirs: already installed."
+        return 0
+    fi
+    fetch "xdg-user-dirs-${XDG_USER_DIRS_VER}.tar.xz" \
+        "https://user-dirs.freedesktop.org/releases/xdg-user-dirs-${XDG_USER_DIRS_VER}.tar.xz" \
+        "xdg-user-dirs-${XDG_USER_DIRS_VER}" "${XDG_USER_DIRS_SHA256}"
+    log "Building xdg-user-dirs ${XDG_USER_DIRS_VER}..."
+    meson_build "${BUILD_DIR}/xdg-user-dirs-${XDG_USER_DIRS_VER}" "${BUILD_DIR}/xdg-user-dirs-build" \
+        -Ddocs=false
+}
+
+# jq, for kscreen-doctor's shell completion (it reads kscreen-doctor's JSON
+# output). Without Oniguruma (not in the release tarball): jq's regular
+# expression functions, which the completion does not use, are left out.
+build_jq() {
+    if [[ -x "${SYSROOT}/usr/bin/jq" ]]; then
+        log "jq: already installed."
+        return 0
+    fi
+    fetch "jq-${JQ_VER}.tar.gz" "https://github.com/jqlang/jq/releases/download/jq-${JQ_VER}/jq-${JQ_VER}.tar.gz" \
+        "jq-${JQ_VER}" "${JQ_SHA256}"
+    log "Building jq ${JQ_VER}..."
+    # The parser is shipped pre-generated by stock Bison; generated again with
+    # jq's own flags (Makefile.am) by the build's Bison, whose skeleton marks
+    # the syntax error count used (lib/cross-env.sh, BISON_PKGDATADIR).
+    (cd "${BUILD_DIR}/jq-${JQ_VER}" && \
+        bison -y --warnings=all -Wno-yacc -d -o src/parser.c src/parser.y) ||
+        die "failed to generate jq's parser"
+    (cd "${BUILD_DIR}/jq-${JQ_VER}" && \
+        ./configure "${COMMON_CONFIGURE[@]}" --disable-docs --without-oniguruma && \
+        make_install)
 }
 
 build_libxslt() {
@@ -970,8 +1082,13 @@ build_libxslt() {
         "https://download.gnome.org/sources/libxslt/${LIBXSLT_VER%.*}/libxslt-${LIBXSLT_VER}.tar.xz" \
         "libxslt-${LIBXSLT_VER}" "${LIBXSLT_SHA256}"
     log "Building libxslt ${LIBXSLT_VER}..."
+    # libxml2 comes from the sysroot through pkg-config. XML_CONFIG=false
+    # was meant to keep configure off the build host's xml2-config, but it
+    # does not: config.log still records XML_CONFIG=/usr/bin/xml2-config
+    # (open; userland/integration/KNOWN-LIMITATIONS.md, Build warnings).
     (cd "${BUILD_DIR}/libxslt-${LIBXSLT_VER}" && \
-        ./configure "${COMMON_CONFIGURE[@]}" --without-python --without-crypto && \
+        ./configure "${COMMON_CONFIGURE[@]}" --without-python --without-crypto \
+            XML_CONFIG=false && \
         make_install)
 }
 
@@ -1097,6 +1214,9 @@ main() {
     build_linux_pam
     build_pam_veridian
     build_duktape
+    build_socat
+    build_xdg_user_dirs
+    build_jq
     build_libxslt
     install_docbook
     install_cacert

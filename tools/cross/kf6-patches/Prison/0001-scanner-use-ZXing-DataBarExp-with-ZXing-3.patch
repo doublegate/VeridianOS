@@ -1,0 +1,24 @@
+VeridianOS: scanner: use ZXing::BarcodeFormat::DataBarExp with ZXing >= 3
+
+GCC reported 'ZXing::BarcodeFormat::DataBarExpanded' is deprecated: Use
+DataBarExp instead [-Wdeprecated-declarations] in src/scanner/format.cpp:25.
+In ZXing-cpp 3 DataBarExpanded is a deprecated alias with the same value as
+DataBarExp. Use DataBarExp there, behind the KZXING_VERSION <
+QT_VERSION_CHECK(3, 0, 0) test this file already uses, so older ZXing keeps
+the old name. No behaviour change.
+
+diff -ru a/src/scanner/format.cpp b/src/scanner/format.cpp
+--- a/src/scanner/format.cpp	2026-10-08 17:32:51.122741510 -0400
++++ b/src/scanner/format.cpp	2026-10-08 17:33:36.245151486 -0400
+@@ -22,7 +22,11 @@
+     {ZXing::BarcodeFormat::Code93, Format::Code93},
+     {ZXing::BarcodeFormat::Code128, Format::Code128},
+     {ZXing::BarcodeFormat::DataBar, Format::DataBar},
++#if KZXING_VERSION < QT_VERSION_CHECK(3, 0, 0)
+     {ZXing::BarcodeFormat::DataBarExpanded, Format::DataBarExpanded},
++#else
++    {ZXing::BarcodeFormat::DataBarExp, Format::DataBarExpanded},
++#endif
+     {ZXing::BarcodeFormat::DataMatrix, Format::DataMatrix},
+     {ZXing::BarcodeFormat::EAN8, Format::EAN8},
+     {ZXing::BarcodeFormat::EAN13, Format::EAN13},

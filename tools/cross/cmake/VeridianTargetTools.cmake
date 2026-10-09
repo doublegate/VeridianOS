@@ -1,4 +1,6 @@
-# VeridianOS tools other packages installed, run on the build host.
+# VeridianOS tools other packages installed, run on the build host; and the
+# Qt metatypes of the libraries each project installs (at the end of this
+# file).
 #
 # Loaded into every Qt/KDE CMake project (CMAKE_PROJECT_INCLUDE, set by
 # cmake-toolchain-veridian.cmake). Packages run tools that earlier packages
@@ -70,4 +72,50 @@ endfunction()
 macro(find_package)
     _find_package(${ARGV})
     _veridian_tt_wrap_all()
+endmacro()
+
+# Qt metatypes of the libraries a project installs.
+#
+# A QML module's types are registered by qmltyperegistrar, which describes
+# each type's base classes and foreign types from the metatypes of the
+# libraries that declare them -- collected from the module's link
+# dependencies (their INTERFACE_SOURCES; see Qt6QmlMacros). Qt's own
+# libraries install and export theirs; KDE's do not, so a QML type deriving
+# from, say, PlasmaQuick::PlasmaWindow or KDirModel was described without its
+# base ("... is used as base type but cannot be found"), and tooling (qmllint,
+# qmlls, the QML compiler) saw incomplete types.
+#
+# Every shared library a project defines with AUTOMOC (QML modules aside:
+# Qt finalizes those itself) now has its metatypes extracted, installed into
+# the target Qt's metatypes directory and exported the way Qt exports its
+# own, at the end of the directory that defines it.
+function(_veridian_export_metatypes target)
+    if(NOT TARGET ${target} OR NOT COMMAND qt6_extract_metatypes
+       OR NOT COMMAND _qt_internal_assign_install_metatypes_files_and_properties)
+        return()
+    endif()
+    get_target_property(type ${target} TYPE)
+    get_target_property(automoc ${target} AUTOMOC)
+    get_target_property(qml_uri ${target} QT_QML_MODULE_URI)
+    get_target_property(installed ${target} INTERFACE_QT_META_TYPES_INSTALL_FILE)
+    if(NOT type STREQUAL "SHARED_LIBRARY" OR NOT automoc OR qml_uri OR installed)
+        return()
+    endif()
+    set(dir "${KDE_INSTALL_QTMETATYPESDIR}")
+    if(NOT dir)
+        set(dir "lib/qt6/metatypes")
+    endif()
+    qt6_extract_metatypes(${target})
+    _qt_internal_assign_install_metatypes_files_and_properties(${target} INSTALL_DIR "${dir}")
+    get_target_property(file ${target} INTERFACE_QT_META_TYPES_BUILD_FILE)
+    install(FILES "${file}" DESTINATION "${dir}")
+endfunction()
+
+# add_library() as before, then the metatypes step deferred to the end of the
+# current directory (when the target has all its sources and properties).
+macro(add_library _veridian_name)
+    _add_library(${_veridian_name} ${ARGN})
+    if(NOT "${ARGV1}" MATCHES "^(ALIAS|IMPORTED|INTERFACE|OBJECT|STATIC|MODULE)$")
+        cmake_language(DEFER CALL _veridian_export_metatypes ${_veridian_name})
+    endif()
 endmacro()

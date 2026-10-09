@@ -55,6 +55,9 @@ source "${SCRIPT_DIR}/lib/cross-env.sh"
 qt_src() {
     local name="$1-everywhere-src-${QT_VER}"
     fetch "${name}.tar.xz" "${QT_BASE_URL}/${name}.tar.xz" "${name}" "${QT_SHA256[$1]}" >&2
+    # The module's patches (pkg-patches/MODULE/), e.g. for the host tools
+    # built from it.
+    apply_pkg_patches "$1" "${BUILD_DIR}/${name}" >&2
     echo "${BUILD_DIR}/${name}"
 }
 
@@ -69,6 +72,10 @@ build_host_qt() {
     fi
     local src
     src="$(qt_src qtbase)"
+    # The host compiler (GCC 16 too) warns on the same HMAC padding loop as
+    # the cross build (see build_qtbase).
+    python3 -I "${SCRIPT_DIR}/deps-patches/qt_hmac_bound.py" \
+        "${src}/src/corelib/tools/qcryptographichash.cpp" || die "failed to patch qcryptographichash.cpp"
     local bld="${BUILD_DIR}/host-qt-build"
     log "Building host Qt..."
     rm -rf "${bld}"
@@ -102,7 +109,9 @@ host_qt_module() {
     local bld="${BUILD_DIR}/host-${module}-build"
     log "Building host ${module}..."
     rm -rf "${bld}"
-    host_env cmake -S "${src}" -B "${bld}" \
+    # Ninja: the generator Qt supports (its build warns under Makefiles),
+    # and the one the host qtbase configure picks.
+    host_env cmake -S "${src}" -B "${bld}" -G Ninja \
         -DCMAKE_PREFIX_PATH="${QT_HOST}" \
         -DCMAKE_INSTALL_PREFIX="${QT_HOST}" \
         -DCMAKE_BUILD_TYPE=Release \
@@ -290,7 +299,10 @@ main() {
     qt_module qtsvg libQt6Svg.so
     qt_module qt5compat libQt6Core5Compat.so
     qt_module qtsensors libQt6Sensors.so
-    qt_module qtwayland libQt6WaylandCompositor.so
+    # QTP0004 (Qt 6.8): a qmldir file in each extra directory of the
+    # compositor's QML module that holds .qml files; Qt's own sources do
+    # not set it, so the module build warned.
+    qt_module qtwayland libQt6WaylandCompositor.so -- -D__QT_INTERNAL_POLICY_QTP0004=NEW
     # Positioning and Location: plasma-workspace requires both.
     qt_module qtpositioning libQt6Positioning.so
     qt_module qtlocation libQt6Location.so

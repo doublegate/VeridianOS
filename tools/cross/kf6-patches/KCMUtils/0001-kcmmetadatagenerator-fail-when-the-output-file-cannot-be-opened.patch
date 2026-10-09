@@ -1,0 +1,24 @@
+VeridianOS: kcmmetadatagenerator: fail when the output file cannot be opened
+
+GCC reported ignoring return value of QFile::open [-Wunused-result] in
+tools/kcmmetadatagenerator.cpp:54. Real bug: when the .desktop output could
+not be opened, every write failed silently and the build tool still exited
+0, leaving a missing or empty .desktop file for the KCM. It now reports the
+file and QFile::errorString() with qCritical() and exits 1, exactly as the
+tool already does when its input cannot be opened.
+
+diff -ru a/tools/kcmmetadatagenerator.cpp b/tools/kcmmetadatagenerator.cpp
+--- a/tools/kcmmetadatagenerator.cpp	2026-10-08 17:32:51.071642025 -0400
++++ b/tools/kcmmetadatagenerator.cpp	2026-10-08 17:32:51.165347179 -0400
+@@ -51,7 +51,10 @@
+     const QLatin1String namePrefix("Name");
+ 
+     QFile out(app.arguments().at(2));
+-    out.open(QIODevice::WriteOnly);
++    if (!out.open(QIODevice::WriteOnly)) {
++        qCritical() << "Could not open file" << out.fileName() << "for writing:" << out.errorString();
++        exit(1);
++    }
+     out.write("[Desktop Entry]\n");
+     out.write("Type=Application\n");
+     out.write("NoDisplay=true\n");

@@ -1,0 +1,134 @@
+VeridianOS: make invariants explicit (stringop, maybe-uninitialized)
+
+Paths are relative to icu/source. One patch serves the host-tools build
+(icu-host) and the target build (icu-cross); both reported the same
+warnings, and both are clean with it.
+
+- common/uresdata.cpp:1265 (ures_swapResource; reported in cmemory.h:68,
+  uprv_memcpy) "specified bound between 18446744071562067968 and
+  18446744073709551612 exceeds maximum object size
+  [-Wstringop-overflow]": a URES_TABLE32 item count read from the bundle
+  being swapped can be negative, and 4*count then converts to a huge
+  size_t. In practice a negative count already failed later (in
+  uprv_sortArray() or swapArray32(), with U_ILLEGAL_ARGUMENT_ERROR) before
+  the memcpy, but nothing said so. The count is now validated where it is
+  read: a negative count prints a udata error and fails with
+  U_INVALID_FORMAT_ERROR, like ures_swap()'s other format checks. Valid
+  bundles are unaffected.
+- i18n/decNumber.cpp:2974 (uprv_decNumberSquareRoot) "writing 1 byte into
+  a region of size 0 [-Wstringop-overflow]" (twice): with DECDPUN == 1 the
+  initial approximation stored three digits with t->lsu[0..2]; t points
+  into buft[D2N(3)], so the space exists, but the stores went through the
+  one-element lsu[] member. The constants (t = 0.259/0.0819,
+  a = 0.819/2.59) are now laid out with uprv_decNumberFromUInt32(), which
+  writes through a Unit pointer and works for any DECDPUN, and the
+  exponents are set after it; the three per-DECDPUN branches collapse into
+  one. Same numbers: square roots of a sample of inputs at 30 digits are
+  byte-identical before and after.
+- i18n/number_mapper.cpp:135 (NumberPropertyMapper::oldToNew)
+  "'currencyUsage' may be used uninitialized [-Wmaybe-uninitialized]": it
+  was only assigned when useCurrency, and only read when
+  properties.currencyUsage is set, which implies useCurrency. It is now
+  initialized unconditionally with the same expression
+  (properties.currencyUsage.getOrDefault(UCURR_USAGE_STANDARD)), which has
+  no side effects. No behaviour change.
+- tools/ctestfw/ctest.c:185 (createTestNode) "'strncpy' output truncated
+  before terminating nul copying as many bytes from a string as its length
+  [-Wstringop-truncation]": the code copies exactly nameLen characters of
+  a longer or equal string and adds the NUL itself; it now says so with
+  memcpy(). No behaviour change.
+
+
+diff -ru a/common/uresdata.cpp b/common/uresdata.cpp
+--- a/common/uresdata.cpp	2026-10-08 17:22:40.573074271 -0400
++++ b/common/uresdata.cpp	2026-10-08 17:27:29.331303601 -0400
+@@ -1147,6 +1147,12 @@
+                 pKey32 = reinterpret_cast<const int32_t*>(p);
+                 qKey32 = reinterpret_cast<int32_t*>(q);
+                 count=udata_readInt32(ds, *pKey32);
++                if(count<0) {
++                    udata_printError(ds, "ures_swapResource(table res=%08x): negative item count %d\n",
++                                     res, count);
++                    *pErrorCode=U_INVALID_FORMAT_ERROR;
++                    return;
++                }
+ 
+                 pKey16=qKey16=nullptr;
+ 
+diff -ru a/i18n/decNumber.cpp b/i18n/decNumber.cpp
+--- a/i18n/decNumber.cpp	2026-10-08 17:22:40.622234962 -0400
++++ b/i18n/decNumber.cpp	2026-10-08 17:26:15.397657009 -0400
+@@ -2958,39 +2958,23 @@
+ 
+     /* Calculate initial approximation, and allow for odd exponent  */
+     workset.digits=workp;                    /* p for initial calculation  */
+-    t->bits=0; t->digits=3;
+-    a->bits=0; a->digits=3;
++    /* [The three-digit coefficients are laid out by decNumberFromUInt32,  */
++    /* which handles any DECDPUN; t is a 3-digit buffer (buft).]  */
+     if ((exp & 1)==0) {                      /* even exponent  */
+       /* Set t=0.259, a=0.819  */
++      uprv_decNumberFromUInt32(t, 259);
++      uprv_decNumberFromUInt32(a, 819);
+       t->exponent=-3;
+       a->exponent=-3;
+-      #if DECDPUN>=3
+-        t->lsu[0]=259;
+-        a->lsu[0]=819;
+-      #elif DECDPUN==2
+-        t->lsu[0]=59; t->lsu[1]=2;
+-        a->lsu[0]=19; a->lsu[1]=8;
+-      #else
+-        t->lsu[0]=9; t->lsu[1]=5; t->lsu[2]=2;
+-        a->lsu[0]=9; a->lsu[1]=1; a->lsu[2]=8;
+-      #endif
+       }
+      else {                                  /* odd exponent  */
+       /* Set t=0.0819, a=2.59  */
+       f->exponent--;                         /* f=f/10  */
+       exp++;                                 /* e=e+1  */
++      uprv_decNumberFromUInt32(t, 819);
++      uprv_decNumberFromUInt32(a, 259);
+       t->exponent=-4;
+       a->exponent=-2;
+-      #if DECDPUN>=3
+-        t->lsu[0]=819;
+-        a->lsu[0]=259;
+-      #elif DECDPUN==2
+-        t->lsu[0]=19; t->lsu[1]=8;
+-        a->lsu[0]=59; a->lsu[1]=2;
+-      #else
+-        t->lsu[0]=9; t->lsu[1]=1; t->lsu[2]=8;
+-        a->lsu[0]=9; a->lsu[1]=5; a->lsu[2]=2;
+-      #endif
+       }
+ 
+     decMultiplyOp(a, a, f, &workset, &ignore);    /* a=a*f  */
+diff -ru a/i18n/number_mapper.cpp b/i18n/number_mapper.cpp
+--- a/i18n/number_mapper.cpp	2026-10-08 17:22:40.649967790 -0400
++++ b/i18n/number_mapper.cpp	2026-10-08 17:27:29.331148960 -0400
+@@ -75,10 +75,9 @@
+             !properties.currencyUsage.isNull() ||
+             warehouse.affixProvider.get().hasCurrencySign());
+     CurrencyUnit currency;
+-    UCurrencyUsage currencyUsage;
++    UCurrencyUsage currencyUsage = properties.currencyUsage.getOrDefault(UCURR_USAGE_STANDARD);
+     if (useCurrency) {
+         currency = resolveCurrency(properties, locale, status);
+-        currencyUsage = properties.currencyUsage.getOrDefault(UCURR_USAGE_STANDARD);
+         // NOTE: Slicing is OK.
+         macros.unit = currency; // NOLINT
+     }
+diff -ru a/tools/ctestfw/ctest.c b/tools/ctestfw/ctest.c
+--- a/tools/ctestfw/ctest.c	2026-10-08 17:22:40.674234580 -0400
++++ b/tools/ctestfw/ctest.c	2026-10-08 17:27:29.331049128 -0400
+@@ -182,7 +182,8 @@
+     newNode->child = NULL;
+ 
+     if (nameLen > 0) {
+-        strncpy( newNode->name, name, nameLen );
++        /* name is at least nameLen characters long; the NUL is added below. */
++        memcpy( newNode->name, name, nameLen );
+     }
+     newNode->name[nameLen] = 0;
+ 

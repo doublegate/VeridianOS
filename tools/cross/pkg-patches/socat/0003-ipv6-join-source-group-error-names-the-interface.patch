@@ -1,0 +1,18 @@
+VeridianOS: ipv6-join-source-group: report the interface that was not found
+
+Found while preparing 0001 for upstream (socat@dest-unreach.org): when the
+interface of ipv6-join-source-group could not be resolved, the error
+message printed the multicast group (opt->value) instead of the
+interface (opt->value2), e.g. 'E interface "[ff02::2]" not found'.
+
+--- a/xio-ip6.c
++++ b/xio-ip6.c
+@@ -645,7 +645,7 @@ int xioapply_ip6_join_source_group(struct single *sfd, struct opt *opt) {
+ 	       &ip6_gsr.gsr_interface, -1)
+        < 0) {
+       Error1("interface \"%s\" not found",
+-	     opt->value.u_string/*ifindex*/);
++	     opt->value2.u_string/*ifindex*/);
+       ip6_gsr.gsr_interface = 0;
+    }
+    /* Third parameter is source address */

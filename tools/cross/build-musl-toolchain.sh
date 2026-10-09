@@ -71,8 +71,9 @@ EOF
 # not.
 stamp() {
     {
-        declare -f fetch_sources build_binutils build_gcc
+        declare -f fetch_sources build_binutils build_prereqs build_gcc
         sources
+        cat "${SCRIPT_DIR}"/toolchain-patches/*/*.patch
         cat "${SYSROOT}/.musl-stamp" 2>/dev/null || die "musl is not built (run build-musl.sh)"
     } | sha256sum | cut -d' ' -f1
 }
@@ -91,11 +92,48 @@ fetch_sources() {
         rm -rf "${BUILD_DIR:?}/${name}"
         tar -xf "${tarball}" -C "${BUILD_DIR}"
     done < <(sources)
-    # GMP, MPFR and MPC are built in-tree with GCC.
-    local gcc_src="${BUILD_DIR}/gcc-${GCC_VERSION}"
-    ln -sfn "../gmp-${GMP_VERSION}" "${gcc_src}/gmp"
-    ln -sfn "../mpfr-${MPFR_VERSION}" "${gcc_src}/mpfr"
-    ln -sfn "../mpc-${MPC_VERSION}" "${gcc_src}/mpc"
+    # Fixes for warnings in the toolchain's own build (toolchain-patches/,
+    # each explaining itself).
+    local tree patch
+    for tree in "binutils-${BINUTILS_VERSION}" "gcc-${GCC_VERSION}"; do
+        for patch in "${SCRIPT_DIR}/toolchain-patches/${tree%-*}"/*.patch; do
+            [[ -f "${patch}" ]] || continue
+            log "Applying ${tree%-*}/$(basename "${patch}")..."
+            patch -d "${BUILD_DIR}/${tree}" -p1 --forward --quiet < "${patch}" ||
+                die "failed to apply ${patch}"
+        done
+    done
+}
+
+# GMP, MPFR and MPC for the compiler itself (it runs on the build host),
+# static, in ${BUILD_DIR}/prereqs. Built on their own rather than in-tree:
+# GCC configures an in-tree GMP for the host "none" (portable C), which
+# GMP reports as obsolete, along with tools not named for that host. Here
+# GMP's host is the generic x86_64 one (not the build machine's own CPU,
+# which config.guess would name), so the compiler runs on any x86_64
+# machine. GMP 6.3.0 is C17 code (see build-deps.sh, build_gmp).
+PREREQS="${BUILD_DIR}/prereqs"
+build_prereqs() {
+    local triplet
+    triplet="$(gcc -dumpmachine)"
+    log "Building GMP ${GMP_VERSION}, MPFR ${MPFR_VERSION} and MPC ${MPC_VERSION} (host)..."
+    rm -rf "${PREREQS}" "${BUILD_DIR}"/build-{gmp,mpfr,mpc}
+    mkdir -p "${BUILD_DIR}"/build-{gmp,mpfr,mpc}
+    local common=(--prefix="${PREREQS}" --build="${triplet}" --host="${triplet}"
+                  --disable-shared --enable-static --with-pic)
+    (cd "${BUILD_DIR}/build-gmp" && \
+        CC_FOR_BUILD="gcc -std=gnu17" CFLAGS="-O2 -std=gnu17" \
+            "${BUILD_DIR}/gmp-${GMP_VERSION}/configure" "${common[@]}" && \
+        make -j"${JOBS}" && make install)
+    python3 -I "${SCRIPT_DIR}/deps-patches/mpfr_nloop.py" "${BUILD_DIR}/mpfr-${MPFR_VERSION}" ||
+        die "failed to patch MPFR"
+    (cd "${BUILD_DIR}/build-mpfr" && \
+        "${BUILD_DIR}/mpfr-${MPFR_VERSION}/configure" "${common[@]}" --with-gmp="${PREREQS}" && \
+        make -j"${JOBS}" && make install)
+    (cd "${BUILD_DIR}/build-mpc" && \
+        "${BUILD_DIR}/mpc-${MPC_VERSION}/configure" "${common[@]}" \
+            --with-gmp="${PREREQS}" --with-mpfr="${PREREQS}" && \
+        make -j"${JOBS}" && make install)
 }
 
 build_binutils() {
@@ -114,7 +152,7 @@ build_binutils() {
             --disable-gprofng \
             --enable-deterministic-archives && \
         make -j"${JOBS}" && \
-        make install)
+        make install LIBTOOLFLAGS=--no-finish)
 }
 
 build_gcc() {
@@ -123,6 +161,13 @@ build_gcc() {
     rm -rf "${bld}"
     mkdir -p "${bld}"
     # Shared and static target libraries (libstdc++, libgcc_s).
+    # --disable-fixed-point: x86 has no fixed-point types; left to its
+    # default, configure looks for them and warns that they are not
+    # supported.
+    # ac_cv_prog_ac_ct_LLVM_CONFIG (empty): the target libraries' configures
+    # (libtool's clang plugin check) look for an llvm-config for the
+    # target, find only the build host's unprefixed one and warn; there is
+    # none for the target, and the result is used only with clang.
     # --enable-default-pie: programs are position-independent; a -static
     # program is still an ordinary static executable. musl has no IFUNC and
     # provides its own stack protector; libsanitizer does not support musl.
@@ -151,8 +196,12 @@ build_gcc() {
             --enable-libstdcxx-time=rt \
             --disable-gnu-indirect-function \
             --disable-libsanitizer \
-            --disable-libssp && \
-        PATH="${PREFIX}/bin:${PATH}" make -j"${JOBS}" \
+            --disable-libssp \
+            --disable-fixed-point \
+            --with-gmp="${PREREQS}" \
+            --with-mpfr="${PREREQS}" \
+            --with-mpc="${PREREQS}" && \
+        PATH="${PREFIX}/bin:${PATH}" ac_cv_prog_ac_ct_LLVM_CONFIG='' make -j"${JOBS}" \
             CFLAGS_FOR_TARGET="-g -O2 -fPIC" CXXFLAGS_FOR_TARGET="-g -O2 -fPIC" && \
         PATH="${PREFIX}/bin:${PATH}" make install)
 }
@@ -169,6 +218,34 @@ install_runtime() {
     cp -a "${lib}"/*.so* "${SYSROOT}/usr/lib/"
     # libstdc++'s gdb pretty-printer script is not a library.
     rm -f "${SYSROOT}"/usr/lib/*.so*-gdb.py
+}
+
+# Paths in what the compiler produces (__FILE__ in assertions and log
+# messages, debug information) name the build host's directories: the
+# source trees under ${VERIDIAN_CROSS_BUILD}, the toolchain's own headers,
+# the sysroot's. A specs file in the compiler's directory (read on every
+# run) maps them, as distributions do, to /usr/src/veridian, /usr and /:
+# the binaries do not depend on where the pipeline ran.
+#
+# That file replaces the built-in specs, and GCC accepts directives such as
+# %rename only in additional -specs= files, so it is the compiler's complete
+# spec set (-dumpspecs, taken before the file exists) with the maps
+# appended to cpp_unique_options.
+install_specs() {
+    # Not asked of the compiler: a malformed specs file left by an earlier
+    # run stops it from answering anything.
+    local dir="${PREFIX}/lib/gcc/${TARGET}/${GCC_VERSION}" maps
+    log "Installing the compiler specs (file prefix maps)..."
+    rm -f "${dir}/specs"
+    maps="-ffile-prefix-map=${VERIDIAN_CROSS_BUILD}=/usr/src/veridian -ffile-prefix-map=${PREFIX}=/usr -ffile-prefix-map=${SYSROOT}/=/"
+    "${PREFIX}/bin/${TARGET}-gcc" -dumpspecs \
+        | awk -v maps="${maps}" '
+            add { $0 = $0 " " maps; add = 0; done = 1 }
+            $0 == "*cpp_unique_options:" { add = 1 }
+            { print }
+            END { exit !done }' > "${dir}/specs.tmp" \
+        || die "no cpp_unique_options in the compiler's specs"
+    mv "${dir}/specs.tmp" "${dir}/specs"
 }
 
 # C and C++ programs (exceptions, iostream, threads, thread_local with a
@@ -251,9 +328,11 @@ main() {
         rm -rf "${PREFIX}"
         fetch_sources
         build_binutils
+        build_prereqs
         build_gcc
         echo "${want}" > "${PREFIX}/.veridian-stamp"
     fi
+    install_specs
     install_runtime
     verify
     log "=== Toolchain ready ==="

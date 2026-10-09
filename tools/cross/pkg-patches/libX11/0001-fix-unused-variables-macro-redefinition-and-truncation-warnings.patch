@@ -1,0 +1,119 @@
+VeridianOS: fix unused-variable, macro-redefinition and truncation warnings
+
+GCC reported, with no change in behaviour needed:
+
+- src/locking.h:37/38 "'xmalloc' redefined", "'xfree' redefined" (in every
+  file that includes it after Xlibint.h): locking.h sets xmalloc/xfree to
+  Xmalloc/Xfree for Xthreads.h, but Xlibint.h has usually included
+  Xthreads.h already, which defaults them to malloc/free. The later
+  definition already won; it now #undefs the defaults first, so the
+  override is explicit. Same expansion as before.
+- src/xlibi18n/lcCT.c:877 (cstoct) "variable 'unconv_num' set but not
+  used": the count of dropped control characters was never returned (the
+  function returns 0). Removed the counter; returning it instead would
+  change what XmbTextListToTextProperty() and friends report, so the
+  established result is kept.
+- src/xkb/XKBGetMap.c:254 (_XkbReadKeyActions) "variable 'symMap' set but
+  not used": removed the dead pointer and its increment.
+- src/ErrDes.c:194 (XGetErrorDatabaseText) -Wformat-truncation: tlen is
+  computed as exactly strlen(name) + strlen(type) + 2, so the snprintf of
+  "%s.%s" never truncated, but GCC could not see that. The key is now
+  assembled with memcpy from the lengths already computed; same string.
+
+
+diff -ru a/src/locking.h b/src/locking.h
+--- a/src/locking.h	2026-10-08 17:12:35.244069472 -0400
++++ b/src/locking.h	2026-10-08 17:14:22.178871693 -0400
+@@ -34,6 +34,10 @@
+ #ifndef _X_locking_H_
+ #define _X_locking_H_
+ 
++/* Xthreads.h defaults these to malloc and free; it may already have been
++ * included through Xlibint.h, so replace its definitions. */
++#undef xmalloc
++#undef xfree
+ #define xmalloc(s) Xmalloc(s)
+ #define xfree(s) Xfree(s)
+ #include <X11/Xlib.h>
+diff -ru a/src/xlibi18n/lcCT.c b/src/xlibi18n/lcCT.c
+--- a/src/xlibi18n/lcCT.c	2026-10-08 17:12:35.219432395 -0400
++++ b/src/xlibi18n/lcCT.c	2026-10-08 17:14:22.179211625 -0400
+@@ -874,7 +874,7 @@
+     State state = (State) conv->state;
+     XlcSide side;
+     unsigned char min_ch = 0, max_ch = 0;
+-    int length, unconv_num;
++    int length;
+     CTInfo ct_info;
+     XlcCharSet charset;
+     const char *csptr;
+@@ -962,7 +962,6 @@
+     }
+ 
+     /* Actually copy the contents. */
+-    unconv_num = 0;
+     char_size = charset->char_size;
+     if (char_size == 1) {
+ 	while (csstr_len > 0 && ct_len > 0) {
+@@ -978,7 +977,6 @@
+ 			  && (ch == 0x1b)))) {
+                     csptr++;
+                     csstr_len--;
+-		    unconv_num++;
+                     continue;
+  		}
+ 	    }
+diff -ru a/src/xkb/XKBGetMap.c b/src/xkb/XKBGetMap.c
+--- a/src/xkb/XKBGetMap.c	2026-10-08 17:12:35.275025368 -0400
++++ b/src/xkb/XKBGetMap.c	2026-10-08 17:14:22.179398068 -0400
+@@ -251,8 +251,6 @@
+     Status ret = Success;
+ 
+     if ((nKeyActs = rep->nKeyActs) > 0) {
+-        XkbSymMapPtr symMap;
+-
+         if (nKeyActs < sizeof numDescBuf)
+             numDesc = numDescBuf;
+         else
+@@ -267,8 +265,7 @@
+             ret = BadLength;
+             goto done;
+         }
+-        symMap = &info->map->key_sym_map[rep->firstKeyAct];
+-        for (i = 0; i < (int) rep->nKeyActs; i++, symMap++) {
++        for (i = 0; i < (int) rep->nKeyActs; i++) {
+             if (numDesc[i] == 0) {
+                 if ((i + rep->firstKeyAct) > (info->max_key_code + 1)) {
+                     ret = BadLength;
+diff -ru a/src/ErrDes.c b/src/ErrDes.c
+--- a/src/ErrDes.c	2026-10-08 17:12:35.301111183 -0400
++++ b/src/ErrDes.c	2026-10-08 17:14:22.179510995 -0400
+@@ -150,6 +150,7 @@
+     XrmValue result;
+     char temp[BUFSIZ];
+     char* tptr;
++    size_t nlen, ylen;
+     unsigned long tlen;
+ 
+     if (nbytes == 0) return 0;
+@@ -185,13 +186,18 @@
+ 
+     if (db)
+     {
+-	tlen = strlen (name) + strlen (type) + 2;
++	nlen = strlen (name);
++	ylen = strlen (type);
++	tlen = nlen + ylen + 2;
+ 	if (tlen <= sizeof(temp))
+ 	    tptr = temp;
+ 	else
+ 	    tptr = Xmalloc (tlen);
+ 	if (tptr) {
+-	    snprintf(tptr, tlen, "%s.%s", name, type);
++	    /* "name.type"; tlen is exactly its size. */
++	    memcpy(tptr, name, nlen);
++	    tptr[nlen] = '.';
++	    memcpy(tptr + nlen + 1, type, ylen + 1);
+ 	    XrmGetResource(db, tptr, "ErrorType.ErrorNumber",
+ 	      &type_str, &result);
+ 	    if (tptr != temp)

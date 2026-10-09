@@ -8,7 +8,9 @@ fontconfig 2.18.3:
 - src/meson.build preprocesses fcobjshash.gperf.h with cc.preprocess();
   meson does not count a header as a source, so the target is empty
   ("Build target preprocessor_0 has no sources"). The file becomes
-  fcobjshash.gperf.c, as upstream fontconfig (main) has done.
+  fcobjshash.gperf.c, as upstream fontconfig (main) has done. (The
+  tarball's autotools files still name the .h; the pipeline builds
+  fontconfig with meson only.)
 
 HarfBuzz 14.6.0:
 - src/hb-ot-metrics.cc comments out a macro with // lines that end in a
@@ -48,16 +50,20 @@ if kind == "fontconfig":
         "#endif\n\n#ifdef _WIN32\n",
     )
     path = f"{src}/src/fcxml.c"
-    text = Path(path).read_text()
-    calls = text.count("(int)XML_GetCurrentLineNumber (parse->parser)")
-    if calls not in (0, 2):
-        sys.exit(f"{path}: expected two line-number calls, found {calls}")
-    Path(path).write_text(
-        text.replace(
+    text = (
+        Path(path)
+        .read_text()
+        .replace(
             "(int)XML_GetCurrentLineNumber (parse->parser)",
             "(int)FcXmlLineNumber (parse->parser)",
         )
     )
+    # Checked after the edit, so a respelled or added call fails here
+    # instead of leaving the deprecated one behind.
+    calls = text.count("(int)FcXmlLineNumber (parse->parser)")
+    if calls != 2 or "XML_GetCurrentLineNumber (parse->parser)" in text:
+        sys.exit(f"{path}: expected exactly two line-number calls, found {calls}")
+    Path(path).write_text(text)
     old_h, new_c = f"{src}/src/fcobjshash.gperf.h", f"{src}/src/fcobjshash.gperf.c"
     if os.path.exists(old_h):
         os.rename(old_h, new_c)

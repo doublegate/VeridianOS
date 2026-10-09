@@ -1,0 +1,27 @@
+VeridianOS: qtbase: no moc run for qttemporalpattern_p.h outside developer builds
+
+time/qttemporalpattern_p.h declares its namespace for moc
+(Q_NAMESPACE_EXPORT, Q_FLAG_NS) only under QT_BUILD_INTERNAL, which Qt
+defines for developer builds (configure.cmake: qt_feature_definition
+"developer-build" "QT_BUILD_INTERNAL"). AutoMoc does not evaluate #ifdef,
+saw the macro and ran moc, which in any other build found nothing:
+"qttemporalpattern_p.h: note: No relevant classes found. No output
+generated." (host and target Qt). The header is now excluded from AutoMoc
+unless developer_build is on; developer builds are unchanged, and the
+other builds lose an empty moc run.
+
+--- a/src/corelib/CMakeLists.txt
++++ b/src/corelib/CMakeLists.txt
+@@ -1124,6 +1124,12 @@
+         parse/qtparseqttemporalformat.cpp parse/qtparseqttemporalformat_p.h
+ )
+ 
++# The header declares its namespace for moc only in developer builds
++# (QT_BUILD_INTERNAL); elsewhere moc would have nothing to generate.
++if(NOT QT_FEATURE_developer_build)
++    set_source_files_properties(time/qttemporalpattern_p.h PROPERTIES SKIP_AUTOMOC ON)
++endif()
++
+ qt_internal_extend_target(Core CONDITION QT_FEATURE_datetimeparser
+     SOURCES
+         time/qdatetimeparser.cpp time/qdatetimeparser_p.h

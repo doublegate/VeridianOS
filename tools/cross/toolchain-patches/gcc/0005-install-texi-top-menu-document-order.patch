@@ -1,0 +1,37 @@
+VeridianOS: install.texi: list the top-level nodes in document order
+
+makeinfo (texinfo 7.3) reported, building gccinstall.info:
+
+  install.texi:116: warning: node next pointer for `Installing GCC' is
+    `Binaries' but next is `Specific' in menu
+  install.texi:116: warning: node prev pointer for `Specific' is
+    `Binaries' but prev is `Installing GCC' in menu
+  install.texi:117: warning: node next pointer for `Specific' is
+    `GNU Free Documentation License' but next is `Binaries' in menu
+  install.texi:117: warning: node prev pointer for `Binaries' is
+    `Installing GCC' but prev is `Specific' in menu
+  install.texi:119: warning: node next pointer for `Binaries' is
+    `Specific' but next is `GNU Free Documentation License' in menu
+  install.texi:119: warning: node prev pointer for `GNU Free
+    Documentation License' is `Specific' but prev is `Binaries' in menu
+
+The nodes are in the order Installing GCC, Binaries, Specific, GNU Free
+Documentation License, and their explicit Next/Prev pointers (including
+the one in include/fdl.texi) follow that order; only the Top menu listed
+Specific before Binaries.  The menu now lists them in document order.
+The generated gccinstall.info differs only in the order of those two
+Top menu entries.
+
+diff -ru a/gcc/doc/install.texi b/gcc/doc/install.texi
+--- a/gcc/doc/install.texi	2026-08-07 03:46:06.125689311 -0400
++++ b/gcc/doc/install.texi	2026-10-08 17:05:54.029676277 -0400
+@@ -113,8 +113,8 @@
+                     procedure for GCC as well as detailing some target
+                     specific installation instructions.
+ 
+-* Specific::        Host/target specific installation notes for GCC.
+ * Binaries::        Where to get pre-compiled binaries.
++* Specific::        Host/target specific installation notes for GCC.
+ 
+ * GNU Free Documentation License:: How you can copy and share this manual.
+ * Concept Index::   This index has two entries.

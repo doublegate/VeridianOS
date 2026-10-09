@@ -30,7 +30,6 @@ JOBS="${JOBS:-$(nproc)}"
 # KWin and its libraries ship with Plasma: the release is build-plasma.sh's.
 PLASMA_VER="$(sed -n 's/^PLASMA_VER="\(.*\)"$/\1/p' "${SCRIPT_DIR}/build-plasma.sh")"
 [[ -n "${PLASMA_VER}" ]] || { echo "[build-kwin] cannot read PLASMA_VER from build-plasma.sh" >&2; exit 1; }
-PLASMA_URL_BASE="https://download.kde.org/stable/plasma/${PLASMA_VER}"
 
 log() { echo "[build-kwin] $*"; }
 die() { echo "[build-kwin] ERROR: $*" >&2; exit 1; }
@@ -43,7 +42,10 @@ source "${SCRIPT_DIR}/lib/kde-build.sh"
 QACCESSIBILITYCLIENT_VER="0.6.0"
 
 plasma_src() {
-    kde_fetch "$1-${PLASMA_VER}" "${PLASMA_URL_BASE}" plasma.sha256
+    local src
+    src="$(kde_fetch "$1-${PLASMA_VER}" "$(plasma_url)" plasma.sha256)"
+    apply_patches "${SCRIPT_DIR}/plasma-patches/$1" "${src}" >&2
+    echo "${src}"
 }
 
 # config_installed CONFIG: the package installing CMake config CONFIG is
@@ -87,6 +89,7 @@ build_qaccessibilityclient() {
     local src
     src="$(kde_fetch "libqaccessibilityclient-${QACCESSIBILITYCLIENT_VER}" \
         "https://download.kde.org/stable/libqaccessibilityclient" plasma.sha256)"
+    apply_patches "${SCRIPT_DIR}/kwin-patches/libqaccessibilityclient" "${src}"
     kde_cmake libqaccessibilityclient "${src}" -DQT_MAJOR_VERSION=6
     check_config QAccessibilityClient6
 }
@@ -147,7 +150,8 @@ build_kwin() {
     # upstream commit as `git format-patch` wrote it, one rebased): the
     # dialog and process-killer helpers and two headers (screenedge.h,
     # shadow.h) needed X11 even with KWIN_BUILD_X11=OFF (b0d9e808,
-    # edc72540, 712c069d, e6e5f947; KDE bug 526689).
+    # edc72540, 712c069d, e6e5f947; KDE bug 526689). 0005-0008 remove
+    # the causes of compiler and AutoMoc warnings (see each patch).
     apply_patches "${SCRIPT_DIR}/kwin-patches" "${src}"
     # Without logind, kwin opens /dev/dri/card0 through
     # NoopSession::openRestricted(). Older releases returned -1 there; since
@@ -193,6 +197,12 @@ main() {
     build_kdecoration
     build_kglobalacceld
     build_host_scanner
+    # KWin's QML (the overview, window switchers, outline) imports
+    # org.kde.plasma.core/components and org.kde.milou; built before KWin
+    # so its build finds their qmldir files. The Plasma phase then finds
+    # them installed.
+    plasma libplasma
+    plasma milou
     build_kwin
     verify
     log "=== KWin build complete ==="

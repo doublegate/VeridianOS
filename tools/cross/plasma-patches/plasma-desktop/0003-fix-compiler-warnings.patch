@@ -1,0 +1,305 @@
+VeridianOS: fix plasma-desktop compiler warnings (deprecated APIs, fallthrough, parentheses)
+
+GCC reported, and this changes:
+- -Wdeprecated-declarations QSortFilterProxyModel::invalidateFilter()
+  (folder/foldermodel.cpp, folder/placesmodel.cpp, landingpage/landingpage.cpp,
+  kded/filterproxymodel.cpp x2): ported to beginFilterChange()/endFilterChange().
+  In the setters beginFilterChange() now precedes the state change, as Qt
+  documents; where the state has already changed (FolderModel::
+  invalidateFilterIfComplete, MostUsedModel's source-model switch) the two
+  are called back to back. endFilterChange() with its default
+  Direction::Both calls the same filter_changed(Rows|Columns) as
+  invalidateFilter() (Qt 6.12 qsortfilterproxymodel.cpp). One difference:
+  beginFilterChange() builds the proxy's root
+  mapping if it does not exist yet (filterAcceptsRow() over all source
+  rows); if the proxy had not been queried yet, endFilterChange() then
+  reports the difference as rowsRemoved/rowsInserted where
+  invalidateFilter() emitted nothing. The resulting rows are the same.
+- -Wdeprecated-declarations KLocalizedContext (dateandtime/dtime.cpp,
+  emojier/app/emojier.cpp): ported to KLocalization::setupLocalizedContext()
+  and KF6::I18nQml added to both targets. setupLocalizedContext() also
+  applies TRANSLATION_DOMAIN to the QML context: for the emojier that is the
+  application domain it already used; kcm_clock's main.qml has no i18n
+  calls. KLocalizedQmlContext also re-evaluates the QML i18n bindings
+  when the application's language changes (QEvent::LanguageChange), which
+  KLocalizedContext did not. <KLocalizedQmlContext> must be included before <KLocalizedString>
+  when TRANSLATION_DOMAIN is defined (otherwise the i18n() macros rewrite
+  its i18n*() member declarations), hence its position in both files.
+- -Wdeprecated-declarations QMouseEvent 5-argument constructor
+  (folder/eventgenerator.cpp): uses the (localPos, scenePos, globalPos)
+  constructor with the values the deprecated one filled in (scenePos =
+  localPos, globalPos = QCursor::pos(), per Qt 6.12 qevent.cpp).
+- -Wdeprecated-declarations QSqlDatabase::exec()
+  (recentFiles/ExcludedApplicationsModel.cpp): QSqlQuery(database).exec(),
+  which is what QSqlDatabase::exec() wraps. The database's lastError() is no
+  longer updated by this query; nothing reads it.
+- -Wdeprecated-declarations QVariant::canConvert(int)
+  (keyboard/xkboptionsmodel.cpp): canConvert<bool>(). (On top of the
+  existing 0002 patch, which touches the same file.)
+- -Wdeprecated-declarations libwacom_get_supported_styli() and
+  libwacom_stylus_get_for_id() (tablet/kcmtablet.cpp): ported to
+  libwacom_get_styli() (libwacom >= 2.14, now required in CMakeLists.txt;
+  the sysroot has 2.20), which returns the WacomStylus objects directly. The
+  old id lookup assumed the Wacom vendor ID, so non-Wacom styli were missed
+  or mismatched; Wacom styli give the same button count as before.
+  Also fixes a leak: the WacomDevice from libwacom_new_from_path() was never
+  passed to libwacom_destroy(); it is now, and the styli list is free()d as
+  libwacom documents.
+- -Wimplicit-fallthrough (solid_actions/ActionEditor.cpp): the PropertyCheck
+  case intentionally falls into InterfaceCheck (a property check also needs
+  the device type); marked [[fallthrough]].
+- -Wparentheses (folder/shortcut.cpp): `mods & ~Keypad | key` already
+  parsed as `(mods & ~Keypad) | key`, the intent; parentheses added.
+
+diff -ruN a/CMakeLists.txt b/CMakeLists.txt
+--- a/CMakeLists.txt	2026-10-08 17:01:37.405626627 -0400
++++ b/CMakeLists.txt	2026-10-08 17:05:00.494081275 -0400
+@@ -172,7 +172,7 @@
+         TYPE REQUIRED
+         PURPOSE "Required for building Tablet input KCM"
+     )
+-    pkg_check_modules(LIBWACOM libwacom REQUIRED IMPORTED_TARGET)
++    pkg_check_modules(LIBWACOM libwacom>=2.14 REQUIRED IMPORTED_TARGET)
+ endif()
+ 
+ find_package(SDL2 2.0.16)
+diff -ruN a/containments/desktop/plugins/folder/eventgenerator.cpp b/containments/desktop/plugins/folder/eventgenerator.cpp
+--- a/containments/desktop/plugins/folder/eventgenerator.cpp	2026-10-08 17:01:37.273750675 -0400
++++ b/containments/desktop/plugins/folder/eventgenerator.cpp	2026-10-08 17:04:11.276454392 -0400
+@@ -7,6 +7,7 @@
+ 
+ #include "eventgenerator.h"
+ 
++#include <QCursor>
+ #include <QGuiApplication>
+ #include <QQuickItem>
+ #include <QQuickWindow>
+@@ -46,7 +47,10 @@
+     default:
+         return;
+     }
+-    QMouseEvent ev(eventType, QPointF(x, y), static_cast<Qt::MouseButton>(button), buttons, modifiers);
++    // Same positions the deprecated constructor filled in: scene position =
++    // local position, global position = the current cursor position.
++    const QPointF localPos(x, y);
++    QMouseEvent ev(eventType, localPos, localPos, QCursor::pos(), static_cast<Qt::MouseButton>(button), buttons, modifiers);
+ 
+     QGuiApplication::sendEvent(item, &ev);
+ }
+diff -ruN a/containments/desktop/plugins/folder/foldermodel.cpp b/containments/desktop/plugins/folder/foldermodel.cpp
+--- a/containments/desktop/plugins/folder/foldermodel.cpp	2026-10-08 17:01:37.239874987 -0400
++++ b/containments/desktop/plugins/folder/foldermodel.cpp	2026-10-08 17:03:58.351552509 -0400
+@@ -405,7 +405,10 @@
+         return;
+     }
+ 
+-    invalidateFilter();
++    // The callers have already changed the filter state, so begin and end the
++    // change together; this is what invalidateFilter() did.
++    beginFilterChange();
++    endFilterChange();
+ }
+ 
+ void FolderModel::newFileMenuItemCreationStarted(const QUrl &url)
+diff -ruN a/containments/desktop/plugins/folder/placesmodel.cpp b/containments/desktop/plugins/folder/placesmodel.cpp
+--- a/containments/desktop/plugins/folder/placesmodel.cpp	2026-10-08 17:01:37.249649382 -0400
++++ b/containments/desktop/plugins/folder/placesmodel.cpp	2026-10-08 17:04:02.048524438 -0400
+@@ -49,9 +49,9 @@
+ void PlacesModel::setShowDesktopEntry(bool showDesktopEntry)
+ {
+     if (m_showDesktopEntry != showDesktopEntry) {
++        beginFilterChange();
+         m_showDesktopEntry = showDesktopEntry;
+-
+-        invalidateFilter();
++        endFilterChange();
+ 
+         Q_EMIT showDesktopEntryChanged();
+     }
+diff -ruN a/containments/desktop/plugins/folder/shortcut.cpp b/containments/desktop/plugins/folder/shortcut.cpp
+--- a/containments/desktop/plugins/folder/shortcut.cpp	2026-10-08 17:01:37.264496299 -0400
++++ b/containments/desktop/plugins/folder/shortcut.cpp	2026-10-08 17:04:05.682496850 -0400
+@@ -27,7 +27,7 @@
+ {
+     if (e->type() == QEvent::KeyPress) {
+         QKeyEvent *keyEvent = static_cast<QKeyEvent *>(e);
+-        const int keyInt = keyEvent->modifiers() & ~Qt::KeypadModifier | keyEvent->key();
++        const int keyInt = (keyEvent->modifiers() & ~Qt::KeypadModifier) | keyEvent->key();
+         if (KStandardShortcut::deleteFile().contains(QKeySequence(keyInt))) {
+             Q_EMIT deleteFile();
+             return true;
+diff -ruN a/emojier/app/CMakeLists.txt b/emojier/app/CMakeLists.txt
+--- a/emojier/app/CMakeLists.txt	2026-10-08 17:01:37.342020883 -0400
++++ b/emojier/app/CMakeLists.txt	2026-10-08 17:04:33.612284967 -0400
+@@ -7,7 +7,7 @@
+     ui/CategoryPage.qml
+ )
+ 
+-target_link_libraries(plasma-emojier PRIVATE Qt::Widgets Qt::Quick KF6::ConfigGui KF6::I18n KF6::CoreAddons KF6::Crash KF6::DBusAddons KF6::WindowSystem Qt::GuiPrivate)
++target_link_libraries(plasma-emojier PRIVATE Qt::Widgets Qt::Quick KF6::ConfigGui KF6::I18n KF6::I18nQml KF6::CoreAddons KF6::Crash KF6::DBusAddons KF6::WindowSystem Qt::GuiPrivate)
+ 
+ install(TARGETS plasma-emojier ${KDE_INSTALL_TARGETS_DEFAULT_ARGS})
+ install(PROGRAMS org.kde.plasma.emojier.desktop DESTINATION ${KDE_INSTALL_DATADIR}/kglobalaccel)
+diff -ruN a/emojier/app/emojier.cpp b/emojier/app/emojier.cpp
+--- a/emojier/app/emojier.cpp	2026-10-08 17:01:37.326783230 -0400
++++ b/emojier/app/emojier.cpp	2026-10-08 17:04:32.135296165 -0400
+@@ -7,6 +7,7 @@
+ #include <KAboutData>
+ #include <KCrash>
+ #include <KDBusService>
++#include <KLocalizedQmlContext>
+ #include <KLocalizedString>
+ #include <KSharedConfig>
+ #include <KWindowConfig>
+@@ -78,7 +79,7 @@
+ 
+     QQmlApplicationEngine engine;
+ 
+-    engine.rootContext()->setContextObject(new KLocalizedContext(&engine));
++    KLocalization::setupLocalizedContext(&engine);
+     engine.loadFromModule("org.kde.plasma.emoji.app", "Emojier");
+ 
+     QObject::connect(service, &KDBusService::activateRequested, &engine, [&engine](const QStringList & /*arguments*/, const QString & /*workingDirectory*/) {
+diff -ruN a/kcms/dateandtime/CMakeLists.txt b/kcms/dateandtime/CMakeLists.txt
+--- a/kcms/dateandtime/CMakeLists.txt	2026-10-08 17:01:37.293213462 -0400
++++ b/kcms/dateandtime/CMakeLists.txt	2026-10-08 17:04:17.037410677 -0400
+@@ -21,6 +21,7 @@
+     KF6::GuiAddons
+     KF6::KCMUtils
+     KF6::I18n
++    KF6::I18nQml
+     KF6::I18nLocaleData
+     KF6::KIOCore
+     KF6::KIOWidgets
+diff -ruN a/kcms/dateandtime/dtime.cpp b/kcms/dateandtime/dtime.cpp
+--- a/kcms/dateandtime/dtime.cpp	2026-10-08 17:01:37.281048987 -0400
++++ b/kcms/dateandtime/dtime.cpp	2026-10-08 17:08:55.118311839 -0400
+@@ -8,6 +8,11 @@
+     SPDX-License-Identifier: GPL-2.0-or-later
+ */
+ 
++// Must precede <KLocalizedString> (pulled in by dtime.h via ui_dateandtime.h):
++// with TRANSLATION_DOMAIN defined, that header turns i18n() and friends into
++// macros, which would rewrite KLocalizedQmlContext's i18n*() member declarations.
++#include <KLocalizedQmlContext>
++
+ #include "dtime.h"
+ 
+ #include <stdlib.h>
+@@ -34,7 +39,6 @@
+ #include <QVBoxLayout>
+ 
+ #include <KLocalizedString>
+-#include <KLocalizedContext>
+ #include <KSvg/Svg>
+ 
+ #include "timedated_interface.h"
+@@ -83,7 +87,7 @@
+     tabWidget->tabBar()->setExpanding(true);
+ 
+     auto engine = timezoneViewer->engine();
+-    engine->rootContext()->setContextObject(new KLocalizedContext(engine));
++    KLocalization::setupLocalizedContext(engine);
+ 
+     timezoneViewer->rootContext()->setContextProperty("DTime", this);
+     timezoneViewer->setSource(QUrl("qrc:/kcm/kcm_clock/main.qml"));
+diff -ruN a/kcms/kded/filterproxymodel.cpp b/kcms/kded/filterproxymodel.cpp
+--- a/kcms/kded/filterproxymodel.cpp	2026-10-08 17:01:37.352498515 -0400
++++ b/kcms/kded/filterproxymodel.cpp	2026-10-08 17:04:39.735238551 -0400
+@@ -23,8 +23,9 @@
+ void FilterProxyModel::setQuery(const QString &query)
+ {
+     if (m_query != query) {
++        beginFilterChange();
+         m_query = query;
+-        invalidateFilter();
++        endFilterChange();
+         Q_EMIT queryChanged();
+     }
+ }
+@@ -37,8 +38,9 @@
+ void FilterProxyModel::setStatusFilter(KDEDConfig::ModuleStatus statusFilter)
+ {
+     if (m_statusFilter != statusFilter) {
++        beginFilterChange();
+         m_statusFilter = statusFilter;
+-        invalidateFilter();
++        endFilterChange();
+         Q_EMIT statusFilterChanged();
+     }
+ }
+diff -ruN a/kcms/keyboard/xkboptionsmodel.cpp b/kcms/keyboard/xkboptionsmodel.cpp
+--- a/kcms/keyboard/xkboptionsmodel.cpp	2026-10-08 17:01:44.409125670 -0400
++++ b/kcms/keyboard/xkboptionsmodel.cpp	2026-10-08 17:04:42.666216337 -0400
+@@ -217,7 +217,7 @@
+         return false;
+     }
+ 
+-    if (role != Roles::CheckedRole || !value.canConvert(QMetaType::Bool)) {
++    if (role != Roles::CheckedRole || !value.canConvert<bool>()) {
+         return false;
+     }
+ 
+diff -ruN a/kcms/landingpage/landingpage.cpp b/kcms/landingpage/landingpage.cpp
+--- a/kcms/landingpage/landingpage.cpp	2026-10-08 17:01:37.302474401 -0400
++++ b/kcms/landingpage/landingpage.cpp	2026-10-08 17:04:37.350256629 -0400
+@@ -83,7 +83,8 @@
+         if (oldModel != sourceModel()) {
+             ignoredKCMs.clear();
+         }
+-        invalidateFilter();
++        beginFilterChange();
++        endFilterChange();
+     };
+ 
+     m_resultModel = model;
+diff -ruN a/kcms/recentFiles/ExcludedApplicationsModel.cpp b/kcms/recentFiles/ExcludedApplicationsModel.cpp
+--- a/kcms/recentFiles/ExcludedApplicationsModel.cpp	2026-10-08 17:01:37.313736947 -0400
++++ b/kcms/recentFiles/ExcludedApplicationsModel.cpp	2026-10-08 17:04:41.418225795 -0400
+@@ -84,7 +84,8 @@
+         return;
+     }
+ 
+-    auto query = database.exec(QStringLiteral("SELECT DISTINCT(initiatingAgent) FROM ResourceScoreCache ORDER BY initiatingAgent"));
++    QSqlQuery query(database);
++    query.exec(QStringLiteral("SELECT DISTINCT(initiatingAgent) FROM ResourceScoreCache ORDER BY initiatingAgent"));
+ 
+     if (d->applications.length() > 0) {
+         beginRemoveRows(QModelIndex(), 0, d->applications.length() - 1);
+diff -ruN a/kcms/solid_actions/ActionEditor.cpp b/kcms/solid_actions/ActionEditor.cpp
+--- a/kcms/solid_actions/ActionEditor.cpp	2026-10-08 17:01:37.375770691 -0400
++++ b/kcms/solid_actions/ActionEditor.cpp	2026-10-08 17:04:44.275204143 -0400
+@@ -128,6 +128,8 @@
+     switch (ui.CbParameterType->currentIndex()) {
+     case Solid::Predicate::PropertyCheck:
+         atomEnable = true;
++        // A property check also needs the device type: enable it as below.
++        [[fallthrough]];
+     case Solid::Predicate::InterfaceCheck:
+         isEnable = true;
+         break;
+diff -ruN a/kcms/tablet/kcmtablet.cpp b/kcms/tablet/kcmtablet.cpp
+--- a/kcms/tablet/kcmtablet.cpp	2026-10-08 17:01:37.391626734 -0400
++++ b/kcms/tablet/kcmtablet.cpp	2026-10-08 17:04:47.722178023 -0400
+@@ -242,16 +242,18 @@
+             qCWarning(KCM_TABLET()) << "Failed to find device in libwacom:" << libwacom_error_get_message(error);
+         } else {
+             int num_styli = 0;
+-            const int *styli = libwacom_get_supported_styli(device, &num_styli);
+-            if (num_styli > 0) {
++            const WacomStylus **styli = libwacom_get_styli(device, &num_styli);
++            if (styli != nullptr && num_styli > 0) {
+                 numButtons = 0; // if we have supported styli, do not use the fallback value
+                 for (int i = 0; i < num_styli; i++) {
+-                    const auto stylus = libwacom_stylus_get_for_id(m_db, styli[i]);
++                    const WacomStylus *stylus = styli[i];
+                     if (stylus != nullptr) {
+                         numButtons = std::max(numButtons, libwacom_stylus_get_num_buttons(stylus));
+                     }
+                 }
+             }
++            free(styli); // the list is ours to free, the styli belong to the database
++            libwacom_destroy(device);
+         }
+         libwacom_error_free(&error);
+ 

@@ -1,0 +1,25 @@
+VeridianOS: KWin: ecm_setup_qtplugin_macro_names with MACRO_NAMES
+
+ECM warned (ECMSetupQtPluginMacroNames.cmake:131): "For ECM >= 6.18, use
+the MACRO_NAMES argument instead of the JSON_* ones". The four effect
+factory macros are now given as MACRO_NAMES, as upstream KWin master
+does; with ECM 6.18 and later the JSON_ARGn positions are no longer used
+(moc's own dependency output tracks the JSON files), so AutoMoc behaves
+the same.
+
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -475,12 +475,10 @@
+ )
+ 
+ ecm_setup_qtplugin_macro_names(
+-    JSON_ARG2
++    MACRO_NAMES
+         "KWIN_EFFECT_FACTORY"
+-    JSON_ARG3
+         "KWIN_EFFECT_FACTORY_ENABLED"
+         "KWIN_EFFECT_FACTORY_SUPPORTED"
+-    JSON_ARG4
+         "KWIN_EFFECT_FACTORY_SUPPORTED_ENABLED"
+     CONFIG_CODE_VARIABLE
+         PACKAGE_SETUP_KWINEFFECTS_AUTOMOC_VARIABLES

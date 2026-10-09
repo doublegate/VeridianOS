@@ -1,0 +1,219 @@
+VeridianOS: state internal invariants GCC cannot see (-Wnull-dereference)
+
+GCC reported -Wnull-dereference ("potential null pointer dereference") at
+the remaining places in GLib, libgobject and libgirepository (target and
+host-tools builds alike). In each case a helper can return NULL in
+general, but not for the arguments used there; the build keeps
+g_assert() enabled, and g_assertion_message_expr() is noreturn, so a
+g_assert() stating the invariant is the explicit check the compiler sees.
+Valid input takes the same paths as before; an invariant violation now
+fails a named assertion instead of crashing on NULL.
+
+- glib/gkeyfile.c (g_key_file_set_group_comment,
+  g_key_file_get_group_comment): the named group was already found, and
+  every named group is followed in key_file->groups by at least the
+  unnamed top-comment group (always the last node), so its node and the
+  node after it (which holds the comment) exist.
+- glib/gvariant-parser.c (string_parse, bytestring_parse): only called
+  after the next token was peeked to be a (byte)string, so
+  token_stream_get() returns a token.
+- gobject/gsignal.c: handler_list_ensure() looks up the key it has just
+  inserted; handlers_find() and the three signal_parse_name() callers look
+  up registered signal ids (signal nodes are never removed); the first
+  element of a class_closure_bsa exists because the array is only created
+  together with it.
+- gobject/gtype.c (type_node_fundamental_info_I): a type's fundamental
+  type is registered before it, and none of the four callers handles a
+  NULL result; the NULL return is replaced by the assertion.
+- gobject/gtypemodule.c (complete_type_info, complete_interface_info):
+  GType only asks the plugin a type or interface was registered with.
+- girepository/girparser.c (parse_type_internal): str is the caller's
+  string or a temporary built with g_strdup()/g_strdup_printf(); GCC
+  cannot see that those return non-NULL and followed a NULL str through
+  the NULL branch of the g_str_has_prefix() macro to "*str" (line 684).
+  The assertion sits before the prefix checks; the existing scan-build
+  assertion further down is left alone.
+- girepository/girwriter.c (gi_ir_writer_write, reported inside the
+  G_TYPE_FROM_INSTANCE() macro at gobject/gtype.h:646): the info at an
+  index below gi_repository_get_n_infos() exists, so it is asserted
+  before the type dispatch whose fallback g_error() dereferenced it.
+
+diff -ru a/girepository/girparser.c b/girepository/girparser.c
+--- a/girepository/girparser.c	2026-10-08 17:11:02.360447905 -0400
++++ b/girepository/girparser.c	2026-10-08 17:08:44.682689279 -0400
+@@ -639,6 +639,10 @@
+         }
+     }
+ 
++  /* str is either the caller's string or a temporary_type built above
++   * (g_strdup() and g_strdup_printf() do not return NULL here). */
++  g_assert (str != NULL);
++
+   if (basic != NULL)
+     /* found a basic type */;
+   else if (g_str_has_prefix (str, "GLib.List") ||
+diff -ru a/girepository/girwriter.c b/girepository/girwriter.c
+--- a/girepository/girwriter.c	2026-10-08 17:11:02.360638003 -0400
++++ b/girepository/girwriter.c	2026-10-08 17:09:10.590129670 -0400
+@@ -1432,6 +1432,9 @@
+         {
+           GIBaseInfo *info = gi_repository_get_info (repository, cur_ns, j);
+ 
++          /* j < n_infos, so there is an info at this index. */
++          g_assert (info != NULL);
++
+           if (GI_IS_FUNCTION_INFO (info))
+             write_function_info (ns, (GIFunctionInfo *)info, xml);
+           else if (GI_IS_CALLBACK_INFO (info))
+diff -ru a/glib/gkeyfile.c b/glib/gkeyfile.c
+--- a/glib/gkeyfile.c	2026-10-08 17:11:02.359526469 -0400
++++ b/glib/gkeyfile.c	2026-10-08 17:03:50.693335590 -0400
+@@ -3785,6 +3785,10 @@
+   /* First remove any existing comment
+    */
+   group_node = g_key_file_lookup_group_node (key_file, group_name);
++  /* The group was found above, and every named group is followed in
++   * key_file->groups by at least the unnamed top-comment group, which is
++   * always the last node; so its node and the next one exist. */
++  g_assert (group_node != NULL && group_node->next != NULL);
+   group = group_node->next->data;
+   for (GList *lp = group->key_value_pairs; lp != NULL; )
+     {
+@@ -4019,6 +4023,10 @@
+     }
+ 
+   group_node = g_key_file_lookup_group_node (key_file, group_name);
++  /* The group was found above, and every named group is followed in
++   * key_file->groups by at least the unnamed top-comment group, which is
++   * always the last node; so its node and the next one exist. */
++  g_assert (group_node != NULL && group_node->next != NULL);
+   group_node = group_node->next;
+   group = (GKeyFileGroup *)group_node->data;  
+   return get_group_comment (key_file, group, error);
+diff -ru a/glib/gvariant-parser.c b/glib/gvariant-parser.c
+--- a/glib/gvariant-parser.c	2026-10-08 17:11:02.359764191 -0400
++++ b/glib/gvariant-parser.c	2026-10-08 17:04:18.861402728 -0400
+@@ -1721,6 +1721,8 @@
+   token_stream_start_ref (stream, &ref);
+   token = token_stream_get (stream);
+   token_stream_end_ref (stream, &ref);
++  /* Only called when the next token was peeked to be a string. */
++  g_assert (token != NULL);
+   length = strlen (token);
+   quote = token[0];
+ 
+@@ -1854,7 +1856,8 @@
+   token_stream_start_ref (stream, &ref);
+   token = token_stream_get (stream);
+   token_stream_end_ref (stream, &ref);
+-  g_assert (token[0] == 'b');
++  /* Only called when the next token was peeked to be a bytestring. */
++  g_assert (token != NULL && token[0] == 'b');
+   length = strlen (token);
+   quote = token[1];
+ 
+diff -ru a/gobject/gsignal.c b/gobject/gsignal.c
+--- a/gobject/gsignal.c	2026-10-08 17:11:02.395266238 -0400
++++ b/gobject/gsignal.c	2026-10-08 17:05:49.133747223 -0400
+@@ -386,6 +386,7 @@
+ {
+   GBSearchArray *hlbsa = g_hash_table_lookup (g_handler_list_bsa_ht, instance);
+   HandlerList key;
++  HandlerList *hlist;
+   
+   key.signal_id = signal_id;
+   key.handlers    = NULL;
+@@ -397,7 +398,10 @@
+     }
+   hlbsa = g_bsearch_array_insert (hlbsa, &g_signal_hlbsa_bconfig, &key);
+   g_hash_table_insert (g_handler_list_bsa_ht, instance, hlbsa);
+-  return g_bsearch_array_lookup (hlbsa, &g_signal_hlbsa_bconfig, &key);
++  hlist = g_bsearch_array_lookup (hlbsa, &g_signal_hlbsa_bconfig, &key);
++  /* The key was inserted (or already present) just above. */
++  g_assert (hlist != NULL);
++  return hlist;
+ }
+ 
+ static inline HandlerList*
+@@ -580,6 +584,9 @@
+ 	      if (!(mask & G_SIGNAL_MATCH_FUNC))
+ 		{
+ 		  node = LOOKUP_SIGNAL_NODE (hlist->signal_id);
++		  /* Handler lists only exist for registered signals, and
++		   * signal nodes are never removed. */
++		  g_assert (node != NULL);
+ 		  if (!node->c_marshaller)
+ 		    continue;
+ 		}
+@@ -1187,6 +1194,8 @@
+     {
+       SignalNode *node = LOOKUP_SIGNAL_NODE (signal_id);
+       
++      /* signal_parse_name() only returns registered signal ids. */
++      g_assert (node != NULL);
+       if (detail && !(node->flags & G_SIGNAL_DETAILED))
+ 	g_critical ("%s: signal '%s' does not support details", G_STRLOC, detailed_signal);
+       else if (!g_type_is_a (itype, node->itype))
+@@ -1838,6 +1847,8 @@
+       if (node->class_closure_bsa)
+ 	{
+ 	  ClassClosure *cc = g_bsearch_array_get_nth (node->class_closure_bsa, &g_class_closure_bconfig, 0);
++	  /* class_closure_bsa is only created together with its first element. */
++	  g_assert (cc != NULL);
+ 	  if (cc->closure->marshal == node->c_marshaller)
+ 	    _g_closure_set_va_marshal (cc->closure, va_marshaller);
+ 	}
+@@ -2436,6 +2447,8 @@
+     {
+       SignalNode *node = LOOKUP_SIGNAL_NODE (signal_id);
+ 
++      /* signal_parse_name() only returns registered signal ids. */
++      g_assert (node != NULL);
+       if (detail && !(node->flags & G_SIGNAL_DETAILED))
+ 	g_critical ("%s: signal '%s' does not support details", G_STRLOC, detailed_signal);
+       else if (!g_type_is_a (itype, node->itype))
+@@ -2546,6 +2559,8 @@
+     {
+       SignalNode *node = LOOKUP_SIGNAL_NODE (signal_id);
+ 
++      /* signal_parse_name() only returns registered signal ids. */
++      g_assert (node != NULL);
+       node_check_deprecated (node);
+ 
+       if (detail && !(node->flags & G_SIGNAL_DETAILED))
+diff -ru a/gobject/gtype.c b/gobject/gtype.c
+--- a/gobject/gtype.c	2026-10-08 17:11:02.360163081 -0400
++++ b/gobject/gtype.c	2026-10-08 17:06:19.940414848 -0400
+@@ -506,7 +506,10 @@
+   if (ftype != NODE_TYPE (node))
+     node = lookup_type_node_I (ftype);
+   
+-  return node ? G_STRUCT_MEMBER_P (node, -SIZEOF_FUNDAMENTAL_INFO) : NULL;
++  /* A type's fundamental type is registered before the type itself, and no
++   * caller handles a NULL result. */
++  g_assert (node != NULL);
++  return G_STRUCT_MEMBER_P (node, -SIZEOF_FUNDAMENTAL_INFO);
+ }
+ 
+ static TypeNode*
+diff -ru a/gobject/gtypemodule.c b/gobject/gtypemodule.c
+--- a/gobject/gtypemodule.c	2026-10-08 17:11:02.395766902 -0400
++++ b/gobject/gtypemodule.c	2026-10-08 17:07:01.129202336 -0400
+@@ -332,6 +332,8 @@
+   GTypeModule *module = G_TYPE_MODULE (plugin);
+   ModuleTypeInfo *module_type_info = g_type_module_find_type_info (module, g_type);
+ 
++  /* GType only asks the plugin a type was registered with. */
++  g_assert (module_type_info != NULL);
+   *info = module_type_info->info;
+   
+   if (module_type_info->info.value_table)
+@@ -347,6 +349,8 @@
+   GTypeModule *module = G_TYPE_MODULE (plugin);
+   ModuleInterfaceInfo *module_interface_info = g_type_module_find_interface_info (module, instance_type, interface_type);
+ 
++  /* GType only asks the plugin an interface was added with. */
++  g_assert (module_interface_info != NULL);
+   *info = module_interface_info->info;
+ }
+ 

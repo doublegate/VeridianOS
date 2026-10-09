@@ -1,0 +1,72 @@
+VeridianOS: grep -E instead of the obsolescent egrep
+
+GNU grep 3.8 and later print "egrep: warning: egrep is obsolescent;
+using grep -E" for every call of egrep, which has always meant grep -E.
+Configure runs a few literal egrep calls (the shared-library run-path
+check in config.rpath, the ld and texinfo version checks), so those
+warnings went through the configure output. They now call grep -E. Same
+matches on every grep.
+
+--- a/config.rpath
++++ b/config.rpath
+@@ -143,7 +143,7 @@
+       ld_shlibs=no
+       ;;
+     beos*)
+-      if $LD --help 2>&1 | egrep ': supported targets:.* elf' > /dev/null; then
++      if $LD --help 2>&1 | grep -E ': supported targets:.* elf' > /dev/null; then
+         :
+       else
+         ld_shlibs=no
+@@ -162,9 +162,9 @@
+     netbsd*)
+       ;;
+     solaris* | sysv5*)
+-      if $LD -v 2>&1 | egrep 'BFD 2\.8' > /dev/null; then
++      if $LD -v 2>&1 | grep -E 'BFD 2\.8' > /dev/null; then
+         ld_shlibs=no
+-      elif $LD --help 2>&1 | egrep ': supported targets:.* elf' > /dev/null; then
++      elif $LD --help 2>&1 | grep -E ': supported targets:.* elf' > /dev/null; then
+         :
+       else
+         ld_shlibs=no
+@@ -174,7 +174,7 @@
+       hardcode_direct=yes
+       ;;
+     *)
+-      if $LD --help 2>&1 | egrep ': supported targets:.* elf' > /dev/null; then
++      if $LD --help 2>&1 | grep -E ': supported targets:.* elf' > /dev/null; then
+         :
+       else
+         ld_shlibs=no
+--- a/configure
++++ b/configure
+@@ -10805,7 +10805,7 @@
+ fi
+ 
+ if test x${use_gnu_ld} = x &&
+-   echo " ${configdirs} " | egrep " (go)?ld " > /dev/null 2>&1 ; then
++   echo " ${configdirs} " | grep -E " (go)?ld " > /dev/null 2>&1 ; then
+   with_gnu_ld=yes
+   extra_host_args="$extra_host_args --with-gnu-ld"
+ fi
+@@ -12041,7 +12041,7 @@
+     # For an installed makeinfo, we require it to be from texinfo 4.7 or
+     # higher, else we use the "missing" dummy.
+     if ${MAKEINFO} --version \
+-       | egrep 'texinfo[^0-9]*(4\.([7-9]|[1-9][0-9])|[5-9]|[1-9][0-9])' >/dev/null 2>&1; then
++       | grep -E 'texinfo[^0-9]*(4\.([7-9]|[1-9][0-9])|[5-9]|[1-9][0-9])' >/dev/null 2>&1; then
+       :
+     else
+       MAKEINFO="$MISSING makeinfo"
+--- a/libctf/configure
++++ b/libctf/configure
+@@ -17216,7 +17216,7 @@
+     # We require texinfo to be 6.3 or later, for a working synindex
+     # and validatemenus: otherwise we fall back to /bin/true.
+     if ${MAKEINFO} --version \
+-       | egrep 'texinfo[^0-9]*(6\.[3-9]|[7-9]|[1-6][0-9])' >/dev/null 2>&1; then
++       | grep -E 'texinfo[^0-9]*(6\.[3-9]|[7-9]|[1-6][0-9])' >/dev/null 2>&1; then
+       build_info=yes
+     else
+         build_info=

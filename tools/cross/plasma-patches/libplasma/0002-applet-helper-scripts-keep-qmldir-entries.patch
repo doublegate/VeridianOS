@@ -1,0 +1,44 @@
+VeridianOS: applet helper scripts keep their qmldir entries, explicitly
+
+plasma_add_applet() hands all of an applet's QML sources, its JavaScript
+helpers included, to the applet's QML module. For each uppercase-named
+plain script (not an ECMAScript module, no ".pragma library" in its first
+128 bytes) Qt adds a qmldir entry and warns ("... is not an ECMAScript
+module and also doesn't contain '.pragma library'. It will be
+re-evaluated in the context of every QML document that explicitly or
+implicitly imports plasma.applet... Set its QT_QML_SKIP_QMLDIR_ENTRY
+source file property to FALSE if you really want this to happen").
+
+Applets do use these entries: the task manager calls
+TaskManagerApplet.LayoutMetrics.* through its module, so dropping them
+breaks it. The scripts' sources are left alone (a ".pragma library"
+would share one instance across documents, a different semantics). The
+property is now set to FALSE for every script among the applet's QML
+sources and resources where it is unset, the explicit form Qt asks for;
+a value an applet sets itself is respected. (Qt looks for ".pragma
+library" only in a script's first 128 bytes, so a library script whose
+pragma follows its license header -- the colour picker's Logic.js -- is
+warned about too.)
+The generated qmldir is identical to before.
+
+--- a/PlasmaMacros.cmake
++++ b/PlasmaMacros.cmake
+@@ -65,6 +65,18 @@
+    include(ECMQmlModule)
+    ecm_add_qml_module(${id} URI "plasma.applet.${id}" QT_NO_PLUGIN ${ARGS_QML_ARGS})
+ 
++   # An applet's helper scripts keep their qmldir entries: some applets use
++   # them through the module (the task manager's TaskManagerApplet.LayoutMetrics).
++   # Saying so explicitly is how Qt accepts a plain (non-library) script there.
++   foreach(_source IN LISTS ARGS_QML_SOURCES ARGS_RESOURCES)
++      if(_source MATCHES "\\.js$")
++         get_source_file_property(_skip "${_source}" QT_QML_SKIP_QMLDIR_ENTRY)
++         if(_skip STREQUAL "NOTFOUND")
++            set_source_files_properties("${_source}" PROPERTIES QT_QML_SKIP_QMLDIR_ENTRY FALSE)
++         endif()
++      endif()
++   endforeach()
++
+    ecm_target_qml_sources(${id} SOURCES ${ARGS_QML_SOURCES} RESOURCES ${ARGS_RESOURCES})
+ 
+    set_target_properties(${id} PROPERTIES LIBRARY_OUTPUT_DIRECTORY "${CMAKE_LIBRARY_OUTPUT_DIRECTORY}/plasma/applets")

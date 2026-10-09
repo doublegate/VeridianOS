@@ -23,6 +23,37 @@ export AR="${HOST}-ar"
 export RANLIB="${HOST}-ranlib"
 export NM="${HOST}-nm"
 export STRIP="${HOST}-strip"
+# The other tools configure scripts look for under the target's name:
+# file (any build of it reads every ELF file), and dlltool and windres
+# (Windows DLLs and resources only; there are none for the target). Named
+# here, configure does not fall back to the unprefixed host tools and warn.
+export FILECMD="file"
+export DLLTOOL="false"
+export RC="false"
+
+# The host's Bison, with its C skeleton patched (deps-patches/bison_yynerrs.py:
+# pure parsers no longer leave their error count set but unused), through
+# a copy of its data directory that BISON_PKGDATADIR points at. Remade when
+# the host's Bison or the patch changes.
+_veridian_bison_data() {
+    local data="${VERIDIAN_HOST_TOOLS}/share/bison-veridian"
+    local patch="${VERIDIAN_CROSS_DIR}/deps-patches/bison_yynerrs.py"
+    local stamp
+    stamp="$(bison --version | head -1) $(sha256sum < "${patch}")"
+    if [[ "$(cat "${data}/.veridian-stamp" 2>/dev/null)" != "${stamp}" ]]; then
+        rm -rf "${data}.tmp"
+        mkdir -p "$(dirname "${data}")"
+        if ! cp -a "$(bison --print-datadir)" "${data}.tmp" ||
+           ! python3 -I "${patch}" "${data}.tmp"; then
+            die "failed to prepare Bison's data"
+        fi
+        echo "${stamp}" > "${data}.tmp/.veridian-stamp"
+        rm -rf "${data}"
+        mv "${data}.tmp" "${data}"
+    fi
+    export BISON_PKGDATADIR="${data}"
+}
+_veridian_bison_data
 export CFLAGS="-O2 -fPIC"
 export CXXFLAGS="-O2 -fPIC"
 # Only the sysroot's .pc files, with their /usr paths placed in the sysroot.
@@ -31,9 +62,20 @@ export PKG_CONFIG_SYSROOT_DIR="${SYSROOT}"
 unset PKG_CONFIG_PATH
 export PKG_CONFIG="pkg-config"
 
+# The build machine, as its own compiler names it. Given to every autotools
+# configure with --build: with --host alone a configure decides whether it
+# is cross compiling by running a test program, and a build host with
+# musl's loader installed (/lib/ld-musl-x86_64.so.1, Arch's musl package)
+# runs it -- against the host's libraries in /lib. The configure then
+# runs its later test programs the same way and takes the host's answers
+# for the target, and the results differ between build machines.
+# shellcheck disable=SC2034
+BUILD_TRIPLET="$(cc -dumpmachine)"
+
 # Autotools configure arguments (used by the sourcing scripts).
 # shellcheck disable=SC2034
 COMMON_CONFIGURE=(
+    --build="${BUILD_TRIPLET}"
     --host="${HOST}"
     --prefix=/usr
     --sysconfdir=/etc
@@ -117,6 +159,13 @@ open(path, "w").write(s.replace(old, new))
 PYEOF
 }
 
+# apply_pkg_patches NAME SRC: the patches for package NAME
+# (tools/cross/pkg-patches/NAME/, each explaining itself) to the freshly
+# extracted tree SRC.
+apply_pkg_patches() {
+    apply_patches "${VERIDIAN_CROSS_DIR}/pkg-patches/$1" "$2"
+}
+
 # apply_patches DIR SRC: DIR's *.patch files, in order, to the freshly
 # extracted tree SRC.
 apply_patches() {
@@ -139,11 +188,33 @@ refresh_config_scripts() {
     done < <(find "$1" \( -name config.sub -o -name config.guess \) -print0)
 }
 
+# The options in OPTIONS... that SRC's configure lists in its --help: a
+# configure reports any it does not know ("unrecognized options").
+known_options() {
+    local src="$1" help opt name positive
+    shift
+    help="$(cd "${src}" && ./configure --help)"
+    for opt in "$@"; do
+        # --help lists --with-X for --without-X and usually --enable-X
+        # for --disable-X.
+        name="${opt%%=*}"
+        positive="${name/#--without-/--with-}"
+        positive="${positive/#--disable-/--enable-}"
+        if [[ "${help}" == *"  ${name}"[[:space:]\[=]* || "${help}" == *"  ${positive}"[[:space:]\[=]* ]]; then
+            echo "${opt}"
+        fi
+    done
+}
+
 # Autotools (run in the configured tree): build, stage into the sysroot,
 # and drop libtool archives. A .la file names its libdir (/usr/lib), which
 # a later libtool link would take as the build host's /usr/lib.
 make_install() {
     make -j"${JOBS}"
+    # libtool's notes on a staged install's normal steps (relinking for
+    # the target paths) are warnings unless patched (see the script).
+    python3 -I "${VERIDIAN_CROSS_DIR}/deps-patches/libtool_staged_install.py" . ||
+        die "failed to patch the package's libtool"
     make install DESTDIR="${SYSROOT}"
     rm -f "${SYSROOT}"/usr/lib/*.la
 }

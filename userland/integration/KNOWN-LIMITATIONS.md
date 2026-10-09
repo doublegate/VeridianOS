@@ -42,6 +42,22 @@
 | Cross-compilation required | All KDE components must be cross-compiled from a host | Use provided build scripts in each component directory |
 | No native package manager | KDE libraries installed manually to sysroot | Use `build-kde-rootfs.sh` for full rootfs |
 
+### Build warnings
+
+A clean build of the whole stack (`tools/cross/build-all-kde.sh`, musl and the toolchain
+through Plasma) printed 2,319 warnings before the v0.27 cleanup and prints 43 now; each was
+removed by fixing its cause (`tools/cross/PATCHES.md`). The 43 left, from the 2026-10-09 build:
+
+| Source | Count | Cause |
+|-----------|---------|------------|
+| GCC 16.2 build tree | 2 | libtool's "remember to run `libtool --finish`" for lto-plugin and libatomic, installed into the toolchain prefix (nothing to finish there: no ldconfig, no system library path) |
+| libxslt 1.1.45 configure | 1 | "using cross tools not prefixed with host triplet": configure looks up `xml2-config` as a tool and finds the build host's `/usr/bin/xml2-config` |
+| wayland-protocols 1.49 | 5 | "since version not increasing" in the experimental xx-input-method-v2 and xx-text-input-v3: an upstream ordering defect; reordering the requests would change their opcodes |
+| HarfBuzz 14.6.0 | 1 | meson notes that ragel is not installed; it is needed only to regenerate the state machines HarfBuzz ships generated |
+| Qt Multimedia 6.12 | 2 | no audio and no media backend (see *No media playback backend* above) |
+| Qt and Plasma type registration | 31 | moc/qmltyperegistrar cannot resolve some types: template base classes (qtwayland's `QWaylandCompositorExtensionTemplate<...>` and friends, plasma-workspace's `QWaylandClientExtensionTemplate<Screencasting>`), foreign types without metatypes (qtpositioning, qtwayland texture sharing, a generated D-Bus interface, `KAbstractViewAdapter`), two `KeyState` types, a QML module name with dashes, three QML types named in lowercase (qtlocation, the comic applet) and one property without a NOTIFY signal (qtwayland). They concern the QML type information used by tooling, not the compiled code |
+| KWin | 1 | CMake: the `UDev` package's DESCRIPTION is set twice (KWin's find module and ECM's) |
+
 ### Performance
 
 | Limitation | Details | Workaround |

@@ -84,21 +84,50 @@ stage_elf() {
 # per file), so the raw bytes cannot be compared.
 is_elf() { [[ "$(head -c 4 "$1" | od -An -tx1 | tr -d ' \n')" == 7f454c46 ]]; }
 
-# Every ELF program the build installed (scripts in usr/bin are build
-# helpers: *-config, code generators).
+# Shell scripts in the program directories that serve only builds: the
+# libraries' *-config scripts and Qt's build wrappers (qmake, qtpaths and
+# qt-cmake run the build host's Qt tools for the target).
+BUILD_SCRIPTS=(
+    usr/bin/glib-gettextize usr/bin/qmake usr/bin/qmake6 usr/bin/qtpaths usr/bin/qtpaths6
+    usr/bin/qt-cmake usr/bin/qt-cmake-create usr/bin/qt-configure-module
+)
+
+# A POSIX shell script (#!/bin/sh) the system runs: the session's helpers
+# (plasma-dbus-run-session-if-needed, plasma-sourceenv.sh), pam_kwallet_init,
+# kdeeject, kinfo, ... -- not a build script. Scripts for other interpreters
+# (Python, Perl, bash) are build or developer tools; the system has none of
+# those interpreters.
+is_runtime_script() {
+    local rel="$1" first
+    [[ "${rel}" != *-config ]] || return 1
+    local s
+    for s in "${BUILD_SCRIPTS[@]}"; do
+        [[ "${rel}" != "${s}" ]] || return 1
+    done
+    IFS= read -r first < "${SYSROOT}/${rel}" || return 1
+    [[ "${first}" =~ ^\#![[:space:]]*/bin/sh([[:space:]]|$) ]] ||
+        [[ "${rel}" == usr/lib/libexec/plasma-sourceenv.sh ]]
+}
+
+# Every ELF program the build installed, and the shell scripts the system
+# runs (is_runtime_script).
 copy_programs() {
     log "Copying programs..."
-    local dir file count=0
+    local dir file rel count=0 scripts=0
     for dir in usr/bin usr/libexec usr/lib/libexec; do
         [[ -d "${SYSROOT}/${dir}" ]] || continue
         while IFS= read -r -d '' file; do
+            rel="${file#"${SYSROOT}/"}"
             if is_elf "${file}"; then
-                stage_elf "${file}" "${file#"${SYSROOT}/"}"
+                stage_elf "${file}" "${rel}"
                 count=$((count + 1))
+            elif is_runtime_script "${rel}"; then
+                install -Dm755 "${file}" "${STAGING}/${rel}"
+                scripts=$((scripts + 1))
             fi
         done < <(find "${SYSROOT}/${dir}" -type f -print0)
     done
-    log "  ${count} programs."
+    log "  ${count} programs, ${scripts} scripts."
 }
 
 # musl's dynamic loader, and every shared library, plugin and QML plugin

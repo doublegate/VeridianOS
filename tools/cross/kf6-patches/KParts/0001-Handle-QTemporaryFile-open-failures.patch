@@ -1,0 +1,71 @@
+VeridianOS: KParts: handle QTemporaryFile::open() failures
+
+GCC reported ignoring return value of 'bool QTemporaryFile::open()'
+[-Wunused-result] at src/readonlypart.cpp:181 and src/readwritepart.cpp:209
+and :247. Real bugs: when the temporary file could not be created (full or
+read-only temp directory), QTemporaryFile::fileName() is empty and the code
+carried on with an empty local path:
+
+- ReadOnlyPartPrivate::openRemoteFile() started a KIO::file_copy() to an
+  empty destination URL. It now logs the error with KPARTSLOG and emits
+  canceled(errorString) (as the job-error path does), without starting the
+  copy.
+- ReadWritePartPrivate::prepareSaving() stored the empty path and marked it
+  as a temp file. It now logs the error, leaves m_file empty and m_bTemp
+  false; saveFile() then fails on the empty local path and save() emits
+  canceled(), as it does for any other save failure.
+- ReadWritePart::saveToUrl() went on to hard-link to an empty path. It now
+  logs the error and returns false, the result it already returns when the
+  hard link fails.
+
+Behaviour is unchanged when the temporary file can be created.
+
+diff -ru a/src/readonlypart.cpp b/src/readonlypart.cpp
+--- a/src/readonlypart.cpp	2026-10-08 17:27:16.273002812 -0400
++++ b/src/readonlypart.cpp	2026-10-08 17:27:16.288642400 -0400
+@@ -178,7 +178,13 @@
+     }
+     QTemporaryFile tempFile(QDir::tempPath() + QLatin1Char('/') + m_metaData.pluginId() + QLatin1String("XXXXXX") + extension);
+     tempFile.setAutoRemove(false);
+-    tempFile.open();
++    if (!tempFile.open()) {
++        qCWarning(KPARTSLOG) << "Could not create a temporary file for" << m_url << ":" << tempFile.errorString();
++        m_bTemp = false;
++        m_file.clear();
++        Q_EMIT q->canceled(tempFile.errorString());
++        return;
++    }
+     m_file = tempFile.fileName();
+ 
+     QUrl destURL = QUrl::fromLocalFile(m_file);
+diff -ru a/src/readwritepart.cpp b/src/readwritepart.cpp
+--- a/src/readwritepart.cpp	2026-10-08 17:27:16.276532571 -0400
++++ b/src/readwritepart.cpp	2026-10-08 17:27:16.288716883 -0400
+@@ -206,7 +206,13 @@
+         if (m_file.isEmpty() || !m_bTemp) {
+             QTemporaryFile tempFile;
+             tempFile.setAutoRemove(false);
+-            tempFile.open();
++            if (!tempFile.open()) {
++                // saveFile() then fails on the empty local path and save() reports it.
++                qCWarning(KPARTSLOG) << "Could not create a temporary file for saving" << m_url << ":" << tempFile.errorString();
++                m_file.clear();
++                m_bTemp = false;
++                return;
++            }
+             m_file = tempFile.fileName();
+             m_bTemp = true;
+         }
+@@ -244,7 +250,11 @@
+             d->m_uploadJob = nullptr;
+         }
+         QTemporaryFile *tempFile = new QTemporaryFile();
+-        tempFile->open();
++        if (!tempFile->open()) {
++            qCWarning(KPARTSLOG) << "Could not create a temporary file for uploading to" << d->m_url << ":" << tempFile->errorString();
++            delete tempFile;
++            return false;
++        }
+         QString uploadFile = tempFile->fileName();
+         delete tempFile;
+         QUrl uploadUrl = QUrl::fromLocalFile(uploadFile);

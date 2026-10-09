@@ -1,0 +1,21 @@
+VeridianOS: FindIconv names its results after the package
+
+cmake/FindIconv.cmake (used by find_package(Iconv)) passed "ICONV" to
+find_package_handle_standard_args(), which CMake reports ("The package
+name passed to find_package_handle_standard_args() (ICONV) does not match
+the name of the calling package (Iconv)"). It now passes "Iconv";
+find_package_handle_standard_args() sets ICONV_FOUND as well as
+Iconv_FOUND, so the module's own checks and CMakeLists.txt's summary,
+which read ICONV_FOUND, see the same result.
+
+--- a/cmake/FindIconv.cmake
++++ b/cmake/FindIconv.cmake
+@@ -73,7 +73,7 @@
+ # handle the QUIETLY and REQUIRED arguments and set ICONV_FOUND to TRUE if
+ # all listed variables are TRUE
+ include(FindPackageHandleStandardArgs)
+-find_package_handle_standard_args(ICONV
++find_package_handle_standard_args(Iconv
+     REQUIRED_VARS ICONV_FOUND_ANY ICONV_INCLUDE_DIR
+     VERSION_VAR ICONV_VERSION_STRING)
+ 

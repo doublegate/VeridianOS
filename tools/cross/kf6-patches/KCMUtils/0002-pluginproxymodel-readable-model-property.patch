@@ -1,0 +1,30 @@
+VeridianOS: KPluginProxyModel's model property can be read
+
+moc warned (kpluginproxymodel.h:18): "Property declaration model has
+neither an associated QProperty<> member, nor a READ accessor function nor
+an associated MEMBER variable", since Q_PROPERTY(QAbstractListModel *model
+WRITE setModel) had no READ. The property now reads back the source model
+that setModel() installed (QML bindings already only assign it). Setting it
+is unchanged.
+
+--- a/src/core/kpluginproxymodel.h
++++ b/src/core/kpluginproxymodel.h
+@@ -15,13 +15,17 @@
+ {
+     Q_OBJECT
+     Q_PROPERTY(QString query READ query WRITE setQuery NOTIFY queryChanged)
+-    Q_PROPERTY(QAbstractListModel *model WRITE setModel)
++    Q_PROPERTY(QAbstractListModel *model READ model WRITE setModel)
+ public:
+     explicit KPluginProxyModel(QObject *parent = nullptr);
+     ~KPluginProxyModel() override;
+ 
+     QString query() const;
+     void setQuery(const QString &query);
++    QAbstractListModel *model() const
++    {
++        return qobject_cast<QAbstractListModel *>(sourceModel());
++    }
+     void setModel(QAbstractListModel *model)
+     {
+         setSourceModel(model);

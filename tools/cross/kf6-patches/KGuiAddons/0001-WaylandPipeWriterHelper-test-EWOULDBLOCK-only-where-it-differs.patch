@@ -1,0 +1,26 @@
+VeridianOS: WaylandPipeWriterHelper: test EWOULDBLOCK only where it differs from EAGAIN
+
+GCC reported logical 'or' of equal expressions [-Wlogical-op] at
+src/systemclipboard/waylandpipewriterhelper.cpp:32: on Linux (glibc and
+musl) EWOULDBLOCK is defined as EAGAIN, so
+"errno == EAGAIN || errno == EWOULDBLOCK" compares the same value twice.
+POSIX allows the two to differ, so the second test is kept, compiled only
+where EWOULDBLOCK != EAGAIN. No behaviour change on any platform.
+
+diff -ru a/src/systemclipboard/waylandpipewriterhelper.cpp b/src/systemclipboard/waylandpipewriterhelper.cpp
+--- a/src/systemclipboard/waylandpipewriterhelper.cpp	2026-10-08 17:31:21.141587006 -0400
++++ b/src/systemclipboard/waylandpipewriterhelper.cpp	2026-10-08 17:31:21.251160775 -0400
+@@ -29,7 +29,12 @@
+                 offset += n;
+                 continue;
+             } else if (n < 0) {
+-                if (errno == EAGAIN || errno == EWOULDBLOCK)
++                // EWOULDBLOCK may be EAGAIN (it is on Linux); only test it separately where it differs.
++                if (errno == EAGAIN
++#if EWOULDBLOCK != EAGAIN
++                    || errno == EWOULDBLOCK
++#endif
++                )
+                     continue;
+                 if (errno == EPIPE)
+                     return SafeWriteResult::Closed;

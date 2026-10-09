@@ -1,0 +1,30 @@
+VeridianOS: ksld protocol messages in increasing version order
+
+wayland-scanner expects each message's "since" version to be at least
+that of the message before it in the file ("since version not
+increasing"): the version 3 requests suspendSystem and hibernateSystem
+came before the version 2 events osdProgress and osdText. Requests and
+events are numbered separately, each in file order, so moving the two
+events before the two requests changes no opcode: the protocol on the
+wire is the same.
+
+--- a/protocols/ksld.xml
++++ b/protocols/ksld.xml
+@@ -5,8 +5,6 @@
+             <arg name="id" type="uint"/>
+         </request>
+         <!-- Everything after here is deprecated -->
+-        <request name="suspendSystem" since="3"/>
+-        <request name="hibernateSystem" since="3"/>
+         <event name="osdProgress" since="2">
+             <arg name="icon" type="string"/>
+             <arg name="percent" type="int"/>
+@@ -16,6 +14,8 @@
+             <arg name="icon" type="string"/>
+             <arg name="text" type="string"/>
+         </event>
++        <request name="suspendSystem" since="3"/>
++        <request name="hibernateSystem" since="3"/>
+         <event name="canSuspendSystem" since="3">
+             <arg name="enabled" type="uint"/>
+         </event>

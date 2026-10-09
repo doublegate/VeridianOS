@@ -57,6 +57,7 @@ build_dbus() {
     fetch "dbus-${DBUS_VER}.tar.xz" \
         "https://dbus.freedesktop.org/releases/dbus/dbus-${DBUS_VER}.tar.xz" \
         "dbus-${DBUS_VER}" "${DBUS_SHA256}"
+    apply_pkg_patches dbus "${BUILD_DIR}/dbus-${DBUS_VER}"
     log "Building D-Bus ${DBUS_VER}..."
     meson_build "${BUILD_DIR}/dbus-${DBUS_VER}" "${BUILD_DIR}/dbus-build" \
         -Dsystemd=disabled \
@@ -101,6 +102,7 @@ fetch_glib() {
         "glib-${GLIB_VER}" "${GLIB_SHA256}"
     python3 -I "${SCRIPT_DIR}/deps-patches/glib_vasnprintf_sign_compare.py" \
         "${BUILD_DIR}/glib-${GLIB_VER}/glib/gnulib/vasnprintf.c" || die "failed to patch GLib vasnprintf.c"
+    apply_pkg_patches glib "${BUILD_DIR}/glib-${GLIB_VER}"
 }
 
 # The code generators (gdbus-codegen, glib-mkenums, glib-genmarshal,
@@ -265,6 +267,7 @@ build_polkit() {
     fetch "polkit-${POLKIT_VER}.tar.gz" \
         "https://github.com/polkit-org/polkit/archive/refs/tags/${POLKIT_VER}.tar.gz" \
         "polkit-${POLKIT_VER}" "${POLKIT_SHA256}"
+    apply_pkg_patches polkit "${BUILD_DIR}/polkit-${POLKIT_VER}"
     log "Building polkit ${POLKIT_VER}..."
     meson_build "${BUILD_DIR}/polkit-${POLKIT_VER}" "${BUILD_DIR}/polkit-build" \
         -Dsession_tracking=ConsoleKit \

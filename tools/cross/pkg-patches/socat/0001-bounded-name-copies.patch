@@ -1,0 +1,82 @@
+VeridianOS: socat copies names into fixed-size fields with their bounds
+
+GCC (-Wstringop-truncation) reported four strncpy() calls; two are real
+defects, two only stated their intent badly:
+
+- xio-ip6.c: the interface of an IPv6 multicast/scope option was copied
+  from a 512-byte parse buffer into a 16-byte (IF_NAMESIZE) allocation
+  with strncpy(), unterminated when the name was 16 characters or more;
+  ifindex() then read past the allocation. A name that long is now
+  rejected ("interface name too long"), as no interface can have it.
+- xio-socket.c: a temporary abstract UNIX socket name was copied at
+  sun_path + 1 with sun_path's full size as the bound, one byte past the
+  field. The bound is now the room after that first byte.
+- xio-unix.c: a path longer than sun_path is truncated on purpose (socat
+  warns), and Linux does not need the field terminated; the copy is now
+  an explicit clear and bounded memcpy, the same bytes as before.
+- xio-interface.c: the name was already validated as an existing
+  interface (so shorter than IFNAMSIZ); it is now copied with room for
+  its terminator.
+
+--- a/xio-interface.c
++++ b/xio-interface.c
+@@ -120,7 +120,8 @@
+    if (rc < 0)
+       return rc;
+ 
+-   strncpy(sfd->para.interface.name, ifname, IFNAMSIZ);
++   strncpy(sfd->para.interface.name, ifname, IFNAMSIZ-1);
++   sfd->para.interface.name[IFNAMSIZ-1] = '\0';
+    _xiointerface_get_iff(sfd->fd, ifname, &sfd->para.interface.save_iff);
+    _xiointerface_apply_iff(sfd->fd, ifname, sfd->para.interface.iff_opts);
+    if (_interface_retrieve_vlan(sfd, opts) < 0)
+--- a/xio-unix.c
++++ b/xio-unix.c
+@@ -98,7 +98,8 @@
+       Warn2("unix socket address "F_Zu" characters long, truncating to "F_Zu"",
+ 	    pathlen, sizeof(saun->sun_path));
+    }
+-   strncpy(saun->sun_path, path, sizeof(saun->sun_path));	/* ok */
++   memset(saun->sun_path, 0, sizeof(saun->sun_path));
++   memcpy(saun->sun_path, path, MIN(pathlen, sizeof(saun->sun_path)));	/* ok */
+    if (tight) {
+       len = sizeof(struct sockaddr_un)-sizeof(saun->sun_path)+
+ 	 MIN(pathlen, sizeof(saun->sun_path));
+--- a/xio-socket.c
++++ b/xio-socket.c
+@@ -2183,7 +2183,12 @@
+ 	       errno = _errno;
+ 	       return -1;
+ 	    }
+-	    strncpy(us->un.sun_path+(abstract?1:0), sockname, sizeof(us->un.sun_path));
++	    {
++	       size_t off = abstract?1:0;
++	       size_t room = sizeof(us->un.sun_path) - off;
++	       memset(us->un.sun_path+off, 0, room);
++	       memcpy(us->un.sun_path+off, sockname, MIN(strlen(sockname), room));
++	    }
+ 	    uslen = sizeof(&((struct sockaddr_un *)0)->sun_path) +
+ 	       Min(strlen(sockname), sizeof(us->un.sun_path)); /*?*/
+ 	    free(sockname);
+--- a/xio-ip6.c
++++ b/xio-ip6.c
+@@ -574,13 +574,18 @@
+       Error1("syntax in option %s: missing ':'", token);
+    }
+    *buffp++ = '\0';
++   if (strlen(buff) >= IF_NAMESIZE) {
++      Error1("interface name too long in \"%s\"", token);
++      free(opt->value.u_string);
++      return -1;
++   }
+    if ((opt->value2.u_string/*ifindex*/ = Malloc(IF_NAMESIZE)) == NULL) {
+       int _errno = errno;
+       free(opt->value.u_string);
+       errno = _errno;
+       return -1;
+    }
+-   strncpy(opt->value2.u_string/*ifindex*/, buff, IF_NAMESIZE);
++   strcpy(opt->value2.u_string/*ifindex*/, buff);
+ 
+    ++tokp;
+    /* Parse second IP address (source address), expect ':' or '\0'' */

@@ -1,0 +1,80 @@
+VeridianOS: fix Solid compiler warnings (deprecated iterable, dead variable, null QPointer)
+
+GCC reported, for the VeridianOS cross build (Qt 6.12):
+
+- src/solid/devices/frontend/predicate.cpp:226, :227: 'QSequentialIterable'
+  is deprecated: Use QMetaSequence's iterables and iterators instead
+  [-Wdeprecated-declarations]. Ported to QMetaSequence::Iterable, which
+  QVariant converts to through the same registered sequential-container
+  converters and whose const iterator also yields QVariant elements.
+  No behaviour change.
+- src/solid/devices/backends/udisks2/udisksopticaldisc.cpp:41: variable
+  'curr_record' set but not used [-Wunused-but-set-variable]. The counter is
+  only incremented; remove it. No behaviour change.
+- libstdc++ bits/atomic_base.h:658: '__atomic_sub_fetch_4' writing 4 bytes
+  into a region of size 0 [-Wstringop-overflow], "destination object is
+  likely at address zero", inlined from
+  DeviceManagerPrivate::~DeviceManagerPrivate() (devicemanager.cpp:46).
+  The destructor walks a copy of m_devicesMap, a hash of
+  QPointer<DevicePrivate>, and called dev.data()->ref.deref() without
+  checking the pointer, so a QPointer whose DevicePrivate is already gone
+  would be dereferenced as nullptr. Every other lookup of m_devicesMap in
+  this file checks the pointer first; the destructor now does the same.
+  No change for live entries.
+
+diff -ru a/src/solid/devices/backends/udisks2/udisksopticaldisc.cpp b/src/solid/devices/backends/udisks2/udisksopticaldisc.cpp
+--- a/src/solid/devices/backends/udisks2/udisksopticaldisc.cpp	2026-10-08 17:12:14.455393617 -0400
++++ b/src/solid/devices/backends/udisks2/udisksopticaldisc.cpp	2026-10-08 17:12:14.537481661 -0400
+@@ -37,8 +37,6 @@
+     char dirname[256];
+     /* our position into the path table */
+     int pos = 0;
+-    /* the path table record we're on */
+-    int curr_record = 1;
+     /* import debug category */
+     using Solid::Backends::UDisks2::UDISKS2;
+ 
+@@ -124,7 +122,6 @@
+ 
+         /* update our position */
+         pos += 8 + len_di;
+-        curr_record++;
+     }
+ 
+     close(fd);
+diff -ru a/src/solid/devices/frontend/devicemanager.cpp b/src/solid/devices/frontend/devicemanager.cpp
+--- a/src/solid/devices/frontend/devicemanager.cpp	2026-10-08 17:12:14.488392317 -0400
++++ b/src/solid/devices/frontend/devicemanager.cpp	2026-10-08 17:13:36.338205120 -0400
+@@ -43,7 +43,8 @@
+     // take a copy as m_devicesMap is changed when DevicePrivate is destroyed
+     const auto deviceMap = m_devicesMap;
+     for (QPointer<DevicePrivate> dev : deviceMap) {
+-        if (!dev.data()->ref.deref()) {
++        // A QPointer is null once its DevicePrivate is gone; skip it, as the other lookups here do.
++        if (dev && !dev->ref.deref()) {
+             delete dev.data();
+         }
+     }
+diff -ru a/src/solid/devices/frontend/predicate.cpp b/src/solid/devices/frontend/predicate.cpp
+--- a/src/solid/devices/frontend/predicate.cpp	2026-10-08 17:12:14.415585625 -0400
++++ b/src/solid/devices/frontend/predicate.cpp	2026-10-08 17:12:14.537297300 -0400
+@@ -7,7 +7,7 @@
+ #include "predicate.h"
+ 
+ #include <QMetaEnum>
+-#include <QSequentialIterable>
++#include <QMetaSequence>
+ #include <QStringList>
+ #include <solid/device.h>
+ 
+@@ -223,8 +223,8 @@
+             }
+ 
+             // Make sure we can match single elements inside lists.
+-            if (value.canConvert<QSequentialIterable>()) {
+-                const auto iterable = value.value<QSequentialIterable>();
++            if (value.canConvert<QMetaSequence::Iterable>()) {
++                const auto iterable = value.value<QMetaSequence::Iterable>();
+                 for (const auto &element : iterable) {
+                     if (element == expected) {
+                         return true;

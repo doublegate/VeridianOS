@@ -661,6 +661,41 @@
   CMake config called `find_dependency()` after defining them (KDocTools' meinproc6, so a
   package with documentation ran it with the host's libraries); every imported tool is wrapped
   now. plasma-desktop compiled the sysroot's path to the XKB data into its keyboard settings.
+- **KDE cross pipeline: the build machine no longer leaks into what is built.**
+  - Every autotools package decided it was *not* cross compiling, because the build host's musl
+    loader ran its test program, and then took the host's answers (against the host's `/lib`)
+    for the target. Configures now get `--build`.
+  - KDocTools installed `all-l10n.xml` with the sysroot's absolute paths; it is relocatable like
+    the rest of its stylesheets. A plasma-workspace kconf_update script would have run the
+    build host's `qtpaths`.
+  - Run-time programs were looked up on the build host (kwallet-pam's socat, plasma-desktop's
+    xdg-user-dir, kinfocenter's tools, ksystemstats, jq). They are looked up in the target, and
+    socat (pam_kwallet_init passes the login through it), xdg-user-dirs and jq are now built.
+  - Compiled-in source paths (assertions, log contexts, debug information) named
+    `/opt/veridian/...`; the cross compiler maps them (`-ffile-prefix-map`, a specs file).
+  - The KDE root filesystem lacked the shell scripts the system runs (the session's
+    `plasma-dbus-run-session-if-needed` and `plasma-sourceenv.sh`, pam_kwallet_init, kdeeject),
+    and the sysroot received the host-side integration scripts. `plasma-apply-aurorae` asked for
+    `/usr/bin/bash`; it is POSIX sh.
+  - KWin's QML imports libplasma and milou, which were built after it; KDED and KWallet were
+    built after KIO; KAuth was built before polkit-qt-1 and had no backend. Brazilian
+    Portuguese handbooks did not find their KDE customization (`pt-BR` vs `pt_br.xml`).
+- **KDE cross pipeline: 2,319 build warnings down to 43.** A clean build of the whole stack (musl
+  and the toolchain through Plasma) printed 2,319 compiler, linker, libtool, configure, CMake,
+  moc and documentation-tool warnings; each was removed by fixing its cause, with no `-Wno-*`
+  and no pragmas (90 warning patches and patch scripts, listed in `tools/cross/PATCHES.md`).
+  The 43 left are listed with their causes in `userland/integration/KNOWN-LIMITATIONS.md`.
+- **Defects in third-party packages,** found while removing their warnings (45 patches; list in
+  `tools/cross/PATCHES.md`, *Upstream candidates*): use after realloc and printf-format text from
+  a file in libX11; overflows in xcb-util-wm, socat and ICU's test framework; NULL dereferences
+  in GLib, D-Bus and Solid's predicate parser; KCoreAddons unmapping shared memory twice;
+  KPty's logout clearing one byte; tools that exited 0 after failing to write (meinproc6,
+  kcmmetadatagenerator); KWallet's portal reporting a secret written that was not; crashes in
+  plasma-workspace's icon, cursor and GTK settings on non-archive files; polkit-qt-1 never
+  connecting ConsoleKit seat signals; ksystemstats reading uninitialized memory values and
+  overflowing a stack array; libksysguard's KiB values with metric units. QCA's OpenSSL plugin
+  is ported to the OpenSSL 3 APIs; its keystore (smart card) keys, which crashed on OpenSSL 3,
+  work through a provider, and three TLS memory errors are fixed.
 - **No executable stacks, and a warning-free userland build.** The VeridianOS GCC target never
   emitted `.note.GNU-stack`, nor did the crt objects, so every program the cross toolchain
   linked got an executable stack and ld warned for each. The target now marks objects as FreeBSD

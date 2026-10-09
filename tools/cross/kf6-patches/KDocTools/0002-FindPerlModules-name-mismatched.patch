@@ -1,0 +1,20 @@
+VeridianOS: FindPerlModules says its per-module checks are named on purpose
+
+For each Perl module it checks (URI::Escape), FindPerlModules.cmake calls
+find_package_handle_standard_args() as PerlModules_<module>, to print a
+line for it and to set the PerlModules_<module>_FOUND result that the
+final HANDLE_COMPONENTS call reads. CMake reports the name differing from
+the calling package's ("does not match the name of the calling package
+(PerlModules)"). Those calls now pass NAME_MISMATCHED, CMake's way of
+declaring that the name differs intentionally; the results are the same.
+
+--- a/cmake/FindPerlModules.cmake
++++ b/cmake/FindPerlModules.cmake
+@@ -44,6 +44,7 @@
+             set(PerlModules_all_modules_found FALSE)
+         endif()
+         find_package_handle_standard_args(PerlModules_${_comp}
++            NAME_MISMATCHED
+             FOUND_VAR
+                 PerlModules_${_comp}_FOUND
+             REQUIRED_VARS

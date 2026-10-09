@@ -1,0 +1,50 @@
+VeridianOS: fix unused-parameter warnings in the brightness controllers
+
+GCC reported -Wunused-parameter in daemon/controllers:
+
+- ddcutildisplay.cpp, DDCutilDisplay::setBrightness() ('value',
+  'allowAnimations') and BrightnessWorker::ddcSetBrightness() ('value',
+  'display'): the bodies are compiled only with WITH_DDCUTIL, which this
+  build does not define. Parameters used inside that block are marked
+  [[maybe_unused]]; 'allowAnimations' is not used on either path (DDC/CI
+  brightness is not animated) and is left unnamed.
+- kwinbrightness.cpp, KWinDisplayBrightness::setBrightness()
+  ('allowAnimations'): the requested brightness is applied through a KWin
+  output configuration, which takes no animation flag; the parameter is
+  left unnamed.
+
+Behaviour is unchanged.
+
+diff -ru a/daemon/controllers/ddcutildisplay.cpp b/daemon/controllers/ddcutildisplay.cpp
+--- a/daemon/controllers/ddcutildisplay.cpp	2026-10-08 17:15:45.064974113 -0400
++++ b/daemon/controllers/ddcutildisplay.cpp	2026-10-08 17:16:04.447129974 -0400
+@@ -192,7 +192,7 @@
+     Q_EMIT retryInitFinished(m_supportsBrightness);
+ }
+ 
+-void DDCutilDisplay::setBrightness(int value, bool allowAnimations)
++void DDCutilDisplay::setBrightness([[maybe_unused]] int value, bool /*allowAnimations*/)
+ {
+ #ifdef WITH_DDCUTIL
+     if (m_supportsBrightness) {
+@@ -226,7 +226,7 @@
+     }
+ }
+ 
+-void BrightnessWorker::ddcSetBrightness(int value, DDCutilDisplay *display)
++void BrightnessWorker::ddcSetBrightness([[maybe_unused]] int value, [[maybe_unused]] DDCutilDisplay *display)
+ {
+ #ifdef WITH_DDCUTIL
+     qCDebug(POWERDEVIL) << "[DDCutilDisplay]:" << display->m_label << "setting brightness to" << value << "with temporary display handle";
+diff -ru a/daemon/controllers/kwinbrightness.cpp b/daemon/controllers/kwinbrightness.cpp
+--- a/daemon/controllers/kwinbrightness.cpp	2026-10-08 17:15:45.086736862 -0400
++++ b/daemon/controllers/kwinbrightness.cpp	2026-10-08 17:16:05.727120669 -0400
+@@ -164,7 +164,7 @@
+     return std::round(m_output->brightness() * 10'000);
+ }
+ 
+-void KWinDisplayBrightness::setBrightness(int brightness, bool allowAnimations)
++void KWinDisplayBrightness::setBrightness(int brightness, bool /*allowAnimations*/)
+ {
+     m_desiredBrightness = brightness / 10'000.0;
+     m_detector->scheduleSetConfig();

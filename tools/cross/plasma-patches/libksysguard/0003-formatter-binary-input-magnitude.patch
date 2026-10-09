@@ -1,0 +1,114 @@
+VeridianOS: libksysguard Formatter: binary input prefixes with metric units
+
+GCC reported formatter/Formatter.cpp:478: variable 'inputOrder' set but not
+used [-Wunused-but-set-variable].
+
+This is a real bug left by upstream commit 9ddde229 ("Follow the user
+preference when formatting byte values", Plasma 6.7). That commit made
+unitOrder() return 1000 for byte units when the user picks the metric
+dialect, and computed an inputOrder of 1024 for values that arrive with
+binary prefixes (memory and process sensors report KiB) -- but never used
+it. A value in KiB was converted with 1000 as if it were kB:
+
+- 1048576 KiB (1 GiB, 1.07 GB) was shown as "1.0 GB" instead of "1.1 GB",
+  and 500.0 KiB as "500.0 kB" instead of "512.0 kB";
+- the automatic prefix was picked from the wrong magnitude (990 KiB,
+  1.01 MB, shown as "990 kB");
+- scaleDownFactor(), used for the chart range unit multipliers, returned
+  1000 instead of 976.5625 for KiB to MB.
+
+adjustedUnit() now uses the input magnitude for the absolute value;
+formatNumber() and scaleDownFactor() share a unitScale() helper (divide by
+the input magnitude of the source prefix, multiply by the display
+magnitude of the target prefix); maximumLength() passes its samples in
+the base unit. With the IEC and JEDEC dialects and for all other units
+both magnitudes are the same and nothing changes. (Prepared for upstream
+with a regression test, invent.kde.org/plasma/libksysguard.)
+
+--- a/formatter/Formatter.cpp
++++ b/formatter/Formatter.cpp
+@@ -467,6 +467,23 @@ static Unit unitBase(Unit unit)
+     }
+ }
+ 
++static int inputUnitOrder(Unit unit)
++{
++    const Unit baseUnit = unitBase(unit);
++    // Indepent of the user preference how it should be shown in the  UI the input byte values use "proper" magnitudes of 1024
++    if (baseUnit == Unit::UnitByte || baseUnit == Unit::UnitByteRate || baseUnit == Unit::UnitBitRate) {
++        return 1024;
++    }
++    return unitOrder(unit);
++}
++
++// The factor to divide a value in unit by to express it in adjusted, a unit with the same base unit
++static qreal unitScale(Unit unit, Unit adjusted)
++{
++    const Unit baseUnit = unitBase(unit);
++    return std::pow(unitOrder(unit), adjusted - baseUnit) / std::pow(inputUnitOrder(unit), unit - baseUnit);
++}
++
+ static Unit adjustedUnit(qreal value, Unit unit, MetricPrefix prefix)
+ {
+     const int order = unitOrder(unit);
+@@ -475,15 +492,10 @@ static Unit adjustedUnit(qreal value, Unit unit, MetricPrefix prefix)
+     }
+ 
+     const Unit baseUnit = unitBase(unit);
+-    int inputOrder = order;
+-    // Indepent of the user preference how it should be shown in the  UI the input byte values use "proper" magnitudes of 1024
+-    if (baseUnit == Unit::UnitByte || baseUnit == Unit::UnitByteRate || baseUnit == Unit::UnitBitRate) {
+-        inputOrder = 1024;
+-    }
+     const MetricPrefix basePrefix = MetricPrefix(unit - baseUnit);
+ 
+     if (prefix == MetricPrefixAutoAdjust) {
+-        const qreal absoluteValue = value * std::pow(order, int(basePrefix));
++        const qreal absoluteValue = value * std::pow(inputUnitOrder(unit), int(basePrefix));
+         if (absoluteValue > 0) {
+             const int targetPrefix = std::log2(absoluteValue) / std::log2(order);
+             if (targetPrefix <= MetricPrefixLast) {
+@@ -514,8 +526,8 @@ static QString formatNumber(const QVariant &value, Unit unit, MetricPrefix prefi
+     }
+ 
+     const Unit adjusted = adjustedUnit(amount, unit, prefix);
+-    if (adjusted != unit) {
+-        amount /= std::pow(unitOrder(unit), adjusted - unit);
++    if (unitOrder(unit)) {
++        amount /= unitScale(unit, adjusted);
+     }
+ 
+     if (precision < 0) {
+@@ -563,11 +575,11 @@ static QString formatBootTimestamp(const QVariant &value)
+ qreal Formatter::scaleDownFactor(const QVariant &value, Unit unit, MetricPrefix targetPrefix)
+ {
+     const Unit adjusted = adjustedUnit(value.toDouble(), unit, targetPrefix);
+-    if (adjusted == unit) {
++    if (!unitOrder(unit)) {
+         return 1;
+     }
+ 
+-    return std::pow(unitOrder(unit), adjusted - unit);
++    return unitScale(unit, adjusted);
+ }
+ 
+ KLocalizedString Formatter::localizedString(const QVariant &value, Unit unit, MetricPrefix targetPrefix)
+@@ -793,14 +805,15 @@ qreal Formatter::maximumLength(Unit unit, const QFont &font)
+ 
+     QString maximum;
+     switch (unitBase(unit)) {
++    // Pass byte values in the base unit, prefixed input units are binary regardless of the user preference
+     case UnitByte:
+-        maximum = formatValue(order - 0.5, UnitMegaByte, MetricPrefixMega);
++        maximum = formatValue((order - 0.5) * order * order, UnitByte, MetricPrefixMega);
+         break;
+     case UnitByteRate:
+-        maximum = formatValue(order - 0.5, UnitMegaByteRate, MetricPrefixMega);
++        maximum = formatValue((order - 0.5) * order * order, UnitByteRate, MetricPrefixMega);
+         break;
+     case UnitBitRate:
+-        maximum = formatValue(order - 0.5, UnitMegaBitRate, MetricPrefixMega);
++        maximum = formatValue((order - 0.5) * order * order, UnitBitRate, MetricPrefixMega);
+         break;
+     case UnitHertz:
+         maximum = formatValue(order - 0.5, UnitMegaHertz, MetricPrefixMega);

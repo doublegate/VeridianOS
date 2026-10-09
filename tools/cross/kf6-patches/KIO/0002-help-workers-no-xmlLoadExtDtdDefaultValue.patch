@@ -1,0 +1,71 @@
+VeridianOS: KIO help workers: no deprecated xmlLoadExtDtdDefaultValue global
+
+GCC reported -Wdeprecated-declarations for xmlLoadExtDtdDefaultValue in
+src/kioworkers/help/main.cpp and main_ghelp.cpp (libxml2 2.15 marks the
+global's accessor XML_DEPRECATED); 0001 removed the neighbouring
+xmlSubstituteEntitiesDefault(1) but not this one.
+
+The global default is not needed, for the same reason as there:
+KDocTools::transform() reads the document with
+XML_PARSE_NOENT | XML_PARSE_DTDLOAD through xmlCtxtUseOptions(), which
+sets the parser context's loadsubset itself, and libxslt loads stylesheets
+and documents with XSLT_PARSE_OPTIONS (which include both). The only parse
+that keeps the global default, the catalog parser, sets loadsubset = 0
+itself (libxml2 catalog.c). The assignment and the file's own extern
+declaration of the global are removed. No behaviour change.
+
+--- a/src/kioworkers/help/main.cpp
++++ b/src/kioworkers/help/main.cpp
+@@ -1,7 +1,5 @@
+ #ifdef _WIN32
+ #define LIBXML_DLL_IMPORT __declspec(dllimport)
+-#else
+-extern "C" int xmlLoadExtDtdDefaultValue;
+ #endif
+ 
+ #include "kio_help.h"
+@@ -53,11 +51,11 @@
+     }
+ 
+     LIBXML_TEST_VERSION
+-    // Entity substitution is requested per parse: KDocTools::transform() reads the
+-    // document with XML_PARSE_NOENT and libxslt loads stylesheets with
+-    // XSLT_PARSE_OPTIONS (which include XML_PARSE_NOENT), so the deprecated global
+-    // default xmlSubstituteEntitiesDefault(1) is not needed.
+-    xmlLoadExtDtdDefaultValue = 1;
++    // Entity substitution and external DTD loading are requested per parse:
++    // KDocTools::transform() reads the document with XML_PARSE_NOENT | XML_PARSE_DTDLOAD
++    // and libxslt loads stylesheets and documents with XSLT_PARSE_OPTIONS (which include
++    // both), so the deprecated global defaults xmlSubstituteEntitiesDefault(1) and
++    // xmlLoadExtDtdDefaultValue = 1 are not needed.
+     exsltRegisterAll();
+ 
+     HelpProtocol worker(false, argv[2], argv[3]);
+--- a/src/kioworkers/help/main_ghelp.cpp
++++ b/src/kioworkers/help/main_ghelp.cpp
+@@ -1,8 +1,6 @@
+ 
+ #ifdef _WIN32
+ #define LIBXML_DLL_IMPORT __declspec(dllimport)
+-#else
+-extern "C" int xmlLoadExtDtdDefaultValue;
+ #endif
+ 
+ #include "kio_help.h"
+@@ -46,11 +44,11 @@
+     }
+ 
+     LIBXML_TEST_VERSION
+-    // Entity substitution is requested per parse: KDocTools::transform() reads the
+-    // document with XML_PARSE_NOENT and libxslt loads stylesheets with
+-    // XSLT_PARSE_OPTIONS (which include XML_PARSE_NOENT), so the deprecated global
+-    // default xmlSubstituteEntitiesDefault(1) is not needed.
+-    xmlLoadExtDtdDefaultValue = 1;
++    // Entity substitution and external DTD loading are requested per parse:
++    // KDocTools::transform() reads the document with XML_PARSE_NOENT | XML_PARSE_DTDLOAD
++    // and libxslt loads stylesheets and documents with XSLT_PARSE_OPTIONS (which include
++    // both), so the deprecated global defaults xmlSubstituteEntitiesDefault(1) and
++    // xmlLoadExtDtdDefaultValue = 1 are not needed.
+     exsltRegisterAll();
+ 
+     HelpProtocol worker(true, argv[2], argv[3]);

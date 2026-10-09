@@ -12,27 +12,55 @@ kde_fetch() {
 }
 
 # kde_cmake NAME SRC [OPTIONS...]: configure, build and stage one KDE
-# CMake project, shared (ADR 0010), with the Qt/KDE toolchain. Plugins, QML modules
-# and metatypes go into the target Qt's directories (build-qt6.sh lays Qt
-# out under /usr/lib/qt6). They are given rather than queried: ECM's query
-# (KDE_INSTALL_USE_QT_SYS_PATHS) runs the host Qt's qtpaths, which answers
-# with the host Qt's directories.
+# CMake project, shared (ADR 0010), with the Qt/KDE toolchain and the
+# stack's defaults (cmake/kde-defaults.cmake: no tests or docs, the target
+# Qt's plugin, QML and metatypes directories, no X11, CMake 4 policies);
+# OPTIONS override them.
 kde_cmake() {
     local name="$1" src="$2"
     shift 2
     log "Building ${name}..."
     CMAKE_TOOLCHAIN="${CMAKE_TOOLCHAIN_KDE}" cmake_build "${src}" "${BUILD_DIR}/${name}-build" \
-        -DBUILD_TESTING=OFF \
-        -DBUILD_QCH=OFF \
-        -DBUILD_PYTHON_BINDINGS=OFF \
-        -DBUILD_DESIGNERPLUGIN=OFF \
-        -DKDE_INSTALL_USE_QT_SYS_PATHS=OFF \
-        -DKDE_INSTALL_QTPLUGINDIR=lib/qt6/plugins \
-        -DKDE_INSTALL_QMLDIR=lib/qt6/qml \
-        -DKDE_INSTALL_QTMETATYPESDIR=lib/qt6/metatypes \
-        -DWITH_X11=OFF \
+        -C "${VERIDIAN_CROSS_DIR}/cmake/kde-defaults.cmake" \
         -DCMAKE_IGNORE_PREFIX_PATH="${CMAKE_IGNORE_PREFIX_PATH:-/home/linuxbrew/.linuxbrew}" \
         "$@"
+}
+
+# component_installed NAME STAMP: NAME was built as STAMP (version and
+# options) and every file its install wrote (CMake's install manifest,
+# which lists them without the DESTDIR) is still in the sysroot.
+component_installed() {
+    local bld="${BUILD_DIR}/$1-build" file
+    [[ "$(cat "${bld}/.veridian-version" 2>/dev/null)" == "$2" && -s "${bld}/install_manifest.txt" ]] || return 1
+    while IFS= read -r file; do
+        [[ -e "${SYSROOT}${file}" || -L "${SYSROOT}${file}" ]] || return 1
+    done < "${bld}/install_manifest.txt"
+    log "$1: already installed."
+}
+
+# plasma_url: where the Plasma release PLASMA_VER is published.
+plasma_url() {
+    echo "https://download.kde.org/stable/plasma/${PLASMA_VER}"
+}
+
+# plasma NAME [CMAKE OPTIONS...]: build and stage one Plasma component
+# (release PLASMA_VER, from plasma_url), with its patches (plasma-patches/NAME/,
+# each explaining itself) applied to the fresh source tree. Always in the
+# Plasma phase's build directory, so a component built early by another
+# phase (libplasma and milou, which KWin's QML needs) is found there and
+# not built twice.
+plasma() {
+    local name="$1"
+    shift
+    local BUILD_DIR="${VERIDIAN_CROSS_BUILD}/plasma"
+    mkdir -p "${BUILD_DIR}"
+    local stamp="${PLASMA_VER} $*"
+    component_installed "${name}" "${stamp}" && return 0
+    local src
+    src="$(kde_fetch "${name}-${PLASMA_VER}" "$(plasma_url)" plasma.sha256)"
+    apply_patches "${VERIDIAN_CROSS_DIR}/plasma-patches/${name}" "${src}"
+    kde_cmake "${name}" "${src}" "$@"
+    echo "${stamp}" > "${BUILD_DIR}/${name}-build/.veridian-version"
 }
 
 # host_python: a Python for the build host with the modules the KDE builds

@@ -1,0 +1,26 @@
+VeridianOS: dbus_message_iter_recurse() checks for a container
+
+Real bug (prepared for upstream, gitlab.freedesktop.org/dbus/dbus):
+calling dbus_message_iter_recurse() when the iterator is not on a
+container -- easy to reach from an application that recurses without
+checking dbus_message_iter_get_arg_type(), e.g. when a peer sends an
+unexpected signature -- went into _dbus_type_reader_recurse(), whose
+_dbus_assert_not_reached() is empty without assertions, and crashed
+through a NULL reader class with no diagnostic (0001 turns that into an
+explicit abort). The public entry point now checks the iterator type
+and the current argument type like the other dbus_message_iter_*()
+functions, so the usual "arguments to dbus_message_iter_recurse() were
+incorrect" check failure is reported instead. Valid calls are
+unaffected.
+
+--- a/dbus/dbus-message.c
++++ b/dbus/dbus-message.c
+@@ -2272,6 +2272,8 @@
+ 
+   _dbus_return_if_fail (_dbus_message_iter_check (real));
+   _dbus_return_if_fail (sub != NULL);
++  _dbus_return_if_fail (real->iter_type == DBUS_MESSAGE_ITER_TYPE_READER);
++  _dbus_return_if_fail (dbus_type_is_container (_dbus_type_reader_get_current_type (&real->u.reader)));
+ 
+   *real_sub = *real;
+   _dbus_type_reader_recurse (&real->u.reader, &real_sub->u.reader);

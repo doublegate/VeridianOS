@@ -1,0 +1,31 @@
+VeridianOS: expmed: read op0_mode directly in extract_bit_field_1
+
+GCC reported:
+
+  gcc/expmed.cc:1864:45: warning: '*(unsigned int*)((char*)&imode +
+    offsetof(scalar_int_mode, scalar_int_mode::m_mode))' may be used
+    uninitialized [-Wmaybe-uninitialized]
+
+A false positive: imode is only used after op0_mode.exists (&imode) has
+returned true, and that call stores it.  The optimiser cannot follow the
+conditional store through the earlier, partly overlapping uses of the
+same variable (giving the second check its own variable still warns).
+The subreg check now tests op0_mode.exists () and passes
+op0_mode.require (), the same mode exists (&imode) stored, so no
+possibly-unset variable is involved.  No behaviour change.
+
+diff -ru a/gcc/expmed.cc b/gcc/expmed.cc
+--- a/gcc/expmed.cc	2026-08-07 03:46:06.148689668 -0400
++++ b/gcc/expmed.cc	2026-10-08 17:04:51.646148293 -0400
+@@ -1859,9 +1859,9 @@
+   /* Extraction of a full MODE1 value can be done with a subreg as long
+      as the least significant bit of the value is the least significant
+      bit of either OP0 or a word of OP0.  */
+-  if (!MEM_P (op0) && !reverse && op0_mode.exists (&imode))
++  if (!MEM_P (op0) && !reverse && op0_mode.exists ())
+     {
+-      rtx sub = extract_bit_field_as_subreg (mode1, op0, imode,
++      rtx sub = extract_bit_field_as_subreg (mode1, op0, op0_mode.require (),
+ 					     bitsize, bitnum);
+       if (sub)
+ 	return convert_extracted_bit_field (sub, mode, tmode, unsignedp);

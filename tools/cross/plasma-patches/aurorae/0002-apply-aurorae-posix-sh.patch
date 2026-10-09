@@ -1,0 +1,15 @@
+VeridianOS: plasma-apply-aurorae runs with /bin/sh
+
+The script (plasma-apply-aurorae.cmake) names /usr/bin/bash as its
+interpreter, which systems without bash -- or with it elsewhere -- do not
+have, so applying an Aurorae decoration failed there. It uses nothing
+beyond POSIX sh (tests, quoted "$@", exit), so it now runs with /bin/sh.
+
+--- a/plasma-apply-aurorae.cmake
++++ b/plasma-apply-aurorae.cmake
+@@ -1,4 +1,4 @@
+-#!/usr/bin/bash
++#!/bin/sh
+ 
+ # TODO Plasma 7: Drop aurorae.knsrc, use knsrc file provided by KWin.
+ 

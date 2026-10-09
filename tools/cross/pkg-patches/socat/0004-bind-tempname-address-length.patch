@@ -1,0 +1,29 @@
+VeridianOS: bind-tempname: address length of temporary names
+
+Found while preparing 0001 for upstream (socat@dest-unreach.org):
+xiobind() computed the length of a generated name's address with
+sizeof(&...->sun_path) -- the size of a pointer (8) instead of the
+offset of sun_path (2) -- and without the leading NUL of an abstract
+name. Every abstract temporary name was bound with 5 trailing NUL bytes
+(part of the name as a peer sees it), and names over 101 characters gave
+a length beyond sizeof(struct sockaddr_un): bind() failed with EINVAL
+and the messages printing the address read past the stack sockaddr_un
+(AddressSanitizer: stack-buffer-overflow). The length is now the
+sockaddr_un header, the leading NUL of an abstract name and the name,
+bounded by the room in sun_path, as xiosetunix() computes it for tight
+addresses.
+
+--- a/xio-socket.c
++++ b/xio-socket.c
+@@ -2189,8 +2189,9 @@
+ 	       memset(us->un.sun_path+off, 0, room);
+ 	       memcpy(us->un.sun_path+off, sockname, MIN(strlen(sockname), room));
+ 	    }
+-	    uslen = sizeof(&((struct sockaddr_un *)0)->sun_path) +
+-	       Min(strlen(sockname), sizeof(us->un.sun_path)); /*?*/
++	    uslen = sizeof(struct sockaddr_un)-sizeof(us->un.sun_path) +
++	       (abstract?1:0) +
++	       Min(strlen(sockname), sizeof(us->un.sun_path)-(abstract?1:0));
+ 	    free(sockname);
+ 
+ 	    if (Bind(sfd->fd, (struct sockaddr *)us, uslen) < 0) {

@@ -72,12 +72,36 @@ patch_kf_source() {
                 'KCONF_UPDATE_EXE="$<TARGET_FILE:KF6::kconf_update>"' \
                 'KCONF_UPDATE_EXE="${KDE_INSTALL_FULL_LIBEXECDIR_KF}/kconf_update"'
             ;;
+        KI18n)
+            # ts-pmap-compile.py (installed too: modules with translations
+            # run it) writes its regular expressions as plain strings, so
+            # "\s" is an invalid string escape (Python 3.12 SyntaxWarning);
+            # raw strings give the regex engine the same text.
+            local f="${src}/cmake/ts-pmap-compile.py"
+            replace_once "${f}" 're.sub("[\s&]", "", text)' 're.sub(r"[\s&]", "", text)'
+            replace_once "${f}" 're.sub("^\s*\n|\n\s*$", "", text)' 're.sub(r"^\s*\n|\n\s*$", "", text)'
+            ;;
         KDocTools)
             # docbookl10nhelper runs while KDocTools builds: through the
             # runner (meinproc6 already runs by target name).
             python3 -I "${SCRIPT_DIR}/deps-patches/cmake_run_built_tools.py" \
                 "${src}/src/CMakeLists.txt" KF6::docbookl10nhelper \
                 || die "failed to patch KDocTools' tool commands"
+            # Language customizations found for region codes (pt-BR), and
+            # all-l10n.xml relocatable like the rest (see the script).
+            python3 -I "${SCRIPT_DIR}/deps-patches/kdoctools_l10n.py" "${src}" \
+                || die "failed to patch KDocTools' language files"
+            # Manual page author metadata (see the script): authors shown as
+            # authors without a warning, and meinproc6's page an author.
+            python3 -I "${SCRIPT_DIR}/deps-patches/kde_man_metadata.py" attribution "${src}" \
+                "${SYSROOT}/usr/share/xml/docbook/xsl-stylesheets" \
+                || die "failed to patch KDocTools' man stylesheet"
+            python3 -I "${SCRIPT_DIR}/deps-patches/kde_man_metadata.py" corpauthor "${src}" \
+                man-meinproc6.1.docbook || die "failed to patch meinproc6's manual page"
+            ;;
+        KPackage)
+            python3 -I "${SCRIPT_DIR}/deps-patches/kde_man_metadata.py" corpauthor "${src}" \
+                man-kpackagetool6.1.docbook || die "failed to patch kpackagetool6's manual page"
             ;;
         BreezeIcons)
             # Its icon tools run during the build: through the runner.
@@ -86,6 +110,9 @@ patch_kf_source() {
                 || die "failed to patch breeze-icons' tool commands"
             ;;
     esac
+    # Then the module's patches (kf6-patches/<module>/, each explaining
+    # itself), made against the source with the changes above.
+    apply_patches "${SCRIPT_DIR}/kf6-patches/${mod}" "${src}"
 }
 
 # build_kf_module NAME [TARBALL_BASE] [-- CMAKE OPTIONS...]
@@ -122,6 +149,12 @@ build_ecm() {
     # metatypes one could not be.
     python3 -I "${SCRIPT_DIR}/deps-patches/ecm_metatypes_dir.py" \
         "${src}/kde-modules/KDEInstallDirs6.cmake" || die "failed to patch ECM KDEInstallDirs6.cmake"
+    # wayland-protocols' own project page, the URL every KDE project gives
+    # it: with Wayland's home page here, FeatureSummary warned in each that
+    # set it ("Property URL already set ..., overriding it").
+    replace_once "${src}/find-modules/FindWaylandProtocols.cmake" \
+        $'DESCRIPTION "Specifications of extended Wayland protocols"\n    URL "https://wayland.freedesktop.org/"' \
+        $'DESCRIPTION "Specifications of extended Wayland protocols"\n    URL "https://gitlab.freedesktop.org/wayland/wayland-protocols/"'
     log "Building ECM..."
     cmake_build "${src}" "${BUILD_DIR}/ecm-build" \
         -DBUILD_TESTING=OFF \
@@ -155,6 +188,7 @@ build_qca() {
     # QcaConfig.cmake.in tests @BUILD_SHARED_LIBRARIES@, which no variable
     # is called, so the installed config always takes its static branch.
     replace_once "${src}/QcaConfig.cmake.in" '@BUILD_SHARED_LIBRARIES@' '@BUILD_SHARED_LIBS@'
+    patch_kf_source QCA "${src}"
     kde_cmake QCA "${src}" \
         -DBUILD_WITH_QT6=ON \
         -DBUILD_TESTS=OFF \
@@ -176,6 +210,7 @@ build_qcoro() {
     fi
     fetch "qcoro-${QCORO_VER}.tar.gz" "https://github.com/qcoro/qcoro/archive/refs/tags/v${QCORO_VER}.tar.gz" \
         "qcoro-${QCORO_VER}" "${QCORO_SHA256}"
+    patch_kf_source QCoro "${BUILD_DIR}/qcoro-${QCORO_VER}"
     kde_cmake QCoro "${BUILD_DIR}/qcoro-${QCORO_VER}" \
         -DUSE_QT_VERSION=6 \
         -DQCORO_BUILD_EXAMPLES=OFF
@@ -233,7 +268,6 @@ build_ksyntaxhighlighting() {
                 -DCMAKE_BUILD_TYPE=Release \
                 -DKSYNTAXHIGHLIGHTING_USE_GUI=OFF \
                 -DBUILD_TESTING=OFF \
-                -DBUILD_QCH=OFF \
                 -DQT_MAJOR_VERSION=6 \
                 -DECM_DIR="${SYSROOT}/usr/share/ECM/cmake" \
                 -DCMAKE_PREFIX_PATH="${VERIDIAN_HOST_TOOLS}/qt6" && \
@@ -297,7 +331,7 @@ build_tier3() {
     # KWallet: secret storage -- the library, the ksecretd and kwalletd
     # daemons (libgcrypt from build-deps.sh) and kwallet-query. GpgME
     # wallets are optional and not in the sysroot.
-    build_kf_module KWallet
+    build_kf_module KWallet -- -DCMAKE_DISABLE_FIND_PACKAGE_Gpgmepp=ON
     build_kf_module KIO
     # KCMUtils requires the org.kde.kirigami QML module.
     build_kf_module Kirigami
@@ -316,7 +350,9 @@ build_tier4() {
     build_qtkeychain
     # Attica: Open Collaboration Services client, required by KNewStuff
     build_kf_module Attica
-    build_kf_module KNewStuff
+    # Without Syndication: it reads the OPDS feeds of e-book stores, and
+    # nothing in the session offers those.
+    build_kf_module KNewStuff -- -DCMAKE_DISABLE_FIND_PACKAGE_KF6Syndication=ON
     build_kf_module KRunner
     build_kf_module KStatusNotifierItem
     # KNotifyConfig: notification settings, with sound preview (Canberra)
@@ -357,6 +393,7 @@ build_polkit_qt() {
     fi
     local src
     src="$(kde_fetch "polkit-qt-1-${POLKIT_QT_VER}" "https://download.kde.org/stable/polkit-qt-1" plasma.sha256)"
+    apply_patches "${SCRIPT_DIR}/plasma-patches/polkit-qt-1" "${src}"
     kde_cmake polkit-qt-1 "${src}" -DQT_MAJOR_VERSION=6 -DBUILD_EXAMPLES=OFF
     [[ -f "${SYSROOT}/usr/lib/cmake/PolkitQt6-1/PolkitQt6-1Config.cmake" ]] ||
         die "polkit-qt-1: CMake config not installed"
@@ -428,6 +465,7 @@ build_kirigami_addons() {
     local src
     src="$(kde_fetch "kirigami-addons-${KIRIGAMI_ADDONS_VER}" \
         "https://download.kde.org/stable/kirigami-addons" kf6.sha256)"
+    patch_kf_source KirigamiAddons "${src}"
     kde_cmake KirigamiAddons "${src}"
     kf_config KirigamiAddons >/dev/null || die "Kirigami Addons: CMake config not installed"
 }

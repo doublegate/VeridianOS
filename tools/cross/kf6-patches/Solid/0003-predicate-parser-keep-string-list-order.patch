@@ -1,0 +1,22 @@
+VeridianOS: predicate parser: keep the elements of a string list in order
+
+Real bug, found with 0002's fix (and prepared for upstream,
+invent.kde.org/frameworks/solid). string_list_rec is right-recursive
+(VAL_STRING ',' string_list_rec), so the parser builds the list from its
+last element and PredicateParse_appendStringListValue() is called with
+each earlier element in turn; appending reversed the list:
+"{'a', 'b', 'c'}" became c, b, a, and could never match a property
+value. The element is now prepended.
+
+--- a/src/solid/devices/predicateparse.cpp
++++ b/src/solid/devices/predicateparse.cpp
+@@ -210,7 +210,8 @@
+ 
+     QStringList new_list = variant->toStringList();
+ 
+-    new_list << QString::fromLatin1(name);
++    // string_list_rec is right-recursive: name comes before the elements already in the list
++    new_list.prepend(QString::fromLatin1(name));
+ 
+     delete variant;
+     free(name);
