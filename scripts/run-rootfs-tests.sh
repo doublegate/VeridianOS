@@ -16,13 +16,16 @@
 # Usage: scripts/run-rootfs-tests.sh [prompt-wait-seconds]
 # Env:   REQUIRE_MUSL=1 (musl_runtime_test must be present),
 #        LOG_DIR (default target/boot-logs), ROOTFS (default
-#        target/rootfs-blockfs.img), TEST_WAIT (seconds for the suite, 120),
-#        SMP (CPU count, default 1)
+#        target/rootfs-blockfs.img), TEST_WAIT (seconds for the audit suite,
+#        120), MUSL_WAIT (seconds for the musl suite, 600; it runs for
+#        several minutes, and a result ends the wait at once), SMP (CPU
+#        count, default 1)
 set -u
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
 prompt_wait="${1:-240}"
 test_wait="${TEST_WAIT:-120}"
+musl_wait="${MUSL_WAIT:-600}"
 log_dir="${LOG_DIR:-$root/target/boot-logs}"
 rootfs="${ROOTFS:-$root/target/rootfs-blockfs.img}"
 img="$root/target/x86_64-veridian/debug/veridian-uefi.img"
@@ -86,7 +89,7 @@ sleep 1
 # absence a failure). The prompt is the kernel shell (vsh), which has no
 # conditionals, so a missing binary just never prints a result.
 printf '/bin/musl_runtime_test\r' >&3
-wait_for 'MUSL-RUNTIME: [0-9]+/[0-9]+|vsh: command not found' 60
+wait_for 'MUSL-RUNTIME: [0-9]+/[0-9]+|vsh: command not found' "$musl_wait"
 sleep 1
 finish
 
