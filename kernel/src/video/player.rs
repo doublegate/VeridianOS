@@ -391,6 +391,11 @@ mod tests {
     use super::*;
     use crate::graphics::PixelFormat;
 
+    /// Held by the tests that move the shared tick counter, which run in
+    /// parallel otherwise: one resetting it mid-way through another's
+    /// playback made that one fail at random.
+    static TICK_LOCK: spin::Mutex<()> = spin::Mutex::new(());
+
     fn make_info(fps: u32) -> VideoInfo {
         VideoInfo {
             width: 4,
@@ -409,6 +414,7 @@ mod tests {
 
     #[test]
     fn test_stream_lifecycle() {
+        let _tick = TICK_LOCK.lock();
         set_tick(0);
         let mut stream = RawVideoStream::new(make_info(10)); // 10 fps = 100ms/frame
         stream.add_frame(make_frame(10));
@@ -449,6 +455,7 @@ mod tests {
 
     #[test]
     fn test_stream_finished() {
+        let _tick = TICK_LOCK.lock();
         set_tick(0);
         let mut stream = RawVideoStream::new(make_info(10));
         stream.add_frame(make_frame(10));

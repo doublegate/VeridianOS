@@ -462,6 +462,11 @@ pub fn init() -> Result<(), KernelError> {
 mod tests {
     use super::*;
 
+    /// Held by the tests that clear or re-detect the shared feature flags,
+    /// which run in parallel otherwise: a test clearing a flag while
+    /// another checked it made that one fail at random.
+    static FEATURE_LOCK: spin::Mutex<()> = spin::Mutex::new(());
+
     #[test]
     fn test_bounds_mask_in_range() {
         let mask = bounds_mask(3, 10);
@@ -524,6 +529,7 @@ mod tests {
 
     #[test]
     fn test_detect_features_host() {
+        let _features = FEATURE_LOCK.lock();
         detect_features();
         // On host/CI, stubs report features as supported.
         #[cfg(not(target_os = "none"))]
@@ -536,6 +542,7 @@ mod tests {
 
     #[test]
     fn test_enable_ibrs_without_support() {
+        let _features = FEATURE_LOCK.lock();
         IBRS_SUPPORTED.store(false, Ordering::Relaxed);
         IBRS_ENABLED.store(false, Ordering::Relaxed);
         assert!(enable_ibrs().is_err());
@@ -545,6 +552,7 @@ mod tests {
 
     #[test]
     fn test_flush_btb_noop_without_support() {
+        let _features = FEATURE_LOCK.lock();
         IBPB_SUPPORTED.store(false, Ordering::Relaxed);
         flush_btb(); // should not panic
                      // Restore.
