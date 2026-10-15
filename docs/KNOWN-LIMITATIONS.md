@@ -120,8 +120,9 @@ work. User code is preempted when its slice ends (D3). What is still missing:
   read until EAGAIN, so this costs a wake-up, not correctness). Other waits are still wrong:
   - an empty pty read returns end-of-file, and a write to a full pty fails with EAGAIN instead
     of waiting (it returns a short count when part fits; N-128).
-- **exec from a multithreaded process fails with EAGAIN.** The other threads would keep running
-  on the page tables exec replaces; stopping them first is N-101.
+- **exec by a thread other than the main one keeps its thread id.** exec from a multithreaded
+  process ends the other threads first, as on Linux (N-101), but Linux also gives the exec'ing
+  thread the process id as its thread id; here it keeps its own.
 - **Two futex tables (N-279).** Dispatched threads (every user thread on x86_64) queue on a
   key -- the physical address for shared mappings, so futexes in memory shared between processes
   work -- but the old table, keyed by (pid, address), still serves threads that are not

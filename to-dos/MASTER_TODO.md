@@ -131,8 +131,9 @@ What does not work yet: `docs/KNOWN-LIMITATIONS.md`.
       set layout (done: N-96, N-98, N-109 part, N-113; stop/continue done; siginfo, sigqueue and sigtimedwait
       done, N-259; no SA_RESTART restart of sigsuspend/sleeps/polls, N-260); signal delivery on
       return to user with restorer frames (N-113); per-thread signal state (N-109); ignored
-      signals dropped at generation (N-98); sigset layout (N-96); wait status and errno (N-99 done except
-      WNOWAIT/rusage; N-127 done); exec permission and fatal-after-clear (done, N-101; multithreaded exec remains); relative paths per thread (N-115); MAP_SHARED anon (done, N-140) and
+      signals dropped at generation (N-98); sigset layout (N-96); wait status and errno (N-99 done; WNOWAIT and rusage done, N-213; N-127 done); exec permission and
+      fatal-after-clear, exec from a multithreaded process ending the other threads first (done,
+      N-101; the exec'ing thread keeps its tid); relative paths per thread (N-115); MAP_SHARED anon (done, N-140) and
       MAP_FIXED semantics (done, N-141); pty fixes (done, N-128); thread placement (N-114 partly done: no unused
       clone stacks; main tid == pid and futex keys remain).
     - [ ] Threads: clone through the dispatcher, native libc clone stub, TCB join, TLS errno

@@ -652,6 +652,13 @@
 
 ### Fixed
 
+- **exec from a multithreaded process works (N-101).** It failed with EAGAIN while any other
+  thread was alive (it had once freed page tables they still used). As Linux does, exec now ends
+  the other threads first: each leaves at its next return to user mode or wakeup, including one
+  spinning in user mode (timer preemption), and exec waits until their tasks are off the CPU.
+  Two threads exec'ing at once: the second one leaves. A fatal signal or an `exit_group` arriving
+  meanwhile wins and the exec fails with EINTR; the three places that make a fatal signal
+  pending now go through one helper so that such a SIGKILL is never lost.
 - **VirtIO doorbells are ordered after the ring updates on AArch64 and RISC-V (CRIT-SEC-01).** No
   barrier separated the store publishing a request from the doorbell write, and the one ordering the
   ring entry was a CPU-only fence. On a weakly ordered CPU the device could be kicked before it could

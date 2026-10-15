@@ -148,15 +148,10 @@ pub fn sys_exec(path_ptr: usize, argv_ptr: usize, envp_ptr: usize) -> SyscallRes
     let argv_refs: Vec<&str> = argv.iter().map(|s| s.as_str()).collect();
     let envp_refs: Vec<&str> = envp.iter().map(|s| s.as_str()).collect();
 
-    // exec replaces the address space every thread of the process runs in.
-    // Until the other threads are stopped first (N-101), refuse while any
-    // of them is alive rather than free page tables they still use.
+    // exec replaces the address space every thread of the process runs in,
+    // so the other threads go first (N-101).
     #[cfg(feature = "alloc")]
-    if crate::sched::dispatch::current_owner()
-        .is_some_and(|(pid, _)| crate::sched::dispatch::tasks_of(pid).len() > 1)
-    {
-        return Err(SyscallError::WouldBlock);
-    }
+    de_thread()?;
 
     match exec_process(&path, &argv_refs, &envp_refs) {
         Ok(_) => {
@@ -345,6 +340,62 @@ pub(crate) fn exit_current(exit_code: i32, term_signal: u32) -> SyscallResult {
 /// - options: Wait options bitmask (WNOHANG=1, WUNTRACED=2, WCONTINUED=8)
 pub fn sys_wait(pid: isize, status_ptr: usize, options: usize) -> SyscallResult {
     sys_wait4(pid, status_ptr, options, 0)
+}
+
+/// Before an exec: end every other thread of the calling process and wait
+/// until their tasks are off the CPU, as Linux's `de_thread` (N-101). They
+/// leave as by `pthread_exit` at their next return to user mode or wakeup
+/// (`EXEC_PENDING`). Two threads exec'ing at once: the second one leaves.
+/// A fatal signal or an `exit_group` arriving meanwhile wins: the exec
+/// fails with EINTR and the signal is acted on at the syscall exit.
+#[cfg(feature = "alloc")]
+fn de_thread() -> Result<(), SyscallError> {
+    use core::sync::atomic::Ordering;
+
+    use crate::{process::exit::EXEC_PENDING, sched::dispatch};
+
+    let Some((pid, tid)) = dispatch::current_owner() else {
+        return Ok(());
+    };
+    if dispatch::tasks_of(pid).len() <= 1 {
+        return Ok(());
+    }
+    let process = crate::process::current_process().ok_or(SyscallError::InvalidState)?;
+    match process.kill_pending.compare_exchange(
+        0,
+        EXEC_PENDING,
+        Ordering::AcqRel,
+        Ordering::Acquire,
+    ) {
+        Ok(_) => {}
+        // Another thread is exec'ing: this one is one of the threads to go.
+        Err(EXEC_PENDING) => {
+            drop(process);
+            crate::process::exit::exit_dispatched(0, false);
+        }
+        Err(_) => return Err(SyscallError::Interrupted),
+    }
+    process.exec_tid.store(tid, Ordering::Release);
+    // Threads asleep in a wait notice at once.
+    for task in dispatch::tasks_of(pid) {
+        dispatch::wake(&task);
+    }
+    // Uninterruptible: this thread does not leave on EXEC_PENDING, and a
+    // real fatal signal replaces EXEC_PENDING, which ends the wait too.
+    dispatch::PROCESS_EVENTS.wait_until(|| {
+        dispatch::tasks_of(pid).len() <= 1
+            || process.kill_pending.load(Ordering::Acquire) != EXEC_PENDING
+    });
+    if process
+        .kill_pending
+        .compare_exchange(EXEC_PENDING, 0, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return Err(SyscallError::Interrupted);
+    }
+    // The other threads are gone; drop their entries.
+    process.threads.lock().retain(|t, _| t.0 == tid);
+    Ok(())
 }
 
 /// wait4: [`sys_wait`], and the child's resource usage (with its own

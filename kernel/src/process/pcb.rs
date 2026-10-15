@@ -129,6 +129,9 @@ pub struct Process {
     /// (dispatched processes only): each thread exits at its next return
     /// to user mode or wakeup, and the last one tears the process down.
     pub kill_pending: AtomicU32,
+    /// While `kill_pending` is `exit::EXEC_PENDING`: the thread doing the
+    /// exec, the one thread that stays (N-101).
+    pub exec_tid: AtomicU64,
 
     /// The signal the parent gets when this process exits: SIGCHLD, or
     /// clone's low byte (0: none) (N-210).
@@ -399,6 +402,7 @@ impl Process {
             term_signal: AtomicU32::new(0),
             dispatched: core::sync::atomic::AtomicBool::new(false),
             kill_pending: AtomicU32::new(0),
+            exec_tid: AtomicU64::new(0),
             exit_signal: AtomicU32::new(super::signals::SIGCHLD as u32),
             vfork_pending: core::sync::atomic::AtomicBool::new(false),
             did_exec: core::sync::atomic::AtomicBool::new(false),

@@ -581,12 +581,7 @@ pub fn exec_process(path: &str, argv: &[&str], envp: &[&str]) -> Result<(), Kern
     let (final_entry, stack_top) = match committed {
         Ok(v) => v,
         Err(e) => {
-            let _ = process.kill_pending.compare_exchange(
-                0,
-                11,
-                core::sync::atomic::Ordering::AcqRel,
-                core::sync::atomic::Ordering::Acquire,
-            );
+            super::exit::set_kill_pending(&process, 11);
             return Err(e);
         }
     };

@@ -747,12 +747,7 @@ pub fn send_info_to_process(
     }
     job_control_on_send(process, sig);
     if sig == SIGKILL {
-        let _ = process.kill_pending.compare_exchange(
-            0,
-            SIGKILL as u32,
-            Ordering::AcqRel,
-            Ordering::Acquire,
-        );
+        super::exit::set_kill_pending(process, SIGKILL as u32);
     } else if ignored(process, sig) {
         return Ok(true);
     } else {

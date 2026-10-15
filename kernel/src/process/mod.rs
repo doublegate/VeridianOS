@@ -398,6 +398,9 @@ pub fn run_and_wait(pid: ProcessId) -> Option<i32> {
 /// running thread was still using when it tore the rest down -- are freed.
 #[cfg(feature = "alloc")]
 pub fn user_task_reaped(pid: u64, _tid: u64) {
+    // Every reap: an exec waits for its process's other tasks to go
+    // (N-101), not only for the whole process.
+    crate::sched::dispatch::PROCESS_EVENTS.wake_all();
     let Some(process) = table::get_process(ProcessId(pid)) else {
         return;
     };
@@ -428,8 +431,12 @@ pub fn wait_interrupted() -> bool {
     let (Some(process), Some(thread)) = (current_process(), current_thread()) else {
         return false;
     };
-    process.kill_pending.load(Ordering::Acquire) != 0
-        || signals::deliverable(&process, &thread) != 0
+    match process.kill_pending.load(Ordering::Acquire) {
+        0 => signals::deliverable(&process, &thread) != 0,
+        // An exec in progress interrupts every thread but the exec'ing one.
+        exit::EXEC_PENDING => process.exec_tid.load(Ordering::Acquire) != thread.tid.0,
+        _ => true,
+    }
 }
 
 /// Run on every return to user mode of a dispatched thread: a thread whose
@@ -446,6 +453,13 @@ pub extern "C" fn user_return_check() {
             if sig == exit::GROUP_EXIT_PENDING {
                 drop(process);
                 exit::exit_dispatched(0, true);
+            } else if sig == exit::EXEC_PENDING {
+                // Another thread is exec'ing: this one leaves.
+                let me = current_thread().map(|t| t.tid.0);
+                if me != Some(process.exec_tid.load(Ordering::Acquire)) {
+                    drop(process);
+                    exit::exit_dispatched(0, false);
+                }
             } else if sig != 0 {
                 drop(process);
                 let _ = crate::syscall::process::exit_current(0, sig);

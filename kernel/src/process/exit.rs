@@ -606,6 +606,23 @@ pub fn kill_process_info(pid: ProcessId, signal: i32, info: SigInfo) -> Result<(
 /// the process's exit code, not as killed by a signal.
 pub const GROUP_EXIT_PENDING: u32 = u32::MAX;
 
+/// `kill_pending` value while a thread execs (N-101): every other thread
+/// leaves (as by `pthread_exit`) at its next return to user mode or wakeup;
+/// the exec'ing thread is `Process::exec_tid`. A fatal signal or an
+/// `exit_group` replaces it, and the exec then fails.
+pub const EXEC_PENDING: u32 = u32::MAX - 1;
+
+/// Make the fatal `signal` pending for `process`'s threads unless one is
+/// already: the first fatal signal wins. It also replaces an exec in
+/// progress -- a SIGKILL during exec must not be lost.
+pub fn set_kill_pending(process: &Process, signal: u32) {
+    let _ = process
+        .kill_pending
+        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |cur| {
+            (cur == 0 || cur == EXEC_PENDING).then_some(signal)
+        });
+}
+
 /// Exit the running thread of a dispatched process (ADR 0006 stage D2).
 /// Never returns.
 ///
@@ -634,7 +651,7 @@ pub fn exit_dispatched(exit_code: i32, group: bool) -> ! {
         }
 
         let pending = process.kill_pending.load(Ordering::Acquire);
-        if group && pending == 0 {
+        if group && (pending == 0 || pending == EXEC_PENDING) {
             // First thread out of an exit_group decides the exit code and
             // sends the others after it.
             process.set_exit_code(exit_code);
@@ -724,12 +741,7 @@ fn force_terminate_process(process: &Process, signal: i32) -> Result<(), KernelE
     if process.dispatched.load(Ordering::Acquire) {
         let tasks = sched::dispatch::tasks_of(process.pid.0);
         if !tasks.is_empty() {
-            let _ = process.kill_pending.compare_exchange(
-                0,
-                signal as u32,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            );
+            set_kill_pending(process, signal as u32);
             for task in &tasks {
                 sched::dispatch::wake(task);
             }

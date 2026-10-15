@@ -1625,15 +1625,25 @@ static void test_threads(void)
     report("musl_pthreads_join_mutex_exit", ok, why);
 }
 
-/* Guards found by the security review of stage D2: a clone with a
- * non-canonical TLS base is refused (it used to reach IA32_FS_BASE and #GP
- * the kernel at every switch), and exec is refused while another thread of
- * the process runs (it freed page tables that thread still used). */
+/* A clone with a non-canonical TLS base is refused (security review of
+ * stage D2: it used to reach IA32_FS_BASE and #GP the kernel at every
+ * switch). exec from a multithreaded process ends the other threads first,
+ * as on Linux (N-101; it used to fail with EAGAIN, and before that freed
+ * page tables they still used): one thread sleeping in the kernel, one
+ * spinning in user mode, and /bin/true runs. */
 static void *sleeper(void *arg)
 {
     (void)arg;
-    struct timespec ts = {0, 200 * 1000 * 1000};
+    struct timespec ts = {5, 0};
     nanosleep(&ts, 0);
+    return 0;
+}
+
+static void *spinner(void *arg)
+{
+    volatile unsigned long *n = arg;
+    for (;;)
+        ++*n;
     return 0;
 }
 
@@ -1646,23 +1656,25 @@ static void test_thread_guards(void)
                      CLONE_SYSVSEM | CLONE_SETTLS;
         errno = 0;
         long r = syscall(SYS_clone, flags, stack + sizeof(stack), 0, 0, 0x8000000000000000UL);
-        int tls_refused = r == -1 && errno == EINVAL;
+        if (!(r == -1 && errno == EINVAL))
+            _exit(10);
 
-        pthread_t t;
-        int exec_refused = 0;
-        if (pthread_create(&t, 0, sleeper, 0) == 0) {
-            char *argv[] = {"true", 0};
-            errno = 0;
-            exec_refused = execve("/bin/true", argv, 0) == -1 && errno == EAGAIN;
-            pthread_join(t, 0);
-        }
-        _exit(tls_refused && exec_refused ? 0 : 1 + tls_refused + 2 * exec_refused);
+        static volatile unsigned long spins;
+        pthread_t a, b;
+        if (pthread_create(&a, 0, sleeper, 0) != 0 ||
+            pthread_create(&b, 0, spinner, (void *)&spins) != 0)
+            _exit(11);
+        while (spins == 0)
+            sched_yield();
+        char *argv[] = {"true", 0};
+        execve("/bin/true", argv, 0);
+        _exit(12); /* exec failed */
     }
     int st = 0;
     int ok = pid > 0 && waitpid(pid, &st, 0) == pid && WIFEXITED(st) && WEXITSTATUS(st) == 0;
     static char why[48];
     snprintf(why, sizeof(why), "status=0x%x", st);
-    report("musl_clone_tls_and_exec_guards", ok, why);
+    report("musl_clone_tls_and_multithreaded_exec", ok, why);
 }
 
 /* Signal handlers as musl installs them (SA_RESTORER, __restore_rt), and
