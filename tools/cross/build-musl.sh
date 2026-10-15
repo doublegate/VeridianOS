@@ -175,13 +175,23 @@ install_linux_headers() {
     local dst="${SYSROOT}/usr/include"
     [[ -f "${src}/linux/limits.h" ]] || die "Linux UAPI headers not found in ${src} (install linux-api-headers or set LINUX_HEADERS_DIR)"
     log "Installing Linux UAPI headers from ${src}..."
-    local dir
+    local dir from
     for dir in linux asm asm-generic drm mtd rdma scsi sound video misc xen; do
-        if [[ -d "${src}/${dir}" ]]; then
+        from="${src}/${dir}"
+        # Debian and Ubuntu keep the architecture's asm/ in the multiarch
+        # directory (linux-libc-dev): /usr/include/x86_64-linux-gnu/asm.
+        if [[ "${dir}" == asm && ! -d "${from}" ]]; then
+            from="${src}/x86_64-linux-gnu/asm"
+        fi
+        if [[ -d "${from}" ]]; then
             mkdir -p "${dst}/${dir}"
-            cp -a "${src}/${dir}/." "${dst}/${dir}/"
+            cp -a "${from}/." "${dst}/${dir}/"
         fi
     done
+    # linux/types.h includes <asm/types.h>; without asm/ every user of the
+    # UAPI headers fails to compile (it went unnoticed on hosts that keep
+    # asm/ in /usr/include).
+    [[ -f "${dst}/asm/types.h" ]] || die "asm/types.h not found under ${src} or ${src}/x86_64-linux-gnu"
 }
 
 # ── Verify ────────────────────────────────────────────────────────────
