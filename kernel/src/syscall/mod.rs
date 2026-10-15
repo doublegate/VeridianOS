@@ -283,6 +283,7 @@ mod futex;
 pub(crate) mod linux_compat;
 mod thread_clone;
 pub(crate) mod userspace;
+pub(crate) use filesystem::rename_paths;
 pub use futex::sys_futex_wake;
 
 // Import Phase 6 syscall modules

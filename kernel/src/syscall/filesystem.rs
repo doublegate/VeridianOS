@@ -2236,8 +2236,15 @@ fn access_path(path: &str, mode: usize, flags: usize) -> SyscallResult {
 /// # Returns
 /// 0 on success.
 pub fn sys_rename(old_ptr: usize, new_ptr: usize) -> SyscallResult {
-    let old_path = resolve_at_path(AT_FDCWD, &read_user_path(old_ptr)?)?;
-    let new_path = resolve_at_path(AT_FDCWD, &read_user_path(new_ptr)?)?;
+    rename_paths(&read_user_path(old_ptr)?, &read_user_path(new_ptr)?)
+}
+
+/// `rename(old, new)` for kernel callers (the shell's `mv`): paths relative
+/// to the calling process's working directory, the same checks and atomic
+/// replace as the system call.
+pub(crate) fn rename_paths(old: &str, new: &str) -> SyscallResult {
+    let old_path = resolve_at_path(AT_FDCWD, old)?;
+    let new_path = resolve_at_path(AT_FDCWD, new)?;
     rename_entry(&old_path, &new_path)
 }
 

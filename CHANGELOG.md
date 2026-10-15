@@ -655,6 +655,10 @@
     than dereferencing physical addresses, which became user addresses when the map moved
     (INC-MEM-03; the walk has no caller today).
   - The heap module's description of which architectures use which allocator is corrected.
+- **The kernel shell's `mv` renames** instead of copying the file through memory and deleting the
+  original, so it keeps the inode and moves directories; across filesystems it still copies. The
+  compositor's frame-copying `back_buffer()` is test-only (its only production use had already
+  gone).
 - **Zone-limited frame allocations stay in their zone.** A DMA-zone request could be served by any
   node's allocator without a zone check; a first attempt at the check (not released) tested only
   the first frame, so a run starting below 16 MiB and ending above it was accepted. The bitmap and
