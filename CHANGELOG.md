@@ -348,6 +348,10 @@
 
 ### Changed
 
+- **The syscall rate limiter has a bucket per CPU (SYS-PERF-01).** Every system call on every CPU
+  updated the same two counters. Each CPU now has its own cache-aligned bucket holding its share
+  of the unchanged machine-wide budget. A single CPU's share, 3.1 million calls per second, is
+  still far above what one CPU issues.
 - **SMP is on by default.** The `smp` feature is now a default feature: the kernel starts every
   CPU the machine has and, on x86_64, runs tasks on all of them (ADR 0012). A one-CPU machine runs
   the same kernel. CI's 4-CPU boot jobs and `scripts/dev/gate.sh --smp` no longer build a separate

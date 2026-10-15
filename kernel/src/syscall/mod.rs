@@ -141,11 +141,20 @@ fn syscall_arg6() -> Result<usize, SyscallError> {
 /// `last_refill`, so concurrent syscalls can neither double-spend a token
 /// nor wrap the counter (SYS-PERF-01). Elapsed time is converted from
 /// hardware ticks to seconds before it becomes tokens.
+///
+/// The global budget ([`Self::REFILL_PER_SEC`], [`Self::MAX_TOKENS`]) is
+/// split into one bucket per CPU, each on its own cache line, so system
+/// calls on different CPUs do not contend for one counter; the shares sum
+/// to the global budget, so the machine-wide rate is unchanged.
 struct SyscallRateLimiter {
     /// Tokens available.
     tokens: AtomicU64,
     /// Hardware timestamp up to which elapsed time has been credited.
     last_refill: AtomicU64,
+    /// Tokens per second this bucket earns.
+    rate: u64,
+    /// Most tokens it holds.
+    burst: u64,
 }
 
 impl SyscallRateLimiter {
@@ -158,14 +167,30 @@ impl SyscallRateLimiter {
     /// the limiter is correct but does not throttle normal workloads.
     const REFILL_PER_SEC: u64 = 50_000_000;
 
-    const fn new() -> Self {
-        Self::with_tokens(Self::MAX_TOKENS)
+    /// Buckets the global budget is split into (one per CPU).
+    const SHARDS: u64 = crate::sched::smp::MAX_CPUS as u64;
+
+    /// One CPU's bucket: its share of the global budget, full.
+    const fn shard() -> Self {
+        Self::with(
+            Self::MAX_TOKENS / Self::SHARDS,
+            Self::REFILL_PER_SEC / Self::SHARDS,
+            Self::MAX_TOKENS / Self::SHARDS,
+        )
     }
 
+    /// A bucket with the whole global budget holding `tokens` (tests).
+    #[cfg(test)]
     const fn with_tokens(tokens: u64) -> Self {
+        Self::with(tokens, Self::REFILL_PER_SEC, Self::MAX_TOKENS)
+    }
+
+    const fn with(tokens: u64, rate: u64, burst: u64) -> Self {
         Self {
             tokens: AtomicU64::new(tokens),
             last_refill: AtomicU64::new(0),
+            rate,
+            burst,
         }
     }
 
@@ -191,14 +216,14 @@ impl SyscallRateLimiter {
         }
         let last = self.last_refill.load(Ordering::Acquire);
         let elapsed = now.saturating_sub(last) as u128;
-        let earned = elapsed * Self::REFILL_PER_SEC as u128 / ticks_per_sec as u128;
+        let earned = elapsed * self.rate as u128 / ticks_per_sec as u128;
         if earned == 0 {
             // Leave last_refill alone so sub-token intervals accumulate.
             return;
         }
         // Credit only the ticks that produced whole tokens, so the
         // remainder is not lost; only the CAS winner adds the tokens.
-        let credited = (earned * ticks_per_sec as u128 / Self::REFILL_PER_SEC as u128) as u64;
+        let credited = (earned * ticks_per_sec as u128 / self.rate as u128) as u64;
         if self
             .last_refill
             .compare_exchange(last, last + credited, Ordering::AcqRel, Ordering::Acquire)
@@ -206,16 +231,26 @@ impl SyscallRateLimiter {
         {
             return;
         }
-        let earned = earned.min(Self::MAX_TOKENS as u128) as u64;
+        let earned = earned.min(self.burst as u128) as u64;
         let _ = self
             .tokens
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |t| {
-                Some(t.saturating_add(earned).min(Self::MAX_TOKENS))
+                Some(t.saturating_add(earned).min(self.burst))
             });
     }
 }
 
-static SYSCALL_RATE_LIMITER: SyscallRateLimiter = SyscallRateLimiter::new();
+/// One rate-limit bucket per CPU (see [`SyscallRateLimiter`]).
+static SYSCALL_RATE_LIMITERS: [crate::mm::cache_aligned::CacheAligned<SyscallRateLimiter>;
+    crate::sched::smp::MAX_CPUS] =
+    [const { crate::mm::cache_aligned::CacheAligned::new(SyscallRateLimiter::shard()) };
+        crate::sched::smp::MAX_CPUS];
+
+/// Charge one system call to this CPU's bucket.
+fn rate_limit_allows() -> bool {
+    let cpu = (crate::arch::percpu::this_cpu_id() as usize).min(SYSCALL_RATE_LIMITERS.len() - 1);
+    SYSCALL_RATE_LIMITERS[cpu].check()
+}
 
 /// Syscall statistics for monitoring
 static SYSCALL_COUNT: AtomicU64 = AtomicU64::new(0);
@@ -562,7 +597,7 @@ pub extern "C" fn syscall_handler(
     );
 
     // Rate limiting check
-    if !SYSCALL_RATE_LIMITER.check() {
+    if !rate_limit_allows() {
         SYSCALL_ERRORS.fetch_add(1, Ordering::Relaxed);
         // Through the shared conversion like every other error: the raw
         // VeridianOS value (-6) is not EAGAIN (-11) to musl (review of the
@@ -4227,6 +4262,25 @@ mod tests {
         limiter.check_at(2 * HZ, HZ);
         assert!(limiter.tokens.load(Ordering::Relaxed) <= SyscallRateLimiter::MAX_TOKENS);
         assert!(limiter.tokens.load(Ordering::Relaxed) >= SyscallRateLimiter::MAX_TOKENS - 1);
+    }
+
+    #[test]
+    fn rate_limiter_shards_share_the_global_budget() {
+        let shard = SyscallRateLimiter::shard();
+        let n = SyscallRateLimiter::SHARDS;
+        // The shares never add up to more than the global budget.
+        assert!(shard.rate * n <= SyscallRateLimiter::REFILL_PER_SEC);
+        assert!(shard.burst * n <= SyscallRateLimiter::MAX_TOKENS);
+        // A shard refills at its own rate and stops at its own burst.
+        let s = SyscallRateLimiter::with(0, shard.rate, shard.burst);
+        s.check_at(0, HZ);
+        s.check_at(HZ / 1_000, HZ); // 1 ms
+        let got = s.tokens.load(Ordering::Relaxed) + 1;
+        assert_eq!(got, shard.rate / 1_000);
+        s.check_at(10 * HZ, HZ);
+        assert!(s.tokens.load(Ordering::Relaxed) <= shard.burst);
+        // One CPU's share still exceeds what it can issue (~0.5M calls/s).
+        assert!(shard.rate > 1_000_000);
     }
 
     // --- Syscall TryFrom tests ---

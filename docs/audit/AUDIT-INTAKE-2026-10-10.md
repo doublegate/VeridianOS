@@ -65,7 +65,7 @@ code, **L** = latent (unreachable today), as in the 2026-10-07 re-evaluation.
 | CAP-PERF-01 (one `RwLock` per capability space) | overstated: per process, the deliberate earlier fix | earlier CAP-PERF-01/02 |
 | SCHED-INC-01 (priority inheritance is a stub) | real | SCHED-INC-01 (D) |
 | POC-SMP-01 (`exit_task` uses CPU 0's scheduler), BM-SCHED-01, POC-SCHED-02b, SCHED-SEC-01 (`find_process`) | real but on the old scheduler path, unreachable once the dispatcher runs | D4 (retire the old scheduler), N-156 |
-| SYS-PERF-01 (one global rate-limiter cache line) | real, minor | SYS-PERF-01 (after D5 per-CPU data) |
+| SYS-PERF-01 (one global rate-limiter cache line) | real, minor | **fixed** (v0.27, D5): one cache-aligned bucket per CPU holding its share of the global budget |
 | BM-DRV-06 (cache lock across disk I/O) | real | N-118: the BlockFS part **fixed** 1ce99be9 |
 | SEC-DRV-01 (virtio-blk spins, no FLUSH) | real | N-52, N-121 (F5) |
 | N-69, N-64, N-75 and the swapped N-65/N-76 | real | their own IDs (F) |
