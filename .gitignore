@@ -350,3 +350,13 @@ a.out
 
 # Antigravity PR reviewer: large-diff on-disk handoff (transient, removed by the script).
 /.agy-review-work/
+
+# Other agent harnesses' private working state (briefings, handoffs, local MCP config).
+/.agents/
+/.codex/
+# Files rescued from /tmp (tmp-salvage); reviewed by hand, never committed wholesale.
+/salvaged/
+/docs/SALVAGE_MANIFEST.md
+# One-off edit scripts and tool output dropped at the repo root.
+/fix*.py
+/clippy_out.txt
