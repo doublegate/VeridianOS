@@ -986,6 +986,47 @@ static void test_pty(void)
     report("musl_pty_readiness_and_blocking", f == 0, why);
 }
 
+/* The console (N-118): with no input waiting it is not readable, a
+ * non-blocking read is EAGAIN, and a blocking reader sleeps -- the parent
+ * keeps running -- until a signal ends the read with EINTR. It used to spin
+ * on the serial port with the CPU held, and poll saw it as always ready. */
+static void console_sig(int s) { (void)s; }
+
+static void test_console(void)
+{
+    int f = 0, st = 0;
+    int fd = open("/dev/console", O_RDONLY | O_NONBLOCK);
+    if (fd < 0) {
+        report("musl_console_blocks_and_polls", 0, "open /dev/console failed");
+        return;
+    }
+    struct pollfd p = {.fd = fd, .events = POLLIN};
+    if (poll(&p, 1, 0) != 0) f |= 1;
+    char buf[8];
+    errno = 0;
+    if (read(fd, buf, sizeof(buf)) != -1 || errno != EAGAIN) f |= 2;
+    close(fd);
+
+    pid_t c = fork();
+    if (c == 0) {
+        struct sigaction sa;
+        memset(&sa, 0, sizeof(sa));
+        sa.sa_handler = console_sig; /* no SA_RESTART */
+        sigaction(SIGUSR1, &sa, 0);
+        int in = open("/dev/console", O_RDONLY);
+        errno = 0;
+        ssize_t n = read(in, buf, sizeof(buf));
+        _exit(n == -1 && errno == EINTR ? 0 : 1);
+    }
+    struct timespec t = {0, 100 * 1000 * 1000};
+    nanosleep(&t, 0);
+    if (kill(c, SIGUSR1) != 0) f |= 4;
+    if (waitpid(c, &st, 0) != c || !WIFEXITED(st) || WEXITSTATUS(st) != 0) f |= 8;
+    static char why[48];
+    snprintf(why, sizeof(why), "fail=%#x st=%#x", f, st);
+    report("musl_console_blocks_and_polls", f == 0, why);
+}
+
 /* munmap, mprotect, brk, mremap, madvise, getrandom and futex bitsets
  * (N-240, N-242, N-243, N-244, N-246, N-226), as Linux. */
 
@@ -3184,6 +3225,7 @@ int main(int argc, char **argv)
     test_peercred();
     test_siginfo();
     test_pty();
+    test_console();
     printf("MUSL-RUNTIME: %d/%d\n", passed, total);
     return passed == total ? 0 : 1;
 }

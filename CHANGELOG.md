@@ -652,6 +652,14 @@
 
 ### Fixed
 
+- **A process reading the console sleeps instead of spinning (N-118, console part).** The
+  `/dev/console` node, the loader's stdin node and the stdin fallback of read(2) each busy-waited
+  on the serial port, so a program waiting for a key kept every other task off the CPU, and two
+  readers could split a line between them. Received bytes now go into one buffer that the timer
+  tick fills and that wakes readers; all of them share one line discipline (canonical lines with
+  erase and ^D kept across reads, raw mode with VMIN/VTIME), poll and epoll see the console's real
+  readiness, and a signal ends the wait with EINTR. On AArch64 and RISC-V, which have no tick hook
+  yet, readers re-check every 10 ms.
 - **Ptys block and report readiness (N-128).** Reading an empty pty returned 0, which programs
   take as end of file, and poll, epoll and select saw ptys as always ready (they re-checked every
   10 ms). An empty side now reads as EAGAIN, or sleeps for a blocking reader until the other side

@@ -73,84 +73,38 @@ fn serial_write_byte(byte: u8) {
     }
 }
 
-/// Try to read a single byte from the serial UART (non-blocking).
-///
-/// Returns `Some(byte)` if data is available, `None` otherwise.
-/// Used as a fallback when the stdin file descriptor is not yet set up.
-fn serial_try_read_byte() -> Option<u8> {
-    #[cfg(target_arch = "x86_64")]
-    {
-        // Check Line Status Register (base + 5) bit 0 for data ready,
-        // then read from data register (base + 0) at COM1 (0x3F8).
-        let status: u8;
-        // SAFETY: Reading the Line Status Register at I/O port 0x3FD.
-        // This is a well-defined 16550 UART register read.
-        unsafe {
-            core::arch::asm!(
-                "in al, dx",
-                out("al") status,
-                in("dx") 0x3FDu16,
-                options(nomem, nostack)
-            );
+/// Read the console for a process without a stdin descriptor, sleeping
+/// (not spinning, N-118) until the line discipline has something to return;
+/// a signal ends the wait with EINTR.
+fn read_console_waiting(out: &mut [u8]) -> Result<usize, SyscallError> {
+    use crate::drivers::console_input;
+    loop {
+        match console_input::read_tty(out) {
+            Ok(n) => return Ok(n),
+            Err(crate::error::KernelError::WouldBlock) => {}
+            Err(e) => return Err(super::map_kernel_error(e)),
         }
-        if (status & 1) != 0 {
-            let data: u8;
-            // SAFETY: Reading the data register at I/O port 0x3F8.
-            // The LSR check above confirmed data is available.
-            unsafe {
-                core::arch::asm!(
-                    "in al, dx",
-                    out("al") data,
-                    in("dx") 0x3F8u16,
-                    options(nomem, nostack)
-                );
-            }
-            Some(data)
-        } else {
-            None
-        }
-    }
-
-    #[cfg(target_arch = "aarch64")]
-    {
-        const UART_BASE: usize = 0x0900_0000;
-        const UART_FR: usize = UART_BASE + 0x18; // Flag register
-        const UART_DR: usize = UART_BASE; // Data register
-
-        // SAFETY: Reading PL011 UART MMIO registers. The QEMU virt machine
-        // maps the UART at this address. volatile_read prevents reordering.
-        unsafe {
-            let flags = core::ptr::read_volatile(UART_FR as *const u32);
-            if (flags & (1 << 4)) == 0 {
-                // RXFE bit clear = data available
-                let data = core::ptr::read_volatile(UART_DR as *const u32);
-                Some((data & 0xFF) as u8)
-            } else {
-                None
+        #[cfg(feature = "alloc")]
+        {
+            use crate::sched::dispatch::{self, WaitError};
+            // Without a tick hook (not x86_64) nothing wakes the queue, so
+            // re-check every 10 ms; a raw-mode VTIME read ends at its
+            // deadline.
+            let recheck = (!cfg!(target_arch = "x86_64"))
+                .then(|| dispatch::clock_ns().saturating_add(10_000_000));
+            let deadline = [recheck, console_input::tty_ready_at()]
+                .into_iter()
+                .flatten()
+                .min();
+            match dispatch::wait_event(&console_input::CONSOLE_INPUT, deadline, || {
+                console_input::tty_readiness() & 0x0001 != 0
+            }) {
+                Ok(()) | Err(WaitError::TimedOut) => {}
+                Err(WaitError::Interrupted) => return Err(SyscallError::Interrupted),
             }
         }
-    }
-
-    #[cfg(target_arch = "riscv64")]
-    {
-        // SBI legacy console getchar (function 0x02).
-        let result: isize;
-        // SAFETY: The ecall invokes SBI console_getchar. Returns the
-        // character in a0, or -1 if no data is available.
-        unsafe {
-            core::arch::asm!(
-                "li a7, 0x02",
-                "ecall",
-                out("a0") result,
-                out("a7") _,
-                options(nomem)
-            );
-        }
-        if result >= 0 {
-            Some(result as u8)
-        } else {
-            None
-        }
+        #[cfg(not(feature = "alloc"))]
+        core::hint::spin_loop();
     }
 }
 
@@ -364,47 +318,13 @@ pub fn sys_read(fd: usize, buffer: usize, count: usize) -> SyscallResult {
         if !console_fallback_allowed(fd) {
             return Err(SyscallError::BadFileDescriptor);
         }
-        // Fallback: read from serial UART, respecting terminal state.
+        // Fallback: the console, through its shared line discipline.
         let read_count = count.min(SERIAL_IO_MAX_SIZE);
         // Bytes are gathered in a kernel buffer and copied out once (N-43).
         let mut line = alloc::vec![0u8; read_count];
-        let buffer_slice = &mut line[..];
-
-        let canonical = crate::drivers::terminal::is_canonical_mode();
-        let echo = crate::drivers::terminal::is_echo_enabled();
-
-        let mut bytes_read = 0;
-        for slot in buffer_slice.iter_mut() {
-            // Spin-wait for a byte to become available
-            let byte = loop {
-                if let Some(b) = serial_try_read_byte() {
-                    break b;
-                }
-                core::hint::spin_loop();
-            };
-
-            // Echo if enabled
-            if echo {
-                serial_write_byte(byte);
-            }
-
-            *slot = byte;
-            bytes_read += 1;
-
-            // In canonical mode, stop after newline or carriage return.
-            // In raw mode, return immediately after each character (VMIN=1).
-            if canonical {
-                if byte == b'\n' || byte == b'\r' {
-                    break;
-                }
-            } else {
-                // Raw mode: return after first character
-                break;
-            }
-        }
-
-        super::userspace::write_user_bytes(buffer, &line[..bytes_read])?;
-        return Ok(bytes_read);
+        let n = read_console_waiting(&mut line)?;
+        super::userspace::write_user_bytes(buffer, &line[..n])?;
+        return Ok(n);
     }
 
     // Non-stdin: use file table normally.

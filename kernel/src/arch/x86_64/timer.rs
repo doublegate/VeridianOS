@@ -37,6 +37,8 @@ pub fn tick(user: bool) {
         sched.tick();
     }
     #[cfg(feature = "alloc")]
+    crate::drivers::console_input::tick();
+    #[cfg(feature = "alloc")]
     crate::sched::dispatch::tick(user);
     #[cfg(not(feature = "alloc"))]
     let _ = user;

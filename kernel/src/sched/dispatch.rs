@@ -231,6 +231,12 @@ pub fn io_event() {
     }
 }
 
+/// [`io_event`] for interrupt context; see [`WaitQueue::wake_all_from_irq`].
+pub fn io_event_from_irq() -> bool {
+    IO_SEQ.fetch_add(1, Ordering::AcqRel);
+    !started() || IO_EVENTS.wake_all_from_irq()
+}
+
 /// The readiness-change count; take it before scanning file objects and
 /// pass it to [`wait_io`].
 pub fn io_seq() -> u64 {
@@ -1173,6 +1179,17 @@ impl WaitQueue {
                 return;
             }
         }
+    }
+
+    /// [`WaitQueue::wake_all`] for interrupt context: locks are only tried,
+    /// and waiters that could not be woken stay queued. Returns whether the
+    /// queue was emptied; if not, the caller retries on a later interrupt.
+    pub fn wake_all_from_irq(&self) -> bool {
+        let Some(mut waiters) = self.waiters.try_lock() else {
+            return false;
+        };
+        waiters.retain(|t| !try_wake(t));
+        waiters.is_empty()
     }
 
     /// Wake every waiter.

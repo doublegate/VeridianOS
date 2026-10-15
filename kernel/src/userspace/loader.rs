@@ -363,39 +363,22 @@ impl crate::fs::VfsNode for SerialConsoleNode {
         true
     }
 
+    /// The console's shared line discipline; WouldBlock until it has
+    /// something to return, and read(2) waits (N-118).
     fn read(&self, _offset: usize, buffer: &mut [u8]) -> Result<usize, KernelError> {
-        // Blocking read from serial (same logic as sys_read stdin fallback)
-        #[cfg(target_arch = "x86_64")]
-        {
-            let mut count = 0;
-            for slot in buffer.iter_mut() {
-                loop {
-                    let status: u8;
-                    // SAFETY: Reading COM1 line status register (0x3FD) via x86 port I/O.
-                    unsafe {
-                        core::arch::asm!("in al, dx", out("al") status, in("dx") 0x3FDu16);
-                    }
-                    if (status & 1) != 0 {
-                        let byte: u8;
-                        // SAFETY: Reading COM1 data register (0x3F8) after confirming data ready.
-                        unsafe {
-                            core::arch::asm!("in al, dx", out("al") byte, in("dx") 0x3F8u16);
-                        }
-                        *slot = byte;
-                        count += 1;
-                        break;
-                    }
-                    core::hint::spin_loop();
-                }
-            }
-            Ok(count)
-        }
-        #[cfg(not(target_arch = "x86_64"))]
-        {
-            // Non-x86: no serial polling available, return EOF
-            let _ = buffer;
-            Ok(0)
-        }
+        crate::drivers::console_input::read_node(buffer)
+    }
+
+    fn poll_readiness(&self) -> u16 {
+        crate::drivers::console_input::tty_readiness()
+    }
+
+    fn wakes_io_waiters(&self) -> bool {
+        cfg!(target_arch = "x86_64")
+    }
+
+    fn ready_at_ns(&self) -> Option<u64> {
+        crate::drivers::console_input::tty_ready_at()
     }
 
     fn write(&self, _offset: usize, data: &[u8]) -> Result<usize, KernelError> {
