@@ -1952,10 +1952,12 @@ fn run_dispatch_tests(passed: &mut u32, failed: &mut u32) {
         }
 
         // Test: two kernel threads interleave through yield and are reaped.
+        // Both are bound to this (the boot) CPU, so they share it even when
+        // other CPUs are idle.
         {
             let before = dispatch::task_count();
-            let a = dispatch::spawn_kernel("worker-a", worker, 1);
-            let b = dispatch::spawn_kernel("worker-b", worker, 2);
+            let a = dispatch::spawn_kernel_on(0, "worker-a", worker, 1);
+            let b = dispatch::spawn_kernel_on(0, "worker-b", worker, 2);
             let ok = match (a, b) {
                 (Ok(a), Ok(b)) => {
                     dispatch::join(a);
@@ -2051,6 +2053,46 @@ fn run_dispatch_tests(passed: &mut u32, failed: &mut u32) {
                 ok &= ran_on.load(Ordering::Acquire) == cpu;
             }
             report_test("dispatch_runs_on_every_cpu", ok, passed, failed);
+        }
+
+        // SMP stage S3 (D5e): unbound kernel threads are placed on idle
+        // CPUs. Each spins for a while recording where it runs; started
+        // while the other CPUs are idle, they must between them use every
+        // CPU.
+        static USED: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+        extern "C" fn spin_here(_: usize) {
+            let start = crate::arch::timer::monotonic_ns();
+            while crate::arch::timer::monotonic_ns().saturating_sub(start) < 20_000_000 {
+                USED.fetch_or(
+                    1 << crate::arch::percpu::this_cpu_id(),
+                    core::sync::atomic::Ordering::AcqRel,
+                );
+                core::hint::spin_loop();
+            }
+        }
+        if online <= 1 {
+            report_skip("dispatch_places_on_idle_cpus", "one CPU online");
+        } else {
+            let mut keys = alloc::vec::Vec::new();
+            for _ in 0..online {
+                if let Ok(k) = dispatch::spawn_kernel("spin", spin_here, 0) {
+                    keys.push(k);
+                }
+            }
+            let spawned = keys.len();
+            for k in keys {
+                dispatch::join(k);
+            }
+            let used = USED.load(Ordering::Acquire);
+            let ok = spawned == online && used.count_ones() as usize == online;
+            if !ok {
+                crate::println!(
+                    "[INIT] placement: {} threads, CPUs used {:#x}",
+                    spawned,
+                    used
+                );
+            }
+            report_test("dispatch_places_on_idle_cpus", ok, passed, failed);
         }
     }
 

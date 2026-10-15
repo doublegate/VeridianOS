@@ -91,6 +91,13 @@ sleep 1
 printf '/bin/musl_runtime_test\r' >&3
 wait_for 'MUSL-RUNTIME: [0-9]+/[0-9]+|vsh: command not found' "$musl_wait"
 sleep 1
+# A program started with arguments gets its own name as argv[0] and the
+# arguments after it (the kernel shell used to pass the arguments alone).
+if grep -aqE 'MUSL-RUNTIME: [0-9]+/[0-9]+' "$log"; then
+    printf '/bin/musl_runtime_test --only gs_base\r' >&3
+    wait_for 'MUSL-ONLY gs_base: ' 60
+    sleep 1
+fi
 finish
 
 status=PASS
@@ -108,6 +115,15 @@ if [[ $musl =~ ([0-9]+)/([0-9]+) ]]; then
 else
     musl="MUSL-RUNTIME: absent"
     [[ ${REQUIRE_MUSL:-0} == 1 ]] && status=FAIL
+fi
+if [[ $musl != "MUSL-RUNTIME: absent" ]]; then
+    only="$(grep -aoE 'MUSL-ONLY gs_base: [0-9]+/[0-9]+' "$log" | tail -1)"
+    if [[ $only =~ ([0-9]+)/([0-9]+)$ ]] && [[ ${BASH_REMATCH[1]} == "${BASH_REMATCH[2]}" ]]; then
+        musl="$musl; ARGV: ok"
+    else
+        musl="$musl; ARGV: ${only:-no result for /bin/musl_runtime_test --only gs_base}"
+        status=FAIL
+    fi
 fi
 grep -aqE 'KERNEL PANIC|panicked at' "$log" && status=FAIL
 

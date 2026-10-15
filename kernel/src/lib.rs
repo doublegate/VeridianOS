@@ -39,7 +39,38 @@ use simple_alloc_unsafe::UnsafeBumpAllocator;
     target_os = "none"
 ))]
 #[global_allocator]
-static ALLOCATOR: LockedHeap = LockedHeap::empty();
+static ALLOCATOR: IrqSafeHeap = IrqSafeHeap(LockedHeap::empty());
+
+/// The kernel heap with its lock taken with interrupts off (Linux's
+/// allocators are interrupt-safe the same way). Interrupt handlers allocate
+/// -- waking a task inserts it into a run queue -- and system calls run with
+/// interrupts on (N-139), so an interrupt arriving while its CPU held the
+/// plain spinlock would spin on it forever, and every other CPU with it.
+#[cfg(all(
+    any(target_arch = "x86_64", target_arch = "riscv64"),
+    target_os = "none"
+))]
+pub struct IrqSafeHeap(LockedHeap);
+
+#[cfg(all(
+    any(target_arch = "x86_64", target_arch = "riscv64"),
+    target_os = "none"
+))]
+// SAFETY: forwards to LockedHeap's GlobalAlloc, which upholds the contract;
+// masking interrupts around it changes nothing the caller can observe.
+unsafe impl core::alloc::GlobalAlloc for IrqSafeHeap {
+    unsafe fn alloc(&self, layout: core::alloc::Layout) -> *mut u8 {
+        let _irq = crate::arch::disable_interrupts();
+        // SAFETY: the caller's contract, passed on.
+        unsafe { self.0.alloc(layout) }
+    }
+
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: core::alloc::Layout) {
+        let _irq = crate::arch::disable_interrupts();
+        // SAFETY: the caller's contract, passed on.
+        unsafe { self.0.dealloc(ptr, layout) }
+    }
+}
 
 #[cfg(target_arch = "aarch64")]
 #[global_allocator]
@@ -58,7 +89,7 @@ static SYSTEM_ALLOCATOR: std::alloc::System = std::alloc::System;
     target_os = "none"
 ))]
 pub fn get_allocator() -> &'static LockedHeap {
-    &ALLOCATOR
+    &ALLOCATOR.0
 }
 
 #[macro_use]

@@ -3394,6 +3394,124 @@ static void test_robust_futex(void)
  * arguments, admit SCHED_DEADLINE reservations up to 95% of the CPU, reset
  * real-time policies in children with SCHED_RESET_ON_FORK, report the CPUs
  * that run tasks, and refuse unprivileged changes with EPERM/EACCES. */
+/* SMP (D5e): a thread restricted to one CPU runs there (getcpu says so)
+ * before sched_setaffinity returns, for every CPU in turn; and threads
+ * started while the other CPUs are idle are spread over all of them. */
+static volatile int spread_stop;
+static unsigned long spread_seen;
+
+static void *spread_spin(void *arg)
+{
+    (void)arg;
+    while (!spread_stop) {
+        int c = sched_getcpu();
+        if (c >= 0 && c < 64) __atomic_fetch_or(&spread_seen, 1UL << c, __ATOMIC_RELAXED);
+    }
+    return 0;
+}
+
+/* The user GS base belongs to the thread (ARCH_SET_GS/ARCH_GET_GS): two
+ * threads sharing one CPU keep their own across switches, and a fork child
+ * inherits it. (While the kernel runs, the base sits in a per-CPU register
+ * that was not switched with the task.) */
+static volatile int gs_go;
+
+static int gs_check(unsigned long mine)
+{
+    unsigned long got = 0;
+    if (syscall(SYS_arch_prctl, 0x1001 /* ARCH_SET_GS */, mine) != 0) return 0;
+    for (int i = 0; i < 2000; i++) {
+        sched_yield();
+        if (syscall(SYS_arch_prctl, 0x1004 /* ARCH_GET_GS */, &got) != 0 || got != mine)
+            return 0;
+    }
+    return 1;
+}
+
+static void *gs_thread(void *arg)
+{
+    (void)arg;
+    while (!gs_go) sched_yield();
+    return (void *)(long)gs_check(0x7000ab000UL);
+}
+
+static void test_gs_base(void)
+{
+    cpu_set_t one, all;
+    sched_getaffinity(0, sizeof(all), &all);
+    CPU_ZERO(&one);
+    CPU_SET(0, &one);
+    sched_setaffinity(0, sizeof(one), &one); /* inherited: both on CPU 0 */
+    pthread_t t;
+    gs_go = 0;
+    int made = pthread_create(&t, 0, gs_thread, 0) == 0;
+    gs_go = 1;
+    int mine = gs_check(0x7000cd000UL);
+    void *theirs = 0;
+    if (made) pthread_join(t, &theirs);
+    sched_setaffinity(0, sizeof(all), &all);
+    unsigned long base = 0;
+    int status = 0;
+    pid_t pid = fork();
+    if (pid == 0) {
+        unsigned long b = 0;
+        _exit(syscall(SYS_arch_prctl, 0x1004, &b) == 0 && b == 0x7000cd000UL ? 0 : 1);
+    }
+    int inherited = pid > 0 && waitpid(pid, &status, 0) == pid && WIFEXITED(status)
+                    && WEXITSTATUS(status) == 0;
+    errno = 0;
+    int eperm = syscall(SYS_arch_prctl, 0x1001, 0x800000000000UL) == -1 && errno == EPERM;
+    int kept = syscall(SYS_arch_prctl, 0x1004, &base) == 0 && base == 0x7000cd000UL;
+    syscall(SYS_arch_prctl, 0x1001, 0UL);
+    static char why[96];
+    snprintf(why, sizeof(why), "made=%d mine=%d theirs=%ld inherited=%d eperm=%d kept=%d", made,
+             mine, (long)theirs, inherited, eperm, kept);
+    report("musl_gs_base_per_thread", made && mine && theirs == (void *)1L && inherited
+                                          && eperm && kept, why);
+}
+
+static void test_smp_placement(void)
+{
+    long ncpu = sysconf(_SC_NPROCESSORS_ONLN);
+    int pinned = ncpu >= 1 && ncpu <= 64, where = -1;
+    cpu_set_t set;
+    for (long c = 0; pinned && c < ncpu; c++) {
+        CPU_ZERO(&set);
+        CPU_SET(c, &set);
+        unsigned cpu = 99, node = 99;
+        pinned = sched_setaffinity(0, sizeof(set), &set) == 0
+                 && syscall(SYS_getcpu, &cpu, &node, 0) == 0 && cpu == (unsigned)c
+                 && node == 0 && sched_getcpu() == c;
+        if (!pinned) where = (int)c;
+    }
+    CPU_ZERO(&set);
+    for (long c = 0; c < ncpu && c < 64; c++) CPU_SET(c, &set);
+    sched_setaffinity(0, sizeof(set), &set);
+
+    /* One spinning thread per other CPU, plus this one spinning too. */
+    pthread_t t[64];
+    int made = 0;
+    spread_stop = 0;
+    spread_seen = 0;
+    for (long i = 1; i < ncpu && i < 64; i++)
+        if (pthread_create(&t[made], 0, spread_spin, 0) == 0) made++;
+    struct timespec t0, now;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    do {
+        int c = sched_getcpu();
+        if (c >= 0 && c < 64) __atomic_fetch_or(&spread_seen, 1UL << c, __ATOMIC_RELAXED);
+        clock_gettime(CLOCK_MONOTONIC, &now);
+    } while ((now.tv_sec - t0.tv_sec) * 1000000000L + (now.tv_nsec - t0.tv_nsec) < 200000000L);
+    spread_stop = 1;
+    for (int i = 0; i < made; i++) pthread_join(t[i], 0);
+    int used = __builtin_popcountl(spread_seen);
+    int spread = made == ncpu - 1 && used == ncpu;
+    static char why[96];
+    snprintf(why, sizeof(why), "cpus=%ld pinned=%d (failed at %d) threads=%d used=%d", ncpu,
+             pinned, where, made, used);
+    report("musl_smp_placement", pinned && spread, why);
+}
+
 struct test_sched_attr {
     uint32_t size, policy;
     uint64_t flags;
@@ -3446,11 +3564,43 @@ static void test_sched(void)
          && g.runtime == 1000000 && g.deadline == 10000000 && g.period == 10000000;
     pid = fork();
     if (pid == 0) {
-        /* 90% more does not fit next to the parent's 10%. */
-        struct test_sched_attr big = {sizeof(big), 6, 0, 0, 0, 9000000, 10000000, 10000000};
-        errno = 0;
-        int busy = syscall(SYS_sched_setattr, 0, &big, 0) == -1 && errno == EBUSY;
-        _exit(busy ? 0 : 1);
+        /* Admission keeps the reserved total under 95% of every CPU, and
+         * the parent holds 10%: processes reserving 90% each are refused
+         * (EBUSY) by the time there is one more of them than CPUs. Each
+         * reports its result through a pipe and keeps its reservation
+         * until killed. */
+        long ncpu = sysconf(_SC_NPROCESSORS_ONLN);
+        pid_t kids[64];
+        int n = 0, busy = 0;
+        for (long i = 0; i <= ncpu && n < 64 && busy == 0; i++) {
+            int fd[2];
+            if (pipe(fd) != 0) {
+                busy = -1;
+                break;
+            }
+            pid_t k = fork();
+            if (k == 0) {
+                struct test_sched_attr big = {sizeof(big), 6, 0, 0, 0,
+                                              9000000, 10000000, 10000000};
+                errno = 0;
+                char r = syscall(SYS_sched_setattr, 0, &big, 0) == 0 ? 'y'
+                         : errno == EBUSY                            ? 'b'
+                                                                     : 'e';
+                write(fd[1], &r, 1);
+                for (;;) pause();
+            }
+            char r = 'e';
+            if (k < 0 || read(fd[0], &r, 1) != 1) r = 'e';
+            close(fd[0]);
+            close(fd[1]);
+            if (k > 0) kids[n++] = k;
+            busy = r == 'b' ? 1 : r == 'y' ? 0 : -1;
+        }
+        for (int i = 0; i < n; i++) {
+            kill(kids[i], SIGKILL);
+            waitpid(kids[i], 0, 0);
+        }
+        _exit(busy == 1 ? 0 : 1);
     }
     int admission = pid > 0 && waitpid(pid, &status, 0) == pid && WIFEXITED(status)
                     && WEXITSTATUS(status) == 0;
@@ -3462,13 +3612,15 @@ static void test_sched(void)
                 && errno == 0 && setpriority(PRIO_PROCESS, 0, 3) == 0
                 && getpriority(PRIO_PROCESS, 0) == 3;
 
-    /* One CPU runs tasks: the mask and the processor count say so. */
+    /* The mask holds every CPU that runs tasks, as many as the processor
+     * count, and a mask of offline CPUs only is refused. */
     cpu_set_t set;
     CPU_ZERO(&set);
-    int aff = sched_getaffinity(0, sizeof(set), &set) == 0 && CPU_COUNT(&set) == 1
-              && CPU_ISSET(0, &set) && sysconf(_SC_NPROCESSORS_ONLN) == 1;
+    long ncpu = sysconf(_SC_NPROCESSORS_ONLN);
+    int aff = ncpu >= 1 && ncpu < 63 && sched_getaffinity(0, sizeof(set), &set) == 0
+              && CPU_COUNT(&set) == ncpu && CPU_ISSET(0, &set);
     CPU_ZERO(&set);
-    CPU_SET(1, &set);
+    CPU_SET(63, &set);
     errno = 0;
     int aff_einval = sched_setaffinity(0, sizeof(set), &set) == -1 && errno == EINVAL;
     CPU_ZERO(&set);
@@ -3505,10 +3657,39 @@ static void test_sched(void)
            why);
 }
 
+/* Tests `--only NAME` can run alone (for debugging a single test). */
+static const struct {
+    const char *name;
+    void (*fn)(void);
+} only_tests[] = {
+    {"threads", test_threads},
+    {"signals", test_signals},
+    {"futex_queues", test_futex_queues},
+    {"blocking_io", test_blocking_io},
+    {"unix_socket_wakeups", test_unix_socket_wakeups},
+    {"robust_futex", test_robust_futex},
+    {"sched", test_sched},
+    {"smp_placement", test_smp_placement},
+    {"gs_base", test_gs_base},
+    {"priority_inheritance", test_priority_inheritance},
+    {"unix_accept_blocks", test_unix_accept_blocks},
+};
+
 int main(int argc, char **argv)
 {
     if (argc >= 2 && strcmp(argv[1], "--ids") == 0)
         return print_ids();
+    if (argc >= 3 && strcmp(argv[1], "--only") == 0) {
+        for (size_t i = 0; i < sizeof(only_tests) / sizeof(only_tests[0]); i++) {
+            if (strcmp(argv[2], only_tests[i].name) == 0) {
+                only_tests[i].fn();
+                printf("MUSL-ONLY %s: %d/%d\n", argv[2], passed, total);
+                return passed != total;
+            }
+        }
+        printf("MUSL-ONLY %s: no such test\n", argv[2]);
+        return 2;
+    }
     test_auxv(argc > 0 ? argv[0] : NULL);
     test_pie();
     test_fsync();
@@ -3541,6 +3722,8 @@ int main(int argc, char **argv)
     test_flock_blocking();
     test_robust_futex();
     test_sched();
+    test_smp_placement();
+    test_gs_base();
     test_setuid_exec("/bin/musl_runtime_test");
     test_clocks_and_usage();
     test_rlimits();

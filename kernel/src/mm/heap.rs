@@ -71,6 +71,8 @@ pub fn heap_size_for(ram: usize) -> usize {
     target_os = "none"
 ))]
 pub fn get_heap_stats() -> (usize, usize, usize) {
+    // Interrupts off while the heap lock is held (see `IrqSafeHeap`).
+    let _irq = crate::arch::disable_interrupts();
     let allocator = crate::get_allocator().lock();
     let total = heap_size();
     let free = allocator.free();

@@ -493,14 +493,9 @@ fn cpumask_bytes() -> usize {
     crate::sched::dispatch::online_cpus().div_ceil(64) * 8
 }
 
-/// The online CPUs as a mask.
+/// The online CPUs (those that run tasks) as a mask.
 fn online_mask() -> u64 {
-    let n = crate::sched::dispatch::online_cpus().min(64);
-    if n == 64 {
-        u64::MAX
-    } else {
-        (1u64 << n) - 1
-    }
+    crate::sched::dispatch::dispatching_mask()
 }
 
 /// Linux's sched_getaffinity length rule: the buffer holds at least one
@@ -530,7 +525,7 @@ pub fn sys_sched_getaffinity(pid: usize, len: usize, mask: usize) -> SyscallResu
 /// sched_setaffinity(pid, len, mask): the CPUs the thread may run on, of
 /// those online (EINVAL if none).
 pub fn sys_sched_setaffinity(pid: usize, len: usize, mask: usize) -> SyscallResult {
-    let (_, owner, thread) = target(pid, SyscallError::ProcessNotFound)?;
+    let (tpid, owner, thread) = target(pid, SyscallError::ProcessNotFound)?;
     let mut raw = [0u8; 8];
     let n = len.min(8);
     userspace::read_user_bytes(mask, &mut raw[..n])?;
@@ -541,9 +536,24 @@ pub fn sys_sched_setaffinity(pid: usize, len: usize, mask: usize) -> SyscallResu
     if wanted == 0 {
         return Err(SyscallError::InvalidArgument);
     }
-    // Only the boot CPU dispatches until SMP (sprint D5): every allowed
-    // mask contains it, so the thread need not move.
     thread.set_affinity(wanted as usize);
+    // A thread on a CPU it may no longer use moves now (itself: before
+    // this call returns to user mode).
+    crate::sched::dispatch::set_affinity((tpid, thread.tid.0), wanted);
+    Ok(0)
+}
+
+/// getcpu(cpu, node, cache): the CPU the caller runs on and its NUMA node
+/// (always 0: one node). Either pointer may be null; the third argument has
+/// been unused since Linux 2.6.24.
+pub fn sys_getcpu(cpu: usize, node: usize, _cache: usize) -> SyscallResult {
+    let here = crate::arch::percpu::this_cpu_id();
+    if cpu != 0 {
+        userspace::write_user(cpu, here)?;
+    }
+    if node != 0 {
+        userspace::write_user(node, 0u32)?;
+    }
     Ok(0)
 }
 

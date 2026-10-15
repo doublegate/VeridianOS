@@ -230,6 +230,7 @@ sched_get_priority_min
 sched_rr_get_interval
 sched_setaffinity
 sched_getaffinity
+getcpu
 getpriority
 setpriority
 

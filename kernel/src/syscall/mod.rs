@@ -1282,6 +1282,7 @@ fn handle_syscall(
         Syscall::SchedRrGetInterval => scheduling::sys_sched_rr_get_interval(arg1, arg2),
         Syscall::SchedSetaffinity => scheduling::sys_sched_setaffinity(arg1, arg2, arg3),
         Syscall::SchedGetaffinity => scheduling::sys_sched_getaffinity(arg1, arg2, arg3),
+        Syscall::Getcpu => scheduling::sys_getcpu(arg1, arg2, arg3),
         Syscall::Getpriority => scheduling::sys_getpriority(arg1, arg2),
         Syscall::Setpriority => scheduling::sys_setpriority(arg1, arg2, arg3),
 

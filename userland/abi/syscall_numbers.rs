@@ -187,6 +187,7 @@ pub mod sysno {
     pub const SYS_sched_rr_get_interval: usize = 148;
     pub const SYS_sched_setaffinity: usize = 203;
     pub const SYS_sched_getaffinity: usize = 204;
+    pub const SYS_getcpu: usize = 309;
     pub const SYS_getpriority: usize = 140;
     pub const SYS_setpriority: usize = 141;
     pub const SYS_futex: usize = 202;

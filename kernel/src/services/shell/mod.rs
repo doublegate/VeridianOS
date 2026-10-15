@@ -930,13 +930,19 @@ impl Shell {
     }
 
     fn execute_external_command(&self, command: &str, args: &[String]) -> CommandResult {
+        // argv[0] is the command as typed, followed by its arguments (the
+        // loader takes the whole vector; passing `args` alone made the
+        // first argument argv[0]).
+        let argv: Vec<&str> = core::iter::once(command)
+            .chain(args.iter().map(|s| s.as_str()))
+            .collect();
         // If command is an absolute or relative path, try it directly first
         if command.starts_with('/') || command.starts_with("./") || command.starts_with("../") {
             if let Ok(_node) = crate::fs::get_vfs().resolve_path(command) {
                 crate::println!("[SHELL] Found executable: {}", command);
                 match crate::userspace::load_user_program(
                     command,
-                    &args.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+                    &argv,
                     &self
                         .get_all_env()
                         .iter()
@@ -977,7 +983,7 @@ impl Shell {
                 // Load and execute the program
                 match crate::userspace::load_user_program(
                     &full_path,
-                    &args.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+                    &argv,
                     &self
                         .get_all_env()
                         .iter()

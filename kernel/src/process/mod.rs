@@ -209,10 +209,14 @@ pub fn start_thread(
         requested: crate::arch::x86_64::switch::xsave::size(),
         available: 0,
     })?;
+    // A new thread or a fork child inherits the caller's GS base (Linux
+    // copies it with the thread); a fresh program starts with 0.
+    let mut gs_base = 0;
     if inherit_fpu {
         // The kernel is soft-float, so the CPU still holds the calling
         // thread's user vector state.
         area.save();
+        gs_base = crate::arch::x86_64::switch::read_user_gs_base();
     }
     process
         .dispatched
@@ -224,7 +228,9 @@ pub fn start_thread(
         cr3,
         fs_base,
         area,
+        gs_base,
         policy,
+        thread.get_affinity() as u64,
     )?;
     Ok(())
 }
@@ -257,19 +263,28 @@ pub fn run_and_wait(pid: ProcessId) -> Option<i32> {
     Some(code)
 }
 
-/// A dispatcher task of thread (pid, tid) has been reaped (it is off every
-/// CPU). Once a zombie process has no task left, its page tables -- which a
-/// running thread was still using when it tore the rest down -- are freed.
+/// The process of a dispatcher task about to be reaped, looked up before
+/// the task leaves the task table: once it has, a waiting parent may remove
+/// the process, and [`user_task_reaped`] must still free its page tables.
 #[cfg(feature = "alloc")]
-pub fn user_task_reaped(pid: u64, _tid: u64) {
+pub fn process_for_reap(pid: u64) -> Option<alloc::sync::Arc<Process>> {
+    table::get_process(ProcessId(pid))
+}
+
+/// A dispatcher task of `process` has been reaped (it is off every CPU and
+/// out of the task table). Once a zombie process has no task left, its page
+/// tables -- which a running thread was still using when it tore the rest
+/// down -- are freed. Runs in the reaper thread: it may sleep.
+#[cfg(feature = "alloc")]
+pub fn user_task_reaped(process: Option<alloc::sync::Arc<Process>>) {
     // Every reap: an exec waits for its process's other tasks to go
     // (N-101), not only for the whole process.
     crate::sched::dispatch::PROCESS_EVENTS.wake_all();
-    let Some(process) = table::get_process(ProcessId(pid)) else {
+    let Some(process) = process else {
         return;
     };
     if process.get_state() != ProcessState::Zombie
-        || !crate::sched::dispatch::tasks_of(pid).is_empty()
+        || !crate::sched::dispatch::tasks_of(process.pid.0).is_empty()
     {
         return;
     }

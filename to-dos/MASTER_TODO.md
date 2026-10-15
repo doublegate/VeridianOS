@@ -156,7 +156,11 @@ What does not work yet: `docs/KNOWN-LIMITATIONS.md`.
       frees through the per-CPU cache after it (N-261); per-CPU syscall rate limiter
       (SYS-PERF-01). Done: D5a (AP setup N-172, IPIs N-173, bring-up N-180), D5b (timers
       N-179), D5c (every CPU dispatches its own run queue), D5d (interrupts on in syscalls,
-      N-139 part; blocking Unix accept).
+      N-139 part; blocking Unix accept), D5e (placement, idle pull and periodic balancing,
+      affinity migration, getcpu, per-task user GS base, interrupt-safe heap, N-139 fixed:
+      interrupts on in page faults and the return to user mode, reaper thread; ADR 0012;
+      `gate.sh --smp`). Left: targeted shootdown and per-CPU frees after it (N-262, N-261),
+      SYS-PERF-01, N-51, N-52, deadline push/pull, remote signal kick, `smp` on by default.
     - [x] Syscalls `sched_setattr/getattr`, `sched_setscheduler`, `nice`/`setpriority`, real
       `sched_setaffinity`/`getaffinity`, `sched_yield` on the new policy (SCHED-INC-02 resolved
       by the deadline class).

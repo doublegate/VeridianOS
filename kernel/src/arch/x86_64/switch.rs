@@ -233,6 +233,25 @@ pub fn write_fs_base(base: u64) {
     unsafe { x86_64::registers::model_specific::Msr::new(0xC000_0100).write(base) }
 }
 
+/// IA32_KERNEL_GS_BASE: while ring 0 runs, the user's GS base (the
+/// entry's `swapgs` exchanged it with the per-CPU block's address).
+const KERNEL_GS_BASE_MSR: u32 = 0xC000_0102;
+
+/// The running task's user GS base (call in ring 0, after the entry's
+/// `swapgs`).
+pub fn read_user_gs_base() -> u64 {
+    // SAFETY: reading IA32_KERNEL_GS_BASE has no side effects.
+    unsafe { x86_64::registers::model_specific::Msr::new(KERNEL_GS_BASE_MSR).read() }
+}
+
+/// Install a task's user GS base for its return to ring 3. `base` must be
+/// canonical (a value read back by [`read_user_gs_base`] is).
+pub fn write_user_gs_base(base: u64) {
+    // SAFETY: the value only takes effect in ring 3 after the exit's
+    // `swapgs`; a canonical value cannot fault.
+    unsafe { x86_64::registers::model_specific::Msr::new(KERNEL_GS_BASE_MSR).write(base) }
+}
+
 /// Load a page table root if it differs from the active one.
 ///
 /// # Safety

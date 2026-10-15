@@ -894,10 +894,12 @@ pub(crate) fn discard_unstarted(process: &Process) {
 /// Clean up a dead thread
 #[cfg(feature = "alloc")]
 pub fn cleanup_thread(process: &Process, tid: ThreadId) -> Result<(), KernelError> {
-    // Remove thread from process
-    let mut threads = process.threads.lock();
-
-    if let Some(thread) = threads.remove(&tid) {
+    // Remove the thread from its process, releasing the lock at once:
+    // freeing the thread's stacks below flushes every CPU's TLB, and a CPU
+    // spinning on this lock with interrupts off could never answer, so both
+    // would wait forever (N-139).
+    let removed = process.threads.lock().remove(&tid);
+    if let Some(thread) = removed {
         println!("[PROCESS] Cleaning up thread {}", tid.0);
 
         // Make sure thread is marked as dead

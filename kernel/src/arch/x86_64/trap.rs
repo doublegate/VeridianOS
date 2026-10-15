@@ -314,6 +314,13 @@ extern "C" fn trap_dispatch(f: &mut TrapFrame) {
 /// a thread whose process received a fatal signal exits instead. Signal
 /// delivery and rescheduling hook in here too (sprint D3).
 fn exit_to_user(f: &mut TrapFrame) {
+    // This work takes locks (the process's threads, its signal state), so
+    // it runs with interrupts on, as Linux's exit_to_user_mode does: with
+    // them off, a CPU spinning on such a lock could not answer the TLB
+    // shootdown of the CPU holding it (N-139). Off again before the iretq.
+    // The frame is on the task's own kernel stack (only #DF, NMI and #MC
+    // use IST stacks, and they do not come here).
+    let irq = FaultIrq::enable_if(true);
     // Timer preemption of user code (stage D3): an interrupt from ring 3
     // whose tick used up the task's slice switches here.
     #[cfg(feature = "alloc")]
@@ -323,6 +330,7 @@ fn exit_to_user(f: &mut TrapFrame) {
     if crate::sched::dispatch::current_owner().is_some() {
         crate::process::signals::deliver_on_return(f);
     }
+    drop(irq);
     sanitize_user_frame(f);
 }
 
@@ -620,6 +628,30 @@ pub fn enable_machine_check() {
 }
 
 /// Page fault.
+/// RFLAGS.IF.
+const RFLAGS_IF: u64 = 1 << 9;
+
+/// Interrupts enabled for the rest of a fault handler, disabled again when
+/// dropped.
+struct FaultIrq(bool);
+
+impl FaultIrq {
+    fn enable_if(on: bool) -> Self {
+        if on {
+            x86_64::instructions::interrupts::enable();
+        }
+        Self(on)
+    }
+}
+
+impl Drop for FaultIrq {
+    fn drop(&mut self) {
+        if self.0 {
+            x86_64::instructions::interrupts::disable();
+        }
+    }
+}
+
 fn page_fault(f: &mut TrapFrame, user: bool) {
     // SAFETY: reading CR2 has no side effects. Read before anything that
     // could fault again.
@@ -630,6 +662,13 @@ fn page_fault(f: &mut TrapFrame, user: bool) {
     };
     let ec = f.error_code;
     let rip = f.rip;
+    // Handle the fault with interrupts on if the faulting context had them
+    // on (Linux does the same), now that CR2 is read. The handler takes the
+    // address space's lock: with interrupts off, a CPU spinning on it could
+    // not answer the TLB shootdown of the CPU holding it, and both would
+    // wait forever (N-139). The guard turns them off again on every return,
+    // since the exit path must run with interrupts off.
+    let _irq = FaultIrq::enable_if(f.rflags & RFLAGS_IF != 0);
 
     #[cfg(feature = "trace")]
     // SAFETY: COM1 is the kernel console on the supported platforms.

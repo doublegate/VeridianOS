@@ -1,6 +1,7 @@
 # ADR 0006: Scheduler-dispatched tasks on per-thread kernel stacks
 
-- Status: accepted
+- Status: accepted; rule 7 is amended by [ADR 0012](0012-smp-dispatch.md) (system calls run with
+  interrupts enabled), which also covers running tasks on every CPU
 - Date: 2026-10-07
 - Tracking: v0.27.0 sprint D (critique C5, plan X0.1); N-41, N-46, N-50, N-51, N-52, N-54;
   SCHED-PERF-01, SMP-PERF-01 (stages S2/S3 of ADR 0004)

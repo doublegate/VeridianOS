@@ -181,23 +181,28 @@ What remains:
 - **chroot (N-250):** a working directory outside the new root is moved to the root, where Linux
   would leave it outside.
 
-### One CPU runs work (SMP stages S2/S3; planned v0.27 sprint D5)
+### SMP is off by default and partly unproven (planned v0.27 sprint D5)
 
 With the `smp` feature (off by default), the other CPUs are started on every architecture (x86
-INIT-SIPI-SIPI, AArch64 PSCI, RISC-V SBI HSM) and come online, but they only idle: all work runs on
-the boot CPU. Per-CPU run queues, balancing and TLB shootdown that waits for acknowledgement are
-sprint D5. Since D5a every CPU gets the boot CPU's syscall MSRs and XCR0 (N-172), IPIs go to APIC
-IDs with the ICR written under one interrupt-off sequence (N-173), and bring-up stops at the first
-CPU that fails, with guarded stacks (N-180). Since D5b the timer wheel advances by elapsed clock time
-and an x86_64 CPU whose TSC is not synchronised with the boot CPU's stays offline (N-179); a TSC that
-is synchronised but not invariant is reported, not refused. Since D5c every CPU dispatches its own
-run queue, but tasks are not yet placed on or moved to other CPUs (D5e), so secondaries run only
-kernel threads sent to them. Since D5d system calls run with interrupts enabled (N-139); a CPU
-spinning on a lock with interrupts off still cannot answer a TLB shootdown, so a shootdown issued
-while holding such a lock can still deadlock until frees are deferred past the flush (D5e).
-Directory permission checks resolve the path separately from the operation (N-51). Lock-free and per-CPU structures are single-CPU-safe but have
-not run on more than one CPU (N-59). Programs see this: sched_getaffinity and the processor count
-report one CPU, and an affinity mask without CPU 0 is EINVAL.
+INIT-SIPI-SIPI, AArch64 PSCI, RISC-V SBI HSM). Only x86_64 runs tasks on them (ADR 0012): tasks are
+placed on idle CPUs, balanced every 4 ms and moved by sched_setaffinity; AArch64 and RISC-V have no
+dispatcher yet (sprint E), so their secondaries idle. Since D5a every CPU gets the boot CPU's
+syscall MSRs and XCR0 (N-172), IPIs go to APIC IDs with the ICR written under one interrupt-off
+sequence (N-173), and bring-up stops at the first CPU that fails, with guarded stacks (N-180). Since
+D5b the timer wheel advances by elapsed clock time and an x86_64 CPU whose TSC is not synchronised
+with the boot CPU's stays offline (N-179); a TSC that is synchronised but not invariant is reported,
+not refused. System calls, page faults and the return to user mode run with interrupts enabled,
+so TLB shootdowns are always answered (N-139, ADR 0012 rule 6).
+
+Still open before `smp` becomes the default:
+- Every TLB shootdown goes to every CPU, whether or not it ran the address space (N-262).
+- Deadline tasks are placed when they wake but never pulled by the balancer, so a burst of them on
+  one CPU can miss deadlines (ADR 0012).
+- A signal sent to a thread running on another CPU is noticed at that CPU's next tick, not at once.
+- Directory permission checks resolve the path separately from the operation (N-51). Lock-free
+  structures (`sync/`, N-59) have not run on more than one CPU.
+- Secondaries copy the boot CPU's CR4, so they match it, including SMEP and SMAP being off (N-15,
+  below).
 
 ### Only x86_64 runs user programs (N-28, N-14; planned v0.27 sprint E)
 

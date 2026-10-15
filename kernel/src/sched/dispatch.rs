@@ -39,7 +39,10 @@ use core::{
 
 use spin::Mutex;
 
-use super::policy::{Entity, Policy, RunQueue, TaskKey};
+use super::policy::{
+    balance::{self, CpuSnapshot},
+    Entity, Policy, RunQueue, TaskKey,
+};
 use crate::error::KernelError;
 
 /// Kernel stack size of a kernel thread and of the idle task, in pages.
@@ -80,6 +83,10 @@ struct ArchState {
     cr3: u64,
     #[cfg(target_arch = "x86_64")]
     fs_base: u64,
+    /// The user GS base, which sits in IA32_KERNEL_GS_BASE while ring 0
+    /// runs (the entry's `swapgs`): it belongs to the task, not the CPU.
+    #[cfg(target_arch = "x86_64")]
+    user_gs_base: u64,
     #[cfg(target_arch = "x86_64")]
     entry_stack: u64,
     #[cfg(target_arch = "x86_64")]
@@ -113,6 +120,16 @@ pub struct Task {
     /// last ran it. Changed only while the task is on no run queue and on
     /// no CPU (wake placement), or with both CPUs' locks held (migration).
     cpu: AtomicUsize,
+    /// The CPUs the task may run on, a bit per CPU (sched_setaffinity).
+    affinity: AtomicU64,
+    /// When the task last stopped running (`monotonic_ns`): whether its
+    /// cache is still warm where it ran, for placement and balancing.
+    last_ran: AtomicU64,
+    /// Taken off its run queue by `schedule` because its CPU is no longer
+    /// allowed; `finish_switch` places it once it is off the CPU.
+    migrate_out: AtomicBool,
+    /// A CPU's idle task: it runs when nothing else can and never sleeps.
+    idle: bool,
     /// CPU time the task has used (N-218).
     usage: super::cputime::CpuUsage,
     /// User vector state (x87/SSE/AVX), switched eagerly: the kernel itself
@@ -148,6 +165,10 @@ impl Task {
             stack,
             owner: None,
             cpu: AtomicUsize::new(0),
+            affinity: AtomicU64::new(u64::MAX),
+            last_ran: AtomicU64::new(0),
+            migrate_out: AtomicBool::new(false),
+            idle: false,
             usage: super::cputime::CpuUsage::new(),
             #[cfg(target_arch = "x86_64")]
             xsave: UnsafeCell::new(None),
@@ -224,6 +245,67 @@ static CURRENT: [AtomicPtr<Task>; MAX_CPUS] =
 
 /// Bit per CPU that dispatches (has its `CpuSched`).
 static DISPATCHING: AtomicU64 = AtomicU64::new(0);
+
+/// What placement and balancing read of a CPU without taking its lock:
+/// published by the CPU's owner of the moment, under its lock, whenever its
+/// run queue changes (`publish`). A reader may see a slightly old value;
+/// the decisions only need to be good, not exact.
+struct CpuStat {
+    nr_running: AtomicUsize,
+    load: AtomicU64,
+    /// When this CPU last balanced periodically.
+    balanced_at: AtomicU64,
+}
+
+static STATS: [CpuStat; MAX_CPUS] = [const {
+    CpuStat {
+        nr_running: AtomicUsize::new(0),
+        load: AtomicU64::new(0),
+        balanced_at: AtomicU64::new(0),
+    }
+}; MAX_CPUS];
+
+/// Publish `st`'s run queue numbers for CPU `cpu` (its lock held).
+fn publish(cpu: usize, st: &mut CpuSched) {
+    let s = &STATS[cpu];
+    s.nr_running.store(st.rq.nr_running(), Ordering::Release);
+    s.load.store(st.rq.load_avg(now()), Ordering::Release);
+}
+
+/// A snapshot of every CPU for the placement and balancing decisions.
+fn snapshots() -> [CpuSnapshot; MAX_CPUS] {
+    let mut out = [CpuSnapshot::default(); MAX_CPUS];
+    for (cpu, snap) in out.iter_mut().enumerate() {
+        let nr = STATS[cpu].nr_running.load(Ordering::Acquire);
+        *snap = CpuSnapshot {
+            online: dispatching(cpu),
+            idle: nr == 0,
+            nr_running: nr,
+            load: STATS[cpu].load.load(Ordering::Acquire),
+        };
+    }
+    out
+}
+
+/// Whether `mask` allows CPU `cpu`.
+fn allows(mask: u64, cpu: usize) -> bool {
+    cpu < 64 && mask & (1 << cpu) != 0
+}
+
+/// The CPU a task that is on no run queue and no CPU should be queued on:
+/// [`balance::select_cpu`] over the dispatching CPUs it may use. `prev`
+/// (its last CPU) if none of them is allowed, which cannot happen through
+/// sched_setaffinity (it refuses a mask without a dispatching CPU).
+fn place(task: &Task, prev: usize) -> usize {
+    let since = now().saturating_sub(task.last_ran.load(Ordering::Acquire));
+    balance::select_cpu(
+        prev,
+        task.affinity.load(Ordering::Acquire),
+        &snapshots(),
+        since,
+    )
+    .unwrap_or(prev)
+}
 
 use super::smp::MAX_CPUS;
 
@@ -379,11 +461,16 @@ pub fn start() -> Result<(), KernelError> {
         // The boot flow runs the nested user programs of the old model, so
         // its vector state is switched too.
         *boot.xsave.get_mut() = crate::arch::x86_64::switch::xsave::Area::new();
+        // The boot flow stays on the boot CPU: it is the timekeeper's
+        // first task and runs the console.
+        *boot.affinity.get_mut() = 1;
         let boot = Arc::new(boot);
         boot.set_state(State::Running);
         boot.on_cpu.store(true, Ordering::Release);
 
-        let idle = Arc::new(new_kernel_task("idle", Policy::Idle, idle_entry, 0)?);
+        let mut idle = new_kernel_task("idle", Policy::Idle, idle_entry, 0)?;
+        idle.idle = true;
+        let idle = Arc::new(idle);
         idle.set_state(State::Ready);
 
         let t = now();
@@ -392,7 +479,8 @@ pub fn start() -> Result<(), KernelError> {
         rq.pick_next(t);
         TASKS.lock().insert(boot.key, boot.clone());
         CURRENT[0].store(Arc::as_ptr(&boot) as *mut Task, Ordering::Release);
-        *CPUS[0].lock() = Some(CpuSched {
+        let mut guard = CPUS[0].lock();
+        let st = guard.insert(CpuSched {
             rq,
             current: boot,
             idle,
@@ -400,8 +488,11 @@ pub fn start() -> Result<(), KernelError> {
             need_resched: false,
             acct_start: t,
         });
+        publish(0, st);
+        drop(guard);
         DISPATCHING.fetch_or(1, Ordering::AcqRel);
         STARTED.store(true, Ordering::Release);
+        spawn_kernel("reaper", reaper, 0)?;
         Ok(())
     }
 }
@@ -462,7 +553,8 @@ pub fn spawn_kernel(
     }
 }
 
-/// Start a kernel thread on CPU `cpu`, which must dispatch. Returns its
+/// Start a kernel thread bound to CPU `cpu`, which must dispatch (Linux
+/// `kthread_bind`: it is never placed or balanced elsewhere). Returns its
 /// key.
 pub fn spawn_kernel_on(
     cpu: usize,
@@ -488,10 +580,12 @@ pub fn spawn_kernel_on(
         let task = Arc::new(new_kernel_task(name, Policy::default(), entry, arg)?);
         let key = task.key;
         task.cpu.store(cpu, Ordering::Release);
+        task.affinity.store(1 << cpu, Ordering::Release);
         TASKS.lock().insert(key, task.clone());
         let irq = irq_save();
         if let Some(st) = CPUS[cpu].lock().as_mut() {
             st.rq.enqueue(key, *task.entity.lock(), now());
+            publish(cpu, st);
         }
         irq_restore(irq);
         kick_cpu(cpu);
@@ -531,14 +625,29 @@ pub fn schedule() {
         st.need_resched = false;
         let t = now();
         st.charge(t);
+        // A running task whose CPU is no longer allowed (sched_setaffinity)
+        // leaves the run queue here; finish_switch places it elsewhere once
+        // it is off this CPU.
+        let cur = st.current.clone();
+        if cur.state() == State::Running
+            && !allows(cur.affinity.load(Ordering::Acquire), cpu)
+            && st.rq.contains(cur.key)
+        {
+            if let Some(entity) = st.rq.dequeue(cur.key, t) {
+                *cur.entity.lock() = entity;
+            }
+            cur.migrate_out.store(true, Ordering::Release);
+        }
+        drop(cur);
         let next = match st.rq.pick_next(t) {
             Some(key) => lookup(key).expect("queued task is registered"),
             None => st.idle.clone(),
         };
-        if Arc::ptr_eq(&next, &st.current) {
+        let switch = if Arc::ptr_eq(&next, &st.current) {
             None
         } else {
             let prev = core::mem::replace(&mut st.current, next.clone());
+            prev.last_ran.store(t, Ordering::Release);
             // Still running: preempted; otherwise it blocked or exited.
             let preempted = prev.state() == State::Running;
             prev.usage.switched(!preempted);
@@ -551,7 +660,9 @@ pub fn schedule() {
             let pair = (Arc::as_ptr(&prev), Arc::as_ptr(&next), !preempted);
             st.prev = Some(prev);
             Some(pair)
-        }
+        };
+        publish(cpu, st);
+        switch
     };
     if let Some((prev, next, voluntary)) = switch {
         // The shell's and panel's switch counters (the cycles taken to
@@ -588,6 +699,7 @@ unsafe fn arch_switch(prev: *const Task, next: *const Task) {
             .start_address()
             .as_u64();
         a.fs_base = switch::read_fs_base();
+        a.user_gs_base = switch::read_user_gs_base();
         a.entry_stack = (*cpu).kernel_rsp;
         a.user_rsp = (*cpu).user_rsp;
         a.syscall_frame = (*cpu).syscall_frame;
@@ -607,6 +719,8 @@ unsafe fn arch_switch(prev: *const Task, next: *const Task) {
         } else {
             0
         });
+        // Read from the MSR when the task was switched out, so canonical.
+        switch::write_user_gs_base(b.user_gs_base);
         crate::arch::percpu::set_entry_stack(b.entry_stack);
         (*cpu).user_rsp = b.user_rsp;
         (*cpu).syscall_frame = b.syscall_frame;
@@ -627,18 +741,59 @@ pub extern "C" fn finish_switch() {
     let prev = CPUS[cpu].lock().as_mut().and_then(|st| st.prev.take());
     if let Some(prev) = prev {
         prev.on_cpu.store(false, Ordering::Release);
+        if prev.migrate_out.swap(false, Ordering::AcqRel) {
+            push(&prev);
+        }
         if prev.state() == State::Dead {
-            TASKS.lock().remove(&prev.key);
-            let owner = prev.owner;
-            // Dropping the last reference frees its kernel stack, which no
-            // CPU uses any more.
-            drop(prev);
-            if let Some((pid, tid)) = owner {
-                crate::process::user_task_reaped(pid, tid);
-            }
-            EXITED.wake_all();
+            // Reaping may sleep (the process's locks) and frees the kernel
+            // stack with a TLB shootdown, so it is the reaper thread's job:
+            // this runs on whatever task comes next, often the idle task,
+            // which must never sleep.
+            let irq = irq_save();
+            DEAD.lock().push(prev);
+            irq_restore(irq);
+            REAP.wake_all();
         }
     }
+}
+
+/// Exited tasks, off their CPUs, waiting for the reaper.
+static DEAD: Mutex<Vec<Arc<Task>>> = Mutex::new(Vec::new());
+
+/// The reaper sleeps here until `DEAD` has work.
+static REAP: WaitQueue = WaitQueue::new();
+
+/// The reaper thread: frees exited tasks (their kernel stacks, the page
+/// tables of a process whose last task this was) and wakes their joiners.
+extern "C" fn reaper(_: usize) {
+    loop {
+        REAP.wait_until(|| {
+            let irq = irq_save();
+            let pending = !DEAD.lock().is_empty();
+            irq_restore(irq);
+            pending
+        });
+        let irq = irq_save();
+        let dead = core::mem::take(&mut *DEAD.lock());
+        irq_restore(irq);
+        for task in dead {
+            reap(task);
+        }
+    }
+}
+
+/// Free exited `task`, which no CPU uses any more.
+fn reap(task: Arc<Task>) {
+    let owner = task.owner;
+    // Before the task leaves the table: see `process_for_reap`.
+    let process = owner.and_then(|(pid, _)| crate::process::process_for_reap(pid));
+    TASKS.lock().remove(&task.key);
+    // Dropping the last reference frees the kernel stack.
+    drop(task);
+    if owner.is_some() {
+        crate::process::user_task_reaped(process);
+    }
+    EXITED.wake_all();
 }
 
 /// Let other runnable tasks of at least the current one's class run.
@@ -677,6 +832,7 @@ pub fn block_current() {
             if let Some(entity) = st.rq.dequeue(me.key, now()) {
                 *me.entity.lock() = entity;
             }
+            publish(cpu, st);
             true
         } else {
             false
@@ -716,26 +872,92 @@ pub fn wake(task: &Arc<Task>) -> bool {
     {
         return false;
     }
-    let irq = irq_save();
-    let cpu = task.cpu.load(Ordering::Acquire);
-    let kick = {
-        let mut guard = CPUS[cpu].lock();
-        guard.as_mut().is_some_and(|st| requeue(st, task))
-    };
-    irq_restore(irq);
-    if kick {
-        kick_cpu(cpu);
+    // Only this waker may queue the task now: it is Ready, so no other wake
+    // succeeds, and balancing moves only queued tasks.
+    let mut waiting_since: Option<u64> = None;
+    let mut reported = false;
+    loop {
+        let old = task.cpu.load(Ordering::Acquire);
+        let irq = irq_save();
+        let guard = CPUS[old].lock();
+        if guard.as_ref().is_some_and(|st| st.rq.contains(task.key)) {
+            // It had not reached block_current yet: it is still queued (and
+            // running) where it was.
+            drop(guard);
+            irq_restore(irq);
+            return true;
+        }
+        if task.on_cpu() {
+            // Still being switched away from on `old` (another CPU, with
+            // interrupts off): it may run nowhere until that is done
+            // (Linux try_to_wake_up waits for `on_cpu` the same way).
+            drop(guard);
+            irq_restore(irq);
+            let since = *waiting_since.get_or_insert_with(now);
+            if !reported && now().saturating_sub(since) > 100_000_000 {
+                reported = true;
+                report_stuck_wake(task, old);
+            }
+            core::hint::spin_loop();
+            continue;
+        }
+        drop(guard);
+        // Off every queue and every CPU: it may go wherever it runs best.
+        let cpu = place(task, old);
+        task.cpu.store(cpu, Ordering::Release);
+        let kick = CPUS[cpu]
+            .lock()
+            .as_mut()
+            .is_some_and(|st| requeue(cpu, st, task));
+        irq_restore(irq);
+        if kick {
+            kick_cpu(cpu);
+        }
+        return true;
     }
-    true
 }
 
-/// Put woken `task` back on `st`, the run queue of its CPU, unless it is
-/// still there (it had not reached `block_current` yet). Returns whether
-/// that CPU must be told to reschedule: the task should preempt what runs
-/// there, or the CPU is idle (it may be halted). A woken task stays on its
-/// CPU: while it is on no queue its CPU cannot change, and while a CPU is
-/// still switching away from it, it may not run anywhere else.
-fn requeue(st: &mut CpuSched, task: &Arc<Task>) -> bool {
+/// A wake has waited over 100 ms for `task` to leave CPU `cpu`: report it
+/// on the raw console (no locks), once. A switch takes microseconds, so
+/// this means a task marked as on a CPU that no longer runs it.
+fn report_stuck_wake(task: &Arc<Task>, cpu: usize) {
+    #[cfg(all(target_arch = "x86_64", target_os = "none"))]
+    // SAFETY: raw COM1 output, no locks taken; only atomics are read.
+    unsafe {
+        use crate::arch::x86_64::idt::{raw_serial_hex as hex, raw_serial_str as out};
+        out(b"[SCHED] wake still waiting after 100 ms: task 0x");
+        hex(Arc::as_ptr(task) as u64);
+        out(b" key 0x");
+        hex(task.key);
+        out(b" pid 0x");
+        hex(task.owner.map_or(0, |o| o.0));
+        out(b" tid 0x");
+        hex(task.owner.map_or(0, |o| o.1));
+        out(b" cpu 0x");
+        hex(cpu as u64);
+        out(b" state 0x");
+        hex(task.state.load(Ordering::Acquire) as u64);
+        out(b" here 0x");
+        hex(crate::arch::percpu::this_cpu_id() as u64);
+        for (c, cur) in CURRENT.iter().enumerate() {
+            if dispatching(c) {
+                out(b" cur");
+                hex(c as u64);
+                out(b"=0x");
+                hex(cur.load(Ordering::Acquire) as u64);
+            }
+        }
+        out(b"\n");
+    }
+    #[cfg(not(all(target_arch = "x86_64", target_os = "none")))]
+    let _ = (task, cpu);
+}
+
+/// Put `task` on `st`, the run queue of CPU `cpu`, unless it is still there
+/// (it had not reached `block_current` yet). Returns whether that CPU must
+/// be told to reschedule: the task should preempt what runs there, or the
+/// CPU is idle (it may be halted).
+fn requeue(cpu: usize, st: &mut CpuSched, task: &Arc<Task>) -> bool {
     if st.rq.contains(task.key) {
         return false;
     }
@@ -744,18 +966,33 @@ fn requeue(st: &mut CpuSched, task: &Arc<Task>) -> bool {
     if st.rq.should_preempt(task.key, t) {
         st.need_resched = true;
     }
+    publish(cpu, st);
     st.need_resched || Arc::ptr_eq(&st.current, &st.idle)
 }
 
-/// Queue a new task on this CPU (CPU 0 before any other dispatches).
-fn enqueue_new(task: &Arc<Task>) {
-    let cpu = this_cpu().unwrap_or(0);
+/// Queue `task`, which is on no run queue and no CPU, where it runs best.
+fn push(task: &Arc<Task>) {
+    let cpu = place(task, task.cpu.load(Ordering::Acquire));
     task.cpu.store(cpu, Ordering::Release);
     let irq = irq_save();
-    if let Some(st) = CPUS[cpu].lock().as_mut() {
-        st.rq.enqueue(task.key, *task.entity.lock(), now());
-    }
+    let kick = CPUS[cpu]
+        .lock()
+        .as_mut()
+        .is_some_and(|st| requeue(cpu, st, task));
     irq_restore(irq);
+    if kick {
+        kick_cpu(cpu);
+    }
+}
+
+/// Queue a new task where it runs best, starting from this CPU (an idle
+/// allowed CPU if there is one; CPU 0 before any other dispatches).
+fn enqueue_new(task: &Arc<Task>) {
+    let here = this_cpu().unwrap_or(0);
+    // Its cache is with its creator.
+    task.last_ran.store(now(), Ordering::Release);
+    task.cpu.store(here, Ordering::Release);
+    push(task);
 }
 
 /// Make CPU `cpu` look at its run queue: an interrupt (the reschedule IPI)
@@ -795,6 +1032,7 @@ pub fn exit_current_task() -> ! {
                 let key = st.current.key;
                 st.current.set_state(State::Dead);
                 st.rq.dequeue(key, now());
+                publish(cpu, st);
             }
         }
         schedule();
@@ -827,7 +1065,14 @@ pub fn tick(user: bool) {
             if st.rq.tick(t) {
                 st.need_resched = true;
             }
+            publish(cpu, st);
         }
+    }
+    let t = now();
+    let stat = &STATS[cpu];
+    if t.saturating_sub(stat.balanced_at.load(Ordering::Relaxed)) >= balance::BALANCE_INTERVAL_NS {
+        stat.balanced_at.store(t, Ordering::Relaxed);
+        pull(cpu, false, true);
     }
     // Machine-wide work on the timekeeping CPU only.
     if crate::arch::percpu::is_timekeeper() {
@@ -871,10 +1116,26 @@ fn wake_expired_sleepers() {
 /// the run queue lock is held (the caller retries later). A task that is
 /// not blocked counts as woken.
 fn try_wake(task: &Arc<Task>) -> bool {
-    let cpu = task.cpu.load(Ordering::Acquire);
-    let Some(mut guard) = CPUS[cpu].try_lock() else {
+    let old = task.cpu.load(Ordering::Acquire);
+    let Some(mut old_guard) = CPUS[old].try_lock() else {
         return false;
     };
+    if task.state() != State::Blocked {
+        return true;
+    }
+    // Moved only when it is off every queue and every CPU (as in `wake`),
+    // and only if the target's lock is free: an interrupt may not wait.
+    let movable = old_guard
+        .as_ref()
+        .is_some_and(|st| !st.rq.contains(task.key))
+        && !task.on_cpu();
+    let target = if movable { place(task, old) } else { old };
+    let mut target_guard = if target != old {
+        CPUS[target].try_lock()
+    } else {
+        None
+    };
+    let cpu = if target_guard.is_some() { target } else { old };
     if task
         .state
         .compare_exchange(
@@ -887,8 +1148,14 @@ fn try_wake(task: &Arc<Task>) -> bool {
     {
         return true;
     }
-    let kick = guard.as_mut().is_some_and(|st| requeue(st, task));
-    drop(guard);
+    task.cpu.store(cpu, Ordering::Release);
+    let st = match target_guard.as_mut() {
+        Some(g) => g.as_mut(),
+        None => old_guard.as_mut(),
+    };
+    let kick = st.is_some_and(|st| requeue(cpu, st, task));
+    drop(target_guard);
+    drop(old_guard);
     if kick {
         kick_cpu(cpu);
     }
@@ -945,7 +1212,7 @@ pub fn wait_event(
             None
         }
     };
-    let Some(me) = current().filter(|_| current_owner().is_some() || started()) else {
+    let Some(me) = current().filter(|t| !t.idle && (current_owner().is_some() || started())) else {
         loop {
             if let Some(r) = check(&mut cond) {
                 return r;
@@ -993,6 +1260,90 @@ pub fn need_resched() -> bool {
     r
 }
 
+/// Most tasks one balancing pass moves.
+const MAX_PULL: usize = 8;
+
+/// Move queued tasks from the busiest CPU to `this` when the load is out of
+/// balance ([`balance::find_busiest`]); with `newly_idle`, any waiting task
+/// will do. A task moves only if it is queued but not running and not
+/// still being switched away from (`on_cpu`), `this` is allowed for it,
+/// and -- unless `this` is idle -- its cache has gone cold. Both CPU locks
+/// are taken in CPU order; in interrupt context (`in_irq`) every lock is
+/// only tried (the heap masks interrupts, so the run queue may allocate).
+/// Returns whether a task moved.
+fn pull(this: usize, newly_idle: bool, in_irq: bool) -> bool {
+    let snap = snapshots();
+    let Some(src) = balance::find_busiest(this, &snap, newly_idle) else {
+        return false;
+    };
+    let want = balance::tasks_to_move(&snap[src], &snap[this]).min(MAX_PULL);
+    let (lo, hi) = (src.min(this), src.max(this));
+    let irq = irq_save();
+    let guards = if in_irq {
+        CPUS[lo]
+            .try_lock()
+            .and_then(|a| CPUS[hi].try_lock().map(|b| (a, b)))
+    } else {
+        let a = CPUS[lo].lock();
+        Some((a, CPUS[hi].lock()))
+    };
+    let mut moved = 0;
+    if let Some((mut g_lo, mut g_hi)) = guards {
+        let (s, d) = if src < this {
+            (g_lo.as_mut(), g_hi.as_mut())
+        } else {
+            (g_hi.as_mut(), g_lo.as_mut())
+        };
+        let tasks = if in_irq {
+            TASKS.try_lock()
+        } else {
+            Some(TASKS.lock())
+        };
+        if let (Some(s), Some(d), Some(tasks)) = (s, d, tasks) {
+            let t = now();
+            let mut keys = [0 as TaskKey; MAX_PULL];
+            let mut n = 0;
+            for k in s.rq.migratable().take(MAX_PULL) {
+                keys[n] = k;
+                n += 1;
+            }
+            for &k in &keys[..n] {
+                if moved == want {
+                    break;
+                }
+                let Some(task) = tasks.get(&k) else {
+                    continue;
+                };
+                if task.on_cpu()
+                    || !allows(task.affinity.load(Ordering::Acquire), this)
+                    || (!newly_idle
+                        && t.saturating_sub(task.last_ran.load(Ordering::Acquire))
+                            < balance::CACHE_HOT_NS)
+                {
+                    continue;
+                }
+                if let Some(entity) = s.rq.dequeue(k, t) {
+                    task.cpu.store(this, Ordering::Release);
+                    d.rq.enqueue(k, entity, t);
+                    if d.rq.should_preempt(k, t) {
+                        d.need_resched = true;
+                    }
+                    moved += 1;
+                }
+            }
+            if moved > 0 {
+                if Arc::ptr_eq(&d.current, &d.idle) {
+                    d.need_resched = true;
+                }
+                publish(src, s);
+                publish(this, d);
+            }
+        }
+    }
+    irq_restore(irq);
+    moved > 0
+}
+
 fn has_runnable(cpu: usize) -> bool {
     CPUS[cpu]
         .lock()
@@ -1008,7 +1359,8 @@ extern "C" fn idle_entry(_: usize) {
         #[cfg(all(target_arch = "x86_64", target_os = "none"))]
         {
             x86_64::instructions::interrupts::disable();
-            if this_cpu().is_some_and(has_runnable) {
+            // Nothing here: take waiting work from a busier CPU first.
+            if this_cpu().is_some_and(|cpu| has_runnable(cpu) || pull(cpu, true, false)) {
                 x86_64::instructions::interrupts::enable();
                 schedule();
             } else {
@@ -1057,19 +1409,23 @@ pub fn current_owner() -> Option<(u64, u64)> {
 
 /// Start a user thread as a task: its first switch-in enters ring 3 with
 /// `frame`, on address space `cr3`, with TLS base `fs_base` and vector
-/// state `xsave`, scheduled with the thread's `policy`.
+/// state `xsave` and user GS base `gs_base`, scheduled with the thread's
+/// `policy` on the CPUs in `affinity`.
 #[cfg(target_arch = "x86_64")]
+#[allow(clippy::too_many_arguments)]
 pub fn spawn_user(
     owner: (u64, u64),
     frame: &crate::arch::x86_64::switch::UserFrame,
     cr3: u64,
     fs_base: u64,
     xsave: crate::arch::x86_64::switch::xsave::Area,
+    gs_base: u64,
     policy: Policy,
+    affinity: u64,
 ) -> Result<TaskKey, KernelError> {
     #[cfg(not(target_os = "none"))]
     {
-        let _ = (owner, frame, cr3, fs_base, xsave, policy);
+        let _ = (owner, frame, cr3, fs_base, xsave, gs_base, policy, affinity);
         Err(KernelError::NotImplemented {
             feature: "user tasks on the host",
         })
@@ -1086,6 +1442,10 @@ pub fn spawn_user(
         let top = stack.base + stack.pages * 4096;
         let mut task = Task::new(alloc_key(), "user", policy, Some(stack));
         task.owner = Some(owner);
+        // A mask with no CPU that dispatches (inherited from a time with
+        // more CPUs, say) would leave it nowhere to run: use them all.
+        let usable = affinity & dispatching_mask();
+        *task.affinity.get_mut() = if usable != 0 { affinity } else { u64::MAX };
         *task.xsave.get_mut() = Some(xsave);
         // SAFETY: the stack was just allocated for this task and is unused.
         let sp = unsafe { crate::arch::x86_64::switch::seed_user_thread(top, frame) };
@@ -1093,6 +1453,12 @@ pub fn spawn_user(
         let arch = task.arch.get_mut();
         arch.cr3 = cr3;
         arch.fs_base = fs_base;
+        // Written to the MSR at every switch-in: it must be canonical.
+        arch.user_gs_base = if crate::arch::x86_64::trap::is_user_address(gs_base) {
+            gs_base
+        } else {
+            0
+        };
         arch.entry_stack = top as u64;
         let task = Arc::new(task);
         let key = task.key;
@@ -1181,13 +1547,75 @@ pub fn pi_priority(owner: (u64, u64)) -> Option<u8> {
     Some(prio)
 }
 
-/// Number of CPUs that run tasks (sched_getaffinity's online set).
-///
-/// One until tasks are placed on other CPUs (sprint D5e): the secondaries
-/// dispatch, but only their idle tasks, as every task starts on the boot
-/// CPU and stays where it woke.
+/// Number of CPUs that run tasks (sched_getaffinity's online set, the
+/// processor count programs see, deadline admission).
 pub fn online_cpus() -> usize {
-    1
+    DISPATCHING.load(Ordering::Acquire).count_ones() as usize
+}
+
+/// The CPUs that run tasks, a bit per CPU.
+pub fn dispatching_mask() -> u64 {
+    DISPATCHING.load(Ordering::Acquire)
+}
+
+/// Restrict user thread `owner` (pid, tid) to the CPUs in `mask`, which
+/// must include a dispatching CPU (sched_setaffinity checks). A queued task
+/// on a CPU no longer allowed moves at once; a running one is told to
+/// reschedule, and `schedule` moves it (a thread that changes its own mask
+/// has moved before its system call returns, at the preemption point on
+/// the way out); a sleeping one is placed by its wake.
+pub fn set_affinity(owner: (u64, u64), mask: u64) {
+    let Some(task) = task_of_owner(owner) else {
+        return;
+    };
+    task.affinity.store(mask, Ordering::Release);
+    loop {
+        let cpu = task.cpu.load(Ordering::Acquire);
+        if allows(mask, cpu) {
+            return;
+        }
+        let irq = irq_save();
+        let mut guard = CPUS[cpu].lock();
+        let Some(st) = guard.as_mut() else {
+            drop(guard);
+            irq_restore(irq);
+            return;
+        };
+        if task.cpu.load(Ordering::Acquire) != cpu {
+            // Moved meanwhile (balanced or woken elsewhere): look again.
+            drop(guard);
+            irq_restore(irq);
+            continue;
+        }
+        if Arc::ptr_eq(&st.current, &task) {
+            st.need_resched = true;
+            drop(guard);
+            irq_restore(irq);
+            kick_cpu(cpu);
+            return;
+        }
+        if !st.rq.contains(task.key) {
+            // Asleep: its wake places it by the new mask.
+            drop(guard);
+            irq_restore(irq);
+            return;
+        }
+        if task.on_cpu() {
+            // Being switched away from on `cpu`: wait until it is off.
+            drop(guard);
+            irq_restore(irq);
+            core::hint::spin_loop();
+            continue;
+        }
+        if let Some(entity) = st.rq.dequeue(task.key, now()) {
+            *task.entity.lock() = entity;
+        }
+        publish(cpu, st);
+        drop(guard);
+        irq_restore(irq);
+        push(&task);
+        return;
+    }
 }
 
 /// Make this secondary CPU dispatch (stage S2): its boot flow becomes its
@@ -1201,13 +1629,16 @@ pub fn run_secondary() -> ! {
             x86_64::instructions::interrupts::enable_and_hlt();
         }
     }
-    let idle = Arc::new(Task::new(alloc_key(), "idle", Policy::Idle, None));
+    let mut idle = Task::new(alloc_key(), "idle", Policy::Idle, None);
+    idle.idle = true;
+    let idle = Arc::new(idle);
     idle.cpu.store(cpu, Ordering::Release);
     idle.set_state(State::Running);
     idle.on_cpu.store(true, Ordering::Release);
     let irq = irq_save();
     CURRENT[cpu].store(Arc::as_ptr(&idle) as *mut Task, Ordering::Release);
-    *CPUS[cpu].lock() = Some(CpuSched {
+    let mut guard = CPUS[cpu].lock();
+    let st = guard.insert(CpuSched {
         rq: RunQueue::new(),
         current: idle.clone(),
         idle,
@@ -1215,6 +1646,8 @@ pub fn run_secondary() -> ! {
         need_resched: false,
         acct_start: now(),
     });
+    publish(cpu, st);
+    drop(guard);
     DISPATCHING.fetch_or(1 << cpu, Ordering::AcqRel);
     irq_restore(irq);
     idle_entry(0);
@@ -1367,7 +1800,9 @@ impl WaitQueue {
     /// is on the queue, so a [`WaitQueue::wake_all`] that makes it true is
     /// never missed. Before the dispatcher starts this polls.
     pub fn wait_until(&self, mut cond: impl FnMut() -> bool) {
-        let Some(me) = current() else {
+        // An idle task must stay runnable (it runs when nothing else can):
+        // it polls instead.
+        let Some(me) = current().filter(|t| !t.idle) else {
             while !cond() {
                 core::hint::spin_loop();
             }

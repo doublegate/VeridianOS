@@ -2366,19 +2366,26 @@ static void test_wait_and_groups(void)
         fails |= 1024;
     /* The child blocks reading a pipe, never the console: a read of the
      * inherited stdin took the harness's next command. */
-    int hold[2];
-    if (pipe(hold) != 0)
+    int hold[2], execd[2];
+    if (pipe(hold) != 0 || pipe(execd) != 0 || fcntl(execd[1], F_SETFD, FD_CLOEXEC) != 0)
         fails |= 16;
     pid = fork();
     if (pid == 0) {
         dup2(hold[0], 0);
         close(hold[1]);
+        close(execd[0]);
         execl("/bin/sh", "sh", "-c", "read x", (char *)0);
         _exit(127);
     }
     close(hold[0]);
-    for (int i = 0; i < 50; i++)
-        sched_yield();                          /* let it exec */
+    /* The exec closes the child's end of `execd` (close-on-exec): EOF
+     * here means it has exec'd. (Yielding a few times was not enough once
+     * the child ran on another CPU.) */
+    close(execd[1]);
+    char ignored;
+    while (read(execd[0], &ignored, 1) > 0)
+        ;
+    close(execd[0]);
     errno = 0;
     if (setpgid(pid, pid) != -1 || errno != EACCES)
         fails |= 2048;

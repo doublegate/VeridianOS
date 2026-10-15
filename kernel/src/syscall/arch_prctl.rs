@@ -15,8 +15,10 @@ use crate::{arch::context::ThreadContext, process, syscall::SyscallError};
 
 // x86_64 arch_prctl codes (subset).  Reused on all architectures for a
 // uniform syscall ABI.
+const ARCH_SET_GS: usize = 0x1001;
 const ARCH_SET_FS: usize = 0x1002;
 const ARCH_GET_FS: usize = 0x1003;
+const ARCH_GET_GS: usize = 0x1004;
 
 /// Whether `addr` may become a user FS/GS base: user space only.
 fn fs_base_allowed(addr: usize) -> bool {
@@ -90,6 +92,23 @@ pub fn sys_arch_prctl(code: usize, addr: usize) -> Result<isize, SyscallError> {
             // itself.
             unsafe { crate::syscall::userspace::copy_to_user(addr, &ctx.tls_base()) }
                 .map_err(|_| SyscallError::InvalidPointer)?;
+            Ok(0)
+        }
+        // The GS base is saved with the task at every switch (it sits in
+        // IA32_KERNEL_GS_BASE while ring 0 runs), so it is set there.
+        #[cfg(all(target_arch = "x86_64", target_os = "none"))]
+        ARCH_SET_GS => {
+            if !fs_base_allowed(addr) {
+                return Err(SyscallError::OperationNotPermitted);
+            }
+            crate::arch::x86_64::switch::write_user_gs_base(addr as u64);
+            Ok(0)
+        }
+        #[cfg(all(target_arch = "x86_64", target_os = "none"))]
+        ARCH_GET_GS => {
+            drop(ctx);
+            let base = crate::arch::x86_64::switch::read_user_gs_base();
+            crate::syscall::userspace::write_user(addr, base)?;
             Ok(0)
         }
         _ => Err(SyscallError::InvalidArgument),

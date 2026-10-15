@@ -206,6 +206,7 @@
 #define SYS_sched_rr_get_interval        148
 #define SYS_sched_setaffinity            203
 #define SYS_sched_getaffinity            204
+#define SYS_getcpu                       309
 #define SYS_getpriority                  140
 #define SYS_setpriority                  141
 /* Futexes */

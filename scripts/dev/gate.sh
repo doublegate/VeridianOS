@@ -4,19 +4,22 @@
 #   host library, and the host unit tests. With --boot also build every
 #   architecture and boot each in QEMU (scripts/boot-test.sh); with --rootfs
 #   also run the x86_64 user-space runtime suite (scripts/run-rootfs-tests.sh,
-#   musl checks required). Exits non-zero if any step fails; each step's
-#   output is kept in ${LOG_DIR:-target/dev-logs}.
+#   musl checks required). With --smp also build with the `smp` feature and
+#   repeat the boots (and with --rootfs the runtime suite) on four CPUs.
+#   Exits non-zero if any step fails; each step's output is kept in
+#   ${LOG_DIR:-target/dev-logs}.
 #
-# Usage: scripts/dev/gate.sh [--boot] [--rootfs]
+# Usage: scripts/dev/gate.sh [--boot] [--rootfs] [--smp]
 set -u
 root="$(git -C "$(dirname "$0")" rev-parse --show-toplevel)" || exit 2
 cd "$root" || exit 2
-boot=0 rootfs=0
+boot=0 rootfs=0 smp=0
 for arg in "$@"; do
     case $arg in
         --boot) boot=1 ;;
         --rootfs) rootfs=1 ;;
-        *) echo "usage: $0 [--boot] [--rootfs]" >&2; exit 2 ;;
+        --smp) smp=1 ;;
+        *) echo "usage: $0 [--boot] [--rootfs] [--smp]" >&2; exit 2 ;;
     esac
 done
 log_dir="${LOG_DIR:-target/dev-logs}"
@@ -58,6 +61,21 @@ if [ $rootfs -eq 1 ]; then
     step rootfs-image scripts/build-busybox-rootfs.sh blockfs
     REQUIRE_MUSL=1 step rootfs-tests scripts/run-rootfs-tests.sh 900
     tail -1 "$log_dir/rootfs-tests.log"
+fi
+if [ $smp -eq 1 ] && { [ $boot -eq 1 ] || [ $rootfs -eq 1 ]; }; then
+    # The same kernel with the `smp` feature, on four CPUs. (This leaves the
+    # smp build in target/; the next gate rebuilds the default one.)
+    FEATURES=smp step build-smp ./build-kernel.sh all dev
+    if [ $boot -eq 1 ]; then
+        for arch in x86_64 aarch64 riscv64; do
+            SMP=4 EXPECT_CPUS=4 step "boot-smp-$arch" scripts/boot-test.sh "$arch"
+            tail -1 "$log_dir/boot-smp-$arch.log"
+        done
+    fi
+    if [ $rootfs -eq 1 ]; then
+        SMP=4 REQUIRE_MUSL=1 step rootfs-tests-smp scripts/run-rootfs-tests.sh 900
+        tail -1 "$log_dir/rootfs-tests-smp.log"
+    fi
 fi
 echo "=== GATE rc=$rc"
 exit $rc

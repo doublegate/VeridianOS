@@ -10,7 +10,9 @@
 # `pkill -9 -f qemu-system` run on its own -- it exits 1 when nothing matches).
 #
 # Usage: scripts/dev/rootfs-monitor.sh   Env: DIR (default target/dev-logs/monitor),
-#        OVMF (firmware, auto-detected), MEM (default 2048M), SMP (default 1)
+#        OVMF (firmware, auto-detected), MEM (default 2048M), SMP (default 1),
+#        CMD (one shell command to run instead of the two suites, e.g.
+#        "/bin/musl_runtime_test --only sched")
 set -u
 root="$(git -C "$(dirname "$0")" rev-parse --show-toplevel)" || exit 2
 cd "$root" || exit 2
@@ -46,6 +48,12 @@ wait_for() { # pattern seconds
 }
 wait_for 'root@veridian' 300 || echo "no shell prompt"
 sleep 2
+if [ -n "${CMD:-}" ]; then
+    printf '%s\r' "$CMD" >&3
+    echo "sent: $CMD (log: $log, monitor: $mon)"
+    wait "$pid"
+    exit 0
+fi
 printf '/bin/audit_runtime_test\r' >&3
 wait_for 'AUDIT-RUNTIME: [0-9]+/[0-9]+' 180
 sleep 1

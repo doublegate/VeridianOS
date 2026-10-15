@@ -386,12 +386,11 @@ int dup3(int oldfd, int newfd, int flags)
     return dup2(oldfd, newfd);
 }
 
-/* pipe2() -- pipe with flags */
+/* pipe2() -- pipe with flags (O_CLOEXEC, O_NONBLOCK). It ignored the flags
+ * and called pipe(), so a close-on-exec pipe leaked into exec'd programs. */
 int pipe2(int pipefd[2], int flags)
 {
-    (void)flags;
-    extern int pipe(int[2]);
-    return pipe(pipefd);
+    return (int)__syscall_ret(veridian_syscall2(SYS_pipe2, pipefd, flags));
 }
 
 /* clock_gettime() -- already defined in time.c, not duplicated here */

@@ -2,6 +2,17 @@
 
 ### Added
 
+- **Tasks run on every CPU (SMP stage S3, D5e; ADR 0012).** With the `smp` feature, a new or woken
+  task is placed on an idle CPU it may use (or stays where its cache is warm), an idle CPU pulls
+  waiting work from the busiest one, and every CPU rebalances every 4 ms when the load differs by
+  more than 25% (ADR 0007's policy, now applied). sched_setaffinity moves a thread off a CPU it may
+  no longer use before the call returns; sched_getaffinity, the processor count
+  (`_SC_NPROCESSORS_ONLN`) and deadline admission count every CPU that runs tasks; getcpu (new)
+  reports the caller's CPU. Boot test `dispatch_places_on_idle_cpus`; runtime test
+  `musl_smp_placement` (a thread pinned to each CPU in turn runs there; threads spread over all
+  CPUs).
+- **arch_prctl ARCH_SET_GS and ARCH_GET_GS.** A thread's user GS base, inherited by its threads
+  and fork children. Runtime test `musl_gs_base_per_thread`.
 - **Priority-inheritance mutexes (SCHED-INC-01).** FUTEX_LOCK_PI, FUTEX_LOCK_PI2, FUTEX_TRYLOCK_PI and
   FUTEX_UNLOCK_PI, with Linux's futex word protocol: while a PI lock has waiters its holder runs at
   the highest waiting priority (through the scheduler's real-time boost, passed along chains of
@@ -687,6 +698,35 @@
 
 ### Fixed
 
+- **TLB shootdowns can no longer deadlock (N-139).** A CPU waiting with interrupts off cannot
+  acknowledge a shootdown, so any lock it spins on must never be held by a CPU that issues one.
+  Three paths broke that rule, all found running the runtime suite on four CPUs: page faults were
+  handled with interrupts off while taking the address space's lock; the return to user mode
+  after an interrupt took the process's locks with interrupts off; and joining a thread freed its
+  kernel stack (a shootdown) while holding the process's thread table. Page faults and the return
+  to user mode now run with interrupts on when the interrupted code had them on, as on Linux, and
+  the thread table is released before the stacks are freed.
+- **Exited tasks are freed by a reaper thread.** The switch path freed them on whatever task ran
+  next, often a CPU's idle task, and freeing a process's page tables can sleep on its address
+  space lock. An idle task that slept stayed "running" off every run queue, and the next waker
+  spun on it forever. A `reaper` kernel thread now does it, and an idle task never sleeps: it
+  polls. The reaper also looks the process up before the task leaves the task table; otherwise a
+  parent that reaped the process in between left its page tables allocated.
+- **The kernel heap is interrupt-safe.** Its lock was a plain spinlock, and interrupt handlers
+  allocate (a wake inserts the task into a run queue). Since system calls run with interrupts on,
+  an interrupt that arrived while its CPU held the heap lock spun on it forever, and every CPU
+  that allocated next stopped with it; on four CPUs the runtime suite hung this way within
+  minutes. The heap now takes its lock with interrupts masked, as Linux's allocators do.
+- **Programs started from the kernel shell with arguments get the right argv.** The shell passed
+  the arguments alone, so the first argument became argv[0] (`prog -x y` ran with
+  `argv = {"-x", "y"}`). The rootfs harness now checks a run with arguments.
+- **pipe2 honours its flags in the native C library.** It ignored them and called pipe, so
+  O_CLOEXEC and O_NONBLOCK had no effect.
+- **The user GS base belongs to the thread.** While the kernel runs, a thread's user GS base sits
+  in a per-CPU register (after the entry's `swapgs`), and switching tasks did not save it: the
+  next task to return to user mode on that CPU got the previous one's value, and a thread that
+  moved to another CPU lost its own. It is now saved and restored with the task, like the FS
+  base.
 - **System calls run with interrupts enabled (N-139).** The x86_64 system-call entry kept
   interrupts off for the whole call, so a CPU in a long system call could not take a timer tick, a
   reschedule IPI or a TLB-shootdown IPI, and a shootdown aimed at it would have waited until the
