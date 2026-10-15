@@ -705,6 +705,11 @@
 
 ### Fixed
 
+- **BlockFS directories reuse the entries of deleted names.** New entries were always appended,
+  and a directory has at most 12 blocks, so a directory where names keep coming and going (`/tmp`,
+  a rename-over loop) filled up after a few thousand creates. After that every create failed,
+  however few names it held. A new entry now takes a deleted one's place when it fits. Host test
+  `test_directory_churn_reuses_entries` (it failed at the 4,090th create before).
 - **System calls no longer cost ~200 us each.** Every system call wrote an audit record to
   `/var/log/audit.log`, synchronously and without limit: a formatted string and a file append per
   call, and a log that grew until memory ran out. Auditing each system call is now opt-in, as

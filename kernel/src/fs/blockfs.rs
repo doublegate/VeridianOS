@@ -2391,6 +2391,49 @@ impl BlockFsInner {
         Ok(None)
     }
 
+    /// A deleted entry (inode 0) of directory `dir_inode` whose record is at
+    /// least `need` bytes: its direct block index, offset and record length.
+    fn free_dir_slot(
+        &self,
+        dir_inode: u32,
+        need: usize,
+    ) -> Result<Option<(usize, usize, usize)>, KernelError> {
+        let Some(inode) = self.inode_table.get(dir_inode as usize) else {
+            return Ok(None);
+        };
+        let dir_size = inode.size as usize;
+        for i in 0..12 {
+            let block_num = inode.direct_blocks[i];
+            let block_start = i * BLOCK_SIZE;
+            if block_num == 0 || block_start >= dir_size {
+                break;
+            }
+            let block_end = BLOCK_SIZE.min(dir_size - block_start);
+            let found = self.with_block(block_num, |block| {
+                let mut offset = 0;
+                while offset + DIR_ENTRY_HEADER_SIZE <= block_end {
+                    let entry = self.read_dir_entry(block, offset);
+                    let rec_len = entry.rec_len as usize;
+                    if rec_len < DIR_ENTRY_HEADER_SIZE
+                        || !rec_len.is_multiple_of(4)
+                        || offset + rec_len > BLOCK_SIZE
+                    {
+                        break;
+                    }
+                    if entry.inode == 0 && rec_len >= need {
+                        return Some((i, offset, rec_len));
+                    }
+                    offset += rec_len;
+                }
+                None
+            })?;
+            if found.is_some() {
+                return Ok(found);
+            }
+        }
+        Ok(None)
+    }
+
     /// Write a new directory entry into a directory inode's data blocks.
     ///
     /// Appends the entry at the end of the directory's current content.
@@ -2404,6 +2447,14 @@ impl BlockFsInner {
     ) -> Result<(), KernelError> {
         let entry = DiskDirEntry::new(target_inode, name, file_type);
         let entry_size = align4(DIR_ENTRY_HEADER_SIZE + entry.name_len as usize);
+
+        // A deleted entry big enough takes the new one, keeping its record
+        // length so the entries after it stay where they are. Appending every
+        // new name filled the directory's 12 blocks after a few thousand
+        // creates and deletes, and it stayed full however few names it held.
+        if let Some((block_idx, offset, rec_len)) = self.free_dir_slot(dir_inode, entry_size)? {
+            return self.serialize_dir_entry(dir_inode, block_idx, offset, &entry, rec_len);
+        }
 
         let dir_size = self.inode_table[dir_inode as usize].size as usize;
 
@@ -2735,6 +2786,29 @@ mod tests {
         ));
         root_a.link("h", file_a).unwrap();
         assert!(root_a.lookup("h").is_ok());
+    }
+
+    /// Deleted directory entries are reused: a directory that keeps
+    /// creating and removing names stays usable (it is limited to 12 blocks,
+    /// and appending every new entry filled them after a few thousand).
+    #[test]
+    fn test_directory_churn_reuses_entries() {
+        let fs = BlockFs::format(4000, 400).unwrap();
+        let dir = fs.root().mkdir("churn", Permissions::default()).unwrap();
+        for i in 0..5000 {
+            let name = alloc::format!("f{}", i % 7);
+            dir.create(&name, Permissions::default())
+                .unwrap_or_else(|e| panic!("create {} failed at {}: {:?}", name, i, e));
+            dir.unlink(&name).unwrap();
+        }
+        // Rename over an existing entry, as `mv new old` does.
+        for i in 0..5000 {
+            dir.symlink("tmp", "target")
+                .unwrap_or_else(|e| panic!("symlink at {}: {:?}", i, e));
+            dir.rename("tmp", &dir, "link").unwrap();
+        }
+        // Still one block: every new name took a freed slot.
+        assert!(dir.metadata().unwrap().size <= BLOCK_SIZE);
     }
 
     #[test]
