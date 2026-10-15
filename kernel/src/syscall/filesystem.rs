@@ -1807,8 +1807,8 @@ fn rename_entry(old: &str, new: &str) -> SyscallResult {
     let _rename = crate::fs::RENAME_LOCK.lock();
     // Both directories are resolved once; the checks and the move below
     // use these nodes (N-51).
-    let (old_parent, old_name) = parent_dir(old)?;
-    let (new_parent, new_name) = parent_dir(new)?;
+    let (old_parent, old_name, old_parent_canon) = parent_dir_canonical(old)?;
+    let (new_parent, new_name, new_parent_canon) = parent_dir_canonical(new)?;
     check_may_remove(&*old_parent, &old_name)?;
     check_dir_write(&*new_parent)?;
     // Replacing an existing `new` removes it, so the sticky rule applies.
@@ -1817,17 +1817,12 @@ fn rename_entry(old: &str, new: &str) -> SyscallResult {
     }
 
     let vfs = vfs()?;
-    let (old_parent_path, _) = split_path(old)?;
-    let (new_parent_path, _) = split_path(new)?;
-    // Compared on canonical parents: the parents are resolved with symlinks
-    // followed below, so a string comparison let a symlink into another
-    // mount through (review of the v0.26.0 stack, PR #11).
-    let old_mount = vfs
-        .entry_mount_point(&old_parent_path, &old_name)
-        .map_err(map_resolve_err)?;
-    let new_mount = vfs
-        .entry_mount_point(&new_parent_path, &new_name)
-        .map_err(map_resolve_err)?;
+    // Compared on the canonical parents of the resolution that produced the
+    // nodes above: a string comparison let a symlink into another mount
+    // through (review of PR #11), and resolving the paths again let them
+    // describe other directories than the nodes (N-51).
+    let old_mount = vfs.canonical_entry_mount_point(&old_parent_canon, &old_name);
+    let new_mount = vfs.canonical_entry_mount_point(&new_parent_canon, &new_name);
     if old_mount != new_mount {
         return Err(SyscallError::CrossDevice);
     }
@@ -1838,23 +1833,17 @@ fn rename_entry(old: &str, new: &str) -> SyscallResult {
         // Compared on canonical paths (symlinks, ".", ".." resolved): a
         // string prefix test on the raw paths was bypassed by "/a/./b" or
         // a symlink to the directory, which orphaned it as its own child.
-        let (_, old_parent_canon) = vfs
-            .resolve_canonical(&old_parent_path, "/", true)
-            .map_err(map_resolve_err)?;
         let src_canon = if old_parent_canon == "/" {
             alloc::format!("/{}", old_name)
         } else {
             alloc::format!("{}/{}", old_parent_canon, old_name)
         };
-        let (_, new_parent_canon) = vfs
-            .resolve_canonical(&new_parent_path, "/", true)
-            .map_err(map_resolve_err)?;
         if crate::fs::path_is_under(&new_parent_canon, &src_canon) {
             return Err(SyscallError::InvalidArgument);
         }
         // Moving it to another parent rewrites its "..", which needs write
         // permission on the directory itself.
-        if old_parent_path != new_parent_path {
+        if old_parent_canon != new_parent_canon {
             let creds = caller_creds();
             let meta = src.metadata().map_err(super::map_kernel_error)?;
             let (uid, gid) = (creds.euid, creds.gid_for(meta.gid));
@@ -1886,9 +1875,28 @@ pub(crate) fn parent_dir(
     ),
     SyscallError,
 > {
-    let (parent, name) = split_path(path)?;
-    let dir = vfs()?.resolve_path(&parent).map_err(map_resolve_err)?;
+    let (dir, name, _) = parent_dir_canonical(path)?;
     Ok((dir, name))
+}
+
+/// [`parent_dir`] with the directory's canonical path from the same
+/// resolution, for checks that need a path (mounts, ancestry): taking it
+/// from a second resolution would let it describe another directory.
+pub(crate) fn parent_dir_canonical(
+    path: &str,
+) -> Result<
+    (
+        alloc::sync::Arc<dyn crate::fs::VfsNode>,
+        alloc::string::String,
+        alloc::string::String,
+    ),
+    SyscallError,
+> {
+    let (parent, name) = split_path(path)?;
+    let (dir, canonical) = vfs()?
+        .resolve_canonical(&parent, "/", true)
+        .map_err(map_resolve_err)?;
+    Ok((dir, name, canonical))
 }
 
 /// Creating or removing an entry in `dir` needs write and search permission

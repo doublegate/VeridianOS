@@ -1005,6 +1005,18 @@ impl<'a> CallerView<'a> {
         self.vfs.entry_mount_point_in(&self.ctx, parent, name)
     }
 
+    /// The mount point of entry `name` of the directory whose canonical path
+    /// is `canonical_parent` (from [`Self::resolve_canonical`]), without
+    /// resolving anything again.
+    pub fn canonical_entry_mount_point(&self, canonical_parent: &str, name: &str) -> String {
+        let entry = if canonical_parent == "/" {
+            alloc::format!("/{}", name)
+        } else {
+            alloc::format!("{}/{}", canonical_parent, name)
+        };
+        self.vfs.mount_point_of(&entry)
+    }
+
     pub fn mkdir(
         &self,
         path: &str,

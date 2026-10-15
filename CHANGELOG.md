@@ -460,7 +460,9 @@
   directory it may not write. Reproduced on four CPUs: 21 files landed in a root-owned 0755
   directory. open with O_CREAT, mkdir, link, symlink, unlink, rename, linkat and symlinkat now
   resolve the parent once, then check and operate on that node; mkdir passes its check to the VFS,
-  which runs it on the same node as the MAC check. Runtime test `musl_dir_check_race`.
+  which runs it on the same node as the MAC check. rename takes its cross-mount and
+  into-own-subtree checks from the same resolution as the directories it moves between (found by
+  review). Runtime test `musl_dir_check_race`.
 - **IPC and capability authority (N-80, N-83, N-87, N-88, N-89).** Several of these were reported
   fixed by another agent's unmerged session but never were.
   - Only an endpoint capability now confers IPC rights, and only on its own endpoint. SEND is the
