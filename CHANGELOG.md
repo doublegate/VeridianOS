@@ -687,6 +687,17 @@
 
 ### Fixed
 
+- **Timers no longer fall behind after lost ticks; clock checks on every CPU (N-179).** The timer
+  wheel advanced one tick period per timer interrupt, so ticks lost while interrupts were off
+  (or skipped by the TSC-deadline rearm) made every kernel timer late; it now advances by the time
+  the clock actually moved. TSC reads are fenced so a later timestamp cannot read smaller, PIT
+  calibration can no longer hang the boot (it stops with a message), and with the `smp` feature an
+  x86_64 CPU whose TSC is not synchronised with the boot CPU's stays offline instead of making the
+  clock jump when a task moves to it.
+- **Priority-inheritance locks cannot be used to boost another process's thread.** (Found by review
+  before release.) A private PI futex's holder must be a thread of the caller's process, and a
+  shared one's a thread whose scheduling the caller could change; the futex word is faulted in
+  before the PI lock is taken, and compare-and-swap retries are bounded (EAGAIN).
 - **Secondary CPUs are set up like the boot CPU, and bring-up stops at the first failure (N-172,
   N-173, N-180).** With the `smp` feature, the other CPUs never got the SYSCALL MSRs (a system
   call there would have jumped to address 0 in ring 0) or the boot CPU's XCR0 (restoring a task's

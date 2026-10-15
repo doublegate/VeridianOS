@@ -76,6 +76,10 @@ pub fn ap_init() -> Result<(), &'static str> {
     Ok(())
 }
 
+/// No clock check: the generic timer counter (AArch64) and the `time` CSR
+/// (RISC-V) are synchronised across CPUs by the architecture.
+pub fn serve_boot_handshake() {}
+
 /// Park with interrupts enabled.
 pub fn idle() -> ! {
     loop {

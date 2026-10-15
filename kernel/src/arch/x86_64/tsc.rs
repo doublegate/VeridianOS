@@ -40,11 +40,18 @@ pub enum TscSource {
     Pit,
 }
 
-/// Read the TSC.
+/// Read the TSC, after every earlier instruction has completed (`lfence`:
+/// RDTSC is not ordered, so an early read could make a later timestamp
+/// look smaller, N-179). Inline assembly, as the `_mm_lfence` intrinsic
+/// needs SSE2, which the soft-float kernel target disables.
 #[inline]
 pub fn read() -> u64 {
-    // SAFETY: RDTSC is unprivileged and has no side effects.
-    unsafe { _rdtsc() }
+    // SAFETY: LFENCE only orders instructions; RDTSC is unprivileged and
+    // has no side effects.
+    unsafe {
+        core::arch::asm!("lfence", options(nomem, nostack, preserves_flags));
+        _rdtsc()
+    }
 }
 
 /// TSC frequency in Hz, or 0 before calibration.
@@ -124,7 +131,7 @@ fn from_hypervisor_leaf() -> Option<u64> {
 }
 
 /// Measure TSC ticks over `pit_ticks` of PIT channel 2 (1.193182 MHz).
-fn pit_window(pit_ticks: u16) -> u64 {
+fn pit_window(pit_ticks: u16) -> Option<u64> {
     // SAFETY: standard PIT/port-0x61 programming, as in apic::calibrate_timer:
     // 0x61 gates channel 2 (speaker off), 0x43 is the command port, 0x42
     // channel 2 data. Boot-time, interrupts off, single CPU.
@@ -144,10 +151,16 @@ fn pit_window(pit_ticks: u16) -> u64 {
         port_61.write(g & 0xFE);
         port_61.write(g | 0x01); // rising gate starts the count
         let start = read();
+        // Bounded (N-179): a missing or stuck PIT must not hang the boot.
+        let mut polls = 0u64;
         while port_61.read() & 0x20 == 0 {
+            polls += 1;
+            if polls > 100_000_000 {
+                return None;
+            }
             core::hint::spin_loop();
         }
-        read().wrapping_sub(start)
+        Some(read().wrapping_sub(start))
     }
 }
 
@@ -158,7 +171,11 @@ fn from_pit() -> u64 {
     let pit_ticks = (PIT_HZ * WINDOW_MS / 1000) as u16;
     let mut samples = [0u64; 5];
     for s in samples.iter_mut() {
-        *s = pit_window(pit_ticks);
+        *s = pit_window(pit_ticks).unwrap_or_else(|| {
+            panic!(
+                "TSC calibration: no CPUID 15h or hypervisor frequency, and the PIT does not count"
+            )
+        });
     }
     samples.sort_unstable();
     samples[2] * PIT_HZ / pit_ticks as u64
@@ -183,6 +200,13 @@ pub fn init() -> (u64, TscSource) {
     (hz, source)
 }
 
+/// Whether another CPU's TSC reading `other` lies between this CPU's
+/// readings `t1` and `t2`, give or take `margin` ticks (the AP bring-up
+/// synchronisation check, N-179).
+pub fn reading_between(t1: u64, other: u64, t2: u64, margin: u64) -> bool {
+    other.saturating_add(margin) >= t1 && other <= t2.saturating_add(margin)
+}
+
 /// CPUID 0x80000007 EDX[8]: the TSC runs at a constant rate.
 pub fn invariant() -> bool {
     // SAFETY: CPUID is always available; the extended leaf is checked.
@@ -192,6 +216,18 @@ pub fn invariant() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn another_cpus_reading_must_fall_between_ours() {
+        // In order: synchronised.
+        assert!(reading_between(1_000, 1_500, 2_000, 10));
+        // Slightly outside, within the margin (cache-line transfer time).
+        assert!(reading_between(1_000, 995, 2_000, 10));
+        assert!(reading_between(1_000, 2_008, 2_000, 10));
+        // The other CPU's TSC runs ahead of, or behind, ours.
+        assert!(!reading_between(1_000_000, 500, 1_000_100, 10));
+        assert!(!reading_between(100, 9_000_000, 200, 10));
+    }
 
     #[test]
     fn conversions_round_trip_without_overflow() {

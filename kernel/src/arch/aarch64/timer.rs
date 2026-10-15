@@ -97,6 +97,6 @@ pub fn handle_interrupt() {
     let next = crate::arch::percpu::advance_timer(counter(), period);
     set_compare(next);
     if crate::arch::percpu::is_timekeeper() {
-        crate::timer::timer_tick(PERIOD_MS.load(Ordering::Relaxed));
+        crate::timer::clock_tick();
     }
 }

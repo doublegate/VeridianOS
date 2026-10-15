@@ -44,6 +44,7 @@ pub(crate) mod smp_arch {
     pub fn ap_init() -> Result<(), &'static str> {
         Ok(())
     }
+    pub fn serve_boot_handshake() {}
     pub fn idle() -> ! {
         loop {
             core::hint::spin_loop();

@@ -188,9 +188,11 @@ INIT-SIPI-SIPI, AArch64 PSCI, RISC-V SBI HSM) and come online, but they only idl
 the boot CPU. Per-CPU run queues, balancing and TLB shootdown that waits for acknowledgement are
 sprint D5. Since D5a every CPU gets the boot CPU's syscall MSRs and XCR0 (N-172), IPIs go to APIC
 IDs with the ICR written under one interrupt-off sequence (N-173), and bring-up stops at the first
-CPU that fails, with guarded stacks (N-180). Known defects that become reachable with D5: a TLB
-shootdown can deadlock against a CPU spinning with interrupts off (N-139), the timer wheel assumes
-no lost ticks (N-179), and directory permission checks resolve the path
+CPU that fails, with guarded stacks (N-180). Since D5b the timer wheel advances by elapsed clock time
+and an x86_64 CPU whose TSC is not synchronised with the boot CPU's stays offline (N-179); a TSC that
+is synchronised but not invariant is reported, not refused. Known defects that become reachable with D5: a TLB
+shootdown can deadlock against a CPU spinning with interrupts off (N-139), and directory permission
+checks resolve the path
 separately from the operation (N-51). Lock-free and per-CPU structures are single-CPU-safe but have
 not run on more than one CPU (N-59). Programs see this: sched_getaffinity and the processor count
 report one CPU, and an affinity mask without CPU 0 is EINVAL.

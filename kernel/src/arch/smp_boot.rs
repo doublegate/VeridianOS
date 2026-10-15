@@ -154,6 +154,8 @@ pub fn bring_up_secondaries() {
             if super::timer::monotonic_ns().saturating_sub(start) > AP_TIMEOUT_NS {
                 break;
             }
+            // Answer the secondary's clock-synchronisation check (x86_64).
+            super::smp_arch::serve_boot_handshake();
             core::hint::spin_loop();
         }
         if args.status.load(Ordering::Acquire) == AP_STATUS_ONLINE {

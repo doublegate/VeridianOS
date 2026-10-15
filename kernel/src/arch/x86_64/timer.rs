@@ -28,7 +28,7 @@ pub fn tick(user: bool) {
         return;
     }
     TICKS.fetch_add(1, Ordering::Relaxed);
-    crate::timer::timer_tick(super::apic::timer_period_ms());
+    crate::timer::clock_tick();
 
     #[cfg(feature = "alloc")]
     crate::drivers::console_input::tick();

@@ -376,6 +376,30 @@ pub(crate) fn cancel_timer(id: TimerId) -> KernelResult<()> {
         .unwrap_or(Err(KernelError::NotInitialized { subsystem: "timer" }))
 }
 
+/// The clock reading (ms) the wheel has been advanced to; 0 before the
+/// first tick.
+static WHEEL_SEEN_MS: AtomicU64 = AtomicU64::new(0);
+
+/// Milliseconds since the last reading in `seen`, which is moved to `now`:
+/// `None` on the first reading (it only sets the baseline) or when the clock
+/// has not moved on.
+fn elapsed_since(seen: &AtomicU64, now: u64) -> Option<u64> {
+    let prev = seen.swap(now.max(1), Ordering::AcqRel);
+    (prev != 0 && now > prev).then(|| now - prev)
+}
+
+/// From the timekeeping CPU's tick: advance the timers by the time that
+/// actually passed on the clock source, not by one tick period. Ticks can
+/// be lost (interrupts off for longer than a period, a TSC-deadline rearm
+/// that skips missed periods), and counting periods let the wheel fall
+/// behind the clock (N-179).
+pub(crate) fn clock_tick() {
+    let now = crate::arch::timer::monotonic_ns() / 1_000_000;
+    if let Some(elapsed) = elapsed_since(&WHEEL_SEEN_MS, now) {
+        timer_tick(elapsed);
+    }
+}
+
 /// Advance all timers by `elapsed_ms` milliseconds and fire expired ones.
 ///
 /// This function should be called from the timer interrupt handler (or a
@@ -460,6 +484,20 @@ mod tests {
 
     /// Dummy callback that does nothing (used in tests).
     fn test_callback(_id: TimerId) {}
+
+    /// N-179: the wheel advances by the time the clock moved, however many
+    /// ticks came; the first reading only sets the baseline.
+    #[test]
+    fn wheel_advances_by_elapsed_clock_time() {
+        let seen = AtomicU64::new(0);
+        assert_eq!(elapsed_since(&seen, 1_000), None, "baseline");
+        assert_eq!(elapsed_since(&seen, 1_001), Some(1));
+        // Three ticks were lost: one tick still advances all 4 ms.
+        assert_eq!(elapsed_since(&seen, 1_005), Some(4));
+        // A tick in the same millisecond advances nothing.
+        assert_eq!(elapsed_since(&seen, 1_005), None);
+        assert_eq!(elapsed_since(&seen, 1_006), Some(1));
+    }
 
     #[test]
     fn test_timer_wheel_add_and_cancel() {

@@ -12,7 +12,7 @@
 //! with interrupts on. It never enters ring 3 and runs no tasks.
 
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use crate::arch::smp_boot::ApBootArgs;
 
@@ -280,6 +280,55 @@ pub fn trampoline_stage() -> u32 {
     }
 }
 
+/// TSC synchronisation check between a starting AP and the boot CPU
+/// (N-179): the AP reads its TSC (`ap`, phase 1), the boot CPU answers with
+/// its own (`bsp`, phase 2), the AP reads again. The boot CPU's reading
+/// must fall between the AP's two, within `TSC_SYNC_MARGIN_NS`, or the
+/// clock (and so every timeout and the fair scheduler's virtual time) would
+/// jump when a task moves between them.
+struct TscSync {
+    ap: AtomicU64,
+    bsp: AtomicU64,
+    phase: AtomicU32,
+}
+
+static TSC_SYNC: TscSync = TscSync {
+    ap: AtomicU64::new(0),
+    bsp: AtomicU64::new(0),
+    phase: AtomicU32::new(0),
+};
+
+const TSC_SYNC_MARGIN_NS: u64 = 10_000;
+
+/// Boot CPU side of the TSC check, called from its wait for an AP.
+pub fn serve_boot_handshake() {
+    if TSC_SYNC.phase.load(Ordering::Acquire) == 1 {
+        TSC_SYNC.bsp.store(super::tsc::read(), Ordering::Relaxed);
+        TSC_SYNC.phase.store(2, Ordering::Release);
+    }
+}
+
+/// AP side of the TSC check.
+fn tsc_in_sync() -> bool {
+    let t1 = super::tsc::read();
+    TSC_SYNC.ap.store(t1, Ordering::Relaxed);
+    TSC_SYNC.phase.store(1, Ordering::Release);
+    let mut spins = 0u64;
+    while TSC_SYNC.phase.load(Ordering::Acquire) != 2 {
+        spins += 1;
+        if spins > 1_000_000_000 {
+            TSC_SYNC.phase.store(0, Ordering::Release);
+            return false;
+        }
+        core::hint::spin_loop();
+    }
+    let t2 = super::tsc::read();
+    let bsp = TSC_SYNC.bsp.load(Ordering::Relaxed);
+    TSC_SYNC.phase.store(0, Ordering::Release);
+    let margin = super::tsc::ns_to_ticks(TSC_SYNC_MARGIN_NS, super::tsc::hz()).max(1);
+    super::tsc::reading_between(t1, bsp, t2, margin)
+}
+
 /// This AP's local setup.
 pub fn ap_init() -> Result<(), &'static str> {
     crate::arch::smp_boot::ap_stage(10);
@@ -295,6 +344,9 @@ pub fn ap_init() -> Result<(), &'static str> {
         return Err("XCR0 differs from the boot CPU's");
     }
     super::syscall::init_syscall_msrs();
+    if !tsc_in_sync() {
+        return Err("TSC not synchronised with the boot CPU");
+    }
     crate::arch::smp_boot::ap_stage(11);
     super::apic::init_local_secondary();
     super::apic::start_local_timer();
