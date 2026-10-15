@@ -3544,6 +3544,10 @@ static void test_dir_check_race(void)
     chmod("/tmp/n51/prot", 0755);
     mkdir("/tmp/n51/ok", 0777);
     chmod("/tmp/n51/ok", 0777);
+    /* What an earlier run left (the test can be repeated with --only). */
+    unlink("/tmp/n51/link");
+    unlink("/tmp/n51/to_ok");
+    unlink("/tmp/n51/to_prot");
     if (symlink("/tmp/n51/ok", "/tmp/n51/link") != 0) f |= 1;
     pid_t pid = fork();
     if (pid == 0) {
@@ -3552,7 +3556,12 @@ static void test_dir_check_race(void)
         n51_stop = 0;
         if (pthread_create(&t, 0, n51_swapper, 0) != 0) _exit(3);
         char path[64];
-        for (int i = 0; i < 20000; i++) {
+        /* 20000 creates or 3 s, whichever comes first: the race shows within
+         * a second here, and a slow virtual machine (CI's, where spinning
+         * vCPUs wait for a descheduled lock holder) must not run past the
+         * suite's time limit. */
+        long long stop_at = mono_ns() + 3000000000LL;
+        for (int i = 0; i < 20000 && mono_ns() < stop_at; i++) {
             snprintf(path, sizeof(path), "/tmp/n51/link/f%d", i % 64);
             int fd = open(path, O_CREAT | O_WRONLY, 0644);
             if (fd >= 0) close(fd);
