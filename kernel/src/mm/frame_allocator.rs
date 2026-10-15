@@ -379,7 +379,17 @@ impl BitmapAllocator {
     /// anywhere in the node. Frames outside the range are never examined,
     /// so a zone request neither takes nor disturbs them.
     fn allocate_in(&self, count: usize, range: Option<(u64, u64)>) -> Result<FrameNumber> {
-        if count == 0 || count >= BITMAP_BUDDY_THRESHOLD {
+        if count >= BITMAP_BUDDY_THRESHOLD {
+            return Err(FrameAllocatorError::InvalidSize);
+        }
+        self.allocate_run(count, range)
+    }
+
+    /// `allocate_in` without the size limit: for the rare large run that
+    /// has to come from the bitmap (the kernel heap on a machine whose RAM
+    /// the bitmap covers entirely, so there is no buddy region).
+    fn allocate_run(&self, count: usize, range: Option<(u64, u64)>) -> Result<FrameNumber> {
+        if count == 0 {
             return Err(FrameAllocatorError::InvalidSize);
         }
         if self.free_frames.load(Ordering::Relaxed) < count {
@@ -1032,6 +1042,22 @@ impl FrameAllocator {
             }
         }
 
+        Err(FrameAllocatorError::OutOfMemory)
+    }
+
+    /// Allocate `count` physically contiguous frames of any size, from a
+    /// buddy region if one can hold them, else as a run in a bitmap node.
+    /// For long-lived boot-time allocations (the kernel heap, N-278); the
+    /// general path keeps runs of 512 frames and more in the buddy regions.
+    pub fn allocate_contiguous(&self, count: usize) -> Result<FrameNumber> {
+        if let Ok(frame) = self.allocate_buddy_internal(count, None, None) {
+            return Ok(frame);
+        }
+        for allocator in self.bitmap_allocators.iter().flatten() {
+            if let Ok(frame) = allocator.allocate_run(count, None) {
+                return Ok(frame);
+            }
+        }
         Err(FrameAllocatorError::OutOfMemory)
     }
 
@@ -1732,6 +1758,23 @@ mod tests {
         a.free(f, 1).unwrap();
         a.free(g, 256).unwrap();
         assert_eq!(a.allocate(1024).unwrap().as_u64(), 0);
+    }
+
+    /// N-278: a run longer than the buddy threshold comes from a bitmap
+    /// node when there is no buddy region (all RAM under 512 MiB).
+    #[test]
+    fn contiguous_runs_come_from_the_bitmap_without_a_buddy_region() {
+        let mut fa = alloc::boxed::Box::new(FrameAllocator::new());
+        fa.init_numa_node(0, FrameNumber::new(4096), 20_000)
+            .unwrap();
+        let heap = fa.allocate_contiguous(16_384).unwrap();
+        assert_eq!(heap.as_u64(), 4096);
+        assert!(
+            fa.allocate_contiguous(16_384).is_err(),
+            "only 3,616 frames left"
+        );
+        // The general path still refuses bitmap runs at the threshold.
+        assert!(fa.allocate_frames(BITMAP_BUDDY_THRESHOLD, None).is_err());
     }
 
     /// The statistics count each successful hand-out once, whatever its

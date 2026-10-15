@@ -1159,10 +1159,11 @@ All 4,095 existing kernel tests must continue passing. The KDE port adds no kern
 | Core apps (Dolphin + Konsole) | ~50-100 MB each | |
 | **Total** | **~500-800 MB** | |
 
-**Kernel heap adjustment**: The current 512MB static kernel heap (`HEAP_MEMORY` in kernel BSS) is insufficient if user-space needs 800MB+ on top. Options:
-1. Reduce kernel heap to 256MB (sufficient for kernel operations) and give the rest to user-space
-2. Implement demand-paged user-space memory (currently pre-allocated)
-3. Require `-m 2048M` or higher for KDE sessions
+**Kernel heap**: since v0.27 the x86_64 kernel heap is taken from RAM at boot rather than being a
+static array: a third of usable memory rounded down to a power of two, 32 MiB to 1 GiB (512 MiB
+at `-m 2048M`, 1 GiB from 4 GiB; `kernel/src/mm/heap.rs`, N-278). A KDE session needing 800 MB of
+user memory therefore wants `-m 4096M`, which leaves about 2.9 GiB beside a 1 GiB heap. Demand-paged
+anonymous memory (user memory is still allocated eagerly) is v0.29 work.
 
 ### GPU Performance
 

@@ -243,8 +243,9 @@ What does not work yet: `docs/KNOWN-LIMITATIONS.md`.
     early data write-back and lock-free misses (N-263, N-118 BlockFS part; ADR 0011); IPC and
     capability authority (N-80, N-83, N-87, N-88, N-89 parts); VirtIO barriers (N-270, N-271);
     mm items (N-265, N-266, PB-MEM-05/07); shell `mv` (N-273); reviewer gate comment (N-276);
-    `scripts/dev/` helpers. Open: heap sized from the memory map so small guests boot (N-278);
-    `knetd` done properly (N-69, with F2); the rest is in the sprint lists above and v0.29.
+    `scripts/dev/` helpers; the x86_64 heap sized from the memory map, so small guests boot
+    (N-278, HX-02). Open: `knetd` done properly (N-69, with F2); the rest is in the sprint lists
+    above and v0.29.
   - [ ] **Release:** tri-arch boot with `-smp 4`, runtime suite, CHANGELOG, tag.
 - [ ] **v0.28.0:** the process, signal, time and file syscall tiers (X2 groups, with the open
   ABI-review findings N-194 to N-247 that belong to them).

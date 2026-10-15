@@ -1367,7 +1367,7 @@ impl BuiltinCommand for SlabCommand {
         }
         #[cfg(not(target_arch = "x86_64"))]
         {
-            crate::println!("Heap size:  {} KB", crate::mm::heap::HEAP_SIZE / 1024);
+            crate::println!("Heap size:  {} KB", crate::mm::heap::heap_size() / 1024);
             crate::println!("(detailed stats only available on x86_64)");
         }
         CommandResult::Success(0)

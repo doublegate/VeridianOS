@@ -329,6 +329,15 @@
 
 ### Changed
 
+- **The x86_64 kernel heap is sized from RAM; small guests boot (N-278, HX-02).** The heap was a
+  1 GiB array in the kernel's BSS, so loading the kernel alone needed more than 1 GiB and a guest
+  with less memory could not boot. At boot the heap is now a run of physical frames used through
+  the physical-memory map: a third of usable RAM rounded down to a power of two, between 32 MiB
+  and 1 GiB. That is 512 MiB at `-m 2048M` (the runtime suite passes with it) and the old 1 GiB
+  from 4 GiB; a 256 MiB guest boots with all boot tests passing. The heap is set up after the
+  boot page-table frames are reserved, so it can never be given one of them. AArch64 and RISC-V
+  keep their 8 MiB static heap until sprint E. (An unmerged attempt by another agent had shrunk
+  the static array to 32 MiB, which broke the root filesystem and native compilation.)
 - **BlockFS writes file data back before sync, and reads without holding the cache (BM-FS-01,
   N-118, ADR 0011).** Dirty blocks used to stay in memory until `sync`, so a large write grew the
   block cache by its whole size. Now, after any operation that leaves more than 16 MiB (1 MiB on

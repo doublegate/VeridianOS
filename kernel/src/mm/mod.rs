@@ -399,26 +399,6 @@ pub fn init_default() {
         let kernel_end_virt = unsafe { &__kernel_end as *const u8 as u64 };
         let kernel_end_phys = translate_kernel_vaddr(kernel_end_virt);
 
-        // If __kernel_end translation failed, try translating the last byte
-        // of HEAP_MEMORY instead. The heap is the largest object in BSS
-        // (~512MB) and its end address is a tight lower bound on the kernel's
-        // physical extent. __kernel_end may fail translation if the
-        // bootloader's page table walk hits an unmapped intermediate entry
-        // for the very last page of the BSS.
-        let kernel_end_phys = if kernel_end_phys != 0 {
-            kernel_end_phys
-        } else {
-            let heap_end_virt = heap::heap_end_vaddr();
-            let heap_end_phys = translate_kernel_vaddr(heap_end_virt);
-            if heap_end_phys != 0 {
-                kprintln!(
-                    "[MM] __kernel_end translation failed, using heap end at phys {:#x}",
-                    heap_end_phys
-                );
-            }
-            heap_end_phys
-        };
-
         // Round up to next 2MB boundary for safety margin, then add 2MB
         let alloc_start = if kernel_end_phys != 0 {
             let aligned = (kernel_end_phys + 0x1FFFFF) & !0x1FFFFF; // Round up to 2MB
@@ -431,16 +411,15 @@ pub fn init_default() {
             );
             start
         } else {
-            // Fallback: compute a safe start from HEAP_SIZE. The kernel's
-            // physical footprint is dominated by the BSS (which contains
-            // HEAP_MEMORY). Add 64MB for code, rodata, data, stacks, and
-            // the bootloader's own allocations.
-            let safe_start = (heap::HEAP_SIZE as u64 + 64 * 1024 * 1024 + 0x1FFFFF) & !0x1FFFFF;
+            // Fallback when __kernel_end does not translate: the kernel
+            // image is about 15 MiB (code, data and a 2 MiB BSS -- the heap
+            // is no longer in it, N-278), so starting at 64 MiB leaves
+            // margin. The bootloader's memory map already marks the image
+            // as not usable; this only clips further.
+            let safe_start: u64 = 64 * 1024 * 1024;
             kprintln!(
-                "[MM] WARNING: Could not find kernel physical end, using {} MB start (heap={}MB + \
-                 64MB margin)",
-                safe_start / (1024 * 1024),
-                heap::HEAP_SIZE / (1024 * 1024)
+                "[MM] WARNING: Could not find kernel physical end, using {} MB start",
+                safe_start / (1024 * 1024)
             );
             safe_start
         };
@@ -514,6 +493,12 @@ pub fn init_default() {
     init(&regions[..count]);
 
     kprintln!("[MM] init returned successfully");
+
+    // The x86_64 heap is taken from the frame allocator (N-278), so the
+    // boot page-table frames must be reserved first or it could be given
+    // frames those tables still use.
+    #[cfg(target_arch = "x86_64")]
+    reserve_boot_page_table_frames();
 
     // Initialize heap allocator after frame allocator is ready
     init_heap().expect("Heap initialization failed");

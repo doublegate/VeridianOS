@@ -256,12 +256,9 @@ pub fn kernel_init() -> KernelResult<()> {
     // Stage 2: Memory management
     kprintln!("[BOOTSTRAP] Stage 2: Memory management");
 
+    // Also reserves the boot page-table frames on x86_64, before the heap
+    // is taken from the frame allocator.
     mm::init_default();
-
-    // Reserve boot page table frames so the frame allocator doesn't hand
-    // them out, which would corrupt kernel address space mappings.
-    #[cfg(target_arch = "x86_64")]
-    mm::reserve_boot_page_table_frames();
 
     // Kernel stack region (N-26): its page tables must exist before the
     // first address space copies the kernel half.
