@@ -190,10 +190,12 @@ sprint D5. Since D5a every CPU gets the boot CPU's syscall MSRs and XCR0 (N-172)
 IDs with the ICR written under one interrupt-off sequence (N-173), and bring-up stops at the first
 CPU that fails, with guarded stacks (N-180). Since D5b the timer wheel advances by elapsed clock time
 and an x86_64 CPU whose TSC is not synchronised with the boot CPU's stays offline (N-179); a TSC that
-is synchronised but not invariant is reported, not refused. Known defects that become reachable with D5: a TLB
-shootdown can deadlock against a CPU spinning with interrupts off (N-139), and directory permission
-checks resolve the path
-separately from the operation (N-51). Lock-free and per-CPU structures are single-CPU-safe but have
+is synchronised but not invariant is reported, not refused. Since D5c every CPU dispatches its own
+run queue, but tasks are not yet placed on or moved to other CPUs (D5e), so secondaries run only
+kernel threads sent to them. Since D5d system calls run with interrupts enabled (N-139); a CPU
+spinning on a lock with interrupts off still cannot answer a TLB shootdown, so a shootdown issued
+while holding such a lock can still deadlock until frees are deferred past the flush (D5e).
+Directory permission checks resolve the path separately from the operation (N-51). Lock-free and per-CPU structures are single-CPU-safe but have
 not run on more than one CPU (N-59). Programs see this: sched_getaffinity and the processor count
 report one CPU, and an affinity mask without CPU 0 is EINVAL.
 

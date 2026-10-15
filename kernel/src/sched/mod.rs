@@ -62,11 +62,14 @@ pub fn wait_for_interrupt_in_syscall() -> bool {
     if dispatch::current_owner().is_some() {
         return dispatch::wait_in_syscall();
     }
-    #[cfg(target_arch = "x86_64")]
-    // SAFETY: enables interrupts for exactly one halt and disables them
-    // again.
-    unsafe {
-        core::arch::asm!("sti; hlt; cli", options(nomem, nostack));
+    // Halt until the next interrupt, keeping the caller's interrupt flag.
+    #[cfg(all(target_arch = "x86_64", target_os = "none"))]
+    {
+        let was_on = x86_64::instructions::interrupts::are_enabled();
+        x86_64::instructions::interrupts::enable_and_hlt();
+        if !was_on {
+            x86_64::instructions::interrupts::disable();
+        }
     }
     #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
     // SAFETY: WFI only waits for an interrupt or event.

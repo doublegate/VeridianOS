@@ -102,8 +102,8 @@ pub(crate) fn wait_ready(
         if now_ns() >= deadline.unwrap_or(start.saturating_add(30_000_000_000)) {
             return scan().map(|s| s.ready);
         }
-        // `sti; hlt` lets the timer interrupt advance the clock (SFMASK
-        // cleared IF on syscall entry), then interrupts are off again.
+        // Halting lets the timer interrupt advance the clock; the interrupt
+        // flag is left as it was.
         if crate::sched::wait_for_interrupt_in_syscall() {
             return Err(SyscallError::Interrupted);
         }

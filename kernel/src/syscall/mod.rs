@@ -2885,6 +2885,17 @@ use crate::net::socket_fd::{SocketHandle, SocketNode};
 
 /// Run `f` on the socket behind `fd` in the caller's own file table.
 /// Fails with EBADF for an unknown fd and ENOTSOCK for a non-socket.
+/// Whether descriptor `fd` is in non-blocking mode (O_NONBLOCK).
+fn fd_nonblocking(fd: usize) -> Result<bool, SyscallError> {
+    let process = crate::process::current_process().ok_or(SyscallError::InvalidState)?;
+    let file = process
+        .file_table
+        .lock()
+        .get(fd)
+        .ok_or(SyscallError::BadFileDescriptor)?;
+    Ok(file.nonblock.load(Ordering::Acquire))
+}
+
 pub(super) fn with_socket_fd<R>(
     fd: usize,
     f: impl FnOnce(&SocketNode) -> R,
@@ -3163,8 +3174,27 @@ fn sys_socket_accept(
             finish_accept(new_fd, addr_ptr, addrlen_ptr, &peer)
         }
         SocketHandle::Unix(id) => {
-            let (new_id, _connecting_id) =
-                crate::net::unix_socket::socket_accept(id).map_err(socket_err)?;
+            // A blocking accept waits for a connection (it returned EAGAIN,
+            // so a server whose client had not connected yet failed); a
+            // signal ends the wait with EINTR. Every connect reports a
+            // readiness change.
+            let (new_id, _connecting_id) = loop {
+                match crate::net::unix_socket::socket_accept(id) {
+                    #[cfg(feature = "alloc")]
+                    Err(crate::error::KernelError::WouldBlock)
+                        if !fd_nonblocking(fd)?
+                            && crate::sched::dispatch::current_owner().is_some() =>
+                    {
+                        crate::sched::dispatch::wait_event(
+                            &crate::sched::dispatch::IO_EVENTS,
+                            None,
+                            || crate::net::unix_socket::accept_ready(id),
+                        )
+                        .map_err(|_| SyscallError::Interrupted)?;
+                    }
+                    r => break r.map_err(socket_err)?,
+                }
+            };
             let new_fd = install_socket(SocketHandle::Unix(new_id), fd_flags)?;
             // The peer of an accepted Unix connection is reported unnamed:
             // sun_family only, length 2 (bound client paths are not

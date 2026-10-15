@@ -687,6 +687,19 @@
 
 ### Fixed
 
+- **System calls run with interrupts enabled (N-139).** The x86_64 system-call entry kept
+  interrupts off for the whole call, so a CPU in a long system call could not take a timer tick, a
+  reschedule IPI or a TLB-shootdown IPI, and a shootdown aimed at it would have waited until the
+  call returned. Interrupts are now enabled once the entry has switched to the kernel stack; the
+  keyboard driver, which the interrupt handler and system calls share, takes its state with
+  interrupts off, and an idle wait inside a system call restores the caller's interrupt state
+  instead of disabling it. A CPU that spins on a lock with interrupts off still cannot answer a
+  shootdown; that goes with deferred frees in D5e.
+- **A blocking accept on a Unix socket waits for a connection.** It returned EAGAIN when no client
+  had connected yet, as if the socket were nonblocking; programs only worked when the client
+  happened to connect first. It now sleeps until a connection arrives (EINTR on a signal), and a
+  nonblocking accept still returns EAGAIN. Found when enabling interrupts in system calls changed
+  which process ran first. Runtime test `musl_unix_accept_blocks`.
 - **Timers no longer fall behind after lost ticks; clock checks on every CPU (N-179).** The timer
   wheel advanced one tick period per timer interrupt, so ticks lost while interrupts were off
   (or skipped by the TSC-deadline rearm) made every kernel timer late; it now advances by the time

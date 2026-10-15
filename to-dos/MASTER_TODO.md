@@ -154,7 +154,9 @@ What does not work yet: `docs/KNOWN-LIMITATIONS.md`.
       stacks (N-180), timer advance by elapsed time (N-179), `smp` on by default; N-51, N-52;
       targeted TLB shootdown (per-address-space CPU mask, logical-to-APIC-ID map; N-262) and
       frees through the per-CPU cache after it (N-261); per-CPU syscall rate limiter
-      (SYS-PERF-01).
+      (SYS-PERF-01). Done: D5a (AP setup N-172, IPIs N-173, bring-up N-180), D5b (timers
+      N-179), D5c (every CPU dispatches its own run queue), D5d (interrupts on in syscalls,
+      N-139 part; blocking Unix accept).
     - [x] Syscalls `sched_setattr/getattr`, `sched_setscheduler`, `nice`/`setpriority`, real
       `sched_setaffinity`/`getaffinity`, `sched_yield` on the new policy (SCHED-INC-02 resolved
       by the deadline class).

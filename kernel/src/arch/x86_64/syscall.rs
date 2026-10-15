@@ -157,6 +157,13 @@ pub unsafe extern "C" fn syscall_entry() {
         "mov r9, r8",
         "mov r8, r10",
         "cld",
+        // Interrupts on for the system call itself (N-139): the frame is
+        // complete and GS is the kernel's, so an interrupt now is an
+        // ordinary ring-0 one. A CPU that spun in a long system call with
+        // interrupts off could neither be preempted by its own timer nor
+        // answer a TLB shootdown, and one CPU waiting for that
+        // acknowledgement while the other waited for its lock deadlocked.
+        "sti",
         "call {handler}",
 
         // The handler may have enabled interrupts (waits); nothing may

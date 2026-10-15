@@ -451,6 +451,16 @@ pub fn socket_accept(listen_socket_id: u64) -> KernelResult<(u64, u64)> {
     Ok((new_id, connecting_id))
 }
 
+/// Whether an accept on `listen_socket_id` would not block: a connection
+/// is pending, or the socket is gone or no longer listening (the accept
+/// then fails).
+pub fn accept_ready(listen_socket_id: u64) -> bool {
+    UNIX_SOCKETS
+        .lock()
+        .get(&listen_socket_id)
+        .is_none_or(|s| s.state != UnixSocketState::Listening || !s.pending_connections.is_empty())
+}
+
 /// Send data on a connected socket.
 pub fn socket_send(socket_id: u64, data: &[u8], rights: Option<ScmRights>) -> KernelResult<usize> {
     let _changed = ReadinessChange;

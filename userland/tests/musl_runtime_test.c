@@ -1779,6 +1779,46 @@ static void test_peercred(void)
     report("musl_peercred", f == 0, why);
 }
 
+/* A blocking accept on a Unix socket waits for a connection; a
+ * non-blocking one is EAGAIN. (It returned EAGAIN at once, so a server
+ * whose client had not connected yet failed.) The client connects 100 ms
+ * late on purpose. */
+static void test_unix_accept_blocks(void)
+{
+    int f = 0, st = 0;
+    struct sockaddr_un a = {.sun_family = AF_UNIX};
+    strcpy(a.sun_path, "/tmp/musl_accept_wait.sock");
+    unlink(a.sun_path);
+    int l = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (l < 0 || bind(l, (struct sockaddr *)&a, sizeof(a)) != 0 || listen(l, 1) != 0) f |= 1;
+    int nb = socket(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK, 0);
+    struct sockaddr_un b = {.sun_family = AF_UNIX};
+    strcpy(b.sun_path, "/tmp/musl_accept_nb.sock");
+    unlink(b.sun_path);
+    if (nb < 0 || bind(nb, (struct sockaddr *)&b, sizeof(b)) != 0 || listen(nb, 1) != 0) f |= 1;
+    errno = 0;
+    if (accept(nb, NULL, NULL) != -1 || errno != EAGAIN) f |= 2;
+    pid_t c = fork();
+    if (c == 0) {
+        struct timespec d = {0, 100 * 1000 * 1000};
+        nanosleep(&d, 0);
+        int s = socket(AF_UNIX, SOCK_STREAM, 0);
+        _exit(s >= 0 && connect(s, (struct sockaddr *)&a, sizeof(a)) == 0 ? 0 : 1);
+    }
+    int s = accept(l, NULL, NULL);
+    if (s < 0) f |= 4;
+    else close(s);
+    waitpid(c, &st, 0);
+    if (!WIFEXITED(st) || WEXITSTATUS(st) != 0) f |= 8;
+    close(l);
+    close(nb);
+    unlink(a.sun_path);
+    unlink(b.sun_path);
+    static char why[48];
+    snprintf(why, sizeof(why), "fail=%#x st=%#x", f, st);
+    report("musl_unix_accept_blocks", f == 0, why);
+}
+
 /* The --ids mode: this program's IDs, AT_SECURE, dumpable flag and
  * command name, for test_setuid_exec. */
 static int print_ids(void)
@@ -3508,6 +3548,7 @@ int main(int argc, char **argv)
     test_memory_calls();
     test_file_calls();
     test_accounts();
+    test_unix_accept_blocks();
     test_peercred();
     test_siginfo();
     test_pty();

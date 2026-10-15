@@ -1314,10 +1314,16 @@ pub fn wait_in_syscall() -> bool {
     if others {
         yield_now();
     } else {
+        // Halt until the next interrupt, then put the interrupt flag back as
+        // it was (system calls run with interrupts on since N-139).
         #[cfg(all(target_arch = "x86_64", target_os = "none"))]
-        x86_64::instructions::interrupts::enable_and_hlt();
-        #[cfg(all(target_arch = "x86_64", target_os = "none"))]
-        x86_64::instructions::interrupts::disable();
+        {
+            let was_on = x86_64::instructions::interrupts::are_enabled();
+            x86_64::instructions::interrupts::enable_and_hlt();
+            if !was_on {
+                x86_64::instructions::interrupts::disable();
+            }
+        }
     }
     crate::process::wait_interrupted()
 }
