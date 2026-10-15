@@ -1893,8 +1893,10 @@ pub(crate) fn parent_dir_canonical(
     SyscallError,
 > {
     let (parent, name) = split_path(path)?;
+    // Relative to the caller's working directory, as `resolve_path` does: a
+    // relative "a/b" names "a" there, not under "/" (review of 40695cdb).
     let (dir, canonical) = vfs()?
-        .resolve_canonical(&parent, "/", true)
+        .resolve_path_canonical(&parent)
         .map_err(map_resolve_err)?;
     Ok((dir, name, canonical))
 }

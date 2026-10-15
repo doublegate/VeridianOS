@@ -3564,6 +3564,38 @@ static void test_dir_check_race(void)
     report("musl_dir_check_race", f == 0, why);
 }
 
+/* Entry creation and removal with relative paths act in the working
+ * directory: "sub/x" is under the cwd, not under "/" (a regression in the
+ * N-51 change resolved relative parents against "/"). */
+static void test_relative_entry_paths(void)
+{
+    int f = 0;
+    char old_cwd[256];
+    if (!getcwd(old_cwd, sizeof(old_cwd))) strcpy(old_cwd, "/");
+    mkdir("/tmp", 0777);
+    mkdir("/tmp/rel", 0777);
+    if (chdir("/tmp/rel") != 0) f |= 1;
+    if (mkdir("sub", 0755) != 0 && errno != EEXIST) f |= 2;
+    int fd = open("sub/new", O_CREAT | O_WRONLY | O_TRUNC, 0644);
+    if (fd < 0) f |= 4; else close(fd);
+    if (link("sub/new", "sub/hard") != 0) f |= 8;
+    if (symlink("new", "sub/soft") != 0) f |= 16;
+    if (rename("sub/hard", "sub/moved") != 0) f |= 32;
+    if (unlink("sub/soft") != 0) f |= 64;
+    struct stat st;
+    if (stat("/tmp/rel/sub/new", &st) != 0) f |= 128;
+    if (stat("/tmp/rel/sub/moved", &st) != 0) f |= 256;
+    if (lstat("/tmp/rel/sub/soft", &st) == 0) f |= 512;
+    if (stat("/sub", &st) == 0) f |= 1024; /* nothing landed under "/" */
+    unlink("/tmp/rel/sub/new");
+    unlink("/tmp/rel/sub/moved");
+    rmdir("/tmp/rel/sub");
+    chdir(old_cwd);
+    static char why[48];
+    snprintf(why, sizeof(why), "fail=%#x", f);
+    report("musl_relative_entry_paths", f == 0, why);
+}
+
 /* A signal for a thread running user code on another CPU arrives at once
  * (the sender interrupts that CPU), not at its next timer tick (1 ms):
  * over 50 signals the mean latency stays well under half a tick. */
@@ -3920,6 +3952,7 @@ static const struct {
     {"clocks_and_usage", test_clocks_and_usage},
     {"signal_kick", test_signal_kick},
     {"dir_check_race", test_dir_check_race},
+    {"relative_entry_paths", test_relative_entry_paths},
     {"priority_inheritance", test_priority_inheritance},
     {"unix_accept_blocks", test_unix_accept_blocks},
 };
@@ -3976,6 +4009,7 @@ int main(int argc, char **argv)
     test_tlb_remote_flush();
     test_signal_kick();
     test_dir_check_race();
+    test_relative_entry_paths();
     test_setuid_exec("/bin/musl_runtime_test");
     test_clocks_and_usage();
     test_rlimits();

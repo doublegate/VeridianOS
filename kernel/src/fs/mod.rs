@@ -975,6 +975,15 @@ impl<'a> CallerView<'a> {
             .map(|(n, _)| n)
     }
 
+    /// [`Self::resolve_path`] (relative to the caller's working directory)
+    /// with the node's canonical path from the same lookup.
+    pub fn resolve_path_canonical(
+        &self,
+        path: &str,
+    ) -> Result<(Arc<dyn VfsNode>, String), KernelError> {
+        self.vfs.lookup(&self.ctx, path, &self.ctx.cwd, true)
+    }
+
     pub fn resolve_path_no_follow(&self, path: &str) -> Result<Arc<dyn VfsNode>, KernelError> {
         self.vfs
             .lookup(&self.ctx, path, &self.ctx.cwd, false)
