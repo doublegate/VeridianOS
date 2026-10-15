@@ -348,6 +348,13 @@
 
 ### Changed
 
+- **TLB shootdowns go only to the CPUs running the address space (N-262).** A change to a user
+  address space used to interrupt every CPU. Each CPU now records the page-table root it loads,
+  and a flush of a user address space reaches only the CPUs on that root, plus any with no record
+  yet. Kernel-half changes still reach every CPU. This is safe because user mappings are not
+  global and PCIDs are not used: a CPU that switched away dropped those entries. Host test
+  `flush_targets_only_cpus_on_the_address_space`; runtime test `musl_tlb_remote_flush`.
+
 - **The x86_64 kernel heap is sized from RAM; small guests boot (N-278, HX-02).** The heap was a
   1 GiB array in the kernel's BSS, so loading the kernel alone needed more than 1 GiB and a guest
   with less memory could not boot. At boot the heap is now a run of physical frames used through

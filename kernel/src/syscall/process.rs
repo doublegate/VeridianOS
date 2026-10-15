@@ -186,6 +186,7 @@ pub fn sys_exec(path_ptr: usize, argv_ptr: usize, envp_ptr: usize) -> SyscallRes
                     if new_cr3 != 0 {
                         let old_cr3: u64;
                         core::arch::asm!("mov {}, cr3", out(reg) old_cr3);
+                        crate::mm::tlb::note_root(new_cr3);
                         core::arch::asm!("mov cr3, {}", in(reg) new_cr3);
                         // A dispatched thread owns its old tables: nothing
                         // else will free them (the nested launchers free

@@ -291,7 +291,15 @@ static void test_clocks_and_usage(void)
         _exit(0);
     }
     struct rusage child_ru;
-    if (wait4(pid, &st, 0, &child_ru) != pid
+    memset(&child_ru, 0, sizeof(child_ru));
+    /* A signal from an earlier test's timer may interrupt the wait. */
+    pid_t got;
+    int wait_errno = 0;
+    while ((got = wait4(pid, &st, 0, &child_ru)) == -1 && errno == EINTR)
+        wait_errno = EINTR;
+    if (got == -1)
+        wait_errno = errno;
+    if (got != pid
         || child_ru.ru_utime.tv_sec * 1000 + child_ru.ru_utime.tv_usec / 1000
                    + child_ru.ru_stime.tv_sec * 1000 + child_ru.ru_stime.tv_usec / 1000
                < 40)
@@ -310,8 +318,12 @@ static void test_clocks_and_usage(void)
         || si.procs == 0 || si.mem_unit != 1 || si.uptime <= 0)
         f |= 4096;
 
-    static char why[64];
-    snprintf(why, sizeof(why), "fail=%#x", f);
+    static char why[112];
+    snprintf(why, sizeof(why), "fail=%#x wait_errno=%d child_ms=%ld children_ms=%ld", f, wait_errno,
+             child_ru.ru_utime.tv_sec * 1000 + child_ru.ru_utime.tv_usec / 1000
+                 + child_ru.ru_stime.tv_sec * 1000 + child_ru.ru_stime.tv_usec / 1000,
+             ru.ru_utime.tv_sec * 1000 + ru.ru_utime.tv_usec / 1000 + ru.ru_stime.tv_sec * 1000
+                 + ru.ru_stime.tv_usec / 1000);
     report("musl_clocks_and_usage", f == 0, why);
 }
 
@@ -3394,6 +3406,92 @@ static void test_robust_futex(void)
  * arguments, admit SCHED_DEADLINE reservations up to 95% of the CPU, reset
  * real-time policies in children with SCHED_RESET_ON_FORK, report the CPUs
  * that run tasks, and refuse unprivileged changes with EPERM/EACCES. */
+/* N-262: a page replaced under a thread running on another CPU is flushed
+ * there. The reader spins on the page from CPU 1 while the main thread
+ * unmaps it and maps a new page at the same address with another value;
+ * a CPU left with the old translation would keep reading the old frame.
+ * (On one CPU it checks the same thing without the remote flush.) Under
+ * KVM this cannot catch a missed flush reliably: the hypervisor refreshes
+ * a vCPU's TLB when its thread moves between host cores, and with remote
+ * flushes disabled the test still passed. mm::tlb's host tests cover the
+ * targeting itself. */
+static volatile int *tlb_page;
+static volatile int tlb_seen_new, tlb_reading, tlb_reader_cpu = -1, tlb_first;
+static cpu_set_t tlb_cpu;
+
+static void *tlb_reader(void *arg)
+{
+    (void)arg;
+    struct timespec t0, now;
+    sched_setaffinity(0, sizeof(tlb_cpu), &tlb_cpu);
+    tlb_reader_cpu = sched_getcpu();
+    tlb_first = *tlb_page;
+    tlb_reading = 1;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    do {
+        /* No system calls in the inner loop: nothing on this CPU may
+         * reload its translations except the flush under test. */
+        for (long i = 0; i < 1000000; i++) {
+            if (*tlb_page == 2) {
+                tlb_seen_new = 1;
+                return 0;
+            }
+        }
+        clock_gettime(CLOCK_MONOTONIC, &now);
+    } while ((now.tv_sec - t0.tv_sec) * 1000000000L + (now.tv_nsec - t0.tv_nsec) < 2000000000L);
+    return 0;
+}
+
+static void test_tlb_remote_flush(void)
+{
+    long ncpu = sysconf(_SC_NPROCESSORS_ONLN);
+    cpu_set_t all, mine;
+    sched_getaffinity(0, sizeof(all), &all);
+    CPU_ZERO(&mine);
+    CPU_SET(0, &mine);
+    CPU_ZERO(&tlb_cpu);
+    CPU_SET(ncpu > 1 ? 1 : 0, &tlb_cpu);
+    sched_setaffinity(0, sizeof(mine), &mine);
+    int *p = mmap(0, PG, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    int ok = p != MAP_FAILED;
+    pthread_t t;
+    if (ok) {
+        *p = 1;
+        tlb_page = p;
+        tlb_seen_new = 0;
+        tlb_reading = 0;
+        ok = pthread_create(&t, 0, tlb_reader, 0) == 0;
+    }
+    if (ok) {
+        while (!tlb_reading) sched_yield();
+        struct timespec d = {0, 20 * 1000000};
+        nanosleep(&d, 0); /* the reader has the old translation cached */
+        int *q = MAP_FAILED, *blocker = MAP_FAILED;
+        if (munmap(p, PG) == 0) {
+            /* The freed frame would come straight back for the new page
+             * (the per-CPU frame cache), hiding a stale translation: a
+             * blocker page takes it first and fills it with 3. */
+            blocker = mmap(0, PG, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+            if (blocker != MAP_FAILED)
+                *blocker = 3;
+            q = mmap(p, PG, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
+        }
+        if (q == p && blocker != MAP_FAILED)
+            *q = 2;
+        else
+            ok = 0;
+        pthread_join(t, 0);
+        munmap(p, PG);
+        if (blocker != MAP_FAILED)
+            munmap(blocker, PG);
+    }
+    sched_setaffinity(0, sizeof(all), &all);
+    static char why[128];
+    snprintf(why, sizeof(why), "cpus=%ld ok=%d seen_new=%d reader_cpu=%d main_cpu=%d first=%d", ncpu,
+             ok, tlb_seen_new, tlb_reader_cpu, sched_getcpu(), tlb_first);
+    report("musl_tlb_remote_flush", ok && tlb_seen_new, why);
+}
+
 /* SMP (D5e): a thread restricted to one CPU runs there (getcpu says so)
  * before sched_setaffinity returns, for every CPU in turn; and threads
  * started while the other CPUs are idle are spread over all of them. */
@@ -3671,6 +3769,8 @@ static const struct {
     {"sched", test_sched},
     {"smp_placement", test_smp_placement},
     {"gs_base", test_gs_base},
+    {"tlb_remote_flush", test_tlb_remote_flush},
+    {"clocks_and_usage", test_clocks_and_usage},
     {"priority_inheritance", test_priority_inheritance},
     {"unix_accept_blocks", test_unix_accept_blocks},
 };
@@ -3724,6 +3824,7 @@ int main(int argc, char **argv)
     test_sched();
     test_smp_placement();
     test_gs_base();
+    test_tlb_remote_flush();
     test_setuid_exec("/bin/musl_runtime_test");
     test_clocks_and_usage();
     test_rlimits();

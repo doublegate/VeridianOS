@@ -31,7 +31,7 @@ code, **L** = latent (unreachable today), as in the 2026-10-07 re-evaluation.
 | ID | Sev | Finding | Matrix ID | Status / Target |
 |---|---|---|---|---|
 | N-261 | Medium L | `per_cpu_free_frame` has one caller (`perf/bench.rs`); every unmap, munmap and teardown free takes the global `FRAME_ALLOCATOR` lock | PB-MEM-01 | open; with D5 (after N-262, frees must follow the shootdown) |
-| N-262 | Medium L | TLB shootdown interrupts every CPU; a per-address-space active-CPU mask (set at the dispatcher's address-space switch) and logical-to-APIC-ID mapping would target only CPUs that ran it | PB-MEM-04 | open; D5 |
+| N-262 | Medium L | TLB shootdown interrupts every CPU; a per-address-space active-CPU mask (set at the dispatcher's address-space switch) and logical-to-APIC-ID mapping would target only CPUs that ran it | PB-MEM-04 | **fixed** (v0.27, D5): each CPU records the root it loads (`tlb::note_root`, before the load); user-space flushes go to the CPUs on that root or with no record, kernel-half flushes to all; IPIs by APIC ID |
 | N-263 | Medium C | Dirty BlockFS blocks were pinned until sync, so a large write grew the cache by its whole size | BM-FS-01 | **fixed** 1ce99be9 (ADR 0011) |
 | N-264 | Low C | `mm/cache_topology.rs` (771 lines) has no callers, and `docs/PERFORMANCE-TUNING.md` says the frame allocator uses cache colouring | INC-MEM-02 | open; G (wire it into the allocator or remove it, and correct the doc) |
 | N-265 | Low L | `translate_address` dereferenced page-table physical addresses, which are low user addresses since N-134 | INC-MEM-03 | **fixed** b0644391 (no live caller) |

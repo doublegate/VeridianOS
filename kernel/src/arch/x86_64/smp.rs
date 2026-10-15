@@ -351,6 +351,14 @@ pub fn ap_init() -> Result<(), &'static str> {
     super::apic::init_local_secondary();
     super::apic::start_local_timer();
     crate::arch::smp_boot::ap_stage(12);
+    // The kernel page table the trampoline loaded, recorded for targeted
+    // TLB flushes (until then this CPU is sent every one).
+    crate::mm::tlb::note_root(
+        x86_64::registers::control::Cr3::read_raw()
+            .0
+            .start_address()
+            .as_u64(),
+    );
     Ok(())
 }
 

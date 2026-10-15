@@ -213,7 +213,7 @@ pub fn free_user_page_table_frames(l4_phys: u64) -> usize {
     // No CPU may still cache a translation through these tables (or the
     // tables themselves, in its paging-structure caches) once their frames
     // are reused (MEM-SEC-02).
-    crate::mm::tlb::flush_all();
+    crate::mm::tlb::flush_all_in(l4_phys);
 
     let phys_offset_val = super::PHYS_MEM_OFFSET.load(core::sync::atomic::Ordering::Acquire);
     let mut freed = 0usize;
@@ -662,6 +662,9 @@ pub struct VirtualAddressSpace {
 pub struct TlbFlushBatch {
     addresses: [u64; Self::MAX_BATCH],
     count: usize,
+    /// The address space whose pages these are (0: unknown, flush on every
+    /// CPU); see `mm::tlb` on targeted flushes.
+    root: u64,
 }
 
 impl Default for TlbFlushBatch {
@@ -673,11 +676,18 @@ impl Default for TlbFlushBatch {
 impl TlbFlushBatch {
     const MAX_BATCH: usize = 16;
 
-    /// Create a new empty batch.
+    /// Create a new empty batch for an unknown address space.
     pub const fn new() -> Self {
+        Self::for_space(0)
+    }
+
+    /// Create a new empty batch for the address space with page-table root
+    /// `root`: only CPUs running it are asked to flush.
+    pub const fn for_space(root: u64) -> Self {
         Self {
             addresses: [0; Self::MAX_BATCH],
             count: 0,
+            root,
         }
     }
 
@@ -697,10 +707,10 @@ impl TlbFlushBatch {
         }
         if self.count > Self::MAX_BATCH {
             // Too many addresses -- full TLB flush is cheaper
-            crate::mm::tlb::flush_all();
+            crate::mm::tlb::flush_all_in(self.root);
         } else {
             // Individual flushes for small batches (one remote request).
-            crate::mm::tlb::flush_pages(&self.addresses[..self.count]);
+            crate::mm::tlb::flush_pages_in(self.root, &self.addresses[..self.count]);
         }
     }
 
@@ -1224,7 +1234,7 @@ impl VirtualAddressSpace {
 
             // The parent's writable pages just became read-only: drop any
             // writable translation every CPU may still hold.
-            super::tlb::flush_all();
+            super::tlb::flush_all_in(self.get_page_table());
         }
 
         // Copy metadata
@@ -1276,7 +1286,7 @@ impl VirtualAddressSpace {
             // go back to the allocator, or a CPU holding a stale translation
             // could write into a frame that already belongs to someone else
             // (MEM-SEC-02).
-            crate::mm::tlb::flush_all();
+            crate::mm::tlb::flush_all_in(self.get_page_table());
 
             // Free physical frames for each mapping that owns them
             for (_, mapping) in mappings.iter().filter(|(_, m)| m.owns_frames()) {
@@ -1408,7 +1418,7 @@ impl VirtualAddressSpace {
                 let va = VirtualAddress(start.0 + (i as u64) * 4096);
                 let page_flags = mapper.translate_page(va).map_or(flags, |(_, f)| f);
                 let _ = mapper.unmap_page(va);
-                super::tlb::flush_page(va.0);
+                super::tlb::flush_page_in(self.get_page_table(), va.0);
                 if let Err(e) = mapper.map_page(va, frame, page_flags, &mut VasFrameAllocator) {
                     // Frames from `i` on were not handed to the mapping;
                     // the fresh one at `i` stays recorded and is freed with
@@ -1512,7 +1522,7 @@ impl VirtualAddressSpace {
                     current
                 };
                 let _ = mapper.unmap_page(va);
-                super::tlb::flush_page(va.0);
+                super::tlb::flush_page_in(self.get_page_table(), va.0);
                 if let Err(e) = mapper.map_page(va, frame, flags, &mut VasFrameAllocator) {
                     // The fresh frame at `i` stays recorded and is freed
                     // with the mapping.
@@ -1656,7 +1666,7 @@ impl VirtualAddressSpace {
                         let _ =
                             mapper.unmap_page(VirtualAddress(aligned_start.0 + (j as u64) * 4096));
                     }
-                    super::tlb::flush_all();
+                    super::tlb::flush_all_in(self.get_page_table());
                     let frame_allocator = FRAME_ALLOCATOR.lock();
                     for &f in &physical_frames {
                         frame_allocator.free_frames(f, 1).ok();
@@ -1668,7 +1678,7 @@ impl VirtualAddressSpace {
             // caching); RISC-V needs a local fence for the new entries
             // (N-143).
             #[cfg(target_arch = "riscv64")]
-            super::tlb::flush_all();
+            super::tlb::flush_all_in(self.get_page_table());
         }
 
         mapping.physical_frames = physical_frames;
@@ -1733,7 +1743,7 @@ impl VirtualAddressSpace {
         }
 
         // Flush TLB
-        let mut tlb_batch = TlbFlushBatch::new();
+        let mut tlb_batch = TlbFlushBatch::for_space(self.get_page_table());
         for i in 0..num_pages {
             tlb_batch.add(vaddr.0 + (i as u64) * 4096);
         }
@@ -1812,12 +1822,12 @@ impl VirtualAddressSpace {
                     for j in 0..i {
                         let page = start.0 + (j as u64) * 4096;
                         let _ = mapper.unmap_page(VirtualAddress(page));
-                        crate::mm::tlb::flush_page(page);
+                        crate::mm::tlb::flush_page_in(self.get_page_table(), page);
                     }
                     return Err(e);
                 }
             }
-            let mut tlb_batch = TlbFlushBatch::new();
+            let mut tlb_batch = TlbFlushBatch::for_space(self.get_page_table());
             for i in 0..frames.len() {
                 tlb_batch.add(start.0 + (i as u64) * 4096);
             }
@@ -1892,7 +1902,7 @@ impl VirtualAddressSpace {
         }
 
         // Flush TLB for the unmapped range using batched flushes
-        let mut tlb_batch = TlbFlushBatch::new();
+        let mut tlb_batch = TlbFlushBatch::for_space(self.get_page_table());
         for i in 0..num_pages {
             let vaddr = mapping.start.0 + (i as u64) * 4096;
             tlb_batch.add(vaddr);
@@ -2016,7 +2026,7 @@ impl VirtualAddressSpace {
 
             // Flush TLB for unmapped pages using batched flushes (without
             // page tables nothing was ever translated).
-            let mut tlb_batch = TlbFlushBatch::new();
+            let mut tlb_batch = TlbFlushBatch::for_space(self.get_page_table());
             for i in unmap_page_start..unmap_page_end {
                 let vaddr = m_start + (i as u64) * 4096;
                 tlb_batch.add(vaddr);
@@ -2119,13 +2129,13 @@ impl VirtualAddressSpace {
                         let _ = mapper.unmap_page(VirtualAddress(new + (at - old)));
                         let _ = mapper.map_page(VirtualAddress(at), frame, flags, &mut alloc);
                     }
-                    crate::mm::tlb::flush_all();
+                    crate::mm::tlb::flush_all_in(self.get_page_table());
                     mappings.insert(m.start, m);
                     return Err(e);
                 }
                 moved.push((from, frame, flags));
             }
-            let mut batch = TlbFlushBatch::new();
+            let mut batch = TlbFlushBatch::for_space(self.get_page_table());
             for &(at, _, _) in &moved {
                 batch.add(at);
             }
@@ -2216,7 +2226,7 @@ impl VirtualAddressSpace {
         // physical map; the mappings lock (held below) serialises updates.
         let mut mapper = unsafe { create_mapper_from_root(root) };
         let mut mappings = self.mappings.lock();
-        let mut batch = TlbFlushBatch::new();
+        let mut batch = TlbFlushBatch::for_space(self.get_page_table());
         for (_, m) in mappings.range_mut(..VirtualAddress(end)).rev() {
             if m.end().0 <= start {
                 break;
@@ -2515,11 +2525,11 @@ impl VirtualAddressSpace {
         if super::frame_refs::is_shared(frame) {
             replace_with_copy(&mut mapper, mapping, index, page, frame, flags, writable)?;
             drop(mappings);
-            release_after_copy(page, frame);
+            release_after_copy(self.get_page_table(), page, frame);
         } else {
             mapper.update_page_flags(VirtualAddress(page), writable)?;
             drop(mappings);
-            super::tlb::flush_page(page);
+            super::tlb::flush_page_in(self.get_page_table(), page);
         }
         Ok(true)
     }
@@ -2584,7 +2594,7 @@ impl VirtualAddressSpace {
                 let copy =
                     replace_with_copy(&mut mapper, mapping, index, page, frame, flags, private)?;
                 drop(mappings);
-                release_after_copy(page, frame);
+                release_after_copy(self.get_page_table(), page, frame);
                 Ok(copy)
             }
         }
@@ -2656,7 +2666,7 @@ impl VirtualAddressSpace {
             let mut mapper = unsafe { create_mapper_from_root(pt_root) };
             let mut alloc = VasFrameAllocator;
             mapper.map_page(vaddr_obj, frame, flags, &mut alloc)?;
-            crate::mm::tlb::flush_page(vaddr as u64);
+            crate::mm::tlb::flush_page_in(self.get_page_table(), vaddr as u64);
         }
         Ok(())
     }
@@ -2680,7 +2690,7 @@ impl VirtualAddressSpace {
             // Unmap old entry (ignore error if not currently mapped)
             let _ = mapper.unmap_page(vaddr_obj);
             mapper.map_page(vaddr_obj, new_frame, flags, &mut alloc)?;
-            crate::mm::tlb::flush_page(vaddr as u64);
+            crate::mm::tlb::flush_page_in(self.get_page_table(), vaddr as u64);
         }
         Ok(())
     }
@@ -2943,7 +2953,7 @@ impl VirtualAddressSpace {
                     for j in 0..i {
                         let _ = mapper.unmap_page(VirtualAddress(start_addr.0 + (j as u64) * 4096));
                     }
-                    crate::mm::tlb::flush_all();
+                    crate::mm::tlb::flush_all_in(self.get_page_table());
                     let frame_allocator = FRAME_ALLOCATOR.lock();
                     for &f in &new_frames {
                         frame_allocator.free_frames(f, 1).ok();
@@ -2952,7 +2962,7 @@ impl VirtualAddressSpace {
                 }
             }
             #[cfg(target_arch = "riscv64")]
-            crate::mm::tlb::flush_all();
+            crate::mm::tlb::flush_all_in(self.get_page_table());
         }
 
         // The heap grows from its last piece -- the mapping ending at the old
@@ -3068,9 +3078,9 @@ impl VirtualAddressSpace {
         if num_pages <= 16 {
             let pages: alloc::vec::Vec<u64> =
                 (0..num_pages as u64).map(|i| start.0 + i * 4096).collect();
-            super::tlb::flush_pages(&pages);
+            super::tlb::flush_pages_in(self.get_page_table(), &pages);
         } else {
-            super::tlb::flush_all();
+            super::tlb::flush_all_in(self.get_page_table());
         }
 
         // Record the protection on the mappings the range covers, split at
@@ -3145,7 +3155,7 @@ impl VirtualAddressSpace {
             // go back to the allocator, or a CPU holding a stale translation
             // could write into a frame that already belongs to someone else
             // (MEM-SEC-02).
-            crate::mm::tlb::flush_all();
+            crate::mm::tlb::flush_all_in(self.page_table_root.load(Ordering::Acquire));
 
             // Free physical frames for each mapping that owns them
             for (_, mapping) in mappings.iter().filter(|(_, m)| m.owns_frames()) {
@@ -3225,7 +3235,7 @@ impl VirtualAddressSpace {
             // go back to the allocator, or a CPU holding a stale translation
             // could write into a frame that already belongs to someone else
             // (MEM-SEC-02).
-            crate::mm::tlb::flush_all();
+            crate::mm::tlb::flush_all_in(self.page_table_root.load(Ordering::Acquire));
 
             // Free physical frames and remove mappings
             for addr in &to_remove {
@@ -3336,12 +3346,12 @@ impl VirtualAddressSpace {
                         frame,
                         "vas",
                     );
-                    crate::mm::tlb::flush_page(vaddr as u64);
+                    crate::mm::tlb::flush_page_in(self.get_page_table(), vaddr as u64);
                     return Ok(());
                 }
                 Err(e) => return Err(e),
             }
-            crate::mm::tlb::flush_page(vaddr as u64);
+            crate::mm::tlb::flush_page_in(self.get_page_table(), vaddr as u64);
         }
 
         // Record the mapping
@@ -3461,12 +3471,12 @@ impl VirtualAddressSpace {
                     let _ =
                         m.unmap_huge_2m(VirtualAddress(vaddr as u64 + c as u64 * HUGE_PAGE_SIZE));
                 }
-                crate::mm::tlb::flush_all();
+                crate::mm::tlb::flush_all_in(self.get_page_table());
                 release(frame);
             }
             return Err(e);
         }
-        crate::mm::tlb::flush_all();
+        crate::mm::tlb::flush_all_in(self.get_page_table());
 
         #[cfg(feature = "alloc")]
         {
@@ -3628,9 +3638,9 @@ fn replace_with_copy(
 /// this address space's share of `frame` (freeing it if the other sharer
 /// let go meanwhile).
 #[cfg(feature = "alloc")]
-fn release_after_copy(page: u64, frame: FrameNumber) {
+fn release_after_copy(root: u64, page: u64, frame: FrameNumber) {
     // Flush before the shared frame can lose its last owner.
-    super::tlb::flush_page(page);
+    super::tlb::flush_page_in(root, page);
     if super::frame_refs::release(frame) {
         crate::mm::note_free_failure(FRAME_ALLOCATOR.lock().free_frames(frame, 1), frame, "vas");
     }

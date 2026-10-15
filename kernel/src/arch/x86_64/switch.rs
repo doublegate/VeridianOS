@@ -257,10 +257,16 @@ pub fn write_user_gs_base(base: u64) {
 /// # Safety
 /// `root` must be a valid PML4 that maps the kernel half.
 pub unsafe fn switch_address_space(root: u64) {
+    if root == 0 {
+        return;
+    }
+    // Recorded before the load (and even when it is the active root, which
+    // an earlier unrecorded load may have left unknown): see mm::tlb.
+    crate::mm::tlb::note_root(root);
     let cur: u64;
     // SAFETY: reading CR3 has no side effects.
     unsafe { asm!("mov {}, cr3", out(reg) cur, options(nomem, nostack, preserves_flags)) };
-    if root != 0 && root != cur & !0xFFF {
+    if root != cur & !0xFFF {
         // SAFETY: forwarded from the caller.
         unsafe { asm!("mov cr3, {}", in(reg) root, options(nostack, preserves_flags)) };
     }

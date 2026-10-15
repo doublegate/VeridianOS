@@ -394,6 +394,7 @@ impl Kpti {
         }
         let cr3 = self.kernel_cr3.load(Ordering::SeqCst);
         if cr3 != 0 {
+            crate::mm::tlb::note_root(cr3);
             // SAFETY: Writing CR3 switches the page table root. cr3 was
             // previously set via set_kernel_cr3 and points to a valid PML4.
             unsafe {
@@ -410,6 +411,7 @@ impl Kpti {
         }
         let cr3 = self.user_cr3.load(Ordering::SeqCst);
         if cr3 != 0 {
+            crate::mm::tlb::note_root(cr3);
             // SAFETY: Writing CR3 switches the page table root. cr3 was
             // previously set via set_user_cr3 and points to a valid PML4.
             unsafe {

@@ -841,6 +841,7 @@ fn restore_cpu_context() {
         );
 
         // Restore CR3 (page tables).
+        crate::mm::tlb::note_root(ctx.cr3);
         core::arch::asm!("mov cr3, {}", in(reg) ctx.cr3, options(nomem, nostack));
 
         // Restore callee-saved registers.

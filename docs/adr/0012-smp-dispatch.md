@@ -74,6 +74,8 @@ raises questions the earlier ADRs leave open:
   with interrupts off on the other side.
 - Rule 6 has to hold for every new lock that interrupt handlers take. A CPU that stays in a
   shootdown wait for over 100 ms reports it on the console.
-- Every shootdown still goes to every CPU (N-262), and frames are not yet batched past the flush.
+- User address-space flushes go only to the CPUs on that page-table root (N-262, `mm::tlb`). Every
+  CR3 load must record the root first (`tlb::note_root`); a new path that loads CR3 without
+  recording it would make a CPU miss flushes.
 - Kernel code that assumed one CPU becomes reachable concurrently. The runtime suite runs at
   `-smp 4` in the gate, and N-51, N-52 and N-59 track what is known.

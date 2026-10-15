@@ -195,7 +195,6 @@ not refused. System calls, page faults and the return to user mode run with inte
 so TLB shootdowns are always answered (N-139, ADR 0012 rule 6).
 
 Still open before `smp` becomes the default:
-- Every TLB shootdown goes to every CPU, whether or not it ran the address space (N-262).
 - Deadline tasks are placed when they wake but never pulled by the balancer, so a burst of them on
   one CPU can miss deadlines (ADR 0012).
 - A signal sent to a thread running on another CPU is noticed at that CPU's next tick, not at once.
