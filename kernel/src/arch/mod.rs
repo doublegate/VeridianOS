@@ -41,7 +41,9 @@ pub(crate) mod smp_arch {
     pub fn start_ap(_hw: u32, _args: &'static ApBootArgs) -> Result<(), &'static str> {
         Err("not implemented on this architecture")
     }
-    pub fn ap_init() {}
+    pub fn ap_init() -> Result<(), &'static str> {
+        Ok(())
+    }
     pub fn idle() -> ! {
         loop {
             core::hint::spin_loop();

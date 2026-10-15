@@ -281,16 +281,25 @@ pub fn trampoline_stage() -> u32 {
 }
 
 /// This AP's local setup.
-pub fn ap_init() {
+pub fn ap_init() -> Result<(), &'static str> {
     crate::arch::smp_boot::ap_stage(10);
     super::gdt::init_ap();
     super::idt::init();
     super::trap::enable_machine_check();
     super::pat::init();
+    // The boot CPU's local state, which the trampoline does not copy (N-172):
+    // x87/SSE/XSAVE control (CR0/CR4, fninit, XCR0) and the SYSCALL MSRs.
+    super::context::init_fpu();
+    if !super::switch::xsave::matches_boot_cpu() {
+        // A task's saved vector state would not restore here (#GP).
+        return Err("XCR0 differs from the boot CPU's");
+    }
+    super::syscall::init_syscall_msrs();
     crate::arch::smp_boot::ap_stage(11);
     super::apic::init_local_secondary();
     super::apic::start_local_timer();
     crate::arch::smp_boot::ap_stage(12);
+    Ok(())
 }
 
 /// Halt with interrupts enabled.

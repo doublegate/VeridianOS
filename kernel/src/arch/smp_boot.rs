@@ -118,8 +118,10 @@ pub fn bring_up_secondaries() {
     crate::sched::smp::mark_secondary_cpu_online();
 
     for (cpu, &hw) in logical_ids(hw_ids.len()).zip(hw_ids.iter()) {
-        let stack = alloc::vec![0u8; AP_STACK_SIZE].leak();
-        let stack_top = (stack.as_ptr() as u64 + AP_STACK_SIZE as u64) & !0xF;
+        let Some(stack_top) = ap_stack_top() else {
+            crate::println!("[SMP] CPU {}: no stack; not starting more CPUs", cpu);
+            break;
+        };
         let block = percpu::arch_cpu_ptr(cpu);
         // SAFETY: CPU `cpu` has not started, so the boot CPU is the only
         // writer of its block.
@@ -136,8 +138,16 @@ pub fn bring_up_secondaries() {
         fence(Ordering::SeqCst);
 
         if let Err(e) = super::smp_arch::start_ap(hw, args) {
-            crate::println!("[SMP] CPU {} (hw id {:#x}): start failed: {}", cpu, hw, e);
-            continue;
+            // Stop (ADR 0004): the CPU may still be running and reading the
+            // boot arguments the next start would overwrite, and logical ids
+            // must stay dense (a gap left a shootdown waiting forever).
+            crate::println!(
+                "[SMP] CPU {} (hw id {:#x}): start failed: {}; not starting more CPUs",
+                cpu,
+                hw,
+                e
+            );
+            break;
         }
         let start = super::timer::monotonic_ns();
         while args.status.load(Ordering::Acquire) != AP_STATUS_ONLINE {
@@ -164,6 +174,24 @@ pub fn bring_up_secondaries() {
     crate::println!("[SMP] {}/{} CPUs online", online_cpus(), total);
 }
 
+/// The top of a new secondary's boot stack, the CPU's for the kernel's
+/// lifetime. On x86_64 a guarded kernel stack (an unmapped page below it;
+/// N-180). AArch64 and RISC-V secondaries start with paging off, so theirs
+/// is plain heap memory until sprint E gives them guard pages.
+#[cfg(feature = "smp")]
+fn ap_stack_top() -> Option<u64> {
+    #[cfg(target_arch = "x86_64")]
+    {
+        let s = crate::mm::kstack::allocate(AP_STACK_SIZE / 4096).ok()?;
+        Some((s.base + AP_STACK_SIZE) as u64 & !0xF)
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        let stack = alloc::vec![0u8; AP_STACK_SIZE].leak();
+        Some((stack.as_ptr() as u64 + AP_STACK_SIZE as u64) & !0xF)
+    }
+}
+
 /// Common secondary entry, called by the architecture's entry code once the
 /// stack and the per-CPU register are set. Never returns.
 #[cfg(feature = "smp")]
@@ -171,7 +199,13 @@ pub fn ap_main() -> ! {
     AP_BOOT_ARGS
         .status
         .store(AP_STATUS_ALIVE, Ordering::Release);
-    super::smp_arch::ap_init();
+    if let Err(why) = super::smp_arch::ap_init() {
+        // Not counted online; the boot CPU stops starting others.
+        crate::println!("[SMP] AP: {}; staying offline", why);
+        loop {
+            core::hint::spin_loop();
+        }
+    }
     AP_BOOT_ARGS
         .status
         .store(AP_STATUS_ONLINE, Ordering::Release);

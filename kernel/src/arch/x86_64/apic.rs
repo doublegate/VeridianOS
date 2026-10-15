@@ -355,11 +355,29 @@ impl LocalApic {
     /// - `dest`: Destination APIC ID.
     /// - `vector`: Interrupt vector.
     pub fn send_ipi(&self, dest: u8, vector: u8) {
-        // Write high dword first (destination in bits 31:24).
-        self.write(LAPIC_ICR_HIGH, (dest as u32) << 24);
-        // Write low dword (vector + delivery mode Fixed). Writing ICR low
-        // triggers the IPI.
-        self.write(LAPIC_ICR_LOW, vector as u32);
+        // The ICR is two registers written in turn: an interrupt handler
+        // sending its own IPI in between would overwrite the destination
+        // (N-173). Interrupts stay off for the whole sequence, and the
+        // previous IPI must have left (delivery status idle) first.
+        x86_64::instructions::interrupts::without_interrupts(|| {
+            self.wait_icr_idle();
+            // Destination in bits 31:24, then the low dword (vector,
+            // delivery mode Fixed), whose write sends.
+            self.write(LAPIC_ICR_HIGH, (dest as u32) << 24);
+            self.write(LAPIC_ICR_LOW, vector as u32);
+        });
+    }
+
+    /// Wait (at most 10 ms) until the previous IPI has been accepted.
+    fn wait_icr_idle(&self) {
+        let start = super::tsc::read();
+        let limit = super::tsc::hz() / 100;
+        while self.read(LAPIC_ICR_LOW) & (1 << 12) != 0 {
+            if super::tsc::read().wrapping_sub(start) > limit {
+                return;
+            }
+            core::hint::spin_loop();
+        }
     }
 
     /// Send an INIT IPI to a target CPU (used in AP startup sequence).
@@ -403,11 +421,14 @@ impl LocalApic {
 
     /// Broadcast IPI to all CPUs except self.
     pub fn send_ipi_all_excluding_self(&self, vector: u8) {
-        // Shorthand = 11 (all excluding self), no destination field needed.
-        self.write(
-            LAPIC_ICR_LOW,
-            0x000C0000 | vector as u32, // shorthand=11, dest_mode=physical, delivery=fixed
-        );
+        x86_64::instructions::interrupts::without_interrupts(|| {
+            self.wait_icr_idle();
+            // Shorthand = 11 (all excluding self), no destination field.
+            self.write(
+                LAPIC_ICR_LOW,
+                0x000C0000 | vector as u32, // shorthand=11, dest_mode=physical, delivery=fixed
+            );
+        });
     }
 }
 
@@ -753,6 +774,24 @@ pub fn send_ipi(dest: u8, vector: u8) -> KernelResult<()> {
         }
         None => Err(KernelError::NotInitialized { subsystem: "APIC" }),
     }
+}
+
+/// Send `vector` to logical CPU `cpu`: its APIC ID comes from the per-CPU
+/// block (the logical id was used as the APIC destination before, N-173).
+pub fn send_ipi_to_cpu(cpu: usize, vector: u8) -> KernelResult<()> {
+    if cpu >= crate::arch::smp_boot::online_cpus() as usize {
+        return Err(KernelError::InvalidArgument {
+            name: "cpu",
+            value: "not online",
+        });
+    }
+    // SAFETY: an online CPU's block is initialised and its hw_id fixed.
+    let hw = unsafe { (*crate::arch::percpu::arch_cpu_ptr(cpu)).hw_id };
+    let dest = u8::try_from(hw).map_err(|_| KernelError::InvalidArgument {
+        name: "cpu",
+        value: "APIC ID above 255 (x2APIC)",
+    })?;
+    send_ipi(dest, vector)
 }
 
 /// Send INIT IPI to a target CPU for AP startup sequence.

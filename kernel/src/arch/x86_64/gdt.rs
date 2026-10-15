@@ -160,9 +160,12 @@ pub fn init_ap() {
         tables::load_tss,
     };
 
+    // Guarded (an unmapped page below each, N-180) and never freed: they
+    // are this CPU's for the kernel's lifetime.
     fn stack() -> VirtAddr {
-        let mem: &'static mut [u8] = alloc::vec![0u8; TSS_STACK_SIZE].leak();
-        VirtAddr::new((mem.as_ptr() as u64 + TSS_STACK_SIZE as u64) & !0xF)
+        let pages = TSS_STACK_SIZE / 4096;
+        let s = crate::mm::kstack::allocate(pages).expect("AP TSS stack");
+        VirtAddr::new((s.base + pages * 4096) as u64 & !0xF)
     }
 
     // Leaked as a raw pointer: RSP0 is rewritten at run time, so no Rust

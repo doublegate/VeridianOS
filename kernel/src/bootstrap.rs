@@ -594,13 +594,15 @@ fn kernel_init_stage3_impl() -> KernelResult<()> {
         Err(e) => panic!("dispatcher could not start: {:?}", e),
     }
 
-    // Run kernel-mode init tests after Stage 4 (VFS + shell ready)
-    kernel_init_main();
-
-    // Stage 5: Scheduler initialization
+    // Stage 5: Scheduler initialization, which brings up the other CPUs
+    // (with the `smp` feature). Before the boot tests, so the SMP ones test
+    // every CPU: they ran before any secondary started, and checked nothing.
     kprintln!("[BOOTSTRAP] Stage 5: Scheduler activation");
 
     sched::init();
+
+    // Run kernel-mode init tests after Stage 4 (VFS + shell ready)
+    kernel_init_main();
 
     // Initialize package manager
     #[cfg(feature = "alloc")]
@@ -2589,7 +2591,11 @@ fn run_usercopy_tests(passed: &mut u32, failed: &mut u32) {
                 ok &= ticks > 0;
             }
         }
-        report_test("smp_cpus_online_and_ticking", ok, passed, failed);
+        if online > 1 {
+            report_test("smp_cpus_online_and_ticking", ok, passed, failed);
+        } else {
+            report_skip("smp_cpus_online_and_ticking", "one CPU online");
+        }
     }
 
     // Test 36: kernel uptime advances at the rate of the hardware clock.
@@ -2614,8 +2620,10 @@ fn run_usercopy_tests(passed: &mut u32, failed: &mut u32) {
 
     // Test 37: a TLB shootdown reaches every online CPU and is confirmed
     // (x86 IPI acknowledgements, SBI RFENCE, AArch64 broadcast TLBI;
-    // MEM-SEC-02). Trivially true on one CPU.
-    {
+    // MEM-SEC-02). Nothing to test on one CPU.
+    if crate::arch::smp_boot::online_cpus() <= 1 {
+        report_skip("tlb_shootdown_confirmed", "one CPU online");
+    } else {
         let start = crate::arch::timer::monotonic_ns();
         for _ in 0..8 {
             crate::mm::tlb::flush_all();

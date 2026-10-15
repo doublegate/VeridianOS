@@ -87,11 +87,12 @@ pub fn start_ap(hw: u32, args: &'static ApBootArgs) -> Result<(), &'static str> 
 
 /// This CPU's local setup: exception vectors and GIC CPU interface. No
 /// timer and no lock before the MMU is on (see the module comment).
-pub fn ap_init() {
+pub fn ap_init() -> Result<(), &'static str> {
     super::exceptions::install();
     crate::arch::smp_boot::ap_stage(1);
     super::gic::init_secondary_cpu_interface();
     crate::arch::smp_boot::ap_stage(2);
+    Ok(())
 }
 
 /// Park with interrupts masked (S1 before N-28).

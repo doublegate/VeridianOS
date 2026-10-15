@@ -67,12 +67,13 @@ pub fn start_ap(hw: u32, args: &'static ApBootArgs) -> Result<(), &'static str> 
 
 /// This hart's local setup: its tick and IPIs (the trap vector is already
 /// installed by the entry stub).
-pub fn ap_init() {
+pub fn ap_init() -> Result<(), &'static str> {
     crate::arch::smp_boot::ap_stage(1);
     crate::arch::riscv::timer::start_secondary();
     // SAFETY: sets sie.SSIE so IPIs (SBI send_ipi) are delivered here.
     unsafe { core::arch::asm!("csrs sie, {0}", in(reg) 2usize, options(nomem, nostack)) };
     crate::arch::smp_boot::ap_stage(2);
+    Ok(())
 }
 
 /// Park with interrupts enabled.

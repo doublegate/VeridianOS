@@ -71,9 +71,11 @@ exposed were fixed (N-182 to N-189); the rest are listed, with their targets, in
   PROT_WRITE|PROT_EXEC fail with EACCES, where Linux allows it (N-241, kept by design). A JIT
   must write code through a writable mapping and run it from an executable one (a second
   mapping of a memfd, or mprotect between the two).
-- **Futexes.** The priority-inheritance operations (FUTEX_LOCK_PI and the rest) are ENOSYS, so
-  musl reports PTHREAD_PRIO_INHERIT mutexes unsupported; they need the scheduler's priority
-  boosting (sprint F).
+- **Futexes.** FUTEX_LOCK_PI, LOCK_PI2, TRYLOCK_PI and UNLOCK_PI work (priority inheritance,
+  SCHED-INC-01), but FUTEX_WAIT_REQUEUE_PI and CMP_REQUEUE_PI (glibc's PI condition variables) are
+  ENOSYS; a deadline task waiting for a PI lock lends real-time priority 99, not its deadline
+  parameters; and a waiter of a PI lock in memory shared between processes whose holder exits gets
+  ESRCH unless the lock is robust.
 - **Errnos.** Many errors come back as EINVAL where Linux is specific (N-202, N-212 to N-216,
   N-234, N-238).
 
@@ -184,10 +186,11 @@ What remains:
 With the `smp` feature (off by default), the other CPUs are started on every architecture (x86
 INIT-SIPI-SIPI, AArch64 PSCI, RISC-V SBI HSM) and come online, but they only idle: all work runs on
 the boot CPU. Per-CPU run queues, balancing and TLB shootdown that waits for acknowledgement are
-sprint D5. Known defects that become reachable then: APs skip the syscall MSR setup (N-172), IPIs
-use logical ids as APIC destinations and vector 0 (N-173), a TLB shootdown can deadlock against a
-CPU spinning with interrupts off (N-139), `smp_boot` continues after a failed start (N-180), the
-timer wheel assumes no lost ticks (N-179), and directory permission checks resolve the path
+sprint D5. Since D5a every CPU gets the boot CPU's syscall MSRs and XCR0 (N-172), IPIs go to APIC
+IDs with the ICR written under one interrupt-off sequence (N-173), and bring-up stops at the first
+CPU that fails, with guarded stacks (N-180). Known defects that become reachable with D5: a TLB
+shootdown can deadlock against a CPU spinning with interrupts off (N-139), the timer wheel assumes
+no lost ticks (N-179), and directory permission checks resolve the path
 separately from the operation (N-51). Lock-free and per-CPU structures are single-CPU-safe but have
 not run on more than one CPU (N-59). Programs see this: sched_getaffinity and the processor count
 report one CPU, and an affinity mask without CPU 0 is EINVAL.

@@ -275,6 +275,17 @@ pub mod xsave {
         SIZE.load(Ordering::Acquire) as usize
     }
 
+    /// Whether this CPU's XCR0 is the boot CPU's, so task areas saved on
+    /// one CPU restore on any (call after `context::init_fpu`).
+    pub fn matches_boot_cpu() -> bool {
+        if !super::super::context::has_xsave() {
+            return SIZE.load(Ordering::Acquire) == 512;
+        }
+        // SAFETY: XGETBV is available once CR4.OSXSAVE is set (init_fpu).
+        let xcr0 = unsafe { core::arch::x86_64::_xgetbv(0) };
+        xcr0 == XCR0.load(Ordering::Acquire)
+    }
+
     /// A 64-byte-aligned save area holding a task's user vector state.
     pub struct Area {
         ptr: *mut u8,

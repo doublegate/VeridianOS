@@ -215,6 +215,24 @@ pub unsafe extern "C" fn syscall_entry() {
 ///
 /// Must be called after `gdt::init()` and before any user-mode transitions.
 pub fn init_syscall() {
+    init_syscall_msrs();
+
+    // Per-CPU block: GS_BASE while ring 0 runs; syscall_entry's swapgs
+    // brings it in from KernelGsBase on entry from ring 3.
+
+    // The boot CPU is logical CPU 0; its hardware id is the initial APIC ID.
+    // SAFETY: CPUID leaf 1 is unprivileged and side-effect free.
+    let apic_id = unsafe { core::arch::x86_64::__cpuid(1).ebx >> 24 };
+    // SAFETY: runs once on the boot CPU, before any syscall or other use of
+    // its per-CPU block.
+    unsafe { crate::arch::percpu::install(0, apic_id) };
+}
+
+/// This CPU's SYSCALL/SYSRET MSRs (EFER.SCE, LSTAR, STAR, SFMASK). Every
+/// CPU needs them: an AP without them jumped to RIP 0 in ring 0 on its
+/// first system call (N-172). The selectors are the same on every CPU
+/// (`gdt::init_ap` uses the boot CPU's layout).
+pub fn init_syscall_msrs() {
     use x86_64::registers::{
         model_specific::{Efer, EferFlags, LStar, SFMask, Star},
         rflags::RFlags,
@@ -279,14 +297,4 @@ pub fn init_syscall() {
             | RFlags::ALIGNMENT_CHECK
             | RFlags::NESTED_TASK,
     );
-
-    // Per-CPU block: GS_BASE while ring 0 runs; syscall_entry's swapgs
-    // brings it in from KernelGsBase on entry from ring 3.
-
-    // The boot CPU is logical CPU 0; its hardware id is the initial APIC ID.
-    // SAFETY: CPUID leaf 1 is unprivileged and side-effect free.
-    let apic_id = unsafe { core::arch::x86_64::__cpuid(1).ebx >> 24 };
-    // SAFETY: runs once on the boot CPU, before any syscall or other use of
-    // its per-CPU block.
-    unsafe { crate::arch::percpu::install(0, apic_id) };
 }

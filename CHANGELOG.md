@@ -2,6 +2,14 @@
 
 ### Added
 
+- **Priority-inheritance mutexes (SCHED-INC-01).** FUTEX_LOCK_PI, FUTEX_LOCK_PI2, FUTEX_TRYLOCK_PI and
+  FUTEX_UNLOCK_PI, with Linux's futex word protocol: while a PI lock has waiters its holder runs at
+  the highest waiting priority (through the scheduler's real-time boost, passed along chains of
+  locks), unlock hands the lock to the highest-priority waiter, and a holder that exits passes its
+  locks on with FUTEX_OWNER_DIED. musl's PTHREAD_PRIO_INHERIT mutexes, reported unsupported before,
+  now work. Runtime test `musl_priority_inheritance` (the classic inversion: with a CPU hog of
+  middle priority, the high-priority waiter still gets the lock). The requeue-PI operations
+  (glibc's PI condition variables) remain ENOSYS.
 - **Signals carry their siginfo; sigqueue and sigtimedwait (N-259).** Every pending signal
   instance has its Linux `siginfo_t`: a real-time signal one per send, in order, a standard signal
   its first sender's. kill gives SI_USER and tkill/tgkill SI_TKILL with the sender's pid and real
@@ -669,8 +677,24 @@
   used (N-279: a waiter and a waker on different tables would have missed each other; N-54) and
   the unused x86_64 `try_enter_usermode`. The dispatcher failing to start now stops the boot, and
   `current_process` is the current dispatcher task's process, nothing else.
+- **The musl syscall remap patch,** the kernel's Linux translation table and per-process ABI flag,
+  and fifteen duplicate system calls that served an existing handler under a second number
+  (ADR 0009).
+- The unused slab allocator and `mm/vmm.rs` (MEM-INC-02).
+- The never-consulted global demand-paging and CoW tables, and the dead fork and fault paths
+  that used them (MEM-ARCH-02, N-07).
+- The unused in-kernel `stdlib` module (1,018 lines with no callers).
 
 ### Fixed
+
+- **Secondary CPUs are set up like the boot CPU, and bring-up stops at the first failure (N-172,
+  N-173, N-180).** With the `smp` feature, the other CPUs never got the SYSCALL MSRs (a system
+  call there would have jumped to address 0 in ring 0) or the boot CPU's XCR0 (restoring a task's
+  AVX state there would have faulted); IPIs used logical CPU numbers as APIC IDs and wrote the
+  two-part ICR with interrupts on; a CPU that failed to start was skipped, leaving a gap that would
+  have made every later TLB shootdown wait forever; and AP stacks had no guard page. All fixed. The
+  SMP boot tests ran before any secondary started and checked nothing; secondaries now come up
+  first, and the tests are reported skipped when one CPU is online.
 
 - **Starting the KDE session no longer frees its page tables twice.** After the session process
   exited, the KDE launcher freed the page tables and reaped the process itself, on top of the
@@ -1029,16 +1053,6 @@
   caller's buffer, so `seekdir(telldir())` jumped to the wrong entry. A buffer too small
   for the next record now returns EINVAL, as on Linux, instead of reporting end of
   directory.
-
-### Removed
-
-- **The musl syscall remap patch,** the kernel's Linux translation table and per-process ABI flag,
-  and fifteen duplicate system calls that served an existing handler under a second number
-  (ADR 0009).
-- The unused slab allocator and `mm/vmm.rs` (MEM-INC-02).
-- The never-consulted global demand-paging and CoW tables, and the dead fork and fault paths
-  that used them (MEM-ARCH-02, N-07).
-- The unused in-kernel `stdlib` module (1,018 lines with no callers).
 
 ---
 
