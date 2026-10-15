@@ -329,6 +329,15 @@
 
 ### Changed
 
+- **BlockFS writes file data back before sync, and reads without holding the cache (BM-FS-01,
+  N-118, ADR 0011).** Dirty blocks used to stay in memory until `sync`, so a large write grew the
+  block cache by its whole size. Now, after any operation that leaves more than 16 MiB (1 MiB on
+  AArch64/RISC-V) of dirty file data, that data is written back and becomes evictable. This stays
+  crash-safe without a journal: a block freed since the last sync is not reused until a sync has
+  written a bitmap without it, and directory and indirect-pointer blocks still wait for sync, so a
+  crash between syncs mounts as the last-synced filesystem. A cache miss no longer holds the cache
+  lock and the disk across the read; other readers keep hitting, and readers of the same block wait
+  on a queue. Cache hits no longer take the disk lock at all.
 - **mkfs-blockfs keeps modes, owners and symlinks.** Images gave every file 0755 or 0644 and
   every directory 0755, dropping set-ID and sticky bits, and copied each symlink's target in its
   place (every BusyBox applet link was a full copy of BusyBox). Files and directories now keep
