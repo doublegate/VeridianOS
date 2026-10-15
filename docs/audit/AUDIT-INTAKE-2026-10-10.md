@@ -38,7 +38,7 @@ code, **L** = latent (unreachable today), as in the 2026-10-07 re-evaluation.
 | N-266 | Low C | heap.rs described RISC-V as using a bump allocator | INC-MEM-04 | **fixed** b0644391 |
 | N-267 | Medium L | The demand-paging branch of the fault handler drops the address-space lock and, in `map_page`, inserts a one-page mapping overlapping the existing one (breaking the no-overlap rule `find_mapping` relies on) and pushes the frame at the wrong index; unreachable while every mapping is filled eagerly | INC-MEM-05 | open; v0.29 (lazy anonymous memory) |
 | N-268 | Low C | Empty intermediate page tables are kept until exit or exec (bounded by the range a process touched) | ARCH-MEM-01 | open; v0.29 |
-| N-269 | Low C | `thread_join` (native 1066) spins on `yield_cpu` with no wait queue and no EINTR | BM-SYS-03 | open; D (threads, with N-102) |
+| N-269 | Low C | `thread_join` (native 1066) spins on `yield_cpu` with no wait queue and no EINTR | BM-SYS-03 | **fixed** (a dispatched joiner sleeps on `PROCESS_EVENTS` until the thread's task is reaped; EINTR on a signal) |
 | N-270 | Medium C | VirtIO: no barrier between the avail-index store and the doorbell, and the ring fence was CPU-only | CRIT-SEC-01 | **fixed** 20b90360 (`dma_wmb`/`dma_rmb`/`io_wmb`) |
 | N-271 | Low C | Barrier asm marked `nomem`, so it was no compiler barrier | CRIT-PERF-01 (as a performance finding: false) | **fixed** 20b90360 |
 | N-272 | Low C | `SyscallError` defined three times (`error.rs` unused, `syscall/mod.rs` the ABI, `pkg/sdk`, plus `userland/rust-std`) | ARCH-ERR-01 | open; G |

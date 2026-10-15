@@ -569,6 +569,33 @@ pub fn sys_thread_join(tid: usize, retval_ptr: usize) -> SyscallResult {
 
     // Get current process
     let current = current_process().ok_or(SyscallError::InvalidState)?;
+    if target_tid == get_thread_tid() {
+        return Err(SyscallError::InvalidArgument); // joining oneself
+    }
+
+    // A dispatched joiner sleeps until the thread has exited and its task
+    // is off the CPU (its kernel stack is in use until then); every task
+    // reap wakes PROCESS_EVENTS. A signal ends the wait (N-269: it spun on
+    // yield_cpu, and could not be interrupted).
+    #[cfg(feature = "alloc")]
+    if crate::sched::dispatch::current_owner().is_some() {
+        use crate::sched::dispatch::{self, WaitError};
+        let pid = current.pid.0;
+        let finished = || match current.threads.lock().get(&target_tid) {
+            None => true,
+            Some(t) => {
+                t.get_state() == crate::process::thread::ThreadState::Zombie
+                    && !dispatch::tasks_of(pid)
+                        .iter()
+                        .any(|task| task.owner() == Some((pid, target_tid.0)))
+            }
+        };
+        if let Err(WaitError::Interrupted) =
+            dispatch::wait_event(&dispatch::PROCESS_EVENTS, None, finished)
+        {
+            return Err(SyscallError::Interrupted);
+        }
+    }
 
     // Find target thread in current process
     loop {

@@ -1027,6 +1027,81 @@ static void test_console(void)
     report("musl_console_blocks_and_polls", f == 0, why);
 }
 
+/* The native thread join (1066, N-269) sleeps until the thread has exited
+ * and is interruptible: joining a thread blocked on a pipe ends with EINTR
+ * when a signal arrives (it spun on yield and never returned); once the
+ * thread exits, the join succeeds and the thread is gone. */
+#define SYS_VERIDIAN_THREAD_JOIN 1066
+
+static int join_pipe[2];
+static volatile pid_t join_tid;
+
+static void *join_worker(void *arg)
+{
+    (void)arg;
+    sigset_t s;
+    sigemptyset(&s);
+    sigaddset(&s, SIGUSR2);
+    pthread_sigmask(SIG_BLOCK, &s, 0); /* the signal goes to the joiner */
+    join_tid = (pid_t)syscall(SYS_gettid);
+    char c;
+    while (read(join_pipe[0], &c, 1) < 0 && errno == EINTR) {
+    }
+    return 0;
+}
+
+static void join_sig(int s) { (void)s; }
+
+static void test_thread_join(void)
+{
+    int f = 0;
+    long r1 = 0, r2 = 0, r3 = 0;
+    int e1 = 0, e3 = 0;
+    if (pipe(join_pipe) != 0) {
+        report("native_thread_join_sleeps", 0, "pipe failed");
+        return;
+    }
+    pthread_t t;
+    if (pthread_create(&t, NULL, join_worker, NULL) != 0) {
+        report("native_thread_join_sleeps", 0, "pthread_create failed");
+        return;
+    }
+    while (join_tid == 0) sched_yield();
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = join_sig; /* no SA_RESTART */
+    sigaction(SIGUSR2, &sa, 0);
+    /* No interval timers yet (X2): a child sends the signal in 100 ms. */
+    pid_t parent = getpid();
+    pid_t c = fork();
+    if (c == 0) {
+        struct timespec d = {0, 100 * 1000 * 1000};
+        nanosleep(&d, 0);
+        kill(parent, SIGUSR2);
+        _exit(0);
+    }
+    unsigned long ret = 1;
+    errno = 0;
+    r1 = syscall(SYS_VERIDIAN_THREAD_JOIN, (long)join_tid, &ret);
+    e1 = errno;
+    if (r1 != -1 || e1 != EINTR) f |= 1;
+    if (write(join_pipe[1], "x", 1) != 1) f |= 2;
+    r2 = syscall(SYS_VERIDIAN_THREAD_JOIN, (long)join_tid, &ret);
+    if (r2 != 0 || ret != 0) f |= 4;
+    errno = 0;
+    r3 = syscall(SYS_VERIDIAN_THREAD_JOIN, (long)join_tid, &ret);
+    e3 = errno;
+    if (r3 != -1) f |= 8; /* already joined: gone */
+    pthread_join(t, 0);   /* musl's side: the tid word is already clear */
+    waitpid(c, 0, 0);
+    signal(SIGUSR2, SIG_DFL);
+    close(join_pipe[0]);
+    close(join_pipe[1]);
+    static char why[80];
+    snprintf(why, sizeof(why), "fail=%#x r=%ld/%d %ld %ld/%d", f, r1, e1, r2, r3, e3);
+    report("native_thread_join_sleeps", f == 0, why);
+}
+
 /* munmap, mprotect, brk, mremap, madvise, getrandom and futex bitsets
  * (N-240, N-242, N-243, N-244, N-246, N-226), as Linux. */
 
@@ -3226,6 +3301,7 @@ int main(int argc, char **argv)
     test_siginfo();
     test_pty();
     test_console();
+    test_thread_join();
     printf("MUSL-RUNTIME: %d/%d\n", passed, total);
     return passed == total ? 0 : 1;
 }
