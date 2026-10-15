@@ -1010,6 +1010,21 @@ fn kick_cpu(cpu: usize) {
     let _ = cpu;
 }
 
+/// Make `task` look at its signals now: wake it if it sleeps, or, if it is
+/// running on another CPU, interrupt that CPU (the reschedule IPI): the
+/// return to user mode from that interrupt delivers them. Without the
+/// interrupt a thread spinning in user mode would not notice until that
+/// CPU's next tick.
+pub fn notify(task: &Arc<Task>) {
+    if wake(task) || !task.on_cpu() {
+        return;
+    }
+    let cpu = task.cpu.load(Ordering::Acquire);
+    if dispatching(cpu) {
+        kick_cpu(cpu);
+    }
+}
+
 /// Wake a task by key.
 pub fn wake_key(key: TaskKey) -> bool {
     lookup(key).is_some_and(|t| wake(&t))

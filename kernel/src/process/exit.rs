@@ -562,7 +562,7 @@ pub fn exit_dispatched(exit_code: i32, group: bool) -> ! {
                 .kill_pending
                 .store(GROUP_EXIT_PENDING, Ordering::Release);
             for task in dispatch::tasks_of(process.pid.0) {
-                dispatch::wake(&task);
+                dispatch::notify(&task);
             }
         } else if !group && pending == 0 {
             process.set_exit_code(exit_code);
@@ -643,7 +643,7 @@ fn force_terminate_process(process: &Process, signal: i32) -> Result<(), KernelE
         if !tasks.is_empty() {
             set_kill_pending(process, signal as u32);
             for task in &tasks {
-                sched::dispatch::wake(task);
+                sched::dispatch::notify(task);
             }
             sched::dispatch::PROCESS_EVENTS.wake_all();
             return Ok(());

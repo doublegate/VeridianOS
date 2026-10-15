@@ -53,7 +53,7 @@ pub enum AuditEventType {
 
 impl AuditEventType {
     /// Convert to bitmask flag for filtering.
-    pub fn to_flag(self) -> u32 {
+    pub const fn to_flag(self) -> u32 {
         1u32 << (self as u8)
     }
 
@@ -261,6 +261,16 @@ impl AuditFilter {
         }
     }
 
+    /// The boot default: every event type except `Syscall`. Auditing every
+    /// system call is opt-in (`enable_event_type`), as on Linux, where no
+    /// system call is audited without a rule: it cost each system call a
+    /// formatted record and a synchronous file append (~200 us).
+    pub const fn default_policy() -> Self {
+        Self {
+            enabled_types: !AuditEventType::Syscall.to_flag(),
+        }
+    }
+
     /// Create a filter that blocks all event types.
     pub const fn deny_all() -> Self {
         Self { enabled_types: 0 }
@@ -318,6 +328,8 @@ struct AuditStats {
     filtered_events: AtomicU64,
     /// Events written to persistent storage
     persisted_events: AtomicU64,
+    /// Events not written because the persistent log is full
+    persist_dropped: AtomicU64,
     /// Alerts triggered
     alerts_triggered: AtomicU64,
     /// Per-type event counts (indexed by AuditEventType discriminant)
@@ -330,6 +342,7 @@ impl AuditStats {
             total_events: AtomicU64::new(0),
             filtered_events: AtomicU64::new(0),
             persisted_events: AtomicU64::new(0),
+            persist_dropped: AtomicU64::new(0),
             alerts_triggered: AtomicU64::new(0),
             per_type_counts: [
                 AtomicU64::new(0),
@@ -399,6 +412,23 @@ static AUDIT_STATS: AuditStats = AuditStats::new();
 
 /// Path for the persistent audit log file.
 const AUDIT_LOG_PATH: &str = "/var/log/audit.log";
+
+/// Most bytes written to the persistent log per boot. Past it events stay
+/// in the in-memory ring only and are counted as dropped (Linux bounds its
+/// queue the same way, `audit_backlog_limit`): an unbounded log let any
+/// process fill memory just by making audited calls.
+const MAX_PERSISTED_BYTES: u64 = 4 << 20;
+
+/// Bytes written to the persistent log so far.
+static PERSISTED_BYTES: AtomicU64 = AtomicU64::new(0);
+
+/// Reserve `len` bytes of the persistent log's `max`, `used` so far.
+fn reserve_persist(used: &AtomicU64, len: u64, max: u64) -> bool {
+    used.fetch_update(Ordering::AcqRel, Ordering::Acquire, |u| {
+        u.checked_add(len).filter(|&n| n <= max)
+    })
+    .is_ok()
+}
 
 // ---------------------------------------------------------------------------
 // Timestamp Helper
@@ -509,6 +539,10 @@ fn fire_alerts(event: &AuditEvent) {
 fn persist_event(event: &AuditEvent) {
     let serialized = event.serialize();
     let bytes = serialized.as_bytes();
+    if !reserve_persist(&PERSISTED_BYTES, bytes.len() as u64, MAX_PERSISTED_BYTES) {
+        AUDIT_STATS.persist_dropped.fetch_add(1, Ordering::Relaxed);
+        return;
+    }
 
     // Try to append to the audit log file; ignore errors if VFS is not
     // mounted or the path does not exist yet.
@@ -616,6 +650,14 @@ pub fn log_capability_op(pid: u64, cap_id: u64, result: i32) {
 ///
 /// Called from the syscall dispatch path.
 pub fn log_syscall(pid: u64, uid: u32, syscall_nr: usize, result: bool) {
+    // Every system call comes here: decide before formatting a record.
+    if !AUDIT_ENABLED.load(Ordering::Acquire)
+        || !AUDIT_FILTER
+            .try_lock()
+            .is_some_and(|f| f.is_enabled(AuditEventType::Syscall))
+    {
+        return;
+    }
     log_event(AuditEvent::new(
         AuditEventType::Syscall,
         pid,
@@ -747,6 +789,7 @@ pub fn get_detailed_stats() -> AuditStatistics {
         total_events: AUDIT_STATS.total_events.load(Ordering::Relaxed),
         filtered_events: AUDIT_STATS.filtered_events.load(Ordering::Relaxed),
         persisted_events: AUDIT_STATS.persisted_events.load(Ordering::Relaxed),
+        persist_dropped: AUDIT_STATS.persist_dropped.load(Ordering::Relaxed),
         alerts_triggered: AUDIT_STATS.alerts_triggered.load(Ordering::Relaxed),
         buffer_count: AUDIT_COUNT.load(Ordering::Relaxed) as u64,
         buffer_capacity: MAX_AUDIT_LOG as u64,
@@ -762,6 +805,8 @@ pub struct AuditStatistics {
     pub filtered_events: u64,
     /// Events written to persistent storage
     pub persisted_events: u64,
+    /// Events not written because the persistent log was full
+    pub persist_dropped: u64,
     /// Alerts triggered
     pub alerts_triggered: u64,
     /// Events currently in buffer
@@ -798,8 +843,8 @@ pub fn init() -> Result<(), KernelError> {
     AUDIT_HEAD.store(0, Ordering::Relaxed);
     AUDIT_COUNT.store(0, Ordering::Relaxed);
 
-    // Set default filter (all events enabled)
-    set_filter(AuditFilter::allow_all());
+    // Default filter: everything but per-syscall records (opt-in).
+    set_filter(AuditFilter::default_policy());
 
     // Try to create the audit log directory (best-effort)
     // The VFS may not be mounted yet; persistent logging will start
@@ -886,6 +931,26 @@ mod tests {
                 .any(|(path, bytes)| path == AUDIT_LOG_PATH
                     && bytes.as_slice() == expected.as_bytes())
         );
+    }
+
+    #[test]
+    fn syscalls_are_not_audited_by_default() {
+        let f = AuditFilter::default_policy();
+        assert!(!f.is_enabled(AuditEventType::Syscall));
+        assert!(f.is_enabled(AuditEventType::ProcessCreate));
+        assert!(f.is_enabled(AuditEventType::CapabilityOp));
+    }
+
+    #[test]
+    fn persistent_log_is_bounded() {
+        let used = AtomicU64::new(0);
+        assert!(reserve_persist(&used, 60, 100));
+        assert!(!reserve_persist(&used, 60, 100), "past the cap");
+        assert!(reserve_persist(&used, 40, 100), "exactly to the cap");
+        assert!(!reserve_persist(&used, 1, 100));
+        assert_eq!(used.load(Ordering::Relaxed), 100);
+        let near_max = AtomicU64::new(u64::MAX - 1);
+        assert!(!reserve_persist(&near_max, 2, u64::MAX), "no overflow");
     }
 
     #[test]

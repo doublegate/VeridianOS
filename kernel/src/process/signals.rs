@@ -763,7 +763,7 @@ pub fn send_info_to_process(
         crate::fs::signalfd::signal_generated();
     }
     for task in &tasks {
-        dispatch::wake(task);
+        dispatch::notify(task);
     }
     dispatch::PROCESS_EVENTS.wake_all();
     Ok(true)
@@ -836,7 +836,7 @@ pub fn send_to_thread(
     crate::fs::signalfd::signal_generated();
     for task in crate::sched::dispatch::tasks_of(process.pid.0) {
         if task.owner() == Some((process.pid.0, thread.tid.0)) {
-            crate::sched::dispatch::wake(&task);
+            crate::sched::dispatch::notify(&task);
         }
     }
     Ok(())

@@ -3492,6 +3492,81 @@ static void test_tlb_remote_flush(void)
     report("musl_tlb_remote_flush", ok && tlb_seen_new, why);
 }
 
+/* A signal for a thread running user code on another CPU arrives at once
+ * (the sender interrupts that CPU), not at its next timer tick (1 ms):
+ * over 50 signals the mean latency stays well under half a tick. */
+static volatile int kick_count, kick_stop;
+static volatile long long kick_seen_ns;
+
+static void kick_handler(int sig)
+{
+    (void)sig;
+    kick_seen_ns = mono_ns();
+    kick_count++;
+}
+
+static void *kick_spinner(void *arg)
+{
+    sched_setaffinity(0, sizeof(cpu_set_t), (cpu_set_t *)arg);
+    while (!kick_stop)
+        ; /* user mode only: no system call to notice a signal in */
+    return 0;
+}
+
+static void test_signal_kick(void)
+{
+    long ncpu = sysconf(_SC_NPROCESSORS_ONLN);
+    if (ncpu < 2) {
+        report("musl_signal_kick", 1, "one CPU");
+        return;
+    }
+    cpu_set_t all, mine, theirs;
+    sched_getaffinity(0, sizeof(all), &all);
+    CPU_ZERO(&mine);
+    CPU_SET(0, &mine);
+    CPU_ZERO(&theirs);
+    CPU_SET(1, &theirs);
+    sched_setaffinity(0, sizeof(mine), &mine);
+    struct sigaction sa, old;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = kick_handler;
+    sigaction(SIGUSR1, &sa, &old);
+    kick_count = 0;
+    kick_stop = 0;
+    pthread_t t;
+    int ok = pthread_create(&t, 0, kick_spinner, &theirs) == 0;
+    long long total = 0, worst = 0;
+    int n = 0;
+    struct timespec settle = {0, 20 * 1000000};
+    nanosleep(&settle, 0); /* the spinner is on CPU 1 */
+    for (int i = 0; ok && i < 50; i++) {
+        long long t0 = mono_ns();
+        if (pthread_kill(t, SIGUSR1) != 0) {
+            ok = 0;
+            break;
+        }
+        while (kick_count == i && mono_ns() - t0 < 100000000LL)
+            ;
+        if (kick_count != i + 1) {
+            ok = 0;
+            break;
+        }
+        long long lat = kick_seen_ns - t0;
+        total += lat;
+        if (lat > worst) worst = lat;
+        n++;
+    }
+    kick_stop = 1;
+    if (ok || n) pthread_join(t, 0);
+    sigaction(SIGUSR1, &old, 0);
+    sched_setaffinity(0, sizeof(all), &all);
+    long mean_us = n ? (long)(total / n / 1000) : -1;
+    static char why[80];
+    snprintf(why, sizeof(why), "ok=%d signals=%d mean=%ldus worst=%ldus", ok, n, mean_us,
+             (long)(worst / 1000));
+    report("musl_signal_kick", ok && n == 50 && mean_us < 200, why);
+}
+
 /* SMP (D5e): a thread restricted to one CPU runs there (getcpu says so)
  * before sched_setaffinity returns, for every CPU in turn; and threads
  * started while the other CPUs are idle are spread over all of them. */
@@ -3771,6 +3846,7 @@ static const struct {
     {"gs_base", test_gs_base},
     {"tlb_remote_flush", test_tlb_remote_flush},
     {"clocks_and_usage", test_clocks_and_usage},
+    {"signal_kick", test_signal_kick},
     {"priority_inheritance", test_priority_inheritance},
     {"unix_accept_blocks", test_unix_accept_blocks},
 };
@@ -3825,6 +3901,7 @@ int main(int argc, char **argv)
     test_smp_placement();
     test_gs_base();
     test_tlb_remote_flush();
+    test_signal_kick();
     test_setuid_exec("/bin/musl_runtime_test");
     test_clocks_and_usage();
     test_rlimits();

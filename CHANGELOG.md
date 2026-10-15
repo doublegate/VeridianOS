@@ -705,6 +705,18 @@
 
 ### Fixed
 
+- **System calls no longer cost ~200 us each.** Every system call wrote an audit record to
+  `/var/log/audit.log`, synchronously and without limit: a formatted string and a file append per
+  call, and a log that grew until memory ran out. Auditing each system call is now opt-in, as
+  on Linux, where none is audited without a rule; the other audit events still go to the in-memory
+  ring and the file. The file stops at 4 MiB per boot, and the shell's `audit` command reports the
+  events past that as not persisted. Measured under KVM on four CPUs: getppid and clock_gettime went
+  from ~200 us to ~1.8 us, and the x86_64 runtime suite from over ten minutes to under two.
+- **A signal reaches a thread running on another CPU at once.** Sending one woke the target if it
+  slept, but a thread running user code on another CPU noticed only at that CPU's next tick (up to
+  1 ms). The sender now interrupts that CPU, and the interrupt's return to user mode delivers the
+  signal; kill, tgkill, a fatal signal and exit_group all do this. Runtime test `musl_signal_kick`
+  (mean latency over 50 signals: ~960 us before, now under the 200 us bound).
 - **TLB shootdowns can no longer deadlock (N-139).** A CPU waiting with interrupts off cannot
   acknowledge a shootdown, so any lock it spins on must never be held by a CPU that issues one.
   Three paths broke that rule, all found running the runtime suite on four CPUs: page faults were

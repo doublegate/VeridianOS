@@ -159,8 +159,8 @@ What does not work yet: `docs/KNOWN-LIMITATIONS.md`.
       N-139 part; blocking Unix accept), D5e (placement, idle pull and periodic balancing,
       affinity migration, getcpu, per-task user GS base, interrupt-safe heap, N-139 fixed:
       interrupts on in page faults and the return to user mode, reaper thread; ADR 0012;
-      `gate.sh --smp`), N-262 targeted shootdown. Left: per-CPU frees after the flush (N-261),
-      SYS-PERF-01, N-51, N-52, deadline push/pull, remote signal kick, `smp` on by default.
+      `gate.sh --smp`), N-262 targeted shootdown, remote signal kick. Left: per-CPU frees after
+      the flush (N-261), SYS-PERF-01, N-51, N-52, deadline push/pull, `smp` on by default.
     - [x] Syscalls `sched_setattr/getattr`, `sched_setscheduler`, `nice`/`setpriority`, real
       `sched_setaffinity`/`getaffinity`, `sched_yield` on the new policy (SCHED-INC-02 resolved
       by the deadline class).
