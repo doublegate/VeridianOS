@@ -12,26 +12,20 @@ pub fn get_ticks() -> u64 {
 /// Increment timer ticks (called from APIC timer interrupt handler at vector
 /// 48).
 ///
-/// Increments the global tick counter and triggers a scheduler tick for
-/// preemptive scheduling. Uses `try_lock()` on the scheduler to avoid
-/// deadlock if the scheduler lock is already held (e.g., we interrupted
-/// mid-schedule).
+/// Every CPU ticks its own run queue (time slices, CPU accounting); only
+/// the timekeeping CPU also advances the tick count, the timer wheel and the
+/// console input (see `is_timekeeper`), and wakes expired sleepers
+/// (`dispatch::tick`).
 pub fn tick(user: bool) {
     // In TSC-deadline mode the timer is one-shot: arm the next tick first.
     super::apic::rearm_deadline_timer();
 
-    // Only the timekeeping CPU advances the tick count, uptime and the
-    // timer wheel; every CPU ticks at the same rate (see is_timekeeper).
-    if !crate::arch::percpu::is_timekeeper() {
-        // Secondary CPUs run no tasks yet (SMP stage S1, ADR 0004), and the
-        // scheduler they would tick is CPU 0's.
-        return;
+    if crate::arch::percpu::is_timekeeper() {
+        TICKS.fetch_add(1, Ordering::Relaxed);
+        crate::timer::clock_tick();
+        #[cfg(feature = "alloc")]
+        crate::drivers::console_input::tick();
     }
-    TICKS.fetch_add(1, Ordering::Relaxed);
-    crate::timer::clock_tick();
-
-    #[cfg(feature = "alloc")]
-    crate::drivers::console_input::tick();
     #[cfg(feature = "alloc")]
     crate::sched::dispatch::tick(user);
     #[cfg(not(feature = "alloc"))]

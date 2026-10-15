@@ -1997,6 +1997,63 @@ fn run_dispatch_tests(passed: &mut u32, failed: &mut u32) {
             report_test("dispatch_waitqueue_wake_and_join", ok, passed, failed);
         }
     }
+    // SMP stage S2: every secondary dispatches. A kernel thread queued on
+    // each one runs there (it records the CPU it found itself on), and its
+    // exit wakes the joiner on the boot CPU across CPUs.
+    #[cfg(target_arch = "x86_64")]
+    {
+        use core::sync::atomic::{AtomicUsize, Ordering};
+
+        use crate::sched::dispatch;
+
+        const NONE: usize = usize::MAX;
+        static RAN_ON: [AtomicUsize; crate::sched::smp::MAX_CPUS] =
+            [const { AtomicUsize::new(NONE) }; crate::sched::smp::MAX_CPUS];
+
+        extern "C" fn where_am_i(slot: usize) {
+            RAN_ON[slot].store(
+                crate::arch::percpu::this_cpu_id() as usize,
+                Ordering::Release,
+            );
+        }
+
+        let online = crate::arch::smp_boot::online_cpus() as usize;
+        if online <= 1 {
+            report_skip("dispatch_runs_on_every_cpu", "one CPU online");
+        } else {
+            // Secondaries become dispatching CPUs right after reporting
+            // online; give them a moment.
+            let start = crate::arch::timer::monotonic_ns();
+            let mut keys = alloc::vec::Vec::new();
+            let mut ok = true;
+            for cpu in 1..online {
+                let key = loop {
+                    match dispatch::spawn_kernel_on(cpu, "where", where_am_i, cpu) {
+                        Ok(k) => break Some(k),
+                        Err(_)
+                            if crate::arch::timer::monotonic_ns().saturating_sub(start)
+                                < 1_000_000_000 =>
+                        {
+                            core::hint::spin_loop()
+                        }
+                        Err(_) => break None,
+                    }
+                };
+                match key {
+                    Some(k) => keys.push(k),
+                    None => ok = false,
+                }
+            }
+            for k in keys {
+                dispatch::join(k);
+            }
+            for (cpu, ran_on) in RAN_ON.iter().enumerate().take(online).skip(1) {
+                ok &= ran_on.load(Ordering::Acquire) == cpu;
+            }
+            report_test("dispatch_runs_on_every_cpu", ok, passed, failed);
+        }
+    }
+
     #[cfg(not(target_arch = "x86_64"))]
     {
         let _ = (passed, failed);

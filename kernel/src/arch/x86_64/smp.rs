@@ -354,8 +354,13 @@ pub fn ap_init() -> Result<(), &'static str> {
     Ok(())
 }
 
-/// Halt with interrupts enabled.
+/// The secondary's dispatch loop (its boot flow becomes its idle task,
+/// SMP stage S2); halt with interrupts enabled if the dispatcher is not
+/// running.
 pub fn idle() -> ! {
+    #[cfg(feature = "alloc")]
+    crate::sched::dispatch::run_secondary();
+    #[cfg(not(feature = "alloc"))]
     loop {
         x86_64::instructions::interrupts::enable_and_hlt();
     }
