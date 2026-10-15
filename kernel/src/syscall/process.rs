@@ -64,8 +64,8 @@ pub(crate) fn sys_fork_with(opts: &crate::process::fork::ForkOptions) -> Syscall
                         crate::process::start_thread(&child_process, &t, true).is_ok()
                     });
                     if !started {
-                        crate::process::table::remove_process(child_pid);
-                        current.children.lock().retain(|&p| p != child_pid);
+                        // Freed whole, not just unlisted (N-46).
+                        crate::process::exit::discard_unstarted(&child_process);
                         return Err(SyscallError::OutOfMemory);
                     }
                 }

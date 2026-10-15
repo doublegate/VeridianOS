@@ -11,7 +11,6 @@ extern crate alloc;
 use alloc::{format, string::String, vec::Vec};
 
 use super::{
-    lifecycle::create_scheduler_task,
     pcb::{Process, ProcessBuilder, ProcessState},
     table,
     thread::ThreadBuilder,
@@ -165,14 +164,10 @@ pub fn create_process_with_options(
     // Add process to process table
     table::add_process(process)?;
 
-    // Mark process as ready
+    // Mark process as ready. Its launcher starts the main thread as a
+    // dispatcher task (process::start_thread / run_and_wait).
     if let Some(process) = table::get_process(pid) {
         process.set_state(ProcessState::Ready);
-
-        // Add main thread to scheduler
-        if let Some(thread) = process.get_thread(tid) {
-            create_scheduler_task(&process, &thread)?;
-        }
     }
 
     // Memory hardening: stack canary + guard page for new process.

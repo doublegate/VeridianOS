@@ -409,6 +409,14 @@ pub fn user_task_reaped(pid: u64, _tid: u64) {
     {
         return;
     }
+    free_page_tables(&process);
+    crate::sched::dispatch::PROCESS_EVENTS.wake_all();
+}
+
+/// Free a process's page tables (its root and what is left below it). Only
+/// once no CPU can be running in its address space.
+#[cfg(feature = "alloc")]
+pub(crate) fn free_page_tables(process: &Process) {
     let root = {
         let vas = process.memory_space.lock();
         let root = vas.get_page_table();
@@ -418,7 +426,6 @@ pub fn user_task_reaped(pid: u64, _tid: u64) {
     if root != 0 {
         crate::mm::vas::free_user_page_table_frames(root);
     }
-    crate::sched::dispatch::PROCESS_EVENTS.wake_all();
 }
 
 /// Whether a dispatched thread waiting in a system call must stop waiting

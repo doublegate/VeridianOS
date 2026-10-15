@@ -15,7 +15,6 @@ use alloc::format;
 use alloc::vec::Vec;
 
 use super::{
-    lifecycle::create_scheduler_task,
     pcb::{ProcessBuilder, ProcessState},
     table,
     thread::ThreadBuilder,
@@ -110,60 +109,296 @@ pub fn fork_process_with(opts: &ForkOptions) -> Result<(ProcessId, super::Thread
 
     let new_pid = new_process.pid;
 
-    // Clone address space with COW (copy-on-write) optimization.
-    // Pages are shared read-only between parent and child; physical copies
-    // are deferred to the page fault handler when either process writes.
-    {
-        let current_space = current_process.memory_space.lock();
-        let mut new_space = new_process.memory_space.lock();
+    // Everything that can fail once the child exists. On failure the child
+    // is freed whole (N-46): its address space, frames, page tables, kernel
+    // stack, capabilities and files used to leak, since dropping a Process
+    // frees nothing.
+    let populate = || -> Result<super::ThreadId, KernelError> {
+        // Clone address space with COW (copy-on-write) optimization.
+        // Pages are shared read-only between parent and child; physical copies
+        // are deferred to the page fault handler when either process writes.
+        {
+            let current_space = current_process.memory_space.lock();
+            let mut new_space = new_process.memory_space.lock();
 
-        // Share the address space copy-on-write: clone_from maps the
-        // parent's frames read-only + COW in both, with per-frame owner
-        // counts (mm::frame_refs); the first write takes a private copy.
-        // A CLONE_VM child maps the same frames writable instead.
-        if opts.share_vm {
-            new_space.share_from(&current_space)?;
-        } else {
-            new_space.clone_from(&current_space)?;
+            // Share the address space copy-on-write: clone_from maps the
+            // parent's frames read-only + COW in both, with per-frame owner
+            // counts (mm::frame_refs); the first write takes a private copy.
+            // A CLONE_VM child maps the same frames writable instead.
+            if opts.share_vm {
+                new_space.share_from(&current_space)?;
+            } else {
+                new_space.clone_from(&current_space)?;
+            }
         }
-    }
 
-    // Clone capabilities
-    {
-        let current_caps = current_process.capability_space.lock();
-        let new_caps = new_process.capability_space.lock();
+        // Clone capabilities
+        {
+            let current_caps = current_process.capability_space.lock();
+            let new_caps = new_process.capability_space.lock();
 
-        // Clone capability space so child has same capabilities as parent
-        new_caps.clone_from(&current_caps)?;
-    }
+            // Clone capability space so child has same capabilities as parent
+            new_caps.clone_from(&current_caps)?;
+        }
 
-    // Clone file table so child inherits stdin/stdout/stderr and pipes
-    {
-        let parent_ft = current_process.file_table.lock();
-        let child_ft = parent_ft.clone_for_fork();
-        *new_process.file_table.lock() = child_ft;
-    }
+        // Clone file table so child inherits stdin/stdout/stderr and pipes
+        {
+            let parent_ft = current_process.file_table.lock();
+            let child_ft = parent_ft.clone_for_fork();
+            *new_process.file_table.lock() = child_ft;
+        }
 
-    // Inherit environment variables from parent
+        // Inherit environment variables from parent
+        #[cfg(feature = "alloc")]
+        {
+            let parent_env = current_process.env_vars.lock();
+            let mut child_env = new_process.env_vars.lock();
+            for (key, value) in parent_env.iter() {
+                child_env.insert(key.clone(), value.clone());
+            }
+            *new_process.exe_path.lock() = current_process.exe_path.lock().clone();
+        }
+
+        // Inherit uid, gid, pgid, sid from parent
+        // (ProcessBuilder doesn't copy these, so do it manually)
+        // uid/gid are non-atomic, but the new_process is not yet visible
+        // to other threads, so this is safe.
+        // SAFETY: new_process is not yet added to the process table, so no
+        // other thread can access it concurrently.
+        {
+            // pgid and sid are inherited from parent per POSIX
+            let parent_pgid = current_process
+                .pgid
+                .load(core::sync::atomic::Ordering::Acquire);
+            let parent_sid = current_process
+                .sid
+                .load(core::sync::atomic::Ordering::Acquire);
+            new_process
+                .pgid
+                .store(parent_pgid, core::sync::atomic::Ordering::Release);
+            new_process
+                .sid
+                .store(parent_sid, core::sync::atomic::Ordering::Release);
+            // So are the resource limits (N-224).
+            new_process.inherit_limits(current_process.limits());
+            // So is the dumpable flag (the memory it protects is copied).
+            new_process.dumpable.store(
+                current_process
+                    .dumpable
+                    .load(core::sync::atomic::Ordering::Acquire),
+                core::sync::atomic::Ordering::Release,
+            );
+        }
+
+        // Signal dispositions and the blocked mask are inherited (POSIX fork);
+        // pending signals are not.
+        *new_process.signal_handlers.lock() = *current_process.signal_handlers.lock();
+        *new_process.signal_action_extra.lock() = *current_process.signal_action_extra.lock();
+        new_process.signal_mask.store(
+            current_process
+                .signal_mask
+                .load(core::sync::atomic::Ordering::Acquire),
+            core::sync::atomic::Ordering::Release,
+        );
+
+        // Create thread in new process matching current thread
+        let new_thread = {
+            let ctx = current_thread.context.lock();
+            let thread = ThreadBuilder::new(
+                new_pid,
+                current_thread.name.clone(),
+                ctx.get_instruction_pointer(),
+            )
+            // The child's only thread is its first: its ID is the child's
+            // (N-217).
+            .tid(super::ThreadId(new_pid.0))
+            // Scheduling parameters as Linux's sched_fork (N-221).
+            .sched(current_thread.sched.lock().for_child())
+            // A clone thread has no kernel-chosen stack (it runs on its own);
+            // the child's main thread still needs a size for a later exec.
+            .user_stack_size(
+                current_thread
+                    .user_stack
+                    .size
+                    .max(super::creation::DEFAULT_USER_STACK_SIZE),
+            )
+            .kernel_stack_size(current_thread.kernel_stack.size)
+            .priority(current_thread.priority)
+            .cpu_affinity(current_thread.get_affinity())
+            // Working directory and umask are copied, not reset to "/" and 022
+            // (N-93); a copy, because the child's later chdir is its own --
+            // unless CLONE_FS shares them.
+            .fs(if opts.share_fs {
+                super::thread::ThreadFs::clone_shared(&current_thread.fs)
+            } else {
+                super::thread::ThreadFs::clone_copy(&current_thread.fs)
+            });
+            let thread = match opts.child_cleartid {
+                Some(ptr) => thread.clear_tid(ptr),
+                None => thread,
+            };
+            let thread = match opts.tls {
+                Some(tls) => thread.tls_base(tls),
+                None => thread,
+            }
+            .build()?;
+
+            // Copy thread context for child process.
+            //
+            // On x86_64, we capture the LIVE register state from the syscall
+            // frame on the kernel stack (saved by syscall_entry assembly). This
+            // gives the child the parent's actual CPU registers at the moment of
+            // fork(), so the child resumes at the instruction after fork() with
+            // RAX=0 (fork return value), not from main().
+            //
+            // On other architectures (or if no syscall frame is available), we
+            // fall back to cloning the parent's ThreadContext from exec/load time.
+            {
+                let mut new_ctx = thread.context.lock();
+
+                #[cfg(target_arch = "x86_64")]
+                {
+                    use crate::arch::x86_64::syscall::get_syscall_frame;
+
+                    if let Some(frame) = get_syscall_frame() {
+                        // Populate child context from live parent registers.
+                        // Start with a clone for fields not in the frame (cr3, segments, etc.)
+                        *new_ctx = (*ctx).clone();
+
+                        // User RIP and RSP: where this syscall returns to.
+                        new_ctx.set_instruction_pointer(frame.rip as usize);
+                        new_ctx.set_stack_pointer(frame.rsp as usize);
+
+                        // Return value: fork returns 0 in child
+                        new_ctx.set_return_value(0);
+
+                        // Copy all general-purpose registers from the live frame.
+                        // The X86_64Context fields are accessed directly since we
+                        // know the concrete type on x86_64.
+                        new_ctx.rbx = frame.rbx;
+                        new_ctx.rbp = frame.rbp;
+                        new_ctx.r12 = frame.r12;
+                        new_ctx.r13 = frame.r13;
+                        new_ctx.r14 = frame.r14;
+                        new_ctx.r15 = frame.r15;
+                        new_ctx.rdi = frame.rdi;
+                        new_ctx.rsi = frame.rsi;
+                        new_ctx.rdx = frame.rdx;
+                        new_ctx.r8 = frame.r8;
+                        new_ctx.r9 = frame.r9;
+                        new_ctx.r10 = frame.r10;
+
+                        // R11 as the parent will see it (SYSCALL put RFLAGS there)
+                        // and the RFLAGS the syscall returns with.
+                        new_ctx.r11 = frame.r11;
+                        new_ctx.rflags = frame.rflags;
+
+                        // RCX holds user RIP (already set via set_instruction_pointer)
+                        new_ctx.rcx = frame.rcx;
+                    } else {
+                        // No syscall frame (called outside syscall context).
+                        // Fall back to cloning parent's stored context.
+                        *new_ctx = (*ctx).clone();
+                        new_ctx.set_return_value(0);
+                    }
+                }
+
+                #[cfg(not(target_arch = "x86_64"))]
+                {
+                    *new_ctx = (*ctx).clone();
+                    new_ctx.set_return_value(0);
+                }
+
+                // clone(2)'s stack and TLS for the child.
+                if let Some(sp) = opts.stack {
+                    new_ctx.set_stack_pointer(sp);
+                }
+                if let Some(tls) = opts.tls {
+                    new_ctx.set_tls_base(tls as u64);
+                }
+            } // Drop lock here
+
+            thread
+        };
+
+        let new_tid = new_thread.tid;
+        new_process
+            .exit_signal
+            .store(opts.exit_signal, core::sync::atomic::Ordering::Release);
+        new_process
+            .vfork_pending
+            .store(opts.vfork, core::sync::atomic::Ordering::Release);
+
+        // The TID stores happen before the child can run. CLONE_CHILD_SETTID
+        // writes the child's memory only: a copy-on-write page is copied first
+        // (a CLONE_VM child shares the frame, so the parent sees it too, as on
+        // Linux). They are ordinary user stores, so page protection applies,
+        // and as on Linux (put_user, result unused) a store that cannot be made
+        // is skipped rather than failing a clone whose child already exists.
+        let tid_bytes = (new_tid.0 as u32).to_ne_bytes();
+        if let Some(ptr) = opts.child_settid {
+            let _ = new_process
+                .memory_space
+                .lock()
+                .write_bytes_private(ptr as u64, &tid_bytes, false);
+        }
+        if let Some(ptr) = opts.parent_settid {
+            let _ = current_process
+                .memory_space
+                .lock()
+                .write_bytes_private(ptr as u64, &tid_bytes, false);
+        }
+
+        // The calling thread's blocked mask (per thread, N-109), alternate
+        // signal stack (N-222), command name (N-227) and no_new_privs: a fork
+        // or vfork child keeps them all.
+        new_thread.sigmask.store(
+            current_thread
+                .sigmask
+                .load(core::sync::atomic::Ordering::Acquire),
+            core::sync::atomic::Ordering::Release,
+        );
+        *new_thread.altstack.lock() = *current_thread.altstack.lock();
+        *new_thread.comm.lock() = *current_thread.comm.lock();
+        new_thread.no_new_privs.store(
+            current_thread
+                .no_new_privs
+                .load(core::sync::atomic::Ordering::Acquire),
+            core::sync::atomic::Ordering::Release,
+        );
+        new_process.add_thread(new_thread)?;
+        Ok(new_tid)
+    };
+    let new_tid = match populate() {
+        Ok(tid) => tid,
+        Err(e) => {
+            #[cfg(feature = "alloc")]
+            super::exit::discard_unstarted(&new_process);
+            return Err(e);
+        }
+    };
+
+    // Add to parent's children list
     #[cfg(feature = "alloc")]
     {
-        let parent_env = current_process.env_vars.lock();
-        let mut child_env = new_process.env_vars.lock();
-        for (key, value) in parent_env.iter() {
-            child_env.insert(key.clone(), value.clone());
-        }
-        *new_process.exe_path.lock() = current_process.exe_path.lock().clone();
+        current_process.children.lock().push(new_pid);
     }
 
     // Inherit container membership from parent so forked children
     // stay inside the same container namespace.
+    let cid = current_process
+        .container_id
+        .load(core::sync::atomic::Ordering::Acquire);
+    new_process
+        .container_id
+        .store(cid, core::sync::atomic::Ordering::Release);
+
+    // Add process to table. A fresh pid cannot already be there.
+    table::add_process(new_process)?;
+
+    // Registered in its container's PID namespace only now, so a fork that
+    // failed above leaves nothing there.
     {
-        let cid = current_process
-            .container_id
-            .load(core::sync::atomic::Ordering::Acquire);
-        new_process
-            .container_id
-            .store(cid, core::sync::atomic::Ordering::Release);
         if cid != 0 {
             // Register child in the container's PID namespace
             #[cfg(target_arch = "x86_64")]
@@ -178,225 +413,8 @@ pub fn fork_process_with(opts: &ForkOptions) -> Result<(ProcessId, super::Thread
         }
     }
 
-    // Inherit uid, gid, pgid, sid from parent
-    // (ProcessBuilder doesn't copy these, so do it manually)
-    // uid/gid are non-atomic, but the new_process is not yet visible
-    // to other threads, so this is safe.
-    // SAFETY: new_process is not yet added to the process table, so no
-    // other thread can access it concurrently.
-    {
-        // pgid and sid are inherited from parent per POSIX
-        let parent_pgid = current_process
-            .pgid
-            .load(core::sync::atomic::Ordering::Acquire);
-        let parent_sid = current_process
-            .sid
-            .load(core::sync::atomic::Ordering::Acquire);
-        new_process
-            .pgid
-            .store(parent_pgid, core::sync::atomic::Ordering::Release);
-        new_process
-            .sid
-            .store(parent_sid, core::sync::atomic::Ordering::Release);
-        // So are the resource limits (N-224).
-        new_process.inherit_limits(current_process.limits());
-        // So is the dumpable flag (the memory it protects is copied).
-        new_process.dumpable.store(
-            current_process
-                .dumpable
-                .load(core::sync::atomic::Ordering::Acquire),
-            core::sync::atomic::Ordering::Release,
-        );
-    }
-
-    // Signal dispositions and the blocked mask are inherited (POSIX fork);
-    // pending signals are not.
-    *new_process.signal_handlers.lock() = *current_process.signal_handlers.lock();
-    *new_process.signal_action_extra.lock() = *current_process.signal_action_extra.lock();
-    new_process.signal_mask.store(
-        current_process
-            .signal_mask
-            .load(core::sync::atomic::Ordering::Acquire),
-        core::sync::atomic::Ordering::Release,
-    );
-
-    // Create thread in new process matching current thread
-    let new_thread = {
-        let ctx = current_thread.context.lock();
-        let thread = ThreadBuilder::new(
-            new_pid,
-            current_thread.name.clone(),
-            ctx.get_instruction_pointer(),
-        )
-        // The child's only thread is its first: its ID is the child's
-        // (N-217).
-        .tid(super::ThreadId(new_pid.0))
-        // Scheduling parameters as Linux's sched_fork (N-221).
-        .sched(current_thread.sched.lock().for_child())
-        // A clone thread has no kernel-chosen stack (it runs on its own);
-        // the child's main thread still needs a size for a later exec.
-        .user_stack_size(
-            current_thread
-                .user_stack
-                .size
-                .max(super::creation::DEFAULT_USER_STACK_SIZE),
-        )
-        .kernel_stack_size(current_thread.kernel_stack.size)
-        .priority(current_thread.priority)
-        .cpu_affinity(current_thread.get_affinity())
-        // Working directory and umask are copied, not reset to "/" and 022
-        // (N-93); a copy, because the child's later chdir is its own --
-        // unless CLONE_FS shares them.
-        .fs(if opts.share_fs {
-            super::thread::ThreadFs::clone_shared(&current_thread.fs)
-        } else {
-            super::thread::ThreadFs::clone_copy(&current_thread.fs)
-        });
-        let thread = match opts.child_cleartid {
-            Some(ptr) => thread.clear_tid(ptr),
-            None => thread,
-        };
-        let thread = match opts.tls {
-            Some(tls) => thread.tls_base(tls),
-            None => thread,
-        }
-        .build()?;
-
-        // Copy thread context for child process.
-        //
-        // On x86_64, we capture the LIVE register state from the syscall
-        // frame on the kernel stack (saved by syscall_entry assembly). This
-        // gives the child the parent's actual CPU registers at the moment of
-        // fork(), so the child resumes at the instruction after fork() with
-        // RAX=0 (fork return value), not from main().
-        //
-        // On other architectures (or if no syscall frame is available), we
-        // fall back to cloning the parent's ThreadContext from exec/load time.
-        {
-            let mut new_ctx = thread.context.lock();
-
-            #[cfg(target_arch = "x86_64")]
-            {
-                use crate::arch::x86_64::syscall::get_syscall_frame;
-
-                if let Some(frame) = get_syscall_frame() {
-                    // Populate child context from live parent registers.
-                    // Start with a clone for fields not in the frame (cr3, segments, etc.)
-                    *new_ctx = (*ctx).clone();
-
-                    // User RIP and RSP: where this syscall returns to.
-                    new_ctx.set_instruction_pointer(frame.rip as usize);
-                    new_ctx.set_stack_pointer(frame.rsp as usize);
-
-                    // Return value: fork returns 0 in child
-                    new_ctx.set_return_value(0);
-
-                    // Copy all general-purpose registers from the live frame.
-                    // The X86_64Context fields are accessed directly since we
-                    // know the concrete type on x86_64.
-                    new_ctx.rbx = frame.rbx;
-                    new_ctx.rbp = frame.rbp;
-                    new_ctx.r12 = frame.r12;
-                    new_ctx.r13 = frame.r13;
-                    new_ctx.r14 = frame.r14;
-                    new_ctx.r15 = frame.r15;
-                    new_ctx.rdi = frame.rdi;
-                    new_ctx.rsi = frame.rsi;
-                    new_ctx.rdx = frame.rdx;
-                    new_ctx.r8 = frame.r8;
-                    new_ctx.r9 = frame.r9;
-                    new_ctx.r10 = frame.r10;
-
-                    // R11 as the parent will see it (SYSCALL put RFLAGS there)
-                    // and the RFLAGS the syscall returns with.
-                    new_ctx.r11 = frame.r11;
-                    new_ctx.rflags = frame.rflags;
-
-                    // RCX holds user RIP (already set via set_instruction_pointer)
-                    new_ctx.rcx = frame.rcx;
-                } else {
-                    // No syscall frame (called outside syscall context).
-                    // Fall back to cloning parent's stored context.
-                    *new_ctx = (*ctx).clone();
-                    new_ctx.set_return_value(0);
-                }
-            }
-
-            #[cfg(not(target_arch = "x86_64"))]
-            {
-                *new_ctx = (*ctx).clone();
-                new_ctx.set_return_value(0);
-            }
-
-            // clone(2)'s stack and TLS for the child.
-            if let Some(sp) = opts.stack {
-                new_ctx.set_stack_pointer(sp);
-            }
-            if let Some(tls) = opts.tls {
-                new_ctx.set_tls_base(tls as u64);
-            }
-        } // Drop lock here
-
-        thread
-    };
-
-    let new_tid = new_thread.tid;
-    new_process
-        .exit_signal
-        .store(opts.exit_signal, core::sync::atomic::Ordering::Release);
-    new_process
-        .vfork_pending
-        .store(opts.vfork, core::sync::atomic::Ordering::Release);
-
-    // The TID stores happen before the child can run. CLONE_CHILD_SETTID
-    // writes the child's memory only: a copy-on-write page is copied first
-    // (a CLONE_VM child shares the frame, so the parent sees it too, as on
-    // Linux). They are ordinary user stores, so page protection applies,
-    // and as on Linux (put_user, result unused) a store that cannot be made
-    // is skipped rather than failing a clone whose child already exists.
-    let tid_bytes = (new_tid.0 as u32).to_ne_bytes();
-    if let Some(ptr) = opts.child_settid {
-        let _ = new_process
-            .memory_space
-            .lock()
-            .write_bytes_private(ptr as u64, &tid_bytes, false);
-    }
-    if let Some(ptr) = opts.parent_settid {
-        let _ = current_process
-            .memory_space
-            .lock()
-            .write_bytes_private(ptr as u64, &tid_bytes, false);
-    }
-
-    // The calling thread's blocked mask (per thread, N-109), alternate
-    // signal stack (N-222), command name (N-227) and no_new_privs: a fork
-    // or vfork child keeps them all.
-    new_thread.sigmask.store(
-        current_thread
-            .sigmask
-            .load(core::sync::atomic::Ordering::Acquire),
-        core::sync::atomic::Ordering::Release,
-    );
-    *new_thread.altstack.lock() = *current_thread.altstack.lock();
-    *new_thread.comm.lock() = *current_thread.comm.lock();
-    new_thread.no_new_privs.store(
-        current_thread
-            .no_new_privs
-            .load(core::sync::atomic::Ordering::Acquire),
-        core::sync::atomic::Ordering::Release,
-    );
-    new_process.add_thread(new_thread)?;
-
-    // Add to parent's children list
-    #[cfg(feature = "alloc")]
-    {
-        current_process.children.lock().push(new_pid);
-    }
-
-    // Add process to table
-    table::add_process(new_process)?;
-
-    // Mark as ready and add to scheduler
+    // Mark as ready. The caller starts its thread (sys_fork_with), and
+    // discards it whole if that fails.
     if let Some(process) = table::get_process(new_pid) {
         // The child inherited the parent's shared-region mappings; tell
         // each region, so its mapping count includes the child. Only now,
@@ -405,10 +423,6 @@ pub fn fork_process_with(opts: &ForkOptions) -> Result<(ProcessId, super::Thread
         // (review of the v0.26.0 stack, PR #15).
         register_inherited_regions(&process);
         process.set_state(ProcessState::Ready);
-
-        if let Some(thread) = process.get_thread(new_tid) {
-            create_scheduler_task(&process, &thread)?;
-        }
     }
 
     // Return child PID to parent

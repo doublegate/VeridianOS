@@ -257,9 +257,11 @@ filesystem.
 
 ### Shared IPC regions are never reclaimed
 
-A region's frames are freed only when no process maps it. Mappings that a child inherits through
-`fork` are not counted, so registered regions are kept for the life of the system. This leaks
-memory, but it cannot free memory that is still in use.
+A region's frames are freed only when it is unregistered, which is refused while any process maps
+it. Every mapping is counted (a fork child's inherited ones too, and an exiting process leaves the
+count since v0.27), but nothing unregisters a region once its count reaches zero, so registered
+regions are kept for the life of the system. This leaks memory, but it cannot free memory that is
+still in use.
 
 ### Binaries built before ADR 0009 do not run (rebuild required)
 

@@ -826,6 +826,11 @@ pub fn cleanup_process(process: &Process) {
         crate::syscall::scheduling::thread_exit(thread);
     }
 
+    // Shared regions forget this process before its mappings go (they kept
+    // counting it, so a region it had mapped could never be unregistered).
+    #[cfg(feature = "alloc")]
+    forget_shared_regions(process);
+
     // Release memory (VAS-tracked data frames + page table subtrees), its
     // size kept as the peak resident set first.
     process.note_rss();
@@ -962,6 +967,42 @@ pub fn cleanup_process(process: &Process) {
         "[PROCESS] Process {} used {} microseconds of CPU time",
         process.pid.0, _cpu_time
     );
+}
+
+/// Tell every shared region `process` maps that it is going away. The
+/// bases are collected first: a region's lock is taken before an address
+/// space's, never inside it (as in fork's `register_inherited_regions`).
+#[cfg(feature = "alloc")]
+fn forget_shared_regions(process: &Process) {
+    let bases: Vec<u64> = {
+        let space = process.memory_space.lock();
+        let mappings = space.mappings_ref().lock();
+        mappings
+            .values()
+            .filter(|m| m.mapping_type == crate::mm::vas::MappingType::SharedRegion)
+            .filter_map(|m| Some(m.physical_frames.first()?.as_u64() * 4096))
+            .collect()
+    };
+    for base in bases {
+        if let Some(region) = crate::ipc::shared_memory::lookup_region(base) {
+            region.forget(process.pid);
+        }
+    }
+}
+
+/// Free everything of a process that never ran: a fork or process creation
+/// that failed part-way, or whose first thread could not be started
+/// (N-46). Its mappings, frames, page tables, kernel stacks, capabilities
+/// and files are released, and it leaves its parent's children and the
+/// process table. Nothing may be running in it.
+#[cfg(feature = "alloc")]
+pub(crate) fn discard_unstarted(process: &Process) {
+    cleanup_process(process);
+    super::free_page_tables(process);
+    if let Some(parent) = process.parent().and_then(table::get_process) {
+        parent.children.lock().retain(|&p| p != process.pid);
+    }
+    let _ = table::remove_process(process.pid);
 }
 
 // ============================================================================

@@ -345,8 +345,14 @@ pub fn sys_thread_clone(
     // the old nested dispatch would run a second copy of it.
     #[cfg(target_arch = "x86_64")]
     if sched::dispatch::current_owner().is_some() {
-        crate::process::start_thread(&proc, &thread, true)
-            .map_err(|_| SyscallError::OutOfMemory)?;
+        if crate::process::start_thread(&proc, &thread, true).is_err() {
+            // The thread never ran: take it out again (with its kernel
+            // stack), or it counted as alive and its process could never
+            // finish exiting (N-46).
+            drop(thread);
+            let _ = crate::process::exit::cleanup_thread(&proc, tid);
+            return Err(SyscallError::OutOfMemory);
+        }
         return Ok(tid.0 as usize);
     }
 
