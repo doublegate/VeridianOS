@@ -1,8 +1,9 @@
 //! Kernel heap
 //!
 //! The backing memory and initialisation of the global allocator: a
-//! `linked_list_allocator::LockedHeap` on x86_64 and a bump allocator on
-//! AArch64 and RISC-V (MEM-SEC-03 tracks giving those a real heap). The
+//! `linked_list_allocator::LockedHeap` on x86_64 and RISC-V, and a bump
+//! allocator on AArch64 until its MMU is on (N-28; MEM-SEC-03 tracks giving
+//! it a real heap). The
 //! slab allocator that used to live here was never instantiated -- every
 //! request went to its fallback -- and was removed (MEM-INC-02).
 
@@ -137,7 +138,7 @@ pub fn init() -> Result<(), crate::error::KernelError> {
             // which is required after writing to the allocator's atomic fields so
             // that the allocator state is visible before any allocation attempts.
             unsafe {
-                core::arch::asm!("dsb sy", "isb", options(nomem, nostack));
+                core::arch::asm!("dsb sy", "isb", options(nostack));
             }
 
             uart_write_str("[HEAP] ALLOCATOR initialized\n");

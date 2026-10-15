@@ -39,32 +39,11 @@ pub fn validate_user_ptr<T>(ptr: *const T, len: usize) -> Result<(), SyscallErro
         return Err(SyscallError::InvalidPointer);
     }
 
-    // Validate page mappings for the entire range
-    validate_page_mappings(addr, end)?;
-
-    Ok(())
-}
-
-/// Validate that all pages in the given range are mapped and accessible
-fn validate_page_mappings(start: usize, end: usize) -> Result<(), SyscallError> {
-    // Range check: verify all pages fall within user space.
-    // Note: translate_user_address() walks page tables using raw physical
-    // addresses as pointers, which requires identity mapping. Since syscalls
-    // run with user CR3 (no identity mapping), the page table walk faults.
-    // The range check is sufficient: if a page is truly unmapped, the
-    // subsequent volatile read/write will trigger a proper page fault.
-    for page_addr in (start..end).step_by(PAGE_SIZE) {
-        if !crate::mm::is_user_addr_valid(page_addr) {
-            return Err(SyscallError::UnmappedMemory);
-        }
-    }
-
-    if !end.is_multiple_of(PAGE_SIZE) {
-        let last_page = (end - 1) & !(PAGE_SIZE - 1);
-        if !crate::mm::is_user_addr_valid(last_page) {
-            return Err(SyscallError::UnmappedMemory);
-        }
-    }
+    // Whether the pages are mapped is not checked here: the copy itself
+    // finds out. On x86_64 a fault in the user-copy routines returns EFAULT
+    // through the exception table (MEM-SEC-01); AArch64 and RISC-V get that
+    // with user mode (sprint E, ARCH-MEM-03). The per-page loop that used to
+    // follow only re-checked the bound above, once per page (PB-MEM-07).
 
     Ok(())
 }

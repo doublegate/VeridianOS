@@ -2494,9 +2494,14 @@ impl VirtualAddressSpace {
         }
 
         let mut mappings = self.mappings.lock();
+        // The only candidate is the last mapping starting at or below the
+        // page (mappings never overlap); was a scan of all of them
+        // (PB-MEM-05).
         let mapping = mappings
-            .values_mut()
-            .find(|m| m.contains(VirtualAddress(page)))
+            .range_mut(..=VirtualAddress(page))
+            .next_back()
+            .map(|(_, m)| m)
+            .filter(|m| m.contains(VirtualAddress(page)))
             .ok_or(KernelError::InvalidAddress {
                 addr: vaddr as usize,
             })?;
@@ -2540,9 +2545,14 @@ impl VirtualAddressSpace {
             return Err(bad);
         }
         let mut mappings = self.mappings.lock();
+        // The only candidate is the last mapping starting at or below the
+        // page (mappings never overlap); was a scan of all of them
+        // (PB-MEM-05).
         let mapping = mappings
-            .values_mut()
-            .find(|m| m.contains(VirtualAddress(page)))
+            .range_mut(..=VirtualAddress(page))
+            .next_back()
+            .map(|(_, m)| m)
+            .filter(|m| m.contains(VirtualAddress(page)))
             .ok_or(KernelError::InvalidAddress {
                 addr: vaddr as usize,
             })?;

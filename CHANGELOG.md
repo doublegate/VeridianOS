@@ -647,6 +647,14 @@
   see the request. New `dma_wmb`, `dma_rmb` and `io_wmb` (as Linux's: `dmb oshst`/`oshld` on
   AArch64, `fence w,w`/`r,r`/`w,o` on RISC-V) are used for virtio-blk and virtio-net. The barrier
   functions also stop being `nomem` asm, which the compiler could move memory accesses across.
+- **Memory-management fixes from the 2026-10 audit intake.**
+  - A copy-on-write fault finds its mapping in O(log n) instead of scanning every mapping
+    (PB-MEM-05).
+  - User-pointer validation no longer re-checks the same bound once per page (PB-MEM-07).
+  - The user-address translation walk reaches page tables through the physical-memory map rather
+    than dereferencing physical addresses, which became user addresses when the map moved
+    (INC-MEM-03; the walk has no caller today).
+  - The heap module's description of which architectures use which allocator is corrected.
 - **Zone-limited frame allocations stay in their zone.** A DMA-zone request could be served by any
   node's allocator without a zone check; a first attempt at the check (not released) tested only
   the first frame, so a run starting below 16 MiB and ending above it was accepted. The bitmap and

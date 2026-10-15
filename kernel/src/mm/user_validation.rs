@@ -25,10 +25,17 @@ pub fn translate_address(addr: usize) -> Option<PageTableEntry> {
     // The kernel is mapped via L4[256-511] in every process's page table,
     // so CR3 already points to the correct page table for translating both
     // user and kernel addresses.
+    // Every table is reached through the physical-memory map (INC-MEM-03):
+    // the walk used to dereference the physical addresses themselves, which
+    // since the map moved into the kernel half (N-134) are low user
+    // addresses of the current process -- it could plant fake tables there.
+    let table_at = |phys: u64| crate::mm::phys_to_virt_addr(phys) as *const PageTable;
+    // The root's low 12 bits are flags (PCID, PWT, PCD on x86_64).
+    let root = crate::mm::get_kernel_page_table() as u64 & 0x000F_FFFF_FFFF_F000;
     // SAFETY: get_kernel_page_table() returns the physical address of the
-    // active page table root. The page table memory is accessible via the
-    // kernel's physical memory mapping and has 'static lifetime.
-    let page_table = unsafe { &*(crate::mm::get_kernel_page_table() as *const PageTable) };
+    // active page table root, mapped by the physical-memory map for the
+    // kernel's lifetime.
+    let page_table = unsafe { &*table_at(root) };
 
     // Walk the page tables to find the entry
     let vpn = addr >> 12; // Virtual page number
@@ -48,8 +55,8 @@ pub fn translate_address(addr: usize) -> Option<PageTableEntry> {
     // Get L3 table
     // SAFETY: l4_entry.addr() returns the physical address of the next-level
     // page table. This address was set by the kernel's page table setup code
-    // and points to a valid PageTable in identity-mapped kernel memory.
-    let l3_table = unsafe { &*(l4_entry.addr()?.as_u64() as *const PageTable) };
+    // and points to a valid PageTable, reached through the physical-memory map.
+    let l3_table = unsafe { &*table_at(l4_entry.addr()?.as_u64()) };
 
     let l3_entry = l3_table[l3_index];
     if !l3_entry.is_present() {
@@ -64,8 +71,8 @@ pub fn translate_address(addr: usize) -> Option<PageTableEntry> {
     // Get L2 table
     // SAFETY: l3_entry.addr() returns the physical address of the next-level
     // page table, set by kernel page table initialization. The address points
-    // to a valid PageTable in identity-mapped kernel memory.
-    let l2_table = unsafe { &*(l3_entry.addr()?.as_u64() as *const PageTable) };
+    // to a valid PageTable, reached through the physical-memory map.
+    let l2_table = unsafe { &*table_at(l3_entry.addr()?.as_u64()) };
 
     let l2_entry = l2_table[l2_index];
     if !l2_entry.is_present() {
@@ -80,8 +87,8 @@ pub fn translate_address(addr: usize) -> Option<PageTableEntry> {
     // Get L1 table
     // SAFETY: l2_entry.addr() returns the physical address of the final-level
     // page table, set by kernel page table initialization. The address points
-    // to a valid PageTable in identity-mapped kernel memory.
-    let l1_table = unsafe { &*(l2_entry.addr()?.as_u64() as *const PageTable) };
+    // to a valid PageTable, reached through the physical-memory map.
+    let l1_table = unsafe { &*table_at(l2_entry.addr()?.as_u64()) };
 
     let l1_entry = l1_table[l1_index];
     if !l1_entry.is_present() {
