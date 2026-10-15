@@ -7,6 +7,10 @@ What VeridianOS does not do yet, or does only partly, as of the v0.27 developmen
   [`docs/audit/AUDIT-VERIFICATION-2026-10-05.md`](audit/AUDIT-VERIFICATION-2026-10-05.md).
 - N-64 to N-181 are tracked in
   [`docs/audit/AUDIT-REEVALUATION-2026-10-07.md`](audit/AUDIT-REEVALUATION-2026-10-07.md).
+- N-182 to N-260 are tracked in
+  [`docs/audit/ABI-REVIEW-2026-10-07.md`](audit/ABI-REVIEW-2026-10-07.md), and N-261 to N-279
+  (the 2026-10-10 matrix intake) in
+  [`docs/audit/AUDIT-INTAKE-2026-10-10.md`](audit/AUDIT-INTAKE-2026-10-10.md).
 - HX-, HA- and HR- IDs (real hardware) are in `ref-docs/HARDWARE-X86_64.md`,
   `ref-docs/HARDWARE-AARCH64.md` and `ref-docs/HARDWARE-RISCV64.md`.
 - Sprint letters (D0, D, E, F, G, H) refer to the v0.27.0 plan in
@@ -118,9 +122,11 @@ work. User code is preempted when its slice ends (D3). What is still missing:
     of waiting (it returns a short count when part fits; N-128).
 - **exec from a multithreaded process fails with EAGAIN.** The other threads would keep running
   on the page tables exec replaces; stopping them first is N-101.
-- **Futex keys (N-114 remainder).** Futex waits poll the futex word instead of queueing on a key
-  (so waits in shared memory between processes work, but every waiter polls). (A main thread's
-  id now equals its process id, N-217.)
+- **Two futex tables (N-279).** Dispatched threads (every user thread on x86_64) queue on a
+  key -- the physical address for shared mappings, so futexes in memory shared between processes
+  work -- but the old table, keyed by (pid, address), still serves threads that are not
+  dispatched. A waiter and a waker on different tables would miss each other; it goes with the
+  old scheduler (D4). (A main thread's id now equals its process id, N-217.)
 - **Native libc threads (N-102).** The native C library's `clone` returns through a C epilogue
   and `errno` is one global, so its `pthread_create` still does not work (musl's does). Two
   fixes are therefore tested by unit tests only: LIBC-SEC-01 (the allocator lock in `stdlib.c`)

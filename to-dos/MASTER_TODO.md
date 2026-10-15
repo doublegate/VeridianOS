@@ -136,15 +136,19 @@ What does not work yet: `docs/KNOWN-LIMITATIONS.md`.
       MAP_FIXED semantics (done, N-141); pty fixes (done, N-128); thread placement (N-114 partly done: no unused
       clone stacks; main tid == pid and futex keys remain).
     - [ ] Threads: clone through the dispatcher, native libc clone stub, TCB join, TLS errno
-      (N-102); N-46, N-50, N-54.
+      (N-102); N-46, N-50, N-54; `thread_join` sleeps on an exit queue instead of yielding
+      (N-269).
     - [ ] D4: nested boot dispatch and `BOOT_RETURN_*` removed; old scheduler, `queue.rs`,
       `percpu_queue.rs`, `deadline.rs`, `process_compat`, old `context_switch` retired (N-84,
-      N-85, N-156, N-181).
+      N-85, N-156, N-181); the old `FUTEX_TABLE` path goes with it (N-279).
     - [ ] D5, SMP S2/S3: per-CPU run queues and current task, idle and balancing on every CPU,
       `cpu_init_local()` on APs (N-172), IPI fixes (N-173), interrupts enabled in syscalls with
       deferred frees and per-mm TLB masks (N-139, N-143 flushes), smp_boot stop + guarded AP
-      stacks (N-180), timer advance by elapsed time (N-179), `smp` on by default; N-51, N-52.
-    - [ ] Syscalls `sched_setattr/getattr`, `sched_setscheduler`, `nice`/`setpriority`, real
+      stacks (N-180), timer advance by elapsed time (N-179), `smp` on by default; N-51, N-52;
+      targeted TLB shootdown (per-address-space CPU mask, logical-to-APIC-ID map; N-262) and
+      frees through the per-CPU cache after it (N-261); per-CPU syscall rate limiter
+      (SYS-PERF-01).
+    - [x] Syscalls `sched_setattr/getattr`, `sched_setscheduler`, `nice`/`setpriority`, real
       `sched_setaffinity`/`getaffinity`, `sched_yield` on the new policy (SCHED-INC-02 resolved
       by the deadline class).
   - [ ] **E, user mode beyond x86_64** (also the boot-critical hardware items, since they coincide
@@ -182,7 +186,10 @@ What does not work yet: `docs/KNOWN-LIMITATIONS.md`.
     passwords (N-153); POSIX shm access control (N-88); on-disk validation and fuzzing, `mkfs`
     (N-123); BlockFS open-unlinked inodes (N-117 interim); mount checks (N-129); frame allocator
     regions (N-142); `write_user` padding and IRQ-safe allocator locks (N-144); RTC fn pointer
-    (N-157); CI flags, blocking coverage, real Kani harnesses, supply chain (N-161 to N-164).
+    (N-157); CI flags, blocking coverage, real Kani harnesses, supply chain (N-161 to N-164);
+    from the 2026-10 intake: dead `cache_topology` and KSM wired or removed and
+    `PERFORMANCE-TUNING.md` corrected (N-264, N-274), one `SyscallError` (N-272), `alloc`
+    unconditional with a CI build that proves it (N-275).
   - [ ] **H, real hardware** (`ref-docs/HARDWARE-{X86_64,AARCH64,RISCV64}.md`: HX-01..34,
     HA-01..30, HR-01..40; items already in E are not repeated):
     - Shared infrastructure: one FDT parser (cells, ranges, `dma-ranges`, interrupt cells,
@@ -230,6 +237,14 @@ What does not work yet: `docs/KNOWN-LIMITATIONS.md`.
   - [ ] **ABI review, security and D/F items:** N-190 to N-193 (permission checks) with D;
     N-207, N-209 to N-211, N-217, N-221, N-222, N-225 with D3/threads/scheduling syscalls;
     N-231, N-235 to N-238 with F1.
+  - [ ] **Consolidation and the 2026-10 audit intake (2026-10-14;
+    `docs/audit/AUDIT-INTAKE-2026-10-10.md`).** Done: another agent's unmerged work audited,
+    archived and reverted, its private files kept out of git; frame-allocator zones; BlockFS
+    early data write-back and lock-free misses (N-263, N-118 BlockFS part; ADR 0011); IPC and
+    capability authority (N-80, N-83, N-87, N-88, N-89 parts); VirtIO barriers (N-270, N-271);
+    mm items (N-265, N-266, PB-MEM-05/07); shell `mv` (N-273); reviewer gate comment (N-276);
+    `scripts/dev/` helpers. Open: heap sized from the memory map so small guests boot (N-278);
+    `knetd` done properly (N-69, with F2); the rest is in the sprint lists above and v0.29.
   - [ ] **Release:** tri-arch boot with `-smp 4`, runtime suite, CHANGELOG, tag.
 - [ ] **v0.28.0:** the process, signal, time and file syscall tiers (X2 groups, with the open
   ABI-review findings N-194 to N-247 that belong to them).
@@ -256,7 +271,8 @@ What does not work yet: `docs/KNOWN-LIMITATIONS.md`.
     inode cache with open counts and orphan list (N-117), crash consistency ADR (journal or shadow
     superblock; N-121), page cache and shared mmap (N-125), dentry cache and hashed directories
     (N-130), stable getdents cookies (N-124), atomic O_APPEND (N-126).
-  - [ ] **v0.29 memory architecture:** lazy anonymous memory, range-indexed mappings, per-frame
+  - [ ] **v0.29 memory architecture** (also N-267 demand-paging mapping overlap, N-268 empty
+    page tables kept): lazy anonymous memory, range-indexed mappings, per-frame
     refcount array, ranged per-mm TLB flushes, per-VMA locks (N-143).
   - [ ] **v0.30 credentials remainder:** filesystem ids, Linux capabilities, setuid exec
     (N-131; the id triples and groups move to v0.27 as N-248).
