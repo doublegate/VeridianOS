@@ -412,6 +412,8 @@ impl From<IpcError> for SyscallError {
             IpcError::OutOfMemory => SyscallError::OutOfMemory,
             IpcError::WouldBlock => SyscallError::WouldBlock,
             IpcError::PermissionDenied => SyscallError::PermissionDenied,
+            IpcError::Interrupted => SyscallError::Interrupted,
+            IpcError::EndpointBusy | IpcError::ResourceBusy => SyscallError::Busy,
             _ => SyscallError::InvalidArgument,
         }
     }

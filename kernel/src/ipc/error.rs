@@ -41,6 +41,8 @@ pub enum IpcError {
     ResourceBusy,
     /// IPC system not initialized
     NotInitialized,
+    /// A signal interrupted a blocking IPC operation
+    Interrupted,
 }
 
 impl IpcError {
@@ -63,6 +65,7 @@ impl IpcError {
             Self::InvalidMemoryRegion => "Invalid memory region",
             Self::ResourceBusy => "Resource temporarily unavailable",
             Self::NotInitialized => "IPC system not initialized",
+            Self::Interrupted => "Interrupted by a signal",
         }
     }
 
@@ -86,6 +89,7 @@ impl IpcError {
             Self::InvalidMemoryRegion => -14,
             Self::ResourceBusy => -15,
             Self::NotInitialized => -16,
+            Self::Interrupted => -17,
         }
     }
 }

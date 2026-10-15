@@ -423,8 +423,10 @@
     endpoint number.
   - A reply is accepted only for a caller with a call outstanding, only once, and only from a holder
     of RECEIVE rights on the endpoint it called. Any process could "reply" to any blocked process.
-    The reply goes only to a reply endpoint the caller owns, and a call that ends without a reply
-    (an error or an interruption) is no longer outstanding.
+    The reply is stored in the call's own kernel slot, keyed by the calling thread, instead of
+    being sent to an endpoint numbered by the caller's pid (any endpoint could have that number);
+    a thread has one call at a time, and a call that ends without a reply (an error or a signal,
+    now EINTR) is no longer outstanding.
   - Capability revocation (native call 1055) is dispatched and requires the caller to hold the
     capability with REVOKE rights. It checked only that the token existed somewhere.
   - The message-passing endpoint registry hands out shared references. The old `&'static` pointers

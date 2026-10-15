@@ -282,21 +282,6 @@ pub fn send_to_endpoint(mut msg: Message, endpoint_id: EndpointId) -> Result<()>
     }
 }
 
-/// Deliver an authorized reply to `caller`'s reply endpoint, the endpoint
-/// numbered by its pid. The endpoint must belong to `caller`: endpoint
-/// numbers and pids share one namespace, so another process's endpoint
-/// with that number must never receive it.
-#[cfg(feature = "alloc")]
-pub fn send_reply(msg: Message, caller: u64) -> Result<()> {
-    let endpoint = ENDPOINT_REGISTRY
-        .get(caller)
-        .ok_or(IpcError::EndpointNotFound)?;
-    if endpoint.owner != ProcessId(caller) {
-        return Err(IpcError::PermissionDenied);
-    }
-    send_to_endpoint(msg, caller)
-}
-
 /// Receive a message from an endpoint
 #[cfg(feature = "alloc")]
 pub fn receive_from_endpoint(endpoint_id: EndpointId, blocking: bool) -> Result<Message> {
@@ -416,24 +401,5 @@ mod tests {
             registry.register(Endpoint::new(7, ProcessId(5))),
             Err(IpcError::EndpointBusy)
         ));
-    }
-
-    /// A reply for pid 9 goes only to an endpoint 9 that pid 9 owns.
-    #[test]
-    fn replies_go_only_to_the_callers_own_endpoint() {
-        ENDPOINT_REGISTRY
-            .register(Endpoint::new(0x9_0009, ProcessId(0x9_0001)))
-            .unwrap();
-        let msg = Message::Small(crate::ipc::SmallMessage::new(0, 0));
-        assert!(matches!(
-            send_reply(msg, 0x9_0009),
-            Err(IpcError::PermissionDenied)
-        ));
-        let msg = Message::Small(crate::ipc::SmallMessage::new(0, 0));
-        assert!(matches!(
-            send_reply(msg, 0x9_000A),
-            Err(IpcError::EndpointNotFound)
-        ));
-        ENDPOINT_REGISTRY.unregister(0x9_0009).unwrap();
     }
 }

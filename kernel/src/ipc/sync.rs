@@ -16,11 +16,9 @@ use super::{
     fast_path::fast_receive,
     message::Message,
 };
-use crate::{
-    arch::entropy::read_timestamp,
-    process::{ProcessId, ProcessState},
-    sched::{current_process, find_process},
-};
+use crate::arch::entropy::read_timestamp;
+#[cfg(test)]
+use crate::process::ProcessId;
 
 /// Statistics for synchronous IPC
 pub struct SyncIpcStats {
@@ -102,93 +100,118 @@ pub fn sync_receive(endpoint: u64) -> Result<Message> {
     }
 }
 
-/// Calls waiting for a reply: caller pid -> the endpoint it called (N-80).
-/// A reply is accepted only for a caller listed here, once, and only from a
-/// process holding RECEIVE rights on that endpoint.
+/// An outstanding call (N-80): the endpoint called, and the reply once a
+/// server has given it.
 #[cfg(feature = "alloc")]
-static PENDING_CALLS: spin::Mutex<alloc::collections::BTreeMap<u64, u64>> =
-    spin::Mutex::new(alloc::collections::BTreeMap::new());
-
-/// Call operation (send and wait for reply)
-pub fn sync_call(request: Message, target: u64) -> Result<Message> {
-    let me = crate::process::current_process()
-        .ok_or(IpcError::ProcessNotFound)?
-        .pid
-        .0;
-    #[cfg(feature = "alloc")]
-    PENDING_CALLS.lock().insert(me, target);
-    if let Err(e) = sync_send(request, target) {
-        #[cfg(feature = "alloc")]
-        PENDING_CALLS.lock().remove(&me);
-        return Err(e);
-    }
-
-    // Mark ourselves as waiting for reply
-    let current = current_process();
-    current.state = ProcessState::Blocked;
-
-    // Wait for reply using process ID as endpoint. Whatever the outcome
-    // (a reply, an error, an interruption), the call is no longer
-    // outstanding, so a later reply is refused.
-    let reply = sync_receive(current.pid.0);
-    #[cfg(feature = "alloc")]
-    PENDING_CALLS.lock().remove(&me);
-    reply
+struct PendingCall {
+    endpoint: u64,
+    reply: Option<Message>,
 }
 
-/// Whether the holder of `cap_space` may reply to `caller` with `cap`: the
-/// caller has a call outstanding and `cap` names the endpoint it called
-/// with RECEIVE rights. The call is consumed, so each call takes one reply.
+/// Outstanding calls by caller thread id. A reply goes into the call's own
+/// slot here, never through an endpoint: endpoint numbers and thread or
+/// process ids are different namespaces, and no ordinary send can reach a
+/// slot. A thread has at most one call outstanding.
+#[cfg(feature = "alloc")]
+static PENDING_CALLS: spin::Mutex<alloc::collections::BTreeMap<u64, PendingCall>> =
+    spin::Mutex::new(alloc::collections::BTreeMap::new());
+
+/// Woken whenever a reply is stored.
+#[cfg(feature = "alloc")]
+static REPLIES: crate::sched::dispatch::WaitQueue = crate::sched::dispatch::WaitQueue::new();
+
+/// Call operation (send and wait for reply). The caller is identified to
+/// the server by its thread id (how a server learns it is part of the
+/// reply-capability design, v0.28).
+pub fn sync_call(request: Message, target: u64) -> Result<Message> {
+    #[cfg(feature = "alloc")]
+    {
+        let me = crate::process::current_thread()
+            .ok_or(IpcError::ProcessNotFound)?
+            .tid
+            .0;
+        {
+            let mut pending = PENDING_CALLS.lock();
+            if pending.contains_key(&me) {
+                return Err(IpcError::EndpointBusy);
+            }
+            pending.insert(
+                me,
+                PendingCall {
+                    endpoint: target,
+                    reply: None,
+                },
+            );
+        }
+        let result = sync_send(request, target).and_then(|()| {
+            let has_reply = || {
+                PENDING_CALLS
+                    .lock()
+                    .get(&me)
+                    .is_some_and(|c| c.reply.is_some())
+            };
+            crate::sched::dispatch::wait_event(&REPLIES, None, has_reply)
+                .map_err(|_| IpcError::Interrupted)
+        });
+        // Whatever the outcome the call is over: a later reply finds no
+        // entry and is refused.
+        let call = PENDING_CALLS.lock().remove(&me);
+        result?;
+        call.and_then(|c| c.reply).ok_or(IpcError::InvalidMessage)
+    }
+    #[cfg(not(feature = "alloc"))]
+    {
+        let _ = (request, target);
+        Err(IpcError::OutOfMemory)
+    }
+}
+
+/// Store `reply` for `caller`'s outstanding call if the holder of
+/// `cap_space` may answer it: `cap` names the endpoint called with RECEIVE
+/// rights, and the call has no reply yet (one reply per call).
 #[cfg(feature = "alloc")]
 fn authorize_reply(
-    pending: &mut alloc::collections::BTreeMap<u64, u64>,
+    pending: &mut alloc::collections::BTreeMap<u64, PendingCall>,
     caller: u64,
     cap: crate::cap::CapabilityToken,
     cap_space: &crate::cap::space::CapabilitySpace,
+    reply: Message,
 ) -> Result<()> {
-    let endpoint = *pending.get(&caller).ok_or(IpcError::InvalidMessage)?;
+    let call = pending.get_mut(&caller).ok_or(IpcError::InvalidMessage)?;
+    if call.reply.is_some() {
+        return Err(IpcError::InvalidMessage);
+    }
     crate::cap::ipc_integration::check_endpoint_permission(
         cap,
         cap_space,
-        endpoint,
+        call.endpoint,
         crate::cap::ipc_integration::IpcRights::RECEIVE,
     )?;
-    pending.remove(&caller);
+    call.reply = Some(reply);
     Ok(())
 }
 
-/// Reply to a previous call. Only a server of the endpoint the caller
-/// called may reply (N-80): `reply`'s capability must name that endpoint
-/// with RECEIVE rights; any process could reply to any blocked one before.
+/// Reply to the outstanding call of thread `caller`. Only a server of the
+/// endpoint called may reply (N-80): `reply`'s capability must name that
+/// endpoint with RECEIVE rights. Any process could reply to any blocked
+/// one before, and replies went to an endpoint numbered by the caller's
+/// pid, a number any endpoint could have.
 pub fn sync_reply(reply: Message, caller: u64) -> Result<()> {
     #[cfg(feature = "alloc")]
     {
         let process = crate::process::current_process().ok_or(IpcError::ProcessNotFound)?;
         let space = process.capability_space.lock();
         let cap = crate::cap::CapabilityToken::from_u64(reply.capability());
-        authorize_reply(&mut PENDING_CALLS.lock(), caller, cap, &space)?;
+        authorize_reply(&mut PENDING_CALLS.lock(), caller, cap, &space, reply)?;
+        drop(space);
+        REPLIES.wake_all();
+        Ok(())
     }
-
-    // Find caller process
-    let caller_process = find_process(ProcessId(caller)).ok_or(IpcError::ProcessNotFound)?;
-
-    // Verify caller is waiting for reply
-    if caller_process.state != ProcessState::Blocked {
-        return Err(IpcError::InvalidMessage);
-    }
-
-    // Deliver to the caller's reply queue (its pid). The reply was
-    // authorized above, so it does not go through the send check, which
-    // asks for a SEND capability on the target endpoint. Delivery itself
-    // still needs the endpoint registries unified (N-33).
-    #[cfg(feature = "alloc")]
-    crate::ipc::message_passing::send_reply(reply, caller)?;
     #[cfg(not(feature = "alloc"))]
-    let _ = reply;
-
-    // Wake the caller process after reply is sent
-    crate::sched::ipc_blocking::wake_up_process(ProcessId(caller));
-    Ok(())
+    {
+        let _ = (reply, caller);
+        Err(IpcError::OutOfMemory)
+    }
 }
 
 /// Slow path for synchronous send
@@ -316,8 +339,8 @@ pub struct SyncStatsSummary {
 mod tests {
     use super::*;
 
-    /// N-80: a reply needs an outstanding call from that caller and a
-    /// RECEIVE capability for the endpoint it called; each call takes one.
+    /// N-80: a reply needs an outstanding call from that caller, a
+    /// RECEIVE capability for the endpoint it called, and no reply yet.
     #[cfg(feature = "alloc")]
     #[test]
     fn reply_requires_the_called_endpoint_and_an_outstanding_call() {
@@ -342,15 +365,27 @@ mod tests {
                 &space,
             )
             .unwrap();
+        let msg = || Message::Small(crate::ipc::SmallMessage::new(0, 7));
         let mut pending = BTreeMap::new();
         // No call outstanding.
-        assert!(authorize_reply(&mut pending, 40, server, &space).is_err());
-        pending.insert(40, ep_id);
+        assert!(authorize_reply(&mut pending, 40, server, &space, msg()).is_err());
+        pending.insert(
+            40,
+            PendingCall {
+                endpoint: ep_id,
+                reply: None,
+            },
+        );
         // A capability for another endpoint does not authorize the reply.
-        assert!(authorize_reply(&mut pending, 40, wrong, &space).is_err());
-        assert!(authorize_reply(&mut pending, 40, server, &space).is_ok());
-        // The call is consumed: a second reply is refused.
-        assert!(authorize_reply(&mut pending, 40, server, &space).is_err());
+        assert!(authorize_reply(&mut pending, 40, wrong, &space, msg()).is_err());
+        assert!(pending[&40].reply.is_none());
+        assert!(authorize_reply(&mut pending, 40, server, &space, msg()).is_ok());
+        assert!(
+            pending[&40].reply.is_some(),
+            "stored in the call's own slot"
+        );
+        // One reply per call.
+        assert!(authorize_reply(&mut pending, 40, server, &space, msg()).is_err());
     }
 
     #[test]
