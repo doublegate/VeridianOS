@@ -46,6 +46,37 @@ type Owner = (u64, u64);
 /// which is a deadlock user space created).
 const MAX_CHAIN: usize = 16;
 
+/// Compare-and-swap attempts on a futex word user space keeps changing
+/// before giving up with EAGAIN, as Linux does.
+const MAX_CAS: usize = 16;
+
+/// The keyspace of futexes in memory shared between processes
+/// (`futex::futex_key`).
+const SHARED: u64 = u64::MAX;
+
+/// Fault the futex word in, readable and writable (a same-value
+/// compare-and-swap takes a copy-on-write copy), before the PI lock is
+/// taken: a fault with the lock held could sleep (a page-cache read) while
+/// other CPUs spin on it.
+fn prefault(uaddr: usize) -> Result<(), SyscallError> {
+    let v = read_user::<u32>(uaddr)?;
+    cmpxchg_user_u32(uaddr, v, v)?;
+    Ok(())
+}
+
+/// Whether `me` may make `holder` the holder of lock `key`, and so lend it
+/// priority. A private futex's holder must be a thread of the caller's own
+/// process; a shared one's a thread whose scheduling the caller could
+/// change anyway (sched_setscheduler's rule). Otherwise writing another
+/// process's thread id into one's own futex word boosted that thread.
+fn may_hold(me: Owner, holder: Owner, key: FutexKey) -> bool {
+    if key.0 == SHARED {
+        super::scheduling::may_change_pid(holder.0)
+    } else {
+        holder.0 == me.0
+    }
+}
+
 struct Waiter {
     owner: Owner,
     /// The priority it lends (its `pi_priority` when it last changed).
@@ -149,10 +180,17 @@ fn hand_off(
     // The word is ours (or the dead owner's); only user space racing
     // against its own lock could change it, and the kernel's word wins.
     let mut val = read_user::<u32>(uaddr)?;
+    let mut tries = 0;
     loop {
         let seen = cmpxchg_user_u32(uaddr, val, word)?;
         if seen == val {
             break;
+        }
+        tries += 1;
+        if tries >= MAX_CAS {
+            // The waiter goes back on the queue; the lock stays as it is.
+            state.waiters.push(next);
+            return Err(SyscallError::WouldBlock);
         }
         val = seen;
     }
@@ -183,9 +221,15 @@ pub(crate) fn lock_pi(
     let key = futex_key(uaddr)?;
 
     loop {
+        prefault(uaddr)?;
         let seq = {
             let mut table = PI.lock();
+            let mut tries = 0;
             loop {
+                tries += 1;
+                if tries > MAX_CAS {
+                    return Err(SyscallError::WouldBlock);
+                }
                 let val = read_user::<u32>(uaddr)?;
                 let tid = val & FUTEX_TID_MASK;
                 if tid == 0 {
@@ -213,19 +257,28 @@ pub(crate) fn lock_pi(
                 {
                     continue;
                 }
-                // The holder must be a live thread (Linux: ESRCH).
+                // The holder must be a live thread (Linux: ESRCH) the caller
+                // may lend priority to.
                 let holder = owner_of_tid(tid).ok_or(SyscallError::ProcessNotFound)?;
+                if !may_hold(me, holder, key) {
+                    return Err(SyscallError::OperationNotPermitted);
+                }
                 let state = table.entry(key).or_insert(PiState {
                     holder,
                     waiters: Vec::new(),
                 });
-                state.holder = holder;
+                let stale = core::mem::replace(&mut state.holder, holder);
                 let seq = SEQ.fetch_add(1, Ordering::Relaxed);
                 state.waiters.push(Waiter {
                     owner: me,
                     prio: dispatch::pi_priority(me).unwrap_or(0),
                     seq,
                 });
+                if stale != holder {
+                    // The word named someone else (user space took or
+                    // passed the lock): the old holder's boost is redone.
+                    propagate(&mut table, stale);
+                }
                 propagate(&mut table, holder);
                 break seq;
             }
@@ -272,6 +325,7 @@ pub(crate) fn unlock_pi(uaddr: usize) -> Result<usize, SyscallError> {
     let my_tid = me.1 as u32 & FUTEX_TID_MASK;
     let key = futex_key(uaddr)?;
 
+    prefault(uaddr)?;
     let mut table = PI.lock();
     let val = read_user::<u32>(uaddr)?;
     if val & FUTEX_TID_MASK != my_tid {
@@ -282,6 +336,7 @@ pub(crate) fn unlock_pi(uaddr: usize) -> Result<usize, SyscallError> {
     }
     // No kernel waiters: free it (clearing a stale waiters bit).
     let mut cur = val;
+    let mut tries = 0;
     loop {
         let seen = cmpxchg_user_u32(uaddr, cur, 0)?;
         if seen == cur {
@@ -289,6 +344,10 @@ pub(crate) fn unlock_pi(uaddr: usize) -> Result<usize, SyscallError> {
         }
         if seen & FUTEX_TID_MASK != my_tid {
             return Err(SyscallError::OperationNotPermitted);
+        }
+        tries += 1;
+        if tries >= MAX_CAS {
+            return Err(SyscallError::WouldBlock);
         }
         cur = seen;
     }
@@ -355,6 +414,14 @@ mod tests {
                 .map(|&(owner, prio, seq)| Waiter { owner, prio, seq })
                 .collect(),
         }
+    }
+
+    #[test]
+    fn a_private_lock_holder_must_be_in_the_callers_process() {
+        // Writing another process's thread id into one's own futex word
+        // must not lend that thread priority.
+        assert!(may_hold((5, 50), (5, 51), (5, 0x1000)));
+        assert!(!may_hold((5, 50), (9, 90), (5, 0x1000)));
     }
 
     #[test]

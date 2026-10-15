@@ -232,6 +232,17 @@ fn same_owner(caller: &Credentials, target: &Credentials) -> bool {
     caller.euid == 0 || caller.euid == target.euid || caller.euid == target.ruid
 }
 
+/// Whether the caller may change the scheduling of process `pid`'s threads
+/// (`same_owner`): the rule for lending them priority through a shared PI
+/// futex (futex_pi.rs).
+pub(crate) fn may_change_pid(pid: u64) -> bool {
+    let Ok(me) = caller() else {
+        return false;
+    };
+    crate::process::table::get_process(crate::process::ProcessId(pid))
+        .is_some_and(|p| same_owner(&me, &p.credentials()))
+}
+
 /// Apply a request to the thread `pid` names.
 fn set(
     pid: usize,
