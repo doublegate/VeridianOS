@@ -120,7 +120,7 @@ TSC. Method and full tables: [`docs/PERFORMANCE-REPORT.md`](docs/PERFORMANCE-REP
 
 | Metric | Target | Measured (avg) |
 | --- | --- | --- |
-| IPC latency | < 1us | not measured: IPC is not reachable from user space yet (N-33) |
+| IPC latency | < 1us | not measured; every message is queued on its endpoint (no register fast path until the v0.28 IPC redesign) |
 | Context switch | < 10us | not measured |
 | Frame allocation | < 1us | 62 ns per-CPU cache, 272 ns global allocator |
 | Capability lookup | < 100 ns | 93 ns (hash table) |

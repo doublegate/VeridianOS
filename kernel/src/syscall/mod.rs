@@ -2539,9 +2539,16 @@ fn sys_ipc_receive(endpoint: usize, buffer: usize, buffer_len: usize) -> Syscall
     if let Err(e) = crate::cap::ipc_integration::check_receive_permission(cap_token, &cap_space) {
         return Err(e.into());
     }
+    // The endpoint is the one the capability names: the token's value used
+    // to be passed as the endpoint number, which found no endpoint (N-81).
+    let endpoint_id = match cap_space.lookup_entry(cap_token) {
+        Some((crate::cap::object::ObjectRef::Endpoint { endpoint }, _rights)) => endpoint.id(),
+        _ => return Err(SyscallError::InvalidCapability),
+    };
     drop(cap_space);
 
-    let message = sync_receive(endpoint as u64).map_err(SyscallError::from)?;
+    // Sleeps until a message arrives; a signal ends the wait with EINTR.
+    let message = sync_receive(endpoint_id).map_err(SyscallError::from)?;
     message_to_user(&message, buffer, buffer_len)
 }
 

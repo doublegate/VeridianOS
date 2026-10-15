@@ -1102,6 +1102,93 @@ static void test_thread_join(void)
     report("native_thread_join_sleeps", f == 0, why);
 }
 
+/* Native IPC (1024-1028): an endpoint created through its capability is
+ * the one send and receive reach (N-47, N-81: they used to reach none), and
+ * a receive sleeps until a message arrives (N-84: it returned an empty
+ * message at once); a signal ends the wait with EINTR. */
+#define SYS_VERIDIAN_IPC_SEND 1024
+#define SYS_VERIDIAN_IPC_RECEIVE 1025
+#define SYS_VERIDIAN_IPC_CREATE_ENDPOINT 1028
+
+struct veridian_small_msg {
+    uint64_t capability;
+    uint32_t opcode;
+    uint32_t flags;
+    uint64_t data[4];
+};
+
+static void ipc_sig(int s) { (void)s; }
+
+static long ipc_send_op(long cap, uint32_t opcode)
+{
+    struct veridian_small_msg m = {0};
+    m.opcode = opcode;
+    m.data[0] = 0x1234;
+    return syscall(SYS_VERIDIAN_IPC_SEND, cap, &m, sizeof(m), 0);
+}
+
+static void test_ipc(void)
+{
+    int f = 0, st = 0;
+    /* The token is returned whole; its flag bits (60-63) make it negative
+     * as a long, so only -1 with errno is a failure. */
+    errno = 0;
+    long cap = syscall(SYS_VERIDIAN_IPC_CREATE_ENDPOINT, 0);
+    if (cap == -1) {
+        static char cwhy[48];
+        snprintf(cwhy, sizeof(cwhy), "create endpoint failed: errno %d", errno);
+        report("native_ipc_send_receive_blocks", 0, cwhy);
+        return;
+    }
+    struct veridian_small_msg in;
+    /* Round trip within one process. */
+    if (ipc_send_op(cap, 7) != 0) f |= 1;
+    memset(&in, 0, sizeof(in));
+    if (syscall(SYS_VERIDIAN_IPC_RECEIVE, cap, &in, sizeof(in)) < 0 || in.opcode != 7 ||
+        in.data[0] != 0x1234)
+        f |= 2;
+
+    /* A receive sleeps until the forked child (same capabilities) sends. */
+    pid_t c = fork();
+    if (c == 0) {
+        struct timespec d = {0, 100 * 1000 * 1000};
+        nanosleep(&d, 0);
+        _exit(ipc_send_op(cap, 9) == 0 ? 0 : 1);
+    }
+    struct timespec t0, t1;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    memset(&in, 0, sizeof(in));
+    long r = syscall(SYS_VERIDIAN_IPC_RECEIVE, cap, &in, sizeof(in));
+    clock_gettime(CLOCK_MONOTONIC, &t1);
+    long waited_ms = (t1.tv_sec - t0.tv_sec) * 1000 + (t1.tv_nsec - t0.tv_nsec) / 1000000;
+    if (r < 0 || in.opcode != 9) f |= 4;
+    if (waited_ms < 50) f |= 8; /* it did wait for the child */
+    if (waitpid(c, &st, 0) != c || !WIFEXITED(st) || WEXITSTATUS(st) != 0) f |= 16;
+
+    /* With nothing to receive, a signal ends the wait. */
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = ipc_sig; /* no SA_RESTART */
+    sigaction(SIGUSR2, &sa, 0);
+    pid_t parent = getpid();
+    c = fork();
+    if (c == 0) {
+        struct timespec d = {0, 100 * 1000 * 1000};
+        nanosleep(&d, 0);
+        kill(parent, SIGUSR2);
+        _exit(0);
+    }
+    errno = 0;
+    long r2 = syscall(SYS_VERIDIAN_IPC_RECEIVE, cap, &in, sizeof(in));
+    int e2 = errno;
+    if (r2 != -1 || e2 != EINTR) f |= 32;
+    waitpid(c, 0, 0);
+    signal(SIGUSR2, SIG_DFL);
+    static char why[80];
+    snprintf(why, sizeof(why), "fail=%#x r=%ld waited=%ldms r2=%ld/%d", f, r, waited_ms, r2, e2);
+    report("native_ipc_send_receive_blocks", f == 0, why);
+}
+
 /* munmap, mprotect, brk, mremap, madvise, getrandom and futex bitsets
  * (N-240, N-242, N-243, N-244, N-246, N-226), as Linux. */
 
@@ -3302,6 +3389,7 @@ int main(int argc, char **argv)
     test_pty();
     test_console();
     test_thread_join();
+    test_ipc();
     printf("MUSL-RUNTIME: %d/%d\n", passed, total);
     return passed == total ? 0 : 1;
 }

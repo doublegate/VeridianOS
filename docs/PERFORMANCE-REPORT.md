@@ -100,7 +100,7 @@ not end-to-end IPC.
 | Frame alloc (single) | <500ns | 2,215ns (per-CPU) / 1,525ns (global) | Different methodology |
 | Cap validation | Not measured | 57ns | New |
 | Context switch | ~500ns (simulated) | Not directly measured | -- |
-| IPC small msg | <1us (register) | 44ns (stats read) | Different measurement |
+| IPC small msg | <1us (register) | not measured (44ns was a counter read) | The register fast path was never reachable and was removed in v0.27 |
 
 Note: Phase 0/1 baselines measured different operations (simulated context switches,
 allocator unit tests). Direct comparison is limited. The v0.21.0 benchmarks measure

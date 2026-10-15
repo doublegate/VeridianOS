@@ -16,7 +16,7 @@ VeridianOS is designed as a modern microkernel operating system with a focus on 
 
 **Architecture Goals** (Enhanced by AI Analysis):
 - Microkernel size: < 15,000 lines of code
-- Sub-microsecond IPC latency (< 5μs Phase 1, < 1μs Phase 5)
+- Sub-microsecond IPC latency (< 5μs Phase 1, < 1μs Phase 5) -- a goal, not measured (see Section 3)
 - Support for 1000+ concurrent processes
 - Zero-copy design throughout
 - Capability-based security with fast lookups
@@ -111,18 +111,18 @@ The process and scheduling subsystems implement:
 
 IPC mechanisms include:
 
-- **Synchronous IPC**: Rendezvous-style message passing ✅
-  - Direct handoff between processes
-  - < 1μs latency achieved for small messages
+- **Synchronous IPC**: queued message passing ✅
+  - Messages are queued on the endpoint; a receiver sleeps on it until one arrives (v0.27)
+  - No direct hand-off and no measured latency yet (v0.28 IPC redesign, N-79 to N-91)
 - **Asynchronous IPC**: Channel-based communication ✅
-  - Lock-free ring buffers
+  - Locked bounded queues (the earlier lock-free ring was unsound, IPC-SYNC-03)
   - Configurable channel capacity
 - **Shared Memory**: Capability-protected regions ✅
   - Zero-copy data sharing
   - NUMA-aware allocation
-- **Fast Path**: Register-based transfer ✅
-  - < 1μs for messages ≤64 bytes
-  - Architecture-specific optimizations
+- **Fast Path**: register-based transfer -- removed in v0.27
+  - It needed the old scheduler and was never reachable from a system call (N-84); a direct
+    hand-off returns with the v0.28 IPC redesign
 - **Capability Integration**: Full permission validation ✅
 - **Rate Limiting**: Token bucket algorithm for DoS protection ✅
 - **Global Registry**: O(1) endpoint and channel lookup ✅
@@ -431,7 +431,7 @@ VeridianOS protects against:
 - **Simpler**: Less architectural complexity
 - **POSIX**: Compatibility layer planned
 - **Open**: Community-driven development
-- **Performance**: Sub-microsecond operations
+- **Performance**: sub-microsecond operations as a goal; measured figures are in PERFORMANCE-REPORT.md
 
 ## Future Directions
 

@@ -34,15 +34,19 @@ impl IpcRights {
 
 /// Create an IPC endpoint capability
 pub fn create_endpoint_capability(
-    _endpoint_id: EndpointId,
+    endpoint_id: EndpointId,
     owner: ProcessId,
     rights: Rights,
     cap_space: &CapabilitySpace,
 ) -> Result<CapabilityToken, CapError> {
-    // Use ObjectRef::Endpoint with an Arc<Endpoint> when alloc is available
+    // The capability holds the registered endpoint itself. It used to hold
+    // a new, unrelated endpoint with an id of its own, so no send or
+    // receive through the capability could reach the endpoint (N-81).
     #[cfg(feature = "alloc")]
     {
-        let endpoint = alloc::sync::Arc::new(crate::ipc::channel::Endpoint::new(owner));
+        let _ = owner;
+        let endpoint = crate::ipc::registry::lookup_endpoint(endpoint_id)
+            .map_err(|_| CapError::InvalidObject)?;
         let object = ObjectRef::Endpoint { endpoint };
         cap_manager().create_capability(object, rights, cap_space)
     }

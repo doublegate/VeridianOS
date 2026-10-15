@@ -4,6 +4,10 @@
 **Phase**: 1 (Microkernel Core) - Updated with actual measurements  
 **Purpose**: Track performance progress against Phase 1 targets
 
+> **Correction (2026-10-15).** The IPC figures below timed in-kernel helpers, not a process-to-process
+> message: the register fast path was never reachable from a system call (N-84) and was removed in
+> v0.27. No IPC latency has been measured. The rest of this record is kept as written.
+
 ## Executive Summary
 
 This document records the baseline performance measurements from Phase 0 and current Phase 1 progress. Notable achievement: IPC fast path has already exceeded Phase 5 target of <1μs latency for small messages! Memory allocation also meeting all targets with the new hybrid allocator.

@@ -83,24 +83,25 @@ The microkernel design places drivers, filesystems, network protocols and the de
 processes. Today all of them run in ring 0. Moving them out, in risk order, is critique item C6 of
 the audit plan.
 
-### IPC cannot reach an endpoint (N-47, N-81; planned v0.28)
+### Native IPC works, but is not the planned design yet (N-79 to N-91; planned v0.28)
 
 The native IPC calls (send, receive, call, reply, create endpoint, bind, share memory, map memory)
-have private numbers 1024-1031 since the switch to Linux system call numbers (ADR 0009). Before
-that they collided with Linux read/write/open/close and could not be called (N-33). Inside the
-kernel, the synchronous send path still looks endpoints up in a registry that nothing fills
-(N-47), so it cannot reach any endpoint.
+have private numbers 1024-1031 since the switch to Linux system call numbers (ADR 0009). Since
+v0.27 a program can create an endpoint, send to it and receive from it: the capability names the
+registered endpoint (N-81 part), send and receive use the registry endpoints are created in (N-47),
+and a receive sleeps on the endpoint until a message arrives, with EINTR on a signal (N-84). The
+runtime test `native_ipc_send_receive_blocks` covers this.
 
-- **Verification is host-only.** The v0.26 IPC work (shared regions that really share their frames,
-  the 16 KiB buffered message tier, capability checks with rights attenuation, and the receive
-  buffer fix N-34) is covered by host unit tests and review only.
+- **Verification is partly host-only.** Shared regions that really share their frames, the 16 KiB
+  buffered message tier and the receive buffer fix N-34 are covered by host unit tests and review
+  only.
 - **Latency figures are in-kernel.** Any IPC latency figure measures in-kernel helpers, not a
   process-to-process round trip.
-- **The IPC design itself is rebuilt in v0.28 (N-79 to N-91).** One endpoint is represented by
-  several unrelated objects, receive and reply use tokens and pids as endpoint ids, SEND is the
-  generic WRITE right that heap and stack capabilities also carry, delivered messages can be lost,
-  the fast-path receive never blocks, and kernel memory used by IPC is not accounted. All of this
-  is reachable from user space only since ADR 0009 and is not used by any program yet.
+- **The IPC design itself is rebuilt in v0.28 (N-79 to N-91).** Every message goes through an
+  endpoint queue (the register fast path went with the old scheduler); reply uses thread ids;
+  SEND is the generic WRITE right that heap and stack capabilities also carry; a capability passed
+  in a message is not transferred to the receiver; and kernel memory used by IPC is not accounted.
+  No program uses native IPC yet.
 
 ### Process model gaps (C5, ADR 0006; planned v0.27 sprint D)
 

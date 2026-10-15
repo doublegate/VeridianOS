@@ -629,13 +629,29 @@ mod integration_tests {
         let cap_space = space::CapabilitySpace::new();
 
         // Create IPC endpoint capability
-        let endpoint_id: crate::ipc::EndpointId = 123;
+        crate::ipc::registry::init();
         let owner = ProcessId(456);
+        let (endpoint_id, _) = crate::ipc::registry::create_endpoint(owner).unwrap();
         let rights = ipc_integration::IpcRights::SEND | ipc_integration::IpcRights::RECEIVE;
 
         let cap =
             ipc_integration::create_endpoint_capability(endpoint_id, owner, rights, &cap_space)
                 .unwrap();
+
+        // The capability names the registered endpoint itself (N-81): it
+        // used to name a second endpoint object with a different id, which
+        // no send or receive could find.
+        match cap_space.lookup_entry(cap) {
+            Some((object::ObjectRef::Endpoint { endpoint }, _)) => {
+                assert_eq!(endpoint.id(), endpoint_id);
+            }
+            _ => panic!("not an endpoint capability"),
+        }
+        // An endpoint that does not exist cannot be named.
+        assert!(
+            ipc_integration::create_endpoint_capability(u64::MAX, owner, rights, &cap_space)
+                .is_err()
+        );
 
         // Check permissions
         assert!(ipc_integration::check_send_permission(cap, &cap_space).is_ok());

@@ -13,7 +13,6 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 use super::{
     error::{IpcError, Result},
-    fast_path::fast_receive,
     message::Message,
 };
 use crate::arch::entropy::read_timestamp;
@@ -43,61 +42,59 @@ pub fn send_message(msg: Message, target_endpoint: u64) -> Result<()> {
     sync_send(msg, target_endpoint)
 }
 
-/// Synchronous message send
-///
-/// Blocks until message is delivered to receiver.
+/// Synchronous message send: the message is queued on the endpoint,
+/// waiting for room while its queue is full (a signal ends the wait).
 pub fn sync_send(msg: Message, target_endpoint: u64) -> Result<()> {
     let start = read_timestamp();
     SYNC_STATS.send_count.fetch_add(1, Ordering::Relaxed);
-
-    match msg {
-        Message::Small(small_msg) => {
-            // Small messages also take the queued path for now. A direct
-            // hand-off needs the receiver to be claimed atomically from a
-            // receive-only wait list bound to this endpoint; the shared
-            // IPC wait queue cannot do that (senders blocked on a full
-            // endpoint park under the same key, and the task can change
-            // state between lookup and delivery). The queued path checks
-            // the capability's endpoint binding and wakes waiters
-            // correctly. Restored with the IPC-SYNC-01/02 wait rework.
-            SYNC_STATS.slow_path_count.fetch_add(1, Ordering::Relaxed);
-            sync_send_slow_path(Message::Small(small_msg), target_endpoint)?;
-            update_latency_stats(start);
-            Ok(())
-        }
-        msg @ (Message::Large(_) | Message::Buffered(_)) => {
-            // Large and buffered messages always use slow path
-            SYNC_STATS.slow_path_count.fetch_add(1, Ordering::Relaxed);
-            sync_send_slow_path(msg, target_endpoint)?;
-            update_latency_stats(start);
-            Ok(())
-        }
-    }
+    SYNC_STATS.slow_path_count.fetch_add(1, Ordering::Relaxed);
+    validate_send_capability(&msg, target_endpoint)?;
+    send_to(target_endpoint, msg)?;
+    update_latency_stats(start);
+    Ok(())
 }
 
-/// Synchronous message receive
-///
-/// Blocks until a message is available.
+/// Synchronous message receive: sleeps until a message is available, the
+/// endpoint closes or a signal must be acted on (N-84: it yielded once and
+/// returned an empty message). The caller checks the RECEIVE right.
 pub fn sync_receive(endpoint: u64) -> Result<Message> {
     let start = read_timestamp();
     SYNC_STATS.receive_count.fetch_add(1, Ordering::Relaxed);
+    let msg = receive_from(endpoint)?;
+    update_latency_stats(start);
+    Ok(msg)
+}
 
-    // Try fast path for small messages
-    match fast_receive(endpoint, None) {
-        Ok(msg) => {
-            SYNC_STATS.fast_path_count.fetch_add(1, Ordering::Relaxed);
-            update_latency_stats(start);
-            Ok(msg)
-        }
-        Err(IpcError::WouldBlock) => {
-            // Fall back to slow path
-            SYNC_STATS.slow_path_count.fetch_add(1, Ordering::Relaxed);
-            let msg = sync_receive_slow_path(endpoint)?;
-            update_latency_stats(start);
-            Ok(msg)
-        }
-        Err(e) => Err(e),
-    }
+/// Queue `msg` on endpoint `id` of the IPC registry, where endpoints are
+/// created. The send path used to look them up in a second registry that
+/// nothing filled, so it reached no endpoint (N-47).
+#[cfg(feature = "alloc")]
+fn send_to(id: u64, msg: Message) -> Result<()> {
+    let endpoint = super::registry::lookup_endpoint(id)?;
+    let sender = crate::process::current_process()
+        .map(|p| p.pid)
+        .unwrap_or(crate::process::ProcessId(0));
+    endpoint.send_sync(msg, sender)
+}
+
+#[cfg(not(feature = "alloc"))]
+fn send_to(_id: u64, _msg: Message) -> Result<()> {
+    Err(IpcError::OutOfMemory)
+}
+
+/// The next message of endpoint `id`, sleeping until there is one.
+#[cfg(feature = "alloc")]
+fn receive_from(id: u64) -> Result<Message> {
+    let endpoint = super::registry::lookup_endpoint(id)?;
+    let receiver = crate::process::current_process()
+        .map(|p| p.pid)
+        .unwrap_or(crate::process::ProcessId(0));
+    endpoint.receive_sync(receiver)
+}
+
+#[cfg(not(feature = "alloc"))]
+fn receive_from(_id: u64) -> Result<Message> {
+    Err(IpcError::OutOfMemory)
 }
 
 /// An outstanding call (N-80): the endpoint called, and the reply once a
@@ -210,50 +207,6 @@ pub fn sync_reply(reply: Message, caller: u64) -> Result<()> {
     #[cfg(not(feature = "alloc"))]
     {
         let _ = (reply, caller);
-        Err(IpcError::OutOfMemory)
-    }
-}
-
-/// Slow path for synchronous send
-fn sync_send_slow_path(msg: Message, target_endpoint: u64) -> Result<()> {
-    // Validate send capability
-    validate_send_capability(&msg, target_endpoint)?;
-
-    // Use message passing subsystem with retry-on-full blocking
-    #[cfg(feature = "alloc")]
-    {
-        const MAX_RETRIES: u32 = 3;
-        for _attempt in 0..MAX_RETRIES {
-            match crate::ipc::message_passing::send_to_endpoint(msg.clone(), target_endpoint) {
-                Ok(()) => {
-                    // Wake any processes waiting on this endpoint
-                    crate::sched::ipc_blocking::wake_up_endpoint_waiters(target_endpoint);
-                    return Ok(());
-                }
-                Err(IpcError::ChannelFull) => {
-                    // Block until space available
-                    crate::sched::ipc_blocking::block_on_ipc(target_endpoint);
-                }
-                Err(e) => return Err(e),
-            }
-        }
-        Err(IpcError::ChannelFull)
-    }
-    #[cfg(not(feature = "alloc"))]
-    {
-        Err(IpcError::OutOfMemory)
-    }
-}
-
-/// Slow path for synchronous receive
-fn sync_receive_slow_path(endpoint: u64) -> Result<Message> {
-    // Use message passing subsystem with blocking
-    #[cfg(feature = "alloc")]
-    {
-        crate::ipc::message_passing::receive_from_endpoint(endpoint, true)
-    }
-    #[cfg(not(feature = "alloc"))]
-    {
         Err(IpcError::OutOfMemory)
     }
 }
@@ -396,28 +349,15 @@ mod tests {
         assert_eq!(stats.fast_path_percentage, 0);
     }
 
-    /// N-33 pin. Endpoints are created in `ipc::registry`, but the send and
-    /// receive paths `sync_send`/`sync_receive` use (`message_passing::
-    /// send_to_endpoint`/`receive_from_endpoint`) look them up in
-    /// `message_passing::ENDPOINT_REGISTRY`, which nothing ever populates.
-    /// So every send fails with `EndpointNotFound`. Un-ignore this when the
-    /// IPC rework unifies the registries (review of the v0.26.0 stack,
-    /// PR #8).
+    /// N-47: an endpoint created in the registry is the one the send and
+    /// receive paths reach (they used a second registry nothing filled).
     #[cfg(feature = "alloc")]
     #[test]
-    #[ignore = "N-33: native IPC unreachable; endpoint registries split"]
     fn endpoint_from_registry_round_trips_through_send_path() {
         crate::ipc::registry::init();
         let (id, _cap) = crate::ipc::registry::create_endpoint(ProcessId(1)).unwrap();
-        assert!(
-            crate::ipc::message_passing::ENDPOINT_REGISTRY
-                .get(id)
-                .is_some(),
-            "endpoint {} is missing from the registry the send path uses",
-            id
-        );
-        crate::ipc::message_passing::send_to_endpoint(Message::small(0, 7), id).unwrap();
-        let received = crate::ipc::message_passing::receive_from_endpoint(id, false).unwrap();
+        send_to(id, Message::small(0, 7)).unwrap();
+        let received = receive_from(id).unwrap();
         assert_eq!(received.opcode(), 7);
     }
 }

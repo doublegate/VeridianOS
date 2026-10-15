@@ -15,7 +15,6 @@ use super::{
     error::{IpcError, Result},
     message::Message,
 };
-use crate::bench::read_timestamp;
 
 /// Maximum messages in async channel
 pub const ASYNC_CHANNEL_SIZE: usize = 256;
@@ -32,6 +31,9 @@ pub struct AsyncChannel {
     /// Subscribers waiting for messages
     #[cfg(feature = "alloc")]
     subscribers: spin::Mutex<alloc::vec::Vec<ProcessId>>,
+    /// Pollers, woken when a message arrives or the channel closes.
+    #[cfg(feature = "alloc")]
+    waiters: crate::sched::dispatch::WaitQueue,
     /// Channel statistics
     stats: ChannelStats,
     /// Channel active flag
@@ -55,6 +57,8 @@ impl AsyncChannel {
             buffer: RingBuffer::new(capacity),
             #[cfg(feature = "alloc")]
             subscribers: spin::Mutex::new(alloc::vec::Vec::new()),
+            #[cfg(feature = "alloc")]
+            waiters: crate::sched::dispatch::WaitQueue::new(),
             stats: ChannelStats {
                 messages_sent: AtomicU64::new(0),
                 messages_received: AtomicU64::new(0),
@@ -63,6 +67,11 @@ impl AsyncChannel {
             },
             active: AtomicBool::new(true),
         }
+    }
+
+    /// The channel's ID.
+    pub fn id(&self) -> u64 {
+        self.id
     }
 
     /// Send a message without blocking
@@ -107,18 +116,9 @@ impl AsyncChannel {
                     }
                 }
 
-                // Wake up subscribers
+                // Wake pollers.
                 #[cfg(feature = "alloc")]
-                {
-                    let subscribers = self.subscribers.lock();
-                    for &pid in subscribers.iter() {
-                        wake_process(pid);
-                    }
-                }
-
-                // Also wake any processes blocked on this channel's endpoint
-                crate::sched::ipc_blocking::wake_up_endpoint_waiters(self.id);
-
+                self.waiters.wake_all();
                 Ok(())
             }
             Err(_) => {
@@ -147,27 +147,24 @@ impl AsyncChannel {
         }
     }
 
-    /// Poll for messages with timeout
+    /// Wait up to `timeout_ns` (0: no limit) for a message, sleeping (it
+    /// spun). A signal ends the wait (`Interrupted`).
+    #[cfg(feature = "alloc")]
     pub fn poll(&self, timeout_ns: u64) -> Result<Option<Message>> {
-        let start = read_timestamp();
-
+        use crate::sched::dispatch::{self, WaitError};
+        let deadline = (timeout_ns > 0).then(|| dispatch::clock_ns().saturating_add(timeout_ns));
         loop {
-            // Try to receive
             match self.receive_async() {
                 Ok(msg) => return Ok(Some(msg)),
-                Err(IpcError::ChannelEmpty) => {
-                    // Check timeout
-                    if timeout_ns > 0 {
-                        let elapsed = timestamp_to_ns(read_timestamp() - start);
-                        if elapsed >= timeout_ns {
-                            return Ok(None);
-                        }
-                    }
-
-                    // Yield CPU and retry
-                    core::hint::spin_loop();
-                }
+                Err(IpcError::ChannelEmpty) => {}
                 Err(e) => return Err(e),
+            }
+            match dispatch::wait_event(&self.waiters, deadline, || {
+                self.buffer.size() > 0 || !self.active.load(Ordering::Acquire)
+            }) {
+                Ok(()) => {}
+                Err(WaitError::TimedOut) => return Ok(None),
+                Err(WaitError::Interrupted) => return Err(IpcError::Interrupted),
             }
         }
     }
@@ -207,14 +204,9 @@ impl AsyncChannel {
     pub fn close(&self) {
         self.active.store(false, Ordering::Release);
 
-        // Wake all subscribers
+        // Wake pollers: they see the channel closed.
         #[cfg(feature = "alloc")]
-        {
-            let subscribers = self.subscribers.lock();
-            for &pid in subscribers.iter() {
-                wake_process(pid);
-            }
-        }
+        self.waiters.wake_all();
     }
 }
 
@@ -316,15 +308,6 @@ impl Default for MessageBatch {
     fn default() -> Self {
         Self::new()
     }
-}
-
-// Process wakeup via scheduler
-fn wake_process(pid: ProcessId) {
-    crate::sched::ipc_blocking::wake_up_process(pid);
-}
-
-fn timestamp_to_ns(ticks: u64) -> u64 {
-    crate::bench::cycles_to_ns(ticks)
 }
 
 #[cfg(all(test, not(target_os = "none")))]

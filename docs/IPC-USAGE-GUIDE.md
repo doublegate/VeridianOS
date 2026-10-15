@@ -10,10 +10,11 @@ The VeridianOS Inter-Process Communication (IPC) subsystem provides high-perform
 
 ## Performance Characteristics
 
-- **Small messages (≤64 bytes)**: <1μs latency using register-based fast path
-- **Large messages**: <5μs latency using shared memory transfers
-- **Throughput**: >1M messages/second for small messages
-- **Zero-copy**: Supported for messages >4KB
+No IPC latency or throughput has been measured process to process. Since v0.27 every message,
+small or large, is queued on its endpoint and a receiver sleeps until one arrives; the register
+fast path was removed with the old scheduler (it was never reachable from a system call, N-84).
+A direct hand-off, and measured targets (<1μs small, <5μs large), come with the v0.28 IPC
+redesign (N-79 to N-91). Shared regions do share their frames (zero-copy).
 
 ## IPC Mechanisms
 
@@ -40,9 +41,9 @@ let received = ipc::receive(&recv_cap)?;
 Messages ≤64 bytes use register-based transfer for minimal latency:
 
 ```rust
-// This automatically uses fast path
+// Queued on the endpoint (no register fast path since v0.27)
 let small_msg = Message::small(&data[..64]);
-ipc::send(&cap, small_msg)?;  // <1μs latency
+ipc::send(&cap, small_msg)?;
 ```
 
 ### 2. Asynchronous Channels

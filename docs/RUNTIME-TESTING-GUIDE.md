@@ -249,7 +249,7 @@ cargo bootimage --target targets/x86_64-veridian.json
 
 Expected performance metrics (from Phase 1):
 
-- **IPC Latency**: < 1μs (target: < 5μs) ✅
+- **IPC Latency**: not measured (the Phase 1 "< 1μs" timed in-kernel helpers; the fast path was removed in v0.27)
 - **Context Switch**: < 10μs ✅
 - **Memory Allocation**: < 1μs ✅
 - **Capability Lookup**: O(1) ✅

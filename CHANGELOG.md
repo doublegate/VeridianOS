@@ -652,6 +652,15 @@
 
 ### Fixed
 
+- **Native IPC reaches its endpoints, and a receive waits (N-47, N-81 part, N-84, N-85).** Since
+  ADR 0009 the native IPC calls could be made, but did nothing useful: an endpoint capability named
+  a second endpoint object that nothing could reach, send looked endpoints up in a registry nothing
+  filled, receive used the capability's value as the endpoint number, and a receive returned an
+  empty message at once instead of waiting. Now a program can create an endpoint and send and
+  receive through it; a receive sleeps until a message arrives (or the endpoint closes), and a
+  signal ends the wait with EINTR. A send to a full endpoint waits for room instead of failing
+  after three tries. The register fast path, which only the old scheduler could use, is gone
+  (it returns with the v0.28 IPC design). Runtime test `native_ipc_send_receive_blocks`.
 - **Boot tests no longer count what they do not run.** Seven in-kernel boot tests reported a pass
   on AArch64 and RISC-V without checking anything (the two dispatcher tests, framebuffer console,
   keyboard, both user-copy fault tests and, on AArch64, heap reuse). They are now reported as

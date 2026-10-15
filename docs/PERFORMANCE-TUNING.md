@@ -84,59 +84,19 @@ Single-page flushes (e.g., individual page table updates) are left as individual
 
 ---
 
-## 3. IPC Fast Path
+## 3. IPC Fast Path (removed in v0.27)
 
-**File**: `kernel/src/ipc/fast_path.rs`
+**File**: `kernel/src/ipc/fast_path.rs` (now only the statistics counters)
 
-### Architecture
+The register fast path wrote a small message straight into a blocked receiver's saved registers
+(`ipc_regs` of the old scheduler's task) and woke it. It was never reachable from a system call:
+the receive side yielded once and returned an empty message, and the send side was used only by an
+uncalled batching helper (N-84). It went with the old scheduler in sprint D4. Every message now goes
+through its endpoint's queue, and receivers sleep on the endpoint's wait queue.
 
-The IPC fast path provides sub-microsecond message delivery for small messages (up to 7 registers) by bypassing the general-purpose channel infrastructure.
-
-```
-fast_send(target_pid, msg)
-    |
-    +--> validate_capability_fast(cap)   # CapabilityCache check, then range check
-    |         |
-    |    [16-entry direct-mapped cache]
-    |
-    +--> get_task_ptr(target_pid)         # O(log n) BTreeMap lookup
-    |         |
-    |    [Global TASK_REGISTRY]
-    |
-    +--> write ipc_regs[0..6]            # Direct register transfer
-    |
-    +--> scheduler::wake_task()           # Wake receiver
-```
-
-### Components
-
-#### CapabilityCache (v0.5.8)
-
-A 16-entry direct-mapped cache for IPC capability validation. Hash function: `id & 0xF`. On cache hit, `validate_capability_fast()` returns immediately without full capability space lookup.
-
-- Populated on successful IPC completion in `fast_send()`.
-- Cache miss falls through to existing range check.
-- Uses `try_lock()` to avoid blocking the IPC hot path.
-
-#### PID-to-Task Registry (v0.5.8)
-
-A global `BTreeMap<u64, SendTaskPtr>` providing O(log n) PID-to-Task lookup, replacing the previous O(n) linear scan through the scheduler's task list.
-
-- `register_task()` called from `create_task()` and `create_task_from_thread()`.
-- `unregister_task()` called from `exit_task()`.
-- Lock scope minimized: pointer cloned and lock released before message copy.
-
-#### Per-Task IPC Registers
-
-Each task has `ipc_regs: [u64; 7]` for direct register-based message transfer. `fast_send()` writes directly to the target task's registers; `fast_receive()` reads from the current task's registers on wakeup.
-
-### Trace Events
-
-| Event | When | Data |
-|-------|------|------|
-| `IpcFastSend` | Entry to `fast_send()` | target PID, capability |
-| `IpcFastReceive` | Entry to `fast_receive()` | calling PID, 0 |
-| `IpcSlowPath` | Fast path falls back | calling PID, reason code |
+A direct hand-off (a receiver claimed atomically from the endpoint's wait list, then a register
+transfer and a direct switch) is part of the v0.28 IPC redesign (N-79 to N-91). The capability
+cache and PID-to-task registry described in earlier versions of this page are gone as well.
 
 ---
 
