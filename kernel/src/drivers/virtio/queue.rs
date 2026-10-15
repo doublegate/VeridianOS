@@ -346,9 +346,10 @@ impl VirtQueue {
                 desc_head,
             );
 
-            // Write barrier: ensure the descriptor table writes and ring entry
-            // write above are visible before we update the available index.
-            atomic::fence(Ordering::Release);
+            // The descriptors and the ring entry must reach the device's view
+            // before the index that publishes them (DMA ordering, not just
+            // CPU ordering: `fence(Release)` is a CPU barrier only).
+            crate::arch::barriers::dma_wmb();
 
             core::ptr::write_volatile(idx_ptr, idx.wrapping_add(1));
         }
@@ -372,8 +373,9 @@ impl VirtQueue {
         if self.last_used_idx == used_idx {
             return None;
         }
-        // Read the element only after observing the index.
-        atomic::fence(Ordering::Acquire);
+        // Read the element only after observing the index the device wrote
+        // (DMA ordering; an Acquire fence orders this CPU's view only).
+        crate::arch::barriers::dma_rmb();
 
         let ring_idx = self.last_used_idx as usize % self.size as usize;
         // SAFETY: ring_idx is modular-reduced to within [0, size).

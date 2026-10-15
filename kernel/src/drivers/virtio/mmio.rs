@@ -249,6 +249,8 @@ impl VirtioMmioTransport {
     }
 
     pub fn notify_queue(&self, idx: u16) {
+        // The ring updates must be visible to the device before the kick.
+        crate::arch::barriers::io_wmb();
         self.write32(regs::QUEUE_NOTIFY, idx as u32);
     }
 

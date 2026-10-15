@@ -641,6 +641,12 @@
 
 ### Fixed
 
+- **VirtIO doorbells are ordered after the ring updates on AArch64 and RISC-V (CRIT-SEC-01).** No
+  barrier separated the store publishing a request from the doorbell write, and the one ordering the
+  ring entry was a CPU-only fence. On a weakly ordered CPU the device could be kicked before it could
+  see the request. New `dma_wmb`, `dma_rmb` and `io_wmb` (as Linux's: `dmb oshst`/`oshld` on
+  AArch64, `fence w,w`/`r,r`/`w,o` on RISC-V) are used for virtio-blk and virtio-net. The barrier
+  functions also stop being `nomem` asm, which the compiler could move memory accesses across.
 - **Zone-limited frame allocations stay in their zone.** A DMA-zone request could be served by any
   node's allocator without a zone check; a first attempt at the check (not released) tested only
   the first frame, so a run starting below 16 MiB and ending above it was accepted. The bitmap and

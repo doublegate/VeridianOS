@@ -300,6 +300,8 @@ impl VirtioPciTransport {
     /// Notify (kick) the device that new buffers are available in the given
     /// queue.
     pub fn notify_queue(&self, queue_index: u16) {
+        // The ring updates must be visible to the device before the kick.
+        crate::arch::barriers::io_wmb();
         self.write16(regs::QUEUE_NOTIFY, queue_index);
     }
 
