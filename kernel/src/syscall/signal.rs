@@ -436,29 +436,9 @@ pub fn sys_sigsuspend(mask_ptr: usize) -> SyscallResult {
         return Err(SyscallError::Interrupted);
     }
 
-    // Save current mask and apply temporary mask
-    let old_mask = proc.get_signal_mask();
-    let sanitized = temp_mask & !crate::process::signals::UNBLOCKABLE;
-    proc.set_signal_mask(sanitized);
-
-    // Check if there's already a pending unblocked signal
-    if proc.get_next_pending_signal().is_some() {
-        // Signal already pending -- restore mask and return
-        proc.set_signal_mask(old_mask);
-        return Err(SyscallError::Interrupted);
-    }
-
-    // Block the process until a signal arrives. The signal delivery
-    // path (process::exit::deliver_pending_signal) will wake us via
-    // sched::wake_up_process when it delivers a signal to this process.
-    proc.set_state(crate::process::pcb::ProcessState::Blocked);
-    crate::sched::block_process(proc.pid);
-
-    // After waking: restore the original signal mask
-    proc.set_signal_mask(old_mask);
-
-    // sigsuspend always returns EINTR per POSIX
-    Err(SyscallError::Interrupted)
+    // Only a dispatched thread has a current process.
+    let _ = (proc, temp_mask);
+    Err(SyscallError::InvalidState)
 }
 
 /// The temporary signal mask of a wait (ppoll, epoll_pwait, epoll_pwait2),

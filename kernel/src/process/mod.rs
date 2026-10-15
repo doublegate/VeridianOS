@@ -36,10 +36,8 @@ pub mod robust_list;
 pub mod session;
 pub mod signal_delivery;
 pub mod signals;
-pub mod sync;
 pub mod table;
 pub mod thread;
-pub mod wait;
 
 // Re-export common types
 pub use lifecycle::{exec_process, fork_process, wait_process as wait_for_child};
@@ -341,48 +339,16 @@ pub extern "C" fn user_return_check() {
     }
 }
 
-/// Yield current thread
-pub fn yield_thread() {
-    crate::sched::yield_cpu();
-}
-
-/// Exit current thread
+/// Exit the calling thread (pthread_exit). Every user thread is a
+/// dispatcher task, which leaves through `exit::exit_dispatched` (robust
+/// futexes, CLONE_CHILD_CLEARTID, CPU time, and the process's teardown if it
+/// is the last thread). Returns only when called outside a user thread.
 pub fn exit_thread(exit_code: i32) {
-    if let (Some(thread), Some(process)) = (current_thread(), current_process()) {
-        println!(
-            "[PROCESS] Thread {} exiting with code {}",
-            thread.tid.0, exit_code
-        );
-
-        // Robust futexes the thread still holds (N-225), then
-        // CLONE_CHILD_CLEARTID, while the thread is intact: clear
-        // *clear_tid and wake one futex waiter (best effort).
-        #[cfg(feature = "alloc")]
-        robust_list::exit_thread(&thread);
-        #[cfg(feature = "alloc")]
-        crate::syscall::scheduling::thread_exit(&thread);
-        #[cfg(feature = "alloc")]
-        thread.release_fs();
-        let clear_ptr = thread.clear_tid.load(core::sync::atomic::Ordering::Acquire);
-        if clear_ptr != 0 {
-            let _ = crate::syscall::userspace::write_user(clear_ptr, 0u32);
-            let _ = crate::syscall::sys_futex_wake(clear_ptr, 1, 0);
-        }
-
-        // Mark thread as exited with state synchronization
-        thread.set_exited(exit_code);
-
-        // A detached thread is never joined, so it must be reaped -- but not
-        // here: cleanup_thread frees the kernel stack this code is running
-        // on and drops `thread` (PROC-SEC-02). Defer it to the idle loop.
-        #[cfg(feature = "alloc")]
-        if thread.detached.load(core::sync::atomic::Ordering::Acquire) {
-            crate::sched::load_balance::defer_thread_reap(process.pid, thread.tid);
-        }
-
-        // Never return - schedule another thread
-        crate::sched::exit_task(exit_code);
+    #[cfg(feature = "alloc")]
+    if crate::sched::dispatch::current_owner().is_some() {
+        exit::exit_dispatched(exit_code, false);
     }
+    let _ = exit_code;
 }
 
 /// Terminate a specific thread
@@ -396,59 +362,12 @@ pub fn terminate_thread(pid: ProcessId, tid: ThreadId) -> crate::error::KernelRe
 
             // Mark thread as dead
             thread.set_state(thread::ThreadState::Dead);
-
-            // Remove from scheduler if it has a task
-            if let Some(task_ptr) = thread.get_task_ptr() {
-                // SAFETY: task_ptr is a NonNull<Task> stored in the thread.
-                // We set the task state to Dead so the scheduler will not
-                // run this task again. The thread was found via a valid
-                // process/thread lookup above.
-                unsafe {
-                    let task = task_ptr.as_ptr();
-                    (*task).state = ProcessState::Dead;
-                }
-            }
-
             Ok(())
         } else {
             Err(crate::error::KernelError::ThreadNotFound { tid: tid.0 })
         }
     } else {
         Err(crate::error::KernelError::ProcessNotFound { pid: pid.0 })
-    }
-}
-
-/// Block current thread
-pub fn block_thread() {
-    if let Some(thread) = current_thread() {
-        // Update thread state to blocked
-        thread.set_blocked(None);
-        crate::sched::yield_cpu();
-    }
-}
-
-/// Wake up a thread
-pub fn wake_thread(tid: ThreadId) {
-    println!("[PROCESS] Waking thread {}", tid.0);
-
-    // Find thread in current process
-    if let Some(current_process) = get_current_process() {
-        let threads = current_process.threads.lock();
-        if let Some(thread) = threads.get(&tid) {
-            // Mark thread as ready
-            thread.set_ready();
-
-            // Wake up in scheduler if it has a task
-            if let Some(task_ptr) = thread.get_task_ptr() {
-                // SAFETY: task_ptr is a NonNull<Task> stored in the thread.
-                // We read the pid field to wake the process in the
-                // scheduler. The thread was found via the threads lock.
-                unsafe {
-                    let task = task_ptr.as_ptr();
-                    crate::sched::wake_up_process((*task).pid);
-                }
-            }
-        }
     }
 }
 

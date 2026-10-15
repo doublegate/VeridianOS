@@ -611,20 +611,6 @@ pub fn exec_process(path: &str, argv: &[&str], envp: &[&str]) -> Result<(), Kern
         ctx.set_return_value(0);
     }
 
-    // Step 4b: Sync scheduler Task context with the updated thread context.
-    // The scheduler has its own TaskContext (set at task creation) which must
-    // match the thread's new entry point/stack, otherwise the scheduler will
-    // resume at the old (pre-exec) address.
-    {
-        let sched = crate::sched::scheduler::current_scheduler().lock();
-        if let Some(task_ptr) = sched.current() {
-            // SAFETY: We are the currently running task and hold the scheduler
-            // lock, so no other CPU will modify this Task concurrently.
-            let task = unsafe { &mut *task_ptr.as_ptr() };
-            task.context = crate::sched::task::TaskContext::new(final_entry as usize, stack_top);
-        }
-    }
-
     // Step 5: Close file descriptors marked close-on-exec
     {
         let file_table = process.file_table.lock();

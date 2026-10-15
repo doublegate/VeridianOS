@@ -21,66 +21,18 @@ use super::{
 #[allow(unused_imports)]
 use crate::{error::KernelError, println, sched};
 
-/// Exit current process
+/// Exit the calling process (exit_group). Every user thread is a
+/// dispatcher task and leaves through [`exit_dispatched`], which ends the
+/// process's other threads and tears it down. Outside a user thread (the
+/// kernel shell's `exit`) there is no process to end.
 pub fn exit_process(exit_code: i32) {
+    #[cfg(feature = "alloc")]
     if let Some(process) = super::current_process() {
-        // Audit log: process exit
         crate::security::audit::log_process_exit(process.pid.0, exit_code);
-
-        println!(
-            "[PROCESS] Process {} exiting with code {}",
-            process.pid.0, exit_code
-        );
-
-        // Set exit code
-        process.set_exit_code(exit_code);
-
-        // Mark all threads as exited
-        #[cfg(feature = "alloc")]
-        {
-            let threads = process.threads.lock();
-            for (_, thread) in threads.iter() {
-                thread.set_state(super::thread::ThreadState::Zombie);
-            }
-        }
-
-        // Clean up resources
-        cleanup_process(&process);
-
-        // Mark process as zombie (parent needs to reap)
-        process.set_state(ProcessState::Zombie);
-
-        // Notify parent: send SIGCHLD and wake if blocked
-        if let Some(parent_pid) = process.parent() {
-            if let Some(parent) = table::get_process(parent_pid) {
-                // Send SIGCHLD to parent (POSIX: delivered on child exit)
-                if let Err(_e) = {
-                    if exit_signal(&process) != 0 {
-                        super::signals::notify_info(
-                            &parent,
-                            super::signals::SigInfo::child_exited(exit_signal(&process), &process),
-                        );
-                    }
-                    Ok::<(), KernelError>(())
-                } {
-                    println!(
-                        "[PROCESS] Warning: Failed to send SIGCHLD to parent {}: {:?}",
-                        parent_pid.0, _e
-                    );
-                }
-
-                // Wake parent if it is blocked (e.g. in waitpid)
-                let parent_state = parent.get_state();
-                if parent_state == ProcessState::Blocked {
-                    parent.set_state(ProcessState::Ready);
-                    sched::wake_up_process(parent_pid);
-                }
-            }
-        }
-
-        // Schedule another process
-        sched::exit_task(exit_code);
+        drop(process);
+        exit_dispatched(exit_code, true);
     }
+    let _ = exit_code;
 }
 
 /// Wait for child process to exit
@@ -470,7 +422,6 @@ pub fn kill_process_info(pid: ProcessId, signal: i32, info: SigInfo) -> Result<(
         signals::SIGSTOP => {
             // SIGSTOP always stops immediately
             process.set_state(ProcessState::Blocked);
-            sched::block_process(pid);
             println!("[PROCESS] Process {} stopped by SIGSTOP", pid.0);
 
             // Notify parent with SIGCHLD (POSIX: child stopped)
@@ -497,7 +448,6 @@ pub fn kill_process_info(pid: ProcessId, signal: i32, info: SigInfo) -> Result<(
                 }
                 SignalAction::Stop => {
                     process.set_state(ProcessState::Blocked);
-                    sched::block_process(pid);
                     println!("[PROCESS] Process {} stopped by signal {}", pid.0, signal);
 
                     // Notify parent with SIGCHLD (POSIX: child stopped)
@@ -514,7 +464,6 @@ pub fn kill_process_info(pid: ProcessId, signal: i32, info: SigInfo) -> Result<(
                 SignalAction::Continue => {
                     if process.get_state() == ProcessState::Blocked {
                         process.set_state(ProcessState::Ready);
-                        sched::wake_up_process(pid);
                         println!("[PROCESS] Process {} continued by signal {}", pid.0, signal);
 
                         // Notify parent with SIGCHLD (POSIX: child continued)
@@ -541,7 +490,6 @@ pub fn kill_process_info(pid: ProcessId, signal: i32, info: SigInfo) -> Result<(
                     // Wake up process if blocked so it can handle the signal
                     if process.get_state() == ProcessState::Blocked {
                         process.set_state(ProcessState::Ready);
-                        sched::wake_up_process(pid);
                     }
                 }
                 SignalAction::Default => {
@@ -672,11 +620,8 @@ fn notify_parent_sigchld(process: &Process, info: SigInfo) {
                 );
             }
 
-            // Wake parent if it is blocked (e.g. in waitpid)
-            if parent.get_state() == ProcessState::Blocked {
-                parent.set_state(ProcessState::Ready);
-                sched::wake_up_process(parent_pid);
-            }
+            // A waiting parent sleeps on PROCESS_EVENTS, which the exit
+            // path wakes.
         }
     }
 }
@@ -712,19 +657,6 @@ fn force_terminate_process(process: &Process, signal: i32) -> Result<(), KernelE
         let threads = process.threads.lock();
         for (_, thread) in threads.iter() {
             thread.set_state(super::thread::ThreadState::Zombie);
-
-            // Remove from scheduler if scheduled
-            if let Some(task_ptr) = thread.get_task_ptr() {
-                // SAFETY: task_ptr is a NonNull<Task> stored in the thread.
-                // We mark the task as Dead so the scheduler will not run it
-                // again. The threads lock is held, preventing concurrent
-                // modification of the thread's task pointer.
-                unsafe {
-                    let task = task_ptr.as_ptr();
-                    (*task).state = ProcessState::Dead;
-                    // Note: The scheduler will clean up dead tasks
-                }
-            }
         }
     }
 
@@ -749,11 +681,6 @@ fn force_terminate_process(process: &Process, signal: i32) -> Result<(), KernelE
                     "[PROCESS] Warning: Failed to send SIGCHLD to parent {}: {:?}",
                     parent_pid.0, _e
                 );
-            }
-
-            if parent.get_state() == ProcessState::Blocked {
-                parent.set_state(ProcessState::Ready);
-                sched::wake_up_process(parent_pid);
             }
         }
     }
@@ -973,25 +900,6 @@ pub fn cleanup_thread(process: &Process, tid: ThreadId) -> Result<(), KernelErro
 
         // Make sure thread is marked as dead
         thread.set_state(super::thread::ThreadState::Dead);
-
-        // Clean up scheduler task if exists
-        if let Some(task_ptr) = thread.get_task_ptr() {
-            // SAFETY: task_ptr is a NonNull<Task> stored in the thread.
-            // We clear the thread reference and mark the task as Dead
-            // for scheduler cleanup. The thread has already been marked
-            // as Dead above, so no scheduler will attempt to run it.
-            unsafe {
-                let task = task_ptr.as_ptr();
-
-                // Clear thread reference in task
-                (*task).thread_ref = None;
-
-                // Mark task for cleanup
-                (*task).state = ProcessState::Dead;
-
-                // The scheduler will eventually free the task memory
-            }
-        }
 
         // Free user stack pages from the VAS. User stack frames are managed
         // by the VAS (allocated via map_page), so unmap them to free the

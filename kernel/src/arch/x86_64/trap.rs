@@ -715,11 +715,6 @@ fn page_fault(f: &mut TrapFrame, user: bool) {
 /// Legacy PIC timer (IRQ 0).
 fn pic_timer() {
     crate::perf::count_interrupt();
-    // Skip the tick if the scheduler lock is held: the holder finishes its
-    // decision, and the next tick catches up.
-    if let Some(mut sched) = crate::sched::scheduler::current_scheduler().try_lock() {
-        sched.tick();
-    }
     pic_eoi(32);
 }
 

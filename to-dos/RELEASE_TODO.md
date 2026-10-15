@@ -157,7 +157,7 @@ Following Semantic Versioning (SemVer):
 - [x] Per-CPU page frame cache (PerCpuPageCache, 64-frame, batch refill/drain)
 - [x] IPC fast path completion (per-task ipc_regs, direct register transfer)
 - [x] TLB optimization (TlbFlushBatch, lazy TLB, tlb_generation counter)
-- [x] Priority inheritance protocol (PiMutex in process/sync.rs)
+- [x] Priority inheritance protocol (PiMutex in process/sync.rs) -- never used; deleted in v0.27 (SCHED-INC-01)
 - [x] Benchmarking suite (7 micro-benchmarks, perf shell builtin)
 - [x] Software tracepoints (10 event types, per-CPU ring buffers, trace shell builtin)
 - [x] Documentation sync (MASTER_TODO, PHASE5_TODO, RELEASE_TODO updated)

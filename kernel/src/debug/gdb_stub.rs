@@ -156,27 +156,34 @@ impl GdbState {
     }
 }
 
-/// Collect thread IDs from the kernel task registry
+/// Thread IDs for GDB: 1 (the kernel) and every user thread that runs as a
+/// dispatcher task. (They came from the old scheduler's task registry,
+/// which no dispatched thread is in.)
 #[cfg(feature = "alloc")]
 fn collect_thread_ids() -> Vec<u64> {
-    // Use process table to enumerate known PIDs
-    // Fall back to just thread 1 if registry is empty
-    let mut ids = Vec::new();
-    for pid in 1..=256u64 {
-        if crate::sched::scheduler::get_task_ptr(pid).is_some() {
-            ids.push(pid);
-        }
-    }
-    if ids.is_empty() {
-        alloc::vec![1] // fallback: report at least thread 1
-    } else {
-        ids
-    }
+    let mut ids = alloc::vec![1];
+    ids.extend(
+        crate::sched::dispatch::owners()
+            .into_iter()
+            .map(|(_, tid)| tid)
+            .filter(|&tid| tid != 1),
+    );
+    ids
 }
 
-/// Check if a thread exists in the task registry
+/// Whether `tid` names the kernel (1) or a user thread with a task.
 fn thread_exists(tid: u64) -> bool {
-    crate::sched::scheduler::get_task_ptr(tid).is_some() || tid == 1
+    #[cfg(feature = "alloc")]
+    {
+        tid == 1
+            || crate::sched::dispatch::owners()
+                .iter()
+                .any(|&(_, t)| t == tid)
+    }
+    #[cfg(not(feature = "alloc"))]
+    {
+        tid == 1
+    }
 }
 
 /// Format a thread ID as hex bytes
@@ -205,41 +212,43 @@ fn format_thread_id_hex(tid: u64) -> Vec<u8> {
     result
 }
 
-/// Load registers from a thread's saved context
+/// Registers of user thread `tid` as its thread context last recorded them
+/// (at creation, fork or exec). The live user registers of a sleeping
+/// dispatched thread are on its kernel stack and are not read yet.
 #[cfg(all(feature = "alloc", target_arch = "x86_64"))]
 fn load_thread_registers(tid: u64) -> Option<GdbRegisters> {
-    let task_ptr = crate::sched::scheduler::get_task_ptr(tid)?;
-    // SAFETY: task_ptr is a valid NonNull returned by the scheduler; task lifetime
-    // outlives this read.
-    let task = unsafe { task_ptr.as_ref() };
-    match &task.context {
-        crate::sched::task::TaskContext::X86_64(ctx) => Some(GdbRegisters {
-            rax: ctx.rax,
-            rbx: ctx.rbx,
-            rcx: ctx.rcx,
-            rdx: ctx.rdx,
-            rsi: ctx.rsi,
-            rdi: ctx.rdi,
-            rbp: ctx.rbp,
-            rsp: ctx.rsp,
-            r8: ctx.r8,
-            r9: ctx.r9,
-            r10: ctx.r10,
-            r11: ctx.r11,
-            r12: ctx.r12,
-            r13: ctx.r13,
-            r14: ctx.r14,
-            r15: ctx.r15,
-            rip: ctx.rip,
-            rflags: ctx.rflags,
-            cs: ctx.cs as u64,
-            ss: ctx.ss as u64,
-            ds: ctx.ds as u64,
-            es: ctx.es as u64,
-            fs: ctx.fs as u64,
-            gs: ctx.gs as u64,
-        }),
-    }
+    let (pid, _) = crate::sched::dispatch::owners()
+        .into_iter()
+        .find(|&(_, t)| t == tid)?;
+    let thread = crate::process::table::get_process(crate::process::ProcessId(pid))?
+        .get_thread(crate::process::ThreadId(tid))?;
+    let ctx = thread.context.lock();
+    Some(GdbRegisters {
+        rax: ctx.rax,
+        rbx: ctx.rbx,
+        rcx: ctx.rcx,
+        rdx: ctx.rdx,
+        rsi: ctx.rsi,
+        rdi: ctx.rdi,
+        rbp: ctx.rbp,
+        rsp: ctx.rsp,
+        r8: ctx.r8,
+        r9: ctx.r9,
+        r10: ctx.r10,
+        r11: ctx.r11,
+        r12: ctx.r12,
+        r13: ctx.r13,
+        r14: ctx.r14,
+        r15: ctx.r15,
+        rip: ctx.rip,
+        rflags: ctx.rflags,
+        cs: ctx.cs as u64,
+        ss: ctx.ss as u64,
+        ds: ctx.ds as u64,
+        es: ctx.es as u64,
+        fs: ctx.fs as u64,
+        gs: ctx.gs as u64,
+    })
 }
 
 #[cfg(all(feature = "alloc", not(target_arch = "x86_64")))]

@@ -30,12 +30,6 @@ pub fn tick(user: bool) {
     TICKS.fetch_add(1, Ordering::Relaxed);
     crate::timer::timer_tick(super::apic::timer_period_ms());
 
-    // Trigger scheduler tick. Use try_lock to avoid deadlock: if the
-    // scheduler lock is already held (e.g., we interrupted mid-schedule),
-    // skip the tick -- the holder will complete its scheduling decision.
-    if let Some(mut sched) = crate::sched::scheduler::current_scheduler().try_lock() {
-        sched.tick();
-    }
     #[cfg(feature = "alloc")]
     crate::drivers::console_input::tick();
     #[cfg(feature = "alloc")]

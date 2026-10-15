@@ -26,6 +26,11 @@
 //! Only x86_64 has the switch primitive yet; elsewhere [`start`] declines
 //! and every entry point is a no-op.
 
+// Only bare-metal x86_64 switches tasks (AArch64 and RISC-V get the switch
+// primitive in sprint E; host tests exercise the logic, not the switch), so
+// elsewhere the task machinery is compiled but unused.
+#![cfg_attr(not(all(target_arch = "x86_64", target_os = "none")), allow(dead_code))]
+
 use alloc::{collections::BTreeMap, sync::Arc, vec::Vec};
 use core::{
     cell::UnsafeCell,
@@ -463,12 +468,13 @@ pub fn schedule() {
     let Some(cpu) = this_cpu() else {
         return;
     };
+    let decide_start = super::metrics::read_tsc();
     let irq = irq_save();
     // Raw pointers: neither task's `Arc` may live on the outgoing stack
     // across the switch (a dead task never comes back to drop it). The
     // CPU state keeps both alive: `prev` until finish_switch, `current`
     // while it runs.
-    let switch: Option<(*const Task, *const Task)> = {
+    let switch: Option<(*const Task, *const Task, bool)> = {
         let mut guard = CPUS[cpu].lock();
         let st = guard.as_mut().expect("dispatching CPU has state");
         st.need_resched = false;
@@ -491,12 +497,18 @@ pub fn schedule() {
             next.set_state(State::Running);
             next.on_cpu.store(true, Ordering::Release);
             CURRENT[cpu].store(Arc::as_ptr(&next) as *mut Task, Ordering::Release);
-            let pair = (Arc::as_ptr(&prev), Arc::as_ptr(&next));
+            let pair = (Arc::as_ptr(&prev), Arc::as_ptr(&next), !preempted);
             st.prev = Some(prev);
             Some(pair)
         }
     };
-    if let Some((prev, next)) = switch {
+    if let Some((prev, next, voluntary)) = switch {
+        // The shell's and panel's switch counters (the cycles taken to
+        // decide the switch, not the switch itself).
+        super::metrics::SCHEDULER_METRICS.record_context_switch(
+            super::metrics::read_tsc().saturating_sub(decide_start),
+            voluntary,
+        );
         // SAFETY: interrupts are off, no dispatch lock is held, both tasks
         // are kept alive by this CPU's state, and `next` was seeded or last
         // switched out by `arch_switch`.
@@ -1078,6 +1090,12 @@ pub fn take_current_usage() -> super::cputime::CpuTimes {
     taken.unwrap_or_default()
 }
 
+/// The (pid, tid) of every user thread that has a task.
+pub fn owners() -> Vec<(u64, u64)> {
+    TASKS.lock().values().filter_map(|t| t.owner).collect()
+}
+
+/// The tasks of process `pid`.
 pub fn tasks_of(pid: u64) -> Vec<Arc<Task>> {
     TASKS
         .lock()

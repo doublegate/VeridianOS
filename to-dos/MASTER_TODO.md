@@ -141,12 +141,13 @@ What does not work yet: `docs/KNOWN-LIMITATIONS.md`.
       (N-102); N-46, N-50, N-54; `thread_join` sleeps on an exit queue instead of yielding
       (N-269). Done: N-102 (`clone_<arch>.S`, errno in the TCB, native pthreads tested by
       `audit_runtime_test`), N-269.
-    - [ ] D4: nested boot dispatch and `BOOT_RETURN_*` removed; old scheduler, `queue.rs`,
+    - [x] D4: nested boot dispatch and `BOOT_RETURN_*` removed; old scheduler, `queue.rs`,
       `percpu_queue.rs`, `deadline.rs`, `process_compat`, old `context_switch` retired (N-84,
       N-85, N-156, N-181); the old `FUTEX_TABLE` path goes with it (N-279). Done: D4a (no
       old-scheduler tasks, failed-fork rollback N-46), D4b (IPC on dispatcher wait queues; N-47,
       N-81 part, N-84, N-85), D4c (nested boot model, `boot_futex_spin` and `FUTEX_TABLE` deleted;
-      N-54, N-279). Next: D4d (the old scheduler modules, `Task`, `context_switch`).
+      N-54, N-279), D4d (old scheduler modules, `Task`, `TaskContext`, `context_switch`,
+      `process::sync`/`wait` deleted; N-50, N-156, N-181).
     - [ ] D5, SMP S2/S3: per-CPU run queues and current task, idle and balancing on every CPU,
       `cpu_init_local()` on APs (N-172), IPI fixes (N-173), interrupts enabled in syscalls with
       deferred frees and per-mm TLB masks (N-139, N-143 flushes), smp_boot stop + guarded AP
@@ -195,7 +196,8 @@ What does not work yet: `docs/KNOWN-LIMITATIONS.md`.
     (N-157); CI flags, blocking coverage, real Kani harnesses, supply chain (N-161 to N-164);
     from the 2026-10 intake: dead `cache_topology` and KSM wired or removed and
     `PERFORMANCE-TUNING.md` corrected (N-264, N-274), one `SyscallError` (N-272), `alloc`
-    unconditional with a CI build that proves it (N-275).
+    unconditional with a CI build that proves it (N-275); `kernel/tests/` either ported to host
+    or boot tests and deleted, or fixed and built in CI (N-280).
   - [ ] **H, real hardware** (`ref-docs/HARDWARE-{X86_64,AARCH64,RISCV64}.md`: HX-01..34,
     HA-01..30, HR-01..40; items already in E are not repeated):
     - Shared infrastructure: one FDT parser (cells, ranges, `dma-ranges`, interrupt cells,
@@ -406,7 +408,7 @@ What does not work yet: `docs/KNOWN-LIMITATIONS.md`.
 - [x] Per-CPU page free lists (PerCpuPageCache, batch refill/drain, v0.5.7)
 - [x] IPC fast path completion (per-task ipc_regs, direct register transfer, v0.5.7)
 - [x] TLB optimization (TlbFlushBatch, lazy TLB, tlb_generation, v0.5.7)
-- [x] Priority inheritance protocol (PiMutex, v0.5.7)
+- [x] Priority inheritance protocol (PiMutex, v0.5.7) -- never used; deleted with the old scheduler in v0.27, redo is SCHED-INC-01
 - [x] Benchmarking suite (7 micro-benchmarks, perf shell builtin, v0.5.7)
 - [x] Software tracepoints (10 event types, per-CPU ring buffers, trace shell builtin, v0.5.7)
 - [x] TlbFlushBatch wired into unmap/map hot paths (v0.5.8)

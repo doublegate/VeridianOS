@@ -100,39 +100,12 @@ cache and PID-to-task registry described in earlier versions of this page are go
 
 ---
 
-## 4. Priority Inheritance Protocol
+## 4. Priority Inheritance (not implemented)
 
-**File**: `kernel/src/process/sync.rs`
-
-### Architecture
-
-`PiMutex` prevents unbounded priority inversion by temporarily boosting the lock owner's priority to match the highest-priority waiter.
-
-```
-High-priority Task A
-    |
-    +--> PiMutex::lock()
-    |       |
-    |   (owner = Task B, priority 10)
-    |       |
-    |   boost Task B: priority 10 --> priority A's priority
-    |       |
-    |   Task A blocks (added to wait queue)
-    |
-    ... Task B runs at boosted priority ...
-    |
-Task B: PiMutex::unlock()
-    |
-    +--> restore original priority
-    +--> wake highest-priority waiter
-```
-
-### Implementation
-
-- `Task::priority_boost: Option<u8>` -- active boost value, checked by `effective_priority()`.
-- On `lock()`: if mutex is held, boost owner's priority to max(owner, waiter).
-- On `unlock()`: restore owner's original priority, wake highest-priority waiter from queue.
-- Transitive: if Task C blocks on a PiMutex held by Task B (which is boosted by Task A), Task B keeps the highest boost.
+The `PiMutex` described here in earlier versions (`kernel/src/process/sync.rs`) boosted the old
+scheduler's task priority, had no callers, and was deleted with that scheduler in v0.27 (sprint D4).
+Priority inheritance on the dispatcher, through the policy classes' boost, is open work
+(SCHED-INC-01, sprint D).
 
 ---
 
@@ -235,18 +208,19 @@ value occupies its own cache line, preventing false sharing between CPU cores.
 Used for:
 - Performance counters (`perf/mod.rs`): 5 atomic counters
 - Per-CPU page caches (`mm/frame_allocator.rs`): `PerCpuPageCache`
-- Ready queues (`sched/queue.rs`): `ReadyQueue`
 
 ---
 
-## 9. Deadline Scheduling -- EDF (v0.11.1)
+## 9. Deadline Scheduling -- EDF (ADR 0007)
 
-**File**: `kernel/src/sched/deadline.rs`
+**File**: `kernel/src/sched/policy/dl.rs` (the v0.11.1 `sched/deadline.rs` was never used by the
+running scheduler and was deleted in v0.27)
 
 ### SCHED_DEADLINE Policy
 
-Implements Earliest Deadline First alongside CFS. Deadline tasks always preempt
-CFS tasks. Among deadline tasks, the one with the earliest absolute deadline wins.
+Earliest Deadline First with a Constant Bandwidth Server, the highest of the dispatcher's policy
+classes: deadline tasks preempt real-time and fair tasks; among them the earliest absolute deadline
+wins. Set with `sched_setattr`.
 
 | Parameter | Description |
 |-----------|-------------|
@@ -254,8 +228,7 @@ CFS tasks. Among deadline tasks, the one with the earliest absolute deadline win
 | deadline_ns | Relative deadline from period start |
 | period_ns | Activation period |
 
-Admission control ensures total utilization (sum of runtime/period) <= 100%.
-Uses fixed-point permille arithmetic (1000 = 100%).
+Admission control keeps total deadline utilization at or below 95% (ADR 0007).
 
 ---
 

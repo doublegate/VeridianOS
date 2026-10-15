@@ -12,9 +12,6 @@ extern crate alloc;
 use alloc::{string::String, vec::Vec};
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
 
-use spin::Mutex;
-
-use super::{queue::ReadyQueue, scheduler::Scheduler, task::Task};
 use crate::error::KernelError;
 
 /// CPU information
@@ -31,11 +28,6 @@ pub struct CpuInfo {
     pub load: AtomicU8,
     /// Number of tasks in run queue
     pub nr_running: AtomicU32,
-    /// Per-CPU scheduler
-    pub scheduler: Mutex<Scheduler>,
-    /// Per-CPU ready queue, on the heap: a ReadyQueue is ~72 KiB and
-    /// CpuInfo is built on the stack (SCHED-PERF-03).
-    pub ready_queue: Mutex<alloc::boxed::Box<ReadyQueue>>,
     /// CPU vendor string
     #[cfg(feature = "alloc")]
     pub vendor: String,
@@ -75,8 +67,6 @@ impl CpuInfo {
             current_task: AtomicU64::new(0),
             load: AtomicU8::new(0),
             nr_running: AtomicU32::new(0),
-            scheduler: Mutex::new(Scheduler::new()),
-            ready_queue: Mutex::new(ReadyQueue::new_boxed()),
             #[cfg(feature = "alloc")]
             vendor: String::new(),
             #[cfg(feature = "alloc")]
@@ -301,16 +291,6 @@ pub fn mark_secondary_cpu_online() {
     SECONDARY_CPUS_ONLINE.store(true, core::sync::atomic::Ordering::Release);
 }
 
-static CPU_TOPOLOGY: Mutex<CpuTopology> = Mutex::new(CpuTopology {
-    total_cpus: 1,
-    online_cpus: AtomicU8::new(1),
-    sockets: 1,
-    cores_per_socket: 1,
-    threads_per_core: 1,
-    #[cfg(feature = "alloc")]
-    numa_nodes: Vec::new(),
-});
-
 /// Initialize SMP support
 pub fn init() {
     // With the `smp` feature, start the other CPUs (stage S1: they park in
@@ -322,28 +302,6 @@ pub fn init() {
     kprintln!("[SMP] SMP initialized (BSP only)");
 }
 
-/// Wake up all Application Processors
-fn wake_up_aps() {
-    let topology = CPU_TOPOLOGY.lock();
-    let num_cpus = topology.total_cpus;
-
-    if num_cpus <= 1 {
-        println!("[SMP] Single CPU system, no APs to wake");
-        return;
-    }
-
-    println!("[SMP] Waking up {} Application Processors", num_cpus - 1);
-
-    // Wake up each AP
-    for cpu_id in 1..num_cpus {
-        if let Err(_e) = cpu_up(cpu_id) {
-            println!("[SMP] Failed to wake CPU {}: {}", cpu_id, _e);
-        } else {
-            println!("[SMP] Successfully woke CPU {}", cpu_id);
-        }
-    }
-}
-
 /// Initialize specific CPU
 pub fn init_cpu(cpu_id: u8) {
     // SAFETY: Each CPU slot is written exactly once during initialization.
@@ -351,12 +309,6 @@ pub fn init_cpu(cpu_id: u8) {
     // No concurrent write to the same index occurs.
     unsafe {
         let cpu_info = CpuInfo::new(cpu_id);
-
-        // Initialize per-CPU scheduler with CPU ID
-        {
-            let mut scheduler = cpu_info.scheduler.lock();
-            scheduler.cpu_id = cpu_id;
-        }
 
         let cpu_data = PerCpuData {
             cpu_info,
@@ -371,13 +323,6 @@ pub fn init_cpu(cpu_id: u8) {
 
         if let Some(ref mut data) = PER_CPU_DATA[cpu_id as usize] {
             data.cpu_info.bring_online();
-
-            // Initialize idle task for this CPU if not BSP
-            #[cfg(feature = "alloc")]
-            if cpu_id != 0 {
-                // Create per-CPU idle task
-                create_cpu_idle_task(cpu_id);
-            }
         }
     }
 }
@@ -596,37 +541,13 @@ pub fn cpu_down(cpu_id: u8) -> Result<(), KernelError> {
             });
         }
 
-        // Migrate all tasks from this CPU
-        let nr_tasks = cpu_data.cpu_info.nr_running.load(Ordering::Relaxed);
-        if nr_tasks > 0 {
-            println!("[SMP] Migrating {} tasks from CPU {}", nr_tasks, cpu_id);
-
-            // Find target CPU with lowest load
-            let target_cpu = find_least_loaded_cpu();
-            if target_cpu == cpu_id {
-                return Err(KernelError::ResourceExhausted {
-                    resource: "available CPUs for migration",
-                });
-            }
-
-            // Migrate all tasks
-            let mut _migrated = 0;
-            loop {
-                let task = {
-                    let mut queue = cpu_data.cpu_info.ready_queue.lock();
-                    queue.dequeue()
-                };
-
-                if let Some(task_ptr) = task {
-                    if migrate_task(task_ptr, cpu_id, target_cpu).is_ok() {
-                        _migrated += 1;
-                    }
-                } else {
-                    break;
-                }
-            }
-
-            println!("[SMP] Migrated {} tasks to CPU {}", _migrated, target_cpu);
+        // Tasks are not migrated off a CPU yet: per-CPU run queues and
+        // balancing come with SMP stage S2 (sprint D5).
+        if cpu_data.cpu_info.nr_running.load(Ordering::Relaxed) > 0 {
+            return Err(KernelError::InvalidState {
+                expected: "no tasks queued",
+                actual: "tasks queued (no migration before sprint D5)",
+            });
         }
 
         // Send CPU offline notification
@@ -639,103 +560,6 @@ pub fn cpu_down(cpu_id: u8) -> Result<(), KernelError> {
         Ok(())
     } else {
         Err(KernelError::NotInitialized { subsystem: "CPU" })
-    }
-}
-
-/// Load balancing: migrate task between CPUs
-pub fn migrate_task(
-    task_ptr: core::ptr::NonNull<Task>,
-    from_cpu: u8,
-    to_cpu: u8,
-) -> Result<(), KernelError> {
-    // SAFETY: task_ptr is a valid NonNull<Task> passed by the caller
-    // (cpu_down or load balancer). We only read task fields (cpu_affinity,
-    // state, sched_class) for migration eligibility checks. The task is not
-    // currently running on any CPU (verified by the Running state check).
-    unsafe {
-        let task = task_ptr.as_ref();
-
-        // Check if migration is allowed
-        if !task.cpu_affinity.contains(to_cpu) {
-            return Err(KernelError::InvalidArgument {
-                name: "cpu_affinity",
-                value: "task affinity prevents migration",
-            });
-        }
-
-        // Don't migrate running tasks
-        if task.state == super::ProcessState::Running {
-            return Err(KernelError::InvalidState {
-                expected: "not running",
-                actual: "running",
-            });
-        }
-
-        // Don't migrate idle tasks
-        if task.sched_class == super::task::SchedClass::Idle {
-            return Err(KernelError::InvalidArgument {
-                name: "sched_class",
-                value: "cannot migrate idle task",
-            });
-        }
-    }
-
-    // Remove from source CPU queue
-    let removed = if let Some(from_cpu_data) = per_cpu(from_cpu) {
-        let mut queue = from_cpu_data.cpu_info.ready_queue.lock();
-        if queue.remove(task_ptr) {
-            from_cpu_data
-                .cpu_info
-                .nr_running
-                .fetch_sub(1, Ordering::Relaxed);
-            from_cpu_data.cpu_info.update_load();
-            true
-        } else {
-            false
-        }
-    } else {
-        false
-    };
-
-    if !removed {
-        return Err(KernelError::NotFound {
-            resource: "task in source CPU queue",
-            id: from_cpu as u64,
-        });
-    }
-
-    // Add to destination CPU queue
-    if let Some(to_cpu_data) = per_cpu(to_cpu) {
-        to_cpu_data.cpu_info.ready_queue.lock().enqueue(task_ptr);
-        to_cpu_data
-            .cpu_info
-            .nr_running
-            .fetch_add(1, Ordering::Relaxed);
-        to_cpu_data.cpu_info.update_load();
-
-        // SAFETY: task_ptr is a valid NonNull<Task> that was just removed
-        // from the source CPU queue and enqueued on the destination. We
-        // update current_cpu to reflect the new CPU assignment. No other
-        // code is modifying this task concurrently because it was removed
-        // from the source queue under lock.
-        unsafe {
-            let task_mut = task_ptr.as_ptr();
-            (*task_mut).current_cpu = Some(to_cpu);
-        }
-
-        // Send IPI if destination CPU is idle
-        if to_cpu_data.cpu_info.is_idle() {
-            send_ipi(to_cpu, 0); // Wake up CPU
-        }
-
-        // Record migration metric
-        super::metrics::SCHEDULER_METRICS.record_migration();
-
-        Ok(())
-    } else {
-        Err(KernelError::NotInitialized {
-            subsystem: "destination CPU",
-        })
     }
 }
 
@@ -798,55 +622,5 @@ fn max_cpuid() -> u32 {
         use core::arch::x86_64::__cpuid;
         let cpuid = __cpuid(0);
         cpuid.eax
-    }
-}
-
-/// Create idle task for specific CPU
-#[cfg(feature = "alloc")]
-fn create_cpu_idle_task(cpu_id: u8) {
-    use alloc::{boxed::Box, format};
-    use core::ptr::NonNull;
-
-    use super::{
-        idle_task_entry,
-        task::{Priority, SchedClass, SchedPolicy, Task},
-    };
-    use crate::process::{ProcessId, ThreadId};
-
-    // Allocate stack for idle task (8KB)
-    const IDLE_STACK_SIZE: usize = 8192;
-    let idle_stack = Box::leak(Box::new([0u8; IDLE_STACK_SIZE]));
-    let idle_stack_top = idle_stack.as_ptr() as usize + IDLE_STACK_SIZE;
-
-    // Get kernel page table
-    let kernel_page_table = crate::mm::get_kernel_page_table();
-
-    // Create idle task
-    let mut idle_task = Box::new(Task::new(
-        ProcessId(0),            // PID 0 for idle
-        ThreadId(cpu_id as u64), // TID = CPU ID for idle tasks
-        format!("idle-cpu{}", cpu_id),
-        idle_task_entry as usize,
-        idle_stack_top,
-        kernel_page_table,
-    ));
-
-    // Set as idle priority
-    idle_task.priority = Priority::Idle;
-    idle_task.sched_class = SchedClass::Idle;
-    idle_task.sched_policy = SchedPolicy::Idle;
-
-    // Set CPU affinity to only this CPU
-    idle_task.cpu_affinity = super::task::CpuSet::single(cpu_id);
-
-    // Get raw pointer to idle task
-    // Box::leak always returns a non-null pointer
-    let idle_ptr =
-        NonNull::new(Box::leak(idle_task) as *mut _).expect("Box::leak returned null (impossible)");
-
-    // Initialize per-CPU scheduler with idle task
-    if let Some(cpu_data) = per_cpu(cpu_id) {
-        let mut scheduler = cpu_data.cpu_info.scheduler.lock();
-        scheduler.init(idle_ptr);
     }
 }

@@ -745,31 +745,6 @@ pub fn sys_setpriority(which: usize, who: usize, priority: usize) -> SyscallResu
     // Actually set the priority
     if let Some(process) = crate::process::table::get_process(pid) {
         process.set_priority(new_priority);
-
-        // Update scheduler tasks for all threads
-        #[cfg(feature = "alloc")]
-        {
-            let threads = process.threads.lock();
-            for (_, thread) in threads.iter() {
-                if let Some(task_ptr) = thread.get_task_ptr() {
-                    // SAFETY: task_ptr is a valid NonNull<Task> obtained from
-                    // the thread's stored task pointer. We modify the priority
-                    // field while holding the threads lock, preventing
-                    // concurrent modification.
-                    unsafe {
-                        let task = task_ptr.as_ptr();
-                        (*task).priority = match new_priority {
-                            ProcessPriority::RealTime => crate::sched::task::Priority::RealTimeHigh,
-                            ProcessPriority::System => crate::sched::task::Priority::SystemHigh,
-                            ProcessPriority::Normal => crate::sched::task::Priority::UserNormal,
-                            ProcessPriority::Low => crate::sched::task::Priority::UserLow,
-                            ProcessPriority::Idle => crate::sched::task::Priority::Idle,
-                        };
-                    }
-                }
-            }
-        }
-
         Ok(0)
     } else {
         Err(SyscallError::ResourceNotFound)

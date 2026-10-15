@@ -151,12 +151,10 @@ fn bench_ipc_stats() -> BenchResult {
     })
 }
 
-/// Benchmark: scheduler current task lookup
+/// Benchmark: the dispatcher's current-task lookup
 fn bench_sched_current() -> BenchResult {
     run_bench("sched_current", 1000, 200, || {
-        let sched = crate::sched::scheduler::SCHEDULER.lock();
-        let current = sched.current();
-        black_box(current);
+        black_box(crate::sched::dispatch::current_owner());
     })
 }
 

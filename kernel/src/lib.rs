@@ -134,8 +134,6 @@ pub mod bench;
 // Re-export for tests and benchmarks
 // Re-export memory management for tests
 pub use mm::{FrameNumber, MemoryRegion, FRAME_SIZE};
-// Re-export scheduler items for tests
-pub use sched::{Priority, SchedClass, Task};
 // Re-exported so the `UserPod` compile_fail doctest can name the accessor;
 // `syscall` itself stays private.
 #[doc(hidden)]

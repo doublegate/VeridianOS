@@ -11,7 +11,6 @@ extern crate alloc;
 
 #[cfg(feature = "alloc")]
 use alloc::{string::String, sync::Arc};
-use core::ptr::NonNull;
 
 use spin::Mutex;
 
@@ -20,7 +19,6 @@ use crate::{
     arch::context::{ArchThreadContext, ThreadContext},
     error::KernelError,
     mm::{FRAME_ALLOCATOR, FRAME_SIZE},
-    sched::task::Task,
 };
 
 /// Per-thread filesystem state for CLONE_FS support.
@@ -146,21 +144,6 @@ fn free_stack_frames(frame: crate::mm::FrameNumber, page_count: usize) {
     let allocator = FRAME_ALLOCATOR.lock();
     let _ = allocator.free_frames(frame, page_count);
 }
-
-/// Safe wrapper for task pointer that implements Send + Sync
-///
-/// Safety: Task pointers are only accessed from within the scheduler
-/// which has its own synchronization mechanisms.
-#[derive(Debug)]
-pub struct TaskPtr(Option<NonNull<Task>>);
-
-// SAFETY: TaskPtr has no accessor and its field is private; the wrapped
-// pointer is never read or dereferenced (today it is only constructed as
-// `TaskPtr(None)` inside a Mutex), so moving it across CPUs is sound.
-unsafe impl Send for TaskPtr {}
-// SAFETY: as for Send -- `&TaskPtr` exposes nothing that reaches the
-// pointee, so sharing it cannot cause a data race.
-unsafe impl Sync for TaskPtr {}
 
 /// Thread ID type
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -407,9 +390,6 @@ pub struct Thread {
     /// Floating point state saved flag
     pub fpu_used: AtomicU32,
 
-    /// Scheduler task pointer (if scheduled)
-    pub task_ptr: Mutex<TaskPtr>,
-
     /// clear_tid pointer for CLONE_CHILD_CLEARTID
     pub clear_tid: AtomicUsize,
 
@@ -590,7 +570,6 @@ impl Thread {
             exit_code: AtomicU32::new(0),
             priority: 2, // Normal priority
             fpu_used: AtomicU32::new(0),
-            task_ptr: Mutex::new(TaskPtr(None)),
             clear_tid: AtomicUsize::new(0),
             sigmask: AtomicU64::new(0),
             sigpending: AtomicU64::new(0),
@@ -682,76 +661,26 @@ impl Thread {
         self.cpu_time.fetch_add(microseconds, Ordering::Relaxed);
     }
 
-    /// Set scheduler task pointer
-    pub fn set_task_ptr(&self, task: Option<NonNull<Task>>) {
-        self.task_ptr.lock().0 = task;
-    }
-
-    /// Get scheduler task pointer
-    pub fn get_task_ptr(&self) -> Option<NonNull<Task>> {
-        self.task_ptr.lock().0
-    }
-
-    /// Synchronize state with scheduler task
-    pub fn sync_state_with_scheduler(&self, new_state: ThreadState) {
-        // Update our state
-        self.set_state(new_state);
-
-        // Update scheduler task state if linked
-        if let Some(task_ptr) = self.get_task_ptr() {
-            // SAFETY: task_ptr is a NonNull<Task> obtained from
-            // get_task_ptr(), which returns a valid pointer to the
-            // scheduler's task. Writing the state field synchronizes the
-            // thread state with the scheduler's view. The pointer is valid
-            // because the task is not freed while the thread holds a
-            // reference to it.
-            unsafe {
-                let task = task_ptr.as_ptr();
-                (*task).state = match new_state {
-                    ThreadState::Creating => crate::process::ProcessState::Creating,
-                    ThreadState::Ready => crate::process::ProcessState::Ready,
-                    ThreadState::Running => crate::process::ProcessState::Running,
-                    ThreadState::Blocked => crate::process::ProcessState::Blocked,
-                    ThreadState::Sleeping => crate::process::ProcessState::Sleeping,
-                    ThreadState::Zombie => crate::process::ProcessState::Zombie,
-                    ThreadState::Dead => crate::process::ProcessState::Dead,
-                };
-            }
-        }
-    }
-
     /// Mark thread as ready to run
     pub fn set_ready(&self) {
-        self.sync_state_with_scheduler(ThreadState::Ready);
+        self.set_state(ThreadState::Ready);
     }
 
     /// Mark thread as blocked
-    pub fn set_blocked(&self, reason: Option<u64>) {
-        self.sync_state_with_scheduler(ThreadState::Blocked);
-
-        // Update scheduler task blocked_on field if linked
-        if let Some(task_ptr) = self.get_task_ptr() {
-            // SAFETY: task_ptr is a NonNull<Task> from get_task_ptr(),
-            // pointing to the scheduler's task entry. Writing blocked_on
-            // records the blocking reason. The pointer remains valid because
-            // the task is not freed while the thread references it.
-            unsafe {
-                let task = task_ptr.as_ptr();
-                (*task).blocked_on = reason;
-            }
-        }
+    pub fn set_blocked(&self, _reason: Option<u64>) {
+        self.set_state(ThreadState::Blocked);
     }
 
     /// Mark thread as running on CPU
     pub fn set_running(&self, cpu: u8) {
         self.current_cpu.store(cpu as u32, Ordering::Release);
-        self.sync_state_with_scheduler(ThreadState::Running);
+        self.set_state(ThreadState::Running);
     }
 
     /// Mark thread as exited
     pub fn set_exited(&self, exit_code: i32) {
         self.exit_code.store(exit_code as u32, Ordering::Release);
-        self.sync_state_with_scheduler(ThreadState::Zombie);
+        self.set_state(ThreadState::Zombie);
     }
 
     /// Get total CPU time

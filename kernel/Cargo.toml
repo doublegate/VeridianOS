@@ -87,10 +87,6 @@ name = "ipc_benchmarks"
 harness = false
 
 [[test]]
-name = "scheduler_tests"
-harness = false
-
-[[test]]
 name = "process_tests"
 harness = false
 

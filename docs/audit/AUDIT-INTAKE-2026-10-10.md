@@ -11,7 +11,7 @@ its N-65/N-76 labels are swapped.
 
 Every finding was re-checked against the tree on 2026-10-14 by three read-only reviews (claim
 status, code verification, reachability). This file is the tracking list for the IDs it adds
-(**N-261 to N-279**) and records where each matrix finding is tracked. **C** = confirmed in the
+(**N-261 to N-280**) and records where each matrix finding is tracked. **C** = confirmed in the
 code, **L** = latent (unreachable today), as in the 2026-10-07 re-evaluation.
 
 ## The remediation that was not merged
@@ -49,6 +49,7 @@ code, **L** = latent (unreachable today), as in the 2026-10-07 re-evaluation.
 | N-277 | Low C | kernel stacks need physically contiguous frames although x86_64 maps them into a slot | ARCH-MEM-04 | duplicate of N-144 (G); no new work item |
 | N-278 | Medium C | The kernel heap is a 1 GiB static array, so a guest with little memory cannot boot; the heap should be sized from the boot memory map | (handoff "QEMU OOM fix"); also HX-02 | **fixed** (frames sized from usable RAM, 32 MiB..1 GiB) |
 | N-279 | Low L | Two futex tables: dispatched threads queue in `DFUTEX`, others in `FUTEX_TABLE`; a waiter and a waker on different tables miss each other (only possible for non-dispatched threads) | POC-SYS-02 | **fixed** (v0.27, D4c): the old table and the nested boot dispatch are deleted; every futex operation is the dispatcher's |
+| N-280 | Low C | None of the bare-metal test programs in `kernel/tests/` compiles (stale signatures, a missing `test_main`, unresolved imports), and no CI job builds them, so `kernel/tests/README.md` describes tests that cannot run; the host unit tests, the in-kernel boot tests and the rootfs runtime suites are the real coverage (found 2026-10-15 while deleting `scheduler_tests.rs`, which tested only the old scheduler) | (review note) | open; G (port the useful checks to host or boot tests, then delete the directory, or fix and add a CI job) |
 
 ## Matrix findings already tracked elsewhere
 

@@ -8,8 +8,7 @@
 use crate::process::thread::ThreadFs;
 use crate::{
     arch::context::ThreadContext,
-    process::{self, thread::ThreadBuilder, ProcessState},
-    sched,
+    process::{self, thread::ThreadBuilder},
     syscall::{userspace::validate_user_ptr, SyscallError},
 };
 
@@ -339,12 +338,11 @@ pub fn sys_thread_clone(
         .add_thread(thread)
         .map_err(|_| SyscallError::InvalidState)?;
 
-    // A dispatched process's new thread runs as its own task (stage D2),
-    // starting from the registers prepared above and a copy of the caller's
-    // vector state. It must not also go on the old scheduler's queue, where
-    // the old nested dispatch would run a second copy of it.
+    // The new thread runs as its own dispatcher task (stage D2), starting
+    // from the registers prepared above and a copy of the caller's vector
+    // state. (CLONE_CHILD_CLEARTID is honoured by exit_dispatched.)
     #[cfg(target_arch = "x86_64")]
-    if sched::dispatch::current_owner().is_some() {
+    {
         if crate::process::start_thread(&proc, &thread, true).is_err() {
             // The thread never ran: take it out again (with its kernel
             // stack), or it counted as alive and its process could never
@@ -353,29 +351,13 @@ pub fn sys_thread_clone(
             let _ = crate::process::exit::cleanup_thread(&proc, tid);
             return Err(SyscallError::OutOfMemory);
         }
-        return Ok(tid.0 as usize);
+        Ok(tid.0 as usize)
     }
-
-    // Create scheduler task
-    let task_ptr = sched::create_task_from_thread(proc.pid, tid, &thread)
-        .map_err(|_| SyscallError::InvalidState)?;
-
-    // Mark ready
-    proc.set_state(ProcessState::Ready);
-
-    // Enqueue the child thread in the scheduler so it actually gets CPU time.
-    // Without this, the child task exists but is never placed on a ready queue,
-    // causing the parent to spin forever in futex_wait (pthread_create waits
-    // for the child to write its TID).
-    sched::SCHEDULER.lock().enqueue(task_ptr);
-
-    // TODO(tier7): CLONE_CHILD_CLEARTID is registered via `builder.clear_tid()`
-    // above.  On thread exit the kernel should:
-    //   1. Write 0 to `*child_tid_ptr` (in the thread's address space).
-    //   2. Perform a FUTEX_WAKE on `child_tid_ptr` to unblock any `pthread_join`
-    //      waiters.
-    // This is currently handled by the thread exit path if the clear_tid
-    // field is set; verify integration in the exit syscall.
-
-    Ok(tid.0 as usize)
+    // No user threads without the dispatcher (sprint E).
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        drop(thread);
+        let _ = crate::process::exit::cleanup_thread(&proc, tid);
+        Err(SyscallError::InvalidState)
+    }
 }

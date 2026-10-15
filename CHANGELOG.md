@@ -652,6 +652,15 @@
 
 ### Removed
 
+- **The old scheduler (sprint D4).** The scheduler that predates the dispatcher (a global ready
+  queue, a `Task` control block of its own, per-CPU and NUMA queues, an EDF module, pid-keyed IPC
+  blocking, process "adapters" and a separate context switch on all three architectures) never ran
+  once the dispatcher started; it is deleted (about 7,800 lines with its 64 unit tests), together
+  with the unused `process::sync` (`KernelMutex`, `KernelSemaphore`, `PiMutex`) and
+  `process::wait`. The scheduler is the dispatcher with its ADR 0007 policy classes. The shell's and
+  desktop panel's scheduler counters now count the dispatcher's switches (they stayed at zero), the
+  GDB stub lists dispatched threads, and `kernel/tests/scheduler_tests.rs` (old-scheduler tests that
+  no longer compiled) is gone. Real priority inheritance is open (SCHED-INC-01).
 - **The nested boot execution model (sprint D4).** Before the dispatcher, programs ran nested inside
   the boot flow: `enter_usermode_returnable` saved the kernel's context, the program's exit jumped
   back to it, a forked child was run inline from its parent's wait loop or pipe read, and a futex
