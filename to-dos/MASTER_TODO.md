@@ -136,7 +136,7 @@ What does not work yet: `docs/KNOWN-LIMITATIONS.md`.
       fatal-after-clear, exec from a multithreaded process ending the other threads first (done,
       N-101; the exec'ing thread keeps its tid); relative paths per thread (N-115); MAP_SHARED anon (done, N-140) and
       MAP_FIXED semantics (done, N-141); pty fixes (done, N-128); thread placement (N-114 partly done: no unused
-      clone stacks; main tid == pid and futex keys remain).
+      clone stacks; main tid == pid and keyed futex queues done, N-114 fixed).
     - [ ] Threads: clone through the dispatcher, native libc clone stub, TCB join, TLS errno
       (N-102); N-46, N-50, N-54; `thread_join` sleeps on an exit queue instead of yielding
       (N-269). Done: N-102 (`clone_<arch>.S`, errno in the TCB, native pthreads tested by
