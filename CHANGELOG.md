@@ -700,7 +700,8 @@
   finish exiting. Both are now undone whole. Every process creation and fork also stopped
   building an unused task for the old scheduler, which was queued and never freed. An exiting
   process now leaves the shared regions it mapped; it used to keep counting as a user, so a region
-  it had mapped could never be unregistered.
+  it had mapped could never be unregistered. Boot test `unstarted_process_freed_whole` (with the old
+  behaviour it reports 36 frames leaked).
 - **Native C library threads work (N-102).** The native libc's `pthread_create` could never
   have worked: the new thread "returned" from a C clone wrapper through a stack frame it did not
   have, the kernel cleared the thread id that `pthread_join` looked the thread up by, `errno` was

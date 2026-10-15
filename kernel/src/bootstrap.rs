@@ -1907,6 +1907,7 @@ pub fn kernel_init_main() {
     run_display_tests(&mut passed, &mut failed);
     run_usercopy_tests(&mut passed, &mut failed);
     run_dispatch_tests(&mut passed, &mut failed);
+    run_process_tests(&mut passed, &mut failed);
 
     // --- Summary ---
     print_summary(passed, failed);
@@ -2004,6 +2005,61 @@ fn run_dispatch_tests(passed: &mut u32, failed: &mut u32) {
         report_skip(
             "dispatch_waitqueue_wake_and_join",
             "no dispatcher (sprint E)",
+        );
+    }
+}
+
+/// Process lifecycle boot tests.
+#[cfg(feature = "alloc")]
+fn run_process_tests(passed: &mut u32, failed: &mut u32) {
+    kprintln!("[INIT] Process tests:");
+    // N-46: a process that never ran -- what a fork that fails part-way, or
+    // whose child cannot be started, leaves behind -- is freed whole: its
+    // mapped frames, page tables and kernel stack all go back. (Dropping a
+    // Process frees nothing; these frames used to leak.)
+    #[cfg(target_arch = "x86_64")]
+    {
+        use crate::{
+            mm::vas::MappingType,
+            process::{pcb::ProcessBuilder, thread::ThreadBuilder},
+        };
+        let free = || crate::mm::FRAME_ALLOCATOR.lock().get_stats().free_frames;
+        let before = free();
+        let built = ProcessBuilder::new(alloc::string::String::from("n46-rollback"))
+            .build_with_address_space()
+            .and_then(|p| {
+                p.memory_space.lock().mmap(16 * 4096, MappingType::Data)?;
+                let t = ThreadBuilder::new(p.pid, alloc::string::String::from("n46"), 0x40_0000)
+                    .build()?;
+                p.add_thread(t)?;
+                Ok(p)
+            });
+        let ok = match built {
+            Ok(p) => {
+                let taken = before.saturating_sub(free());
+                crate::process::exit::discard_unstarted(&p);
+                drop(p);
+                let after = free();
+                if after != before {
+                    kprintln!(
+                        "  [n46] frames: before {} taken {} after {}",
+                        before,
+                        taken,
+                        after
+                    );
+                }
+                taken >= 16 && after == before
+            }
+            Err(_) => false,
+        };
+        report_test("unstarted_process_freed_whole", ok, passed, failed);
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        let _ = (passed, failed);
+        report_skip(
+            "unstarted_process_freed_whole",
+            "no user address spaces yet (sprint E)",
         );
     }
 }
