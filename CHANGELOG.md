@@ -614,6 +614,11 @@
 
 ### Fixed
 
+- **Zone-limited frame allocations stay in their zone.** A DMA-zone request could be served by any
+  node's allocator without a zone check; a first attempt at the check (not released) tested only
+  the first frame, so a run starting below 16 MiB and ending above it was accepted. The bitmap and
+  buddy allocators now search only inside the zone (the buddy splits a straddling block towards
+  it). The per-allocator statistics count each successful allocation once.
 - **SA_RESTART no longer restarts sigsuspend, sleeps and polls (N-260).** A signal handler with
   SA_RESTART restarted every interrupted system call, so sigsuspend went back to waiting after
   the very handler it waited for, and nanosleep, poll, select and epoll_wait started over with

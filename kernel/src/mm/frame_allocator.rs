@@ -244,6 +244,9 @@ struct BitmapAllocator {
     free_frames: AtomicUsize,
     /// Word where the next search starts (just past the last allocation).
     hint: AtomicUsize,
+    /// Successful allocations: each contiguous run or single frame handed
+    /// out counts once, whatever its size; rejected attempts never count.
+    allocations: core::sync::atomic::AtomicU64,
 }
 
 /// Call `f(word, mask)` for each bitmap word covering bits
@@ -265,12 +268,25 @@ fn for_each_word_mask(start: usize, count: usize, mut f: impl FnMut(usize, u64))
     }
 }
 
-/// First run of `count` set bits within words `[lo, hi)` of `bitmap`;
-/// returns the bit index of its start.
+/// First run of `count` set bits within bits `[lo, hi)` of `bitmap`;
+/// returns the bit index of its start. Bits outside the range count as
+/// clear, so a run never starts before `lo` or reaches past `hi`.
 fn find_run(bitmap: &[u64], lo: usize, hi: usize, count: usize) -> Option<usize> {
+    let hi = hi.min(bitmap.len() * 64);
+    if lo >= hi {
+        return None;
+    }
     let mut run = 0usize;
     let mut run_start = 0usize;
-    for (i, &word) in bitmap.iter().enumerate().take(hi).skip(lo) {
+    let (first, last) = (lo / 64, (hi - 1) / 64);
+    for (i, &word) in bitmap.iter().enumerate().take(last + 1).skip(first) {
+        let mut word = word;
+        if i == first {
+            word &= u64::MAX << (lo % 64);
+        }
+        if i == last && !hi.is_multiple_of(64) {
+            word &= (1u64 << (hi % 64)) - 1;
+        }
         if word == 0 {
             run = 0;
             continue;
@@ -344,6 +360,7 @@ impl BitmapAllocator {
             total_frames: frame_count,
             free_frames: AtomicUsize::new(frame_count),
             hint: AtomicUsize::new(0),
+            allocations: core::sync::atomic::AtomicU64::new(0),
         }
     }
 
@@ -354,6 +371,14 @@ impl BitmapAllocator {
 
     /// Allocate contiguous frames
     fn allocate(&self, count: usize) -> Result<FrameNumber> {
+        self.allocate_in(count, None)
+    }
+
+    /// Allocate `count` contiguous frames lying entirely inside the frame
+    /// range `[start, end)` when one is given (a memory zone), else
+    /// anywhere in the node. Frames outside the range are never examined,
+    /// so a zone request neither takes nor disturbs them.
+    fn allocate_in(&self, count: usize, range: Option<(u64, u64)>) -> Result<FrameNumber> {
         if count == 0 || count >= BITMAP_BUDDY_THRESHOLD {
             return Err(FrameAllocatorError::InvalidSize);
         }
@@ -361,20 +386,27 @@ impl BitmapAllocator {
             return Err(FrameAllocatorError::OutOfMemory);
         }
 
+        // The range as bit offsets into this node.
+        let base = self.start_frame.as_u64();
+        let (lo, hi) = match range {
+            None => (0, self.total_frames),
+            Some((start, end)) => {
+                let lo = start.saturating_sub(base).min(self.total_frames as u64) as usize;
+                let hi = end.saturating_sub(base).min(self.total_frames as u64) as usize;
+                (lo, hi)
+            }
+        };
+        if hi.saturating_sub(lo) < count {
+            return Err(FrameAllocatorError::OutOfMemory);
+        }
+
         let mut bitmap = self.bitmap.lock();
-        let words = self.words();
-        let hint = self.hint.load(Ordering::Relaxed).min(words);
+        let hint = (self.hint.load(Ordering::Relaxed) * 64).clamp(lo, hi);
 
         // From the hint to the end, then from the start up to the hint (a
         // run may straddle the hint, so the second pass overlaps it).
-        let found = find_run(&bitmap[..], hint, words, count).or_else(|| {
-            find_run(
-                &bitmap[..],
-                0,
-                (hint + count.div_ceil(64) + 1).min(words),
-                count,
-            )
-        });
+        let found = find_run(&bitmap[..], hint, hi, count)
+            .or_else(|| find_run(&bitmap[..], lo, (hint + count + 64).min(hi), count));
         let Some(first) = found else {
             return Err(FrameAllocatorError::OutOfMemory);
         };
@@ -382,6 +414,7 @@ impl BitmapAllocator {
         for_each_word_mask(first, count, |w, mask| bitmap[w] &= !mask);
         self.free_frames.fetch_sub(count, Ordering::Release);
         self.hint.store((first + count) / 64, Ordering::Relaxed);
+        self.allocations.fetch_add(1, Ordering::Relaxed);
         Ok(FrameNumber::new(self.start_frame.as_u64() + first as u64))
     }
 
@@ -408,6 +441,7 @@ impl BitmapAllocator {
             }
         }
         self.free_frames.fetch_sub(n, Ordering::Release);
+        self.allocations.fetch_add(n as u64, Ordering::Relaxed);
         n
     }
 
@@ -480,6 +514,9 @@ struct BuddyAllocator {
     total_frames: usize,
     /// Free frame count
     free_frames: AtomicUsize,
+    /// Successful allocations: each contiguous run or single frame handed
+    /// out counts once, whatever its size; rejected attempts never count.
+    allocations: core::sync::atomic::AtomicU64,
 }
 
 #[derive(Debug)]
@@ -517,6 +554,7 @@ impl BuddyAllocator {
             start_frame,
             total_frames,
             free_frames: AtomicUsize::new(total_frames),
+            allocations: core::sync::atomic::AtomicU64::new(0),
         };
 
         // Initialize with one large block
@@ -557,9 +595,45 @@ impl BuddyAllocator {
 
     /// Allocate frames of the given order
     fn allocate(&self, count: usize) -> Result<FrameNumber> {
+        self.allocate_in(count, None)
+    }
+
+    /// Unlink the first block of `list` for which `fits(frame)` holds.
+    #[cfg(feature = "alloc")]
+    fn take_first(
+        list: &mut Option<BuddyBlock>,
+        fits: impl Fn(FrameNumber) -> bool,
+    ) -> Option<BuddyBlock> {
+        if fits(list.as_ref()?.frame) {
+            let mut block = list.take()?;
+            *list = block.next.take().map(|b| *b);
+            return Some(block);
+        }
+        let mut cursor = &mut list.as_mut()?.next;
+        loop {
+            match cursor {
+                None => return None,
+                Some(node) if fits(node.frame) => {
+                    let mut node = cursor.take()?;
+                    *cursor = node.next.take();
+                    return Some(*node);
+                }
+                Some(node) => cursor = &mut node.next,
+            }
+        }
+    }
+
+    /// Allocate `count` frames (rounded up to a power of two). With a frame
+    /// range `[start, end)` (a memory zone), the allocation lies entirely
+    /// inside it: a free block that contains a suitably aligned piece
+    /// inside the range is split down to that piece, and the halves
+    /// around it go back on the free lists.
+    fn allocate_in(&self, count: usize, range: Option<(u64, u64)>) -> Result<FrameNumber> {
         if count == 0 {
             return Err(FrameAllocatorError::InvalidSize);
         }
+        #[cfg(not(feature = "alloc"))]
+        let _ = range;
 
         #[cfg(not(feature = "alloc"))]
         {
@@ -573,34 +647,56 @@ impl BuddyAllocator {
             if order >= self.free_lists.len() {
                 return Err(FrameAllocatorError::InvalidSize);
             }
+            let size = 1u64 << order;
+            let base = self.start_frame.as_u64();
 
-            // Try to find a block of the right size
+            // The first piece of `size` frames, aligned like a block of that
+            // order, inside both the block `[frame, frame + 2^block_order)`
+            // and the range.
+            let target = |frame: u64, block_order: usize| -> Option<u64> {
+                let block_end = frame + (1u64 << block_order);
+                let (start, end) = match range {
+                    None => return Some(frame),
+                    Some((start, end)) => (start.max(frame), end.min(block_end)),
+                };
+                let piece = base + (start.checked_sub(base)?).div_ceil(size) * size;
+                (piece.checked_add(size)? <= end).then_some(piece)
+            };
+
             for current_order in order..self.free_lists.len() {
                 let mut list = self.free_lists[current_order].lock();
+                let fits = |frame: FrameNumber| target(frame.as_u64(), current_order).is_some();
+                let Some(block) = Self::take_first(&mut list, fits) else {
+                    continue;
+                };
+                let Some(piece) = target(block.frame.as_u64(), current_order) else {
+                    // `fits` held for this block a moment ago.
+                    return Err(FrameAllocatorError::OutOfMemory);
+                };
 
-                if let Some(mut block) = list.take() {
-                    // Remove block from free list
-                    *list = block.next.take().map(|b| *b);
-
-                    // Split block if necessary
-                    let mut split_order = current_order;
-                    while split_order > order {
-                        split_order -= 1;
-                        let buddy_frame =
-                            FrameNumber::new(block.frame.as_u64() + (1 << split_order));
-
-                        // Add buddy to free list
-                        let mut buddy_list = self.free_lists[split_order].lock();
-                        let buddy_block = BuddyBlock {
-                            frame: buddy_frame,
-                            next: buddy_list.take().map(Box::new),
-                        };
-                        *buddy_list = Some(buddy_block);
-                    }
-
-                    self.free_frames.fetch_sub(1 << order, Ordering::Release);
-                    return Ok(block.frame);
+                // Halve towards `piece`, freeing the other half each time.
+                let mut lo = block.frame.as_u64();
+                let mut split_order = current_order;
+                while split_order > order {
+                    split_order -= 1;
+                    let half = 1u64 << split_order;
+                    let other = if piece >= lo + half {
+                        let other = lo;
+                        lo += half;
+                        other
+                    } else {
+                        lo + half
+                    };
+                    let mut buddy_list = self.free_lists[split_order].lock();
+                    let buddy_block = BuddyBlock {
+                        frame: FrameNumber::new(other),
+                        next: buddy_list.take().map(Box::new),
+                    };
+                    *buddy_list = Some(buddy_block);
                 }
+                debug_assert_eq!(lo, piece);
+                self.free_frames.fetch_sub(1 << order, Ordering::Release);
+                return Ok(FrameNumber::new(lo));
             }
 
             Err(FrameAllocatorError::OutOfMemory)
@@ -911,20 +1007,18 @@ impl FrameAllocator {
         numa_node: Option<usize>,
         zone: Option<MemoryZone>,
     ) -> Result<FrameNumber> {
+        let range = zone.map(|z| {
+            let (start, end) = z.frame_range();
+            (start.as_u64(), end.as_u64())
+        });
         if let Some(node) = numa_node {
             // Try specified node first
             if node < MAX_NUMA_NODES {
                 if let Some(ref allocator) = self.bitmap_allocators[node] {
-                    if let Ok(frame) = allocator.allocate(count) {
-                        // Check zone constraint
-                        if let Some(z) = zone {
-                            if !z.contains(frame) {
-                                let _ = allocator.free(frame, count);
-                                return Err(FrameAllocatorError::OutOfMemory);
-                            }
-                        }
-                        // Reserved frames were removed from the bitmap when
-                        // the region was added.
+                    // The search stays inside the zone, so every frame of the
+                    // run is in it. Reserved frames were removed from the
+                    // bitmap when the region was added.
+                    if let Ok(frame) = allocator.allocate_in(count, range) {
                         return Ok(frame);
                     }
                 }
@@ -933,7 +1027,7 @@ impl FrameAllocator {
 
         // Try all nodes
         for allocator in self.bitmap_allocators.iter().flatten() {
-            if let Ok(frame) = allocator.allocate(count) {
+            if let Ok(frame) = allocator.allocate_in(count, range) {
                 return Ok(frame);
             }
         }
@@ -1002,44 +1096,28 @@ impl FrameAllocator {
         numa_node: Option<usize>,
         zone: Option<MemoryZone>,
     ) -> Result<FrameNumber> {
-        if let Some(node) = numa_node {
-            // Try specified node first
-            if node < MAX_NUMA_NODES {
-                if let Some(ref allocator) = self.buddy_allocators[node] {
-                    if let Ok(frame) = allocator.allocate(count) {
-                        // Check zone constraint
-                        if let Some(z) = zone {
-                            if !z.contains(frame) {
-                                let _ = allocator.free(frame, count);
-                                return Err(FrameAllocatorError::OutOfMemory);
-                            }
-                        }
-
-                        // Check if allocated frames are reserved
-                        #[cfg(feature = "alloc")]
-                        if self.is_reserved(frame, count) {
-                            // Try to free and continue searching
-                            let _ = allocator.free(frame, count);
-                        } else {
-                            return Ok(frame);
-                        }
-                        #[cfg(not(feature = "alloc"))]
-                        return Ok(frame);
-                    }
-                }
-            }
-        }
-
-        // Try all nodes
-        for allocator in self.buddy_allocators.iter().flatten() {
-            if let Ok(frame) = allocator.allocate(count) {
-                // Check if allocated frames are reserved
+        let range = zone.map(|z| {
+            let (start, end) = z.frame_range();
+            (start.as_u64(), end.as_u64())
+        });
+        let preferred = numa_node
+            .filter(|&node| node < MAX_NUMA_NODES)
+            .and_then(|node| self.buddy_allocators[node].as_ref());
+        // The specified node first, then every node.
+        for allocator in preferred
+            .into_iter()
+            .chain(self.buddy_allocators.iter().flatten())
+        {
+            if let Ok(frame) = allocator.allocate_in(count, range) {
+                // A block overlapping reserved frames goes back, and the
+                // search moves on.
                 #[cfg(feature = "alloc")]
                 if self.is_reserved(frame, count) {
-                    // Try to free and continue searching
                     let _ = allocator.free(frame, count);
                     continue;
                 }
+                // Counted here, once a block is actually handed out.
+                allocator.allocations.fetch_add(1, Ordering::Relaxed);
                 return Ok(frame);
             }
         }
@@ -1080,22 +1158,26 @@ impl FrameAllocator {
     pub fn get_stats(&self) -> FrameAllocatorStats {
         let mut free_frames = 0u64;
         let mut total_frames = 0u64;
+        let mut bitmap_allocations = 0u64;
+        let mut buddy_allocations = 0u64;
 
         for allocator in self.bitmap_allocators.iter().flatten() {
             free_frames += allocator.free_count() as u64;
             total_frames += allocator.total_frames as u64;
+            bitmap_allocations += allocator.allocations.load(Ordering::Relaxed);
         }
 
         for allocator in self.buddy_allocators.iter().flatten() {
             free_frames += allocator.free_count() as u64;
             total_frames += allocator.total_frames as u64;
+            buddy_allocations += allocator.allocations.load(Ordering::Relaxed);
         }
 
         FrameAllocatorStats {
             total_frames,
             free_frames,
-            bitmap_allocations: 0,
-            buddy_allocations: 0,
+            bitmap_allocations,
+            buddy_allocations,
             allocation_time_ns: self.allocation_time_ns.load(Ordering::Relaxed),
         }
     }
@@ -1389,7 +1471,7 @@ mod tests {
                 .collect();
             for count in [1, 2, 3, 7, 31, 63, 64, 65, 100, 129, 200] {
                 assert_eq!(
-                    find_run(&words, 0, 6, count),
+                    find_run(&words, 0, 384, count),
                     naive_run(&bits, count),
                     "words={:x?} count={}",
                     words,
@@ -1560,5 +1642,112 @@ mod tests {
             .allocate(1024)
             .expect("full-size allocation should succeed after buddy merge");
         assert_eq!(frame3.as_u64(), 0);
+    }
+
+    /// `find_run` bounded to a bit range returns only runs inside it.
+    #[test]
+    fn find_run_bit_bounds_match_naive_scan() {
+        let mut x = 0x2545_F491_4F6C_DD1Du64;
+        for _ in 0..200 {
+            let mut words = [0u64; 4];
+            for w in words.iter_mut() {
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                *w = if x % 3 == 0 { u64::MAX } else { x };
+            }
+            let lo = (x % 100) as usize;
+            let hi = (lo + 50 + (x % 150) as usize).min(256);
+            let bits: alloc::vec::Vec<bool> = (lo..hi)
+                .map(|i| words[i / 64] >> (i % 64) & 1 == 1)
+                .collect();
+            for count in [1, 5, 40, 64, 65, 120] {
+                assert_eq!(
+                    find_run(&words, lo, hi, count),
+                    naive_run(&bits, count).map(|r| r + lo),
+                    "words={:x?} lo={} hi={} count={}",
+                    words,
+                    lo,
+                    hi,
+                    count
+                );
+            }
+        }
+    }
+
+    /// A range-limited bitmap allocation never returns a frame outside the
+    /// range, even when free frames below it come first, and never lets a
+    /// run straddle the range's end.
+    #[test]
+    fn bitmap_allocate_in_stays_inside_range() {
+        let a = BitmapAllocator::new(FrameNumber::new(4000), 300);
+        let range = (4100, 4164);
+        let f = a.allocate_in(10, Some(range)).unwrap();
+        assert!(f.as_u64() >= range.0 && f.as_u64() + 10 <= range.1);
+        // 54 frames remain in the range: a 55-frame run would cross its end.
+        assert!(a.allocate_in(55, Some(range)).is_err());
+        let g = a.allocate_in(54, Some(range)).unwrap();
+        assert!(g.as_u64() >= range.0 && g.as_u64() + 54 <= range.1);
+        assert!(a.allocate_in(1, Some(range)).is_err());
+        // A range missing the node entirely is out of memory.
+        assert!(a.allocate_in(1, Some((0, 4000))).is_err());
+        // Frames outside the range are untouched.
+        assert_eq!(a.free_count(), 300 - 64);
+        assert_eq!(a.allocate_in(1, Some((4000, 4100))).unwrap().as_u64(), 4000);
+    }
+
+    /// 87da0a38 checked only the first frame of a zone allocation: a run
+    /// starting below the DMA limit but ending above it was returned.
+    #[test]
+    fn zone_allocation_keeps_the_whole_run_in_the_zone() {
+        let mut fa = alloc::boxed::Box::new(FrameAllocator::new());
+        fa.init_numa_node(0, FrameNumber::new(4000), 300).unwrap();
+        // Only frames 4000..4096 are in the DMA zone.
+        assert!(fa
+            .allocate_frames_in_zone(100, Some(0), Some(MemoryZone::Dma))
+            .is_err());
+        let f = fa
+            .allocate_frames_in_zone(96, Some(0), Some(MemoryZone::Dma))
+            .unwrap();
+        assert_eq!(f.as_u64(), 4000);
+        // Normal-zone requests skip the DMA frames instead of failing.
+        let mut fa = alloc::boxed::Box::new(FrameAllocator::new());
+        fa.init_numa_node(0, FrameNumber::new(4000), 300).unwrap();
+        let n = fa
+            .allocate_frames_in_zone(8, None, Some(MemoryZone::Normal))
+            .unwrap();
+        assert!(n.as_u64() >= 4096);
+    }
+
+    /// A buddy allocation limited to a range takes a block inside it.
+    #[test]
+    fn buddy_allocate_in_picks_a_block_inside_the_range() {
+        let a = BuddyAllocator::new(FrameNumber::new(0), 1024);
+        let f = a.allocate_in(1, Some((512, 1024))).unwrap();
+        assert!(f.as_u64() >= 512 && f.as_u64() < 1024);
+        let g = a.allocate_in(256, Some((512, 1024))).unwrap();
+        assert!(g.as_u64() >= 512 && g.as_u64() + 256 <= 1024);
+        assert!(a.allocate_in(512, Some((512, 1024))).is_err());
+        // Everything freed merges back into the whole region.
+        a.free(f, 1).unwrap();
+        a.free(g, 256).unwrap();
+        assert_eq!(a.allocate(1024).unwrap().as_u64(), 0);
+    }
+
+    /// The statistics count each successful hand-out once, whatever its
+    /// size, and never a rejected attempt.
+    #[test]
+    fn allocation_counters_count_successes_once() {
+        let mut fa = alloc::boxed::Box::new(FrameAllocator::new());
+        fa.init_numa_node(0, FrameNumber::new(4000), 300).unwrap();
+        fa.allocate_frames(5, None).unwrap();
+        let mut out = [0u64; 3];
+        assert_eq!(fa.allocate_single_frames(&mut out), 3);
+        assert!(fa
+            .allocate_frames_in_zone(200, Some(0), Some(MemoryZone::Dma))
+            .is_err());
+        let stats = fa.get_stats();
+        assert_eq!(stats.bitmap_allocations, 4, "1 run + 3 singles");
+        assert_eq!(stats.buddy_allocations, 0);
     }
 }
