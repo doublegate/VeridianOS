@@ -652,6 +652,11 @@
 
 ### Fixed
 
+- **Boot tests no longer count what they do not run.** Seven in-kernel boot tests reported a pass
+  on AArch64 and RISC-V without checking anything (the two dispatcher tests, framebuffer console,
+  keyboard, both user-copy fault tests and, on AArch64, heap reuse). They are now reported as
+  skipped, with the reason, and the tally says so: AArch64 `34/34 passed (7 skipped)`, RISC-V
+  `35/35 passed (6 skipped)`, x86_64 unchanged at 42/42. The earlier 41/41 figures overstated both.
 - **A failed fork frees the child (N-46); exits leave shared regions.** A fork that failed after
   copying the address space, or whose child could not be started, leaked the child's frames, page
   tables, kernel stack, capabilities and open files (dropping a process frees nothing); a clone

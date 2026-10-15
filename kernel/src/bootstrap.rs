@@ -2436,13 +2436,15 @@ fn run_dispatch_tests(passed: &mut u32, failed: &mut u32) {
     }
     #[cfg(not(target_arch = "x86_64"))]
     {
-        report_test(
+        let _ = (passed, failed);
+        report_skip(
             "dispatch_kthreads_interleave_and_reap",
-            true,
-            passed,
-            failed,
+            "no dispatcher (sprint E)",
         );
-        report_test("dispatch_waitqueue_wake_and_join", true, passed, failed);
+        report_skip(
+            "dispatch_waitqueue_wake_and_join",
+            "no dispatcher (sprint E)",
+        );
     }
 }
 
@@ -2833,25 +2835,34 @@ fn run_phase4_tests(passed: &mut u32, failed: &mut u32) {
 
 /// Run display/input boot tests (tests 28-29).
 #[cfg(feature = "alloc")]
+#[cfg_attr(not(target_arch = "x86_64"), allow(unused_variables))] // all skipped there
 fn run_display_tests(passed: &mut u32, failed: &mut u32) {
     kprintln!("[INIT] Display/input tests:");
 
     // Test 28: Framebuffer console initialized (x86_64 only — UEFI provides fb)
     {
         #[cfg(target_arch = "x86_64")]
-        let ok = crate::graphics::fbcon::is_initialized();
+        report_test(
+            "fbcon_initialized",
+            crate::graphics::fbcon::is_initialized(),
+            passed,
+            failed,
+        );
         #[cfg(not(target_arch = "x86_64"))]
-        let ok = true; // ramfb may or may not be available; skip on non-x86_64
-        report_test("fbcon_initialized", ok, passed, failed);
+        report_skip("fbcon_initialized", "ramfb is optional here");
     }
 
     // Test 29: Keyboard driver ready (x86_64 only — PS/2 keyboard)
     {
         #[cfg(target_arch = "x86_64")]
-        let ok = crate::drivers::keyboard::is_initialized();
+        report_test(
+            "keyboard_driver_ready",
+            crate::drivers::keyboard::is_initialized(),
+            passed,
+            failed,
+        );
         #[cfg(not(target_arch = "x86_64"))]
-        let ok = true; // No PS/2 keyboard on ARM/RISC-V
-        report_test("keyboard_driver_ready", ok, passed, failed);
+        report_skip("keyboard_driver_ready", "no PS/2 keyboard");
     }
 }
 
@@ -2878,9 +2889,13 @@ fn run_usercopy_tests(passed: &mut u32, failed: &mut u32) {
             let mut buf = [0u8; 8];
             read_user_bytes(0x0000_7FF0_0000_0000, &mut buf).is_err()
         };
-        #[cfg(not(target_arch = "x86_64"))]
-        let ok = true; // no fault fixup on aarch64/riscv64 yet
+        #[cfg(target_arch = "x86_64")]
         report_test("usercopy_fault_returns_efault", ok, passed, failed);
+        #[cfg(not(target_arch = "x86_64"))]
+        report_skip(
+            "usercopy_fault_returns_efault",
+            "no fault fixup yet (sprint E)",
+        );
     }
 
     // Test 33: the futex WAKE_OP atomic on an unmapped user word returns an
@@ -2888,9 +2903,13 @@ fn run_usercopy_tests(passed: &mut u32, failed: &mut u32) {
     {
         #[cfg(target_arch = "x86_64")]
         let ok = crate::syscall::userspace::cmpxchg_user_u32(0x0000_7FF0_0000_0000, 0, 1).is_err();
-        #[cfg(not(target_arch = "x86_64"))]
-        let ok = true; // no fault fixup on aarch64/riscv64 yet
+        #[cfg(target_arch = "x86_64")]
         report_test("usercopy_cmpxchg_fault_returns_efault", ok, passed, failed);
+        #[cfg(not(target_arch = "x86_64"))]
+        report_skip(
+            "usercopy_cmpxchg_fault_returns_efault",
+            "no fault fixup yet (sprint E)",
+        );
     }
 
     // Test 32: the boot stack has not overflowed into the statics below it
@@ -3006,9 +3025,13 @@ fn run_usercopy_tests(passed: &mut u32, failed: &mut u32) {
             v.push(i as u8);
             v.capacity() >= 1 << 20 && v[0] == i as u8
         });
-        #[cfg(target_arch = "aarch64")]
-        let ok = true;
+        #[cfg(not(target_arch = "aarch64"))]
         report_test("heap_reuses_freed_memory", ok, passed, failed);
+        #[cfg(target_arch = "aarch64")]
+        report_skip(
+            "heap_reuses_freed_memory",
+            "bump allocator until the MMU is on (N-28)",
+        );
     }
 
     // Test 39: a kernel stack has an unmapped guard page below it, and
@@ -3092,6 +3115,21 @@ pub fn kernel_init_main() {
     kprintln!("BOOTOK");
 }
 
+/// Tests that cannot run on this architecture yet. They are reported and
+/// counted apart, never as passed, so the tally claims only what ran.
+static SKIPPED: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
+/// Report a test that does not run here, and why.
+#[allow(dead_code)] // every skip is architecture-specific
+fn report_skip(name: &str, why: &str) {
+    kprint_rt!("  ");
+    kprint_rt!(name);
+    kprint_rt!("...[skipped: ");
+    kprint_rt!(why);
+    kprintln!("]");
+    SKIPPED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+}
+
 /// Print test summary and BOOTOK/BOOTFAIL
 fn print_summary(passed: u32, failed: u32) {
     kprintln!("========================================");
@@ -3099,7 +3137,14 @@ fn print_summary(passed: u32, failed: u32) {
     kprint_u64!(passed);
     kprint_rt!("/");
     kprint_u64!(passed + failed);
-    kprintln!(" passed");
+    kprint_rt!(" passed");
+    let skipped = SKIPPED.load(core::sync::atomic::Ordering::Relaxed);
+    if skipped > 0 {
+        kprint_rt!(" (");
+        kprint_u64!(skipped);
+        kprint_rt!(" skipped)");
+    }
+    kprintln!("");
     if failed == 0 {
         kprintln!("BOOTOK");
     } else {
