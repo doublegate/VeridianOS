@@ -449,6 +449,13 @@
 
 ### Security
 
+- **Creating or removing a directory entry checks the directory it acts on (N-51).** The write
+  and search permission check resolved the parent directory, and the operation then resolved the
+  path again. A symlink swapped in between let an unprivileged process create files in a
+  directory it may not write. Reproduced on four CPUs: 21 files landed in a root-owned 0755
+  directory. open with O_CREAT, mkdir, link, symlink, unlink, rename, linkat and symlinkat now
+  resolve the parent once, then check and operate on that node; mkdir passes its check to the VFS,
+  which runs it on the same node as the MAC check. Runtime test `musl_dir_check_race`.
 - **IPC and capability authority (N-80, N-83, N-87, N-88, N-89).** Several of these were reported
   fixed by another agent's unmerged session but never were.
   - Only an endpoint capability now confers IPC rights, and only on its own endpoint. SEND is the

@@ -202,9 +202,8 @@ fn open_path(path: &str, flags: usize, mode: usize) -> SyscallResult {
         // reported as itself.
         Err(e) if open_flags.create && is_not_found(&e) => {
             let perms = creation_perms(mode);
-            let (parent_path, name) = split_path(path)?;
-            require_dir_write(path)?;
-            let parent = vfs()?.resolve_path(&parent_path).map_err(map_resolve_err)?;
+            let (parent, name) = parent_dir(path)?;
+            check_dir_write(&*parent)?;
             match parent.create(&name, perms) {
                 Ok(node) => {
                     own_new_node(&node);
@@ -694,12 +693,25 @@ fn make_directory(path: &str, mode: usize) -> SyscallResult {
         Err(e) if is_not_found(&e) => {}
         Err(e) => return Err(map_resolve_err(e)),
     }
-    require_dir_write(path)?;
-    let node = vfs()?
-        .mkdir(path, creation_perms(mode))
-        .map_err(super::map_kernel_error)?;
+    let node = make_directory_node(path, creation_perms(mode))?;
     own_new_node(&node);
     Ok(0)
+}
+
+/// Create directory `path`: the VFS resolves its parent once and checks
+/// the MAC policy and this permission callback on that same node before
+/// creating the entry there (N-51).
+fn make_directory_node(
+    path: &str,
+    perms: Permissions,
+) -> Result<alloc::sync::Arc<dyn crate::fs::VfsNode>, SyscallError> {
+    vfs()?
+        .mkdir_checked(path, perms, |dir| {
+            check_dir_write(dir).map_err(|_| crate::error::KernelError::PermissionDenied {
+                operation: "create directory entry",
+            })
+        })
+        .map_err(super::map_kernel_error)
 }
 
 /// Remove a directory
@@ -1793,17 +1805,20 @@ fn rename_entry(old: &str, new: &str) -> SyscallResult {
     // Held across the ancestry check and the move, so no concurrent rename
     // can make the check stale.
     let _rename = crate::fs::RENAME_LOCK.lock();
-    require_may_remove(old)?;
-    require_dir_write(new)?;
+    // Both directories are resolved once; the checks and the move below
+    // use these nodes (N-51).
+    let (old_parent, old_name) = parent_dir(old)?;
+    let (new_parent, new_name) = parent_dir(new)?;
+    check_may_remove(&*old_parent, &old_name)?;
+    check_dir_write(&*new_parent)?;
     // Replacing an existing `new` removes it, so the sticky rule applies.
-    let new_exists = vfs()?.resolve_path_no_follow(new).is_ok();
-    if new_exists {
-        require_may_remove(new)?;
+    if new_parent.lookup(&new_name).is_ok() {
+        check_may_remove(&*new_parent, &new_name)?;
     }
 
     let vfs = vfs()?;
-    let (old_parent_path, old_name) = split_path(old)?;
-    let (new_parent_path, new_name) = split_path(new)?;
+    let (old_parent_path, _) = split_path(old)?;
+    let (new_parent_path, _) = split_path(new)?;
     // Compared on canonical parents: the parents are resolved with symlinks
     // followed below, so a string comparison let a symlink into another
     // mount through (review of the v0.26.0 stack, PR #11).
@@ -1816,7 +1831,7 @@ fn rename_entry(old: &str, new: &str) -> SyscallResult {
     if old_mount != new_mount {
         return Err(SyscallError::CrossDevice);
     }
-    let src = vfs.resolve_path_no_follow(old).map_err(map_resolve_err)?;
+    let src = old_parent.lookup(&old_name).map_err(map_resolve_err)?;
 
     if src.node_type() == crate::fs::NodeType::Directory {
         // A directory cannot move into its own subtree (POSIX: EINVAL).
@@ -1849,12 +1864,6 @@ fn rename_entry(old: &str, new: &str) -> SyscallResult {
         }
     }
 
-    let old_parent = vfs
-        .resolve_path(&old_parent_path)
-        .map_err(map_resolve_err)?;
-    let new_parent = vfs
-        .resolve_path(&new_parent_path)
-        .map_err(map_resolve_err)?;
     // The node moves; nothing is copied, and a symlink at `new` is replaced
     // rather than followed (FS-PERF-03).
     old_parent
@@ -1863,16 +1872,33 @@ fn rename_entry(old: &str, new: &str) -> SyscallResult {
     Ok(0)
 }
 
-/// Creating or removing a directory entry needs write and search
-/// permission on the directory holding it (FS-SEC-02).
-pub(crate) fn require_dir_write(path: &str) -> Result<(), SyscallError> {
+/// The directory holding `path`, resolved once for the caller, and the
+/// entry's name. The permission checks below and the operation that
+/// follows all use this one node: checking a path and then operating on it
+/// by path again let the path change in between -- a symlink swapped in, a
+/// directory renamed -- so the check applied to another directory (N-51).
+pub(crate) fn parent_dir(
+    path: &str,
+) -> Result<
+    (
+        alloc::sync::Arc<dyn crate::fs::VfsNode>,
+        alloc::string::String,
+    ),
+    SyscallError,
+> {
+    let (parent, name) = split_path(path)?;
+    let dir = vfs()?.resolve_path(&parent).map_err(map_resolve_err)?;
+    Ok((dir, name))
+}
+
+/// Creating or removing an entry in `dir` needs write and search permission
+/// on it (FS-SEC-02).
+pub(crate) fn check_dir_write(dir: &dyn crate::fs::VfsNode) -> Result<(), SyscallError> {
     let creds = caller_creds();
     let uid = creds.euid;
     if uid == 0 {
         return Ok(());
     }
-    let (parent, _) = split_path(path)?;
-    let dir = vfs()?.resolve_path(&parent).map_err(map_resolve_err)?;
     let meta = dir.metadata().map_err(super::map_kernel_error)?;
     let gid = creds.gid_for(meta.gid);
     let p = meta.permissions;
@@ -1883,27 +1909,24 @@ pub(crate) fn require_dir_write(path: &str) -> Result<(), SyscallError> {
     }
 }
 
-/// Check that the caller may remove or rename the entry at `path`: it needs
-/// write and search permission on the parent directory and, if that
-/// directory is sticky, must own the entry or the directory (or be root).
-pub(crate) fn require_may_remove(path: &str) -> Result<(), SyscallError> {
-    require_dir_write(path)?;
+/// Check that the caller may remove or rename entry `name` of `dir`: write
+/// and search permission on `dir` and, if it is sticky, ownership of the
+/// entry or the directory (or root).
+pub(crate) fn check_may_remove(
+    dir: &dyn crate::fs::VfsNode,
+    name: &str,
+) -> Result<(), SyscallError> {
+    check_dir_write(dir)?;
     let uid = caller_creds().euid;
     if uid == 0 {
         return Ok(());
     }
-    let (parent, _) = split_path(path)?;
-    let vfs_guard = vfs()?;
-    let dir_meta = vfs_guard
-        .resolve_path(&parent)
-        .map_err(map_resolve_err)?
-        .metadata()
-        .map_err(super::map_kernel_error)?;
+    let dir_meta = dir.metadata().map_err(super::map_kernel_error)?;
     if !dir_meta.permissions.sticky || dir_meta.uid == uid {
         return Ok(());
     }
-    let entry_meta = vfs_guard
-        .resolve_path_no_follow(path)
+    let entry_meta = dir
+        .lookup(name)
         .map_err(map_resolve_err)?
         .metadata()
         .map_err(super::map_kernel_error)?;
@@ -2629,17 +2652,13 @@ const AT_EMPTY_PATH: usize = 0x1000;
 pub fn sys_link(old_ptr: usize, new_ptr: usize) -> SyscallResult {
     let old_path = read_user_path(old_ptr)?;
     let new_path = read_user_path(new_ptr)?;
-    require_dir_write(&new_path)?;
+    let (parent, link_name) = parent_dir(&new_path)?;
+    check_dir_write(&*parent)?;
 
     let vfs = vfs()?;
 
     // Resolve the old path to get the target node
     let target = vfs.resolve_path(&old_path).map_err(map_resolve_err)?;
-
-    // Split new_path into parent dir + name
-    let (parent_path, link_name) = split_path(&new_path)?;
-
-    let parent = vfs.resolve_path(&parent_path).map_err(map_resolve_err)?;
 
     parent
         .link(&link_name, target)
@@ -2654,13 +2673,8 @@ pub fn sys_link(old_ptr: usize, new_ptr: usize) -> SyscallResult {
 pub fn sys_symlink(target_ptr: usize, link_ptr: usize) -> SyscallResult {
     let target = read_user_path(target_ptr)?;
     let link_path = read_user_path(link_ptr)?;
-    require_dir_write(&link_path)?;
-
-    let vfs = vfs()?;
-
-    let (parent_path, link_name) = split_path(&link_path)?;
-
-    let parent = vfs.resolve_path(&parent_path).map_err(map_resolve_err)?;
+    let (parent, link_name) = parent_dir(&link_path)?;
+    check_dir_write(&*parent)?;
 
     let node = parent
         .symlink(&link_name, &target)
@@ -2894,8 +2908,9 @@ pub fn sys_unlinkat(dirfd: usize, path_ptr: usize, flags: usize) -> SyscallResul
         (false, false) if trailing_slash => return Err(SyscallError::NotADirectory),
         _ => {}
     }
-    require_may_remove(&abs_path)?;
-    vfs()?.unlink(&abs_path).map_err(super::map_kernel_error)?;
+    let (dir, name) = parent_dir(&abs_path)?;
+    check_may_remove(&*dir, &name)?;
+    dir.unlink(&name).map_err(super::map_kernel_error)?;
     Ok(0)
 }
 

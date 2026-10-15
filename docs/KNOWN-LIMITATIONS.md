@@ -197,8 +197,7 @@ so TLB shootdowns are always answered (N-139, ADR 0012 rule 6).
 Still open before `smp` becomes the default:
 - Deadline tasks are placed when they wake but never pulled by the balancer, so a burst of them on
   one CPU can miss deadlines (ADR 0012).
-- Directory permission checks resolve the path separately from the operation (N-51). Lock-free
-  structures (`sync/`, N-59) have not run on more than one CPU.
+- Lock-free structures (`sync/`, N-59) have not run on more than one CPU.
 - Secondaries copy the boot CPU's CR4, so they match it, including SMEP and SMAP being off (N-15,
   below).
 

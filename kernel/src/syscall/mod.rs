@@ -1741,19 +1741,13 @@ fn sys_linkat(
     let new_rel = filesystem::read_user_path(newpath_ptr)?;
     let old_abs = filesystem::resolve_at_path(olddirfd, &old_rel)?;
     let new_abs = filesystem::resolve_at_path(newdirfd, &new_rel)?;
-    filesystem::require_dir_write(&new_abs)?;
-
-    let vfs = filesystem::vfs()?;
+    // Checked and linked in the same directory node (N-51).
+    let (parent, link_name) = filesystem::parent_dir(&new_abs)?;
+    filesystem::check_dir_write(&*parent)?;
 
     // Resolve old path to get target node
-    let target = vfs
+    let target = filesystem::vfs()?
         .resolve_path(&old_abs)
-        .map_err(filesystem::map_resolve_err)?;
-
-    // Split new path into parent + name, create link in parent
-    let (parent_path, link_name) = filesystem::split_path(&new_abs)?;
-    let parent = vfs
-        .resolve_path(&parent_path)
         .map_err(filesystem::map_resolve_err)?;
     parent
         .link(&link_name, target)
@@ -1771,15 +1765,9 @@ fn sys_symlinkat(target_ptr: usize, newdirfd: usize, linkpath_ptr: usize) -> Sys
     let target = filesystem::read_user_path(target_ptr)?;
     let link_rel = filesystem::read_user_path(linkpath_ptr)?;
     let link_abs = filesystem::resolve_at_path(newdirfd, &link_rel)?;
-    filesystem::require_dir_write(&link_abs)?;
-
-    let vfs = filesystem::vfs()?;
-
-    // Split link path into parent + name, create symlink in parent
-    let (parent_path, link_name) = filesystem::split_path(&link_abs)?;
-    let parent = vfs
-        .resolve_path(&parent_path)
-        .map_err(filesystem::map_resolve_err)?;
+    // Checked and created in the same directory node (N-51).
+    let (parent, link_name) = filesystem::parent_dir(&link_abs)?;
+    filesystem::check_dir_write(&*parent)?;
     let node = parent
         .symlink(&link_name, &target)
         .map_err(|_| SyscallError::InvalidArgument)?;

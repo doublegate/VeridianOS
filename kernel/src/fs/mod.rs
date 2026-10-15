@@ -1010,7 +1010,19 @@ impl<'a> CallerView<'a> {
         path: &str,
         permissions: Permissions,
     ) -> Result<Arc<dyn VfsNode>, KernelError> {
-        self.vfs.mkdir_in(&self.ctx, path, permissions)
+        self.vfs.mkdir_in(&self.ctx, path, permissions, |_| Ok(()))
+    }
+
+    /// [`Self::mkdir`], with `check` (the caller's permission check) run on
+    /// the resolved parent directory before the entry is created in that
+    /// same directory, so the path cannot change in between (N-51).
+    pub fn mkdir_checked(
+        &self,
+        path: &str,
+        permissions: Permissions,
+        check: impl FnOnce(&dyn VfsNode) -> Result<(), KernelError>,
+    ) -> Result<Arc<dyn VfsNode>, KernelError> {
+        self.vfs.mkdir_in(&self.ctx, path, permissions, check)
     }
 
     pub fn unlink(&self, path: &str) -> Result<(), KernelError> {
@@ -1363,7 +1375,7 @@ impl Vfs {
         path: &str,
         permissions: Permissions,
     ) -> Result<Arc<dyn VfsNode>, KernelError> {
-        self.mkdir_in(&self.kernel_context(), path, permissions)
+        self.mkdir_in(&self.kernel_context(), path, permissions, |_| Ok(()))
     }
 
     fn mkdir_in(
@@ -1371,6 +1383,7 @@ impl Vfs {
         ctx: &PathContext,
         path: &str,
         permissions: Permissions,
+        check: impl FnOnce(&dyn VfsNode) -> Result<(), KernelError>,
     ) -> Result<Arc<dyn VfsNode>, KernelError> {
         // Parse the path once and use that single result both for the MAC
         // check and for the creation, so they cannot disagree: the parent
@@ -1398,6 +1411,7 @@ impl Vfs {
             crate::security::AccessType::Write,
             ctx.pid,
         )?;
+        check(&*parent)?;
 
         parent.mkdir(name, permissions)
     }

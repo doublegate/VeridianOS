@@ -15,6 +15,7 @@
  */
 
 #define _GNU_SOURCE
+#include <dirent.h>
 #include <errno.h>
 #include <grp.h>
 #include <sys/stat.h>
@@ -3492,6 +3493,77 @@ static void test_tlb_remote_flush(void)
     report("musl_tlb_remote_flush", ok && tlb_seen_new, why);
 }
 
+/* N-51: creating an entry checks and creates in the same directory. An
+ * unprivileged process swaps the symlink /tmp/n51/link between a directory
+ * it may write (ok) and one it may not (prot, root's, 0755) on one thread
+ * while creating link/fN on another, each on its own CPU. With the check
+ * and the create resolving the path separately, a create could pass the
+ * check through ok and land in prot. prot must stay empty. */
+static volatile int n51_stop;
+
+static void *n51_swapper(void *arg)
+{
+    (void)arg;
+    while (!n51_stop) {
+        symlink("/tmp/n51/prot", "/tmp/n51/to_prot");
+        rename("/tmp/n51/to_prot", "/tmp/n51/link");
+        symlink("/tmp/n51/ok", "/tmp/n51/to_ok");
+        rename("/tmp/n51/to_ok", "/tmp/n51/link");
+    }
+    return 0;
+}
+
+static int n51_count(const char *dir)
+{
+    DIR *d = opendir(dir);
+    int n = 0;
+    if (!d) return -1;
+    struct dirent *e;
+    while ((e = readdir(d)))
+        if (strcmp(e->d_name, ".") != 0 && strcmp(e->d_name, "..") != 0) n++;
+    closedir(d);
+    return n;
+}
+
+static void test_dir_check_race(void)
+{
+    int f = 0;
+    mkdir("/tmp", 0777);
+    mkdir("/tmp/n51", 0777);
+    chmod("/tmp/n51", 0777);
+    mkdir("/tmp/n51/prot", 0755);
+    chmod("/tmp/n51/prot", 0755);
+    mkdir("/tmp/n51/ok", 0777);
+    chmod("/tmp/n51/ok", 0777);
+    if (symlink("/tmp/n51/ok", "/tmp/n51/link") != 0) f |= 1;
+    pid_t pid = fork();
+    if (pid == 0) {
+        if (setgid(1000) != 0 || setuid(1000) != 0) _exit(2);
+        pthread_t t;
+        n51_stop = 0;
+        if (pthread_create(&t, 0, n51_swapper, 0) != 0) _exit(3);
+        char path[64];
+        for (int i = 0; i < 20000; i++) {
+            snprintf(path, sizeof(path), "/tmp/n51/link/f%d", i % 64);
+            int fd = open(path, O_CREAT | O_WRONLY, 0644);
+            if (fd >= 0) close(fd);
+        }
+        n51_stop = 1;
+        pthread_join(t, 0);
+        _exit(0);
+    }
+    int st = 0;
+    if (pid < 0 || waitpid(pid, &st, 0) != pid || !WIFEXITED(st) || WEXITSTATUS(st) != 0)
+        f |= 2;
+    int in_prot = n51_count("/tmp/n51/prot");
+    int in_ok = n51_count("/tmp/n51/ok");
+    if (in_prot != 0) f |= 4;
+    if (in_ok <= 0) f |= 8; /* the creates through ok did happen */
+    static char why[80];
+    snprintf(why, sizeof(why), "fail=%#x in_prot=%d in_ok=%d status=%#x", f, in_prot, in_ok, st);
+    report("musl_dir_check_race", f == 0, why);
+}
+
 /* A signal for a thread running user code on another CPU arrives at once
  * (the sender interrupts that CPU), not at its next timer tick (1 ms):
  * over 50 signals the mean latency stays well under half a tick. */
@@ -3847,6 +3919,7 @@ static const struct {
     {"tlb_remote_flush", test_tlb_remote_flush},
     {"clocks_and_usage", test_clocks_and_usage},
     {"signal_kick", test_signal_kick},
+    {"dir_check_race", test_dir_check_race},
     {"priority_inheritance", test_priority_inheritance},
     {"unix_accept_blocks", test_unix_accept_blocks},
 };
@@ -3902,6 +3975,7 @@ int main(int argc, char **argv)
     test_gs_base();
     test_tlb_remote_flush();
     test_signal_kick();
+    test_dir_check_race();
     test_setuid_exec("/bin/musl_runtime_test");
     test_clocks_and_usage();
     test_rlimits();
