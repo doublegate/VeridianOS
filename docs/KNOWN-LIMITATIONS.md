@@ -181,9 +181,9 @@ What remains:
 - **chroot (N-250):** a working directory outside the new root is moved to the root, where Linux
   would leave it outside.
 
-### SMP is off by default and partly unproven (planned v0.27 sprint D5)
+### SMP: what is not done yet (v0.27 sprint D5; E for AArch64 and RISC-V)
 
-With the `smp` feature (off by default), the other CPUs are started on every architecture (x86
+The `smp` feature is on by default since v0.27: the other CPUs are started on every architecture (x86
 INIT-SIPI-SIPI, AArch64 PSCI, RISC-V SBI HSM). Only x86_64 runs tasks on them (ADR 0012): tasks are
 placed on idle CPUs, balanced every 4 ms and moved by sched_setaffinity; AArch64 and RISC-V have no
 dispatcher yet (sprint E), so their secondaries idle. Since D5a every CPU gets the boot CPU's
@@ -194,7 +194,7 @@ with the boot CPU's stays offline (N-179); a TSC that is synchronised but not in
 not refused. System calls, page faults and the return to user mode run with interrupts enabled,
 so TLB shootdowns are always answered (N-139, ADR 0012 rule 6).
 
-Still open before `smp` becomes the default:
+Still open:
 - Deadline tasks are placed when they wake but never pulled by the balancer, so a burst of them on
   one CPU can miss deadlines (ADR 0012).
 - Lock-free structures (`sync/`, N-59) have not run on more than one CPU.

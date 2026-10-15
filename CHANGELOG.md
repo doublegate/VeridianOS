@@ -348,6 +348,11 @@
 
 ### Changed
 
+- **SMP is on by default.** The `smp` feature is now a default feature: the kernel starts every
+  CPU the machine has and, on x86_64, runs tasks on all of them (ADR 0012). A one-CPU machine runs
+  the same kernel. CI's 4-CPU boot jobs and `scripts/dev/gate.sh --smp` no longer build a separate
+  kernel for them.
+
 - **TLB shootdowns go only to the CPUs running the address space (N-262).** A change to a user
   address space used to interrupt every CPU. Each CPU now records the page-table root it loads,
   and a flush of a user address space reaches only the CPUs on that root, plus any with no record

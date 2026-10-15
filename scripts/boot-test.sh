@@ -12,7 +12,7 @@
 # Env:   SETTLE (default 20), LOG_DIR (default target/boot-logs),
 #        QEMU_EXTRA (extra QEMU arguments), SMP (CPU count, default 1),
 #        EXPECT_CPUS (require "[SMP] N/N CPUs online" with N = this value;
-#        for kernels built with FEATURES=smp), PROFILE (debug or release,
+#        the `smp` feature is on by default), PROFILE (debug or release,
 #        default debug; release boots the `./build-kernel.sh <arch> release` build)
 set -u
 

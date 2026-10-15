@@ -458,8 +458,8 @@ jobs:
             fail-fast: false
             matrix:
                 arch: [x86_64, aarch64, riscv64]
-                # smp: the `smp` feature build on 4 CPUs, which must all come
-                # online; otherwise the default build on one CPU.
+                # smp: 4 CPUs, which must all come online (the `smp` feature is
+                # on by default); otherwise one CPU.
                 smp: [false, true]
                 # release: the profile the release artifacts are built with,
                 # so a shipped kernel is one that has booted (N-159).
@@ -468,7 +468,6 @@ jobs:
                     - smp: true
                       profile: release
         env:
-            FEATURES: ${{ matrix.smp && 'smp' || '' }}
             PROFILE: ${{ matrix.profile }}
             SMP: ${{ matrix.smp && '4' || '1' }}
             EXPECT_CPUS: ${{ matrix.smp && '4' || '' }}

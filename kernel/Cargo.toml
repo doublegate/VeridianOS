@@ -10,8 +10,10 @@ repository.workspace = true
 workspace = true
 
 [features]
-default = ["alloc"]
+default = ["alloc", "smp"]
 alloc = []
+# Start the other CPUs and run tasks on them (ADR 0004, ADR 0012); on by
+# default since v0.27 sprint D5.
 smp = []
 test-kernel = ["qemu-exit"]
 net_debug = []
