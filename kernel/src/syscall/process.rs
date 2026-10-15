@@ -345,7 +345,8 @@ pub fn sys_wait(pid: isize, status_ptr: usize, options: usize) -> SyscallResult 
 /// Before an exec: end every other thread of the calling process and wait
 /// until their tasks are off the CPU, as Linux's `de_thread` (N-101). They
 /// leave as by `pthread_exit` at their next return to user mode or wakeup
-/// (`EXEC_PENDING`). Two threads exec'ing at once: the second one leaves.
+/// (`EXEC_PENDING`). Two threads exec'ing at once: the second one gets
+/// EINTR and leaves at its syscall exit.
 /// A fatal signal or an `exit_group` arriving meanwhile wins: the exec
 /// fails with EINTR and the signal is acted on at the syscall exit.
 #[cfg(feature = "alloc")]
@@ -368,11 +369,11 @@ fn de_thread() -> Result<(), SyscallError> {
         Ordering::Acquire,
     ) {
         Ok(_) => {}
-        // Another thread is exec'ing: this one is one of the threads to go.
-        Err(EXEC_PENDING) => {
-            drop(process);
-            crate::process::exit::exit_dispatched(0, false);
-        }
+        // Another thread is exec'ing, or a fatal signal is pending: fail
+        // with EINTR so this call unwinds and frees what it holds (path,
+        // argv, envp). At the syscall exit `user_return_check` then makes
+        // this thread leave (EXEC_PENDING) or acts on the signal. Exiting
+        // from here leaked them (security review of 0d72e1b1).
         Err(_) => return Err(SyscallError::Interrupted),
     }
     process.exec_tid.store(tid, Ordering::Release);
