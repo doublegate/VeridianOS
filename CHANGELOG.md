@@ -709,8 +709,10 @@
   `/var/log/audit.log`, synchronously and without limit: a formatted string and a file append per
   call, and a log that grew until memory ran out. Auditing each system call is now opt-in, as
   on Linux, where none is audited without a rule; the other audit events still go to the in-memory
-  ring and the file. The file stops at 4 MiB per boot, and the shell's `audit` command reports the
-  events past that as not persisted. Measured under KVM on four CPUs: getppid and clock_gettime went
+  ring and the file. The file stops at 4 MiB per boot: routine events at 3 MiB, the last MiB kept for
+  critical ones (permission denials, privilege escalation, failed logins, security configuration
+  changes), so flooding the log with routine events cannot keep those out. The first refusal is
+  reported on the console, and the shell's `audit` command counts the events not persisted. Measured under KVM on four CPUs: getppid and clock_gettime went
   from ~200 us to ~1.8 us, and the x86_64 runtime suite from over ten minutes to under two.
 - **A signal reaches a thread running on another CPU at once.** Sending one woke the target if it
   slept, but a thread running user code on another CPU noticed only at that CPU's next tick (up to

@@ -419,6 +419,26 @@ const AUDIT_LOG_PATH: &str = "/var/log/audit.log";
 /// process fill memory just by making audited calls.
 const MAX_PERSISTED_BYTES: u64 = 4 << 20;
 
+/// The part of [`MAX_PERSISTED_BYTES`] only critical events may use
+/// (`is_critical_event`): a process that floods the log with routine events
+/// must not be able to keep its permission failures or escalation attempts
+/// out of it.
+const CRITICAL_RESERVE_BYTES: u64 = 1 << 20;
+
+/// Set once the persistent log has refused an event (reported once).
+static PERSIST_FULL_REPORTED: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+
+/// The budget an event may write up to: the whole log for a critical one,
+/// the log less the critical reserve otherwise.
+fn persist_limit(critical: bool) -> u64 {
+    if critical {
+        MAX_PERSISTED_BYTES
+    } else {
+        MAX_PERSISTED_BYTES - CRITICAL_RESERVE_BYTES
+    }
+}
+
 /// Bytes written to the persistent log so far.
 static PERSISTED_BYTES: AtomicU64 = AtomicU64::new(0);
 
@@ -539,8 +559,21 @@ fn fire_alerts(event: &AuditEvent) {
 fn persist_event(event: &AuditEvent) {
     let serialized = event.serialize();
     let bytes = serialized.as_bytes();
-    if !reserve_persist(&PERSISTED_BYTES, bytes.len() as u64, MAX_PERSISTED_BYTES) {
+    let len = bytes.len() as u64;
+    if !reserve_persist(
+        &PERSISTED_BYTES,
+        len,
+        persist_limit(is_critical_event(event)),
+    ) {
         AUDIT_STATS.persist_dropped.fetch_add(1, Ordering::Relaxed);
+        // Like Linux's audit_failure printk: say so once on the console.
+        if !PERSIST_FULL_REPORTED.swap(true, Ordering::AcqRel) {
+            println!(
+                "[AUDIT] persistent log full ({} bytes): further routine events are kept in \
+                 memory only",
+                MAX_PERSISTED_BYTES
+            );
+        }
         return;
     }
 
@@ -548,6 +581,9 @@ fn persist_event(event: &AuditEvent) {
     // mounted or the path does not exist yet.
     if append_persisted(AUDIT_LOG_PATH, bytes) {
         AUDIT_STATS.record_persisted();
+    } else {
+        // Not written (no VFS yet, say): give the budget back.
+        PERSISTED_BYTES.fetch_sub(len, Ordering::AcqRel);
     }
 }
 
@@ -951,6 +987,22 @@ mod tests {
         assert_eq!(used.load(Ordering::Relaxed), 100);
         let near_max = AtomicU64::new(u64::MAX - 1);
         assert!(!reserve_persist(&near_max, 2, u64::MAX), "no overflow");
+    }
+
+    #[test]
+    fn routine_events_cannot_use_the_critical_reserve() {
+        let used = AtomicU64::new(0);
+        let routine = persist_limit(false);
+        assert!(reserve_persist(&used, routine, routine));
+        assert!(
+            !reserve_persist(&used, 1, persist_limit(false)),
+            "routine log full"
+        );
+        assert!(
+            reserve_persist(&used, 1, persist_limit(true)),
+            "a critical event still fits"
+        );
+        assert_eq!(persist_limit(true) - routine, CRITICAL_RESERVE_BYTES);
     }
 
     #[test]
