@@ -216,23 +216,8 @@ pid_t gettid(void)
     return (pid_t)veridian_syscall0(SYS_gettid);
 }
 
-/*
- * Low-level thread creation (kernel thread_clone).
- * Shared-address-space threads must set CLONE_VM|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD.
- */
-long veridian_thread_clone(unsigned long flags,
-                           void *newsp,
-                           int *parent_tidptr,
-                           int *child_tidptr,
-                           void *tls)
-{
-    return __syscall_ret(veridian_syscall5(SYS_clone,
-                                           flags,
-                                           (long)newsp,
-                                           (long)parent_tidptr,
-                                           (long)child_tidptr,
-                                           (long)tls));
-}
+/* Thread creation is __veridian_clone (clone_<arch>.S): a thread on a new
+ * stack cannot return through a C function (N-102). */
 
 int arch_prctl(int code, unsigned long addr)
 {

@@ -652,6 +652,16 @@
 
 ### Fixed
 
+- **Native C library threads work (N-102).** The native libc's `pthread_create` could never
+  have worked: the new thread "returned" from a C clone wrapper through a stack frame it did not
+  have, the kernel cleared the thread id that `pthread_join` looked the thread up by, `errno` was
+  one global, and the thread pointer did not point at a self pointer, which x86_64 TLS reads at
+  `%fs:0`. Threads now start in an assembly entry (`clone_<arch>.S`), the exit word is its own
+  field, and each thread has its errno in its control block. The native thread, allocator
+  (LIBC-SEC-01) and detach (PROC-SEC-02) checks in `audit_runtime_test` now run by default.
+- **thread_join sleeps (N-269).** The native join system call (1066) spun on yield and could not
+  be interrupted. A dispatched joiner now sleeps until the thread has exited and is off the CPU,
+  and a signal ends the wait with EINTR. Runtime test `native_thread_join_sleeps`.
 - **A process reading the console sleeps instead of spinning (N-118, console part).** The
   `/dev/console` node, the loader's stdin node and the stdin fallback of read(2) each busy-waited
   on the serial port, so a program waiting for a key kept every other task off the CPU, and two

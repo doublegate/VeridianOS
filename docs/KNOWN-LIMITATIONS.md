@@ -128,10 +128,6 @@ work. User code is preempted when its slice ends (D3). What is still missing:
   work -- but the old table, keyed by (pid, address), still serves threads that are not
   dispatched. A waiter and a waker on different tables would miss each other; it goes with the
   old scheduler (D4). (A main thread's id now equals its process id, N-217.)
-- **Native libc threads (N-102).** The native C library's `clone` returns through a C epilogue
-  and `errno` is one global, so its `pthread_create` still does not work (musl's does). Two
-  fixes are therefore tested by unit tests only: LIBC-SEC-01 (the allocator lock in `stdlib.c`)
-  and PROC-SEC-02 (deferred reaping of an exiting thread's stack).
 - **Some per-thread state is per process (N-109):** the robust-list head and the FS base
   registered through `arch_prctl` (the signal mask and pending set are per thread since D3).
 - **Old binaries.** KDE binaries built before the v0.27 musl patch map `pthread_exit` to a

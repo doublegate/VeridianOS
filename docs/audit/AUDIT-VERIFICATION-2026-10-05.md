@@ -224,7 +224,7 @@ threads (the scheduler has no ring-3 entry path for a new thread; planned for v0
 
 | ID | Unit-tested | Runtime check that is blocked |
 |---|---|---|
-| LIBC-SEC-01 | allocator lock in `stdlib.c` | pthread malloc stress (`audit_runtime_test threads`) |
+| LIBC-SEC-01 | allocator lock in `stdlib.c` | pthread malloc stress (`audit_runtime_test`, run by default since N-102) |
 | PROC-SEC-02 | deferred reap queues | a detached thread exiting on a running system |
 
 Release notes for v0.26.0 must not claim either as runtime-verified.

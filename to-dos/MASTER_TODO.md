@@ -139,7 +139,8 @@ What does not work yet: `docs/KNOWN-LIMITATIONS.md`.
       clone stacks; main tid == pid and futex keys remain).
     - [ ] Threads: clone through the dispatcher, native libc clone stub, TCB join, TLS errno
       (N-102); N-46, N-50, N-54; `thread_join` sleeps on an exit queue instead of yielding
-      (N-269).
+      (N-269). Done: N-102 (`clone_<arch>.S`, errno in the TCB, native pthreads tested by
+      `audit_runtime_test`), N-269.
     - [ ] D4: nested boot dispatch and `BOOT_RETURN_*` removed; old scheduler, `queue.rs`,
       `percpu_queue.rs`, `deadline.rs`, `process_compat`, old `context_switch` retired (N-84,
       N-85, N-156, N-181); the old `FUTEX_TABLE` path goes with it (N-279).

@@ -228,6 +228,52 @@ static void test_threads(void)
     report("thread_detach_x20", ok, "create/detach");
 }
 
+/* --- errno is per thread (N-102). ---------------------------------------- */
+static volatile int errno_go;
+
+static void *errno_worker(void *arg)
+{
+    int mine = (int)(long)arg;
+    errno = mine;
+    while (!errno_go)
+        sched_yield(); /* the other threads set theirs meanwhile */
+    for (int i = 0; i < 1000; i++) {
+        if (errno != mine)
+            return (void *)1;
+        sched_yield();
+    }
+    /* A failing call sets this thread's errno only. */
+    if (close(-1) != -1 || errno != EBADF)
+        return (void *)2;
+    return NULL;
+}
+
+static void test_errno_per_thread(void)
+{
+    pthread_t t[3];
+    int ok = 1, created = 0;
+    errno = 0;
+    for (int i = 0; i < 3; i++) {
+        if (pthread_create(&t[created], NULL, errno_worker, (void *)(long)(100 + i)) != 0)
+            ok = 0;
+        else
+            created++;
+    }
+    errno = 7;
+    errno_go = 1;
+    long bad = 0;
+    for (int i = 0; i < created; i++) {
+        void *r = NULL;
+        if (pthread_join(t[i], &r) != 0)
+            ok = 0;
+        bad |= (long)r;
+    }
+    int main_errno = errno;
+    static char why[64];
+    snprintf(why, sizeof(why), "created %d worker %ld main errno %d", created, bad, main_errno);
+    report("errno_per_thread", ok && created == 3 && bad == 0 && main_errno == 7, why);
+}
+
 /* --- Allocator under threads (LIBC-SEC-01) and aligned_alloc. ---------- */
 static void *alloc_worker(void *arg)
 {
@@ -2451,12 +2497,11 @@ int main(int argc, char **argv)
         exec_env_helper(argv[1]);
     test_fd_numbering();
     test_scanf();
-    /* User threads need a ring-3 entry path in the scheduler that does not
-     * exist yet (see KNOWN-LIMITATIONS); run those checks only on request. */
-    if (argc > 1 && strcmp(argv[1], "threads") == 0) {
-        test_allocator();
-        test_threads();
-    }
+    /* Native libc threads (N-102): clone through clone_<arch>.S, errno
+     * per thread. */
+    test_allocator();
+    test_threads();
+    test_errno_per_thread();
     test_fork_exit();
     test_cow();
     test_huge_pages();
