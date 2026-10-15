@@ -414,6 +414,24 @@
 
 ### Security
 
+- **IPC and capability authority (N-80, N-83, N-87, N-88, N-89).** Several of these were reported
+  fixed by another agent's unmerged session but never were.
+  - Only an endpoint capability now confers IPC rights, and only on its own endpoint. SEND is the
+    WRITE bit, which process and memory capabilities also carry, and such a capability used to pass
+    the send check and skip the endpoint match.
+  - `ipc_call` sends to the endpoint its capability names. It used to pass the token itself as the
+    endpoint number.
+  - A reply is accepted only for a caller with a call outstanding, only once, and only from a holder
+    of RECEIVE rights on the endpoint it called. Any process could "reply" to any blocked process.
+    The reply goes only to a reply endpoint the caller owns, and a call that ends without a reply
+    (an error or an interruption) is no longer outstanding.
+  - Capability revocation (native call 1055) is dispatched and requires the caller to hold the
+    capability with REVOKE rights. It checked only that the token existed somewhere.
+  - The message-passing endpoint registry hands out shared references. The old `&'static` pointers
+    into a by-value map dangled whenever the map moved its entries.
+  - Resizing a mapped POSIX shared-memory object is refused instead of freeing frames still mapped,
+    and a resize keeps the contents.
+  - The revocation cache updates incrementally instead of copying the whole set.
 - **No built-in password; accounts on disk (N-131, N-153).** The kernel created `root` with the
   password `veridian` at every boot, kept accounts only in memory, and the graphical display
   manager accepted root with any password, so the KDE screen lock protected nothing. Accounts now

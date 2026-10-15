@@ -296,6 +296,49 @@ mod manager_tests {
         assert!(ipc_integration::check_send_permission(read_only, &cap_space).is_err());
     }
 
+    /// N-80: a capability that does not name an endpoint confers no IPC
+    /// rights, whatever its rights bits. SEND is the WRITE bit, which a
+    /// process, memory or heap capability can carry; such capabilities used
+    /// to pass the send check and then skip the endpoint match.
+    #[test]
+    fn non_endpoint_capabilities_grant_no_ipc() {
+        let cap_space = space::CapabilitySpace::new();
+        let all = token::Rights::READ | token::Rights::WRITE | token::Rights::EXECUTE;
+        let process = manager::cap_manager()
+            .create_capability(
+                object::ObjectRef::Process { pid: ProcessId(9) },
+                all,
+                &cap_space,
+            )
+            .unwrap();
+        assert!(ipc_integration::check_send_permission(process, &cap_space).is_err());
+        assert!(ipc_integration::check_receive_permission(process, &cap_space).is_err());
+        assert!(ipc_integration::check_bind_permission(process, &cap_space).is_err());
+    }
+
+    /// N-80: a capability authorizes IPC on its own endpoint only.
+    #[test]
+    fn endpoint_capability_authorizes_only_its_endpoint() {
+        use alloc::sync::Arc;
+        let cap_space = space::CapabilitySpace::new();
+        let endpoint = Arc::new(crate::ipc::Endpoint::new(ProcessId(8)));
+        let id = endpoint.id();
+        let cap = manager::cap_manager()
+            .create_capability(
+                object::ObjectRef::Endpoint { endpoint },
+                ipc_integration::IpcRights::RECEIVE,
+                &cap_space,
+            )
+            .unwrap();
+        let receive = ipc_integration::IpcRights::RECEIVE;
+        assert!(ipc_integration::check_endpoint_permission(cap, &cap_space, id, receive).is_ok());
+        assert!(
+            ipc_integration::check_endpoint_permission(cap, &cap_space, id + 1, receive).is_err()
+        );
+        let send = ipc_integration::IpcRights::SEND;
+        assert!(ipc_integration::check_endpoint_permission(cap, &cap_space, id, send).is_err());
+    }
+
     #[test]
     fn test_capability_creation() {
         let cap_space = space::CapabilitySpace::new();

@@ -483,6 +483,12 @@ pub fn map_kernel_error(err: crate::error::KernelError) -> SyscallError {
         KernelError::NotFound { .. } => SyscallError::ResourceNotFound,
         KernelError::BrokenPipe => SyscallError::BrokenPipe,
         KernelError::WouldBlock => SyscallError::WouldBlock,
+        KernelError::InvalidCapability { reason, .. } => match reason {
+            crate::error::CapError::NotFound => SyscallError::CapabilityNotFound,
+            crate::error::CapError::InsufficientRights => SyscallError::InsufficientRights,
+            crate::error::CapError::CapabilityRevoked => SyscallError::CapabilityRevoked,
+            _ => SyscallError::InvalidCapability,
+        },
         _ => SyscallError::InvalidState,
     }
 }
@@ -729,6 +735,9 @@ fn handle_syscall(
         Syscall::IpcBindEndpoint => sys_ipc_bind_endpoint(arg1, arg2),
         Syscall::IpcShareMemory => sys_ipc_share_memory(arg1, arg2, arg3, arg4),
         Syscall::IpcMapMemory => sys_ipc_map_memory(arg1, arg2, arg3),
+        Syscall::CapabilityRevoke => crate::cap::revocation::sys_capability_revoke(arg1 as u64)
+            .map(|()| 0)
+            .map_err(map_kernel_error),
 
         // Process management
         Syscall::SchedYield => sys_yield(),
@@ -2546,8 +2555,21 @@ fn sys_ipc_call(
     }
     validate_user_buffer(recv_buf, recv_size)?;
 
+    // The endpoint is the one the capability names, not the token's value
+    // (the token used to be passed as the endpoint number).
+    let endpoint = {
+        let process = crate::process::current_process().ok_or(SyscallError::InvalidState)?;
+        let space = process.capability_space.lock();
+        let token = crate::cap::CapabilityToken::from_u64(capability as u64);
+        crate::cap::ipc_integration::check_send_permission(token, &space)
+            .map_err(SyscallError::from)?;
+        match space.lookup_entry(token) {
+            Some((crate::cap::object::ObjectRef::Endpoint { endpoint }, _)) => endpoint.id(),
+            _ => return Err(SyscallError::InvalidCapability),
+        }
+    };
     let message = message_from_user(Some(capability as u64), send_msg, send_size)?;
-    let reply = sync_call(message, capability as u64).map_err(SyscallError::from)?;
+    let reply = sync_call(message, endpoint).map_err(SyscallError::from)?;
     message_to_user(&reply, recv_buf, recv_size)
 }
 
@@ -2853,7 +2875,7 @@ fn sys_shm_truncate(name_ptr: usize, _name_len: usize, size: usize) -> SyscallRe
 
     crate::ipc::posix_shm::shm_truncate(&name, size)
         .map(|()| 0)
-        .map_err(|_| SyscallError::OutOfMemory)
+        .map_err(map_kernel_error)
 }
 
 // ---------------------------------------------------------------------------

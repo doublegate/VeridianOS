@@ -8,7 +8,7 @@
 extern crate alloc;
 
 #[cfg(feature = "alloc")]
-use alloc::{collections::BTreeMap, vec::Vec};
+use alloc::{collections::BTreeMap, sync::Arc, vec::Vec};
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use spin::Mutex;
@@ -148,8 +148,12 @@ impl Endpoint {
 /// Global endpoint registry
 #[cfg(feature = "alloc")]
 pub struct EndpointRegistry {
-    /// Endpoints indexed by ID
-    endpoints: Mutex<BTreeMap<EndpointId, Endpoint>>,
+    /// Endpoints indexed by ID. Shared (`Arc`), so a sender or receiver
+    /// keeps its endpoint alive while it uses it (N-83): the map used to
+    /// hold endpoints by value and hand out `&'static` references, which
+    /// dangled as soon as the map moved its entries (any insertion can) or
+    /// the endpoint was unregistered.
+    endpoints: Mutex<BTreeMap<EndpointId, Arc<Endpoint>>>,
 }
 
 #[cfg(feature = "alloc")]
@@ -169,7 +173,7 @@ impl EndpointRegistry {
             return Err(IpcError::EndpointBusy);
         }
 
-        endpoints.insert(endpoint.id, endpoint);
+        endpoints.insert(endpoint.id, Arc::new(endpoint));
         Ok(())
     }
 
@@ -195,17 +199,10 @@ impl EndpointRegistry {
         }
     }
 
-    /// Get an endpoint reference
-    pub fn get(&self, id: EndpointId) -> Option<&'static Endpoint> {
-        let endpoints = self.endpoints.lock();
-
-        endpoints.get(&id).map(|ep| {
-            // SAFETY: The Endpoint is stored in a BTreeMap behind a Mutex, so it has
-            // a stable address as long as it is not removed. The returned 'static
-            // reference is valid as long as the endpoint remains in the registry.
-            // Callers must not hold this reference across endpoint removal.
-            unsafe { &*(ep as *const Endpoint) }
-        })
+    /// Get an endpoint. It stays valid after it is unregistered (closed
+    /// then, so sends and receives on it fail).
+    pub fn get(&self, id: EndpointId) -> Option<Arc<Endpoint>> {
+        self.endpoints.lock().get(&id).cloned()
     }
 }
 
@@ -283,6 +280,21 @@ pub fn send_to_endpoint(mut msg: Message, endpoint_id: EndpointId) -> Result<()>
             Err(e) => Err(e),
         }
     }
+}
+
+/// Deliver an authorized reply to `caller`'s reply endpoint, the endpoint
+/// numbered by its pid. The endpoint must belong to `caller`: endpoint
+/// numbers and pids share one namespace, so another process's endpoint
+/// with that number must never receive it.
+#[cfg(feature = "alloc")]
+pub fn send_reply(msg: Message, caller: u64) -> Result<()> {
+    let endpoint = ENDPOINT_REGISTRY
+        .get(caller)
+        .ok_or(IpcError::EndpointNotFound)?;
+    if endpoint.owner != ProcessId(caller) {
+        return Err(IpcError::PermissionDenied);
+    }
+    send_to_endpoint(msg, caller)
 }
 
 /// Receive a message from an endpoint
@@ -377,4 +389,51 @@ pub fn retrieve_delivered_message() -> Option<Message> {
 /// Initialize message passing subsystem
 pub fn init() {
     println!("[IPC] Message passing subsystem initialized");
+}
+
+#[cfg(all(test, feature = "alloc"))]
+mod tests {
+    use super::*;
+
+    /// N-83: an endpoint obtained from the registry stays valid while the
+    /// registry grows (a by-value map moves its entries) and after it is
+    /// unregistered, when it reads as closed.
+    #[test]
+    fn registry_endpoints_outlive_map_changes_and_removal() {
+        let registry = EndpointRegistry::new();
+        registry.register(Endpoint::new(1, ProcessId(5))).unwrap();
+        let first = registry.get(1).unwrap();
+        for id in 2..500 {
+            registry.register(Endpoint::new(id, ProcessId(5))).unwrap();
+        }
+        assert_eq!((first.id, first.owner), (1, ProcessId(5)));
+        assert!(first.is_active());
+        registry.unregister(1).unwrap();
+        assert_eq!(first.id, 1, "still readable after removal");
+        assert!(!first.is_active(), "and closed");
+        assert!(registry.get(1).is_none());
+        assert!(matches!(
+            registry.register(Endpoint::new(7, ProcessId(5))),
+            Err(IpcError::EndpointBusy)
+        ));
+    }
+
+    /// A reply for pid 9 goes only to an endpoint 9 that pid 9 owns.
+    #[test]
+    fn replies_go_only_to_the_callers_own_endpoint() {
+        ENDPOINT_REGISTRY
+            .register(Endpoint::new(0x9_0009, ProcessId(0x9_0001)))
+            .unwrap();
+        let msg = Message::Small(crate::ipc::SmallMessage::new(0, 0));
+        assert!(matches!(
+            send_reply(msg, 0x9_0009),
+            Err(IpcError::PermissionDenied)
+        ));
+        let msg = Message::Small(crate::ipc::SmallMessage::new(0, 0));
+        assert!(matches!(
+            send_reply(msg, 0x9_000A),
+            Err(IpcError::EndpointNotFound)
+        ));
+        ENDPOINT_REGISTRY.unregister(0x9_0009).unwrap();
+    }
 }

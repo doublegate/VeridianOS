@@ -380,8 +380,8 @@ Page protections now follow `prot` (fixed in v0.27, N-132 to N-137). What remain
 - **Memory is allocated eagerly** at `mmap` time, not on first touch (v0.29 memory work).
 - **RAM above the eighth memory region is lost (N-142, HX-07).** Only the eight largest usable
   regions are used; UEFI firmware on real machines reports 50 to 150.
-- **POSIX shared memory (N-88)** has no access control, `ftruncate` can free frames that are still
-  mapped, and unlinked names can still be opened.
+- **POSIX shared memory (N-88)** has no access control, and unlinked names can still be opened.
+  (`ftruncate` of a mapped object is now refused rather than freeing frames under the mapping.)
 
 ### Security policy features are partial (N-150 to N-152, N-88)
 

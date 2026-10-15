@@ -53,18 +53,61 @@ pub fn create_endpoint_capability(
     }
 }
 
+/// The endpoint `cap` names in `cap_space`, if it names one (N-80). Only an
+/// endpoint capability confers IPC rights: the IPC rights are general bits
+/// (SEND is WRITE), which capabilities of other objects carry too.
+#[cfg(feature = "alloc")]
+fn endpoint_of(cap: CapabilityToken, cap_space: &CapabilitySpace) -> Option<u64> {
+    match cap_space.lookup_entry(cap) {
+        Some((ObjectRef::Endpoint { endpoint }, _)) => Some(endpoint.id()),
+        _ => None,
+    }
+}
+
+/// `cap` is a valid endpoint capability in `cap_space` with `rights`.
+fn check_ipc_permission(
+    cap: CapabilityToken,
+    cap_space: &CapabilitySpace,
+    rights: Rights,
+) -> Result<(), IpcError> {
+    match super::manager::check_capability(cap, rights, cap_space) {
+        Ok(()) => {}
+        Err(CapError::InvalidCapability) => return Err(IpcError::InvalidCapability),
+        Err(CapError::InsufficientRights) => return Err(IpcError::PermissionDenied),
+        Err(CapError::CapabilityRevoked) => return Err(IpcError::InvalidCapability),
+        Err(_) => return Err(IpcError::PermissionDenied),
+    }
+    #[cfg(feature = "alloc")]
+    if endpoint_of(cap, cap_space).is_none() {
+        return Err(IpcError::InvalidCapability);
+    }
+    Ok(())
+}
+
+/// `cap` is a valid capability in `cap_space` for endpoint `endpoint_id`
+/// with `rights`: the check for an operation on a known endpoint.
+pub fn check_endpoint_permission(
+    cap: CapabilityToken,
+    cap_space: &CapabilitySpace,
+    endpoint_id: u64,
+    rights: Rights,
+) -> Result<(), IpcError> {
+    check_ipc_permission(cap, cap_space, rights)?;
+    #[cfg(feature = "alloc")]
+    if endpoint_of(cap, cap_space) != Some(endpoint_id) {
+        return Err(IpcError::InvalidCapability);
+    }
+    #[cfg(not(feature = "alloc"))]
+    let _ = endpoint_id;
+    Ok(())
+}
+
 /// Check if process has permission to send to endpoint
 pub fn check_send_permission(
     cap: CapabilityToken,
     cap_space: &CapabilitySpace,
 ) -> Result<(), IpcError> {
-    match super::manager::check_capability(cap, IpcRights::SEND, cap_space) {
-        Ok(()) => Ok(()),
-        Err(CapError::InvalidCapability) => Err(IpcError::InvalidCapability),
-        Err(CapError::InsufficientRights) => Err(IpcError::PermissionDenied),
-        Err(CapError::CapabilityRevoked) => Err(IpcError::InvalidCapability),
-        Err(_) => Err(IpcError::PermissionDenied),
-    }
+    check_ipc_permission(cap, cap_space, IpcRights::SEND)
 }
 
 /// Check if process has permission to receive from endpoint
@@ -72,13 +115,7 @@ pub fn check_receive_permission(
     cap: CapabilityToken,
     cap_space: &CapabilitySpace,
 ) -> Result<(), IpcError> {
-    match super::manager::check_capability(cap, IpcRights::RECEIVE, cap_space) {
-        Ok(()) => Ok(()),
-        Err(CapError::InvalidCapability) => Err(IpcError::InvalidCapability),
-        Err(CapError::InsufficientRights) => Err(IpcError::PermissionDenied),
-        Err(CapError::CapabilityRevoked) => Err(IpcError::InvalidCapability),
-        Err(_) => Err(IpcError::PermissionDenied),
-    }
+    check_ipc_permission(cap, cap_space, IpcRights::RECEIVE)
 }
 
 /// Check if process has permission to bind to endpoint
@@ -86,13 +123,7 @@ pub fn check_bind_permission(
     cap: CapabilityToken,
     cap_space: &CapabilitySpace,
 ) -> Result<(), IpcError> {
-    match super::manager::check_capability(cap, IpcRights::BIND, cap_space) {
-        Ok(()) => Ok(()),
-        Err(CapError::InvalidCapability) => Err(IpcError::InvalidCapability),
-        Err(CapError::InsufficientRights) => Err(IpcError::PermissionDenied),
-        Err(CapError::CapabilityRevoked) => Err(IpcError::InvalidCapability),
-        Err(_) => Err(IpcError::PermissionDenied),
-    }
+    check_ipc_permission(cap, cap_space, IpcRights::BIND)
 }
 
 /// Delegate IPC endpoint capability to another process

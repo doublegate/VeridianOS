@@ -36,6 +36,13 @@ pub struct RevocationList {
     #[cfg(feature = "alloc")]
     revoked: RwLock<BTreeSet<(u64, u8)>>, // (cap_id, generation)
 
+    /// The same entries in the order they were added. Entries are never
+    /// removed (see below), so a cache brings itself up to date by reading
+    /// only the entries after the last one it saw (N-87; it used to copy
+    /// the whole set on every revocation anywhere).
+    #[cfg(feature = "alloc")]
+    log: RwLock<Vec<(u64, u8)>>,
+
     /// Revocation epoch counter
     epoch: AtomicU64,
 }
@@ -45,6 +52,8 @@ impl RevocationList {
         Self {
             #[cfg(feature = "alloc")]
             revoked: RwLock::new(BTreeSet::new()),
+            #[cfg(feature = "alloc")]
+            log: RwLock::new(Vec::new()),
             epoch: AtomicU64::new(0),
         }
     }
@@ -58,7 +67,9 @@ impl RevocationList {
     pub fn add_id(&self, id: u64, generation: u8) {
         #[cfg(feature = "alloc")]
         {
-            self.revoked.write().insert((id, generation));
+            if self.revoked.write().insert((id, generation)) {
+                self.log.write().push((id, generation));
+            }
         }
         #[cfg(not(feature = "alloc"))]
         let _ = (id, generation);
@@ -159,6 +170,9 @@ pub fn revoke_batch(caps: &[CapabilityToken]) -> Result<u32, KernelError> {
 pub struct RevocationCache {
     /// Cached revocation epoch
     cached_epoch: AtomicU64,
+    /// Entries of the global log already copied.
+    #[cfg(feature = "alloc")]
+    seen: core::sync::atomic::AtomicUsize,
     /// Cached revoked capabilities
     #[cfg(feature = "alloc")]
     cache: RwLock<BTreeSet<(u64, u8)>>,
@@ -168,6 +182,8 @@ impl RevocationCache {
     pub const fn new() -> Self {
         Self {
             cached_epoch: AtomicU64::new(0),
+            #[cfg(feature = "alloc")]
+            seen: core::sync::atomic::AtomicUsize::new(0),
             #[cfg(feature = "alloc")]
             cache: RwLock::new(BTreeSet::new()),
         }
@@ -198,29 +214,48 @@ impl RevocationCache {
     fn update_cache(&self) {
         let current_epoch = REVOCATION_LIST.epoch();
 
-        // Copy revocation list to cache
-        let global_revoked = REVOCATION_LIST.revoked.read();
+        // Copy only the entries added since the last update.
+        let log = REVOCATION_LIST.log.read();
         let mut cache = self.cache.write();
-        cache.clear();
-        cache.extend(global_revoked.iter().cloned());
+        let seen = self.seen.load(Ordering::Acquire);
+        cache.extend(log[seen..].iter().copied());
+        self.seen.store(log.len(), Ordering::Release);
 
         self.cached_epoch.store(current_epoch, Ordering::Release);
     }
 }
 
-/// System call handler for capability revocation
-pub fn sys_capability_revoke(cap_value: u64) -> Result<(), KernelError> {
-    let cap = CapabilityToken::from_u64(cap_value);
-
-    // Verify the capability exists and the caller has REVOKE rights
-    if !cap_manager().is_valid(cap) {
+/// Revoke `cap` (and what was derived from it) on behalf of a caller whose
+/// capability space is `space` (N-89). Only a holder may revoke, and only
+/// with REVOKE rights: a valid token alone proved nothing, since tokens can
+/// be guessed or seen in transit.
+pub fn revoke_held(
+    space: &super::space::CapabilitySpace,
+    cap: CapabilityToken,
+) -> Result<(), KernelError> {
+    let rights = space.lookup(cap).ok_or(KernelError::InvalidCapability {
+        cap_id: cap.id(),
+        reason: crate::error::CapError::NotFound,
+    })?;
+    if !rights.contains(super::token::Rights::REVOKE) {
         return Err(KernelError::InvalidCapability {
             cap_id: cap.id(),
-            reason: crate::error::CapError::NotFound,
+            reason: crate::error::CapError::InsufficientRights,
         });
     }
-
     revoke_capability(cap)
+}
+
+/// System call handler for capability revocation (native call 1055): the
+/// calling process must hold `cap_value` with REVOKE rights.
+pub fn sys_capability_revoke(cap_value: u64) -> Result<(), KernelError> {
+    let cap = CapabilityToken::from_u64(cap_value);
+    let process = crate::process::current_process().ok_or(KernelError::NotFound {
+        resource: "current process",
+        id: 0,
+    })?;
+    let space = process.capability_space.lock();
+    revoke_held(&space, cap)
 }
 
 // ===========================================================================
@@ -485,6 +520,68 @@ mod tests {
     use alloc::vec;
 
     use super::*;
+
+    /// N-89: only a holder with REVOKE rights may revoke. Revocation used to
+    /// check only that the capability existed somewhere, so anyone who
+    /// learned a token could revoke it system-wide.
+    #[test]
+    fn revoke_requires_holding_the_capability_with_revoke_rights() {
+        use crate::{
+            cap::{object::ObjectRef, space::CapabilitySpace, token::Rights},
+            process::ProcessId,
+        };
+        let space = CapabilitySpace::new();
+        let obj = ObjectRef::Process { pid: ProcessId(77) };
+        let held = CapabilityToken::new(0x7_0001, 0, 0, 0);
+        space.insert(held, obj.clone(), Rights::READ).unwrap();
+        let revocable = CapabilityToken::new(0x7_0002, 0, 0, 0);
+        space
+            .insert(revocable, obj, Rights::READ | Rights::REVOKE)
+            .unwrap();
+        let foreign = CapabilityToken::new(0x7_0003, 0, 0, 0);
+
+        assert!(matches!(
+            revoke_held(&space, foreign),
+            Err(KernelError::InvalidCapability {
+                reason: crate::error::CapError::NotFound,
+                ..
+            })
+        ));
+        assert!(matches!(
+            revoke_held(&space, held),
+            Err(KernelError::InvalidCapability {
+                reason: crate::error::CapError::InsufficientRights,
+                ..
+            })
+        ));
+        assert!(
+            !REVOCATION_LIST.is_revoked(held),
+            "refused revoke changes nothing"
+        );
+        assert!(revoke_held(&space, revocable).is_ok());
+        assert!(REVOCATION_LIST.is_revoked(revocable));
+    }
+
+    /// N-87: the cache catches up from the log incrementally and keeps
+    /// what it saw before.
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn revocation_cache_updates_incrementally() {
+        let cache = RevocationCache::new();
+        let a = CapabilityToken::new(0x8_0001, 0, 0, 0);
+        let b = CapabilityToken::new(0x8_0002, 0, 0, 0);
+        REVOCATION_LIST.add(a);
+        assert!(cache.is_revoked(a));
+        let seen = cache.seen.load(Ordering::Relaxed);
+        REVOCATION_LIST.add(b);
+        assert!(cache.is_revoked(b));
+        assert!(cache.is_revoked(a), "earlier entries are kept");
+        assert!(cache.seen.load(Ordering::Relaxed) > seen);
+        // Adding an entry already present does not grow the log.
+        let len = REVOCATION_LIST.log.read().len();
+        REVOCATION_LIST.add(a);
+        assert_eq!(REVOCATION_LIST.log.read().len(), len);
+    }
 
     #[test]
     fn test_revocation_list_basic() {

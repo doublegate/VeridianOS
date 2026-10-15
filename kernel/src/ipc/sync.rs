@@ -102,21 +102,73 @@ pub fn sync_receive(endpoint: u64) -> Result<Message> {
     }
 }
 
+/// Calls waiting for a reply: caller pid -> the endpoint it called (N-80).
+/// A reply is accepted only for a caller listed here, once, and only from a
+/// process holding RECEIVE rights on that endpoint.
+#[cfg(feature = "alloc")]
+static PENDING_CALLS: spin::Mutex<alloc::collections::BTreeMap<u64, u64>> =
+    spin::Mutex::new(alloc::collections::BTreeMap::new());
+
 /// Call operation (send and wait for reply)
 pub fn sync_call(request: Message, target: u64) -> Result<Message> {
-    // Send request
-    sync_send(request, target)?;
+    let me = crate::process::current_process()
+        .ok_or(IpcError::ProcessNotFound)?
+        .pid
+        .0;
+    #[cfg(feature = "alloc")]
+    PENDING_CALLS.lock().insert(me, target);
+    if let Err(e) = sync_send(request, target) {
+        #[cfg(feature = "alloc")]
+        PENDING_CALLS.lock().remove(&me);
+        return Err(e);
+    }
 
     // Mark ourselves as waiting for reply
     let current = current_process();
     current.state = ProcessState::Blocked;
 
-    // Wait for reply using process ID as endpoint
-    sync_receive(current.pid.0)
+    // Wait for reply using process ID as endpoint. Whatever the outcome
+    // (a reply, an error, an interruption), the call is no longer
+    // outstanding, so a later reply is refused.
+    let reply = sync_receive(current.pid.0);
+    #[cfg(feature = "alloc")]
+    PENDING_CALLS.lock().remove(&me);
+    reply
 }
 
-/// Reply to a previous call
+/// Whether the holder of `cap_space` may reply to `caller` with `cap`: the
+/// caller has a call outstanding and `cap` names the endpoint it called
+/// with RECEIVE rights. The call is consumed, so each call takes one reply.
+#[cfg(feature = "alloc")]
+fn authorize_reply(
+    pending: &mut alloc::collections::BTreeMap<u64, u64>,
+    caller: u64,
+    cap: crate::cap::CapabilityToken,
+    cap_space: &crate::cap::space::CapabilitySpace,
+) -> Result<()> {
+    let endpoint = *pending.get(&caller).ok_or(IpcError::InvalidMessage)?;
+    crate::cap::ipc_integration::check_endpoint_permission(
+        cap,
+        cap_space,
+        endpoint,
+        crate::cap::ipc_integration::IpcRights::RECEIVE,
+    )?;
+    pending.remove(&caller);
+    Ok(())
+}
+
+/// Reply to a previous call. Only a server of the endpoint the caller
+/// called may reply (N-80): `reply`'s capability must name that endpoint
+/// with RECEIVE rights; any process could reply to any blocked one before.
 pub fn sync_reply(reply: Message, caller: u64) -> Result<()> {
+    #[cfg(feature = "alloc")]
+    {
+        let process = crate::process::current_process().ok_or(IpcError::ProcessNotFound)?;
+        let space = process.capability_space.lock();
+        let cap = crate::cap::CapabilityToken::from_u64(reply.capability());
+        authorize_reply(&mut PENDING_CALLS.lock(), caller, cap, &space)?;
+    }
+
     // Find caller process
     let caller_process = find_process(ProcessId(caller)).ok_or(IpcError::ProcessNotFound)?;
 
@@ -125,8 +177,14 @@ pub fn sync_reply(reply: Message, caller: u64) -> Result<()> {
         return Err(IpcError::InvalidMessage);
     }
 
-    // Send reply directly
-    sync_send(reply, caller)?;
+    // Deliver to the caller's reply queue (its pid). The reply was
+    // authorized above, so it does not go through the send check, which
+    // asks for a SEND capability on the target endpoint. Delivery itself
+    // still needs the endpoint registries unified (N-33).
+    #[cfg(feature = "alloc")]
+    crate::ipc::message_passing::send_reply(reply, caller)?;
+    #[cfg(not(feature = "alloc"))]
+    let _ = reply;
 
     // Wake the caller process after reply is sent
     crate::sched::ipc_blocking::wake_up_process(ProcessId(caller));
@@ -188,35 +246,15 @@ fn validate_send_capability(msg: &Message, endpoint_id: u64) -> Result<()> {
     // Convert capability ID to token
     let cap_token = crate::cap::CapabilityToken::from_u64(cap_id);
 
-    // Check if the capability grants send permission for this endpoint
-    // Note: This checks the capability exists, is valid, and has SEND rights
-    crate::cap::ipc_integration::check_send_permission(cap_token, &cap_space).map_err(
-        |e| match e {
-            IpcError::InvalidCapability => IpcError::InvalidCapability,
-            IpcError::PermissionDenied => IpcError::PermissionDenied,
-            _ => IpcError::InvalidCapability,
-        },
+    // The capability must name this endpoint and carry SEND (N-80): one
+    // for another object, or another endpoint, does not let the holder send
+    // here.
+    crate::cap::ipc_integration::check_endpoint_permission(
+        cap_token,
+        &cap_space,
+        endpoint_id,
+        crate::cap::ipc_integration::IpcRights::SEND,
     )?;
-
-    // Verify the capability is associated with the target endpoint.
-    // Look up the full capability entry to check the ObjectRef.
-    // Non-endpoint capabilities are also valid for general IPC
-    // (e.g., process capabilities can send on any endpoint they
-    // have SEND rights for).
-    #[cfg(feature = "alloc")]
-    {
-        if let Some((crate::cap::object::ObjectRef::Endpoint { endpoint }, _rights)) =
-            cap_space.lookup_entry(cap_token)
-        {
-            if endpoint.id() != endpoint_id {
-                return Err(IpcError::InvalidCapability);
-            }
-        }
-    }
-    #[cfg(not(feature = "alloc"))]
-    {
-        let _ = endpoint_id;
-    }
 
     Ok(())
 }
@@ -277,6 +315,43 @@ pub struct SyncStatsSummary {
 #[cfg(all(test, not(target_os = "none")))]
 mod tests {
     use super::*;
+
+    /// N-80: a reply needs an outstanding call from that caller and a
+    /// RECEIVE capability for the endpoint it called; each call takes one.
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn reply_requires_the_called_endpoint_and_an_outstanding_call() {
+        use alloc::{collections::BTreeMap, sync::Arc};
+
+        use crate::cap::{ipc_integration::IpcRights, manager::cap_manager, object::ObjectRef};
+        let space = crate::cap::space::CapabilitySpace::new();
+        let ep = Arc::new(crate::ipc::Endpoint::new(ProcessId(3)));
+        let ep_id = ep.id();
+        let server = cap_manager()
+            .create_capability(
+                ObjectRef::Endpoint { endpoint: ep },
+                IpcRights::RECEIVE,
+                &space,
+            )
+            .unwrap();
+        let other = Arc::new(crate::ipc::Endpoint::new(ProcessId(3)));
+        let wrong = cap_manager()
+            .create_capability(
+                ObjectRef::Endpoint { endpoint: other },
+                IpcRights::RECEIVE,
+                &space,
+            )
+            .unwrap();
+        let mut pending = BTreeMap::new();
+        // No call outstanding.
+        assert!(authorize_reply(&mut pending, 40, server, &space).is_err());
+        pending.insert(40, ep_id);
+        // A capability for another endpoint does not authorize the reply.
+        assert!(authorize_reply(&mut pending, 40, wrong, &space).is_err());
+        assert!(authorize_reply(&mut pending, 40, server, &space).is_ok());
+        // The call is consumed: a second reply is refused.
+        assert!(authorize_reply(&mut pending, 40, server, &space).is_err());
+    }
 
     #[test]
     fn test_sync_stats() {
