@@ -426,23 +426,12 @@ pub fn sys_nanosleep(req_ptr: usize, rem_ptr: usize) -> SyscallResult {
 
     let sleep_ms = (req.tv_sec as u64) * 1000 + (req.tv_nsec as u64) / 1_000_000;
 
-    // Boot-path cooperative dispatch: skip the spin loop so the child
-    // thread yields back promptly and the cooperative scheduler can make
-    // progress. The sleep is effectively a no-op in this context.
-    #[cfg(target_arch = "x86_64")]
-    let in_boot_coop = crate::arch::x86_64::usermode::BOOT_CLONE_YIELD_PENDING
-        .load(core::sync::atomic::Ordering::Acquire);
-    #[cfg(not(target_arch = "x86_64"))]
-    let in_boot_coop = false;
-
-    if !in_boot_coop {
-        let start = crate::timer::get_uptime_ms();
-        // Busy-wait with interrupt-enabled halts so APIC timer ISR can
-        // advance UPTIME_MS (SFMASK clears IF on syscall entry).
-        while crate::timer::get_uptime_ms() - start < sleep_ms {
-            if crate::sched::wait_for_interrupt_in_syscall() {
-                return Err(SyscallError::Interrupted);
-            }
+    // Not dispatched (no user thread is, without the dispatcher): wait with
+    // interrupt-enabled halts so the timer can advance the uptime.
+    let start = crate::timer::get_uptime_ms();
+    while crate::timer::get_uptime_ms() - start < sleep_ms {
+        if crate::sched::wait_for_interrupt_in_syscall() {
+            return Err(SyscallError::Interrupted);
         }
     }
 

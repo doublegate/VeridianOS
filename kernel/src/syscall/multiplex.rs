@@ -73,16 +73,6 @@ pub(crate) fn wait_ready(
     timeout_ns: Option<u64>,
     mut scan: impl FnMut() -> Result<Scan, SyscallError>,
 ) -> SyscallResult {
-    // Boot-path cooperative dispatch: a child thread dispatched from
-    // boot_futex_spin yields back to its parent after each system call, so
-    // waiting here would block every other thread: a single look.
-    #[cfg(target_arch = "x86_64")]
-    let in_boot_coop = crate::arch::x86_64::usermode::BOOT_CLONE_YIELD_PENDING
-        .load(core::sync::atomic::Ordering::Acquire);
-    #[cfg(not(target_arch = "x86_64"))]
-    let in_boot_coop = false;
-    let timeout_ns = if in_boot_coop { Some(0) } else { timeout_ns };
-
     #[cfg(feature = "alloc")]
     let dispatched = crate::sched::dispatch::current_owner().is_some();
     let start = now_ns();

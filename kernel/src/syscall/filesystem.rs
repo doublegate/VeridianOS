@@ -329,12 +329,6 @@ pub fn sys_read(fd: usize, buffer: usize, count: usize) -> SyscallResult {
 
     // Non-stdin: use file table normally.
     //
-    // In boot execution mode (no preemptive scheduler), a pipe read may
-    // return WouldBlock because the child process that writes to the pipe
-    // hasn't been dispatched yet. When this happens, we dispatch any Ready
-    // children inline (the same pattern used by waitpid), then retry the
-    // read. This enables shell command substitution `$(cmd)` where the
-    // parent reads from a pipe that the child writes to.
     let proc = process::current_process().ok_or(SyscallError::InvalidState)?;
 
     // First attempt: try reading directly. The file table lock covers only
@@ -388,66 +382,8 @@ pub fn sys_read(fd: usize, buffer: usize, count: usize) -> SyscallResult {
         }
     }
 
-    // Boot execution mode: dispatch any Ready children so they can write
-    // to the pipe, then retry the read. This loop runs at most
-    // MAX_CHILD_DISPATCH iterations to prevent infinite loops.
-    #[cfg(target_arch = "x86_64")]
-    {
-        use crate::process::{pcb::ProcessState, table, thread::ThreadId};
-
-        if crate::arch::x86_64::usermode::has_boot_return_context() {
-            let current_pid = proc.pid;
-            const MAX_CHILD_DISPATCH: usize = 16;
-
-            for _ in 0..MAX_CHILD_DISPATCH {
-                // Find a Ready child to dispatch.
-                let children = table::PROCESS_TABLE.find_children(current_pid);
-                let mut dispatched = false;
-
-                for child_pid in &children {
-                    if let Some(child) = table::get_process(*child_pid) {
-                        if child.get_state() == ProcessState::Ready {
-                            let parent_tid = proc
-                                .threads
-                                .lock()
-                                .values()
-                                .next()
-                                .map(|t| t.tid)
-                                .unwrap_or(ThreadId(current_pid.0));
-
-                            dispatched = crate::bootstrap::boot_run_forked_child(
-                                *child_pid,
-                                current_pid,
-                                parent_tid,
-                            );
-                            break;
-                        }
-                    }
-                }
-
-                // Retry the read after dispatching the child.
-                let file_table = proc.file_table.lock();
-                if let Some(file_desc) = file_table.get(fd) {
-                    match file_read_to_user(&file_desc, buffer, count) {
-                        Err(SyscallError::WouldBlock) => {
-                            // Still empty -- continue dispatching if we ran a child
-                            drop(file_table);
-                            if !dispatched {
-                                // No more children to dispatch, return EAGAIN
-                                return Err(SyscallError::WouldBlock);
-                            }
-                        }
-                        other => return other,
-                    }
-                } else {
-                    return Err(SyscallError::InvalidArgument);
-                }
-            }
-        }
-    }
-
-    // Non-boot context or exhausted dispatch attempts: return EAGAIN so
-    // the C library can retry via poll()/select().
+    // Not a dispatched thread (no user thread is, without the dispatcher):
+    // EAGAIN.
     Err(SyscallError::WouldBlock)
 }
 

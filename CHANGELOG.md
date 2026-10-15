@@ -650,8 +650,26 @@
   user buffer now gives EFAULT instead of a kernel fault. Bulk transfers go through bounded
   bounce buffers, and messages and datagrams are capped at 1 MiB.
 
+### Removed
+
+- **The nested boot execution model (sprint D4).** Before the dispatcher, programs ran nested inside
+  the boot flow: `enter_usermode_returnable` saved the kernel's context, the program's exit jumped
+  back to it, a forked child was run inline from its parent's wait loop or pipe read, and a futex
+  wait ran sibling threads from their saved registers. Every user thread has been a dispatcher task
+  since stage D2, so all of that is deleted (about 1,100 lines), together with the futex table it
+  used (N-279: a waiter and a waker on different tables would have missed each other; N-54) and
+  the unused x86_64 `try_enter_usermode`. The dispatcher failing to start now stops the boot, and
+  `current_process` is the current dispatcher task's process, nothing else.
+
 ### Fixed
 
+- **Starting the KDE session no longer frees its page tables twice.** After the session process
+  exited, the KDE launcher freed the page tables and reaped the process itself, on top of the
+  dispatcher already doing both; the same page-table frames were freed twice.
+- **The kernel shell on AArch64 and RISC-V no longer jumps into a program in kernel mode.** With no
+  user mode there yet, starting a program yielded into the old scheduler, which could start the
+  program's entry point in kernel mode. The shell now says user programs are not available on
+  that architecture and frees the loaded program.
 - **Native IPC reaches its endpoints, and a receive waits (N-47, N-81 part, N-84, N-85).** Since
   ADR 0009 the native IPC calls could be made, but did nothing useful: an endpoint capability named
   a second endpoint object that nothing could reach, send looked endpoints up in a registry nothing

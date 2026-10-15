@@ -143,7 +143,10 @@ What does not work yet: `docs/KNOWN-LIMITATIONS.md`.
       `audit_runtime_test`), N-269.
     - [ ] D4: nested boot dispatch and `BOOT_RETURN_*` removed; old scheduler, `queue.rs`,
       `percpu_queue.rs`, `deadline.rs`, `process_compat`, old `context_switch` retired (N-84,
-      N-85, N-156, N-181); the old `FUTEX_TABLE` path goes with it (N-279).
+      N-85, N-156, N-181); the old `FUTEX_TABLE` path goes with it (N-279). Done: D4a (no
+      old-scheduler tasks, failed-fork rollback N-46), D4b (IPC on dispatcher wait queues; N-47,
+      N-81 part, N-84, N-85), D4c (nested boot model, `boot_futex_spin` and `FUTEX_TABLE` deleted;
+      N-54, N-279). Next: D4d (the old scheduler modules, `Task`, `context_switch`).
     - [ ] D5, SMP S2/S3: per-CPU run queues and current task, idle and balancing on every CPU,
       `cpu_init_local()` on APs (N-172), IPI fixes (N-173), interrupts enabled in syscalls with
       deferred frees and per-mm TLB masks (N-139, N-143 flushes), smp_boot stop + guarded AP

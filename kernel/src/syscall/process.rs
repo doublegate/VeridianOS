@@ -265,60 +265,6 @@ pub(crate) fn exit_current(exit_code: i32, term_signal: u32) -> SyscallResult {
         crate::process::exit::exit_dispatched(exit_code, true);
     }
 
-    // Check for boot return context FIRST, before exit_thread/exit_process.
-    // Both of those call sched::exit_task() which does a context switch and
-    // never returns, preventing boot_return_to_kernel from being reached.
-    #[cfg(target_arch = "x86_64")]
-    {
-        let has_ctx = crate::arch::x86_64::usermode::has_boot_return_context();
-        if has_ctx {
-            // Mark the process as Zombie and notify parent before returning
-            // to the boot context. This is needed for nested child execution:
-            // when a forked child exits, the parent's wait loop must find it
-            // as a Zombie to reap it.
-            //
-            // CRITICAL: We must also call cleanup_process to close all file
-            // descriptors. Without this, pipe write ends are never closed,
-            // so the parent's pipe read never gets EOF -- causing hangs in
-            // command substitution `$(cmd)` where the parent waits for EOF.
-            if let Some(process) = current_process() {
-                process.set_exit_code(exit_code);
-
-                #[cfg(feature = "alloc")]
-                {
-                    let threads = process.threads.lock();
-                    for (_, thread) in threads.iter() {
-                        thread.set_state(crate::process::thread::ThreadState::Zombie);
-                    }
-                }
-
-                // Close all file descriptors (pipes, files, etc.) BEFORE
-                // marking as Zombie. This ensures pipe write_closed is set
-                // so parent reads get EOF.
-                crate::process::exit::cleanup_process(&process);
-
-                process.set_state(crate::process::pcb::ProcessState::Zombie);
-
-                // Wake parent if blocked in waitpid
-                if let Some(parent_pid) = process.parent() {
-                    if let Some(parent) = crate::process::table::get_process(parent_pid) {
-                        if parent.get_state() == crate::process::pcb::ProcessState::Blocked {
-                            parent.set_state(crate::process::pcb::ProcessState::Ready);
-                            crate::sched::wake_up_process(parent_pid);
-                        }
-                    }
-                }
-            }
-
-            // SAFETY: The boot return context was saved by
-            // enter_usermode_returnable (or enter_forked_child_returnable)
-            // and is still valid on the kernel stack.
-            unsafe {
-                crate::arch::x86_64::usermode::boot_return_to_kernel();
-            }
-        }
-    }
-
     // Normal path: exit_thread calls sched::exit_task (never returns).
     exit_thread(exit_code);
 

@@ -13,7 +13,7 @@
 // called from user-space syscall paths. Will be exercised once the process
 // lifecycle is driven by real user-space programs.
 
-use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicU64, Ordering};
 
 #[cfg(feature = "alloc")]
 extern crate alloc;
@@ -66,65 +66,6 @@ pub const MAX_THREADS_PER_PROCESS: usize = 256;
 /// every other thread an ID no process has, so gettid, tkill and tgkill name
 /// threads and processes without ambiguity (N-217).
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
-
-/// Boot-launched process tracking.
-///
-/// During bootstrap, user processes are launched via
-/// `enter_usermode_returnable()` without registering them in the scheduler.
-/// When these processes make syscalls (e.g., fork), `current_process()` queries
-/// the scheduler which only knows about the idle task (pid=0). These atomics
-/// provide a fallback: the bootstrap wrapper sets them before entering user
-/// mode, and `current_process()`/`current_thread()` check them when the
-/// scheduler returns no valid process.
-///
-/// Using atomics avoids the SCHEDULER lock entirely, which is critical because
-/// acquiring the lock from the bootstrap stack corrupts SSE alignment (movaps
-/// GP fault).
-pub(crate) static BOOT_CURRENT_PID: AtomicU64 = AtomicU64::new(0);
-pub(crate) static BOOT_CURRENT_TID: AtomicU64 = AtomicU64::new(0);
-/// The scheduler task (`sched::scheduler::RUNNING_TASK`) that registered the
-/// boot-launched process. The registration applies only while that task is
-/// still the one running: any other task the scheduler runs in the meantime
-/// keeps its own identity (W-8).
-static BOOT_DISPATCH_TASK: AtomicUsize = AtomicUsize::new(0);
-
-/// The boot-launched (pid, tid), if one is registered *and* we are running
-/// in the context that registered it. Lock-free (see above).
-fn boot_context() -> Option<(u64, u64)> {
-    let pid = BOOT_CURRENT_PID.load(Ordering::Acquire);
-    if pid == 0 {
-        return None;
-    }
-    let running = crate::sched::scheduler::RUNNING_TASK.load(Ordering::Acquire);
-    if running != BOOT_DISPATCH_TASK.load(Ordering::Acquire) {
-        return None;
-    }
-    Some((pid, BOOT_CURRENT_TID.load(Ordering::Acquire)))
-}
-
-/// Register a boot-launched process as the current process.
-///
-/// Called from the bootstrap wrapper before entering user mode via
-/// `enter_usermode_returnable()`. This allows `current_process()` and
-/// `current_thread()` to return the correct process/thread during syscalls.
-pub fn set_boot_current(pid: ProcessId, tid: ThreadId) {
-    BOOT_DISPATCH_TASK.store(
-        crate::sched::scheduler::RUNNING_TASK.load(Ordering::Acquire),
-        Ordering::Release,
-    );
-    BOOT_CURRENT_TID.store(tid.0, Ordering::Release);
-    BOOT_CURRENT_PID.store(pid.0, Ordering::Release);
-}
-
-/// Clear the boot-launched process tracking.
-///
-/// Called from the bootstrap wrapper after the user process exits and control
-/// returns to the kernel bootstrap code.
-pub fn clear_boot_current() {
-    BOOT_CURRENT_PID.store(0, Ordering::Release);
-    BOOT_CURRENT_TID.store(0, Ordering::Release);
-    BOOT_DISPATCH_TASK.store(0, Ordering::Release);
-}
 
 /// Allocate a new process ID
 pub fn alloc_pid() -> ProcessId {
@@ -193,67 +134,19 @@ fn dispatched_context() -> Option<(u64, u64)> {
     }
 }
 
-/// Get current process
+/// Get current process: the process of the user thread running as the
+/// current dispatcher task. `None` for kernel threads and the boot task (the
+/// old scheduler's current task and the boot-launched registration went in
+/// sprint D4).
 pub fn current_process() -> Option<alloc::sync::Arc<Process>> {
-    // A user thread running as its own dispatcher task.
-    if let Some((pid, _)) = dispatched_context() {
-        return table::get_process(ProcessId(pid));
-    }
-
-    // A process launched directly by the boot/cooperative dispatcher
-    // (enter_usermode_returnable) is not the scheduler's current task -- the
-    // scheduler still reports the dispatching task. While that dispatching
-    // task is the one running, the registered boot process is the caller.
-    // This check takes no locks: taking the SCHEDULER lock on the bootstrap
-    // stack misaligns SSE state.
-    if let Some((boot_pid, _)) = boot_context() {
-        if let Some(proc) = table::get_process(ProcessId(boot_pid)) {
-            return Some(proc);
-        }
-    }
-
-    // Get from current CPU's scheduler
-    if let Some(task) = crate::sched::SCHEDULER.lock().current() {
-        // SAFETY: `task` is a NonNull<Task> returned by the scheduler's
-        // current() method. The scheduler guarantees the pointer is valid
-        // for the lifetime of the lock. We read pid to look up the process.
-        unsafe {
-            let task_ref = task.as_ref();
-            if let Some(proc) = table::get_process(task_ref.pid) {
-                return Some(proc);
-            }
-        }
-    }
-
-    None
+    let (pid, _) = dispatched_context()?;
+    table::get_process(ProcessId(pid))
 }
 
-/// Like [`current_process`], but never waits for the scheduler lock:
-/// returns `None` if it is held. For fault handlers that may run while the
-/// interrupted code holds that lock.
+/// Like [`current_process`]; takes no scheduler lock, so fault handlers may
+/// use it whatever the interrupted code holds.
 pub fn try_current_process() -> Option<alloc::sync::Arc<Process>> {
-    if let Some((pid, _)) = dispatched_context() {
-        return table::get_process(ProcessId(pid));
-    }
-    if let Some((boot_pid, _)) = boot_context() {
-        return table::get_process(ProcessId(boot_pid));
-    }
-    // The riscv64 scheduler has no try_lock; nothing on riscv64 calls this
-    // from a fault handler (the user-copy fixup is x86_64-only).
-    #[cfg(target_arch = "riscv64")]
-    {
-        current_process()
-    }
-    #[cfg(not(target_arch = "riscv64"))]
-    {
-        let sched = crate::sched::SCHEDULER.try_lock()?;
-        let task = sched.current()?;
-        // SAFETY: as in current_process(): the scheduler's current task
-        // pointer is valid while its lock is held; only the pid is read.
-        let pid = unsafe { task.as_ref().pid };
-        drop(sched);
-        table::get_process(pid)
-    }
+    current_process()
 }
 
 /// Find process by ID
@@ -266,38 +159,11 @@ pub fn get_current_process() -> Option<alloc::sync::Arc<Process>> {
     current_process()
 }
 
-/// Get current thread
+/// Get current thread (same rule as [`current_process`], so the two never
+/// name different processes).
 pub fn current_thread() -> Option<alloc::sync::Arc<Thread>> {
-    // Same rule as current_process(), so the two never name different
-    // processes.
-    if let Some((pid, tid)) = dispatched_context() {
-        return table::get_process(ProcessId(pid))?.get_thread(ThreadId(tid));
-    }
-    if let Some((boot_pid, boot_tid)) = boot_context() {
-        if let Some(process) = table::get_process(ProcessId(boot_pid)) {
-            if let Some(thread) = process.get_thread(ThreadId(boot_tid)) {
-                return Some(thread);
-            }
-        }
-    }
-
-    // Get from current CPU's scheduler
-    if let Some(task) = crate::sched::SCHEDULER.lock().current() {
-        // SAFETY: `task` is a NonNull<Task> returned by the scheduler's
-        // current() method. The scheduler guarantees the pointer is valid
-        // for the lifetime of the lock. We read pid and tid to look up
-        // the thread via the process table.
-        unsafe {
-            let task_ref = task.as_ref();
-            if let Some(process) = table::get_process(task_ref.pid) {
-                if let Some(thread) = process.get_thread(task_ref.tid) {
-                    return Some(thread);
-                }
-            }
-        }
-    }
-
-    None
+    let (pid, tid) = dispatched_context()?;
+    table::get_process(ProcessId(pid))?.get_thread(ThreadId(tid))
 }
 
 /// Start `thread` of `process` as a dispatcher task (ADR 0006 stage D2):
@@ -697,32 +563,3 @@ pub fn get_process_list() -> Option<alloc::vec::Vec<u64>> {
 }
 
 // get_process is already re-exported at the top of the module
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::sched::scheduler::RUNNING_TASK;
-
-    /// W-8: a boot-launched registration applies only while the task that
-    /// registered it is running; any other scheduled task keeps its own
-    /// identity, and clearing removes it.
-    #[test]
-    fn boot_context_is_scoped_to_the_registering_task() {
-        let saved = RUNNING_TASK.load(Ordering::Acquire);
-
-        RUNNING_TASK.store(0x1000, Ordering::Release);
-        set_boot_current(ProcessId(77), ThreadId(78));
-        assert_eq!(boot_context(), Some((77, 78)));
-
-        RUNNING_TASK.store(0x2000, Ordering::Release); // another task runs
-        assert_eq!(boot_context(), None);
-
-        RUNNING_TASK.store(0x1000, Ordering::Release); // dispatcher resumes
-        assert_eq!(boot_context(), Some((77, 78)));
-
-        clear_boot_current();
-        assert_eq!(boot_context(), None);
-
-        RUNNING_TASK.store(saved, Ordering::Release);
-    }
-}

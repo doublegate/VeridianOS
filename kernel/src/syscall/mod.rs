@@ -634,51 +634,6 @@ pub extern "C" fn syscall_handler(
     #[cfg(target_arch = "x86_64")]
     crate::arch::x86_64::kpti::on_syscall_exit();
 
-    // Boot-path cooperative yield: if this process was dispatched as a clone
-    // child from futex_wait's spin loop, yield back to the parent after each
-    // syscall so the parent can re-check the futex word.
-    #[cfg(target_arch = "x86_64")]
-    {
-        if crate::arch::x86_64::usermode::BOOT_CLONE_YIELD_PENDING
-            .load(core::sync::atomic::Ordering::Acquire)
-            && crate::arch::x86_64::usermode::has_boot_return_context()
-        {
-            // Save the child's live register state back to its ThreadContext
-            // so the next dispatch uses the correct RIP/RSP/GPRs.
-            // Without this, the child would restart from the clone return
-            // point on every dispatch instead of progressing.
-            if let Some(thread) = crate::process::current_thread() {
-                if let Some(frame) = crate::arch::x86_64::syscall::get_syscall_frame() {
-                    let mut ctx = thread.context.lock();
-                    ctx.rip = frame.rip;
-                    ctx.rflags = frame.rflags;
-                    ctx.rsp = frame.rsp;
-                    ctx.rax = ret as u64; // syscall return value
-                    ctx.rbx = frame.rbx;
-                    ctx.rbp = frame.rbp;
-                    ctx.rdi = frame.rdi;
-                    ctx.rsi = frame.rsi;
-                    ctx.rdx = frame.rdx;
-                    ctx.r8 = frame.r8;
-                    ctx.r9 = frame.r9;
-                    ctx.r10 = frame.r10;
-                    ctx.r12 = frame.r12;
-                    ctx.r13 = frame.r13;
-                    ctx.r14 = frame.r14;
-                    ctx.r15 = frame.r15;
-                }
-            }
-
-            // SAFETY: boot return context is valid (checked above).
-            // boot_return_to_kernel restores the parent's saved
-            // context from enter_forked_child_returnable and returns
-            // to the parent's dispatch loop in boot_futex_spin.
-            unsafe {
-                crate::arch::x86_64::usermode::boot_return_to_kernel();
-            }
-        }
-    }
-
     ret
 }
 

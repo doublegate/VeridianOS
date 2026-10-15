@@ -416,38 +416,16 @@ fn exception_siginfo(vector: u64, rip: u64) -> crate::process::signals::SigInfo 
     SigInfo::fault(sig, code, addr)
 }
 
-/// Mark the faulting user process as killed by `signal` and return to the
-/// context that launched it. Does not return.
-///
-/// `thread_only` keeps the other threads of the process alive (the page
-/// fault path's existing behaviour for clone threads).
-fn kill_user(signal: u32, thread_only: bool) -> ! {
-    // A thread running as its own task leaves through the normal exit
-    // path (stage D2), which tears its process down. The trap frame on its
-    // kernel stack is simply abandoned.
+/// Kill the faulting user process with `signal`. Does not return: the
+/// thread leaves through the normal exit path, which tears its process
+/// down, and the trap frame on its kernel stack is abandoned. Every user
+/// thread is a dispatcher task (the nested boot model went in sprint D4).
+fn kill_user(signal: u32) -> ! {
     #[cfg(feature = "alloc")]
     if crate::sched::dispatch::current_owner().is_some() {
         let _ = crate::syscall::process::exit_current(0, signal);
     }
-    if thread_only {
-        if let Some(thread) = crate::process::current_thread() {
-            thread.set_state(crate::process::thread::ThreadState::Zombie);
-        } else if let Some(process) = crate::process::current_process() {
-            process.set_term_signal(signal);
-            process.set_state(crate::process::pcb::ProcessState::Zombie);
-        }
-    } else if let Some(process) = crate::process::current_process() {
-        process.set_term_signal(signal);
-        process.set_state(crate::process::pcb::ProcessState::Zombie);
-    }
-    if super::usermode::has_boot_return_context() {
-        // SAFETY: ring 0 with interrupts disabled (interrupt gate), GS_BASE
-        // holds the per-CPU block (trap_common swapped it in), and the boot
-        // return context was just checked to exist.
-        unsafe { super::usermode::boot_return_to_kernel() };
-    }
-    // A user context always has a launcher today (nested execution).
-    fatal(b"user fault without a launch context", None);
+    fatal(b"user fault outside a dispatched thread", None);
 }
 
 /// Log a fatal kernel fault and stop this CPU. Uses only port I/O: the
@@ -547,7 +525,7 @@ fn exception(f: &mut TrapFrame, user: bool) {
         if queue_fault_signal(exception_siginfo(f.vector, f.rip)) {
             return;
         }
-        kill_user(exception_signal(f.vector), false);
+        kill_user(exception_signal(f.vector));
     }
     match f.vector {
         // A kernel breakpoint or debug trap (debugger use) resumes.
@@ -693,10 +671,8 @@ fn page_fault(f: &mut TrapFrame, user: bool) {
             raw_serial_hex(crate::syscall::LAST_SYSCALL_NUM.load(Ordering::Relaxed));
             raw_serial_str(b"\n");
         }
-        if super::usermode::has_boot_return_context() {
-            // SAFETY: as in `kill_user`.
-            unsafe { super::usermode::boot_return_to_kernel() };
-        }
+        // A kernel bug: the faulting code may hold locks, so the task is not
+        // killed (that would leave them held); the CPU stops.
         fatal(b"kernel page fault at a user address", Some(f));
     }
 
@@ -727,7 +703,7 @@ fn page_fault(f: &mut TrapFrame, user: bool) {
         if queue_fault_signal(crate::process::signals::SigInfo::fault(11, code, cr2)) {
             return;
         }
-        kill_user(11, true);
+        kill_user(11);
     }
 
     if crate::mm::kstack::is_guard_fault(cr2) {

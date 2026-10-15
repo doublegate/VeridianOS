@@ -639,17 +639,6 @@ impl EpollNode {
         events: &mut [EpollEvent],
         timeout_ns: Option<u64>,
     ) -> Result<usize, KernelError> {
-        // Boot-path cooperative dispatch: when a child thread is dispatched
-        // from boot_futex_spin, the syscall handler yields back to the parent
-        // after each syscall, so waiting here would block every other thread:
-        // a single pass.
-        #[cfg(target_arch = "x86_64")]
-        let in_boot_coop = crate::arch::x86_64::usermode::BOOT_CLONE_YIELD_PENDING
-            .load(core::sync::atomic::Ordering::Acquire);
-        #[cfg(not(target_arch = "x86_64"))]
-        let in_boot_coop = false;
-        let timeout_ns = if in_boot_coop { Some(0) } else { timeout_ns };
-
         // A dispatched waiter sleeps between scans until a watched file
         // reports a change, becomes ready by itself (a timerfd's expiry),
         // or -- if one does not report its changes yet -- a periodic

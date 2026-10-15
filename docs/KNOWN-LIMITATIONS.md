@@ -113,22 +113,15 @@ work. User code is preempted when its slice ends (D3). What is still missing:
 - **The kernel is not preemptible.** A task is switched only on its way back to user mode or
   when it waits, so a long system call keeps the CPU until it returns or waits.
 - **Some waits still re-check instead of being woken (blocking step of sprint D).** Sleeps,
-  futexes, pipes, eventfd, timerfd, signalfd, `sigsuspend`, `wait` and job-control stops sleep
-  until woken. `poll`, `select`, `epoll_wait` and blocking reads of INET sockets, ptys and other
-  descriptors that do not report readiness changes yet sleep too but re-check every 10 ms.
-  Without per-object wake-ups, an
-  edge-triggered epoll registration may report again after unrelated I/O (users of EPOLLET
-  read until EAGAIN, so this costs a wake-up, not correctness). Other waits are still wrong:
-  - an empty pty read returns end-of-file, and a write to a full pty fails with EAGAIN instead
-    of waiting (it returns a short count when part fits; N-128).
+  futexes, pipes, ptys, the console, eventfd, timerfd, signalfd, IPC endpoints, `sigsuspend`,
+  `wait` and job-control stops sleep until woken. `poll`, `select`, `epoll_wait` and blocking
+  reads of INET sockets and other descriptors that do not report readiness changes yet sleep too
+  but re-check every 10 ms (INET sockets go with the F1 socket layer). Without per-object
+  wake-ups, an edge-triggered epoll registration may report again after unrelated I/O (users of
+  EPOLLET read until EAGAIN, so this costs a wake-up, not correctness).
 - **exec by a thread other than the main one keeps its thread id.** exec from a multithreaded
   process ends the other threads first, as on Linux (N-101), but Linux also gives the exec'ing
   thread the process id as its thread id; here it keeps its own.
-- **Two futex tables (N-279).** Dispatched threads (every user thread on x86_64) queue on a
-  key -- the physical address for shared mappings, so futexes in memory shared between processes
-  work -- but the old table, keyed by (pid, address), still serves threads that are not
-  dispatched. A waiter and a waker on different tables would miss each other; it goes with the
-  old scheduler (D4). (A main thread's id now equals its process id, N-217.)
 - **Some per-thread state is per process (N-109):** the robust-list head and the FS base
   registered through `arch_prctl` (the signal mask and pending set are per thread since D3).
 - **Old binaries.** KDE binaries built before the v0.27 musl patch map `pthread_exit` to a
@@ -142,8 +135,6 @@ handlers for every exception. What remains depends on the dispatcher:
 
 - The syscall frame pointer and user RSP scratch are per CPU; the dispatcher saves and restores
   them with each task rather than keeping them on the task's own stack (N-167, N-35).
-- The nested launch model (`enter_usermode_returnable`) is still compiled in, and is removed
-  with the old scheduler in D4.
 - A fatal kernel fault stops only the faulting CPU; the others keep running until SMP stage S2.
 
 ### Signals (N-99, N-104, N-105, N-170; sprint D)
@@ -212,13 +203,11 @@ report one CPU, and an affinity mask without CPU 0 is EINVAL.
 - **The AArch64 and RISC-V kernels use FP/SIMD registers** in kernel code, so every interrupt saves
   a 720-byte frame (N-178). The x86_64 kernel is built soft-float since v0.27.
 
-### FPU and vector registers are not saved across switches (N-41, planned v0.27 sprint D)
+### FPU and vector registers on AArch64 and RISC-V (N-41 part, sprint E)
 
-No x87, SSE or AVX state is saved or restored when the CPU switches between processes, although
-AVX and AVX-512 are enabled. Two processes that both use vector registers can corrupt, and read,
-each other's values. Today this happens only between a parent and a nested child. The x86_64 kernel
-no longer touches these registers itself (soft-float target); saving user state with XSAVE, sized
-from CPUID, comes with the dispatcher.
+On x86_64 every task has its own x87/SSE/AVX state, saved and restored with XSAVE sized from CPUID
+at each switch (stage D2), and the kernel itself is soft-float. AArch64 and RISC-V have no user mode
+yet; their state switching comes with it in sprint E.
 
 ### AArch64 and RISC-V kernel stacks have no guard pages (N-26, sprint E)
 

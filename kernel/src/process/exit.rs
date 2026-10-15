@@ -320,59 +320,12 @@ pub fn wait_children(filter: WaitFilter, options: WaitOptions) -> Result<Waited,
             continue;
         }
 
-        // Boot execution model: no preemptive scheduler to context-switch
-        // to the child. If we find a Ready child (just forked, never run),
-        // run it inline to completion. After it exits, loop back to reap
-        // the zombie.
-        #[cfg(target_arch = "x86_64")]
-        {
-            let mut ran_child = false;
-            for child_pid in &children {
-                if !filter.matches(*child_pid) {
-                    continue;
-                }
-                if let Some(child) = table::get_process(*child_pid) {
-                    if child.get_state() == ProcessState::Ready {
-                        // Get parent's thread ID for BOOT_CURRENT restore
-                        let parent_tid = current
-                            .threads
-                            .lock()
-                            .values()
-                            .next()
-                            .map(|t| t.tid)
-                            .unwrap_or(super::thread::ThreadId(current_pid.0));
-                        ran_child = crate::bootstrap::boot_run_forked_child(
-                            *child_pid,
-                            current_pid,
-                            parent_tid,
-                        );
-                        break;
-                    }
-                }
-            }
-            if ran_child {
-                // Child ran to completion, loop back to reap
-                continue;
-            }
-        }
-
-        // Normal scheduler path: block and wait for child to wake us.
-        println!(
-            "[PROCESS] Process {} blocking in wait() for {:?}",
-            current_pid.0, filter
-        );
-
-        sched::block_process(current_pid);
-
-        // When we wake up, loop back to check for zombie children.
-        current.set_state(ProcessState::Running);
-
-        // Check if we were interrupted by a signal
-        if let Some(signum) = current.get_next_pending_signal() {
-            // Clear the signal and return EINTR
-            current.clear_pending_signal(signum);
-            return Err(KernelError::WouldBlock);
-        }
+        // Without the dispatcher (AArch64/RISC-V until sprint E) no user
+        // process runs, so nothing could change a child's state.
+        return Err(KernelError::InvalidState {
+            expected: "a dispatched caller",
+            actual: "no dispatcher",
+        });
     }
 }
 
