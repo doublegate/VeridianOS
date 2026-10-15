@@ -52,6 +52,9 @@ if [ $boot -eq 1 ]; then
     done
 fi
 if [ $rootfs -eq 1 ]; then
+    # Stage first: it compiles the runtime test programs, so a change to
+    # their sources is tested (blockfs alone packs the old binaries).
+    step rootfs-stage scripts/build-busybox-rootfs.sh rootfs
     step rootfs-image scripts/build-busybox-rootfs.sh blockfs
     REQUIRE_MUSL=1 step rootfs-tests scripts/run-rootfs-tests.sh 900
     tail -1 "$log_dir/rootfs-tests.log"
