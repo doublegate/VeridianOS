@@ -546,7 +546,7 @@ pub fn exit_dispatched(exit_code: i32, group: bool) -> ! {
         crate::syscall::scheduling::thread_exit(&thread);
         thread.release_fs();
         // The thread's CPU time stays with the process.
-        process.add_exited_cpu(dispatch::take_current_usage());
+        process.add_exited_cpu_from(dispatch::take_current_usage);
         let clear_ptr = thread.clear_tid.load(Ordering::Acquire);
         if clear_ptr != 0 {
             let _ = crate::syscall::userspace::write_user(clear_ptr, 0u32);
@@ -900,6 +900,10 @@ pub fn cleanup_thread(process: &Process, tid: ThreadId) -> Result<(), KernelErro
     // would wait forever (N-139).
     let removed = process.threads.lock().remove(&tid);
     if let Some(thread) = removed {
+        // Per-thread progress lines only with the `trace` feature: every
+        // exited thread comes through here, and each console byte is a VM
+        // exit.
+        #[cfg(feature = "trace")]
         println!("[PROCESS] Cleaning up thread {}", tid.0);
 
         // Make sure thread is marked as dead
@@ -921,6 +925,7 @@ pub fn cleanup_thread(process: &Process, tid: ThreadId) -> Result<(), KernelErro
                 let page_addr = stack_base + i * 0x1000;
                 let _ = memory_space.unmap(page_addr, 0x1000);
             }
+            #[cfg(feature = "trace")]
             println!(
                 "[PROCESS] Freed user stack at {:#x}, size {}",
                 stack_base, stack_size
@@ -945,6 +950,7 @@ pub fn cleanup_thread(process: &Process, tid: ThreadId) -> Result<(), KernelErro
                     frame: crate::mm::FrameNumber::new(frame_num),
                     pages: page_count,
                 });
+                #[cfg(feature = "trace")]
                 println!(
                     "[PROCESS] Freed kernel stack for tid {} ({} frames)",
                     tid.0, page_count
@@ -973,6 +979,7 @@ pub fn cleanup_thread(process: &Process, tid: ThreadId) -> Result<(), KernelErro
                         tls.base, _e
                     );
                 } else {
+                    #[cfg(feature = "trace")]
                     println!(
                         "[PROCESS] Freed TLS area at {:#x}, size {}",
                         tls.base, tls.size

@@ -724,6 +724,18 @@
 
 ### Fixed
 
+- **CPU clocks no longer go backwards.** A thread's CPU clock read its total and its running slice
+  separately; a timer tick between the two reads lost up to a tick. A process's CPU clock lost
+  what an exited thread ran while tearing itself down, once the thread's task was freed. It also
+  lost the moved time for an instant while a thread's time moved into the exited total. Each
+  case went back by up to half a millisecond; now the reads and the moves are atomic with
+  respect to each other. Runtime test `musl_process_clock_monotonic`; `musl_clocks_and_usage`
+  passes 40 runs in a row on one and four CPUs (it failed now and then).
+- **A process can create more than 255 threads over its life.** An exited thread's kernel state
+  stayed until the process exited, because C libraries join through the CLONE_CHILD_CLEARTID
+  futex, not a kernel call. The 256th create failed with EAGAIN. Its entry and an unused kernel
+  stack are now freed as soon as its task is, as on Linux. Runtime test `musl_many_threads`
+  (600 threads).
 - **BlockFS directories reuse the entries of deleted names.** New entries were always appended,
   and a directory has at most 12 blocks, so a directory where names keep coming and going (`/tmp`,
   a rename-over loop) filled up after a few thousand creates. After that every create failed,

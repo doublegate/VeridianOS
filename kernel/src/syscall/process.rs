@@ -506,6 +506,13 @@ pub fn sys_gettid() -> SyscallResult {
 
 /// Join with a thread, waiting for its termination
 ///
+/// Waits until thread `tid` of the caller's process is gone. An exited
+/// thread is removed once its task is reaped (`user_task_reaped`, as Linux
+/// frees CLONE_THREAD threads), possibly before the join; a thread no longer
+/// in the table has therefore finished, and the join reports 0 for it. The
+/// native C library checks the id against its own threads and takes the
+/// return value from its thread block.
+///
 /// # Arguments
 /// - tid: Thread ID to join
 /// - retval_ptr: Pointer to store thread return value
@@ -519,6 +526,10 @@ pub fn sys_thread_join(tid: usize, retval_ptr: usize) -> SyscallResult {
     if target_tid == get_thread_tid() {
         return Err(SyscallError::InvalidArgument); // joining oneself
     }
+    // A thread of this process leaves the thread table only once it has
+    // exited and its task is reaped (`user_task_reaped`), which can happen
+    // before the joiner gets here; so a thread not in the table has
+    // finished. The C library checks the id against its own threads first.
 
     // A dispatched joiner sleeps until the thread has exited and its task
     // is off the CPU (its kernel stack is in use until then); every task
@@ -587,8 +598,14 @@ pub fn sys_thread_join(tid: usize, retval_ptr: usize) -> SyscallResult {
                 crate::sched::yield_cpu();
             }
             None => {
-                // Thread doesn't exist
-                return Err(SyscallError::ResourceNotFound);
+                // Exited and reaped (see above). Its exit value went with
+                // it; the C library keeps the real one in its own thread
+                // block, so 0 is reported.
+                if retval_ptr != 0 {
+                    // SAFETY: copy_to_user validates the user pointer.
+                    unsafe { copy_to_user(retval_ptr, &0usize)? };
+                }
+                return Ok(0);
             }
         }
     }

@@ -161,15 +161,26 @@ static void test_prctl(void)
 }
 
 /* Spin for at least `ms` of CPU time on this thread. */
+/* User plus system time of `ru` in milliseconds. */
+static long rusage_ms(const struct rusage *ru)
+{
+    long us = (ru->ru_utime.tv_sec + ru->ru_stime.tv_sec) * 1000000L + ru->ru_utime.tv_usec
+              + ru->ru_stime.tv_usec;
+    return us / 1000;
+}
+
 static void burn_cpu(long ms)
 {
     struct timespec start, now;
     clock_gettime(CLOCK_THREAD_CPUTIME_ID, &start);
+    /* In nanoseconds: across a second boundary the nanosecond difference
+     * is negative, and dividing it before adding stopped ~1 ms early. */
+    long long until = (long long)start.tv_sec * 1000000000LL + start.tv_nsec + ms * 1000000LL;
     do {
         for (volatile int i = 0; i < 10000; i++)
             ;
         clock_gettime(CLOCK_THREAD_CPUTIME_ID, &now);
-    } while ((now.tv_sec - start.tv_sec) * 1000 + (now.tv_nsec - start.tv_nsec) / 1000000 < ms);
+    } while ((long long)now.tv_sec * 1000000000LL + now.tv_nsec < until);
 }
 
 static long long ms_of(struct timespec t)
@@ -199,9 +210,14 @@ static void test_clocks_and_usage(void)
     errno = 0;
     if (clock_gettime(12, &a) != -1 || errno != EINVAL) f |= 2;
 
+    struct timespec ta, tb;
     clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &a);
+    clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ta);
     burn_cpu(30);
+    clock_gettime(CLOCK_THREAD_CPUTIME_ID, &tb);
     clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &b);
+    long proc_us = (b.tv_sec - a.tv_sec) * 1000000L + (b.tv_nsec - a.tv_nsec) / 1000;
+    long thr_us = (tb.tv_sec - ta.tv_sec) * 1000000L + (tb.tv_nsec - ta.tv_nsec) / 1000;
     if (ms_of(b) - ms_of(a) < 30) f |= 4;
     clockid_t pclk, tclk;
     struct timespec pc, tc;
@@ -278,12 +294,7 @@ static void test_clocks_and_usage(void)
 
     /* Usage. */
     struct rusage ru;
-    if (getrusage(RUSAGE_SELF, &ru) != 0 || ru.ru_utime.tv_sec * 1000 + ru.ru_utime.tv_usec / 1000
-                                                  + ru.ru_stime.tv_sec * 1000
-                                                  + ru.ru_stime.tv_usec / 1000
-                                              < 30
-        || ru.ru_maxrss <= 0)
-        f |= 512;
+    if (getrusage(RUSAGE_SELF, &ru) != 0 || rusage_ms(&ru) < 30 || ru.ru_maxrss <= 0) f |= 512;
     errno = 0;
     if (getrusage(7, &ru) != -1 || errno != EINVAL) f |= 512;
     pid = fork();
@@ -300,31 +311,26 @@ static void test_clocks_and_usage(void)
         wait_errno = EINTR;
     if (got == -1)
         wait_errno = errno;
-    if (got != pid
-        || child_ru.ru_utime.tv_sec * 1000 + child_ru.ru_utime.tv_usec / 1000
-                   + child_ru.ru_stime.tv_sec * 1000 + child_ru.ru_stime.tv_usec / 1000
-               < 40)
-        f |= 1024;
-    if (getrusage(RUSAGE_CHILDREN, &ru) != 0
-        || ru.ru_utime.tv_sec * 1000 + ru.ru_utime.tv_usec / 1000 + ru.ru_stime.tv_sec * 1000
-                   + ru.ru_stime.tv_usec / 1000
-               < 40)
-        f |= 1024;
+    /* Microseconds summed before converting: truncating utime and stime to
+     * milliseconds separately lost up to 2 ms (40 ms read as 39). */
+    if (got != pid || rusage_ms(&child_ru) < 40) f |= 1024;
+    if (getrusage(RUSAGE_CHILDREN, &ru) != 0 || rusage_ms(&ru) < 40) f |= 1024;
     struct tms tm;
     clock_t since_boot = times(&tm);
-    if (since_boot <= 0 || tm.tms_utime + tm.tms_stime < 3 || tm.tms_cutime + tm.tms_cstime < 4)
+    /* User and system time are each truncated to clock ticks (10 ms), so
+     * their sum can be one tick short: 30+ ms of our own time is at least 2
+     * ticks, the child's 40+ ms at least 3. */
+    if (since_boot <= 0 || tm.tms_utime + tm.tms_stime < 2 || tm.tms_cutime + tm.tms_cstime < 3)
         f |= 2048;
     struct sysinfo si;
     if (sysinfo(&si) != 0 || si.totalram == 0 || si.freeram == 0 || si.freeram > si.totalram
         || si.procs == 0 || si.mem_unit != 1 || si.uptime <= 0)
         f |= 4096;
 
-    static char why[112];
-    snprintf(why, sizeof(why), "fail=%#x wait_errno=%d child_ms=%ld children_ms=%ld", f, wait_errno,
-             child_ru.ru_utime.tv_sec * 1000 + child_ru.ru_utime.tv_usec / 1000
-                 + child_ru.ru_stime.tv_sec * 1000 + child_ru.ru_stime.tv_usec / 1000,
-             ru.ru_utime.tv_sec * 1000 + ru.ru_utime.tv_usec / 1000 + ru.ru_stime.tv_sec * 1000
-                 + ru.ru_stime.tv_usec / 1000);
+    static char why[160];
+    snprintf(why, sizeof(why),
+             "fail=%#x proc_us=%ld thread_us=%ld wait_errno=%d child_ms=%ld children_ms=%ld", f,
+             proc_us, thr_us, wait_errno, rusage_ms(&child_ru), rusage_ms(&ru));
     report("musl_clocks_and_usage", f == 0, why);
 }
 
@@ -1101,10 +1107,13 @@ static void test_thread_join(void)
     if (write(join_pipe[1], "x", 1) != 1) f |= 2;
     r2 = syscall(SYS_VERIDIAN_THREAD_JOIN, (long)join_tid, &ret);
     if (r2 != 0 || ret != 0) f |= 4;
+    /* Gone (joined, or reaped on its own as on Linux): a further join finds
+     * nothing to wait for and reports it finished. */
+    ret = 1;
     errno = 0;
     r3 = syscall(SYS_VERIDIAN_THREAD_JOIN, (long)join_tid, &ret);
     e3 = errno;
-    if (r3 != -1) f |= 8; /* already joined: gone */
+    if (r3 != 0 || ret != 0) f |= 8;
     pthread_join(t, 0);   /* musl's side: the tid word is already clear */
     waitpid(c, 0, 0);
     signal(SIGUSR2, SIG_DFL);
@@ -3934,6 +3943,78 @@ static void test_sched(void)
            why);
 }
 
+/* The process CPU clock never goes back: a thread's time moves to the
+ * process when it exits, including what it runs while tearing down (that
+ * part was dropped when its task was reaped, so the clock went back). */
+static void *short_burn(void *arg)
+{
+    (void)arg;
+    burn_cpu(2);
+    return 0;
+}
+
+static long long process_cpu_ns(void)
+{
+    struct timespec t;
+    clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &t);
+    return (long long)t.tv_sec * 1000000000LL + t.tv_nsec;
+}
+
+static void test_process_clock_monotonic(void)
+{
+    long long last = process_cpu_ns(), worst = 0;
+    int backwards = 0, create_err = 0, at = -1;
+    for (int i = 0; i < 50; i++) {
+        pthread_t t;
+        int rc = pthread_create(&t, 0, short_burn, 0);
+        if (rc != 0) {
+            create_err = rc;
+            at = i;
+            break;
+        }
+        pthread_join(t, 0);
+        for (int j = 0; j < 200; j++) {
+            long long now = process_cpu_ns();
+            if (now < last) {
+                backwards++;
+                if (last - now > worst) worst = last - now;
+            }
+            last = now > last ? now : last;
+        }
+    }
+    static char why[96];
+    snprintf(why, sizeof(why), "went back %d times, by up to %lld ns; create error %d at %d",
+             backwards, worst, create_err, at);
+    report("musl_process_clock_monotonic", backwards == 0 && create_err == 0, why);
+}
+
+/* A process can create and join more threads over its life than it may
+ * have at once (256): an exited, joined thread's kernel state is freed.
+ * It was kept until the process exited, so the 256th create failed with
+ * EAGAIN. */
+static void *nop_thread(void *arg)
+{
+    return arg;
+}
+
+static void test_many_threads(void)
+{
+    int made = 0, err = 0;
+    for (int i = 0; i < 600; i++) {
+        pthread_t t;
+        int rc = pthread_create(&t, 0, nop_thread, 0);
+        if (rc != 0) {
+            err = rc;
+            break;
+        }
+        pthread_join(t, 0);
+        made++;
+    }
+    static char why[48];
+    snprintf(why, sizeof(why), "made %d of 600, error %d", made, err);
+    report("musl_many_threads", made == 600, why);
+}
+
 /* Tests `--only NAME` can run alone (for debugging a single test). */
 static const struct {
     const char *name;
@@ -3950,6 +4031,8 @@ static const struct {
     {"gs_base", test_gs_base},
     {"tlb_remote_flush", test_tlb_remote_flush},
     {"clocks_and_usage", test_clocks_and_usage},
+    {"process_clock_monotonic", test_process_clock_monotonic},
+    {"many_threads", test_many_threads},
     {"signal_kick", test_signal_kick},
     {"dir_check_race", test_dir_check_race},
     {"relative_entry_paths", test_relative_entry_paths},
@@ -3962,9 +4045,13 @@ int main(int argc, char **argv)
     if (argc >= 2 && strcmp(argv[1], "--ids") == 0)
         return print_ids();
     if (argc >= 3 && strcmp(argv[1], "--only") == 0) {
+        /* `--only NAME [N]`: run it N times (default once), to catch a
+         * test that fails only sometimes. */
+        int repeat = argc >= 4 ? atoi(argv[3]) : 1;
         for (size_t i = 0; i < sizeof(only_tests) / sizeof(only_tests[0]); i++) {
             if (strcmp(argv[2], only_tests[i].name) == 0) {
-                only_tests[i].fn();
+                for (int r = 0; r < (repeat > 0 ? repeat : 1); r++)
+                    only_tests[i].fn();
                 printf("MUSL-ONLY %s: %d/%d\n", argv[2], passed, total);
                 return passed != total;
             }
@@ -4012,6 +4099,8 @@ int main(int argc, char **argv)
     test_relative_entry_paths();
     test_setuid_exec("/bin/musl_runtime_test");
     test_clocks_and_usage();
+    test_process_clock_monotonic();
+    test_many_threads();
     test_rlimits();
     test_sigpipe();
     test_memory_calls();

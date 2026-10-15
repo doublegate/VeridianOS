@@ -276,7 +276,23 @@ pub fn process_for_reap(pid: u64) -> Option<alloc::sync::Arc<Process>> {
 /// tables -- which a running thread was still using when it tore the rest
 /// down -- are freed. Runs in the reaper thread: it may sleep.
 #[cfg(feature = "alloc")]
-pub fn user_task_reaped(process: Option<alloc::sync::Arc<Process>>) {
+pub fn user_task_reaped(process: Option<alloc::sync::Arc<Process>>, tid: u64) {
+    // A thread other than the main one that has exited while its process
+    // lives on is gone for good, as on Linux: its entry (and the kernel
+    // stack its builder allocated) is freed now. C libraries join through
+    // the CLONE_CHILD_CLEARTID futex, not the kernel, so nothing else ever
+    // removed it, and a process stopped creating threads after 255.
+    if let Some(p) = &process {
+        let exited = p.get_thread(ThreadId(tid)).is_some_and(|t| {
+            matches!(
+                t.get_state(),
+                thread::ThreadState::Zombie | thread::ThreadState::Dead
+            )
+        });
+        if tid != p.pid.0 && exited && p.get_state() != ProcessState::Zombie {
+            let _ = exit::cleanup_thread(p, ThreadId(tid));
+        }
+    }
     // Every reap: an exec waits for its process's other tasks to go
     // (N-101), not only for the whole process.
     crate::sched::dispatch::PROCESS_EVENTS.wake_all();

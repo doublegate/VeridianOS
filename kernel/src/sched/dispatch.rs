@@ -787,11 +787,17 @@ fn reap(task: Arc<Task>) {
     let owner = task.owner;
     // Before the task leaves the table: see `process_for_reap`.
     let process = owner.and_then(|(pid, _)| crate::process::process_for_reap(pid));
+    // What the thread ran after its exit took its CPU time (tearing itself
+    // down, switching away) moves to the process too, before the task stops
+    // counting as live: dropped, it made the process's CPU clock go back.
+    if let Some(p) = &process {
+        p.add_exited_cpu_from(|| task.usage.take());
+    }
     TASKS.lock().remove(&task.key);
     // Dropping the last reference frees the kernel stack.
     drop(task);
-    if owner.is_some() {
-        crate::process::user_task_reaped(process);
+    if let Some((_, tid)) = owner {
+        crate::process::user_task_reaped(process, tid);
     }
     EXITED.wake_all();
 }
@@ -1672,18 +1678,24 @@ pub fn run_secondary() -> ! {
 /// The CPU time of `task`, with the slice it is running now if it is this
 /// CPU's current task.
 fn task_cpu(task: &Task) -> super::cputime::CpuTimes {
+    let Some(cpu) = this_cpu() else {
+        return task.usage.snapshot();
+    };
+    // The snapshot and the running slice are read together, with
+    // interrupts off and this CPU's lock held: a tick between them charged
+    // the slice to the counter after the snapshot was taken, and the slice
+    // added afterwards started at that tick, so up to a tick went missing
+    // and the thread's CPU clock went back.
+    let irq = irq_save();
     let mut times = task.usage.snapshot();
-    if let Some(cpu) = this_cpu() {
-        let irq = irq_save();
-        if let Some(st) = CPUS[cpu].lock().as_ref() {
-            if st.current.key == task.key {
-                times.runtime_ns = times
-                    .runtime_ns
-                    .saturating_add(now().saturating_sub(st.acct_start));
-            }
+    if let Some(st) = CPUS[cpu].lock().as_ref() {
+        if st.current.key == task.key {
+            times.runtime_ns = times
+                .runtime_ns
+                .saturating_add(now().saturating_sub(st.acct_start));
         }
-        irq_restore(irq);
     }
+    irq_restore(irq);
     times
 }
 

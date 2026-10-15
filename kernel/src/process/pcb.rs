@@ -523,17 +523,28 @@ impl Process {
 
     /// A thread of this process exited having used `times`.
     pub fn add_exited_cpu(&self, times: crate::sched::cputime::CpuTimes) {
+        self.add_exited_cpu_from(|| times);
+    }
+
+    /// Move a thread's CPU time into the exited total: `take` (which zeroes
+    /// the thread's counter) runs under the same lock [`Self::cpu_times`]
+    /// holds while it sums the live threads, so no reader sees the time in
+    /// neither place (the process's CPU clock would go back).
+    pub fn add_exited_cpu_from(&self, take: impl FnOnce() -> crate::sched::cputime::CpuTimes) {
         let mut sum = self.cpu_exited.lock();
-        *sum = sum.plus(times);
+        *sum = sum.plus(take());
     }
 
     /// The CPU time the process has used: its exited threads' and its live
     /// threads' (getrusage RUSAGE_SELF, CLOCK_PROCESS_CPUTIME_ID).
     pub fn cpu_times(&self) -> crate::sched::cputime::CpuTimes {
-        let exited = *self.cpu_exited.lock();
+        // Held across the sum: see `add_exited_cpu_from`.
+        let exited = self.cpu_exited.lock();
         #[cfg(feature = "alloc")]
-        let exited = exited.plus(crate::sched::dispatch::process_tasks_cpu(self.pid.0));
-        exited
+        let total = exited.plus(crate::sched::dispatch::process_tasks_cpu(self.pid.0));
+        #[cfg(not(feature = "alloc"))]
+        let total = *exited;
+        total
     }
 
     /// The CPU time of the children waited for and their own children
