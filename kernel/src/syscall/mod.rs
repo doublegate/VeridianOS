@@ -280,6 +280,14 @@ use self::multiplex::{sys_poll, sys_ppoll, sys_pselect6, sys_select};
 // Import user space utilities
 mod arch_prctl;
 mod futex;
+#[cfg(feature = "alloc")]
+mod futex_pi;
+
+/// A thread is exiting: hand on the PI futexes it holds (futex_pi.rs).
+#[cfg(feature = "alloc")]
+pub(crate) fn futex_pi_owner_exiting(owner: (u64, u64)) {
+    futex_pi::owner_exiting(owner);
+}
 pub(crate) mod linux_compat;
 mod thread_clone;
 pub(crate) mod userspace;
@@ -401,6 +409,9 @@ pub enum SyscallError {
     ConnectionReset = -129,
     /// ECANCELED: a timerfd's wall clock was set (TFD_TIMER_CANCEL_ON_SET).
     Canceled = -130,
+    /// The operation would deadlock, e.g. locking a PI futex one already
+    /// owns (EDEADLK, errno 35).
+    Deadlock = -131,
 }
 
 impl From<IpcError> for SyscallError {
@@ -969,10 +980,11 @@ fn handle_syscall(
             // command (ENOSYS), not a different one. Futex words are keyed
             // by (process, address), so private and shared are the same.
             let cmd = (arg2 as u32) & !(0x80 | 0x100);
-            // FUTEX_CLOCK_REALTIME: a WAIT_BITSET deadline is on the wall
-            // clock. Linux accepts it only on waits (ENOSYS otherwise).
+            // FUTEX_CLOCK_REALTIME: a WAIT_BITSET or LOCK_PI2 deadline is on
+            // the wall clock. Linux accepts it only on those and on WAIT
+            // (ENOSYS otherwise).
             let realtime = arg2 & 0x100 != 0;
-            if realtime && cmd != 0 && cmd != 9 {
+            if realtime && cmd != 0 && cmd != 9 && cmd != 13 {
                 return Err(SyscallError::NotImplemented);
             }
             match cmd {
@@ -1027,11 +1039,25 @@ fn handle_syscall(
                     }
                     futex::sys_futex_wake(arg1, arg3, bitset as usize).map(|v| v as usize)
                 }
-                // FUTEX_FD (removed from Linux in 2.6.26), the
-                // priority-inheritance operations (LOCK_PI, UNLOCK_PI,
-                // TRYLOCK_PI, WAIT_REQUEUE_PI, CMP_REQUEUE_PI, LOCK_PI2:
-                // docs/KNOWN-LIMITATIONS.md) and unknown commands: ENOSYS,
-                // as Linux's do_futex. musl reports PI mutexes unsupported.
+                // Priority inheritance (SCHED-INC-01, futex_pi.rs).
+                // FUTEX_LOCK_PI: the timeout is an absolute CLOCK_REALTIME
+                // time; FUTEX_LOCK_PI2: CLOCK_MONOTONIC unless
+                // FUTEX_CLOCK_REALTIME.
+                6 | 13 => {
+                    let kind = if cmd == 6 || realtime {
+                        futex::FutexTimeout::Realtime
+                    } else {
+                        futex::FutexTimeout::Monotonic
+                    };
+                    let deadline = futex::linux_timeout(arg4, kind)?;
+                    futex_pi::lock_pi(arg1, deadline, false)
+                }
+                7 => futex_pi::unlock_pi(arg1),
+                8 => futex_pi::lock_pi(arg1, None, true),
+                // FUTEX_FD (removed from Linux in 2.6.26), WAIT_REQUEUE_PI
+                // and CMP_REQUEUE_PI (glibc's PI condition variables; musl
+                // does not use them) and unknown commands: ENOSYS, as
+                // Linux's do_futex.
                 _ => Err(SyscallError::NotImplemented),
             }
         }

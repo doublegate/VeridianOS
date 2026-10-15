@@ -541,6 +541,8 @@ pub fn exit_dispatched(exit_code: i32, group: bool) -> ! {
         // Robust futexes the thread still holds (N-225), then
         // CLONE_CHILD_CLEARTID: clear the TID word and wake a joiner.
         super::robust_list::exit_thread(&thread);
+        // PI locks it holds pass to their top waiters (FUTEX_OWNER_DIED).
+        crate::syscall::futex_pi_owner_exiting((process.pid.0, thread.tid.0));
         crate::syscall::scheduling::thread_exit(&thread);
         thread.release_fs();
         // The thread's CPU time stays with the process.

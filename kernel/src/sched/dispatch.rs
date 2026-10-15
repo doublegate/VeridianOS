@@ -1007,12 +1007,7 @@ pub fn spawn_user(
 /// sleeping one takes the policy when it wakes. No task (the thread does
 /// not run under the dispatcher): nothing to change.
 pub fn set_policy(owner: (u64, u64), policy: Policy) {
-    let Some(task) = TASKS
-        .lock()
-        .values()
-        .find(|t| t.owner == Some(owner))
-        .cloned()
-    else {
+    let Some(task) = task_of_owner(owner) else {
         return;
     };
     let irq = irq_save();
@@ -1031,12 +1026,64 @@ pub fn set_policy(owner: (u64, u64), policy: Policy) {
     irq_restore(irq);
 }
 
+/// The task of user thread `owner` (pid, tid).
+fn task_of_owner(owner: (u64, u64)) -> Option<Arc<Task>> {
+    TASKS
+        .lock()
+        .values()
+        .find(|t| t.owner == Some(owner))
+        .cloned()
+}
+
+/// Set or clear the priority-inheritance boost of user thread `owner`
+/// (SCHED-INC-01): a queued or running task is requeued in its boosted
+/// class and its CPU asked to reschedule; a sleeping one takes the boost
+/// when it wakes. No task: nothing to change.
+pub fn set_boost(owner: (u64, u64), boost: Option<u8>) {
+    let Some(task) = task_of_owner(owner) else {
+        return;
+    };
+    let irq = irq_save();
+    let mut queued = false;
+    for cpu in CPUS.iter() {
+        if let Some(st) = cpu.lock().as_mut() {
+            if st.rq.set_boost(task.key, boost, now()) {
+                queued = true;
+                st.need_resched = true;
+            }
+        }
+    }
+    if !queued {
+        task.entity.lock().boost = boost;
+    }
+    irq_restore(irq);
+}
+
+/// The priority user thread `owner` passes on to the owner of a
+/// priority-inheritance lock it waits for (`Entity::pi_priority`), or
+/// `None` if it has no task.
+pub fn pi_priority(owner: (u64, u64)) -> Option<u8> {
+    let task = task_of_owner(owner)?;
+    let irq = irq_save();
+    let mut found = None;
+    for cpu in CPUS.iter() {
+        if let Some(st) = cpu.lock().as_ref() {
+            if let Some(e) = st.rq.entity_of(task.key) {
+                found = Some(e.pi_priority());
+                break;
+            }
+        }
+    }
+    let prio = found.unwrap_or_else(|| task.entity.lock().pi_priority());
+    irq_restore(irq);
+    Some(prio)
+}
+
 /// Number of CPUs that run tasks (sched_getaffinity's online set).
 pub fn online_cpus() -> usize {
     CPUS.len()
 }
 
-/// Live tasks running threads of process `pid`.
 /// The CPU time of `task`, with the slice it is running now if it is this
 /// CPU's current task.
 fn task_cpu(task: &Task) -> super::cputime::CpuTimes {
@@ -1095,7 +1142,7 @@ pub fn owners() -> Vec<(u64, u64)> {
     TASKS.lock().values().filter_map(|t| t.owner).collect()
 }
 
-/// The tasks of process `pid`.
+/// Live tasks running threads of process `pid`.
 pub fn tasks_of(pid: u64) -> Vec<Arc<Task>> {
     TASKS
         .lock()

@@ -185,8 +185,8 @@ What does not work yet: `docs/KNOWN-LIMITATIONS.md`.
       (N-73, N-78, N-58).
     - F5 storage: interrupt-driven NVMe and virtio-blk, FLUSH from BlockFS sync, durable fsync
       (N-52, N-74, N-121 durability), then NVMe queues.
-    - WireGuard (NET-INC-02) after F1/F2; priority inheritance (SCHED-INC-01) through the policy
-      boost; namespaces (VIRT-INC-01).
+    - WireGuard (NET-INC-02) after F1/F2; priority inheritance (SCHED-INC-01, done in D: PI
+      futexes through the policy boost); namespaces (VIRT-INC-01).
   - [ ] **G, hardening and correctness:** enable retpoline, stack protector, eIBRS/AutoIBRS, IBPB,
     UMIP, SMEP/SMAP (N-15) and decide KPTI (N-145, N-146); entropy sources and fast key erasure
     (N-149); crypto KATs and RustCrypto primitives (N-154); package verifier cleanup (N-148);

@@ -73,6 +73,20 @@ impl Entity {
         }
     }
 
+    /// The priority this task passes on to the owner of a priority-
+    /// inheritance lock it waits for (SCHED-INC-01): its real-time priority
+    /// or current boost, 99 (the highest) for a deadline task, 0 for a fair
+    /// one (which lends no priority).
+    pub fn pi_priority(&self) -> u8 {
+        match self.policy {
+            Policy::Deadline(_) => 99,
+            Policy::Fifo { prio } | Policy::RoundRobin { prio } => {
+                prio.max(self.boost.unwrap_or(0))
+            }
+            _ => self.boost.unwrap_or(0),
+        }
+    }
+
     /// Take a new policy (a task off any queue), keeping its fair lag.
     pub fn set_policy(&mut self, policy: Policy) {
         self.fair.weight = weight_of(policy);
@@ -144,6 +158,11 @@ impl RunQueue {
 
     pub fn contains(&self, key: TaskKey) -> bool {
         self.meta.contains_key(&key)
+    }
+
+    /// The scheduling state of a queued (or running) task.
+    pub fn entity_of(&self, key: TaskKey) -> Option<Entity> {
+        self.meta.get(&key).map(|m| m.entity)
     }
 
     pub fn class_of(&self, key: TaskKey) -> Option<Class> {
@@ -570,6 +589,31 @@ mod tests {
             (80..=120).contains(&fair_ms),
             "fair got {fair_ms} ms of 2000"
         );
+    }
+
+    #[test]
+    fn pi_priority_is_own_rt_priority_or_boost() {
+        let fair = Entity::new(Policy::Normal { nice: -5 });
+        assert_eq!(fair.pi_priority(), 0, "a fair task lends nothing");
+        let mut rt = Entity::new(Policy::Fifo { prio: 40 });
+        assert_eq!(rt.pi_priority(), 40);
+        rt.boost = Some(70);
+        assert_eq!(rt.pi_priority(), 70, "a boost passes on (chains)");
+        rt.boost = Some(10);
+        assert_eq!(rt.pi_priority(), 40, "never below its own");
+        let mut boosted_fair = Entity::new(Policy::Normal { nice: 0 });
+        boosted_fair.boost = Some(55);
+        assert_eq!(boosted_fair.pi_priority(), 55);
+    }
+
+    #[test]
+    fn entity_of_reports_the_queued_state() {
+        let mut rq = RunQueue::new();
+        assert!(rq.entity_of(1).is_none());
+        rq.enqueue(1, Entity::new(Policy::RoundRobin { prio: 9 }), 0);
+        assert_eq!(rq.entity_of(1).map(|e| e.pi_priority()), Some(9));
+        rq.set_boost(1, Some(20), 0);
+        assert_eq!(rq.entity_of(1).map(|e| e.pi_priority()), Some(20));
     }
 
     #[test]

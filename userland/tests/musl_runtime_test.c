@@ -1189,6 +1189,128 @@ static void test_ipc(void)
     report("native_ipc_send_receive_blocks", f == 0, why);
 }
 
+/* Priority inheritance (SCHED-INC-01, FUTEX_LOCK_PI/UNLOCK_PI): the
+ * textbook inversion, everything on CPU 0. A fair thread L holds a PI mutex
+ * and needs 50 ms of CPU to release it; a FIFO-20 thread M hogs the CPU for
+ * 600 ms; a FIFO-40 thread H waits for the mutex for at most 400 ms. With
+ * inheritance L runs at 40, above M, and H gets the mutex; without it M
+ * starves L and H times out. (musl used to report PI mutexes unsupported.) */
+static pthread_mutex_t pi_m;
+static volatile int pi_locked, pi_go_m, pi_stop_m;
+static volatile int pi_h_rc = -1;
+static volatile long pi_h_ms = -1;
+
+static long pi_now_ms(void)
+{
+    struct timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    return t.tv_sec * 1000 + t.tv_nsec / 1000000;
+}
+
+static void pi_spin_ms(long ms)
+{
+    long end = pi_now_ms() + ms;
+    while (pi_now_ms() < end) {
+    }
+}
+
+static void *pi_low(void *a)
+{
+    (void)a;
+    pthread_mutex_lock(&pi_m);
+    pi_locked = 1;
+    while (!pi_go_m) sched_yield(); /* hold it until M is hogging */
+    pi_spin_ms(50);
+    pthread_mutex_unlock(&pi_m);
+    return 0;
+}
+
+static void *pi_medium(void *a)
+{
+    (void)a;
+    long end = pi_now_ms() + 600;
+    while (pi_now_ms() < end && !pi_stop_m) {
+    }
+    return 0;
+}
+
+static void *pi_high(void *a)
+{
+    (void)a;
+    struct timespec t;
+    clock_gettime(CLOCK_REALTIME, &t);
+    t.tv_nsec += 400 * 1000000L;
+    if (t.tv_nsec >= 1000000000L) {
+        t.tv_sec++;
+        t.tv_nsec -= 1000000000L;
+    }
+    long start = pi_now_ms();
+    pi_h_rc = pthread_mutex_timedlock(&pi_m, &t);
+    pi_h_ms = pi_now_ms() - start;
+    if (pi_h_rc == 0) pthread_mutex_unlock(&pi_m);
+    pi_stop_m = 1;
+    return 0;
+}
+
+static int pi_spawn(pthread_t *t, void *(*fn)(void *), int policy, int prio)
+{
+    pthread_attr_t a;
+    pthread_attr_init(&a);
+    if (policy != SCHED_OTHER) {
+        struct sched_param sp = {.sched_priority = prio};
+        pthread_attr_setinheritsched(&a, PTHREAD_EXPLICIT_SCHED);
+        pthread_attr_setschedpolicy(&a, policy);
+        pthread_attr_setschedparam(&a, &sp);
+    }
+    int r = pthread_create(t, &a, fn, 0);
+    pthread_attr_destroy(&a);
+    return r;
+}
+
+static void test_priority_inheritance(void)
+{
+    int f = 0, proto_rc, sp_rc;
+    cpu_set_t one;
+    CPU_ZERO(&one);
+    CPU_SET(0, &one);
+    sched_setaffinity(0, sizeof(one), &one); /* inherited by the threads */
+    pthread_mutexattr_t ma;
+    pthread_mutexattr_init(&ma);
+    proto_rc = pthread_mutexattr_setprotocol(&ma, PTHREAD_PRIO_INHERIT);
+    if (proto_rc != 0) f |= 1;
+    pthread_mutex_init(&pi_m, &ma);
+    pthread_mutexattr_destroy(&ma);
+    /* The orchestrating thread outranks all three. */
+    struct sched_param mp = {.sched_priority = 50};
+    sp_rc = pthread_setschedparam(pthread_self(), SCHED_FIFO, &mp);
+    if (sp_rc != 0) f |= 2;
+    pthread_t l, m, h;
+    if (pi_spawn(&l, pi_low, SCHED_OTHER, 0) != 0) f |= 4;
+    while (!pi_locked) {
+        struct timespec d = {0, 1000000};
+        nanosleep(&d, 0);
+    }
+    if (pi_spawn(&m, pi_medium, SCHED_FIFO, 20) != 0) f |= 4;
+    pi_go_m = 1;
+    struct timespec d = {0, 20 * 1000000};
+    nanosleep(&d, 0); /* M now hogs the CPU; L, at fair priority, waits */
+    if (pi_spawn(&h, pi_high, SCHED_FIFO, 40) != 0) f |= 4;
+    pthread_join(h, 0);
+    pthread_join(m, 0);
+    pthread_join(l, 0);
+    struct sched_param np = {.sched_priority = 0};
+    pthread_setschedparam(pthread_self(), SCHED_OTHER, &np);
+    if (pi_h_rc != 0) f |= 8;
+    pthread_mutex_destroy(&pi_m);
+    CPU_ZERO(&one);
+    for (int i = 0; i < 64; i++) CPU_SET(i, &one);
+    sched_setaffinity(0, sizeof(one), &one);
+    static char why[96];
+    snprintf(why, sizeof(why), "fail=%#x proto=%d setsched=%d h_rc=%d h_waited=%ldms", f,
+             proto_rc, sp_rc, pi_h_rc, pi_h_ms);
+    report("musl_priority_inheritance", f == 0, why);
+}
+
 /* munmap, mprotect, brk, mremap, madvise, getrandom and futex bitsets
  * (N-240, N-242, N-243, N-244, N-246, N-226), as Linux. */
 
@@ -1441,8 +1563,9 @@ static int mm_random_futex(void)
     if (getrandom(buf, 16, 0x8) != -1 || errno != EINVAL) f |= 4;
     errno = 0;
     if (getrandom(buf, 16, GRND_RANDOM | 4) != -1 || errno != EINVAL) f |= 4;
-    /* futex: WAKE_BITSET wakes only waiters sharing a bit; PI and unknown
-     * commands are ENOSYS. */
+    /* futex: WAKE_BITSET wakes only waiters sharing a bit; the requeue-PI
+     * commands (glibc PI condition variables) and unknown commands are
+     * ENOSYS. (LOCK_PI itself works since SCHED-INC-01.) */
     pthread_t t;
     pthread_create(&t, NULL, bitset_waiter, NULL);
     while (!bitset_waiting)
@@ -1467,7 +1590,8 @@ static int mm_random_futex(void)
     if (syscall(SYS_futex, &bitset_word, FUTEX_WAKE_BITSET, 1, NULL, NULL, 0) != -1 || errno != EINVAL)
         f |= 16;
     errno = 0;
-    if (syscall(SYS_futex, &bitset_word, FUTEX_LOCK_PI, 0, NULL, NULL, 0) != -1 || errno != ENOSYS)
+    if (syscall(SYS_futex, &bitset_word, FUTEX_WAIT_REQUEUE_PI, 0, NULL, &bitset_word, 0) != -1 ||
+        errno != ENOSYS)
         f |= 32;
     errno = 0;
     if (syscall(SYS_futex, &bitset_word, 0x200 | FUTEX_WAKE, 1, NULL, NULL, 0) != -1 || errno != ENOSYS)
@@ -3390,6 +3514,7 @@ int main(int argc, char **argv)
     test_console();
     test_thread_join();
     test_ipc();
+    test_priority_inheritance();
     printf("MUSL-RUNTIME: %d/%d\n", passed, total);
     return passed == total ? 0 : 1;
 }

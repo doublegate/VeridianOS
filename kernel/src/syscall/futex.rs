@@ -51,7 +51,7 @@ const FUTEX_WAKE_OP: u32 = 5;
 pub(crate) const FUTEX_WAIT_BITSET_MATCH_ANY: u32 = 0xFFFF_FFFF;
 
 // Futex wait queue keyed by (pid, uaddr)
-type FutexKey = (u64, usize);
+pub(super) type FutexKey = (u64, usize);
 
 /// Number of futex hash buckets (power of two).
 const FUTEX_BUCKETS: usize = 256;
@@ -429,7 +429,7 @@ static DFUTEX: [crate::mm::cache_aligned::CacheAligned<Mutex<Vec<DWaiter>>>; FUT
 /// address when the word is in `MAP_SHARED` memory, so waiters in every
 /// process mapping it meet (N-114), otherwise (pid, address).
 #[cfg(feature = "alloc")]
-fn futex_key(uaddr: usize) -> Result<FutexKey, SyscallError> {
+pub(super) fn futex_key(uaddr: usize) -> Result<FutexKey, SyscallError> {
     /// The "pid" of keys for shared memory.
     const SHARED: u64 = u64::MAX;
     let proc = process::current_process().ok_or(SyscallError::InvalidState)?;
