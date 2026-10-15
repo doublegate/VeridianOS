@@ -11,7 +11,7 @@ its N-65/N-76 labels are swapped.
 
 Every finding was re-checked against the tree on 2026-10-14 by three read-only reviews (claim
 status, code verification, reachability). This file is the tracking list for the IDs it adds
-(**N-261 to N-280**) and records where each matrix finding is tracked. **C** = confirmed in the
+(**N-261 to N-281**) and records where each matrix finding is tracked. **C** = confirmed in the
 code, **L** = latent (unreachable today), as in the 2026-10-07 re-evaluation.
 
 ## The remediation that was not merged
@@ -30,7 +30,7 @@ code, **L** = latent (unreachable today), as in the 2026-10-07 re-evaluation.
 
 | ID | Sev | Finding | Matrix ID | Status / Target |
 |---|---|---|---|---|
-| N-261 | Medium L | `per_cpu_free_frame` has one caller (`perf/bench.rs`); every unmap, munmap and teardown free takes the global `FRAME_ALLOCATOR` lock | PB-MEM-01 | open; with D5 (after N-262, frees must follow the shootdown) |
+| N-261 | Medium L | `per_cpu_free_frame` has one caller (`perf/bench.rs`); every unmap, munmap and teardown free takes the global `FRAME_ALLOCATOR` lock | PB-MEM-01 | **measured, not changed** (v0.27, D5): frees through the per-CPU cache after the flush, in unmap and munmap, cost a single process 6% (566 -> 606 us per mmap, 16 faults, munmap; KVM) and gained four processes 5% (2.8 -> 2.65 s for 4 x 3000 iterations); the global lock taken once per range is not the bottleneck (see N-281) |
 | N-262 | Medium L | TLB shootdown interrupts every CPU; a per-address-space active-CPU mask (set at the dispatcher's address-space switch) and logical-to-APIC-ID mapping would target only CPUs that ran it | PB-MEM-04 | **fixed** (v0.27, D5): each CPU records the root it loads (`tlb::note_root`, before the load); user-space flushes go to the CPUs on that root or with no record, kernel-half flushes to all; IPIs by APIC ID |
 | N-263 | Medium C | Dirty BlockFS blocks were pinned until sync, so a large write grew the cache by its whole size | BM-FS-01 | **fixed** 1ce99be9 (ADR 0011) |
 | N-264 | Low C | `mm/cache_topology.rs` (771 lines) has no callers, and `docs/PERFORMANCE-TUNING.md` says the frame allocator uses cache colouring | INC-MEM-02 | open; G (wire it into the allocator or remove it, and correct the doc) |
@@ -50,6 +50,7 @@ code, **L** = latent (unreachable today), as in the 2026-10-07 re-evaluation.
 | N-278 | Medium C | The kernel heap is a 1 GiB static array, so a guest with little memory cannot boot; the heap should be sized from the boot memory map | (handoff "QEMU OOM fix"); also HX-02 | **fixed** (frames sized from usable RAM, 32 MiB..1 GiB) |
 | N-279 | Low L | Two futex tables: dispatched threads queue in `DFUTEX`, others in `FUTEX_TABLE`; a waiter and a waker on different tables miss each other (only possible for non-dispatched threads) | POC-SYS-02 | **fixed** (v0.27, D4c): the old table and the nested boot dispatch are deleted; every futex operation is the dispatcher's |
 | N-280 | Low C | None of the bare-metal test programs in `kernel/tests/` compiles (stale signatures, a missing `test_main`, unresolved imports), and no CI job builds them, so `kernel/tests/README.md` describes tests that cannot run; the host unit tests, the in-kernel boot tests and the rootfs runtime suites are the real coverage (found 2026-10-15 while deleting `scheduler_tests.rs`, which tested only the old scheduler) | (review note) | open; G (port the useful checks to host or boot tests, then delete the directory, or fix and add a CI job) |
+| N-281 | Medium L | A page fault costs ~35 us: mmap of 16 pages, touching each and munmap take ~570 us on one CPU (KVM), and four processes doing it at once take 1.65x as long as one, so a shared lock or structure on the fault/map path dominates (it is not the frame allocator, N-261). Measured 2026-10-15 with a temporary benchmark | (D5 measurement) | open; profile the fault path (in-kernel `perf` counters), then fix the hot spot |
 
 ## Matrix findings already tracked elsewhere
 

@@ -160,8 +160,9 @@ What does not work yet: `docs/KNOWN-LIMITATIONS.md`.
       affinity migration, getcpu, per-task user GS base, interrupt-safe heap, N-139 fixed:
       interrupts on in page faults and the return to user mode, reaper thread; ADR 0012;
       `gate.sh --smp`), N-262 targeted shootdown, remote signal kick. Left: per-CPU frees after
-      the flush (N-261), N-52 (with F5 interrupt-driven storage), deadline push/pull. Done
-      since: SYS-PERF-01 (per-CPU rate-limit buckets), `smp` on by default, N-51 (directory checks on the resolved node), audit cost and cap, BlockFS
+      N-52 (with F5 interrupt-driven storage), deadline push/pull, N-281 (page faults cost
+      ~35 us; profile first). N-261 measured: per-CPU frees did not pay (-6%/+5%), not
+      changed. Done since: SYS-PERF-01 (per-CPU rate-limit buckets), `smp` on by default, N-51 (directory checks on the resolved node), audit cost and cap, BlockFS
       directory slot reuse.
     - [x] Syscalls `sched_setattr/getattr`, `sched_setscheduler`, `nice`/`setpriority`, real
       `sched_setaffinity`/`getaffinity`, `sched_yield` on the new policy (SCHED-INC-02 resolved
