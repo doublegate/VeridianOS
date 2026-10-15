@@ -943,6 +943,49 @@ static void test_siginfo(void)
     signal(rt, SIG_DFL);
 }
 
+/* Ptys (the private OpenPty call, 1304: musl's openpty needs /dev/ptmx,
+ * which is v0.29). An empty side reads as EAGAIN when non-blocking, not as
+ * end of file (it used to return 0); poll reports what the buffers hold;
+ * a blocking reader sleeps until the other side writes and gets the data. */
+#define SYS_VERIDIAN_OPENPTY 1304
+
+static void test_pty(void)
+{
+    int m = -1, sl = -1, f = 0;
+    if (syscall(SYS_VERIDIAN_OPENPTY, &m, &sl) != 0 || m < 0 || sl < 0) {
+        report("musl_pty_readiness_and_blocking", 0, "openpty failed");
+        return;
+    }
+    struct pollfd p = {.fd = m, .events = POLLIN | POLLOUT};
+    if (poll(&p, 1, 0) != 1 || (p.revents & POLLIN) || !(p.revents & POLLOUT)) f |= 1;
+    fcntl(m, F_SETFL, fcntl(m, F_GETFL) | O_NONBLOCK);
+    char buf[16];
+    errno = 0;
+    if (read(m, buf, sizeof(buf)) != -1 || errno != EAGAIN) f |= 2;
+    if (write(sl, "hi", 2) != 2) f |= 4;
+    p.revents = 0;
+    if (poll(&p, 1, 0) != 1 || !(p.revents & POLLIN)) f |= 8;
+    if (read(m, buf, sizeof(buf)) != 2 || memcmp(buf, "hi", 2) != 0) f |= 16;
+
+    /* A child blocks reading the slave; the parent types after 100 ms. */
+    pid_t c = fork();
+    if (c == 0) {
+        char in[8];
+        ssize_t n = read(sl, in, sizeof(in));
+        _exit(n == 3 && memcmp(in, "ok\n", 3) == 0 ? 0 : 1);
+    }
+    struct timespec t = {0, 100 * 1000 * 1000};
+    nanosleep(&t, 0);
+    if (write(m, "ok\n", 3) != 3) f |= 32;
+    int st = 0;
+    if (waitpid(c, &st, 0) != c || !WIFEXITED(st) || WEXITSTATUS(st) != 0) f |= 64;
+    close(m);
+    close(sl);
+    static char why[48];
+    snprintf(why, sizeof(why), "fail=%#x st=%#x", f, st);
+    report("musl_pty_readiness_and_blocking", f == 0, why);
+}
+
 /* munmap, mprotect, brk, mremap, madvise, getrandom and futex bitsets
  * (N-240, N-242, N-243, N-244, N-246, N-226), as Linux. */
 
@@ -3140,6 +3183,7 @@ int main(int argc, char **argv)
     test_accounts();
     test_peercred();
     test_siginfo();
+    test_pty();
     printf("MUSL-RUNTIME: %d/%d\n", passed, total);
     return passed == total ? 0 : 1;
 }

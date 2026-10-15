@@ -34,6 +34,9 @@ use crate::{error::KernelError, process::ProcessId, sync::once_lock::GlobalState
 /// PTY buffer size
 const PTY_BUFFER_SIZE: usize = 4096;
 
+const POLLIN: u16 = 0x0001;
+const POLLOUT: u16 = 0x0004;
+
 /// Terminal control characters
 pub mod termios {
     pub const VINTR: u8 = 0; // ^C
@@ -141,17 +144,51 @@ impl PtyMaster {
         self.id
     }
 
-    /// Read from slave output (what the slave wrote)
+    /// Read from slave output (what the slave wrote). Nothing to read is
+    /// `WouldBlock` (EAGAIN, or a sleep for a blocking descriptor): it used
+    /// to return 0, which a reader takes as end of file.
     pub fn read(&self, buffer: &mut [u8]) -> Result<usize, KernelError> {
-        let mut output = self.output_buffer.write();
-        let bytes_to_read = buffer.len().min(output.len());
-
-        for i in 0..bytes_to_read {
-            // bytes_to_read <= output.len(), so pop_front cannot return None
-            buffer[i] = output.pop_front().expect("output buffer underrun");
+        let bytes_to_read = {
+            let mut output = self.output_buffer.write();
+            let n = buffer.len().min(output.len());
+            for slot in buffer.iter_mut().take(n) {
+                // n <= output.len(), so pop_front cannot return None
+                *slot = output.pop_front().expect("output buffer underrun");
+            }
+            n
+        };
+        if bytes_to_read == 0 && !buffer.is_empty() {
+            return Err(KernelError::WouldBlock);
         }
-
+        // Space freed for the slave's writes.
+        crate::sched::dispatch::io_event();
         Ok(bytes_to_read)
+    }
+
+    /// poll bits for the master side: POLLIN when the slave has written
+    /// something, POLLOUT when the slave's input has room.
+    pub fn master_readiness(&self) -> u16 {
+        let mut ready = 0;
+        if !self.output_buffer.read().is_empty() {
+            ready |= POLLIN;
+        }
+        if self.input_buffer.read().len() < PTY_BUFFER_SIZE {
+            ready |= POLLOUT;
+        }
+        ready
+    }
+
+    /// poll bits for the slave side: POLLIN when the master has written
+    /// input, POLLOUT when the output has room.
+    pub fn slave_readiness(&self) -> u16 {
+        let mut ready = 0;
+        if !self.input_buffer.read().is_empty() {
+            ready |= POLLIN;
+        }
+        if self.output_buffer.read().len() < PTY_BUFFER_SIZE {
+            ready |= POLLOUT;
+        }
+        ready
     }
 
     /// Write to slave input (what the slave will read).
@@ -172,6 +209,8 @@ impl PtyMaster {
         if taken == 0 && !data.is_empty() {
             return Err(KernelError::WouldBlock);
         }
+        // Input for the slave's readers.
+        crate::sched::dispatch::io_event();
         Ok(taken)
     }
 
@@ -305,14 +344,20 @@ impl PtySlave {
     pub fn read(&self, buffer: &mut [u8]) -> Result<usize, KernelError> {
         // Get master and read from input buffer
         if let Some(master) = get_pty_master(self.master_id) {
-            let mut input = master.input_buffer.write();
-            let bytes_to_read = buffer.len().min(input.len());
-
-            for i in 0..bytes_to_read {
-                // bytes_to_read <= input.len(), so pop_front cannot return None
-                buffer[i] = input.pop_front().expect("input buffer underrun");
+            let bytes_to_read = {
+                let mut input = master.input_buffer.write();
+                let n = buffer.len().min(input.len());
+                for slot in buffer.iter_mut().take(n) {
+                    // n <= input.len(), so pop_front cannot return None
+                    *slot = input.pop_front().expect("input buffer underrun");
+                }
+                n
+            };
+            // Nothing typed yet: wait (or EAGAIN), not end of file.
+            if bytes_to_read == 0 && !buffer.is_empty() {
+                return Err(KernelError::WouldBlock);
             }
-
+            crate::sched::dispatch::io_event();
             Ok(bytes_to_read)
         } else {
             Err(KernelError::NotFound {
@@ -331,6 +376,8 @@ impl PtySlave {
             if taken == 0 && !data.is_empty() {
                 return Err(KernelError::WouldBlock);
             }
+            // Output for the master's readers.
+            crate::sched::dispatch::io_event();
             Ok(taken)
         } else {
             Err(KernelError::NotFound {
@@ -533,6 +580,16 @@ impl VfsNode for PtyMasterNode {
         self.master.write(data)
     }
 
+    fn poll_readiness(&self) -> u16 {
+        self.master.master_readiness()
+    }
+
+    /// Every buffer change calls `io_event`, so poll, epoll and blocking
+    /// reads sleep instead of re-checking every 10 ms.
+    fn wakes_io_waiters(&self) -> bool {
+        true
+    }
+
     fn metadata(&self) -> Result<Metadata, KernelError> {
         Ok(Metadata {
             node_type: NodeType::CharDevice,
@@ -630,6 +687,16 @@ impl VfsNode for PtySlaveNode {
         self.slave.write(data)
     }
 
+    fn poll_readiness(&self) -> u16 {
+        // A slave whose master is gone reads end of file and writes fail:
+        // report it readable so pollers notice.
+        get_pty_master(self.slave.master_id()).map_or(POLLIN, |m| m.slave_readiness())
+    }
+
+    fn wakes_io_waiters(&self) -> bool {
+        true
+    }
+
     fn metadata(&self) -> Result<Metadata, KernelError> {
         Ok(Metadata {
             node_type: NodeType::CharDevice,
@@ -681,6 +748,30 @@ impl VfsNode for PtySlaveNode {
 
 #[cfg(test)]
 mod tests {
+    /// Readiness follows the buffers, and an empty read is WouldBlock (a
+    /// sleep for a blocking reader), not 0, which reads as end of file.
+    #[test]
+    fn readiness_and_empty_reads_follow_the_buffers() {
+        let master = PtyMaster::new(91);
+        let mut buf = [0u8; 8];
+        assert_eq!(master.master_readiness(), POLLOUT);
+        assert_eq!(master.slave_readiness(), POLLOUT);
+        assert!(matches!(
+            master.read(&mut buf),
+            Err(KernelError::WouldBlock)
+        ));
+        assert_eq!(master.write(b"ls").unwrap(), 2);
+        assert_eq!(master.slave_readiness(), POLLIN | POLLOUT);
+        assert!(master.master_readiness() & POLLIN == 0);
+        master.output_buffer.write().push_back(b'x');
+        assert_eq!(master.master_readiness(), POLLIN | POLLOUT);
+        assert_eq!(master.read(&mut buf).unwrap(), 1);
+        assert_eq!(master.master_readiness(), POLLOUT);
+        // A full input buffer is not writable.
+        master.input_buffer.write().resize(PTY_BUFFER_SIZE, b'a');
+        assert_eq!(master.master_readiness() & POLLOUT, 0);
+    }
+
     use super::*;
 
     #[test]

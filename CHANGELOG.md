@@ -652,6 +652,10 @@
 
 ### Fixed
 
+- **Ptys block and report readiness (N-128).** Reading an empty pty returned 0, which programs
+  take as end of file, and poll, epoll and select saw ptys as always ready (they re-checked every
+  10 ms). An empty side now reads as EAGAIN, or sleeps for a blocking reader until the other side
+  writes; readiness follows the buffers, and every change wakes waiters.
 - **exec from a multithreaded process works (N-101).** It failed with EAGAIN while any other
   thread was alive (it had once freed page tables they still used). As Linux does, exec now ends
   the other threads first: each leaves at its next return to user mode or wakeup, including one
