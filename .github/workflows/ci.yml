@@ -599,7 +599,16 @@ jobs:
                   ./scripts/build-busybox-rootfs.sh all
                   ./scripts/build-busybox-rootfs.sh blockfs
             - name: Run runtime suite
-              run: REQUIRE_MUSL=1 scripts/run-rootfs-tests.sh 900
+              run: |
+                  REQUIRE_MUSL=1 scripts/run-rootfs-tests.sh 900
+                  cp target/boot-logs/rootfs-tests.log target/boot-logs/rootfs-tests-1cpu.log
+            # The same suite with its programs spread over four CPUs (the
+            # `smp` feature is on by default): timing bugs between CPUs only
+            # show here.
+            - name: Run runtime suite on 4 CPUs
+              run: |
+                  SMP=4 REQUIRE_MUSL=1 scripts/run-rootfs-tests.sh 900
+                  cp target/boot-logs/rootfs-tests.log target/boot-logs/rootfs-tests-4cpu.log
             - name: Upload log
               if: always()
               uses: actions/upload-artifact@v4

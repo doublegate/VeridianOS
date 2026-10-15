@@ -4,22 +4,24 @@
 #   host library, and the host unit tests. With --boot also build every
 #   architecture and boot each in QEMU (scripts/boot-test.sh); with --rootfs
 #   also run the x86_64 user-space runtime suite (scripts/run-rootfs-tests.sh,
-#   musl checks required). With --smp also repeat the boots (and with
-#   --rootfs the runtime suite) on four CPUs.
+#   musl checks required). The boots (and with --rootfs the runtime suite)
+#   then run again on four CPUs, since the `smp` feature is on by default;
+#   --no-smp skips that second round (--smp is accepted and is the default).
 #   Exits non-zero if any step fails; each step's output is kept in
 #   ${LOG_DIR:-target/dev-logs}.
 #
-# Usage: scripts/dev/gate.sh [--boot] [--rootfs] [--smp]
+# Usage: scripts/dev/gate.sh [--boot] [--rootfs] [--no-smp]
 set -u
 root="$(git -C "$(dirname "$0")" rev-parse --show-toplevel)" || exit 2
 cd "$root" || exit 2
-boot=0 rootfs=0 smp=0
+boot=0 rootfs=0 smp=1
 for arg in "$@"; do
     case $arg in
         --boot) boot=1 ;;
         --rootfs) rootfs=1 ;;
         --smp) smp=1 ;;
-        *) echo "usage: $0 [--boot] [--rootfs] [--smp]" >&2; exit 2 ;;
+        --no-smp) smp=0 ;;
+        *) echo "usage: $0 [--boot] [--rootfs] [--no-smp]" >&2; exit 2 ;;
     esac
 done
 log_dir="${LOG_DIR:-target/dev-logs}"

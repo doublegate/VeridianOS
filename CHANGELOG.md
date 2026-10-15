@@ -354,8 +354,9 @@
   still far above what one CPU issues.
 - **SMP is on by default.** The `smp` feature is now a default feature: the kernel starts every
   CPU the machine has and, on x86_64, runs tasks on all of them (ADR 0012). A one-CPU machine runs
-  the same kernel. CI's 4-CPU boot jobs and `scripts/dev/gate.sh --smp` no longer build a separate
-  kernel for them.
+  the same kernel. CI's 4-CPU boot jobs no longer build a separate kernel, CI runs the user-space
+  runtime suite on one CPU and again on four, and `scripts/dev/gate.sh --boot --rootfs` does the
+  same by default (`--no-smp` skips the 4-CPU round).
 
 - **TLB shootdowns go only to the CPUs running the address space (N-262).** A change to a user
   address space used to interrupt every CPU. Each CPU now records the page-table root it loads,
