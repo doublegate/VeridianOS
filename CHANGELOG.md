@@ -361,6 +361,16 @@
 
 ### Changed
 
+- **Pages are cleared and copied with string instructions (N-281).** Every fresh user page was
+  zeroed with `write_bytes`, whose `memset` comes from `compiler_builtins` built at the kernel's
+  own opt-level: in a dev kernel about 30 cycles a byte, so a 16-page anonymous mmap took
+  ~590 us, nearly all of it zeroing (it had been put down to page faults, but anonymous mappings
+  take none). `mm::page_ops::clear_page` and `copy_page` (`rep stosq`/`rep movsq` on x86_64, as
+  Linux's `clear_page`) now zero and copy every whole frame: mmap, brk, demand paging, page
+  tables, huge pages, fork and copy-on-write. A 16-page mmap takes 31 us in a dev kernel and
+  3 us in a release one (was 19 us). New `perf` benchmark `page_clear` (36 ns dev, 31 ns
+  release; 32,889 and 868 ns with `write_bytes`).
+
 - **The syscall rate limiter has a bucket per CPU (SYS-PERF-01).** Every system call on every CPU
   updated the same two counters. Each CPU now has its own cache-aligned bucket holding its share
   of the unchanged machine-wide budget. A single CPU's share, 3.1 million calls per second, is

@@ -203,7 +203,7 @@ impl PageTableHierarchy {
         // which adds the bootloader's physical memory mapping offset.
         unsafe {
             let virt = super::phys_to_virt_addr(l4_addr.as_u64());
-            core::ptr::write_bytes(virt as *mut u8, 0, 4096);
+            crate::mm::page_ops::clear_page(virt as *mut u8);
         }
 
         Ok(Self { l4_table: l4_addr })
@@ -440,7 +440,7 @@ impl PageMapper {
             // to a valid virtual address in the kernel's memory mapping.
             unsafe {
                 let virt = super::phys_to_virt_addr(frame.as_u64() << 12);
-                core::ptr::write_bytes(virt as *mut u8, 0, 4096);
+                crate::mm::page_ops::clear_page(virt as *mut u8);
             }
             l4_entry.set(frame, intermediate_flags);
         } else if flags.contains(PageFlags::USER) && !l4_entry.flags().contains(PageFlags::USER) {
@@ -483,7 +483,7 @@ impl PageMapper {
             // frame is freshly allocated and exclusively owned.
             unsafe {
                 let virt = super::phys_to_virt_addr(frame.as_u64() << 12);
-                core::ptr::write_bytes(virt as *mut u8, 0, 4096);
+                crate::mm::page_ops::clear_page(virt as *mut u8);
             }
             l3_entry.set(frame, intermediate_flags);
         } else if flags.contains(PageFlags::USER) && !l3_entry.flags().contains(PageFlags::USER) {
@@ -593,7 +593,7 @@ impl PageMapper {
             // frame is freshly allocated and exclusively owned.
             unsafe {
                 let virt = super::phys_to_virt_addr(frame.as_u64() << 12);
-                core::ptr::write_bytes(virt as *mut u8, 0, 4096);
+                crate::mm::page_ops::clear_page(virt as *mut u8);
             }
             l2_entry.set(frame, intermediate_flags);
         } else if flags.contains(PageFlags::USER) && !l2_entry.flags().contains(PageFlags::USER) {

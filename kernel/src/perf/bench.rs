@@ -152,6 +152,33 @@ fn bench_ipc_stats() -> BenchResult {
 }
 
 /// Benchmark: the dispatcher's current-task lookup
+/// Benchmark: zeroing one 4 KiB frame through the physical map
+/// (`mm::page_ops::clear_page`), as every fresh user page is (N-281). The
+/// same frame each time, so it is cache-warm: this measures the clearing
+/// itself, not the memory.
+fn bench_page_clear() -> BenchResult {
+    let Ok(frame) = crate::mm::frame_allocator::per_cpu_alloc_frame() else {
+        return BenchResult {
+            name: "page_clear",
+            iterations: 0,
+            min_ns: 0,
+            // Not measured: reported as a miss, never as a pass.
+            avg_ns: u64::MAX,
+            max_ns: 0,
+            target_ns: 1000,
+        };
+    };
+    let page = crate::mm::phys_to_virt_addr(frame.as_u64() << 12) as *mut u8;
+    let result = run_bench("page_clear", 1000, 1000, || {
+        // SAFETY: `page` is the frame allocated above, reached through the
+        // physical map and used by nothing else until it is freed below.
+        unsafe { crate::mm::page_ops::clear_page(page) };
+        black_box(page);
+    });
+    let _ = crate::mm::frame_allocator::per_cpu_free_frame(frame);
+    result
+}
+
 fn bench_sched_current() -> BenchResult {
     run_bench("sched_current", 1000, 200, || {
         black_box(crate::sched::dispatch::current_owner());
@@ -181,6 +208,7 @@ pub(crate) fn run_all_benchmarks() {
         bench_atomic_counter(),
         bench_ipc_stats(),
         bench_sched_current(),
+        bench_page_clear(),
     ];
 
     let mut passed = 0;

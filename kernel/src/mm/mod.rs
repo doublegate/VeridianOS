@@ -18,6 +18,7 @@ pub mod kstack;
 #[cfg(feature = "alloc")]
 pub mod page_cache;
 pub mod page_fault;
+pub mod page_ops;
 pub mod page_table;
 pub mod tlb;
 pub mod user_layout;

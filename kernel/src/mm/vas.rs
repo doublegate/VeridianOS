@@ -1093,7 +1093,7 @@ impl VirtualAddressSpace {
                         let virt = super::phys_to_virt_addr(frame.as_u64() << 12) as *mut u8;
                         // SAFETY: `frame` was just allocated and is mapped
                         // nowhere; the physical map makes it writable here.
-                        unsafe { core::ptr::write_bytes(virt, 0, 4096) };
+                        unsafe { crate::mm::page_ops::clear_page(virt) };
                         child_mapping.physical_frames.push(frame);
                         let vaddr = VirtualAddress(mapping.start.0 + (i as u64) * 4096);
                         if let Err(e) =
@@ -1178,11 +1178,11 @@ impl VirtualAddressSpace {
                         // unmapped 2 MiB block. Both are RAM in the physical
                         // map, and exactly 2 MiB is copied.
                         unsafe {
-                            core::ptr::copy_nonoverlapping(
-                                super::phys_to_virt_addr(src.as_u64() << 12) as *const u8,
-                                super::phys_to_virt_addr(copy.as_u64() << 12) as *mut u8,
-                                HUGE_PAGE_SIZE as usize,
-                            );
+                            let from = super::phys_to_virt_addr(src.as_u64() << 12) as *const u8;
+                            let to = super::phys_to_virt_addr(copy.as_u64() << 12) as *mut u8;
+                            for i in 0..(HUGE_PAGE_SIZE / 4096) as usize {
+                                super::page_ops::copy_page(to.add(i * 4096), from.add(i * 4096));
+                            }
                         }
                         let chunk_va = VirtualAddress(mapping.start.0 + c as u64 * HUGE_PAGE_SIZE);
                         if let Err(e) =
@@ -1635,7 +1635,7 @@ impl VirtualAddressSpace {
             let virt = crate::mm::phys_to_virt_addr(frame.as_u64() << 12) as *mut u8;
             // SAFETY: each frame was just allocated and is not mapped
             // anywhere; the physical map makes it accessible to the kernel.
-            unsafe { core::ptr::write_bytes(virt, 0, 4096) };
+            unsafe { crate::mm::page_ops::clear_page(virt) };
         }
 
         if replace {
@@ -2255,7 +2255,7 @@ impl VirtualAddressSpace {
                 let virt = crate::mm::phys_to_virt_addr(fresh.as_u64() << 12) as *mut u8;
                 // SAFETY: `fresh` was just allocated and is mapped nowhere;
                 // the physical map makes its 4096 bytes writable here.
-                unsafe { core::ptr::write_bytes(virt, 0, 4096) };
+                unsafe { crate::mm::page_ops::clear_page(virt) };
                 let _ = mapper.unmap_page(VirtualAddress(va));
                 if let Err(e) =
                     mapper.map_page(VirtualAddress(va), fresh, m.flags, &mut VasFrameAllocator)
@@ -2368,7 +2368,7 @@ impl VirtualAddressSpace {
                     let virt = crate::mm::phys_to_virt_addr(frame.as_u64() << 12) as *mut u8;
                     // SAFETY: the frame backs a page of this shared
                     // mapping; the physical map makes it writable here.
-                    unsafe { core::ptr::write_bytes(virt, 0, 4096) };
+                    unsafe { crate::mm::page_ops::clear_page(virt) };
                 }
             }
         }
@@ -2933,7 +2933,7 @@ impl VirtualAddressSpace {
             // SAFETY: Frame is freshly allocated; phys_to_virt_addr maps it into the
             // kernel's identity-mapped region.
             unsafe {
-                core::ptr::write_bytes(virt, 0, 4096);
+                crate::mm::page_ops::clear_page(virt);
             }
         }
 
@@ -3317,7 +3317,7 @@ impl VirtualAddressSpace {
         // frame allocator. phys_to_virt_addr maps it into the kernel's
         // physical memory window, so the 4 KiB page is writable and unshared.
         unsafe {
-            core::ptr::write_bytes(virt, 0, 4096);
+            crate::mm::page_ops::clear_page(virt);
         }
 
         let vaddr_obj = VirtualAddress(vaddr as u64);
@@ -3448,11 +3448,10 @@ impl VirtualAddressSpace {
             };
             // SAFETY: freshly allocated contiguous frames in the physical map.
             unsafe {
-                core::ptr::write_bytes(
-                    super::phys_to_virt_addr(frame.as_u64() * 4096) as *mut u8,
-                    0,
-                    HUGE_PAGE_SIZE as usize,
-                );
+                let base = super::phys_to_virt_addr(frame.as_u64() * 4096) as *mut u8;
+                for i in 0..HUGE_PAGE_FRAMES {
+                    super::page_ops::clear_page(base.add(i * 4096));
+                }
             }
             if let Some(m) = mapper.as_mut() {
                 if let Err(e) = m.map_huge_2m(chunk_va, frame, flags, &mut VasFrameAllocator) {
@@ -3604,10 +3603,9 @@ fn replace_with_copy(
     // SAFETY: both frames are RAM reached through the physical map; `copy`
     // was just allocated and is not mapped anywhere yet.
     unsafe {
-        core::ptr::copy_nonoverlapping(
-            super::phys_to_virt_addr(frame.as_u64() << 12) as *const u8,
+        super::page_ops::copy_page(
             super::phys_to_virt_addr(copy.as_u64() << 12) as *mut u8,
-            4096,
+            super::phys_to_virt_addr(frame.as_u64() << 12) as *const u8,
         );
     }
     let _ = mapper.unmap_page(VirtualAddress(page));
