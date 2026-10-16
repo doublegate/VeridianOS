@@ -19,6 +19,7 @@ const SBI_EXT_SRST: usize = 0x53525354; // "SRST"
 const SBI_TIMER_SET_TIMER: usize = 0;
 
 /// SBI RFENCE function IDs.
+const SBI_RFENCE_REMOTE_FENCE_I: usize = 0;
 const SBI_RFENCE_REMOTE_SFENCE_VMA: usize = 1;
 
 /// SBI IPI function IDs.
@@ -140,6 +141,31 @@ pub fn remote_sfence_vma_all(start: usize, size: usize) -> SbiRet {
         );
     }
     SbiRet { error, value }
+}
+
+/// Execute `fence.i` on every hart (SBI RFENCE `remote_fence_i`,
+/// `hart_mask_base = -1`): instruction fetch is not coherent with stores,
+/// so code written by one hart must be fenced on every hart that may run
+/// it. Falls back to a local fence without the RFENCE extension (then only
+/// one hart runs tasks).
+pub fn remote_fence_i_all() {
+    if !has_rfence() {
+        // SAFETY: an instruction-stream fence; no other effect.
+        unsafe { core::arch::asm!("fence.i", options(nostack)) };
+        return;
+    }
+    // SAFETY: an SBI ecall (RFENCE extension, function 0) with the register
+    // convention of the SBI specification: a0-a1 the hart mask; results in
+    // a0/a1.
+    unsafe {
+        core::arch::asm!(
+            "ecall",
+            inlateout("a0") 0usize => _,
+            inlateout("a1") usize::MAX => _,
+            in("a6") SBI_RFENCE_REMOTE_FENCE_I,
+            in("a7") SBI_EXT_RFENCE,
+        );
+    }
 }
 
 pub fn probe_extension(extension_id: usize) -> bool {

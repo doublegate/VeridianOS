@@ -186,8 +186,8 @@ What does not work yet: `docs/KNOWN-LIMITATIONS.md`.
       physical map, user address spaces share the kernel half (E-RV4); guarded kernel stacks,
       switch primitive and dispatcher on the boot hart (E-RV5); U-mode entry and exit, ecall
       system calls by the generic table, fault-tolerant user copies (E-RV6, ADR 0014; N-14);
-      ELF programs through the loader (E-RV6c); next: RISC-V musl and rootfs, TLS, user FP,
-      signals, user cmpxchg, secondaries dispatching; remove raw 0x1000_0000 stores and QEMU-only probes (HR-04
+      ELF programs through the loader (E-RV6c); every hart dispatches (E-RV5c); next: RISC-V
+      musl and rootfs, TLS, user FP, signals, user cmpxchg; remove raw 0x1000_0000 stores and QEMU-only probes (HR-04
       to HR-06); memory map from the DT (HR-07); external interrupts (scause 9) handled, not fatal
       (HR-31); IPIs by hart id (HR-33); U-mode with `tp` via `sscratch` (N-14); `sstatus` SPP
       sanitiser (N-170).

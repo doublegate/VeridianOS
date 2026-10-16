@@ -1842,12 +1842,18 @@ pub fn set_affinity(owner: (u64, u64), mask: u64) {
 /// Make this secondary CPU dispatch (stage S2): its boot flow becomes its
 /// idle task, and it runs whatever reaches its run queue. Called once by
 /// the secondary after its local setup. Never returns.
-#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+#[cfg(dispatch)]
 pub fn run_secondary() -> ! {
     let cpu = crate::arch::percpu::this_cpu_id() as usize;
     if !started() || cpu == 0 || cpu >= MAX_CPUS {
         loop {
+            #[cfg(target_arch = "x86_64")]
             x86_64::instructions::interrupts::enable_and_hlt();
+            #[cfg(target_arch = "riscv64")]
+            {
+                crate::arch::riscv64::switch::irq_save();
+                crate::arch::riscv64::switch::wait_for_interrupt();
+            }
         }
     }
     let mut idle = Task::new(alloc_key(), "idle", Policy::Idle, None);

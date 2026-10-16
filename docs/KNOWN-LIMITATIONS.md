@@ -185,9 +185,8 @@ What remains:
 
 The `smp` feature is on by default since v0.27: the other CPUs are started on every architecture (x86
 INIT-SIPI-SIPI, AArch64 PSCI, RISC-V SBI HSM). Only x86_64 runs tasks on them (ADR 0012): tasks are
-placed on idle CPUs, balanced every 4 ms and moved by sched_setaffinity. RISC-V dispatches kernel
-threads on its boot hart since v0.27 (its secondaries still idle); AArch64 has no dispatcher yet
-(sprint E). Since D5a every CPU gets the boot CPU's
+placed on idle CPUs, balanced every 4 ms and moved by sched_setaffinity. RISC-V does the same on
+every hart since v0.27 (sprint E); AArch64 has no dispatcher yet. Since D5a every CPU gets the boot CPU's
 syscall MSRs and XCR0 (N-172), IPIs go to APIC IDs with the ICR written under one interrupt-off
 sequence (N-173), and bring-up stops at the first CPU that fails, with guarded stacks (N-180). Since
 D5b the timer wheel advances by elapsed clock time and an x86_64 CPU whose TSC is not synchronised
@@ -210,8 +209,8 @@ Still open:
   on, the kernel runs in the upper half, and programs from the VFS run in U-mode as dispatcher
   tasks with system calls, page faults and fault-tolerant user copies. Not yet: a RISC-V C
   library and rootfs (so no BusyBox or musl programs), TLS (`tp`) setup, user FP state (an FP
-  instruction is SIGILL), signal handlers, a fault-tolerant user compare-and-exchange (futexes),
-  and secondary harts dispatching.
+  instruction is SIGILL), signal handlers and a fault-tolerant user compare-and-exchange
+  (futexes).
 
 ### FPU and vector registers on AArch64 and RISC-V (N-41 part, sprint E)
 

@@ -86,6 +86,10 @@ pub fn serve_boot_handshake() {}
 
 /// Park with interrupts enabled.
 pub fn idle() -> ! {
+    // Dispatch here too (its boot flow becomes its idle task, as on x86_64).
+    #[cfg(feature = "alloc")]
+    crate::sched::dispatch::run_secondary();
+    #[cfg(not(feature = "alloc"))]
     loop {
         // SAFETY: enables supervisor interrupts on this hart, whose trap
         // vector and handlers are installed, then waits for one.

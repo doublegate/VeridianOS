@@ -46,7 +46,7 @@ numbered by Linux's generic table (ADR 0009 amendment).
 - ELF programs from the VFS run through the loader (boot tests `riscv_elf_program_runs`,
   `riscv_embedded_init_runs`). Not yet: a RISC-V C library and TLS; user FP state (FP is off in
   U-mode, so an FP instruction is SIGILL); signal handlers (only fatal signals act); a
-  fault-tolerant user compare-and-exchange (futexes); secondary harts dispatching. These follow in
-  sprint E.
+  fault-tolerant user compare-and-exchange (futexes). These follow in sprint E. Secondary harts
+  dispatch too (the loader fences the new code on every hart, SBI `remote_fence_i`).
 - The user copy goes a byte at a time; faster copies wait for a measurement.
 - A user `sp` is never trusted: the kernel never runs on it, and the trap does not read user memory.

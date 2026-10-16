@@ -2005,7 +2005,7 @@ fn run_dispatch_tests(passed: &mut u32, failed: &mut u32) {
     // SMP stage S2: every secondary dispatches. A kernel thread queued on
     // each one runs there (it records the CPU it found itself on), and its
     // exit wakes the joiner on the boot CPU across CPUs.
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(dispatch)]
     {
         use core::sync::atomic::{AtomicUsize, Ordering};
 
@@ -2063,7 +2063,14 @@ fn run_dispatch_tests(passed: &mut u32, failed: &mut u32) {
         // while the other CPUs are idle, they must between them use every
         // CPU.
         static USED: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+        // Set once every spinner exists: until then they wait, so that all
+        // of them occupy a CPU at the same time however slowly they are
+        // created (40 ms each under RISC-V emulation, longer than a spin).
+        static GO: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
         extern "C" fn spin_here(_: usize) {
+            while !GO.load(core::sync::atomic::Ordering::Acquire) {
+                core::hint::spin_loop();
+            }
             let start = crate::arch::timer::monotonic_ns();
             while crate::arch::timer::monotonic_ns().saturating_sub(start) < 20_000_000 {
                 USED.fetch_or(
@@ -2083,6 +2090,7 @@ fn run_dispatch_tests(passed: &mut u32, failed: &mut u32) {
                 }
             }
             let spawned = keys.len();
+            GO.store(true, core::sync::atomic::Ordering::Release);
             for k in keys {
                 dispatch::join(k);
             }
@@ -2099,18 +2107,6 @@ fn run_dispatch_tests(passed: &mut u32, failed: &mut u32) {
         }
     }
 
-    // Secondary harts do not dispatch on RISC-V yet (sprint E).
-    #[cfg(all(dispatch, not(target_arch = "x86_64")))]
-    {
-        report_skip(
-            "dispatch_runs_on_every_cpu",
-            "secondaries do not dispatch yet (sprint E)",
-        );
-        report_skip(
-            "dispatch_places_on_idle_cpus",
-            "secondaries do not dispatch yet (sprint E)",
-        );
-    }
     #[cfg(not(dispatch))]
     {
         let _ = (passed, failed);
@@ -2300,10 +2296,9 @@ fn run_riscv_user(code: &[u8]) -> (Option<u64>, Option<i32>) {
                 // SAFETY: the code page's frame, just mapped and not yet
                 // used by anyone; `code` fits in it.
                 unsafe { core::ptr::copy_nonoverlapping(code.as_ptr(), dst, code.len()) };
-                // The hart fetches what was just written (RISC-V has no
+                // Every hart fetches what was just written (RISC-V has no
                 // coherent instruction fetch without fence.i).
-                // SAFETY: an instruction-stream fence; no other effect.
-                unsafe { core::arch::asm!("fence.i", options(nostack)) };
+                crate::arch::riscv::sbi::remote_fence_i_all();
                 true
             }
             _ => false,

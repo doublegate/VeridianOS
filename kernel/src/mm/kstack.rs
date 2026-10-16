@@ -188,8 +188,12 @@ pub fn allocate(pages: usize) -> Result<KernelStack, KernelError> {
         feature = "alloc"
     )))]
     let base = super::phys_to_virt_addr(frame.as_u64() << 12) as usize;
-    // SAFETY: `base` maps exactly the `pages` frames just allocated.
-    unsafe { core::ptr::write_bytes(base as *mut u8, 0, pages * 4096) };
+    // Page by page with clear_page (the dev kernel's memset is slow, N-281).
+    for i in 0..pages {
+        // SAFETY: `base` maps exactly the `pages` frames just allocated, and
+        // page `i` of them is unused.
+        unsafe { super::page_ops::clear_page((base + i * 4096) as *mut u8) };
+    }
     Ok(KernelStack { base, frame, pages })
 }
 

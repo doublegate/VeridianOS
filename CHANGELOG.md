@@ -2,6 +2,13 @@
 
 ### Added
 
+- **Every RISC-V hart dispatches.** Secondary harts turn their boot flow into an idle task and run
+  tasks, as x86_64's CPUs do (ADR 0012), and the loader fences new program code on every hart
+  (SBI `remote_fence_i`: instruction fetch is not coherent with stores on RISC-V). The SMP
+  dispatcher boot tests `dispatch_runs_on_every_cpu` and `dispatch_places_on_idle_cpus` run on
+  RISC-V. The placement test now starts its spinners together: created one by one under
+  emulation (40 ms each), the first had finished before the last existed. Kernel stacks are
+  cleared page by page with `clear_page`.
 - **RISC-V runs ELF programs.** The loader no longer skips segment loading on RISC-V (it did while
   RISC-V ran with paging off): a static ELF program from the VFS is loaded, given its arguments
   on the stack and the console as fds 0-2, and run in U-mode. Boot test `riscv_elf_program_runs`
