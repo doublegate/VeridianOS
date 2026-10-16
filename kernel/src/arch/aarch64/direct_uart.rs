@@ -38,7 +38,11 @@ unsafe fn uart_write_bytes_asm(ptr: *const u8, len: usize) {
             uart = in(reg) uart_addr,
             i = out(reg) _,
             byte = out(reg) _,
-            options(nostack, preserves_flags)
+            // Not `preserves_flags`: the loop's `cmp` overwrites NZCV. With
+            // that option LLVM kept a comparison made before a print live
+            // across it, so release kernels branched on this loop's flags
+            // and boot tests passed silently reported "failed".
+            options(nostack)
         )
     };
 }

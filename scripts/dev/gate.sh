@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Kernel quality gate, the one to pass before every commit:
 #   fmt check, clippy (-D warnings) on the three bare-metal targets and the
-#   host library (also with every feature, as CI's Quick Checks), and the host
+#   host library (also with every feature, as CI's Quick Checks), the
+#   inline-assembly flags lint (scripts/dev/check-asm-flags.py), and the host
 #   unit tests. With --boot also build every
 #   architecture and boot each in QEMU (scripts/boot-test.sh); with --rootfs
 #   also run the x86_64 user-space runtime suite (scripts/run-rootfs-tests.sh,
@@ -42,6 +43,9 @@ step() {
     fi
 }
 step fmt cargo fmt --all --check
+# Inline assembly that claims preserves_flags must not set the flags: a
+# block that did made release AArch64 boot tests report passes as failures.
+step asm-flags python3 "$root/scripts/dev/check-asm-flags.py"
 step clippy-x86_64 cargo clippy --target targets/x86_64-veridian.json -p veridian-kernel "${bs[@]}" -- -D warnings
 step clippy-aarch64 cargo clippy --target aarch64-unknown-none-softfloat -p veridian-kernel "${bs[@]}" -- -D warnings
 step clippy-riscv64 cargo clippy --target riscv64imac-unknown-none-elf -p veridian-kernel "${bs[@]}" -- -D warnings
@@ -73,6 +77,14 @@ if [ $boot -eq 1 ]; then
     # runs, so the kernel must not depend on its default load address.
     AARCH64_LOAD_ADDR=0x40600000 step boot-aarch64-relocated scripts/boot-test.sh aarch64
     tail -1 "$log_dir/boot-aarch64-relocated.log"
+    # Release kernels too, as CI boots them: optimisation exposes what a
+    # debug build hides (an asm block's false preserves_flags made release
+    # AArch64 report passing tests as failed).
+    step build-release ./build-kernel.sh all release
+    for arch in x86_64 aarch64 riscv64; do
+        PROFILE=release step "boot-release-$arch" scripts/boot-test.sh "$arch"
+        tail -1 "$log_dir/boot-release-$arch.log"
+    done
 fi
 if [ $rootfs -eq 1 ]; then
     # Stage first: it compiles the runtime test programs, so a change to

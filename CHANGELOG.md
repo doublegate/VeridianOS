@@ -868,6 +868,16 @@
 
 ### Fixed
 
+- **Release AArch64 kernels reported passing boot tests as failed.** The PL011 print loop's inline
+  assembly (`direct_uart.rs`) declared `options(preserves_flags)` but runs `cmp`. LLVM therefore kept
+  a comparison made before a print live across it, and the code afterwards branched on the loop's
+  flags. CI's release boot failed `cap_quota_enforced` on one build and `heap_reuses_freed_memory`
+  on the next, wherever the optimiser happened to schedule a comparison across a print; gdb
+  showed the heap test completing all 64 iterations before being reported as failed. The option
+  is gone. A new lint, `scripts/dev/check-asm-flags.py`, rejects any `asm!` block that claims
+  `preserves_flags` and contains a flag-setting instruction (the other 60 such blocks are clean),
+  and `gate.sh --boot` now also builds and boots release kernels, as CI does.
+
 - **A slow timer tick no longer livelocks the CPU (RISC-V, x86_64).** The tick re-armed the next
   deadline before doing its work (scheduler accounting, deadline pulls, balancing), so a tick that
   outlasted the 1 ms period returned with the next interrupt already due. The debug RISC-V kernel
