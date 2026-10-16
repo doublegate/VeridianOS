@@ -591,7 +591,7 @@ fn kernel_init_stage3_impl() -> KernelResult<()> {
     // user program runs as a dispatcher task; there is no other way to run
     // one (the nested boot model went in sprint D4), so this cannot fail
     // and boot go on.
-    #[cfg(all(feature = "alloc", target_arch = "x86_64"))]
+    #[cfg(all(feature = "alloc", dispatch))]
     match crate::sched::dispatch::start() {
         Ok(()) => kprintln!("[BOOTSTRAP] Dispatcher started (boot task + idle)"),
         Err(e) => panic!("dispatcher could not start: {:?}", e),
@@ -1919,13 +1919,13 @@ pub fn kernel_init_main() {
 }
 
 /// Dispatcher tests (ADR 0006, stage D1): kernel threads on their own
-/// stacks, switching, wait queues, the idle task and reaping. x86_64 only
-/// until the switch primitive exists elsewhere; the others report these
-/// tests as skipped.
+/// stacks, switching, wait queues, the idle task and reaping. On the
+/// `dispatch` architectures (x86_64, RISC-V); AArch64 reports them as
+/// skipped until it has the switch primitive.
 #[cfg(feature = "alloc")]
 fn run_dispatch_tests(passed: &mut u32, failed: &mut u32) {
     kprintln!("[INIT] Dispatcher tests:");
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(dispatch)]
     {
         use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
@@ -2099,17 +2099,29 @@ fn run_dispatch_tests(passed: &mut u32, failed: &mut u32) {
         }
     }
 
-    #[cfg(not(target_arch = "x86_64"))]
+    // Secondary harts do not dispatch on RISC-V yet (sprint E).
+    #[cfg(all(dispatch, not(target_arch = "x86_64")))]
+    {
+        report_skip(
+            "dispatch_runs_on_every_cpu",
+            "secondaries do not dispatch yet (sprint E)",
+        );
+        report_skip(
+            "dispatch_places_on_idle_cpus",
+            "secondaries do not dispatch yet (sprint E)",
+        );
+    }
+    #[cfg(not(dispatch))]
     {
         let _ = (passed, failed);
-        report_skip(
+        for name in [
             "dispatch_kthreads_interleave_and_reap",
-            "no dispatcher (sprint E)",
-        );
-        report_skip(
             "dispatch_waitqueue_wake_and_join",
-            "no dispatcher (sprint E)",
-        );
+            "dispatch_runs_on_every_cpu",
+            "dispatch_places_on_idle_cpus",
+        ] {
+            report_skip(name, "no dispatcher (sprint E)");
+        }
     }
 }
 

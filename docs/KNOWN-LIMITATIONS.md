@@ -185,8 +185,9 @@ What remains:
 
 The `smp` feature is on by default since v0.27: the other CPUs are started on every architecture (x86
 INIT-SIPI-SIPI, AArch64 PSCI, RISC-V SBI HSM). Only x86_64 runs tasks on them (ADR 0012): tasks are
-placed on idle CPUs, balanced every 4 ms and moved by sched_setaffinity; AArch64 and RISC-V have no
-dispatcher yet (sprint E), so their secondaries idle. Since D5a every CPU gets the boot CPU's
+placed on idle CPUs, balanced every 4 ms and moved by sched_setaffinity. RISC-V dispatches kernel
+threads on its boot hart since v0.27 (its secondaries still idle); AArch64 has no dispatcher yet
+(sprint E). Since D5a every CPU gets the boot CPU's
 syscall MSRs and XCR0 (N-172), IPIs go to APIC IDs with the ICR written under one interrupt-off
 sequence (N-173), and bring-up stops at the first CPU that fails, with guarded stacks (N-180). Since
 D5b the timer wheel advances by elapsed clock time and an x86_64 CPU whose TSC is not synchronised
@@ -206,8 +207,8 @@ Still open:
   work and EL0 (user mode) on AArch64. The EL2 entry leaves several EL2 registers unset and writes
   SCTLR_EL1 = 0 over its RES1 bits (N-177, HA-14).
 - **RISC-V has no user mode (N-14).** U-mode traps are fatal. Paging is on, the kernel runs in the
-  upper half and new address spaces share it with an empty lower half (ADR 0013); entering and
-  leaving U-mode comes next.
+  upper half and new address spaces share it with an empty lower half (ADR 0013), and the boot
+  hart runs kernel threads as dispatcher tasks; entering and leaving U-mode comes next.
 
 ### FPU and vector registers on AArch64 and RISC-V (N-41 part, sprint E)
 

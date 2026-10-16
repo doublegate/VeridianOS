@@ -165,4 +165,8 @@ pub fn handle_interrupt() {
     if crate::arch::percpu::is_timekeeper() {
         crate::timer::clock_tick();
     }
+    // Time slices, accounting, balancing; on the timekeeper also the
+    // sleepers (as x86_64's tick). The kernel runs no user code yet.
+    #[cfg(feature = "alloc")]
+    crate::sched::dispatch::tick(false);
 }

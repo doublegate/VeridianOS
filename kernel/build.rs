@@ -47,6 +47,17 @@ fn main() {
         println!("cargo:rustc-link-arg=-T{}", linker_script.display());
     }
 
+    // `dispatch`: the architectures whose kernel runs tasks on their own
+    // stacks (ADR 0006): x86_64 and, since sprint E, RISC-V. AArch64 joins
+    // with its MMU work; host builds never dispatch.
+    println!("cargo:rustc-check-cfg=cfg(dispatch)");
+    if target == "x86_64-veridian"
+        || target == "x86_64-unknown-none"
+        || target.starts_with("riscv64")
+    {
+        println!("cargo:rustc-cfg=dispatch");
+    }
+
     // Rebuild if linker script changes
     println!("cargo:rerun-if-changed=src/arch/x86_64/link.ld");
     println!("cargo:rerun-if-changed=src/arch/aarch64/link.ld");

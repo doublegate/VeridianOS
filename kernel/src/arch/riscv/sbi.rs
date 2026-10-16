@@ -21,6 +21,9 @@ const SBI_TIMER_SET_TIMER: usize = 0;
 /// SBI RFENCE function IDs.
 const SBI_RFENCE_REMOTE_SFENCE_VMA: usize = 1;
 
+/// SBI IPI function IDs.
+const SBI_IPI_SEND_IPI: usize = 0;
+
 /// SBI HSM function IDs (hart state management).
 const SBI_HSM_HART_START: usize = 0;
 
@@ -100,6 +103,13 @@ pub fn has_rfence() -> bool {
 /// secondary harts).
 pub fn has_hsm() -> bool {
     probe_extension(SBI_EXT_HSM)
+}
+
+/// Send a supervisor software interrupt to hart `hartid` (SBI IPI
+/// `send_ipi` with a one-hart mask based at `hartid`); it sets that hart's
+/// `sip.SSIP`.
+pub fn send_ipi(hartid: usize) -> SbiRet {
+    sbi_call(SBI_EXT_IPI, SBI_IPI_SEND_IPI, 1, hartid, 0)
 }
 
 /// Start stopped hart `hartid` at physical address `start_addr` in S-mode

@@ -2,6 +2,15 @@
 
 ### Added
 
+- **RISC-V runs the dispatcher (ADR 0006).** A switch primitive (`arch/riscv64/switch.rs`:
+  callee-saved registers on the task's stack, seeded kernel threads, `satp` per task), interrupt
+  masking through `sstatus.SIE`, an idle loop that cannot miss a wake (`wfi` with interrupts
+  masked) and IPIs through SBI. The boot flow becomes the boot hart's first task, the timer
+  interrupt drives the scheduler tick, and kernel threads run: the boot tests
+  `dispatch_kthreads_interleave_and_reap` and `dispatch_waitqueue_wake_and_join` pass on RISC-V
+  (they were skipped). Secondary harts do not dispatch yet. The architectures that dispatch are
+  the `dispatch` cfg, set by build.rs. The two SMP dispatcher tests are now reported as skipped
+  where they cannot run (they were left out silently).
 - **RISC-V kernel stacks have guard pages (N-26).** With paging on, RISC-V uses the same stack
   region as x86_64: each stack in its own slot of the kernel half with unmapped pages below it,
   so an overflow faults instead of overwriting the neighbouring frame. The boot test

@@ -23,13 +23,14 @@
 //! - **Reaping.** An exited task is removed and its stack freed in
 //!   [`finish_switch`], on the next task's stack.
 //!
-//! Only x86_64 has the switch primitive yet; elsewhere [`start`] declines
-//! and every entry point is a no-op.
+//! x86_64 and RISC-V have the switch primitive (the `dispatch` cfg, set by
+//! build.rs); elsewhere -- AArch64 until its MMU work, and host tests --
+//! [`start`] declines and every entry point is a no-op.
 
-// Only bare-metal x86_64 switches tasks (AArch64 and RISC-V get the switch
-// primitive in sprint E; host tests exercise the logic, not the switch), so
-// elsewhere the task machinery is compiled but unused.
-#![cfg_attr(not(all(target_arch = "x86_64", target_os = "none")), allow(dead_code))]
+// Only the `dispatch` architectures switch tasks (host tests exercise the
+// logic, not the switch), so elsewhere the task machinery is compiled but
+// unused.
+#![cfg_attr(not(dispatch), allow(dead_code))]
 
 use alloc::{collections::BTreeMap, sync::Arc, vec::Vec};
 use core::{
@@ -93,6 +94,9 @@ struct ArchState {
     user_rsp: u64,
     #[cfg(target_arch = "x86_64")]
     syscall_frame: u64,
+    /// RISC-V: the physical root of the task's address space (satp).
+    #[cfg(target_arch = "riscv64")]
+    root: u64,
 }
 
 /// A dispatchable task.
@@ -397,8 +401,7 @@ static STARTED: AtomicBool = AtomicBool::new(false);
 /// Woken whenever a task exits (for [`join`]).
 static EXITED: WaitQueue = WaitQueue::new();
 
-/// The kernel's own page table root, for kernel threads (x86_64).
-#[cfg(target_arch = "x86_64")]
+/// The kernel's own page table root, for kernel threads.
 static KERNEL_CR3: AtomicU64 = AtomicU64::new(0);
 
 /// Whether the dispatcher runs on this machine.
@@ -432,7 +435,11 @@ fn irq_save() -> IrqFlag {
         x86_64::instructions::interrupts::disable();
         IrqFlag(on)
     }
-    #[cfg(not(all(target_arch = "x86_64", target_os = "none")))]
+    #[cfg(all(target_arch = "riscv64", dispatch))]
+    {
+        IrqFlag(crate::arch::riscv64::switch::irq_save())
+    }
+    #[cfg(not(dispatch))]
     {
         IrqFlag(false)
     }
@@ -442,6 +449,10 @@ fn irq_restore(flag: IrqFlag) {
     #[cfg(all(target_arch = "x86_64", target_os = "none"))]
     if flag.0 {
         x86_64::instructions::interrupts::enable();
+    }
+    #[cfg(all(target_arch = "riscv64", dispatch))]
+    if flag.0 {
+        crate::arch::riscv64::switch::irq_enable();
     }
     let _ = flag;
 }
@@ -453,13 +464,13 @@ fn lookup(key: TaskKey) -> Option<Arc<Task>> {
 /// Adopt the running boot flow as CPU 0's first task and create the idle
 /// task. Call once, on CPU 0, with the heap and kernel stacks available.
 pub fn start() -> Result<(), KernelError> {
-    #[cfg(not(all(target_arch = "x86_64", target_os = "none")))]
+    #[cfg(not(dispatch))]
     {
         Err(KernelError::NotImplemented {
             feature: "task dispatch on this architecture",
         })
     }
-    #[cfg(all(target_arch = "x86_64", target_os = "none"))]
+    #[cfg(dispatch)]
     {
         if started() {
             return Err(KernelError::AlreadyExists {
@@ -467,17 +478,30 @@ pub fn start() -> Result<(), KernelError> {
                 id: 0,
             });
         }
+        #[cfg(target_arch = "x86_64")]
         let cr3 = x86_64::registers::control::Cr3::read()
             .0
             .start_address()
             .as_u64();
+        #[cfg(target_arch = "riscv64")]
+        let cr3 = crate::arch::riscv64::switch::current_root();
         KERNEL_CR3.store(cr3, Ordering::Release);
 
+        #[cfg(target_arch = "x86_64")]
         crate::arch::x86_64::switch::xsave::init();
+        #[cfg_attr(not(target_arch = "x86_64"), allow(unused_mut))]
         let mut boot = Task::new(alloc_key(), "boot", Policy::default(), None);
         // The boot flow runs the nested user programs of the old model, so
         // its vector state is switched too.
-        *boot.xsave.get_mut() = crate::arch::x86_64::switch::xsave::Area::new();
+        #[cfg(target_arch = "x86_64")]
+        {
+            *boot.xsave.get_mut() = crate::arch::x86_64::switch::xsave::Area::new();
+        }
+        // Its address space is the kernel's.
+        #[cfg(target_arch = "riscv64")]
+        {
+            boot.arch.get_mut().root = cr3;
+        }
         // The boot flow stays on the boot CPU: it is the timekeeper's
         // first task and runs the console.
         *boot.affinity.get_mut() = 1;
@@ -519,7 +543,7 @@ fn alloc_key() -> TaskKey {
 }
 
 /// A kernel task whose first switch-in runs `entry(arg)`.
-#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+#[cfg(dispatch)]
 fn new_kernel_task(
     name: &'static str,
     policy: Policy,
@@ -530,13 +554,24 @@ fn new_kernel_task(
     let top = stack.base + stack.pages * 4096;
     let task = Task::new(alloc_key(), name, policy, Some(stack));
     // SAFETY: the stack was just allocated for this task and is unused.
+    #[cfg(target_arch = "x86_64")]
     let sp = unsafe { crate::arch::x86_64::switch::seed_kernel_thread(top, entry, arg) };
+    // SAFETY: as above.
+    #[cfg(target_arch = "riscv64")]
+    let sp = unsafe { crate::arch::riscv64::switch::seed_kernel_thread(top, entry, arg) };
     // SAFETY: the task is not shared yet.
     unsafe {
         *task.saved_sp.get() = sp;
         let arch = &mut *task.arch.get();
-        arch.cr3 = KERNEL_CR3.load(Ordering::Acquire);
-        arch.entry_stack = top as u64;
+        #[cfg(target_arch = "x86_64")]
+        {
+            arch.cr3 = KERNEL_CR3.load(Ordering::Acquire);
+            arch.entry_stack = top as u64;
+        }
+        #[cfg(target_arch = "riscv64")]
+        {
+            arch.root = KERNEL_CR3.load(Ordering::Acquire);
+        }
     }
     Ok(task)
 }
@@ -547,14 +582,14 @@ pub fn spawn_kernel(
     entry: extern "C" fn(usize),
     arg: usize,
 ) -> Result<TaskKey, KernelError> {
-    #[cfg(not(all(target_arch = "x86_64", target_os = "none")))]
+    #[cfg(not(dispatch))]
     {
         let _ = (name, entry, arg);
         Err(KernelError::NotImplemented {
             feature: "kernel threads on this architecture",
         })
     }
-    #[cfg(all(target_arch = "x86_64", target_os = "none"))]
+    #[cfg(dispatch)]
     {
         if !started() {
             return Err(KernelError::InvalidState {
@@ -579,14 +614,14 @@ pub fn spawn_kernel_on(
     entry: extern "C" fn(usize),
     arg: usize,
 ) -> Result<TaskKey, KernelError> {
-    #[cfg(not(all(target_arch = "x86_64", target_os = "none")))]
+    #[cfg(not(dispatch))]
     {
         let _ = (cpu, name, entry, arg);
         Err(KernelError::NotImplemented {
             feature: "kernel threads on this architecture",
         })
     }
-    #[cfg(all(target_arch = "x86_64", target_os = "none"))]
+    #[cfg(dispatch)]
     {
         if !dispatching(cpu) {
             return Err(KernelError::InvalidArgument {
@@ -744,7 +779,17 @@ unsafe fn arch_switch(prev: *const Task, next: *const Task) {
 
         switch::switch_stacks((*prev).saved_sp.get(), *(*next).saved_sp.get());
     }
-    #[cfg(not(all(target_arch = "x86_64", target_os = "none")))]
+    // RISC-V: the address space, then the stacks. Kernel tasks carry the
+    // kernel root; user state (FP, tp) comes with user mode.
+    #[cfg(all(target_arch = "riscv64", dispatch))]
+    // SAFETY: as above.
+    unsafe {
+        use crate::arch::riscv64::switch;
+        (*(*prev).arch.get()).root = switch::current_root();
+        switch::switch_address_space((*(*next).arch.get()).root);
+        switch::switch_stacks((*prev).saved_sp.get(), *(*next).saved_sp.get());
+    }
+    #[cfg(not(dispatch))]
     let _ = (prev, next);
 }
 
@@ -1029,7 +1074,11 @@ fn kick_cpu(cpu: usize) {
             crate::arch::x86_64::apic::SCHED_WAKE_VECTOR,
         );
     }
-    #[cfg(not(all(target_arch = "x86_64", target_os = "none")))]
+    #[cfg(all(target_arch = "riscv64", dispatch))]
+    if Some(cpu) != this_cpu() {
+        crate::arch::riscv64::switch::kick(cpu);
+    }
+    #[cfg(not(dispatch))]
     let _ = cpu;
 }
 
@@ -1473,7 +1522,20 @@ extern "C" fn idle_entry(_: usize) {
                 x86_64::instructions::interrupts::enable_and_hlt();
             }
         }
-        #[cfg(not(all(target_arch = "x86_64", target_os = "none")))]
+        #[cfg(all(target_arch = "riscv64", dispatch))]
+        {
+            use crate::arch::riscv64::switch;
+            switch::irq_save();
+            if this_cpu().is_some_and(|cpu| {
+                has_runnable(cpu) || pull_dl(cpu, false) || pull(cpu, true, false)
+            }) {
+                switch::irq_enable();
+                schedule();
+            } else {
+                switch::wait_for_interrupt();
+            }
+        }
+        #[cfg(not(dispatch))]
         core::hint::spin_loop();
     }
 }

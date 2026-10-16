@@ -10,6 +10,7 @@ pub mod entry;
 pub mod serial;
 #[cfg(feature = "smp")]
 pub mod smp;
+pub mod switch;
 pub mod usermode;
 
 // Re-export context, PLIC, and timer from parent riscv module
