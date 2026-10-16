@@ -816,6 +816,13 @@
 
 ### Fixed
 
+- **AArch64 boot sets up EL1 and EL2 properly (N-177, HA-01, HA-14).** The EL2 path wrote 0 to
+  SCTLR_EL1, clearing its RES1 bits, and a direct EL1 entry never wrote it; both (and secondary
+  CPUs) now write the ARMv8.0 RES1 value with the MMU off. The EL2 drop also stops trapping
+  FP/SIMD and coprocessor accesses and lets EL1 read the real MIDR/MPIDR (CPTR_EL2, HSTR_EL2,
+  VPIDR_EL2, VMPIDR_EL2, as Linux's init_el2). The device tree pointer firmware passes in x0 is
+  kept (the first instruction overwrote it) and used, with QEMU `virt`'s fixed address for a
+  bare ELF as the fallback. Booted at EL1 and at EL2 (`-machine virtualization=on`).
 - **ramfb works on AArch64 and RISC-V.** It never initialised: the 3 MiB framebuffer was asked
   of the general allocator, which refuses runs of 512 frames or more from the bitmap (and below
   512 MiB of RAM there is no buddy region; `allocate_contiguous` serves them now), the fw_cfg

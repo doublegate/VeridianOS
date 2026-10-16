@@ -1,7 +1,23 @@
+.section ".data"
+.balign 8
+.global veridian_dtb_pa
+// Physical address of the device tree from x0 (HA-01): the Linux arm64
+// boot protocol passes it there; QEMU does so for an Image, not for a
+// bare ELF (x0 = 0, the blob then sits at the start of RAM).
+veridian_dtb_pa:
+    .dword 0
+
+// SCTLR_EL1 with the MMU and caches off (HA-14/HA-15, N-177): only the
+// bits that are RES1 in ARMv8.0 (LSMAOE, nTLSMD, SPAN, EIS, TSCXT, EOS),
+// little-endian, no alignment checks. Writing 0 cleared those RES1 bits.
+.equ VERIDIAN_SCTLR_EL1_MMU_OFF, 0x30D00800
+
 .section ".text.boot"
 .global _start
 
 _start:
+    // x20 keeps x0 (the device tree) through the EL2 -> EL1 drop.
+    mov x20, x0
     // Check current exception level
     mrs x0, CurrentEL
     and x0, x0, #0xC
@@ -30,15 +46,30 @@ el2_entry:
     mov x0, #3
     msr cnthctl_el2, x0
     msr cntvoff_el2, xzr
+
+    // EL2 state the EL1 kernel relies on (HA-14, as Linux's init_el2):
+    // FP/SIMD not trapped (CPTR_EL2 RES1 bits only, TFP = 0), no
+    // coprocessor traps, and EL1 reads the real MIDR/MPIDR.
+    mov x0, #0x33ff
+    msr cptr_el2, x0
+    msr hstr_el2, xzr
+    mrs x0, midr_el1
+    msr vpidr_el2, x0
+    mrs x0, mpidr_el1
+    msr vmpidr_el2, x0
     
-    // Configure SCTLR_EL1 (safe defaults)
-    mov x0, #0x0
+    // SCTLR_EL1: RES1 bits, MMU and caches off
+    ldr x0, =VERIDIAN_SCTLR_EL1_MMU_OFF
     msr sctlr_el1, x0
     
     // Return to EL1
     eret
 
 el1_entry:
+    // Entered at EL1 directly, SCTLR_EL1 holds whatever firmware left.
+    ldr x0, =VERIDIAN_SCTLR_EL1_MMU_OFF
+    msr sctlr_el1, x0
+    isb
     // Enable FP/NEON - LLVM may emit SIMD instructions (e.g. movi/str q0
     // for buffer zeroing). Without this, those instructions trap silently.
     mov x0, #(3 << 20)
@@ -92,6 +123,10 @@ el1_entry:
     str xzr, [x0], #8
     b 1b
 2:
+
+    // The device tree pointer, now that nothing will clear it.
+    adrp x0, veridian_dtb_pa
+    str x20, [x0, :lo12:veridian_dtb_pa]
     
     // Call Rust main
     bl _start_rust
@@ -123,9 +158,20 @@ veridian_secondary_entry:
     mov x1, #3
     msr cnthctl_el2, x1
     msr cntvoff_el2, xzr
-    msr sctlr_el1, xzr
+    mov x1, #0x33ff
+    msr cptr_el2, x1
+    msr hstr_el2, xzr
+    mrs x1, midr_el1
+    msr vpidr_el2, x1
+    mrs x1, mpidr_el1
+    msr vmpidr_el2, x1
+    ldr x1, =VERIDIAN_SCTLR_EL1_MMU_OFF
+    msr sctlr_el1, x1
     eret
 3:
+    ldr x1, =VERIDIAN_SCTLR_EL1_MMU_OFF
+    msr sctlr_el1, x1
+    isb
     mov x1, #(3 << 20)
     msr cpacr_el1, x1
     isb
@@ -140,9 +186,3 @@ veridian_secondary_entry:
 4:
     wfe
     b 4b
-
-.section .bss
-.align 16
-_stack_bottom:
-    .space 0x4000
-_stack_top:

@@ -21,9 +21,6 @@ extern "C" {
     fn veridian_secondary_entry();
 }
 
-/// Where QEMU puts the device tree for a bare-metal ELF on `virt`.
-const QEMU_VIRT_DTB_PA: u64 = 0x4000_0000;
-
 /// PSCI conduit found during enumeration.
 static CONDUIT: spin::Once<Conduit> = spin::Once::new();
 
@@ -33,9 +30,9 @@ const MPIDR_AFF_MASK: u64 = 0x00FF_FFFF;
 /// MPIDR affinities of the usable secondary CPUs, in device tree order.
 pub fn enumerate_secondaries() -> Vec<u32> {
     let mut cpus = Vec::new();
-    // SAFETY: on QEMU virt the blob is at the start of RAM, identity
-    // mapped; from_phys validates the header before reading further.
-    let Some(fdt) = (unsafe { crate::arch::fdt::Fdt::from_phys(QEMU_VIRT_DTB_PA) }) else {
+    // SAFETY: the blob firmware passed (or QEMU virt's), reached through
+    // the physical map; from_phys validates the header before reading on.
+    let Some(fdt) = (unsafe { crate::arch::fdt::Fdt::from_phys(super::boot::dtb_pa()) }) else {
         crate::println!("[SMP] No device tree found: secondary CPUs not started");
         return cpus;
     };

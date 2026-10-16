@@ -203,8 +203,8 @@ Still open:
 
 - **AArch64 runs with the MMU and caches off (N-28, HA-16).** All memory is treated as Device
   memory, so the filesystems use `fs::bare_lock`, which does not actually lock. This blocks SMP
-  work and EL0 (user mode) on AArch64. The EL2 entry leaves several EL2 registers unset and writes
-  SCTLR_EL1 = 0 over its RES1 bits (N-177, HA-14).
+  work and EL0 (user mode) on AArch64. (Since v0.27 the boot sets SCTLR_EL1's RES1 bits and the
+  EL2 state the kernel relies on, N-177, HA-14, and uses the device tree firmware passes, HA-01.)
 - **RISC-V runs static ELF programs, without a C library yet (ADR 0013, ADR 0014).** Paging is
   on, the kernel runs in the upper half, and programs from the VFS run in U-mode as dispatcher
   tasks with system calls, page faults and fault-tolerant user copies. Not yet: a RISC-V C

@@ -8,6 +8,28 @@ use core::arch::global_asm;
 // Include the assembly boot code
 global_asm!(include_str!("boot.S"));
 
+extern "C" {
+    /// The device tree pointer boot.S saved from x0 (0 if none was passed).
+    static veridian_dtb_pa: u64;
+}
+
+/// Where QEMU puts the device tree for a bare-metal ELF on `virt`, which it
+/// does not pass in x0.
+const QEMU_VIRT_DTB_PA: u64 = 0x4000_0000;
+
+/// The device tree's physical address: the one firmware passed in x0, or
+/// QEMU `virt`'s fixed location for a bare ELF (HA-01).
+pub fn dtb_pa() -> u64 {
+    // SAFETY: written once by boot.S before any Rust code runs; read-only
+    // afterwards.
+    let passed = unsafe { core::ptr::addr_of!(veridian_dtb_pa).read_volatile() };
+    if passed != 0 {
+        passed
+    } else {
+        QEMU_VIRT_DTB_PA
+    }
+}
+
 /// Rust entry of a secondary CPU (from `veridian_secondary_entry` in
 /// boot.S, which already set the stack and TPIDR_EL1). Defined in every
 /// build because boot.S references it; CPUs are only started with the
