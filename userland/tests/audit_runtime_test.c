@@ -289,7 +289,7 @@ static void *alloc_worker(void *arg)
             size_t sz = 1 + (seed >> 8) % 1500;
             slots[k] = (seed & 7) == 0 ? aligned_alloc(64, sz) : malloc(sz);
             if (!slots[k])
-                return (void *)1;
+                return (void *)(long)(i + 1); /* the failing iteration */
             memset(slots[k], k, sz);
         }
     }
@@ -303,20 +303,36 @@ static void test_allocator(void)
     pthread_t t[4];
     int ok = 1;
     int created = 0;
+    int create_err = 0, join_err = 0;
+    long failed_at = 0;
     /* Join only the threads that were created: t[i] is unset after a
      * failed pthread_create (review of the v0.26.0 stack, PR #9). */
     for (int i = 0; i < 4; i++) {
-        if (pthread_create(&t[created], NULL, alloc_worker, (void *)(long)(i + 1)) != 0)
+        int e = pthread_create(&t[created], NULL, alloc_worker, (void *)(long)(i + 1));
+        if (e != 0) {
             ok = 0;
-        else
+            create_err = e;
+        } else {
             created++;
+        }
     }
     for (int i = 0; i < created; i++) {
         void *r = NULL;
-        if (pthread_join(t[i], &r) != 0 || r)
+        int e = pthread_join(t[i], &r);
+        if (e != 0) {
             ok = 0;
+            join_err = e;
+        } else if (r) {
+            ok = 0;
+            failed_at = (long)r;
+        }
     }
-    report("malloc_threads_4x20000", ok, "allocation failed or thread error");
+    /* Which step failed: thread creation, join, or a NULL allocation (and
+     * at which iteration of the worker). */
+    static char why[96];
+    snprintf(why, sizeof(why), "created %d create err %d join err %d alloc NULL at iter %ld",
+             created, create_err, join_err, failed_at);
+    report("malloc_threads_4x20000", ok, why);
 
     void *p = aligned_alloc(4096, 100);
     ok = p && ((unsigned long)p & 4095) == 0;
