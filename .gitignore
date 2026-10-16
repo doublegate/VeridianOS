@@ -74,8 +74,8 @@ WARP.md
 # Cargo/Rust user directories. .cargo/ here is a whole Cargo home (bin/,
 # registry caches, env scripts); only its config.toml, the project's build
 # settings, is tracked, so CI and fresh clones build with the same flags.
-.cargo/*
-!.cargo/config.toml
+**/.cargo/*
+!**/.cargo/config.toml
 .rustup/
 
 # User configuration directories
