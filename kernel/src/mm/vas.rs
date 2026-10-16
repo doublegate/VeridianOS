@@ -195,6 +195,16 @@ pub fn map_mmio(phys: u64, size: usize) -> Result<usize, KernelError> {
     Ok(super::phys_to_virt_addr(phys) as usize)
 }
 
+/// The instruction-cache step of [`VirtualAddressSpace::sync_code`], for a
+/// caller that cleaned several ranges with
+/// [`VirtualAddressSpace::clean_code`].
+pub fn sync_icache() {
+    #[cfg(all(target_arch = "aarch64", target_os = "none"))]
+    crate::arch::aarch64::sync_icache_all();
+    #[cfg(all(target_arch = "riscv64", target_os = "none"))]
+    crate::arch::riscv::sbi::remote_fence_i_all();
+}
+
 /// Free all user-space page table frames in a page table hierarchy.
 ///
 /// Walks the L4 table and for each **user-space** L4 entry (indices 0..256),
@@ -1330,6 +1340,47 @@ impl VirtualAddressSpace {
     pub fn set_page_table(&self, root_phys_addr: u64) {
         self.page_table_root
             .store(root_phys_addr, Ordering::Release);
+    }
+
+    /// Prepare the user pages mapped in `start..start + len` for
+    /// instruction fetch after the kernel wrote them through the physical
+    /// map: on AArch64 their data cache lines are cleaned to the point of
+    /// unification (HA-25; nothing on a core with CTR_EL0.IDC). Unmapped
+    /// pages are skipped. [`Self::sync_code`] does this and the
+    /// instruction-cache step; a caller with several ranges cleans each and
+    /// syncs once.
+    pub fn clean_code(&self, start: u64, len: u64) {
+        #[cfg(all(target_arch = "aarch64", target_os = "none"))]
+        {
+            let root = self.get_page_table();
+            if root == 0 || len == 0 {
+                return;
+            }
+            // SAFETY: the address space's own root; only read.
+            let mapper = unsafe { create_mapper_from_root(root) };
+            let end = start.saturating_add(len);
+            let mut page = start & !0xFFF;
+            while page < end {
+                if let Ok((frame, _)) = mapper.translate_page(VirtualAddress(page)) {
+                    let from = page.max(start);
+                    let to = (page + 0x1000).min(end);
+                    let kva = super::phys_to_virt_addr((frame.as_u64() << 12) + (from - page));
+                    crate::arch::aarch64::clean_dcache_to_pou(kva as usize, (to - from) as usize);
+                }
+                page += 0x1000;
+            }
+        }
+        #[cfg(not(all(target_arch = "aarch64", target_os = "none")))]
+        let _ = (start, len);
+    }
+
+    /// Make what the kernel wrote to the user pages in `start..start + len`
+    /// visible to instruction fetch on every CPU: [`Self::clean_code`],
+    /// then the instruction caches (AArch64) or `fence.i` on every hart
+    /// (RISC-V). Nothing on x86_64, whose instruction fetch is coherent.
+    pub fn sync_code(&self, start: u64, len: u64) {
+        self.clean_code(start, len);
+        sync_icache();
     }
 
     /// Get page table root

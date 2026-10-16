@@ -72,6 +72,18 @@ pub unsafe fn copy_page(dst: *mut u8, src: *const u8) {
     }
 }
 
+/// The start of every cache line of size `line` (a power of two) that
+/// `addr..addr + len` touches, for cache maintenance by address.
+pub fn cache_line_starts(addr: usize, len: usize, line: usize) -> impl Iterator<Item = usize> {
+    let first = addr & !(line - 1);
+    let end = if len == 0 {
+        first
+    } else {
+        addr.saturating_add(len)
+    };
+    (first..end).step_by(line)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -102,5 +114,18 @@ mod tests {
         assert_eq!(&p.0[1][..], &src[..]);
         assert!(p.0[0].iter().all(|&b| b == 0x11));
         assert!(p.0[2].iter().all(|&b| b == 0x22));
+    }
+
+    #[test]
+    fn cache_line_starts_cover_the_range_from_its_first_line() {
+        // 0x1030..0x1080: the end is exclusive, so not the line at 0x1080.
+        let v: alloc::vec::Vec<usize> = cache_line_starts(0x1030, 0x50, 64).collect();
+        assert_eq!(v, [0x1000, 0x1040]);
+        let v: alloc::vec::Vec<usize> = cache_line_starts(0x1030, 0x51, 64).collect();
+        assert_eq!(v, [0x1000, 0x1040, 0x1080]);
+        assert_eq!(cache_line_starts(0x1000, 64, 64).count(), 1);
+        assert_eq!(cache_line_starts(0x1000, 65, 64).count(), 2);
+        assert_eq!(cache_line_starts(0x1000, 0, 64).count(), 0);
+        assert_eq!(cache_line_starts(0x2000, 4096, 64).count(), 64);
     }
 }

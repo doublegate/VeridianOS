@@ -2,6 +2,16 @@
 
 ### Added
 
+- **Cache maintenance for user code on AArch64 (HA-25); instruction-cache sync for executable
+  mappings on both AArch64 and RISC-V.** The kernel cleaned no data cache lines before user code
+  ran, relying on QEMU's CTR_EL0.IDC. Code it writes is now cleaned to the point of unification
+  (`dc cvau`) unless CTR_EL0.IDC is set, and the instruction caches are invalidated unless
+  CTR_EL0.DIC is set (`VirtualAddressSpace::sync_code`). This covers the loader, mmap of a file with
+  PROT_EXEC and mprotect adding PROT_EXEC; the last two had no instruction-cache sync at all, on
+  RISC-V either (now `fence.i` on every hart). QEMU models no caches, so stale code cannot be shown
+  there: the boot test `aarch64_dcache_clean_to_pou` runs the clean over a user code page and then
+  the code, and a host test covers the line arithmetic. AArch64 55/55. ADR 0016 amended.
+
 - **ASIDs on AArch64 (HA-26).** Each user address space gets an address-space identifier
   (`mm::asid`, 16-bit where the CPU has them), so switching address spaces no longer invalidates
   the TLB: other spaces' entries stay, tagged with their own ASIDs. An ASID is released with a

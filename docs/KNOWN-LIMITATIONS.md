@@ -506,7 +506,10 @@ order are in `ref-docs/HARDWARE-X86_64.md`, `ref-docs/HARDWARE-AARCH64.md` and
     (ADR 0015, HA-17), and it has no PE/COFF header for UEFI.
   - **Platform devices.** Hard-codes the QEMU PL011 UART, GICv2 addresses and a 128 MiB RAM layout
     (HA-05, HA-07, HA-17), and supports no GICv3 or PCIe (HA-20).
-  - **Caches and CPU start.** Has no cache maintenance anywhere (HA-25), and can start secondary
+  - **Caches and CPU start.** Maintains the caches for its boot page tables and for code it writes
+    for user programs (cleaned to the point of unification unless CTR_EL0.IDC, instruction caches
+    invalidated unless CTR_EL0.DIC), but not for DMA buffers, which QEMU keeps coherent (HA-25).
+    QEMU models no caches, so none of it is tested against stale data. It can start secondary
     CPUs only through PSCI, not the Raspberry Pi 4's spin-table (HA-22).
 - **RISC-V:**
   - **Boot.** Has no Image header, so U-Boot `booti` and EFI cannot load it (HR-03). (BSS is

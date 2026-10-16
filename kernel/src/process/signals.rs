@@ -1152,7 +1152,7 @@ mod generic {
         // SAFETY: the page just mapped for the trampoline, unused by
         // anything else; 8 bytes fit.
         unsafe { core::ptr::copy_nonoverlapping(TRAMPOLINE.as_ptr(), dst, TRAMPOLINE.len()) };
-        crate::arch::riscv::sbi::remote_fence_i_all();
+        vas.sync_code(page.as_u64(), TRAMPOLINE.len() as u64);
         process.sigtramp.store(page.as_u64(), Ordering::Release);
         Some(page.as_u64())
     }

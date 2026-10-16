@@ -90,6 +90,17 @@ by a frame record; handlers return to the C library's SA_RESTORER, which musl al
 The boot test `user_signal_handler_round_trip` has the handler rewrite a saved register in its
 `ucontext` and checks that `rt_sigreturn` restores it; it fails with the restore skipped.
 
+## Amendment (2026-10-16): cache maintenance for user code (HA-25)
+
+Decision 6 relied on CTR_EL0.IDC. Code the kernel writes for user programs is now cleaned to the
+point of unification (`dc cvau` through the physical map, `VirtualAddressSpace::clean_code`) unless
+CTR_EL0.IDC is set, and the instruction caches are invalidated (`ic ialluis`) unless CTR_EL0.DIC is
+set (`sync_icache_all`). This happens after the loader maps a program's executable pages, when an
+mmap with PROT_EXEC installs a file's pages, when mprotect adds PROT_EXEC (Linux syncs an
+executable page as it installs it), and for the boot tests' code pages. The mmap and mprotect cases
+were missing on RISC-V too, which now runs `fence.i` on every hart there. Code a program writes
+for itself is its own to sync (`__clear_cache`).
+
 ## Amendment (2026-10-16): ASIDs (HA-26)
 
 Decision 4's TLB invalidation on every address-space switch is gone. Each user page-table root

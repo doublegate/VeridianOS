@@ -281,6 +281,7 @@ pub fn load(
 ) -> Result<Loaded, crate::error::KernelError> {
     let (binary, node, data, program_plan) = program;
     map_image(vas, node, data, program_plan)?;
+    let mut interpreter_plan = None;
     let (start, base) = match interpreter {
         Some((interp, interp_node, interp_data)) => {
             let bad = |_| crate::error::KernelError::InvalidArgument {
@@ -291,17 +292,25 @@ pub fn load(
             let at = vas.reserve_mmap_area(size as usize)?;
             let interp_plan = plan(interp, interp_data.len(), at.as_u64()).map_err(bad)?;
             map_image(vas, interp_node, interp_data, &interp_plan)?;
-            (interp_plan.entry, interp_plan.bias)
+            let entry = (interp_plan.entry, interp_plan.bias);
+            interpreter_plan = Some(interp_plan);
+            entry
         }
         None => (program_plan.entry, 0),
     };
-    // RISC-V fetches instructions incoherently with stores: the program's
-    // code must be fenced on every hart that may run it.
-    #[cfg(all(target_arch = "riscv64", target_os = "none"))]
-    crate::arch::riscv::sbi::remote_fence_i_all();
-    // AArch64 likewise needs its instruction caches made coherent.
-    #[cfg(all(target_arch = "aarch64", target_os = "none"))]
-    crate::arch::aarch64::sync_icache_all();
+    // Instruction fetch is not coherent with the kernel's stores on
+    // AArch64 and RISC-V: the executable pages are cleaned, then every
+    // CPU's instruction side made to see them (HA-25).
+    for p in program_plan.pages.iter().chain(
+        interpreter_plan
+            .as_ref()
+            .map_or(&[][..], |plan| &plan.pages[..]),
+    ) {
+        if p.flags & PF_X != 0 {
+            vas.clean_code(p.vaddr, 4096);
+        }
+    }
+    crate::mm::vas::sync_icache();
     Ok(Loaded {
         start,
         aux: super::dynamic::ProgramAux {

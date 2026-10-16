@@ -122,15 +122,57 @@ pub fn disable_interrupts() -> impl Drop {
     }
 }
 
-/// Make code just written through the data side visible to instruction
-/// fetch on every CPU (after loading a program): invalidate the
-/// instruction caches to the inner-shareable domain. This relies on the
-/// data cache being coherent with fetch at the point of unification
-/// (CTR_EL0.IDC, which QEMU reports); a core without it also needs the
-/// written range cleaned with `dc cvau` first (HA-25).
+/// CTR_EL0, the cache type register.
+fn ctr_el0() -> u64 {
+    let ctr: u64;
+    // SAFETY: reading CTR_EL0 has no side effects.
+    unsafe { core::arch::asm!("mrs {0}, ctr_el0", out(reg) ctr, options(nomem, nostack)) };
+    ctr
+}
+
+/// CTR_EL0.IDC: data written need not be cleaned to the point of
+/// unification for instruction fetch to see it.
+const CTR_IDC: u64 = 1 << 28;
+/// CTR_EL0.DIC: the instruction caches need no invalidation for it either.
+const CTR_DIC: u64 = 1 << 29;
+
+/// Clean the data cache lines of `addr..addr + len` (kernel addresses,
+/// such as the physical map's alias of a user page) to the point of
+/// unification, so instruction fetch can see what was written there
+/// (HA-25). Nothing to do on a core with CTR_EL0.IDC; [`sync_icache_all`]
+/// must follow either way.
+pub fn clean_dcache_to_pou(addr: usize, len: usize) {
+    let ctr = ctr_el0();
+    if ctr & CTR_IDC == 0 {
+        clean_dcache_lines_to_pou(addr, len, 4 << ((ctr >> 16) & 0xF));
+    }
+}
+
+/// [`clean_dcache_to_pou`] whatever CTR_EL0.IDC says, with lines of
+/// `line` bytes (CTR_EL0.DminLine).
+pub fn clean_dcache_lines_to_pou(addr: usize, len: usize, line: usize) {
+    for a in crate::mm::page_ops::cache_line_starts(addr, len, line) {
+        // SAFETY: `dc cvau` cleans the line holding `a`, a mapped kernel
+        // address (the caller's range); it changes no data.
+        unsafe { core::arch::asm!("dc cvau, {0}", in(reg) a, options(nostack)) };
+    }
+    // SAFETY: a barrier only: the cleans complete before what follows.
+    unsafe { core::arch::asm!("dsb ish", options(nostack)) };
+}
+
+/// Make code just written (and, without CTR_EL0.IDC, cleaned with
+/// [`clean_dcache_to_pou`]) visible to instruction fetch on every CPU:
+/// invalidate the instruction caches to the inner-shareable domain, unless
+/// CTR_EL0.DIC says they need none. Another CPU synchronises its context
+/// on its next exception return to EL0.
 pub fn sync_icache_all() {
-    // SAFETY: cache maintenance and barriers only.
-    unsafe { core::arch::asm!("dsb ish", "ic ialluis", "dsb ish", "isb", options(nostack)) };
+    if ctr_el0() & CTR_DIC != 0 {
+        // SAFETY: barriers only.
+        unsafe { core::arch::asm!("dsb ish", "isb", options(nostack)) };
+    } else {
+        // SAFETY: cache maintenance and barriers only.
+        unsafe { core::arch::asm!("dsb ish", "ic ialluis", "dsb ish", "isb", options(nostack)) };
+    }
 }
 
 /// Serial initialization for compatibility with the arch-generic interface.

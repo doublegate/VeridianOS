@@ -484,6 +484,12 @@ pub fn sys_mmap(
                 let _ = memory_space.unmap_region(VirtualAddress(mapped_addr as u64));
                 return Err(e);
             }
+            // Code read from the file: instruction fetch must see it on
+            // every CPU (HA-25; Linux does this as it installs an
+            // executable page).
+            if prot & PROT_EXEC != 0 {
+                memory_space.sync_code(mapped_addr as u64, length as u64);
+            }
         }
 
         // The mapping records its file, for mremap and MADV_DONTNEED.
@@ -606,6 +612,13 @@ pub fn sys_mprotect(addr: usize, length: usize, prot: usize) -> SyscallResult {
             crate::error::KernelError::PermissionDenied { .. } => SyscallError::PermissionDenied,
             _ => SyscallError::OutOfMemory,
         })?;
+    // Pages made executable may hold what the kernel or another mapping
+    // wrote through the data side (HA-25), as Linux syncs an executable
+    // page when it is installed. A program that writes its own code still
+    // syncs it itself (`__clear_cache`).
+    if prot & PROT_EXEC != 0 {
+        memory_space.sync_code(addr as u64, length as u64);
+    }
 
     Ok(0)
 }

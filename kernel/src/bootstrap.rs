@@ -2294,6 +2294,7 @@ fn run_process_tests(passed: &mut u32, failed: &mut u32) {
             failed,
         );
         report_asid_isolation(passed, failed);
+        report_dcache_clean(passed, failed);
         report_fp_survives(fp, passed, failed);
         report_signal_round_trip(sig, passed, failed);
         let (_, status) = run_user_code(futex);
@@ -2413,6 +2414,37 @@ fn report_asid_isolation(passed: &mut u32, failed: &mut u32) {
     report_test("aarch64_asids_isolate_address_spaces", ok, passed, failed);
 }
 
+/// The data-cache clean for instruction fetch (HA-25), which QEMU's
+/// CTR_EL0.IDC makes unnecessary there: run it anyway over a user code
+/// page's alias in the physical map, then run that code. A bad address or
+/// line size faults or skips lines; the program must still exit with its pid.
+#[cfg(all(feature = "alloc", target_arch = "aarch64"))]
+fn report_dcache_clean(passed: &mut u32, failed: &mut u32) {
+    let code = crate::arch::aarch64::usermode::test_programs()[0];
+    let ok = build_user_code(code).is_some_and(|pid| {
+        let Some(process) = crate::process::table::get_process(pid) else {
+            return false;
+        };
+        {
+            let vas = process.memory_space.lock();
+            // SAFETY: the process's root, through the physical map; only read.
+            let m = unsafe { crate::mm::vas::create_mapper_from_root_pub(vas.get_page_table()) };
+            let Ok((frame, _)) = m.translate_page(crate::mm::VirtualAddress(0x40_0000)) else {
+                return false;
+            };
+            let kva = crate::mm::phys_to_virt_addr(frame.as_u64() << 12) as usize;
+            let ctr: u64;
+            // SAFETY: reading CTR_EL0 has no side effects.
+            unsafe { core::arch::asm!("mrs {0}, ctr_el0", out(reg) ctr, options(nomem, nostack)) };
+            crate::arch::aarch64::clean_dcache_lines_to_pou(kva, 4096, 4 << ((ctr >> 16) & 0xF));
+            crate::arch::aarch64::sync_icache_all();
+        }
+        drop(process);
+        crate::process::run_and_wait_all(&[pid])[0] == Some((pid.0 & 0xFF) as i32)
+    });
+    report_test("aarch64_dcache_clean_to_pou", ok, passed, failed);
+}
+
 /// The signal test program (`test_programs()[4]`): a SIGUSR1 handler that
 /// rewrites a saved register in its ucontext; exit status 49 means the
 /// frame, the handler's arguments, the return path and rt_sigreturn's
@@ -2512,10 +2544,7 @@ fn build_user_code(code: &[u8]) -> Option<crate::process::ProcessId> {
                 unsafe { core::ptr::copy_nonoverlapping(code.as_ptr(), dst, code.len()) };
                 // Every CPU fetches what was just written (instruction
                 // fetch is not coherent with stores without maintenance).
-                #[cfg(target_arch = "riscv64")]
-                crate::arch::riscv::sbi::remote_fence_i_all();
-                #[cfg(target_arch = "aarch64")]
-                crate::arch::aarch64::sync_icache_all();
+                vas.sync_code(CODE, code.len() as u64);
                 true
             }
             _ => false,
