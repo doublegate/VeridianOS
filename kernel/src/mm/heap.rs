@@ -1,9 +1,8 @@
 //! Kernel heap
 //!
-//! The backing memory and initialisation of the global allocator: a
-//! `linked_list_allocator::LockedHeap` on x86_64 and RISC-V, and a bump
-//! allocator on AArch64 until its MMU is on (N-28; MEM-SEC-03 tracks giving
-//! it a real heap). The
+//! The backing memory and initialisation of the global allocator, a
+//! `linked_list_allocator::LockedHeap` on every architecture (AArch64 used a
+//! bump allocator until its MMU was on, N-28, MEM-SEC-03). The
 //! slab allocator that used to live here was never instantiated -- every
 //! request went to its fallback -- and was removed (MEM-INC-02).
 

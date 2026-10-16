@@ -327,9 +327,9 @@ pub mod arm {
     }
 }
 
-// `native`: the format of the target architecture. AArch64 tables are not
-// loaded until its MMU is turned on (N-28, ADR 0015); building them in the
-// Arm format from now keeps them right for that.
+// `native`: the format of the target architecture. On AArch64 the boot
+// tables are built in boot.S (ADR 0015); the ones built here are process
+// address spaces, which are loaded once AArch64 has EL0.
 #[cfg(target_arch = "aarch64")]
 pub use arm as native;
 #[cfg(target_arch = "riscv64")]

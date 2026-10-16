@@ -39,6 +39,27 @@ fn set_compare(deadline: u64) {
     }
 }
 
+/// Start this CPU's tick at the period the boot CPU configured (a secondary
+/// CPU). The timer interrupt is a PPI, whose enable and priority registers
+/// are banked per CPU in GICv2, so each CPU enables its own. The caller
+/// unmasks IRQs afterwards.
+pub fn start_secondary() -> crate::error::KernelResult<()> {
+    let period = PERIOD.load(Ordering::Relaxed);
+    if period == 0 {
+        return Ok(());
+    }
+    let first = counter() + period;
+    crate::arch::percpu::set_timer_next(first);
+    set_compare(first);
+    // SAFETY: enables this CPU's EL1 virtual timer with its interrupt
+    // unmasked; its vectors and GIC CPU interface are set up.
+    unsafe {
+        core::arch::asm!("msr cntv_ctl_el0, {0}", "isb", in(reg) CTL_ENABLE, options(nostack));
+    }
+    super::gic::set_irq_priority(super::exceptions::VIRTUAL_TIMER_INTID, 0x80)?;
+    super::gic::enable_irq(super::exceptions::VIRTUAL_TIMER_INTID)
+}
+
 /// Start a periodic tick at `hz`: arm the virtual timer and enable its PPI
 /// at the GIC. The vector table must be installed and the GIC initialized;
 /// the caller unmasks IRQs afterwards.

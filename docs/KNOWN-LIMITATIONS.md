@@ -204,9 +204,9 @@ Still open:
 - **AArch64 has its MMU on, but still carries the MMU-off workarounds (N-28, HA-16).** Since v0.27
   the kernel runs in the upper half with the MMU and caches on (ADR 0015), so exclusive loads and
   stores work, and the filesystems use real locks (`fs::bare_lock`, which did not lock, is gone).
-  The kernel heap is the same linked-list allocator as on the other architectures. Not yet
-  removed: the reduced secondary-CPU stage (secondaries park instead of dispatching). There is no
-  EL0 (user mode) yet. (The boot also sets SCTLR_EL1's RES1 bits
+  The kernel heap is the same linked-list allocator as on the other architectures, and secondary
+  CPUs take locks and run their own timer tick. They do not run tasks: AArch64 has no dispatcher
+  (task switching) yet, and no EL0 (user mode). (The boot also sets SCTLR_EL1's RES1 bits
   and the EL2 state the kernel relies on, N-177, HA-14, and uses the device tree firmware passes,
   HA-01.)
 - **RISC-V runs static ELF programs, without a C library yet (ADR 0013, ADR 0014).** Paging is

@@ -828,6 +828,13 @@
 
 ### Removed
 
+- **The reduced AArch64 secondary-CPU stage (N-28 fixed).** AArch64 secondaries parked with
+  interrupts masked, taking no lock and no timer, because exclusives were unreliable with the MMU
+  off. They now enable their own timer PPI (banked per CPU in GICv2), tick, and idle with
+  interrupts on. They still run no tasks; AArch64 has no dispatcher yet. Boot test
+  `smp_cpus_online_and_ticking` requires ticks on every secondary on AArch64 too (it failed
+  before): 40/40 on four CPUs.
+
 - **The AArch64 bump allocator (MEM-SEC-03, N-28 part).** AArch64 used a heap that never reused
   freed memory, because the linked-list allocator's lock needs exclusives, which hung with the MMU
   off. With the MMU on it uses the same interrupt-safe `LockedHeap` as x86_64 and RISC-V, and

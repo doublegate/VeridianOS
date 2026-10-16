@@ -5,12 +5,11 @@
 //! RAM for a bare-metal ELF. A secondary enters `veridian_secondary_entry`
 //! (boot.S) with the MMU and caches off.
 //!
-//! Reduced stage S1 (ADR 0004): until the MMU is on (N-28), load/store
-//! exclusive -- every lock and atomic read-modify-write -- is not
-//! architecturally reliable across CPUs on the Device memory the kernel
-//! runs from. A secondary therefore only installs its vectors and GIC CPU
-//! interface, reports ONLINE with plain stores, and parks with interrupts
-//! masked: no lock, no timer, no shared state.
+//! A secondary switches its MMU on in boot.S (ADR 0015), sets up its GIC
+//! CPU interface and its own timer tick, and idles with interrupts on. It
+//! does not run tasks yet: AArch64 has no dispatcher (sprint E). Until its
+//! MMU was on (N-28) a secondary could take no lock and ran a reduced stage
+//! that parked with interrupts masked.
 
 use alloc::vec::Vec;
 
@@ -84,12 +83,12 @@ pub fn start_ap(hw: u32, args: &'static ApBootArgs) -> Result<(), &'static str> 
     }
 }
 
-/// This CPU's local setup: the GIC CPU interface (boot.S installed the
-/// exception vectors). No timer and no lock before the MMU is on (see the
-/// module comment).
+/// This CPU's local setup: the GIC CPU interface and its timer tick (boot.S
+/// installed the exception vectors and turned the MMU on).
 pub fn ap_init() -> Result<(), &'static str> {
     crate::arch::smp_boot::ap_stage(1);
     super::gic::init_secondary_cpu_interface();
+    super::timer::start_secondary().map_err(|_| "timer start failed")?;
     crate::arch::smp_boot::ap_stage(2);
     Ok(())
 }
@@ -98,11 +97,12 @@ pub fn ap_init() -> Result<(), &'static str> {
 /// (RISC-V) are synchronised across CPUs by the architecture.
 pub fn serve_boot_handshake() {}
 
-/// Park with interrupts masked (S1 before N-28).
+/// Idle with interrupts enabled (the timer ticks here); no tasks run on a
+/// secondary until AArch64 has a dispatcher.
 pub fn idle() -> ! {
     loop {
-        // SAFETY: waits for an event; interrupts stay masked (DAIF set at
-        // entry).
-        unsafe { core::arch::asm!("wfe", options(nomem, nostack)) };
+        // SAFETY: unmasks IRQs on this CPU, whose vectors, GIC CPU interface
+        // and timer are set up, then waits for one.
+        unsafe { core::arch::asm!("msr daifclr, #2", "wfi", options(nomem, nostack)) };
     }
 }

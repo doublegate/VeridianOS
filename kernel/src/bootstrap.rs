@@ -2955,8 +2955,7 @@ fn run_usercopy_tests(passed: &mut u32, failed: &mut u32) {
                 // SAFETY: as above.
                 ok &= unsafe { core::ptr::read_volatile(&(*arch_cpu_ptr(other)).hw_id) } != hw;
             }
-            // AArch64 secondaries run no timer before the MMU is on (N-28).
-            if cpu > 0 && !cfg!(target_arch = "aarch64") {
+            if cpu > 0 {
                 ok &= ticks > 0;
             }
         }
