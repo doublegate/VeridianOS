@@ -575,9 +575,14 @@ pub fn sys_thread_join(tid: usize, retval_ptr: usize) -> SyscallResult {
                     return Err(SyscallError::InvalidState); // cannot join
                                                             // detached thread
                 }
-                // Thread has exited, clean it up
-                if crate::process::lifecycle::cleanup_thread(&current, target_tid).is_err() {
-                    return Err(SyscallError::InvalidState);
+                // Thread has exited, clean it up. On another CPU the reaper
+                // may have removed it since the lookup above
+                // (`user_task_reaped`): it has finished either way, so that is
+                // not an error. Treating it as one made pthread_join return
+                // EINVAL now and then with four CPUs (ISSUE-0023).
+                match crate::process::lifecycle::cleanup_thread(&current, target_tid) {
+                    Ok(()) | Err(crate::error::KernelError::ThreadNotFound { .. }) => {}
+                    Err(_) => return Err(SyscallError::InvalidState),
                 }
 
                 // Return exit code to user

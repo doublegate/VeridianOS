@@ -25,7 +25,13 @@ Currently no critical issues. All 18 historical issues resolved.
 ## Open Issues
 
 ### ISSUE-0023: Rare `pthread_join` EINVAL in `malloc_threads_4x20000` on four CPUs
-- **Status**: OPEN (not reproduced since)
+- **Status**: RESOLVED (October 16, 2026), by analysis: the failure is too rare to reproduce on
+  demand (one run in about 40)
+- **Cause**: `sys_thread_join` read the target thread as a zombie and then called
+  `cleanup_thread`; on another CPU the reaper (`user_task_reaped`) could remove the thread in
+  between, so `cleanup_thread` reported ThreadNotFound and the join returned EINVAL.
+- **Fix**: an already-removed thread has finished, so ThreadNotFound there counts as joined (the
+  exit code read with the zombie state is reported).
 - **Component**: native libc allocator / threads, x86_64 SMP
 - **Reported**: October 16, 2026 (gate run on `feat/v0.27`, 4-CPU rootfs round)
 - **Description**: `audit_runtime_test` reported `FAIL malloc_threads_4x20000: allocation failed
@@ -37,9 +43,6 @@ Currently no critical issues. All 18 historical issues resolved.
   join err 22 alloc NULL at iter 0`. Every allocation succeeded; `pthread_join` returned EINVAL
   for one thread. So this is a thread-join bug (the native libc's TCB lookup, or a race between
   thread exit and join), not the allocator. The next run of the same suite passed.
-- **Next**: find why `pthread_join` (native libc `userland/libc/src/pthread.c`) can return EINVAL
-  for a thread it created: the `lookup_tcb` registry and its locking, and the kernel's join and
-  exit path on four CPUs.
 - **Also**: `rename_directory_moves_subtree` fails when the suite runs twice in one boot (the first
   run leaves its directories); harmless for the gate, which runs it once per boot.
 

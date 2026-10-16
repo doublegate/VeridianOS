@@ -916,6 +916,11 @@
 
 ### Fixed
 
+- **`pthread_join` could fail with EINVAL on several CPUs (ISSUE-0023).** `sys_thread_join` saw
+  the target as a zombie, then had the thread removed under it by the reaper on another CPU, and
+  reported the resulting ThreadNotFound as EINVAL. A thread already removed has finished, so the
+  join now succeeds. Seen once in about 40 four-CPU runs of `audit_runtime_test`.
+
 - **Console lines from several CPUs interleaved (AArch64, RISC-V).** The RISC-V `print!` and the
   AArch64 `print!` and direct UART writes took no lock, so with every hart dispatching a line from
   one CPU could land inside another's. A four-hart boot's tally came out as `Results: [P50/50
