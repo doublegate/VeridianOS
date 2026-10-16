@@ -24,7 +24,7 @@ Currently no critical issues. All 18 historical issues resolved.
 
 ## Open Issues
 
-### ISSUE-0023: Rare `malloc_threads_4x20000` failure on four CPUs
+### ISSUE-0023: Rare `pthread_join` EINVAL in `malloc_threads_4x20000` on four CPUs
 - **Status**: OPEN (not reproduced since)
 - **Component**: native libc allocator / threads, x86_64 SMP
 - **Reported**: October 16, 2026 (gate run on `feat/v0.27`, 4-CPU rootfs round)
@@ -33,8 +33,13 @@ Currently no critical issues. All 18 historical issues resolved.
   `SMP=4 scripts/run-rootfs-tests.sh` boots). The test then gave no detail; it now reports how
   many threads were created, the `pthread_create`/`pthread_join` error and the worker iteration
   that got NULL. Allocations of this size come from `sbrk` under the allocator's spinlock.
-- **Next**: on the next occurrence, read the detail line and follow that path (thread creation,
-  join, or `brk`).
+- **Seen again** (October 16, 2026, gate on the FP-state change, 4 CPUs): `created 4 create err 0
+  join err 22 alloc NULL at iter 0`. Every allocation succeeded; `pthread_join` returned EINVAL
+  for one thread. So this is a thread-join bug (the native libc's TCB lookup, or a race between
+  thread exit and join), not the allocator. The next run of the same suite passed.
+- **Next**: find why `pthread_join` (native libc `userland/libc/src/pthread.c`) can return EINVAL
+  for a thread it created: the `lookup_tcb` registry and its locking, and the kernel's join and
+  exit path on four CPUs.
 - **Also**: `rename_directory_moves_subtree` fails when the suite runs twice in one boot (the first
   run leaves its directories); harmless for the gate, which runs it once per boot.
 
