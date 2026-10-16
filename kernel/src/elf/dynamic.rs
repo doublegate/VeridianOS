@@ -141,7 +141,16 @@ pub fn aux_vector(
     let (hwcap, hwcap2) = hwcaps();
     let mut aux = Vec::with_capacity(24);
     let mut push = |t, v| aux.push(AuxVecEntry::new(t, v));
-    #[cfg(target_arch = "x86_64")]
+    // The stack a signal frame needs (x86_64 always; AArch64 and RISC-V
+    // where their frames exist).
+    #[cfg(any(
+        target_arch = "x86_64",
+        all(
+            feature = "alloc",
+            target_os = "none",
+            any(target_arch = "aarch64", target_arch = "riscv64")
+        )
+    ))]
     push(AtMinsigstksz, crate::process::signals::MIN_SIGNAL_FRAME);
     push(AtHwcap, hwcap);
     push(AtPagesz, crate::mm::PAGE_SIZE as u64);

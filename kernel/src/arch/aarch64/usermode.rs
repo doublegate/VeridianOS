@@ -186,6 +186,56 @@ core::arch::global_asm!(
     "    svc #0",
     ".global veridian_a64_user_fp_end",
     "veridian_a64_user_fp_end:",
+    // F: installs a SIGUSR1 handler (rt_sigaction 134, SA_SIGINFO |
+    // SA_RESTORER with its own rt_sigreturn stub, as musl does), sends
+    // itself SIGUSR1 (kill 129). The handler checks si_signo and writes 42
+    // into the saved x19 of its ucontext (uc_mcontext.regs[19], offset
+    // 176 + 8 + 19 * 8 = 336). After rt_sigreturn, exit(x19 + x20) = 49
+    // shows the frame, the handler's arguments, the restorer and the
+    // restored (modified) context all worked.
+    ".balign 4",
+    ".global veridian_a64_user_sig",
+    "veridian_a64_user_sig:",
+    "    mov x20, #7",
+    "    mov x19, #0",
+    "    sub sp, sp, #32",
+    "    adr x0, 3f",
+    "    str x0, [sp]",
+    "    mov x0, #0x4000000",
+    "    orr x0, x0, #4",
+    "    str x0, [sp, #8]",
+    "    adr x0, 4f",
+    "    str x0, [sp, #16]",
+    "    str xzr, [sp, #24]",
+    "    mov x0, #10",
+    "    mov x1, sp",
+    "    mov x2, #0",
+    "    mov x3, #8",
+    "    mov x8, #134",
+    "    svc #0",
+    "    cbnz x0, 2f",
+    "    mov x8, #172",
+    "    svc #0",
+    "    mov x1, #10",
+    "    mov x8, #129",
+    "    svc #0",
+    "    add x0, x19, x20",
+    "    mov x8, #94",
+    "    svc #0",
+    "2:  mov x0, #1",
+    "    mov x8, #94",
+    "    svc #0",
+    "3:  ldr w3, [x1]",
+    "    mov x4, #42",
+    "    cmp w3, #10",
+    "    b.eq 5f",
+    "    mov x4, #1",
+    "5:  str x4, [x2, #336]",
+    "    ret",
+    "4:  mov x8, #139",
+    "    svc #0",
+    ".global veridian_a64_user_sig_end",
+    "veridian_a64_user_sig_end:",
     // D: the body of an ELF test program: write(1, "A64-ELF-OK\n", 11),
     // then exit_group(argc), argc being the first word of the stack the
     // loader built.
@@ -214,6 +264,8 @@ extern "C" {
     static veridian_a64_user_sysreg_end: u8;
     static veridian_a64_user_fp: u8;
     static veridian_a64_user_fp_end: u8;
+    static veridian_a64_user_sig: u8;
+    static veridian_a64_user_sig_end: u8;
     static veridian_a64_user_elf: u8;
     static veridian_a64_user_elf_end: u8;
 }
@@ -264,8 +316,9 @@ pub fn test_elf() -> alloc::vec::Vec<u8> {
 }
 
 /// The boot-test user programs (see above): getpid round trip, page
-/// fault, EL1 system register, FP state kept across switches.
-pub fn test_programs() -> [&'static [u8]; 4] {
+/// fault, EL1 system register, FP state kept across switches, signal
+/// handler round trip.
+pub fn test_programs() -> [&'static [u8]; 5] {
     // Only the addresses of the linker symbols are taken (safe).
     [
         span(
@@ -283,6 +336,10 @@ pub fn test_programs() -> [&'static [u8]; 4] {
         span(
             core::ptr::addr_of!(veridian_a64_user_fp),
             core::ptr::addr_of!(veridian_a64_user_fp_end),
+        ),
+        span(
+            core::ptr::addr_of!(veridian_a64_user_sig),
+            core::ptr::addr_of!(veridian_a64_user_sig_end),
         ),
     ]
 }

@@ -154,6 +154,12 @@ pub struct Process {
     /// applied after it.
     pub cont_seq: AtomicU32,
 
+    /// RISC-V: the user address of the page holding the sigreturn
+    /// trampoline signal handlers return to (Linux uses its vDSO), or 0
+    /// before the first handler. Checked before every use, so a stale value
+    /// (after exec) is replaced.
+    pub sigtramp: AtomicU64,
+
     /// A stop or continue the parent has not collected with `wait` yet, as
     /// a wait status (`0x7f | sig << 8` or `0xffff`); 0 for none.
     pub job_report: AtomicU32,
@@ -408,6 +414,7 @@ impl Process {
             did_exec: core::sync::atomic::AtomicBool::new(false),
             stop_signal: AtomicU32::new(0),
             cont_seq: AtomicU32::new(0),
+            sigtramp: AtomicU64::new(0),
             job_report: AtomicU32::new(0),
             cpu_time: AtomicU64::new(0),
             memory_stats: MemoryStats::default(),

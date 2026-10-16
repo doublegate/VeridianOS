@@ -77,3 +77,15 @@ eagerly by `sched::dispatch::arch_switch` (as XSAVE on x86_64). A new program st
 and clone copy the caller's live registers. AArch64 saves v0-v31, FPCR and FPSR, and CPACR_EL1.FPEN is 11 on every CPU.
 The boot test `aarch64_user_fp_is_trapped` is replaced by `user_fp_state_survives_switches`, which
 fails with the switch disabled.
+
+## Amendment (2026-10-16): signal handlers
+
+Signals reach handlers, with the decision loop x86_64 uses (`process::signals`: default actions,
+stops, SA_RESTART, SA_ONSTACK, SA_NODEFER, SA_RESETHAND, the mask). A fault with a handler that does
+not block it is queued for that handler (`signals::queue_fault`, shared with x86_64), as on Linux,
+instead of ending the process. SA_RESTART puts the call's first argument back (the return value
+overwrote it) and rewinds the 4-byte instruction; `rt_sigreturn` itself is never restarted. AArch64 uses Linux's arm64 `rt_sigframe` (`siginfo`, then a `ucontext` whose `sigcontext` holds
+x0-x30, sp, pc and pstate, with an `fpsimd_context` record and a terminator in `__reserved`), followed
+by a frame record; handlers return to the C library's SA_RESTORER, which musl always passes.
+The boot test `user_signal_handler_round_trip` has the handler rewrite a saved register in its
+`ucontext` and checks that `rt_sigreturn` restores it; it fails with the restore skipped.

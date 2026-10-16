@@ -162,8 +162,10 @@ pub const FPE_FLTOVF: i32 = 4;
 pub const FPE_FLTUND: i32 = 5;
 pub const FPE_FLTRES: i32 = 6;
 pub const FPE_FLTINV: i32 = 7;
+pub const ILL_ILLOPC: i32 = 1;
 pub const ILL_ILLOPN: i32 = 2;
 pub const BUS_ADRALN: i32 = 1;
+pub const TRAP_BRKPT: i32 = 1;
 pub const TRAP_TRACE: i32 = 2;
 
 /// Linux `siginfo_t` (x86_64, 128 bytes): signo, errno, code, then a union
@@ -444,17 +446,15 @@ pub const UNBLOCKABLE: u64 = sig_bit(SIGKILL) | sig_bit(SIGSTOP);
 const SIG_DFL: u64 = 0;
 const SIG_IGN: u64 = 1;
 
-/// `sigaction` flags (Linux x86_64 values).
-#[cfg(target_arch = "x86_64")]
+/// `sigaction` flags (Linux values, the same on x86_64, arm64 and RISC-V;
+/// RISC-V has no SA_RESTORER, its handlers return through the kernel's
+/// trampoline).
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 const SA_RESTORER: u64 = 0x0400_0000;
-#[cfg(target_arch = "x86_64")]
 const SA_RESTART: u64 = 0x1000_0000;
-#[cfg(target_arch = "x86_64")]
 const SA_NODEFER: u64 = 0x4000_0000;
-#[cfg(target_arch = "x86_64")]
 const SA_RESETHAND: u64 = 0x8000_0000;
 /// Run the handler on the alternate signal stack (sigaltstack).
-#[cfg(target_arch = "x86_64")]
 const SA_ONSTACK: u64 = 0x0800_0000;
 
 /// `stack_t.ss_flags`: the thread is running on its alternate stack.
@@ -582,8 +582,7 @@ impl SigAltStack {
     }
 }
 
-/// Linux EINTR, as a system call returns it in rax.
-#[cfg(target_arch = "x86_64")]
+/// Linux EINTR, as a system call returns it (rax, x0, a0).
 const EINTR_RAX: u64 = (-4i64) as u64;
 
 /// What a signal does when it is not caught.
@@ -673,7 +672,7 @@ fn notify_parent_job(process: &Process, code: i32, status: i32) {
 
 /// Stop `process` with `sig`, unless a SIGCONT came after `seq` was read
 /// (the stop signal was taken before it, so the continue wins).
-#[cfg(all(feature = "alloc", target_arch = "x86_64"))]
+#[cfg(feature = "alloc")]
 fn stop_process(process: &Process, sig: usize, seq: u32) {
     if process
         .stop_signal
@@ -897,13 +896,578 @@ pub fn set_mask(process: &Process, thread: &Thread, mask: u64) -> u64 {
 
 /// Take the lowest deliverable signal off the pending sets, with its
 /// siginfo.
-#[cfg(target_arch = "x86_64")]
 fn dequeue(process: &Process, thread: &Thread) -> Option<SigInfo> {
     take_lowest(process, thread, deliverable(process, thread))
 }
 
 #[cfg(target_arch = "x86_64")]
 pub use frame::{deliver_on_return, rt_sigreturn, MIN_SIGNAL_FRAME};
+#[cfg(all(
+    feature = "alloc",
+    target_os = "none",
+    any(target_arch = "aarch64", target_arch = "riscv64")
+))]
+pub use generic::{deliver_on_return, rt_sigreturn, MIN_SIGNAL_FRAME};
+
+/// Queue a synchronous fault signal (`info`) for the current thread if it
+/// has a handler the signal is not blocked for, so the handler runs on the
+/// way back to user mode (SIGSEGV handlers, SIGFPE handlers...). Returns
+/// false when the fault must kill the process instead: the default action,
+/// ignored, or blocked (Linux forces the default for a blocked or ignored
+/// synchronous signal).
+pub fn queue_fault(info: SigInfo) -> bool {
+    #[cfg(feature = "alloc")]
+    if crate::sched::dispatch::current_owner().is_some() {
+        if let (Some(process), Some(thread)) = (super::current_process(), super::current_thread()) {
+            let sig = info.signo();
+            let handler = process.get_signal_handler(sig).unwrap_or(0);
+            let blocked = thread.sigmask.load(Ordering::Acquire) & sig_bit(sig) != 0;
+            if handler > SIG_IGN && !blocked {
+                let _ = thread.rt_queue.push(
+                    &thread.sigpending,
+                    info,
+                    Charge::of(&process),
+                    Overflow::Merge,
+                );
+                return true;
+            }
+        }
+    }
+    let _ = info;
+    false
+}
+
+/// Signal delivery to handlers on AArch64 and RISC-V (sprint E), with
+/// Linux's frames, so musl works unmodified: the decision loop is
+/// x86_64's (`frame::deliver_on_return`); the frame is each architecture's
+/// `struct rt_sigframe`.
+///
+/// - **AArch64**: `siginfo`, then a `ucontext` whose `sigcontext` holds x0-x30,
+///   sp, pc and pstate, with an `fpsimd_context` record (v0-v31, FPSR, FPCR)
+///   and a terminator in its 4 KiB `__reserved` area; a frame record (the
+///   interrupted x29, x30) follows, and x29 points at it. The handler returns
+///   to the C library's SA_RESTORER (musl `__restore_rt`).
+/// - **RISC-V**: `siginfo`, then a `ucontext` whose `sigcontext` holds pc and
+///   x1-x31 and the D-extension state (f0-f31, fcsr). RISC-V has no
+///   SA_RESTORER: Linux returns through its vDSO; here the kernel maps one page
+///   with `li a7, 139; ecall` into the process the first time it enters a
+///   handler (`Process::sigtramp`).
+///
+/// A system call a signal interrupted with EINTR is restarted with
+/// SA_RESTART by putting its first argument back (the return value
+/// overwrote it; the exception path passes it in) and rewinding the 4-byte
+/// `svc`/`ecall`.
+#[cfg(all(
+    feature = "alloc",
+    target_os = "none",
+    any(target_arch = "aarch64", target_arch = "riscv64")
+))]
+mod generic {
+    use alloc::boxed::Box;
+
+    use super::*;
+    #[cfg(target_arch = "aarch64")]
+    use crate::arch::aarch64::switch::UserFrame;
+    #[cfg(target_arch = "riscv64")]
+    use crate::arch::riscv64::switch::UserFrame;
+    use crate::syscall::userspace::{is_user_address, read_user_bytes, write_user_bytes};
+
+    /// Linux `stack_t`.
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct StackT {
+        ss_sp: u64,
+        ss_flags: i32,
+        pad: i32,
+        ss_size: u64,
+    }
+
+    /// arm64 `struct sigcontext`: 4384 bytes.
+    #[cfg(target_arch = "aarch64")]
+    #[repr(C, align(16))]
+    #[derive(Clone, Copy)]
+    struct SigContext {
+        fault_address: u64,
+        regs: [u64; 31],
+        sp: u64,
+        pc: u64,
+        pstate: u64,
+        reserved: [u8; 4096],
+    }
+
+    /// RISC-V `struct sigcontext`: pc and x1-x31, then the FP state (the
+    /// 528-byte `union __riscv_fp_state`, D layout: f0-f31 and fcsr).
+    #[cfg(target_arch = "riscv64")]
+    #[repr(C, align(16))]
+    #[derive(Clone, Copy)]
+    struct SigContext {
+        regs: [u64; 32],
+        fpregs: [u64; 32],
+        fcsr: u32,
+        fp_reserved: [u32; 67],
+    }
+
+    /// Linux `struct ucontext` (arm64 and RISC-V share the layout): the
+    /// signal mask is padded to 128 bytes (glibc's 1024-bit sigset).
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct UContext {
+        uc_flags: u64,
+        uc_link: u64,
+        uc_stack: StackT,
+        uc_sigmask: u64,
+        unused: [u64; 15],
+        uc_mcontext: SigContext,
+    }
+
+    /// Linux `struct rt_sigframe` for both.
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct RtSigFrame {
+        info: SigInfo,
+        uc: UContext,
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    const _: () = {
+        assert!(core::mem::size_of::<SigContext>() == 4384);
+        assert!(core::mem::size_of::<UContext>() == 4560);
+        assert!(core::mem::offset_of!(UContext, uc_mcontext) == 176);
+        assert!(core::mem::size_of::<RtSigFrame>() == 4688);
+    };
+    #[cfg(target_arch = "riscv64")]
+    const _: () = {
+        assert!(core::mem::size_of::<SigContext>() == 784);
+        assert!(core::mem::size_of::<UContext>() == 960);
+        assert!(core::mem::offset_of!(UContext, uc_mcontext) == 176);
+        assert!(core::mem::size_of::<RtSigFrame>() == 1088);
+    };
+
+    /// arm64: the frame record after the sigframe (x29, x30 of the
+    /// interrupted code), as Linux places it.
+    #[cfg(target_arch = "aarch64")]
+    const RECORD: usize = 16;
+    #[cfg(target_arch = "riscv64")]
+    const RECORD: usize = 0;
+
+    /// arm64 `struct fpsimd_context` magic and size.
+    #[cfg(target_arch = "aarch64")]
+    const FPSIMD_MAGIC: u32 = 0x4650_8001;
+    #[cfg(target_arch = "aarch64")]
+    const FPSIMD_SIZE: u32 = 528;
+
+    /// The stack one signal frame takes, rounded to 16: reported as
+    /// AT_MINSIGSTKSZ.
+    pub const MIN_SIGNAL_FRAME: u64 =
+        ((core::mem::size_of::<RtSigFrame>() + RECORD + 15) as u64) & !15;
+
+    /// RISC-V: `li a7, 139` (rt_sigreturn); `ecall`.
+    #[cfg(target_arch = "riscv64")]
+    const TRAMPOLINE: [u8; 8] = [0x93, 0x08, 0xB0, 0x08, 0x73, 0x00, 0x00, 0x00];
+
+    #[cfg(target_arch = "aarch64")]
+    fn pc(f: &UserFrame) -> u64 {
+        f.elr
+    }
+    #[cfg(target_arch = "riscv64")]
+    fn pc(f: &UserFrame) -> u64 {
+        f.sepc
+    }
+    #[cfg(target_arch = "aarch64")]
+    fn set_pc(f: &mut UserFrame, v: u64) {
+        f.elr = v;
+    }
+    #[cfg(target_arch = "riscv64")]
+    fn set_pc(f: &mut UserFrame, v: u64) {
+        f.sepc = v;
+    }
+    #[cfg(target_arch = "aarch64")]
+    fn sp(f: &UserFrame) -> u64 {
+        f.sp
+    }
+    #[cfg(target_arch = "riscv64")]
+    fn sp(f: &UserFrame) -> u64 {
+        f.x[2]
+    }
+    /// The register a system call returns in, and the first argument.
+    #[cfg(target_arch = "aarch64")]
+    const RET: usize = 0;
+    #[cfg(target_arch = "riscv64")]
+    const RET: usize = 10;
+
+    /// A zeroed frame on the heap (4.7 KiB on AArch64: too much for a
+    /// kernel stack).
+    fn zeroed_frame() -> Box<RtSigFrame> {
+        // SAFETY: RtSigFrame is plain data (integers and byte arrays), for
+        // which all-zero bytes are a valid value.
+        unsafe { Box::<RtSigFrame>::new_zeroed().assume_init() }
+    }
+
+    fn bytes_of(frame: &RtSigFrame) -> &[u8] {
+        // SAFETY: plain data, every byte initialised (built from zero).
+        unsafe {
+            core::slice::from_raw_parts(
+                frame as *const RtSigFrame as *const u8,
+                core::mem::size_of::<RtSigFrame>(),
+            )
+        }
+    }
+
+    fn bytes_of_mut(frame: &mut RtSigFrame) -> &mut [u8] {
+        // SAFETY: as above; any bytes form a valid value.
+        unsafe {
+            core::slice::from_raw_parts_mut(
+                frame as *mut RtSigFrame as *mut u8,
+                core::mem::size_of::<RtSigFrame>(),
+            )
+        }
+    }
+
+    /// RISC-V: the address of this process's sigreturn trampoline, mapping
+    /// it (read + execute, user) the first time, or again if the recorded
+    /// page no longer holds it (exec replaced the address space).
+    #[cfg(target_arch = "riscv64")]
+    fn sigtramp(process: &Process) -> Option<u64> {
+        use crate::mm::{vas::MappingType, PageFlags};
+        let at = process.sigtramp.load(Ordering::Acquire);
+        if at != 0 {
+            let mut code = [0u8; 8];
+            if read_user_bytes(at as usize, &mut code).is_ok() && code == TRAMPOLINE {
+                return Some(at);
+            }
+        }
+        let vas = process.memory_space.lock();
+        let page = vas.reserve_mmap_area(4096).ok()?;
+        vas.map_region_flags(
+            page,
+            4096,
+            MappingType::Code,
+            Some(PageFlags::PRESENT | PageFlags::USER),
+        )
+        .ok()?;
+        // SAFETY: the process's root, through the physical map; only read.
+        let mapper = unsafe { crate::mm::vas::create_mapper_from_root_pub(vas.get_page_table()) };
+        let (frame, _) = mapper.translate_page(page).ok()?;
+        let dst = crate::mm::phys_to_virt_addr(frame.as_u64() << 12) as *mut u8;
+        // SAFETY: the page just mapped for the trampoline, unused by
+        // anything else; 8 bytes fit.
+        unsafe { core::ptr::copy_nonoverlapping(TRAMPOLINE.as_ptr(), dst, TRAMPOLINE.len()) };
+        crate::arch::riscv::sbi::remote_fence_i_all();
+        process.sigtramp.store(page.as_u64(), Ordering::Release);
+        Some(page.as_u64())
+    }
+
+    /// Build the handler frame for `info`'s signal on the user stack and
+    /// point `f` at the handler. `syscall` is the interrupted system call's
+    /// first argument, if this return is from one. Returns false if the
+    /// frame cannot be written (the caller kills the thread with SIGSEGV).
+    #[allow(clippy::too_many_arguments)]
+    fn setup_frame(
+        f: &mut UserFrame,
+        syscall: Option<u64>,
+        process: &Process,
+        thread: &Thread,
+        info: SigInfo,
+        handler: u64,
+        flags: u64,
+        restorer: u64,
+        sa_mask: u64,
+    ) -> bool {
+        let sig = info.signo();
+        if !is_user_address(handler as usize) {
+            return false;
+        }
+        #[cfg(target_arch = "aarch64")]
+        let ret_to = {
+            if flags & SA_RESTORER == 0 || !is_user_address(restorer as usize) {
+                return false;
+            }
+            restorer
+        };
+        #[cfg(target_arch = "riscv64")]
+        let ret_to = {
+            let _ = restorer;
+            match sigtramp(process) {
+                Some(at) => at,
+                None => return false,
+            }
+        };
+
+        // SA_RESTART: run the interrupted call again, with its first
+        // argument back in place of the EINTR it returned, unless it is one
+        // that returns EINTR after a handler regardless (`no_restart`).
+        let no_restart = thread.no_restart.swap(false, Ordering::AcqRel);
+        if let Some(arg0) = syscall {
+            if f.x[RET] == EINTR_RAX && flags & SA_RESTART != 0 && !no_restart {
+                f.x[RET] = arg0;
+                set_pc(f, pc(f).wrapping_sub(4));
+            }
+        }
+
+        // The stack: with SA_ONSTACK the alternate one, from its top, if it
+        // is armed and the thread is not already on it; otherwise the
+        // interrupted one (neither ABI has a red zone).
+        let alt = *thread.altstack.lock();
+        let state = alt.flags_at(sp(f));
+        let switch = flags & SA_ONSTACK != 0 && state & (SS_DISABLE | SS_ONSTACK) == 0;
+        let base = match (switch, alt.top()) {
+            (true, Some(top)) => top,
+            _ => sp(f),
+        };
+        let size = (core::mem::size_of::<RtSigFrame>() + RECORD) as u64;
+        let Some(frame_addr) = base.checked_sub(size).map(|a| a & !15) else {
+            return false;
+        };
+        if !is_user_address(frame_addr as usize) || frame_addr < 0x1000 {
+            return false;
+        }
+        if (switch || state & SS_ONSTACK != 0) && alt.flags_at(frame_addr) & SS_ONSTACK == 0 {
+            return false;
+        }
+
+        let old_mask = if thread.has_saved_sigmask.swap(false, Ordering::AcqRel) {
+            thread.saved_sigmask.load(Ordering::Acquire)
+        } else {
+            thread.sigmask.load(Ordering::Acquire)
+        };
+        let saved_alt = thread.altstack.lock().enter_handler();
+        let mut frame = zeroed_frame();
+        frame.info = info;
+        frame.uc.uc_stack = StackT {
+            ss_sp: saved_alt.sp,
+            ss_flags: saved_alt.flags,
+            pad: 0,
+            ss_size: saved_alt.size,
+        };
+        frame.uc.uc_sigmask = old_mask;
+        let mc = &mut frame.uc.uc_mcontext;
+        #[cfg(target_arch = "aarch64")]
+        {
+            mc.fault_address = if info.is_fault() { info.addr() } else { 0 };
+            mc.regs = f.x;
+            mc.sp = f.sp;
+            mc.pc = f.elr;
+            mc.pstate = f.spsr;
+            // The user's FP/SIMD registers: the kernel is soft-float, so
+            // the CPU still holds them.
+            let mut fp = crate::arch::aarch64::context::initial_fpu();
+            crate::arch::aarch64::context::save_fpu_state(&mut fp);
+            let r = &mut mc.reserved;
+            r[0..4].copy_from_slice(&FPSIMD_MAGIC.to_le_bytes());
+            r[4..8].copy_from_slice(&FPSIMD_SIZE.to_le_bytes());
+            r[8..12].copy_from_slice(&fp.fpsr.to_le_bytes());
+            r[12..16].copy_from_slice(&fp.fpcr.to_le_bytes());
+            for (i, v) in fp.v.iter().enumerate() {
+                let at = 16 + i * 16;
+                r[at..at + 8].copy_from_slice(&v[0].to_le_bytes());
+                r[at + 8..at + 16].copy_from_slice(&v[1].to_le_bytes());
+            }
+            // The terminator record after it is already zero.
+        }
+        #[cfg(target_arch = "riscv64")]
+        {
+            mc.regs = f.x;
+            mc.regs[0] = f.sepc;
+            if crate::arch::riscv64::fpu::present() {
+                let mut fp = crate::arch::riscv64::fpu::initial();
+                crate::arch::riscv64::fpu::save(&mut fp);
+                for (d, s) in mc.fpregs.iter_mut().zip(fp.f.iter()) {
+                    *d = s.to_bits();
+                }
+                mc.fcsr = fp.fcsr;
+            }
+        }
+        if write_user_bytes(frame_addr as usize, bytes_of(&frame)).is_err() {
+            return false;
+        }
+        let info_addr = frame_addr + core::mem::offset_of!(RtSigFrame, info) as u64;
+        let uc_addr = frame_addr + core::mem::offset_of!(RtSigFrame, uc) as u64;
+
+        // Enter the handler: handler(sig, &info, &uc) on the new frame,
+        // returning to the restorer / trampoline.
+        #[cfg(target_arch = "aarch64")]
+        {
+            let record = frame_addr + core::mem::size_of::<RtSigFrame>() as u64;
+            let mut rec = [0u8; 16];
+            rec[0..8].copy_from_slice(&f.x[29].to_le_bytes());
+            rec[8..16].copy_from_slice(&f.x[30].to_le_bytes());
+            if write_user_bytes(record as usize, &rec).is_err() {
+                return false;
+            }
+            f.x[0] = sig as u64;
+            f.x[1] = info_addr;
+            f.x[2] = uc_addr;
+            f.x[29] = record;
+            f.x[30] = ret_to;
+            f.sp = frame_addr;
+            f.elr = handler;
+        }
+        #[cfg(target_arch = "riscv64")]
+        {
+            f.x[10] = sig as u64;
+            f.x[11] = info_addr;
+            f.x[12] = uc_addr;
+            f.x[1] = ret_to;
+            f.x[2] = frame_addr;
+            f.sepc = handler;
+        }
+
+        // Block sa_mask, and the signal itself unless SA_NODEFER.
+        let mut blocked = thread.sigmask.load(Ordering::Acquire) | sa_mask;
+        if flags & SA_NODEFER == 0 {
+            blocked |= sig_bit(sig);
+        }
+        set_mask(process, thread, blocked);
+        if flags & SA_RESETHAND != 0 {
+            let _ = process.set_signal_handler(sig, SIG_DFL);
+            process.signal_action_extra.lock()[sig] = (0, 0, 0);
+        }
+        true
+    }
+
+    /// Act on pending signals on the way back to user mode: a fatal one ends
+    /// the thread's process, a stop stops it, a caught one gets a handler
+    /// frame (one per return). `syscall` is the first argument of the system
+    /// call this return ends, if it is one (for SA_RESTART). Never returns
+    /// when the process is terminated.
+    pub fn deliver_on_return(f: &mut UserFrame, mut syscall: Option<u64>) {
+        loop {
+            park_while_stopped();
+            super::super::user_return_check();
+            let fatal = {
+                let (Some(process), Some(thread)) = (
+                    super::super::current_process(),
+                    super::super::current_thread(),
+                ) else {
+                    return;
+                };
+                let seq = process.cont_seq.load(Ordering::SeqCst);
+                let Some(info) = dequeue(&process, &thread) else {
+                    thread.no_restart.store(false, Ordering::Release);
+                    if thread.has_saved_sigmask.swap(false, Ordering::AcqRel) {
+                        set_mask(
+                            &process,
+                            &thread,
+                            thread.saved_sigmask.load(Ordering::Acquire),
+                        );
+                    }
+                    return;
+                };
+                let sig = info.signo();
+                let handler = process.get_signal_handler(sig).unwrap_or(SIG_DFL);
+                match handler {
+                    SIG_IGN => None,
+                    SIG_DFL => match default_action(sig) {
+                        DefaultAction::Terminate | DefaultAction::CoreDump => Some(sig),
+                        DefaultAction::Stop => {
+                            // The interrupted call runs again once the
+                            // process continues, as on Linux.
+                            thread.no_restart.store(false, Ordering::Release);
+                            if let Some(arg0) = syscall.take() {
+                                if f.x[RET] == EINTR_RAX {
+                                    f.x[RET] = arg0;
+                                    set_pc(f, pc(f).wrapping_sub(4));
+                                }
+                            }
+                            stop_process(&process, sig, seq);
+                            None
+                        }
+                        _ => None,
+                    },
+                    addr => {
+                        let (flags, restorer, mask) = process.signal_action_extra.lock()[sig];
+                        if setup_frame(
+                            f, syscall, &process, &thread, info, addr, flags, restorer, mask,
+                        ) {
+                            return;
+                        }
+                        Some(11)
+                    }
+                }
+            };
+            if let Some(sig) = fatal {
+                let _ = crate::syscall::process::exit_current(0, sig as u32);
+            }
+        }
+    }
+
+    /// rt_sigreturn: restore the context `setup_frame` saved into the
+    /// exception frame `f`. The frame is at the user stack pointer (the
+    /// handler returned with it unchanged). Returns the restored first
+    /// register (what the system call "returns"), or None if the frame is
+    /// unusable (the caller kills the thread with SIGSEGV, as Linux does).
+    pub fn rt_sigreturn(f: &mut UserFrame) -> Option<u64> {
+        let process = super::super::current_process()?;
+        let thread = super::super::current_thread()?;
+        let frame_addr = sp(f);
+        if frame_addr & 15 != 0 {
+            return None;
+        }
+        let mut frame = zeroed_frame();
+        read_user_bytes(frame_addr as usize, bytes_of_mut(&mut frame)).ok()?;
+        let mc = frame.uc.uc_mcontext;
+        #[cfg(target_arch = "aarch64")]
+        {
+            if !is_user_address(mc.pc as usize) || !is_user_address(mc.sp as usize) {
+                return None;
+            }
+            // The FP/SIMD record first (it can fail).
+            let r = &mc.reserved;
+            let word = |at: usize| u32::from_le_bytes([r[at], r[at + 1], r[at + 2], r[at + 3]]);
+            if word(0) != FPSIMD_MAGIC || word(4) != FPSIMD_SIZE {
+                return None;
+            }
+            let mut fp = crate::arch::aarch64::context::initial_fpu();
+            fp.fpsr = word(8);
+            fp.fpcr = word(12);
+            for (i, v) in fp.v.iter_mut().enumerate() {
+                let at = 16 + i * 16;
+                let q = |o: usize| {
+                    let mut b = [0u8; 8];
+                    b.copy_from_slice(&r[o..o + 8]);
+                    u64::from_le_bytes(b)
+                };
+                *v = [q(at), q(at + 8)];
+            }
+            crate::arch::aarch64::context::restore_fpu_state(&fp);
+            f.x = mc.regs;
+            f.sp = mc.sp;
+            f.elr = mc.pc;
+            // Only the condition flags come back; the exception return
+            // forces EL0 with interrupts unmasked (`switch::user_spsr`).
+            f.spsr = mc.pstate & 0xF000_0000;
+        }
+        #[cfg(target_arch = "riscv64")]
+        {
+            if !is_user_address(mc.regs[0] as usize) || !is_user_address(mc.regs[2] as usize) {
+                return None;
+            }
+            if crate::arch::riscv64::fpu::present() {
+                let mut fp = crate::arch::riscv64::fpu::initial();
+                for (d, s) in fp.f.iter_mut().zip(mc.fpregs.iter()) {
+                    *d = f64::from_bits(*s);
+                }
+                fp.fcsr = mc.fcsr;
+                crate::arch::riscv64::fpu::restore(&fp);
+            }
+            let sepc = mc.regs[0];
+            f.x = mc.regs;
+            f.x[0] = 0;
+            f.sepc = sepc;
+        }
+        set_mask(&process, &thread, frame.uc.uc_sigmask);
+        let uc_stack = frame.uc.uc_stack;
+        let _ = thread.altstack.lock().set(
+            AltStackRequest {
+                sp: uc_stack.ss_sp,
+                flags: uc_stack.ss_flags,
+                size: uc_stack.ss_size,
+            },
+            sp(f),
+        );
+        Some(f.x[RET])
+    }
+}
 
 #[cfg(target_arch = "x86_64")]
 mod frame {

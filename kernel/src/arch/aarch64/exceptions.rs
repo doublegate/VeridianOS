@@ -239,6 +239,10 @@ extern "C" fn aarch64_kernel_sync(frame: *mut u64) {
 /// `veridian_aarch64_return_to_user`.
 extern "C" fn aarch64_user_exception(f: &mut super::switch::UserFrame, vector: u64) {
     use super::switch;
+    use crate::process::signals::*;
+    // The first argument of the system call this return ends, for
+    // SA_RESTART (the return value overwrites x0).
+    let mut syscall = None;
     if vector == 9 {
         aarch64_irq();
     } else {
@@ -248,44 +252,74 @@ extern "C" fn aarch64_user_exception(f: &mut super::switch::UserFrame, vector: u
                 // ELR is already past the svc. The call runs with IRQs on,
                 // as on x86_64 and RISC-V.
                 switch::irq_enable();
+                let nr = f.x[switch::UserFrame::X8] as usize;
+                // Never restart rt_sigreturn: the context it restored is
+                // already the one to return to.
+                if nr != RT_SIGRETURN {
+                    syscall = Some(f.x[0]);
+                }
                 let a = |i: usize| f.x[i] as usize;
-                let ret = crate::syscall::aarch64_syscall(
-                    f.x[switch::UserFrame::X8] as usize,
-                    a(0),
-                    a(1),
-                    a(2),
-                    a(3),
-                    a(4),
-                );
+                let ret = crate::syscall::aarch64_syscall(nr, a(0), a(1), a(2), a(3), a(4));
                 f.x[switch::UserFrame::X0] = ret as u64;
             }
             EC_IABORT_LOWER | EC_DABORT_LOWER => {
                 switch::irq_enable();
                 let info = crate::mm::page_fault::from_aarch64(esr, far, elr);
+                let code = if info.reason == crate::mm::page_fault::PageFaultReason::NotPresent {
+                    SEGV_MAPERR
+                } else {
+                    SEGV_ACCERR
+                };
                 if crate::mm::page_fault::handle_page_fault(info).is_err() {
-                    kill_user(11); // SIGSEGV
+                    fault(SIGSEGV, code, far);
                 }
             }
-            // FP/SIMD is trapped at EL0 until its state is switched with
-            // the task (CPACR_EL1.FPEN), as RISC-V keeps FS off.
-            EC_UNKNOWN | EC_FP_ACCESS | EC_ILLEGAL_STATE | EC_SYSREG => kill_user(4), // SIGILL
-            EC_BRK => kill_user(5),                                                   // SIGTRAP
-            EC_PC_ALIGN | EC_SP_ALIGN => kill_user(7),                                // SIGBUS
-            _ => kill_user(7),
+            EC_UNKNOWN | EC_FP_ACCESS | EC_ILLEGAL_STATE | EC_SYSREG => {
+                fault(SIGILL, ILL_ILLOPC, elr)
+            }
+            EC_BRK => fault(SIGTRAP, TRAP_BRKPT, elr),
+            EC_PC_ALIGN => fault(SIGBUS, BUS_ADRALN, elr),
+            EC_SP_ALIGN => fault(SIGBUS, BUS_ADRALN, f.sp),
+            _ => fault(SIGBUS, SI_KERNEL, 0),
         }
     }
-    exit_to_user(f);
+    exit_to_user(f, syscall);
 }
 
-/// Last step before every return to EL0: preemption, a fatal signal acted
-/// on, and a frame that can only return to EL0 with interrupts unmasked.
-/// Signal handlers are not delivered on AArch64 yet.
-fn exit_to_user(f: &mut super::switch::UserFrame) {
+/// arm64's rt_sigreturn number.
+const RT_SIGRETURN: usize = 139;
+const SIGILL: usize = 4;
+const SIGTRAP: usize = 5;
+const SIGBUS: usize = 7;
+const SIGSEGV: usize = 11;
+
+/// A user fault's signal: queued for its handler if the thread has one
+/// that does not block it, else the process ends (Linux forces the
+/// default action for a blocked or ignored synchronous signal).
+fn fault(sig: usize, code: i32, addr: u64) {
+    if !crate::process::signals::queue_fault(crate::process::signals::SigInfo::fault(
+        sig, code, addr,
+    )) {
+        kill_user(sig as u32);
+    }
+}
+
+/// Last step before every return to EL0: preemption, signals (fatal ones,
+/// stops, handlers: `signals::deliver_on_return`), and a frame that can only
+/// return to EL0 with interrupts unmasked. `syscall` is the first argument
+/// of the system call this return ends, if it is one.
+fn exit_to_user(f: &mut super::switch::UserFrame, syscall: Option<u64>) {
     use super::switch;
     switch::irq_enable();
     #[cfg(feature = "alloc")]
     crate::sched::dispatch::preempt_user();
-    crate::process::user_return_check();
+    #[cfg(feature = "alloc")]
+    crate::process::signals::deliver_on_return(f, syscall);
+    #[cfg(not(feature = "alloc"))]
+    {
+        let _ = syscall;
+        crate::process::user_return_check();
+    }
     switch::irq_save();
     f.spsr = switch::user_spsr(f.spsr);
     if !crate::syscall::userspace::is_user_address(f.elr as usize) {

@@ -59,3 +59,17 @@ and clone copy the caller's live registers. RISC-V saves f0-f31 and fcsr with `s
 restore, turns FS off at every trap from U-mode (the user's FS is in the frame and comes back with
 the `sret`), returns to U-mode with FS Clean, and learns F/D from the device tree (`riscv64::fpu`;
 `misa` and `mstatus` are M-mode CSRs, HR-20/21).
+
+## Amendment (2026-10-16): signal handlers
+
+Signals reach handlers, with the decision loop x86_64 uses (`process::signals`: default actions,
+stops, SA_RESTART, SA_ONSTACK, SA_NODEFER, SA_RESETHAND, the mask). A fault with a handler that does
+not block it is queued for that handler (`signals::queue_fault`, shared with x86_64), as on Linux,
+instead of ending the process. SA_RESTART puts the call's first argument back (the return value
+overwrote it) and rewinds the 4-byte instruction; `rt_sigreturn` itself is never restarted. RISC-V uses Linux's RISC-V `rt_sigframe` (`siginfo`, then a `ucontext` whose `sigcontext` holds pc,
+x1-x31 and the D state). Its uapi has no SA_RESTORER, so `struct sigaction` is 24 bytes (handler,
+flags, mask); Linux returns from handlers through its vDSO. Here the kernel maps one read-execute
+page holding `li a7, 139; ecall` into the process, from its mmap area, the first time a handler is
+entered (`Process::sigtramp`, re-checked before each use so exec cannot leave it stale).
+The boot test `user_signal_handler_round_trip` has the handler rewrite a saved register in its
+`ucontext` and checks that `rt_sigreturn` restores it; it fails with the restore skipped.

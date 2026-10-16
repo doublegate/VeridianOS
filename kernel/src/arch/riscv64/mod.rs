@@ -289,6 +289,7 @@ extern "C" fn riscv_user_trap(f: &mut switch::UserFrame) {
         core::arch::asm!("csrr {0}, scause", out(reg) scause, options(nomem, nostack));
         core::arch::asm!("csrr {0}, stval", out(reg) stval, options(nomem, nostack));
     }
+    let mut syscall = None;
     match scause {
         s if s == SCAUSE_INTERRUPT | IRQ_S_TIMER => super::riscv::timer::handle_interrupt(true),
         s if s == SCAUSE_INTERRUPT | IRQ_S_SOFT => ack_ipi(),
@@ -297,39 +298,60 @@ extern "C" fn riscv_user_trap(f: &mut switch::UserFrame) {
             // system calls do since N-139).
             f.sepc += 4;
             switch::irq_enable();
+            let nr = f.x[switch::UserFrame::A7] as usize;
+            // The first argument, for SA_RESTART (the return value
+            // overwrites a0); never for rt_sigreturn, whose restored
+            // context is already the one to return to.
+            if nr != RT_SIGRETURN {
+                syscall = Some(f.x[switch::UserFrame::A0]);
+            }
             let a = |i: usize| f.x[switch::UserFrame::A0 + i] as usize;
-            let ret = crate::syscall::riscv64_syscall(
-                f.x[switch::UserFrame::A7] as usize,
-                a(0),
-                a(1),
-                a(2),
-                a(3),
-                a(4),
-            );
+            let ret = crate::syscall::riscv64_syscall(nr, a(0), a(1), a(2), a(3), a(4));
             f.x[switch::UserFrame::A0] = ret as u64;
         }
         EXC_INSN_PAGE | EXC_LOAD_PAGE | EXC_STORE_PAGE => {
             switch::irq_enable();
             let info = crate::mm::page_fault::from_riscv(scause as u64, stval as u64, f.sepc);
             if crate::mm::page_fault::handle_page_fault(info).is_err() {
-                kill_user(11); // SIGSEGV
+                user_fault(11, crate::process::signals::SEGV_MAPERR, stval as u64);
             }
         }
-        EXC_ILLEGAL => kill_user(4),    // SIGILL
-        EXC_BREAKPOINT => kill_user(5), // SIGTRAP
-        _ => kill_user(7),              // SIGBUS
+        EXC_ILLEGAL => user_fault(4, crate::process::signals::ILL_ILLOPC, f.sepc),
+        EXC_BREAKPOINT => user_fault(5, crate::process::signals::TRAP_BRKPT, f.sepc),
+        _ => user_fault(7, crate::process::signals::SI_KERNEL, 0),
     }
-    exit_to_user(f);
+    exit_to_user(f, syscall);
 }
 
-/// Last step before every return to user mode: preemption, a fatal signal
-/// acted on, and a frame that can only return to user mode. Signal handlers
-/// are not delivered on RISC-V yet (sprint E).
-fn exit_to_user(f: &mut switch::UserFrame) {
+/// RISC-V's rt_sigreturn number.
+const RT_SIGRETURN: usize = 139;
+
+/// A user fault's signal: queued for its handler if the thread has one
+/// that does not block it, else the process ends (Linux forces the
+/// default action for a blocked or ignored synchronous signal).
+fn user_fault(sig: usize, code: i32, addr: u64) {
+    if !crate::process::signals::queue_fault(crate::process::signals::SigInfo::fault(
+        sig, code, addr,
+    )) {
+        kill_user(sig as u32);
+    }
+}
+
+/// Last step before every return to user mode: preemption, signals (fatal
+/// ones, stops, handlers: `signals::deliver_on_return`), and a frame that
+/// can only return to user mode. `syscall` is the first argument of the
+/// system call this return ends, if it is one.
+fn exit_to_user(f: &mut switch::UserFrame, syscall: Option<u64>) {
     switch::irq_enable();
     #[cfg(feature = "alloc")]
     crate::sched::dispatch::preempt_user();
-    crate::process::user_return_check();
+    #[cfg(feature = "alloc")]
+    crate::process::signals::deliver_on_return(f, syscall);
+    #[cfg(not(feature = "alloc"))]
+    {
+        let _ = syscall;
+        crate::process::user_return_check();
+    }
     switch::irq_save();
     f.sstatus = switch::user_sstatus(f.sstatus);
     if !crate::syscall::userspace::is_user_address(f.sepc as usize) {

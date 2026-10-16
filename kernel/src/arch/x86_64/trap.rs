@@ -340,30 +340,7 @@ fn exit_to_user(f: &mut TrapFrame) {
 /// must kill the process instead (default action, ignored, or blocked:
 /// Linux forces the default for a blocked or ignored synchronous signal).
 fn queue_fault_signal(info: crate::process::signals::SigInfo) -> bool {
-    #[cfg(feature = "alloc")]
-    if crate::sched::dispatch::current_owner().is_some() {
-        if let (Some(process), Some(thread)) = (
-            crate::process::current_process(),
-            crate::process::current_thread(),
-        ) {
-            use crate::process::signals;
-            let sig = info.signo();
-            let bit = signals::sig_bit(sig);
-            let handler = process.get_signal_handler(sig).unwrap_or(0);
-            let blocked = thread.sigmask.load(Ordering::Acquire) & bit != 0;
-            if handler > 1 && !blocked {
-                let _ = thread.rt_queue.push(
-                    &thread.sigpending,
-                    info,
-                    signals::Charge::of(&process),
-                    signals::Overflow::Merge,
-                );
-                return true;
-            }
-        }
-    }
-    let _ = info;
-    false
+    crate::process::signals::queue_fault(info)
 }
 
 /// The `si_code` of a floating-point exception from its status bits

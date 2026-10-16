@@ -2,6 +2,21 @@
 
 ### Added
 
+- **Signal handlers on AArch64 and RISC-V.** Signals reach handlers with Linux's frames:
+  - **AArch64:** the arm64 `rt_sigframe`, with an `fpsimd_context` record and a frame record,
+    returning through the C library's SA_RESTORER.
+  - **RISC-V:** the RISC-V `rt_sigframe`, with the D state. Its `struct sigaction` is the 24-byte
+    layout with no restorer, and handlers return through a trampoline page the kernel maps lazily,
+    where Linux uses its vDSO.
+  - **Both:** x86_64's decision loop (stops, SA_RESTART with the first argument put back,
+    SA_ONSTACK, SA_NODEFER, SA_RESETHAND). Faults with an unblocked handler are queued for it
+    (`signals::queue_fault`, now shared with x86_64), and AT_MINSIGSTKSZ is reported.
+
+  New boot test `user_signal_handler_round_trip`: the handler rewrites a saved register in its
+  `ucontext`, and the test checks `rt_sigreturn` restores it. It fails with the restore skipped.
+  AArch64 is now 50/50 and RISC-V 47/47. The user-mode boot tests now get four stack pages, which
+  the 4.7 KiB AArch64 frame needs.
+
 - **User FP state on AArch64 and RISC-V (N-41 part).** Each user task carries an FP area that
   `arch_switch` saves and restores eagerly, as XSAVE does on x86_64. AArch64 switches v0-v31, FPCR
   and FPSR and enables FP at EL0 (CPACR_EL1.FPEN = 11). RISC-V switches f0-f31 and fcsr, keeps FS

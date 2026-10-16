@@ -2183,7 +2183,7 @@ fn run_process_tests(passed: &mut u32, failed: &mut u32) {
     // Exit status as run_and_wait reports it: the code, or 128 + signal.
     #[cfg(target_arch = "riscv64")]
     {
-        let [getpid, fault, csr, fp] = crate::arch::riscv64::usermode::test_programs();
+        let [getpid, fault, csr, fp, sig] = crate::arch::riscv64::usermode::test_programs();
         let (pid, status) = run_user_code(getpid);
         let ok = pid.is_some_and(|p| status == Some((p & 0xFF) as i32));
         if !ok {
@@ -2211,6 +2211,7 @@ fn run_process_tests(passed: &mut u32, failed: &mut u32) {
             failed,
         );
         report_fp_survives(fp, passed, failed);
+        report_signal_round_trip(sig, passed, failed);
 
         // An ELF program through the loader (from the VFS, with arguments
         // and the console as fds 0-2): it writes "RV-ELF-OK" and exits with
@@ -2253,7 +2254,7 @@ fn run_process_tests(passed: &mut u32, failed: &mut u32) {
     // it really ran at EL0. Exit status as run_and_wait reports it.
     #[cfg(target_arch = "aarch64")]
     {
-        let [getpid, fault, sysreg, fp] = crate::arch::aarch64::usermode::test_programs();
+        let [getpid, fault, sysreg, fp, sig] = crate::arch::aarch64::usermode::test_programs();
         let (pid, status) = run_user_code(getpid);
         let ok = pid.is_some_and(|p| status == Some((p & 0xFF) as i32));
         if !ok {
@@ -2281,6 +2282,7 @@ fn run_process_tests(passed: &mut u32, failed: &mut u32) {
             failed,
         );
         report_fp_survives(fp, passed, failed);
+        report_signal_round_trip(sig, passed, failed);
 
         // An ELF program through the loader: it writes "A64-ELF-OK" and
         // exits with its argc.
@@ -2323,7 +2325,7 @@ fn run_process_tests(passed: &mut u32, failed: &mut u32) {
     }
 }
 /// Run `code` (position-independent) as a new process in user mode: one
-/// executable page at 0x40_0000, one stack page below 0x80_1000. Returns
+/// executable page at 0x40_0000, four stack pages below 0x80_4000. Returns
 /// its pid and the exit status `run_and_wait` reports.
 #[cfg(all(
     feature = "alloc",
@@ -2356,6 +2358,27 @@ fn report_fp_survives(code: &[u8], passed: &mut u32, failed: &mut u32) {
     report_test("user_fp_state_survives_switches", ok, passed, failed);
 }
 
+/// The signal test program (`test_programs()[4]`): a SIGUSR1 handler that
+/// rewrites a saved register in its ucontext; exit status 49 means the
+/// frame, the handler's arguments, the return path and rt_sigreturn's
+/// restore of the modified context all worked.
+#[cfg(all(
+    feature = "alloc",
+    any(target_arch = "riscv64", target_arch = "aarch64")
+))]
+fn report_signal_round_trip(code: &[u8], passed: &mut u32, failed: &mut u32) {
+    let (_, status) = run_user_code(code);
+    if status != Some(49) {
+        crate::println!("    status {:?}", status);
+    }
+    report_test(
+        "user_signal_handler_round_trip",
+        status == Some(49),
+        passed,
+        failed,
+    );
+}
+
 /// Build (not start) a process that runs `code` as [`run_user_code`] does.
 #[cfg(all(
     feature = "alloc",
@@ -2369,6 +2392,9 @@ fn build_user_code(code: &[u8]) -> Option<crate::process::ProcessId> {
     };
     const CODE: u64 = 0x40_0000;
     const STACK: u64 = 0x80_0000;
+    // Room for a signal frame (4.7 KiB on AArch64) below the program's own
+    // use of the stack.
+    const STACK_SIZE: usize = 4 * 4096;
     let Ok(p) =
         ProcessBuilder::new(alloc::string::String::from("rv-user")).build_with_address_space()
     else {
@@ -2387,7 +2413,7 @@ fn build_user_code(code: &[u8]) -> Option<crate::process::ProcessId> {
         let stack_ok = vas
             .map_region_flags(
                 VirtualAddress(STACK),
-                4096,
+                STACK_SIZE,
                 MappingType::Stack,
                 Some(
                     PageFlags::PRESENT
@@ -2427,7 +2453,7 @@ fn build_user_code(code: &[u8]) -> Option<crate::process::ProcessId> {
     {
         let mut c = t.context.lock();
         c.set_instruction_pointer(CODE as usize);
-        c.set_stack_pointer((STACK + 4096) as usize);
+        c.set_stack_pointer((STACK + STACK_SIZE as u64) as usize);
     }
     if p.add_thread(t).is_err() {
         return None;

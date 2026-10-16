@@ -190,6 +190,49 @@ core::arch::global_asm!(
     ".option pop",
     ".global veridian_rv_user_fp_end",
     "veridian_rv_user_fp_end:",
+    // F: installs a SIGUSR1 handler (rt_sigaction 134, SA_SIGINFO; RISC-V
+    // has no restorer: the kernel's trampoline returns), sends itself
+    // SIGUSR1 (kill 129). The handler checks si_signo and writes 42 into
+    // the saved s1 of its ucontext (uc_mcontext.regs[9], offset 176 + 9 *
+    // 8 = 248). After rt_sigreturn, exit(s1 + s2) = 49.
+    ".balign 4",
+    ".global veridian_rv_user_sig",
+    "veridian_rv_user_sig:",
+    "    li s2, 7",
+    "    li s1, 0",
+    "    addi sp, sp, -32",
+    "    lla t0, 3f",
+    "    sd t0, 0(sp)",
+    "    li t0, 4",
+    "    sd t0, 8(sp)",
+    "    sd zero, 16(sp)",
+    "    li a0, 10",
+    "    mv a1, sp",
+    "    li a2, 0",
+    "    li a3, 8",
+    "    li a7, 134",
+    "    ecall",
+    "    bnez a0, 2f",
+    "    li a7, 172",
+    "    ecall",
+    "    li a1, 10",
+    "    li a7, 129",
+    "    ecall",
+    "    add a0, s1, s2",
+    "    li a7, 94",
+    "    ecall",
+    "2:  li a0, 1",
+    "    li a7, 94",
+    "    ecall",
+    "3:  lw t0, 0(a1)",
+    "    li t1, 42",
+    "    li t2, 10",
+    "    beq t0, t2, 5f",
+    "    li t1, 1",
+    "5:  sd t1, 248(a2)",
+    "    ret",
+    ".global veridian_rv_user_sig_end",
+    "veridian_rv_user_sig_end:",
     // D: the body of an ELF test program: write(1, "RV-ELF-OK\n", 10),
     // then exit_group(argc), argc being the first word of the stack the
     // loader built.
@@ -218,6 +261,8 @@ extern "C" {
     static veridian_rv_user_csr_end: u8;
     static veridian_rv_user_fp: u8;
     static veridian_rv_user_fp_end: u8;
+    static veridian_rv_user_sig: u8;
+    static veridian_rv_user_sig_end: u8;
     static veridian_rv_user_elf: u8;
     static veridian_rv_user_elf_end: u8;
 }
@@ -263,8 +308,9 @@ pub fn test_elf() -> alloc::vec::Vec<u8> {
 }
 
 /// The boot-test user programs (see above): getpid round trip, page
-/// fault, privileged CSR, FP state kept across switches.
-pub fn test_programs() -> [&'static [u8]; 4] {
+/// fault, privileged CSR, FP state kept across switches, signal handler
+/// round trip.
+pub fn test_programs() -> [&'static [u8]; 5] {
     let span = |a: *const u8, b: *const u8| {
         // SAFETY: two labels of one rodata block, `a` before `b`.
         unsafe { core::slice::from_raw_parts(a, b as usize - a as usize) }
@@ -286,6 +332,10 @@ pub fn test_programs() -> [&'static [u8]; 4] {
         span(
             core::ptr::addr_of!(veridian_rv_user_fp),
             core::ptr::addr_of!(veridian_rv_user_fp_end),
+        ),
+        span(
+            core::ptr::addr_of!(veridian_rv_user_sig),
+            core::ptr::addr_of!(veridian_rv_user_sig_end),
         ),
     ]
 }

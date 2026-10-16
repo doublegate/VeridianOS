@@ -48,11 +48,12 @@ pub const SIG_IGN: usize = 1;
 // User-space signal action structure (repr(C) for ABI stability)
 // ============================================================================
 
-/// Linux x86_64 kernel `struct sigaction` layout (32 bytes).
+/// Linux kernel `struct sigaction` layout on x86_64 and arm64 (32 bytes).
 ///
 /// Field order MUST match the kernel ABI that musl's rt_sigaction expects:
 ///   sa_handler (8), sa_flags (8), sa_restorer (8), sa_mask (8).
 /// Note: sa_flags is `unsigned long` (8 bytes on x86_64), NOT u32.
+#[cfg(not(target_arch = "riscv64"))]
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct SigAction {
@@ -66,13 +67,60 @@ pub struct SigAction {
     pub sa_mask: u64, // offset 24
 }
 
-// SAFETY: repr(C), four 8-byte integer fields at offsets 0/8/16/24, no padding.
-// The handler and restorer are plain addresses validated where they are used,
-// not Rust function pointers.
+/// RISC-V `struct sigaction`: no SA_RESTORER and no restorer field (Linux
+/// returns from handlers through its vDSO, this kernel through its own
+/// trampoline page); the mask follows the flags, at offset 16. musl's
+/// riscv64 `k_sigaction` matches it (plus an unused pointer the kernel does
+/// not read).
+#[cfg(target_arch = "riscv64")]
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SigAction {
+    pub sa_handler: usize,
+    pub sa_flags: u64,
+    pub sa_mask: u64,
+}
+
+impl SigAction {
+    /// The action as user space sees it.
+    fn new(handler: u64, flags: u64, restorer: u64, mask: u64) -> Self {
+        #[cfg(not(target_arch = "riscv64"))]
+        return Self {
+            sa_handler: handler as usize,
+            sa_flags: flags,
+            sa_restorer: restorer as usize,
+            sa_mask: mask,
+        };
+        // No restorer on RISC-V (see above).
+        #[cfg(target_arch = "riscv64")]
+        {
+            let _ = restorer;
+            Self {
+                sa_handler: handler as usize,
+                sa_flags: flags,
+                sa_mask: mask,
+            }
+        }
+    }
+
+    /// The restorer the C library named (0 on RISC-V, which has none).
+    fn restorer(&self) -> u64 {
+        #[cfg(not(target_arch = "riscv64"))]
+        return self.sa_restorer as u64;
+        #[cfg(target_arch = "riscv64")]
+        0
+    }
+}
+
+// SAFETY: repr(C), 8-byte integer fields with no padding. The handler and
+// restorer are plain addresses validated where they are used, not Rust
+// function pointers.
 unsafe impl crate::syscall::userspace::UserPod for SigAction {}
 
-// Compile-time assertion: Linux x86_64 struct sigaction is 32 bytes.
+#[cfg(not(target_arch = "riscv64"))]
 const _: () = assert!(core::mem::size_of::<SigAction>() == 32);
+#[cfg(target_arch = "riscv64")]
+const _: () = assert!(core::mem::size_of::<SigAction>() == 24);
 
 // ============================================================================
 // Syscall implementations
@@ -118,20 +166,14 @@ pub fn sys_sigaction(signum: usize, act_ptr: usize, oldact_ptr: usize) -> Syscal
         let (flags, restorer, mask) = proc.signal_action_extra.lock()[signum];
         super::userspace::write_user(
             oldact_ptr,
-            SigAction {
-                sa_handler: old_handler as usize,
-                sa_flags: flags,
-                sa_restorer: restorer as usize,
-                sa_mask: mask,
-            },
+            SigAction::new(old_handler, flags, restorer, mask),
         )?;
     }
 
     if let Some(act) = new_act {
         proc.set_signal_handler(signum, act.sa_handler as u64)
             .map_err(|_| SyscallError::InvalidArgument)?;
-        proc.signal_action_extra.lock()[signum] =
-            (act.sa_flags, act.sa_restorer as u64, act.sa_mask);
+        proc.signal_action_extra.lock()[signum] = (act.sa_flags, act.restorer(), act.sa_mask);
     }
 
     Ok(0)
@@ -583,6 +625,29 @@ pub fn sys_sigreturn(frame_ptr: usize) -> SyscallResult {
             Some(Some(rax)) => Ok(rax as usize),
             _ => super::process::exit_current(0, 11),
         };
+    }
+    // AArch64 and RISC-V: the same, into the exception frame the per-CPU
+    // block records for the call in progress (`syscall_frame`).
+    #[cfg(all(
+        feature = "alloc",
+        target_os = "none",
+        any(target_arch = "aarch64", target_arch = "riscv64")
+    ))]
+    if crate::sched::dispatch::current_owner().is_some() {
+        #[cfg(target_arch = "aarch64")]
+        type Frame = crate::arch::aarch64::switch::UserFrame;
+        #[cfg(target_arch = "riscv64")]
+        type Frame = crate::arch::riscv64::switch::UserFrame;
+        // SAFETY: this CPU's own block; `syscall_frame` is the current
+        // task's exception frame on its kernel stack, live for this call.
+        let frame = unsafe { (*crate::arch::percpu::this_arch_cpu()).syscall_frame } as *mut Frame;
+        if !frame.is_null() {
+            // SAFETY: as above; nothing else touches the frame now.
+            if let Some(x0) = crate::process::signals::rt_sigreturn(unsafe { &mut *frame }) {
+                return Ok(x0 as usize);
+            }
+        }
+        return super::process::exit_current(0, 11);
     }
 
     if frame_ptr == 0 {
