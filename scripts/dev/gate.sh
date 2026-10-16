@@ -64,6 +64,11 @@ if [ $boot -eq 1 ]; then
     # AArch64 does not dispatch yet.
     QEMU_EXTRA="-icount shift=4" step boot-riscv64-slow scripts/boot-test.sh riscv64 300
     tail -1 "$log_dir/boot-riscv64-slow.log"
+    # The AArch64 arm64 Image (HA-03), which QEMU boots through the Linux
+    # protocol: it must also get the device tree in x0 (HA-01).
+    AARCH64_IMAGE=1 step boot-aarch64-image scripts/boot-test.sh aarch64
+    tail -1 "$log_dir/boot-aarch64-image.log"
+    step boot-aarch64-image-dtb grep -q "Device tree passed in x0" "$root/target/boot-logs/boot-aarch64.log"
 fi
 if [ $rootfs -eq 1 ]; then
     # Stage first: it compiles the runtime test programs, so a change to

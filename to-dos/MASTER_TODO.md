@@ -172,8 +172,8 @@ What does not work yet: `docs/KNOWN-LIMITATIONS.md`.
   - [ ] **E, user mode beyond x86_64** (also the boot-critical hardware items, since they coincide
     with turning the MMU on; `ref-docs/HARDWARE-AARCH64.md`, `ref-docs/HARDWARE-RISCV64.md`):
     - AArch64: done: DTB from x0, Linux-style EL2/SCTLR setup on boot and secondary paths (HA-01,
-      HA-14, HA-15 part, N-177); next: early VBAR (HA-02); arm64 Image header and flat binary
-      (HA-03); position-independent early boot with the kernel at a high TTBR1 VA, MMU and caches
+      HA-14, HA-15 part, N-177); arm64 Image header and flat binary, booted in the gate (HA-03);
+      next: early VBAR (HA-02); position-independent early boot with the kernel at a high TTBR1 VA, MMU and caches
       on before the first lock, TCR.IPS from PARange, 48-bit TTBR0 (HA-04, HA-16, N-28); cache
       maintenance primitives and DMA coherency (HA-25); ASIDs (HA-26); memory map from `/memory`
       and reservations (HA-17); EL0 entry/exit and SVC dispatch; register sanitiser (N-170).

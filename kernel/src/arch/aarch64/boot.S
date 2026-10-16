@@ -16,6 +16,21 @@ veridian_dtb_pa:
 .global _start
 
 _start:
+    // arm64 Image header (HA-03; Linux Documentation/arch/arm64/booting.rst),
+    // so that the `objcopy -O binary` image (veridian-kernel.img) boots
+    // through QEMU's and U-Boot's `booti` path, which pass the device tree
+    // in x0. The ELF enters here too and takes the branch.
+    b veridian_aarch64_entry         // code0
+    .word 0                          // code1
+    .quad 0x200000                   // text_offset: the link base is RAM + 2 MiB
+    .quad __veridian_image_size      // image_size, BSS and boot stack included
+    .quad 0x2                        // flags: little-endian, 4 KiB pages,
+                                     // 2 MiB-aligned base near the start of RAM
+    .quad 0, 0, 0                    // res2-res4
+    .byte 0x41, 0x52, 0x4d, 0x64     // magic "ARM\x64" at 0x38
+    .word 0                          // res5 (no PE/COFF header)
+
+veridian_aarch64_entry:
     // x20 keeps x0 (the device tree) through the EL2 -> EL1 drop.
     mov x20, x0
     // Check current exception level

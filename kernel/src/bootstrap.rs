@@ -2809,6 +2809,24 @@ fn run_usercopy_tests(passed: &mut u32, failed: &mut u32) {
         report_test("boot_stack_canary_intact", ok, passed, failed);
     }
 
+    // AArch64: a valid device tree is where boot.S says it is: the one
+    // firmware passed in x0 (an arm64 Image boot, HA-01/HA-03), or QEMU
+    // virt's fixed place for a bare ELF. The line names which, so that a
+    // boot of the Image can require x0.
+    #[cfg(target_arch = "aarch64")]
+    {
+        use crate::arch::aarch64::boot;
+        if boot::dtb_passed_in_x0() {
+            println!("[BOOT] Device tree passed in x0");
+        } else {
+            println!("[BOOT] Device tree at the QEMU virt default (x0 was 0)");
+        }
+        // SAFETY: the blob firmware passed, or QEMU virt's, reached through
+        // the physical map; from_phys validates the header before reading.
+        let ok = unsafe { crate::arch::fdt::Fdt::from_phys(boot::dtb_pa()) }.is_some();
+        report_test("device_tree_found", ok, passed, failed);
+    }
+
     // Test 34: the monotonic clock advances and the 1000 Hz timer interrupt
     // is delivered (LAPIC on x86_64, EL1 virtual timer on AArch64,
     // stimecmp/SBI on RISC-V). Before, uptime never advanced and AArch64 /

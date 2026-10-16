@@ -42,7 +42,10 @@ SECTIONS
     /* Kernel end marker */
     . = ALIGN(4K);
     __kernel_end = .;
-    
+    /* The Image header's image_size: what a loader must leave free from
+     * the load address, BSS and the boot stack included (HA-03). */
+    __veridian_image_size = __kernel_end - _start;
+
     /* Discard unwanted sections */
     /DISCARD/ : {
         *(.comment)

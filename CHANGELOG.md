@@ -2,6 +2,15 @@
 
 ### Added
 
+- **AArch64 arm64 Image (HA-03).** boot.S starts with the 64-byte Linux arm64 Image header
+  (`text_offset` 2 MiB, `image_size` covering BSS and the boot stack, 4 KiB pages, magic `ARM\x64`),
+  and `build-kernel.sh` writes the raw image next to the ELF as `veridian-kernel.img`. QEMU boots it
+  through the Linux protocol, as U-Boot `booti` and the Raspberry Pi firmware will, with the device
+  tree in x0. A new boot test, `device_tree_found`, checks the device tree and logs whether x0
+  carried it. `gate.sh --boot` boots the Image (`AARCH64_IMAGE=1 scripts/boot-test.sh aarch64`)
+  and requires x0. Before the header, QEMU loaded the image at the wrong address and boot hung
+  after the GIC.
+
 - **Every RISC-V hart dispatches.** Secondary harts turn their boot flow into an idle task and run
   tasks, as x86_64's CPUs do (ADR 0012), and the loader fences new program code on every hart
   (SBI `remote_fence_i`: instruction fetch is not coherent with stores on RISC-V). The SMP

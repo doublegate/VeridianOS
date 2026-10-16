@@ -14,7 +14,10 @@
 #        QEMU_EXTRA (extra QEMU arguments), SMP (CPU count, default 1),
 #        EXPECT_CPUS (require "[SMP] N/N CPUs online" with N = this value;
 #        the `smp` feature is on by default), PROFILE (debug or release,
-#        default debug; release boots the `./build-kernel.sh <arch> release` build)
+#        default debug; release boots the `./build-kernel.sh <arch> release` build),
+#        AARCH64_IMAGE=1 (boot the raw arm64 Image, veridian-kernel.img, which
+#        QEMU loads through the Linux boot protocol with the DTB in x0, instead
+#        of the ELF)
 set -u
 
 arch="${1:?usage: boot-test.sh <x86_64|aarch64|riscv64> [max-seconds]}"
@@ -56,6 +59,7 @@ x86_64)
     ;;
 aarch64)
     img="$root/target/aarch64-unknown-none-softfloat/$profile/veridian-kernel"
+    [[ ${AARCH64_IMAGE:-0} == 1 ]] && img="$img.img"
     cmd=(qemu-system-aarch64 -M virt -cpu cortex-a72 -smp "$smp" -m 256M -kernel "$img" -device ramfb)
     ;;
 riscv64)

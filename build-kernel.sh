@@ -57,6 +57,19 @@ build_arch() {
     if cargo build $RELEASE_FLAG $FEATURE_FLAGS --target "$target" -p veridian-kernel -Zbuild-std=core,compiler_builtins,alloc; then
         echo -e "${GREEN}$arch build successful!${NC}"
 
+        # AArch64: also the raw arm64 Image (64-byte header in boot.S,
+        # HA-03) that QEMU, U-Boot `booti` and the Raspberry Pi firmware load.
+        if [ "$arch" == "AArch64" ]; then
+            local elf="target/$target/$BUILD_DIR/veridian-kernel"
+            local objcopy
+            objcopy=$(ls "$(rustc --print sysroot)"/lib/rustlib/*/bin/llvm-objcopy 2>/dev/null | head -1)
+            [ -n "$objcopy" ] || objcopy=llvm-objcopy
+            if ! "$objcopy" -O binary "$elf" "$elf.img"; then
+                echo -e "${RED}AArch64 Image (objcopy) failed${NC}"
+                exit 1
+            fi
+        fi
+
         # For x86_64, create bootable disk image using bootloader 0.11+
         if [ "$arch" == "x86_64" ]; then
             echo -e "${YELLOW}Creating bootable disk image for x86_64...${NC}"

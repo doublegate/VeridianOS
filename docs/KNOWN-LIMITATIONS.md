@@ -491,8 +491,9 @@ order are in `ref-docs/HARDWARE-X86_64.md`, `ref-docs/HARDWARE-AARCH64.md` and
     USB-legacy or AHCI firmware handoff (HX-18, HX-29).
   - **Device coverage.** Display is the UEFI framebuffer or virtio-gpu only (HX-31).
 - **AArch64:**
-  - **Boot protocol.** Discards the device-tree pointer, has no Image header, and runs only at
-    0x40200000 with the MMU off (HA-01 to HA-04).
+  - **Boot protocol.** Boots as an ELF or as an arm64 Image with the device tree in x0 (HA-01,
+    HA-03), but runs only at 0x40200000 with the MMU off (HA-04), and has no PE/COFF header for
+    UEFI.
   - **Platform devices.** Hard-codes the QEMU PL011 UART, GICv2 addresses and a 128 MiB RAM layout
     (HA-05, HA-07, HA-17), and supports no GICv3 or PCIe (HA-20).
   - **Caches and CPU start.** Has no cache maintenance anywhere (HA-25), and can start secondary

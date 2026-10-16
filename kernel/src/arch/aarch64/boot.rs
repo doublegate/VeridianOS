@@ -17,16 +17,25 @@ extern "C" {
 /// does not pass in x0.
 const QEMU_VIRT_DTB_PA: u64 = 0x4000_0000;
 
+/// The device tree pointer boot.S saved from x0.
+fn passed_dtb_pa() -> u64 {
+    // SAFETY: written once by boot.S before any Rust code runs; read-only
+    // afterwards.
+    unsafe { core::ptr::addr_of!(veridian_dtb_pa).read_volatile() }
+}
+
+/// Whether firmware passed the device tree in x0 (the arm64 Image boot
+/// protocol), rather than the bare-ELF fallback being used.
+pub fn dtb_passed_in_x0() -> bool {
+    passed_dtb_pa() != 0
+}
+
 /// The device tree's physical address: the one firmware passed in x0, or
 /// QEMU `virt`'s fixed location for a bare ELF (HA-01).
 pub fn dtb_pa() -> u64 {
-    // SAFETY: written once by boot.S before any Rust code runs; read-only
-    // afterwards.
-    let passed = unsafe { core::ptr::addr_of!(veridian_dtb_pa).read_volatile() };
-    if passed != 0 {
-        passed
-    } else {
-        QEMU_VIRT_DTB_PA
+    match passed_dtb_pa() {
+        0 => QEMU_VIRT_DTB_PA,
+        pa => pa,
     }
 }
 
