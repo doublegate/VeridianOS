@@ -2,7 +2,8 @@
 # Kernel quality gate, the one to pass before every commit:
 #   fmt check, clippy (-D warnings) on the three bare-metal targets and the
 #   host library (also with every feature, as CI's Quick Checks), the
-#   inline-assembly flags lint (scripts/dev/check-asm-flags.py), and the host
+#   inline-assembly flags lint (scripts/dev/check-asm-flags.py), the rest of
+#   CI's Quick Checks (syscall numbers, libc host tests, vsh), and the host
 #   unit tests. With --boot also build every
 #   architecture and boot each in QEMU (scripts/boot-test.sh); with --rootfs
 #   also run the x86_64 user-space runtime suite (scripts/run-rootfs-tests.sh,
@@ -46,6 +47,13 @@ step fmt cargo fmt --all --check
 # Inline assembly that claims preserves_flags must not set the flags: a
 # block that did made release AArch64 boot tests report passes as failures.
 step asm-flags python3 "$root/scripts/dev/check-asm-flags.py"
+# The rest of CI's Quick Checks: generated syscall numbers in sync with the
+# generator (a hand edit of numbers.rs failed CI once), the native libc
+# host tests, and vsh's formatting and build.
+step syscall-numbers python3 "$root/tools/compat/gen_syscalls.py" --check
+step libc-host-tests bash -c 'for t in "$0"/userland/libc/tests/test-*.sh; do bash "$t" || exit 1; done' "$root"
+step vsh-fmt bash -c 'cd "$0/userland/vsh" && cargo fmt -- --check' "$root"
+step vsh-build bash -c 'cd "$0/userland/vsh" && cargo build --target x86_64-unknown-none -Zbuild-std=core,compiler_builtins,alloc' "$root"
 step clippy-x86_64 cargo clippy --target targets/x86_64-veridian.json -p veridian-kernel "${bs[@]}" -- -D warnings
 step clippy-aarch64 cargo clippy --target aarch64-unknown-none-softfloat -p veridian-kernel "${bs[@]}" -- -D warnings
 step clippy-riscv64 cargo clippy --target riscv64imac-unknown-none-elf -p veridian-kernel "${bs[@]}" -- -D warnings

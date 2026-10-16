@@ -28,9 +28,10 @@ TBL = REPO / "abi/linux/syscall_64.tbl"
 GENERIC_TBL = REPO / "abi/linux/syscall.tbl"
 # The ABIs of the generic table each 64-bit architecture uses: common and 64
 # (scripts/Makefile.asm-headers) plus its own (arch/*/kernel/Makefile.syscalls,
-# v7.2). arm64 adds renameat; it is listed when AArch64 gets user mode.
+# v7.2): arm64 adds renameat, RISC-V its two riscv calls.
 GENERIC_ABIS = {
     "riscv64": {"common", "64", "riscv", "rlimit", "memfd_secret"},
+    "aarch64": {"common", "64", "renameat", "rlimit", "memfd_secret"},
 }
 OUT_RS = REPO / "kernel/src/syscall/numbers.rs"
 OUT_H = REPO / "userland/libc/include/veridian/sysno.h"
@@ -240,6 +241,9 @@ def gen_c(entries):
     out += ["", "#elif defined(__riscv) && __riscv_xlen == 64", ""]
     out += ["/* Linux's generic table: calls RISC-V leaves to user space are absent. */"]
     out += block("riscv64")
+    out += ["", "#elif defined(__aarch64__)", ""]
+    out += ["/* Linux's generic table with arm64's ABIs (renameat included). */"]
+    out += block("aarch64")
     out += ["", "#else", '#error "<veridian/sysno.h>: no system call numbers for this architecture"', "#endif"]
     out += ["", "#endif /* _VERIDIAN_SYSNO_H */", ""]
     return "\n".join(out)
@@ -270,6 +274,17 @@ def gen_user_rust(entries):
     for e in entries:
         if e["riscv64"] is not None:
             out.append(f"    pub const {e['const']}: usize = {e['riscv64']};")
+    out += [
+        "}",
+        "",
+        "// Linux's generic table with arm64's ABIs (renameat included).",
+        "#[cfg(target_arch = \"aarch64\")]",
+        "#[allow(dead_code, non_upper_case_globals)]",
+        "pub mod sysno {",
+    ]
+    for e in entries:
+        if e["aarch64"] is not None:
+            out.append(f"    pub const {e['const']}: usize = {e['aarch64']};")
     out += ["}", ""]
     return "\n".join(out)
 
@@ -283,8 +298,10 @@ def gen_md(entries):
         "",
         f"{len(entries)} calls: {linux} use their Linux number and name (ADR 0009), "
         f"{len(entries) - linux} are VeridianOS calls numbered from {PRIVATE_BASE} on every "
-        "architecture. RISC-V uses Linux's generic table (`abi/linux/syscall.tbl`), which leaves "
-        f"{sum(1 for e in entries if e['riscv64'] is None)} of these calls to user space "
+        "architecture. RISC-V and AArch64 use Linux's generic table (`abi/linux/syscall.tbl`), "
+        f"which leaves {sum(1 for e in entries if e['riscv64'] is None)} of these calls to user "
+        "space on RISC-V and "
+        f"{sum(1 for e in entries if e['aarch64'] is None)} on AArch64 "
         "(`--`: open, fork and the like). "
         "C programs get the numbers from `<veridian/sysno.h>`, Rust programs from "
         "`userland/abi/syscall_numbers.rs`. What each Linux call implements, and how fully, "
@@ -294,9 +311,16 @@ def gen_md(entries):
     for e in entries:
         if e["group"] != group:
             group = e["group"]
-            out += ["", f"## {group}", "", "| x86_64 | RISC-V | Constant | Kernel variant |", "|---|---|---|---|"]
+            out += [
+                "",
+                f"## {group}",
+                "",
+                "| x86_64 | RISC-V | AArch64 | Constant | Kernel variant |",
+                "|---|---|---|---|---|",
+            ]
         rv = e["riscv64"] if e["riscv64"] is not None else "--"
-        out.append(f"| {e['number']} | {rv} | `{e['const']}` | `{e['variant']}` |")
+        a64 = e["aarch64"] if e["aarch64"] is not None else "--"
+        out.append(f"| {e['number']} | {rv} | {a64} | `{e['const']}` | `{e['variant']}` |")
     out.append("")
     return "\n".join(out)
 
