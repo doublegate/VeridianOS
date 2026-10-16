@@ -868,6 +868,12 @@
 
 ### Fixed
 
+- **`unstarted_process_freed_whole` raced other CPUs.** The boot test compares the machine-wide
+  free-frame count before and after building and discarding a process. Since every RISC-V hart
+  dispatches tasks, another hart can free frames in the middle of the measurement (seen once on four
+  harts: 16 frames more free after than before). The test now takes up to three measurements. A
+  leak still fails every one; a concurrent change elsewhere does not repeat.
+
 - **Release AArch64 kernels reported passing boot tests as failed.** The PL011 print loop's inline
   assembly (`direct_uart.rs`) declared `options(preserves_flags)` but runs `cmp`. LLVM therefore kept
   a comparison made before a print live across it, and the code afterwards branched on the loop's

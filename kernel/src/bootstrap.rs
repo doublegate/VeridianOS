@@ -2136,36 +2136,44 @@ fn run_process_tests(passed: &mut u32, failed: &mut u32) {
             process::{pcb::ProcessBuilder, thread::ThreadBuilder},
         };
         // Free frames include the per-CPU caches, where mmap allocates
-        // from and unmapping frees to (N-261).
+        // from and unmapping frees to (N-261). The count is machine-wide, so
+        // other CPUs running tasks can allocate or free in the middle of a
+        // measurement (seen once on four RISC-V harts: 16 frames more free
+        // after than before). A leak fails every attempt; a concurrent
+        // change on another CPU does not repeat, so three tries are made.
         let free = || crate::mm::get_memory_stats().free_frames;
-        let before = free();
-        let built = ProcessBuilder::new(alloc::string::String::from("n46-rollback"))
-            .build_with_address_space()
-            .and_then(|p| {
-                p.memory_space.lock().mmap(16 * 4096, MappingType::Data)?;
-                let t = ThreadBuilder::new(p.pid, alloc::string::String::from("n46"), 0x40_0000)
-                    .build()?;
-                p.add_thread(t)?;
-                Ok(p)
-            });
-        let ok = match built {
-            Ok(p) => {
-                let taken = before.saturating_sub(free());
-                crate::process::exit::discard_unstarted(&p);
-                drop(p);
-                let after = free();
-                if after != before {
-                    kprintln!(
-                        "  [n46] frames: before {} taken {} after {}",
-                        before,
-                        taken,
-                        after
-                    );
+        let attempt = || {
+            let before = free();
+            let built = ProcessBuilder::new(alloc::string::String::from("n46-rollback"))
+                .build_with_address_space()
+                .and_then(|p| {
+                    p.memory_space.lock().mmap(16 * 4096, MappingType::Data)?;
+                    let t =
+                        ThreadBuilder::new(p.pid, alloc::string::String::from("n46"), 0x40_0000)
+                            .build()?;
+                    p.add_thread(t)?;
+                    Ok(p)
+                });
+            match built {
+                Ok(p) => {
+                    let taken = before.saturating_sub(free());
+                    crate::process::exit::discard_unstarted(&p);
+                    drop(p);
+                    let after = free();
+                    if after != before {
+                        kprintln!(
+                            "  [n46] frames: before {} taken {} after {}",
+                            before,
+                            taken,
+                            after
+                        );
+                    }
+                    taken >= 16 && after == before
                 }
-                taken >= 16 && after == before
+                Err(_) => false,
             }
-            Err(_) => false,
         };
+        let ok = (0..3).any(|_| attempt());
         report_test("unstarted_process_freed_whole", ok, passed, failed);
     }
     #[cfg(not(any(target_arch = "x86_64", target_arch = "riscv64")))]
