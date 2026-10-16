@@ -2,6 +2,16 @@
 
 ### Added
 
+- **Fault-tolerant user compare-and-exchange on AArch64 and RISC-V (ARCH-MEM-03).** The futex
+  atomic (`cmpxchg_user_u32`: FUTEX_WAKE_OP, PI futexes, robust lists) used a plain atomic on the
+  user address there, so an unmapped or read-only page faulted in the kernel. It is now an
+  LDAXR/STLXR loop (AArch64) or LR/SC loop (RISC-V, with SUM set only around it). Both memory
+  instructions have fixup entries; a fault is offered to demand paging and copy-on-write, and
+  the loop reloads after the exception clears the monitor or reservation, otherwise it returns
+  EFAULT. Boot tests: `usercopy_cmpxchg_fault_returns_efault` now runs on both, and the new
+  `user_futex_wake_op_updates_word` has a user program change a stack word through FUTEX_WAKE_OP
+  (it fails with the store disabled). AArch64 52/52, RISC-V 49/49.
+
 - **Signal handlers on AArch64 and RISC-V.** Signals reach handlers with Linux's frames:
   - **AArch64:** the arm64 `rt_sigframe`, with an `fpsimd_context` record and a frame record,
     returning through the C library's SA_RESTORER.

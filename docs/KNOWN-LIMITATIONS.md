@@ -207,17 +207,17 @@ Still open:
   and the N-28 workarounds are gone (`fs::bare_lock`, the bump allocator, the reduced secondary
   stage). Every CPU dispatches, and programs from the VFS run at EL0 as dispatcher tasks with
   system calls, page faults, fault-tolerant user copies, user FP/SIMD state and signal handlers
-  (Linux's arm64 `rt_sigframe`; SA_RESTART has no test on AArch64 yet). Not yet: an AArch64 C
-  library and rootfs (so no BusyBox or musl programs), a fault-tolerant user compare-and-exchange
-  (futexes) and ASIDs (every address-space switch invalidates the TLB, HA-26). (The boot also sets SCTLR_EL1's RES1 bits and the EL2 state the
+  (Linux's arm64 `rt_sigframe`; SA_RESTART has no test on AArch64 yet), and fault-tolerant
+  user compare-and-exchange for futexes. Not yet: an AArch64 C library and rootfs (so no BusyBox or
+  musl programs) and ASIDs (every address-space switch invalidates the TLB, HA-26). (The boot also sets SCTLR_EL1's RES1 bits and the EL2 state the
   kernel relies on, N-177, HA-14, and uses the device tree firmware passes, HA-01.)
 - **RISC-V runs static ELF programs, without a C library yet (ADR 0013, ADR 0014).** Paging is
   on, the kernel runs in the upper half, and programs from the VFS run in U-mode as dispatcher
   tasks with system calls, page faults, fault-tolerant user copies, user FP state and signal
   handlers (Linux's RISC-V `rt_sigframe`; handlers return through a trampoline page the kernel maps,
-  where Linux uses its vDSO; SA_RESTART has no test on RISC-V yet). Not yet: a RISC-V C library
-  and rootfs (so no BusyBox or musl programs), TLS (`tp`) setup and a fault-tolerant user
-  compare-and-exchange (futexes).
+  where Linux uses its vDSO; SA_RESTART has no test on RISC-V yet), and fault-tolerant user
+  compare-and-exchange for futexes. Not yet: a RISC-V C library and rootfs (so no BusyBox or musl
+  programs) and TLS (`tp`) setup.
 
 ### FPU and vector registers: no SVE or RISC-V V state (N-41 part)
 

@@ -236,6 +236,31 @@ core::arch::global_asm!(
     "    svc #0",
     ".global veridian_a64_user_sig_end",
     "veridian_a64_user_sig_end:",
+    // G: futex(FUTEX_WAKE_OP) on two stack words: wake none at the first,
+    // add 37 to the second (5) with FUTEX_OP(ADD, 37, CMP_EQ, 0) =
+    // 0x10025000 as the sixth argument; exit with the second word (42):
+    // the kernel's fault-tolerant compare-and-exchange changed user memory.
+    ".balign 4",
+    ".global veridian_a64_user_futex",
+    "veridian_a64_user_futex:",
+    "    sub sp, sp, #16",
+    "    mov w0, #5",
+    "    str w0, [sp, #4]",
+    "    str wzr, [sp]",
+    "    mov x0, sp",
+    "    mov x1, #5",
+    "    mov x2, #0",
+    "    mov x3, #0",
+    "    add x4, sp, #4",
+    "    movz x5, #0x5000",
+    "    movk x5, #0x1002, lsl #16",
+    "    mov x8, #98",
+    "    svc #0",
+    "    ldr w0, [sp, #4]",
+    "    mov x8, #94",
+    "    svc #0",
+    ".global veridian_a64_user_futex_end",
+    "veridian_a64_user_futex_end:",
     // D: the body of an ELF test program: write(1, "A64-ELF-OK\n", 11),
     // then exit_group(argc), argc being the first word of the stack the
     // loader built.
@@ -266,6 +291,8 @@ extern "C" {
     static veridian_a64_user_fp_end: u8;
     static veridian_a64_user_sig: u8;
     static veridian_a64_user_sig_end: u8;
+    static veridian_a64_user_futex: u8;
+    static veridian_a64_user_futex_end: u8;
     static veridian_a64_user_elf: u8;
     static veridian_a64_user_elf_end: u8;
 }
@@ -317,8 +344,8 @@ pub fn test_elf() -> alloc::vec::Vec<u8> {
 
 /// The boot-test user programs (see above): getpid round trip, page
 /// fault, EL1 system register, FP state kept across switches, signal
-/// handler round trip.
-pub fn test_programs() -> [&'static [u8]; 5] {
+/// handler round trip, futex WAKE_OP.
+pub fn test_programs() -> [&'static [u8]; 6] {
     // Only the addresses of the linker symbols are taken (safe).
     [
         span(
@@ -340,6 +367,10 @@ pub fn test_programs() -> [&'static [u8]; 5] {
         span(
             core::ptr::addr_of!(veridian_a64_user_sig),
             core::ptr::addr_of!(veridian_a64_user_sig_end),
+        ),
+        span(
+            core::ptr::addr_of!(veridian_a64_user_futex),
+            core::ptr::addr_of!(veridian_a64_user_futex_end),
         ),
     ]
 }

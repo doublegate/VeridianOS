@@ -2183,7 +2183,7 @@ fn run_process_tests(passed: &mut u32, failed: &mut u32) {
     // Exit status as run_and_wait reports it: the code, or 128 + signal.
     #[cfg(target_arch = "riscv64")]
     {
-        let [getpid, fault, csr, fp, sig] = crate::arch::riscv64::usermode::test_programs();
+        let [getpid, fault, csr, fp, sig, futex] = crate::arch::riscv64::usermode::test_programs();
         let (pid, status) = run_user_code(getpid);
         let ok = pid.is_some_and(|p| status == Some((p & 0xFF) as i32));
         if !ok {
@@ -2212,6 +2212,16 @@ fn run_process_tests(passed: &mut u32, failed: &mut u32) {
         );
         report_fp_survives(fp, passed, failed);
         report_signal_round_trip(sig, passed, failed);
+        let (_, status) = run_user_code(futex);
+        if status != Some(42) {
+            crate::println!("    status {:?}", status);
+        }
+        report_test(
+            "user_futex_wake_op_updates_word",
+            status == Some(42),
+            passed,
+            failed,
+        );
 
         // An ELF program through the loader (from the VFS, with arguments
         // and the console as fds 0-2): it writes "RV-ELF-OK" and exits with
@@ -2254,7 +2264,8 @@ fn run_process_tests(passed: &mut u32, failed: &mut u32) {
     // it really ran at EL0. Exit status as run_and_wait reports it.
     #[cfg(target_arch = "aarch64")]
     {
-        let [getpid, fault, sysreg, fp, sig] = crate::arch::aarch64::usermode::test_programs();
+        let [getpid, fault, sysreg, fp, sig, futex] =
+            crate::arch::aarch64::usermode::test_programs();
         let (pid, status) = run_user_code(getpid);
         let ok = pid.is_some_and(|p| status == Some((p & 0xFF) as i32));
         if !ok {
@@ -2283,6 +2294,16 @@ fn run_process_tests(passed: &mut u32, failed: &mut u32) {
         );
         report_fp_survives(fp, passed, failed);
         report_signal_round_trip(sig, passed, failed);
+        let (_, status) = run_user_code(futex);
+        if status != Some(42) {
+            crate::println!("    status {:?}", status);
+        }
+        report_test(
+            "user_futex_wake_op_updates_word",
+            status == Some(42),
+            passed,
+            failed,
+        );
 
         // An ELF program through the loader: it writes "A64-ELF-OK" and
         // exits with its argc.
@@ -2917,17 +2938,11 @@ fn run_usercopy_tests(passed: &mut u32, failed: &mut u32) {
     }
 
     // Test 33: the futex WAKE_OP atomic on an unmapped user word returns an
-    // error instead of faulting in the kernel (x86_64 cmpxchg fixup).
+    // error instead of faulting in the kernel (the cmpxchg fixups: x86_64
+    // cmpxchg, AArch64 exclusives, RISC-V LR/SC).
     {
-        #[cfg(target_arch = "x86_64")]
         let ok = crate::syscall::userspace::cmpxchg_user_u32(0x0000_7FF0_0000_0000, 0, 1).is_err();
-        #[cfg(target_arch = "x86_64")]
         report_test("usercopy_cmpxchg_fault_returns_efault", ok, passed, failed);
-        #[cfg(not(target_arch = "x86_64"))]
-        report_skip(
-            "usercopy_cmpxchg_fault_returns_efault",
-            "no fault fixup yet (sprint E)",
-        );
     }
 
     // Test 32: the boot stack has not overflowed into the statics below it

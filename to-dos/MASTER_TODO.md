@@ -183,8 +183,8 @@ What does not work yet: `docs/KNOWN-LIMITATIONS.md`.
       address spaces hold only the user half (TTBR0); EL0 entry/exit, SVC system calls with arm64
       numbers, user page faults, fault-tolerant user copies, ELF programs and the embedded init
       (ADR 0016, E-A6); user FP/SIMD state switched with the task, signal handlers with Linux's
-      rt_sigframe, fault signals to handlers (both also RISC-V); next: user cmpxchg, ASIDs, C
-      library; cache
+      rt_sigframe, fault signals to handlers, fault-tolerant user cmpxchg (all also RISC-V);
+      next: ASIDs, C library; cache
       maintenance primitives and DMA coherency (HA-25); ASIDs (HA-26); memory map from `/memory`
       and reservations (HA-17); EL0 entry/exit and SVC dispatch; register sanitiser (N-170).
     - RISC-V: done: zero BSS, hart lottery, `sstatus.FS` Off in the kernel (HR-01, HR-19, HR-20

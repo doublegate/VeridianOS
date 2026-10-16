@@ -296,11 +296,24 @@ pub fn cmpxchg_user_u32(addr: usize, old: u32, new: u32) -> Result<u32, SyscallE
         unsafe { crate::arch::x86_64::usercopy::cmpxchg_user_u32(addr as *mut u32, old, new) }
             .map_err(|()| SyscallError::UnmappedMemory)
     }
-    #[cfg(not(all(target_arch = "x86_64", target_os = "none")))]
+    // AArch64 and RISC-V: fault-tolerant the same way (exclusive load and
+    // store, LR/SC).
+    #[cfg(all(target_arch = "aarch64", target_os = "none"))]
     {
-        // SAFETY: `addr` is aligned and validated; AtomicU32 has the layout
-        // of u32. Without a fault fixup on these targets, the page must
-        // already be mapped writable (the same assumption as raw_copy).
+        // SAFETY: `addr` is aligned and was validated as a user address.
+        unsafe { crate::arch::aarch64::usercopy::cmpxchg_user_u32(addr as *mut u32, old, new) }
+            .map_err(|()| SyscallError::UnmappedMemory)
+    }
+    #[cfg(all(target_arch = "riscv64", target_os = "none"))]
+    {
+        // SAFETY: `addr` is aligned and was validated as a user address.
+        unsafe { crate::arch::riscv64::usercopy::cmpxchg_user_u32(addr as *mut u32, old, new) }
+            .map_err(|()| SyscallError::UnmappedMemory)
+    }
+    #[cfg(not(target_os = "none"))]
+    {
+        // Host tests: SAFETY: `addr` is aligned and validated; AtomicU32
+        // has the layout of u32.
         let word = unsafe { core::sync::atomic::AtomicU32::from_ptr(addr as *mut u32) };
         Ok(word
             .compare_exchange(

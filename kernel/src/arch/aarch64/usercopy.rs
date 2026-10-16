@@ -36,6 +36,33 @@ core::arch::global_asm!(
     "veridian_aarch64_copy_user_fault:",
     "    mov x0, #1",
     "    ret",
+    // Compare-and-exchange of an aligned 32-bit user word (futexes):
+    // x0 = ptr, w1 = old, w2 = new, x3 = where to store the value found;
+    // returns 0, or 1 after a fault. An exception between the exclusive
+    // load and store clears the monitor, so after a fault that demand
+    // paging resolved the store fails and the loop reloads.
+    ".balign 4",
+    ".global veridian_aarch64_cmpxchg_user32",
+    "veridian_aarch64_cmpxchg_user32:",
+    "1:",
+    ".global veridian_aarch64_cmpxchg_user32_load",
+    "veridian_aarch64_cmpxchg_user32_load:",
+    "    ldaxr w4, [x0]",
+    "    cmp w4, w1",
+    "    b.ne 2f",
+    ".global veridian_aarch64_cmpxchg_user32_store",
+    "veridian_aarch64_cmpxchg_user32_store:",
+    "    stlxr w5, w2, [x0]",
+    "    cbnz w5, 1b",
+    "    b 3f",
+    "2:  clrex",
+    "3:  str w4, [x3]",
+    "    mov x0, #0",
+    "    ret",
+    ".global veridian_aarch64_cmpxchg_user32_fault",
+    "veridian_aarch64_cmpxchg_user32_fault:",
+    "    mov x0, #1",
+    "    ret",
 );
 
 extern "C" {
@@ -43,6 +70,28 @@ extern "C" {
     fn veridian_aarch64_copy_user_load();
     fn veridian_aarch64_copy_user_store();
     fn veridian_aarch64_copy_user_fault();
+    fn veridian_aarch64_cmpxchg_user32(ptr: *mut u32, old: u32, new: u32, found: *mut u32)
+        -> usize;
+    fn veridian_aarch64_cmpxchg_user32_load();
+    fn veridian_aarch64_cmpxchg_user32_store();
+    fn veridian_aarch64_cmpxchg_user32_fault();
+}
+
+/// Atomically store `new` in the aligned user word at `ptr` if it holds
+/// `old`; returns the value found (equal to `old` iff the store happened).
+/// `Err` if the page could not be made present and writable.
+///
+/// # Safety
+/// `ptr` must be 4-byte aligned and lie in user space (`validate_user_ptr`).
+pub(crate) unsafe fn cmpxchg_user_u32(ptr: *mut u32, old: u32, new: u32) -> Result<u32, ()> {
+    let mut found = 0u32;
+    // SAFETY: per the contract; `found` is a kernel local; a fault inside
+    // resumes at the fixup.
+    if unsafe { veridian_aarch64_cmpxchg_user32(ptr, old, new, &mut found) } == 0 {
+        Ok(found)
+    } else {
+        Err(())
+    }
 }
 
 /// Copy `len` bytes where one side is user memory. `Err` if a user page
@@ -63,7 +112,14 @@ pub(crate) unsafe fn copy_user(dst: *mut u8, src: *const u8, len: usize) -> Resu
 /// The fixup for a kernel fault at `pc`, if `pc` is one of the user-copy
 /// instructions.
 pub fn fixup_for(pc: usize) -> Option<usize> {
-    let load = veridian_aarch64_copy_user_load as *const () as usize;
-    let store = veridian_aarch64_copy_user_store as *const () as usize;
-    (pc == load || pc == store).then_some(veridian_aarch64_copy_user_fault as *const () as usize)
+    let at = |f: unsafe extern "C" fn()| f as *const () as usize;
+    if pc == at(veridian_aarch64_copy_user_load) || pc == at(veridian_aarch64_copy_user_store) {
+        Some(at(veridian_aarch64_copy_user_fault))
+    } else if pc == at(veridian_aarch64_cmpxchg_user32_load)
+        || pc == at(veridian_aarch64_cmpxchg_user32_store)
+    {
+        Some(at(veridian_aarch64_cmpxchg_user32_fault))
+    } else {
+        None
+    }
 }

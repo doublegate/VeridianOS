@@ -233,6 +233,28 @@ core::arch::global_asm!(
     "    ret",
     ".global veridian_rv_user_sig_end",
     "veridian_rv_user_sig_end:",
+    // G: futex(FUTEX_WAKE_OP) as on AArch64: exit with the second word,
+    // 5 + 37 = 42.
+    ".balign 4",
+    ".global veridian_rv_user_futex",
+    "veridian_rv_user_futex:",
+    "    addi sp, sp, -16",
+    "    li t0, 5",
+    "    sw t0, 4(sp)",
+    "    sw zero, 0(sp)",
+    "    mv a0, sp",
+    "    li a1, 5",
+    "    li a2, 0",
+    "    li a3, 0",
+    "    addi a4, sp, 4",
+    "    li a5, 0x10025000",
+    "    li a7, 98",
+    "    ecall",
+    "    lw a0, 4(sp)",
+    "    li a7, 94",
+    "    ecall",
+    ".global veridian_rv_user_futex_end",
+    "veridian_rv_user_futex_end:",
     // D: the body of an ELF test program: write(1, "RV-ELF-OK\n", 10),
     // then exit_group(argc), argc being the first word of the stack the
     // loader built.
@@ -263,6 +285,8 @@ extern "C" {
     static veridian_rv_user_fp_end: u8;
     static veridian_rv_user_sig: u8;
     static veridian_rv_user_sig_end: u8;
+    static veridian_rv_user_futex: u8;
+    static veridian_rv_user_futex_end: u8;
     static veridian_rv_user_elf: u8;
     static veridian_rv_user_elf_end: u8;
 }
@@ -309,8 +333,8 @@ pub fn test_elf() -> alloc::vec::Vec<u8> {
 
 /// The boot-test user programs (see above): getpid round trip, page
 /// fault, privileged CSR, FP state kept across switches, signal handler
-/// round trip.
-pub fn test_programs() -> [&'static [u8]; 5] {
+/// round trip, futex WAKE_OP.
+pub fn test_programs() -> [&'static [u8]; 6] {
     let span = |a: *const u8, b: *const u8| {
         // SAFETY: two labels of one rodata block, `a` before `b`.
         unsafe { core::slice::from_raw_parts(a, b as usize - a as usize) }
@@ -336,6 +360,10 @@ pub fn test_programs() -> [&'static [u8]; 5] {
         span(
             core::ptr::addr_of!(veridian_rv_user_sig),
             core::ptr::addr_of!(veridian_rv_user_sig_end),
+        ),
+        span(
+            core::ptr::addr_of!(veridian_rv_user_futex),
+            core::ptr::addr_of!(veridian_rv_user_futex_end),
         ),
     ]
 }

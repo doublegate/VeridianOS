@@ -60,7 +60,7 @@ code, **L** = latent (unreachable today), as in the 2026-10-07 re-evaluation.
 | PB-MEM-02 (eager mmap under the lock), PB-MEM-03 (`EXTRA_OWNERS` under `FRAME_ALLOCATOR`) | partly real (the outer per-process lock is the stall; the order is documented) | N-143, N-138 (v0.29) |
 | PB-MEM-05 (linear VMA scan on COW faults), PB-MEM-07 (per-page bound check) | real | N-143; both **fixed** b0644391 |
 | ARCH-MEM-02 (`Box` under the buddy free-list lock) | overstated: no AB-BA deadlock (the x86 heap never calls the frame allocator) | MEM-SEC-03 follow-up |
-| ARCH-MEM-03 (no fault-tolerant usercopy on AArch64/RISC-V) | real, documented | E; RISC-V **fixed** (v0.27): copies with a fixup table, SUM only inside them (ADR 0014); AArch64 **fixed** (v0.27): the same, with an EL1 synchronous-exception handler (ADR 0016); compare-and-exchange open on both |
+| ARCH-MEM-03 (no fault-tolerant usercopy on AArch64/RISC-V) | real, documented | E; RISC-V **fixed** (v0.27): copies with a fixup table, SUM only inside them (ADR 0014); AArch64 **fixed** (v0.27): the same, with an EL1 synchronous-exception handler (ADR 0016); the futex compare-and-exchange is fault-tolerant on both too (exclusives, LR/SC) |
 | ARCH-MEM-05 (page cache never evicts) | real | KNOWN-LIMITATIONS, v0.29 |
 | IPC-SEC-01..03, IPC-SYNC-01..03, IPC-ARCH-01, IPC-PERF-01 | real | N-83 (**fixed** 9ec919ec), N-88 (partly fixed), N-80 (partly fixed), N-82, N-86, N-84, N-81, N-91 |
 | CAP-SEC-01, CAP-SEC-02, ARCH-CAP-01 | real (ARCH-CAP-01's call sites are dead) | N-89, N-87 (both partly fixed 9ec919ec) |
