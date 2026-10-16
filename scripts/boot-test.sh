@@ -3,7 +3,8 @@
 #
 # Passes when the serial log shows BOOTOK, the boot-test tally is complete
 # ("Results: N/N passed"), and nothing panicked during a settle period after
-# BOOTOK (later boot stages run after the marker).
+# BOOTOK (later boot stages run after the marker). AArch64 and RISC-V boot
+# with a ramfb display, so the framebuffer console is checked too.
 #
 # QEMU runs in the background and is killed when done; it is never wrapped
 # in `timeout` (QEMU 10 misbehaves under it).
@@ -55,11 +56,11 @@ x86_64)
     ;;
 aarch64)
     img="$root/target/aarch64-unknown-none-softfloat/$profile/veridian-kernel"
-    cmd=(qemu-system-aarch64 -M virt -cpu cortex-a72 -smp "$smp" -m 256M -kernel "$img")
+    cmd=(qemu-system-aarch64 -M virt -cpu cortex-a72 -smp "$smp" -m 256M -kernel "$img" -device ramfb)
     ;;
 riscv64)
     img="$root/target/riscv64imac-unknown-none-elf/$profile/veridian-kernel"
-    cmd=(qemu-system-riscv64 -M virt -smp "$smp" -m 256M -bios default -kernel "$img")
+    cmd=(qemu-system-riscv64 -M virt -smp "$smp" -m 256M -bios default -kernel "$img" -device ramfb)
     ;;
 *)
     echo "unknown architecture: $arch"

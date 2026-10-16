@@ -399,8 +399,11 @@ pub fn kernel_init() -> KernelResult<()> {
                 }
                 kprintln!("[BOOTSTRAP] ramfb + fbcon initialized (1024x768)");
             }
-            Err(_) => {
-                kprintln!("[BOOTSTRAP] ramfb not available, serial-only output");
+            Err(e) => {
+                crate::println!(
+                    "[BOOTSTRAP] ramfb not available ({:?}), serial-only output",
+                    e
+                );
             }
         }
     }
@@ -2567,8 +2570,19 @@ fn run_display_tests(passed: &mut u32, failed: &mut u32) {
             passed,
             failed,
         );
+        // With a ramfb device the console must be up on it; without one
+        // there is nothing to check.
         #[cfg(not(target_arch = "x86_64"))]
-        report_skip("fbcon_initialized", "ramfb is optional here");
+        if crate::drivers::ramfb::present() {
+            report_test(
+                "fbcon_initialized",
+                crate::graphics::fbcon::is_initialized(),
+                passed,
+                failed,
+            );
+        } else {
+            report_skip("fbcon_initialized", "no ramfb device (-device ramfb)");
+        }
     }
 
     // Test 29: Keyboard driver ready (x86_64 only — PS/2 keyboard)

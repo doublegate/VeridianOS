@@ -770,6 +770,13 @@
 
 ### Fixed
 
+- **ramfb works on AArch64 and RISC-V.** It never initialised: the 3 MiB framebuffer was asked
+  of the general allocator, which refuses runs of 512 frames or more from the bitmap (and below
+  512 MiB of RAM there is no buddy region; `allocate_contiguous` serves them now), the fw_cfg
+  base was AArch64's on RISC-V too (QEMU puts it at 0x1010_0000 there), and the config block and
+  DMA descriptor were on the stack, whose address was handed to the device as a physical one
+  (they go in a DMA frame now). The boot tests run with `-device ramfb` on both, and
+  `fbcon_initialized` checks the console whenever fw_cfg lists `etc/ramfb`.
 - **RISC-V boot no longer relies on the loader (HR-01, HR-19, HR-20).** `_start` zeroes `.bss`
   (QEMU's ELF loader does, a flat Image from U-Boot or EFI does not), runs a hart lottery so
   that, with firmware that starts every hart at once, one boots and the others stop through SBI
