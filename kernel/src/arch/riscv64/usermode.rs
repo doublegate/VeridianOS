@@ -255,6 +255,16 @@ core::arch::global_asm!(
     "    ecall",
     ".global veridian_rv_user_futex_end",
     "veridian_rv_user_futex_end:",
+    // H: the body of the TLS test ELF: exit with the first TLS word, at tp
+    // (the psABI puts the image at the thread pointer).
+    ".balign 4",
+    ".global veridian_rv_user_tls",
+    "veridian_rv_user_tls:",
+    "    ld a0, 0(tp)",
+    "    li a7, 94",
+    "    ecall",
+    ".global veridian_rv_user_tls_end",
+    "veridian_rv_user_tls_end:",
     // D: the body of an ELF test program: write(1, "RV-ELF-OK\n", 10),
     // then exit_group(argc), argc being the first word of the stack the
     // loader built.
@@ -289,6 +299,63 @@ extern "C" {
     static veridian_rv_user_futex_end: u8;
     static veridian_rv_user_elf: u8;
     static veridian_rv_user_elf_end: u8;
+    static veridian_rv_user_tls: u8;
+    static veridian_rv_user_tls_end: u8;
+}
+
+/// A minimal static ELF whose code reads its first TLS word through the
+/// thread pointer and exits with it: one read+execute PT_LOAD at 0x10000
+/// (headers, code, then the 8-byte TLS image holding 42) and a PT_TLS
+/// segment over the image (memory size 16, alignment 8). Exit status 42
+/// means the loader built the TLS block and set the thread pointer.
+pub fn test_tls_elf() -> alloc::vec::Vec<u8> {
+    // Only the addresses of the linker symbols are taken (safe).
+    let a = core::ptr::addr_of!(veridian_rv_user_tls);
+    let b = core::ptr::addr_of!(veridian_rv_user_tls_end);
+    // SAFETY: two labels of one rodata block, `a` before `b`.
+    let code = unsafe { core::slice::from_raw_parts(a, b as usize - a as usize) };
+    const BASE: u64 = 0x10000;
+    const HDRS: u64 = 64 + 2 * 56;
+    let image_at = (HDRS + code.len() as u64).next_multiple_of(8);
+    let size = image_at + 8;
+    let mut e = alloc::vec::Vec::with_capacity(size as usize);
+    e.extend_from_slice(&[0x7F, b'E', b'L', b'F', 2, 1, 1, 0]);
+    e.extend_from_slice(&[0; 8]);
+    e.extend_from_slice(&2u16.to_le_bytes()); // ET_EXEC
+    e.extend_from_slice(&243u16.to_le_bytes());
+    e.extend_from_slice(&1u32.to_le_bytes());
+    e.extend_from_slice(&(BASE + HDRS).to_le_bytes()); // entry
+    e.extend_from_slice(&64u64.to_le_bytes()); // phoff
+    e.extend_from_slice(&0u64.to_le_bytes()); // shoff
+    e.extend_from_slice(&1u32.to_le_bytes()); // flags
+    e.extend_from_slice(&64u16.to_le_bytes());
+    e.extend_from_slice(&56u16.to_le_bytes());
+    e.extend_from_slice(&2u16.to_le_bytes()); // phnum
+    e.extend_from_slice(&64u16.to_le_bytes());
+    e.extend_from_slice(&0u16.to_le_bytes());
+    e.extend_from_slice(&0u16.to_le_bytes());
+    // PT_LOAD: everything, read + execute.
+    e.extend_from_slice(&1u32.to_le_bytes());
+    e.extend_from_slice(&5u32.to_le_bytes());
+    e.extend_from_slice(&0u64.to_le_bytes());
+    e.extend_from_slice(&BASE.to_le_bytes());
+    e.extend_from_slice(&BASE.to_le_bytes());
+    e.extend_from_slice(&size.to_le_bytes());
+    e.extend_from_slice(&size.to_le_bytes());
+    e.extend_from_slice(&0x1000u64.to_le_bytes());
+    // PT_TLS: the 8-byte image (16 bytes in memory, the rest zero).
+    e.extend_from_slice(&7u32.to_le_bytes());
+    e.extend_from_slice(&4u32.to_le_bytes()); // R
+    e.extend_from_slice(&image_at.to_le_bytes());
+    e.extend_from_slice(&(BASE + image_at).to_le_bytes());
+    e.extend_from_slice(&(BASE + image_at).to_le_bytes());
+    e.extend_from_slice(&8u64.to_le_bytes());
+    e.extend_from_slice(&16u64.to_le_bytes());
+    e.extend_from_slice(&8u64.to_le_bytes());
+    e.extend_from_slice(code);
+    e.resize(image_at as usize, 0);
+    e.extend_from_slice(&42u64.to_le_bytes());
+    e
 }
 
 /// A minimal static RISC-V ELF executable of the ELF test program: one

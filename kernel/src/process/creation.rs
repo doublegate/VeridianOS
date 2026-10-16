@@ -743,10 +743,13 @@ unsafe fn write_bytes_to_user_stack(
 }
 
 /// Give a static program its initial TLS block from its PT_TLS segment, if
-/// it has one (x86_64, variant II: FS_BASE points at the TCB, which follows
-/// the TLS image), and record FS_BASE for the return to user mode. The
-/// native libc relies on this; musl sets up TLS itself and replaces it.
-/// Nothing is done (and it is logged) if the block cannot be set up.
+/// it has one, and record its thread pointer for the return to user mode
+/// (`Process::tls_fs_base`): on x86_64 (variant II) FS_BASE points at the
+/// TCB, which follows the TLS image; on AArch64 and RISC-V (variant I) the
+/// thread pointer (TPIDR_EL0, `tp`) is the block base and the image lies
+/// above it, after a 16-byte TCB on AArch64 and at it on RISC-V. The native
+/// libc relies on this; musl sets up TLS itself and replaces it. Nothing is
+/// done (and it is logged) if the block cannot be set up.
 #[cfg(feature = "alloc")]
 pub(crate) fn setup_static_tls(process: &Process, binary: &crate::elf::ElfBinary, data: &[u8]) {
     #[cfg(target_arch = "x86_64")]
@@ -793,7 +796,55 @@ pub(crate) fn setup_static_tls(process: &Process, binary: &crate::elf::ElfBinary
             .tls_fs_base
             .store(tcb, core::sync::atomic::Ordering::Release);
     }
-    #[cfg(not(target_arch = "x86_64"))]
+    #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
+    {
+        let Some(tls) = binary
+            .segments
+            .iter()
+            .find(|s| s.segment_type == crate::elf::SegmentType::Tls)
+        else {
+            return;
+        };
+        #[cfg(target_arch = "aarch64")]
+        const TCB_SIZE: usize = 16;
+        #[cfg(target_arch = "riscv64")]
+        const TCB_SIZE: usize = 0;
+        let Some((size, image_offset)) =
+            crate::elf::tls_layout_above_tp(tls.memory_size as usize, tls.alignment, TCB_SIZE)
+        else {
+            crate::println!(
+                "[LOADER] PT_TLS alignment {} unsupported; leaving TLS to libc",
+                tls.alignment
+            );
+            return;
+        };
+        let memory_space = process.memory_space.lock();
+        let base = match memory_space.mmap(size, crate::mm::vas::MappingType::Data) {
+            Ok(base) => base.as_u64(),
+            Err(e) => {
+                crate::println!("[LOADER] TLS block of {} bytes not mapped: {:?}", size, e);
+                return;
+            }
+        };
+        // The initial image from the file; the TCB and the rest are zero.
+        let from = tls.file_offset as usize;
+        if let Some(init) = from
+            .checked_add(tls.file_size as usize)
+            .and_then(|to| data.get(from..to))
+        {
+            let _ =
+                crate::elf::write_to_user_pages(&memory_space, base + image_offset as u64, init);
+        }
+        drop(memory_space);
+        process
+            .tls_fs_base
+            .store(base, core::sync::atomic::Ordering::Release);
+    }
+    #[cfg(not(any(
+        target_arch = "x86_64",
+        target_arch = "aarch64",
+        target_arch = "riscv64"
+    )))]
     let _ = (process, binary, data);
 }
 

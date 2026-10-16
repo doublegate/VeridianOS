@@ -183,7 +183,8 @@ What does not work yet: `docs/KNOWN-LIMITATIONS.md`.
       address spaces hold only the user half (TTBR0); EL0 entry/exit, SVC system calls with arm64
       numbers, user page faults, fault-tolerant user copies, ELF programs and the embedded init
       (ADR 0016, E-A6); user FP/SIMD state switched with the task, signal handlers with Linux's
-      rt_sigframe, fault signals to handlers, fault-tolerant user cmpxchg (all also RISC-V);
+      rt_sigframe, fault signals to handlers, fault-tolerant user cmpxchg, static TLS from PT_TLS
+      (all also RISC-V);
       next: ASIDs, C library; cache
       maintenance primitives and DMA coherency (HA-25); ASIDs (HA-26); memory map from `/memory`
       and reservations (HA-17); EL0 entry/exit and SVC dispatch; register sanitiser (N-170).
@@ -197,7 +198,7 @@ What does not work yet: `docs/KNOWN-LIMITATIONS.md`.
       switch primitive and dispatcher on the boot hart (E-RV5); U-mode entry and exit, ecall
       system calls by the generic table, fault-tolerant user copies (E-RV6, ADR 0014; N-14);
       ELF programs through the loader (E-RV6c); every hart dispatches (E-RV5c); next: RISC-V
-      musl and rootfs, TLS, user FP, signals, user cmpxchg; remove raw 0x1000_0000 stores and QEMU-only probes (HR-04
+      musl and rootfs (done: TLS, user FP, signals, user cmpxchg); remove raw 0x1000_0000 stores and QEMU-only probes (HR-04
       to HR-06); memory map from the DT (HR-07); external interrupts (scause 9) handled, not fatal
       (HR-31); IPIs by hart id (HR-33); U-mode with `tp` via `sscratch` (N-14); `sstatus` SPP
       sanitiser (N-170).

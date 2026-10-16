@@ -262,8 +262,15 @@ pub fn start_thread(
             });
         }
         let mut f = UserFrame::default();
+        // The thread pointer: the context's (a clone's CLONE_SETTLS, a
+        // fork's), else the static program's TLS block (`setup_static_tls`).
+        let tp = if ctx.tp != 0 {
+            ctx.tp
+        } else {
+            process.tls_fs_base.load(Ordering::Acquire) as usize
+        };
         let regs = [
-            ctx.ra, ctx.sp, ctx.gp, ctx.tp, ctx.t0, ctx.t1, ctx.t2, ctx.s0, ctx.s1, ctx.a0, ctx.a1,
+            ctx.ra, ctx.sp, ctx.gp, tp, ctx.t0, ctx.t1, ctx.t2, ctx.s0, ctx.s1, ctx.a0, ctx.a1,
             ctx.a2, ctx.a3, ctx.a4, ctx.a5, ctx.a6, ctx.a7, ctx.s2, ctx.s3, ctx.s4, ctx.s5, ctx.s6,
             ctx.s7, ctx.s8, ctx.s9, ctx.s10, ctx.s11, ctx.t3, ctx.t4, ctx.t5, ctx.t6,
         ];
@@ -327,7 +334,14 @@ pub fn start_thread(
             elr: ctx.pc,
             spsr: 0,
         };
-        (f, ctx.tpidr_el0)
+        // The thread pointer: the context's (a clone's CLONE_SETTLS, a
+        // fork's), else the static program's TLS block (`setup_static_tls`).
+        let tls = if ctx.tpidr_el0 != 0 {
+            ctx.tpidr_el0
+        } else {
+            process.tls_fs_base.load(Ordering::Acquire)
+        };
+        (f, tls)
     };
     let root = process.memory_space.lock().get_page_table();
     if root == 0 {

@@ -216,8 +216,8 @@ Still open:
   tasks with system calls, page faults, fault-tolerant user copies, user FP state and signal
   handlers (Linux's RISC-V `rt_sigframe`; handlers return through a trampoline page the kernel maps,
   where Linux uses its vDSO; SA_RESTART has no test on RISC-V yet), and fault-tolerant user
-  compare-and-exchange for futexes. Not yet: a RISC-V C library and rootfs (so no BusyBox or musl
-  programs) and TLS (`tp`) setup.
+  compare-and-exchange for futexes, and static TLS (`tp` at the PT_TLS block). Not yet: a RISC-V
+  C library and rootfs (so no BusyBox or musl programs).
 
 ### FPU and vector registers: no SVE or RISC-V V state (N-41 part)
 

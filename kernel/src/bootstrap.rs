@@ -2222,6 +2222,7 @@ fn run_process_tests(passed: &mut u32, failed: &mut u32) {
             passed,
             failed,
         );
+        report_static_tls(passed, failed);
 
         // An ELF program through the loader (from the VFS, with arguments
         // and the console as fds 0-2): it writes "RV-ELF-OK" and exits with
@@ -2304,6 +2305,7 @@ fn run_process_tests(passed: &mut u32, failed: &mut u32) {
             passed,
             failed,
         );
+        report_static_tls(passed, failed);
 
         // An ELF program through the loader: it writes "A64-ELF-OK" and
         // exits with its argc.
@@ -2398,6 +2400,30 @@ fn report_signal_round_trip(code: &[u8], passed: &mut u32, failed: &mut u32) {
         passed,
         failed,
     );
+}
+
+/// A static ELF with a PT_TLS segment (`usermode::test_tls_elf`), loaded
+/// through the loader from the VFS: it exits with its first TLS word (42)
+/// when the loader built its TLS block and set the thread pointer.
+#[cfg(all(
+    feature = "alloc",
+    any(target_arch = "riscv64", target_arch = "aarch64")
+))]
+fn report_static_tls(passed: &mut u32, failed: &mut u32) {
+    #[cfg(target_arch = "aarch64")]
+    let elf = crate::arch::aarch64::usermode::test_tls_elf();
+    #[cfg(target_arch = "riscv64")]
+    let elf = crate::arch::riscv64::usermode::test_tls_elf();
+    let status = crate::fs::write_file("/tmp/tls-test", &elf)
+        .ok()
+        .and_then(|_| {
+            crate::userspace::loader::load_user_program("/tmp/tls-test", &["tls-test"], &[]).ok()
+        })
+        .and_then(crate::process::run_and_wait);
+    if status != Some(42) {
+        crate::println!("    status {:?}", status);
+    }
+    report_test("user_static_tls_block", status == Some(42), passed, failed);
 }
 
 /// Build (not start) a process that runs `code` as [`run_user_code`] does.

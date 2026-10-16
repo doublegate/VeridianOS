@@ -271,6 +271,26 @@ pub fn tls_layout(memsz: usize, p_align: u64) -> Option<(usize, usize)> {
     Some((block_size, aligned))
 }
 
+/// Layout of the initial TLS block for TLS variant I (AArch64, RISC-V),
+/// where the thread pointer is the block base and the TLS image lies above
+/// it, after a TCB of `tcb_size` bytes (16 on AArch64, AAELF64; 0 on
+/// RISC-V, whose psABI puts the image at the thread pointer). Returns
+/// `(block_size, image_offset)`: the image starts at the TCB size rounded
+/// up to `p_align`. As [`tls_layout`], an alignment that is not a power of
+/// two or exceeds a page (the block base is page-aligned) is refused.
+pub fn tls_layout_above_tp(memsz: usize, p_align: u64, tcb_size: usize) -> Option<(usize, usize)> {
+    let align = (p_align as usize).max(1);
+    if !align.is_power_of_two() || align > 4096 {
+        return None;
+    }
+    let image = tcb_size.checked_next_multiple_of(align)?;
+    let block_size = image
+        .checked_add(memsz)?
+        .max(16)
+        .checked_next_multiple_of(16)?;
+    Some((block_size, image))
+}
+
 /// Dynamic linking information
 #[derive(Debug)]
 pub struct DynamicInfo {

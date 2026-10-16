@@ -2,6 +2,15 @@
 
 ### Added
 
+- **Static TLS on AArch64 and RISC-V.** The loader gives a static program with a PT_TLS segment
+  its initial TLS block on these architectures too (it did only on x86_64), laid out as each
+  psABI's variant I: the thread pointer (TPIDR_EL0, `tp`) is the block base, and the image lies
+  above it, after a 16-byte TCB on AArch64 and at it on RISC-V (`elf::tls_layout_above_tp`, with a
+  host test). A new thread starts with that pointer unless its context carries one (a clone's
+  CLONE_SETTLS, a fork's). Boot test `user_static_tls_block`: a static ELF reads its first TLS word
+  through the thread pointer and exits with it (it fails with status 139 when the pointer is not
+  set). AArch64 53/53, RISC-V 50/50.
+
 - **Fault-tolerant user compare-and-exchange on AArch64 and RISC-V (ARCH-MEM-03).** The futex
   atomic (`cmpxchg_user_u32`: FUTEX_WAKE_OP, PI futexes, robust lists) used a plain atomic on the
   user address there, so an unmapped or read-only page faulted in the kernel. It is now an

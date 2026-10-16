@@ -1410,6 +1410,19 @@ mod tests {
     }
 
     #[test]
+    fn tls_layout_above_tp_places_the_image_after_the_tcb() {
+        // AArch64: a 16-byte TCB at the thread pointer, then the image.
+        assert_eq!(tls_layout_above_tp(0x13, 8, 16), Some((0x30, 0x10)));
+        // A larger alignment moves the image up to it.
+        assert_eq!(tls_layout_above_tp(0x13, 64, 16), Some((0x60, 0x40)));
+        // RISC-V: no TCB, the image at the thread pointer.
+        assert_eq!(tls_layout_above_tp(0x13, 8, 0), Some((0x20, 0)));
+        assert_eq!(tls_layout_above_tp(0, 0, 0), Some((0x10, 0)));
+        assert_eq!(tls_layout_above_tp(0x13, 24, 16), None);
+        assert_eq!(tls_layout_above_tp(0x13, 8192, 0), None);
+    }
+
+    #[test]
     fn tls_layout_honours_p_align() {
         // memsz 0x13 at align 8: the image rounds up to 0x18.
         assert_eq!(tls_layout(0x13, 8), Some((0x20, 0x18)));
