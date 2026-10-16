@@ -611,6 +611,14 @@ pub fn exec_process(path: &str, argv: &[&str], envp: &[&str]) -> Result<(), Kern
         ctx.set_return_value(0);
     }
 
+    // The exec can no longer fail: the process counts as exec'd from here
+    // (setpgid's EACCES). Before the close-on-exec step, because a parent
+    // takes EOF on a close-on-exec pipe as the sign of a completed exec and
+    // may run on another CPU the moment the descriptor closes.
+    process
+        .did_exec
+        .store(true, core::sync::atomic::Ordering::Release);
+
     // Step 5: Close file descriptors marked close-on-exec
     {
         let file_table = process.file_table.lock();
@@ -648,9 +656,6 @@ pub fn exec_process(path: &str, argv: &[&str], envp: &[&str]) -> Result<(), Kern
     // The image is replaced: a parent waiting in vfork may run again; the
     // memory it shared with this process is no longer this process's.
     process.release_vfork_parent();
-    process
-        .did_exec
-        .store(true, core::sync::atomic::Ordering::Release);
 
     // The actual execution resumes when we return to user mode
     // The modified thread context will cause execution at the new entry point

@@ -950,6 +950,13 @@
 
 ### Fixed
 
+- **exec marked a process as exec'd only after closing its close-on-exec descriptors.** A parent
+  that took EOF on a close-on-exec pipe as the sign of the exec could call `setpgid` on another CPU
+  before the flag was set and succeed instead of getting EACCES (`getcwd_wait_and_groups` bit 2048,
+  CI run 38927521498 on 4 CPUs). The flag is now set once the exec can no longer fail, before
+  that step. The check runs 16 times in `audit_runtime_test`; with a delay injected between the
+  two steps it failed before the fix and passes after.
+
 - **`pthread_join` could fail with EINVAL on several CPUs (ISSUE-0023).** `sys_thread_join` saw
   the target as a zombie, then had the thread removed under it by the reaper on another CPU, and
   reported the resulting ThreadNotFound as EINVAL. A thread already removed has finished, so the

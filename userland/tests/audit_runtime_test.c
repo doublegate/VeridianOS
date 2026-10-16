@@ -2381,33 +2381,38 @@ static void test_wait_and_groups(void)
     if (setpgid(0, 99999) != -1 || errno != EPERM)
         fails |= 1024;
     /* The child blocks reading a pipe, never the console: a read of the
-     * inherited stdin took the harness's next command. */
-    int hold[2], execd[2];
-    if (pipe(hold) != 0 || pipe(execd) != 0 || fcntl(execd[1], F_SETFD, FD_CLOEXEC) != 0)
-        fails |= 16;
-    pid = fork();
-    if (pid == 0) {
-        dup2(hold[0], 0);
-        close(hold[1]);
+     * inherited stdin took the harness's next command. Repeated: on SMP
+     * the parent can see EOF the moment the exec closes the pipe, and
+     * the child must already count as exec'd then (it did not, CI run
+     * 38927521498). */
+    for (int round = 0; round < 16; round++) {
+        int hold[2], execd[2];
+        if (pipe(hold) != 0 || pipe(execd) != 0 || fcntl(execd[1], F_SETFD, FD_CLOEXEC) != 0)
+            fails |= 16;
+        pid = fork();
+        if (pid == 0) {
+            dup2(hold[0], 0);
+            close(hold[1]);
+            close(execd[0]);
+            execl("/bin/sh", "sh", "-c", "read x", (char *)0);
+            _exit(127);
+        }
+        close(hold[0]);
+        /* The exec closes the child's end of `execd` (close-on-exec): EOF
+         * here means it has exec'd. (Yielding a few times was not enough
+         * once the child ran on another CPU.) */
+        close(execd[1]);
+        char ignored;
+        while (read(execd[0], &ignored, 1) > 0)
+            ;
         close(execd[0]);
-        execl("/bin/sh", "sh", "-c", "read x", (char *)0);
-        _exit(127);
+        errno = 0;
+        if (setpgid(pid, pid) != -1 || errno != EACCES)
+            fails |= 2048;
+        kill(pid, SIGKILL);
+        waitpid(pid, &st, 0);
+        close(hold[1]);
     }
-    close(hold[0]);
-    /* The exec closes the child's end of `execd` (close-on-exec): EOF
-     * here means it has exec'd. (Yielding a few times was not enough once
-     * the child ran on another CPU.) */
-    close(execd[1]);
-    char ignored;
-    while (read(execd[0], &ignored, 1) > 0)
-        ;
-    close(execd[0]);
-    errno = 0;
-    if (setpgid(pid, pid) != -1 || errno != EACCES)
-        fails |= 2048;
-    kill(pid, SIGKILL);
-    waitpid(pid, &st, 0);
-    close(hold[1]);
 
     /* setsid from a process-group leader: EPERM. */
     pid = fork();
