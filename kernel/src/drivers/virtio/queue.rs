@@ -458,8 +458,7 @@ fn phys_to_kernel_virt(phys: u64) -> usize {
 
     #[cfg(not(target_arch = "x86_64"))]
     {
-        // AArch64 and RISC-V: physical addresses are identity-mapped in the
-        // kernel's address space during early boot.
-        phys as usize
+        // The physical-memory map (RISC-V; offset 0 on AArch64, MMU off).
+        crate::mm::phys_to_virt_addr(phys) as usize
     }
 }

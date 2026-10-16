@@ -20,19 +20,29 @@ veridian_boot_lottery:
 
 .balign 8
 .global veridian_kernel_satp
-# The kernel's satp (Sv48 and the early root). Secondary harts load it
-# before they touch any kernel address.
+# The kernel's satp (Sv48 and the kernel root, no identity map).
 veridian_kernel_satp:
+    .dword 0
+# The trampoline's satp: the kernel root plus the identity map, for the
+# few instructions between turning paging on at the physical address and
+# running at the kernel's own. Secondary harts use it the same way.
+veridian_trampoline_satp:
     .dword 0
 
 # Early page tables (E-RV3), zeroed with the rest of .bss.
 .section .bss
 .balign 4096
+# The kernel root: L4[256] and L4[511] only, so the lower half is free for
+# user address spaces (they share these two entries).
+.global veridian_kernel_root
+veridian_kernel_root:
+    .space 4096
+# The trampoline root: the same plus L4[0], the identity map.
 veridian_early_root:
     .space 4096
 # 512 GiB in 1 GiB pages at their physical address: the physical-memory
-# map (L4[256], virtual = physical + 0xFFFF_8000_0000_0000) and, until the
-# MMIO drivers use that map, an identity map (L4[0]).
+# map (L4[256], virtual = physical + 0xFFFF_8000_0000_0000) and, in the
+# trampoline only, the identity map (L4[0]).
 veridian_early_l3_phys:
     .space 4096
 # The kernel image at its link address, 0xFFFF_FFFF_8000_0000 + 2 MiB:
@@ -164,29 +174,43 @@ _start:
     or t5, t5, t4
     sd t5, 8(t6)
 
-    la a0, veridian_early_root
+    # Both roots: L4[256] (physical map) and L4[511] (kernel image); the
+    # trampoline root also L4[0] (identity).
     la t1, veridian_early_l3_phys
-    srli t5, t1, 2
-    ori t5, t5, 1
-    sd t5, 0(a0)
-    li t6, 256 * 8
-    add t6, a0, t6
-    sd t5, 0(t6)
+    srli t2, t1, 2
+    ori t2, t2, 1
     la t1, veridian_early_l3_kernel
-    srli t5, t1, 2
-    ori t5, t5, 1
-    li t6, 511 * 8
-    add t6, a0, t6
-    sd t5, 0(t6)
+    srli t3, t1, 2
+    ori t3, t3, 1
+    li t4, 256 * 8
+    li t1, 511 * 8
+    la a0, veridian_kernel_root
+    add t6, a0, t4
+    sd t2, 0(t6)
+    add t6, a0, t1
+    sd t3, 0(t6)
+    la a0, veridian_early_root
+    sd t2, 0(a0)
+    add t6, a0, t4
+    sd t2, 0(t6)
+    add t6, a0, t1
+    sd t3, 0(t6)
 
-    # satp = Sv48 (mode 9) | root PPN. satp is WARL: a hart without Sv48
-    # keeps it 0, and then the jump below would fault, so stop instead.
-    srli t5, a0, 12
+    # satp = Sv48 (mode 9) | root PPN, for each root. satp is WARL: a hart
+    # without Sv48 keeps it 0, and then the jump below would fault, so stop
+    # instead.
     li t6, 9
     slli t6, t6, 60
+    la a0, veridian_kernel_root
+    srli t5, a0, 12
     or t5, t5, t6
-    la t6, veridian_kernel_satp
-    sd t5, 0(t6)
+    la a0, veridian_kernel_satp
+    sd t5, 0(a0)
+    la a0, veridian_early_root
+    srli t5, a0, 12
+    or t5, t5, t6
+    la a0, veridian_trampoline_satp
+    sd t5, 0(a0)
     sfence.vma
     csrw satp, t5
     sfence.vma
@@ -200,6 +224,10 @@ _start:
 .Lhigh_addr:
     .dword .Lhigh
 .Lhigh:
+    # Now at the kernel's own address: drop the identity map.
+    ld t0, veridian_kernel_satp
+    csrw satp, t0
+    sfence.vma
     la sp, __stack_top
 
     # Jump to Rust code (use `call` for 32-bit range; `jal` only reaches +/-1MB)
@@ -251,7 +279,7 @@ veridian_hart_entry:
     # Entered at the physical address with the MMU off: the kernel's
     # tables first, then the upper-half code; a1 (the boot block) is a
     # kernel virtual address, used only after this.
-    ld t0, veridian_kernel_satp
+    ld t0, veridian_trampoline_satp
     sfence.vma
     csrw satp, t0
     sfence.vma
@@ -261,6 +289,9 @@ veridian_hart_entry:
 .Lhart_high_addr:
     .dword .Lhart_high
 .Lhart_high:
+    ld t0, veridian_kernel_satp
+    csrw satp, t0
+    sfence.vma
     ld sp, 8(a1)
     ld tp, 16(a1)
     csrw sscratch, zero

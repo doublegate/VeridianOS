@@ -203,7 +203,7 @@ pub extern "C" fn kernel_main() -> ! {
     // writes are not reordered or elided by the compiler.
     unsafe {
         // Direct write to UART at 0x10000000
-        let uart_base = 0x1000_0000 as *mut u8;
+        let uart_base = crate::mm::phys_to_virt_addr(0x1000_0000) as *mut u8;
         // Write 'V' for VeridianOS
         uart_base.write_volatile(b'V');
         uart_base.write_volatile(b'E');

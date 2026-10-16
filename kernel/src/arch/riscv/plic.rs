@@ -389,7 +389,12 @@ pub fn init() -> KernelResult<()> {
     #[cfg(not(target_arch = "riscv64"))]
     let hart_id: u32 = 0;
 
-    let plic = Plic::new(PLIC_BASE, MAX_SOURCES - 1, hart_id);
+    // MMIO through the physical-memory map (RISC-V runs with paging on).
+    let plic = Plic::new(
+        crate::mm::phys_to_virt_addr(PLIC_BASE as u64) as usize,
+        MAX_SOURCES - 1,
+        hart_id,
+    );
     plic.reset();
 
     crate::println!(

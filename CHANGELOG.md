@@ -5,9 +5,11 @@
 - **RISC-V runs with paging on, the kernel in the upper half (ADR 0013).** The kernel ran with
   `satp` Bare at its load address, in what is the user half of an address space. It is now
   linked at 0xFFFF_FFFF_8020_0000 and loaded at 0x8020_0000; `_start` builds early page tables
-  (all physical memory at 0xFFFF_8000_0000_0000, the image at its link address, and a temporary
-  identity map), turns on Sv48 (stopping with a message on a hart without it) and jumps up.
-  Secondary harts load the same `satp` before using any kernel address. Sv39-only boards are
+  (all physical memory at 0xFFFF_8000_0000_0000 and the image at its link address), turns on
+  Sv48 through a trampoline root that also maps the image at its physical address (stopping with
+  a message on a hart without Sv48), jumps up and switches to the kernel root, whose lower half
+  is empty (boot test `kernel_root_lower_half_empty`). Secondary harts do the same. MMIO (PLIC,
+  virtio-mmio, the early UART) and the virtio rings go through the physical-memory map. Sv39-only boards are
   not supported yet (HR-09).
 - **Tasks run on every CPU (SMP stage S3, D5e; ADR 0012).** With the `smp` feature, a new or woken
   task is placed on an idle CPU it may use (or stays where its cache is warm), an idle CPU pulls
@@ -777,6 +779,10 @@
   DMA descriptor were on the stack, whose address was handed to the device as a physical one
   (they go in a DMA frame now). The boot tests run with `-device ramfb` on both, and
   `fbcon_initialized` checks the console whenever fw_cfg lists `etc/ramfb`.
+- **New RISC-V address spaces share the kernel half.** `map_kernel_space` read the kernel's
+  tables only on x86_64 and gave other architectures 18 MiB of freshly allocated frames mapped at
+  kernel addresses instead; RISC-V now copies the kernel root's entries 256-511 (boot test
+  `user_half_starts_empty`, now also checking the sharing).
 - **RISC-V boot no longer relies on the loader (HR-01, HR-19, HR-20).** `_start` zeroes `.bss`
   (QEMU's ELF loader does, a flat Image from U-Boot or EFI does not), runs a hart lottery so
   that, with firmware that starts every hart at once, one boots and the others stop through SBI

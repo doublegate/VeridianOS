@@ -792,14 +792,21 @@ impl VirtualAddressSpace {
                 core::arch::asm!("mov {}, cr3", out(reg) boot_cr3);
             }
         }
-        #[cfg(not(target_arch = "x86_64"))]
+        // RISC-V: the root from satp (physical, already without the mode
+        // and ASID), the kernel root of ADR 0013.
+        #[cfg(target_arch = "riscv64")]
+        {
+            boot_cr3 = super::get_kernel_page_table() as u64;
+        }
+        #[cfg(not(any(target_arch = "x86_64", target_arch = "riscv64")))]
         {
             boot_cr3 = 0;
         }
 
         let boot_l4_phys = boot_cr3 & 0x000F_FFFF_FFFF_F000;
         if boot_l4_phys == 0 {
-            // On non-x86_64 or if CR3 is somehow 0, just record regions
+            // AArch64 (MMU off, no tables to share) or a CR3 of 0: just
+            // record regions
             #[cfg(feature = "alloc")]
             {
                 self.map_region(

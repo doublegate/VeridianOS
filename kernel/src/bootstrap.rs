@@ -227,7 +227,7 @@ pub fn kernel_init() -> KernelResult<()> {
     // boot on this platform.  write_volatile ensures the compiler does
     // not elide or reorder the MMIO stores.
     unsafe {
-        let uart_base = 0x1000_0000 as *mut u8;
+        let uart_base = crate::mm::phys_to_virt_addr(0x1000_0000) as *mut u8;
         uart_base.write_volatile(b'K');
         uart_base.write_volatile(b'I');
         uart_base.write_volatile(b'N');
@@ -763,7 +763,7 @@ pub fn run() -> ! {
     // boot.  write_volatile ensures the compiler does not elide the
     // MMIO stores.
     unsafe {
-        let uart_base = 0x1000_0000 as *mut u8;
+        let uart_base = crate::mm::phys_to_virt_addr(0x1000_0000) as *mut u8;
         uart_base.write_volatile(b'R');
         uart_base.write_volatile(b'U');
         uart_base.write_volatile(b'N');
@@ -2831,39 +2831,68 @@ fn run_usercopy_tests(passed: &mut u32, failed: &mut u32) {
     // A new address space's lower half (user space) is empty: no kernel
     // entry is shared into it, so all of it is the process's own. A stale
     // kernel-heap slot (L4 136) used to be copied in and shared by fork.
-    // x86_64 only: AArch64 and RISC-V have no user address spaces yet
-    // (`VirtualAddressSpace::init` fails there); the check is enabled for
-    // them with user mode in sprint E (N-28, N-14).
-    #[cfg(target_arch = "x86_64")]
+    // Its upper half is the kernel's, entry for entry (on RISC-V the new
+    // space used to get freshly allocated tables there instead). AArch64
+    // has no user address spaces yet (MMU off, N-28).
+    #[cfg(any(target_arch = "x86_64", target_arch = "riscv64"))]
     {
+        use crate::mm::page_table::PageTable;
+        let table = |root: u64| {
+            // SAFETY: a root page table, through the physical map; only read.
+            unsafe { &*(crate::mm::phys_to_virt_addr(root) as *const PageTable) }
+        };
+        let kernel_root = crate::mm::get_kernel_page_table() as u64 & 0x000F_FFFF_FFFF_F000;
         let mut vas = crate::mm::vas::VirtualAddressSpace::new();
         let init = vas.init();
         let root = vas.get_page_table();
         let first_present = (init.is_ok() && root != 0).then(|| {
-            // SAFETY: the root table `init` just allocated, through the
-            // physical map; only read here.
-            let l4 = unsafe {
-                &*(crate::mm::phys_to_virt_addr(root) as *const crate::mm::page_table::PageTable)
-            };
+            let l4 = table(root);
             (0..256).find(|&i| l4[i].is_present())
         });
-        let ok = first_present == Some(None);
+        let shared = init.is_ok()
+            && root != 0
+            && (256..512).all(|i| table(root)[i].frame() == table(kernel_root)[i].frame());
+        let ok = first_present == Some(None) && shared;
         if !ok {
-            kprintln!(
-                "    init ok: {}, root {:#x}, first user-half entry present: {:?}",
+            crate::println!(
+                "    init ok: {}, root {:#x}, first user-half entry present: {:?}, kernel half \
+                 shared: {}",
                 init.is_ok(),
                 root,
-                first_present
+                first_present,
+                shared
             );
         }
         vas.destroy();
         report_test("user_half_starts_empty", ok, passed, failed);
     }
-    #[cfg(not(target_arch = "x86_64"))]
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "riscv64")))]
     report_skip(
         "user_half_starts_empty",
         "no user address spaces yet (sprint E)",
     );
+
+    // RISC-V: the kernel's own root maps nothing in the lower half. The
+    // early boot's identity map is only in the trampoline root (ADR 0013),
+    // so the lower half is entirely user space.
+    #[cfg(target_arch = "riscv64")]
+    {
+        let root = crate::mm::get_kernel_page_table() as u64;
+        // SAFETY: the active root, through the physical map; only read.
+        let l4 = unsafe {
+            &*(crate::mm::phys_to_virt_addr(root) as *const crate::mm::page_table::PageTable)
+        };
+        let first = (0..256).find(|&i| l4[i].is_present());
+        if let Some(i) = first {
+            crate::println!("    kernel root entry {} is present (lower half)", i);
+        }
+        report_test(
+            "kernel_root_lower_half_empty",
+            first.is_none(),
+            passed,
+            failed,
+        );
+    }
 }
 
 #[cfg(not(feature = "alloc"))]

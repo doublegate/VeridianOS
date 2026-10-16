@@ -205,8 +205,9 @@ Still open:
   memory, so the filesystems use `fs::bare_lock`, which does not actually lock. This blocks SMP
   work and EL0 (user mode) on AArch64. The EL2 entry leaves several EL2 registers unset and writes
   SCTLR_EL1 = 0 over its RES1 bits (N-177, HA-14).
-- **RISC-V has no user mode (N-14).** U-mode traps are fatal. Paging is on and the kernel runs in
-  the upper half (ADR 0013); user address spaces come next.
+- **RISC-V has no user mode (N-14).** U-mode traps are fatal. Paging is on, the kernel runs in the
+  upper half and new address spaces share it with an empty lower half (ADR 0013); entering and
+  leaving U-mode comes next.
 
 ### FPU and vector registers on AArch64 and RISC-V (N-41 part, sprint E)
 
@@ -495,8 +496,7 @@ order are in `ref-docs/HARDWARE-X86_64.md`, `ref-docs/HARDWARE-AARCH64.md` and
   - **Fixed addresses.** Writes to 0x1000_0000, a clock controller on the HiFive Unmatched (HR-04).
   - **Paging.** On since v0.27, Sv48 only (ADR 0013): the walker has four levels, while the
     common boards are Sv39-only (HR-09). The kernel image is one writable, executable mapping
-    (no W^X yet), and a temporary identity map of the low 512 GiB remains until the MMIO
-    drivers use the physical-memory map.
+    (no W^X yet).
   - **Interrupts.** Computes the PLIC context wrongly on boards whose hart 0 is a monitor core
     (HR-12) and treats device interrupts as fatal (HR-31).
   - **Privileged registers.** The unused FP save/restore code reads `misa` and the FP

@@ -55,4 +55,17 @@ Linux on RISC-V links the kernel high and turns paging on in its first instructi
 - Memory attributes come from the platform's PMAs, so mapping holes and MMIO cacheable in the
   page tables is harmless on RISC-V without Svpbmt; with Svpbmt (HR-11) the physical map will
   need the right types.
-- The temporary identity map overlaps the user half until E-RV4 removes it.
+- The temporary identity map overlapped the user half until E-RV4 confined it to the trampoline
+  (amendment below).
+
+## Amendment (E-RV4, 2026-10-16): no identity map after the trampoline
+
+The identity map of decision 2 is now confined to a trampoline root, used only between `csrw satp`
+at the physical address and the jump to the upper half. boot.S builds two roots from the same
+tables: the trampoline root (L4[0], L4[256], L4[511]) and the kernel root (L4[256] and L4[511]
+only). The boot hart and each secondary hart load the trampoline root, jump high, then load the
+kernel root (`veridian_kernel_satp`). The drivers that used physical addresses as pointers (PLIC,
+virtio-mmio slots, virtio queue rings, the early UART writes, ramfb and fw_cfg) use the
+physical-memory map, and the secure-boot hash reads the image at its link address. New address
+spaces copy the kernel root's upper half. Boot tests: `kernel_root_lower_half_empty`,
+`user_half_starts_empty` (now on RISC-V too, and checking that the upper half is shared).

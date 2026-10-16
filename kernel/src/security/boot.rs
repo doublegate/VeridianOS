@@ -240,7 +240,7 @@ fn get_kernel_extent() -> (usize, usize) {
     let kernel_start: usize = 0x40200000; // aarch64 link.ld base
 
     #[cfg(target_arch = "riscv64")]
-    let kernel_start: usize = 0x80200000; // OpenSBI jump address
+    let kernel_start: usize = 0xFFFF_FFFF_8020_0000; // link address (ADR 0013)
 
     // Hash the first 64 KiB of the kernel text section.
     // This covers the entry point, interrupt vectors, and core dispatch
