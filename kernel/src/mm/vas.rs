@@ -254,7 +254,7 @@ pub fn free_user_page_table_frames(l4_phys: u64) -> usize {
                 continue;
             }
             // Skip huge pages (1GB) -- they have no L2 subtable
-            if l3_entry.flags().0 & PageFlags::HUGE.0 != 0 {
+            if l3_entry.is_huge() {
                 continue;
             }
 
@@ -273,7 +273,7 @@ pub fn free_user_page_table_frames(l4_phys: u64) -> usize {
                     continue;
                 }
                 // Skip huge pages (2MB) -- they have no L1 subtable
-                if l2_entry.flags().0 & PageFlags::HUGE.0 != 0 {
+                if l2_entry.is_huge() {
                     continue;
                 }
 
@@ -345,7 +345,7 @@ fn free_user_page_table_subtrees(l4_phys: u64) {
         let l3_table = unsafe { &*(super::phys_to_virt_addr(l3_phys) as *const PageTable) };
         for l3_idx in 0..PAGE_TABLE_ENTRIES {
             let l3_entry = &l3_table[l3_idx];
-            if !l3_entry.is_present() || l3_entry.flags().0 & PageFlags::HUGE.0 != 0 {
+            if !l3_entry.is_present() || l3_entry.is_huge() {
                 continue;
             }
 
@@ -359,7 +359,7 @@ fn free_user_page_table_subtrees(l4_phys: u64) {
             let l2_table = unsafe { &*(super::phys_to_virt_addr(l2_phys) as *const PageTable) };
             for l2_idx in 0..PAGE_TABLE_ENTRIES {
                 let l2_entry = &l2_table[l2_idx];
-                if !l2_entry.is_present() || l2_entry.flags().0 & PageFlags::HUGE.0 != 0 {
+                if !l2_entry.is_present() || l2_entry.is_huge() {
                     continue;
                 }
 

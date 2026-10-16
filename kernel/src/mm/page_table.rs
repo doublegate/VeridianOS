@@ -55,7 +55,9 @@ impl PageTableEntry {
         self.frame().map(|f| PhysicalAddress::new(f.as_u64() << 12))
     }
 
-    /// Get flags for this entry
+    /// Get flags for this entry. Never test `HUGE` in them to tell a leaf
+    /// from a table: RISC-V has no such bit (the level is the size), so the
+    /// test is always false there. Use [`Self::is_huge`].
     pub const fn flags(&self) -> PageFlags {
         pte::native::flags(self.entry)
     }
