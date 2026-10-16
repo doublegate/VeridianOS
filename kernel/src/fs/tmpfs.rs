@@ -7,11 +7,8 @@
 use alloc::{collections::BTreeMap, string::String, sync::Arc, vec::Vec};
 use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
-#[cfg(not(target_arch = "aarch64"))]
 use spin::RwLock;
 
-#[cfg(target_arch = "aarch64")]
-use super::bare_lock::RwLock;
 use super::{DirEntry, Filesystem, Metadata, NodeType, Permissions, VfsNode};
 use crate::error::{FsError, KernelError};
 

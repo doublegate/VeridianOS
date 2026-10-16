@@ -2876,6 +2876,26 @@ fn run_usercopy_tests(passed: &mut u32, failed: &mut u32) {
             passed,
             failed,
         );
+
+        // Exclusive loads and stores work now that memory is Normal
+        // cacheable (N-28): an atomic read-modify-write, and a reader-writer
+        // lock that refuses a writer while a reader holds it. With the MMU
+        // off these hung, which is why the filesystems used `bare_lock`, a
+        // lock that did not lock.
+        use core::sync::atomic::{AtomicU64, Ordering};
+        let counter = AtomicU64::new(1);
+        let rmw = counter.fetch_add(2, Ordering::AcqRel) == 1
+            && counter
+                .compare_exchange(3, 7, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok();
+        let lock = spin::RwLock::new(0u32);
+        let excludes = {
+            let reader = lock.read();
+            let refused = lock.try_write().is_none();
+            drop(reader);
+            refused && lock.try_write().is_some()
+        };
+        report_test("exclusives_and_locks_work", rmw && excludes, passed, failed);
     }
 
     // Test 34: the monotonic clock advances and the 1000 Hz timer interrupt

@@ -10,8 +10,6 @@ use spin::RwLock;
 
 use crate::error::{FsError, KernelError};
 
-#[cfg(target_arch = "aarch64")]
-pub mod bare_lock;
 pub mod blockdev;
 pub mod blockfs;
 pub mod devfs;

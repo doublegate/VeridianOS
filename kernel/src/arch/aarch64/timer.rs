@@ -76,14 +76,8 @@ pub fn start(hz: u32) -> crate::error::KernelResult<()> {
 /// rather than firing a burst. Only the clock and the timer wheel advance:
 /// preempting the interrupted kernel code from here is not supported yet.
 pub fn handle_interrupt() {
-    // Only this handler writes TICKS, so a plain load and store suffice. An
-    // atomic read-modify-write would use exclusive load/store, which is not
-    // architecturally reliable while the MMU is off (N-28).
     if crate::arch::percpu::is_timekeeper() {
-        TICKS.store(
-            TICKS.load(Ordering::Relaxed).wrapping_add(1),
-            Ordering::Relaxed,
-        );
+        TICKS.fetch_add(1, Ordering::Relaxed);
     }
     let period = PERIOD.load(Ordering::Relaxed);
     if period == 0 {

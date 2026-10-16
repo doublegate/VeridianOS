@@ -828,6 +828,13 @@
 
 ### Removed
 
+- **`fs::bare_lock` (N-28 part).** The AArch64 filesystems (ramfs, tmpfs, devfs, blockfs, ext4,
+  FAT32, pty, inotify, flock, xattr, file) locked with an `UnsafeCell` wrapper that did not lock,
+  because exclusive loads and stores hung with the MMU off. With the MMU on (ADR 0015) they use
+  `spin::RwLock` like the other architectures, and the AArch64 timer counts ticks with `fetch_add`.
+  New boot test `exclusives_and_locks_work` (atomic read-modify-write; a writer refused while a
+  reader holds the lock): AArch64 37/37, 39/39 on four CPUs.
+
 - **The old scheduler (sprint D4).** The scheduler that predates the dispatcher (a global ready
   queue, a `Task` control block of its own, per-CPU and NUMA queues, an EDF module, pid-keyed IPC
   blocking, process "adapters" and a separate context switch on all three architectures) never ran
