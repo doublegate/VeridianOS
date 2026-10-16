@@ -411,8 +411,42 @@ impl RunQueue {
         true
     }
 
-    /// Queued tasks that may be migrated: not running, fair or real-time
-    /// (deadline tasks stay where admission placed them).
+    /// Take in a task another CPU's queue gave up (balancing). Unlike
+    /// [`Self::enqueue`] this is not a wakeup: a deadline task keeps its
+    /// current reservation (deadline and runtime left).
+    pub fn migrate_in(&mut self, key: TaskKey, entity: Entity, now: u64) {
+        match entity.policy {
+            Policy::Deadline(d) => {
+                self.update_load(now);
+                self.dl.enqueue_migrated(key, d, now);
+                self.meta.insert(
+                    key,
+                    Meta {
+                        entity,
+                        rt: entity.rt(),
+                    },
+                );
+            }
+            _ => self.enqueue(key, entity, now),
+        }
+    }
+
+    /// Earliest absolute deadline among runnable deadline tasks, running or
+    /// waiting.
+    pub fn dl_earliest(&self) -> Option<u64> {
+        self.dl.ready().next().map(|(d, _)| d)
+    }
+
+    /// Deadline tasks that wait (neither running nor throttled), earliest
+    /// deadline first, as (deadline, task).
+    pub fn dl_waiting(&self) -> impl Iterator<Item = (u64, TaskKey)> + '_ {
+        let curr = self.curr;
+        self.dl.ready().filter(move |&(_, k)| Some(k) != curr)
+    }
+
+    /// Queued tasks that may be migrated by the load balancer: not running,
+    /// fair or real-time (deadline tasks move by deadline instead:
+    /// [`Self::dl_waiting`]).
     pub fn migratable(&self) -> impl Iterator<Item = TaskKey> + '_ {
         let curr = self.curr;
         self.fair
@@ -674,6 +708,58 @@ mod tests {
         assert_eq!(running, Some(3));
         let m: Vec<_> = rq.migratable().collect();
         assert_eq!(m, [1, 2, 4]);
+    }
+
+    #[test]
+    fn deadline_waiting_excludes_running_and_throttled() {
+        let mut rq = RunQueue::new();
+        let dl = |d: u64| {
+            Entity::new(Policy::Deadline(
+                DlEntity::new(5 * MS, d, 100 * MS).unwrap(),
+            ))
+        };
+        assert_eq!(rq.dl_earliest(), None);
+        rq.enqueue(1, dl(30 * MS), 0);
+        rq.enqueue(2, dl(10 * MS), 0);
+        rq.enqueue(3, dl(20 * MS), 0);
+        rq.enqueue(4, normal(), 0);
+        assert_eq!(rq.pick_next(0), Some(2));
+        assert_eq!(rq.dl_earliest(), Some(10 * MS));
+        let w: Vec<_> = rq.dl_waiting().collect();
+        assert_eq!(w, [(20 * MS, 3), (30 * MS, 1)]);
+        // Task 2 uses its runtime: throttled, it neither waits nor counts.
+        rq.tick(6 * MS);
+        assert_eq!(rq.pick_next(6 * MS), Some(3));
+        assert_eq!(rq.dl_earliest(), Some(20 * MS));
+        let w: Vec<_> = rq.dl_waiting().collect();
+        assert_eq!(w, [(30 * MS, 1)]);
+    }
+
+    #[test]
+    fn migration_keeps_the_deadline_reservation() {
+        let mut a = RunQueue::new();
+        let d = DlEntity::new(10 * MS, 100 * MS, 100 * MS).unwrap();
+        a.enqueue(1, Entity::new(Policy::Deadline(d)), 0);
+        assert_eq!(a.pick_next(0), Some(1));
+        a.tick(2 * MS);
+        let e = a.dequeue(1, 2 * MS).unwrap();
+        // At 90 ms, 8 ms left in 10 ms fails the CBS wakeup test: a wakeup
+        // would start a new reservation due at 190 ms. A move keeps it.
+        let mut b = RunQueue::new();
+        b.enqueue(2, normal(), 90 * MS);
+        b.pick_next(90 * MS);
+        b.migrate_in(1, e, 90 * MS);
+        assert_eq!(b.dl_earliest(), Some(100 * MS), "deadline kept");
+        assert!(b.should_preempt(1, 90 * MS));
+        let Some(Entity {
+            policy: Policy::Deadline(moved),
+            ..
+        }) = b.dequeue(1, 90 * MS)
+        else {
+            panic!("not a deadline task");
+        };
+        assert_eq!(moved.deadline, 100 * MS);
+        assert_eq!(moved.remaining, (8 * MS) as i64, "runtime left kept");
     }
 
     #[test]

@@ -3815,6 +3815,104 @@ struct test_sched_attr {
     uint64_t runtime, deadline, period;
 };
 
+/* SMP: deadline tasks that all wait on one CPU spread out. Each thread
+ * reserves 45 ms every 100 ms, starts on CPU 0 (its creator's mask), and
+ * then may use every CPU while it keeps running. One CPU can give them
+ * 100% between them; spread out, each gets its 45%. They used to stay
+ * where they started: deadline tasks moved only when they woke. A launcher
+ * thread restricted to CPU 0 creates them, so that this thread is never
+ * restricted: the deadline threads leave nothing of CPU 0 to anyone else
+ * when they do not spread. */
+static volatile int dlb_phase;
+static long long dlb_used[4];
+static int dlb_ok[4], dlb_inherited[4], dlb_made, dlb_want;
+static pthread_t dlb_t[4];
+
+static long long thread_cpu_ns(void)
+{
+    struct timespec t;
+    clock_gettime(CLOCK_THREAD_CPUTIME_ID, &t);
+    return (long long)t.tv_sec * 1000000000LL + t.tv_nsec;
+}
+
+static void *dlb_thread(void *arg)
+{
+    long i = (long)arg;
+    /* A new thread gets its creator's mask (it used to get every CPU). */
+    cpu_set_t got;
+    CPU_ZERO(&got);
+    dlb_inherited[i] = sched_getaffinity(0, sizeof(got), &got) == 0 && CPU_COUNT(&got) == 1
+                       && CPU_ISSET(0, &got) && sched_getcpu() == 0;
+    while (dlb_phase < 1) sched_yield();
+    struct test_sched_attr a = {sizeof(a), 6, 0, 0, 0, 45000000, 100000000, 100000000};
+    dlb_ok[i] = syscall(SYS_sched_setattr, 0, &a, 0) == 0;
+    cpu_set_t all;
+    CPU_ZERO(&all);
+    for (int c = 0; c < 64; c++) CPU_SET(c, &all);
+    sched_setaffinity(0, sizeof(all), &all); /* offline CPUs are dropped */
+    while (dlb_phase < 2) ;
+    /* The clock stands still while the thread does not run, so reading it
+     * late (when next scheduled) still reads it at the phase change. */
+    long long start = thread_cpu_ns();
+    while (dlb_phase < 3) ;
+    dlb_used[i] = thread_cpu_ns() - start;
+    struct test_sched_attr n = {sizeof(n), SCHED_OTHER, 0, 0, 0, 0, 0, 0};
+    syscall(SYS_sched_setattr, 0, &n, 0);
+    return 0;
+}
+
+static void *dlb_launcher(void *arg)
+{
+    (void)arg;
+    cpu_set_t zero;
+    CPU_ZERO(&zero);
+    CPU_SET(0, &zero);
+    if (sched_setaffinity(0, sizeof(zero), &zero) != 0) return 0;
+    for (long i = 0; i < dlb_want; i++)
+        if (pthread_create(&dlb_t[dlb_made], 0, dlb_thread, (void *)i) == 0) dlb_made++;
+    return 0;
+}
+
+static void test_dl_balance(void)
+{
+    long ncpu = sysconf(_SC_NPROCESSORS_ONLN);
+    if (ncpu < 2) {
+        report("musl_dl_balance", 1, "one CPU");
+        return;
+    }
+    /* At least three, so that one CPU cannot fit them (135%); at most two
+     * per CPU, so that spread out they fit (90%). */
+    dlb_want = ncpu >= 4 ? 4 : 3;
+    dlb_made = 0;
+    dlb_phase = 0;
+    for (int i = 0; i < 4; i++) {
+        dlb_used[i] = -1;
+        dlb_ok[i] = dlb_inherited[i] = 0;
+    }
+    pthread_t launcher;
+    if (pthread_create(&launcher, 0, dlb_launcher, 0) == 0) pthread_join(launcher, 0);
+    dlb_phase = 1;
+    struct timespec settle = {0, 100 * 1000000}, window = {0, 600 * 1000000};
+    nanosleep(&settle, 0);
+    dlb_phase = 2;
+    nanosleep(&window, 0);
+    dlb_phase = 3;
+    for (int i = 0; i < dlb_made; i++) pthread_join(dlb_t[i], 0);
+    int ok = dlb_made == dlb_want, inherited = 1;
+    long long least = -1;
+    for (int i = 0; i < dlb_made; i++) {
+        ok = ok && dlb_ok[i];
+        inherited = inherited && dlb_inherited[i];
+        if (least < 0 || dlb_used[i] < least) least = dlb_used[i];
+    }
+    /* 45% of 600 ms is 270 ms; sharing one CPU, each would get 600/n. */
+    static char why[112];
+    snprintf(why, sizeof(why),
+             "cpus=%ld threads=%d inherited=%d admitted=%d least=%lldms (want >=230)", ncpu,
+             dlb_made, inherited, ok, least / 1000000);
+    report("musl_dl_balance", ok && inherited && least >= 230000000LL, why);
+}
+
 static void test_sched(void)
 {
     static char why[256];
@@ -4037,6 +4135,7 @@ static const struct {
     {"robust_futex", test_robust_futex},
     {"sched", test_sched},
     {"smp_placement", test_smp_placement},
+    {"dl_balance", test_dl_balance},
     {"gs_base", test_gs_base},
     {"tlb_remote_flush", test_tlb_remote_flush},
     {"clocks_and_usage", test_clocks_and_usage},
@@ -4101,6 +4200,7 @@ int main(int argc, char **argv)
     test_robust_futex();
     test_sched();
     test_smp_placement();
+    test_dl_balance();
     test_gs_base();
     test_tlb_remote_flush();
     test_signal_kick();

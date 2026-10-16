@@ -253,6 +253,9 @@ static DISPATCHING: AtomicU64 = AtomicU64::new(0);
 struct CpuStat {
     nr_running: AtomicUsize,
     load: AtomicU64,
+    /// [`CpuSnapshot::dl_earliest`] and [`CpuSnapshot::dl_next`].
+    dl_earliest: AtomicU64,
+    dl_next: AtomicU64,
     /// When this CPU last balanced periodically.
     balanced_at: AtomicU64,
 }
@@ -261,6 +264,8 @@ static STATS: [CpuStat; MAX_CPUS] = [const {
     CpuStat {
         nr_running: AtomicUsize::new(0),
         load: AtomicU64::new(0),
+        dl_earliest: AtomicU64::new(balance::NO_DL),
+        dl_next: AtomicU64::new(balance::NO_DL),
         balanced_at: AtomicU64::new(0),
     }
 }; MAX_CPUS];
@@ -270,6 +275,10 @@ fn publish(cpu: usize, st: &mut CpuSched) {
     let s = &STATS[cpu];
     s.nr_running.store(st.rq.nr_running(), Ordering::Release);
     s.load.store(st.rq.load_avg(now()), Ordering::Release);
+    let earliest = st.rq.dl_earliest().unwrap_or(balance::NO_DL);
+    let next = st.rq.dl_waiting().next().map_or(balance::NO_DL, |(d, _)| d);
+    s.dl_earliest.store(earliest, Ordering::Release);
+    s.dl_next.store(next, Ordering::Release);
 }
 
 /// A snapshot of every CPU for the placement and balancing decisions.
@@ -282,6 +291,8 @@ fn snapshots() -> [CpuSnapshot; MAX_CPUS] {
             idle: nr == 0,
             nr_running: nr,
             load: STATS[cpu].load.load(Ordering::Acquire),
+            dl_earliest: STATS[cpu].dl_earliest.load(Ordering::Acquire),
+            dl_next: STATS[cpu].dl_next.load(Ordering::Acquire),
         };
     }
     out
@@ -295,15 +306,21 @@ fn allows(mask: u64, cpu: usize) -> bool {
 /// The CPU a task that is on no run queue and no CPU should be queued on:
 /// [`balance::select_cpu`] over the dispatching CPUs it may use. `prev`
 /// (its last CPU) if none of them is allowed, which cannot happen through
-/// sched_setaffinity (it refuses a mask without a dispatching CPU).
+/// sched_setaffinity (it refuses a mask without a dispatching CPU). A
+/// deadline task goes where it runs soonest ([`balance::select_cpu_dl`],
+/// by the deadline its wakeup gives it).
 fn place(task: &Task, prev: usize) -> usize {
-    let since = now().saturating_sub(task.last_ran.load(Ordering::Acquire));
-    balance::select_cpu(
-        prev,
-        task.affinity.load(Ordering::Acquire),
-        &snapshots(),
-        since,
-    )
+    let t = now();
+    let since = t.saturating_sub(task.last_ran.load(Ordering::Acquire));
+    let affinity = task.affinity.load(Ordering::Acquire);
+    let entity = *task.entity.lock();
+    match entity.policy {
+        Policy::Deadline(mut d) => {
+            d.on_wakeup(t);
+            balance::select_cpu_dl(prev, affinity, &snapshots(), since, d.deadline)
+        }
+        _ => balance::select_cpu(prev, affinity, &snapshots(), since),
+    }
     .unwrap_or(prev)
 }
 
@@ -1089,6 +1106,9 @@ pub fn tick(user: bool) {
             publish(cpu, st);
         }
     }
+    // A waiting deadline task that would run sooner here moves now; the
+    // other classes balance less often.
+    pull_dl(cpu, true);
     let t = now();
     let stat = &STATS[cpu];
     if t.saturating_sub(stat.balanced_at.load(Ordering::Relaxed)) >= balance::BALANCE_INTERVAL_NS {
@@ -1365,6 +1385,69 @@ fn pull(this: usize, newly_idle: bool, in_irq: bool) -> bool {
     moved > 0
 }
 
+/// Take one waiting deadline task that would run sooner on `this` than
+/// where it waits ([`balance::find_dl_source`], rechecked under both
+/// locks): global EDF across CPUs, approximately, as Linux's
+/// `pull_dl_task`. Runs on every tick and when a CPU goes idle, and costs
+/// one read per CPU when there is nothing to pull. The task keeps its
+/// reservation. Locking as [`pull`]. Returns whether a task moved.
+fn pull_dl(this: usize, in_irq: bool) -> bool {
+    let snap = snapshots();
+    let Some(src) = balance::find_dl_source(this, &snap) else {
+        return false;
+    };
+    let (lo, hi) = (src.min(this), src.max(this));
+    let irq = irq_save();
+    let guards = if in_irq {
+        CPUS[lo]
+            .try_lock()
+            .and_then(|a| CPUS[hi].try_lock().map(|b| (a, b)))
+    } else {
+        let a = CPUS[lo].lock();
+        Some((a, CPUS[hi].lock()))
+    };
+    let mut moved = false;
+    if let Some((mut g_lo, mut g_hi)) = guards {
+        let (s, d) = if src < this {
+            (g_lo.as_mut(), g_hi.as_mut())
+        } else {
+            (g_hi.as_mut(), g_lo.as_mut())
+        };
+        let tasks = if in_irq {
+            TASKS.try_lock()
+        } else {
+            Some(TASKS.lock())
+        };
+        if let (Some(s), Some(d), Some(tasks)) = (s, d, tasks) {
+            let t = now();
+            let mine = d.rq.dl_earliest().unwrap_or(balance::NO_DL);
+            let pick =
+                s.rq.dl_waiting()
+                    .take_while(|&(deadline, _)| deadline < mine)
+                    .map(|(_, k)| k)
+                    .find(|k| {
+                        tasks.get(k).is_some_and(|task| {
+                            !task.on_cpu() && allows(task.affinity.load(Ordering::Acquire), this)
+                        })
+                    });
+            if let Some(k) = pick {
+                if let (Some(task), Some(entity)) = (tasks.get(&k), s.rq.dequeue(k, t)) {
+                    task.cpu.store(this, Ordering::Release);
+                    d.rq.migrate_in(k, entity, t);
+                    if d.rq.should_preempt(k, t) || Arc::ptr_eq(&d.current, &d.idle) {
+                        d.need_resched = true;
+                    }
+                    publish(src, s);
+                    publish(this, d);
+                    moved = true;
+                }
+            }
+        }
+    }
+    irq_restore(irq);
+    moved
+}
+
 fn has_runnable(cpu: usize) -> bool {
     CPUS[cpu]
         .lock()
@@ -1381,7 +1464,9 @@ extern "C" fn idle_entry(_: usize) {
         {
             x86_64::instructions::interrupts::disable();
             // Nothing here: take waiting work from a busier CPU first.
-            if this_cpu().is_some_and(|cpu| has_runnable(cpu) || pull(cpu, true, false)) {
+            if this_cpu().is_some_and(|cpu| {
+                has_runnable(cpu) || pull_dl(cpu, false) || pull(cpu, true, false)
+            }) {
                 x86_64::instructions::interrupts::enable();
                 schedule();
             } else {

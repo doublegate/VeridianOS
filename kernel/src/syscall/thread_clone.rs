@@ -214,6 +214,8 @@ pub fn sys_thread_clone(
     .kernel_stack_size(process::creation::DEFAULT_KERNEL_STACK_SIZE)
     // Scheduling parameters as Linux's sched_fork (N-221).
     .sched(current_thread.sched.lock().for_child())
+    // And its CPU mask (Linux copies it too); every CPU was allowed.
+    .cpu_affinity(current_thread.get_affinity())
     // The thread runs on the caller's stack (`newsp`, required above): no
     // kernel-chosen stack is mapped for it. One used to be, 256 KiB per
     // thread that nothing ran on (N-114).

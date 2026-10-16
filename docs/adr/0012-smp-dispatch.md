@@ -67,9 +67,14 @@ raises questions the earlier ADRs leave open:
 
 - Runnable work spreads over every CPU. A thread can be pinned with sched_setaffinity, and getcpu
   reports where it runs.
-- Deadline tasks are admitted against the total bandwidth of all CPUs, but are placed only when
-  they wake: they are never pulled by the balancer. A burst of deadline tasks on one CPU can miss
-  deadlines until their next wake spreads them (Linux pushes and pulls deadline tasks; deferred).
+- Deadline tasks are admitted against the total bandwidth of all CPUs. They move by deadline
+  rather than load (global EDF, approximately): a waking one goes where it would run soonest
+  (`balance::select_cpu_dl`, Linux `find_later_rq`), and on every tick and when it goes idle a CPU
+  takes a waiting one whose deadline is earlier than everything it runs (`pull_dl`, Linux
+  `pull_dl_task`), keeping its reservation. There is no separate push: a task that cannot run
+  where it is queued waits at most one tick for another CPU to pull it. Throttled tasks do not
+  move. Admission does not account for affinity, so deadline tasks restricted to too few CPUs can
+  still overload them (Linux refuses such masks for deadline tasks; not done).
 - Waking a task that is mid-switch on another CPU spins for the rest of that switch. It is short,
   with interrupts off on the other side.
 - Rule 6 has to hold for every new lock that interrupt handlers take. A CPU that stays in a

@@ -140,6 +140,22 @@ impl DlRq {
         self.tasks.insert(key, e);
     }
 
+    /// Queue a task moved from another CPU, keeping its reservation (no
+    /// wakeup rule: it was runnable all along). A reservation that has run
+    /// out is replenished as a wakeup would.
+    pub fn enqueue_migrated(&mut self, key: TaskKey, mut e: DlEntity, now: u64) {
+        if e.remaining <= 0 || e.deadline <= now {
+            e.on_wakeup(now);
+        }
+        self.ready.insert((e.deadline, key));
+        self.tasks.insert(key, e);
+    }
+
+    /// Runnable (not throttled) tasks, earliest deadline first.
+    pub fn ready(&self) -> impl Iterator<Item = (u64, TaskKey)> + '_ {
+        self.ready.iter().copied()
+    }
+
     pub fn dequeue(&mut self, key: TaskKey) -> Option<DlEntity> {
         let e = self.tasks.remove(&key)?;
         self.ready.remove(&(e.deadline, key));
