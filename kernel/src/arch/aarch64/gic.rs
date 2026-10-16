@@ -67,6 +67,9 @@ const GICD_IPRIORITYR: usize = 0x400;
 const GICD_ITARGETSR: usize = 0x800;
 /// Interrupt Configuration Registers (2 bits per interrupt).
 const GICD_ICFGR: usize = 0xC00;
+/// Software Generated Interrupt Register: target list (bits 16-23) and
+/// SGI number (bits 0-3).
+const GICD_SGIR: usize = 0xF00;
 
 // ---------------------------------------------------------------------------
 // GIC CPU Interface (GICC) register offsets
@@ -403,19 +406,36 @@ impl Gic {
 /// Reads GICC_IAR directly instead of through the `GIC` mutex: the CPU
 /// interface is banked per CPU, IAR/EOIR need no shared state, and an
 /// interrupt handler must never wait for a lock the interrupted code holds.
-/// Returns `None` for a spurious read (1023).
+/// Returns the whole IAR value, `None` for a spurious read (1023): its
+/// interrupt ID is bits 0-9, and for an SGI bits 10-12 name the CPU that
+/// sent it. End the interrupt with the whole value (`end_of_interrupt_raw`),
+/// as GICv2 requires for SGIs.
 pub fn acknowledge_raw() -> Option<u32> {
     // SAFETY: GICC_BASE + GICC_IAR is the GICv2 CPU interface's IAR on the
     // QEMU virt machine (mapped, as for all GIC accesses here).
     let iar = unsafe { ptr::read_volatile((GICC_BASE + GICC_IAR) as *const u32) };
-    let id = iar & 0x3FF;
-    (id != GIC_SPURIOUS_IRQ).then_some(id)
+    (iar & 0x3FF != GIC_SPURIOUS_IRQ).then_some(iar)
 }
 
-/// Signal end of interrupt for `id` from IRQ context (see `acknowledge_raw`).
-pub fn end_of_interrupt_raw(id: u32) {
-    // SAFETY: as acknowledge_raw; EOIR takes the ID returned by IAR.
-    unsafe { ptr::write_volatile((GICC_BASE + GICC_EOIR) as *mut u32, id) };
+/// Signal end of interrupt from IRQ context with the value
+/// `acknowledge_raw` returned.
+pub fn end_of_interrupt_raw(iar: u32) {
+    // SAFETY: as acknowledge_raw; EOIR takes the value IAR returned.
+    unsafe { ptr::write_volatile((GICC_BASE + GICC_EOIR) as *mut u32, iar) };
+}
+
+/// Send SGI `sgi` (0-15) to the CPU with GIC CPU interface number `target`
+/// (0-7). SGIs are always enabled in GICv2, so the target takes it as soon
+/// as its priority mask allows.
+pub fn send_sgi_raw(target: u32, sgi: u32) {
+    let value = ((1u32 << (target & 7)) << 16) | (sgi & 0xF);
+    // SAFETY: GICD_SGIR on the QEMU virt machine's distributor; the write
+    // only raises an interrupt. The barrier makes the caller's stores (the
+    // work the target is woken for) visible first.
+    unsafe {
+        core::arch::asm!("dsb ishst", options(nostack, preserves_flags));
+        ptr::write_volatile((GICD_BASE + GICD_SGIR) as *mut u32, value);
+    }
 }
 
 /// Initialize the GICv2 controller.

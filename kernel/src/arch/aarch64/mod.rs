@@ -16,6 +16,7 @@ pub mod psci;
 pub mod serial;
 #[cfg(feature = "smp")]
 pub mod smp;
+pub mod switch;
 pub mod timer;
 pub mod usermode;
 

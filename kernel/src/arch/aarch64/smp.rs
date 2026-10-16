@@ -6,10 +6,9 @@
 //! (boot.S) with the MMU and caches off.
 //!
 //! A secondary switches its MMU on in boot.S (ADR 0015), sets up its GIC
-//! CPU interface and its own timer tick, and idles with interrupts on. It
-//! does not run tasks yet: AArch64 has no dispatcher (sprint E). Until its
-//! MMU was on (N-28) a secondary could take no lock and ran a reduced stage
-//! that parked with interrupts masked.
+//! CPU interface and its own timer tick, and dispatches (its boot flow
+//! becomes its idle task). Until its MMU was on (N-28) a secondary could
+//! take no lock and ran a reduced stage that parked with interrupts masked.
 
 use alloc::vec::Vec;
 
@@ -97,9 +96,12 @@ pub fn ap_init() -> Result<(), &'static str> {
 /// (RISC-V) are synchronised across CPUs by the architecture.
 pub fn serve_boot_handshake() {}
 
-/// Idle with interrupts enabled (the timer ticks here); no tasks run on a
-/// secondary until AArch64 has a dispatcher.
+/// Dispatch on this CPU: its boot flow becomes its idle task (as on x86_64
+/// and RISC-V), with interrupts enabled.
 pub fn idle() -> ! {
+    #[cfg(feature = "alloc")]
+    crate::sched::dispatch::run_secondary();
+    #[cfg(not(feature = "alloc"))]
     loop {
         // SAFETY: unmasks IRQs on this CPU, whose vectors, GIC CPU interface
         // and timer are set up, then waits for one.

@@ -178,8 +178,8 @@ What does not work yet: `docs/KNOWN-LIMITATIONS.md`.
       before Rust, TCR.IPS from PARange, 48-bit TTBR0, any 2 MiB-aligned load base (ADR 0015;
       HA-04, HA-16, N-28 part); Arm page-table format (`mm::pte::arm`); MMIO through the
       physical map, identity map confined to the switch; `bare_lock`, the bump
-      allocator and the reduced secondary stage removed (N-28 fixed); next: the dispatcher
-      (switch primitive, `dispatch` cfg) and EL0; cache
+      allocator and the reduced secondary stage removed (N-28 fixed); the dispatcher on every
+      CPU (switch primitive, `dispatch` cfg, SGI kicks, timer tick; E-A5/E-A5c); next: EL0; cache
       maintenance primitives and DMA coherency (HA-25); ASIDs (HA-26); memory map from `/memory`
       and reservations (HA-17); EL0 entry/exit and SVC dispatch; register sanitiser (N-170).
     - RISC-V: done: zero BSS, hart lottery, `sstatus.FS` Off in the kernel (HR-01, HR-19, HR-20

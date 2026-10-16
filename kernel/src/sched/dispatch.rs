@@ -104,6 +104,10 @@ struct ArchState {
     entry_stack: u64,
     #[cfg(target_arch = "riscv64")]
     syscall_frame: u64,
+    /// AArch64: the physical root of the task's lower half (TTBR0_EL1; the
+    /// kernel half is TTBR1's, ADR 0015).
+    #[cfg(target_arch = "aarch64")]
+    root: u64,
 }
 
 /// A dispatchable task.
@@ -446,6 +450,10 @@ fn irq_save() -> IrqFlag {
     {
         IrqFlag(crate::arch::riscv64::switch::irq_save())
     }
+    #[cfg(all(target_arch = "aarch64", dispatch))]
+    {
+        IrqFlag(crate::arch::aarch64::switch::irq_save())
+    }
     #[cfg(not(dispatch))]
     {
         IrqFlag(false)
@@ -460,6 +468,10 @@ fn irq_restore(flag: IrqFlag) {
     #[cfg(all(target_arch = "riscv64", dispatch))]
     if flag.0 {
         crate::arch::riscv64::switch::irq_enable();
+    }
+    #[cfg(all(target_arch = "aarch64", dispatch))]
+    if flag.0 {
+        crate::arch::aarch64::switch::irq_enable();
     }
     let _ = flag;
 }
@@ -492,6 +504,9 @@ pub fn start() -> Result<(), KernelError> {
             .as_u64();
         #[cfg(target_arch = "riscv64")]
         let cr3 = crate::arch::riscv64::switch::current_root();
+        // AArch64: the kernel's lower half is the empty root (ADR 0015).
+        #[cfg(target_arch = "aarch64")]
+        let cr3 = crate::arch::aarch64::switch::current_root();
         KERNEL_CR3.store(cr3, Ordering::Release);
 
         #[cfg(target_arch = "x86_64")]
@@ -505,7 +520,7 @@ pub fn start() -> Result<(), KernelError> {
             *boot.xsave.get_mut() = crate::arch::x86_64::switch::xsave::Area::new();
         }
         // Its address space is the kernel's.
-        #[cfg(target_arch = "riscv64")]
+        #[cfg(any(target_arch = "riscv64", target_arch = "aarch64"))]
         {
             boot.arch.get_mut().root = cr3;
         }
@@ -566,6 +581,9 @@ fn new_kernel_task(
     // SAFETY: as above.
     #[cfg(target_arch = "riscv64")]
     let sp = unsafe { crate::arch::riscv64::switch::seed_kernel_thread(top, entry, arg) };
+    // SAFETY: as above.
+    #[cfg(target_arch = "aarch64")]
+    let sp = unsafe { crate::arch::aarch64::switch::seed_kernel_thread(top, entry, arg) };
     // SAFETY: the task is not shared yet.
     unsafe {
         *task.saved_sp.get() = sp;
@@ -575,7 +593,7 @@ fn new_kernel_task(
             arch.cr3 = KERNEL_CR3.load(Ordering::Acquire);
             arch.entry_stack = top as u64;
         }
-        #[cfg(target_arch = "riscv64")]
+        #[cfg(any(target_arch = "riscv64", target_arch = "aarch64"))]
         {
             arch.root = KERNEL_CR3.load(Ordering::Acquire);
         }
@@ -801,6 +819,18 @@ unsafe fn arch_switch(prev: *const Task, next: *const Task) {
         switch::switch_address_space(b.root);
         (*cpu).kernel_rsp = b.entry_stack;
         (*cpu).syscall_frame = b.syscall_frame;
+        switch::switch_stacks((*prev).saved_sp.get(), *(*next).saved_sp.get());
+    }
+    // AArch64: the lower half (TTBR0), then the stacks. Kernel tasks carry
+    // the empty root; user state comes with EL0.
+    #[cfg(all(target_arch = "aarch64", dispatch))]
+    // SAFETY: as above.
+    unsafe {
+        use crate::arch::aarch64::switch;
+        let a = &mut *(*prev).arch.get();
+        a.root = switch::current_root();
+        let b = &*(*next).arch.get();
+        switch::switch_address_space(b.root);
         switch::switch_stacks((*prev).saved_sp.get(), *(*next).saved_sp.get());
     }
     #[cfg(not(dispatch))]
@@ -1091,6 +1121,10 @@ fn kick_cpu(cpu: usize) {
     #[cfg(all(target_arch = "riscv64", dispatch))]
     if Some(cpu) != this_cpu() {
         crate::arch::riscv64::switch::kick(cpu);
+    }
+    #[cfg(all(target_arch = "aarch64", dispatch))]
+    if Some(cpu) != this_cpu() {
+        crate::arch::aarch64::switch::kick(cpu);
     }
     #[cfg(not(dispatch))]
     let _ = cpu;
@@ -1536,8 +1570,11 @@ extern "C" fn idle_entry(_: usize) {
                 x86_64::instructions::interrupts::enable_and_hlt();
             }
         }
-        #[cfg(all(target_arch = "riscv64", dispatch))]
+        #[cfg(all(any(target_arch = "riscv64", target_arch = "aarch64"), dispatch))]
         {
+            #[cfg(target_arch = "aarch64")]
+            use crate::arch::aarch64::switch;
+            #[cfg(target_arch = "riscv64")]
             use crate::arch::riscv64::switch;
             switch::irq_save();
             if this_cpu().is_some_and(|cpu| {
@@ -1853,6 +1890,11 @@ pub fn run_secondary() -> ! {
             {
                 crate::arch::riscv64::switch::irq_save();
                 crate::arch::riscv64::switch::wait_for_interrupt();
+            }
+            #[cfg(target_arch = "aarch64")]
+            {
+                crate::arch::aarch64::switch::irq_save();
+                crate::arch::aarch64::switch::wait_for_interrupt();
             }
         }
     }

@@ -2,6 +2,17 @@
 
 ### Added
 
+- **AArch64 dispatches kernel tasks on every CPU (E-A5, E-A5c; ADR 0006).** New
+  `arch/aarch64/switch.rs`: `switch_stacks` saves x19-x30, a kernel-thread trampoline, TTBR0 as the
+  task's root (switched with a TLB invalidate, since there are no ASIDs yet, HA-26), DAIF-based IRQ
+  save and enable, a WFI idle that wakes on a masked pending IRQ, and kicks as GICv2 SGIs
+  (`gic::send_sgi_raw`). The GIC acknowledge now returns the whole IAR value so an SGI ends with
+  its source-CPU bits, as GICv2 requires. The timer tick runs `dispatch::tick` and re-arms after
+  the work. The `dispatch` cfg covers AArch64, and secondaries enter `run_secondary`. Newly run
+  boot tests: `dispatch_kthreads_interleave_and_reap` and `dispatch_waitqueue_wake_and_join`
+  (40/40); with four CPUs also `dispatch_runs_on_every_cpu` and `dispatch_places_on_idle_cpus`
+  (44/44). `gate.sh --boot` also boots the debug AArch64 kernel under `-icount shift=4`.
+
 - **AArch64: no identity map after the MMU switch (ADR 0015 amendment).** The UART, GIC, console
   input and debug writes reach their devices through the physical-memory map
   (`arch::aarch64::platform`). After the branch to the upper half every CPU loads an empty root

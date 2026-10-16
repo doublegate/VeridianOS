@@ -92,10 +92,15 @@ pub fn start(hz: u32) -> crate::error::KernelResult<()> {
 
 /// Handle the virtual timer interrupt (called from the IRQ vector).
 ///
-/// Re-arms first (the timer interrupt is level-triggered and stays asserted
-/// until the compare value moves past the counter), skipping missed ticks
-/// rather than firing a burst. Only the clock and the timer wheel advance:
-/// preempting the interrupted kernel code from here is not supported yet.
+/// Advances the clock (on the timekeeper) and runs the dispatcher's tick,
+/// then re-arms by whole periods, skipping missed ticks rather than firing
+/// a burst. The re-arm follows the work, against the time it ended, so a
+/// tick that outlasts the period still leaves the interrupted code a whole
+/// one (as on RISC-V and x86_64). The interrupt is level-triggered and
+/// stays asserted until the compare value moves past the counter, which
+/// this does before `aarch64_irq` ends the interrupt at the GIC, and IRQs
+/// stay masked throughout. Preempting the interrupted kernel code from
+/// here is not supported; tasks switch at scheduling points.
 pub fn handle_interrupt() {
     if crate::arch::percpu::is_timekeeper() {
         TICKS.fetch_add(1, Ordering::Relaxed);
@@ -107,11 +112,16 @@ pub fn handle_interrupt() {
         unsafe { core::arch::asm!("msr cntv_ctl_el0, xzr", "isb", options(nostack)) };
         return;
     }
-    // Per-CPU deadline (CNTV_CVAL_EL0 is per CPU); only the timekeeping
-    // CPU advances global time.
-    let next = crate::arch::percpu::advance_timer(counter(), period);
-    set_compare(next);
+    // Only the timekeeping CPU advances global time.
     if crate::arch::percpu::is_timekeeper() {
         crate::timer::clock_tick();
     }
+    // Time slices, accounting, balancing; on the timekeeper also the
+    // sleepers (as x86_64's and RISC-V's tick).
+    #[cfg(feature = "alloc")]
+    crate::sched::dispatch::tick(false);
+    // Per-CPU deadline (CNTV_CVAL_EL0 is per CPU), from the time the work
+    // ended (see above).
+    let next = crate::arch::percpu::advance_timer(counter(), period);
+    set_compare(next);
 }

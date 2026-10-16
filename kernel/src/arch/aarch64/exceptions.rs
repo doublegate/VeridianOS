@@ -111,6 +111,9 @@ extern "C" {
     static veridian_aarch64_vectors: u8;
 }
 
+/// The SGI the dispatcher sends to wake another CPU (`switch::kick`).
+pub const SCHED_WAKE_SGI: u32 = 1;
+
 /// GIC interrupt ID of the EL1 virtual timer (PPI 11 = INTID 27).
 pub const VIRTUAL_TIMER_INTID: u32 = 27;
 
@@ -124,13 +127,16 @@ pub fn vectors_base() -> u64 {
 /// Bounded so a stuck level-triggered source cannot hold the CPU here.
 extern "C" fn aarch64_irq() {
     for _ in 0..16 {
-        let Some(intid) = super::gic::acknowledge_raw() else {
+        let Some(iar) = super::gic::acknowledge_raw() else {
             return;
         };
-        if intid == VIRTUAL_TIMER_INTID {
+        // An SGI (SCHED_WAKE_SGI, a dispatcher kick) needs no work here:
+        // taking it ends the target's wait, and it reaches its next
+        // scheduling point.
+        if iar & 0x3FF == VIRTUAL_TIMER_INTID {
             super::timer::handle_interrupt();
         }
-        super::gic::end_of_interrupt_raw(intid);
+        super::gic::end_of_interrupt_raw(iar);
     }
 }
 
