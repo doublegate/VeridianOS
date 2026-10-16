@@ -886,6 +886,14 @@
 
 ### Fixed
 
+- **AArch64 process address spaces could not be built.** `map_kernel_space` gave every AArch64
+  process root three fake "kernel regions" (2 MiB code, 2 MiB data, 16 MiB heap, from fresh frames),
+  which failed and left `VirtualAddressSpace::init` returning an error. They were also useless,
+  since TTBR0 never translates the upper half. With the kernel half in TTBR1 (ADR 0015) a process
+  root now holds only the user half. `user_half_starts_empty` runs on AArch64 (it failed first)
+  and checks the upper half is empty and that building a root takes a few frames;
+  `unstarted_process_freed_whole` runs there too: 42/42, 46/46 on four CPUs.
+
 - **`unstarted_process_freed_whole` raced other CPUs.** The boot test compares the machine-wide
   free-frame count before and after building and discarding a process. Since every RISC-V hart
   dispatches tasks, another hart can free frames in the middle of the measurement (seen once on four

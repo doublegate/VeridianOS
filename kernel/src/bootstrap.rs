@@ -2129,7 +2129,6 @@ fn run_process_tests(passed: &mut u32, failed: &mut u32) {
     // whose child cannot be started, leaves behind -- is freed whole: its
     // mapped frames, page tables and kernel stack all go back. (Dropping a
     // Process frees nothing; these frames used to leak.)
-    #[cfg(any(target_arch = "x86_64", target_arch = "riscv64"))]
     {
         use crate::{
             mm::vas::MappingType,
@@ -2175,14 +2174,6 @@ fn run_process_tests(passed: &mut u32, failed: &mut u32) {
         };
         let ok = (0..3).any(|_| attempt());
         report_test("unstarted_process_freed_whole", ok, passed, failed);
-    }
-    #[cfg(not(any(target_arch = "x86_64", target_arch = "riscv64")))]
-    {
-        let _ = (passed, failed);
-        report_skip(
-            "unstarted_process_freed_whole",
-            "no user address spaces yet (sprint E)",
-        );
     }
 
     // RISC-V user mode (sprint E): a program in a fresh address space runs
@@ -3077,45 +3068,59 @@ fn run_usercopy_tests(passed: &mut u32, failed: &mut u32) {
     // entry is shared into it, so all of it is the process's own. A stale
     // kernel-heap slot (L4 136) used to be copied in and shared by fork.
     // Its upper half is the kernel's, entry for entry (on RISC-V the new
-    // space used to get freshly allocated tables there instead). AArch64
-    // has no user address spaces yet (MMU off, N-28).
-    #[cfg(any(target_arch = "x86_64", target_arch = "riscv64"))]
+    // space used to get freshly allocated tables there instead). On
+    // AArch64 the kernel half is TTBR1's (ADR 0015), so a process root
+    // holds nothing above the user half, and building one takes a few
+    // frames: it used to map 20 MiB of fresh frames as "kernel regions".
+    #[cfg(any(
+        target_arch = "x86_64",
+        target_arch = "riscv64",
+        target_arch = "aarch64"
+    ))]
     {
         use crate::mm::page_table::PageTable;
         let table = |root: u64| {
             // SAFETY: a root page table, through the physical map; only read.
             unsafe { &*(crate::mm::phys_to_virt_addr(root) as *const PageTable) }
         };
-        let kernel_root = crate::mm::get_kernel_page_table() as u64 & 0x000F_FFFF_FFFF_F000;
+        let free = || crate::mm::get_memory_stats().free_frames;
         let mut vas = crate::mm::vas::VirtualAddressSpace::new();
+        let before = free();
         let init = vas.init();
+        let taken = before.saturating_sub(free());
         let root = vas.get_page_table();
         let first_present = (init.is_ok() && root != 0).then(|| {
             let l4 = table(root);
             (0..256).find(|&i| l4[i].is_present())
         });
+        #[cfg(not(target_arch = "aarch64"))]
+        let shared = {
+            let kernel_root = crate::mm::get_kernel_page_table() as u64 & 0x000F_FFFF_FFFF_F000;
+            init.is_ok()
+                && root != 0
+                && (256..512).all(|i| table(root)[i].frame() == table(kernel_root)[i].frame())
+        };
+        #[cfg(target_arch = "aarch64")]
         let shared = init.is_ok()
             && root != 0
-            && (256..512).all(|i| table(root)[i].frame() == table(kernel_root)[i].frame());
+            && (256..512).all(|i| !table(root)[i].is_present())
+            && taken < 64;
+        let _ = taken;
         let ok = first_present == Some(None) && shared;
         if !ok {
             crate::println!(
                 "    init ok: {}, root {:#x}, first user-half entry present: {:?}, kernel half \
-                 shared: {}",
+                 right: {}, frames taken {}",
                 init.is_ok(),
                 root,
                 first_present,
-                shared
+                shared,
+                taken
             );
         }
         vas.destroy();
         report_test("user_half_starts_empty", ok, passed, failed);
     }
-    #[cfg(not(any(target_arch = "x86_64", target_arch = "riscv64")))]
-    report_skip(
-        "user_half_starts_empty",
-        "no user address spaces yet (sprint E)",
-    );
 
     // RISC-V: the kernel's own root maps nothing in the lower half. The
     // early boot's identity map is only in the trampoline root (ADR 0013),

@@ -774,8 +774,6 @@ impl VirtualAddressSpace {
     /// new process, so that the kernel remains accessible during syscalls
     /// (which run with the user's CR3).
     pub fn map_kernel_space(&mut self) -> Result<(), KernelError> {
-        use super::page_table::{PageTable, PAGE_TABLE_ENTRIES};
-
         let new_root = self.page_table_root.load(Ordering::Acquire);
         if new_root == 0 {
             return Err(KernelError::NotInitialized {
@@ -783,70 +781,81 @@ impl VirtualAddressSpace {
             });
         }
 
-        // Read the current (boot) CR3 to get the kernel's L4 entries
-        let boot_cr3: u64;
-        #[cfg(target_arch = "x86_64")]
+        // AArch64: the kernel half is TTBR1's, the same for every address
+        // space (ADR 0015); a process root is loaded into TTBR0 and holds
+        // only the user half, so there is nothing to share into it.
+        #[cfg(target_arch = "aarch64")]
         {
-            // SAFETY: Reading CR3 is a read-only privileged operation.
-            unsafe {
-                core::arch::asm!("mov {}, cr3", out(reg) boot_cr3);
-            }
+            Ok(())
         }
-        // RISC-V: the root from satp (physical, already without the mode
-        // and ASID), the kernel root of ADR 0013.
-        #[cfg(target_arch = "riscv64")]
+        #[cfg(not(target_arch = "aarch64"))]
         {
-            boot_cr3 = super::get_kernel_page_table() as u64;
-        }
-        #[cfg(not(any(target_arch = "x86_64", target_arch = "riscv64")))]
-        {
-            boot_cr3 = 0;
-        }
+            use super::page_table::{PageTable, PAGE_TABLE_ENTRIES};
 
-        let boot_l4_phys = boot_cr3 & 0x000F_FFFF_FFFF_F000;
-        if boot_l4_phys == 0 {
-            // AArch64 (MMU off, no tables to share) or a CR3 of 0: just
-            // record regions
-            #[cfg(feature = "alloc")]
+            // Read the current (boot) CR3 to get the kernel's L4 entries
+            let boot_cr3: u64;
+            #[cfg(target_arch = "x86_64")]
             {
-                self.map_region(
-                    VirtualAddress(0xFFFF_8000_0000_0000),
-                    0x200000,
-                    MappingType::Code,
-                )?;
-                self.map_region(
-                    VirtualAddress(0xFFFF_8000_0020_0000),
-                    0x200000,
-                    MappingType::Data,
-                )?;
-                self.map_region(
-                    VirtualAddress(0xFFFF_C000_0000_0000),
-                    0x1000000,
-                    MappingType::Heap,
-                )?;
-            }
-            return Ok(());
-        }
-
-        // Copy kernel-space L4 entries (indices 256-511) from boot page
-        // tables into the new process's L4. This shares the entire
-        // kernel upper-half mapping.
-        // SAFETY: Both boot_l4_phys and new_root are valid L4 page table
-        // physical addresses. We convert via phys_to_virt_addr to get
-        // kernel-accessible pointers. We copy only the upper half (kernel
-        // space), leaving the lower half (user space) zeroed.
-        unsafe {
-            let boot_l4 = &*(super::phys_to_virt_addr(boot_l4_phys) as *const PageTable);
-            let new_l4 = &mut *(super::phys_to_virt_addr(new_root) as *mut PageTable);
-
-            for i in 256..PAGE_TABLE_ENTRIES {
-                if boot_l4[i].is_present() {
-                    new_l4[i] = boot_l4[i];
+                // SAFETY: Reading CR3 is a read-only privileged operation.
+                unsafe {
+                    core::arch::asm!("mov {}, cr3", out(reg) boot_cr3);
                 }
             }
-        }
+            // RISC-V: the root from satp (physical, already without the mode
+            // and ASID), the kernel root of ADR 0013.
+            #[cfg(target_arch = "riscv64")]
+            {
+                boot_cr3 = super::get_kernel_page_table() as u64;
+            }
+            #[cfg(not(any(target_arch = "x86_64", target_arch = "riscv64")))]
+            {
+                boot_cr3 = 0;
+            }
 
-        Ok(())
+            let boot_l4_phys = boot_cr3 & 0x000F_FFFF_FFFF_F000;
+            if boot_l4_phys == 0 {
+                // A CR3 of 0 (no kernel tables to share): just record regions
+                #[cfg(feature = "alloc")]
+                {
+                    self.map_region(
+                        VirtualAddress(0xFFFF_8000_0000_0000),
+                        0x200000,
+                        MappingType::Code,
+                    )?;
+                    self.map_region(
+                        VirtualAddress(0xFFFF_8000_0020_0000),
+                        0x200000,
+                        MappingType::Data,
+                    )?;
+                    self.map_region(
+                        VirtualAddress(0xFFFF_C000_0000_0000),
+                        0x1000000,
+                        MappingType::Heap,
+                    )?;
+                }
+                return Ok(());
+            }
+
+            // Copy kernel-space L4 entries (indices 256-511) from boot page
+            // tables into the new process's L4. This shares the entire
+            // kernel upper-half mapping.
+            // SAFETY: Both boot_l4_phys and new_root are valid L4 page table
+            // physical addresses. We convert via phys_to_virt_addr to get
+            // kernel-accessible pointers. We copy only the upper half (kernel
+            // space), leaving the lower half (user space) zeroed.
+            unsafe {
+                let boot_l4 = &*(super::phys_to_virt_addr(boot_l4_phys) as *const PageTable);
+                let new_l4 = &mut *(super::phys_to_virt_addr(new_root) as *mut PageTable);
+
+                for i in 256..PAGE_TABLE_ENTRIES {
+                    if boot_l4[i].is_present() {
+                        new_l4[i] = boot_l4[i];
+                    }
+                }
+            }
+
+            Ok(())
+        }
     }
 
     /// Clone from another address space (deep copy for fork).
