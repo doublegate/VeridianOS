@@ -6,8 +6,8 @@
 //! # Safety note (AArch64 UART calls)
 //!
 //! All `unsafe { uart_write_str(...) }` blocks in this file perform MMIO
-//! writes to the QEMU virt machine UART at 0x0900_0000.  This address is
-//! mapped and valid throughout kernel execution on this platform.  The
+//! writes to the QEMU virt machine UART (`platform::PL011`, through the
+//! physical-memory map), which is mapped throughout kernel execution.  The
 //! function only writes bytes to the UART data register and cannot cause
 //! memory corruption.
 

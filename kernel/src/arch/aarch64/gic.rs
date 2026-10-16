@@ -35,11 +35,12 @@ use crate::{
 // QEMU virt machine GICv2 base addresses
 // ---------------------------------------------------------------------------
 
-/// GIC Distributor base address on QEMU virt machine.
-const GICD_BASE: usize = 0x0800_0000;
+/// GIC Distributor on the QEMU virt machine (physical 0x0800_0000, through
+/// the physical-memory map).
+const GICD_BASE: usize = super::platform::GICD;
 
-/// GIC CPU Interface base address on QEMU virt machine.
-const GICC_BASE: usize = 0x0801_0000;
+/// GIC CPU Interface on the QEMU virt machine (physical 0x0801_0000).
+const GICC_BASE: usize = super::platform::GICC;
 
 // ---------------------------------------------------------------------------
 // GIC Distributor (GICD) register offsets
@@ -430,8 +431,8 @@ pub fn init() -> KernelResult<()> {
     gic.init_cpu_interface();
 
     // Print initialization info via direct UART (println! is a no-op on AArch64)
-    // SAFETY: uart_write_str performs raw MMIO writes to the PL011 UART at
-    // 0x0900_0000. The UART is memory-mapped by QEMU's virt machine and the
+    // SAFETY: uart_write_str performs raw MMIO writes to the PL011 UART
+    // (`platform::PL011`). The UART is memory-mapped by QEMU's virt machine and the
     // write is non-destructive. Called during single-threaded kernel init.
     unsafe {
         use crate::arch::aarch64::direct_uart::uart_write_str;

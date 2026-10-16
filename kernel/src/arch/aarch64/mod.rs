@@ -1,7 +1,7 @@
 //! AArch64 (ARM 64-bit) architecture support.
 //!
-//! Provides initialization, interrupt control (DAIF), serial I/O (PL011
-//! UART at 0x0900_0000), and I/O port stubs for the AArch64 platform.
+//! Provides initialization, interrupt control (DAIF), serial I/O (the PL011
+//! UART, `platform::PL011`), and I/O port stubs for the AArch64 platform.
 
 // Include the boot module
 pub mod boot;
@@ -11,6 +11,7 @@ pub mod direct_uart;
 pub mod entry;
 pub mod exceptions;
 pub mod gic;
+pub mod platform;
 pub mod psci;
 pub mod serial;
 #[cfg(feature = "smp")]
@@ -20,9 +21,9 @@ pub mod usermode;
 
 /// Called from bootstrap on AArch64 via `crate::arch::init()`.
 pub fn init() {
-    // SAFETY: uart_write_str performs a raw MMIO write to the PL011 UART at
-    // 0x09000000. This is safe during kernel init as the UART is memory-mapped
-    // by QEMU's virt machine and the write is non-destructive.
+    // SAFETY: uart_write_str performs a raw MMIO write to the PL011 UART
+    // (`platform::PL011`). This is safe during kernel init as the UART is
+    // memory-mapped by QEMU's virt machine and the write is non-destructive.
     unsafe {
         use crate::arch::aarch64::direct_uart::uart_write_str;
         uart_write_str("[ARCH] Performing AArch64-specific initialization\n");
@@ -122,7 +123,7 @@ pub fn disable_interrupts() -> impl Drop {
 /// Serial initialization for compatibility with the arch-generic interface.
 #[allow(dead_code)] // Arch-generic interface -- AArch64 serial initialized differently
 pub fn serial_init() -> crate::serial::Pl011Uart {
-    crate::serial::Pl011Uart::new(0x0900_0000)
+    crate::serial::Pl011Uart::new(platform::PL011)
 }
 
 /// Flush TLB for a specific virtual address. Called via

@@ -13,12 +13,14 @@ veridian_dtb_pa:
 veridian_kernel_offset:
     .dword 0
 
-// The boot CPU's MMU registers, for secondary CPUs: MAIR, TCR, TTBR0,
-// TTBR1. Written before the MMU is on (so they are in memory, not only in
-// a cache) and read by each secondary before it turns its own MMU on.
+// The boot CPU's MMU registers, for secondary CPUs: MAIR, TCR, TTBR0 (the
+// identity root, for the switch), TTBR1, and the physical address of the
+// empty root TTBR0 holds afterwards. Written before the MMU is on (so they
+// are in memory, not only in a cache) and read by each secondary before it
+// turns its own MMU on.
 .global veridian_mmu_regs
 veridian_mmu_regs:
-    .dword 0, 0, 0, 0
+    .dword 0, 0, 0, 0, 0
 
 // SCTLR_EL1 with the MMU and caches off (HA-14/HA-15, N-177): only the
 // bits that are RES1 in ARMv8.0 (LSMAOE, nTLSMD, SPAN, EIS, TSCXT, EOS),
@@ -48,7 +50,9 @@ veridian_mmu_regs:
 // The boot translation tables (ADR 0015), zeroed with the rest of .bss:
 // the TTBR1 root, the physical map's level-1 table (root entry 256), the
 // kernel image's level-1 and level-2 tables (root entry 511, level-1 entry
-// 510), and for TTBR0 an identity root with its own level-1 table.
+// 510), for TTBR0 an identity root with its own level-1 table (used only
+// across the switch), and the empty root TTBR0 holds after it until a
+// process address space is loaded.
 .section ".bss.pgtables", "aw", %nobits
 .balign 4096
 veridian_pt_start:
@@ -58,6 +62,7 @@ veridian_pt_kernel_l1:  .skip 4096
 veridian_pt_kernel_l2:  .skip 4096
 veridian_pt_idroot:     .skip 4096
 veridian_pt_ident:      .skip 4096
+veridian_pt_empty:      .skip 4096
 veridian_pt_end:
 
 .section ".text.boot"
@@ -263,6 +268,8 @@ el1_entry:
     add x9, x9, :lo12:veridian_mmu_regs
     stp x6, x7, [x9]
     stp x5, x0, [x9, #16]
+    adrp x14, veridian_pt_empty
+    str x14, [x9, #32]
     dsb sy
     msr mair_el1, x6
     msr tcr_el1, x7
@@ -283,6 +290,13 @@ el1_entry:
     br x6
 
 veridian_boot_high:
+    // The identity map was only for the switch: TTBR0 gets the empty root
+    // (x14, a physical address), so the lower half belongs to processes.
+    msr ttbr0_el1, x14
+    isb
+    tlbi vmalle1
+    dsb nsh
+    isb
     // Stack, vectors and everything else at their link addresses now.
     adrp x1, __stack_top
     add x1, x1, :lo12:__stack_top
@@ -384,6 +398,15 @@ veridian_secondary_entry:
     ldr x1, =veridian_secondary_high
     br x1
 veridian_secondary_high:
+    // TTBR0: the empty root, as on the boot CPU.
+    adrp x1, veridian_mmu_regs
+    add x1, x1, :lo12:veridian_mmu_regs
+    ldr x1, [x1, #32]
+    msr ttbr0_el1, x1
+    isb
+    tlbi vmalle1
+    dsb nsh
+    isb
     // x19 is the boot block's physical address: make it a kernel address.
     adrp x1, veridian_kernel_offset
     ldr x1, [x1, :lo12:veridian_kernel_offset]

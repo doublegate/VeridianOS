@@ -204,9 +204,8 @@ Still open:
 - **AArch64 has its MMU on, but still carries the MMU-off workarounds (N-28, HA-16).** Since v0.27
   the kernel runs in the upper half with the MMU and caches on (ADR 0015), so exclusive loads and
   stores work. Not yet removed: `fs::bare_lock` (the filesystems' lock, which does not actually
-  lock), the bump global allocator, the reduced secondary-CPU stage (secondaries park instead of
-  dispatching) and the temporary identity map in TTBR0 (the UART and GIC drivers still use
-  physical addresses). There is no EL0 (user mode) yet. (The boot also sets SCTLR_EL1's RES1 bits
+  lock), the bump global allocator and the reduced secondary-CPU stage (secondaries park instead
+  of dispatching). There is no EL0 (user mode) yet. (The boot also sets SCTLR_EL1's RES1 bits
   and the EL2 state the kernel relies on, N-177, HA-14, and uses the device tree firmware passes,
   HA-01.)
 - **RISC-V runs static ELF programs, without a C library yet (ADR 0013, ADR 0014).** Paging is

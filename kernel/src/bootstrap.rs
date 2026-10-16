@@ -2858,6 +2858,24 @@ fn run_usercopy_tests(passed: &mut u32, failed: &mut u32) {
             && translated
             && normal;
         report_test("mmu_on_kernel_in_upper_half", ok, passed, failed);
+
+        // Nothing is mapped in the lower half once the switch is done: the
+        // identity map is gone from TTBR0 (ADR 0015), so the physical address
+        // of the kernel itself does not translate, and the devices are
+        // reached through the physical-memory map.
+        let low = boot::kernel_phys(here);
+        let par_low: u64;
+        // SAFETY: an address translation has no side effect beyond PAR_EL1.
+        unsafe {
+            core::arch::asm!("at s1e1r, {0}", "isb", "mrs {1}, par_el1",
+                in(reg) low, out(reg) par_low, options(nostack));
+        }
+        report_test(
+            "lower_half_unmapped_after_boot",
+            par_low & 1 == 1,
+            passed,
+            failed,
+        );
     }
 
     // Test 34: the monotonic clock advances and the 1000 Hz timer interrupt

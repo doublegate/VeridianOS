@@ -110,9 +110,9 @@ pub unsafe extern "C" fn _start_rust() -> ! {
     use crate::arch::aarch64::direct_uart::uart_write_str;
 
     // Write startup messages
-    // SAFETY: with the MMU disabled (this function's contract) physical
-    // address 0x09000000 is directly accessible, and it is the PL011 UART on
-    // the QEMU virt machine this boot path targets.
+    // SAFETY: boot.S mapped the PL011 UART of the QEMU virt machine this
+    // boot path targets as Device memory in the physical-memory map
+    // (`platform::PL011`).
     unsafe {
         uart_write_str("[BOOT] AArch64 Rust entry point reached\n");
         uart_write_str("[BOOT] Stack initialized and BSS cleared\n");

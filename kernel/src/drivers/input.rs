@@ -142,7 +142,7 @@ fn read_serial_x86_64() -> Option<u8> {
 /// Read from PL011 UART (AArch64, QEMU virt).
 #[cfg(target_arch = "aarch64")]
 fn read_uart_aarch64() -> Option<u8> {
-    const UART_BASE: usize = 0x0900_0000;
+    const UART_BASE: usize = crate::arch::aarch64::platform::PL011;
     const UART_FR: usize = UART_BASE + 0x18; // Flag register
     const UART_DR: usize = UART_BASE; // Data register
 

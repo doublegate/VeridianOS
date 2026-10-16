@@ -2,6 +2,13 @@
 
 ### Added
 
+- **AArch64: no identity map after the MMU switch (ADR 0015 amendment).** The UART, GIC, console
+  input and debug writes reach their devices through the physical-memory map
+  (`arch::aarch64::platform`). After the branch to the upper half every CPU loads an empty root
+  into TTBR0, so the lower half is free for processes. New boot test
+  `lower_half_unmapped_after_boot` (AArch64 36/36, 38/38 on four CPUs) failed with the identity
+  root left in place.
+
 - **AArch64 runs with the MMU and caches on, in the upper half (N-28 part, HA-04, HA-16; ADR
   0015).** The kernel is linked at 0xFFFF_FFFF_8020_0000 and loaded 2 MiB into RAM; boot.S runs
   position-independent at the load address, builds the boot tables in `.bss` and switches. TTBR1

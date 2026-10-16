@@ -74,3 +74,15 @@ the TTBR1 half.
 - Without ASIDs (HA-26), a TTBR0 switch must invalidate the TLB; that comes with EL0.
 - Device and Normal memory are told apart only by the fixed QEMU `virt` rule until the device-tree
   memory map is used. On hardware the rule is wrong, and the first board port must replace it.
+
+## Amendment (2026-10-16): no identity map after the switch
+
+Decision 2's identity root is now used only between enabling the MMU and the branch to the upper
+half. Right after it, each CPU loads an empty root into TTBR0 (its physical address is the fifth
+word of `veridian_mmu_regs`) and invalidates the TLB. The drivers that used physical addresses as
+pointers (the PL011 UART in every early and panic path, the GICv2 distributor and CPU interface,
+the console input poll, the debug writes in the bump allocator and `sys_write`'s fallback) reach
+them through the physical-memory map, `arch::aarch64::platform` (`mmio(pa)`, a compile-time
+constant because the map's base is fixed). Boot test `lower_half_unmapped_after_boot` translates
+the kernel's own physical address and requires a fault; it failed with the identity root left in
+TTBR0.

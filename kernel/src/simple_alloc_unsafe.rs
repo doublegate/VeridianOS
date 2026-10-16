@@ -53,13 +53,13 @@ impl UnsafeBumpAllocator {
         #[cfg(target_arch = "aarch64")]
         {
             // Use index-based loop - iterators hang on AArch64 bare metal
-            let uart = 0x09000000 as *mut u8;
+            let uart = crate::arch::aarch64::platform::PL011 as *mut u8;
             let msg: &[u8] = b"[ALLOC] init called\n";
             let mut i = 0;
             while i < msg.len() {
-                // SAFETY: 0x09000000 is the PL011 UART data register on the
-                // QEMU virt machine; the kernel accesses it by physical
-                // address here, as direct_uart does.
+                // SAFETY: the PL011 UART data register on the QEMU virt
+                // machine, through the physical-memory map, as direct_uart
+                // uses it.
                 unsafe { core::ptr::write_volatile(uart, msg[i]) };
                 i += 1;
             }
@@ -88,7 +88,7 @@ impl UnsafeBumpAllocator {
         }
         #[cfg(target_arch = "aarch64")]
         {
-            let uart = 0x09000000 as *mut u8;
+            let uart = crate::arch::aarch64::platform::PL011 as *mut u8;
             let msg: &[u8] = b"[ALLOC] init done\n";
             let mut i = 0;
             while i < msg.len() {

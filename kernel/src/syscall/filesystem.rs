@@ -47,10 +47,11 @@ fn serial_write_byte(byte: u8) {
     #[cfg(target_arch = "aarch64")]
     {
         // Direct MMIO write to PL011 UART data register (QEMU virt machine).
-        const UART_DR: usize = 0x0900_0000;
-        // SAFETY: The PL011 UART data register at 0x09000000 is memory-mapped
-        // I/O on the QEMU virt machine. Writing a byte transmits a character.
-        // volatile_write ensures the compiler does not elide the store.
+        const UART_DR: usize = crate::arch::aarch64::platform::PL011;
+        // SAFETY: The PL011 UART data register is memory-mapped I/O on the
+        // QEMU virt machine, reached through the physical-memory map. Writing a byte
+        // transmits a character. volatile_write ensures the compiler does not
+        // elide the store.
         unsafe {
             core::ptr::write_volatile(UART_DR as *mut u8, byte);
         }
