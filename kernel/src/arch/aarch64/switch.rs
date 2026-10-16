@@ -192,15 +192,98 @@ pub fn current_root() -> u64 {
     ttbr0 & TTBR_BADDR
 }
 
-/// Load the address space whose level-0 table is at physical `root` into
-/// TTBR0, if it is not the active one. There are no ASIDs yet (HA-26), so
-/// the TLB is invalidated: the old space's translations must not survive.
+/// The TTBR0_EL1 ASID field: bits 63:48 (55:48 with 8-bit ASIDs).
+const TTBR_ASID_SHIFT: u32 = 48;
+
+/// The whole TTBR0_EL1 value: the root of the active lower half and its
+/// ASID. A task saves this, so it comes back with the same ASID.
+pub fn current_ttbr0() -> u64 {
+    let ttbr0: u64;
+    // SAFETY: reading TTBR0_EL1 has no side effects at EL1.
+    unsafe { core::arch::asm!("mrs {0}, ttbr0_el1", out(reg) ttbr0, options(nomem, nostack)) };
+    ttbr0
+}
+
+/// The ASIDs of the user address spaces (HA-26), by root.
+#[cfg(feature = "alloc")]
+static ASIDS: spin::Mutex<Option<crate::mm::asid::AsidAllocator>> = spin::Mutex::new(None);
+
+/// How many ASIDs the CPU tags with: 65536 when the boot code enabled
+/// 16-bit ASIDs (TCR_EL1.AS, bit 36), else 256.
+#[cfg(feature = "alloc")]
+fn asid_limit() -> usize {
+    let tcr: u64;
+    // SAFETY: reading TCR_EL1 has no side effects at EL1.
+    unsafe { core::arch::asm!("mrs {0}, tcr_el1", out(reg) tcr, options(nomem, nostack)) };
+    if tcr & (1 << 36) != 0 {
+        1 << 16
+    } else {
+        1 << 8
+    }
+}
+
+/// Run `f` on the ASID allocator with IRQs masked: the switch (IRQs masked)
+/// may take the lock, so no holder may be interrupted into a switch.
+#[cfg(feature = "alloc")]
+fn with_asids<R>(f: impl FnOnce(&mut crate::mm::asid::AsidAllocator) -> R) -> R {
+    let irq = irq_save();
+    let r = f(ASIDS
+        .lock()
+        .get_or_insert_with(|| crate::mm::asid::AsidAllocator::new(asid_limit())));
+    if irq {
+        irq_enable();
+    }
+    r
+}
+
+/// The TTBR0_EL1 value for user address space `root`: the root with its
+/// ASID, allocated on first use. ASID 0 (no ASID) when all are in use: the
+/// switch then invalidates ASID 0's entries instead.
+#[cfg(feature = "alloc")]
+pub fn ttbr0_for(root: u64) -> u64 {
+    let root = root & TTBR_BADDR;
+    let asid = with_asids(|a| a.get_or_allocate(root));
+    root | (asid as u64) << TTBR_ASID_SHIFT
+}
+
+/// Release the ASID of user address space `root` once no CPU runs in it
+/// (its tables are being freed): its TLB entries are invalidated on every
+/// CPU before the ASID can be handed out again.
+#[cfg(feature = "alloc")]
+pub fn release_asid(root: u64) {
+    with_asids(|a| {
+        if let Some(asid) = a.release(root & TTBR_BADDR) {
+            // SAFETY: `tlbi aside1is` invalidates the entries tagged `asid`
+            // (bits 63:48 of the operand) on every CPU in the Inner
+            // Shareable domain; `dsb ish` waits for that everywhere. Done
+            // under the allocator lock, so before any reuse of the ASID.
+            unsafe {
+                core::arch::asm!(
+                    "dsb ishst",
+                    "tlbi aside1is, {0}",
+                    "dsb ish",
+                    "isb",
+                    in(reg) (asid as u64) << TTBR_ASID_SHIFT,
+                    options(nostack)
+                );
+            }
+        }
+    });
+}
+
+/// Load `ttbr0` (a root and its ASID, see [`ttbr0_for`]) into TTBR0, if it
+/// is not the active value. With an ASID the TLB is left alone: the other
+/// spaces' entries carry other ASIDs and do not match (HA-26). Without one
+/// (ASID 0: the empty root, a bare root, or ASIDs exhausted) ASID 0's
+/// entries are invalidated on this CPU, as another space may have left
+/// some.
 ///
 /// # Safety
-/// `root` must be a valid level-0 table (the kernel half is TTBR1's, so it
-/// need not map the kernel).
-pub unsafe fn switch_address_space(root: u64) {
-    if root == 0 || root == current_root() {
+/// The root in `ttbr0` must be a valid level-0 table (the kernel half is
+/// TTBR1's, so it need not map the kernel), and a nonzero ASID must be the
+/// one `ttbr0_for` gave that root.
+pub unsafe fn switch_address_space(ttbr0: u64) {
+    if ttbr0 == 0 || ttbr0 == current_ttbr0() {
         return;
     }
     // SAFETY: per the contract; the kernel keeps running from TTBR1.
@@ -209,12 +292,12 @@ pub unsafe fn switch_address_space(root: u64) {
             "dsb ishst",
             "msr ttbr0_el1, {0}",
             "isb",
-            "tlbi vmalle1",
-            "dsb nsh",
-            "isb",
-            in(reg) root,
+            in(reg) ttbr0,
             options(nostack)
         );
+        if ttbr0 >> TTBR_ASID_SHIFT == 0 {
+            core::arch::asm!("tlbi aside1, xzr", "dsb nsh", "isb", options(nostack));
+        }
     }
 }
 

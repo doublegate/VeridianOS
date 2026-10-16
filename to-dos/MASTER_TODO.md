@@ -185,8 +185,9 @@ What does not work yet: `docs/KNOWN-LIMITATIONS.md`.
       (ADR 0016, E-A6); user FP/SIMD state switched with the task, signal handlers with Linux's
       rt_sigframe, fault signals to handlers, fault-tolerant user cmpxchg, static TLS from PT_TLS
       (all also RISC-V);
-      next: ASIDs, C library; cache
-      maintenance primitives and DMA coherency (HA-25); ASIDs (HA-26); memory map from `/memory`
+      an ASID per address space, released with `tlbi aside1is` when its tables are freed (HA-26);
+      next: C library; cache
+      maintenance primitives and DMA coherency (HA-25); memory map from `/memory`
       and reservations (HA-17); EL0 entry/exit and SVC dispatch; register sanitiser (N-170).
     - RISC-V: done: zero BSS, hart lottery, `sstatus.FS` Off in the kernel (HR-01, HR-19, HR-20
       part; the M-mode CSR reads go with FP switching). RISC-V Image header and

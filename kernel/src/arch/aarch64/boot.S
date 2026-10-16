@@ -265,6 +265,13 @@ el1_entry:
     mov x9, #5
     csel x8, x9, x8, hi
     bfi x7, x8, #32, #3
+    // 16-bit ASIDs (TCR_EL1.AS) where ID_AA64MMFR0_EL1.ASIDBits says so.
+    mrs x10, id_aa64mmfr0_el1
+    ubfx x10, x10, #4, #4
+    cmp x10, #2
+    movz x11, #0x10, lsl #32
+    orr x11, x7, x11
+    csel x7, x11, x7, eq
     adrp x9, veridian_mmu_regs
     add x9, x9, :lo12:veridian_mmu_regs
     stp x6, x7, [x9]

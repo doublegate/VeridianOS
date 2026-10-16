@@ -214,6 +214,9 @@ pub fn free_user_page_table_frames(l4_phys: u64) -> usize {
     // tables themselves, in its paging-structure caches) once their frames
     // are reused (MEM-SEC-02).
     crate::mm::tlb::flush_all_in(l4_phys);
+    // Its ASID goes back to the pool, its entries invalidated (HA-26).
+    #[cfg(all(target_arch = "aarch64", feature = "alloc"))]
+    crate::arch::aarch64::switch::release_asid(l4_phys);
 
     let phys_offset_val = super::PHYS_MEM_OFFSET.load(core::sync::atomic::Ordering::Acquire);
     let mut freed = 0usize;

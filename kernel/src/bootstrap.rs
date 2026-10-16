@@ -2293,6 +2293,7 @@ fn run_process_tests(passed: &mut u32, failed: &mut u32) {
             passed,
             failed,
         );
+        report_asid_isolation(passed, failed);
         report_fp_survives(fp, passed, failed);
         report_signal_round_trip(sig, passed, failed);
         let (_, status) = run_user_code(futex);
@@ -2379,6 +2380,37 @@ fn report_fp_survives(code: &[u8], passed: &mut u32, failed: &mut u32) {
         crate::println!("    statuses {:?}", statuses);
     }
     report_test("user_fp_state_survives_switches", ok, passed, failed);
+}
+
+/// Three processes run the ASID test program together, each address space
+/// with its own ASID (HA-26): each must read back its own pid from the same
+/// stack address after every switch. They also hold distinct nonzero ASIDs.
+#[cfg(all(feature = "alloc", target_arch = "aarch64"))]
+fn report_asid_isolation(passed: &mut u32, failed: &mut u32) {
+    let code = crate::arch::aarch64::usermode::test_asid_program();
+    let built: alloc::vec::Vec<_> = (0..3).filter_map(|_| build_user_code(code)).collect();
+    let asids: alloc::vec::Vec<u64> = built
+        .iter()
+        .filter_map(|&pid| crate::process::table::get_process(pid))
+        .map(|p| {
+            crate::arch::aarch64::switch::ttbr0_for(p.memory_space.lock().get_page_table()) >> 48
+        })
+        .collect();
+    let distinct = asids.len() == 3
+        && asids.iter().all(|&a| a != 0)
+        && asids[0] != asids[1]
+        && asids[1] != asids[2]
+        && asids[0] != asids[2];
+    let statuses = if built.len() == 3 {
+        crate::process::run_and_wait_all(&built)
+    } else {
+        alloc::vec![None]
+    };
+    let ok = distinct && statuses.iter().all(|s| *s == Some(0));
+    if !ok {
+        crate::println!("    asids {:?}, statuses {:?}", asids, statuses);
+    }
+    report_test("aarch64_asids_isolate_address_spaces", ok, passed, failed);
 }
 
 /// The signal test program (`test_programs()[4]`): a SIGUSR1 handler that

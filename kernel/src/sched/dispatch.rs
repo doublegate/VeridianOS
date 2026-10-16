@@ -849,7 +849,7 @@ unsafe fn arch_switch(prev: *const Task, next: *const Task) {
         use crate::arch::aarch64::switch;
         let cpu = crate::arch::percpu::this_arch_cpu();
         let a = &mut *(*prev).arch.get();
-        a.root = switch::current_root();
+        a.root = switch::current_ttbr0();
         a.tls = switch::read_tls();
         a.syscall_frame = (*cpu).syscall_frame;
         let b = &*(*next).arch.get();
@@ -1733,7 +1733,8 @@ pub fn spawn_user(
     *task.saved_sp.get_mut() = sp;
     *task.fp.get_mut() = Some(fp);
     let arch = task.arch.get_mut();
-    arch.root = root;
+    // The root with its ASID (HA-26).
+    arch.root = crate::arch::aarch64::switch::ttbr0_for(root);
     arch.tls = tls;
     let task = Arc::new(task);
     let key = task.key;

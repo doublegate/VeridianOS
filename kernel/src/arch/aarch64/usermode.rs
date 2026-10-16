@@ -272,6 +272,33 @@ core::arch::global_asm!(
     "    svc #0",
     ".global veridian_a64_user_tls_end",
     "veridian_a64_user_tls_end:",
+    // I: stores its pid in a stack word (the same virtual address in every
+    // process), then yields 64 times, checking the word after each: exit 0
+    // when it always reads its own pid. Two address spaces sharing an ASID
+    // would see each other's word through the TLB.
+    ".balign 4",
+    ".global veridian_a64_user_asid",
+    "veridian_a64_user_asid:",
+    "    mov x8, #172",
+    "    svc #0",
+    "    mov x19, x0",
+    "    sub sp, sp, #16",
+    "    str x19, [sp]",
+    "    mov x20, #64",
+    "1:  mov x8, #124",
+    "    svc #0",
+    "    ldr x2, [sp]",
+    "    cmp x2, x19",
+    "    b.ne 3f",
+    "    subs x20, x20, #1",
+    "    b.ne 1b",
+    "    mov x0, #0",
+    "    b 2f",
+    "3:  mov x0, #1",
+    "2:  mov x8, #94",
+    "    svc #0",
+    ".global veridian_a64_user_asid_end",
+    "veridian_a64_user_asid_end:",
     // D: the body of an ELF test program: write(1, "A64-ELF-OK\n", 11),
     // then exit_group(argc), argc being the first word of the stack the
     // loader built.
@@ -308,6 +335,17 @@ extern "C" {
     static veridian_a64_user_elf_end: u8;
     static veridian_a64_user_tls: u8;
     static veridian_a64_user_tls_end: u8;
+    static veridian_a64_user_asid: u8;
+    static veridian_a64_user_asid_end: u8;
+}
+
+/// The ASID test program (see its assembly).
+pub fn test_asid_program() -> &'static [u8] {
+    // Only the addresses of the linker symbols are taken (safe).
+    span(
+        core::ptr::addr_of!(veridian_a64_user_asid),
+        core::ptr::addr_of!(veridian_a64_user_asid_end),
+    )
 }
 
 /// A minimal static ELF whose code reads its first TLS word through the

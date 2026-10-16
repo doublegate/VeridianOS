@@ -2,6 +2,15 @@
 
 ### Added
 
+- **ASIDs on AArch64 (HA-26).** Each user address space gets an address-space identifier
+  (`mm::asid`, 16-bit where the CPU has them), so switching address spaces no longer invalidates
+  the TLB: other spaces' entries stay, tagged with their own ASIDs. An ASID is released with a
+  broadcast `tlbi aside1is` when its page tables are freed, before it can be reused; ASID 0 is the
+  fallback when all are in use, with the old invalidation. Boot test
+  `aarch64_asids_isolate_address_spaces`: three processes keep their pid at the same stack address
+  while switching (with one ASID for every root, two read another's). Host tests for the
+  allocator. AArch64 54/54. ADR 0016 amended.
+
 - **Static TLS on AArch64 and RISC-V.** The loader gives a static program with a PT_TLS segment
   its initial TLS block on these architectures too (it did only on x86_64), laid out as each
   psABI's variant I: the thread pointer (TPIDR_EL0, `tp`) is the block base, and the image lies

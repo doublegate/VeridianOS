@@ -6,6 +6,8 @@
 // Memory management core -- many APIs exercised at boot and during allocation
 #![allow(dead_code)]
 
+#[cfg(feature = "alloc")]
+pub mod asid;
 pub mod bootloader;
 pub mod cache_aligned;
 pub mod cache_topology;

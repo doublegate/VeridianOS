@@ -89,3 +89,24 @@ x0-x30, sp, pc and pstate, with an `fpsimd_context` record and a terminator in `
 by a frame record; handlers return to the C library's SA_RESTORER, which musl always passes.
 The boot test `user_signal_handler_round_trip` has the handler rewrite a saved register in its
 `ucontext` and checks that `rt_sigreturn` restores it; it fails with the restore skipped.
+
+## Amendment (2026-10-16): ASIDs (HA-26)
+
+Decision 4's TLB invalidation on every address-space switch is gone. Each user page-table root
+gets an ASID (`mm::asid`; 16-bit when ID_AA64MMFR0_EL1.ASIDBits says so, TCR_EL1.AS set at boot,
+else 8-bit), and a task saves the whole TTBR0 value, so it comes back with its ASID; the switch
+writes TTBR0 and leaves the TLB alone. Entries of other spaces stay, tagged with other ASIDs.
+
+- Nothing needs a generation rollover: an ASID belongs to its root until the root is freed
+  (`free_user_page_table_frames`, after no CPU runs in it), when it is released under the
+  allocator lock with `tlbi aside1is` (every CPU) before it can be handed out again.
+- Changes inside a live address space were already invalidated on every CPU (`tlbi ...is`), so
+  entries an earlier CPU keeps stay correct.
+- ASID 0 is never allocated: the empty root's (it maps nothing), and the fallback when all ASIDs
+  are in use, for which the switch invalidates ASID 0's entries on the CPU (`tlbi aside1`), as
+  before.
+- User pages are already non-global (nG) and kernel pages global (`mm::pte::arm`).
+
+The boot test `aarch64_asids_isolate_address_spaces` runs three processes that keep their pid at
+the same stack address while switching; with one ASID shared by every root, two of them read
+another's word.

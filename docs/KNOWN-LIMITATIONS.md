@@ -208,8 +208,8 @@ Still open:
   stage). Every CPU dispatches, and programs from the VFS run at EL0 as dispatcher tasks with
   system calls, page faults, fault-tolerant user copies, user FP/SIMD state and signal handlers
   (Linux's arm64 `rt_sigframe`; SA_RESTART has no test on AArch64 yet), and fault-tolerant
-  user compare-and-exchange for futexes. Not yet: an AArch64 C library and rootfs (so no BusyBox or
-  musl programs) and ASIDs (every address-space switch invalidates the TLB, HA-26). (The boot also sets SCTLR_EL1's RES1 bits and the EL2 state the
+  user compare-and-exchange for futexes, static TLS, and an ASID per address space (HA-26). Not
+  yet: an AArch64 C library and rootfs (so no BusyBox or musl programs). (The boot also sets SCTLR_EL1's RES1 bits and the EL2 state the
   kernel relies on, N-177, HA-14, and uses the device tree firmware passes, HA-01.)
 - **RISC-V runs static ELF programs, without a C library yet (ADR 0013, ADR 0014).** Paging is
   on, the kernel runs in the upper half, and programs from the VFS run in U-mode as dispatcher
