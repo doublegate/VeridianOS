@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Kernel quality gate, the one to pass before every commit:
 #   fmt check, clippy (-D warnings) on the three bare-metal targets and the
-#   host library, and the host unit tests. With --boot also build every
+#   host library (also with every feature, as CI's Quick Checks), and the host
+#   unit tests. With --boot also build every
 #   architecture and boot each in QEMU (scripts/boot-test.sh); with --rootfs
 #   also run the x86_64 user-space runtime suite (scripts/run-rootfs-tests.sh,
 #   musl checks required). The boots (and with --rootfs the runtime suite)
@@ -45,6 +46,8 @@ step clippy-x86_64 cargo clippy --target targets/x86_64-veridian.json -p veridia
 step clippy-aarch64 cargo clippy --target aarch64-unknown-none-softfloat -p veridian-kernel "${bs[@]}" -- -D warnings
 step clippy-riscv64 cargo clippy --target riscv64imac-unknown-none-elf -p veridian-kernel "${bs[@]}" -- -D warnings
 step clippy-host cargo clippy --lib --features alloc -p veridian-kernel --target x86_64-unknown-linux-gnu -- -D warnings
+# CI's Quick Checks step: the host build with every feature (e.g. `trace`).
+step clippy-all-features cargo clippy --lib --all-features -- -D warnings
 step host-tests cargo test --lib --features alloc -p veridian-kernel --target x86_64-unknown-linux-gnu
 grep -a 'test result' "$log_dir/host-tests.log"
 if [ $boot -eq 1 ] || [ $rootfs -eq 1 ]; then

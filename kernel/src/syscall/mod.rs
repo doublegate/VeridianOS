@@ -636,6 +636,18 @@ pub extern "C" fn syscall_handler(
         arg5,
     );
 
+    // Diagnostic (`trace` feature): results of the first 500 syscalls.
+    #[cfg(all(target_arch = "x86_64", feature = "trace"))]
+    if count < 500 {
+        // SAFETY: COM1 (port 0x3F8) is present on the x86_64 platforms this
+        // kernel targets, which is the raw_serial_* contract.
+        unsafe {
+            crate::arch::x86_64::idt::raw_serial_str(b"  =>");
+            crate::arch::x86_64::idt::raw_serial_hex(ret as u64);
+            crate::arch::x86_64::idt::raw_serial_str(b"\n");
+        }
+    }
+
     // KPTI: switch to shadow page tables before returning to user mode.
     #[cfg(target_arch = "x86_64")]
     crate::arch::x86_64::kpti::on_syscall_exit();
@@ -732,18 +744,6 @@ fn dispatch(
             linux_compat::to_linux_errno(error)
         }
     };
-
-    // Diagnostic (`trace` feature): results of the first 500 syscalls.
-    #[cfg(all(target_arch = "x86_64", feature = "trace"))]
-    if count < 500 {
-        // SAFETY: COM1 (port 0x3F8) is present on the x86_64 platforms this
-        // kernel targets, which is the raw_serial_* contract.
-        unsafe {
-            crate::arch::x86_64::idt::raw_serial_str(b"  =>");
-            crate::arch::x86_64::idt::raw_serial_hex(ret as u64);
-            crate::arch::x86_64::idt::raw_serial_str(b"\n");
-        }
-    }
 
     // Trace: syscall exit
     crate::trace!(
