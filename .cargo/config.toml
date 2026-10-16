@@ -1,0 +1,12 @@
+
+[build]
+target = "x86_64-unknown-none"
+
+[target.'cfg(target_os = "none")']
+runner = "bootimage runner"
+
+[target.x86_64-veridian]
+rustflags = ["-C", "code-model=kernel", "-C", "relocation-model=static"]
+
+[target.aarch64-unknown-none-softfloat]
+rustflags = ["-C", "relocation-model=static", "-Z", "ub-checks=no"]
