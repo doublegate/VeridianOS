@@ -1917,8 +1917,8 @@ pub fn kernel_init_main() {
 
 /// Dispatcher tests (ADR 0006, stage D1): kernel threads on their own
 /// stacks, switching, wait queues, the idle task and reaping. x86_64 only
-/// until the switch primitive exists elsewhere; the others report a pass,
-/// as the user-copy tests do for features they lack.
+/// until the switch primitive exists elsewhere; the others report these
+/// tests as skipped.
 #[cfg(feature = "alloc")]
 fn run_dispatch_tests(passed: &mut u32, failed: &mut u32) {
     kprintln!("[INIT] Dispatcher tests:");
@@ -2799,7 +2799,19 @@ fn run_usercopy_tests(passed: &mut u32, failed: &mut u32) {
             }
             Err(_) => false,
         };
+        #[cfg(target_arch = "x86_64")]
         report_test("kernel_stack_guard_page", ok, passed, failed);
+        // Without paging there is no guard to check: the stack being
+        // usable is all that ran, so a pass would claim too much.
+        #[cfg(not(target_arch = "x86_64"))]
+        if ok {
+            report_skip(
+                "kernel_stack_guard_page",
+                "no guard page without paging (sprint E, N-26)",
+            );
+        } else {
+            report_test("kernel_stack_guard_page", false, passed, failed);
+        }
     }
 
     // A new address space's lower half (user space) is empty: no kernel
@@ -2833,6 +2845,11 @@ fn run_usercopy_tests(passed: &mut u32, failed: &mut u32) {
         vas.destroy();
         report_test("user_half_starts_empty", ok, passed, failed);
     }
+    #[cfg(not(target_arch = "x86_64"))]
+    report_skip(
+        "user_half_starts_empty",
+        "no user address spaces yet (sprint E)",
+    );
 }
 
 #[cfg(not(feature = "alloc"))]

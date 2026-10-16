@@ -24,8 +24,8 @@ pub fn try_enter_usermode() -> Result<(), crate::error::KernelError> {
     // 2. Exception vectors (VBAR_EL1) configured to handle SVC from EL0
     // 3. Physical frame allocation for user code + stack pages
     //
-    // Currently, the kernel runs with a basic identity mapping set up during
-    // early boot. Full user-space page table management (TTBR0_EL1 for
+    // Currently, the kernel runs with the MMU off (N-28): there are no page
+    // tables at all. Full user-space page table management (TTBR0_EL1 for
     // user-space, TTBR1_EL1 for kernel-space) requires the VMM to create
     // per-process address spaces with proper PTE_USER (AP[1]=1) bits.
     //

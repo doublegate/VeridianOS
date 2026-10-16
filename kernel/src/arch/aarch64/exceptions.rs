@@ -202,7 +202,7 @@ extern "C" fn aarch64_fatal(kind: u64) -> ! {
         "FIQ from AArch32",
         "SError from AArch32",
     ];
-    // println! is a no-op on AArch64; write to the PL011 directly.
+    // Write to the PL011 directly: no console lock in a fatal exception.
     let _ = core::fmt::Write::write_fmt(
         &mut super::direct_uart::writer(),
         format_args!(
