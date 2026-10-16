@@ -1008,9 +1008,15 @@ mod tests {
     #[test]
     fn test_log_event() {
         enable(); // Auditing is disabled by default; must enable before logging
-        log_process_create(456, 1000, 0);
-        let (count, _) = get_stats();
-        assert!(count > 0);
+
+        // Logging only tries the filter lock and drops the event when it is
+        // held (best effort, by design), and tests running in parallel use
+        // the same global filter: retry until one event gets through.
+        let recorded = (0..1000).any(|_| {
+            log_process_create(456, 1000, 0);
+            get_stats().0 > 0
+        });
+        assert!(recorded);
     }
 
     #[test]
