@@ -144,10 +144,13 @@ pub fn start_secondary() {
 /// Handle a supervisor timer interrupt (called from the trap handler).
 ///
 /// Re-arms by whole periods so the tick does not drift, skipping ticks that
-/// were missed rather than firing a burst. Only the clock and the timer
-/// wheel are advanced: preempting the interrupted kernel code from here is
-/// not supported yet.
-/// Timer interrupt; `user` when it interrupted user mode.
+/// were missed rather than firing a burst. The re-arm comes after the tick's
+/// work, against the time it finished: a tick that outlasts the period
+/// (a debug kernel under slow emulation) then still leaves the interrupted
+/// code a whole period, where arming first left the next deadline already
+/// past and the hart never got out of the handler. Interrupts are off for
+/// the whole handler, so arming late loses nothing. `user` when the
+/// interrupt came from user mode.
 pub fn handle_interrupt(user: bool) {
     if crate::arch::percpu::is_timekeeper() {
         TICKS.fetch_add(1, Ordering::Relaxed);
@@ -159,10 +162,7 @@ pub fn handle_interrupt(user: bool) {
         arm(u64::MAX);
         return;
     }
-    // Per-CPU deadline (stimecmp is per hart); only the timekeeping hart
-    // advances global time.
-    let next = crate::arch::percpu::advance_timer(read_time(), period);
-    arm(next);
+    // Only the timekeeping hart advances global time.
     if crate::arch::percpu::is_timekeeper() {
         crate::timer::clock_tick();
     }
@@ -172,4 +172,8 @@ pub fn handle_interrupt(user: bool) {
     crate::sched::dispatch::tick(user);
     #[cfg(not(feature = "alloc"))]
     let _ = user;
+    // Per-CPU deadline (stimecmp is per hart), from the time the work
+    // ended (see above).
+    let next = crate::arch::percpu::advance_timer(read_time(), period);
+    arm(next);
 }

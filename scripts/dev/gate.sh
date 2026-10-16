@@ -58,6 +58,12 @@ if [ $boot -eq 1 ]; then
         step "boot-$arch" scripts/boot-test.sh "$arch"
         tail -1 "$log_dir/boot-$arch.log"
     done
+    # The debug RISC-V kernel again on a slow clock (16 ns per instruction):
+    # a timer tick that outlasts its period must not livelock the boot, as
+    # one did on CI's slower runners. KVM rules this out on x86_64, and
+    # AArch64 does not dispatch yet.
+    QEMU_EXTRA="-icount shift=4" step boot-riscv64-slow scripts/boot-test.sh riscv64 300
+    tail -1 "$log_dir/boot-riscv64-slow.log"
 fi
 if [ $rootfs -eq 1 ]; then
     # Stage first: it compiles the runtime test programs, so a change to

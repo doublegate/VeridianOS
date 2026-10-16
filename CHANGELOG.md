@@ -816,6 +816,13 @@
 
 ### Fixed
 
+- **A slow timer tick no longer livelocks the CPU (RISC-V, x86_64).** The tick re-armed the next
+  deadline before doing its work (scheduler accounting, deadline pulls, balancing), so a tick that
+  outlasted the 1 ms period returned with the next interrupt already due. The debug RISC-V kernel
+  on CI's slower runners never got past starting the dispatcher. The re-arm now follows the work,
+  against the time it ended, so the interrupted code always gets a whole period. `gate.sh --boot`
+  adds a debug RISC-V boot under `-icount shift=4`, which hung before the fix and passes 45/45
+  after it.
 - **AArch64 boot sets up EL1 and EL2 properly (N-177, HA-01, HA-14).** The EL2 path wrote 0 to
   SCTLR_EL1, clearing its RES1 bits, and a direct EL1 entry never wrote it; both (and secondary
   CPUs) now write the ARMv8.0 RES1 value with the MMU off. The EL2 drop also stops trapping

@@ -17,9 +17,6 @@ pub fn get_ticks() -> u64 {
 /// console input (see `is_timekeeper`), and wakes expired sleepers
 /// (`dispatch::tick`).
 pub fn tick(user: bool) {
-    // In TSC-deadline mode the timer is one-shot: arm the next tick first.
-    super::apic::rearm_deadline_timer();
-
     if crate::arch::percpu::is_timekeeper() {
         TICKS.fetch_add(1, Ordering::Relaxed);
         crate::timer::clock_tick();
@@ -30,6 +27,12 @@ pub fn tick(user: bool) {
     crate::sched::dispatch::tick(user);
     #[cfg(not(feature = "alloc"))]
     let _ = user;
+    // In TSC-deadline mode the timer is one-shot: arm the next tick, after
+    // the work and against the time it ended, so that a tick outlasting the
+    // period still leaves the interrupted code a whole one (arming first
+    // left the deadline already past: an interrupt livelock). Interrupts
+    // stay off until the return, so nothing fires early.
+    super::apic::rearm_deadline_timer();
 }
 
 /// Setup timer for periodic interrupts
