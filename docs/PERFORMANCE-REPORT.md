@@ -234,17 +234,23 @@ temporary user-space benchmark; mean of 500 runs, 50 for 256 pages, one process)
 - 256-page mappings vary between boots by several milliseconds: frames the guest has not used
   before are backed by the host on first touch (EPT faults), which the guest cannot avoid.
 
-### Per-CPU frame cache for mmap and munmap (N-261)
+### Per-CPU frame cache for mmap and munmap (N-261, not adopted)
 
 Release kernel, 4 vCPUs, the same benchmark, two boots each (mmap / munmap, mean per call):
 
-| Pages | One process before | One process after | Four processes before | Four processes after |
-|------:|-------------------:|------------------:|----------------------:|---------------------:|
-| 1 | 1 / 1 us | 1 / 1 us | 5-6 / 5-6 us | 5 / 5 us |
-| 16 | 3-4 / 3 us | 3 / 4 us | 11-12 / 5 us | 4 / 6 us |
-| 256 | 75-78 / 20 us | 62 / 42 us | 1,126-1,749 / 32-36 us | 142 / 62 us |
+| Pages | Variant | One process | Four processes |
+|------:|---------|------------:|---------------:|
+| 16 | global allocator (current) | 3-4 / 3 us | 11-12 / 5 us |
+| 16 | per-CPU alloc and free | 3 / 4 us | 4 / 6 us |
+| 16 | per-CPU alloc, global free | 3 / 3 us | 70-113 / 4 us |
+| 256 | global allocator (current) | 75-78 / 20 us | 1,126-1,749 / 32-36 us |
+| 256 | per-CPU alloc and free | 62 / 42 us | 142 / 62 us |
+| 256 | per-CPU alloc, global free | 611-1,156 / 30-31 us | 3,501-6,902 / 36-39 us |
 
-Wall time for the four processes at 256 pages: 94-258 ms before, 33 ms after. Unmapping a large
-range costs more alone, as the full cache drains back to the global allocator in batches, but
-allocation no longer serialises the CPUs. The 1-page case still costs five times as much with
-four processes as with one; that contention is elsewhere (N-282).
+Allocating and freeing through the per-CPU cache removes the contention on the global lock, but
+the cache does not check a frame on free (the global allocator refuses one that is already free
+or not RAM), so a double free on the unmap paths would give one frame to two owners. That
+variant was reverted; it needs per-frame state the cache can check without the global lock
+(N-261). Allocating from the cache while freeing globally is the worst of the three: the cache
+refills with frames nobody used recently, which the host backs on first touch. The 1-page case
+costs five times as much with four processes in every variant (N-282).

@@ -1414,7 +1414,8 @@ pub fn per_cpu_alloc_frame() -> Result<FrameNumber> {
         // The cache filled up meanwhile: return what did not fit.
         let global = FRAME_ALLOCATOR.lock();
         for &f in &batch[1..1 + leftover] {
-            let _ = global.free_frames(FrameNumber::new(f), 1);
+            let f = FrameNumber::new(f);
+            note_free_failure(global.free_frames(f, 1), f, "per-CPU cache refill");
         }
     }
     let frame = FrameNumber::new(batch[0]);
@@ -1431,6 +1432,12 @@ pub fn per_cpu_alloc_frame() -> Result<FrameNumber> {
 /// Fast path: only this CPU's cache lock. Above the high watermark a batch
 /// is moved to a stack buffer under the cache lock and returned to the
 /// global allocator after it is released.
+///
+/// Unlike [`FrameAllocator::free_frames`] this does not check the frame: a
+/// frame freed twice, or one that is not RAM, is cached and handed out
+/// again. Use it only for a frame the caller has just allocated and owns
+/// alone (an allocation being rolled back); free mapped frames through the
+/// global allocator.
 pub fn per_cpu_free_frame(frame: FrameNumber) -> Result<()> {
     crate::trace!(
         crate::perf::trace::TraceEventType::FrameFree,
@@ -1459,7 +1466,8 @@ pub fn per_cpu_free_frame(frame: FrameNumber) -> Result<()> {
     if n > 0 || direct {
         let global = FRAME_ALLOCATOR.lock();
         for &f in &batch[..n] {
-            let _ = global.free_frames(FrameNumber::new(f), 1);
+            let f = FrameNumber::new(f);
+            note_free_failure(global.free_frames(f, 1), f, "per-CPU cache drain");
         }
         if direct {
             return global.free_frames(frame, 1);

@@ -1610,16 +1610,19 @@ impl VirtualAddressSpace {
             .try_reserve_exact(num_pages)
             .map_err(|_| too_big)?;
 
-        // Allocate all frames first, from this CPU's frame cache (it refills
-        // in batches, so the global allocator lock is taken once per batch,
-        // not per page: N-261); on failure free the ones already taken.
+        // Allocate all frames first (FRAME_ALLOCATOR held briefly); on
+        // failure free the ones already taken. Not through the per-CPU
+        // cache: unmapping frees through the global allocator, which checks
+        // each frame, so a cache here would refill with frames nobody used
+        // recently (cold in a VM) and measured slower (N-261).
         {
+            let frame_allocator = FRAME_ALLOCATOR.lock();
             for _ in 0..num_pages {
-                match super::frame_allocator::per_cpu_alloc_frame() {
+                match frame_allocator.allocate_frames(1, None) {
                     Ok(frame) => physical_frames.push(frame),
                     Err(_) => {
                         for &f in &physical_frames {
-                            super::frame_allocator::per_cpu_free_frame(f).ok();
+                            frame_allocator.free_frames(f, 1).ok();
                         }
                         return Err(KernelError::OutOfMemory {
                             requested: 4096,
@@ -1909,15 +1912,17 @@ impl VirtualAddressSpace {
         }
         tlb_batch.flush();
 
-        // Free the physical frames (only if the mapping owns them), now that
-        // no CPU translates to them: to this CPU's frame cache, which mmap
-        // and page faults allocate from, so a map/unmap loop rarely takes
-        // the global allocator lock (N-261).
+        // Free the physical frames (only if the mapping owns them). Through
+        // the global allocator, not the per-CPU cache: it refuses a frame
+        // that is already free or not RAM, and the cache does not check, so
+        // a double free here (copy-on-write or shared-mapping state gone
+        // wrong) would hand one frame to two owners (N-261 review).
         if mapping.owns_frames() {
+            let frame_allocator = FRAME_ALLOCATOR.lock();
             for frame in mapping.physical_frames {
                 if super::frame_refs::release(frame) {
                     crate::mm::note_free_failure(
-                        super::frame_allocator::per_cpu_free_frame(frame),
+                        frame_allocator.free_frames(frame, 1),
                         frame,
                         "vas",
                     );
@@ -2037,14 +2042,16 @@ impl VirtualAddressSpace {
         }
 
         // Free the physical frames for the unmapped range, after the flush
-        // above, to this CPU's frame cache (N-261; see `unmap`).
+        // above, through the global allocator, which checks them (see
+        // `unmap`).
         if mapping.owns_frames() {
+            let frame_allocator = FRAME_ALLOCATOR.lock();
             for i in unmap_page_start..unmap_page_end.min(mapping.physical_frames.len()) {
                 if !super::frame_refs::release(mapping.physical_frames[i]) {
                     continue; // still mapped by a copy-on-write sibling
                 }
                 crate::mm::note_free_failure(
-                    super::frame_allocator::per_cpu_free_frame(mapping.physical_frames[i]),
+                    frame_allocator.free_frames(mapping.physical_frames[i], 1),
                     mapping.physical_frames[i],
                     "vas",
                 );
