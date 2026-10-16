@@ -26,8 +26,11 @@ veridian_mmu_regs:
 // bits that are RES1 in ARMv8.0 (LSMAOE, nTLSMD, SPAN, EIS, TSCXT, EOS),
 // little-endian, no alignment checks. Writing 0 cleared those RES1 bits.
 .equ VERIDIAN_SCTLR_EL1_MMU_OFF, 0x30D00800
-// The same with the MMU (M), data cache (C) and instruction cache (I) on.
-.equ VERIDIAN_SCTLR_EL1_MMU_ON, 0x30D01805
+// The same with the MMU (M), data cache (C) and instruction cache (I) on,
+// and EL0 allowed what Linux allows it: DZE (bit 14, `dc zva`), UCT (bit
+// 15, reading CTR_EL0) and UCI (bit 26, `dc cvau`/`ic ivau` and the like,
+// for `__clear_cache`). Each trapped as an undefined instruction (SIGILL).
+.equ VERIDIAN_SCTLR_EL1_MMU_ON, 0x34D0D805
 
 // MAIR_EL1: attribute 0 Normal write-back non-transient (0xFF), attribute 1
 // Device-nGnRE (0x04); `mm::pte::arm` uses the same indices.

@@ -2295,6 +2295,16 @@ fn run_process_tests(passed: &mut u32, failed: &mut u32) {
         );
         report_asid_isolation(passed, failed);
         report_dcache_clean(passed, failed);
+        let (_, status) = run_user_code(crate::arch::aarch64::usermode::test_cacheops_program());
+        if status != Some(0) {
+            crate::println!("    status {:?}", status);
+        }
+        report_test(
+            "aarch64_el0_cache_maintenance",
+            status == Some(0),
+            passed,
+            failed,
+        );
         report_fp_survives(fp, passed, failed);
         report_signal_round_trip(sig, passed, failed);
         let (_, status) = run_user_code(futex);

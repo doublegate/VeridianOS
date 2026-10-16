@@ -101,6 +101,9 @@ executable page as it installs it), and for the boot tests' code pages. The mmap
 were missing on RISC-V too, which now runs `fence.i` on every hart there. Code a program writes
 for itself is its own to sync (`__clear_cache`).
 
+EL0 may read CTR_EL0 and run `dc cvau`, `ic ivau` and `dc zva` itself (SCTLR_EL1.UCT, UCI, DZE,
+as Linux sets them); until then they trapped as undefined instructions under decision 3.
+
 ## Amendment (2026-10-16): ASIDs (HA-26)
 
 Decision 4's TLB invalidation on every address-space switch is gone. Each user page-table root

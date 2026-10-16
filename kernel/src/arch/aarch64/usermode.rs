@@ -299,6 +299,32 @@ core::arch::global_asm!(
     "    svc #0",
     ".global veridian_a64_user_asid_end",
     "veridian_a64_user_asid_end:",
+    // J: the cache operations a C library or JIT uses at EL0, as on Linux:
+    // read CTR_EL0, clean and invalidate the line of its own code
+    // (`__clear_cache`), and zero a block below the stack pointer with
+    // `dc zva` unless DCZID_EL0.DZP prohibits it (exit 2). Exit 0; a
+    // trapped one is SIGILL (132).
+    ".balign 4",
+    ".global veridian_a64_user_cacheops",
+    "veridian_a64_user_cacheops:",
+    "    mrs x1, ctr_el0",
+    "    adr x2, 1f",
+    "    dc cvau, x2",
+    "    dsb ish",
+    "    ic ivau, x2",
+    "    dsb ish",
+    "    isb",
+    "1:  mrs x3, dczid_el0",
+    "    mov x0, #2",
+    "    tbnz x3, #4, 2f",
+    "    sub x4, sp, #4096",
+    "    and x4, x4, #-2048",
+    "    dc zva, x4",
+    "    mov x0, #0",
+    "2:  mov x8, #94",
+    "    svc #0",
+    ".global veridian_a64_user_cacheops_end",
+    "veridian_a64_user_cacheops_end:",
     // D: the body of an ELF test program: write(1, "A64-ELF-OK\n", 11),
     // then exit_group(argc), argc being the first word of the stack the
     // loader built.
@@ -337,6 +363,17 @@ extern "C" {
     static veridian_a64_user_tls_end: u8;
     static veridian_a64_user_asid: u8;
     static veridian_a64_user_asid_end: u8;
+    static veridian_a64_user_cacheops: u8;
+    static veridian_a64_user_cacheops_end: u8;
+}
+
+/// The EL0 cache-operations test program (see its assembly).
+pub fn test_cacheops_program() -> &'static [u8] {
+    // Only the addresses of the linker symbols are taken (safe).
+    span(
+        core::ptr::addr_of!(veridian_a64_user_cacheops),
+        core::ptr::addr_of!(veridian_a64_user_cacheops_end),
+    )
 }
 
 /// The ASID test program (see its assembly).

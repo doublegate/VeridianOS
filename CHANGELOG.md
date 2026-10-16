@@ -969,6 +969,12 @@
 
 ### Fixed
 
+- **AArch64 user programs could not read CTR_EL0 or do their own cache maintenance.** SCTLR_EL1
+  left UCT, UCI and DZE clear, so `mrs ctr_el0`, `dc cvau`/`ic ivau` (`__clear_cache`, JITs) and
+  `dc zva` (memset) at EL0 were undefined instructions and killed the program with SIGILL. They are
+  allowed now, as on Linux. Boot test `aarch64_el0_cache_maintenance` (status 132 before, 0 after).
+  AArch64 56/56.
+
 - **exec marked a process as exec'd only after closing its close-on-exec descriptors.** A parent
   that took EOF on a close-on-exec pipe as the sign of the exec could call `setpgid` on another CPU
   before the flag was set and succeed instead of getting EACCES (`getcwd_wait_and_groups` bit 2048,
