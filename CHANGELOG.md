@@ -916,6 +916,14 @@
 
 ### Fixed
 
+- **Console lines from several CPUs interleaved (AArch64, RISC-V).** The RISC-V `print!` and the
+  AArch64 `print!` and direct UART writes took no lock, so with every hart dispatching a line from
+  one CPU could land inside another's. A four-hart boot's tally came out as `Results: [P50/50
+  passed`, which the boot test could not parse. `print::with_console` now serialises each
+  message across CPUs with interrupts off. It is reentrant on one CPU, so a fault or panic while
+  printing still prints, and its wait is bounded, so a CPU that stopped holding it cannot
+  silence the console. x86_64 already held its serial port's lock.
+
 - **AArch64 process address spaces could not be built.** `map_kernel_space` gave every AArch64
   process root three fake "kernel regions" (2 MiB code, 2 MiB data, 16 MiB heap, from fresh frames),
   which failed and left `VirtualAddressSpace::init` returning an error. They were also useless,

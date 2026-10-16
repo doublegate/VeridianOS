@@ -51,10 +51,11 @@ unsafe fn uart_write_bytes_asm(ptr: *const u8, len: usize) {
 pub fn direct_print_str(s: &str) {
     // SAFETY: s.as_ptr() and s.len() provide a valid byte buffer from the &str.
     // uart_write_bytes_asm writes each byte to the PL011 UART (`platform::PL011`)
-    // via assembly, avoiding LLVM loop compilation issues on AArch64.
-    unsafe {
+    // via assembly, avoiding LLVM loop compilation issues on AArch64. One
+    // message at a time across CPUs (`print::with_console`).
+    crate::print::with_console(|| unsafe {
         uart_write_bytes_asm(s.as_ptr(), s.len());
-    }
+    });
 }
 
 /// Output a string to UART without using any loops or iterators
