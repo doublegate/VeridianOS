@@ -19,23 +19,23 @@ extern crate alloc;
 // On host (x86_64-unknown-linux-gnu) for coverage/testing, delegate to the
 // system allocator so that test code using Vec/String/alloc compiles and runs.
 #[cfg(all(
-    any(target_arch = "x86_64", target_arch = "riscv64"),
+    any(
+        target_arch = "x86_64",
+        target_arch = "riscv64",
+        target_arch = "aarch64"
+    ),
     target_os = "none"
 ))]
 use linked_list_allocator::LockedHeap;
 
-// The bump allocator AArch64 uses until its MMU is on (N-28: locks need
-// exclusives, unreliable on Device memory). Also built for host unit tests,
-// which exercise it on a Vec-backed heap.
-#[cfg(any(target_arch = "aarch64", test))]
-#[cfg_attr(test, allow(dead_code))]
-mod simple_alloc_unsafe;
-#[cfg(target_arch = "aarch64")]
-use simple_alloc_unsafe::UnsafeBumpAllocator;
-
-/// x86_64 and RISC-V: a real heap that reuses freed memory (MEM-SEC-03).
+/// A real heap that reuses freed memory (MEM-SEC-03); AArch64 used a bump
+/// allocator until its MMU was on (N-28, ADR 0015).
 #[cfg(all(
-    any(target_arch = "x86_64", target_arch = "riscv64"),
+    any(
+        target_arch = "x86_64",
+        target_arch = "riscv64",
+        target_arch = "aarch64"
+    ),
     target_os = "none"
 ))]
 #[global_allocator]
@@ -47,13 +47,21 @@ static ALLOCATOR: IrqSafeHeap = IrqSafeHeap(LockedHeap::empty());
 /// interrupts on (N-139), so an interrupt arriving while its CPU held the
 /// plain spinlock would spin on it forever, and every other CPU with it.
 #[cfg(all(
-    any(target_arch = "x86_64", target_arch = "riscv64"),
+    any(
+        target_arch = "x86_64",
+        target_arch = "riscv64",
+        target_arch = "aarch64"
+    ),
     target_os = "none"
 ))]
 pub struct IrqSafeHeap(LockedHeap);
 
 #[cfg(all(
-    any(target_arch = "x86_64", target_arch = "riscv64"),
+    any(
+        target_arch = "x86_64",
+        target_arch = "riscv64",
+        target_arch = "aarch64"
+    ),
     target_os = "none"
 ))]
 // SAFETY: forwards to LockedHeap's GlobalAlloc, which upholds the contract;
@@ -72,10 +80,6 @@ unsafe impl core::alloc::GlobalAlloc for IrqSafeHeap {
     }
 }
 
-#[cfg(target_arch = "aarch64")]
-#[global_allocator]
-pub static ALLOCATOR: UnsafeBumpAllocator = UnsafeBumpAllocator::new();
-
 // Host target: use the system allocator so unit tests can allocate normally.
 #[cfg(not(target_os = "none"))]
 extern crate std;
@@ -85,7 +89,11 @@ static SYSTEM_ALLOCATOR: std::alloc::System = std::alloc::System;
 
 /// Get a reference to the global allocator
 #[cfg(all(
-    any(target_arch = "x86_64", target_arch = "riscv64"),
+    any(
+        target_arch = "x86_64",
+        target_arch = "riscv64",
+        target_arch = "aarch64"
+    ),
     target_os = "none"
 ))]
 pub fn get_allocator() -> &'static LockedHeap {

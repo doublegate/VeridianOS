@@ -2998,9 +2998,7 @@ fn run_usercopy_tests(passed: &mut u32, failed: &mut u32) {
     // Test 38: the kernel heap reuses freed memory (MEM-SEC-03). 64 MiB
     // allocated and freed 1 MiB at a time exceeds the 8 MiB AArch64/RISC-V
     // heap, so a bump allocator, which never reuses memory, fails it.
-    // AArch64 keeps its bump allocator until its MMU is on (N-28).
     {
-        #[cfg(not(target_arch = "aarch64"))]
         let ok = (0..64).all(|i| {
             let mut v: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
             if v.try_reserve_exact(1 << 20).is_err() {
@@ -3010,13 +3008,7 @@ fn run_usercopy_tests(passed: &mut u32, failed: &mut u32) {
             v.push(i as u8);
             v.capacity() >= 1 << 20 && v[0] == i as u8
         });
-        #[cfg(not(target_arch = "aarch64"))]
         report_test("heap_reuses_freed_memory", ok, passed, failed);
-        #[cfg(target_arch = "aarch64")]
-        report_skip(
-            "heap_reuses_freed_memory",
-            "bump allocator until the MMU is on (N-28)",
-        );
     }
 
     // Test 39: a kernel stack has an unmapped guard page below it, and

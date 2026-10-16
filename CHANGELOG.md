@@ -828,6 +828,12 @@
 
 ### Removed
 
+- **The AArch64 bump allocator (MEM-SEC-03, N-28 part).** AArch64 used a heap that never reused
+  freed memory, because the linked-list allocator's lock needs exclusives, which hung with the MMU
+  off. With the MMU on it uses the same interrupt-safe `LockedHeap` as x86_64 and RISC-V, and
+  `simple_alloc_unsafe.rs` is deleted. Boot test `heap_reuses_freed_memory` now runs on AArch64
+  (it failed with the bump allocator): 38/38, 40/40 on four CPUs.
+
 - **`fs::bare_lock` (N-28 part).** The AArch64 filesystems (ramfs, tmpfs, devfs, blockfs, ext4,
   FAT32, pty, inotify, flock, xattr, file) locked with an `UnsafeCell` wrapper that did not lock,
   because exclusive loads and stores hung with the MMU off. With the MMU on (ADR 0015) they use

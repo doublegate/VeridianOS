@@ -63,11 +63,15 @@ pub fn heap_size_for(ram: usize) -> usize {
     pow2.clamp(MIN_HEAP_SIZE, MAX_HEAP_SIZE)
 }
 
-/// Get current heap statistics (x86_64 only).
+/// Get current heap statistics.
 ///
 /// Returns (total, used, free) in bytes.
 #[cfg(all(
-    any(target_arch = "x86_64", target_arch = "riscv64"),
+    any(
+        target_arch = "x86_64",
+        target_arch = "riscv64",
+        target_arch = "aarch64"
+    ),
     target_os = "none"
 ))]
 pub fn get_heap_stats() -> (usize, usize, usize) {
@@ -95,60 +99,21 @@ pub fn init() -> Result<(), crate::error::KernelError> {
         let (heap_start, heap_size) = frame_backed_region()?;
         HEAP_BYTES.store(heap_size, Ordering::Relaxed);
 
-        // RISC-V: the same LockedHeap as x86_64 (MEM-SEC-03). It used to
-        // use the never-freeing bump allocator because the linked-list free
-        // list was corrupted ("Hole list out of order?"); the cause was the
-        // frame allocator handing out frames inside the kernel image, where
-        // this static heap lives, and that has since been fixed (the
-        // allocator starts after the kernel end).
-        #[cfg(all(target_arch = "riscv64", target_os = "none"))]
+        // RISC-V and AArch64: the same LockedHeap as x86_64 (MEM-SEC-03).
+        // RISC-V used the never-freeing bump allocator because the
+        // linked-list free list was corrupted ("Hole list out of order?");
+        // the cause was the frame allocator handing out frames inside the
+        // kernel image, where this static heap lives, since fixed (the
+        // allocator starts after the kernel end). AArch64 used it because
+        // locks need exclusives, which hung with its MMU off (N-28).
+        #[cfg(all(
+            any(target_arch = "riscv64", target_arch = "aarch64"),
+            target_os = "none"
+        ))]
         {
             let mut allocator = crate::get_allocator().lock();
             allocator.init(heap_start, heap_size);
             drop(allocator);
-        }
-
-        // AArch64: Use lock-free UnsafeBumpAllocator (LockedHeap deadlocks on AArch64)
-        // Initialize fields directly to avoid function call issues on AArch64
-        #[cfg(target_arch = "aarch64")]
-        {
-            use core::sync::atomic::Ordering;
-
-            use crate::arch::aarch64::direct_uart::uart_write_str;
-
-            uart_write_str("[HEAP] Initializing AArch64 UnsafeBumpAllocator\n");
-
-            let start_addr = heap_start as usize;
-
-            // Initialize ALLOCATOR atomics directly (bypasses function call)
-            crate::ALLOCATOR.start.store(start_addr, Ordering::SeqCst);
-            crate::ALLOCATOR.size.store(heap_size, Ordering::SeqCst);
-            crate::ALLOCATOR.next.store(start_addr, Ordering::SeqCst);
-            crate::ALLOCATOR.allocations.store(0, Ordering::SeqCst);
-            core::sync::atomic::fence(Ordering::SeqCst);
-
-            // AArch64 memory barriers
-            // SAFETY: DSB SY (Data Synchronization Barrier) and ISB (Instruction
-            // Synchronization Barrier) are architectural barrier instructions that
-            // are always safe to execute at any exception level. They ensure all
-            // preceding memory operations complete before subsequent ones begin,
-            // which is required after writing to the allocator's atomic fields so
-            // that the allocator state is visible before any allocation attempts.
-            unsafe {
-                core::arch::asm!("dsb sy", "isb", options(nostack));
-            }
-
-            uart_write_str("[HEAP] ALLOCATOR initialized\n");
-
-            // Verify allocator state
-            let next_val = crate::ALLOCATOR.next.load(Ordering::SeqCst);
-            if next_val != 0 {
-                uart_write_str("[HEAP] Allocator state verified OK\n");
-            } else {
-                uart_write_str("[HEAP] WARNING: Allocator next=0\n");
-            }
-
-            uart_write_str("[HEAP] AArch64 heap initialization complete\n");
         }
 
         // x86_64: Use LockedHeap
