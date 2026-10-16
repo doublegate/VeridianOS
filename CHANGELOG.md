@@ -977,6 +977,11 @@
 
 ### Fixed
 
+- **The loader ran other architectures' programs.** The ELF check accepted x86_64, AArch64 and
+  RISC-V programs on every architecture, so an x86_64 `/sbin/init` on an AArch64 root was started
+  and died with SIGBUS. `elf::image::plan` now refuses any machine but the kernel's own (ENOEXEC,
+  as Linux's `elf_check_arch`), with a host test.
+
 - **AArch64 user programs could not read CTR_EL0 or do their own cache maintenance.** SCTLR_EL1
   left UCT, UCI and DZE clear, so `mrs ctr_el0`, `dc cvau`/`ic ivau` (`__clear_cache`, JITs) and
   `dc zva` (memset) at EL0 were undefined instructions and killed the program with SIGILL. They are

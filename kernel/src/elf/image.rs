@@ -161,6 +161,10 @@ pub fn span(binary: &ElfBinary, file_len: usize) -> Result<(u64, u64), ElfError>
 /// addresses (`base` unused). The image must lie in user space and the
 /// entry point on an executable page.
 pub fn plan(binary: &ElfBinary, file_len: usize, base: u64) -> Result<ImagePlan, ElfError> {
+    // Another architecture's program (the parser accepts all three).
+    if binary.machine != super::types::NATIVE_MACHINE {
+        return Err(ElfError::UnsupportedMachine);
+    }
     let (start, end) = span(binary, file_len)?;
     let bias = if is_relocatable(binary) {
         base.wrapping_sub(start)
@@ -433,6 +437,7 @@ mod tests {
     fn binary(elf_type: ElfType, entry: u64, segments: Vec<ElfSegment>) -> ElfBinary {
         ElfBinary {
             elf_type: elf_type as u16,
+            machine: crate::elf::types::NATIVE_MACHINE,
             entry_point: entry,
             load_base: 0,
             load_size: 0,
@@ -443,6 +448,27 @@ mod tests {
             interpreter: None,
             dynamic: false,
         }
+    }
+
+    /// Another architecture's program is not planned (ENOEXEC at exec).
+    #[test]
+    fn foreign_machine_is_refused() {
+        let foreign = if crate::elf::types::NATIVE_MACHINE == 62 {
+            183
+        } else {
+            62
+        };
+        let mut b = binary(
+            ElfType::Executable,
+            0x40_0000,
+            alloc::vec![load(0x40_0000, 0, 0x1000, 0x1000, PF_R | PF_X)],
+        );
+        assert!(plan(&b, 0x1000, PIE_BASE).is_ok());
+        b.machine = foreign;
+        assert!(matches!(
+            plan(&b, 0x1000, PIE_BASE),
+            Err(ElfError::UnsupportedMachine)
+        ));
     }
 
     /// A typical static program: text (RX) from offset 0, then data (RW)

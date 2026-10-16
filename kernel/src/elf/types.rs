@@ -188,11 +188,23 @@ pub enum SegmentType {
     Other(u32),
 }
 
+/// The e_machine of programs this kernel runs (EM_X86_64, EM_AARCH64,
+/// EM_RISCV). Another architecture's program is refused with ENOEXEC, as
+/// Linux's `elf_check_arch` does.
+#[cfg(target_arch = "x86_64")]
+pub const NATIVE_MACHINE: u16 = 62;
+#[cfg(target_arch = "aarch64")]
+pub const NATIVE_MACHINE: u16 = 183;
+#[cfg(target_arch = "riscv64")]
+pub const NATIVE_MACHINE: u16 = 243;
+
 /// ELF binary information
 #[derive(Debug)]
 pub struct ElfBinary {
     /// e_type: ET_EXEC (2) or ET_DYN (3).
     pub elf_type: u16,
+    /// e_machine: the architecture the program is for.
+    pub machine: u16,
     pub entry_point: u64,
     pub load_base: u64,
     pub load_size: usize,

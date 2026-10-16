@@ -143,6 +143,7 @@ impl ElfLoader {
 
         Ok(ElfBinary {
             elf_type: header.elf_type,
+            machine: header.machine,
             entry_point: header.entry,
             load_base,
             load_size,
@@ -1337,6 +1338,7 @@ mod tests {
             .unwrap_or(0);
         ElfBinary {
             elf_type: 2,
+            machine: NATIVE_MACHINE,
             entry_point: load_base,
             load_base,
             load_size: 0,
