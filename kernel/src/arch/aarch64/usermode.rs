@@ -122,3 +122,150 @@ pub unsafe fn enter_usermode(entry_point: u64, user_stack: u64) -> ! {
         )
     };
 }
+
+// Boot-test programs for EL0 (position-independent, copied to a user page
+// by `bootstrap`), as on RISC-V (ADR 0016). A: getpid, then exit_group
+// with the result (a system call round trip). B: a load from address 0 (a
+// user fault the kernel cannot resolve: SIGSEGV). C: reads SCTLR_EL1, an
+// EL1 register (undefined at EL0: SIGILL, which shows the code ran at
+// EL0). E: an FP instruction (`fmov d0, xzr`, as `.inst` since the kernel
+// is soft-float): FP/SIMD traps at EL0 (CPACR_EL1.FPEN) until its state is
+// switched with the task, so SIGILL. Numbers from Linux's generic table:
+// getpid 172, exit_group 94.
+core::arch::global_asm!(
+    ".section .rodata",
+    ".balign 4",
+    ".global veridian_a64_user_getpid",
+    "veridian_a64_user_getpid:",
+    "    mov x8, #172",
+    "    svc #0",
+    "    mov x8, #94",
+    "    svc #0",
+    "1:  b 1b",
+    ".global veridian_a64_user_getpid_end",
+    "veridian_a64_user_getpid_end:",
+    ".balign 4",
+    ".global veridian_a64_user_fault",
+    "veridian_a64_user_fault:",
+    "    mov x1, #0",
+    "    ldr x0, [x1]",
+    "    mov x8, #94",
+    "    svc #0",
+    ".global veridian_a64_user_fault_end",
+    "veridian_a64_user_fault_end:",
+    ".balign 4",
+    ".global veridian_a64_user_sysreg",
+    "veridian_a64_user_sysreg:",
+    "    mrs x0, sctlr_el1",
+    "    mov x8, #94",
+    "    svc #0",
+    ".global veridian_a64_user_sysreg_end",
+    "veridian_a64_user_sysreg_end:",
+    ".balign 4",
+    ".global veridian_a64_user_fp",
+    "veridian_a64_user_fp:",
+    "    .inst 0x9e6703e0",
+    "    mov x8, #94",
+    "    svc #0",
+    ".global veridian_a64_user_fp_end",
+    "veridian_a64_user_fp_end:",
+    // D: the body of an ELF test program: write(1, "A64-ELF-OK\n", 11),
+    // then exit_group(argc), argc being the first word of the stack the
+    // loader built.
+    ".balign 4",
+    ".global veridian_a64_user_elf",
+    "veridian_a64_user_elf:",
+    "    mov x0, #1",
+    "    adr x1, 2f",
+    "    mov x2, #11",
+    "    mov x8, #64",
+    "    svc #0",
+    "    ldr x0, [sp]",
+    "    mov x8, #94",
+    "    svc #0",
+    "2:  .ascii \"A64-ELF-OK\\n\"",
+    ".global veridian_a64_user_elf_end",
+    "veridian_a64_user_elf_end:",
+);
+
+extern "C" {
+    static veridian_a64_user_getpid: u8;
+    static veridian_a64_user_getpid_end: u8;
+    static veridian_a64_user_fault: u8;
+    static veridian_a64_user_fault_end: u8;
+    static veridian_a64_user_sysreg: u8;
+    static veridian_a64_user_sysreg_end: u8;
+    static veridian_a64_user_fp: u8;
+    static veridian_a64_user_fp_end: u8;
+    static veridian_a64_user_elf: u8;
+    static veridian_a64_user_elf_end: u8;
+}
+
+fn span(a: *const u8, b: *const u8) -> &'static [u8] {
+    // SAFETY: two labels of one rodata block, `a` before `b`.
+    unsafe { core::slice::from_raw_parts(a, b as usize - a as usize) }
+}
+
+/// A minimal static AArch64 ELF executable of the ELF test program: one
+/// read+execute PT_LOAD at 0x10000 holding the headers and the code, with
+/// the entry right after the headers.
+pub fn test_elf() -> alloc::vec::Vec<u8> {
+    // Only the addresses of the linker symbols are taken (safe).
+    let code = span(
+        core::ptr::addr_of!(veridian_a64_user_elf),
+        core::ptr::addr_of!(veridian_a64_user_elf_end),
+    );
+    const BASE: u64 = 0x10000;
+    const HDRS: u64 = 64 + 56;
+    let size = HDRS + code.len() as u64;
+    let mut e = alloc::vec::Vec::with_capacity(size as usize);
+    e.extend_from_slice(&[0x7F, b'E', b'L', b'F', 2, 1, 1, 0]);
+    e.extend_from_slice(&[0; 8]);
+    e.extend_from_slice(&2u16.to_le_bytes()); // ET_EXEC
+    e.extend_from_slice(&183u16.to_le_bytes()); // EM_AARCH64
+    e.extend_from_slice(&1u32.to_le_bytes());
+    e.extend_from_slice(&(BASE + HDRS).to_le_bytes()); // entry
+    e.extend_from_slice(&64u64.to_le_bytes()); // phoff
+    e.extend_from_slice(&0u64.to_le_bytes()); // shoff
+    e.extend_from_slice(&0u32.to_le_bytes()); // flags
+    e.extend_from_slice(&64u16.to_le_bytes());
+    e.extend_from_slice(&56u16.to_le_bytes());
+    e.extend_from_slice(&1u16.to_le_bytes()); // phnum
+    e.extend_from_slice(&64u16.to_le_bytes());
+    e.extend_from_slice(&0u16.to_le_bytes());
+    e.extend_from_slice(&0u16.to_le_bytes());
+    e.extend_from_slice(&1u32.to_le_bytes()); // PT_LOAD
+    e.extend_from_slice(&5u32.to_le_bytes()); // R | X
+    e.extend_from_slice(&0u64.to_le_bytes()); // offset
+    e.extend_from_slice(&BASE.to_le_bytes()); // vaddr
+    e.extend_from_slice(&BASE.to_le_bytes()); // paddr
+    e.extend_from_slice(&size.to_le_bytes()); // filesz
+    e.extend_from_slice(&size.to_le_bytes()); // memsz
+    e.extend_from_slice(&0x1000u64.to_le_bytes()); // align
+    e.extend_from_slice(code);
+    e
+}
+
+/// The boot-test user programs (see above): getpid round trip, page
+/// fault, EL1 system register, FP instruction.
+pub fn test_programs() -> [&'static [u8]; 4] {
+    // Only the addresses of the linker symbols are taken (safe).
+    [
+        span(
+            core::ptr::addr_of!(veridian_a64_user_getpid),
+            core::ptr::addr_of!(veridian_a64_user_getpid_end),
+        ),
+        span(
+            core::ptr::addr_of!(veridian_a64_user_fault),
+            core::ptr::addr_of!(veridian_a64_user_fault_end),
+        ),
+        span(
+            core::ptr::addr_of!(veridian_a64_user_sysreg),
+            core::ptr::addr_of!(veridian_a64_user_sysreg_end),
+        ),
+        span(
+            core::ptr::addr_of!(veridian_a64_user_fp),
+            core::ptr::addr_of!(veridian_a64_user_fp_end),
+        ),
+    ]
+}

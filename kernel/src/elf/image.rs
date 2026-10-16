@@ -299,6 +299,9 @@ pub fn load(
     // code must be fenced on every hart that may run it.
     #[cfg(all(target_arch = "riscv64", target_os = "none"))]
     crate::arch::riscv::sbi::remote_fence_i_all();
+    // AArch64 likewise needs its instruction caches made coherent.
+    #[cfg(all(target_arch = "aarch64", target_os = "none"))]
+    crate::arch::aarch64::sync_icache_all();
     Ok(Loaded {
         start,
         aux: super::dynamic::ProgramAux {

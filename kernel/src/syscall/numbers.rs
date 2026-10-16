@@ -1064,6 +1064,19 @@ impl Syscall {
             _ => None,
         }
     }
+
+    /// Decode an aarch64 system call number: the same generic table with
+    /// arm64's ABIs (64, common, memfd_secret, renameat, rlimit; Linux's
+    /// arch/arm64/kernel/Makefile.syscalls), that is riscv64's minus the
+    /// riscv-only calls plus `renameat`, and the private numbers.
+    pub const fn from_aarch64(value: usize) -> Option<Self> {
+        match value {
+            38 => Some(Syscall::Renameat),
+            // riscv_hwprobe and riscv_flush_icache are RISC-V's only.
+            258 | 259 => None,
+            _ => Self::from_riscv64(value),
+        }
+    }
 }
 
 impl Syscall {

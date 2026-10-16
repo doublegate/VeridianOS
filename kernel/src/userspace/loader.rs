@@ -256,22 +256,9 @@ fn create_minimal_init() -> Result<ProcessId, KernelError> {
         // iretq path.
     }
 
-    #[cfg(target_arch = "aarch64")]
-    if let Some(process) = crate::process::get_process(pid) {
-        let mut memory_space = process.memory_space.lock();
-        let page_flags = crate::mm::PageFlags::PRESENT | crate::mm::PageFlags::USER;
-        memory_space.map_page(entry_point, page_flags)?;
-
-        // AArch64: b . (14000000)
-        // SAFETY: entry_point was just mapped with USER | PRESENT flags above.
-        // Writing the AArch64 "b ." (branch-to-self) instruction at the
-        // entry point creates a minimal init process that spins in place.
-        unsafe {
-            let code_ptr = entry_point as *mut u32;
-            *code_ptr = 0x14000000;
-        }
-    }
-
+    // AArch64: likewise. The kernel used to store a "b ." at the user
+    // address directly, which only worked with the MMU off; with the lower
+    // half belonging to the process (ADR 0015) the store would fault.
     #[cfg(target_arch = "riscv64")]
     {
         // RISC-V: Cannot directly write to user-space virtual addresses during

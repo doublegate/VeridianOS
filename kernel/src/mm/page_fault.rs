@@ -405,13 +405,17 @@ pub fn from_x86_64(error_code: u64, cr2: u64, rip: u64) -> PageFaultInfo {
 #[cfg(target_arch = "aarch64")]
 pub fn from_aarch64(esr_el1: u64, far_el1: u64, elr_el1: u64) -> PageFaultInfo {
     let dfsc = (esr_el1 & 0x3F) as u8;
-    let was_write = (esr_el1 & (1 << 6)) != 0;
     // EC field is bits [31:26]
     let ec = ((esr_el1 >> 26) & 0x3F) as u8;
-    // If EC == 0b100100 the abort came from a lower EL (user mode)
-    let was_user = ec == 0b100100;
+    // A data abort (0x24/0x25) says in WnR whether it was a write; an
+    // instruction abort (0x20/0x21) is a fetch.
+    let was_write = matches!(ec, 0x24 | 0x25) && (esr_el1 & (1 << 6)) != 0;
+    // From a lower EL (user mode): instruction abort 0x20, data abort 0x24.
+    let was_user = matches!(ec, 0x20 | 0x24);
 
-    let reason = match dfsc & 0x0F {
+    // The full fault status code: a synchronous external abort on a table
+    // walk (0x14-0x17) must not read as a translation fault.
+    let reason = match dfsc {
         // Translation faults (levels 0-3)
         0x04..=0x07 => PageFaultReason::NotPresent,
         // Permission faults (levels 0-3)

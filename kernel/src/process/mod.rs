@@ -288,6 +288,57 @@ pub fn start_thread(
     Ok(())
 }
 
+/// AArch64: start `thread` as a dispatcher task entering EL0 with the
+/// registers of its saved context (x0-x30, sp, pc) and its TLS register
+/// (TPIDR_EL0). User FP state is not switched yet (FP is trapped at EL0),
+/// so `inherit_fpu` has nothing to copy.
+#[cfg(all(feature = "alloc", target_arch = "aarch64", target_os = "none"))]
+pub fn start_thread(
+    process: &Process,
+    thread: &Thread,
+    inherit_fpu: bool,
+) -> crate::error::KernelResult<()> {
+    use crate::arch::aarch64::switch::UserFrame;
+    let _ = inherit_fpu;
+    let (frame, tls) = {
+        let ctx = thread.context.lock();
+        let user = crate::syscall::userspace::is_user_address;
+        if !user(ctx.pc as usize) || !user(ctx.sp as usize) {
+            return Err(crate::error::KernelError::InvalidArgument {
+                name: "thread context",
+                value: "entry point or stack outside user space",
+            });
+        }
+        let f = UserFrame {
+            x: ctx.x,
+            sp: ctx.sp,
+            elr: ctx.pc,
+            spsr: 0,
+        };
+        (f, ctx.tpidr_el0)
+    };
+    let root = process.memory_space.lock().get_page_table();
+    if root == 0 {
+        return Err(crate::error::KernelError::InvalidState {
+            expected: "address space",
+            actual: "no page table",
+        });
+    }
+    process
+        .dispatched
+        .store(true, core::sync::atomic::Ordering::Release);
+    let policy = thread.sched.lock().to_policy();
+    crate::sched::dispatch::spawn_user(
+        (process.pid.0, thread.tid.0),
+        &frame,
+        root,
+        tls,
+        policy,
+        thread.get_affinity() as u64,
+    )?;
+    Ok(())
+}
+
 /// Run a freshly created (or exec'd) process as dispatcher tasks and wait
 /// for it to end (stage D2): its first thread is started, the caller blocks
 /// until the process is a zombie whose last task is off the CPU, and the
@@ -297,7 +348,10 @@ pub fn start_thread(
     feature = "alloc",
     any(
         target_arch = "x86_64",
-        all(target_arch = "riscv64", target_os = "none")
+        all(
+            any(target_arch = "riscv64", target_arch = "aarch64"),
+            target_os = "none"
+        )
     )
 ))]
 pub fn run_and_wait(pid: ProcessId) -> Option<i32> {

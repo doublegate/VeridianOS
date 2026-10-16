@@ -10,9 +10,16 @@
 //!   soft-float (`aarch64-unknown-none-softfloat`, N-178), so no kernel code
 //!   uses them, and user FP state is switched with the task (as Linux arm64
 //!   does), not saved on every exception.
-//! - Everything else (synchronous exceptions, FIQ, SError, any exception from
-//!   EL0 or taken on SP_EL0) is a kernel bug or an unsupported path: it is
-//!   reported with ESR/ELR/FAR on the UART and the system stops.
+//! - A synchronous exception at EL1 with SP_EL1: a fault in a user copy
+//!   (`usercopy.rs`) is offered to demand paging and otherwise resumes at the
+//!   copy's fixup (EFAULT); anything else is a kernel bug, reported.
+//! - Synchronous exceptions and IRQs from EL0 (ADR 0016) land on the running
+//!   task's kernel stack (SP_EL1, left at its top by the return to EL0), saved
+//!   whole as a `switch::UserFrame`: system calls (`svc`), page faults, IRQs;
+//!   anything else ends the process with a signal.
+//! - Everything else (FIQ, SError, exceptions taken on SP_EL0, AArch32) is a
+//!   kernel bug or an unsupported path: it is reported with ESR/ELR/FAR on the
+//!   UART and the system stops.
 
 use core::arch::global_asm;
 
@@ -74,7 +81,8 @@ veridian_aarch64_vectors:
     VERIDIAN_FATAL_VECTOR 2
     VERIDIAN_FATAL_VECTOR 3
     // Current EL, SP_ELx: sync
-    VERIDIAN_FATAL_VECTOR 4
+    .balign 128
+    b veridian_aarch64_kernel_sync
     // Current EL, SP_ELx: IRQ
     .balign 128
     b veridian_aarch64_irq_entry
@@ -82,8 +90,16 @@ veridian_aarch64_vectors:
     VERIDIAN_FATAL_VECTOR 6
     VERIDIAN_FATAL_VECTOR 7
     // Lower EL, AArch64: sync, IRQ, FIQ, SError
-    VERIDIAN_FATAL_VECTOR 8
-    VERIDIAN_FATAL_VECTOR 9
+    .balign 128
+    sub sp, sp, #272
+    stp x0, x1, [sp, #0]
+    mov x1, #8
+    b veridian_aarch64_user_entry
+    .balign 128
+    sub sp, sp, #272
+    stp x0, x1, [sp, #0]
+    mov x1, #9
+    b veridian_aarch64_user_entry
     VERIDIAN_FATAL_VECTOR 10
     VERIDIAN_FATAL_VECTOR 11
     // Lower EL, AArch32: sync, IRQ, FIQ, SError
@@ -98,6 +114,71 @@ veridian_aarch64_irq_entry:
     VERIDIAN_RESTORE_CONTEXT
     eret
 
+veridian_aarch64_kernel_sync:
+    VERIDIAN_SAVE_CONTEXT
+    mov x0, sp
+    bl {ksync}
+    VERIDIAN_RESTORE_CONTEXT
+    eret
+
+// From EL0: x0 and x1 are saved and x1 holds the vector (8 sync, 9 IRQ);
+// sp is the UserFrame on the task's kernel stack.
+veridian_aarch64_user_entry:
+    stp x2, x3, [sp, #16]
+    stp x4, x5, [sp, #32]
+    stp x6, x7, [sp, #48]
+    stp x8, x9, [sp, #64]
+    stp x10, x11, [sp, #80]
+    stp x12, x13, [sp, #96]
+    stp x14, x15, [sp, #112]
+    stp x16, x17, [sp, #128]
+    stp x18, x19, [sp, #144]
+    stp x20, x21, [sp, #160]
+    stp x22, x23, [sp, #176]
+    stp x24, x25, [sp, #192]
+    stp x26, x27, [sp, #208]
+    stp x28, x29, [sp, #224]
+    str x30, [sp, #240]
+    mrs x2, sp_el0
+    mrs x3, elr_el1
+    stp x2, x3, [sp, #248]
+    mrs x2, spsr_el1
+    str x2, [sp, #264]
+    // The per-CPU block (TPIDR_EL1) records the frame of the exception in
+    // progress (`syscall_frame`, offset 0x10).
+    mrs x2, tpidr_el1
+    mov x3, sp
+    str x3, [x2, #0x10]
+    mov x29, #0
+    mov x0, sp
+    bl {user}
+    // Fall through: return to EL0 with the frame at sp.
+.global veridian_aarch64_return_to_user
+veridian_aarch64_return_to_user:
+    ldp x2, x3, [sp, #248]
+    msr sp_el0, x2
+    msr elr_el1, x3
+    ldr x2, [sp, #264]
+    msr spsr_el1, x2
+    ldp x0, x1, [sp, #0]
+    ldp x2, x3, [sp, #16]
+    ldp x4, x5, [sp, #32]
+    ldp x6, x7, [sp, #48]
+    ldp x8, x9, [sp, #64]
+    ldp x10, x11, [sp, #80]
+    ldp x12, x13, [sp, #96]
+    ldp x14, x15, [sp, #112]
+    ldp x16, x17, [sp, #128]
+    ldp x18, x19, [sp, #144]
+    ldp x20, x21, [sp, #160]
+    ldp x22, x23, [sp, #176]
+    ldp x24, x25, [sp, #192]
+    ldp x26, x27, [sp, #208]
+    ldp x28, x29, [sp, #224]
+    ldr x30, [sp, #240]
+    add sp, sp, #272
+    eret
+
 veridian_aarch64_fatal_entry:
     bl {fatal}
 1:  wfe
@@ -105,7 +186,124 @@ veridian_aarch64_fatal_entry:
 "#,
     irq = sym aarch64_irq,
     fatal = sym aarch64_fatal,
+    ksync = sym aarch64_kernel_sync,
+    user = sym aarch64_user_exception,
 );
+
+/// Exception classes (ESR_EL1.EC) the handlers act on.
+const EC_UNKNOWN: u64 = 0x00;
+const EC_FP_ACCESS: u64 = 0x07;
+const EC_ILLEGAL_STATE: u64 = 0x0E;
+const EC_SVC64: u64 = 0x15;
+const EC_SYSREG: u64 = 0x18;
+const EC_IABORT_LOWER: u64 = 0x20;
+const EC_PC_ALIGN: u64 = 0x22;
+const EC_DABORT_LOWER: u64 = 0x24;
+const EC_DABORT_SAME: u64 = 0x25;
+const EC_SP_ALIGN: u64 = 0x26;
+const EC_BRK: u64 = 0x3C;
+
+fn syndrome() -> (u64, u64, u64) {
+    let (esr, elr, far): (u64, u64, u64);
+    // SAFETY: reading the EL1 syndrome registers has no side effects.
+    unsafe {
+        core::arch::asm!("mrs {0}, esr_el1", "mrs {1}, elr_el1", "mrs {2}, far_el1",
+            out(reg) esr, out(reg) elr, out(reg) far, options(nomem, nostack));
+    }
+    (esr, elr, far)
+}
+
+/// A synchronous exception at EL1. A data abort in a user copy is offered
+/// to demand paging (the page may just not be backed yet) and otherwise
+/// resumes at the copy's fixup, which returns EFAULT; anything else is a
+/// kernel bug. `frame` is the save area (`VERIDIAN_SAVE_CONTEXT`): ELR at
+/// offset 168.
+extern "C" fn aarch64_kernel_sync(frame: *mut u64) {
+    let (esr, elr, far) = syndrome();
+    if esr >> 26 == EC_DABORT_SAME {
+        if let Some(fixup) = super::usercopy::fixup_for(elr as usize) {
+            let info = crate::mm::page_fault::from_aarch64(esr, far, elr);
+            if !crate::mm::page_fault::resolve_user_copy_fault(&info) {
+                // SAFETY: `frame` is this exception's save area; word 21
+                // (offset 168) is the ELR it restores.
+                unsafe { frame.add(21).write(fixup as u64) };
+            }
+            return;
+        }
+    }
+    aarch64_fatal(4)
+}
+
+/// An exception from EL0, on the task's kernel stack with its registers in
+/// `f`: `vector` 8 for a synchronous exception, 9 for an IRQ. Returns to
+/// `veridian_aarch64_return_to_user`.
+extern "C" fn aarch64_user_exception(f: &mut super::switch::UserFrame, vector: u64) {
+    use super::switch;
+    if vector == 9 {
+        aarch64_irq();
+    } else {
+        let (esr, elr, far) = syndrome();
+        match esr >> 26 {
+            EC_SVC64 => {
+                // ELR is already past the svc. The call runs with IRQs on,
+                // as on x86_64 and RISC-V.
+                switch::irq_enable();
+                let a = |i: usize| f.x[i] as usize;
+                let ret = crate::syscall::aarch64_syscall(
+                    f.x[switch::UserFrame::X8] as usize,
+                    a(0),
+                    a(1),
+                    a(2),
+                    a(3),
+                    a(4),
+                );
+                f.x[switch::UserFrame::X0] = ret as u64;
+            }
+            EC_IABORT_LOWER | EC_DABORT_LOWER => {
+                switch::irq_enable();
+                let info = crate::mm::page_fault::from_aarch64(esr, far, elr);
+                if crate::mm::page_fault::handle_page_fault(info).is_err() {
+                    kill_user(11); // SIGSEGV
+                }
+            }
+            // FP/SIMD is trapped at EL0 until its state is switched with
+            // the task (CPACR_EL1.FPEN), as RISC-V keeps FS off.
+            EC_UNKNOWN | EC_FP_ACCESS | EC_ILLEGAL_STATE | EC_SYSREG => kill_user(4), // SIGILL
+            EC_BRK => kill_user(5),                                                   // SIGTRAP
+            EC_PC_ALIGN | EC_SP_ALIGN => kill_user(7),                                // SIGBUS
+            _ => kill_user(7),
+        }
+    }
+    exit_to_user(f);
+}
+
+/// Last step before every return to EL0: preemption, a fatal signal acted
+/// on, and a frame that can only return to EL0 with interrupts unmasked.
+/// Signal handlers are not delivered on AArch64 yet.
+fn exit_to_user(f: &mut super::switch::UserFrame) {
+    use super::switch;
+    switch::irq_enable();
+    #[cfg(feature = "alloc")]
+    crate::sched::dispatch::preempt_user();
+    crate::process::user_return_check();
+    switch::irq_save();
+    f.spsr = switch::user_spsr(f.spsr);
+    if !crate::syscall::userspace::is_user_address(f.elr as usize) {
+        kill_user(11);
+    }
+}
+
+/// End the current process with `signal` (a fault it did not handle).
+fn kill_user(signal: u32) -> ! {
+    #[cfg(feature = "alloc")]
+    if crate::sched::dispatch::current_owner().is_some() {
+        let _ = crate::syscall::process::exit_current(0, signal);
+    }
+    panic!(
+        "AArch64 user fault (signal {}) outside a dispatched thread",
+        signal
+    );
+}
 
 extern "C" {
     static veridian_aarch64_vectors: u8;

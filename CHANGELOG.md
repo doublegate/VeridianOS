@@ -2,6 +2,25 @@
 
 ### Added
 
+- **AArch64 runs user programs at EL0 (E-A6; ADR 0016).** Exceptions from EL0 land on the task's
+  kernel stack, since the return to EL0 leaves SP_EL1 at its top. They are saved as a 272-byte
+  `UserFrame` and handled by ESR class:
+  - `svc` is a system call with Linux's generic numbers and arm64's ABIs
+    (`Syscall::from_aarch64`: RISC-V's plus `renameat`);
+  - instruction and data aborts go through `mm::page_fault`;
+  - other classes become SIGILL, SIGTRAP or SIGBUS.
+
+  TPIDR_EL0 and the frame pointer are switched with the task. FP/SIMD traps at EL0
+  (CPACR_EL1.FPEN = 01) until its state is switched. User copies are fault-tolerant, served by a
+  new EL1 synchronous-exception handler, and loaded code is made fetchable (`sync_icache_all`).
+  `mm::page_fault::from_aarch64` now counts instruction aborts as user faults and decodes the full
+  fault status code. The embedded init and shell used x86_64's numbers (1, 231) and now use arm64's
+  (64, 94). New boot tests, which give AArch64 49/49 and 53/53 on four CPUs:
+  `aarch64_user_syscall_round_trip`, `aarch64_user_fault_kills_process`,
+  `aarch64_user_mode_is_unprivileged`, `aarch64_user_fp_is_trapped` (it fails with FP enabled at
+  EL0), `aarch64_elf_program_runs`, `aarch64_embedded_init_runs`; `usercopy_fault_returns_efault`
+  now runs on AArch64 too.
+
 - **AArch64 dispatches kernel tasks on every CPU (E-A5, E-A5c; ADR 0006).** New
   `arch/aarch64/switch.rs`: `switch_stacks` saves x19-x30, a kernel-thread trampoline, TTBR0 as the
   task's root (switched with a TLB invalidate, since there are no ASIDs yet, HA-26), DAIF-based IRQ

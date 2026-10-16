@@ -156,18 +156,19 @@ const HELLO_CODE: &[u8] = &[
 /// AArch64 machine code for the minimal init process.
 ///
 /// Writes "VeridianOS init started\n" to stdout (fd 1) using `write`
-/// (Linux number 1) via SVC, then exits with status 0 via
-/// `exit_group` (231).
+/// (64) via SVC, then exits with status 0 via `exit_group` (94): arm64
+/// uses Linux's generic numbers (ADR 0009, ADR 0016), not x86_64's 1 and
+/// 231, which it used to.
 ///
 /// Disassembly:
 /// ```text
 ///  0x00: d2800020  mov  x0, #1           ; fd = stdout
 ///  0x04: 100000e1  adr  x1, #28          ; buf = &msg (PC-relative)
 ///  0x08: d2800302  mov  x2, #24          ; len = 24
-///  0x0c: d2800028  mov  x8, #1           ; write
+///  0x0c: d2800808  mov  x8, #64          ; write
 ///  0x10: d4000001  svc  #0               ; syscall
 ///  0x14: d2800000  mov  x0, #0           ; exit_code = 0
-///  0x18: d2801ce8  mov  x8, #231         ; exit_group
+///  0x18: d2800bc8  mov  x8, #94          ; exit_group
 ///  0x1c: d4000001  svc  #0               ; syscall
 ///  0x20: "VeridianOS init started\n"
 /// ```
@@ -176,10 +177,10 @@ const INIT_CODE: &[u8] = &[
     0x20, 0x00, 0x80, 0xD2, // mov x0, #1 (fd = stdout)
     0xE1, 0x00, 0x00, 0x10, // adr x1, #28 (buf = &msg)
     0x02, 0x03, 0x80, 0xD2, // mov x2, #24 (len)
-    0x28, 0x00, 0x80, 0xD2, // mov x8, #1 (write)
+    0x08, 0x08, 0x80, 0xD2, // mov x8, #64 (write)
     0x01, 0x00, 0x00, 0xD4, // svc #0
     0x00, 0x00, 0x80, 0xD2, // mov x0, #0 (status = 0)
-    0xE8, 0x1C, 0x80, 0xD2, // mov x8, #231 (exit_group)
+    0xC8, 0x0B, 0x80, 0xD2, // mov x8, #94 (exit_group)
     0x01, 0x00, 0x00, 0xD4, // svc #0
     // msg: "VeridianOS init started\n" (24 bytes)
     b'V', b'e', b'r', b'i', b'd', b'i', b'a', b'n', b'O', b'S', b' ', b'i', b'n', b'i', b't', b' ',
@@ -199,10 +200,10 @@ const INIT_CODE: &[u8] = &[
 ///  0x00: d2800020  mov  x0, #1           ; fd = stdout
 ///  0x04: 100000e1  adr  x1, #28          ; buf = &msg (PC-relative)
 ///  0x08: d28000c2  mov  x2, #6           ; len = 6
-///  0x0c: d2800028  mov  x8, #1           ; write
+///  0x0c: d2800808  mov  x8, #64          ; write
 ///  0x10: d4000001  svc  #0               ; syscall
 ///  0x14: d2800000  mov  x0, #0           ; exit_code = 0
-///  0x18: d2801ce8  mov  x8, #231         ; exit_group
+///  0x18: d2800bc8  mov  x8, #94          ; exit_group
 ///  0x1c: d4000001  svc  #0               ; syscall
 ///  0x20: "vsh> \n"
 /// ```
@@ -211,10 +212,10 @@ const SHELL_CODE: &[u8] = &[
     0x20, 0x00, 0x80, 0xD2, // mov x0, #1 (fd = stdout)
     0xE1, 0x00, 0x00, 0x10, // adr x1, #28 (buf = &msg)
     0xC2, 0x00, 0x80, 0xD2, // mov x2, #6 (len)
-    0x28, 0x00, 0x80, 0xD2, // mov x8, #1 (write)
+    0x08, 0x08, 0x80, 0xD2, // mov x8, #64 (write)
     0x01, 0x00, 0x00, 0xD4, // svc #0
     0x00, 0x00, 0x80, 0xD2, // mov x0, #0 (status = 0)
-    0xE8, 0x1C, 0x80, 0xD2, // mov x8, #231 (exit_group)
+    0xC8, 0x0B, 0x80, 0xD2, // mov x8, #94 (exit_group)
     0x01, 0x00, 0x00, 0xD4, // svc #0
     // msg: "vsh> \n" (6 bytes)
     b'v', b's', b'h', b'>', b' ', b'\n',

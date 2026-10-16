@@ -200,16 +200,17 @@ Still open:
 - Secondaries copy the boot CPU's CR4, so they match it, including SMEP and SMAP being off (N-15,
   below).
 
-### AArch64 runs no user programs; RISC-V runs only simple ones (N-28; sprint E)
+### AArch64 and RISC-V run only simple user programs (sprint E)
 
-- **AArch64 has its MMU on, but still carries the MMU-off workarounds (N-28, HA-16).** Since v0.27
-  the kernel runs in the upper half with the MMU and caches on (ADR 0015), so exclusive loads and
-  stores work, and the filesystems use real locks (`fs::bare_lock`, which did not lock, is gone).
-  The kernel heap is the same linked-list allocator as on the other architectures, and secondary
-  CPUs take locks and run their own timer tick. Every CPU dispatches kernel tasks
-  (`arch/aarch64/switch.rs`). There is no EL0 (user mode) yet, so no AArch64 user program runs. (The boot also sets SCTLR_EL1's RES1 bits
-  and the EL2 state the kernel relies on, N-177, HA-14, and uses the device tree firmware passes,
-  HA-01.)
+- **AArch64 runs static ELF programs, without a C library yet (ADR 0015, ADR 0016).** Since v0.27
+  the kernel runs in the upper half with the MMU and caches on, so exclusive loads and stores work,
+  and the N-28 workarounds are gone (`fs::bare_lock`, the bump allocator, the reduced secondary
+  stage). Every CPU dispatches, and programs from the VFS run at EL0 as dispatcher tasks with
+  system calls, page faults and fault-tolerant user copies. Not yet: an AArch64 C library and rootfs
+  (so no BusyBox or musl programs), user FP state (an FP instruction is SIGILL), signal handlers,
+  a fault-tolerant user compare-and-exchange (futexes) and ASIDs (every address-space switch
+  invalidates the TLB, HA-26). (The boot also sets SCTLR_EL1's RES1 bits and the EL2 state the
+  kernel relies on, N-177, HA-14, and uses the device tree firmware passes, HA-01.)
 - **RISC-V runs static ELF programs, without a C library yet (ADR 0013, ADR 0014).** Paging is
   on, the kernel runs in the upper half, and programs from the VFS run in U-mode as dispatcher
   tasks with system calls, page faults and fault-tolerant user copies. Not yet: a RISC-V C
@@ -223,7 +224,7 @@ On x86_64 every task has its own x87/SSE/AVX state, saved and restored with XSAV
 at each switch (stage D2), and the kernel itself is soft-float. The AArch64 and RISC-V kernels are
 soft-float too since v0.27 (N-178), so the FP registers hold only user state. RISC-V user mode runs
 with FP off (`sstatus.FS`), so a program's FP instruction traps; switching the state comes next in
-sprint E. AArch64 has no user mode yet.
+sprint E. AArch64 traps FP/SIMD at EL0 the same way (CPACR_EL1.FPEN = 01, ADR 0016).
 
 ### AArch64 kernel stacks have no guard pages; RISC-V overflows hang (N-26, sprint E)
 

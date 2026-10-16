@@ -12,7 +12,11 @@
 //! ```text
 //!   kernel thread: [x19 x20 .. x28 x29 x30]   x30 = kthread_trampoline,
 //!                                             x19 = entry, x20 = arg
+//!   user thread:   [x19 .. x30] [UserFrame]   x30 = user_trampoline
 //! ```
+//!
+//! A user thread's kernel stack top is where its exceptions from EL0 land:
+//! the return to EL0 leaves SP_EL1 there (ADR 0016).
 //!
 //! A task's address space is its TTBR0_EL1 root (the lower half); the kernel
 //! half is TTBR1's, shared by all (ADR 0015). Kernel tasks carry the empty
@@ -23,6 +27,84 @@ use core::arch::naked_asm;
 /// Bytes of a switch frame: 12 registers, a multiple of 16 (AAPCS64 keeps
 /// `sp` 16-byte aligned).
 const FRAME: usize = 96;
+
+/// A user thread's registers as the EL0 exception entry saves them on its
+/// kernel stack, and as the return to EL0 restores them
+/// (`veridian_aarch64_return_to_user`): x0-x30, then SP_EL0, ELR_EL1 and
+/// SPSR_EL1. 272 bytes, a multiple of 16.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct UserFrame {
+    pub x: [u64; 31],
+    pub sp: u64,
+    pub elr: u64,
+    pub spsr: u64,
+}
+
+const _: () = assert!(core::mem::size_of::<UserFrame>() == 272);
+
+impl UserFrame {
+    /// The system call number (x8) and the first argument and result (x0).
+    pub const X8: usize = 8;
+    pub const X0: usize = 0;
+}
+
+/// The SPSR to return to EL0 with: EL0t (M = 0), AArch64, no interrupt
+/// masked (D, A, I, F clear), single-step and illegal-return clear; only the
+/// condition flags (NZCV) are kept from `spsr`.
+pub fn user_spsr(spsr: u64) -> u64 {
+    spsr & 0xF000_0000
+}
+
+/// First code of a new user thread: finish the switch, act on a fatal
+/// signal sent before it first ran, then enter EL0 with the `UserFrame`
+/// at `sp`.
+#[unsafe(naked)]
+unsafe extern "C" fn user_trampoline() {
+    naked_asm!(
+        "bl {finish}",
+        "bl {check}",
+        "b veridian_aarch64_return_to_user",
+        finish = sym crate::sched::dispatch::finish_switch,
+        check = sym crate::process::user_return_check,
+    );
+}
+
+/// Seed a kernel stack so that switching to it enters EL0 with `frame`.
+/// Returns the saved stack pointer.
+///
+/// # Safety
+/// The top `size_of::<UserFrame>() + FRAME + 16` bytes below `stack_top`
+/// must be writable and unused.
+pub unsafe fn seed_user_thread(stack_top: usize, frame: &UserFrame) -> usize {
+    let frame_at = (stack_top & !0xF) - core::mem::size_of::<UserFrame>();
+    let sp = frame_at - FRAME;
+    let regs = sp as *mut u64;
+    // SAFETY: within the caller's writable stack top; both areas are
+    // 16-byte aligned.
+    unsafe {
+        (frame_at as *mut UserFrame).write(*frame);
+        for i in 0..FRAME / 8 {
+            regs.add(i).write(0);
+        }
+        regs.add(11).write(user_trampoline as *const () as u64); // x30
+    }
+    sp
+}
+
+/// The user TLS register (TPIDR_EL0) of the running thread.
+pub fn read_tls() -> u64 {
+    let v: u64;
+    // SAFETY: reading TPIDR_EL0 has no side effects.
+    unsafe { core::arch::asm!("mrs {0}, tpidr_el0", out(reg) v, options(nomem, nostack)) };
+    v
+}
+
+/// Set the user TLS register (TPIDR_EL0) for the thread about to run.
+pub fn write_tls(value: u64) {
+    // SAFETY: TPIDR_EL0 is user state only; the kernel does not use it.
+    unsafe { core::arch::asm!("msr tpidr_el0, {0}", in(reg) value, options(nomem, nostack)) };
+}
 
 /// Save the callee-saved registers and stack pointer of the running task
 /// into `*prev_sp`, and resume the task whose saved stack pointer is

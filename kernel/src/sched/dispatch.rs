@@ -105,9 +105,15 @@ struct ArchState {
     #[cfg(target_arch = "riscv64")]
     syscall_frame: u64,
     /// AArch64: the physical root of the task's lower half (TTBR0_EL1; the
-    /// kernel half is TTBR1's, ADR 0015).
+    /// kernel half is TTBR1's, ADR 0015), its user TLS register
+    /// (TPIDR_EL0), and the user frame of the exception in progress
+    /// (per-CPU block 0x10) while the task runs (ADR 0016).
     #[cfg(target_arch = "aarch64")]
     root: u64,
+    #[cfg(target_arch = "aarch64")]
+    tls: u64,
+    #[cfg(target_arch = "aarch64")]
+    syscall_frame: u64,
 }
 
 /// A dispatchable task.
@@ -827,10 +833,15 @@ unsafe fn arch_switch(prev: *const Task, next: *const Task) {
     // SAFETY: as above.
     unsafe {
         use crate::arch::aarch64::switch;
+        let cpu = crate::arch::percpu::this_arch_cpu();
         let a = &mut *(*prev).arch.get();
         a.root = switch::current_root();
+        a.tls = switch::read_tls();
+        a.syscall_frame = (*cpu).syscall_frame;
         let b = &*(*next).arch.get();
         switch::switch_address_space(b.root);
+        switch::write_tls(b.tls);
+        (*cpu).syscall_frame = b.syscall_frame;
         switch::switch_stacks((*prev).saved_sp.get(), *(*next).saved_sp.get());
     }
     #[cfg(not(dispatch))]
@@ -1658,6 +1669,47 @@ pub fn spawn_user(
     let arch = task.arch.get_mut();
     arch.root = root;
     arch.entry_stack = (top & !0xF) as u64;
+    let task = Arc::new(task);
+    let key = task.key;
+    TASKS.lock().insert(key, task.clone());
+    enqueue_new(&task);
+    Ok(key)
+}
+
+/// Start an AArch64 user thread as a task: its first switch-in enters EL0
+/// with `frame` (registers, SP_EL0, ELR, SPSR) on the address space whose
+/// root is `root` (TTBR0) and with TLS register `tls` (TPIDR_EL0),
+/// scheduled with `policy` on the CPUs in `affinity`. User FP state is not
+/// switched yet (FP is trapped at EL0).
+#[cfg(all(target_arch = "aarch64", dispatch))]
+pub fn spawn_user(
+    owner: (u64, u64),
+    frame: &crate::arch::aarch64::switch::UserFrame,
+    root: u64,
+    tls: u64,
+    policy: Policy,
+    affinity: u64,
+) -> Result<TaskKey, KernelError> {
+    if !started() {
+        return Err(KernelError::InvalidState {
+            expected: "dispatcher started",
+            actual: "not started",
+        });
+    }
+    let stack = crate::mm::kstack::allocate(KTHREAD_STACK_PAGES)?;
+    let top = stack.base + stack.pages * 4096;
+    let mut task = Task::new(alloc_key(), "user", policy, Some(stack));
+    task.owner = Some(owner);
+    let usable = affinity & dispatching_mask();
+    *task.affinity.get_mut() = if usable != 0 { affinity } else { u64::MAX };
+    let mut entry = *frame;
+    entry.spsr = crate::arch::aarch64::switch::user_spsr(entry.spsr);
+    // SAFETY: the stack was just allocated for this task and is unused.
+    let sp = unsafe { crate::arch::aarch64::switch::seed_user_thread(top, &entry) };
+    *task.saved_sp.get_mut() = sp;
+    let arch = task.arch.get_mut();
+    arch.root = root;
+    arch.tls = tls;
     let task = Arc::new(task);
     let key = task.key;
     TASKS.lock().insert(key, task.clone());

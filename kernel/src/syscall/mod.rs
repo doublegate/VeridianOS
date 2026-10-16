@@ -143,9 +143,23 @@ fn syscall_arg6() -> Result<usize, SyscallError> {
         // SAFETY: as above, a live frame.
         Ok(unsafe { (*frame).x[15] } as usize)
     }
+    // AArch64: x5 of the user frame, likewise.
+    #[cfg(all(target_arch = "aarch64", target_os = "none"))]
+    {
+        // SAFETY: as for RISC-V: this CPU's own block, the current task's
+        // frame or 0.
+        let frame = unsafe { (*crate::arch::percpu::this_arch_cpu()).syscall_frame }
+            as *const crate::arch::aarch64::switch::UserFrame;
+        if frame.is_null() {
+            return Err(SyscallError::NotImplemented);
+        }
+        // SAFETY: as above, a live frame.
+        Ok(unsafe { (*frame).x[5] } as usize)
+    }
     #[cfg(not(any(
         all(target_arch = "x86_64", target_os = "none"),
-        all(target_arch = "riscv64", target_os = "none")
+        all(target_arch = "riscv64", target_os = "none"),
+        all(target_arch = "aarch64", target_os = "none")
     )))]
     {
         Err(SyscallError::NotImplemented)
@@ -678,6 +692,39 @@ pub fn riscv64_syscall(
     }
     dispatch(
         Syscall::from_riscv64(syscall_num).ok_or(()),
+        syscall_num,
+        arg1,
+        arg2,
+        arg3,
+        arg4,
+        arg5,
+    )
+}
+
+/// An AArch64 system call (from the EL0 `svc` exception): Linux's generic
+/// numbers with arm64's ABIs (`Syscall::from_aarch64`), `x0`-`x4` the
+/// arguments (the sixth is read from the saved frame, `syscall_arg6`).
+/// Returns the value for `x0`.
+#[cfg(target_arch = "aarch64")]
+pub fn aarch64_syscall(
+    syscall_num: usize,
+    arg1: usize,
+    arg2: usize,
+    arg3: usize,
+    arg4: usize,
+    arg5: usize,
+) -> isize {
+    crate::arch::speculation_barrier();
+    SYSCALL_COUNT.fetch_add(1, Ordering::Relaxed);
+    LAST_SYSCALL_NUM.store(syscall_num as u64, Ordering::Relaxed);
+    LAST_SYSCALL_ARG1.store(arg1 as u64, Ordering::Relaxed);
+    LAST_SYSCALL_ARG2.store(arg2 as u64, Ordering::Relaxed);
+    if !rate_limit_allows() {
+        SYSCALL_ERRORS.fetch_add(1, Ordering::Relaxed);
+        return linux_compat::to_linux_errno(SyscallError::WouldBlock);
+    }
+    dispatch(
+        Syscall::from_aarch64(syscall_num).ok_or(()),
         syscall_num,
         arg1,
         arg2,
@@ -3571,6 +3618,29 @@ mod tests {
         for &call in numbers::ALL {
             if call.linux_name().is_none() {
                 assert_eq!(Syscall::from_riscv64(call as usize), Some(call));
+            }
+        }
+    }
+
+    /// arm64 numbers: the generic table as on riscv64, plus `renameat` (38),
+    /// which riscv64's table omits; nothing riscv-only.
+    #[test]
+    fn aarch64_numbers_are_the_generic_table() {
+        assert_eq!(Syscall::from_aarch64(38), Some(Syscall::Renameat));
+        assert_eq!(Syscall::from_riscv64(38), None);
+        assert_eq!(Syscall::from_aarch64(64), Some(Syscall::Write));
+        assert_eq!(Syscall::from_aarch64(94), Some(Syscall::ExitGroup));
+        assert_eq!(Syscall::from_aarch64(172), Some(Syscall::Getpid));
+        assert_eq!(Syscall::from_aarch64(258), None);
+        assert_eq!(Syscall::from_aarch64(259), None);
+        for n in 0..2048 {
+            if n != 38 && n != 258 && n != 259 {
+                assert_eq!(
+                    Syscall::from_aarch64(n),
+                    Syscall::from_riscv64(n),
+                    "number {}",
+                    n
+                );
             }
         }
     }

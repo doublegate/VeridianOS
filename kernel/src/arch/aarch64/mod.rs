@@ -18,6 +18,7 @@ pub mod serial;
 pub mod smp;
 pub mod switch;
 pub mod timer;
+pub mod usercopy;
 pub mod usermode;
 
 /// Called from bootstrap on AArch64 via `crate::arch::init()`.
@@ -119,6 +120,17 @@ pub fn disable_interrupts() -> impl Drop {
     InterruptGuard {
         was_enabled: (daif & 0x80) == 0,
     }
+}
+
+/// Make code just written through the data side visible to instruction
+/// fetch on every CPU (after loading a program): invalidate the
+/// instruction caches to the inner-shareable domain. This relies on the
+/// data cache being coherent with fetch at the point of unification
+/// (CTR_EL0.IDC, which QEMU reports); a core without it also needs the
+/// written range cleaned with `dc cvau` first (HA-25).
+pub fn sync_icache_all() {
+    // SAFETY: cache maintenance and barriers only.
+    unsafe { core::arch::asm!("dsb ish", "ic ialluis", "dsb ish", "isb", options(nostack)) };
 }
 
 /// Serial initialization for compatibility with the arch-generic interface.

@@ -2184,13 +2184,13 @@ fn run_process_tests(passed: &mut u32, failed: &mut u32) {
     #[cfg(target_arch = "riscv64")]
     {
         let [getpid, fault, csr] = crate::arch::riscv64::usermode::test_programs();
-        let (pid, status) = run_riscv_user(getpid);
+        let (pid, status) = run_user_code(getpid);
         let ok = pid.is_some_and(|p| status == Some((p & 0xFF) as i32));
         if !ok {
             crate::println!("    pid {:?}, status {:?}", pid, status);
         }
         report_test("riscv_user_syscall_round_trip", ok, passed, failed);
-        let (_, status) = run_riscv_user(fault);
+        let (_, status) = run_user_code(fault);
         if status != Some(128 + 11) {
             crate::println!("    status {:?}", status);
         }
@@ -2200,7 +2200,7 @@ fn run_process_tests(passed: &mut u32, failed: &mut u32) {
             passed,
             failed,
         );
-        let (_, status) = run_riscv_user(csr);
+        let (_, status) = run_user_code(csr);
         if status != Some(128 + 4) {
             crate::println!("    status {:?}", status);
         }
@@ -2246,12 +2246,99 @@ fn run_process_tests(passed: &mut u32, failed: &mut u32) {
             failed,
         );
     }
+    // AArch64 user mode (sprint E, ADR 0016): as on RISC-V. getpid returns
+    // its pid through svc (it exits with it); a load from address 0 kills
+    // it with SIGSEGV; an EL1 system-register read kills it with SIGILL, so
+    // it really ran at EL0. Exit status as run_and_wait reports it.
+    #[cfg(target_arch = "aarch64")]
+    {
+        let [getpid, fault, sysreg, fp] = crate::arch::aarch64::usermode::test_programs();
+        let (pid, status) = run_user_code(getpid);
+        let ok = pid.is_some_and(|p| status == Some((p & 0xFF) as i32));
+        if !ok {
+            crate::println!("    pid {:?}, status {:?}", pid, status);
+        }
+        report_test("aarch64_user_syscall_round_trip", ok, passed, failed);
+        let (_, status) = run_user_code(fault);
+        if status != Some(128 + 11) {
+            crate::println!("    status {:?}", status);
+        }
+        report_test(
+            "aarch64_user_fault_kills_process",
+            status == Some(128 + 11),
+            passed,
+            failed,
+        );
+        let (_, status) = run_user_code(sysreg);
+        if status != Some(128 + 4) {
+            crate::println!("    status {:?}", status);
+        }
+        report_test(
+            "aarch64_user_mode_is_unprivileged",
+            status == Some(128 + 4),
+            passed,
+            failed,
+        );
+        // FP at EL0 traps (SIGILL) until FP state is switched per task.
+        let (_, status) = run_user_code(fp);
+        if status != Some(128 + 4) {
+            crate::println!("    status {:?}", status);
+        }
+        report_test(
+            "aarch64_user_fp_is_trapped",
+            status == Some(128 + 4),
+            passed,
+            failed,
+        );
+
+        // An ELF program through the loader: it writes "A64-ELF-OK" and
+        // exits with its argc.
+        let elf = crate::arch::aarch64::usermode::test_elf();
+        let status = crate::fs::write_file("/tmp/a64-elf-test", &elf)
+            .ok()
+            .and_then(|_| {
+                crate::userspace::loader::load_user_program(
+                    "/tmp/a64-elf-test",
+                    &["a64-elf-test", "a", "b"],
+                    &[],
+                )
+                .ok()
+            })
+            .and_then(crate::process::run_and_wait);
+        if status != Some(3) {
+            crate::println!("    status {:?}", status);
+        }
+        report_test(
+            "aarch64_elf_program_runs",
+            status == Some(3),
+            passed,
+            failed,
+        );
+
+        // The embedded init (`/sbin/init`) runs and exits 0 with arm64's
+        // numbers (write 64, exit_group 94).
+        let status = crate::userspace::loader::load_user_program("/sbin/init", &[], &[])
+            .ok()
+            .and_then(crate::process::run_and_wait);
+        if status != Some(0) {
+            crate::println!("    status {:?}", status);
+        }
+        report_test(
+            "aarch64_embedded_init_runs",
+            status == Some(0),
+            passed,
+            failed,
+        );
+    }
 }
 /// Run `code` (position-independent) as a new process in user mode: one
 /// executable page at 0x40_0000, one stack page below 0x80_1000. Returns
 /// its pid and the exit status `run_and_wait` reports.
-#[cfg(all(feature = "alloc", target_arch = "riscv64"))]
-fn run_riscv_user(code: &[u8]) -> (Option<u64>, Option<i32>) {
+#[cfg(all(
+    feature = "alloc",
+    any(target_arch = "riscv64", target_arch = "aarch64")
+))]
+fn run_user_code(code: &[u8]) -> (Option<u64>, Option<i32>) {
     use crate::{
         arch::context::ThreadContext,
         mm::{vas::MappingType, PageFlags, VirtualAddress},
@@ -2295,9 +2382,12 @@ fn run_riscv_user(code: &[u8]) -> (Option<u64>, Option<i32>) {
                 // SAFETY: the code page's frame, just mapped and not yet
                 // used by anyone; `code` fits in it.
                 unsafe { core::ptr::copy_nonoverlapping(code.as_ptr(), dst, code.len()) };
-                // Every hart fetches what was just written (RISC-V has no
-                // coherent instruction fetch without fence.i).
+                // Every CPU fetches what was just written (instruction
+                // fetch is not coherent with stores without maintenance).
+                #[cfg(target_arch = "riscv64")]
                 crate::arch::riscv::sbi::remote_fence_i_all();
+                #[cfg(target_arch = "aarch64")]
+                crate::arch::aarch64::sync_icache_all();
                 true
             }
             _ => false,
@@ -2773,18 +2863,11 @@ fn run_usercopy_tests(passed: &mut u32, failed: &mut u32) {
     // ARCH-MEM-03). The address is in the user half and mapped by nothing
     // during boot.
     {
-        #[cfg(any(target_arch = "x86_64", target_arch = "riscv64"))]
         let ok = {
             let mut buf = [0u8; 8];
             read_user_bytes(0x0000_7FF0_0000_0000, &mut buf).is_err()
         };
-        #[cfg(any(target_arch = "x86_64", target_arch = "riscv64"))]
         report_test("usercopy_fault_returns_efault", ok, passed, failed);
-        #[cfg(not(any(target_arch = "x86_64", target_arch = "riscv64")))]
-        report_skip(
-            "usercopy_fault_returns_efault",
-            "no fault fixup yet (sprint E)",
-        );
     }
 
     // Test 33: the futex WAKE_OP atomic on an unmapped user word returns an

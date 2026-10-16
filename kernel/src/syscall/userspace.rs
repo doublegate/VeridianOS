@@ -258,9 +258,20 @@ unsafe fn raw_copy(dst: *mut u8, src: *const u8, len: usize) -> Result<(), Sysca
         unsafe { crate::arch::riscv64::usercopy::copy_user(dst, src, len) }
             .map_err(|()| SyscallError::UnmappedMemory)
     }
-    #[cfg(not(any(
-        all(target_arch = "x86_64", target_os = "none"),
-        all(target_arch = "riscv64", target_os = "none")
+    // AArch64: fault-tolerant the same way (ADR 0016).
+    #[cfg(all(target_arch = "aarch64", target_os = "none"))]
+    {
+        // SAFETY: forwarded from this function's contract.
+        unsafe { crate::arch::aarch64::usercopy::copy_user(dst, src, len) }
+            .map_err(|()| SyscallError::UnmappedMemory)
+    }
+    #[cfg(not(all(
+        any(
+            target_arch = "x86_64",
+            target_arch = "riscv64",
+            target_arch = "aarch64"
+        ),
+        target_os = "none"
     )))]
     {
         // SAFETY: forwarded from this function's contract; user and kernel
