@@ -229,13 +229,12 @@ while the kernel runs and detects F/D from the device tree (`misa` is an M-mode 
 handled: the AArch64 SVE/SME registers and the RISC-V vector extension (V). A program using them
 gets SIGILL; QEMU's default CPUs do not offer them.
 
-### AArch64 kernel stacks have no guard pages; RISC-V overflows hang (N-26, sprint E)
+### AArch64 and RISC-V kernel stack overflows hang instead of reporting (N-26 rest, sprint E)
 
-x86_64 and RISC-V kernel stacks have unmapped guard pages (RISC-V since v0.27, with paging). On
-AArch64, which runs the kernel without paging today, a kernel stack overflow still silently
-corrupts the neighbouring frame. On RISC-V an overflow faults on the guard, but the trap is taken
-on the same stack, so it faults again instead of reporting: there is no separate overflow stack
-yet (x86_64 takes the fault on an IST stack).
+Kernel stacks have unmapped guard pages on every architecture (AArch64 and RISC-V since v0.27),
+so an overflow no longer corrupts a neighbouring frame. On AArch64 and RISC-V it faults on the
+guard, but the exception is taken on the same stack, so it faults again instead of reporting:
+there is no separate overflow stack yet (x86_64 takes the fault on an IST stack).
 
 ### IPC copy-on-write transfers are refused
 

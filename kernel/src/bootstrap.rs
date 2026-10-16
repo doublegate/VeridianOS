@@ -3251,8 +3251,7 @@ fn run_usercopy_tests(passed: &mut u32, failed: &mut u32) {
     }
 
     // Test 39: a kernel stack has an unmapped guard page below it, and
-    // freeing it unmaps it (N-26). x86_64 and RISC-V; AArch64 runs the
-    // kernel without paging (N-28).
+    // freeing it unmaps it (N-26).
     {
         let ok = match crate::mm::kstack::allocate(16) {
             Ok(stack) => {
@@ -3264,45 +3263,24 @@ fn run_usercopy_tests(passed: &mut u32, failed: &mut u32) {
                     hi.write_volatile(0x5678);
                     lo.read_volatile() == 0x1234 && hi.read_volatile() == 0x5678
                 };
-                #[cfg(any(target_arch = "x86_64", target_arch = "riscv64"))]
-                let guarded = {
-                    // SAFETY: the kernel's root table through the physical map;
-                    // only read here.
-                    let m = unsafe {
-                        crate::mm::vas::create_mapper_from_root_pub(
-                            crate::mm::get_kernel_page_table() as u64,
-                        )
-                    };
-                    let probe = |a: usize| m.translate_page(crate::mm::VirtualAddress(a as u64));
-                    let guard_unmapped = probe(stack.base - 4096).is_err()
-                        && crate::mm::kstack::is_guard_fault((stack.base - 8) as u64);
-                    let mapped = probe(stack.base).is_ok();
-                    let base = stack.base;
-                    crate::mm::kstack::free(stack);
-                    guard_unmapped && mapped && probe(base).is_err()
+                // SAFETY: the kernel's root table through the physical map;
+                // only read here.
+                let m = unsafe {
+                    crate::mm::vas::create_mapper_from_root_pub(
+                        crate::mm::get_kernel_page_table() as u64
+                    )
                 };
-                #[cfg(not(any(target_arch = "x86_64", target_arch = "riscv64")))]
-                let guarded = {
-                    crate::mm::kstack::free(stack);
-                    true
-                };
-                usable && guarded
+                let probe = |a: usize| m.translate_page(crate::mm::VirtualAddress(a as u64));
+                let guard_unmapped = probe(stack.base - 4096).is_err()
+                    && crate::mm::kstack::is_guard_fault((stack.base - 8) as u64);
+                let mapped = probe(stack.base).is_ok();
+                let base = stack.base;
+                crate::mm::kstack::free(stack);
+                usable && guard_unmapped && mapped && probe(base).is_err()
             }
             Err(_) => false,
         };
-        #[cfg(any(target_arch = "x86_64", target_arch = "riscv64"))]
         report_test("kernel_stack_guard_page", ok, passed, failed);
-        // Without paging there is no guard to check: the stack being
-        // usable is all that ran, so a pass would claim too much.
-        #[cfg(not(any(target_arch = "x86_64", target_arch = "riscv64")))]
-        if ok {
-            report_skip(
-                "kernel_stack_guard_page",
-                "no guard page without paging (sprint E, N-26)",
-            );
-        } else {
-            report_test("kernel_stack_guard_page", false, passed, failed);
-        }
     }
 
     // A new address space's lower half (user space) is empty: no kernel

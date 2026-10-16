@@ -204,8 +204,8 @@ What does not work yet: `docs/KNOWN-LIMITATIONS.md`.
       to HR-06); memory map from the DT (HR-07); external interrupts (scause 9) handled, not fatal
       (HR-31); IPIs by hart id (HR-33); U-mode with `tp` via `sscratch` (N-14); `sstatus` SPP
       sanitiser (N-170).
-    - Both: kernel stack guard pages (N-26; done on RISC-V, which still needs an overflow stack
-      for the trap). Done: soft-float kernels (N-178,
+    - Both: kernel stack guard pages (N-26; done on both, which still need an overflow stack
+      for the exception). Done: soft-float kernels (N-178,
       `aarch64-unknown-none-softfloat`, `riscv64imac-unknown-none-elf`); E0 boot tests report
       what cannot run as skipped.
   - [ ] **F, networking, storage and protocols:**

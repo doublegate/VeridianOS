@@ -2,6 +2,14 @@
 
 ### Added
 
+- **Guard pages under AArch64 kernel stacks (N-26).** AArch64 kernel stacks came from the physical
+  map, so an overflow silently overwrote the neighbouring frame. They now come from the stack region
+  (0xFFFF_E000_0000_0000, in the TTBR1 half every address space shares), each at the top of its own
+  slot with unmapped pages below, as on x86_64 and RISC-V; the pages are global, so no ASID tags
+  them. The boot test `kernel_stack_guard_page` now runs on AArch64 (it was skipped, and fails with
+  the old allocator). AArch64 57/57. An overflow still faults again on the same stack instead of
+  reporting (no overflow stack yet, as on RISC-V).
+
 - **Cache maintenance for user code on AArch64 (HA-25); instruction-cache sync for executable
   mappings on both AArch64 and RISC-V.** The kernel cleaned no data cache lines before user code
   ran, relying on QEMU's CTR_EL0.IDC. Code it writes is now cleaned to the point of unification
