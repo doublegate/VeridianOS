@@ -1367,6 +1367,15 @@ static PER_CPU_PAGE_CACHES: [crate::mm::cache_aligned::CacheAligned<Mutex<PerCpu
     [const { crate::mm::cache_aligned::CacheAligned::new(Mutex::new(PerCpuPageCache::new())) };
         crate::sched::smp::MAX_CPUS];
 
+/// Frames held in the per-CPU caches. They are free, but the global
+/// allocator's statistics do not count them (`get_stats`).
+pub fn per_cpu_cached_frames() -> u64 {
+    PER_CPU_PAGE_CACHES
+        .iter()
+        .map(|c| c.lock().cached_count() as u64)
+        .sum()
+}
+
 /// This CPU's page cache.
 fn this_cpu_cache() -> &'static Mutex<PerCpuPageCache> {
     let cpu = crate::sched::smp::current_cpu_id() as usize;

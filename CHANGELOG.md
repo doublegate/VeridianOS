@@ -361,6 +361,12 @@
 
 ### Changed
 
+- **mmap and munmap use the per-CPU frame cache (N-261).** Anonymous mappings took every frame
+  from the global allocator under its lock, and unmapping returned them the same way. Both now
+  go through the CPU's frame cache, which refills and drains in batches. Release kernel, four
+  processes on four CPUs: a 16-page mmap takes 4 us (was 11-12), a 256-page one 142 us (was
+  1.1-1.7 ms). A single process is about even. Free memory (`/proc/meminfo`, sysinfo, the
+  shell) now counts the frames waiting in the per-CPU caches; it left them out.
 - **Pages are cleared and copied with string instructions (N-281).** Every fresh user page was
   zeroed with `write_bytes`, whose `memset` comes from `compiler_builtins` built at the kernel's
   own opt-level: in a dev kernel about 30 cycles a byte, so a 16-page anonymous mmap took

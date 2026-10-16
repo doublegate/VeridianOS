@@ -701,14 +701,16 @@ pub struct MemoryStats {
     pub cached_frames: usize,
 }
 
-/// Get memory statistics
+/// Get memory statistics. Free frames include those waiting in the per-CPU
+/// caches (counted after the global lock is released: a cache refill takes
+/// the two locks one after the other, never nested).
 pub fn get_memory_stats() -> MemoryStats {
-    let allocator = FRAME_ALLOCATOR.lock();
-    let stats = allocator.get_stats();
+    let stats = FRAME_ALLOCATOR.lock().get_stats();
+    let cached = frame_allocator::per_cpu_cached_frames();
 
     MemoryStats {
         total_frames: stats.total_frames as usize,
-        free_frames: stats.free_frames as usize,
+        free_frames: (stats.free_frames + cached) as usize,
         cached_frames: PAGE_CACHE_FRAMES.load(Ordering::Relaxed) as usize,
     }
 }

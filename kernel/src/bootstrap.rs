@@ -2124,7 +2124,9 @@ fn run_process_tests(passed: &mut u32, failed: &mut u32) {
             mm::vas::MappingType,
             process::{pcb::ProcessBuilder, thread::ThreadBuilder},
         };
-        let free = || crate::mm::FRAME_ALLOCATOR.lock().get_stats().free_frames;
+        // Free frames include the per-CPU caches, where mmap allocates
+        // from and unmapping frees to (N-261).
+        let free = || crate::mm::get_memory_stats().free_frames;
         let before = free();
         let built = ProcessBuilder::new(alloc::string::String::from("n46-rollback"))
             .build_with_address_space()

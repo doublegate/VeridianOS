@@ -160,11 +160,12 @@ What does not work yet: `docs/KNOWN-LIMITATIONS.md`.
       affinity migration, getcpu, per-task user GS base, interrupt-safe heap, N-139 fixed:
       interrupts on in page faults and the return to user mode, reaper thread; ADR 0012;
       `gate.sh --smp`), N-262 targeted shootdown, remote signal kick. Left: per-CPU frees after
-      N-52 (with F5 interrupt-driven storage), N-261 (re-measure per-CPU frees on a release
-      kernel: the first measurement was a dev kernel). Done since: SYS-PERF-01 (per-CPU rate-limit buckets), `smp` on by default, N-51 (directory checks on the resolved node), audit cost and cap, BlockFS
+      N-52 (with F5 interrupt-driven storage), N-282 (1-page mmap 5x slower with four
+      processes; profile first). Done since: SYS-PERF-01 (per-CPU rate-limit buckets), `smp` on by default, N-51 (directory checks on the resolved node), audit cost and cap, BlockFS
       directory slot reuse, deadline tasks placed and pulled by deadline (`pull_dl`), new
       threads inherit the creator's CPU mask, deadline threads must allow every CPU, N-281
-      (mmap cost was dev-build `memset` zeroing, not faults: `clear_page`/`copy_page`).
+      (mmap cost was dev-build `memset` zeroing, not faults: `clear_page`/`copy_page`), N-261
+      (mmap and munmap through the per-CPU frame cache, measured on a release kernel).
     - [x] Syscalls `sched_setattr/getattr`, `sched_setscheduler`, `nice`/`setpriority`, real
       `sched_setaffinity`/`getaffinity`, `sched_yield` on the new policy (SCHED-INC-02 resolved
       by the deadline class).

@@ -11,7 +11,7 @@ its N-65/N-76 labels are swapped.
 
 Every finding was re-checked against the tree on 2026-10-14 by three read-only reviews (claim
 status, code verification, reachability). This file is the tracking list for the IDs it adds
-(**N-261 to N-281**) and records where each matrix finding is tracked. **C** = confirmed in the
+(**N-261 to N-282**) and records where each matrix finding is tracked. **C** = confirmed in the
 code, **L** = latent (unreachable today), as in the 2026-10-07 re-evaluation.
 
 ## The remediation that was not merged
@@ -30,7 +30,7 @@ code, **L** = latent (unreachable today), as in the 2026-10-07 re-evaluation.
 
 | ID | Sev | Finding | Matrix ID | Status / Target |
 |---|---|---|---|---|
-| N-261 | Medium L | `per_cpu_free_frame` has one caller (`perf/bench.rs`); every unmap, munmap and teardown free takes the global `FRAME_ALLOCATOR` lock | PB-MEM-01 | **open: re-measure on a release kernel** (v0.27, D5). Frees through the per-CPU cache after the flush, in unmap and munmap, measured -6% for one process and +5% for four, but on a dev kernel, where zeroing the new pages through the unoptimised `memset` was ~95% of each mmap (N-281), so the comparison measured nothing useful. The change was not kept |
+| N-261 | Medium L | `per_cpu_free_frame` has one caller (`perf/bench.rs`); every unmap, munmap and teardown free takes the global `FRAME_ALLOCATOR` lock | PB-MEM-01 | **fixed** (v0.27, D5). The first measurement (-6% for one process, +5% for four) ran on a dev kernel, where zeroing through the unoptimised `memset` was ~95% of each mmap (N-281), and freed into the cache while mmap still allocated from the global allocator. Now mmap allocates and unmap/munmap free through the per-CPU cache. Release kernel, four processes on four CPUs: 16-page mmap 11-12 -> 4 us, 256 pages 1.1-1.7 ms -> 142 us (all four: 94-258 -> 33 ms); one process about even (256-page munmap 20 -> 42 us as a full cache drains, mmap 75 -> 62 us) |
 | N-262 | Medium L | TLB shootdown interrupts every CPU; a per-address-space active-CPU mask (set at the dispatcher's address-space switch) and logical-to-APIC-ID mapping would target only CPUs that ran it | PB-MEM-04 | **fixed** (v0.27, D5): each CPU records the root it loads (`tlb::note_root`, before the load); user-space flushes go to the CPUs on that root or with no record, kernel-half flushes to all; IPIs by APIC ID |
 | N-263 | Medium C | Dirty BlockFS blocks were pinned until sync, so a large write grew the cache by its whole size | BM-FS-01 | **fixed** 1ce99be9 (ADR 0011) |
 | N-264 | Low C | `mm/cache_topology.rs` (771 lines) has no callers, and `docs/PERFORMANCE-TUNING.md` says the frame allocator uses cache colouring | INC-MEM-02 | open; G (wire it into the allocator or remove it, and correct the doc) |
@@ -51,6 +51,7 @@ code, **L** = latent (unreachable today), as in the 2026-10-07 re-evaluation.
 | N-279 | Low L | Two futex tables: dispatched threads queue in `DFUTEX`, others in `FUTEX_TABLE`; a waiter and a waker on different tables miss each other (only possible for non-dispatched threads) | POC-SYS-02 | **fixed** (v0.27, D4c): the old table and the nested boot dispatch are deleted; every futex operation is the dispatcher's |
 | N-280 | Low C | None of the bare-metal test programs in `kernel/tests/` compiles (stale signatures, a missing `test_main`, unresolved imports), and no CI job builds them, so `kernel/tests/README.md` describes tests that cannot run; the host unit tests, the in-kernel boot tests and the rootfs runtime suites are the real coverage (found 2026-10-15 while deleting `scheduler_tests.rs`, which tested only the old scheduler) | (review note) | open; G (port the useful checks to host or boot tests, then delete the directory, or fix and add a CI job) |
 | N-281 | Medium L | Anonymous mmap was slow: 16 pages took ~570 us on one CPU (KVM). Recorded as "a page fault costs ~35 us", which was wrong: anonymous mappings are filled when made, and touching them takes no fault (0.2-0.3 us a page). Profiled with TSC probes in `sys_mmap`: ~95% was zeroing the frames with `write_bytes`, whose `memset` (from `compiler_builtins`, built by `-Zbuild-std` at the kernel's opt-level) runs ~30 cycles a byte in a dev kernel. Four processes on four CPUs took the same time as one: no contention | (D5 measurement) | **fixed** (v0.27, D5): `mm::page_ops::clear_page`/`copy_page` (`rep stosq`/`rep movsq` on x86_64, as Linux) at every whole-frame zero and copy. 16-page mmap 588 -> 31 us (dev), 19 -> 3 us (release); `perf` benchmark `page_clear` 32,889 -> 36 ns (dev), 868 -> 31 ns (release). Remaining variation for large mappings is the host backing guest RAM on first touch |
+| N-282 | Low L | With four processes on four CPUs a 1-page anonymous mmap and munmap each take ~5 us against ~1 us for one process (release kernel, KVM), and the per-CPU frame cache (N-261) does not change it: some other lock or structure every mmap takes is shared (the heap, the process table, the syscall path) | (D5 measurement) | open; profile before changing anything |
 
 ## Matrix findings already tracked elsewhere
 
