@@ -200,22 +200,25 @@ Still open:
 - Secondaries copy the boot CPU's CR4, so they match it, including SMEP and SMAP being off (N-15,
   below).
 
-### Only x86_64 runs user programs (N-28, N-14; planned v0.27 sprint E)
+### AArch64 runs no user programs; RISC-V runs only built-in ones (N-28; sprint E)
 
 - **AArch64 runs with the MMU and caches off (N-28, HA-16).** All memory is treated as Device
   memory, so the filesystems use `fs::bare_lock`, which does not actually lock. This blocks SMP
   work and EL0 (user mode) on AArch64. The EL2 entry leaves several EL2 registers unset and writes
   SCTLR_EL1 = 0 over its RES1 bits (N-177, HA-14).
-- **RISC-V has no user mode (N-14).** U-mode traps are fatal. Paging is on, the kernel runs in the
-  upper half and new address spaces share it with an empty lower half (ADR 0013), and the boot
-  hart runs kernel threads as dispatcher tasks; entering and leaving U-mode comes next.
+- **RISC-V runs user code, but not yet programs from disk (ADR 0013, ADR 0014).** Paging is on,
+  the kernel runs in the upper half, and threads enter and leave U-mode as dispatcher tasks with
+  system calls, page faults and fault-tolerant user copies. Not yet: ELF programs through the
+  loader and exec, user FP state (an FP instruction is SIGILL), signal handlers, a fault-tolerant
+  user compare-and-exchange (futexes), and secondary harts dispatching.
 
 ### FPU and vector registers on AArch64 and RISC-V (N-41 part, sprint E)
 
 On x86_64 every task has its own x87/SSE/AVX state, saved and restored with XSAVE sized from CPUID
 at each switch (stage D2), and the kernel itself is soft-float. The AArch64 and RISC-V kernels are
-soft-float too since v0.27 (N-178), so the FP registers hold only user state; AArch64 and RISC-V
-have no user mode yet, and switching that state comes with it in sprint E.
+soft-float too since v0.27 (N-178), so the FP registers hold only user state. RISC-V user mode runs
+with FP off (`sstatus.FS`), so a program's FP instruction traps; switching the state comes next in
+sprint E. AArch64 has no user mode yet.
 
 ### AArch64 kernel stacks have no guard pages; RISC-V overflows hang (N-26, sprint E)
 

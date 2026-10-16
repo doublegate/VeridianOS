@@ -94,9 +94,16 @@ struct ArchState {
     user_rsp: u64,
     #[cfg(target_arch = "x86_64")]
     syscall_frame: u64,
-    /// RISC-V: the physical root of the task's address space (satp).
+    /// RISC-V: the physical root of the task's address space (satp), and
+    /// this CPU's user-entry state while the task runs: the kernel stack a
+    /// trap from user mode lands on and the user frame of the trap in
+    /// progress (per-CPU block 0x00 and 0x10).
     #[cfg(target_arch = "riscv64")]
     root: u64,
+    #[cfg(target_arch = "riscv64")]
+    entry_stack: u64,
+    #[cfg(target_arch = "riscv64")]
+    syscall_frame: u64,
 }
 
 /// A dispatchable task.
@@ -785,8 +792,15 @@ unsafe fn arch_switch(prev: *const Task, next: *const Task) {
     // SAFETY: as above.
     unsafe {
         use crate::arch::riscv64::switch;
-        (*(*prev).arch.get()).root = switch::current_root();
-        switch::switch_address_space((*(*next).arch.get()).root);
+        let cpu = crate::arch::percpu::this_arch_cpu();
+        let a = &mut *(*prev).arch.get();
+        a.root = switch::current_root();
+        a.entry_stack = (*cpu).kernel_rsp;
+        a.syscall_frame = (*cpu).syscall_frame;
+        let b = &*(*next).arch.get();
+        switch::switch_address_space(b.root);
+        (*cpu).kernel_rsp = b.entry_stack;
+        (*cpu).syscall_frame = b.syscall_frame;
         switch::switch_stacks((*prev).saved_sp.get(), *(*next).saved_sp.get());
     }
     #[cfg(not(dispatch))]
@@ -1573,6 +1587,45 @@ pub fn current_owner() -> Option<(u64, u64)> {
     // alive (in the CPU state) while it is current; reading it from the
     // same CPU cannot race with its replacement.
     unsafe { (*p).owner }
+}
+
+/// Start a RISC-V user thread as a task: its first switch-in enters user
+/// mode with `frame` (registers, sepc, sstatus) on the address space whose
+/// root is `root`, scheduled with `policy` on the CPUs in `affinity`. User
+/// FP state is not switched yet (FP stays off in user mode).
+#[cfg(all(target_arch = "riscv64", dispatch))]
+pub fn spawn_user(
+    owner: (u64, u64),
+    frame: &crate::arch::riscv64::switch::UserFrame,
+    root: u64,
+    policy: Policy,
+    affinity: u64,
+) -> Result<TaskKey, KernelError> {
+    if !started() {
+        return Err(KernelError::InvalidState {
+            expected: "dispatcher started",
+            actual: "not started",
+        });
+    }
+    let stack = crate::mm::kstack::allocate(KTHREAD_STACK_PAGES)?;
+    let top = stack.base + stack.pages * 4096;
+    let mut task = Task::new(alloc_key(), "user", policy, Some(stack));
+    task.owner = Some(owner);
+    let usable = affinity & dispatching_mask();
+    *task.affinity.get_mut() = if usable != 0 { affinity } else { u64::MAX };
+    let mut entry = *frame;
+    entry.sstatus = crate::arch::riscv64::switch::user_sstatus(entry.sstatus);
+    // SAFETY: the stack was just allocated for this task and is unused.
+    let sp = unsafe { crate::arch::riscv64::switch::seed_user_thread(top, &entry) };
+    *task.saved_sp.get_mut() = sp;
+    let arch = task.arch.get_mut();
+    arch.root = root;
+    arch.entry_stack = (top & !0xF) as u64;
+    let task = Arc::new(task);
+    let key = task.key;
+    TASKS.lock().insert(key, task.clone());
+    enqueue_new(&task);
+    Ok(key)
 }
 
 /// Start a user thread as a task: its first switch-in enters ring 3 with

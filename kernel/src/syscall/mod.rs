@@ -128,7 +128,25 @@ fn syscall_arg6() -> Result<usize, SyscallError> {
             .map(|frame| frame.r9 as usize)
             .ok_or(SyscallError::NotImplemented)
     }
-    #[cfg(not(all(target_arch = "x86_64", target_os = "none")))]
+    // RISC-V: a5 of the user frame the trap entry saved; the per-CPU block
+    // points at it while the call runs (offset 0x10, `syscall_frame`).
+    #[cfg(all(target_arch = "riscv64", target_os = "none"))]
+    {
+        // SAFETY: this CPU's own block; `syscall_frame` is the current
+        // task's user frame on its kernel stack (set by the trap entry and
+        // switched with the task), or 0.
+        let frame = unsafe { (*crate::arch::percpu::this_arch_cpu()).syscall_frame }
+            as *const crate::arch::riscv64::switch::UserFrame;
+        if frame.is_null() {
+            return Err(SyscallError::NotImplemented);
+        }
+        // SAFETY: as above, a live frame.
+        Ok(unsafe { (*frame).x[15] } as usize)
+    }
+    #[cfg(not(any(
+        all(target_arch = "x86_64", target_os = "none"),
+        all(target_arch = "riscv64", target_os = "none")
+    )))]
     {
         Err(SyscallError::NotImplemented)
     }
@@ -605,17 +623,75 @@ pub extern "C" fn syscall_handler(
         return linux_compat::to_linux_errno(SyscallError::WouldBlock);
     }
 
-    // Caller PID for audit logging. The process reference is dropped here:
-    // exit and exec do not return, so an Arc held across the dispatch would
-    // never be released.
-    let caller_pid = crate::process::current_process()
-        .map(|p| p.pid.0)
-        .unwrap_or(0);
-
     // One table for every caller (ADR 0009): Linux x86_64 numbers, and
     // private numbers from 1024 for VeridianOS-only calls. An unknown
     // number is ENOSYS, as on Linux.
-    let result = match Syscall::try_from(syscall_num) {
+    let ret = dispatch(
+        Syscall::try_from(syscall_num),
+        syscall_num,
+        arg1,
+        arg2,
+        arg3,
+        arg4,
+        arg5,
+    );
+
+    // KPTI: switch to shadow page tables before returning to user mode.
+    #[cfg(target_arch = "x86_64")]
+    crate::arch::x86_64::kpti::on_syscall_exit();
+
+    ret
+}
+
+/// A RISC-V system call (from the U-mode `ecall` trap): Linux's generic
+/// numbers (ADR 0009), `a0`-`a5` the arguments (the sixth is read from the
+/// saved frame, `syscall_arg6`). Returns the value for `a0`.
+#[cfg(target_arch = "riscv64")]
+pub fn riscv64_syscall(
+    syscall_num: usize,
+    arg1: usize,
+    arg2: usize,
+    arg3: usize,
+    arg4: usize,
+    arg5: usize,
+) -> isize {
+    crate::arch::speculation_barrier();
+    SYSCALL_COUNT.fetch_add(1, Ordering::Relaxed);
+    LAST_SYSCALL_NUM.store(syscall_num as u64, Ordering::Relaxed);
+    LAST_SYSCALL_ARG1.store(arg1 as u64, Ordering::Relaxed);
+    LAST_SYSCALL_ARG2.store(arg2 as u64, Ordering::Relaxed);
+    if !rate_limit_allows() {
+        SYSCALL_ERRORS.fetch_add(1, Ordering::Relaxed);
+        return linux_compat::to_linux_errno(SyscallError::WouldBlock);
+    }
+    dispatch(
+        Syscall::from_riscv64(syscall_num).ok_or(()),
+        syscall_num,
+        arg1,
+        arg2,
+        arg3,
+        arg4,
+        arg5,
+    )
+}
+
+/// Run a decoded system call and turn its result into the value user space
+/// sees (Linux errno on failure). Shared by every architecture's entry.
+fn dispatch(
+    decoded: Result<Syscall, ()>,
+    syscall_num: usize,
+    arg1: usize,
+    arg2: usize,
+    arg3: usize,
+    arg4: usize,
+    arg5: usize,
+) -> isize {
+    // Caller PID for audit logging (dropped here: exit and exec do not
+    // return, so an Arc held across the dispatch would never be released).
+    let caller_pid = crate::process::current_process()
+        .map(|p| p.pid.0)
+        .unwrap_or(0);
+    let result = match decoded {
         Ok(syscall) => {
             let result = handle_syscall(syscall, arg1, arg2, arg3, arg4, arg5);
             if result == Err(SyscallError::Interrupted) && never_restarted(syscall) {
@@ -675,10 +751,6 @@ pub extern "C" fn syscall_handler(
         syscall_num as u64,
         ret as u64
     );
-
-    // KPTI: switch to shadow page tables before returning to user mode.
-    #[cfg(target_arch = "x86_64")]
-    crate::arch::x86_64::kpti::on_syscall_exit();
 
     ret
 }

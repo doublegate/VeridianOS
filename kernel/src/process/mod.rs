@@ -235,12 +235,71 @@ pub fn start_thread(
     Ok(())
 }
 
+/// RISC-V: start `thread` as a dispatcher task entering user mode with the
+/// registers of its saved context (pc, sp, gp, tp, the argument registers).
+/// User FP state is not switched yet, so `inherit_fpu` has nothing to copy.
+#[cfg(all(feature = "alloc", target_arch = "riscv64", target_os = "none"))]
+pub fn start_thread(
+    process: &Process,
+    thread: &Thread,
+    inherit_fpu: bool,
+) -> crate::error::KernelResult<()> {
+    use crate::arch::riscv64::switch::UserFrame;
+    let _ = inherit_fpu;
+    let frame = {
+        let ctx = thread.context.lock();
+        let user = crate::syscall::userspace::is_user_address;
+        if !user(ctx.pc) || !user(ctx.sp) {
+            return Err(crate::error::KernelError::InvalidArgument {
+                name: "thread context",
+                value: "entry point or stack outside user space",
+            });
+        }
+        let mut f = UserFrame::default();
+        let regs = [
+            ctx.ra, ctx.sp, ctx.gp, ctx.tp, ctx.t0, ctx.t1, ctx.t2, ctx.s0, ctx.s1, ctx.a0, ctx.a1,
+            ctx.a2, ctx.a3, ctx.a4, ctx.a5, ctx.a6, ctx.a7, ctx.s2, ctx.s3, ctx.s4, ctx.s5, ctx.s6,
+            ctx.s7, ctx.s8, ctx.s9, ctx.s10, ctx.s11, ctx.t3, ctx.t4, ctx.t5, ctx.t6,
+        ];
+        for (i, r) in regs.iter().enumerate() {
+            f.x[i + 1] = *r as u64;
+        }
+        f.sepc = ctx.pc as u64;
+        f
+    };
+    let root = process.memory_space.lock().get_page_table();
+    if root == 0 {
+        return Err(crate::error::KernelError::InvalidState {
+            expected: "address space",
+            actual: "no page table",
+        });
+    }
+    process
+        .dispatched
+        .store(true, core::sync::atomic::Ordering::Release);
+    let policy = thread.sched.lock().to_policy();
+    crate::sched::dispatch::spawn_user(
+        (process.pid.0, thread.tid.0),
+        &frame,
+        root,
+        policy,
+        thread.get_affinity() as u64,
+    )?;
+    Ok(())
+}
+
 /// Run a freshly created (or exec'd) process as dispatcher tasks and wait
 /// for it to end (stage D2): its first thread is started, the caller blocks
 /// until the process is a zombie whose last task is off the CPU, and the
 /// zombie is reaped. Returns the exit code, or 128 + the signal that killed
 /// it (the shell convention). `None` if the process could not be started.
-#[cfg(all(feature = "alloc", target_arch = "x86_64"))]
+#[cfg(all(
+    feature = "alloc",
+    any(
+        target_arch = "x86_64",
+        all(target_arch = "riscv64", target_os = "none")
+    )
+))]
 pub fn run_and_wait(pid: ProcessId) -> Option<i32> {
     let process = table::get_process(pid)?;
     let thread = process.threads.lock().values().next().cloned()?;

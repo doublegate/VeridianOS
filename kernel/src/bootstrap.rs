@@ -2133,7 +2133,7 @@ fn run_process_tests(passed: &mut u32, failed: &mut u32) {
     // whose child cannot be started, leaves behind -- is freed whole: its
     // mapped frames, page tables and kernel stack all go back. (Dropping a
     // Process frees nothing; these frames used to leak.)
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(any(target_arch = "x86_64", target_arch = "riscv64"))]
     {
         use crate::{
             mm::vas::MappingType,
@@ -2172,7 +2172,7 @@ fn run_process_tests(passed: &mut u32, failed: &mut u32) {
         };
         report_test("unstarted_process_freed_whole", ok, passed, failed);
     }
-    #[cfg(not(target_arch = "x86_64"))]
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "riscv64")))]
     {
         let _ = (passed, failed);
         report_skip(
@@ -2180,6 +2180,120 @@ fn run_process_tests(passed: &mut u32, failed: &mut u32) {
             "no user address spaces yet (sprint E)",
         );
     }
+
+    // RISC-V user mode (sprint E): a program in a fresh address space runs
+    // in U-mode as a dispatcher task. getpid returns its pid through ecall
+    // (it exits with it); a load from address 0 kills it with SIGSEGV; a
+    // supervisor CSR read kills it with SIGILL, so it really ran in U-mode.
+    // Exit status as run_and_wait reports it: the code, or 128 + signal.
+    #[cfg(target_arch = "riscv64")]
+    {
+        let [getpid, fault, csr] = crate::arch::riscv64::usermode::test_programs();
+        let (pid, status) = run_riscv_user(getpid);
+        let ok = pid.is_some_and(|p| status == Some((p & 0xFF) as i32));
+        if !ok {
+            crate::println!("    pid {:?}, status {:?}", pid, status);
+        }
+        report_test("riscv_user_syscall_round_trip", ok, passed, failed);
+        let (_, status) = run_riscv_user(fault);
+        if status != Some(128 + 11) {
+            crate::println!("    status {:?}", status);
+        }
+        report_test(
+            "riscv_user_fault_kills_process",
+            status == Some(128 + 11),
+            passed,
+            failed,
+        );
+        let (_, status) = run_riscv_user(csr);
+        if status != Some(128 + 4) {
+            crate::println!("    status {:?}", status);
+        }
+        report_test(
+            "riscv_user_mode_is_unprivileged",
+            status == Some(128 + 4),
+            passed,
+            failed,
+        );
+    }
+}
+/// Run `code` (position-independent) as a new process in user mode: one
+/// executable page at 0x40_0000, one stack page below 0x80_1000. Returns
+/// its pid and the exit status `run_and_wait` reports.
+#[cfg(all(feature = "alloc", target_arch = "riscv64"))]
+fn run_riscv_user(code: &[u8]) -> (Option<u64>, Option<i32>) {
+    use crate::{
+        arch::context::ThreadContext,
+        mm::{vas::MappingType, PageFlags, VirtualAddress},
+        process::{pcb::ProcessBuilder, thread::ThreadBuilder},
+    };
+    const CODE: u64 = 0x40_0000;
+    const STACK: u64 = 0x80_0000;
+    let Ok(p) =
+        ProcessBuilder::new(alloc::string::String::from("rv-user")).build_with_address_space()
+    else {
+        return (None, None);
+    };
+    let mapped = {
+        let vas = p.memory_space.lock();
+        let code_ok = vas
+            .map_region_flags(
+                VirtualAddress(CODE),
+                4096,
+                MappingType::Code,
+                Some(PageFlags::PRESENT | PageFlags::USER),
+            )
+            .is_ok();
+        let stack_ok = vas
+            .map_region_flags(
+                VirtualAddress(STACK),
+                4096,
+                MappingType::Stack,
+                Some(
+                    PageFlags::PRESENT
+                        | PageFlags::USER
+                        | PageFlags::WRITABLE
+                        | PageFlags::NO_EXECUTE,
+                ),
+            )
+            .is_ok();
+        // SAFETY: the process's root, through the physical map; only read.
+        let m = unsafe { crate::mm::vas::create_mapper_from_root_pub(vas.get_page_table()) };
+        match m.translate_page(VirtualAddress(CODE)) {
+            Ok((frame, _)) if code_ok && stack_ok && code.len() <= 4096 => {
+                let dst = crate::mm::phys_to_virt_addr(frame.as_u64() << 12) as *mut u8;
+                // SAFETY: the code page's frame, just mapped and not yet
+                // used by anyone; `code` fits in it.
+                unsafe { core::ptr::copy_nonoverlapping(code.as_ptr(), dst, code.len()) };
+                // The hart fetches what was just written (RISC-V has no
+                // coherent instruction fetch without fence.i).
+                // SAFETY: an instruction-stream fence; no other effect.
+                unsafe { core::arch::asm!("fence.i", options(nostack)) };
+                true
+            }
+            _ => false,
+        }
+    };
+    if !mapped {
+        return (None, None);
+    }
+    let Ok(t) =
+        ThreadBuilder::new(p.pid, alloc::string::String::from("rv-user"), CODE as usize).build()
+    else {
+        return (None, None);
+    };
+    {
+        let mut c = t.context.lock();
+        c.set_instruction_pointer(CODE as usize);
+        c.set_stack_pointer((STACK + 4096) as usize);
+    }
+    if p.add_thread(t).is_err() {
+        return (None, None);
+    }
+    let Ok(pid) = crate::process::table::add_process(p) else {
+        return (None, None);
+    };
+    (Some(pid.0), crate::process::run_and_wait(pid))
 }
 
 /// Run VFS boot tests (tests 1-6).
@@ -2626,17 +2740,18 @@ fn run_usercopy_tests(passed: &mut u32, failed: &mut u32) {
     }
 
     // Test 31: a fault on an unmapped user page returns an error instead of
-    // aborting (x86_64 copy fixup; MEM-SEC-01 / SYS-SEC-01). The address is
-    // in the user half and mapped by nothing during boot.
+    // aborting (the x86_64 and RISC-V copy fixups; MEM-SEC-01 / SYS-SEC-01,
+    // ARCH-MEM-03). The address is in the user half and mapped by nothing
+    // during boot.
     {
-        #[cfg(target_arch = "x86_64")]
+        #[cfg(any(target_arch = "x86_64", target_arch = "riscv64"))]
         let ok = {
             let mut buf = [0u8; 8];
             read_user_bytes(0x0000_7FF0_0000_0000, &mut buf).is_err()
         };
-        #[cfg(target_arch = "x86_64")]
+        #[cfg(any(target_arch = "x86_64", target_arch = "riscv64"))]
         report_test("usercopy_fault_returns_efault", ok, passed, failed);
-        #[cfg(not(target_arch = "x86_64"))]
+        #[cfg(not(any(target_arch = "x86_64", target_arch = "riscv64")))]
         report_skip(
             "usercopy_fault_returns_efault",
             "no fault fixup yet (sprint E)",

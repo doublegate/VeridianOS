@@ -48,6 +48,11 @@ pub fn validate_user_ptr<T>(ptr: *const T, len: usize) -> Result<(), SyscallErro
     Ok(())
 }
 
+/// Whether `addr` is in user space.
+pub fn is_user_address(addr: usize) -> bool {
+    addr < USER_SPACE_END
+}
+
 /// Check if a user pointer is valid (compatibility wrapper)
 pub fn validate_user_ptr_compat(ptr: usize, size: usize) -> Result<(), SyscallError> {
     validate_user_ptr(ptr as *const u8, size)
@@ -245,7 +250,18 @@ unsafe fn raw_copy(dst: *mut u8, src: *const u8, len: usize) -> Result<(), Sysca
         unsafe { crate::arch::x86_64::usercopy::copy_user(dst, src, len) }
             .map_err(|()| SyscallError::UnmappedMemory)
     }
-    #[cfg(not(all(target_arch = "x86_64", target_os = "none")))]
+    // RISC-V: fault-tolerant too, and the only code that sets sstatus.SUM
+    // (ARCH-MEM-03).
+    #[cfg(all(target_arch = "riscv64", target_os = "none"))]
+    {
+        // SAFETY: forwarded from this function's contract.
+        unsafe { crate::arch::riscv64::usercopy::copy_user(dst, src, len) }
+            .map_err(|()| SyscallError::UnmappedMemory)
+    }
+    #[cfg(not(any(
+        all(target_arch = "x86_64", target_os = "none"),
+        all(target_arch = "riscv64", target_os = "none")
+    )))]
     {
         // SAFETY: forwarded from this function's contract; user and kernel
         // ranges never overlap.

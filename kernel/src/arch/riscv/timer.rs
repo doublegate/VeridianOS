@@ -147,7 +147,8 @@ pub fn start_secondary() {
 /// were missed rather than firing a burst. Only the clock and the timer
 /// wheel are advanced: preempting the interrupted kernel code from here is
 /// not supported yet.
-pub fn handle_interrupt() {
+/// Timer interrupt; `user` when it interrupted user mode.
+pub fn handle_interrupt(user: bool) {
     if crate::arch::percpu::is_timekeeper() {
         TICKS.fetch_add(1, Ordering::Relaxed);
     }
@@ -166,7 +167,9 @@ pub fn handle_interrupt() {
         crate::timer::clock_tick();
     }
     // Time slices, accounting, balancing; on the timekeeper also the
-    // sleepers (as x86_64's tick). The kernel runs no user code yet.
+    // sleepers (as x86_64's tick).
     #[cfg(feature = "alloc")]
-    crate::sched::dispatch::tick(false);
+    crate::sched::dispatch::tick(user);
+    #[cfg(not(feature = "alloc"))]
+    let _ = user;
 }

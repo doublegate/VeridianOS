@@ -124,3 +124,72 @@ pub unsafe fn enter_usermode(entry_point: u64, user_stack: u64, kernel_sp: u64) 
         )
     };
 }
+
+// Boot-test programs for user mode (position-independent, copied to a user
+// page by `bootstrap`). A: getpid, then exit_group with the result (a
+// system call round trip). B: a load from address 0 (a user page fault the
+// kernel cannot resolve: SIGSEGV). C: reads sstatus, a supervisor CSR
+// (illegal in U-mode: SIGILL, which shows the code ran in U-mode).
+// Numbers from Linux's generic table: getpid 172, exit_group 94.
+core::arch::global_asm!(
+    ".section .rodata",
+    ".balign 4",
+    ".global veridian_rv_user_getpid",
+    "veridian_rv_user_getpid:",
+    "    li a7, 172",
+    "    ecall",
+    "    li a7, 94",
+    "    ecall",
+    "1:  j 1b",
+    ".global veridian_rv_user_getpid_end",
+    "veridian_rv_user_getpid_end:",
+    ".balign 4",
+    ".global veridian_rv_user_fault",
+    "veridian_rv_user_fault:",
+    "    ld a0, 0(zero)",
+    "    li a7, 94",
+    "    ecall",
+    ".global veridian_rv_user_fault_end",
+    "veridian_rv_user_fault_end:",
+    ".balign 4",
+    ".global veridian_rv_user_csr",
+    "veridian_rv_user_csr:",
+    "    csrr a0, sstatus",
+    "    li a7, 94",
+    "    ecall",
+    ".global veridian_rv_user_csr_end",
+    "veridian_rv_user_csr_end:",
+);
+
+extern "C" {
+    static veridian_rv_user_getpid: u8;
+    static veridian_rv_user_getpid_end: u8;
+    static veridian_rv_user_fault: u8;
+    static veridian_rv_user_fault_end: u8;
+    static veridian_rv_user_csr: u8;
+    static veridian_rv_user_csr_end: u8;
+}
+
+/// The boot-test user programs (see above): getpid round trip, page
+/// fault, privileged CSR.
+pub fn test_programs() -> [&'static [u8]; 3] {
+    let span = |a: *const u8, b: *const u8| {
+        // SAFETY: two labels of one rodata block, `a` before `b`.
+        unsafe { core::slice::from_raw_parts(a, b as usize - a as usize) }
+    };
+    // Only the addresses of the linker symbols are taken (safe).
+    [
+        span(
+            core::ptr::addr_of!(veridian_rv_user_getpid),
+            core::ptr::addr_of!(veridian_rv_user_getpid_end),
+        ),
+        span(
+            core::ptr::addr_of!(veridian_rv_user_fault),
+            core::ptr::addr_of!(veridian_rv_user_fault_end),
+        ),
+        span(
+            core::ptr::addr_of!(veridian_rv_user_csr),
+            core::ptr::addr_of!(veridian_rv_user_csr_end),
+        ),
+    ]
+}

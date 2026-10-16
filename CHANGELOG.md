@@ -2,6 +2,17 @@
 
 ### Added
 
+- **RISC-V user mode (ADR 0014).** Threads enter and leave U-mode as dispatcher tasks: the trap
+  vector tells a user trap by swapping `tp` with `sscratch` (so the kernel's per-CPU pointer is
+  back before any kernel code runs, N-14), saves the registers on the task's kernel stack, and
+  handles `ecall` system calls (Linux's generic numbers), page faults, interrupts and illegal
+  instructions; every return to U-mode passes the preemption and fatal-signal checks with a
+  sanitised `sstatus`. User copies are fault-tolerant and the only code that may touch user pages
+  (`sstatus.SUM`; ARCH-MEM-03). Boot tests on RISC-V: `riscv_user_syscall_round_trip`,
+  `riscv_user_fault_kills_process`, `riscv_user_mode_is_unprivileged` (each failed when the
+  return went to supervisor mode), `usercopy_fault_returns_efault` and
+  `unstarted_process_freed_whole` (both skipped before). Programs from disk, user FP, signal
+  handlers and SMP dispatch follow.
 - **RISC-V system call numbers (ADR 0009).** `tools/compat/gen_syscalls.py` also reads Linux's
   generic table (`abi/linux/syscall.tbl`, v7.2), which RISC-V and arm64 use: the kernel gets
   `Syscall::from_riscv64`, and `<veridian/sysno.h>` and the Rust constants give RISC-V programs

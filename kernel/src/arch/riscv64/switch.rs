@@ -8,7 +8,9 @@
 //! start trampoline:
 //!
 //! ```text
-//!   [ra s0 s1 .. s11] padding    ra = kthread_trampoline, s0 = entry, s1 = arg
+//!   kernel thread: [ra s0 s1 .. s11] padding    ra = kthread_trampoline,
+//!                                               s0 = entry, s1 = arg
+//!   user thread:   [ra s0 .. s11] padding [UserFrame]   ra = user_trampoline
 //! ```
 
 use core::arch::naked_asm;
@@ -16,6 +18,43 @@ use core::arch::naked_asm;
 /// Bytes of a switch frame: 13 registers, rounded up to keep `sp` 16-byte
 /// aligned (psABI).
 const FRAME: usize = 112;
+
+/// A user thread's registers as the trap entry saves them on its kernel
+/// stack, and as the return to user mode restores them
+/// (`veridian_riscv_return_to_user`): `x[i]` is register x<i> (`x[0]` is
+/// unused), then `sepc` and `sstatus`. 272 bytes, a multiple of 16.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct UserFrame {
+    pub x: [u64; 32],
+    pub sepc: u64,
+    pub sstatus: u64,
+}
+
+const _: () = assert!(core::mem::size_of::<UserFrame>() == 272);
+
+impl UserFrame {
+    pub const RA: usize = 1;
+    pub const SP: usize = 2;
+    pub const TP: usize = 4;
+    pub const A0: usize = 10;
+    pub const A7: usize = 17;
+}
+
+/// sstatus bits for a return to user mode.
+const SSTATUS_SPP: u64 = 1 << 8;
+const SSTATUS_SPIE: u64 = 1 << 5;
+const SSTATUS_SIE: u64 = 1 << 1;
+const SSTATUS_SUM: u64 = 1 << 18;
+const SSTATUS_FS: u64 = 3 << 13;
+
+/// The `sstatus` to return to user mode with: U-mode (SPP clear),
+/// interrupts on there (SPIE), kernel interrupts off until the `sret`, no
+/// kernel access to user pages (SUM clear) and FP off (user FP state is not
+/// switched yet, so an FP instruction traps). Every other bit is kept.
+pub fn user_sstatus(sstatus: u64) -> u64 {
+    (sstatus & !(SSTATUS_SPP | SSTATUS_SIE | SSTATUS_SUM | SSTATUS_FS)) | SSTATUS_SPIE
+}
 
 /// Save the callee-saved registers and stack pointer of the running task
 /// into `*prev_sp`, and resume the task whose saved stack pointer is
@@ -78,6 +117,42 @@ unsafe extern "C" fn kthread_trampoline() {
         finish = sym crate::sched::dispatch::finish_switch,
         exit = sym crate::sched::dispatch::exit_kernel_thread,
     );
+}
+
+/// First code of a new user thread: finish the switch, act on a fatal
+/// signal sent before it first ran, then enter user mode with the
+/// `UserFrame` at `sp`.
+#[unsafe(naked)]
+unsafe extern "C" fn user_trampoline() {
+    naked_asm!(
+        "call {finish}",
+        "call {check}",
+        "j veridian_riscv_return_to_user",
+        finish = sym crate::sched::dispatch::finish_switch,
+        check = sym crate::process::user_return_check,
+    );
+}
+
+/// Seed a kernel stack so that switching to it enters user mode with
+/// `frame`. Returns the saved stack pointer.
+///
+/// # Safety
+/// The top `size_of::<UserFrame>() + FRAME + 16` bytes below `stack_top`
+/// must be writable and unused.
+pub unsafe fn seed_user_thread(stack_top: usize, frame: &UserFrame) -> usize {
+    let frame_at = (stack_top & !0xF) - core::mem::size_of::<UserFrame>();
+    let sp = frame_at - FRAME;
+    let regs = sp as *mut u64;
+    // SAFETY: within the caller's writable stack top; both areas are
+    // 16-byte aligned.
+    unsafe {
+        (frame_at as *mut UserFrame).write(*frame);
+        for i in 0..FRAME / 8 {
+            regs.add(i).write(0);
+        }
+        regs.write(user_trampoline as *const () as u64); // ra
+    }
+    sp
 }
 
 /// Seed a kernel stack (top `stack_top`) so that switching to it runs

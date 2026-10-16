@@ -11,6 +11,7 @@ pub mod serial;
 #[cfg(feature = "smp")]
 pub mod smp;
 pub mod switch;
+pub mod usercopy;
 pub mod usermode;
 
 // Re-export context, PLIC, and timer from parent riscv module
@@ -18,24 +19,31 @@ pub use super::riscv::{context, plic, timer};
 
 // Supervisor trap vector (Direct mode, 4-byte aligned).
 //
-// Kernel traps run on the interrupted kernel stack. sscratch is 0 while the
-// kernel runs; a trap from U-mode (where sscratch would hold the kernel
-// stack) is detected by the swap and treated as fatal until user mode is
-// supported on RISC-V. The caller-saved registers plus sepc/sstatus are
-// saved; the Rust handler preserves the callee-saved ones. The kernel uses
-// no floating point (project rule), so FP state is not saved.
+// `sscratch` tells where a trap came from (Linux's convention): 0 while the
+// kernel runs; in user mode it holds this CPU's per-CPU block, and `tp`
+// belongs to the user (TLS). The vector swaps the two: a non-zero `tp` after
+// the swap means user mode.
 //
-// Supervisor timer interrupts are handled; any other trap is a kernel bug
-// and stops the system with scause/sepc/stval (before a vector existed,
-// such a trap silently restarted boot -- N-13).
+// - From the kernel: the trap runs on the interrupted kernel stack. The
+//   caller-saved registers plus sepc/sstatus are saved; the Rust handler
+//   preserves the callee-saved ones and may change the saved sepc (the
+//   user-copy fixup). The kernel is soft-float (N-178): no FP state.
+// - From user mode: the user `sp` goes to the per-CPU scratch slot, the task's
+//   kernel stack comes from the per-CPU block (`kernel_rsp`, set at each
+//   switch), and the whole register file is saved there as a
+//   `switch::UserFrame`. `veridian_riscv_return_to_user` restores it; a new
+//   user task starts there too.
+//
+// Per-CPU block (`arch::percpu::ArchCpu`): 0x00 kernel stack for user
+// entries, 0x08 user sp scratch, 0x10 the current user frame.
 core::arch::global_asm!(
     ".section .text",
     ".balign 4",
     ".global veridian_riscv_trap",
     "veridian_riscv_trap:",
-    "    csrrw sp, sscratch, sp",
-    "    bnez sp, 2f",
-    "    csrrw sp, sscratch, sp",
+    "    csrrw tp, sscratch, tp",
+    "    bnez tp, 4f",
+    "    csrrw tp, sscratch, tp",
     "    addi sp, sp, -144",
     "    sd ra, 0(sp)",
     "    sd t0, 8(sp)",
@@ -60,6 +68,7 @@ core::arch::global_asm!(
     "    csrr a0, scause",
     "    csrr a1, sepc",
     "    csrr a2, stval",
+    "    mv a3, sp",
     "    call {handler}",
     "    ld t0, 136(sp)",
     "    csrw sstatus, t0",
@@ -83,14 +92,97 @@ core::arch::global_asm!(
     "    ld t6, 120(sp)",
     "    addi sp, sp, 144",
     "    sret",
-    "2:",
-    "    csrr a0, scause",
-    "    csrr a1, sepc",
-    "    csrr a2, stval",
-    "    call {fatal}",
-    "3:  j 3b",
+    // From user mode: tp = per-CPU block, sscratch = user tp.
+    "4:",
+    "    sd sp, 8(tp)",
+    "    ld sp, 0(tp)",
+    "    addi sp, sp, -272",
+    "    sd x1, 8(sp)",
+    "    sd x3, 24(sp)",
+    "    sd x5, 40(sp)",
+    "    sd x6, 48(sp)",
+    "    sd x7, 56(sp)",
+    "    sd x8, 64(sp)",
+    "    sd x9, 72(sp)",
+    "    sd x10, 80(sp)",
+    "    sd x11, 88(sp)",
+    "    sd x12, 96(sp)",
+    "    sd x13, 104(sp)",
+    "    sd x14, 112(sp)",
+    "    sd x15, 120(sp)",
+    "    sd x16, 128(sp)",
+    "    sd x17, 136(sp)",
+    "    sd x18, 144(sp)",
+    "    sd x19, 152(sp)",
+    "    sd x20, 160(sp)",
+    "    sd x21, 168(sp)",
+    "    sd x22, 176(sp)",
+    "    sd x23, 184(sp)",
+    "    sd x24, 192(sp)",
+    "    sd x25, 200(sp)",
+    "    sd x26, 208(sp)",
+    "    sd x27, 216(sp)",
+    "    sd x28, 224(sp)",
+    "    sd x29, 232(sp)",
+    "    sd x30, 240(sp)",
+    "    sd x31, 248(sp)",
+    "    ld t0, 8(tp)",
+    "    sd t0, 16(sp)",
+    "    csrr t0, sscratch",
+    "    sd t0, 32(sp)",
+    "    csrw sscratch, zero",
+    "    csrr t0, sepc",
+    "    sd t0, 256(sp)",
+    "    csrr t0, sstatus",
+    "    sd t0, 264(sp)",
+    "    sd sp, 16(tp)",
+    "    mv a0, sp",
+    "    call {user_handler}",
+    // Return to user mode with the UserFrame at sp (also a new task's
+    // first entry). Interrupts off until the sret; sscratch = this CPU's
+    // block again.
+    ".global veridian_riscv_return_to_user",
+    "veridian_riscv_return_to_user:",
+    "    csrci sstatus, 2",
+    "    ld t0, 264(sp)",
+    "    csrw sstatus, t0",
+    "    ld t0, 256(sp)",
+    "    csrw sepc, t0",
+    "    csrw sscratch, tp",
+    "    ld x1, 8(sp)",
+    "    ld x3, 24(sp)",
+    "    ld x5, 40(sp)",
+    "    ld x6, 48(sp)",
+    "    ld x7, 56(sp)",
+    "    ld x8, 64(sp)",
+    "    ld x9, 72(sp)",
+    "    ld x10, 80(sp)",
+    "    ld x11, 88(sp)",
+    "    ld x12, 96(sp)",
+    "    ld x13, 104(sp)",
+    "    ld x14, 112(sp)",
+    "    ld x15, 120(sp)",
+    "    ld x16, 128(sp)",
+    "    ld x17, 136(sp)",
+    "    ld x18, 144(sp)",
+    "    ld x19, 152(sp)",
+    "    ld x20, 160(sp)",
+    "    ld x21, 168(sp)",
+    "    ld x22, 176(sp)",
+    "    ld x23, 184(sp)",
+    "    ld x24, 192(sp)",
+    "    ld x25, 200(sp)",
+    "    ld x26, 208(sp)",
+    "    ld x27, 216(sp)",
+    "    ld x28, 224(sp)",
+    "    ld x29, 232(sp)",
+    "    ld x30, 240(sp)",
+    "    ld x31, 248(sp)",
+    "    ld tp, 32(sp)",
+    "    ld sp, 16(sp)",
+    "    sret",
     handler = sym riscv_trap,
-    fatal = sym riscv_fatal_trap,
+    user_handler = sym riscv_user_trap,
 );
 
 extern "C" {
@@ -136,21 +228,119 @@ const SCAUSE_INTERRUPT: usize = 1 << 63;
 const IRQ_S_SOFT: usize = 1;
 const IRQ_S_TIMER: usize = 5;
 
-/// Rust side of the trap vector. Returns only for handled interrupts.
-extern "C" fn riscv_trap(scause: usize, sepc: usize, stval: usize) {
+/// scause exception codes.
+const EXC_ILLEGAL: usize = 2;
+const EXC_BREAKPOINT: usize = 3;
+const EXC_ECALL_U: usize = 8;
+const EXC_INSN_PAGE: usize = 12;
+const EXC_LOAD_PAGE: usize = 13;
+const EXC_STORE_PAGE: usize = 15;
+
+/// Rust side of the vector for traps taken in the kernel. Returns for
+/// handled interrupts and for a user-copy fault (`frame[16]` is the saved
+/// sepc, which it then points at the fixup).
+extern "C" fn riscv_trap(scause: usize, sepc: usize, stval: usize, frame: *mut u64) {
     if scause == SCAUSE_INTERRUPT | IRQ_S_TIMER {
-        super::riscv::timer::handle_interrupt();
+        super::riscv::timer::handle_interrupt(false);
         return;
     }
     if scause == SCAUSE_INTERRUPT | IRQ_S_SOFT {
-        // An IPI (SBI send_ipi sets sip.SSIP). Acknowledge it by clearing
-        // SSIP, or it stays pending and traps again on return.
-        // SAFETY: clears only the supervisor software-interrupt pending bit.
-        unsafe { core::arch::asm!("csrc sip, {0}", in(reg) 2usize, options(nomem, nostack)) };
-        crate::arch::percpu::note_ipi();
+        ack_ipi();
         return;
     }
+    if matches!(scause, EXC_LOAD_PAGE | EXC_STORE_PAGE) {
+        if let Some(fixup) = usercopy::fixup_for(sepc) {
+            // A user copy touched a page that is not present: demand paging
+            // first (the page may just not be backed yet), else EFAULT.
+            let info = crate::mm::page_fault::from_riscv(scause as u64, stval as u64, sepc as u64);
+            if !crate::mm::page_fault::resolve_user_copy_fault(&info) {
+                // SAFETY: `frame` is this trap's save area (the vector
+                // passes its sp); slot 16 is the saved sepc it restores.
+                unsafe { frame.add(16).write(fixup as u64) };
+            }
+            return;
+        }
+    }
     riscv_fatal_trap(scause, sepc, stval)
+}
+
+/// Acknowledge an IPI (SBI send_ipi sets sip.SSIP): clear SSIP, or it stays
+/// pending and traps again on return.
+fn ack_ipi() {
+    // SAFETY: clears only the supervisor software-interrupt pending bit.
+    unsafe { core::arch::asm!("csrc sip, {0}", in(reg) 2usize, options(nomem, nostack)) };
+    crate::arch::percpu::note_ipi();
+}
+
+/// Rust side of the vector for traps from user mode, on the task's kernel
+/// stack with its registers in `f`: system calls, interrupts, faults.
+/// Returns to `veridian_riscv_return_to_user`.
+extern "C" fn riscv_user_trap(f: &mut switch::UserFrame) {
+    let scause: usize;
+    let stval: usize;
+    // SAFETY: reading the trap CSRs has no side effects.
+    unsafe {
+        core::arch::asm!("csrr {0}, scause", out(reg) scause, options(nomem, nostack));
+        core::arch::asm!("csrr {0}, stval", out(reg) stval, options(nomem, nostack));
+    }
+    match scause {
+        s if s == SCAUSE_INTERRUPT | IRQ_S_TIMER => super::riscv::timer::handle_interrupt(true),
+        s if s == SCAUSE_INTERRUPT | IRQ_S_SOFT => ack_ipi(),
+        EXC_ECALL_U => {
+            // Past the ecall; the call runs with interrupts on (as x86_64's
+            // system calls do since N-139).
+            f.sepc += 4;
+            switch::irq_enable();
+            let a = |i: usize| f.x[switch::UserFrame::A0 + i] as usize;
+            let ret = crate::syscall::riscv64_syscall(
+                f.x[switch::UserFrame::A7] as usize,
+                a(0),
+                a(1),
+                a(2),
+                a(3),
+                a(4),
+            );
+            f.x[switch::UserFrame::A0] = ret as u64;
+        }
+        EXC_INSN_PAGE | EXC_LOAD_PAGE | EXC_STORE_PAGE => {
+            switch::irq_enable();
+            let info = crate::mm::page_fault::from_riscv(scause as u64, stval as u64, f.sepc);
+            if crate::mm::page_fault::handle_page_fault(info).is_err() {
+                kill_user(11); // SIGSEGV
+            }
+        }
+        EXC_ILLEGAL => kill_user(4),    // SIGILL
+        EXC_BREAKPOINT => kill_user(5), // SIGTRAP
+        _ => kill_user(7),              // SIGBUS
+    }
+    exit_to_user(f);
+}
+
+/// Last step before every return to user mode: preemption, a fatal signal
+/// acted on, and a frame that can only return to user mode. Signal handlers
+/// are not delivered on RISC-V yet (sprint E).
+fn exit_to_user(f: &mut switch::UserFrame) {
+    switch::irq_enable();
+    #[cfg(feature = "alloc")]
+    crate::sched::dispatch::preempt_user();
+    crate::process::user_return_check();
+    switch::irq_save();
+    f.sstatus = switch::user_sstatus(f.sstatus);
+    if !crate::syscall::userspace::is_user_address(f.sepc as usize) {
+        kill_user(11);
+    }
+}
+
+/// End the current process with `signal` (a fault it did not handle).
+fn kill_user(signal: u32) -> ! {
+    #[cfg(feature = "alloc")]
+    if crate::sched::dispatch::current_owner().is_some() {
+        let _ = crate::syscall::process::exit_current(0, signal);
+    }
+    panic!(
+        "RISC-V user fault (signal {}) outside a dispatched thread",
+        signal
+    );
 }
 
 /// Report an unexpected supervisor-mode trap and stop.
