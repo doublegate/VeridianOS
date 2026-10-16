@@ -3765,6 +3765,16 @@ static void test_gs_base(void)
                                           && eperm && kept, why);
 }
 
+/* A new thread gets its creator's mask (it used to get every CPU). */
+static void *mask_reader(void *arg)
+{
+    cpu_set_t got;
+    CPU_ZERO(&got);
+    long want = (long)arg;
+    return (void *)(long)(sched_getaffinity(0, sizeof(got), &got) == 0 && CPU_COUNT(&got) == 1
+                          && CPU_ISSET(want, &got) && sched_getcpu() == want);
+}
+
 static void test_smp_placement(void)
 {
     long ncpu = sysconf(_SC_NPROCESSORS_ONLN);
@@ -3779,6 +3789,11 @@ static void test_smp_placement(void)
                  && node == 0 && sched_getcpu() == c;
         if (!pinned) where = (int)c;
     }
+    /* Still pinned to the last CPU: a thread created now is too. */
+    pthread_t reader;
+    void *inherited = 0;
+    if (pthread_create(&reader, 0, mask_reader, (void *)(ncpu - 1)) == 0)
+        pthread_join(reader, &inherited);
     CPU_ZERO(&set);
     for (long c = 0; c < ncpu && c < 64; c++) CPU_SET(c, &set);
     sched_setaffinity(0, sizeof(set), &set);
@@ -3802,9 +3817,9 @@ static void test_smp_placement(void)
     int used = __builtin_popcountl(spread_seen);
     int spread = made == ncpu - 1 && used == ncpu;
     static char why[96];
-    snprintf(why, sizeof(why), "cpus=%ld pinned=%d (failed at %d) threads=%d used=%d", ncpu,
-             pinned, where, made, used);
-    report("musl_smp_placement", pinned && spread, why);
+    snprintf(why, sizeof(why), "cpus=%ld pinned=%d (failed at %d) inherited=%ld threads=%d used=%d",
+             ncpu, pinned, where, (long)inherited, made, used);
+    report("musl_smp_placement", pinned && inherited == (void *)1L && spread, why);
 }
 
 struct test_sched_attr {
@@ -3815,18 +3830,15 @@ struct test_sched_attr {
     uint64_t runtime, deadline, period;
 };
 
-/* SMP: deadline tasks that all wait on one CPU spread out. Each thread
- * reserves 45 ms every 100 ms, starts on CPU 0 (its creator's mask), and
- * then may use every CPU while it keeps running. One CPU can give them
- * 100% between them; spread out, each gets its 45%. They used to stay
- * where they started: deadline tasks moved only when they woke. A launcher
- * thread restricted to CPU 0 creates them, so that this thread is never
- * restricted: the deadline threads leave nothing of CPU 0 to anyone else
- * when they do not spread. */
+/* SMP: busy deadline tasks spread over the CPUs. Each thread reserves
+ * 45 ms every 100 ms and never sleeps; spread out, each gets its 45%, and
+ * sharing one CPU three or four of them could not (135% or 180%). The
+ * placement at wakeup and the pull of waiting deadline tasks spread them.
+ * A deadline thread must allow every online CPU, as on Linux: admission
+ * counts all of them, so restricted deadline tasks could overload one. */
 static volatile int dlb_phase;
 static long long dlb_used[4];
-static int dlb_ok[4], dlb_inherited[4], dlb_made, dlb_want;
-static pthread_t dlb_t[4];
+static int dlb_ok[4];
 
 static long long thread_cpu_ns(void)
 {
@@ -3838,18 +3850,9 @@ static long long thread_cpu_ns(void)
 static void *dlb_thread(void *arg)
 {
     long i = (long)arg;
-    /* A new thread gets its creator's mask (it used to get every CPU). */
-    cpu_set_t got;
-    CPU_ZERO(&got);
-    dlb_inherited[i] = sched_getaffinity(0, sizeof(got), &got) == 0 && CPU_COUNT(&got) == 1
-                       && CPU_ISSET(0, &got) && sched_getcpu() == 0;
     while (dlb_phase < 1) sched_yield();
     struct test_sched_attr a = {sizeof(a), 6, 0, 0, 0, 45000000, 100000000, 100000000};
     dlb_ok[i] = syscall(SYS_sched_setattr, 0, &a, 0) == 0;
-    cpu_set_t all;
-    CPU_ZERO(&all);
-    for (int c = 0; c < 64; c++) CPU_SET(c, &all);
-    sched_setaffinity(0, sizeof(all), &all); /* offline CPUs are dropped */
     while (dlb_phase < 2) ;
     /* The clock stands still while the thread does not run, so reading it
      * late (when next scheduled) still reads it at the phase change. */
@@ -3861,16 +3864,32 @@ static void *dlb_thread(void *arg)
     return 0;
 }
 
-static void *dlb_launcher(void *arg)
+/* In a child, so a failure leaves this process's thread as it was: 0 if
+ * a restricted thread may not become a deadline one (EPERM), a deadline
+ * one may not be restricted (EBUSY), and with every CPU both work. */
+static int dlb_mask_rules(void)
 {
-    (void)arg;
-    cpu_set_t zero;
-    CPU_ZERO(&zero);
-    CPU_SET(0, &zero);
-    if (sched_setaffinity(0, sizeof(zero), &zero) != 0) return 0;
-    for (long i = 0; i < dlb_want; i++)
-        if (pthread_create(&dlb_t[dlb_made], 0, dlb_thread, (void *)i) == 0) dlb_made++;
-    return 0;
+    pid_t pid = fork();
+    if (pid == 0) {
+        cpu_set_t all, zero;
+        sched_getaffinity(0, sizeof(all), &all);
+        CPU_ZERO(&zero);
+        CPU_SET(0, &zero);
+        struct test_sched_attr a = {sizeof(a), 6, 0, 0, 0, 1000000, 10000000, 10000000};
+        int r = 0;
+        if (sched_setaffinity(0, sizeof(zero), &zero) != 0) r |= 1;
+        errno = 0;
+        if (!(syscall(SYS_sched_setattr, 0, &a, 0) == -1 && errno == EPERM)) r |= 2;
+        if (sched_setaffinity(0, sizeof(all), &all) != 0) r |= 4;
+        if (syscall(SYS_sched_setattr, 0, &a, 0) != 0) r |= 8;
+        errno = 0;
+        if (!(sched_setaffinity(0, sizeof(zero), &zero) == -1 && errno == EBUSY)) r |= 16;
+        if (sched_setaffinity(0, sizeof(all), &all) != 0) r |= 32;
+        _exit(r);
+    }
+    int status = -1;
+    if (pid < 0 || waitpid(pid, &status, 0) != pid || !WIFEXITED(status)) return 64;
+    return WEXITSTATUS(status);
 }
 
 static void test_dl_balance(void)
@@ -3880,37 +3899,35 @@ static void test_dl_balance(void)
         report("musl_dl_balance", 1, "one CPU");
         return;
     }
-    /* At least three, so that one CPU cannot fit them (135%); at most two
-     * per CPU, so that spread out they fit (90%). */
-    dlb_want = ncpu >= 4 ? 4 : 3;
-    dlb_made = 0;
+    int rules = dlb_mask_rules();
+    /* At least three, so that one CPU cannot fit them; at most two per
+     * CPU, so that spread out they fit (90%). */
+    int want = ncpu >= 4 ? 4 : 3, made = 0;
+    pthread_t t[4];
     dlb_phase = 0;
-    for (int i = 0; i < 4; i++) {
+    for (long i = 0; i < want; i++) {
         dlb_used[i] = -1;
-        dlb_ok[i] = dlb_inherited[i] = 0;
+        dlb_ok[i] = 0;
+        if (pthread_create(&t[made], 0, dlb_thread, (void *)i) == 0) made++;
     }
-    pthread_t launcher;
-    if (pthread_create(&launcher, 0, dlb_launcher, 0) == 0) pthread_join(launcher, 0);
     dlb_phase = 1;
     struct timespec settle = {0, 100 * 1000000}, window = {0, 600 * 1000000};
     nanosleep(&settle, 0);
     dlb_phase = 2;
     nanosleep(&window, 0);
     dlb_phase = 3;
-    for (int i = 0; i < dlb_made; i++) pthread_join(dlb_t[i], 0);
-    int ok = dlb_made == dlb_want, inherited = 1;
+    for (int i = 0; i < made; i++) pthread_join(t[i], 0);
+    int ok = made == want;
     long long least = -1;
-    for (int i = 0; i < dlb_made; i++) {
+    for (int i = 0; i < made; i++) {
         ok = ok && dlb_ok[i];
-        inherited = inherited && dlb_inherited[i];
         if (least < 0 || dlb_used[i] < least) least = dlb_used[i];
     }
-    /* 45% of 600 ms is 270 ms; sharing one CPU, each would get 600/n. */
+    /* 45% of 600 ms is 270 ms. */
     static char why[112];
-    snprintf(why, sizeof(why),
-             "cpus=%ld threads=%d inherited=%d admitted=%d least=%lldms (want >=230)", ncpu,
-             dlb_made, inherited, ok, least / 1000000);
-    report("musl_dl_balance", ok && inherited && least >= 230000000LL, why);
+    snprintf(why, sizeof(why), "cpus=%ld mask rules=%d threads=%d admitted=%d least=%lldms (want >=230)",
+             ncpu, rules, made, ok, least / 1000000);
+    report("musl_dl_balance", rules == 0 && ok && least >= 230000000LL, why);
 }
 
 static void test_sched(void)

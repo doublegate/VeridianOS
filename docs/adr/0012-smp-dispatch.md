@@ -73,8 +73,9 @@ raises questions the earlier ADRs leave open:
   takes a waiting one whose deadline is earlier than everything it runs (`pull_dl`, Linux
   `pull_dl_task`), keeping its reservation. There is no separate push: a task that cannot run
   where it is queued waits at most one tick for another CPU to pull it. Throttled tasks do not
-  move. Admission does not account for affinity, so deadline tasks restricted to too few CPUs can
-  still overload them (Linux refuses such masks for deadline tasks; not done).
+  move. Admission counts every online CPU, so a deadline thread must allow all of them, as on
+  Linux: sched_setattr refuses one with a narrower mask (EPERM) and sched_setaffinity refuses to
+  narrow a deadline thread's mask (EBUSY).
 - Waking a task that is mid-switch on another CPU spins for the rest of that switch. It is short,
   with interrupts off on the other side.
 - Rule 6 has to hold for every new lock that interrupt handlers take. A CPU that stays in a

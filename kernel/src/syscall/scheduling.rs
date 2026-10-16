@@ -12,7 +12,10 @@
 //! never take SCHED_DEADLINE, leave SCHED_IDLE only if RLIMIT_NICE allows
 //! its current nice value, never clear SCHED_RESET_ON_FORK, and change only
 //! threads of its own user (EPERM). SCHED_DEADLINE goes through admission
-//! control (95% of each CPU; EBUSY past it).
+//! control (95% of each CPU; EBUSY past it), and since that counts every
+//! online CPU, a deadline thread must allow all of them: sched_setattr
+//! refuses one whose mask leaves one out (EPERM), and sched_setaffinity
+//! refuses to narrow a deadline thread's mask (EBUSY), as Linux does.
 
 use alloc::{sync::Arc, vec::Vec};
 
@@ -254,6 +257,11 @@ fn set(
     let request = req(&params)?;
     let new = decide(&params, &request, me.euid == 0, Allowance::of(owner_pid))?;
     if !same_owner(&me, &owner) {
+        return Err(SyscallError::OperationNotPermitted);
+    }
+    // The affinity is read under the scheduling lock, which
+    // sched_setaffinity holds while it checks and changes the mask.
+    if new.deadline.is_some() && !deadline_mask_ok(thread.get_affinity() as u64, online_mask()) {
         return Err(SyscallError::OperationNotPermitted);
     }
     reserve_deadline(&params, &new)?;
@@ -498,6 +506,13 @@ fn online_mask() -> u64 {
     crate::sched::dispatch::dispatching_mask()
 }
 
+/// Whether a deadline thread may have CPU mask `mask`: it must allow every
+/// online CPU, since admission counts the bandwidth of all of them
+/// (Linux: sched_setattr EPERM, sched_setaffinity EBUSY otherwise).
+fn deadline_mask_ok(mask: u64, online: u64) -> bool {
+    mask & online == online
+}
+
 /// Linux's sched_getaffinity length rule: the buffer holds at least one
 /// bit per CPU and is whole longs. Compared in bytes: `len * 8` overflows
 /// for a huge `len` (a debug-build panic any caller could trigger; security
@@ -536,7 +551,13 @@ pub fn sys_sched_setaffinity(pid: usize, len: usize, mask: usize) -> SyscallResu
     if wanted == 0 {
         return Err(SyscallError::InvalidArgument);
     }
+    // A deadline thread keeps every online CPU (EBUSY, as Linux).
+    let params = thread.sched.lock();
+    if params.deadline.is_some() && !deadline_mask_ok(wanted, online_mask()) {
+        return Err(SyscallError::Busy);
+    }
     thread.set_affinity(wanted as usize);
+    drop(params);
     // A thread on a CPU it may no longer use moves now (itself: before
     // this call returns to user mode).
     crate::sched::dispatch::set_affinity((tpid, thread.tid.0), wanted);
@@ -821,6 +842,15 @@ mod tests {
         assert!(reserve_deadline(&a, &none).is_ok());
         assert_eq!(*DL_BANDWIDTH.lock(), 0);
         *DL_BANDWIDTH.lock() = saved;
+    }
+
+    #[test]
+    fn deadline_threads_must_allow_every_online_cpu() {
+        assert!(deadline_mask_ok(0b1111, 0b1111));
+        assert!(deadline_mask_ok(!0, 0b1111), "offline CPUs do not matter");
+        assert!(!deadline_mask_ok(0b0001, 0b1111));
+        assert!(!deadline_mask_ok(0b1110, 0b1111));
+        assert!(deadline_mask_ok(0b0001, 0b0001), "one CPU");
     }
 
     #[test]

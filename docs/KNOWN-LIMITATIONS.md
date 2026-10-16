@@ -195,9 +195,6 @@ not refused. System calls, page faults and the return to user mode run with inte
 so TLB shootdowns are always answered (N-139, ADR 0012 rule 6).
 
 Still open:
-- Deadline admission counts every CPU but ignores affinity: deadline tasks restricted to fewer
-  CPUs than their reserved bandwidth needs overload those CPUs (Linux refuses such masks for
-  deadline tasks with EBUSY/EPERM). Unrestricted deadline tasks spread by deadline (ADR 0012).
 - Lock-free structures (`sync/`, N-59) have not run on more than one CPU.
 - Secondaries copy the boot CPU's CR4, so they match it, including SMEP and SMAP being off (N-15,
   below).

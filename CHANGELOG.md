@@ -17,9 +17,13 @@
   reservation. A waking deadline task goes to a CPU with no deadline work, else to the one whose
   earliest deadline is the latest, if later than its own (Linux `find_later_rq`). Deadline tasks
   used to be placed only at wakeup and never moved, so busy ones that started on one CPU stayed
-  there over its capacity. Runtime test `musl_dl_balance` (four threads reserving 45% each,
-  started on CPU 0, over a 600 ms window: before, the least-served one ran 0 ms; now each runs
-  at least 230 ms).
+  there over its capacity. Host tests for both decisions; runtime test `musl_dl_balance` (four
+  busy threads reserving 45% each all run at least 230 ms of a 600 ms window).
+- **A deadline thread must allow every online CPU, as on Linux.** Admission counts the bandwidth
+  of all of them, so deadline threads restricted to a few CPUs could be admitted and still
+  overload those. sched_setattr to SCHED_DEADLINE now fails with EPERM for a thread whose mask
+  leaves out an online CPU, and sched_setaffinity with EBUSY when it would narrow a deadline
+  thread's mask. `musl_dl_balance` checks both.
 - **arch_prctl ARCH_SET_GS and ARCH_GET_GS.** A thread's user GS base, inherited by its threads
   and fork children. Runtime test `musl_gs_base_per_thread`.
 - **Priority-inheritance mutexes (SCHED-INC-01).** FUTEX_LOCK_PI, FUTEX_LOCK_PI2, FUTEX_TRYLOCK_PI and
@@ -735,7 +739,7 @@
 
 - **A new thread inherits its creator's CPU mask.** clone gave every new thread all CPUs, so a
   thread created by one restricted with sched_setaffinity could run anywhere (Linux copies the
-  mask). Checked by `musl_dl_balance`.
+  mask). Checked by `musl_smp_placement`.
 - **CPU clocks no longer go backwards.** A thread's CPU clock read its total and its running slice
   separately; a timer tick between the two reads lost up to a tick. A process's CPU clock lost
   what an exited thread ran while tearing itself down, once the thread's task was freed. It also
