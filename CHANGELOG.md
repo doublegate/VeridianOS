@@ -2,6 +2,12 @@
 
 ### Added
 
+- **RISC-V system call numbers (ADR 0009).** `tools/compat/gen_syscalls.py` also reads Linux's
+  generic table (`abi/linux/syscall.tbl`, v7.2), which RISC-V and arm64 use: the kernel gets
+  `Syscall::from_riscv64`, and `<veridian/sysno.h>` and the Rust constants give RISC-V programs
+  their numbers (`write` 64, `exit_group` 94), with no number for the calls that table leaves to
+  user space (`open`, `fork`). `docs/compat/SYSCALL-NUMBERS.md` lists both columns. Host test
+  `riscv64_numbers_are_the_generic_table`.
 - **RISC-V runs the dispatcher (ADR 0006).** A switch primitive (`arch/riscv64/switch.rs`:
   callee-saved registers on the task's stack, seeded kernel threads, `satp` per task), interrupt
   masking through `sstatus.SIE`, an idle loop that cannot miss a wake (`wfi` with interrupts

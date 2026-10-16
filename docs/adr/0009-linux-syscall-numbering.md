@@ -72,3 +72,14 @@ WSL1, the FreeBSD Linuxulator) speaks Linux's numbers.
 - **Embedded machine code.** The kernel's embedded programs and signal trampolines take their
   numbers from the generated enum. The x86_64 ones were re-encoded for `write` (1) and
   `exit_group` (231).
+
+## Amendment (2026-10-16, sprint E): RISC-V uses Linux's generic table
+
+As planned under "Other architectures", the generator now reads Linux's generic table as well
+(`abi/linux/syscall.tbl`, v7.2 `scripts/syscall.tbl`), filtered by RISC-V's ABIs (`common`, `64`,
+`riscv`, `rlimit`, `memfd_secret`, from `arch/riscv/kernel/Makefile.syscalls`). The kernel decodes
+RISC-V numbers with `Syscall::from_riscv64` into the same `Syscall` variants; `<veridian/sysno.h>`
+and `userland/abi/syscall_numbers.rs` give each architecture its own numbers, and a call the
+generic table leaves to user space (`open`, `stat`, `fork`, `pipe`, `dup2`, `arch_prctl`, ...) has
+no number on RISC-V, as on Linux. Private numbers are the same everywhere. arm64 (which adds
+`renameat`) is added when AArch64 gets user mode.

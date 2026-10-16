@@ -3449,6 +3449,60 @@ mod tests {
         assert!(Syscall::try_from(1023).is_err());
     }
 
+    /// RISC-V numbers come from Linux's generic table (ADR 0009): the
+    /// asm-generic values, the private numbers unchanged, and no number for
+    /// the calls that table leaves to user space.
+    #[test]
+    fn riscv64_numbers_are_the_generic_table() {
+        let cases: &[(usize, Syscall)] = &[
+            (17, Syscall::Getcwd),
+            (56, Syscall::Openat),
+            (57, Syscall::Close),
+            (61, Syscall::Getdents64),
+            (63, Syscall::Read),
+            (64, Syscall::Write),
+            (73, Syscall::Ppoll),
+            (79, Syscall::Newfstatat),
+            (93, Syscall::Exit),
+            (94, Syscall::ExitGroup),
+            (96, Syscall::SetTidAddress),
+            (98, Syscall::Futex),
+            (113, Syscall::ClockGettime),
+            (134, Syscall::RtSigaction),
+            (172, Syscall::Getpid),
+            (178, Syscall::Gettid),
+            (214, Syscall::Brk),
+            (215, Syscall::Munmap),
+            (220, Syscall::Clone),
+            (221, Syscall::Execve),
+            (222, Syscall::Mmap),
+            (261, Syscall::Prlimit64),
+            (1024, Syscall::IpcSend),
+        ];
+        for &(n, call) in cases {
+            assert_eq!(Syscall::from_riscv64(n), Some(call), "number {}", n);
+        }
+        let absent = [
+            Syscall::Open,
+            Syscall::Stat,
+            Syscall::Fork,
+            Syscall::Pipe,
+            Syscall::Dup2,
+            Syscall::ArchPrctl,
+        ];
+        for n in 0..2048 {
+            if let Some(call) = Syscall::from_riscv64(n) {
+                assert!(!absent.contains(&call), "{:?} at {}", call, n);
+            }
+        }
+        // Every private call keeps its number.
+        for &call in numbers::ALL {
+            if call.linux_name().is_none() {
+                assert_eq!(Syscall::from_riscv64(call as usize), Some(call));
+            }
+        }
+    }
+
     /// Linux numbers that the old musl remap or the old Linux translation
     /// table sent to the wrong call now reach the right one.
     #[test]

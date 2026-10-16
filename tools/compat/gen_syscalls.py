@@ -4,6 +4,8 @@
 Inputs:
     abi/syscalls.map          kernel variant -> Linux name or private number
     abi/linux/syscall_64.tbl  Linux x86_64 numbers (vendored, v7.2)
+    abi/linux/syscall.tbl     Linux's generic table, used by RISC-V and arm64
+                              (vendored, v7.2 scripts/syscall.tbl)
 
 Outputs (checked in; never edit them by hand):
     kernel/src/syscall/numbers.rs           the Syscall enum and its decoder
@@ -23,6 +25,13 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[2]
 MAP = REPO / "abi/syscalls.map"
 TBL = REPO / "abi/linux/syscall_64.tbl"
+GENERIC_TBL = REPO / "abi/linux/syscall.tbl"
+# The ABIs of the generic table each 64-bit architecture uses: common and 64
+# (scripts/Makefile.asm-headers) plus its own (arch/*/kernel/Makefile.syscalls,
+# v7.2). arm64 adds renameat; it is listed when AArch64 gets user mode.
+GENERIC_ABIS = {
+    "riscv64": {"common", "64", "riscv", "rlimit", "memfd_secret"},
+}
 OUT_RS = REPO / "kernel/src/syscall/numbers.rs"
 OUT_H = REPO / "userland/libc/include/veridian/sysno.h"
 OUT_USER_RS = REPO / "userland/abi/syscall_numbers.rs"
@@ -45,6 +54,29 @@ def read_linux_table():
         if len(fields) >= 3 and fields[1] in ("common", "64"):
             table[fields[2]] = int(fields[0])
     return table
+
+
+def read_generic_table(abis):
+    table = {}
+    for line in GENERIC_TBL.read_text().splitlines():
+        if not line.strip() or line.startswith("#"):
+            continue
+        fields = line.split()
+        if len(fields) >= 3 and fields[1] in abis:
+            if fields[2] in table:
+                fail(f"generic table: {fields[2]} twice for ABIs {sorted(abis)}")
+            table[fields[2]] = int(fields[0])
+    return table
+
+
+def add_generic_numbers(entries):
+    """Give each Linux call its number on each generic-table architecture
+    (None where that architecture does not have the call: open, fork and the
+    other calls its table leaves to user space)."""
+    for arch, abis in GENERIC_ABIS.items():
+        table = read_generic_table(abis)
+        for e in entries:
+            e[arch] = table.get(e["linux"]) if e["linux"] else e["number"]
 
 
 def upper_snake(name):
@@ -134,6 +166,28 @@ def gen_rust(entries):
         "        }",
         "    }",
         "}",
+    ]
+    for arch in GENERIC_ABIS:
+        out += [
+            "",
+            "impl Syscall {",
+            f"    /// Decode a {arch} system call number: Linux's generic table with",
+            f"    /// that architecture's ABIs ({', '.join(sorted(GENERIC_ABIS[arch]))}),",
+            "    /// and the private numbers. `None` for a number the architecture does",
+            "    /// not have, including calls its table leaves to user space (open,",
+            "    /// fork).",
+            f"    pub const fn from_{arch}(value: usize) -> Option<Self> {{",
+            "        match value {",
+        ]
+        for e in sorted((e for e in entries if e[arch] is not None), key=lambda e: e[arch]):
+            out.append(f"            {e[arch]} => Some(Syscall::{e['variant']}),")
+        out += [
+            "            _ => None,",
+            "        }",
+            "    }",
+            "}",
+        ]
+    out += [
         "",
         "impl Syscall {",
         "    /// The Linux name of this call, or `None` for a VeridianOS-only call.",
@@ -171,12 +225,22 @@ def gen_c(entries):
         "#define _VERIDIAN_SYSNO_H",
         "",
     ]
-    group = None
-    for e in entries:
-        if e["group"] != group:
-            group = e["group"]
-            out += [f"/* {group} */"]
-        out.append(f"#define {e['const']:<32} {e['number']}")
+    def block(key):
+        lines, group = [], None
+        for e in entries:
+            if e[key] is None:
+                continue
+            if e["group"] != group:
+                group = e["group"]
+                lines.append(f"/* {group} */")
+            lines.append(f"#define {e['const']:<32} {e[key]}")
+        return lines
+
+    out += ["#if defined(__x86_64__)", ""] + block("number")
+    out += ["", "#elif defined(__riscv) && __riscv_xlen == 64", ""]
+    out += ["/* Linux's generic table: calls RISC-V leaves to user space are absent. */"]
+    out += block("riscv64")
+    out += ["", "#else", '#error "<veridian/sysno.h>: no system call numbers for this architecture"', "#endif"]
     out += ["", "#endif /* _VERIDIAN_SYSNO_H */", ""]
     return "\n".join(out)
 
@@ -189,11 +253,23 @@ def gen_user_rust(entries):
         "// Used with include!, which takes items only, so the attribute sits on",
         "// a module: `include!(\".../syscall_numbers.rs\"); pub use sysno::*;`",
         "",
+        "#[cfg(target_arch = \"x86_64\")]",
         "#[allow(dead_code, non_upper_case_globals)]",
         "pub mod sysno {",
     ]
     for e in entries:
         out.append(f"    pub const {e['const']}: usize = {e['number']};")
+    out += [
+        "}",
+        "",
+        "// Linux's generic table: calls RISC-V leaves to user space are absent.",
+        "#[cfg(target_arch = \"riscv64\")]",
+        "#[allow(dead_code, non_upper_case_globals)]",
+        "pub mod sysno {",
+    ]
+    for e in entries:
+        if e["riscv64"] is not None:
+            out.append(f"    pub const {e['const']}: usize = {e['riscv64']};")
     out += ["}", ""]
     return "\n".join(out)
 
@@ -205,8 +281,11 @@ def gen_md(entries):
         "",
         "Generated by `tools/compat/gen_syscalls.py` from `abi/syscalls.map`; do not edit.",
         "",
-        f"{len(entries)} calls: {linux} use their Linux x86_64 number and name (ADR 0009), "
-        f"{len(entries) - linux} are VeridianOS calls numbered from {PRIVATE_BASE}. "
+        f"{len(entries)} calls: {linux} use their Linux number and name (ADR 0009), "
+        f"{len(entries) - linux} are VeridianOS calls numbered from {PRIVATE_BASE} on every "
+        "architecture. RISC-V uses Linux's generic table (`abi/linux/syscall.tbl`), which leaves "
+        f"{sum(1 for e in entries if e['riscv64'] is None)} of these calls to user space "
+        "(`--`: open, fork and the like). "
         "C programs get the numbers from `<veridian/sysno.h>`, Rust programs from "
         "`userland/abi/syscall_numbers.rs`. What each Linux call implements, and how fully, "
         "is in `LINUX-SYSCALL-COVERAGE.md`.",
@@ -215,8 +294,9 @@ def gen_md(entries):
     for e in entries:
         if e["group"] != group:
             group = e["group"]
-            out += ["", f"## {group}", "", "| Number | Constant | Kernel variant |", "|---|---|---|"]
-        out.append(f"| {e['number']} | `{e['const']}` | `{e['variant']}` |")
+            out += ["", f"## {group}", "", "| x86_64 | RISC-V | Constant | Kernel variant |", "|---|---|---|---|"]
+        rv = e["riscv64"] if e["riscv64"] is not None else "--"
+        out.append(f"| {e['number']} | {rv} | `{e['const']}` | `{e['variant']}` |")
     out.append("")
     return "\n".join(out)
 
@@ -224,6 +304,7 @@ def gen_md(entries):
 def main():
     check = "--check" in sys.argv[1:]
     entries = read_map(read_linux_table())
+    add_generic_numbers(entries)
     outputs = {
         OUT_RS: gen_rust(entries),
         OUT_H: gen_c(entries),
