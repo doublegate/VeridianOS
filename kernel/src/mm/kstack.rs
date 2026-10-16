@@ -1,7 +1,7 @@
 //! Kernel stacks with guard pages (N-26).
 //!
-//! On x86_64 each thread's kernel stack is mapped into its own slot of a
-//! dedicated kernel-half region, at the top of the slot, with the pages
+//! On x86_64 and RISC-V each thread's kernel stack is mapped into its own slot
+//! of a dedicated kernel-half region, at the top of the slot, with the pages
 //! below it left unmapped. A stack overflow then faults on the guard (the
 //! page-fault handler runs on its own IST stack) instead of silently
 //! overwriting whatever frame lay next to the stack in the direct physical
@@ -11,8 +11,10 @@
 //! the kernel half of the page table, so every address space shares the
 //! tables below it and sees each stack as it is mapped.
 //!
-//! AArch64 and RISC-V run the kernel without paging today (sprint E), so
-//! there the stack keeps its direct-map address and has no guard yet.
+//! AArch64 runs the kernel without paging today (sprint E), so there the
+//! stack keeps its direct-map address and has no guard yet. On RISC-V an
+//! overflow faults on the guard, but the trap is taken on the same stack,
+//! so it does not report cleanly yet (no separate overflow stack).
 
 use super::{FrameNumber, FRAME_ALLOCATOR};
 use crate::error::KernelError;
@@ -26,7 +28,11 @@ pub struct KernelStack {
     pub pages: usize,
 }
 
-#[cfg(all(target_arch = "x86_64", target_os = "none", feature = "alloc"))]
+#[cfg(all(
+    any(target_arch = "x86_64", target_arch = "riscv64"),
+    target_os = "none",
+    feature = "alloc"
+))]
 mod region {
     use alloc::vec::Vec;
     use core::sync::atomic::{AtomicUsize, Ordering};
@@ -147,7 +153,11 @@ mod region {
 /// Prepare the stack region. Call once during memory init, before the
 /// first address space is created.
 pub fn init() {
-    #[cfg(all(target_arch = "x86_64", target_os = "none", feature = "alloc"))]
+    #[cfg(all(
+        any(target_arch = "x86_64", target_arch = "riscv64"),
+        target_os = "none",
+        feature = "alloc"
+    ))]
     region::init();
 }
 
@@ -160,7 +170,11 @@ pub fn allocate(pages: usize) -> Result<KernelStack, KernelError> {
             requested: pages * 4096,
             available: 0,
         })?;
-    #[cfg(all(target_arch = "x86_64", target_os = "none", feature = "alloc"))]
+    #[cfg(all(
+        any(target_arch = "x86_64", target_arch = "riscv64"),
+        target_os = "none",
+        feature = "alloc"
+    ))]
     let base = match region::map(frame, pages) {
         Ok(base) => base,
         Err(e) => {
@@ -168,7 +182,11 @@ pub fn allocate(pages: usize) -> Result<KernelStack, KernelError> {
             return Err(e);
         }
     };
-    #[cfg(not(all(target_arch = "x86_64", target_os = "none", feature = "alloc")))]
+    #[cfg(not(all(
+        any(target_arch = "x86_64", target_arch = "riscv64"),
+        target_os = "none",
+        feature = "alloc"
+    )))]
     let base = super::phys_to_virt_addr(frame.as_u64() << 12) as usize;
     // SAFETY: `base` maps exactly the `pages` frames just allocated.
     unsafe { core::ptr::write_bytes(base as *mut u8, 0, pages * 4096) };
@@ -178,7 +196,11 @@ pub fn allocate(pages: usize) -> Result<KernelStack, KernelError> {
 /// Free a stack from [`allocate`]: unmap it (on every CPU), then return
 /// its frames.
 pub fn free(stack: KernelStack) {
-    #[cfg(all(target_arch = "x86_64", target_os = "none", feature = "alloc"))]
+    #[cfg(all(
+        any(target_arch = "x86_64", target_arch = "riscv64"),
+        target_os = "none",
+        feature = "alloc"
+    ))]
     if region::contains(stack.base as u64) {
         region::unmap(stack.base, stack.pages);
     }
@@ -188,11 +210,19 @@ pub fn free(stack: KernelStack) {
 /// Whether `addr` is in the guard area of the kernel stack region (below
 /// a stack in its slot), i.e. a fault there is a kernel stack overflow.
 pub fn is_guard_fault(addr: u64) -> bool {
-    #[cfg(all(target_arch = "x86_64", target_os = "none", feature = "alloc"))]
+    #[cfg(all(
+        any(target_arch = "x86_64", target_arch = "riscv64"),
+        target_os = "none",
+        feature = "alloc"
+    ))]
     {
         region::contains(addr)
     }
-    #[cfg(not(all(target_arch = "x86_64", target_os = "none", feature = "alloc")))]
+    #[cfg(not(all(
+        any(target_arch = "x86_64", target_arch = "riscv64"),
+        target_os = "none",
+        feature = "alloc"
+    )))]
     {
         let _ = addr;
         false

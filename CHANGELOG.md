@@ -2,6 +2,11 @@
 
 ### Added
 
+- **RISC-V kernel stacks have guard pages (N-26).** With paging on, RISC-V uses the same stack
+  region as x86_64: each stack in its own slot of the kernel half with unmapped pages below it,
+  so an overflow faults instead of overwriting the neighbouring frame. The boot test
+  `kernel_stack_guard_page` runs on RISC-V (it was skipped). The trap is still taken on the
+  overflowed stack, so it does not report cleanly yet.
 - **RISC-V runs with paging on, the kernel in the upper half (ADR 0013).** The kernel ran with
   `satp` Bare at its load address, in what is the user half of an address space. It is now
   linked at 0xFFFF_FFFF_8020_0000 and loaded at 0x8020_0000; `_start` builds early page tables

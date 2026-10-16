@@ -2774,8 +2774,8 @@ fn run_usercopy_tests(passed: &mut u32, failed: &mut u32) {
     }
 
     // Test 39: a kernel stack has an unmapped guard page below it, and
-    // freeing it unmaps it (N-26). x86_64 only until the other
-    // architectures run the kernel with paging (sprint E).
+    // freeing it unmaps it (N-26). x86_64 and RISC-V; AArch64 runs the
+    // kernel without paging (N-28).
     {
         let ok = match crate::mm::kstack::allocate(16) {
             Ok(stack) => {
@@ -2787,7 +2787,7 @@ fn run_usercopy_tests(passed: &mut u32, failed: &mut u32) {
                     hi.write_volatile(0x5678);
                     lo.read_volatile() == 0x1234 && hi.read_volatile() == 0x5678
                 };
-                #[cfg(target_arch = "x86_64")]
+                #[cfg(any(target_arch = "x86_64", target_arch = "riscv64"))]
                 let guarded = {
                     // SAFETY: the kernel's root table through the physical map;
                     // only read here.
@@ -2804,7 +2804,7 @@ fn run_usercopy_tests(passed: &mut u32, failed: &mut u32) {
                     crate::mm::kstack::free(stack);
                     guard_unmapped && mapped && probe(base).is_err()
                 };
-                #[cfg(not(target_arch = "x86_64"))]
+                #[cfg(not(any(target_arch = "x86_64", target_arch = "riscv64")))]
                 let guarded = {
                     crate::mm::kstack::free(stack);
                     true
@@ -2813,11 +2813,11 @@ fn run_usercopy_tests(passed: &mut u32, failed: &mut u32) {
             }
             Err(_) => false,
         };
-        #[cfg(target_arch = "x86_64")]
+        #[cfg(any(target_arch = "x86_64", target_arch = "riscv64"))]
         report_test("kernel_stack_guard_page", ok, passed, failed);
         // Without paging there is no guard to check: the stack being
         // usable is all that ran, so a pass would claim too much.
-        #[cfg(not(target_arch = "x86_64"))]
+        #[cfg(not(any(target_arch = "x86_64", target_arch = "riscv64")))]
         if ok {
             report_skip(
                 "kernel_stack_guard_page",

@@ -216,10 +216,13 @@ at each switch (stage D2), and the kernel itself is soft-float. The AArch64 and 
 soft-float too since v0.27 (N-178), so the FP registers hold only user state; AArch64 and RISC-V
 have no user mode yet, and switching that state comes with it in sprint E.
 
-### AArch64 and RISC-V kernel stacks have no guard pages (N-26, sprint E)
+### AArch64 kernel stacks have no guard pages; RISC-V overflows hang (N-26, sprint E)
 
-x86_64 kernel stacks have unmapped guard pages. On AArch64 and RISC-V, which run the kernel
-without paging today, a kernel stack overflow still silently corrupts the neighbouring frame.
+x86_64 and RISC-V kernel stacks have unmapped guard pages (RISC-V since v0.27, with paging). On
+AArch64, which runs the kernel without paging today, a kernel stack overflow still silently
+corrupts the neighbouring frame. On RISC-V an overflow faults on the guard, but the trap is taken
+on the same stack, so it faults again instead of reporting: there is no separate overflow stack
+yet (x86_64 takes the fault on an IST stack).
 
 ### IPC copy-on-write transfers are refused
 
