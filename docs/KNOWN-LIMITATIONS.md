@@ -205,8 +205,8 @@ Still open:
   memory, so the filesystems use `fs::bare_lock`, which does not actually lock. This blocks SMP
   work and EL0 (user mode) on AArch64. The EL2 entry leaves several EL2 registers unset and writes
   SCTLR_EL1 = 0 over its RES1 bits (N-177, HA-14).
-- **RISC-V has no user mode (N-14).** U-mode traps are fatal; page tables use the x86 entry format
-  (HR-10).
+- **RISC-V has no user mode (N-14).** U-mode traps are fatal and paging is off (HR-10's entry
+  format is in place).
 
 ### FPU and vector registers on AArch64 and RISC-V (N-41 part, sprint E)
 
@@ -493,8 +493,9 @@ order are in `ref-docs/HARDWARE-X86_64.md`, `ref-docs/HARDWARE-AARCH64.md` and
   - **Boot.** Has no Image header, so U-Boot `booti` and EFI cannot load it (HR-03). (BSS is
     zeroed and a hart lottery runs since v0.27, HR-01/HR-19.)
   - **Fixed addresses.** Writes to 0x1000_0000, a clock controller on the HiFive Unmatched (HR-04).
-  - **Paging.** Supports only Sv48, while the common boards are Sv39-only, and uses x86-format
-    page-table entries (HR-09, HR-10).
+  - **Paging.** Not enabled yet. The entry format is RISC-V's own since v0.27 (`mm::pte`,
+    HR-10), but the walker has four levels, i.e. Sv48 only, while the common boards are
+    Sv39-only (HR-09).
   - **Interrupts.** Computes the PLIC context wrongly on boards whose hart 0 is a monitor core
     (HR-12) and treats device interrupts as fatal (HR-31).
   - **Privileged registers.** The unused FP save/restore code reads `misa` and the FP

@@ -20,6 +20,7 @@ pub mod page_cache;
 pub mod page_fault;
 pub mod page_ops;
 pub mod page_table;
+pub mod pte;
 pub mod tlb;
 pub mod user_layout;
 pub mod user_validation;
@@ -167,6 +168,31 @@ impl PageFlags {
 
     pub fn contains(&self, other: Self) -> bool {
         (self.0 & other.0) == other.0
+    }
+
+    /// No flags.
+    pub const fn empty() -> Self {
+        Self(0)
+    }
+
+    /// The raw bits (the x86_64 entry layout, `mm::pte::x86`).
+    pub const fn bits(self) -> u64 {
+        self.0
+    }
+
+    /// These flags and `other` (a `const` `|`).
+    pub const fn union(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
+
+    /// Whether every flag of `other` is set, in a `const` context.
+    pub const fn has(self, other: Self) -> bool {
+        self.0 & other.0 == other.0
+    }
+
+    /// Flags from raw bits (the x86_64 entry layout).
+    pub const fn from_bits(bits: u64) -> Self {
+        Self(bits)
     }
 
     /// These flags without `other`.

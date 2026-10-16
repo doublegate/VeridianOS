@@ -10,7 +10,7 @@ use core::{
     ops::{Index, IndexMut},
 };
 
-use super::{FrameNumber, PageFlags, PhysicalAddress, VirtualAddress, FRAME_ALLOCATOR};
+use super::{pte, FrameNumber, PageFlags, PhysicalAddress, VirtualAddress, FRAME_ALLOCATOR};
 use crate::error::KernelError;
 
 /// Number of entries in a page table
@@ -36,16 +36,18 @@ impl PageTableEntry {
 
     /// Check if the entry is present
     pub const fn is_present(&self) -> bool {
-        self.entry & PageFlags::PRESENT.0 != 0
+        pte::native::is_present(self.entry)
+    }
+
+    /// Whether this entry, above the last level, is a large-page leaf
+    /// rather than a pointer to the next table.
+    pub const fn is_huge(&self) -> bool {
+        pte::native::is_huge(self.entry)
     }
 
     /// Get the physical frame this entry points to
     pub fn frame(&self) -> Option<FrameNumber> {
-        if self.is_present() {
-            Some(FrameNumber::new((self.entry & 0x000FFFFF_FFFFF000) >> 12))
-        } else {
-            None
-        }
+        pte::native::frame(self.entry)
     }
 
     /// Get the address this entry points to
@@ -55,14 +57,24 @@ impl PageTableEntry {
 
     /// Get flags for this entry
     pub const fn flags(&self) -> PageFlags {
-        // The low flag bits and NX (bit 63). NX used to be dropped, so a
-        // fork re-mapped the child's data and stack pages executable.
-        PageFlags(self.entry & (0xFFF | PageFlags::NO_EXECUTE.0))
+        pte::native::flags(self.entry)
     }
 
-    /// Set this entry to map to a frame with given flags
+    /// Set this entry to map to a frame with given flags (a leaf)
     pub fn set(&mut self, frame: FrameNumber, flags: PageFlags) {
-        self.entry = (frame.as_u64() << 12) | flags.0;
+        self.entry = pte::native::leaf(frame, flags);
+    }
+
+    /// Point this entry at the next-level table in `frame`; `user` when it
+    /// is on the path to a user page.
+    pub fn set_table(&mut self, frame: FrameNumber, user: bool) {
+        self.entry = pte::native::table(frame, user);
+    }
+
+    /// Let user pages below this table entry be reached (x86_64 checks
+    /// USER at every level; RISC-V has nothing to add).
+    pub fn grant_user_table(&mut self) {
+        self.entry = pte::native::grant_user_table(self.entry);
     }
 
     /// Set this entry to map to an address with given flags
@@ -418,13 +430,9 @@ impl PageMapper {
         let l4_table = unsafe { &mut *self.l4_table };
         let l4_entry = &mut l4_table[breakdown.l4_index];
 
-        // Intermediate page table entries must include USER if the leaf
-        // mapping is user-accessible. x86_64 checks USER on all 4 levels.
-        let intermediate_flags = if flags.contains(PageFlags::USER) {
-            PageFlags::PRESENT | PageFlags::WRITABLE | PageFlags::USER
-        } else {
-            PageFlags::PRESENT | PageFlags::WRITABLE
-        };
+        // The path to a user page must allow user access (x86_64 checks
+        // USER at every level; on RISC-V table entries carry none).
+        let user = flags.contains(PageFlags::USER);
 
         // Get or create L3 table
         if !l4_entry.is_present() {
@@ -442,12 +450,10 @@ impl PageMapper {
                 let virt = super::phys_to_virt_addr(frame.as_u64() << 12);
                 crate::mm::page_ops::clear_page(virt as *mut u8);
             }
-            l4_entry.set(frame, intermediate_flags);
-        } else if flags.contains(PageFlags::USER) && !l4_entry.flags().contains(PageFlags::USER) {
+            l4_entry.set_table(frame, user);
+        } else if user {
             // Existing entry needs USER bit added for user-space child mapping
-            let current_flags = l4_entry.flags();
-            let addr = l4_entry.addr().unwrap();
-            l4_entry.set_addr(addr, current_flags | PageFlags::USER);
+            l4_entry.grant_user_table();
         }
         // The entry was just set to PRESENT (either already was, or we set it above),
         // so `addr()` is guaranteed to return `Some`.
@@ -462,7 +468,7 @@ impl PageMapper {
             unsafe { &mut *(super::phys_to_virt_addr(l3_phys.as_u64()) as *mut PageTable) };
         let l3_entry = &mut l3_table[breakdown.l3_index];
 
-        if l3_entry.is_present() && l3_entry.flags().contains(PageFlags::HUGE) {
+        if l3_entry.is_huge() {
             return Err(KernelError::AlreadyExists {
                 resource: "page mapping (1 GiB page)",
                 id: page.as_u64(),
@@ -485,11 +491,9 @@ impl PageMapper {
                 let virt = super::phys_to_virt_addr(frame.as_u64() << 12);
                 crate::mm::page_ops::clear_page(virt as *mut u8);
             }
-            l3_entry.set(frame, intermediate_flags);
-        } else if flags.contains(PageFlags::USER) && !l3_entry.flags().contains(PageFlags::USER) {
-            let current_flags = l3_entry.flags();
-            let addr = l3_entry.addr().unwrap();
-            l3_entry.set_addr(addr, current_flags | PageFlags::USER);
+            l3_entry.set_table(frame, user);
+        } else if user {
+            l3_entry.grant_user_table();
         }
         let l2_phys = l3_entry.addr().ok_or(KernelError::InvalidState {
             expected: "L3 entry present",
@@ -543,7 +547,7 @@ impl PageMapper {
         // SAFETY: a present L3 entry's table, through the physical map.
         let l2_table = unsafe { &mut *(super::phys_to_virt_addr(l2_phys) as *mut PageTable) };
         let entry = &mut l2_table[breakdown.l2_index];
-        if !entry.is_present() || !entry.flags().contains(PageFlags::HUGE) {
+        if !entry.is_huge() {
             return Err(KernelError::UnmappedMemory {
                 addr: page.as_u64() as usize,
             });
@@ -564,15 +568,11 @@ impl PageMapper {
         allocator: &mut impl FrameAllocator,
     ) -> Result<(), KernelError> {
         let breakdown = VirtualAddressBreakdown::new(page);
-        let intermediate_flags = if flags.contains(PageFlags::USER) {
-            PageFlags::PRESENT | PageFlags::WRITABLE | PageFlags::USER
-        } else {
-            PageFlags::PRESENT | PageFlags::WRITABLE
-        };
+        let user = flags.contains(PageFlags::USER);
         // SAFETY: the pointer is to an entry of a live page table reached
         // through the physical map; this mapper has exclusive access.
         let l2_entry = unsafe { &mut *self.l2_entry_for(page, flags, allocator)? };
-        if l2_entry.is_present() && l2_entry.flags().contains(PageFlags::HUGE) {
+        if l2_entry.is_huge() {
             return Err(KernelError::AlreadyExists {
                 resource: "page mapping (2 MiB page)",
                 id: page.as_u64(),
@@ -595,11 +595,9 @@ impl PageMapper {
                 let virt = super::phys_to_virt_addr(frame.as_u64() << 12);
                 crate::mm::page_ops::clear_page(virt as *mut u8);
             }
-            l2_entry.set(frame, intermediate_flags);
-        } else if flags.contains(PageFlags::USER) && !l2_entry.flags().contains(PageFlags::USER) {
-            let current_flags = l2_entry.flags();
-            let addr = l2_entry.addr().unwrap();
-            l2_entry.set_addr(addr, current_flags | PageFlags::USER);
+            l2_entry.set_table(frame, user);
+        } else if user {
+            l2_entry.grant_user_table();
         }
         let l1_phys = l2_entry.addr().ok_or(KernelError::InvalidState {
             expected: "L2 entry present",
@@ -673,13 +671,14 @@ impl PageMapper {
             });
         }
         // A 2 MiB leaf: the 4 KiB frame within it (flags keep HUGE).
-        if l2_entry.flags().contains(PageFlags::HUGE) {
+        if l2_entry.is_huge() {
             let base = l2_entry.frame().ok_or(KernelError::UnmappedMemory {
                 addr: page.as_u64() as usize,
             })?;
             return Ok((
                 FrameNumber::new(base.as_u64() + (page.as_u64() >> 12 & 0x1FF)),
-                l2_entry.flags(),
+                // RISC-V leaves have no HUGE bit: the level is the size.
+                l2_entry.flags() | PageFlags::HUGE,
             ));
         }
 
@@ -719,10 +718,8 @@ impl PageMapper {
         let grant_user =
             new_flags.contains(PageFlags::USER) && usize::from(breakdown.l4_index) < 256;
         let add_user = |entry: &mut PageTableEntry| {
-            if grant_user && !entry.flags().contains(PageFlags::USER) {
-                if let Some(addr) = entry.addr() {
-                    entry.set_addr(addr, entry.flags() | PageFlags::USER);
-                }
+            if grant_user {
+                entry.grant_user_table();
             }
         };
 
@@ -760,7 +757,7 @@ impl PageMapper {
                 addr: page.as_u64() as usize,
             });
         }
-        if l2_entry.flags().contains(PageFlags::HUGE) {
+        if l2_entry.is_huge() {
             // A 2 MiB leaf has no L1 table below it; treating the data page
             // as one would rewrite user memory.
             return Err(KernelError::InvalidArgument {
@@ -832,7 +829,7 @@ impl PageMapper {
                 addr: page.as_u64() as usize,
             });
         }
-        if l2_entry.flags().contains(PageFlags::HUGE) {
+        if l2_entry.is_huge() {
             // Part of a 2 MiB page: unmapped whole, by unmap_huge_2m.
             return Err(KernelError::InvalidArgument {
                 name: "page",

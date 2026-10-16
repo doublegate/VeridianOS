@@ -361,6 +361,12 @@
 
 ### Changed
 
+- **Page-table entries have an architecture format (HR-10).** The walker wrote x86_64 entries
+  on every architecture, which RISC-V cannot use: there a pointer to the next table carries only
+  V (U, A and D are reserved) and any entry with R, W or X is a leaf. `mm::pte` holds the x86_64
+  and RISC-V Sv39/Sv48 formats as pure functions with host tests, and the walker asks the
+  native one to write a leaf, a table pointer and the user path, and to recognise a large page.
+  x86_64 entries are bit-for-bit what they were. RISC-V paging itself is the next step.
 - **The AArch64 and RISC-V kernels are built soft-float (N-178).** They were built for the
   hard-float `aarch64-unknown-none` and `riscv64gc-unknown-none-elf` targets, so the compiler
   could use the FP/SIMD registers in kernel code (839 such instructions in the AArch64 kernel),

@@ -64,7 +64,7 @@ pub fn translate_address(addr: usize) -> Option<PageTableEntry> {
     }
 
     // Check for huge page (1GB)
-    if l3_entry.flags().contains(PageFlags::HUGE) {
+    if l3_entry.is_huge() {
         return Some(l3_entry);
     }
 
@@ -80,7 +80,7 @@ pub fn translate_address(addr: usize) -> Option<PageTableEntry> {
     }
 
     // Check for large page (2MB)
-    if l2_entry.flags().contains(PageFlags::HUGE) {
+    if l2_entry.is_huge() {
         return Some(l2_entry);
     }
 

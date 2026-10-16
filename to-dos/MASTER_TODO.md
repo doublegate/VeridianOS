@@ -180,8 +180,8 @@ What does not work yet: `docs/KNOWN-LIMITATIONS.md`.
     - RISC-V: done: zero BSS, hart lottery, `sstatus.FS` Off in the kernel (HR-01, HR-19, HR-20
       part; the M-mode CSR reads go with FP switching). RISC-V Image header and
       relocatable or MMU-early boot (HR-02, HR-03); `satp` mode probe with Sv39 default and
-      3/4/5-level tables from the boot hart's cpu node (HR-08, HR-09); RISC-V PTE encoder with A/D,
-      Svpbmt/XTheadMae (HR-10, HR-11); remove raw 0x1000_0000 stores and QEMU-only probes (HR-04
+      3/4/5-level tables from the boot hart's cpu node (HR-08, HR-09); RISC-V PTE encoder with A/D
+      (HR-10, done: `mm::pte`), Svpbmt/XTheadMae (HR-11); remove raw 0x1000_0000 stores and QEMU-only probes (HR-04
       to HR-06); memory map from the DT (HR-07); external interrupts (scause 9) handled, not fatal
       (HR-31); IPIs by hart id (HR-33); U-mode with `tp` via `sscratch` (N-14); `sstatus` SPP
       sanitiser (N-170).
