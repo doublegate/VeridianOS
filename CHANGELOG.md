@@ -2,6 +2,13 @@
 
 ### Added
 
+- **RISC-V runs with paging on, the kernel in the upper half (ADR 0013).** The kernel ran with
+  `satp` Bare at its load address, in what is the user half of an address space. It is now
+  linked at 0xFFFF_FFFF_8020_0000 and loaded at 0x8020_0000; `_start` builds early page tables
+  (all physical memory at 0xFFFF_8000_0000_0000, the image at its link address, and a temporary
+  identity map), turns on Sv48 (stopping with a message on a hart without it) and jumps up.
+  Secondary harts load the same `satp` before using any kernel address. Sv39-only boards are
+  not supported yet (HR-09).
 - **Tasks run on every CPU (SMP stage S3, D5e; ADR 0012).** With the `smp` feature, a new or woken
   task is placed on an idle CPU it may use (or stays where its cache is warm), an idle CPU pulls
   waiting work from the busiest one, and every CPU rebalances every 4 ms when the load differs by

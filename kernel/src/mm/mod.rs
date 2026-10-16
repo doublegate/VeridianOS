@@ -47,8 +47,9 @@ pub const PAGE_SIZE: usize = 4096;
 /// Physical memory offset: virtual = physical + PHYS_MEM_OFFSET.
 ///
 /// On x86_64 with bootloader 0.11, physical memory is mapped at a dynamic
-/// offset provided by the bootloader. On AArch64 and RISC-V, physical
-/// memory is identity-mapped (offset = 0).
+/// offset provided by the bootloader. On RISC-V boot.S maps it at
+/// 0xFFFF_8000_0000_0000 (ADR 0013). On AArch64, which runs with the MMU
+/// off, the offset is 0.
 pub(crate) static PHYS_MEM_OFFSET: AtomicU64 = AtomicU64::new(0);
 
 /// Set the physical memory offset (called once during early boot).
@@ -58,8 +59,7 @@ pub fn set_phys_mem_offset(offset: u64) {
 
 /// Convert a physical address to a virtual pointer.
 ///
-/// On x86_64, adds the bootloader's physical memory mapping offset.
-/// On AArch64/RISC-V, returns the address unchanged (identity-mapped).
+/// Adds the physical-memory map's offset (0 on AArch64, MMU off).
 #[inline]
 pub fn phys_to_virt_addr(phys: u64) -> u64 {
     phys + PHYS_MEM_OFFSET.load(Ordering::Acquire)
@@ -489,8 +489,9 @@ pub fn init_default() {
         (regions, count)
     };
 
-    // AArch64 and RISC-V boot with the MMU off or identity-mapped, so the
-    // linker's __kernel_end is the kernel's physical end. The pool starts
+    // AArch64 runs with the MMU off, so the linker's __kernel_end is the
+    // kernel's physical end; RISC-V runs the image in the upper half (ADR
+    // 0013) and converts it. The pool starts
     // after it and ends at 128 MiB of RAM -- QEMU `virt`'s default when no
     // `-m` is given. Under-estimating only leaves memory unused; over-
     // estimating would hand out frames that do not exist.
@@ -502,6 +503,9 @@ pub fn init_default() {
         }
         // Only the linker symbol's address is taken; it is never read.
         let kernel_end = core::ptr::addr_of!(__kernel_end) as u64;
+        // RISC-V runs the kernel at its link address in the upper half.
+        #[cfg(target_arch = "riscv64")]
+        let kernel_end = crate::arch::riscv64::boot::kernel_phys(kernel_end);
         #[cfg(target_arch = "aarch64")]
         let ram_end: u64 = 0x4000_0000 + 128 * 1024 * 1024;
         #[cfg(target_arch = "riscv64")]

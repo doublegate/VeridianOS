@@ -18,6 +18,28 @@ veridian_boot_hartid:
 veridian_boot_lottery:
     .word 0
 
+.balign 8
+.global veridian_kernel_satp
+# The kernel's satp (Sv48 and the early root). Secondary harts load it
+# before they touch any kernel address.
+veridian_kernel_satp:
+    .dword 0
+
+# Early page tables (E-RV3), zeroed with the rest of .bss.
+.section .bss
+.balign 4096
+veridian_early_root:
+    .space 4096
+# 512 GiB in 1 GiB pages at their physical address: the physical-memory
+# map (L4[256], virtual = physical + 0xFFFF_8000_0000_0000) and, until the
+# MMIO drivers use that map, an identity map (L4[0]).
+veridian_early_l3_phys:
+    .space 4096
+# The kernel image at its link address, 0xFFFF_FFFF_8000_0000 + 2 MiB:
+# L4[511], L3[510..511] = physical 2..4 GiB.
+veridian_early_l3_kernel:
+    .space 4096
+
 .section .text.boot
 .global _start
 
@@ -112,6 +134,74 @@ _start:
     li t0, 0x6000
     csrc sstatus, t0
 
+    # Paging (E-RV3). This code runs at its physical address (`la` is
+    # PC-relative), the kernel is linked in the upper half. Leaves are
+    # 1 GiB pages: V R W X G A D = 0xEF; a table pointer is V = 1; the
+    # PPN sits at bit 10, so an aligned physical address >> 2.
+    la a0, veridian_early_l3_phys
+    li t1, 0
+    li t2, 512
+    li t3, 0x40000000
+    li t4, 0xEF
+6:
+    srli t5, t1, 2
+    or t5, t5, t4
+    sd t5, 0(a0)
+    addi a0, a0, 8
+    add t1, t1, t3
+    addi t2, t2, -1
+    bnez t2, 6b
+
+    la a0, veridian_early_l3_kernel
+    li t6, 510 * 8
+    add t6, a0, t6
+    li t1, 0x80000000
+    srli t5, t1, 2
+    or t5, t5, t4
+    sd t5, 0(t6)
+    li t1, 0xC0000000
+    srli t5, t1, 2
+    or t5, t5, t4
+    sd t5, 8(t6)
+
+    la a0, veridian_early_root
+    la t1, veridian_early_l3_phys
+    srli t5, t1, 2
+    ori t5, t5, 1
+    sd t5, 0(a0)
+    li t6, 256 * 8
+    add t6, a0, t6
+    sd t5, 0(t6)
+    la t1, veridian_early_l3_kernel
+    srli t5, t1, 2
+    ori t5, t5, 1
+    li t6, 511 * 8
+    add t6, a0, t6
+    sd t5, 0(t6)
+
+    # satp = Sv48 (mode 9) | root PPN. satp is WARL: a hart without Sv48
+    # keeps it 0, and then the jump below would fault, so stop instead.
+    srli t5, a0, 12
+    li t6, 9
+    slli t6, t6, 60
+    or t5, t5, t6
+    la t6, veridian_kernel_satp
+    sd t5, 0(t6)
+    sfence.vma
+    csrw satp, t5
+    sfence.vma
+    csrr t6, satp
+    bne t6, t5, .Lno_sv48
+
+    # Continue at the link (upper-half) address of .Lhigh.
+    ld t0, .Lhigh_addr
+    jr t0
+.balign 8
+.Lhigh_addr:
+    .dword .Lhigh
+.Lhigh:
+    la sp, __stack_top
+
     # Jump to Rust code (use `call` for 32-bit range; `jal` only reaches +/-1MB)
     call _start_rust
 
@@ -119,6 +209,23 @@ _start:
 1:
     wfi
     j 1b
+
+# No Sv48: print "no Sv48" through SBI and stop (Sv39 is HR-09).
+.Lno_sv48:
+    la t0, .Lno_sv48_msg
+7:
+    lbu a0, 0(t0)
+    beqz a0, 8f
+    li a7, 0x01
+    ecall
+    addi t0, t0, 1
+    j 7b
+8:
+    wfi
+    j 8b
+.Lno_sv48_msg:
+    .asciz "no Sv48: cannot enable paging\n"
+.balign 4
 
 # A hart that lost the lottery asks SBI HSM to stop it (EID "HSM", FID 1
 # hart_stop), so the boot hart can start it later as a secondary. It
@@ -141,6 +248,19 @@ veridian_hart_entry:
     csrw sip, zero
     li t0, 0x6000
     csrc sstatus, t0
+    # Entered at the physical address with the MMU off: the kernel's
+    # tables first, then the upper-half code; a1 (the boot block) is a
+    # kernel virtual address, used only after this.
+    ld t0, veridian_kernel_satp
+    sfence.vma
+    csrw satp, t0
+    sfence.vma
+    ld t0, .Lhart_high_addr
+    jr t0
+.balign 8
+.Lhart_high_addr:
+    .dword .Lhart_high
+.Lhart_high:
     ld sp, 8(a1)
     ld tp, 16(a1)
     csrw sscratch, zero

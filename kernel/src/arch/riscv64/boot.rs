@@ -14,6 +14,19 @@ extern "C" {
     static veridian_boot_hartid: u64;
 }
 
+/// The kernel image's link address minus its load address (`link.ld`):
+/// boot.S maps the image at `physical + KERNEL_OFFSET` (E-RV3).
+pub const KERNEL_OFFSET: u64 = 0xFFFF_FFFF_0000_0000;
+
+/// Where boot.S maps all physical memory (1 GiB pages, 512 GiB), as on
+/// x86_64: virtual = physical + PHYS_MAP_BASE.
+pub const PHYS_MAP_BASE: u64 = 0xFFFF_8000_0000_0000;
+
+/// The physical address of a kernel-image address (code, statics).
+pub fn kernel_phys(va: u64) -> u64 {
+    va - KERNEL_OFFSET
+}
+
 /// Hardware id of the boot hart.
 pub fn boot_hartid() -> u64 {
     // SAFETY: written once by boot.S before any Rust code runs; read-only
@@ -44,6 +57,10 @@ extern "C" fn veridian_secondary_rust(
 
 #[no_mangle]
 pub extern "C" fn _start_rust() -> ! {
+    // boot.S turned paging on: physical memory is reached through its map
+    // from here on (`mm::phys_to_virt_addr`).
+    crate::mm::set_phys_mem_offset(PHYS_MAP_BASE);
+
     // The boot hart is logical CPU 0; `tp` now points at its per-CPU block.
     // SAFETY: first Rust code on the boot hart, before anything reads `tp`.
     unsafe { crate::arch::percpu::install(0, boot_hartid() as u32) };

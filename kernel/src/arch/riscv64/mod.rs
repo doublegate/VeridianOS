@@ -204,6 +204,16 @@ pub fn init() {
     // interrupts can be taken.
     unsafe { core::arch::asm!("csrsi sstatus, 2", options(nomem, nostack)) };
 
+    let satp: usize;
+    // SAFETY: reads the address-translation CSR; no side effects.
+    unsafe { core::arch::asm!("csrr {}, satp", out(reg) satp, options(nomem, nostack)) };
+    println!(
+        "[RISCV64] Paging: satp mode {} root {:#x}, kernel at {:#x}",
+        satp >> 60,
+        (satp & 0xFFF_FFFF_FFFF) << 12,
+        init as *const () as usize
+    );
+
     println!("[RISCV64] Architecture initialization complete (timer interrupts on)");
 }
 

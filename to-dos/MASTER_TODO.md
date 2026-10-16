@@ -181,7 +181,8 @@ What does not work yet: `docs/KNOWN-LIMITATIONS.md`.
       part; the M-mode CSR reads go with FP switching). RISC-V Image header and
       relocatable or MMU-early boot (HR-02, HR-03); `satp` mode probe with Sv39 default and
       3/4/5-level tables from the boot hart's cpu node (HR-08, HR-09); RISC-V PTE encoder with A/D
-      (HR-10, done: `mm::pte`), Svpbmt/XTheadMae (HR-11); remove raw 0x1000_0000 stores and QEMU-only probes (HR-04
+      (HR-10, done: `mm::pte`), Svpbmt/XTheadMae (HR-11); done: paging on and the kernel in the
+      upper half, Sv48 (E-RV3, ADR 0013); remove raw 0x1000_0000 stores and QEMU-only probes (HR-04
       to HR-06); memory map from the DT (HR-07); external interrupts (scause 9) handled, not fatal
       (HR-31); IPIs by hart id (HR-33); U-mode with `tp` via `sscratch` (N-14); `sstatus` SPP
       sanitiser (N-170).

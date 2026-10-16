@@ -3,8 +3,9 @@
 //! Harts come from the device tree's `/cpus/cpu@N` nodes (`reg` = hart
 //! id). OpenSBI keeps every hart but the boot hart STOPPED until the kernel
 //! calls `hart_start`, which enters `veridian_hart_entry` (boot.S) with the
-//! MMU off. The kernel itself runs with `satp = 0`, so the entry address and
-//! the boot block are passed as their (identical) virtual addresses.
+//! MMU off: the entry address is passed as its physical address, and the
+//! stub turns paging on (the kernel's `satp`, saved by boot.S) before it
+//! uses the boot block, a kernel virtual address.
 
 use alloc::vec::Vec;
 
@@ -53,9 +54,12 @@ pub fn prepare_boot_args(_args: &ApBootArgs) {}
 
 /// Ask the firmware to start hart `hw` at the entry stub.
 pub fn start_ap(hw: u32, args: &'static ApBootArgs) -> Result<(), &'static str> {
+    // The hart starts with the MMU off, so at the entry's physical
+    // address; it turns paging on before it reads `args`.
+    let entry = super::boot::kernel_phys(veridian_hart_entry as *const () as u64);
     let ret = crate::arch::riscv::sbi::hart_start(
         hw as usize,
-        veridian_hart_entry as *const () as usize,
+        entry as usize,
         args as *const ApBootArgs as usize,
     );
     if ret.is_ok() {
