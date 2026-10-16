@@ -833,8 +833,13 @@ static void test_fork_inheritance(void)
     sigprocmask(SIG_SETMASK, NULL, &saved);
     sigemptyset(&s);
     sigaddset(&s, SIGUSR1);
-    /* Same buffer for set and oldset: the new mask must still be applied. */
+    /* Same buffer for set and oldset: the new mask must still be applied.
+     * (Deliberately aliased, against the C prototype's restrict: the kernel
+     * must read the set before writing the old one.) */
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wrestrict"
     int r = sigprocmask(SIG_BLOCK, &s, &s);
+#pragma GCC diagnostic pop
     sigprocmask(SIG_SETMASK, NULL, &cur);
     int applied = r == 0 && sigismember(&cur, SIGUSR1) == 1 && sigismember(&s, SIGUSR1) == 0;
     sigprocmask(SIG_SETMASK, &saved, NULL);
@@ -1173,9 +1178,9 @@ static void test_dir_search_permission(void)
 #define DF_GUARD 64
 #include <veridian/sysno.h> /* system call numbers (ADR 0009) */
 
+#if defined(__x86_64__)
 static long raw_syscall4_df(long nr, long a, long b, long c, long d)
 {
-#if defined(__x86_64__)
     register long rax __asm__("rax") = nr;
     register long rdi __asm__("rdi") = a;
     register long rsi __asm__("rsi") = b;
@@ -1186,11 +1191,8 @@ static long raw_syscall4_df(long nr, long a, long b, long c, long d)
                      : "r"(rdi), "r"(rsi), "r"(rdx), "r"(r10)
                      : "rcx", "r11", "memory", "cc");
     return rax;
-#else
-    (void)nr; (void)a; (void)b; (void)c; (void)d;
-    return -1;
-#endif
 }
+#endif
 
 static void test_direction_flag(void)
 {
@@ -1224,29 +1226,81 @@ static void test_direction_flag(void)
 
 /* --- Exceptions in user code (N-168, N-175). ------------------------------
  * Each trap kills only the child that caused it, with the signal Linux
- * sends; the parent and the kernel carry on. */
+ * sends; the parent and the kernel carry on. The traps are the
+ * architecture's own (an integer divide by zero does not trap on AArch64 or
+ * RISC-V, so only x86_64 checks SIGFPE). */
+static const struct {
+    const char *name;
+    int sig;
+} trap_cases[] = {
+#if defined(__x86_64__)
+    {"trap_ud2_sigill", SIGILL},        {"trap_divide_sigfpe", SIGFPE},
+    {"trap_int3_sigtrap", SIGTRAP},     {"trap_hlt_sigsegv", SIGSEGV},
+    {"trap_kernel_vector_sigsegv", SIGSEGV},
+#elif defined(__aarch64__)
+    {"trap_udf_sigill", SIGILL},
+    {"trap_brk_sigtrap", SIGTRAP},
+    {"trap_el1_sysreg_sigill", SIGILL},
+#elif defined(__riscv)
+    {"trap_unimp_sigill", SIGILL},
+    {"trap_ebreak_sigtrap", SIGTRAP},
+    {"trap_smode_csr_sigill", SIGILL},
+#endif
+};
+
+static void trap(int which)
+{
+#if defined(__x86_64__)
+    switch (which) {
+    case 0: /* #UD -> SIGILL */
+        __asm__ volatile("ud2");
+        break;
+    case 1: /* #DE -> SIGFPE (asm: GCC rewrites 1 / x as a branch) */
+        __asm__ volatile("xor %%edx, %%edx\n\tmov $1, %%eax\n\txor %%ecx, %%ecx\n\tdiv %%ecx"
+                         ::: "eax", "ecx", "edx");
+        break;
+    case 2: /* #BP from int3 (a DPL-3 gate) -> SIGTRAP */
+        __asm__ volatile("int3");
+        break;
+    case 3: /* privileged instruction, #GP -> SIGSEGV */
+        __asm__ volatile("hlt");
+        break;
+    case 4: /* int to a kernel-only vector, #GP -> SIGSEGV */
+        __asm__ volatile("int $0x30");
+        break;
+    }
+#elif defined(__aarch64__)
+    switch (which) {
+    case 0: /* permanently undefined -> SIGILL */
+        __asm__ volatile("udf #0");
+        break;
+    case 1: /* breakpoint -> SIGTRAP */
+        __asm__ volatile("brk #0");
+        break;
+    case 2: /* an EL1 register from EL0, trapped -> SIGILL */
+        __asm__ volatile("mrs x0, sctlr_el1" ::: "x0");
+        break;
+    }
+#elif defined(__riscv)
+    switch (which) {
+    case 0: /* illegal instruction -> SIGILL */
+        __asm__ volatile("unimp");
+        break;
+    case 1: /* breakpoint -> SIGTRAP */
+        __asm__ volatile("ebreak");
+        break;
+    case 2: /* an S-mode CSR from U-mode -> SIGILL */
+        __asm__ volatile("csrr t0, sstatus" ::: "t0");
+        break;
+    }
+#endif
+}
+
 static int child_traps(int which)
 {
     pid_t pid = fork();
     if (pid == 0) {
-        switch (which) {
-        case 0: /* #UD -> SIGILL */
-            __asm__ volatile("ud2");
-            break;
-        case 1: /* #DE -> SIGFPE (asm: GCC rewrites 1 / x as a branch) */
-            __asm__ volatile("xor %%edx, %%edx\n\tmov $1, %%eax\n\txor %%ecx, %%ecx\n\tdiv %%ecx"
-                             ::: "eax", "ecx", "edx");
-            break;
-        case 2: /* #BP from int3 (a DPL-3 gate) -> SIGTRAP */
-            __asm__ volatile("int3");
-            break;
-        case 3: /* privileged instruction, #GP -> SIGSEGV */
-            __asm__ volatile("hlt");
-            break;
-        case 4: /* int to a kernel-only vector, #GP -> SIGSEGV */
-            __asm__ volatile("int $0x30");
-            break;
-        }
+        trap(which);
         _exit(0);
     }
     int st = 0;
@@ -1258,19 +1312,11 @@ static int child_traps(int which)
 
 static void test_traps(void)
 {
-    static const struct {
-        const char *name;
-        int sig;
-    } cases[] = {
-        {"trap_ud2_sigill", SIGILL},       {"trap_divide_sigfpe", SIGFPE},
-        {"trap_int3_sigtrap", SIGTRAP},    {"trap_hlt_sigsegv", SIGSEGV},
-        {"trap_kernel_vector_sigsegv", SIGSEGV},
-    };
-    for (int i = 0; i < 5; i++) {
-        int sig = child_traps(i);
+    for (size_t i = 0; i < sizeof(trap_cases) / sizeof(trap_cases[0]); i++) {
+        int sig = child_traps((int)i);
         static char why[64];
         snprintf(why, sizeof(why), "got signal %d (status 0x%x)", sig, last_status);
-        report(cases[i].name, sig == cases[i].sig, why);
+        report(trap_cases[i].name, sig == trap_cases[i].sig, why);
     }
 }
 
@@ -2260,6 +2306,50 @@ static int exit_code_of(pid_t pid)
     return WEXITSTATUS(st);
 }
 
+/* clone(flags, 0, ptid, ctid) without a new stack (a fork). The argument
+ * order is the architecture's: x86_64 has (flags, stack, ptid, ctid, tls),
+ * arm64 and RISC-V Linux's CLONE_BACKWARDS (flags, stack, ptid, tls, ctid). */
+static long raw_clone(unsigned long flags, volatile int *ptid, volatile int *ctid)
+{
+#if defined(__x86_64__)
+    return veridian_syscall5(SYS_clone, flags, 0, ptid, ctid, 0);
+#else
+    return veridian_syscall5(SYS_clone, flags, 0, ptid, 0, ctid);
+#endif
+}
+
+/* The clone checks, apart from test_vfork_and_clone's vfork calls (the raw
+ * system calls' register variables could not live across those). */
+static __attribute__((noinline)) int clone_checks(void)
+{
+    int fails = 0;
+    /* clone(SIGCHLD) is fork. */
+    long r = raw_clone(SIGCHLD, 0, 0);
+    if (r == 0)
+        _exit(5);
+    if (r < 0 || exit_code_of((pid_t)r) != 5)
+        fails |= 8;
+
+    /* CLONE_CHILD_SETTID writes the child's copy only;
+     * CLONE_PARENT_SETTID the parent's. */
+    settid_slot = 0;
+    r = raw_clone(CLONE_CHILD_SETTID | SIGCHLD, 0, &settid_slot);
+    if (r == 0)
+        _exit(settid_slot != 0 ? 0 : 1);
+    if (r < 0 || exit_code_of((pid_t)r) != 0 || settid_slot != 0)
+        fails |= 16;
+    r = raw_clone(CLONE_PARENT_SETTID | SIGCHLD, &settid_slot, 0);
+    if (r == 0)
+        _exit(0);
+    if (r < 0 || exit_code_of((pid_t)r) != 0 || settid_slot == 0)
+        fails |= 32;
+
+    /* A file table shared between processes is not supported. */
+    if (raw_clone(CLONE_FILES | SIGCHLD, 0, 0) != -EINVAL)
+        fails |= 64;
+    return fails;
+}
+
 static void test_vfork_and_clone(void)
 {
     /* Live across vfork, which returns twice: volatile. */
@@ -2283,30 +2373,7 @@ static void test_vfork_and_clone(void)
     if (exit_code_of(pid) != 3)
         fails |= 4;
 
-    /* clone(SIGCHLD) is fork. */
-    long r = veridian_syscall5(SYS_clone, SIGCHLD, 0, 0, 0, 0);
-    if (r == 0)
-        _exit(5);
-    if (r < 0 || exit_code_of((pid_t)r) != 5)
-        fails |= 8;
-
-    /* CLONE_CHILD_SETTID writes the child's copy only;
-     * CLONE_PARENT_SETTID the parent's. */
-    settid_slot = 0;
-    r = veridian_syscall5(SYS_clone, CLONE_CHILD_SETTID | SIGCHLD, 0, 0, &settid_slot, 0);
-    if (r == 0)
-        _exit(settid_slot != 0 ? 0 : 1);
-    if (r < 0 || exit_code_of((pid_t)r) != 0 || settid_slot != 0)
-        fails |= 16;
-    r = veridian_syscall5(SYS_clone, CLONE_PARENT_SETTID | SIGCHLD, 0, &settid_slot, 0, 0);
-    if (r == 0)
-        _exit(0);
-    if (r < 0 || exit_code_of((pid_t)r) != 0 || settid_slot == 0)
-        fails |= 32;
-
-    /* A file table shared between processes is not supported. */
-    if (veridian_syscall5(SYS_clone, CLONE_FILES | SIGCHLD, 0, 0, 0, 0) != -EINVAL)
-        fails |= 64;
+    fails |= clone_checks();
 
     /* What posix_spawn, system and popen rest on. */
     FILE *p = popen("echo spawned", "r");

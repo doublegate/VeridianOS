@@ -2857,11 +2857,17 @@ static void test_event_fds(void)
     int blocking_read = pid > 0 && read(bfd, &v, 8) == 8 && v == 7;
     int status = -1;
     waitpid(pid, &status, 0);
-    /* The original eventfd(initval) call: eventfd2 without flags. */
+    /* The original eventfd(initval) call: eventfd2 without flags (x86_64
+     * only: the generic system call table has no eventfd). */
+#ifdef SYS_eventfd
     int lfd = syscall(SYS_eventfd, 3);
     v = 0;
     int legacy = lfd >= 0 && (fcntl(lfd, F_GETFL) & O_NONBLOCK) == 0 && read(lfd, &v, 8) == 8
                  && v == 3;
+#else
+    int lfd = -1;
+    int legacy = 1;
+#endif
 
     int tfd = timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK | TFD_CLOEXEC);
     errno = 0;
@@ -2933,11 +2939,16 @@ static void test_signalfd(void)
     kill(getpid(), SIGUSR2);
     int got2 = read(sfd, &info, sizeof(info)) == sizeof(info) && info.ssi_signo == SIGUSR2;
     /* The original signalfd(fd, mask, sizemask) call: signalfd4 without
-     * flags, so a blocking descriptor. */
+     * flags, so a blocking descriptor (x86_64 only, as eventfd above). */
+#ifdef SYS_signalfd
     int lsfd = syscall(SYS_signalfd, -1, &usr2, 8);
     kill(getpid(), SIGUSR2);
     int legacy = lsfd >= 0 && (fcntl(lsfd, F_GETFL) & O_NONBLOCK) == 0
                  && read(lsfd, &info, sizeof(info)) == sizeof(info) && info.ssi_signo == SIGUSR2;
+#else
+    int lsfd = -1;
+    int legacy = 1;
+#endif
     /* sizemask must be 8 (the kernel's sigset_t). */
     errno = 0;
     int bad_size = syscall(SYS_signalfd4, -1, &usr1, 4, 0) == -1 && errno == EINVAL;
@@ -2989,7 +3000,11 @@ static void test_epoll(void)
     errno = 0;
     int e_flags = epoll_create1(1) == -1 && errno == EINVAL;
     errno = 0;
+#ifdef SYS_epoll_create
     int e_size = syscall(SYS_epoll_create, 0) == -1 && errno == EINVAL;
+#else
+    int e_size = 1; /* no epoll_create in the generic table */
+#endif
     int ep = epoll_create1(EPOLL_CLOEXEC);
     int regular = open("/tmp/musl_epoll_file", O_CREAT | O_RDWR | O_TRUNC, 0644);
     int p[2];
@@ -3117,6 +3132,23 @@ static void test_epoll(void)
 /* N-194, N-206: select waits and reports readiness as Linux does (it
  * reported every open descriptor ready at once); pselect6 applies its
  * signal mask for the wait; poll reports POLLRDNORM. */
+/* The raw select call with a timeval {sec, usec}, written back as select
+ * does. The generic system call table (arm64, RISC-V) has no select, so
+ * there it is pselect6 with the same time as a timespec, which Linux also
+ * writes back. */
+static long raw_select(int n, fd_set *r, long tv[2])
+{
+#ifdef SYS_select
+    return syscall(SYS_select, n, r, NULL, NULL, tv);
+#else
+    long ts[2] = {tv[0], tv[1] * 1000};
+    long ret = syscall(SYS_pselect6, n, r, NULL, NULL, ts, NULL);
+    tv[0] = ts[0];
+    tv[1] = ts[1] / 1000;
+    return ret;
+#endif
+}
+
 static void test_select(void)
 {
     static char why[256];
@@ -3131,7 +3163,7 @@ static void test_select(void)
     FD_SET(p[0], &r);
     long tv_raw[2] = {0, 40000};
     long long t0 = mono_ns();
-    int idle = syscall(SYS_select, p[0] + 1, &r, NULL, NULL, tv_raw) == 0 && !FD_ISSET(p[0], &r);
+    int idle = raw_select(p[0] + 1, &r, tv_raw) == 0 && !FD_ISSET(p[0], &r);
     long waited_ms = (long)((mono_ns() - t0) / 1000000);
     int timed = idle && waited_ms >= 35 && tv_raw[0] == 0 && tv_raw[1] == 0;
 
@@ -3173,7 +3205,7 @@ static void test_select(void)
     long bad_tv[2] = {0, 1000000};
     FD_ZERO(&r);
     errno = 0;
-    int einval = syscall(SYS_select, 1, &r, NULL, NULL, bad_tv) == -1 && errno == EINVAL;
+    int einval = raw_select(1, &r, bad_tv) == -1 && errno == EINVAL;
 
     /* pselect: SIGUSR1 blocked and pending, let through for the wait. */
     struct sigaction sa;
@@ -3213,6 +3245,7 @@ static void test_select(void)
     close(p[1]);
 }
 
+#ifdef SYS_arch_prctl
 /* N-215: arch_prctl refuses an FS base outside user space with EPERM, as
  * Linux (it was EACCES), and leaves the thread's TLS alone; GET_FS reports
  * the base the thread runs with; an unknown code is EINVAL. */
@@ -3232,6 +3265,10 @@ static void test_arch_prctl(void)
     snprintf(why, sizeof(why), "get=%d eperm=%d kept=%d einval=%d", got, eperm, kept, einval);
     report("musl_arch_prctl", got && eperm && kept && einval, why);
 }
+#else
+/* arch_prctl is x86_64's. */
+static void test_arch_prctl(void) {}
+#endif
 
 /* N-217: thread IDs and process IDs share one space, as on Linux: the
  * first thread's ID is the process's, other threads get IDs no process has,
@@ -3705,6 +3742,7 @@ static void *spread_spin(void *arg)
     return 0;
 }
 
+#ifdef SYS_arch_prctl
 /* The user GS base belongs to the thread (ARCH_SET_GS/ARCH_GET_GS): two
  * threads sharing one CPU keep their own across switches, and a fork child
  * inherits it. (While the kernel runs, the base sits in a per-CPU register
@@ -3764,6 +3802,10 @@ static void test_gs_base(void)
     report("musl_gs_base_per_thread", made && mine && theirs == (void *)1L && inherited
                                           && eperm && kept, why);
 }
+#else
+/* The GS base is x86_64's. */
+static void test_gs_base(void) {}
+#endif
 
 /* A new thread gets its creator's mask (it used to get every CPU). */
 static void *mask_reader(void *arg)

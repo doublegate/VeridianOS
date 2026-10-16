@@ -189,7 +189,9 @@ What does not work yet: `docs/KNOWN-LIMITATIONS.md`.
       cache maintenance for code the kernel writes (HA-25 part: `dc cvau` without CTR_EL0.IDC,
       `ic ialluis` without DIC; loader, mmap and mprotect with PROT_EXEC);
       memory map from `/memory` less the reservations and the blob, heap sized from it (HA-17);
-      next: C library; DMA coherency (HA-25 rest); register sanitiser (N-170).
+      musl, Linux 7.2 UAPI headers and a GCC 16 cross toolchain (`tools/cross/build-musl-arch.sh`,
+      also RISC-V); next: port the runtime tests, rootfs; DMA coherency (HA-25 rest); register
+      sanitiser (N-170).
     - RISC-V: done: zero BSS, hart lottery, `sstatus.FS` Off in the kernel (HR-01, HR-19, HR-20
       part; the M-mode CSR reads go with FP switching). RISC-V Image header and
       relocatable or MMU-early boot (HR-02, HR-03); `satp` mode probe with Sv39 default and
@@ -200,7 +202,7 @@ What does not work yet: `docs/KNOWN-LIMITATIONS.md`.
       switch primitive and dispatcher on the boot hart (E-RV5); U-mode entry and exit, ecall
       system calls by the generic table, fault-tolerant user copies (E-RV6, ADR 0014; N-14);
       ELF programs through the loader (E-RV6c); every hart dispatches (E-RV5c); next: RISC-V
-      musl and rootfs (done: TLS, user FP, signals, user cmpxchg); remove raw 0x1000_0000 stores and QEMU-only probes (HR-04
+      rootfs (done: musl and toolchain, TLS, user FP, signals, user cmpxchg); remove raw 0x1000_0000 stores and QEMU-only probes (HR-04
       to HR-06); done: memory map from the DT (HR-07); external interrupts (scause 9) handled, not fatal
       (HR-31); IPIs by hart id (HR-33); U-mode with `tp` via `sscratch` (N-14); `sstatus` SPP
       sanitiser (N-170).

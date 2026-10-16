@@ -2,6 +2,21 @@
 
 ### Added
 
+- **musl and GCC cross toolchains for AArch64 and RISC-V.** `tools/cross/veridian-paths.sh` takes
+  `VERIDIAN_ARCH` (x86_64, aarch64, riscv64); x86_64 keeps its locations, the others get their own
+  sysroot, toolchain and build trees (`-aarch64`, `-riscv64`), so one never replaces another.
+  `tools/cross/build-musl-arch.sh <arch>` bootstraps without a host cross compiler: Linux 7.2.11 UAPI
+  headers (`build-linux-headers.sh`, `make headers_install`), musl built by clang (lld, no compiler
+  runtime), a first-stage GCC 16.2 (compiler and static libgcc), musl again with it, then the full
+  toolchain (C, C++, shared runtimes), checked by running static and dynamic C and C++ programs
+  (exceptions, threads, `thread_local`, `dlopen`) under qemu-user. RISC-V targets RV64GC/lp64d.
+  `build-musl.sh` records the compiler that built musl and rebuilds when it changes.
+  The runtime tests build for both with it: `musl_runtime_test` guards the x86_64-only calls
+  (`eventfd`, `signalfd`, `epoll_create`, `select`, `arch_prctl`; `select` is checked through
+  `pselect6` where it is missing), and `audit_runtime_test` gets each architecture's traps
+  (AArch64 `udf`/`brk`/EL1 register, RISC-V `unimp`/`ebreak`/S-mode CSR) and `clone`'s argument
+  order (arm64 and RISC-V put the child TID last). Not run on those architectures yet.
+
 - **RAM from the device tree, and a heap sized from it, on AArch64 and RISC-V (HA-17, HR-07).**
   Both assumed 128 MiB of RAM and had a static 8 MiB heap, too small for a BlockFS root (with a
   disk attached, a 1 MiB allocation failed). The frame allocator now takes the device tree's

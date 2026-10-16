@@ -9,13 +9,28 @@
 # Each location can be overridden from the environment.
 
 VERIDIAN_PREFIX="${VERIDIAN_PREFIX:-/opt/veridian}"
+# The target architecture: x86_64 (the KDE pipeline's, with the original
+# unsuffixed locations), aarch64 or riscv64, each with its own sysroot,
+# toolchain and build trees (suffixed with the architecture), so building
+# one never replaces another's.
+VERIDIAN_ARCH="${VERIDIAN_ARCH:-x86_64}"
+case "${VERIDIAN_ARCH}" in
+    x86_64) _veridian_sfx="" ;;
+    aarch64 | riscv64) _veridian_sfx="-${VERIDIAN_ARCH}" ;;
+    *)
+        echo "veridian-paths.sh: unsupported VERIDIAN_ARCH '${VERIDIAN_ARCH}'" >&2
+        return 1 2>/dev/null || exit 1
+        ;;
+esac
+# musl's dynamic loader for the architecture (a link to /usr/lib/libc.so).
+VERIDIAN_LDSO="/lib/ld-musl-${VERIDIAN_ARCH}.so.1"
 # This directory (the build scripts, toolchain files and patches).
 VERIDIAN_CROSS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # musl libc plus every library the KDE stack installs. (Not
 # /opt/veridian/sysroot/<arch>: that is the generic toolchain/ files' layout.)
-VERIDIAN_SYSROOT="${VERIDIAN_SYSROOT:-${VERIDIAN_PREFIX}/musl-sysroot}"
+VERIDIAN_SYSROOT="${VERIDIAN_SYSROOT:-${VERIDIAN_PREFIX}/musl-sysroot${_veridian_sfx}}"
 # Per-phase build trees (build-<phase>.sh uses ${VERIDIAN_CROSS_BUILD}/<phase>).
-VERIDIAN_CROSS_BUILD="${VERIDIAN_CROSS_BUILD:-${VERIDIAN_PREFIX}/cross-build}"
+VERIDIAN_CROSS_BUILD="${VERIDIAN_CROSS_BUILD:-${VERIDIAN_PREFIX}/cross-build${_veridian_sfx}}"
 # Downloaded source tarballs, kept apart from the build trees so a clean
 # rebuild never downloads again.
 VERIDIAN_SOURCES="${VERIDIAN_SOURCES:-${VERIDIAN_PREFIX}/sources}"
@@ -23,8 +38,9 @@ VERIDIAN_SOURCES="${VERIDIAN_SOURCES:-${VERIDIAN_PREFIX}/sources}"
 # The cross toolchain every phase after musl compiles with
 # (build-musl-toolchain.sh): GCC and binutils for this triple, with
 # libstdc++ built for the musl in the sysroot.
-VERIDIAN_TARGET="${VERIDIAN_TARGET:-x86_64-veridian-linux-musl}"
-VERIDIAN_TOOLCHAIN="${VERIDIAN_TOOLCHAIN:-${VERIDIAN_PREFIX}/musl-toolchain}"
+VERIDIAN_TARGET="${VERIDIAN_TARGET:-${VERIDIAN_ARCH}-veridian-linux-musl}"
+VERIDIAN_TOOLCHAIN="${VERIDIAN_TOOLCHAIN:-${VERIDIAN_PREFIX}/musl-toolchain${_veridian_sfx}}"
+unset _veridian_sfx
 VERIDIAN_CC="${VERIDIAN_TOOLCHAIN}/bin/${VERIDIAN_TARGET}-gcc"
 VERIDIAN_CXX="${VERIDIAN_TOOLCHAIN}/bin/${VERIDIAN_TARGET}-g++"
 
@@ -40,8 +56,8 @@ VERIDIAN_RUN_TARGET="${VERIDIAN_HOST_TOOLS}/bin/veridian-run-target"
 # Exported, so the CMake toolchain files (which fall back to /opt/veridian)
 # and every child build see the same locations: with VERIDIAN_PREFIX set
 # elsewhere, an unexported toolchain path silently meant the default one.
+export VERIDIAN_ARCH VERIDIAN_LDSO
 export VERIDIAN_PREFIX VERIDIAN_CROSS_DIR VERIDIAN_SYSROOT VERIDIAN_HOST_TOOLS VERIDIAN_CROSS_BUILD VERIDIAN_SOURCES
-export VERIDIAN_TARGET VERIDIAN_TOOLCHAIN VERIDIAN_CC VERIDIAN_CXX VERIDIAN_RUN_TARGET
 export VERIDIAN_TARGET VERIDIAN_TOOLCHAIN VERIDIAN_CC VERIDIAN_CXX VERIDIAN_RUN_TARGET
 # Autotools finds ${VERIDIAN_TARGET}-ar, -ranlib, -strip and the rest by
 # name on PATH.

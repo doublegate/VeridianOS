@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Build the musl cross toolchain the KDE pipeline compiles with
 #
-# binutils and GCC (C and C++) for x86_64-veridian-linux-musl, using the
+# binutils and GCC (C and C++) for ${VERIDIAN_ARCH}-veridian-linux-musl
+# (x86_64, aarch64 or riscv64; tools/cross/veridian-paths.sh), using the
 # musl in ${VERIDIAN_SYSROOT} (build-musl.sh) as the target C library, so
 # libstdc++, libgcc and libgcc_eh are built for musl. Every later phase
 # compiles with this toolchain.
@@ -13,7 +14,7 @@
 # so that library would link.
 #
 # Programs link dynamically by default, against musl's loader
-# (/lib/ld-musl-x86_64.so.1) and the shared C and C++ runtimes, as on
+# (/lib/ld-musl-<arch>.so.1) and the shared C and C++ runtimes, as on
 # Linux (ADR 0010); -static and -static-pie still work. The runtime
 # libraries (libgcc_s, libstdc++) are installed into the sysroot too, so
 # the root filesystem can ship them.
@@ -71,7 +72,7 @@ EOF
 # not.
 stamp() {
     {
-        declare -f fetch_sources build_binutils build_prereqs build_gcc
+        declare -f fetch_sources build_binutils build_prereqs configure_gcc build_gcc
         sources
         cat "${SCRIPT_DIR}"/toolchain-patches/*/*.patch
         cat "${SYSROOT}/.musl-stamp" 2>/dev/null || die "musl is not built (run build-musl.sh)"
@@ -155,9 +156,12 @@ build_binutils() {
         make install LIBTOOLFLAGS=--no-finish)
 }
 
-build_gcc() {
+configure_gcc() {
     local bld="${BUILD_DIR}/build-gcc"
-    log "Building GCC ${GCC_VERSION} (C, C++) for ${TARGET}..."
+    # RISC-V: the RVA20 general-purpose profile (RV64GC) with hardware
+    # floating point in registers (lp64d), as Linux distributions build.
+    local arch_opts=()
+    [[ "${VERIDIAN_ARCH}" == riscv64 ]] && arch_opts=(--with-arch=rv64gc --with-abi=lp64d)
     rm -rf "${bld}"
     mkdir -p "${bld}"
     # Shared and static target libraries (libstdc++, libgcc_s).
@@ -183,6 +187,7 @@ build_gcc() {
             --with-sysroot="${SYSROOT}" \
             --with-native-system-header-dir=/usr/include \
             --with-pkgversion="VeridianOS musl" \
+            "${arch_opts[@]}" \
             --enable-languages=c,c++ \
             --disable-bootstrap \
             --disable-multilib \
@@ -200,10 +205,31 @@ build_gcc() {
             --disable-fixed-point \
             --with-gmp="${PREREQS}" \
             --with-mpfr="${PREREQS}" \
-            --with-mpc="${PREREQS}" && \
+            --with-mpc="${PREREQS}")
+}
+
+build_gcc() {
+    local bld="${BUILD_DIR}/build-gcc"
+    log "Building GCC ${GCC_VERSION} (C, C++) for ${TARGET}..."
+    configure_gcc
+    (cd "${bld}" && \
         PATH="${PREFIX}/bin:${PATH}" ac_cv_prog_ac_ct_LLVM_CONFIG='' make -j"${JOBS}" \
             CFLAGS_FOR_TARGET="-g -O2 -fPIC" CXXFLAGS_FOR_TARGET="-g -O2 -fPIC" && \
         PATH="${PREFIX}/bin:${PATH}" make install)
+}
+
+# The first stage on aarch64/riscv64 (musl built by clang, whose libc.so
+# leaves the compiler runtime's symbols unresolved, so nothing dynamic can
+# link against it yet): the compiler and a static libgcc only, enough to
+# rebuild musl with. The next run builds the whole toolchain.
+build_gcc_stage1() {
+    local bld="${BUILD_DIR}/build-gcc"
+    log "Building GCC ${GCC_VERSION} stage 1 (compiler, static libgcc) for ${TARGET}..."
+    configure_gcc
+    (cd "${bld}" && \
+        PATH="${PREFIX}/bin:${PATH}" make -j"${JOBS}" all-gcc && \
+        PATH="${PREFIX}/bin:${PATH}" make -j"${JOBS}" enable_shared=no all-target-libgcc && \
+        PATH="${PREFIX}/bin:${PATH}" make install-gcc install-target-libgcc)
 }
 
 # The target's runtime libraries (libgcc_s, libstdc++ and the other GCC
@@ -250,9 +276,9 @@ install_specs() {
 
 # C and C++ programs (exceptions, iostream, threads, thread_local with a
 # destructor) build against musl and nothing from the host: static ones run
-# directly on the build host, dynamic ones through musl's loader there
-# (the host has no /lib/ld-musl-x86_64.so.1), including a dlopen of a C++
-# shared object.
+# directly on the build host (another architecture's under qemu-user),
+# dynamic ones through musl's loader there (the host has no
+# /lib/ld-musl-<arch>.so.1), including a dlopen of a C++ shared object.
 verify() {
     log "Verifying the toolchain..."
     local dir="${BUILD_DIR}/verify"
@@ -296,18 +322,21 @@ CPP
     "${gcc}" "${flags[@]}" "${dir}/t.c" -o "${dir}/t-c" || die "dynamic C program did not build"
     "${gxx}" "${flags[@]}" -pthread "${dir}/t.cpp" -o "${dir}/t-cpp" || die "dynamic C++ program did not build"
 
+    # Another architecture's programs run under qemu-user.
+    local run=()
+    [[ "${VERIDIAN_ARCH}" == x86_64 ]] || run=("qemu-${VERIDIAN_ARCH}")
     local exe
     for exe in t-c-static t-cpp-static; do
         [[ "$(file "${dir}/${exe}")" == *"statically linked"* ]] || die "${exe} is not static"
     done
     for exe in t-c t-cpp; do
-        [[ "$(file "${dir}/${exe}")" == *"interpreter /lib/ld-musl-x86_64.so.1"* ]] \
+        [[ "$(file "${dir}/${exe}")" == *"interpreter ${VERIDIAN_LDSO}"* ]] \
             || die "${exe} does not ask for musl's loader"
     done
-    [[ "$("${dir}/t-c-static")" == "ok" ]] || die "static C program failed"
-    [[ "$("${dir}/t-cpp-static")" == $'ok\ntls dtor' ]] || die "static C++ program failed"
+    [[ "$("${run[@]}" "${dir}/t-c-static")" == "ok" ]] || die "static C program failed"
+    [[ "$("${run[@]}" "${dir}/t-cpp-static")" == $'ok\ntls dtor' ]] || die "static C++ program failed"
     # musl's loader as a command: <loader> [--library-path P] <program> <args>.
-    local ld=("${SYSROOT}/usr/lib/libc.so" --library-path "${SYSROOT}/usr/lib")
+    local ld=("${run[@]}" "${SYSROOT}/usr/lib/libc.so" --library-path "${SYSROOT}/usr/lib")
     [[ "$("${ld[@]}" "${dir}/t-c")" == "ok" ]] || die "dynamic C program failed"
     [[ "$("${ld[@]}" "${dir}/t-cpp" "${dir}/libs.so")" == $'ok\ntls dtor\n5' ]] \
         || die "dynamic C++ program (with dlopen) failed"
@@ -322,6 +351,21 @@ main() {
     mkdir -p "${BUILD_DIR}"
     local want
     want="$(stamp)"
+    # musl still clang's (see build_gcc_stage1).
+    if [[ "$(cat "${SYSROOT}/.musl-compiler" 2>/dev/null)" == clang* ]]; then
+        if [[ -x "${PREFIX}/bin/${TARGET}-gcc" && "$(cat "${PREFIX}/.veridian-stage1" 2>/dev/null)" == "${want}" ]]; then
+            log "Stage 1 already built."
+        else
+            rm -rf "${PREFIX}"
+            fetch_sources
+            build_binutils
+            build_prereqs
+            build_gcc_stage1
+            echo "${want}" > "${PREFIX}/.veridian-stage1"
+        fi
+        log "Stage 1 ready: rebuild musl with it (build-musl.sh), then run this again."
+        return 0
+    fi
     if [[ -x "${PREFIX}/bin/${TARGET}-g++" && "$(cat "${PREFIX}/.veridian-stamp" 2>/dev/null)" == "${want}" ]]; then
         log "Already built."
     else

@@ -12,13 +12,20 @@
 #
 # Output (installed for /usr, staged into the sysroot):
 #   $SYSROOT/usr/lib/libc.a, libc.so and the crt objects
-#   $SYSROOT/lib/ld-musl-x86_64.so.1 (the dynamic loader: a link to
+#   $SYSROOT/lib/ld-musl-<arch>.so.1 (the dynamic loader: a link to
 #     /usr/lib/libc.so, which is both; ADR 0010)
 #   $SYSROOT/usr/include/ (C library and Linux UAPI headers)
 #   $SYSROOT/.musl-stamp (what this musl was built from)
 #
-# The host GCC builds musl itself (musl needs no C library to build);
-# build-musl-toolchain.sh then builds the cross compiler against it.
+# The host GCC builds musl itself for x86_64 (musl needs no C library to
+# build); build-musl-toolchain.sh then builds the cross compiler against it.
+#
+# For aarch64 and riscv64 (VERIDIAN_ARCH) there is no cross compiler yet the
+# first time: clang builds musl for the target without a compiler runtime
+# (none is installed for it; libc.so is left with those symbols unresolved),
+# which is enough to build the GCC cross toolchain against. Run again once
+# that toolchain exists, this script rebuilds musl with it, against its
+# libgcc (tools/cross/build-musl-arch.sh does both).
 
 set -euo pipefail
 
@@ -33,8 +40,25 @@ SYSROOT="${VERIDIAN_SYSROOT}"
 PATCH_DIR="${SCRIPT_DIR}/musl-patches"
 JOBS="${JOBS:-$(nproc)}"
 
-# musl is freestanding code: the host GCC builds it for x86_64.
-CROSS_CC="${CROSS_CC:-gcc}"
+# musl is freestanding code: the host GCC builds it for x86_64; elsewhere
+# the cross toolchain, or clang the first time (see above).
+MUSL_CONFIGURE_EXTRA=()
+if [[ -n "${CROSS_CC:-}" ]]; then
+    :
+elif [[ "${VERIDIAN_ARCH}" == x86_64 ]]; then
+    CROSS_CC=gcc
+elif [[ -x "${VERIDIAN_CC}" ]]; then
+    CROSS_CC="${VERIDIAN_CC}"
+    MUSL_CONFIGURE_EXTRA=(--target="${VERIDIAN_TARGET}" CROSS_COMPILE="${VERIDIAN_TARGET}-")
+else
+    # lld: the host's GNU ld links only the host's architecture.
+    CROSS_CC="clang --target=${VERIDIAN_ARCH}-linux-musl -fuse-ld=lld"
+    # -z undefs after configure's --no-undefined: libc.so keeps the
+    # compiler runtime's symbols (long double arithmetic) unresolved.
+    # shellcheck disable=SC2054 # the commas are in -Wl,-z,undefs
+    MUSL_CONFIGURE_EXTRA=(--target="${VERIDIAN_ARCH}-linux-musl" AR=llvm-ar RANLIB=llvm-ranlib LIBCC=
+                          LDFLAGS=-Wl,-z,undefs)
+fi
 
 log() { echo "[build-musl] $*"; }
 die() { echo "[build-musl] ERROR: $*" >&2; exit 1; }
@@ -124,10 +148,13 @@ patch_musl() {
 configure_musl() {
     local src="${BUILD_DIR}/musl-${MUSL_VERSION}"
     local build="${BUILD_DIR}/build"
-    if [[ -f "${build}/config.mak" ]]; then
+    # Configured with this compiler (a change, such as clang to the cross
+    # GCC, rebuilds it from scratch).
+    if [[ -f "${build}/config.mak" && "$(cat "${build}/.veridian-cc" 2>/dev/null)" == "${CROSS_CC}" ]]; then
         log "Already configured."
         return 0
     fi
+    rm -rf "${build}"
     mkdir -p "${build}"
     log "Configuring musl for VeridianOS..."
     # For /usr on the target, staged into the sysroot by install_musl, with
@@ -141,9 +168,11 @@ configure_musl() {
             --enable-shared \
             --enable-static \
             --disable-wrapper \
+            "${MUSL_CONFIGURE_EXTRA[@]}" \
             CC="${CROSS_CC}" \
             CFLAGS="-O2 -fPIC" \
     )
+    echo "${CROSS_CC}" > "${build}/.veridian-cc"
 }
 
 # ── Build ─────────────────────────────────────────────────────────────
@@ -162,6 +191,9 @@ install_musl() {
     # What this musl is, next to it (the build tree is disposable): the
     # cross toolchain rebuilds when it changes.
     patch_stamp > "${SYSROOT}/.musl-stamp"
+    # Which compiler built it (not part of the stamp: rebuilding musl with
+    # the cross GCC must not rebuild that GCC).
+    echo "${CROSS_CC}" > "${SYSROOT}/.musl-compiler"
 }
 
 # ── Linux UAPI headers ────────────────────────────────────────────────
@@ -171,6 +203,11 @@ install_musl() {
 # x86_64 ABI, so the host's x86_64 linux-api-headers are the right set.
 # Override with LINUX_HEADERS_DIR to use a pinned headers_install tree.
 install_linux_headers() {
+    # The host's headers are x86_64's: right only for that architecture.
+    if [[ "${VERIDIAN_ARCH}" != x86_64 && -z "${LINUX_HEADERS_DIR:-}" ]]; then
+        log "No Linux UAPI headers for ${VERIDIAN_ARCH} (set LINUX_HEADERS_DIR to a headers_install tree for it)."
+        return 0
+    fi
     local src="${LINUX_HEADERS_DIR:-/usr/include}"
     local dst="${SYSROOT}/usr/include"
     [[ -f "${src}/linux/limits.h" ]] || die "Linux UAPI headers not found in ${src} (install linux-api-headers or set LINUX_HEADERS_DIR)"
@@ -207,7 +244,6 @@ verify_install() {
         "${SYSROOT}/usr/include/pthread.h" \
         "${SYSROOT}/usr/include/sys/socket.h" \
         "${SYSROOT}/usr/include/sys/epoll.h" \
-        "${SYSROOT}/usr/include/linux/limits.h" \
         "${SYSROOT}/usr/lib/crt1.o" \
     ; do
         if [[ ! -f "$f" ]]; then
@@ -216,9 +252,15 @@ verify_install() {
         fi
     done
 
+    if [[ ( "${VERIDIAN_ARCH}" == x86_64 || -n "${LINUX_HEADERS_DIR:-}" ) &&
+          ! -f "${SYSROOT}/usr/include/linux/limits.h" ]]; then
+        log "  MISSING: ${SYSROOT}/usr/include/linux/limits.h"
+        errors=$((errors + 1))
+    fi
+
     # The loader is a link to libc.so, absolute as on the target.
-    if [[ "$(readlink "${SYSROOT}/lib/ld-musl-x86_64.so.1")" != "/usr/lib/libc.so" ]]; then
-        log "  MISSING: ${SYSROOT}/lib/ld-musl-x86_64.so.1 -> /usr/lib/libc.so"
+    if [[ "$(readlink "${SYSROOT}${VERIDIAN_LDSO}")" != "/usr/lib/libc.so" ]]; then
+        log "  MISSING: ${SYSROOT}${VERIDIAN_LDSO} -> /usr/lib/libc.so"
         errors=$((errors + 1))
     fi
 
