@@ -1,9 +1,8 @@
-
-[build]
-target = "x86_64-unknown-none"
-
-[target.'cfg(target_os = "none")']
-runner = "bootimage runner"
+# Project build settings, tracked so that CI and fresh clones build with the
+# same flags (the rest of .cargo/ is a local Cargo home and stays ignored).
+# Only per-target flags live here: every build names its target explicitly
+# (build-kernel.sh, the gate, CI), and a command without --target builds for
+# the host, as CI's host checks expect.
 
 [target.x86_64-veridian]
 rustflags = ["-C", "code-model=kernel", "-C", "relocation-model=static"]
