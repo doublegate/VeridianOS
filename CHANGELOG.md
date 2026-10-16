@@ -2,6 +2,17 @@
 
 ### Added
 
+- **User FP state on AArch64 and RISC-V (N-41 part).** Each user task carries an FP area that
+  `arch_switch` saves and restores eagerly, as XSAVE does on x86_64. AArch64 switches v0-v31, FPCR
+  and FPSR and enables FP at EL0 (CPACR_EL1.FPEN = 11). RISC-V switches f0-f31 and fcsr, keeps FS
+  off while the kernel runs (it is now cleared at every trap from U-mode) and returns with FS Clean.
+  A new program starts zeroed; fork and clone copy the caller's registers. RISC-V learns F/D from
+  the device tree's `riscv,isa` (`fdt::isa_has_base_extension`, host-tested): its FP code read
+  `misa` and wrote `mstatus`, M-mode CSRs that S-mode cannot touch (HR-20/21). Boot test
+  `user_fp_state_survives_switches` runs two processes that each keep their pid in two FP
+  registers across 64 yields. It fails with the switch disabled, and replaces
+  `aarch64_user_fp_is_trapped`. `process::run_and_wait_all` starts several processes before waiting.
+
 - **AArch64 runs user programs at EL0 (E-A6; ADR 0016).** Exceptions from EL0 land on the task's
   kernel stack, since the return to EL0 leaves SP_EL1 at its top. They are saved as a 272-byte
   `UserFrame` and handled by ESR class:

@@ -177,6 +177,16 @@ pub fn init_fpu() {
     }
 }
 
+/// The FP/SIMD state a new program starts with: every register zero, FPCR
+/// zero (round to nearest, no traps, no flush-to-zero), FPSR zero.
+pub fn initial_fpu() -> alloc::boxed::Box<FpuState> {
+    alloc::boxed::Box::new(FpuState {
+        v: [[0; 2]; 32],
+        fpcr: 0,
+        fpsr: 0,
+    })
+}
+
 /// Save FPU/NEON state to the given FpuState buffer
 ///
 /// Saves all 32 SIMD registers (Q0-Q31) plus FPCR and FPSR.

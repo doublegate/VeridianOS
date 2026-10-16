@@ -243,50 +243,26 @@ impl crate::arch::context::ThreadContext for RiscVContext {
     }
 }
 
-/// Initialize FPU for current CPU
-pub fn init_fpu() {
-    // SAFETY: Sets the FS field in mstatus to "Dirty" (0x6000), enabling the FPU.
-    // This is a privileged CSR write that must be done in machine/supervisor mode.
-    // The t0 register is used as a temporary and marked as clobbered.
-    unsafe {
-        // Enable FPU in mstatus
-        asm!(
-            "li t0, 0x6000",     // FS = 11 (dirty)
-            "csrs mstatus, t0",
-            out("t0") _,
-        );
-    }
-}
+/// Initialize FPU for current CPU: nothing to do. FS stays Off while the
+/// kernel runs and user FP state is switched with the task
+/// (`riscv64::fpu`). This used to write `mstatus`, an M-mode CSR that
+/// S-mode code cannot access (HR-20).
+pub fn init_fpu() {}
 
-/// Check if CPU supports F extension
-///
-/// Retained for future FPU context switching and feature detection
-/// during SMP bring-up.
+/// Whether the harts have the F extension (from the device tree; `misa`
+/// is an M-mode CSR that S-mode code cannot read, HR-21).
 #[allow(dead_code)] // CPU feature detection API
 pub fn has_f_extension() -> bool {
-    // Check misa register
-    // SAFETY: Reading the misa CSR is a read-only operation that reports
-    // which ISA extensions are supported. Always accessible in M-mode.
-    unsafe {
-        let misa: usize;
-        asm!("csrr {}, misa", out(reg) misa);
-        (misa & (1 << 5)) != 0 // Bit 5 = F extension
-    }
+    #[cfg(target_arch = "riscv64")]
+    return crate::arch::riscv64::fpu::present();
+    #[cfg(not(target_arch = "riscv64"))]
+    false
 }
 
-/// Check if CPU supports D extension
-///
-/// Called by save_fpu_state() and restore_fpu_state() to check
-/// for double-precision FP register availability.
+/// Whether the harts have the D extension (likewise; F and D are recorded
+/// together). Checked by save_fpu_state() and restore_fpu_state().
 pub fn has_d_extension() -> bool {
-    // Check misa register
-    // SAFETY: Reading the misa CSR is a read-only operation that reports
-    // which ISA extensions are supported. Always accessible in M-mode.
-    unsafe {
-        let misa: usize;
-        asm!("csrr {}, misa", out(reg) misa);
-        (misa & (1 << 3)) != 0 // Bit 3 = D extension
-    }
+    has_f_extension()
 }
 
 /// Save FPU state (F/D extension registers)

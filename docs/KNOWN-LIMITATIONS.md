@@ -218,13 +218,15 @@ Still open:
   instruction is SIGILL), signal handlers and a fault-tolerant user compare-and-exchange
   (futexes).
 
-### FPU and vector registers on AArch64 and RISC-V (N-41 part, sprint E)
+### FPU and vector registers: no SVE or RISC-V V state (N-41 part)
 
-On x86_64 every task has its own x87/SSE/AVX state, saved and restored with XSAVE sized from CPUID
-at each switch (stage D2), and the kernel itself is soft-float. The AArch64 and RISC-V kernels are
-soft-float too since v0.27 (N-178), so the FP registers hold only user state. RISC-V user mode runs
-with FP off (`sstatus.FS`), so a program's FP instruction traps; switching the state comes next in
-sprint E. AArch64 traps FP/SIMD at EL0 the same way (CPACR_EL1.FPEN = 01, ADR 0016).
+Every architecture switches user FP state with the task. x86_64 saves and restores its
+x87/SSE/AVX state with XSAVE sized from CPUID (stage D2). Since sprint E, AArch64 saves v0-v31,
+FPCR and FPSR, and RISC-V f0-f31 and fcsr, eagerly at each switch. All three kernels are
+soft-float (N-178), so these registers hold only user state. RISC-V keeps `sstatus.FS` off
+while the kernel runs and detects F/D from the device tree (`misa` is an M-mode CSR). Not
+handled: the AArch64 SVE/SME registers and the RISC-V vector extension (V). A program using them
+gets SIGILL; QEMU's default CPUs do not offer them.
 
 ### AArch64 kernel stacks have no guard pages; RISC-V overflows hang (N-26, sprint E)
 

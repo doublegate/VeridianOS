@@ -140,10 +140,10 @@ el1_entry:
     ldr x0, =VERIDIAN_SCTLR_EL1_MMU_OFF
     msr sctlr_el1, x0
     isb
-    // CPACR_EL1.FPEN = 01: FP/SIMD traps at EL0 and not at EL1. The kernel
-    // is soft-float (N-178) and uses none; user FP state is not switched
-    // with the task yet, so an EL0 FP instruction is SIGILL (ADR 0016).
-    mov x0, #(1 << 20)
+    // CPACR_EL1.FPEN = 11: FP/SIMD at EL0 and EL1. The kernel is soft-float
+    // (N-178) and uses the registers only to switch user state with the
+    // task (sched::dispatch::arch_switch).
+    mov x0, #(3 << 20)
     msr cpacr_el1, x0
     isb
 
@@ -372,7 +372,7 @@ veridian_secondary_entry:
     ldr x1, =VERIDIAN_SCTLR_EL1_MMU_OFF
     msr sctlr_el1, x1
     isb
-    mov x1, #(1 << 20)          // CPACR_EL1.FPEN = 01, as on the boot CPU
+    mov x1, #(3 << 20)          // CPACR_EL1.FPEN = 11, as on the boot CPU
     msr cpacr_el1, x1
     isb
     // The boot CPU's MMU registers (written to memory before its MMU was

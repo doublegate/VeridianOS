@@ -69,3 +69,11 @@ rlimit, memfd_secret): RISC-V's numbers plus `renameat` (38), without the two RI
 - The user copy goes a byte at a time; faster copies wait for a measurement.
 - A user stack pointer is never trusted: the kernel never runs on SP_EL0, and the entry does not read
   user memory.
+
+## Amendment (2026-10-16): user FP state is switched
+
+User FP state is no longer off in user mode: each user task carries an FP area, saved and restored
+eagerly by `sched::dispatch::arch_switch` (as XSAVE on x86_64). A new program starts zeroed; fork
+and clone copy the caller's live registers. AArch64 saves v0-v31, FPCR and FPSR, and CPACR_EL1.FPEN is 11 on every CPU.
+The boot test `aarch64_user_fp_is_trapped` is replaced by `user_fp_state_survives_switches`, which
+fails with the switch disabled.

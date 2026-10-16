@@ -261,6 +261,32 @@ pub fn isa_has_extension(isa: &[u8], ext: &[u8]) -> bool {
         .any(|e| e.eq_ignore_ascii_case(ext))
 }
 
+/// Whether a RISC-V ISA description lists single-letter extension `letter`
+/// (ASCII, case-insensitive): in a `riscv,isa` string the letters after the
+/// `rv32`/`rv64` prefix of the first `_`-separated token (`g` stands for
+/// `imafd`); in a `riscv,isa-extensions` list an entry of that letter alone.
+pub fn isa_has_base_extension(isa: &[u8], letter: u8) -> bool {
+    let letter = letter.to_ascii_lowercase();
+    let mut tokens = isa
+        .split(|&c| c == b'_' || c == 0)
+        .filter(|t| !t.is_empty());
+    let Some(first) = tokens.next() else {
+        return false;
+    };
+    // No allocation: this runs before the heap exists (RISC-V early boot).
+    let is_prefix = first.len() >= 4
+        && first[..2].eq_ignore_ascii_case(b"rv")
+        && (&first[2..4] == b"32" || &first[2..4] == b"64");
+    if is_prefix {
+        let has = |l: u8| first[4..].iter().any(|c| c.to_ascii_lowercase() == l);
+        return has(letter) || (has(b'g') && b"imafd".contains(&letter));
+    }
+    // An isa-extensions list: each entry is one extension.
+    core::iter::once(first)
+        .chain(tokens)
+        .any(|t| t.len() == 1 && t[0].to_ascii_lowercase() == letter)
+}
+
 #[cfg(test)]
 mod tests {
     use alloc::vec::Vec;
@@ -343,6 +369,19 @@ mod tests {
         assert!(isa_has_extension(b"i\0m\0a\0sstc\0zicntr\0", b"sstc"));
         assert!(!isa_has_extension(b"rv64imafdc_zicsr\0", b"sstc"));
         assert!(!isa_has_extension(b"rv64imafdc_sstcx\0", b"sstc"));
+    }
+
+    #[test]
+    fn finds_single_letter_extensions() {
+        assert!(isa_has_base_extension(b"rv64imafdch_zicsr_sstc\0", b'd'));
+        assert!(isa_has_base_extension(b"RV64IMAFDC\0", b'f'));
+        assert!(isa_has_base_extension(b"rv64gc\0", b'd'), "g implies imafd");
+        assert!(!isa_has_base_extension(b"rv64imac_zicsr\0", b'd'));
+        // A multi-letter extension containing the letter is not it.
+        assert!(!isa_has_base_extension(b"rv64imac_zdinx\0", b'd'));
+        assert!(isa_has_base_extension(b"i\0m\0a\0f\0d\0c\0", b'd'));
+        assert!(!isa_has_base_extension(b"i\0m\0a\0c\0zicsr\0", b'd'));
+        assert!(!isa_has_base_extension(b"", b'd'));
     }
 
     #[test]

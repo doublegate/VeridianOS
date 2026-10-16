@@ -128,10 +128,11 @@ pub unsafe fn enter_usermode(entry_point: u64, user_stack: u64) -> ! {
 // with the result (a system call round trip). B: a load from address 0 (a
 // user fault the kernel cannot resolve: SIGSEGV). C: reads SCTLR_EL1, an
 // EL1 register (undefined at EL0: SIGILL, which shows the code ran at
-// EL0). E: an FP instruction (`fmov d0, xzr`, as `.inst` since the kernel
-// is soft-float): FP/SIMD traps at EL0 (CPACR_EL1.FPEN) until its state is
-// switched with the task, so SIGILL. Numbers from Linux's generic table:
-// getpid 172, exit_group 94.
+// EL0). E: puts its pid in d0 and d31 (`fmov`, as `.inst` since the kernel
+// is soft-float), yields 64 times (sched_yield 124) and exits 0 if both
+// still hold it: two of these running together on one CPU see each other's
+// values unless FP state is switched with the task. Numbers from Linux's
+// generic table: getpid 172, exit_group 94.
 core::arch::global_asm!(
     ".section .rodata",
     ".balign 4",
@@ -164,8 +165,24 @@ core::arch::global_asm!(
     ".balign 4",
     ".global veridian_a64_user_fp",
     "veridian_a64_user_fp:",
-    "    .inst 0x9e6703e0",
-    "    mov x8, #94",
+    "    mov x8, #172",
+    "    svc #0",
+    "    mov x19, x0",
+    "    .inst 0x9e670000", // fmov d0, x0
+    "    .inst 0x9e67001f", // fmov d31, x0
+    "    mov x20, #64",
+    "1:  mov x8, #124",
+    "    svc #0",
+    "    subs x20, x20, #1",
+    "    b.ne 1b",
+    "    .inst 0x9e660002", // fmov x2, d0
+    "    .inst 0x9e6603e3", // fmov x3, d31
+    "    eor x2, x2, x19",
+    "    eor x3, x3, x19",
+    "    orr x0, x2, x3",
+    "    cbz x0, 2f",
+    "    mov x0, #1",
+    "2:  mov x8, #94",
     "    svc #0",
     ".global veridian_a64_user_fp_end",
     "veridian_a64_user_fp_end:",
@@ -247,7 +264,7 @@ pub fn test_elf() -> alloc::vec::Vec<u8> {
 }
 
 /// The boot-test user programs (see above): getpid round trip, page
-/// fault, EL1 system register, FP instruction.
+/// fault, EL1 system register, FP state kept across switches.
 pub fn test_programs() -> [&'static [u8]; 4] {
     // Only the addresses of the linker symbols are taken (safe).
     [

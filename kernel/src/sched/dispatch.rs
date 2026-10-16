@@ -158,6 +158,12 @@ pub struct Task {
     /// rule as `saved_sp`.
     #[cfg(target_arch = "x86_64")]
     xsave: UnsafeCell<Option<crate::arch::x86_64::switch::xsave::Area>>,
+    /// AArch64 and RISC-V: the user FP/SIMD registers, switched eagerly the
+    /// same way (both kernels are soft-float, N-178). Same access rule.
+    #[cfg(target_arch = "aarch64")]
+    fp: UnsafeCell<Option<alloc::boxed::Box<crate::arch::aarch64::context::FpuState>>>,
+    #[cfg(target_arch = "riscv64")]
+    fp: UnsafeCell<Option<alloc::boxed::Box<crate::arch::riscv::context::FpuState>>>,
 }
 
 // SAFETY: `saved_sp` and `arch` are accessed only by the CPU switching the
@@ -193,6 +199,8 @@ impl Task {
             usage: super::cputime::CpuUsage::new(),
             #[cfg(target_arch = "x86_64")]
             xsave: UnsafeCell::new(None),
+            #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
+            fp: UnsafeCell::new(None),
         }
     }
 
@@ -822,6 +830,12 @@ unsafe fn arch_switch(prev: *const Task, next: *const Task) {
         a.entry_stack = (*cpu).kernel_rsp;
         a.syscall_frame = (*cpu).syscall_frame;
         let b = &*(*next).arch.get();
+        if let Some(fp) = (*(*prev).fp.get()).as_mut() {
+            crate::arch::riscv64::fpu::save(fp);
+        }
+        if let Some(fp) = (*(*next).fp.get()).as_ref() {
+            crate::arch::riscv64::fpu::restore(fp);
+        }
         switch::switch_address_space(b.root);
         (*cpu).kernel_rsp = b.entry_stack;
         (*cpu).syscall_frame = b.syscall_frame;
@@ -839,6 +853,12 @@ unsafe fn arch_switch(prev: *const Task, next: *const Task) {
         a.tls = switch::read_tls();
         a.syscall_frame = (*cpu).syscall_frame;
         let b = &*(*next).arch.get();
+        if let Some(fp) = (*(*prev).fp.get()).as_mut() {
+            crate::arch::aarch64::context::save_fpu_state(fp);
+        }
+        if let Some(fp) = (*(*next).fp.get()).as_ref() {
+            crate::arch::aarch64::context::restore_fpu_state(fp);
+        }
         switch::switch_address_space(b.root);
         switch::write_tls(b.tls);
         (*cpu).syscall_frame = b.syscall_frame;
@@ -1639,13 +1659,14 @@ pub fn current_owner() -> Option<(u64, u64)> {
 
 /// Start a RISC-V user thread as a task: its first switch-in enters user
 /// mode with `frame` (registers, sepc, sstatus) on the address space whose
-/// root is `root`, scheduled with `policy` on the CPUs in `affinity`. User
-/// FP state is not switched yet (FP stays off in user mode).
+/// root is `root`, with user FP registers `fp`, scheduled with `policy` on
+/// the CPUs in `affinity`.
 #[cfg(all(target_arch = "riscv64", dispatch))]
 pub fn spawn_user(
     owner: (u64, u64),
     frame: &crate::arch::riscv64::switch::UserFrame,
     root: u64,
+    fp: alloc::boxed::Box<crate::arch::riscv::context::FpuState>,
     policy: Policy,
     affinity: u64,
 ) -> Result<TaskKey, KernelError> {
@@ -1666,6 +1687,7 @@ pub fn spawn_user(
     // SAFETY: the stack was just allocated for this task and is unused.
     let sp = unsafe { crate::arch::riscv64::switch::seed_user_thread(top, &entry) };
     *task.saved_sp.get_mut() = sp;
+    *task.fp.get_mut() = Some(fp);
     let arch = task.arch.get_mut();
     arch.root = root;
     arch.entry_stack = (top & !0xF) as u64;
@@ -1678,15 +1700,17 @@ pub fn spawn_user(
 
 /// Start an AArch64 user thread as a task: its first switch-in enters EL0
 /// with `frame` (registers, SP_EL0, ELR, SPSR) on the address space whose
-/// root is `root` (TTBR0) and with TLS register `tls` (TPIDR_EL0),
-/// scheduled with `policy` on the CPUs in `affinity`. User FP state is not
-/// switched yet (FP is trapped at EL0).
+/// root is `root` (TTBR0), with TLS register `tls` (TPIDR_EL0) and user
+/// FP/SIMD registers `fp`, scheduled with `policy` on the CPUs in
+/// `affinity`.
 #[cfg(all(target_arch = "aarch64", dispatch))]
+#[allow(clippy::too_many_arguments)]
 pub fn spawn_user(
     owner: (u64, u64),
     frame: &crate::arch::aarch64::switch::UserFrame,
     root: u64,
     tls: u64,
+    fp: alloc::boxed::Box<crate::arch::aarch64::context::FpuState>,
     policy: Policy,
     affinity: u64,
 ) -> Result<TaskKey, KernelError> {
@@ -1707,6 +1731,7 @@ pub fn spawn_user(
     // SAFETY: the stack was just allocated for this task and is unused.
     let sp = unsafe { crate::arch::aarch64::switch::seed_user_thread(top, &entry) };
     *task.saved_sp.get_mut() = sp;
+    *task.fp.get_mut() = Some(fp);
     let arch = task.arch.get_mut();
     arch.root = root;
     arch.tls = tls;

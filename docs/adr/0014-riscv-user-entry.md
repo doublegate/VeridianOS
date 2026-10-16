@@ -50,3 +50,12 @@ numbered by Linux's generic table (ADR 0009 amendment).
   dispatch too (the loader fences the new code on every hart, SBI `remote_fence_i`).
 - The user copy goes a byte at a time; faster copies wait for a measurement.
 - A user `sp` is never trusted: the kernel never runs on it, and the trap does not read user memory.
+
+## Amendment (2026-10-16): user FP state is switched
+
+User FP state is no longer off in user mode: each user task carries an FP area, saved and restored
+eagerly by `sched::dispatch::arch_switch` (as XSAVE on x86_64). A new program starts zeroed; fork
+and clone copy the caller's live registers. RISC-V saves f0-f31 and fcsr with `sstatus.FS` on only for the save and
+restore, turns FS off at every trap from U-mode (the user's FS is in the frame and comes back with
+the `sret`), returns to U-mode with FS Clean, and learns F/D from the device tree (`riscv64::fpu`;
+`misa` and `mstatus` are M-mode CSRs, HR-20/21).

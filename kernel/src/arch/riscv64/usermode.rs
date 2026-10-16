@@ -159,6 +159,37 @@ core::arch::global_asm!(
     "    ecall",
     ".global veridian_rv_user_csr_end",
     "veridian_rv_user_csr_end:",
+    // E: puts its pid in f0 and f31, yields 64 times (sched_yield 124) and
+    // exits 0 if both still hold it: two of these running together on one
+    // hart see each other's values unless FP state is switched with the
+    // task. The kernel is soft-float, so the FP instructions are enabled
+    // for this program only.
+    ".balign 4",
+    ".global veridian_rv_user_fp",
+    "veridian_rv_user_fp:",
+    ".option push",
+    ".option arch, +d",
+    "    li a7, 172",
+    "    ecall",
+    "    mv s1, a0",
+    "    fmv.d.x f0, a0",
+    "    fmv.d.x f31, a0",
+    "    li s2, 64",
+    "1:  li a7, 124",
+    "    ecall",
+    "    addi s2, s2, -1",
+    "    bnez s2, 1b",
+    "    fmv.x.d t0, f0",
+    "    fmv.x.d t1, f31",
+    "    xor t0, t0, s1",
+    "    xor t1, t1, s1",
+    "    or a0, t0, t1",
+    "    snez a0, a0",
+    "    li a7, 94",
+    "    ecall",
+    ".option pop",
+    ".global veridian_rv_user_fp_end",
+    "veridian_rv_user_fp_end:",
     // D: the body of an ELF test program: write(1, "RV-ELF-OK\n", 10),
     // then exit_group(argc), argc being the first word of the stack the
     // loader built.
@@ -185,6 +216,8 @@ extern "C" {
     static veridian_rv_user_fault_end: u8;
     static veridian_rv_user_csr: u8;
     static veridian_rv_user_csr_end: u8;
+    static veridian_rv_user_fp: u8;
+    static veridian_rv_user_fp_end: u8;
     static veridian_rv_user_elf: u8;
     static veridian_rv_user_elf_end: u8;
 }
@@ -230,8 +263,8 @@ pub fn test_elf() -> alloc::vec::Vec<u8> {
 }
 
 /// The boot-test user programs (see above): getpid round trip, page
-/// fault, privileged CSR.
-pub fn test_programs() -> [&'static [u8]; 3] {
+/// fault, privileged CSR, FP state kept across switches.
+pub fn test_programs() -> [&'static [u8]; 4] {
     let span = |a: *const u8, b: *const u8| {
         // SAFETY: two labels of one rodata block, `a` before `b`.
         unsafe { core::slice::from_raw_parts(a, b as usize - a as usize) }
@@ -249,6 +282,10 @@ pub fn test_programs() -> [&'static [u8]; 3] {
         span(
             core::ptr::addr_of!(veridian_rv_user_csr),
             core::ptr::addr_of!(veridian_rv_user_csr_end),
+        ),
+        span(
+            core::ptr::addr_of!(veridian_rv_user_fp),
+            core::ptr::addr_of!(veridian_rv_user_fp_end),
         ),
     ]
 }

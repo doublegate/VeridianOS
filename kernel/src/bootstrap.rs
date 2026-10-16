@@ -2183,7 +2183,7 @@ fn run_process_tests(passed: &mut u32, failed: &mut u32) {
     // Exit status as run_and_wait reports it: the code, or 128 + signal.
     #[cfg(target_arch = "riscv64")]
     {
-        let [getpid, fault, csr] = crate::arch::riscv64::usermode::test_programs();
+        let [getpid, fault, csr, fp] = crate::arch::riscv64::usermode::test_programs();
         let (pid, status) = run_user_code(getpid);
         let ok = pid.is_some_and(|p| status == Some((p & 0xFF) as i32));
         if !ok {
@@ -2210,6 +2210,7 @@ fn run_process_tests(passed: &mut u32, failed: &mut u32) {
             passed,
             failed,
         );
+        report_fp_survives(fp, passed, failed);
 
         // An ELF program through the loader (from the VFS, with arguments
         // and the console as fds 0-2): it writes "RV-ELF-OK" and exits with
@@ -2279,17 +2280,7 @@ fn run_process_tests(passed: &mut u32, failed: &mut u32) {
             passed,
             failed,
         );
-        // FP at EL0 traps (SIGILL) until FP state is switched per task.
-        let (_, status) = run_user_code(fp);
-        if status != Some(128 + 4) {
-            crate::println!("    status {:?}", status);
-        }
-        report_test(
-            "aarch64_user_fp_is_trapped",
-            status == Some(128 + 4),
-            passed,
-            failed,
-        );
+        report_fp_survives(fp, passed, failed);
 
         // An ELF program through the loader: it writes "A64-ELF-OK" and
         // exits with its argc.
@@ -2339,6 +2330,38 @@ fn run_process_tests(passed: &mut u32, failed: &mut u32) {
     any(target_arch = "riscv64", target_arch = "aarch64")
 ))]
 fn run_user_code(code: &[u8]) -> (Option<u64>, Option<i32>) {
+    match build_user_code(code) {
+        Some(pid) => (Some(pid.0), crate::process::run_and_wait(pid)),
+        None => (None, None),
+    }
+}
+
+/// Two copies of the FP test program (`test_programs()[3]`) run together:
+/// each puts its pid in two FP registers, yields 64 times and exits 0 only
+/// if they still hold it. On one CPU they alternate, so this fails unless
+/// user FP state is switched with the task.
+#[cfg(all(
+    feature = "alloc",
+    any(target_arch = "riscv64", target_arch = "aarch64")
+))]
+fn report_fp_survives(code: &[u8], passed: &mut u32, failed: &mut u32) {
+    let statuses = match (build_user_code(code), build_user_code(code)) {
+        (Some(a), Some(b)) => crate::process::run_and_wait_all(&[a, b]),
+        _ => alloc::vec![None, None],
+    };
+    let ok = statuses.iter().all(|s| *s == Some(0));
+    if !ok {
+        crate::println!("    statuses {:?}", statuses);
+    }
+    report_test("user_fp_state_survives_switches", ok, passed, failed);
+}
+
+/// Build (not start) a process that runs `code` as [`run_user_code`] does.
+#[cfg(all(
+    feature = "alloc",
+    any(target_arch = "riscv64", target_arch = "aarch64")
+))]
+fn build_user_code(code: &[u8]) -> Option<crate::process::ProcessId> {
     use crate::{
         arch::context::ThreadContext,
         mm::{vas::MappingType, PageFlags, VirtualAddress},
@@ -2349,7 +2372,7 @@ fn run_user_code(code: &[u8]) -> (Option<u64>, Option<i32>) {
     let Ok(p) =
         ProcessBuilder::new(alloc::string::String::from("rv-user")).build_with_address_space()
     else {
-        return (None, None);
+        return None;
     };
     let mapped = {
         let vas = p.memory_space.lock();
@@ -2394,12 +2417,12 @@ fn run_user_code(code: &[u8]) -> (Option<u64>, Option<i32>) {
         }
     };
     if !mapped {
-        return (None, None);
+        return None;
     }
     let Ok(t) =
         ThreadBuilder::new(p.pid, alloc::string::String::from("rv-user"), CODE as usize).build()
     else {
-        return (None, None);
+        return None;
     };
     {
         let mut c = t.context.lock();
@@ -2407,12 +2430,9 @@ fn run_user_code(code: &[u8]) -> (Option<u64>, Option<i32>) {
         c.set_stack_pointer((STACK + 4096) as usize);
     }
     if p.add_thread(t).is_err() {
-        return (None, None);
+        return None;
     }
-    let Ok(pid) = crate::process::table::add_process(p) else {
-        return (None, None);
-    };
-    (Some(pid.0), crate::process::run_and_wait(pid))
+    crate::process::table::add_process(p).ok()
 }
 
 /// Run VFS boot tests (tests 1-6).

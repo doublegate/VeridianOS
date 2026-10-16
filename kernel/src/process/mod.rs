@@ -237,7 +237,8 @@ pub fn start_thread(
 
 /// RISC-V: start `thread` as a dispatcher task entering user mode with the
 /// registers of its saved context (pc, sp, gp, tp, the argument registers).
-/// User FP state is not switched yet, so `inherit_fpu` has nothing to copy.
+/// `inherit_fpu` gives it a copy of the calling thread's live FP registers
+/// (fork, clone) instead of the initial state (a new program).
 #[cfg(all(feature = "alloc", target_arch = "riscv64", target_os = "none"))]
 pub fn start_thread(
     process: &Process,
@@ -245,7 +246,12 @@ pub fn start_thread(
     inherit_fpu: bool,
 ) -> crate::error::KernelResult<()> {
     use crate::arch::riscv64::switch::UserFrame;
-    let _ = inherit_fpu;
+    let mut fp = crate::arch::riscv64::fpu::initial();
+    if inherit_fpu {
+        // The kernel is soft-float: the FP registers still hold the calling
+        // thread's user state.
+        crate::arch::riscv64::fpu::save(&mut fp);
+    }
     let frame = {
         let ctx = thread.context.lock();
         let user = crate::syscall::userspace::is_user_address;
@@ -282,6 +288,7 @@ pub fn start_thread(
         (process.pid.0, thread.tid.0),
         &frame,
         root,
+        fp,
         policy,
         thread.get_affinity() as u64,
     )?;
@@ -290,8 +297,8 @@ pub fn start_thread(
 
 /// AArch64: start `thread` as a dispatcher task entering EL0 with the
 /// registers of its saved context (x0-x30, sp, pc) and its TLS register
-/// (TPIDR_EL0). User FP state is not switched yet (FP is trapped at EL0),
-/// so `inherit_fpu` has nothing to copy.
+/// (TPIDR_EL0). `inherit_fpu` gives it a copy of the calling thread's live
+/// FP/SIMD registers (fork, clone) instead of the initial state.
 #[cfg(all(feature = "alloc", target_arch = "aarch64", target_os = "none"))]
 pub fn start_thread(
     process: &Process,
@@ -299,7 +306,12 @@ pub fn start_thread(
     inherit_fpu: bool,
 ) -> crate::error::KernelResult<()> {
     use crate::arch::aarch64::switch::UserFrame;
-    let _ = inherit_fpu;
+    let mut fp = crate::arch::aarch64::context::initial_fpu();
+    if inherit_fpu {
+        // The kernel is soft-float: the FP registers still hold the calling
+        // thread's user state.
+        crate::arch::aarch64::context::save_fpu_state(&mut fp);
+    }
     let (frame, tls) = {
         let ctx = thread.context.lock();
         let user = crate::syscall::userspace::is_user_address;
@@ -333,6 +345,7 @@ pub fn start_thread(
         &frame,
         root,
         tls,
+        fp,
         policy,
         thread.get_affinity() as u64,
     )?;
@@ -355,25 +368,51 @@ pub fn start_thread(
     )
 ))]
 pub fn run_and_wait(pid: ProcessId) -> Option<i32> {
-    let process = table::get_process(pid)?;
-    let thread = process.threads.lock().values().next().cloned()?;
-    if start_thread(&process, &thread, false).is_err() {
-        return None;
-    }
-    drop(thread);
-    crate::sched::dispatch::PROCESS_EVENTS.wait_until(|| {
-        process.get_state() == ProcessState::Zombie
-            && crate::sched::dispatch::tasks_of(pid.0).is_empty()
-    });
-    let sig = process.term_signal.load(Ordering::Acquire);
-    let code = if sig != 0 {
-        128 + sig as i32
-    } else {
-        process.get_exit_code()
-    };
-    drop(process);
-    table::remove_process(pid);
-    Some(code)
+    run_and_wait_all(&[pid])[0]
+}
+
+/// [`run_and_wait`] for several processes at once: all are started before
+/// any is waited for, so they run concurrently. One status per pid, in
+/// order (`None` for one that could not be started).
+#[cfg(all(
+    feature = "alloc",
+    any(
+        target_arch = "x86_64",
+        all(
+            any(target_arch = "riscv64", target_arch = "aarch64"),
+            target_os = "none"
+        )
+    )
+))]
+pub fn run_and_wait_all(pids: &[ProcessId]) -> alloc::vec::Vec<Option<i32>> {
+    let started: alloc::vec::Vec<Option<alloc::sync::Arc<Process>>> = pids
+        .iter()
+        .map(|&pid| {
+            let process = table::get_process(pid)?;
+            let thread = process.threads.lock().values().next().cloned()?;
+            start_thread(&process, &thread, false).ok()?;
+            Some(process)
+        })
+        .collect();
+    pids.iter()
+        .zip(started)
+        .map(|(&pid, process)| {
+            let process = process?;
+            crate::sched::dispatch::PROCESS_EVENTS.wait_until(|| {
+                process.get_state() == ProcessState::Zombie
+                    && crate::sched::dispatch::tasks_of(pid.0).is_empty()
+            });
+            let sig = process.term_signal.load(Ordering::Acquire);
+            let code = if sig != 0 {
+                128 + sig as i32
+            } else {
+                process.get_exit_code()
+            };
+            drop(process);
+            table::remove_process(pid);
+            Some(code)
+        })
+        .collect()
 }
 
 /// The process of a dispatcher task about to be reaped, looked up before

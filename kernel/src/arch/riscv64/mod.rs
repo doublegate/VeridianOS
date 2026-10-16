@@ -7,6 +7,7 @@
 pub mod boot;
 pub mod bootstrap;
 pub mod entry;
+pub mod fpu;
 pub mod serial;
 #[cfg(feature = "smp")]
 pub mod smp;
@@ -135,6 +136,11 @@ core::arch::global_asm!(
     "    sd t0, 256(sp)",
     "    csrr t0, sstatus",
     "    sd t0, 264(sp)",
+    // FP off while the kernel runs (HR-20): the user's FS is in the frame
+    // and comes back with the sret; its registers stay live and are saved
+    // at the next switch (`fpu`).
+    "    li t0, 0x6000",
+    "    csrc sstatus, t0",
     "    sd sp, 16(tp)",
     "    mv a0, sp",
     "    call {user_handler}",
@@ -388,6 +394,7 @@ pub fn init() {
     // SAFETY: veridian_dtb_pa is written once by boot.S before Rust runs.
     let dtb_pa = unsafe { core::ptr::read_volatile(core::ptr::addr_of!(veridian_dtb_pa)) };
     super::riscv::timer::init_from_device_tree(dtb_pa);
+    fpu::init_from_device_tree(dtb_pa);
     read_mmu_type(dtb_pa);
     super::riscv::timer::start(1000);
 

@@ -48,12 +48,21 @@ const SSTATUS_SIE: u64 = 1 << 1;
 const SSTATUS_SUM: u64 = 1 << 18;
 const SSTATUS_FS: u64 = 3 << 13;
 
+/// sstatus.FS = Clean: the FP registers hold the task's saved state.
+const SSTATUS_FS_CLEAN: u64 = 2 << 13;
+
 /// The `sstatus` to return to user mode with: U-mode (SPP clear),
 /// interrupts on there (SPIE), kernel interrupts off until the `sret`, no
-/// kernel access to user pages (SUM clear) and FP off (user FP state is not
-/// switched yet, so an FP instruction traps). Every other bit is kept.
+/// kernel access to user pages (SUM clear), and FP Clean when the harts
+/// have F/D (user FP state is switched with the task, `fpu`), else Off (an
+/// FP instruction traps). Every other bit is kept.
 pub fn user_sstatus(sstatus: u64) -> u64 {
-    (sstatus & !(SSTATUS_SPP | SSTATUS_SIE | SSTATUS_SUM | SSTATUS_FS)) | SSTATUS_SPIE
+    let fs = if super::fpu::present() {
+        SSTATUS_FS_CLEAN
+    } else {
+        0
+    };
+    (sstatus & !(SSTATUS_SPP | SSTATUS_SIE | SSTATUS_SUM | SSTATUS_FS)) | SSTATUS_SPIE | fs
 }
 
 /// Save the callee-saved registers and stack pointer of the running task
