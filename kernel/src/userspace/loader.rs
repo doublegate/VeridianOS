@@ -173,14 +173,7 @@ pub fn load_user_program(
 
     // Load the program (ADR 0010), and for a dynamic one its interpreter,
     // which then runs first; then its stack, with the auxiliary vector.
-    //
-    // On RISC-V, the MMU is not enabled (satp = Bare mode), so ELF load
-    // addresses (e.g. 0x400000) map directly to physical addresses that
-    // are not valid RAM on the QEMU virt machine (RAM starts at
-    // 0x80000000). Writing to those addresses causes a store access fault
-    // and a CPU reset. Skip segment loading on RISC-V; the process PCB
-    // is still created for bookkeeping.
-    #[cfg(not(target_arch = "riscv64"))]
+    // (RISC-V skipped this while it ran with paging off; ADR 0013.)
     if let Some(process) = crate::process::get_process(pid) {
         let not_elf = |_| KernelError::InvalidArgument {
             name: "elf_binary",

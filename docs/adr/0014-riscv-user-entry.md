@@ -43,8 +43,10 @@ numbered by Linux's generic table (ADR 0009 amendment).
 
 - RISC-V runs programs in U-mode as dispatcher tasks (boot tests `riscv_user_syscall_round_trip`,
   `riscv_user_fault_kills_process`, `riscv_user_mode_is_unprivileged`, `usercopy_fault_returns_efault`).
-- Not yet: ELF programs through the loader and exec on RISC-V; user FP state (FP is off in U-mode, so
-  an FP instruction is SIGILL); signal handlers (only fatal signals act); a fault-tolerant user
-  compare-and-exchange (futexes); secondary harts dispatching. These follow in sprint E.
+- ELF programs from the VFS run through the loader (boot tests `riscv_elf_program_runs`,
+  `riscv_embedded_init_runs`). Not yet: a RISC-V C library and TLS; user FP state (FP is off in
+  U-mode, so an FP instruction is SIGILL); signal handlers (only fatal signals act); a
+  fault-tolerant user compare-and-exchange (futexes); secondary harts dispatching. These follow in
+  sprint E.
 - The user copy goes a byte at a time; faster copies wait for a measurement.
 - A user `sp` is never trusted: the kernel never runs on it, and the trap does not read user memory.

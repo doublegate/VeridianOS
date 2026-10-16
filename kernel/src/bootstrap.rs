@@ -2215,6 +2215,41 @@ fn run_process_tests(passed: &mut u32, failed: &mut u32) {
             passed,
             failed,
         );
+
+        // An ELF program through the loader (from the VFS, with arguments
+        // and the console as fds 0-2): it writes "RV-ELF-OK" and exits with
+        // its argc.
+        let elf = crate::arch::riscv64::usermode::test_elf();
+        let status = crate::fs::write_file("/tmp/rv-elf-test", &elf)
+            .ok()
+            .and_then(|_| {
+                crate::userspace::loader::load_user_program(
+                    "/tmp/rv-elf-test",
+                    &["rv-elf-test", "a", "b"],
+                    &[],
+                )
+                .ok()
+            })
+            .and_then(crate::process::run_and_wait);
+        if status != Some(3) {
+            crate::println!("    status {:?}", status);
+        }
+        report_test("riscv_elf_program_runs", status == Some(3), passed, failed);
+
+        // The embedded init (`/sbin/init`, userspace/embedded.rs) runs and
+        // exits 0: its numbers are RISC-V's (write 64, exit_group 94).
+        let status = crate::userspace::loader::load_user_program("/sbin/init", &[], &[])
+            .ok()
+            .and_then(crate::process::run_and_wait);
+        if status != Some(0) {
+            crate::println!("    status {:?}", status);
+        }
+        report_test(
+            "riscv_embedded_init_runs",
+            status == Some(0),
+            passed,
+            failed,
+        );
     }
 }
 /// Run `code` (position-independent) as a new process in user mode: one

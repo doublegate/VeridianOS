@@ -2,6 +2,12 @@
 
 ### Added
 
+- **RISC-V runs ELF programs.** The loader no longer skips segment loading on RISC-V (it did while
+  RISC-V ran with paging off): a static ELF program from the VFS is loaded, given its arguments
+  on the stack and the console as fds 0-2, and run in U-mode. Boot test `riscv_elf_program_runs`
+  (it writes its own line to the console and exits with its argc). The embedded RISC-V init and
+  shell used x86_64's numbers for write and exit_group; they use RISC-V's now (boot test
+  `riscv_embedded_init_runs`, which fails with the old ones).
 - **RISC-V user mode (ADR 0014).** Threads enter and leave U-mode as dispatcher tasks: the trap
   vector tells a user trap by swapping `tp` with `sscratch` (so the kernel's per-CPU pointer is
   back before any kernel code runs, N-14), saves the registers on the task's kernel stack, and

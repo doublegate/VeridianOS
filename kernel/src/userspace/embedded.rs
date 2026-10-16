@@ -227,8 +227,8 @@ const SHELL_CODE: &[u8] = &[
 /// RISC-V 64-bit machine code for the minimal init process.
 ///
 /// Writes "VeridianOS init started\n" to stdout (fd 1) using `write`
-/// (Linux number 1) via ECALL, then exits with status 0 via
-/// `exit_group` (231).
+/// (Linux generic number 64) via ECALL, then exits with status 0 via
+/// `exit_group` (94); RISC-V uses Linux's generic table (ADR 0009).
 ///
 /// Disassembly:
 /// ```text
@@ -236,10 +236,10 @@ const SHELL_CODE: &[u8] = &[
 ///  0x04: 00000597  auipc  a1, 0           ; a1 = PC
 ///  0x08: 02058593  addi   a1, a1, 32      ; a1 = &msg (32 bytes from auipc)
 ///  0x0c: 01800613  addi   a2, zero, 24    ; len = 24
-///  0x10: 00100893  addi   a7, zero, 1     ; write
+///  0x10: 04000893  addi   a7, zero, 64    ; write
 ///  0x14: 00000073  ecall                  ; syscall
 ///  0x18: 00000513  addi   a0, zero, 0     ; exit_code = 0
-///  0x1c: 0e700893  addi   a7, zero, 231   ; exit_group
+///  0x1c: 05e00893  addi   a7, zero, 94    ; exit_group
 ///  0x20: 00000073  ecall                  ; syscall
 ///  0x24: "VeridianOS init started\n"
 /// ```
@@ -249,10 +249,10 @@ const INIT_CODE: &[u8] = &[
     0x97, 0x05, 0x00, 0x00, // auipc a1, 0 (a1 = this instruction)
     0x93, 0x85, 0x05, 0x02, // addi a1, a1, 32 (buf = &msg)
     0x13, 0x06, 0x80, 0x01, // addi a2, zero, 24 (len)
-    0x93, 0x08, 0x10, 0x00, // addi a7, zero, 1 (write)
+    0x93, 0x08, 0x00, 0x04, // addi a7, zero, 64 (write)
     0x73, 0x00, 0x00, 0x00, // ecall
     0x13, 0x05, 0x00, 0x00, // addi a0, zero, 0 (status = 0)
-    0x93, 0x08, 0x70, 0x0E, // addi a7, zero, 231 (exit_group)
+    0x93, 0x08, 0xE0, 0x05, // addi a7, zero, 94 (exit_group)
     0x73, 0x00, 0x00, 0x00, // ecall
     // msg: "VeridianOS init started\n" (24 bytes)
     b'V', b'e', b'r', b'i', b'd', b'i', b'a', b'n', b'O', b'S', b' ', b'i', b'n', b'i', b't', b' ',
@@ -273,10 +273,10 @@ const INIT_CODE: &[u8] = &[
 ///  0x04: 00000597  auipc  a1, 0           ; a1 = PC
 ///  0x08: 02058593  addi   a1, a1, 32      ; a1 = &msg (32 bytes from auipc)
 ///  0x0c: 00600613  addi   a2, zero, 6     ; len = 6
-///  0x10: 00100893  addi   a7, zero, 1     ; write
+///  0x10: 04000893  addi   a7, zero, 64    ; write
 ///  0x14: 00000073  ecall                  ; syscall
 ///  0x18: 00000513  addi   a0, zero, 0     ; exit_code = 0
-///  0x1c: 0e700893  addi   a7, zero, 231   ; exit_group
+///  0x1c: 05e00893  addi   a7, zero, 94    ; exit_group
 ///  0x20: 00000073  ecall                  ; syscall
 ///  0x24: "vsh> \n"
 /// ```
@@ -286,10 +286,10 @@ const SHELL_CODE: &[u8] = &[
     0x97, 0x05, 0x00, 0x00, // auipc a1, 0 (a1 = this instruction)
     0x93, 0x85, 0x05, 0x02, // addi a1, a1, 32 (buf = &msg)
     0x13, 0x06, 0x60, 0x00, // addi a2, zero, 6 (len)
-    0x93, 0x08, 0x10, 0x00, // addi a7, zero, 1 (write)
+    0x93, 0x08, 0x00, 0x04, // addi a7, zero, 64 (write)
     0x73, 0x00, 0x00, 0x00, // ecall
     0x13, 0x05, 0x00, 0x00, // addi a0, zero, 0 (status = 0)
-    0x93, 0x08, 0x70, 0x0E, // addi a7, zero, 231 (exit_group)
+    0x93, 0x08, 0xE0, 0x05, // addi a7, zero, 94 (exit_group)
     0x73, 0x00, 0x00, 0x00, // ecall
     // msg: "vsh> \n" (6 bytes)
     b'v', b's', b'h', b'>', b' ', b'\n',

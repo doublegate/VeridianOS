@@ -159,6 +159,23 @@ core::arch::global_asm!(
     "    ecall",
     ".global veridian_rv_user_csr_end",
     "veridian_rv_user_csr_end:",
+    // D: the body of an ELF test program: write(1, "RV-ELF-OK\n", 10),
+    // then exit_group(argc), argc being the first word of the stack the
+    // loader built.
+    ".balign 4",
+    ".global veridian_rv_user_elf",
+    "veridian_rv_user_elf:",
+    "    li a0, 1",
+    "    lla a1, 2f",
+    "    li a2, 10",
+    "    li a7, 64",
+    "    ecall",
+    "    ld a0, 0(sp)",
+    "    li a7, 94",
+    "    ecall",
+    "2:  .ascii \"RV-ELF-OK\\n\"",
+    ".global veridian_rv_user_elf_end",
+    "veridian_rv_user_elf_end:",
 );
 
 extern "C" {
@@ -168,6 +185,48 @@ extern "C" {
     static veridian_rv_user_fault_end: u8;
     static veridian_rv_user_csr: u8;
     static veridian_rv_user_csr_end: u8;
+    static veridian_rv_user_elf: u8;
+    static veridian_rv_user_elf_end: u8;
+}
+
+/// A minimal static RISC-V ELF executable of the ELF test program: one
+/// read+execute PT_LOAD at 0x10000 holding the headers and the code, with
+/// the entry right after the headers.
+pub fn test_elf() -> alloc::vec::Vec<u8> {
+    // Only the addresses of the linker symbols are taken (safe).
+    let a = core::ptr::addr_of!(veridian_rv_user_elf);
+    let b = core::ptr::addr_of!(veridian_rv_user_elf_end);
+    // SAFETY: two labels of one rodata block, `a` before `b`.
+    let code = unsafe { core::slice::from_raw_parts(a, b as usize - a as usize) };
+    const BASE: u64 = 0x10000;
+    const HDRS: u64 = 64 + 56;
+    let size = HDRS + code.len() as u64;
+    let mut e = alloc::vec::Vec::with_capacity(size as usize);
+    e.extend_from_slice(&[0x7F, b'E', b'L', b'F', 2, 1, 1, 0]);
+    e.extend_from_slice(&[0; 8]);
+    e.extend_from_slice(&2u16.to_le_bytes()); // ET_EXEC
+    e.extend_from_slice(&243u16.to_le_bytes()); // EM_RISCV
+    e.extend_from_slice(&1u32.to_le_bytes());
+    e.extend_from_slice(&(BASE + HDRS).to_le_bytes()); // entry
+    e.extend_from_slice(&64u64.to_le_bytes()); // phoff
+    e.extend_from_slice(&0u64.to_le_bytes()); // shoff
+    e.extend_from_slice(&1u32.to_le_bytes()); // flags: RVC, soft float
+    e.extend_from_slice(&64u16.to_le_bytes());
+    e.extend_from_slice(&56u16.to_le_bytes());
+    e.extend_from_slice(&1u16.to_le_bytes()); // phnum
+    e.extend_from_slice(&64u16.to_le_bytes());
+    e.extend_from_slice(&0u16.to_le_bytes());
+    e.extend_from_slice(&0u16.to_le_bytes());
+    e.extend_from_slice(&1u32.to_le_bytes()); // PT_LOAD
+    e.extend_from_slice(&5u32.to_le_bytes()); // R | X
+    e.extend_from_slice(&0u64.to_le_bytes()); // offset
+    e.extend_from_slice(&BASE.to_le_bytes()); // vaddr
+    e.extend_from_slice(&BASE.to_le_bytes()); // paddr
+    e.extend_from_slice(&size.to_le_bytes()); // filesz
+    e.extend_from_slice(&size.to_le_bytes()); // memsz
+    e.extend_from_slice(&0x1000u64.to_le_bytes()); // align
+    e.extend_from_slice(code);
+    e
 }
 
 /// The boot-test user programs (see above): getpid round trip, page
