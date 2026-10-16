@@ -54,11 +54,11 @@ x86_64)
         -device ide-hd,drive=disk0 -m 2048M)
     ;;
 aarch64)
-    img="$root/target/aarch64-unknown-none/$profile/veridian-kernel"
+    img="$root/target/aarch64-unknown-none-softfloat/$profile/veridian-kernel"
     cmd=(qemu-system-aarch64 -M virt -cpu cortex-a72 -smp "$smp" -m 256M -kernel "$img")
     ;;
 riscv64)
-    img="$root/target/riscv64gc-unknown-none-elf/$profile/veridian-kernel"
+    img="$root/target/riscv64imac-unknown-none-elf/$profile/veridian-kernel"
     cmd=(qemu-system-riscv64 -M virt -smp "$smp" -m 256M -bios default -kernel "$img")
     ;;
 *)

@@ -182,12 +182,12 @@ qemu-system-x86_64 -enable-kvm \
 
 # Run in QEMU (AArch64)
 qemu-system-aarch64 -M virt -cpu cortex-a72 -m 256M \
-    -kernel target/aarch64-unknown-none/debug/veridian-kernel \
+    -kernel target/aarch64-unknown-none-softfloat/debug/veridian-kernel \
     -serial stdio -display none
 
 # Run in QEMU (RISC-V)
 qemu-system-riscv64 -M virt -m 256M -bios default \
-    -kernel target/riscv64gc-unknown-none-elf/debug/veridian-kernel \
+    -kernel target/riscv64imac-unknown-none-elf/debug/veridian-kernel \
     -serial stdio -display none
 
 # Run tests

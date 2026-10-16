@@ -361,6 +361,16 @@
 
 ### Changed
 
+- **The AArch64 and RISC-V kernels are built soft-float (N-178).** They were built for the
+  hard-float `aarch64-unknown-none` and `riscv64gc-unknown-none-elf` targets, so the compiler
+  could use the FP/SIMD registers in kernel code (839 such instructions in the AArch64 kernel),
+  and AArch64 saved all 32 vector registers on every interrupt in a 720-byte frame. RISC-V saved
+  none, so FP code there would have corrupted state. They are now built for
+  `aarch64-unknown-none-softfloat` and `riscv64imac-unknown-none-elf`: no FP/SIMD instruction in
+  either kernel, a 192-byte AArch64 interrupt frame, and the FP registers left for user threads,
+  whose state is switched with the task (only the save and restore code names them). The build
+  output moves to `target/aarch64-unknown-none-softfloat/` and
+  `target/riscv64imac-unknown-none-elf/`; scripts, CI and docs follow.
 - **Pages are cleared and copied with string instructions (N-281).** Every fresh user page was
   zeroed with `write_bytes`, whose `memset` comes from `compiler_builtins` built at the kernel's
   own opt-level: in a dev kernel about 30 cycles a byte, so a 16-page anonymous mmap took

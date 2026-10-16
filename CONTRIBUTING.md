@@ -120,8 +120,8 @@ git checkout -b feature/my-feature
 6. **Run lints**:
    ```bash
    cargo clippy --target x86_64-unknown-none -p veridian-kernel -- -D warnings
-   cargo clippy --target aarch64-unknown-none -p veridian-kernel -- -D warnings
-   cargo clippy --target riscv64gc-unknown-none-elf -p veridian-kernel -- -D warnings
+   cargo clippy --target aarch64-unknown-none-softfloat -p veridian-kernel -- -D warnings
+   cargo clippy --target riscv64imac-unknown-none-elf -p veridian-kernel -- -D warnings
    ```
 
 ### 4. Testing Requirements

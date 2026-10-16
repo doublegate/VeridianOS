@@ -60,7 +60,7 @@ jobs:
             - name: Run clippy (kernel, bare-metal targets)
               run: |
                   BS="-Zbuild-std=core,compiler_builtins,alloc -Zbuild-std-features=compiler-builtins-mem"
-                  for t in targets/x86_64-veridian.json aarch64-unknown-none riscv64gc-unknown-none-elf; do
+                  for t in targets/x86_64-veridian.json aarch64-unknown-none-softfloat riscv64imac-unknown-none-elf; do
                     echo "::group::clippy $t"
                     cargo clippy --target "$t" -p veridian-kernel $BS -- -D warnings
                     echo "::endgroup::"
@@ -98,12 +98,12 @@ jobs:
                       # Custom target with kernel code model + linker script
                       # Required for higher-half kernel at 0xFFFFFFFF80100000
                       target_dir: x86_64-veridian
-                    - target: aarch64-unknown-none
+                    - target: aarch64-unknown-none-softfloat
                       arch: aarch64
-                      target_dir: aarch64-unknown-none
-                    - target: riscv64gc-unknown-none-elf
+                      target_dir: aarch64-unknown-none-softfloat
+                    - target: riscv64imac-unknown-none-elf
                       arch: riscv64gc
-                      target_dir: riscv64gc-unknown-none-elf
+                      target_dir: riscv64imac-unknown-none-elf
         steps:
             - uses: actions/checkout@v4
             - name: Install Rust
@@ -661,7 +661,7 @@ jobs:
                   ### Kernel Images (`kernel/`)
                   - `x86_64/veridian-kernel` - Intel/AMD 64-bit kernel
                   - `aarch64/veridian-kernel` - ARM 64-bit kernel
-                  - `riscv64gc/veridian-kernel` - RISC-V 64-bit kernel with G+C extensions
+                  - `riscv64gc/veridian-kernel` - RISC-V 64-bit kernel (built RV64IMAC, soft-float; runs on RV64GC)
                   ### Debug Symbols (`symbols/`)
                   Matching debug symbols for each kernel image.
                   ### Documentation (`docs/`)

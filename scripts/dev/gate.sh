@@ -42,8 +42,8 @@ step() {
 }
 step fmt cargo fmt --all --check
 step clippy-x86_64 cargo clippy --target targets/x86_64-veridian.json -p veridian-kernel "${bs[@]}" -- -D warnings
-step clippy-aarch64 cargo clippy --target aarch64-unknown-none -p veridian-kernel "${bs[@]}" -- -D warnings
-step clippy-riscv64 cargo clippy --target riscv64gc-unknown-none-elf -p veridian-kernel "${bs[@]}" -- -D warnings
+step clippy-aarch64 cargo clippy --target aarch64-unknown-none-softfloat -p veridian-kernel "${bs[@]}" -- -D warnings
+step clippy-riscv64 cargo clippy --target riscv64imac-unknown-none-elf -p veridian-kernel "${bs[@]}" -- -D warnings
 step clippy-host cargo clippy --lib --features alloc -p veridian-kernel --target x86_64-unknown-linux-gnu -- -D warnings
 step host-tests cargo test --lib --features alloc -p veridian-kernel --target x86_64-unknown-linux-gnu
 grep -a 'test result' "$log_dir/host-tests.log"

@@ -166,10 +166,10 @@ targets until a proper `veridian` target is upstreamed to rustc:
 cargo build --target x86_64-unknown-none
 
 # AArch64 user-space (freestanding)
-cargo build --target aarch64-unknown-none
+cargo build --target aarch64-unknown-none-softfloat
 
 # RISC-V 64 user-space (freestanding)
-cargo build --target riscv64gc-unknown-none-elf
+cargo build --target riscv64imac-unknown-none-elf
 ```
 
 User-space Rust programs should use `#![no_std]` and `#![no_main]`, and invoke

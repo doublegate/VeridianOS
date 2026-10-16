@@ -184,7 +184,9 @@ What does not work yet: `docs/KNOWN-LIMITATIONS.md`.
       to HR-06); memory map from the DT (HR-07); external interrupts (scause 9) handled, not fatal
       (HR-31); IPIs by hart id (HR-33); U-mode with `tp` via `sscratch` (N-14); `sstatus` SPP
       sanitiser (N-170).
-    - Both: soft-float kernels (N-178), kernel stack guard pages (N-26).
+    - Both: kernel stack guard pages (N-26). Done: soft-float kernels (N-178,
+      `aarch64-unknown-none-softfloat`, `riscv64imac-unknown-none-elf`); E0 boot tests report
+      what cannot run as skipped.
   - [ ] **F, networking, storage and protocols:**
     - F1 socket layer: sockaddr decoding, UDP send/receive/demux/checksum, errno and readiness
       (N-64 to N-68, N-72).

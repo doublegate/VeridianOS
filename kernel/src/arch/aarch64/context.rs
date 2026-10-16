@@ -187,6 +187,9 @@ pub fn save_fpu_state(state: &mut FpuState) {
     unsafe {
         let base = state.v.as_mut_ptr() as *mut u64;
         asm!(
+            // The kernel is built without FP/SIMD (N-178); only this
+            // save/restore of user state uses those registers.
+            ".arch_extension fp",
             "stp q0,  q1,  [{base}]",
             "stp q2,  q3,  [{base}, #32]",
             "stp q4,  q5,  [{base}, #64]",
@@ -207,8 +210,8 @@ pub fn save_fpu_state(state: &mut FpuState) {
         );
         let mut fpcr: u32;
         let mut fpsr: u32;
-        asm!("mrs {fpcr:x}, FPCR", fpcr = out(reg) fpcr);
-        asm!("mrs {fpsr:x}, FPSR", fpsr = out(reg) fpsr);
+        asm!(".arch_extension fp", "mrs {fpcr:x}, FPCR", fpcr = out(reg) fpcr);
+        asm!(".arch_extension fp", "mrs {fpsr:x}, FPSR", fpsr = out(reg) fpsr);
         state.fpcr = fpcr;
         state.fpsr = fpsr;
     }
@@ -224,10 +227,13 @@ pub fn restore_fpu_state(state: &FpuState) {
     unsafe {
         let fpcr = state.fpcr;
         let fpsr = state.fpsr;
-        asm!("msr FPCR, {fpcr:x}", fpcr = in(reg) fpcr);
-        asm!("msr FPSR, {fpsr:x}", fpsr = in(reg) fpsr);
+        asm!(".arch_extension fp", "msr FPCR, {fpcr:x}", fpcr = in(reg) fpcr);
+        asm!(".arch_extension fp", "msr FPSR, {fpsr:x}", fpsr = in(reg) fpsr);
         let base = state.v.as_ptr() as *const u64;
         asm!(
+            // The kernel is built without FP/SIMD (N-178); only this
+            // save/restore of user state uses those registers.
+            ".arch_extension fp",
             "ldp q0,  q1,  [{base}]",
             "ldp q2,  q3,  [{base}, #32]",
             "ldp q4,  q5,  [{base}, #64]",

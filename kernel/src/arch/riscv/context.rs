@@ -302,6 +302,10 @@ pub fn save_fpu_state(state: &mut FpuState) {
     unsafe {
         let base = state.f.as_mut_ptr() as *mut u8;
         asm!(
+            // The kernel is built without F/D (N-178); only this
+            // save/restore of user state uses the FP registers.
+            ".option push",
+            ".option arch, +d",
             "fsd f0,  0({base})",
             "fsd f1,  8({base})",
             "fsd f2,  16({base})",
@@ -334,10 +338,16 @@ pub fn save_fpu_state(state: &mut FpuState) {
             "fsd f29, 232({base})",
             "fsd f30, 240({base})",
             "fsd f31, 248({base})",
+            ".option pop",
             base = in(reg) base,
         );
         let fcsr: u32;
-        asm!("frcsr {fcsr}", fcsr = out(reg) fcsr);
+        asm!(
+            ".option push",
+            ".option arch, +f",
+            "frcsr {fcsr}",
+            ".option pop",
+            fcsr = out(reg) fcsr);
         state.fcsr = fcsr;
     }
 }
@@ -354,9 +364,18 @@ pub fn restore_fpu_state(state: &FpuState) {
     // The D extension is confirmed available by the has_d_extension() check above.
     unsafe {
         let fcsr = state.fcsr;
-        asm!("fscsr {fcsr}", fcsr = in(reg) fcsr);
+        asm!(
+            ".option push",
+            ".option arch, +f",
+            "fscsr {fcsr}",
+            ".option pop",
+            fcsr = in(reg) fcsr);
         let base = state.f.as_ptr() as *const u8;
         asm!(
+            // The kernel is built without F/D (N-178); only this
+            // save/restore of user state uses the FP registers.
+            ".option push",
+            ".option arch, +d",
             "fld f0,  0({base})",
             "fld f1,  8({base})",
             "fld f2,  16({base})",
@@ -389,6 +408,7 @@ pub fn restore_fpu_state(state: &FpuState) {
             "fld f29, 232({base})",
             "fld f30, 240({base})",
             "fld f31, 248({base})",
+            ".option pop",
             base = in(reg) base,
         );
     }

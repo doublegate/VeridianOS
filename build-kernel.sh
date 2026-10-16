@@ -87,16 +87,16 @@ case $ARCH in
         build_arch "x86_64" "targets/x86_64-veridian.json"
         ;;
     aarch64)
-        build_arch "AArch64" "aarch64-unknown-none"
+        build_arch "AArch64" "aarch64-unknown-none-softfloat"
         ;;
     riscv64)
-        build_arch "RISC-V" "riscv64gc-unknown-none-elf"
+        build_arch "RISC-V" "riscv64imac-unknown-none-elf"
         ;;
     all)
         echo -e "${YELLOW}Building all architectures...${NC}"
         build_arch "x86_64" "targets/x86_64-veridian.json"
-        build_arch "AArch64" "aarch64-unknown-none"
-        build_arch "RISC-V" "riscv64gc-unknown-none-elf"
+        build_arch "AArch64" "aarch64-unknown-none-softfloat"
+        build_arch "RISC-V" "riscv64imac-unknown-none-elf"
         ;;
     *)
         echo -e "${RED}Unknown architecture: $ARCH${NC}"
@@ -119,8 +119,8 @@ if [ "$ARCH" == "all" ] || [ "$ARCH" == "x86_64" ]; then
     echo "  x86_64: target/x86_64-veridian/$BUILD_DIR/veridian-kernel"
 fi
 if [ "$ARCH" == "all" ] || [ "$ARCH" == "aarch64" ]; then
-    echo "  AArch64: target/aarch64-unknown-none/$BUILD_DIR/veridian-kernel"
+    echo "  AArch64: target/aarch64-unknown-none-softfloat/$BUILD_DIR/veridian-kernel"
 fi
 if [ "$ARCH" == "all" ] || [ "$ARCH" == "riscv64" ]; then
-    echo "  RISC-V: target/riscv64gc-unknown-none-elf/$BUILD_DIR/veridian-kernel"
+    echo "  RISC-V: target/riscv64imac-unknown-none-elf/$BUILD_DIR/veridian-kernel"
 fi

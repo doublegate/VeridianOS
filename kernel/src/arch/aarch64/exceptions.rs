@@ -5,25 +5,25 @@
 //! address 0.
 //!
 //! - IRQ taken at EL1 with SP_EL1 (the kernel's mode): the interrupted context
-//!   is saved -- x0-x18, x29, x30, ELR/SPSR, and all of q0-q31 with FPCR/FPSR,
-//!   because the kernel runs with FP/SIMD enabled and LLVM uses the vector
-//!   registers -- the GIC is serviced, and the context returns.
+//!   is saved -- x0-x18, x29, x30, ELR/SPSR -- the GIC is serviced, and the
+//!   context returns. The FP/SIMD registers are not saved: the kernel is built
+//!   soft-float (`aarch64-unknown-none-softfloat`, N-178), so no kernel code
+//!   uses them, and user FP state is switched with the task (as Linux arm64
+//!   does), not saved on every exception.
 //! - Everything else (synchronous exceptions, FIQ, SError, any exception from
 //!   EL0 or taken on SP_EL0) is a kernel bug or an unsupported path: it is
 //!   reported with ESR/ELR/FAR on the UART and the system stops.
 
 use core::arch::global_asm;
 
-/// Saved-context layout (720 bytes, 16-byte aligned): x0-x18 and x29 at
-/// 0..160, x30 and ELR at 160, SPSR at 176, FPCR/FPSR at 184, padding,
-/// q0-q31 at 208..720. X-register pairs must stay within the +504 offset
-/// range of STP/LDP.
-const _FRAME_SIZE: usize = 720;
+/// Saved-context layout (192 bytes, 16-byte aligned): x0-x18 and x29 at
+/// 0..160, x30 and ELR at 160, SPSR at 176, padding to 192.
+const _FRAME_SIZE: usize = 192;
 
 global_asm!(
     r#"
 .macro VERIDIAN_SAVE_CONTEXT
-    sub sp, sp, #720
+    sub sp, sp, #192
     stp x0, x1, [sp, #0]
     stp x2, x3, [sp, #16]
     stp x4, x5, [sp, #32]
@@ -38,47 +38,9 @@ global_asm!(
     stp x30, x0, [sp, #160]
     mrs x1, spsr_el1
     str x1, [sp, #176]
-    stp q0, q1, [sp, #208]
-    stp q2, q3, [sp, #240]
-    stp q4, q5, [sp, #272]
-    stp q6, q7, [sp, #304]
-    stp q8, q9, [sp, #336]
-    stp q10, q11, [sp, #368]
-    stp q12, q13, [sp, #400]
-    stp q14, q15, [sp, #432]
-    stp q16, q17, [sp, #464]
-    stp q18, q19, [sp, #496]
-    stp q20, q21, [sp, #528]
-    stp q22, q23, [sp, #560]
-    stp q24, q25, [sp, #592]
-    stp q26, q27, [sp, #624]
-    stp q28, q29, [sp, #656]
-    stp q30, q31, [sp, #688]
-    mrs x0, fpcr
-    mrs x1, fpsr
-    stp x0, x1, [sp, #184]
 .endm
 
 .macro VERIDIAN_RESTORE_CONTEXT
-    ldp x0, x1, [sp, #184]
-    msr fpcr, x0
-    msr fpsr, x1
-    ldp q0, q1, [sp, #208]
-    ldp q2, q3, [sp, #240]
-    ldp q4, q5, [sp, #272]
-    ldp q6, q7, [sp, #304]
-    ldp q8, q9, [sp, #336]
-    ldp q10, q11, [sp, #368]
-    ldp q12, q13, [sp, #400]
-    ldp q14, q15, [sp, #432]
-    ldp q16, q17, [sp, #464]
-    ldp q18, q19, [sp, #496]
-    ldp q20, q21, [sp, #528]
-    ldp q22, q23, [sp, #560]
-    ldp q24, q25, [sp, #592]
-    ldp q26, q27, [sp, #624]
-    ldp q28, q29, [sp, #656]
-    ldp q30, q31, [sp, #688]
     ldp x30, x0, [sp, #160]
     msr elr_el1, x0
     ldr x1, [sp, #176]
@@ -93,7 +55,7 @@ global_asm!(
     ldp x16, x17, [sp, #128]
     ldp x18, x29, [sp, #144]
     ldp x0, x1, [sp, #0]
-    add sp, sp, #720
+    add sp, sp, #192
 .endm
 
 .macro VERIDIAN_FATAL_VECTOR kind

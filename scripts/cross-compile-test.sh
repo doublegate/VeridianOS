@@ -308,13 +308,13 @@ if [[ "${RUN_QEMU}" == true ]]; then
         aarch64)
             echo "  2. Run QEMU:"
             echo "     qemu-system-aarch64 -M virt -cpu cortex-a72 -m 256M \\"
-            echo "       -kernel target/aarch64-unknown-none/debug/veridian-kernel \\"
+            echo "       -kernel target/aarch64-unknown-none-softfloat/debug/veridian-kernel \\"
             echo "       -serial stdio -display none"
             ;;
         riscv64)
             echo "  2. Run QEMU:"
             echo "     qemu-system-riscv64 -M virt -m 256M -bios default \\"
-            echo "       -kernel target/riscv64gc-unknown-none-elf/debug/veridian-kernel \\"
+            echo "       -kernel target/riscv64imac-unknown-none-elf/debug/veridian-kernel \\"
             echo "       -serial stdio -display none"
             ;;
     esac

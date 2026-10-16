@@ -43,7 +43,7 @@ cargo bootimage --target targets/x86_64-veridian.json
 
 ```bash
 # Build kernel
-cargo build --target aarch64-unknown-none -p veridian-kernel \
+cargo build --target aarch64-unknown-none-softfloat -p veridian-kernel \
   -Zbuild-std=core,compiler_builtins,alloc
 ```
 
@@ -51,7 +51,7 @@ cargo build --target aarch64-unknown-none -p veridian-kernel \
 
 ```bash
 # Build kernel
-cargo build --target riscv64gc-unknown-none-elf -p veridian-kernel \
+cargo build --target riscv64imac-unknown-none-elf -p veridian-kernel \
   -Zbuild-std=core,compiler_builtins,alloc
 ```
 
@@ -85,7 +85,7 @@ timeout 10 qemu-system-x86_64 \
 timeout 10 qemu-system-aarch64 \
   -M virt \
   -cpu cortex-a57 \
-  -kernel target/aarch64-unknown-none/debug/veridian-kernel \
+  -kernel target/aarch64-unknown-none-softfloat/debug/veridian-kernel \
   -serial stdio \
   -display none
 ```
@@ -95,7 +95,7 @@ timeout 10 qemu-system-aarch64 \
 ```bash
 timeout 10 qemu-system-riscv64 \
   -M virt \
-  -kernel target/riscv64gc-unknown-none-elf/debug/veridian-kernel \
+  -kernel target/riscv64imac-unknown-none-elf/debug/veridian-kernel \
   -serial stdio \
   -display none
 ```

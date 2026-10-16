@@ -50,11 +50,11 @@ Output: `target/x86_64-veridian/debug/veridian-kernel`
 ./build-kernel.sh aarch64 dev
 
 # Manual build (standard bare metal target)
-cargo build --target aarch64-unknown-none \
+cargo build --target aarch64-unknown-none-softfloat \
     -p veridian-kernel
 ```
 
-Output: `target/aarch64-unknown-none/debug/veridian-kernel`
+Output: `target/aarch64-unknown-none-softfloat/debug/veridian-kernel`
 
 ### RISC-V 64
 
@@ -63,11 +63,11 @@ Output: `target/aarch64-unknown-none/debug/veridian-kernel`
 ./build-kernel.sh riscv64 dev
 
 # Manual build (standard bare metal target)
-cargo build --target riscv64gc-unknown-none-elf \
+cargo build --target riscv64imac-unknown-none-elf \
     -p veridian-kernel
 ```
 
-Output: `target/riscv64gc-unknown-none-elf/debug/veridian-kernel`
+Output: `target/riscv64imac-unknown-none-elf/debug/veridian-kernel`
 
 ## Build Options
 

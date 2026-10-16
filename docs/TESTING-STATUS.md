@@ -84,8 +84,8 @@ The in-kernel test framework (`kernel/src/test_framework.rs`) runs 29 boot tests
 
 # Clippy (all 3 targets)
 cargo clippy --target targets/x86_64-veridian.json -p veridian-kernel -- -D warnings
-cargo clippy --target aarch64-unknown-none -p veridian-kernel -- -D warnings
-cargo clippy --target riscv64gc-unknown-none-elf -p veridian-kernel -- -D warnings
+cargo clippy --target aarch64-unknown-none-softfloat -p veridian-kernel -- -D warnings
+cargo clippy --target riscv64imac-unknown-none-elf -p veridian-kernel -- -D warnings
 
 # Format check
 cargo fmt --all -- --check

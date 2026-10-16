@@ -207,14 +207,13 @@ Still open:
   SCTLR_EL1 = 0 over its RES1 bits (N-177, HA-14).
 - **RISC-V has no user mode (N-14).** U-mode traps are fatal; page tables use the x86 entry format
   (HR-10).
-- **The AArch64 and RISC-V kernels use FP/SIMD registers** in kernel code, so every interrupt saves
-  a 720-byte frame (N-178). The x86_64 kernel is built soft-float since v0.27.
 
 ### FPU and vector registers on AArch64 and RISC-V (N-41 part, sprint E)
 
 On x86_64 every task has its own x87/SSE/AVX state, saved and restored with XSAVE sized from CPUID
-at each switch (stage D2), and the kernel itself is soft-float. AArch64 and RISC-V have no user mode
-yet; their state switching comes with it in sprint E.
+at each switch (stage D2), and the kernel itself is soft-float. The AArch64 and RISC-V kernels are
+soft-float too since v0.27 (N-178), so the FP registers hold only user state; AArch64 and RISC-V
+have no user mode yet, and switching that state comes with it in sprint E.
 
 ### AArch64 and RISC-V kernel stacks have no guard pages (N-26, sprint E)
 
