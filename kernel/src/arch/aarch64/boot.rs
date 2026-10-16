@@ -17,6 +17,15 @@ extern "C" {
 /// does not pass in x0.
 const QEMU_VIRT_DTB_PA: u64 = 0x4000_0000;
 
+/// VBAR_EL1 as `_start_rust` found it (written once, before anything else).
+static ENTRY_VBAR: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// Whether the exception vectors were already installed when Rust code
+/// started, so that a fault in the earliest Rust code is reported.
+pub fn vectors_installed_at_entry() -> bool {
+    ENTRY_VBAR.load(core::sync::atomic::Ordering::Relaxed) == super::exceptions::vectors_base()
+}
+
 /// The device tree pointer boot.S saved from x0.
 fn passed_dtb_pa() -> u64 {
     // SAFETY: written once by boot.S before any Rust code runs; read-only
@@ -72,6 +81,13 @@ extern "C" fn veridian_secondary_rust(args: &'static crate::arch::smp_boot::ApBo
 #[no_mangle]
 #[link_section = ".text.boot"]
 pub unsafe extern "C" fn _start_rust() -> ! {
+    // First: where exceptions vectored when Rust was entered, for the
+    // early-vectors boot test.
+    let vbar: u64;
+    // SAFETY: reading VBAR_EL1 has no side effects.
+    unsafe { core::arch::asm!("mrs {0}, vbar_el1", out(reg) vbar, options(nomem, nostack)) };
+    ENTRY_VBAR.store(vbar, core::sync::atomic::Ordering::Relaxed);
+
     // Use direct_uart for proper string output
     use crate::arch::aarch64::direct_uart::uart_write_str;
 

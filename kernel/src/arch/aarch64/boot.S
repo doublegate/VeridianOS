@@ -111,6 +111,14 @@ el1_entry:
     add x1, x1, :lo12:__stack_top
     // Ensure 16-byte alignment
     and sp, x1, #~15
+
+    // Exception vectors as soon as there is a stack for them (HARDWARE-AARCH64.md bring-up step 1), so
+    // that a fault anywhere after this is reported (exceptions.rs) rather
+    // than vectoring wherever firmware left VBAR_EL1.
+    adrp x1, veridian_aarch64_vectors
+    add x1, x1, :lo12:veridian_aarch64_vectors
+    msr vbar_el1, x1
+    isb
     
     // Initialize frame pointer for ABI compliance
     mov x29, #0
@@ -192,6 +200,11 @@ veridian_secondary_entry:
     isb
     ldr x1, [x19, #0x08]
     and sp, x1, #~15
+    // Exception vectors before any Rust code, as on the boot CPU.
+    adrp x1, veridian_aarch64_vectors
+    add x1, x1, :lo12:veridian_aarch64_vectors
+    msr vbar_el1, x1
+    isb
     ldr x1, [x19, #0x10]
     msr tpidr_el1, x1
     mov x29, #0

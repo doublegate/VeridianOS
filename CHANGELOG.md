@@ -2,6 +2,14 @@
 
 ### Added
 
+- **AArch64 exception vectors before any Rust code.** boot.S writes VBAR_EL1 as soon as each CPU
+  has a stack (boot and secondary paths), instead of Stage 1 hardware init doing it after
+  `kernel_main` had already run. A fault in the earliest Rust code is now reported with ESR/ELR/FAR,
+  where it used to vector wherever firmware left VBAR_EL1 (address 0 under QEMU; a silent hang on
+  hardware). Boot test `vectors_installed_before_rust` compares the VBAR `_start_rust` finds with
+  the table (AArch64 34/34, 36/36 on four CPUs). It failed before the move, and a probe `udf` at
+  the top of `_start_rust` now prints `[EXCEPTION] unhandled sync`.
+
 - **AArch64 arm64 Image (HA-03).** boot.S starts with the 64-byte Linux arm64 Image header
   (`text_offset` 2 MiB, `image_size` covering BSS and the boot stack, 4 KiB pages, magic `ARM\x64`),
   and `build-kernel.sh` writes the raw image next to the ELF as `veridian-kernel.img`. QEMU boots it

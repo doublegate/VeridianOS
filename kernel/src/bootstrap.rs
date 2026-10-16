@@ -2825,6 +2825,15 @@ fn run_usercopy_tests(passed: &mut u32, failed: &mut u32) {
         // the physical map; from_phys validates the header before reading.
         let ok = unsafe { crate::arch::fdt::Fdt::from_phys(boot::dtb_pa()) }.is_some();
         report_test("device_tree_found", ok, passed, failed);
+        // The exception vectors were in place before the first Rust code
+        // (boot.S installs them once the stack exists); before,
+        // a fault until Stage 1 vectored wherever firmware had left VBAR.
+        report_test(
+            "vectors_installed_before_rust",
+            boot::vectors_installed_at_entry(),
+            passed,
+            failed,
+        );
     }
 
     // Test 34: the monotonic clock advances and the 1000 Hz timer interrupt

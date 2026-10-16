@@ -28,10 +28,6 @@ pub fn init() {
         uart_write_str("[ARCH] Performing AArch64-specific initialization\n");
     }
 
-    // Exception vectors first: from here on an exception is reported
-    // instead of vectoring to address 0.
-    exceptions::install();
-
     // Initialize the GIC (Generic Interrupt Controller)
     if let Err(_e) = gic::init() {
         // SAFETY: uart_write_str performs a raw MMIO write to the PL011 UART.

@@ -114,14 +114,10 @@ extern "C" {
 /// GIC interrupt ID of the EL1 virtual timer (PPI 11 = INTID 27).
 pub const VIRTUAL_TIMER_INTID: u32 = 27;
 
-/// Install the vector table. Must run before interrupts are unmasked.
-pub fn install() {
-    let base = core::ptr::addr_of!(veridian_aarch64_vectors) as u64;
-    // SAFETY: the table is 2 KiB aligned and holds the 16 architected
-    // entries; writing VBAR_EL1 only changes where exceptions vector.
-    unsafe {
-        core::arch::asm!("msr vbar_el1, {0}", "isb", in(reg) base, options(nostack));
-    }
+/// The vector table's address. boot.S writes it to VBAR_EL1 on every CPU
+/// as soon as the CPU has a stack, before any Rust code runs.
+pub fn vectors_base() -> u64 {
+    core::ptr::addr_of!(veridian_aarch64_vectors) as u64
 }
 
 /// IRQ handler: acknowledge and dispatch everything pending at the GIC.
