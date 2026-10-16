@@ -373,6 +373,73 @@ pub(crate) fn region_after_kernel(kernel_end: u64, ram_end: u64) -> Option<Memor
     })
 }
 
+/// The parts of the `[start, end)` ranges in `ram` that no range in
+/// `reserved` overlaps, into `out` (at most `out.len()`; any more are
+/// dropped). Returns how many were written.
+#[cfg(any(target_arch = "aarch64", target_arch = "riscv64", test))]
+pub(crate) fn carve(ram: &[(u64, u64)], reserved: &[(u64, u64)], out: &mut [(u64, u64)]) -> usize {
+    let mut n = 0;
+    for &(start, end) in ram {
+        // Walk the range upwards, skipping each reservation inside it.
+        let mut from = start;
+        while from < end {
+            // The lowest reservation overlapping [from, end).
+            let next = reserved
+                .iter()
+                .filter(|&&(rs, re)| rs < end && re > from)
+                .min_by_key(|&&(rs, _)| rs);
+            let to = next.map_or(end, |&(rs, _)| rs.max(from));
+            if to > from && n < out.len() {
+                out[n] = (from, to);
+                n += 1;
+            }
+            match next {
+                Some(&(_, re)) => from = re.max(to),
+                None => break,
+            }
+        }
+    }
+    n
+}
+
+/// AArch64 and RISC-V: usable RAM from the device tree at `dtb_pa` (its
+/// memory nodes, less the firmware's reservations and the blob itself),
+/// clipped to start above the kernel (HA-17, HR-07). `None` without a
+/// usable device tree.
+#[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
+fn device_tree_regions(dtb_pa: u64, kernel_end: u64, out: &mut [MemoryRegion]) -> Option<usize> {
+    // SAFETY: the address firmware passed (or QEMU virt's fixed one on
+    // AArch64), in the physical map; the blob stays in place, as nothing
+    // below reuses its memory.
+    let fdt = unsafe { crate::arch::fdt::Fdt::from_phys(dtb_pa) }?;
+    const MAX: usize = 16;
+    let mut ram = [(0u64, 0u64); MAX];
+    let mut nram = 0;
+    fdt.memory_ranges(|base, size| {
+        if nram < MAX {
+            ram[nram] = (base, base.saturating_add(size));
+            nram += 1;
+        }
+    });
+    let mut reserved = [(0u64, 0u64); MAX];
+    reserved[0] = (dtb_pa, dtb_pa.saturating_add(fdt.size() as u64));
+    let mut nres = 1;
+    fdt.reserved_ranges(|base, size| {
+        if nres < MAX {
+            reserved[nres] = (base, base.saturating_add(size));
+            nres += 1;
+        }
+    });
+    let mut usable = [(0u64, 0u64); 2 * MAX];
+    let n = carve(&ram[..nram], &reserved[..nres], &mut usable);
+    let count = clip_usable_regions(
+        usable[..n].iter().copied(),
+        pool_start_after(kernel_end),
+        out,
+    );
+    (count > 0).then_some(count)
+}
+
 /// Clip usable `[start, end)` ranges to begin at or above `floor`, align
 /// them to whole frames, and keep the largest `out.len()` of them (each
 /// becomes a NUMA node, and there are only so many). Returns how many were
@@ -492,11 +559,11 @@ pub fn init_default() {
 
     // Both run the image in the upper half (ADR 0013, ADR 0015), so the
     // linker's __kernel_end is converted to its physical address. The pool
-    // starts
-    // after it and ends at 128 MiB of RAM -- QEMU `virt`'s default when no
-    // `-m` is given. Under-estimating only leaves memory unused; over-
-    // estimating would hand out frames that do not exist.
-    // TODO(v0.27): read the RAM size from the device tree instead.
+    // starts after it; RAM is what the device tree's memory nodes say, less
+    // its reservations and the blob (HA-17, HR-07). Without a device tree,
+    // it ends at 128 MiB of RAM -- QEMU `virt`'s default when no `-m` is
+    // given: under-estimating only leaves memory unused; over-estimating
+    // would hand out frames that do not exist.
     #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
     let default_map = {
         extern "C" {
@@ -509,15 +576,31 @@ pub fn init_default() {
         #[cfg(target_arch = "aarch64")]
         let kernel_end = crate::arch::aarch64::boot::kernel_phys(kernel_end);
         #[cfg(target_arch = "aarch64")]
-        let ram_end: u64 = 0x4000_0000 + 128 * 1024 * 1024;
+        let (dtb_pa, ram_end) = (
+            crate::arch::aarch64::boot::dtb_pa(),
+            0x4000_0000u64 + 128 * 1024 * 1024,
+        );
         #[cfg(target_arch = "riscv64")]
-        let ram_end: u64 = 0x8000_0000 + 128 * 1024 * 1024;
-        let Some(region) = region_after_kernel(kernel_end, ram_end) else {
-            panic!("[MM] kernel image leaves no RAM for the frame allocator");
-        };
-        let mut regions = [region; MAX_BOOT_REGIONS];
-        regions[0] = region;
-        (regions, 1)
+        let (dtb_pa, ram_end) = (
+            crate::arch::riscv64::dtb_pa(),
+            0x8000_0000u64 + 128 * 1024 * 1024,
+        );
+        let mut regions = [MemoryRegion {
+            start: 0,
+            size: 0,
+            usable: false,
+        }; MAX_BOOT_REGIONS];
+        if let Some(count) = device_tree_regions(dtb_pa, kernel_end, &mut regions) {
+            kprintln!("[MM] {} usable region(s) from the device tree", count);
+            (regions, count)
+        } else {
+            kprintln!("[MM] No device tree memory map: assuming 128 MiB of RAM");
+            let Some(region) = region_after_kernel(kernel_end, ram_end) else {
+                panic!("[MM] kernel image leaves no RAM for the frame allocator");
+            };
+            regions[0] = region;
+            (regions, 1)
+        }
     };
 
     kprintln!("[MM] Calling init with default memory map");
@@ -761,6 +844,47 @@ mod layout_tests {
         let region = region_after_kernel(0x8114_8000, 0x8800_0000).unwrap();
         assert_eq!(region.start + region.size, 0x8800_0000);
         assert!(region_after_kernel(0x87F0_0000, 0x8800_0000).is_none());
+    }
+
+    #[test]
+    fn carve_removes_reservations() {
+        let mut out = [(0u64, 0u64); 8];
+        // Two reservations inside, one overlapping the end, one outside.
+        let n = carve(
+            &[(0x1000, 0x10000)],
+            &[
+                (0x3000, 0x4000),
+                (0x2000, 0x2800),
+                (0xF000, 0x12000),
+                (0x20000, 0x21000),
+            ],
+            &mut out,
+        );
+        assert_eq!(
+            &out[..n],
+            &[(0x1000, 0x2000), (0x2800, 0x3000), (0x4000, 0xF000)]
+        );
+        // Overlapping reservations, one covering the start.
+        let n = carve(
+            &[(0x1000, 0x8000)],
+            &[(0x0, 0x2000), (0x1800, 0x3000)],
+            &mut out,
+        );
+        assert_eq!(&out[..n], &[(0x3000, 0x8000)]);
+        // Nothing reserved; a fully reserved range gives nothing.
+        let n = carve(
+            &[(0x1000, 0x2000), (0x5000, 0x6000)],
+            &[(0x5000, 0x6000)],
+            &mut out,
+        );
+        assert_eq!(&out[..n], &[(0x1000, 0x2000)]);
+        // More pieces than room: the rest are dropped.
+        let n = carve(
+            &[(0, 0x10000)],
+            &[(0x1000, 0x2000), (0x3000, 0x4000)],
+            &mut out[..2],
+        );
+        assert_eq!(n, 2);
     }
 
     #[test]

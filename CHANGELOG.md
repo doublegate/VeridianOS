@@ -2,6 +2,15 @@
 
 ### Added
 
+- **RAM from the device tree, and a heap sized from it, on AArch64 and RISC-V (HA-17, HR-07).**
+  Both assumed 128 MiB of RAM and had a static 8 MiB heap, too small for a BlockFS root (with a
+  disk attached, a 1 MiB allocation failed). The frame allocator now takes the device tree's
+  memory nodes, less the memory reservation block, `/reserved-memory` and the blob itself
+  (`Fdt::memory_ranges`, `Fdt::reserved_ranges`, `mm::carve`, host-tested), and the heap is taken
+  from frames as on x86_64 (N-278): 64 MiB at 256 MiB of RAM, 256 MiB at 1 GiB. Without a device
+  tree 128 MiB is still assumed. Boot test `memory_map_from_device_tree` (it fails with the old
+  map: 114 of 256 MiB managed). AArch64 58/58, RISC-V 51/51.
+
 - **Guard pages under AArch64 kernel stacks (N-26).** AArch64 kernel stacks came from the physical
   map, so an overflow silently overwrote the neighbouring frame. They now come from the stack region
   (0xFFFF_E000_0000_0000, in the TTBR1 half every address space shares), each at the top of its own
@@ -976,6 +985,11 @@
 - The unused in-kernel `stdlib` module (1,018 lines with no callers).
 
 ### Fixed
+
+- **A boot-test result line could be split by another CPU's message.** The `Results:` line and each
+  test's line are printed in several pieces, and on 4 CPUs `[INIT] Results: 62/[PROCESS] Dropping
+  process 29` made the boot test unparseable (all tests had passed). AArch64 and RISC-V now hold
+  the console lock across each line (`print::with_console`, reentrant).
 
 - **The loader ran other architectures' programs.** The ELF check accepted x86_64, AArch64 and
   RISC-V programs on every architecture, so an x86_64 `/sbin/init` on an AArch64 root was started

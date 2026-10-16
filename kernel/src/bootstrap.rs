@@ -3250,6 +3250,29 @@ fn run_usercopy_tests(passed: &mut u32, failed: &mut u32) {
         report_test("heap_reuses_freed_memory", ok, passed, failed);
     }
 
+    // AArch64 and RISC-V: the frame allocator manages the RAM the device
+    // tree reports (HA-17, HR-07), less the kernel image and what lies
+    // below it, not a fixed 128 MiB. The gate boots with 256 MiB.
+    #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
+    {
+        #[cfg(target_arch = "aarch64")]
+        let dtb = crate::arch::aarch64::boot::dtb_pa();
+        #[cfg(target_arch = "riscv64")]
+        let dtb = crate::arch::riscv64::dtb_pa();
+        let mut ram = 0u64;
+        // SAFETY: the address firmware passed, in the physical map.
+        if let Some(fdt) = unsafe { crate::arch::fdt::Fdt::from_phys(dtb) } {
+            fdt.memory_ranges(|_, size| ram += size);
+        }
+        let managed = crate::mm::FRAME_ALLOCATOR.lock().get_stats().total_frames * 4096;
+        // The image, firmware below it and the pool's guard: well under 64 MiB.
+        let ok = ram > 0 && managed + (64 << 20) >= ram && managed <= ram;
+        if !ok {
+            crate::println!("    device tree RAM {:#x}, managed {:#x}", ram, managed);
+        }
+        report_test("memory_map_from_device_tree", ok, passed, failed);
+    }
+
     // Test 39: a kernel stack has an unmapped guard page below it, and
     // freeing it unmaps it (N-26).
     {
@@ -3373,32 +3396,47 @@ pub fn kernel_init_main() {
 /// counted apart, never as passed, so the tally claims only what ran.
 static SKIPPED: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 
+/// Print a line made of several pieces as one: another CPU's message cannot
+/// land in the middle (`Results: 62/[PROCESS] Dropping process 29`, which
+/// the boot tests could not parse). AArch64 and RISC-V hold the console
+/// lock across `f`; x86_64 has none to hold.
+fn console_line(f: impl FnOnce()) {
+    #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
+    crate::print::with_console(f);
+    #[cfg(not(any(target_arch = "aarch64", target_arch = "riscv64")))]
+    f();
+}
+
 /// Report a test that does not run here, and why.
 #[allow(dead_code)] // every skip is architecture-specific
 fn report_skip(name: &str, why: &str) {
-    kprint_rt!("  ");
-    kprint_rt!(name);
-    kprint_rt!("...[skipped: ");
-    kprint_rt!(why);
-    kprintln!("]");
+    console_line(|| {
+        kprint_rt!("  ");
+        kprint_rt!(name);
+        kprint_rt!("...[skipped: ");
+        kprint_rt!(why);
+        kprintln!("]");
+    });
     SKIPPED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
 }
 
 /// Print test summary and BOOTOK/BOOTFAIL
 fn print_summary(passed: u32, failed: u32) {
     kprintln!("========================================");
-    kprint_rt!("[INIT] Results: ");
-    kprint_u64!(passed);
-    kprint_rt!("/");
-    kprint_u64!(passed + failed);
-    kprint_rt!(" passed");
     let skipped = SKIPPED.load(core::sync::atomic::Ordering::Relaxed);
-    if skipped > 0 {
-        kprint_rt!(" (");
-        kprint_u64!(skipped);
-        kprint_rt!(" skipped)");
-    }
-    kprintln!("");
+    console_line(|| {
+        kprint_rt!("[INIT] Results: ");
+        kprint_u64!(passed);
+        kprint_rt!("/");
+        kprint_u64!(passed + failed);
+        kprint_rt!(" passed");
+        if skipped > 0 {
+            kprint_rt!(" (");
+            kprint_u64!(skipped);
+            kprint_rt!(" skipped)");
+        }
+        kprintln!("");
+    });
     if failed == 0 {
         kprintln!("BOOTOK");
     } else {
@@ -3409,13 +3447,15 @@ fn print_summary(passed: u32, failed: u32) {
 
 /// Report a single test result with QEMU-parseable markers
 fn report_test(name: &str, ok: bool, passed: &mut u32, failed: &mut u32) {
-    kprint_rt!("  ");
-    kprint_rt!(name);
-    if ok {
-        kprintln!("...[ok]");
-    } else {
-        kprintln!("...[failed]");
-    }
+    console_line(|| {
+        kprint_rt!("  ");
+        kprint_rt!(name);
+        if ok {
+            kprintln!("...[ok]");
+        } else {
+            kprintln!("...[failed]");
+        }
+    });
 
     if ok {
         *passed += 1;

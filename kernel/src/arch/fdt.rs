@@ -20,6 +20,27 @@ const FDT_END: u32 = 9;
 pub struct Fdt<'a> {
     structs: &'a [u8],
     strings: &'a [u8],
+    /// The memory reservation block (pairs of big-endian u64 address and
+    /// size, ended by a pair of zeros), to the end of the blob.
+    rsvmap: &'a [u8],
+    /// The blob's total size (it must not be reused while it is read).
+    total: usize,
+}
+
+/// One step of [`Fdt::walk`]. Depth 1 is the root node.
+enum Event<'a> {
+    Begin {
+        depth: usize,
+        name: &'a [u8],
+    },
+    Prop {
+        depth: usize,
+        name: &'a [u8],
+        value: &'a [u8],
+    },
+    End {
+        depth: usize,
+    },
 }
 
 fn be32(b: &[u8], off: usize) -> Option<u32> {
@@ -50,10 +71,177 @@ impl<'a> Fdt<'a> {
         let off_strings = be32(blob, 12)? as usize;
         let size_strings = be32(blob, 32)? as usize;
         let size_struct = be32(blob, 36)? as usize;
+        let off_rsvmap = be32(blob, 16)? as usize;
         Some(Self {
             structs: blob.get(off_struct..off_struct.checked_add(size_struct)?)?,
             strings: blob.get(off_strings..off_strings.checked_add(size_strings)?)?,
+            rsvmap: blob.get(off_rsvmap..)?,
+            total,
         })
+    }
+
+    /// The blob's size in bytes (its header's totalsize).
+    pub fn size(&self) -> usize {
+        self.total
+    }
+
+    /// Call `f` for each token of the structure block, in order. Stops
+    /// quietly at malformed data.
+    fn walk(&self, mut f: impl FnMut(Event<'a>)) {
+        let b = self.structs;
+        let mut off = 0usize;
+        let mut depth = 0usize;
+        let mut step = || -> Option<bool> {
+            let token = be32(b, off)?;
+            off = off.checked_add(4)?;
+            match token {
+                FDT_BEGIN_NODE => {
+                    let name = cstr(b, off)?;
+                    off = align4(off.checked_add(name.len() + 1)?)?;
+                    depth += 1;
+                    f(Event::Begin { depth, name });
+                }
+                FDT_END_NODE => {
+                    if depth == 0 {
+                        return None;
+                    }
+                    f(Event::End { depth });
+                    depth -= 1;
+                }
+                FDT_PROP => {
+                    let len = be32(b, off)? as usize;
+                    let nameoff = be32(b, off.checked_add(4)?)? as usize;
+                    let val_off = off.checked_add(8)?;
+                    let value = b.get(val_off..val_off.checked_add(len)?)?;
+                    off = align4(val_off.checked_add(len)?)?;
+                    let name = cstr(self.strings, nameoff)?;
+                    f(Event::Prop { depth, name, value });
+                }
+                FDT_NOP => {}
+                FDT_END => return Some(false),
+                _ => return None,
+            }
+            Some(true)
+        };
+        while let Some(true) = step() {}
+    }
+
+    /// The root's `#address-cells` and `#size-cells` (2 and 1 when absent,
+    /// as the specification says), each 1 or 2.
+    fn root_cells(&self) -> Option<(usize, usize)> {
+        let get = |p: &str, default: u64| match self.root_property(p) {
+            Some(v) => cells_u64(v),
+            None => Some(default),
+        };
+        let ac = get("#address-cells", 2)? as usize;
+        let sc = get("#size-cells", 1)? as usize;
+        ((1..=2).contains(&ac) && (1..=2).contains(&sc)).then_some((ac, sc))
+    }
+
+    /// A property of the root node itself.
+    fn root_property(&self, prop: &str) -> Option<&'a [u8]> {
+        let mut found = None;
+        self.walk(|e| {
+            if let Event::Prop {
+                depth: 1,
+                name,
+                value,
+            } = e
+            {
+                if name == prop.as_bytes() && found.is_none() {
+                    found = Some(value);
+                }
+            }
+        });
+        found
+    }
+
+    /// Call `f(base, size)` for each range of every `reg` entry of the
+    /// top-level memory nodes (named `memory` or `memory@...`, or with
+    /// `device_type = "memory"`), in the root's address and size cells.
+    /// Nothing is reported for cell sizes other than 1 or 2.
+    pub fn memory_ranges(&self, mut f: impl FnMut(u64, u64)) {
+        let Some(cells) = self.root_cells() else {
+            return;
+        };
+        let mut memory = false;
+        let mut reg: Option<&'a [u8]> = None;
+        self.walk(|e| match e {
+            Event::Begin { depth: 2, name } => {
+                let base = name.split(|&c| c == b'@').next().unwrap_or(name);
+                memory = base == b"memory";
+                reg = None;
+            }
+            Event::Prop {
+                depth: 2,
+                name,
+                value,
+            } => match name {
+                b"reg" => reg = Some(value),
+                b"device_type" => memory |= trim_nul(value) == b"memory",
+                _ => {}
+            },
+            Event::End { depth: 2 } => {
+                if memory {
+                    if let Some(r) = reg {
+                        reg_ranges(r, cells, &mut f);
+                    }
+                }
+            }
+            _ => {}
+        });
+    }
+
+    /// Call `f(base, size)` for every range firmware reserved: the memory
+    /// reservation block, then each child of `/reserved-memory` with a
+    /// `reg` (in that node's cells, the root's when it has none). Children
+    /// with only a `size` (to be allocated by the OS) are not reported.
+    pub fn reserved_ranges(&self, mut f: impl FnMut(u64, u64)) {
+        let mut off = 0usize;
+        while let (Some(addr), Some(size)) = (be64(self.rsvmap, off), be64(self.rsvmap, off + 8)) {
+            if addr == 0 && size == 0 {
+                break;
+            }
+            f(addr, size);
+            off += 16;
+        }
+        let Some(root) = self.root_cells() else {
+            return;
+        };
+        let mut in_reserved = false;
+        let mut cells = root;
+        let mut reg: Option<&'a [u8]> = None;
+        self.walk(|e| match e {
+            Event::Begin { depth: 2, name } => {
+                in_reserved = name == b"reserved-memory";
+                cells = root;
+            }
+            Event::Prop {
+                depth: 2,
+                name,
+                value,
+            } if in_reserved => {
+                let n = cells_u64(value).map(|v| v as usize);
+                match (name, n) {
+                    (b"#address-cells", Some(n @ 1..=2)) => cells.0 = n,
+                    (b"#size-cells", Some(n @ 1..=2)) => cells.1 = n,
+                    _ => {}
+                }
+            }
+            Event::Begin { depth: 3, .. } => reg = None,
+            Event::Prop {
+                depth: 3,
+                name: b"reg",
+                value,
+            } if in_reserved => reg = Some(value),
+            Event::End { depth: 3 } => {
+                if let Some(r) = reg.take().filter(|_| in_reserved) {
+                    reg_ranges(r, cells, &mut f);
+                }
+            }
+            Event::End { depth: 2 } => in_reserved = false,
+            _ => {}
+        });
     }
 
     /// The blob firmware left at physical address `pa` (0 = none).
@@ -177,6 +365,26 @@ impl CpuNode<'_> {
 /// A string property without its terminating NUL.
 fn trim_nul(v: &[u8]) -> &[u8] {
     v.split(|&c| c == 0).next().unwrap_or(v)
+}
+
+/// Big-endian u64 at `off` in `b`.
+fn be64(b: &[u8], off: usize) -> Option<u64> {
+    Some((u64::from(be32(b, off)?) << 32) | u64::from(be32(b, off.checked_add(4)?)?))
+}
+
+/// Each (address, size) pair of a `reg` value with `cells` = (address
+/// cells, size cells), to `f`. Zero-sized entries are skipped.
+fn reg_ranges(reg: &[u8], cells: (usize, usize), f: &mut impl FnMut(u64, u64)) {
+    let (ac, sc) = cells;
+    let entry = (ac + sc) * 4;
+    for e in reg.chunks_exact(entry) {
+        let (Some(base), Some(size)) = (cells_u64(&e[..ac * 4]), cells_u64(&e[ac * 4..])) else {
+            return;
+        };
+        if size != 0 {
+            f(base, size);
+        }
+    }
 }
 
 /// Big-endian cell value of 1 or 2 cells.
@@ -382,6 +590,136 @@ mod tests {
         assert!(isa_has_base_extension(b"i\0m\0a\0f\0d\0c\0", b'd'));
         assert!(!isa_has_base_extension(b"i\0m\0a\0c\0zicsr\0", b'd'));
         assert!(!isa_has_base_extension(b"", b'd'));
+    }
+
+    /// / { #address-cells = <2>; #size-cells = <2>;
+    ///     memory@40000000 { device_type = "memory";
+    ///         reg = <0 0x40000000 0 0x10000000>, <0 0x80000000 0 0x1000>; };
+    ///     ram { device_type = "memory"; reg = <1 0 0 0x2000>; };
+    ///     memoryless@1 { reg = <0 1 0 1>; };
+    ///     reserved-memory { #address-cells = <2>; #size-cells = <1>;
+    ///         fw@40000000 { reg = <0 0x40000000 0x200000>; };
+    ///         pool { size = <0x100000>; }; }; }
+    /// with /memreserve/ 0x48000000 0x1000.
+    fn memory_sample() -> Vec<u8> {
+        let mut strings = Vec::new();
+        let mut add = |n: &[u8]| {
+            let off = strings.len();
+            strings.extend_from_slice(n);
+            strings.push(0);
+            off
+        };
+        let (ac, sc, reg, dt, size) = (
+            add(b"#address-cells"),
+            add(b"#size-cells"),
+            add(b"reg"),
+            add(b"device_type"),
+            add(b"size"),
+        );
+        let mut st = Vec::new();
+        let tok = |st: &mut Vec<u8>, t: u32| st.extend_from_slice(&t.to_be_bytes());
+        let name = |st: &mut Vec<u8>, n: &[u8]| {
+            st.extend_from_slice(n);
+            st.push(0);
+            while st.len() % 4 != 0 {
+                st.push(0);
+            }
+        };
+        let prop = |st: &mut Vec<u8>, off: usize, v: &[u8]| {
+            st.extend_from_slice(&FDT_PROP.to_be_bytes());
+            st.extend_from_slice(&(v.len() as u32).to_be_bytes());
+            st.extend_from_slice(&(off as u32).to_be_bytes());
+            st.extend_from_slice(v);
+            while st.len() % 4 != 0 {
+                st.push(0);
+            }
+        };
+        let cells = |v: &[u32]| v.iter().flat_map(|c| c.to_be_bytes()).collect::<Vec<u8>>();
+        tok(&mut st, FDT_BEGIN_NODE);
+        name(&mut st, b"");
+        prop(&mut st, ac, &cells(&[2]));
+        prop(&mut st, sc, &cells(&[2]));
+        tok(&mut st, FDT_BEGIN_NODE);
+        name(&mut st, b"memory@40000000");
+        prop(&mut st, dt, b"memory\0");
+        prop(
+            &mut st,
+            reg,
+            &cells(&[0, 0x4000_0000, 0, 0x1000_0000, 0, 0x8000_0000, 0, 0x1000]),
+        );
+        tok(&mut st, FDT_END_NODE);
+        tok(&mut st, FDT_BEGIN_NODE);
+        name(&mut st, b"ram");
+        prop(&mut st, reg, &cells(&[1, 0, 0, 0x2000]));
+        prop(&mut st, dt, b"memory\0");
+        tok(&mut st, FDT_END_NODE);
+        tok(&mut st, FDT_BEGIN_NODE);
+        name(&mut st, b"memoryless@1");
+        prop(&mut st, reg, &cells(&[0, 1, 0, 1]));
+        tok(&mut st, FDT_END_NODE);
+        tok(&mut st, FDT_BEGIN_NODE);
+        name(&mut st, b"reserved-memory");
+        prop(&mut st, ac, &cells(&[2]));
+        prop(&mut st, sc, &cells(&[1]));
+        tok(&mut st, FDT_BEGIN_NODE);
+        name(&mut st, b"fw@40000000");
+        prop(&mut st, reg, &cells(&[0, 0x4000_0000, 0x20_0000]));
+        tok(&mut st, FDT_END_NODE);
+        tok(&mut st, FDT_BEGIN_NODE);
+        name(&mut st, b"pool");
+        prop(&mut st, size, &cells(&[0x10_0000]));
+        tok(&mut st, FDT_END_NODE);
+        tok(&mut st, FDT_END_NODE);
+        tok(&mut st, FDT_END_NODE);
+        tok(&mut st, FDT_END);
+
+        let mut rsv = Vec::new();
+        for v in [0x4800_0000u64, 0x1000, 0, 0] {
+            rsv.extend_from_slice(&v.to_be_bytes());
+        }
+        let off_rsv = 40usize;
+        let off_struct = off_rsv + rsv.len();
+        let off_strings = off_struct + st.len();
+        let total = off_strings + strings.len();
+        let mut b = Vec::new();
+        for v in [
+            FDT_MAGIC,
+            total as u32,
+            off_struct as u32,
+            off_strings as u32,
+            off_rsv as u32,
+            17,
+            16,
+            0,
+            strings.len() as u32,
+            st.len() as u32,
+        ] {
+            b.extend_from_slice(&v.to_be_bytes());
+        }
+        b.extend_from_slice(&rsv);
+        b.extend_from_slice(&st);
+        b.extend_from_slice(&strings);
+        b
+    }
+
+    #[test]
+    fn reads_memory_and_reserved_ranges() {
+        let blob = memory_sample();
+        let fdt = Fdt::new(&blob).unwrap();
+        assert_eq!(fdt.size(), blob.len());
+        let mut mem = Vec::new();
+        fdt.memory_ranges(|b, s| mem.push((b, s)));
+        assert_eq!(
+            mem,
+            [
+                (0x4000_0000, 0x1000_0000),
+                (0x8000_0000, 0x1000),
+                (0x1_0000_0000, 0x2000)
+            ]
+        );
+        let mut rsv = Vec::new();
+        fdt.reserved_ranges(|b, s| rsv.push((b, s)));
+        assert_eq!(rsv, [(0x4800_0000, 0x1000), (0x4000_0000, 0x20_0000)]);
     }
 
     #[test]

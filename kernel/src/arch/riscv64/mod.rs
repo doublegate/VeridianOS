@@ -206,6 +206,12 @@ pub fn sv48_supported() -> bool {
     SV48.load(core::sync::atomic::Ordering::Relaxed)
 }
 
+/// The device tree's physical address, as firmware passed it in a1.
+pub fn dtb_pa() -> u64 {
+    // SAFETY: veridian_dtb_pa is written once by boot.S before Rust runs.
+    unsafe { core::ptr::read_volatile(core::ptr::addr_of!(veridian_dtb_pa)) }
+}
+
 /// Record the MMU type from the device tree.
 fn read_mmu_type(dtb_pa: u64) {
     // SAFETY: dtb_pa is what firmware passed in a1 (saved by boot.S).

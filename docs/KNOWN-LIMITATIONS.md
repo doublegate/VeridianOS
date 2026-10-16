@@ -489,7 +489,8 @@ order are in `ref-docs/HARDWARE-X86_64.md`, `ref-docs/HARDWARE-AARCH64.md` and
 - **x86_64:**
   - **Boot devices.** Needs a 16550 at 0x3F8 and an 8254 PIT; the console reads endless 0xFF
     bytes without the UART, and timer calibration can hang (HX-01, HX-03).
-  - **Memory and CPUs.** At least ~1.5 GiB of RAM for the 1 GiB static heap (HX-02), xAPIC
+  - **Memory and CPUs.** The heap is sized from RAM since N-278 (32 MiB at least, so 256 MiB
+    boots; the BlockFS runtime suite uses 2 GiB), but there is still an xAPIC
     handover with the I/O APIC at 0xFEC00000, 8-bit APIC IDs and at most 16 CPUs
     (HX-04, HX-05, N-174).
   - **Buses and ACPI.** PCI configuration space through port I/O only (no ECAM), and BAR sizing
@@ -503,8 +504,9 @@ order are in `ref-docs/HARDWARE-X86_64.md`, `ref-docs/HARDWARE-AARCH64.md` and
     HA-03), from any 2 MiB-aligned load base (HA-04, checked at a second address in the gate), but
     the early map treats the first GiB as MMIO and the rest as RAM, which only QEMU `virt` satisfies
     (ADR 0015, HA-17), and it has no PE/COFF header for UEFI.
-  - **Platform devices.** Hard-codes the QEMU PL011 UART, GICv2 addresses and a 128 MiB RAM layout
-    (HA-05, HA-07, HA-17), and supports no GICv3 or PCIe (HA-20).
+  - **Platform devices.** Hard-codes the QEMU PL011 UART and GICv2 addresses (HA-05, HA-07), and
+    supports no GICv3 or PCIe (HA-20). RAM comes from the device tree's memory nodes, less its
+    reservations, since v0.27 (HA-17); without a device tree 128 MiB is assumed.
   - **Caches and CPU start.** Maintains the caches for its boot page tables and for code it writes
     for user programs (cleaned to the point of unification unless CTR_EL0.IDC, instruction caches
     invalidated unless CTR_EL0.DIC), but not for DMA buffers, which QEMU keeps coherent (HA-25).
@@ -514,6 +516,7 @@ order are in `ref-docs/HARDWARE-X86_64.md`, `ref-docs/HARDWARE-AARCH64.md` and
   - **Boot.** Has no Image header, so U-Boot `booti` and EFI cannot load it (HR-03). (BSS is
     zeroed and a hart lottery runs since v0.27, HR-01/HR-19.)
   - **Fixed addresses.** Writes to 0x1000_0000, a clock controller on the HiFive Unmatched (HR-04).
+    (RAM comes from the device tree since v0.27, HR-07.)
   - **Paging.** On since v0.27, Sv48 only (ADR 0013): the walker has four levels, while the
     common boards are Sv39-only (HR-09). The kernel image is one writable, executable mapping
     (no W^X yet).
