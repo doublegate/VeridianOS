@@ -60,20 +60,22 @@ pub fn enumerate_secondaries() -> Vec<u32> {
 }
 
 /// Nothing extra on AArch64. The boot block is written with plain stores;
-/// the secondary reads it with its MMU off, which `start_ap` orders.
+/// the secondary reads it once its MMU is on, which `start_ap` orders.
 pub fn prepare_boot_args(_args: &ApBootArgs) {}
 
 /// Power on CPU `hw` at the entry stub.
 pub fn start_ap(hw: u32, args: &'static ApBootArgs) -> Result<(), &'static str> {
     let conduit = *CONDUIT.get().ok_or("no PSCI conduit")?;
-    // The secondary reads the boot block with its MMU and caches off.
+    // The secondary starts with its MMU off, at physical addresses: its
+    // entry and its boot block are passed as such (ADR 0015). It reads the
+    // block only once its MMU is on, so the block needs no cache cleaning.
     // SAFETY: barriers only.
     unsafe { core::arch::asm!("dsb sy", "isb", options(nostack)) };
     let ret = psci::cpu_on(
         conduit,
         u64::from(hw),
-        veridian_secondary_entry as *const () as u64,
-        args as *const ApBootArgs as u64,
+        super::boot::kernel_phys(veridian_secondary_entry as *const () as u64),
+        super::boot::kernel_phys(args as *const ApBootArgs as u64),
     );
     if ret == 0 {
         Ok(())

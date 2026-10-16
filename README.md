@@ -38,7 +38,7 @@ VeridianOS intentionally prioritizes architectural clarity over feature velocity
 
 ### Platform
 
-- **Multi-architecture** -- x86_64 (UEFI), AArch64 and RISC-V 64 (OpenSBI) boot and pass the in-kernel tests under QEMU. User programs run only on x86_64; AArch64 runs with the MMU off; none has run on real hardware yet ([`docs/KNOWN-LIMITATIONS.md`](docs/KNOWN-LIMITATIONS.md))
+- **Multi-architecture** -- x86_64 (UEFI), AArch64 and RISC-V 64 (OpenSBI) boot and pass the in-kernel tests under QEMU. User programs run on x86_64 and, without a C library yet, on RISC-V; AArch64 runs with its MMU on but no user mode yet; none has run on real hardware yet ([`docs/KNOWN-LIMITATIONS.md`](docs/KNOWN-LIMITATIONS.md))
 - **Self-hosting** -- Native GCC 14.2 and Rust compiler toolchain; BusyBox 1.36.1 with 95 applets compiled on-target
 - **Package management** -- DPLL SAT dependency resolver, ports system, reproducible builds, Ed25519 package signing
 - **Complete C library** -- Full stdio/stdlib/string/unistd with POSIX headers, math library, and architecture-specific setjmp/longjmp
@@ -110,7 +110,7 @@ Figures as of v0.26.0 (2026-10-06); sources: [`docs/PERFORMANCE-REPORT.md`](docs
 | Architecture | Boot Method | Status |
 | --- | --- | --- |
 | x86_64 | UEFI via OVMF | Boots to BOOTOK (34/34); 1280x800 UEFI GOP, Ring 3 user programs, native compilation |
-| AArch64 | Direct kernel loading | Boots to BOOTOK (34/34); PL011 UART, virtio-MMIO, BlockFS root. No user mode yet: the MMU is off (N-28) |
+| AArch64 | Direct kernel loading | Boots to BOOTOK (34/34); PL011 UART, virtio-MMIO, BlockFS root. MMU on, kernel in the upper half (ADR 0015); no user mode yet |
 | RISC-V 64 | OpenSBI | Boots to BOOTOK (34/34); Sv48 page tables, virtio-MMIO, BlockFS root. No user mode yet |
 
 ### Performance

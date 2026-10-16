@@ -17,7 +17,10 @@
 #        default debug; release boots the `./build-kernel.sh <arch> release` build),
 #        AARCH64_IMAGE=1 (boot the raw arm64 Image, veridian-kernel.img, which
 #        QEMU loads through the Linux boot protocol with the DTB in x0, instead
-#        of the ELF)
+#        of the ELF), AARCH64_LOAD_ADDR=<addr> (load that Image at another
+#        2 MiB-aligned base + 2 MiB with QEMU's generic loader instead of
+#        -kernel, to check that it runs wherever it is loaded; no device
+#        tree in x0 then, so the kernel uses QEMU virt's)
 set -u
 
 arch="${1:?usage: boot-test.sh <x86_64|aarch64|riscv64> [max-seconds]}"
@@ -61,6 +64,11 @@ aarch64)
     img="$root/target/aarch64-unknown-none-softfloat/$profile/veridian-kernel"
     [[ ${AARCH64_IMAGE:-0} == 1 ]] && img="$img.img"
     cmd=(qemu-system-aarch64 -M virt -cpu cortex-a72 -smp "$smp" -m 256M -kernel "$img" -device ramfb)
+    if [[ -n ${AARCH64_LOAD_ADDR:-} ]]; then
+        cmd=(qemu-system-aarch64 -M virt -cpu cortex-a72 -smp "$smp" -m 256M
+            -device "loader,file=$img.img,addr=$AARCH64_LOAD_ADDR"
+            -device "loader,addr=$AARCH64_LOAD_ADDR,cpu-num=0" -device ramfb)
+    fi
     ;;
 riscv64)
     img="$root/target/riscv64imac-unknown-none-elf/$profile/veridian-kernel"

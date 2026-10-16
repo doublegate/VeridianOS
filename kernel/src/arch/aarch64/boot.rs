@@ -11,6 +11,20 @@ global_asm!(include_str!("boot.S"));
 extern "C" {
     /// The device tree pointer boot.S saved from x0 (0 if none was passed).
     static veridian_dtb_pa: u64;
+    /// The kernel's virtual minus physical address, measured by boot.S.
+    static veridian_kernel_offset: u64;
+}
+
+/// Where boot.S maps all physical memory (ADR 0015): `mm::PHYS_MEM_OFFSET`.
+pub const PHYS_MAP_BASE: u64 = 0xFFFF_8000_0000_0000;
+
+/// The physical address of a kernel-image address (code, statics, linker
+/// symbols). The offset is the one boot.S measured, so this holds wherever
+/// the image was loaded.
+pub fn kernel_phys(va: u64) -> u64 {
+    // SAFETY: written once by boot.S before any Rust code runs; read-only
+    // afterwards.
+    va - unsafe { core::ptr::addr_of!(veridian_kernel_offset).read_volatile() }
 }
 
 /// Where QEMU puts the device tree for a bare-metal ELF on `virt`, which it
@@ -77,7 +91,7 @@ extern "C" fn veridian_secondary_rust(args: &'static crate::arch::smp_boot::ApBo
 /// This function is called from assembly with:
 /// - Stack properly initialized
 /// - BSS section cleared
-/// - Running in EL1 with MMU disabled
+/// - Running in EL1 with the MMU on, at the link address (ADR 0015)
 #[no_mangle]
 #[link_section = ".text.boot"]
 pub unsafe extern "C" fn _start_rust() -> ! {
@@ -87,6 +101,10 @@ pub unsafe extern "C" fn _start_rust() -> ! {
     // SAFETY: reading VBAR_EL1 has no side effects.
     unsafe { core::arch::asm!("mrs {0}, vbar_el1", out(reg) vbar, options(nomem, nostack)) };
     ENTRY_VBAR.store(vbar, core::sync::atomic::Ordering::Relaxed);
+
+    // boot.S turned the MMU on: physical memory is reached through its map
+    // from here on (`mm::phys_to_virt_addr`).
+    crate::mm::set_phys_mem_offset(PHYS_MAP_BASE);
 
     // Use direct_uart for proper string output
     use crate::arch::aarch64::direct_uart::uart_write_str;

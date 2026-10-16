@@ -201,10 +201,14 @@ Still open:
 
 ### AArch64 runs no user programs; RISC-V runs only simple ones (N-28; sprint E)
 
-- **AArch64 runs with the MMU and caches off (N-28, HA-16).** All memory is treated as Device
-  memory, so the filesystems use `fs::bare_lock`, which does not actually lock. This blocks SMP
-  work and EL0 (user mode) on AArch64. (Since v0.27 the boot sets SCTLR_EL1's RES1 bits and the
-  EL2 state the kernel relies on, N-177, HA-14, and uses the device tree firmware passes, HA-01.)
+- **AArch64 has its MMU on, but still carries the MMU-off workarounds (N-28, HA-16).** Since v0.27
+  the kernel runs in the upper half with the MMU and caches on (ADR 0015), so exclusive loads and
+  stores work. Not yet removed: `fs::bare_lock` (the filesystems' lock, which does not actually
+  lock), the bump global allocator, the reduced secondary-CPU stage (secondaries park instead of
+  dispatching) and the temporary identity map in TTBR0 (the UART and GIC drivers still use
+  physical addresses). There is no EL0 (user mode) yet. (The boot also sets SCTLR_EL1's RES1 bits
+  and the EL2 state the kernel relies on, N-177, HA-14, and uses the device tree firmware passes,
+  HA-01.)
 - **RISC-V runs static ELF programs, without a C library yet (ADR 0013, ADR 0014).** Paging is
   on, the kernel runs in the upper half, and programs from the VFS run in U-mode as dispatcher
   tasks with system calls, page faults and fault-tolerant user copies. Not yet: a RISC-V C
@@ -492,8 +496,9 @@ order are in `ref-docs/HARDWARE-X86_64.md`, `ref-docs/HARDWARE-AARCH64.md` and
   - **Device coverage.** Display is the UEFI framebuffer or virtio-gpu only (HX-31).
 - **AArch64:**
   - **Boot protocol.** Boots as an ELF or as an arm64 Image with the device tree in x0 (HA-01,
-    HA-03), but runs only at 0x40200000 with the MMU off (HA-04), and has no PE/COFF header for
-    UEFI.
+    HA-03), from any 2 MiB-aligned load base (HA-04, checked at a second address in the gate), but
+    the early map treats the first GiB as MMIO and the rest as RAM, which only QEMU `virt` satisfies
+    (ADR 0015, HA-17), and it has no PE/COFF header for UEFI.
   - **Platform devices.** Hard-codes the QEMU PL011 UART, GICv2 addresses and a 128 MiB RAM layout
     (HA-05, HA-07, HA-17), and supports no GICv3 or PCIe (HA-20).
   - **Caches and CPU start.** Has no cache maintenance anywhere (HA-25), and can start secondary

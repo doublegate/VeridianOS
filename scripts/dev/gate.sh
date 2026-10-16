@@ -69,6 +69,10 @@ if [ $boot -eq 1 ]; then
     AARCH64_IMAGE=1 step boot-aarch64-image scripts/boot-test.sh aarch64
     tail -1 "$log_dir/boot-aarch64-image.log"
     step boot-aarch64-image-dtb grep -q "Device tree passed in x0" "$root/target/boot-logs/boot-aarch64.log"
+    # The same Image loaded 4 MiB higher: the MMU-on code measures where it
+    # runs, so the kernel must not depend on its default load address.
+    AARCH64_LOAD_ADDR=0x40600000 step boot-aarch64-relocated scripts/boot-test.sh aarch64
+    tail -1 "$log_dir/boot-aarch64-relocated.log"
 fi
 if [ $rootfs -eq 1 ]; then
     # Stage first: it compiles the runtime test programs, so a change to

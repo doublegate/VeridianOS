@@ -173,9 +173,12 @@ What does not work yet: `docs/KNOWN-LIMITATIONS.md`.
     with turning the MMU on; `ref-docs/HARDWARE-AARCH64.md`, `ref-docs/HARDWARE-RISCV64.md`):
     - AArch64: done: DTB from x0, Linux-style EL2/SCTLR setup on boot and secondary paths (HA-01,
       HA-14, HA-15 part, N-177); arm64 Image header and flat binary, booted in the gate (HA-03);
-      exception vectors installed in boot.S before any Rust code (bring-up step 1); next:
-      position-independent early boot with the kernel at a high TTBR1 VA, MMU and caches
-      on before the first lock, TCR.IPS from PARange, 48-bit TTBR0 (HA-04, HA-16, N-28); cache
+      exception vectors installed in boot.S before any Rust code (bring-up step 1);
+      position-independent early boot with the kernel at a high TTBR1 VA, MMU and caches on
+      before Rust, TCR.IPS from PARange, 48-bit TTBR0, any 2 MiB-aligned load base (ADR 0015;
+      HA-04, HA-16, N-28 part); Arm page-table format (`mm::pte::arm`); next: MMIO through the
+      physical map and the identity map confined to the switch, remove `bare_lock`, the bump
+      allocator and the reduced secondary stage (N-28); cache
       maintenance primitives and DMA coherency (HA-25); ASIDs (HA-26); memory map from `/memory`
       and reservations (HA-17); EL0 entry/exit and SVC dispatch; register sanitiser (N-170).
     - RISC-V: done: zero BSS, hart lottery, `sstatus.FS` Off in the kernel (HR-01, HR-19, HR-20

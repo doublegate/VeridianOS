@@ -47,9 +47,8 @@ pub const PAGE_SIZE: usize = 4096;
 /// Physical memory offset: virtual = physical + PHYS_MEM_OFFSET.
 ///
 /// On x86_64 with bootloader 0.11, physical memory is mapped at a dynamic
-/// offset provided by the bootloader. On RISC-V boot.S maps it at
-/// 0xFFFF_8000_0000_0000 (ADR 0013). On AArch64, which runs with the MMU
-/// off, the offset is 0.
+/// offset provided by the bootloader. On RISC-V and AArch64 boot.S maps it
+/// at 0xFFFF_8000_0000_0000 (ADR 0013, ADR 0015).
 pub(crate) static PHYS_MEM_OFFSET: AtomicU64 = AtomicU64::new(0);
 
 /// Set the physical memory offset (called once during early boot).
@@ -59,7 +58,7 @@ pub fn set_phys_mem_offset(offset: u64) {
 
 /// Convert a physical address to a virtual pointer.
 ///
-/// Adds the physical-memory map's offset (0 on AArch64, MMU off).
+/// Adds the physical-memory map's offset.
 #[inline]
 pub fn phys_to_virt_addr(phys: u64) -> u64 {
     phys + PHYS_MEM_OFFSET.load(Ordering::Acquire)
@@ -106,15 +105,15 @@ pub fn get_kernel_page_table() -> usize {
 
     #[cfg(target_arch = "aarch64")]
     {
-        // TTBR0_EL1 holds the page table base
-        let ttbr0: u64;
-        // SAFETY: Reading TTBR0_EL1 is a read-only system register access that
-        // returns the EL0/EL1 page table base address. It has no side effects and
-        // is always accessible at EL1 (kernel mode).
+        // The kernel root is in TTBR1_EL1 (ADR 0015); TTBR0_EL1 holds the
+        // lower half (the boot identity map for now, later a process).
+        let ttbr1: u64;
+        // SAFETY: reading TTBR1_EL1 has no side effects at EL1.
         unsafe {
-            core::arch::asm!("mrs {}, TTBR0_EL1", out(reg) ttbr0);
+            core::arch::asm!("mrs {}, TTBR1_EL1", out(reg) ttbr1);
         }
-        ttbr0 as usize
+        // The base address field; the ASID bits (63:48) are not part of it.
+        (ttbr1 & 0x0000_FFFF_FFFF_F000) as usize
     }
 
     #[cfg(any(target_arch = "riscv32", target_arch = "riscv64"))]
@@ -489,9 +488,9 @@ pub fn init_default() {
         (regions, count)
     };
 
-    // AArch64 runs with the MMU off, so the linker's __kernel_end is the
-    // kernel's physical end; RISC-V runs the image in the upper half (ADR
-    // 0013) and converts it. The pool starts
+    // Both run the image in the upper half (ADR 0013, ADR 0015), so the
+    // linker's __kernel_end is converted to its physical address. The pool
+    // starts
     // after it and ends at 128 MiB of RAM -- QEMU `virt`'s default when no
     // `-m` is given. Under-estimating only leaves memory unused; over-
     // estimating would hand out frames that do not exist.
@@ -503,9 +502,10 @@ pub fn init_default() {
         }
         // Only the linker symbol's address is taken; it is never read.
         let kernel_end = core::ptr::addr_of!(__kernel_end) as u64;
-        // RISC-V runs the kernel at its link address in the upper half.
         #[cfg(target_arch = "riscv64")]
         let kernel_end = crate::arch::riscv64::boot::kernel_phys(kernel_end);
+        #[cfg(target_arch = "aarch64")]
+        let kernel_end = crate::arch::aarch64::boot::kernel_phys(kernel_end);
         #[cfg(target_arch = "aarch64")]
         let ram_end: u64 = 0x4000_0000 + 128 * 1024 * 1024;
         #[cfg(target_arch = "riscv64")]

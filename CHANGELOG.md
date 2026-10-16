@@ -2,6 +2,21 @@
 
 ### Added
 
+- **AArch64 runs with the MMU and caches on, in the upper half (N-28 part, HA-04, HA-16; ADR
+  0015).** The kernel is linked at 0xFFFF_FFFF_8020_0000 and loaded 2 MiB into RAM; boot.S runs
+  position-independent at the load address, builds the boot tables in `.bss` and switches. TTBR1
+  holds the kernel root: all physical memory at 0xFFFF_8000_0000_0000 in 1 GiB blocks (the first
+  GiB Device, the rest Normal, as QEMU `virt` lays it out) and the image at its link address in 2
+  MiB blocks from wherever it was loaded. TTBR0 holds a temporary identity map. MAIR and TCR match
+  `mm::pte::arm`, with IPS from PARange. The table lines are invalidated before the switch. boot.S
+  then branches high and reloads the stack and VBAR. Secondary CPUs get the physical addresses of
+  their entry and boot block from PSCI CPU_ON, load the boot CPU's MMU registers and switch the
+  same way. `kernel_phys` uses the offset boot.S measured, `get_kernel_page_table` reads TTBR1,
+  and `PHYS_MEM_OFFSET` is set. New boot test `mmu_on_kernel_in_upper_half` checks SCTLR, the
+  running address and an `AT S1E1R` translation to Normal memory (AArch64 35/35, 37/37 on four
+  CPUs). `gate.sh --boot` also boots the Image loaded 4 MiB higher (`AARCH64_LOAD_ADDR`). Still to
+  do: MMIO through the physical map, then removing the MMU-off workarounds.
+
 - **AArch64 exception vectors before any Rust code.** boot.S writes VBAR_EL1 as soon as each CPU
   has a stack (boot and secondary paths), instead of Stage 1 hardware init doing it after
   `kernel_main` had already run. A fault in the earliest Rust code is now reported with ESR/ELR/FAR,

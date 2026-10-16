@@ -2834,6 +2834,30 @@ fn run_usercopy_tests(passed: &mut u32, failed: &mut u32) {
             passed,
             failed,
         );
+
+        // The MMU and caches are on with the layout of ADR 0015: the kernel
+        // runs at its upper-half link address, the kernel root is TTBR1's,
+        // and a kernel address translates (AT S1E1R) to the physical
+        // address `kernel_phys` computes, through Normal cacheable memory.
+        let sctlr: u64;
+        let par: u64;
+        let here = boot::kernel_phys as *const () as u64;
+        // SAFETY: reading SCTLR_EL1 and an address translation of a mapped
+        // kernel address have no side effects beyond PAR_EL1.
+        unsafe {
+            core::arch::asm!("mrs {0}, sctlr_el1", out(reg) sctlr, options(nomem, nostack));
+            core::arch::asm!("at s1e1r, {0}", "isb", "mrs {1}, par_el1",
+                in(reg) here, out(reg) par, options(nostack));
+        }
+        let translated =
+            par & 1 == 0 && par & 0x0000_FFFF_FFFF_F000 == boot::kernel_phys(here) & !0xFFF;
+        let normal = par >> 56 == 0xFF;
+        let ok = sctlr & 0x1005 == 0x1005
+            && here >= 0xFFFF_FFFF_8000_0000
+            && crate::mm::get_kernel_page_table() != 0
+            && translated
+            && normal;
+        report_test("mmu_on_kernel_in_upper_half", ok, passed, failed);
     }
 
     // Test 34: the monotonic clock advances and the 1000 Hz timer interrupt
