@@ -490,13 +490,16 @@ order are in `ref-docs/HARDWARE-X86_64.md`, `ref-docs/HARDWARE-AARCH64.md` and
   - **Caches and CPU start.** Has no cache maintenance anywhere (HA-25), and can start secondary
     CPUs only through PSCI, not the Raspberry Pi 4's spin-table (HA-22).
 - **RISC-V:**
-  - **Boot.** Never zeroes BSS (relies on the ELF loader) and has no Image header (HR-01, HR-03).
+  - **Boot.** Has no Image header, so U-Boot `booti` and EFI cannot load it (HR-03). (BSS is
+    zeroed and a hart lottery runs since v0.27, HR-01/HR-19.)
   - **Fixed addresses.** Writes to 0x1000_0000, a clock controller on the HiFive Unmatched (HR-04).
   - **Paging.** Supports only Sv48, while the common boards are Sv39-only, and uses x86-format
     page-table entries (HR-09, HR-10).
   - **Interrupts.** Computes the PLIC context wrongly on boards whose hart 0 is a monitor core
     (HR-12) and treats device interrupts as fatal (HR-31).
-  - **Privileged registers.** Reads M-mode registers from S-mode (HR-20, HR-21).
+  - **Privileged registers.** The unused FP save/restore code reads `misa` and the FP
+    initialisation writes `mstatus`, M-mode registers that trap in S-mode (HR-20, HR-21); fixed
+    with FP state switching in sprint E. `sstatus.FS` is Off in the kernel since v0.27.
   - **Missing support.** No PCIe, no non-coherent DMA and no shutdown or reboot path
     (HR-24, HR-34, HR-38).
 

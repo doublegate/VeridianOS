@@ -13,10 +13,25 @@ veridian_dtb_pa:
 veridian_boot_hartid:
     .dword 0
 
+# Hart lottery (HR-19): the first hart to reach _start boots; the others
+# stop. Firmware without SBI HSM starts every hart here at once.
+veridian_boot_lottery:
+    .word 0
+
 .section .text.boot
 .global _start
 
 _start:
+    la t0, veridian_boot_lottery
+    li t1, 1
+    # The assembler may not see the target's A extension here (release
+    # LTO builds this file without it), so name it.
+    .option push
+    .option arch, +a
+    amoadd.w t1, t1, (t0)
+    .option pop
+    bnez t1, .Llost_lottery
+
     la t0, veridian_dtb_pa
     sd a1, 0(t0)
     la t0, veridian_boot_hartid
@@ -81,6 +96,22 @@ _start:
     # Set up stack - use __stack_top from linker script
     la sp, __stack_top
 
+    # Zero .bss (HR-01): QEMU's ELF loader does, but a flat Image loaded
+    # by U-Boot or EFI carries no bss contents.
+    la t0, __bss_start
+    la t1, __bss_end
+3:
+    bgeu t0, t1, 4f
+    sd zero, 0(t0)
+    addi t0, t0, 8
+    j 3b
+4:
+
+    # FP off (HR-20): the kernel is soft-float (N-178), so an FP
+    # instruction in kernel code traps instead of using user registers.
+    li t0, 0x6000
+    csrc sstatus, t0
+
     # Jump to Rust code (use `call` for 32-bit range; `jal` only reaches +/-1MB)
     call _start_rust
 
@@ -88,6 +119,17 @@ _start:
 1:
     wfi
     j 1b
+
+# A hart that lost the lottery asks SBI HSM to stop it (EID "HSM", FID 1
+# hart_stop), so the boot hart can start it later as a secondary. It
+# returns only if HSM is missing; then the hart waits here for good.
+.Llost_lottery:
+    li a7, 0x48534D
+    li a6, 1
+    ecall
+5:
+    wfi
+    j 5b
 
 # Secondary hart entry (SBI HSM hart_start): S-mode, satp = 0, sstatus.SIE =
 # 0, a0 = hartid, a1 = &ApBootArgs (arch/smp_boot.rs). Takes the stack and
@@ -97,6 +139,8 @@ _start:
 veridian_hart_entry:
     csrw sie, zero
     csrw sip, zero
+    li t0, 0x6000
+    csrc sstatus, t0
     ld sp, 8(a1)
     ld tp, 16(a1)
     csrw sscratch, zero

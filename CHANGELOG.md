@@ -757,6 +757,11 @@
 
 ### Fixed
 
+- **RISC-V boot no longer relies on the loader (HR-01, HR-19, HR-20).** `_start` zeroes `.bss`
+  (QEMU's ELF loader does, a flat Image from U-Boot or EFI does not), runs a hart lottery so
+  that, with firmware that starts every hart at once, one boots and the others stop through SBI
+  HSM instead of sharing one stack, and turns `sstatus.FS` off so that an FP instruction in the
+  soft-float kernel traps.
 - **Free memory counts the per-CPU frame caches.** `/proc/meminfo`, sysinfo and the shell
   reported only the global allocator's free frames, leaving out up to 64 per CPU waiting in the
   per-CPU caches. Frames the caches give back to the global allocator are now checked like any

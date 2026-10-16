@@ -177,7 +177,8 @@ What does not work yet: `docs/KNOWN-LIMITATIONS.md`.
       on before the first lock, TCR.IPS from PARange, 48-bit TTBR0 (HA-04, HA-16, N-28); cache
       maintenance primitives and DMA coherency (HA-25); ASIDs (HA-26); memory map from `/memory`
       and reservations (HA-17); EL0 entry/exit and SVC dispatch; register sanitiser (N-170).
-    - RISC-V: zero BSS, hart lottery, `sstatus.FS` (HR-01, HR-19, HR-20); RISC-V Image header and
+    - RISC-V: done: zero BSS, hart lottery, `sstatus.FS` Off in the kernel (HR-01, HR-19, HR-20
+      part; the M-mode CSR reads go with FP switching). RISC-V Image header and
       relocatable or MMU-early boot (HR-02, HR-03); `satp` mode probe with Sv39 default and
       3/4/5-level tables from the boot hart's cpu node (HR-08, HR-09); RISC-V PTE encoder with A/D,
       Svpbmt/XTheadMae (HR-10, HR-11); remove raw 0x1000_0000 stores and QEMU-only probes (HR-04
