@@ -1,0 +1,27 @@
+VeridianOS: KSortFilterProxyModel: port invalidateFilter() to endFilterChange()
+
+GCC reported 'void QSortFilterProxyModel::invalidateFilter()' is deprecated:
+Use begin/endFilterChange() instead [-Wdeprecated-declarations] in
+src/qml/ksortfilterproxymodel.cpp:311.
+
+KSortFilterProxyModel::invalidateFilter() is a QML-invokable slot that
+callers use after they have changed what their filter callbacks depend on,
+so there is no "before" point at which to call beginFilterChange(). In Qt,
+the deprecated QSortFilterProxyModel::invalidateFilter() is
+filter_changed(Rows | Columns), which is exactly
+endFilterChange(Direction::Both); the slot now calls that. No behaviour
+change. Requires Qt >= 6.10 (endFilterChange()).
+
+diff -ru a/src/qml/ksortfilterproxymodel.cpp b/src/qml/ksortfilterproxymodel.cpp
+--- a/src/qml/ksortfilterproxymodel.cpp	2026-10-08 17:16:38.781249165 -0400
++++ b/src/qml/ksortfilterproxymodel.cpp	2026-10-08 17:16:38.817514110 -0400
+@@ -308,7 +308,8 @@
+ 
+ void KSortFilterProxyModel::invalidateFilter()
+ {
+-    QSortFilterProxyModel::invalidateFilter();
++    // Called after the filter parameters changed: refilter rows and columns.
++    endFilterChange(QSortFilterProxyModel::Direction::Both);
+ }
+ 
+ #include "moc_ksortfilterproxymodel.cpp"

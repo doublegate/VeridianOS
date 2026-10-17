@@ -1,0 +1,32 @@
+VeridianOS: ip-add-membership: fixed crash with the interface parameter
+
+Found while preparing 0001 for upstream (socat@dest-unreach.org): since
+1.8.0.0, xiotype_ip_add_membership() strncpy()s the interface name of
+the documented three-parameter form (ip-add-membership=group:addr:if) to
+opt->value3.u_string, a pointer that is never allocated, so socat dies
+with signal 11 during option parsing. The name is now strdup()ed; a name
+of IF_NAMESIZE characters or more, which strncpy() truncated without a
+terminator, is rejected with "interface name too long".
+
+--- a/xio-ip.c
++++ b/xio-ip.c
+@@ -1198,7 +1198,18 @@ int xiotype_ip_add_membership(
+ 
+ #if HAVE_STRUCT_IP_MREQN
+ 	if (*tokp++ == ':') {
+-		strncpy(opt->value3.u_string/*ifindex*/, tokp, IF_NAMESIZE);	/* ok */
++		if (strlen(tokp) >= IF_NAMESIZE) {
++			Error1("interface name too long in \"%s\"", tokp);
++			free(opt->value2.u_string);
++			free(opt->value.u_string);
++			return -1;
++		}
++		if ((opt->value3.u_string/*ifindex*/ = strdup(tokp)) == NULL) {
++			Error1("strdup(\"%s\"): out of memory", tokp);
++			free(opt->value2.u_string);
++			free(opt->value.u_string);
++			return -1;
++		}
+ 		Info4("setting option \"%s\" to {\"%s\",\"%s\",\"%s\"}",
+ 		      ent->desc->defname,
+ 		      opt->value.u_string/*multiaddr*/,

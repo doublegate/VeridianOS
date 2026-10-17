@@ -216,21 +216,32 @@ static INITIALIZED: AtomicBool = AtomicBool::new(false);
 // ---------------------------------------------------------------------------
 
 /// Execute CPUID instruction with leaf and subleaf
+///
+/// # Safety
+///
+/// Must run on x86_64, where CPUID is always available; any leaf/subleaf
+/// is accepted (unsupported leaves return zeros or the highest leaf). It is
+/// `unsafe` only because it executes inline assembly.
 #[cfg(target_arch = "x86_64")]
 unsafe fn cpuid(leaf: u32, subleaf: u32) -> (u32, u32, u32, u32) {
     let (eax, ebx, ecx, edx): (u32, u32, u32, u32);
     // SAFETY: CPUID is always available on x86_64. We save/restore rbx because
     // LLVM reserves it. The push/pop pair preserves the frame pointer.
-    core::arch::asm!(
-        "push rbx",
-        "cpuid",
-        "mov {ebx_out:e}, ebx",
-        "pop rbx",
-        inout("eax") leaf => eax,
-        inout("ecx") subleaf => ecx,
-        ebx_out = out(reg) ebx,
-        out("edx") edx,
-    );
+    // SAFETY: CPUID is always available on x86_64. We save/restore rbx because
+    // LLVM reserves it. The push/pop pair preserves the frame pointer. CPUID
+    // only reads identification data, for any leaf/subleaf.
+    unsafe {
+        core::arch::asm!(
+            "push rbx",
+            "cpuid",
+            "mov {ebx_out:e}, ebx",
+            "pop rbx",
+            inout("eax") leaf => eax,
+            inout("ecx") subleaf => ecx,
+            ebx_out = out(reg) ebx,
+            out("edx") edx,
+        )
+    };
     (eax, ebx, ecx, edx)
 }
 
@@ -255,12 +266,14 @@ fn detect_x86_64(topology: &mut CacheTopology) {
 #[cfg(target_arch = "x86_64")]
 fn detect_cpuid_leaf4(topology: &mut CacheTopology) {
     // Check max supported leaf
+    // SAFETY: cpuid has no precondition on x86_64 (this fn is cfg-gated).
     let (max_leaf, _, _, _) = unsafe { cpuid(0, 0) };
     if max_leaf < 4 {
         return;
     }
 
     for subleaf in 0..MAX_CACHE_LEVELS as u32 {
+        // SAFETY: cpuid has no precondition on x86_64 (this fn is cfg-gated).
         let (eax, ebx, ecx, _edx) = unsafe { cpuid(4, subleaf) };
 
         // Cache type in EAX[4:0]: 0=no more, 1=data, 2=instruction, 3=unified
@@ -312,12 +325,14 @@ fn detect_cpuid_leaf4(topology: &mut CacheTopology) {
 #[cfg(target_arch = "x86_64")]
 fn detect_cpuid_amd(topology: &mut CacheTopology) {
     // Check max extended leaf
+    // SAFETY: cpuid has no precondition on x86_64 (this fn is cfg-gated).
     let (max_ext, _, _, _) = unsafe { cpuid(0x80000000, 0) };
     if max_ext < 0x8000001D {
         return;
     }
 
     for subleaf in 0..MAX_CACHE_LEVELS as u32 {
+        // SAFETY: cpuid has no precondition on x86_64 (this fn is cfg-gated).
         let (eax, ebx, ecx, _edx) = unsafe { cpuid(0x8000001D, subleaf) };
 
         // Same encoding as leaf 4

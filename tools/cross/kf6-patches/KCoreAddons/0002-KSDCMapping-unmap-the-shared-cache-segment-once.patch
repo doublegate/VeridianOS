@@ -1,0 +1,27 @@
+VeridianOS: KSDCMapping: unmap the shared cache segment once, not twice
+
+Real bug, found while fixing the warning in 0001 (not reported by GCC).
+KSDCMapping::detachFromSharedMemory() called ::munmap(m_mapped, m_mapSize)
+unconditionally and then called it again in the error check:
+
+    ::munmap(m_mapped, m_mapSize);
+    if (0 != ::munmap(m_mapped, m_mapSize)) { ...log... }
+
+The second call unmaps an address range the process no longer owns. In a
+multi-threaded process another thread can have received a new mapping at
+that address in between (mmap reuses freed ranges), and the second munmap()
+then silently unmaps that unrelated memory; otherwise it is a no-op and the
+error check can never see the first call's failure. Keep only the checked
+call. Applies after 0001.
+
+diff -ru a/src/lib/caching/ksdcmapping_p.h b/src/lib/caching/ksdcmapping_p.h
+--- a/src/lib/caching/ksdcmapping_p.h	2026-10-08 17:30:32.622028044 -0400
++++ b/src/lib/caching/ksdcmapping_p.h	2026-10-08 17:30:32.649398696 -0400
+@@ -162,7 +162,6 @@
+                 ::msync(m_mapped, m_mapSize, MS_INVALIDATE | MS_ASYNC);
+             }
+ #endif
+-            ::munmap(m_mapped, m_mapSize);
+             if (0 != ::munmap(m_mapped, m_mapSize)) {
+                 qCCritical(KCOREADDONS_DEBUG) << "Unable to unmap shared memory segment" << static_cast<void *>(m_mapped) << ":" << ::strerror(errno);
+             }

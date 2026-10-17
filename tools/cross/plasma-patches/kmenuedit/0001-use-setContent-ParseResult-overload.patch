@@ -1,0 +1,29 @@
+VeridianOS: use the QDomDocument::setContent() overload returning ParseResult
+
+GCC reported -Wdeprecated-declarations for QDomDocument::setContent(
+QIODevice *, QString *, int *, int *) in MenuFile::load() (menufile.cpp):
+"Use the overload returning ParseResult instead". The deprecated overload
+forwards to setContent(device, ParseOption::Default) (no namespace
+processing) and unpacks the result; the code now calls that directly and
+logs result.errorLine, errorColumn and errorMessage in the same warning.
+Behaviour is unchanged.
+
+diff -ru a/menufile.cpp b/menufile.cpp
+--- a/menufile.cpp	2026-10-08 17:29:57.628578971 -0400
++++ b/menufile.cpp	2026-10-08 17:30:28.003796817 -0400
+@@ -61,11 +61,10 @@
+         return false;
+     }
+ 
+-    QString errorMsg;
+-    int errorRow;
+-    int errorCol;
+-    if (!m_doc.setContent(&file, &errorMsg, &errorRow, &errorCol)) {
+-        qCWarning(KMENUEDIT_LOG) << "Parse error in " << m_fileName << ", line " << errorRow << ", col " << errorCol << ": " << errorMsg;
++    const QDomDocument::ParseResult result = m_doc.setContent(&file);
++    if (!result) {
++        qCWarning(KMENUEDIT_LOG) << "Parse error in " << m_fileName << ", line " << result.errorLine << ", col " << result.errorColumn << ": "
++                                 << result.errorMessage;
+         file.close();
+         create();
+         return false;

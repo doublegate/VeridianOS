@@ -9,8 +9,8 @@
  * primitives actually used by self-hosting toolchain code are implemented.
  *
  * Threading model:
- *   - Threads are created via SYS_THREAD_CLONE (Linux clone-style semantics).
- *   - Synchronization uses SYS_FUTEX (futex_wait / futex_wake / futex_requeue).
+ *   - Threads are created via SYS_clone (Linux clone-style semantics).
+ *   - Synchronization uses SYS_futex (futex_wait / futex_wake / futex_requeue).
  *   - Thread joining uses SYS_THREAD_JOIN with CLONE_CHILD_CLEARTID for
  *     robust exit notification.
  *   - No kernel-side helper threads are required.
@@ -43,9 +43,12 @@
 
 #include <veridian/syscall.h>
 
+#include "tcb.h"
+
 /* Imported raw syscall helpers */
-long veridian_thread_clone(unsigned long flags, void *newsp,
-                           int *parent_tidptr, int *child_tidptr, void *tls);
+/* clone_<arch>.S: the new thread runs fn(arg) on `stack` and exits. */
+long __veridian_clone(unsigned long flags, void *stack, int *ptid, int *ctid,
+                      void *tls, int (*fn)(void *), void *arg);
 int futex_wait(int *uaddr, int expected, const struct timespec *timeout);
 int futex_wake(int *uaddr, int count);
 int futex_requeue(int *uaddr, int wake_count, int *uaddr2, int requeue_count);
@@ -91,10 +94,17 @@ static inline void set_thread_pointer(void *ptr)
 #endif
 }
 
+/* NULL until the process has a thread pointer (ensure_main_tcb): without
+ * one, %fs:0 is address 0. The x86_64 read is a volatile asm so it cannot
+ * be hoisted above that check (see errno.c). */
 static inline void *get_thread_pointer(void)
 {
+    if (!__atomic_load_n(&__veridian_tp_ready, __ATOMIC_ACQUIRE))
+        return NULL;
 #if defined(__x86_64__)
-    return __builtin_thread_pointer();
+    void *t;
+    __asm__ volatile("mov %%fs:0, %0" : "=r"(t));
+    return t;
 #elif defined(__aarch64__)
     return __builtin_thread_pointer();
 #elif defined(__riscv)
@@ -106,6 +116,7 @@ static inline void *get_thread_pointer(void)
 
 /* Thread control block --------------------------------------------------- */
 struct pthread_control {
+    struct veridian_tcb_head head; /* first: the thread pointer's target */
     pthread_t tid;
     void *stack;       /* aligned usable stack base */
     void *stack_alloc; /* original pointer for free */
@@ -132,7 +143,10 @@ static void ensure_main_tcb(void)
     main_tcb.retval = NULL;
     main_tcb.start = NULL;
     main_tcb.arg = NULL;
+    main_tcb.head.self = &main_tcb.head;
+    main_tcb.head.errno_val = errno; /* errno moves into the TCB */
     set_thread_pointer(&main_tcb);
+    __atomic_store_n(&__veridian_tp_ready, 1, __ATOMIC_RELEASE);
     main_tcb_ready = 1;
 }
 
@@ -396,6 +410,15 @@ struct start_args {
     void *arg;
 };
 
+static void child_trampoline(struct pthread_control *tcb);
+
+/* The new thread's first function (called by __veridian_clone). */
+static int child_entry(void *p)
+{
+    child_trampoline(p);
+    return 0;
+}
+
 static void child_trampoline(struct pthread_control *tcb)
 {
     set_thread_pointer(tcb);
@@ -422,7 +445,7 @@ static void child_trampoline(struct pthread_control *tcb)
  *   exit_futex used by CLONE_CHILD_CLEARTID for join notification.
  *
  * Clone syscall usage:
- *   We call veridian_thread_clone() with CLONE_VM | CLONE_FS | CLONE_FILES |
+ *   We call __veridian_clone() with CLONE_VM | CLONE_FS | CLONE_FILES |
  *   CLONE_SIGHAND | CLONE_THREAD (shared address space, file table, and
  *   signal handlers) plus CLONE_SETTLS (set the thread pointer to the TCB),
  *   CLONE_CHILD_CLEARTID (kernel zeroes exit_futex on exit and does a futex
@@ -459,6 +482,7 @@ int pthread_create(pthread_t *thread,
         free(raw);  /* free the original malloc'd pointer, not the aligned one */
         return ENOMEM;
     }
+    tcb->head.self = &tcb->head;
     tcb->stack = stack;
     tcb->stack_alloc = raw;
     tcb->stack_size = stack_size;
@@ -467,33 +491,25 @@ int pthread_create(pthread_t *thread,
     tcb->arg = arg;
     tcb->exit_futex = 0;
 
-    /* Set up the child stack: push start_routine and arg at the top so the
-     * kernel entry trampoline can pop them. Stack grows downward. */
-    void **child_stack_top = (void **)((uint8_t *)stack + stack_size);
-    *(--child_stack_top) = arg;
-    *(--child_stack_top) = (void *)start_routine;
     unsigned long flags = CLONE_VM | CLONE_FS | CLONE_FILES | CLONE_SIGHAND |
                           CLONE_THREAD | CLONE_SETTLS |
                           CLONE_CHILD_CLEARTID | CLONE_CHILD_SETTID | CLONE_PARENT_SETTID;
 
     /* NOTE: register_tcb() is intentionally NOT called here -- it is called
      * below, only after clone succeeds, to avoid leaving a dangling TCB
-     * registry entry on failure. */
-    long ret = veridian_thread_clone(flags,
-                                     child_stack_top,
-                                     (int *)&tcb->tid,
-                                     (int *)&tcb->tid,
-                                     tcb);
+     * registry entry on failure. The child starts in child_entry on its
+     * own stack (clone_<arch>.S) and never returns here (N-102). */
+    long ret = __veridian_clone(flags,
+                                (uint8_t *)stack + stack_size,
+                                (int *)&tcb->tid,
+                                &tcb->exit_futex,
+                                tcb,
+                                child_entry,
+                                tcb);
     if (ret < 0) {
-        int clone_err = errno;
         free(raw);
         free(tcb);
-        return clone_err ? clone_err : (int)-ret;
-    }
-
-    if (ret == 0) {
-        /* Child path -- never returns */
-        child_trampoline(tcb);
+        return (int)-ret;
     }
 
     /* Parent path: clone succeeded, now register the TCB. */
@@ -515,7 +531,7 @@ int pthread_create(pthread_t *thread,
  *   (or returns immediately if the thread has already exited).
  *
  *   After the join syscall returns, we read the return value from the TCB
- *   (which the child wrote before calling SYS_THREAD_EXIT), then unregister
+ *   (which the child wrote before calling SYS_exit), then unregister
  *   and free the TCB and its stack allocation.
  */
 int pthread_join(pthread_t thread, void **retval)
@@ -574,7 +590,7 @@ static void __attribute__((noreturn)) pthread_exit_raw(void *retval)
     if (tcb) {
         tcb->retval = retval;
     }
-    veridian_syscall1(SYS_THREAD_EXIT, (long)retval);
+    veridian_syscall1(SYS_exit, (long)retval);
     __builtin_unreachable();
 }
 
@@ -589,7 +605,7 @@ int pthread_setcancelstate(int state, int *oldstate)
 
 int pthread_yield(void)
 {
-    veridian_syscall0(SYS_PROCESS_YIELD);
+    veridian_syscall0(SYS_sched_yield);
     return 0;
 }
 
@@ -1130,7 +1146,7 @@ int pthread_spin_unlock(pthread_spinlock_t *lock)
  *
  * Runs TLS destructors for all active keys belonging to this thread, then
  * calls pthread_exit_raw() which stores the return value in the TCB and
- * issues SYS_THREAD_EXIT.  The TCB cleanup (freeing stack, unregistering
+ * issues SYS_exit.  The TCB cleanup (freeing stack, unregistering
  * from the TCB list) is handled by pthread_join() in the joining thread.
  *
  * Destructor ordering follows POSIX: up to PTHREAD_DESTRUCTOR_ITERATIONS

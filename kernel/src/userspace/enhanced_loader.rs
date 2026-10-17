@@ -514,9 +514,10 @@ pub fn load_and_execute(path: &str, args: ProgramArgs) -> Result<ProcessId, Kern
     println!("[ELF-LOADER] Loading program: {}", path);
 
     // Read file from filesystem
-    let vfs = crate::fs::get_vfs();
-    let file_node = vfs
-        .open(path, crate::fs::file::OpenFlags::read_only())
+    let file_node = crate::fs::get_vfs()
+        .as_caller()
+        .open_follow_canonical(path, crate::fs::file::OpenFlags::read_only(), true)
+        .map(|(node, _)| node)
         .map_err(|_| KernelError::NotFound {
             resource: "file",
             id: 0,
@@ -606,9 +607,10 @@ fn load_interpreter(process: &Process, interp_path: &str) -> Result<VirtualAddre
     println!("[ELF-LOADER] Loading interpreter from {}", interp_path);
 
     // Read interpreter from filesystem
-    let vfs = crate::fs::get_vfs();
-    let file_node = vfs
-        .open(interp_path, crate::fs::file::OpenFlags::read_only())
+    let file_node = crate::fs::get_vfs()
+        .as_caller()
+        .open_follow_canonical(interp_path, crate::fs::file::OpenFlags::read_only(), true)
+        .map(|(node, _)| node)
         .map_err(|_| KernelError::NotFound {
             resource: "interpreter",
             id: 0,

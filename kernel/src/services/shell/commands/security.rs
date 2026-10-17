@@ -126,6 +126,7 @@ impl BuiltinCommand for AuditCommand {
                 crate::println!("Total events:     {}", stats.total_events);
                 crate::println!("Filtered:         {}", stats.filtered_events);
                 crate::println!("Persisted:        {}", stats.persisted_events);
+                crate::println!("Not persisted:    {} (log full)", stats.persist_dropped);
                 crate::println!("Alerts triggered: {}", stats.alerts_triggered);
                 crate::println!(
                     "Buffer:           {}/{}",

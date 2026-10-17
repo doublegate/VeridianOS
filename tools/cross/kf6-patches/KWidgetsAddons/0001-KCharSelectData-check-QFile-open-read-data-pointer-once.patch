@@ -1,0 +1,84 @@
+VeridianOS: KCharSelectData: check QFile::open, read the data pointer once
+
+GCC reported, for the VeridianOS cross build:
+
+- src/kcharselectdata.cpp:89: ignoring return value of QFile::open
+  [-Wunused-result]. When the embedded resource cannot be opened, readAll()
+  returns an empty array and the existing "size < 40" check rejects it, so
+  the outcome was already "return false"; the failure is now handled where it
+  happens. No behaviour change.
+- QtCore/qendian.h:57: array subscript 4..7 is outside array bounds of
+  'const char [1]' [-Warray-bounds] (4x), reached through qFromLittleEndian()
+  inlined into KCharSelectData::sectionList(), blockName() and sectionName().
+  These three functions called dataFile.constData() twice, once for the
+  header reads and once for the string table. constData() returns
+  &QByteArray::_empty (a 1-byte object) when the array has no buffer; GCC
+  jump-threaded the two calls into a path where the header reads at offset
+  16..28 go through &_empty, and warned about that path. It is not reachable
+  (openDataFile() only succeeds with at least 40 bytes loaded), but the code
+  now takes the pointer once and derives both views from it, which removes
+  the duplicated path. The warning was located in Qt's installed header but
+  caused by this code; nothing in Qt needs changing. No behaviour change.
+
+diff -ru a/src/kcharselectdata.cpp b/src/kcharselectdata.cpp
+--- a/src/kcharselectdata.cpp	2026-10-08 17:01:38.577617660 -0400
++++ b/src/kcharselectdata.cpp	2026-10-08 17:03:31.982752867 -0400
+@@ -86,7 +86,9 @@
+         return true;
+     } else {
+         QFile file(QStringLiteral(":/kf6/kcharselect/kcharselect-data"));
+-        file.open(QIODevice::ReadOnly);
++        if (!file.open(QIODevice::ReadOnly)) {
++            return false;
++        }
+         dataFile = file.readAll();
+         file.close();
+         if (dataFile.size() < 40) {
+@@ -267,11 +269,11 @@
+         return QStringList();
+     }
+ 
+-    const uchar *udata = reinterpret_cast<const uchar *>(dataFile.constData());
++    const char *data = dataFile.constData();
++    const uchar *udata = reinterpret_cast<const uchar *>(data);
+     const quint32 stringBegin = qFromLittleEndian<quint32>(udata + 24);
+     const quint32 stringEnd = qFromLittleEndian<quint32>(udata + 28);
+ 
+-    const char *data = dataFile.constData();
+     QStringList list;
+     quint32 i = stringBegin;
+     list.append(QCoreApplication::translate("KCharSelectData", "All", "KCharSelect section name"));
+@@ -418,14 +420,14 @@
+         return QString();
+     }
+ 
+-    const uchar *udata = reinterpret_cast<const uchar *>(dataFile.constData());
++    const char *data = dataFile.constData();
++    const uchar *udata = reinterpret_cast<const uchar *>(data);
+     const quint32 stringBegin = qFromLittleEndian<quint32>(udata + 16);
+     const quint32 stringEnd = qFromLittleEndian<quint32>(udata + 20);
+ 
+     quint32 i = stringBegin;
+     int currIndex = 0;
+ 
+-    const char *data = dataFile.constData();
+     while (i < stringEnd && currIndex < index) {
+         i += qstrlen(data + i) + 1;
+         currIndex++;
+@@ -445,14 +447,14 @@
+ 
+     index -= 1;
+ 
+-    const uchar *udata = reinterpret_cast<const uchar *>(dataFile.constData());
++    const char *data = dataFile.constData();
++    const uchar *udata = reinterpret_cast<const uchar *>(data);
+     const quint32 stringBegin = qFromLittleEndian<quint32>(udata + 24);
+     const quint32 stringEnd = qFromLittleEndian<quint32>(udata + 28);
+ 
+     quint32 i = stringBegin;
+     int currIndex = 0;
+ 
+-    const char *data = dataFile.constData();
+     while (i < stringEnd && currIndex < index) {
+         i += qstrlen(data + i) + 1;
+         currIndex++;

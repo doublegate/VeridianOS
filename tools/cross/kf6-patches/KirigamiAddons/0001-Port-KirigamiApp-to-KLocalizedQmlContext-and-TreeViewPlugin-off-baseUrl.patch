@@ -1,0 +1,104 @@
+VeridianOS: port KirigamiApp to KLocalizedQmlContext and TreeViewPlugin off baseUrl()
+
+GCC reported, for the VeridianOS cross build (KF 6.30, Qt 6.12):
+
+- src/app/kirigamiapp.cpp:33, :35: 'KLocalizedContext' is deprecated: Since
+  6.8. use KLocalizedQmlContext or KLocalization::setupLocalizedContext()
+  from KF6::I18nQml instead [-Wdeprecated-declarations].
+  KirigamiApp::start() now installs a KLocalizedQmlContext, set up exactly
+  as KLocalization::setupLocalizedContext() does (setContextObject() +
+  QQmlEngine::setContextForObject()), but without applying this library's
+  own TRANSLATION_DOMAIN ("kirigami_app6"), which the inline helper would
+  set and which must not become the application's QML domain; the old code
+  set no domain either. A context object the application installed itself
+  is kept as before: a KLocalizedQmlContext, or the deprecated
+  KLocalizedContext (matched with QObject::inherits() so the deprecated type
+  is not named). Previously an application-installed KLocalizedQmlContext
+  was replaced. KirigamiApp now links KF6::I18nQml (exported by the same
+  KF6I18n package it already finds). KLocalizedQmlContext also re-evaluates
+  the application's QML translations when the application language changes
+  at runtime, marks i18n bindings as translation bindings, and makes the
+  KI18n QML singleton available; KLocalizedContext did none of these.
+- src/treeview/treeviewplugin.h:24, :28: 'QQmlExtensionPlugin::baseUrl()' is
+  deprecated: Provide a qmldir file to remove the need for calling baseUrl
+  [-Wdeprecated-declarations]. The module has a generated qmldir with
+  "prefer :/qt/qml/org/kde/kirigamiaddons/treeview/", and
+  ecm_target_qml_sources() compiles TreeViewDecoration.qml and
+  styles/org.kde.desktop/TreeViewDecoration.qml into the plugin under that
+  resource prefix. resolveFilePath()/resolveFileUrl() now use that prefix
+  instead of the installed directory reported by baseUrl(). The style
+  selection logic is unchanged; the selected component is loaded from the
+  plugin's embedded copy (the copy the qmldir already tells the engine to
+  prefer, built from the same source file) rather than the loose installed
+  file. One case differs: when the module was resolved through its qrc
+  qmldir (the prefer path; the plugin already loaded, or linked
+  statically), baseUrl() was a qrc: URL whose toLocalFile() is empty, so
+  no style directory was ever found and the unstyled file was used; the
+  resource path finds the style in that case too. (0002 warns if the
+  prefix ever stops matching.)
+
+diff -ru a/src/app/CMakeLists.txt b/src/app/CMakeLists.txt
+--- a/src/app/CMakeLists.txt	2026-10-08 17:22:17.235547744 -0400
++++ b/src/app/CMakeLists.txt	2026-10-08 17:22:17.304750569 -0400
+@@ -14,6 +14,7 @@
+     Qt6::Qml
+     KF6::CoreAddons
+     KF6::I18n
++    KF6::I18nQml
+     KF6::ColorScheme
+ )
+ if(TARGET KF6::Crash)
+diff -ru a/src/app/kirigamiapp.cpp b/src/app/kirigamiapp.cpp
+--- a/src/app/kirigamiapp.cpp	2026-10-08 17:22:17.216141298 -0400
++++ b/src/app/kirigamiapp.cpp	2026-10-08 17:22:17.304685814 -0400
+@@ -9,7 +9,7 @@
+ #include <QQmlApplicationEngine>
+ #include <QQmlContext>
+ 
+-#include <KLocalizedContext>
++#include <KLocalizedQmlContext>
+ 
+ #include "kirigamiappdefaults.h"
+ 
+@@ -30,9 +30,16 @@
+ bool KirigamiApp::start(QAnyStringView uri, QAnyStringView typeName, QQmlApplicationEngine *engine)
+ {
+     Q_ASSERT(engine);
+-    if (!qobject_cast<KLocalizedContext *>(engine->rootContext()->contextObject())) {
+-        // Ensure the i18n() infrastructure is available
+-        engine->rootContext()->setContextObject(new KLocalizedContext(engine));
++    const QObject *contextObject = engine->rootContext()->contextObject();
++    // Keep a localized context the application installed itself (KLocalizedQmlContext,
++    // or the deprecated KLocalizedContext, checked by name to avoid the deprecated type).
++    if (!qobject_cast<const KLocalizedQmlContext *>(contextObject) && !(contextObject && contextObject->inherits("KLocalizedContext"))) {
++        // Ensure the i18n() infrastructure is available. Same as
++        // KLocalization::setupLocalizedContext(), but without applying this library's
++        // TRANSLATION_DOMAIN to the application's QML.
++        auto *localizedContext = new KLocalizedQmlContext(engine);
++        engine->rootContext()->setContextObject(localizedContext);
++        QQmlEngine::setContextForObject(localizedContext, engine->rootContext());
+     }
+     engine->loadFromModule(uri, typeName);
+     return !engine->rootObjects().isEmpty();
+diff -ru a/src/treeview/treeviewplugin.h b/src/treeview/treeviewplugin.h
+--- a/src/treeview/treeviewplugin.h	2026-10-08 17:22:17.266008796 -0400
++++ b/src/treeview/treeviewplugin.h	2026-10-08 17:22:17.304790797 -0400
+@@ -19,13 +19,16 @@
+ 
+ private:
+     QUrl componentUrl(const QString &fileName) const;
++    // The module's QML files are compiled into this plugin under the module's resource
++    // prefix; its qmldir already tells the engine to prefer that copy
++    // ("prefer :/qt/qml/org/kde/kirigamiaddons/treeview/").
+     QString resolveFilePath(const QString &path) const
+     {
+-        return baseUrl().toLocalFile() + QLatin1Char('/') + path;
++        return QStringLiteral(":/qt/qml/org/kde/kirigamiaddons/treeview") + QLatin1Char('/') + path;
+     }
+     QString resolveFileUrl(const QString &filePath) const
+     {
+-        return baseUrl().toString() + QLatin1Char('/') + filePath;
++        return QStringLiteral("qrc:/qt/qml/org/kde/kirigamiaddons/treeview") + QLatin1Char('/') + filePath;
+     }
+     QStringList m_stylesFallbackChain;
+ };

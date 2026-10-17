@@ -1,76 +1,137 @@
 #!/usr/bin/env bash
 # Build musl libc for VeridianOS cross-compilation
 #
-# This script downloads, patches, and cross-compiles musl libc 1.2.5
-# to produce a static libc.a and C headers in the sysroot.
+# This script downloads and cross-compiles musl libc 1.2.6 with the patches
+# in musl-patches/ (no syscall patch since ADR 0009: the kernel speaks the
+# Linux ABI): the C library, static and shared, its dynamic loader, and the
+# C headers, in the sysroot.
 #
 # Prerequisites:
 #   - GCC cross-compiler (x86_64-linux-musl or host gcc for static target)
-#   - wget/curl for downloading source
+#   - curl (or wget) for downloading source
 #
-# Output:
-#   $SYSROOT/usr/lib/libc.a
-#   $SYSROOT/usr/include/ (POSIX headers)
-#   $SYSROOT/bin/x86_64-veridian-musl-gcc (wrapper script)
+# Output (installed for /usr, staged into the sysroot):
+#   $SYSROOT/usr/lib/libc.a, libc.so and the crt objects
+#   $SYSROOT/lib/ld-musl-<arch>.so.1 (the dynamic loader: a link to
+#     /usr/lib/libc.so, which is both; ADR 0010)
+#   $SYSROOT/usr/include/ (C library and Linux UAPI headers)
+#   $SYSROOT/.musl-stamp (what this musl was built from)
+#
+# The host GCC builds musl itself for x86_64 (musl needs no C library to
+# build); build-musl-toolchain.sh then builds the cross compiler against it.
+#
+# For aarch64 and riscv64 (VERIDIAN_ARCH) there is no cross compiler yet the
+# first time: clang builds musl for the target without a compiler runtime
+# (none is installed for it; libc.so is left with those symbols unresolved),
+# which is enough to build the GCC cross toolchain against. Run again once
+# that toolchain exists, this script rebuilds musl with it, against its
+# libgcc (tools/cross/build-musl-arch.sh does both).
 
 set -euo pipefail
 
-MUSL_VERSION="1.2.5"
+MUSL_VERSION="1.2.6"
 MUSL_URL="https://musl.libc.org/releases/musl-${MUSL_VERSION}.tar.gz"
+MUSL_SHA256="d585fd3b613c66151fc3249e8ed44f77020cb5e6c1e635a616d3f9f82460512a"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
-BUILD_DIR="${PROJECT_ROOT}/target/cross-build/musl"
-SYSROOT="${VERIDIAN_SYSROOT:-${PROJECT_ROOT}/target/veridian-sysroot}"
+# shellcheck source=veridian-paths.sh
+source "${SCRIPT_DIR}/veridian-paths.sh"
+BUILD_DIR="${VERIDIAN_CROSS_BUILD}/musl"
+SYSROOT="${VERIDIAN_SYSROOT}"
 PATCH_DIR="${SCRIPT_DIR}/musl-patches"
 JOBS="${JOBS:-$(nproc)}"
 
-# Host GCC for cross-compilation. If a musl cross-compiler is available,
-# prefer it; otherwise fall back to the system gcc targeting x86_64.
-CROSS_CC="${CROSS_CC:-gcc}"
+# musl is freestanding code: the host GCC builds it for x86_64; elsewhere
+# the cross toolchain, or clang the first time (see above).
+MUSL_CONFIGURE_EXTRA=()
+if [[ -n "${CROSS_CC:-}" ]]; then
+    :
+elif [[ "${VERIDIAN_ARCH}" == x86_64 ]]; then
+    CROSS_CC=gcc
+elif [[ -x "${VERIDIAN_CC}" ]]; then
+    CROSS_CC="${VERIDIAN_CC}"
+    MUSL_CONFIGURE_EXTRA=(--target="${VERIDIAN_TARGET}" CROSS_COMPILE="${VERIDIAN_TARGET}-")
+else
+    # lld: the host's GNU ld links only the host's architecture.
+    CROSS_CC="clang --target=${VERIDIAN_ARCH}-linux-musl -fuse-ld=lld"
+    # -z undefs after configure's --no-undefined: libc.so keeps the
+    # compiler runtime's symbols (long double arithmetic) unresolved.
+    # shellcheck disable=SC2054 # the commas are in -Wl,-z,undefs
+    MUSL_CONFIGURE_EXTRA=(--target="${VERIDIAN_ARCH}-linux-musl" AR=llvm-ar RANLIB=llvm-ranlib LIBCC=
+                          LDFLAGS=-Wl,-z,undefs)
+fi
 
 log() { echo "[build-musl] $*"; }
 die() { echo "[build-musl] ERROR: $*" >&2; exit 1; }
 
 # ── Download ──────────────────────────────────────────────────────────
 download_musl() {
-    local tarball="${BUILD_DIR}/musl-${MUSL_VERSION}.tar.gz"
+    local tarball="${VERIDIAN_SOURCES}/musl-${MUSL_VERSION}.tar.gz"
     if [[ -f "${tarball}" ]]; then
         log "Source tarball already downloaded."
+        verify_musl "${tarball}"
         return 0
     fi
     mkdir -p "${BUILD_DIR}"
     log "Downloading musl ${MUSL_VERSION}..."
-    if command -v wget &>/dev/null; then
-        wget -q -O "${tarball}" "${MUSL_URL}"
-    elif command -v curl &>/dev/null; then
+    # curl first: wget may be a sandbox wrapper (firejail) that cannot
+    # write outside the home directory, e.g. to /opt/veridian/sources.
+    if command -v curl &>/dev/null; then
         curl -fsSL -o "${tarball}" "${MUSL_URL}"
+    elif command -v wget &>/dev/null; then
+        wget -q -O "${tarball}" "${MUSL_URL}"
     else
         die "Need wget or curl to download musl."
     fi
+    verify_musl "${tarball}"
+}
+
+# The tarball must be the release the patches were made for.
+verify_musl() {
+    local got
+    got="$(sha256sum "$1" | cut -d' ' -f1)"
+    [[ "${got}" == "${MUSL_SHA256}" ]] \
+        || die "musl tarball checksum mismatch (got ${got}); remove $1 and retry."
 }
 
 # ── Extract ───────────────────────────────────────────────────────────
+# Identity of the patch set: the .patch files plus this script. A tree
+# patched with anything else is re-extracted, so a changed patch can never
+# be silently skipped.
+patch_stamp() {
+    # nullglob: an empty patch set is valid (cat of a literal "*.patch"
+    # would fail, and with pipefail stop the build).
+    local patches
+    patches=$(shopt -s nullglob; echo "${PATCH_DIR}"/*.patch)
+    # shellcheck disable=SC2086 # word splitting of the list is intended
+    cat $patches "${BASH_SOURCE[0]}" | sha256sum | cut -d' ' -f1
+}
+
 extract_musl() {
     local src="${BUILD_DIR}/musl-${MUSL_VERSION}"
+    local marker="${src}/.veridian_patched"
     if [[ -d "${src}" ]]; then
-        log "Source already extracted."
-        return 0
+        if [[ -f "${marker}" && "$(cat "${marker}")" == "$(patch_stamp)" ]]; then
+            log "Source already extracted."
+            return 0
+        fi
+        log "Patch set changed (or tree not fully patched): re-extracting."
+        rm -rf "${src}" "${BUILD_DIR}/build"
     fi
     log "Extracting..."
-    tar -xzf "${BUILD_DIR}/musl-${MUSL_VERSION}.tar.gz" -C "${BUILD_DIR}"
+    mkdir -p "${BUILD_DIR}"
+    tar -xzf "${VERIDIAN_SOURCES}/musl-${MUSL_VERSION}.tar.gz" -C "${BUILD_DIR}"
 }
 
 # ── Patch ─────────────────────────────────────────────────────────────
-# Patch musl's x86_64 syscall_arch.h to remap Linux syscall numbers
-# to VeridianOS equivalents.
+# Apply musl-patches/*.patch (an empty set is valid).
 patch_musl() {
     local src="${BUILD_DIR}/musl-${MUSL_VERSION}"
     local marker="${src}/.veridian_patched"
-    if [[ -f "${marker}" ]]; then
+    if [[ -f "${marker}" && "$(cat "${marker}")" == "$(patch_stamp)" ]]; then
         log "Already patched."
         return 0
     fi
-    log "Applying VeridianOS syscall patches..."
+    log "Applying VeridianOS patches (if any)..."
     if [[ -d "${PATCH_DIR}" ]]; then
         for patch in "${PATCH_DIR}"/*.patch; do
             [[ -f "$patch" ]] || continue
@@ -79,173 +140,7 @@ patch_musl() {
         done
     fi
 
-    # Generate syscall number remapping header.
-    # musl uses Linux syscall numbers from arch/x86_64/bits/syscall.h.in.
-    # We create an overlay that redefines the critical ones to VeridianOS numbers.
-    cat > "${src}/arch/x86_64/bits/veridian_syscall_map.h" << 'HEADER'
-/* VeridianOS syscall number remapping for musl libc.
- *
- * musl's internal __syscall() calls use Linux x86_64 numbers.
- * This header is included from syscall_arch.h to remap them
- * to VeridianOS equivalents at compile time.
- *
- * Only the ~60 syscalls actually used by musl are remapped.
- * Unmapped syscalls will return -ENOSYS at runtime.
- */
-#ifndef _VERIDIAN_SYSCALL_MAP_H
-#define _VERIDIAN_SYSCALL_MAP_H
-
-/* Filesystem */
-#define __VER_SYS_read       52
-#define __VER_SYS_write      53
-#define __VER_SYS_open       50
-#define __VER_SYS_close      51
-#define __VER_SYS_stat       150
-#define __VER_SYS_fstat      55
-#define __VER_SYS_lstat      151
-#define __VER_SYS_lseek      54
-#define __VER_SYS_dup        57
-#define __VER_SYS_dup2       58
-#define __VER_SYS_dup3       66
-#define __VER_SYS_pipe2      65
-#define __VER_SYS_fcntl      158
-#define __VER_SYS_truncate   188
-#define __VER_SYS_ftruncate  56
-#define __VER_SYS_getcwd     110
-#define __VER_SYS_chdir      111
-#define __VER_SYS_mkdir      60
-#define __VER_SYS_rmdir      61
-#define __VER_SYS_unlink     157
-#define __VER_SYS_rename     154
-#define __VER_SYS_link       155
-#define __VER_SYS_symlink    156
-#define __VER_SYS_readlink   152
-#define __VER_SYS_chmod      185
-#define __VER_SYS_fchmod     186
-#define __VER_SYS_chown      197
-#define __VER_SYS_fchown     198
-#define __VER_SYS_umask      187
-#define __VER_SYS_access     153
-#define __VER_SYS_openat     190
-#define __VER_SYS_mkdirat    193
-#define __VER_SYS_unlinkat   192
-#define __VER_SYS_renameat   194
-#define __VER_SYS_fstatat    191
-#define __VER_SYS_readv      183
-#define __VER_SYS_writev     184
-#define __VER_SYS_pread64    195
-#define __VER_SYS_pwrite64   196
-#define __VER_SYS_fsync      73
-#define __VER_SYS_ioctl      112
-
-/* Memory */
-#define __VER_SYS_mmap       20
-#define __VER_SYS_munmap     21
-#define __VER_SYS_mprotect   22
-#define __VER_SYS_brk        23
-
-/* Process */
-#define __VER_SYS_exit       11
-#define __VER_SYS_exit_group 11
-#define __VER_SYS_fork       12
-#define __VER_SYS_execve     13
-#define __VER_SYS_wait4      14
-#define __VER_SYS_getpid     15
-#define __VER_SYS_getppid    16
-#define __VER_SYS_kill       113
-#define __VER_SYS_getuid     170
-#define __VER_SYS_geteuid    171
-#define __VER_SYS_getgid     172
-#define __VER_SYS_getegid    173
-#define __VER_SYS_setuid     174
-#define __VER_SYS_setgid     175
-#define __VER_SYS_setpgid    176
-#define __VER_SYS_getpgid    177
-#define __VER_SYS_getpgrp    178
-#define __VER_SYS_setsid     179
-#define __VER_SYS_getsid     180
-#define __VER_SYS_uname      204
-
-/* Signals */
-#define __VER_SYS_rt_sigaction   120
-#define __VER_SYS_rt_sigprocmask 121
-#define __VER_SYS_rt_sigsuspend  122
-#define __VER_SYS_rt_sigreturn   123
-
-/* Threading */
-#define __VER_SYS_clone      310
-#define __VER_SYS_futex      311
-#define __VER_SYS_gettid     43
-
-/* Time */
-#define __VER_SYS_clock_gettime  160
-#define __VER_SYS_clock_getres   161
-#define __VER_SYS_nanosleep      162
-#define __VER_SYS_gettimeofday   163
-
-/* Socket */
-#define __VER_SYS_socket     220
-#define __VER_SYS_bind       221
-#define __VER_SYS_listen     222
-#define __VER_SYS_connect    223
-#define __VER_SYS_accept     224
-#define __VER_SYS_accept4    224
-#define __VER_SYS_sendto     250
-#define __VER_SYS_recvfrom   251
-#define __VER_SYS_sendmsg    338
-#define __VER_SYS_recvmsg    339
-#define __VER_SYS_socketpair 228
-#define __VER_SYS_setsockopt 254
-#define __VER_SYS_getsockopt 255
-#define __VER_SYS_getsockname 252
-#define __VER_SYS_getpeername 253
-
-/* I/O multiplexing */
-#define __VER_SYS_poll       300
-#define __VER_SYS_select     200
-#define __VER_SYS_epoll_create1 262
-#define __VER_SYS_epoll_ctl  263
-#define __VER_SYS_epoll_wait 264
-
-/* Event notification */
-#define __VER_SYS_eventfd2   331
-#define __VER_SYS_timerfd_create  334
-#define __VER_SYS_timerfd_settime 335
-#define __VER_SYS_timerfd_gettime 336
-#define __VER_SYS_signalfd4  337
-#define __VER_SYS_getrandom  330
-
-/* PTY */
-#define __VER_SYS_ioctl      112
-
-/* Shared memory */
-#define __VER_SYS_shmget     210
-#define __VER_SYS_shmat      210
-
-/* Misc */
-#define __VER_SYS_arch_prctl     203
-#define __VER_SYS_getrlimit      260
-#define __VER_SYS_setrlimit      261
-#define __VER_SYS_mknod          199
-#define __VER_SYS_ptrace         140
-#define __VER_SYS_set_tid_address 352
-#define __VER_SYS_set_robust_list 353
-#define __VER_SYS_madvise        345
-#define __VER_SYS_getdents64     340
-#define __VER_SYS_prlimit64      341
-#define __VER_SYS_inotify_init1  342
-#define __VER_SYS_memfd_create   351
-#define __VER_SYS_fchmodat       346
-#define __VER_SYS_fchownat       347
-#define __VER_SYS_linkat         348
-#define __VER_SYS_symlinkat      349
-#define __VER_SYS_readlinkat     350
-#define __VER_SYS_shutdown       227
-
-#endif /* _VERIDIAN_SYSCALL_MAP_H */
-HEADER
-
-    touch "${marker}"
+    patch_stamp > "${marker}"
     log "Patches applied."
 }
 
@@ -253,21 +148,31 @@ HEADER
 configure_musl() {
     local src="${BUILD_DIR}/musl-${MUSL_VERSION}"
     local build="${BUILD_DIR}/build"
-    if [[ -f "${build}/config.mak" ]]; then
+    # Configured with this compiler (a change, such as clang to the cross
+    # GCC, rebuilds it from scratch).
+    if [[ -f "${build}/config.mak" && "$(cat "${build}/.veridian-cc" 2>/dev/null)" == "${CROSS_CC}" ]]; then
         log "Already configured."
         return 0
     fi
+    rm -rf "${build}"
     mkdir -p "${build}"
     log "Configuring musl for VeridianOS..."
+    # For /usr on the target, staged into the sysroot by install_musl, with
+    # the dynamic loader in /lib (where every dynamically linked program
+    # asks for it). No musl-gcc wrapper: the cross toolchain is built
+    # against this sysroot.
     (cd "${build}" && \
         "${src}/configure" \
-            --prefix="${SYSROOT}/usr" \
-            --syslibdir="${SYSROOT}/usr/lib" \
-            --disable-shared \
+            --prefix=/usr \
+            --syslibdir=/lib \
+            --enable-shared \
             --enable-static \
+            --disable-wrapper \
+            "${MUSL_CONFIGURE_EXTRA[@]}" \
             CC="${CROSS_CC}" \
-            CFLAGS="-O2 -fPIC -DVERIDIAN_OS=1" \
+            CFLAGS="-O2 -fPIC" \
     )
+    echo "${CROSS_CC}" > "${build}/.veridian-cc"
 }
 
 # ── Build ─────────────────────────────────────────────────────────────
@@ -282,10 +187,13 @@ install_musl() {
     local build="${BUILD_DIR}/build"
     log "Installing to ${SYSROOT}..."
     mkdir -p "${SYSROOT}/usr"
-    make -C "${build}" install
-
-    # Create the musl-gcc wrapper script
-    create_wrapper
+    make -C "${build}" install DESTDIR="${SYSROOT}"
+    # What this musl is, next to it (the build tree is disposable): the
+    # cross toolchain rebuilds when it changes.
+    patch_stamp > "${SYSROOT}/.musl-stamp"
+    # Which compiler built it (not part of the stamp: rebuilding musl with
+    # the cross GCC must not rebuild that GCC).
+    echo "${CROSS_CC}" > "${SYSROOT}/.musl-compiler"
 }
 
 # ── Linux UAPI headers ────────────────────────────────────────────────
@@ -295,147 +203,32 @@ install_musl() {
 # x86_64 ABI, so the host's x86_64 linux-api-headers are the right set.
 # Override with LINUX_HEADERS_DIR to use a pinned headers_install tree.
 install_linux_headers() {
+    # The host's headers are x86_64's: right only for that architecture.
+    if [[ "${VERIDIAN_ARCH}" != x86_64 && -z "${LINUX_HEADERS_DIR:-}" ]]; then
+        log "No Linux UAPI headers for ${VERIDIAN_ARCH} (set LINUX_HEADERS_DIR to a headers_install tree for it)."
+        return 0
+    fi
     local src="${LINUX_HEADERS_DIR:-/usr/include}"
     local dst="${SYSROOT}/usr/include"
     [[ -f "${src}/linux/limits.h" ]] || die "Linux UAPI headers not found in ${src} (install linux-api-headers or set LINUX_HEADERS_DIR)"
     log "Installing Linux UAPI headers from ${src}..."
-    local dir
+    local dir from
     for dir in linux asm asm-generic drm mtd rdma scsi sound video misc xen; do
-        if [[ -d "${src}/${dir}" ]]; then
+        from="${src}/${dir}"
+        # Debian and Ubuntu keep the architecture's asm/ in the multiarch
+        # directory (linux-libc-dev): /usr/include/x86_64-linux-gnu/asm.
+        if [[ "${dir}" == asm && ! -d "${from}" ]]; then
+            from="${src}/x86_64-linux-gnu/asm"
+        fi
+        if [[ -d "${from}" ]]; then
             mkdir -p "${dst}/${dir}"
-            cp -a "${src}/${dir}/." "${dst}/${dir}/"
+            cp -a "${from}/." "${dst}/${dir}/"
         fi
     done
-}
-
-# ── Wrapper Scripts ───────────────────────────────────────────────────
-create_wrapper() {
-    local gcc_wrapper="${SYSROOT}/bin/x86_64-veridian-musl-gcc"
-    local gxx_wrapper="${SYSROOT}/bin/x86_64-veridian-musl-g++"
-    local compat_dir="${SCRIPT_DIR}/musl-compat"
-    mkdir -p "${SYSROOT}/bin"
-
-    # Detect GCC version and internal include path
-    local gcc_ver
-    gcc_ver=$(${CROSS_CC} -dumpversion 2>/dev/null || echo "15.2.1")
-    local gcc_dir="/usr/lib/gcc/x86_64-pc-linux-gnu/${gcc_ver}"
-    if [[ ! -d "${gcc_dir}" ]]; then
-        # Try common alternative paths
-        gcc_dir=$(${CROSS_CC} -print-search-dirs 2>/dev/null | grep install | awk '{print $2}' || echo "/usr/lib/gcc/x86_64-pc-linux-gnu/${gcc_ver}")
-    fi
-
-    # ── C wrapper ────────────────────────────────────────────────
-    cat > "${gcc_wrapper}" << 'WRAPPER'
-#!/usr/bin/env bash
-# musl-gcc wrapper for VeridianOS cross-compilation
-SYSROOT="$(cd "$(dirname "$0")/.." && pwd)"
-GCC_DIR="PLACEHOLDER_GCC_DIR"
-
-COMPILE_ONLY=0
-SHARED=0
-for arg in "$@"; do
-    case "$arg" in
-        -c|-S|-E) COMPILE_ONLY=1 ;;
-        -shared) SHARED=1 ;;
-    esac
-done
-
-if [[ $COMPILE_ONLY -eq 1 ]]; then
-    exec gcc --sysroot="${SYSROOT}" -nostdinc \
-        -isystem "${GCC_DIR}/include" \
-        -isystem "${SYSROOT}/usr/include" \
-        -static "$@"
-elif [[ $SHARED -eq 1 ]]; then
-    exec gcc --sysroot="${SYSROOT}" -nostdinc \
-        -isystem "${GCC_DIR}/include" \
-        -isystem "${SYSROOT}/usr/include" \
-        -L"${SYSROOT}/usr/lib" -nostdlib "$@" -lc
-else
-    exec gcc --sysroot="${SYSROOT}" -nostdinc \
-        -isystem "${GCC_DIR}/include" \
-        -isystem "${SYSROOT}/usr/include" \
-        -L"${SYSROOT}/usr/lib" -static -nostdlib \
-        "${SYSROOT}/usr/lib/crt1.o" "${SYSROOT}/usr/lib/crti.o" \
-        "$@" -lc "${SYSROOT}/usr/lib/crtn.o"
-fi
-WRAPPER
-    sed -i "s|PLACEHOLDER_GCC_DIR|${gcc_dir}|" "${gcc_wrapper}"
-    chmod +x "${gcc_wrapper}"
-
-    # ── C++ wrapper ──────────────────────────────────────────────
-    cat > "${gxx_wrapper}" << 'WRAPPER'
-#!/usr/bin/env bash
-# musl-g++ wrapper for VeridianOS cross-compilation
-# Uses system GCC's libstdc++ with musl libc + glibc shim for missing symbols
-GCC_DIR="PLACEHOLDER_GCC_DIR"
-GCC_VER="PLACEHOLDER_GCC_VER"
-SYSROOT="$(cd "$(dirname "$0")/.." && pwd)"
-
-COMPILE_ONLY=0
-SHARED=0
-for arg in "$@"; do
-    case "$arg" in
-        -c|-S|-E) COMPILE_ONLY=1 ;;
-        -shared) SHARED=1 ;;
-    esac
-done
-
-COMMON_FLAGS=(
-    -nostdinc
-    -include "${SYSROOT}/usr/include/compat/glibc_compat.h"
-    -isystem /usr/include/c++/${GCC_VER}
-    -isystem /usr/include/c++/${GCC_VER}/x86_64-pc-linux-gnu
-    -isystem ${GCC_DIR}/include
-    -isystem ${GCC_DIR}/include-fixed
-    -isystem "${SYSROOT}/usr/include"
-)
-
-if [[ $COMPILE_ONLY -eq 1 ]]; then
-    exec g++ "${COMMON_FLAGS[@]}" "$@"
-elif [[ $SHARED -eq 1 ]]; then
-    exec g++ "${COMMON_FLAGS[@]}" -nostdlib \
-        -L"${SYSROOT}/usr/lib" -L/usr/lib "$@" \
-        -lstdc++ -lglibc_shim -lc -lpthread -lgcc -lgcc_eh \
-        -lpthread -lc -lglibc_shim
-else
-    exec g++ "${COMMON_FLAGS[@]}" -static -nostdlib \
-        "${SYSROOT}/usr/lib/crt1.o" "${SYSROOT}/usr/lib/crti.o" \
-        -L"${SYSROOT}/usr/lib" -L/usr/lib "$@" \
-        -lstdc++ -lglibc_shim -lc -lpthread -lgcc -lgcc_eh \
-        -lpthread -lc -lglibc_shim "${SYSROOT}/usr/lib/crtn.o"
-fi
-WRAPPER
-    sed -i "s|PLACEHOLDER_GCC_DIR|${gcc_dir}|" "${gxx_wrapper}"
-    sed -i "s|PLACEHOLDER_GCC_VER|${gcc_ver}|" "${gxx_wrapper}"
-    chmod +x "${gxx_wrapper}"
-
-    # ── Install glibc compat files ───────────────────────────────
-    if [[ -d "${compat_dir}" ]]; then
-        mkdir -p "${SYSROOT}/usr/include/compat"
-        cp "${compat_dir}/glibc_compat.h" "${SYSROOT}/usr/include/compat/"
-        cp "${compat_dir}/glibc_shim.c" "${SYSROOT}/usr/lib/"
-
-        # Compile the glibc shim
-        "${gcc_wrapper}" -c -O2 -fPIC \
-            -o "${SYSROOT}/usr/lib/glibc_shim.o" \
-            "${SYSROOT}/usr/lib/glibc_shim.c"
-        ar rcs "${SYSROOT}/usr/lib/libglibc_shim.a" \
-            "${SYSROOT}/usr/lib/glibc_shim.o"
-        log "Installed glibc compat shim."
-    fi
-
-    # Also create convenience symlinks for common tools
-    for tool in ar ranlib strip objdump; do
-        if command -v "x86_64-linux-musl-${tool}" &>/dev/null; then
-            ln -sf "$(command -v "x86_64-linux-musl-${tool}")" \
-                "${SYSROOT}/bin/x86_64-veridian-${tool}"
-        elif command -v "${tool}" &>/dev/null; then
-            ln -sf "$(command -v "${tool}")" \
-                "${SYSROOT}/bin/x86_64-veridian-${tool}"
-        fi
-    done
-
-    log "Wrapper scripts: ${gcc_wrapper}, ${gxx_wrapper}"
+    # linux/types.h includes <asm/types.h>; without asm/ every user of the
+    # UAPI headers fails to compile (it went unnoticed on hosts that keep
+    # asm/ in /usr/include).
+    [[ -f "${dst}/asm/types.h" ]] || die "asm/types.h not found under ${src} or ${src}/x86_64-linux-gnu"
 }
 
 # ── Verify ────────────────────────────────────────────────────────────
@@ -444,19 +237,32 @@ verify_install() {
     local errors=0
     for f in \
         "${SYSROOT}/usr/lib/libc.a" \
+        "${SYSROOT}/usr/lib/libc.so" \
         "${SYSROOT}/usr/include/stdio.h" \
         "${SYSROOT}/usr/include/stdlib.h" \
         "${SYSROOT}/usr/include/unistd.h" \
         "${SYSROOT}/usr/include/pthread.h" \
         "${SYSROOT}/usr/include/sys/socket.h" \
         "${SYSROOT}/usr/include/sys/epoll.h" \
-        "${SYSROOT}/bin/x86_64-veridian-musl-gcc" \
+        "${SYSROOT}/usr/lib/crt1.o" \
     ; do
         if [[ ! -f "$f" ]]; then
             log "  MISSING: $f"
             errors=$((errors + 1))
         fi
     done
+
+    if [[ ( "${VERIDIAN_ARCH}" == x86_64 || -n "${LINUX_HEADERS_DIR:-}" ) &&
+          ! -f "${SYSROOT}/usr/include/linux/limits.h" ]]; then
+        log "  MISSING: ${SYSROOT}/usr/include/linux/limits.h"
+        errors=$((errors + 1))
+    fi
+
+    # The loader is a link to libc.so, absolute as on the target.
+    if [[ "$(readlink "${SYSROOT}${VERIDIAN_LDSO}")" != "/usr/lib/libc.so" ]]; then
+        log "  MISSING: ${SYSROOT}${VERIDIAN_LDSO} -> /usr/lib/libc.so"
+        errors=$((errors + 1))
+    fi
 
     if [[ $errors -eq 0 ]]; then
         log "All files present. musl libc ready."

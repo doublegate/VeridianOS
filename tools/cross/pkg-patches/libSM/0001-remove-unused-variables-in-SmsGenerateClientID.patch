@@ -1,0 +1,23 @@
+VeridianOS: remove unused variables in SmsGenerateClientID()
+
+GCC reported -Wunused-variable for 'inet_addr', 'ptr1' and 'decimal'
+(src/sm_genid.c:148-150) in the TCPCONN branch of SmsGenerateClientID().
+They are left over from an older address-formatting implementation and
+are used under no configuration (the IPv4/IPv6 and gethostbyname paths
+all format the address through addr_ptr). Removed; no behaviour change.
+('inet_addr' also shadowed the libc function of that name.)
+
+
+diff -ru a/src/sm_genid.c b/src/sm_genid.c
+--- a/src/sm_genid.c	2026-10-08 17:17:50.803483333 -0400
++++ b/src/sm_genid.c	2026-10-08 17:17:50.857730663 -0400
+@@ -145,9 +145,6 @@
+     char temp[256];
+     char *id;
+     static int sequence = 0;
+-    char* inet_addr;
+-    char *ptr1;
+-    unsigned char decimal[4];
+     int i;
+     struct in_addr *haddr = NULL;
+ # ifdef HAVE_GETADDRINFO

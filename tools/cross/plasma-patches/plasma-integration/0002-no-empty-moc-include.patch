@@ -1,0 +1,17 @@
+VeridianOS: no moc includes where there is nothing to moc
+
+kdeplatformtheme.cpp includes its ".moc" file,
+but contains no Q_OBJECT, Q_GADGET, Q_NAMESPACE or K_PLUGIN_* (its
+QObject classes are declared in headers, which AutoMoc handles on its
+own), so AutoMoc generated nothing for it and warned
+("includes the moc file ..., but does not contain a Q_OBJECT ...").
+The include is removed.
+
+--- a/qt6/src/platformtheme/kdeplatformtheme.cpp
++++ b/qt6/src/platformtheme/kdeplatformtheme.cpp
+@@ -421,5 +421,3 @@
+ 
+     return false;
+ }
+-
+-#include "kdeplatformtheme.moc"

@@ -1,0 +1,41 @@
+VeridianOS: KeyboardBrightnessControl's isSilent property can be read
+
+isSilent was declared with a WRITE accessor only, which moc reports
+("Property declaration isSilent has neither an associated QProperty<>
+member, nor a READ accessor function nor an associated MEMBER variable.
+The property will be invalid."): the property was invalid, so QML could
+not read it back. It gets a READ accessor, isSilent(), as the battery
+monitor's InhibitionControl has for its own isSilent property.
+
+--- a/applets/brightness/plugin/keyboardbrightnesscontrol.h
++++ b/applets/brightness/plugin/keyboardbrightnesscontrol.h
+@@ -21,13 +21,14 @@
+     Q_PROPERTY(int brightness READ default WRITE setBrightness NOTIFY brightnessChanged BINDABLE bindableBrightness)
+     Q_PROPERTY(int brightnessMax READ default NOTIFY brightnessMaxChanged BINDABLE bindableBrightnessMax)
+     Q_PROPERTY(bool isBrightnessAvailable READ default NOTIFY isBrightnessAvailableChanged BINDABLE bindableIsBrightnessAvailable)
+-    Q_PROPERTY(bool isSilent WRITE setIsSilent)
++    Q_PROPERTY(bool isSilent READ isSilent WRITE setIsSilent)
+ 
+ public:
+     explicit KeyboardBrightnessControl(QObject *parent = nullptr);
+     ~KeyboardBrightnessControl() override;
+ 
+     void setBrightness(int value);
++    bool isSilent() const;
+     void setIsSilent(bool silent);
+ 
+     QBindable<bool> bindableIsBrightnessAvailable();
+--- a/applets/brightness/plugin/keyboardbrightnesscontrol.cpp
++++ b/applets/brightness/plugin/keyboardbrightnesscontrol.cpp
+@@ -72,6 +72,11 @@
+     return &m_maxBrightness;
+ }
+ 
++bool KeyboardBrightnessControl::isSilent() const
++{
++    return m_isSilent;
++}
++
+ void KeyboardBrightnessControl::setIsSilent(bool silent)
+ {
+     m_isSilent = silent;

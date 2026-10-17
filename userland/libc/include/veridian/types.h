@@ -22,14 +22,19 @@ extern "C" {
 /* Process and User Identity Types                                           */
 /* ========================================================================= */
 
-/** Process identifier (matches kernel ProcessId = u64) */
-typedef int64_t     pid_t;
+/** Process identifier: an int, as in the Linux ABI the kernel speaks
+ *  (siginfo_t, struct ucred and struct flock carry 32-bit pids). It was
+ *  64 bits, which shifted every field after a pid in those structures. */
+typedef int32_t     pid_t;
 
 /** User identifier */
 typedef uint32_t    uid_t;
 
 /** Group identifier */
 typedef uint32_t    gid_t;
+
+/** A pid, uid or gid, as waitid(2) takes */
+typedef uint32_t    id_t;
 
 /* ========================================================================= */
 /* Filesystem Types                                                          */

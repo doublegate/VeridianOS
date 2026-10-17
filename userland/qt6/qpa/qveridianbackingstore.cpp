@@ -13,8 +13,11 @@
 #include "qveridianwindow.h"
 #include "qveridianintegration.h"
 
+#include <QtGui/QPainter>
+
 #include <wayland-client.h>
 
+#include <fcntl.h>
 #include <sys/mman.h>
 #include <unistd.h>
 #include <string.h>
@@ -137,12 +140,12 @@ QPaintDevice *QVeridianBackingStore::paintDevice()
 
 void QVeridianBackingStore::beginPaint(const QRegion &region)
 {
-    Q_UNUSED(region);
-
-    /* Clear the dirty region to transparent */
+    /* Clear the dirty region (not the whole image) to transparent. */
     if (!m_image.isNull()) {
+        QPainter p(&m_image);
+        p.setCompositionMode(QPainter::CompositionMode_Source);
         for (const QRect &r : region)
-            m_image.fill(Qt::transparent);
+            p.fillRect(r, Qt::transparent);
     }
 }
 

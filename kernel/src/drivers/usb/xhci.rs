@@ -1379,17 +1379,23 @@ impl XhciController {
         // SAFETY: Caller guarantees mmio_base is a valid, mapped xHCI MMIO region.
         // All reads are within the capability register space at known offsets.
         let cap_length = unsafe { core::ptr::read_volatile(mmio_base as *const u8) };
+        // SAFETY: as above -- a capability register at a fixed offset inside
+        // the caller-guaranteed xHCI MMIO region.
         let hci_version = unsafe {
             core::ptr::read_volatile((mmio_base + cap_regs::HCIVERSION as u64) as *const u16)
         };
+        // SAFETY: as above -- capability register inside the MMIO region.
         let hcsparams1 = unsafe {
             core::ptr::read_volatile((mmio_base + cap_regs::HCSPARAMS1 as u64) as *const u32)
         };
+        // SAFETY: as above -- capability register inside the MMIO region.
         let hccparams1 = unsafe {
             core::ptr::read_volatile((mmio_base + cap_regs::HCCPARAMS1 as u64) as *const u32)
         };
+        // SAFETY: as above -- capability register inside the MMIO region.
         let dboff =
             unsafe { core::ptr::read_volatile((mmio_base + cap_regs::DBOFF as u64) as *const u32) };
+        // SAFETY: as above -- capability register inside the MMIO region.
         let rtsoff = unsafe {
             core::ptr::read_volatile((mmio_base + cap_regs::RTSOFF as u64) as *const u32)
         };

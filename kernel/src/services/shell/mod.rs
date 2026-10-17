@@ -262,11 +262,13 @@ impl Shell {
                 core::arch::asm!("hlt")
             }
 
+            // SAFETY: WFI only idles the core until the next interrupt.
             #[cfg(target_arch = "aarch64")]
             unsafe {
                 core::arch::asm!("wfi")
             }
 
+            // SAFETY: WFI only idles the hart until the next interrupt.
             #[cfg(target_arch = "riscv64")]
             unsafe {
                 core::arch::asm!("wfi")
@@ -928,13 +930,19 @@ impl Shell {
     }
 
     fn execute_external_command(&self, command: &str, args: &[String]) -> CommandResult {
+        // argv[0] is the command as typed, followed by its arguments (the
+        // loader takes the whole vector; passing `args` alone made the
+        // first argument argv[0]).
+        let argv: Vec<&str> = core::iter::once(command)
+            .chain(args.iter().map(|s| s.as_str()))
+            .collect();
         // If command is an absolute or relative path, try it directly first
         if command.starts_with('/') || command.starts_with("./") || command.starts_with("../") {
             if let Ok(_node) = crate::fs::get_vfs().resolve_path(command) {
                 crate::println!("[SHELL] Found executable: {}", command);
                 match crate::userspace::load_user_program(
                     command,
-                    &args.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+                    &argv,
                     &self
                         .get_all_env()
                         .iter()
@@ -975,7 +983,7 @@ impl Shell {
                 // Load and execute the program
                 match crate::userspace::load_user_program(
                     &full_path,
-                    &args.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+                    &argv,
                     &self
                         .get_all_env()
                         .iter()
@@ -1198,6 +1206,39 @@ impl Shell {
         crate::drivers::input::read_char()
     }
 
+    /// Read a password after printing `prompt`, without echoing it: Enter
+    /// ends it, Backspace removes a character, Ctrl-C or Ctrl-D cancels
+    /// (`None`). At most `crate::security::crypt::MAX_KEY` bytes are kept;
+    /// the buffer is wiped once copied out.
+    pub(crate) fn read_secret(prompt: &str) -> Option<String> {
+        crate::print!("{}", prompt);
+        crate::graphics::fbcon::flush();
+        let mut buf: Vec<u8> = Vec::new();
+        let result = loop {
+            let Some(byte) = Self::read_char() else {
+                core::hint::spin_loop();
+                continue;
+            };
+            match byte {
+                b'\r' | b'\n' => break String::from_utf8(buf.clone()).ok(),
+                0x03 | 0x04 => break None,
+                0x08 | 0x7f => {
+                    buf.pop();
+                }
+                b if b >= 0x20 && buf.len() < crate::security::crypt::MAX_KEY => buf.push(b),
+                _ => {}
+            }
+        };
+        for byte in buf.iter_mut() {
+            // SAFETY: `byte` is a valid, aligned reference into `buf`;
+            // volatile so the wipe is not dropped as a dead store.
+            unsafe { core::ptr::write_volatile(byte, 0) };
+        }
+        crate::print!("\n");
+        crate::graphics::fbcon::flush();
+        result
+    }
+
     /// Handle a signal delivered to the shell or its foreground job.
     ///
     /// Dispatches to the appropriate handler based on the signal number.
@@ -1300,156 +1341,13 @@ impl Shell {
 ///
 /// Returns the process's exit code.
 fn run_user_process_from_shell(pid: crate::process::ProcessId) -> i32 {
-    use crate::process::get_process;
-
     crate::println!("[SHELL] run_user_process_from_shell: pid={}", pid.0);
 
-    let process = match get_process(pid) {
-        Some(p) => p,
-        None => {
-            crate::println!("[SHELL] Error: Process {} not found", pid.0);
-            return 1;
-        }
-    };
-
-    // Architecture-specific user-mode entry
-    #[cfg(target_arch = "x86_64")]
-    {
-        // Get the process's page table root (physical address for CR3)
-        let vas = process.memory_space.lock();
-        let pt_root = vas.get_page_table();
-        if pt_root == 0 {
-            drop(vas);
-            crate::println!("[SHELL] Error: Process {} has no page table", pid.0);
-            return 1;
-        }
-
-        // Get entry point, user stack, and thread ID from the process's first thread
-        let threads = process.threads.lock();
-        let thread = match threads.values().next() {
-            Some(t) => t,
-            None => {
-                drop(threads);
-                drop(vas);
-                crate::println!("[SHELL] Error: Process {} has no threads", pid.0);
-                return 1;
-            }
-        };
-
-        let tid = thread.tid;
-
-        let (entry_point, user_stack_ptr) = {
-            use crate::arch::context::ThreadContext;
-            let ctx = thread.context.lock();
-            (
-                ctx.get_instruction_pointer() as u64,
-                ctx.get_stack_pointer() as u64,
-            )
-        };
-
-        // Drop locks before entering user mode
-        drop(threads);
-        drop(vas);
-
-        crate::println!(
-            "[SHELL] Entering Ring 3: entry={:#x} stack={:#x}",
-            entry_point,
-            user_stack_ptr
-        );
-
-        // Register as the current process so that current_process() /
-        // current_thread() return the correct values during syscalls
-        // (required for arch_prctl, brk, mmap, etc.).
-        crate::process::set_boot_current(pid, tid);
-
-        // User CS and SS selectors (Ring 3)
-        let user_cs: u64 = 0x33; // GDT index 6, RPL 3
-        let user_ss: u64 = 0x2B; // GDT index 5, RPL 3
-
-        // Enter Ring 3 via iretq with returnable context.
-        // When the user process calls sys_exit, this call returns normally
-        // with the exit code.
-        //
-        // SAFETY: All preconditions for enter_usermode_returnable are met:
-        // - entry_point is in the process's user-space page tables
-        // - user_stack_ptr points to the top of the user stack
-        // - CS/SS are valid Ring 3 selectors from the GDT
-        // - pt_root is a valid L4 page table with kernel mappings preserved
-        // - kernel_rsp_ptr points to the per-CPU kernel_rsp field
-        let kernel_rsp_ptr = crate::arch::x86_64::syscall::per_cpu_data_ptr() as u64;
-        unsafe {
-            crate::arch::x86_64::usermode::enter_usermode_returnable(
-                entry_point,
-                user_stack_ptr,
-                user_cs,
-                user_ss,
-                pt_root,
-                kernel_rsp_ptr,
-            );
-        }
-
-        // Clear boot current tracking after user process exits
-        crate::process::clear_boot_current();
-
-        crate::println!("[SHELL] Returned from Ring 3");
-
-        // Free the process's page table hierarchy frames. Deferred from
-        // cleanup_process() because the process's CR3 was still active
-        // at that point. Now that boot CR3 is restored, it is safe.
-        let current_pt_root = if let Some(proc) = get_process(pid) {
-            proc.memory_space.lock().get_page_table()
-        } else {
-            0
-        };
-
-        // Free post-exec page table if exec changed it
-        if current_pt_root != 0 && current_pt_root != pt_root {
-            crate::mm::vas::free_user_page_table_frames(current_pt_root);
-        }
-        // Free the original page table
-        if pt_root != 0 {
-            crate::mm::vas::free_user_page_table_frames(pt_root);
-        }
-        // Clear so no double-free
-        if let Some(proc) = get_process(pid) {
-            proc.memory_space.lock().set_page_table(0);
-        }
-
-        // Get exit code and reap zombie
-        let exit_code = match get_process(pid) {
-            Some(p) => p.get_exit_code(),
-            None => 0,
-        };
-        if let Some(proc) = get_process(pid) {
-            let state = proc.get_state();
-            if state == crate::process::ProcessState::Zombie
-                || state == crate::process::ProcessState::Dead
-            {
-                crate::process::table::remove_process(pid);
-            }
-        }
-
-        exit_code
-    }
-
-    #[cfg(not(target_arch = "x86_64"))]
-    {
-        // For AArch64 and RISC-V, user-mode entry is not yet implemented in the shell.
-        // Fall back to yielding and waiting (this will still freeze, but at least
-        // it compiles and shows what needs to be done).
-        crate::println!(
-            "[SHELL] Warning: Direct user-mode entry not implemented on this architecture"
-        );
-        crate::println!("[SHELL] Attempting scheduler-based wait (may freeze)...");
-
-        crate::sched::yield_cpu();
-
-        match crate::process::wait_for_child(Some(pid)) {
-            Ok((_child_pid, exit_code)) => exit_code,
-            Err(e) => {
-                crate::println!("[SHELL] Error waiting for process: {:?}", e);
-                1
-            }
-        }
-    }
+    // The program runs as dispatcher tasks of its own and the shell (the
+    // boot task) waits for it (ADR 0006 stage D2), on every architecture
+    // (EL0 and U-mode since sprint E).
+    crate::process::run_and_wait(pid).unwrap_or_else(|| {
+        crate::println!("[SHELL] Error: could not start process {}", pid.0);
+        1
+    })
 }

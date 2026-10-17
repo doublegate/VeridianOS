@@ -1,0 +1,704 @@
+VeridianOS: no partial designated initializers
+
+GCC warns in C++ for every member a designated initializer leaves out
+(-Wmissing-field-initializers; in C it does not), 209 times across these
+files: output states and information, DRM, Vulkan and sync_file ioctl
+structs, render nodes, transaction entries. Each such object is now
+value-initialized with empty braces -- which gives every member its
+default member initializer or zero, exactly what the omitted designators
+gave -- and the named members are assigned after it, in the same order.
+RenderContext has const members, which cannot be assigned, so its
+initializer names its remaining members instead. sync_merge_data's name is
+a char array, copied with strncpy into the zeroed struct (NUL-terminated,
+as before).
+
+ColorSurfaceFeedback's listener names the protocol's version 2 event,
+preferred_changed2, as null: the color manager is bound at version 1, so
+the event is never sent (and a listener member left out is null too).
+
+diff -ru a/src/backends/drm/drm_connector.cpp b/src/backends/drm/drm_connector.cpp
+--- a/src/backends/drm/drm_connector.cpp	2026-10-08 16:45:25.176126361 -0400
++++ b/src/backends/drm/drm_connector.cpp	2026-10-08 16:46:41.888841799 -0400
+@@ -427,21 +427,20 @@
+ {
+     auto modeInfo = libxcvt_gen_mode_info(size.width(), size.height(), refreshRate, flags & OutputModeline::Flag::ReducedBlanking, false);
+ 
+-    drmModeModeInfo mode{
+-        .clock = uint32_t(modeInfo->dot_clock),
+-        .hdisplay = uint16_t(modeInfo->hdisplay),
+-        .hsync_start = modeInfo->hsync_start,
+-        .hsync_end = modeInfo->hsync_end,
+-        .htotal = modeInfo->htotal,
+-        .vdisplay = uint16_t(modeInfo->vdisplay),
+-        .vsync_start = modeInfo->vsync_start,
+-        .vsync_end = modeInfo->vsync_end,
+-        .vtotal = modeInfo->vtotal,
+-        .vscan = 1,
+-        .vrefresh = uint32_t(modeInfo->vrefresh),
+-        .flags = modeInfo->mode_flags,
+-        .type = DRM_MODE_TYPE_USERDEF,
+-    };
++    drmModeModeInfo mode{};
++    mode.clock = uint32_t(modeInfo->dot_clock);
++    mode.hdisplay = uint16_t(modeInfo->hdisplay);
++    mode.hsync_start = modeInfo->hsync_start;
++    mode.hsync_end = modeInfo->hsync_end;
++    mode.htotal = modeInfo->htotal;
++    mode.vdisplay = uint16_t(modeInfo->vdisplay);
++    mode.vsync_start = modeInfo->vsync_start;
++    mode.vsync_end = modeInfo->vsync_end;
++    mode.vtotal = modeInfo->vtotal;
++    mode.vscan = 1;
++    mode.vrefresh = uint32_t(modeInfo->vrefresh);
++    mode.flags = modeInfo->mode_flags;
++    mode.type = DRM_MODE_TYPE_USERDEF;
+ 
+     sprintf(mode.name, "%dx%d@%d", size.width(), size.height(), mode.vrefresh);
+ 
+diff -ru a/src/backends/drm/drm_virtual_output.cpp b/src/backends/drm/drm_virtual_output.cpp
+--- a/src/backends/drm/drm_virtual_output.cpp	2026-10-08 16:45:28.390416332 -0400
++++ b/src/backends/drm/drm_virtual_output.cpp	2026-10-08 16:46:43.343829032 -0400
+@@ -29,18 +29,18 @@
+     auto mode = std::make_shared<OutputMode>(OutputModeline(size, 60000, OutputModeline::Flag::Preferred));
+     m_renderLoop->setRefreshRate(mode->refreshRate());
+ 
+-    setInformation(Information{
+-        .name = QStringLiteral("Virtual-") + name,
+-        .model = description,
+-        .physicalSize = size,
+-        .capabilities = Capability::CustomModes,
+-    });
++    Information information{};
++    information.name = QStringLiteral("Virtual-") + name;
++    information.model = description;
++    information.physicalSize = size;
++    information.capabilities = Capability::CustomModes;
++    setInformation(information);
+ 
+-    setState(State{
+-        .scale = scale,
+-        .modes = {mode},
+-        .currentMode = mode,
+-    });
++    State state{};
++    state.scale = scale;
++    state.modes = {mode};
++    state.currentMode = mode;
++    setState(state);
+ 
+     recreateSurface();
+ }
+diff -ru a/src/backends/virtual/virtual_backend.cpp b/src/backends/virtual/virtual_backend.cpp
+--- a/src/backends/virtual/virtual_backend.cpp	2026-10-08 16:45:31.631465279 -0400
++++ b/src/backends/virtual/virtual_backend.cpp	2026-10-08 16:46:44.538818551 -0400
+@@ -119,11 +119,11 @@
+ 
+ BackendOutput *VirtualBackend::createVirtualOutput(const QString &name, const QString &description, const QSize &size, qreal scale)
+ {
+-    return addOutput(OutputInfo{
+-        .size = size,
+-        .scale = scale,
+-        .connectorName = QStringLiteral("Virtual-") + name,
+-    });
++    OutputInfo info{};
++    info.size = size;
++    info.scale = scale;
++    info.connectorName = QStringLiteral("Virtual-") + name;
++    return addOutput(info);
+ }
+ 
+ void VirtualBackend::removeVirtualOutput(BackendOutput *output)
+diff -ru a/src/backends/virtual/virtual_output.cpp b/src/backends/virtual/virtual_output.cpp
+--- a/src/backends/virtual/virtual_output.cpp	2026-10-08 16:45:45.870714157 -0400
++++ b/src/backends/virtual/virtual_output.cpp	2026-10-08 16:46:47.363793789 -0400
+@@ -29,15 +29,15 @@
+ 
+     static int identifier = -1;
+     m_identifier = ++identifier;
+-    setInformation(Information{
+-        .name = connectorName.value_or(QStringLiteral("Virtual-%1").arg(identifier)),
+-        .physicalSize = physicalSizeInMM,
+-        .edid = Edid{edid, edidIdentifierOverride},
+-        .capabilities = Capability::CustomModes,
+-        .panelOrientation = panelOrientation,
+-        .internal = internal,
+-        .mstPath = mstPath.value_or(QByteArray()),
+-    });
++    Information information{};
++    information.name = connectorName.value_or(QStringLiteral("Virtual-%1").arg(identifier));
++    information.physicalSize = physicalSizeInMM;
++    information.edid = Edid{edid, edidIdentifierOverride};
++    information.capabilities = Capability::CustomModes;
++    information.panelOrientation = panelOrientation;
++    information.internal = internal;
++    information.mstPath = mstPath.value_or(QByteArray());
++    setInformation(information);
+ }
+ 
+ VirtualOutput::~VirtualOutput()
+@@ -73,12 +73,12 @@
+ 
+     m_renderLoop->setRefreshRate(modeList.front()->refreshRate());
+     m_vsyncMonitor->setRefreshRate(modeList.front()->refreshRate());
+-    setState(State{
+-        .scale = scale,
+-        .modes = modeList,
+-        .currentMode = modeList.front(),
+-        .scaleSetting = scale,
+-    });
++    State state{};
++    state.scale = scale;
++    state.modes = modeList;
++    state.currentMode = modeList.front();
++    state.scaleSetting = scale;
++    setState(state);
+ }
+ 
+ void VirtualOutput::applyChanges(const OutputConfiguration &config)
+diff -ru a/src/backends/wayland/color_manager.cpp b/src/backends/wayland/color_manager.cpp
+--- a/src/backends/wayland/color_manager.cpp	2026-10-08 16:52:20.339415820 -0400
++++ b/src/backends/wayland/color_manager.cpp	2026-10-08 16:52:36.540863939 -0400
+@@ -299,6 +299,9 @@
+         connect(listener, &ImageDescriptionListener::done, feedback, &ColorSurfaceFeedback::setPreferredColor);
+         wp_image_description_v1_destroy(img);
+     },
++    // A version 2 event; the color manager is bound at version 1
++    // (wayland_display.cpp), so the compositor never sends it.
++    .preferred_changed2 = nullptr,
+ };
+ // clang-format on
+ 
+diff -ru a/src/backends/wayland/wayland_output.cpp b/src/backends/wayland/wayland_output.cpp
+--- a/src/backends/wayland/wayland_output.cpp	2026-10-08 16:45:49.354280465 -0400
++++ b/src/backends/wayland/wayland_output.cpp	2026-10-08 16:46:48.175786676 -0400
+@@ -150,11 +150,11 @@
+         wp_fractional_scale_v1_add_listener(m_fractionalScale, &s_fractionalScaleListener, this);
+     }
+     m_viewport = backend->display()->viewporter()->createViewport(*m_surface);
+-    setInformation(Information{
+-        .name = name,
+-        .model = name,
+-        .capabilities = caps,
+-    });
++    Information information{};
++    information.name = name;
++    information.model = name;
++    information.capabilities = caps;
++    setInformation(information);
+ 
+     m_configureThrottleTimer.setSingleShot(true);
+     connect(&m_configureThrottleTimer, &QTimer::timeout, this, [this]() {
+diff -ru a/src/core/gbmgraphicsbufferallocator.cpp b/src/core/gbmgraphicsbufferallocator.cpp
+--- a/src/core/gbmgraphicsbufferallocator.cpp	2026-10-08 16:45:53.340298465 -0400
++++ b/src/core/gbmgraphicsbufferallocator.cpp	2026-10-08 16:46:51.508757495 -0400
+@@ -123,11 +123,10 @@
+         return nullptr;
+     }
+ 
+-    drm_mode_create_dumb createArgs{
+-        .height = uint32_t(options.size.height()),
+-        .width = uint32_t(options.size.width()),
+-        .bpp = 32,
+-    };
++    drm_mode_create_dumb createArgs{};
++    createArgs.height = uint32_t(options.size.height());
++    createArgs.width = uint32_t(options.size.width());
++    createArgs.bpp = 32;
+     if (drmIoctl(gbm_device_get_fd(device), DRM_IOCTL_MODE_CREATE_DUMB, &createArgs) != 0) {
+         qCWarning(KWIN_CORE) << "DRM_IOCTL_MODE_CREATE_DUMB failed:" << strerror(errno);
+         return nullptr;
+@@ -306,9 +305,8 @@
+ GraphicsBuffer::Map DumbGraphicsBuffer::map(MapFlags flags)
+ {
+     if (!m_data) {
+-        drm_mode_map_dumb mapArgs{
+-            .handle = m_handle,
+-        };
++        drm_mode_map_dumb mapArgs{};
++        mapArgs.handle = m_handle;
+         if (drmIoctl(m_drmFd, DRM_IOCTL_MODE_MAP_DUMB, &mapArgs) != 0) {
+             qCWarning(KWIN_CORE) << "DRM_IOCTL_MODE_MAP_DUMB failed:" << strerror(errno);
+             return {};
+diff -ru a/src/core/renderdevice.cpp b/src/core/renderdevice.cpp
+--- a/src/core/renderdevice.cpp	2026-10-08 16:45:56.029851687 -0400
++++ b/src/core/renderdevice.cpp	2026-10-08 16:47:08.270611177 -0400
+@@ -219,9 +219,8 @@
+ 
+         vk::PhysicalDeviceSynchronization2Features syncFeatures;
+         syncFeatures.synchronization2 = true;
+-        VkPhysicalDeviceFeatures features{
+-            .robustBufferAccess = true,
+-        };
++        VkPhysicalDeviceFeatures features{};
++        features.robustBufferAccess = true;
+         VkDeviceCreateInfo deviceInfo{
+             .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
+             .pNext = &syncFeatures,
+diff -ru a/src/core/syncobjtimeline.cpp b/src/core/syncobjtimeline.cpp
+--- a/src/core/syncobjtimeline.cpp	2026-10-08 16:46:04.007741067 -0400
++++ b/src/core/syncobjtimeline.cpp	2026-10-08 16:52:44.523799360 -0400
+@@ -6,6 +6,7 @@
+ #include "syncobjtimeline.h"
+ 
+ #include <cerrno>
++#include <cstring>
+ #include <sys/eventfd.h>
+ #include <sys/ioctl.h>
+ #include <xf86drm.h>
+@@ -30,11 +31,10 @@
+ 
+ FileDescriptor SyncReleasePoint::mergeSyncFds(const FileDescriptor &one, const FileDescriptor &two)
+ {
+-    struct sync_merge_data data{
+-        .name = "merged release fence",
+-        .fd2 = two.get(),
+-        .fence = -1,
+-    };
++    struct sync_merge_data data{};
++    strncpy(data.name, "merged release fence", sizeof(data.name) - 1);
++    data.fd2 = two.get();
++    data.fence = -1;
+     int err = -1;
+     do {
+         err = ioctl(one.get(), SYNC_IOC_MERGE, &data);
+diff -ru a/src/main_wayland.cpp b/src/main_wayland.cpp
+--- a/src/main_wayland.cpp	2026-10-08 16:46:06.033158230 -0400
++++ b/src/main_wayland.cpp	2026-10-08 16:47:10.318593349 -0400
+@@ -544,10 +544,10 @@
+     case BackendType::Virtual: {
+         auto outputBackend = std::make_unique<KWin::VirtualBackend>();
+         for (int i = 0; i < outputCount; ++i) {
+-            outputBackend->addOutput(KWin::VirtualBackend::OutputInfo{
+-                .size = initialWindowSize,
+-                .scale = outputScale,
+-            });
++            KWin::VirtualBackend::OutputInfo info{};
++            info.size = initialWindowSize;
++            info.scale = outputScale;
++            outputBackend->addOutput(info);
+         }
+         a.setSession(KWin::Session::create(KWin::Session::Type::Noop));
+         a.setOutputBackend(std::move(outputBackend));
+diff -ru a/src/outputconfigurationstore.cpp b/src/outputconfigurationstore.cpp
+--- a/src/outputconfigurationstore.cpp	2026-10-08 16:46:10.037920797 -0400
++++ b/src/outputconfigurationstore.cpp	2026-10-08 16:47:55.975198567 -0400
+@@ -426,48 +426,48 @@
+                     qPrintable(state.edidIdentifier), effectiveMode->size().width(), effectiveMode->size().height(), effectiveMode->refreshRate());
+         }
+ 
+-        *ret.changeSet(output) = OutputChangeSet{
+-            .currentMode = effectiveMode,
+-            .desiredMode = state.mode,
+-            .enabled = setupState.enabled,
+-            .pos = setupState.position,
+-            .scale = state.scaleSetting,
+-            .scaleSetting = state.scaleSetting,
+-            .transform = state.transform,
+-            .manualTransform = state.manualTransform,
+-            .overscan = state.overscan,
+-            .rgbRange = state.rgbRange,
+-            .vrrPolicy = state.vrrPolicy,
+-            .highDynamicRange = state.highDynamicRange,
+-            .referenceLuminance = state.referenceLuminance,
+-            .wideColorGamut = state.wideColorGamut,
+-            .autoRotationPolicy = state.autoRotation,
+-            .iccProfilePath = state.iccProfilePath,
+-            .iccProfile = state.iccProfilePath ? IccProfile::load(*state.iccProfilePath).value_or(nullptr) : nullptr,
+-            .hdrIccProfilePath = state.hdrIccProfilePath,
+-            .hdrIccProfile = state.hdrIccProfilePath ? IccProfile::load(*state.hdrIccProfilePath).value_or(nullptr) : nullptr,
+-            .maxPeakBrightnessOverride = state.maxPeakBrightnessOverride,
+-            .maxAverageBrightnessOverride = state.maxAverageBrightnessOverride,
+-            .minBrightnessOverride = state.minBrightnessOverride,
+-            .sdrGamutWideness = state.sdrGamutWideness,
+-            .colorProfileSource = state.colorProfileSource,
+-            .hdrColorProfileSource = state.hdrColorProfileSource,
+-            .brightness = state.brightness,
+-            .allowSdrSoftwareBrightness = state.allowSdrSoftwareBrightness,
+-            .colorPowerTradeoff = state.colorPowerTradeoff,
+-            .uuid = state.uuid,
+-            .replicationSource = setupState.replicationSource,
+-            .detectedDdcCi = state.detectedDdcCi,
+-            .allowDdcCi = state.allowDdcCi,
+-            .maxBitsPerColor = state.maxBitsPerColor,
+-            .edrPolicy = state.edrPolicy,
+-            .sharpness = state.sharpness,
+-            .priority = setupState.priority,
+-            .customModes = state.customModes,
+-            .automaticBrightness = state.automaticBrightness,
+-            .autoBrightnessCurve = state.autoBrightnessCurve,
+-            .abmLevel = state.abmLevel,
+-        };
++        OutputChangeSet newChangeSet{};
++        newChangeSet.currentMode = effectiveMode;
++        newChangeSet.desiredMode = state.mode;
++        newChangeSet.enabled = setupState.enabled;
++        newChangeSet.pos = setupState.position;
++        newChangeSet.scale = state.scaleSetting;
++        newChangeSet.scaleSetting = state.scaleSetting;
++        newChangeSet.transform = state.transform;
++        newChangeSet.manualTransform = state.manualTransform;
++        newChangeSet.overscan = state.overscan;
++        newChangeSet.rgbRange = state.rgbRange;
++        newChangeSet.vrrPolicy = state.vrrPolicy;
++        newChangeSet.highDynamicRange = state.highDynamicRange;
++        newChangeSet.referenceLuminance = state.referenceLuminance;
++        newChangeSet.wideColorGamut = state.wideColorGamut;
++        newChangeSet.autoRotationPolicy = state.autoRotation;
++        newChangeSet.iccProfilePath = state.iccProfilePath;
++        newChangeSet.iccProfile = state.iccProfilePath ? IccProfile::load(*state.iccProfilePath).value_or(nullptr) : nullptr;
++        newChangeSet.hdrIccProfilePath = state.hdrIccProfilePath;
++        newChangeSet.hdrIccProfile = state.hdrIccProfilePath ? IccProfile::load(*state.hdrIccProfilePath).value_or(nullptr) : nullptr;
++        newChangeSet.maxPeakBrightnessOverride = state.maxPeakBrightnessOverride;
++        newChangeSet.maxAverageBrightnessOverride = state.maxAverageBrightnessOverride;
++        newChangeSet.minBrightnessOverride = state.minBrightnessOverride;
++        newChangeSet.sdrGamutWideness = state.sdrGamutWideness;
++        newChangeSet.colorProfileSource = state.colorProfileSource;
++        newChangeSet.hdrColorProfileSource = state.hdrColorProfileSource;
++        newChangeSet.brightness = state.brightness;
++        newChangeSet.allowSdrSoftwareBrightness = state.allowSdrSoftwareBrightness;
++        newChangeSet.colorPowerTradeoff = state.colorPowerTradeoff;
++        newChangeSet.uuid = state.uuid;
++        newChangeSet.replicationSource = setupState.replicationSource;
++        newChangeSet.detectedDdcCi = state.detectedDdcCi;
++        newChangeSet.allowDdcCi = state.allowDdcCi;
++        newChangeSet.maxBitsPerColor = state.maxBitsPerColor;
++        newChangeSet.edrPolicy = state.edrPolicy;
++        newChangeSet.sharpness = state.sharpness;
++        newChangeSet.priority = setupState.priority;
++        newChangeSet.customModes = state.customModes;
++        newChangeSet.automaticBrightness = state.automaticBrightness;
++        newChangeSet.autoBrightnessCurve = state.autoBrightnessCurve;
++        newChangeSet.abmLevel = state.abmLevel;
++        *ret.changeSet(output) = std::move(newChangeSet);
+     }
+     return ret;
+ }
+@@ -662,41 +662,41 @@
+         }
+ 
+         const auto changeset = ret.changeSet(output);
+-        *changeset = {
+-            .currentMode = modeline,
+-            .desiredMode = modeline,
+-            .enabled = setupState ? setupState->enabled : enable,
+-            .pos = setupState ? setupState->position : rightMostPosition,
+-            // kscreen scale is unreliable because it gets overwritten with the value 1 on Xorg,
+-            // and we don't know if it's from Xorg or the 5.27 Wayland session... so just ignore it
+-            .scaleSetting = existingData.scaleSetting.value_or(chooseScale(output, modeline->size())),
+-            .transform = existingData.transform.value_or(kscreenChangeSet.transform.value_or(output->panelOrientation())),
+-            .manualTransform = existingData.manualTransform.value_or(kscreenChangeSet.transform.value_or(output->panelOrientation())),
+-            .overscan = existingData.overscan.value_or(kscreenChangeSet.overscan.value_or(0)),
+-            .rgbRange = existingData.rgbRange.value_or(kscreenChangeSet.rgbRange.value_or(BackendOutput::RgbRange::Automatic)),
+-            .vrrPolicy = existingData.vrrPolicy.value_or(kscreenChangeSet.vrrPolicy.value_or(VrrPolicy::Never)),
+-            .highDynamicRange = existingData.highDynamicRange.value_or(false),
+-            .referenceLuminance = existingData.referenceLuminance.value_or(std::clamp(output->maxAverageBrightnessOverride().value_or(output->advertisedMaxAverageBrightness().value_or(200)), 200.0, 500.0)),
+-            .wideColorGamut = existingData.wideColorGamut.value_or(false),
+-            .autoRotationPolicy = existingData.autoRotation.value_or(BackendOutput::AutoRotationPolicy::InTabletMode),
+-            .colorProfileSource = existingData.colorProfileSource.value_or(BackendOutput::ColorProfileSource::sRGB),
+-            .hdrColorProfileSource = existingData.hdrColorProfileSource.value_or(BackendOutput::ColorProfileSource::EDID),
+-            .brightness = existingData.brightness.value_or(1.0),
+-            .allowSdrSoftwareBrightness = existingData.allowSdrSoftwareBrightness.value_or(output->brightnessDevice() == nullptr),
+-            .colorPowerTradeoff = existingData.colorPowerTradeoff.value_or(BackendOutput::ColorPowerTradeoff::PreferEfficiency),
+-            .uuid = existingData.uuid,
+-            .detectedDdcCi = existingData.detectedDdcCi.value_or(false),
+-            .allowDdcCi = existingData.allowDdcCi.value_or(!output->isDdcCiKnownBroken()),
+-            .maxBitsPerColor = existingData.maxBitsPerColor,
+-            .edrPolicy = existingData.edrPolicy.value_or(BackendOutput::EdrPolicy::Always),
+-            .sharpness = existingData.sharpness.value_or(0),
+-            .priority = setupState ? setupState->priority : priority,
+-            .customModes = existingData.customModes,
+-            .automaticBrightness = existingData.automaticBrightness.value_or(false),
+-            // TODO generate a more fitting brightness map per screen?
+-            .autoBrightnessCurve = existingData.autoBrightnessCurve,
+-            .abmLevel = existingData.abmLevel.value_or(0),
+-        };
++        OutputChangeSet newChangeSet{};
++        newChangeSet.currentMode = modeline;
++        newChangeSet.desiredMode = modeline;
++        newChangeSet.enabled = setupState ? setupState->enabled : enable;
++        newChangeSet.pos = setupState ? setupState->position : rightMostPosition;
++        // kscreen scale is unreliable because it gets overwritten with the value 1 on Xorg,
++        // and we don't know if it's from Xorg or the 5.27 Wayland session... so just ignore it
++        newChangeSet.scaleSetting = existingData.scaleSetting.value_or(chooseScale(output, modeline->size()));
++        newChangeSet.transform = existingData.transform.value_or(kscreenChangeSet.transform.value_or(output->panelOrientation()));
++        newChangeSet.manualTransform = existingData.manualTransform.value_or(kscreenChangeSet.transform.value_or(output->panelOrientation()));
++        newChangeSet.overscan = existingData.overscan.value_or(kscreenChangeSet.overscan.value_or(0));
++        newChangeSet.rgbRange = existingData.rgbRange.value_or(kscreenChangeSet.rgbRange.value_or(BackendOutput::RgbRange::Automatic));
++        newChangeSet.vrrPolicy = existingData.vrrPolicy.value_or(kscreenChangeSet.vrrPolicy.value_or(VrrPolicy::Never));
++        newChangeSet.highDynamicRange = existingData.highDynamicRange.value_or(false);
++        newChangeSet.referenceLuminance = existingData.referenceLuminance.value_or(std::clamp(output->maxAverageBrightnessOverride().value_or(output->advertisedMaxAverageBrightness().value_or(200)), 200.0, 500.0));
++        newChangeSet.wideColorGamut = existingData.wideColorGamut.value_or(false);
++        newChangeSet.autoRotationPolicy = existingData.autoRotation.value_or(BackendOutput::AutoRotationPolicy::InTabletMode);
++        newChangeSet.colorProfileSource = existingData.colorProfileSource.value_or(BackendOutput::ColorProfileSource::sRGB);
++        newChangeSet.hdrColorProfileSource = existingData.hdrColorProfileSource.value_or(BackendOutput::ColorProfileSource::EDID);
++        newChangeSet.brightness = existingData.brightness.value_or(1.0);
++        newChangeSet.allowSdrSoftwareBrightness = existingData.allowSdrSoftwareBrightness.value_or(output->brightnessDevice() == nullptr);
++        newChangeSet.colorPowerTradeoff = existingData.colorPowerTradeoff.value_or(BackendOutput::ColorPowerTradeoff::PreferEfficiency);
++        newChangeSet.uuid = existingData.uuid;
++        newChangeSet.detectedDdcCi = existingData.detectedDdcCi.value_or(false);
++        newChangeSet.allowDdcCi = existingData.allowDdcCi.value_or(!output->isDdcCiKnownBroken());
++        newChangeSet.maxBitsPerColor = existingData.maxBitsPerColor;
++        newChangeSet.edrPolicy = existingData.edrPolicy.value_or(BackendOutput::EdrPolicy::Always);
++        newChangeSet.sharpness = existingData.sharpness.value_or(0);
++        newChangeSet.priority = setupState ? setupState->priority : priority;
++        newChangeSet.customModes = existingData.customModes;
++        newChangeSet.automaticBrightness = existingData.automaticBrightness.value_or(false);
++        // TODO generate a more fitting brightness map per screen?
++        newChangeSet.autoBrightnessCurve = existingData.autoBrightnessCurve;
++        newChangeSet.abmLevel = existingData.abmLevel.value_or(0);
++        *changeset = std::move(newChangeSet);
+         if (setupState) {
+             priority = std::max(setupState->priority + 1, priority);
+         } else {
+diff -ru a/src/placeholderoutput.cpp b/src/placeholderoutput.cpp
+--- a/src/placeholderoutput.cpp	2026-10-08 16:46:14.212405808 -0400
++++ b/src/placeholderoutput.cpp	2026-10-08 16:46:49.753772856 -0400
+@@ -17,17 +17,17 @@
+     m_renderLoop->setRefreshRate(mode->refreshRate());
+     m_renderLoop->inhibit();
+ 
+-    setState(State{
+-        .scale = scale,
+-        .modes = {mode},
+-        .currentMode = mode,
+-        .enabled = true,
+-    });
++    State state{};
++    state.scale = scale;
++    state.modes = {mode};
++    state.currentMode = mode;
++    state.enabled = true;
++    setState(state);
+ 
+-    setInformation(Information{
+-        .name = QStringLiteral("Placeholder-1"),
+-        .placeholder = true,
+-    });
++    Information information{};
++    information.name = QStringLiteral("Placeholder-1");
++    information.placeholder = true;
++    setInformation(information);
+ }
+ 
+ PlaceholderOutput::~PlaceholderOutput()
+diff -ru a/src/qpainter/qpainterswapchain.cpp b/src/qpainter/qpainterswapchain.cpp
+--- a/src/qpainter/qpainterswapchain.cpp	2026-10-08 16:46:16.761126051 -0400
++++ b/src/qpainter/qpainterswapchain.cpp	2026-10-08 16:47:11.111586449 -0400
+@@ -82,11 +82,11 @@
+         }
+     }
+ 
+-    GraphicsBuffer *buffer = m_allocator->allocate(GraphicsBufferOptions{
+-        .size = m_size,
+-        .format = m_format,
+-        .software = true,
+-    });
++    GraphicsBufferOptions options{};
++    options.size = m_size;
++    options.format = m_format;
++    options.software = true;
++    GraphicsBuffer *buffer = m_allocator->allocate(options);
+     if (!buffer) {
+         qCWarning(KWIN_QPAINTER) << "Failed to allocate a qpainter swapchain graphics buffer";
+         return nullptr;
+diff -ru a/src/scene/itemrenderer_opengl.cpp b/src/scene/itemrenderer_opengl.cpp
+--- a/src/scene/itemrenderer_opengl.cpp	2026-10-08 16:46:19.409173042 -0400
++++ b/src/scene/itemrenderer_opengl.cpp	2026-10-08 16:52:14.942039096 -0400
+@@ -210,18 +210,18 @@
+         if (!geometry.isEmpty()) {
+             const auto ninePatch = static_cast<NinePatchOpenGL *>(shadowItem->ninePatch());
+             if (ninePatch && ninePatch->texture()) {
+-                RenderNode &renderNode = context->renderNodes.emplace_back(RenderNode{
+-                    .traits = ShaderTrait::MapTexture,
+-                    .textures = {ninePatch->texture()},
+-                    .geometry = geometry,
+-                    .transformMatrix = context->transformStack.top(),
+-                    .opacity = context->opacityStack.top(),
+-                    .hasAlpha = true,
+-                    .colorDescription = item->colorDescription(),
+-                    .renderingIntent = item->renderingIntent(),
+-                    .bufferReleasePoint = nullptr,
+-                    .paintHole = hole,
+-                });
++                RenderNode node{};
++                node.traits = ShaderTrait::MapTexture;
++                node.textures = {ninePatch->texture()};
++                node.geometry = geometry;
++                node.transformMatrix = context->transformStack.top();
++                node.opacity = context->opacityStack.top();
++                node.hasAlpha = true;
++                node.colorDescription = item->colorDescription();
++                node.renderingIntent = item->renderingIntent();
++                node.bufferReleasePoint = nullptr;
++                node.paintHole = hole;
++                RenderNode &renderNode = context->renderNodes.emplace_back(std::move(node));
+                 renderNode.geometry.postProcessTextureCoordinates(ninePatch->texture()->matrix(UnnormalizedCoordinates));
+             }
+         }
+@@ -229,18 +229,18 @@
+         if (!geometry.isEmpty()) {
+             auto atlas = static_cast<const AtlasOpenGL *>(decorationItem->atlas());
+             if (atlas && atlas->texture()) {
+-                RenderNode &renderNode = context->renderNodes.emplace_back(RenderNode{
+-                    .traits = ShaderTrait::MapTexture,
+-                    .textures = {atlas->texture()},
+-                    .geometry = geometry,
+-                    .transformMatrix = context->transformStack.top(),
+-                    .opacity = context->opacityStack.top(),
+-                    .hasAlpha = true,
+-                    .colorDescription = item->colorDescription(),
+-                    .renderingIntent = item->renderingIntent(),
+-                    .bufferReleasePoint = nullptr,
+-                    .paintHole = hole,
+-                });
++                RenderNode node{};
++                node.traits = ShaderTrait::MapTexture;
++                node.textures = {atlas->texture()};
++                node.geometry = geometry;
++                node.transformMatrix = context->transformStack.top();
++                node.opacity = context->opacityStack.top();
++                node.hasAlpha = true;
++                node.colorDescription = item->colorDescription();
++                node.renderingIntent = item->renderingIntent();
++                node.bufferReleasePoint = nullptr;
++                node.paintHole = hole;
++                RenderNode &renderNode = context->renderNodes.emplace_back(std::move(node));
+                 renderNode.geometry.postProcessTextureCoordinates(atlas->texture()->matrix(UnnormalizedCoordinates));
+             }
+         }
+@@ -248,20 +248,20 @@
+         auto texture = static_cast<TextureOpenGL *>(surfaceItem->texture());
+         if (texture && !texture->planes().isEmpty()) {
+             if (!geometry.isEmpty()) {
+-                RenderNode &renderNode = context->renderNodes.emplace_back(RenderNode{
+-                    .traits = texture->planes().count() == 1 ? ShaderTrait::MapTexture : ShaderTrait::MapMultiPlaneTexture,
+-                    .textures = texture->planes(),
+-                    .geometry = geometry,
+-                    .transformMatrix = context->transformStack.top(),
+-                    .opacity = context->opacityStack.top(),
+-                    .hasAlpha = surfaceItem->hasAlphaChannel(),
+-                    .colorDescription = item->colorDescription(),
+-                    .renderingIntent = item->renderingIntent(),
+-                    .bufferReleasePoint = texture->releasePoint(),
+-                    .paintHole = hole,
+-                    .hasFloatingPointColor = texture->isFloatingPoint(),
+-                    .layerDebugBox = m_debug.layerEnabled ? std::optional(item->rect()) : std::nullopt,
+-                });
++                RenderNode node{};
++                node.traits = texture->planes().count() == 1 ? ShaderTrait::MapTexture : ShaderTrait::MapMultiPlaneTexture;
++                node.textures = texture->planes();
++                node.geometry = geometry;
++                node.transformMatrix = context->transformStack.top();
++                node.opacity = context->opacityStack.top();
++                node.hasAlpha = surfaceItem->hasAlphaChannel();
++                node.colorDescription = item->colorDescription();
++                node.renderingIntent = item->renderingIntent();
++                node.bufferReleasePoint = texture->releasePoint();
++                node.paintHole = hole;
++                node.hasFloatingPointColor = texture->isFloatingPoint();
++                node.layerDebugBox = m_debug.layerEnabled ? std::optional(item->rect()) : std::nullopt;
++                RenderNode &renderNode = context->renderNodes.emplace_back(std::move(node));
+                 renderNode.geometry.postProcessTextureCoordinates(texture->planes().at(0)->matrix(UnnormalizedCoordinates));
+                 if (surfaceItem->colorDescription()->yuvCoefficients() != YUVMatrixCoefficients::Identity) {
+                     renderNode.traits |= ShaderTrait::YuvConversion;
+@@ -284,18 +284,18 @@
+         if (!geometry.isEmpty()) {
+             auto texture = static_cast<TextureOpenGL *>(imageItem->texture());
+             if (texture && !texture->planes().isEmpty()) {
+-                RenderNode &renderNode = context->renderNodes.emplace_back(RenderNode{
+-                    .traits = ShaderTrait::MapTexture,
+-                    .textures = texture->planes(),
+-                    .geometry = geometry,
+-                    .transformMatrix = context->transformStack.top(),
+-                    .opacity = context->opacityStack.top(),
+-                    .hasAlpha = imageItem->image().hasAlphaChannel(),
+-                    .colorDescription = item->colorDescription(),
+-                    .renderingIntent = item->renderingIntent(),
+-                    .bufferReleasePoint = texture->releasePoint(),
+-                    .paintHole = hole,
+-                });
++                RenderNode node{};
++                node.traits = ShaderTrait::MapTexture;
++                node.textures = texture->planes();
++                node.geometry = geometry;
++                node.transformMatrix = context->transformStack.top();
++                node.opacity = context->opacityStack.top();
++                node.hasAlpha = imageItem->image().hasAlphaChannel();
++                node.colorDescription = item->colorDescription();
++                node.renderingIntent = item->renderingIntent();
++                node.bufferReleasePoint = texture->releasePoint();
++                node.paintHole = hole;
++                RenderNode &renderNode = context->renderNodes.emplace_back(std::move(node));
+                 renderNode.geometry.postProcessTextureCoordinates(texture->planes()[0]->matrix(UnnormalizedCoordinates));
+             }
+         }
+@@ -305,23 +305,23 @@
+             const int thickness = std::round(outline.thickness() * context->renderTargetScale);
+             const RectF outerRect = borderItem->rect().scaled(context->renderTargetScale).rounded();
+             const RectF innerRect = outerRect.adjusted(thickness, thickness, -thickness, -thickness);
+-            context->renderNodes.append(RenderNode{
+-                .traits = ShaderTrait::Border,
+-                .geometry = geometry,
+-                .transformMatrix = context->transformStack.top(),
+-                .opacity = context->opacityStack.top(),
+-                .hasAlpha = true,
+-                .colorDescription = borderItem->colorDescription(),
+-                .renderingIntent = borderItem->renderingIntent(),
+-                .box = QVector4D(innerRect.x() + innerRect.width() * 0.5,
++            RenderNode node{};
++            node.traits = ShaderTrait::Border;
++            node.geometry = geometry;
++            node.transformMatrix = context->transformStack.top();
++            node.opacity = context->opacityStack.top();
++            node.hasAlpha = true;
++            node.colorDescription = borderItem->colorDescription();
++            node.renderingIntent = borderItem->renderingIntent();
++            node.box = QVector4D(innerRect.x() + innerRect.width() * 0.5,
+                                  innerRect.y() + innerRect.height() * 0.5,
+                                  innerRect.width() * 0.5,
+-                                 innerRect.height() * 0.5),
+-                .borderRadius = outline.radius().scaled(context->renderTargetScale).rounded().toVector(),
+-                .borderThickness = thickness,
+-                .borderColor = outline.color(),
+-                .paintHole = hole,
+-            });
++                                 innerRect.height() * 0.5);
++            node.borderRadius = outline.radius().scaled(context->renderTargetScale).rounded().toVector();
++            node.borderThickness = thickness;
++            node.borderColor = outline.color();
++            node.paintHole = hole;
++            context->renderNodes.append(std::move(node));
+         }
+     }
+ 
+@@ -369,6 +369,10 @@
+     }
+ 
+     RenderContext renderContext{
++        .renderNodes = {},
++        .transformStack = {},
++        .opacityStack = {},
++        .cornerStack = {},
+         .projectionMatrix = viewport.projectionMatrix(),
+         .rootTransform = data.toMatrix(viewport.scale()), // TODO: unify transforms
+         .deviceClip = (deviceRegion & renderTarget.transformedRect()),
+diff -ru a/src/wayland/transaction.cpp b/src/wayland/transaction.cpp
+--- a/src/wayland/transaction.cpp	2026-10-08 16:46:22.709738464 -0400
++++ b/src/wayland/transaction.cpp	2026-10-08 16:47:12.313575993 -0400
+@@ -92,11 +92,11 @@
+     auto state = std::make_unique<SurfaceState>();
+     pending->mergeInto(state.get());
+ 
+-    m_entries.emplace_back(TransactionEntry{
+-        .surface = surface,
+-        .buffer = GraphicsBufferRef(state->buffer),
+-        .state = std::move(state),
+-    });
++    TransactionEntry entry{};
++    entry.surface = surface;
++    entry.buffer = GraphicsBufferRef(state->buffer);
++    entry.state = std::move(state);
++    m_entries.emplace_back(std::move(entry));
+ }
+ 
+ void Transaction::amend(SurfaceInterface *surface, std::function<void(SurfaceState *)> mutator)

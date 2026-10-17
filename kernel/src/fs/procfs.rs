@@ -83,7 +83,7 @@ impl VfsNode for ProcNode {
                 match name.as_str() {
                     "version" => {
                         format!(
-                            "VeridianOS version 0.5.0 (gcc 14.2.0) #1 SMP {}\n",
+                            "VeridianOS version 0.5.0 (gcc 16.2.0) #1 SMP {}\n",
                             env!("CARGO_PKG_VERSION")
                         )
                     }
@@ -98,8 +98,10 @@ impl VfsNode for ProcNode {
                         let total_kb = stats.total_frames * 4; // 4KB per frame
                         let free_kb = stats.free_frames * 4;
                         let used_kb = total_kb.saturating_sub(free_kb);
-                        let cached_kb = stats.cached_frames * 4;
-                        let available_kb = free_kb + cached_kb;
+                        // Cached: the file page cache (ADR 0010). Frames on
+                        // the allocator's per-CPU lists are free memory too.
+                        let cached_kb = crate::mm::page_cache::cached_pages() * 4;
+                        let available_kb = free_kb + stats.cached_frames * 4;
                         let buffers_kb = 0usize;
                         let slab_kb = 0usize;
 
@@ -110,7 +112,8 @@ impl VfsNode for ProcNode {
                              Buffers:        {:>8} kB\n\
                              Cached:         {:>8} kB\n\
                              Slab:           {:>8} kB\n\
-                             MemUsed:        {:>8} kB\n",
+                             MemUsed:        {:>8} kB\n\
+                             CowShared:      {:>8} kB\n",
                             total_kb,
                             free_kb,
                             available_kb,
@@ -118,6 +121,10 @@ impl VfsNode for ProcNode {
                             cached_kb,
                             slab_kb,
                             used_kb,
+                            // Frames with more than one owner (each counted
+                            // once): shared copy-on-write after fork, or a
+                            // cached file page that processes map.
+                            crate::mm::frame_refs::shared_frames() * 4,
                         )
                     }
                     "cpuinfo" => generate_cpuinfo(),
@@ -538,7 +545,12 @@ fn generate_loadavg() -> String {
         .unwrap_or(1);
 
     // Linux format: 1min 5min 15min running/total last_pid
-    format!("0.00 0.00 0.00 {}/{} {}\n", running, total, last_pid)
+    let [one, five, fifteen] =
+        crate::sched::loadavg::averages().map(crate::sched::loadavg::format_parts);
+    format!(
+        "{}.{:02} {}.{:02} {}.{:02} {}/{} {}\n",
+        one.0, one.1, five.0, five.1, fifteen.0, fifteen.1, running, total, last_pid
+    )
 }
 
 /// Read CPUID vendor ID string (x86_64 only).

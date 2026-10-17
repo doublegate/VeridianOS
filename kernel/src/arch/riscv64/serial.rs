@@ -64,6 +64,9 @@ pub fn create_serial_port() -> SerialPort {
 #[doc(hidden)]
 pub fn _serial_print(args: fmt::Arguments) {
     use core::fmt::Write;
-    let mut uart = create_serial_port();
-    uart.write_fmt(args).expect("serial write_fmt failed");
+    // One message at a time across harts (`print::with_console`).
+    crate::print::with_console(|| {
+        let mut uart = create_serial_port();
+        let _ = uart.write_fmt(args);
+    });
 }

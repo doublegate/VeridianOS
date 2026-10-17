@@ -8,7 +8,7 @@
 #[cfg(feature = "alloc")]
 extern crate alloc;
 
-use super::{validate_user_pointer, SyscallError, SyscallResult};
+use super::{SyscallError, SyscallResult};
 use crate::{
     mm::{vas::MappingType, VirtualAddress, PAGE_SIZE},
     process,
@@ -26,6 +26,29 @@ pub const PROT_READ: usize = 0x1;
 pub const PROT_WRITE: usize = 0x2;
 /// Pages may be executed.
 pub const PROT_EXEC: usize = 0x4;
+/// arm64: the pages are BTI guarded (indirect branches must land on BTI).
+pub const PROT_BTI: usize = 0x10;
+
+/// The protection bits beyond PROT_READ/WRITE/EXEC this architecture
+/// accepts: PROT_BTI on AArch64 (after [`bti_prot`]), none elsewhere.
+#[cfg(target_arch = "aarch64")]
+const PROT_ARCH: usize = PROT_BTI;
+#[cfg(not(target_arch = "aarch64"))]
+const PROT_ARCH: usize = 0;
+
+/// PROT_BTI as arm64 Linux treats it: kept where the CPU has BTI (`bti`);
+/// otherwise mprotect refuses it (EINVAL, `arch_validate_prot`) and mmap
+/// drops it (`arch_calc_vm_prot_bits` ignores it).
+#[cfg_attr(not(target_arch = "aarch64"), allow(dead_code))]
+fn bti_prot(prot: usize, bti: bool, mprotect: bool) -> Result<usize, SyscallError> {
+    if prot & PROT_BTI == 0 || bti {
+        Ok(prot)
+    } else if mprotect {
+        Err(SyscallError::InvalidArgument)
+    } else {
+        Ok(prot & !PROT_BTI)
+    }
+}
 
 // ============================================================================
 // Mapping flags
@@ -39,6 +62,36 @@ pub const MAP_PRIVATE: usize = 0x02;
 pub const MAP_FIXED: usize = 0x10;
 /// The mapping is not backed by any file (zero-filled).
 pub const MAP_ANONYMOUS: usize = 0x20;
+/// Back an anonymous mapping with 2 MiB pages (Linux value).
+pub const MAP_HUGETLB: usize = 0x40000;
+/// MAP_SHARED with every flag checked (EOPNOTSUPP for one not known).
+const MAP_SHARED_VALIDATE: usize = 0x03;
+/// The mapping-type bits of the flags.
+const MAP_TYPE: usize = 0x0f;
+/// MAP_FIXED, but EEXIST instead of replacing a mapping in the range.
+const MAP_FIXED_NOREPLACE: usize = 0x10_0000;
+/// The flags Linux has always accepted (its LEGACY_MAP_MASK), and
+/// MAP_FIXED_NOREPLACE: what MAP_SHARED_VALIDATE lets through (MAP_SYNC,
+/// for DAX files, is not: there is no DAX). Besides
+/// MAP_FIXED, MAP_ANONYMOUS and MAP_HUGETLB they need nothing here --
+/// MAP_POPULATE, MAP_LOCKED, MAP_NORESERVE, MAP_NONBLOCK and MAP_STACK
+/// describe memory that is always present -- or are ignored as Linux
+/// ignores them (MAP_DENYWRITE, MAP_EXECUTABLE, MAP_GROWSDOWN,
+/// MAP_UNINITIALIZED).
+const MAP_KNOWN: usize = MAP_TYPE
+    | MAP_FIXED
+    | MAP_ANONYMOUS
+    | 0x100 // MAP_GROWSDOWN
+    | 0x800 // MAP_DENYWRITE
+    | 0x1000 // MAP_EXECUTABLE
+    | 0x2000 // MAP_LOCKED
+    | 0x4000 // MAP_NORESERVE
+    | 0x8000 // MAP_POPULATE
+    | 0x1_0000 // MAP_NONBLOCK
+    | 0x2_0000 // MAP_STACK
+    | MAP_HUGETLB
+    | MAP_FIXED_NOREPLACE
+    | 0x400_0000; // MAP_UNINITIALIZED
 
 /// Sentinel value indicating a failed mapping.
 pub const MAP_FAILED: usize = usize::MAX;
@@ -57,6 +110,81 @@ fn prot_to_mapping_type(prot: usize, shared: bool) -> MappingType {
     } else {
         // Data covers read-only and read-write private mappings
         MappingType::Data
+    }
+}
+
+/// RLIMIT_AS and RLIMIT_DATA (Linux's may_expand_vm): ENOMEM unless the
+/// process may map `bytes` more, not counting what it maps in
+/// `[skip_start, skip_end)` (the part a MAP_FIXED request replaces).
+/// `data`: the new memory is private and writable.
+#[cfg(feature = "alloc")]
+fn may_expand_vm(
+    proc: &process::Process,
+    vas: &crate::mm::VirtualAddressSpace,
+    (skip_start, skip_end): (u64, u64),
+    bytes: u64,
+    data: bool,
+) -> Result<(), SyscallError> {
+    let usage = vas.vm_usage(skip_start, skip_end);
+    if process::rlimit::may_expand_vm(&proc.limits(), usage, bytes, data) {
+        Ok(())
+    } else {
+        Err(SyscallError::OutOfMemory)
+    }
+}
+
+/// A file's contents for pages about to be mapped, read before the address
+/// space is locked (N-118): its cached pages (each with one more owner), or
+/// a copy for a file without a page cache or a mapping that must not share
+/// them.
+enum FileData {
+    Cached(alloc::vec::Vec<Option<crate::mm::FrameNumber>>),
+    Copy(alloc::vec::Vec<u8>),
+}
+
+impl FileData {
+    /// `len` bytes of `node` from `offset` (page aligned), cached if the
+    /// filesystem keeps a page cache.
+    fn read(
+        node: &dyn crate::fs::VfsNode,
+        offset: usize,
+        len: usize,
+    ) -> Result<Self, SyscallError> {
+        match crate::mm::page_cache::file_pages(node, offset / PAGE_SIZE, len / PAGE_SIZE) {
+            Some(frames) => Ok(Self::Cached(frames.map_err(super::map_kernel_error)?)),
+            None => Ok(Self::copy(node, offset, len)),
+        }
+    }
+
+    /// A copy of `len` bytes of `node` from `offset`; past the end of the
+    /// file, zeros.
+    fn copy(node: &dyn crate::fs::VfsNode, offset: usize, len: usize) -> Self {
+        let mut buf = alloc::vec![0u8; len];
+        let _ = node.read(offset, &mut buf);
+        Self::Copy(buf)
+    }
+
+    /// Not used: the cached pages' owners go back.
+    fn release(self) {
+        if let Self::Cached(frames) = self {
+            crate::mm::page_cache::release(frames.into_iter().flatten());
+        }
+    }
+
+    /// Put the contents into the freshly mapped pages at `addr`.
+    fn install(
+        self,
+        vas: &crate::mm::VirtualAddressSpace,
+        addr: usize,
+    ) -> Result<(), SyscallError> {
+        match self {
+            Self::Cached(frames) => vas
+                .install_file_pages(VirtualAddress(addr as u64), &frames)
+                .map_err(super::map_kernel_error),
+            Self::Copy(buf) => vas
+                .fill_owned_pages(addr as u64, &buf)
+                .map_err(super::map_kernel_error),
+        }
     }
 }
 
@@ -88,32 +216,58 @@ pub fn sys_mmap(
     flags: usize,
     fd_or_packed: usize,
 ) -> SyscallResult {
-    // Validate length
+    // Validate length: non-zero, and no larger than user space, so a huge
+    // request fails here instead of reaching any allocation (N-133).
     if length == 0 {
         return Err(SyscallError::InvalidArgument);
     }
+    if length > crate::mm::user_layout::USER_SPACE_END {
+        return Err(SyscallError::OutOfMemory);
+    }
 
-    // Validate protection flags (only low 3 bits valid)
-    if prot & !(PROT_READ | PROT_WRITE | PROT_EXEC) != 0 {
+    // Validate protection flags: read, write, execute, and on AArch64
+    // PROT_BTI (dropped where the CPU has no BTI, as Linux's mmap does).
+    #[cfg(target_arch = "aarch64")]
+    let prot = bti_prot(prot, crate::arch::bti_supported(), false)?;
+    if prot & !(PROT_READ | PROT_WRITE | PROT_EXEC | PROT_ARCH) != 0 {
         return Err(SyscallError::InvalidArgument);
     }
 
-    // Enforce W^X: writable + executable is not allowed
-    if prot & PROT_WRITE != 0 && prot & PROT_EXEC != 0 {
+    // W^X: writable and executable memory is EACCES unless the program
+    // opted in, and always under PR_SET_MDWE (ADR 0017).
+    if process::current_process()
+        .ok_or(SyscallError::InvalidState)?
+        .memory_space
+        .lock()
+        .wx_policy()
+        .refuses_map(prot)
+    {
         return Err(SyscallError::PermissionDenied);
     }
 
-    // Must specify either SHARED or PRIVATE (not both, not neither)
-    let shared = flags & MAP_SHARED != 0;
-    let private = flags & MAP_PRIVATE != 0;
-    if shared == private {
-        return Err(SyscallError::InvalidArgument);
-    }
+    // The type, as Linux's do_mmap (N-241): MAP_SHARED, MAP_PRIVATE or
+    // MAP_SHARED_VALIDATE, which refuses flags it does not know (and
+    // MAP_SYNC, for DAX files) with EOPNOTSUPP. Plain MAP_SHARED and
+    // MAP_PRIVATE ignore unknown flags, as on Linux.
+    let (shared, private) = match flags & MAP_TYPE {
+        MAP_SHARED => (true, false),
+        MAP_PRIVATE => (false, true),
+        MAP_SHARED_VALIDATE => {
+            if flags & !MAP_KNOWN != 0 {
+                return Err(SyscallError::NotSupported);
+            }
+            (true, false)
+        }
+        _ => return Err(SyscallError::InvalidArgument),
+    };
 
     // MAP_FIXED requires a page-aligned address whose whole (page-rounded)
     // range is user space. Without the range check a fixed mapping could
     // be placed in the kernel half or the reserved top page.
-    let is_fixed = flags & MAP_FIXED != 0;
+    // MAP_FIXED_NOREPLACE is MAP_FIXED that fails (EEXIST) where something
+    // is already mapped.
+    let no_replace = flags & MAP_FIXED_NOREPLACE != 0;
+    let is_fixed = flags & MAP_FIXED != 0 || no_replace;
     if is_fixed {
         let aligned_len = length
             .checked_add(PAGE_SIZE - 1)
@@ -129,33 +283,13 @@ pub fn sys_mmap(
 
     let is_anonymous = flags & MAP_ANONYMOUS != 0;
 
-    // Extract fd and offset. Linux mmap has 6 args:
-    //   rdi=addr, rsi=len, rdx=prot, r10=flags, r8=fd, r9=offset
-    // Our syscall entry only passes 5 C params (arg5 = r8 = fd).
-    // The 6th arg (r9 = offset) is saved in the SyscallFrame on the stack.
-    // For Linux ABI processes, extract fd directly from arg5 and offset
-    // from the saved r9 register in the SyscallFrame.
-    let linux_abi = crate::syscall::linux_compat::is_linux_abi(caller_pid);
+    // Linux layout (ADR 0009): fd in r8 (arg5), offset in r9 (the sixth
+    // argument). The native ABI used to pack both into arg5, so a musl
+    // file mapping, which uses the Linux layout, read fd 0.
     let (fd, offset) = if is_anonymous {
         (0usize, 0usize)
-    } else if linux_abi {
-        // Linux ABI: fd_or_packed IS the fd; offset is in r9 on the stack.
-        let mmap_offset = {
-            #[cfg(target_arch = "x86_64")]
-            {
-                crate::arch::x86_64::syscall::get_syscall_frame()
-                    .map(|frame| frame.r9 as usize)
-                    .unwrap_or(0)
-            }
-            #[cfg(not(target_arch = "x86_64"))]
-            {
-                0usize
-            }
-        };
-        (fd_or_packed, mmap_offset)
     } else {
-        // VeridianOS native ABI: packed fd(upper 32) + offset(lower 32)
-        (fd_or_packed >> 32, fd_or_packed & 0xFFFF_FFFF)
+        (fd_or_packed, super::syscall_arg6()?)
     };
 
     // DRM device mappings are checked before any memory is mapped: the
@@ -172,42 +306,185 @@ pub fn sys_mmap(
     }
 
     let mapping_type = prot_to_mapping_type(prot, shared);
-    let memory_space = proc.memory_space.lock();
+    // The page flags follow `prot`: no-execute unless PROT_EXEC, read-only
+    // unless PROT_WRITE, no user access for PROT_NONE (N-132).
+    let page_flags = crate::mm::vas::user_prot_flags(prot);
 
-    let mapped_addr = if is_fixed {
-        // MAP_FIXED: map at the exact requested address
-        memory_space
-            .map_region(VirtualAddress(addr as u64), length, mapping_type)
-            .map_err(|_| SyscallError::OutOfMemory)?;
-        addr
+    // A file mapping, checked as Linux does (N-230): the offset is page
+    // aligned (EINVAL), the fd is open (EBADF; a closed one silently became
+    // anonymous memory), open for reading, and for a writable shared
+    // mapping open for writing too (EACCES); a directory or a stream cannot
+    // be mapped (ENODEV).
+    #[cfg(feature = "alloc")]
+    if !is_anonymous && !is_drm_mmap {
+        if offset & (PAGE_SIZE - 1) != 0 {
+            return Err(SyscallError::InvalidArgument);
+        }
+        let file = proc
+            .file_table
+            .lock()
+            .get(fd)
+            .ok_or(SyscallError::BadFileDescriptor)?;
+        if !file.flags.read || (shared && prot & PROT_WRITE != 0 && !file.flags.write) {
+            return Err(SyscallError::PermissionDenied);
+        }
+        if file.node.node_type() == crate::fs::NodeType::Directory || file.node.is_stream() {
+            return Err(SyscallError::NoDevice);
+        }
+        // A file whose own pages can be mapped (a memfd) is, for
+        // MAP_SHARED: the mapping and every other one, read and write see
+        // one copy. Other files are still copied (a page cache is v0.29).
+        if shared {
+            let pages = length.div_ceil(PAGE_SIZE);
+            if let Some(frames) =
+                file.node
+                    .share_pages(offset / PAGE_SIZE, pages, prot & PROT_WRITE != 0)
+            {
+                let frames = frames.map_err(super::map_kernel_error)?;
+                let at = is_fixed.then_some(VirtualAddress(addr as u64));
+                // May mprotect make it writable later? Not through a
+                // read-only fd, nor past a write seal.
+                let write_sealed = file.node.seals().is_some_and(|s| {
+                    s & (crate::fs::seals::WRITE | crate::fs::seals::FUTURE_WRITE) != 0
+                });
+                let may_write = file.flags.write && !write_sealed;
+                let vas = proc.memory_space.lock();
+                let bytes = (pages * PAGE_SIZE) as u64;
+                if no_replace && !vas.range_is_free(addr as u64, addr as u64 + bytes) {
+                    for &frame in &frames {
+                        if crate::mm::frame_refs::release(frame) {
+                            crate::mm::note_free_failure(
+                                crate::mm::FRAME_ALLOCATOR.lock().free_frames(frame, 1),
+                                frame,
+                                "mmap",
+                            );
+                        }
+                    }
+                    return Err(SyscallError::FileExists);
+                }
+                let skip = at.map_or((0, 0), |a| (a.0, a.0 + bytes));
+                if let Err(e) = may_expand_vm(&proc, &vas, skip, bytes, false) {
+                    // Give back the owners share_pages added (the memfd
+                    // keeps its own).
+                    for &frame in &frames {
+                        if crate::mm::frame_refs::release(frame) {
+                            crate::mm::note_free_failure(
+                                crate::mm::FRAME_ALLOCATOR.lock().free_frames(frame, 1),
+                                frame,
+                                "mmap",
+                            );
+                        }
+                    }
+                    return Err(e);
+                }
+                let start = vas
+                    .map_shared_frames(at, &frames, page_flags, may_write)
+                    .map_err(|_| SyscallError::OutOfMemory)?;
+                vas.set_backing(start, file.node.clone(), offset);
+                return Ok(start.as_usize());
+            }
+        }
+    }
+
+    // The file's contents are read before the address space is locked:
+    // reading may sleep, and a lock held across it would stop the machine
+    // (N-118). A private mapping of a file whose filesystem keeps a page
+    // cache maps the cached pages, shared read-only or copy-on-write (ADR
+    // 0010); other file mappings get a copy. The file is taken out of the
+    // table, which is not held across the read either.
+    let (file_data, file_node) = if !is_anonymous && !is_drm_mmap {
+        let file = proc
+            .file_table
+            .lock()
+            .get(fd)
+            .ok_or(SyscallError::BadFileDescriptor)?;
+        let len = length.div_ceil(PAGE_SIZE) * PAGE_SIZE;
+        let data = if private {
+            FileData::read(&*file.node, offset, len)?
+        } else {
+            FileData::copy(&*file.node, offset, len)
+        };
+        (Some(data), Some((file.node.clone(), file.flags.write)))
     } else {
-        // Kernel-chosen address: use VAS.mmap() which bumps next_mmap_addr
-        let vaddr = memory_space
-            .mmap(length, mapping_type)
-            .map_err(|_| SyscallError::OutOfMemory)?;
-        vaddr.as_usize()
+        (None, None)
     };
 
-    // Register anonymous mappings with demand paging for COW and future
-    // lazy allocation support. The pages are currently allocated eagerly by
-    // VAS::mmap(), but registering them enables the page fault handler to
-    // resolve COW faults within this region.
-    if is_anonymous {
-        let lazy_flags = if prot & PROT_WRITE != 0 {
-            crate::mm::PageFlags::PRESENT
-                | crate::mm::PageFlags::WRITABLE
-                | crate::mm::PageFlags::USER
-        } else {
-            crate::mm::PageFlags::PRESENT | crate::mm::PageFlags::USER
-        };
-        let aligned_len = (length + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
-        crate::mm::demand_paging::register_lazy(
-            mapped_addr,
-            aligned_len,
-            lazy_flags,
-            crate::mm::demand_paging::BackingType::Anonymous,
-        );
+    let memory_space = proc.memory_space.lock();
+
+    // MAP_FIXED_NOREPLACE: nothing may be mapped in the range (EEXIST).
+    if no_replace {
+        let end =
+            (addr as u64).saturating_add(length.div_ceil(PAGE_SIZE) as u64 * PAGE_SIZE as u64);
+        if !memory_space.range_is_free(addr as u64, end) {
+            if let Some(file_data) = file_data {
+                file_data.release();
+            }
+            return Err(SyscallError::FileExists);
+        }
     }
+
+    // RLIMIT_AS and RLIMIT_DATA, for the pages the mapping will take.
+    #[cfg(feature = "alloc")]
+    {
+        const HUGE: usize = 2 * 1024 * 1024;
+        let unit = if is_anonymous && !is_fixed && flags & MAP_HUGETLB != 0 {
+            HUGE
+        } else {
+            PAGE_SIZE
+        };
+        let bytes = length.div_ceil(unit).saturating_mul(unit) as u64;
+        let skip = if is_fixed {
+            (addr as u64, addr as u64 + bytes)
+        } else {
+            (0, 0)
+        };
+        let data = private && prot & PROT_WRITE != 0;
+        if let Err(e) = may_expand_vm(&proc, &memory_space, skip, bytes, data) {
+            if let Some(file_data) = file_data {
+                file_data.release();
+            }
+            return Err(e);
+        }
+    }
+
+    let mapped = (|| -> Result<usize, SyscallError> {
+        Ok(if is_fixed {
+            // MAP_FIXED: map at the exact requested address, replacing what
+            // is there (N-141).
+            memory_space
+                .map_region_fixed(
+                    VirtualAddress(addr as u64),
+                    length,
+                    mapping_type,
+                    Some(page_flags),
+                )
+                .map_err(|_| SyscallError::OutOfMemory)?;
+            addr
+        } else if is_anonymous && flags & MAP_HUGETLB != 0 {
+            // 2 MiB pages (MEM-ARCH-01): a 2 MiB-aligned address, the length
+            // rounded up to 2 MiB.
+            memory_space
+                .mmap_huge_flags(length, mapping_type, page_flags)
+                .map_err(|_| SyscallError::OutOfMemory)?
+                .as_usize()
+        } else {
+            // Kernel-chosen address at the (bounded) mmap cursor.
+            let vaddr = memory_space
+                .mmap_flags(length, mapping_type, Some(page_flags))
+                .map_err(|_| SyscallError::OutOfMemory)?;
+            vaddr.as_usize()
+        })
+    })();
+    let mapped_addr = match mapped {
+        Ok(addr) => addr,
+        Err(e) => {
+            // Owners of cached pages no mapping took go back.
+            if let Some(file_data) = file_data {
+                file_data.release();
+            }
+            return Err(e);
+        }
+    };
 
     // For file-backed mappings, read file contents into the mapped pages
     if !is_anonymous {
@@ -233,42 +510,29 @@ pub fn sys_mmap(
                     .map_physical_region(fb_phys, aligned_len, VirtualAddress(mapped_addr as u64))
                     .map_err(|_| SyscallError::OutOfMemory)?;
             }
-        } else {
-            let file_table = proc.file_table.lock();
-            if let Some(file) = file_table.get(fd) {
-                // Read file data for the requested range.
-                // IMPORTANT: Read directly from the VFS node at the specified offset
-                // instead of using file.seek()+file.read(), which would corrupt the
-                // shared File position used by user-space stdio (fread/fseek).
-                let aligned_len = (length + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
-                let mut buf = alloc::vec![0u8; aligned_len];
-                let _bytes_read = file.node.read(offset, &mut buf).unwrap_or(0);
+        } else if let Some(file_data) = file_data {
+            // The file's pages (cached pages replace the fresh ones; pages
+            // past the end of the file stay zero).
+            if let Err(e) = file_data.install(&memory_space, mapped_addr) {
+                let _ = memory_space.unmap_region(VirtualAddress(mapped_addr as u64));
+                return Err(e);
+            }
+            // Code read from the file: instruction fetch must see it on
+            // every CPU (HA-25; Linux does this as it installs an
+            // executable page).
+            if prot & PROT_EXEC != 0 {
+                memory_space.sync_code(mapped_addr as u64, length as u64);
+            }
+        }
 
-                // Write file data into the mapped region via physical memory.
-                // The pages are mapped in the process's page tables. We walk the
-                // page tables to find the physical frames and write through the
-                // kernel's physical memory window (phys_to_virt_addr).
-                let pt_root = memory_space.get_page_table();
-                if pt_root != 0 {
-                    let mapper = unsafe { crate::mm::vas::create_mapper_from_root_pub(pt_root) };
-                    for page_off in (0..aligned_len).step_by(PAGE_SIZE) {
-                        let vaddr = mapped_addr + page_off;
-                        if let Ok((frame, _flags)) =
-                            mapper.translate_page(VirtualAddress(vaddr as u64))
-                        {
-                            let phys_addr = frame.as_u64() << 12;
-                            let virt = crate::mm::phys_to_virt_addr(phys_addr);
-                            let copy_len = PAGE_SIZE.min(buf.len() - page_off);
-                            unsafe {
-                                core::ptr::copy_nonoverlapping(
-                                    buf[page_off..].as_ptr(),
-                                    virt as *mut u8,
-                                    copy_len,
-                                );
-                            }
-                        }
-                    }
-                }
+        // The mapping records its file, for mremap and MADV_DONTNEED.
+        if let Some((node, writable)) = file_node {
+            let start = VirtualAddress(mapped_addr as u64);
+            memory_space.set_backing(start, node, offset);
+            // A shared mapping of a file opened read-only may never be
+            // made writable (Linux clears VM_MAYWRITE: mprotect EACCES).
+            if shared {
+                memory_space.set_may_write(start, writable);
             }
         }
     }
@@ -288,20 +552,22 @@ pub fn sys_mmap(
 /// # Returns
 /// 0 on success.
 pub fn sys_munmap(addr: usize, length: usize) -> SyscallResult {
-    if addr == 0 || length == 0 {
-        return Err(SyscallError::InvalidArgument);
-    }
-
-    // Address must be page-aligned
-    if addr & 0xFFF != 0 {
+    // As Linux's __do_munmap (N-240): a page-aligned address and a
+    // non-zero length, the page-rounded range within user space (EINVAL
+    // otherwise, whatever its size). Address 0 is valid, and so is a range
+    // with nothing mapped.
+    let len = length
+        .checked_next_multiple_of(PAGE_SIZE)
+        .ok_or(SyscallError::InvalidArgument)?;
+    if addr & (PAGE_SIZE - 1) != 0
+        || len == 0
+        || addr > crate::mm::user_layout::USER_SPACE_END
+        || len > crate::mm::user_layout::USER_SPACE_END - addr
+    {
         return Err(SyscallError::InvalidArgument);
     }
 
     let proc = process::current_process().ok_or(SyscallError::InvalidState)?;
-
-    // Validate the region is in user space
-    validate_user_pointer(addr, length)?;
-
     let memory_space = proc.memory_space.lock();
     let result = memory_space.unmap(addr, length);
     result.map_err(|_| SyscallError::InvalidArgument)?;
@@ -322,42 +588,592 @@ pub fn sys_munmap(addr: usize, length: usize) -> SyscallResult {
 /// # Returns
 /// 0 on success.
 pub fn sys_mprotect(addr: usize, length: usize, prot: usize) -> SyscallResult {
-    if addr == 0 || length == 0 {
+    /// No effect on x86_64 (Linux accepts it).
+    const PROT_SEM: usize = 0x8;
+    // As Linux's do_mprotect_pkey (N-240): a page-aligned address and
+    // known protection bits (EINVAL); a zero length succeeds; a range that
+    // wraps, leaves user space or is not all mapped is ENOMEM.
+    if addr & (PAGE_SIZE - 1) != 0
+        || prot & !(PROT_READ | PROT_WRITE | PROT_EXEC | PROT_SEM | PROT_ARCH) != 0
+    {
         return Err(SyscallError::InvalidArgument);
     }
-
-    // Address must be page-aligned
-    if addr & 0xFFF != 0 {
-        return Err(SyscallError::InvalidArgument);
+    // PROT_BTI only where the CPU has BTI (arm64 `arch_validate_prot`).
+    #[cfg(target_arch = "aarch64")]
+    let prot = bti_prot(prot, crate::arch::bti_supported(), true)?;
+    let prot = prot & !PROT_SEM;
+    if length == 0 {
+        return Ok(0);
     }
-
-    // Validate protection flags
-    if prot & !(PROT_READ | PROT_WRITE | PROT_EXEC) != 0 {
-        return Err(SyscallError::InvalidArgument);
+    let len = length
+        .checked_next_multiple_of(PAGE_SIZE)
+        .ok_or(SyscallError::OutOfMemory)?;
+    if !crate::mm::user_layout::is_user_range(addr, len) {
+        return Err(SyscallError::OutOfMemory);
     }
 
     let proc = process::current_process().ok_or(SyscallError::InvalidState)?;
 
-    // Validate the region is in user space
-    validate_user_pointer(addr, length)?;
-
-    // Check W^X violation
-    if prot & PROT_WRITE != 0 && prot & PROT_EXEC != 0 {
+    // protect_region checks that every page of the range is mapped
+    // (ENOMEM, as Linux), that borrowed mappings gain no rights (N-135),
+    // and W^X with PR_SET_MDWE (EACCES, ADR 0017).
+    let memory_space = proc.memory_space.lock();
+    // EACCES before the data limit's ENOMEM, as Linux checks each VMA.
+    if memory_space.wx_policy().refuses_map(prot) {
         return Err(SyscallError::PermissionDenied);
     }
 
-    // Verify the mapping exists in the process's address space
-    let memory_space = proc.memory_space.lock();
-    let _mapping = memory_space
-        .find_mapping(VirtualAddress(addr as u64))
-        .ok_or(SyscallError::InvalidArgument)?;
+    // Private memory made writable becomes data: ENOMEM past RLIMIT_DATA,
+    // as Linux's mprotect_fixup (which refuses only when the data limit,
+    // not the address-space one, is what the change would break).
+    #[cfg(feature = "alloc")]
+    if prot & PROT_WRITE != 0 {
+        let end = (addr as u64)
+            .saturating_add(length as u64)
+            .div_ceil(PAGE_SIZE as u64)
+            * PAGE_SIZE as u64;
+        let gained = memory_space.data_bytes_gained(addr as u64, end);
+        if gained > 0 {
+            let limits = proc.limits();
+            let usage = memory_space.vm_usage(0, 0);
+            if !process::rlimit::may_expand_vm(&limits, usage, gained, true)
+                && process::rlimit::may_expand_vm(&limits, usage, gained, false)
+            {
+                return Err(SyscallError::OutOfMemory);
+            }
+        }
+    }
 
-    // Update hardware page table entries
     memory_space
         .protect_region(VirtualAddress(addr as u64), length, prot)
-        .map_err(|_| SyscallError::InvalidArgument)?;
+        .map_err(|e| match e {
+            crate::error::KernelError::PermissionDenied { .. } => SyscallError::PermissionDenied,
+            _ => SyscallError::OutOfMemory,
+        })?;
+    // Pages made executable may hold what the kernel or another mapping
+    // wrote through the data side (HA-25), as Linux syncs an executable
+    // page when it is installed. A program that writes its own code still
+    // syncs it itself (`__clear_cache`).
+    if prot & PROT_EXEC != 0 {
+        memory_space.sync_code(addr as u64, length as u64);
+    }
 
     Ok(0)
+}
+
+/// madvise advice (Linux values).
+mod madv {
+    pub const NORMAL: usize = 0;
+    pub const WILLNEED: usize = 3;
+    pub const DONTNEED: usize = 4;
+    pub const FREE: usize = 8;
+    pub const REMOVE: usize = 9;
+    pub const DONTFORK: usize = 10;
+    pub const DOFORK: usize = 11;
+    pub const MERGEABLE: usize = 12;
+    pub const DODUMP: usize = 17;
+    pub const WIPEONFORK: usize = 18;
+    pub const KEEPONFORK: usize = 19;
+    pub const COLD: usize = 20;
+    pub const PAGEOUT: usize = 21;
+    pub const POPULATE_READ: usize = 22;
+    pub const POPULATE_WRITE: usize = 23;
+    pub const DONTNEED_LOCKED: usize = 24;
+}
+
+/// madvise(addr, len, advice) (N-243), as Linux:
+///
+/// - EINVAL: an unaligned address, a length that overflows, an unknown advice
+///   (and MADV_COLLAPSE, the guard-page and memory-failure advice, none of
+///   which exist here); advice that does not apply to a mapping in the range
+///   (below). A zero length succeeds.
+/// - Applied to the mapped parts of the range; a gap makes the call fail with
+///   ENOMEM afterwards.
+/// - DONTNEED (and DONTNEED_LOCKED): private memory reads as zero again -- a
+///   file mapping as the file -- and gives up its pages; shared memory keeps
+///   its contents; device memory is EINVAL.
+/// - FREE: private anonymous memory only (EINVAL); the pages are kept, as Linux
+///   keeps them until memory runs short.
+/// - REMOVE: shared mappings only (EINVAL), writable ones (EACCES); the range
+///   reads as zero for every sharer.
+/// - DONTFORK/DOFORK, WIPEONFORK/KEEPONFORK: what a fork child gets.
+/// - POPULATE_READ/WRITE: pages are always present; EFAULT if the mapping
+///   cannot be read (or written).
+/// - NORMAL, RANDOM, SEQUENTIAL, WILLNEED, MERGEABLE, UNMERGEABLE, HUGEPAGE,
+///   NOHUGEPAGE, DONTDUMP, DODUMP, COLD, PAGEOUT: hints, no effect.
+pub fn sys_madvise(addr: usize, len: usize, advice: usize) -> SyscallResult {
+    use crate::mm::vas::MappingType as T;
+    let inval = SyscallError::InvalidArgument;
+    let known =
+        matches!(advice, madv::NORMAL..=madv::DONTNEED | madv::FREE..=madv::DONTNEED_LOCKED);
+    if addr & (PAGE_SIZE - 1) != 0 || !known {
+        return Err(inval);
+    }
+    let len = len.checked_next_multiple_of(PAGE_SIZE).ok_or(inval)?;
+    if len == 0 {
+        return Ok(0);
+    }
+    let end = addr.checked_add(len).ok_or(inval)?;
+    let (start, end) = (addr as u64, end as u64);
+    let proc = process::current_process().ok_or(SyscallError::InvalidState)?;
+
+    for _ in 0..8 {
+        let found = proc.memory_space.lock().mappings_in(start, end);
+        let mut covered = start;
+        let mut gap = false;
+        for m in &found {
+            gap |= m.start.0 > covered;
+            covered = covered.max(m.end().0);
+        }
+        gap |= covered < end;
+        let private = |m: &crate::mm::vas::VirtualMapping| {
+            !matches!(m.mapping_type, T::Shared | T::Device | T::SharedRegion)
+        };
+        let borrowed = |m: &crate::mm::vas::VirtualMapping| {
+            matches!(m.mapping_type, T::Device | T::SharedRegion)
+        };
+        let piece = |m: &crate::mm::vas::VirtualMapping| {
+            let from = start.max(m.start.0);
+            (from, end.min(m.end().0) - from)
+        };
+        match advice {
+            madv::DONTNEED | madv::DONTNEED_LOCKED => {
+                if found.iter().any(borrowed) {
+                    return Err(inval);
+                }
+                // The file contents of private file mappings, read unlocked.
+                let mut restore = alloc::vec::Vec::new();
+                for m in found.iter().filter(|m| private(m)) {
+                    if let Some(b) = &m.backing {
+                        let (from, bytes) = piece(m);
+                        let offset = b.offset + (from - m.start.0) as usize;
+                        restore.push((from, FileData::read(&*b.node, offset, bytes as usize)?));
+                    }
+                }
+                let vas = proc.memory_space.lock();
+                if !same_mappings(&vas.mappings_in(start, end), &found) {
+                    drop(vas);
+                    restore.into_iter().for_each(|(_, data)| data.release());
+                    continue;
+                }
+                if let Err(e) = vas.discard_private_pages(start, end) {
+                    restore.into_iter().for_each(|(_, data)| data.release());
+                    return Err(super::map_kernel_error(e));
+                }
+                for (from, data) in restore {
+                    data.install(&vas, from as usize)?;
+                }
+            }
+            madv::FREE => {
+                if found.iter().any(|m| !private(m) || m.backing.is_some()) {
+                    return Err(inval);
+                }
+            }
+            // Checked and done under one lock (a sealed mapping swapped in
+            // after a check on the snapshot would be zeroed).
+            madv::REMOVE => proc
+                .memory_space
+                .lock()
+                .zero_shared_pages(start, end)
+                .map_err(super::map_kernel_error)?,
+            madv::DONTFORK | madv::DOFORK | madv::WIPEONFORK | madv::KEEPONFORK => {
+                let (dont_fork, wipe) = match advice {
+                    madv::DONTFORK => (Some(true), None),
+                    madv::DOFORK => (Some(false), None),
+                    madv::WIPEONFORK => (None, Some(true)),
+                    _ => (None, Some(false)),
+                };
+                proc.memory_space
+                    .lock()
+                    .set_fork_behaviour(start, end, dont_fork, wipe)
+                    .map_err(|_| inval)?;
+            }
+            madv::POPULATE_READ | madv::POPULATE_WRITE => {
+                if found.iter().any(borrowed) {
+                    return Err(inval);
+                }
+                let need = if advice == madv::POPULATE_WRITE {
+                    crate::mm::PageFlags::WRITABLE
+                } else {
+                    crate::mm::PageFlags::USER
+                };
+                if found.iter().any(|m| !m.flags.contains(need)) {
+                    return Err(SyscallError::InvalidPointer);
+                }
+            }
+            // Hints: NORMAL..WILLNEED, MERGEABLE..DODUMP, COLD, PAGEOUT.
+            madv::NORMAL..=madv::WILLNEED
+            | madv::MERGEABLE..=madv::DODUMP
+            | madv::COLD
+            | madv::PAGEOUT => {}
+            _ => return Err(inval),
+        }
+        return if gap {
+            Err(SyscallError::OutOfMemory)
+        } else {
+            Ok(0)
+        };
+    }
+    Err(SyscallError::OutOfMemory)
+}
+
+/// Whether two snapshots of the mappings in a range are the same mappings
+/// (another thread changed none of them in between): place, kind,
+/// protection, write permission and file, by identity.
+fn same_mappings(
+    a: &[crate::mm::vas::VirtualMapping],
+    b: &[crate::mm::vas::VirtualMapping],
+) -> bool {
+    let file = |m: &crate::mm::vas::VirtualMapping| {
+        m.backing
+            .as_ref()
+            .map(|b| (alloc::sync::Arc::as_ptr(&b.node) as *const u8, b.offset))
+    };
+    a.len() == b.len()
+        && a.iter().zip(b).all(|(x, y)| {
+            x.start == y.start
+                && x.size == y.size
+                && x.mapping_type == y.mapping_type
+                && x.flags == y.flags
+                && x.may_write == y.may_write
+                && file(x) == file(y)
+        })
+}
+
+const MREMAP_MAYMOVE: usize = 1;
+const MREMAP_FIXED: usize = 2;
+const MREMAP_DONTUNMAP: usize = 4;
+
+/// mremap(old, old_len, new_len, flags, new) (N-246), as Linux:
+///
+/// - EINVAL: an unaligned address, unknown flags, FIXED or DONTUNMAP without
+///   MAYMOVE, a zero new length, a FIXED target that is unaligned, outside user
+///   space or overlapping the old range; DONTUNMAP with a size change or on
+///   anything but private anonymous memory (Linux 5.7's rule); an old length of
+///   0 on a private mapping.
+/// - EFAULT: the old range is not within one mapping.
+/// - Shrinking unmaps the tail in place; growing extends in place when the
+///   pages after the mapping are free, and otherwise moves the mapping
+///   (MAYMOVE; ENOMEM without it) -- the pages themselves move, nothing is
+///   copied. Grown pages are zero for anonymous memory, the file's next pages
+///   for a file mapping and a memfd's own pages for a shared one. FIXED moves
+///   to `new`, replacing what is there; DONTUNMAP moves and leaves the old
+///   range mapped with fresh zero pages; an old length of 0 on a shared mapping
+///   maps its pages a second time.
+/// - Growth counts against RLIMIT_AS and RLIMIT_DATA (ENOMEM).
+pub fn sys_mremap(
+    old_addr: usize,
+    old_len: usize,
+    new_len: usize,
+    flags: usize,
+    new_addr: usize,
+) -> SyscallResult {
+    use crate::mm::user_layout::is_user_range;
+    let inval = SyscallError::InvalidArgument;
+    let may_move = flags & MREMAP_MAYMOVE != 0;
+    let fixed = flags & MREMAP_FIXED != 0;
+    let dont_unmap = flags & MREMAP_DONTUNMAP != 0;
+    if flags & !(MREMAP_MAYMOVE | MREMAP_FIXED | MREMAP_DONTUNMAP) != 0
+        || old_addr & (PAGE_SIZE - 1) != 0
+        || (fixed || dont_unmap) && !may_move
+    {
+        return Err(inval);
+    }
+    let old_len = old_len.checked_next_multiple_of(PAGE_SIZE).ok_or(inval)?;
+    let new_len = new_len.checked_next_multiple_of(PAGE_SIZE).ok_or(inval)?;
+    if new_len == 0 || dont_unmap && old_len != new_len {
+        return Err(inval);
+    }
+    // Ranges from user arguments are checked before any sum of them (an
+    // overflow would panic a debug kernel).
+    if !is_user_range(old_addr, old_len) {
+        return Err(SyscallError::InvalidPointer);
+    }
+    let target = if fixed {
+        if new_addr & (PAGE_SIZE - 1) != 0 || !is_user_range(new_addr, new_len) {
+            return Err(inval);
+        }
+        // Both ranges are in user space, so the sums cannot overflow.
+        if new_addr < old_addr + old_len && old_addr < new_addr + new_len {
+            return Err(inval);
+        }
+        Some(new_addr)
+    } else {
+        None
+    };
+
+    let proc = process::current_process().ok_or(SyscallError::InvalidState)?;
+    // The mapping is looked at, the file's pages for any growth are read
+    // with the address space unlocked (N-118), and then, locked again, the
+    // change is made if the mapping is still the one looked at. Another
+    // thread changing it in between makes the call start over.
+    for _ in 0..8 {
+        let found = proc
+            .memory_space
+            .lock()
+            .find_mapping(VirtualAddress(old_addr as u64));
+        let m = found.ok_or(SyscallError::InvalidPointer)?;
+        let into = old_addr as u64 - m.start.0;
+        if into + old_len as u64 > m.size as u64 {
+            return Err(SyscallError::InvalidPointer);
+        }
+        let shared = m.mapping_type == MappingType::Shared;
+        if old_len == 0 && !shared || dont_unmap && (shared || m.backing.is_some()) {
+            return Err(inval);
+        }
+        // Device memory and IPC regions are only borrowed: added pages
+        // would be allocator frames that such a mapping never frees (Linux
+        // refuses to grow VM_PFNMAP/VM_DONTEXPAND areas, EFAULT).
+        if new_len > old_len && !m.owns_frames() {
+            return Err(SyscallError::InvalidPointer);
+        }
+        // The file offset just past the old range: where growth continues.
+        let grow_offset = m
+            .backing
+            .as_ref()
+            .map(|b| b.offset + into as usize + old_len);
+        let growth = match (&m.backing, grow_offset) {
+            (Some(b), Some(at)) if new_len > old_len && !shared => {
+                Some(FileData::read(&*b.node, at, new_len - old_len)?)
+            }
+            _ => None,
+        };
+        let vas = proc.memory_space.lock();
+        let same = vas
+            .find_mapping(VirtualAddress(old_addr as u64))
+            .is_some_and(|now| {
+                same_mappings(core::slice::from_ref(&now), core::slice::from_ref(&m))
+            });
+        if !same {
+            drop(vas);
+            if let Some(growth) = growth {
+                growth.release();
+            }
+            continue;
+        }
+        let request = Remap {
+            old: old_addr,
+            old_len,
+            new_len,
+            may_move,
+            target,
+            dont_unmap,
+            grow_offset,
+        };
+        return remap_locked(&proc, &vas, &request, &m, growth);
+    }
+    Err(SyscallError::OutOfMemory)
+}
+
+/// An mremap request, validated.
+struct Remap {
+    old: usize,
+    old_len: usize,
+    new_len: usize,
+    may_move: bool,
+    target: Option<usize>,
+    dont_unmap: bool,
+    /// File offset for pages added after the old range (file mappings).
+    grow_offset: Option<usize>,
+}
+
+/// mremap with the address space locked: `m` is the mapping holding the
+/// old range, `growth` the file data for added pages (private file
+/// mappings).
+fn remap_locked(
+    proc: &process::Process,
+    vas: &crate::mm::VirtualAddressSpace,
+    r: &Remap,
+    m: &crate::mm::vas::VirtualMapping,
+    growth: Option<FileData>,
+) -> SyscallResult {
+    let release = |growth: Option<FileData>| {
+        if let Some(growth) = growth {
+            growth.release();
+        }
+    };
+    let nomem = SyscallError::OutOfMemory;
+    let grow = (r.new_len.saturating_sub(r.old_len)) as u64;
+
+    // A second mapping of a shared mapping's pages (old length 0).
+    if r.old_len == 0 {
+        release(growth);
+        let pages = r.new_len / PAGE_SIZE;
+        let first = (r.old - m.start.0 as usize) / PAGE_SIZE;
+        let frames = match &m.backing {
+            Some(b) => b
+                .node
+                .share_pages(b.offset / PAGE_SIZE + first, pages, m.may_write)
+                .ok_or(SyscallError::InvalidArgument)?
+                .map_err(super::map_kernel_error)?,
+            None => {
+                let frames = m
+                    .physical_frames
+                    .get(first..first + pages)
+                    .ok_or(SyscallError::InvalidArgument)?
+                    .to_vec();
+                for &frame in &frames {
+                    crate::mm::frame_refs::share(frame);
+                }
+                frames
+            }
+        };
+        let skip = r
+            .target
+            .map_or((0, 0), |t| (t as u64, (t + r.new_len) as u64));
+        if may_expand_vm(proc, vas, skip, r.new_len as u64, false).is_err() {
+            for &frame in &frames {
+                if crate::mm::frame_refs::release(frame) {
+                    crate::mm::note_free_failure(
+                        crate::mm::FRAME_ALLOCATOR.lock().free_frames(frame, 1),
+                        frame,
+                        "mremap",
+                    );
+                }
+            }
+            return Err(nomem);
+        }
+        let at = r.target.map(|t| VirtualAddress(t as u64));
+        let start = vas
+            .map_shared_frames(at, &frames, m.flags, m.may_write)
+            .map_err(|_| nomem)?;
+        if let Some(b) = &m.backing {
+            vas.set_backing(start, b.node.clone(), b.offset + first * PAGE_SIZE);
+        }
+        return Ok(start.as_usize());
+    }
+
+    // Shrinking in place.
+    if r.target.is_none() && !r.dont_unmap && r.new_len <= r.old_len {
+        release(growth);
+        if r.new_len < r.old_len {
+            vas.unmap(r.old + r.new_len, r.old_len - r.new_len)
+                .map_err(|_| SyscallError::InvalidArgument)?;
+        }
+        return Ok(r.old);
+    }
+
+    // Growing in place: the old range ends the mapping and the pages after
+    // it are free.
+    let end = (r.old + r.old_len) as u64;
+    if r.target.is_none()
+        && !r.dont_unmap
+        && end == m.end().0
+        && crate::mm::user_layout::is_user_range(r.old, r.new_len)
+        && vas.range_is_free(end, (r.old + r.new_len) as u64)
+    {
+        if let Err(e) = may_expand_vm(proc, vas, (0, 0), grow, m.is_data()) {
+            release(growth);
+            return Err(e);
+        }
+        extend(vas, m, r, end as usize, growth)?;
+        return Ok(r.old);
+    }
+    if !r.may_move {
+        release(growth);
+        return Err(nomem);
+    }
+
+    // Moving: to the FIXED target (whatever is there is unmapped first,
+    // and the old range is cut to the new length) or to a free range.
+    let moved_len = r.old_len.min(r.new_len);
+    let dest = match r.target {
+        Some(t) => {
+            if let Err(e) = vas.unmap(t, r.new_len) {
+                release(growth);
+                return Err(super::map_kernel_error(e));
+            }
+            if r.new_len < r.old_len {
+                let _ = vas.unmap(r.old + r.new_len, r.old_len - r.new_len);
+            }
+            t
+        }
+        None => match vas.reserve_mmap_area(r.new_len) {
+            Ok(at) => at.as_usize(),
+            Err(_) => {
+                release(growth);
+                return Err(nomem);
+            }
+        },
+    };
+    let extra = grow + if r.dont_unmap { r.old_len as u64 } else { 0 };
+    if extra > 0 {
+        if let Err(e) = may_expand_vm(proc, vas, (0, 0), extra, m.is_data()) {
+            release(growth);
+            return Err(e);
+        }
+    }
+    if let Err(e) = vas.move_range(r.old as u64, moved_len as u64, dest as u64) {
+        release(growth);
+        return Err(super::map_kernel_error(e));
+    }
+    if r.dont_unmap {
+        // Private anonymous memory only (checked): fresh zero pages.
+        vas.map_region_fixed(
+            VirtualAddress(r.old as u64),
+            r.old_len,
+            m.mapping_type,
+            Some(m.flags),
+        )
+        .map_err(|_| nomem)?;
+    }
+    if r.new_len > moved_len {
+        // The moved mapping's record, for extending it.
+        let moved = vas
+            .find_mapping(VirtualAddress(dest as u64))
+            .ok_or(SyscallError::InvalidState)?;
+        extend(vas, &moved, r, dest + moved_len, growth)?;
+    } else {
+        release(growth);
+    }
+    Ok(dest)
+}
+
+/// Map the pages added after a mapping (`m`, ending at `at`) that mremap
+/// grows: a memfd's next pages for a shared file mapping, the file's next
+/// pages (`growth`) for a private one, zero pages otherwise; then join them
+/// to it.
+fn extend(
+    vas: &crate::mm::VirtualAddressSpace,
+    m: &crate::mm::vas::VirtualMapping,
+    r: &Remap,
+    at: usize,
+    growth: Option<FileData>,
+) -> Result<(), SyscallError> {
+    let nomem = SyscallError::OutOfMemory;
+    let len = r.new_len - r.old_len.min(r.new_len);
+    let start = VirtualAddress(at as u64);
+    let shared_frames = match (&m.backing, r.grow_offset) {
+        (Some(b), Some(offset)) if m.mapping_type == MappingType::Shared => b
+            .node
+            .share_pages(offset / PAGE_SIZE, len / PAGE_SIZE, m.may_write)
+            .transpose()
+            .map_err(super::map_kernel_error)?,
+        _ => None,
+    };
+    if let Some(frames) = shared_frames {
+        if let Some(growth) = growth {
+            growth.release();
+        }
+        vas.map_shared_frames(Some(start), &frames, m.flags, m.may_write)
+            .map_err(|_| nomem)?;
+    } else {
+        if let Err(e) = vas.map_region_fixed(start, len, m.mapping_type, Some(m.flags)) {
+            if let Some(growth) = growth {
+                growth.release();
+            }
+            return Err(super::map_kernel_error(e));
+        }
+        if let Some(growth) = growth {
+            growth.install(vas, at)?;
+        }
+        vas.set_may_write(start, m.may_write);
+    }
+    if let (Some(b), Some(offset)) = (&m.backing, r.grow_offset) {
+        vas.set_backing(start, b.node.clone(), offset);
+    }
+    vas.merge_with_next(m.start);
+    Ok(())
 }
 
 /// Maximum user heap size: 8 GiB.
@@ -396,6 +1212,16 @@ pub fn sys_brk(addr: usize) -> SyscallResult {
             // Return current break (unchanged) to signal failure.
             return Ok(memory_space.brk(None).as_usize());
         }
+        // RLIMIT_AS and RLIMIT_DATA for the pages the heap grows by.
+        #[cfg(feature = "alloc")]
+        {
+            let page = PAGE_SIZE as u64;
+            let current = memory_space.brk(None).0.div_ceil(page);
+            let grow = requested.div_ceil(page).saturating_sub(current) * page;
+            if grow > 0 && may_expand_vm(&proc, &memory_space, (0, 0), grow, true).is_err() {
+                return Ok(memory_space.brk(None).as_usize());
+            }
+        }
 
         // Page-align the request upward for efficiency.
         // The VAS brk() handles sub-page increments, but page-aligning here
@@ -408,101 +1234,23 @@ pub fn sys_brk(addr: usize) -> SyscallResult {
     Ok(result.as_usize())
 }
 
-// ============================================================================
-// Resource limits (POSIX getrlimit / setrlimit)
-// ============================================================================
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-/// POSIX resource limit identifiers
-const RLIMIT_AS: usize = 9; // Address space size
-const RLIMIT_DATA: usize = 2; // Data segment size (heap)
-const RLIMIT_STACK: usize = 3; // Stack size
-const RLIMIT_NOFILE: usize = 7; // Max open files
-const RLIMIT_FSIZE: usize = 1; // Max file size
-
-/// RLIM_INFINITY -- unlimited
-const RLIM_INFINITY: u64 = u64::MAX;
-
-/// rlimit structure (matches POSIX)
-#[repr(C)]
-struct Rlimit {
-    rlim_cur: u64, // soft limit
-    rlim_max: u64, // hard limit
-}
-
-/// Get resource limits (syscall 260).
-///
-/// # Arguments
-/// - `resource`: RLIMIT_* constant
-/// - `rlim_ptr`: Pointer to user-space Rlimit struct to fill
-pub fn sys_getrlimit(resource: usize, rlim_ptr: usize) -> SyscallResult {
-    if rlim_ptr == 0 {
-        return Err(SyscallError::InvalidArgument);
+    #[test]
+    fn prot_bti_follows_arm64_linux() {
+        let rx_bti = PROT_READ | PROT_EXEC | PROT_BTI;
+        // A BTI CPU keeps it, for both calls.
+        assert_eq!(bti_prot(rx_bti, true, false), Ok(rx_bti));
+        assert_eq!(bti_prot(rx_bti, true, true), Ok(rx_bti));
+        // Without BTI: mmap drops it, mprotect refuses it.
+        assert_eq!(bti_prot(rx_bti, false, false), Ok(PROT_READ | PROT_EXEC));
+        assert_eq!(
+            bti_prot(rx_bti, false, true),
+            Err(SyscallError::InvalidArgument)
+        );
+        // Nothing changes without it.
+        assert_eq!(bti_prot(PROT_READ, false, true), Ok(PROT_READ));
     }
-    validate_user_pointer(rlim_ptr, core::mem::size_of::<Rlimit>())?;
-
-    let (cur, max) = match resource {
-        RLIMIT_AS => {
-            let limit = MAX_USER_HEAP_SIZE;
-            (limit, limit)
-        }
-        RLIMIT_DATA => {
-            let limit = MAX_USER_HEAP_SIZE;
-            (limit, limit)
-        }
-        RLIMIT_STACK => {
-            let stack_size = 8 * 1024 * 1024u64; // 8MB default
-            (stack_size, stack_size)
-        }
-        RLIMIT_NOFILE => {
-            (256, 256) // current fd table limit
-        }
-        RLIMIT_FSIZE => {
-            (RLIM_INFINITY, RLIM_INFINITY) // no file size limit
-        }
-        _ => return Err(SyscallError::InvalidArgument),
-    };
-
-    // Write the rlimit struct to user space
-    let rlim = rlim_ptr as *mut Rlimit;
-    unsafe {
-        (*rlim).rlim_cur = cur;
-        (*rlim).rlim_max = max;
-    }
-
-    Ok(0)
-}
-
-/// Set resource limits (syscall 261).
-///
-/// Currently only validates and acknowledges -- actual enforcement is via
-/// the existing per-resource constants. Future: per-process configurable
-/// limits.
-///
-/// # Arguments
-/// - `resource`: RLIMIT_* constant
-/// - `rlim_ptr`: Pointer to user-space Rlimit struct with new values
-pub fn sys_setrlimit(resource: usize, rlim_ptr: usize) -> SyscallResult {
-    if rlim_ptr == 0 {
-        return Err(SyscallError::InvalidArgument);
-    }
-    validate_user_pointer(rlim_ptr, core::mem::size_of::<Rlimit>())?;
-
-    let rlim = rlim_ptr as *const Rlimit;
-    let (cur, max) = unsafe { ((*rlim).rlim_cur, (*rlim).rlim_max) };
-
-    // Validate: soft limit must not exceed hard limit
-    if cur > max {
-        return Err(SyscallError::InvalidArgument);
-    }
-
-    // Validate the resource type is known
-    match resource {
-        RLIMIT_AS | RLIMIT_DATA | RLIMIT_STACK | RLIMIT_NOFILE | RLIMIT_FSIZE => {}
-        _ => return Err(SyscallError::InvalidArgument),
-    }
-
-    // Acknowledge the request (limits are currently global constants).
-    // Per-process configurable limits deferred to later sprint.
-    let _ = (cur, max);
-    Ok(0)
 }

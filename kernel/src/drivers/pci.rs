@@ -3,7 +3,6 @@
 //! Implements PCI bus enumeration and device management.
 
 use alloc::{collections::BTreeMap, format, string::String, vec::Vec};
-use core::mem;
 
 use crate::{
     error::KernelError,
@@ -576,14 +575,22 @@ impl PciBus {
 
     /// Read configuration byte
     fn read_config_byte(&self, location: PciLocation, register: PciConfigRegister) -> u8 {
-        let offset = register as u16;
+        self.read_config_byte_at(location, register as u16)
+    }
+
+    /// Read a configuration byte at a raw offset.
+    fn read_config_byte_at(&self, location: PciLocation, offset: u16) -> u8 {
         let dword = self.read_config_dword(location, offset & !3);
         ((dword >> ((offset & 3) * 8)) & 0xFF) as u8
     }
 
     /// Read configuration word
     fn read_config_word(&self, location: PciLocation, register: PciConfigRegister) -> u16 {
-        let offset = register as u16;
+        self.read_config_word_at(location, register as u16)
+    }
+
+    /// Read a configuration word at a raw offset.
+    fn read_config_word_at(&self, location: PciLocation, offset: u16) -> u16 {
         let dword = self.read_config_dword(location, offset & !3);
         ((dword >> ((offset & 3) * 8)) & 0xFFFF) as u16
     }
@@ -751,17 +758,11 @@ impl Bus for PciBus {
         let location = PciLocation::new(bus, dev, func);
 
         match size {
-            // SAFETY: PciConfigRegister is #[repr(u16)] so any u16 value that maps
-            // to a valid variant is safe to transmute. Offsets outside valid register
-            // values will produce a bit pattern that reads from the corresponding PCI
-            // config space offset, which is defined hardware behavior.
-            1 => Ok(self.read_config_byte(location, unsafe {
-                mem::transmute::<u16, PciConfigRegister>(offset)
-            }) as u32),
-            // SAFETY: Same as the 1-byte case above.
-            2 => Ok(self.read_config_word(location, unsafe {
-                mem::transmute::<u16, PciConfigRegister>(offset)
-            }) as u32),
+            // Raw offsets: transmuting an arbitrary u16 into the
+            // PciConfigRegister enum was undefined behaviour for every offset
+            // that is not one of its variants (N-155).
+            1 => Ok(self.read_config_byte_at(location, offset) as u32),
+            2 => Ok(self.read_config_word_at(location, offset) as u32),
             4 => Ok(self.read_config_dword(location, offset)),
             _ => Err(KernelError::InvalidArgument {
                 name: "size",

@@ -38,6 +38,10 @@ void free(void *ptr);
 long write(int fd, const void *buf, unsigned long count);
 void abort(void) __attribute__((noreturn));
 
+/* Catch-clause type matching (cxx_typeinfo.c) */
+int __veridian_can_catch(const void *catch_type, const void *thrown_type,
+                         void *thrown_obj, void **adjusted);
+
 /* ========================================================================= */
 /* Exception class identifier                                                */
 /* ========================================================================= */
@@ -245,8 +249,9 @@ void *__cxa_begin_catch(void *exception_header)
 
     globals->uncaughtExceptions--;
 
-    /* Return pointer to the user exception object */
-    return header + 1;
+    /* The object the handler binds to: a base subobject when a base-class
+     * handler caught a derived exception (set by the personality). */
+    return header->adjustedPtr ? header->adjustedPtr : (void *)(header + 1);
 }
 
 /* ========================================================================= */
@@ -317,7 +322,7 @@ void *__cxa_get_exception_ptr(void *exception_header)
         (struct __cxa_exception *)((char *)unwind_exc -
             __builtin_offsetof(struct __cxa_exception, unwindHeader));
 
-    return header + 1;
+    return header->adjustedPtr ? header->adjustedPtr : (void *)(header + 1);
 }
 
 /* ========================================================================= */
@@ -499,6 +504,48 @@ static uint64_t read_encoded_ptr(const uint8_t **p, uint8_t encoding,
     return result;
 }
 
+/* Size of one type-table entry in the given encoding */
+static size_t encoded_size(uint8_t encoding)
+{
+    switch (encoding & 0x0F) {
+    case DW_EH_PE_udata2:
+    case DW_EH_PE_sdata2:
+        return 2;
+    case DW_EH_PE_udata4:
+    case DW_EH_PE_sdata4:
+        return 4;
+    default:
+        return 8;
+    }
+}
+
+/*
+ * Type-table entry `index` (1-based): entries are stored backwards from
+ * the end of the table, so entry i starts i entry-sizes before it. A null
+ * entry is catch (...).
+ */
+static const void *type_table_entry(const uint8_t *type_table,
+                                    uint8_t tt_encoding, uint64_t index)
+{
+    const uint8_t *entry = type_table - index * encoded_size(tt_encoding);
+    return (const void *)(uintptr_t)read_encoded_ptr(&entry, tt_encoding, 0);
+}
+
+/*
+ * Whether the handler for `catch_type` takes this exception. Foreign
+ * (non-C++) exceptions only match catch (...).
+ */
+static int handler_matches(const void *catch_type, int native,
+                           struct __cxa_exception *xh, void **adjusted)
+{
+    if (!catch_type) {
+        *adjusted = native ? (void *)(xh + 1) : (void *)0;
+        return 1;
+    }
+    return native && __veridian_can_catch(catch_type, xh->exceptionType,
+                                          xh + 1, adjusted);
+}
+
 /* ========================================================================= */
 /* __gxx_personality_v0 -- GCC C++ personality routine                       */
 /* ========================================================================= */
@@ -594,6 +641,11 @@ _Unwind_Reason_Code __gxx_personality_v0(
     int handler_switch_value = 0;
     int found_handler = 0;
     int found_cleanup = 0;
+    int native = exception_class == CXX_EXCEPTION_CLASS;
+    struct __cxa_exception *xh =
+        (struct __cxa_exception *)((char *)ue_header -
+            __builtin_offsetof(struct __cxa_exception, unwindHeader));
+    void *adjusted = (void *)0;
 
     if (action_offset > 0) {
         const uint8_t *ap = action_table + action_offset - 1;
@@ -604,16 +656,11 @@ _Unwind_Reason_Code __gxx_personality_v0(
             int64_t next_offset = read_sleb128(&ap);
 
             if (type_filter > 0) {
-                /*
-                 * Positive filter: this is a catch clause.
-                 * type_filter is an index into the type table.
-                 *
-                 * For now, we treat any positive filter as a match.
-                 * A full implementation would compare the exception's
-                 * type_info against the type table entry.
-                 */
-                if (exception_class == CXX_EXCEPTION_CLASS) {
-                    /* Match: this catch handler catches our exception */
+                /* Catch clause: type_filter indexes the type table */
+                if (type_table &&
+                    handler_matches(type_table_entry(type_table, tt_encoding,
+                                                     (uint64_t)type_filter),
+                                    native, xh, &adjusted)) {
                     handler_switch_value = (int)type_filter;
                     found_handler = 1;
                     break;
@@ -621,8 +668,32 @@ _Unwind_Reason_Code __gxx_personality_v0(
             } else if (type_filter == 0) {
                 /* Cleanup action (no type filter) */
                 found_cleanup = 1;
+            } else if (type_table) {
+                /*
+                 * Exception specification: a ULEB128 list of type-table
+                 * indices starting -type_filter - 1 bytes past the table,
+                 * ended by 0. The handler (which calls unexpected) runs
+                 * when the exception matches none of the listed types.
+                 */
+                const uint8_t *spec = type_table + (-type_filter - 1);
+                int allowed = 0;
+                uint64_t idx;
+                void *ignored;
+                while ((idx = read_uleb128(&spec)) != 0) {
+                    if (handler_matches(type_table_entry(type_table,
+                                                         tt_encoding, idx),
+                                        native, xh, &ignored)) {
+                        allowed = 1;
+                        break;
+                    }
+                }
+                if (!allowed) {
+                    handler_switch_value = (int)type_filter;
+                    found_handler = 1;
+                    adjusted = native ? (void *)(xh + 1) : (void *)0;
+                    break;
+                }
             }
-            /* Negative filter: exception spec (not implemented) */
 
             if (next_offset == 0)
                 break;
@@ -636,14 +707,19 @@ _Unwind_Reason_Code __gxx_personality_v0(
 
     /* ---- Phase 1: just report whether we found a handler ---- */
     if (actions & _UA_SEARCH_PHASE) {
-        if (found_handler)
+        if (found_handler) {
+            if (native)
+                xh->adjustedPtr = adjusted;
             return _URC_HANDLER_FOUND;
+        }
         return _URC_CONTINUE_UNWIND;
     }
 
     /* ---- Phase 2: install context for landing pad ---- */
     if (actions & _UA_CLEANUP_PHASE) {
         if (found_handler || found_cleanup) {
+            if (found_handler && native)
+                xh->adjustedPtr = adjusted;
             /*
              * Set up the registers that the landing pad expects:
              *   GR[0] (RAX on x86_64): pointer to _Unwind_Exception

@@ -1,0 +1,101 @@
+VeridianOS: no moc includes where there is nothing to moc
+
+The keyboard and spell checking KCMs, tastenbrett and the emoji selector's plugin include their ".moc" files,
+but contain no Q_OBJECT, Q_GADGET, Q_NAMESPACE or K_PLUGIN_* (their
+QObject classes are declared in headers, which AutoMoc handles on its
+own), so AutoMoc generated nothing for them and warned for each
+("includes the moc file ..., but does not contain a Q_OBJECT ...").
+The includes are removed.
+
+--- a/kcms/keyboard/keyboard_config.cpp
++++ b/kcms/keyboard/keyboard_config.cpp
+@@ -194,6 +194,4 @@
+     m_layouts.clear();
+     m_settings->setDefaults();
+ }
+-
+-#include "keyboard_config.moc"
+ #include "moc_keyboard_config.cpp"
+--- a/kcms/keyboard/xkboptionsmodel.cpp
++++ b/kcms/keyboard/xkboptionsmodel.cpp
+@@ -253,4 +253,3 @@
+ }
+ 
+ #include "moc_xkboptionsmodel.cpp"
+-#include "xkboptionsmodel.moc"
+--- a/kcms/keyboard/userlayoutmodel.cpp
++++ b/kcms/keyboard/userlayoutmodel.cpp
+@@ -155,4 +155,3 @@
+ }
+ 
+ #include "moc_userlayoutmodel.cpp"
+-#include "userlayoutmodel.moc"
+--- a/kcms/keyboard/shortcuthelper.cpp
++++ b/kcms/keyboard/shortcuthelper.cpp
+@@ -103,4 +103,3 @@
+ }
+ 
+ #include "moc_shortcuthelper.cpp"
+-#include "shortcuthelper.moc"
+--- a/kcms/keyboard/layoutmodel.cpp
++++ b/kcms/keyboard/layoutmodel.cpp
+@@ -58,6 +58,4 @@
+         {Roles::VariantNameRole, QByteArrayLiteral("variantName")},
+     };
+ }
+-
+-#include "layoutmodel.moc"
+ #include "moc_layoutmodel.cpp"
+--- a/kcms/keyboard/keyboardmodel.cpp
++++ b/kcms/keyboard/keyboardmodel.cpp
+@@ -52,6 +52,4 @@
+         {Roles::NameRole, QByteArrayLiteral("name")},
+     };
+ }
+-
+-#include "keyboardmodel.moc"
+ #include "moc_keyboardmodel.cpp"
+--- a/kcms/keyboard/kcm_keyboard.cpp
++++ b/kcms/keyboard/kcm_keyboard.cpp
+@@ -191,6 +191,4 @@
+     m_shortcutHelper->actionColletion()->resetLayoutShortcuts();
+     m_shortcutHelper->actionColletion()->setLayoutShortcuts(m_config->layouts());
+ }
+-
+-#include "kcm_keyboard.moc"
+ #include "moc_kcm_keyboard.cpp"
+--- a/kcms/keyboard/tastenbrett/main.cpp
++++ b/kcms/keyboard/tastenbrett/main.cpp
+@@ -181,5 +181,3 @@
+ 
+     return app.exec();
+ }
+-
+-#include "main.moc"
+--- a/kcms/spellchecking/spellcheckingskeleton.cpp
++++ b/kcms/spellchecking/spellcheckingskeleton.cpp
+@@ -73,6 +73,4 @@
+     return m_store->clients();
+ }
+ 
+-#include "spellcheckingskeleton.moc"
+-
+ #include "moc_spellcheckingskeleton.cpp"
+--- a/kcms/spellchecking/spellcheckingdata.cpp
++++ b/kcms/spellchecking/spellcheckingdata.cpp
+@@ -51,6 +51,4 @@
+     return isDefaults;
+ }
+ 
+-#include "spellcheckingdata.moc"
+-
+ #include "moc_spellcheckingdata.cpp"
+--- a/emojier/emojierplugin.cpp
++++ b/emojier/emojierplugin.cpp
+@@ -332,6 +332,4 @@
+     clipboard->setText(text, QClipboard::Selection);
+ }
+ 
+-#include "emojierplugin.moc"
+-
+ #include "moc_emojierplugin.cpp"

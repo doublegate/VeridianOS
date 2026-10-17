@@ -41,7 +41,7 @@ As of v0.5.0, VeridianOS has completed all self-hosting infrastructure
 | PS/2 keyboard + serial | Working | Dual input, multiplexed |
 | VFS + filesystems | Working | RamFS, DevFS, ProcFS, BlockFS (ext2-style dirs) |
 | Process fork/exec | Working | ELF multi-LOAD segments (T6-0), capability inheritance |
-| IPC system | Working | Sync/async, zero-copy, fast path <1us |
+| IPC system | Working | Queued sync/async messages with sleeping receivers, zero-copy shared regions; no fast path (v0.28) |
 | Package manager | Working | In-kernel vpkg, DPLL SAT resolver, VFS-backed DB |
 | Syscall interface | Working | 79+ syscalls across 7 categories |
 | Custom libc | Working | 17 source files, 25+ headers, tri-arch setjmp |

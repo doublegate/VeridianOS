@@ -655,6 +655,9 @@ impl CommandTableHeader {
 
     /// Write a Register H2D FIS into the command FIS area.
     pub fn set_h2d_fis(&mut self, fis: &FisRegH2D) {
+        // SAFETY: FisRegH2D is a #[repr(C, packed)] struct of exactly 20 u8
+        // fields, so the reference is valid for reading 20 initialized bytes
+        // with alignment 1 for the borrow's lifetime.
         let fis_bytes =
             unsafe { core::slice::from_raw_parts(fis as *const FisRegH2D as *const u8, 20) };
         self.cfis[..20].copy_from_slice(fis_bytes);

@@ -1,0 +1,86 @@
+VeridianOS: fix kdeplasma-addons compiler warnings
+
+GCC reported:
+- applets/comic/engine/comic.cpp:100,108 -Wmissing-field-initializers (15
+  members each): the error results were built as
+  ComicMetaData{.reason = reason, .error = true}. The surrounding
+  QT_WARNING_DISABLE_*("-Wmissing-designated-field-initializers") pragmas
+  name a different option, so they never covered GCC's warning. The error
+  result is now built by a local lambda that value-initializes the struct
+  (ComicMetaData data{}) and then assigns reason and error; the pragmas are
+  dropped. Every other member gets the same default as before.
+- applets/grouping/groupingcontainment.cpp:74 -Wunused-variable: the
+  oldContainmentInstantiated flag was set and never read; removed.
+- applets/weather/weatherdatamonitor_p.cpp:236 -Wmissing-field-initializers
+  (IonInfo::forecastDataList): the designated initializer named only
+  ionControl. Now IonInfo info{} followed by assigning ionControl; the other
+  members keep their defaults (locationCount 0, empty list). The local lost
+  its const, which nothing relied on (it is only copied into the hash).
+
+Behaviour is unchanged.
+
+diff -ru a/applets/comic/engine/comic.cpp b/applets/comic/engine/comic.cpp
+--- a/applets/comic/engine/comic.cpp	2026-10-08 16:56:43.373004347 -0400
++++ b/applets/comic/engine/comic.cpp	2026-10-08 16:57:25.340572500 -0400
+@@ -91,13 +91,16 @@
+         connect(provider, &ComicProvider::error, this, &ComicEngine::error);
+         return true;
+     }
+-    // Struct with just error=true is fine!
+-    QT_WARNING_PUSH
+-    QT_WARNING_DISABLE_GCC("-Wmissing-designated-field-initializers");
+-    QT_WARNING_DISABLE_CLANG("-Wmissing-designated-field-initializers");
++    // Struct with just error=true is fine: every other member keeps its default.
++    const auto errorMetaData = [reason] {
++        ComicMetaData data{};
++        data.reason = reason;
++        data.error = true;
++        return data;
++    };
+     // ... start a new query otherwise
+     if (parts.count() < 2) {
+-        Q_EMIT requestFinished(ComicMetaData{.reason = reason, .error = true});
++        Q_EMIT requestFinished(errorMetaData());
+         qCWarning(PLASMA_COMIC) << "Less than two arguments specified.";
+         return false;
+     }
+@@ -105,12 +108,11 @@
+         // User might have installed more from GHNS
+         loadProviders();
+         if (!mProviders.contains(parts[0])) {
+-            Q_EMIT requestFinished(ComicMetaData{.reason = reason, .error = true});
++            Q_EMIT requestFinished(errorMetaData());
+             qCWarning(PLASMA_COMIC) << identifier << "comic plugin does not seem to be installed.";
+             return false;
+         }
+     }
+-    QT_WARNING_POP
+ 
+     // check if there is a connection
+     if (!isOnline()) {
+diff -ru a/applets/grouping/groupingcontainment.cpp b/applets/grouping/groupingcontainment.cpp
+--- a/applets/grouping/groupingcontainment.cpp	2026-10-08 16:56:43.395336551 -0400
++++ b/applets/grouping/groupingcontainment.cpp	2026-10-08 16:57:26.548563077 -0400
+@@ -71,7 +71,6 @@
+     }
+ 
+     // Delete the the old grouping containment
+-    bool oldContainmentInstantiated = false;
+     for (Plasma::Containment *cont : corona()->containments()) {
+         if (cont->id() == oldContId) {
+             delete cont;
+diff -ru a/applets/weather/weatherdatamonitor_p.cpp b/applets/weather/weatherdatamonitor_p.cpp
+--- a/applets/weather/weatherdatamonitor_p.cpp	2026-10-08 16:56:43.418441834 -0400
++++ b/applets/weather/weatherdatamonitor_p.cpp	2026-10-08 16:57:28.231549950 -0400
+@@ -231,9 +231,8 @@
+ 
+     qCDebug(WEATHER::CONTROLLER) << "WeatherDataMonitor: Ion moved to thread: " << ion->thread();
+ 
+-    const IonInfo info{
+-        .ionControl = std::shared_ptr<IonControl>{new IonControl(providerName, ion, workerThread)},
+-    };
++    IonInfo info{};
++    info.ionControl = std::shared_ptr<IonControl>{new IonControl(providerName, ion, workerThread)};
+     m_ionControls.insert(providerName, info);
+     qCDebug(WEATHER::CONTROLLER) << "WeatherDataMonitor: successfully created";
+ 

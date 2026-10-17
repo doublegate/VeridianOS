@@ -57,12 +57,12 @@ The project includes `build-kernel.sh` which handles architecture-specific build
 - **Target file**: `targets/x86_64-veridian.json`
 
 #### AArch64
-- **Uses**: Standard bare metal target `aarch64-unknown-none`
+- **Uses**: Standard bare metal target `aarch64-unknown-none-softfloat`
 - **No special configuration needed**
 - **Working implementations**: Preserved in `kernel/src/arch/aarch64/working-simple/`
 
 #### RISC-V
-- **Uses**: Standard bare metal target `riscv64gc-unknown-none-elf`
+- **Uses**: Standard bare metal target `riscv64imac-unknown-none-elf`
 - **No special configuration needed**
 
 ### Verification Steps
@@ -70,8 +70,8 @@ The project includes `build-kernel.sh` which handles architecture-specific build
 1. **Check build artifacts**:
    ```bash
    ls -la target/x86_64-veridian/debug/veridian-kernel
-   ls -la target/aarch64-unknown-none/debug/veridian-kernel
-   ls -la target/riscv64gc-unknown-none-elf/debug/veridian-kernel
+   ls -la target/aarch64-unknown-none-softfloat/debug/veridian-kernel
+   ls -la target/riscv64imac-unknown-none-elf/debug/veridian-kernel
    ```
 
 2. **Verify linking addresses** (x86_64):

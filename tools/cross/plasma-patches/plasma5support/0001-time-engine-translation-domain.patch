@@ -1,0 +1,16 @@
+VeridianOS: the time data engine's own translation domain only
+
+The top-level CMakeLists.txt defines TRANSLATION_DOMAIN as
+"libplasma5support" for the whole tree; each data engine directory
+removes that definition before adding its own, except the time engine's,
+so its sources were compiled with both (GCC: "'TRANSLATION_DOMAIN'
+redefined") and took whichever came last on the command line. It now
+removes it like the others.
+
+--- a/src/dataengines/time/CMakeLists.txt
++++ b/src/dataengines/time/CMakeLists.txt
+@@ -1,3 +1,4 @@
++remove_definitions(-DTRANSLATION_DOMAIN=\"libplasma5support\")
+ add_definitions(-DTRANSLATION_DOMAIN=\"plasma_engine_time\")
+ 
+ set(time_engine_SRCS

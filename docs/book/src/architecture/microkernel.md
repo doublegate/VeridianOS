@@ -269,7 +269,7 @@ match driver_process.wait_for_exit() {
 | **IPC Small Message** | <5μs | ~0.8μs | ≤64 bytes, register-based |
 | **IPC Large Transfer** | <10μs | ~3.2μs | Zero-copy shared memory |
 | **Context Switch** | <10μs | ~8.5μs | Including TLB flush |
-| **Memory Allocation** | <1μs | ~0.6μs | Slab allocator |
+| **Memory Allocation** | <1μs | ~1.5μs | Global frame allocator (`frame_alloc_global`, PERFORMANCE-REPORT.md); target not met |
 | **Capability Validation** | <500ns | ~0.2μs | O(1) lookup |
 | **System Call** | <1μs | ~0.4μs | Kernel entry/exit |
 

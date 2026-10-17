@@ -1,0 +1,42 @@
+VeridianOS: xcb_ewmh_init_atoms checks its allocations
+
+xcb_ewmh_init_atoms() allocates the per-screen arrays and the cookie
+array with malloc() and wrote through them unchecked, so running out of
+memory meant a write through a null pointer. On failure it now frees what
+it allocated, leaves the screen pointers null, and returns NULL -- the
+result it already gives for a connection without screens.
+
+--- a/ewmh/ewmh.c.m4
++++ b/ewmh/ewmh.c.m4
+@@ -536,6 +536,8 @@
+   /* Allocate the data structures depending of the number of screens */
+   ewmh->screens = malloc(sizeof(xcb_screen_t *) * ewmh->nb_screens);
+   ewmh->_NET_WM_CM_Sn = malloc(sizeof(xcb_atom_t) * ewmh->nb_screens);
++  if(!ewmh->screens || !ewmh->_NET_WM_CM_Sn)
++    goto fail;
+ 
+   for(screen_iter = xcb_setup_roots_iterator(setup), screen_nbr = 0; screen_iter.rem;
+       xcb_screen_next(&screen_iter))
+@@ -546,6 +548,8 @@
+      number of screens */
+   ewmh_cookies = malloc(sizeof(xcb_intern_atom_cookie_t) *
+                         (NB_EWMH_ATOMS + ewmh->nb_screens));
++  if(!ewmh_cookies)
++    goto fail;
+ 
+   /* First, send InternAtom request for all Atoms except _NET_WM_CM_Sn */
+   for(atom_nbr = 0; atom_nbr < NB_EWMH_ATOMS; atom_nbr++)
+@@ -570,6 +574,13 @@
+     }
+ 
+   return ewmh_cookies;
++
++ fail:
++  free(ewmh->screens);
++  free(ewmh->_NET_WM_CM_Sn);
++  ewmh->screens = NULL;
++  ewmh->_NET_WM_CM_Sn = NULL;
++  return NULL;
+ }
+ 
+ uint8_t

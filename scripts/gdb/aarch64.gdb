@@ -57,8 +57,8 @@ end
 
 define examine-boot-area
     echo === Boot Area Memory ===\n
-    echo Kernel Load Address (0x40080000):\n
-    x/16i 0x40080000
+    echo Kernel Load Address (0x40200000):\n
+    x/16i 0x40200000
     echo \nStack Area (0x80000):\n
     x/8gx 0x80000
 end
@@ -107,7 +107,7 @@ break-boot "aarch64"
 break-panic
 
 # Also break on our known working entry points
-break *0x40080000
+break *0x40200000
 break _start_rust
 
 echo [GDB] Ready to debug AArch64 kernel. Use 'continue' to start.\n

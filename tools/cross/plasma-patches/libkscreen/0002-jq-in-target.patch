@@ -1,0 +1,23 @@
+VeridianOS: look for jq in the target system
+
+jq is used at run time by kscreen-doctor's shell completion;
+CMakeLists.txt looked it up with find_program(), which when cross
+compiling searched the build host and reported its jq. It now searches the
+target's root (CMAKE_FIND_ROOT_PATH) when cross compiling.
+
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -56,7 +56,12 @@
+ option(BUILD_QCH "Build API documentation in QCH format (for e.g. Qt Assistant, Qt Creator & KDevelop)" OFF)
+ add_feature_info(QCH ${BUILD_QCH} "API documentation in QCH format (for e.g. Qt Assistant, Qt Creator & KDevelop)")
+ 
+-find_program(JQ NAMES "jq" DOC "jq is used in zsh completion script")
++# A run-time dependency: when cross compiling, the target's program.
++if(CMAKE_CROSSCOMPILING)
++  find_program(JQ NAMES "jq" DOC "jq is used in zsh completion script" ONLY_CMAKE_FIND_ROOT_PATH)
++else()
++  find_program(JQ NAMES "jq" DOC "jq is used in zsh completion script")
++endif()
+ if(JQ)
+   message(STATUS "Found jq executable: ${JQ}")
+ else()

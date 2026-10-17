@@ -11,6 +11,8 @@
 #include "qveridianwindow.h"
 #include "qveridianintegration.h"
 
+#include <QtGui/qpa/qwindowsysteminterface.h>
+
 #include <wayland-client.h>
 #include <xdg-shell-client-protocol.h>
 
@@ -56,9 +58,30 @@ static void xdg_toplevel_close(void *data, struct xdg_toplevel *toplevel)
     Q_UNUSED(toplevel);
 }
 
+/* xdg-shell v4 and v5 events. libwayland calls every listener slot a
+ * compositor sends, so a missing one is a NULL call, not a no-op. */
+static void xdg_toplevel_configure_bounds(void *data, struct xdg_toplevel *toplevel,
+                                          int32_t width, int32_t height)
+{
+    Q_UNUSED(data);
+    Q_UNUSED(toplevel);
+    Q_UNUSED(width);
+    Q_UNUSED(height);
+}
+
+static void xdg_toplevel_wm_capabilities(void *data, struct xdg_toplevel *toplevel,
+                                         struct wl_array *capabilities)
+{
+    Q_UNUSED(data);
+    Q_UNUSED(toplevel);
+    Q_UNUSED(capabilities);
+}
+
 static const struct xdg_toplevel_listener xdg_toplevel_listener = {
     xdg_toplevel_configure,
     xdg_toplevel_close,
+    xdg_toplevel_configure_bounds,
+    xdg_toplevel_wm_capabilities,
 };
 
 /* ========================================================================= */

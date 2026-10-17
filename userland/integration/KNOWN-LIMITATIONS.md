@@ -15,6 +15,19 @@
 | OpenGL ES 2.0 only | No OpenGL 3.x/4.x core profile support | KWin's GLES2 backend handles this transparently |
 | Complex script rendering | Arabic/Devanagari ligature rendering may have edge cases | Install additional fonts; Latin/CJK fully supported |
 
+### Media, cameras and X11 (v0.27 shared-library build)
+
+| Limitation | Details | Workaround |
+|-----------|---------|------------|
+| No media playback backend | Qt Multimedia is built (Prison's barcode scanner, Qt Speech and Plasma's QML media types link it) but without a backend: no FFmpeg or GStreamer plugin and no PulseAudio/PipeWire audio, so nothing plays audio or video | None yet; a backend (FFmpeg plus an ALSA or PipeWire audio path) is a planned follow-up |
+| No cameras | Prison's scanner and any camera use need V4L2 devices, which the kernel does not provide | None |
+| No text-to-speech engine | Qt Speech is built without speech-dispatcher or flite | None |
+| No X11 applications | KWin is built with `KWIN_BUILD_X11=OFF`; XWayland is deferred | Wayland applications only |
+| X11 client libraries without an X server | libxcb, libX11 and friends are built (tools/cross/build-x11.sh) because Qt's xcb plugin, KWindowSystem's X11 API, libplasma and libkscreen use them unconditionally; the Plasma session itself is Wayland-only (`WITH_X11_SESSION=OFF`, X11 mouse/touchpad KCMs off) | None needed; the X11 code paths stay idle without `DISPLAY` |
+| No login records (utmp) | KPty is built without utempter: terminals are not recorded, and nothing reads utmp yet (`who`, `last`) | None needed today |
+| No screen casting | kpipewire is not built: it needs PipeWire and FFmpeg (to-dos/MASTER_TODO.md) | None |
+| polkit session tracking via ConsoleKit | polkit 127 is built with `session_tracking=ConsoleKit` (no logind/elogind on VeridianOS), and nothing provides ConsoleKit, so polkit cannot tell an active local session from an inactive one; `allow_active` rules do not grant | Administrator actions authenticate through the agent (pkexec, polkit-agent-helper-1 with PAM) |
+
 ### Data & Sync
 
 | Limitation | Details | Workaround |
@@ -28,6 +41,22 @@
 | Multi-arch KDE | KDE Plasma 6 is x86_64 only; AArch64/RISC-V are future work | Kernel + built-in DE run on all 3 architectures |
 | Cross-compilation required | All KDE components must be cross-compiled from a host | Use provided build scripts in each component directory |
 | No native package manager | KDE libraries installed manually to sysroot | Use `build-kde-rootfs.sh` for full rootfs |
+
+### Build warnings
+
+A clean build of the whole stack (`tools/cross/build-all-kde.sh`, musl and the toolchain
+through Plasma) printed 2,319 warnings before the v0.27 cleanup and prints 43 now; each was
+removed by fixing its cause (`tools/cross/PATCHES.md`). The 43 left, from the 2026-10-09 build:
+
+| Source | Count | Cause |
+|-----------|---------|------------|
+| GCC 16.2 build tree | 2 | libtool's "remember to run `libtool --finish`" for lto-plugin and libatomic, installed into the toolchain prefix (nothing to finish there: no ldconfig, no system library path) |
+| libxslt 1.1.45 configure | 1 | "using cross tools not prefixed with host triplet": configure looks up `xml2-config` as a tool and finds the build host's `/usr/bin/xml2-config` |
+| wayland-protocols 1.49 | 5 | "since version not increasing" in the experimental xx-input-method-v2 and xx-text-input-v3: an upstream ordering defect; reordering the requests would change their opcodes |
+| HarfBuzz 14.6.0 | 1 | meson notes that ragel is not installed; it is needed only to regenerate the state machines HarfBuzz ships generated |
+| Qt Multimedia 6.12 | 2 | no audio and no media backend (see *No media playback backend* above) |
+| Qt and Plasma type registration | 31 | moc/qmltyperegistrar cannot resolve some types: template base classes (qtwayland's `QWaylandCompositorExtensionTemplate<...>` and friends, plasma-workspace's `QWaylandClientExtensionTemplate<Screencasting>`), foreign types without metatypes (qtpositioning, qtwayland texture sharing, a generated D-Bus interface, `KAbstractViewAdapter`), two `KeyState` types, a QML module name with dashes, three QML types named in lowercase (qtlocation, the comic applet) and one property without a NOTIFY signal (qtwayland). They concern the QML type information used by tooling, not the compiled code |
+| KWin | 1 | CMake: the `UDev` package's DESCRIPTION is set twice (KWin's find module and ECM's) |
 
 ### Performance
 

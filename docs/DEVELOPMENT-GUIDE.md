@@ -33,8 +33,8 @@ rustup component add rust-src llvm-tools-preview rustfmt clippy
 
 # Add target architectures
 rustup target add x86_64-unknown-none
-rustup target add aarch64-unknown-none
-rustup target add riscv64gc-unknown-none-elf
+rustup target add aarch64-unknown-none-softfloat
+rustup target add riscv64imac-unknown-none-elf
 ```
 
 #### 2. Install System Dependencies

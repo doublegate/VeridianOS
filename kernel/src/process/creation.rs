@@ -11,7 +11,6 @@ extern crate alloc;
 use alloc::{format, string::String, vec::Vec};
 
 use super::{
-    lifecycle::create_scheduler_task,
     pcb::{Process, ProcessBuilder, ProcessState},
     table,
     thread::ThreadBuilder,
@@ -95,10 +94,20 @@ pub fn create_process_with_options(
     }
 
     // Create the main thread
+    // The new process starts in its creator's working directory: the
+    // kernel shell's after a `cd`, or the calling thread's (N-115).
+    let (start_cwd, start_root) = crate::fs::try_get_vfs()
+        .map(|vfs| {
+            let ctx = vfs.caller_context();
+            (ctx.cwd, ctx.root)
+        })
+        .unwrap_or_else(|| (String::from("/"), String::from("/")));
     let main_thread =
         ThreadBuilder::new(pid, format!("{}-main", options.name), options.entry_point)
+            .tid(super::ThreadId(pid.0))
             .user_stack_size(options.user_stack_size)
             .kernel_stack_size(options.kernel_stack_size)
+            .fs(super::thread::ThreadFs::with_cwd(start_cwd, start_root))
             .build()?;
 
     let tid = main_thread.tid;
@@ -137,8 +146,14 @@ pub fn create_process_with_options(
     let argv_refs: Vec<&str> = options.argv.iter().map(|s| s.as_str()).collect();
     let envp_refs: Vec<&str> = options.envp.iter().map(|s| s.as_str()).collect();
 
-    // Get the process before adding to table so we can set up the stack
-    let stack_top = setup_exec_stack(&process, &argv_refs, &envp_refs, None)?;
+    // Get the process before adding to table so we can set up the stack.
+    // A program loaded later replaces it; for one that is not, the vector
+    // has the entry point and no program headers.
+    let program = crate::elf::dynamic::ProgramAux {
+        entry: options.entry_point as u64,
+        ..Default::default()
+    };
+    let stack_top = setup_exec_stack(&process, &argv_refs, &envp_refs, &options.name, &program)?;
 
     // Update the thread context with the adjusted stack pointer
     if let Some(thread) = process.get_thread(tid) {
@@ -149,14 +164,10 @@ pub fn create_process_with_options(
     // Add process to process table
     table::add_process(process)?;
 
-    // Mark process as ready
+    // Mark process as ready. Its launcher starts the main thread as a
+    // dispatcher task (process::start_thread / run_and_wait).
     if let Some(process) = table::get_process(pid) {
         process.set_state(ProcessState::Ready);
-
-        // Add main thread to scheduler
-        if let Some(thread) = process.get_thread(tid) {
-            create_scheduler_task(&process, &thread)?;
-        }
     }
 
     // Memory hardening: stack canary + guard page for new process.
@@ -244,11 +255,14 @@ pub fn parse_shebang(data: &[u8]) -> Option<(String, Option<String>)> {
 /// the default search directories: `/bin`, `/usr/bin`, `/usr/local/bin`.
 #[cfg(feature = "alloc")]
 pub fn search_path(name: &str) -> Option<String> {
-    use crate::fs;
+    // In the caller's view: under its root, from its working directory.
+    let file_exists = |path: &str| {
+        crate::fs::try_get_vfs().is_some_and(|vfs| vfs.as_caller().resolve_path(path).is_ok())
+    };
 
     // If name already contains a slash, treat it as a path
     if name.contains('/') {
-        if fs::file_exists(name) {
+        if file_exists(name) {
             return Some(String::from(name));
         }
         return None;
@@ -267,7 +281,7 @@ pub fn search_path(name: &str) -> Option<String> {
                 continue;
             }
             let full_path = format!("{}/{}", dir, name);
-            if fs::file_exists(&full_path) {
+            if file_exists(&full_path) {
                 return Some(full_path);
             }
         }
@@ -277,13 +291,103 @@ pub fn search_path(name: &str) -> Option<String> {
 
         for dir in DEFAULT_SEARCH_DIRS {
             let full_path = format!("{}/{}", dir, name);
-            if fs::file_exists(&full_path) {
+            if file_exists(&full_path) {
                 return Some(full_path);
             }
         }
     }
 
     None
+}
+
+/// What exec learned from the program file about the credentials and
+/// dumpability of the new image.
+#[cfg(feature = "alloc")]
+struct ExecIds {
+    /// The owner a set-user-ID file offers.
+    set_uid: Option<u32>,
+    /// The group a set-group-ID file (with group execute) offers.
+    set_gid: Option<u32>,
+    /// The caller may read the program (and its loader).
+    readable: bool,
+}
+
+/// Install the credentials a program runs with (Linux's
+/// cred_guard_mutex section of exec): `set_ids` are the owner and group a
+/// set-user-ID or set-group-ID file offers, granted unless the thread asked
+/// for no new privileges, a tracer without privilege is attached, or
+/// another process shares this one's directories and umask (CLONE_FS: it
+/// could redirect the privileged program; LSM_UNSAFE_SHARE). Decided and
+/// installed under `cred_guard`, which ptrace attach takes too: a tracer
+/// attached before is seen here, and one attaching after sees the new
+/// credentials.
+#[cfg(feature = "alloc")]
+fn install_exec_credentials(process: &super::Process, thread: &super::Thread, ids: ExecIds) {
+    use core::sync::atomic::Ordering;
+
+    let _guard = process.cred_guard.lock();
+    let traced_unprivileged = match process.tracer.load(Ordering::Acquire) {
+        0 => false,
+        tracer => super::table::get_process(super::ProcessId(tracer)).is_none_or(|t| t.euid() != 0),
+    };
+    // exec runs only in a single-threaded process, so this thread is the
+    // process's only user of its filesystem state.
+    let fs_shared = thread.fs().users.load(Ordering::Acquire) > 1;
+    let may_gain =
+        !thread.no_new_privs.load(Ordering::Acquire) && !traced_unprivileged && !fs_shared;
+    let creds = process
+        .credentials()
+        .after_exec(ids.set_uid, ids.set_gid, may_gain);
+    process.update_credentials(|c| *c = creds);
+    // Linux's begin_new_exec: a process running with other effective IDs
+    // than its real ones, or a program it could not read, may not be
+    // traced or have its memory read by its user (PR_GET_DUMPABLE 0);
+    // otherwise exec makes it dumpable again.
+    let dumpable = ids.readable && creds.euid == creds.ruid && creds.egid == creds.rgid;
+    process.dumpable.store(dumpable, Ordering::Release);
+}
+
+/// The last component of `path` (Linux's kbasename).
+#[cfg(feature = "alloc")]
+fn basename(path: &str) -> &str {
+    path.rsplit('/').next().unwrap_or(path)
+}
+
+/// Read the file at `path` for exec: it must be a regular file the caller
+/// (`uid`, `gid`) may execute -- root needs at least one execute bit, as on
+/// Linux -- or the result is `PermissionDenied` (EACCES). The check and the
+/// read use the same resolved node, so the file cannot be swapped between
+/// them (N-101). The node comes back too: the loader maps the file's pages
+/// from its page cache (ADR 0010).
+#[cfg(feature = "alloc")]
+pub(crate) fn read_executable(
+    path: &str,
+    creds: &super::creds::Credentials,
+) -> Result<(alloc::sync::Arc<dyn crate::fs::VfsNode>, Vec<u8>), KernelError> {
+    let node = crate::fs::get_vfs()
+        .as_caller()
+        .resolve_path(path)
+        .map_err(|_| KernelError::FsError(crate::error::FsError::NotFound))?;
+    let meta = node.metadata()?;
+    if !may_execute(&meta, creds.euid, creds.gid_for(meta.gid)) {
+        return Err(KernelError::PermissionDenied { operation: "exec" });
+    }
+    let mut data = alloc::vec![0u8; meta.size];
+    let n = node.read(0, &mut data)?;
+    data.truncate(n);
+    Ok((node, data))
+}
+
+/// Whether `uid`/`gid` may execute a node with metadata `meta`.
+#[cfg(feature = "alloc")]
+fn may_execute(meta: &crate::fs::Metadata, uid: u32, gid: u32) -> bool {
+    let perms = &meta.permissions;
+    meta.node_type == crate::fs::NodeType::File
+        && if uid == 0 {
+            perms.owner_exec || perms.group_exec || perms.other_exec
+        } else {
+            perms.can_run(uid, gid, meta.uid, meta.gid)
+        }
 }
 
 /// Execute a new program in current process
@@ -297,7 +401,7 @@ pub fn search_path(name: &str) -> Option<String> {
 /// if the path does not start with `/`, standard directories are searched.
 #[cfg(feature = "alloc")]
 pub fn exec_process(path: &str, argv: &[&str], envp: &[&str]) -> Result<(), KernelError> {
-    use crate::{elf::ElfLoader, fs};
+    use crate::elf::ElfLoader;
 
     let process = super::current_process().ok_or(KernelError::ProcessNotFound { pid: 0 })?;
     let current_thread = super::current_thread().ok_or(KernelError::ThreadNotFound { tid: 0 })?;
@@ -309,9 +413,9 @@ pub fn exec_process(path: &str, argv: &[&str], envp: &[&str]) -> Result<(), Kern
         String::from(path)
     };
 
-    // Step 1: Load new program from filesystem
-    let file_data = fs::read_file(&resolved_path)
-        .map_err(|_| KernelError::FsError(crate::error::FsError::NotFound))?;
+    // Step 1: Load new program from filesystem, checking execute
+    // permission on the node that is read (N-101).
+    let (file_node, file_data) = read_executable(&resolved_path, &process.credentials())?;
 
     // Step 1b: Check for shebang (#!) and delegate to interpreter if found
     if let Some((interpreter, opt_arg)) = parse_shebang(&file_data) {
@@ -335,167 +439,147 @@ pub fn exec_process(path: &str, argv: &[&str], envp: &[&str]) -> Result<(), Kern
             new_argv.extend_from_slice(&argv[1..]);
         }
 
-        // Recursively exec the interpreter
-        return exec_process(&interpreter, &new_argv, envp);
+        // Recursively exec the interpreter; the set-user-ID and
+        // set-group-ID bits of the script itself are ignored, as on Linux,
+        // and the command name is the script's (N-227).
+        exec_process(&interpreter, &new_argv, envp)?;
+        *current_thread.comm.lock() = super::thread::comm_from(basename(&resolved_path).as_bytes());
+        return Ok(());
     }
 
-    // Validate the image before touching the current address space. exec
-    // must leave the caller intact when it fails; parsing after clear()
-    // meant a non-ELF file (e.g. the empty /proc/self/exe) destroyed the
-    // caller's mappings and the failed exec returned into nothing.
-    let elf_binary =
-        ElfLoader::new()
-            .parse(&file_data)
-            .map_err(|_| KernelError::InvalidArgument {
-                name: "elf",
+    // Validate and plan the image before touching the current address
+    // space (ADR 0010). exec must leave the caller intact when it fails;
+    // parsing after clear() meant a non-ELF file (e.g. the empty
+    // /proc/self/exe) destroyed the caller's mappings and the failed exec
+    // returned into nothing.
+    let not_elf = |_| KernelError::InvalidArgument {
+        name: "elf",
+        value: "not a loadable ELF image",
+    };
+    let elf_binary = ElfLoader::new().parse(&file_data).map_err(not_elf)?;
+    let program_plan =
+        crate::elf::image::plan(&elf_binary, file_data.len(), crate::elf::image::PIE_BASE)
+            .map_err(not_elf)?;
+
+    // The interpreter (PT_INTERP) is opened, permission-checked and checked
+    // before the point of no return as well, as Linux does: a missing or
+    // non-executable loader fails the exec with the old image intact.
+    type Interp = (
+        alloc::sync::Arc<dyn crate::fs::VfsNode>,
+        Vec<u8>,
+        crate::elf::ElfBinary,
+    );
+    let interp: Option<Interp> = match &elf_binary.interpreter {
+        Some(path) => {
+            let (node, data) = read_executable(path, &process.credentials())?;
+            let bad = |_| KernelError::InvalidArgument {
+                name: "interpreter",
                 value: "not a loadable ELF image",
-            })?;
-
-    // Step 2: Clear current address space and load new program
-    *process.exe_path.lock() = resolved_path.clone();
-    let entry_point = {
-        let mut memory_space = process.memory_space.lock();
-
-        // Clear existing mappings before loading new program
-        memory_space.clear();
-
-        // Reinitialize the address space for the new program
-        memory_space.init()?;
-
-        // Re-map the main thread's user stack into the fresh VAS. `clear()`
-        // removed all user mappings; without this, the new image would return
-        // to an unmapped stack (the /bin/sh crash).
-        if let Some(main_tid) = process.get_main_thread_id() {
-            if let Some(main_thread) = process.get_thread(main_tid) {
-                let user_base = main_thread.user_stack.base;
-                let user_size = main_thread.user_stack.size;
-                let flags = crate::mm::PageFlags::PRESENT
-                    | crate::mm::PageFlags::USER
-                    | crate::mm::PageFlags::WRITABLE
-                    | crate::mm::PageFlags::NO_EXECUTE;
-                let pages = user_size / 4096;
-                for i in 0..pages {
-                    let vaddr = user_base + i * 4096;
-                    memory_space.map_page(vaddr, flags)?;
-                }
-                memory_space.set_stack_top(user_base + user_size);
-                memory_space.set_stack_size(user_size);
-            }
+            };
+            let parsed = ElfLoader::new().parse(&data).map_err(bad)?;
+            crate::elf::image::check_interpreter(&parsed, data.len()).map_err(bad)?;
+            Some((node, data, parsed))
         }
-
-        // Load ELF segments into address space and get entry point
-        ElfLoader::load(&file_data, &mut memory_space)?
+        None => None,
     };
 
-    // Step 2b: Check for dynamic linking
-    let (final_entry, aux_vector) = {
-        if elf_binary.dynamic && elf_binary.interpreter.is_some() {
-            // Dynamically linked -- load interpreter and build aux vector
-            let dyn_info = crate::elf::dynamic::prepare_dynamic_linking(
-                &file_data,
-                &elf_binary,
-                elf_binary.load_base,
-            )?
-            .ok_or(KernelError::InvalidArgument {
-                name: "dynamic",
-                value: "binary has interpreter but prepare_dynamic_linking returned None",
-            })?;
-
-            // Load interpreter LOAD segments into the process address space.
-            // The interpreter is a separate ELF loaded at its own base address
-            // (distinct from the main binary) to avoid overlap.
-            let interp_data = fs::read_file(&dyn_info.interp_path)
-                .map_err(|_| KernelError::FsError(crate::error::FsError::NotFound))?;
-            {
-                let mut memory_space = process.memory_space.lock();
-                let _interp_entry = ElfLoader::load(&interp_data, &mut memory_space)?;
-            }
-
-            // Entry point is the interpreter, not the main binary
-            (dyn_info.interp_entry, Some(dyn_info.aux_vector))
-        } else {
-            // Statically linked -- use binary entry directly, no aux vector
-            (entry_point, None)
+    // A set-user-ID or set-group-ID program runs as its file's owner or
+    // group (Linux's bprm_fill_uid): the IDs the file offers, read with the
+    // file. Whether they are granted is decided when they are installed.
+    // A program (or loader) the caller may run but not read must not be
+    // readable through the process either (Linux's would_dump).
+    let set_ids = {
+        let creds = process.credentials();
+        let readable = |meta: &crate::fs::Metadata| {
+            meta.permissions
+                .can_read(creds.euid, creds.gid_for(meta.gid), meta.uid, meta.gid)
+        };
+        let meta = file_node.metadata()?;
+        let perms = meta.permissions;
+        let interp_readable = match &interp {
+            Some((node, ..)) => readable(&node.metadata()?),
+            None => true,
+        };
+        ExecIds {
+            set_uid: perms.set_uid.then_some(meta.uid),
+            set_gid: (perms.set_gid && perms.group_exec).then_some(meta.gid),
+            readable: readable(&meta) && interp_readable,
         }
     };
 
-    // Step 2c: Set up TLS (Thread-Local Storage) if the ELF has a PT_TLS segment.
-    //
-    // x86_64 uses TLS variant II: %fs points to the Thread Control Block (TCB)
-    // at the END of the TLS block. TLS variables are at negative offsets from %fs.
-    // Layout: [tls_data | tls_bss | TCB_self_pointer]
-    //                                ^--- %fs base points here
-    //
-    // We allocate the TLS block via mmap in the process's VAS, copy the TLS
-    // template from the already-mapped PT_TLS segment, write a self-pointer
-    // at the TCB, and store the FS_BASE for the syscall/enter_usermode path.
-    #[cfg(target_arch = "x86_64")]
-    {
-        let loader = ElfLoader::new();
-        let elf_binary = loader.parse(&file_data).ok();
-        if let Some(ref binary) = elf_binary {
-            if let Some(tls_seg) = binary
-                .segments
-                .iter()
-                .find(|s| s.segment_type == crate::elf::types::SegmentType::Tls)
-            {
-                let tls_memsz = tls_seg.memory_size as usize;
-                let tls_filesz = tls_seg.file_size as usize;
-                // The TLS block needs: tls_memsz (data+bss) + 8 (TCB self-pointer),
-                // aligned up to 16 bytes.
-                let tcb_size = 8usize; // self-pointer
-                let tls_block_size = ((tls_memsz + tcb_size) + 15) & !15;
+    // Point of no return: from clear() on, a failure cannot go back to the
+    // old image. The process is then killed with SIGSEGV at the system-call
+    // exit (Linux force_sigsegv), instead of returning into an emptied
+    // address space (N-101).
+    let committed = (|| -> Result<_, KernelError> {
+        // Step 2: Clear current address space and load new program; the
+        // old image's size stays in the peak resident set, as on Linux.
+        process.note_rss();
+        *process.exe_path.lock() = resolved_path.clone();
+        let loaded = {
+            let mut memory_space = process.memory_space.lock();
 
-                // Allocate user-space memory for TLS via mmap
-                let memory_space = process.memory_space.lock();
-                let tls_alloc =
-                    memory_space.mmap(tls_block_size, crate::mm::vas::MappingType::Data);
-                if let Ok(tls_base_vaddr) = tls_alloc {
-                    let tls_base = tls_base_vaddr.as_usize();
+            // Clear existing mappings before loading new program
+            memory_space.clear();
 
-                    // The TCB (and %fs) points to: tls_base + tls_memsz
-                    let tcb_addr = tls_base + tls_memsz;
+            // Reinitialize the address space for the new program
+            memory_space.init()?;
 
-                    // Copy TLS init data from the already-loaded PT_TLS segment.
-                    // The template lives at tls_vaddr in the process's VAS (already
-                    // mapped by the LOAD segment that contains the TLS section).
-                    // We read from the ELF file data and write to the new TLS block.
-                    if tls_filesz > 0 {
-                        let tls_file_offset = tls_seg.file_offset as usize;
-                        if tls_file_offset + tls_filesz <= file_data.len() {
-                            let tls_init =
-                                &file_data[tls_file_offset..tls_file_offset + tls_filesz];
-                            let _ = crate::elf::write_to_user_pages(
-                                &memory_space,
-                                tls_base as u64,
-                                tls_init,
-                            );
-                        }
+            // Re-map the main thread's user stack into the fresh VAS. `clear()`
+            // removed all user mappings; without this, the new image would return
+            // to an unmapped stack (the /bin/sh crash).
+            if let Some(main_tid) = process.get_main_thread_id() {
+                if let Some(main_thread) = process.get_thread(main_tid) {
+                    let user_base = main_thread.user_stack.base;
+                    let user_size = main_thread.user_stack.size;
+                    let flags = crate::mm::PageFlags::PRESENT
+                        | crate::mm::PageFlags::USER
+                        | crate::mm::PageFlags::WRITABLE
+                        | crate::mm::PageFlags::NO_EXECUTE;
+                    let pages = user_size / 4096;
+                    for i in 0..pages {
+                        let vaddr = user_base + i * 4096;
+                        memory_space.map_page(vaddr, flags)?;
                     }
-                    // BSS portion (tls_memsz - tls_filesz) is already zero from mmap
-
-                    // Write TCB self-pointer: *(u64*)tcb_addr = tcb_addr
-                    // This is needed because %fs:0 must return the TCB address itself.
-                    let self_ptr_bytes = (tcb_addr as u64).to_le_bytes();
-                    let _ = crate::elf::write_to_user_pages(
-                        &memory_space,
-                        tcb_addr as u64,
-                        &self_ptr_bytes,
-                    );
-
-                    drop(memory_space);
-
-                    // Store FS_BASE in the process for later use by enter_usermode
-                    process
-                        .tls_fs_base
-                        .store(tcb_addr as u64, core::sync::atomic::Ordering::Release);
+                    memory_space.set_stack_top(user_base + user_size);
+                    memory_space.set_stack_size(user_size);
                 }
             }
-        }
-    }
 
-    // Step 3: Setup new stack with arguments, environment, and aux vector
-    let stack_top = setup_exec_stack(&process, argv, envp, aux_vector.as_deref())?;
+            // The program, and for a dynamic one its interpreter, which
+            // runs first.
+            crate::elf::image::load(
+                &memory_space,
+                (&elf_binary, &*file_node, &file_data, &program_plan),
+                interp
+                    .as_ref()
+                    .map(|(node, data, binary)| (binary, &**node, data.as_slice())),
+            )?
+        };
+
+        // Step 2c: a static program gets its TLS block from the kernel
+        // (the native libc relies on it); a dynamic one's loader sets up
+        // TLS itself.
+        if interp.is_none() {
+            setup_static_tls(&process, &elf_binary, &file_data);
+        }
+
+        // The program's credentials, before the stack: AT_SECURE (and so
+        // the loader's refusal of LD_PRELOAD and LD_LIBRARY_PATH) follows
+        // from them.
+        install_exec_credentials(&process, &current_thread, set_ids);
+
+        // Step 3: Setup new stack with arguments, environment, and aux vector
+        let stack_top = setup_exec_stack(&process, argv, envp, &resolved_path, &loaded.aux)?;
+        Ok((loaded.start, stack_top))
+    })();
+    let (final_entry, stack_top) = match committed {
+        Ok(v) => v,
+        Err(e) => {
+            super::exit::set_kill_pending(&process, 11);
+            return Err(e);
+        }
+    };
 
     // Step 3b: Populate the process's env_vars BTreeMap from envp.
     // This makes environment variables available to kernel-side lookups
@@ -527,19 +611,13 @@ pub fn exec_process(path: &str, argv: &[&str], envp: &[&str]) -> Result<(), Kern
         ctx.set_return_value(0);
     }
 
-    // Step 4b: Sync scheduler Task context with the updated thread context.
-    // The scheduler has its own TaskContext (set at task creation) which must
-    // match the thread's new entry point/stack, otherwise the scheduler will
-    // resume at the old (pre-exec) address.
-    {
-        let sched = crate::sched::scheduler::current_scheduler().lock();
-        if let Some(task_ptr) = sched.current() {
-            // SAFETY: We are the currently running task and hold the scheduler
-            // lock, so no other CPU will modify this Task concurrently.
-            let task = unsafe { &mut *task_ptr.as_ptr() };
-            task.context = crate::sched::task::TaskContext::new(final_entry as usize, stack_top);
-        }
-    }
+    // The exec can no longer fail: the process counts as exec'd from here
+    // (setpgid's EACCES). Before the close-on-exec step, because a parent
+    // takes EOF on a close-on-exec pipe as the sign of a completed exec and
+    // may run on another CPU the moment the descriptor closes.
+    process
+        .did_exec
+        .store(true, core::sync::atomic::Ordering::Release);
 
     // Step 5: Close file descriptors marked close-on-exec
     {
@@ -548,8 +626,36 @@ pub fn exec_process(path: &str, argv: &[&str], envp: &[&str]) -> Result<(), Kern
         file_table.close_on_exec();
     }
 
-    // Step 6: Reset signal handlers to defaults
+    // Step 5b: Only capabilities marked PRESERVE_EXEC survive exec (N-30).
+    // The filtered space used to be built in sys_exec and then dropped, so
+    // every capability survived (N-94). Done here, after the last step that
+    // can fail, so a failed exec leaves the caller's capabilities intact.
+    {
+        let filtered = crate::cap::CapabilitySpace::new();
+        {
+            let old = process.capability_space.lock();
+            if crate::cap::inheritance::exec_inherit_capabilities(&old, &filtered).is_err() {
+                println!("[WARN] exec: some PRESERVE_EXEC capabilities were not kept");
+            }
+        }
+        let old = core::mem::replace(&mut *process.capability_space.lock(), filtered);
+        drop(old);
+    }
+
+    // Step 6: Reset signal handlers to defaults, and the alternate signal
+    // stack (it was in the old image), as Linux does.
     process.reset_signal_handlers();
+    *current_thread.altstack.lock() = super::signals::SigAltStack::default();
+    // The robust list was in the old image too (N-225).
+    current_thread
+        .robust_list
+        .store(0, core::sync::atomic::Ordering::Release);
+    // The command name is the program's file name (N-227).
+    *current_thread.comm.lock() = super::thread::comm_from(basename(&resolved_path).as_bytes());
+
+    // The image is replaced: a parent waiting in vfork may run again; the
+    // memory it shared with this process is no longer this process's.
+    process.release_vfork_parent();
 
     // The actual execution resumes when we return to user mode
     // The modified thread context will cause execution at the new entry point
@@ -609,6 +715,8 @@ unsafe fn write_bytes_to_user_stack(
         return;
     }
 
+    // SAFETY: pt_root is the non-zero L4 physical address owned by
+    // `memory_space`, which is what create_mapper_from_root requires.
     let mapper = unsafe { super::super::mm::vas::create_mapper_from_root_pub(pt_root) };
 
     // Write in page-sized chunks to handle data that crosses page boundaries.
@@ -639,30 +747,125 @@ unsafe fn write_bytes_to_user_stack(
     }
 }
 
-/// Setup stack for exec with arguments, environment, and optional auxiliary
-/// vector.
-///
-/// Writes the full argc/argv/envp/auxv layout to the user stack via the
-/// physical memory window. The layout (growing downward from stack_top) is:
+/// Give a static program its initial TLS block from its PT_TLS segment, if
+/// it has one, and record its thread pointer for the return to user mode
+/// (`Process::tls_fs_base`): on x86_64 (variant II) FS_BASE points at the
+/// TCB, which follows the TLS image; on AArch64 and RISC-V (variant I) the
+/// thread pointer (TPIDR_EL0, `tp`) is the block base and the image lies
+/// above it, after a 16-byte TCB on AArch64 and at it on RISC-V. The native
+/// libc relies on this; musl sets up TLS itself and replaces it. Nothing is
+/// done (and it is logged) if the block cannot be set up.
+#[cfg(feature = "alloc")]
+pub(crate) fn setup_static_tls(process: &Process, binary: &crate::elf::ElfBinary, data: &[u8]) {
+    #[cfg(target_arch = "x86_64")]
+    {
+        let Some(tls) = binary
+            .segments
+            .iter()
+            .find(|s| s.segment_type == crate::elf::SegmentType::Tls)
+        else {
+            return;
+        };
+        // The image (data+bss) rounded up to p_align, then the 8-byte TCB
+        // self-pointer at the p_align-aligned thread pointer.
+        let Some((size, tcb_offset)) =
+            crate::elf::tls_layout(tls.memory_size as usize, tls.alignment)
+        else {
+            crate::println!(
+                "[LOADER] PT_TLS alignment {} unsupported; leaving TLS to libc",
+                tls.alignment
+            );
+            return;
+        };
+        let memory_space = process.memory_space.lock();
+        let base = match memory_space.mmap(size, crate::mm::vas::MappingType::Data) {
+            Ok(base) => base.as_u64(),
+            Err(e) => {
+                crate::println!("[LOADER] TLS block of {} bytes not mapped: {:?}", size, e);
+                return;
+            }
+        };
+        let tcb = base + tcb_offset as u64;
+        // The initial image from the file; the rest of the block is zero.
+        let from = tls.file_offset as usize;
+        if let Some(init) = from
+            .checked_add(tls.file_size as usize)
+            .and_then(|to| data.get(from..to))
+        {
+            let _ = crate::elf::write_to_user_pages(&memory_space, base, init);
+        }
+        // %fs:0 is the TCB's own address.
+        let _ = crate::elf::write_to_user_pages(&memory_space, tcb, &tcb.to_le_bytes());
+        drop(memory_space);
+        process
+            .tls_fs_base
+            .store(tcb, core::sync::atomic::Ordering::Release);
+    }
+    #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
+    {
+        let Some(tls) = binary
+            .segments
+            .iter()
+            .find(|s| s.segment_type == crate::elf::SegmentType::Tls)
+        else {
+            return;
+        };
+        #[cfg(target_arch = "aarch64")]
+        const TCB_SIZE: usize = 16;
+        #[cfg(target_arch = "riscv64")]
+        const TCB_SIZE: usize = 0;
+        let Some((size, image_offset)) =
+            crate::elf::tls_layout_above_tp(tls.memory_size as usize, tls.alignment, TCB_SIZE)
+        else {
+            crate::println!(
+                "[LOADER] PT_TLS alignment {} unsupported; leaving TLS to libc",
+                tls.alignment
+            );
+            return;
+        };
+        let memory_space = process.memory_space.lock();
+        let base = match memory_space.mmap(size, crate::mm::vas::MappingType::Data) {
+            Ok(base) => base.as_u64(),
+            Err(e) => {
+                crate::println!("[LOADER] TLS block of {} bytes not mapped: {:?}", size, e);
+                return;
+            }
+        };
+        // The initial image from the file; the TCB and the rest are zero.
+        let from = tls.file_offset as usize;
+        if let Some(init) = from
+            .checked_add(tls.file_size as usize)
+            .and_then(|to| data.get(from..to))
+        {
+            let _ =
+                crate::elf::write_to_user_pages(&memory_space, base + image_offset as u64, init);
+        }
+        drop(memory_space);
+        process
+            .tls_fs_base
+            .store(base, core::sync::atomic::Ordering::Release);
+    }
+    #[cfg(not(any(
+        target_arch = "x86_64",
+        target_arch = "aarch64",
+        target_arch = "riscv64"
+    )))]
+    let _ = (process, binary, data);
+}
+
+/// Set up the initial user stack of a program: its arguments, environment
+/// and auxiliary vector (ADR 0010), written through the physical memory
+/// window. Returns the stack pointer, which points at argc.
 ///
 /// ```text
 /// [high addresses]
-///   envp strings (null-terminated)
-///   argv strings (null-terminated)
+///   program file name (AT_EXECFN), envp strings, argv strings
+///   platform string (AT_PLATFORM)
+///   16 random bytes (AT_RANDOM)
 ///   padding (16-byte alignment)
-///   AT_NULL (0, 0)           <- auxv terminator (if present)
-///   auxv[N-1] (type, value)
-///   ...
-///   auxv[0] (type, value)
-///   NULL                     <- envp[N]
-///   envp[N-1] pointer
-///   ...
-///   envp[0] pointer
-///   NULL                     <- argv[argc]
-///   argv[argc-1] pointer
-///   ...
-///   argv[0] pointer
-///   argc (usize)             <- SP (returned)
+///   auxv pairs, ending with AT_NULL
+///   NULL, envp pointers, NULL, argv pointers
+///   argc                     <- SP (returned)
 /// [low addresses]
 /// ```
 #[cfg(feature = "alloc")]
@@ -670,8 +873,26 @@ pub(crate) fn setup_exec_stack(
     process: &Process,
     argv: &[&str],
     envp: &[&str],
-    aux_vector: Option<&[crate::elf::dynamic::AuxVecEntry]>,
+    execfn: &str,
+    program: &crate::elf::dynamic::ProgramAux,
 ) -> Result<usize, KernelError> {
+    let creds = process.credentials();
+    let process_aux = crate::elf::dynamic::ProcessAux {
+        uid: creds.ruid,
+        euid: creds.euid,
+        gid: creds.rgid,
+        egid: creds.egid,
+        // Linux's secureexec: the effective IDs differ from the real ones.
+        secure: creds.euid != creds.ruid || creds.egid != creds.rgid,
+    };
+    let mut random = [0u8; 16];
+    crate::crypto::random::get_random()
+        .fill_bytes(&mut random)
+        .map_err(|_| KernelError::InvalidState {
+            expected: "a seeded random number generator",
+            actual: "AT_RANDOM bytes unavailable",
+        })?;
+
     let memory_space = process.memory_space.lock();
 
     // Get stack region
@@ -679,120 +900,267 @@ pub(crate) fn setup_exec_stack(
     let stack_size = memory_space.user_stack_size();
     let stack_top = stack_base + stack_size;
 
-    // ---- Phase 1: Write strings from the top of the stack downward ----
-    let mut string_sp = stack_top;
+    let layout = exec_stack_layout(stack_top, argv, envp, execfn, program, &process_aux);
 
-    // Write envp strings and record their user-space addresses
-    let mut envp_addrs: Vec<usize> = Vec::with_capacity(envp.len());
-    for &env in envp.iter().rev() {
-        let bytes = env.as_bytes();
-        string_sp -= bytes.len() + 1; // +1 for null terminator
-                                      // SAFETY: string_sp is within the stack mapping. We write the string
-                                      // bytes followed by a null terminator.
-        unsafe {
-            write_bytes_to_user_stack(&memory_space, string_sp, bytes);
-            write_bytes_to_user_stack(&memory_space, string_sp + bytes.len(), &[0]);
-        }
-        envp_addrs.push(string_sp);
-    }
-    envp_addrs.reverse();
-
-    // Write argv strings and record their user-space addresses
-    let mut argv_addrs: Vec<usize> = Vec::with_capacity(argv.len());
-    for &arg in argv.iter().rev() {
-        let bytes = arg.as_bytes();
-        string_sp -= bytes.len() + 1;
-        // SAFETY: string_sp is within the stack mapping.
-        unsafe {
-            write_bytes_to_user_stack(&memory_space, string_sp, bytes);
-            write_bytes_to_user_stack(&memory_space, string_sp + bytes.len(), &[0]);
-        }
-        argv_addrs.push(string_sp);
-    }
-    argv_addrs.reverse();
-
-    // ---- Phase 2: Align and write pointer arrays ----
-    // Align to 16 bytes
-    let mut sp = string_sp & !0xF;
-
-    // Ensure space for: argc + argv ptrs + NULL + envp ptrs + NULL + auxv entries
-    // Each auxv entry is 2 usizes (type, value)
-    let auxv_slots = aux_vector.map(|v| v.len() * 2).unwrap_or(0);
-    let ptrs_needed = 1 + argv.len() + 1 + envp.len() + 1 + auxv_slots;
-    sp -= ptrs_needed * core::mem::size_of::<usize>();
-    // Re-align to 16 bytes (ABI requirement)
-    sp &= !0xF;
-
-    // DIAGNOSTIC: Check if sp is still within stack bounds
-    if sp < stack_base {
-        crate::kprintln!(
-            "[STACK_SETUP] OVERFLOW! sp={:#x} < stack_base={:#x}, need {} bytes",
-            sp,
-            stack_base,
-            stack_top - sp
-        );
+    if layout.sp < stack_base {
         return Err(KernelError::OutOfMemory {
-            requested: stack_top - sp,
+            requested: stack_top - layout.sp,
             available: stack_size,
         });
     }
 
-    let mut write_pos = sp;
-
-    // Write argc
-    // SAFETY: write_pos is within the stack region.
-    unsafe {
-        write_to_user_stack(&memory_space, write_pos, argv.len());
-    }
-    write_pos += core::mem::size_of::<usize>();
-
-    // Write argv pointers
-    for &addr in &argv_addrs {
-        // SAFETY: write_pos is within the stack region.
+    for &(addr, bytes) in &layout.strings {
+        // SAFETY: addr is within the stack mapping (sp >= stack_base was
+        // checked above and every string lies above sp). We write the
+        // string bytes followed by a null terminator.
         unsafe {
-            write_to_user_stack(&memory_space, write_pos, addr);
+            write_bytes_to_user_stack(&memory_space, addr, bytes);
+            write_bytes_to_user_stack(&memory_space, addr + bytes.len(), &[0]);
         }
-        write_pos += core::mem::size_of::<usize>();
     }
-    // NULL terminator for argv
-    // SAFETY: write_pos is within the stack region.
+    // SAFETY: the 16 bytes exec_stack_layout reserved above sp.
     unsafe {
-        write_to_user_stack(&memory_space, write_pos, 0);
+        write_bytes_to_user_stack(&memory_space, layout.random_at, &random);
     }
-    write_pos += core::mem::size_of::<usize>();
+    random.fill(0);
 
-    // Write envp pointers
-    for &addr in &envp_addrs {
-        // SAFETY: write_pos is within the stack region.
+    // argc, argv pointers + NULL, envp pointers + NULL, auxv pairs.
+    for (i, &word) in layout.words.iter().enumerate() {
+        // SAFETY: the words fill the block exec_stack_layout reserved
+        // between sp and the strings, and sp >= stack_base was checked
+        // above, so every write is within the stack region.
         unsafe {
-            write_to_user_stack(&memory_space, write_pos, addr);
-        }
-        write_pos += core::mem::size_of::<usize>();
-    }
-    // NULL terminator for envp
-    // SAFETY: write_pos is within the stack region.
-    unsafe {
-        write_to_user_stack(&memory_space, write_pos, 0);
-    }
-    write_pos += core::mem::size_of::<usize>();
-
-    // Write auxiliary vector (if present, for dynamically linked binaries)
-    if let Some(auxv) = aux_vector {
-        for entry in auxv {
-            // Each aux entry is two usize values: type, value
-            // SAFETY: write_pos is within the stack region, reserved in
-            // ptrs_needed calculation above.
-            unsafe {
-                write_to_user_stack(&memory_space, write_pos, entry.type_id as usize);
-            }
-            write_pos += core::mem::size_of::<usize>();
-            // SAFETY: write_pos is within the stack region.
-            unsafe {
-                write_to_user_stack(&memory_space, write_pos, entry.value as usize);
-            }
-            write_pos += core::mem::size_of::<usize>();
+            write_to_user_stack(
+                &memory_space,
+                layout.sp + i * core::mem::size_of::<usize>(),
+                word,
+            );
         }
     }
 
-    Ok(sp)
+    Ok(layout.sp)
+}
+
+/// The initial user stack of a program: where each string and the random
+/// bytes go, the stack pointer, and the words written upward from it.
+#[cfg(feature = "alloc")]
+pub(crate) struct ExecStackLayout<'a> {
+    /// Each string's address; a NUL follows it on the stack.
+    pub(crate) strings: Vec<(usize, &'a [u8])>,
+    /// Where the 16 AT_RANDOM bytes go.
+    pub(crate) random_at: usize,
+    /// The initial stack pointer (16-byte aligned), pointing at argc.
+    pub(crate) sp: usize,
+    /// argc, argv pointers, NULL, envp pointers, NULL, then each auxv
+    /// entry as (type, value).
+    pub(crate) words: Vec<usize>,
+}
+
+/// Lay out the stack [`setup_exec_stack`] writes below `stack_top`. Pure:
+/// nothing is written, and the bounds check is left to the caller.
+#[cfg(feature = "alloc")]
+pub(crate) fn exec_stack_layout<'a>(
+    stack_top: usize,
+    argv: &[&'a str],
+    envp: &[&'a str],
+    execfn: &'a str,
+    program: &crate::elf::dynamic::ProgramAux,
+    process: &crate::elf::dynamic::ProcessAux,
+) -> ExecStackLayout<'a> {
+    let mut strings = Vec::with_capacity(argv.len() + envp.len() + 2);
+    let mut top = stack_top;
+    let mut place = |s: &'a str, strings: &mut Vec<(usize, &'a [u8])>| {
+        top -= s.len() + 1; // +1 for the NUL
+        strings.push((top, s.as_bytes()));
+        top
+    };
+
+    // As Linux: the file name at the top, then envp and argv strings, each
+    // list ascending in order.
+    let execfn_at = place(execfn, &mut strings);
+    let mut envp_addrs: Vec<usize> = envp.iter().rev().map(|e| place(e, &mut strings)).collect();
+    envp_addrs.reverse();
+    let mut argv_addrs: Vec<usize> = argv.iter().rev().map(|a| place(a, &mut strings)).collect();
+    argv_addrs.reverse();
+    let platform_at = place(crate::elf::dynamic::PLATFORM, &mut strings);
+    let random_at = (top - 16) & !0xF;
+
+    let auxv = crate::elf::dynamic::aux_vector(
+        program,
+        process,
+        &crate::elf::dynamic::StackAux {
+            random: random_at as u64,
+            execfn: execfn_at as u64,
+            platform: platform_at as u64,
+        },
+    );
+
+    let words_needed = 1 + argv.len() + 1 + envp.len() + 1 + auxv.len() * 2;
+    let sp = (random_at - words_needed * core::mem::size_of::<usize>()) & !0xF;
+
+    let mut words = Vec::with_capacity(words_needed);
+    words.push(argv.len());
+    words.extend_from_slice(&argv_addrs);
+    words.push(0);
+    words.extend_from_slice(&envp_addrs);
+    words.push(0);
+    for entry in &auxv {
+        words.push(entry.type_id as usize);
+        words.push(entry.value as usize);
+    }
+
+    ExecStackLayout {
+        strings,
+        random_at,
+        sp,
+        words,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::elf::dynamic::{AuxType, ProcessAux, ProgramAux};
+
+    const TOP: usize = 0x7FFF_F000;
+
+    /// The string written at `addr` in `layout`.
+    fn string_at<'a>(layout: &ExecStackLayout<'a>, addr: usize) -> &'a [u8] {
+        layout
+            .strings
+            .iter()
+            .find(|&&(a, _)| a == addr)
+            .map(|&(_, s)| s)
+            .expect("pointer to a laid-out string")
+    }
+
+    fn program() -> ProgramAux {
+        ProgramAux {
+            phdr: Some(0x40_0040),
+            phent: 56,
+            phnum: 9,
+            entry: 0x40_1000,
+            base: 0,
+        }
+    }
+
+    /// The word after argc's pointer lists and each auxv value.
+    fn aux(layout: &ExecStackLayout<'_>, argc: usize, envc: usize, t: AuxType) -> usize {
+        let pairs = &layout.words[1 + argc + 1 + envc + 1..];
+        pairs
+            .chunks(2)
+            .find(|p| p[0] == t as usize)
+            .map(|p| p[1])
+            .expect("aux entry present")
+    }
+
+    #[test]
+    fn exec_stack_layout_matches_the_sysv_abi() {
+        let layout = exec_stack_layout(
+            TOP,
+            &["/bin/sh", "-c"],
+            &["HOME=/"],
+            "/bin/sh",
+            &program(),
+            &ProcessAux::default(),
+        );
+
+        assert_eq!(layout.words[0], 2);
+        assert_eq!(string_at(&layout, layout.words[1]), b"/bin/sh");
+        assert_eq!(string_at(&layout, layout.words[2]), b"-c");
+        assert_eq!(layout.words[3], 0);
+        assert_eq!(string_at(&layout, layout.words[4]), b"HOME=/");
+        assert_eq!(layout.words[5], 0);
+        // The vector ends the block with one AT_NULL.
+        assert_eq!(&layout.words[layout.words.len() - 2..], &[0, 0]);
+
+        // The file name at the very top, then envp above argv.
+        let execfn = aux(&layout, 2, 1, AuxType::AtExecfn);
+        assert_eq!(execfn, TOP - "/bin/sh".len() - 1);
+        assert_eq!(string_at(&layout, execfn), b"/bin/sh");
+        assert_eq!(layout.words[4], execfn - "HOME=/".len() - 1);
+        assert_eq!(layout.words[2], layout.words[4] - "-c".len() - 1);
+        assert_eq!(layout.words[1], layout.words[2] - "/bin/sh".len() - 1);
+
+        // The platform string below them, the random bytes below it.
+        let platform = aux(&layout, 2, 1, AuxType::AtPlatform);
+        assert_eq!(
+            string_at(&layout, platform),
+            crate::elf::dynamic::PLATFORM.as_bytes()
+        );
+        assert_eq!(
+            platform,
+            layout.words[1] - crate::elf::dynamic::PLATFORM.len() - 1
+        );
+        assert_eq!(aux(&layout, 2, 1, AuxType::AtRandom), layout.random_at);
+        assert!(layout.random_at + 16 <= platform);
+        assert_eq!(layout.random_at % 16, 0);
+
+        // sp is 16-byte aligned and the block ends below the random bytes.
+        assert_eq!(layout.sp % 16, 0);
+        assert!(layout.sp + layout.words.len() * 8 <= layout.random_at);
+        assert_eq!(aux(&layout, 2, 1, AuxType::AtEntry), 0x40_1000);
+        assert_eq!(aux(&layout, 2, 1, AuxType::AtPhnum), 9);
+    }
+
+    /// The stack pointer stays 16-byte aligned whatever the string
+    /// lengths, and nothing overlaps.
+    #[test]
+    fn exec_stack_layout_alignment_for_any_string_length() {
+        let args = ["a", "bb", "ccc", "dddd", "eeeee", "ffffff", "ggggggg"];
+        for n in 0..args.len() {
+            for top in [TOP, TOP - 3, TOP - 8] {
+                let layout = exec_stack_layout(
+                    top,
+                    &args[..n],
+                    &args[n..],
+                    "x",
+                    &program(),
+                    &ProcessAux::default(),
+                );
+                assert_eq!(layout.sp % 16, 0);
+                let lowest = layout.strings.iter().map(|&(a, _)| a).min().unwrap();
+                assert!(layout.random_at + 16 <= lowest);
+                assert!(layout.sp + layout.words.len() * 8 <= layout.random_at);
+                let total: usize = args.iter().map(|s| s.len() + 1).sum::<usize>()
+                    + 2
+                    + crate::elf::dynamic::PLATFORM.len()
+                    + 1;
+                assert_eq!(lowest, top - total);
+            }
+        }
+    }
+
+    fn meta(node_type: crate::fs::NodeType, mode: u32, uid: u32, gid: u32) -> crate::fs::Metadata {
+        crate::fs::Metadata {
+            node_type,
+            size: 0,
+            permissions: crate::fs::Permissions::from_mode(mode),
+            uid,
+            gid,
+            created: 0,
+            modified: 0,
+            accessed: 0,
+            inode: 1,
+        }
+    }
+
+    /// N-101: exec needs a regular file with an execute bit the caller
+    /// holds; root needs any execute bit, and never a directory.
+    #[test]
+    fn exec_permission_follows_linux_rules() {
+        use crate::fs::NodeType;
+        let file = NodeType::File;
+        // Root: any execute bit, but at least one.
+        assert!(!may_execute(&meta(file, 0o644, 0, 0), 0, 0));
+        assert!(may_execute(&meta(file, 0o001, 5, 5), 0, 0));
+        assert!(!may_execute(&meta(NodeType::Directory, 0o755, 0, 0), 0, 0));
+        // Owner, group and other classes.
+        assert!(may_execute(&meta(file, 0o700, 1000, 1000), 1000, 1000));
+        assert!(!may_execute(&meta(file, 0o700, 0, 0), 1000, 1000));
+        assert!(may_execute(&meta(file, 0o710, 0, 100), 1000, 100));
+        assert!(may_execute(&meta(file, 0o701, 0, 0), 1000, 1000));
+        // The owner class decides for the owner, even if others may run it.
+        assert!(!may_execute(&meta(file, 0o611, 1000, 0), 1000, 1000));
+    }
 }

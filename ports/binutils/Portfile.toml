@@ -7,7 +7,7 @@
 
 [port]
 name = "binutils"
-version = "2.43"
+version = "2.47"
 description = "GNU binary utilities -- assembler, linker, and object file tools"
 homepage = "https://www.gnu.org/software/binutils/"
 license = "GPL-3.0-or-later"
@@ -15,8 +15,8 @@ category = "devel"
 build_type = "autotools"
 
 [sources]
-urls = ["https://ftp.gnu.org/gnu/binutils/binutils-2.43.tar.xz"]
-checksums = ["b53606f443ac8f01d1d5fc9c39497f2af322d99e14cea5c0b4b124d630379365"]
+urls = ["https://ftp.gnu.org/gnu/binutils/binutils-2.47.tar.xz"]
+checksums = ["154ab23b60070e8f27013c22977f1129425d67d1e8acd6e13010e617811e4cff"]
 
 [dependencies]
 build = []

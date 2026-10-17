@@ -7,7 +7,7 @@
 #   Phase C: Native compilation on VeridianOS (separate script)
 #
 # Prerequisites:
-#   - Cross-compiler: /opt/veridian/toolchain/bin/x86_64-veridian-gcc (GCC 14.2.0)
+#   - Cross-compiler: /opt/veridian/toolchain/bin/x86_64-veridian-gcc (GCC 16.2.0, scripts/build-cross-toolchain.sh)
 #   - BusyBox source: downloaded automatically to /tmp/VeridianOS/busybox-1.36.1/
 #   - Native GCC toolchain: target/native-gcc-static/ (from build-native-gcc-static.sh)
 #
@@ -18,6 +18,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
+# The latest STABLE release (checked 2026-10-07): busybox.net labels 1.37.0 and
+# 1.38.0 "unstable".
 BUSYBOX_VERSION="1.36.1"
 BUSYBOX_URL="https://busybox.net/downloads/busybox-${BUSYBOX_VERSION}.tar.bz2"
 
@@ -34,7 +36,10 @@ CC="${TOOLCHAIN_PREFIX}/bin/x86_64-veridian-gcc"
 STRIP="${TOOLCHAIN_PREFIX}/bin/x86_64-veridian-strip"
 READELF="${TOOLCHAIN_PREFIX}/bin/x86_64-veridian-readelf"
 SYSROOT="${TOOLCHAIN_PREFIX}/sysroot"
-GCC_LIBDIR="${TOOLCHAIN_PREFIX}/lib/gcc/x86_64-veridian/14.2.0"
+# The cross compiler's version (its private headers and libgcc live under
+# lib/gcc/<target>/<version>), read from the compiler rather than hardcoded.
+GCC_VERSION="$("$CC" -dumpversion 2>/dev/null || echo unknown)"
+GCC_LIBDIR="${TOOLCHAIN_PREFIX}/lib/gcc/x86_64-veridian/${GCC_VERSION}"
 GCC_INCDIR="${GCC_LIBDIR}/include"
 CC_WRAPPER="${SCRIPT_DIR}/veridian-cc-wrapper.sh"
 
@@ -88,16 +93,13 @@ phase_headers() {
         [ -f "$f" ] || continue
         cp "$f" "$dst_inc/"
     done
-    # Subdirectories
-    for subdir in sys arpa netinet veridian; do
-        if [ -d "$src_inc/$subdir" ]; then
-            mkdir -p "$dst_inc/$subdir"
-            for f in "$src_inc/$subdir"/*.h; do
-                [ -f "$f" ] || continue
-                cp "$f" "$dst_inc/$subdir/"
-            done
-        fi
-    done
+    # Every subdirectory (a fixed list once left net/ out, which only a
+    # fresh sysroot such as CI's exposed).
+    (cd "$src_inc" && find . -mindepth 2 -name '*.h' -print0) |
+        while IFS= read -r -d '' f; do
+            mkdir -p "$dst_inc/$(dirname "$f")"
+            cp "$src_inc/$f" "$dst_inc/$f"
+        done
 
     # Rebuild libc.a with posix_stubs3.c
     echo "  Rebuilding libc.a..."
@@ -112,9 +114,10 @@ phase_headers() {
     cflags+=" -isystem ${GCC_INCDIR}"
     cflags+=" -fno-stack-protector -ffreestanding"
     cflags+=" -mno-red-zone -mcmodel=small"
-    cflags+=" -Wno-unused-parameter -Wno-implicit-function-declaration"
+    cflags+=" -Wall -Wextra -Werror"
 
     local obj_count=0
+    local failed=""
     for src in "$libc_src"/*.c; do
         [ -f "$src" ] || continue
         local name
@@ -125,13 +128,52 @@ phase_headers() {
             obj_count=$((obj_count + 1))
         else
             echo "FAILED"
+            failed+=" $name.c"
         fi
     done
+    # Architecture assembly (setjmp/longjmp), as the libc Makefile builds it.
+    for src in "$libc_src"/*_x86_64.S; do
+        [ -f "$src" ] || continue
+        local name
+        name="$(basename "$src" .S)"
+        echo -n "    $name.S -> "
+        if "$CC" $cflags -c "$src" -o "$libc_build/${name}.o" 2>&1; then
+            echo "OK"
+            obj_count=$((obj_count + 1))
+        else
+            echo "FAILED"
+            failed+=" $name.S"
+        fi
+    done
+    # A libc missing objects links programs that fail at run time, far from
+    # the cause, so any source that does not compile stops the build (C2).
+    if [ -n "$failed" ]; then
+        echo "  ERROR: libc sources failed to compile:$failed"
+        exit 1
+    fi
 
     # Create libc.a
     "$TOOLCHAIN_PREFIX/bin/x86_64-veridian-ar" rcs "$libc_build/libc.a" "$libc_build"/*.o
     cp "$libc_build/libc.a" "$dst_lib/libc.a"
     echo "  libc.a: $obj_count objects"
+
+    # libm: <math.h> and libm.a (BusyBox awk and dc use them). Built here so
+    # a fresh sysroot has them; they used to exist only in sysroots that were
+    # set up by hand.
+    local libm_dir="${PROJECT_ROOT}/userland/libm"
+    local libm_build="${WORK_DIR}/libm-build"
+    rm -rf "$libm_build"
+    mkdir -p "$libm_build"
+    cp "$libm_dir"/include/*.h "$dst_inc/"
+    for src in "$libm_dir"/src/*.c; do
+        if ! "$CC" $cflags -isystem "$libm_dir/include" -c "$src" \
+                -o "$libm_build/$(basename "$src" .c).o" 2>&1; then
+            echo "  ERROR: libm source failed to compile: $src"
+            exit 1
+        fi
+    done
+    "$TOOLCHAIN_PREFIX/bin/x86_64-veridian-ar" rcs "$dst_lib/libm.a" "$libm_build"/*.o
+    echo "  libm.a: $(ls "$libm_build"/*.o | wc -l) objects"
 
     local hdr_count
     hdr_count=$(find "$dst_inc" -name '*.h' | wc -l)
@@ -219,7 +261,10 @@ phase_build() {
         SKIP_STRIP=y \
         V=1 \
         O="$BB_BUILD" \
-        busybox 2>&1 | tee "$WORK_DIR/busybox-build.log" | tail -20
+        busybox >"$WORK_DIR/busybox-build.log" 2>&1 || true
+    # Not a pipeline into tail: with pipefail a failed make would exit here,
+    # before the error report below.
+    tail -20 "$WORK_DIR/busybox-build.log"
 
     if [ -f "$BB_BUILD/busybox" ]; then
         echo ""
@@ -241,6 +286,10 @@ phase_build() {
         echo ""
         echo "  FAILED: No busybox binary produced"
         echo "  Check build log: $WORK_DIR/busybox-build.log"
+        # A parallel build interleaves output, so the tail above rarely
+        # shows the cause: print every compiler/linker error.
+        grep -n -B2 -A6 -E ' error: |undefined reference|cannot find|No such file' \
+            "$WORK_DIR/busybox-build.log" | head -120 || true
         exit 1
     fi
     echo ""
@@ -317,7 +366,7 @@ phase_rootfs() {
     pgm_cflags+=" -isystem ${GCC_INCDIR}"
     pgm_cflags+=" -fno-stack-protector -ffreestanding"
     pgm_cflags+=" -mno-red-zone -mcmodel=small"
-    pgm_cflags+=" -Wall -Wextra -Wno-unused-parameter"
+    pgm_cflags+=" -Wall -Wextra"
     local pgm_ldflags="-static -nostdlib -L${SYSROOT}/usr/lib"
 
     # sysinfo (fastfetch-inspired system info display)
@@ -341,7 +390,7 @@ phase_rootfs() {
         local curses_build="/tmp/VeridianOS/libcurses-rootfs-build"
         rm -rf "$curses_build"
         mkdir -p "$curses_build"
-        local curses_cflags="-static -O2 -Wall -Wextra -Wno-unused-parameter"
+        local curses_cflags="-static -O2 -Wall -Wextra"
         curses_cflags+=" -fno-stack-protector -ffreestanding -mno-red-zone -mcmodel=small"
         curses_cflags+=" -nostdinc -isystem ${SYSROOT}/usr/include -isystem ${GCC_INCDIR}"
         curses_cflags+=" -I${curses_src}"
@@ -364,7 +413,9 @@ phase_rootfs() {
     # edit (nano-inspired text editor, depends on libcurses)
     if [ -f "${PROGRAMS_DIR}/edit/edit.c" ] && [ -f "$BUILD_DIR/usr/lib/libcurses.a" ]; then
         echo -n "    edit... "
-        if "$CC" $pgm_cflags $pgm_ldflags -o "$BUILD_DIR/bin/edit" \
+        # curses.h from the in-tree library (the toolchain sysroot does not
+        # carry it; an old one only had a hand-installed copy).
+        if "$CC" $pgm_cflags -I"${curses_src}" $pgm_ldflags -o "$BUILD_DIR/bin/edit" \
                 "${SYSROOT}/usr/lib/crt0.o" "${PROGRAMS_DIR}/edit/edit.c" \
                 -L"$BUILD_DIR/usr/lib" -lcurses -lc 2>&1; then
             "$STRIP" "$BUILD_DIR/bin/edit" 2>/dev/null || true
@@ -390,6 +441,81 @@ phase_rootfs() {
         else
             echo "FAILED"
         fi
+    fi
+
+    # The runtime audit suite run by scripts/run-rootfs-tests.sh. Built here
+    # so a full rebuild never drops it; a failure stops the build (C1).
+    echo -n "    audit_runtime_test... "
+    if "$CC" -static -O2 -Wall -Wextra -L"${SYSROOT}/usr/lib" -o "$BUILD_DIR/bin/audit_runtime_test" \
+            "${TESTS_DIR}/audit_runtime_test.c" 2>&1; then
+        echo "OK"
+    else
+        echo "FAILED"
+        exit 1
+    fi
+
+    # The same kind of checks for programs built against musl, with the
+    # toolchain KDE is built with (tools/cross/build-musl.sh, then
+    # build-musl-toolchain.sh; paths from tools/cross/veridian-paths.sh).
+    local musl_cc musl_cxx musl_strip musl_sysroot
+    musl_cc="$(source "${PROJECT_ROOT}/tools/cross/veridian-paths.sh" && echo "$VERIDIAN_CC")"
+    musl_cxx="$(source "${PROJECT_ROOT}/tools/cross/veridian-paths.sh" && echo "$VERIDIAN_CXX")"
+    musl_strip="${musl_cc%-gcc}-strip"
+    musl_sysroot="$(source "${PROJECT_ROOT}/tools/cross/veridian-paths.sh" && echo "$VERIDIAN_SYSROOT")"
+    if [ -x "$musl_cc" ]; then
+        echo -n "    musl_runtime_test... "
+        # A static PIE: the kernel picks its address (ADR 0010).
+        if "$musl_cc" -static-pie -O2 -Wall -Wextra -o "$BUILD_DIR/bin/musl_runtime_test" \
+                "${TESTS_DIR}/musl_runtime_test.c" 2>&1; then
+            echo "OK"
+        else
+            echo "FAILED"
+            exit 1
+        fi
+        # The W^X opt-in (ADR 0017): a program carrying the VeridianOS note,
+        # and copies without it that tools/veridian-elfctl changes.
+        echo -n "    wx_needed_test... "
+        if "$musl_cc" -static-pie -O2 -Wall -Wextra -idirafter "${PROJECT_ROOT}/userland/libc/include" \
+                -o "$BUILD_DIR/bin/wx_needed_test" "${TESTS_DIR}/wx_needed_test.c" 2>&1 \
+            && "${PROJECT_ROOT}/scripts/build-wx-note-tests.sh" "$musl_cc" "$BUILD_DIR/bin" 2>&1; then
+            echo "OK"
+        else
+            echo "FAILED"
+            exit 1
+        fi
+
+        # Dynamic linking (ADR 0010): musl's loader and the shared C++
+        # runtime, stripped, and a dynamically linked C++ program that
+        # dlopens a C++ library (musl_runtime_test runs it). The loader is
+        # a copy of libc.so, which is both: the image builder copies the
+        # target of a symlink, and the sysroot's absolute link would be
+        # resolved on the build host. musl answers a libc.so dependency
+        # itself, so /usr/lib needs no second copy.
+        echo -n "    dynamic loader and C++ runtime... "
+        mkdir -p "$BUILD_DIR/lib" "$BUILD_DIR/usr/lib"
+        if "$musl_strip" --strip-unneeded -o "$BUILD_DIR/lib/ld-musl-x86_64.so.1" \
+                "${musl_sysroot}/usr/lib/libc.so" \
+            && "$musl_strip" --strip-unneeded -o "$BUILD_DIR/usr/lib/libstdc++.so.6" \
+                "$(readlink -f "${musl_sysroot}/usr/lib/libstdc++.so.6")" \
+            && "$musl_strip" --strip-unneeded -o "$BUILD_DIR/usr/lib/libgcc_s.so.1" \
+                "${musl_sysroot}/usr/lib/libgcc_s.so.1"; then
+            echo "OK"
+        else
+            echo "FAILED"
+            exit 1
+        fi
+        echo -n "    musl_dynamic_test... "
+        if "$musl_cxx" -O2 -Wall -Wextra -fPIC -shared -o "$BUILD_DIR/usr/lib/libveridian_dltest.so" \
+                "${TESTS_DIR}/musl_dltest_lib.cpp" 2>&1 \
+            && "$musl_cxx" -O2 -Wall -Wextra -pthread -o "$BUILD_DIR/bin/musl_dynamic_test" \
+                "${TESTS_DIR}/musl_dynamic_test.cpp" 2>&1; then
+            echo "OK"
+        else
+            echo "FAILED"
+            exit 1
+        fi
+    else
+        echo "    musl_runtime_test... skipped (no musl toolchain; run tools/cross/build-musl.sh and build-musl-toolchain.sh)"
     fi
 
     # Copy source files for native compilation on VeridianOS
@@ -445,8 +571,10 @@ phase_rootfs() {
     # Include native GCC toolchain if available (for Phase C)
     if [ -d "$NATIVE_GCC_DIR/usr/bin" ]; then
         echo "  Adding native GCC toolchain..."
-        mkdir -p "$BUILD_DIR/usr/lib/gcc/x86_64-veridian/14.2.0/include"
-        mkdir -p "$BUILD_DIR/usr/libexec/gcc/x86_64-veridian/14.2.0"
+        # The native compiler's version, from its own install tree.
+        NATIVE_GCC_VERSION="$(ls "$NATIVE_GCC_DIR/usr/lib/gcc/x86_64-veridian/" 2>/dev/null | sort -V | tail -1)"
+        mkdir -p "$BUILD_DIR/usr/lib/gcc/x86_64-veridian/${NATIVE_GCC_VERSION}/include"
+        mkdir -p "$BUILD_DIR/usr/libexec/gcc/x86_64-veridian/${NATIVE_GCC_VERSION}"
         mkdir -p "$BUILD_DIR/usr/include/sys"
         mkdir -p "$BUILD_DIR/usr/include/arpa"
         mkdir -p "$BUILD_DIR/usr/include/netinet"
@@ -463,8 +591,8 @@ phase_rootfs() {
 
         # cc1, collect2
         for tool in cc1 collect2 ld as; do
-            src="$NATIVE_GCC_DIR/usr/libexec/gcc/x86_64-veridian/14.2.0/$tool"
-            [ -f "$src" ] && cp "$src" "$BUILD_DIR/usr/libexec/gcc/x86_64-veridian/14.2.0/"
+            src="$NATIVE_GCC_DIR/usr/libexec/gcc/x86_64-veridian/${NATIVE_GCC_VERSION}/$tool"
+            [ -f "$src" ] && cp "$src" "$BUILD_DIR/usr/libexec/gcc/x86_64-veridian/${NATIVE_GCC_VERSION}/"
         done
 
         # Libraries
@@ -472,9 +600,9 @@ phase_rootfs() {
             [ -f "$NATIVE_GCC_DIR/usr/lib/$f" ] && cp "$NATIVE_GCC_DIR/usr/lib/$f" "$BUILD_DIR/usr/lib/"
         done
         for f in libgcc.a crtbegin.o crtend.o; do
-            [ -f "$NATIVE_GCC_DIR/usr/lib/gcc/x86_64-veridian/14.2.0/$f" ] && \
-                cp "$NATIVE_GCC_DIR/usr/lib/gcc/x86_64-veridian/14.2.0/$f" \
-                   "$BUILD_DIR/usr/lib/gcc/x86_64-veridian/14.2.0/"
+            [ -f "$NATIVE_GCC_DIR/usr/lib/gcc/x86_64-veridian/${NATIVE_GCC_VERSION}/$f" ] && \
+                cp "$NATIVE_GCC_DIR/usr/lib/gcc/x86_64-veridian/${NATIVE_GCC_VERSION}/$f" \
+                   "$BUILD_DIR/usr/lib/gcc/x86_64-veridian/${NATIVE_GCC_VERSION}/"
         done
 
         # Headers -- copy sysroot headers (canonical, freshly rebuilt by phase_headers),
@@ -484,14 +612,14 @@ phase_rootfs() {
         [ -d "${SYSROOT}/usr/include" ] && cp -r "${SYSROOT}/usr/include/"* "$BUILD_DIR/usr/include/" 2>/dev/null || true
 
         # GCC internal headers (stdbool.h, stddef.h, stdarg.h, etc.) -- essential for compilation
-        local gcc_inc="$NATIVE_GCC_DIR/usr/lib/gcc/x86_64-veridian/14.2.0/include"
+        local gcc_inc="$NATIVE_GCC_DIR/usr/lib/gcc/x86_64-veridian/${NATIVE_GCC_VERSION}/include"
         if [ -d "$gcc_inc" ]; then
-            cp -r "$gcc_inc/"* "$BUILD_DIR/usr/lib/gcc/x86_64-veridian/14.2.0/include/" 2>/dev/null || true
+            cp -r "$gcc_inc/"* "$BUILD_DIR/usr/lib/gcc/x86_64-veridian/${NATIVE_GCC_VERSION}/include/" 2>/dev/null || true
             echo "    + GCC internal headers ($(ls "$gcc_inc" | wc -l) files)"
         fi
 
         # GCC specs
-        cat > "$BUILD_DIR/usr/lib/gcc/x86_64-veridian/14.2.0/specs" << 'SPECEOF'
+        cat > "$BUILD_DIR/usr/lib/gcc/x86_64-veridian/${NATIVE_GCC_VERSION}/specs" << 'SPECEOF'
 *linker:
 ld
 SPECEOF

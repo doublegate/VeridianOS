@@ -314,6 +314,20 @@ impl SharedRegion {
         Ok(())
     }
 
+    /// Drop `process`'s mapping from the bookkeeping only, for a process
+    /// whose address space is going away as a whole (exit, or a fork
+    /// undone). Returns whether it had one. Without this an exited process
+    /// kept counting in `mapping_count`, and the region could never be
+    /// unregistered.
+    pub fn forget(&self, process: ProcessId) -> bool {
+        if self.mappings.lock().remove(&process).is_some() {
+            self.ref_count.fetch_sub(1, Ordering::Relaxed);
+            true
+        } else {
+            false
+        }
+    }
+
     /// Transfer ownership of region to another process.
     ///
     /// Validates that the target process exists before transferring.
@@ -487,6 +501,25 @@ mod tests {
         // Clean up without running Drop on fake frames.
         let removed = REGISTRY.lock().remove(&base).unwrap();
         drop(removed);
+        core::mem::forget(region);
+    }
+
+    #[test]
+    fn forget_drops_an_exited_process_so_the_region_can_go() {
+        let base = 0xDEAD_0001_0000;
+        let region = register_region(fake_region(base));
+        let child = ProcessId(4243);
+        region
+            .register_inherited(child, VirtualAddress::new(0x4000_0000), Permission::Read)
+            .unwrap();
+        assert_eq!(unregister_region(base), Err(IpcError::ResourceBusy));
+        // The process exited: only the bookkeeping goes (its page tables
+        // went with its address space).
+        assert!(region.forget(child));
+        assert!(!region.forget(child), "only once");
+        assert_eq!(region.mapping_count(), 0);
+        assert_eq!(region.get_mapping(child), None);
+        assert_eq!(unregister_region(base), Ok(()));
         core::mem::forget(region);
     }
 

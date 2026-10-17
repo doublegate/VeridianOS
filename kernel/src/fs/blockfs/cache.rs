@@ -10,19 +10,33 @@
 //! the allocator; that matters on AArch64/RISC-V, whose bump allocator never
 //! reclaims memory.
 //!
-//! Rules that keep data safe:
-//! - **Dirty blocks stay in memory until sync.** Only clean slots are evicted;
-//!   when every slot is dirty the pool grows past its capacity. The superblock,
-//!   bitmap and inode table are written only at sync and there is no journal,
-//!   so writing a data block earlier could overwrite a block that was freed and
-//!   reused while the last-synced inodes still point at it. A crash would then
-//!   corrupt the old file. Pinning keeps the disk exactly at its last-synced
-//!   state between syncs, as before this cache. The capacity therefore bounds
-//!   clean (read) data; dirty data is bounded by how much is written between
-//!   syncs.
+//! Rules that keep data safe (ADR 0003, ADR 0011):
+//! - **Metadata blocks stay in memory until sync.** The superblock, bitmap and
+//!   inode table are written only at sync and there is no journal, so a
+//!   directory or indirect-pointer block written early would let the
+//!   last-synced inodes point at blocks the last-synced bitmap calls free. Such
+//!   blocks are *pinned*: dirty until the next sync, never evicted.
+//! - **File data blocks may be written back before sync** (BM-FS-01), when more
+//!   than the dirty limit of them accumulate: BlockFS never reuses a block
+//!   freed since the last sync (it waits in quarantine until that sync has
+//!   written the new bitmap), so a data block either belonged to the same file
+//!   at the last sync (an in-place overwrite) or was free on the disk (nothing
+//!   on the disk refers to it). A crash cannot corrupt another file. A block
+//!   reused from quarantine, because the disk was otherwise full, is pinned
+//!   like metadata.
+//! - Only clean slots are evicted; when every slot is dirty the pool grows past
+//!   its capacity. The capacity bounds clean data, the dirty limit unpinned
+//!   dirty data; pinned data is bounded by what changes between syncs.
 //! - A newly allocated block is inserted zeroed and dirty, so stale bytes on
 //!   the disk can never be read back through it.
 //! - A freed block is dropped without write-back.
+//!
+//! A miss does not hold the cache across the disk read (N-118 / BM-DRV-06):
+//! [`BlockCache::lookup`] claims a slot, marks it *filling* and hands its
+//! buffer out in a [`FillTicket`]; the caller drops the cache lock, reads
+//! the block into the ticket and calls [`BlockCache::finish_fill`]. Readers
+//! of other blocks carry on meanwhile; a reader of the same block sees
+//! [`Lookup::Busy`] and waits. A filling slot is clean and never evicted.
 
 use alloc::{boxed::Box, vec, vec::Vec};
 
@@ -58,7 +72,46 @@ struct Slot {
     block: u32,
     dirty: bool,
     referenced: bool,
+    /// Its buffer is out in a [`FillTicket`]; `data` is empty until the
+    /// fill finishes.
+    filling: bool,
+    /// Dirty and not writable before the next sync (see the module docs).
+    pinned: bool,
     data: Box<[u8]>,
+}
+
+/// Result of [`BlockCache::lookup`].
+pub(crate) enum Lookup {
+    /// Resident in this slot ([`BlockCache::data`]).
+    Hit(usize),
+    /// Not allocated: reads as zeros.
+    Zero,
+    /// Another reader is filling it: wait, then look again.
+    Busy,
+    /// A miss: read the block into the ticket, then
+    /// [`BlockCache::finish_fill`].
+    Fill(FillTicket),
+}
+
+/// A claimed slot's buffer, out of the cache while the block is read into
+/// it. It must go back through [`BlockCache::finish_fill`]; until then the
+/// slot stays busy.
+#[must_use]
+pub(crate) struct FillTicket {
+    slot: usize,
+    block: u32,
+    buf: Box<[u8]>,
+}
+
+impl FillTicket {
+    pub(crate) fn block(&self) -> u32 {
+        self.block
+    }
+
+    /// The buffer to read the block into.
+    pub(crate) fn buf(&mut self) -> &mut [u8] {
+        &mut self.buf
+    }
 }
 
 /// Counters, reported by `blockfs` diagnostics and the tests.
@@ -69,6 +122,8 @@ pub(crate) struct CacheStats {
     pub evictions: u64,
     /// Dirty blocks written by `flush` (sync).
     pub writebacks: u64,
+    /// Unpinned data blocks written before sync (`writeback_unpinned`).
+    pub early_writebacks: u64,
 }
 
 pub(crate) struct BlockCache {
@@ -79,6 +134,11 @@ pub(crate) struct BlockCache {
     free: Vec<u32>,
     hand: usize,
     capacity: usize,
+    /// Dirty slots that are not pinned.
+    dirty_unpinned: usize,
+    /// Above this many unpinned dirty blocks, `over_dirty_limit` asks the
+    /// filesystem to write them back.
+    dirty_limit: usize,
     stats: CacheStats,
 }
 
@@ -90,6 +150,8 @@ impl BlockCache {
             free: Vec::new(),
             hand: 0,
             capacity: capacity.max(1),
+            dirty_unpinned: 0,
+            dirty_limit: DEFAULT_CAPACITY_BLOCKS,
             stats: CacheStats::default(),
         }
     }
@@ -101,6 +163,41 @@ impl BlockCache {
     /// Slots currently allocated (resident plus recycled).
     pub(crate) fn slot_count(&self) -> usize {
         self.slots.len()
+    }
+
+    /// Whether enough unpinned dirty blocks have accumulated that the
+    /// filesystem should write them back (`writeback_unpinned`).
+    pub(crate) fn over_dirty_limit(&self) -> bool {
+        self.dirty_unpinned > self.dirty_limit
+    }
+
+    /// Change the dirty limit (tests and mount options).
+    pub(crate) fn set_dirty_limit(&mut self, blocks: usize) {
+        self.dirty_limit = blocks;
+    }
+
+    /// Mark `slot` dirty; `pin` keeps it until the next sync. A pinned slot
+    /// stays pinned whatever later writes say.
+    fn mark_dirty(&mut self, slot: usize, pin: bool) {
+        let s = &mut self.slots[slot];
+        let was_unpinned = s.dirty && !s.pinned;
+        s.dirty = true;
+        s.pinned |= pin;
+        match (was_unpinned, !s.pinned) {
+            (false, true) => self.dirty_unpinned += 1,
+            (true, false) => self.dirty_unpinned -= 1,
+            _ => {}
+        }
+    }
+
+    /// Mark `slot` clean (written, or its contents dropped).
+    fn mark_clean(&mut self, slot: usize) {
+        let s = &mut self.slots[slot];
+        if s.dirty && !s.pinned {
+            self.dirty_unpinned -= 1;
+        }
+        s.dirty = false;
+        s.pinned = false;
     }
 
     pub(crate) fn dirty_count(&self) -> usize {
@@ -116,9 +213,71 @@ impl BlockCache {
             return None;
         }
         let slot = slot as usize;
+        if self.slots[slot].filling {
+            return None;
+        }
         self.slots[slot].referenced = true;
         self.stats.hits += 1;
         Some(slot)
+    }
+
+    /// Look `block` up for reading without doing any I/O (see the module
+    /// docs): a hit, zeros, busy, or a ticket to fill it.
+    pub(crate) fn lookup(&mut self, block: u32, allocated: bool) -> Result<Lookup, KernelError> {
+        if (block as usize) >= self.index.len() {
+            return Err(KernelError::FsError(crate::error::FsError::IoError));
+        }
+        if self.is_filling(block) {
+            return Ok(Lookup::Busy);
+        }
+        if let Some(slot) = self.resident(block) {
+            return Ok(Lookup::Hit(slot));
+        }
+        if !allocated {
+            return Ok(Lookup::Zero);
+        }
+        self.stats.misses += 1;
+        let slot = self.claim(block);
+        let s = &mut self.slots[slot];
+        s.filling = true;
+        let buf = core::mem::take(&mut s.data);
+        Ok(Lookup::Fill(FillTicket { slot, block, buf }))
+    }
+
+    /// Whether `block` is being filled by a [`FillTicket`].
+    pub(crate) fn is_filling(&self, block: u32) -> bool {
+        match self.index.get(block as usize) {
+            Some(&slot) if slot != NO_SLOT => self.slots[slot as usize].filling,
+            _ => false,
+        }
+    }
+
+    /// A resident slot's contents.
+    pub(crate) fn data(&self, slot: usize) -> &[u8] {
+        &self.slots[slot].data
+    }
+
+    /// Return a ticket's buffer with the outcome of its read. On success
+    /// the block is resident in the returned slot; on failure the slot is
+    /// released and the next access reads the disk again.
+    pub(crate) fn finish_fill(
+        &mut self,
+        ticket: FillTicket,
+        read: Result<(), KernelError>,
+    ) -> Result<usize, KernelError> {
+        let FillTicket { slot, block, buf } = ticket;
+        let s = &mut self.slots[slot];
+        // The slot cannot change hands while filling: eviction skips it,
+        // and discard and invalidation run with the filesystem locked
+        // exclusively, so no ticket is outstanding then.
+        debug_assert!(s.filling && s.block == block);
+        s.data = buf;
+        s.filling = false;
+        if let Err(e) = read {
+            self.release(slot);
+            return Err(e);
+        }
+        Ok(slot)
     }
 
     /// Get a slot for `block`, evicting or growing as needed. The returned
@@ -136,8 +295,10 @@ impl BlockCache {
             }
         };
         let s = &mut self.slots[slot];
+        debug_assert!(!s.dirty, "claim takes only clean slots");
         s.block = block;
         s.dirty = false;
+        s.pinned = false;
         s.referenced = true;
         self.index[block as usize] = slot as u32;
         slot
@@ -148,13 +309,16 @@ impl BlockCache {
             block: NO_SLOT,
             dirty: false,
             referenced: false,
+            filling: false,
+            pinned: false,
             data: vec![0u8; BLOCK_SIZE].into_boxed_slice(),
         });
         self.slots.len() - 1
     }
 
     /// CLOCK sweep: clear reference bits until an unreferenced clean slot
-    /// comes round. Dirty slots are pinned until sync (see the module docs).
+    /// comes round. Dirty slots are pinned until sync (see the module docs),
+    /// and slots being filled hold no data yet.
     /// Two full turns without a candidate means every slot is dirty.
     fn evict(&mut self) -> Option<usize> {
         let n = self.slots.len();
@@ -162,7 +326,7 @@ impl BlockCache {
             let i = self.hand;
             self.hand = (self.hand + 1) % n;
             let s = &mut self.slots[i];
-            if s.dirty {
+            if s.dirty || s.filling {
                 continue;
             }
             if s.referenced {
@@ -179,6 +343,7 @@ impl BlockCache {
 
     /// Read access. Blocks that are not allocated read as zeros without
     /// touching the disk or the pool.
+    #[cfg(test)]
     pub(crate) fn read<R>(
         &mut self,
         block: u32,
@@ -200,12 +365,14 @@ impl BlockCache {
     }
 
     /// Write access to an existing block: its current contents are loaded
-    /// first, and the slot is marked dirty.
+    /// first, and the slot is marked dirty; `pin` (metadata, or a block
+    /// reused from quarantine) keeps it until the next sync.
     pub(crate) fn write(
         &mut self,
         block: u32,
         allocated: bool,
         disk: Option<Disk<'_>>,
+        pin: bool,
     ) -> Result<&mut [u8], KernelError> {
         if (block as usize) >= self.index.len() {
             return Err(KernelError::FsError(crate::error::FsError::IoError));
@@ -219,13 +386,12 @@ impl BlockCache {
                 slot
             }
         };
-        let s = &mut self.slots[slot];
-        s.dirty = true;
-        Ok(&mut s.data)
+        self.mark_dirty(slot, pin);
+        Ok(&mut self.slots[slot].data)
     }
 
     /// Insert a newly allocated block: zeroed and dirty, no disk read.
-    pub(crate) fn insert_zeroed(&mut self, block: u32) -> Result<(), KernelError> {
+    pub(crate) fn insert_zeroed(&mut self, block: u32, pin: bool) -> Result<(), KernelError> {
         if (block as usize) >= self.index.len() {
             return Err(KernelError::FsError(crate::error::FsError::IoError));
         }
@@ -233,9 +399,8 @@ impl BlockCache {
             Some(slot) => slot,
             None => self.claim(block),
         };
-        let s = &mut self.slots[slot];
-        s.data.fill(0);
-        s.dirty = true;
+        self.slots[slot].data.fill(0);
+        self.mark_dirty(slot, pin);
         Ok(())
     }
 
@@ -259,12 +424,12 @@ impl BlockCache {
     }
 
     fn release(&mut self, slot: usize) {
+        self.mark_clean(slot);
         let s = &mut self.slots[slot];
         if s.block != NO_SLOT {
             self.index[s.block as usize] = NO_SLOT;
         }
         s.block = NO_SLOT;
-        s.dirty = false;
         s.referenced = false;
         self.free.push(slot as u32);
     }
@@ -283,15 +448,34 @@ impl BlockCache {
     /// reported by the caller).
     pub(crate) fn flush(&mut self, disk: Disk<'_>) -> Result<usize, KernelError> {
         let mut written = 0;
-        for s in self.slots.iter_mut() {
+        for i in 0..self.slots.len() {
+            let s = &self.slots[i];
             if s.block == NO_SLOT || !s.dirty || !disk.can_write(s.block) {
                 continue;
             }
             disk.backend.write_block(s.block as u64, &s.data)?;
-            s.dirty = false;
+            self.mark_clean(i);
             written += 1;
         }
         self.stats.writebacks += written as u64;
+        Ok(written)
+    }
+
+    /// Write back every dirty block that is not pinned, so it becomes
+    /// clean and evictable (BM-FS-01; safe before sync, see the module
+    /// docs). Returns how many were written.
+    pub(crate) fn writeback_unpinned(&mut self, disk: Disk<'_>) -> Result<usize, KernelError> {
+        let mut written = 0;
+        for i in 0..self.slots.len() {
+            let s = &self.slots[i];
+            if s.block == NO_SLOT || !s.dirty || s.pinned || !disk.can_write(s.block) {
+                continue;
+            }
+            disk.backend.write_block(s.block as u64, &s.data)?;
+            self.mark_clean(i);
+            written += 1;
+        }
+        self.stats.early_writebacks += written as u64;
         Ok(written)
     }
 
@@ -306,7 +490,8 @@ impl BlockCache {
     /// Drop every clean block, so the next access rereads the disk.
     pub(crate) fn invalidate_clean(&mut self) {
         for i in 0..self.slots.len() {
-            if self.slots[i].block != NO_SLOT && !self.slots[i].dirty {
+            let s = &self.slots[i];
+            if s.block != NO_SLOT && !s.dirty && !s.filling {
                 self.release(i);
             }
         }
@@ -407,7 +592,7 @@ mod tests {
     fn dirty_blocks_stay_in_memory_until_flush() {
         let m = MemDisk::new(8);
         let mut c = BlockCache::new(8, 2);
-        c.write(1, true, Some(m.disk())).unwrap()[0] = 0xAA;
+        c.write(1, true, Some(m.disk()), false).unwrap()[0] = 0xAA;
         for b in 2..8 {
             first_byte(&mut c, b, m.disk());
         }
@@ -428,7 +613,7 @@ mod tests {
         let m = MemDisk::new(8);
         let mut c = BlockCache::new(8, 2);
         for b in 0..4 {
-            c.write(b, true, Some(m.disk())).unwrap()[0] = 0xF0 | b as u8;
+            c.write(b, true, Some(m.disk()), false).unwrap()[0] = 0xF0 | b as u8;
         }
         assert_eq!(c.slot_count(), 4);
         assert_eq!(*m.writes.borrow(), 0);
@@ -447,7 +632,7 @@ mod tests {
     fn new_blocks_never_expose_stale_disk_bytes() {
         let m = MemDisk::new(8);
         let mut c = BlockCache::new(8, 1);
-        c.insert_zeroed(6).unwrap();
+        c.insert_zeroed(6, false).unwrap();
         assert_eq!(first_byte(&mut c, 6, m.disk()), 0);
         // Pinned dirty: other reads cannot push it out and reread disk.
         first_byte(&mut c, 2, m.disk());
@@ -460,8 +645,8 @@ mod tests {
     fn discard_drops_without_writeback_and_flush_writes_dirty() {
         let m = MemDisk::new(8);
         let mut c = BlockCache::new(8, 4);
-        c.write(2, true, Some(m.disk())).unwrap()[0] = 0x11;
-        c.write(3, true, Some(m.disk())).unwrap()[0] = 0x22;
+        c.write(2, true, Some(m.disk()), false).unwrap()[0] = 0x11;
+        c.write(3, true, Some(m.disk()), false).unwrap()[0] = 0x22;
         c.discard(2);
         assert_eq!(c.dirty_count(), 1);
         assert_eq!(c.flush(m.disk()).unwrap(), 1);
@@ -474,7 +659,7 @@ mod tests {
     fn blocks_past_device_end_stay_dirty() {
         let m = MemDisk::new(4);
         let mut c = BlockCache::new(8, 8);
-        c.insert_zeroed(6).unwrap();
+        c.insert_zeroed(6, false).unwrap();
         assert_eq!(c.flush(m.disk()).unwrap(), 0);
         assert_eq!(c.unwritable_dirty(m.disk()).collect::<Vec<_>>(), vec![6]);
     }
@@ -483,6 +668,143 @@ mod tests {
     fn out_of_range_block_is_an_error() {
         let mut c = BlockCache::new(4, 4);
         assert!(c.read(4, true, None, |_| ()).is_err());
-        assert!(c.write(9, true, None).is_err());
+        assert!(c.write(9, true, None, false).is_err());
+        assert!(c.lookup(4, true).is_err());
+    }
+
+    /// Run a fill the way `BlockFsInner::with_block` does: the disk read
+    /// happens with no cache borrow held.
+    fn fill_now(c: &mut BlockCache, mut t: FillTicket, m: &MemDisk) -> usize {
+        let r = m.read_block(t.block() as u64, t.buf());
+        c.finish_fill(t, r).unwrap()
+    }
+
+    /// N-118 / BM-DRV-06: a miss hands out a ticket and the cache stays
+    /// usable while the read is in flight: other blocks hit and fill, the
+    /// block being filled reports busy, and it hits once the fill is done.
+    #[test]
+    fn fill_ticket_leaves_the_cache_usable_during_io() {
+        let m = MemDisk::new(16);
+        let mut c = BlockCache::new(16, 4);
+        let Ok(Lookup::Fill(t5)) = c.lookup(5, true) else {
+            panic!("a miss hands out a fill ticket");
+        };
+        assert!(matches!(c.lookup(5, true), Ok(Lookup::Busy)));
+        assert!(c.is_filling(5));
+        // Another block fills and hits meanwhile.
+        let Ok(Lookup::Fill(t3)) = c.lookup(3, true) else {
+            panic!("block 3 misses");
+        };
+        let s3 = fill_now(&mut c, t3, &m);
+        assert_eq!(c.data(s3)[0], 3);
+        assert!(matches!(c.lookup(3, true), Ok(Lookup::Hit(_))));
+        // Unallocated blocks still read as zeros.
+        assert!(matches!(c.lookup(9, false), Ok(Lookup::Zero)));
+        let s5 = fill_now(&mut c, t5, &m);
+        assert!(!c.is_filling(5));
+        let Ok(Lookup::Hit(hit)) = c.lookup(5, true) else {
+            panic!("block 5 is resident after its fill");
+        };
+        assert_eq!(hit, s5);
+        assert_eq!(c.data(s5)[0], 5);
+        assert_eq!(c.stats().misses, 2);
+        assert_eq!(*m.reads.borrow(), 2);
+    }
+
+    /// A slot being filled has no valid data, so it is never evicted: the
+    /// pool grows instead.
+    #[test]
+    fn filling_slot_is_never_evicted() {
+        let m = MemDisk::new(8);
+        let mut c = BlockCache::new(8, 1);
+        let Ok(Lookup::Fill(t1)) = c.lookup(1, true) else {
+            panic!("miss");
+        };
+        let Ok(Lookup::Fill(t2)) = c.lookup(2, true) else {
+            panic!("miss");
+        };
+        assert_eq!(
+            c.slot_count(),
+            2,
+            "grew past capacity rather than evict a filling slot"
+        );
+        let s2 = fill_now(&mut c, t2, &m);
+        let s1 = fill_now(&mut c, t1, &m);
+        assert_eq!((c.data(s1)[0], c.data(s2)[0]), (1, 2));
+    }
+
+    /// A failed read releases its slot: nothing is left busy, and the next
+    /// access tries the disk again.
+    #[test]
+    fn failed_fill_releases_the_slot() {
+        let mut c = BlockCache::new(8, 2);
+        let Ok(Lookup::Fill(t)) = c.lookup(4, true) else {
+            panic!("miss");
+        };
+        let err = KernelError::FsError(crate::error::FsError::IoError);
+        assert!(c.finish_fill(t, Err(err)).is_err());
+        assert!(!c.is_filling(4));
+        assert!(matches!(c.lookup(4, true), Ok(Lookup::Fill(_))));
+    }
+
+    /// BM-FS-01: unpinned dirty data past the limit is written back and
+    /// becomes evictable; pinned (metadata) blocks stay dirty until flush.
+    #[test]
+    fn writeback_unpinned_leaves_pinned_blocks_dirty() {
+        let m = MemDisk::new(16);
+        let mut c = BlockCache::new(16, 2);
+        c.set_dirty_limit(2);
+        for b in 0..4 {
+            c.write(b, true, Some(m.disk()), false).unwrap()[0] = 0xD0 | b as u8;
+        }
+        c.write(9, true, Some(m.disk()), true).unwrap()[0] = 0x99;
+        // A later unpinned write does not unpin it.
+        c.write(9, true, Some(m.disk()), false).unwrap()[1] = 0x98;
+        assert!(c.over_dirty_limit());
+        assert_eq!(c.writeback_unpinned(m.disk()).unwrap(), 4);
+        assert!(!c.over_dirty_limit());
+        assert_eq!(c.dirty_count(), 1, "the pinned block is still dirty");
+        assert_eq!(m.blocks.borrow()[2][0], 0xD2);
+        assert_eq!(m.blocks.borrow()[9][0], 9, "pinned block not written");
+        assert_eq!(c.stats().early_writebacks, 4);
+        // The written slots are clean again, so the pool can shrink back
+        // around the pinned block.
+        for b in 10..16 {
+            first_byte(&mut c, b, m.disk());
+        }
+        assert!(c.slot_count() <= 5);
+        // Sync writes the pinned block and clears the pin.
+        assert_eq!(c.flush(m.disk()).unwrap(), 1);
+        assert_eq!(m.blocks.borrow()[9][..2], [0x99, 0x98]);
+        assert_eq!(c.dirty_count(), 0);
+    }
+
+    /// The unpinned-dirty count follows every transition, including
+    /// discard of a dirty block and a pinned block being re-dirtied.
+    #[test]
+    fn dirty_limit_counts_only_unpinned_dirty_blocks() {
+        let m = MemDisk::new(8);
+        let mut c = BlockCache::new(8, 8);
+        c.set_dirty_limit(1);
+        c.insert_zeroed(1, false).unwrap();
+        c.insert_zeroed(2, true).unwrap();
+        assert!(!c.over_dirty_limit(), "one unpinned, one pinned");
+        c.write(3, true, Some(m.disk()), false).unwrap();
+        assert!(c.over_dirty_limit());
+        c.discard(3);
+        assert!(!c.over_dirty_limit());
+        c.write(1, true, Some(m.disk()), true).unwrap();
+        assert_eq!(
+            c.writeback_unpinned(m.disk()).unwrap(),
+            0,
+            "1 is pinned now"
+        );
+        c.flush(m.disk()).unwrap();
+        c.write(4, true, Some(m.disk()), false).unwrap();
+        c.write(5, true, Some(m.disk()), false).unwrap();
+        assert!(
+            c.over_dirty_limit(),
+            "flush reset the count, new writes count"
+        );
     }
 }

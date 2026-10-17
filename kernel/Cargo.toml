@@ -6,12 +6,20 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[lints]
+workspace = true
+
 [features]
-default = ["alloc"]
+default = ["alloc", "smp"]
 alloc = []
+# Start the other CPUs and run tasks on them (ADR 0004, ADR 0012); on by
+# default since v0.27 sprint D5.
 smp = []
 test-kernel = ["qemu-exit"]
 net_debug = []
+# Raw serial tracing of every page fault and every open() (bring-up aid;
+# each byte is a VM exit, so it is off by default; N-176, N-130).
+trace = []
 benchmarks = []
 integration-tests = []
 qemu-exit = []
@@ -24,6 +32,9 @@ linked_list_allocator.workspace = true
 lazy_static.workspace = true
 bitflags.workspace = true
 log.workspace = true
+# FIPS 204 ML-DSA (package signature verification, N-55). Pure Rust,
+# no_std, forbid(unsafe_code); default features (getrandom, pkcs8) off.
+ml-dsa = { version = "0.1.1", default-features = false, features = ["alloc"] }
 
 # Architecture-specific dependencies
 [target.'cfg(target_arch = "x86_64")'.dependencies]
@@ -75,10 +86,6 @@ harness = false
 
 [[test]]
 name = "ipc_benchmarks"
-harness = false
-
-[[test]]
-name = "scheduler_tests"
 harness = false
 
 [[test]]

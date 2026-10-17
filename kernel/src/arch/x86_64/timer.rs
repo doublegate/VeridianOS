@@ -12,25 +12,27 @@ pub fn get_ticks() -> u64 {
 /// Increment timer ticks (called from APIC timer interrupt handler at vector
 /// 48).
 ///
-/// Increments the global tick counter and triggers a scheduler tick for
-/// preemptive scheduling. Uses `try_lock()` on the scheduler to avoid
-/// deadlock if the scheduler lock is already held (e.g., we interrupted
-/// mid-schedule).
-pub fn tick() {
-    TICKS.fetch_add(1, Ordering::Relaxed);
-
-    // In TSC-deadline mode the timer is one-shot: arm the next tick first.
-    super::apic::rearm_deadline_timer();
-
-    // Advance kernel uptime and the timer wheel by one timer period.
-    crate::timer::timer_tick(super::apic::timer_period_ms());
-
-    // Trigger scheduler tick. Use try_lock to avoid deadlock: if the
-    // scheduler lock is already held (e.g., we interrupted mid-schedule),
-    // skip the tick -- the holder will complete its scheduling decision.
-    if let Some(mut sched) = crate::sched::scheduler::current_scheduler().try_lock() {
-        sched.tick();
+/// Every CPU ticks its own run queue (time slices, CPU accounting); only
+/// the timekeeping CPU also advances the tick count, the timer wheel and the
+/// console input (see `is_timekeeper`), and wakes expired sleepers
+/// (`dispatch::tick`).
+pub fn tick(user: bool) {
+    if crate::arch::percpu::is_timekeeper() {
+        TICKS.fetch_add(1, Ordering::Relaxed);
+        crate::timer::clock_tick();
+        #[cfg(feature = "alloc")]
+        crate::drivers::console_input::tick();
     }
+    #[cfg(feature = "alloc")]
+    crate::sched::dispatch::tick(user);
+    #[cfg(not(feature = "alloc"))]
+    let _ = user;
+    // In TSC-deadline mode the timer is one-shot: arm the next tick, after
+    // the work and against the time it ended, so that a tick outlasting the
+    // period still leaves the interrupted code a whole one (arming first
+    // left the deadline already past: an interrupt livelock). Interrupts
+    // stay off until the return, so nothing fires early.
+    super::apic::rearm_deadline_timer();
 }
 
 /// Setup timer for periodic interrupts

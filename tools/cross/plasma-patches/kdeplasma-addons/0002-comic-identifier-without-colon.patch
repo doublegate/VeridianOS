@@ -1,0 +1,24 @@
+VeridianOS: comic applet: no out-of-range read for an identifier without ':'
+
+Real bug (found by the patch review; present on upstream master too):
+ComicEngine::requestSource() splits the identifier at ':' and read
+parts[1] to decide whether the current strip is requested, before the
+"Less than two arguments specified" check further down. An identifier
+without ':' gives a one-element list, so parts[1] was an out-of-range
+access (an assertion in debug builds, undefined behaviour otherwise).
+isCurrentComic now requires the second part to exist; such an identifier
+then takes the existing error path (or, offline, the cache lookup with
+isCurrentComic false, as for any non-current strip). Valid identifiers
+are unaffected.
+
+--- a/applets/comic/engine/comic.cpp
++++ b/applets/comic/engine/comic.cpp
+@@ -78,7 +78,7 @@
+ 
+     const QStringList parts = identifier.split(QLatin1Char(':'), Qt::KeepEmptyParts);
+ 
+-    bool isCurrentComic = parts[1].isEmpty();
++    bool isCurrentComic = parts.count() > 1 && parts[1].isEmpty();
+ 
+     // check whether it is cached, make sure second part present
+     bool lookInCache = parts.count() > 1 && !(isCurrentComic && reason == RequestReason::Check) && CachedProvider::isCached(identifier);

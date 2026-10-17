@@ -18,7 +18,7 @@
 
 int clock_gettime(clockid_t clk_id, struct timespec *tp)
 {
-    long ret = veridian_syscall2(SYS_CLOCK_GETTIME, clk_id, tp);
+    long ret = veridian_syscall2(SYS_clock_gettime, clk_id, tp);
     if (ret < 0) {
         errno = (int)(-ret);
         return -1;
@@ -28,7 +28,7 @@ int clock_gettime(clockid_t clk_id, struct timespec *tp)
 
 int clock_getres(clockid_t clk_id, struct timespec *res)
 {
-    long ret = veridian_syscall2(SYS_CLOCK_GETRES, clk_id, res);
+    long ret = veridian_syscall2(SYS_clock_getres, clk_id, res);
     if (ret < 0) {
         errno = (int)(-ret);
         return -1;
@@ -42,7 +42,7 @@ int clock_getres(clockid_t clk_id, struct timespec *res)
 
 int nanosleep(const struct timespec *req, struct timespec *rem)
 {
-    long ret = veridian_syscall2(SYS_NANOSLEEP, req, rem);
+    long ret = veridian_syscall2(SYS_nanosleep, req, rem);
     if (ret < 0) {
         errno = (int)(-ret);
         return -1;
@@ -61,7 +61,7 @@ int gettimeofday(struct timeval *tv, struct timezone *tz)
     if (!tv)
         return 0;
 
-    long ret = veridian_syscall2(SYS_GETTIMEOFDAY, tv, tz);
+    long ret = veridian_syscall2(SYS_gettimeofday, tv, tz);
     if (ret < 0) {
         errno = (int)(-ret);
         return -1;

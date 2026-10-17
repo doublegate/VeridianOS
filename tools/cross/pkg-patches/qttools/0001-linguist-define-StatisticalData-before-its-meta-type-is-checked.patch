@@ -1,0 +1,119 @@
+VeridianOS: linguist: define StatisticalData before its meta-type is checked
+
+GCC 16 reported, for the host qttools build, in linguist's
+mocs_compilation.cpp: "statistics.h:12: defining 'StatisticalData', which
+previously failed to be complete in a SFINAE context
+[-Wsfinae-incomplete]". messagemodel.h only forward-declared
+StatisticalData but uses it in the statsChanged() signals of MessageModel
+and MultiDataModel; the moc code for those classes (included earlier in
+mocs_compilation.cpp than moc_statistics.cpp) asks QMetaType whether the
+type is complete, gets "no", and statistics.h then defines it in the same
+translation unit. The answer to that question must not change within a
+program (the meta-type information would differ between translation
+units), so this is worth fixing rather than a cosmetic warning.
+
+The struct moves unchanged into a new header, statisticaldata.h, which
+both messagemodel.h (instead of the forward declaration) and statistics.h
+include, so the type is complete wherever the signal is declared. The new
+header is listed with the other linguist sources in CMakeLists.txt. No
+behaviour change.
+
+diff -ruN a/src/linguist/linguist/CMakeLists.txt b/src/linguist/linguist/CMakeLists.txt
+--- a/src/linguist/linguist/CMakeLists.txt	2026-10-08 17:29:54.150638257 -0400
++++ b/src/linguist/linguist/CMakeLists.txt	2026-10-08 17:29:54.180457147 -0400
+@@ -57,6 +57,7 @@
+         phraseview.cpp phraseview.h
+         recentfiles.cpp recentfiles.h
+         sourcecodeview.cpp sourcecodeview.h
++        statisticaldata.h
+         statistics.cpp statistics.h statistics.ui
+         translatedialog.cpp translatedialog.h translatedialog.ui
+         translationsettings.ui
+diff -ruN a/src/linguist/linguist/messagemodel.h b/src/linguist/linguist/messagemodel.h
+--- a/src/linguist/linguist/messagemodel.h	2026-10-08 17:29:45.542714868 -0400
++++ b/src/linguist/linguist/messagemodel.h	2026-10-08 17:29:45.552832086 -0400
+@@ -4,6 +4,7 @@
+ #ifndef MESSAGEMODEL_H
+ #define MESSAGEMODEL_H
+ 
++#include "statisticaldata.h"
+ #include "translator.h"
+ 
+ #include <QtCore/QAbstractItemModel>
+@@ -17,7 +18,6 @@
+ 
+ class DataModel;
+ class MultiDataModel;
+-struct StatisticalData;
+ 
+ class MessageItem
+ {
+diff -ruN a/src/linguist/linguist/statisticaldata.h b/src/linguist/linguist/statisticaldata.h
+--- a/src/linguist/linguist/statisticaldata.h	1969-12-31 19:00:00.000000000 -0500
++++ b/src/linguist/linguist/statisticaldata.h	2026-10-08 17:29:45.552722662 -0400
+@@ -0,0 +1,31 @@
++// Copyright (C) 2016 The Qt Company Ltd.
++// SPDX-License-Identifier: LicenseRef-Qt-Commercial OR GPL-3.0-only WITH Qt-GPL-exception-1.0
++
++#ifndef STATISTICALDATA_H
++#define STATISTICALDATA_H
++
++#include <QtCore/qglobal.h>
++
++QT_BEGIN_NAMESPACE
++
++struct StatisticalData
++{
++    int wordsSource;
++    int charsSource;
++    int charsSpacesSource;
++    int wordsFinished;
++    int charsFinished;
++    int charsSpacesFinished;
++    int wordsUnfinished;
++    int charsUnfinished;
++    int charsSpacesUnfinished;
++    int translatedMsgNoDanger;
++    int translatedMsgDanger;
++    int obsoleteMsg;
++    int unfinishedMsgNoDanger;
++    int unfinishedMsgDanger;
++};
++
++QT_END_NAMESPACE
++
++#endif // STATISTICALDATA_H
+diff -ruN a/src/linguist/linguist/statistics.h b/src/linguist/linguist/statistics.h
+--- a/src/linguist/linguist/statistics.h	2026-10-08 17:29:45.539700897 -0400
++++ b/src/linguist/linguist/statistics.h	2026-10-08 17:29:45.552706819 -0400
+@@ -4,29 +4,12 @@
+ #ifndef STATISTICS_H
+ #define STATISTICS_H
+ 
++#include "statisticaldata.h"
+ #include "ui_statistics.h"
+ #include <QVariant>
+ 
+ QT_BEGIN_NAMESPACE
+ 
+-struct StatisticalData
+-{
+-    int wordsSource;
+-    int charsSource;
+-    int charsSpacesSource;
+-    int wordsFinished;
+-    int charsFinished;
+-    int charsSpacesFinished;
+-    int wordsUnfinished;
+-    int charsUnfinished;
+-    int charsSpacesUnfinished;
+-    int translatedMsgNoDanger;
+-    int translatedMsgDanger;
+-    int obsoleteMsg;
+-    int unfinishedMsgNoDanger;
+-    int unfinishedMsgDanger;
+-};
+-
+ class Statistics : public QDialog, public Ui::Statistics
+ {
+     Q_OBJECT

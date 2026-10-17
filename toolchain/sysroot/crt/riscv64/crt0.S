@@ -94,3 +94,6 @@ _exit:
  * with the actual __global_pointer$ value from the linker script.
  */
 .weak __global_pointer$
+
+/* No executable stack. */
+.section .note.GNU-stack,"",%progbits

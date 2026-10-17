@@ -1,0 +1,25 @@
+VeridianOS: kinfocenter's run-time programs looked up in the target
+
+cmake/ProgramFinder.cmake finds the programs the information modules run
+(lspci, glxinfo, dmidecode, wayland-info, ...) to report them in the
+feature summary as run-time dependencies. Cross compiling, find_program()
+searched the build host, so the summary reported the build host's
+programs as present on the target. It now searches the target's root
+(CMAKE_FIND_ROOT_PATH) when cross compiling.
+
+--- a/cmake/ProgramFinder.cmake
++++ b/cmake/ProgramFinder.cmake
+@@ -7,7 +7,12 @@
+ #  $package_FOUND - true if found
+ #  $package_PATH - path to the bin (only when found)
+ macro(program_finder program)
+-    find_program(${CMAKE_FIND_PACKAGE_NAME}_PATH ${program} ${ARGN})
++    # A run-time dependency: when cross compiling, the target's program.
++    if(CMAKE_CROSSCOMPILING)
++        find_program(${CMAKE_FIND_PACKAGE_NAME}_PATH ${program} ${ARGN} ONLY_CMAKE_FIND_ROOT_PATH)
++    else()
++        find_program(${CMAKE_FIND_PACKAGE_NAME}_PATH ${program} ${ARGN})
++    endif()
+ 
+     include(FindPackageHandleStandardArgs)
+     find_package_handle_standard_args(${CMAKE_FIND_PACKAGE_NAME}

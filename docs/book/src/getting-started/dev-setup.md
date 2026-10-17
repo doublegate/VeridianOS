@@ -163,7 +163,7 @@ If the kernel boots successfully in QEMU, your development environment is ready!
 If you encounter issues:
 1. Check the [Troubleshooting Guide](../project/troubleshooting.md)
 2. Search existing [GitHub Issues](https://github.com/doublegate/VeridianOS/issues)
-3. Join our [Discord server](https://discord.gg/veridian)
+3. Join our [Discord server](https://discord.gg/WGcgrnuVHt)
 4. Open a new issue with detailed error messages
 
 ## Next Steps

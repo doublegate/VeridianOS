@@ -1,0 +1,74 @@
+VeridianOS: QCA: initialise alloc_info on failure; port setTimeSpec(Qt::UTC)
+
+Two of the warnings GCC reported for QCA in the VeridianOS cross build (the
+121 "deprecated: Since OpenSSL 3.0" warnings in qca-ossl.cpp are a separate
+porting job and untouched here):
+
+- src/qca_tools.cpp:359: 'ai.size' may be used uninitialized
+  [-Wmaybe-uninitialized], in MemoryRegion::Private(const QByteArray &, bool)
+  (inlined into the MemoryRegion constructors). Real bug: ai_new() returned
+  false for a negative size without touching *ai, and the constructor then
+  called memcpy(ai.data, ..., ai.size) with uninitialised members; the
+  destructor's ai_delete() read them as well. A negative size reaches it
+  when QByteArray::size() (qsizetype) does not fit the int parameter, i.e.
+  for arrays of 2 GiB or more. ai_new() now leaves a valid empty allocation
+  (size 0, null buffers) when it fails, and the constructor copies only
+  after a successful, non-empty allocation. No change for valid sizes.
+- plugins/qca-ossl/qca-ossl.cpp:3407: 'QDateTime::setTimeSpec(Qt::TimeSpec)'
+  is deprecated: Use setTimeZone() instead [-Wdeprecated-declarations].
+  Ported to setTimeZone(QTimeZone::UTC) (Qt >= 6.5), which Qt documents as
+  the equivalent of setTimeSpec(Qt::UTC): the date and time fields are kept
+  and reinterpreted as UTC. <QTimeZone> is included. No behaviour change.
+
+diff -ru a/plugins/qca-ossl/qca-ossl.cpp b/plugins/qca-ossl/qca-ossl.cpp
+--- a/plugins/qca-ossl/qca-ossl.cpp	2026-10-08 17:34:18.325203514 -0400
++++ b/plugins/qca-ossl/qca-ossl.cpp	2026-10-08 17:35:17.955497467 -0400
+@@ -22,6 +22,7 @@
+ 
+ #include <QDebug>
+ #include <QElapsedTimer>
++#include <QTimeZone>
+ #include <QtCrypto>
+ #include <QtPlugin>
+ #include <qcaprovider.h>
+@@ -3404,7 +3405,7 @@
+     qdt.setDate(qdate);
+     qdt.setTime(qtime);
+     if (gmt)
+-        qdt.setTimeSpec(Qt::UTC);
++        qdt.setTimeZone(QTimeZone::UTC);
+ auq_err:
+     if (isGmt)
+         *isGmt = gmt;
+diff -ru a/src/qca_tools.cpp b/src/qca_tools.cpp
+--- a/src/qca_tools.cpp	2026-10-08 17:34:18.322252056 -0400
++++ b/src/qca_tools.cpp	2026-10-08 17:34:29.492238477 -0400
+@@ -206,8 +206,16 @@
+ 
+ bool ai_new(alloc_info *ai, int size, bool sec)
+ {
+-    if (size < 0)
++    if (size < 0) {
++        // leave an empty, valid allocation behind, so the caller and
++        // ai_delete() never read an uninitialized alloc_info
++        ai->size = 0;
++        ai->sec  = sec;
++        ai->sbuf = nullptr;
++        ai->qbuf = nullptr;
++        ai->data = nullptr;
+         return false;
++    }
+ 
+     ai->size = size;
+     ai->sec  = sec;
+@@ -355,8 +363,8 @@
+ 
+     Private(const QByteArray &from, bool sec)
+     {
+-        ai_new(&ai, from.size(), sec);
+-        memcpy(ai.data, from.data(), ai.size);
++        if (ai_new(&ai, from.size(), sec) && ai.size > 0)
++            memcpy(ai.data, from.data(), ai.size);
+     }
+ 
+     Private(const Private &from)

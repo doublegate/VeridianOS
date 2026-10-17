@@ -23,10 +23,10 @@
 //!
 //! # Syscall mappings
 //!
-//! - `mmap` -> SYS_MEMORY_MAP (20)
-//! - `munmap` -> SYS_MEMORY_UNMAP (21)
-//! - `mprotect` -> SYS_MEMORY_PROTECT (22)
-//! - `brk` -> SYS_MEMORY_BRK (23)
+//! - `mmap` -> SYS_mmap (9)
+//! - `munmap` -> SYS_munmap (11)
+//! - `mprotect` -> SYS_mprotect (10)
+//! - `brk` -> SYS_brk (12)
 
 use core::{
     alloc::{GlobalAlloc, Layout},
@@ -35,8 +35,8 @@ use core::{
 };
 
 use super::{
-    syscall1, syscall2, syscall3, syscall6, syscall_result, SyscallError, SYS_MEMORY_BRK,
-    SYS_MEMORY_MAP, SYS_MEMORY_PROTECT, SYS_MEMORY_UNMAP,
+    syscall1, syscall2, syscall3, syscall6, syscall_result, SyscallError, SYS_brk,
+    SYS_mmap, SYS_mprotect, SYS_munmap,
 };
 
 // ============================================================================
@@ -94,7 +94,7 @@ pub fn mmap(
     // SAFETY: The kernel validates all arguments and allocates pages.
     let ret = unsafe {
         syscall6(
-            SYS_MEMORY_MAP,
+            SYS_mmap,
             addr,
             length,
             prot,
@@ -118,7 +118,7 @@ pub fn mmap(
 /// - `length`: Length in bytes
 pub fn munmap(addr: usize, length: usize) -> Result<usize, SyscallError> {
     // SAFETY: The kernel validates the address range.
-    let ret = unsafe { syscall2(SYS_MEMORY_UNMAP, addr, length) };
+    let ret = unsafe { syscall2(SYS_munmap, addr, length) };
     syscall_result(ret)
 }
 
@@ -130,7 +130,7 @@ pub fn munmap(addr: usize, length: usize) -> Result<usize, SyscallError> {
 /// - `prot`: New protection flags
 pub fn mprotect(addr: usize, length: usize, prot: usize) -> Result<usize, SyscallError> {
     // SAFETY: The kernel validates the address range and protection flags.
-    let ret = unsafe { syscall3(SYS_MEMORY_PROTECT, addr, length, prot) };
+    let ret = unsafe { syscall3(SYS_mprotect, addr, length, prot) };
     syscall_result(ret)
 }
 
@@ -143,7 +143,7 @@ pub fn mprotect(addr: usize, length: usize, prot: usize) -> Result<usize, Syscal
 /// Current break address after the operation.
 pub fn brk(addr: usize) -> Result<usize, SyscallError> {
     // SAFETY: The kernel validates the new break address.
-    let ret = unsafe { syscall1(SYS_MEMORY_BRK, addr) };
+    let ret = unsafe { syscall1(SYS_brk, addr) };
     syscall_result(ret)
 }
 

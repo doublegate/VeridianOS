@@ -214,68 +214,14 @@ fn launch_kde_init() -> Result<crate::process::ProcessId, crate::error::KernelEr
     })
 }
 
-/// Run a KDE process using the same pattern as
-/// `bootstrap::run_user_process_scheduled`.
-///
-/// This blocks the current kernel thread until the process exits, then
-/// cleans up page tables and reaps the zombie process entry.
+/// Run a KDE process and wait until it exits. `run_user_process` runs it as
+/// dispatcher tasks; their reaping frees its page tables and
+/// `run_and_wait` removes it from the process table. This function used to
+/// free the page tables and reap the process itself as well, which, once
+/// the dispatcher did both, freed the same page-table frames twice.
 #[cfg(all(feature = "alloc", target_arch = "x86_64"))]
 fn run_kde_process(pid: crate::process::ProcessId) {
-    use crate::process::get_process;
-
-    // Save page table root before running (needed for cleanup after exit)
-    let saved_pt_root = if let Some(proc) = get_process(pid) {
-        proc.memory_space.lock().get_page_table()
-    } else {
-        0
-    };
-
-    // Look up first thread ID for boot-current tracking
-    let tid = if let Some(proc) = get_process(pid) {
-        let threads = proc.threads.lock();
-        threads.values().next().map(|t| t.tid)
-    } else {
-        None
-    };
-
-    // Run the process (blocks until it exits)
-    if let Some(tid) = tid {
-        crate::process::set_boot_current(pid, tid);
-        crate::bootstrap::run_user_process(pid);
-        crate::process::clear_boot_current();
-    } else {
-        crate::bootstrap::run_user_process(pid);
-    }
-
-    // Boot CR3 is now restored. Free page table hierarchy frames.
-    // If the process called exec(), the page table was replaced -- free both.
-    let current_pt_root = if let Some(proc) = get_process(pid) {
-        proc.memory_space.lock().get_page_table()
-    } else {
-        0
-    };
-
-    if current_pt_root != 0 && current_pt_root != saved_pt_root {
-        crate::mm::vas::free_user_page_table_frames(current_pt_root);
-    }
-    if saved_pt_root != 0 {
-        crate::mm::vas::free_user_page_table_frames(saved_pt_root);
-    }
-
-    // Clear page_table_root to prevent double-free
-    if let Some(proc) = get_process(pid) {
-        proc.memory_space.lock().set_page_table(0);
-    }
-
-    // Reap zombie process
-    if let Some(proc) = get_process(pid) {
-        let state = proc.get_state();
-        if state == crate::process::ProcessState::Zombie
-            || state == crate::process::ProcessState::Dead
-        {
-            crate::process::table::remove_process(pid);
-        }
-    }
+    crate::bootstrap::run_user_process(pid);
 }
 
 /// Simple monotonic counter for measuring elapsed time.
@@ -327,7 +273,24 @@ fn setup_dbus_stub_socket() {
             }
         };
 
-        if unix_socket::socket_bind(stub_id, path).is_err() {
+        // The socket file a client's connect finds, in its directory.
+        let vfs = crate::fs::get_vfs();
+        for (i, _) in path.match_indices('/').skip(1) {
+            let _ = vfs.mkdir(&path[..i], crate::fs::Permissions::from_mode(0o755));
+        }
+        let file = match vfs.mknod(
+            path,
+            crate::fs::NodeType::Socket,
+            crate::fs::Permissions::from_mode(0o777),
+            0,
+        ) {
+            Ok(file) => file,
+            Err(_) => {
+                println!("[KDE] D-Bus stub ({}): socket file not made", path);
+                continue;
+            }
+        };
+        if unix_socket::socket_bind(stub_id, file, path).is_err() {
             println!("[KDE] D-Bus stub ({}): bind failed", path);
             continue;
         }

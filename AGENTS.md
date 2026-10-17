@@ -155,7 +155,7 @@ cargo install bootimage cargo-xbuild cargo-watch cargo-expand cargo-audit cargo-
 - **Core**: Memory management, scheduling, IPC, hardware abstraction
 - **User-space drivers (design goal, C6)**: Capability-controlled MMIO, interrupt forwarding, IOMMU DMA. Today drivers run in ring 0 inside the kernel (docs/KNOWN-LIMITATIONS.md)
 - **Zero-copy IPC**: Shared memory mapping, <1us fast path
-- **Security**: 64-bit capability tokens, post-quantum (Kyber/ML-KEM; Dilithium3 with pre-FIPS 204 sizes, N-55)
+- **Security**: 64-bit capability tokens, post-quantum (ML-DSA-65 verification per FIPS 204; experimental non-standard Kyber, N-57)
 
 ### Memory Layout (x86_64)
 ```

@@ -91,7 +91,9 @@ pub struct Process {
     pub priority: Mutex<ProcessPriority>,
 
     /// Virtual address space
-    pub memory_space: Mutex<VirtualAddressSpace>,
+    /// The address space. A sleeping lock: a page fault that finds it held
+    /// waits instead of failing (N-138).
+    pub memory_space: crate::sync::sleep_mutex::SleepMutex<VirtualAddressSpace>,
 
     /// Capability space
     pub capability_space: Mutex<CapabilitySpace>,
@@ -116,6 +118,52 @@ pub struct Process {
     /// Exit code (set when process exits)
     pub exit_code: AtomicU32,
 
+    /// Signal that terminated the process (0: it exited normally).
+    pub term_signal: AtomicU32,
+
+    /// Its threads run as dispatcher tasks (ADR 0006 stage D2) rather than
+    /// nested inside the context that launched them.
+    pub dispatched: core::sync::atomic::AtomicBool,
+
+    /// A fatal signal waiting to be acted on by the process's own threads
+    /// (dispatched processes only): each thread exits at its next return
+    /// to user mode or wakeup, and the last one tears the process down.
+    pub kill_pending: AtomicU32,
+    /// While `kill_pending` is `exit::EXEC_PENDING`: the thread doing the
+    /// exec, the one thread that stays (N-101).
+    pub exec_tid: AtomicU64,
+
+    /// The signal the parent gets when this process exits: SIGCHLD, or
+    /// clone's low byte (0: none) (N-210).
+    pub exit_signal: AtomicU32,
+
+    /// A CLONE_VFORK child whose parent waits until it execs or exits;
+    /// cleared (and PROCESS_EVENTS woken) by either (N-210).
+    pub vfork_pending: core::sync::atomic::AtomicBool,
+
+    /// The process has exec'd since it was created: its parent may no
+    /// longer change its process group (setpgid EACCES, N-216).
+    pub did_exec: core::sync::atomic::AtomicBool,
+
+    /// Job control (D3): the signal that stopped the process, 0 while it
+    /// runs. Its threads park on their way back to user mode until SIGCONT
+    /// or SIGKILL.
+    pub stop_signal: AtomicU32,
+
+    /// Counts SIGCONTs, so a stop decided before a SIGCONT arrived is not
+    /// applied after it.
+    pub cont_seq: AtomicU32,
+
+    /// RISC-V: the user address of the page holding the sigreturn
+    /// trampoline signal handlers return to (Linux uses its vDSO), or 0
+    /// before the first handler. Checked before every use, so a stale value
+    /// (after exec) is replaced.
+    pub sigtramp: AtomicU64,
+
+    /// A stop or continue the parent has not collected with `wait` yet, as
+    /// a wait status (`0x7f | sig << 8` or `0xffff`); 0 for none.
+    pub job_report: AtomicU32,
+
     /// CPU time used (in microseconds)
     pub cpu_time: AtomicU64,
 
@@ -125,14 +173,45 @@ pub struct Process {
     /// Creation timestamp
     pub created_at: u64,
 
-    /// User ID. Atomic because processes are shared through `Arc`.
-    uid: AtomicU32,
-
-    /// Group ID.
-    gid: AtomicU32,
+    /// User and group IDs and supplementary groups (N-248). A lock
+    /// because processes are shared through `Arc` and a set*id call
+    /// updates several fields at once.
+    creds: Mutex<super::creds::Credentials>,
 
     /// Process group ID (initialized to pid)
     pub pgid: AtomicU64,
+
+    /// The pid of the process tracing this one with ptrace, or 0. Not
+    /// inherited on fork, as on Linux.
+    pub tracer: AtomicU64,
+
+    /// Linux's cred_guard_mutex: exec decides and installs set-ID
+    /// credentials under it, and ptrace attaches under it, so a tracer
+    /// either attaches first (and exec grants no privilege) or sees the new
+    /// credentials (and may not attach). Held only briefly, never across
+    /// anything that waits.
+    pub cred_guard: Mutex<()>,
+
+    /// Linux's mm dumpable flag (PR_SET_DUMPABLE): when clear, only root
+    /// may ptrace the process or read its robust list. Inherited on fork,
+    /// set by exec as `install_exec_credentials` decides.
+    pub dumpable: core::sync::atomic::AtomicBool,
+
+    /// Resource limits (N-224): inherited on fork, kept across exec.
+    rlimits: Mutex<super::rlimit::Limits>,
+    /// RLIMIT_CPU's soft and hard values in nanoseconds, for the return to
+    /// user mode to check without the lock (u64::MAX: none).
+    pub cpu_limit_ns: [core::sync::atomic::AtomicU64; 2],
+
+    /// CPU time of the process's exited threads (its live threads' is the
+    /// dispatcher's), and of its children it has waited for, with theirs
+    /// (Linux's signal_struct sums; N-218, N-223).
+    cpu_exited: Mutex<crate::sched::cputime::CpuTimes>,
+    cpu_children: Mutex<crate::sched::cputime::CpuTimes>,
+    /// The largest resident set seen (pages), and the largest of the
+    /// children waited for (getrusage ru_maxrss).
+    peak_rss_pages: core::sync::atomic::AtomicUsize,
+    children_peak_rss_pages: core::sync::atomic::AtomicUsize,
 
     /// Session ID (initialized to pid)
     pub sid: AtomicU64,
@@ -148,10 +227,17 @@ pub struct Process {
 
     /// Signal handlers (signal number -> handler action)
     /// 0 = default, 1 = ignore, other values = handler address
-    pub signal_handlers: Mutex<[u64; 32]>,
+    pub signal_handlers: Mutex<[u64; super::signals::NSIG + 1]>,
+
+    /// The rest of each signal's action: (sa_flags, sa_restorer, sa_mask),
+    /// kept so sigaction returns what was set (N-95) and for delivery.
+    pub signal_action_extra: Mutex<[(u64, u64, u64); super::signals::NSIG + 1]>,
 
     /// Pending signals bitmap
     pub pending_signals: AtomicU64,
+
+    /// Queued real-time signals behind `pending_signals` (N-209).
+    pub rt_queue: super::signals::RtQueue,
 
     /// Signal mask (blocked signals)
     pub signal_mask: AtomicU64,
@@ -171,10 +257,6 @@ pub struct Process {
     /// User-space address to zero and futex-wake on thread exit
     /// (set by set_tid_address syscall, used by pthread_join).
     pub clear_child_tid: AtomicU64,
-
-    /// User-space address of robust futex list head
-    /// (set by set_robust_list syscall for cleanup on abnormal exit).
-    pub robust_list_head: AtomicU64,
 }
 
 /// Memory usage statistics
@@ -199,24 +281,107 @@ impl Process {
         *self.parent.lock() = parent;
     }
 
-    /// User ID.
+    /// A copy of the credentials. Permission checks use the effective IDs
+    /// and `Credentials::gid_for`.
+    pub fn credentials(&self) -> super::creds::Credentials {
+        *self.creds.lock()
+    }
+
+    /// The process's resource limits.
+    pub fn limits(&self) -> super::rlimit::Limits {
+        *self.rlimits.lock()
+    }
+
+    /// Set resource limit `resource` (`Limits::set`'s rules), and apply it
+    /// where it is enforced from cached values; the old value.
+    pub fn set_rlimit(
+        &self,
+        resource: usize,
+        new: super::rlimit::Rlimit,
+        privileged: bool,
+    ) -> Result<super::rlimit::Rlimit, crate::syscall::SyscallError> {
+        let old = self.rlimits.lock().set(resource, new, privileged)?;
+        self.apply_rlimit(resource, new);
+        Ok(old)
+    }
+
+    /// Take all of `limits` (fork: the parent's).
+    pub fn inherit_limits(&self, limits: super::rlimit::Limits) {
+        *self.rlimits.lock() = limits;
+        for resource in [super::rlimit::RLIMIT_NOFILE, super::rlimit::RLIMIT_CPU] {
+            if let Ok(value) = limits.get(resource) {
+                self.apply_rlimit(resource, value);
+            }
+        }
+    }
+
+    /// RLIMIT_CPU's soft limit was reached and SIGXCPU sent: move it one
+    /// second on (up to the hard limit), so the signal comes again each
+    /// further second of CPU time, as Linux's check_process_timers.
+    pub fn bump_cpu_soft_limit(&self) {
+        use super::rlimit::RLIMIT_CPU;
+        let mut limits = self.rlimits.lock();
+        let Ok(mut value) = limits.get(RLIMIT_CPU) else {
+            return;
+        };
+        if value.cur < value.max {
+            value.cur += 1;
+            let _ = limits.set(RLIMIT_CPU, value, true);
+        }
+        drop(limits);
+        self.apply_rlimit(RLIMIT_CPU, value);
+    }
+
+    fn apply_rlimit(&self, resource: usize, value: super::rlimit::Rlimit) {
+        use super::rlimit::{RLIMIT_CPU, RLIMIT_NOFILE};
+        match resource {
+            RLIMIT_NOFILE => self
+                .file_table
+                .lock()
+                .set_limit(value.cur.min(usize::MAX as u64) as usize),
+            RLIMIT_CPU => {
+                let ns = |secs: u64| secs.saturating_mul(1_000_000_000);
+                self.cpu_limit_ns[0].store(ns(value.cur), Ordering::Release);
+                self.cpu_limit_ns[1].store(ns(value.max), Ordering::Release);
+            }
+            _ => {}
+        }
+    }
+
+    /// Change the credentials atomically; `f` enforces the set*id rules.
+    /// As Linux's commit_creds, a change of the effective user or group
+    /// makes the process non-dumpable: memory it read with the old
+    /// identity (a dropped root's secrets) must not become readable to the
+    /// new one through ptrace. exec decides dumpability itself afterwards.
+    pub fn update_credentials<R>(&self, f: impl FnOnce(&mut super::creds::Credentials) -> R) -> R {
+        let mut creds = self.creds.lock();
+        let (euid, egid) = (creds.euid, creds.egid);
+        let result = f(&mut creds);
+        if creds.euid != euid || creds.egid != egid {
+            self.dumpable
+                .store(false, core::sync::atomic::Ordering::Release);
+        }
+        result
+    }
+
+    /// Real user ID.
     pub fn uid(&self) -> u32 {
-        self.uid.load(Ordering::Acquire)
+        self.creds.lock().ruid
     }
 
-    /// Set the user ID (callers enforce setuid rules).
-    pub fn set_uid(&self, uid: u32) {
-        self.uid.store(uid, Ordering::Release);
+    /// Effective user ID, the one permission checks use.
+    pub fn euid(&self) -> u32 {
+        self.creds.lock().euid
     }
 
-    /// Group ID.
+    /// Real group ID.
     pub fn gid(&self) -> u32 {
-        self.gid.load(Ordering::Acquire)
+        self.creds.lock().rgid
     }
 
-    /// Set the group ID (callers enforce setgid rules).
-    pub fn set_gid(&self, gid: u32) {
-        self.gid.store(gid, Ordering::Release);
+    /// Effective group ID.
+    pub fn egid(&self) -> u32 {
+        self.creds.lock().egid
     }
 
     /// Create a new process
@@ -233,31 +398,54 @@ impl Process {
             name,
             state: AtomicU32::new(ProcessState::Creating as u32),
             priority: Mutex::new(priority),
-            memory_space: Mutex::new(VirtualAddressSpace::new()),
+            memory_space: crate::sync::sleep_mutex::SleepMutex::new(VirtualAddressSpace::new()),
             capability_space: Mutex::new(CapabilitySpace::new()),
             file_table: Mutex::new(FileTable::new()),
             threads: Mutex::new(BTreeMap::new()),
             ipc_endpoints: Mutex::new(BTreeMap::new()),
             children: Mutex::new(Vec::new()),
             exit_code: AtomicU32::new(0),
+            term_signal: AtomicU32::new(0),
+            dispatched: core::sync::atomic::AtomicBool::new(false),
+            kill_pending: AtomicU32::new(0),
+            exec_tid: AtomicU64::new(0),
+            exit_signal: AtomicU32::new(super::signals::SIGCHLD as u32),
+            vfork_pending: core::sync::atomic::AtomicBool::new(false),
+            did_exec: core::sync::atomic::AtomicBool::new(false),
+            stop_signal: AtomicU32::new(0),
+            cont_seq: AtomicU32::new(0),
+            sigtramp: AtomicU64::new(0),
+            job_report: AtomicU32::new(0),
             cpu_time: AtomicU64::new(0),
             memory_stats: MemoryStats::default(),
             created_at: crate::arch::timer::get_ticks(),
-            uid: AtomicU32::new(0),
-            gid: AtomicU32::new(0),
+            creds: Mutex::new(super::creds::Credentials::new(0, 0)),
             pgid: AtomicU64::new(pid.0),
+            tracer: AtomicU64::new(0),
+            cred_guard: Mutex::new(()),
+            dumpable: core::sync::atomic::AtomicBool::new(true),
+            rlimits: Mutex::new(super::rlimit::Limits::defaults()),
+            cpu_limit_ns: [
+                core::sync::atomic::AtomicU64::new(u64::MAX),
+                core::sync::atomic::AtomicU64::new(u64::MAX),
+            ],
+            cpu_exited: Mutex::new(crate::sched::cputime::CpuTimes::ZERO),
+            cpu_children: Mutex::new(crate::sched::cputime::CpuTimes::ZERO),
+            peak_rss_pages: core::sync::atomic::AtomicUsize::new(0),
+            children_peak_rss_pages: core::sync::atomic::AtomicUsize::new(0),
             sid: AtomicU64::new(pid.0),
             env_vars: Mutex::new(BTreeMap::new()),
             #[cfg(feature = "alloc")]
             exe_path: Mutex::new(String::new()),
-            signal_handlers: Mutex::new([0u64; 32]),
+            signal_handlers: Mutex::new([0u64; super::signals::NSIG + 1]),
+            signal_action_extra: Mutex::new([(0, 0, 0); super::signals::NSIG + 1]),
             pending_signals: AtomicU64::new(0),
+            rt_queue: super::signals::RtQueue::new(),
             signal_mask: AtomicU64::new(0),
             umask: AtomicU32::new(0o022),
             tls_fs_base: AtomicU64::new(0),
             container_id: AtomicU64::new(0),
             clear_child_tid: AtomicU64::new(0),
-            robust_list_head: AtomicU64::new(0),
         }
     }
 
@@ -340,6 +528,71 @@ impl Process {
         self.cpu_time.fetch_add(microseconds, Ordering::Relaxed);
     }
 
+    /// A thread of this process exited having used `times`.
+    pub fn add_exited_cpu(&self, times: crate::sched::cputime::CpuTimes) {
+        self.add_exited_cpu_from(|| times);
+    }
+
+    /// Move a thread's CPU time into the exited total: `take` (which zeroes
+    /// the thread's counter) runs under the same lock [`Self::cpu_times`]
+    /// holds while it sums the live threads, so no reader sees the time in
+    /// neither place (the process's CPU clock would go back).
+    pub fn add_exited_cpu_from(&self, take: impl FnOnce() -> crate::sched::cputime::CpuTimes) {
+        let mut sum = self.cpu_exited.lock();
+        *sum = sum.plus(take());
+    }
+
+    /// The CPU time the process has used: its exited threads' and its live
+    /// threads' (getrusage RUSAGE_SELF, CLOCK_PROCESS_CPUTIME_ID).
+    pub fn cpu_times(&self) -> crate::sched::cputime::CpuTimes {
+        // Held across the sum: see `add_exited_cpu_from`.
+        let exited = self.cpu_exited.lock();
+        #[cfg(feature = "alloc")]
+        let total = exited.plus(crate::sched::dispatch::process_tasks_cpu(self.pid.0));
+        #[cfg(not(feature = "alloc"))]
+        let total = *exited;
+        total
+    }
+
+    /// The CPU time of the children waited for and their own children
+    /// (getrusage RUSAGE_CHILDREN, times' cutime and cstime).
+    pub fn children_cpu_times(&self) -> crate::sched::cputime::CpuTimes {
+        *self.cpu_children.lock()
+    }
+
+    /// A child was reaped: its time and its children's count as this
+    /// process's children's, and its peak resident set as theirs.
+    pub fn add_reaped_child_cpu(&self, child: &Self) {
+        let theirs = child.cpu_times().plus(child.children_cpu_times());
+        let mut sum = self.cpu_children.lock();
+        *sum = sum.plus(theirs);
+        let peak = child.peak_rss_pages().max(child.children_peak_rss_pages());
+        self.children_peak_rss_pages
+            .fetch_max(peak, Ordering::Relaxed);
+    }
+
+    /// The largest resident set seen, in pages, counting the current one
+    /// while the process still has its memory.
+    pub fn peak_rss_pages(&self) -> usize {
+        self.note_rss();
+        self.peak_rss_pages.load(Ordering::Relaxed)
+    }
+
+    /// The largest resident set of the children waited for, in pages.
+    pub fn children_peak_rss_pages(&self) -> usize {
+        self.children_peak_rss_pages.load(Ordering::Relaxed)
+    }
+
+    /// Record the current resident set in the peak (on reads, and before
+    /// the memory goes at exit).
+    pub fn note_rss(&self) {
+        #[cfg(feature = "alloc")]
+        if let Some(space) = self.memory_space.try_lock() {
+            self.peak_rss_pages
+                .fetch_max(space.resident_pages(), Ordering::Relaxed);
+        }
+    }
+
     /// Get total CPU time
     pub fn get_cpu_time(&self) -> u64 {
         self.cpu_time.load(Ordering::Relaxed)
@@ -355,6 +608,19 @@ impl Process {
         self.exit_code.load(Ordering::Acquire) as i32
     }
 
+    /// Record that signal `sig` terminated the process.
+    pub fn set_term_signal(&self, sig: u32) {
+        self.term_signal.store(sig & 0x7f, Ordering::Release);
+    }
+
+    /// The POSIX/Linux wait status for this (exited) process.
+    pub fn wait_status(&self) -> i32 {
+        wait_status(
+            self.get_exit_code(),
+            self.term_signal.load(Ordering::Acquire),
+        )
+    }
+
     /// Set process priority
     pub fn set_priority(&self, new_priority: ProcessPriority) {
         *self.priority.lock() = new_priority;
@@ -366,13 +632,6 @@ impl Process {
     /// pthread_join to detect thread completion.
     pub fn set_clear_child_tid(&self, addr: usize) {
         self.clear_child_tid.store(addr as u64, Ordering::Release);
-    }
-
-    /// Set user-space address of the robust futex list head.
-    /// Called by set_robust_list syscall; the kernel walks this list on
-    /// abnormal thread exit to unlock any held robust mutexes.
-    pub fn set_robust_list(&self, addr: usize) {
-        self.robust_list_head.store(addr as u64, Ordering::Release);
     }
 
     /// Get mutable reference to memory space
@@ -388,21 +647,29 @@ impl Process {
 
     /// Reset all signal handlers to default (used during exec)
     pub fn reset_signal_handlers(&self) {
+        // Caught signals revert to their default action; ignored ones stay
+        // ignored (POSIX exec), so a parent's SIG_IGN still applies.
         let mut handlers = self.signal_handlers.lock();
-        for handler in handlers.iter_mut() {
-            *handler = 0; // 0 = default action
+        let mut ignored = 0u64;
+        for (sig, handler) in handlers.iter_mut().enumerate() {
+            if *handler == 1 {
+                ignored |= super::signals::sig_bit(sig);
+            } else {
+                *handler = 0; // 0 = default action
+            }
         }
-        // Clear pending signals that were ignored
-        self.pending_signals.store(0, Ordering::Release);
+        *self.signal_action_extra.lock() = [(0, 0, 0); super::signals::NSIG + 1];
+        // Pending signals survive exec (POSIX), except the ignored ones.
+        self.rt_queue.clear(&self.pending_signals, ignored);
     }
 
     /// Set a signal handler
     /// handler: 0 = default, 1 = ignore, other = handler address
     pub fn set_signal_handler(&self, signum: usize, handler: u64) -> Result<u64, KernelError> {
-        if signum >= 32 {
+        if signum > super::signals::NSIG {
             return Err(KernelError::InvalidArgument {
                 name: "signum",
-                value: "signal number out of range (0-31)",
+                value: "signal number out of range (0-64)",
             });
         }
         // SIGKILL (9) and SIGSTOP (19) cannot be caught or ignored
@@ -419,35 +686,61 @@ impl Process {
 
     /// Get a signal handler
     pub fn get_signal_handler(&self, signum: usize) -> Option<u64> {
-        if signum >= 32 {
+        if signum > super::signals::NSIG {
             return None;
         }
         Some(self.signal_handlers.lock()[signum])
     }
 
-    /// Send a signal to this process
+    /// A CLONE_VFORK child has exec'd or exited: its parent may resume.
+    pub fn release_vfork_parent(&self) {
+        if self.vfork_pending.swap(false, Ordering::AcqRel) {
+            #[cfg(feature = "alloc")]
+            crate::sched::dispatch::PROCESS_EVENTS.wake_all();
+        }
+    }
+
+    /// Send a signal to this process from the kernel (SI_KERNEL).
     pub fn send_signal(&self, signum: usize) -> Result<(), KernelError> {
-        if signum >= 32 {
+        self.send_signal_info(super::signals::SigInfo::kernel(signum))
+    }
+
+    /// Make `info.si_signo` pending for this process with `info` (the old,
+    /// undispatched path; dispatched processes go through
+    /// `signals::send_info_to_process`).
+    pub fn send_signal_info(&self, info: super::signals::SigInfo) -> Result<(), KernelError> {
+        let signum = info.signo();
+        if signum > super::signals::NSIG {
             return Err(KernelError::InvalidArgument {
                 name: "signum",
-                value: "signal number out of range (0-31)",
+                value: "signal number out of range (0-64)",
             });
         }
-        // Set the signal bit in pending signals
-        let mask = 1u64 << signum;
-        self.pending_signals.fetch_or(mask, Ordering::AcqRel);
+        if signum == 0 {
+            return Ok(());
+        }
+        // Linux set layout: bit `signum - 1` (N-96); real-time signals
+        // queue (N-209) up to RLIMIT_SIGPENDING, past which they pend
+        // without another instance, as kill does on Linux.
+        let _ = self.rt_queue.push(
+            &self.pending_signals,
+            info,
+            super::signals::Charge::of(self),
+            super::signals::Overflow::Merge,
+        );
+        crate::fs::signalfd::signal_generated();
         Ok(())
     }
 
     /// Check if a signal is pending
     pub fn is_signal_pending(&self, signum: usize) -> bool {
-        if signum >= 32 {
+        if signum > super::signals::NSIG {
             return false;
         }
         let pending = self.pending_signals.load(Ordering::Acquire);
         let mask = self.signal_mask.load(Ordering::Acquire);
         let effective_pending = pending & !mask;
-        (effective_pending & (1u64 << signum)) != 0
+        (effective_pending & super::signals::sig_bit(signum)) != 0
     }
 
     /// Get the next pending signal (lowest numbered, unmasked)
@@ -458,23 +751,19 @@ impl Process {
         if effective_pending == 0 {
             return None;
         }
-        // Find lowest set bit
-        Some(effective_pending.trailing_zeros() as usize)
+        // Lowest set bit; bit n is signal n + 1.
+        Some(effective_pending.trailing_zeros() as usize + 1)
     }
 
     /// Clear a pending signal
     pub fn clear_pending_signal(&self, signum: usize) {
-        if signum < 32 {
-            let mask = !(1u64 << signum);
-            self.pending_signals.fetch_and(mask, Ordering::AcqRel);
-        }
+        let _ = self.rt_queue.take(&self.pending_signals, signum);
     }
 
     /// Set signal mask (returns old mask)
     pub fn set_signal_mask(&self, new_mask: u64) -> u64 {
         // Cannot mask SIGKILL (9) or SIGSTOP (19)
-        let protected = (1u64 << 9) | (1u64 << 19);
-        let actual_mask = new_mask & !protected;
+        let actual_mask = new_mask & !super::signals::UNBLOCKABLE;
         self.signal_mask.swap(actual_mask, Ordering::AcqRel)
     }
 
@@ -491,8 +780,33 @@ impl Drop for Process {
     }
 }
 
+/// Linux wait-status encoding (N-99): a normal exit is `code << 8`
+/// (`WIFEXITED`, `WEXITSTATUS`); death by signal is the signal number in the
+/// low 7 bits (`WIFSIGNALED`, `WTERMSIG`), with 0x80 set when the signal
+/// dumps core by default (`WCOREDUMP`).
+pub fn wait_status(exit_code: i32, term_signal: u32) -> i32 {
+    match term_signal & 0x7f {
+        0 => (exit_code & 0xff) << 8,
+        sig => {
+            // SIGQUIT, SIGILL, SIGTRAP, SIGABRT, SIGBUS, SIGFPE, SIGSEGV,
+            // SIGXCPU, SIGXFSZ, SIGSYS default to a core dump.
+            let core = matches!(sig, 3 | 4 | 5 | 6 | 7 | 8 | 11 | 24 | 25 | 31);
+            sig as i32 | if core { 0x80 } else { 0 }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn wait_status_encodes_exit_and_signal() {
+        assert_eq!(wait_status(3, 0), 0x300); // WIFEXITED, WEXITSTATUS 3
+        assert_eq!(wait_status(0, 9), 9); // WIFSIGNALED, SIGKILL, no core
+        assert_eq!(wait_status(0, 11), 0x8b); // SIGSEGV with WCOREDUMP
+        assert_eq!(wait_status(0, 15), 15);
+        assert_eq!(wait_status(0x1ff, 0), 0xff00);
+    }
+
     use super::*;
 
     fn make_process(pid: u64, name: &str) -> Process {
@@ -502,6 +816,19 @@ mod tests {
             alloc::string::String::from(name),
             ProcessPriority::Normal,
         )
+    }
+
+    /// A change of effective user or group makes the process non-dumpable
+    /// (Linux's commit_creds); other credential changes leave it.
+    #[test]
+    fn effective_id_changes_clear_dumpable() {
+        use core::sync::atomic::Ordering;
+        let proc = make_process(3, "creds");
+        assert!(proc.dumpable.load(Ordering::Acquire));
+        proc.update_credentials(|c| c.setgroups(&[5]).unwrap());
+        assert!(proc.dumpable.load(Ordering::Acquire));
+        proc.update_credentials(|c| c.setuid(1000).unwrap());
+        assert!(!proc.dumpable.load(Ordering::Acquire));
     }
 
     // --- ProcessState tests ---
@@ -651,7 +978,7 @@ mod tests {
     #[test]
     fn test_signal_handler_invalid_signal() {
         let proc = make_process(21, "sig_invalid");
-        assert_eq!(proc.get_signal_handler(32), None);
+        assert_eq!(proc.get_signal_handler(65), None);
         assert_eq!(proc.get_signal_handler(100), None);
     }
 
@@ -687,7 +1014,7 @@ mod tests {
     #[test]
     fn test_set_signal_handler_out_of_range() {
         let proc = make_process(25, "sig_range");
-        let result = proc.set_signal_handler(32, 1);
+        let result = proc.set_signal_handler(65, 1);
         assert!(result.is_err());
     }
 
@@ -701,7 +1028,81 @@ mod tests {
     #[test]
     fn test_send_signal_invalid() {
         let proc = make_process(27, "sig_send_inv");
-        assert!(proc.send_signal(32).is_err());
+        assert!(proc.send_signal(65).is_err());
+        assert!(proc.set_signal_handler(65, 0x1000).is_err());
+        assert_eq!(proc.get_signal_handler(65), None);
+    }
+
+    /// Signals 32-64 exist (musl's pthread_cancel uses 33) and real-time
+    /// signals queue: each send is delivered once, while a standard signal
+    /// sent twice before delivery is delivered once (N-209).
+    #[test]
+    fn real_time_signals_queue() {
+        let proc = make_process(29, "sig_rt");
+        proc.set_signal_handler(64, 0x1000).unwrap();
+        assert_eq!(proc.get_signal_handler(64), Some(0x1000));
+        for _ in 0..3 {
+            proc.send_signal(33).unwrap();
+            proc.send_signal(2).unwrap();
+        }
+        let mut taken = alloc::vec::Vec::new();
+        while let Some(sig) = proc.get_next_pending_signal() {
+            proc.clear_pending_signal(sig);
+            taken.push(sig);
+        }
+        assert_eq!(taken, alloc::vec![2, 33, 33, 33]);
+    }
+
+    #[test]
+    fn real_time_queue_is_bounded_per_user() {
+        use crate::process::{
+            rlimit::{Rlimit, RLIMIT_SIGPENDING},
+            signals::{queued_by_user, sig_bit},
+        };
+        let uid = 4242;
+        let proc = make_process(30, "sig_rt_full");
+        proc.update_credentials(|c| *c = crate::process::creds::Credentials::new(uid, uid));
+        proc.set_rlimit(RLIMIT_SIGPENDING, Rlimit { cur: 3, max: 3 }, false)
+            .unwrap();
+        for _ in 0..5 {
+            proc.send_signal(40).unwrap();
+        }
+        // Three are queued and charged to the user; kill-style sends past
+        // the limit pend without queueing.
+        assert_eq!(queued_by_user(uid), 3);
+        assert!(proc.pending_signals.load(Ordering::Acquire) & sig_bit(40) != 0);
+        // A standard signal never queues, so never fills.
+        for _ in 0..2000 {
+            proc.send_signal(10).unwrap();
+        }
+        let mut delivered = 0;
+        while proc.is_signal_pending(40) {
+            proc.clear_pending_signal(40);
+            delivered += 1;
+        }
+        assert_eq!(delivered, 3);
+        assert_eq!(queued_by_user(uid), 0);
+        // Dropping a process gives its queued signals back.
+        proc.send_signal(41).unwrap();
+        assert_eq!(queued_by_user(uid), 1);
+        drop(proc);
+        assert_eq!(queued_by_user(uid), 0);
+    }
+
+    #[test]
+    fn exec_keeps_pending_signals_except_ignored() {
+        let proc = make_process(31, "sig_exec");
+        proc.set_signal_handler(10, 1).unwrap(); // SIG_IGN
+        proc.set_signal_handler(12, 0x2000).unwrap();
+        proc.send_signal(10).unwrap();
+        proc.send_signal(12).unwrap();
+        proc.send_signal(35).unwrap();
+        proc.reset_signal_handlers();
+        assert!(!proc.is_signal_pending(10));
+        assert!(proc.is_signal_pending(12));
+        assert!(proc.is_signal_pending(35));
+        assert_eq!(proc.get_signal_handler(10), Some(1));
+        assert_eq!(proc.get_signal_handler(12), Some(0));
     }
 
     #[test]
@@ -712,8 +1113,8 @@ mod tests {
         // Before masking, signal is pending
         assert!(proc.is_signal_pending(3));
 
-        // Mask signal 3
-        proc.set_signal_mask(1u64 << 3);
+        // Mask signal 3 (Linux layout: bit 2; N-96)
+        proc.set_signal_mask(1u64 << 2);
 
         // Now it should NOT be seen as pending (masked)
         assert!(!proc.is_signal_pending(3));
@@ -728,8 +1129,9 @@ mod tests {
 
         // SIGKILL and SIGSTOP should NOT be masked
         let mask = proc.get_signal_mask();
-        assert_eq!(mask & (1u64 << 9), 0, "SIGKILL should not be maskable");
-        assert_eq!(mask & (1u64 << 19), 0, "SIGSTOP should not be maskable");
+        // Linux layout: signal n is bit n - 1 (N-96).
+        assert_eq!(mask & (1u64 << 8), 0, "SIGKILL should not be maskable");
+        assert_eq!(mask & (1u64 << 18), 0, "SIGSTOP should not be maskable");
     }
 
     #[test]
@@ -767,8 +1169,8 @@ mod tests {
         // All handlers should be reset to default
         assert_eq!(proc.get_signal_handler(2), Some(0));
         assert_eq!(proc.get_signal_handler(15), Some(0));
-        // Pending signals should be cleared
-        assert!(!proc.is_signal_pending(5));
+        // A pending signal survives exec (POSIX execve).
+        assert!(proc.is_signal_pending(5));
     }
 
     // --- Process identity tests ---
@@ -839,8 +1241,7 @@ pub struct ProcessBuilder {
     name: String,
     parent: Option<ProcessId>,
     priority: ProcessPriority,
-    uid: u32,
-    gid: u32,
+    creds: super::creds::Credentials,
 }
 
 #[cfg(feature = "alloc")]
@@ -851,8 +1252,7 @@ impl ProcessBuilder {
             name,
             parent: None,
             priority: ProcessPriority::Normal,
-            uid: 0,
-            gid: 0,
+            creds: super::creds::Credentials::new(0, 0),
         }
     }
 
@@ -868,15 +1268,9 @@ impl ProcessBuilder {
         self
     }
 
-    /// Set user ID
-    pub fn uid(mut self, uid: u32) -> Self {
-        self.uid = uid;
-        self
-    }
-
-    /// Set group ID
-    pub fn gid(mut self, gid: u32) -> Self {
-        self.gid = gid;
+    /// Set the credentials (a forked child takes its parent's).
+    pub fn credentials(mut self, creds: super::creds::Credentials) -> Self {
+        self.creds = creds;
         self
     }
 
@@ -890,8 +1284,7 @@ impl ProcessBuilder {
     pub fn build(self) -> Process {
         let pid = super::alloc_pid();
         let process = Process::new(pid, self.parent, self.name, self.priority);
-        process.set_uid(self.uid);
-        process.set_gid(self.gid);
+        process.update_credentials(|c| *c = self.creds);
         process
     }
 
@@ -903,8 +1296,7 @@ impl ProcessBuilder {
     pub fn build_with_address_space(self) -> Result<Process, KernelError> {
         let pid = super::alloc_pid();
         let process = Process::new(pid, self.parent, self.name, self.priority);
-        process.set_uid(self.uid);
-        process.set_gid(self.gid);
+        process.update_credentials(|c| *c = self.creds);
 
         // Initialize the virtual address space with a real page table root
         // and kernel space mappings

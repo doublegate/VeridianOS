@@ -227,7 +227,7 @@ pub fn kernel_init() -> KernelResult<()> {
     // boot on this platform.  write_volatile ensures the compiler does
     // not elide or reorder the MMIO stores.
     unsafe {
-        let uart_base = 0x1000_0000 as *mut u8;
+        let uart_base = crate::mm::phys_to_virt_addr(0x1000_0000) as *mut u8;
         uart_base.write_volatile(b'K');
         uart_base.write_volatile(b'I');
         uart_base.write_volatile(b'N');
@@ -250,18 +250,25 @@ pub fn kernel_init() -> KernelResult<()> {
         kprintln!("[BOOTSTRAP] PAT configured (WC available)");
         crate::arch::x86_64::rtc::init();
     }
+    // AArch64 and RISC-V: the wall clock from a device-tree RTC.
+    #[cfg(all(
+        any(target_arch = "aarch64", target_arch = "riscv64"),
+        target_os = "none"
+    ))]
+    crate::arch::mmio_rtc::init();
 
     kprintln!("[BOOTSTRAP] Architecture initialized");
 
     // Stage 2: Memory management
     kprintln!("[BOOTSTRAP] Stage 2: Memory management");
 
+    // Also reserves the boot page-table frames on x86_64, before the heap
+    // is taken from the frame allocator.
     mm::init_default();
 
-    // Reserve boot page table frames so the frame allocator doesn't hand
-    // them out, which would corrupt kernel address space mappings.
-    #[cfg(target_arch = "x86_64")]
-    mm::reserve_boot_page_table_frames();
+    // Kernel stack region (N-26): its page tables must exist before the
+    // first address space copies the kernel half.
+    mm::kstack::init();
 
     kprintln!("[BOOTSTRAP] Memory management initialized");
 
@@ -398,8 +405,11 @@ pub fn kernel_init() -> KernelResult<()> {
                 }
                 kprintln!("[BOOTSTRAP] ramfb + fbcon initialized (1024x768)");
             }
-            Err(_) => {
-                kprintln!("[BOOTSTRAP] ramfb not available, serial-only output");
+            Err(e) => {
+                crate::println!(
+                    "[BOOTSTRAP] ramfb not available ({:?}), serial-only output",
+                    e
+                );
             }
         }
     }
@@ -583,13 +593,25 @@ fn kernel_init_stage3_impl() -> KernelResult<()> {
         kprintln!("[BOOTSTRAP] Keyboard driver initialized");
     }
 
-    // Run kernel-mode init tests after Stage 4 (VFS + shell ready)
-    kernel_init_main();
+    // The boot flow becomes CPU 0's first task (ADR 0006, stage D1). Every
+    // user program runs as a dispatcher task; there is no other way to run
+    // one (the nested boot model went in sprint D4), so this cannot fail
+    // and boot go on.
+    #[cfg(all(feature = "alloc", dispatch))]
+    match crate::sched::dispatch::start() {
+        Ok(()) => kprintln!("[BOOTSTRAP] Dispatcher started (boot task + idle)"),
+        Err(e) => panic!("dispatcher could not start: {:?}", e),
+    }
 
-    // Stage 5: Scheduler initialization
+    // Stage 5: Scheduler initialization, which brings up the other CPUs
+    // (with the `smp` feature). Before the boot tests, so the SMP ones test
+    // every CPU: they ran before any secondary started, and checked nothing.
     kprintln!("[BOOTSTRAP] Stage 5: Scheduler activation");
 
     sched::init();
+
+    // Run kernel-mode init tests after Stage 4 (VFS + shell ready)
+    kernel_init_main();
 
     // Initialize package manager
     #[cfg(feature = "alloc")]
@@ -644,6 +666,9 @@ fn kernel_init_stage3_impl() -> KernelResult<()> {
     {
         crate::syscall::userland_ext::users::init_user_db();
         kprintln!("[BOOTSTRAP] User database initialized");
+        // The accounts on the root filesystem (/etc/passwd, /etc/shadow;
+        // N-131): there is no built-in password.
+        crate::security::accounts::load();
     }
 
     // Initialize PTY subsystem (needed by desktop terminal emulator)
@@ -696,7 +721,8 @@ fn kernel_init_stage3_impl() -> KernelResult<()> {
         kprintln!("[BOOTSTRAP] Virtualization subsystem initialized");
     }
 
-    // Initialize KPTI shadow page tables (Meltdown mitigation)
+    // Build the KPTI shadow page tables. Nothing loads them yet, so this is
+    // not a Meltdown mitigation (N-145).
     #[cfg(target_arch = "x86_64")]
     {
         kprintln!("[BOOTSTRAP] Initializing KPTI shadow page tables...");
@@ -743,7 +769,7 @@ pub fn run() -> ! {
     // boot.  write_volatile ensures the compiler does not elide the
     // MMIO stores.
     unsafe {
-        let uart_base = 0x1000_0000 as *mut u8;
+        let uart_base = crate::mm::phys_to_virt_addr(0x1000_0000) as *mut u8;
         uart_base.write_volatile(b'R');
         uart_base.write_volatile(b'U');
         uart_base.write_volatile(b'N');
@@ -1325,8 +1351,8 @@ fn mount_blockfs_root() {
             // and libinput search for data files at those compile-time
             // paths, so recreate the sysroot directory and symlink its `usr`
             // back to `/usr`. build.rs sets the path: VERIDIAN_SYSROOT if
-            // given at kernel build time, else <repo>/target/veridian-sysroot,
-            // the tools/cross default. It must match the sysroot the rootfs
+            // given at kernel build time, else /opt/veridian/musl-sysroot, the
+            // tools/cross default. It must match the sysroot the rootfs
             // binaries were built against. This goes away once tools/cross
             // builds with --prefix=/usr.
             {
@@ -1617,7 +1643,7 @@ fn test_user_binary_load() {
                             "-isystem",
                             "/usr/include",
                             "-isystem",
-                            "/usr/lib/gcc/x86_64-veridian/14.2.0/include",
+                            "/usr/lib/gcc/x86_64-veridian/16.2.0/include", /* GCC_VERSION in scripts/build-native-gcc-static.sh */
                             "-static",
                             "-fno-stack-protector",
                             "-ffreestanding",
@@ -1655,7 +1681,7 @@ fn test_user_binary_load() {
                             "-L",
                             "/usr/lib",
                             "-L",
-                            "/usr/lib/gcc/x86_64-veridian/14.2.0",
+                            "/usr/lib/gcc/x86_64-veridian/16.2.0",
                             "-lc",
                             "-lgcc",
                         ],
@@ -1846,489 +1872,21 @@ fn boot_reap_orphan_zombies() {
     }
 }
 
-/// Switch to a user process's address space and enter Ring 3.
-///
-/// Uses `enter_usermode_returnable` which saves the boot context (callee-saved
-/// registers, RSP, CR3) before iretq. When the user process calls `sys_exit`,
-/// the boot context is restored and this function returns normally, allowing
-/// sequential execution of multiple user-mode programs during bootstrap.
-///
-/// `#[inline(never)]` ensures the compiler generates a proper call frame with
-/// correct stack alignment, preventing SSE `movaps` GP faults in callers.
-#[inline(never)]
+/// Run user process `pid` as dispatcher tasks of its own and wait until it
+/// has exited (ADR 0006, stage D2): every launcher -- the boot tests, the
+/// shell, the KDE session -- uses this. The nested "returnable" entry that
+/// ran a program inside the boot flow went with the old scheduler (D4).
 #[cfg(all(feature = "alloc", target_arch = "x86_64"))]
 pub(crate) fn run_user_process(pid: crate::process::ProcessId) {
-    use crate::process::get_process;
-
-    let process = match get_process(pid) {
-        Some(p) => p,
-        None => return,
-    };
-
-    // Get the process's page table root (physical address for CR3)
-    let vas = process.memory_space.lock();
-    let pt_root = vas.get_page_table();
-    if pt_root == 0 {
-        return;
-    }
-
-    // Get entry point and user stack from the process's first thread
-    let threads = process.threads.lock();
-    let thread = match threads.values().next() {
-        Some(t) => t,
-        None => return,
-    };
-
-    let (entry_point, user_stack_ptr) = {
-        use crate::arch::context::ThreadContext;
-        let ctx = thread.context.lock();
-        (
-            ctx.get_instruction_pointer() as u64,
-            ctx.get_stack_pointer() as u64,
-        )
-    };
-
-    // Drop locks before entering user mode
-    drop(threads);
-    drop(vas);
-
-    // User CS and SS selectors (Ring 3)
-    let user_cs: u64 = 0x33; // GDT index 6, RPL 3
-    let user_ss: u64 = 0x2B; // GDT index 5, RPL 3
-
-    // Verify entry point and stack are mapped before entering Ring 3
-    // SAFETY: pt_root is a valid L4 page table address from the process's VAS.
-    unsafe {
-        use crate::mm::{vas::create_mapper_from_root_pub, VirtualAddress};
-        let mapper = create_mapper_from_root_pub(pt_root);
-
-        let entry_page = VirtualAddress(entry_point & !0xFFF);
-        if mapper.translate_page(entry_page).is_err() {
-            kprintln!("[BOOT] FATAL: entry {:#x} not mapped", entry_point);
-            return;
-        }
-
-        let stack_page = VirtualAddress((user_stack_ptr - 16) & !0xFFF);
-        if mapper.translate_page(stack_page).is_err() {
-            kprintln!("[BOOT] FATAL: stack {:#x} not mapped", user_stack_ptr);
-            return;
-        }
-    }
-
-    // Set FS_BASE (MSR 0xC0000100) for TLS if the process has a PT_TLS segment.
-    {
-        let fs_base = process
-            .tls_fs_base
-            .load(core::sync::atomic::Ordering::Acquire);
-        if fs_base != 0 {
-            // SAFETY: Writing IA32_FS_BASE MSR and emitting serial debug output.
-            // fs_base is a valid TLS address from the ELF loader.
-            unsafe {
-                crate::arch::x86_64::idt::raw_serial_str(b"[BOOT] FS_BASE=0x");
-                crate::arch::x86_64::idt::raw_serial_hex(fs_base);
-                crate::arch::x86_64::idt::raw_serial_str(b"\n");
-                let lo = fs_base as u32;
-                let hi = (fs_base >> 32) as u32;
-                core::arch::asm!(
-                    "wrmsr",
-                    in("ecx") 0xC000_0100u32, // IA32_FS_BASE
-                    in("eax") lo,
-                    in("edx") hi,
-                );
-            }
-        }
-    }
-
-    // Enter Ring 3 via iretq with returnable context.
-    // The naked function saves callee-saved registers, RSP, and CR3 to
-    // globals, sets per-CPU kernel_rsp, switches CR3, and does iretq.
-    // When the user process calls sys_exit, boot_return_to_kernel()
-    // restores the saved context and this call "returns" normally.
-    //
-    // SAFETY: All preconditions for enter_usermode_returnable are met:
-    // - entry_point is in the process's user-space page tables
-    // - user_stack_top points to the top of the user stack
-    // - CS/SS are valid Ring 3 selectors from the GDT
-    // - pt_root is a valid L4 page table with kernel mappings preserved
-    // - kernel_rsp_ptr points to the per-CPU kernel_rsp field
-    // DEBUG: Print TSS stack addresses and IDT handler addresses before entering
-    // Ring 3.
-    crate::arch::x86_64::gdt::debug_print_tss_stacks();
-    unsafe {
-        let pf_addr = crate::arch::x86_64::gdt::debug_idt_handler_addr(14); // #PF = vector 14
-        let df_addr = crate::arch::x86_64::gdt::debug_idt_handler_addr(8); // #DF = vector 8
-        let gp_addr = crate::arch::x86_64::gdt::debug_idt_handler_addr(13); // #GP = vector 13
-        crate::arch::x86_64::idt::raw_serial_str(b"[IDT] PF_handler=0x");
-        crate::arch::x86_64::idt::raw_serial_hex(pf_addr);
-        crate::arch::x86_64::idt::raw_serial_str(b" GP_handler=0x");
-        crate::arch::x86_64::idt::raw_serial_hex(gp_addr);
-        crate::arch::x86_64::idt::raw_serial_str(b" DF_handler=0x");
-        crate::arch::x86_64::idt::raw_serial_hex(df_addr);
-        crate::arch::x86_64::idt::raw_serial_str(b"\n");
-    }
-    // DEBUG: Verify IST stacks and handler code are mapped in the process
-    // page table (pt_root). Walk each critical kernel address through the
-    // process L4 to confirm it's present before entering Ring 3.
-    crate::arch::x86_64::gdt::debug_verify_ist_in_cr3(pt_root);
-
-    // IST write test and Ring 0 PF trigger test removed -- both confirmed
-    // IST stacks are properly mapped (PASS). The DF was caused by hardware
-    // interrupts (APIC timer, etc.) firing from Ring 3 without IST, falling
-    // back to TSS.RSP0 which was stale/unmapped in the process CR3. Fixed
-    // by adding IST to all hardware IRQ vectors (32, 33, 48, 49, 50).
-    // SAFETY: Reading TSS.RSP0 and writing to COM1 for diagnostics.
-    let tss_rsp0 = crate::arch::x86_64::gdt::get_kernel_stack();
-    unsafe {
-        crate::arch::x86_64::idt::raw_serial_str(b"[BOOT] TSS_RSP0=0x");
-        crate::arch::x86_64::idt::raw_serial_hex(tss_rsp0);
-        crate::arch::x86_64::idt::raw_serial_str(b" entry=0x");
-        crate::arch::x86_64::idt::raw_serial_hex(entry_point);
-        crate::arch::x86_64::idt::raw_serial_str(b" usp=0x");
-        crate::arch::x86_64::idt::raw_serial_hex(user_stack_ptr);
-        crate::arch::x86_64::idt::raw_serial_str(b" cr3=0x");
-        crate::arch::x86_64::idt::raw_serial_hex(pt_root);
-        crate::arch::x86_64::idt::raw_serial_str(b"\n");
-    }
-
-    // Update TSS.RSP0 to the current boot stack. Hardware exceptions from
-    // Ring 3 (page faults, GPF, timer IRQ, etc.) load RSP from TSS.RSP0 for
-    // the privilege-level switch. enter_usermode_returnable will save the
-    // current RSP as per-CPU kernel_rsp (for SYSCALL), but TSS.RSP0 (for
-    // hardware interrupts) must also be updated.
-    //
-    // Read current RSP -- this is our boot stack which is guaranteed mapped.
-    let current_rsp: u64;
-    unsafe {
-        core::arch::asm!("mov {}, rsp", out(reg) current_rsp, options(nomem, nostack));
-    }
-    crate::arch::x86_64::gdt::set_kernel_stack(current_rsp);
-
-    // Re-initialize FPU/AVX state before entering usermode.
-    // VEX-encoded instructions (AVX) in user binaries require CR4.OSXSAVE
-    // and XCR0 bits 0-2 (x87/SSE/AVX), otherwise they cause #UD.
-    // The boot-time init_fpu() in arch::init() runs early, but subsequent
-    // boot stages (MMU, KPTI, etc.) may not preserve all CR4 bits.
-    // This idempotent re-init ensures the state is correct.
-    crate::arch::x86_64::context::init_fpu();
-
-    let per_cpu = crate::arch::x86_64::syscall::per_cpu_data_ptr();
-    let kernel_rsp_ptr = per_cpu as u64;
-    unsafe {
-        crate::arch::x86_64::usermode::enter_usermode_returnable(
-            entry_point,
-            user_stack_ptr,
-            user_cs,
-            user_ss,
-            pt_root,
-            kernel_rsp_ptr,
-        );
+    if crate::process::run_and_wait(pid).is_none() {
+        kprintln!("[BOOT] Could not start pid {}", pid.0);
     }
 }
 
-/// Wrapper that registers a boot-launched user process before entering user
-/// mode, so that `current_process()` / `current_thread()` return the correct
-/// values during syscalls (required for fork, wait, etc.).
-///
-/// Uses lock-free atomics (`BOOT_CURRENT_PID`/`BOOT_CURRENT_TID` in
-/// `process/mod.rs`) instead of modifying the scheduler. Acquiring the
-/// SCHEDULER lock from the bootstrap stack corrupts SSE alignment (the
-/// `movaps` in `Task::new()` requires 16-byte alignment, but the lock
-/// cycle shifts RSP by 8 on the second invocation, causing a GP fault).
-///
-/// After the user process exits (via `sys_exit` -> `boot_return_to_kernel`),
-/// the process is a zombie in the process table. This function reaps it to
-/// prevent process table leaks across 213+ sequential program executions
-/// during BusyBox compilation.
-///
-/// `#[inline(never)]` prevents the compiler from inlining this into
-/// `test_user_binary_load`, which would change that function's stack frame
-/// layout between invocations and corrupt SSE alignment for subsequent
-/// `Process::new()` calls.
-#[inline(never)]
+/// `run_user_process` for the boot tests (kept as their entry point).
 #[cfg(all(feature = "alloc", target_arch = "x86_64"))]
 fn run_user_process_scheduled(pid: crate::process::ProcessId) {
-    use crate::process::get_process;
-
-    // Save the process's page table root BEFORE running. cleanup_process()
-    // (called during sys_exit) frees data frames but intentionally does NOT
-    // free the page table hierarchy frames because the process's CR3 is
-    // still active at that point. We free them here AFTER boot_return_to_kernel
-    // restores the boot CR3.
-    let saved_pt_root = if let Some(proc) = get_process(pid) {
-        proc.memory_space.lock().get_page_table()
-    } else {
-        0
-    };
-
-    // Look up the process's first thread ID so current_thread() works.
-    let tid = if let Some(proc) = get_process(pid) {
-        let threads = proc.threads.lock();
-        threads.values().next().map(|t| t.tid)
-    } else {
-        None
-    };
-
-    if let Some(tid) = tid {
-        // Register as the current boot process (atomic, no locks).
-        crate::process::set_boot_current(pid, tid);
-
-        run_user_process(pid);
-
-        // Clear after user process exits and control returns here.
-        crate::process::clear_boot_current();
-    } else {
-        // Process not found or no threads -- run without tracking.
-        run_user_process(pid);
-    }
-
-    // Boot CR3 is now restored. Free the process's page table hierarchy
-    // frames (L4/L3/L2/L1 tables). This is deferred from cleanup_process()
-    // because at that point the process's CR3 was still active -- freeing
-    // the L4 frame while it's the active CR3 causes a triple fault on the
-    // next TLB miss.
-    //
-    // If the process called exec(), the page table was replaced: init()
-    // allocated a new L4 and overwrote page_table_root. We must free BOTH
-    // the pre-exec page table (saved_pt_root) and the post-exec page table
-    // (current page_table_root). Without this, every exec() leaks the
-    // post-exec page table hierarchy (~10-30 frames per exec).
-    let current_pt_root = if let Some(proc) = get_process(pid) {
-        proc.memory_space.lock().get_page_table()
-    } else {
-        0
-    };
-
-    // Free the post-exec page table if exec changed it
-    if current_pt_root != 0 && current_pt_root != saved_pt_root {
-        let freed = crate::mm::vas::free_user_page_table_frames(current_pt_root);
-        if freed > 0 {
-            kprintln!(
-                "[BOOT] Freed {} post-exec page table frames for pid {}",
-                freed,
-                pid.0
-            );
-        }
-    }
-
-    // Free the pre-exec (or only) page table
-    if saved_pt_root != 0 {
-        let freed = crate::mm::vas::free_user_page_table_frames(saved_pt_root);
-        if freed > 0 {
-            kprintln!("[BOOT] Freed {} page table frames for pid {}", freed, pid.0);
-        }
-    }
-
-    // Clear page_table_root so boot_reap_orphan_zombies() will not
-    // attempt to double-free the same page table hierarchy.
-    if let Some(proc) = get_process(pid) {
-        proc.memory_space.lock().set_page_table(0);
-    }
-
-    // Reap the zombie process from the process table.
-    // sys_exit() already called cleanup_process() (closing fds, releasing
-    // memory, capabilities, IPC endpoints) and marked the process as Zombie.
-    // But in boot context there is no parent to call waitpid(), so the
-    // zombie entry leaks in the process table. Remove it now to prevent
-    // unbounded growth across hundreds of sequential program executions.
-    if let Some(proc) = get_process(pid) {
-        let state = proc.get_state();
-        if state == crate::process::ProcessState::Zombie
-            || state == crate::process::ProcessState::Dead
-        {
-            crate::process::table::remove_process(pid);
-        }
-    }
-}
-
-/// Run a forked child process inline from the parent's wait loop.
-///
-/// Called from `wait_process_with_options` when in boot execution mode (no
-/// preemptive scheduler). The child was created by fork() and is Ready but
-/// has never been scheduled. This function:
-/// 1. Saves and restores the parent's boot return context (BOOT_RETURN globals)
-/// 2. Saves and restores the parent's BOOT_CURRENT PID/TID
-/// 3. Handles swapgs rebalancing (we're inside a syscall handler)
-/// 4. Runs the child to completion via `enter_forked_child_returnable`
-///
-/// Returns `true` if the child was run, `false` if not in boot context.
-#[cfg(all(feature = "alloc", target_arch = "x86_64"))]
-pub fn boot_run_forked_child(
-    child_pid: crate::process::ProcessId,
-    parent_pid: crate::process::ProcessId,
-    parent_tid: crate::process::thread::ThreadId,
-) -> bool {
-    use core::sync::atomic::Ordering;
-
-    use crate::{
-        arch::x86_64::usermode::{
-            ForkChildRegs, BOOT_RETURN_CR3, BOOT_RETURN_RSP, BOOT_STACK_CANARY,
-        },
-        process::get_process,
-    };
-
-    if !crate::arch::x86_64::usermode::has_boot_return_context() {
-        return false;
-    }
-
-    let child = match get_process(child_pid) {
-        Some(p) => p,
-        None => return false,
-    };
-
-    // Extract ALL registers from child's ThreadContext into ForkChildRegs.
-    // fork() captured the parent's live registers; we must restore every one
-    // so the child resumes with correct callee-saved regs, not garbage.
-    let (regs, child_tid) = {
-        let threads = child.threads.lock();
-        match threads.values().next() {
-            Some(t) => {
-                let ctx = t.context.lock();
-                let r = ForkChildRegs {
-                    rip: ctx.rip,
-                    rsp: ctx.rsp,
-                    rflags: ctx.rflags,
-                    rax: ctx.rax,
-                    rbx: ctx.rbx,
-                    rcx: ctx.rcx,
-                    rdx: ctx.rdx,
-                    rsi: ctx.rsi,
-                    rdi: ctx.rdi,
-                    rbp: ctx.rbp,
-                    r8: ctx.r8,
-                    r9: ctx.r9,
-                    r10: ctx.r10,
-                    r11: ctx.r11,
-                    r12: ctx.r12,
-                    r13: ctx.r13,
-                    r14: ctx.r14,
-                    r15: ctx.r15,
-                    fs_base: ctx.tls_base,
-                };
-                (r, t.tid)
-            }
-            None => return false,
-        }
-    };
-
-    let cr3 = {
-        let vas = child.memory_space.lock();
-        vas.get_page_table()
-    };
-
-    if cr3 == 0 {
-        return false;
-    }
-
-    // Save parent's boot return context
-    let saved_rsp = BOOT_RETURN_RSP.load(Ordering::SeqCst);
-    let saved_cr3 = BOOT_RETURN_CR3.load(Ordering::SeqCst);
-    let saved_canary = BOOT_STACK_CANARY.load(Ordering::SeqCst);
-
-    // Save parent's per-CPU state. The child's syscall_entry and
-    // enter_forked_child_returnable will overwrite both fields:
-    // - kernel_rsp (gs:[0x0]): enter_forked_child_returnable writes new value
-    // - user_rsp (gs:[0x8]): child's syscall_entry writes child's user RSP
-    // Without restoring these, the parent's sysretq uses wrong RSP and
-    // the parent's next syscall uses a stale kernel stack pointer.
-    let per_cpu = crate::arch::x86_64::syscall::per_cpu_data_ptr();
-    // SAFETY: per_cpu is a valid pointer to the current CPU's PerCpuData,
-    // initialized during boot. We read kernel_rsp and user_rsp to save/restore
-    // across the child dispatch.
-    let saved_kernel_rsp = unsafe { (*per_cpu).kernel_rsp };
-    let saved_user_rsp = unsafe { (*per_cpu).user_rsp };
-
-    // Set child as the current boot process
-    crate::process::set_boot_current(child_pid, child_tid);
-
-    // Rebalance swapgs: we're inside a syscall handler where GS.base = per_cpu_data
-    // and KernelGsBase = 0 (from parent's syscall_entry swapgs). enter_usermode
-    // needs KernelGsBase = per_cpu_data so the child's syscall_entry can load
-    // kernel_rsp. swapgs swaps them: GS.base → 0, KernelGsBase → per_cpu_data.
-    // SAFETY: Rebalancing swapgs so KernelGsBase holds per_cpu_data for the
-    // child's syscall_entry. We are in a syscall context with known GS state.
-    unsafe { core::arch::asm!("swapgs", options(nomem, nostack)) };
-
-    let kernel_rsp_ptr = per_cpu as u64;
-
-    // Diagnostic: show key registers being passed to child
-    // SAFETY: Writing directly to the serial port for low-level debug output.
-    // The raw_serial_* functions use port I/O that is always safe in kernel mode.
-    unsafe {
-        crate::arch::x86_64::idt::raw_serial_str(b"[CHILD_DISPATCH] rip=0x");
-        crate::arch::x86_64::idt::raw_serial_hex(regs.rip);
-        crate::arch::x86_64::idt::raw_serial_str(b" rsp=0x");
-        crate::arch::x86_64::idt::raw_serial_hex(regs.rsp);
-        crate::arch::x86_64::idt::raw_serial_str(b" rbx=0x");
-        crate::arch::x86_64::idt::raw_serial_hex(regs.rbx);
-        crate::arch::x86_64::idt::raw_serial_str(b" rbp=0x");
-        crate::arch::x86_64::idt::raw_serial_hex(regs.rbp);
-        crate::arch::x86_64::idt::raw_serial_str(b"\n");
-    }
-
-    // SAFETY: All preconditions for enter_forked_child_returnable are met:
-    // regs contains the child's saved register state, cr3 is a valid page table,
-    // and kernel_rsp_ptr points to the per-CPU data for syscall re-entry.
-    unsafe {
-        crate::arch::x86_64::usermode::enter_forked_child_returnable(&regs, cr3, kernel_rsp_ptr);
-    }
-
-    // Child exited, boot_return_to_kernel brought us back here.
-    // boot_return_to_kernel did swapgs (balancing child's syscall_entry swapgs)
-    // and zeroed GS. Now: GS.base=0, KernelGsBase=per_cpu_data.
-    // swapgs to restore parent's syscall handler state: GS.base=per_cpu_data.
-    // SAFETY: Restoring GS.base to per_cpu_data after child exit. The GS state
-    // is known (GS.base=0, KernelGsBase=per_cpu_data) from boot_return_to_kernel.
-    unsafe { core::arch::asm!("swapgs", options(nomem, nostack)) };
-
-    // Boot CR3 is restored. Free the child's page table hierarchy frames
-    // (deferred from cleanup_process -- see vas.rs clear() comment).
-    //
-    // If the child called exec(), the page table was replaced: init()
-    // allocated a new L4 and overwrote page_table_root. We must free BOTH
-    // the pre-exec page table (cr3, saved before entering user mode) and
-    // the post-exec page table (current page_table_root). Without this,
-    // every fork+exec leaks the post-exec page table hierarchy.
-    let current_child_pt = if let Some(child_proc) = get_process(child_pid) {
-        child_proc.memory_space.lock().get_page_table()
-    } else {
-        0
-    };
-
-    // Free the post-exec page table if exec changed it
-    if current_child_pt != 0 && current_child_pt != cr3 {
-        crate::mm::vas::free_user_page_table_frames(current_child_pt);
-    }
-
-    // Free the pre-exec (or only) page table
-    if cr3 != 0 {
-        crate::mm::vas::free_user_page_table_frames(cr3);
-    }
-
-    // Clear page_table_root to prevent boot_reap_orphan_zombies()
-    // from double-freeing the same frames.
-    if let Some(child_proc) = get_process(child_pid) {
-        child_proc.memory_space.lock().set_page_table(0);
-    }
-
-    // Restore parent's per-CPU state so:
-    // - parent's sysretq uses the correct user RSP
-    // - parent's next syscall uses the correct kernel stack
-    // SAFETY: per_cpu is a valid pointer (same as saved above). Restoring the
-    // saved values that were overwritten during child dispatch.
-    unsafe {
-        (*per_cpu).kernel_rsp = saved_kernel_rsp;
-        (*per_cpu).user_rsp = saved_user_rsp;
-    }
-
-    // Restore parent as current boot process
-    crate::process::set_boot_current(parent_pid, parent_tid);
-
-    // Restore parent's boot return context
-    BOOT_RETURN_RSP.store(saved_rsp, Ordering::SeqCst);
-    BOOT_RETURN_CR3.store(saved_cr3, Ordering::SeqCst);
-    BOOT_STACK_CANARY.store(saved_canary, Ordering::SeqCst);
-
-    true
+    run_user_process(pid);
 }
 
 /// Kernel-mode init function
@@ -2359,9 +1917,781 @@ pub fn kernel_init_main() {
     run_phase4_tests(&mut passed, &mut failed);
     run_display_tests(&mut passed, &mut failed);
     run_usercopy_tests(&mut passed, &mut failed);
+    run_dispatch_tests(&mut passed, &mut failed);
+    run_process_tests(&mut passed, &mut failed);
 
     // --- Summary ---
     print_summary(passed, failed);
+}
+
+/// Dispatcher tests (ADR 0006, stage D1): kernel threads on their own
+/// stacks, switching, wait queues, the idle task and reaping. On the
+/// `dispatch` architectures (x86_64, RISC-V); AArch64 reports them as
+/// skipped until it has the switch primitive.
+#[cfg(feature = "alloc")]
+fn run_dispatch_tests(passed: &mut u32, failed: &mut u32) {
+    kprintln!("[INIT] Dispatcher tests:");
+    #[cfg(dispatch)]
+    {
+        use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+
+        use crate::sched::dispatch;
+
+        static COUNTER: AtomicU32 = AtomicU32::new(0);
+        /// Each thread appends its id (1 or 2) as a base-3 digit.
+        static TRACE: AtomicU64 = AtomicU64::new(0);
+        static FLAG: AtomicU32 = AtomicU32::new(0);
+        static SEEN: AtomicU32 = AtomicU32::new(0);
+        static WQ: dispatch::WaitQueue = dispatch::WaitQueue::new();
+
+        extern "C" fn worker(id: usize) {
+            for _ in 0..20 {
+                COUNTER.fetch_add(1, Ordering::Relaxed);
+                let t = TRACE.load(Ordering::Relaxed);
+                if t < u64::MAX / 4 {
+                    TRACE.store(t * 3 + id as u64, Ordering::Relaxed);
+                }
+                dispatch::yield_now();
+            }
+        }
+
+        extern "C" fn waiter(_: usize) {
+            WQ.wait_until(|| FLAG.load(Ordering::Acquire) != 0);
+            SEEN.store(FLAG.load(Ordering::Acquire), Ordering::Release);
+        }
+
+        // Test: two kernel threads interleave through yield and are reaped.
+        // Both are bound to this (the boot) CPU, so they share it even when
+        // other CPUs are idle.
+        {
+            let before = dispatch::task_count();
+            let a = dispatch::spawn_kernel_on(0, "worker-a", worker, 1);
+            let b = dispatch::spawn_kernel_on(0, "worker-b", worker, 2);
+            let ok = match (a, b) {
+                (Ok(a), Ok(b)) => {
+                    dispatch::join(a);
+                    dispatch::join(b);
+                    // Count switches between the two ids in the trace.
+                    let mut t = TRACE.load(Ordering::Relaxed);
+                    let (mut last, mut alternations) = (0, 0);
+                    while t != 0 {
+                        let d = t % 3;
+                        if last != 0 && d != last {
+                            alternations += 1;
+                        }
+                        last = d;
+                        t /= 3;
+                    }
+                    COUNTER.load(Ordering::Relaxed) == 40
+                        && alternations >= 4
+                        && dispatch::task_count() == before
+                }
+                _ => false,
+            };
+            report_test("dispatch_kthreads_interleave_and_reap", ok, passed, failed);
+        }
+
+        // Test: a blocked thread is woken through a wait queue; its exit
+        // runs the idle task (nothing else is runnable while this thread
+        // waits in join) and wakes the joiner.
+        {
+            let ok = match dispatch::spawn_kernel("waiter", waiter, 0) {
+                Ok(w) => {
+                    dispatch::yield_now(); // let it block
+                    FLAG.store(7, Ordering::Release);
+                    WQ.wake_all();
+                    dispatch::join(w);
+                    SEEN.load(Ordering::Acquire) == 7
+                }
+                Err(_) => false,
+            };
+            report_test("dispatch_waitqueue_wake_and_join", ok, passed, failed);
+        }
+    }
+    // SMP stage S2: every secondary dispatches. A kernel thread queued on
+    // each one runs there (it records the CPU it found itself on), and its
+    // exit wakes the joiner on the boot CPU across CPUs.
+    #[cfg(dispatch)]
+    {
+        use core::sync::atomic::{AtomicUsize, Ordering};
+
+        use crate::sched::dispatch;
+
+        const NONE: usize = usize::MAX;
+        static RAN_ON: [AtomicUsize; crate::sched::smp::MAX_CPUS] =
+            [const { AtomicUsize::new(NONE) }; crate::sched::smp::MAX_CPUS];
+
+        extern "C" fn where_am_i(slot: usize) {
+            RAN_ON[slot].store(
+                crate::arch::percpu::this_cpu_id() as usize,
+                Ordering::Release,
+            );
+        }
+
+        let online = crate::arch::smp_boot::online_cpus() as usize;
+        if online <= 1 {
+            report_skip("dispatch_runs_on_every_cpu", "one CPU online");
+        } else {
+            // Secondaries become dispatching CPUs right after reporting
+            // online; give them a moment.
+            let start = crate::arch::timer::monotonic_ns();
+            let mut keys = alloc::vec::Vec::new();
+            let mut ok = true;
+            for cpu in 1..online {
+                let key = loop {
+                    match dispatch::spawn_kernel_on(cpu, "where", where_am_i, cpu) {
+                        Ok(k) => break Some(k),
+                        Err(_)
+                            if crate::arch::timer::monotonic_ns().saturating_sub(start)
+                                < 1_000_000_000 =>
+                        {
+                            core::hint::spin_loop()
+                        }
+                        Err(_) => break None,
+                    }
+                };
+                match key {
+                    Some(k) => keys.push(k),
+                    None => ok = false,
+                }
+            }
+            for k in keys {
+                dispatch::join(k);
+            }
+            for (cpu, ran_on) in RAN_ON.iter().enumerate().take(online).skip(1) {
+                ok &= ran_on.load(Ordering::Acquire) == cpu;
+            }
+            report_test("dispatch_runs_on_every_cpu", ok, passed, failed);
+        }
+
+        // SMP stage S3 (D5e): unbound kernel threads are placed on idle
+        // CPUs. Each spins for a while recording where it runs; started
+        // while the other CPUs are idle, they must between them use every
+        // CPU.
+        static USED: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+        // Set once every spinner exists: until then they wait, so that all
+        // of them occupy a CPU at the same time however slowly they are
+        // created (40 ms each under RISC-V emulation, longer than a spin).
+        static GO: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+        extern "C" fn spin_here(_: usize) {
+            while !GO.load(core::sync::atomic::Ordering::Acquire) {
+                core::hint::spin_loop();
+            }
+            let start = crate::arch::timer::monotonic_ns();
+            while crate::arch::timer::monotonic_ns().saturating_sub(start) < 20_000_000 {
+                USED.fetch_or(
+                    1 << crate::arch::percpu::this_cpu_id(),
+                    core::sync::atomic::Ordering::AcqRel,
+                );
+                core::hint::spin_loop();
+            }
+        }
+        if online <= 1 {
+            report_skip("dispatch_places_on_idle_cpus", "one CPU online");
+        } else {
+            let mut keys = alloc::vec::Vec::new();
+            for _ in 0..online {
+                if let Ok(k) = dispatch::spawn_kernel("spin", spin_here, 0) {
+                    keys.push(k);
+                }
+            }
+            let spawned = keys.len();
+            GO.store(true, core::sync::atomic::Ordering::Release);
+            for k in keys {
+                dispatch::join(k);
+            }
+            let used = USED.load(Ordering::Acquire);
+            let ok = spawned == online && used.count_ones() as usize == online;
+            if !ok {
+                crate::println!(
+                    "[INIT] placement: {} threads, CPUs used {:#x}",
+                    spawned,
+                    used
+                );
+            }
+            report_test("dispatch_places_on_idle_cpus", ok, passed, failed);
+        }
+    }
+
+    #[cfg(not(dispatch))]
+    {
+        let _ = (passed, failed);
+        for name in [
+            "dispatch_kthreads_interleave_and_reap",
+            "dispatch_waitqueue_wake_and_join",
+            "dispatch_runs_on_every_cpu",
+            "dispatch_places_on_idle_cpus",
+        ] {
+            report_skip(name, "no dispatcher (sprint E)");
+        }
+    }
+}
+
+/// Process lifecycle boot tests.
+#[cfg(feature = "alloc")]
+fn run_process_tests(passed: &mut u32, failed: &mut u32) {
+    kprintln!("[INIT] Process tests:");
+    // N-46: a process that never ran -- what a fork that fails part-way, or
+    // whose child cannot be started, leaves behind -- is freed whole: its
+    // mapped frames, page tables and kernel stack all go back. (Dropping a
+    // Process frees nothing; these frames used to leak.)
+    {
+        use crate::{
+            mm::vas::MappingType,
+            process::{pcb::ProcessBuilder, thread::ThreadBuilder},
+        };
+        // Free frames include the per-CPU caches, where mmap allocates
+        // from and unmapping frees to (N-261). The count is machine-wide, so
+        // other CPUs running tasks can allocate or free in the middle of a
+        // measurement (seen once on four RISC-V harts: 16 frames more free
+        // after than before). A leak fails every attempt; a concurrent
+        // change on another CPU does not repeat, so three tries are made.
+        let free = || crate::mm::get_memory_stats().free_frames;
+        let attempt = || {
+            let before = free();
+            let built = ProcessBuilder::new(alloc::string::String::from("n46-rollback"))
+                .build_with_address_space()
+                .and_then(|p| {
+                    p.memory_space.lock().mmap(16 * 4096, MappingType::Data)?;
+                    let t =
+                        ThreadBuilder::new(p.pid, alloc::string::String::from("n46"), 0x40_0000)
+                            .build()?;
+                    p.add_thread(t)?;
+                    Ok(p)
+                });
+            match built {
+                Ok(p) => {
+                    let taken = before.saturating_sub(free());
+                    crate::process::exit::discard_unstarted(&p);
+                    drop(p);
+                    let after = free();
+                    if after != before {
+                        kprintln!(
+                            "  [n46] frames: before {} taken {} after {}",
+                            before,
+                            taken,
+                            after
+                        );
+                    }
+                    taken >= 16 && after == before
+                }
+                Err(_) => false,
+            }
+        };
+        let ok = (0..3).any(|_| attempt());
+        report_test("unstarted_process_freed_whole", ok, passed, failed);
+    }
+
+    // RISC-V user mode (sprint E): a program in a fresh address space runs
+    // in U-mode as a dispatcher task. getpid returns its pid through ecall
+    // (it exits with it); a load from address 0 kills it with SIGSEGV; a
+    // supervisor CSR read kills it with SIGILL, so it really ran in U-mode.
+    // Exit status as run_and_wait reports it: the code, or 128 + signal.
+    #[cfg(target_arch = "riscv64")]
+    {
+        let [getpid, fault, csr, fp, sig, futex] = crate::arch::riscv64::usermode::test_programs();
+        let (pid, status) = run_user_code(getpid);
+        let ok = pid.is_some_and(|p| status == Some((p & 0xFF) as i32));
+        if !ok {
+            crate::println!("    pid {:?}, status {:?}", pid, status);
+        }
+        report_test("riscv_user_syscall_round_trip", ok, passed, failed);
+        let (_, status) = run_user_code(fault);
+        if status != Some(128 + 11) {
+            crate::println!("    status {:?}", status);
+        }
+        report_test(
+            "riscv_user_fault_kills_process",
+            status == Some(128 + 11),
+            passed,
+            failed,
+        );
+        let (_, status) = run_user_code(csr);
+        if status != Some(128 + 4) {
+            crate::println!("    status {:?}", status);
+        }
+        report_test(
+            "riscv_user_mode_is_unprivileged",
+            status == Some(128 + 4),
+            passed,
+            failed,
+        );
+        report_fp_survives(fp, passed, failed);
+        report_signal_round_trip(sig, passed, failed);
+        let (_, status) = run_user_code(futex);
+        if status != Some(42) {
+            crate::println!("    status {:?}", status);
+        }
+        report_test(
+            "user_futex_wake_op_updates_word",
+            status == Some(42),
+            passed,
+            failed,
+        );
+        report_static_tls(passed, failed);
+
+        // An ELF program through the loader (from the VFS, with arguments
+        // and the console as fds 0-2): it writes "RV-ELF-OK" and exits with
+        // its argc.
+        let elf = crate::arch::riscv64::usermode::test_elf();
+        let status = crate::fs::write_file("/tmp/rv-elf-test", &elf)
+            .ok()
+            .and_then(|_| {
+                crate::userspace::loader::load_user_program(
+                    "/tmp/rv-elf-test",
+                    &["rv-elf-test", "a", "b"],
+                    &[],
+                )
+                .ok()
+            })
+            .and_then(crate::process::run_and_wait);
+        if status != Some(3) {
+            crate::println!("    status {:?}", status);
+        }
+        report_test("riscv_elf_program_runs", status == Some(3), passed, failed);
+
+        // The embedded init (`/sbin/init`, userspace/embedded.rs) runs and
+        // exits 0: its numbers are RISC-V's (write 64, exit_group 94).
+        let status = run_embedded_init();
+        if status != Some(0) {
+            crate::println!("    status {:?}", status);
+        }
+        report_test(
+            "riscv_embedded_init_runs",
+            status == Some(0),
+            passed,
+            failed,
+        );
+        report_fork(
+            crate::arch::riscv64::usermode::test_fork_program(),
+            passed,
+            failed,
+        );
+        report_exec(
+            crate::arch::riscv64::usermode::test_exec_program(),
+            passed,
+            failed,
+        );
+    }
+    // AArch64 user mode (sprint E, ADR 0016): as on RISC-V. getpid returns
+    // its pid through svc (it exits with it); a load from address 0 kills
+    // it with SIGSEGV; an EL1 system-register read kills it with SIGILL, so
+    // it really ran at EL0. Exit status as run_and_wait reports it.
+    #[cfg(target_arch = "aarch64")]
+    {
+        let [getpid, fault, sysreg, fp, sig, futex] =
+            crate::arch::aarch64::usermode::test_programs();
+        let (pid, status) = run_user_code(getpid);
+        let ok = pid.is_some_and(|p| status == Some((p & 0xFF) as i32));
+        if !ok {
+            crate::println!("    pid {:?}, status {:?}", pid, status);
+        }
+        report_test("aarch64_user_syscall_round_trip", ok, passed, failed);
+        let (_, status) = run_user_code(fault);
+        if status != Some(128 + 11) {
+            crate::println!("    status {:?}", status);
+        }
+        report_test(
+            "aarch64_user_fault_kills_process",
+            status == Some(128 + 11),
+            passed,
+            failed,
+        );
+        let (_, status) = run_user_code(sysreg);
+        if status != Some(128 + 4) {
+            crate::println!("    status {:?}", status);
+        }
+        report_test(
+            "aarch64_user_mode_is_unprivileged",
+            status == Some(128 + 4),
+            passed,
+            failed,
+        );
+        report_asid_isolation(passed, failed);
+        report_dcache_clean(passed, failed);
+        let (_, status) = run_user_code(crate::arch::aarch64::usermode::test_cacheops_program());
+        if status != Some(0) {
+            crate::println!("    status {:?}", status);
+        }
+        report_test(
+            "aarch64_el0_cache_maintenance",
+            status == Some(0),
+            passed,
+            failed,
+        );
+        report_fp_survives(fp, passed, failed);
+        report_signal_round_trip(sig, passed, failed);
+        let (_, status) = run_user_code(futex);
+        if status != Some(42) {
+            crate::println!("    status {:?}", status);
+        }
+        report_test(
+            "user_futex_wake_op_updates_word",
+            status == Some(42),
+            passed,
+            failed,
+        );
+        report_static_tls(passed, failed);
+
+        // An ELF program through the loader: it writes "A64-ELF-OK" and
+        // exits with its argc.
+        let elf = crate::arch::aarch64::usermode::test_elf();
+        let status = crate::fs::write_file("/tmp/a64-elf-test", &elf)
+            .ok()
+            .and_then(|_| {
+                crate::userspace::loader::load_user_program(
+                    "/tmp/a64-elf-test",
+                    &["a64-elf-test", "a", "b"],
+                    &[],
+                )
+                .ok()
+            })
+            .and_then(crate::process::run_and_wait);
+        if status != Some(3) {
+            crate::println!("    status {:?}", status);
+        }
+        report_test(
+            "aarch64_elf_program_runs",
+            status == Some(3),
+            passed,
+            failed,
+        );
+
+        // The embedded init (`/sbin/init`) runs and exits 0 with arm64's
+        // numbers (write 64, exit_group 94).
+        let status = run_embedded_init();
+        if status != Some(0) {
+            crate::println!("    status {:?}", status);
+        }
+        report_test(
+            "aarch64_embedded_init_runs",
+            status == Some(0),
+            passed,
+            failed,
+        );
+        report_fork(
+            crate::arch::aarch64::usermode::test_fork_program(),
+            passed,
+            failed,
+        );
+        report_exec(
+            crate::arch::aarch64::usermode::test_exec_program(),
+            passed,
+            failed,
+        );
+        report_bti(passed, failed);
+    }
+}
+
+/// BTI guarded pages (PROT_BTI): with FEAT_BTI, an indirect branch into a
+/// guarded page must land on a BTI instruction (SIGILL otherwise); without
+/// it, mprotect refuses PROT_BTI with EINVAL, as Linux does.
+#[cfg(all(feature = "alloc", target_arch = "aarch64"))]
+fn report_bti(passed: &mut u32, failed: &mut u32) {
+    use crate::arch::aarch64::usermode::test_bti_program;
+    let (_, pad) = run_user_code(test_bti_program(true));
+    let (_, nopad) = run_user_code(test_bti_program(false));
+    let bti = crate::arch::bti_supported();
+    let ok = if bti {
+        pad == Some(0) && nopad == Some(128 + 4)
+    } else {
+        pad == Some(22) && nopad == Some(22)
+    };
+    if !ok {
+        crate::println!("    bti {} pad {:?} nopad {:?}", bti, pad, nopad);
+    }
+    report_test("user_bti_guards_indirect_branches", ok, passed, failed);
+
+    // The loader guards a static program whose GNU property note asks for
+    // BTI (no mprotect in it): SIGILL on a BTI CPU, exit 0 elsewhere.
+    let elf = crate::arch::aarch64::usermode::test_bti_elf();
+    let status = crate::fs::write_file("/tmp/bti-test", &elf)
+        .ok()
+        .and_then(|_| {
+            crate::userspace::loader::load_user_program("/tmp/bti-test", &["bti-test"], &[]).ok()
+        })
+        .and_then(crate::process::run_and_wait);
+    let want = if bti { Some(128 + 4) } else { Some(0) };
+    if status != want {
+        crate::println!("    status {:?}", status);
+    }
+    report_test("loader_guards_bti_programs", status == want, passed, failed);
+}
+
+/// exec starts the new image at its own entry (`/tmp/embedded-init`, from
+/// `run_embedded_init`, exits 0); the return used to go through the old
+/// frame into the unmapped old image.
+#[cfg(all(
+    feature = "alloc",
+    any(target_arch = "riscv64", target_arch = "aarch64")
+))]
+fn report_exec(code: &[u8], passed: &mut u32, failed: &mut u32) {
+    let (_, status) = run_user_code(code);
+    if status != Some(0) {
+        crate::println!("    status {:?}", status);
+    }
+    report_test(
+        "user_exec_enters_new_image",
+        status == Some(0),
+        passed,
+        failed,
+    );
+}
+
+/// A fork child resumes after the call with its parent's registers (it
+/// used to start from the load-time context, the program's entry, and
+/// fork again): the program exits with its child's status, 7.
+#[cfg(all(
+    feature = "alloc",
+    any(target_arch = "riscv64", target_arch = "aarch64")
+))]
+fn report_fork(code: &[u8], passed: &mut u32, failed: &mut u32) {
+    let (_, status) = run_user_code(code);
+    if status != Some(7) {
+        crate::println!("    status {:?}", status);
+    }
+    report_test(
+        "user_fork_child_resumes_after_call",
+        status == Some(7),
+        passed,
+        failed,
+    );
+}
+/// Run `code` (position-independent) as a new process in user mode: one
+/// executable page at 0x40_0000, four stack pages below 0x80_4000. Returns
+/// its pid and the exit status `run_and_wait` reports.
+#[cfg(all(
+    feature = "alloc",
+    any(target_arch = "riscv64", target_arch = "aarch64")
+))]
+fn run_user_code(code: &[u8]) -> (Option<u64>, Option<i32>) {
+    match build_user_code(code) {
+        Some(pid) => (Some(pid.0), crate::process::run_and_wait(pid)),
+        None => (None, None),
+    }
+}
+
+/// Two copies of the FP test program (`test_programs()[3]`) run together:
+/// each puts its pid in two FP registers, yields 64 times and exits 0 only
+/// if they still hold it. On one CPU they alternate, so this fails unless
+/// user FP state is switched with the task.
+#[cfg(all(
+    feature = "alloc",
+    any(target_arch = "riscv64", target_arch = "aarch64")
+))]
+fn report_fp_survives(code: &[u8], passed: &mut u32, failed: &mut u32) {
+    let statuses = match (build_user_code(code), build_user_code(code)) {
+        (Some(a), Some(b)) => crate::process::run_and_wait_all(&[a, b]),
+        _ => alloc::vec![None, None],
+    };
+    let ok = statuses.iter().all(|s| *s == Some(0));
+    if !ok {
+        crate::println!("    statuses {:?}", statuses);
+    }
+    report_test("user_fp_state_survives_switches", ok, passed, failed);
+}
+
+/// Three processes run the ASID test program together, each address space
+/// with its own ASID (HA-26): each must read back its own pid from the same
+/// stack address after every switch. They also hold distinct nonzero ASIDs.
+#[cfg(all(feature = "alloc", target_arch = "aarch64"))]
+fn report_asid_isolation(passed: &mut u32, failed: &mut u32) {
+    let code = crate::arch::aarch64::usermode::test_asid_program();
+    let built: alloc::vec::Vec<_> = (0..3).filter_map(|_| build_user_code(code)).collect();
+    let asids: alloc::vec::Vec<u64> = built
+        .iter()
+        .filter_map(|&pid| crate::process::table::get_process(pid))
+        .map(|p| {
+            crate::arch::aarch64::switch::ttbr0_for(p.memory_space.lock().get_page_table()) >> 48
+        })
+        .collect();
+    let distinct = asids.len() == 3
+        && asids.iter().all(|&a| a != 0)
+        && asids[0] != asids[1]
+        && asids[1] != asids[2]
+        && asids[0] != asids[2];
+    let statuses = if built.len() == 3 {
+        crate::process::run_and_wait_all(&built)
+    } else {
+        alloc::vec![None]
+    };
+    let ok = distinct && statuses.iter().all(|s| *s == Some(0));
+    if !ok {
+        crate::println!("    asids {:?}, statuses {:?}", asids, statuses);
+    }
+    report_test("aarch64_asids_isolate_address_spaces", ok, passed, failed);
+}
+
+/// The data-cache clean for instruction fetch (HA-25), which QEMU's
+/// CTR_EL0.IDC makes unnecessary there: run it anyway over a user code
+/// page's alias in the physical map, then run that code. A bad address or
+/// line size faults or skips lines; the program must still exit with its pid.
+#[cfg(all(feature = "alloc", target_arch = "aarch64"))]
+fn report_dcache_clean(passed: &mut u32, failed: &mut u32) {
+    let code = crate::arch::aarch64::usermode::test_programs()[0];
+    let ok = build_user_code(code).is_some_and(|pid| {
+        let Some(process) = crate::process::table::get_process(pid) else {
+            return false;
+        };
+        {
+            let vas = process.memory_space.lock();
+            // SAFETY: the process's root, through the physical map; only read.
+            let m = unsafe { crate::mm::vas::create_mapper_from_root_pub(vas.get_page_table()) };
+            let Ok((frame, _)) = m.translate_page(crate::mm::VirtualAddress(0x40_0000)) else {
+                return false;
+            };
+            let kva = crate::mm::phys_to_virt_addr(frame.as_u64() << 12) as usize;
+            let ctr: u64;
+            // SAFETY: reading CTR_EL0 has no side effects.
+            unsafe { core::arch::asm!("mrs {0}, ctr_el0", out(reg) ctr, options(nomem, nostack)) };
+            crate::arch::aarch64::clean_dcache_lines_to_pou(kva, 4096, 4 << ((ctr >> 16) & 0xF));
+            crate::arch::aarch64::sync_icache_all();
+        }
+        drop(process);
+        crate::process::run_and_wait_all(&[pid])[0] == Some((pid.0 & 0xFF) as i32)
+    });
+    report_test("aarch64_dcache_clean_to_pou", ok, passed, failed);
+}
+
+/// The signal test program (`test_programs()[4]`): a SIGUSR1 handler that
+/// rewrites a saved register in its ucontext; exit status 49 means the
+/// frame, the handler's arguments, the return path and rt_sigreturn's
+/// restore of the modified context all worked.
+#[cfg(all(
+    feature = "alloc",
+    any(target_arch = "riscv64", target_arch = "aarch64")
+))]
+fn report_signal_round_trip(code: &[u8], passed: &mut u32, failed: &mut u32) {
+    let (_, status) = run_user_code(code);
+    if status != Some(49) {
+        crate::println!("    status {:?}", status);
+    }
+    report_test(
+        "user_signal_handler_round_trip",
+        status == Some(49),
+        passed,
+        failed,
+    );
+}
+
+/// A static ELF with a PT_TLS segment (`usermode::test_tls_elf`), loaded
+/// through the loader from the VFS: it exits with its first TLS word (42)
+/// when the loader built its TLS block and set the thread pointer.
+#[cfg(all(
+    feature = "alloc",
+    any(target_arch = "riscv64", target_arch = "aarch64")
+))]
+fn report_static_tls(passed: &mut u32, failed: &mut u32) {
+    #[cfg(target_arch = "aarch64")]
+    let elf = crate::arch::aarch64::usermode::test_tls_elf();
+    #[cfg(target_arch = "riscv64")]
+    let elf = crate::arch::riscv64::usermode::test_tls_elf();
+    let status = crate::fs::write_file("/tmp/tls-test", &elf)
+        .ok()
+        .and_then(|_| {
+            crate::userspace::loader::load_user_program("/tmp/tls-test", &["tls-test"], &[]).ok()
+        })
+        .and_then(crate::process::run_and_wait);
+    if status != Some(42) {
+        crate::println!("    status {:?}", status);
+    }
+    report_test("user_static_tls_block", status == Some(42), passed, failed);
+}
+
+/// Run the kernel's embedded init (`userspace::embedded::init_elf`) through
+/// the loader and wait for it: from `/tmp`, since `/sbin/init` is the root
+/// filesystem's own init when one is mounted (it never exits).
+#[cfg(all(
+    feature = "alloc",
+    any(target_arch = "riscv64", target_arch = "aarch64")
+))]
+fn run_embedded_init() -> Option<i32> {
+    let elf = crate::userspace::embedded::init_elf();
+    crate::fs::write_file("/tmp/embedded-init", &elf)
+        .ok()
+        .and_then(|_| {
+            crate::userspace::loader::load_user_program("/tmp/embedded-init", &[], &[]).ok()
+        })
+        .and_then(crate::process::run_and_wait)
+}
+
+/// Build (not start) a process that runs `code` as [`run_user_code`] does.
+#[cfg(all(
+    feature = "alloc",
+    any(target_arch = "riscv64", target_arch = "aarch64")
+))]
+fn build_user_code(code: &[u8]) -> Option<crate::process::ProcessId> {
+    use crate::{
+        arch::context::ThreadContext,
+        mm::{vas::MappingType, PageFlags, VirtualAddress},
+        process::{pcb::ProcessBuilder, thread::ThreadBuilder},
+    };
+    const CODE: u64 = 0x40_0000;
+    const STACK: u64 = 0x80_0000;
+    // Room for a signal frame (4.7 KiB on AArch64) below the program's own
+    // use of the stack.
+    const STACK_SIZE: usize = 4 * 4096;
+    let Ok(p) =
+        ProcessBuilder::new(alloc::string::String::from("rv-user")).build_with_address_space()
+    else {
+        return None;
+    };
+    let mapped = {
+        let vas = p.memory_space.lock();
+        let code_ok = vas
+            .map_region_flags(
+                VirtualAddress(CODE),
+                4096,
+                MappingType::Code,
+                Some(PageFlags::PRESENT | PageFlags::USER),
+            )
+            .is_ok();
+        let stack_ok = vas
+            .map_region_flags(
+                VirtualAddress(STACK),
+                STACK_SIZE,
+                MappingType::Stack,
+                Some(
+                    PageFlags::PRESENT
+                        | PageFlags::USER
+                        | PageFlags::WRITABLE
+                        | PageFlags::NO_EXECUTE,
+                ),
+            )
+            .is_ok();
+        // SAFETY: the process's root, through the physical map; only read.
+        let m = unsafe { crate::mm::vas::create_mapper_from_root_pub(vas.get_page_table()) };
+        match m.translate_page(VirtualAddress(CODE)) {
+            Ok((frame, _)) if code_ok && stack_ok && code.len() <= 4096 => {
+                let dst = crate::mm::phys_to_virt_addr(frame.as_u64() << 12) as *mut u8;
+                // SAFETY: the code page's frame, just mapped and not yet
+                // used by anyone; `code` fits in it.
+                unsafe { core::ptr::copy_nonoverlapping(code.as_ptr(), dst, code.len()) };
+                // Every CPU fetches what was just written (instruction
+                // fetch is not coherent with stores without maintenance).
+                vas.sync_code(CODE, code.len() as u64);
+                true
+            }
+            _ => false,
+        }
+    };
+    if !mapped {
+        return None;
+    }
+    let Ok(t) =
+        ThreadBuilder::new(p.pid, alloc::string::String::from("rv-user"), CODE as usize).build()
+    else {
+        return None;
+    };
+    {
+        let mut c = t.context.lock();
+        c.set_instruction_pointer(CODE as usize);
+        c.set_stack_pointer((STACK + STACK_SIZE as u64) as usize);
+    }
+    if p.add_thread(t).is_err() {
+        return None;
+    }
+    crate::process::table::add_process(p).ok()
 }
 
 /// Run VFS boot tests (tests 1-6).
@@ -2751,25 +3081,45 @@ fn run_phase4_tests(passed: &mut u32, failed: &mut u32) {
 
 /// Run display/input boot tests (tests 28-29).
 #[cfg(feature = "alloc")]
+#[cfg_attr(not(target_arch = "x86_64"), allow(unused_variables))] // all skipped there
 fn run_display_tests(passed: &mut u32, failed: &mut u32) {
     kprintln!("[INIT] Display/input tests:");
 
     // Test 28: Framebuffer console initialized (x86_64 only — UEFI provides fb)
     {
         #[cfg(target_arch = "x86_64")]
-        let ok = crate::graphics::fbcon::is_initialized();
+        report_test(
+            "fbcon_initialized",
+            crate::graphics::fbcon::is_initialized(),
+            passed,
+            failed,
+        );
+        // With a ramfb device the console must be up on it; without one
+        // there is nothing to check.
         #[cfg(not(target_arch = "x86_64"))]
-        let ok = true; // ramfb may or may not be available; skip on non-x86_64
-        report_test("fbcon_initialized", ok, passed, failed);
+        if crate::drivers::ramfb::present() {
+            report_test(
+                "fbcon_initialized",
+                crate::graphics::fbcon::is_initialized(),
+                passed,
+                failed,
+            );
+        } else {
+            report_skip("fbcon_initialized", "no ramfb device (-device ramfb)");
+        }
     }
 
     // Test 29: Keyboard driver ready (x86_64 only — PS/2 keyboard)
     {
         #[cfg(target_arch = "x86_64")]
-        let ok = crate::drivers::keyboard::is_initialized();
+        report_test(
+            "keyboard_driver_ready",
+            crate::drivers::keyboard::is_initialized(),
+            passed,
+            failed,
+        );
         #[cfg(not(target_arch = "x86_64"))]
-        let ok = true; // No PS/2 keyboard on ARM/RISC-V
-        report_test("keyboard_driver_ready", ok, passed, failed);
+        report_skip("keyboard_driver_ready", "no PS/2 keyboard");
     }
 }
 
@@ -2788,26 +3138,22 @@ fn run_usercopy_tests(passed: &mut u32, failed: &mut u32) {
     }
 
     // Test 31: a fault on an unmapped user page returns an error instead of
-    // aborting (x86_64 copy fixup; MEM-SEC-01 / SYS-SEC-01). The address is
-    // in the user half and mapped by nothing during boot.
+    // aborting (the x86_64 and RISC-V copy fixups; MEM-SEC-01 / SYS-SEC-01,
+    // ARCH-MEM-03). The address is in the user half and mapped by nothing
+    // during boot.
     {
-        #[cfg(target_arch = "x86_64")]
         let ok = {
             let mut buf = [0u8; 8];
             read_user_bytes(0x0000_7FF0_0000_0000, &mut buf).is_err()
         };
-        #[cfg(not(target_arch = "x86_64"))]
-        let ok = true; // no fault fixup on aarch64/riscv64 yet
         report_test("usercopy_fault_returns_efault", ok, passed, failed);
     }
 
     // Test 33: the futex WAKE_OP atomic on an unmapped user word returns an
-    // error instead of faulting in the kernel (x86_64 cmpxchg fixup).
+    // error instead of faulting in the kernel (the cmpxchg fixups: x86_64
+    // cmpxchg, AArch64 exclusives, RISC-V LR/SC).
     {
-        #[cfg(target_arch = "x86_64")]
         let ok = crate::syscall::userspace::cmpxchg_user_u32(0x0000_7FF0_0000_0000, 0, 1).is_err();
-        #[cfg(not(target_arch = "x86_64"))]
-        let ok = true; // no fault fixup on aarch64/riscv64 yet
         report_test("usercopy_cmpxchg_fault_returns_efault", ok, passed, failed);
     }
 
@@ -2816,6 +3162,95 @@ fn run_usercopy_tests(passed: &mut u32, failed: &mut u32) {
     {
         let ok = crate::arch::boot_stack_intact();
         report_test("boot_stack_canary_intact", ok, passed, failed);
+    }
+
+    // AArch64: a valid device tree is where boot.S says it is: the one
+    // firmware passed in x0 (an arm64 Image boot, HA-01/HA-03), or QEMU
+    // virt's fixed place for a bare ELF. The line names which, so that a
+    // boot of the Image can require x0.
+    #[cfg(target_arch = "aarch64")]
+    {
+        use crate::arch::aarch64::boot;
+        if boot::dtb_passed_in_x0() {
+            println!("[BOOT] Device tree passed in x0");
+        } else {
+            println!("[BOOT] Device tree at the QEMU virt default (x0 was 0)");
+        }
+        // SAFETY: the blob firmware passed, or QEMU virt's, reached through
+        // the physical map; from_phys validates the header before reading.
+        let ok = unsafe { crate::arch::fdt::Fdt::from_phys(boot::dtb_pa()) }.is_some();
+        report_test("device_tree_found", ok, passed, failed);
+        // The exception vectors were in place before the first Rust code
+        // (boot.S installs them once the stack exists); before,
+        // a fault until Stage 1 vectored wherever firmware had left VBAR.
+        report_test(
+            "vectors_installed_before_rust",
+            boot::vectors_installed_at_entry(),
+            passed,
+            failed,
+        );
+
+        // The MMU and caches are on with the layout of ADR 0015: the kernel
+        // runs at its upper-half link address, the kernel root is TTBR1's,
+        // and a kernel address translates (AT S1E1R) to the physical
+        // address `kernel_phys` computes, through Normal cacheable memory.
+        let sctlr: u64;
+        let par: u64;
+        let here = boot::kernel_phys as *const () as u64;
+        // SAFETY: reading SCTLR_EL1 and an address translation of a mapped
+        // kernel address have no side effects beyond PAR_EL1.
+        unsafe {
+            core::arch::asm!("mrs {0}, sctlr_el1", out(reg) sctlr, options(nomem, nostack));
+            core::arch::asm!("at s1e1r, {0}", "isb", "mrs {1}, par_el1",
+                in(reg) here, out(reg) par, options(nostack));
+        }
+        let translated =
+            par & 1 == 0 && par & 0x0000_FFFF_FFFF_F000 == boot::kernel_phys(here) & !0xFFF;
+        let normal = par >> 56 == 0xFF;
+        let ok = sctlr & 0x1005 == 0x1005
+            && here >= 0xFFFF_FFFF_8000_0000
+            && crate::mm::get_kernel_page_table() != 0
+            && translated
+            && normal;
+        report_test("mmu_on_kernel_in_upper_half", ok, passed, failed);
+
+        // Nothing is mapped in the lower half once the switch is done: the
+        // identity map is gone from TTBR0 (ADR 0015), so the physical address
+        // of the kernel itself does not translate, and the devices are
+        // reached through the physical-memory map.
+        let low = boot::kernel_phys(here);
+        let par_low: u64;
+        // SAFETY: an address translation has no side effect beyond PAR_EL1.
+        unsafe {
+            core::arch::asm!("at s1e1r, {0}", "isb", "mrs {1}, par_el1",
+                in(reg) low, out(reg) par_low, options(nostack));
+        }
+        report_test(
+            "lower_half_unmapped_after_boot",
+            par_low & 1 == 1,
+            passed,
+            failed,
+        );
+
+        // Exclusive loads and stores work now that memory is Normal
+        // cacheable (N-28): an atomic read-modify-write, and a reader-writer
+        // lock that refuses a writer while a reader holds it. With the MMU
+        // off these hung, which is why the filesystems used `bare_lock`, a
+        // lock that did not lock.
+        use core::sync::atomic::{AtomicU64, Ordering};
+        let counter = AtomicU64::new(1);
+        let rmw = counter.fetch_add(2, Ordering::AcqRel) == 1
+            && counter
+                .compare_exchange(3, 7, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok();
+        let lock = spin::RwLock::new(0u32);
+        let excludes = {
+            let reader = lock.read();
+            let refused = lock.try_write().is_none();
+            drop(reader);
+            refused && lock.try_write().is_some()
+        };
+        report_test("exclusives_and_locks_work", rmw && excludes, passed, failed);
     }
 
     // Test 34: the monotonic clock advances and the 1000 Hz timer interrupt
@@ -2838,6 +3273,241 @@ fn run_usercopy_tests(passed: &mut u32, failed: &mut u32) {
         let ok = ticks >= 5 && elapsed < 50;
         report_test("timer_interrupts_and_clock", ok, passed, failed);
     }
+
+    // Test 35: every CPU that came online has its own per-CPU block (the
+    // right logical id, a distinct hardware id) and, where secondaries run
+    // a timer, has taken ticks on it. Trivially true on one CPU (SMP stage
+    // S1, ADR 0004).
+    {
+        use crate::arch::percpu::arch_cpu_ptr;
+        let online = crate::arch::smp_boot::online_cpus() as usize;
+        let start_ms = crate::timer::get_uptime_ms();
+        while crate::timer::get_uptime_ms().saturating_sub(start_ms) < 20 {
+            core::hint::spin_loop();
+        }
+        let mut ok = true;
+        for cpu in 0..online {
+            // SAFETY: read-only snapshot of static per-CPU blocks; each
+            // field is written only by its own CPU.
+            let (id, hw, ticks) = unsafe {
+                let p = arch_cpu_ptr(cpu);
+                (
+                    core::ptr::read_volatile(&(*p).cpu_id),
+                    core::ptr::read_volatile(&(*p).hw_id),
+                    core::ptr::read_volatile(&(*p).local_ticks),
+                )
+            };
+            ok &= id as usize == cpu;
+            for other in 0..cpu {
+                // SAFETY: as above.
+                ok &= unsafe { core::ptr::read_volatile(&(*arch_cpu_ptr(other)).hw_id) } != hw;
+            }
+            if cpu > 0 {
+                ok &= ticks > 0;
+            }
+        }
+        if online > 1 {
+            report_test("smp_cpus_online_and_ticking", ok, passed, failed);
+        } else {
+            report_skip("smp_cpus_online_and_ticking", "one CPU online");
+        }
+    }
+
+    // Test 36: kernel uptime advances at the rate of the hardware clock.
+    // With several CPUs ticking, only the timekeeper may advance it, or it
+    // runs N times fast.
+    {
+        let hw0 = crate::arch::timer::monotonic_ns();
+        let up0 = crate::timer::get_uptime_ms();
+        let mut spins = 0u64;
+        while crate::arch::timer::monotonic_ns().saturating_sub(hw0) < 100_000_000
+            && spins < 4_000_000_000
+        {
+            core::hint::spin_loop();
+            spins += 1;
+        }
+        let hw_ms = crate::arch::timer::monotonic_ns().saturating_sub(hw0) / 1_000_000;
+        let up_ms = crate::timer::get_uptime_ms().saturating_sub(up0);
+        // Within 30% of the hardware clock (ticks are 1 ms; QEMU TCG jitters).
+        let ok = hw_ms >= 100 && up_ms * 10 >= hw_ms * 7 && up_ms * 10 <= hw_ms * 13;
+        report_test("uptime_tracks_hw_clock", ok, passed, failed);
+    }
+
+    // Test 37: a TLB shootdown reaches every online CPU and is confirmed
+    // (x86 IPI acknowledgements, SBI RFENCE, AArch64 broadcast TLBI;
+    // MEM-SEC-02). Nothing to test on one CPU.
+    if crate::arch::smp_boot::online_cpus() <= 1 {
+        report_skip("tlb_shootdown_confirmed", "one CPU online");
+    } else {
+        let start = crate::arch::timer::monotonic_ns();
+        for _ in 0..8 {
+            crate::mm::tlb::flush_all();
+            crate::mm::tlb::flush_page(0x0000_7FF0_0000_0000);
+        }
+        let quick = crate::arch::timer::monotonic_ns().saturating_sub(start) < 500_000_000;
+        let ok = quick && crate::mm::tlb::remote_flushes_confirmed();
+        report_test("tlb_shootdown_confirmed", ok, passed, failed);
+    }
+
+    // Test 38: the kernel heap reuses freed memory (MEM-SEC-03). 64 MiB
+    // allocated and freed 1 MiB at a time exceeds the 8 MiB AArch64/RISC-V
+    // heap, so a bump allocator, which never reuses memory, fails it.
+    {
+        let ok = (0..64).all(|i| {
+            let mut v: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+            if v.try_reserve_exact(1 << 20).is_err() {
+                return false;
+            }
+            // Reuse needs no writes (writing 64 MiB is slow under TCG).
+            v.push(i as u8);
+            v.capacity() >= 1 << 20 && v[0] == i as u8
+        });
+        report_test("heap_reuses_freed_memory", ok, passed, failed);
+    }
+
+    // AArch64 and RISC-V: the frame allocator manages the RAM the device
+    // tree reports (HA-17, HR-07), less the kernel image and what lies
+    // below it, not a fixed 128 MiB. The gate boots with 256 MiB.
+    #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
+    {
+        #[cfg(target_arch = "aarch64")]
+        let dtb = crate::arch::aarch64::boot::dtb_pa();
+        #[cfg(target_arch = "riscv64")]
+        let dtb = crate::arch::riscv64::dtb_pa();
+        let mut ram = 0u64;
+        // SAFETY: the address firmware passed, in the physical map.
+        if let Some(fdt) = unsafe { crate::arch::fdt::Fdt::from_phys(dtb) } {
+            fdt.memory_ranges(|_, size| ram += size);
+        }
+        let managed = crate::mm::FRAME_ALLOCATOR.lock().get_stats().total_frames * 4096;
+        // The kernel heap is taken out of the managed frames (about a
+        // third of RAM: 512 MiB at 2 GiB); the image, firmware below it and the
+        // pool's guard are well under 64 MiB.
+        let heap = crate::mm::heap::heap_size() as u64;
+        let ok = ram > 0 && managed + heap + (64 << 20) >= ram && managed <= ram;
+        if !ok {
+            crate::println!(
+                "    device tree RAM {:#x}, managed {:#x}, heap {:#x}",
+                ram,
+                managed,
+                heap
+            );
+        }
+        report_test("memory_map_from_device_tree", ok, passed, failed);
+    }
+
+    // Test 39: a kernel stack has an unmapped guard page below it, and
+    // freeing it unmaps it (N-26).
+    {
+        let ok = match crate::mm::kstack::allocate(16) {
+            Ok(stack) => {
+                // SAFETY: both ends of the 16 pages just allocated.
+                let usable = unsafe {
+                    let lo = stack.base as *mut u64;
+                    let hi = (stack.base + 16 * 4096 - 8) as *mut u64;
+                    lo.write_volatile(0x1234);
+                    hi.write_volatile(0x5678);
+                    lo.read_volatile() == 0x1234 && hi.read_volatile() == 0x5678
+                };
+                // SAFETY: the kernel's root table through the physical map;
+                // only read here.
+                let m = unsafe {
+                    crate::mm::vas::create_mapper_from_root_pub(
+                        crate::mm::get_kernel_page_table() as u64
+                    )
+                };
+                let probe = |a: usize| m.translate_page(crate::mm::VirtualAddress(a as u64));
+                let guard_unmapped = probe(stack.base - 4096).is_err()
+                    && crate::mm::kstack::is_guard_fault((stack.base - 8) as u64);
+                let mapped = probe(stack.base).is_ok();
+                let base = stack.base;
+                crate::mm::kstack::free(stack);
+                usable && guard_unmapped && mapped && probe(base).is_err()
+            }
+            Err(_) => false,
+        };
+        report_test("kernel_stack_guard_page", ok, passed, failed);
+    }
+
+    // A new address space's lower half (user space) is empty: no kernel
+    // entry is shared into it, so all of it is the process's own. A stale
+    // kernel-heap slot (L4 136) used to be copied in and shared by fork.
+    // Its upper half is the kernel's, entry for entry (on RISC-V the new
+    // space used to get freshly allocated tables there instead). On
+    // AArch64 the kernel half is TTBR1's (ADR 0015), so a process root
+    // holds nothing above the user half, and building one takes a few
+    // frames: it used to map 20 MiB of fresh frames as "kernel regions".
+    #[cfg(any(
+        target_arch = "x86_64",
+        target_arch = "riscv64",
+        target_arch = "aarch64"
+    ))]
+    {
+        use crate::mm::page_table::PageTable;
+        let table = |root: u64| {
+            // SAFETY: a root page table, through the physical map; only read.
+            unsafe { &*(crate::mm::phys_to_virt_addr(root) as *const PageTable) }
+        };
+        let free = || crate::mm::get_memory_stats().free_frames;
+        let mut vas = crate::mm::vas::VirtualAddressSpace::new();
+        let before = free();
+        let init = vas.init();
+        let taken = before.saturating_sub(free());
+        let root = vas.get_page_table();
+        let first_present = (init.is_ok() && root != 0).then(|| {
+            let l4 = table(root);
+            (0..256).find(|&i| l4[i].is_present())
+        });
+        #[cfg(not(target_arch = "aarch64"))]
+        let shared = {
+            let kernel_root = crate::mm::get_kernel_page_table() as u64 & 0x000F_FFFF_FFFF_F000;
+            init.is_ok()
+                && root != 0
+                && (256..512).all(|i| table(root)[i].frame() == table(kernel_root)[i].frame())
+        };
+        #[cfg(target_arch = "aarch64")]
+        let shared = init.is_ok()
+            && root != 0
+            && (256..512).all(|i| !table(root)[i].is_present())
+            && taken < 64;
+        let _ = taken;
+        let ok = first_present == Some(None) && shared;
+        if !ok {
+            crate::println!(
+                "    init ok: {}, root {:#x}, first user-half entry present: {:?}, kernel half \
+                 right: {}, frames taken {}",
+                init.is_ok(),
+                root,
+                first_present,
+                shared,
+                taken
+            );
+        }
+        vas.destroy();
+        report_test("user_half_starts_empty", ok, passed, failed);
+    }
+
+    // RISC-V: the kernel's own root maps nothing in the lower half. The
+    // early boot's identity map is only in the trampoline root (ADR 0013),
+    // so the lower half is entirely user space.
+    #[cfg(target_arch = "riscv64")]
+    {
+        let root = crate::mm::get_kernel_page_table() as u64;
+        // SAFETY: the active root, through the physical map; only read.
+        let l4 = unsafe {
+            &*(crate::mm::phys_to_virt_addr(root) as *const crate::mm::page_table::PageTable)
+        };
+        let first = (0..256).find(|&i| l4[i].is_present());
+        if let Some(i) = first {
+            crate::println!("    kernel root entry {} is present (lower half)", i);
+        }
+        report_test(
+            "kernel_root_lower_half_empty",
+            first.is_none(),
+            passed,
+            failed,
+        );
+    }
 }
 
 #[cfg(not(feature = "alloc"))]
@@ -2845,14 +3515,51 @@ pub fn kernel_init_main() {
     kprintln!("BOOTOK");
 }
 
+/// Tests that cannot run on this architecture yet. They are reported and
+/// counted apart, never as passed, so the tally claims only what ran.
+static SKIPPED: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
+/// Print a line made of several pieces as one: another CPU's message cannot
+/// land in the middle (`Results: 62/[PROCESS] Dropping process 29`, which
+/// the boot tests could not parse). AArch64 and RISC-V hold the console
+/// lock across `f`; x86_64 has none to hold.
+fn console_line(f: impl FnOnce()) {
+    #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
+    crate::print::with_console(f);
+    #[cfg(not(any(target_arch = "aarch64", target_arch = "riscv64")))]
+    f();
+}
+
+/// Report a test that does not run here, and why.
+#[allow(dead_code)] // every skip is architecture-specific
+fn report_skip(name: &str, why: &str) {
+    console_line(|| {
+        kprint_rt!("  ");
+        kprint_rt!(name);
+        kprint_rt!("...[skipped: ");
+        kprint_rt!(why);
+        kprintln!("]");
+    });
+    SKIPPED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+}
+
 /// Print test summary and BOOTOK/BOOTFAIL
 fn print_summary(passed: u32, failed: u32) {
     kprintln!("========================================");
-    kprint_rt!("[INIT] Results: ");
-    kprint_u64!(passed);
-    kprint_rt!("/");
-    kprint_u64!(passed + failed);
-    kprintln!(" passed");
+    let skipped = SKIPPED.load(core::sync::atomic::Ordering::Relaxed);
+    console_line(|| {
+        kprint_rt!("[INIT] Results: ");
+        kprint_u64!(passed);
+        kprint_rt!("/");
+        kprint_u64!(passed + failed);
+        kprint_rt!(" passed");
+        if skipped > 0 {
+            kprint_rt!(" (");
+            kprint_u64!(skipped);
+            kprint_rt!(" skipped)");
+        }
+        kprintln!("");
+    });
     if failed == 0 {
         kprintln!("BOOTOK");
     } else {
@@ -2863,13 +3570,15 @@ fn print_summary(passed: u32, failed: u32) {
 
 /// Report a single test result with QEMU-parseable markers
 fn report_test(name: &str, ok: bool, passed: &mut u32, failed: &mut u32) {
-    kprint_rt!("  ");
-    kprint_rt!(name);
-    if ok {
-        kprintln!("...[ok]");
-    } else {
-        kprintln!("...[failed]");
-    }
+    console_line(|| {
+        kprint_rt!("  ");
+        kprint_rt!(name);
+        if ok {
+            kprintln!("...[ok]");
+        } else {
+            kprintln!("...[failed]");
+        }
+    });
 
     if ok {
         *passed += 1;

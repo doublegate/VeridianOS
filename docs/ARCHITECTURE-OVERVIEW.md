@@ -1,6 +1,10 @@
 # VeridianOS Architecture Overview
 
-**Last Updated**: June 15, 2025
+**Last Updated**: June 15, 2025 (status notes added October 7, 2026)
+
+> **Design, not status.** Much of this document describes the target architecture. What the
+> kernel does today, and which of these properties are not yet in effect, is listed in
+> [`KNOWN-LIMITATIONS.md`](KNOWN-LIMITATIONS.md); where the two disagree, that page is right.
 
 ## Executive Summary
 
@@ -12,7 +16,7 @@ VeridianOS is designed as a modern microkernel operating system with a focus on 
 
 **Architecture Goals** (Enhanced by AI Analysis):
 - Microkernel size: < 15,000 lines of code
-- Sub-microsecond IPC latency (< 5μs Phase 1, < 1μs Phase 5)
+- Sub-microsecond IPC latency (< 5μs Phase 1, < 1μs Phase 5) -- a goal, not measured (see Section 3)
 - Support for 1000+ concurrent processes
 - Zero-copy design throughout
 - Capability-based security with fast lookups
@@ -107,18 +111,18 @@ The process and scheduling subsystems implement:
 
 IPC mechanisms include:
 
-- **Synchronous IPC**: Rendezvous-style message passing ✅
-  - Direct handoff between processes
-  - < 1μs latency achieved for small messages
+- **Synchronous IPC**: queued message passing ✅
+  - Messages are queued on the endpoint; a receiver sleeps on it until one arrives (v0.27)
+  - No direct hand-off and no measured latency yet (v0.28 IPC redesign, N-79 to N-91)
 - **Asynchronous IPC**: Channel-based communication ✅
-  - Lock-free ring buffers
+  - Locked bounded queues (the earlier lock-free ring was unsound, IPC-SYNC-03)
   - Configurable channel capacity
 - **Shared Memory**: Capability-protected regions ✅
   - Zero-copy data sharing
   - NUMA-aware allocation
-- **Fast Path**: Register-based transfer ✅
-  - < 1μs for messages ≤64 bytes
-  - Architecture-specific optimizations
+- **Fast Path**: register-based transfer -- removed in v0.27
+  - It needed the old scheduler and was never reachable from a system call (N-84); a direct
+    hand-off returns with the v0.28 IPC redesign
 - **Capability Integration**: Full permission validation ✅
 - **Rate Limiting**: Token bucket algorithm for DoS protection ✅
 - **Global Registry**: O(1) endpoint and channel lookup ✅
@@ -174,7 +178,8 @@ Security is enforced through:
 
 ### Driver Framework
 
-All drivers run in user space with:
+The design runs drivers in user space with the features below. **Today every driver runs in the
+kernel** (ring 0); moving them out is critique item C6, planned from v0.28:
 
 - **Device Tree Integration**: Automatic device discovery
 - **Interrupt Forwarding**: Kernel routes interrupts to drivers
@@ -242,9 +247,9 @@ All drivers run in user space with:
 ### Defense in Depth
 
 1. **Hardware Security**
-   - SMEP/SMAP enforcement
-   - NX bit utilization
-   - IOMMU protection
+   - SMEP/SMAP enforcement (not enabled yet, N-15)
+   - NX bit utilization (in effect: NX/W^X from mapping flags)
+   - IOMMU protection (tables parsed, translation not enabled, N-77)
    - Secure boot chain
 
 2. **Kernel Security**
@@ -265,14 +270,14 @@ VeridianOS protects against:
 
 - **Privilege Escalation**: Capability system prevents unauthorized access
 - **Memory Corruption**: Rust's safety and runtime checks
-- **Side-Channel Attacks**: Mitigations for Spectre/Meltdown
+- **Side-Channel Attacks**: Mitigations for Spectre/Meltdown (planned; none is active today, N-145, N-146)
 - **Supply Chain Attacks**: Reproducible builds and signing
 
 ## Performance Optimizations
 
 ### Kernel Optimizations
 
-- **Lock-Free Algorithms**: Reduced contention
+- **Lock-Free Algorithms**: Reduced contention (goal; the frame allocator and run queues use locks today)
 - **Per-CPU Data**: Cache-line optimization
 - **RCU Synchronization**: Read-heavy workload optimization
 - **Huge Page Support**: Reduced TLB pressure
@@ -290,7 +295,7 @@ VeridianOS protects against:
 
 - **Multi-Core Support**: Up to 1024 CPUs
 - **NUMA Awareness**: Optimized memory placement
-- **Lock-Free Data Structures**: Reduced synchronization overhead
+- **Lock-Free Data Structures**: Reduced synchronization overhead (goal; most kernel structures use spinlocks today)
 - **Work Stealing**: Dynamic load balancing
 
 ### Vertical Scalability
@@ -359,7 +364,7 @@ VeridianOS protects against:
 
 ### Current Performance Metrics
 
-- **IPC Latency**: < 1μs achieved (✅ exceeding 5μs target)
+- **IPC Latency**: not measured end to end: user programs cannot reach IPC yet (N-33); earlier "< 1μs" figures timed in-kernel helpers
 - **Context Switch**: < 10μs achieved (✅ meeting target)
 - **Memory Allocation**: < 500ns achieved (✅ exceeding 1μs target)
 - **Page Mapping**: 1.5μs achieved (✅ exceeding 2μs target)
@@ -426,7 +431,7 @@ VeridianOS protects against:
 - **Simpler**: Less architectural complexity
 - **POSIX**: Compatibility layer planned
 - **Open**: Community-driven development
-- **Performance**: Sub-microsecond operations
+- **Performance**: sub-microsecond operations as a goal; measured figures are in PERFORMANCE-REPORT.md
 
 ## Future Directions
 
@@ -442,7 +447,7 @@ VeridianOS protects against:
 
 1. **Unikernel Mode**: Single-application optimization
 2. **Confidential Computing**: Hardware-based isolation (Intel TDX, AMD SEV)
-3. **Quantum-Resistant Crypto**: Post-quantum algorithms (ML-KEM, ML-DSA)
+3. **Quantum-Resistant Crypto**: Post-quantum algorithms. ML-DSA-65 verification (FIPS 204) exists; the Kyber KEM is not FIPS 203 ML-KEM (N-57)
 4. **AI Acceleration**: Kernel-level ML support
 5. **CXL Integration**: Compute Express Link memory
 

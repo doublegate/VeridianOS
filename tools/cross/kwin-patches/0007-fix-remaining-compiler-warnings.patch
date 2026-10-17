@@ -1,0 +1,139 @@
+VeridianOS: fix the remaining KWin compiler warnings
+
+GCC reported, for the VeridianOS cross build (KWin 6.7.5, Qt 6.12, KF 6.30,
+libei 1.6). Each change matches what upstream KWin master does, so it can
+be dropped with the release that carries it:
+
+- src/kcms/common/genericscriptedconfig.cpp:112: ignoring the [[nodiscard]]
+  result of QFile::open. An unreadable config.ui now shows the existing
+  "Error loading widget from %1: %2" label with the file error; before,
+  QUiLoader::load() failed on the unopened file and the same label showed
+  the loader's error instead.
+- src/plugins/eis/eiscontext.cpp:161: four libei 1.6 events not handled in
+  the switch (-Wswitch): EIS_EVENT_DEVICE_READY,
+  EIS_EVENT_SEAT_DEVICE_REQUESTED, EIS_EVENT_TEXT_KEYSYM,
+  EIS_EVENT_TEXT_UTF8. They fell through the switch and were dropped; they
+  are now listed with the ignored events (this release has no text-input
+  support for emulated input; master adds it).
+- src/plugins/qpa/integration.cpp:96: QPlatformIntegration::RasterGLSurface
+  is deprecated ("no longer used"). The case is removed; the default branch
+  returns QPlatformIntegration::hasCapability(), which is false for it
+  (qplatformintegration.cpp), as the case did.
+- src/plugins/windowsystem/windowsystem.cpp:52:
+  KWaylandExtras::xdgActivationTokenArrived() is deprecated since KF 6.19.
+  requestToken() implements the deprecated request API; nothing in this
+  stack calls KWaylandExtras::requestXdgActivationToken() (checked across
+  every package built), and the token is served by xdgActivationToken(),
+  which this plugin already implements. requestToken() is now empty, as in
+  master.
+- src/backends/drm/drm_output.cpp:761: unused variable 'wcg'; removed (it
+  was computed and never read).
+- src/backends/wayland/wayland_backend.cpp:649: unused variable
+  'attributes' in an if-condition; the condition tests the pointer
+  directly. Same branch taken.
+- src/wayland/keyboard.cpp:217, src/wayland/inputmethod_v1.cpp:95:
+  'waylandState' may be used uninitialized. The switch covers every
+  KeyboardKeyState value, so it is always assigned; it is now initialized
+  to WL_KEYBOARD_KEY_STATE_PRESSED like master, which the compiler can see.
+
+--- a/src/kcms/common/genericscriptedconfig.cpp
++++ b/src/kcms/common/genericscriptedconfig.cpp
+@@ -107,9 +107,14 @@
+     QUiLoader *loader = new QUiLoader(this);
+     loader->setLanguageChangeEnabled(true);
+     QFile uiFile(uiPath);
++    if (!uiFile.open(QFile::ReadOnly)) {
++        auto errorLabel = new QLabel(i18n("Error loading widget from %1: %2", uiPath, uiFile.errorString()));
++        layout->addWidget(errorLabel);
++        return;
++    }
++
+     m_translator->setTranslationDomain(metaData.value("X-KWin-Config-TranslationDomain"));
+ 
+-    uiFile.open(QFile::ReadOnly);
+     QWidget *customConfigForm = loader->load(&uiFile, widget());
+ 
+     if (!customConfigForm) {
+--- a/src/plugins/eis/eiscontext.cpp
++++ b/src/plugins/eis/eiscontext.cpp
+@@ -349,6 +349,11 @@
+         }
+         case EIS_EVENT_PONG:
+         case EIS_EVENT_SYNC:
++        // libei 1.6 events this release does not handle
++        case EIS_EVENT_TEXT_KEYSYM:
++        case EIS_EVENT_TEXT_UTF8:
++        case EIS_EVENT_DEVICE_READY:
++        case EIS_EVENT_SEAT_DEVICE_REQUESTED:
+             break;
+         }
+         eis_event_unref(event);
+--- a/src/plugins/qpa/integration.cpp
++++ b/src/plugins/qpa/integration.cpp
+@@ -93,7 +93,6 @@
+         return true;
+     case ThreadedOpenGL:
+     case BufferQueueingOpenGL:
+-    case RasterGLSurface:
+         return false;
+     default:
+         return QPlatformIntegration::hasCapability(cap);
+--- a/src/plugins/windowsystem/windowsystem.cpp
++++ b/src/plugins/windowsystem/windowsystem.cpp
+@@ -45,12 +45,7 @@
+ #if KWINDOWSYSTEM_BUILD_DEPRECATED_SINCE(6, 19)
+ void WindowSystem::requestToken(QWindow *win, uint32_t serial, const QString &appId)
+ {
+-    auto seat = KWin::waylandServer()->seat();
+-    auto token = KWin::waylandServer()->xdgActivationIntegration()->requestPrivilegedToken(nullptr, seat->display()->serial(), seat, appId);
+-    // Ensure that xdgActivationTokenArrived is always emitted asynchronously
+-    QTimer::singleShot(0, KWaylandExtras::self(), [serial, token] {
+-        Q_EMIT KWaylandExtras::self()->xdgActivationTokenArrived(serial, token);
+-    });
++    // xdgActivationToken() should be used instead.
+ }
+ #endif
+ 
+--- a/src/backends/drm/drm_output.cpp
++++ b/src/backends/drm/drm_output.cpp
+@@ -758,7 +758,6 @@
+     ColorPipeline colorPipeline = ColorPipeline::create(next.blendingColor, encoding, RenderingIntent::AbsoluteColorimetricNoAdaptation);
+ 
+     const bool hdr = next.highDynamicRange && (capabilities() & Capability::HighDynamicRange);
+-    const bool wcg = next.wideColorGamut && (capabilities() & Capability::WideColorGamut);
+     const auto &iccProfile = hdr ? next.hdrIccProfile : next.iccProfile;
+     const ColorProfileSource profileSource = hdr ? next.hdrColorProfileSource : next.colorProfileSource;
+     const bool usesICC = profileSource == ColorProfileSource::ICC && iccProfile;
+--- a/src/backends/wayland/wayland_backend.cpp
++++ b/src/backends/wayland/wayland_backend.cpp
+@@ -646,7 +646,7 @@
+     auto &buffer = m_buffers[graphicsBuffer];
+     if (!buffer) {
+         wl_buffer *handle = nullptr;
+-        if (const DmaBufAttributes *attributes = graphicsBuffer->dmabufAttributes()) {
++        if (graphicsBuffer->dmabufAttributes()) {
+             handle = m_display->linuxDmabuf()->importBuffer(graphicsBuffer);
+         } else if (const ShmAttributes *attributes = graphicsBuffer->shmAttributes()) {
+             handle = importShmBuffer(m_display.get(), attributes);
+--- a/src/wayland/keyboard.cpp
++++ b/src/wayland/keyboard.cpp
+@@ -196,7 +196,7 @@
+ 
+ void KeyboardInterface::sendKey(quint32 key, KeyboardKeyState state, ClientConnection *client, uint32_t serial)
+ {
+-    quint32 waylandState;
++    quint32 waylandState = WL_KEYBOARD_KEY_STATE_PRESSED;
+     switch (state) {
+     case KeyboardKeyState::Pressed:
+         waylandState = WL_KEYBOARD_KEY_STATE_PRESSED;
+--- a/src/wayland/inputmethod_v1.cpp
++++ b/src/wayland/inputmethod_v1.cpp
+@@ -74,7 +74,7 @@
+ 
+ void InputMethodGrabV1::sendKey(quint32 serial, quint32 timestamp, quint32 key, KeyboardKeyState state)
+ {
+-    quint32 waylandState;
++    quint32 waylandState = WL_KEYBOARD_KEY_STATE_PRESSED;
+     switch (state) {
+     case KeyboardKeyState::Pressed:
+         waylandState = WL_KEYBOARD_KEY_STATE_PRESSED;

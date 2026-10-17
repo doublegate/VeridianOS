@@ -71,8 +71,11 @@ venv/
 CLAUDE.local.md
 WARP.md
 
-# Cargo/Rust user directories
-.cargo/
+# Cargo/Rust user directories. .cargo/ here is a whole Cargo home (bin/,
+# registry caches, env scripts); only its config.toml, the project's build
+# settings, is tracked, so CI and fresh clones build with the same flags.
+**/.cargo/*
+!**/.cargo/config.toml
 .rustup/
 
 # User configuration directories
@@ -120,6 +123,8 @@ sqlite_mcp_server.db
 *.elf
 *.sym
 *.map
+# The syscall table source (tools/compat/gen_syscalls.py), not a linker map.
+!abi/syscalls.map
 
 # Bootloader/GRUB artifacts
 isofiles/
@@ -348,3 +353,13 @@ a.out
 
 # Antigravity PR reviewer: large-diff on-disk handoff (transient, removed by the script).
 /.agy-review-work/
+
+# Other agent harnesses' private working state (briefings, handoffs, local MCP config).
+/.agents/
+/.codex/
+# Files rescued from /tmp (tmp-salvage); reviewed by hand, never committed wholesale.
+/salvaged/
+/docs/SALVAGE_MANIFEST.md
+# One-off edit scripts and tool output dropped at the repo root.
+/fix*.py
+/clippy_out.txt

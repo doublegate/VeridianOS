@@ -1,0 +1,137 @@
+VeridianOS: do not pass error database text to printf as a format
+
+GCC reported "format not a string literal, argument types not checked
+[-Wformat-nonliteral]" six times in _XPrintDefaultError() (src/XlibInt.c
+1329, 1349, 1381, 1409, 1415, 1419). The default X error handler printed
+each line with fprintf(fp, mesg, value), where mesg is text looked up in
+the error database file (XErrorDB) or a built-in fallback. That is a real
+defect, not only a style issue: the conversion in the file is not checked
+against the argument (the fallbacks pass an unsigned long serial or XID to
+"%d"/"0x%x", and XErrorDB passes an unsigned long long request number to
+"%lu"), and any other conversion in the file would read arguments that
+were never passed.
+
+A small helper, _XPrintErrorDBMessage(), now prints the text itself and
+substitutes the value for an integer conversion (any flags, width,
+precision and length modifier, then d/i/u/x/X/o; "%%" prints '%'), using
+literal formats on an unsigned long long. All values printed are unsigned
+(opcodes, XIDs, serials). For the shipped XErrorDB entries ("%d", "0x%lx",
+"%lu") the output is identical; the fallbacks now print the full value
+instead of a truncated int. Flags and width in a custom database are
+ignored (none are used by XErrorDB).
+
+
+diff -ru a/src/XlibInt.c b/src/XlibInt.c
+--- a/src/XlibInt.c	2026-10-08 17:12:35.328103893 -0400
++++ b/src/XlibInt.c	2026-10-08 17:14:02.209622934 -0400
+@@ -1310,6 +1310,62 @@
+ }
+ 
+ 
++/*
++ * Print a message from the error database with @value substituted for its
++ * integer conversion. The message text comes from a file (XErrorDB), so it
++ * is interpreted here instead of being passed to printf as a format: a
++ * conversion with any flags, width, precision and length modifier, ending
++ * in d, i, u, x, X or o, prints @value in that base (all the values printed
++ * here are unsigned); "%%" prints '%'; anything else is printed as is.
++ */
++static void
++_XPrintErrorDBMessage(
++    FILE *fp,
++    const char *mesg,
++    unsigned long long value)
++{
++    const char *p = mesg;
++
++    while (*p) {
++	const char *conv;
++
++	if (*p != '%') {
++	    fputc(*p++, fp);
++	    continue;
++	}
++	if (p[1] == '%') {
++	    fputc('%', fp);
++	    p += 2;
++	    continue;
++	}
++	conv = p + 1;
++	conv += strspn(conv, "-+ #0123456789.");
++	conv += strspn(conv, "hlLqjzt");
++	switch (*conv) {
++	case 'd':
++	case 'i':
++	case 'u':
++	    fprintf(fp, "%llu", value);
++	    break;
++	case 'x':
++	    fprintf(fp, "%llx", value);
++	    break;
++	case 'X':
++	    fprintf(fp, "%llX", value);
++	    break;
++	case 'o':
++	    fprintf(fp, "%llo", value);
++	    break;
++	default:
++	    /* Not an integer conversion: print it unchanged. */
++	    fwrite(p, 1, (size_t) (conv - p), fp);
++	    p = conv;
++	    continue;
++	}
++	p = conv + 1;
++    }
++}
++
+ static int _XPrintDefaultError(
+     Display *dpy,
+     XErrorEvent *event,
+@@ -1326,7 +1382,7 @@
+     (void) fprintf(fp, "%s:  %s\n  ", mesg, buffer);
+     XGetErrorDatabaseText(dpy, mtype, "MajorCode", "Request Major code %d",
+ 	mesg, BUFSIZ);
+-    (void) fprintf(fp, mesg, event->request_code);
++    _XPrintErrorDBMessage(fp, mesg, event->request_code);
+     if (event->request_code < 128) {
+ 	snprintf(number, sizeof(number), "%d", event->request_code);
+ 	XGetErrorDatabaseText(dpy, "XRequest", number, "", buffer, BUFSIZ);
+@@ -1346,7 +1402,7 @@
+ 	XGetErrorDatabaseText(dpy, mtype, "MinorCode", "Request Minor code %d",
+ 			      mesg, BUFSIZ);
+ 	fputs("  ", fp);
+-	(void) fprintf(fp, mesg, event->minor_code);
++	_XPrintErrorDBMessage(fp, mesg, event->minor_code);
+ 	if (ext) {
+ 	    snprintf(mesg, sizeof(mesg), "%s.%d", ext->name, event->minor_code);
+ 	    XGetErrorDatabaseText(dpy, "XRequest", mesg, "", buffer, BUFSIZ);
+@@ -1378,7 +1434,7 @@
+ 	XGetErrorDatabaseText(dpy, mtype, buffer, "", mesg, BUFSIZ);
+ 	if (mesg[0]) {
+ 	    fputs("  ", fp);
+-	    (void) fprintf(fp, mesg, event->resourceid);
++	    _XPrintErrorDBMessage(fp, mesg, event->resourceid);
+ 	    fputs("\n", fp);
+ 	}
+ 	/* let extensions try to print the values */
+@@ -1406,17 +1462,17 @@
+ 	    XGetErrorDatabaseText(dpy, mtype, "ResourceID", "ResourceID 0x%x",
+ 				  mesg, BUFSIZ);
+ 	fputs("  ", fp);
+-	(void) fprintf(fp, mesg, event->resourceid);
++	_XPrintErrorDBMessage(fp, mesg, event->resourceid);
+ 	fputs("\n", fp);
+     }
+     XGetErrorDatabaseText(dpy, mtype, "ErrorSerial", "Error Serial #%d",
+ 			  mesg, BUFSIZ);
+     fputs("  ", fp);
+-    (void) fprintf(fp, mesg, event->serial);
++    _XPrintErrorDBMessage(fp, mesg, event->serial);
+     XGetErrorDatabaseText(dpy, mtype, "CurrentSerial", "Current Serial #%lld",
+ 			  mesg, BUFSIZ);
+     fputs("\n  ", fp);
+-    (void) fprintf(fp, mesg, (unsigned long long)(X_DPY_GET_REQUEST(dpy)));
++    _XPrintErrorDBMessage(fp, mesg, (unsigned long long)(X_DPY_GET_REQUEST(dpy)));
+     fputs("\n", fp);
+     if (event->error_code == BadImplementation) return 0;
+     return 1;

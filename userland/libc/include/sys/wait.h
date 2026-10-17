@@ -63,6 +63,20 @@ extern "C" {
 /** Also report stopped children. */
 #define WUNTRACED   2
 
+/** Also report children resumed by SIGCONT. */
+#define WCONTINUED  8
+
+/* waitid(2) */
+#define WSTOPPED    2
+#define WEXITED     4
+#define WNOWAIT     0x01000000
+
+typedef enum {
+    P_ALL  = 0,
+    P_PID  = 1,
+    P_PGID = 2,
+} idtype_t;
+
 /* ========================================================================= */
 /* Function declarations                                                     */
 /* ========================================================================= */
@@ -81,6 +95,19 @@ pid_t waitpid(pid_t pid, int *wstatus, int options);
  * Wait for any child process (equivalent to waitpid(-1, wstatus, 0)).
  */
 pid_t wait(int *wstatus);
+
+struct rusage;
+
+/**
+ * BSD waits: as waitpid(-1, ...) and waitpid(pid, ...), also reporting the
+ * child's resource usage when rusage is non-NULL.
+ */
+pid_t wait3(int *wstatus, int options, struct rusage *rusage);
+pid_t wait4(pid_t pid, int *wstatus, int options, struct rusage *rusage);
+
+/* Forward declaration: <signal.h> defines siginfo_t. */
+#include <veridian/signal.h>
+int waitid(idtype_t idtype, id_t id, siginfo_t *infop, int options);
 
 #ifdef __cplusplus
 }

@@ -3,8 +3,6 @@
 //! This module defines the common interface for thread context management
 //! that must be implemented for each architecture.
 
-use crate::sched::task::TaskContext;
-
 /// Thread context trait
 pub trait ThreadContext: Sized {
     /// Create a new empty context
@@ -42,9 +40,6 @@ pub trait ThreadContext: Sized {
 
     /// Clone the context
     fn clone_from(&mut self, other: &Self);
-
-    /// Convert to scheduler's TaskContext
-    fn to_task_context(&self) -> TaskContext;
 }
 
 /// Architecture-specific thread context type alias
@@ -56,22 +51,6 @@ pub type ArchThreadContext = crate::arch::aarch64::context::AArch64Context;
 
 #[cfg(any(target_arch = "riscv32", target_arch = "riscv64"))]
 pub type ArchThreadContext = crate::arch::riscv::context::RiscVContext;
-
-/// Perform a context switch between two threads
-///
-/// # Safety
-/// This function must be called with interrupts disabled and
-/// both contexts must be valid.
-pub unsafe fn switch_context(from: &mut ArchThreadContext, to: &ArchThreadContext) {
-    #[cfg(target_arch = "x86_64")]
-    crate::arch::x86_64::context::switch_context(from, to);
-
-    #[cfg(target_arch = "aarch64")]
-    crate::arch::aarch64::context::switch_context(from, to);
-
-    #[cfg(any(target_arch = "riscv32", target_arch = "riscv64"))]
-    crate::arch::riscv::context::switch_context(from, to);
-}
 
 /// Initialize FPU/SIMD for the current CPU
 pub fn init_fpu() {

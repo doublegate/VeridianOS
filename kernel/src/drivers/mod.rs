@@ -6,6 +6,7 @@
 pub mod ahci;
 pub mod bluetooth;
 pub mod console;
+pub mod console_input;
 pub(crate) mod dma_frame;
 pub mod e1000;
 pub mod evdev;

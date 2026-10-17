@@ -47,24 +47,31 @@ fn main() {
         println!("cargo:rustc-link-arg=-T{}", linker_script.display());
     }
 
+    // `dispatch`: the architectures whose kernel runs tasks on their own
+    // stacks (ADR 0006): x86_64 and, since sprint E, RISC-V and AArch64;
+    // host builds never dispatch.
+    println!("cargo:rustc-check-cfg=cfg(dispatch)");
+    if target == "x86_64-veridian"
+        || target == "x86_64-unknown-none"
+        || target.starts_with("riscv64")
+        || target.starts_with("aarch64")
+    {
+        println!("cargo:rustc-cfg=dispatch");
+    }
+
     // Rebuild if linker script changes
     println!("cargo:rerun-if-changed=src/arch/x86_64/link.ld");
     println!("cargo:rerun-if-changed=src/arch/aarch64/link.ld");
     println!("cargo:rerun-if-changed=src/arch/riscv64/link.ld");
     // bootstrap.rs recreates the cross-compiled sysroot path at boot, so it
     // must match the sysroot the rootfs binaries were built against. The
-    // tools/cross scripts default to <repo>/target/veridian-sysroot; use the
-    // same default here, overridable with VERIDIAN_SYSROOT. (The fallback
-    // used to be the pre-reorganisation March path, which silently
-    // mismatched any rootfs rebuilt since.)
-    let sysroot = env::var("VERIDIAN_SYSROOT").unwrap_or_else(|_| {
-        kernel_dir
-            .parent()
-            .expect("kernel crate has a parent directory")
-            .join("target/veridian-sysroot")
-            .display()
-            .to_string()
-    });
+    // tools/cross scripts default to /opt/veridian/musl-sysroot
+    // (tools/cross/veridian-paths.sh: outside target/, which `cargo clean`
+    // deletes); use the same default here, overridable with
+    // VERIDIAN_SYSROOT. (The fallback used to be the pre-reorganisation
+    // March path, which silently mismatched any rootfs rebuilt since.)
+    let sysroot =
+        env::var("VERIDIAN_SYSROOT").unwrap_or_else(|_| String::from("/opt/veridian/musl-sysroot"));
     println!("cargo:rustc-env=VERIDIAN_SYSROOT_PATH={}", sysroot);
     println!("cargo:rerun-if-env-changed=VERIDIAN_SYSROOT");
 }

@@ -84,10 +84,10 @@ impl AudioRingBuffer {
         let first_chunk = (c - w).min(to_write);
         let second_chunk = to_write - first_chunk;
 
+        let data_ptr = self.data.as_ptr() as *mut u8;
         // SAFETY: We only write within bounds of self.data, and the atomic
         // positions ensure the reader does not access these regions until
         // write_pos is updated.
-        let data_ptr = self.data.as_ptr() as *mut u8;
         unsafe {
             core::ptr::copy_nonoverlapping(data.as_ptr(), data_ptr.add(w), first_chunk);
             if second_chunk > 0 {

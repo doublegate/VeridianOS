@@ -50,11 +50,11 @@ Output: `target/x86_64-veridian/debug/veridian-kernel`
 ./build-kernel.sh aarch64 dev
 
 # Manual build (standard bare metal target)
-cargo build --target aarch64-unknown-none \
+cargo build --target aarch64-unknown-none-softfloat \
     -p veridian-kernel
 ```
 
-Output: `target/aarch64-unknown-none/debug/veridian-kernel`
+Output: `target/aarch64-unknown-none-softfloat/debug/veridian-kernel`
 
 ### RISC-V 64
 
@@ -63,11 +63,11 @@ Output: `target/aarch64-unknown-none/debug/veridian-kernel`
 ./build-kernel.sh riscv64 dev
 
 # Manual build (standard bare metal target)
-cargo build --target riscv64gc-unknown-none-elf \
+cargo build --target riscv64imac-unknown-none-elf \
     -p veridian-kernel
 ```
 
-Output: `target/riscv64gc-unknown-none-elf/debug/veridian-kernel`
+Output: `target/riscv64imac-unknown-none-elf/debug/veridian-kernel`
 
 ## Build Options
 
@@ -121,7 +121,7 @@ ls target/x86_64-veridian/debug/bootimage-veridian-kernel.bin
 ### Other Architectures
 
 AArch64 and RISC-V use the raw kernel binary directly:
-- AArch64: Load at 0x40080000
+- AArch64: Load at 0x40200000
 - RISC-V: Load with OpenSBI
 
 ## Build Artifacts

@@ -1,0 +1,37 @@
+VeridianOS: fix ConsoleKit seat discovery (QVariant::type(), "ao" reply)
+
+GCC reported -Wdeprecated-declarations for QVariant::type() in
+Authority::Private::init() (core/polkitqt1-authority.cpp), in the
+ConsoleKit seat discovery, which never connected any seat:
+
+- QVariant::type() reports every user type as QVariant::UserType (Qt 5
+  and Qt 6 alike), so comparing it with qMetaTypeId<QDBusArgument>() was
+  never true, and arg.toStringList() is empty for a QDBusArgument.
+- Even with a matching check, the GetSeats reply is an array of object
+  paths ("ao"), which QtDBus does not demarshall into a QStringList.
+
+The check now compares QVariant::userType() and the reply is read as a
+list of QDBusObjectPath, so DeviceAdded/Removed, SessionAdded/Removed
+and ActiveSessionChanged of the seats present at startup are connected.
+Only systems running ConsoleKit reach this code. Prepared for upstream
+(invent.kde.org/libraries/polkit-qt-1, tested there with a fake
+ConsoleKit on a private bus).
+
+--- a/core/polkitqt1-authority.cpp
++++ b/core/polkitqt1-authority.cpp
+@@ -229,8 +229,13 @@ void Authority::Private::init()
+         // this method returns a list with present seats
+         QStringList seats;
+         QVariant arg = reply.arguments()[0];
+-        if (arg.type() == qMetaTypeId<QDBusArgument>()) {
+-            arg.value<QDBusArgument>() >> seats;
++        if (arg.userType() == qMetaTypeId<QDBusArgument>()) {
++            // the seats are object paths ("ao"), which do not demarshall into a QStringList
++            QList<QDBusObjectPath> seatPaths;
++            arg.value<QDBusArgument>() >> seatPaths;
++            Q_FOREACH(const QDBusObjectPath &seatPath, seatPaths) {
++                seats << seatPath.path();
++            }
+         } else {
+             seats = arg.toStringList();
+         }

@@ -9,28 +9,28 @@
 //! - `SocketAddr` / `IpAddr` / `Ipv4Addr` -- address types
 //!
 //! Syscall mappings:
-//! - `socket`      -> SYS_SOCKET_CREATE (220)
-//! - `bind`        -> SYS_SOCKET_BIND (221)
-//! - `listen`      -> SYS_SOCKET_LISTEN (222)
-//! - `connect`     -> SYS_SOCKET_CONNECT (223)
-//! - `accept`      -> SYS_SOCKET_ACCEPT (224)
-//! - `send`        -> SYS_SOCKET_SEND (225)
-//! - `recv`        -> SYS_SOCKET_RECV (226)
-//! - `close`       -> SYS_SOCKET_CLOSE (227)
-//! - `sendto`      -> SYS_NET_SENDTO (250)
-//! - `recvfrom`    -> SYS_NET_RECVFROM (251)
-//! - `getsockname` -> SYS_NET_GETSOCKNAME (252)
-//! - `getpeername` -> SYS_NET_GETPEERNAME (253)
-//! - `setsockopt`  -> SYS_NET_SETSOCKOPT (254)
-//! - `getsockopt`  -> SYS_NET_GETSOCKOPT (255)
+//! - `socket`      -> SYS_socket (41)
+//! - `bind`        -> SYS_bind (49)
+//! - `listen`      -> SYS_listen (50)
+//! - `connect`     -> SYS_connect (42)
+//! - `accept`      -> SYS_accept (43)
+//! - `send`        -> SYS_SOCKET_SEND (1249)
+//! - `recv`        -> SYS_SOCKET_RECV (1250)
+//! - `close`       -> SYS_SOCKET_CLOSE (1251)
+//! - `sendto`      -> SYS_sendto (44)
+//! - `recvfrom`    -> SYS_recvfrom (45)
+//! - `getsockname` -> SYS_getsockname (51)
+//! - `getpeername` -> SYS_getpeername (52)
+//! - `setsockopt`  -> SYS_setsockopt (54)
+//! - `getsockopt`  -> SYS_getsockopt (55)
 
 extern crate alloc;
 
 use super::{
     fd::SharedFd, syscall1, syscall2, syscall3, syscall5, syscall_result, SyscallError,
-    SYS_NET_GETPEERNAME, SYS_NET_GETSOCKNAME, SYS_NET_GETSOCKOPT, SYS_NET_RECVFROM, SYS_NET_SENDTO,
-    SYS_NET_SETSOCKOPT, SYS_SOCKET_ACCEPT, SYS_SOCKET_BIND, SYS_SOCKET_CLOSE, SYS_SOCKET_CONNECT,
-    SYS_SOCKET_CREATE, SYS_SOCKET_LISTEN, SYS_SOCKET_RECV, SYS_SOCKET_SEND,
+    SYS_getpeername, SYS_getsockname, SYS_getsockopt, SYS_recvfrom, SYS_sendto,
+    SYS_setsockopt, SYS_accept, SYS_bind, SYS_SOCKET_CLOSE, SYS_connect,
+    SYS_socket, SYS_listen, SYS_SOCKET_RECV, SYS_SOCKET_SEND,
 };
 
 // ============================================================================
@@ -81,20 +81,20 @@ pub const TCP_NODELAY: usize = 1;
 
 /// Create a socket.
 pub fn socket(domain: usize, sock_type: usize, _protocol: usize) -> Result<usize, SyscallError> {
-    // VeridianOS SYS_SOCKET_CREATE takes (domain, sock_type).
-    let ret = unsafe { syscall2(SYS_SOCKET_CREATE, domain, sock_type) };
+    // VeridianOS SYS_socket takes (domain, sock_type).
+    let ret = unsafe { syscall2(SYS_socket, domain, sock_type) };
     syscall_result(ret)
 }
 
 /// Bind a socket to an address.
 pub fn bind(fd: usize, addr: *const u8, addrlen: usize) -> Result<usize, SyscallError> {
-    let ret = unsafe { syscall3(SYS_SOCKET_BIND, fd, addr as usize, addrlen) };
+    let ret = unsafe { syscall3(SYS_bind, fd, addr as usize, addrlen) };
     syscall_result(ret)
 }
 
 /// Listen on a socket.
 pub fn listen(fd: usize, backlog: usize) -> Result<usize, SyscallError> {
-    let ret = unsafe { syscall2(SYS_SOCKET_LISTEN, fd, backlog) };
+    let ret = unsafe { syscall2(SYS_listen, fd, backlog) };
     syscall_result(ret)
 }
 
@@ -103,13 +103,13 @@ pub fn accept(fd: usize) -> Result<usize, SyscallError> {
     // The kernel takes (fd, addr, addrlen); pass NULLs explicitly so it
     // does not read stale rsi/rdx as an address buffer.
     // SAFETY: plain syscall; no user buffers are passed.
-    let ret = unsafe { syscall3(SYS_SOCKET_ACCEPT, fd, 0, 0) };
+    let ret = unsafe { syscall3(SYS_accept, fd, 0, 0) };
     syscall_result(ret)
 }
 
 /// Connect to a remote address.
 pub fn connect(fd: usize, addr: *const u8, addrlen: usize) -> Result<usize, SyscallError> {
-    let ret = unsafe { syscall3(SYS_SOCKET_CONNECT, fd, addr as usize, addrlen) };
+    let ret = unsafe { syscall3(SYS_connect, fd, addr as usize, addrlen) };
     syscall_result(ret)
 }
 
@@ -141,7 +141,7 @@ pub fn sendto(
 ) -> Result<usize, SyscallError> {
     let ret = unsafe {
         syscall5(
-            SYS_NET_SENDTO,
+            SYS_sendto,
             fd,
             buf as usize,
             len,
@@ -154,19 +154,19 @@ pub fn sendto(
 
 /// Receive data and sender address (UDP).
 pub fn recvfrom(fd: usize, buf: *mut u8, len: usize, addr: *mut u8) -> Result<usize, SyscallError> {
-    let ret = unsafe { super::syscall4(SYS_NET_RECVFROM, fd, buf as usize, len, addr as usize) };
+    let ret = unsafe { super::syscall4(SYS_recvfrom, fd, buf as usize, len, addr as usize) };
     syscall_result(ret)
 }
 
 /// Get local socket address.
 pub fn getsockname(fd: usize, addr: *mut u8, addrlen: *mut usize) -> Result<usize, SyscallError> {
-    let ret = unsafe { syscall3(SYS_NET_GETSOCKNAME, fd, addr as usize, addrlen as usize) };
+    let ret = unsafe { syscall3(SYS_getsockname, fd, addr as usize, addrlen as usize) };
     syscall_result(ret)
 }
 
 /// Get peer socket address.
 pub fn getpeername(fd: usize, addr: *mut u8, addrlen: *mut usize) -> Result<usize, SyscallError> {
-    let ret = unsafe { syscall3(SYS_NET_GETPEERNAME, fd, addr as usize, addrlen as usize) };
+    let ret = unsafe { syscall3(SYS_getpeername, fd, addr as usize, addrlen as usize) };
     syscall_result(ret)
 }
 
@@ -180,7 +180,7 @@ pub fn setsockopt(
 ) -> Result<usize, SyscallError> {
     let ret = unsafe {
         syscall5(
-            SYS_NET_SETSOCKOPT,
+            SYS_setsockopt,
             fd,
             level,
             optname,
@@ -203,7 +203,7 @@ pub fn getsockopt(
     // SAFETY: plain syscall; the kernel validates optval and treats a NULL
     // optlen as "write the full int".
     let ret =
-        unsafe { super::syscall5(SYS_NET_GETSOCKOPT, fd, level, optname, optval as usize, 0) };
+        unsafe { super::syscall5(SYS_getsockopt, fd, level, optname, optval as usize, 0) };
     syscall_result(ret)
 }
 

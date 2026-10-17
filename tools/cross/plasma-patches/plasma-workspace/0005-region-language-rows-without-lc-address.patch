@@ -1,0 +1,105 @@
+VeridianOS: region_language: map rows to settings without LC_ADDRESS
+
+GCC reported -Wswitch in LocaleListModel::data() and OptionsModel::data():
+the enumerators Address, NameStyle and PhoneNumbers were not handled. They
+are handled only under #ifdef LC_ADDRESS, which musl does not define.
+
+LocaleListModel: without LC_ADDRESS there is no address/name/phone example;
+the three enumerators are now listed in the #else branch and give no
+example, which is what the switch fell through to before.
+
+OptionsModel: this one hides a real bug on C libraries without LC_ADDRESS.
+m_staticNames (the model rows) leaves out the Address, Name Style and Phone
+Numbers rows there, but data() turned the row number into the setting with
+static_cast<SettingType>(row). The last row, "Data and Storage Sizes", is
+row 6 then, which is SettingType::Address, so its example
+(m_binaryDialectExample) was never shown. setBinaryDialect() likewise
+emitted dataChanged() for row SettingType::BinaryDialect (9) of a 7-row
+model, so the row never refreshed. data() now reads the setting from
+m_staticNames.at(row).second, as the Page role already did, and
+setBinaryDialect() uses the last row, where that entry is always appended.
+The three enumerators get #else cases that cannot be reached because those
+rows do not exist.
+
+On glibc (LC_ADDRESS defined) rows and settings coincide, so behaviour there
+is unchanged.
+
+--- a/kcms/region_language/localelistmodel.cpp	2026-10-08 16:59:33.579720900 -0400
++++ b/kcms/region_language/localelistmodel.cpp	2026-10-08 17:06:14.029200995 -0400
+@@ -173,6 +173,12 @@
+             return Utility::nameStyleExample(data.locale);
+         case PhoneNumbers:
+             return Utility::phoneNumbersExample(data.locale);
++#else
++        case Address:
++        case NameStyle:
++        case PhoneNumbers:
++            // The C library has no LC_ADDRESS/LC_NAME/LC_TELEPHONE: no example to show.
++            break;
+ #endif
+         case BinaryDialect:
+             Q_ASSERT(false);
+--- a/kcms/region_language/optionsmodel.cpp	2026-10-08 16:59:33.581791907 -0400
++++ b/kcms/region_language/optionsmodel.cpp	2026-10-08 17:06:14.029727038 -0400
+@@ -117,11 +117,14 @@
+         return {};
+     }
+ 
++    // Rows are the entries of m_staticNames, which skips the LC_ADDRESS settings when the
++    // C library lacks them, so the row number is not necessarily the SettingType value.
++    const SettingType settingType = m_staticNames.at(row).second;
+     switch (static_cast<Roles>(role)) {
+     case Name:
+         return m_staticNames.at(row).first;
+     case Subtitle: {
+-        switch (static_cast<SettingType>(row)) {
++        switch (settingType) {
+         case Language:
+             Q_ASSERT(false); // shouldn't happen
+             return {};
+@@ -168,6 +171,12 @@
+                 return getNativeName(m_settings->phoneNumbers());
+             }
+             break;
++#else
++        case Address:
++        case NameStyle:
++        case PhoneNumbers:
++            // Not in m_staticNames without LC_ADDRESS, so never a row here.
++            break;
+ #endif
+         case BinaryDialect:
+             Q_UNREACHABLE();
+@@ -175,7 +184,7 @@
+         return {}; // implicit locale
+     }
+     case Example: {
+-        switch (static_cast<SettingType>(row)) {
++        switch (settingType) {
+         case Language:
+             Q_ASSERT(false); // shouldn't happen
+             return {};
+@@ -238,6 +247,12 @@
+             }
+             return example;
+         }
++#else
++        case Address:
++        case NameStyle:
++        case PhoneNumbers:
++            // Not in m_staticNames without LC_ADDRESS, so never a row here.
++            break;
+ #endif
+         case BinaryDialect:
+             return m_binaryDialectExample;
+@@ -300,7 +315,9 @@
+     m_binaryDialect = static_cast<KFormat::BinaryUnitDialect>(i);
+     updateBinaryDialectExample();
+ 
+-    const auto idx = createIndex(SettingType::BinaryDialect, 0);
++    // "Data and Storage Sizes" is always the last row; its row number is SettingType::BinaryDialect
++    // only when the LC_ADDRESS rows are present.
++    const auto idx = createIndex(static_cast<int>(m_staticNames.size()) - 1, 0);
+     Q_EMIT dataChanged(idx, idx, {Subtitle, Example});
+     Q_EMIT binaryDialectChanged();
+ }

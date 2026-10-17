@@ -13,6 +13,7 @@ use core::sync::atomic::Ordering;
 
 use super::{
     pcb::{Process, ProcessState},
+    signals::SigInfo,
     table,
     thread::ThreadId,
     ProcessId,
@@ -20,58 +21,18 @@ use super::{
 #[allow(unused_imports)]
 use crate::{error::KernelError, println, sched};
 
-/// Exit current process
+/// Exit the calling process (exit_group). Every user thread is a
+/// dispatcher task and leaves through [`exit_dispatched`], which ends the
+/// process's other threads and tears it down. Outside a user thread (the
+/// kernel shell's `exit`) there is no process to end.
 pub fn exit_process(exit_code: i32) {
+    #[cfg(feature = "alloc")]
     if let Some(process) = super::current_process() {
-        // Audit log: process exit
         crate::security::audit::log_process_exit(process.pid.0, exit_code);
-
-        println!(
-            "[PROCESS] Process {} exiting with code {}",
-            process.pid.0, exit_code
-        );
-
-        // Set exit code
-        process.set_exit_code(exit_code);
-
-        // Mark all threads as exited
-        #[cfg(feature = "alloc")]
-        {
-            let threads = process.threads.lock();
-            for (_, thread) in threads.iter() {
-                thread.set_state(super::thread::ThreadState::Zombie);
-            }
-        }
-
-        // Clean up resources
-        cleanup_process(&process);
-
-        // Mark process as zombie (parent needs to reap)
-        process.set_state(ProcessState::Zombie);
-
-        // Notify parent: send SIGCHLD and wake if blocked
-        if let Some(parent_pid) = process.parent() {
-            if let Some(parent) = table::get_process(parent_pid) {
-                // Send SIGCHLD to parent (POSIX: delivered on child exit)
-                if let Err(_e) = parent.send_signal(signals::SIGCHLD as usize) {
-                    println!(
-                        "[PROCESS] Warning: Failed to send SIGCHLD to parent {}: {:?}",
-                        parent_pid.0, _e
-                    );
-                }
-
-                // Wake parent if it is blocked (e.g. in waitpid)
-                let parent_state = parent.get_state();
-                if parent_state == ProcessState::Blocked {
-                    parent.set_state(ProcessState::Ready);
-                    sched::wake_up_process(parent_pid);
-                }
-            }
-        }
-
-        // Schedule another process
-        sched::exit_task(exit_code);
+        drop(process);
+        exit_dispatched(exit_code, true);
     }
+    let _ = exit_code;
 }
 
 /// Wait for child process to exit
@@ -89,6 +50,11 @@ pub struct WaitOptions {
     pub untraced: bool,
     /// Also return if a stopped child has been resumed (WCONTINUED)
     pub continued: bool,
+    /// Do not report exited children (waitid without WEXITED)
+    pub skip_exited: bool,
+    /// Report without reaping the child or consuming its stop/continue
+    /// report (waitid WNOWAIT), so a later wait sees it again
+    pub keep: bool,
 }
 
 impl WaitOptions {
@@ -96,10 +62,42 @@ impl WaitOptions {
     pub fn no_hang() -> Self {
         Self {
             no_hang: true,
-            untraced: false,
-            continued: false,
+            ..Self::default()
         }
     }
+}
+
+/// Which children a wait is for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WaitFilter {
+    /// Any child (`pid == -1`, `P_ALL`).
+    Any,
+    /// One child (`pid > 0`, `P_PID`).
+    Pid(ProcessId),
+    /// Children in a process group (`pid == 0` or `pid < -1`, `P_PGID`;
+    /// N-99).
+    Group(u64),
+}
+
+impl WaitFilter {
+    fn matches(self, child: ProcessId) -> bool {
+        match self {
+            Self::Any => true,
+            Self::Pid(p) => p == child,
+            Self::Group(g) => {
+                table::get_process(child).is_some_and(|c| c.pgid.load(Ordering::Acquire) == g)
+            }
+        }
+    }
+}
+
+/// The stop or continue report of `child` that `options` asks for, if any
+/// (not consumed).
+fn job_report_for(child: &super::Process, options: WaitOptions) -> Option<u32> {
+    let r = child.job_report.load(Ordering::Acquire);
+    let stop = r != 0 && r & 0xff == 0x7f;
+    let cont = r == 0xffff;
+    ((options.untraced && stop) || (options.continued && cont)).then_some(r)
 }
 
 /// Wait for child process with options
@@ -108,6 +106,46 @@ pub fn wait_process_with_options(
     pid: Option<ProcessId>,
     options: WaitOptions,
 ) -> Result<(ProcessId, i32), KernelError> {
+    wait_children(pid.map_or(WaitFilter::Any, WaitFilter::Pid), options).map(|w| (w.pid, w.status))
+}
+
+/// What a wait reports about a child (pid 0: nothing yet, under WNOHANG).
+#[cfg(feature = "alloc")]
+#[derive(Debug, Clone, Copy)]
+pub struct Waited {
+    pub pid: ProcessId,
+    pub status: i32,
+    /// The child's CPU time and its waited-for children's (wait4 and
+    /// waitid's rusage, as Linux's getrusage(RUSAGE_BOTH) of the child).
+    pub usage: crate::sched::cputime::CpuTimes,
+    /// The larger of the child's peak resident set and its children's.
+    pub maxrss_pages: usize,
+}
+
+#[cfg(feature = "alloc")]
+impl Waited {
+    fn of(child: &super::Process, status: i32) -> Self {
+        Self {
+            pid: child.pid,
+            status,
+            usage: child.cpu_times().plus(child.children_cpu_times()),
+            maxrss_pages: child.peak_rss_pages().max(child.children_peak_rss_pages()),
+        }
+    }
+
+    const NOTHING: Self = Self {
+        pid: ProcessId(0),
+        status: 0,
+        usage: crate::sched::cputime::CpuTimes::ZERO,
+        maxrss_pages: 0,
+    };
+}
+
+/// Wait for a child selected by `filter` to change state: exit (unless
+/// `skip_exited`), stop (`untraced`) or continue (`continued`). Each stop
+/// or continue is reported once.
+#[cfg(feature = "alloc")]
+pub fn wait_children(filter: WaitFilter, options: WaitOptions) -> Result<Waited, KernelError> {
     let current = super::current_process().ok_or(KernelError::NotInitialized {
         subsystem: "current process",
     })?;
@@ -130,8 +168,7 @@ pub fn wait_process_with_options(
 
         for child_pid in &children {
             // Check if this child matches our pid filter
-            let matches_filter = pid.is_none() || pid == Some(*child_pid);
-            if !matches_filter {
+            if !filter.matches(*child_pid) {
                 continue;
             }
 
@@ -141,9 +178,14 @@ pub fn wait_process_with_options(
                 let child_state = child.get_state();
 
                 // Check for zombie (exited)
-                if child_state == ProcessState::Zombie {
+                if child_state == ProcessState::Zombie && !options.skip_exited {
+                    if options.keep {
+                        return Ok(Waited::of(&child, child.wait_status()));
+                    }
                     // Reap the zombie
                     let exit_code = child.get_exit_code();
+                    current.add_reaped_child_cpu(&child);
+                    let waited = Waited::of(&child, child.wait_status());
 
                     // Remove from children list
                     current.children.lock().retain(|&p| p != *child_pid);
@@ -160,95 +202,82 @@ pub fn wait_process_with_options(
                     // Normal exit: low 7 bits = 0, bits 8-15 = exit code
                     // WIFEXITED(s) = (s & 0x7f) == 0
                     // WEXITSTATUS(s) = (s >> 8) & 0xff
-                    let wait_status = (exit_code & 0xff) << 8;
-                    return Ok((*child_pid, wait_status));
+                    // Exit code or terminating signal (N-99).
+                    return Ok(waited);
                 }
 
-                // Check for stopped child if WUNTRACED is set
-                if options.untraced && child_state == ProcessState::Blocked {
-                    // Return status indicating stopped (signal number in bits 8-15)
-                    // Use 0x7f as the stopped indicator with SIGSTOP (19)
-                    let status = 0x7f | (19 << 8);
-                    return Ok((*child_pid, status));
-                }
-
-                // Check for continued child if WCONTINUED is set
-                if options.continued && child_state == ProcessState::Running {
-                    // Return status indicating continued
-                    let status = 0xffff; // WIFCONTINUED indicator
-                    return Ok((*child_pid, status));
+                // A stop (WUNTRACED) or continue (WCONTINUED), reported
+                // once: whoever clears it reports it (N-99).
+                if let Some(r) = job_report_for(&child, options) {
+                    if options.keep {
+                        return Ok(Waited::of(&child, r as i32));
+                    }
+                    if child
+                        .job_report
+                        .compare_exchange(r, 0, Ordering::AcqRel, Ordering::Acquire)
+                        .is_ok()
+                    {
+                        return Ok(Waited::of(&child, r as i32));
+                    }
                 }
             }
         }
 
         // No matching child found
-        if pid.is_some() && !matching_child_exists {
-            return Err(KernelError::ProcessNotFound {
-                pid: pid.unwrap_or(ProcessId(0)).0,
-            });
+        if !matching_child_exists {
+            return match filter {
+                WaitFilter::Pid(p) => Err(KernelError::ProcessNotFound { pid: p.0 }),
+                // No child in the group: ECHILD, as for no children.
+                _ => Err(KernelError::NotFound {
+                    resource: "child process",
+                    id: 0,
+                }),
+            };
         }
 
         // No zombie children found
         if options.no_hang {
             // WNOHANG: return immediately with (0, 0) to indicate no child changed state
-            return Ok((ProcessId(0), 0));
+            return Ok(Waited::NOTHING);
         }
 
-        // Boot execution model: no preemptive scheduler to context-switch
-        // to the child. If we find a Ready child (just forked, never run),
-        // run it inline to completion. After it exits, loop back to reap
-        // the zombie.
-        #[cfg(target_arch = "x86_64")]
-        {
-            let mut ran_child = false;
-            for child_pid in &children {
-                let matches_filter = pid.is_none() || pid == Some(*child_pid);
-                if !matches_filter {
-                    continue;
-                }
-                if let Some(child) = table::get_process(*child_pid) {
-                    if child.get_state() == ProcessState::Ready {
-                        // Get parent's thread ID for BOOT_CURRENT restore
-                        let parent_tid = current
-                            .threads
-                            .lock()
-                            .values()
-                            .next()
-                            .map(|t| t.tid)
-                            .unwrap_or(super::thread::ThreadId(current_pid.0));
-                        ran_child = crate::bootstrap::boot_run_forked_child(
-                            *child_pid,
-                            current_pid,
-                            parent_tid,
-                        );
-                        break;
-                    }
-                }
+        // A dispatched process waits for a child to change state; its
+        // children run as tasks of their own. A fatal signal for this
+        // process ends the wait (EINTR; the thread then exits on its way
+        // back to user mode).
+        #[cfg(feature = "alloc")]
+        if crate::sched::dispatch::current_owner().is_some() {
+            sched::dispatch::PROCESS_EVENTS.wait_until(|| {
+                super::wait_interrupted()
+                    || table::PROCESS_TABLE
+                        .find_children(current_pid)
+                        .iter()
+                        .filter(|c| filter.matches(**c))
+                        .any(|c| {
+                            // A zombie is reapable once its last task is off
+                            // the CPU and its page tables are gone.
+                            table::get_process(*c).is_none_or(|p| {
+                                (p.get_state() == ProcessState::Zombie
+                                    && !options.skip_exited
+                                    && sched::dispatch::tasks_of(c.0).is_empty())
+                                    || job_report_for(&p, options).is_some()
+                            })
+                        })
+            });
+            // A signal to act on (fatal, or caught: EINTR, or a restart
+            // with SA_RESTART).
+            if super::wait_interrupted() {
+                return Err(KernelError::WouldBlock);
             }
-            if ran_child {
-                // Child ran to completion, loop back to reap
-                continue;
-            }
+            continue;
         }
 
-        // Normal scheduler path: block and wait for child to wake us.
-        println!(
-            "[PROCESS] Process {} blocking in wait() for child {}",
-            current_pid.0,
-            pid.map_or(-1, |p| p.0 as i64)
-        );
-
-        sched::block_process(current_pid);
-
-        // When we wake up, loop back to check for zombie children.
-        current.set_state(ProcessState::Running);
-
-        // Check if we were interrupted by a signal
-        if let Some(signum) = current.get_next_pending_signal() {
-            // Clear the signal and return EINTR
-            current.clear_pending_signal(signum);
-            return Err(KernelError::WouldBlock);
-        }
+        // Without the dispatcher (AArch64/RISC-V until sprint E) no user
+        // process runs, so nothing could change a child's state.
+        return Err(KernelError::InvalidState {
+            expected: "a dispatched caller",
+            actual: "no dispatcher",
+        });
     }
 }
 
@@ -328,11 +357,17 @@ pub fn default_signal_action(signal: i32) -> SignalAction {
 
 /// Send a signal to a process (kill syscall)
 pub fn kill_process(pid: ProcessId, signal: i32) -> Result<(), KernelError> {
+    kill_process_info(pid, signal, SigInfo::kernel(signal as usize))
+}
+
+/// [`kill_process`] with the siginfo the target sees: kill(2) passes the
+/// sender (SI_USER, its pid and real user), the kernel SI_KERNEL.
+pub fn kill_process_info(pid: ProcessId, signal: i32, info: SigInfo) -> Result<(), KernelError> {
     // Validate signal number
-    if !(0..=31).contains(&signal) {
+    if !(0..=super::signals::NSIG as i32).contains(&signal) {
         return Err(KernelError::InvalidArgument {
             name: "signal",
-            value: "signal number out of range (0-31)",
+            value: "signal number out of range (0-64)",
         });
     }
 
@@ -356,8 +391,17 @@ pub fn kill_process(pid: ProcessId, signal: i32) -> Result<(), KernelError> {
 
     println!("[PROCESS] Sending signal {} to process {}", signal, pid.0);
 
+    // A dispatched process takes its signals on its own threads (sprint
+    // D3): queued, ignored ones dropped, SIGKILL at once.
+    #[cfg(feature = "alloc")]
+    if process.dispatched.load(Ordering::Acquire)
+        && super::signals::send_info_to_process(&process, info)?
+    {
+        return Ok(());
+    }
+
     // Queue the signal to the process
-    process.send_signal(signal as usize)?;
+    process.send_signal_info(info)?;
 
     // Determine the action to take
     let handler = process.get_signal_handler(signal as usize).unwrap_or(0);
@@ -373,16 +417,23 @@ pub fn kill_process(pid: ProcessId, signal: i32) -> Result<(), KernelError> {
     match signal {
         signals::SIGKILL => {
             // SIGKILL always terminates immediately
-            force_terminate_process(&process)?;
+            force_terminate_process(&process, signal)?;
         }
         signals::SIGSTOP => {
             // SIGSTOP always stops immediately
             process.set_state(ProcessState::Blocked);
-            sched::block_process(pid);
             println!("[PROCESS] Process {} stopped by SIGSTOP", pid.0);
 
             // Notify parent with SIGCHLD (POSIX: child stopped)
-            notify_parent_sigchld(&process);
+            notify_parent_sigchld(
+                &process,
+                SigInfo::child(
+                    signals::SIGCHLD as usize,
+                    super::signals::CLD_STOPPED,
+                    &process,
+                    signals::SIGSTOP,
+                ),
+            );
         }
         _ => {
             // Handle based on action
@@ -393,24 +444,38 @@ pub fn kill_process(pid: ProcessId, signal: i32) -> Result<(), KernelError> {
                 }
                 SignalAction::Terminate | SignalAction::CoreDump => {
                     // For default terminate/core dump actions, do it now
-                    force_terminate_process(&process)?;
+                    force_terminate_process(&process, signal)?;
                 }
                 SignalAction::Stop => {
                     process.set_state(ProcessState::Blocked);
-                    sched::block_process(pid);
                     println!("[PROCESS] Process {} stopped by signal {}", pid.0, signal);
 
                     // Notify parent with SIGCHLD (POSIX: child stopped)
-                    notify_parent_sigchld(&process);
+                    notify_parent_sigchld(
+                        &process,
+                        SigInfo::child(
+                            signals::SIGCHLD as usize,
+                            super::signals::CLD_STOPPED,
+                            &process,
+                            signal,
+                        ),
+                    );
                 }
                 SignalAction::Continue => {
                     if process.get_state() == ProcessState::Blocked {
                         process.set_state(ProcessState::Ready);
-                        sched::wake_up_process(pid);
                         println!("[PROCESS] Process {} continued by signal {}", pid.0, signal);
 
                         // Notify parent with SIGCHLD (POSIX: child continued)
-                        notify_parent_sigchld(&process);
+                        notify_parent_sigchld(
+                            &process,
+                            SigInfo::child(
+                                signals::SIGCHLD as usize,
+                                super::signals::CLD_CONTINUED,
+                                &process,
+                                signals::SIGCONT,
+                            ),
+                        );
                     }
                     process.clear_pending_signal(signal as usize);
                 }
@@ -425,12 +490,11 @@ pub fn kill_process(pid: ProcessId, signal: i32) -> Result<(), KernelError> {
                     // Wake up process if blocked so it can handle the signal
                     if process.get_state() == ProcessState::Blocked {
                         process.set_state(ProcessState::Ready);
-                        sched::wake_up_process(pid);
                     }
                 }
                 SignalAction::Default => {
                     // Should not reach here, but handle it as terminate
-                    force_terminate_process(&process)?;
+                    force_terminate_process(&process, signal)?;
                 }
             }
         }
@@ -439,31 +503,127 @@ pub fn kill_process(pid: ProcessId, signal: i32) -> Result<(), KernelError> {
     Ok(())
 }
 
+/// `kill_pending` value for an `exit_group` by another thread: leave with
+/// the process's exit code, not as killed by a signal.
+pub const GROUP_EXIT_PENDING: u32 = u32::MAX;
+
+/// `kill_pending` value while a thread execs (N-101): every other thread
+/// leaves (as by `pthread_exit`) at its next return to user mode or wakeup;
+/// the exec'ing thread is `Process::exec_tid`. A fatal signal or an
+/// `exit_group` replaces it, and the exec then fails.
+pub const EXEC_PENDING: u32 = u32::MAX - 1;
+
+/// Make the fatal `signal` pending for `process`'s threads unless one is
+/// already: the first fatal signal wins. It also replaces an exec in
+/// progress -- a SIGKILL during exec must not be lost.
+pub fn set_kill_pending(process: &Process, signal: u32) {
+    let _ = process
+        .kill_pending
+        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |cur| {
+            (cur == 0 || cur == EXEC_PENDING).then_some(signal)
+        });
+}
+
+/// Exit the running thread of a dispatched process (ADR 0006 stage D2).
+/// Never returns.
+///
+/// `group` ends the whole process (`exit`/`exit_group`): the other threads
+/// leave at their next return to user mode or wakeup. Otherwise only this
+/// thread ends (`pthread_exit`). The last thread to leave tears the process
+/// down -- files, memory, capabilities -- makes it a zombie and tells the
+/// parent. Its page tables, which this thread is still running on, are
+/// freed once its task is off the CPU (`user_task_reaped`).
+#[cfg(feature = "alloc")]
+pub fn exit_dispatched(exit_code: i32, group: bool) -> ! {
+    use crate::sched::dispatch;
+
+    if let (Some(process), Some(thread)) = (super::current_process(), super::current_thread()) {
+        // Robust futexes the thread still holds (N-225), then
+        // CLONE_CHILD_CLEARTID: clear the TID word and wake a joiner.
+        super::robust_list::exit_thread(&thread);
+        // PI locks it holds pass to their top waiters (FUTEX_OWNER_DIED).
+        crate::syscall::futex_pi_owner_exiting((process.pid.0, thread.tid.0));
+        crate::syscall::scheduling::thread_exit(&thread);
+        thread.release_fs();
+        // The thread's CPU time stays with the process.
+        process.add_exited_cpu_from(dispatch::take_current_usage);
+        let clear_ptr = thread.clear_tid.load(Ordering::Acquire);
+        if clear_ptr != 0 {
+            let _ = crate::syscall::userspace::write_user(clear_ptr, 0u32);
+            let _ = crate::syscall::sys_futex_wake(clear_ptr, 1, 0);
+        }
+
+        let pending = process.kill_pending.load(Ordering::Acquire);
+        if group && (pending == 0 || pending == EXEC_PENDING) {
+            // First thread out of an exit_group decides the exit code and
+            // sends the others after it.
+            process.set_exit_code(exit_code);
+            process
+                .kill_pending
+                .store(GROUP_EXIT_PENDING, Ordering::Release);
+            for task in dispatch::tasks_of(process.pid.0) {
+                dispatch::notify(&task);
+            }
+        } else if !group && pending == 0 {
+            process.set_exit_code(exit_code);
+        }
+        thread.set_exited(exit_code);
+
+        let others_alive = process.threads.lock().values().any(|t| {
+            t.tid != thread.tid
+                && !matches!(
+                    t.get_state(),
+                    super::thread::ThreadState::Zombie | super::thread::ThreadState::Dead
+                )
+        });
+        if !others_alive {
+            cleanup_process(&process);
+            process.set_state(ProcessState::Zombie);
+            notify_parent_sigchld(
+                &process,
+                SigInfo::child_exited(exit_signal(&process), &process),
+            );
+        }
+        dispatch::PROCESS_EVENTS.wake_all();
+    }
+    dispatch::exit_current_task()
+}
+
 // ============================================================================
 // SIGCHLD notification helper
 // ============================================================================
 
-/// Send SIGCHLD to the parent of `process` and wake it if blocked.
+/// The signal a parent gets when `process` exits: SIGCHLD, or what clone
+/// asked for (its low byte; 0 for none, N-210).
+fn exit_signal(process: &Process) -> usize {
+    process.exit_signal.load(Ordering::Acquire) as usize
+}
+
+/// Send `info` (SIGCHLD, or the child's exit signal, with the child's state
+/// change; signal 0 sends nothing) to the parent of `process` and wake it
+/// if blocked.
 ///
 /// Called when a child process exits, stops, or continues. This is the
 /// unified notification path: `exit_process` and `kill_process` (for Stop
 /// and Continue actions) both funnel through here.
-fn notify_parent_sigchld(process: &Process) {
+fn notify_parent_sigchld(process: &Process, info: SigInfo) {
     if let Some(parent_pid) = process.parent() {
         if let Some(parent) = table::get_process(parent_pid) {
-            // Send SIGCHLD to parent (POSIX: delivered on child state change)
-            if let Err(_e) = parent.send_signal(signals::SIGCHLD as usize) {
+            // Signal the parent (POSIX: delivered on child state change)
+            if let Err(_e) = {
+                if info.signo() != 0 {
+                    super::signals::notify_info(&parent, info);
+                }
+                Ok::<(), KernelError>(())
+            } {
                 println!(
                     "[PROCESS] Warning: Failed to send SIGCHLD to parent {}: {:?}",
                     parent_pid.0, _e
                 );
             }
 
-            // Wake parent if it is blocked (e.g. in waitpid)
-            if parent.get_state() == ProcessState::Blocked {
-                parent.set_state(ProcessState::Ready);
-                sched::wake_up_process(parent_pid);
-            }
+            // A waiting parent sleeps on PROCESS_EVENTS, which the exit
+            // path wakes.
         }
     }
 }
@@ -473,9 +633,25 @@ fn notify_parent_sigchld(process: &Process) {
 // ============================================================================
 
 /// Force terminate a process (used by SIGKILL and unhandled fatal signals)
-fn force_terminate_process(process: &Process) -> Result<(), KernelError> {
+fn force_terminate_process(process: &Process, signal: i32) -> Result<(), KernelError> {
+    // A dispatched process is never torn down under its running threads:
+    // they act on the signal themselves (at their next return to user mode
+    // or wakeup), and the last one out does the teardown (stage D2).
+    #[cfg(feature = "alloc")]
+    if process.dispatched.load(Ordering::Acquire) {
+        let tasks = sched::dispatch::tasks_of(process.pid.0);
+        if !tasks.is_empty() {
+            set_kill_pending(process, signal as u32);
+            for task in &tasks {
+                sched::dispatch::notify(task);
+            }
+            sched::dispatch::PROCESS_EVENTS.wake_all();
+            return Ok(());
+        }
+    }
     let _pid = process.pid;
     println!("[PROCESS] Force terminating process {}", _pid.0);
+    process.set_term_signal(signal as u32);
 
     // Mark all threads as exited
     #[cfg(feature = "alloc")]
@@ -483,19 +659,6 @@ fn force_terminate_process(process: &Process) -> Result<(), KernelError> {
         let threads = process.threads.lock();
         for (_, thread) in threads.iter() {
             thread.set_state(super::thread::ThreadState::Zombie);
-
-            // Remove from scheduler if scheduled
-            if let Some(task_ptr) = thread.get_task_ptr() {
-                // SAFETY: task_ptr is a NonNull<Task> stored in the thread.
-                // We mark the task as Dead so the scheduler will not run it
-                // again. The threads lock is held, preventing concurrent
-                // modification of the thread's task pointer.
-                unsafe {
-                    let task = task_ptr.as_ptr();
-                    (*task).state = ProcessState::Dead;
-                    // Note: The scheduler will clean up dead tasks
-                }
-            }
         }
     }
 
@@ -507,16 +670,19 @@ fn force_terminate_process(process: &Process) -> Result<(), KernelError> {
     if let Some(parent_pid) = process.parent() {
         if let Some(parent) = table::get_process(parent_pid) {
             // Send SIGCHLD to parent
-            if let Err(_e) = parent.send_signal(signals::SIGCHLD as usize) {
+            if let Err(_e) = {
+                if exit_signal(process) != 0 {
+                    super::signals::notify_info(
+                        &parent,
+                        super::signals::SigInfo::child_exited(exit_signal(process), process),
+                    );
+                }
+                Ok::<(), KernelError>(())
+            } {
                 println!(
                     "[PROCESS] Warning: Failed to send SIGCHLD to parent {}: {:?}",
                     parent_pid.0, _e
                 );
-            }
-
-            if parent.get_state() == ProcessState::Blocked {
-                parent.set_state(ProcessState::Ready);
-                sched::wake_up_process(parent_pid);
             }
         }
     }
@@ -531,7 +697,25 @@ pub fn cleanup_process(process: &Process) {
         process.pid.0
     );
 
-    // Release memory (VAS-tracked data frames + page table subtrees)
+    // A parent waiting in vfork for this child may resume.
+    process.release_vfork_parent();
+
+    // SCHED_DEADLINE reservations of every thread go back, whatever path
+    // ended them (each thread's own exit already did; idempotent), so a
+    // lost one can never hold admission control's bandwidth for good.
+    #[cfg(feature = "alloc")]
+    for thread in process.threads.lock().values() {
+        crate::syscall::scheduling::thread_exit(thread);
+    }
+
+    // Shared regions forget this process before its mappings go (they kept
+    // counting it, so a region it had mapped could never be unregistered).
+    #[cfg(feature = "alloc")]
+    forget_shared_regions(process);
+
+    // Release memory (VAS-tracked data frames + page table subtrees), its
+    // size kept as the peak resident set first.
+    process.note_rss();
     {
         let mut memory_space = process.memory_space.lock();
         // Clear all mappings
@@ -555,16 +739,13 @@ pub fn cleanup_process(process: &Process) {
             let frame_num = thread.kernel_stack.phys_frame.load(Ordering::Acquire);
             let page_count = thread.kernel_stack.phys_page_count.load(Ordering::Acquire);
             if frame_num != 0 && page_count > 0 {
-                let frame = crate::mm::FrameNumber::new(frame_num);
-                if let Err(_e) = crate::mm::FRAME_ALLOCATOR
-                    .lock()
-                    .free_frames(frame, page_count)
-                {
-                    println!(
-                        "[PROCESS] Warning: failed to free kernel stack frames for tid {}: {:?}",
-                        thread.tid.0, _e
-                    );
-                }
+                // Unmaps the guard-paged stack (N-26) on every CPU, then
+                // returns its frames.
+                crate::mm::kstack::free(crate::mm::kstack::KernelStack {
+                    base: thread.kernel_stack.base,
+                    frame: crate::mm::FrameNumber::new(frame_num),
+                    pages: page_count,
+                });
                 // Mark as freed to prevent double-free
                 thread.kernel_stack.phys_frame.store(0, Ordering::Release);
                 thread
@@ -628,7 +809,21 @@ pub fn cleanup_process(process: &Process) {
             );
         }
         file_table.close_all();
+        // flock/fcntl locks die with their owner (N-120).
+        crate::fs::flock::cleanup_process_locks(process.pid.0);
     }
+
+    // An exiting tracer detaches from everything it traced (as on Linux),
+    // so a later process with the same pid inherits no tracing rights.
+    #[cfg(feature = "alloc")]
+    table::PROCESS_TABLE.for_each(|p| {
+        let _ = p.tracer.compare_exchange(
+            process.pid.0,
+            0,
+            core::sync::atomic::Ordering::AcqRel,
+            core::sync::atomic::Ordering::Acquire,
+        );
+    });
 
     // Reparent children to init if not zombie
     #[cfg(feature = "alloc")]
@@ -656,6 +851,42 @@ pub fn cleanup_process(process: &Process) {
     );
 }
 
+/// Tell every shared region `process` maps that it is going away. The
+/// bases are collected first: a region's lock is taken before an address
+/// space's, never inside it (as in fork's `register_inherited_regions`).
+#[cfg(feature = "alloc")]
+fn forget_shared_regions(process: &Process) {
+    let bases: Vec<u64> = {
+        let space = process.memory_space.lock();
+        let mappings = space.mappings_ref().lock();
+        mappings
+            .values()
+            .filter(|m| m.mapping_type == crate::mm::vas::MappingType::SharedRegion)
+            .filter_map(|m| Some(m.physical_frames.first()?.as_u64() * 4096))
+            .collect()
+    };
+    for base in bases {
+        if let Some(region) = crate::ipc::shared_memory::lookup_region(base) {
+            region.forget(process.pid);
+        }
+    }
+}
+
+/// Free everything of a process that never ran: a fork or process creation
+/// that failed part-way, or whose first thread could not be started
+/// (N-46). Its mappings, frames, page tables, kernel stacks, capabilities
+/// and files are released, and it leaves its parent's children and the
+/// process table. Nothing may be running in it.
+#[cfg(feature = "alloc")]
+pub(crate) fn discard_unstarted(process: &Process) {
+    cleanup_process(process);
+    super::free_page_tables(process);
+    if let Some(parent) = process.parent().and_then(table::get_process) {
+        parent.children.lock().retain(|&p| p != process.pid);
+    }
+    let _ = table::remove_process(process.pid);
+}
+
 // ============================================================================
 // Thread Cleanup
 // ============================================================================
@@ -663,33 +894,20 @@ pub fn cleanup_process(process: &Process) {
 /// Clean up a dead thread
 #[cfg(feature = "alloc")]
 pub fn cleanup_thread(process: &Process, tid: ThreadId) -> Result<(), KernelError> {
-    // Remove thread from process
-    let mut threads = process.threads.lock();
-
-    if let Some(thread) = threads.remove(&tid) {
+    // Remove the thread from its process, releasing the lock at once:
+    // freeing the thread's stacks below flushes every CPU's TLB, and a CPU
+    // spinning on this lock with interrupts off could never answer, so both
+    // would wait forever (N-139).
+    let removed = process.threads.lock().remove(&tid);
+    if let Some(thread) = removed {
+        // Per-thread progress lines only with the `trace` feature: every
+        // exited thread comes through here, and each console byte is a VM
+        // exit.
+        #[cfg(feature = "trace")]
         println!("[PROCESS] Cleaning up thread {}", tid.0);
 
         // Make sure thread is marked as dead
         thread.set_state(super::thread::ThreadState::Dead);
-
-        // Clean up scheduler task if exists
-        if let Some(task_ptr) = thread.get_task_ptr() {
-            // SAFETY: task_ptr is a NonNull<Task> stored in the thread.
-            // We clear the thread reference and mark the task as Dead
-            // for scheduler cleanup. The thread has already been marked
-            // as Dead above, so no scheduler will attempt to run it.
-            unsafe {
-                let task = task_ptr.as_ptr();
-
-                // Clear thread reference in task
-                (*task).thread_ref = None;
-
-                // Mark task for cleanup
-                (*task).state = ProcessState::Dead;
-
-                // The scheduler will eventually free the task memory
-            }
-        }
 
         // Free user stack pages from the VAS. User stack frames are managed
         // by the VAS (allocated via map_page), so unmap them to free the
@@ -707,6 +925,7 @@ pub fn cleanup_thread(process: &Process, tid: ThreadId) -> Result<(), KernelErro
                 let page_addr = stack_base + i * 0x1000;
                 let _ = memory_space.unmap(page_addr, 0x1000);
             }
+            #[cfg(feature = "trace")]
             println!(
                 "[PROCESS] Freed user stack at {:#x}, size {}",
                 stack_base, stack_size
@@ -726,21 +945,16 @@ pub fn cleanup_thread(process: &Process, tid: ThreadId) -> Result<(), KernelErro
                 .phys_page_count
                 .load(core::sync::atomic::Ordering::Acquire);
             if frame_num != 0 && page_count > 0 {
-                let frame = crate::mm::FrameNumber::new(frame_num);
-                if let Err(_e) = crate::mm::FRAME_ALLOCATOR
-                    .lock()
-                    .free_frames(frame, page_count)
-                {
-                    println!(
-                        "[PROCESS] Warning: Failed to free kernel stack for tid {}: {:?}",
-                        tid.0, _e
-                    );
-                } else {
-                    println!(
-                        "[PROCESS] Freed kernel stack for tid {} ({} frames)",
-                        tid.0, page_count
-                    );
-                }
+                crate::mm::kstack::free(crate::mm::kstack::KernelStack {
+                    base: thread.kernel_stack.base,
+                    frame: crate::mm::FrameNumber::new(frame_num),
+                    pages: page_count,
+                });
+                #[cfg(feature = "trace")]
+                println!(
+                    "[PROCESS] Freed kernel stack for tid {} ({} frames)",
+                    tid.0, page_count
+                );
                 // Mark as freed to prevent double-free
                 thread
                     .kernel_stack
@@ -765,6 +979,7 @@ pub fn cleanup_thread(process: &Process, tid: ThreadId) -> Result<(), KernelErro
                         tls.base, _e
                     );
                 } else {
+                    #[cfg(feature = "trace")]
                     println!(
                         "[PROCESS] Freed TLS area at {:#x}, size {}",
                         tls.base, tls.size

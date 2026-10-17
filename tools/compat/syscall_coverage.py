@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Linux syscall coverage report for VeridianOS.
 
-Compares the x86_64 syscall table of a Linux release with what the
-VeridianOS Linux-ABI layer (kernel/src/syscall/linux_compat.rs and the
-special cases in kernel/src/syscall/mod.rs) handles, and writes a Markdown
-table with one row per syscall.
+Compares the x86_64 syscall table of a Linux release with the calls the
+kernel dispatches (abi/syscalls.map, whose numbers are Linux's since ADR
+0009; stubs are read from handle_syscall in kernel/src/syscall/mod.rs), and
+writes a Markdown table with one row per syscall.
 
 Usage:
     curl -fsSL -o syscall_64.tbl \\
@@ -23,9 +23,6 @@ import sys
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
-
-# Calls dispatched ahead of the translation table in syscall/mod.rs.
-SPECIAL_CASED = {"ppoll", "faccessat", "faccessat2"}
 
 # Grouping used by the compatibility plan (docs/compat and the roadmap).
 GROUPS = [
@@ -71,20 +68,31 @@ def group_of(name: str) -> str:
     return "other"
 
 
-def veridian_status() -> tuple[set[int], set[int]]:
-    src = (REPO / "kernel/src/syscall/linux_compat.rs").read_text()
-    consts = {m[1]: int(m[2]) for m in re.finditer(r"const LINUX_([A-Z0-9_]+): usize = (\d+);", src)}
+def camel(name: str) -> str:
+    return "".join(p[:1].upper() + p[1:] for p in name.split("_"))
 
-    def body(fn: str) -> str:
-        start = src.index(fn)
-        return src[start:src.index("\n}\n", start)]
 
-    routed = {consts[n] for n in re.findall(r"LINUX_([A-Z0-9_]+)", body("fn translate_linux_syscall"))
-              if n in consts}
-    stubbed = {consts[n] for n in re.findall(r"LINUX_([A-Z0-9_]+)", body("fn handle_linux_stub"))
-               if n in consts}
-    routed |= {consts[n.upper()] for n in SPECIAL_CASED if n.upper() in consts}
-    return routed - stubbed, stubbed
+def veridian_status() -> tuple[set[str], set[str]]:
+    """Linux names the kernel dispatches (abi/syscalls.map, ADR 0009), split
+    into real handlers and stubs. A stub is a `handle_syscall` arm that
+    answers with a constant: ENOSYS, a fixed ENOMEM, or a fixed success."""
+    names = set()
+    for line in (REPO / "abi/syscalls.map").read_text().splitlines():
+        fields = line.split("#", 1)[0].split()
+        if len(fields) == 1:
+            names.add(fields[0])
+    src = (REPO / "kernel/src/syscall/mod.rs").read_text()
+    body = src[src.index("fn handle_syscall("):]
+    body = body[:body.index("\n}\n")]
+    stub_variants = set()
+    for pats, _ in re.findall(
+        r"((?:Syscall::\w+\s*\|\s*)*Syscall::\w+)\s*=>\s*"
+        r"(Err\(SyscallError::(?:NotImplemented|OutOfMemory)\)|Ok\(0\)),",
+        body,
+    ):
+        stub_variants |= set(re.findall(r"Syscall::(\w+)", pats))
+    stubbed = {n for n in names if camel(n) in stub_variants}
+    return names - stubbed, stubbed
 
 
 def main() -> None:
@@ -102,9 +110,9 @@ def main() -> None:
     counts = {"implemented": 0, "stub": 0, "missing": 0, "enosys": 0}
     out = []
     for number, name, has_entry in rows:
-        if number in implemented:
+        if name in implemented:
             status = "implemented"
-        elif number in stubbed:
+        elif name in stubbed:
             status = "stub"
         elif not has_entry:
             status = "enosys"

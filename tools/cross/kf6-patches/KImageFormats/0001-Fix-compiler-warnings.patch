@@ -1,0 +1,49 @@
+VeridianOS: fix KImageFormats compiler warnings (header-defined helper, PIC header fields)
+
+GCC reported, for the VeridianOS cross build:
+
+- src/imageformats/util_p.h:250: 'QByteArray deviceRead(QIODevice*, qint64)'
+  defined but not used [-Wunused-function], in every plugin that includes
+  util_p.h but does not read through deviceRead() (ani, ff, hdr, pcx, pxr,
+  pic, kra, sct, dds, tim, ...). It was the only function in this header
+  defined "static" (each plugin got a private copy); every other helper
+  there is "inline". Make it inline. No behaviour change.
+- src/imageformats/pic.cpp:91, :95: 'strncpy' specified bound 80 / 4
+  equals destination size [-Wstringop-truncation]. The PIC header's comment
+  and id are fixed-width fields written with writeRawData(..., sizeof),
+  zero padded and not NUL-terminated by design, and both buffers are
+  zero-initialised. The copy is now
+  memcpy(field, src, strnlen(src, sizeof(field))), which writes exactly the
+  bytes strncpy wrote. No behaviour change.
+
+diff -ru a/src/imageformats/pic.cpp b/src/imageformats/pic.cpp
+--- a/src/imageformats/pic.cpp	2026-10-08 17:27:57.929391582 -0400
++++ b/src/imageformats/pic.cpp	2026-10-08 17:27:58.079901307 -0400
+@@ -87,12 +87,13 @@
+     s << header.magic;
+     s << header.version;
+ 
++    // Fixed-width fields, zero padded and not necessarily NUL-terminated.
+     char comment[80] = {};
+-    strncpy(comment, header.comment.constData(), sizeof(comment));
++    memcpy(comment, header.comment.constData(), strnlen(header.comment.constData(), sizeof(comment)));
+     s.writeRawData(comment, sizeof(comment));
+ 
+     char id[4] = {};
+-    strncpy(id, header.id.constData(), sizeof(id));
++    memcpy(id, header.id.constData(), strnlen(header.id.constData(), sizeof(id)));
+     s.writeRawData(id, sizeof(id));
+ 
+     s << header.width;
+diff -ru a/src/imageformats/util_p.h b/src/imageformats/util_p.h
+--- a/src/imageformats/util_p.h	2026-10-08 17:27:57.885902735 -0400
++++ b/src/imageformats/util_p.h	2026-10-08 17:27:58.079753693 -0400
+@@ -247,7 +247,7 @@
+  * \param maxSize The maximum size to read.
+  * \return The byte array read.
+  */
+-static QByteArray deviceRead(QIODevice *d, qint64 maxSize)
++inline QByteArray deviceRead(QIODevice *d, qint64 maxSize)
+ {
+     if (d == nullptr) {
+         return{};

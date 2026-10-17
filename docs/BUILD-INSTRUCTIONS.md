@@ -96,8 +96,8 @@ rustup component add rust-src llvm-tools-preview rustfmt clippy
 
 # Add target architectures
 rustup target add x86_64-unknown-none
-rustup target add aarch64-unknown-none
-rustup target add riscv64gc-unknown-none-elf
+rustup target add aarch64-unknown-none-softfloat
+rustup target add riscv64imac-unknown-none-elf
 
 # Install cargo tools
 cargo install cargo-xbuild bootimage just
@@ -164,10 +164,10 @@ just clean
 cargo build --target targets/x86_64-veridian.json -p veridian-kernel -Zbuild-std=core,compiler_builtins,alloc
 
 # Build for AArch64 (standard bare metal target)
-cargo build --target aarch64-unknown-none -p veridian-kernel
+cargo build --target aarch64-unknown-none-softfloat -p veridian-kernel
 
 # Build for RISC-V (standard bare metal target)
-cargo build --target riscv64gc-unknown-none-elf -p veridian-kernel
+cargo build --target riscv64imac-unknown-none-elf -p veridian-kernel
 
 # Release build
 cargo build --release --target targets/x86_64-veridian.json -p veridian-kernel -Zbuild-std=core,compiler_builtins,alloc
@@ -373,7 +373,7 @@ just run
 ./build-kernel.sh aarch64 dev
 
 # Run with QEMU
-qemu-system-aarch64 -M virt -cpu cortex-a57 -nographic -kernel target/aarch64-unknown-none/debug/veridian-kernel
+qemu-system-aarch64 -M virt -cpu cortex-a57 -nographic -kernel target/aarch64-unknown-none-softfloat/debug/veridian-kernel
 ```
 
 #### RISC-V
@@ -383,7 +383,7 @@ qemu-system-aarch64 -M virt -cpu cortex-a57 -nographic -kernel target/aarch64-un
 ./build-kernel.sh riscv64 dev
 
 # Run with QEMU
-qemu-system-riscv64 -M virt -nographic -kernel target/riscv64gc-unknown-none-elf/debug/veridian-kernel
+qemu-system-riscv64 -M virt -nographic -kernel target/riscv64imac-unknown-none-elf/debug/veridian-kernel
 ```
 
 ### Testing Status
@@ -515,10 +515,10 @@ jobs:
             target: targets/x86_64-veridian.json
             build-std: true
           - arch: aarch64
-            target: aarch64-unknown-none
+            target: aarch64-unknown-none-softfloat
             build-std: false
           - arch: riscv64
-            target: riscv64gc-unknown-none-elf
+            target: riscv64imac-unknown-none-elf
             build-std: false
     runs-on: ubuntu-latest
     steps:

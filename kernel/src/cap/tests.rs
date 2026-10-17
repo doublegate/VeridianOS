@@ -296,6 +296,49 @@ mod manager_tests {
         assert!(ipc_integration::check_send_permission(read_only, &cap_space).is_err());
     }
 
+    /// N-80: a capability that does not name an endpoint confers no IPC
+    /// rights, whatever its rights bits. SEND is the WRITE bit, which a
+    /// process, memory or heap capability can carry; such capabilities used
+    /// to pass the send check and then skip the endpoint match.
+    #[test]
+    fn non_endpoint_capabilities_grant_no_ipc() {
+        let cap_space = space::CapabilitySpace::new();
+        let all = token::Rights::READ | token::Rights::WRITE | token::Rights::EXECUTE;
+        let process = manager::cap_manager()
+            .create_capability(
+                object::ObjectRef::Process { pid: ProcessId(9) },
+                all,
+                &cap_space,
+            )
+            .unwrap();
+        assert!(ipc_integration::check_send_permission(process, &cap_space).is_err());
+        assert!(ipc_integration::check_receive_permission(process, &cap_space).is_err());
+        assert!(ipc_integration::check_bind_permission(process, &cap_space).is_err());
+    }
+
+    /// N-80: a capability authorizes IPC on its own endpoint only.
+    #[test]
+    fn endpoint_capability_authorizes_only_its_endpoint() {
+        use alloc::sync::Arc;
+        let cap_space = space::CapabilitySpace::new();
+        let endpoint = Arc::new(crate::ipc::Endpoint::new(ProcessId(8)));
+        let id = endpoint.id();
+        let cap = manager::cap_manager()
+            .create_capability(
+                object::ObjectRef::Endpoint { endpoint },
+                ipc_integration::IpcRights::RECEIVE,
+                &cap_space,
+            )
+            .unwrap();
+        let receive = ipc_integration::IpcRights::RECEIVE;
+        assert!(ipc_integration::check_endpoint_permission(cap, &cap_space, id, receive).is_ok());
+        assert!(
+            ipc_integration::check_endpoint_permission(cap, &cap_space, id + 1, receive).is_err()
+        );
+        let send = ipc_integration::IpcRights::SEND;
+        assert!(ipc_integration::check_endpoint_permission(cap, &cap_space, id, send).is_err());
+    }
+
     #[test]
     fn test_capability_creation() {
         let cap_space = space::CapabilitySpace::new();
@@ -338,6 +381,83 @@ mod manager_tests {
         assert!(target_space.check_rights(new_cap, token::Rights::READ));
         assert!(!target_space.check_rights(new_cap, token::Rights::WRITE));
         assert!(!target_space.check_rights(new_cap, token::Rights::GRANT));
+    }
+
+    /// Delegation mints a capability of its own, recorded under its parent,
+    /// so one delegation can be revoked without the parent, and revoking the
+    /// parent takes every delegation with it (CAP-INC-02).
+    #[test]
+    fn delegation_has_its_own_id_and_revocation_cascades() {
+        let a = space::CapabilitySpace::new();
+        let b = space::CapabilitySpace::new();
+        let c = space::CapabilitySpace::new();
+        let obj = object::ObjectRef::Process {
+            pid: ProcessId(4321),
+        };
+        let all = token::Rights::READ | token::Rights::GRANT;
+        let mgr = manager::cap_manager();
+        let root = mgr.create_capability(obj.clone(), all, &a).unwrap();
+        let child = mgr.delegate(root, &a, &b, all).unwrap();
+        let grandchild = mgr.delegate(child, &b, &c, token::Rights::READ).unwrap();
+        assert_ne!(child.id(), root.id());
+        assert_ne!(grandchild.id(), child.id());
+
+        // Revoking one delegation leaves its parent alone.
+        let sibling = mgr.delegate(root, &a, &c, token::Rights::READ).unwrap();
+        revocation::revoke_capability(sibling).unwrap();
+        assert!(manager::check_capability(sibling, token::Rights::READ, &c).is_err());
+        assert!(manager::check_capability(root, token::Rights::READ, &a).is_ok());
+        assert!(manager::check_capability(grandchild, token::Rights::READ, &c).is_ok());
+
+        // Delegating the same rights to the same space again reuses the
+        // live delegation instead of minting another.
+        assert_eq!(
+            mgr.delegate(child, &b, &c, token::Rights::READ).unwrap(),
+            grandchild
+        );
+
+        // Revoking the root cascades down the derivation tree.
+        revocation::revoke_capability(root).unwrap();
+        assert!(manager::check_capability(root, token::Rights::READ, &a).is_err());
+        assert!(manager::check_capability(child, token::Rights::READ, &b).is_err());
+        assert!(manager::check_capability(grandchild, token::Rights::READ, &c).is_err());
+        assert!(revocation::is_revoked(grandchild));
+    }
+
+    /// The per-capability delegation limit counts delegations still held:
+    /// one a process gave up (here, its space dropped, as on exit) is
+    /// collected, so a long-running server can keep delegating to
+    /// short-lived clients. Delegations held at once are still bounded.
+    #[test]
+    fn delegation_limit_counts_only_held_delegations() {
+        let server = space::CapabilitySpace::new();
+        let obj = object::ObjectRef::Process {
+            pid: ProcessId(9876),
+        };
+        let mgr = manager::cap_manager();
+        let root = mgr
+            .create_capability(obj, token::Rights::READ | token::Rights::GRANT, &server)
+            .unwrap();
+        for _ in 0..1100 {
+            let client = space::CapabilitySpace::new();
+            mgr.delegate(root, &server, &client, token::Rights::READ)
+                .unwrap();
+        }
+        let mut held = alloc::vec::Vec::new();
+        let mut refused = false;
+        for _ in 0..1100 {
+            let client = space::CapabilitySpace::new();
+            match mgr.delegate(root, &server, &client, token::Rights::READ) {
+                Ok(_) => held.push(client),
+                Err(manager::CapError::QuotaExceeded) => {
+                    refused = true;
+                    break;
+                }
+                Err(e) => panic!("unexpected {e:?}"),
+            }
+        }
+        assert!(refused, "held delegations must stay bounded");
+        assert_eq!(held.len(), 1024);
     }
 
     #[test]
@@ -509,13 +629,29 @@ mod integration_tests {
         let cap_space = space::CapabilitySpace::new();
 
         // Create IPC endpoint capability
-        let endpoint_id: crate::ipc::EndpointId = 123;
+        crate::ipc::registry::init();
         let owner = ProcessId(456);
+        let (endpoint_id, _) = crate::ipc::registry::create_endpoint(owner).unwrap();
         let rights = ipc_integration::IpcRights::SEND | ipc_integration::IpcRights::RECEIVE;
 
         let cap =
             ipc_integration::create_endpoint_capability(endpoint_id, owner, rights, &cap_space)
                 .unwrap();
+
+        // The capability names the registered endpoint itself (N-81): it
+        // used to name a second endpoint object with a different id, which
+        // no send or receive could find.
+        match cap_space.lookup_entry(cap) {
+            Some((object::ObjectRef::Endpoint { endpoint }, _)) => {
+                assert_eq!(endpoint.id(), endpoint_id);
+            }
+            _ => panic!("not an endpoint capability"),
+        }
+        // An endpoint that does not exist cannot be named.
+        assert!(
+            ipc_integration::create_endpoint_capability(u64::MAX, owner, rights, &cap_space)
+                .is_err()
+        );
 
         // Check permissions
         assert!(ipc_integration::check_send_permission(cap, &cap_space).is_ok());

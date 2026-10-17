@@ -36,6 +36,7 @@ pub fn read_cr3() -> PhysicalAddress {
 
 /// Write CR3 register (page table base)
 pub fn write_cr3(addr: PhysicalAddress) {
+    crate::mm::tlb::note_root(addr.as_u64());
     // SAFETY: Writing CR3 sets the page table root and flushes the TLB. The
     // caller must ensure `addr` points to a valid, properly aligned PML4 table.
     unsafe {

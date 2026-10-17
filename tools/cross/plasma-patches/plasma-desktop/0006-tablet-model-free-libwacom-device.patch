@@ -1,0 +1,22 @@
+VeridianOS: tablet KCM: free the libwacom device in TabletsModel::data()
+
+Real bug, found while preparing 0003's libwacom fix for upstream
+(invent.kde.org/plasma/plasma-desktop): TabletsModel::data() creates a
+WacomDevice with libwacom_new_from_path() for every display-role request
+and returned its name without libwacom_destroy(), leaking a device each
+time the list is painted. The name is copied into a QString and the
+device destroyed.
+
+--- a/kcms/tablet/tabletsmodel.cpp
++++ b/kcms/tablet/tabletsmodel.cpp
+@@ -78,7 +78,9 @@
+             libwacom_error_free(&error);
+         } else {
+             libwacom_error_free(&error);
+-            return libwacom_get_name(device);
++            const QString name = QString::fromUtf8(libwacom_get_name(device));
++            libwacom_destroy(device);
++            return name;
+         }
+ 
+         if (hasPenDevice) {

@@ -92,6 +92,9 @@ impl BreakpointManager {
         // GDB provides valid code addresses. The original byte is preserved for
         // restoration when the breakpoint is removed.
         let original = unsafe { core::ptr::read_volatile(ptr) };
+        // SAFETY: same GDB-supplied address that was just read; NOTE: it is
+        // not validated here as mapped and writable (kernel text is normally
+        // read-only), so this relies on GDB supplying a writable code address.
         unsafe {
             core::ptr::write_volatile(ptr, 0xCC);
         }

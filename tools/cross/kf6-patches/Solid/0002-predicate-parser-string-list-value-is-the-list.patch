@@ -1,0 +1,28 @@
+VeridianOS: predicate parser: a string list value is the list, not the '{' token
+
+Real bug, found while looking at the bison-generated predicate_parser.c (not
+reported by GCC). The rule
+
+    string_list: '{' string_list_rec '}' { $$ = $<ptr>1; }
+
+returns the semantic value of the '{' token, which the lexer sets to 0
+(yylval->name = 0), instead of the list built by string_list_rec ($2). A
+predicate with a string-list value, e.g. "Foo.bar == {'a', 'b'}", therefore
+handed a null value to PredicateParse_newAtom(), which dereferences it
+(*val) and crashes; the list itself was leaked. Use $<ptr>2.
+
+The regenerated parser differs from the as-built one only in that action
+(yyvsp[-2] -> yyvsp[-1]).
+
+diff -ru a/src/solid/devices/predicate_parser.y b/src/solid/devices/predicate_parser.y
+--- a/src/solid/devices/predicate_parser.y	2026-10-08 17:14:46.685435507 -0400
++++ b/src/solid/devices/predicate_parser.y	2026-10-08 17:14:46.697598250 -0400
+@@ -85,7 +85,7 @@
+      | VAL_FLOAT { $$ = PredicateParse_newDoubleValue( $<vald>1 ); }
+      | string_list { $$ = $<ptr>1; }
+ 
+-string_list: '{' string_list_rec '}' { $$ = $<ptr>1; }
++string_list: '{' string_list_rec '}' { $$ = $<ptr>2; }
+ 
+ string_list_rec: /* empty */ { $$ = PredicateParse_newEmptyStringListValue(); }
+                | VAL_STRING { $$ = PredicateParse_newStringListValue( $<ptr>1 ); }

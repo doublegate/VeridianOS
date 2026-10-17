@@ -175,8 +175,8 @@ All three architectures compile successfully with the network stack:
 
 ```bash
 ✅ x86_64: target/x86_64-veridian/debug/veridian-kernel
-✅ AArch64: target/aarch64-unknown-none/debug/veridian-kernel
-✅ RISC-V: target/riscv64gc-unknown-none-elf/debug/veridian-kernel
+✅ AArch64: target/aarch64-unknown-none-softfloat/debug/veridian-kernel
+✅ RISC-V: target/riscv64imac-unknown-none-elf/debug/veridian-kernel
 ```
 
 **Warnings**: 91 (mostly static mut references and unreachable code)

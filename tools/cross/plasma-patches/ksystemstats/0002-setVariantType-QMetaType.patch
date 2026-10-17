@@ -1,0 +1,353 @@
+VeridianOS: ksystemstats: pass QMetaType::Type to SensorProperty::setVariantType
+
+Companion to libksysguard 0002 (port off the deprecated QVariant::Type),
+which changes SensorProperty::setVariantType() to take QMetaType::Type.
+The enumerators have the same values (QVariant::Double == QMetaType::Double,
+QVariant::Int == QMetaType::Int, QVariant::String == QMetaType::QString,
+QVariant::ULongLong == QMetaType::ULongLong), so each sensor reports the same
+type id as before. Without this change ksystemstats does not compile against
+the patched libksysguard headers. Applies after ksystemstats 0001.
+
+diff -ru a/plugins/cpu/cpu.cpp b/plugins/cpu/cpu.cpp
+--- a/plugins/cpu/cpu.cpp	2026-10-08 18:56:30.056561562 -0400
++++ b/plugins/cpu/cpu.cpp	2026-10-08 18:56:35.779735929 -0400
+@@ -26,7 +26,7 @@
+     m_user = new KSysGuard::SensorProperty(QStringLiteral("user"), QStringLiteral("user"), 0, this);
+     m_wait = new KSysGuard::SensorProperty(QStringLiteral("wait"), QStringLiteral("wait"), 0, this);
+     auto n = new KSysGuard::SensorProperty(QStringLiteral("name"), i18nc("@title", "Name"), name(), this);
+-    n->setVariantType(QVariant::String);
++    n->setVariantType(QMetaType::QString);
+ }
+ 
+ 
+@@ -38,28 +38,28 @@
+     m_usage->setName(i18nc("@title", "Total Usage"));
+     m_usage->setShortName(id() == u"all" ? i18nc("@title, Short for 'Total Usage'", "Usage") : name().toUtf8().constData());
+     m_usage->setUnit(KSysGuard::UnitPercent);
+-    m_usage->setVariantType(QVariant::Double);
++    m_usage->setVariantType(QMetaType::Double);
+     m_usage->setMax(100);
+ 
+     m_system->setPrefix(name());
+     m_system->setName(i18nc("@title", "System Usage"));
+     m_system->setShortName(id() == u"all" ? i18nc("@title, Short for 'System Usage'", "System") : i18nc("@title, Short for '%1 System Usage'", "%1 System", name()));
+     m_system->setUnit(KSysGuard::UnitPercent);
+-    m_system->setVariantType(QVariant::Double);
++    m_system->setVariantType(QMetaType::Double);
+     m_system->setMax(100);
+ 
+     m_user->setPrefix(name());
+     m_user->setName(i18nc("@title", "User Usage"));
+     m_user->setShortName(id() == u"all" ? i18nc("@title, Short for 'User Usage'", "User") : i18nc("@title, Short for '%1 User Usage'", "%1 User", name()));
+     m_user->setUnit(KSysGuard::UnitPercent);
+-    m_user->setVariantType(QVariant::Double);
++    m_user->setVariantType(QMetaType::Double);
+     m_user->setMax(100);
+ 
+     m_wait->setPrefix(name());
+     m_wait->setName(i18nc("@title", "Wait Usage"));
+     m_wait->setShortName(id() == u"all" ? i18nc("@title, Short for 'Wait Load'", "Wait") : i18nc("@title, Short for '%1 Wait Load'", "%1 Wait", name()));
+     m_wait->setUnit(KSysGuard::UnitPercent);
+-    m_wait->setVariantType(QVariant::Double);
++    m_wait->setVariantType(QMetaType::Double);
+     m_wait->setMax(100);
+ }
+ 
+@@ -85,13 +85,13 @@
+     m_frequency->setName(i18nc("@title", "Current Frequency"));
+     m_frequency->setShortName(i18nc("@title, Short for 'Current Frequency'", name().toUtf8().constData()));
+     m_frequency->setDescription(i18nc("@info", "Current frequency of the CPU"));
+-    m_frequency->setVariantType(QVariant::Double);
++    m_frequency->setVariantType(QMetaType::Double);
+     m_frequency->setUnit(KSysGuard::Unit::UnitMegaHertz);
+ 
+     m_temperature->setPrefix(name());
+     m_temperature->setName(i18nc("@title", "Current Temperature"));
+     m_temperature->setShortName(i18nc("@title, Short for Current Temperatur", name().toUtf8().constData()));
+-    m_temperature->setVariantType(QVariant::Double);
++    m_temperature->setVariantType(QMetaType::Double);
+     m_temperature->setUnit(KSysGuard::Unit::UnitCelsius);
+ }
+ 
+@@ -139,21 +139,21 @@
+     
+     auto maxTemp = new KSysGuard::AggregateSensor(this, "maximumTemperature", i18nc("@title", "Maximum CPU Temperature"));
+     maxTemp->setShortName(i18nc("@title, Short for 'Maximum CPU Temperature'", "Max Temperature"));
+-    maxTemp->setVariantType(QVariant::Double);
++    maxTemp->setVariantType(QMetaType::Double);
+     maxTemp->setUnit(KSysGuard::Unit::UnitCelsius);
+     maxTemp->setMatchSensors(QRegularExpression("^(?!all).*$"), "temperature");
+     maxTemp->setAggregateFunction(maxAggregator);
+     
+     auto minTemp = new KSysGuard::AggregateSensor(this, "minimumTemperature", i18nc("@title", "Minimum CPU Temperature"));
+     minTemp->setShortName(i18nc("@title, Short for 'Minimum CPU Temperature'", "Min Temperature"));
+-    minTemp->setVariantType(QVariant::Double);
++    minTemp->setVariantType(QMetaType::Double);
+     minTemp->setUnit(KSysGuard::Unit::UnitCelsius);
+     minTemp->setMatchSensors(QRegularExpression("^(?!all).*$"), "temperature");
+     minTemp->setAggregateFunction(minAggregator);
+ 
+     auto avgTemp = new KSysGuard::AggregateSensor(this, "averageTemperature", i18nc("@title", "Average CPU Temperature"));
+     avgTemp->setShortName(i18nc("@title, Short for 'Average CPU Temperature'", "Average Temperature"));
+-    avgTemp->setVariantType(QVariant::Double);
++    avgTemp->setVariantType(QMetaType::Double);
+     avgTemp->setUnit(KSysGuard::Unit::UnitCelsius);
+     avgTemp->setMatchSensors(QRegularExpression("^(?!all).*$"), "temperature");
+     avgTemp->setAggregateFunction(avgAggregator);
+diff -ru a/plugins/disks/disks.cpp b/plugins/disks/disks.cpp
+--- a/plugins/disks/disks.cpp	2026-10-08 18:56:30.053942596 -0400
++++ b/plugins/disks/disks.cpp	2026-10-08 18:56:35.779849378 -0400
+@@ -76,39 +76,39 @@
+ 
+     m_name = new KSysGuard::SensorProperty("name", i18nc("@title", "Name"), device.displayName(), this);
+     m_name->setShortName(i18nc("@title", "Name"));
+-    m_name->setVariantType(QVariant::String);
++    m_name->setVariantType(QMetaType::QString);
+ 
+     m_total = new KSysGuard::SensorProperty("total", i18nc("@title", "Total Space"), volume->size(), this);
+     m_total->setPrefix(name());
+     m_total->setShortName(i18nc("@title Short for 'Total Space'", "Total"));
+     m_total->setUnit(KSysGuard::UnitByte);
+-    m_total->setVariantType(QVariant::ULongLong);
++    m_total->setVariantType(QMetaType::ULongLong);
+ 
+     m_readRate = new KSysGuard::SensorProperty("read", i18nc("@title", "Read Rate"), 0, this);
+     m_readRate->setPrefix(name());
+     m_readRate->setShortName(i18nc("@title Short for 'Read Rate'", "Read"));
+     m_readRate->setUnit(KSysGuard::UnitByteRate);
+-    m_readRate->setVariantType(QVariant::Double);
++    m_readRate->setVariantType(QMetaType::Double);
+ 
+     m_writeRate = new KSysGuard::SensorProperty("write", i18nc("@title", "Write Rate"), 0, this);
+     m_writeRate->setPrefix(name());
+     m_writeRate->setShortName(i18nc("@title Short for 'Write Rate'", "Write"));
+     m_writeRate->setUnit(KSysGuard::UnitByteRate);
+-    m_writeRate->setVariantType(QVariant::Double);
++    m_writeRate->setVariantType(QMetaType::Double);
+ 
+     if (volume->usage() != Solid::StorageVolume::PartitionTable) {
+         m_used = new KSysGuard::SensorProperty("used", i18nc("@title", "Used Space"), this);
+         m_used->setPrefix(name());
+         m_used->setShortName(i18nc("@title Short for 'Used Space'", "Used"));
+         m_used->setUnit(KSysGuard::UnitByte);
+-        m_used->setVariantType(QVariant::ULongLong);
++        m_used->setVariantType(QMetaType::ULongLong);
+         m_used->setMax(volume->size());
+ 
+         m_free = new KSysGuard::SensorProperty("free", i18nc("@title", "Free Space"), this);
+         m_free->setPrefix(name());
+         m_free->setShortName(i18nc("@title Short for 'Free Space'", "Free"));
+         m_free->setUnit(KSysGuard::UnitByte);
+-        m_free->setVariantType(QVariant::ULongLong);
++        m_free->setVariantType(QMetaType::ULongLong);
+         m_free->setMax(volume->size());
+ 
+         auto usedPercent = new KSysGuard::PercentageSensor(this, "usedPercent", i18nc("@title", "Percentage Used"));
+@@ -287,14 +287,14 @@
+     auto total = new KSysGuard::AggregateSensor(allDisks, "total", i18nc("@title", "Total Space"));
+     total->setShortName(i18nc("@title Short for 'Total Space'", "Total"));
+     total->setUnit(KSysGuard::UnitByte);
+-    total->setVariantType(QVariant::ULongLong);
++    total->setVariantType(QMetaType::ULongLong);
+     total->setMatchSensors(QRegularExpression("^.*$"), "total");
+     total->setFilterFunction(filterFunction);
+ 
+     auto free = new KSysGuard::AggregateSensor(allDisks, "free", i18nc("@title", "Free Space"));
+     free->setShortName(i18nc("@title Short for 'Free Space'", "Free"));
+     free->setUnit(KSysGuard::UnitByte);
+-    free->setVariantType(QVariant::ULongLong);
++    free->setVariantType(QMetaType::ULongLong);
+     free->setMax(total->value().toULongLong());
+     free->setMatchSensors(QRegularExpression("^.*$"), "free");
+     free->setFilterFunction(filterFunction);
+@@ -302,7 +302,7 @@
+     auto used = new KSysGuard::AggregateSensor(allDisks, "used", i18nc("@title", "Used Space"));
+     used->setShortName(i18nc("@title Short for 'Used Space'", "Used"));
+     used->setUnit(KSysGuard::UnitByte);
+-    used->setVariantType(QVariant::ULongLong);
++    used->setVariantType(QMetaType::ULongLong);
+     used->setMax(total->value().toULongLong());
+     used->setMatchSensors(QRegularExpression("^.*$"), "used");
+     used->setFilterFunction(filterFunction);
+@@ -310,14 +310,14 @@
+     auto readRate = new KSysGuard::AggregateSensor(allDisks, "read", i18nc("@title", "Read Rate"), 0);
+     readRate->setShortName(i18nc("@title Short for 'Read Rate'", "Read"));
+     readRate->setUnit(KSysGuard::UnitByteRate);
+-    readRate->setVariantType(QVariant::Double);
++    readRate->setVariantType(QMetaType::Double);
+     readRate->setMatchSensors(QRegularExpression("^(?!all).*$"), "read");
+     readRate->setFilterFunction(filterFunction);
+ 
+     auto writeRate = new KSysGuard::AggregateSensor(allDisks, "write", i18nc("@title", "Write Rate"), 0);
+     writeRate->setShortName(i18nc("@title Short for 'Write Rate'", "Write"));
+     writeRate->setUnit(KSysGuard::UnitByteRate);
+-    writeRate->setVariantType(QVariant::Double);
++    writeRate->setVariantType(QMetaType::Double);
+     writeRate->setMatchSensors(QRegularExpression("^(?!all).*$"), "write");
+     writeRate->setFilterFunction(filterFunction);
+ 
+diff -ru a/plugins/memory/backend.cpp b/plugins/memory/backend.cpp
+--- a/plugins/memory/backend.cpp	2026-10-08 18:56:30.051223854 -0400
++++ b/plugins/memory/backend.cpp	2026-10-08 18:56:35.779906974 -0400
+@@ -39,12 +39,12 @@
+     m_total->setName(i18nc("@title", "Total Physical Memory"));
+     m_total->setShortName(i18nc("@title, Short for 'Total Physical Memory'", "Total"));
+     m_total->setUnit(KSysGuard::UnitByte);
+-    m_total->setVariantType(QVariant::ULongLong);
++    m_total->setVariantType(QMetaType::ULongLong);
+ 
+     m_used->setName(i18nc("@title", "Used Physical Memory"));
+     m_used->setShortName(i18nc("@title, Short for 'Used Physical Memory'", "Used"));
+     m_used->setUnit(KSysGuard::UnitByte);
+-    m_used->setVariantType(QVariant::ULongLong);
++    m_used->setVariantType(QMetaType::ULongLong);
+     m_used->setMax(m_total);
+     auto usedPercentage = new KSysGuard::PercentageSensor(m_physicalObject, QStringLiteral("usedPercent"), i18nc("@title", "Used Physical Memory Percentage"));
+     usedPercentage->setShortName(m_used->info().shortName);
+@@ -53,7 +53,7 @@
+     m_free->setName(i18nc("@title", "Free Physical Memory"));
+     m_free->setShortName(i18nc("@title, Short for 'Free Physical Memory'", "Free"));
+     m_free->setUnit(KSysGuard::UnitByte);
+-    m_free->setVariantType(QVariant::ULongLong);
++    m_free->setVariantType(QMetaType::ULongLong);
+     m_free->setMax(m_total);
+     auto freePercentage = new KSysGuard::PercentageSensor(m_physicalObject, QStringLiteral("freePercent"), i18nc("@title", "Free Physical Memory Percentage"));
+     freePercentage->setShortName(m_free->info().shortName);
+@@ -62,7 +62,7 @@
+     m_application->setName(i18nc("@title", "Application Memory"));
+     m_application->setShortName(i18nc("@title, Short for 'Application Memory'", "Application"));
+     m_application->setUnit(KSysGuard::UnitByte);
+-    m_application->setVariantType(QVariant::ULongLong);
++    m_application->setVariantType(QMetaType::ULongLong);
+     m_application->setMax(m_total);
+     auto applicationPercentage = new KSysGuard::PercentageSensor(m_physicalObject, QStringLiteral("applicationPercent"), i18nc("@title", "Application Memory Percentage"));
+     applicationPercentage->setShortName(m_application->info().shortName);
+@@ -71,7 +71,7 @@
+     m_cache->setName(i18nc("@title", "Cache Memory"));
+     m_cache->setShortName(i18nc("@title, Short for 'Cache Memory'", "Cache"));
+     m_cache->setUnit(KSysGuard::UnitByte);
+-    m_cache->setVariantType(QVariant::ULongLong);
++    m_cache->setVariantType(QMetaType::ULongLong);
+     m_cache->setMax(m_total);
+     auto cachePercentage = new KSysGuard::PercentageSensor(m_physicalObject, QStringLiteral("cachePercent"), i18nc("@title", "Cache Memory Percentage"));
+     cachePercentage->setShortName(m_cache->info().shortName);
+@@ -81,7 +81,7 @@
+     m_buffer->setShortName(i18nc("@title, Short for 'Buffer Memory'", "Buffer"));
+     m_buffer->setDescription(i18n("Amount of memory used for caching disk blocks"));
+     m_buffer->setUnit(KSysGuard::UnitByte);
+-    m_buffer->setVariantType(QVariant::ULongLong);
++    m_buffer->setVariantType(QMetaType::ULongLong);
+     m_buffer->setMax(m_total);
+     auto bufferPercentage = new KSysGuard::PercentageSensor(m_physicalObject, QStringLiteral("bufferPercent"), i18nc("@title", "Buffer Memory Percentage"));
+     bufferPercentage->setShortName(m_buffer->info().shortName);
+@@ -90,12 +90,12 @@
+     m_swapTotal->setName(i18nc("@title", "Total Swap Memory"));
+     m_swapTotal->setShortName(i18nc("@title, Short for 'Total Swap Memory'", "Total"));
+     m_swapTotal->setUnit(KSysGuard::UnitByte);
+-    m_swapTotal->setVariantType(QVariant::ULongLong);
++    m_swapTotal->setVariantType(QMetaType::ULongLong);
+ 
+     m_swapUsed->setName(i18nc("@title", "Used Swap Memory"));
+     m_swapUsed->setShortName(i18nc("@title, Short for 'Used Swap Memory'", "Used"));
+     m_swapUsed->setUnit(KSysGuard::UnitByte);
+-    m_swapUsed->setVariantType(QVariant::ULongLong);
++    m_swapUsed->setVariantType(QMetaType::ULongLong);
+     m_swapUsed->setMax(m_swapTotal);
+     auto usedSwapPercentage = new KSysGuard::PercentageSensor(m_swapObject, QStringLiteral("usedPercent"), i18nc("@title", "Used Swap Memory Percentage"));
+     usedSwapPercentage->setShortName(m_swapUsed->info().shortName);
+@@ -104,7 +104,7 @@
+     m_swapFree->setName(i18nc("@title", "Free Swap Memory"));
+     m_swapFree->setShortName(i18nc("@title, Short for 'Free Swap Memory'", "Free"));
+     m_swapFree->setUnit(KSysGuard::UnitByte);
+-    m_swapFree->setVariantType(QVariant::ULongLong);
++    m_swapFree->setVariantType(QMetaType::ULongLong);
+     m_swapFree->setMax(m_swapTotal);
+     auto freeSwapPercentage = new KSysGuard::PercentageSensor(m_swapObject, QStringLiteral("freePercent"), i18nc("@title", "Free Swap Memory Percentage"));
+     freeSwapPercentage->setShortName(m_swapFree->info().shortName);
+diff -ru a/plugins/power/power.cpp b/plugins/power/power.cpp
+--- a/plugins/power/power.cpp	2026-10-08 18:56:30.048519723 -0400
++++ b/plugins/power/power.cpp	2026-10-08 18:56:35.779965560 -0400
+@@ -37,7 +37,7 @@
+     : SensorObject(idHelper(device), name, parent)
+ {
+     auto n = new KSysGuard::SensorProperty("name", i18nc("@title", "Name"), name, this);
+-    n->setVariantType(QVariant::String);
++    n->setVariantType(QMetaType::QString);
+ 
+     const auto * const battery = device.as<Solid::Battery>();
+ 
+@@ -46,7 +46,7 @@
+     designCapacity->setPrefix(name);
+     designCapacity->setDescription(i18n("Amount of energy that the Battery was designed to hold"));
+     designCapacity->setUnit(KSysGuard::UnitWattHour);
+-    designCapacity->setVariantType(QVariant::Double);;
++    designCapacity->setVariantType(QMetaType::Double);;
+     designCapacity->setMin(battery->energyFullDesign());
+     designCapacity->setMax(battery->energyFullDesign());
+ 
+@@ -55,7 +55,7 @@
+     currentCapacity->setPrefix(name);
+     currentCapacity->setDescription(i18n("Amount of energy that the battery can currently hold"));
+     currentCapacity->setUnit(KSysGuard::UnitWattHour);
+-    currentCapacity->setVariantType(QVariant::Double);
++    currentCapacity->setVariantType(QMetaType::Double);
+     currentCapacity->setMax(designCapacity);
+     connect(battery, &Solid::Battery::energyFullChanged, currentCapacity, &KSysGuard::SensorProperty::setValue);
+ 
+@@ -64,7 +64,7 @@
+     health->setPrefix(name);
+     health->setDescription(i18n("Percentage of the design capacity that the battery can hold"));
+     health->setUnit(KSysGuard::UnitPercent);
+-    health->setVariantType(QVariant::Int);
++    health->setVariantType(QMetaType::Int);
+     health->setMax(100);
+     connect(battery, &Solid::Battery::capacityChanged, health, &KSysGuard::SensorProperty::setValue);
+ 
+@@ -73,7 +73,7 @@
+     charge->setPrefix(name);
+     charge->setDescription(i18n("Amount of energy that the battery is currently holding"));
+     charge->setUnit(KSysGuard::UnitWattHour);
+-    charge->setVariantType(QVariant::Double);
++    charge->setVariantType(QMetaType::Double);
+     charge->setMax(currentCapacity);
+     connect(battery, &Solid::Battery::energyChanged, charge, &KSysGuard::SensorProperty::setValue);
+ 
+@@ -82,7 +82,7 @@
+     chargePercent->setPrefix(name);
+     chargePercent->setDescription(i18n("Percentage of the current capacity that the battery is currently holding"));
+     chargePercent->setUnit(KSysGuard::UnitPercent);
+-    chargePercent->setVariantType(QVariant::Int);
++    chargePercent->setVariantType(QMetaType::Int);
+     chargePercent->setMax(100);
+     connect(battery, &Solid::Battery::chargePercentChanged, chargePercent, &KSysGuard::SensorProperty::setValue);
+ 
+@@ -92,7 +92,7 @@
+     chargeRate->setPrefix(name);
+     chargeRate->setDescription(i18n("Power that the battery is being charged with (positive) or discharged (negative)"));
+     chargeRate->setUnit(KSysGuard::UnitWatt);
+-    chargeRate->setVariantType(QVariant::Double);
++    chargeRate->setVariantType(QMetaType::Double);
+     chargeRate->setValue(-battery->energyRate());
+     connect(battery, &Solid::Battery::energyRateChanged, chargeRate, [battery, chargeRate] (double rate) {
+         // According to the documentation, energyRate should be positive if discharging
+diff -ru a/plugins/pressure/pressure.cpp b/plugins/pressure/pressure.cpp
+--- a/plugins/pressure/pressure.cpp	2026-10-08 18:56:30.045692969 -0400
++++ b/plugins/pressure/pressure.cpp	2026-10-08 18:56:35.780024752 -0400
+@@ -226,7 +226,7 @@
+     auto setup_datafield = [](KSysGuard::SensorProperty *sensorProperty)
+     {
+         sensorProperty->setUnit(KSysGuard::UnitPercent);
+-        sensorProperty->setVariantType(QVariant::Double);
++        sensorProperty->setVariantType(QMetaType::Double);
+         sensorProperty->setMax(100);
+     };
+ 
+@@ -252,7 +252,7 @@
+     auto setup_totalfield = [](KSysGuard::SensorProperty *sensorProperty)
+     {
+         // TODO: specify unit sensorProperty->setUnit(KSysGuard::UnitPercent);
+-        sensorProperty->setVariantType(QVariant::ULongLong);
++        sensorProperty->setVariantType(QMetaType::ULongLong);
+     };
+ 
+     setup_totalfield(memorySomeTotalProperty);

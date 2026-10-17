@@ -652,12 +652,6 @@ void __assert_fail(const char *expr, const char *file,
 /* File locking                                                              */
 /* ========================================================================= */
 
-int flock(int fd, int operation)
-{
-    (void)fd;
-    (void)operation;
-    return 0;
-}
 
 /* gethostname() is already implemented in unistd.c */
 

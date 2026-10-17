@@ -1,0 +1,21 @@
+VeridianOS: find Boost through its own CMake package
+
+src/CMakeLists.txt asks for Boost in MODULE mode, through CMake's
+FindBoost, which CMake 3.30 deprecated and CMake 4 removes under policy
+CMP0167 (set to NEW for the whole stack, tools/cross/cmake/
+kde-defaults.cmake). Boost has shipped its own CMake package
+(BoostConfig.cmake) since 1.70, and the sysroot's Boost is installed with
+it; the search is now in CONFIG mode. The package sets Boost_INCLUDE_DIRS,
+which the code uses, as FindBoost did.
+
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -2,7 +2,7 @@
+ 
+ # Boosting us a bit
+ 
+-find_package(Boost ${Boost_MINIMUM_VERSION} MODULE REQUIRED)
++find_package(Boost ${Boost_MINIMUM_VERSION} CONFIG REQUIRED)
+ set_package_properties(Boost PROPERTIES
+     DESCRIPTION "Boost C++ Libraries"
+     URL "https://www.boost.org"

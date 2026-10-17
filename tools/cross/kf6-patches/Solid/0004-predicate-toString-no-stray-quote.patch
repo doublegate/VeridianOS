@@ -1,0 +1,18 @@
+VeridianOS: Predicate::toString(): no stray quote after a string list
+
+Real bug (prepared for upstream, invent.kde.org/frameworks/solid):
+a string-list value was written as "{'a', 'b'}'": the closing literal had
+one quote too many, so toString() of such a predicate could not be parsed
+back into the same predicate.
+
+--- a/src/solid/devices/frontend/predicate.cpp
++++ b/src/solid/devices/frontend/predicate.cpp
+@@ -294,7 +294,7 @@
+             if (list.isEmpty()) {
+                 value = QStringLiteral("{}");
+             } else {
+-                value = QStringLiteral("{'") + list.join(QStringLiteral("', '")) + QStringLiteral("'}'");
++                value = QStringLiteral("{'") + list.join(QStringLiteral("', '")) + QStringLiteral("'}");
+             }
+             break;
+         }

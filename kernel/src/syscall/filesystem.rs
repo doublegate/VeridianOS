@@ -11,6 +11,7 @@
 
 #![allow(clippy::unnecessary_cast)]
 
+use super::multiplex::{POLLERR, POLLHUP, POLLIN, POLLOUT};
 #[allow(unused_imports)]
 use super::{
     validate_user_buffer, validate_user_ptr_typed, validate_user_string_ptr, SyscallError,
@@ -46,10 +47,11 @@ fn serial_write_byte(byte: u8) {
     #[cfg(target_arch = "aarch64")]
     {
         // Direct MMIO write to PL011 UART data register (QEMU virt machine).
-        const UART_DR: usize = 0x0900_0000;
-        // SAFETY: The PL011 UART data register at 0x09000000 is memory-mapped
-        // I/O on the QEMU virt machine. Writing a byte transmits a character.
-        // volatile_write ensures the compiler does not elide the store.
+        const UART_DR: usize = crate::arch::aarch64::platform::PL011;
+        // SAFETY: The PL011 UART data register is memory-mapped I/O on the
+        // QEMU virt machine, reached through the physical-memory map. Writing a byte
+        // transmits a character. volatile_write ensures the compiler does not
+        // elide the store.
         unsafe {
             core::ptr::write_volatile(UART_DR as *mut u8, byte);
         }
@@ -72,84 +74,38 @@ fn serial_write_byte(byte: u8) {
     }
 }
 
-/// Try to read a single byte from the serial UART (non-blocking).
-///
-/// Returns `Some(byte)` if data is available, `None` otherwise.
-/// Used as a fallback when the stdin file descriptor is not yet set up.
-fn serial_try_read_byte() -> Option<u8> {
-    #[cfg(target_arch = "x86_64")]
-    {
-        // Check Line Status Register (base + 5) bit 0 for data ready,
-        // then read from data register (base + 0) at COM1 (0x3F8).
-        let status: u8;
-        // SAFETY: Reading the Line Status Register at I/O port 0x3FD.
-        // This is a well-defined 16550 UART register read.
-        unsafe {
-            core::arch::asm!(
-                "in al, dx",
-                out("al") status,
-                in("dx") 0x3FDu16,
-                options(nomem, nostack)
-            );
+/// Read the console for a process without a stdin descriptor, sleeping
+/// (not spinning, N-118) until the line discipline has something to return;
+/// a signal ends the wait with EINTR.
+fn read_console_waiting(out: &mut [u8]) -> Result<usize, SyscallError> {
+    use crate::drivers::console_input;
+    loop {
+        match console_input::read_tty(out) {
+            Ok(n) => return Ok(n),
+            Err(crate::error::KernelError::WouldBlock) => {}
+            Err(e) => return Err(super::map_kernel_error(e)),
         }
-        if (status & 1) != 0 {
-            let data: u8;
-            // SAFETY: Reading the data register at I/O port 0x3F8.
-            // The LSR check above confirmed data is available.
-            unsafe {
-                core::arch::asm!(
-                    "in al, dx",
-                    out("al") data,
-                    in("dx") 0x3F8u16,
-                    options(nomem, nostack)
-                );
-            }
-            Some(data)
-        } else {
-            None
-        }
-    }
-
-    #[cfg(target_arch = "aarch64")]
-    {
-        const UART_BASE: usize = 0x0900_0000;
-        const UART_FR: usize = UART_BASE + 0x18; // Flag register
-        const UART_DR: usize = UART_BASE; // Data register
-
-        // SAFETY: Reading PL011 UART MMIO registers. The QEMU virt machine
-        // maps the UART at this address. volatile_read prevents reordering.
-        unsafe {
-            let flags = core::ptr::read_volatile(UART_FR as *const u32);
-            if (flags & (1 << 4)) == 0 {
-                // RXFE bit clear = data available
-                let data = core::ptr::read_volatile(UART_DR as *const u32);
-                Some((data & 0xFF) as u8)
-            } else {
-                None
+        #[cfg(feature = "alloc")]
+        {
+            use crate::sched::dispatch::{self, WaitError};
+            // Without a tick hook (not x86_64) nothing wakes the queue, so
+            // re-check every 10 ms; a raw-mode VTIME read ends at its
+            // deadline.
+            let recheck = (!cfg!(target_arch = "x86_64"))
+                .then(|| dispatch::clock_ns().saturating_add(10_000_000));
+            let deadline = [recheck, console_input::tty_ready_at()]
+                .into_iter()
+                .flatten()
+                .min();
+            match dispatch::wait_event(&console_input::CONSOLE_INPUT, deadline, || {
+                console_input::tty_readiness() & 0x0001 != 0
+            }) {
+                Ok(()) | Err(WaitError::TimedOut) => {}
+                Err(WaitError::Interrupted) => return Err(SyscallError::Interrupted),
             }
         }
-    }
-
-    #[cfg(target_arch = "riscv64")]
-    {
-        // SBI legacy console getchar (function 0x02).
-        let result: isize;
-        // SAFETY: The ecall invokes SBI console_getchar. Returns the
-        // character in a0, or -1 if no data is available.
-        unsafe {
-            core::arch::asm!(
-                "li a7, 0x02",
-                "ecall",
-                out("a0") result,
-                out("a7") _,
-                options(nomem)
-            );
-        }
-        if result >= 0 {
-            Some(result as u8)
-        } else {
-            None
-        }
+        #[cfg(not(feature = "alloc"))]
+        core::hint::spin_loop();
     }
 }
 
@@ -170,10 +126,14 @@ fn console_fallback_allowed(fd: usize) -> bool {
 /// Prevents unbounded kernel-side loops for large writes.
 const SERIAL_IO_MAX_SIZE: usize = 64 * 1024;
 
-/// Helper to get the VFS instance, returning a syscall error instead of
-/// panicking if the VFS subsystem has not been initialized yet.
-pub(crate) fn vfs() -> Result<&'static crate::fs::Vfs, SyscallError> {
-    try_get_vfs().ok_or(SyscallError::InvalidState)
+/// The VFS as the calling thread sees it (its cwd, root and permissions;
+/// N-251), or a syscall error instead of a panic if the VFS subsystem has
+/// not been initialized yet. Every path a program supplies is resolved
+/// through this.
+pub(crate) fn vfs() -> Result<crate::fs::CallerView<'static>, SyscallError> {
+    try_get_vfs()
+        .map(|v| v.as_caller())
+        .ok_or(SyscallError::InvalidState)
 }
 
 #[cfg(feature = "alloc")]
@@ -195,7 +155,7 @@ pub fn sys_open(path: usize, flags: usize, mode: usize) -> SyscallResult {
     let path_str = path_owned.as_str();
 
     // Trace ALL open calls during kwin bringup
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(all(target_arch = "x86_64", feature = "trace"))]
     {
         // SAFETY: Writing to COM1 for diagnostic output.
         unsafe {
@@ -208,74 +168,157 @@ pub fn sys_open(path: usize, flags: usize, mode: usize) -> SyscallResult {
         }
     }
 
-    // Get current process
+    open_path(path_str, flags, mode)
+}
+
+/// Open `path` with Linux `open(2)` semantics (shared by open and openat).
+///
+/// - O_CREAT|O_EXCL fails with EEXIST if the name exists, and a lost create
+///   race is EEXIST or a plain open, never ENOENT;
+/// - O_TRUNC truncates (openat used to skip it, and musl routes every open()
+///   through openat) and reports a failure;
+/// - O_NOFOLLOW refuses a final symlink (ELOOP), O_DIRECTORY anything but a
+///   directory (ENOTDIR), and a directory cannot be opened for writing (EISDIR)
+///   (N-116).
+fn open_path(path: &str, flags: usize, mode: usize) -> SyscallResult {
+    // arm64 has its own values (its O_LARGEFILE, 0x2_0000, which musl adds
+    // to every open, is x86_64's O_NOFOLLOW); riscv64 has x86_64's.
+    #[cfg(target_arch = "aarch64")]
+    const O_DIRECTORY: usize = 0x4000;
+    #[cfg(target_arch = "aarch64")]
+    const O_NOFOLLOW: usize = 0x8000;
+    #[cfg(not(target_arch = "aarch64"))]
+    const O_DIRECTORY: usize = 0x1_0000;
+    #[cfg(not(target_arch = "aarch64"))]
+    const O_NOFOLLOW: usize = 0x2_0000;
+    const O_CLOEXEC: usize = 0x8_0000;
+    use crate::fs::NodeType;
+
     let process = process::current_process().ok_or(SyscallError::InvalidState)?;
-
-    // Convert flags. O_CLOEXEC (0x80000) is handled separately.
     let open_flags = OpenFlags::from_bits(flags as u32).ok_or(SyscallError::InvalidArgument)?;
-    let cloexec = (flags & 0x80000) != 0; // O_CLOEXEC
+    let cloexec = flags & O_CLOEXEC != 0;
+    let follow = flags & O_NOFOLLOW == 0;
 
-    // Open the file through VFS
-    match vfs()?.open(path_str, open_flags) {
-        Ok(node) => {
-            require_open_access(&node, &open_flags)?;
-
-            // Handle O_TRUNC on existing files
-            if open_flags.truncate {
-                let _ = node.truncate(0);
+    let (node, created, canonical) = match vfs()?.open_follow_canonical(path, open_flags, follow) {
+        Ok((node, canonical)) => {
+            if open_flags.create && open_flags.exclusive {
+                return Err(SyscallError::FileExists);
             }
-
-            // Create file with path stored for dirfd resolution
-            let file = crate::fs::file::File::new_with_path(
-                node,
-                open_flags,
-                alloc::string::String::from(path_str),
-            );
-
-            // Add to process file table (with O_CLOEXEC if specified)
-            let file_table = process.file_table.lock();
-            match file_table.open_with_flags(alloc::sync::Arc::new(file), cloexec) {
-                Ok(fd_num) => Ok(fd_num),
-                Err(_) => Err(SyscallError::OutOfMemory),
+            (node, false, Some(canonical))
+        }
+        // Only a missing name may be created; any other failure (EACCES
+        // from a directory without search permission, ENOTDIR, ELOOP) is
+        // reported as itself. A name ending in '/' can only be a directory,
+        // which O_CREAT does not make (EISDIR, as Linux's open_last_lookups).
+        Err(e) if open_flags.create && is_not_found(&e) => {
+            if path.ends_with('/') {
+                return Err(SyscallError::IsADirectory);
+            }
+            let perms = creation_perms(mode);
+            // One resolution of the parent for the MAC check, the permission
+            // check and the creation, as mkdir and mknod do.
+            let made = vfs()?.mknod_checked(path, NodeType::File, perms, 0, |dir| {
+                check_dir_write(dir).map_err(|_| crate::error::KernelError::PermissionDenied {
+                    operation: "create directory entry",
+                })
+            });
+            match made {
+                Ok(node) => {
+                    own_new_node(&node);
+                    (node, true, None)
+                }
+                // Another opener created it between the lookup and here.
+                Err(crate::error::KernelError::FsError(crate::error::FsError::AlreadyExists))
+                    if !open_flags.exclusive =>
+                {
+                    let (node, canonical) = vfs()?
+                        .open_follow_canonical(path, open_flags, follow)
+                        .map_err(map_resolve_err)?;
+                    (node, false, Some(canonical))
+                }
+                Err(crate::error::KernelError::FsError(crate::error::FsError::AlreadyExists)) => {
+                    return Err(SyscallError::FileExists);
+                }
+                // map_kernel_error: a MAC or permission denial is EACCES.
+                Err(e) => return Err(super::map_kernel_error(e)),
             }
         }
-        Err(e) => {
-            // Only a missing name may be created; any other failure (EACCES
-            // from a directory without search permission, ENOTDIR, ELOOP)
-            // is reported as itself. Every failure used to read as ENOENT
-            // (review of the v0.26.0 stack, PR #15).
-            if open_flags.create && is_not_found(&e) {
-                let perms = creation_perms(mode);
-                let (parent_path, name) = split_path(path_str)?;
-                require_dir_write(path_str)?;
-                let vfs_guard = vfs()?;
-                let parent = match vfs_guard.resolve_path(&parent_path) {
-                    Ok(p) => p,
-                    Err(_) => {
-                        return Err(SyscallError::ResourceNotFound);
-                    }
-                };
-                match parent.create(&name, perms) {
-                    Ok(node) => {
-                        own_new_node(&node);
-                        let file = crate::fs::file::File::new_with_path(
-                            node,
-                            open_flags,
-                            alloc::string::String::from(path_str),
-                        );
-                        let file_table = process.file_table.lock();
-                        match file_table.open_with_flags(alloc::sync::Arc::new(file), cloexec) {
-                            Ok(fd_num) => Ok(fd_num),
-                            Err(_) => Err(SyscallError::OutOfMemory),
-                        }
-                    }
-                    Err(_) => Err(SyscallError::ResourceNotFound),
-                }
-            } else {
-                Err(map_resolve_err(e))
+        Err(e) => return Err(map_resolve_err(e)),
+    };
+
+    let node_type = node.node_type();
+    // O_CREAT names a file: an existing directory is EISDIR even read-only.
+    if open_flags.create && !created && node_type == NodeType::Directory {
+        return Err(SyscallError::IsADirectory);
+    }
+    if !follow && node_type == NodeType::Symlink {
+        return Err(SyscallError::SymlinkLoop);
+    }
+    if flags & O_DIRECTORY != 0 && node_type != NodeType::Directory {
+        return Err(SyscallError::NotADirectory);
+    }
+    if open_flags.write && node_type == NodeType::Directory {
+        return Err(SyscallError::IsADirectory);
+    }
+    if !created {
+        require_open_access(&node, &open_flags)?;
+    }
+    if open_flags.truncate && open_flags.write && !created && node_type == NodeType::File {
+        node.truncate(0).map_err(map_resolve_err)?;
+        crate::fs::remove_privs_after_write(&*node);
+    }
+    // A special file made by mknod opens what it names; a socket file
+    // cannot be opened (ENXIO, as Linux's `sock_no_open`).
+    let node = if node.is_special_inode() {
+        match node_type {
+            NodeType::Pipe => open_fifo(node, &open_flags)?,
+            NodeType::CharDevice | NodeType::BlockDevice => {
+                crate::fs::devfs::open_device(node).map_err(super::map_kernel_error)?
+            }
+            _ => return Err(SyscallError::NoDeviceOrAddress),
+        }
+    } else {
+        node
+    };
+
+    // The file records the canonical path of what it opened (in the whole
+    // tree) for fchdir and dirfd resolution: the path as written could be
+    // relative, and would be re-resolved against a later cwd (N-204).
+    let canonical = match canonical {
+        Some(c) => c,
+        None => vfs()?
+            .resolve_canonical(path, &vfs()?.get_cwd(), false)
+            .map(|(_, c)| c)
+            .unwrap_or_else(|_| alloc::string::String::from(path)),
+    };
+    let file = crate::fs::file::File::new_with_path(node, open_flags, canonical);
+    let file_table = process.file_table.lock();
+    file_table
+        .open_with_flags(alloc::sync::Arc::new(file), cloexec)
+        .map_err(super::map_kernel_error)
+}
+
+/// Open FIFO `inode` (`fs::fifo`): a blocking open of one end sleeps until
+/// the other end is opened, or a signal interrupts it (EINTR, restarted
+/// under SA_RESTART as Linux's ERESTARTSYS).
+fn open_fifo(
+    inode: alloc::sync::Arc<dyn crate::fs::VfsNode>,
+    flags: &OpenFlags,
+) -> Result<alloc::sync::Arc<dyn crate::fs::VfsNode>, SyscallError> {
+    let end = crate::fs::fifo::FifoEnd::open(inode, flags.read, flags.write, flags.nonblock)
+        .map_err(super::map_kernel_error)?;
+    #[cfg(feature = "alloc")]
+    if crate::sched::dispatch::current_owner().is_some() {
+        use crate::sched::dispatch::{self, WaitError};
+        while end.needs_partner() {
+            match dispatch::wait_event(&dispatch::IO_EVENTS, None, || !end.needs_partner()) {
+                Ok(()) | Err(WaitError::TimedOut) => {}
+                // Dropping the end undoes the open.
+                Err(WaitError::Interrupted) => return Err(SyscallError::Interrupted),
             }
         }
     }
+    Ok(alloc::sync::Arc::new(end))
 }
 
 /// Close a file descriptor
@@ -298,7 +341,7 @@ pub fn sys_close(fd: usize) -> SyscallResult {
     let file_table = process.file_table.lock();
     match file_table.close(fd) {
         Ok(_) => Ok(0),
-        Err(_) => Err(SyscallError::InvalidArgument),
+        Err(e) => Err(super::map_kernel_error(e)),
     }
 }
 
@@ -323,166 +366,82 @@ pub fn sys_read(fd: usize, buffer: usize, count: usize) -> SyscallResult {
     // Validate buffer is in user space
     validate_user_buffer(buffer, count)?;
 
-    // For stdin (fd 0), try file table first, then fall back to serial
-    if fd == 0 {
-        // Try the file table first if we have a process context
-        if let Some(proc) = process::current_process() {
-            let file_table = proc.file_table.lock();
-            if let Some(file_desc) = file_table.get(fd) {
-                // SAFETY: buffer is non-zero (checked above). The caller
-                // must provide a valid, writable buffer of at least `count`
-                // bytes. from_raw_parts_mut creates a mutable slice.
-                let buffer_slice =
-                    unsafe { core::slice::from_raw_parts_mut(buffer as *mut u8, count) };
-                return match file_desc.read(buffer_slice) {
-                    Ok(bytes_read) => Ok(bytes_read),
-                    Err(crate::error::KernelError::WouldBlock) => Err(SyscallError::WouldBlock),
-                    Err(crate::error::KernelError::BrokenPipe) => Ok(0),
-                    Err(_) => Err(SyscallError::InvalidState),
-                };
-            }
-        }
-
+    // For stdin (fd 0): an open file (a pipe, a tty) is read like any other
+    // fd below -- including waiting for a pipe writer, which returning here
+    // skipped (`head` on a pipe got an error instead of the data). Only a
+    // process without one falls back to the serial console.
+    let stdin_open =
+        fd == 0 && process::current_process().is_some_and(|p| p.file_table.lock().get(0).is_some());
+    if fd == 0 && !stdin_open {
         if !console_fallback_allowed(fd) {
             return Err(SyscallError::BadFileDescriptor);
         }
-        // Fallback: read from serial UART, respecting terminal state.
+        // Fallback: the console, through its shared line discipline.
         let read_count = count.min(SERIAL_IO_MAX_SIZE);
-        // SAFETY: buffer is non-zero (checked above). We limit the size
-        // via SERIAL_IO_MAX_SIZE. The caller must provide a valid writable
-        // buffer of at least `count` bytes. During early bring-up this
-        // may be a kernel-space address from the embedded init binary.
-        let buffer_slice =
-            unsafe { core::slice::from_raw_parts_mut(buffer as *mut u8, read_count) };
-
-        let canonical = crate::drivers::terminal::is_canonical_mode();
-        let echo = crate::drivers::terminal::is_echo_enabled();
-
-        let mut bytes_read = 0;
-        for slot in buffer_slice.iter_mut() {
-            // Spin-wait for a byte to become available
-            let byte = loop {
-                if let Some(b) = serial_try_read_byte() {
-                    break b;
-                }
-                core::hint::spin_loop();
-            };
-
-            // Echo if enabled
-            if echo {
-                serial_write_byte(byte);
-            }
-
-            *slot = byte;
-            bytes_read += 1;
-
-            // In canonical mode, stop after newline or carriage return.
-            // In raw mode, return immediately after each character (VMIN=1).
-            if canonical {
-                if byte == b'\n' || byte == b'\r' {
-                    break;
-                }
-            } else {
-                // Raw mode: return after first character
-                break;
-            }
-        }
-
-        return Ok(bytes_read);
+        // Bytes are gathered in a kernel buffer and copied out once (N-43).
+        let mut line = alloc::vec![0u8; read_count];
+        let n = read_console_waiting(&mut line)?;
+        super::userspace::write_user_bytes(buffer, &line[..n])?;
+        return Ok(n);
     }
 
     // Non-stdin: use file table normally.
     //
-    // In boot execution mode (no preemptive scheduler), a pipe read may
-    // return WouldBlock because the child process that writes to the pipe
-    // hasn't been dispatched yet. When this happens, we dispatch any Ready
-    // children inline (the same pattern used by waitpid), then retry the
-    // read. This enables shell command substitution `$(cmd)` where the
-    // parent reads from a pipe that the child writes to.
     let proc = process::current_process().ok_or(SyscallError::InvalidState)?;
 
-    // SAFETY: buffer was validated as non-zero above. The caller must
-    // provide a valid, writable user-space buffer of at least `count`
-    // bytes. from_raw_parts_mut creates a mutable slice for the read.
-    let buffer_slice = unsafe { core::slice::from_raw_parts_mut(buffer as *mut u8, count) };
-
-    // First attempt: try reading directly.
+    // First attempt: try reading directly. The file table lock covers only
+    // the lookup: a read can sleep (an empty eventfd), and a lock held over
+    // it stopped every other thread's file system calls (N-118).
     {
-        let file_table = proc.file_table.lock();
-        let file_desc = file_table.get(fd).ok_or(SyscallError::InvalidArgument)?;
-        match file_desc.read(buffer_slice) {
-            Ok(bytes_read) => return Ok(bytes_read),
-            Err(crate::error::KernelError::WouldBlock) => {
+        let file_desc = proc
+            .file_table
+            .lock()
+            .get(fd)
+            .ok_or(SyscallError::BadFileDescriptor)?;
+        match file_read_to_user(&file_desc, buffer, count) {
+            Err(SyscallError::WouldBlock) => {
                 // Pipe empty with write end open -- fall through to try
                 // dispatching children in boot context.
             }
-            Err(crate::error::KernelError::BrokenPipe) => return Ok(0), // EOF
-            Err(_) => return Err(SyscallError::InvalidState),
+            other => return other,
         }
     } // Drop file_table lock before dispatching children.
 
-    // Boot execution mode: dispatch any Ready children so they can write
-    // to the pipe, then retry the read. This loop runs at most
-    // MAX_CHILD_DISPATCH iterations to prevent infinite loops.
-    #[cfg(target_arch = "x86_64")]
-    {
-        use crate::process::{pcb::ProcessState, table, thread::ThreadId};
-
-        if crate::arch::x86_64::usermode::has_boot_return_context() {
-            let current_pid = proc.pid;
-            const MAX_CHILD_DISPATCH: usize = 16;
-
-            for _ in 0..MAX_CHILD_DISPATCH {
-                // Find a Ready child to dispatch.
-                let children = table::PROCESS_TABLE.find_children(current_pid);
-                let mut dispatched = false;
-
-                for child_pid in &children {
-                    if let Some(child) = table::get_process(*child_pid) {
-                        if child.get_state() == ProcessState::Ready {
-                            let parent_tid = proc
-                                .threads
-                                .lock()
-                                .values()
-                                .next()
-                                .map(|t| t.tid)
-                                .unwrap_or(ThreadId(current_pid.0));
-
-                            dispatched = crate::bootstrap::boot_run_forked_child(
-                                *child_pid,
-                                current_pid,
-                                parent_tid,
-                            );
-                            break;
-                        }
-                    }
-                }
-
-                // Retry the read after dispatching the child.
-                let file_table = proc.file_table.lock();
-                if let Some(file_desc) = file_table.get(fd) {
-                    match file_desc.read(buffer_slice) {
-                        Ok(bytes_read) => return Ok(bytes_read),
-                        Err(crate::error::KernelError::WouldBlock) => {
-                            // Still empty -- continue dispatching if we ran a child
-                            drop(file_table);
-                            if !dispatched {
-                                // No more children to dispatch, return EAGAIN
-                                return Err(SyscallError::WouldBlock);
-                            }
-                        }
-                        Err(crate::error::KernelError::BrokenPipe) => return Ok(0),
-                        Err(_) => return Err(SyscallError::InvalidState),
-                    }
-                } else {
-                    return Err(SyscallError::InvalidArgument);
-                }
+    // A dispatched reader (stage D2) runs alongside its writer: a blocking
+    // read of an empty pipe or socket waits until data arrives or the
+    // writers close (EOF), as POSIX requires. It used to return EAGAIN,
+    // which the nested model hid by running the writer inline and which
+    // made `$(sort f | head -n 1)` read nothing once both ran at once
+    // (N-119). O_NONBLOCK still gets EAGAIN.
+    #[cfg(feature = "alloc")]
+    if crate::sched::dispatch::current_owner().is_some() {
+        let mut retry_now = false;
+        loop {
+            // The file table lock is held only for the lookup: never across
+            // the user copy or the wait (N-118).
+            let file_desc = proc
+                .file_table
+                .lock()
+                .get(fd)
+                .ok_or(SyscallError::BadFileDescriptor)?;
+            if file_desc
+                .nonblock
+                .load(core::sync::atomic::Ordering::Acquire)
+            {
+                return Err(SyscallError::WouldBlock);
             }
+            match file_read_to_user(&file_desc, buffer, count) {
+                Err(SyscallError::WouldBlock) => {}
+                other => return other,
+            }
+            // Sleep until readable (data, EOF or error); a signal ends the
+            // wait (EINTR).
+            wait_ready(&file_desc, POLLIN | POLLHUP | POLLERR, &mut retry_now)?;
         }
     }
 
-    // Non-boot context or exhausted dispatch attempts: return EAGAIN so
-    // the C library can retry via poll()/select().
+    // Not a dispatched thread (no user thread is, without the dispatcher):
+    // EAGAIN.
     Err(SyscallError::WouldBlock)
 }
 
@@ -513,19 +472,8 @@ pub fn sys_write(fd: usize, buffer: usize, count: usize) -> SyscallResult {
     if fd == 1 || fd == 2 {
         // Try the file table first if we have a process context
         if let Some(proc) = process::current_process() {
-            let file_table = proc.file_table.lock();
-            if let Some(file_desc) = file_table.get(fd) {
-                // SAFETY: buffer is non-zero (checked above). The caller
-                // must provide a valid, readable buffer of at least `count`
-                // bytes. from_raw_parts creates an immutable slice.
-                let buffer_slice =
-                    unsafe { core::slice::from_raw_parts(buffer as *const u8, count) };
-                return match file_desc.write(buffer_slice) {
-                    Ok(bytes_written) => Ok(bytes_written),
-                    Err(crate::error::KernelError::BrokenPipe) => Err(SyscallError::BrokenPipe),
-                    Err(crate::error::KernelError::WouldBlock) => Err(SyscallError::WouldBlock),
-                    Err(_) => Err(SyscallError::InvalidState),
-                };
+            if let Some(result) = write_fd(&proc, fd, buffer, count) {
+                return result;
             }
         }
 
@@ -534,13 +482,10 @@ pub fn sys_write(fd: usize, buffer: usize, count: usize) -> SyscallResult {
         }
         // Fallback: write directly to serial UART
         let write_count = count.min(SERIAL_IO_MAX_SIZE);
-        // SAFETY: buffer is non-zero (checked above). We limit the size
-        // via SERIAL_IO_MAX_SIZE. The caller must provide a valid readable
-        // buffer of at least `count` bytes. During early bring-up this
-        // may be a kernel-space address from the embedded init binary.
-        let buffer_slice = unsafe { core::slice::from_raw_parts(buffer as *const u8, write_count) };
-
-        for &byte in buffer_slice {
+        // Copied in once through the fault-tolerant reader (N-43).
+        let mut out = alloc::vec![0u8; write_count];
+        super::userspace::read_user_bytes(buffer, &mut out)?;
+        for &byte in &out {
             serial_write_byte(byte);
         }
 
@@ -549,20 +494,142 @@ pub fn sys_write(fd: usize, buffer: usize, count: usize) -> SyscallResult {
 
     // Non-stdout/stderr: use file table normally
     let proc = process::current_process().ok_or(SyscallError::InvalidState)?;
-    let file_table = proc.file_table.lock();
-    let file_desc = file_table.get(fd).ok_or(SyscallError::InvalidArgument)?;
+    write_fd(&proc, fd, buffer, count).unwrap_or(Err(SyscallError::BadFileDescriptor))
+}
 
-    // SAFETY: buffer was validated as non-zero above. The caller must
-    // provide a valid, readable user-space buffer of at least `count`
-    // bytes. from_raw_parts creates an immutable slice for the write.
-    let buffer_slice = unsafe { core::slice::from_raw_parts(buffer as *const u8, count) };
+/// Write `count` bytes from `buffer` to `fd` of `proc` (`None`: no such
+/// fd). A dispatched writer (stage D2) to a full pipe or socket waits for
+/// room, as POSIX requires of a blocking descriptor, instead of getting
+/// EAGAIN; O_NONBLOCK still gets it (N-119). No lock is held while waiting,
+/// and a signal ends the wait (EINTR).
+fn write_fd(
+    proc: &crate::process::Process,
+    fd: usize,
+    buffer: usize,
+    count: usize,
+) -> Option<SyscallResult> {
+    #[cfg(feature = "alloc")]
+    let mut retry_now = false;
+    // A blocking write to a stream (pipe, socket, terminal) waits until all
+    // of it is written, as POSIX requires; a short count used to come back
+    // as soon as a pipe filled. A signal or a closed reader after part was
+    // written returns the count so far.
+    let mut done = 0usize;
+    loop {
+        // Looked up under the file table lock, written without it (N-118).
+        let file_desc = proc.file_table.lock().get(fd)?;
+        let blocking = !file_desc
+            .nonblock
+            .load(core::sync::atomic::Ordering::Acquire);
+        let stream = !matches!(
+            file_desc.node.node_type(),
+            crate::fs::NodeType::File | crate::fs::NodeType::Directory
+        );
+        let result = file_write_from_user(&file_desc, buffer + done, count - done);
+        #[cfg(feature = "alloc")]
+        let dispatched = crate::sched::dispatch::current_owner().is_some();
+        #[cfg(not(feature = "alloc"))]
+        let dispatched = false;
+        match result {
+            Ok(n) if blocking && stream && dispatched && done + n < count => done += n,
+            Ok(n) => return Some(Ok(done + n)),
+            Err(SyscallError::WouldBlock) if blocking && dispatched => {}
+            Err(e) if done > 0 => {
+                sigpipe_after_partial_write(&file_desc, e);
+                return Some(Ok(done));
+            }
+            Err(e) => return Some(Err(e)),
+        }
+        #[cfg(feature = "alloc")]
+        if let Err(e) = wait_ready(&file_desc, POLLOUT | POLLERR, &mut retry_now) {
+            return Some(if done > 0 { Ok(done) } else { Err(e) });
+        }
+    }
+}
 
-    match file_desc.write(buffer_slice) {
-        Ok(bytes_written) => Ok(bytes_written),
+/// A write to a pipe that loses its last reader after part of the data went
+/// in still raises SIGPIPE, as Linux's pipe_write does; the caller gets the
+/// count written. (A socket raises it only when nothing was sent, and an
+/// EPIPE with nothing written is signalled by the system call dispatcher.)
+fn sigpipe_after_partial_write(file: &crate::fs::file::File, error: SyscallError) {
+    if error == SyscallError::BrokenPipe && file.node.node_type() == crate::fs::NodeType::Pipe {
+        crate::process::signals::send_to_current(crate::process::exit::signals::SIGPIPE as usize);
+    }
+}
+
+/// Sleep until `file` reports one of `mask` (poll bits), a signal must be
+/// acted on (EINTR), or -- for a file type that does not wake waiters
+/// itself -- a short re-check interval passes. `retry_now` carries state
+/// between calls: when the last wait ended because the file looked ready
+/// but the operation still blocked, this one sleeps for the interval
+/// instead, so a node whose readiness and I/O disagree cannot spin.
+#[cfg(feature = "alloc")]
+fn wait_ready(
+    file: &crate::fs::file::File,
+    mask: u16,
+    retry_now: &mut bool,
+) -> Result<(), SyscallError> {
+    use crate::sched::dispatch::{self, WaitError};
+    const RECHECK_NS: u64 = 10_000_000;
+    let rearm = core::mem::take(retry_now);
+    let recheck = (rearm || !file.node.wakes_io_waiters())
+        .then(|| dispatch::clock_ns().saturating_add(RECHECK_NS));
+    // A node that becomes ready by itself (a timerfd's expiry) is woken for
+    // then.
+    let deadline = [recheck, file.node.ready_at_ns()]
+        .into_iter()
+        .flatten()
+        .min();
+    match dispatch::wait_event(&dispatch::IO_EVENTS, deadline, || {
+        !rearm && file.node.poll_readiness() & mask != 0
+    }) {
+        Ok(()) => {
+            *retry_now = true;
+            Ok(())
+        }
+        Err(WaitError::TimedOut) => Ok(()),
+        Err(WaitError::Interrupted) => Err(SyscallError::Interrupted),
+    }
+}
+
+/// Read up to `count` bytes from an open file into user memory at `buf`.
+/// A regular file is read in chunks until `count` or end of file; anything
+/// else (pipe, tty, socket, device) gets exactly one underlying read, so its
+/// blocking and short-read behaviour is unchanged. EOF on a pipe is 0.
+fn file_read_to_user(file: &crate::fs::file::File, buf: usize, count: usize) -> SyscallResult {
+    // Not open for reading is EBADF (it was EACCES), a directory EISDIR
+    // (N-197).
+    if !file.flags.read {
+        return Err(SyscallError::BadFileDescriptor);
+    }
+    let regular = match file.node.node_type() {
+        crate::fs::NodeType::File => true,
+        crate::fs::NodeType::Directory => return Err(SyscallError::IsADirectory),
+        _ => false,
+    };
+    super::userspace::produce_to_user(buf, count, regular, |kbuf| match file.read(kbuf) {
+        Ok(n) => Ok(n),
+        Err(crate::error::KernelError::BrokenPipe) => Ok(0),
+        Err(crate::error::KernelError::WouldBlock) => Err(SyscallError::WouldBlock),
+        Err(e) => Err(super::map_kernel_error(e)),
+    })
+}
+
+/// Write up to `count` bytes of user memory at `buf` to an open file, in
+/// chunks; a short write (a full pipe) ends the transfer with the count so
+/// far.
+fn file_write_from_user(file: &crate::fs::file::File, buf: usize, count: usize) -> SyscallResult {
+    // Not open for writing is EBADF, as on Linux (N-197).
+    if !file.flags.write {
+        return Err(SyscallError::BadFileDescriptor);
+    }
+    let count = file.fsize_room(count).map_err(super::map_kernel_error)?;
+    super::userspace::consume_from_user(buf, count, true, |kbuf| match file.write(kbuf) {
+        Ok(n) => Ok(n),
         Err(crate::error::KernelError::BrokenPipe) => Err(SyscallError::BrokenPipe),
         Err(crate::error::KernelError::WouldBlock) => Err(SyscallError::WouldBlock),
-        Err(_) => Err(SyscallError::InvalidState),
-    }
+        Err(e) => Err(super::map_kernel_error(e)),
+    })
 }
 
 /// Seek within a file
@@ -579,11 +646,21 @@ pub fn sys_seek(fd: usize, offset: isize, whence: usize) -> SyscallResult {
     let process = process::current_process().ok_or(SyscallError::InvalidState)?;
 
     // Get file descriptor
-    let file_table = process.file_table.lock();
-    let file_desc = file_table.get(fd).ok_or(SyscallError::InvalidArgument)?;
+    // Lookup only; the lock is not held over the operation (N-118).
+    let file_desc = process
+        .file_table
+        .lock()
+        .get(fd)
+        .ok_or(SyscallError::BadFileDescriptor)?;
+    // A pipe, socket or terminal has no position (N-190).
+    if file_desc.node.is_stream() {
+        return Err(SyscallError::IllegalSeek);
+    }
 
     // Convert whence to SeekFrom
     let seek_from = match whence {
+        // A negative absolute offset is EINVAL, not a huge position (N-122).
+        0 if offset < 0 => return Err(SyscallError::InvalidArgument),
         0 => SeekFrom::Start(offset as usize),
         1 => SeekFrom::Current(offset),
         2 => SeekFrom::End(offset),
@@ -593,7 +670,7 @@ pub fn sys_seek(fd: usize, offset: isize, whence: usize) -> SyscallResult {
     // Perform seek
     match file_desc.seek(seek_from) {
         Ok(new_pos) => Ok(new_pos as usize),
-        Err(_) => Err(SyscallError::InvalidState),
+        Err(e) => Err(super::map_kernel_error(e)),
     }
 }
 
@@ -610,41 +687,50 @@ pub fn sys_stat(fd: usize, stat_buf: usize) -> SyscallResult {
     let process = process::current_process().ok_or(SyscallError::InvalidState)?;
 
     // Get file descriptor
-    let file_table = process.file_table.lock();
-    let file_desc = file_table.get(fd).ok_or(SyscallError::InvalidArgument)?;
+    // Lookup only; the lock is not held over the operation (N-118).
+    let file_desc = process
+        .file_table
+        .lock()
+        .get(fd)
+        .ok_or(SyscallError::BadFileDescriptor)?;
 
     // Get metadata and write to user buffer
-    let metadata = file_desc
-        .node
-        .metadata()
-        .map_err(|_| SyscallError::InvalidState)?;
-    let stat = fill_stat(&metadata);
+    let metadata = file_desc.node.metadata().map_err(super::map_kernel_error)?;
+    let stat = fill_stat(&metadata, &*file_desc.node);
 
-    // SAFETY: stat_buf was validated as non-null, in user-space, and aligned.
-    unsafe {
-        core::ptr::write(stat_buf as *mut FileStat, stat);
-    }
+    super::userspace::write_user(stat_buf, stat)?;
     Ok(0)
 }
 
-/// Truncate a file
-///
-/// # Arguments
-/// - fd: File descriptor
-/// - size: New file size
-pub fn sys_truncate(fd: usize, size: usize) -> SyscallResult {
-    // Get current process
-    let process = process::current_process().ok_or(SyscallError::InvalidState)?;
-
-    // Get file descriptor
-    let file_table = process.file_table.lock();
-    let file_desc = file_table.get(fd).ok_or(SyscallError::InvalidArgument)?;
-
-    // Truncate file
-    match file_desc.node.truncate(size) {
-        Ok(_) => Ok(0),
-        Err(_) => Err(SyscallError::InvalidState),
+/// An `loff_t` argument (an offset or a length): negative is EINVAL.
+fn file_offset(value: usize) -> Result<usize, SyscallError> {
+    if (value as i64) < 0 {
+        Err(SyscallError::InvalidArgument)
+    } else {
+        Ok(value)
     }
+}
+
+/// ftruncate: the fd must be a regular file open for writing, else EINVAL;
+/// a negative length is EINVAL before the fd is looked at (N-191).
+pub fn sys_ftruncate(fd: usize, length: usize) -> SyscallResult {
+    let length = file_offset(length)?;
+    let process = process::current_process().ok_or(SyscallError::InvalidState)?;
+    // Lookup only; the lock is not held over the operation (N-118).
+    let file = process
+        .file_table
+        .lock()
+        .get(fd)
+        .ok_or(SyscallError::BadFileDescriptor)?;
+    if file.node.node_type() != crate::fs::NodeType::File || !file.flags.write {
+        return Err(SyscallError::InvalidArgument);
+    }
+    crate::fs::check_fsize_truncate(&*file.node, length).map_err(super::map_kernel_error)?;
+    file.node
+        .truncate(length)
+        .map_err(super::map_kernel_error)?;
+    crate::fs::remove_privs_after_write(&*file.node);
+    Ok(0)
 }
 
 /// Create a directory
@@ -653,43 +739,38 @@ pub fn sys_truncate(fd: usize, size: usize) -> SyscallResult {
 /// - path: Path to new directory
 /// - mode: Directory permissions
 pub fn sys_mkdir(path: usize, mode: usize) -> SyscallResult {
-    // Validate path pointer is in user space
-    validate_user_string_ptr(path)?;
+    // Copied in through the fault-tolerant reader (N-43).
+    make_directory(&read_user_path(path)?, mode)
+}
 
-    // Get path string
-    // SAFETY: path was validated as non-null and in user-space above. We read
-    // user-space pointer until null terminator or 4096-byte limit. The
-    // caller must provide a valid null-terminated string.
-    let path_bytes = unsafe {
-        let mut bytes = Vec::new();
-        let mut ptr = path as *const u8;
-
-        for _ in 0..4096 {
-            let byte = *ptr;
-            if byte == 0 {
-                break;
-            }
-            bytes.push(byte);
-            ptr = ptr.add(1);
-        }
-        bytes
-    };
-
-    let path_str = match core::str::from_utf8(&path_bytes) {
-        Ok(s) => s,
-        Err(_) => return Err(SyscallError::InvalidArgument),
-    };
-
-    // Create directory through VFS
-    let permissions = creation_perms(mode);
-    let vfs_guard = vfs()?;
-    match vfs_guard.mkdir(path_str, permissions) {
-        Ok(node) => {
-            own_new_node(&node);
-            Ok(0)
-        }
-        Err(e) => Err(super::map_kernel_error(e)),
+/// mkdir and mkdirat, in Linux's order: an existing name (a symlink is not
+/// followed) is EEXIST, which `mkdir -p` relies on, before write and search
+/// permission on the parent is required (N-192: mkdir checked none).
+fn make_directory(path: &str, mode: usize) -> SyscallResult {
+    match vfs()?.resolve_path_no_follow(path) {
+        Ok(_) => return Err(SyscallError::FileExists),
+        Err(e) if is_not_found(&e) => {}
+        Err(e) => return Err(map_resolve_err(e)),
     }
+    let node = make_directory_node(path, creation_perms(mode))?;
+    own_new_node(&node);
+    Ok(0)
+}
+
+/// Create directory `path`: the VFS resolves its parent once and checks
+/// the MAC policy and this permission callback on that same node before
+/// creating the entry there (N-51).
+fn make_directory_node(
+    path: &str,
+    perms: Permissions,
+) -> Result<alloc::sync::Arc<dyn crate::fs::VfsNode>, SyscallError> {
+    vfs()?
+        .mkdir_checked(path, perms, |dir| {
+            check_dir_write(dir).map_err(|_| crate::error::KernelError::PermissionDenied {
+                operation: "create directory entry",
+            })
+        })
+        .map_err(super::map_kernel_error)
 }
 
 /// Remove a directory
@@ -697,14 +778,7 @@ pub fn sys_mkdir(path: usize, mode: usize) -> SyscallResult {
 /// # Arguments
 /// - path: Path to directory to remove
 pub fn sys_rmdir(path: usize) -> SyscallResult {
-    let path_str = read_user_path(path)?;
-    require_may_remove(&path_str)?;
-
-    // Remove directory through VFS
-    match vfs()?.unlink(&path_str) {
-        Ok(_) => Ok(0),
-        Err(e) => Err(super::map_kernel_error(e)),
-    }
+    sys_unlinkat(AT_FDCWD, path, AT_REMOVEDIR)
 }
 
 /// Mount a filesystem
@@ -751,56 +825,18 @@ pub fn sys_mount(
         return Err(SyscallError::PermissionDenied);
     }
 
-    // Get mount point path
-    // SAFETY: mount_point was validated as non-zero above. We read bytes
-    // from the user-space pointer until null terminator or 4096-byte limit.
-    let mount_path_bytes = unsafe {
-        let mut bytes = Vec::new();
-        let mut ptr = mount_point as *const u8;
+    // Copied in through the fault-tolerant reader (N-43).
+    let mount_path_owned = read_user_path(mount_point)?;
+    let mount_path = mount_path_owned.as_str();
 
-        for _ in 0..4096 {
-            let byte = *ptr;
-            if byte == 0 {
-                break;
-            }
-            bytes.push(byte);
-            ptr = ptr.add(1);
-        }
-        bytes
-    };
-
-    let mount_path = match core::str::from_utf8(&mount_path_bytes) {
-        Ok(s) => s,
-        Err(_) => return Err(SyscallError::InvalidArgument),
-    };
-
-    // Get filesystem type
-    // SAFETY: fs_type was validated as non-zero above. We read bytes from
-    // the user-space pointer until null terminator or 256-byte limit.
-    let fs_type_bytes = unsafe {
-        let mut bytes = Vec::new();
-        let mut ptr = fs_type as *const u8;
-
-        for _ in 0..256 {
-            let byte = *ptr;
-            if byte == 0 {
-                break;
-            }
-            bytes.push(byte);
-            ptr = ptr.add(1);
-        }
-        bytes
-    };
-
-    let fs_type_str = match core::str::from_utf8(&fs_type_bytes) {
-        Ok(s) => s,
-        Err(_) => return Err(SyscallError::InvalidArgument),
-    };
+    // Copied in through the fault-tolerant reader (N-43).
+    let fs_type_owned = crate::syscall::userspace::read_user_cstr(fs_type, 255)?;
+    let fs_type_str = fs_type_owned.as_str();
 
     // Mount filesystem
     match vfs()?.mount_by_type(mount_path, fs_type_str, flags as u32) {
         Ok(_) => Ok(0),
-        Err(_) => Err(SyscallError::InvalidState),
+        Err(e) => Err(super::map_kernel_error(e)),
     }
 }
 
@@ -839,33 +875,14 @@ pub fn sys_unmount(mount_point: usize) -> SyscallResult {
         return Err(SyscallError::PermissionDenied);
     }
 
-    // Get mount point path
-    // SAFETY: mount_point was validated as non-zero above. We read bytes
-    // from the user-space pointer until null terminator or 4096-byte limit.
-    let mount_path_bytes = unsafe {
-        let mut bytes = Vec::new();
-        let mut ptr = mount_point as *const u8;
-
-        for _ in 0..4096 {
-            let byte = *ptr;
-            if byte == 0 {
-                break;
-            }
-            bytes.push(byte);
-            ptr = ptr.add(1);
-        }
-        bytes
-    };
-
-    let mount_path = match core::str::from_utf8(&mount_path_bytes) {
-        Ok(s) => s,
-        Err(_) => return Err(SyscallError::InvalidArgument),
-    };
+    // Copied in through the fault-tolerant reader (N-43).
+    let mount_path_owned = read_user_path(mount_point)?;
+    let mount_path = mount_path_owned.as_str();
 
     // Unmount filesystem
     match vfs()?.unmount(mount_path) {
         Ok(_) => Ok(0),
-        Err(_) => Err(SyscallError::InvalidState),
+        Err(e) => Err(super::map_kernel_error(e)),
     }
 }
 
@@ -875,7 +892,7 @@ pub fn sys_unmount(mount_point: usize) -> SyscallResult {
 pub fn sys_sync() -> SyscallResult {
     match vfs()?.sync() {
         Ok(_) => Ok(0),
-        Err(_) => Err(SyscallError::InvalidState),
+        Err(e) => Err(super::map_kernel_error(e)),
     }
 }
 
@@ -896,7 +913,7 @@ pub fn sys_fsync(fd: usize) -> SyscallResult {
     // Sync all filesystems (BlockFS syncs dirty blocks to disk)
     match vfs()?.sync() {
         Ok(_) => Ok(0),
-        Err(_) => Err(SyscallError::InvalidState),
+        Err(e) => Err(super::map_kernel_error(e)),
     }
 }
 
@@ -910,8 +927,11 @@ pub fn sys_fsync(fd: usize) -> SyscallResult {
 /// Field order and padding MUST match the kernel ABI that musl expects.
 /// Key difference from naive layout: nlink comes before mode, and there
 /// is a 4-byte pad after gid, plus nanosecond fields and trailing padding.
+/// `fill_stat` builds this on every architecture; arm64 and RISC-V copy it
+/// out as [`GenericStat`].
 #[repr(C)]
-struct FileStat {
+#[derive(Clone, Copy)]
+struct X86Stat {
     st_dev: u64,        // offset 0
     st_ino: u64,        // offset 8
     st_nlink: u64,      // offset 16 (note: before st_mode in Linux ABI)
@@ -933,10 +953,107 @@ struct FileStat {
 }
 
 // Compile-time assertion: Linux x86_64 struct stat is exactly 144 bytes.
-const _: () = assert!(core::mem::size_of::<FileStat>() == 144);
+const _: () = assert!(core::mem::size_of::<X86Stat>() == 144);
+// Every field sits where the next one ends (Linux x86_64 offsets), so there
+// is no implicit padding and a copy to user memory exposes no
+// uninitialized kernel bytes.
+const _: () = {
+    use core::mem::offset_of;
+    assert!(offset_of!(X86Stat, st_mode) == 24);
+    assert!(offset_of!(X86Stat, __pad0) == 36);
+    assert!(offset_of!(X86Stat, st_rdev) == 40);
+    assert!(offset_of!(X86Stat, st_atime) == 72);
+    assert!(offset_of!(X86Stat, __unused) == 120);
+};
 
-/// Helper: populate a FileStat from VFS metadata.
-fn fill_stat(metadata: &crate::fs::Metadata) -> FileStat {
+/// Linux's asm-generic `struct stat` (128 bytes), which arm64 and RISC-V
+/// use: mode before a 32-bit nlink, a pad after rdev, a 32-bit blksize.
+/// Writing the 144-byte x86_64 layout there ran 16 bytes past the caller's
+/// buffer (BusyBox ash lost its saved frame and returned to address 0).
+#[repr(C)]
+#[derive(Clone, Copy)]
+#[cfg_attr(
+    not(any(target_arch = "aarch64", target_arch = "riscv64")),
+    allow(dead_code)
+)]
+struct GenericStat {
+    st_dev: u64,        // offset 0
+    st_ino: u64,        // offset 8
+    st_mode: u32,       // offset 16
+    st_nlink: u32,      // offset 20
+    st_uid: u32,        // offset 24
+    st_gid: u32,        // offset 28
+    st_rdev: u64,       // offset 32
+    __pad1: u64,        // offset 40
+    st_size: i64,       // offset 48
+    st_blksize: i32,    // offset 56
+    __pad2: i32,        // offset 60
+    st_blocks: i64,     // offset 64
+    st_atime: i64,      // offset 72
+    st_atime_nsec: i64, // offset 80
+    st_mtime: i64,      // offset 88
+    st_mtime_nsec: i64, // offset 96
+    st_ctime: i64,      // offset 104
+    st_ctime_nsec: i64, // offset 112
+    __unused: [u32; 2], // offset 120
+}
+
+const _: () = assert!(core::mem::size_of::<GenericStat>() == 128);
+// No implicit padding (no uninitialised kernel bytes reach user memory).
+const _: () = {
+    use core::mem::offset_of;
+    assert!(offset_of!(GenericStat, st_mode) == 16);
+    assert!(offset_of!(GenericStat, st_rdev) == 32);
+    assert!(offset_of!(GenericStat, st_size) == 48);
+    assert!(offset_of!(GenericStat, st_blocks) == 64);
+    assert!(offset_of!(GenericStat, __unused) == 120);
+};
+
+impl From<X86Stat> for GenericStat {
+    fn from(s: X86Stat) -> Self {
+        Self {
+            st_dev: s.st_dev,
+            st_ino: s.st_ino,
+            st_mode: s.st_mode,
+            st_nlink: s.st_nlink as u32,
+            st_uid: s.st_uid,
+            st_gid: s.st_gid,
+            st_rdev: s.st_rdev,
+            __pad1: 0,
+            st_size: s.st_size,
+            st_blksize: s.st_blksize as i32,
+            __pad2: 0,
+            st_blocks: s.st_blocks,
+            st_atime: s.st_atime,
+            st_atime_nsec: s.st_atime_nsec,
+            st_mtime: s.st_mtime,
+            st_mtime_nsec: s.st_mtime_nsec,
+            st_ctime: s.st_ctime,
+            st_ctime_nsec: s.st_ctime_nsec,
+            __unused: [0; 2],
+        }
+    }
+}
+
+/// The `struct stat` this architecture's programs read.
+#[cfg(not(any(target_arch = "aarch64", target_arch = "riscv64")))]
+type FileStat = X86Stat;
+#[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
+type FileStat = GenericStat;
+
+/// Helper: populate a FileStat from the VFS metadata of `node`, and its
+/// device number for a device.
+fn fill_stat(metadata: &crate::fs::Metadata, node: &dyn crate::fs::VfsNode) -> FileStat {
+    let rdev = node
+        .device_id()
+        .map_or(0, |(major, minor)| crate::fs::make_dev(major, minor));
+    #[allow(clippy::useless_conversion)] // the identity on x86_64
+    let stat = FileStat::from(fill_x86_stat(metadata, rdev));
+    stat
+}
+
+/// [`fill_stat`] in the x86_64 layout; `rdev` in Linux's encoding.
+fn fill_x86_stat(metadata: &crate::fs::Metadata, rdev: u32) -> X86Stat {
     // File type bits plus the node's real permission bits; this used to
     // report a fixed 0644/0755 for every file and directory.
     let type_bits = match metadata.node_type {
@@ -950,7 +1067,7 @@ fn fill_stat(metadata: &crate::fs::Metadata) -> FileStat {
     };
     let mode = type_bits | metadata.permissions.to_mode();
     let size = metadata.size as i64;
-    FileStat {
+    X86Stat {
         st_dev: 1,
         st_ino: metadata.inode,
         st_nlink: 1,
@@ -958,7 +1075,7 @@ fn fill_stat(metadata: &crate::fs::Metadata) -> FileStat {
         st_uid: metadata.uid,
         st_gid: metadata.gid,
         __pad0: 0,
-        st_rdev: 0,
+        st_rdev: rdev as u64,
         st_size: size,
         st_blksize: 4096,
         st_blocks: (size + 511) / 512,
@@ -993,7 +1110,16 @@ pub(crate) fn map_resolve_err(e: crate::error::KernelError) -> SyscallError {
             SyscallError::ResourceNotFound
         }
         crate::error::KernelError::FsError(crate::error::FsError::NotADirectory) => {
-            SyscallError::InvalidArgument
+            SyscallError::NotADirectory
+        }
+        crate::error::KernelError::FsError(crate::error::FsError::IsADirectory) => {
+            SyscallError::IsADirectory
+        }
+        crate::error::KernelError::FsError(crate::error::FsError::AlreadyExists) => {
+            SyscallError::FileExists
+        }
+        crate::error::KernelError::FsError(crate::error::FsError::NoSpace) => {
+            SyscallError::OutOfMemory
         }
         crate::error::KernelError::FsError(crate::error::FsError::PermissionDenied) => {
             SyscallError::PermissionDenied
@@ -1018,7 +1144,7 @@ pub fn sys_dup(fd: usize) -> SyscallResult {
     let file_table = proc.file_table.lock();
     match file_table.dup(fd) {
         Ok(new_fd) => Ok(new_fd),
-        Err(_) => Err(SyscallError::InvalidArgument),
+        Err(e) => Err(super::map_kernel_error(e)),
     }
 }
 
@@ -1035,7 +1161,7 @@ pub fn sys_dup2(old_fd: usize, new_fd: usize) -> SyscallResult {
     let file_table = proc.file_table.lock();
     match file_table.dup2(old_fd, new_fd) {
         Ok(()) => Ok(new_fd),
-        Err(_) => Err(SyscallError::InvalidArgument),
+        Err(e) => Err(super::map_kernel_error(e)),
     }
 }
 
@@ -1062,11 +1188,6 @@ pub fn sys_pipe(pipe_fds_ptr: usize) -> SyscallResult {
 /// # Returns
 /// Length of the CWD path
 pub fn sys_getcwd(buf: usize, size: usize) -> SyscallResult {
-    if size == 0 {
-        return Err(SyscallError::InvalidArgument);
-    }
-    validate_user_buffer(buf, size)?;
-
     let cwd = {
         let thread = process::current_thread().ok_or(SyscallError::InvalidState)?;
         #[cfg(feature = "alloc")]
@@ -1079,20 +1200,22 @@ pub fn sys_getcwd(buf: usize, size: usize) -> SyscallResult {
         }
     };
 
+    // As Linux: ERANGE when the path and its NUL do not fit (size 0
+    // included), only the bytes written must be user memory, and the
+    // result counts the NUL (N-214; it was strlen, and EINVAL).
     let cwd_bytes = cwd.as_bytes();
     if cwd_bytes.len() + 1 > size {
-        return Err(SyscallError::InvalidArgument); // Buffer too small
+        return Err(SyscallError::RangeError);
     }
+    validate_user_buffer(buf, cwd_bytes.len() + 1)?;
 
-    // SAFETY: buf was validated above as non-null and in user space with
-    // sufficient size. We write cwd_bytes.len() + 1 bytes (including NUL).
-    unsafe {
-        let dst = buf as *mut u8;
-        core::ptr::copy_nonoverlapping(cwd_bytes.as_ptr(), dst, cwd_bytes.len());
-        *dst.add(cwd_bytes.len()) = 0; // NUL terminator
-    }
+    // The path and its NUL go out through the fault-tolerant writer (N-43).
+    let mut out = Vec::with_capacity(cwd_bytes.len() + 1);
+    out.extend_from_slice(cwd_bytes);
+    out.push(0);
+    super::userspace::write_user_bytes(buf, &out)?;
 
-    Ok(cwd_bytes.len())
+    Ok(out.len())
 }
 
 /// Change current working directory
@@ -1115,18 +1238,222 @@ pub fn sys_chdir(path_ptr: usize) -> SyscallResult {
     #[cfg(feature = "alloc")]
     {
         let cwd = thread.fs().cwd.lock().clone();
-        let vfs = vfs()?;
-        let node = vfs
-            .resolve_from(&path, &cwd)
-            .map_err(|_| SyscallError::ResourceNotFound)?;
-        if node.node_type() != crate::fs::NodeType::Directory {
-            return Err(SyscallError::InvalidArgument);
-        }
-        // Update per-thread cwd
-        let normalized = crate::process::cwd::resolve_path(&path, &cwd);
-        *thread.fs().cwd.lock() = normalized;
-        Ok(0)
+        let (node, canonical) = vfs()?
+            .resolve_canonical(&path, &cwd, true)
+            .map_err(map_resolve_err)?;
+        enter_directory(&thread, &node, &canonical)
     }
+}
+
+/// Make `node` (at canonical path `canonical` in the whole tree) the
+/// thread's working directory: it must be a directory the caller may
+/// search. The working directory is kept as the canonical path relative to
+/// the root, so a symlink or ".." in the argument is resolved once and
+/// getcwd reports the real directory.
+#[cfg(feature = "alloc")]
+fn enter_directory(
+    thread: &process::Thread,
+    node: &alloc::sync::Arc<dyn crate::fs::VfsNode>,
+    canonical: &str,
+) -> SyscallResult {
+    if node.node_type() != crate::fs::NodeType::Directory {
+        return Err(SyscallError::NotADirectory);
+    }
+    let creds = caller_creds();
+    if creds.euid != 0 {
+        let meta = node.metadata().map_err(super::map_kernel_error)?;
+        if !meta
+            .permissions
+            .can_run(creds.euid, creds.gid_for(meta.gid), meta.uid, meta.gid)
+        {
+            return Err(SyscallError::PermissionDenied);
+        }
+    }
+    let fs = thread.fs();
+    let root = fs.root.lock().clone();
+    *fs.cwd.lock() = crate::fs::root_relative(canonical, &root);
+    Ok(0)
+}
+
+/// utimensat's special `tv_nsec` values.
+const UTIME_NOW: i64 = (1 << 30) - 1;
+const UTIME_OMIT: i64 = (1 << 30) - 2;
+
+/// One utimensat time ([tv_sec, tv_nsec]) as the seconds to store, or
+/// `None` to leave it (UTIME_OMIT). Times before 1970 are stored as 0, the
+/// earliest the filesystems represent.
+fn utime_spec(spec: [i64; 2], now: u64) -> Result<Option<u64>, SyscallError> {
+    match spec[1] {
+        UTIME_NOW => Ok(Some(now)),
+        UTIME_OMIT => Ok(None),
+        0..=999_999_999 => Ok(Some(spec[0].max(0) as u64)),
+        _ => Err(SyscallError::InvalidArgument),
+    }
+}
+
+/// utimensat(dirfd, path, times, flags) (N-249); with a NULL path it acts
+/// on `dirfd` itself (futimens). NULL `times` sets both to now. Setting
+/// explicit times needs the owner (or root, EPERM otherwise); setting the
+/// current time also allows a caller with write permission (EACCES).
+pub fn sys_utimensat(
+    dirfd: usize,
+    path_ptr: usize,
+    times_ptr: usize,
+    flags: usize,
+) -> SyscallResult {
+    if flags & !AT_SYMLINK_NOFOLLOW_FLAG != 0 {
+        return Err(SyscallError::InvalidArgument);
+    }
+    let node = if path_ptr == 0 {
+        let proc = process::current_process().ok_or(SyscallError::InvalidState)?;
+        let table = proc.file_table.lock();
+        table
+            .get(dirfd as u32 as usize)
+            .ok_or(SyscallError::BadFileDescriptor)?
+            .node
+            .clone()
+    } else {
+        let path = resolve_at_path(dirfd, &read_user_path(path_ptr)?)?;
+        let vfs = vfs()?;
+        if flags & AT_SYMLINK_NOFOLLOW_FLAG != 0 {
+            vfs.resolve_path_no_follow(&path)
+        } else {
+            vfs.resolve_path(&path)
+        }
+        .map_err(map_resolve_err)?
+    };
+    let specs = if times_ptr == 0 {
+        None
+    } else {
+        Some(super::userspace::read_user::<[[i64; 2]; 2]>(times_ptr)?)
+    };
+    let now = crate::arch::timer::get_timestamp_secs();
+    let (atime, mtime) = match specs {
+        None => (Some(now), Some(now)),
+        Some([a, m]) => (utime_spec(a, now)?, utime_spec(m, now)?),
+    };
+    let only_now = specs.is_none_or(|[a, m]| a[1] == UTIME_NOW && m[1] == UTIME_NOW);
+    let creds = caller_creds();
+    let meta = node.metadata().map_err(super::map_kernel_error)?;
+    if creds.euid != 0 && meta.uid != creds.euid {
+        if !only_now {
+            return Err(SyscallError::OperationNotPermitted);
+        }
+        if !meta
+            .permissions
+            .can_write(creds.euid, creds.gid_for(meta.gid), meta.uid, meta.gid)
+        {
+            return Err(SyscallError::PermissionDenied);
+        }
+    }
+    if atime.is_none() && mtime.is_none() {
+        return Ok(0);
+    }
+    node.set_times(atime, mtime)
+        .map_err(super::map_kernel_error)?;
+    Ok(0)
+}
+
+/// The fd's recorded path, as seen from the caller's root, provided it
+/// still names the object the fd refers to. Files are reached by path
+/// strings (N-115), so a directory renamed after it was opened, with
+/// another put at its old name, would otherwise let `fchdir` or an `*at`
+/// call check one directory and act on the other; that case is ENOENT.
+fn fd_directory_path(file: &crate::fs::file::File) -> Result<alloc::string::String, SyscallError> {
+    if file.node.node_type() != crate::fs::NodeType::Directory {
+        return Err(SyscallError::NotADirectory);
+    }
+    let global = file.path.as_deref().ok_or(SyscallError::NotADirectory)?;
+    let vfs = vfs()?;
+    let root = vfs.get_root();
+    let path = crate::fs::root_relative(global, &root);
+    let (now, canonical) = vfs
+        .resolve_canonical(&path, "/", true)
+        .map_err(|_| SyscallError::ResourceNotFound)?;
+    let same = canonical == global
+        && now.node_type() == crate::fs::NodeType::Directory
+        && match (now.metadata(), file.node.metadata()) {
+            (Ok(a), Ok(b)) => a.inode == b.inode,
+            _ => false,
+        };
+    if same {
+        Ok(path)
+    } else {
+        Err(SyscallError::ResourceNotFound)
+    }
+}
+
+/// fchdir: change to the directory an open fd refers to (N-250).
+pub fn sys_fchdir(fd: usize) -> SyscallResult {
+    let thread = process::current_thread().ok_or(SyscallError::InvalidState)?;
+    let proc = process::current_process().ok_or(SyscallError::InvalidState)?;
+    let file = proc
+        .file_table
+        .lock()
+        .get(fd as u32 as usize)
+        .ok_or(SyscallError::BadFileDescriptor)?;
+    let (node, path) = (file.node.clone(), fd_directory_path(&file)?);
+    // `path` is relative to the root; enter_directory wants the whole-tree
+    // path it maps back.
+    let root = vfs()?.get_root();
+    let path = if root == "/" {
+        path
+    } else if path == "/" {
+        root
+    } else {
+        alloc::format!("{}{}", root, path)
+    };
+    #[cfg(not(feature = "alloc"))]
+    {
+        let _ = (thread, node, path);
+        return Err(SyscallError::InvalidState);
+    }
+    #[cfg(feature = "alloc")]
+    enter_directory(&thread, &node, &path)
+}
+
+/// chroot (N-250): make `path` the root for every later lookup of this
+/// process's threads that share its filesystem state (and of children,
+/// which inherit it). Root only (EPERM), as without CAP_SYS_CHROOT on
+/// Linux. The working directory stays where it is if it is under the new
+/// root; otherwise it becomes the new root, where Linux would leave it
+/// outside (the classic way out of a chroot).
+pub fn sys_chroot(path_ptr: usize) -> SyscallResult {
+    let path = read_user_path(path_ptr)?;
+    if caller_creds().euid != 0 {
+        return Err(SyscallError::OperationNotPermitted);
+    }
+    let thread = process::current_thread().ok_or(SyscallError::InvalidState)?;
+    let fs = thread.fs();
+    let cwd = fs.cwd.lock().clone();
+    let (node, new_root) = vfs()?
+        .resolve_canonical(&path, &cwd, true)
+        .map_err(map_resolve_err)?;
+    if node.node_type() != crate::fs::NodeType::Directory {
+        return Err(SyscallError::NotADirectory);
+    }
+    let old_root = fs.root.lock().clone();
+    // The working directory in the whole tree, then seen from the new root.
+    let cwd_global = if old_root == "/" {
+        cwd
+    } else if cwd == "/" {
+        old_root
+    } else {
+        alloc::format!("{}{}", old_root, cwd)
+    };
+    let new_cwd = if new_root == "/" {
+        cwd_global
+    } else if cwd_global == new_root {
+        alloc::string::String::from("/")
+    } else {
+        match cwd_global.strip_prefix(new_root.as_str()) {
+            Some(rest) if rest.starts_with('/') => alloc::string::String::from(rest),
+            _ => alloc::string::String::from("/"),
+        }
+    };
+    *fs.root.lock() = new_root;
+    *fs.cwd.lock() = new_cwd;
+    Ok(0)
 }
 
 /// I/O control operations on a file descriptor
@@ -1234,10 +1561,7 @@ pub fn sys_ioctl(fd: usize, cmd: usize, arg: usize) -> SyscallResult {
             validate_user_ptr_typed::<KernelWinsize>(arg)?;
 
             let ws = terminal::get_winsize_snapshot();
-            // SAFETY: arg was validated as aligned, non-null, and in user space.
-            unsafe {
-                core::ptr::write(arg as *mut KernelWinsize, ws);
-            }
+            super::userspace::write_user(arg, ws)?;
             Ok(0)
         }
         TIOCSWINSZ => {
@@ -1247,8 +1571,7 @@ pub fn sys_ioctl(fd: usize, cmd: usize, arg: usize) -> SyscallResult {
             }
             validate_user_ptr_typed::<KernelWinsize>(arg)?;
 
-            // SAFETY: arg was validated as aligned, non-null, and in user space.
-            let ws = unsafe { core::ptr::read(arg as *const KernelWinsize) };
+            let ws: KernelWinsize = super::userspace::read_user(arg)?;
             terminal::set_winsize(&ws);
             Ok(0)
         }
@@ -1260,10 +1583,7 @@ pub fn sys_ioctl(fd: usize, cmd: usize, arg: usize) -> SyscallResult {
             validate_user_ptr_typed::<KernelTermios>(arg)?;
 
             let termios = terminal::get_termios_snapshot();
-            // SAFETY: arg was validated above.
-            unsafe {
-                core::ptr::write(arg as *mut KernelTermios, termios);
-            }
+            super::userspace::write_user(arg, termios)?;
             Ok(0)
         }
         TCSETS => {
@@ -1273,8 +1593,7 @@ pub fn sys_ioctl(fd: usize, cmd: usize, arg: usize) -> SyscallResult {
             }
             validate_user_ptr_typed::<KernelTermios>(arg)?;
 
-            // SAFETY: arg was validated as aligned, non-null, and in user space.
-            let new_termios = unsafe { core::ptr::read(arg as *const KernelTermios) };
+            let new_termios: KernelTermios = super::userspace::read_user(arg)?;
             terminal::set_termios(&new_termios);
             Ok(0)
         }
@@ -1287,8 +1606,7 @@ pub fn sys_ioctl(fd: usize, cmd: usize, arg: usize) -> SyscallResult {
             }
             validate_user_ptr_typed::<KernelTermios>(arg)?;
 
-            // SAFETY: arg was validated above.
-            let new_termios = unsafe { core::ptr::read(arg as *const KernelTermios) };
+            let new_termios: KernelTermios = super::userspace::read_user(arg)?;
             terminal::set_termios(&new_termios);
             Ok(0)
         }
@@ -1300,8 +1618,7 @@ pub fn sys_ioctl(fd: usize, cmd: usize, arg: usize) -> SyscallResult {
             }
             validate_user_ptr_typed::<KernelTermios>(arg)?;
 
-            // SAFETY: arg was validated above.
-            let new_termios = unsafe { core::ptr::read(arg as *const KernelTermios) };
+            let new_termios: KernelTermios = super::userspace::read_user(arg)?;
             terminal::set_termios(&new_termios);
             Ok(0)
         }
@@ -1316,10 +1633,7 @@ pub fn sys_ioctl(fd: usize, cmd: usize, arg: usize) -> SyscallResult {
             } else {
                 1
             };
-            // SAFETY: arg was validated above.
-            unsafe {
-                core::ptr::write(arg as *mut i32, pgid);
-            }
+            super::userspace::write_user(arg, pgid)?;
             Ok(0)
         }
         TIOCSPGRP => {
@@ -1346,46 +1660,141 @@ pub fn sys_ioctl(fd: usize, cmd: usize, arg: usize) -> SyscallResult {
 /// # Returns
 /// 0 on success
 pub fn sys_kill(pid: usize, signal: usize) -> SyscallResult {
-    let pid_i = pid as isize;
+    // kill(2) used to update a separate bookkeeping table (the process
+    // server's) and never reach a process, with no permission check and
+    // process groups scanned only up to pid 1024 (N-92).
+    // An int: its low 32 bits. Signals 1..=64 (0 tests for existence).
+    let sig = Some(signal as u32 as i32)
+        .filter(|s| (0..=crate::process::signals::NSIG as i32).contains(s))
+        .ok_or(SyscallError::InvalidArgument)?;
+    let caller = crate::process::current_process().ok_or(SyscallError::InvalidState)?;
 
-    if pid_i == 0 {
-        // pid == 0: send to every process in the caller's process group
-        let caller = crate::process::current_process().ok_or(SyscallError::InvalidState)?;
-        let my_pgid = caller.pgid.load(core::sync::atomic::Ordering::Relaxed);
-        send_signal_to_pgid(my_pgid, signal as i32)
-    } else if pid_i < 0 {
-        // pid < 0: send to process group |pid|
-        let pgid = (-pid_i) as u64;
-        send_signal_to_pgid(pgid, signal as i32)
-    } else {
-        // pid > 0: send to specific process
-        let process_server = crate::services::process_server::get_process_server();
-        match process_server.send_signal(crate::process::ProcessId(pid as u64), signal as i32) {
-            Ok(()) => Ok(0),
-            Err(_) => Err(SyscallError::ProcessNotFound),
+    match pid as isize {
+        p if p > 0 => kill_one(&caller, crate::process::ProcessId(p as u64), sig),
+        0 => kill_matching(&caller, sig, |p| {
+            p.pgid.load(core::sync::atomic::Ordering::Relaxed)
+                == caller.pgid.load(core::sync::atomic::Ordering::Relaxed)
+        }),
+        // Every process the caller may signal except init and itself.
+        -1 => kill_matching(&caller, sig, |p| p.pid.0 != 1 && p.pid != caller.pid),
+        p => {
+            let pgid = p.unsigned_abs() as u64;
+            kill_matching(&caller, sig, |p| {
+                p.pgid.load(core::sync::atomic::Ordering::Relaxed) == pgid
+            })
         }
     }
 }
 
-/// Send a signal to every process in the given process group.
-fn send_signal_to_pgid(pgid: u64, signal: i32) -> SyscallResult {
-    use crate::process::table;
+/// Whether `caller` may signal `target` (Linux kill(2)): root, or the
+/// sender's real or effective uid is the target's real or saved uid.
+fn may_signal(caller: &crate::process::Process, target: &crate::process::Process) -> bool {
+    let (c, t) = (caller.credentials(), target.credentials());
+    c.euid == 0
+        || [c.ruid, c.euid]
+            .iter()
+            .any(|&id| id == t.ruid || id == t.suid)
+}
 
-    let mut found = false;
-    let process_server = crate::services::process_server::get_process_server();
-    for pid_val in 1..=1024u64 {
-        let pid = crate::process::ProcessId(pid_val);
-        if let Some(proc) = table::get_process(pid) {
-            if proc.pgid.load(core::sync::atomic::Ordering::Relaxed) == pgid {
-                let _ = process_server.send_signal(pid, signal);
-                found = true;
-            }
+/// Signal one process; `sig` 0 only checks that it exists and may be
+/// signalled.
+pub(crate) fn kill_one(
+    caller: &crate::process::Process,
+    pid: crate::process::ProcessId,
+    sig: i32,
+) -> SyscallResult {
+    let target = crate::process::table::get_process(pid).ok_or(SyscallError::ProcessNotFound)?;
+    if !target.is_alive() {
+        return Err(SyscallError::ProcessNotFound);
+    }
+    if !may_signal(caller, &target) {
+        return Err(SyscallError::OperationNotPermitted);
+    }
+    if sig == 0 {
+        return Ok(0);
+    }
+    // A signal the caller sends itself whose action ends the process must
+    // leave through the exit path: tearing the process down here would
+    // return into the address space just freed.
+    // (A dispatched process queues it instead and acts on it at the
+    // system-call exit, honouring its mask; sprint D3.)
+    if target.pid == caller.pid
+        && terminates(caller, sig)
+        && !target
+            .dispatched
+            .load(core::sync::atomic::Ordering::Acquire)
+    {
+        return super::process::exit_current(0, sig as u32);
+    }
+    // The target sees the sender: SI_USER, the caller's pid and real user.
+    let info = crate::process::signals::SigInfo::from_process(
+        sig as usize,
+        crate::process::signals::SI_USER,
+        caller.pid.0,
+        caller.credentials().ruid,
+    );
+    send_info(pid, sig, info)
+}
+
+/// Make `sig` pending for process `pid` with `info` (the caller checked
+/// existence and permission): EAGAIN when a queued real-time signal would
+/// exceed RLIMIT_SIGPENDING.
+pub(crate) fn send_info(
+    pid: crate::process::ProcessId,
+    sig: i32,
+    info: crate::process::signals::SigInfo,
+) -> SyscallResult {
+    crate::process::exit::kill_process_info(pid, sig, info)
+        .map(|_| 0)
+        .map_err(|e| match e {
+            crate::error::KernelError::WouldBlock => SyscallError::WouldBlock,
+            _ => SyscallError::ProcessNotFound,
+        })
+}
+
+/// Whether delivering `sig` to `process` would end it (default action
+/// terminate or core dump, or SIGKILL).
+fn terminates(process: &crate::process::Process, sig: i32) -> bool {
+    use crate::process::exit::{default_signal_action, signals, SignalAction};
+    if sig == signals::SIGKILL {
+        return true;
+    }
+    let handler = process.get_signal_handler(sig as usize).unwrap_or(0);
+    handler == 0
+        && matches!(
+            default_signal_action(sig),
+            SignalAction::Terminate | SignalAction::CoreDump | SignalAction::Default
+        )
+}
+
+/// Signal every process selected by `pred` that the caller may signal.
+/// ESRCH if none matched, EPERM if all matches were refused.
+fn kill_matching(
+    caller: &crate::process::Process,
+    sig: i32,
+    pred: impl Fn(&crate::process::Process) -> bool,
+) -> SyscallResult {
+    let mut targets = alloc::vec::Vec::new();
+    crate::process::table::PROCESS_TABLE.for_each(|p| {
+        if p.is_alive() && pred(p) {
+            targets.push(p.pid);
+        }
+    });
+    if targets.is_empty() {
+        return Err(SyscallError::ProcessNotFound);
+    }
+    // The caller last, so it is still alive to signal the others.
+    targets.sort_by_key(|&p| p == caller.pid);
+    let mut sent = false;
+    for pid in targets {
+        if kill_one(caller, pid, sig).is_ok() {
+            sent = true;
         }
     }
-    if found {
+    if sent {
         Ok(0)
     } else {
-        Err(SyscallError::ProcessNotFound)
+        Err(SyscallError::OperationNotPermitted)
     }
 }
 
@@ -1396,6 +1805,18 @@ fn send_signal_to_pgid(pgid: u64, signal: i32) -> SyscallResult {
 /// Helper: read a NUL-terminated path from user space into an alloc::String.
 #[cfg(feature = "alloc")]
 pub(crate) fn read_user_path(ptr: usize) -> Result<alloc::string::String, SyscallError> {
+    // An empty path names nothing (ENOENT), as Linux's getname (N-203).
+    let path = read_user_path_or_empty(ptr)?;
+    if path.is_empty() {
+        return Err(SyscallError::ResourceNotFound);
+    }
+    Ok(path)
+}
+
+/// A path argument that may be empty (calls taking AT_EMPTY_PATH). A path
+/// with no terminator within PATH_MAX (4096 bytes, the NUL included) is
+/// ENAMETOOLONG; it used to be cut off and used (N-203).
+pub(crate) fn read_user_path_or_empty(ptr: usize) -> Result<alloc::string::String, SyscallError> {
     validate_user_string_ptr(ptr)?;
 
     // Copy through the fault-tolerant accessor in chunks that never cross a
@@ -1406,6 +1827,7 @@ pub(crate) fn read_user_path(ptr: usize) -> Result<alloc::string::String, Syscal
     const PAGE: usize = 4096;
     let mut bytes = Vec::new();
     let mut addr = ptr;
+    let mut terminated = false;
     'copy: while bytes.len() < PATH_MAX {
         let in_page = PAGE - (addr % PAGE);
         let mut chunk = [0u8; 64];
@@ -1413,11 +1835,15 @@ pub(crate) fn read_user_path(ptr: usize) -> Result<alloc::string::String, Syscal
         crate::syscall::userspace::read_user_bytes(addr, &mut chunk[..n])?;
         for &b in &chunk[..n] {
             if b == 0 {
+                terminated = true;
                 break 'copy;
             }
             bytes.push(b);
         }
         addr += n;
+    }
+    if !terminated {
+        return Err(SyscallError::NameTooLong);
     }
 
     core::str::from_utf8(&bytes)
@@ -1425,10 +1851,13 @@ pub(crate) fn read_user_path(ptr: usize) -> Result<alloc::string::String, Syscal
         .map_err(|_| SyscallError::InvalidArgument)
 }
 
-/// Credentials of the calling process: (uid, gid). Kernel context, with no
-/// process, acts as root.
-fn caller_creds() -> (u32, u32) {
-    process::current_process().map_or((0, 0), |p| (p.uid(), p.gid()))
+/// Credentials of the calling process. Kernel context, with no process,
+/// acts as root. Checks use the effective IDs, and a file's group grants
+/// access to any process in that group (`Credentials::gid_for`).
+fn caller_creds() -> crate::process::creds::Credentials {
+    process::current_process().map_or(crate::process::creds::Credentials::new(0, 0), |p| {
+        p.credentials()
+    })
 }
 
 /// Permissions for a new node: the requested `mode` minus the calling
@@ -1448,7 +1877,8 @@ pub(crate) fn creation_perms(mode: usize) -> Permissions {
 /// again would chown whatever is at that name by then -- a user could swap
 /// in a hard link to a root-owned file and take ownership of it.
 pub(crate) fn own_new_node(node: &alloc::sync::Arc<dyn crate::fs::VfsNode>) {
-    let (uid, gid) = caller_creds();
+    let creds = caller_creds();
+    let (uid, gid) = (creds.euid, creds.egid);
     if uid != 0 || gid != 0 {
         let _ = node.chown(Some(uid), Some(gid));
     }
@@ -1456,19 +1886,35 @@ pub(crate) fn own_new_node(node: &alloc::sync::Arc<dyn crate::fs::VfsNode>) {
 
 /// chmod-style operations: only the owner or root may change a node's
 /// mode (FS-SEC-02).
-pub(crate) fn require_owner_or_root(
+pub(crate) fn chmod_node(
     node: &alloc::sync::Arc<dyn crate::fs::VfsNode>,
-) -> Result<(), SyscallError> {
-    let (uid, _) = caller_creds();
-    if uid == 0 {
-        return Ok(());
+    mode: usize,
+) -> SyscallResult {
+    let creds = caller_creds();
+    let meta = node.metadata().map_err(super::map_kernel_error)?;
+    let perms = chmod_perms(&creds, meta.uid, meta.gid, mode)?;
+    node.chmod(perms).map_err(super::map_kernel_error)?;
+    Ok(0)
+}
+
+/// The mode a chmod by `creds` stores on a file owned by `uid`:`gid`.
+/// EPERM unless the caller owns the file or is root; and as Linux's
+/// setattr_copy, a caller other than root outside the file's group cannot
+/// set the set-group-ID bit (it is dropped, not refused).
+pub(crate) fn chmod_perms(
+    creds: &crate::process::creds::Credentials,
+    uid: u32,
+    gid: u32,
+    mode: usize,
+) -> Result<Permissions, SyscallError> {
+    if creds.euid != 0 && creds.euid != uid {
+        return Err(SyscallError::OperationNotPermitted);
     }
-    let meta = node.metadata().map_err(|_| SyscallError::InvalidState)?;
-    if meta.uid == uid {
-        Ok(())
-    } else {
-        Err(SyscallError::PermissionDenied)
+    let mut perms = Permissions::from_mode(mode as u32 & 0o7777);
+    if creds.euid != 0 && !creds.in_group(gid) {
+        perms.set_gid = false;
     }
+    Ok(perms)
 }
 
 /// Check that the caller may open `node` with `flags`, using the POSIX
@@ -1478,13 +1924,15 @@ pub(crate) fn require_open_access(
     node: &alloc::sync::Arc<dyn crate::fs::VfsNode>,
     flags: &OpenFlags,
 ) -> Result<(), SyscallError> {
-    let (uid, gid) = caller_creds();
+    let creds = caller_creds();
+    let uid = creds.euid;
     if uid == 0 {
         return Ok(());
     }
     let meta = node
         .metadata()
         .map_err(|_| SyscallError::PermissionDenied)?;
+    let gid = creds.gid_for(meta.gid);
     let p = meta.permissions;
     if flags.read && !p.can_read(uid, gid, meta.uid, meta.gid) {
         return Err(SyscallError::PermissionDenied);
@@ -1504,67 +1952,54 @@ fn rename_entry(old: &str, new: &str) -> SyscallResult {
     // Held across the ancestry check and the move, so no concurrent rename
     // can make the check stale.
     let _rename = crate::fs::RENAME_LOCK.lock();
-    require_may_remove(old)?;
-    require_dir_write(new)?;
+    // Both directories are resolved once; the checks and the move below
+    // use these nodes (N-51).
+    let (old_parent, old_name, old_parent_canon) = parent_dir_canonical(old)?;
+    let (new_parent, new_name, new_parent_canon) = parent_dir_canonical(new)?;
+    check_may_remove(&*old_parent, &old_name)?;
+    check_dir_write(&*new_parent)?;
     // Replacing an existing `new` removes it, so the sticky rule applies.
-    let new_exists = vfs()?.resolve_path_no_follow(new).is_ok();
-    if new_exists {
-        require_may_remove(new)?;
+    if new_parent.lookup(&new_name).is_ok() {
+        check_may_remove(&*new_parent, &new_name)?;
     }
 
     let vfs = vfs()?;
-    let (old_parent_path, old_name) = split_path(old)?;
-    let (new_parent_path, new_name) = split_path(new)?;
-    // Compared on canonical parents: the parents are resolved with symlinks
-    // followed below, so a string comparison let a symlink into another
-    // mount through (review of the v0.26.0 stack, PR #11).
-    let old_mount = vfs
-        .entry_mount_point(&old_parent_path, &old_name)
-        .map_err(map_resolve_err)?;
-    let new_mount = vfs
-        .entry_mount_point(&new_parent_path, &new_name)
-        .map_err(map_resolve_err)?;
+    // Compared on the canonical parents of the resolution that produced the
+    // nodes above: a string comparison let a symlink into another mount
+    // through (review of PR #11), and resolving the paths again let them
+    // describe other directories than the nodes (N-51).
+    let old_mount = vfs.canonical_entry_mount_point(&old_parent_canon, &old_name);
+    let new_mount = vfs.canonical_entry_mount_point(&new_parent_canon, &new_name);
     if old_mount != new_mount {
         return Err(SyscallError::CrossDevice);
     }
-    let src = vfs.resolve_path_no_follow(old).map_err(map_resolve_err)?;
+    let src = old_parent.lookup(&old_name).map_err(map_resolve_err)?;
 
     if src.node_type() == crate::fs::NodeType::Directory {
         // A directory cannot move into its own subtree (POSIX: EINVAL).
         // Compared on canonical paths (symlinks, ".", ".." resolved): a
         // string prefix test on the raw paths was bypassed by "/a/./b" or
         // a symlink to the directory, which orphaned it as its own child.
-        let (_, old_parent_canon) = vfs
-            .resolve_canonical(&old_parent_path, "/", true)
-            .map_err(map_resolve_err)?;
         let src_canon = if old_parent_canon == "/" {
             alloc::format!("/{}", old_name)
         } else {
             alloc::format!("{}/{}", old_parent_canon, old_name)
         };
-        let (_, new_parent_canon) = vfs
-            .resolve_canonical(&new_parent_path, "/", true)
-            .map_err(map_resolve_err)?;
         if crate::fs::path_is_under(&new_parent_canon, &src_canon) {
             return Err(SyscallError::InvalidArgument);
         }
         // Moving it to another parent rewrites its "..", which needs write
         // permission on the directory itself.
-        if old_parent_path != new_parent_path {
-            let (uid, gid) = caller_creds();
-            let meta = src.metadata().map_err(|_| SyscallError::InvalidState)?;
+        if old_parent_canon != new_parent_canon {
+            let creds = caller_creds();
+            let meta = src.metadata().map_err(super::map_kernel_error)?;
+            let (uid, gid) = (creds.euid, creds.gid_for(meta.gid));
             if uid != 0 && !meta.permissions.can_write(uid, gid, meta.uid, meta.gid) {
                 return Err(SyscallError::PermissionDenied);
             }
         }
     }
 
-    let old_parent = vfs
-        .resolve_path(&old_parent_path)
-        .map_err(map_resolve_err)?;
-    let new_parent = vfs
-        .resolve_path(&new_parent_path)
-        .map_err(map_resolve_err)?;
     // The node moves; nothing is copied, and a symlink at `new` is replaced
     // rather than followed (FS-PERF-03).
     old_parent
@@ -1573,16 +2008,56 @@ fn rename_entry(old: &str, new: &str) -> SyscallResult {
     Ok(0)
 }
 
-/// Creating or removing a directory entry needs write and search
-/// permission on the directory holding it (FS-SEC-02).
-pub(crate) fn require_dir_write(path: &str) -> Result<(), SyscallError> {
-    let (uid, gid) = caller_creds();
+/// The directory holding `path`, resolved once for the caller, and the
+/// entry's name. The permission checks below and the operation that
+/// follows all use this one node: checking a path and then operating on it
+/// by path again let the path change in between -- a symlink swapped in, a
+/// directory renamed -- so the check applied to another directory (N-51).
+pub(crate) fn parent_dir(
+    path: &str,
+) -> Result<
+    (
+        alloc::sync::Arc<dyn crate::fs::VfsNode>,
+        alloc::string::String,
+    ),
+    SyscallError,
+> {
+    let (dir, name, _) = parent_dir_canonical(path)?;
+    Ok((dir, name))
+}
+
+/// [`parent_dir`] with the directory's canonical path from the same
+/// resolution, for checks that need a path (mounts, ancestry): taking it
+/// from a second resolution would let it describe another directory.
+pub(crate) fn parent_dir_canonical(
+    path: &str,
+) -> Result<
+    (
+        alloc::sync::Arc<dyn crate::fs::VfsNode>,
+        alloc::string::String,
+        alloc::string::String,
+    ),
+    SyscallError,
+> {
+    let (parent, name) = split_path(path)?;
+    // Relative to the caller's working directory, as `resolve_path` does: a
+    // relative "a/b" names "a" there, not under "/" (review of 40695cdb).
+    let (dir, canonical) = vfs()?
+        .resolve_path_canonical(&parent)
+        .map_err(map_resolve_err)?;
+    Ok((dir, name, canonical))
+}
+
+/// Creating or removing an entry in `dir` needs write and search permission
+/// on it (FS-SEC-02).
+pub(crate) fn check_dir_write(dir: &dyn crate::fs::VfsNode) -> Result<(), SyscallError> {
+    let creds = caller_creds();
+    let uid = creds.euid;
     if uid == 0 {
         return Ok(());
     }
-    let (parent, _) = split_path(path)?;
-    let dir = vfs()?.resolve_path(&parent).map_err(map_resolve_err)?;
-    let meta = dir.metadata().map_err(|_| SyscallError::InvalidState)?;
+    let meta = dir.metadata().map_err(super::map_kernel_error)?;
+    let gid = creds.gid_for(meta.gid);
     let p = meta.permissions;
     if p.can_write(uid, gid, meta.uid, meta.gid) && p.can_run(uid, gid, meta.uid, meta.gid) {
         Ok(())
@@ -1591,30 +2066,27 @@ pub(crate) fn require_dir_write(path: &str) -> Result<(), SyscallError> {
     }
 }
 
-/// Check that the caller may remove or rename the entry at `path`: it needs
-/// write and search permission on the parent directory and, if that
-/// directory is sticky, must own the entry or the directory (or be root).
-pub(crate) fn require_may_remove(path: &str) -> Result<(), SyscallError> {
-    require_dir_write(path)?;
-    let (uid, _) = caller_creds();
+/// Check that the caller may remove or rename entry `name` of `dir`: write
+/// and search permission on `dir` and, if it is sticky, ownership of the
+/// entry or the directory (or root).
+pub(crate) fn check_may_remove(
+    dir: &dyn crate::fs::VfsNode,
+    name: &str,
+) -> Result<(), SyscallError> {
+    check_dir_write(dir)?;
+    let uid = caller_creds().euid;
     if uid == 0 {
         return Ok(());
     }
-    let (parent, _) = split_path(path)?;
-    let vfs_guard = vfs()?;
-    let dir_meta = vfs_guard
-        .resolve_path(&parent)
-        .map_err(map_resolve_err)?
-        .metadata()
-        .map_err(|_| SyscallError::InvalidState)?;
+    let dir_meta = dir.metadata().map_err(super::map_kernel_error)?;
     if !dir_meta.permissions.sticky || dir_meta.uid == uid {
         return Ok(());
     }
-    let entry_meta = vfs_guard
-        .resolve_path_no_follow(path)
+    let entry_meta = dir
+        .lookup(name)
         .map_err(map_resolve_err)?
         .metadata()
-        .map_err(|_| SyscallError::InvalidState)?;
+        .map_err(super::map_kernel_error)?;
     if entry_meta.uid == uid {
         Ok(())
     } else {
@@ -1633,20 +2105,7 @@ pub(crate) fn require_may_remove(path: &str) -> Result<(), SyscallError> {
 /// # Returns
 /// 0 on success.
 pub fn sys_stat_path(path_ptr: usize, stat_buf: usize) -> SyscallResult {
-    validate_user_ptr_typed::<FileStat>(stat_buf)?;
-    let path = read_user_path(path_ptr)?;
-
-    let vfs = vfs()?;
-    let node = vfs.resolve_path(&path).map_err(map_resolve_err)?;
-
-    let metadata = node.metadata().map_err(|_| SyscallError::InvalidState)?;
-    let stat = fill_stat(&metadata);
-
-    // SAFETY: stat_buf was validated as non-null, in user-space, and aligned.
-    unsafe {
-        core::ptr::write(stat_buf as *mut FileStat, stat);
-    }
-    Ok(0)
+    sys_fstatat(AT_FDCWD, path_ptr, stat_buf, 0)
 }
 
 /// Stat a file by path without following the final symlink (syscall 151).
@@ -1662,80 +2121,9 @@ pub fn sys_stat_path(path_ptr: usize, stat_buf: usize) -> SyscallResult {
 /// # Returns
 /// 0 on success.
 pub fn sys_lstat(path_ptr: usize, stat_buf: usize) -> SyscallResult {
-    validate_user_ptr_typed::<FileStat>(stat_buf)?;
-    let path = read_user_path(path_ptr)?;
-
-    // Trace lstat calls during kwin bringup
-    #[cfg(target_arch = "x86_64")]
-    {
-        // SAFETY: Writing to COM1 for diagnostic output.
-        unsafe {
-            crate::arch::x86_64::idt::raw_serial_str(b"[LSTAT] ");
-            let show_len = path.len().min(80);
-            for &b in &path.as_bytes()[..show_len] {
-                crate::arch::x86_64::idt::raw_serial_str(&[b]);
-            }
-            crate::arch::x86_64::idt::raw_serial_str(b"\n");
-        }
-    }
-
-    let vfs = vfs()?;
-    match vfs.resolve_path_no_follow(&path) {
-        Ok(node) => {
-            let metadata = node.metadata().map_err(|_| SyscallError::InvalidState)?;
-            let stat = fill_stat(&metadata);
-            // SAFETY: stat_buf was validated as non-null, in user-space, and aligned.
-            unsafe {
-                core::ptr::write(stat_buf as *mut FileStat, stat);
-            }
-            Ok(0)
-        }
-        Err(_) => {
-            // Workaround for wayland display socket creation:
-            // kwin's musl wrapper has a bug where stat() returning ENOENT
-            // is misinterpreted as a non-ENOENT error (likely due to double
-            // __syscall_ret application in the musl remap wrapper). This
-            // prevents kwin from finding a free wayland display number.
-            //
-            // For paths matching /run/user/0/wayland-N (without .lock),
-            // return a fake stat indicating S_IFSOCK. This tells wayland
-            // "stale socket from previous run" which triggers the correct
-            // unlink+rebind path instead of the broken ENOENT path.
-            if path.starts_with("/run/user/")
-                && path.contains("wayland-")
-                && !path.ends_with(".lock")
-            {
-                // S_IFSOCK (0xC000) | 0o755
-                let fake_stat = FileStat {
-                    st_dev: 0,
-                    st_ino: 0xFFFF,
-                    st_nlink: 1,
-                    st_mode: 0xC1ED, // S_IFSOCK | 0755
-                    st_uid: 0,
-                    st_gid: 0,
-                    __pad0: 0,
-                    st_rdev: 0,
-                    st_size: 0,
-                    st_blksize: 4096,
-                    st_blocks: 0,
-                    st_atime: 0,
-                    st_atime_nsec: 0,
-                    st_mtime: 0,
-                    st_mtime_nsec: 0,
-                    st_ctime: 0,
-                    st_ctime_nsec: 0,
-                    __unused: [0; 3],
-                };
-                unsafe {
-                    core::ptr::write(stat_buf as *mut FileStat, fake_stat);
-                }
-                return Ok(0);
-            }
-            Err(map_resolve_err(crate::error::KernelError::FsError(
-                crate::error::FsError::NotFound,
-            )))
-        }
-    }
+    // A missing Wayland socket used to stat as a socket here, a workaround
+    // for a musl remapping bug that ADR 0009 removed.
+    sys_fstatat(AT_FDCWD, path_ptr, stat_buf, AT_SYMLINK_NOFOLLOW)
 }
 
 /// Read the target of a symbolic link (syscall 152).
@@ -1808,50 +2196,71 @@ pub fn sys_readlink(path_ptr: usize, buf: usize, bufsiz: usize) -> SyscallResult
 /// 0 if accessible, error otherwise.
 pub fn sys_access(path_ptr: usize, mode: usize) -> SyscallResult {
     let path = read_user_path(path_ptr)?;
-    access_path(&path, mode)
+    access_path(&path, mode, 0)
 }
 
-/// faccessat / faccessat2: `access` relative to a directory fd.
-///
-/// `flags` (AT_EACCESS, AT_SYMLINK_NOFOLLOW) are accepted; real and
-/// effective IDs are the same here and symlinks are always followed.
-pub fn sys_faccessat(dirfd: usize, path_ptr: usize, mode: usize, _flags: usize) -> SyscallResult {
+/// faccessat (3 arguments, no flags) and faccessat2 (with `flags`):
+/// `access` relative to a directory fd.
+pub fn sys_faccessat(dirfd: usize, path_ptr: usize, mode: usize, flags: usize) -> SyscallResult {
     let path = read_user_path(path_ptr)?;
     let path = resolve_at_path(dirfd, &path)?;
-    access_path(&path, mode)
+    access_path(&path, mode, flags)
 }
 
-fn access_path(path: &str, mode: usize) -> SyscallResult {
-    let vfs = vfs()?;
+const AT_EACCESS: usize = 0x200;
+const AT_SYMLINK_NOFOLLOW_FLAG: usize = 0x100;
 
-    // Check if the file exists (F_OK = 0)
-    let node = vfs.resolve_path(path).map_err(map_resolve_err)?;
-
-    // For non-zero mode, check permissions against metadata
-    if mode != 0 {
-        let metadata = node.metadata().map_err(|_| SyscallError::InvalidState)?;
-
-        // Determine the caller's uid.  Root (uid 0) bypasses all checks.
-        let caller_uid = crate::process::current_process()
-            .map(|p| p.uid())
-            .unwrap_or(0);
-
-        if caller_uid != 0 {
-            let perms = &metadata.permissions;
-            // R_OK=4, W_OK=2, X_OK=1
-            if mode & 4 != 0 && !perms.other_read {
-                return Err(SyscallError::PermissionDenied);
-            }
-            if mode & 2 != 0 && !perms.other_write {
-                return Err(SyscallError::PermissionDenied);
-            }
-            if mode & 1 != 0 && !perms.other_exec {
-                return Err(SyscallError::PermissionDenied);
-            }
-        }
+/// Whether access mode `mode` (R_OK 4, W_OK 2, X_OK 1) is granted to a
+/// process with IDs (uid, gid as `gid_for` chose it) on a file with `meta`.
+/// Root may read and write anything and execute anything with an execute
+/// bit set, or any directory, as on Linux.
+fn access_granted(
+    uid: u32,
+    gid: u32,
+    meta: &crate::fs::Metadata,
+    is_dir: bool,
+    mode: usize,
+) -> bool {
+    let p = &meta.permissions;
+    if uid == 0 {
+        let any_x = p.owner_exec || p.group_exec || p.other_exec;
+        return mode & 1 == 0 || any_x || is_dir;
     }
+    (mode & 4 == 0 || p.can_read(uid, gid, meta.uid, meta.gid))
+        && (mode & 2 == 0 || p.can_write(uid, gid, meta.uid, meta.gid))
+        && (mode & 1 == 0 || p.can_run(uid, gid, meta.uid, meta.gid))
+}
 
-    Ok(0)
+/// access(2): checked with the real IDs (the effective ones with
+/// AT_EACCESS), owner, then group (any of the process's groups), then
+/// other bits. It checked only the "other" bits (N-193).
+fn access_path(path: &str, mode: usize, flags: usize) -> SyscallResult {
+    if mode & !7 != 0 || flags & !(AT_EACCESS | AT_SYMLINK_NOFOLLOW_FLAG) != 0 {
+        return Err(SyscallError::InvalidArgument);
+    }
+    let vfs = vfs()?;
+    let node = if flags & AT_SYMLINK_NOFOLLOW_FLAG != 0 {
+        vfs.resolve_path_no_follow(path)
+    } else {
+        vfs.resolve_path(path)
+    }
+    .map_err(map_resolve_err)?;
+    if mode == 0 {
+        return Ok(0); // F_OK: it exists
+    }
+    let meta = node.metadata().map_err(super::map_kernel_error)?;
+    let creds = caller_creds();
+    let (uid, gid) = if flags & AT_EACCESS != 0 {
+        (creds.euid, creds.gid_for(meta.gid))
+    } else {
+        (creds.ruid, creds.real_gid_for(meta.gid))
+    };
+    let is_dir = node.node_type() == crate::fs::NodeType::Directory;
+    if access_granted(uid, gid, &meta, is_dir, mode) {
+        Ok(0)
+    } else {
+        Err(SyscallError::PermissionDenied)
+    }
 }
 
 /// Rename a file or directory (syscall 154).
@@ -1863,8 +2272,15 @@ fn access_path(path: &str, mode: usize) -> SyscallResult {
 /// # Returns
 /// 0 on success.
 pub fn sys_rename(old_ptr: usize, new_ptr: usize) -> SyscallResult {
-    let old_path = resolve_at_path(AT_FDCWD, &read_user_path(old_ptr)?)?;
-    let new_path = resolve_at_path(AT_FDCWD, &read_user_path(new_ptr)?)?;
+    rename_paths(&read_user_path(old_ptr)?, &read_user_path(new_ptr)?)
+}
+
+/// `rename(old, new)` for kernel callers (the shell's `mv`): paths relative
+/// to the calling process's working directory, the same checks and atomic
+/// replace as the system call.
+pub(crate) fn rename_paths(old: &str, new: &str) -> SyscallResult {
+    let old_path = resolve_at_path(AT_FDCWD, old)?;
+    let new_path = resolve_at_path(AT_FDCWD, new)?;
     rename_entry(&old_path, &new_path)
 }
 
@@ -1876,15 +2292,7 @@ pub fn sys_rename(old_ptr: usize, new_ptr: usize) -> SyscallResult {
 /// # Returns
 /// 0 on success.
 pub fn sys_unlink(path_ptr: usize) -> SyscallResult {
-    let path = read_user_path(path_ptr)?;
-    require_may_remove(&path)?;
-
-    let vfs = vfs()?;
-
-    match vfs.unlink(&path) {
-        Ok(()) => Ok(0),
-        Err(_) => Err(SyscallError::ResourceNotFound),
-    }
+    sys_unlinkat(AT_FDCWD, path_ptr, 0)
 }
 
 /// File descriptor control (syscall 158).
@@ -1905,6 +2313,8 @@ pub fn sys_fcntl(fd: usize, cmd: usize, arg: usize) -> SyscallResult {
     const F_GETFL: usize = 3;
     const F_SETFL: usize = 4;
     const F_DUPFD_CLOEXEC: usize = 1030;
+    const F_ADD_SEALS: usize = 1033;
+    const F_GET_SEALS: usize = 1034;
     const FD_CLOEXEC: usize = 1;
 
     let proc = process::current_process().ok_or(SyscallError::InvalidState)?;
@@ -1915,21 +2325,21 @@ pub fn sys_fcntl(fd: usize, cmd: usize, arg: usize) -> SyscallResult {
             // Duplicate fd to lowest available >= arg
             match file_table.dup_at_least(fd, arg, false) {
                 Ok(new_fd) => Ok(new_fd),
-                Err(_) => Err(SyscallError::InvalidArgument),
+                Err(e) => Err(super::map_kernel_error(e)),
             }
         }
         F_DUPFD_CLOEXEC => {
             // Duplicate fd to lowest available >= arg, with close-on-exec
             match file_table.dup_at_least(fd, arg, true) {
                 Ok(new_fd) => Ok(new_fd),
-                Err(_) => Err(SyscallError::InvalidArgument),
+                Err(e) => Err(super::map_kernel_error(e)),
             }
         }
         F_GETFD => {
             // Get close-on-exec flag via FileTable API
             match file_table.get_cloexec(fd) {
                 Ok(cloexec) => Ok(if cloexec { FD_CLOEXEC } else { 0 }),
-                Err(_) => Err(SyscallError::InvalidArgument),
+                Err(e) => Err(super::map_kernel_error(e)),
             }
         }
         F_SETFD => {
@@ -1968,6 +2378,29 @@ pub fn sys_fcntl(fd: usize, cmd: usize, arg: usize) -> SyscallResult {
                 .store(nonblock, core::sync::atomic::Ordering::Relaxed);
             Ok(0)
         }
+        // Seals (N-229): only a memfd has them (EINVAL otherwise); adding
+        // needs the fd open for writing (EPERM), as on Linux.
+        F_GET_SEALS => {
+            let file = file_table.get(fd).ok_or(SyscallError::BadFileDescriptor)?;
+            file.node
+                .seals()
+                .map(|s| s as usize)
+                .ok_or(SyscallError::InvalidArgument)
+        }
+        F_ADD_SEALS => {
+            let file = file_table.get(fd).ok_or(SyscallError::BadFileDescriptor)?;
+            drop(file_table);
+            if file.node.seals().is_none() {
+                return Err(SyscallError::InvalidArgument);
+            }
+            if !file.flags.write {
+                return Err(SyscallError::OperationNotPermitted);
+            }
+            file.node
+                .add_seals(arg as u32)
+                .map(|_| 0)
+                .map_err(super::map_kernel_error)
+        }
         _ => Err(SyscallError::InvalidArgument),
     }
 }
@@ -1984,10 +2417,22 @@ pub fn sys_fcntl(fd: usize, cmd: usize, arg: usize) -> SyscallResult {
 ///
 /// # Returns
 /// 0 on success.
-pub fn sys_pipe2(pipe_fds_ptr: usize, flags: usize) -> SyscallResult {
-    validate_user_buffer(pipe_fds_ptr, 2 * core::mem::size_of::<i32>())?;
+/// Linux O_CLOEXEC and O_NONBLOCK, the only flags pipe2 and dup3 accept.
+const FD_FLAG_CLOEXEC: usize = 0x8_0000;
+const FD_FLAG_NONBLOCK: usize = 0x800;
 
-    let cloexec = flags & 0x2000 != 0;
+/// pipe2's flags as (cloexec, nonblock); anything else is EINVAL, as on
+/// Linux.
+fn pipe2_flags(flags: usize) -> Result<(bool, bool), SyscallError> {
+    if flags & !(FD_FLAG_CLOEXEC | FD_FLAG_NONBLOCK) != 0 {
+        return Err(SyscallError::InvalidArgument);
+    }
+    Ok((flags & FD_FLAG_CLOEXEC != 0, flags & FD_FLAG_NONBLOCK != 0))
+}
+
+pub fn sys_pipe2(pipe_fds_ptr: usize, flags: usize) -> SyscallResult {
+    let (cloexec, nonblock) = pipe2_flags(flags)?;
+    validate_user_buffer(pipe_fds_ptr, 2 * core::mem::size_of::<i32>())?;
 
     // Create the pipe
     let (reader, writer) = crate::fs::pipe::create_pipe().map_err(|_| SyscallError::OutOfMemory)?;
@@ -1999,8 +2444,20 @@ pub fn sys_pipe2(pipe_fds_ptr: usize, flags: usize) -> SyscallResult {
         alloc::sync::Arc::new(crate::fs::pipe::PipeWriteNode::new(writer));
 
     // Create File objects
-    let read_file = crate::fs::file::File::new(read_node, OpenFlags::read_only());
-    let write_file = crate::fs::file::File::new(write_node, OpenFlags::write_only());
+    let read_file = crate::fs::file::File::new(
+        read_node,
+        OpenFlags {
+            nonblock,
+            ..OpenFlags::read_only()
+        },
+    );
+    let write_file = crate::fs::file::File::new(
+        write_node,
+        OpenFlags {
+            nonblock,
+            ..OpenFlags::write_only()
+        },
+    );
 
     // Allocate file descriptors in the calling process's file table
     let proc = process::current_process().ok_or(SyscallError::InvalidState)?;
@@ -2008,23 +2465,25 @@ pub fn sys_pipe2(pipe_fds_ptr: usize, flags: usize) -> SyscallResult {
 
     let read_fd = file_table
         .open_with_flags(alloc::sync::Arc::new(read_file), cloexec)
-        .map_err(|_| SyscallError::OutOfMemory)?;
+        .map_err(super::map_kernel_error)?;
 
     let write_fd = file_table
         .open_with_flags(alloc::sync::Arc::new(write_file), cloexec)
-        .map_err(|_| {
+        .map_err(|e| {
             // Clean up read fd on failure
             file_table.close_on_rollback(read_fd, "pipe");
-            SyscallError::OutOfMemory
+            super::map_kernel_error(e)
         })?;
 
-    // Write [read_fd, write_fd] to user buffer as i32 (C int).
-    // SAFETY: pipe_fds_ptr was validated above as non-null and in user
-    // space with sufficient size for two i32 values.
-    unsafe {
-        let fds = pipe_fds_ptr as *mut i32;
-        *fds = read_fd as i32;
-        *fds.add(1) = write_fd as i32;
+    // Write [read_fd, write_fd] to user buffer as i32 (C int), through the
+    // fault-tolerant writer (N-43). An unwritable buffer leaves the caller
+    // without the fds, so they are closed again.
+    if let Err(e) =
+        crate::syscall::userspace::write_user(pipe_fds_ptr, [read_fd as i32, write_fd as i32])
+    {
+        file_table.close_on_rollback(write_fd, "pipe");
+        file_table.close_on_rollback(read_fd, "pipe");
+        return Err(e);
     }
 
     Ok(0)
@@ -2049,17 +2508,17 @@ pub fn sys_dup3(old_fd: usize, new_fd: usize, flags: usize) -> SyscallResult {
     }
 
     // Only O_CLOEXEC is valid
-    if flags & !0x2000 != 0 {
+    if flags & !FD_FLAG_CLOEXEC != 0 {
         return Err(SyscallError::InvalidArgument);
     }
 
-    let cloexec = flags & 0x2000 != 0;
+    let cloexec = flags & FD_FLAG_CLOEXEC != 0;
     let proc = process::current_process().ok_or(SyscallError::InvalidState)?;
     let file_table = proc.file_table.lock();
 
     file_table
         .dup3(old_fd, new_fd, cloexec)
-        .map_err(|_| SyscallError::InvalidArgument)?;
+        .map_err(super::map_kernel_error)?;
 
     Ok(new_fd)
 }
@@ -2077,11 +2536,9 @@ pub fn sys_opendir(path_ptr: usize) -> SyscallResult {
     let vfs = vfs()?;
 
     // Verify path exists and is a directory
-    let node = vfs
-        .resolve_path(&path)
-        .map_err(|_| SyscallError::ResourceNotFound)?;
+    let node = vfs.resolve_path(&path).map_err(map_resolve_err)?;
 
-    let metadata = node.metadata().map_err(|_| SyscallError::InvalidState)?;
+    let metadata = node.metadata().map_err(super::map_kernel_error)?;
     if metadata.node_type != crate::fs::NodeType::Directory {
         return Err(SyscallError::InvalidArgument);
     }
@@ -2092,7 +2549,7 @@ pub fn sys_opendir(path_ptr: usize) -> SyscallResult {
     let file_table = proc.file_table.lock();
     match file_table.open(alloc::sync::Arc::new(file)) {
         Ok(fd) => Ok(fd),
-        Err(_) => Err(SyscallError::OutOfMemory),
+        Err(e) => Err(super::map_kernel_error(e)),
     }
 }
 
@@ -2121,8 +2578,12 @@ pub fn sys_readdir(fd: usize, entry_buf: usize, buf_size: usize) -> SyscallResul
     validate_user_buffer(entry_buf, buf_size)?;
 
     let proc = process::current_process().ok_or(SyscallError::InvalidState)?;
-    let file_table = proc.file_table.lock();
-    let file_desc = file_table.get(fd).ok_or(SyscallError::InvalidArgument)?;
+    // Lookup only; the lock is not held over the operation (N-118).
+    let file_desc = proc
+        .file_table
+        .lock()
+        .get(fd)
+        .ok_or(SyscallError::BadFileDescriptor)?;
 
     // Read all directory entries from the VFS node
     let entries = file_desc
@@ -2144,23 +2605,21 @@ pub fn sys_readdir(fd: usize, entry_buf: usize, buf_size: usize) -> SyscallResul
         return Err(SyscallError::InvalidArgument);
     }
 
-    // Write entry name + NUL terminator + node type byte to user buffer
-    // SAFETY: entry_buf was validated above as non-null and in user space
-    // with sufficient size. We write name_bytes.len() + 2 bytes total.
-    unsafe {
-        let dst = entry_buf as *mut u8;
-        core::ptr::copy_nonoverlapping(name_bytes.as_ptr(), dst, name_bytes.len());
-        *dst.add(name_bytes.len()) = 0; // NUL terminator
-        *dst.add(name_bytes.len() + 1) = match entry.node_type {
-            crate::fs::NodeType::File => 0,
-            crate::fs::NodeType::Directory => 1,
-            crate::fs::NodeType::CharDevice => 2,
-            crate::fs::NodeType::BlockDevice => 3,
-            crate::fs::NodeType::Symlink => 4,
-            crate::fs::NodeType::Pipe => 5,
-            _ => 0,
-        };
-    }
+    // Entry name + NUL terminator + node type byte, written to the user
+    // buffer in one fault-tolerant copy (N-43).
+    let mut out = Vec::with_capacity(name_bytes.len() + 2);
+    out.extend_from_slice(name_bytes);
+    out.push(0);
+    out.push(match entry.node_type {
+        crate::fs::NodeType::File => 0,
+        crate::fs::NodeType::Directory => 1,
+        crate::fs::NodeType::CharDevice => 2,
+        crate::fs::NodeType::BlockDevice => 3,
+        crate::fs::NodeType::Symlink => 4,
+        crate::fs::NodeType::Pipe => 5,
+        _ => 0,
+    });
+    super::userspace::write_user_bytes(entry_buf, &out)?;
 
     // Advance the file position to the next entry
     let _ = file_desc.seek(crate::fs::SeekFrom::Start(pos + 1));
@@ -2192,10 +2651,14 @@ struct Iovec {
     iov_len: usize,
 }
 
+// SAFETY: repr(C) with two usize fields and no padding, so every bit
+// pattern is a valid value.
+unsafe impl super::userspace::UserPod for Iovec {}
+
 /// Maximum number of iovec entries per readv/writev call.
 const IOV_MAX: usize = 1024;
 
-/// Read from a file descriptor into multiple buffers (SYS_READV = 183).
+/// Read from a file descriptor into multiple buffers (SYS_readv = 19).
 ///
 /// # Arguments
 /// - `fd`: File descriptor to read from.
@@ -2219,12 +2682,7 @@ pub fn sys_readv(fd: usize, iov_ptr: usize, iovcnt: usize) -> SyscallResult {
     let mut total_read = 0usize;
 
     for i in 0..iovcnt {
-        // SAFETY: iov_ptr was validated above. Each Iovec is repr(C) with
-        // known size. We read iov entries one at a time within bounds.
-        let iov = unsafe {
-            let ptr = (iov_ptr as *const Iovec).add(i);
-            core::ptr::read(ptr)
-        };
+        let iov: Iovec = super::userspace::read_user_index(iov_ptr, i)?;
 
         if iov.iov_len == 0 {
             continue;
@@ -2252,7 +2710,7 @@ pub fn sys_readv(fd: usize, iov_ptr: usize, iovcnt: usize) -> SyscallResult {
     Ok(total_read)
 }
 
-/// Write to a file descriptor from multiple buffers (SYS_WRITEV = 184).
+/// Write to a file descriptor from multiple buffers (SYS_writev = 20).
 ///
 /// # Arguments
 /// - `fd`: File descriptor to write to.
@@ -2274,23 +2732,38 @@ pub fn sys_writev(fd: usize, iov_ptr: usize, iovcnt: usize) -> SyscallResult {
     validate_user_buffer(iov_ptr, iov_size)?;
 
     let mut total_written = 0usize;
+    let iovs = (0..iovcnt)
+        .map(|i| super::userspace::read_user_index::<Iovec>(iov_ptr, i))
+        .collect::<Result<alloc::vec::Vec<_>, _>>()?;
 
-    for i in 0..iovcnt {
-        // SAFETY: iov_ptr was validated above. Each Iovec is repr(C) with
-        // known size. We read iov entries one at a time within bounds.
-        let iov = unsafe {
-            let ptr = (iov_ptr as *const Iovec).add(i);
-            core::ptr::read(ptr)
-        };
+    // RLIMIT_FSIZE applies to the vector as one write: only a write that
+    // starts at the limit is refused (EFBIG, SIGXFSZ), and the segments
+    // stop where it is reached.
+    let total = iovs
+        .iter()
+        .fold(0usize, |t, iov| t.saturating_add(iov.iov_len));
+    let file = process::current_process().and_then(|p| p.file_table.lock().get(fd));
+    let mut room = match file {
+        Some(file) if file.flags.write => {
+            file.fsize_room(total).map_err(super::map_kernel_error)?
+        }
+        _ => total,
+    };
 
-        if iov.iov_len == 0 {
+    for iov in iovs {
+        let len = iov.iov_len.min(room);
+        if len == 0 {
+            if room == 0 {
+                break;
+            }
             continue;
         }
 
         // Delegate to existing sys_write for each segment
-        match sys_write(fd, iov.iov_base, iov.iov_len) {
+        match sys_write(fd, iov.iov_base, len) {
             Ok(n) => {
                 total_written += n;
+                room -= n.min(room);
                 // Short write means buffer full or error
                 if n < iov.iov_len {
                     break;
@@ -2299,6 +2772,11 @@ pub fn sys_writev(fd: usize, iov_ptr: usize, iovcnt: usize) -> SyscallResult {
             Err(e) => {
                 // If we already wrote some data, return what we have
                 if total_written > 0 {
+                    if let Some(file) =
+                        process::current_process().and_then(|p| p.file_table.lock().get(fd))
+                    {
+                        sigpipe_after_partial_write(&file, e);
+                    }
                     break;
                 }
                 return Err(e);
@@ -2317,6 +2795,13 @@ pub fn sys_writev(fd: usize, iov_ptr: usize, iovcnt: usize) -> SyscallResult {
 /// Must match the C-side `#define AT_FDCWD (-100)` in syscall.h.
 const AT_FDCWD: usize = (-100isize) as usize;
 
+/// unlinkat: remove a directory (rmdir).
+const AT_REMOVEDIR: usize = 0x200;
+/// Do not follow a final symlink.
+const AT_SYMLINK_NOFOLLOW: usize = 0x100;
+/// An empty path names the dirfd itself.
+const AT_EMPTY_PATH: usize = 0x1000;
+
 /// Create a hard link (syscall 155).
 ///
 /// Creates a new directory entry `new_path` pointing to the same file as
@@ -2324,17 +2809,13 @@ const AT_FDCWD: usize = (-100isize) as usize;
 pub fn sys_link(old_ptr: usize, new_ptr: usize) -> SyscallResult {
     let old_path = read_user_path(old_ptr)?;
     let new_path = read_user_path(new_ptr)?;
-    require_dir_write(&new_path)?;
+    let (parent, link_name) = parent_dir(&new_path)?;
+    check_dir_write(&*parent)?;
 
     let vfs = vfs()?;
 
     // Resolve the old path to get the target node
     let target = vfs.resolve_path(&old_path).map_err(map_resolve_err)?;
-
-    // Split new_path into parent dir + name
-    let (parent_path, link_name) = split_path(&new_path)?;
-
-    let parent = vfs.resolve_path(&parent_path).map_err(map_resolve_err)?;
 
     parent
         .link(&link_name, target)
@@ -2349,13 +2830,8 @@ pub fn sys_link(old_ptr: usize, new_ptr: usize) -> SyscallResult {
 pub fn sys_symlink(target_ptr: usize, link_ptr: usize) -> SyscallResult {
     let target = read_user_path(target_ptr)?;
     let link_path = read_user_path(link_ptr)?;
-    require_dir_write(&link_path)?;
-
-    let vfs = vfs()?;
-
-    let (parent_path, link_name) = split_path(&link_path)?;
-
-    let parent = vfs.resolve_path(&parent_path).map_err(map_resolve_err)?;
+    let (parent, link_name) = parent_dir(&link_path)?;
+    check_dir_write(&*parent)?;
 
     let node = parent
         .symlink(&link_name, &target)
@@ -2369,30 +2845,20 @@ pub fn sys_symlink(target_ptr: usize, link_ptr: usize) -> SyscallResult {
 pub fn sys_chmod(path_ptr: usize, mode: usize) -> SyscallResult {
     let path = read_user_path(path_ptr)?;
 
-    let vfs = vfs()?;
-    let node = vfs.resolve_path(&path).map_err(map_resolve_err)?;
-    require_owner_or_root(&node)?;
-
-    let perms = Permissions::from_mode(mode as u32);
-    node.chmod(perms)
-        .map_err(|_| SyscallError::InvalidArgument)?;
-
-    Ok(0)
+    let node = vfs()?.resolve_path(&path).map_err(map_resolve_err)?;
+    chmod_node(&node, mode)
 }
 
 /// Change file permissions by fd (syscall 186).
 pub fn sys_fchmod(fd: usize, mode: usize) -> SyscallResult {
     let proc = process::current_process().ok_or(SyscallError::InvalidState)?;
-    let file_table = proc.file_table.lock();
-    let file = file_table.get(fd).ok_or(SyscallError::InvalidArgument)?;
-    require_owner_or_root(&file.node)?;
-
-    let perms = Permissions::from_mode(mode as u32);
-    file.node
-        .chmod(perms)
-        .map_err(|_| SyscallError::InvalidArgument)?;
-
-    Ok(0)
+    // Lookup only; the lock is not held over the operation (N-118).
+    let file = proc
+        .file_table
+        .lock()
+        .get(fd)
+        .ok_or(SyscallError::BadFileDescriptor)?;
+    chmod_node(&file.node, mode)
 }
 
 /// Set file creation mask (syscall 187).
@@ -2415,152 +2881,24 @@ pub fn sys_umask(mask: usize) -> SyscallResult {
     }
 }
 
-/// Truncate a file by path (syscall 188).
-pub fn sys_truncate_path(path_ptr: usize, size: usize) -> SyscallResult {
+/// truncate: set the length of the regular file at `path` (EISDIR for a
+/// directory, EINVAL for anything else), which needs write permission on
+/// it; a negative length is EINVAL before the lookup (N-191).
+pub fn sys_truncate(path_ptr: usize, length: usize) -> SyscallResult {
+    let length = file_offset(length)?;
     let path = read_user_path(path_ptr)?;
-
-    let vfs = vfs()?;
-    let node = vfs
-        .resolve_path(&path)
-        .map_err(|_| SyscallError::ResourceNotFound)?;
-
-    node.truncate(size)
-        .map_err(|_| SyscallError::InvalidArgument)?;
-
+    let node = vfs()?.resolve_path(&path).map_err(map_resolve_err)?;
+    match node.node_type() {
+        crate::fs::NodeType::File => {}
+        crate::fs::NodeType::Directory => return Err(SyscallError::IsADirectory),
+        _ => return Err(SyscallError::InvalidArgument),
+    }
+    // As opening it for writing would need (N-191).
+    require_open_access(&node, &OpenFlags::write_only())?;
+    crate::fs::check_fsize_truncate(&*node, length).map_err(super::map_kernel_error)?;
+    node.truncate(length).map_err(super::map_kernel_error)?;
+    crate::fs::remove_privs_after_write(&*node);
     Ok(0)
-}
-
-/// Poll file descriptors for readiness (syscall 189).
-///
-/// Poll file descriptors for I/O readiness using VfsNode::poll_readiness().
-///
-/// Checks each fd's actual buffer state (pipe occupancy, write-end closed,
-/// etc.) rather than always reporting ready. Supports timeout via busy-wait
-/// with scheduler yield (same approach as nanosleep).
-///
-/// # Arguments
-/// - `fds_ptr`: Pointer to array of PollFd structs.
-/// - `nfds`: Number of entries.
-/// - `timeout_ms`: Timeout in milliseconds. 0 = non-blocking poll, negative (as
-///   i32) = infinite wait, positive = wait up to N ms.
-pub fn sys_poll(fds_ptr: usize, nfds: usize, timeout_ms: usize) -> SyscallResult {
-    // Boot-path cooperative dispatch: when a child thread is dispatched from
-    // boot_futex_spin, the syscall handler yields back to the parent after
-    // each syscall. If we spin-loop here for the full timeout, the
-    // cooperative scheduler is blocked and no other threads can run. Treat
-    // the call as non-blocking (single poll pass) so the child yields
-    // promptly and the event loop makes progress across multiple dispatches.
-    #[cfg(target_arch = "x86_64")]
-    let in_boot_coop = crate::arch::x86_64::usermode::BOOT_CLONE_YIELD_PENDING
-        .load(core::sync::atomic::Ordering::Acquire);
-    #[cfg(not(target_arch = "x86_64"))]
-    let in_boot_coop = false;
-
-    if nfds == 0 {
-        // timeout_ms > 0 means sleep for that duration (like usleep via poll)
-        if (timeout_ms as i32) > 0 && !in_boot_coop {
-            let start = crate::timer::get_uptime_ms();
-            while crate::timer::get_uptime_ms() - start < timeout_ms as u64 {
-                // Enable interrupts briefly to let APIC timer advance
-                // UPTIME_MS (see epoll::epoll_wait for full rationale).
-                crate::sched::wait_for_interrupt_in_syscall();
-            }
-        }
-        return Ok(0);
-    }
-    if nfds > 256 {
-        return Err(SyscallError::InvalidArgument);
-    }
-
-    validate_user_buffer(fds_ptr, nfds * core::mem::size_of::<PollFd>())?;
-
-    let timeout_i32 = if in_boot_coop {
-        0i32
-    } else {
-        timeout_ms as i32
-    };
-    let start = crate::timer::get_uptime_ms();
-    // Cap infinite wait to 30 seconds to prevent permanent hangs
-    let max_wait_ms: u64 = if timeout_i32 < 0 {
-        30_000
-    } else {
-        timeout_i32 as u64
-    };
-
-    loop {
-        let proc = process::current_process().ok_or(SyscallError::InvalidState)?;
-        let file_table = proc.file_table.lock();
-        let mut ready_count = 0usize;
-
-        for i in 0..nfds {
-            // SAFETY: fds_ptr was validated above and PollFd is repr(C).
-            let pollfd = unsafe { &mut *((fds_ptr as *mut PollFd).add(i)) };
-            pollfd.revents = 0;
-
-            if pollfd.fd < 0 {
-                continue;
-            }
-
-            if let Some(file) = file_table.get(pollfd.fd as usize) {
-                let readiness = file.node.poll_readiness();
-                if pollfd.events & POLLIN != 0 && readiness & 0x0001 != 0 {
-                    pollfd.revents |= POLLIN;
-                }
-                if pollfd.events & POLLOUT != 0 && readiness & 0x0004 != 0 {
-                    pollfd.revents |= POLLOUT;
-                }
-                // POLLERR and POLLHUP always delivered regardless of events mask
-                if readiness & 0x0008 != 0 {
-                    pollfd.revents |= POLLERR;
-                }
-                if readiness & 0x0010 != 0 {
-                    pollfd.revents |= POLLHUP;
-                }
-                if pollfd.revents != 0 {
-                    ready_count += 1;
-                }
-            } else {
-                // Not an open fd in this process. Sockets are fds now, so
-                // there is no global-socket-id fallback (W-14).
-                pollfd.revents = POLLNVAL;
-                ready_count += 1;
-            }
-        }
-        // Drop file_table lock before yielding
-        drop(file_table);
-
-        if ready_count > 0 || timeout_i32 == 0 {
-            return Ok(ready_count);
-        }
-
-        // Timeout expired?
-        if crate::timer::get_uptime_ms() - start >= max_wait_ms {
-            return Ok(0);
-        }
-
-        // Enable interrupts briefly so the APIC timer ISR can fire and
-        // advance UPTIME_MS.  Without this, the monotonic clock is frozen
-        // (SFMASK clears IF on syscall entry) and time-based fds such as
-        // timerfd never become readable.  See epoll::epoll_wait for the
-        // detailed rationale.
-        crate::sched::wait_for_interrupt_in_syscall();
-    }
-}
-
-/// Poll event flags
-const POLLIN: i16 = 0x001;
-const POLLOUT: i16 = 0x004;
-const POLLERR: i16 = 0x008;
-const POLLHUP: i16 = 0x010;
-const POLLNVAL: i16 = 0x020;
-
-/// Poll file descriptor structure (matches C struct pollfd).
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct PollFd {
-    fd: i32,
-    events: i16,
-    revents: i16,
 }
 
 /// Resolve a path relative to a directory fd.
@@ -2578,9 +2916,10 @@ pub(crate) fn resolve_at_path(
         return Ok(String::from(path));
     }
 
-    if dirfd == AT_FDCWD {
+    // dirfd is an int: compare its low 32 bits, sign-extended or not.
+    if dirfd as u32 as i32 == AT_FDCWD as u32 as i32 {
         // Relative to CWD
-        let cwd = if let Some(vfs) = try_get_vfs() {
+        let cwd = if let Ok(vfs) = vfs() {
             vfs.get_cwd()
         } else {
             String::from("/")
@@ -2591,18 +2930,16 @@ pub(crate) fn resolve_at_path(
             Ok(alloc::format!("{}/{}", cwd, path))
         }
     } else {
-        // Relative to directory fd — look up the fd in the file table
+        // Relative to the directory the fd refers to: EBADF if it is not
+        // open, ENOTDIR if it is not a directory (N-204).
         let proc = process::current_process().ok_or(SyscallError::InvalidState)?;
-        let file_table = proc.file_table.lock();
-        let file = file_table.get(dirfd).ok_or(SyscallError::InvalidArgument)?;
-
-        // Use the stored path if available, otherwise fall back to "/"
-        let dir_path = if let Some(ref p) = file.path {
-            String::from(p.as_str())
-        } else {
-            // No stored path — fall back to root (best effort)
-            String::from("/")
-        };
+        // The table lock is not held across the path lookup.
+        let file = proc
+            .file_table
+            .lock()
+            .get(dirfd as u32 as usize)
+            .ok_or(SyscallError::BadFileDescriptor)?;
+        let dir_path = fd_directory_path(&file)?;
 
         if dir_path.ends_with('/') {
             Ok(alloc::format!("{}{}", dir_path, path))
@@ -2617,8 +2954,8 @@ pub fn sys_openat(dirfd: usize, path_ptr: usize, flags: usize, mode: usize) -> S
     let rel_path = read_user_path(path_ptr)?;
     let abs_path = resolve_at_path(dirfd, &rel_path)?;
 
-    // Trace ALL openat calls during kwin bringup
-    #[cfg(target_arch = "x86_64")]
+    // Trace openat calls (kwin bring-up aid; `trace` feature only).
+    #[cfg(all(target_arch = "x86_64", feature = "trace"))]
     {
         // SAFETY: Writing to COM1 for diagnostic output.
         unsafe {
@@ -2631,129 +2968,113 @@ pub fn sys_openat(dirfd: usize, path_ptr: usize, flags: usize, mode: usize) -> S
         }
     }
 
-    // Delegate to sys_open using the resolved absolute path.
-    // We write the path to a temporary kernel buffer, then call the existing
-    // sys_open logic. Since sys_open reads from a user pointer, we use the
-    // VFS directly instead.
-    let proc = process::current_process().ok_or(SyscallError::InvalidState)?;
-    let open_flags = OpenFlags::from_bits(flags as u32).ok_or(SyscallError::InvalidArgument)?;
-    let cloexec = (flags & 0x80000) != 0; // O_CLOEXEC
-
-    match vfs()?.open(&abs_path, open_flags) {
-        Ok(node) => {
-            // openat had no permission check at all; musl routes every
-            // open() through it.
-            require_open_access(&node, &open_flags)?;
-            // Store the path so ioctl dispatch can identify device types
-            // (e.g., DRM fds opened via openat need path for "dri/" check).
-            let file = crate::fs::file::File::new_with_path(
-                node,
-                open_flags,
-                alloc::string::String::from(abs_path.as_str()),
-            );
-            let file_table = proc.file_table.lock();
-            match file_table.open_with_flags(alloc::sync::Arc::new(file), cloexec) {
-                Ok(fd_num) => Ok(fd_num),
-                Err(_) => Err(SyscallError::OutOfMemory),
-            }
-        }
-        Err(e) => {
-            // As in sys_open: create only a missing name, report the rest.
-            if open_flags.create && is_not_found(&e) {
-                let perms = creation_perms(mode);
-                let (parent_path, name) = split_path(&abs_path)?;
-                require_dir_write(&abs_path)?;
-                let vfs_guard = vfs()?;
-                let parent = vfs_guard
-                    .resolve_path(&parent_path)
-                    .map_err(|_| SyscallError::ResourceNotFound)?;
-                match parent.create(&name, perms) {
-                    Ok(node) => {
-                        own_new_node(&node);
-                        let file = crate::fs::file::File::new_with_path(
-                            node,
-                            open_flags,
-                            alloc::string::String::from(abs_path.as_str()),
-                        );
-                        let file_table = proc.file_table.lock();
-                        match file_table.open_with_flags(alloc::sync::Arc::new(file), cloexec) {
-                            Ok(fd_num) => Ok(fd_num),
-                            Err(_) => Err(SyscallError::OutOfMemory),
-                        }
-                    }
-                    Err(_) => Err(SyscallError::ResourceNotFound),
-                }
-            } else {
-                Err(map_resolve_err(e))
-            }
-        }
-    }
+    open_path(&abs_path, flags, mode)
 }
 
-/// Stat a file relative to a directory fd (syscall 191).
-pub fn sys_fstatat(dirfd: usize, path_ptr: usize, stat_buf: usize, _flags: usize) -> SyscallResult {
-    let rel_path = read_user_path(path_ptr)?;
-    let abs_path = resolve_at_path(dirfd, &rel_path)?;
-
-    // Trace fstatat calls during kwin bringup
-    #[cfg(target_arch = "x86_64")]
-    {
-        // SAFETY: Writing to COM1 for diagnostic output.
-        unsafe {
-            crate::arch::x86_64::idt::raw_serial_str(b"[STAT] ");
-            let show_len = abs_path.len().min(80);
-            for &b in &abs_path.as_bytes()[..show_len] {
-                crate::arch::x86_64::idt::raw_serial_str(&[b]);
-            }
-            crate::arch::x86_64::idt::raw_serial_str(b"\n");
-        }
+/// newfstatat(dirfd, path, buf, flags) (N-196), and stat and lstat
+/// through it, as Linux's vfs_fstatat: AT_SYMLINK_NOFOLLOW stats a final
+/// symlink itself (it was always followed), AT_EMPTY_PATH with an empty
+/// path stats `dirfd` itself -- any kind of file -- or the cwd,
+/// AT_NO_AUTOMOUNT is accepted (there is no automounting); other flags are
+/// EINVAL. A trailing slash follows a final symlink and needs a directory
+/// (ENOTDIR).
+pub fn sys_fstatat(dirfd: usize, path_ptr: usize, stat_buf: usize, flags: usize) -> SyscallResult {
+    const AT_NO_AUTOMOUNT: usize = 0x800;
+    if flags & !(AT_SYMLINK_NOFOLLOW | AT_NO_AUTOMOUNT | AT_EMPTY_PATH) != 0 {
+        return Err(SyscallError::InvalidArgument);
     }
-
+    let rel_path = if flags & AT_EMPTY_PATH != 0 {
+        read_user_path_or_empty(path_ptr)?
+    } else {
+        read_user_path(path_ptr)?
+    };
     validate_user_ptr_typed::<FileStat>(stat_buf)?;
 
     let vfs = vfs()?;
-    let node = vfs
-        .resolve_path(&abs_path)
-        .map_err(|_| SyscallError::ResourceNotFound)?;
+    let node = if rel_path.is_empty() {
+        if dirfd as u32 as i32 == AT_FDCWD as u32 as i32 {
+            vfs.resolve_path(&vfs.get_cwd()).map_err(map_resolve_err)?
+        } else {
+            let proc = process::current_process().ok_or(SyscallError::InvalidState)?;
+            let file = proc
+                .file_table
+                .lock()
+                .get(dirfd as u32 as usize)
+                .ok_or(SyscallError::BadFileDescriptor)?;
+            file.node.clone()
+        }
+    } else {
+        let abs_path = resolve_at_path(dirfd, &rel_path)?;
+        let trailing_slash = rel_path.ends_with('/');
+        let node = if flags & AT_SYMLINK_NOFOLLOW != 0 && !trailing_slash {
+            vfs.resolve_path_no_follow(&abs_path)
+        } else {
+            vfs.resolve_path(&abs_path)
+        }
+        .map_err(map_resolve_err)?;
+        if trailing_slash && node.node_type() != crate::fs::NodeType::Directory {
+            return Err(SyscallError::NotADirectory);
+        }
+        node
+    };
 
-    let metadata = node.metadata().map_err(|_| SyscallError::InvalidState)?;
-    let stat = fill_stat(&metadata);
-    // SAFETY: stat_buf was validated above.
-    unsafe {
-        core::ptr::write(stat_buf as *mut FileStat, stat);
-    }
+    let metadata = node.metadata().map_err(super::map_kernel_error)?;
+    super::userspace::write_user(stat_buf, fill_stat(&metadata, &*node))?;
     Ok(0)
 }
 
-/// Unlink a file relative to a directory fd (syscall 192).
-///
-/// If flags contains AT_REMOVEDIR (0x200), acts like rmdir.
-pub fn sys_unlinkat(dirfd: usize, path_ptr: usize, _flags: usize) -> SyscallResult {
+/// unlinkat(dirfd, path, flags) (N-195), and unlink and rmdir through it,
+/// as Linux's do_unlinkat and do_rmdir: a relative path is resolved
+/// against the cwd or `dirfd` (unlink used to refuse a path without `/`).
+/// AT_REMOVEDIR removes a directory -- ENOTDIR for anything else, EINVAL
+/// for `.`, ENOTEMPTY for `..`, EBUSY for `/` -- and without it a directory
+/// is EISDIR, as is `.`, `..` or `/`, and a trailing slash on anything but
+/// a directory is ENOTDIR. The last component is not followed: a symlink
+/// is removed, not its target. Other flags are EINVAL.
+pub fn sys_unlinkat(dirfd: usize, path_ptr: usize, flags: usize) -> SyscallResult {
+    if flags & !AT_REMOVEDIR != 0 {
+        return Err(SyscallError::InvalidArgument);
+    }
+    let remove_dir = flags & AT_REMOVEDIR != 0;
     let rel_path = read_user_path(path_ptr)?;
-    let abs_path = resolve_at_path(dirfd, &rel_path)?;
-    require_may_remove(&abs_path)?;
-
-    let vfs = vfs()?;
-    vfs.unlink(&abs_path)
-        .map_err(|_| SyscallError::ResourceNotFound)?;
-
+    let trimmed = rel_path.trim_end_matches('/');
+    let trailing_slash = trimmed.len() != rel_path.len();
+    let last = trimmed.rsplit('/').next().unwrap_or("");
+    if trimmed.is_empty() {
+        // "/" (or "//"): the root.
+        return Err(if remove_dir {
+            SyscallError::Busy
+        } else {
+            SyscallError::IsADirectory
+        });
+    }
+    match (remove_dir, last) {
+        (true, ".") => return Err(SyscallError::InvalidArgument),
+        (true, "..") => return Err(SyscallError::DirectoryNotEmpty),
+        (false, "." | "..") => return Err(SyscallError::IsADirectory),
+        _ => {}
+    }
+    let abs_path = resolve_at_path(dirfd, trimmed)?;
+    let node = vfs()?
+        .resolve_path_no_follow(&abs_path)
+        .map_err(map_resolve_err)?;
+    let is_dir = node.node_type() == crate::fs::NodeType::Directory;
+    match (remove_dir, is_dir) {
+        (true, false) => return Err(SyscallError::NotADirectory),
+        (false, true) => return Err(SyscallError::IsADirectory),
+        (false, false) if trailing_slash => return Err(SyscallError::NotADirectory),
+        _ => {}
+    }
+    let (dir, name) = parent_dir(&abs_path)?;
+    check_may_remove(&*dir, &name)?;
+    dir.unlink(&name).map_err(super::map_kernel_error)?;
     Ok(0)
 }
 
 /// Create a directory relative to a directory fd (syscall 193).
 pub fn sys_mkdirat(dirfd: usize, path_ptr: usize, mode: usize) -> SyscallResult {
     let rel_path = read_user_path(path_ptr)?;
-    let abs_path = resolve_at_path(dirfd, &rel_path)?;
-    require_dir_write(&abs_path)?;
-
-    let permissions = creation_perms(mode);
-    let vfs_guard = vfs()?;
-    let node = vfs_guard
-        .mkdir(&abs_path, permissions)
-        .map_err(|_| SyscallError::InvalidState)?;
-    own_new_node(&node);
-
-    Ok(0)
+    make_directory(&resolve_at_path(dirfd, &rel_path)?, mode)
 }
 
 /// Rename a file relative to directory fds (syscall 194).
@@ -2768,46 +3089,95 @@ pub fn sys_renameat(
     rename_entry(&old_abs, &new_abs)
 }
 
+/// renameat2(olddirfd, old, newdirfd, new, flags) (syscall 316; 276 in the
+/// generic table, where it is riscv64's only rename). Flags 0 is renameat.
+/// RENAME_NOREPLACE, RENAME_EXCHANGE and RENAME_WHITEOUT are EINVAL, as Linux
+/// answers on a filesystem without them: none of the filesystems here can
+/// do them atomically.
+pub fn sys_renameat2(
+    olddirfd: usize,
+    old_ptr: usize,
+    newdirfd: usize,
+    new_ptr: usize,
+    flags: usize,
+) -> SyscallResult {
+    if flags as u32 != 0 {
+        return Err(SyscallError::InvalidArgument);
+    }
+    sys_renameat(olddirfd, old_ptr, newdirfd, new_ptr)
+}
+
+/// The file behind `fd` for pread/pwrite, in Linux's order: a negative
+/// offset is EINVAL, then an unknown fd EBADF, then a stream (pipe, socket,
+/// terminal, event fd), which has no offset, ESPIPE (N-190). The access
+/// mode is the caller's check.
+fn positioned_file(
+    fd: usize,
+    offset: usize,
+) -> Result<alloc::sync::Arc<crate::fs::file::File>, SyscallError> {
+    file_offset(offset)?;
+    let proc = process::current_process().ok_or(SyscallError::InvalidState)?;
+    // Lookup only; the lock is not held over the operation (N-118).
+    let file = proc
+        .file_table
+        .lock()
+        .get(fd)
+        .ok_or(SyscallError::BadFileDescriptor)?;
+    if file.node.is_stream() {
+        return Err(SyscallError::IllegalSeek);
+    }
+    Ok(file)
+}
+
 /// Read from a file descriptor at a given offset without changing position
 /// (syscall 195).
 pub fn sys_pread(fd: usize, buf: usize, count: usize, offset: usize) -> SyscallResult {
+    let file = positioned_file(fd, offset)?;
+    if !file.flags.read {
+        return Err(SyscallError::BadFileDescriptor);
+    }
+    if file.node.node_type() == crate::fs::NodeType::Directory {
+        return Err(SyscallError::IsADirectory);
+    }
     if count == 0 {
         return Ok(0);
     }
     validate_user_buffer(buf, count)?;
 
-    let proc = process::current_process().ok_or(SyscallError::InvalidState)?;
-    let file_table = proc.file_table.lock();
-    let file = file_table.get(fd).ok_or(SyscallError::InvalidArgument)?;
-
-    // Read directly at offset through the VfsNode, bypassing File position
-    // SAFETY: buf was validated above.
-    let buffer_slice = unsafe { core::slice::from_raw_parts_mut(buf as *mut u8, count) };
-    match file.node.read(offset, buffer_slice) {
-        Ok(n) => Ok(n),
-        Err(_) => Err(SyscallError::InvalidState),
-    }
+    // Read at `offset` through the VfsNode, bypassing the File position,
+    // a chunk at a time through a kernel buffer (N-43).
+    let mut at = offset;
+    super::userspace::produce_to_user(buf, count, true, |kbuf| {
+        let n = file.node.read(at, kbuf).map_err(super::map_kernel_error)?;
+        at += n;
+        Ok(n)
+    })
 }
 
 /// Write to a file descriptor at a given offset without changing position
 /// (syscall 196).
 pub fn sys_pwrite(fd: usize, buf: usize, count: usize, offset: usize) -> SyscallResult {
+    let file = positioned_file(fd, offset)?;
+    if !file.flags.write {
+        return Err(SyscallError::BadFileDescriptor);
+    }
     if count == 0 {
         return Ok(0);
     }
     validate_user_buffer(buf, count)?;
 
-    let proc = process::current_process().ok_or(SyscallError::InvalidState)?;
-    let file_table = proc.file_table.lock();
-    let file = file_table.get(fd).ok_or(SyscallError::InvalidArgument)?;
-
-    // Write directly at offset through the VfsNode, bypassing File position
-    // SAFETY: buf was validated above.
-    let buffer_slice = unsafe { core::slice::from_raw_parts(buf as *const u8, count) };
-    match file.node.write(offset, buffer_slice) {
-        Ok(n) => Ok(n),
-        Err(_) => Err(SyscallError::InvalidState),
-    }
+    // RLIMIT_FSIZE for the whole write, then at `offset` through the
+    // VfsNode, a chunk at a time (N-43).
+    let count =
+        crate::fs::check_fsize(&*file.node, offset, count).map_err(super::map_kernel_error)?;
+    let mut at = offset;
+    let written = super::userspace::consume_from_user(buf, count, true, |kbuf| {
+        let n = file.node.write(at, kbuf).map_err(super::map_kernel_error)?;
+        at += n;
+        Ok(n)
+    })?;
+    crate::fs::remove_privs_after_write(&*file.node);
+    Ok(written)
 }
 
 /// Helper: split a path into (parent_dir, basename).
@@ -2829,7 +3199,7 @@ pub(crate) fn split_path(
         Ok((parent, name))
     } else {
         // No slash — parent is CWD
-        let cwd = if let Some(vfs) = try_get_vfs() {
+        let cwd = if let Ok(vfs) = vfs() {
             vfs.get_cwd()
         } else {
             String::from("/")
@@ -2848,8 +3218,28 @@ fn chown_id(id: usize) -> Option<u32> {
     (id != u32::MAX).then_some(id)
 }
 
-/// Apply a chown to `node`. Only root may change ownership (FS-SEC-02);
-/// this used to be a no-op that reported success.
+/// Whether `creds` may give a file owned by `file_uid`:`file_gid` the
+/// owner `uid` and group `gid` (`None`: unchanged), as Linux's chown_ok and
+/// chgrp_ok with _POSIX_CHOWN_RESTRICTED: root may do anything; the owner
+/// may keep the owner and set the group to one it belongs to.
+pub(crate) fn may_chown(
+    creds: &crate::process::creds::Credentials,
+    file_uid: u32,
+    file_gid: u32,
+    uid: Option<u32>,
+    gid: Option<u32>,
+) -> bool {
+    if creds.euid == 0 {
+        return true;
+    }
+    let owner = creds.euid == file_uid;
+    let uid_ok = uid.is_none_or(|u| owner && u == file_uid);
+    let gid_ok = gid.is_none_or(|g| owner && (g == file_gid || creds.in_group(g)));
+    uid_ok && gid_ok
+}
+
+/// Apply a chown to `node` ([`may_chown`], EPERM otherwise; FS-SEC-02).
+/// This used to be a no-op that reported success.
 pub(crate) fn chown_node(
     node: &alloc::sync::Arc<dyn crate::fs::VfsNode>,
     uid: usize,
@@ -2859,10 +3249,19 @@ pub(crate) fn chown_node(
     if uid.is_none() && gid.is_none() {
         return Ok(0);
     }
-    if caller_creds().0 != 0 {
-        return Err(SyscallError::PermissionDenied);
+    let meta = node.metadata().map_err(super::map_kernel_error)?;
+    if !may_chown(&caller_creds(), meta.uid, meta.gid, uid, gid) {
+        return Err(SyscallError::OperationNotPermitted);
     }
     node.chown(uid, gid).map_err(super::map_kernel_error)?;
+    // A non-directory that changes hands loses set-user-ID and
+    // set-group-ID (`Permissions::after_chown`).
+    let meta = node.metadata().map_err(super::map_kernel_error)?;
+    if meta.node_type != crate::fs::NodeType::Directory {
+        if let Some(kept) = meta.permissions.after_chown() {
+            node.chmod(kept).map_err(super::map_kernel_error)?;
+        }
+    }
     Ok(0)
 }
 
@@ -2884,67 +3283,287 @@ pub fn sys_fchown(fd: usize, uid: usize, gid: usize) -> SyscallResult {
     chown_node(&file.node, uid, gid)
 }
 
-/// Create a special or ordinary file (syscall 199).
-///
-/// Stub: returns EPERM — device file creation not supported.
-pub fn sys_mknod(path_ptr: usize, _mode: usize, _dev: usize) -> SyscallResult {
-    let _path = read_user_path(path_ptr)?;
-    Err(SyscallError::PermissionDenied)
+/// mknod(2): mknodat relative to the working directory.
+pub fn sys_mknod(path_ptr: usize, mode: usize, dev: usize) -> SyscallResult {
+    sys_mknodat(AT_FDCWD, path_ptr, mode, dev)
 }
 
-/// Synchronous I/O multiplexing (syscall 200).
-///
-/// Scans fd_set bitmaps for set bits and checks whether the corresponding
-/// file descriptors exist in the current process's file table. Files and
-/// pipes are always considered ready (same simplification as `sys_poll`).
-pub fn sys_select(
-    nfds: usize,
-    readfds_ptr: usize,
-    writefds_ptr: usize,
-    _exceptfds_ptr: usize,
-    _timeout_ptr: usize,
-) -> SyscallResult {
-    // fd_set is a bitmap: 1 bit per fd, packed into usize-width words.
-    // FD_SETSIZE is typically 1024, but we cap at nfds.
-    let nfds = nfds.min(1024);
-    if nfds == 0 {
-        return Ok(0);
+/// mknodat(2), as Linux's `filename_mknodat`: a regular file (type 0 or
+/// S_IFREG), FIFO, character or block device numbered `dev` (32 bits,
+/// Linux's encoding) or socket file named by `path_ptr` relative to
+/// `dirfd`. A directory type is EPERM, any other type EINVAL; an existing
+/// name (not followed) is EEXIST; the parent needs write and search
+/// permission (EACCES); a device needs privilege (EPERM, CAP_MKNOD: root
+/// here); the mode is reduced by the umask. A filesystem that cannot hold
+/// special files (devfs, procfs) is EPERM.
+pub fn sys_mknodat(dirfd: usize, path_ptr: usize, mode: usize, dev: usize) -> SyscallResult {
+    let rel_path = read_user_path(path_ptr)?;
+    let kind = crate::fs::mknod_kind(mode as u32).map_err(|dir| {
+        if dir {
+            SyscallError::OperationNotPermitted
+        } else {
+            SyscallError::InvalidArgument
+        }
+    })?;
+    let path = resolve_at_path(dirfd, &rel_path)?;
+    let perms = creation_perms(mode);
+    make_node(&path, rel_path.ends_with('/'), kind, perms, dev as u32)?;
+    Ok(0)
+}
+
+/// Make the special file (or, for `NodeType::File`, regular file) `kind` at
+/// the absolute `path`, owned by the caller, as mknodat does: EEXIST for an
+/// existing name (not followed), ENOENT for a name that ended in '/'
+/// (`trailing_slash`), the parent's MAC, write and search checks, and
+/// privilege for a device. `rdev` is used only for a device. bind() of a
+/// Unix socket makes its socket file through this too.
+pub(crate) fn make_node(
+    path: &str,
+    trailing_slash: bool,
+    kind: crate::fs::NodeType,
+    perms: Permissions,
+    rdev: u32,
+) -> Result<alloc::sync::Arc<dyn crate::fs::VfsNode>, SyscallError> {
+    match vfs()?.resolve_path_no_follow(path) {
+        Ok(_) => return Err(SyscallError::FileExists),
+        Err(e) if is_not_found(&e) => {}
+        Err(e) => return Err(map_resolve_err(e)),
+    }
+    // "name/" can only be a directory, which mknod does not make.
+    if trailing_slash {
+        return Err(SyscallError::ResourceNotFound);
+    }
+    let device = matches!(
+        kind,
+        crate::fs::NodeType::CharDevice | crate::fs::NodeType::BlockDevice
+    );
+    let rdev = if device { rdev } else { 0 };
+    // Every type, regular files included, goes through one resolution of
+    // the parent for the MAC check, the permission checks and the creation.
+    let node = vfs()?.mknod_checked(path, kind, perms, rdev, |dir| {
+        let denied = crate::error::KernelError::PermissionDenied {
+            operation: "create directory entry",
+        };
+        check_dir_write(dir).map_err(|_| denied)?;
+        if device && caller_creds().euid != 0 {
+            return Err(crate::error::KernelError::FsError(
+                crate::error::FsError::OperationNotPermitted,
+            ));
+        }
+        Ok(())
+    });
+    let node = node.map_err(|e| match e {
+        crate::error::KernelError::FsError(crate::error::FsError::AlreadyExists) => {
+            SyscallError::FileExists
+        }
+        crate::error::KernelError::FsError(crate::error::FsError::NotSupported) => {
+            SyscallError::OperationNotPermitted
+        }
+        e => super::map_kernel_error(e),
+    })?;
+    own_new_node(&node);
+    Ok(node)
+}
+
+/// The socket file bind() of a Unix socket makes for the name `name`
+/// (relative to the working directory), as Linux's `unix_bind_bsd`: a
+/// socket file with mode 0777 less the umask, through [`make_node`], so an
+/// existing name is EADDRINUSE.
+pub(crate) fn make_socket_file(
+    name: &str,
+) -> Result<alloc::sync::Arc<dyn crate::fs::VfsNode>, SyscallError> {
+    let path = resolve_at_path(AT_FDCWD, name)?;
+    make_node(
+        &path,
+        name.ends_with('/'),
+        crate::fs::NodeType::Socket,
+        creation_perms(0o777),
+        0,
+    )
+    .map_err(|e| match e {
+        SyscallError::FileExists => SyscallError::AddressInUse,
+        e => e,
+    })
+}
+
+/// The socket file a connect (or an addressed send) to the Unix socket name
+/// `name` reaches, as Linux's `unix_find_bsd`: the name is followed like any
+/// path, the caller needs write permission on the file (EACCES), and
+/// anything but a socket file is ECONNREFUSED.
+pub(crate) fn find_socket_file(
+    name: &str,
+) -> Result<alloc::sync::Arc<dyn crate::fs::VfsNode>, SyscallError> {
+    let path = resolve_at_path(AT_FDCWD, name)?;
+    let file = vfs()?.resolve_path(&path).map_err(map_resolve_err)?;
+    require_open_access(&file, &OpenFlags::write_only())?;
+    if file.node_type() != crate::fs::NodeType::Socket {
+        return Err(SyscallError::ConnectionRefused);
+    }
+    Ok(file)
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn generic_stat_takes_every_field() {
+        let x = super::X86Stat {
+            st_dev: 1,
+            st_ino: 2,
+            st_nlink: 3,
+            st_mode: 0o100644,
+            st_uid: 5,
+            st_gid: 6,
+            __pad0: 0,
+            st_rdev: 7,
+            st_size: 8,
+            st_blksize: 4096,
+            st_blocks: 9,
+            st_atime: 10,
+            st_atime_nsec: 11,
+            st_mtime: 12,
+            st_mtime_nsec: 13,
+            st_ctime: 14,
+            st_ctime_nsec: 15,
+            __unused: [0; 3],
+        };
+        let g = super::GenericStat::from(x);
+        assert_eq!(
+            (g.st_dev, g.st_ino, g.st_mode, g.st_nlink),
+            (1, 2, 0o100644, 3)
+        );
+        assert_eq!((g.st_uid, g.st_gid, g.st_rdev, g.st_size), (5, 6, 7, 8));
+        assert_eq!((g.st_blksize, g.st_blocks), (4096, 9));
+        assert_eq!((g.st_atime, g.st_atime_nsec, g.st_mtime), (10, 11, 12));
+        assert_eq!((g.st_mtime_nsec, g.st_ctime, g.st_ctime_nsec), (13, 14, 15));
     }
 
-    // Number of bytes needed for the bitmap
-    let bytes_needed = nfds.div_ceil(8);
-    let mut ready_count: usize = 0;
+    use super::*;
+    use crate::process::creds::Credentials;
 
-    // Helper: scan an fd_set bitmap and count ready fds.
-    // All existing fds are considered ready (files/pipes always ready).
-    let process = crate::process::current_process().ok_or(SyscallError::InvalidState)?;
-    let file_table = process.file_table.lock();
+    /// A user 1000 in group 100 and supplementary group 20.
+    fn user() -> Credentials {
+        let mut c = Credentials::new(0, 0);
+        c.setgroups(&[20]).unwrap();
+        c.setresgid(100, 100, 100).unwrap();
+        c.setresuid(1000, 1000, 1000).unwrap();
+        c
+    }
 
-    for fdset_ptr in [readfds_ptr, writefds_ptr] {
-        if fdset_ptr == 0 {
-            continue;
-        }
-        validate_user_buffer(fdset_ptr, bytes_needed)?;
-        for fd in 0..nfds {
-            let byte_idx = fd / 8;
-            let bit_idx = fd % 8;
-            // SAFETY: fdset_ptr validated above; byte_idx < bytes_needed.
-            let byte_val = unsafe { core::ptr::read_volatile((fdset_ptr + byte_idx) as *const u8) };
-            if byte_val & (1 << bit_idx) != 0 {
-                // Check if this fd exists in the file table
-                if file_table.get(fd).is_some() {
-                    ready_count += 1;
-                } else {
-                    // Clear the bit for fds that don't exist
-                    let cleared = byte_val & !(1 << bit_idx);
-                    // SAFETY: same pointer, validated above.
-                    unsafe {
-                        core::ptr::write_volatile((fdset_ptr + byte_idx) as *mut u8, cleared);
-                    }
-                }
-            }
+    /// chmod: the owner or root (EPERM for others); set-group-ID is
+    /// dropped for a non-root caller outside the file's group.
+    #[test]
+    fn chmod_follows_linux_rules() {
+        let u = user();
+        assert_eq!(
+            chmod_perms(&u, 0, 0, 0o644),
+            Err(SyscallError::OperationNotPermitted)
+        );
+        assert_eq!(
+            chmod_perms(&u, 1000, 100, 0o6755).unwrap().to_mode(),
+            0o6755
+        );
+        assert_eq!(chmod_perms(&u, 1000, 20, 0o2755).unwrap().to_mode(), 0o2755);
+        assert_eq!(chmod_perms(&u, 1000, 7, 0o6755).unwrap().to_mode(), 0o4755);
+        let root = Credentials::new(0, 0);
+        assert_eq!(
+            chmod_perms(&root, 1000, 7, 0o2755).unwrap().to_mode(),
+            0o2755
+        );
+        // File type bits in the argument are ignored.
+        assert_eq!(
+            chmod_perms(&u, 1000, 100, 0o100644).unwrap().to_mode(),
+            0o644
+        );
+    }
+
+    /// chown: root anything; the owner only its own groups, never the user.
+    #[test]
+    fn chown_is_restricted_to_root_and_owner_chgrp() {
+        let u = user();
+        assert!(may_chown(&u, 1000, 100, None, Some(20)));
+        assert!(may_chown(&u, 1000, 100, Some(1000), Some(100)));
+        assert!(!may_chown(&u, 1000, 100, None, Some(7)));
+        assert!(!may_chown(&u, 1000, 100, Some(1001), None));
+        assert!(!may_chown(&u, 1001, 100, None, Some(100)));
+        assert!(may_chown(
+            &Credentials::new(0, 0),
+            1001,
+            7,
+            Some(5),
+            Some(9)
+        ));
+    }
+
+    /// loff_t is signed: a negative offset or length (as a register value)
+    /// is EINVAL, not a huge unsigned one (N-190, N-191).
+    #[test]
+    fn negative_file_offsets_are_invalid() {
+        assert_eq!(file_offset(0), Ok(0));
+        assert_eq!(file_offset(i64::MAX as usize), Ok(i64::MAX as usize));
+        assert_eq!(
+            file_offset(-1i64 as usize),
+            Err(SyscallError::InvalidArgument)
+        );
+        assert_eq!(
+            file_offset(i64::MIN as usize),
+            Err(SyscallError::InvalidArgument)
+        );
+    }
+
+    /// pipe2 takes Linux O_CLOEXEC (0x80000) and O_NONBLOCK (0x800); it
+    /// tested 0x2000, which no C library sends, and accepted anything.
+    #[test]
+    fn pipe2_decodes_linux_flags() {
+        assert_eq!(pipe2_flags(0), Ok((false, false)));
+        assert_eq!(pipe2_flags(0x8_0000), Ok((true, false)));
+        assert_eq!(pipe2_flags(0x800), Ok((false, true)));
+        assert_eq!(pipe2_flags(0x8_0800), Ok((true, true)));
+        assert_eq!(pipe2_flags(0x2000), Err(SyscallError::InvalidArgument));
+        assert_eq!(pipe2_flags(1), Err(SyscallError::InvalidArgument));
+    }
+
+    fn meta(mode: u32, uid: u32, gid: u32) -> crate::fs::Metadata {
+        crate::fs::Metadata {
+            node_type: crate::fs::NodeType::File,
+            size: 0,
+            permissions: Permissions::from_mode(mode),
+            uid,
+            gid,
+            created: 0,
+            modified: 0,
+            accessed: 0,
+            inode: 0,
         }
     }
 
-    Ok(ready_count)
+    /// access(2) uses owner, then group, then other bits (it checked only
+    /// "other", so a 0700 file failed for its owner), and root needs an
+    /// execute bit to execute (N-193).
+    #[test]
+    fn access_uses_owner_group_other_precedence() {
+        let m = meta(0o750, 1000, 100);
+        assert!(access_granted(1000, 100, &m, false, 7));
+        assert!(access_granted(2000, 100, &m, false, 4 | 1));
+        assert!(!access_granted(2000, 100, &m, false, 2));
+        assert!(!access_granted(2000, 200, &m, false, 4));
+        assert!(access_granted(0, 0, &m, false, 7));
+        let noexec = meta(0o644, 1000, 100);
+        assert!(!access_granted(0, 0, &noexec, false, 1));
+        assert!(access_granted(0, 0, &noexec, true, 1));
+    }
+
+    /// utimensat times: UTIME_NOW, UTIME_OMIT, a valid time, and EINVAL
+    /// for an out-of-range tv_nsec.
+    #[test]
+    fn utime_spec_follows_utimensat() {
+        assert_eq!(utime_spec([5, UTIME_NOW], 100), Ok(Some(100)));
+        assert_eq!(utime_spec([5, UTIME_OMIT], 100), Ok(None));
+        assert_eq!(utime_spec([1234, 500], 100), Ok(Some(1234)));
+        assert_eq!(utime_spec([-10, 0], 100), Ok(Some(0)));
+        assert_eq!(
+            utime_spec([1, 1_000_000_000], 100),
+            Err(SyscallError::InvalidArgument)
+        );
+        assert_eq!(utime_spec([1, -1], 100), Err(SyscallError::InvalidArgument));
+    }
 }

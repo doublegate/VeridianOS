@@ -158,11 +158,14 @@ pub fn create_initial_capabilities(
             reason: crate::error::CapError::InvalidObject,
         })?;
 
-    // Create default IPC endpoint capability for the process to communicate
+    // Create default IPC endpoint capability for the process to communicate.
+    // A registered endpoint (removed when the process exits): an
+    // unregistered one could be named but not reached (N-81). Before the
+    // IPC registry exists (early boot) the process gets none.
     #[cfg(feature = "alloc")]
+    if let Ok(endpoint) = crate::ipc::registry::create_endpoint(process_id)
+        .and_then(|(id, _)| crate::ipc::registry::lookup_endpoint(id))
     {
-        use alloc::sync::Arc;
-        let endpoint = Arc::new(crate::ipc::channel::Endpoint::new(process_id));
         let ipc_obj = super::object::ObjectRef::Endpoint { endpoint };
         let ipc_rights = Rights::READ | Rights::WRITE | Rights::EXECUTE;
         cap_manager()

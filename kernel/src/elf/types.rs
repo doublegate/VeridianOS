@@ -147,7 +147,7 @@ pub struct Elf64Rela {
 }
 
 /// ELF loader errors
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ElfError {
     InvalidMagic,
     InvalidClass,
@@ -188,9 +188,23 @@ pub enum SegmentType {
     Other(u32),
 }
 
+/// The e_machine of programs this kernel runs (EM_X86_64, EM_AARCH64,
+/// EM_RISCV). Another architecture's program is refused with ENOEXEC, as
+/// Linux's `elf_check_arch` does.
+#[cfg(target_arch = "x86_64")]
+pub const NATIVE_MACHINE: u16 = 62;
+#[cfg(target_arch = "aarch64")]
+pub const NATIVE_MACHINE: u16 = 183;
+#[cfg(target_arch = "riscv64")]
+pub const NATIVE_MACHINE: u16 = 243;
+
 /// ELF binary information
 #[derive(Debug)]
 pub struct ElfBinary {
+    /// e_type: ET_EXEC (2) or ET_DYN (3).
+    pub elf_type: u16,
+    /// e_machine: the architecture the program is for.
+    pub machine: u16,
     pub entry_point: u64,
     pub load_base: u64,
     pub load_size: usize,
@@ -267,6 +281,26 @@ pub fn tls_layout(memsz: usize, p_align: u64) -> Option<(usize, usize)> {
         .checked_add(TCB_SIZE)?
         .checked_next_multiple_of(16)?;
     Some((block_size, aligned))
+}
+
+/// Layout of the initial TLS block for TLS variant I (AArch64, RISC-V),
+/// where the thread pointer is the block base and the TLS image lies above
+/// it, after a TCB of `tcb_size` bytes (16 on AArch64, AAELF64; 0 on
+/// RISC-V, whose psABI puts the image at the thread pointer). Returns
+/// `(block_size, image_offset)`: the image starts at the TCB size rounded
+/// up to `p_align`. As [`tls_layout`], an alignment that is not a power of
+/// two or exceeds a page (the block base is page-aligned) is refused.
+pub fn tls_layout_above_tp(memsz: usize, p_align: u64, tcb_size: usize) -> Option<(usize, usize)> {
+    let align = (p_align as usize).max(1);
+    if !align.is_power_of_two() || align > 4096 {
+        return None;
+    }
+    let image = tcb_size.checked_next_multiple_of(align)?;
+    let block_size = image
+        .checked_add(memsz)?
+        .max(16)
+        .checked_next_multiple_of(16)?;
+    Some((block_size, image))
 }
 
 /// Dynamic linking information

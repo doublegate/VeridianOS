@@ -26,11 +26,11 @@ case $ARCH in
         QEMU_CMD="qemu-system-x86_64 -device isa-debug-exit,iobase=0xf4,iosize=0x04 -serial stdio -display none"
         ;;
     aarch64)
-        TARGET="aarch64-unknown-none"
+        TARGET="aarch64-unknown-none-softfloat"
         QEMU_CMD="qemu-system-aarch64 -M virt -cpu cortex-a57 -serial stdio -display none -semihosting"
         ;;
     riscv64)
-        TARGET="riscv64gc-unknown-none-elf"
+        TARGET="riscv64imac-unknown-none-elf"
         QEMU_CMD="qemu-system-riscv64 -M virt -serial stdio -display none -bios none"
         ;;
     *)

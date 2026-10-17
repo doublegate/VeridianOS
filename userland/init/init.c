@@ -23,8 +23,9 @@ static char *const shell_envp[] = {
     "USER=root",
     "PWD=/",
     "TMPDIR=/tmp",
-    "COMPILER_PATH=/usr/libexec/gcc/x86_64-veridian/14.2.0",
-    "LIBRARY_PATH=/usr/lib:/usr/lib/gcc/x86_64-veridian/14.2.0",
+    // GCC_VERSION of scripts/build-native-gcc-static.sh (the native compiler).
+    "COMPILER_PATH=/usr/libexec/gcc/x86_64-veridian/16.2.0",
+    "LIBRARY_PATH=/usr/lib:/usr/lib/gcc/x86_64-veridian/16.2.0",
     NULL
 };
 

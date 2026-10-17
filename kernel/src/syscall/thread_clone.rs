@@ -8,8 +8,7 @@
 use crate::process::thread::ThreadFs;
 use crate::{
     arch::context::ThreadContext,
-    process::{self, thread::ThreadBuilder, ProcessState},
-    sched,
+    process::{self, thread::ThreadBuilder},
     syscall::{userspace::validate_user_ptr, SyscallError},
 };
 
@@ -29,12 +28,77 @@ const CLONE_CHILD_CLEARTID: usize = 0x0020_0000;
 /// Accepted but ignored for compatibility.
 const CLONE_DETACHED: usize = 0x0040_0000;
 const CLONE_CHILD_SETTID: usize = 0x0100_0000;
+const CLONE_VFORK: usize = 0x0000_4000;
+/// clone's low byte: the signal the parent gets when a new process exits.
+const CSIGNAL: usize = 0xFF;
 
 /// Upper bound of the user-space address range.  Any stack pointer must be
 /// strictly below this address.  The value matches the canonical user-space
 /// limit on x86_64; AArch64 and RISC-V use the same logical limit via
 /// `validate_user_ptr`.
 use crate::mm::user_layout::USER_SPACE_END;
+
+/// clone without CLONE_THREAD: a new process, as fork or vfork (N-210).
+/// musl's and glibc's posix_spawn -- and so system and popen -- call
+/// clone(CLONE_VM | CLONE_VFORK | SIGCHLD) with a stack of their own; it
+/// was EINVAL. CLONE_VM shares the parent's memory page by page
+/// (`VirtualAddressSpace::share_from`). CLONE_FILES and CLONE_SIGHAND
+/// across processes (a shared fd or handler table) are not supported
+/// (EINVAL).
+fn process_clone(
+    flags: usize,
+    newsp: usize,
+    parent_tid_ptr: usize,
+    child_tid_ptr: usize,
+    tls: usize,
+) -> Result<usize, SyscallError> {
+    let supported = CSIGNAL
+        | CLONE_VM
+        | CLONE_FS
+        | CLONE_VFORK
+        | CLONE_SYSVSEM
+        | CLONE_SETTLS
+        | CLONE_PARENT_SETTID
+        | CLONE_CHILD_SETTID
+        | CLONE_CHILD_CLEARTID
+        | CLONE_DETACHED;
+    if flags & !supported != 0 {
+        return Err(SyscallError::InvalidArgument);
+    }
+    let exit_signal = flags & CSIGNAL;
+    if exit_signal > crate::process::signals::NSIG {
+        return Err(SyscallError::InvalidArgument);
+    }
+    #[cfg(target_arch = "x86_64")]
+    if flags & CLONE_SETTLS != 0 && !crate::arch::x86_64::trap::is_user_address(tls as u64) {
+        return Err(SyscallError::InvalidArgument);
+    }
+    // 0 keeps the caller's stack (fork); otherwise it must be user memory.
+    if newsp > USER_SPACE_END {
+        return Err(SyscallError::InvalidPointer);
+    }
+    for (flag, ptr) in [
+        (CLONE_PARENT_SETTID, parent_tid_ptr),
+        (CLONE_CHILD_SETTID, child_tid_ptr),
+        (CLONE_CHILD_CLEARTID, child_tid_ptr),
+    ] {
+        if flags & flag != 0 {
+            validate_user_ptr(ptr as *const u32, core::mem::size_of::<u32>())?;
+        }
+    }
+    let on = |flag: usize| flags & flag != 0;
+    super::process::sys_fork_with(&process::fork::ForkOptions {
+        share_vm: on(CLONE_VM),
+        share_fs: on(CLONE_FS),
+        vfork: on(CLONE_VFORK),
+        stack: (newsp != 0).then_some(newsp),
+        tls: on(CLONE_SETTLS).then_some(tls),
+        exit_signal: exit_signal as u32,
+        parent_settid: on(CLONE_PARENT_SETTID).then_some(parent_tid_ptr),
+        child_settid: on(CLONE_CHILD_SETTID).then_some(child_tid_ptr),
+        child_cleartid: on(CLONE_CHILD_CLEARTID).then_some(child_tid_ptr),
+    })
+}
 
 /// Create a new thread sharing the current process's address space and
 /// resources, following the Linux `clone(2)` semantics for thread creation.
@@ -77,6 +141,9 @@ pub fn sys_thread_clone(
     child_tid_ptr: usize,
     tls: usize,
 ) -> Result<usize, SyscallError> {
+    if flags & CLONE_THREAD == 0 {
+        return process_clone(flags, newsp, parent_tid_ptr, child_tid_ptr, tls);
+    }
     // Validate flags
     let required = CLONE_VM | CLONE_FILES | CLONE_SIGHAND | CLONE_THREAD;
     if flags & required != required {
@@ -100,6 +167,13 @@ pub fn sys_thread_clone(
     }
     // Share FS? (CWD and umask). If not set, clone gets its own copy.
     let share_fs = flags & CLONE_FS != 0;
+
+    // The TLS base is loaded into IA32_FS_BASE whenever the thread runs; a
+    // non-canonical value would fault (#GP) in ring 0 at every switch.
+    #[cfg(target_arch = "x86_64")]
+    if flags & CLONE_SETTLS != 0 && !crate::arch::x86_64::trap::is_user_address(tls as u64) {
+        return Err(SyscallError::InvalidArgument);
+    }
 
     // Basic user stack validation
     if newsp == 0 {
@@ -125,6 +199,8 @@ pub fn sys_thread_clone(
     }
 
     let proc = process::current_process().ok_or(SyscallError::InvalidState)?;
+    // RLIMIT_NPROC counts threads too (EAGAIN).
+    process::rlimit::check_nproc(&proc)?;
 
     // Clone current user context so child resumes at same PC with retval=0.
     // The caller pushed start_routine/arg on the user stack before invoking clone.
@@ -136,7 +212,14 @@ pub fn sys_thread_clone(
         current_ctx.get_instruction_pointer(),
     )
     .kernel_stack_size(process::creation::DEFAULT_KERNEL_STACK_SIZE)
-    .user_stack_size(process::creation::DEFAULT_USER_STACK_SIZE);
+    // Scheduling parameters as Linux's sched_fork (N-221).
+    .sched(current_thread.sched.lock().for_child())
+    // And its CPU mask (Linux copies it too); every CPU was allowed.
+    .cpu_affinity(current_thread.get_affinity())
+    // The thread runs on the caller's stack (`newsp`, required above): no
+    // kernel-chosen stack is mapped for it. One used to be, 256 KiB per
+    // thread that nothing ran on (N-114).
+    .user_stack_size(0);
 
     #[cfg(feature = "alloc")]
     {
@@ -158,6 +241,21 @@ pub fn sys_thread_clone(
 
     let thread = builder.build().map_err(|_| SyscallError::InvalidState)?;
     let tid = thread.tid;
+    // A new thread starts with its creator's blocked mask (N-109), command
+    // name (N-227) and no_new_privs, as Linux copies them.
+    thread.sigmask.store(
+        current_thread
+            .sigmask
+            .load(core::sync::atomic::Ordering::Acquire),
+        core::sync::atomic::Ordering::Release,
+    );
+    *thread.comm.lock() = *current_thread.comm.lock();
+    thread.no_new_privs.store(
+        current_thread
+            .no_new_privs
+            .load(core::sync::atomic::Ordering::Acquire),
+        core::sync::atomic::Ordering::Release,
+    );
 
     // Override context with cloned registers so the child returns 0 from clone.
     //
@@ -175,8 +273,8 @@ pub fn sys_thread_clone(
         // instead of the instruction after the clone() syscall.
         #[cfg(target_arch = "x86_64")]
         if let Some(frame) = crate::arch::x86_64::syscall::get_syscall_frame() {
-            child_ctx.rip = frame.rcx; // RCX = user RIP (saved by SYSCALL)
-            child_ctx.rflags = frame.r11; // R11 = user RFLAGS (saved by SYSCALL)
+            child_ctx.rip = frame.rip;
+            child_ctx.rflags = frame.rflags;
             child_ctx.rbx = frame.rbx;
             child_ctx.rbp = frame.rbp;
             child_ctx.r12 = frame.r12;
@@ -190,6 +288,8 @@ pub fn sys_thread_clone(
             child_ctx.r9 = frame.r9;
             child_ctx.r10 = frame.r10;
         }
+        #[cfg(not(target_arch = "x86_64"))]
+        crate::process::load_live_user_registers(&mut child_ctx);
 
         child_ctx.set_stack_pointer(newsp);
         child_ctx.set_return_value(0); // child sees 0 return
@@ -234,23 +334,6 @@ pub fn sys_thread_clone(
         }
     }
 
-    // Map user stack pages for the new thread
-    {
-        let mut vas = proc.memory_space.lock();
-        let stack_base = thread.user_stack.base;
-        let stack_size = thread.user_stack.size;
-        let flags = crate::mm::PageFlags::PRESENT
-            | crate::mm::PageFlags::USER
-            | crate::mm::PageFlags::WRITABLE
-            | crate::mm::PageFlags::NO_EXECUTE;
-        let pages = stack_size / 4096;
-        for i in 0..pages {
-            let vaddr = stack_base + i * 4096;
-            vas.map_page(vaddr, flags)
-                .map_err(|_| SyscallError::InvalidState)?;
-        }
-    }
-
     // Add to the process first: the task keeps a pointer to the thread, so
     // it must be created from the thread's final, shared (Arc) location.
     // It used to be created from this local, which add_thread() then moved,
@@ -259,26 +342,16 @@ pub fn sys_thread_clone(
         .add_thread(thread)
         .map_err(|_| SyscallError::InvalidState)?;
 
-    // Create scheduler task
-    let task_ptr = sched::create_task_from_thread(proc.pid, tid, &thread)
-        .map_err(|_| SyscallError::InvalidState)?;
-
-    // Mark ready
-    proc.set_state(ProcessState::Ready);
-
-    // Enqueue the child thread in the scheduler so it actually gets CPU time.
-    // Without this, the child task exists but is never placed on a ready queue,
-    // causing the parent to spin forever in futex_wait (pthread_create waits
-    // for the child to write its TID).
-    sched::SCHEDULER.lock().enqueue(task_ptr);
-
-    // TODO(tier7): CLONE_CHILD_CLEARTID is registered via `builder.clear_tid()`
-    // above.  On thread exit the kernel should:
-    //   1. Write 0 to `*child_tid_ptr` (in the thread's address space).
-    //   2. Perform a FUTEX_WAKE on `child_tid_ptr` to unblock any `pthread_join`
-    //      waiters.
-    // This is currently handled by the thread exit path if the clear_tid
-    // field is set; verify integration in the exit syscall.
-
+    // The new thread runs as its own dispatcher task (stage D2), starting
+    // from the registers prepared above and a copy of the caller's vector
+    // state. (CLONE_CHILD_CLEARTID is honoured by exit_dispatched.)
+    if crate::process::start_thread(&proc, &thread, true).is_err() {
+        // The thread never ran: take it out again (with its kernel
+        // stack), or it counted as alive and its process could never
+        // finish exiting (N-46).
+        drop(thread);
+        let _ = crate::process::exit::cleanup_thread(&proc, tid);
+        return Err(SyscallError::OutOfMemory);
+    }
     Ok(tid.0 as usize)
 }

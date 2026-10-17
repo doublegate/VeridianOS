@@ -1,0 +1,54 @@
+Remove two set-but-unused variables (GCC -Wunused-but-set-variable).
+
+appletlib.c: the applet index is read only with FEATURE_INSTALLER.
+getopt32.c: spec_flgs recorded the "?" spec, which no code reads since
+the error path shows usage unless "!" is given.
+
+--- a/libbb/appletlib.c	2026-10-07 09:16:56.590226829 -0400
++++ b/libbb/appletlib.c	2026-10-07 09:16:56.626792880 -0400
+@@ -848,17 +848,19 @@
+ #  endif
+ 
+ 	if (is_prefixed_with(argv[1], "--list")) {
++#  if ENABLE_FEATURE_INSTALLER
+ 		unsigned i = 0;
++#  endif
+ 		const char *a = applet_names;
+ 		dup2(1, 2);
+ 		while (*a) {
+ #  if ENABLE_FEATURE_INSTALLER
+ 			if (argv[1][6]) /* --list-full? */
+ 				full_write2_str(install_dir[APPLET_INSTALL_LOC(i)] + 1);
++			i++;
+ #  endif
+ 			full_write2_str(a);
+ 			full_write2_str("\n");
+-			i++;
+ 			while (*a++ != '\0')
+ 				continue;
+ 		}
+--- a/libbb/getopt32.c	2026-10-07 09:16:56.590302315 -0400
++++ b/libbb/getopt32.c	2026-10-07 09:16:56.628066548 -0400
+@@ -348,9 +348,7 @@
+ 	unsigned trigger;
+ 	int min_arg = 0;
+ 	int max_arg = -1;
+-	int spec_flgs = 0;
+ 
+-#define SHOW_USAGE_IF_ERROR     1
+ 
+ 	on_off = complementary;
+ 	memset(on_off, 0, sizeof(complementary));
+@@ -449,9 +447,9 @@
+ 			continue;
+ 		c = s[1];
+ 		if (*s == '?') {
+-			if (c < '0' || c > '9') {
+-				spec_flgs |= SHOW_USAGE_IF_ERROR;
+-			} else {
++			/* "?" alone (show usage on error) is what the error
++			 * path always does unless "!" is given. */
++			if (c >= '0' && c <= '9') {
+ 				max_arg = c - '0';
+ 				s++;
+ 			}

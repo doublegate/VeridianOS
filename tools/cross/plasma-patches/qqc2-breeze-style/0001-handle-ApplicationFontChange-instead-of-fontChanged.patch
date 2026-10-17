@@ -1,0 +1,114 @@
+VeridianOS: track application font changes without QGuiApplication::fontChanged
+
+GCC reported -Wdeprecated-declarations for QGuiApplication::fontChanged()
+("Handle QEvent::ApplicationFontChange instead") in the BreezeDial and
+PaintedSymbolItem constructors (style/impl/breezedial.cpp,
+style/impl/paintedsymbolitem.cpp), which connected to it to refresh their
+cached font metrics.
+
+QGuiApplication::setFont() emits the deprecated signal and, right after,
+sends QEvent::ApplicationFontChange to the application object; that is the
+only place either happens. Items do not receive that event themselves, so
+each item now installs itself as an event filter on qGuiApp and, on
+ApplicationFontChange addressed to qGuiApp, refreshes its font metrics and
+schedules a repaint exactly as the lambda did. This is the pattern
+Kirigami's Units uses for the same purpose. eventFilter() is declared as a
+protected override in breezedial.h and paintedsymbolitem.h; it always
+passes the event on.
+
+Behaviour is unchanged. A filter on the application object sees every
+event of the GUI thread; the added cost per item is one pointer and type
+comparison per event.
+
+diff -ru a/style/impl/breezedial.cpp b/style/impl/breezedial.cpp
+--- a/style/impl/breezedial.cpp	2026-10-08 17:27:14.670711624 -0400
++++ b/style/impl/breezedial.cpp	2026-10-08 17:27:35.096400361 -0400
+@@ -32,17 +32,24 @@
+     : QQuickPaintedItem(parent)
+     , d_ptr(new BreezeDialPrivate(this))
+ {
+-    Q_D(BreezeDial);
+-    connect(qGuiApp, &QGuiApplication::fontChanged, this, [this, d]() {
+-        d->fontMetrics = QFontMetricsF(QGuiApplication::font());
+-        update();
+-    });
++    // ApplicationFontChange is sent to the application object only
++    qGuiApp->installEventFilter(this);
+ }
+ 
+ BreezeDial::~BreezeDial() noexcept
+ {
+ }
+ 
++bool BreezeDial::eventFilter(QObject *watched, QEvent *event)
++{
++    if (watched == qGuiApp && event->type() == QEvent::ApplicationFontChange) {
++        Q_D(BreezeDial);
++        d->fontMetrics = QFontMetricsF(QGuiApplication::font());
++        update();
++    }
++    return QQuickPaintedItem::eventFilter(watched, event);
++}
++
+ void BreezeDial::paint(QPainter *painter)
+ {
+     Q_D(BreezeDial);
+diff -ru a/style/impl/breezedial.h b/style/impl/breezedial.h
+--- a/style/impl/breezedial.h	2026-10-08 17:27:14.673621476 -0400
++++ b/style/impl/breezedial.h	2026-10-08 17:27:35.096240597 -0400
+@@ -58,6 +58,9 @@
+     void grooveThicknessChanged();
+     void notchesVisibleChanged();
+ 
++protected:
++    bool eventFilter(QObject *watched, QEvent *event) override;
++
+ private:
+     const std::unique_ptr<BreezeDialPrivate> d_ptr;
+     Q_DECLARE_PRIVATE(BreezeDial)
+diff -ru a/style/impl/paintedsymbolitem.cpp b/style/impl/paintedsymbolitem.cpp
+--- a/style/impl/paintedsymbolitem.cpp	2026-10-08 17:27:14.676560442 -0400
++++ b/style/impl/paintedsymbolitem.cpp	2026-10-08 17:27:35.096444257 -0400
+@@ -12,10 +12,8 @@
+     , d_ptr(new PaintedSymbolItemPrivate(this))
+ {
+     Q_D(PaintedSymbolItem);
+-    connect(qGuiApp, &QGuiApplication::fontChanged, this, [this, d]() {
+-        d->fontMetrics = QFontMetricsF(QGuiApplication::font());
+-        update();
+-    });
++    // ApplicationFontChange is sent to the application object only
++    qGuiApp->installEventFilter(this);
+     d->targetSymbolSize = d->fontMetrics.height() + std::fmod(d->fontMetrics.height(), 2.0);
+     d->targetSymbolSize -= std::fmod(d->targetSymbolSize, 6.0);
+     d->targetSymbolSize -= d->targetSymbolSize / 3.0;
+@@ -27,6 +25,16 @@
+ {
+ }
+ 
++bool PaintedSymbolItem::eventFilter(QObject *watched, QEvent *event)
++{
++    if (watched == qGuiApp && event->type() == QEvent::ApplicationFontChange) {
++        Q_D(PaintedSymbolItem);
++        d->fontMetrics = QFontMetricsF(QGuiApplication::font());
++        update();
++    }
++    return QQuickPaintedItem::eventFilter(watched, event);
++}
++
+ void PaintedSymbolItem::paint(QPainter *painter)
+ {
+     Q_D(PaintedSymbolItem);
+diff -ru a/style/impl/paintedsymbolitem.h b/style/impl/paintedsymbolitem.h
+--- a/style/impl/paintedsymbolitem.h	2026-10-08 17:27:14.679483338 -0400
++++ b/style/impl/paintedsymbolitem.h	2026-10-08 17:27:35.096277445 -0400
+@@ -60,6 +60,9 @@
+     void penWidthChanged();
+     void symbolTypeChanged();
+ 
++protected:
++    bool eventFilter(QObject *watched, QEvent *event) override;
++
+ private:
+     const QScopedPointer<PaintedSymbolItemPrivate> d_ptr;
+     Q_DECLARE_PRIVATE(PaintedSymbolItem)

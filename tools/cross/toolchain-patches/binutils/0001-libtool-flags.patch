@@ -1,0 +1,102 @@
+VeridianOS: binutils libtool flags without libtool notes
+
+ld's libdep plugin is linked with "-rpath /nowhere" on top of the
+"-rpath $(bfdplugindir)" automake gives every installed libtool library,
+so libtool warned "ignoring multiple -rpath's for a libtool library" and,
+at install, "remember to run 'libtool --finish /nowhere'". The flag goes
+(the testplug libraries, which are not installed, keep theirs): the
+plugin is linked for, and installed into, bfd-plugins as before. With
+the first -rpath gone, libdep.la's libdir is the real install directory,
+so a "make install" without DESTDIR would now run "libtool --finish"
+there (ldconfig -n and a banner); build-musl-toolchain.sh installs with
+LIBTOOLFLAGS=--no-finish, which keeps the installed files and the
+install steps as before.
+
+libsframe and libctf pass -version-info whether they are installed
+libraries (--enable-install-libbfd) or not; for the internal convenience
+libraries of an ordinary build libtool ignores it and warns
+("-version-info/-version-number is ignored for convenience libraries").
+The version is now given only to the installed libraries.
+
+Both Makefile.am and the generated Makefile.in are changed (binutils
+builds without maintainer mode, so automake does not run).
+
+--- a/ld/Makefile.am
++++ b/ld/Makefile.am
+@@ -719,7 +719,7 @@
+ bfdplugindir = $(libdir)/bfd-plugins
+ bfdplugin_LTLIBRARIES = libdep.la
+ libdep_la_SOURCES = libdep_plugin.c
+-libdep_la_LDFLAGS = -no-undefined -rpath /nowhere -module -avoid-version
++libdep_la_LDFLAGS = -no-undefined -module -avoid-version
+ libdep_la_LINK = $(LIBTOOL) $(AM_V_lt) --tag=CC $(AM_LIBTOOLFLAGS) \
+ 	--tag=disable-static \
+ 	$(LIBTOOLFLAGS) --mode=link $(CCLD) $(AM_CFLAGS) $(CFLAGS) \
+--- a/ld/Makefile.in
++++ b/ld/Makefile.in
+@@ -1060,7 +1060,7 @@
+ bfdplugindir = $(libdir)/bfd-plugins
+ bfdplugin_LTLIBRARIES = libdep.la
+ libdep_la_SOURCES = libdep_plugin.c
+-libdep_la_LDFLAGS = -no-undefined -rpath /nowhere -module -avoid-version
++libdep_la_LDFLAGS = -no-undefined -module -avoid-version
+ libdep_la_LINK = $(LIBTOOL) $(AM_V_lt) --tag=CC $(AM_LIBTOOLFLAGS) \
+ 	--tag=disable-static \
+ 	$(LIBTOOLFLAGS) --mode=link $(CCLD) $(AM_CFLAGS) $(CFLAGS) \
+--- a/libsframe/Makefile.am
++++ b/libsframe/Makefile.am
+@@ -29,7 +29,11 @@
+ # include libctf for swap.h
+ AM_CPPFLAGS = -I$(srcdir)/../include -I$(srcdir)/../libctf
+ AM_CFLAGS = @ac_libsframe_warn_cflags@
++# A library version only for the installed library: libtool ignores it, with
++# a warning, for the convenience library built otherwise.
++if INSTALL_LIBBFD
+ libsframe_version_info = -version-info `grep -v '^\#' $(srcdir)/libtool-version`
++endif
+ # libsframe does not restrict the set of exported symbols.  So, if linker does
+ # not support symbol versioning, there is no need to fall back on libtool's
+ # -export-symbols option.
+--- a/libsframe/Makefile.in
++++ b/libsframe/Makefile.in
+@@ -562,7 +562,9 @@
+ # include libctf for swap.h
+ AM_CPPFLAGS = -I$(srcdir)/../include -I$(srcdir)/../libctf
+ AM_CFLAGS = @ac_libsframe_warn_cflags@
+-libsframe_version_info = -version-info `grep -v '^\#' $(srcdir)/libtool-version`
++# A library version only for the installed library: libtool ignores it, with
++# a warning, for the convenience library built otherwise.
++@INSTALL_LIBBFD_TRUE@libsframe_version_info = -version-info `grep -v '^\#' $(srcdir)/libtool-version`
+ @HAVE_LD_VERSION_SCRIPT_TRUE@@HAVE_SOLARIS_LD_FALSE@libsframe_version_script = -Wl,--version-script=$(srcdir)/libsframe.ver
+ # libsframe does not restrict the set of exported symbols.  So, if linker does
+ # not support symbol versioning, there is no need to fall back on libtool's
+--- a/libctf/Makefile.am
++++ b/libctf/Makefile.am
+@@ -52,7 +52,12 @@
+ endif
+ 
+ libctf_nobfd_la_LIBADD = @CTF_LIBADD@ $(ZLIB)
+-libctf_ldflags_nover = -version-info 0:0:0 @SHARED_LDFLAGS@
++# A library version only for the installed libraries: libtool ignores it,
++# with a warning, for the convenience libraries built otherwise.
++if INSTALL_LIBBFD
++libctf_version_info = -version-info 0:0:0
++endif
++libctf_ldflags_nover = $(libctf_version_info) @SHARED_LDFLAGS@
+ libctf_nobfd_la_LDFLAGS = $(libctf_ldflags_nover) @VERSION_FLAGS_NOBFD@
+ libctf_nobfd_la_CPPFLAGS = $(AM_CPPFLAGS) -DNOBFD=1
+ libctf_nobfd_la_SOURCES = ctf-archive.c ctf-dump.c ctf-create.c ctf-decl.c ctf-error.c \
+--- a/libctf/Makefile.in
++++ b/libctf/Makefile.in
+@@ -607,7 +607,10 @@
+ @INSTALL_LIBBFD_TRUE@include_HEADERS = $(INCDIR)/ctf.h $(INCDIR)/ctf-api.h
+ @INSTALL_LIBBFD_FALSE@noinst_LTLIBRARIES = libctf.la libctf-nobfd.la
+ libctf_nobfd_la_LIBADD = @CTF_LIBADD@ $(ZLIB)
+-libctf_ldflags_nover = -version-info 0:0:0 @SHARED_LDFLAGS@
++# A library version only for the installed libraries: libtool ignores it,
++# with a warning, for the convenience libraries built otherwise.
++@INSTALL_LIBBFD_TRUE@libctf_version_info = -version-info 0:0:0
++libctf_ldflags_nover = $(libctf_version_info) @SHARED_LDFLAGS@
+ libctf_nobfd_la_LDFLAGS = $(libctf_ldflags_nover) @VERSION_FLAGS_NOBFD@
+ libctf_nobfd_la_CPPFLAGS = $(AM_CPPFLAGS) -DNOBFD=1
+ libctf_nobfd_la_SOURCES = ctf-archive.c ctf-dump.c ctf-create.c \

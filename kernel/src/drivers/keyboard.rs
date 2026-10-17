@@ -126,6 +126,9 @@ mod x86_64_impl {
     // The push side (interrupt handler) is single-producer and pop side
     // (shell loop) is single-consumer, making concurrent access safe.
     unsafe impl Send for KeyBuffer {}
+    // SAFETY: the fields are a plain byte array and atomics. The only
+    // mutation of `buf` goes through `push(&mut self)`; `&self` methods only
+    // read, so shared references cannot race on the array.
     unsafe impl Sync for KeyBuffer {}
 
     static KEY_BUFFER: Mutex<KeyBuffer> = Mutex::new(KeyBuffer::new());
@@ -143,11 +146,19 @@ mod x86_64_impl {
         INITIALIZED.store(true, Ordering::Release);
     }
 
-    /// Handle a scancode from the PS/2 keyboard interrupt (vector 33).
+    /// Handle a scancode, from the PS/2 keyboard interrupt (vector 33) or
+    /// the polling path. The keyboard locks are also taken in interrupt
+    /// context, so task-context callers hold them with interrupts off (with
+    /// interrupts on in system calls, N-139, an IRQ 1 on top of a holder
+    /// would spin forever).
     ///
     /// This function must NOT call println! or acquire any spinlock used
     /// by the serial/fbcon output path.
     pub fn handle_scancode(scancode: u8) {
+        x86_64::instructions::interrupts::without_interrupts(|| handle_scancode_locked(scancode));
+    }
+
+    fn handle_scancode_locked(scancode: u8) {
         use pc_keyboard::KeyCode;
 
         let mut kb_guard = KEYBOARD.lock();
@@ -223,9 +234,10 @@ mod x86_64_impl {
         }
     }
 
-    /// Read a decoded key byte from the keyboard buffer (non-blocking).
+    /// Read a decoded key byte from the keyboard buffer (non-blocking), with
+    /// interrupts off for the reason given at `handle_scancode`.
     pub fn read_key() -> Option<u8> {
-        KEY_BUFFER.lock().pop()
+        x86_64::instructions::interrupts::without_interrupts(|| KEY_BUFFER.lock().pop())
     }
 }
 

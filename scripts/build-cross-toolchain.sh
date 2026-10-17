@@ -58,28 +58,29 @@ JOBS="$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)"
 # ---------------------------------------------------------------------------
 # Version and checksum table
 # ---------------------------------------------------------------------------
-BINUTILS_VERSION="2.43"
-GCC_VERSION="14.2.0"
+BINUTILS_VERSION="2.47"
+GCC_VERSION="16.2.0"
 GMP_VERSION="6.3.0"
-MPFR_VERSION="4.2.1"
-MPC_VERSION="1.3.1"
+MPFR_VERSION="4.2.2"
+MPC_VERSION="1.4.1"
 
 BINUTILS_URL="https://ftp.gnu.org/gnu/binutils/binutils-${BINUTILS_VERSION}.tar.xz"
 GCC_URL="https://ftp.gnu.org/gnu/gcc/gcc-${GCC_VERSION}/gcc-${GCC_VERSION}.tar.xz"
 GMP_URL="https://ftp.gnu.org/gnu/gmp/gmp-${GMP_VERSION}.tar.xz"
 MPFR_URL="https://ftp.gnu.org/gnu/mpfr/mpfr-${MPFR_VERSION}.tar.xz"
-MPC_URL="https://ftp.gnu.org/gnu/mpc/mpc-${MPC_VERSION}.tar.gz"
+MPC_URL="https://ftp.gnu.org/gnu/mpc/mpc-${MPC_VERSION}.tar.xz"
 
-BINUTILS_SHA256="b53606f443ac8f01d1d5fc9c39497f2af322d99e14cea5c0b4b124d630379365"
-GCC_SHA256="a7b39bc69cbf9e25826c5a60ab26477001f7c08d85cec04bc0e29cabed6f3cc9"
+BINUTILS_SHA256="154ab23b60070e8f27013c22977f1129425d67d1e8acd6e13010e617811e4cff"
+GCC_SHA256="e6738e29597f733270731aa90600f37ffdc045079dfc27ec7e8192cc81085c3e"
 GMP_SHA256="a3c2b80201b89e68616f4ad30bc66aee4927c3ce50e33929ca819d5c43538898"
-MPFR_SHA256="277807353a6726978996945af13e52829e3abd7a9a5b7fb2793894e18f1fcbb2"
-MPC_SHA256="ab642492f5cf882b74aa0cb730cd410a81edcdbec895183ce930e706c1c759b8"
+MPFR_SHA256="b67ba0383ef7e8a8563734e2e889ef5ec3c3b898a01d00fa0a6869ad81c6ce01"
+MPC_SHA256="91204cd32f164bd3b7c992d4a6a8ce6519511aadab30f78b6982d0bf8d73e931"
 
 # ---------------------------------------------------------------------------
 # Build directory
 # ---------------------------------------------------------------------------
-BUILD_BASE="/tmp/veridian-toolchain-build"
+# Overridable: a GCC build needs several GB, more than a small tmpfs /tmp has.
+BUILD_BASE="${BUILD_BASE:-/tmp/veridian-toolchain-build}"
 
 # ---------------------------------------------------------------------------
 # Parse arguments
@@ -150,7 +151,7 @@ check_prerequisites() {
 
     local missing=()
 
-    for cmd in gcc g++ make tar wget sha256sum patch bison flex \
+    for cmd in gcc g++ make tar curl sha256sum patch bison flex \
                makeinfo xz gzip; do
         if ! command -v "${cmd}" &>/dev/null; then
             missing+=("${cmd}")
@@ -202,6 +203,26 @@ create_directories() {
 # ---------------------------------------------------------------------------
 # Step 3: Download source tarballs
 # ---------------------------------------------------------------------------
+# Apply a patch to an extracted source tree once. The stamp records the
+# patch's SHA-256: a tree patched with an older version of it cannot be
+# patched again, and is reported instead of being silently built as it is.
+apply_patch_once() {
+    local tree="$1" patch_file="$2" label="$3"
+    local pname sum stamp
+    pname="$(basename "${patch_file}")"
+    sum="$(sha256sum "${patch_file}" | cut -d' ' -f1)"
+    stamp="${tree}/.applied-${pname}"
+    if [[ -f "${stamp}" ]]; then
+        [[ "$(cat "${stamp}")" == "${sum}" ]] ||
+            die "${tree} has an older ${label}/${pname}; remove the tree to re-extract it"
+        info "Patch already applied: ${label}/${pname}"
+        return 0
+    fi
+    info "Applying: ${label}/${pname}"
+    patch -d "${tree}" -p1 < "${patch_file}" || die "Failed to apply patch: ${patch_file}"
+    echo "${sum}" > "${stamp}"
+}
+
 download_sources() {
     step "Downloading source tarballs"
 
@@ -222,8 +243,15 @@ download_sources() {
             info "Already downloaded: ${filename}"
         else
             info "Downloading ${filename} ..."
-            wget -q --show-progress -O "${dest}" "${url}" \
-                || die "Failed to download ${url}"
+            # curl first: wget may be a sandbox wrapper (firejail) that
+            # cannot write outside the home directory.
+            if command -v curl &>/dev/null; then
+                curl -fL --progress-bar -o "${dest}" "${url}" \
+                    || { rm -f "${dest}"; die "Failed to download ${url}"; }
+            else
+                wget -q --show-progress -O "${dest}" "${url}" \
+                    || { rm -f "${dest}"; die "Failed to download ${url}"; }
+            fi
         fi
     done
 
@@ -241,7 +269,7 @@ verify_checksums() {
         ["gcc-${GCC_VERSION}.tar.xz"]="${GCC_SHA256}"
         ["gmp-${GMP_VERSION}.tar.xz"]="${GMP_SHA256}"
         ["mpfr-${MPFR_VERSION}.tar.xz"]="${MPFR_SHA256}"
-        ["mpc-${MPC_VERSION}.tar.gz"]="${MPC_SHA256}"
+        ["mpc-${MPC_VERSION}.tar.xz"]="${MPC_SHA256}"
     )
 
     for filename in "${!expected[@]}"; do
@@ -301,17 +329,7 @@ apply_patches() {
     if [[ -d "${patches_dir}" ]]; then
         for patch_file in "${patches_dir}"/*.patch; do
             [[ -f "${patch_file}" ]] || continue
-            local pname
-            pname="$(basename "${patch_file}")"
-            local stamp="${srcdir}/binutils-${BINUTILS_VERSION}/.applied-${pname}"
-            if [[ -f "${stamp}" ]]; then
-                info "Patch already applied: binutils/${pname}"
-            else
-                info "Applying: binutils/${pname}"
-                patch -d "${srcdir}/binutils-${BINUTILS_VERSION}" -p1 < "${patch_file}" \
-                    || die "Failed to apply patch: ${patch_file}"
-                touch "${stamp}"
-            fi
+            apply_patch_once "${srcdir}/binutils-${BINUTILS_VERSION}" "${patch_file}" binutils
         done
     else
         warn "No binutils patches directory found at ${patches_dir}"
@@ -322,17 +340,7 @@ apply_patches() {
     if [[ -d "${patches_dir}" ]]; then
         for patch_file in "${patches_dir}"/*.patch; do
             [[ -f "${patch_file}" ]] || continue
-            local pname
-            pname="$(basename "${patch_file}")"
-            local stamp="${srcdir}/gcc-${GCC_VERSION}/.applied-${pname}"
-            if [[ -f "${stamp}" ]]; then
-                info "Patch already applied: gcc/${pname}"
-            else
-                info "Applying: gcc/${pname}"
-                patch -d "${srcdir}/gcc-${GCC_VERSION}" -p1 < "${patch_file}" \
-                    || die "Failed to apply patch: ${patch_file}"
-                touch "${stamp}"
-            fi
+            apply_patch_once "${srcdir}/gcc-${GCC_VERSION}" "${patch_file}" gcc
         done
     else
         warn "No GCC patches directory found at ${patches_dir}"

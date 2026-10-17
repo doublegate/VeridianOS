@@ -102,8 +102,8 @@ check_qemu() {
 target_triple() {
     case "$1" in
         x86_64)  echo "x86_64-unknown-none" ;;
-        aarch64) echo "aarch64-unknown-none" ;;
-        riscv64) echo "riscv64gc-unknown-none-elf" ;;
+        aarch64) echo "aarch64-unknown-none-softfloat" ;;
+        riscv64) echo "riscv64imac-unknown-none-elf" ;;
     esac
 }
 

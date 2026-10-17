@@ -47,9 +47,28 @@ build_arch() {
         BUILD_DIR="debug"
     fi
 
+    # Extra cargo features from the environment, e.g. FEATURES=smp.
+    FEATURE_FLAGS=""
+    if [ -n "${FEATURES:-}" ]; then
+        FEATURE_FLAGS="--features ${FEATURES}"
+    fi
+
     # All architectures need -Zbuild-std for bare metal targets
-    if cargo build $RELEASE_FLAG --target "$target" -p veridian-kernel -Zbuild-std=core,compiler_builtins,alloc; then
+    if cargo build $RELEASE_FLAG $FEATURE_FLAGS --target "$target" -p veridian-kernel -Zbuild-std=core,compiler_builtins,alloc; then
         echo -e "${GREEN}$arch build successful!${NC}"
+
+        # AArch64: also the raw arm64 Image (64-byte header in boot.S,
+        # HA-03) that QEMU, U-Boot `booti` and the Raspberry Pi firmware load.
+        if [ "$arch" == "AArch64" ]; then
+            local elf="target/$target/$BUILD_DIR/veridian-kernel"
+            local objcopy
+            objcopy=$(ls "$(rustc --print sysroot)"/lib/rustlib/*/bin/llvm-objcopy 2>/dev/null | head -1)
+            [ -n "$objcopy" ] || objcopy=llvm-objcopy
+            if ! "$objcopy" -O binary "$elf" "$elf.img"; then
+                echo -e "${RED}AArch64 Image (objcopy) failed${NC}"
+                exit 1
+            fi
+        fi
 
         # For x86_64, create bootable disk image using bootloader 0.11+
         if [ "$arch" == "x86_64" ]; then
@@ -81,16 +100,16 @@ case $ARCH in
         build_arch "x86_64" "targets/x86_64-veridian.json"
         ;;
     aarch64)
-        build_arch "AArch64" "aarch64-unknown-none"
+        build_arch "AArch64" "aarch64-unknown-none-softfloat"
         ;;
     riscv64)
-        build_arch "RISC-V" "riscv64gc-unknown-none-elf"
+        build_arch "RISC-V" "riscv64imac-unknown-none-elf"
         ;;
     all)
         echo -e "${YELLOW}Building all architectures...${NC}"
         build_arch "x86_64" "targets/x86_64-veridian.json"
-        build_arch "AArch64" "aarch64-unknown-none"
-        build_arch "RISC-V" "riscv64gc-unknown-none-elf"
+        build_arch "AArch64" "aarch64-unknown-none-softfloat"
+        build_arch "RISC-V" "riscv64imac-unknown-none-elf"
         ;;
     *)
         echo -e "${RED}Unknown architecture: $ARCH${NC}"
@@ -113,8 +132,8 @@ if [ "$ARCH" == "all" ] || [ "$ARCH" == "x86_64" ]; then
     echo "  x86_64: target/x86_64-veridian/$BUILD_DIR/veridian-kernel"
 fi
 if [ "$ARCH" == "all" ] || [ "$ARCH" == "aarch64" ]; then
-    echo "  AArch64: target/aarch64-unknown-none/$BUILD_DIR/veridian-kernel"
+    echo "  AArch64: target/aarch64-unknown-none-softfloat/$BUILD_DIR/veridian-kernel"
 fi
 if [ "$ARCH" == "all" ] || [ "$ARCH" == "riscv64" ]; then
-    echo "  RISC-V: target/riscv64gc-unknown-none-elf/$BUILD_DIR/veridian-kernel"
+    echo "  RISC-V: target/riscv64imac-unknown-none-elf/$BUILD_DIR/veridian-kernel"
 fi

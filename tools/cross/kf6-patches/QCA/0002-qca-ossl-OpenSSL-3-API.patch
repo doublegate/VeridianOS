@@ -1,0 +1,4328 @@
+qca-ossl: port to the OpenSSL 3 APIs (no API deprecated in OpenSSL 3.0)
+
+Applies to: qca-2.3.12 (tarball) plus the VeridianOS QcaConfig.cmake.in edit
+(@BUILD_SHARED_LIBRARIES@ -> @BUILD_SHARED_LIBS@) and 0001 in this directory.
+Apply with `patch -p1`.
+Requires OpenSSL >= 3.0 (CMake now asks for 3.0); tested against OpenSSL 3.6.5
+and 4.0.3. Upstream: KDE bug 392054.
+
+Summary
+-------
+qca-ossl.cpp used ~50 low-level APIs that OpenSSL 3.0 deprecated (121
+-Wdeprecated-declarations warnings against OpenSSL 4.0.3, 122 qca-ossl warnings
+in total with the one Qt deprecation). After this patch it compiles with no
+OpenSSL deprecation warning, and also compiles cleanly with
+-DOPENSSL_API_COMPAT=30000, -DOPENSSL_NO_DEPRECATED_3_0 and
+-DOPENSSL_NO_DEPRECATED (each on its own and combined), against both OpenSSL
+3.6.5 and 4.0.3 headers. (The one other qca-ossl warning, Qt's
+QDateTime::setTimeSpec deprecation, is fixed by 0001.)
+
+What was deprecated, and what replaces it
+-----------------------------------------
+* HMAC_CTX_new/free/reset/copy, HMAC_Init_ex/Update/Final
+  -> EVP_MAC "HMAC" (EVP_MAC_CTX_new/dup/free, EVP_MAC_init with the digest
+     name as OSSL_MAC_PARAM_DIGEST, EVP_MAC_update/final). A copy duplicates the
+     running state (EVP_MAC_CTX_dup), as HMAC_CTX_copy did. An empty key is
+     passed as a zero-length non-null buffer, since a null key means "reuse the
+     previous key" to EVP_MAC_init.
+
+* RSA/DSA/DH key construction: RSA_new/set0_key/set0_factors,
+  DSA_new/set0_pqg/set0_key, DH_new/set0_pqg/set0_key, EVP_PKEY_assign_*
+  -> OSSL_PARAM_BLD + EVP_PKEY_fromdata. The same components go in: an
+     imported RSA private key gets n, e, d, p, q and, as before, no CRT values.
+     Private components are pushed from secure BIGNUMs, so the OSSL_PARAM block
+     holding them is cleansed by OSSL_PARAM_free.
+  -> RSA_blinding_off(): the old code switched blinding off for a private key
+     given with e == 0 or d == 0. Blinding cannot be switched off on a provider
+     key, and the RSA key manager requires e. The missing exponent is now
+     computed instead (e * d = 1 mod lcm(p-1, q-1)). A key without e keeps
+     working (and e() now reports the real exponent instead of 0); a key without
+     d, which used to give wrong results, now works; a key with neither (or
+     without p, q) is not created.
+
+* Reading components: EVP_PKEY_get0_RSA/DSA/DH + RSA_get0_key/get0_factors,
+  DSA_get0_pqg/get0_key, DH_get0_pqg/get0_key, RSA_size, DH_size
+  -> EVP_PKEY_get_bn_param (OSSL_PKEY_PARAM_RSA_N/E/D/FACTOR1/FACTOR2,
+     FFC_P/Q/G, PUB_KEY, PRIV_KEY) and EVP_PKEY_get_size. A component the key
+     does not have reads as 0 (the old getters crashed on a null BIGNUM).
+
+* Key generation: RSA_generate_key_ex, DSA_generate_key, DH_generate_key
+  -> EVP_PKEY_keygen_init/EVP_PKEY_generate (RSA: set_rsa_keygen_bits +
+     set1_rsa_keygen_pubexp; DSA/DH: from a parameters-only key).
+  DSA keys in the 512 and 768-bit groups: OpenSSL 3 checks the domain by the
+  FIPS 186-4 rules before generating a key. The old code worked around that by
+  generating a dummy group with DSA_generate_parameters_ex() to borrow its
+  internal "legacy" flag; the DSA key manager offers the same choice as the
+  "fips186_2" generation type, which is used (only) when the default check fails
+  for p < 2048, exactly when the old fallback ran.
+
+* DSA_generate_parameters_ex (the JCE groups DSA_512/768/1024 regenerated from
+  seed and counter)
+  -> EVP_PKEY_paramgen with OSSL_PKEY_PARAM_FFC_TYPE "fips186_2", PBITS, QBITS
+     160 and the same seed; the counter is read back as
+     OSSL_PKEY_PARAM_FFC_PCOUNTER and checked as before. The groups are
+     bit-identical to the old ones (the new DSA test pins them; DSA_1024 is the
+     well-known JCE default group).
+
+* i2d_RSAPublicKey/d2i_RSAPublicKey, i2d_DSAPublicKey/d2i_DSAPublicKey
+  (convertToPublic) and the manual DH copy
+  -> EVP_PKEY_todata(EVP_PKEY_PUBLIC_KEY) + EVP_PKEY_fromdata: the same public
+     key (RSA n, e; DSA y with p, q, g; DH y with the domain) without going
+     through a DER encoding at all, so the PKCS#1 RSAPublicKey vs.
+     SubjectPublicKeyInfo question does not arise.
+
+* Raw RSA: RSA_public_encrypt/private_decrypt/private_encrypt/public_decrypt
+  -> EVP_PKEY_encrypt/decrypt/sign/verify_recover with
+     EVP_PKEY_CTX_set_rsa_padding and no signature digest, which applies the
+     padding to the input exactly like the old calls (OAEP keeps its SHA-1 /
+     MGF1-SHA-1 defaults; PKCS#1 v1.5 decryption keeps OpenSSL's default
+     implicit rejection, which RSA_private_decrypt also had). EMSA3_Raw
+     signatures and verification use the same primitive.
+
+* DH_compute_key -> EVP_PKEY_derive with padding explicitly off: the secret
+  without leading zero bytes, as before.
+
+* RSA_METHOD (RSA_meth_dup/set_*, RSA_set_method, RSA_get_default_method):
+  replaced by a provider, see below.
+
+* Also removed (deprecated in 1.1.0, gone with OPENSSL_NO_DEPRECATED):
+  OpenSSL_add_all_algorithms, ERR_load_crypto_strings, SSL_library_init,
+  SSL_load_error_strings, OpenSSL_add_ssl_algorithms (-> the OPENSSL_init_*
+  calls they expanded to), SSLv23_*_method (-> TLS_*_method),
+  X509_get_notBefore/After (-> X509_getm_* / X509_get0_*),
+  X509_STORE_CTX_get_chain / X509_STORE_CTX_trusted_stack (-> get0_chain /
+  set0_trusted_stack), EVP_CIPHER_CTX_init/cleanup (-> EVP_CIPHER_CTX_reset),
+  PEMerr (-> ERR_raise), SSL_get_peer_certificate (-> SSL_get1_peer_certificate,
+  now freed: the old call leaked a reference). The pre-OpenSSL-3
+  #ifdef OPENSSL_VERSION_MAJOR branches are gone.
+
+Keystore keys: how the RSA_METHOD path works now
+------------------------------------------------
+TLS (server and client authentication) and CMS accept a private key that
+belongs to another QCA provider: a smart card or PKCS#11 token key reached
+through a QCA keystore. OpenSSL never sees the private half; every private
+operation must go back to QCA. The old code did that with an RSA_METHOD whose
+rsa_priv_dec called QCA's decrypt. That never covered signing (rsa_priv_enc was
+set to NULL), and RSA_METHOD is deprecated since OpenSSL 3.0 (OpenSSL 4.0.3
+still sends a key with a custom RSA_METHOD through it; an upstream fix kept
+that design, this patch moves to a provider). With the unported plugin on OpenSSL 3.6.5 the new
+KeystoreKey test crashes (SIGSEGV) for TLS server and client authentication and
+CMS signing, and fails for RSA key exchange and CMS decryption.
+
+The plugin now registers a small built-in OpenSSL provider (OSSL_PROVIDER_add_
+builtin + OSSL_PROVIDER_load into the default library context, on first use;
+unloaded in the plugin's destructor). It implements, for "RSA":
+
+* a key manager whose key object holds the QCA RSAPrivateKey and its n, e. Keys
+  are created only by createFromExisting(): it parks the QCA key under a
+  one-time ticket and calls EVP_PKEY_fromdata on this key manager with that
+  ticket (no pointers travel through OSSL_PARAM). The key manager exports the
+  public half (n, e) only and refuses any export or import that involves the
+  private key. That refusal is what makes OpenSSL run the private-key
+  operations of these keys with this provider's own implementations (it tries
+  the default provider first and falls back to the key's provider when the key
+  cannot be exported), while EVP_PKEY_eq/X509_check_private_key still work
+  through the public export. It also answers bits, security bits, max size,
+  default digest (SHA256), n and e.
+* a signature implementation: PKCS#1 v1.5 only, through sign and
+  digest_sign_init/update/final (OpenSSL 4 requires the latter for
+  EVP_DigestSign). The DigestInfo is built with X509_SIG (or the raw 36 bytes
+  for TLS 1.0/1.1 MD5+SHA-1; or the raw input without a digest, like
+  RSA_private_encrypt) and signed with QCA's EMSA3_Raw (PKCS#11 CKM_RSA_PKCS).
+  The result is left-padded to the modulus length. It also reports the X.509
+  AlgorithmIdentifier. RSA-PSS is rejected: QCA's key API cannot express it.
+* an asymmetric cipher for decryption: PKCS#1 v1.5 and OAEP (SHA-1/MGF1-SHA-1,
+  empty label: QCA's EME_PKCS1_OAEP) -- the two paddings rsa_priv_dec handled --
+  plus RSA_PKCS1_WITH_TLS_PADDING, which libssl now uses for RSA key exchange:
+  the premaster secret is checked for length and client version and replaced
+  by random bytes on any failure, branch-free, so a bad ciphertext never shows
+  as an error (RFC 5246 7.4.7.1). Whether the keystore's own decryption failed
+  may still show in its timing; that is a property of the backend.
+  Implicit rejection is reported as off, and requests to turn it on are refused
+  (it needs the private key itself).
+
+All its algorithms carry the property "qca.keystore=yes"; every key the plugin
+builds or generates itself asks for "qca.keystore=no", and createFromExisting
+asks for "qca.keystore=yes". The provider's name carries the address of its
+init function, because OpenSSL keeps built-in registrations for the life of the
+process and QCA can unload and reload the plugin. It has no teardown function
+and no state, so OpenSSL never calls into the plugin after it is unloaded.
+
+Because the keystore key can only sign PKCS#1 v1.5, a TLS session that uses one
+is capped at TLS 1.2 (TLS 1.3 signs with RSA-PSS only), and the signature
+algorithms this side signs with are restricted to RSA+SHA256/384/512 (server:
+SSL_set1_sigalgs_list, with the CertificateRequest list kept broad through
+SSL_set1_client_sigalgs_list; client: SSL_set1_client_sigalgs_list). Sessions
+with ordinary keys are unchanged.
+
+CMS decryption now also accepts a keystore key (the same conversion as CMS
+signing); before, a key of another provider was static_cast to this plugin's
+key type there.
+
+Other fixes found while testing (all in code this patch touches or that the new
+tests run through)
+--------------------------------------------------------------------------------
+* TLS SNI: `char *hostname = targetHostName.toLatin1().data()` used a pointer
+  into a destroyed temporary (AddressSanitizer: heap-use-after-free). The
+  QByteArray is now kept alive.
+* TLS server getCert(): when the client sends no certificate, OpenSSL 3 returns
+  an empty peer chain and no peer certificate; the old code passed the null
+  certificate to X509_up_ref and called primary() on an empty chain (SIGSEGV).
+* MyTLSContext::init() failure paths freed the SSL and SSL_CTX but left the
+  pointers set, so reset() freed them again, and a later update() wrote into
+  the freed BIO. They now go through freeSsl(), which clears the pointers, and
+  update() returns an error when there is no session.
+
+New tests (unittest/)
+---------------------
+* rsaunittest: testRawPadding (each padding seen through the raw primitive of
+  the other direction: PKCS#1 v1.5 type 2 and type 1 block layout, OAEP leading
+  zero, EME_NO_PADDING decryption both ways, OAEP rejected in the private
+  direction, EME_PKCS1v15_SSL rejected, EMSA3_Raw = PKCS#1 private encryption,
+  EMSA3_SHA256 = EMSA3_Raw of the SHA-256 DigestInfo); testImportExport
+  (n, e, p, q, d round trip; the imported key signs identically and decrypts
+  PKCS#1 v1.5/OAEP; public key from components; convertToPublic; DER of the
+  public key unchanged); testMissingExponent (e == 0 / d == 0 handling above).
+* dsaunittest: testGroups (DSA_512/768/1024 pinned; keys in all three sign and
+  verify); testImportExport (domain, y, x round trip, IEEE 1363 and DER
+  signatures, public key from components, convertToPublic).
+* keygenunittest: testDHImportExport (IETF_1024/2048 import of domain, y, x;
+  agreement both ways, with imported and converted keys);
+  testDHSharedSecretLength (secrets are never zero-padded; a short one is
+  found and checked from both sides).
+* macunittest: HMACIncrementalCopy (RFC 4231 #2 fed in pieces, a copy taken
+  mid-stream continuing with other data, reuse after clear(), a copy of a fresh
+  object, empty key and data).
+* keystorekey (new, ctest "KeystoreKey"): a test provider stands in for a
+  keystore (only n and e leave it; it counts sign/decrypt calls) and checks:
+  TLS server authentication (ECDHE, server signature), TLS client
+  authentication (CertificateVerify), RSA key exchange against a plain OpenSSL
+  TLS 1.2 client restricted to AES128-GCM-SHA256 (TLS-padding decryption), a
+  keystore key not matching the certificate (ErrorInit, no key use), CMS
+  signing (verified, and a tampered copy fails), CMS decryption, and plugin
+  unload/reload followed by TLS again.
+  All new tests except testMissingExponent and KeystoreKey also pass on the
+  unported plugin, which shows the port keeps behaviour there.
+
+Verification
+------------
+Native builds (Qt 6.12, GCC 16, -Wall -Wextra), DEVELOPER_MODE=ON so that the
+tests load the plugins of the build tree and not an installed QCA:
+  unported, OpenSSL 3.6.5: 155 warnings (qca-ossl.cpp 122: 121 OpenSSL + 1 Qt);
+                           ctest 100% tests passed out of 25
+  ported,   OpenSSL 3.6.5: 34 warnings (qca-ossl.cpp 1: Qt); all other warnings
+                           identical; ctest 100% tests passed out of 26
+  unported, OpenSSL 4.0.3: qca-ossl.cpp 122 (121 "Since OpenSSL 3.0")
+  ported,   OpenSSL 4.0.3: qca-ossl.cpp 1 (Qt); ctest 100% tests passed out of 26
+The 25 original tests report the same test cases with the same results and
+output before and after. The full suite also passes under
+AddressSanitizer/UBSan with no report in qca-ossl (the reports that remain are
+in QCA core and the same as without the patch).
+
+Not covered by this patch: the plugin's raw "no padding" decryption through a
+keystore key (the RSA_METHOD did not support it either), RSA-PSS with keystore
+keys (not expressible through QCA), and QDateTime::setTimeSpec (Qt).
+
+diff -ruN a/plugins/qca-ossl/CMakeLists.txt b/plugins/qca-ossl/CMakeLists.txt
+--- a/plugins/qca-ossl/CMakeLists.txt	2026-08-28 06:28:47.000000000 -0400
++++ b/plugins/qca-ossl/CMakeLists.txt	2026-10-08 18:22:19.879453028 -0400
+@@ -1,9 +1,10 @@
+ # QCA OSSL
+ 
++# The plugin uses the OpenSSL 3 provider APIs (no API deprecated in 3.0)
+ if(WITH_ossl_PLUGIN STREQUAL "yes")
+-  find_package(OpenSSL 1.1.1 REQUIRED)
++  find_package(OpenSSL 3.0 REQUIRED)
+ else()
+-  find_package(OpenSSL 1.1.1)
++  find_package(OpenSSL 3.0)
+ endif()
+ 
+ if(OPENSSL_FOUND)
+diff -ruN a/plugins/qca-ossl/qca-ossl.cpp b/plugins/qca-ossl/qca-ossl.cpp
+--- a/plugins/qca-ossl/qca-ossl.cpp	2026-10-08 18:22:04.419284383 -0400
++++ b/plugins/qca-ossl/qca-ossl.cpp	2026-10-08 18:22:19.879954385 -0400
+@@ -28,39 +28,101 @@
+ #include <qcaprovider.h>
+ 
+ #include <openssl/evp.h>
+-#include <openssl/hmac.h>
+ 
++#include <atomic>
+ #include <cstdio>
+ #include <cstdlib>
++#include <cstring>
+ #include <iostream>
++#include <map>
+ #include <memory>
+-
++#include <mutex>
++#include <string>
++#include <vector>
++
++#include <openssl/bn.h>
++#include <openssl/core_dispatch.h>
++#include <openssl/core_names.h>
++#include <openssl/dh.h>
++#include <openssl/dsa.h>
+ #include <openssl/err.h>
++#include <openssl/objects.h>
+ #include <openssl/opensslv.h>
++#include <openssl/param_build.h>
++#include <openssl/params.h>
+ #include <openssl/pem.h>
+ #include <openssl/pkcs12.h>
++#include <openssl/provider.h>
+ #include <openssl/rand.h>
++#include <openssl/rsa.h>
+ #include <openssl/ssl.h>
+ #include <openssl/x509v3.h>
+-#ifdef OPENSSL_VERSION_MAJOR
+-#include <openssl/provider.h>
+-#endif
+ 
+ #include <openssl/kdf.h>
+ 
++// The key handling below is written against the OpenSSL 3 provider APIs (EVP_PKEY_fromdata,
++// OSSL_PARAM, EVP_MAC, built-in providers). None of the low-level RSA/DSA/DH/HMAC APIs that
++// OpenSSL 3.0 deprecated are used.
++#if OPENSSL_VERSION_NUMBER < 0x30000000L
++#error "qca-ossl requires OpenSSL 3.0 or later"
++#endif
++
+ using namespace QCA;
+ 
+ namespace {
+-struct DsaDeleter
++static bool s_legacyProviderAvailable = false;
++
++struct EvpPkeyDeleter
+ {
+-    void operator()(DSA *pointer)
++    void operator()(EVP_PKEY *p) const
+     {
+-        if (pointer)
+-            DSA_free(pointer);
++        EVP_PKEY_free(p);
+     }
+ };
++using EvpPkeyPtr = std::unique_ptr<EVP_PKEY, EvpPkeyDeleter>;
+ 
+-static bool s_legacyProviderAvailable = false;
++struct EvpPkeyCtxDeleter
++{
++    void operator()(EVP_PKEY_CTX *p) const
++    {
++        EVP_PKEY_CTX_free(p);
++    }
++};
++using EvpPkeyCtxPtr = std::unique_ptr<EVP_PKEY_CTX, EvpPkeyCtxDeleter>;
++
++// BN_clear_free: some of these hold private key components
++struct BnDeleter
++{
++    void operator()(BIGNUM *p) const
++    {
++        BN_clear_free(p);
++    }
++};
++using BnPtr = std::unique_ptr<BIGNUM, BnDeleter>;
++
++struct ParamBldDeleter
++{
++    void operator()(OSSL_PARAM_BLD *p) const
++    {
++        OSSL_PARAM_BLD_free(p);
++    }
++};
++using ParamBldPtr = std::unique_ptr<OSSL_PARAM_BLD, ParamBldDeleter>;
++
++// OSSL_PARAM_free() cleanses the block that holds values pushed from secure BIGNUMs
++struct ParamDeleter
++{
++    void operator()(OSSL_PARAM *p) const
++    {
++        OSSL_PARAM_free(p);
++    }
++};
++using ParamPtr = std::unique_ptr<OSSL_PARAM, ParamDeleter>;
++
++// Property query for every key this plugin creates or generates itself. Those keys belong to
++// OpenSSL's own providers; the "qca.keystore=yes" implementations registered further down
++// (keystore-backed RSA keys) must never be picked for them.
++static const char kNativeKeyPropq[] = "qca.keystore=no";
+ } // end of anonymous namespace
+ 
+ namespace opensslQCAPlugin {
+@@ -123,6 +185,79 @@
+     return BN_bin2bn((const unsigned char *)buf.data(), buf.size(), nullptr);
+ }
+ 
++// For private key components: OSSL_PARAM_BLD keeps the value of a secure BIGNUM in a block that
++// OSSL_PARAM_free() cleanses.
++static BIGNUM *bi2bn_secure(const BigInteger &n)
++{
++    BIGNUM *bn = BN_secure_new();
++    if (!bn)
++        return nullptr;
++    SecureArray buf = n.toArray();
++    if (!BN_bin2bn((const unsigned char *)buf.data(), buf.size(), bn)) {
++        BN_clear_free(bn);
++        return nullptr;
++    }
++    return bn;
++}
++
++// Reads a BIGNUM key parameter (OSSL_PKEY_PARAM_*). A parameter the key does not have reads as
++// zero, which is also what an absent component looked like through the old RSA/DSA/DH getters.
++static BigInteger pkey_get_bi(const EVP_PKEY *pkey, const char *name)
++{
++    BIGNUM *bn = nullptr;
++    if (!pkey || EVP_PKEY_get_bn_param(pkey, name, &bn) != 1 || !bn) {
++        ERR_clear_error();
++        return BigInteger(0);
++    }
++    BigInteger bi = bn2bi(bn);
++    BN_clear_free(bn);
++    return bi;
++}
++
++// Builds a key of the given OpenSSL key type ("RSA", "DSA", "DH") from OSSL_PARAMs.
++// selection is EVP_PKEY_KEYPAIR, EVP_PKEY_PUBLIC_KEY or EVP_PKEY_KEY_PARAMETERS.
++static EVP_PKEY *pkey_from_params(const char *type, int selection, const OSSL_PARAM *params)
++{
++    EvpPkeyCtxPtr ctx(EVP_PKEY_CTX_new_from_name(nullptr, type, kNativeKeyPropq));
++    EVP_PKEY     *pkey = nullptr;
++    if (!ctx || EVP_PKEY_fromdata_init(ctx.get()) <= 0 ||
++        EVP_PKEY_fromdata(ctx.get(), &pkey, selection, const_cast<OSSL_PARAM *>(params)) <= 0)
++        return nullptr;
++    return pkey;
++}
++
++static EVP_PKEY *pkey_from_builder(const char *type, int selection, OSSL_PARAM_BLD *bld)
++{
++    ParamPtr params(OSSL_PARAM_BLD_to_param(bld));
++    if (!params)
++        return nullptr;
++    return pkey_from_params(type, selection, params.get());
++}
++
++// Adds a BIGNUM parameter to bld. The builder copies the value only in OSSL_PARAM_BLD_to_param(),
++// so the BIGNUM is kept alive in holder until then.
++static bool
++bld_push_bi(OSSL_PARAM_BLD *bld, const char *name, const BigInteger &value, bool secret, std::vector<BnPtr> &holder)
++{
++    BnPtr bn(secret ? bi2bn_secure(value) : bi2bn(value));
++    if (!bn || !OSSL_PARAM_BLD_push_BN(bld, name, bn.get()))
++        return false;
++    holder.push_back(std::move(bn));
++    return true;
++}
++
++// A copy of pkey holding only its public half and domain parameters. This replaces the
++// i2d_RSAPublicKey/d2i_RSAPublicKey (and DSA equivalents) round trip of the old code: the result is
++// the same key, without the private components, built by the same key manager.
++static EVP_PKEY *pkey_public_copy(EVP_PKEY *pkey)
++{
++    OSSL_PARAM *raw = nullptr;
++    if (!pkey || EVP_PKEY_todata(pkey, EVP_PKEY_PUBLIC_KEY, &raw) != 1)
++        return nullptr;
++    ParamPtr params(raw);
++    return pkey_from_params(EVP_PKEY_get0_type_name(pkey), EVP_PKEY_PUBLIC_KEY, params.get());
++}
++
+ // take lowest bytes of BIGNUM to fit
+ // pad with high byte zeroes to fit
+ static SecureArray bn2fixedbuf(const BIGNUM *n, int size)
+@@ -1000,7 +1135,7 @@
+         else
+             klen = PEM_def_callback(psbuf, PEM_BUFSIZE, 0, u);
+         if (klen <= 0) {
+-            PEMerr(PEM_F_D2I_PKCS8PRIVATEKEY_BIO, PEM_R_BAD_PASSWORD_READ);
++            ERR_raise(ERR_LIB_PEM, PEM_R_BAD_PASSWORD_READ);
+             X509_SIG_free(p8);
+             return nullptr;
+         }
+@@ -1329,26 +1464,37 @@
+     opensslHMACContext(const EVP_MD *algorithm, Provider *p, const QString &type)
+         : MACContext(p, type)
+     {
+-        m_algorithm = algorithm;
+-        m_context   = HMAC_CTX_new();
++        m_algorithm   = algorithm;
++        EVP_MAC *hmac = EVP_MAC_fetch(nullptr, OSSL_MAC_NAME_HMAC, nullptr);
++        m_context     = hmac ? EVP_MAC_CTX_new(hmac) : nullptr;
++        EVP_MAC_free(hmac); // the context holds its own reference
+     }
+ 
+     opensslHMACContext(const opensslHMACContext &other)
+         : MACContext(other)
+     {
+         m_algorithm = other.m_algorithm;
+-        m_context   = HMAC_CTX_new();
+-        HMAC_CTX_copy(m_context, other.m_context);
++        // copies the key and the running digest state, like HMAC_CTX_copy()
++        m_context = other.m_context ? EVP_MAC_CTX_dup(other.m_context) : nullptr;
+     }
+ 
+     ~opensslHMACContext() override
+     {
+-        HMAC_CTX_free(m_context);
++        EVP_MAC_CTX_free(m_context);
+     }
+ 
+     void setup(const SymmetricKey &key) override
+     {
+-        HMAC_Init_ex(m_context, key.data(), key.size(), m_algorithm, nullptr);
++        if (!m_context)
++            return;
++        OSSL_PARAM params[] = {OSSL_PARAM_construct_utf8_string(
++                                   OSSL_MAC_PARAM_DIGEST, const_cast<char *>(EVP_MD_get0_name(m_algorithm)), 0),
++                               OSSL_PARAM_construct_end()};
++        // A null key pointer would mean "re-initialise with the previous key" to EVP_MAC_init(), so an
++        // empty key is passed as a zero-length non-null buffer, as HMAC_Init_ex() received it.
++        static const unsigned char emptyKey = 0;
++        const unsigned char *keyData = key.isEmpty() ? &emptyKey : reinterpret_cast<const unsigned char *>(key.data());
++        EVP_MAC_init(m_context, keyData, key.size(), params);
+     }
+ 
+     KeyLength keyLength() const override
+@@ -1358,14 +1504,17 @@
+ 
+     void update(const MemoryRegion &a) override
+     {
+-        HMAC_Update(m_context, (unsigned char *)a.data(), a.size());
++        if (m_context)
++            EVP_MAC_update(m_context, reinterpret_cast<const unsigned char *>(a.data()), a.size());
+     }
+ 
+     void final(MemoryRegion *out) override
+     {
+-        SecureArray sa(EVP_MD_size(m_algorithm), 0);
+-        HMAC_Final(m_context, (unsigned char *)sa.data(), nullptr);
+-        HMAC_CTX_reset(m_context);
++        SecureArray sa(EVP_MD_get_size(m_algorithm), 0);
++        size_t      outLen = 0;
++        if (m_context)
++            EVP_MAC_final(m_context, reinterpret_cast<unsigned char *>(sa.data()), &outLen, sa.size());
++        // Like HMAC_Final() + HMAC_CTX_reset() before: the context needs setup() again before reuse.
+         *out = sa;
+     }
+ 
+@@ -1375,11 +1524,80 @@
+     }
+ 
+ protected:
+-    HMAC_CTX     *m_context;
++    EVP_MAC_CTX  *m_context;
+     const EVP_MD *m_algorithm;
+ };
+ 
+ //----------------------------------------------------------------------------
++// Raw RSA operations
++//----------------------------------------------------------------------------
++enum RsaRawOp
++{
++    RsaPublicEncrypt,  // was RSA_public_encrypt()
++    RsaPrivateDecrypt, // was RSA_private_decrypt()
++    RsaPrivateEncrypt, // was RSA_private_encrypt(): signature primitive, no digest
++    RsaPublicDecrypt   // was RSA_public_decrypt(): signature recovery, no digest
++};
++
++// One RSA operation with the given RSA_*_PADDING mode, without any digest processing, through the
++// EVP_PKEY interface. No signature digest is set, so the sign/verify-recover operations apply the
++// padding to the input exactly as RSA_private_encrypt()/RSA_public_decrypt() did, and OAEP uses its
++// SHA-1/MGF1-SHA-1 defaults as RSA_public_encrypt()/RSA_private_decrypt() did. On success *out
++// holds the result and its length is returned; on failure -1 is returned.
++static int rsa_raw_op(EVP_PKEY *pkey, RsaRawOp op, int padding, const MemoryRegion &in, SecureArray *out)
++{
++    EvpPkeyCtxPtr ctx(EVP_PKEY_CTX_new_from_pkey(nullptr, pkey, nullptr));
++    if (!ctx)
++        return -1;
++
++    int ok = 0;
++    switch (op) {
++    case RsaPublicEncrypt:
++        ok = EVP_PKEY_encrypt_init(ctx.get());
++        break;
++    case RsaPrivateDecrypt:
++        ok = EVP_PKEY_decrypt_init(ctx.get());
++        break;
++    case RsaPrivateEncrypt:
++        ok = EVP_PKEY_sign_init(ctx.get());
++        break;
++    case RsaPublicDecrypt:
++        ok = EVP_PKEY_verify_recover_init(ctx.get());
++        break;
++    }
++    if (ok <= 0 || EVP_PKEY_CTX_set_rsa_padding(ctx.get(), padding) <= 0)
++        return -1;
++
++    const int size = EVP_PKEY_get_size(pkey);
++    if (size <= 0)
++        return -1;
++    out->resize(size);
++    size_t               outLen = out->size();
++    unsigned char       *o      = reinterpret_cast<unsigned char *>(out->data());
++    const unsigned char *i      = reinterpret_cast<const unsigned char *>(in.data());
++    switch (op) {
++    case RsaPublicEncrypt:
++        ok = EVP_PKEY_encrypt(ctx.get(), o, &outLen, i, in.size());
++        break;
++    case RsaPrivateDecrypt:
++        ok = EVP_PKEY_decrypt(ctx.get(), o, &outLen, i, in.size());
++        break;
++    case RsaPrivateEncrypt:
++        ok = EVP_PKEY_sign(ctx.get(), o, &outLen, i, in.size());
++        break;
++    case RsaPublicDecrypt:
++        ok = EVP_PKEY_verify_recover(ctx.get(), o, &outLen, i, in.size());
++        break;
++    }
++    if (ok <= 0 || outLen > size_t(size)) {
++        out->clear();
++        return -1;
++    }
++    out->resize(int(outLen));
++    return int(outLen);
++}
++
++//----------------------------------------------------------------------------
+ // EVPKey
+ //----------------------------------------------------------------------------
+ 
+@@ -1488,15 +1706,12 @@
+                 int type = EVP_PKEY_id(pkey);
+ 
+                 if (type == EVP_PKEY_RSA) {
+-                    const RSA *rsa = EVP_PKEY_get0_RSA(pkey);
+-                    if (RSA_private_encrypt(raw.size(),
+-                                            (unsigned char *)raw.data(),
+-                                            (unsigned char *)out.data(),
+-                                            (RSA *)rsa,
+-                                            RSA_PKCS1_PADDING) == -1) {
++                    const int ret = rsa_raw_op(pkey, RsaPrivateEncrypt, RSA_PKCS1_PADDING, raw, &out);
++                    if (ret < 0) {
+                         state = SignError;
+                         return SecureArray();
+                     }
++                    len = ret;
+                 } else if (type == EVP_PKEY_DSA) {
+                     state = SignError;
+                     return SecureArray();
+@@ -1527,12 +1742,7 @@
+                 int type = EVP_PKEY_id(pkey);
+ 
+                 if (type == EVP_PKEY_RSA) {
+-                    const RSA *rsa = EVP_PKEY_get0_RSA(pkey);
+-                    if ((len = RSA_public_decrypt(sig.size(),
+-                                                  (unsigned char *)sig.data(),
+-                                                  (unsigned char *)out.data(),
+-                                                  (RSA *)rsa,
+-                                                  RSA_PKCS1_PADDING)) == -1) {
++                    if ((len = rsa_raw_op(pkey, RsaPublicDecrypt, RSA_PKCS1_PADDING, sig, &out)) < 0) {
+                         state = VerifyError;
+                         return false;
+                     }
+@@ -1657,25 +1867,41 @@
+ 
+ #ifndef OPENSSL_FIPS
+ 
++// Regenerates the JCE DSA groups from their seeds. DSA_generate_parameters_ex() used FIPS 186-2
++// generation (SHA-1, 160-bit q) for these sizes and seeds; the DSA key manager is asked for exactly
++// that, with the same seed, so p, q, g and the counter come out identical.
+ static bool make_dlgroup(const QByteArray &seed, int bits, int counter, DLParams *params)
+ {
+-    int                              ret_counter;
+-    std::unique_ptr<DSA, DsaDeleter> dsa(DSA_new());
+-    if (!dsa)
++    EvpPkeyCtxPtr ctx(EVP_PKEY_CTX_new_from_name(nullptr, "DSA", kNativeKeyPropq));
++    if (!ctx || EVP_PKEY_paramgen_init(ctx.get()) <= 0)
+         return false;
+ 
+-    if (DSA_generate_parameters_ex(
+-            dsa.get(), bits, (const unsigned char *)seed.data(), seed.size(), &ret_counter, nullptr, nullptr) != 1)
++    size_t     pbits       = bits;
++    size_t     qbits       = 160;
++    char       type[]      = "fips186_2";
++    OSSL_PARAM genParams[] = {OSSL_PARAM_construct_utf8_string(OSSL_PKEY_PARAM_FFC_TYPE, type, 0),
++                              OSSL_PARAM_construct_size_t(OSSL_PKEY_PARAM_FFC_PBITS, &pbits),
++                              OSSL_PARAM_construct_size_t(OSSL_PKEY_PARAM_FFC_QBITS, &qbits),
++                              OSSL_PARAM_construct_octet_string(
++                                  OSSL_PKEY_PARAM_FFC_SEED, const_cast<char *>(seed.constData()), size_t(seed.size())),
++                              OSSL_PARAM_construct_end()};
++    if (EVP_PKEY_CTX_set_params(ctx.get(), genParams) <= 0)
+         return false;
+ 
++    EVP_PKEY *raw = nullptr;
++    if (EVP_PKEY_paramgen(ctx.get(), &raw) <= 0)
++        return false;
++    EvpPkeyPtr dsaParams(raw);
++
++    int ret_counter = -1;
++    if (EVP_PKEY_get_int_param(dsaParams.get(), OSSL_PKEY_PARAM_FFC_PCOUNTER, &ret_counter) != 1)
++        return false;
+     if (ret_counter != counter)
+         return false;
+ 
+-    const BIGNUM *bnp, *bnq, *bng;
+-    DSA_get0_pqg(dsa.get(), &bnp, &bnq, &bng);
+-    params->p = bn2bi(bnp);
+-    params->q = bn2bi(bnq);
+-    params->g = bn2bi(bng);
++    params->p = pkey_get_bi(dsaParams.get(), OSSL_PKEY_PARAM_FFC_P);
++    params->q = pkey_get_bi(dsaParams.get(), OSSL_PKEY_PARAM_FFC_Q);
++    params->g = pkey_get_bi(dsaParams.get(), OSSL_PKEY_PARAM_FFC_G);
+ 
+     return true;
+ }
+@@ -1844,24 +2070,38 @@
+ //----------------------------------------------------------------------------
+ // RSAKey
+ //----------------------------------------------------------------------------
+-namespace {
+-static const auto RsaDeleter = [](RSA *pointer) {
+-    if (pointer)
+-        RSA_free((RSA *)pointer);
+-};
++// Computes the RSA exponent missing from a private key: known^-1 mod lcm(p - 1, q - 1). This
++// gives d from e, or an e that works with d.
++static bool rsa_derive_exponent(const BigInteger &known, const BigInteger &p, const BigInteger &q, BigInteger *missing)
++{
++    if (known == BigInteger(0) || p == BigInteger(0) || q == BigInteger(0))
++        return false;
+ 
+-static const auto BnDeleter = [](BIGNUM *pointer) {
+-    if (pointer)
+-        BN_free((BIGNUM *)pointer);
+-};
+-} // end of anonymous namespace
++    std::unique_ptr<BN_CTX, decltype(&BN_CTX_free)> ctx(BN_CTX_secure_new(), &BN_CTX_free);
++    BnPtr                                           bk(bi2bn_secure(known)), bp(bi2bn_secure(p)), bq(bi2bn_secure(q));
++    BnPtr p1(BN_secure_new()), q1(BN_secure_new()), g(BN_secure_new()), lambda(BN_secure_new()),
++        result(BN_secure_new());
++    if (!ctx || !bk || !bp || !bq || !p1 || !q1 || !g || !lambda || !result)
++        return false;
++
++    if (!BN_sub(p1.get(), bp.get(), BN_value_one()) || !BN_sub(q1.get(), bq.get(), BN_value_one()) ||
++        !BN_gcd(g.get(), p1.get(), q1.get(), ctx.get()) || !BN_mul(lambda.get(), p1.get(), q1.get(), ctx.get()) ||
++        !BN_div(lambda.get(), nullptr, lambda.get(), g.get(), ctx.get()) ||
++        !BN_mod_inverse(result.get(), bk.get(), lambda.get(), ctx.get())) {
++        ERR_clear_error();
++        return false;
++    }
++
++    *missing = bn2bi(result.get());
++    return true;
++}
+ 
+ class RSAKeyMaker : public QThread
+ {
+     Q_OBJECT
+ public:
+-    RSA *result;
+-    int  bits, exp;
++    EVP_PKEY *result;
++    int       bits, exp;
+ 
+     RSAKeyMaker(int _bits, int _exp, QObject *parent = nullptr)
+         : QThread(parent)
+@@ -1874,17 +2114,12 @@
+     ~RSAKeyMaker() override
+     {
+         wait();
+-        if (result)
+-            RSA_free(result);
++        EVP_PKEY_free(result);
+     }
+ 
+     void run() override
+     {
+-        std::unique_ptr<RSA, decltype(RsaDeleter)> rsa(RSA_new(), RsaDeleter);
+-        if (!rsa)
+-            return;
+-
+-        std::unique_ptr<BIGNUM, decltype(BnDeleter)> e(BN_new(), BnDeleter);
++        BnPtr e(BN_new());
+         if (!e)
+             return;
+ 
+@@ -1892,18 +2127,23 @@
+         if (BN_set_word(e.get(), exp) != 1)
+             return;
+ 
+-        if (RSA_generate_key_ex(rsa.get(), bits, e.get(), nullptr) == 0) {
++        EvpPkeyCtxPtr ctx(EVP_PKEY_CTX_new_from_name(nullptr, "RSA", kNativeKeyPropq));
++        if (!ctx || EVP_PKEY_keygen_init(ctx.get()) <= 0 || EVP_PKEY_CTX_set_rsa_keygen_bits(ctx.get(), bits) <= 0 ||
++            EVP_PKEY_CTX_set1_rsa_keygen_pubexp(ctx.get(), e.get()) <= 0)
++            return;
++
++        EVP_PKEY *pkey = nullptr;
++        if (EVP_PKEY_generate(ctx.get(), &pkey) <= 0)
+             return;
+-        }
+ 
+-        result = rsa.release();
++        result = pkey;
+     }
+ 
+-    RSA *takeResult()
++    EVP_PKEY *takeResult()
+     {
+-        RSA *rsa = result;
+-        result   = nullptr;
+-        return rsa;
++        EVP_PKEY *pkey = result;
++        result         = nullptr;
++        return pkey;
+     }
+ };
+ 
+@@ -1966,136 +2206,87 @@
+         if (!sec)
+             return;
+ 
+-        // extract the public key into DER format
+-        const RSA     *rsa_pkey = EVP_PKEY_get0_RSA(evp.pkey);
+-        int            len      = i2d_RSAPublicKey(rsa_pkey, nullptr);
+-        SecureArray    result(len);
+-        unsigned char *p = (unsigned char *)result.data();
+-        i2d_RSAPublicKey(rsa_pkey, &p);
+-        p = (unsigned char *)result.data();
+-
+-        // put the DER public key back into openssl
++        EVP_PKEY *pub = pkey_public_copy(evp.pkey);
+         evp.reset();
+-        RSA *rsa = d2i_RSAPublicKey(nullptr, (const unsigned char **)&p, result.size());
+-        evp.pkey = EVP_PKEY_new();
+-        EVP_PKEY_assign_RSA(evp.pkey, rsa);
+-        sec = false;
++        evp.pkey = pub;
++        sec      = false;
+     }
+ 
+     int bits() const override
+     {
+-        return EVP_PKEY_bits(evp.pkey);
++        return EVP_PKEY_get_bits(evp.pkey);
+     }
+ 
+     int maximumEncryptSize(EncryptionAlgorithm alg) const override
+     {
+-        const RSA *rsa  = EVP_PKEY_get0_RSA(evp.pkey);
+-        int        size = 0;
++        // EVP_PKEY_get_size() of an RSA key is RSA_size(): the modulus length in bytes
++        const int rsaSize = EVP_PKEY_get_size(evp.pkey);
++        int       size    = 0;
+         switch (alg) {
+         case EME_PKCS1v15:
+-            size = RSA_size(rsa) - 11 - 1;
++            size = rsaSize - 11 - 1;
+             break;
+         case EME_PKCS1_OAEP:
+-            size = RSA_size(rsa) - 41 - 1;
++            size = rsaSize - 41 - 1;
+             break;
+         case EME_PKCS1v15_SSL:
+-            size = RSA_size(rsa) - 11 - 1;
++            size = rsaSize - 11 - 1;
+             break;
+         case EME_NO_PADDING:
+-            size = RSA_size(rsa) - 1;
++            size = rsaSize - 1;
+             break;
+         }
+ 
+         return size;
+     }
+ 
++    // RSA_SSLV23_PADDING (EME_PKCS1v15_SSL) does not exist in OpenSSL 3, so that algorithm is
++    // rejected, as it already was with OpenSSL 3 before.
++    static bool rsaPadding(EncryptionAlgorithm alg, int *pad)
++    {
++        switch (alg) {
++        case EME_PKCS1v15:
++            *pad = RSA_PKCS1_PADDING;
++            return true;
++        case EME_PKCS1_OAEP:
++            *pad = RSA_PKCS1_OAEP_PADDING;
++            return true;
++        case EME_NO_PADDING:
++            *pad = RSA_NO_PADDING;
++            return true;
++        default:
++            return false;
++        }
++    }
++
+     SecureArray encrypt(const SecureArray &in, EncryptionAlgorithm alg) override
+     {
+-        const RSA  *rsa = EVP_PKEY_get0_RSA(evp.pkey);
+         SecureArray buf = in;
+         int         max = maximumEncryptSize(alg);
+ 
+         if (buf.size() > max)
+             buf.resize(max);
+-        SecureArray result(RSA_size(rsa));
+ 
+         int pad;
+-        switch (alg) {
+-        case EME_PKCS1v15:
+-            pad = RSA_PKCS1_PADDING;
+-            break;
+-        case EME_PKCS1_OAEP:
+-            pad = RSA_PKCS1_OAEP_PADDING;
+-            break;
+-// OPENSSL_VERSION_MAJOR is only defined on openssl > 3.0
+-// that doesn't have RSA_SSLV23_PADDING so we can use it negatively here
+-#ifndef OPENSSL_VERSION_MAJOR
+-        case EME_PKCS1v15_SSL:
+-            pad = RSA_SSLV23_PADDING;
+-            break;
+-#endif
+-        case EME_NO_PADDING:
+-            pad = RSA_NO_PADDING;
+-            break;
+-        default:
++        if (!rsaPadding(alg, &pad))
+             return SecureArray();
+-            break;
+-        }
+ 
+-        int ret;
+-        if (isPrivate())
+-            ret = RSA_private_encrypt(
+-                buf.size(), (unsigned char *)buf.data(), (unsigned char *)result.data(), (RSA *)rsa, pad);
+-        else
+-            ret = RSA_public_encrypt(
+-                buf.size(), (unsigned char *)buf.data(), (unsigned char *)result.data(), (RSA *)rsa, pad);
+-
+-        if (ret < 0)
++        SecureArray result;
++        if (rsa_raw_op(evp.pkey, isPrivate() ? RsaPrivateEncrypt : RsaPublicEncrypt, pad, buf, &result) < 0)
+             return SecureArray();
+-        result.resize(ret);
+ 
+         return result;
+     }
+ 
+     bool decrypt(const SecureArray &in, SecureArray *out, EncryptionAlgorithm alg) override
+     {
+-        const RSA  *rsa = EVP_PKEY_get0_RSA(evp.pkey);
+-        SecureArray result(RSA_size(rsa));
+-        int         pad;
+-
+-        switch (alg) {
+-        case EME_PKCS1v15:
+-            pad = RSA_PKCS1_PADDING;
+-            break;
+-        case EME_PKCS1_OAEP:
+-            pad = RSA_PKCS1_OAEP_PADDING;
+-            break;
+-// OPENSSL_VERSION_MAJOR is only defined on openssl > 3.0
+-// that doesn't have RSA_SSLV23_PADDING so we can use it negatively here
+-#ifndef OPENSSL_VERSION_MAJOR
+-        case EME_PKCS1v15_SSL:
+-            pad = RSA_SSLV23_PADDING;
+-            break;
+-#endif
+-        case EME_NO_PADDING:
+-            pad = RSA_NO_PADDING;
+-            break;
+-        default:
++        int pad;
++        if (!rsaPadding(alg, &pad))
+             return false;
+-            break;
+-        }
+-
+-        int ret;
+-        if (isPrivate())
+-            ret = RSA_private_decrypt(
+-                in.size(), (unsigned char *)in.data(), (unsigned char *)result.data(), (RSA *)rsa, pad);
+-        else
+-            ret = RSA_public_decrypt(
+-                in.size(), (unsigned char *)in.data(), (unsigned char *)result.data(), (RSA *)rsa, pad);
+ 
+-        if (ret < 0)
++        SecureArray result;
++        if (rsa_raw_op(evp.pkey, isPrivate() ? RsaPrivateDecrypt : RsaPublicDecrypt, pad, in, &result) < 0)
+             return false;
+-        result.resize(ret);
+ 
+         *out = result;
+         return true;
+@@ -2196,93 +2387,85 @@
+     {
+         evp.reset();
+ 
+-        RSA *rsa = RSA_new();
+-        if (RSA_set0_key(rsa, bi2bn(n), bi2bn(e), bi2bn(d)) == 0 || RSA_set0_factors(rsa, bi2bn(p), bi2bn(q)) == 0) {
+-            // Free BIGNUMS?
+-            RSA_free(rsa);
++        // The old code switched RSA blinding off when e or d was zero, the only way the legacy RSA
++        // object could run private operations without them. Blinding cannot be switched off for a
++        // provider key (and the provider requires e), so the missing exponent is derived instead
++        // from the other one and the factors: e * d = 1 mod lcm(p - 1, q - 1). A key with d == 0
++        // used to produce wrong results; it now works.
++        BigInteger pubExp = e, privExp = d;
++        if (e == BigInteger(0) && !rsa_derive_exponent(d, p, q, &pubExp))
++            return;
++        if (d == BigInteger(0) && !rsa_derive_exponent(e, p, q, &privExp))
++            return;
++
++        // n, e, d and both factors, as RSA_set0_key() + RSA_set0_factors() gave the legacy object.
++        // Like there, no CRT parameters are supplied, so private operations use d directly.
++        ParamBldPtr        bld(OSSL_PARAM_BLD_new());
++        std::vector<BnPtr> holder;
++        if (!bld || !bld_push_bi(bld.get(), OSSL_PKEY_PARAM_RSA_N, n, false, holder) ||
++            !bld_push_bi(bld.get(), OSSL_PKEY_PARAM_RSA_E, pubExp, false, holder) ||
++            !bld_push_bi(bld.get(), OSSL_PKEY_PARAM_RSA_D, privExp, true, holder) ||
++            !bld_push_bi(bld.get(), OSSL_PKEY_PARAM_RSA_FACTOR1, p, true, holder) ||
++            !bld_push_bi(bld.get(), OSSL_PKEY_PARAM_RSA_FACTOR2, q, true, holder))
+             return;
+-        }
+ 
+-        // When private key has no Public Exponent (e) or Private Exponent (d)
+-        // need to disable blinding. Otherwise decryption will be broken.
+-        // http://www.mail-archive.com/openssl-users@openssl.org/msg63530.html
+-        if (e == BigInteger(0) || d == BigInteger(0))
+-            RSA_blinding_off(rsa);
+-
+-        evp.pkey = EVP_PKEY_new();
+-        EVP_PKEY_assign_RSA(evp.pkey, rsa);
+-        sec = true;
++        evp.pkey = pkey_from_builder("RSA", EVP_PKEY_KEYPAIR, bld.get());
++        if (evp.pkey)
++            sec = true;
+     }
+ 
+     void createPublic(const BigInteger &n, const BigInteger &e) override
+     {
+         evp.reset();
+ 
+-        RSA *rsa = RSA_new();
+-        if (RSA_set0_key(rsa, bi2bn(n), bi2bn(e), nullptr) == 0) {
+-            RSA_free(rsa);
++        ParamBldPtr        bld(OSSL_PARAM_BLD_new());
++        std::vector<BnPtr> holder;
++        if (!bld || !bld_push_bi(bld.get(), OSSL_PKEY_PARAM_RSA_N, n, false, holder) ||
++            !bld_push_bi(bld.get(), OSSL_PKEY_PARAM_RSA_E, e, false, holder))
+             return;
+-        }
+ 
+-        evp.pkey = EVP_PKEY_new();
+-        EVP_PKEY_assign_RSA(evp.pkey, rsa);
+-        sec = false;
++        evp.pkey = pkey_from_builder("RSA", EVP_PKEY_PUBLIC_KEY, bld.get());
++        sec      = false;
+     }
+ 
+     BigInteger n() const override
+     {
+-        const RSA    *rsa = EVP_PKEY_get0_RSA(evp.pkey);
+-        const BIGNUM *bnn;
+-        RSA_get0_key(rsa, &bnn, nullptr, nullptr);
+-        return bn2bi(bnn);
++        return pkey_get_bi(evp.pkey, OSSL_PKEY_PARAM_RSA_N);
+     }
+ 
+     BigInteger e() const override
+     {
+-        const RSA    *rsa = EVP_PKEY_get0_RSA(evp.pkey);
+-        const BIGNUM *bne;
+-        RSA_get0_key(rsa, nullptr, &bne, nullptr);
+-        return bn2bi(bne);
++        return pkey_get_bi(evp.pkey, OSSL_PKEY_PARAM_RSA_E);
+     }
+ 
+     BigInteger p() const override
+     {
+-        const RSA    *rsa = EVP_PKEY_get0_RSA(evp.pkey);
+-        const BIGNUM *bnp;
+-        RSA_get0_factors(rsa, &bnp, nullptr);
+-        return bn2bi(bnp);
++        return pkey_get_bi(evp.pkey, OSSL_PKEY_PARAM_RSA_FACTOR1);
+     }
+ 
+     BigInteger q() const override
+     {
+-        const RSA    *rsa = EVP_PKEY_get0_RSA(evp.pkey);
+-        const BIGNUM *bnq;
+-        RSA_get0_factors(rsa, nullptr, &bnq);
+-        return bn2bi(bnq);
++        return pkey_get_bi(evp.pkey, OSSL_PKEY_PARAM_RSA_FACTOR2);
+     }
+ 
+     BigInteger d() const override
+     {
+-        const RSA    *rsa = EVP_PKEY_get0_RSA(evp.pkey);
+-        const BIGNUM *bnd;
+-        RSA_get0_key(rsa, nullptr, nullptr, &bnd);
+-        return bn2bi(bnd);
++        return pkey_get_bi(evp.pkey, OSSL_PKEY_PARAM_RSA_D);
+     }
+ 
+ private Q_SLOTS:
+     void km_finished()
+     {
+-        RSA *rsa = keymaker->takeResult();
++        EVP_PKEY *pkey = keymaker->takeResult();
+         if (wasBlocking)
+             delete keymaker;
+         else
+             keymaker->deleteLater();
+         keymaker = nullptr;
+ 
+-        if (rsa) {
+-            evp.pkey = EVP_PKEY_new();
+-            EVP_PKEY_assign_RSA(evp.pkey, rsa);
+-            sec = true;
++        if (pkey) {
++            evp.pkey = pkey;
++            sec      = true;
+         }
+ 
+         if (!wasBlocking)
+@@ -2293,12 +2476,59 @@
+ //----------------------------------------------------------------------------
+ // DSAKey
+ //----------------------------------------------------------------------------
++// Generates a key pair from a domain parameter key. ffcType selects the FFC generation/validation
++// type ("fips186_2" or "fips186_4"); nullptr keeps the key manager's default.
++static EVP_PKEY *pkey_generate_from_params(EVP_PKEY *domainParams, const char *ffcType)
++{
++    EvpPkeyCtxPtr ctx(EVP_PKEY_CTX_new_from_pkey(nullptr, domainParams, kNativeKeyPropq));
++    if (!ctx || EVP_PKEY_keygen_init(ctx.get()) <= 0)
++        return nullptr;
++    if (ffcType) {
++        OSSL_PARAM params[] = {
++            OSSL_PARAM_construct_utf8_string(OSSL_PKEY_PARAM_FFC_TYPE, const_cast<char *>(ffcType), 0),
++            OSSL_PARAM_construct_end()};
++        if (EVP_PKEY_CTX_set_params(ctx.get(), params) <= 0)
++            return nullptr;
++    }
++    EVP_PKEY *pkey = nullptr;
++    if (EVP_PKEY_generate(ctx.get(), &pkey) <= 0)
++        return nullptr;
++    return pkey;
++}
++
++// A DSA or DH key from a QCA domain and public value, plus the private value when x is given.
++// DSA keys carry q; QCA's DH groups are (p, g) only, as DH_set0_pqg(dh, p, nullptr, g) set them.
++static EVP_PKEY *dl_pkey(const char *type, const DLGroup &domain, bool withQ, const BigInteger &y, const BigInteger *x)
++{
++    ParamBldPtr        bld(OSSL_PARAM_BLD_new());
++    std::vector<BnPtr> holder;
++    if (!bld || !bld_push_bi(bld.get(), OSSL_PKEY_PARAM_FFC_P, domain.p(), false, holder) ||
++        (withQ && !bld_push_bi(bld.get(), OSSL_PKEY_PARAM_FFC_Q, domain.q(), false, holder)) ||
++        !bld_push_bi(bld.get(), OSSL_PKEY_PARAM_FFC_G, domain.g(), false, holder) ||
++        !bld_push_bi(bld.get(), OSSL_PKEY_PARAM_PUB_KEY, y, false, holder) ||
++        (x && !bld_push_bi(bld.get(), OSSL_PKEY_PARAM_PRIV_KEY, *x, true, holder)))
++        return nullptr;
++    return pkey_from_builder(type, x ? EVP_PKEY_KEYPAIR : EVP_PKEY_PUBLIC_KEY, bld.get());
++}
++
++// DSA domain parameters (p, q, g) as a parameters-only key
++static EVP_PKEY *dsa_domain_params(const DLGroup &domain)
++{
++    ParamBldPtr        bld(OSSL_PARAM_BLD_new());
++    std::vector<BnPtr> holder;
++    if (!bld || !bld_push_bi(bld.get(), OSSL_PKEY_PARAM_FFC_P, domain.p(), false, holder) ||
++        !bld_push_bi(bld.get(), OSSL_PKEY_PARAM_FFC_Q, domain.q(), false, holder) ||
++        !bld_push_bi(bld.get(), OSSL_PKEY_PARAM_FFC_G, domain.g(), false, holder))
++        return nullptr;
++    return pkey_from_builder("DSA", EVP_PKEY_KEY_PARAMETERS, bld.get());
++}
++
+ class DSAKeyMaker : public QThread
+ {
+     Q_OBJECT
+ public:
+-    DLGroup domain;
+-    DSA    *result;
++    DLGroup   domain;
++    EVP_PKEY *result;
+ 
+     DSAKeyMaker(const DLGroup &_domain, QObject *parent = nullptr)
+         : QThread(parent)
+@@ -2310,60 +2540,38 @@
+     ~DSAKeyMaker() override
+     {
+         wait();
+-        if (result)
+-            DSA_free(result);
++        EVP_PKEY_free(result);
+     }
+ 
+     void run() override
+     {
+-        std::unique_ptr<DSA, DsaDeleter> dsa(DSA_new());
+-        BIGNUM                          *pne = bi2bn(domain.p()), *qne = bi2bn(domain.q()), *gne = bi2bn(domain.g());
+-
+-        if (!DSA_set0_pqg(dsa.get(), pne, qne, gne)) {
++        EvpPkeyPtr params(dsa_domain_params(domain));
++        if (!params)
+             return;
++
++        ERR_set_mark();
++        EVP_PKEY *pkey = pkey_generate_from_params(params.get(), nullptr);
++        if (!pkey && EVP_PKEY_get_bits(params.get()) < 2048) {
++            // Before generating a key OpenSSL 3 checks the domain parameters by the FIPS 186-4
++            // rules, which reject the 512 and 768-bit groups. The old code borrowed the internal
++            // "legacy" (FIPS 186-2) flag from a dummy group generated with DSA_generate_parameters_ex()
++            // for p < 2048; the DSA key manager offers the same choice as the "fips186_2" type.
++            ERR_pop_to_mark();
++            ERR_set_mark();
++            pkey = pkey_generate_from_params(params.get(), "fips186_2");
+         }
+-        if (!DSA_generate_key(dsa.get())) {
+-            // OPENSSL_VERSION_MAJOR is only defined in openssl3
+-#ifdef OPENSSL_VERSION_MAJOR
+-            // HACK
+-            // in openssl3 there is an internal flag for "legacy" values
+-            //      bits < 2048 && seed_len <= 20
+-            // set in ossl_ffc_params_FIPS186_2_generate (called by DSA_generate_parameters_ex)
+-            // that we have no way to get or set, so if the bits are smaller than 2048 we generate
+-            // a dsa from a dummy seed and then override the p/q/g with the ones we want
+-            // so we can reuse the internal flag
+-            if (BN_num_bits(pne) < 2048) {
+-                int dummy;
+-                dsa.reset(DSA_new());
+-                if (DSA_generate_parameters_ex(
+-                        dsa.get(), 512, (const unsigned char *)"THIS_IS_A_DUMMY_SEED", 20, &dummy, nullptr, nullptr) !=
+-                    1) {
+-                    return;
+-                }
+-                pne = bi2bn(domain.p());
+-                qne = bi2bn(domain.q());
+-                gne = bi2bn(domain.g());
+-                if (!DSA_set0_pqg(dsa.get(), pne, qne, gne)) {
+-                    return;
+-                }
+-                if (!DSA_generate_key(dsa.get())) {
+-                    return;
+-                }
+-            } else {
+-                return;
+-            }
+-#else
+-            return;
+-#endif
+-        }
+-        result = dsa.release();
++        if (pkey)
++            ERR_pop_to_mark();
++        else
++            ERR_clear_last_mark();
++        result = pkey;
+     }
+ 
+-    DSA *takeResult()
++    EVP_PKEY *takeResult()
+     {
+-        DSA *dsa = result;
+-        result   = nullptr;
+-        return dsa;
++        EVP_PKEY *pkey = result;
++        result         = nullptr;
++        return pkey;
+     }
+ };
+ 
+@@ -2428,25 +2636,16 @@
+         if (!sec)
+             return;
+ 
+-        // extract the public key into DER format
+-        const DSA     *dsa_pkey = EVP_PKEY_get0_DSA(evp.pkey);
+-        int            len      = i2d_DSAPublicKey(dsa_pkey, nullptr);
+-        SecureArray    result(len);
+-        unsigned char *p = (unsigned char *)result.data();
+-        i2d_DSAPublicKey(dsa_pkey, &p);
+-        p = (unsigned char *)result.data();
+-
+-        // put the DER public key back into openssl
++        // i2d_DSAPublicKey() wrote y together with p, q and g; the public copy keeps the same
++        EVP_PKEY *pub = pkey_public_copy(evp.pkey);
+         evp.reset();
+-        DSA *dsa = d2i_DSAPublicKey(nullptr, (const unsigned char **)&p, result.size());
+-        evp.pkey = EVP_PKEY_new();
+-        EVP_PKEY_assign_DSA(evp.pkey, dsa);
+-        sec = false;
++        evp.pkey = pub;
++        sec      = false;
+     }
+ 
+     int bits() const override
+     {
+-        return EVP_PKEY_bits(evp.pkey);
++        return EVP_PKEY_get_bits(evp.pkey);
+     }
+ 
+     void startSign(SignatureAlgorithm, SignatureFormat format) override
+@@ -2514,81 +2713,49 @@
+     {
+         evp.reset();
+ 
+-        DSA    *dsa        = DSA_new();
+-        BIGNUM *bnp        = bi2bn(domain.p());
+-        BIGNUM *bnq        = bi2bn(domain.q());
+-        BIGNUM *bng        = bi2bn(domain.g());
+-        BIGNUM *bnpub_key  = bi2bn(y);
+-        BIGNUM *bnpriv_key = bi2bn(x);
+-
+-        if (!DSA_set0_pqg(dsa, bnp, bnq, bng) || !DSA_set0_key(dsa, bnpub_key, bnpriv_key)) {
+-            DSA_free(dsa);
+-            return;
+-        }
+-
+-        evp.pkey = EVP_PKEY_new();
+-        EVP_PKEY_assign_DSA(evp.pkey, dsa);
+-        sec = true;
++        evp.pkey = dl_pkey("DSA", domain, true, y, &x);
++        if (evp.pkey)
++            sec = true;
+     }
+ 
+     void createPublic(const DLGroup &domain, const BigInteger &y) override
+     {
+         evp.reset();
+ 
+-        DSA    *dsa       = DSA_new();
+-        BIGNUM *bnp       = bi2bn(domain.p());
+-        BIGNUM *bnq       = bi2bn(domain.q());
+-        BIGNUM *bng       = bi2bn(domain.g());
+-        BIGNUM *bnpub_key = bi2bn(y);
+-
+-        if (!DSA_set0_pqg(dsa, bnp, bnq, bng) || !DSA_set0_key(dsa, bnpub_key, nullptr)) {
+-            DSA_free(dsa);
+-            return;
+-        }
+-
+-        evp.pkey = EVP_PKEY_new();
+-        EVP_PKEY_assign_DSA(evp.pkey, dsa);
+-        sec = false;
++        evp.pkey = dl_pkey("DSA", domain, true, y, nullptr);
++        sec      = false;
+     }
+ 
+     DLGroup domain() const override
+     {
+-        const DSA    *dsa = EVP_PKEY_get0_DSA(evp.pkey);
+-        const BIGNUM *bnp, *bnq, *bng;
+-        DSA_get0_pqg(dsa, &bnp, &bnq, &bng);
+-        return DLGroup(bn2bi(bnp), bn2bi(bnq), bn2bi(bng));
++        return DLGroup(pkey_get_bi(evp.pkey, OSSL_PKEY_PARAM_FFC_P),
++                       pkey_get_bi(evp.pkey, OSSL_PKEY_PARAM_FFC_Q),
++                       pkey_get_bi(evp.pkey, OSSL_PKEY_PARAM_FFC_G));
+     }
+ 
+     BigInteger y() const override
+     {
+-        const DSA    *dsa = EVP_PKEY_get0_DSA(evp.pkey);
+-        const BIGNUM *bnpub_key;
+-        DSA_get0_key(dsa, &bnpub_key, nullptr);
+-        return bn2bi(bnpub_key);
++        return pkey_get_bi(evp.pkey, OSSL_PKEY_PARAM_PUB_KEY);
+     }
+ 
+     BigInteger x() const override
+     {
+-        const DSA    *dsa = EVP_PKEY_get0_DSA(evp.pkey);
+-        const BIGNUM *bnpriv_key;
+-        DSA_get0_key(dsa, nullptr, &bnpriv_key);
+-        return bn2bi(bnpriv_key);
++        return pkey_get_bi(evp.pkey, OSSL_PKEY_PARAM_PRIV_KEY);
+     }
+ 
+ private Q_SLOTS:
+     void km_finished()
+     {
+-        DSA *dsa = keymaker->takeResult();
++        EVP_PKEY *pkey = keymaker->takeResult();
+         if (wasBlocking)
+             delete keymaker;
+         else
+             keymaker->deleteLater();
+         keymaker = nullptr;
+ 
+-        if (dsa) {
+-            evp.pkey = EVP_PKEY_new();
+-            EVP_PKEY_assign_DSA(evp.pkey, dsa);
+-            sec = true;
++        if (pkey) {
++            evp.pkey = pkey;
++            sec      = true;
+         }
+ 
+         if (!wasBlocking)
+@@ -2603,8 +2770,8 @@
+ {
+     Q_OBJECT
+ public:
+-    DLGroup domain;
+-    DH     *result;
++    DLGroup   domain;
++    EVP_PKEY *result;
+ 
+     DHKeyMaker(const DLGroup &_domain, QObject *parent = nullptr)
+         : QThread(parent)
+@@ -2616,27 +2783,28 @@
+     ~DHKeyMaker() override
+     {
+         wait();
+-        if (result)
+-            DH_free(result);
++        EVP_PKEY_free(result);
+     }
+ 
+     void run() override
+     {
+-        DH     *dh  = DH_new();
+-        BIGNUM *bnp = bi2bn(domain.p());
+-        BIGNUM *bng = bi2bn(domain.g());
+-        if (!DH_set0_pqg(dh, bnp, nullptr, bng) || !DH_generate_key(dh)) {
+-            DH_free(dh);
++        // (p, g) without q, as DH_set0_pqg(dh, p, nullptr, g) set them
++        ParamBldPtr        bld(OSSL_PARAM_BLD_new());
++        std::vector<BnPtr> holder;
++        if (!bld || !bld_push_bi(bld.get(), OSSL_PKEY_PARAM_FFC_P, domain.p(), false, holder) ||
++            !bld_push_bi(bld.get(), OSSL_PKEY_PARAM_FFC_G, domain.g(), false, holder))
+             return;
+-        }
+-        result = dh;
++        EvpPkeyPtr params(pkey_from_builder("DH", EVP_PKEY_KEY_PARAMETERS, bld.get()));
++        if (!params)
++            return;
++        result = pkey_generate_from_params(params.get(), nullptr);
+     }
+ 
+-    DH *takeResult()
++    EVP_PKEY *takeResult()
+     {
+-        DH *dh = result;
+-        result = nullptr;
+-        return dh;
++        EVP_PKEY *pkey = result;
++        result         = nullptr;
++        return pkey;
+     }
+ };
+ 
+@@ -2699,47 +2867,40 @@
+         if (!sec)
+             return;
+ 
+-        const DH     *orig = EVP_PKEY_get0_DH(evp.pkey);
+-        DH           *dh   = DH_new();
+-        const BIGNUM *bnp, *bng, *bnpub_key;
+-        DH_get0_pqg(orig, &bnp, nullptr, &bng);
+-        DH_get0_key(orig, &bnpub_key, nullptr);
+-
+-        DH_set0_key(dh, BN_dup(bnpub_key), nullptr);
+-        DH_set0_pqg(dh, BN_dup(bnp), nullptr, BN_dup(bng));
+-
++        // the domain parameters and the public value, as the old code copied them
++        EVP_PKEY *pub = pkey_public_copy(evp.pkey);
+         evp.reset();
+-
+-        evp.pkey = EVP_PKEY_new();
+-        EVP_PKEY_assign_DH(evp.pkey, dh);
+-        sec = false;
++        evp.pkey = pub;
++        sec      = false;
+     }
+ 
+     int bits() const override
+     {
+-        return EVP_PKEY_bits(evp.pkey);
++        return EVP_PKEY_get_bits(evp.pkey);
+     }
+ 
+     SymmetricKey deriveKey(const PKeyBase &theirs) override
+     {
+-        // Not const: OpenSSL 1.1 takes a non-const EVP_PKEY * here.
++        // Not const: EVP_PKEY_derive_set_peer() takes a non-const EVP_PKEY *.
+         EVP_PKEY *theirPkey = static_cast<const DHKey *>(&theirs)->evp.pkey;
+         if (!evp.pkey || !theirPkey)
+             return SymmetricKey();
+ 
+-        const DH *dh   = EVP_PKEY_get0_DH(evp.pkey);
+-        const DH *them = EVP_PKEY_get0_DH(theirPkey);
+-        if (!dh || !them)
++        if (!EVP_PKEY_is_a(evp.pkey, "DH") || !EVP_PKEY_is_a(theirPkey, "DH"))
+             return SymmetricKey();
+ 
+-        const BIGNUM *bnpub_key;
+-        DH_get0_key(them, &bnpub_key, nullptr);
++        // Plain DH (no KDF) and no padding: the shared secret without leading zero bytes, which is
++        // what DH_compute_key() returned. The peer key is checked as DH_compute_key() checked it.
++        EvpPkeyCtxPtr ctx(EVP_PKEY_CTX_new_from_pkey(nullptr, evp.pkey, nullptr));
++        size_t        len = 0;
++        if (!ctx || EVP_PKEY_derive_init(ctx.get()) <= 0 || EVP_PKEY_CTX_set_dh_pad(ctx.get(), 0) <= 0 ||
++            EVP_PKEY_derive_set_peer(ctx.get(), theirPkey) <= 0 || EVP_PKEY_derive(ctx.get(), nullptr, &len) <= 0)
++            return SymmetricKey();
+ 
+-        SecureArray result(DH_size(dh));
+-        int         ret = DH_compute_key((unsigned char *)result.data(), bnpub_key, (DH *)dh);
+-        if (ret <= 0)
++        SecureArray result(static_cast<int>(len));
++        if (EVP_PKEY_derive(ctx.get(), reinterpret_cast<unsigned char *>(result.data()), &len) <= 0 || len == 0)
+             return SymmetricKey();
+-        result.resize(ret);
++        result.resize(int(len));
+         return SymmetricKey(result);
+     }
+ 
+@@ -2762,79 +2923,47 @@
+     {
+         evp.reset();
+ 
+-        DH     *dh         = DH_new();
+-        BIGNUM *bnp        = bi2bn(domain.p());
+-        BIGNUM *bng        = bi2bn(domain.g());
+-        BIGNUM *bnpub_key  = bi2bn(y);
+-        BIGNUM *bnpriv_key = bi2bn(x);
+-
+-        if (!DH_set0_key(dh, bnpub_key, bnpriv_key) || !DH_set0_pqg(dh, bnp, nullptr, bng)) {
+-            DH_free(dh);
+-            return;
+-        }
+-
+-        evp.pkey = EVP_PKEY_new();
+-        EVP_PKEY_assign_DH(evp.pkey, dh);
+-        sec = true;
++        evp.pkey = dl_pkey("DH", domain, false, y, &x);
++        if (evp.pkey)
++            sec = true;
+     }
+ 
+     void createPublic(const DLGroup &domain, const BigInteger &y) override
+     {
+         evp.reset();
+ 
+-        DH     *dh        = DH_new();
+-        BIGNUM *bnp       = bi2bn(domain.p());
+-        BIGNUM *bng       = bi2bn(domain.g());
+-        BIGNUM *bnpub_key = bi2bn(y);
+-
+-        if (!DH_set0_key(dh, bnpub_key, nullptr) || !DH_set0_pqg(dh, bnp, nullptr, bng)) {
+-            DH_free(dh);
+-            return;
+-        }
+-
+-        evp.pkey = EVP_PKEY_new();
+-        EVP_PKEY_assign_DH(evp.pkey, dh);
+-        sec = false;
++        evp.pkey = dl_pkey("DH", domain, false, y, nullptr);
++        sec      = false;
+     }
+ 
+     DLGroup domain() const override
+     {
+-        const DH     *dh = EVP_PKEY_get0_DH(evp.pkey);
+-        const BIGNUM *bnp, *bng;
+-        DH_get0_pqg(dh, &bnp, nullptr, &bng);
+-        return DLGroup(bn2bi(bnp), bn2bi(bng));
++        return DLGroup(pkey_get_bi(evp.pkey, OSSL_PKEY_PARAM_FFC_P), pkey_get_bi(evp.pkey, OSSL_PKEY_PARAM_FFC_G));
+     }
+ 
+     BigInteger y() const override
+     {
+-        const DH     *dh = EVP_PKEY_get0_DH(evp.pkey);
+-        const BIGNUM *bnpub_key;
+-        DH_get0_key(dh, &bnpub_key, nullptr);
+-        return bn2bi(bnpub_key);
++        return pkey_get_bi(evp.pkey, OSSL_PKEY_PARAM_PUB_KEY);
+     }
+ 
+     BigInteger x() const override
+     {
+-        const DH     *dh = EVP_PKEY_get0_DH(evp.pkey);
+-        const BIGNUM *bnpriv_key;
+-        DH_get0_key(dh, nullptr, &bnpriv_key);
+-        return bn2bi(bnpriv_key);
++        return pkey_get_bi(evp.pkey, OSSL_PKEY_PARAM_PRIV_KEY);
+     }
+ 
+ private Q_SLOTS:
+     void km_finished()
+     {
+-        DH *dh = keymaker->takeResult();
++        EVP_PKEY *pkey = keymaker->takeResult();
+         if (wasBlocking)
+             delete keymaker;
+         else
+             keymaker->deleteLater();
+         keymaker = nullptr;
+ 
+-        if (dh) {
+-            evp.pkey = EVP_PKEY_new();
+-            EVP_PKEY_assign_DH(evp.pkey, dh);
+-            sec = true;
++        if (pkey) {
++            evp.pkey = pkey;
++            sec      = true;
+         }
+ 
+         if (!wasBlocking)
+@@ -2843,84 +2972,1140 @@
+ };
+ 
+ //----------------------------------------------------------------------------
+-// QCA-based RSA_METHOD
++// RSA keys held by other QCA providers (keystore keys)
+ //----------------------------------------------------------------------------
++//
++// TLS and CMS signing accept a private key from another QCA provider, typically a smart card or
++// PKCS#11 token reached through a QCA keystore. OpenSSL never sees such a key's private half; it
++// has to hand every private-key operation back to QCA. With OpenSSL 1.x this was a custom
++// RSA_METHOD, an API deprecated since OpenSSL 3, where operations are meant to go through
++// providers. So this plugin registers a small built-in provider:
++//
++//  - a key manager for "RSA" whose key objects hold the QCA key plus its public half (n, e). It
++//    exports only the public half and refuses any request that includes the private key, which is
++//    what makes OpenSSL run the private-key operations of these keys with the two
++//    implementations below instead of exporting the key to another provider;
++//  - an RSA signature implementation: PKCS#1 v1.5 only. The DigestInfo (or, without a digest,
++//    the raw input) is signed with QCA's EMSA3_Raw, the operation keystore backends implement
++//    (PKCS#11 CKM_RSA_PKCS). RSA-PSS cannot be expressed through QCA's key API;
++//  - an RSA asymmetric cipher for decryption: PKCS#1 v1.5 and OAEP with SHA-1/MGF1-SHA-1 (QCA's
++//    EME_PKCS1_OAEP), the two paddings the RSA_METHOD decrypted, plus the TLS RSA key exchange
++//    variant (RSA_PKCS1_WITH_TLS_PADDING) that OpenSSL 3 uses instead of plain PKCS#1 v1.5 and
++//    that never fails visibly on a bad premaster secret.
++//
++// Everything is tagged with the property "qca.keystore=yes". Keys of this provider are created
++// only through createFromExisting() below, which asks for that property, and all keys the
++// plugin makes itself ask for "qca.keystore=no". The provider is loaded on first use and
++// unloaded with the plugin. Users: TLS (server and client authentication) and CMS signing and
++// decryption.
++namespace keystore {
++
++static const char kTicketParam[]    = "qca-keystore-ticket";
++static const char kPropDefinition[] = "qca.keystore=yes";
++static const char kPropQuery[]      = "qca.keystore=yes";
++static const char kRsaNames[]       = "RSA:rsaEncryption:1.2.840.113549.1.1.1";
++static const int  kTlsPremasterSize = 48; // SSL_MAX_MASTER_KEY_LENGTH
+ 
+-// only supports EMSA3_Raw for now
+-class QCA_RSA_METHOD
++// The provider's key object. OpenSSL frees keys and operation contexts in no particular order,
++// so contexts hold a reference of their own.
++struct KeyData
+ {
+-public:
+-    RSAPrivateKey key;
++    std::atomic<int> refs {1};
++    std::mutex       lock; // QCA key objects are not thread-safe; serialise the operations
++    RSAPrivateKey    key;
++    BIGNUM          *n = nullptr;
++    BIGNUM          *e = nullptr;
+ 
+-    QCA_RSA_METHOD(const RSAPrivateKey &_key, RSA *rsa)
++    KeyData()                           = default;
++    KeyData(const KeyData &)            = delete;
++    KeyData &operator=(const KeyData &) = delete;
++    ~KeyData()
+     {
+-        key = _key;
+-        RSA_set_method(rsa, rsa_method());
+-        RSA_set_app_data(rsa, this);
+-        BIGNUM *bnn = bi2bn(_key.n());
+-        BIGNUM *bne = bi2bn(_key.e());
++        BN_free(n);
++        BN_free(e);
++    }
+ 
+-        RSA_set0_key(rsa, bnn, bne, nullptr);
++    bool hasPrivate() const
++    {
++        return !key.isNull();
++    }
++
++    int bits() const
++    {
++        return n ? BN_num_bits(n) : 0;
++    }
++
++    int size() const
++    {
++        return n ? BN_num_bytes(n) : 0;
++    }
++};
++
++static KeyData *keyRef(KeyData *k)
++{
++    if (k)
++        k->refs.fetch_add(1);
++    return k;
++}
++
++static void keyUnref(KeyData *k)
++{
++    if (k && k->refs.fetch_sub(1) == 1)
++        delete k;
++}
++
++// Keys waiting to be picked up by the key manager's import (see createFromExisting()). Only a
++// ticket travels through OSSL_PARAM, never a pointer.
++static std::mutex                       s_pendingLock;
++static std::map<quint64, RSAPrivateKey> s_pending;
++static quint64                          s_nextTicket = 0;
++
++static quint64 addPending(const RSAPrivateKey &key)
++{
++    std::lock_guard<std::mutex> locker(s_pendingLock);
++    const quint64               ticket = ++s_nextTicket;
++    s_pending[ticket]                  = key;
++    return ticket;
++}
++
++static RSAPrivateKey takePending(quint64 ticket)
++{
++    std::lock_guard<std::mutex> locker(s_pendingLock);
++    RSAPrivateKey               key;
++    auto                        it = s_pending.find(ticket);
++    if (it != s_pending.end()) {
++        key = it->second;
++        s_pending.erase(it);
++    }
++    return key;
++}
++
++static void reportError(int reason, const char *text)
++{
++    ERR_raise_data(ERR_LIB_RSA, reason, "QCA keystore key: %s", text);
++}
++
++// RSA_*_PADDING from an OSSL_PARAM that may carry the number or its name
++static bool getPadMode(const OSSL_PARAM *p, int *mode)
++{
++    if (p->data_type == OSSL_PARAM_INTEGER)
++        return OSSL_PARAM_get_int(p, mode) == 1;
++    if (p->data_type != OSSL_PARAM_UTF8_STRING || !p->data)
++        return false;
++    const char *s = static_cast<const char *>(p->data);
++    if (strcmp(s, OSSL_PKEY_RSA_PAD_MODE_PKCSV15) == 0)
++        *mode = RSA_PKCS1_PADDING;
++    else if (strcmp(s, OSSL_PKEY_RSA_PAD_MODE_NONE) == 0)
++        *mode = RSA_NO_PADDING;
++    else if (strcmp(s, OSSL_PKEY_RSA_PAD_MODE_OAEP) == 0 || strcmp(s, "oeap") == 0)
++        *mode = RSA_PKCS1_OAEP_PADDING;
++    else if (strcmp(s, OSSL_PKEY_RSA_PAD_MODE_X931) == 0)
++        *mode = RSA_X931_PADDING;
++    else if (strcmp(s, OSSL_PKEY_RSA_PAD_MODE_PSS) == 0)
++        *mode = RSA_PKCS1_PSS_PADDING;
++    else
++        return false;
++    return true;
++}
++
++static bool setPadMode(OSSL_PARAM *p, int mode)
++{
++    if (p->data_type == OSSL_PARAM_INTEGER)
++        return OSSL_PARAM_set_int(p, mode) == 1;
++    if (p->data_type != OSSL_PARAM_UTF8_STRING)
++        return false;
++    switch (mode) {
++    case RSA_PKCS1_PADDING:
++        return OSSL_PARAM_set_utf8_string(p, OSSL_PKEY_RSA_PAD_MODE_PKCSV15) == 1;
++    case RSA_NO_PADDING:
++        return OSSL_PARAM_set_utf8_string(p, OSSL_PKEY_RSA_PAD_MODE_NONE) == 1;
++    case RSA_PKCS1_OAEP_PADDING:
++        return OSSL_PARAM_set_utf8_string(p, OSSL_PKEY_RSA_PAD_MODE_OAEP) == 1;
++    default:
++        return false; // RSA_PKCS1_WITH_TLS_PADDING has no name
+     }
++}
+ 
+-    RSA_METHOD *rsa_method()
++// The private-key operations, done by QCA
++static bool qcaSign(KeyData *k, const QByteArray &input, unsigned char *sig, size_t *siglen, size_t sigsize)
++{
++    const int  size = k->size();
++    QByteArray out;
+     {
+-        static RSA_METHOD *ops = nullptr;
++        std::lock_guard<std::mutex> locker(k->lock);
++        out = k->key.signMessage(input, EMSA3_Raw);
++    }
++    // An RSA signature is an integer below n, written with exactly as many bytes as n.
++    if (out.isEmpty() || out.size() > size || size_t(size) > sigsize) {
++        reportError(RSA_R_RSA_OPERATIONS_NOT_SUPPORTED, "signing failed");
++        return false;
++    }
++    const int pad = size - int(out.size());
++    memset(sig, 0, pad);
++    memcpy(sig + pad, out.constData(), out.size());
++    *siglen = size;
++    return true;
++}
++
++static bool qcaDecrypt(KeyData *k, const unsigned char *in, size_t inlen, EncryptionAlgorithm alg, SecureArray *out)
++{
++    SecureArray input(static_cast<int>(inlen));
++    memcpy(input.data(), in, inlen);
++    std::lock_guard<std::mutex> locker(k->lock);
++    return k->key.decrypt(input, out, alg);
++}
++
++// The EMSA-PKCS1-v1_5 encoding input for a digest: the DER DigestInfo, or the bare 36 bytes of
++// TLS 1.0/1.1's MD5+SHA-1, as RSA_sign() produced them.
++static bool digestInfo(const EVP_MD *md, const unsigned char *hash, size_t hashLen, QByteArray *out)
++{
++    const int nid = EVP_MD_get_type(md);
++    if (nid == NID_md5_sha1) {
++        *out = QByteArray(reinterpret_cast<const char *>(hash), int(hashLen));
++        return true;
++    }
++
++    ASN1_OBJECT *oid = OBJ_nid2obj(nid);
++    if (!oid || OBJ_length(oid) == 0)
++        return false;
+ 
+-        if (!ops) {
+-            ops = RSA_meth_dup(RSA_get_default_method());
+-            RSA_meth_set_priv_enc(ops, nullptr);      // pkcs11_rsa_encrypt
+-            RSA_meth_set_priv_dec(ops, rsa_priv_dec); // pkcs11_rsa_encrypt
+-            RSA_meth_set_sign(ops, nullptr);
+-            RSA_meth_set_verify(ops, nullptr); // pkcs11_rsa_verify
+-            RSA_meth_set_finish(ops, rsa_finish);
++    std::unique_ptr<X509_SIG, decltype(&X509_SIG_free)> sig(X509_SIG_new(), &X509_SIG_free);
++    X509_ALGOR                                         *alg    = nullptr;
++    ASN1_OCTET_STRING                                  *digest = nullptr;
++    if (!sig)
++        return false;
++    X509_SIG_getm(sig.get(), &alg, &digest);
++    if (!X509_ALGOR_set0(alg, oid, V_ASN1_NULL, nullptr) || !ASN1_OCTET_STRING_set(digest, hash, int(hashLen)))
++        return false;
++
++    const int len = i2d_X509_SIG(sig.get(), nullptr);
++    if (len <= 0)
++        return false;
++    out->resize(len);
++    unsigned char *p = reinterpret_cast<unsigned char *>(out->data());
++    return i2d_X509_SIG(sig.get(), &p) == len;
++}
++
++//----------------------------------------------------------------------------
++// key manager
++//----------------------------------------------------------------------------
++static OSSL_FUNC_keymgmt_new_fn                  km_new;
++static OSSL_FUNC_keymgmt_free_fn                 km_free;
++static OSSL_FUNC_keymgmt_has_fn                  km_has;
++static OSSL_FUNC_keymgmt_match_fn                km_match;
++static OSSL_FUNC_keymgmt_import_fn               km_import;
++static OSSL_FUNC_keymgmt_import_types_fn         km_import_types;
++static OSSL_FUNC_keymgmt_export_fn               km_export;
++static OSSL_FUNC_keymgmt_export_types_fn         km_export_types;
++static OSSL_FUNC_keymgmt_get_params_fn           km_get_params;
++static OSSL_FUNC_keymgmt_gettable_params_fn      km_gettable_params;
++static OSSL_FUNC_keymgmt_query_operation_name_fn km_query_operation_name;
++static OSSL_FUNC_keymgmt_dup_fn                  km_dup;
++
++static void *km_new(void *)
++{
++    return new (std::nothrow) KeyData;
++}
++
++static void km_free(void *keydata)
++{
++    keyUnref(static_cast<KeyData *>(keydata));
++}
++
++static int km_has(const void *keydata, int selection)
++{
++    const KeyData *k = static_cast<const KeyData *>(keydata);
++    if (!k)
++        return 0;
++    int ok = 1;
++    if (selection & OSSL_KEYMGMT_SELECT_PUBLIC_KEY)
++        ok = ok && k->n && k->e;
++    if (selection & OSSL_KEYMGMT_SELECT_PRIVATE_KEY)
++        ok = ok && k->hasPrivate();
++    return ok; // RSA keys have no domain parameters
++}
++
++static int km_match(const void *keydata1, const void *keydata2, int selection)
++{
++    const KeyData *a = static_cast<const KeyData *>(keydata1);
++    const KeyData *b = static_cast<const KeyData *>(keydata2);
++    if (!a || !b)
++        return 0;
++    if ((selection & OSSL_KEYMGMT_SELECT_KEYPAIR) == 0)
++        return 1;
++    // the private half is not available; a key pair is identified by its public half
++    return a->n && b->n && a->e && b->e && BN_cmp(a->n, b->n) == 0 && BN_cmp(a->e, b->e) == 0;
++}
++
++// Only keys handed over by createFromExisting() can be imported. Key material that OpenSSL
++// holds itself (a public key it wants to compare, for instance) is refused, so that it stays
++// with the provider it came from.
++static int km_import(void *keydata, int selection, const OSSL_PARAM params[])
++{
++    KeyData *k = static_cast<KeyData *>(keydata);
++    if (!k)
++        return 0;
++    const OSSL_PARAM *p = OSSL_PARAM_locate_const(params, kTicketParam);
++    uint64_t          ticket;
++    if (!p || (selection & OSSL_KEYMGMT_SELECT_PRIVATE_KEY) == 0 || OSSL_PARAM_get_uint64(p, &ticket) != 1)
++        return 0;
++
++    const RSAPrivateKey key = takePending(ticket);
++    if (key.isNull())
++        return 0;
++    BnPtr n(bi2bn(key.n())), e(bi2bn(key.e()));
++    if (!n || !e || BN_is_zero(n.get()) || BN_is_zero(e.get()))
++        return 0;
++
++    BN_free(k->n);
++    BN_free(k->e);
++    k->n   = n.release();
++    k->e   = e.release();
++    k->key = key;
++    return 1;
++}
++
++static const OSSL_PARAM *km_import_types(int selection)
++{
++    static const OSSL_PARAM types[] = {OSSL_PARAM_uint64(kTicketParam, nullptr), OSSL_PARAM_END};
++    static const OSSL_PARAM none[]  = {OSSL_PARAM_END};
++    return (selection & OSSL_KEYMGMT_SELECT_PRIVATE_KEY) ? types : none;
++}
++
++static int km_export(void *keydata, int selection, OSSL_CALLBACK *cb, void *cbarg)
++{
++    KeyData *k = static_cast<KeyData *>(keydata);
++    if (!k || !cb)
++        return 0;
++    // The private half stays in the keystore. Refusing makes OpenSSL use this provider's own
++    // signature and cipher implementations for it.
++    if (selection & OSSL_KEYMGMT_SELECT_PRIVATE_KEY)
++        return 0;
++
++    ParamBldPtr bld(OSSL_PARAM_BLD_new());
++    if (!bld)
++        return 0;
++    if (selection & OSSL_KEYMGMT_SELECT_PUBLIC_KEY) {
++        if (!k->n || !k->e || !OSSL_PARAM_BLD_push_BN(bld.get(), OSSL_PKEY_PARAM_RSA_N, k->n) ||
++            !OSSL_PARAM_BLD_push_BN(bld.get(), OSSL_PKEY_PARAM_RSA_E, k->e))
++            return 0;
++    }
++    ParamPtr params(OSSL_PARAM_BLD_to_param(bld.get()));
++    return params ? cb(params.get(), cbarg) : 0;
++}
++
++static const OSSL_PARAM *km_export_types(int selection)
++{
++    static const OSSL_PARAM types[] = {OSSL_PARAM_BN(OSSL_PKEY_PARAM_RSA_N, nullptr, 0),
++                                       OSSL_PARAM_BN(OSSL_PKEY_PARAM_RSA_E, nullptr, 0),
++                                       OSSL_PARAM_END};
++    static const OSSL_PARAM none[]  = {OSSL_PARAM_END};
++    return (selection & OSSL_KEYMGMT_SELECT_PUBLIC_KEY) ? types : none;
++}
++
++static int km_get_params(void *keydata, OSSL_PARAM params[])
++{
++    KeyData *k = static_cast<KeyData *>(keydata);
++    if (!k)
++        return 0;
++    OSSL_PARAM *p;
++    if ((p = OSSL_PARAM_locate(params, OSSL_PKEY_PARAM_BITS)) && !OSSL_PARAM_set_int(p, k->bits()))
++        return 0;
++    if ((p = OSSL_PARAM_locate(params, OSSL_PKEY_PARAM_SECURITY_BITS)) &&
++        !OSSL_PARAM_set_int(p, BN_security_bits(k->bits(), -1)))
++        return 0;
++    if ((p = OSSL_PARAM_locate(params, OSSL_PKEY_PARAM_MAX_SIZE)) && !OSSL_PARAM_set_int(p, k->size()))
++        return 0;
++    if ((p = OSSL_PARAM_locate(params, OSSL_PKEY_PARAM_DEFAULT_DIGEST)) && !OSSL_PARAM_set_utf8_string(p, "SHA256"))
++        return 0;
++    if ((p = OSSL_PARAM_locate(params, OSSL_PKEY_PARAM_RSA_N)) && k->n && !OSSL_PARAM_set_BN(p, k->n))
++        return 0;
++    if ((p = OSSL_PARAM_locate(params, OSSL_PKEY_PARAM_RSA_E)) && k->e && !OSSL_PARAM_set_BN(p, k->e))
++        return 0;
++    return 1;
++}
++
++static const OSSL_PARAM *km_gettable_params(void *)
++{
++    static const OSSL_PARAM types[] = {OSSL_PARAM_int(OSSL_PKEY_PARAM_BITS, nullptr),
++                                       OSSL_PARAM_int(OSSL_PKEY_PARAM_SECURITY_BITS, nullptr),
++                                       OSSL_PARAM_int(OSSL_PKEY_PARAM_MAX_SIZE, nullptr),
++                                       OSSL_PARAM_utf8_string(OSSL_PKEY_PARAM_DEFAULT_DIGEST, nullptr, 0),
++                                       OSSL_PARAM_BN(OSSL_PKEY_PARAM_RSA_N, nullptr, 0),
++                                       OSSL_PARAM_BN(OSSL_PKEY_PARAM_RSA_E, nullptr, 0),
++                                       OSSL_PARAM_END};
++    return types;
++}
++
++static const char *km_query_operation_name(int)
++{
++    return "RSA";
++}
++
++static void *km_dup(const void *keydata, int selection)
++{
++    const KeyData *src = static_cast<const KeyData *>(keydata);
++    if (!src)
++        return nullptr;
++    KeyData *k = new (std::nothrow) KeyData;
++    if (!k)
++        return nullptr;
++    if (selection & OSSL_KEYMGMT_SELECT_KEYPAIR) {
++        k->n = src->n ? BN_dup(src->n) : nullptr;
++        k->e = src->e ? BN_dup(src->e) : nullptr;
++        if ((src->n && !k->n) || (src->e && !k->e)) {
++            keyUnref(k);
++            return nullptr;
+         }
+-        return ops;
+     }
++    if (selection & OSSL_KEYMGMT_SELECT_PRIVATE_KEY)
++        k->key = src->key;
++    return k;
++}
+ 
+-    static int rsa_priv_dec(int flen, const unsigned char *from, unsigned char *to, RSA *rsa, int padding)
++//----------------------------------------------------------------------------
++// signature
++//----------------------------------------------------------------------------
++struct SigCtx
++{
++    KeyData    *key = nullptr;
++    std::string propq;
++    EVP_MD     *md         = nullptr; // digest of the DigestInfo, if any
++    EVP_MD_CTX *mdctx      = nullptr; // running digest of a digest-sign operation
++    bool        digestSign = false;
++
++    SigCtx()                          = default;
++    SigCtx(const SigCtx &)            = delete;
++    SigCtx &operator=(const SigCtx &) = delete;
++    ~SigCtx()
+     {
+-        QCA::EncryptionAlgorithm algo;
++        keyUnref(key);
++        EVP_MD_free(md);
++        EVP_MD_CTX_free(mdctx);
++    }
++};
+ 
+-        if (padding == RSA_PKCS1_PADDING) {
+-            algo = QCA::EME_PKCS1v15;
+-        } else if (padding == RSA_PKCS1_OAEP_PADDING) {
+-            algo = QCA::EME_PKCS1_OAEP;
+-        } else {
+-            RSAerr(RSA_F_RSA_OSSL_PRIVATE_DECRYPT, RSA_R_UNKNOWN_PADDING_TYPE);
+-            return -1;
++static OSSL_FUNC_signature_newctx_fn              sig_newctx;
++static OSSL_FUNC_signature_freectx_fn             sig_freectx;
++static OSSL_FUNC_signature_dupctx_fn              sig_dupctx;
++static OSSL_FUNC_signature_sign_init_fn           sig_sign_init;
++static OSSL_FUNC_signature_sign_fn                sig_sign;
++static OSSL_FUNC_signature_digest_sign_init_fn    sig_digest_sign_init;
++static OSSL_FUNC_signature_digest_sign_update_fn  sig_digest_sign_update;
++static OSSL_FUNC_signature_digest_sign_final_fn   sig_digest_sign_final;
++static OSSL_FUNC_signature_set_ctx_params_fn      sig_set_ctx_params;
++static OSSL_FUNC_signature_settable_ctx_params_fn sig_settable_ctx_params;
++static OSSL_FUNC_signature_get_ctx_params_fn      sig_get_ctx_params;
++static OSSL_FUNC_signature_gettable_ctx_params_fn sig_gettable_ctx_params;
++
++static void *sig_newctx(void *, const char *propq)
++{
++    SigCtx *c = new (std::nothrow) SigCtx;
++    if (c && propq)
++        c->propq = propq;
++    return c;
++}
++
++static void sig_freectx(void *vctx)
++{
++    delete static_cast<SigCtx *>(vctx);
++}
++
++static void *sig_dupctx(void *vctx)
++{
++    const SigCtx *src = static_cast<const SigCtx *>(vctx);
++    if (!src)
++        return nullptr;
++    SigCtx *c = new (std::nothrow) SigCtx;
++    if (!c)
++        return nullptr;
++    c->key        = keyRef(src->key);
++    c->propq      = src->propq;
++    c->digestSign = src->digestSign;
++    if (src->md) {
++        EVP_MD_up_ref(src->md);
++        c->md = src->md;
++    }
++    if (src->mdctx) {
++        c->mdctx = EVP_MD_CTX_new();
++        if (!c->mdctx || !EVP_MD_CTX_copy_ex(c->mdctx, src->mdctx)) {
++            delete c;
++            return nullptr;
+         }
++    }
++    return c;
++}
+ 
+-        QCA_RSA_METHOD *self = (QCA_RSA_METHOD *)RSA_get_app_data(rsa);
++static bool sigSetDigest(SigCtx *c, const char *name, const char *props)
++{
++    if (!props && !c->propq.empty())
++        props = c->propq.c_str();
++    EVP_MD *md = EVP_MD_fetch(nullptr, name, props);
++    if (!md)
++        return false;
++    // a PKCS#1 v1.5 signature names its digest in the DigestInfo
++    const int nid = EVP_MD_get_type(md);
++    if (nid != NID_md5_sha1 && (nid == NID_undef || OBJ_length(OBJ_nid2obj(nid)) == 0)) {
++        EVP_MD_free(md);
++        reportError(RSA_R_UNKNOWN_ALGORITHM_TYPE, "digest without an algorithm identifier");
++        return false;
++    }
++    EVP_MD_free(c->md);
++    c->md = md;
++    return true;
++}
+ 
+-        QCA::SecureArray input;
+-        input.resize(flen);
+-        memcpy(input.data(), from, input.size());
++static int sigInit(SigCtx *c, void *provkey, const OSSL_PARAM params[])
++{
++    if (!c)
++        return 0;
++    // a null key re-initialises the operation with the current one
++    if (provkey) {
++        KeyData *k = static_cast<KeyData *>(provkey);
++        if (!k->hasPrivate()) {
++            reportError(RSA_R_VALUE_MISSING, "no private key");
++            return 0;
++        }
++        keyUnref(c->key);
++        c->key = keyRef(k);
++    } else if (!c->key) {
++        return 0;
++    }
++    EVP_MD_free(c->md);
++    c->md = nullptr;
++    EVP_MD_CTX_free(c->mdctx);
++    c->mdctx      = nullptr;
++    c->digestSign = false;
++    return sig_set_ctx_params(c, params);
++}
+ 
+-        QCA::SecureArray output;
++static int sig_sign_init(void *vctx, void *provkey, const OSSL_PARAM params[])
++{
++    return sigInit(static_cast<SigCtx *>(vctx), provkey, params);
++}
+ 
+-        if (self->key.decrypt(input, &output, algo)) {
+-            memcpy(to, output.data(), output.size());
+-            return output.size();
++static int
++sigSignDigest(SigCtx *c, unsigned char *sig, size_t *siglen, size_t sigsize, const unsigned char *tbs, size_t tbslen)
++{
++    QByteArray input;
++    if (c->md) {
++        if (tbslen != size_t(EVP_MD_get_size(c->md)) || !digestInfo(c->md, tbs, tbslen, &input)) {
++            reportError(RSA_R_INVALID_DIGEST_LENGTH, "bad digest");
++            return 0;
+         }
++    } else {
++        // no digest: the input is signed as it is, as RSA_private_encrypt(RSA_PKCS1_PADDING) did
++        input = QByteArray(reinterpret_cast<const char *>(tbs), int(tbslen));
++    }
++    return qcaSign(c->key, input, sig, siglen, sigsize) ? 1 : 0;
++}
+ 
+-        // XXX: An error should be set in this case too.
+-        return -1;
++static int
++sig_sign(void *vctx, unsigned char *sig, size_t *siglen, size_t sigsize, const unsigned char *tbs, size_t tbslen)
++{
++    SigCtx *c = static_cast<SigCtx *>(vctx);
++    if (!c || !c->key)
++        return 0;
++    if (!sig) {
++        *siglen = c->key->size();
++        return 1;
+     }
++    return sigSignDigest(c, sig, siglen, sigsize, tbs, tbslen);
++}
+ 
+-    static int rsa_finish(RSA *rsa)
+-    {
+-        QCA_RSA_METHOD *self = (QCA_RSA_METHOD *)RSA_get_app_data(rsa);
+-        delete self;
++static int sig_digest_sign_init(void *vctx, const char *mdname, void *provkey, const OSSL_PARAM params[])
++{
++    SigCtx *c = static_cast<SigCtx *>(vctx);
++    if (!sigInit(c, provkey, params))
++        return 0;
++    if (mdname && *mdname && !sigSetDigest(c, mdname, nullptr))
++        return 0;
++    if (!c->md)
++        return 0;
++    c->mdctx = EVP_MD_CTX_new();
++    if (!c->mdctx || !EVP_DigestInit_ex(c->mdctx, c->md, nullptr))
++        return 0;
++    c->digestSign = true;
++    return 1;
++}
++
++static int sig_digest_sign_update(void *vctx, const unsigned char *data, size_t datalen)
++{
++    SigCtx *c = static_cast<SigCtx *>(vctx);
++    if (!c || !c->mdctx)
++        return 0;
++    return EVP_DigestUpdate(c->mdctx, data, datalen);
++}
++
++static int sig_digest_sign_final(void *vctx, unsigned char *sig, size_t *siglen, size_t sigsize)
++{
++    SigCtx *c = static_cast<SigCtx *>(vctx);
++    if (!c || !c->key || !c->mdctx)
++        return 0;
++    if (!sig) {
++        *siglen = c->key->size();
+         return 1;
+     }
++    unsigned char hash[EVP_MAX_MD_SIZE];
++    unsigned int  hashLen = 0;
++    if (!EVP_DigestFinal_ex(c->mdctx, hash, &hashLen))
++        return 0;
++    return sigSignDigest(c, sig, siglen, sigsize, hash, hashLen);
++}
++
++static int sig_set_ctx_params(void *vctx, const OSSL_PARAM params[])
++{
++    SigCtx *c = static_cast<SigCtx *>(vctx);
++    if (!c)
++        return 0;
++    if (!params)
++        return 1;
++
++    const OSSL_PARAM *p = OSSL_PARAM_locate_const(params, OSSL_SIGNATURE_PARAM_PAD_MODE);
++    if (p) {
++        int mode;
++        if (!getPadMode(p, &mode) || mode != RSA_PKCS1_PADDING) {
++            reportError(RSA_R_UNKNOWN_PADDING_TYPE, "only PKCS#1 v1.5 signatures are possible");
++            return 0;
++        }
++    }
++    // PSS parameters
++    if (OSSL_PARAM_locate_const(params, OSSL_SIGNATURE_PARAM_PSS_SALTLEN) ||
++        OSSL_PARAM_locate_const(params, OSSL_SIGNATURE_PARAM_MGF1_DIGEST)) {
++        reportError(RSA_R_UNKNOWN_PADDING_TYPE, "only PKCS#1 v1.5 signatures are possible");
++        return 0;
++    }
++    p = OSSL_PARAM_locate_const(params, OSSL_SIGNATURE_PARAM_DIGEST);
++    if (p) {
++        const char *name  = nullptr;
++        const char *props = nullptr;
++        if (c->digestSign || OSSL_PARAM_get_utf8_string_ptr(p, &name) != 1)
++            return 0;
++        const OSSL_PARAM *pp = OSSL_PARAM_locate_const(params, OSSL_SIGNATURE_PARAM_PROPERTIES);
++        if (pp && OSSL_PARAM_get_utf8_string_ptr(pp, &props) != 1)
++            return 0;
++        if (!sigSetDigest(c, name, props))
++            return 0;
++    }
++    return 1;
++}
++
++static const OSSL_PARAM *sig_settable_ctx_params(void *, void *)
++{
++    static const OSSL_PARAM types[] = {OSSL_PARAM_utf8_string(OSSL_SIGNATURE_PARAM_PAD_MODE, nullptr, 0),
++                                       OSSL_PARAM_utf8_string(OSSL_SIGNATURE_PARAM_DIGEST, nullptr, 0),
++                                       OSSL_PARAM_utf8_string(OSSL_SIGNATURE_PARAM_PROPERTIES, nullptr, 0),
++                                       OSSL_PARAM_END};
++    return types;
++}
++
++static int sig_get_ctx_params(void *vctx, OSSL_PARAM params[])
++{
++    SigCtx *c = static_cast<SigCtx *>(vctx);
++    if (!c)
++        return 0;
++    OSSL_PARAM *p;
++    if ((p = OSSL_PARAM_locate(params, OSSL_SIGNATURE_PARAM_PAD_MODE)) && !setPadMode(p, RSA_PKCS1_PADDING))
++        return 0;
++    if ((p = OSSL_PARAM_locate(params, OSSL_SIGNATURE_PARAM_DIGEST)) && c->md &&
++        !OSSL_PARAM_set_utf8_string(p, EVP_MD_get0_name(c->md)))
++        return 0;
++    if ((p = OSSL_PARAM_locate(params, OSSL_SIGNATURE_PARAM_ALGORITHM_ID)) && c->md) {
++        // the X.509 AlgorithmIdentifier of this signature, e.g. sha256WithRSAEncryption
++        int sigNid = NID_undef;
++        if (!OBJ_find_sigid_by_algs(&sigNid, EVP_MD_get_type(c->md), NID_rsaEncryption))
++            return 0;
++        std::unique_ptr<X509_ALGOR, decltype(&X509_ALGOR_free)> algor(X509_ALGOR_new(), &X509_ALGOR_free);
++        if (!algor || !X509_ALGOR_set0(algor.get(), OBJ_nid2obj(sigNid), V_ASN1_NULL, nullptr))
++            return 0;
++        unsigned char *der    = nullptr;
++        const int      derLen = i2d_X509_ALGOR(algor.get(), &der);
++        if (derLen <= 0)
++            return 0;
++        const int ok = OSSL_PARAM_set_octet_string(p, der, size_t(derLen));
++        OPENSSL_free(der);
++        if (!ok)
++            return 0;
++    }
++    return 1;
++}
++
++static const OSSL_PARAM *sig_gettable_ctx_params(void *, void *)
++{
++    static const OSSL_PARAM types[] = {OSSL_PARAM_utf8_string(OSSL_SIGNATURE_PARAM_PAD_MODE, nullptr, 0),
++                                       OSSL_PARAM_utf8_string(OSSL_SIGNATURE_PARAM_DIGEST, nullptr, 0),
++                                       OSSL_PARAM_octet_string(OSSL_SIGNATURE_PARAM_ALGORITHM_ID, nullptr, 0),
++                                       OSSL_PARAM_END};
++    return types;
++}
++
++//----------------------------------------------------------------------------
++// asymmetric cipher (decryption only)
++//----------------------------------------------------------------------------
++struct CipherCtx
++{
++    KeyData     *key = nullptr;
++    std::string  propq;
++    int          pad        = RSA_PKCS1_PADDING;
++    std::string  oaepDigest = "SHA1";
++    std::string  mgf1Digest; // empty: same as the OAEP digest
++    unsigned int clientVersion = 0;
++    unsigned int altVersion    = 0;
++
++    CipherCtx()                             = default;
++    CipherCtx(const CipherCtx &)            = delete;
++    CipherCtx &operator=(const CipherCtx &) = delete;
++    ~CipherCtx()
++    {
++        keyUnref(key);
++    }
+ };
+ 
+-static RSA *createFromExisting(const RSAPrivateKey &key)
++static OSSL_FUNC_asym_cipher_newctx_fn              ac_newctx;
++static OSSL_FUNC_asym_cipher_freectx_fn             ac_freectx;
++static OSSL_FUNC_asym_cipher_dupctx_fn              ac_dupctx;
++static OSSL_FUNC_asym_cipher_decrypt_init_fn        ac_decrypt_init;
++static OSSL_FUNC_asym_cipher_decrypt_fn             ac_decrypt;
++static OSSL_FUNC_asym_cipher_set_ctx_params_fn      ac_set_ctx_params;
++static OSSL_FUNC_asym_cipher_settable_ctx_params_fn ac_settable_ctx_params;
++static OSSL_FUNC_asym_cipher_get_ctx_params_fn      ac_get_ctx_params;
++static OSSL_FUNC_asym_cipher_gettable_ctx_params_fn ac_gettable_ctx_params;
++
++static void *ac_newctx(void *)
++{
++    return new (std::nothrow) CipherCtx;
++}
++
++static void ac_freectx(void *vctx)
+ {
+-    RSA *r = RSA_new();
+-    new QCA_RSA_METHOD(key, r); // will delete itself on RSA_free
+-    return r;
++    delete static_cast<CipherCtx *>(vctx);
++}
++
++static void *ac_dupctx(void *vctx)
++{
++    const CipherCtx *src = static_cast<const CipherCtx *>(vctx);
++    if (!src)
++        return nullptr;
++    CipherCtx *c = new (std::nothrow) CipherCtx;
++    if (!c)
++        return nullptr;
++    c->key           = keyRef(src->key);
++    c->propq         = src->propq;
++    c->pad           = src->pad;
++    c->oaepDigest    = src->oaepDigest;
++    c->mgf1Digest    = src->mgf1Digest;
++    c->clientVersion = src->clientVersion;
++    c->altVersion    = src->altVersion;
++    return c;
++}
++
++static int ac_decrypt_init(void *vctx, void *provkey, const OSSL_PARAM params[])
++{
++    CipherCtx *c = static_cast<CipherCtx *>(vctx);
++    KeyData   *k = static_cast<KeyData *>(provkey);
++    if (!c || !k || !k->hasPrivate())
++        return 0;
++    keyUnref(c->key);
++    c->key        = keyRef(k);
++    c->pad        = RSA_PKCS1_PADDING;
++    c->oaepDigest = "SHA1";
++    c->mgf1Digest.clear();
++    c->clientVersion = 0;
++    c->altVersion    = 0;
++    return ac_set_ctx_params(c, params);
++}
++
++// all-ones if a == b, else zero, without a branch
++static unsigned int ctEq(unsigned int a, unsigned int b)
++{
++    const unsigned int x = a ^ b;
++    return 0u - ((~x & (x - 1u)) >> (sizeof(unsigned int) * 8 - 1));
++}
++
++// RSA_PKCS1_WITH_TLS_PADDING: the 48-byte premaster secret of TLS RSA key exchange. If decryption
++// fails, or the result has the wrong length or version, a random secret is returned instead of
++// an error (RFC 5246, 7.4.7.1), as OpenSSL's own implementation does. The selection below is
++// branch-free; whether the keystore's own decryption failed may still show in its timing.
++static int tlsDecrypt(CipherCtx *c, unsigned char *out, size_t *outlen, const unsigned char *in, size_t inlen)
++{
++    if (c->clientVersion == 0) {
++        reportError(RSA_R_PKCS_DECODING_ERROR, "no TLS client version");
++        return 0;
++    }
++    unsigned char random[kTlsPremasterSize];
++    if (RAND_priv_bytes(random, sizeof(random)) <= 0)
++        return 0;
++
++    SecureArray decrypted;
++    ERR_set_mark();
++    const bool ok = qcaDecrypt(c->key, in, inlen, EME_PKCS1v15, &decrypted);
++    ERR_pop_to_mark(); // a failure here must not be distinguishable from a bad version
++
++    SecureArray premaster(kTlsPremasterSize, 0);
++    const bool  lengthOk = ok && decrypted.size() == kTlsPremasterSize;
++    if (lengthOk)
++        memcpy(premaster.data(), decrypted.constData(), kTlsPremasterSize);
++
++    const unsigned char *pm   = reinterpret_cast<const unsigned char *>(premaster.constData());
++    unsigned int         good = 0u - (unsigned int)lengthOk;
++    unsigned int versionGood  = ctEq(pm[0], (c->clientVersion >> 8) & 0xff) & ctEq(pm[1], c->clientVersion & 0xff);
++    if (c->altVersion != 0)
++        versionGood |= ctEq(pm[0], (c->altVersion >> 8) & 0xff) & ctEq(pm[1], c->altVersion & 0xff);
++    good &= versionGood;
++
++    for (int i = 0; i < kTlsPremasterSize; ++i)
++        out[i] = (unsigned char)((pm[i] & good) | (random[i] & ~good));
++    OPENSSL_cleanse(random, sizeof(random));
++    *outlen = kTlsPremasterSize;
++    return 1;
++}
++
++static int
++ac_decrypt(void *vctx, unsigned char *out, size_t *outlen, size_t outsize, const unsigned char *in, size_t inlen)
++{
++    CipherCtx *c = static_cast<CipherCtx *>(vctx);
++    if (!c || !c->key)
++        return 0;
++
++    if (c->pad == RSA_PKCS1_WITH_TLS_PADDING) {
++        if (!out) {
++            *outlen = kTlsPremasterSize;
++            return 1;
++        }
++        if (outsize < size_t(kTlsPremasterSize))
++            return 0;
++        return tlsDecrypt(c, out, outlen, in, inlen);
++    }
++
++    const size_t size = c->key->size();
++    if (!out) {
++        *outlen = size;
++        return 1;
++    }
++    if (outsize < size)
++        return 0;
++
++    EncryptionAlgorithm alg;
++    switch (c->pad) {
++    case RSA_PKCS1_PADDING:
++        alg = EME_PKCS1v15;
++        break;
++    case RSA_PKCS1_OAEP_PADDING:
++        alg = EME_PKCS1_OAEP;
++        break;
++    default:
++        reportError(RSA_R_UNKNOWN_PADDING_TYPE, "unsupported padding");
++        return 0;
++    }
++
++    SecureArray result;
++    if (!qcaDecrypt(c->key, in, inlen, alg, &result) || size_t(result.size()) > outsize) {
++        reportError(RSA_R_PKCS_DECODING_ERROR, "decryption failed");
++        return 0;
++    }
++    memcpy(out, result.constData(), result.size());
++    *outlen = result.size();
++    return 1;
++}
++
++// QCA's EME_PKCS1_OAEP is OAEP with SHA-1 and MGF1-SHA-1 and an empty label
++static bool isSha1(const char *name, const char *props)
++{
++    EVP_MD    *md = EVP_MD_fetch(nullptr, name, props);
++    const bool ok = md && EVP_MD_is_a(md, "SHA1");
++    EVP_MD_free(md);
++    return ok;
++}
++
++static int ac_set_ctx_params(void *vctx, const OSSL_PARAM params[])
++{
++    CipherCtx *c = static_cast<CipherCtx *>(vctx);
++    if (!c)
++        return 0;
++    if (!params)
++        return 1;
++
++    const OSSL_PARAM *p = OSSL_PARAM_locate_const(params, OSSL_ASYM_CIPHER_PARAM_PAD_MODE);
++    if (p) {
++        // the paddings the RSA_METHOD decrypted with, plus the TLS key exchange variant that
++        // OpenSSL 3 uses where it used plain PKCS#1 v1.5 before
++        int mode;
++        if (!getPadMode(p, &mode) ||
++            (mode != RSA_PKCS1_PADDING && mode != RSA_PKCS1_OAEP_PADDING && mode != RSA_PKCS1_WITH_TLS_PADDING)) {
++            reportError(RSA_R_UNKNOWN_PADDING_TYPE, "unsupported padding");
++            return 0;
++        }
++        c->pad = mode;
++    }
++
++    const char *props = nullptr;
++    p                 = OSSL_PARAM_locate_const(params, OSSL_ASYM_CIPHER_PARAM_OAEP_DIGEST_PROPS);
++    if (p && OSSL_PARAM_get_utf8_string_ptr(p, &props) != 1)
++        return 0;
++    p = OSSL_PARAM_locate_const(params, OSSL_ASYM_CIPHER_PARAM_OAEP_DIGEST);
++    if (p) {
++        const char *name = nullptr;
++        if (OSSL_PARAM_get_utf8_string_ptr(p, &name) != 1 || !isSha1(name, props)) {
++            reportError(RSA_R_DIGEST_NOT_ALLOWED, "OAEP is only possible with SHA-1");
++            return 0;
++        }
++        c->oaepDigest = name;
++    }
++
++    props = nullptr;
++    p     = OSSL_PARAM_locate_const(params, OSSL_ASYM_CIPHER_PARAM_MGF1_DIGEST_PROPS);
++    if (p && OSSL_PARAM_get_utf8_string_ptr(p, &props) != 1)
++        return 0;
++    p = OSSL_PARAM_locate_const(params, OSSL_ASYM_CIPHER_PARAM_MGF1_DIGEST);
++    if (p) {
++        const char *name = nullptr;
++        if (OSSL_PARAM_get_utf8_string_ptr(p, &name) != 1 || !isSha1(name, props)) {
++            reportError(RSA_R_DIGEST_NOT_ALLOWED, "OAEP is only possible with MGF1-SHA-1");
++            return 0;
++        }
++        c->mgf1Digest = name;
++    }
++
++    p = OSSL_PARAM_locate_const(params, OSSL_ASYM_CIPHER_PARAM_OAEP_LABEL);
++    if (p) {
++        const void *label    = nullptr;
++        size_t      labelLen = 0;
++        if (OSSL_PARAM_get_octet_string_ptr(p, &label, &labelLen) != 1 || labelLen != 0) {
++            reportError(RSA_R_PKCS_DECODING_ERROR, "OAEP labels are not possible");
++            return 0;
++        }
++    }
++
++    p = OSSL_PARAM_locate_const(params, OSSL_ASYM_CIPHER_PARAM_TLS_CLIENT_VERSION);
++    if (p && OSSL_PARAM_get_uint(p, &c->clientVersion) != 1)
++        return 0;
++    p = OSSL_PARAM_locate_const(params, OSSL_ASYM_CIPHER_PARAM_TLS_NEGOTIATED_VERSION);
++    if (p && OSSL_PARAM_get_uint(p, &c->altVersion) != 1)
++        return 0;
++
++#ifdef OSSL_ASYM_CIPHER_PARAM_IMPLICIT_REJECTION // OpenSSL 3.2
++    // Implicit rejection needs the private key itself. The keystore reports padding errors.
++    p = OSSL_PARAM_locate_const(params, OSSL_ASYM_CIPHER_PARAM_IMPLICIT_REJECTION);
++    if (p) {
++        unsigned int implicitRejection = 0;
++        if (OSSL_PARAM_get_uint(p, &implicitRejection) != 1 || implicitRejection != 0) {
++            reportError(RSA_R_PKCS_DECODING_ERROR, "implicit rejection is not possible");
++            return 0;
++        }
++    }
++#endif
++    return 1;
++}
++
++static const OSSL_PARAM *ac_settable_ctx_params(void *, void *)
++{
++    static const OSSL_PARAM types[] = {OSSL_PARAM_utf8_string(OSSL_ASYM_CIPHER_PARAM_PAD_MODE, nullptr, 0),
++                                       OSSL_PARAM_utf8_string(OSSL_ASYM_CIPHER_PARAM_OAEP_DIGEST, nullptr, 0),
++                                       OSSL_PARAM_utf8_string(OSSL_ASYM_CIPHER_PARAM_OAEP_DIGEST_PROPS, nullptr, 0),
++                                       OSSL_PARAM_utf8_string(OSSL_ASYM_CIPHER_PARAM_MGF1_DIGEST, nullptr, 0),
++                                       OSSL_PARAM_utf8_string(OSSL_ASYM_CIPHER_PARAM_MGF1_DIGEST_PROPS, nullptr, 0),
++                                       OSSL_PARAM_octet_string(OSSL_ASYM_CIPHER_PARAM_OAEP_LABEL, nullptr, 0),
++                                       OSSL_PARAM_uint(OSSL_ASYM_CIPHER_PARAM_TLS_CLIENT_VERSION, nullptr),
++                                       OSSL_PARAM_uint(OSSL_ASYM_CIPHER_PARAM_TLS_NEGOTIATED_VERSION, nullptr),
++#ifdef OSSL_ASYM_CIPHER_PARAM_IMPLICIT_REJECTION
++                                       OSSL_PARAM_uint(OSSL_ASYM_CIPHER_PARAM_IMPLICIT_REJECTION, nullptr),
++#endif
++                                       OSSL_PARAM_END};
++    return types;
++}
++
++static int ac_get_ctx_params(void *vctx, OSSL_PARAM params[])
++{
++    CipherCtx *c = static_cast<CipherCtx *>(vctx);
++    if (!c)
++        return 0;
++    OSSL_PARAM *p;
++    if ((p = OSSL_PARAM_locate(params, OSSL_ASYM_CIPHER_PARAM_PAD_MODE)) && !setPadMode(p, c->pad))
++        return 0;
++    if ((p = OSSL_PARAM_locate(params, OSSL_ASYM_CIPHER_PARAM_OAEP_DIGEST)) &&
++        !OSSL_PARAM_set_utf8_string(p, c->oaepDigest.c_str()))
++        return 0;
++    if ((p = OSSL_PARAM_locate(params, OSSL_ASYM_CIPHER_PARAM_MGF1_DIGEST)) &&
++        !OSSL_PARAM_set_utf8_string(p, c->mgf1Digest.empty() ? c->oaepDigest.c_str() : c->mgf1Digest.c_str()))
++        return 0;
++    if ((p = OSSL_PARAM_locate(params, OSSL_ASYM_CIPHER_PARAM_OAEP_LABEL)) && !OSSL_PARAM_set_octet_ptr(p, nullptr, 0))
++        return 0;
++    if ((p = OSSL_PARAM_locate(params, OSSL_ASYM_CIPHER_PARAM_TLS_CLIENT_VERSION)) &&
++        !OSSL_PARAM_set_uint(p, c->clientVersion))
++        return 0;
++    if ((p = OSSL_PARAM_locate(params, OSSL_ASYM_CIPHER_PARAM_TLS_NEGOTIATED_VERSION)) &&
++        !OSSL_PARAM_set_uint(p, c->altVersion))
++        return 0;
++#ifdef OSSL_ASYM_CIPHER_PARAM_IMPLICIT_REJECTION
++    if ((p = OSSL_PARAM_locate(params, OSSL_ASYM_CIPHER_PARAM_IMPLICIT_REJECTION)) && !OSSL_PARAM_set_uint(p, 0))
++        return 0;
++#endif
++    return 1;
++}
++
++static const OSSL_PARAM *ac_gettable_ctx_params(void *, void *)
++{
++    static const OSSL_PARAM types[] = {OSSL_PARAM_utf8_string(OSSL_ASYM_CIPHER_PARAM_PAD_MODE, nullptr, 0),
++                                       OSSL_PARAM_utf8_string(OSSL_ASYM_CIPHER_PARAM_OAEP_DIGEST, nullptr, 0),
++                                       OSSL_PARAM_utf8_string(OSSL_ASYM_CIPHER_PARAM_MGF1_DIGEST, nullptr, 0),
++                                       OSSL_PARAM_octet_ptr(OSSL_ASYM_CIPHER_PARAM_OAEP_LABEL, nullptr, 0),
++                                       OSSL_PARAM_uint(OSSL_ASYM_CIPHER_PARAM_TLS_CLIENT_VERSION, nullptr),
++                                       OSSL_PARAM_uint(OSSL_ASYM_CIPHER_PARAM_TLS_NEGOTIATED_VERSION, nullptr),
++#ifdef OSSL_ASYM_CIPHER_PARAM_IMPLICIT_REJECTION
++                                       OSSL_PARAM_uint(OSSL_ASYM_CIPHER_PARAM_IMPLICIT_REJECTION, nullptr),
++#endif
++                                       OSSL_PARAM_END};
++    return types;
++}
++
++//----------------------------------------------------------------------------
++// provider
++//----------------------------------------------------------------------------
++// Casting to void (*)(void) is how OSSL_DISPATCH stores every function.
++template<typename F> static void (*dispatchFn(F *f))(void)
++{
++    return reinterpret_cast<void (*)(void)>(f);
++}
++
++static const OSSL_DISPATCH kKeymgmtFunctions[] = {
++    {OSSL_FUNC_KEYMGMT_NEW, dispatchFn(km_new)},
++    {OSSL_FUNC_KEYMGMT_FREE, dispatchFn(km_free)},
++    {OSSL_FUNC_KEYMGMT_HAS, dispatchFn(km_has)},
++    {OSSL_FUNC_KEYMGMT_MATCH, dispatchFn(km_match)},
++    {OSSL_FUNC_KEYMGMT_IMPORT, dispatchFn(km_import)},
++    {OSSL_FUNC_KEYMGMT_IMPORT_TYPES, dispatchFn(km_import_types)},
++    {OSSL_FUNC_KEYMGMT_EXPORT, dispatchFn(km_export)},
++    {OSSL_FUNC_KEYMGMT_EXPORT_TYPES, dispatchFn(km_export_types)},
++    {OSSL_FUNC_KEYMGMT_GET_PARAMS, dispatchFn(km_get_params)},
++    {OSSL_FUNC_KEYMGMT_GETTABLE_PARAMS, dispatchFn(km_gettable_params)},
++    {OSSL_FUNC_KEYMGMT_QUERY_OPERATION_NAME, dispatchFn(km_query_operation_name)},
++    {OSSL_FUNC_KEYMGMT_DUP, dispatchFn(km_dup)},
++    {0, nullptr}};
++
++static const OSSL_DISPATCH kSignatureFunctions[] = {
++    {OSSL_FUNC_SIGNATURE_NEWCTX, dispatchFn(sig_newctx)},
++    {OSSL_FUNC_SIGNATURE_FREECTX, dispatchFn(sig_freectx)},
++    {OSSL_FUNC_SIGNATURE_DUPCTX, dispatchFn(sig_dupctx)},
++    {OSSL_FUNC_SIGNATURE_SIGN_INIT, dispatchFn(sig_sign_init)},
++    {OSSL_FUNC_SIGNATURE_SIGN, dispatchFn(sig_sign)},
++    {OSSL_FUNC_SIGNATURE_DIGEST_SIGN_INIT, dispatchFn(sig_digest_sign_init)},
++    {OSSL_FUNC_SIGNATURE_DIGEST_SIGN_UPDATE, dispatchFn(sig_digest_sign_update)},
++    {OSSL_FUNC_SIGNATURE_DIGEST_SIGN_FINAL, dispatchFn(sig_digest_sign_final)},
++    {OSSL_FUNC_SIGNATURE_SET_CTX_PARAMS, dispatchFn(sig_set_ctx_params)},
++    {OSSL_FUNC_SIGNATURE_SETTABLE_CTX_PARAMS, dispatchFn(sig_settable_ctx_params)},
++    {OSSL_FUNC_SIGNATURE_GET_CTX_PARAMS, dispatchFn(sig_get_ctx_params)},
++    {OSSL_FUNC_SIGNATURE_GETTABLE_CTX_PARAMS, dispatchFn(sig_gettable_ctx_params)},
++    {0, nullptr}};
++
++static const OSSL_DISPATCH kAsymCipherFunctions[] = {
++    {OSSL_FUNC_ASYM_CIPHER_NEWCTX, dispatchFn(ac_newctx)},
++    {OSSL_FUNC_ASYM_CIPHER_FREECTX, dispatchFn(ac_freectx)},
++    {OSSL_FUNC_ASYM_CIPHER_DUPCTX, dispatchFn(ac_dupctx)},
++    {OSSL_FUNC_ASYM_CIPHER_DECRYPT_INIT, dispatchFn(ac_decrypt_init)},
++    {OSSL_FUNC_ASYM_CIPHER_DECRYPT, dispatchFn(ac_decrypt)},
++    {OSSL_FUNC_ASYM_CIPHER_SET_CTX_PARAMS, dispatchFn(ac_set_ctx_params)},
++    {OSSL_FUNC_ASYM_CIPHER_SETTABLE_CTX_PARAMS, dispatchFn(ac_settable_ctx_params)},
++    {OSSL_FUNC_ASYM_CIPHER_GET_CTX_PARAMS, dispatchFn(ac_get_ctx_params)},
++    {OSSL_FUNC_ASYM_CIPHER_GETTABLE_CTX_PARAMS, dispatchFn(ac_gettable_ctx_params)},
++    {0, nullptr}};
++
++static const OSSL_ALGORITHM kKeymgmtAlgorithms[] = {
++    {kRsaNames, kPropDefinition, kKeymgmtFunctions, "RSA key held by a QCA keystore"},
++    {nullptr, nullptr, nullptr, nullptr}};
++
++static const OSSL_ALGORITHM kSignatureAlgorithms[] = {
++    {kRsaNames, kPropDefinition, kSignatureFunctions, "PKCS#1 v1.5 signature by a QCA keystore key"},
++    {nullptr, nullptr, nullptr, nullptr}};
++
++static const OSSL_ALGORITHM kAsymCipherAlgorithms[] = {
++    {kRsaNames, kPropDefinition, kAsymCipherFunctions, "RSA decryption by a QCA keystore key"},
++    {nullptr, nullptr, nullptr, nullptr}};
++
++static OSSL_FUNC_provider_query_operation_fn providerQuery;
++static OSSL_provider_init_fn                 providerInit;
++
++static const OSSL_ALGORITHM *providerQuery(void *, int operation_id, int *no_store)
++{
++    *no_store = 0;
++    switch (operation_id) {
++    case OSSL_OP_KEYMGMT:
++        return kKeymgmtAlgorithms;
++    case OSSL_OP_SIGNATURE:
++        return kSignatureAlgorithms;
++    case OSSL_OP_ASYM_CIPHER:
++        return kAsymCipherAlgorithms;
++    default:
++        return nullptr;
++    }
++}
++
++static int providerInit(const OSSL_CORE_HANDLE *, const OSSL_DISPATCH *, const OSSL_DISPATCH **out, void **provctx)
++{
++    // No teardown function and no state: nothing in this library is called after the
++    // provider is unloaded.
++    static const OSSL_DISPATCH functions[] = {{OSSL_FUNC_PROVIDER_QUERY_OPERATION, dispatchFn(providerQuery)},
++                                              {0, nullptr}};
++    static int                 context     = 0;
++    *out                                   = functions;
++    *provctx                               = &context;
++    return 1;
++}
++
++static std::mutex     s_providerLock;
++static OSSL_PROVIDER *s_provider = nullptr;
++static std::string    s_providerName;
++
++static bool loadProvider()
++{
++    std::lock_guard<std::mutex> locker(s_providerLock);
++    if (s_provider)
++        return true;
++    if (s_providerName.empty()) {
++        // OpenSSL keeps built-in provider registrations, with their init function, for the life of
++        // the process, and looks them up by name. This plugin may be unloaded and loaded again at
++        // another address, so the name carries the address of the init function: a later load
++        // never reaches a stale registration.
++        const std::string name =
++            "qca-keystore-" + QByteArray::number(reinterpret_cast<quintptr>(&providerInit), 16).toStdString();
++        if (!OSSL_PROVIDER_add_builtin(nullptr, name.c_str(), providerInit))
++            return false;
++        s_providerName = name;
++    }
++    s_provider = OSSL_PROVIDER_load(nullptr, s_providerName.c_str());
++    return s_provider != nullptr;
++}
++
++// Called when the plugin goes away, so that OpenSSL holds no function of this library.
++static void unloadProvider()
++{
++    std::lock_guard<std::mutex> locker(s_providerLock);
++    if (s_provider) {
++        OSSL_PROVIDER_unload(s_provider);
++        s_provider = nullptr;
++    }
++}
++
++} // namespace keystore
++
++// An EVP_PKEY whose private-key operations are performed by key, an RSA key of another QCA
++// provider. Returns nullptr if the key is not usable that way.
++static EVP_PKEY *createFromExisting(const RSAPrivateKey &key)
++{
++    if (key.isNull() || !keystore::loadProvider())
++        return nullptr;
++
++    const quint64 ticket   = keystore::addPending(key);
++    uint64_t      ticketId = ticket;
++    OSSL_PARAM params[] = {OSSL_PARAM_construct_uint64(keystore::kTicketParam, &ticketId), OSSL_PARAM_construct_end()};
++
++    EVP_PKEY     *pkey = nullptr;
++    EvpPkeyCtxPtr ctx(EVP_PKEY_CTX_new_from_name(nullptr, "RSA", keystore::kPropQuery));
++    if (!ctx || EVP_PKEY_fromdata_init(ctx.get()) <= 0 ||
++        EVP_PKEY_fromdata(ctx.get(), &pkey, EVP_PKEY_KEYPAIR, params) <= 0)
++        pkey = nullptr;
++
++    keystore::takePending(ticket); // in case the key manager did not take it
++    return pkey;
+ }
+ 
+ //----------------------------------------------------------------------------
+@@ -3520,8 +4705,8 @@
+         BN_free(bn);
+ 
+         // validity period
+-        ASN1_TIME_set(X509_get_notBefore(x), opts.notValidBefore().toSecsSinceEpoch());
+-        ASN1_TIME_set(X509_get_notAfter(x), opts.notValidAfter().toSecsSinceEpoch());
++        ASN1_TIME_set(X509_getm_notBefore(x), opts.notValidBefore().toSecsSinceEpoch());
++        ASN1_TIME_set(X509_getm_notAfter(x), opts.notValidAfter().toSecsSinceEpoch());
+ 
+         // public key
+         X509_set_pubkey(x, pk);
+@@ -3646,7 +4831,7 @@
+         X509_verify_cert(ctx);
+ 
+         // grab the chain, which may not be fully populated
+-        STACK_OF(X509) *chain = X509_STORE_CTX_get_chain(ctx);
++        STACK_OF(X509) *chain = X509_STORE_CTX_get0_chain(ctx);
+ 
+         bool ok = false;
+ 
+@@ -3693,8 +4878,8 @@
+             p.serial.fromString(str);
+         }
+ 
+-        p.start = ASN1_UTCTIME_QDateTime(X509_get_notBefore(x), nullptr);
+-        p.end   = ASN1_UTCTIME_QDateTime(X509_get_notAfter(x), nullptr);
++        p.start = ASN1_UTCTIME_QDateTime(X509_get0_notBefore(x), nullptr);
++        p.end   = ASN1_UTCTIME_QDateTime(X509_get0_notAfter(x), nullptr);
+ 
+         CertificateInfo subject, issuer;
+ 
+@@ -3925,8 +5110,8 @@
+         BN_free(bn);
+ 
+         // validity period
+-        ASN1_TIME_set(X509_get_notBefore(x), QDateTime::currentDateTimeUtc().toSecsSinceEpoch());
+-        ASN1_TIME_set(X509_get_notAfter(x), notValidAfter.toSecsSinceEpoch());
++        ASN1_TIME_set(X509_getm_notBefore(x), QDateTime::currentDateTimeUtc().toSecsSinceEpoch());
++        ASN1_TIME_set(X509_getm_notAfter(x), notValidAfter.toSecsSinceEpoch());
+ 
+         X509_set_pubkey(x, static_cast<const MyPKeyContext *>(req.subjectPublicKey())->get_pkey());
+         X509_set_subject_name(x, subjectName);
+@@ -4672,7 +5857,7 @@
+     X509_STORE_CTX_init(ctx, store, x, untrusted_list);
+ 
+     // this initializes the trusted certs
+-    X509_STORE_CTX_trusted_stack(ctx, trusted_list);
++    X509_STORE_CTX_set0_trusted_stack(ctx, trusted_list);
+ 
+     // verify!
+     int ret = X509_verify_cert(ctx);
+@@ -4746,7 +5931,7 @@
+     X509_STORE_CTX_init(ctx, store, x, untrusted_list);
+ 
+     // this initializes the trusted certs
+-    X509_STORE_CTX_trusted_stack(ctx, trusted_list);
++    X509_STORE_CTX_set0_trusted_stack(ctx, trusted_list);
+ 
+     // verify!
+     int ret = X509_verify_cert(ctx);
+@@ -4755,7 +5940,7 @@
+         err = X509_STORE_CTX_get_error(ctx);
+ 
+     // grab the chain, which may not be fully populated
+-    STACK_OF(X509) *xchain = X509_STORE_CTX_get_chain(ctx);
++    STACK_OF(X509) *xchain = X509_STORE_CTX_get0_chain(ctx);
+ 
+     // make sure the chain is what we expect.  the reason we need to do
+     //   this is because I don't think openssl cares about the order of
+@@ -4973,8 +6158,9 @@
+         : TLSContext(p, QStringLiteral("tls"))
+     {
+         if (!ssl_init) {
+-            SSL_library_init();
+-            SSL_load_error_strings();
++            // what SSL_library_init() and SSL_load_error_strings() expanded to
++            OPENSSL_init_ssl(0, nullptr);
++            OPENSSL_init_ssl(OPENSSL_INIT_LOAD_SSL_STRINGS | OPENSSL_INIT_LOAD_CRYPTO_STRINGS, nullptr);
+             ssl_init = true;
+         }
+ 
+@@ -5027,7 +6213,7 @@
+ 
+     QStringList supportedCipherSuites(const TLS::Version &version) const override
+     {
+-        OpenSSL_add_ssl_algorithms();
++        OPENSSL_init_ssl(0, nullptr); // was OpenSSL_add_ssl_algorithms()
+         SSL_CTX *ctx = nullptr;
+         switch (version) {
+ #ifndef OPENSSL_NO_SSL3_METHOD
+@@ -5161,6 +6347,12 @@
+ 
+     void update(const QByteArray &from_net, const QByteArray &from_app) override
+     {
++        if (!ssl) {
++            // start() failed (or the session was reset): there is nothing to feed
++            result_result = Error;
++            doResultsReady();
++            return;
++        }
+         if (mode == Active) {
+             bool ok = true;
+             if (!from_app.isEmpty())
+@@ -5182,7 +6374,7 @@
+     bool priv_startClient()
+     {
+         // serv = false;
+-        method = SSLv23_client_method();
++        method = TLS_client_method();
+         if (!init())
+             return false;
+         mode = Connect;
+@@ -5192,7 +6384,7 @@
+     bool priv_startServer()
+     {
+         // serv = true;
+-        method = SSLv23_server_method();
++        method = TLS_server_method();
+         if (!init())
+             return false;
+         mode = Accept;
+@@ -5486,6 +6678,18 @@
+         QMetaObject::invokeMethod(this, "resultsReady", Qt::QueuedConnection);
+     }
+ 
++    // Frees the half-built session of a failed init(). The pointers are cleared so that reset()
++    // (and the destructor) do not free them again.
++    void freeSsl()
++    {
++        SSL_free(ssl); // also frees the BIOs handed to it
++        ssl  = nullptr;
++        rbio = nullptr;
++        wbio = nullptr;
++        SSL_CTX_free(context);
++        context = nullptr;
++    }
++
+     bool init()
+     {
+         context = SSL_CTX_new(method);
+@@ -5524,8 +6728,9 @@
+         if (targetHostName.isEmpty() == false) {
+             // we have a target
+             // this might fail, but we ignore that for now
+-            char *hostname = targetHostName.toLatin1().data();
+-            SSL_set_tlsext_host_name(ssl, hostname);
++            // (the QByteArray must outlive the call: the pointer used to dangle)
++            const QByteArray hostname = targetHostName.toLatin1();
++            SSL_set_tlsext_host_name(ssl, hostname.constData());
+         }
+ #endif
+ 
+@@ -5543,34 +6748,59 @@
+ 
+             const PKeyContext *tmp_kc = static_cast<const PKeyContext *>(nkey.context());
+ 
++            bool keystoreKey = false;
+             if (!tmp_kc->sameProvider(this)) {
+                 // fprintf(stderr, "experimental: private key supplied by a different provider\n");
+ 
+                 // make a pkey pointing to the existing private key
+-                EVP_PKEY *pkey;
+-                pkey = EVP_PKEY_new();
+-                EVP_PKEY_assign_RSA(pkey, createFromExisting(nkey.toRSA()));
++                EVP_PKEY *pkey = nkey.isRSA() ? createFromExisting(nkey.toRSA()) : nullptr;
++                if (!pkey) {
++                    freeSsl();
++                    return false;
++                }
+ 
+                 // make a new private key object to hold it
+                 MyPKeyContext *pk = new MyPKeyContext(provider());
+                 PKeyBase      *k  = pk->pkeyToBase(pkey, true); // does an EVP_PKEY_free()
+                 pk->k             = k;
+                 nkey.change(pk);
++                keystoreKey = true;
+             }
+ 
+             const MyCertContext *cc = static_cast<const MyCertContext *>(cert.context());
+             const MyPKeyContext *kc = static_cast<const MyPKeyContext *>(nkey.context());
+ 
+             if (SSL_use_certificate(ssl, cc->item.cert) != 1) {
+-                SSL_free(ssl);
+-                SSL_CTX_free(context);
++                freeSsl();
+                 return false;
+             }
+             if (SSL_use_PrivateKey(ssl, kc->get_pkey()) != 1) {
+-                SSL_free(ssl);
+-                SSL_CTX_free(context);
++                freeSsl();
+                 return false;
+             }
++
++            if (keystoreKey) {
++                // The keystore key can only make PKCS#1 v1.5 signatures (see the keystore provider).
++                // TLS 1.3 allows only RSA-PSS for handshake signatures, and in TLS 1.2 our own
++                // signature algorithm must not be RSA-PSS either. The lists below restrict only what
++                // this side signs with; a server's certificate request keeps offering PSS.
++                static const char ownSigalgs[] = "RSA+SHA256:RSA+SHA384:RSA+SHA512";
++                static const char requestSigalgs[] =
++                    "ECDSA+SHA256:ECDSA+SHA384:ECDSA+SHA512:ed25519:ed448:"
++                    "rsa_pss_rsae_sha256:rsa_pss_rsae_sha384:rsa_pss_rsae_sha512:"
++                    "rsa_pss_pss_sha256:rsa_pss_pss_sha384:rsa_pss_pss_sha512:"
++                    "RSA+SHA256:RSA+SHA384:RSA+SHA512";
++                bool ok = SSL_set_max_proto_version(ssl, TLS1_2_VERSION) == 1;
++                if (serv) // the server signs from the general list; the client list is its request
++                    ok = ok && SSL_set1_sigalgs_list(ssl, ownSigalgs) == 1 &&
++                        SSL_set1_client_sigalgs_list(ssl, requestSigalgs) == 1;
++                else // the client signs from the client list
++                    ok = ok && SSL_set1_client_sigalgs_list(ssl, ownSigalgs) == 1;
++                if (!ok) {
++                    freeSsl();
++                    return false;
++                }
++            }
+         }
+ 
+         // request a certificate from the client, if in server mode
+@@ -5591,12 +6821,17 @@
+             CertificateChain chain;
+ 
+             if (serv) {
+-                X509          *x  = SSL_get_peer_certificate(ssl);
+-                MyCertContext *cc = new MyCertContext(provider());
+-                cc->fromX509(x);
+-                Certificate cert;
+-                cert.change(cc);
+-                chain += cert;
++                // SSL_get_peer_certificate() also returned a new reference, which was leaked.
++                // A client that sends no certificate leaves an empty chain and no certificate.
++                X509 *x = SSL_get1_peer_certificate(ssl);
++                if (x) {
++                    MyCertContext *cc = new MyCertContext(provider());
++                    cc->fromX509(x); // takes its own reference
++                    X509_free(x);
++                    Certificate cert;
++                    cert.change(cc);
++                    chain += cert;
++                }
+             }
+ 
+             for (int n = 0; n < sk_X509_num(x_chain); ++n) {
+@@ -5608,6 +6843,11 @@
+                 chain += cert;
+             }
+ 
++            if (chain.isEmpty()) { // a client without a certificate
++                peercert = Certificate();
++                vr       = code;
++                return;
++            }
+             peercert = chain.primary();
+ 
+ #ifdef Q_OS_MAC
+@@ -5949,9 +7189,12 @@
+                 // fprintf(stderr, "experimental: private key supplied by a different provider\n");
+ 
+                 // make a pkey pointing to the existing private key
+-                EVP_PKEY *pkey;
+-                pkey = EVP_PKEY_new();
+-                EVP_PKEY_assign_RSA(pkey, createFromExisting(key.toRSA()));
++                EVP_PKEY *pkey = key.isRSA() ? createFromExisting(key.toRSA()) : nullptr;
++                if (!pkey) {
++                    // reported like a failed signature: no output
++                    QMetaObject::invokeMethod(this, "updated", Qt::QueuedConnection);
++                    return;
++                }
+ 
+                 // make a new private key object to hold it
+                 MyPKeyContext *pk = new MyPKeyContext(provider());
+@@ -6182,6 +7425,17 @@
+                 Certificate      cert  = chain.primary();
+                 PrivateKey       key   = cms->privateKeys[n].x509PrivateKey();
+ 
++                // a key of another provider (a keystore key) decrypts through the keystore
++                // provider, as for signing; it used to be cast to this plugin's key type
++                if (!static_cast<const PKeyContext *>(key.context())->sameProvider(this)) {
++                    EVP_PKEY *pkey = key.isRSA() ? createFromExisting(key.toRSA()) : nullptr;
++                    if (!pkey)
++                        continue;
++                    MyPKeyContext *pk = new MyPKeyContext(provider());
++                    pk->k             = pk->pkeyToBase(pkey, true); // does an EVP_PKEY_free()
++                    key.change(pk);
++                }
++
+                 MyCertContext *cc = static_cast<MyCertContext *>(cert.context());
+                 MyPKeyContext *kc = static_cast<MyPKeyContext *>(key.context());
+ 
+@@ -6319,7 +7573,7 @@
+     {
+         m_cryptoAlgorithm = algorithm;
+         m_context         = EVP_CIPHER_CTX_new();
+-        EVP_CIPHER_CTX_init(m_context);
++        EVP_CIPHER_CTX_reset(m_context); // was EVP_CIPHER_CTX_init()
+         m_pad  = pad;
+         m_type = type;
+     }
+@@ -6338,7 +7592,7 @@
+ 
+     ~opensslCipherContext() override
+     {
+-        EVP_CIPHER_CTX_cleanup(m_context);
++        EVP_CIPHER_CTX_reset(m_context); // was EVP_CIPHER_CTX_cleanup()
+         EVP_CIPHER_CTX_free(m_context);
+     }
+ 
+@@ -6674,8 +7928,6 @@
+     opensslProvider()
+     {
+         openssl_initted = false;
+-// OPENSSL_VERSION_MAJOR is only defined in openssl3
+-#ifdef OPENSSL_VERSION_MAJOR
+         /* Activating a provider explicitly disables the implicit loading of
+            the default one, so make sure it is present before asking for the
+            legacy provider below. Loading it again is a no-op. */
+@@ -6685,15 +7937,13 @@
+         if (OSSL_PROVIDER_try_load(nullptr, "legacy", 1)) {
+             s_legacyProviderAvailable = true;
+         }
+-#else
+-        s_legacyProviderAvailable = true;
+-#endif
+     }
+ 
+     void init() override
+     {
+-        OpenSSL_add_all_algorithms();
+-        ERR_load_crypto_strings();
++        // what OpenSSL_add_all_algorithms() and ERR_load_crypto_strings() expanded to
++        OPENSSL_init_crypto(OPENSSL_INIT_ADD_ALL_CIPHERS | OPENSSL_INIT_ADD_ALL_DIGESTS, nullptr);
++        OPENSSL_init_crypto(OPENSSL_INIT_LOAD_CRYPTO_STRINGS, nullptr);
+ 
+         // seed the RNG if it's not seeded yet
+         if (RAND_status() == 0) {
+@@ -6709,6 +7959,11 @@
+ 
+     ~opensslProvider() override
+     {
++        // The keystore key provider's functions live in this plugin, which may be unloaded next.
++        // Every key of that provider belongs to a TLS or CMS context of this plugin, and those are
++        // gone by now.
++        keystore::unloadProvider();
++
+         // FIXME: ?  for now we never deinit, in case other libs/code
+         //   are using openssl
+         /*if(!openssl_initted)
+diff -ruN a/plugins/qca-ossl/README b/plugins/qca-ossl/README
+--- a/plugins/qca-ossl/README	2026-08-28 06:28:47.000000000 -0400
++++ b/plugins/qca-ossl/README	2026-10-08 18:22:19.880964919 -0400
+@@ -19,7 +19,7 @@
+ * CMS (for S/MIME)
+ 
+ Requirements:
+-  OpenSSL Library (http://www.openssl.org/)
++  OpenSSL Library 3.0 or later (http://www.openssl.org/)
+ 
+ Installing
+ ----------
+diff -ruN a/unittest/CMakeLists.txt b/unittest/CMakeLists.txt
+--- a/unittest/CMakeLists.txt	2026-08-28 06:28:47.000000000 -0400
++++ b/unittest/CMakeLists.txt	2026-10-08 18:22:19.881014408 -0400
+@@ -38,4 +38,5 @@
+ find_package(OpenSSL 1.1.1)
+ if(OPENSSL_FOUND)
+   add_subdirectory(cms)
++  add_subdirectory(keystorekey)
+ endif()
+diff -ruN a/unittest/dsaunittest/dsaunittest.cpp b/unittest/dsaunittest/dsaunittest.cpp
+--- a/unittest/dsaunittest/dsaunittest.cpp	2026-08-28 06:28:47.000000000 -0400
++++ b/unittest/dsaunittest/dsaunittest.cpp	2026-10-08 18:22:19.881092406 -0400
+@@ -38,6 +38,9 @@
+     void initTestCase();
+     void cleanupTestCase();
+     void testdsa();
++    void testGroups_data();
++    void testGroups();
++    void testImportExport();
+ 
+ private:
+     QCA::Initializer *m_init;
+@@ -112,6 +115,151 @@
+     QVERIFY(dsaKey == fromDERkey);
+ }
+ 
++Q_DECLARE_METATYPE(QCA::DLGroupSet)
++
++static QString hexOf(const QCA::BigInteger &b)
++{
++    return QCA::arrayToHex(b.toArray().toByteArray());
++}
++
++static QString sha1Of(const QCA::BigInteger &b)
++{
++    return QCA::Hash(QStringLiteral("sha1")).hashToString(b.toArray());
++}
++
++void DSAUnitTest::testGroups_data()
++{
++    QTest::addColumn<QCA::DLGroupSet>("set");
++    QTest::addColumn<int>("bits");
++    QTest::addColumn<QString>("p");
++    QTest::addColumn<QString>("q");
++    QTest::addColumn<QString>("g");
++
++    // The JCE groups, regenerated from their FIPS 186-2 seeds and counters. The 1024-bit group is
++    // the well-known JCE default; the others are pinned by the SHA-1 of their (signed) encoding.
++    QTest::newRow("DSA_512") << QCA::DSA_512 << 512 << QStringLiteral("64ba6aae487ad849e700fb4f3222c8063c344560")
++                             << QStringLiteral("f6f4936f07569763e68f57f44098fdfdb764ff12")
++                             << QStringLiteral("3ec57e1217f59398ab2464a95a7660443b37f572");
++    QTest::newRow("DSA_768") << QCA::DSA_768 << 768 << QStringLiteral("da5fd48e051dd3ccd9115abee35a3ba80448b048")
++                             << QStringLiteral("b30d0a366f227c461fceefa1c09148fda44f9761")
++                             << QStringLiteral("33557f4c3e633825ae1a579624a0e7ee63268c93");
++    QTest::newRow("DSA_1024") << QCA::DSA_1024 << 1024
++                              << QStringLiteral(
++                                     "00fd7f53811d75122952df4a9c2eece4e7f611b7523cef4400c31e3f80b6512669455d40225"
++                                     "1fb593d8d58fabfc5f5ba30f6cb9b556cd7813b801d346ff26660b76b9950a5a49f9fe8047b"
++                                     "1022c24fbba9d7feb7c61bf83b57e7c6a8a6150f04fb83f6d3c51ec3023554135a169132f67"
++                                     "5f3ae2b61d72aeff22203199dd14801c7")
++                              << QStringLiteral("009760508f15230bccb292b982a2eb840bf0581cf5")
++                              << QStringLiteral(
++                                     "00f7e1a085d69b3ddecbbcab5c36b857b97994afbbfa3aea82f9574c0b3d0782675159578eb"
++                                     "ad4594fe67107108180b449167123e84c281613b7cf09328cc8a6e13c167a8b547c8d28e0a3"
++                                     "ae1e2bb3a675916ea37f0bfa213562f1fb627a01243bcca4f1bea8519089a883dfe15ae59f0"
++                                     "6928b665e807b552564014c3bfecf492a");
++}
++
++// The groups come out as specified, and keys generated in them sign and verify, also the 512
++// and 768-bit ones that OpenSSL 3 only generates keys for by the FIPS 186-2 rules.
++void DSAUnitTest::testGroups()
++{
++    const QString provider = QStringLiteral("qca-ossl");
++    if (!QCA::isSupported("pkey", provider) || !QCA::PKey::supportedTypes(provider).contains(QCA::PKey::DSA))
++        QSKIP("DSA not supported!");
++
++    QFETCH(QCA::DLGroupSet, set);
++    QFETCH(int, bits);
++    QFETCH(QString, p);
++    QFETCH(QString, q);
++    QFETCH(QString, g);
++
++    if (!QCA::DLGroup::supportedGroupSets(provider).contains(set))
++        QSKIP("group set not supported");
++
++    QCA::KeyGenerator keygen;
++    QCA::DLGroup      group = keygen.createDLGroup(set, provider);
++    QVERIFY(!group.isNull());
++    if (bits == 1024) {
++        QCOMPARE(hexOf(group.p()), p);
++        QCOMPARE(hexOf(group.q()), q);
++        QCOMPARE(hexOf(group.g()), g);
++    } else {
++        QCOMPARE(sha1Of(group.p()), p);
++        QCOMPARE(sha1Of(group.q()), q);
++        QCOMPARE(sha1Of(group.g()), g);
++    }
++
++    QCA::DSAPrivateKey key = keygen.createDSA(group, provider).toDSA();
++    QVERIFY(!key.isNull());
++    QCOMPARE(key.bitSize(), bits);
++    QCOMPARE(key.domain().p(), group.p());
++    QCOMPARE(key.domain().q(), group.q());
++    QCOMPARE(key.domain().g(), group.g());
++
++    const QCA::SecureArray message("DSA group test");
++    QCA::DSAPublicKey      pub = key.toPublicKey().toDSA();
++    const QByteArray       sig = key.signMessage(message, QCA::EMSA1_SHA1);
++    QCOMPARE(sig.size(), 40); // IEEE 1363: r and s, 20 bytes each
++    QVERIFY(pub.verifyMessage(message, sig, QCA::EMSA1_SHA1));
++    QVERIFY(!pub.verifyMessage(QCA::SecureArray("another message"), sig, QCA::EMSA1_SHA1));
++}
++
++// Keys built from their components work like the generated key they came from
++void DSAUnitTest::testImportExport()
++{
++    const QString provider = QStringLiteral("qca-ossl");
++    if (!QCA::isSupported("pkey", provider) || !QCA::PKey::supportedTypes(provider).contains(QCA::PKey::DSA))
++        QSKIP("DSA not supported!");
++    if (!QCA::DLGroup::supportedGroupSets(provider).contains(QCA::DSA_1024))
++        QSKIP("DSA_1024 discrete logarithm group sets not supported!");
++
++    QCA::KeyGenerator  keygen;
++    QCA::DLGroup       group = keygen.createDLGroup(QCA::DSA_1024, provider);
++    QCA::DSAPrivateKey orig  = keygen.createDSA(group, provider).toDSA();
++    QVERIFY(!orig.isNull());
++    QCA::DSAPublicKey origPub = orig.toPublicKey().toDSA();
++
++    const QCA::DLGroup    domain = orig.domain();
++    const QCA::BigInteger y = orig.y(), x = orig.x();
++    QCOMPARE(origPub.y(), y);
++    QCOMPARE(origPub.domain().p(), group.p());
++    QCOMPARE(origPub.domain().q(), group.q());
++    QCOMPARE(origPub.domain().g(), group.g());
++
++    QCA::DSAPrivateKey imported(domain, y, x, provider);
++    QVERIFY(!imported.isNull());
++    QVERIFY(imported.isPrivate());
++    QCOMPARE(imported.bitSize(), 1024);
++    QCOMPARE(imported.y(), y);
++    QCOMPARE(imported.x(), x);
++    QCOMPARE(imported.domain().p(), group.p());
++    QCOMPARE(imported.domain().q(), group.q());
++    QCOMPARE(imported.domain().g(), group.g());
++
++    const QCA::SecureArray message("import and export");
++    const QByteArray       sig = imported.signMessage(message, QCA::EMSA1_SHA1);
++    QVERIFY(origPub.verifyMessage(message, sig, QCA::EMSA1_SHA1));
++    const QByteArray derSig = imported.signMessage(message, QCA::EMSA1_SHA1, QCA::DERSequence);
++    QVERIFY(origPub.verifyMessage(message, derSig, QCA::EMSA1_SHA1, QCA::DERSequence));
++
++    QCA::DSAPublicKey pubFromComponents(domain, y, provider);
++    QVERIFY(!pubFromComponents.isNull());
++    QVERIFY(pubFromComponents.isPublic());
++    QCOMPARE(pubFromComponents.y(), y);
++    QVERIFY(pubFromComponents.verifyMessage(message, orig.signMessage(message, QCA::EMSA1_SHA1), QCA::EMSA1_SHA1));
++    QCOMPARE(pubFromComponents.toDER(), origPub.toDER());
++
++    // the public half keeps p, q and g with y
++    QCA::DSAPublicKey converted = imported.toPublicKey().toDSA();
++    QVERIFY(!converted.isNull());
++    QVERIFY(converted.isPublic());
++    QVERIFY(!converted.isPrivate());
++    QCOMPARE(converted.y(), y);
++    QCOMPARE(converted.domain().p(), group.p());
++    QCOMPARE(converted.domain().q(), group.q());
++    QCOMPARE(converted.domain().g(), group.g());
++    QVERIFY(converted.verifyMessage(message, sig, QCA::EMSA1_SHA1));
++    QCOMPARE(converted.toDER(), origPub.toDER());
++}
++
+ QTEST_MAIN(DSAUnitTest)
+ 
+ #include "dsaunittest.moc"
+diff -ruN a/unittest/keygenunittest/keygenunittest.cpp b/unittest/keygenunittest/keygenunittest.cpp
+--- a/unittest/keygenunittest/keygenunittest.cpp	2026-08-28 06:28:47.000000000 -0400
++++ b/unittest/keygenunittest/keygenunittest.cpp	2026-10-08 18:22:19.881169794 -0400
+@@ -41,6 +41,8 @@
+     void testDSA();
+     void testDH();
+     void testDHDeriveKey();
++    void testDHImportExport();
++    void testDHSharedSecretLength();
+ 
+ private:
+     QCA::Initializer *m_init;
+@@ -175,6 +177,90 @@
+     QCOMPARE(shared, otherSide);
+ }
+ 
++// DH keys built from their components agree with the generated keys they came from
++void KeyGenUnitTest::testDHImportExport()
++{
++    QCA::KeyGenerator keygen;
++
++    if (!QCA::isSupported("pkey") || !QCA::PKey::supportedTypes().contains(QCA::PKey::DH))
++        QSKIP("DH not supported!");
++
++    const QList<QCA::DLGroupSet> sets = {QCA::IETF_1024, QCA::IETF_2048};
++    for (QCA::DLGroupSet set : sets) {
++        const QCA::DLGroup group = keygen.createDLGroup(set);
++        QCOMPARE(group.isNull(), false);
++        QCOMPARE(group.q(), QCA::BigInteger(0)); // DH groups are (p, g)
++
++        QCA::DHPrivateKey a = keygen.createDH(group).toDH();
++        QCA::DHPrivateKey b = keygen.createDH(group).toDH();
++        QCOMPARE(a.isNull(), false);
++        QCOMPARE(b.isNull(), false);
++        QCOMPARE(a.domain().p(), group.p());
++        QCOMPARE(a.domain().g(), group.g());
++
++        QCA::DHPrivateKey imported(a.domain(), a.y(), a.x());
++        QCOMPARE(imported.isNull(), false);
++        QVERIFY(imported.isPrivate());
++        QCOMPARE(imported.bitSize(), a.bitSize());
++        QCOMPARE(imported.x(), a.x());
++        QCOMPARE(imported.y(), a.y());
++        QCOMPARE(imported.domain().p(), group.p());
++        QCOMPARE(imported.domain().g(), group.g());
++
++        QCA::DHPublicKey bPub(b.domain(), b.y());
++        QCOMPARE(bPub.isNull(), false);
++        QVERIFY(bPub.isPublic());
++        QCOMPARE(bPub.y(), b.y());
++
++        const QCA::SymmetricKey shared = imported.deriveKey(bPub);
++        QCOMPARE(shared.isEmpty(), false);
++        QCOMPARE(shared, a.deriveKey(b.toPublicKey()));
++        QCOMPARE(shared, b.deriveKey(imported.toPublicKey()));
++
++        // the public half keeps the domain and y
++        QCA::DHPublicKey converted = imported.toPublicKey().toDH();
++        QCOMPARE(converted.isNull(), false);
++        QVERIFY(converted.isPublic());
++        QCOMPARE(converted.y(), a.y());
++        QCOMPARE(converted.domain().p(), group.p());
++        QCOMPARE(converted.domain().g(), group.g());
++        QCOMPARE(b.deriveKey(converted), shared);
++    }
++}
++
++// The shared secret is the plain DH value, without leading zero bytes (DH_compute_key(), not
++// the padded variant): about one secret in 256 is shorter than p.
++void KeyGenUnitTest::testDHSharedSecretLength()
++{
++    QCA::KeyGenerator keygen;
++
++    if (!QCA::isSupported("pkey") || !QCA::PKey::supportedTypes().contains(QCA::PKey::DH))
++        QSKIP("DH not supported!");
++
++    const QCA::DLGroup group = keygen.createDLGroup(QCA::IETF_1024);
++    QCOMPARE(group.isNull(), false);
++    const int pBytes = 128;
++
++    QCA::PrivateKey a = keygen.createDH(group);
++    QCOMPARE(a.isNull(), false);
++    const QCA::PublicKey aPub = a.toPublicKey();
++
++    bool sawShort = false;
++    for (int i = 0; i < 4000 && !sawShort; ++i) {
++        QCA::PrivateKey b = keygen.createDH(group);
++        QCOMPARE(b.isNull(), false);
++        const QCA::SymmetricKey shared = a.deriveKey(b.toPublicKey());
++        QVERIFY(!shared.isEmpty());
++        QVERIFY(shared.size() <= pBytes);
++        QVERIFY(shared[0] != 0); // never zero-padded
++        if (shared.size() < pBytes) {
++            sawShort = true;
++            QCOMPARE(b.deriveKey(aPub), shared);
++        }
++    }
++    QVERIFY(sawShort);
++}
++
+ QTEST_MAIN(KeyGenUnitTest)
+ 
+ #include "keygenunittest.moc"
+diff -ruN a/unittest/keystorekey/CMakeLists.txt b/unittest/keystorekey/CMakeLists.txt
+--- a/unittest/keystorekey/CMakeLists.txt	1969-12-31 19:00:00.000000000 -0500
++++ b/unittest/keystorekey/CMakeLists.txt	2026-10-08 18:22:19.881234636 -0400
+@@ -0,0 +1,11 @@
++ENABLE_TESTING()
++
++set(keystorekeyunittest_bin_SRCS keystorekeyunittest.cpp)
++
++add_executable(keystorekeyunittest ${keystorekeyunittest_bin_SRCS} )
++
++target_link_qca_test_libraries(keystorekeyunittest)
++# a plain OpenSSL TLS client drives the RSA key exchange case
++target_link_libraries(keystorekeyunittest OpenSSL::SSL OpenSSL::Crypto)
++
++add_qca_test(keystorekeyunittest "KeystoreKey")
+diff -ruN a/unittest/keystorekey/keystorekeyunittest.cpp b/unittest/keystorekey/keystorekeyunittest.cpp
+--- a/unittest/keystorekey/keystorekeyunittest.cpp	1969-12-31 19:00:00.000000000 -0500
++++ b/unittest/keystorekey/keystorekeyunittest.cpp	2026-10-08 18:22:19.881357559 -0400
+@@ -0,0 +1,633 @@
++/**
++ * Copyright (C)  2026  The VeridianOS project
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ *
++ * 1. Redistributions of source code must retain the above copyright
++ *   notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *   notice, this list of conditions and the following disclaimer in the
++ *   documentation and/or other materials provided with the distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE AUTHOR ``AS IS'' AND ANY EXPRESS OR
++ * IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES
++ * OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.
++ * IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY DIRECT, INDIRECT,
++ * INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT
++ * NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
++ * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
++ * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
++ * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
++ * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++// qca-ossl with a private key that belongs to another QCA provider, as a smart card or PKCS#11
++// key reached through a keystore does: TLS (server and client authentication, RSA key exchange)
++// and CMS (signing, decryption) must hand every private-key operation to that provider.
++
++#include <QTest>
++#include <QtCrypto>
++#include <qcaprovider.h>
++
++#include <openssl/err.h>
++#include <openssl/ssl.h>
++
++#include <atomic>
++
++#ifdef QT_STATICPLUGIN
++#include "import_plugins.h"
++#endif
++
++namespace {
++
++struct Counters
++{
++    std::atomic<int> sign {0};
++    std::atomic<int> decrypt {0};
++
++    void reset()
++    {
++        sign    = 0;
++        decrypt = 0;
++    }
++};
++
++// Stands in for a keystore provider. Its keys are never handed to OpenSSL.
++class KeystoreProvider : public QCA::Provider
++{
++public:
++    int qcaVersion() const override
++    {
++        return QCA_VERSION;
++    }
++
++    QString name() const override
++    {
++        return QStringLiteral("keystore-test");
++    }
++
++    QStringList features() const override
++    {
++        return QStringList();
++    }
++
++    Provider::Context *createContext(const QString &) override
++    {
++        return nullptr;
++    }
++};
++
++// An RSA key of the keystore: only n and e are known outside; signing and decryption are done
++// here (by an ordinary qca-ossl key standing in for the token) and counted.
++class KeystoreRSAContext : public QCA::RSAContext
++{
++    Q_OBJECT
++public:
++    KeystoreRSAContext(QCA::Provider *p, const QCA::RSAPrivateKey &inner, Counters *counters)
++        : QCA::RSAContext(p)
++        , m_inner(inner)
++        , m_counters(counters)
++    {
++    }
++
++    KeystoreRSAContext(const KeystoreRSAContext &from)
++        : QCA::RSAContext(from.provider())
++        , m_inner(from.m_inner)
++        , m_counters(from.m_counters)
++    {
++    }
++
++    QCA::Provider::Context *clone() const override
++    {
++        return new KeystoreRSAContext(*this);
++    }
++
++    bool isNull() const override
++    {
++        return m_inner.isNull();
++    }
++
++    QCA::PKey::Type type() const override
++    {
++        return QCA::PKey::RSA;
++    }
++
++    bool isPrivate() const override
++    {
++        return true;
++    }
++
++    bool canExport() const override
++    {
++        return false;
++    }
++
++    void convertToPublic() override
++    {
++    }
++
++    int bits() const override
++    {
++        return m_inner.bitSize();
++    }
++
++    int maximumEncryptSize(QCA::EncryptionAlgorithm alg) const override
++    {
++        return m_inner.maximumEncryptSize(alg);
++    }
++
++    bool decrypt(const QCA::SecureArray &in, QCA::SecureArray *out, QCA::EncryptionAlgorithm alg) override
++    {
++        ++m_counters->decrypt;
++        return m_inner.decrypt(in, out, alg);
++    }
++
++    void startSign(QCA::SignatureAlgorithm alg, QCA::SignatureFormat format) override
++    {
++        m_alg    = alg;
++        m_format = format;
++        m_data.clear();
++    }
++
++    void update(const QCA::MemoryRegion &in) override
++    {
++        m_data += in.toByteArray();
++    }
++
++    QByteArray endSign() override
++    {
++        ++m_counters->sign;
++        return m_inner.signMessage(m_data, m_alg, m_format);
++    }
++
++    void createPrivate(int, int, bool) override
++    {
++    }
++
++    void createPrivate(const QCA::BigInteger &,
++                       const QCA::BigInteger &,
++                       const QCA::BigInteger &,
++                       const QCA::BigInteger &,
++                       const QCA::BigInteger &) override
++    {
++    }
++
++    void createPublic(const QCA::BigInteger &, const QCA::BigInteger &) override
++    {
++    }
++
++    QCA::BigInteger n() const override
++    {
++        return m_inner.n();
++    }
++
++    QCA::BigInteger e() const override
++    {
++        return m_inner.e();
++    }
++
++    // the private components stay in the keystore
++    QCA::BigInteger p() const override
++    {
++        return QCA::BigInteger();
++    }
++
++    QCA::BigInteger q() const override
++    {
++        return QCA::BigInteger();
++    }
++
++    QCA::BigInteger d() const override
++    {
++        return QCA::BigInteger();
++    }
++
++private:
++    QCA::RSAPrivateKey      m_inner;
++    Counters               *m_counters;
++    QCA::SignatureAlgorithm m_alg    = QCA::SignatureUnknown;
++    QCA::SignatureFormat    m_format = QCA::DefaultFormat;
++    QByteArray              m_data;
++};
++
++class KeystorePKeyContext : public QCA::PKeyContext
++{
++    Q_OBJECT
++public:
++    KeystorePKeyContext(QCA::Provider *p)
++        : QCA::PKeyContext(p)
++    {
++    }
++
++    ~KeystorePKeyContext() override
++    {
++        delete m_key;
++    }
++
++    QCA::Provider::Context *clone() const override
++    {
++        KeystorePKeyContext *c = new KeystorePKeyContext(provider());
++        c->m_key               = m_key ? static_cast<QCA::PKeyBase *>(m_key->clone()) : nullptr;
++        return c;
++    }
++
++    QList<QCA::PKey::Type> supportedTypes() const override
++    {
++        return QList<QCA::PKey::Type>() << QCA::PKey::RSA;
++    }
++
++    QList<QCA::PKey::Type> supportedIOTypes() const override
++    {
++        return QList<QCA::PKey::Type>();
++    }
++
++    QList<QCA::PBEAlgorithm> supportedPBEAlgorithms() const override
++    {
++        return QList<QCA::PBEAlgorithm>();
++    }
++
++    QCA::PKeyBase *key() override
++    {
++        return m_key;
++    }
++
++    const QCA::PKeyBase *key() const override
++    {
++        return m_key;
++    }
++
++    void setKey(QCA::PKeyBase *key) override
++    {
++        delete m_key;
++        m_key = key;
++    }
++
++    bool importKey(const QCA::PKeyBase *) override
++    {
++        return false;
++    }
++
++private:
++    QCA::PKeyBase *m_key = nullptr;
++};
++
++} // namespace
++
++class KeystoreKeyUnitTest : public QObject
++{
++    Q_OBJECT
++
++private Q_SLOTS:
++    void initTestCase();
++    void cleanupTestCase();
++    void tlsServerSignature();
++    void tlsClientSignature();
++    void tlsRsaKeyExchange();
++    void tlsKeyNotMatchingCertificate();
++    void cmsSign();
++    void cmsDecrypt();
++    void pluginReload();
++
++private:
++    void            createIdentity();
++    QCA::PrivateKey keystoreKey(const QCA::RSAPrivateKey &inner);
++    bool            handshake(QCA::TLS &client, QCA::TLS &server);
++    void            transfer(QCA::TLS &from, QCA::TLS &to);
++
++    QCA::Initializer          *m_init = nullptr;
++    KeystoreProvider           m_provider;
++    Counters                   m_counters;
++    QCA::RSAPrivateKey         m_key;
++    QCA::Certificate           m_cert;
++    QCA::CertificateCollection m_trusted;
++    bool                       m_supported = false;
++};
++
++static const QString kOssl = QStringLiteral("qca-ossl");
++
++void KeystoreKeyUnitTest::initTestCase()
++{
++    m_init      = new QCA::Initializer;
++    m_supported = QCA::isSupported("pkey", kOssl) && QCA::isSupported("cert", kOssl) &&
++        QCA::isSupported("tls", kOssl) && QCA::isSupported("cms", kOssl);
++    if (m_supported)
++        createIdentity();
++}
++
++void KeystoreKeyUnitTest::cleanupTestCase()
++{
++    m_trusted = QCA::CertificateCollection();
++    m_cert    = QCA::Certificate();
++    m_key     = QCA::RSAPrivateKey();
++    delete m_init;
++}
++
++// A self-signed certificate for a fresh RSA key, trusted by both ends
++void KeystoreKeyUnitTest::createIdentity()
++{
++    m_key = QCA::KeyGenerator().createRSA(2048, 65537, kOssl).toRSA();
++    QVERIFY(!m_key.isNull());
++
++    QCA::CertificateOptions opts;
++    QCA::CertificateInfo    info;
++    info.insert(QCA::CommonName, QStringLiteral("keystore.test"));
++    opts.setInfo(info);
++    QCA::Constraints constraints;
++    constraints << QCA::ConstraintType(QCA::DigitalSignature) << QCA::ConstraintType(QCA::KeyEncipherment)
++                << QCA::ConstraintType(QCA::ServerAuth) << QCA::ConstraintType(QCA::ClientAuth)
++                << QCA::ConstraintType(QCA::EmailProtection);
++    opts.setConstraints(constraints);
++    opts.setSerialNumber(QCA::BigInteger(1));
++    const QDateTime now = QDateTime::currentDateTimeUtc();
++    opts.setValidityPeriod(now.addDays(-1), now.addDays(1));
++
++    m_cert = QCA::Certificate(opts, m_key, kOssl);
++    QVERIFY(!m_cert.isNull());
++    m_trusted = QCA::CertificateCollection();
++    m_trusted.addCertificate(m_cert);
++}
++
++// A private key of the keystore provider that does its operations with inner
++QCA::PrivateKey KeystoreKeyUnitTest::keystoreKey(const QCA::RSAPrivateKey &inner)
++{
++    KeystorePKeyContext *ctx = new KeystorePKeyContext(&m_provider);
++    ctx->setKey(new KeystoreRSAContext(&m_provider, inner, &m_counters));
++    QCA::PrivateKey key;
++    key.change(ctx);
++    return key;
++}
++
++void KeystoreKeyUnitTest::transfer(QCA::TLS &from, QCA::TLS &to)
++{
++    const QByteArray data = from.readOutgoing();
++    if (!data.isEmpty())
++        to.writeIncoming(data);
++}
++
++bool KeystoreKeyUnitTest::handshake(QCA::TLS &client, QCA::TLS &server)
++{
++    for (int i = 0; i < 500 && !(client.isHandshaken() && server.isHandshaken()); ++i) {
++        transfer(client, server);
++        transfer(server, client);
++        QTest::qWait(1);
++    }
++    return client.isHandshaken() && server.isHandshaken();
++}
++
++// The server authenticates with a keystore key: it signs its (EC)DHE key exchange through it.
++void KeystoreKeyUnitTest::tlsServerSignature()
++{
++    if (!m_supported)
++        QSKIP("qca-ossl TLS/CMS not available");
++    m_counters.reset();
++
++    QCA::TLS server(nullptr, kOssl);
++    server.setCertificate(QCA::CertificateChain(m_cert), keystoreKey(m_key));
++    server.startServer();
++
++    QCA::TLS client(nullptr, kOssl);
++    client.setTrustedCertificates(m_trusted);
++    client.startClient(QStringLiteral("keystore.test"));
++
++    QVERIFY(handshake(client, server));
++    QVERIFY(m_counters.sign > 0);
++    QCOMPARE(m_counters.decrypt.load(), 0);
++    QCOMPARE(client.peerCertificateChain().primary(), m_cert);
++
++    client.write("from the client");
++    server.write("from the server");
++    for (int i = 0; i < 20; ++i) {
++        transfer(client, server);
++        transfer(server, client);
++        QTest::qWait(1);
++    }
++    QCOMPARE(server.read(), QByteArray("from the client"));
++    QCOMPARE(client.read(), QByteArray("from the server"));
++}
++
++// The client authenticates with a keystore key: it signs its CertificateVerify through it.
++void KeystoreKeyUnitTest::tlsClientSignature()
++{
++    if (!m_supported)
++        QSKIP("qca-ossl TLS/CMS not available");
++    m_counters.reset();
++
++    QCA::TLS server(nullptr, kOssl);
++    server.setCertificate(QCA::CertificateChain(m_cert), m_key);
++    server.setTrustedCertificates(m_trusted);
++    server.startServer();
++
++    QCA::TLS client(nullptr, kOssl);
++    client.setCertificate(QCA::CertificateChain(m_cert), keystoreKey(m_key));
++    client.setTrustedCertificates(m_trusted);
++    client.startClient(QStringLiteral("keystore.test"));
++
++    QVERIFY(handshake(client, server));
++    QVERIFY(m_counters.sign > 0);
++    QCOMPARE(server.peerCertificateChain().primary(), m_cert);
++    QCOMPARE(server.peerCertificateValidity(), QCA::ValidityGood);
++
++    client.write("authenticated");
++    for (int i = 0; i < 20; ++i) {
++        transfer(client, server);
++        transfer(server, client);
++        QTest::qWait(1);
++    }
++    QCOMPARE(server.read(), QByteArray("authenticated"));
++}
++
++// RSA key exchange: the server decrypts the premaster secret through the keystore key. The
++// client is plain OpenSSL, restricted to an RSA key exchange cipher suite.
++void KeystoreKeyUnitTest::tlsRsaKeyExchange()
++{
++    if (!m_supported)
++        QSKIP("qca-ossl TLS/CMS not available");
++    m_counters.reset();
++
++    QCA::TLS server(nullptr, kOssl);
++    server.setCertificate(QCA::CertificateChain(m_cert), keystoreKey(m_key));
++    server.startServer();
++
++    SSL_CTX *ctx = SSL_CTX_new(TLS_client_method());
++    QVERIFY(ctx);
++    QVERIFY(SSL_CTX_set_max_proto_version(ctx, TLS1_2_VERSION) == 1);
++    QVERIFY(SSL_CTX_set_cipher_list(ctx, "AES128-GCM-SHA256") == 1);
++    SSL *ssl = SSL_new(ctx);
++    QVERIFY(ssl);
++    BIO *toClient   = BIO_new(BIO_s_mem());
++    BIO *fromClient = BIO_new(BIO_s_mem());
++    SSL_set_bio(ssl, toClient, fromClient);
++    SSL_set_connect_state(ssl);
++
++    auto pump = [&]() {
++        QByteArray buf(16384, 0);
++        int        n;
++        while ((n = BIO_read(fromClient, buf.data(), buf.size())) > 0)
++            server.writeIncoming(buf.left(n));
++        const QByteArray reply = server.readOutgoing();
++        if (!reply.isEmpty())
++            BIO_write(toClient, reply.constData(), reply.size());
++        QTest::qWait(1);
++    };
++
++    for (int i = 0; i < 500 && !(SSL_is_init_finished(ssl) && server.isHandshaken()); ++i) {
++        SSL_do_handshake(ssl);
++        pump();
++    }
++    QVERIFY(SSL_is_init_finished(ssl));
++    QVERIFY(server.isHandshaken());
++    QCOMPARE(QByteArray(SSL_CIPHER_get_name(SSL_get_current_cipher(ssl))), QByteArray("AES128-GCM-SHA256"));
++    QVERIFY(m_counters.decrypt > 0);
++    QCOMPARE(m_counters.sign.load(), 0);
++
++    // the keys agree: data goes through both ways
++    QCOMPARE(SSL_write(ssl, "ping", 4), 4);
++    server.write("pong");
++    QByteArray received;
++    char       buf[16];
++    for (int i = 0; i < 20 && received.isEmpty(); ++i) {
++        pump();
++        const int n = SSL_read(ssl, buf, sizeof(buf));
++        if (n > 0)
++            received = QByteArray(buf, n);
++    }
++    QCOMPARE(received, QByteArray("pong"));
++    QCOMPARE(server.read(), QByteArray("ping"));
++
++    SSL_free(ssl);
++    SSL_CTX_free(ctx);
++}
++
++// A keystore key that is not the certificate's key is refused when the session starts.
++void KeystoreKeyUnitTest::tlsKeyNotMatchingCertificate()
++{
++    if (!m_supported)
++        QSKIP("qca-ossl TLS/CMS not available");
++    m_counters.reset();
++
++    QCA::RSAPrivateKey other = QCA::KeyGenerator().createRSA(2048, 65537, kOssl).toRSA();
++    QVERIFY(!other.isNull());
++
++    QCA::TLS server(nullptr, kOssl);
++    server.setCertificate(QCA::CertificateChain(m_cert), keystoreKey(other));
++    server.startServer();
++    for (int i = 0; i < 10; ++i)
++        QTest::qWait(1);
++    QCOMPARE(server.errorCode(), QCA::TLS::ErrorInit);
++
++    QCA::TLS client(nullptr, kOssl);
++    client.setTrustedCertificates(m_trusted);
++    client.startClient(QStringLiteral("keystore.test"));
++
++    QVERIFY(!handshake(client, server));
++    QCOMPARE(m_counters.sign.load(), 0);
++    QCOMPARE(m_counters.decrypt.load(), 0);
++}
++
++// CMS signature by a keystore key, verified with the certificate
++void KeystoreKeyUnitTest::cmsSign()
++{
++    if (!m_supported)
++        QSKIP("qca-ossl TLS/CMS not available");
++    m_counters.reset();
++
++    QCA::SecureMessageKey signer;
++    signer.setX509CertificateChain(QCA::CertificateChain(m_cert));
++    signer.setX509PrivateKey(keystoreKey(m_key));
++
++    const QByteArray   text("signed with a keystore key");
++    QCA::CMS           cms(nullptr, kOssl);
++    QCA::SecureMessage msg(&cms);
++    msg.setSigner(signer);
++    msg.startSign(QCA::SecureMessage::Message);
++    msg.update(text);
++    msg.end();
++    msg.waitForFinished(-1);
++    const QByteArray signedText = msg.read();
++    QVERIFY(!signedText.isEmpty());
++    QVERIFY(m_counters.sign > 0);
++
++    QCA::CMS verifier(nullptr, kOssl);
++    verifier.setTrustedCertificates(m_trusted);
++    QCA::SecureMessage check(&verifier);
++    check.startVerify();
++    check.update(signedText);
++    check.end();
++    check.waitForFinished(-1);
++    QVERIFY(check.wasSigned());
++    QVERIFY(check.verifySuccess());
++    // (qca-ossl does not return the content of a verified message)
++
++    // the signature covers the content
++    QByteArray tampered = signedText;
++    const int  at       = tampered.indexOf(text);
++    QVERIFY(at > 0);
++    tampered[at] = 'S';
++    QCA::SecureMessage checkTampered(&verifier);
++    checkTampered.startVerify();
++    checkTampered.update(tampered);
++    checkTampered.end();
++    checkTampered.waitForFinished(-1);
++    QVERIFY(!checkTampered.verifySuccess());
++}
++
++// CMS decryption by a keystore key
++void KeystoreKeyUnitTest::cmsDecrypt()
++{
++    if (!m_supported)
++        QSKIP("qca-ossl TLS/CMS not available");
++    m_counters.reset();
++
++    QCA::SecureMessageKey recipient;
++    recipient.setX509CertificateChain(QCA::CertificateChain(m_cert));
++
++    const QByteArray   text("for the keystore key only");
++    QCA::CMS           cms(nullptr, kOssl);
++    QCA::SecureMessage msg(&cms);
++    msg.setRecipient(recipient);
++    msg.startEncrypt();
++    msg.update(text);
++    msg.end();
++    msg.waitForFinished(-1);
++    const QByteArray encrypted = msg.read();
++    QVERIFY(!encrypted.isEmpty());
++
++    QCA::SecureMessageKey holder;
++    holder.setX509CertificateChain(QCA::CertificateChain(m_cert));
++    holder.setX509PrivateKey(keystoreKey(m_key));
++    QCA::CMS decryptor(nullptr, kOssl);
++    decryptor.setPrivateKeys(QCA::SecureMessageKeyList() << holder);
++    QCA::SecureMessage dec(&decryptor);
++    dec.startDecrypt();
++    dec.update(encrypted);
++    dec.end();
++    dec.waitForFinished(-1);
++    QCOMPARE(dec.read(), text);
++    QVERIFY(m_counters.decrypt > 0);
++}
++
++// The OpenSSL provider behind keystore keys lives in the plugin. Unloading and loading the
++// plugins again must leave OpenSSL with a working one.
++void KeystoreKeyUnitTest::pluginReload()
++{
++    if (!m_supported)
++        QSKIP("qca-ossl TLS/CMS not available");
++
++    // nothing of qca-ossl may outlive the plugin
++    m_trusted = QCA::CertificateCollection();
++    m_cert    = QCA::Certificate();
++    m_key     = QCA::RSAPrivateKey();
++    QCA::unloadAllPlugins();
++    QCA::scanForPlugins();
++    QVERIFY(QCA::isSupported("tls", kOssl));
++
++    createIdentity();
++    tlsServerSignature();
++    tlsClientSignature();
++}
++
++QTEST_MAIN(KeystoreKeyUnitTest)
++
++#include "keystorekeyunittest.moc"
+diff -ruN a/unittest/macunittest/macunittest.cpp b/unittest/macunittest/macunittest.cpp
+--- a/unittest/macunittest/macunittest.cpp	2026-08-28 06:28:47.000000000 -0400
++++ b/unittest/macunittest/macunittest.cpp	2026-10-08 18:22:19.881472716 -0400
+@@ -44,6 +44,7 @@
+     void HMACSHA384();
+     void HMACSHA512();
+     void HMACRMD160();
++    void HMACIncrementalCopy();
+ 
+ private:
+     QCA::Initializer *m_init;
+@@ -681,6 +682,57 @@
+     }
+ }
+ 
++// Data fed in pieces, a copy taken half way that then goes its own way, reuse after final(),
++// and an empty key.
++void MACUnitTest::HMACIncrementalCopy()
++{
++    const QString provider = QStringLiteral("qca-ossl");
++    if (!QCA::isSupported("hmac(sha256)", provider))
++        QSKIP("HMAC(SHA256) not supported for qca-ossl");
++
++    // RFC 4231 test case 2
++    const QString expected = QStringLiteral("5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843");
++    // the same key with " and more" appended to the data
++    const QString expectedLonger = QStringLiteral("286d5b971b51fae9efacd7945e815746e53c41b6e4b07c74baef37d71071f0bc");
++
++    QCA::MessageAuthenticationCode hmac(
++        QStringLiteral("hmac(sha256)"), QCA::SymmetricKey(QCA::SecureArray("Jefe")), provider);
++    hmac.update(QCA::SecureArray("what do "));
++    hmac.update(QCA::SecureArray("ya want"));
++
++    // the copy carries the key and the data so far
++    QCA::MessageAuthenticationCode copy = hmac;
++    copy.context(); // detach
++
++    hmac.update(QCA::SecureArray(" for nothing?"));
++    QCOMPARE(QCA::arrayToHex(hmac.final().toByteArray()), expected);
++
++    copy.update(QCA::SecureArray(" for "));
++    copy.update(QCA::SecureArray("nothing? and more"));
++    QCOMPARE(QCA::arrayToHex(copy.final().toByteArray()), expectedLonger);
++
++    // final() did not disturb the other one
++    QCOMPARE(QCA::arrayToHex(hmac.final().toByteArray()), expected);
++
++    // after clear() the same key is used again
++    hmac.clear();
++    hmac.update(QCA::SecureArray("what do ya want for nothing?"));
++    QCOMPARE(QCA::arrayToHex(hmac.final().toByteArray()), expected);
++
++    // a copy of a fresh object, with nothing fed yet
++    QCA::MessageAuthenticationCode fresh(
++        QStringLiteral("hmac(sha256)"), QCA::SymmetricKey(QCA::SecureArray("Jefe")), provider);
++    QCA::MessageAuthenticationCode freshCopy = fresh;
++    freshCopy.context(); // detach
++    freshCopy.update(QCA::SecureArray("what do ya want for nothing?"));
++    QCOMPARE(QCA::arrayToHex(freshCopy.final().toByteArray()), expected);
++
++    // empty key and empty data
++    QCA::MessageAuthenticationCode empty(QStringLiteral("hmac(sha256)"), QCA::SymmetricKey(), provider);
++    QCOMPARE(QCA::arrayToHex(empty.final().toByteArray()),
++             QStringLiteral("b613679a0814d9ec772f95d778c35fc5ff1697c493715653c6c712144292c5ad"));
++}
++
+ QTEST_MAIN(MACUnitTest)
+ 
+ #include "macunittest.moc"
+diff -ruN a/unittest/rsaunittest/rsaunittest.cpp b/unittest/rsaunittest/rsaunittest.cpp
+--- a/unittest/rsaunittest/rsaunittest.cpp	2026-08-28 06:28:47.000000000 -0400
++++ b/unittest/rsaunittest/rsaunittest.cpp	2026-10-08 18:22:19.881599476 -0400
+@@ -40,6 +40,9 @@
+     void testrsa();
+     void testAsymmetricEncryption_data();
+     void testAsymmetricEncryption();
++    void testRawPadding();
++    void testImportExport();
++    void testMissingExponent();
+ 
+ private:
+     QCA::Initializer *m_init;
+@@ -215,6 +218,198 @@
+     }
+ }
+ 
++static bool rsaSupported(const QString &provider)
++{
++    return QCA::isSupported("pkey", provider) && QCA::PKey::supportedTypes(provider).contains(QCA::PKey::RSA) &&
++        QCA::PKey::supportedIOTypes(provider).contains(QCA::PKey::RSA);
++}
++
++static int byteAt(const QCA::SecureArray &a, int i)
++{
++    return static_cast<unsigned char>(a[i]);
++}
++
++// The padding of every direction, looked at through raw (unpadded) RSA in the opposite direction
++void RSAUnitTest::testRawPadding()
++{
++    const QString provider = QStringLiteral("qca-ossl");
++    if (!rsaSupported(provider))
++        QSKIP("RSA not supported. skipping");
++
++    QCA::RSAPrivateKey priv = QCA::KeyGenerator().createRSA(1024, 65537, provider).toRSA();
++    QVERIFY(!priv.isNull());
++    QCA::RSAPublicKey pub = priv.toPublicKey().toRSA();
++    QVERIFY(!pub.isNull());
++
++    const int              modulusBytes = 128;
++    const QCA::SecureArray message("raw padding test");
++    const int              separator = modulusBytes - message.size() - 1; // index of the 00 before the message
++    QCA::SecureArray       block, plain;
++
++    // PKCS#1 v1.5 encryption: 00 02, nonzero random padding, 00, message
++    QCA::SecureArray cipher = pub.encrypt(message, QCA::EME_PKCS1v15);
++    QCOMPARE(cipher.size(), modulusBytes);
++    QVERIFY(priv.decrypt(cipher, &block, QCA::EME_NO_PADDING));
++    QCOMPARE(block.size(), modulusBytes);
++    QCOMPARE(byteAt(block, 0), 0);
++    QCOMPARE(byteAt(block, 1), 2);
++    for (int i = 2; i < separator; ++i)
++        QVERIFY(byteAt(block, i) != 0);
++    QCOMPARE(byteAt(block, separator), 0);
++    QCOMPARE(block.toByteArray().right(message.size()), message.toByteArray());
++
++    // OAEP: the encoded message starts with a zero byte and is otherwise unrecognisable
++    cipher = pub.encrypt(message, QCA::EME_PKCS1_OAEP);
++    QCOMPARE(cipher.size(), modulusBytes);
++    QVERIFY(priv.decrypt(cipher, &block, QCA::EME_NO_PADDING));
++    QCOMPARE(block.size(), modulusBytes);
++    QCOMPARE(byteAt(block, 0), 0);
++    QVERIFY(!block.toByteArray().contains(message.toByteArray()));
++    QVERIFY(priv.decrypt(cipher, &plain, QCA::EME_PKCS1_OAEP));
++    QCOMPARE(plain, message);
++
++    // PKCS#1 v1.5 with the private key (block type 1): 00 01, FF padding, 00, message
++    cipher = priv.encrypt(message, QCA::EME_PKCS1v15);
++    QCOMPARE(cipher.size(), modulusBytes);
++    QVERIFY(pub.decrypt(cipher, &block, QCA::EME_NO_PADDING));
++    QCOMPARE(block.size(), modulusBytes);
++    QCOMPARE(byteAt(block, 0), 0);
++    QCOMPARE(byteAt(block, 1), 1);
++    for (int i = 2; i < separator; ++i)
++        QCOMPARE(byteAt(block, i), 0xff);
++    QCOMPARE(byteAt(block, separator), 0);
++    QCOMPARE(block.toByteArray().right(message.size()), message.toByteArray());
++    QVERIFY(pub.decrypt(cipher, &plain, QCA::EME_PKCS1v15));
++    QCOMPARE(plain, message);
++
++    // OAEP has no private-key direction
++    QVERIFY(priv.encrypt(message, QCA::EME_PKCS1_OAEP).isEmpty());
++    QVERIFY(!pub.decrypt(cipher, &plain, QCA::EME_PKCS1_OAEP));
++
++    // there is no SSLv23 padding in OpenSSL 3
++    QVERIFY(pub.encrypt(message, QCA::EME_PKCS1v15_SSL).isEmpty());
++    QVERIFY(!priv.decrypt(cipher, &plain, QCA::EME_PKCS1v15_SSL));
++
++    // EMSA3_Raw signs the data itself: the same block type 1
++    const QByteArray rawSig = priv.signMessage(message, QCA::EMSA3_Raw);
++    QCOMPARE(rawSig.size(), modulusBytes);
++    QCOMPARE(QCA::SecureArray(rawSig), cipher);
++    QVERIFY(pub.verifyMessage(message, rawSig, QCA::EMSA3_Raw));
++    QVERIFY(!pub.verifyMessage(QCA::SecureArray("another message"), rawSig, QCA::EMSA3_Raw));
++
++    // EMSA3_SHA256 is EMSA3_Raw of the SHA-256 DigestInfo
++    const QByteArray digestInfo = QCA::hexToArray(QStringLiteral("3031300d060960864801650304020105000420")) +
++        QCA::Hash(QStringLiteral("sha256"), provider).hash(message).toByteArray();
++    const QByteArray sha256Sig = priv.signMessage(message, QCA::EMSA3_SHA256);
++    QCOMPARE(sha256Sig, priv.signMessage(digestInfo, QCA::EMSA3_Raw));
++    QVERIFY(pub.verifyMessage(digestInfo, sha256Sig, QCA::EMSA3_Raw));
++    QVERIFY(pub.verifyMessage(message, sha256Sig, QCA::EMSA3_SHA256));
++    QVERIFY(!pub.verifyMessage(message, rawSig, QCA::EMSA3_SHA256));
++}
++
++// Keys built from their components work like the generated key they came from
++void RSAUnitTest::testImportExport()
++{
++    const QString provider = QStringLiteral("qca-ossl");
++    if (!rsaSupported(provider))
++        QSKIP("RSA not supported. skipping");
++
++    QCA::RSAPrivateKey orig = QCA::KeyGenerator().createRSA(1024, 65537, provider).toRSA();
++    QVERIFY(!orig.isNull());
++    QCA::RSAPublicKey origPub = orig.toPublicKey().toRSA();
++
++    const QCA::BigInteger n = orig.n(), e = orig.e(), p = orig.p(), q = orig.q(), d = orig.d();
++    QCOMPARE(e, QCA::BigInteger(65537));
++    QCA::BigInteger pq = p;
++    pq *= q;
++    QCOMPARE(pq, n);
++    QCOMPARE(origPub.n(), n);
++    QCOMPARE(origPub.e(), e);
++
++    QCA::RSAPrivateKey imported(n, e, p, q, d, provider);
++    QVERIFY(!imported.isNull());
++    QVERIFY(imported.isPrivate());
++    QCOMPARE(imported.bitSize(), 1024);
++    QCOMPARE(imported.n(), n);
++    QCOMPARE(imported.e(), e);
++    QCOMPARE(imported.p(), p);
++    QCOMPARE(imported.q(), q);
++    QCOMPARE(imported.d(), d);
++
++    const QCA::SecureArray message("import and export");
++    const QByteArray       sig = imported.signMessage(message, QCA::EMSA3_SHA256);
++    QVERIFY(origPub.verifyMessage(message, sig, QCA::EMSA3_SHA256));
++    QCOMPARE(sig, orig.signMessage(message, QCA::EMSA3_SHA256)); // PKCS#1 v1.5 is deterministic
++
++    const QList<QCA::EncryptionAlgorithm> algorithms = {QCA::EME_PKCS1v15, QCA::EME_PKCS1_OAEP};
++    for (QCA::EncryptionAlgorithm alg : algorithms) {
++        QCA::SecureArray plain;
++        QVERIFY(imported.decrypt(origPub.encrypt(message, alg), &plain, alg));
++        QCOMPARE(plain, message);
++    }
++
++    // public key from its components
++    QCA::RSAPublicKey pubFromComponents(n, e, provider);
++    QVERIFY(!pubFromComponents.isNull());
++    QVERIFY(pubFromComponents.isPublic());
++    QCOMPARE(pubFromComponents.bitSize(), 1024);
++    QCOMPARE(pubFromComponents.n(), n);
++    QCOMPARE(pubFromComponents.e(), e);
++    QVERIFY(pubFromComponents.verifyMessage(message, sig, QCA::EMSA3_SHA256));
++    QCOMPARE(pubFromComponents.toDER(), origPub.toDER());
++
++    // the public half of the imported key
++    QCA::RSAPublicKey converted = imported.toPublicKey().toRSA();
++    QVERIFY(!converted.isNull());
++    QVERIFY(converted.isPublic());
++    QVERIFY(!converted.isPrivate());
++    QCOMPARE(converted.n(), n);
++    QCOMPARE(converted.e(), e);
++    QVERIFY(converted.verifyMessage(message, sig, QCA::EMSA3_SHA256));
++    QCOMPARE(converted.toDER(), origPub.toDER());
++    QCA::SecureArray plain;
++    QVERIFY(orig.decrypt(converted.encrypt(message, QCA::EME_PKCS1_OAEP), &plain, QCA::EME_PKCS1_OAEP));
++    QCOMPARE(plain, message);
++}
++
++// A private key given without e or without d gets the missing exponent computed from the other
++// one and the factors. (Before the OpenSSL 3 port, a key without e worked with RSA blinding
++// switched off and reported e == 0, and a key without d gave wrong results.)
++void RSAUnitTest::testMissingExponent()
++{
++    const QString provider = QStringLiteral("qca-ossl");
++    if (!rsaSupported(provider))
++        QSKIP("RSA not supported. skipping");
++
++    QCA::RSAPrivateKey orig = QCA::KeyGenerator().createRSA(1024, 65537, provider).toRSA();
++    QVERIFY(!orig.isNull());
++    QCA::RSAPublicKey origPub = orig.toPublicKey().toRSA();
++
++    const QCA::BigInteger  n = orig.n(), e = orig.e(), p = orig.p(), q = orig.q(), d = orig.d();
++    const QCA::SecureArray message("missing exponent");
++    const QByteArray       sig = orig.signMessage(message, QCA::EMSA3_SHA256);
++
++    QCA::RSAPrivateKey noE(n, QCA::BigInteger(0), p, q, d, provider);
++    QVERIFY(!noE.isNull());
++    QCOMPARE(noE.e(), e);
++    QCA::SecureArray plain;
++    QVERIFY(noE.decrypt(origPub.encrypt(message, QCA::EME_PKCS1v15), &plain, QCA::EME_PKCS1v15));
++    QCOMPARE(plain, message);
++    QCOMPARE(noE.signMessage(message, QCA::EMSA3_SHA256), sig);
++
++    QCA::RSAPrivateKey noD(n, e, p, q, QCA::BigInteger(0), provider);
++    QVERIFY(!noD.isNull());
++    QVERIFY(noD.d() != QCA::BigInteger(0));
++    QVERIFY(noD.decrypt(origPub.encrypt(message, QCA::EME_PKCS1_OAEP), &plain, QCA::EME_PKCS1_OAEP));
++    QCOMPARE(plain, message);
++    QCOMPARE(noD.signMessage(message, QCA::EMSA3_SHA256), sig);
++
++    // nothing to compute them from: there is no key (PKey::isNull() only reports a missing context)
++    QCA::RSAPrivateKey neither(n, QCA::BigInteger(0), p, q, QCA::BigInteger(0), provider);
++    QCOMPARE(neither.bitSize(), 0);
++    QVERIFY(!neither.decrypt(origPub.encrypt(message, QCA::EME_PKCS1v15), &plain, QCA::EME_PKCS1v15));
++}
++
+ QTEST_MAIN(RSAUnitTest)
+ 
+ #include "rsaunittest.moc"

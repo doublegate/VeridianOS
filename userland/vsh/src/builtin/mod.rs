@@ -1006,9 +1006,8 @@ fn builtin_kill(args: &[String]) -> Result<i32> {
 
     for arg in &args[start..] {
         if let Some(pid) = parse_i32(arg) {
-            let ret = unsafe {
-                syscall::syscall2(syscall::SYS_PROCESS_KILL, pid as usize, signal as usize)
-            };
+            let ret =
+                unsafe { syscall::syscall2(syscall::SYS_kill, pid as usize, signal as usize) };
             if ret < 0 {
                 eprintln!("vsh: kill: ({}) - No such process", pid);
             }

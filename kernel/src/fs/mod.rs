@@ -8,19 +8,20 @@ use alloc::{collections::BTreeMap, format, string::String, sync::Arc, vec, vec::
 
 use spin::RwLock;
 
-use crate::error::KernelError;
+use crate::error::{FsError, KernelError};
 
-#[cfg(target_arch = "aarch64")]
-pub mod bare_lock;
 pub mod blockdev;
 pub mod blockfs;
 pub mod devfs;
 pub mod eventfd;
 pub mod ext4;
 pub mod fat32;
+pub mod fifo;
 pub mod file;
 pub mod flock;
 pub mod inotify;
+#[cfg(feature = "alloc")]
+pub mod memfd;
 pub mod pipe;
 pub mod procfs;
 pub mod pty;
@@ -36,6 +37,33 @@ pub mod nfs;
 pub mod smb;
 
 pub use file::{File, FileDescriptor, FileTable, OpenFlags, SeekFrom};
+
+/// Largest file a RAM-backed filesystem (ramfs, tmpfs) will hold. Without a
+/// bound, one write at a huge offset made the kernel allocate the whole
+/// range and abort (N-122).
+pub const MAX_RAM_FILE_SIZE: usize = 1 << 30;
+
+/// The end of a write of `len` bytes at `offset`, if the file may grow to it.
+pub(crate) fn ram_write_end(offset: usize, len: usize) -> Result<usize, KernelError> {
+    offset
+        .checked_add(len)
+        .filter(|&end| end <= MAX_RAM_FILE_SIZE)
+        .ok_or(KernelError::FsError(FsError::FileTooLarge))
+}
+
+/// Grow `data` to `new_len` zero-filled bytes, failing (ENOSPC) instead of
+/// aborting when the heap cannot provide them.
+pub(crate) fn grow_ram_file(data: &mut Vec<u8>, new_len: usize) -> Result<(), KernelError> {
+    if new_len > MAX_RAM_FILE_SIZE {
+        return Err(KernelError::FsError(FsError::FileTooLarge));
+    }
+    if new_len > data.len() {
+        data.try_reserve_exact(new_len - data.len())
+            .map_err(|_| KernelError::FsError(FsError::NoSpace))?;
+        data.resize(new_len, 0);
+    }
+    Ok(())
+}
 
 /// Maximum path length
 pub const PATH_MAX: usize = 4096;
@@ -69,13 +97,82 @@ pub enum NodeType {
 /// parent-before-child. Callers of `VfsNode::rename` must hold it.
 pub(crate) static RENAME_LOCK: spin::Mutex<()> = spin::Mutex::new(());
 
+/// How much of a `len`-byte write at `pos` a file-size limit of `limit`
+/// bytes allows (Linux's generic_write_check_limits): `None` if the write
+/// starts at or past the limit (EFBIG), otherwise the bytes up to it.
+pub fn fsize_allowed(limit: u64, pos: usize, len: usize) -> Option<usize> {
+    let room = limit.checked_sub(pos as u64).filter(|&r| r > 0)?;
+    Some(len.min(room.min(usize::MAX as u64) as usize))
+}
+
+/// RLIMIT_FSIZE (N-224) for the calling process writing `len` bytes at
+/// `pos` of `node`: the bytes it may write. Only regular files are
+/// limited. A write that would start at or past the limit sends the caller
+/// SIGXFSZ and fails with EFBIG; one that crosses it is shortened. A
+/// zero-length write is never refused.
+pub fn check_fsize(node: &dyn VfsNode, pos: usize, len: usize) -> Result<usize, KernelError> {
+    if len == 0 || node.node_type() != NodeType::File {
+        return Ok(len);
+    }
+    let Some(process) = crate::process::current_process() else {
+        return Ok(len);
+    };
+    let limit = process.limits().cur(crate::process::rlimit::RLIMIT_FSIZE);
+    fsize_allowed(limit, pos, len).ok_or_else(|| {
+        crate::process::signals::send_to_current(crate::process::exit::signals::SIGXFSZ as usize);
+        KernelError::FsError(FsError::FileTooLarge)
+    })
+}
+
+/// RLIMIT_FSIZE for setting the size of `node` to `size` (truncate,
+/// ftruncate; Linux's inode_newsize_ok): growing a regular file past the
+/// limit sends SIGXFSZ and fails with EFBIG.
+pub fn check_fsize_truncate(node: &dyn VfsNode, size: usize) -> Result<(), KernelError> {
+    if node.node_type() != NodeType::File || node.metadata().is_ok_and(|m| size <= m.size) {
+        return Ok(());
+    }
+    let Some(process) = crate::process::current_process() else {
+        return Ok(());
+    };
+    if size as u64 > process.limits().cur(crate::process::rlimit::RLIMIT_FSIZE) {
+        crate::process::signals::send_to_current(crate::process::exit::signals::SIGXFSZ as usize);
+        return Err(KernelError::FsError(FsError::FileTooLarge));
+    }
+    Ok(())
+}
+
+/// After a write or truncate of `node` by the calling process: drop the
+/// set-user-ID and set-group-ID bits as [`Permissions::after_write`] says.
+/// Regular files only; a failure to read or change the mode leaves it.
+pub fn remove_privs_after_write(node: &dyn VfsNode) {
+    if node.node_type() != NodeType::File {
+        return;
+    }
+    let Some(process) = crate::process::current_process() else {
+        return;
+    };
+    let creds = process.credentials();
+    if creds.euid == 0 {
+        return;
+    }
+    let Ok(meta) = node.metadata() else {
+        return;
+    };
+    if let Some(kept) = meta
+        .permissions
+        .after_write(creds.euid, creds.in_group(meta.gid))
+    {
+        let _ = node.chmod(kept);
+    }
+}
+
 /// Names that can never be a rename source or target.
 pub(crate) fn is_special_name(name: &str) -> bool {
     name.is_empty() || name == "." || name == ".."
 }
 
 /// File permissions (Unix-style)
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Permissions {
     pub owner_read: bool,
     pub owner_write: bool,
@@ -89,6 +186,13 @@ pub struct Permissions {
     /// Sticky bit (S_ISVTX): in a directory, only an entry's owner, the
     /// directory's owner or root may remove or rename the entry.
     pub sticky: bool,
+    /// Set-user-ID bit (S_ISUID): exec runs the program with its owner as
+    /// the effective user.
+    pub set_uid: bool,
+    /// Set-group-ID bit (S_ISGID): exec runs the program with its group as
+    /// the effective group (with group execute permission; without it the
+    /// bit marks mandatory locking, which Linux no longer honours).
+    pub set_gid: bool,
 }
 
 impl Permissions {
@@ -105,6 +209,8 @@ impl Permissions {
             other_write: false,
             other_exec: true,
             sticky: false,
+            set_uid: false,
+            set_gid: false,
         }
     }
 
@@ -121,6 +227,8 @@ impl Permissions {
             other_write: false,
             other_exec: false,
             sticky: false,
+            set_uid: false,
+            set_gid: false,
         }
     }
 
@@ -139,6 +247,8 @@ impl Permissions {
             (self.other_write, 0o002),
             (self.other_exec, 0o001),
             (self.sticky, 0o1000),
+            (self.set_gid, 0o2000),
+            (self.set_uid, 0o4000),
         ]
         .iter()
         .filter(|(set, _)| *set)
@@ -158,7 +268,40 @@ impl Permissions {
             other_write: (mode & 0o002) != 0,
             other_exec: (mode & 0o001) != 0,
             sticky: (mode & 0o1000) != 0,
+            set_gid: (mode & 0o2000) != 0,
+            set_uid: (mode & 0o4000) != 0,
         }
+    }
+
+    /// Linux's file_remove_privs: the permissions a file keeps after a
+    /// write or truncate by `uid` (`in_group`: the writer belongs to the
+    /// file's group). Root keeps the bits (CAP_FSETID); anyone else drops
+    /// set-user-ID, and set-group-ID where it means set-group-ID (group
+    /// execute set) or the writer is outside the group. `None` when nothing
+    /// changes.
+    pub fn after_write(&self, uid: u32, in_group: bool) -> Option<Self> {
+        if uid == 0 {
+            return None;
+        }
+        let mut kept = *self;
+        kept.set_uid = false;
+        if self.group_exec || !in_group {
+            kept.set_gid = false;
+        }
+        (kept != *self).then_some(kept)
+    }
+
+    /// The permissions a non-directory keeps when its owner or group
+    /// changes (Linux's chown, whoever calls it): no set-user-ID, and no
+    /// set-group-ID with group execute (without it the bit marks mandatory
+    /// locking and stays). `None` when nothing changes.
+    pub fn after_chown(&self) -> Option<Self> {
+        let mut kept = *self;
+        kept.set_uid = false;
+        if self.group_exec {
+            kept.set_gid = false;
+        }
+        (kept != *self).then_some(kept)
     }
 
     /// Check if the given uid/gid has read access.
@@ -226,6 +369,28 @@ pub struct DirEntry {
     pub inode: u64,
 }
 
+/// Readiness bits as Linux reports them: POLLIN (1) comes with POLLRDNORM
+/// (0x40) and POLLOUT (4) with POLLWRNORM (0x100), as Linux's pipes, sockets
+/// and regular files set them, whichever of a pair a node reports.
+pub fn normalize_poll_bits(bits: u16) -> u16 {
+    const IN: u16 = 0x001 | 0x040;
+    const OUT: u16 = 0x004 | 0x100;
+    let mut bits = bits;
+    if bits & IN != 0 {
+        bits |= IN;
+    }
+    if bits & OUT != 0 {
+        bits |= OUT;
+    }
+    bits
+}
+
+/// A node's readiness for poll, select and epoll ([`normalize_poll_bits`]
+/// of [`VfsNode::poll_readiness`]).
+pub fn poll_bits(node: &dyn VfsNode) -> u16 {
+    normalize_poll_bits(node.poll_readiness())
+}
+
 /// VFS node operations trait
 pub trait VfsNode: Send + Sync {
     /// Node type query (also serves as vtable slot padding for AArch64)
@@ -278,6 +443,14 @@ pub trait VfsNode: Send + Sync {
         Err(KernelError::NotImplemented {
             feature: "hard links",
         })
+    }
+
+    /// A stable identity for the file this node names, `(filesystem,
+    /// inode)`, for filesystems that build a new node object on every
+    /// lookup (BlockFS). `None` (the default) means node objects are shared,
+    /// so the node's address identifies the file.
+    fn file_identity(&self) -> Option<(u64, u64)> {
+        None
     }
 
     /// Create a symbolic link in this directory.
@@ -341,6 +514,15 @@ pub trait VfsNode: Send + Sync {
         Err(KernelError::NotImplemented { feature: "chown" })
     }
 
+    /// Set the access and/or modification time (seconds); `None` leaves
+    /// that time unchanged. Permission checks are the caller's job
+    /// (utimensat, N-249).
+    fn set_times(&self, _atime: Option<u64>, _mtime: Option<u64>) -> Result<(), KernelError> {
+        Err(KernelError::NotImplemented {
+            feature: "set_times",
+        })
+    }
+
     /// Poll readiness for I/O multiplexing (poll/epoll).
     ///
     /// Returns a bitmask of ready events using POLL* constants:
@@ -354,6 +536,71 @@ pub trait VfsNode: Send + Sync {
     fn poll_readiness(&self) -> u16 {
         // Regular files/dirs: always ready for read+write
         0x0001 | 0x0004 // POLLIN | POLLOUT
+    }
+
+    /// Whether the node is a stream with no file position -- a pipe,
+    /// socket, terminal or event object -- so lseek, pread and pwrite on
+    /// it are ESPIPE, as for Linux's nonseekable files.
+    fn is_stream(&self) -> bool {
+        matches!(self.node_type(), NodeType::Pipe | NodeType::Socket)
+    }
+
+    /// The file's seals (fcntl F_GET_SEALS, bits from [`seals`]); `None`
+    /// for a file that cannot be sealed -- only memfds can -- which fcntl
+    /// reports as EINVAL.
+    fn seals(&self) -> Option<u32> {
+        None
+    }
+
+    /// Add seals (F_ADD_SEALS): EPERM once `seals::SEAL` is set, EINVAL for
+    /// a file that cannot be sealed.
+    fn add_seals(&self, _seals: u32) -> Result<(), KernelError> {
+        Err(KernelError::InvalidArgument {
+            name: "seals",
+            value: "file cannot be sealed",
+        })
+    }
+
+    /// The page cache of the file (`mm::page_cache`, ADR 0010): its pages,
+    /// shared by every private mapping of the file and every program
+    /// segment loaded from it (see `mm::page_cache::file_pages`). `None`:
+    /// the filesystem has no page cache, and the pages are copied.
+    #[cfg(feature = "alloc")]
+    fn page_cache(&self) -> Option<alloc::sync::Arc<crate::mm::page_cache::FileCache>> {
+        None
+    }
+
+    /// The frames holding pages `[first_page, first_page + count)` of the
+    /// file, for a MAP_SHARED mapping that maps the file's own pages, so it
+    /// and every other mapping, read and write see one copy (N-230). Each
+    /// frame returned has gained an owner (`mm::frame_refs`) that the
+    /// mapping releases when unmapped. `writable`: the mapping may write
+    /// (refused under F_SEAL_WRITE). `None`: the node has no such pages,
+    /// and a MAP_SHARED mapping of it is a private copy (a page cache is
+    /// v0.29 work).
+    #[cfg(feature = "alloc")]
+    fn share_pages(
+        &self,
+        _first_page: usize,
+        _count: usize,
+        _writable: bool,
+    ) -> Option<Result<Vec<crate::mm::FrameNumber>, KernelError>> {
+        None
+    }
+
+    /// Whether every readiness change of this node calls
+    /// [`crate::sched::dispatch::io_event`]. Waiters on such a node sleep
+    /// until woken; on any other they also re-check periodically.
+    fn wakes_io_waiters(&self) -> bool {
+        false
+    }
+
+    /// When this node becomes ready by itself, with no event to wake
+    /// waiters (a timerfd's next expiry), as `dispatch::clock_ns`: read,
+    /// poll and epoll sleep no longer than that. `None`: only events change
+    /// its readiness.
+    fn ready_at_ns(&self) -> Option<u64> {
+        None
     }
 
     /// Downcast to `&dyn core::any::Any` for type-specific operations.
@@ -373,6 +620,80 @@ pub trait VfsNode: Send + Sync {
     /// about what the node is (W-7).
     fn device_id(&self) -> Option<(u32, u32)> {
         None
+    }
+
+    /// Create special file `name` in this directory (mknod): a FIFO
+    /// (`NodeType::Pipe`), a character or block device numbered `rdev`
+    /// (Linux's encoding, [`dev_major`] and [`dev_minor`]) or a socket.
+    /// Default: this filesystem cannot hold one, which mknod reports as
+    /// EPERM, as Linux does for a filesystem without `mknod`.
+    fn mknod(
+        &self,
+        _name: &str,
+        _kind: NodeType,
+        _permissions: Permissions,
+        _rdev: u32,
+    ) -> Result<Arc<dyn VfsNode>, KernelError> {
+        Err(KernelError::FsError(crate::error::FsError::NotSupported))
+    }
+
+    /// Whether this is a special file kept by a filesystem (made by
+    /// mknod), which open replaces with what it names: a FIFO's pipe
+    /// (`fifo`), a device (`devfs::open_device`). A pipe, device or socket
+    /// object itself is not one.
+    fn is_special_inode(&self) -> bool {
+        false
+    }
+}
+
+/// The major number of a device number in Linux's 32-bit encoding (as
+/// `mknod` takes it and `stat` reports it: `new_decode_dev`).
+pub const fn dev_major(dev: u32) -> u32 {
+    (dev & 0xf_ff00) >> 8
+}
+
+/// The minor number of a device number in Linux's 32-bit encoding.
+pub const fn dev_minor(dev: u32) -> u32 {
+    (dev & 0xff) | ((dev >> 12) & 0xf_ff00)
+}
+
+/// A device number in Linux's 32-bit encoding (`new_encode_dev`): 12 bits
+/// of major, 20 of minor.
+pub const fn make_dev(major: u32, minor: u32) -> u32 {
+    (minor & 0xff) | ((major & 0xfff) << 8) | ((minor & !0xff) << 12)
+}
+
+/// Which file a node names, for tables that find something by its inode (a
+/// FIFO's pipe, the socket bound to a socket file): `file_identity` where
+/// the filesystem has one (BlockFS), otherwise the node's address, which
+/// stays unique while the table holds the node.
+pub(crate) fn inode_key(node: &Arc<dyn VfsNode>) -> (u64, u64) {
+    node.file_identity()
+        .unwrap_or((0, Arc::as_ptr(node) as *const () as u64))
+}
+
+/// A special inode found by number (BlockFS's `file_identity`) lost its
+/// last link and was freed. Forget what its FIFO table and socket bindings
+/// hold under that key, so a new file that is given the same inode number
+/// starts fresh; open FIFO ends and the bound socket keep working, as on
+/// Linux, where an unlinked inode lives until its last reference goes.
+pub(crate) fn special_inode_freed(key: (u64, u64)) {
+    fifo::forget(key);
+    crate::net::unix_socket::forget_file(key);
+}
+
+/// The kind of file a mknod `mode` asks for (Linux's `may_mknod`): a type
+/// of 0 is a regular file; a directory is EPERM (`Err(true)`) and any
+/// other unknown type EINVAL (`Err(false)`).
+pub fn mknod_kind(mode: u32) -> Result<NodeType, bool> {
+    match mode & 0o170000 {
+        0 | 0o100000 => Ok(NodeType::File),
+        0o020000 => Ok(NodeType::CharDevice),
+        0o060000 => Ok(NodeType::BlockDevice),
+        0o010000 => Ok(NodeType::Pipe),
+        0o140000 => Ok(NodeType::Socket),
+        0o040000 => Err(true),
+        _ => Err(false),
     }
 }
 
@@ -522,17 +843,36 @@ impl MountTable {
     /// re-walking the shortened canonical path from the root. Every
     /// component that is not last must be a directory.
     ///
-    /// With `creds = Some((uid, gid))` every directory searched -- for a
+    /// With `creds = Some(credentials)` every directory searched -- for a
     /// name or for `..` -- must grant that caller search (execute)
     /// permission, as POSIX requires; otherwise the walk fails with
     /// `PermissionDenied`. `None` is the kernel's own lookups, and root.
+    #[cfg(test)]
     fn resolve(
         &self,
         path: &str,
         cwd: &str,
         follow_last: bool,
         symlink_depth: usize,
-        creds: Option<(u32, u32)>,
+        creds: Option<crate::process::creds::Credentials>,
+    ) -> Result<(Arc<dyn VfsNode>, String), KernelError> {
+        self.resolve_in(path, cwd, "/", follow_last, symlink_depth, creds)
+    }
+
+    /// `resolve` under a root directory (chroot). `root` is a canonical
+    /// path in the whole tree; `path` when absolute, and `cwd`, are
+    /// relative to it. Absolute paths and absolute symlink targets start at
+    /// the root and `..` stops there, so no lookup leaves it. The canonical
+    /// path returned is in the whole tree (for MAC and mount checks); see
+    /// `root_relative` for the process's view.
+    fn resolve_in(
+        &self,
+        path: &str,
+        cwd: &str,
+        root: &str,
+        follow_last: bool,
+        symlink_depth: usize,
+        creds: Option<crate::process::creds::Credentials>,
     ) -> Result<(Arc<dyn VfsNode>, String), KernelError> {
         use alloc::collections::VecDeque;
 
@@ -550,7 +890,8 @@ impl MountTable {
             q.extend(split(path));
             q
         };
-        let mut canon: Vec<String> = Vec::new();
+        let root_canon: Vec<String> = split(root).into_iter().collect();
+        let mut canon: Vec<String> = root_canon.clone();
         let mut node = self.walk_canonical(&canon)?;
         let mut links = symlink_depth;
 
@@ -560,16 +901,22 @@ impl MountTable {
             if node.node_type() != NodeType::Directory {
                 return Err(KernelError::FsError(crate::error::FsError::NotADirectory));
             }
-            if let Some((uid, gid)) = creds {
+            if let Some(c) = creds {
                 let meta = node.metadata()?;
-                if !meta.permissions.can_run(uid, gid, meta.uid, meta.gid) {
+                if !meta
+                    .permissions
+                    .can_run(c.euid, c.gid_for(meta.gid), meta.uid, meta.gid)
+                {
                     return Err(KernelError::FsError(
                         crate::error::FsError::PermissionDenied,
                     ));
                 }
             }
             if component == ".." {
-                canon.pop();
+                // ".." of the root is the root itself.
+                if canon.len() > root_canon.len() {
+                    canon.pop();
+                }
                 node = self.walk_canonical(&canon)?;
                 continue;
             }
@@ -592,7 +939,7 @@ impl MountTable {
                 // in front of whatever was still pending.
                 canon.pop();
                 if target.starts_with('/') {
-                    canon.clear();
+                    canon = root_canon.clone();
                 }
                 let mut spliced = split(&target);
                 spliced.extend(pending.drain(..));
@@ -625,13 +972,223 @@ impl MountTable {
     }
 }
 
-/// The credentials whose search permission a path walk checks: the calling
-/// process's, or `None` (no check) for root and for kernel context with no
-/// current process.
-fn search_creds() -> Option<(u32, u32)> {
-    crate::process::current_process()
-        .map(|p| (p.uid(), p.gid()))
-        .filter(|&(uid, _)| uid != 0)
+/// File seals (fcntl F_ADD_SEALS / F_GET_SEALS), with Linux's values. A
+/// sealed memfd refuses the sealed operations with EPERM.
+pub mod seals {
+    /// No further seals may be added.
+    pub const SEAL: u32 = 0x1;
+    /// The size may not decrease.
+    pub const SHRINK: u32 = 0x2;
+    /// The size may not increase.
+    pub const GROW: u32 = 0x4;
+    /// The contents may not change.
+    pub const WRITE: u32 = 0x8;
+    /// As `WRITE` for write(2) and new writable mappings; existing writable
+    /// mappings keep working.
+    pub const FUTURE_WRITE: u32 = 0x10;
+    /// The execute bits may not change.
+    pub const EXEC: u32 = 0x20;
+    /// Every seal.
+    pub const ALL: u32 = SEAL | SHRINK | GROW | WRITE | FUTURE_WRITE | EXEC;
+}
+
+/// Whose view of the tree a path lookup uses (N-251). A kernel subsystem
+/// (audit, logging, the package manager) must see the real tree whichever
+/// thread is current -- with the caller's root a chrooted process could
+/// make the audit log land in a file it owns, and with its permissions
+/// make logging fail -- while a system call must see exactly the caller's.
+/// `Vfs` methods use the kernel's view; `Vfs::as_caller` gives the
+/// caller's.
+#[derive(Debug, Clone)]
+pub struct PathContext {
+    /// Where relative paths start, relative to `root`.
+    pub cwd: String,
+    /// The root directory, as a canonical path in the whole tree.
+    pub root: String,
+    /// Whose search permission a walk checks; `None` checks none.
+    pub creds: Option<crate::process::creds::Credentials>,
+    /// The process MAC policy is checked for (0: the kernel).
+    pub pid: u64,
+}
+
+/// The VFS as the calling thread sees it (see [`PathContext`]). It does
+/// not dereference to `Vfs`: an operation it lacks is a compile error in
+/// the system call that wants it, never a silent lookup in the kernel's
+/// view, which would escape a chroot and skip permission checks.
+pub struct CallerView<'a> {
+    vfs: &'a Vfs,
+    ctx: PathContext,
+}
+
+impl<'a> CallerView<'a> {
+    /// The caller's context.
+    pub fn context(&self) -> &PathContext {
+        &self.ctx
+    }
+
+    /// The VFS itself, for operations on the mount table rather than on
+    /// paths (mount, unmount, sync).
+    pub fn global(&self) -> &'a Vfs {
+        self.vfs
+    }
+
+    /// The caller's working directory, relative to its root.
+    pub fn get_cwd(&self) -> String {
+        self.ctx.cwd.clone()
+    }
+
+    /// The caller's root, as a canonical path in the whole tree.
+    pub fn get_root(&self) -> String {
+        self.ctx.root.clone()
+    }
+
+    pub fn resolve_path(&self, path: &str) -> Result<Arc<dyn VfsNode>, KernelError> {
+        self.vfs
+            .lookup(&self.ctx, path, &self.ctx.cwd, true)
+            .map(|(n, _)| n)
+    }
+
+    /// [`Self::resolve_path`] (relative to the caller's working directory)
+    /// with the node's canonical path from the same lookup.
+    pub fn resolve_path_canonical(
+        &self,
+        path: &str,
+    ) -> Result<(Arc<dyn VfsNode>, String), KernelError> {
+        self.vfs.lookup(&self.ctx, path, &self.ctx.cwd, true)
+    }
+
+    pub fn resolve_path_no_follow(&self, path: &str) -> Result<Arc<dyn VfsNode>, KernelError> {
+        self.vfs
+            .lookup(&self.ctx, path, &self.ctx.cwd, false)
+            .map(|(n, _)| n)
+    }
+
+    /// [`Vfs::resolve_canonical`] in the caller's view; `cwd` is relative
+    /// to the caller's root.
+    pub fn resolve_canonical(
+        &self,
+        path: &str,
+        cwd: &str,
+        follow_last: bool,
+    ) -> Result<(Arc<dyn VfsNode>, String), KernelError> {
+        self.vfs.lookup(&self.ctx, path, cwd, follow_last)
+    }
+
+    pub fn open_follow_canonical(
+        &self,
+        path: &str,
+        flags: OpenFlags,
+        follow_last: bool,
+    ) -> Result<(Arc<dyn VfsNode>, String), KernelError> {
+        self.vfs.open_in(&self.ctx, path, flags, follow_last)
+    }
+
+    pub fn entry_mount_point(&self, parent: &str, name: &str) -> Result<String, KernelError> {
+        self.vfs.entry_mount_point_in(&self.ctx, parent, name)
+    }
+
+    /// The mount point of entry `name` of the directory whose canonical path
+    /// is `canonical_parent` (from [`Self::resolve_canonical`]), without
+    /// resolving anything again.
+    pub fn canonical_entry_mount_point(&self, canonical_parent: &str, name: &str) -> String {
+        let entry = if canonical_parent == "/" {
+            alloc::format!("/{}", name)
+        } else {
+            alloc::format!("{}/{}", canonical_parent, name)
+        };
+        self.vfs.mount_point_of(&entry)
+    }
+
+    pub fn mkdir(
+        &self,
+        path: &str,
+        permissions: Permissions,
+    ) -> Result<Arc<dyn VfsNode>, KernelError> {
+        self.vfs.mkdir_in(&self.ctx, path, permissions, |_| Ok(()))
+    }
+
+    /// [`Self::mkdir`], with `check` (the caller's permission check) run on
+    /// the resolved parent directory before the entry is created in that
+    /// same directory, so the path cannot change in between (N-51).
+    pub fn mkdir_checked(
+        &self,
+        path: &str,
+        permissions: Permissions,
+        check: impl FnOnce(&dyn VfsNode) -> Result<(), KernelError>,
+    ) -> Result<Arc<dyn VfsNode>, KernelError> {
+        self.vfs.mkdir_in(&self.ctx, path, permissions, check)
+    }
+
+    /// Create `path` for mknod -- a regular file (`NodeType::File`), FIFO,
+    /// device numbered `rdev`, or socket -- as [`Self::mkdir_checked`]
+    /// creates a directory: one resolution of the parent for the MAC check,
+    /// `check` and the creation.
+    pub fn mknod_checked(
+        &self,
+        path: &str,
+        kind: NodeType,
+        permissions: Permissions,
+        rdev: u32,
+        check: impl FnOnce(&dyn VfsNode) -> Result<(), KernelError>,
+    ) -> Result<Arc<dyn VfsNode>, KernelError> {
+        self.vfs.create_in(&self.ctx, path, check, |parent, name| {
+            if kind == NodeType::File {
+                parent.create(name, permissions)
+            } else {
+                parent.mknod(name, kind, permissions, rdev)
+            }
+        })
+    }
+
+    pub fn unlink(&self, path: &str) -> Result<(), KernelError> {
+        self.vfs.unlink_in(&self.ctx, path)
+    }
+
+    /// The canonical path in the whole tree of the directory `path` names:
+    /// what the mount table is keyed by. Without this a chrooted
+    /// `mount("/")` would name the real root.
+    fn mount_target(&self, path: &str) -> Result<String, KernelError> {
+        let (node, canonical) = self.vfs.lookup(&self.ctx, path, &self.ctx.cwd, true)?;
+        if node.node_type() != NodeType::Directory {
+            return Err(KernelError::FsError(FsError::NotADirectory));
+        }
+        Ok(canonical)
+    }
+
+    /// [`Vfs::mount_by_type`] at the directory `path` names for the caller.
+    pub fn mount_by_type(&self, path: &str, fs_type: &str, flags: u32) -> Result<(), KernelError> {
+        let target = self.mount_target(path)?;
+        self.vfs.mount_by_type(&target, fs_type, flags)
+    }
+
+    /// [`Vfs::unmount`] of the mount at the directory `path` names for the
+    /// caller.
+    pub fn unmount(&self, path: &str) -> Result<(), KernelError> {
+        let target = self.mount_target(path)?;
+        self.vfs.unmount(&target)
+    }
+
+    /// Flush every filesystem; not path-dependent.
+    pub fn sync(&self) -> Result<(), KernelError> {
+        self.vfs.sync()
+    }
+}
+
+/// `path`, a canonical path in the whole tree, as seen from inside `root`
+/// (the inverse of `resolve_in`'s mapping): "/jail/a" is "/a" under root
+/// "/jail". A path outside the root (which a lookup never produces) is
+/// returned whole.
+pub(crate) fn root_relative(path: &str, root: &str) -> String {
+    if root == "/" {
+        return String::from(path);
+    }
+    if path == root {
+        return String::from("/");
+    }
+    match path.strip_prefix(root) {
+        Some(rest) if rest.starts_with('/') => String::from(rest),
+        _ => String::from(path),
+    }
 }
 
 /// `/` followed by the components joined with `/`; `/` for none.
@@ -716,23 +1273,78 @@ impl Vfs {
         })
     }
 
+    /// The kernel's own view of the tree: the whole tree, the kernel
+    /// shell's working directory, no search-permission checks, MAC as the
+    /// kernel.
+    pub fn kernel_context(&self) -> PathContext {
+        PathContext {
+            cwd: self.cwd.read().clone(),
+            root: String::from("/"),
+            creds: None,
+            pid: 0,
+        }
+    }
+
+    /// The calling thread's view: its working directory and root
+    /// (chroot), its process's credentials for search permission (none
+    /// for root) and its pid for MAC. Without a current thread or process
+    /// (the kernel shell) that part is the kernel's.
+    pub fn caller_context(&self) -> PathContext {
+        let mut ctx = self.kernel_context();
+        #[cfg(feature = "alloc")]
+        if let Some(thread) = crate::process::current_thread() {
+            let fs = thread.fs();
+            ctx.cwd = fs.cwd.lock().clone();
+            ctx.root = fs.root.lock().clone();
+        }
+        if let Some(process) = crate::process::current_process() {
+            ctx.pid = process.pid.0;
+            ctx.creds = Some(process.credentials()).filter(|c| c.euid != 0);
+        }
+        ctx
+    }
+
+    /// Lookups as the calling thread: what system calls, exec and the
+    /// program loader use for paths a program supplied.
+    pub fn as_caller(&self) -> CallerView<'_> {
+        CallerView {
+            vfs: self,
+            ctx: self.caller_context(),
+        }
+    }
+
+    /// Resolve `path` (relative paths from `cwd`) in `ctx`'s view: the
+    /// node and its canonical path in the whole tree.
+    fn lookup(
+        &self,
+        ctx: &PathContext,
+        path: &str,
+        cwd: &str,
+        follow_last: bool,
+    ) -> Result<(Arc<dyn VfsNode>, String), KernelError> {
+        self.snapshot()
+            .resolve_in(path, cwd, &ctx.root, follow_last, 0, ctx.creds)
+    }
+
     /// Resolve a path to a VFS node, following symlinks (including the
     /// final component).
     pub fn resolve_path(&self, path: &str) -> Result<Arc<dyn VfsNode>, KernelError> {
-        self.resolve_path_inner(path, &self.get_cwd(), true, 0)
+        let ctx = self.kernel_context();
+        self.lookup(&ctx, path, &ctx.cwd, true).map(|(n, _)| n)
     }
 
     /// Resolve a path to a VFS node without following the final symlink
     /// component. Intermediate symlinks are still followed. Used by
     /// `lstat()` and `readlink()`.
     pub fn resolve_path_no_follow(&self, path: &str) -> Result<Arc<dyn VfsNode>, KernelError> {
-        self.resolve_path_inner(path, &self.get_cwd(), false, 0)
+        let ctx = self.kernel_context();
+        self.lookup(&ctx, path, &ctx.cwd, false).map(|(n, _)| n)
     }
 
-    /// Resolve a path to a VFS node using an explicit cwd (per-thread FS
-    /// state).
+    /// Resolve a path to a VFS node using an explicit cwd.
     pub fn resolve_from(&self, path: &str, cwd: &str) -> Result<Arc<dyn VfsNode>, KernelError> {
-        self.resolve_path_inner(path, cwd, true, 0)
+        self.lookup(&self.kernel_context(), path, cwd, true)
+            .map(|(n, _)| n)
     }
 
     /// Resolve a path to a VFS node using an explicit cwd, without
@@ -742,12 +1354,14 @@ impl Vfs {
         path: &str,
         cwd: &str,
     ) -> Result<Arc<dyn VfsNode>, KernelError> {
-        self.resolve_path_inner(path, cwd, false, 0)
+        self.lookup(&self.kernel_context(), path, cwd, false)
+            .map(|(n, _)| n)
     }
 
-    /// The mount point (normalized path) that serves `path`.
+    /// The mount point that serves `path`, a canonical path in the whole
+    /// tree.
     pub fn mount_point_of(&self, path: &str) -> String {
-        let path = normalize_path(path, &self.get_cwd());
+        let path = normalize_path(path, "/");
         self.snapshot()
             .mounts
             .keys()
@@ -763,7 +1377,17 @@ impl Vfs {
     /// paths as written: a symlink in the parent path can point into another
     /// mount (review of the v0.26.0 stack, PR #11).
     pub fn entry_mount_point(&self, parent: &str, name: &str) -> Result<String, KernelError> {
-        let (_, canon) = self.resolve_canonical(parent, &self.get_cwd(), true)?;
+        let ctx = self.kernel_context();
+        self.entry_mount_point_in(&ctx, parent, name)
+    }
+
+    fn entry_mount_point_in(
+        &self,
+        ctx: &PathContext,
+        parent: &str,
+        name: &str,
+    ) -> Result<String, KernelError> {
+        let (_, canon) = self.lookup(ctx, parent, &ctx.cwd, true)?;
         let entry = if canon == "/" {
             alloc::format!("/{}", name)
         } else {
@@ -782,29 +1406,12 @@ impl Vfs {
         cwd: &str,
         follow_last: bool,
     ) -> Result<(Arc<dyn VfsNode>, String), KernelError> {
-        self.snapshot()
-            .resolve(path, cwd, follow_last, 0, search_creds())
+        self.lookup(&self.kernel_context(), path, cwd, follow_last)
     }
 
-    /// Inner path resolution with configurable symlink behavior.
-    ///
-    /// - `follow_last`: if `true`, a symlink at the final component is
-    ///   resolved. If `false`, the symlink node itself is returned.
-    /// - `symlink_depth`: current nesting depth for loop detection. Returns
-    ///   `FsError::SymlinkLoop` when it exceeds `SYMLINK_MAX_DEPTH`.
-    fn resolve_path_inner(
-        &self,
-        path: &str,
-        cwd: &str,
-        follow_last: bool,
-        symlink_depth: usize,
-    ) -> Result<Arc<dyn VfsNode>, KernelError> {
-        self.snapshot()
-            .resolve(path, cwd, follow_last, symlink_depth, search_creds())
-            .map(|(node, _)| node)
-    }
-
-    /// Get current working directory
+    /// The kernel's working directory (the kernel shell's `cd`). A user
+    /// thread's own is in `ThreadFs` and reached through `as_caller`
+    /// (N-115).
     pub fn get_cwd(&self) -> String {
         self.cwd.read().clone()
     }
@@ -827,23 +1434,49 @@ impl Vfs {
     ///
     /// Checks MAC policy before allowing access.
     pub fn open(&self, path: &str, flags: OpenFlags) -> Result<Arc<dyn VfsNode>, KernelError> {
-        // Determine access type from flags
+        self.open_follow(path, flags, true)
+    }
+
+    /// Like [`Self::open`]; `follow_last = false` returns a symlink at the
+    /// final component itself (O_NOFOLLOW).
+    pub fn open_follow(
+        &self,
+        path: &str,
+        flags: OpenFlags,
+        follow_last: bool,
+    ) -> Result<Arc<dyn VfsNode>, KernelError> {
+        self.open_follow_canonical(path, flags, follow_last)
+            .map(|(node, _)| node)
+    }
+
+    /// [`Self::open_follow`], also returning the node's canonical path in
+    /// the whole tree (what an open file records for `fchdir` and `*at`).
+    pub fn open_follow_canonical(
+        &self,
+        path: &str,
+        flags: OpenFlags,
+        follow_last: bool,
+    ) -> Result<(Arc<dyn VfsNode>, String), KernelError> {
+        self.open_in(&self.kernel_context(), path, flags, follow_last)
+    }
+
+    fn open_in(
+        &self,
+        ctx: &PathContext,
+        path: &str,
+        flags: OpenFlags,
+        follow_last: bool,
+    ) -> Result<(Arc<dyn VfsNode>, String), KernelError> {
         let access = if flags.write {
             crate::security::AccessType::Write
         } else {
             crate::security::AccessType::Read
         };
-
-        // Get current process PID for MAC check (0 = kernel context)
-        let pid = crate::process::current_process()
-            .map(|p| p.pid.0)
-            .unwrap_or(0);
-
         // MAC is checked on the canonical path, after `..` and symlinks are
         // resolved, never on the path as written (FS-SEC-01).
-        let (node, canonical) = self.resolve_canonical(path, &self.get_cwd(), true)?;
-        crate::security::mac::check_file_access(&canonical, access, pid)?;
-        Ok(node)
+        let (node, canonical) = self.lookup(ctx, path, &ctx.cwd, follow_last)?;
+        crate::security::mac::check_file_access(&canonical, access, ctx.pid)?;
+        Ok((node, canonical))
     }
 
     /// Create a directory
@@ -857,37 +1490,84 @@ impl Vfs {
         path: &str,
         permissions: Permissions,
     ) -> Result<Arc<dyn VfsNode>, KernelError> {
+        self.mkdir_in(&self.kernel_context(), path, permissions, |_| Ok(()))
+    }
+
+    /// Make a special file (FIFO, device or socket) in the kernel's context,
+    /// as [`Self::mkdir`] makes a directory.
+    pub fn mknod(
+        &self,
+        path: &str,
+        kind: NodeType,
+        permissions: Permissions,
+        rdev: u32,
+    ) -> Result<Arc<dyn VfsNode>, KernelError> {
+        self.create_in(
+            &self.kernel_context(),
+            path,
+            |_| Ok(()),
+            |parent, name| parent.mknod(name, kind, permissions, rdev),
+        )
+    }
+
+    fn mkdir_in(
+        &self,
+        ctx: &PathContext,
+        path: &str,
+        permissions: Permissions,
+        check: impl FnOnce(&dyn VfsNode) -> Result<(), KernelError>,
+    ) -> Result<Arc<dyn VfsNode>, KernelError> {
+        self.create_in(ctx, path, check, |parent, name| {
+            parent.mkdir(name, permissions)
+        })
+    }
+
+    /// Create the entry `path` names with `make(parent, name)`, after the
+    /// MAC check (Write) and `check` on the parent.
+    fn create_in(
+        &self,
+        ctx: &PathContext,
+        path: &str,
+        check: impl FnOnce(&dyn VfsNode) -> Result<(), KernelError>,
+        make: impl FnOnce(&dyn VfsNode, &str) -> Result<Arc<dyn VfsNode>, KernelError>,
+    ) -> Result<Arc<dyn VfsNode>, KernelError> {
         // Parse the path once and use that single result both for the MAC
         // check and for the creation, so they cannot disagree: the parent
         // is resolved canonically (following symlinks) and the policy sees
         // the path the directory is really created at. Normalizing also
         // removes trailing slashes, `.` and `..`, so the final name is
         // never one of those.
-        let path = normalize_path(path, &self.get_cwd());
+        let path = normalize_path(path, &ctx.cwd);
         if path == "/" {
             return Err(KernelError::FsError(crate::error::FsError::AlreadyExists));
         }
         let pos = path.rfind('/').unwrap_or(0);
         let (parent_path, name) = (&path[..pos.max(1)], &path[pos + 1..]);
 
-        let (parent, canonical_parent) = self.resolve_canonical(parent_path, "/", true)?;
+        let (parent, canonical_parent) = self.lookup(ctx, parent_path, "/", true)?;
         let target = if canonical_parent == "/" {
             format!("/{}", name)
         } else {
             format!("{}/{}", canonical_parent, name)
         };
 
-        // MAC check: creating a directory requires Write access
-        let pid = crate::process::current_process()
-            .map(|p| p.pid.0)
-            .unwrap_or(0);
-        crate::security::mac::check_file_access(&target, crate::security::AccessType::Write, pid)?;
+        // MAC check: creating an entry requires Write access
+        crate::security::mac::check_file_access(
+            &target,
+            crate::security::AccessType::Write,
+            ctx.pid,
+        )?;
+        check(&*parent)?;
 
-        parent.mkdir(name, permissions)
+        make(&*parent, name)
     }
 
     /// Remove a file or directory
     pub fn unlink(&self, path: &str) -> Result<(), KernelError> {
+        self.unlink_in(&self.kernel_context(), path)
+    }
+
+    fn unlink_in(&self, ctx: &PathContext, path: &str) -> Result<(), KernelError> {
         // Split path into parent and name
         let (parent_path, name) = if let Some(pos) = path.rfind('/') {
             if pos == 0 {
@@ -899,10 +1579,7 @@ impl Vfs {
             return Err(KernelError::FsError(crate::error::FsError::InvalidPath));
         };
 
-        // Get parent directory
-        let parent = self.resolve_path(parent_path)?;
-
-        // Remove from parent
+        let (parent, _) = self.lookup(ctx, parent_path, &ctx.cwd, true)?;
         parent.unlink(name)
     }
 
@@ -1388,6 +2065,80 @@ pub fn append_file(path: &str, data: &[u8]) -> Result<usize, KernelError> {
 mod tests {
     use super::*;
 
+    /// Linux's device-number encoding (`new_encode_dev`): 12 bits of
+    /// major, 20 of minor, both round-trip.
+    #[test]
+    fn device_numbers_use_linux_encoding() {
+        assert_eq!(make_dev(1, 3), 0x103);
+        assert_eq!(make_dev(8, 0x12345), 0x1230_0845);
+        for (major, minor) in [(0, 0), (1, 3), (226, 128), (0xfff, 0xf_ffff), (8, 300)] {
+            let dev = make_dev(major, minor);
+            assert_eq!((dev_major(dev), dev_minor(dev)), (major, minor));
+        }
+    }
+
+    /// mknod's file types, as Linux's `may_mknod`.
+    #[test]
+    fn mknod_types_follow_linux() {
+        assert_eq!(mknod_kind(0o644), Ok(NodeType::File));
+        assert_eq!(mknod_kind(0o100644), Ok(NodeType::File));
+        assert_eq!(mknod_kind(0o010644), Ok(NodeType::Pipe));
+        assert_eq!(mknod_kind(0o020600), Ok(NodeType::CharDevice));
+        assert_eq!(mknod_kind(0o060600), Ok(NodeType::BlockDevice));
+        assert_eq!(mknod_kind(0o140755), Ok(NodeType::Socket));
+        assert_eq!(mknod_kind(0o040755), Err(true), "a directory: EPERM");
+        assert_eq!(mknod_kind(0o120777), Err(false), "a symlink: EINVAL");
+        assert_eq!(mknod_kind(0o030000), Err(false));
+    }
+
+    /// RamFS and tmpfs hold special files: the type, the device number of
+    /// a device only, EEXIST for a taken name, and no data.
+    #[test]
+    fn ram_filesystems_hold_special_files() {
+        let roots = [
+            ramfs::RamFs::new().root(),
+            tmpfs::TmpFs::new(1 << 20).root(),
+        ];
+        for root in roots {
+            let perms = Permissions::from_mode(0o620);
+            let dev = root
+                .mknod("tty", NodeType::CharDevice, perms, make_dev(4, 1))
+                .unwrap();
+            assert_eq!(dev.device_id(), Some((4, 1)));
+            assert!(dev.is_special_inode());
+            assert_eq!(dev.metadata().unwrap().node_type, NodeType::CharDevice);
+            let fifo = root
+                .mknod("p", NodeType::Pipe, perms, make_dev(4, 1))
+                .unwrap();
+            assert_eq!(fifo.device_id(), None, "only a device has a number");
+            assert!(fifo.write(0, b"x").is_err());
+            assert!(matches!(
+                root.mknod("p", NodeType::Socket, perms, 0),
+                Err(KernelError::FsError(crate::error::FsError::AlreadyExists))
+            ));
+            assert!(root.mknod("d", NodeType::Directory, perms, 0).is_err());
+            let types: Vec<_> = root
+                .readdir()
+                .unwrap()
+                .into_iter()
+                .map(|e| e.node_type)
+                .collect();
+            assert!(types.contains(&NodeType::Pipe) && types.contains(&NodeType::CharDevice));
+            assert!(root.lookup("p").unwrap().is_special_inode());
+        }
+    }
+
+    /// RLIMIT_FSIZE arithmetic (Linux's generic_write_check_limits).
+    #[test]
+    fn fsize_limit_shortens_or_refuses_writes() {
+        assert_eq!(fsize_allowed(u64::MAX, 1 << 40, 4096), Some(4096));
+        assert_eq!(fsize_allowed(1000, 0, 4096), Some(1000));
+        assert_eq!(fsize_allowed(1000, 990, 4096), Some(10));
+        assert_eq!(fsize_allowed(1000, 1000, 1), None);
+        assert_eq!(fsize_allowed(1000, 2000, 1), None);
+        assert_eq!(fsize_allowed(0, 0, 1), None);
+    }
+
     /// FS-PERF-03: the same rename behaviour on every filesystem that
     /// implements it.
     fn rename_contract(fs: &dyn Filesystem) {
@@ -1423,7 +2174,7 @@ mod tests {
         assert!(b.rename("h", &b, "d").is_err(), "file over directory");
         assert!(b.rename("d", &b, "h").is_err(), "directory over file");
         d.create("x", Permissions::default()).unwrap();
-        let e = b.mkdir("e", Permissions::default()).unwrap();
+        b.mkdir("e", Permissions::default()).unwrap();
         assert!(b.rename("e", &b, "d").is_err(), "over non-empty directory");
         assert!(b.rename(".", &b, "z").is_err());
 
@@ -1516,9 +2267,49 @@ mod tests {
 
     #[test]
     fn permissions_mode_round_trip_includes_sticky() {
-        for mode in [0o1777, 0o755, 0o1700, 0o644, 0o0] {
+        for mode in [
+            0o1777, 0o755, 0o1700, 0o644, 0o0, 0o4755, 0o2755, 0o6711, 0o7777,
+        ] {
             assert_eq!(Permissions::from_mode(mode).to_mode(), mode);
         }
+        let p = Permissions::from_mode(0o6755);
+        assert!(p.set_uid && p.set_gid && !p.sticky);
+    }
+
+    /// Linux's file_remove_privs: a write by anyone but root drops
+    /// set-user-ID; set-group-ID goes with group execute or when the writer
+    /// is outside the group, and stays as a locking mark otherwise.
+    #[test]
+    fn writes_drop_set_id_bits_except_for_root() {
+        let suid = Permissions::from_mode(0o4755);
+        assert_eq!(suid.after_write(0, false), None);
+        assert_eq!(suid.after_write(1000, true).unwrap().to_mode(), 0o755);
+        let sgid = Permissions::from_mode(0o2755);
+        assert_eq!(sgid.after_write(1000, true).unwrap().to_mode(), 0o755);
+        let lock_mark = Permissions::from_mode(0o2644);
+        assert_eq!(lock_mark.after_write(1000, true), None);
+        assert_eq!(lock_mark.after_write(1000, false).unwrap().to_mode(), 0o644);
+        assert_eq!(Permissions::from_mode(0o644).after_write(1000, false), None);
+    }
+
+    /// chown drops set-user-ID always and set-group-ID with group execute.
+    #[test]
+    fn chown_drops_set_id_bits() {
+        assert_eq!(
+            Permissions::from_mode(0o6755)
+                .after_chown()
+                .unwrap()
+                .to_mode(),
+            0o755
+        );
+        assert_eq!(
+            Permissions::from_mode(0o6744)
+                .after_chown()
+                .unwrap()
+                .to_mode(),
+            0o2744
+        );
+        assert_eq!(Permissions::from_mode(0o1777).after_chown(), None);
     }
 
     /// Helper: create a Vfs with a ramfs root filesystem already mounted.
@@ -1551,6 +2342,38 @@ mod tests {
         assert_eq!(canonical, "/a/b/x");
     }
 
+    /// chroot (N-250): under root /jail, absolute paths, `..` and
+    /// absolute symlink targets stay inside it.
+    #[test]
+    fn lookups_under_a_root_never_leave_it() {
+        let vfs = make_vfs_with_root();
+        let root = vfs.root_fs().unwrap().root();
+        root.create("secret", Permissions::default()).unwrap();
+        let jail = root.mkdir("jail", Permissions::default()).unwrap();
+        let etc = jail.mkdir("etc", Permissions::default()).unwrap();
+        etc.create("passwd", Permissions::default()).unwrap();
+        jail.symlink("out", "/secret").unwrap();
+        jail.symlink("up", "../../secret").unwrap();
+        let table = vfs.snapshot();
+        let r = |path: &str, cwd: &str| {
+            table
+                .resolve_in(path, cwd, "/jail", true, 0, None)
+                .map(|(_, canon)| canon)
+        };
+        assert_eq!(r("/etc/passwd", "/").unwrap(), "/jail/etc/passwd");
+        assert_eq!(r("/../../etc/passwd", "/").unwrap(), "/jail/etc/passwd");
+        assert_eq!(r("passwd", "/etc").unwrap(), "/jail/etc/passwd");
+        assert_eq!(r("..", "/").unwrap(), "/jail");
+        // /secret exists outside the jail only.
+        assert!(r("/secret", "/").is_err());
+        assert!(r("/out", "/").is_err());
+        assert!(r("/up", "/").is_err());
+        assert_eq!(root_relative("/jail/etc/passwd", "/jail"), "/etc/passwd");
+        assert_eq!(root_relative("/jail", "/jail"), "/");
+        assert_eq!(root_relative("/jailbreak", "/jail"), "/jailbreak");
+        assert_eq!(root_relative("/a/b", "/"), "/a/b");
+    }
+
     #[test]
     fn dotdot_through_missing_or_file_component_fails() {
         // Each component before ".." must exist and be a directory; a
@@ -1581,7 +2404,7 @@ mod tests {
             .unwrap();
         open.create("f", Permissions::from_mode(0o644)).unwrap();
         let table = vfs.snapshot();
-        let other = Some((1000, 1000));
+        let other = Some(crate::process::creds::Credentials::new(1000, 1000));
         // Root-owned 0700: another user cannot pass through it, even to a
         // world-readable file, and not by ".." either.
         assert!(matches!(
@@ -1671,6 +2494,87 @@ mod tests {
         assert_eq!(vfs.entry_mount_point("/", "f").unwrap(), "/");
         // A mount point belongs to its own mount, so renaming it stays EXDEV.
         assert_eq!(vfs.entry_mount_point("/", "mnt").unwrap(), "/mnt");
+    }
+
+    /// A view as a thread chrooted to "/jail" would have it.
+    fn jailed(vfs: &Vfs) -> CallerView<'_> {
+        CallerView {
+            vfs,
+            ctx: PathContext {
+                cwd: String::from("/"),
+                root: String::from("/jail"),
+                creds: None,
+                pid: 0,
+            },
+        }
+    }
+
+    #[test]
+    fn kernel_lookups_ignore_the_callers_root() {
+        // N-251: a kernel subsystem (the audit log) resolving "/var/log/x"
+        // while a chrooted thread was current resolved it inside the
+        // chroot, into a file the process controls.
+        let vfs = make_vfs_with_root();
+        let root = vfs.root_fs().unwrap().root();
+        root.create("log", Permissions::default()).unwrap();
+        let jail = root.mkdir("jail", Permissions::default()).unwrap();
+        jail.create("log", Permissions::default()).unwrap();
+        let real = root.lookup("log").unwrap().metadata().unwrap().inode;
+        let fake = jail.lookup("log").unwrap().metadata().unwrap().inode;
+
+        let kernel = vfs.resolve_path("/log").unwrap();
+        assert_eq!(kernel.metadata().unwrap().inode, real);
+        let (_, canonical) = vfs
+            .open_follow_canonical("/log", OpenFlags::read_only(), true)
+            .unwrap();
+        assert_eq!(canonical, "/log");
+
+        let caller = jailed(&vfs).resolve_path("/log").unwrap();
+        assert_eq!(caller.metadata().unwrap().inode, fake);
+        let (_, canonical) = jailed(&vfs)
+            .open_follow_canonical("/log", OpenFlags::read_only(), true)
+            .unwrap();
+        assert_eq!(canonical, "/jail/log");
+        // ".." stops at the caller's root.
+        assert_eq!(
+            jailed(&vfs)
+                .resolve_path("/../../log")
+                .unwrap()
+                .metadata()
+                .unwrap()
+                .inode,
+            fake
+        );
+    }
+
+    #[test]
+    fn kernel_context_has_no_caller_identity() {
+        let vfs = make_vfs_with_root();
+        let ctx = vfs.kernel_context();
+        assert_eq!(ctx.root, "/");
+        assert!(ctx.creds.is_none());
+        assert_eq!(ctx.pid, 0);
+    }
+
+    #[test]
+    fn caller_mounts_are_placed_inside_its_root() {
+        // A chrooted mount("/") named the real root (and failed as
+        // already mounted); it must mount over the chroot's "/".
+        let vfs = make_vfs_with_root();
+        let root = vfs.root_fs().unwrap().root();
+        let jail = root.mkdir("jail", Permissions::default()).unwrap();
+        jail.mkdir("mnt", Permissions::default()).unwrap();
+        jail.create("file", Permissions::default()).unwrap();
+
+        jailed(&vfs).mount_by_type("/mnt", "ramfs", 0).unwrap();
+        assert_eq!(vfs.mount_point_of("/jail/mnt/x"), "/jail/mnt");
+        assert_eq!(vfs.mount_point_of("/mnt"), "/");
+        // Not a directory, and not there at all.
+        assert!(jailed(&vfs).mount_by_type("/file", "ramfs", 0).is_err());
+        assert!(jailed(&vfs).mount_by_type("/none", "ramfs", 0).is_err());
+
+        jailed(&vfs).unmount("/mnt").unwrap();
+        assert_eq!(vfs.mount_point_of("/jail/mnt/x"), "/");
     }
 
     #[test]

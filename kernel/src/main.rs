@@ -23,7 +23,6 @@
 #![no_std]
 #![no_main]
 #![feature(custom_test_frameworks)]
-#![feature(abi_x86_interrupt)]
 // naked_functions is stable since Rust 1.88.0, no feature flag needed
 #![test_runner(crate::test_runner)]
 #![reexport_test_harness_main = "test_main"]
@@ -48,8 +47,12 @@ use veridian_kernel::*;
 #[cfg(target_arch = "x86_64")]
 const BOOTLOADER_CONFIG: BootloaderConfig = {
     let mut config = BootloaderConfig::new_default();
-    // Map physical memory for kernel access (required for page table management)
-    config.mappings.physical_memory = Some(Mapping::Dynamic);
+    // Map physical memory for kernel access (required for page table
+    // management) at the base of the kernel half. `Dynamic` placed it in a
+    // lower-half slot (usually L4[3]) inside the user address range, where
+    // a MAP_FIXED mapping could mark the shared physical-map tables USER
+    // and link user pages into every address space (N-134).
+    config.mappings.physical_memory = Some(Mapping::FixedAddress(0xFFFF_8000_0000_0000));
     config.kernel_stack_size = 128 * 1024; // 128 KiB kernel stack
     config
 };
@@ -200,7 +203,7 @@ pub extern "C" fn kernel_main() -> ! {
     // writes are not reordered or elided by the compiler.
     unsafe {
         // Direct write to UART at 0x10000000
-        let uart_base = 0x1000_0000 as *mut u8;
+        let uart_base = crate::mm::phys_to_virt_addr(0x1000_0000) as *mut u8;
         // Write 'V' for VeridianOS
         uart_base.write_volatile(b'V');
         uart_base.write_volatile(b'E');

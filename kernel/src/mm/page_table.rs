@@ -10,7 +10,7 @@ use core::{
     ops::{Index, IndexMut},
 };
 
-use super::{FrameNumber, PageFlags, PhysicalAddress, VirtualAddress, FRAME_ALLOCATOR};
+use super::{pte, FrameNumber, PageFlags, PhysicalAddress, VirtualAddress, FRAME_ALLOCATOR};
 use crate::error::KernelError;
 
 /// Number of entries in a page table
@@ -36,16 +36,18 @@ impl PageTableEntry {
 
     /// Check if the entry is present
     pub const fn is_present(&self) -> bool {
-        self.entry & PageFlags::PRESENT.0 != 0
+        pte::native::is_present(self.entry)
+    }
+
+    /// Whether this entry, above the last level, is a large-page leaf
+    /// rather than a pointer to the next table.
+    pub const fn is_huge(&self) -> bool {
+        pte::native::is_huge(self.entry)
     }
 
     /// Get the physical frame this entry points to
     pub fn frame(&self) -> Option<FrameNumber> {
-        if self.is_present() {
-            Some(FrameNumber::new((self.entry & 0x000FFFFF_FFFFF000) >> 12))
-        } else {
-            None
-        }
+        pte::native::frame(self.entry)
     }
 
     /// Get the address this entry points to
@@ -53,14 +55,28 @@ impl PageTableEntry {
         self.frame().map(|f| PhysicalAddress::new(f.as_u64() << 12))
     }
 
-    /// Get flags for this entry
+    /// Get flags for this entry. Never test `HUGE` in them to tell a leaf
+    /// from a table: RISC-V has no such bit (the level is the size), so the
+    /// test is always false there. Use [`Self::is_huge`].
     pub const fn flags(&self) -> PageFlags {
-        PageFlags(self.entry & 0xFFF)
+        pte::native::flags(self.entry)
     }
 
-    /// Set this entry to map to a frame with given flags
+    /// Set this entry to map to a frame with given flags (a leaf)
     pub fn set(&mut self, frame: FrameNumber, flags: PageFlags) {
-        self.entry = (frame.as_u64() << 12) | flags.0;
+        self.entry = pte::native::leaf(frame, flags);
+    }
+
+    /// Point this entry at the next-level table in `frame`; `user` when it
+    /// is on the path to a user page.
+    pub fn set_table(&mut self, frame: FrameNumber, user: bool) {
+        self.entry = pte::native::table(frame, user);
+    }
+
+    /// Let user pages below this table entry be reached (x86_64 checks
+    /// USER at every level; RISC-V has nothing to add).
+    pub fn grant_user_table(&mut self) {
+        self.entry = pte::native::grant_user_table(self.entry);
     }
 
     /// Set this entry to map to an address with given flags
@@ -201,7 +217,7 @@ impl PageTableHierarchy {
         // which adds the bootloader's physical memory mapping offset.
         unsafe {
             let virt = super::phys_to_virt_addr(l4_addr.as_u64());
-            core::ptr::write_bytes(virt as *mut u8, 0, 4096);
+            crate::mm::page_ops::clear_page(virt as *mut u8);
         }
 
         Ok(Self { l4_table: l4_addr })
@@ -388,15 +404,25 @@ impl PageMapper {
         }
     }
 
-    /// Map a page to a frame
-    pub fn map_page(
+    /// Walk to the L2 entry for `page`, creating the L3 and L2 tables if
+    /// needed (with USER on the intermediate entries for a user mapping).
+    /// Refuses to descend through a 1 GiB leaf.
+    fn l2_entry_for(
         &mut self,
         page: VirtualAddress,
-        frame: FrameNumber,
         flags: PageFlags,
         allocator: &mut impl FrameAllocator,
-    ) -> Result<(), KernelError> {
+    ) -> Result<*mut PageTableEntry, KernelError> {
         let breakdown = VirtualAddressBreakdown::new(page);
+
+        // The upper half belongs to the kernel and its tables are shared by
+        // every address space: a user mapping there would mark them USER for
+        // all processes (N-133).
+        if flags.contains(PageFlags::USER) && usize::from(breakdown.l4_index) >= 256 {
+            return Err(KernelError::PermissionDenied {
+                operation: "user mapping in the kernel half",
+            });
+        }
 
         // Get L4 table
         // SAFETY: `self.l4_table` was provided by the caller of `PageMapper::new`
@@ -406,13 +432,9 @@ impl PageMapper {
         let l4_table = unsafe { &mut *self.l4_table };
         let l4_entry = &mut l4_table[breakdown.l4_index];
 
-        // Intermediate page table entries must include USER if the leaf
-        // mapping is user-accessible. x86_64 checks USER on all 4 levels.
-        let intermediate_flags = if flags.contains(PageFlags::USER) {
-            PageFlags::PRESENT | PageFlags::WRITABLE | PageFlags::USER
-        } else {
-            PageFlags::PRESENT | PageFlags::WRITABLE
-        };
+        // The path to a user page must allow user access (x86_64 checks
+        // USER at every level; on RISC-V table entries carry none).
+        let user = flags.contains(PageFlags::USER);
 
         // Get or create L3 table
         if !l4_entry.is_present() {
@@ -428,14 +450,12 @@ impl PageMapper {
             // to a valid virtual address in the kernel's memory mapping.
             unsafe {
                 let virt = super::phys_to_virt_addr(frame.as_u64() << 12);
-                core::ptr::write_bytes(virt as *mut u8, 0, 4096);
+                crate::mm::page_ops::clear_page(virt as *mut u8);
             }
-            l4_entry.set(frame, intermediate_flags);
-        } else if flags.contains(PageFlags::USER) && !l4_entry.flags().contains(PageFlags::USER) {
+            l4_entry.set_table(frame, user);
+        } else if user {
             // Existing entry needs USER bit added for user-space child mapping
-            let current_flags = l4_entry.flags();
-            let addr = l4_entry.addr().unwrap();
-            l4_entry.set_addr(addr, current_flags | PageFlags::USER);
+            l4_entry.grant_user_table();
         }
         // The entry was just set to PRESENT (either already was, or we set it above),
         // so `addr()` is guaranteed to return `Some`.
@@ -449,6 +469,13 @@ impl PageMapper {
         let l3_table =
             unsafe { &mut *(super::phys_to_virt_addr(l3_phys.as_u64()) as *mut PageTable) };
         let l3_entry = &mut l3_table[breakdown.l3_index];
+
+        if l3_entry.is_huge() {
+            return Err(KernelError::AlreadyExists {
+                resource: "page mapping (1 GiB page)",
+                id: page.as_u64(),
+            });
+        }
 
         // Get or create L2 table
         if !l3_entry.is_present() {
@@ -464,13 +491,11 @@ impl PageMapper {
             // frame is freshly allocated and exclusively owned.
             unsafe {
                 let virt = super::phys_to_virt_addr(frame.as_u64() << 12);
-                core::ptr::write_bytes(virt as *mut u8, 0, 4096);
+                crate::mm::page_ops::clear_page(virt as *mut u8);
             }
-            l3_entry.set(frame, intermediate_flags);
-        } else if flags.contains(PageFlags::USER) && !l3_entry.flags().contains(PageFlags::USER) {
-            let current_flags = l3_entry.flags();
-            let addr = l3_entry.addr().unwrap();
-            l3_entry.set_addr(addr, current_flags | PageFlags::USER);
+            l3_entry.set_table(frame, user);
+        } else if user {
+            l3_entry.grant_user_table();
         }
         let l2_phys = l3_entry.addr().ok_or(KernelError::InvalidState {
             expected: "L3 entry present",
@@ -480,7 +505,81 @@ impl PageMapper {
         // identity-mapped region.
         let l2_table =
             unsafe { &mut *(super::phys_to_virt_addr(l2_phys.as_u64()) as *mut PageTable) };
-        let l2_entry = &mut l2_table[breakdown.l2_index];
+        Ok(&mut l2_table[breakdown.l2_index] as *mut PageTableEntry)
+    }
+
+    /// Map a 2 MiB page: an L2 leaf (HUGE) for the 512 frames starting at
+    /// `frame`. `page` and `frame` must be 2 MiB aligned (MEM-ARCH-01).
+    pub fn map_huge_2m(
+        &mut self,
+        page: VirtualAddress,
+        frame: FrameNumber,
+        flags: PageFlags,
+        allocator: &mut impl FrameAllocator,
+    ) -> Result<(), KernelError> {
+        if page.as_u64() & 0x1F_FFFF != 0 || frame.as_u64() & 0x1FF != 0 {
+            return Err(KernelError::InvalidArgument {
+                name: "huge page",
+                value: "address or frame not 2 MiB aligned",
+            });
+        }
+        // SAFETY: the pointer is to an entry of a live page table reached
+        // through the physical map; this mapper has exclusive access.
+        let l2_entry = unsafe { &mut *self.l2_entry_for(page, flags, allocator)? };
+        if l2_entry.is_present() {
+            return Err(KernelError::AlreadyExists {
+                resource: "page mapping",
+                id: page.as_u64(),
+            });
+        }
+        l2_entry.set(frame, flags | PageFlags::HUGE | PageFlags::PRESENT);
+        Ok(())
+    }
+
+    /// Unmap a 2 MiB page installed by [`Self::map_huge_2m`]; returns its
+    /// first frame. The caller flushes the TLB on every CPU.
+    pub fn unmap_huge_2m(&mut self, page: VirtualAddress) -> Result<FrameNumber, KernelError> {
+        let breakdown = VirtualAddressBreakdown::new(page);
+        // SAFETY: as in translate_page; exclusive access per PageMapper::new.
+        let l4_table = unsafe { &*self.l4_table };
+        let l3_phys = l3_phys_from_entry(&l4_table[breakdown.l4_index], page)?;
+        // SAFETY: a present L4 entry's table, through the physical map.
+        let l3_table = unsafe { &*(super::phys_to_virt_addr(l3_phys) as *const PageTable) };
+        let l2_phys = l3_phys_from_entry(&l3_table[breakdown.l3_index], page)?;
+        // SAFETY: a present L3 entry's table, through the physical map.
+        let l2_table = unsafe { &mut *(super::phys_to_virt_addr(l2_phys) as *mut PageTable) };
+        let entry = &mut l2_table[breakdown.l2_index];
+        if !entry.is_huge() {
+            return Err(KernelError::UnmappedMemory {
+                addr: page.as_u64() as usize,
+            });
+        }
+        let frame = entry.frame().ok_or(KernelError::UnmappedMemory {
+            addr: page.as_u64() as usize,
+        })?;
+        entry.clear();
+        Ok(frame)
+    }
+
+    /// Map a page to a frame
+    pub fn map_page(
+        &mut self,
+        page: VirtualAddress,
+        frame: FrameNumber,
+        flags: PageFlags,
+        allocator: &mut impl FrameAllocator,
+    ) -> Result<(), KernelError> {
+        let breakdown = VirtualAddressBreakdown::new(page);
+        let user = flags.contains(PageFlags::USER);
+        // SAFETY: the pointer is to an entry of a live page table reached
+        // through the physical map; this mapper has exclusive access.
+        let l2_entry = unsafe { &mut *self.l2_entry_for(page, flags, allocator)? };
+        if l2_entry.is_huge() {
+            return Err(KernelError::AlreadyExists {
+                resource: "page mapping (2 MiB page)",
+                id: page.as_u64(),
+            });
+        }
 
         // Get or create L1 table
         if !l2_entry.is_present() {
@@ -496,13 +595,11 @@ impl PageMapper {
             // frame is freshly allocated and exclusively owned.
             unsafe {
                 let virt = super::phys_to_virt_addr(frame.as_u64() << 12);
-                core::ptr::write_bytes(virt as *mut u8, 0, 4096);
+                crate::mm::page_ops::clear_page(virt as *mut u8);
             }
-            l2_entry.set(frame, intermediate_flags);
-        } else if flags.contains(PageFlags::USER) && !l2_entry.flags().contains(PageFlags::USER) {
-            let current_flags = l2_entry.flags();
-            let addr = l2_entry.addr().unwrap();
-            l2_entry.set_addr(addr, current_flags | PageFlags::USER);
+            l2_entry.set_table(frame, user);
+        } else if user {
+            l2_entry.grant_user_table();
         }
         let l1_phys = l2_entry.addr().ok_or(KernelError::InvalidState {
             expected: "L2 entry present",
@@ -575,6 +672,17 @@ impl PageMapper {
                 addr: page.as_u64() as usize,
             });
         }
+        // A 2 MiB leaf: the 4 KiB frame within it (flags keep HUGE).
+        if l2_entry.is_huge() {
+            let base = l2_entry.frame().ok_or(KernelError::UnmappedMemory {
+                addr: page.as_u64() as usize,
+            })?;
+            return Ok((
+                FrameNumber::new(base.as_u64() + (page.as_u64() >> 12 & 0x1FF)),
+                // RISC-V leaves have no HUGE bit: the level is the size.
+                l2_entry.flags() | PageFlags::HUGE,
+            ));
+        }
 
         let l1_phys = l2_entry.addr().ok_or(KernelError::InvalidState {
             expected: "L2 entry has address",
@@ -603,38 +711,64 @@ impl PageMapper {
         new_flags: PageFlags,
     ) -> Result<PageFlags, KernelError> {
         let breakdown = VirtualAddressBreakdown::new(page);
+        // A leaf that becomes user-accessible needs USER on every level
+        // above it too (x86_64 checks all four). The tables may have been
+        // created for a kernel-only leaf -- a PROT_NONE mapping -- so mprotect
+        // to PROT_READ|PROT_WRITE left user code faulting on a present page
+        // (musl's thread stacks: mmap PROT_NONE, then mprotect). Never in
+        // the kernel half.
+        let grant_user =
+            new_flags.contains(PageFlags::USER) && usize::from(breakdown.l4_index) < 256;
+        let add_user = |entry: &mut PageTableEntry| {
+            if grant_user {
+                entry.grant_user_table();
+            }
+        };
 
         // SAFETY: Same invariants as other PageMapper methods.
-        let l4_table = unsafe { &*self.l4_table };
-        let l4_entry = &l4_table[breakdown.l4_index];
+        let l4_table = unsafe { &mut *self.l4_table };
+        let l4_entry = &mut l4_table[breakdown.l4_index];
         if !l4_entry.is_present() {
             return Err(KernelError::UnmappedMemory {
                 addr: page.as_u64() as usize,
             });
         }
 
+        add_user(l4_entry);
         let l3_phys = l3_phys_from_entry(l4_entry, page)?;
         // SAFETY: Physical address from a present L4 entry, converted to virtual via
         // identity-mapped region.
-        let l3_table = unsafe { &*(super::phys_to_virt_addr(l3_phys as u64) as *const PageTable) };
-        let l3_entry = &l3_table[breakdown.l3_index];
+        let l3_table =
+            unsafe { &mut *(super::phys_to_virt_addr(l3_phys as u64) as *mut PageTable) };
+        let l3_entry = &mut l3_table[breakdown.l3_index];
         if !l3_entry.is_present() {
             return Err(KernelError::UnmappedMemory {
                 addr: page.as_u64() as usize,
             });
         }
 
+        add_user(l3_entry);
         let l2_phys = l3_phys_from_entry(l3_entry, page)?;
         // SAFETY: Physical address from a present L3 entry, converted to virtual via
         // identity-mapped region.
-        let l2_table = unsafe { &*(super::phys_to_virt_addr(l2_phys as u64) as *const PageTable) };
-        let l2_entry = &l2_table[breakdown.l2_index];
+        let l2_table =
+            unsafe { &mut *(super::phys_to_virt_addr(l2_phys as u64) as *mut PageTable) };
+        let l2_entry = &mut l2_table[breakdown.l2_index];
         if !l2_entry.is_present() {
             return Err(KernelError::UnmappedMemory {
                 addr: page.as_u64() as usize,
             });
         }
+        if l2_entry.is_huge() {
+            // A 2 MiB leaf has no L1 table below it; treating the data page
+            // as one would rewrite user memory.
+            return Err(KernelError::InvalidArgument {
+                name: "page",
+                value: "inside a 2 MiB page",
+            });
+        }
 
+        add_user(l2_entry);
         let l1_phys = l3_phys_from_entry(l2_entry, page)?;
         // SAFETY: Physical address from a present L2 entry, converted to virtual via
         // identity-mapped region.
@@ -695,6 +829,13 @@ impl PageMapper {
         if !l2_entry.is_present() {
             return Err(KernelError::UnmappedMemory {
                 addr: page.as_u64() as usize,
+            });
+        }
+        if l2_entry.is_huge() {
+            // Part of a 2 MiB page: unmapped whole, by unmap_huge_2m.
+            return Err(KernelError::InvalidArgument {
+                name: "page",
+                value: "inside a 2 MiB page",
             });
         }
 
@@ -768,4 +909,25 @@ pub trait FrameAllocator {
         count: usize,
         numa_node: Option<usize>,
     ) -> Result<FrameNumber, super::FrameAllocatorError>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn entry_flags_keep_no_execute_and_cow() {
+        let mut e = PageTableEntry::empty();
+        let flags = PageFlags::PRESENT | PageFlags::USER | PageFlags::COW | PageFlags::NO_EXECUTE;
+        e.set(FrameNumber::new(0x1234), flags);
+        let got = e.flags();
+        assert!(
+            got.contains(PageFlags::NO_EXECUTE),
+            "NX must survive a read-back"
+        );
+        assert!(got.contains(PageFlags::COW));
+        assert!(!got.contains(PageFlags::WRITABLE));
+        assert_eq!(e.frame(), Some(FrameNumber::new(0x1234)));
+        assert!(!got.without(PageFlags::COW).contains(PageFlags::COW));
+    }
 }

@@ -1,0 +1,94 @@
+VeridianOS: fix KWallet compiler warnings; report portal fd failures
+
+GCC reported, for the VeridianOS cross build:
+
+- src/runtime/kwalletbackend/cbc.cc:105: 'rc' may be used uninitialized
+  [-Wmaybe-uninitialized]. Latent bug: CipherBlockChain::encrypt() returned
+  an indeterminate value when called with len == 0 (the block loop does not
+  run). It now returns 0 for zero bytes, matching decrypt() (rc = 0) and
+  BlowFish::encrypt() (returns len). No change for non-empty input.
+- src/runtime/ksecretd/kwalletfreedesktopattributes.cpp:36: ignoring return
+  value of QFile::open [-Wunused-result]. The code already tested
+  file.isOpen() on the next line; test the open() result instead. No
+  behaviour change.
+- src/runtime/ksecretd/kwalletportalsecrets.cpp:73: ignoring return value of
+  QFile::open(int fd, ...) [-Wunused-result]. Real bug: when the secret
+  could not be handed to xdg-desktop-portal through the request's file
+  descriptor, the portal was still told the request succeeded (response
+  0), so the application went on with an empty secret. The open, the
+  write and an explicit flush() are checked (QFile::open() on a
+  descriptor succeeds even for an invalid one; the error only shows when
+  the buffered data is written), the error is logged, and the reply is
+  response 2 ("other error"), as when the wallet cannot be opened.
+- src/runtime/ksecretd/ksecretd.cpp:284: unused parameter 'modal'
+  [-Wunused-parameter]. It is only read under #if WITH_X11; mark it
+  [[maybe_unused]]. No behaviour change.
+
+The cbc.cc and portal fixes are prepared for upstream
+(invent.kde.org/frameworks/kwallet).
+
+Applies on top of the in-place edits build-kf6.sh makes to
+src/runtime/ksecretd/CMakeLists.txt and
+src/runtime/kwalletd/secretserviceclient.cpp (no file overlaps).
+
+--- a/src/runtime/ksecretd/ksecretd.cpp
++++ b/src/runtime/ksecretd/ksecretd.cpp
+@@ -281,7 +281,7 @@
+ }
+ 
+ // Sets up a dialog that will be shown by kwallet.
+-void KSecretD::setupDialog(QWidget *dialog, WId wId, bool modal)
++void KSecretD::setupDialog(QWidget *dialog, WId wId, [[maybe_unused]] bool modal)
+ {
+     if (wId != 0) {
+         // correct, set dialog parent
+--- a/src/runtime/ksecretd/kwalletfreedesktopattributes.cpp
++++ b/src/runtime/ksecretd/kwalletfreedesktopattributes.cpp
+@@ -33,8 +33,7 @@
+     QByteArray content;
+     {
+         QFile file(_path);
+-        file.open(QIODevice::ReadOnly | QIODevice::Text);
+-        if (!file.isOpen()) {
++        if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
+             qCDebug(KSECRETD_LOG) << "Can't read attributes file " << _path;
+             return;
+         }
+--- a/src/runtime/ksecretd/kwalletportalsecrets.cpp
++++ b/src/runtime/ksecretd/kwalletportalsecrets.cpp
+@@ -7,6 +7,7 @@
+ 
+ #include "kwalletportalsecrets.h"
+ 
++#include "ksecretd_debug.h"
+ #include "kwalletportalsecretsadaptor.h"
+ 
+ #include <QRandomGenerator>
+@@ -70,9 +71,13 @@
+     }
+ 
+     QFile outFile;
+-    outFile.open(request.fd, QIODevice::ReadWrite);
+-
+-    outFile.write(secret);
++    if (!outFile.open(request.fd, QIODevice::ReadWrite) || outFile.write(secret) != secret.size() || !outFile.flush()) {
++        qCWarning(KSECRETD_LOG) << "Could not hand the secret for" << request.appId << "to the portal:" << outFile.errorString();
++        const auto replyList = QVariantList{{(uint)2}, {{QVariantMap{}}}};
++        auto reply = request.message.createReply(replyList);
++        QDBusConnection::sessionBus().send(reply);
++        return;
++    }
+ 
+     const auto replyList = QVariantList{{(uint)0}, {{QVariantMap{}}}};
+     auto reply = request.message.createReply(replyList);
+--- a/src/runtime/kwalletbackend/cbc.cc
++++ b/src/runtime/kwalletbackend/cbc.cc
+@@ -74,7 +74,7 @@
+ int CipherBlockChain::encrypt(void *block, int len)
+ {
+     if (_cipher && !_reader) {
+-        int rc;
++        int rc = 0;
+ 
+         _writer |= 1;
+ 

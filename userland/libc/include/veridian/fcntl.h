@@ -76,6 +76,21 @@ extern "C" {
 /** Duplicate fd with close-on-exec set */
 #define F_DUPFD_CLOEXEC 1030
 
+/** Add seals to a memfd (memfd_create with MFD_ALLOW_SEALING) */
+#define F_ADD_SEALS     1033
+
+/** Get a memfd's seals */
+#define F_GET_SEALS     1034
+
+/** Seals: no more seals, no shrinking, no growing, no writes, no new
+ *  writers, no change to the execute bits */
+#define F_SEAL_SEAL         0x0001
+#define F_SEAL_SHRINK       0x0002
+#define F_SEAL_GROW         0x0004
+#define F_SEAL_WRITE        0x0008
+#define F_SEAL_FUTURE_WRITE 0x0010
+#define F_SEAL_EXEC         0x0020
+
 /** Get record lock */
 #define F_GETLK         5
 /** Set record lock (blocking) */

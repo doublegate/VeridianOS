@@ -1,0 +1,67 @@
+VeridianOS: no unused variable/parameters without getutent_r() or innetgr()
+
+musl provides neither getutent_r() nor innetgr(), and GCC reported:
+
+- modules/pam_timestamp/pam_timestamp.c:231 "unused variable 'utbuf'"
+  (check_login_time): the buffer is only passed to getutent_r(); it is now
+  declared under the same HAVE_GETUTENT_R condition as that call.
+- modules/pam_succeed_if/pam_succeed_if.c:266 and :279 "unused parameter"
+  'host', 'user' and 'group' (evaluate_innetgr, evaluate_notinnetgr):
+  they are only passed to innetgr(). The file already marks pamh with
+  SOMETIMES_UNUSED (UNUSED when HAVE_INNETGR, since only the fallback logs
+  through it); the three parameters get the mirror-image macro,
+  UNUSED_WITHOUT_INNETGR (UNUSED when innetgr() is missing).
+
+No behaviour change in either configuration.
+
+
+diff -ru a/modules/pam_succeed_if/pam_succeed_if.c b/modules/pam_succeed_if/pam_succeed_if.c
+--- a/modules/pam_succeed_if/pam_succeed_if.c	2026-10-08 17:20:38.592779853 -0400
++++ b/modules/pam_succeed_if/pam_succeed_if.c	2026-10-08 17:20:38.602781756 -0400
+@@ -257,13 +257,18 @@
+ 
+ #ifdef HAVE_INNETGR
+ # define SOMETIMES_UNUSED UNUSED
++# define UNUSED_WITHOUT_INNETGR
+ #else
+ # define SOMETIMES_UNUSED
++# define UNUSED_WITHOUT_INNETGR UNUSED
+ #endif
+ 
+ /* Return PAM_SUCCESS if the (host,user) is in the netgroup. */
+ static int
+-evaluate_innetgr(const pam_handle_t* pamh SOMETIMES_UNUSED, const char *host, const char *user, const char *group)
++evaluate_innetgr(const pam_handle_t* pamh SOMETIMES_UNUSED,
++		 const char *host UNUSED_WITHOUT_INNETGR,
++		 const char *user UNUSED_WITHOUT_INNETGR,
++		 const char *group UNUSED_WITHOUT_INNETGR)
+ {
+ #ifdef HAVE_INNETGR
+ 	if (innetgr(group, host, user, NULL) == 1)
+@@ -276,7 +281,10 @@
+ }
+ /* Return PAM_SUCCESS if the (host,user) is NOT in the netgroup. */
+ static int
+-evaluate_notinnetgr(const pam_handle_t* pamh SOMETIMES_UNUSED, const char *host, const char *user, const char *group)
++evaluate_notinnetgr(const pam_handle_t* pamh SOMETIMES_UNUSED,
++		    const char *host UNUSED_WITHOUT_INNETGR,
++		    const char *user UNUSED_WITHOUT_INNETGR,
++		    const char *group UNUSED_WITHOUT_INNETGR)
+ {
+ #ifdef HAVE_INNETGR
+ 	if (innetgr(group, host, user, NULL) == 0)
+diff -ru a/modules/pam_timestamp/pam_timestamp.c b/modules/pam_timestamp/pam_timestamp.c
+--- a/modules/pam_timestamp/pam_timestamp.c	2026-10-08 17:20:38.589743673 -0400
++++ b/modules/pam_timestamp/pam_timestamp.c	2026-10-08 17:20:38.602646509 -0400
+@@ -228,7 +228,10 @@
+ 
+ 	oldest_login = usec/USEC_PER_SEC;
+ #else
+-	struct utmp utbuf, *ut;
++#ifdef HAVE_GETUTENT_R
++	struct utmp utbuf;
++#endif
++	struct utmp *ut;
+ 
+ 	setutent();
+ 	while(

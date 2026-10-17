@@ -56,7 +56,7 @@ pub fn execute_pipeline_multi(
         if pid < 0 {
             // Fork failed -- kill any children we already started
             for &cpid in &child_pids {
-                let _ = unsafe { syscall::syscall2(syscall::SYS_PROCESS_KILL, cpid as usize, 9) };
+                let _ = unsafe { syscall::syscall2(syscall::SYS_kill, cpid as usize, 9) };
             }
             for p in &pipes {
                 syscall::sys_close(p[0]);

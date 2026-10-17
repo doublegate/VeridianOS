@@ -1,0 +1,22 @@
+VeridianOS: qdbusxml2cpp ignores foreign elements in signals too
+
+The D-Bus introspection format allows elements from other XML namespaces
+(the freedesktop documentation markup, <doc:doc>, in UPower's and
+fprintd's interface files for instance). QDBusXmlParser skips them
+silently in interfaces, methods and properties -- it warns only about
+unknown elements without a prefix -- but in a signal it warned about
+every unknown element: "Unknown element 'doc' while checking for signal
+arguments" for each documented signal. Signals now get the same prefix
+check as methods.
+
+--- a/src/dbus/qdbusxmlparser.cpp
++++ b/src/dbus/qdbusxmlparser.cpp
+@@ -255,7 +255,7 @@
+                     parseArg(attributes, argument);
+                     arguments << argument;
+                 }
+-            } else {
++            } else if (m_xml.prefix().isEmpty()) {
+                 qDBusParserWarning("Unknown element '%s' while checking for signal arguments",
+                                    qPrintable(m_xml.name().toString()));
+             }

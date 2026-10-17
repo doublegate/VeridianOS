@@ -29,7 +29,7 @@ struct FdInner {
 /// A reference-counted wrapper around an OS file descriptor.
 ///
 /// When the last `SharedFd` referencing a given descriptor is dropped the
-/// descriptor is closed via `SYS_FILE_CLOSE`.
+/// descriptor is closed via `SYS_close`.
 ///
 /// `SharedFd` is `Send` and `Sync` -- the file descriptor itself is just an
 /// integer and the kernel handles concurrent access safely.

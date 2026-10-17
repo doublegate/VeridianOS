@@ -100,7 +100,7 @@ not end-to-end IPC.
 | Frame alloc (single) | <500ns | 2,215ns (per-CPU) / 1,525ns (global) | Different methodology |
 | Cap validation | Not measured | 57ns | New |
 | Context switch | ~500ns (simulated) | Not directly measured | -- |
-| IPC small msg | <1us (register) | 44ns (stats read) | Different measurement |
+| IPC small msg | <1us (register) | not measured (44ns was a counter read) | The register fast path was never reachable and was removed in v0.27 |
 
 Note: Phase 0/1 baselines measured different operations (simulated context switches,
 allocator unit tests). Direct comparison is limited. The v0.21.0 benchmarks measure
@@ -190,3 +190,67 @@ Host-target unit tests at baseline: **4,284 passed, 0 failed**; after Sprint B: 
 The "Host-Target Tests" section above is out of date: the host build compiles, and
 `[INIT] Results: 34/34 passed` plus BOOTOK hold on all three architectures (29/29 in the v0.21.0
 run above; v0.26.0 added five boot tests).
+
+## v0.27 -- Build Mode and Page Clearing (N-281)
+
+**Dev kernels are not fit for timing.** `-Zbuild-std` builds `core` and `compiler_builtins` at
+the kernel's own opt-level, so a dev kernel's `memset` and `memcpy` are unoptimised (about 30
+cycles a byte), and a `[profile.dev.package."*"]` override does not reach them. Anything that
+clears or copies memory looks many times slower than it is. Every figure from here on states
+its build mode, and decisions are taken on release-kernel numbers. The v0.26.0 table above is a
+dev kernel throughout; its `frame_alloc_1` (62 ns) now measures 2,115 ns in a dev kernel and
+74 ns in a release one.
+
+Same machine and QEMU as above, 1 vCPU, 2026-10-15. `perf` command (1,000 iterations):
+
+| Benchmark | Dev | Release |
+|-----------|----:|--------:|
+| syscall_getpid | 86 | 33 |
+| frame_alloc_1 | 2,115 | 74 |
+| frame_alloc_global | 297 | 85 |
+| cap_lookup | 97 | 29 |
+| atomic_counter | 14 | 13 |
+| ipc_stats_read | 20 | 8 |
+| sched_current | 81 | 32 |
+| page_clear (new) | 36 | 31 |
+
+`page_clear` zeroes one cache-warm 4 KiB frame with `mm::page_ops::clear_page` (`rep stosq`).
+With `write_bytes`, as every page was zeroed before, it took 32,889 ns (dev) and 868 ns
+(release).
+
+Anonymous mmap of private read-write pages, then a write to each page, then munmap (a
+temporary user-space benchmark; mean of 500 runs, 50 for 256 pages, one process):
+
+| Pages | mmap before (dev) | mmap after (dev) | mmap before (release) | mmap after (release) | touch per page |
+|------:|------------------:|-----------------:|----------------------:|---------------------:|---------------:|
+| 1 | 60 us | 25 us | 3 us | 1 us | 0.7-2 us |
+| 16 | 576 us | 31 us | 19 us | 3 us | 0.2-0.3 us |
+| 256 | 8.8 ms | 0.65-4.2 ms | 2.4-6.8 ms | 0.4 ms | 0.2 us |
+
+- Touching a page takes no fault: anonymous mappings are filled when made. The earlier "a
+  page fault costs ~35 us" was the zeroing inside mmap divided by the page count.
+- Four processes on four CPUs take as long as one (16 pages: 562 vs 592 us before the fix), so
+  nothing on the path is contended. Four processes on one CPU take four times as long.
+- 256-page mappings vary between boots by several milliseconds: frames the guest has not used
+  before are backed by the host on first touch (EPT faults), which the guest cannot avoid.
+
+### Per-CPU frame cache for mmap and munmap (N-261, not adopted)
+
+Release kernel, 4 vCPUs, the same benchmark, two boots each (mmap / munmap, mean per call):
+
+| Pages | Variant | One process | Four processes |
+|------:|---------|------------:|---------------:|
+| 16 | global allocator (current) | 3-4 / 3 us | 11-12 / 5 us |
+| 16 | per-CPU alloc and free | 3 / 4 us | 4 / 6 us |
+| 16 | per-CPU alloc, global free | 3 / 3 us | 70-113 / 4 us |
+| 256 | global allocator (current) | 75-78 / 20 us | 1,126-1,749 / 32-36 us |
+| 256 | per-CPU alloc and free | 62 / 42 us | 142 / 62 us |
+| 256 | per-CPU alloc, global free | 611-1,156 / 30-31 us | 3,501-6,902 / 36-39 us |
+
+Allocating and freeing through the per-CPU cache removes the contention on the global lock, but
+the cache does not check a frame on free (the global allocator refuses one that is already free
+or not RAM), so a double free on the unmap paths would give one frame to two owners. That
+variant was reverted; it needs per-frame state the cache can check without the global lock
+(N-261). Allocating from the cache while freeing globally is the worst of the three: the cache
+refills with frames nobody used recently, which the host backs on first touch. The 1-page case
+costs five times as much with four processes in every variant (N-282).

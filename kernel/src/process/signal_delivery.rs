@@ -34,10 +34,9 @@
 #![allow(dead_code)] // Signal delivery infrastructure -- cross-arch stubs + frame helpers
 
 #[allow(unused_imports)]
-use crate::{error::KernelError, println, process::pcb::Process, process::thread::Thread};
-
-/// Syscall number for SIG_RETURN (must match Syscall::SigReturn = 123).
-const SYS_SIGRETURN: u64 = 123;
+use crate::{
+    error::KernelError, println, process::pcb::Process, process::thread::Thread, syscall::Syscall,
+};
 
 /// Signal handler value indicating default action.
 const SIG_DFL: u64 = 0;
@@ -98,27 +97,38 @@ const SIGNAL_FRAME_SIZE: usize = core::mem::size_of::<SignalFrame>();
 ///
 /// This small code sequence is written onto the user stack just above the
 /// signal frame. When the signal handler returns, it executes this trampoline
-/// which calls `syscall(SYS_SIGRETURN, frame_ptr)`.
+/// which calls `rt_sigreturn(frame_ptr)`.
 ///
 /// Assembly:
 /// ```text
 ///   lea rdi, [rsp]      ; frame_ptr = current RSP (points to SignalFrame)
-///   mov rax, 123         ; SYS_SIGRETURN
+///   mov rax, Syscall::RtSigreturn
 ///   syscall
 ///   ud2                  ; should never reach here
 /// ```
 ///
 /// Encoded bytes (15 bytes):
 ///   48 8d 3c 24          lea rdi, [rsp]
-///   48 c7 c0 7b 00 00 00 mov rax, 123
+///   48 c7 c0 nn nn nn nn mov rax, imm32 (Syscall::RtSigreturn)
 ///   0f 05                syscall
 ///   0f 0b                ud2
 #[cfg(target_arch = "x86_64")]
 const SIGRETURN_TRAMPOLINE: [u8; 15] = [
-    0x48, 0x8d, 0x3c, 0x24, // lea rdi, [rsp]
-    0x48, 0xc7, 0xc0, 0x7b, 0x00, 0x00, 0x00, // mov rax, 123
-    0x0f, 0x05, // syscall
-    0x0f, 0x0b, // ud2
+    0x48,
+    0x8d,
+    0x3c,
+    0x24, // lea rdi, [rsp]
+    0x48,
+    0xc7,
+    0xc0,
+    Syscall::RtSigreturn as u8,
+    (Syscall::RtSigreturn as u32 >> 8) as u8,
+    (Syscall::RtSigreturn as u32 >> 16) as u8,
+    (Syscall::RtSigreturn as u32 >> 24) as u8, // mov rax, Syscall::RtSigreturn
+    0x0f,
+    0x05, // syscall
+    0x0f,
+    0x0b, // ud2
 ];
 
 /// Size of the trampoline code in bytes.
@@ -129,70 +139,41 @@ const TRAMPOLINE_SIZE: usize = SIGRETURN_TRAMPOLINE.len();
 // Physical memory write/read helpers (same pattern as creation.rs)
 // ============================================================================
 
-/// Write a value to a user-space address via the physical memory window.
+/// Write a value to a user-space address of `memory_space`.
 ///
 /// # Safety
 ///
-/// `vaddr` must be a valid mapped address in the process's VAS with write
-/// permissions. The caller must ensure no concurrent access to this memory.
+/// `vaddr` must be a user address the process may write. The caller must
+/// ensure no concurrent access to this memory.
 #[cfg(feature = "alloc")]
 unsafe fn write_to_user_stack(
     memory_space: &crate::mm::VirtualAddressSpace,
     vaddr: usize,
     value: usize,
 ) {
-    use crate::mm::VirtualAddress;
-
-    let pt_root = memory_space.get_page_table();
-    if pt_root == 0 {
-        return;
-    }
-
-    let mapper = unsafe { crate::mm::vas::create_mapper_from_root_pub(pt_root) };
-    if let Ok((frame, _flags)) = mapper.translate_page(VirtualAddress(vaddr as u64)) {
-        let page_offset = vaddr & 0xFFF;
-        let phys_addr = (frame.as_u64() << 12) + page_offset as u64;
-        // SAFETY: phys_addr is converted to a kernel-accessible virtual
-        // address via phys_to_virt_addr (required on x86_64 where physical
-        // memory is mapped at a dynamic offset, not identity-mapped).
-        unsafe {
-            let virt = crate::mm::phys_to_virt_addr(phys_addr);
-            core::ptr::write(virt as *mut usize, value);
-        }
-    }
+    // SAFETY: as this function's own contract.
+    unsafe { write_bytes_to_user_stack(memory_space, vaddr, &value.to_ne_bytes()) }
 }
 
-/// Write a byte slice to a user-space address via the physical memory window.
+/// Write a byte slice to a user-space address of `memory_space`.
+///
+/// The write goes through
+/// [`crate::mm::VirtualAddressSpace::write_bytes_private`], so a frame this
+/// address space shares -- copy-on-write after a fork, or a page of a file's
+/// page cache -- is copied first and the write never reaches another process. A
+/// page the process may not write is left untouched, as an unmapped one is.
 ///
 /// # Safety
 ///
-/// Same requirements as `write_to_user_stack`. The range
-/// `[vaddr, vaddr+data.len())` must be within a single mapped page.
+/// `vaddr` must be a user address the process may write. The caller must
+/// ensure no concurrent access to this memory.
 #[cfg(feature = "alloc")]
 unsafe fn write_bytes_to_user_stack(
     memory_space: &crate::mm::VirtualAddressSpace,
     vaddr: usize,
     data: &[u8],
 ) {
-    use crate::mm::VirtualAddress;
-
-    let pt_root = memory_space.get_page_table();
-    if pt_root == 0 {
-        return;
-    }
-
-    let mapper = unsafe { crate::mm::vas::create_mapper_from_root_pub(pt_root) };
-    if let Ok((frame, _flags)) = mapper.translate_page(VirtualAddress(vaddr as u64)) {
-        let page_offset = vaddr & 0xFFF;
-        let phys_addr = (frame.as_u64() << 12) + page_offset as u64;
-        // SAFETY: phys_addr is converted to a kernel-accessible virtual
-        // address via phys_to_virt_addr. The destination has at least
-        // data.len() bytes available within the page.
-        unsafe {
-            let virt = crate::mm::phys_to_virt_addr(phys_addr);
-            core::ptr::copy_nonoverlapping(data.as_ptr(), virt as *mut u8, data.len());
-        }
-    }
+    let _ = memory_space.write_bytes_private(vaddr as u64, data, false);
 }
 
 /// Read a `usize` value from a user-space address via the physical memory
@@ -214,6 +195,8 @@ unsafe fn read_from_user_stack(
         return None;
     }
 
+    // SAFETY: pt_root is the non-zero L4 physical address owned by
+    // `memory_space`, which is what create_mapper_from_root requires.
     let mapper = unsafe { crate::mm::vas::create_mapper_from_root_pub(pt_root) };
     if let Ok((frame, _flags)) = mapper.translate_page(VirtualAddress(vaddr as u64)) {
         let page_offset = vaddr & 0xFFF;
@@ -248,6 +231,8 @@ unsafe fn read_bytes_from_user_stack(
         return false;
     }
 
+    // SAFETY: pt_root is the non-zero L4 physical address owned by
+    // `memory_space`, which is what create_mapper_from_root requires.
     let mapper = unsafe { crate::mm::vas::create_mapper_from_root_pub(pt_root) };
     if let Ok((frame, _flags)) = mapper.translate_page(VirtualAddress(vaddr as u64)) {
         let page_offset = vaddr & 0xFFF;
@@ -300,10 +285,10 @@ pub fn deliver_signal(
     thread: &Thread,
     signum: usize,
 ) -> Result<bool, KernelError> {
-    if signum == 0 || signum > 31 {
+    if signum == 0 || signum > super::signals::NSIG {
         return Err(KernelError::InvalidArgument {
             name: "signum",
-            value: "signal number out of range (1-31)",
+            value: "signal number out of range (1-64)",
         });
     }
 
@@ -365,14 +350,14 @@ fn deliver_signal_to_handler(
 /// general-purpose registers (x0-x30), SP, PC, and PSTATE. A 4-instruction
 /// trampoline is placed immediately after the frame; when the signal handler
 /// returns, it executes the trampoline which invokes `svc #0` with
-/// `SYS_SIGRETURN` in w8 (the syscall number register on AArch64).
+/// `Syscall::RtSigreturn` in w8 (the syscall number register on AArch64).
 ///
 /// # Stack layout after delivery (growing downward)
 ///
 /// ```text
 /// [original SP]
 ///   ...
-/// [trampoline: add x0,sp,#0 / mov w8,#SYS_SIGRETURN / svc #0 / brk #0]
+/// [trampoline: add x0,sp,#0 / mov w8,#Syscall::RtSigreturn / svc #0 / brk #0]
 /// [Aarch64SignalFrame]         <- new SP
 ///   .trampoline_ret            = address of trampoline code
 ///   .signum
@@ -406,7 +391,7 @@ fn deliver_signal_aarch64(
         pstate: u64,
     }
 
-    // Trampoline: add x0, sp, #0 ; mov w8, #SYS_SIGRETURN ; svc #0 ; brk #0
+    // Trampoline: add x0, sp, #0 ; mov w8, #Syscall::RtSigreturn ; svc #0 ; brk #0
     const TRAMPOLINE: [u32; 4] = [
         0x910003e0, // add x0, sp, #0
         0x52800000, // mov w8,#0 (patched below)
@@ -459,9 +444,9 @@ fn deliver_signal_aarch64(
         );
     }
 
-    // Patch trampoline SYS_SIGRETURN number
+    // Patch trampoline Syscall::RtSigreturn number
     let mut tramp = TRAMPOLINE;
-    tramp[1] = 0x52800000 | ((SYS_SIGRETURN as u32) << 5); // mov w8,#SYS_SIGRETURN
+    tramp[1] = 0x52800000 | ((Syscall::RtSigreturn as u32) << 5); // mov w8, #Syscall::RtSigreturn
 
     // SAFETY: The trampoline is written immediately after the signal
     // frame at `sp + frame_size`. This address is within the same user
@@ -507,7 +492,7 @@ fn deliver_signal_aarch64(
 /// general-purpose registers (x1-x31; x0 is hardwired to zero), sepc, and
 /// sstatus. A 4-instruction trampoline is placed immediately after the frame;
 /// when the signal handler returns, it executes the trampoline which invokes
-/// `ecall` with `SYS_SIGRETURN` in a7 (the syscall number register on
+/// `ecall` with `Syscall::RtSigreturn` in a7 (the syscall number register on
 /// RISC-V).
 ///
 /// # Stack layout after delivery (growing downward)
@@ -515,7 +500,7 @@ fn deliver_signal_aarch64(
 /// ```text
 /// [original SP]
 ///   ...
-/// [trampoline: addi a0,sp,0 / addi a7,x0,SYS_SIGRETURN / ecall / ebreak]
+/// [trampoline: addi a0,sp,0 / addi a7,x0,Syscall::RtSigreturn / ecall / ebreak]
 /// [RiscvSignalFrame]           <- new SP
 ///   .trampoline_ret            = address of trampoline code
 ///   .signum
@@ -549,7 +534,7 @@ fn deliver_signal_riscv(
 
     const TRAMPOLINE: [u32; 4] = [
         0x00010513, // addi a0, sp, 0   (frame ptr via sp)
-        0x00000893, // addi a7, x0, imm (patched below with SYS_SIGRETURN)
+        0x00000893, // addi a7, x0, imm (patched below with Syscall::RtSigreturn)
         0x00000073, // ecall
         0x00100073, // ebreak
     ];
@@ -629,7 +614,7 @@ fn deliver_signal_riscv(
     }
 
     let mut tramp = TRAMPOLINE;
-    tramp[1] = 0x00000893 | ((SYS_SIGRETURN as u32) << 20); // addi a7,x0,SYS_SIGRETURN
+    tramp[1] = 0x00000893 | ((Syscall::RtSigreturn as u32) << 20); // addi a7, x0, Syscall::RtSigreturn
 
     // SAFETY: The trampoline is written immediately after the signal
     // frame at `sp + frame_size`. This address is within the same user
@@ -878,6 +863,17 @@ fn restore_signal_frame_x86_64(
     // valid. We copy the struct by value.
     let frame: SignalFrame = unsafe { core::ptr::read(frame_bytes.as_ptr() as *const SignalFrame) };
 
+    // The frame is user memory: a process may have rewritten it. Only a user
+    // RIP and RSP are accepted, and RFLAGS keeps only the bits user code can
+    // set itself, so sigreturn cannot raise IOPL or set system flags (N-170).
+    use crate::arch::x86_64::trap::{is_user_address, sanitize_user_rflags};
+    if !is_user_address(frame.rip) || !is_user_address(frame.rsp) {
+        return Err(KernelError::InvalidArgument {
+            name: "frame_ptr",
+            value: "signal frame holds a non-user RIP or RSP",
+        });
+    }
+
     // Restore the thread context
     {
         let mut ctx = thread.context.lock();
@@ -898,7 +894,7 @@ fn restore_signal_frame_x86_64(
         ctx.r14 = frame.r14;
         ctx.r15 = frame.r15;
         ctx.rip = frame.rip;
-        ctx.rflags = frame.rflags;
+        ctx.rflags = sanitize_user_rflags(frame.rflags);
     }
 
     // Restore the signal mask

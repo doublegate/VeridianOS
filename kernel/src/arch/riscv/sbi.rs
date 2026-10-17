@@ -11,13 +11,22 @@ const SBI_EXT_BASE: usize = 0x10;
 const SBI_EXT_TIMER: usize = 0x54494D45; // "TIME"
 const SBI_EXT_IPI: usize = 0x735049; // "sPI"
 const SBI_EXT_RFENCE: usize = 0x52464E43; // "RFNC"
-#[allow(dead_code)] // SBI extension ID per RISC-V SBI spec
 const SBI_EXT_HSM: usize = 0x48534D; // "HSM"
 #[allow(dead_code)] // SBI extension ID per RISC-V SBI spec
 const SBI_EXT_SRST: usize = 0x53525354; // "SRST"
 
 /// SBI function IDs for timer extension
 const SBI_TIMER_SET_TIMER: usize = 0;
+
+/// SBI RFENCE function IDs.
+const SBI_RFENCE_REMOTE_FENCE_I: usize = 0;
+const SBI_RFENCE_REMOTE_SFENCE_VMA: usize = 1;
+
+/// SBI IPI function IDs.
+const SBI_IPI_SEND_IPI: usize = 0;
+
+/// SBI HSM function IDs (hart state management).
+const SBI_HSM_HART_START: usize = 0;
 
 /// SBI return value
 #[derive(Debug, Clone, Copy)]
@@ -85,6 +94,80 @@ pub fn get_sbi_impl_version() -> SbiRet {
 }
 
 /// Check if an SBI extension is available
+/// Whether the firmware implements remote fences (needed for TLB
+/// shootdown across harts).
+pub fn has_rfence() -> bool {
+    probe_extension(SBI_EXT_RFENCE)
+}
+
+/// Whether the firmware implements hart state management (needed to start
+/// secondary harts).
+pub fn has_hsm() -> bool {
+    probe_extension(SBI_EXT_HSM)
+}
+
+/// Send a supervisor software interrupt to hart `hartid` (SBI IPI
+/// `send_ipi` with a one-hart mask based at `hartid`); it sets that hart's
+/// `sip.SSIP`.
+pub fn send_ipi(hartid: usize) -> SbiRet {
+    sbi_call(SBI_EXT_IPI, SBI_IPI_SEND_IPI, 1, hartid, 0)
+}
+
+/// Start stopped hart `hartid` at physical address `start_addr` in S-mode
+/// with the MMU off, `a0 = hartid` and `a1 = opaque` (SBI HSM `hart_start`).
+/// Asynchronous: success means the hart will start, not that it has.
+pub fn hart_start(hartid: usize, start_addr: usize, opaque: usize) -> SbiRet {
+    sbi_call(SBI_EXT_HSM, SBI_HSM_HART_START, hartid, start_addr, opaque)
+}
+
+/// Execute `sfence.vma` for `[start, start + size)` on every hart (SBI
+/// RFENCE; `hart_mask_base = -1` selects all harts, `size = usize::MAX` is a
+/// full flush). OpenSBI returns after the remote harts have flushed.
+pub fn remote_sfence_vma_all(start: usize, size: usize) -> SbiRet {
+    let error: isize;
+    let value: usize;
+    // SAFETY: an SBI ecall (RFENCE extension, function 1) with the register
+    // convention of the SBI specification: a0-a3 arguments, a6 function,
+    // a7 extension; results in a0/a1.
+    unsafe {
+        core::arch::asm!(
+            "ecall",
+            inlateout("a0") 0usize => error,
+            inlateout("a1") usize::MAX => value,
+            in("a2") start,
+            in("a3") size,
+            in("a6") SBI_RFENCE_REMOTE_SFENCE_VMA,
+            in("a7") SBI_EXT_RFENCE,
+        );
+    }
+    SbiRet { error, value }
+}
+
+/// Execute `fence.i` on every hart (SBI RFENCE `remote_fence_i`,
+/// `hart_mask_base = -1`): instruction fetch is not coherent with stores,
+/// so code written by one hart must be fenced on every hart that may run
+/// it. Falls back to a local fence without the RFENCE extension (then only
+/// one hart runs tasks).
+pub fn remote_fence_i_all() {
+    if !has_rfence() {
+        // SAFETY: an instruction-stream fence; no other effect.
+        unsafe { core::arch::asm!("fence.i", options(nostack)) };
+        return;
+    }
+    // SAFETY: an SBI ecall (RFENCE extension, function 0) with the register
+    // convention of the SBI specification: a0-a1 the hart mask; results in
+    // a0/a1.
+    unsafe {
+        core::arch::asm!(
+            "ecall",
+            inlateout("a0") 0usize => _,
+            inlateout("a1") usize::MAX => _,
+            in("a6") SBI_RFENCE_REMOTE_FENCE_I,
+            in("a7") SBI_EXT_RFENCE,
+        );
+    }
+}
+
 pub fn probe_extension(extension_id: usize) -> bool {
     let ret = sbi_call(SBI_EXT_BASE, 3, extension_id, 0, 0);
     ret.value != 0

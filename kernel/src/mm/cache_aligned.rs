@@ -68,9 +68,11 @@ impl<T> DerefMut for CacheAligned<T> {
     }
 }
 
-// Safety: CacheAligned is transparent for Send/Sync -- it only adds alignment.
-// If T: Send, CacheAligned<T>: Send. If T: Sync, CacheAligned<T>: Sync.
+// SAFETY: CacheAligned is transparent for Send/Sync -- it only adds alignment.
+// If T: Send, CacheAligned<T>: Send.
 unsafe impl<T: Send> Send for CacheAligned<T> {}
+// SAFETY: CacheAligned only adds alignment around a `T`, so if T: Sync,
+// CacheAligned<T>: Sync.
 unsafe impl<T: Sync> Sync for CacheAligned<T> {}
 
 impl<T: Default> Default for CacheAligned<T> {

@@ -33,23 +33,322 @@ What does not work yet: `docs/KNOWN-LIMITATIONS.md`.
 
 ### Roadmap after v0.26.0
 
-- [ ] **v0.27.0: process model and SMP (C5, X0).**
-  - Preemptible ring-3/EL0/U-mode tasks.
-  - User threads.
-  - Kernel stack guard pages (N-26).
-  - AArch64 MMU (N-28) and RISC-V U-mode.
-  - SMP bring-up and TLB shootdown.
-  - Copy-on-write fork.
-  - Huge pages, real AArch64/RISC-V heaps, priority inheritance, TCP completion, namespaces.
-- [ ] **v0.27.0 carry-overs from the v0.26 plan:**
-  - C1 CI job for the runtime suite.
-  - C2 build hygiene.
-  - C3 shared ABI crate.
-  - C4 lifetime cleanup.
-- [ ] **v0.28.0:** one Linux ABI with VeridianOS IPC in its own range (X1, fixes N-33), plus the
-  process, signal, time and file syscall tiers.
+- [ ] **v0.27.0: process model and SMP (C5, X0).** Sprints, in dependency order; IDs are in
+  `docs/audit/AUDIT-VERIFICATION-2026-10-05.md`:
+  - [x] **A, foundations and hygiene:** done (N-07 moves to C with copy-on-write).
+    - N-56 workspace lints and the clippy allow-list (C2).
+    - N-55 FIPS 204 ML-DSA with NIST known-answer tests.
+    - N-43 raw socket buffer reads; N-45 ramfs cross-fs link.
+    - Dead code: N-07, `mm/vmm.rs`, MEM-INC-02 slab, CAP-INC-02 derivation, SYS-INC-01.
+    - Coverage helpers (plan Addendum 3); C1 runtime-suite CI job.
+  - [x] **B, per-CPU data and SMP (stage S1, ADR 0004):**
+    - [x] BSP per-CPU data on every architecture; N-35 per-CPU syscall frame.
+    - [x] AP bring-up behind `smp`: x86 INIT-SIPI-SIPI, AArch64 PSCI, RISC-V SBI HSM; 4/4 online
+      on every arch in QEMU and in CI.
+    - [x] TLB shootdown: MEM-SEC-02, MEM-ARCH-03.
+    - Moved to D: per-CPU run queues and work stealing (SCHED-PERF-01, SMP-PERF-01; stage S2),
+      N-51, N-52 and N-14 (with RISC-V U-mode in E). S2 needs scheduler-dispatched context
+      switching, which D reworks. Today `schedule()` switches while its caller holds the
+      scheduler lock, so a task that starts fresh never releases it. The two races become
+      reachable only once tasks run concurrently.
+  - [x] **C, memory** (guard pages x86_64 only until E):
+    - Copy-on-write with frame refcounts: MEM-ARCH-02, PROC-ARCH-01, N-07.
+    - Huge pages: MEM-ARCH-01.
+    - Real AArch64/RISC-V heaps: MEM-SEC-03.
+    - Kernel stack guard pages: N-26.
+  - [x] **D0, urgent fixes reachable today** (re-evaluation, `docs/audit/AUDIT-REEVALUATION-2026-10-07.md`;
+    do first, each with a regression test). Done 2026-10-07: runtime suites native 41/41 and musl
+    6/6 (`musl_runtime_test`, CI `REQUIRE_MUSL=1`); remainders of partly fixed items (N-99, N-105,
+    N-120 blocking, N-143) moved to D:
+    - Gemini issue-triage workflow on `main` (N-158); CI release/summary gates and three-target clippy
+      (N-159, N-160).
+    - Memory: `prot` honoured by mmap/brk, PROT_NONE, W^X, `max_prot` for mprotect, bounded mmap length
+      and cursor, no USER at kernel slots, physmap out of the user range, stack-growth limit, brk/map
+      leaks (N-132 to N-137).
+    - Process: fork credentials/cwd/handlers (N-93), exec capability filter (N-94), `kill` to real
+      processes (N-92), `arch_prctl` canonical check (N-100), `sigaction` layout and `sigprocmask`
+      order (N-95, N-97), musl `tkill`/`tgkill`/`waitid` intercepts (N-103), `prctl` fail-closed
+      (N-151).
+    - Files: syscall 73 heuristic (N-120), offset/size DoS (N-122), O_EXCL/O_TRUNC/O_NOFOLLOW/
+      O_DIRECTORY (N-116 flags).
+    - Package header overflow (N-147), PCI transmute (N-155), per-fault and per-open serial output
+      (N-176, N-130).
+    - Truthful claims: KNOWN-LIMITATIONS "hardening not active" (KPTI, KASLR, canaries, retpoline,
+      Spectre, SMEP/SMAP), TLS, MAC, seccomp, Kani/TLA+, file mmap; README/book/overview corrections
+      (N-145, N-146, N-150, N-152, N-163, N-165).
+  - [ ] **DL, dynamic linking (ADR 0010; X3 loader pulled forward from v0.29, 2026-10-08).** KDE
+    switches from static archives to shared libraries loaded by musl's dynamic linker:
+    - [x] Program loader: every PT_LOAD validated before exec commits (malformed files fail, the
+      kernel no longer panics on them), page plan with shared-page merging, PIE programs at
+      `0x5555_5555_4000`, the interpreter in the mmap area; one path for exec and the initial
+      loader. Full Linux auxv for every program (AT_RANDOM, AT_HWCAP/HWCAP2, AT_CLKTCK, AT_UID..
+      AT_EGID, AT_SECURE, AT_EXECFN, AT_PLATFORM, AT_MINSIGSTKSZ). Runtime: `musl_auxv`,
+      `musl_pie_loaded` (the musl suite runs as a static PIE).
+    - [x] Shared file pages: a page cache per BlockFS file (`mm::page_cache`) for private file
+      mappings and loaded program segments, read-only or copy-on-write; dropped when the file
+      changes or its inode is freed. Runtime: `musl_page_cache`, `musl_program_pages_shared`.
+    - [x] Toolchain: shared musl (`/lib/ld-musl-x86_64.so.1`), GCC with shared libstdc++ and
+      libgcc_s, dynamic linking by default; verified on the build host through musl's loader,
+      including `dlopen` of a C++ shared object. CI builds and caches it.
+    - [x] Dynamic programs in VeridianOS: musl's loader and the shared C++ runtime in the root
+      filesystem; `musl_dynamic_program` runs a dynamically linked C++ program (exceptions,
+      threads, thread_local, `dlopen` of a C++ library).
+    - [ ] KDE pipeline with shared libraries; static workarounds removed; rootfs with `/lib`.
+    - [ ] Media backend for the KDE stack: Qt Multimedia is built for Prison, Qt Speech and QML
+      but has no backend; add FFmpeg (shared) and an audio path (ALSA now, PipeWire later),
+      then Qt Multimedia's FFmpeg plugin; cameras need kernel V4L2
+      (`userland/integration/KNOWN-LIMITATIONS.md`).
+    - Later (sprint G / v0.29): ASLR, vDSO, eviction of cached pages, writable MAP_SHARED of files.
+  - [ ] **D, process model and scheduler (C5; ADR 0006 + ADR 0007):**
+    - [x] Scheduler policy core: EEVDF fair, FIFO/RR with bandwidth limit, SCHED_DEADLINE (CBS),
+      PELT-style load, SMP placement/balancing (`sched/policy/`, 36 host tests).
+    - [x] x86 entry layer first: assembly stubs with symmetric swapgs + lfence, one TrapFrame for
+      syscalls and traps, IST only for #DF/NMI/#MC, SYSRET eligibility with IRET fallback,
+      exit-to-user hook, user-register sanitiser (N-166, N-169 to N-171, N-175; ADR 0008).
+      Per-thread frames (N-167) and the no-launch-context fault path (N-168) finish with D2.
+    - [x] D1: switch primitive (`switch_stacks`), boot task + idle, kernel threads on guarded
+      stacks, wait queues (prepare-to-wait), reaping after `on_cpu` clears (`sched/dispatch.rs`,
+      2 boot tests).
+    - [x] D2 dispatcher: user tasks
+      dispatched by the scheduler on their own kernel stacks; launch from boot/shell/KDE as
+      spawn + wait; exit vs exit_group, process exit by the last thread, teardown after every
+      thread is off-CPU, child wait queue (N-106 to N-111); fork/wait; XSAVE switching (N-41).
+      Done 2026-10-07: every launcher (boot, shell, KDE session) uses `process::run_and_wait`;
+      musl pthreads run concurrently. Open: N-111 (Zombie->Dead CAS) and N-112 with SMP (D5);
+      waits poll through `dispatch::wait_in_syscall` until the blocking step.
+    - [ ] Blocking: wait-queue primitive, sleep queue, no spinlock held across I/O, user copies
+      or waits; file table lock dropped after fd lookup; sleeping address-space lock (N-118,
+      N-119, N-138); pipes with reader/writer counts and PIPE_BUF atomicity; futex queues with
+      timespec timeouts (N-104). Done: `wait_event` + timer sleepers, sleeping nanosleep/
+      clock_nanosleep/sigsuspend/timerfd/futex/pipe/eventfd/poll/epoll, futex requeue and shared
+      keys, N-104, file-table lock after lookup and stream position lock (N-118 part), sleeping
+      address-space lock (N-138), whole blocking writes and PIPE_BUF atomicity, BlockFS reads
+      with the cache unlocked (N-118 BlockFS part), pty readiness wakeups and blocking pty reads
+      (Unix sockets done before), console reads that sleep on a shared input buffer (N-118
+      console part). Open: INET socket readiness goes with the F1 socket layer.
+    - [ ] D3: timer preemption of ring 3 (done: `dispatch::preempt_user` on trap and syscall
+      exit; kill acted on in every dispatched wait); device IRQs on the kernel stack (done, ADR 0008);
+      signal delivery with rt_sigframe/restorer, per-thread mask/pending, ignored dropped, Linux
+      set layout (done: N-96, N-98, N-109 part, N-113; stop/continue done; siginfo, sigqueue and sigtimedwait
+      done, N-259; no SA_RESTART restart of sigsuspend/sleeps/polls, N-260); signal delivery on
+      return to user with restorer frames (N-113); per-thread signal state (N-109); ignored
+      signals dropped at generation (N-98); sigset layout (N-96); wait status and errno (N-99 done; WNOWAIT and rusage done, N-213; N-127 done); exec permission and
+      fatal-after-clear, exec from a multithreaded process ending the other threads first (done,
+      N-101; the exec'ing thread keeps its tid); relative paths per thread (N-115); MAP_SHARED anon (done, N-140) and
+      MAP_FIXED semantics (done, N-141); pty fixes (done, N-128); thread placement (N-114 partly done: no unused
+      clone stacks; main tid == pid and keyed futex queues done, N-114 fixed).
+    - [ ] Threads: clone through the dispatcher, native libc clone stub, TCB join, TLS errno
+      (N-102); N-46, N-50, N-54; `thread_join` sleeps on an exit queue instead of yielding
+      (N-269). Done: N-102 (`clone_<arch>.S`, errno in the TCB, native pthreads tested by
+      `audit_runtime_test`), N-269.
+    - [x] D4: nested boot dispatch and `BOOT_RETURN_*` removed; old scheduler, `queue.rs`,
+      `percpu_queue.rs`, `deadline.rs`, `process_compat`, old `context_switch` retired (N-84,
+      N-85, N-156, N-181); the old `FUTEX_TABLE` path goes with it (N-279). Done: D4a (no
+      old-scheduler tasks, failed-fork rollback N-46), D4b (IPC on dispatcher wait queues; N-47,
+      N-81 part, N-84, N-85), D4c (nested boot model, `boot_futex_spin` and `FUTEX_TABLE` deleted;
+      N-54, N-279), D4d (old scheduler modules, `Task`, `TaskContext`, `context_switch`,
+      `process::sync`/`wait` deleted; N-50, N-156, N-181).
+    - [ ] D5, SMP S2/S3: per-CPU run queues and current task, idle and balancing on every CPU,
+      `cpu_init_local()` on APs (N-172), IPI fixes (N-173), interrupts enabled in syscalls with
+      deferred frees and per-mm TLB masks (N-139, N-143 flushes), smp_boot stop + guarded AP
+      stacks (N-180), timer advance by elapsed time (N-179), `smp` on by default; N-51, N-52;
+      targeted TLB shootdown (per-address-space CPU mask, logical-to-APIC-ID map; N-262) and
+      frees through the per-CPU cache after it (N-261); per-CPU syscall rate limiter
+      (SYS-PERF-01). Done: D5a (AP setup N-172, IPIs N-173, bring-up N-180), D5b (timers
+      N-179), D5c (every CPU dispatches its own run queue), D5d (interrupts on in syscalls,
+      N-139 part; blocking Unix accept), D5e (placement, idle pull and periodic balancing,
+      affinity migration, getcpu, per-task user GS base, interrupt-safe heap, N-139 fixed:
+      interrupts on in page faults and the return to user mode, reaper thread; ADR 0012;
+      `gate.sh --smp`), N-262 targeted shootdown, remote signal kick. Left: per-CPU frees after
+      N-52 (with F5 interrupt-driven storage), N-282 (1-page mmap 5x slower with four
+      processes; profile first), N-261 (per-CPU frees pay, but need checking: per-frame state
+      the cache can test without the global lock). Done since: SYS-PERF-01 (per-CPU rate-limit buckets), `smp` on by default, N-51 (directory checks on the resolved node), audit cost and cap, BlockFS
+      directory slot reuse, deadline tasks placed and pulled by deadline (`pull_dl`), new
+      threads inherit the creator's CPU mask, deadline threads must allow every CPU, N-281
+      (mmap cost was dev-build `memset` zeroing, not faults: `clear_page`/`copy_page`).
+    - [x] Syscalls `sched_setattr/getattr`, `sched_setscheduler`, `nice`/`setpriority`, real
+      `sched_setaffinity`/`getaffinity`, `sched_yield` on the new policy (SCHED-INC-02 resolved
+      by the deadline class).
+  - [ ] **E, user mode beyond x86_64** (also the boot-critical hardware items, since they coincide
+    with turning the MMU on; `ref-docs/HARDWARE-AARCH64.md`, `ref-docs/HARDWARE-RISCV64.md`):
+    - AArch64: done: DTB from x0, Linux-style EL2/SCTLR setup on boot and secondary paths (HA-01,
+      HA-14, HA-15 part, N-177); arm64 Image header and flat binary, booted in the gate (HA-03);
+      exception vectors installed in boot.S before any Rust code (bring-up step 1);
+      position-independent early boot with the kernel at a high TTBR1 VA, MMU and caches on
+      before Rust, TCR.IPS from PARange, 48-bit TTBR0, any 2 MiB-aligned load base (ADR 0015;
+      HA-04, HA-16, N-28 part); Arm page-table format (`mm::pte::arm`); MMIO through the
+      physical map, identity map confined to the switch; `bare_lock`, the bump
+      allocator and the reduced secondary stage removed (N-28 fixed); the dispatcher on every
+      CPU (switch primitive, `dispatch` cfg, SGI kicks, timer tick; E-A5/E-A5c); process
+      address spaces hold only the user half (TTBR0); EL0 entry/exit, SVC system calls with arm64
+      numbers, user page faults, fault-tolerant user copies, ELF programs and the embedded init
+      (ADR 0016, E-A6); user FP/SIMD state switched with the task, signal handlers with Linux's
+      rt_sigframe, fault signals to handlers, fault-tolerant user cmpxchg, static TLS from PT_TLS
+      (all also RISC-V);
+      an ASID per address space, released with `tlbi aside1is` when its tables are freed (HA-26);
+      cache maintenance for code the kernel writes (HA-25 part: `dc cvau` without CTR_EL0.IDC,
+      `ic ialluis` without DIC; loader, mmap and mprotect with PROT_EXEC);
+      memory map from `/memory` less the reservations and the blob, heap sized from it (HA-17);
+      musl, Linux 7.2 UAPI headers and a GCC 16 cross toolchain (`tools/cross/build-musl-arch.sh`,
+      also RISC-V); fork/clone/exec, generic stat/epoll layouts, PL031/Goldfish RTC and a musl
+      BusyBox root running the BusyBox self-test and both runtime suites
+      (`scripts/build-musl-rootfs.sh`, `ARCH=... scripts/run-rootfs-tests.sh`; also RISC-V);
+      those runs in the gate on one and four CPUs; PSTATE sanitised on every return to EL0 and
+      by sigreturn, with a test that panics the kernel without it (N-170); next: DMA coherency
+      (HA-25 rest); done: AT_HWCAP2 (instructions needing no kernel support), arm64
+      MINSIGSTKSZ 5120, BTI for user programs (PROT_BTI, GP pages, loader property notes,
+      SCTLR_EL1.BT0, HWCAP2_BTI; boot-tested on `-cpu max` in the gate).
+    - RISC-V: done: zero BSS, hart lottery, `sstatus.FS` Off in the kernel (HR-01, HR-19, HR-20
+      part; the M-mode CSR reads go with FP switching). RISC-V Image header and
+      relocatable or MMU-early boot (HR-02, HR-03); `satp` mode probe with Sv39 default and
+      3/4/5-level tables from the boot hart's cpu node (HR-08, HR-09); RISC-V PTE encoder with A/D
+      (HR-10, done: `mm::pte`), Svpbmt/XTheadMae (HR-11); done: paging on and the kernel in the
+      upper half, Sv48 (E-RV3, ADR 0013); identity map only in the trampoline, MMIO through the
+      physical map, user address spaces share the kernel half (E-RV4); guarded kernel stacks,
+      switch primitive and dispatcher on the boot hart (E-RV5); U-mode entry and exit, ecall
+      system calls by the generic table, fault-tolerant user copies (E-RV6, ADR 0014; N-14);
+      ELF programs through the loader (E-RV6c); every hart dispatches (E-RV5c); the musl BusyBox
+      root (done: musl and toolchain, TLS, user FP, signals, user cmpxchg, fork/exec); next: remove raw 0x1000_0000 stores and QEMU-only probes (HR-04
+      to HR-06); done: memory map from the DT (HR-07); external interrupts (scause 9) handled, not fatal
+      (HR-31); IPIs by hart id (HR-33); U-mode with `tp` via `sscratch` (N-14); done: `sstatus`
+      never taken from user state, sigreturn refuses a kernel pc (N-170).
+    - Both: kernel stack guard pages (N-26; done on both, which still need an overflow stack
+      for the exception). Done: soft-float kernels (N-178,
+      `aarch64-unknown-none-softfloat`, `riscv64imac-unknown-none-elf`); E0 boot tests report
+      what cannot run as skipped.
+  - [ ] **F, networking, storage and protocols:**
+    - F1 socket layer: sockaddr decoding, UDP send/receive/demux/checksum, errno and readiness
+      (N-64 to N-68, N-72).
+    - F2 network thread with NIC interrupts and per-socket wait queues (N-69, N-75); generic
+      device-interrupt vectors, x2APIC and MADT-driven I/O APIC (N-174).
+    - F3 TCP: decide smoltcp (no_std, 0BSD) vs in-house, then NET-INC-01, N-08, N-20, N-70,
+      N-71, N-76, DNS (N-77).
+    - F4 virtqueues: device-sized rings, EVENT_IDX, batched kicks, DMA barriers, fewer copies
+      (N-73, N-78, N-58).
+    - F5 storage: interrupt-driven NVMe and virtio-blk, FLUSH from BlockFS sync, durable fsync
+      (N-52, N-74, N-121 durability), then NVMe queues.
+    - WireGuard (NET-INC-02) after F1/F2; priority inheritance (SCHED-INC-01, done in D: PI
+      futexes through the policy boost); namespaces (VIRT-INC-01).
+  - [ ] **G, hardening and correctness:** enable retpoline, stack protector, eIBRS/AutoIBRS, IBPB,
+    UMIP, SMEP/SMAP (N-15) and decide KPTI (N-145, N-146); entropy sources and fast key erasure
+    (N-149); crypto KATs and RustCrypto primitives (N-154); package verifier cleanup (N-148);
+    passwords (N-153); POSIX shm access control (N-88); on-disk validation and fuzzing, `mkfs`
+    (N-123); BlockFS open-unlinked inodes (N-117 interim); mount checks (N-129); frame allocator
+    regions (N-142); `write_user` padding and IRQ-safe allocator locks (N-144); RTC fn pointer
+    (N-157); CI flags, blocking coverage, real Kani harnesses, supply chain (N-161 to N-164);
+    from the 2026-10 intake: dead `cache_topology` and KSM wired or removed and
+    `PERFORMANCE-TUNING.md` corrected (N-264, N-274), one `SyscallError` (N-272), `alloc`
+    unconditional with a CI build that proves it (N-275); `kernel/tests/` either ported to host
+    or boot tests and deleted, or fixed and built in CI (N-280).
+    - Kernel stack overflow reported on AArch64 and RISC-V (N-26 rest, moved from E on 2026-10-16):
+      check at the EL1/S-mode exception entry (AArch64: `sp - frame` probed with `at s1e1w`, x0
+      stashed in SP_EL0, which the return to EL0 reloads; RISC-V: `sscratch`), then a per-CPU
+      overflow stack and a fatal report, as x86_64's IST does; tested by a feature-gated boot
+      that overflows on purpose (none of the three architectures tests its report yet).
+  - [ ] **H, real hardware** (`ref-docs/HARDWARE-{X86_64,AARCH64,RISCV64}.md`: HX-01..34,
+    HA-01..30, HR-01..40; items already in E are not repeated):
+    - Shared infrastructure: one FDT parser (cells, ranges, `dma-ranges`, interrupt cells,
+      `/chosen`, `reserved-memory`; fuzzed) and ACPI table parsers (MADT, FADT, MCFG, SPCR, DBG2,
+      HPET, SRAT, DMAR, GTDT, PPTT, IORT); a console framework (SPCR/DBG2/`stdout-path`, PL011,
+      ns16550/DW with `reg-shift`/`reg-io-width`, SBI DBCN, GOP fallback, probes that never read
+      absent ports); a DMA API (coherent and non-coherent, Zicbom/T-Head/SiFive and Arm cache
+      maintenance, bus-address translation); generic PCIe ECAM (MCFG / `pci-host-ecam-generic`)
+      with correct BAR sizing and MSI/MSI-X; QEMU-only devices (virtio-mmio, fw_cfg/ramfb) probed
+      only from firmware tables.
+    - x86_64: PIT-less timer calibration (CPUID 15h/16h, MSR 0xCE, HPET, PM timer) and LAPIC
+      against TSC (HX-01, HX-21); runtime-sized heap (HX-02); console selection (HX-03); ACPI
+      before APIC, x2APIC, MADT-driven I/O APIC (HX-04, N-174); 32-bit APIC IDs and dynamic CPU
+      count (HX-05); trampoline reservation and 4 KiB low mapping (HX-06); full memory map and
+      SRAT nodes (HX-07); MAXPHYADDR, kernel-owned page tables with UC MMIO and one WC
+      framebuffer, PAT sequence (HX-08 to HX-10); PCI segments and BARs (HX-11 to HX-13); FADT
+      power/reset/century, AML interpreter choice (HX-14 to HX-16, HX-28); no legacy VGA
+      (HX-17); xHCI and AHCI BIOS handoff, USB HID, NVMe shutdown (HX-18, HX-29, HX-30); IOMMU
+      state and RMRRs (HX-19); NMI/#MC, microcode, mitigations, idle/P-states, thermal (HX-22 to
+      HX-27); supported-hardware list and NIC drivers (HX-20); EFI system table, SMBIOS, crash
+      capture (HX-31 to HX-34).
+    - AArch64: earlycon and console drivers (HA-05, HA-06); GICv2 from the DT and GICv3/ITS
+      (HA-07 to HA-11, HA-28); timer frequency and INTID from the DT (HA-12, HA-13, HA-27); full
+      MPIDR ids, PSCI features/off/reset, spin-table (HA-21, HA-22); dma-ranges (HA-29);
+      Spectre/SSBD (HA-30); errata and CPU-feature survey (PAN, LSE, PAuth, BTI); big.LITTLE
+      capacity for scheduler placement; UEFI + ACPI entry for SystemReady servers (HA-24);
+      PCIe and SMMUv3 (HA-20). First board: Raspberry Pi 4, then Pi 5, RK3588, a server.
+    - RISC-V: PLIC from the DT with contexts from `interrupts-extended`, APLIC/IMSIC (HR-12 to
+      HR-14); timebase and Sstc from the boot hart (HR-15, HR-16); SBI hygiene and HSM with
+      physical addresses (HR-17, HR-18, HR-27); no M-mode CSRs (HR-21); entropy (HR-22); PCIe
+      (HR-34); SiFive errata, ASIDs, vector state, SRST shutdown, idle suspend, IOMMU (HR-29 to
+      HR-40); cache topology from the DT (HR-26). First board: VisionFive 2, then Unmatched, then a
+      T-Head board.
+    - CI: the QEMU validation matrices from the three documents (flat-Image loads at two
+      addresses, `gic-version=3`, `virtualization=on`, `-M sifive_u`, `sv48=off`, `aia=`, no
+      PIT/HPET, no COM1, `pxb-pcie`, x2APIC above 255 CPUs) as boot jobs.
+  - [x] **X1, Linux system call numbers (pulled forward from v0.28; ADR 0009):** generated from
+    `abi/syscalls.map`, VeridianOS calls from 1024 (fixes N-33), stock musl, every caller and
+    the kernel's embedded code moved; rootfs suite and tri-arch boot pass. Handler review:
+    N-182 to N-250 (`docs/audit/ABI-REVIEW-2026-10-07.md`), N-182 to N-189 fixed.
+  - [x] **Credentials and paths (N-248 to N-250, pulled forward from v0.30 at the user's
+    request):** setresuid/setresgid/getres*id, setreuid/setregid, setgroups/getgroups, permission
+    checks on effective ids and groups; fchdir; chroot through the path resolver; utimensat.
+    Native libc and musl use them.
+  - [ ] **ABI review, security and D/F items:** N-190 to N-193 (permission checks) with D;
+    N-207, N-209 to N-211, N-217, N-221, N-222, N-225 with D3/threads/scheduling syscalls;
+    N-231, N-235 to N-238 with F1.
+  - [ ] **Consolidation and the 2026-10 audit intake (2026-10-14;
+    `docs/audit/AUDIT-INTAKE-2026-10-10.md`).** Done: another agent's unmerged work audited,
+    archived and reverted, its private files kept out of git; frame-allocator zones; BlockFS
+    early data write-back and lock-free misses (N-263, N-118 BlockFS part; ADR 0011); IPC and
+    capability authority (N-80, N-83, N-87, N-88, N-89 parts); VirtIO barriers (N-270, N-271);
+    mm items (N-265, N-266, PB-MEM-05/07); shell `mv` (N-273); reviewer gate comment (N-276);
+    `scripts/dev/` helpers; the x86_64 heap sized from the memory map, so small guests boot
+    (N-278, HX-02). Open: `knetd` done properly (N-69, with F2); the rest is in the sprint lists
+    above and v0.29.
+  - [ ] **Every Linux system call (2026-10-16 directive; whether it lands in v0.27.0 or later is
+    open).** Each call implemented with Linux semantics on all three architectures, numbers from
+    Linux's tables (`abi/syscalls.map`, `tools/compat/gen_syscalls.py`; the AArch64/RISC-V
+    decoders are generated from `abi/linux/syscall.tbl` and pinned by
+    `generic_numbers_match_the_linux_table`). Kernel-modifying and raw-hardware calls
+    (`init_module`/`finit_module`/`delete_module`, `kexec_*`, `iopl`/`ioperm`, `bpf` and
+    similar) are refused by policy with EPERM after Linux's argument checks. Steps: per-arch
+    coverage in `docs/compat/LINUX-SYSCALL-COVERAGE.md` (stale since 2026-10-09, x86_64 only);
+    then group by group (process, signals, time, files, memory, ipc, events, network, sched,
+    mount, system) with fail-first tests; LTP and musl libc-test in the rootfs suite; rewrite
+    `docs/PORTING-GUIDE.md` (it still lists the pre-ADR-0009 native numbers). Done: W^X
+    per-program opt-in (ELF note) and prctl PR_SET_MDWE/PR_GET_MDWE (ADR 0017); mknod and
+    mknodat (FIFOs with Linux's open/read/write/poll rules, device nodes opening their device by
+    number, socket files; special files on RamFS, tmpfs and BlockFS and in mkfs-blockfs images;
+    st_rdev in stat; N-201); bind() of a Unix socket makes its socket file and connect() finds
+    the socket through it; `tools/veridian-elfctl` adds or clears the W^X note in an existing
+    binary.
+  - [ ] **Release:** tri-arch boot with `-smp 4`, runtime suite, CHANGELOG, tag.
+- [ ] **v0.28.0:** the process, signal, time and file syscall tiers (X2 groups, with the open
+  ABI-review findings N-194 to N-247 that belong to them).
+  - [ ] **IPC redesign** (makes IPC reachable and correct): one endpoint object held by capabilities,
+    typed rights, per-endpoint sender/receiver wait queues, one-shot reply capabilities and a direct
+    switch with time-slice donation on call, notifications, accounting and rollback, the derivation
+    tree as sole authority (N-79 to N-91, IPC-INC-01 remainder, N-47).
+  - [ ] **Package signing keys (N-55 follow-up).** Today no post-quantum key is provisioned, so a
+    policy requiring the PQ signature refuses every package.
+    - Key hierarchy: an offline maintainer root key (ML-DSA-65 seed, plus Ed25519) that only
+      certifies and revokes, and online signing keys (Ed25519 + ML-DSA-65 pairs) that sign
+      packages, certified by the root and usable from CI.
+    - `tools/pkg-keygen`: an offline tool on the `ml-dsa` crate to generate the root seed, and to
+      generate and certify signing keys and revocations.
+    - Kernel: embed the root public key; verify a signing-key certificate (and revocation list)
+      against it instead of trusting one embedded key; replace `trusted_mldsa_public_key()`.
+    - Users may add their own trusted keys for their own repositories (an extra keyring); the base
+      system trusts the project root.
+    - ADR for the key ceremony: offline generation, seed backup, rotation, revocation, and what
+      happens if the root is lost or compromised.
 - [ ] **v0.29.0 - v0.31.0:** the rest of the Linux/POSIX syscall surface, loader/vDSO/TTY/procfs,
   and LTP and open_posix in CI. See `docs/compat/COMPATIBILITY-PLAN.md`.
+  - [ ] **v0.29 filesystem architecture:** node-based path API with lookup-or-create (N-116, N-51),
+    inode cache with open counts and orphan list (N-117), crash consistency ADR (journal or shadow
+    superblock; N-121), page cache and shared mmap (N-125), dentry cache and hashed directories
+    (N-130), stable getdents cookies (N-124), atomic O_APPEND (N-126).
+  - [ ] **v0.29 memory architecture** (also N-267 demand-paging mapping overlap, N-268 empty
+    page tables kept): lazy anonymous memory, range-indexed mappings, per-frame
+    refcount array, ranged per-mm TLB flushes, per-VMA locks (N-143).
+  - [ ] **v0.30 credentials remainder:** filesystem ids, Linux capabilities, setuid exec
+    (N-131; the id triples and groups move to v0.27 as N-248).
 - [ ] **C6 (staged from v0.28):** move drivers, protocols and codecs out of the kernel.
 - [ ] **C7:** serve a native user-space Wayland client; frame-backed `wl_shm` (DRV-PERF-01,
   DESK-ARCH-01).
@@ -100,7 +399,7 @@ What does not work yet: `docs/KNOWN-LIMITATIONS.md`.
 
 ### Phase 2: User Space Foundation (100% COMPLETE)
 - [x] VFS: RamFS, DevFS, ProcFS, BlockFS with ext2-style directories
-- [x] ELF loader with dynamic linking and relocations
+- [x] ELF loader with dynamic linking and relocations (the dynamic part could not run a program until v0.27, ADR 0010)
 - [x] Driver framework: PCI/USB bus, network, storage, console, GPU
 - [x] Init system with service management
 - [x] Shell with 20+ built-in commands
@@ -173,7 +472,7 @@ What does not work yet: `docs/KNOWN-LIMITATIONS.md`.
 - [x] Per-CPU page free lists (PerCpuPageCache, batch refill/drain, v0.5.7)
 - [x] IPC fast path completion (per-task ipc_regs, direct register transfer, v0.5.7)
 - [x] TLB optimization (TlbFlushBatch, lazy TLB, tlb_generation, v0.5.7)
-- [x] Priority inheritance protocol (PiMutex, v0.5.7)
+- [x] Priority inheritance protocol (PiMutex, v0.5.7) -- never used; deleted with the old scheduler in v0.27, redo is SCHED-INC-01
 - [x] Benchmarking suite (7 micro-benchmarks, perf shell builtin, v0.5.7)
 - [x] Software tracepoints (10 event types, per-CPU ring buffers, trace shell builtin, v0.5.7)
 - [x] TlbFlushBatch wired into unmap/map hot paths (v0.5.8)

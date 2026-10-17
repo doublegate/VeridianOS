@@ -1,0 +1,84 @@
+VeridianOS: check KArchive::open() before reading theme archives
+
+GCC reported -Wunused-result: KArchive::open() is [[nodiscard]] and its
+result was ignored in the icons, cursor theme and GTK style KCMs.
+
+This is a real bug: when the selected file is not a readable tar archive
+(a corrupt download, a wrong file type, a permission problem),
+KArchive::directory() returns nullptr after the failed open and the code
+dereferenced it (themeDir->entries(), archiveDir->entries(),
+themeArchive.directory()->entries()), crashing the KCM. The GTK page also
+called constFirst() on the entry list of an empty archive.
+
+Now a failed open is handled the way each function already handles an
+archive without themes:
+- icons IconModule::findThemeDirs(): returns no themes, so the caller shows
+  "The file is not a valid icon theme archive."; installThemes() hides its
+  progress message and returns false.
+- cursor theme installThemeFile(): shows the existing "not a valid ... theme
+  archive" error and returns.
+- GTK installGtkThemeFromFile(): shows the existing "%1 is not a valid GTK
+  Theme archive." error for an unreadable or empty archive.
+
+Behaviour for valid archives is unchanged.
+
+--- a/kcms/icons/main.cpp	2026-10-08 16:59:33.556790165 -0400
++++ b/kcms/icons/main.cpp	2026-10-08 17:05:58.108314019 -0400
+@@ -189,7 +189,10 @@
+     QStringList foundThemes;
+ 
+     KTar archive(archiveName);
+-    archive.open(QIODevice::ReadOnly);
++    if (!archive.open(QIODevice::ReadOnly)) {
++        // Not a readable tar archive: no themes (the caller reports an invalid archive).
++        return foundThemes;
++    }
+     const KArchiveDirectory *themeDir = archive.directory();
+ 
+     KArchiveEntry *possibleDir = nullptr;
+@@ -225,7 +228,10 @@
+     Q_EMIT showProgress(i18n("Installing icon themes…"));
+ 
+     KTar archive(archiveName);
+-    archive.open(QIODevice::ReadOnly);
++    if (!archive.open(QIODevice::ReadOnly)) {
++        Q_EMIT hideProgress();
++        return false;
++    }
+     qApp->processEvents(QEventLoop::ExcludeUserInputEvents);
+ 
+     const KArchiveDirectory *rootDir = archive.directory();
+--- a/kcms/cursortheme/kcmcursortheme.cpp	2026-10-08 16:59:33.568051905 -0400
++++ b/kcms/cursortheme/kcmcursortheme.cpp	2026-10-08 17:05:58.108549737 -0400
+@@ -409,7 +409,10 @@
+ void CursorThemeConfig::installThemeFile(const QString &path)
+ {
+     KTar archive(path);
+-    archive.open(QIODevice::ReadOnly);
++    if (!archive.open(QIODevice::ReadOnly)) {
++        Q_EMIT showErrorMessage(i18n("The file is not a valid icon theme archive."));
++        return;
++    }
+ 
+     const KArchiveDirectory *archiveDir = archive.directory();
+     QStringList themeDirs;
+--- a/kcms/style/gtkpage.cpp	2026-10-08 16:59:33.583569615 -0400
++++ b/kcms/style/gtkpage.cpp	2026-10-08 17:05:58.108635726 -0400
+@@ -52,12 +52,16 @@
+     QString themesInstallDirectoryPath(QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation) + QStringLiteral("/themes"));
+     QDir::home().mkpath(themesInstallDirectoryPath);
+     KTar themeArchive(fileUrl.path());
+-    themeArchive.open(QIODevice::ReadOnly);
+ 
+     auto showError = [this, fileUrl]() {
+         Q_EMIT showErrorMessage(i18n("%1 is not a valid GTK Theme archive.", fileUrl.fileName()));
+     };
+ 
++    if (!themeArchive.open(QIODevice::ReadOnly) || themeArchive.directory()->entries().isEmpty()) {
++        showError();
++        return;
++    }
++
+     QString firstEntryName = themeArchive.directory()->entries().constFirst();
+     const KArchiveEntry *possibleThemeDirectory = themeArchive.directory()->entry(firstEntryName);
+     if (possibleThemeDirectory->isDirectory()) {

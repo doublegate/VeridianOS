@@ -1,0 +1,478 @@
+VeridianOS: fix compiler warnings in plasma-workspace
+
+GCC warnings fixed at the cause (no suppression). Behaviour is unchanged
+except where noted.
+
+- -Wunused-parameter: unnamed in klipper ActionsWidget::onItemChanged (col),
+  ksecretprompter UnlockCollectionPrompt/CreateCollectionPrompt
+  (activationToken, D-Bus API), PromptContext's serviceUnregistered lambda
+  (serviceName), ksmserver sanity_check (argc, argv), PanelView's
+  editModeChanged lambda (edit), ShellCorona's checkUiReady lambda (visible)
+  and Notifications::showInhibitionSummary (blacklistedDesktopEntries,
+  blacklistedNotifyRcNames; public Q_INVOKABLE API, the parameters are not
+  used by the implementation). [[maybe_unused]] where the parameter is used
+  only under a build option: Unit::getLastJournalEntries (unit,
+  HAVE_SYSTEMD), kicker handleAppstreamActions (service, HAVE_APPSTREAMQT),
+  MediaMetadata::read (path, HAVE_KExiv2).
+- -Wunused-variable / -Wunused-but-set-variable: freespacenotifier tested
+  `auto volume = device.as<StorageVolume>()` only for non-null; it now uses
+  the equivalent device.is<StorageVolume>(). The ksecretprompter test keeps
+  creating its self-registering Request object without the unused pointer.
+  Dead counters removed in kfontinst Folder::list (i) and
+  CFontFileList::run (n), and the dead flag oldSystrayInstantiated in
+  SystemTray.
+- -Wunused-function / -Wunused-variable in ksmserver/server.cpp: the
+  unused helper fprintfhex() and the unused static remTempFile removed.
+- -Wunused-function in logout-greeter: systemdUpdateTriggerFileInfo() and the
+  PackageKit file-name constants are used only under
+  PACKAGEKIT_OFFLINE_UPDATES; they are now defined under the same condition.
+- -Wreorder: KSMShutdownDlg's constructor initialises m_windowed before
+  m_result, matching the declaration order (the values do not depend on
+  each other).
+- -Wparentheses in ksmserver/server.cpp: the intended assignment in
+  `if (file_entry->auth_data = malloc(...))` gets the extra parentheses.
+- -Wrestrict in ksmserver/legacy.cpp: select() was given the same fd_set as
+  readfds and exceptfds, which are restrict-qualified, so the kernel's
+  results for both sets were written to one object (undefined behaviour per
+  the prototype). Two separate sets with the same fd are passed now; the
+  result is still not inspected, the call only waits for activity or the
+  timeout as before.
+- -Wimplicit-fallthrough in kicker AppEntry::init: case NameOnly set
+  m_description and fell into NameAndGenericName, which sets the same
+  m_description again. The two cases are merged, which is what the code did.
+- -Wswitch in PanelView's locationChanged handler: Floating, Desktop and
+  FullScreen are not screen edges, so no form factor follows from them;
+  they are listed explicitly and keep the form factor, as before.
+- -Wdeprecated-declarations:
+  * LayerShellQt::Shell::useLayerShell() ("not needed since Qt 6.5"): it
+    only set QT_WAYLAND_SHELL_INTEGRATION=layer-shell process-wide. The
+    splash windows already request the layer-shell role per window with
+    LayerShellQt::Window::get(), the replacement since Qt 6.5, so the call
+    and its now-empty SplashApp::setupWaylandIntegration() are removed.
+  * QString::fromUcs4(const uint *, qsizetype) in kfontinst CharTip: the
+    code point is passed as char32_t.
+- -Wunused-result (QFile::open, [[nodiscard]]):
+  * startplasma: a missing kdedefaults/package file already meant "apply
+    the defaults" unless the look-and-feel name is empty (readLine() on the
+    unopened file returned nothing); an unopened file now reads as empty
+    without calling readLine(), which keeps that behaviour exactly and
+    stops Qt's "device not open" warning.
+  * KLookAndFeelManager::save: writing kdedefaults/package now happens only
+    when the open succeeded, and a failure is reported with qWarning() as
+    elsewhere in libklookandfeel (it was silently lost before).
+- musl "#warning redirecting incorrect #include <sys/errno.h>" (kfontinst
+  dbus/Helper.cpp) and "<sys/poll.h>" (libtaskmanager
+  waylandtasksmodel.cpp): include the POSIX <errno.h> and <poll.h>.
+
+--- a/freespacenotifier/module.cpp	2026-10-08 16:59:33.547194414 -0400
++++ b/freespacenotifier/module.cpp	2026-10-08 17:04:37.125258335 -0400
+@@ -40,7 +40,7 @@
+         Solid::Device device(udi);
+ 
+         // Required for two stage devices
+-        if (auto volume = device.as<Solid::StorageVolume>()) {
++        if (device.is<Solid::StorageVolume>()) {
+             auto *iface = device.as<Solid::GenericInterface>();
+             if (iface) {
+                 iface->setProperty("udi", udi);
+--- a/klipper/configdialog.cpp	2026-10-08 16:59:33.549064573 -0400
++++ b/klipper/configdialog.cpp	2026-10-08 17:04:38.280249580 -0400
+@@ -563,7 +563,7 @@
+     return (m_actionsTree->actionsChanged() != -1);
+ }
+ 
+-void ActionsWidget::onItemChanged(QTreeWidgetItem *item, int col)
++void ActionsWidget::onItemChanged(QTreeWidgetItem *item, int /*col*/)
+ {
+     QTreeWidgetItem *parentItem = item->parent(); // parent of the command item
+     if (parentItem == nullptr) { // this is a top level action
+--- a/ksecretprompter/tests/promptertest.cpp	2026-10-08 16:59:33.551300992 -0400
++++ b/ksecretprompter/tests/promptertest.cpp	2026-10-08 17:04:47.107182683 -0400
+@@ -24,7 +24,9 @@
+     : QObject(parent)
+ {
+     QDBusObjectPath path(QDBusObjectPath(u"/org/kde/secretprompter/request/1"_s));
+-    Request *req = new Request(path);
++    // Lives for the rest of the test: it registers itself on the session bus
++    // (and deletes itself if that fails).
++    new Request(path);
+ 
+     auto widget = new QWidget;
+     widget->setMinimumSize(QSize(300, 300));
+--- a/ksecretprompter/src/ksecretprompter.cpp	2026-10-08 16:59:33.895791293 -0400
++++ b/ksecretprompter/src/ksecretprompter.cpp	2026-10-08 17:05:07.297713104 -0400
+@@ -162,7 +162,7 @@
+ 
+ void KSecretPrompter::UnlockCollectionPrompt(const QDBusObjectPath &path,
+                                              const QString &windowId,
+-                                             const QString &activationToken,
++                                             const QString & /*activationToken*/,
+                                              const QString &collectionName)
+ {
+     Prompt(path,
+@@ -173,7 +173,7 @@
+ 
+ void KSecretPrompter::CreateCollectionPrompt(const QDBusObjectPath &path,
+                                              const QString &windowId,
+-                                             const QString &activationToken,
++                                             const QString & /*activationToken*/,
+                                              const QString &collectionName)
+ {
+     Prompt(path,
+--- a/ksecretprompter/src/promptcontext.cpp	2026-10-08 16:59:33.555005012 -0400
++++ b/ksecretprompter/src/promptcontext.cpp	2026-10-08 17:04:40.743230911 -0400
+@@ -24,7 +24,7 @@
+ {
+     qCDebug(KSecretPrompterDaemon) << "Creating PromptContext for caller:" << callerAddress << "path:" << path.path();
+ 
+-    connect(m_watcher, &QDBusServiceWatcher::serviceUnregistered, this, [this](const QString &serviceName) {
++    connect(m_watcher, &QDBusServiceWatcher::serviceUnregistered, this, [this](const QString & /*serviceName*/) {
+         m_valid = false;
+         deleteLater();
+     });
+--- a/ksmserver/main.cpp	2026-10-08 16:59:33.558667279 -0400
++++ b/ksmserver/main.cpp	2026-10-08 17:04:41.762223188 -0400
+@@ -57,7 +57,7 @@
+     return true;
+ }
+ 
+-void sanity_check(int argc, char *argv[])
++void sanity_check(int /*argc*/, char * /*argv*/[])
+ {
+     QString msg;
+     QByteArray path;
+--- a/ksplash/ksplashqml/splashapp.cpp	2026-10-08 16:59:33.560583424 -0400
++++ b/ksplash/ksplashqml/splashapp.cpp	2026-10-08 17:05:20.727113196 -0400
+@@ -21,8 +21,6 @@
+ #include <KConfigGroup>
+ #include <KSharedConfig>
+ 
+-#include <LayerShellQt/Shell>
+-
+ #define TEST_STEP_INTERVAL 2000
+ 
+ /**
+@@ -64,8 +62,6 @@
+     dbus.registerObject(QStringLiteral("/KSplash"), this, QDBusConnection::ExportScriptableSlots);
+     dbus.registerService(QStringLiteral("org.kde.KSplash"));
+ 
+-    setupWaylandIntegration();
+-
+     for (const auto screenList{screens()}; QScreen * screen : screenList) {
+         adoptScreen(screen);
+     }
+@@ -139,12 +135,4 @@
+     });
+ }
+ 
+-void SplashApp::setupWaylandIntegration()
+-{
+-    if (!KWindowSystem::isPlatformWayland()) {
+-        return;
+-    }
+-    LayerShellQt::Shell::useLayerShell();
+-}
+-
+ #include "moc_splashapp.cpp"
+--- a/ksplash/ksplashqml/splashapp.h	2026-10-08 16:59:33.562540566 -0400
++++ b/ksplash/ksplashqml/splashapp.h	2026-10-08 17:05:20.727210587 -0400
+@@ -30,7 +30,6 @@
+     void setStage(int stage);
+ 
+ private:
+-    void setupWaylandIntegration();
+     int m_stage;
+     QList<SplashWindow *> m_windows;
+     bool m_testing;
+--- a/ksmserver/server.cpp	2026-10-08 16:59:33.564371798 -0400
++++ b/ksmserver/server.cpp	2026-10-08 17:05:20.727677981 -0400
+@@ -172,8 +172,6 @@
+ 
+ IceAuthDataEntry *authDataEntries = nullptr;
+ 
+-static QTemporaryFile *remTempFile = nullptr;
+-
+ static IceListenObj *listenObjs = nullptr;
+ int numTransports = 0;
+ 
+@@ -303,18 +301,6 @@
+     inline static size_t count = 0;
+ };
+ 
+-/* for printing hex digits */
+-static void fprintfhex(FILE *fp, unsigned int len, char *cp)
+-{
+-    static const char hexchars[] = "0123456789abcdef";
+-
+-    for (; len > 0; len--, cp++) {
+-        unsigned char s = *cp;
+-        putc(hexchars[s >> 4], fp);
+-        putc(hexchars[s & 0x0f], fp);
+-    }
+-}
+-
+ #define MAGIC_COOKIE_LEN 16
+ 
+ Status SetAuthentication(int count, IceListenObj *listenObjs, IceAuthDataEntry **authDataEntries)
+@@ -358,7 +344,7 @@
+             file_entry->protocol_data_length = 0;
+             file_entry->network_id = IceGetListenConnectionString(listenObjs[i / 2]);
+             file_entry->auth_name = strdup("MIT-MAGIC-COOKIE-1");
+-            if (file_entry->auth_data = (char *)malloc(MAGIC_COOKIE_LEN)) {
++            if ((file_entry->auth_data = (char *)malloc(MAGIC_COOKIE_LEN))) {
+                 memcpy(file_entry->auth_data, (*authDataEntries)[i].auth_data, MAGIC_COOKIE_LEN);
+             }
+             file_entry->auth_data_length = MAGIC_COOKIE_LEN;
+@@ -384,7 +370,7 @@
+             file_entry->protocol_data_length = 0;
+             file_entry->network_id = IceGetListenConnectionString(listenObjs[i / 2]);
+             file_entry->auth_name = strdup("MIT-MAGIC-COOKIE-1");
+-            if (file_entry->auth_data = (char *)malloc(MAGIC_COOKIE_LEN)) {
++            if ((file_entry->auth_data = (char *)malloc(MAGIC_COOKIE_LEN))) {
+                 memcpy(file_entry->auth_data, (*authDataEntries)[i + 1].auth_data, MAGIC_COOKIE_LEN);
+             }
+             file_entry->auth_data_length = MAGIC_COOKIE_LEN;
+--- a/libklookandfeel/klookandfeelmanager.cpp	2026-10-08 16:59:33.566199357 -0400
++++ b/libklookandfeel/klookandfeelmanager.cpp	2026-10-08 17:05:38.747571402 -0400
+@@ -592,8 +592,11 @@
+         }
+ 
+         QFile packageFile(QStandardPaths::writableLocation(QStandardPaths::GenericConfigLocation) + QLatin1String("/kdedefaults/package"));
+-        packageFile.open(QIODevice::WriteOnly);
+-        packageFile.write(packageId.toUtf8());
++        if (packageFile.open(QIODevice::WriteOnly)) {
++            packageFile.write(packageId.toUtf8());
++        } else {
++            qWarning("Failed to open %s for writing: %s", qPrintable(packageFile.fileName()), qPrintable(packageFile.errorString()));
++        }
+ 
+         if (m_mode == Mode::Defaults) {
+             return;
+--- a/logout-greeter/shutdowndlg.cpp	2026-10-08 16:59:33.569957146 -0400
++++ b/logout-greeter/shutdowndlg.cpp	2026-10-08 17:05:20.727959739 -0400
+@@ -48,6 +48,7 @@
+ 
+ using namespace Qt::StringLiterals;
+ 
++#ifdef PACKAGEKIT_OFFLINE_UPDATES
+ namespace
+ {
+ constexpr auto PK_OFFLINE_PREPARED_FILENAME = "/var/lib/PackageKit/prepared-update"_L1;
+@@ -63,6 +64,7 @@
+     return {};
+ }
+ } // namespace
++#endif
+ 
+ static const QString s_login1Service = QStringLiteral("org.freedesktop.login1");
+ static const QString s_login1Path = QStringLiteral("/org/freedesktop/login1");
+@@ -74,8 +76,8 @@
+ 
+ KSMShutdownDlg::KSMShutdownDlg(QWindow *parent, KWorkSpace::ShutdownType sdtype, bool windowed, QScreen *screen)
+     : QuickViewSharedEngine(parent)
+-    , m_result(false)
+     , m_windowed(windowed)
++    , m_result(false)
+ // this is a WType_Popup on purpose. Do not change that! Not
+ // having a popup here has severe side effects.
+ {
+--- a/ksmserver/legacy.cpp	2026-10-08 16:59:33.571986408 -0400
++++ b/ksmserver/legacy.cpp	2026-10-08 17:05:20.728147171 -0400
+@@ -169,14 +169,17 @@
+                 break;
+             }
+             /* Wait for more events */
+-            fd_set fds;
+-            FD_ZERO(&fds);
++            fd_set readFds;
++            fd_set exceptFds;
++            FD_ZERO(&readFds);
++            FD_ZERO(&exceptFds);
+             int fd = ConnectionNumber(newdisplay);
+-            FD_SET(fd, &fds);
++            FD_SET(fd, &readFds);
++            FD_SET(fd, &exceptFds);
+             struct timeval tmwait;
+             tmwait.tv_sec = (wmSaveYourselfTimeout - msecs) / 1000;
+             tmwait.tv_usec = ((wmSaveYourselfTimeout - msecs) % 1000) * 1000;
+-            ::select(fd + 1, &fds, nullptr, &fds, &tmwait);
++            ::select(fd + 1, &readFds, nullptr, &exceptFds, &tmwait);
+         }
+     }
+     // Terminate work in new display
+--- a/kcms/kfontinst/dbus/Helper.cpp	2026-10-08 16:59:33.573938829 -0400
++++ b/kcms/kfontinst/dbus/Helper.cpp	2026-10-08 17:05:38.744618459 -0400
+@@ -15,8 +15,8 @@
+ #include <QDebug>
+ #include <QDomDocument>
+ #include <kio/global.h>
++#include <errno.h>
+ #include <signal.h>
+-#include <sys/errno.h>
+ #include <sys/types.h>
+ #include <unistd.h>
+ 
+--- a/kcms/kfontinst/dbus/Folder.cpp	2026-10-08 16:59:33.575577846 -0400
++++ b/kcms/kfontinst/dbus/Folder.cpp	2026-10-08 17:05:38.745046168 -0400
+@@ -230,7 +230,7 @@
+     Families fam(m_isSystem);
+     FamilyCont::ConstIterator it(m_fonts.begin()), end(m_fonts.end());
+ 
+-    for (int i = 0; it != end; ++it, ++i) {
++    for (; it != end; ++it) {
+         fam.items.insert(*it);
+     }
+ 
+--- a/kcms/autostart/unit.cpp	2026-10-08 16:59:33.577819598 -0400
++++ b/kcms/autostart/unit.cpp	2026-10-08 17:05:38.745108659 -0400
+@@ -143,7 +143,7 @@
+     m_sessionBus.send(message);
+ }
+ 
+-QStringList Unit::getLastJournalEntries(const QString &unit)
++QStringList Unit::getLastJournalEntries([[maybe_unused]] const QString &unit)
+ {
+ #if HAVE_SYSTEMD
+     sd_journal *journal;
+--- a/applets/kicker/actionlist.cpp	2026-10-08 16:59:33.585507154 -0400
++++ b/applets/kicker/actionlist.cpp	2026-10-08 17:05:38.745224077 -0400
+@@ -431,7 +431,7 @@
+ #endif
+ }
+ 
+-bool handleAppstreamActions(const QString &actionId, const KService::Ptr &service)
++bool handleAppstreamActions(const QString &actionId, [[maybe_unused]] const KService::Ptr &service)
+ {
+     if (actionId != QLatin1String("manageApplication")) {
+         return false;
+--- a/startkde/startplasma.cpp	2026-10-08 16:59:33.587444410 -0400
++++ b/startkde/startplasma.cpp	2026-10-08 17:05:38.747437255 -0400
+@@ -422,8 +422,10 @@
+     }
+ 
+     QFile activeLnf(extraConfigDir + QLatin1String("/package"));
+-    activeLnf.open(QIODevice::ReadOnly);
+-    if (activeLnf.readLine() != lookAndFeelName.toUtf8()) {
++    const bool activeLnfOpened = activeLnf.open(QIODevice::ReadOnly);
++    // A missing or unreadable file reads as empty, as readLine() on it did.
++    const QByteArray activeLnfName = activeLnfOpened ? activeLnf.readLine() : QByteArray();
++    if (activeLnfName != lookAndFeelName.toUtf8()) {
+         KPackage::Package package = KPackage::PackageLoader::self()->loadPackage(QStringLiteral("Plasma/LookAndFeel"), lookAndFeelName);
+         KLookAndFeelManager lnfManager;
+         lnfManager.setMode(KLookAndFeelManager::Mode::Defaults);
+--- a/applets/kicker/appentry.cpp	2026-10-08 16:59:33.589331722 -0400
++++ b/applets/kicker/appentry.cpp	2026-10-08 17:05:38.745306402 -0400
+@@ -180,7 +180,6 @@
+ 
+     switch (nameFormat) {
+     case NameOnly:
+-        m_description = comment;
+     case NameAndGenericName:
+         if (m_serviceAction) {
+             m_compactName = m_serviceAction->text();
+--- a/kcms/kfontinst/viewpart/CharTip.cpp	2026-10-08 16:59:33.591212372 -0400
++++ b/kcms/kfontinst/viewpart/CharTip.cpp	2026-10-08 17:05:38.745368483 -0400
+@@ -153,7 +153,8 @@
+     details +=
+         u"<tr><td align=\"right\"><b>" + i18n("UCS-4") + u"&nbsp;</b></td><td>" + u"U+" + QStringLiteral("%1").arg(m_item.ucs4, 4, 16) + u"&nbsp;</td></tr>";
+ 
+-    QString str(QString::fromUcs4(&(m_item.ucs4), 1));
++    const char32_t ucs4 = m_item.ucs4;
++    QString str(QString::fromUcs4(&ucs4, 1));
+     details += u"<tr><td align=\"right\"><b>" + i18n("UTF-16") + u"&nbsp;</b></td><td>";
+ 
+     const ushort *utf16(str.utf16());
+--- a/kcms/kfontinst/kcmfontinst/DuplicatesDialog.cpp	2026-10-08 16:59:33.593184111 -0400
++++ b/kcms/kfontinst/kcmfontinst/DuplicatesDialog.cpp	2026-10-08 17:05:38.745554194 -0400
+@@ -318,11 +318,11 @@
+         TFontMap::Iterator it(m_map.begin()), end(m_map.end());
+         QHash<QString, QSet<TFile>> folderMap;
+ 
+-        for (int n = 0; it != end && !m_terminated; ++it) {
++        for (; it != end && !m_terminated; ++it) {
+             QStringList add;
+             QSet<QString>::const_iterator fIt((*it).begin()), fEnd((*it).end());
+ 
+-            for (; fIt != fEnd && !m_terminated; ++fIt, ++n) {
++            for (; fIt != fEnd && !m_terminated; ++fIt) {
+                 folderMap[Misc::getDir(*fIt)].insert(TFile(Misc::getFile(*fIt), it));
+             }
+         }
+--- a/shell/panelview.cpp	2026-10-08 16:59:33.595075206 -0400
++++ b/shell/panelview.cpp	2026-10-08 17:05:38.746030810 -0400
+@@ -108,6 +108,12 @@
+         case Plasma::Types::TopEdge:
+         case Plasma::Types::BottomEdge:
+             containment()->setFormFactor(Plasma::Types::Horizontal);
++            break;
++        case Plasma::Types::Floating:
++        case Plasma::Types::Desktop:
++        case Plasma::Types::FullScreen:
++            // Not a screen edge: there is no panel orientation to derive, keep the form factor.
++            break;
+         }
+         restore();
+     });
+@@ -1684,7 +1690,7 @@
+ {
+     restore();
+     Plasma::Containment *const cont = containment();
+-    connect(m_corona, &Plasma::Corona::editModeChanged, this, [this](bool edit) {
++    connect(m_corona, &Plasma::Corona::editModeChanged, this, [this](bool /*edit*/) {
+         updateExclusiveZone();
+     });
+     updateExclusiveZone();
+--- a/shell/shellcorona.cpp	2026-10-08 16:59:33.596577684 -0400
++++ b/shell/shellcorona.cpp	2026-10-08 17:05:38.746908078 -0400
+@@ -1655,7 +1655,7 @@
+         connect(panel, &PanelView::thicknessChanged, this, rectNotify);
+         connect(panel, &PanelView::userConfiguringChanged, this, &ShellCorona::panelBeingConfiguredChanged);
+ 
+-        auto checkUiReady = [this, panel = QPointer{panel}](bool visible) {
++        auto checkUiReady = [this, panel = QPointer{panel}](bool /*visible*/) {
+             // Be mindful of what you capture in this lambda. At the time of writing the connects only ensures 'this'
+             // is still alive. Panel may not be, so weak pointer it.
+             if (!panel) {
+--- a/wallpapers/image/plugin/finder/mediametadatafinder.cpp	2026-10-08 16:59:33.598969758 -0400
++++ b/wallpapers/image/plugin/finder/mediametadatafinder.cpp	2026-10-08 17:05:38.747003631 -0400
+@@ -12,7 +12,7 @@
+ #include <KExiv2/KExiv2>
+ #endif
+ 
+-MediaMetadata MediaMetadata::read(const QString &path)
++MediaMetadata MediaMetadata::read([[maybe_unused]] const QString &path)
+ {
+     MediaMetadata metadata;
+ 
+--- a/applets/systemtray/systemtray.cpp	2026-10-08 16:59:33.601171976 -0400
++++ b/applets/systemtray/systemtray.cpp	2026-10-08 17:05:38.747127950 -0400
+@@ -251,7 +251,6 @@
+     }
+ 
+     // Delete the the old systray
+-    bool oldSystrayInstantiated = false;
+     for (Plasma::Containment *cont : corona()->containments()) {
+         if (cont->id() == oldSystrayId) {
+             delete cont;
+--- a/libnotificationmanager/notifications.cpp	2026-10-08 16:59:33.603306980 -0400
++++ b/libnotificationmanager/notifications.cpp	2026-10-08 17:05:38.747281807 -0400
+@@ -955,7 +955,7 @@
+     }
+ }
+ 
+-void Notifications::showInhibitionSummary(Urgency urgency, const QStringList &blacklistedDesktopEntries, const QStringList &blacklistedNotifyRcNames)
++void Notifications::showInhibitionSummary(Urgency urgency, const QStringList & /*blacklistedDesktopEntries*/, const QStringList & /*blacklistedNotifyRcNames*/)
+ {
+     int inhibited = 0;
+     for (int i = 0, count = d->notificationsAndJobsModel->rowCount(); i < count; ++i) {
+--- a/libtaskmanager/waylandtasksmodel.cpp	2026-10-08 16:59:33.605362732 -0400
++++ b/libtaskmanager/waylandtasksmodel.cpp	2026-10-08 17:05:38.744952767 -0400
+@@ -34,7 +34,7 @@
+ #include <qpa/qplatformwindow_p.h>
+ 
+ #include <fcntl.h>
+-#include <sys/poll.h>
++#include <poll.h>
+ #include <unistd.h>
+ 
+ using namespace std::chrono_literals;

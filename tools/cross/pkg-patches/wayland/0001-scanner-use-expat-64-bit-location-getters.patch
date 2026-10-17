@@ -1,0 +1,55 @@
+VeridianOS: wayland-scanner: use the 64-bit expat location getters
+
+GCC reported -Wdeprecated-declarations three times in src/scanner.c (host
+wayland-scanner): expat 2.9.0 deprecates XML_GetCurrentLineNumber() and
+XML_GetCurrentColumnNumber() in favour of XML_GetCurrentLineNumber64() and
+XML_GetCurrentColumnNumber64(), which return the same values as uint64_t
+and do not wrap on 32-bit platforms. Local macros pick the 64-bit getters
+on expat >= 2.9.0 and the old ones otherwise, so the scanner still builds
+against older expat. The line number is still stored in the int
+loc.line_number, and the parse-error message casts both values to long to
+match its existing "%ld" format (previously an unsigned long was passed
+for %ld). Behaviour is unchanged.
+
+
+diff -ru a/src/scanner.c b/src/scanner.c
+--- a/src/scanner.c	2026-10-08 17:00:17.362379670 -0400
++++ b/src/scanner.c	2026-10-08 17:00:17.377743687 -0400
+@@ -50,6 +50,17 @@
+  * the Git commit that 'git blame' for this comment points to for more. */
+ #include <expat.h>
+ 
++/* XML_GetCurrentLineNumber() and XML_GetCurrentColumnNumber() are
++ * deprecated since expat 2.9.0 in favour of the 64-bit variants, which do
++ * not wrap on 32-bit platforms. */
++#if XML_MAJOR_VERSION > 2 || (XML_MAJOR_VERSION == 2 && XML_MINOR_VERSION >= 9)
++#define xml_line_number(parser) XML_GetCurrentLineNumber64(parser)
++#define xml_column_number(parser) XML_GetCurrentColumnNumber64(parser)
++#else
++#define xml_line_number(parser) XML_GetCurrentLineNumber(parser)
++#define xml_column_number(parser) XML_GetCurrentColumnNumber(parser)
++#endif
++
+ #include "wayland-util.h"
+ 
+ #define PROGRAM_NAME "wayland-scanner"
+@@ -738,7 +749,7 @@
+ 	const char *frozen = NULL;
+ 	int i, version = 0;
+ 
+-	ctx->loc.line_number = XML_GetCurrentLineNumber(ctx->parser);
++	ctx->loc.line_number = xml_line_number(ctx->parser);
+ 	for (i = 0; atts[i]; i += 2) {
+ 		if (strcmp(atts[i], "name") == 0)
+ 			name = atts[i + 1];
+@@ -2202,8 +2213,8 @@
+ 		if (XML_ParseBuffer(ctx.parser, len, len == 0) == 0) {
+ 			fprintf(stderr,
+ 				"Error parsing XML at line %ld col %ld: %s\n",
+-				XML_GetCurrentLineNumber(ctx.parser),
+-				XML_GetCurrentColumnNumber(ctx.parser),
++				(long) xml_line_number(ctx.parser),
++				(long) xml_column_number(ctx.parser),
+ 				XML_ErrorString(XML_GetErrorCode(ctx.parser)));
+ 			fclose(input);
+ 			exit(EXIT_FAILURE);

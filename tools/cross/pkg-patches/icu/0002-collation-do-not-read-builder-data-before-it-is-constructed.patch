@@ -1,0 +1,52 @@
+VeridianOS: collation: do not read builder data before it is constructed
+
+Backport of upstream ICU commit 45a8a28de6f (ICU-22779, ICU 79.1; drop
+this patch when moving to ICU 79). GCC reported, in the
+DataBuilderCollationIterator constructor (i18n/collationdatabuilder.cpp,
+inlined from the CollationIterator constructor in
+i18n/collationiterator.h): "'...CollationData::trie' is used
+uninitialized [-Wuninitialized]".
+
+Real (latent) undefined behaviour: the base class CollationIterator is
+initialized before the member builderData, but it is passed &builderData
+and its constructor read d->trie, an indeterminate value. Upstream adds a
+protected constructor that takes the trie explicitly (nullptr: the
+builder's data has no trie of its own), which DataBuilderCollationIterator
+uses. Every other CollationIterator subclass is unaffected.
+
+--- a/i18n/collationdatabuilder.cpp
++++ b/i18n/collationdatabuilder.cpp
+@@ -164,7 +164,7 @@ class DataBuilderCollationIterator : public CollationIterator {
+ };
+ 
+ DataBuilderCollationIterator::DataBuilderCollationIterator(CollationDataBuilder &b)
+-        : CollationIterator(&builderData, /*numeric=*/ false),
++        : CollationIterator(&builderData, /*nullTrie=*/ nullptr, /*numeric=*/ false),
+           builder(b), builderData(b.nfcImpl),
+           s(nullptr), pos(0) {
+     builderData.base = builder.base;
+--- a/i18n/collationiterator.h
++++ b/i18n/collationiterator.h
+@@ -212,6 +212,22 @@ class U_I18N_API_CLASS CollationIterator : public UObject {
+ protected:
+     CollationIterator(const CollationIterator &other);
+ 
++    /**
++     * A special constructor used by DataBuilderCollationIterator, which initializes
++     * the CollationData in the constructor. The public CollationIterator constructor
++     * initializes the trie pointer from the CollationData, but it's not yet available
++     * when DataBuilderCollationIterator invokes the CollationIterator constructor.
++     * The CollationData used by DataBuilderCollationIterator is the Normalizer2Impl,
++     * which does not have a trie, so the trie pointer is set to nullptr.
++     */
++    CollationIterator(const CollationData *d, std::nullptr_t nullTrie, UBool numeric)
++            : trie(nullTrie),
++              data(d),
++              cesIndex(0),
++              skipped(nullptr),
++              numCpFwd(-1),
++              isNumeric(numeric) {}
++
+     void reset();
+ 
+     /**

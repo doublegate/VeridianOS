@@ -42,10 +42,27 @@ The sysroot contains headers and libraries for the target. Default locations:
 
 Override with `VERIDIAN_SYSROOT` environment variable.
 
-**Note:** The sysroot is not yet populated with a libc. A musl or newlib port
-is required before user-space C programs can link dynamically. Currently, all
-user-space code must be statically linked or compiled as freestanding (no libc
-dependency).
+**Note:** these freestanding toolchains have no C library. For C and C++
+programs with libc, use the musl toolchains below.
+
+### musl Toolchains (C and C++ with a C library)
+
+`tools/cross/veridian-paths.sh` defines one musl toolchain and sysroot per
+architecture, selected with `VERIDIAN_ARCH` (default `x86_64`):
+
+| Architecture | Triple | Toolchain | Sysroot |
+|--------------|--------|-----------|---------|
+| x86_64  | `x86_64-veridian-linux-musl`  | `/opt/veridian/musl-toolchain`         | `/opt/veridian/musl-sysroot`         |
+| AArch64 | `aarch64-veridian-linux-musl` | `/opt/veridian/musl-toolchain-aarch64` | `/opt/veridian/musl-sysroot-aarch64` |
+| RISC-V 64 | `riscv64-veridian-linux-musl` | `/opt/veridian/musl-toolchain-riscv64` | `/opt/veridian/musl-sysroot-riscv64` |
+
+They hold musl 1.2.5, Linux 7.2 UAPI headers and GCC 16.2 (C, C++, shared
+runtimes); the loader is `/lib/ld-musl-<arch>.so.1`. Build them with
+`tools/cross/build-musl-toolchain.sh` (x86_64, the KDE pipeline's) or
+`tools/cross/build-musl-arch.sh aarch64|riscv64`. Programs built with them
+use the Linux system call ABI, which is VeridianOS's (ADR 0009).
+`scripts/build-musl-rootfs.sh aarch64|riscv64` uses them to build a BusyBox
+root for those architectures.
 
 ## Using CMake Toolchain Files
 
@@ -166,10 +183,10 @@ targets until a proper `veridian` target is upstreamed to rustc:
 cargo build --target x86_64-unknown-none
 
 # AArch64 user-space (freestanding)
-cargo build --target aarch64-unknown-none
+cargo build --target aarch64-unknown-none-softfloat
 
 # RISC-V 64 user-space (freestanding)
-cargo build --target riscv64gc-unknown-none-elf
+cargo build --target riscv64imac-unknown-none-elf
 ```
 
 User-space Rust programs should use `#![no_std]` and `#![no_main]`, and invoke

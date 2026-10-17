@@ -16,7 +16,13 @@ pub unsafe extern "C" fn memcpy(dest: *mut c_void, src: *const c_void, n: usize)
     let src_u8 = src as *const u8;
 
     for i in 0..n {
-        *dest_u8.add(i) = *src_u8.add(i);
+        // SAFETY: forwarded from this function's contract: the caller
+        // guarantees `src` and `dest` are valid for `n` bytes, so offset
+        // `i < n` stays in bounds of both. This must remain a plain byte
+        // loop (not `copy_nonoverlapping`), which would lower back to memcpy.
+        unsafe {
+            *dest_u8.add(i) = *src_u8.add(i);
+        }
     }
 
     dest
@@ -32,7 +38,11 @@ pub unsafe extern "C" fn memset(dest: *mut c_void, c: i32, n: usize) -> *mut c_v
     let byte = c as u8;
 
     for i in 0..n {
-        *dest_u8.add(i) = byte;
+        // SAFETY: forwarded from this function's contract: the caller
+        // guarantees `dest` is valid for writes of `n` bytes, and `i < n`.
+        unsafe {
+            *dest_u8.add(i) = byte;
+        }
     }
 
     dest
@@ -52,13 +62,25 @@ pub unsafe extern "C" fn memmove(dest: *mut c_void, src: *const c_void, n: usize
         Ordering::Less => {
             // Copy forward
             for i in 0..n {
-                *dest_u8.add(i) = *src_u8.add(i);
+                // SAFETY: forwarded from this function's contract: `src` and
+                // `dest` are valid for `n` bytes and `i < n`. With
+                // dest < src, a forward copy never reads a byte it already
+                // overwrote.
+                unsafe {
+                    *dest_u8.add(i) = *src_u8.add(i);
+                }
             }
         }
         Ordering::Greater => {
             // Copy backward to handle overlap
             for i in (0..n).rev() {
-                *dest_u8.add(i) = *src_u8.add(i);
+                // SAFETY: forwarded from this function's contract: `src` and
+                // `dest` are valid for `n` bytes and `i < n`. With
+                // dest > src, a backward copy never reads a byte it already
+                // overwrote.
+                unsafe {
+                    *dest_u8.add(i) = *src_u8.add(i);
+                }
             }
         }
         Ordering::Equal => {
@@ -79,8 +101,9 @@ pub unsafe extern "C" fn memcmp(s1: *const c_void, s2: *const c_void, n: usize) 
     let s2_u8 = s2 as *const u8;
 
     for i in 0..n {
-        let a = *s1_u8.add(i);
-        let b = *s2_u8.add(i);
+        // SAFETY: forwarded from this function's contract: `s1` and `s2` are
+        // valid for reads of `n` bytes, and `i < n`.
+        let (a, b) = unsafe { (*s1_u8.add(i), *s2_u8.add(i)) };
         if a != b {
             return a as i32 - b as i32;
         }

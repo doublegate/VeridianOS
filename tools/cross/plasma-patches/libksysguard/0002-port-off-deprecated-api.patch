@@ -1,0 +1,276 @@
+VeridianOS: port libksysguard off deprecated Qt/KF6 API (QVariant::Type, KLocalizedContext, QMap iterator +)
+
+GCC reported -Wdeprecated-declarations for:
+
+- QVariant::Type ("Use QMetaType::Type instead") in SensorInfo.h:32/76,
+  SensorProperty.h:84, SensorProperty.cpp:164, Sensor.h:159, Sensor.cpp:161,
+  and QVariant::QVariant(Type) in Sensor.cpp:169. Ported to QMetaType::Type:
+  SensorInfo::variantType (both the public systemstats/SensorInfo.h and the
+  installed sensors/SensorInfo_p.h copy, so the two definitions of
+  KSysGuard::SensorInfo stay identical), SensorProperty::setVariantType(),
+  Sensor::type() and its Q_PROPERTY, and QVariant{QMetaType(type)} for the
+  default value. QVariant::Type's enumerators are defined as the QMetaType
+  values, so every stored value is the same number.
+  Two places had to keep the old representation explicitly:
+  * D-Bus: QVariant::Type has a 0xffffffff enumerator, so its underlying type
+    is unsigned and "argument << s.variantType" marshalled a uint ("u", as
+    the org.kde.ksystemstats1 XML declares: (sssuuddi)). QMetaType::Type is
+    int-sized and would marshal as "i" and break the wire format, so the
+    value is now streamed as static_cast<uint>(...). The reader already read
+    a uint32_t.
+  * SensorDataModel TypeRole: "return info.variantType;" produced a QVariant
+    holding that uint; QVariant(QMetaType::Type) is a deleted constructor, so
+    it now returns static_cast<uint>(info.variantType), the same QVariant.
+  This changes the C++ API/ABI of libksysguard (setVariantType and
+  Sensor::type take/return QMetaType::Type). The only in-tree caller,
+  ksystemstats, passes QVariant::Double etc. to setVariantType and needs the
+  companion ksystemstats patch (QVariant::X -> QMetaType::X); everything is
+  rebuilt from source in order, so the soname is not bumped.
+- QVariant::type() in SensorFaceController.cpp:940: use typeId() and
+  QMetaType::QStringList (same comparison).
+- KLocalizedContext (deprecated since KF 6.8) in SensorFaceController_p.h:104
+  and SensorFaceController.cpp:396: use KLocalizedQmlContext from
+  KF6::I18nQml (same parent, same setTranslationDomain() and i18n*()
+  context-object API used by the face QML); SensorFaces now links
+  KF6::I18nQml (KF6 >= 6.26 is already required).
+  KLocalizedQmlContext adds what KLocalizedContext lacked: it installs a
+  process-wide event filter that retranslates on a language change, and
+  each i18n*() call tries to mark the calling binding as a translation
+  binding. This context object has no QML engine of its own, so that
+  attempt only logs a kf.i18n.qml debug message; translations are
+  unchanged.
+- QMap iterator + int in SensorUnitModel.cpp:104 ("QMap iterators are not
+  random access"): use std::next() (same element).
+
+Not handled here: "'TRANSLATION_DOMAIN' redefined" (0001); the
+Formatter.cpp 'inputOrder' warning is fixed in 0003 (real bug).
+
+diff -ru -x formatter a/faces/CMakeLists.txt b/faces/CMakeLists.txt
+--- a/faces/CMakeLists.txt	2026-10-08 18:42:21.709018823 -0400
++++ b/faces/CMakeLists.txt	2026-10-08 18:44:10.381120483 -0400
+@@ -78,6 +78,7 @@
+         Qt::Core
+         Qt::DBus
+         KF6::I18n
++        KF6::I18nQml
+         KF6::Package
+         KF6::ConfigQml
+         KF6::Solid
+diff -ru -x formatter a/faces/SensorFaceController.cpp b/faces/SensorFaceController.cpp
+--- a/faces/SensorFaceController.cpp	2026-10-08 18:42:21.691292943 -0400
++++ b/faces/SensorFaceController.cpp	2026-10-08 18:44:10.381044240 -0400
+@@ -393,7 +393,7 @@
+         d->sensorsGroup.sync();
+     });
+ 
+-    d->contextObj = new KLocalizedContext(this);
++    d->contextObj = new KLocalizedQmlContext(this);
+ 
+     d->resolveSensors(d->readAndUpdateSensors(d->sensorsGroup, QStringLiteral("totalSensors")), [this](SensorResolver *resolver) {
+         d->totalSensors = resolver->found;
+@@ -937,7 +937,7 @@
+         for (const QString &key : presetGroup.keyList()) {
+             KConfigSkeletonItem *item = d->faceConfigLoader->findItemByName(key);
+             if (item) {
+-                if (item->property().type() == QVariant::StringList) {
++                if (item->property().typeId() == QMetaType::QStringList) {
+                     item->setProperty(presetGroup.readEntry(key, QStringList()));
+                 } else {
+                     item->setProperty(presetGroup.readEntry(key));
+diff -ru -x formatter a/faces/SensorFaceController_p.h b/faces/SensorFaceController_p.h
+--- a/faces/SensorFaceController_p.h	2026-10-08 18:42:21.667329974 -0400
++++ b/faces/SensorFaceController_p.h	2026-10-08 18:44:10.380705255 -0400
+@@ -9,7 +9,7 @@
+ #include <KConfigGroup>
+ #include <KConfigLoader>
+ #include <KConfigPropertyMap>
+-#include <KLocalizedContext>
++#include <KLocalizedQmlContext>
+ #include <KPackage/PackageLoader>
+ #include <QJsonArray>
+ #include <QQuickItem>
+@@ -101,7 +101,7 @@
+     bool configNeedsSave = false;
+     KPackage::Package facePackage;
+     QString faceId;
+-    KLocalizedContext *contextObj = nullptr;
++    KLocalizedQmlContext *contextObj = nullptr;
+     KConfigGroup configGroup;
+     KConfigGroup appearanceGroup;
+     KConfigGroup sensorsGroup;
+diff -ru -x formatter a/sensors/Sensor.cpp b/sensors/Sensor.cpp
+--- a/sensors/Sensor.cpp	2026-10-08 18:42:21.592802239 -0400
++++ b/sensors/Sensor.cpp	2026-10-08 18:44:10.380577326 -0400
+@@ -158,7 +158,7 @@
+     return d->sensorInfo.max;
+ }
+ 
+-QVariant::Type Sensor::type() const
++QMetaType::Type Sensor::type() const
+ {
+     return d->sensorInfo.variantType;
+ }
+@@ -166,7 +166,7 @@
+ QVariant Sensor::value() const
+ {
+     if (!d->value.isValid()) {
+-        return QVariant{d->sensorInfo.variantType};
++        return QVariant{QMetaType(d->sensorInfo.variantType)};
+     }
+     return d->value;
+ }
+diff -ru -x formatter a/sensors/SensorDataModel.cpp b/sensors/SensorDataModel.cpp
+--- a/sensors/SensorDataModel.cpp	2026-10-08 18:45:47.736486565 -0400
++++ b/sensors/SensorDataModel.cpp	2026-10-08 18:45:47.760667883 -0400
+@@ -129,7 +129,8 @@
+     case Maximum:
+         return info.max;
+     case Type:
+-        return info.variantType;
++        // A plain number, as the QVariant::Type enum this replaced converted to.
++        return static_cast<uint>(info.variantType);
+     case SensorId:
+         return sensor;
+     case Color:
+@@ -180,7 +181,8 @@
+     case Maximum:
+         return info.max;
+     case Type:
+-        return info.variantType;
++        // A plain number, as the QVariant::Type enum this replaced converted to.
++        return static_cast<uint>(info.variantType);
+     case UpdateInterval:
+         // TODO: Make this dynamic once the backend supports it.
+         return BackendUpdateInterval;
+diff -ru -x formatter a/sensors/Sensor.h b/sensors/Sensor.h
+--- a/sensors/Sensor.h	2026-10-08 18:42:21.567802417 -0400
++++ b/sensors/Sensor.h	2026-10-08 18:44:10.380483114 -0400
+@@ -68,11 +68,11 @@
+      */
+     Q_PROPERTY(qreal maximum READ maximum NOTIFY metaDataChanged)
+     /**
+-     * The QVariant type for this sensor.
++     * The QMetaType type id for this sensor.
+      *
+      * This is used to create proper default values.
+      */
+-    Q_PROPERTY(QVariant::Type type READ type NOTIFY metaDataChanged)
++    Q_PROPERTY(QMetaType::Type type READ type NOTIFY metaDataChanged)
+     /**
+      * The status of the sensor.
+      *
+@@ -156,7 +156,7 @@
+     KSysGuard::Unit unit() const;
+     qreal minimum() const;
+     qreal maximum() const;
+-    QVariant::Type type() const;
++    QMetaType::Type type() const;
+     /**
+      * This signal is emitted when any of the metadata properties change.
+      */
+diff -ru -x formatter a/sensors/SensorInfo_p.h b/sensors/SensorInfo_p.h
+--- a/sensors/SensorInfo_p.h	2026-10-08 18:42:21.617332281 -0400
++++ b/sensors/SensorInfo_p.h	2026-10-08 18:44:10.380254294 -0400
+@@ -25,7 +25,7 @@
+     QString name; // Translated name of the sensor.
+     QString shortName; // Shorter translated name of the sensor, to use when space is constrained.
+     QString description; // Translated description of the sensor.
+-    QVariant::Type variantType = QVariant::Invalid;
++    QMetaType::Type variantType = QMetaType::UnknownType;
+     KSysGuard::Unit unit = KSysGuard::UnitInvalid; // Both a format hint and implies data type (i.e double/string)
+     qreal min = 0;
+     qreal max = 0;
+@@ -53,7 +53,8 @@
+     argument << s.name;
+     argument << s.shortName;
+     argument << s.description;
+-    argument << s.variantType;
++    // Sent as "u" (see the D-Bus interface XML), as the QVariant::Type enum this replaced was.
++    argument << static_cast<uint>(s.variantType);
+     argument << s.unit;
+     argument << s.min;
+     argument << s.max;
+@@ -69,7 +70,7 @@
+     argument >> s.description;
+     uint32_t t;
+     argument >> t;
+-    s.variantType = static_cast<QVariant::Type>(t);
++    s.variantType = static_cast<QMetaType::Type>(t);
+     argument >> t;
+     s.unit = static_cast<KSysGuard::Unit>(t);
+     argument >> s.min;
+diff -ru -x formatter a/sensors/SensorUnitModel.cpp b/sensors/SensorUnitModel.cpp
+--- a/sensors/SensorUnitModel.cpp	2026-10-08 18:42:21.642801882 -0400
++++ b/sensors/SensorUnitModel.cpp	2026-10-08 18:44:17.468501019 -0400
+@@ -7,6 +7,7 @@
+ #include "SensorUnitModel.h"
+ 
+ #include <array>
++#include <iterator>
+ #include <optional>
+ 
+ #include <QScopeGuard>
+@@ -101,7 +102,7 @@
+         return QVariant{};
+     }
+ 
+-    auto itr = d->units.begin() + index.row();
++    auto itr = std::next(d->units.begin(), index.row());
+     auto entry = itr.value();
+ 
+     switch (role) {
+diff -ru -x formatter a/systemstats/SensorInfo.h b/systemstats/SensorInfo.h
+--- a/systemstats/SensorInfo.h	2026-10-08 18:42:21.504874564 -0400
++++ b/systemstats/SensorInfo.h	2026-10-08 18:44:10.380134136 -0400
+@@ -29,7 +29,7 @@
+     QString name; // Translated name of the sensor.
+     QString shortName; // Shorter translated name of the sensor, to use when space is constrained.
+     QString description; // Translated description of the sensor.
+-    QVariant::Type variantType = QVariant::Invalid;
++    QMetaType::Type variantType = QMetaType::UnknownType;
+     KSysGuard::Unit unit = KSysGuard::UnitInvalid; // Both a format hint and implies data type (i.e double/string)
+     qreal min = 0;
+     qreal max = 0;
+@@ -57,7 +57,8 @@
+     argument << s.name;
+     argument << s.shortName;
+     argument << s.description;
+-    argument << s.variantType;
++    // Sent as "u" (see the D-Bus interface XML), as the QVariant::Type enum this replaced was.
++    argument << static_cast<uint>(s.variantType);
+     argument << s.unit;
+     argument << s.min;
+     argument << s.max;
+@@ -73,7 +74,7 @@
+     argument >> s.description;
+     uint32_t t;
+     argument >> t;
+-    s.variantType = static_cast<QVariant::Type>(t);
++    s.variantType = static_cast<QMetaType::Type>(t);
+     argument >> t;
+     s.unit = static_cast<KSysGuard::Unit>(t);
+     argument >> s.min;
+diff -ru -x formatter a/systemstats/SensorProperty.cpp b/systemstats/SensorProperty.cpp
+--- a/systemstats/SensorProperty.cpp	2026-10-08 18:42:21.543802589 -0400
++++ b/systemstats/SensorProperty.cpp	2026-10-08 18:44:10.380343859 -0400
+@@ -161,7 +161,7 @@
+     Q_EMIT sensorInfoChanged();
+ }
+ 
+-void SensorProperty::setVariantType(QVariant::Type type)
++void SensorProperty::setVariantType(QMetaType::Type type)
+ {
+     if (d->info.variantType == type) {
+         return;
+diff -ru -x formatter a/systemstats/SensorProperty.h b/systemstats/SensorProperty.h
+--- a/systemstats/SensorProperty.h	2026-10-08 18:42:21.523728059 -0400
++++ b/systemstats/SensorProperty.h	2026-10-08 18:44:10.380298152 -0400
+@@ -81,7 +81,7 @@
+      */
+     void setMax(SensorProperty *other);
+     void setUnit(KSysGuard::Unit unit);
+-    void setVariantType(QVariant::Type type);
++    void setVariantType(QMetaType::Type type);
+ 
+     bool isSubscribed() const;
+ 
