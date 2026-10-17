@@ -1308,6 +1308,13 @@ mod generic {
             f.x[30] = ret_to;
             f.sp = frame_addr;
             f.elr = handler;
+            // Delivery is an indirect call: with BTI, as after a BLR to the
+            // handler, so a guarded handler must start with a landing pad
+            // (Linux's setup_return).
+            if crate::arch::bti_supported() {
+                use crate::arch::aarch64::switch::{BTYPE_C, BTYPE_MASK};
+                f.spsr = (f.spsr & !BTYPE_MASK) | BTYPE_C;
+            }
         }
         #[cfg(target_arch = "riscv64")]
         {
@@ -1440,9 +1447,9 @@ mod generic {
             f.x = mc.regs;
             f.sp = mc.sp;
             f.elr = mc.pc;
-            // Only the condition flags come back; the exception return
-            // forces EL0 with interrupts unmasked (`switch::user_spsr`).
-            f.spsr = mc.pstate & 0xF000_0000;
+            // Only the condition flags and BTYPE come back; the exception
+            // return forces EL0 with interrupts unmasked (`switch::user_spsr`).
+            f.spsr = crate::arch::aarch64::switch::user_spsr(mc.pstate);
         }
         #[cfg(target_arch = "riscv64")]
         {

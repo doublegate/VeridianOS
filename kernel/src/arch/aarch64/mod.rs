@@ -6,6 +6,7 @@
 // Include the boot module
 pub mod boot;
 pub mod bootstrap;
+pub mod bti;
 pub mod context;
 pub mod direct_uart;
 pub mod entry;
@@ -30,6 +31,9 @@ pub fn init() {
         use crate::arch::aarch64::direct_uart::uart_write_str;
         uart_write_str("[ARCH] Performing AArch64-specific initialization\n");
     }
+
+    // BTI for user programs, if this CPU has it (before any EL0 code).
+    bti::init_cpu(true);
 
     // Initialize the GIC (Generic Interrupt Controller)
     if let Err(_e) = gic::init() {

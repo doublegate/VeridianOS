@@ -193,6 +193,8 @@ veridian_aarch64_fatal_entry:
 /// Exception classes (ESR_EL1.EC) the handlers act on.
 const EC_UNKNOWN: u64 = 0x00;
 const EC_FP_ACCESS: u64 = 0x07;
+/// An indirect branch into a BTI guarded page missed its landing pad.
+const EC_BTI: u64 = 0x0D;
 const EC_ILLEGAL_STATE: u64 = 0x0E;
 const EC_SVC64: u64 = 0x15;
 const EC_SYSREG: u64 = 0x18;
@@ -274,7 +276,9 @@ extern "C" fn aarch64_user_exception(f: &mut super::switch::UserFrame, vector: u
                     fault(SIGSEGV, code, far, elr, f.x[30]);
                 }
             }
-            EC_UNKNOWN | EC_FP_ACCESS | EC_ILLEGAL_STATE | EC_SYSREG => {
+            // A BTI violation is SIGILL with ILL_ILLOPC, as Linux's
+            // do_el0_bti.
+            EC_UNKNOWN | EC_FP_ACCESS | EC_ILLEGAL_STATE | EC_SYSREG | EC_BTI => {
                 fault(SIGILL, ILL_ILLOPC, elr, elr, f.x[30])
             }
             EC_BRK => fault(SIGTRAP, TRAP_BRKPT, elr, elr, f.x[30]),

@@ -2,6 +2,21 @@
 
 ### Added
 
+- **BTI for user programs on AArch64 (PROT_BTI).** On a CPU with FEAT_BTI (ID_AA64PFR1_EL1.BT)
+  the kernel enforces guarded pages at EL0 as Linux does: SCTLR_EL1.BT0 on every CPU
+  (`arch::aarch64::bti`), the PTE GP bit for PROT_BTI (`PageFlags::GUARDED`), mprotect accepting
+  PROT_BTI and mmap applying it, the loader guarding the code of a static program (or of the
+  interpreter) whose PT_GNU_PROPERTY note sets GNU_PROPERTY_AARCH64_FEATURE_1_BTI
+  (`image::note_wants_bti`, a bounds-checked parser of the untrusted note; a malformed one is
+  ENOEXEC), HWCAP2_BTI, and a BTI exception (EC 0x0D) delivered as SIGILL/ILL_ILLOPC. SPSR's BTYPE
+  survives returns to EL0 and sigreturn, and signal handlers start as after a BLR (BTYPE=C).
+  Without FEAT_BTI (QEMU's Cortex-A72) mprotect refuses PROT_BTI with EINVAL and mmap drops it,
+  as on Linux. Host tests for the PTE bit, the protection mapping, the PROT_BTI rules and the
+  note parser; boot tests `user_bti_guards_indirect_branches` and `loader_guards_bti_programs`,
+  which run on both CPU models (`scripts/boot-test.sh` takes `AARCH64_CPU`; the gate boots
+  `-cpu max` and checks BTI was enforced). Each failed first on `-cpu max` (without the GP bit,
+  and without the loader's guarding). AArch64 62/62, `-smp 4` 66/66.
+
 - **AT_HWCAP2 on AArch64; arm64's MINSIGSTKSZ.** AArch64 programs now get AT_HWCAP2, as Linux
   passes it on arm64 (not on RISC-V): the instructions EL0 can use with no kernel support, from
   ID_AA64ISAR0/1/2_EL1 (DCPODP, FLAGM2, FRINT, I8MM, BF16, EBF16, DGH, RNG, CSSC, RPRFM, HBC,

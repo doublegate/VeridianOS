@@ -147,7 +147,7 @@ pub struct Elf64Rela {
 }
 
 /// ELF loader errors
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ElfError {
     InvalidMagic,
     InvalidClass,

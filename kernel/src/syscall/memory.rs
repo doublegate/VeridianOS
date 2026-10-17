@@ -26,6 +26,29 @@ pub const PROT_READ: usize = 0x1;
 pub const PROT_WRITE: usize = 0x2;
 /// Pages may be executed.
 pub const PROT_EXEC: usize = 0x4;
+/// arm64: the pages are BTI guarded (indirect branches must land on BTI).
+pub const PROT_BTI: usize = 0x10;
+
+/// The protection bits beyond PROT_READ/WRITE/EXEC this architecture
+/// accepts: PROT_BTI on AArch64 (after [`bti_prot`]), none elsewhere.
+#[cfg(target_arch = "aarch64")]
+const PROT_ARCH: usize = PROT_BTI;
+#[cfg(not(target_arch = "aarch64"))]
+const PROT_ARCH: usize = 0;
+
+/// PROT_BTI as arm64 Linux treats it: kept where the CPU has BTI (`bti`);
+/// otherwise mprotect refuses it (EINVAL, `arch_validate_prot`) and mmap
+/// drops it (`arch_calc_vm_prot_bits` ignores it).
+#[cfg_attr(not(target_arch = "aarch64"), allow(dead_code))]
+fn bti_prot(prot: usize, bti: bool, mprotect: bool) -> Result<usize, SyscallError> {
+    if prot & PROT_BTI == 0 || bti {
+        Ok(prot)
+    } else if mprotect {
+        Err(SyscallError::InvalidArgument)
+    } else {
+        Ok(prot & !PROT_BTI)
+    }
+}
 
 // ============================================================================
 // Mapping flags
@@ -202,8 +225,11 @@ pub fn sys_mmap(
         return Err(SyscallError::OutOfMemory);
     }
 
-    // Validate protection flags (only low 3 bits valid)
-    if prot & !(PROT_READ | PROT_WRITE | PROT_EXEC) != 0 {
+    // Validate protection flags: read, write, execute, and on AArch64
+    // PROT_BTI (dropped where the CPU has no BTI, as Linux's mmap does).
+    #[cfg(target_arch = "aarch64")]
+    let prot = bti_prot(prot, crate::arch::bti_supported(), false)?;
+    if prot & !(PROT_READ | PROT_WRITE | PROT_EXEC | PROT_ARCH) != 0 {
         return Err(SyscallError::InvalidArgument);
     }
 
@@ -560,9 +586,14 @@ pub fn sys_mprotect(addr: usize, length: usize, prot: usize) -> SyscallResult {
     // As Linux's do_mprotect_pkey (N-240): a page-aligned address and
     // known protection bits (EINVAL); a zero length succeeds; a range that
     // wraps, leaves user space or is not all mapped is ENOMEM.
-    if addr & (PAGE_SIZE - 1) != 0 || prot & !(PROT_READ | PROT_WRITE | PROT_EXEC | PROT_SEM) != 0 {
+    if addr & (PAGE_SIZE - 1) != 0
+        || prot & !(PROT_READ | PROT_WRITE | PROT_EXEC | PROT_SEM | PROT_ARCH) != 0
+    {
         return Err(SyscallError::InvalidArgument);
     }
+    // PROT_BTI only where the CPU has BTI (arm64 `arch_validate_prot`).
+    #[cfg(target_arch = "aarch64")]
+    let prot = bti_prot(prot, crate::arch::bti_supported(), true)?;
     let prot = prot & !PROT_SEM;
     if length == 0 {
         return Ok(0);
@@ -1194,4 +1225,25 @@ pub fn sys_brk(addr: usize) -> SyscallResult {
     let result = memory_space.brk(new_break);
 
     Ok(result.as_usize())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn prot_bti_follows_arm64_linux() {
+        let rx_bti = PROT_READ | PROT_EXEC | PROT_BTI;
+        // A BTI CPU keeps it, for both calls.
+        assert_eq!(bti_prot(rx_bti, true, false), Ok(rx_bti));
+        assert_eq!(bti_prot(rx_bti, true, true), Ok(rx_bti));
+        // Without BTI: mmap drops it, mprotect refuses it.
+        assert_eq!(bti_prot(rx_bti, false, false), Ok(PROT_READ | PROT_EXEC));
+        assert_eq!(
+            bti_prot(rx_bti, false, true),
+            Err(SyscallError::InvalidArgument)
+        );
+        // Nothing changes without it.
+        assert_eq!(bti_prot(PROT_READ, false, true), Ok(PROT_READ));
+    }
 }

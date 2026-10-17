@@ -162,6 +162,10 @@ impl PageFlags {
     /// Software bit (ignored by the MMU): the page is shared copy-on-write
     /// and mapped read-only; a write fault gives the writer a private copy.
     pub const COW: Self = Self(1 << 9);
+    /// A BTI guarded page (AArch64 PTE bit 50, GP; PROT_BTI): an indirect
+    /// branch into it must land on a BTI instruction. Bit 10 is ignored by
+    /// x86_64 entries, and only AArch64 ever sets it.
+    pub const GUARDED: Self = Self(1 << 10);
     pub const NO_EXECUTE: Self = Self(1 << 63);
 
     // Alias for NO_EXECUTE

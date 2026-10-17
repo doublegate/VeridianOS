@@ -210,6 +210,8 @@ pub mod arm {
     pub const AF: u64 = 1 << 10;
     /// Not global: the translation belongs to the current ASID.
     pub const NG: u64 = 1 << 11;
+    /// Guarded page (FEAT_BTI): indirect branches must land on BTI.
+    pub const GP: u64 = 1 << 50;
     /// Privileged (EL1) execute-never.
     pub const PXN: u64 = 1 << 53;
     /// Unprivileged (EL0) execute-never.
@@ -256,6 +258,9 @@ pub mod arm {
         }
         if flags.has(PageFlags::COW) {
             e |= SW_COW;
+        }
+        if flags.has(PageFlags::GUARDED) {
+            e |= GP;
         }
         e
     }
@@ -310,6 +315,9 @@ pub mod arm {
         }
         if entry & SW_COW != 0 {
             f = f.union(PageFlags::COW);
+        }
+        if entry & GP != 0 {
+            f = f.union(PageFlags::GUARDED);
         }
         if entry & TABLE_OR_PAGE == 0 {
             f = f.union(PageFlags::HUGE);
@@ -401,6 +409,17 @@ mod tests {
         assert!(is_present(t) && !is_huge(t));
         assert_eq!(table(F, false), t);
         assert_eq!(grant_user_table(t), t);
+    }
+
+    #[test]
+    fn arm_guarded_pages() {
+        use arm::*;
+        let code = PageFlags::PRESENT | PageFlags::USER;
+        let gp = leaf(F, code | PageFlags::GUARDED);
+        assert_eq!(gp & GP, GP, "PROT_BTI sets GP (bit 50)");
+        assert_eq!(gp & !GP, leaf(F, code), "and nothing else");
+        assert!(flags(gp).contains(PageFlags::GUARDED));
+        assert!(!flags(leaf(F, code)).contains(PageFlags::GUARDED));
     }
 
     const F: FrameNumber = FrameNumber::new(0x8_0123);

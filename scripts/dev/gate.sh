@@ -88,6 +88,11 @@ if [ $boot -eq 1 ]; then
     # runs, so the kernel must not depend on its default load address.
     AARCH64_LOAD_ADDR=0x40600000 step boot-aarch64-relocated scripts/boot-test.sh aarch64
     tail -1 "$log_dir/boot-aarch64-relocated.log"
+    # A CPU with FEAT_BTI (QEMU's `max`): the BTI boot tests take their
+    # enforcing branch, which must really have run.
+    AARCH64_CPU=max step boot-aarch64-max scripts/boot-test.sh aarch64
+    tail -1 "$log_dir/boot-aarch64-max.log"
+    step boot-aarch64-max-bti grep -q "guarded pages for user programs: enforced" "$root/target/boot-logs/boot-aarch64.log"
     # Release kernels too, as CI boots them: optimisation exposes what a
     # debug build hides (an asm block's false preserves_flags made release
     # AArch64 report passing tests as failed).

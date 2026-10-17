@@ -284,7 +284,18 @@ pub fn load(
     interpreter: Option<(&ElfBinary, &dyn crate::fs::VfsNode, &[u8])>,
 ) -> Result<Loaded, crate::error::KernelError> {
     let (binary, node, data, program_plan) = program;
-    map_image(vas, node, data, program_plan)?;
+    // BTI guarded code (arm64 `arch_elf_adjust_prot`): the kernel guards
+    // the program only when it has no interpreter, and the interpreter by
+    // its own note; an interpreter guards what it loads itself. A
+    // malformed property note is ENOEXEC.
+    let note_error = |_| crate::error::KernelError::InvalidArgument {
+        name: "PT_GNU_PROPERTY",
+        value: "malformed GNU property note",
+    };
+    let bti = crate::arch::bti_supported();
+    let program_guarded =
+        bti && interpreter.is_none() && wants_bti(binary, data).map_err(note_error)?;
+    map_image(vas, node, data, program_plan, program_guarded)?;
     let mut interpreter_plan = None;
     let (start, base) = match interpreter {
         Some((interp, interp_node, interp_data)) => {
@@ -295,7 +306,8 @@ pub fn load(
             let size = check_interpreter(interp, interp_data.len()).map_err(bad)?;
             let at = vas.reserve_mmap_area(size as usize)?;
             let interp_plan = plan(interp, interp_data.len(), at.as_u64()).map_err(bad)?;
-            map_image(vas, interp_node, interp_data, &interp_plan)?;
+            let guarded = bti && wants_bti(interp, interp_data).map_err(note_error)?;
+            map_image(vas, interp_node, interp_data, &interp_plan, guarded)?;
             let entry = (interp_plan.entry, interp_plan.bias);
             interpreter_plan = Some(interp_plan);
             entry
@@ -331,21 +343,26 @@ pub fn load(
 /// into `vas`: one mapping per run of equal permissions. Whole-file pages
 /// come from the file's page cache when it has one, so every process
 /// running the program shares them (read-only, or copy-on-write in a
-/// writable segment); the other pages are written from `data`.
+/// writable segment); the other pages are written from `data`. With
+/// `guarded`, executable pages are BTI guarded (PROT_BTI).
 pub fn map_image(
     vas: &crate::mm::VirtualAddressSpace,
     node: &dyn crate::fs::VfsNode,
     data: &[u8],
     plan: &ImagePlan,
+    guarded: bool,
 ) -> Result<(), crate::error::KernelError> {
     use crate::mm::{vas::MappingType, VirtualAddress};
     let cache = node.page_cache();
     let mut first = 0;
     for run in plan.runs() {
-        // PF_R/W/X to PROT_READ (1) / PROT_WRITE (2) / PROT_EXEC (4).
+        // PF_R/W/X to PROT_READ (1) / PROT_WRITE (2) / PROT_EXEC (4), and
+        // PROT_BTI (0x10) on guarded code.
+        let exec = run.flags & PF_X != 0;
         let prot = ((run.flags & PF_R != 0) as usize)
             | (((run.flags & PF_W != 0) as usize) << 1)
-            | (((run.flags & PF_X != 0) as usize) << 2);
+            | ((exec as usize) << 2)
+            | (((exec && guarded) as usize) << 4);
         let kind = if run.flags & PF_X != 0 {
             MappingType::Code
         } else {
@@ -414,12 +431,154 @@ pub fn map_image(
     Ok(())
 }
 
+/// PT_GNU_PROPERTY: the program's GNU property note.
+const PT_GNU_PROPERTY: u32 = 0x6474_e553;
+/// The note type of GNU properties.
+const NT_GNU_PROPERTY_TYPE_0: u32 = 5;
+/// The arm64 feature property, and its BTI bit.
+const GNU_PROPERTY_AARCH64_FEATURE_1_AND: u32 = 0xc000_0000;
+const GNU_PROPERTY_AARCH64_FEATURE_1_BTI: u32 = 1;
+
+/// Whether a GNU property note (the bytes of a PT_GNU_PROPERTY segment)
+/// marks the program as built for BTI. As Linux's `parse_elf_properties`
+/// and arm64 `arch_parse_elf_property`: one NT_GNU_PROPERTY_TYPE_0 note
+/// named "GNU", its properties 8-byte aligned in ascending type order, the
+/// arm64 feature word exactly 4 bytes; anything malformed is ENOEXEC.
+pub fn note_wants_bti(note: &[u8]) -> Result<bool, ElfError> {
+    let bad = ElfError::InvalidProgramHeader;
+    // A little-endian word at `at` of `b`, if it is there.
+    let word = |b: &[u8], at: usize| -> Option<u32> {
+        let w = b.get(at..at.checked_add(4)?)?;
+        Some(u32::from_le_bytes(<[u8; 4]>::try_from(w).ok()?))
+    };
+    // Header (namesz, descsz, type), then the name "GNU\0", then the
+    // descriptor at offset 16, a multiple of 8 bytes.
+    let (Some(namesz), Some(descsz), Some(kind)) = (word(note, 0), word(note, 4), word(note, 8))
+    else {
+        return Err(bad);
+    };
+    if kind != NT_GNU_PROPERTY_TYPE_0 || namesz != 4 || note.get(12..16) != Some(b"GNU\0") {
+        return Err(bad);
+    }
+    let descsz = descsz as usize;
+    if !descsz.is_multiple_of(8) {
+        return Err(bad);
+    }
+    let desc = note.get(16..16 + descsz).ok_or(bad)?;
+    let mut at = 0usize;
+    let mut prev: Option<u32> = None;
+    let mut bti = false;
+    while at < desc.len() {
+        let (Some(kind), Some(size)) = (word(desc, at), word(desc, at + 4)) else {
+            return Err(bad);
+        };
+        if prev.is_some_and(|p| kind <= p) {
+            return Err(bad);
+        }
+        prev = Some(kind);
+        let data = at + 8;
+        let end = data.checked_add(size as usize).ok_or(bad)?;
+        if end > desc.len() {
+            return Err(bad);
+        }
+        if kind == GNU_PROPERTY_AARCH64_FEATURE_1_AND {
+            if size != 4 {
+                return Err(bad);
+            }
+            bti = word(desc, data).ok_or(bad)? & GNU_PROPERTY_AARCH64_FEATURE_1_BTI != 0;
+        }
+        at = end.checked_next_multiple_of(8).ok_or(bad)?;
+    }
+    Ok(bti)
+}
+
+/// Whether `binary` (whose file is `data`) asks for BTI: its
+/// PT_GNU_PROPERTY note, if it has one.
+pub fn wants_bti(binary: &ElfBinary, data: &[u8]) -> Result<bool, ElfError> {
+    let Some(seg) = binary
+        .segments
+        .iter()
+        .find(|s| s.segment_type == SegmentType::Other(PT_GNU_PROPERTY))
+    else {
+        return Ok(false);
+    };
+    let start = usize::try_from(seg.file_offset).map_err(|_| ElfError::InvalidProgramHeader)?;
+    let len = usize::try_from(seg.file_size).map_err(|_| ElfError::InvalidProgramHeader)?;
+    let end = start
+        .checked_add(len)
+        .ok_or(ElfError::InvalidProgramHeader)?;
+    note_wants_bti(data.get(start..end).ok_or(ElfError::InvalidProgramHeader)?)
+}
+
 #[cfg(test)]
 mod tests {
     use alloc::vec;
 
     use super::*;
     use crate::elf::ElfSegment;
+
+    /// A GNU property note holding `props` (type, data) in that order.
+    fn property_note(props: &[(u32, &[u8])]) -> Vec<u8> {
+        let mut desc = Vec::new();
+        for (t, d) in props {
+            desc.extend_from_slice(&t.to_le_bytes());
+            desc.extend_from_slice(&(d.len() as u32).to_le_bytes());
+            desc.extend_from_slice(d);
+            while desc.len() % 8 != 0 {
+                desc.push(0);
+            }
+        }
+        let mut n = Vec::new();
+        n.extend_from_slice(&4u32.to_le_bytes());
+        n.extend_from_slice(&(desc.len() as u32).to_le_bytes());
+        n.extend_from_slice(&5u32.to_le_bytes());
+        n.extend_from_slice(b"GNU\0");
+        n.extend_from_slice(&desc);
+        n
+    }
+
+    #[test]
+    fn gnu_property_note_bti() {
+        let feature = |bits: u32| (0xc000_0000u32, bits.to_le_bytes());
+        let (t, bti) = feature(1 | 2); // BTI and PAC
+        assert_eq!(note_wants_bti(&property_note(&[(t, &bti)])), Ok(true));
+        let (t, pac) = feature(2);
+        assert_eq!(note_wants_bti(&property_note(&[(t, &pac)])), Ok(false));
+        // Another property first (x86 ISA needed, 0xc0008002) is skipped.
+        let other = 7u32.to_le_bytes();
+        let note = property_note(&[(0x1000, &other), (t, &bti)]);
+        assert_eq!(note_wants_bti(&note), Ok(true));
+        // No arm64 property: no BTI.
+        assert_eq!(
+            note_wants_bti(&property_note(&[(0x1000, &other)])),
+            Ok(false)
+        );
+
+        let bad = Err(ElfError::InvalidProgramHeader);
+        // Feature word not 4 bytes.
+        assert_eq!(
+            note_wants_bti(&property_note(&[(t, &[1, 0, 0, 0, 0, 0, 0, 0])])),
+            bad
+        );
+        // Properties out of order.
+        assert_eq!(
+            note_wants_bti(&property_note(&[(t, &bti), (0x1000, &other)])),
+            bad
+        );
+        // Wrong note type or name, truncated note, data past the end.
+        let mut n = property_note(&[(t, &bti)]);
+        n[8] = 1;
+        assert_eq!(note_wants_bti(&n), bad);
+        let mut n = property_note(&[(t, &bti)]);
+        n[12] = b'X';
+        assert_eq!(note_wants_bti(&n), bad);
+        let n = property_note(&[(t, &bti)]);
+        assert_eq!(note_wants_bti(&n[..n.len() - 4]), bad);
+        assert_eq!(note_wants_bti(&n[..10]), bad);
+        let mut n = property_note(&[(t, &bti)]);
+        n[20] = 200; // pr_datasz far past the descriptor
+        assert_eq!(note_wants_bti(&n), bad);
+    }
 
     fn load(vaddr: u64, offset: u64, filesz: u64, memsz: u64, flags: u32) -> ElfSegment {
         ElfSegment {

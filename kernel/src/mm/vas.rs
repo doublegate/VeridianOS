@@ -486,6 +486,7 @@ pub fn user_prot_flags(prot: usize) -> PageFlags {
     const PROT_WRITE: usize = 0x2;
     const PROT_EXEC: usize = 0x4;
     const PROT_RWX: usize = 0x7;
+    const PROT_BTI: usize = 0x10;
     let mut f = PageFlags::PRESENT;
     if prot & PROT_RWX != 0 {
         f |= PageFlags::USER;
@@ -495,6 +496,11 @@ pub fn user_prot_flags(prot: usize) -> PageFlags {
     }
     if prot & PROT_EXEC == 0 {
         f |= PageFlags::NO_EXECUTE;
+    }
+    // arm64 PROT_BTI: a guarded page (Linux sets PTE_GP for VM_ARM64_BTI
+    // whatever the other bits). Only reaches here where BTI is offered.
+    if prot & PROT_BTI != 0 {
+        f |= PageFlags::GUARDED;
     }
     f
 }
@@ -3917,6 +3923,10 @@ mod tests {
         assert!(rw.contains(PageFlags::WRITABLE) && rw.contains(PageFlags::NO_EXECUTE));
         let rx = user_prot_flags(0x5);
         assert!(!rx.contains(PageFlags::NO_EXECUTE) && !rx.contains(PageFlags::WRITABLE));
+        // PROT_BTI (0x10) guards the pages (the system calls decide whether
+        // it may be asked for); without it they are not guarded.
+        assert!(user_prot_flags(0x15).contains(PageFlags::GUARDED));
+        assert!(!user_prot_flags(0x5).contains(PageFlags::GUARDED));
         // Default data/shared mappings are no longer executable.
         let data = VirtualMapping::new(VirtualAddress(0x1000), 0x1000, MappingType::Data);
         assert!(data.flags.contains(PageFlags::NO_EXECUTE));

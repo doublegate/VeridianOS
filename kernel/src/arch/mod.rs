@@ -5,6 +5,19 @@
 //! interface (serial, boot, context switching, interrupts) that the
 //! architecture-independent kernel code uses.
 
+/// Whether user programs get Branch Target Identification (FEAT_BTI on
+/// AArch64; never elsewhere).
+#[cfg(all(target_arch = "aarch64", target_os = "none"))]
+pub fn bti_supported() -> bool {
+    aarch64::bti::supported()
+}
+/// Whether user programs get Branch Target Identification (FEAT_BTI on
+/// AArch64; never elsewhere).
+#[cfg(not(all(target_arch = "aarch64", target_os = "none")))]
+pub fn bti_supported() -> bool {
+    false
+}
+
 /// Device-tree RTCs (the wall clock on AArch64 and RISC-V).
 #[cfg(any(test, target_arch = "aarch64", target_arch = "riscv64"))]
 pub mod mmio_rtc;

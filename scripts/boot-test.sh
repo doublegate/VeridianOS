@@ -15,6 +15,7 @@
 #        EXPECT_CPUS (require "[SMP] N/N CPUs online" with N = this value;
 #        the `smp` feature is on by default), PROFILE (debug or release,
 #        default debug; release boots the `./build-kernel.sh <arch> release` build),
+#        AARCH64_CPU (QEMU -cpu for AArch64, default cortex-a72; `max` has BTI),
 #        AARCH64_IMAGE=1 (boot the raw arm64 Image, veridian-kernel.img, which
 #        QEMU loads through the Linux boot protocol with the DTB in x0, instead
 #        of the ELF), AARCH64_LOAD_ADDR=<addr> (load that Image at another
@@ -63,9 +64,9 @@ x86_64)
 aarch64)
     img="$root/target/aarch64-unknown-none-softfloat/$profile/veridian-kernel"
     [[ ${AARCH64_IMAGE:-0} == 1 ]] && img="$img.img"
-    cmd=(qemu-system-aarch64 -M virt -cpu cortex-a72 -smp "$smp" -m 256M -kernel "$img" -device ramfb)
+    cmd=(qemu-system-aarch64 -M virt -cpu "${AARCH64_CPU:-cortex-a72}" -smp "$smp" -m 256M -kernel "$img" -device ramfb)
     if [[ -n ${AARCH64_LOAD_ADDR:-} ]]; then
-        cmd=(qemu-system-aarch64 -M virt -cpu cortex-a72 -smp "$smp" -m 256M
+        cmd=(qemu-system-aarch64 -M virt -cpu "${AARCH64_CPU:-cortex-a72}" -smp "$smp" -m 256M
             -device "loader,file=$img.img,addr=$AARCH64_LOAD_ADDR"
             -device "loader,addr=$AARCH64_LOAD_ADDR,cpu-num=0" -device ramfb)
     fi

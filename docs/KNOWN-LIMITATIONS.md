@@ -211,10 +211,10 @@ Still open:
   new image), and `scripts/build-musl-rootfs.sh aarch64` builds a BusyBox root with musl
   (`tools/cross/build-musl-arch.sh`) that `ARCH=aarch64 scripts/run-rootfs-tests.sh` runs:
   the BusyBox self-test, `audit_runtime_test` and `musl_runtime_test` all pass, on one and four
-  CPUs, and `scripts/dev/gate.sh --rootfs` runs them. Not yet: `PROT_BTI` is refused by mmap
-  and mprotect, as Linux does on a CPU without BTI (QEMU's Cortex-A72), but also on one with it
-  (glibc sets it there; musl does not). `AT_HWCAP2` reports only instructions that need no
-  kernel support (not BTI, MOPS, SVE, SME, MTE). (The boot also sets SCTLR_EL1's RES1 bits and
+  CPUs, and `scripts/dev/gate.sh --rootfs` runs them. On a CPU with FEAT_BTI, guarded pages
+  (PROT_BTI, and code of programs whose GNU property note asks for it) are enforced as on Linux;
+  the kernel's own code is not built with BTI landing pads. `AT_HWCAP2` reports BTI there and
+  otherwise only instructions that need no kernel support (not MOPS, SVE, SME, MTE). (The boot also sets SCTLR_EL1's RES1 bits and
   the EL2 state the kernel relies on, N-177, HA-14, and uses the device tree firmware passes,
   HA-01.)
 - **RISC-V runs musl programs and a BusyBox root (ADR 0013, ADR 0014).** Paging is

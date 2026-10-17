@@ -51,10 +51,19 @@ impl UserFrame {
 
 /// The SPSR to return to EL0 with: EL0t (M = 0), AArch64, no interrupt
 /// masked (D, A, I, F clear), single-step and illegal-return clear; only the
-/// condition flags (NZCV) are kept from `spsr`.
+/// condition flags (NZCV) and BTYPE are kept from `spsr`. BTYPE (bits
+/// 11:10) records an indirect branch whose target was not yet checked, so
+/// an interrupt between the branch and its target does not skip the BTI
+/// check (Linux keeps it too); at EL0 it can only make the program fault.
 pub fn user_spsr(spsr: u64) -> u64 {
-    spsr & 0xF000_0000
+    spsr & USER_SPSR_BITS
 }
+
+/// The SPSR bits a user program controls: NZCV and BTYPE.
+pub const USER_SPSR_BITS: u64 = 0xF000_0C00;
+/// SPSR BTYPE as after a BLR (`PSR_BTYPE_C`), for entering a handler.
+pub const BTYPE_MASK: u64 = 0xC00;
+pub const BTYPE_C: u64 = 0b10 << 10;
 
 /// First code of a new user thread: finish the switch, act on a fatal
 /// signal sent before it first ran, then enter EL0 with the `UserFrame`

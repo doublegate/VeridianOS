@@ -168,8 +168,9 @@ pub fn arm64_hwcap(pfr0: u64, isar0: u64) -> u64 {
 /// for instructions EL0 can use with no kernel support, from
 /// ID_AA64ISAR0/1/2_EL1: DCPODP (0), FLAGM2 (7), FRINT (8), I8MM (13), BF16
 /// (14), DGH (15), RNG (16), EBF16 (32), CSSC (34), RPRFM (35), HBC (44),
-/// LRCPC3 (46). Not reported, as the kernel does not provide what they
-/// need: BTI (no PROT_BTI or guarded pages), MOPS (exceptions on migration),
+/// LRCPC3 (46). BTI (17) is added by `hwcaps` where the kernel enforces
+/// guarded pages. Not reported, as the kernel does not provide what they
+/// need: MOPS (exceptions on migration),
 /// WFxT, ECV, AFP, RPRES, and the SVE, SME and MTE families.
 pub fn arm64_hwcap2(isar0: u64, isar1: u64, isar2: u64) -> u64 {
     let field = |r: u64, at: u32| (r >> at) & 0xF;
@@ -217,7 +218,12 @@ fn hwcaps() -> (u64, u64) {
         core::arch::asm!("mrs {0}, id_aa64isar1_el1", out(reg) isar1, options(nomem, nostack));
         core::arch::asm!("mrs {0}, s3_0_c0_c6_2", out(reg) isar2, options(nomem, nostack));
     }
-    (arm64_hwcap(pfr0, isar0), arm64_hwcap2(isar0, isar1, isar2))
+    // HWCAP2_BTI (17) where guarded pages are enforced (`arch::aarch64::bti`).
+    let bti = (crate::arch::bti_supported() as u64) << 17;
+    (
+        arm64_hwcap(pfr0, isar0),
+        arm64_hwcap2(isar0, isar1, isar2) | bti,
+    )
 }
 
 #[cfg(all(target_arch = "riscv64", target_os = "none"))]

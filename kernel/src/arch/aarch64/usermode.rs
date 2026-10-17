@@ -427,6 +427,167 @@ core::arch::global_asm!(
     "veridian_a64_user_exec_end:",
 );
 
+// BTI: make the program's own page PROT_READ|PROT_EXEC|PROT_BTI (mprotect
+// 226; on failure exit with the errno), then call a function in it
+// through a register (`blr`). `pad`'s target starts with `bti c` (`hint
+// #34`, a NOP without BTI) and returns, so the program exits 0; `nopad`'s
+// does not, which a BTI CPU stops with SIGILL.
+core::arch::global_asm!(
+    ".section .rodata",
+    ".balign 4",
+    ".global veridian_a64_user_bti_pad",
+    "veridian_a64_user_bti_pad:",
+    "    adr x0, veridian_a64_user_bti_pad",
+    "    and x0, x0, #0xfffffffffffff000",
+    "    mov x1, #4096",
+    "    mov x2, #0x15",
+    "    mov x8, #226",
+    "    svc #0",
+    "    cbnz x0, 9f",
+    "    adr x9, 2f",
+    "    blr x9",
+    "    mov x0, #0",
+    "    b 8f",
+    "2:  hint #34",
+    "    ret",
+    "9:  neg x0, x0",
+    "8:  mov x8, #94",
+    "    svc #0",
+    ".global veridian_a64_user_bti_pad_end",
+    "veridian_a64_user_bti_pad_end:",
+    ".balign 4",
+    ".global veridian_a64_user_bti_nopad",
+    "veridian_a64_user_bti_nopad:",
+    "    adr x0, veridian_a64_user_bti_nopad",
+    "    and x0, x0, #0xfffffffffffff000",
+    "    mov x1, #4096",
+    "    mov x2, #0x15",
+    "    mov x8, #226",
+    "    svc #0",
+    "    cbnz x0, 9f",
+    "    adr x9, 2f",
+    "    blr x9",
+    "    mov x0, #0",
+    "    b 8f",
+    "2:  nop",
+    "    ret",
+    "9:  neg x0, x0",
+    "8:  mov x8, #94",
+    "    svc #0",
+    ".global veridian_a64_user_bti_nopad_end",
+    "veridian_a64_user_bti_nopad_end:",
+);
+
+// The BTI ELF's code: a call through a register to a target without a
+// landing pad, then exit 0. Only a loader that guarded the page from the
+// program's GNU property note makes a BTI CPU stop it (SIGILL).
+core::arch::global_asm!(
+    ".section .rodata",
+    ".balign 4",
+    ".global veridian_a64_user_bti_elf",
+    "veridian_a64_user_bti_elf:",
+    "    adr x9, 2f",
+    "    blr x9",
+    "    mov x0, #0",
+    "    mov x8, #94",
+    "    svc #0",
+    "2:  nop",
+    "    ret",
+    ".global veridian_a64_user_bti_elf_end",
+    "veridian_a64_user_bti_elf_end:",
+);
+
+extern "C" {
+    static veridian_a64_user_bti_elf: u8;
+    static veridian_a64_user_bti_elf_end: u8;
+}
+
+/// A minimal static ELF built for BTI: one read+execute PT_LOAD at 0x10000
+/// (headers, code, then a GNU property note with
+/// GNU_PROPERTY_AARCH64_FEATURE_1_BTI) and a PT_GNU_PROPERTY segment over
+/// the note. Its code calls an unpadded target through a register, so it
+/// exits 0 unless the loader guarded its code, and SIGILL if it did.
+pub fn test_bti_elf() -> alloc::vec::Vec<u8> {
+    let code = span(
+        core::ptr::addr_of!(veridian_a64_user_bti_elf),
+        core::ptr::addr_of!(veridian_a64_user_bti_elf_end),
+    );
+    const BASE: u64 = 0x10000;
+    const HDRS: u64 = 64 + 2 * 56;
+    const NOTE_LEN: u64 = 32;
+    let note_at = (HDRS + code.len() as u64).next_multiple_of(8);
+    let size = note_at + NOTE_LEN;
+    let mut e = alloc::vec::Vec::with_capacity(size as usize);
+    e.extend_from_slice(&[0x7F, b'E', b'L', b'F', 2, 1, 1, 0]);
+    e.extend_from_slice(&[0; 8]);
+    e.extend_from_slice(&2u16.to_le_bytes()); // ET_EXEC
+    e.extend_from_slice(&183u16.to_le_bytes());
+    e.extend_from_slice(&1u32.to_le_bytes());
+    e.extend_from_slice(&(BASE + HDRS).to_le_bytes()); // entry
+    e.extend_from_slice(&64u64.to_le_bytes()); // phoff
+    e.extend_from_slice(&0u64.to_le_bytes()); // shoff
+    e.extend_from_slice(&0u32.to_le_bytes()); // flags
+    e.extend_from_slice(&64u16.to_le_bytes());
+    e.extend_from_slice(&56u16.to_le_bytes());
+    e.extend_from_slice(&2u16.to_le_bytes()); // phnum
+    e.extend_from_slice(&64u16.to_le_bytes());
+    e.extend_from_slice(&0u16.to_le_bytes());
+    e.extend_from_slice(&0u16.to_le_bytes());
+    // PT_LOAD: everything, read + execute.
+    e.extend_from_slice(&1u32.to_le_bytes());
+    e.extend_from_slice(&5u32.to_le_bytes());
+    e.extend_from_slice(&0u64.to_le_bytes());
+    e.extend_from_slice(&BASE.to_le_bytes());
+    e.extend_from_slice(&BASE.to_le_bytes());
+    e.extend_from_slice(&size.to_le_bytes());
+    e.extend_from_slice(&size.to_le_bytes());
+    e.extend_from_slice(&0x1000u64.to_le_bytes());
+    // PT_GNU_PROPERTY over the note.
+    e.extend_from_slice(&0x6474_e553u32.to_le_bytes());
+    e.extend_from_slice(&4u32.to_le_bytes()); // R
+    e.extend_from_slice(&note_at.to_le_bytes());
+    e.extend_from_slice(&(BASE + note_at).to_le_bytes());
+    e.extend_from_slice(&(BASE + note_at).to_le_bytes());
+    e.extend_from_slice(&NOTE_LEN.to_le_bytes());
+    e.extend_from_slice(&NOTE_LEN.to_le_bytes());
+    e.extend_from_slice(&8u64.to_le_bytes());
+    e.extend_from_slice(code);
+    e.resize(note_at as usize, 0);
+    // NT_GNU_PROPERTY_TYPE_0 "GNU": GNU_PROPERTY_AARCH64_FEATURE_1_AND,
+    // 4 bytes, the BTI bit, padded to 8.
+    for w in [4u32, 16, 5] {
+        e.extend_from_slice(&w.to_le_bytes());
+    }
+    e.extend_from_slice(b"GNU\0");
+    for w in [0xc000_0000u32, 4, 1, 0] {
+        e.extend_from_slice(&w.to_le_bytes());
+    }
+    e
+}
+
+extern "C" {
+    static veridian_a64_user_bti_pad: u8;
+    static veridian_a64_user_bti_pad_end: u8;
+    static veridian_a64_user_bti_nopad: u8;
+    static veridian_a64_user_bti_nopad_end: u8;
+}
+
+/// The BTI test program: its call target has a landing pad (`pad`) or not.
+pub fn test_bti_program(pad: bool) -> &'static [u8] {
+    // Only the addresses of the linker symbols are taken (safe).
+    if pad {
+        span(
+            core::ptr::addr_of!(veridian_a64_user_bti_pad),
+            core::ptr::addr_of!(veridian_a64_user_bti_pad_end),
+        )
+    } else {
+        span(
+            core::ptr::addr_of!(veridian_a64_user_bti_nopad),
+            core::ptr::addr_of!(veridian_a64_user_bti_nopad_end),
+        )
+    }
+}
+
 extern "C" {
     static veridian_a64_user_fork: u8;
     static veridian_a64_user_fork_end: u8;

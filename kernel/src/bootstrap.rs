@@ -2379,7 +2379,43 @@ fn run_process_tests(passed: &mut u32, failed: &mut u32) {
             passed,
             failed,
         );
+        report_bti(passed, failed);
     }
+}
+
+/// BTI guarded pages (PROT_BTI): with FEAT_BTI, an indirect branch into a
+/// guarded page must land on a BTI instruction (SIGILL otherwise); without
+/// it, mprotect refuses PROT_BTI with EINVAL, as Linux does.
+#[cfg(all(feature = "alloc", target_arch = "aarch64"))]
+fn report_bti(passed: &mut u32, failed: &mut u32) {
+    use crate::arch::aarch64::usermode::test_bti_program;
+    let (_, pad) = run_user_code(test_bti_program(true));
+    let (_, nopad) = run_user_code(test_bti_program(false));
+    let bti = crate::arch::bti_supported();
+    let ok = if bti {
+        pad == Some(0) && nopad == Some(128 + 4)
+    } else {
+        pad == Some(22) && nopad == Some(22)
+    };
+    if !ok {
+        crate::println!("    bti {} pad {:?} nopad {:?}", bti, pad, nopad);
+    }
+    report_test("user_bti_guards_indirect_branches", ok, passed, failed);
+
+    // The loader guards a static program whose GNU property note asks for
+    // BTI (no mprotect in it): SIGILL on a BTI CPU, exit 0 elsewhere.
+    let elf = crate::arch::aarch64::usermode::test_bti_elf();
+    let status = crate::fs::write_file("/tmp/bti-test", &elf)
+        .ok()
+        .and_then(|_| {
+            crate::userspace::loader::load_user_program("/tmp/bti-test", &["bti-test"], &[]).ok()
+        })
+        .and_then(crate::process::run_and_wait);
+    let want = if bti { Some(128 + 4) } else { Some(0) };
+    if status != want {
+        crate::println!("    status {:?}", status);
+    }
+    report_test("loader_guards_bti_programs", status == want, passed, failed);
 }
 
 /// exec starts the new image at its own entry (`/tmp/embedded-init`, from

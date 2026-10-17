@@ -86,6 +86,7 @@ pub fn start_ap(hw: u32, args: &'static ApBootArgs) -> Result<(), &'static str> 
 /// installed the exception vectors and turned the MMU on).
 pub fn ap_init() -> Result<(), &'static str> {
     crate::arch::smp_boot::ap_stage(1);
+    super::bti::init_cpu(false);
     super::gic::init_secondary_cpu_interface();
     super::timer::start_secondary().map_err(|_| "timer start failed")?;
     crate::arch::smp_boot::ap_stage(2);
