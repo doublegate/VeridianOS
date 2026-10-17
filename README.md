@@ -38,7 +38,7 @@ VeridianOS intentionally prioritizes architectural clarity over feature velocity
 
 ### Platform
 
-- **Multi-architecture** -- x86_64 (UEFI), AArch64 and RISC-V 64 (OpenSBI) boot and pass the in-kernel tests under QEMU. On all three a BusyBox root runs with fork, exec, threads and signals (x86_64 with the native libc, AArch64 and RISC-V with musl); the runtime suites run on four CPUs on x86_64 and on one CPU so far on AArch64 and RISC-V (their boot tests run on four); none has run on real hardware yet ([`docs/KNOWN-LIMITATIONS.md`](docs/KNOWN-LIMITATIONS.md))
+- **Multi-architecture** -- x86_64 (UEFI), AArch64 and RISC-V 64 (OpenSBI) boot and pass the in-kernel tests under QEMU. On all three a BusyBox root runs with fork, exec, threads and signals (x86_64 with the native libc, AArch64 and RISC-V with musl), on one and on four CPUs; none has run on real hardware yet ([`docs/KNOWN-LIMITATIONS.md`](docs/KNOWN-LIMITATIONS.md))
 - **Self-hosting** -- Native GCC 14.2 and Rust compiler toolchain; BusyBox 1.36.1 with 95 applets compiled on-target
 - **Package management** -- DPLL SAT dependency resolver, ports system, reproducible builds, Ed25519 package signing
 - **Complete C library** -- Full stdio/stdlib/string/unistd with POSIX headers, math library, and architecture-specific setjmp/longjmp

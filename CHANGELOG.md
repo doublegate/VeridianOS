@@ -2,6 +2,18 @@
 
 ### Added
 
+- **sigreturn cannot raise privilege on AArch64 and RISC-V (N-170), tested; the AArch64 and RISC-V
+  runtime suites on four CPUs.** Every return to EL0 keeps only PSTATE's condition flags
+  (`user_spsr`) and every return to U-mode forces `sstatus` to user mode (`user_sstatus`);
+  sigreturn takes only the flags and refuses a kernel-half pc or sp. New `audit_runtime_test`
+  checks `sigreturn_refuses_kernel_pc` (both) and `sigreturn_keeps_el0_and_unmasked` (AArch64: a
+  handler that writes EL1h with DAIF masked into its frame); with both masks removed the second
+  panics the kernel (an instruction abort at EL1 on the program's code). `scripts/dev/gate.sh`
+  runs the AArch64 and RISC-V suites with `-smp 4` as well. The SA_RESTART checks no longer
+  depend on fork timing: on four emulated RISC-V harts the second fork took longer than the
+  test's 90 ms margin, so the slow child exited before the signal was sent; it now exits only
+  after the signal (a byte on a pipe).
+
 - **BusyBox and musl programs on AArch64 and RISC-V.** `scripts/build-musl-rootfs.sh aarch64|riscv64`
   builds a BlockFS root with the musl cross toolchain: BusyBox 1.36.1 (static), `/sbin/init`,
   `audit_runtime_test`, `musl_runtime_test` and the dynamically linked C++ test with musl's

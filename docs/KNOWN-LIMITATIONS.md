@@ -163,8 +163,6 @@ What remains:
 - **No timer or I/O siginfo.** POSIX timers (timer_create) and SIGIO (F_SETOWN, O_ASYNC) do
   not exist yet, so no signal arrives with SI_TIMER or POLL_* information; kill, tkill,
   sigqueue, SIGCHLD and fault signals carry Linux's siginfo (N-259).
-- **sigreturn on AArch64 and RISC-V does not sanitise registers (N-170).** PSTATE and `sstatus`
-  are restored as given from the user's signal frame.
 - **Signal stacks on AArch64 use x86_64's minimum.** `MINSIGSTKSZ` is 2048 on every
   architecture; arm64's is 5120, so a smaller sigaltstack is accepted there.
 
@@ -209,7 +207,7 @@ Still open:
   and the N-28 workarounds are gone (`fs::bare_lock`, the bump allocator, the reduced secondary
   stage). Every CPU dispatches, and programs from the VFS run at EL0 as dispatcher tasks with
   system calls, page faults, fault-tolerant user copies, user FP/SIMD state and signal handlers
-  (Linux's arm64 `rt_sigframe`; SA_RESTART has no test on AArch64 yet), and fault-tolerant
+  (Linux's arm64 `rt_sigframe`), and fault-tolerant
   user compare-and-exchange for futexes, static TLS, and an ASID per address space (HA-26). fork,
   clone and exec run (the child resumes from the parent's live registers, and exec enters the
   new image), and `scripts/build-musl-rootfs.sh aarch64` builds a BusyBox root with musl
@@ -222,7 +220,7 @@ Still open:
   on, the kernel runs in the upper half, and programs from the VFS run in U-mode as dispatcher
   tasks with system calls, page faults, fault-tolerant user copies, user FP state and signal
   handlers (Linux's RISC-V `rt_sigframe`; handlers return through a trampoline page the kernel maps,
-  where Linux uses its vDSO; SA_RESTART has no test on RISC-V yet), and fault-tolerant user
+  where Linux uses its vDSO), and fault-tolerant user
   compare-and-exchange for futexes, and static TLS (`tp` at the PT_TLS block). fork, clone and
   exec run as on AArch64, and `scripts/build-musl-rootfs.sh riscv64` builds the same BusyBox root,
   which `ARCH=riscv64 scripts/run-rootfs-tests.sh` runs. Not yet: the gate does not run it.

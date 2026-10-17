@@ -123,6 +123,11 @@ if [ $smp -eq 1 ] && { [ $boot -eq 1 ] || [ $rootfs -eq 1 ]; }; then
     if [ $rootfs -eq 1 ]; then
         SMP=4 REQUIRE_MUSL=1 step rootfs-tests-smp scripts/run-rootfs-tests.sh 900
         tail -1 "$log_dir/rootfs-tests-smp.log"
+        # The musl roots the rootfs stage built, on four emulated CPUs.
+        for arch in aarch64 riscv64; do
+            ARCH=$arch SMP=4 REQUIRE_MUSL=1 step "rootfs-tests-smp-$arch" scripts/run-rootfs-tests.sh
+            tail -1 "$log_dir/rootfs-tests-smp-$arch.log"
+        done
     fi
 fi
 echo "=== GATE rc=$rc"

@@ -1478,22 +1478,38 @@ static void test_signal_handlers(void)
     snprintf(why, sizeof(why), "handlers=%d fp_equal=%d", d3_usr2_count, a == expect);
     report("signal_handlers_preserve_fp_state", a == expect && d3_usr2_count > 0, why);
 
-    /* SA_RESTART restarts an interrupted wait; without it, EINTR. */
+    /* SA_RESTART restarts an interrupted wait; without it, EINTR. The
+     * slow child exits only after the poker has signalled (a byte on a
+     * pipe, at most 2 s later), so the signal always lands during the
+     * wait however slowly the second fork runs (four emulated CPUs). */
     for (int restart = 1; restart >= 0; restart--) {
         d3_install(SIGUSR1, d3_on_usr1, restart ? SA_RESTART : 0);
+        int go[2];
+        if (pipe(go) != 0) {
+            report(restart ? "signal_sa_restart_restarts_wait" : "signal_without_restart_eintr",
+                   0, "pipe failed");
+            continue;
+        }
         pid_t slow = fork();
         if (slow == 0) {
-            struct timespec ts = {0, 120 * 1000 * 1000};
-            nanosleep(&ts, 0);
+            close(go[1]);
+            struct pollfd p = {go[0], POLLIN, 0};
+            poll(&p, 1, 2000);
             _exit(5);
         }
         pid_t poker = fork();
         if (poker == 0) {
+            close(go[0]);
             struct timespec ts = {0, 30 * 1000 * 1000};
             nanosleep(&ts, 0);
             kill(parent, SIGUSR1);
+            /* Give the handler a moment to interrupt the wait first. */
+            nanosleep(&ts, 0);
+            (void)write(go[1], "g", 1);
             _exit(0);
         }
+        close(go[0]);
+        close(go[1]);
         int s2 = 0;
         errno = 0;
         pid_t r = waitpid(slow, &s2, 0);
@@ -2597,6 +2613,77 @@ static void test_sigaltstack(void)
            "fork child lost the stack, or SS_DISABLE did not take effect");
 }
 
+/* --- sigreturn sanitises the user's registers (N-170). --------------------
+ * A handler may rewrite its saved context, but never into privileged state:
+ * a kernel-half pc kills the thread with SIGSEGV (Linux's bad frame), and
+ * on AArch64 the exception level and interrupt masks in PSTATE are ignored
+ * (only the condition flags come back), so the program goes on at EL0 with
+ * signals and preemption working. x86_64 has its own check (D3). */
+#if defined(__aarch64__) || defined(__riscv)
+#include <ucontext.h>
+static volatile int n170_hits;
+static void n170_kernel_pc(int sig, siginfo_t *si, void *ctx)
+{
+    (void)sig;
+    (void)si;
+    ucontext_t *uc = ctx;
+#if defined(__aarch64__)
+    uc->uc_mcontext.pc = 0xffff800000000000UL;
+#else
+    uc->uc_mcontext.__gregs[REG_PC] = 0xffffffc000000000UL;
+#endif
+}
+#if defined(__aarch64__)
+static void n170_el1_pstate(int sig, siginfo_t *si, void *ctx)
+{
+    (void)sig;
+    (void)si;
+    ucontext_t *uc = ctx;
+    /* EL1h (M = 5), D, A, I and F masked; keep the flags. */
+    uc->uc_mcontext.pstate = (uc->uc_mcontext.pstate & 0xf0000000UL) | 0x3c5;
+    n170_hits++;
+}
+#endif
+
+static void test_sigreturn_sanitises(void)
+{
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_flags = SA_SIGINFO;
+    sigemptyset(&sa.sa_mask);
+    pid_t pid = fork();
+    if (pid == 0) {
+        sa.sa_sigaction = n170_kernel_pc;
+        sigaction(SIGUSR1, &sa, 0);
+        kill(getpid(), SIGUSR1);
+        _exit(0); /* reached only if the kernel pc was refused */
+    }
+    int st = 0;
+    int ok = waitpid(pid, &st, 0) == pid && WIFSIGNALED(st) && WTERMSIG(st) == SIGSEGV;
+    static char why[64];
+    snprintf(why, sizeof(why), "status 0x%x", (unsigned)st);
+    report("sigreturn_refuses_kernel_pc", ok, why);
+#if defined(__aarch64__)
+    pid = fork();
+    if (pid == 0) {
+        sa.sa_sigaction = n170_el1_pstate;
+        sigaction(SIGUSR1, &sa, 0);
+        kill(getpid(), SIGUSR1);
+        /* Still at EL0 with interrupts on: another signal arrives, and a
+         * sleep ends through the timer interrupt. */
+        kill(getpid(), SIGUSR1);
+        struct timespec ts = {0, 5 * 1000 * 1000};
+        nanosleep(&ts, 0);
+        _exit(n170_hits == 2 ? 0 : 1);
+    }
+    st = 0;
+    ok = waitpid(pid, &st, 0) == pid && WIFEXITED(st) && WEXITSTATUS(st) == 0;
+    snprintf(why, sizeof(why), "status 0x%x", (unsigned)st);
+    report("sigreturn_keeps_el0_and_unmasked", ok, why);
+#endif
+}
+#endif
+
 int main(int argc, char **argv)
 {
     setvbuf(stdout, NULL, _IONBF, 0);
@@ -2636,6 +2723,9 @@ int main(int argc, char **argv)
     test_kill_sleeping();
     test_blocking_pipe();
     test_signal_handlers();
+#if defined(__aarch64__) || defined(__riscv)
+    test_sigreturn_sanitises();
+#endif
     test_relative_paths();
     test_exec_permission();
     test_shared_anon_fork();

@@ -193,8 +193,9 @@ What does not work yet: `docs/KNOWN-LIMITATIONS.md`.
       also RISC-V); fork/clone/exec, generic stat/epoll layouts, PL031/Goldfish RTC and a musl
       BusyBox root running the BusyBox self-test and both runtime suites
       (`scripts/build-musl-rootfs.sh`, `ARCH=... scripts/run-rootfs-tests.sh`; also RISC-V);
-      next: those runs in the gate; DMA coherency (HA-25 rest); register sanitiser (N-170);
-      PROT_BTI, AT_HWCAP2, arm64 MINSIGSTKSZ.
+      those runs in the gate on one and four CPUs; PSTATE sanitised on every return to EL0 and
+      by sigreturn, with a test that panics the kernel without it (N-170); next: DMA coherency
+      (HA-25 rest); PROT_BTI, AT_HWCAP2, arm64 MINSIGSTKSZ.
     - RISC-V: done: zero BSS, hart lottery, `sstatus.FS` Off in the kernel (HR-01, HR-19, HR-20
       part; the M-mode CSR reads go with FP switching). RISC-V Image header and
       relocatable or MMU-early boot (HR-02, HR-03); `satp` mode probe with Sv39 default and
@@ -204,11 +205,11 @@ What does not work yet: `docs/KNOWN-LIMITATIONS.md`.
       physical map, user address spaces share the kernel half (E-RV4); guarded kernel stacks,
       switch primitive and dispatcher on the boot hart (E-RV5); U-mode entry and exit, ecall
       system calls by the generic table, fault-tolerant user copies (E-RV6, ADR 0014; N-14);
-      ELF programs through the loader (E-RV6c); every hart dispatches (E-RV5c); next: RISC-V
-      rootfs (done: musl and toolchain, TLS, user FP, signals, user cmpxchg); remove raw 0x1000_0000 stores and QEMU-only probes (HR-04
+      ELF programs through the loader (E-RV6c); every hart dispatches (E-RV5c); the musl BusyBox
+      root (done: musl and toolchain, TLS, user FP, signals, user cmpxchg, fork/exec); next: remove raw 0x1000_0000 stores and QEMU-only probes (HR-04
       to HR-06); done: memory map from the DT (HR-07); external interrupts (scause 9) handled, not fatal
-      (HR-31); IPIs by hart id (HR-33); U-mode with `tp` via `sscratch` (N-14); `sstatus` SPP
-      sanitiser (N-170).
+      (HR-31); IPIs by hart id (HR-33); U-mode with `tp` via `sscratch` (N-14); done: `sstatus`
+      never taken from user state, sigreturn refuses a kernel pc (N-170).
     - Both: kernel stack guard pages (N-26; done on both, which still need an overflow stack
       for the exception). Done: soft-float kernels (N-178,
       `aarch64-unknown-none-softfloat`, `riscv64imac-unknown-none-elf`); E0 boot tests report
