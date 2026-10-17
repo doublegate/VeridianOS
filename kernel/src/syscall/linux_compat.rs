@@ -19,6 +19,7 @@ pub(crate) fn to_linux_errno(err: super::SyscallError) -> isize {
 
     // Linux errno constants (negated for return values)
     const LINUX_EPERM: isize = -1;
+    const LINUX_ENXIO: isize = -6;
     const LINUX_ENOENT: isize = -2;
     const LINUX_ESRCH: isize = -3;
     const LINUX_ECHILD: isize = -10;
@@ -122,6 +123,7 @@ pub(crate) fn to_linux_errno(err: super::SyscallError) -> isize {
         SyscallError::ConnectionReset => LINUX_ECONNRESET,
         SyscallError::Canceled => LINUX_ECANCELED,
         SyscallError::Deadlock => LINUX_EDEADLK,
+        SyscallError::NoDeviceOrAddress => LINUX_ENXIO,
     }
 }
 

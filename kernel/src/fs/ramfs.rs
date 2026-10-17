@@ -26,6 +26,10 @@ struct RamNode {
     /// Inode number
     inode: u64,
 
+    /// Device number of a device node (Linux's encoding, `fs::make_dev`);
+    /// 0 for anything else.
+    rdev: u32,
+
     /// Which `RamFs` instance this node belongs to. Every instance's nodes
     /// downcast to `RamNode`, so this is what tells two mounts apart.
     fs_id: u64,
@@ -55,6 +59,7 @@ impl RamNode {
                 inode,
             }),
             inode,
+            rdev: 0,
             fs_id,
             parent_inode: core::sync::atomic::AtomicU64::new(parent_inode),
         }
@@ -78,6 +83,7 @@ impl RamNode {
                 inode,
             }),
             inode,
+            rdev: 0,
             fs_id,
             parent_inode: core::sync::atomic::AtomicU64::new(parent_inode),
         }
@@ -105,9 +111,28 @@ impl RamNode {
                 inode,
             }),
             inode,
+            rdev: 0,
             fs_id,
             parent_inode: core::sync::atomic::AtomicU64::new(parent_inode),
         }
+    }
+}
+
+impl RamNode {
+    /// Create a special file node (mknod): a FIFO, device or socket.
+    fn new_special(
+        kind: NodeType,
+        inode: u64,
+        parent_inode: u64,
+        fs_id: u64,
+        permissions: Permissions,
+        rdev: u32,
+    ) -> Self {
+        let mut node = Self::new_file(inode, parent_inode, fs_id, permissions);
+        node.node_type = kind;
+        node.metadata.get_mut().node_type = kind;
+        node.rdev = rdev;
+        node
     }
 }
 
@@ -407,6 +432,52 @@ impl VfsNode for RamNode {
 
     fn as_any(&self) -> Option<&dyn core::any::Any> {
         Some(self)
+    }
+
+    fn mknod(
+        &self,
+        name: &str,
+        kind: NodeType,
+        permissions: Permissions,
+        rdev: u32,
+    ) -> Result<Arc<dyn VfsNode>, KernelError> {
+        if self.node_type != NodeType::Directory {
+            return Err(KernelError::FsError(FsError::NotADirectory));
+        }
+        if !matches!(
+            kind,
+            NodeType::Pipe | NodeType::CharDevice | NodeType::BlockDevice | NodeType::Socket
+        ) {
+            return Err(KernelError::FsError(FsError::NotSupported));
+        }
+        let mut children = self.children.write();
+        if children.contains_key(name) {
+            return Err(KernelError::FsError(FsError::AlreadyExists));
+        }
+        let inode = NEXT_INODE.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        let devices = matches!(kind, NodeType::CharDevice | NodeType::BlockDevice);
+        let node = Arc::new(RamNode::new_special(
+            kind,
+            inode,
+            self.inode,
+            self.fs_id,
+            permissions,
+            if devices { rdev } else { 0 },
+        ));
+        children.insert(String::from(name), node.clone());
+        Ok(node as Arc<dyn VfsNode>)
+    }
+
+    fn is_special_inode(&self) -> bool {
+        matches!(
+            self.node_type,
+            NodeType::Pipe | NodeType::CharDevice | NodeType::BlockDevice | NodeType::Socket
+        )
+    }
+
+    fn device_id(&self) -> Option<(u32, u32)> {
+        matches!(self.node_type, NodeType::CharDevice | NodeType::BlockDevice)
+            .then(|| (super::dev_major(self.rdev), super::dev_minor(self.rdev)))
     }
 
     fn link(&self, name: &str, target: Arc<dyn VfsNode>) -> Result<(), KernelError> {

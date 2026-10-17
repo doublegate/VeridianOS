@@ -99,6 +99,7 @@ pub mod sysno {
     pub const SYS_fchown: usize = 93;
     pub const SYS_fchownat: usize = 260;
     pub const SYS_mknod: usize = 133;
+    pub const SYS_mknodat: usize = 259;
     pub const SYS_rename: usize = 82;
     pub const SYS_renameat: usize = 264;
     pub const SYS_renameat2: usize = 316;
@@ -346,6 +347,7 @@ pub mod sysno {
     pub const SYS_fchmodat: usize = 53;
     pub const SYS_fchown: usize = 55;
     pub const SYS_fchownat: usize = 54;
+    pub const SYS_mknodat: usize = 33;
     pub const SYS_renameat2: usize = 276;
     pub const SYS_linkat: usize = 37;
     pub const SYS_symlinkat: usize = 36;
@@ -577,6 +579,7 @@ pub mod sysno {
     pub const SYS_fchmodat: usize = 53;
     pub const SYS_fchown: usize = 55;
     pub const SYS_fchownat: usize = 54;
+    pub const SYS_mknodat: usize = 33;
     pub const SYS_renameat: usize = 38;
     pub const SYS_renameat2: usize = 276;
     pub const SYS_linkat: usize = 37;

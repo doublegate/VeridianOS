@@ -123,6 +123,7 @@ chown
 fchown
 fchownat
 mknod
+mknodat
 rename
 renameat
 renameat2

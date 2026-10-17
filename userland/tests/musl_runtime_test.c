@@ -35,6 +35,7 @@
 #include <sys/prctl.h>
 #include <sys/resource.h>
 #include <sys/sysinfo.h>
+#include <sys/sysmacros.h>
 #include <sys/time.h>
 #include <sys/times.h>
 #include <sys/select.h>
@@ -2159,6 +2160,152 @@ static void test_mdwe(void)
     static char why[64];
     snprintf(why, sizeof(why), "status=%#x no_inherit=%d", st, f2);
     report("musl_mdwe", ok && f2 == 0, why);
+}
+
+/* Milliseconds of CLOCK_MONOTONIC. */
+static long now_ms(void)
+{
+    struct timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    return t.tv_sec * 1000L + t.tv_nsec / 1000000L;
+}
+
+/* FIFOs as Linux: mkfifo makes one (EEXIST again); a non-blocking
+ * write-only open with no reader is ENXIO, a non-blocking read-only open
+ * succeeds and reads end of file; a blocking open waits for the other end,
+ * and data flows from the writer's open to the reader's. */
+static void test_mkfifo(void)
+{
+    const char *path = "/tmp/musl_fifo";
+    static char why[96];
+    int f = 0;
+    unlink(path);
+    struct stat st;
+    if (mkfifo(path, 0640) != 0 || stat(path, &st) != 0 || !S_ISFIFO(st.st_mode)
+        || (st.st_mode & 0777) != 0640)
+        f |= 1;
+    if (mkfifo(path, 0640) != -1 || errno != EEXIST)
+        f |= 2;
+    if (open(path, O_WRONLY | O_NONBLOCK) != -1 || errno != ENXIO)
+        f |= 4;
+    int r = open(path, O_RDONLY | O_NONBLOCK);
+    char b[32];
+    struct pollfd pfd = {r, POLLIN, 0};
+    if (r < 0 || read(r, b, sizeof(b)) != 0 || poll(&pfd, 1, 0) != 0)
+        f |= 8;
+    if (r >= 0)
+        close(r);
+    pid_t pid = fork();
+    if (pid == 0) {
+        long t0 = now_ms();
+        int w = open(path, O_WRONLY);
+        long waited = now_ms() - t0;
+        int ok = w >= 0 && waited >= 100 && write(w, "fifo data", 9) == 9;
+        _exit(ok ? 0 : (w < 0 ? 1 : 2));
+    }
+    usleep(300000); /* the writer's open waits for this reader */
+    r = open(path, O_RDONLY);
+    int n = 0, k;
+    while (r >= 0 && (k = read(r, b + n, sizeof(b) - 1 - n)) > 0)
+        n += k;
+    b[n] = 0;
+    if (r < 0 || strcmp(b, "fifo data") != 0)
+        f |= 16;
+    if (r >= 0 && (fstat(r, &st) != 0 || !S_ISFIFO(st.st_mode)))
+        f |= 32;
+    if (r >= 0)
+        close(r);
+    int cst = -1;
+    if (pid < 0 || waitpid(pid, &cst, 0) != pid || !WIFEXITED(cst) || WEXITSTATUS(cst) != 0)
+        f |= 64;
+    unlink(path);
+    snprintf(why, sizeof(why), "f=%#x read=\"%s\" child=%#x errno=%d", f, b, cst, errno);
+    report("musl_mkfifo", f == 0, why);
+}
+
+/* mknod and mknodat as Linux: a device node opens the device its number
+ * names and stat reports the number; a number with no device and a socket
+ * file are ENXIO to open; S_IFREG (or type 0) makes a regular file, a
+ * directory type is EPERM and an unknown one EINVAL; "name/" is ENOENT;
+ * and only root makes devices (EPERM), while anyone may make a FIFO. */
+static void test_mknod(void)
+{
+    const char *dir = "/tmp/musl_mknod";
+    static char why[96];
+    char p[64];
+    int f = 0;
+    mkdir(dir, 0777);
+    chmod(dir, 0777);
+    struct stat st;
+    snprintf(p, sizeof(p), "%s/null", dir);
+    unlink(p);
+    if (mknod(p, S_IFCHR | 0666, makedev(1, 3)) != 0 || stat(p, &st) != 0
+        || !S_ISCHR(st.st_mode) || major(st.st_rdev) != 1 || minor(st.st_rdev) != 3)
+        f |= 1;
+    int fd = open(p, O_RDWR);
+    char b[4] = {1, 1, 1, 1};
+    if (fd < 0 || write(fd, "gone", 4) != 4 || read(fd, b, 4) != 0)
+        f |= 2;
+    if (fd >= 0 && (fstat(fd, &st) != 0 || st.st_rdev != makedev(1, 3)))
+        f |= 2;
+    if (fd >= 0)
+        close(fd);
+    unlink(p);
+    if (stat("/dev/null", &st) != 0 || st.st_rdev != makedev(1, 3))
+        f |= 4;
+    snprintf(p, sizeof(p), "%s/none", dir);
+    unlink(p);
+    if (mknod(p, S_IFCHR | 0600, makedev(99, 1)) != 0 || open(p, O_RDONLY) != -1
+        || errno != ENXIO)
+        f |= 8;
+    unlink(p);
+    snprintf(p, sizeof(p), "%s/sock", dir);
+    unlink(p);
+    if (mknod(p, S_IFSOCK | 0600, 0) != 0 || stat(p, &st) != 0 || !S_ISSOCK(st.st_mode)
+        || open(p, O_RDONLY) != -1 || errno != ENXIO)
+        f |= 16;
+    unlink(p);
+    snprintf(p, sizeof(p), "%s/reg", dir);
+    unlink(p);
+    if (mknod(p, 0600, 0) != 0 || stat(p, &st) != 0 || !S_ISREG(st.st_mode))
+        f |= 32;
+    unlink(p);
+    if (mknod(p, S_IFDIR | 0700, 0) != -1 || errno != EPERM)
+        f |= 64;
+    if (mknod(p, 0030000 | 0600, 0) != -1 || errno != EINVAL)
+        f |= 64;
+    snprintf(p, sizeof(p), "%s/slash/", dir);
+    if (mknod(p, S_IFIFO | 0600, 0) != -1 || errno != ENOENT)
+        f |= 128;
+    int dfd = open(dir, O_RDONLY | O_DIRECTORY);
+    if (dfd < 0 || mknodat(dfd, "at", S_IFIFO | 0600, 0) != 0
+        || fstatat(dfd, "at", &st, 0) != 0 || !S_ISFIFO(st.st_mode))
+        f |= 256;
+    if (dfd >= 0) {
+        unlinkat(dfd, "at", 0);
+        close(dfd);
+    }
+    pid_t pid = fork();
+    if (pid == 0) {
+        char q[64];
+        int g = 0;
+        if (setuid(65534) != 0)
+            _exit(1);
+        snprintf(q, sizeof(q), "%s/userdev", dir);
+        if (mknod(q, S_IFCHR | 0600, makedev(1, 3)) != -1 || errno != EPERM)
+            g |= 2;
+        snprintf(q, sizeof(q), "%s/userfifo", dir);
+        if (mknod(q, S_IFIFO | 0600, 0) != 0 || stat(q, &st) != 0 || st.st_uid != 65534)
+            g |= 4;
+        unlink(q);
+        _exit(g);
+    }
+    int cst = -1;
+    if (pid < 0 || waitpid(pid, &cst, 0) != pid || !WIFEXITED(cst) || WEXITSTATUS(cst) != 0)
+        f |= 512;
+    rmdir(dir);
+    snprintf(why, sizeof(why), "f=%#x child=%#x errno=%d", f, cst, errno);
+    report("musl_mknod", f == 0, why);
 }
 
 /* Threads run concurrently as their own tasks (ADR 0006 stage D2):
@@ -4424,6 +4571,8 @@ int main(int argc, char **argv)
     test_wx_default();
     test_wx_opt_in();
     test_mdwe();
+    test_mkfifo();
+    test_mknod();
     test_threads();
     test_thread_guards();
     test_signals();

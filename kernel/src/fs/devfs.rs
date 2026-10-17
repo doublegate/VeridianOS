@@ -12,6 +12,126 @@ use crate::error::{FsError, KernelError};
 /// Major number of DRM (Direct Rendering Manager) character devices.
 pub(crate) const DRM_MAJOR: u32 = 226;
 
+/// The character devices, as `(major, minor, path under /dev)`: what
+/// /dev holds and what a device node made by mknod opens (Linux's
+/// numbers).
+const DEVICES: &[(u32, u32, &str)] = &[
+    (1, 3, "null"),
+    (1, 5, "zero"),
+    (1, 8, "random"),
+    (1, 9, "urandom"),
+    (5, 1, "console"),
+    (4, 0, "tty0"),
+    (DRM_MAJOR, 0, "dri/card0"),
+    (DRM_MAJOR, 128, "dri/renderD128"),
+    (13, 64, "input/event0"),
+    (13, 65, "input/event1"),
+];
+
+/// What opening device inode `inode` (made by mknod, on any filesystem)
+/// gives: the device its number names, ENXIO for a number with no device
+/// (there are no block devices to open this way yet). The file reads,
+/// writes and polls the device; stat and chmod see the inode.
+pub fn open_device(inode: Arc<dyn VfsNode>) -> Result<Arc<dyn VfsNode>, KernelError> {
+    let enxio = KernelError::FsError(FsError::NoDeviceOrAddress);
+    if inode.node_type() != NodeType::CharDevice {
+        return Err(enxio);
+    }
+    let (major, minor) = inode.device_id().ok_or(enxio)?;
+    let &(_, _, path) = DEVICES
+        .iter()
+        .find(|&&(ma, mi, _)| (ma, mi) == (major, minor))
+        .ok_or(enxio)?;
+    Ok(Arc::new(DeviceFile {
+        inode,
+        device: DevNode::new_char(String::from(path), major, minor),
+    }))
+}
+
+/// An open device inode: the device's I/O, the inode's attributes.
+struct DeviceFile {
+    inode: Arc<dyn VfsNode>,
+    device: DevNode,
+}
+
+impl VfsNode for DeviceFile {
+    fn node_type(&self) -> NodeType {
+        NodeType::CharDevice
+    }
+
+    fn is_stream(&self) -> bool {
+        self.device.is_stream()
+    }
+
+    fn read(&self, offset: usize, buffer: &mut [u8]) -> Result<usize, KernelError> {
+        self.device.read(offset, buffer)
+    }
+
+    fn write(&self, offset: usize, data: &[u8]) -> Result<usize, KernelError> {
+        self.device.write(offset, data)
+    }
+
+    fn poll_readiness(&self) -> u16 {
+        self.device.poll_readiness()
+    }
+
+    fn wakes_io_waiters(&self) -> bool {
+        self.device.wakes_io_waiters()
+    }
+
+    fn ready_at_ns(&self) -> Option<u64> {
+        self.device.ready_at_ns()
+    }
+
+    fn device_id(&self) -> Option<(u32, u32)> {
+        self.device.device_id()
+    }
+
+    fn metadata(&self) -> Result<Metadata, KernelError> {
+        self.inode.metadata()
+    }
+
+    fn file_identity(&self) -> Option<(u64, u64)> {
+        self.inode.file_identity()
+    }
+
+    fn chmod(&self, permissions: Permissions) -> Result<(), KernelError> {
+        self.inode.chmod(permissions)
+    }
+
+    fn chown(&self, uid: Option<u32>, gid: Option<u32>) -> Result<(), KernelError> {
+        self.inode.chown(uid, gid)
+    }
+
+    fn set_times(&self, atime: Option<u64>, mtime: Option<u64>) -> Result<(), KernelError> {
+        self.inode.set_times(atime, mtime)
+    }
+
+    fn readdir(&self) -> Result<Vec<DirEntry>, KernelError> {
+        Err(KernelError::FsError(FsError::NotADirectory))
+    }
+
+    fn lookup(&self, _name: &str) -> Result<Arc<dyn VfsNode>, KernelError> {
+        Err(KernelError::FsError(FsError::NotADirectory))
+    }
+
+    fn create(&self, _name: &str, _perms: Permissions) -> Result<Arc<dyn VfsNode>, KernelError> {
+        Err(KernelError::FsError(FsError::NotADirectory))
+    }
+
+    fn mkdir(&self, _name: &str, _perms: Permissions) -> Result<Arc<dyn VfsNode>, KernelError> {
+        Err(KernelError::FsError(FsError::NotADirectory))
+    }
+
+    fn unlink(&self, _name: &str) -> Result<(), KernelError> {
+        Err(KernelError::FsError(FsError::NotADirectory))
+    }
+
+    fn truncate(&self, size: usize) -> Result<(), KernelError> {
+        self.device.truncate(size)
+    }
+}
+
 /// PID of the calling process (0 when there is none, e.g. during boot).
 fn current_pid() -> u64 {
     crate::process::current_process().map_or(0, |p| p.pid.0)
@@ -380,68 +500,20 @@ struct DevRoot {
 impl DevRoot {
     fn new() -> Self {
         let mut devices = BTreeMap::new();
-
-        // Create standard device nodes
-        devices.insert(
-            String::from("null"),
-            Arc::new(DevNode::new_char(String::from("null"), 1, 3)),
-        );
-
-        devices.insert(
-            String::from("zero"),
-            Arc::new(DevNode::new_char(String::from("zero"), 1, 5)),
-        );
-
-        devices.insert(
-            String::from("random"),
-            Arc::new(DevNode::new_char(String::from("random"), 1, 8)),
-        );
-
-        devices.insert(
-            String::from("urandom"),
-            Arc::new(DevNode::new_char(String::from("urandom"), 1, 9)),
-        );
-
-        devices.insert(
-            String::from("console"),
-            Arc::new(DevNode::new_char(String::from("console"), 5, 1)),
-        );
-
-        devices.insert(
-            String::from("tty0"),
-            Arc::new(DevNode::new_char(String::from("tty0"), 4, 0)),
-        );
-
-        // Create /dev/dri/ subdirectory with DRM device nodes
-        let dri_dir = Arc::new(DevSubDir::new(String::from("dri")));
-        dri_dir.add_device(
-            String::from("card0"),
-            Arc::new(DevNode::new_char(String::from("dri/card0"), DRM_MAJOR, 0)),
-        );
-        dri_dir.add_device(
-            String::from("renderD128"),
-            Arc::new(DevNode::new_char(
-                String::from("dri/renderD128"),
-                DRM_MAJOR,
-                128,
-            )),
-        );
-
-        // Create /dev/input/ subdirectory with evdev device nodes
-        let input_dir = Arc::new(DevSubDir::new(String::from("input")));
-        input_dir.add_device(
-            String::from("event0"),
-            Arc::new(DevNode::new_char(String::from("input/event0"), 13, 64)),
-        );
-        input_dir.add_device(
-            String::from("event1"),
-            Arc::new(DevNode::new_char(String::from("input/event1"), 13, 65)),
-        );
-
-        let mut subdirs = BTreeMap::new();
-        subdirs.insert(String::from("dri"), dri_dir);
-        subdirs.insert(String::from("input"), input_dir);
-
+        let mut subdirs: BTreeMap<String, Arc<DevSubDir>> = BTreeMap::new();
+        for &(major, minor, path) in DEVICES {
+            let node = Arc::new(DevNode::new_char(String::from(path), major, minor));
+            match path.split_once('/') {
+                // /dev/dri/, /dev/input/
+                Some((dir, name)) => subdirs
+                    .entry(String::from(dir))
+                    .or_insert_with(|| Arc::new(DevSubDir::new(String::from(dir))))
+                    .add_device(String::from(name), node),
+                None => {
+                    devices.insert(String::from(path), node);
+                }
+            }
+        }
         Self {
             devices: RwLock::new(devices),
             subdirs: RwLock::new(subdirs),
@@ -594,5 +666,56 @@ impl Filesystem for DevFs {
 
     fn sync(&self) -> Result<(), KernelError> {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::fs::{make_dev, ramfs::RamFs};
+
+    /// A device node made by mknod opens the device its number names, with
+    /// the inode's attributes; a number with no device, or a block device,
+    /// is ENXIO.
+    #[test]
+    fn device_inodes_open_their_device() {
+        let root = RamFs::new().root();
+        let perms = Permissions::from_mode(0o600);
+        let null = root
+            .mknod("mynull", NodeType::CharDevice, perms, make_dev(1, 3))
+            .unwrap();
+        let file = open_device(null).unwrap();
+        assert_eq!(file.write(0, b"gone"), Ok(4));
+        let mut b = [1u8; 4];
+        assert_eq!(file.read(0, &mut b), Ok(0), "/dev/null reads nothing");
+        assert_eq!(file.device_id(), Some((1, 3)));
+        assert_eq!(file.metadata().unwrap().permissions.to_mode(), 0o600);
+        let zero = root
+            .mknod("z", NodeType::CharDevice, perms, make_dev(1, 5))
+            .unwrap();
+        assert_eq!(open_device(zero).unwrap().read(0, &mut b), Ok(4));
+        assert_eq!(b, [0; 4]);
+        let enxio = Some(KernelError::FsError(FsError::NoDeviceOrAddress));
+        let none = root
+            .mknod("none", NodeType::CharDevice, perms, make_dev(99, 1))
+            .unwrap();
+        assert_eq!(open_device(none).err(), enxio);
+        let blk = root
+            .mknod("blk", NodeType::BlockDevice, perms, make_dev(1, 3))
+            .unwrap();
+        assert_eq!(open_device(blk).err(), enxio);
+    }
+
+    /// /dev is built from the same table mknod numbers resolve against.
+    #[test]
+    fn dev_holds_every_device_in_the_table() {
+        let root = DevFs::new().root();
+        for &(major, minor, path) in DEVICES {
+            let node = match path.split_once('/') {
+                Some((dir, name)) => root.lookup(dir).unwrap().lookup(name).unwrap(),
+                None => root.lookup(path).unwrap(),
+            };
+            assert_eq!(node.device_id(), Some((major, minor)), "{path}");
+        }
     }
 }

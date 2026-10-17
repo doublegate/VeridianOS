@@ -288,26 +288,63 @@ impl DiskInode {
         }
     }
 
+    /// The file type bits of `mode` (S_IFMT). Each type is one value of
+    /// them, not a bit: tested as bits, a block device (0x6000) and a
+    /// socket (0xC000) both looked like directories.
+    fn file_type_bits(&self) -> u16 {
+        self.mode & 0xF000
+    }
+
     pub fn is_dir(&self) -> bool {
-        (self.mode & 0x4000) != 0
+        self.file_type_bits() == 0x4000
     }
 
     pub fn is_file(&self) -> bool {
-        (self.mode & 0x8000) != 0
+        self.file_type_bits() == 0x8000
     }
 
     pub fn is_symlink(&self) -> bool {
-        (self.mode & 0xA000) == 0xA000
+        self.file_type_bits() == 0xA000
+    }
+
+    /// A FIFO, device or socket (mknod): no data blocks, and a device
+    /// keeps its number in `direct_blocks[0]`, as ext2 does.
+    pub fn is_special(&self) -> bool {
+        matches!(self.file_type_bits(), 0x1000 | 0x2000 | 0x6000 | 0xC000)
+    }
+
+    /// The device number of a device inode (Linux's encoding).
+    pub fn rdev(&self) -> u32 {
+        if matches!(self.file_type_bits(), 0x2000 | 0x6000) {
+            self.direct_blocks[0]
+        } else {
+            0
+        }
     }
 
     pub fn node_type(&self) -> NodeType {
-        if self.is_dir() {
-            NodeType::Directory
-        } else if self.is_symlink() {
-            NodeType::Symlink
-        } else {
-            NodeType::File
+        match self.file_type_bits() {
+            0x4000 => NodeType::Directory,
+            0xA000 => NodeType::Symlink,
+            0x1000 => NodeType::Pipe,
+            0x2000 => NodeType::CharDevice,
+            0x6000 => NodeType::BlockDevice,
+            0xC000 => NodeType::Socket,
+            _ => NodeType::File,
         }
+    }
+}
+
+/// The file type bits (S_IFMT) of a node type.
+fn type_mode(kind: NodeType) -> u16 {
+    match kind {
+        NodeType::File => 0x8000,
+        NodeType::Directory => 0x4000,
+        NodeType::Symlink => 0xA000,
+        NodeType::Pipe => 0x1000,
+        NodeType::CharDevice => 0x2000,
+        NodeType::BlockDevice => 0x6000,
+        NodeType::Socket => 0xC000,
     }
 }
 
@@ -340,6 +377,24 @@ impl DiskDirEntry {
     pub const FT_DIR: u8 = 2;
     /// File type constant for symlinks
     pub const FT_SYMLINK: u8 = 7;
+    /// File type constants for special files (ext2's values)
+    pub const FT_CHRDEV: u8 = 3;
+    pub const FT_BLKDEV: u8 = 4;
+    pub const FT_FIFO: u8 = 5;
+    pub const FT_SOCK: u8 = 6;
+
+    /// The entry type for a node type.
+    pub fn file_type_of(kind: NodeType) -> u8 {
+        match kind {
+            NodeType::File => Self::FT_REG_FILE,
+            NodeType::Directory => Self::FT_DIR,
+            NodeType::Symlink => Self::FT_SYMLINK,
+            NodeType::CharDevice => Self::FT_CHRDEV,
+            NodeType::BlockDevice => Self::FT_BLKDEV,
+            NodeType::Pipe => Self::FT_FIFO,
+            NodeType::Socket => Self::FT_SOCK,
+        }
+    }
 
     /// Create a new directory entry
     pub fn new(inode: u32, name: &str, file_type: u8) -> Self {
@@ -371,6 +426,10 @@ impl DiskDirEntry {
         match self.file_type {
             Self::FT_DIR => NodeType::Directory,
             Self::FT_SYMLINK => NodeType::Symlink,
+            Self::FT_CHRDEV => NodeType::CharDevice,
+            Self::FT_BLKDEV => NodeType::BlockDevice,
+            Self::FT_FIFO => NodeType::Pipe,
+            Self::FT_SOCK => NodeType::Socket,
             _ => NodeType::File,
         }
     }
@@ -559,6 +618,40 @@ impl VfsNode for BlockFsNode {
 
     fn as_any(&self) -> Option<&dyn core::any::Any> {
         Some(self)
+    }
+
+    fn mknod(
+        &self,
+        name: &str,
+        kind: NodeType,
+        permissions: Permissions,
+        rdev: u32,
+    ) -> Result<Arc<dyn VfsNode>, KernelError> {
+        let new_inode =
+            self.mutate(|fs| fs.create_special(self.inode_num, name, kind, permissions, rdev))?;
+        Ok(Arc::new(BlockFsNode::new(new_inode, self.fs.clone())))
+    }
+
+    fn is_special_inode(&self) -> bool {
+        let fs = self.fs.read();
+        fs.inode_table
+            .get(self.inode_num as usize)
+            .is_some_and(DiskInode::is_special)
+    }
+
+    fn device_id(&self) -> Option<(u32, u32)> {
+        let fs = self.fs.read();
+        let inode = fs.inode_table.get(self.inode_num as usize)?;
+        matches!(
+            inode.node_type(),
+            NodeType::CharDevice | NodeType::BlockDevice
+        )
+        .then(|| {
+            (
+                super::dev_major(inode.rdev()),
+                super::dev_minor(inode.rdev()),
+            )
+        })
     }
 
     fn rename(
@@ -1368,6 +1461,9 @@ impl BlockFsInner {
             .inode_table
             .get(inode_num as usize)
             .ok_or(KernelError::FsError(FsError::NotFound))?;
+        if inode.is_special() {
+            return Err(KernelError::FsError(FsError::NotAFile));
+        }
 
         if offset >= inode.size as usize {
             return Ok(0);
@@ -1412,6 +1508,13 @@ impl BlockFsInner {
         offset: usize,
         data: &[u8],
     ) -> Result<usize, KernelError> {
+        if self
+            .inode_table
+            .get(inode_num as usize)
+            .is_some_and(DiskInode::is_special)
+        {
+            return Err(KernelError::FsError(FsError::NotAFile));
+        }
         self.page_cache.invalidate(inode_num as u64);
         // Collect block information in multiple passes to avoid borrow conflicts
         let mut blocks_needed: Vec<(usize, usize, usize)> = Vec::new();
@@ -1695,6 +1798,50 @@ impl BlockFsInner {
         Ok(inode_num)
     }
 
+    /// Create special file `name` (mknod) in `parent`: a FIFO, a device
+    /// numbered `rdev` or a socket. It has no data blocks; a device's
+    /// number is kept in `direct_blocks[0]`.
+    fn create_special(
+        &mut self,
+        parent: u32,
+        name: &str,
+        kind: NodeType,
+        permissions: Permissions,
+        rdev: u32,
+    ) -> Result<u32, KernelError> {
+        if !matches!(
+            kind,
+            NodeType::Pipe | NodeType::CharDevice | NodeType::BlockDevice | NodeType::Socket
+        ) {
+            return Err(KernelError::FsError(FsError::NotSupported));
+        }
+        if name.is_empty() || name.len() > MAX_FILENAME_LEN {
+            return Err(KernelError::InvalidArgument {
+                name: "filename",
+                value: "empty or exceeds maximum length",
+            });
+        }
+        if self.find_dir_entry(parent, name)?.is_some() {
+            return Err(KernelError::FsError(FsError::AlreadyExists));
+        }
+        let inode_num = self
+            .allocate_inode()
+            .ok_or(KernelError::ResourceExhausted { resource: "inodes" })?;
+        let mode = type_mode(kind) | (permissions.to_mode() & 0o7777) as u16;
+        let mut inode = DiskInode::new(mode, 0, 0);
+        if matches!(kind, NodeType::CharDevice | NodeType::BlockDevice) {
+            inode.direct_blocks[0] = rdev;
+        }
+        self.inode_table[inode_num as usize] = inode;
+        let file_type = DiskDirEntry::file_type_of(kind);
+        if let Err(e) = self.write_dir_entry(parent, inode_num, name, file_type) {
+            self.inode_table[inode_num as usize] = DiskInode::free();
+            self.superblock.free_inodes += 1;
+            return Err(e);
+        }
+        Ok(inode_num)
+    }
+
     /// Point the directory entry at (`dir`, `block_idx`, `offset`) at
     /// `inode` (0 deletes it). Link counts are the caller's business.
     fn set_dir_entry_inode(
@@ -1906,6 +2053,13 @@ impl BlockFsInner {
     }
 
     fn truncate_inode(&mut self, inode_num: u32, size: usize) -> Result<(), KernelError> {
+        if self
+            .inode_table
+            .get(inode_num as usize)
+            .is_some_and(DiskInode::is_special)
+        {
+            return Err(KernelError::FsError(FsError::NotAFile));
+        }
         self.page_cache.invalidate(inode_num as u64);
         let old_size = {
             let inode = self
@@ -2108,11 +2262,8 @@ impl BlockFsInner {
         }
 
         // Determine file type for directory entry
-        let file_type = if self.inode_table[target_inode as usize].is_symlink() {
-            DiskDirEntry::FT_SYMLINK
-        } else {
-            DiskDirEntry::FT_REG_FILE
-        };
+        let file_type =
+            DiskDirEntry::file_type_of(self.inode_table[target_inode as usize].node_type());
 
         // Add directory entry
         self.write_dir_entry(dir_inode, target_inode, name, file_type)?;
@@ -2558,6 +2709,11 @@ impl BlockFsInner {
     /// Free all data blocks belonging to an inode (direct + indirect).
     fn free_inode_blocks(&mut self, inode_num: u32) -> Result<(), KernelError> {
         self.page_cache.invalidate(inode_num as u64);
+        // A special file has no blocks; its device number is not one.
+        if self.inode_table[inode_num as usize].is_special() {
+            self.inode_table[inode_num as usize].direct_blocks = [0; DIRECT_BLOCKS];
+            return Ok(());
+        }
         // Free direct blocks
         for i in 0..DIRECT_BLOCKS {
             let block_num = self.inode_table[inode_num as usize].direct_blocks[i];
@@ -2736,6 +2892,57 @@ pub fn attach_virtio_backend(fs: &BlockFs, load_from_disk: bool) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// mknod on BlockFS: each special type reads back as itself (the type
+    /// bits were tested as bits, so a block device and a socket came back
+    /// as directories), a device keeps its number, nothing reads or writes
+    /// its data, and removing it frees no block.
+    #[test]
+    fn special_files_keep_their_type_and_number() {
+        let fs = BlockFs::format(1000, 100).unwrap();
+        let root = fs.root();
+        let perms = Permissions::from_mode(0o640);
+        let rdev = crate::fs::make_dev(8, 300);
+        for (name, kind) in [
+            ("fifo", NodeType::Pipe),
+            ("chr", NodeType::CharDevice),
+            ("blk", NodeType::BlockDevice),
+            ("sock", NodeType::Socket),
+        ] {
+            let node = root.mknod(name, kind, perms, rdev).unwrap();
+            assert_eq!(node.node_type(), kind, "{name}");
+            assert!(node.is_special_inode());
+            let meta = root.lookup(name).unwrap().metadata().unwrap();
+            assert_eq!((meta.node_type, meta.permissions.to_mode()), (kind, 0o640));
+            let device = matches!(kind, NodeType::CharDevice | NodeType::BlockDevice);
+            assert_eq!(node.device_id(), device.then_some((8, 300)), "{name}");
+            assert!(node.write(0, b"x").is_err() && node.truncate(4).is_err());
+        }
+        let types: Vec<_> = root
+            .readdir()
+            .unwrap()
+            .into_iter()
+            .filter(|e| e.name != "." && e.name != "..")
+            .map(|e| (e.name, e.node_type))
+            .collect();
+        assert!(types.contains(&(String::from("blk"), NodeType::BlockDevice)));
+        assert!(types.contains(&(String::from("sock"), NodeType::Socket)));
+        assert!(matches!(
+            root.mknod("fifo", NodeType::Pipe, perms, 0),
+            Err(KernelError::FsError(FsError::AlreadyExists))
+        ));
+        assert!(root.lookup("fifo").unwrap().is_special_inode());
+        let free = fs.inner.read().superblock.free_blocks;
+        for name in ["fifo", "chr", "blk", "sock"] {
+            root.unlink(name).unwrap();
+        }
+        let inner = fs.inner.read();
+        assert_eq!(
+            inner.superblock.free_blocks, free,
+            "a device number was freed as a block"
+        );
+        assert_eq!(inner.superblock.free_inodes, 99);
+    }
 
     #[test]
     fn test_superblock_creation() {

@@ -2,6 +2,24 @@
 
 ### Added
 
+- **mknod and mknodat, with FIFOs and device nodes (N-201).** mknod was always EPERM, so
+  `mkfifo` failed; mknodat had no number. Both now follow Linux's `filename_mknodat`:
+  - a regular file (type 0 or S_IFREG), FIFO, character or block device or socket file; a
+    directory type is EPERM and any other EINVAL; an existing name is EEXIST, `name/` ENOENT;
+  - write and search permission on the parent (EACCES); devices need privilege (EPERM; root,
+    standing in for CAP_MKNOD); the umask applies; a filesystem without special files (devfs,
+    procfs) is EPERM.
+
+  RamFS, tmpfs and BlockFS hold special files; BlockFS keeps a device's number in
+  `direct_blocks[0]` as ext2 does, and mkfs-blockfs copies FIFOs, devices and sockets from the
+  source tree. Opening a FIFO follows Linux's `fifo_open` (`fs::fifo`): one pipe per inode,
+  shared by every open; read-only waits for a writer and write-only for a reader (O_NONBLOCK:
+  read-only succeeds, write-only is ENXIO); read-write never waits; no writer reads as end of
+  file and no reader is EPIPE; poll as `pipe_poll`. A device node opens the device its number
+  names (`devfs::open_device`; ENXIO for a number with no device), and a socket file is ENXIO
+  to open. stat reports st_rdev in Linux's encoding, for /dev's own nodes too (it was 0). Host
+  tests for each filesystem, the FIFO rules and the device table; runtime tests `musl_mkfifo`
+  (also passes on Linux) and `musl_mknod` on all three architectures.
 - **W^X opt-in per program, and PR_SET_MDWE (ADR 0017).** W^X stays the default (mmap and
   mprotect with PROT_WRITE|PROT_EXEC are EACCES). A program that needs writable and executable
   memory, such as a JIT, opts in with a VeridianOS ELF note in the main program
@@ -1092,6 +1110,10 @@
 
 ### Fixed
 
+- **BlockFS read the type of a block device or socket inode as a directory.** The type bits
+  were tested as single bits (`mode & 0x4000`), so S_IFBLK (0x6000) and S_IFSOCK (0xC000) looked
+  like directories, and FIFOs and character devices like regular files. Each type is now one
+  value of `mode & 0xF000`, and directory entries carry ext2's types for special files.
 - **A boot-test result line could be split by another CPU's message.** The `Results:` line and each
   test's line are printed in several pieces, and on 4 CPUs `[INIT] Results: 62/[PROCESS] Dropping
   process 29` made the boot test unparseable (all tests had passed). AArch64 and RISC-V now hold

@@ -312,8 +312,11 @@ What does not work yet: `docs/KNOWN-LIMITATIONS.md`.
     then group by group (process, signals, time, files, memory, ipc, events, network, sched,
     mount, system) with fail-first tests; LTP and musl libc-test in the rootfs suite; rewrite
     `docs/PORTING-GUIDE.md` (it still lists the pre-ADR-0009 native numbers). Done: W^X
-    per-program opt-in (ELF note) and prctl PR_SET_MDWE/PR_GET_MDWE (ADR 0017); next: a tool
-    that adds the W^X note to an existing binary.
+    per-program opt-in (ELF note) and prctl PR_SET_MDWE/PR_GET_MDWE (ADR 0017); mknod and
+    mknodat (FIFOs with Linux's open/read/write/poll rules, device nodes opening their device by
+    number, socket files; special files on RamFS, tmpfs and BlockFS and in mkfs-blockfs images;
+    st_rdev in stat; N-201); next: a tool that adds the W^X note to an existing binary; bind()
+    of a Unix socket making its socket file.
   - [ ] **Release:** tri-arch boot with `-smp 4`, runtime suite, CHANGELOG, tag.
 - [ ] **v0.28.0:** the process, signal, time and file syscall tiers (X2 groups, with the open
   ABI-review findings N-194 to N-247 that belong to them).

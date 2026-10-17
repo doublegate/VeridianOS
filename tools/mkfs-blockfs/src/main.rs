@@ -29,6 +29,11 @@ const BLOCK_SIZE: usize = 4096;
 const S_IFREG: u16 = 0x8000;
 const S_IFDIR: u16 = 0x4000;
 const S_IFLNK: u16 = 0xA000;
+/// Special files: FIFO, character and block device, socket.
+const S_IFIFO: u16 = 0x1000;
+const S_IFCHR: u16 = 0x2000;
+const S_IFBLK: u16 = 0x6000;
+const S_IFSOCK: u16 = 0xC000;
 const BLOCKFS_MAGIC: u32 = 0x424C4B46; // "BLKF"
 const DISK_INODE_SIZE: usize = 96;
 const INODES_PER_BLOCK: usize = BLOCK_SIZE / DISK_INODE_SIZE; // 42
@@ -41,6 +46,10 @@ const DIR_ENTRY_HEADER_SIZE: usize = 8;
 const FT_REG_FILE: u8 = 1;
 const FT_DIR: u8 = 2;
 const FT_SYMLINK: u8 = 7;
+const FT_CHRDEV: u8 = 3;
+const FT_BLKDEV: u8 = 4;
+const FT_FIFO: u8 = 5;
+const FT_SOCK: u8 = 6;
 
 fn align4(val: usize) -> usize {
     (val + 3) & !3
@@ -410,6 +419,28 @@ impl BlockFsBuilder {
         inode_idx
     }
 
+    /// Create a special file inode (`mode` with its type bits: FIFO,
+    /// device or socket) and add it to a parent directory. It has no data;
+    /// a device's number (Linux's 32-bit encoding) is kept in
+    /// `direct_blocks[0]`, as the kernel's BlockFS reads it.
+    fn create_special(&mut self, parent_inode: u32, name: &str, mode: u16, rdev: u32) -> u32 {
+        let inode_idx = self.allocate_inode().expect("out of inodes");
+        let inode = &mut self.inodes[inode_idx as usize];
+        inode.mode = mode;
+        inode.links_count = 1;
+        let (file_type, device) = match mode & 0xF000 {
+            S_IFCHR => (FT_CHRDEV, true),
+            S_IFBLK => (FT_BLKDEV, true),
+            S_IFIFO => (FT_FIFO, false),
+            _ => (FT_SOCK, false),
+        };
+        if device {
+            inode.direct_blocks[0] = rdev;
+        }
+        self.write_dir_entry(parent_inode, inode_idx, name, file_type);
+        inode_idx
+    }
+
     /// Create a directory inode (`mode` with its type bits) and add it to a
     /// parent directory
     fn create_directory(&mut self, parent_inode: u32, name: &str, mode: u16) -> u32 {
@@ -507,8 +538,24 @@ impl BlockFsBuilder {
                     let mode = S_IFREG | host_mode(&path, 0o644);
                     let inode = self.create_file(parent_inode, &name_str, &data, mode);
                     paths.insert(image_path, inode);
+                } else {
+                    use std::os::unix::fs::{FileTypeExt, MetadataExt};
+                    let type_bits = if file_type.is_fifo() {
+                        S_IFIFO
+                    } else if file_type.is_char_device() {
+                        S_IFCHR
+                    } else if file_type.is_block_device() {
+                        S_IFBLK
+                    } else if file_type.is_socket() {
+                        S_IFSOCK
+                    } else {
+                        continue;
+                    };
+                    let mode = type_bits | (metadata.mode() & 0o755) as u16;
+                    let rdev = linux_dev(metadata.rdev());
+                    let inode = self.create_special(parent_inode, &name_str, mode, rdev);
+                    paths.insert(image_path, inode);
                 }
-                // Special files (devices, sockets, FIFOs) are skipped.
             }
         }
         paths
@@ -656,6 +703,14 @@ fn count_entries(dir: &Path) -> usize {
 /// umask or a file set-user-ID to the builder must not turn into a
 /// root-owned writable or set-user-ID-root file; set-ID, sticky and
 /// group or other write bits come only from `--attrs`.
+/// A host `dev_t` (glibc's 64-bit layout) in Linux's 32-bit encoding
+/// (`new_encode_dev`), which the kernel's BlockFS stores.
+fn linux_dev(dev: u64) -> u32 {
+    let major = (((dev >> 8) & 0xfff) | ((dev >> 32) & !0xfff)) as u32;
+    let minor = ((dev & 0xff) | ((dev >> 12) & !0xff)) as u32;
+    (minor & 0xff) | ((major & 0xfff) << 8) | ((minor & !0xff) << 12)
+}
+
 fn host_mode(path: &Path, default: u16) -> u16 {
     use std::os::unix::fs::PermissionsExt;
     fs::metadata(path)
@@ -855,6 +910,36 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Host device numbers become Linux's 32-bit encoding.
+    #[test]
+    fn device_numbers_are_encoded_as_linux() {
+        // glibc makedev(1, 3), makedev(8, 0x12345).
+        assert_eq!(linux_dev(0x103), 0x103);
+        let glibc = (0x45u64) | (8 << 8) | (0x123u64 << 20);
+        assert_eq!(linux_dev(glibc), 0x1230_0845);
+    }
+
+    /// A FIFO in the source tree becomes a FIFO inode with its mode.
+    #[test]
+    fn populate_keeps_fifos() {
+        let root = env::temp_dir().join(format!("mkfs-blockfs-fifo-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let ok = std::process::Command::new("mkfifo")
+            .args(["-m", "640"])
+            .arg(root.join("pipe"))
+            .status()
+            .unwrap()
+            .success();
+        assert!(ok);
+        let mut b = BlockFsBuilder::new(64, 32);
+        let paths = b.populate_from_dir(&root, 0);
+        let inode = &b.inodes[paths["/pipe"] as usize];
+        assert_eq!(inode.mode, S_IFIFO | 0o640);
+        assert_eq!(inode.direct_blocks, [0; DIRECT_BLOCKS]);
+        let _ = fs::remove_dir_all(&root);
+    }
 
     #[test]
     fn attr_lines_parse_and_reject_bad_input() {

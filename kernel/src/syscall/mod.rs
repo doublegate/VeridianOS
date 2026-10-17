@@ -479,6 +479,8 @@ pub enum SyscallError {
     /// The operation would deadlock, e.g. locking a PI futex one already
     /// owns (EDEADLK, errno 35).
     Deadlock = -131,
+    /// No such device or address (ENXIO, errno 6).
+    NoDeviceOrAddress = -132,
 }
 
 impl From<IpcError> for SyscallError {
@@ -543,6 +545,7 @@ pub fn map_kernel_error(err: crate::error::KernelError) -> SyscallError {
             FsError::NotMounted => SyscallError::InvalidArgument,
             FsError::UnknownFsType => SyscallError::NoDevice,
             FsError::NotSupported => SyscallError::NotSupported,
+            FsError::NoDeviceOrAddress => SyscallError::NoDeviceOrAddress,
             FsError::NotASymlink => SyscallError::InvalidArgument,
             FsError::FileTooLarge => SyscallError::FileTooLarge,
             FsError::CorruptedData => SyscallError::IoError,
@@ -1019,6 +1022,7 @@ fn handle_syscall(
         Syscall::Chown => sys_chown(arg1, arg2, arg3),
         Syscall::Fchown => sys_fchown(arg1, arg2, arg3),
         Syscall::Mknod => sys_mknod(arg1, arg2, arg3),
+        Syscall::Mknodat => sys_mknodat(arg1, arg2, arg3, arg4),
         Syscall::Select => sys_select(arg1, arg2, arg3, arg4, arg5),
         // pselect6(nfds, readfds, writefds, exceptfds, timeout, sig)
         Syscall::Pselect6 => sys_pselect6(arg1, arg2, arg3, arg4, arg5, syscall_arg6()?),

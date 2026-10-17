@@ -253,6 +253,19 @@ fn open_path(path: &str, flags: usize, mode: usize) -> SyscallResult {
         node.truncate(0).map_err(map_resolve_err)?;
         crate::fs::remove_privs_after_write(&*node);
     }
+    // A special file made by mknod opens what it names; a socket file
+    // cannot be opened (ENXIO, as Linux's `sock_no_open`).
+    let node = if node.is_special_inode() {
+        match node_type {
+            NodeType::Pipe => open_fifo(node, &open_flags)?,
+            NodeType::CharDevice | NodeType::BlockDevice => {
+                crate::fs::devfs::open_device(node).map_err(super::map_kernel_error)?
+            }
+            _ => return Err(SyscallError::NoDeviceOrAddress),
+        }
+    } else {
+        node
+    };
 
     // The file records the canonical path of what it opened (in the whole
     // tree) for fchdir and dirfd resolution: the path as written could be
@@ -269,6 +282,29 @@ fn open_path(path: &str, flags: usize, mode: usize) -> SyscallResult {
     file_table
         .open_with_flags(alloc::sync::Arc::new(file), cloexec)
         .map_err(super::map_kernel_error)
+}
+
+/// Open FIFO `inode` (`fs::fifo`): a blocking open of one end sleeps until
+/// the other end is opened, or a signal interrupts it (EINTR, restarted
+/// under SA_RESTART as Linux's ERESTARTSYS).
+fn open_fifo(
+    inode: alloc::sync::Arc<dyn crate::fs::VfsNode>,
+    flags: &OpenFlags,
+) -> Result<alloc::sync::Arc<dyn crate::fs::VfsNode>, SyscallError> {
+    let end = crate::fs::fifo::FifoEnd::open(inode, flags.read, flags.write, flags.nonblock)
+        .map_err(super::map_kernel_error)?;
+    #[cfg(feature = "alloc")]
+    if crate::sched::dispatch::current_owner().is_some() {
+        use crate::sched::dispatch::{self, WaitError};
+        while end.needs_partner() {
+            match dispatch::wait_event(&dispatch::IO_EVENTS, None, || !end.needs_partner()) {
+                Ok(()) | Err(WaitError::TimedOut) => {}
+                // Dropping the end undoes the open.
+                Err(WaitError::Interrupted) => return Err(SyscallError::Interrupted),
+            }
+        }
+    }
+    Ok(alloc::sync::Arc::new(end))
 }
 
 /// Close a file descriptor
@@ -646,7 +682,7 @@ pub fn sys_stat(fd: usize, stat_buf: usize) -> SyscallResult {
 
     // Get metadata and write to user buffer
     let metadata = file_desc.node.metadata().map_err(super::map_kernel_error)?;
-    let stat = fill_stat(&metadata);
+    let stat = fill_stat(&metadata, &*file_desc.node);
 
     super::userspace::write_user(stat_buf, stat)?;
     Ok(0)
@@ -991,15 +1027,19 @@ type FileStat = X86Stat;
 #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
 type FileStat = GenericStat;
 
-/// Helper: populate a FileStat from VFS metadata.
-fn fill_stat(metadata: &crate::fs::Metadata) -> FileStat {
+/// Helper: populate a FileStat from the VFS metadata of `node`, and its
+/// device number for a device.
+fn fill_stat(metadata: &crate::fs::Metadata, node: &dyn crate::fs::VfsNode) -> FileStat {
+    let rdev = node
+        .device_id()
+        .map_or(0, |(major, minor)| crate::fs::make_dev(major, minor));
     #[allow(clippy::useless_conversion)] // the identity on x86_64
-    let stat = FileStat::from(fill_x86_stat(metadata));
+    let stat = FileStat::from(fill_x86_stat(metadata, rdev));
     stat
 }
 
-/// [`fill_stat`] in the x86_64 layout.
-fn fill_x86_stat(metadata: &crate::fs::Metadata) -> X86Stat {
+/// [`fill_stat`] in the x86_64 layout; `rdev` in Linux's encoding.
+fn fill_x86_stat(metadata: &crate::fs::Metadata, rdev: u32) -> X86Stat {
     // File type bits plus the node's real permission bits; this used to
     // report a fixed 0644/0755 for every file and directory.
     let type_bits = match metadata.node_type {
@@ -1021,7 +1061,7 @@ fn fill_x86_stat(metadata: &crate::fs::Metadata) -> X86Stat {
         st_uid: metadata.uid,
         st_gid: metadata.gid,
         __pad0: 0,
-        st_rdev: 0,
+        st_rdev: rdev as u64,
         st_size: size,
         st_blksize: 4096,
         st_blocks: (size + 511) / 512,
@@ -2965,7 +3005,7 @@ pub fn sys_fstatat(dirfd: usize, path_ptr: usize, stat_buf: usize, flags: usize)
     };
 
     let metadata = node.metadata().map_err(super::map_kernel_error)?;
-    super::userspace::write_user(stat_buf, fill_stat(&metadata))?;
+    super::userspace::write_user(stat_buf, fill_stat(&metadata, &*node))?;
     Ok(0)
 }
 
@@ -3229,12 +3269,69 @@ pub fn sys_fchown(fd: usize, uid: usize, gid: usize) -> SyscallResult {
     chown_node(&file.node, uid, gid)
 }
 
-/// Create a special or ordinary file (syscall 199).
-///
-/// Stub: returns EPERM — device file creation not supported.
-pub fn sys_mknod(path_ptr: usize, _mode: usize, _dev: usize) -> SyscallResult {
-    let _path = read_user_path(path_ptr)?;
-    Err(SyscallError::PermissionDenied)
+/// mknod(2): mknodat relative to the working directory.
+pub fn sys_mknod(path_ptr: usize, mode: usize, dev: usize) -> SyscallResult {
+    sys_mknodat(AT_FDCWD, path_ptr, mode, dev)
+}
+
+/// mknodat(2), as Linux's `filename_mknodat`: a regular file (type 0 or
+/// S_IFREG), FIFO, character or block device numbered `dev` (32 bits,
+/// Linux's encoding) or socket file named by `path_ptr` relative to
+/// `dirfd`. A directory type is EPERM, any other type EINVAL; an existing
+/// name (not followed) is EEXIST; the parent needs write and search
+/// permission (EACCES); a device needs privilege (EPERM, CAP_MKNOD: root
+/// here); the mode is reduced by the umask. A filesystem that cannot hold
+/// special files (devfs, procfs) is EPERM.
+pub fn sys_mknodat(dirfd: usize, path_ptr: usize, mode: usize, dev: usize) -> SyscallResult {
+    let rel_path = read_user_path(path_ptr)?;
+    let kind = crate::fs::mknod_kind(mode as u32).map_err(|dir| {
+        if dir {
+            SyscallError::OperationNotPermitted
+        } else {
+            SyscallError::InvalidArgument
+        }
+    })?;
+    let path = resolve_at_path(dirfd, &rel_path)?;
+    match vfs()?.resolve_path_no_follow(&path) {
+        Ok(_) => return Err(SyscallError::FileExists),
+        Err(e) if is_not_found(&e) => {}
+        Err(e) => return Err(map_resolve_err(e)),
+    }
+    // "name/" can only be a directory, which mknod does not make.
+    if rel_path.ends_with('/') {
+        return Err(SyscallError::ResourceNotFound);
+    }
+    let perms = creation_perms(mode);
+    let device = matches!(
+        kind,
+        crate::fs::NodeType::CharDevice | crate::fs::NodeType::BlockDevice
+    );
+    let rdev = if device { dev as u32 } else { 0 };
+    // Every type, regular files included, goes through one resolution of
+    // the parent for the MAC check, the permission checks and the creation.
+    let node = vfs()?.mknod_checked(&path, kind, perms, rdev, |dir| {
+        let denied = crate::error::KernelError::PermissionDenied {
+            operation: "create directory entry",
+        };
+        check_dir_write(dir).map_err(|_| denied)?;
+        if device && caller_creds().euid != 0 {
+            return Err(crate::error::KernelError::FsError(
+                crate::error::FsError::OperationNotPermitted,
+            ));
+        }
+        Ok(())
+    });
+    let node = node.map_err(|e| match e {
+        crate::error::KernelError::FsError(crate::error::FsError::AlreadyExists) => {
+            SyscallError::FileExists
+        }
+        crate::error::KernelError::FsError(crate::error::FsError::NotSupported) => {
+            SyscallError::OperationNotPermitted
+        }
+        e => super::map_kernel_error(e),
+    })?;
+    own_new_node(&node);
+    Ok(0)
 }
 
 #[cfg(test)]

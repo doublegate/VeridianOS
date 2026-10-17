@@ -16,6 +16,7 @@ pub mod devfs;
 pub mod eventfd;
 pub mod ext4;
 pub mod fat32;
+pub mod fifo;
 pub mod file;
 pub mod flock;
 pub mod inotify;
@@ -620,6 +621,61 @@ pub trait VfsNode: Send + Sync {
     fn device_id(&self) -> Option<(u32, u32)> {
         None
     }
+
+    /// Create special file `name` in this directory (mknod): a FIFO
+    /// (`NodeType::Pipe`), a character or block device numbered `rdev`
+    /// (Linux's encoding, [`dev_major`] and [`dev_minor`]) or a socket.
+    /// Default: this filesystem cannot hold one, which mknod reports as
+    /// EPERM, as Linux does for a filesystem without `mknod`.
+    fn mknod(
+        &self,
+        _name: &str,
+        _kind: NodeType,
+        _permissions: Permissions,
+        _rdev: u32,
+    ) -> Result<Arc<dyn VfsNode>, KernelError> {
+        Err(KernelError::FsError(crate::error::FsError::NotSupported))
+    }
+
+    /// Whether this is a special file kept by a filesystem (made by
+    /// mknod), which open replaces with what it names: a FIFO's pipe
+    /// (`fifo`), a device (`devfs::open_device`). A pipe, device or socket
+    /// object itself is not one.
+    fn is_special_inode(&self) -> bool {
+        false
+    }
+}
+
+/// The major number of a device number in Linux's 32-bit encoding (as
+/// `mknod` takes it and `stat` reports it: `new_decode_dev`).
+pub const fn dev_major(dev: u32) -> u32 {
+    (dev & 0xf_ff00) >> 8
+}
+
+/// The minor number of a device number in Linux's 32-bit encoding.
+pub const fn dev_minor(dev: u32) -> u32 {
+    (dev & 0xff) | ((dev >> 12) & 0xf_ff00)
+}
+
+/// A device number in Linux's 32-bit encoding (`new_encode_dev`): 12 bits
+/// of major, 20 of minor.
+pub const fn make_dev(major: u32, minor: u32) -> u32 {
+    (minor & 0xff) | ((major & 0xfff) << 8) | ((minor & !0xff) << 12)
+}
+
+/// The kind of file a mknod `mode` asks for (Linux's `may_mknod`): a type
+/// of 0 is a regular file; a directory is EPERM (`Err(true)`) and any
+/// other unknown type EINVAL (`Err(false)`).
+pub fn mknod_kind(mode: u32) -> Result<NodeType, bool> {
+    match mode & 0o170000 {
+        0 | 0o100000 => Ok(NodeType::File),
+        0o020000 => Ok(NodeType::CharDevice),
+        0o060000 => Ok(NodeType::BlockDevice),
+        0o010000 => Ok(NodeType::Pipe),
+        0o140000 => Ok(NodeType::Socket),
+        0o040000 => Err(true),
+        _ => Err(false),
+    }
 }
 
 /// Filesystem trait
@@ -1044,6 +1100,27 @@ impl<'a> CallerView<'a> {
         self.vfs.mkdir_in(&self.ctx, path, permissions, check)
     }
 
+    /// Create `path` for mknod -- a regular file (`NodeType::File`), FIFO,
+    /// device numbered `rdev`, or socket -- as [`Self::mkdir_checked`]
+    /// creates a directory: one resolution of the parent for the MAC check,
+    /// `check` and the creation.
+    pub fn mknod_checked(
+        &self,
+        path: &str,
+        kind: NodeType,
+        permissions: Permissions,
+        rdev: u32,
+        check: impl FnOnce(&dyn VfsNode) -> Result<(), KernelError>,
+    ) -> Result<Arc<dyn VfsNode>, KernelError> {
+        self.vfs.create_in(&self.ctx, path, check, |parent, name| {
+            if kind == NodeType::File {
+                parent.create(name, permissions)
+            } else {
+                parent.mknod(name, kind, permissions, rdev)
+            }
+        })
+    }
+
     pub fn unlink(&self, path: &str) -> Result<(), KernelError> {
         self.vfs.unlink_in(&self.ctx, path)
     }
@@ -1404,6 +1481,20 @@ impl Vfs {
         permissions: Permissions,
         check: impl FnOnce(&dyn VfsNode) -> Result<(), KernelError>,
     ) -> Result<Arc<dyn VfsNode>, KernelError> {
+        self.create_in(ctx, path, check, |parent, name| {
+            parent.mkdir(name, permissions)
+        })
+    }
+
+    /// Create the entry `path` names with `make(parent, name)`, after the
+    /// MAC check (Write) and `check` on the parent.
+    fn create_in(
+        &self,
+        ctx: &PathContext,
+        path: &str,
+        check: impl FnOnce(&dyn VfsNode) -> Result<(), KernelError>,
+        make: impl FnOnce(&dyn VfsNode, &str) -> Result<Arc<dyn VfsNode>, KernelError>,
+    ) -> Result<Arc<dyn VfsNode>, KernelError> {
         // Parse the path once and use that single result both for the MAC
         // check and for the creation, so they cannot disagree: the parent
         // is resolved canonically (following symlinks) and the policy sees
@@ -1424,7 +1515,7 @@ impl Vfs {
             format!("{}/{}", canonical_parent, name)
         };
 
-        // MAC check: creating a directory requires Write access
+        // MAC check: creating an entry requires Write access
         crate::security::mac::check_file_access(
             &target,
             crate::security::AccessType::Write,
@@ -1432,7 +1523,7 @@ impl Vfs {
         )?;
         check(&*parent)?;
 
-        parent.mkdir(name, permissions)
+        make(&*parent, name)
     }
 
     /// Remove a file or directory
@@ -1937,6 +2028,69 @@ pub fn append_file(path: &str, data: &[u8]) -> Result<usize, KernelError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Linux's device-number encoding (`new_encode_dev`): 12 bits of
+    /// major, 20 of minor, both round-trip.
+    #[test]
+    fn device_numbers_use_linux_encoding() {
+        assert_eq!(make_dev(1, 3), 0x103);
+        assert_eq!(make_dev(8, 0x12345), 0x1230_0845);
+        for (major, minor) in [(0, 0), (1, 3), (226, 128), (0xfff, 0xf_ffff), (8, 300)] {
+            let dev = make_dev(major, minor);
+            assert_eq!((dev_major(dev), dev_minor(dev)), (major, minor));
+        }
+    }
+
+    /// mknod's file types, as Linux's `may_mknod`.
+    #[test]
+    fn mknod_types_follow_linux() {
+        assert_eq!(mknod_kind(0o644), Ok(NodeType::File));
+        assert_eq!(mknod_kind(0o100644), Ok(NodeType::File));
+        assert_eq!(mknod_kind(0o010644), Ok(NodeType::Pipe));
+        assert_eq!(mknod_kind(0o020600), Ok(NodeType::CharDevice));
+        assert_eq!(mknod_kind(0o060600), Ok(NodeType::BlockDevice));
+        assert_eq!(mknod_kind(0o140755), Ok(NodeType::Socket));
+        assert_eq!(mknod_kind(0o040755), Err(true), "a directory: EPERM");
+        assert_eq!(mknod_kind(0o120777), Err(false), "a symlink: EINVAL");
+        assert_eq!(mknod_kind(0o030000), Err(false));
+    }
+
+    /// RamFS and tmpfs hold special files: the type, the device number of
+    /// a device only, EEXIST for a taken name, and no data.
+    #[test]
+    fn ram_filesystems_hold_special_files() {
+        let roots = [
+            ramfs::RamFs::new().root(),
+            tmpfs::TmpFs::new(1 << 20).root(),
+        ];
+        for root in roots {
+            let perms = Permissions::from_mode(0o620);
+            let dev = root
+                .mknod("tty", NodeType::CharDevice, perms, make_dev(4, 1))
+                .unwrap();
+            assert_eq!(dev.device_id(), Some((4, 1)));
+            assert!(dev.is_special_inode());
+            assert_eq!(dev.metadata().unwrap().node_type, NodeType::CharDevice);
+            let fifo = root
+                .mknod("p", NodeType::Pipe, perms, make_dev(4, 1))
+                .unwrap();
+            assert_eq!(fifo.device_id(), None, "only a device has a number");
+            assert!(fifo.write(0, b"x").is_err());
+            assert!(matches!(
+                root.mknod("p", NodeType::Socket, perms, 0),
+                Err(KernelError::FsError(crate::error::FsError::AlreadyExists))
+            ));
+            assert!(root.mknod("d", NodeType::Directory, perms, 0).is_err());
+            let types: Vec<_> = root
+                .readdir()
+                .unwrap()
+                .into_iter()
+                .map(|e| e.node_type)
+                .collect();
+            assert!(types.contains(&NodeType::Pipe) && types.contains(&NodeType::CharDevice));
+            assert!(root.lookup("p").unwrap().is_special_inode());
+        }
+    }
 
     /// RLIMIT_FSIZE arithmetic (Linux's generic_write_check_limits).
     #[test]

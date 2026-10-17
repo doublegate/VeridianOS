@@ -110,6 +110,7 @@
 #define SYS_fchown                       93
 #define SYS_fchownat                     260
 #define SYS_mknod                        133
+#define SYS_mknodat                      259
 #define SYS_rename                       82
 #define SYS_renameat                     264
 #define SYS_renameat2                    316
@@ -381,6 +382,7 @@
 #define SYS_fchmodat                     53
 #define SYS_fchown                       55
 #define SYS_fchownat                     54
+#define SYS_mknodat                      33
 #define SYS_renameat2                    276
 #define SYS_linkat                       37
 #define SYS_symlinkat                    36
@@ -636,6 +638,7 @@
 #define SYS_fchmodat                     53
 #define SYS_fchown                       55
 #define SYS_fchownat                     54
+#define SYS_mknodat                      33
 #define SYS_renameat                     38
 #define SYS_renameat2                    276
 #define SYS_linkat                       37

@@ -323,6 +323,22 @@ alone.
 FIPS 203. It does not interoperate with ML-KEM and should not be relied on for confidentiality.
 Nothing in the kernel uses it for real traffic.
 
+### Unix socket paths are not socket files
+
+bind() of a Unix socket to a path records the path in the socket layer's own table: it makes no
+socket file, so `ls` does not show it, a second bind to the name is not EADDRINUSE through the
+file system, and connect() matches the path as written rather than the file. mknod can make a
+socket file (S_IFSOCK), which, as on Linux, cannot be opened (ENXIO).
+
+### Device nodes and FIFOs made by mknod
+
+- A device node opens one of the character devices `/dev` has (`devfs::DEVICES`: null, zero,
+  random, urandom, console, tty0, the DRM and input nodes); any other number, and every block
+  device number, is ENXIO, as on Linux for a number no driver registered.
+- On BlockFS a FIFO is found by its inode number. Unlinking a FIFO that is still open and making
+  a new FIFO that gets the same inode number joins the old pipe; Linux keeps the unlinked inode
+  until its last close.
+
 ### Unix sockets cannot pass Unix sockets
 
 Passing a Unix-socket file descriptor in SCM_RIGHTS is refused with EINVAL. Passing one would need a

@@ -22,6 +22,9 @@ struct TmpNode {
     children: RwLock<BTreeMap<String, Arc<TmpNode>>>,
     metadata: RwLock<Metadata>,
     inode: u64,
+    /// Device number of a device node (Linux's encoding, `fs::make_dev`);
+    /// 0 for anything else.
+    rdev: u32,
     /// Parent directory inode (".."); changes when a rename moves this
     /// directory.
     parent_inode: core::sync::atomic::AtomicU64,
@@ -55,6 +58,7 @@ impl TmpNode {
                 inode,
             }),
             inode,
+            rdev: 0,
             parent_inode: core::sync::atomic::AtomicU64::new(parent_inode),
             bytes_used,
             size_limit,
@@ -84,6 +88,7 @@ impl TmpNode {
                 inode,
             }),
             inode,
+            rdev: 0,
             parent_inode: core::sync::atomic::AtomicU64::new(parent_inode),
             bytes_used,
             size_limit,
@@ -115,6 +120,7 @@ impl TmpNode {
                 inode,
             }),
             inode,
+            rdev: 0,
             parent_inode: core::sync::atomic::AtomicU64::new(parent_inode),
             bytes_used,
             size_limit,
@@ -482,6 +488,56 @@ impl VfsNode for TmpNode {
 
     fn as_any(&self) -> Option<&dyn core::any::Any> {
         Some(self)
+    }
+
+    fn mknod(
+        &self,
+        name: &str,
+        kind: NodeType,
+        permissions: Permissions,
+        rdev: u32,
+    ) -> Result<Arc<dyn VfsNode>, KernelError> {
+        if self.node_type != NodeType::Directory {
+            return Err(KernelError::FsError(FsError::NotADirectory));
+        }
+        if !matches!(
+            kind,
+            NodeType::Pipe | NodeType::CharDevice | NodeType::BlockDevice | NodeType::Socket
+        ) {
+            return Err(KernelError::FsError(FsError::NotSupported));
+        }
+        let mut children = self.children.write();
+        if children.contains_key(name) {
+            return Err(KernelError::FsError(FsError::AlreadyExists));
+        }
+        let inode = TMPFS_NEXT_INODE.fetch_add(1, Ordering::Relaxed);
+        let mut node = TmpNode::new_file(
+            inode,
+            self.inode,
+            permissions,
+            self.bytes_used.clone(),
+            self.size_limit,
+        );
+        node.node_type = kind;
+        node.metadata.get_mut().node_type = kind;
+        if matches!(kind, NodeType::CharDevice | NodeType::BlockDevice) {
+            node.rdev = rdev;
+        }
+        let node = Arc::new(node);
+        children.insert(String::from(name), node.clone());
+        Ok(node as Arc<dyn VfsNode>)
+    }
+
+    fn is_special_inode(&self) -> bool {
+        matches!(
+            self.node_type,
+            NodeType::Pipe | NodeType::CharDevice | NodeType::BlockDevice | NodeType::Socket
+        )
+    }
+
+    fn device_id(&self) -> Option<(u32, u32)> {
+        matches!(self.node_type, NodeType::CharDevice | NodeType::BlockDevice)
+            .then(|| (super::dev_major(self.rdev), super::dev_minor(self.rdev)))
     }
 
     fn link(&self, name: &str, target: Arc<dyn VfsNode>) -> Result<(), KernelError> {

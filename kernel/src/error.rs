@@ -198,6 +198,10 @@ pub enum FsError {
     BadFileDescriptor,
     /// Operation not supported on this node type
     NotSupported,
+    /// No such device or address: a device node whose number names no
+    /// device, a socket file opened as a file, a FIFO opened for writing
+    /// without blocking while nobody reads it (ENXIO)
+    NoDeviceOrAddress,
     /// Target is not a symbolic link
     NotASymlink,
     /// File size exceeds maximum supported limit
