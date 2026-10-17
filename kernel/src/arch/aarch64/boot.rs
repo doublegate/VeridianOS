@@ -18,6 +18,10 @@ extern "C" {
 /// Where boot.S maps all physical memory (ADR 0015): `mm::PHYS_MEM_OFFSET`.
 pub const PHYS_MAP_BASE: u64 = 0xFFFF_8000_0000_0000;
 
+/// How much physical memory the map covers (512 1 GiB blocks): physical
+/// addresses at or above it are not used.
+pub const PHYS_MAP_SIZE: u64 = 512 << 30;
+
 /// The physical address of a kernel-image address (code, statics, linker
 /// symbols). The offset is the one boot.S measured, so this holds wherever
 /// the image was loaded.

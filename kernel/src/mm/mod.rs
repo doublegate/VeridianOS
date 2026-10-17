@@ -50,8 +50,9 @@ pub const PAGE_SIZE: usize = 4096;
 /// Physical memory offset: virtual = physical + PHYS_MEM_OFFSET.
 ///
 /// On x86_64 with bootloader 0.11, physical memory is mapped at a dynamic
-/// offset provided by the bootloader. On RISC-V and AArch64 boot.S maps it
-/// at 0xFFFF_8000_0000_0000 (ADR 0013, ADR 0015).
+/// offset provided by the bootloader. AArch64's boot.S maps it at
+/// 0xFFFF_8000_0000_0000 (ADR 0015), RISC-V's at 0xFFFF_FFC0_0000_0000,
+/// inside Sv39's kernel half (ADR 0018).
 pub(crate) static PHYS_MEM_OFFSET: AtomicU64 = AtomicU64::new(0);
 
 /// Set the physical memory offset (called once during early boot).
@@ -420,9 +421,15 @@ fn device_tree_regions(dtb_pa: u64, kernel_end: u64, out: &mut [MemoryRegion]) -
     const MAX: usize = 16;
     let mut ram = [(0u64, 0u64); MAX];
     let mut nram = 0;
+    // Only what the physical map covers can be used (ADR 0015, ADR 0018).
+    #[cfg(target_arch = "aarch64")]
+    let limit = crate::arch::aarch64::boot::PHYS_MAP_SIZE;
+    #[cfg(target_arch = "riscv64")]
+    let limit = crate::arch::riscv64::boot::PHYS_MAP_SIZE;
     fdt.memory_ranges(|base, size| {
-        if nram < MAX {
-            ram[nram] = (base, base.saturating_add(size));
+        let end = base.saturating_add(size).min(limit);
+        if nram < MAX && end > base {
+            ram[nram] = (base, end);
             nram += 1;
         }
     });

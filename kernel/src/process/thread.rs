@@ -116,7 +116,7 @@ pub const GUARD_PAGE_COUNT: usize = 1;
 
 /// Base virtual address for user thread stacks.
 /// Grows downward from near the top of user address space.
-const USER_STACK_REGION_BASE: usize = 0x0000_7FFE_0000_0000;
+const USER_STACK_REGION_BASE: usize = crate::mm::user_layout::THREAD_STACKS_TOP;
 
 /// Base virtual address for TLS regions.
 #[allow(dead_code)] // TLS mapping base address -- used when TLS is wired

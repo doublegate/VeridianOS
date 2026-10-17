@@ -23,9 +23,10 @@ pub const PF_X: u32 = 1;
 pub const PF_W: u32 = 2;
 pub const PF_R: u32 = 4;
 
-/// Where an ET_DYN program goes: Linux's `ELF_ET_DYN_BASE` on x86_64,
-/// without randomisation.
-pub const PIE_BASE: u64 = 0x5555_5555_4000;
+/// Where an ET_DYN program goes, without randomisation
+/// (`mm::user_layout::PIE_BASE`: Linux's `ELF_ET_DYN_BASE` for each
+/// architecture's layout).
+pub const PIE_BASE: u64 = crate::mm::user_layout::PIE_BASE as u64;
 
 const PAGE: u64 = 4096;
 
@@ -997,7 +998,7 @@ mod tests {
             0,
             vec![load(0, 0, 0x10, 0x10, PF_R | PF_X)],
         );
-        let top = crate::mm::user_layout::USER_SPACE_END as u64;
+        let top = crate::mm::user_layout::user_space_end() as u64;
         assert!(plan(&b, 0x10, top - 0x1000).is_ok());
         assert!(plan(&b, 0x10, top).is_err());
         assert!(plan(&b, 0x10, 0x5555_0000_0800).is_err()); // not page aligned

@@ -221,7 +221,7 @@ pub fn sys_mmap(
     if length == 0 {
         return Err(SyscallError::InvalidArgument);
     }
-    if length > crate::mm::user_layout::USER_SPACE_END {
+    if length > crate::mm::user_layout::user_space_end() {
         return Err(SyscallError::OutOfMemory);
     }
 
@@ -561,8 +561,8 @@ pub fn sys_munmap(addr: usize, length: usize) -> SyscallResult {
         .ok_or(SyscallError::InvalidArgument)?;
     if addr & (PAGE_SIZE - 1) != 0
         || len == 0
-        || addr > crate::mm::user_layout::USER_SPACE_END
-        || len > crate::mm::user_layout::USER_SPACE_END - addr
+        || addr > crate::mm::user_layout::user_space_end()
+        || len > crate::mm::user_layout::user_space_end() - addr
     {
         return Err(SyscallError::InvalidArgument);
     }

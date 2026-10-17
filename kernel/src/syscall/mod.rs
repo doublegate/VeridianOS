@@ -12,7 +12,7 @@
 //! 1. **Non-null** -- the pointer is not zero.
 //! 2. **User-space range** -- the entire `[ptr, ptr+size)` region falls within
 //!    the architecture-specific user-space address range (below
-//!    [`USER_SPACE_END`]).
+//!    [`user_space_end`]).
 //! 3. **No arithmetic overflow** -- `ptr + size` does not wrap around.
 //! 4. **Size cap** -- the buffer size does not exceed [`MAX_BUFFER_SIZE`] (256
 //!    MB).
@@ -35,7 +35,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 /// On x86_64 this is the canonical upper bound of user space (128 TB).
 /// AArch64 and RISC-V use the same logical split for the QEMU virt machine.
 /// Exclusive end of user space (see mm::user_layout for why).
-use crate::mm::user_layout::USER_SPACE_END;
+use crate::mm::user_layout::user_space_end;
 use crate::{
     ipc::{sync_call, sync_receive, sync_reply, sync_send, IpcError, Message, SmallMessage},
     sched,
@@ -50,7 +50,7 @@ const MAX_BUFFER_SIZE: usize = 256 * 1024 * 1024;
 /// - `ptr` is non-null
 /// - `size` does not exceed [`MAX_BUFFER_SIZE`]
 /// - `ptr + size` does not overflow
-/// - the entire range `[ptr, ptr+size)` is below [`USER_SPACE_END`]
+/// - the entire range `[ptr, ptr+size)` is below [`user_space_end`]
 #[inline]
 fn validate_user_pointer(ptr: usize, size: usize) -> Result<(), SyscallError> {
     if ptr == 0 {
@@ -68,7 +68,7 @@ fn validate_user_pointer(ptr: usize, size: usize) -> Result<(), SyscallError> {
     }
     // Check for overflow and that the entire range is in user space
     let end = ptr.checked_add(size).ok_or(SyscallError::InvalidPointer)?;
-    if end > USER_SPACE_END {
+    if end > user_space_end() {
         return Err(SyscallError::AccessDenied);
     }
     Ok(())

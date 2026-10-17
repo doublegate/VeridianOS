@@ -46,8 +46,13 @@ mod region {
     use super::*;
     use crate::mm::{PageFlags, VirtualAddress};
 
-    /// The stacks region (one L4 slot, 512 GiB).
+    /// The stacks region: one L4 slot (512 GiB) on x86_64 and AArch64; on
+    /// RISC-V 16 GiB inside Sv39's kernel half, L3[384..399] of L4[511]
+    /// under Sv48 (ADR 0018).
+    #[cfg(not(target_arch = "riscv64"))]
     pub(super) const REGION_BASE: u64 = 0xFFFF_E000_0000_0000;
+    #[cfg(target_arch = "riscv64")]
+    pub(super) const REGION_BASE: u64 = 0xFFFF_FFE0_0000_0000;
     /// One stack per slot: up to 252 KiB of stack and at least one guard
     /// page below it.
     pub(super) const SLOT_SIZE: u64 = 256 * 1024;

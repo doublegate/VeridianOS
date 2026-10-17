@@ -18,7 +18,7 @@ const MAX_ARGS: usize = 32768;
 
 /// User space memory range constants
 const USER_SPACE_START: usize = 0x0000_0000_0000_0000;
-use crate::mm::user_layout::USER_SPACE_END; // exclusive end
+use crate::mm::user_layout::user_space_end; // exclusive end
 const PAGE_SIZE: usize = 4096;
 
 /// Check if a user pointer is valid with comprehensive validation
@@ -35,7 +35,7 @@ pub fn validate_user_ptr<T>(ptr: *const T, len: usize) -> Result<(), SyscallErro
 
     // Check address range is within user space
     // Note: USER_SPACE_START is 0, so we only need to check the upper bound
-    if end > USER_SPACE_END {
+    if end > user_space_end() {
         return Err(SyscallError::InvalidPointer);
     }
 
@@ -50,7 +50,7 @@ pub fn validate_user_ptr<T>(ptr: *const T, len: usize) -> Result<(), SyscallErro
 
 /// Whether `addr` is in user space.
 pub fn is_user_address(addr: usize) -> bool {
-    addr < USER_SPACE_END
+    addr < user_space_end()
 }
 
 /// Check if a user pointer is valid (compatibility wrapper)
@@ -588,7 +588,7 @@ mod accessor_tests {
 
     #[test]
     fn accessors_reject_null_and_kernel_addresses() {
-        for addr in [0usize, KERNEL_ADDR, USER_SPACE_END - 2] {
+        for addr in [0usize, KERNEL_ADDR, user_space_end() - 2] {
             assert!(read_user::<u64>(addr).is_err(), "read {:#x}", addr);
             assert!(write_user::<u64>(addr, 1).is_err(), "write {:#x}", addr);
             assert!(write_user_slice::<u32>(addr, &[1, 2]).is_err());

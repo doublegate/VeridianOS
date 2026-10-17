@@ -36,7 +36,7 @@ const CSIGNAL: usize = 0xFF;
 /// strictly below this address.  The value matches the canonical user-space
 /// limit on x86_64; AArch64 and RISC-V use the same logical limit via
 /// `validate_user_ptr`.
-use crate::mm::user_layout::USER_SPACE_END;
+use crate::mm::user_layout::user_space_end;
 
 /// clone without CLONE_THREAD: a new process, as fork or vfork (N-210).
 /// musl's and glibc's posix_spawn -- and so system and popen -- call
@@ -74,7 +74,7 @@ fn process_clone(
         return Err(SyscallError::InvalidArgument);
     }
     // 0 keeps the caller's stack (fork); otherwise it must be user memory.
-    if newsp > USER_SPACE_END {
+    if newsp > user_space_end() {
         return Err(SyscallError::InvalidPointer);
     }
     for (flag, ptr) in [
@@ -183,7 +183,7 @@ pub fn sys_thread_clone(
     // stack top may equal the exclusive end). Kernel addresses must be
     // rejected to prevent a malicious caller from running a thread with
     // a kernel-space stack.
-    if newsp > USER_SPACE_END {
+    if newsp > user_space_end() {
         return Err(SyscallError::InvalidPointer);
     }
 

@@ -18,9 +18,14 @@ extern "C" {
 /// boot.S maps the image at `physical + KERNEL_OFFSET` (E-RV3).
 pub const KERNEL_OFFSET: u64 = 0xFFFF_FFFF_0000_0000;
 
-/// Where boot.S maps all physical memory (1 GiB pages, 512 GiB), as on
-/// x86_64: virtual = physical + PHYS_MAP_BASE.
-pub const PHYS_MAP_BASE: u64 = 0xFFFF_8000_0000_0000;
+/// Where boot.S maps physical memory (1 GiB pages, [`PHYS_MAP_SIZE`]):
+/// virtual = physical + PHYS_MAP_BASE. Inside Sv39's kernel half, so the
+/// same layout serves Sv39 and Sv48 (ADR 0018).
+pub const PHYS_MAP_BASE: u64 = 0xFFFF_FFC0_0000_0000;
+
+/// How much physical memory the map covers: physical addresses at or above
+/// it are not used (the device tree's memory is clamped to it).
+pub const PHYS_MAP_SIZE: u64 = 128 << 30;
 
 /// The physical address of a kernel-image address (code, statics).
 pub fn kernel_phys(va: u64) -> u64 {
@@ -60,6 +65,12 @@ pub extern "C" fn _start_rust() -> ! {
     // boot.S turned paging on: physical memory is reached through its map
     // from here on (`mm::phys_to_virt_addr`).
     crate::mm::set_phys_mem_offset(PHYS_MAP_BASE);
+    // The user limit follows the mode boot.S turned on (ADR 0018): satp
+    // MODE 8 is Sv39 (three levels), 9 Sv48 (four).
+    let satp: u64;
+    // SAFETY: reads satp, which has no side effects.
+    unsafe { core::arch::asm!("csrr {}, satp", out(reg) satp, options(nomem, nostack)) };
+    crate::mm::user_layout::set_riscv_paging_levels(if satp >> 60 == 8 { 3 } else { 4 });
 
     // The boot hart is logical CPU 0; `tp` now points at its per-CPU block.
     // SAFETY: first Rust code on the boot hart, before anything reads `tp`.

@@ -32,21 +32,25 @@ veridian_trampoline_satp:
 # Early page tables (E-RV3), zeroed with the rest of .bss.
 .section .bss
 .balign 4096
-# The kernel root: L4[256] and L4[511] only, so the lower half is free for
-# user address spaces (they share these two entries).
+# The kernel root: L4[511] only, so the lower half is free for user
+# address spaces (they share that entry). Everything the kernel maps is in
+# Sv39's kernel half, 0xFFFF_FFC0_0000_0000 and up (ADR 0018).
 .global veridian_kernel_root
 veridian_kernel_root:
     .space 4096
 # The trampoline root: the same plus L4[0], the identity map.
 veridian_early_root:
     .space 4096
-# 512 GiB in 1 GiB pages at their physical address: the physical-memory
-# map (L4[256], virtual = physical + 0xFFFF_8000_0000_0000) and, in the
-# trampoline only, the identity map (L4[0]).
+# The identity map, for the trampoline only: 512 GiB in 1 GiB pages at
+# their physical address (L4[0]).
 veridian_early_l3_phys:
     .space 4096
-# The kernel image at its link address, 0xFFFF_FFFF_8000_0000 + 2 MiB:
-# L4[511], L3[510..511] = physical 2..4 GiB.
+# The kernel half (L4[511]), in 1 GiB pages:
+#   L3[256..383]  the physical map, 128 GiB: virtual = physical +
+#                 0xFFFF_FFC0_0000_0000;
+#   L3[384..399]  the kernel stacks (mm::kstack), filled in later;
+#   L3[510..511]  the image at its link address, 0xFFFF_FFFF_8000_0000 +
+#                 2 MiB = physical 2..4 GiB.
 veridian_early_l3_kernel:
     .space 4096
 
@@ -162,6 +166,21 @@ _start:
     addi t2, t2, -1
     bnez t2, 6b
 
+    # The physical map: L3[256 + i] = physical i GiB, for 128 GiB.
+    la a0, veridian_early_l3_kernel
+    li t6, 256 * 8
+    add a0, a0, t6
+    li t1, 0
+    li t2, 128
+9:
+    srli t5, t1, 2
+    or t5, t5, t4
+    sd t5, 0(a0)
+    addi a0, a0, 8
+    add t1, t1, t3
+    addi t2, t2, -1
+    bnez t2, 9b
+
     la a0, veridian_early_l3_kernel
     li t6, 510 * 8
     add t6, a0, t6
@@ -174,25 +193,20 @@ _start:
     or t5, t5, t4
     sd t5, 8(t6)
 
-    # Both roots: L4[256] (physical map) and L4[511] (kernel image); the
-    # trampoline root also L4[0] (identity).
+    # Both roots: L4[511] (the kernel half); the trampoline root also L4[0]
+    # (identity).
     la t1, veridian_early_l3_phys
     srli t2, t1, 2
     ori t2, t2, 1
     la t1, veridian_early_l3_kernel
     srli t3, t1, 2
     ori t3, t3, 1
-    li t4, 256 * 8
     li t1, 511 * 8
     la a0, veridian_kernel_root
-    add t6, a0, t4
-    sd t2, 0(t6)
     add t6, a0, t1
     sd t3, 0(t6)
     la a0, veridian_early_root
     sd t2, 0(a0)
-    add t6, a0, t4
-    sd t2, 0(t6)
     add t6, a0, t1
     sd t3, 0(t6)
 

@@ -9,7 +9,7 @@ use crate::mm::{
 
 /// Check if a user address is valid (within user space range)
 pub fn is_user_addr_valid(addr: usize) -> bool {
-    addr < crate::mm::user_layout::USER_SPACE_END
+    addr < crate::mm::user_layout::user_space_end()
 }
 
 /// Translate a virtual address to its page table entry

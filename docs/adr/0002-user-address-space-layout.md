@@ -1,6 +1,6 @@
 # ADR 0002: User address-space layout
 
-- Status: accepted
+- Status: accepted; the RISC-V range is amended by ADR 0018 (Sv39's user half on every hart)
 - Date: 2026-10-06
 
 ## Context

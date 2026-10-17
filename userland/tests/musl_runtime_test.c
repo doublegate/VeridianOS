@@ -3157,16 +3157,22 @@ static void test_auxv(const char *argv0)
 }
 
 /* This program is a static PIE: the kernel put it at its PIE base
- * (0x5555_5555_4000), and musl relocated it before main, so code, data and
- * the pointers in data all refer to addresses there. */
+ * (Linux's ELF_ET_DYN_BASE: 0x5555_5555_4000, or on RISC-V Sv39's
+ * 0x2A_AAAA_A000, mm::user_layout), and musl relocated it before main, so
+ * code, data and the pointers in data all refer to addresses there. */
+#if defined(__riscv)
+#define PIE_BASE 0x2aaaaaa000UL
+#else
+#define PIE_BASE 0x555555554000UL
+#endif
 static const char *const pie_string = "relocated";
 static void test_pie(void)
 {
     uintptr_t code = (uintptr_t)&test_pie;
     uintptr_t data = (uintptr_t)&pie_string;
     uintptr_t entry = getauxval(AT_ENTRY);
-    int ok = code >= 0x555555554000UL && code < 0x555565554000UL && data > code
-             && entry >= 0x555555554000UL && entry < code + 0x10000000UL
+    int ok = code >= PIE_BASE && code < PIE_BASE + 0x10000000UL && data > code
+             && entry >= PIE_BASE && entry < code + 0x10000000UL
              && strcmp(pie_string, "relocated") == 0;
     static char why[96];
     snprintf(why, sizeof(why), "code=%#lx data=%#lx entry=%#lx", (unsigned long)code,

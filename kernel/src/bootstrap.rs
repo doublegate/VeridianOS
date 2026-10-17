@@ -3144,7 +3144,7 @@ fn run_usercopy_tests(passed: &mut u32, failed: &mut u32) {
     {
         let ok = {
             let mut buf = [0u8; 8];
-            read_user_bytes(0x0000_7FF0_0000_0000, &mut buf).is_err()
+            read_user_bytes(crate::mm::user_layout::UNMAPPED_TEST_ADDR, &mut buf).is_err()
         };
         report_test("usercopy_fault_returns_efault", ok, passed, failed);
     }
@@ -3153,7 +3153,12 @@ fn run_usercopy_tests(passed: &mut u32, failed: &mut u32) {
     // error instead of faulting in the kernel (the cmpxchg fixups: x86_64
     // cmpxchg, AArch64 exclusives, RISC-V LR/SC).
     {
-        let ok = crate::syscall::userspace::cmpxchg_user_u32(0x0000_7FF0_0000_0000, 0, 1).is_err();
+        let ok = crate::syscall::userspace::cmpxchg_user_u32(
+            crate::mm::user_layout::UNMAPPED_TEST_ADDR,
+            0,
+            1,
+        )
+        .is_err();
         report_test("usercopy_cmpxchg_fault_returns_efault", ok, passed, failed);
     }
 
@@ -3342,7 +3347,7 @@ fn run_usercopy_tests(passed: &mut u32, failed: &mut u32) {
         let start = crate::arch::timer::monotonic_ns();
         for _ in 0..8 {
             crate::mm::tlb::flush_all();
-            crate::mm::tlb::flush_page(0x0000_7FF0_0000_0000);
+            crate::mm::tlb::flush_page(crate::mm::user_layout::UNMAPPED_TEST_ADDR as u64);
         }
         let quick = crate::arch::timer::monotonic_ns().saturating_sub(start) < 500_000_000;
         let ok = quick && crate::mm::tlb::remote_flushes_confirmed();

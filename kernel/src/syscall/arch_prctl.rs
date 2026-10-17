@@ -22,7 +22,7 @@ const ARCH_GET_GS: usize = 0x1004;
 
 /// Whether `addr` may become a user FS/GS base: user space only.
 fn fs_base_allowed(addr: usize) -> bool {
-    addr < crate::mm::user_layout::USER_SPACE_END
+    addr < crate::mm::user_layout::user_space_end()
 }
 
 /// Set or get the current thread's TLS base register.

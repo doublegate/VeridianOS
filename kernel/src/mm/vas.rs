@@ -446,8 +446,8 @@ enum PrivateWrite {
 /// Whether `page` is a user page (kernel pages are mapped in every
 /// address space and must never be reached through a user address).
 fn is_user_page(page: u64) -> bool {
-    use super::user_layout::{USER_SPACE_END, USER_SPACE_START};
-    page >= USER_SPACE_START as u64 && page < USER_SPACE_END as u64
+    use super::user_layout::{user_space_end, USER_SPACE_START};
+    page >= USER_SPACE_START as u64 && page < user_space_end() as u64
 }
 
 /// The rule for [`PrivateWrite`], as Linux's `check_vma_flags`: device
@@ -762,13 +762,11 @@ impl Default for VirtualAddressSpace {
             page_table_root: AtomicU64::new(0),
             #[cfg(feature = "alloc")]
             mappings: Mutex::new(BTreeMap::new()),
-            // Start mmap region at 0x4000_0000_0000 (256GB)
-            next_mmap_addr: AtomicU64::new(0x4000_0000_0000),
-            // Heap starts at 0x2000_0000_0000 (128GB)
-            heap_start: AtomicU64::new(0x2000_0000_0000),
-            heap_break: AtomicU64::new(0x2000_0000_0000),
-            // Stack starts at 0x7FFF_FFFF_0000 and grows down
-            stack_top: AtomicU64::new(0x7FFF_FFFF_0000),
+            // The architecture's layout (mm::user_layout, ADR 0018).
+            next_mmap_addr: AtomicU64::new(crate::mm::user_layout::MMAP_BASE as u64),
+            heap_start: AtomicU64::new(crate::mm::user_layout::HEAP_BASE as u64),
+            heap_break: AtomicU64::new(crate::mm::user_layout::HEAP_BASE as u64),
+            stack_top: AtomicU64::new(crate::mm::user_layout::STACK_TOP as u64),
             stack_size: AtomicU64::new(8 * 1024 * 1024),
             tlb_generation: AtomicU64::new(0),
             wx_policy: AtomicU32::new(0),
@@ -2873,7 +2871,10 @@ impl VirtualAddressSpace {
         loop {
             let base = cur.checked_next_multiple_of(align).ok_or(refused)?;
             let end = base.checked_add(size).ok_or(refused)?;
-            if !crate::mm::user_layout::is_user_range(base as usize, size as usize) {
+            // Within user space, and below the PIE base (ADR 0018).
+            if !crate::mm::user_layout::is_user_range(base as usize, size as usize)
+                || end > crate::mm::user_layout::MMAP_END as u64
+            {
                 return Err(refused);
             }
             match self.next_mmap_addr.compare_exchange_weak(
@@ -3357,7 +3358,7 @@ impl VirtualAddressSpace {
         self.heap_break
             .store(self.heap_start.load(Ordering::Relaxed), Ordering::Release);
         self.next_mmap_addr
-            .store(0x4000_0000_0000, Ordering::Release);
+            .store(crate::mm::user_layout::MMAP_BASE as u64, Ordering::Release);
     }
 
     /// Clear user-space mappings only (for exec)
@@ -3426,7 +3427,7 @@ impl VirtualAddressSpace {
         self.heap_break
             .store(self.heap_start.load(Ordering::Relaxed), Ordering::Release);
         self.next_mmap_addr
-            .store(0x4000_0000_0000, Ordering::Release);
+            .store(crate::mm::user_layout::MMAP_BASE as u64, Ordering::Release);
 
         Ok(())
     }
@@ -3983,7 +3984,9 @@ mod tests {
         assert!(is_user_page(
             crate::mm::user_layout::USER_SPACE_START as u64
         ));
-        assert!(!is_user_page(crate::mm::user_layout::USER_SPACE_END as u64));
+        assert!(!is_user_page(
+            crate::mm::user_layout::user_space_end() as u64
+        ));
         assert!(!is_user_page(0xFFFF_8000_0000_0000));
         assert!(!is_user_page(0xFFFF_FFFF_8010_0000));
     }
@@ -4133,7 +4136,7 @@ mod tests {
         assert!(vas
             .map_borrowed_frames(Some(VirtualAddress(0xFFFF_8000_0000_0000)), &frames, flags)
             .is_err());
-        let top = super::super::user_layout::USER_SPACE_END as u64 - 0x1000;
+        let top = super::super::user_layout::user_space_end() as u64 - 0x1000;
         assert!(vas
             .map_borrowed_frames(Some(VirtualAddress(top)), &frames, flags)
             .is_err());
@@ -4297,6 +4300,21 @@ mod tests {
     // Note: test_vas_clone_from removed -- clone_from() now allocates
     // real page tables via FRAME_ALLOCATOR, which is unavailable in the
     // host test environment. Verified via QEMU boot tests instead.
+
+    /// The mmap cursor stops at the PIE base, so it never runs into the
+    /// program (ADR 0018).
+    #[test]
+    fn mmap_area_ends_at_the_pie_base() {
+        let vas = VirtualAddressSpace::new();
+        let end = crate::mm::user_layout::MMAP_END as u64;
+        vas.next_mmap_addr.store(end - 0x2000, Ordering::Release);
+        assert_eq!(
+            vas.reserve_mmap_area(0x2000).ok(),
+            Some(VirtualAddress(end - 0x2000))
+        );
+        assert!(vas.reserve_mmap_area(0x1000).is_err(), "past the PIE base");
+        assert_eq!(vas.next_mmap_addr.load(Ordering::Acquire), end);
+    }
 
     #[test]
     fn test_vas_mmap_advances_address() {

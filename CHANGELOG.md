@@ -713,6 +713,18 @@
 
 ### Changed
 
+- **RISC-V: the address layout fits Sv39 (ADR 0018, stage A of HR-09).** Most RISC-V boards
+  implement only Sv39, whose kernel and user halves are 256 GiB each; the layout was Sv48's. The
+  physical map moves to 0xFFFF_FFC0_0000_0000 (128 GiB; more RAM is not used), the kernel stacks
+  to 0xFFFF_FFE0_0000_0000, both beside the image under one top-level entry. What the kernel
+  places in user space is below 256 GiB on every hart, as Linux keeps hint-less mappings there:
+  the mmap area from 64 GiB, PIE programs at 0x2A_AAAA_A000 (Linux's Sv39 `ELF_ET_DYN_BASE`) and
+  the stacks. The user limit follows the paging mode, set at boot from satp, so a program on a
+  Sv48 hart can still map up to 128 TiB by asking, as on Linux. Paging is still Sv48; the Sv39
+  probe and 3-level walk are stage B. The user layout is now defined once per architecture in
+  `mm::user_layout` (x86_64 and AArch64 unchanged), and the mmap area ends at the PIE base on
+  every architecture instead of running into the program.
+
 - **Page-table entries have an architecture format (HR-10).** The walker wrote x86_64 entries
   on every architecture, which RISC-V cannot use: there a pointer to the next table carries only
   V (U, A and D are reserved) and any entry with R, W or X is a leaf. `mm::pte` holds the x86_64
