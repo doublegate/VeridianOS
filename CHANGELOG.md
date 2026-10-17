@@ -2,6 +2,21 @@
 
 ### Added
 
+- **W^X opt-in per program, and PR_SET_MDWE (ADR 0017).** W^X stays the default (mmap and
+  mprotect with PROT_WRITE|PROT_EXEC are EACCES). A program that needs writable and executable
+  memory, such as a JIT, opts in with a VeridianOS ELF note in the main program
+  (`<veridian/wxneeded.h>`; owner `VeridianOS`, NT_VERIDIAN_FEATURE_CTL, bit WXNEEDED) and then
+  gets Linux's behaviour. Only the main program's note counts, at exec (not an interpreter's or a
+  library's); nothing turns W^X off at run time; a malformed note is no opt-in. prctl
+  PR_SET_MDWE/PR_GET_MDWE follow Linux 6.3+:
+  - the argument checks (EINVAL), and one way (EPERM);
+  - no W+X even with the note, and no memory gaining exec;
+  - a W+X segment fails exec under it;
+  - kept across fork and exec unless PR_MDWE_NO_INHERIT.
+
+  The policy lives in the address space (`mm::wx`). Runtime tests on all three architectures:
+  `musl_wx_refused_by_default`, `musl_wx_opt_in` (runs code written into an RWX mapping) and
+  `musl_mdwe`.
 - **BTI for user programs on AArch64 (PROT_BTI).** On a CPU with FEAT_BTI (ID_AA64PFR1_EL1.BT)
   the kernel enforces guarded pages at EL0 as Linux does: SCTLR_EL1.BT0 on every CPU
   (`arch::aarch64::bti`), the PTE GP bit for PROT_BTI (`PageFlags::GUARDED`), mprotect accepting

@@ -146,6 +146,8 @@ pub(crate) fn sys_prctl(
     const PR_GET_TIMERSLACK: usize = 30;
     const PR_SET_NO_NEW_PRIVS: usize = 38;
     const PR_GET_NO_NEW_PRIVS: usize = 39;
+    const PR_SET_MDWE: usize = 65;
+    const PR_GET_MDWE: usize = 66;
     let thread = || crate::process::current_thread().ok_or(super::SyscallError::InvalidState);
     match option {
         // The thread's command name (N-227): up to 15 bytes of the string,
@@ -194,6 +196,32 @@ pub(crate) fn sys_prctl(
                 return Err(super::SyscallError::InvalidArgument);
             }
             Ok(thread()?.no_new_privs.load(Ordering::Acquire) as usize)
+        }
+        // Memory-Deny-Write-Execute, as Linux (ADR 0017): one way, for the
+        // whole address space.
+        PR_SET_MDWE => {
+            use crate::mm::wx::MdweError;
+            crate::process::current_process()
+                .ok_or(super::SyscallError::InvalidState)?
+                .memory_space
+                .lock()
+                .update_wx_policy(|p| p.set_mdwe(arg2, arg3, arg4, arg5))
+                .map_err(|e| match e {
+                    MdweError::Invalid => super::SyscallError::InvalidArgument,
+                    MdweError::Locked => super::SyscallError::OperationNotPermitted,
+                })?;
+            Ok(0)
+        }
+        PR_GET_MDWE => {
+            if arg2 != 0 || arg3 != 0 || arg4 != 0 || arg5 != 0 {
+                return Err(super::SyscallError::InvalidArgument);
+            }
+            Ok(crate::process::current_process()
+                .ok_or(super::SyscallError::InvalidState)?
+                .memory_space
+                .lock()
+                .wx_policy()
+                .mdwe() as usize)
         }
         _ => Err(super::SyscallError::InvalidArgument),
     }

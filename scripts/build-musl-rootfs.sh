@@ -7,9 +7,9 @@
 # with it:
 #   - BusyBox 1.36.1 (defconfig, static), with its applet links;
 #   - /sbin/init (userland/init/init.c);
-#   - the runtime tests: audit_runtime_test, musl_runtime_test and the
-#     dynamically linked musl_dynamic_test with its library, musl's loader
-#     and the shared C++ runtime;
+#   - the runtime tests: audit_runtime_test, musl_runtime_test with
+#     wx_needed_test, and the dynamically linked musl_dynamic_test with its
+#     library, musl's loader and the shared C++ runtime;
 #   - the BusyBox self-test (userland/tests/busybox_test.sh) and its data.
 #
 # Usage: scripts/build-musl-rootfs.sh aarch64|riscv64
@@ -105,6 +105,9 @@ build_programs() {
     # (the native libc's, for all three architectures) and GNU extensions.
     "${CC}" -D_GNU_SOURCE -static-pie -O2 -Wall -Wextra -idirafter "${ROOT}/userland/libc/include" \
         -o "${BUILD_DIR}/bin/audit_runtime_test" "${TESTS}/audit_runtime_test.c"
+    # The W^X opt-in (ADR 0017): a program carrying the VeridianOS note.
+    "${CC}" -static-pie -O2 -Wall -Wextra -idirafter "${ROOT}/userland/libc/include" \
+        -o "${BUILD_DIR}/bin/wx_needed_test" "${TESTS}/wx_needed_test.c"
     # Dynamic linking: musl's loader (a copy of libc.so, which is both; a
     # link would be resolved on the build host), the shared C++ runtime and
     # a C++ program that dlopens a C++ library.

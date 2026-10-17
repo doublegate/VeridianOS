@@ -2017,6 +2017,150 @@ static void test_mprotect(void)
     report("musl_prot_read_blocks_write", ok, why);
 }
 
+/* W^X (ADR 0017): memory writable and executable at once is EACCES by
+ * default (Linux allows it); exec-gain alone (RW -> RX) is allowed. */
+#ifndef PR_SET_MDWE
+#define PR_SET_MDWE 65
+#define PR_GET_MDWE 66
+#define PR_MDWE_REFUSE_EXEC_GAIN 1
+#define PR_MDWE_NO_INHERIT 2
+#endif
+
+static void test_wx_default(void)
+{
+    int f = 0;
+    void *p = mmap(0, 4096, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (p != MAP_FAILED || errno != EACCES)
+        f |= 1;
+    char *q = mmap(0, 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (q == MAP_FAILED)
+        f |= 2;
+    else {
+        if (mprotect(q, 4096, PROT_READ | PROT_WRITE | PROT_EXEC) != -1 || errno != EACCES)
+            f |= 4;
+        if (mprotect(q, 4096, PROT_READ | PROT_EXEC) != 0)
+            f |= 8;
+        munmap(q, 4096);
+    }
+    if (prctl(PR_GET_MDWE, 0, 0, 0, 0) != 0)
+        f |= 16;
+    static char why[32];
+    snprintf(why, sizeof(why), "fail=%#x", f);
+    report("musl_wx_refused_by_default", f == 0, why);
+}
+
+/* Run `path` with `arg` (or none), its standard output into `out`; the
+ * wait status, or -1. */
+static int run_capture(const char *path, const char *arg, char *out, size_t len)
+{
+    extern char **environ;
+    int fds[2];
+    if (pipe(fds) != 0)
+        return -1;
+    posix_spawn_file_actions_t actions;
+    posix_spawn_file_actions_init(&actions);
+    posix_spawn_file_actions_adddup2(&actions, fds[1], 1);
+    posix_spawn_file_actions_addclose(&actions, fds[0]);
+    char *args[] = {(char *)path, (char *)arg, NULL};
+    pid_t pid = -1;
+    int spawned = posix_spawn(&pid, path, &actions, NULL, args, environ);
+    posix_spawn_file_actions_destroy(&actions);
+    close(fds[1]);
+    size_t n = 0;
+    ssize_t r;
+    while (n < len - 1 && (r = read(fds[0], out + n, len - 1 - n)) > 0)
+        n += (size_t)r;
+    out[n] = 0;
+    close(fds[0]);
+    int status = -1;
+    if (spawned != 0 || waitpid(pid, &status, 0) != pid)
+        return -1;
+    char *nl = strchr(out, '\n');
+    if (nl)
+        *nl = 0;
+    return status;
+}
+
+/* A program carrying the VeridianOS W^X note (<veridian/wxneeded.h>) gets
+ * Linux's behaviour: RWX memory, code written to it runs
+ * (userland/tests/wx_needed_test.c). */
+static void test_wx_opt_in(void)
+{
+    static char out[128], why[200];
+    int st = run_capture("/bin/wx_needed_test", NULL, out, sizeof(out));
+    snprintf(why, sizeof(why), "status=%#x output: %s", st, out);
+    report("musl_wx_opt_in", st == 0 && strcmp(out, "WX OK 42") == 0, why);
+}
+
+/* PR_SET_MDWE as Linux: argument checks, one way (EPERM), no RWX and no
+ * exec gain, kept across fork and exec -- where it overrides the W^X
+ * note -- unless set with PR_MDWE_NO_INHERIT. In children: it is
+ * permanent. */
+static void test_mdwe(void)
+{
+    pid_t pid = fork();
+    if (pid == 0) {
+        int f = 0;
+        if (prctl(PR_SET_MDWE, PR_MDWE_NO_INHERIT, 0, 0, 0) != -1 || errno != EINVAL)
+            f |= 1;
+        if (prctl(PR_SET_MDWE, 4, 0, 0, 0) != -1 || errno != EINVAL)
+            f |= 1;
+        if (prctl(PR_SET_MDWE, PR_MDWE_REFUSE_EXEC_GAIN, 0, 0, 0) != 0)
+            f |= 2;
+        if (prctl(PR_GET_MDWE, 0, 0, 0, 0) != PR_MDWE_REFUSE_EXEC_GAIN)
+            f |= 2;
+        if (prctl(PR_SET_MDWE, PR_MDWE_REFUSE_EXEC_GAIN, 0, 0, 0) != 0)
+            f |= 4;
+        if (prctl(PR_SET_MDWE, 0, 0, 0, 0) != -1 || errno != EPERM)
+            f |= 4;
+        if (prctl(PR_SET_MDWE, 3, 0, 0, 0) != -1 || errno != EPERM)
+            f |= 4;
+        /* RX is fine; RW cannot become RX; RX stays RX. */
+        char *x = mmap(0, 4096, PROT_READ | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        char *w = mmap(0, 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        if (x == MAP_FAILED || w == MAP_FAILED)
+            f |= 8;
+        else {
+            if (mprotect(w, 4096, PROT_READ | PROT_EXEC) != -1 || errno != EACCES)
+                f |= 16;
+            if (mprotect(x, 4096, PROT_READ | PROT_EXEC) != 0)
+                f |= 16;
+        }
+        /* Kept across fork and exec; the note does not undo it. */
+        pid_t g = fork();
+        if (g == 0)
+            _exit(prctl(PR_GET_MDWE, 0, 0, 0, 0) == PR_MDWE_REFUSE_EXEC_GAIN ? 0 : 1);
+        int gst = -1;
+        if (g < 0 || waitpid(g, &gst, 0) != g || !WIFEXITED(gst) || WEXITSTATUS(gst) != 0)
+            f |= 32;
+        char out[64];
+        if (run_capture("/bin/wx_needed_test", "refused", out, sizeof(out)) != 0
+            || strcmp(out, "WX REFUSED OK") != 0)
+            f |= 64;
+        _exit(f);
+    }
+    int st = -1, f2 = -1;
+    int ok = pid > 0 && waitpid(pid, &st, 0) == pid && WIFEXITED(st) && WEXITSTATUS(st) == 0;
+    /* NO_INHERIT: a fork child starts without it. */
+    pid = fork();
+    if (pid == 0) {
+        if (prctl(PR_SET_MDWE, PR_MDWE_REFUSE_EXEC_GAIN | PR_MDWE_NO_INHERIT, 0, 0, 0) != 0
+            || prctl(PR_GET_MDWE, 0, 0, 0, 0) != 3)
+            _exit(1);
+        pid_t g = fork();
+        if (g == 0)
+            _exit(prctl(PR_GET_MDWE, 0, 0, 0, 0) == 0 ? 0 : 1);
+        int gst = -1;
+        _exit(g > 0 && waitpid(g, &gst, 0) == g && WIFEXITED(gst) && WEXITSTATUS(gst) == 0 ? 0 : 2);
+    }
+    int st2 = -1;
+    if (pid > 0 && waitpid(pid, &st2, 0) == pid && WIFEXITED(st2))
+        f2 = WEXITSTATUS(st2);
+    static char why[64];
+    snprintf(why, sizeof(why), "status=%#x no_inherit=%d", st, f2);
+    report("musl_mdwe", ok && f2 == 0, why);
+}
+
 /* Threads run concurrently as their own tasks (ADR 0006 stage D2):
  * pthread_create/join with a mutex-protected counter, and pthread_exit
  * ends only the calling thread (musl's exit was a process exit, N-106). */
@@ -4277,6 +4421,9 @@ int main(int argc, char **argv)
     test_raise_abort();
     test_waitid();
     test_mprotect();
+    test_wx_default();
+    test_wx_opt_in();
+    test_mdwe();
     test_threads();
     test_thread_guards();
     test_signals();

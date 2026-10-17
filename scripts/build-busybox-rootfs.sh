@@ -472,6 +472,15 @@ phase_rootfs() {
             echo "FAILED"
             exit 1
         fi
+        # The W^X opt-in (ADR 0017): a program carrying the VeridianOS note.
+        echo -n "    wx_needed_test... "
+        if "$musl_cc" -static-pie -O2 -Wall -Wextra -idirafter "${PROJECT_ROOT}/userland/libc/include" \
+                -o "$BUILD_DIR/bin/wx_needed_test" "${TESTS_DIR}/wx_needed_test.c" 2>&1; then
+            echo "OK"
+        else
+            echo "FAILED"
+            exit 1
+        fi
 
         # Dynamic linking (ADR 0010): musl's loader and the shared C++
         # runtime, stripped, and a dynamically linked C++ program that

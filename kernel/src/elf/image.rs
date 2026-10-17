@@ -292,6 +292,9 @@ pub fn load(
         name: "PT_GNU_PROPERTY",
         value: "malformed GNU property note",
     };
+    // W^X follows the new program's note (the interpreter's does not
+    // count), and PR_SET_MDWE the old program's (ADR 0017).
+    vas.set_wx_policy(vas.wx_policy().exec(wants_wx(binary, data)));
     let bti = crate::arch::bti_supported();
     let program_guarded =
         bti && interpreter.is_none() && wants_bti(binary, data).map_err(note_error)?;
@@ -363,6 +366,13 @@ pub fn map_image(
             | (((run.flags & PF_W != 0) as usize) << 1)
             | ((exec as usize) << 2)
             | (((exec && guarded) as usize) << 4);
+        // Under PR_SET_MDWE a writable and executable segment is refused,
+        // as Linux's mmap of it is.
+        if vas.wx_policy().refuses_segment(prot) {
+            return Err(crate::error::KernelError::PermissionDenied {
+                operation: "exec: writable and executable segment under MDWE",
+            });
+        }
         let kind = if run.flags & PF_X != 0 {
             MappingType::Code
         } else {
@@ -510,6 +520,76 @@ pub fn wants_bti(binary: &ElfBinary, data: &[u8]) -> Result<bool, ElfError> {
     note_wants_bti(data.get(start..end).ok_or(ElfError::InvalidProgramHeader)?)
 }
 
+/// The owner of VeridianOS notes, and the feature-control note's type and
+/// its W^X opt-in bit (`<veridian/wxneeded.h>`).
+const VERIDIAN_NOTE_NAME: &[u8] = b"VeridianOS\0";
+const NT_VERIDIAN_FEATURE_CTL: u32 = 1;
+const VERIDIAN_FCTL_WXNEEDED: u32 = 1;
+
+/// Whether the notes of one PT_NOTE segment (`note`, aligned to `align`
+/// bytes, 4 or 8) hold a VeridianOS feature-control note with the W^X
+/// opt-in. A malformed segment counts as no opt-in: the safe default, and
+/// as Linux, which ignores what it does not read, exec does not fail.
+pub fn note_wants_wx(note: &[u8], align: usize) -> bool {
+    let word = |at: usize| -> Option<u32> {
+        let w = note.get(at..at.checked_add(4)?)?;
+        Some(u32::from_le_bytes(<[u8; 4]>::try_from(w).ok()?))
+    };
+    let mut at = 0usize;
+    while at < note.len() {
+        let (Some(namesz), Some(descsz), Some(kind)) = (word(at), word(at + 4), word(at + 8))
+        else {
+            return false;
+        };
+        let name_at = at + 12;
+        let Some(desc_at) = name_at
+            .checked_add(namesz as usize)
+            .and_then(|e| e.checked_next_multiple_of(align))
+        else {
+            return false;
+        };
+        let Some(next) = desc_at
+            .checked_add(descsz as usize)
+            .and_then(|e| e.checked_next_multiple_of(align))
+        else {
+            return false;
+        };
+        let (Some(name), Some(desc)) = (
+            note.get(name_at..name_at + namesz as usize),
+            note.get(desc_at..desc_at + descsz as usize),
+        ) else {
+            return false;
+        };
+        if name == VERIDIAN_NOTE_NAME && kind == NT_VERIDIAN_FEATURE_CTL && desc.len() == 4 {
+            let bits = u32::from_le_bytes([desc[0], desc[1], desc[2], desc[3]]);
+            return bits & VERIDIAN_FCTL_WXNEEDED != 0;
+        }
+        at = next;
+    }
+    false
+}
+
+/// Whether `binary` (whose file is `data`) opts in to writable and
+/// executable memory: a VeridianOS feature-control note in any PT_NOTE.
+pub fn wants_wx(binary: &ElfBinary, data: &[u8]) -> bool {
+    binary
+        .segments
+        .iter()
+        .filter(|s| s.segment_type == SegmentType::Note)
+        .any(|s| {
+            let (Ok(start), Ok(len)) =
+                (usize::try_from(s.file_offset), usize::try_from(s.file_size))
+            else {
+                return false;
+            };
+            let align = if s.alignment == 8 { 8 } else { 4 };
+            start
+                .checked_add(len)
+                .and_then(|end| data.get(start..end))
+                .is_some_and(|n| note_wants_wx(n, align))
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use alloc::vec;
@@ -535,6 +615,83 @@ mod tests {
         n.extend_from_slice(b"GNU\0");
         n.extend_from_slice(&desc);
         n
+    }
+
+    #[test]
+    fn veridian_wx_note_is_the_opt_in() {
+        // One note: namesz, descsz, type, name padded, desc padded.
+        fn note(name: &[u8], kind: u32, desc: &[u8], align: usize) -> Vec<u8> {
+            let mut n = Vec::new();
+            n.extend_from_slice(&(name.len() as u32).to_le_bytes());
+            n.extend_from_slice(&(desc.len() as u32).to_le_bytes());
+            n.extend_from_slice(&kind.to_le_bytes());
+            n.extend_from_slice(name);
+            n.resize(n.len().next_multiple_of(align), 0);
+            n.extend_from_slice(desc);
+            n.resize(n.len().next_multiple_of(align), 0);
+            n
+        }
+        let wx = note(b"VeridianOS\0", 1, &[1, 0, 0, 0], 4);
+        assert!(note_wants_wx(&wx, 4));
+        // As <veridian/wxneeded.h> lays it out (and the toolchain links it).
+        assert_eq!(wx.len(), 0x1c);
+        // The bit clear, another type, another owner, a short descriptor.
+        assert!(!note_wants_wx(
+            &note(b"VeridianOS\0", 1, &[2, 0, 0, 0], 4),
+            4
+        ));
+        assert!(!note_wants_wx(
+            &note(b"VeridianOS\0", 2, &[1, 0, 0, 0], 4),
+            4
+        ));
+        assert!(!note_wants_wx(
+            &note(b"VeridianOT\0", 1, &[1, 0, 0, 0], 4),
+            4
+        ));
+        assert!(!note_wants_wx(&note(b"VeridianOS\0", 1, &[1, 0], 4), 4));
+        // After another note in the same segment.
+        let mut two = note(b"GNU\0", 3, &[0xab; 20], 4);
+        two.extend_from_slice(&wx);
+        assert!(note_wants_wx(&two, 4));
+        // In an 8-aligned segment.
+        assert!(note_wants_wx(
+            &note(b"VeridianOS\0", 1, &[1, 0, 0, 0], 8),
+            8
+        ));
+        // Malformed: no opt-in, never a panic.
+        assert!(!note_wants_wx(&wx[..wx.len() - 1], 4));
+        assert!(!note_wants_wx(&wx[..10], 4));
+        let mut huge = wx.clone();
+        huge[0..4].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert!(!note_wants_wx(&huge, 4));
+        huge[0..4].copy_from_slice(&11u32.to_le_bytes());
+        huge[4..8].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert!(!note_wants_wx(&huge, 4));
+        assert!(!note_wants_wx(&[], 4));
+
+        // Only PT_NOTE segments are read, within the file.
+        let seg = |kind, off, size| ElfSegment {
+            segment_type: kind,
+            virtual_addr: 0,
+            physical_addr: 0,
+            file_offset: off,
+            file_size: size,
+            memory_size: size,
+            flags: PF_R,
+            alignment: 4,
+        };
+        let mut file = vec![0u8; 0x40];
+        file.extend_from_slice(&wx);
+        let mut b = binary(
+            ElfType::Executable,
+            0,
+            vec![seg(SegmentType::Load, 0x40, 0x1c)],
+        );
+        assert!(!wants_wx(&b, &file));
+        b.segments.push(seg(SegmentType::Note, 0x40, 0x1c));
+        assert!(wants_wx(&b, &file));
+        b.segments[1].file_size = 0x1000;
+        assert!(!wants_wx(&b, &file), "a note past the end of the file");
     }
 
     #[test]

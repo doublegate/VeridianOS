@@ -68,10 +68,17 @@ exposed were fixed (N-182 to N-189); the rest are listed, with their targets, in
   moving the heap with mremap leaves the program break where it was; and mappings that Linux
   would merge (two adjacent mmaps alike in every way) stay separate, so an mremap spanning both
   is EFAULT.
-- **W^X.** A mapping is never writable and executable at once: mmap and mprotect with
-  PROT_WRITE|PROT_EXEC fail with EACCES, where Linux allows it (N-241, kept by design). A JIT
-  must write code through a writable mapping and run it from an executable one (a second
-  mapping of a memfd, or mprotect between the two).
+- **W^X.** By default a mapping is never writable and executable at once: mmap and mprotect
+  with PROT_WRITE|PROT_EXEC fail with EACCES, where Linux allows it (N-241, kept by design; ADR
+  0017).
+  - A program that needs it (a JIT) opts in with the VeridianOS ELF note
+    (`<veridian/wxneeded.h>`) and then behaves as on Linux.
+  - An unmodified Linux binary carries no note, so it must be relinked with the header. No tool
+    adds the note to an existing binary yet.
+  - Without the note, a JIT must write code through a writable mapping and run it from an
+    executable one (a second mapping of a memfd, or mprotect between the two).
+  - PR_SET_MDWE follows Linux. It is reported only when set: the default W^X is not MDWE,
+    because it allows memory to become executable.
 - **Futexes.** FUTEX_LOCK_PI, LOCK_PI2, TRYLOCK_PI and UNLOCK_PI work (priority inheritance,
   SCHED-INC-01), but FUTEX_WAIT_REQUEUE_PI and CMP_REQUEUE_PI (glibc's PI condition variables) are
   ENOSYS; a deadline task waiting for a PI lock lends real-time priority 99, not its deadline

@@ -233,8 +233,15 @@ pub fn sys_mmap(
         return Err(SyscallError::InvalidArgument);
     }
 
-    // Enforce W^X: writable + executable is not allowed
-    if prot & PROT_WRITE != 0 && prot & PROT_EXEC != 0 {
+    // W^X: writable and executable memory is EACCES unless the program
+    // opted in, and always under PR_SET_MDWE (ADR 0017).
+    if process::current_process()
+        .ok_or(SyscallError::InvalidState)?
+        .memory_space
+        .lock()
+        .wx_policy()
+        .refuses_map(prot)
+    {
         return Err(SyscallError::PermissionDenied);
     }
 
@@ -607,14 +614,14 @@ pub fn sys_mprotect(addr: usize, length: usize, prot: usize) -> SyscallResult {
 
     let proc = process::current_process().ok_or(SyscallError::InvalidState)?;
 
-    // Check W^X violation
-    if prot & PROT_WRITE != 0 && prot & PROT_EXEC != 0 {
+    // protect_region checks that every page of the range is mapped
+    // (ENOMEM, as Linux), that borrowed mappings gain no rights (N-135),
+    // and W^X with PR_SET_MDWE (EACCES, ADR 0017).
+    let memory_space = proc.memory_space.lock();
+    // EACCES before the data limit's ENOMEM, as Linux checks each VMA.
+    if memory_space.wx_policy().refuses_map(prot) {
         return Err(SyscallError::PermissionDenied);
     }
-
-    // protect_region checks that every page of the range is mapped
-    // (ENOMEM, as Linux) and that borrowed mappings gain no rights (N-135).
-    let memory_space = proc.memory_space.lock();
 
     // Private memory made writable becomes data: ENOMEM past RLIMIT_DATA,
     // as Linux's mprotect_fixup (which refuses only when the data limit,

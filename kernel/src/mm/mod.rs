@@ -27,6 +27,7 @@ pub mod tlb;
 pub mod user_layout;
 pub mod user_validation;
 pub mod vas;
+pub mod wx;
 
 #[cfg(feature = "alloc")]
 extern crate alloc;

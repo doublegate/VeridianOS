@@ -5,7 +5,7 @@
 
 #![allow(clippy::manual_div_ceil)]
 
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 #[cfg(feature = "alloc")]
 extern crate alloc;
@@ -670,6 +670,9 @@ pub struct VirtualAddressSpace {
     /// The scheduler compares this against the last-seen generation at switch
     /// time to determine whether a TLB flush is needed.
     pub tlb_generation: AtomicU64,
+
+    /// Which memory may be writable and executable (`mm::wx`, ADR 0017).
+    wx_policy: AtomicU32,
 }
 
 /// Batched TLB flush accumulator.
@@ -759,6 +762,7 @@ impl Default for VirtualAddressSpace {
             stack_top: AtomicU64::new(0x7FFF_FFFF_0000),
             stack_size: AtomicU64::new(8 * 1024 * 1024),
             tlb_generation: AtomicU64::new(0),
+            wx_policy: AtomicU32::new(0),
         }
     }
 }
@@ -767,6 +771,34 @@ impl VirtualAddressSpace {
     /// Create a new virtual address space
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Which memory this space may make writable and executable.
+    pub fn wx_policy(&self) -> super::wx::WxPolicy {
+        super::wx::WxPolicy::from_bits(self.wx_policy.load(Ordering::Acquire))
+    }
+
+    /// Replace the policy (exec, fork).
+    pub fn set_wx_policy(&self, policy: super::wx::WxPolicy) {
+        self.wx_policy.store(policy.bits(), Ordering::Release);
+    }
+
+    /// Change the policy atomically (PR_SET_MDWE from any thread).
+    pub fn update_wx_policy<E>(
+        &self,
+        f: impl Fn(super::wx::WxPolicy) -> Result<super::wx::WxPolicy, E>,
+    ) -> Result<(), E> {
+        let mut cur = self.wx_policy.load(Ordering::Acquire);
+        loop {
+            let new = f(super::wx::WxPolicy::from_bits(cur))?.bits();
+            match self
+                .wx_policy
+                .compare_exchange(cur, new, Ordering::AcqRel, Ordering::Acquire)
+            {
+                Ok(_) => return Ok(()),
+                Err(seen) => cur = seen,
+            }
+        }
     }
 
     /// Initialize virtual address space
@@ -1052,6 +1084,11 @@ impl VirtualAddressSpace {
     #[cfg(feature = "alloc")]
     fn clone_from_inner(&mut self, other: &Self, share_all: bool) -> Result<(), KernelError> {
         use super::page_table::{PageTable, PageTableHierarchy, PAGE_TABLE_ENTRIES};
+
+        // A fork child's W^X policy is inherited (`WxPolicy::forked`); a
+        // CLONE_VM child shares the parent's mm on Linux, so keeps it whole.
+        let policy = other.wx_policy();
+        self.set_wx_policy(if share_all { policy } else { policy.forked() });
 
         // Step 1: Allocate a new L4 page table for the child
         let new_hierarchy = PageTableHierarchy::new()?;
@@ -3130,6 +3167,15 @@ impl VirtualAddressSpace {
             if !m.may_write && new_flags.contains(PageFlags::WRITABLE) {
                 return Err(KernelError::PermissionDenied {
                     operation: "mprotect: mapping may not be written",
+                });
+            }
+            // W^X, and under MDWE no memory becoming executable (ADR 0017).
+            if self
+                .wx_policy()
+                .refuses_protect(prot, !m.flags.contains(PageFlags::NO_EXECUTE))
+            {
+                return Err(KernelError::PermissionDenied {
+                    operation: "mprotect: writable and executable",
                 });
             }
             if !m.owns_frames() {
