@@ -2308,6 +2308,45 @@ static void test_mknod(void)
     report("musl_mknod", f == 0, why);
 }
 
+/* open with O_CREAT names a file, so Linux refuses it with EISDIR for a
+ * name ending in '/' (whether or not it exists, creating nothing) and for an
+ * existing directory, even opened read-only. */
+static void test_open_creat_dir(void)
+{
+    const char *dir = "/tmp/musl_creat_dir";
+    static char why[64];
+    int f = 0;
+    struct stat st;
+    mkdir(dir, 0777);
+    int fd = open("/tmp/musl_creat_dir/new/", O_CREAT | O_WRONLY, 0600);
+    if (fd != -1 || errno != EISDIR)
+        f |= 1;
+    if (stat("/tmp/musl_creat_dir/new", &st) != -1 || errno != ENOENT)
+        f |= 2;
+    if (fd >= 0)
+        close(fd);
+    unlink("/tmp/musl_creat_dir/new");
+    fd = open(dir, O_CREAT | O_RDONLY, 0600);
+    if (fd != -1 || errno != EISDIR)
+        f |= 4;
+    if (fd >= 0)
+        close(fd);
+    fd = open("/tmp/musl_creat_dir/.", O_CREAT | O_RDONLY, 0600);
+    if (fd != -1 || errno != EISDIR)
+        f |= 8;
+    if (fd >= 0)
+        close(fd);
+    fd = open("/tmp/musl_creat_dir/file", O_CREAT | O_EXCL | O_WRONLY, 0600);
+    if (fd < 0 || stat("/tmp/musl_creat_dir/file", &st) != 0 || !S_ISREG(st.st_mode))
+        f |= 16;
+    if (fd >= 0)
+        close(fd);
+    unlink("/tmp/musl_creat_dir/file");
+    rmdir(dir);
+    snprintf(why, sizeof(why), "f=%#x errno=%d", f, errno);
+    report("musl_open_creat_dir", f == 0, why);
+}
+
 /* Threads run concurrently as their own tasks (ADR 0006 stage D2):
  * pthread_create/join with a mutex-protected counter, and pthread_exit
  * ends only the calling thread (musl's exit was a process exit, N-106). */
@@ -4573,6 +4612,7 @@ int main(int argc, char **argv)
     test_mdwe();
     test_mkfifo();
     test_mknod();
+    test_open_creat_dir();
     test_threads();
     test_thread_guards();
     test_signals();

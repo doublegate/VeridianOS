@@ -1110,6 +1110,12 @@
 
 ### Fixed
 
+- **open with O_CREAT skipped the MAC check on the file it created**, which mkdir and mknod make
+  (found in the security review of mknod). The creation now goes through the same single
+  resolution of the parent for the MAC check, the directory permission check and the create, and
+  a MAC denial is EACCES. O_CREAT also follows Linux for directories: a name ending in `/` is
+  EISDIR and creates nothing (it was EINVAL), and so is an existing directory, even opened
+  read-only (it opened). `musl_open_creat_dir` covers this.
 - **BlockFS read the type of a block device or socket inode as a directory.** The type bits
   were tested as single bits (`mode & 0x4000`), so S_IFBLK (0x6000) and S_IFSOCK (0xC000) looked
   like directories, and FIFOs and character devices like regular files. Each type is now one

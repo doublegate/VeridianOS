@@ -208,12 +208,21 @@ fn open_path(path: &str, flags: usize, mode: usize) -> SyscallResult {
         }
         // Only a missing name may be created; any other failure (EACCES
         // from a directory without search permission, ENOTDIR, ELOOP) is
-        // reported as itself.
+        // reported as itself. A name ending in '/' can only be a directory,
+        // which O_CREAT does not make (EISDIR, as Linux's open_last_lookups).
         Err(e) if open_flags.create && is_not_found(&e) => {
+            if path.ends_with('/') {
+                return Err(SyscallError::IsADirectory);
+            }
             let perms = creation_perms(mode);
-            let (parent, name) = parent_dir(path)?;
-            check_dir_write(&*parent)?;
-            match parent.create(&name, perms) {
+            // One resolution of the parent for the MAC check, the permission
+            // check and the creation, as mkdir and mknod do.
+            let made = vfs()?.mknod_checked(path, NodeType::File, perms, 0, |dir| {
+                check_dir_write(dir).map_err(|_| crate::error::KernelError::PermissionDenied {
+                    operation: "create directory entry",
+                })
+            });
+            match made {
                 Ok(node) => {
                     own_new_node(&node);
                     (node, true, None)
@@ -230,13 +239,18 @@ fn open_path(path: &str, flags: usize, mode: usize) -> SyscallResult {
                 Err(crate::error::KernelError::FsError(crate::error::FsError::AlreadyExists)) => {
                     return Err(SyscallError::FileExists);
                 }
-                Err(e) => return Err(map_resolve_err(e)),
+                // map_kernel_error: a MAC or permission denial is EACCES.
+                Err(e) => return Err(super::map_kernel_error(e)),
             }
         }
         Err(e) => return Err(map_resolve_err(e)),
     };
 
     let node_type = node.node_type();
+    // O_CREAT names a file: an existing directory is EISDIR even read-only.
+    if open_flags.create && !created && node_type == NodeType::Directory {
+        return Err(SyscallError::IsADirectory);
+    }
     if !follow && node_type == NodeType::Symlink {
         return Err(SyscallError::SymlinkLoop);
     }
