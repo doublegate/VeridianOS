@@ -186,6 +186,19 @@ fn try_demand_page_in(
 
     #[cfg(feature = "alloc")]
     {
+        // Another thread of this process mapped the page since this one
+        // faulted, or was replacing it (a copy-on-write copy unmaps the
+        // shared page first): retry the access, as Linux does. Only a
+        // not-present fault, and only if the page now allows this access,
+        // so a real fault is never retried forever. The local flush drops
+        // a stale invalid translation a RISC-V hart may keep.
+        if info.reason == PageFaultReason::NotPresent
+            && memory_space.page_allows(info.faulting_address, info.was_write, info.was_user_mode)
+        {
+            crate::arch::tlb_flush_address(info.faulting_address & !(PAGE_SIZE as u64 - 1));
+            return Ok(());
+        }
+
         let mapping = memory_space.find_mapping(vaddr);
         match mapping {
             Some(m) => {

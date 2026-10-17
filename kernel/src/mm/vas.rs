@@ -58,6 +58,15 @@ fn cow_flags_for(old: PageFlags, requested: PageFlags, shared: bool) -> PageFlag
     }
 }
 
+/// Whether a leaf entry with `flags` allows the access a fault reported
+/// (`write`, from `user` mode). A copy-on-write page is not writable until
+/// its fault is resolved.
+fn access_allowed(flags: PageFlags, write: bool, user: bool) -> bool {
+    flags.contains(PageFlags::PRESENT)
+        && (!user || flags.contains(PageFlags::USER))
+        && (!write || (flags.contains(PageFlags::WRITABLE) && !flags.contains(PageFlags::COW)))
+}
+
 /// Frame allocator wrapper implementing the page_table::FrameAllocator trait.
 /// Delegates to the global FRAME_ALLOCATOR.
 pub(crate) struct VasFrameAllocator;
@@ -2656,6 +2665,27 @@ impl VirtualAddressSpace {
         Ok(true)
     }
 
+    /// Whether the page at `vaddr` is mapped now and allows the access a
+    /// fault on it reported: the fault was spurious. Another CPU running
+    /// this address space mapped the page meanwhile, or was replacing it
+    /// (a copy-on-write copy unmaps the shared page before mapping the
+    /// copy); Linux retries the access then. The caller holds the
+    /// memory-space lock, which the fault paths that change a page (demand
+    /// paging, copy-on-write) hold while they do.
+    pub fn page_allows(&self, vaddr: u64, write: bool, user: bool) -> bool {
+        let root = self.page_table_root.load(Ordering::Acquire);
+        if root == 0 {
+            return false;
+        }
+        // SAFETY: `root` is this address space's L4 table, reached through
+        // the physical map; it is only read here, and the caller's
+        // memory-space lock keeps it and its subtables in place.
+        let mapper = unsafe { create_mapper_from_root(root) };
+        mapper
+            .translate_page(VirtualAddress(vaddr & !0xFFF))
+            .is_ok_and(|(_, flags)| access_allowed(flags, write, user))
+    }
+
     /// Make the user page at `vaddr` this address space's to write and
     /// return its frame, for writes the kernel makes into one address
     /// space only (ptrace POKE, clone's SETTID stores), which must not
@@ -3995,6 +4025,26 @@ mod tests {
         assert_eq!(cow_flags_for(cow, ro, true), ro);
         // A caller cannot set COW itself; private frames become writable.
         assert_eq!(cow_flags_for(ro, rw | PageFlags::COW, false), rw);
+    }
+
+    /// A fault is spurious only if the page now allows exactly the access
+    /// that faulted: retrying anything else would fault forever.
+    #[test]
+    fn spurious_fault_needs_the_access_allowed() {
+        let rw = PageFlags::PRESENT | PageFlags::USER | PageFlags::WRITABLE;
+        let ro = PageFlags::PRESENT | PageFlags::USER;
+        let cow = ro | PageFlags::COW;
+        let kernel = PageFlags::PRESENT | PageFlags::WRITABLE;
+        assert!(access_allowed(ro, false, true));
+        assert!(access_allowed(rw, true, true));
+        assert!(access_allowed(cow, false, true));
+        // A write to a read-only or copy-on-write page is a real fault.
+        assert!(!access_allowed(ro, true, true));
+        assert!(!access_allowed(cow | PageFlags::WRITABLE, true, true));
+        // User access to a kernel page, or to a page not present.
+        assert!(!access_allowed(kernel, false, true));
+        assert!(access_allowed(kernel, true, false));
+        assert!(!access_allowed(rw.without(PageFlags::PRESENT), false, true));
     }
 
     // --- MappingType tests ---

@@ -2565,6 +2565,56 @@ static void test_thread_guards(void)
     report("musl_clone_tls_and_multithreaded_exec", ok, why);
 }
 
+/* A write to a page a fork shares copies it, and the copy replaces the
+ * shared page: unmapped, then mapped again. A thread on another CPU that
+ * touches the page meanwhile faults, and the fault must be retried, not
+ * turned into SIGSEGV (it was: musl_clone_tls_and_multithreaded_exec
+ * crashed now and then on AArch64 with -smp 4). Readers keep reading
+ * while the main thread writes every page; only with more than one CPU
+ * can they meet the gap. */
+#define COW_RACE_PAGES 256
+static char cow_race_buf[COW_RACE_PAGES * 4096] __attribute__((aligned(4096)));
+static volatile int cow_race_done;
+
+static void *cow_race_reader(void *arg)
+{
+    volatile unsigned long *sum = arg;
+    while (!cow_race_done)
+        for (int i = 0; i < COW_RACE_PAGES; i++)
+            *sum += ((volatile char *)cow_race_buf)[i * 4096];
+    return 0;
+}
+
+static void test_cow_race(void)
+{
+    int ok = 1;
+    int st = 0;
+    for (int round = 0; round < 4 && ok; round++) {
+        /* Backed in the parent, so the fork shares every page. */
+        for (int i = 0; i < COW_RACE_PAGES; i++)
+            cow_race_buf[i * 4096] = (char)round;
+        pid_t pid = fork();
+        if (pid == 0) {
+            static volatile unsigned long sums[3];
+            pthread_t t[3];
+            for (int i = 0; i < 3; i++)
+                if (pthread_create(&t[i], 0, cow_race_reader, (void *)&sums[i]) != 0)
+                    _exit(2);
+            sched_yield();
+            for (int i = 0; i < COW_RACE_PAGES; i++)
+                cow_race_buf[i * 4096 + 1] = 1;
+            cow_race_done = 1;
+            for (int i = 0; i < 3; i++)
+                pthread_join(t[i], 0);
+            _exit(0);
+        }
+        ok = pid > 0 && waitpid(pid, &st, 0) == pid && WIFEXITED(st) && WEXITSTATUS(st) == 0;
+    }
+    static char why[48];
+    snprintf(why, sizeof(why), "status=0x%x", st);
+    report("musl_cow_concurrent_readers", ok, why);
+}
+
 /* Signal handlers as musl installs them (SA_RESTORER, __restore_rt), and
  * musl's set layout (bit sig - 1): a mask naming SIGUSR1 must block
  * SIGUSR1, not the signal next to it (N-96). */
@@ -4682,6 +4732,7 @@ static const struct {
     void (*fn)(void);
 } only_tests[] = {
     {"threads", test_threads},
+    {"cow_race", test_cow_race},
     {"signals", test_signals},
     {"futex_queues", test_futex_queues},
     {"blocking_io", test_blocking_io},
@@ -4739,6 +4790,7 @@ int main(int argc, char **argv)
     test_unix_socket_file();
     test_threads();
     test_thread_guards();
+    test_cow_race();
     test_signals();
     test_thread_fork_exec();
     test_sleeps();

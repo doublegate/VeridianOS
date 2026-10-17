@@ -1135,6 +1135,14 @@
 
 ### Fixed
 
+- **A thread touching a page another CPU was copying got SIGSEGV.** A write to a page a fork
+  shares replaces it with a copy, unmapping the shared page first; a second thread of the process
+  faulting on it meanwhile found the page already backed and was sent SIGSEGV. The same happened
+  when two threads first touched one page at once. A not-present fault on a page that now allows
+  the access is retried, as on Linux, after a local TLB flush. `musl_clone_tls_and_multithreaded_exec`
+  failed now and then on AArch64 with `-smp 4` for this reason; `musl_cow_concurrent_readers`
+  (three threads reading while the fourth writes 256 shared pages) failed 5 of 5 runs there and
+  passes 10 of 10.
 - **open with O_CREAT skipped the MAC check on the file it created**, which mkdir and mknod make
   (found in the security review of mknod). The creation now goes through the same single
   resolution of the parent for the MAC check, the directory permission check and the create, and
