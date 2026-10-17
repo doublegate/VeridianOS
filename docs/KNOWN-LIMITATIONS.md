@@ -45,8 +45,9 @@ exposed were fixed (N-182 to N-189); the rest are listed, with their targets, in
   these differences: a sleep or futex wait until an absolute CLOCK_REALTIME time does not move
   when the clock is set afterwards (timerfds do); sleeping on a process CPU clock is ENOTSUP;
   there is no leap-second offset, so CLOCK_TAI reads as UTC; BOOTTIME equals MONOTONIC, as there
-  is no suspend; and AArch64 and RISC-V have no RTC driver, so their wall clock starts at the
-  epoch (they run no user programs yet). adjtimex and clock_adjtime do not exist.
+  is no suspend; and on AArch64 and RISC-V the wall clock comes from a device-tree PL031 or
+  Goldfish RTC, read once at boot (without one it counts from the epoch). adjtimex and
+  clock_adjtime do not exist.
 - **Resource usage.** getrusage, times and wait4 report CPU time (split into user and system
   time by tick samples), peak resident set and context switches; page-fault, block I/O, IPC and
   signal counts are zero.
@@ -163,7 +164,9 @@ What remains:
   not exist yet, so no signal arrives with SI_TIMER or POLL_* information; kill, tkill,
   sigqueue, SIGCHLD and fault signals carry Linux's siginfo (N-259).
 - **sigreturn on AArch64 and RISC-V does not sanitise registers (N-170).** PSTATE and `sstatus`
-  are restored as given, latent until those architectures have user mode.
+  are restored as given from the user's signal frame.
+- **Signal stacks on AArch64 use x86_64's minimum.** `MINSIGSTKSZ` is 2048 on every
+  architecture; arm64's is 5120, so a smaller sigaltstack is accepted there.
 
 ### Processes, exec and credentials
 
@@ -186,8 +189,7 @@ What remains:
 The `smp` feature is on by default since v0.27: the other CPUs are started on every architecture (x86
 INIT-SIPI-SIPI, AArch64 PSCI, RISC-V SBI HSM). Only x86_64 runs tasks on them (ADR 0012): tasks are
 placed on idle CPUs, balanced every 4 ms and moved by sched_setaffinity. RISC-V does the same on
-every hart since v0.27 (sprint E), and AArch64 on every CPU since v0.27 too (kernel tasks only; EL0
-is not there yet). Since D5a every CPU gets the boot CPU's
+every hart since v0.27 (sprint E), and AArch64 on every CPU since v0.27 too, user tasks included. Since D5a every CPU gets the boot CPU's
 syscall MSRs and XCR0 (N-172), IPIs go to APIC IDs with the ICR written under one interrupt-off
 sequence (N-173), and bring-up stops at the first CPU that fails, with guarded stacks (N-180). Since
 D5b the timer wheel advances by elapsed clock time and an x86_64 CPU whose TSC is not synchronised
@@ -200,27 +202,30 @@ Still open:
 - Secondaries copy the boot CPU's CR4, so they match it, including SMEP and SMAP being off (N-15,
   below).
 
-### AArch64 and RISC-V run only simple user programs (sprint E)
+### AArch64 and RISC-V user programs (sprint E)
 
-- **AArch64 runs static ELF programs, without a C library yet (ADR 0015, ADR 0016).** Since v0.27
+- **AArch64 runs musl programs and a BusyBox root (ADR 0015, ADR 0016).** Since v0.27
   the kernel runs in the upper half with the MMU and caches on, so exclusive loads and stores work,
   and the N-28 workarounds are gone (`fs::bare_lock`, the bump allocator, the reduced secondary
   stage). Every CPU dispatches, and programs from the VFS run at EL0 as dispatcher tasks with
   system calls, page faults, fault-tolerant user copies, user FP/SIMD state and signal handlers
   (Linux's arm64 `rt_sigframe`; SA_RESTART has no test on AArch64 yet), and fault-tolerant
-  user compare-and-exchange for futexes, static TLS, and an ASID per address space (HA-26). Not
-  yet: a rootfs (so no BusyBox or musl programs run there). musl and a GCC cross toolchain for
-  AArch64 are built (`tools/cross/build-musl-arch.sh`), but the runtime tests are not ported to it
-  yet. (The boot also sets SCTLR_EL1's RES1 bits and the EL2 state the
+  user compare-and-exchange for futexes, static TLS, and an ASID per address space (HA-26). fork,
+  clone and exec run (the child resumes from the parent's live registers, and exec enters the
+  new image), and `scripts/build-musl-rootfs.sh aarch64` builds a BusyBox root with musl
+  (`tools/cross/build-musl-arch.sh`) that `ARCH=aarch64 scripts/run-rootfs-tests.sh` runs:
+  the BusyBox self-test, `audit_runtime_test` and `musl_runtime_test` all pass. Not yet: the
+  gate does not run it, `PROT_BTI` is refused by mmap and mprotect (glibc sets it; musl does not),
+  and `AT_HWCAP2` is not passed. (The boot also sets SCTLR_EL1's RES1 bits and the EL2 state the
   kernel relies on, N-177, HA-14, and uses the device tree firmware passes, HA-01.)
-- **RISC-V runs static ELF programs, without a C library yet (ADR 0013, ADR 0014).** Paging is
+- **RISC-V runs musl programs and a BusyBox root (ADR 0013, ADR 0014).** Paging is
   on, the kernel runs in the upper half, and programs from the VFS run in U-mode as dispatcher
   tasks with system calls, page faults, fault-tolerant user copies, user FP state and signal
   handlers (Linux's RISC-V `rt_sigframe`; handlers return through a trampoline page the kernel maps,
   where Linux uses its vDSO; SA_RESTART has no test on RISC-V yet), and fault-tolerant user
-  compare-and-exchange for futexes, and static TLS (`tp` at the PT_TLS block). Not yet: a rootfs
-  (so no BusyBox or musl programs run there). musl and a GCC cross toolchain for RISC-V are built
-  (`tools/cross/build-musl-arch.sh`), but the runtime tests are not ported to it yet.
+  compare-and-exchange for futexes, and static TLS (`tp` at the PT_TLS block). fork, clone and
+  exec run as on AArch64, and `scripts/build-musl-rootfs.sh riscv64` builds the same BusyBox root,
+  which `ARCH=riscv64 scripts/run-rootfs-tests.sh` runs. Not yet: the gate does not run it.
 
 ### FPU and vector registers: no SVE or RISC-V V state (N-41 part)
 
@@ -343,8 +348,7 @@ Present as code but not in effect, despite older documentation:
 - **Retpoline, IBRS/eIBRS, IBPB, RSB filling, MDS clearing, UMIP:** not enabled (HX-23). There is
   no early microcode loading either (HX-24), so fixes shipped as microcode depend on the firmware.
 - **SMEP/SMAP:** not enabled (N-15).
-- **AArch64:** no branch-predictor or BHB hardening on entry from EL0 and no SSBD (HA-30); moot
-  until AArch64 has user mode.
+- **AArch64:** no branch-predictor or BHB hardening on entry from EL0 and no SSBD (HA-30).
 
 ### Network sockets do not work from user programs (N-64 to N-69; planned v0.27 sprint F)
 

@@ -4,6 +4,13 @@ This guide covers the process of porting existing POSIX/Linux software to
 VeridianOS, including syscall compatibility, filesystem differences, and the
 Portfile build system.
 
+> **Status (2026-10-16): partly out of date.** Since v0.27 the only user ABI is Linux's: system
+> call numbers come from Linux's tables (ADR 0009, `docs/adr/0009-linux-syscall-numbering.md`;
+> `abi/linux/syscall_64.tbl` on x86_64, `abi/linux/syscall.tbl` on AArch64 and RISC-V), and the
+> "Supported Syscalls" lists below, which give the old native numbering, no longer apply. Per-call
+> coverage: `docs/compat/LINUX-SYSCALL-COVERAGE.md`; what differs from Linux:
+> `docs/KNOWN-LIMITATIONS.md`. This guide will be rewritten with the syscall coverage work.
+
 ## Overview
 
 VeridianOS is a capability-based microkernel. While it provides a POSIX-like
@@ -12,9 +19,11 @@ traditional Unix systems that affect ported software:
 
 - Capability-based security instead of Unix UID/GID permissions
 - Microkernel architecture with user-space drivers
-- RamFS-based filesystem (no persistent storage yet)
-- No libc available (musl/newlib port in progress)
-- No dynamic linker (all programs are statically linked)
+- A BlockFS root on a virtio disk, with RamFS and tmpfs mounts
+- musl 1.2.5 with GCC cross toolchains for all three architectures
+  (`tools/cross/build-musl-toolchain.sh` for x86_64, `tools/cross/build-musl-arch.sh` for
+  AArch64 and RISC-V), plus the native libc on x86_64
+- Static and dynamically linked programs (musl's loader, `PT_INTERP`)
 
 ## Supported Syscalls
 

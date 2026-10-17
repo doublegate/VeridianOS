@@ -319,7 +319,8 @@ extern "C" fn riscv_user_trap(f: &mut switch::UserFrame) {
             switch::irq_enable();
             let info = crate::mm::page_fault::from_riscv(scause as u64, stval as u64, f.sepc);
             if crate::mm::page_fault::handle_page_fault(info).is_err() {
-                user_fault(11, crate::process::signals::SEGV_MAPERR, stval as u64);
+                let code = crate::mm::page_fault::user_segv_code(stval as u64);
+                user_fault(11, code, stval as u64);
             }
         }
         EXC_ILLEGAL => user_fault(4, crate::process::signals::ILL_ILLOPC, f.sepc),

@@ -124,7 +124,76 @@ fn hwcaps() -> (u64, u64) {
     (edx as u64, 0)
 }
 
-#[cfg(not(all(target_arch = "x86_64", target_os = "none")))]
+/// AArch64: Linux's arm64 AT_HWCAP bits from ID_AA64PFR0_EL1 and
+/// ID_AA64ISAR0_EL1 (`arch/arm64/kernel/cpufeature.c`): FP (0) and ASIMD
+/// (1) when implemented (field not 0xF), AES (3), PMULL (4), SHA1 (5),
+/// SHA2 (6), CRC32 (7), LSE ATOMICS (8), FPHP (9) and ASIMDHP (10). EVTSTRM
+/// and CPUID are not set: the kernel enables no timer event stream and does
+/// not emulate EL0 reads of the ID registers.
+pub fn arm64_hwcap(pfr0: u64, isar0: u64) -> u64 {
+    let field = |r: u64, at: u32| (r >> at) & 0xF;
+    let mut hwcap = 0;
+    let (fp, simd) = (field(pfr0, 16), field(pfr0, 20));
+    if fp != 0xF {
+        hwcap |= 1 << 0;
+        if fp == 1 {
+            hwcap |= 1 << 9;
+        }
+    }
+    if simd != 0xF {
+        hwcap |= 1 << 1;
+        if simd == 1 {
+            hwcap |= 1 << 10;
+        }
+    }
+    let aes = field(isar0, 4);
+    if aes >= 1 {
+        hwcap |= 1 << 3;
+    }
+    if aes >= 2 {
+        hwcap |= 1 << 4;
+    }
+    for (at, bit) in [(8, 5), (12, 6), (16, 7)] {
+        if field(isar0, at) >= 1 {
+            hwcap |= 1 << bit;
+        }
+    }
+    if field(isar0, 20) >= 2 {
+        hwcap |= 1 << 8;
+    }
+    hwcap
+}
+
+/// RISC-V: Linux's AT_HWCAP, one bit per single-letter extension (bit
+/// `letter - 'a'`) of those it reports (I, M, A, F, D, C; V is left out:
+/// no vector state is switched, Linux likewise reports V only with its
+/// vector support). F and D only with `user_fp` (the kernel switches the
+/// F/D registers). `has` says whether the harts have a letter.
+pub fn riscv_hwcap(has: impl Fn(u8) -> bool, user_fp: bool) -> u64 {
+    b"imafdc"
+        .iter()
+        .filter(|&&l| user_fp || !matches!(l, b'f' | b'd'))
+        .filter(|&&l| has(l))
+        .fold(0, |acc, &l| acc | 1 << (l - b'a'))
+}
+
+#[cfg(all(target_arch = "aarch64", target_os = "none"))]
+fn hwcaps() -> (u64, u64) {
+    let (pfr0, isar0): (u64, u64);
+    // SAFETY: the ID registers are readable at EL1 and have no side effects.
+    unsafe {
+        core::arch::asm!("mrs {0}, id_aa64pfr0_el1", out(reg) pfr0, options(nomem, nostack));
+        core::arch::asm!("mrs {0}, id_aa64isar0_el1", out(reg) isar0, options(nomem, nostack));
+    }
+    (arm64_hwcap(pfr0, isar0), 0)
+}
+
+#[cfg(all(target_arch = "riscv64", target_os = "none"))]
+fn hwcaps() -> (u64, u64) {
+    (crate::arch::riscv64::fpu::hwcap(), 0)
+}
+
+#[cfg(not(target_os = "none"))]
 fn hwcaps() -> (u64, u64) {
     (0, 0)
 }
@@ -186,6 +255,29 @@ mod tests {
 
     fn value(aux: &[AuxVecEntry], t: AuxType) -> Option<u64> {
         aux.iter().find(|e| e.type_id == t).map(|e| e.value)
+    }
+
+    #[test]
+    fn arm64_hwcap_follows_the_id_registers() {
+        // Cortex-A72 (QEMU): FP and AdvSIMD (0), AES + PMULL (2), SHA1,
+        // SHA2, CRC32; no LSE atomics, no half precision.
+        let pfr0 = 0x0000_0000_0000_0011;
+        let isar0 = 0x0000_0000_0001_1120;
+        assert_eq!(arm64_hwcap(pfr0, isar0), 0b1111_1011);
+        // No FP/AdvSIMD (0xF): neither bit; half precision (1) and LSE (2).
+        assert_eq!(arm64_hwcap(0xFF << 16, 0), 0);
+        assert_eq!(arm64_hwcap(0x11 << 16, 2 << 20), 0b111_0000_0011);
+    }
+
+    #[test]
+    fn riscv_hwcap_has_the_base_letters_the_kernel_supports() {
+        let rv64gc = |l: u8| b"imafdcv".contains(&l);
+        let bit = |l: u8| 1u64 << (l - b'a');
+        let base = bit(b'i') | bit(b'm') | bit(b'a') | bit(b'c');
+        // V is never reported (no vector state is switched); F and D only
+        // when user FP is.
+        assert_eq!(riscv_hwcap(rv64gc, true), base | bit(b'f') | bit(b'd'));
+        assert_eq!(riscv_hwcap(rv64gc, false), base);
     }
 
     #[test]

@@ -2,6 +2,45 @@
 
 ### Added
 
+- **BusyBox and musl programs on AArch64 and RISC-V.** `scripts/build-musl-rootfs.sh aarch64|riscv64`
+  builds a BlockFS root with the musl cross toolchain: BusyBox 1.36.1 (static), `/sbin/init`,
+  `audit_runtime_test`, `musl_runtime_test` and the dynamically linked C++ test with musl's
+  loader. `ARCH=aarch64|riscv64 scripts/run-rootfs-tests.sh` boots it and runs the BusyBox
+  self-test and both suites; all pass (BUSYBOX_ALL_PASS, AUDIT-RUNTIME 88/88,
+  MUSL-RUNTIME 59/59) on both. `scripts/dev/gate.sh --rootfs` runs both after x86_64's
+  suite (it needs the toolchains). Getting there fixed:
+  - **fork and clone** had never worked on either: the child is now built from the parent's live
+    trap frame (`live_user_frame`, `load_user_frame`, TPIDR_EL0 / `tp`) and its thread is started
+    on every architecture (it was x86_64-only); `clone` takes arm64/RISC-V's argument order
+    (CLONE_BACKWARDS: flags, stack, ptid, tls, ctid).
+  - **exec** returned into the old, freed image: it now switches TTBR0 or `satp`, sets TLS,
+    resets FP state and rewrites the trap frame for the new entry point and stack.
+  - **The shell** ran user programs only on x86_64.
+  - **ABI layouts:** `stat` is asm-generic's 128-byte layout off x86_64 (the 144-byte x86 one
+    overran musl's buffer: ash crashed at pc 0); `epoll_event` is unpacked (data at offset 8);
+    arm64's `O_DIRECTORY`/`O_NOFOLLOW` are 0x4000/0x8000 (its 0x20000 is O_LARGEFILE).
+  - **renameat2** (x86_64 316, generic 276, from `abi/syscalls.map`; flags 0, else EINVAL), and a
+    host test,
+    `generic_numbers_match_the_linux_table`, that checks every AArch64 and RISC-V number the
+    kernel decodes against Linux's `scripts/syscall.tbl`, in both directions.
+  - **Signal masks:** the mask pselect, ppoll and epoll_pwait install is kept for the handler
+    when they are interrupted on every architecture (it was x86_64-only).
+  - **RISC-V copy-on-write in system calls:** `scause` does not tell a missing page from a
+    protection fault, so a `read()` into a page still shared after fork failed with EFAULT
+    (ash lost its script after its first fork); the user-copy path now resolves it as CoW.
+    For the same reason a fault on a mapped page it may not access is now SEGV_ACCERR there
+    (a mapping covers it, as Linux decides), not always SEGV_MAPERR.
+  - **Wall clock:** CLOCK_REALTIME comes from the device tree's PL031 (AArch64) or Goldfish
+    (RISC-V) RTC (`arch::mmio_rtc`, `Fdt::compatible_reg`, host-tested); it counted from boot.
+  - **AT_HWCAP** from the ID registers on AArch64 and from the ISA string on RISC-V (F/D only
+    with user FP state), host-tested.
+  - **Faults** of user programs log the signal, code, address, pc and lr on AArch64.
+  Boot tests `user_fork_child_resumes_after_call` and `user_exec_enters_new_image` (each failed
+  first: the child hung; exec ended with status 139): AArch64 60/60, RISC-V 53/53.
+  `memory_map_from_device_tree` counts the kernel heap, which comes out of managed RAM (it
+  failed with 2 GiB). The tests themselves became portable (TLB-retry handler, a ready byte in
+  the flock test, the x86_64-only TLS check guarded, `brk` through the system call).
+
 - **musl and GCC cross toolchains for AArch64 and RISC-V.** `tools/cross/veridian-paths.sh` takes
   `VERIDIAN_ARCH` (x86_64, aarch64, riscv64); x86_64 keeps its locations, the others get their own
   sysroot, toolchain and build trees (`-aarch64`, `-riscv64`), so one never replaces another.
@@ -15,7 +54,8 @@
   (`eventfd`, `signalfd`, `epoll_create`, `select`, `arch_prctl`; `select` is checked through
   `pselect6` where it is missing), and `audit_runtime_test` gets each architecture's traps
   (AArch64 `udf`/`brk`/EL1 register, RISC-V `unimp`/`ebreak`/S-mode CSR) and `clone`'s argument
-  order (arm64 and RISC-V put the child TID last). Not run on those architectures yet.
+  order (arm64 and RISC-V put the child TID last). They run there since the BusyBox root
+  for those architectures (above).
 
 - **RAM from the device tree, and a heap sized from it, on AArch64 and RISC-V (HA-17, HR-07).**
   Both assumed 128 MiB of RAM and had a static 8 MiB heap, too small for a BlockFS root (with a

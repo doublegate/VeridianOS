@@ -78,6 +78,23 @@ pub struct FpuState {
 }
 
 impl RiscVContext {
+    /// Take the user registers of `frame` (a live trap frame, `x[i]` =
+    /// register x<i>): a fork or clone child resumes where its parent's
+    /// system call returns to, not at the program's entry.
+    pub fn load_user_frame(&mut self, frame: &crate::arch::riscv64::switch::UserFrame) {
+        let x = |i: usize| frame.x[i] as usize;
+        (self.ra, self.sp, self.gp, self.tp) = (x(1), x(2), x(3), x(4));
+        (self.t0, self.t1, self.t2) = (x(5), x(6), x(7));
+        (self.s0, self.s1) = (x(8), x(9));
+        (self.a0, self.a1, self.a2, self.a3) = (x(10), x(11), x(12), x(13));
+        (self.a4, self.a5, self.a6, self.a7) = (x(14), x(15), x(16), x(17));
+        (self.s2, self.s3, self.s4, self.s5, self.s6) = (x(18), x(19), x(20), x(21), x(22));
+        (self.s7, self.s8, self.s9, self.s10, self.s11) = (x(23), x(24), x(25), x(26), x(27));
+        (self.t3, self.t4, self.t5, self.t6) = (x(28), x(29), x(30), x(31));
+        self.pc = frame.sepc as usize;
+        self.sepc = frame.sepc as usize;
+    }
+
     /// Create new context for a task
     pub fn new(entry_point: usize, stack_pointer: usize) -> Self {
         Self {

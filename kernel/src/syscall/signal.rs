@@ -525,13 +525,15 @@ impl WaitSigmask {
         let Some(old) = self.old else {
             return;
         };
-        #[cfg(all(feature = "alloc", target_arch = "x86_64"))]
+        // Every architecture's delivery restores it from the handler frame
+        // (x86_64's `frame` and the generic one).
+        #[cfg(feature = "alloc")]
         if *result == Err(SyscallError::Interrupted)
             && crate::sched::dispatch::current_owner().is_some()
         {
             return;
         }
-        #[cfg(not(all(feature = "alloc", target_arch = "x86_64")))]
+        #[cfg(not(feature = "alloc"))]
         let _ = result;
         if let (Some(proc), Some(thread)) = (process::current_process(), process::current_thread())
         {
@@ -574,7 +576,18 @@ pub fn sys_sigaltstack(ss: usize, old_ss: usize) -> SyscallResult {
     // The caller's stack pointer decides SS_ONSTACK and EPERM.
     #[cfg(all(target_arch = "x86_64", target_os = "none"))]
     let sp = crate::arch::x86_64::syscall::get_syscall_frame().map_or(0, |f| f.rsp);
-    #[cfg(not(all(target_arch = "x86_64", target_os = "none")))]
+    #[cfg(all(target_arch = "aarch64", target_os = "none"))]
+    let sp = crate::arch::aarch64::switch::live_user_frame().map_or(0, |f| f.sp);
+    #[cfg(all(target_arch = "riscv64", target_os = "none"))]
+    let sp = crate::arch::riscv64::switch::live_user_frame().map_or(0, |f| f.x[2]);
+    #[cfg(not(all(
+        any(
+            target_arch = "x86_64",
+            target_arch = "aarch64",
+            target_arch = "riscv64"
+        ),
+        target_os = "none"
+    )))]
     let sp = 0u64;
 
     let request = if ss != 0 {

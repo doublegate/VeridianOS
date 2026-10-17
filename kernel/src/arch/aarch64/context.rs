@@ -47,6 +47,18 @@ pub struct FpuState {
 }
 
 impl AArch64Context {
+    /// Take the user registers of `frame` (a live exception frame) and the
+    /// TLS register `tls`: a fork or clone child resumes where its parent's
+    /// system call returns to, not at the program's entry.
+    pub fn load_user_frame(&mut self, frame: &crate::arch::aarch64::switch::UserFrame, tls: u64) {
+        self.x = frame.x;
+        self.sp = frame.sp;
+        self.pc = frame.elr;
+        self.elr = frame.elr;
+        self.tpidr_el0 = tls;
+        self.tls_base = tls;
+    }
+
     /// Create new context for a task
     pub fn new(entry_point: usize, stack_pointer: usize) -> Self {
         Self {

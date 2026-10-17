@@ -181,7 +181,15 @@ pub fn sys_open(path: usize, flags: usize, mode: usize) -> SyscallResult {
 ///   directory (ENOTDIR), and a directory cannot be opened for writing (EISDIR)
 ///   (N-116).
 fn open_path(path: &str, flags: usize, mode: usize) -> SyscallResult {
+    // arm64 has its own values (its O_LARGEFILE, 0x2_0000, which musl adds
+    // to every open, is x86_64's O_NOFOLLOW); riscv64 has x86_64's.
+    #[cfg(target_arch = "aarch64")]
+    const O_DIRECTORY: usize = 0x4000;
+    #[cfg(target_arch = "aarch64")]
+    const O_NOFOLLOW: usize = 0x8000;
+    #[cfg(not(target_arch = "aarch64"))]
     const O_DIRECTORY: usize = 0x1_0000;
+    #[cfg(not(target_arch = "aarch64"))]
     const O_NOFOLLOW: usize = 0x2_0000;
     const O_CLOEXEC: usize = 0x8_0000;
     use crate::fs::NodeType;
@@ -869,9 +877,11 @@ pub fn sys_fsync(fd: usize) -> SyscallResult {
 /// Field order and padding MUST match the kernel ABI that musl expects.
 /// Key difference from naive layout: nlink comes before mode, and there
 /// is a 4-byte pad after gid, plus nanosecond fields and trailing padding.
+/// `fill_stat` builds this on every architecture; arm64 and RISC-V copy it
+/// out as [`GenericStat`].
 #[repr(C)]
 #[derive(Clone, Copy)]
-struct FileStat {
+struct X86Stat {
     st_dev: u64,        // offset 0
     st_ino: u64,        // offset 8
     st_nlink: u64,      // offset 16 (note: before st_mode in Linux ABI)
@@ -893,21 +903,103 @@ struct FileStat {
 }
 
 // Compile-time assertion: Linux x86_64 struct stat is exactly 144 bytes.
-const _: () = assert!(core::mem::size_of::<FileStat>() == 144);
+const _: () = assert!(core::mem::size_of::<X86Stat>() == 144);
 // Every field sits where the next one ends (Linux x86_64 offsets), so there
 // is no implicit padding and a copy to user memory exposes no
 // uninitialized kernel bytes.
 const _: () = {
     use core::mem::offset_of;
-    assert!(offset_of!(FileStat, st_mode) == 24);
-    assert!(offset_of!(FileStat, __pad0) == 36);
-    assert!(offset_of!(FileStat, st_rdev) == 40);
-    assert!(offset_of!(FileStat, st_atime) == 72);
-    assert!(offset_of!(FileStat, __unused) == 120);
+    assert!(offset_of!(X86Stat, st_mode) == 24);
+    assert!(offset_of!(X86Stat, __pad0) == 36);
+    assert!(offset_of!(X86Stat, st_rdev) == 40);
+    assert!(offset_of!(X86Stat, st_atime) == 72);
+    assert!(offset_of!(X86Stat, __unused) == 120);
 };
+
+/// Linux's asm-generic `struct stat` (128 bytes), which arm64 and RISC-V
+/// use: mode before a 32-bit nlink, a pad after rdev, a 32-bit blksize.
+/// Writing the 144-byte x86_64 layout there ran 16 bytes past the caller's
+/// buffer (BusyBox ash lost its saved frame and returned to address 0).
+#[repr(C)]
+#[derive(Clone, Copy)]
+#[cfg_attr(
+    not(any(target_arch = "aarch64", target_arch = "riscv64")),
+    allow(dead_code)
+)]
+struct GenericStat {
+    st_dev: u64,        // offset 0
+    st_ino: u64,        // offset 8
+    st_mode: u32,       // offset 16
+    st_nlink: u32,      // offset 20
+    st_uid: u32,        // offset 24
+    st_gid: u32,        // offset 28
+    st_rdev: u64,       // offset 32
+    __pad1: u64,        // offset 40
+    st_size: i64,       // offset 48
+    st_blksize: i32,    // offset 56
+    __pad2: i32,        // offset 60
+    st_blocks: i64,     // offset 64
+    st_atime: i64,      // offset 72
+    st_atime_nsec: i64, // offset 80
+    st_mtime: i64,      // offset 88
+    st_mtime_nsec: i64, // offset 96
+    st_ctime: i64,      // offset 104
+    st_ctime_nsec: i64, // offset 112
+    __unused: [u32; 2], // offset 120
+}
+
+const _: () = assert!(core::mem::size_of::<GenericStat>() == 128);
+// No implicit padding (no uninitialised kernel bytes reach user memory).
+const _: () = {
+    use core::mem::offset_of;
+    assert!(offset_of!(GenericStat, st_mode) == 16);
+    assert!(offset_of!(GenericStat, st_rdev) == 32);
+    assert!(offset_of!(GenericStat, st_size) == 48);
+    assert!(offset_of!(GenericStat, st_blocks) == 64);
+    assert!(offset_of!(GenericStat, __unused) == 120);
+};
+
+impl From<X86Stat> for GenericStat {
+    fn from(s: X86Stat) -> Self {
+        Self {
+            st_dev: s.st_dev,
+            st_ino: s.st_ino,
+            st_mode: s.st_mode,
+            st_nlink: s.st_nlink as u32,
+            st_uid: s.st_uid,
+            st_gid: s.st_gid,
+            st_rdev: s.st_rdev,
+            __pad1: 0,
+            st_size: s.st_size,
+            st_blksize: s.st_blksize as i32,
+            __pad2: 0,
+            st_blocks: s.st_blocks,
+            st_atime: s.st_atime,
+            st_atime_nsec: s.st_atime_nsec,
+            st_mtime: s.st_mtime,
+            st_mtime_nsec: s.st_mtime_nsec,
+            st_ctime: s.st_ctime,
+            st_ctime_nsec: s.st_ctime_nsec,
+            __unused: [0; 2],
+        }
+    }
+}
+
+/// The `struct stat` this architecture's programs read.
+#[cfg(not(any(target_arch = "aarch64", target_arch = "riscv64")))]
+type FileStat = X86Stat;
+#[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
+type FileStat = GenericStat;
 
 /// Helper: populate a FileStat from VFS metadata.
 fn fill_stat(metadata: &crate::fs::Metadata) -> FileStat {
+    #[allow(clippy::useless_conversion)] // the identity on x86_64
+    let stat = FileStat::from(fill_x86_stat(metadata));
+    stat
+}
+
+/// [`fill_stat`] in the x86_64 layout.
+fn fill_x86_stat(metadata: &crate::fs::Metadata) -> X86Stat {
     // File type bits plus the node's real permission bits; this used to
     // report a fixed 0644/0755 for every file and directory.
     let type_bits = match metadata.node_type {
@@ -921,7 +1013,7 @@ fn fill_stat(metadata: &crate::fs::Metadata) -> FileStat {
     };
     let mode = type_bits | metadata.permissions.to_mode();
     let size = metadata.size as i64;
-    FileStat {
+    X86Stat {
         st_dev: 1,
         st_ino: metadata.inode,
         st_nlink: 1,
@@ -2943,6 +3035,24 @@ pub fn sys_renameat(
     rename_entry(&old_abs, &new_abs)
 }
 
+/// renameat2(olddirfd, old, newdirfd, new, flags) (syscall 316; 276 in the
+/// generic table, where it is riscv64's only rename). Flags 0 is renameat.
+/// RENAME_NOREPLACE, RENAME_EXCHANGE and RENAME_WHITEOUT are EINVAL, as Linux
+/// answers on a filesystem without them: none of the filesystems here can
+/// do them atomically.
+pub fn sys_renameat2(
+    olddirfd: usize,
+    old_ptr: usize,
+    newdirfd: usize,
+    new_ptr: usize,
+    flags: usize,
+) -> SyscallResult {
+    if flags as u32 != 0 {
+        return Err(SyscallError::InvalidArgument);
+    }
+    sys_renameat(olddirfd, old_ptr, newdirfd, new_ptr)
+}
+
 /// The file behind `fd` for pread/pwrite, in Linux's order: a negative
 /// offset is EINVAL, then an unknown fd EBADF, then a stream (pipe, socket,
 /// terminal, event fd), which has no offset, ESPIPE (N-190). The access
@@ -3129,6 +3239,39 @@ pub fn sys_mknod(path_ptr: usize, _mode: usize, _dev: usize) -> SyscallResult {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn generic_stat_takes_every_field() {
+        let x = super::X86Stat {
+            st_dev: 1,
+            st_ino: 2,
+            st_nlink: 3,
+            st_mode: 0o100644,
+            st_uid: 5,
+            st_gid: 6,
+            __pad0: 0,
+            st_rdev: 7,
+            st_size: 8,
+            st_blksize: 4096,
+            st_blocks: 9,
+            st_atime: 10,
+            st_atime_nsec: 11,
+            st_mtime: 12,
+            st_mtime_nsec: 13,
+            st_ctime: 14,
+            st_ctime_nsec: 15,
+            __unused: [0; 3],
+        };
+        let g = super::GenericStat::from(x);
+        assert_eq!(
+            (g.st_dev, g.st_ino, g.st_mode, g.st_nlink),
+            (1, 2, 0o100644, 3)
+        );
+        assert_eq!((g.st_uid, g.st_gid, g.st_rdev, g.st_size), (5, 6, 7, 8));
+        assert_eq!((g.st_blksize, g.st_blocks), (4096, 9));
+        assert_eq!((g.st_atime, g.st_atime_nsec, g.st_mtime), (10, 11, 12));
+        assert_eq!((g.st_mtime_nsec, g.st_ctime, g.st_ctime_nsec), (13, 14, 15));
+    }
+
     use super::*;
     use crate::process::creds::Credentials;
 

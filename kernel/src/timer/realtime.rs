@@ -4,8 +4,8 @@
 //! clock at boot (UTC seconds since 1970), and by clock_settime and
 //! settimeofday. Moving it never moves the monotonic clock, as on Linux.
 //! Until an RTC has been read the offset is zero and the wall clock counts
-//! from boot (AArch64 and RISC-V have no RTC driver yet; they run no user
-//! programs either).
+//! from boot. The RTC is the CMOS clock on x86_64 and a device-tree PL031
+//! or Goldfish RTC on AArch64 and RISC-V (`arch::mmio_rtc`).
 
 use core::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 

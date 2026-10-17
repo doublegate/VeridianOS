@@ -417,6 +417,14 @@ fn build_minimal_elf(code: &[u8], load_addr: u64) -> Vec<u8> {
 
 /// Populate the RamFS with embedded init and shell binaries.
 ///
+/// The embedded init as an ELF executable (what [`populate_initramfs`]
+/// writes to `/sbin/init`), for the boot tests: with a root filesystem
+/// mounted, `/sbin/init` is that filesystem's init instead.
+#[cfg(feature = "alloc")]
+pub fn init_elf() -> Vec<u8> {
+    build_minimal_elf(INIT_CODE, 0x40_0000)
+}
+
 /// Creates `/sbin/init` and `/bin/vsh` in the VFS so that
 /// `load_init_process()` and `load_shell()` can find real ELF executables
 /// instead of falling back to stub processes.

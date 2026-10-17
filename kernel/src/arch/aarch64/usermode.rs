@@ -367,6 +367,91 @@ extern "C" {
     static veridian_a64_user_cacheops_end: u8;
 }
 
+// Fork: x19 = 42, then clone(SIGCHLD) (220; arm64's argument order:
+// flags, stack, parent_tid, tls, child_tid). The child exits with x19 - 35
+// = 7, which it can only do if it resumed after the svc with the parent's
+// registers; the parent waits for it (wait4 260) and exits with its status.
+// A child started from the program's entry would fork again, forever.
+core::arch::global_asm!(
+    ".section .rodata",
+    ".balign 4",
+    ".global veridian_a64_user_fork",
+    "veridian_a64_user_fork:",
+    "    mov x19, #42",
+    "    mov x0, #17",
+    "    mov x1, #0",
+    "    mov x2, #0",
+    "    mov x3, #0",
+    "    mov x4, #0",
+    "    mov x8, #220",
+    "    svc #0",
+    "    cbnz x0, 1f",
+    "    sub x0, x19, #35",
+    "    mov x8, #94",
+    "    svc #0",
+    "1:  sub sp, sp, #16",
+    "    str xzr, [sp]",
+    "    mov x1, sp",
+    "    mov x2, #0",
+    "    mov x3, #0",
+    "    mov x8, #260",
+    "    svc #0",
+    "    ldr w0, [sp]",
+    "    lsr w0, w0, #8",
+    "    mov x8, #94",
+    "    svc #0",
+    ".global veridian_a64_user_fork_end",
+    "veridian_a64_user_fork_end:",
+);
+
+// Exec: execve("/tmp/embedded-init", NULL, NULL) (221), which bootstrap
+// wrote and which exits 0; exit 1 if the call returns. The new image must
+// start at its own entry: returning through the old frame went back into
+// the unmapped old image (SIGSEGV).
+core::arch::global_asm!(
+    ".section .rodata",
+    ".balign 4",
+    ".global veridian_a64_user_exec",
+    "veridian_a64_user_exec:",
+    "    adr x0, 1f",
+    "    mov x1, #0",
+    "    mov x2, #0",
+    "    mov x8, #221",
+    "    svc #0",
+    "    mov x0, #1",
+    "    mov x8, #94",
+    "    svc #0",
+    "1:  .asciz \"/tmp/embedded-init\"",
+    ".balign 4",
+    ".global veridian_a64_user_exec_end",
+    "veridian_a64_user_exec_end:",
+);
+
+extern "C" {
+    static veridian_a64_user_fork: u8;
+    static veridian_a64_user_fork_end: u8;
+    static veridian_a64_user_exec: u8;
+    static veridian_a64_user_exec_end: u8;
+}
+
+/// The exec test program (see its assembly).
+pub fn test_exec_program() -> &'static [u8] {
+    // Only the addresses of the linker symbols are taken (safe).
+    span(
+        core::ptr::addr_of!(veridian_a64_user_exec),
+        core::ptr::addr_of!(veridian_a64_user_exec_end),
+    )
+}
+
+/// The fork test program (see its assembly).
+pub fn test_fork_program() -> &'static [u8] {
+    // Only the addresses of the linker symbols are taken (safe).
+    span(
+        core::ptr::addr_of!(veridian_a64_user_fork),
+        core::ptr::addr_of!(veridian_a64_user_fork_end),
+    )
+}
+
 /// The EL0 cache-operations test program (see its assembly).
 pub fn test_cacheops_program() -> &'static [u8] {
     // Only the addresses of the linker symbols are taken (safe).

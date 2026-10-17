@@ -56,8 +56,8 @@ pub(crate) fn sys_fork_with(opts: &crate::process::fork::ForkOptions) -> Syscall
 
                 // A dispatched parent's child runs as its own task, from the
                 // parent's registers at this syscall (rax = 0) and a copy of
-                // its vector state.
-                #[cfg(all(feature = "alloc", target_arch = "x86_64"))]
+                // its vector state (on every architecture since sprint E).
+                #[cfg(feature = "alloc")]
                 if crate::sched::dispatch::current_owner().is_some() {
                     let thread = child_process.threads.lock().values().next().cloned();
                     let started = thread.is_some_and(|t| {
@@ -224,9 +224,8 @@ pub fn sys_exec(path_ptr: usize, argv_ptr: usize, envp_ptr: usize) -> SyscallRes
                 );
             }
 
-            // Non-x86_64: exec not yet supported for user-mode entry
             #[cfg(not(target_arch = "x86_64"))]
-            Err(SyscallError::InvalidState)
+            enter_new_image()
         }
         // Report the real cause (not-found, bad image, out of memory);
         // every failure used to surface as ENOENT. An image that does not
@@ -237,6 +236,88 @@ pub fn sys_exec(path_ptr: usize, argv_ptr: usize, envp_ptr: usize) -> SyscallRes
         }) => Err(SyscallError::ExecFormat),
         Err(e) => Err(super::map_kernel_error(e)),
     }
+}
+
+/// AArch64 and RISC-V: finish a successful exec of the calling (dispatched)
+/// thread. The new image's root goes into TTBR0/satp (the task keeps it:
+/// the switch saves the live root), the old tables are freed, and the
+/// exception frame this system call returns through is rewritten to the
+/// new entry and stack with every other register zero, the static TLS
+/// block as thread pointer and the initial FP state, as Linux starts a new
+/// program. The old frame pointed into the image that was just unmapped.
+#[cfg(not(target_arch = "x86_64"))]
+fn enter_new_image() -> SyscallResult {
+    #[cfg(target_arch = "aarch64")]
+    use crate::arch::aarch64::switch;
+    use crate::arch::context::ThreadContext;
+    #[cfg(target_arch = "riscv64")]
+    use crate::arch::riscv64::switch;
+    if crate::sched::dispatch::current_owner().is_none() {
+        return Err(SyscallError::InvalidState);
+    }
+    let thread = crate::process::current_thread().ok_or(SyscallError::InvalidState)?;
+    let process = current_process().ok_or(SyscallError::InvalidState)?;
+    let (entry, stack) = {
+        let ctx = thread.context.lock();
+        (
+            ctx.get_instruction_pointer() as u64,
+            ctx.get_stack_pointer() as u64,
+        )
+    };
+    let root = process.memory_space.lock().get_page_table();
+    let tls = process
+        .tls_fs_base
+        .load(core::sync::atomic::Ordering::Acquire);
+    // SAFETY: this CPU's own block; `syscall_frame` is this thread's live
+    // exception frame on its kernel stack for the duration of the call.
+    let frame =
+        unsafe { (*crate::arch::percpu::this_arch_cpu()).syscall_frame } as *mut switch::UserFrame;
+    if root == 0 || frame.is_null() {
+        return Err(SyscallError::InvalidState);
+    }
+    let old = switch::current_root();
+    #[cfg(target_arch = "aarch64")]
+    {
+        // SAFETY: `root` is the new image's level-0 table, with the ASID
+        // ttbr0_for gave it; the kernel runs from TTBR1.
+        unsafe { switch::switch_address_space(switch::ttbr0_for(root)) };
+        switch::write_tls(tls);
+        crate::arch::aarch64::context::restore_fpu_state(
+            &crate::arch::aarch64::context::initial_fpu(),
+        );
+        // SAFETY: the live frame (above); nothing else uses it now.
+        unsafe {
+            *frame = switch::UserFrame {
+                x: [0; 31],
+                sp: stack,
+                elr: entry,
+                spsr: 0,
+            };
+        }
+    }
+    #[cfg(target_arch = "riscv64")]
+    {
+        // SAFETY: `root` is the new image's root, which maps the kernel half.
+        unsafe { switch::switch_address_space(root) };
+        crate::arch::riscv64::fpu::restore(&crate::arch::riscv64::fpu::initial());
+        // SAFETY: the live frame (above); nothing else uses it now.
+        unsafe {
+            let sstatus = (*frame).sstatus;
+            *frame = switch::UserFrame {
+                x: [0; 32],
+                sepc: entry,
+                sstatus,
+            };
+            (*frame).x[switch::UserFrame::SP] = stack;
+            (*frame).x[switch::UserFrame::TP] = tls;
+        }
+    }
+    // The old tables are this thread's alone now (de_thread ended the
+    // others), and no CPU runs in them any more.
+    if old != root && old != 0 {
+        crate::mm::vas::free_user_page_table_frames(old);
+    }
+    Ok(0)
 }
 
 /// Exit the current process

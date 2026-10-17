@@ -129,7 +129,36 @@ pub fn resolve_user_copy_fault(info: &PageFaultInfo) -> bool {
     };
     // Never sleeps: the system call may hold a spinlock (security review
     // of d1e2b47); a held address-space lock gives EFAULT, as before.
+    // RISC-V's scause does not tell a missing page from a protection fault
+    // (`from_riscv` reports NotPresent for both), so a write to a present
+    // page still shared after a fork arrives here: it is resolved as CoW,
+    // which acts only on pages fork marked copy-on-write.
     try_demand_page_in(&process, &as_user, false).is_ok()
+        || (info.was_write && resolve_cow_in(&process, info, false).is_ok())
+}
+
+/// The SIGSEGV code for a user fault at `addr` that could not be resolved,
+/// as Linux chooses it: SEGV_ACCERR when a mapping covers the address (the
+/// access was not allowed), SEGV_MAPERR when none does. For RISC-V, whose
+/// scause does not tell the two apart (`from_riscv`). Called from a user
+/// fault, where the thread holds no kernel lock.
+pub fn user_segv_code(addr: u64) -> i32 {
+    #[cfg(feature = "alloc")]
+    let mapped = crate::process::try_current_process().is_some_and(|p| {
+        p.memory_space
+            .lock_if_may_sleep(true)
+            .is_some_and(|ms| ms.find_mapping(VirtualAddress::new(addr)).is_some())
+    });
+    #[cfg(not(feature = "alloc"))]
+    let mapped = {
+        let _ = addr;
+        false
+    };
+    if mapped {
+        crate::process::signals::SEGV_ACCERR
+    } else {
+        crate::process::signals::SEGV_MAPERR
+    }
 }
 
 /// `may_sleep`: whether the address-space lock may be waited for. Only a

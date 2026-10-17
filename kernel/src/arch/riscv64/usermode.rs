@@ -398,6 +398,91 @@ pub fn test_elf() -> alloc::vec::Vec<u8> {
     e
 }
 
+// Fork, as on AArch64: s1 = 42, clone(SIGCHLD) (220: flags, stack,
+// parent_tid, tls, child_tid); the child exits with s1 - 35 = 7, the parent
+// waits for it (wait4 260) and exits with its status.
+core::arch::global_asm!(
+    ".section .rodata",
+    ".balign 4",
+    ".global veridian_rv_user_fork",
+    "veridian_rv_user_fork:",
+    "    li s1, 42",
+    "    li a0, 17",
+    "    li a1, 0",
+    "    li a2, 0",
+    "    li a3, 0",
+    "    li a4, 0",
+    "    li a7, 220",
+    "    ecall",
+    "    bnez a0, 1f",
+    "    addi a0, s1, -35",
+    "    li a7, 94",
+    "    ecall",
+    "1:  addi sp, sp, -16",
+    "    sd zero, 0(sp)",
+    "    mv a1, sp",
+    "    li a2, 0",
+    "    li a3, 0",
+    "    li a7, 260",
+    "    ecall",
+    "    lw a0, 0(sp)",
+    "    srli a0, a0, 8",
+    "    li a7, 94",
+    "    ecall",
+    ".global veridian_rv_user_fork_end",
+    "veridian_rv_user_fork_end:",
+);
+
+// Exec, as on AArch64: execve("/tmp/embedded-init", NULL, NULL) (221);
+// exit 1 if it returns.
+core::arch::global_asm!(
+    ".section .rodata",
+    ".balign 4",
+    ".global veridian_rv_user_exec",
+    "veridian_rv_user_exec:",
+    "    lla a0, 1f",
+    "    li a1, 0",
+    "    li a2, 0",
+    "    li a7, 221",
+    "    ecall",
+    "    li a0, 1",
+    "    li a7, 94",
+    "    ecall",
+    "1:  .asciz \"/tmp/embedded-init\"",
+    ".balign 4",
+    ".global veridian_rv_user_exec_end",
+    "veridian_rv_user_exec_end:",
+);
+
+extern "C" {
+    static veridian_rv_user_fork: u8;
+    static veridian_rv_user_fork_end: u8;
+    static veridian_rv_user_exec: u8;
+    static veridian_rv_user_exec_end: u8;
+}
+
+/// The exec test program (see its assembly).
+pub fn test_exec_program() -> &'static [u8] {
+    // SAFETY: two labels of one rodata block, the start before the end;
+    // only their addresses are taken.
+    unsafe {
+        let a = core::ptr::addr_of!(veridian_rv_user_exec);
+        let b = core::ptr::addr_of!(veridian_rv_user_exec_end);
+        core::slice::from_raw_parts(a, b as usize - a as usize)
+    }
+}
+
+/// The fork test program (see its assembly).
+pub fn test_fork_program() -> &'static [u8] {
+    // SAFETY: two labels of one rodata block, the start before the end;
+    // only their addresses are taken.
+    unsafe {
+        let a = core::ptr::addr_of!(veridian_rv_user_fork);
+        let b = core::ptr::addr_of!(veridian_rv_user_fork_end);
+        core::slice::from_raw_parts(a, b as usize - a as usize)
+    }
+}
+
 /// The boot-test user programs (see above): getpid round trip, page
 /// fault, privileged CSR, FP state kept across switches, signal handler
 /// round trip, futex WAKE_OP.

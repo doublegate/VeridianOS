@@ -881,7 +881,13 @@ fn handle_syscall(
         Syscall::Gettid => sys_gettid(),
         Syscall::ThreadSetAffinity => sys_thread_setaffinity(arg1, arg2, arg3),
         Syscall::ThreadGetAffinity => sys_thread_getaffinity(arg1, arg2, arg3),
+        // arm64 and RISC-V pass clone's arguments in Linux's CLONE_BACKWARDS
+        // order (flags, stack, parent_tid, tls, child_tid), as musl's
+        // __clone does; x86_64 passes child_tid before tls.
+        #[cfg(not(any(target_arch = "aarch64", target_arch = "riscv64")))]
         Syscall::Clone => thread_clone::sys_thread_clone(arg1, arg2, arg3, arg4, arg5),
+        #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
+        Syscall::Clone => thread_clone::sys_thread_clone(arg1, arg2, arg3, arg5, arg4),
 
         // Filesystem operations
         Syscall::Open => sys_open(arg1, arg2, arg3),
@@ -1007,6 +1013,7 @@ fn handle_syscall(
         Syscall::Unlinkat => sys_unlinkat(arg1, arg2, arg3),
         Syscall::Mkdirat => sys_mkdirat(arg1, arg2, arg3),
         Syscall::Renameat => sys_renameat(arg1, arg2, arg3, arg4),
+        Syscall::Renameat2 => sys_renameat2(arg1, arg2, arg3, arg4, arg5),
         Syscall::Pread64 => sys_pread(arg1, arg2, arg3, arg4),
         Syscall::Pwrite64 => sys_pwrite(arg1, arg2, arg3, arg4),
         Syscall::Chown => sys_chown(arg1, arg2, arg3),
@@ -1609,7 +1616,8 @@ fn sys_epoll_wait(
     let file = current_file(epfd)?;
     let ep = EpollNode::of(&file).ok_or(SyscallError::InvalidArgument)?;
     // Events are gathered in a kernel array (at most 1024 per call, as a
-    // short count is always allowed) and copied out packed, through the
+    // short count is always allowed) and copied out in this architecture's
+    // layout (packed on x86_64 only), through the
     // fault-tolerant writer (N-43).
     let mut events = alloc::vec![EpollEvent { events: 0, data: 0 }; max_events.min(1024)];
     let n = ep.wait(&mut events, timeout_ns).map_err(|e| match e {
@@ -1620,15 +1628,25 @@ fn sys_epoll_wait(
     Ok(n)
 }
 
-/// `sizeof(struct epoll_event)`: packed `u32 events` + `u64 data`.
-const EPOLL_EVENT_BYTES: usize = core::mem::size_of::<crate::net::epoll::EpollEvent>();
+/// Where `data` sits in the user `struct epoll_event`: Linux packs it on
+/// x86_64 only (`u32 events` + `u64 data`, 12 bytes); arm64 and RISC-V have
+/// the natural layout (a pad after `events`, 16 bytes).
+const EPOLL_DATA_AT: usize = if cfg!(target_arch = "x86_64") { 4 } else { 8 };
+
+/// `sizeof(struct epoll_event)` on this architecture.
+const EPOLL_EVENT_BYTES: usize = EPOLL_DATA_AT + 8;
 
 /// Decode a user `struct epoll_event`.
 fn epoll_event_from_bytes(raw: &[u8; EPOLL_EVENT_BYTES]) -> crate::net::epoll::EpollEvent {
+    decode_epoll_event(raw, EPOLL_DATA_AT)
+}
+
+/// Decode a `struct epoll_event` whose `data` is at `data_at`.
+fn decode_epoll_event(raw: &[u8], data_at: usize) -> crate::net::epoll::EpollEvent {
     let mut events = [0u8; 4];
     let mut data = [0u8; 8];
     events.copy_from_slice(&raw[..4]);
-    data.copy_from_slice(&raw[4..]);
+    data.copy_from_slice(&raw[data_at..data_at + 8]);
     crate::net::epoll::EpollEvent {
         events: u32::from_ne_bytes(events),
         data: u64::from_ne_bytes(data),
@@ -1645,12 +1663,23 @@ fn epoll_events_buffer_len(max_events: usize) -> Result<usize, SyscallError> {
     Ok(max_events * EPOLL_EVENT_BYTES)
 }
 
-/// `events` as the packed user array epoll_wait returns.
+/// `events` as the user array epoll_wait returns (this architecture's
+/// layout).
 fn epoll_events_to_bytes(events: &[crate::net::epoll::EpollEvent]) -> alloc::vec::Vec<u8> {
-    let mut out = alloc::vec::Vec::with_capacity(events.len() * EPOLL_EVENT_BYTES);
+    encode_epoll_events(events, EPOLL_DATA_AT)
+}
+
+/// `events` as an array of `struct epoll_event` with `data` at `data_at`
+/// (any pad before it zero).
+fn encode_epoll_events(
+    events: &[crate::net::epoll::EpollEvent],
+    data_at: usize,
+) -> alloc::vec::Vec<u8> {
+    let mut out = alloc::vec::Vec::with_capacity(events.len() * (data_at + 8));
     for ev in events {
         let (flags, data) = (ev.events, ev.data);
         out.extend_from_slice(&flags.to_ne_bytes());
+        out.resize(out.len() + data_at - 4, 0);
         out.extend_from_slice(&data.to_ne_bytes());
     }
     out
@@ -3622,12 +3651,74 @@ mod tests {
         }
     }
 
+    /// Every arm64 and riscv64 number the kernel decodes is the one Linux's
+    /// generic table (`abi/linux/syscall.tbl`, Linux v7.2, with each
+    /// architecture's extra ABIs from its `Makefile.syscalls`) gives that
+    /// call, and every call the kernel knows by a Linux name is decoded at
+    /// Linux's number: the hand-written tables cannot drift or leave a call
+    /// out (riscv64 once had no renameat2).
+    #[test]
+    fn generic_numbers_match_the_linux_table() {
+        use alloc::{collections::BTreeMap, vec::Vec};
+        const TABLE: &str = include_str!("../../../abi/linux/syscall.tbl");
+        type Decode = fn(usize) -> Option<Syscall>;
+        let arches: [(&str, &[&str], Decode); 2] = [
+            (
+                "aarch64",
+                &["renameat", "rlimit", "memfd_secret"],
+                Syscall::from_aarch64,
+            ),
+            (
+                "riscv64",
+                &["riscv", "rlimit", "memfd_secret"],
+                Syscall::from_riscv64,
+            ),
+        ];
+        for (arch, extra, decode) in arches {
+            let mut linux: BTreeMap<usize, &str> = BTreeMap::new();
+            for line in TABLE.lines().filter(|l| !l.starts_with('#')) {
+                let f: Vec<&str> = line.split_whitespace().collect();
+                if f.len() >= 3 && (f[1] == "common" || f[1] == "64" || extra.contains(&f[1])) {
+                    linux.insert(f[0].parse().unwrap(), f[2]);
+                }
+            }
+            let mut wrong = Vec::new();
+            for nr in 0..1024 {
+                if let Some(call) = decode(nr) {
+                    if linux.get(&nr).copied() != call.linux_name() {
+                        wrong.push((nr, call.linux_name(), linux.get(&nr).copied()));
+                    }
+                }
+            }
+            let mut undecoded = Vec::new();
+            for &call in crate::syscall::numbers::ALL {
+                let Some(name) = call.linux_name() else {
+                    continue;
+                };
+                if let Some((&nr, _)) = linux.iter().find(|(_, n)| **n == name) {
+                    if decode(nr) != Some(call) {
+                        undecoded.push((nr, name));
+                    }
+                }
+            }
+            assert!(
+                wrong.is_empty() && undecoded.is_empty(),
+                "{arch}: decoded as another call (nr, ours, Linux's): {wrong:?}; known but not \
+                 decoded at Linux's number: {undecoded:?}"
+            );
+        }
+    }
+
     /// arm64 numbers: the generic table as on riscv64, plus `renameat` (38),
     /// which riscv64's table omits; nothing riscv-only.
     #[test]
     fn aarch64_numbers_are_the_generic_table() {
         assert_eq!(Syscall::from_aarch64(38), Some(Syscall::Renameat));
         assert_eq!(Syscall::from_riscv64(38), None);
+        // renameat2 is riscv64's only rename (musl's rename() uses it).
+        assert_eq!(Syscall::from_riscv64(276), Some(Syscall::Renameat2));
+        assert_eq!(Syscall::from_aarch64(276), Some(Syscall::Renameat2));
+        assert_eq!(Syscall::try_from(316), Ok(Syscall::Renameat2));
         assert_eq!(Syscall::from_aarch64(64), Some(Syscall::Write));
         assert_eq!(Syscall::from_aarch64(94), Some(Syscall::ExitGroup));
         assert_eq!(Syscall::from_aarch64(172), Some(Syscall::Getpid));
@@ -4262,6 +4353,25 @@ mod tests {
         assert_eq!(&bytes[12..16], &1u32.to_ne_bytes());
         assert_eq!(&bytes[16..], &2u64.to_ne_bytes());
         assert!(epoll_events_to_bytes(&[]).is_empty());
+    }
+
+    /// arm64 and RISC-V: `struct epoll_event` is not packed there (16
+    /// bytes, data at offset 8, the pad written as zero).
+    #[test]
+    fn epoll_event_generic_layout_round_trips() {
+        use crate::net::epoll::EpollEvent;
+        let mut raw = [0u8; 16];
+        raw[..4].copy_from_slice(&0x11u32.to_ne_bytes());
+        raw[4..8].copy_from_slice(&[0xAA; 4]); // padding, ignored
+        raw[8..].copy_from_slice(&0x42u64.to_ne_bytes());
+        let ev = decode_epoll_event(&raw, 8);
+        let (events, data) = (ev.events, ev.data);
+        assert_eq!((events, data), (0x11, 0x42));
+        let bytes = encode_epoll_events(&[EpollEvent { events: 1, data: 2 }], 8);
+        assert_eq!(bytes.len(), 16);
+        assert_eq!(&bytes[..4], &1u32.to_ne_bytes());
+        assert_eq!(&bytes[4..8], &[0; 4]);
+        assert_eq!(&bytes[8..], &2u64.to_ne_bytes());
     }
 
     /// W-16: the byte count for maxevents must not wrap.

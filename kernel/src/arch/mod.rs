@@ -5,6 +5,9 @@
 //! interface (serial, boot, context switching, interrupts) that the
 //! architecture-independent kernel code uses.
 
+/// Device-tree RTCs (the wall clock on AArch64 and RISC-V).
+#[cfg(any(test, target_arch = "aarch64", target_arch = "riscv64"))]
+pub mod mmio_rtc;
 pub mod percpu;
 pub mod smp_boot;
 

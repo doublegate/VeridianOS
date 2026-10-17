@@ -190,8 +190,11 @@ What does not work yet: `docs/KNOWN-LIMITATIONS.md`.
       `ic ialluis` without DIC; loader, mmap and mprotect with PROT_EXEC);
       memory map from `/memory` less the reservations and the blob, heap sized from it (HA-17);
       musl, Linux 7.2 UAPI headers and a GCC 16 cross toolchain (`tools/cross/build-musl-arch.sh`,
-      also RISC-V); next: port the runtime tests, rootfs; DMA coherency (HA-25 rest); register
-      sanitiser (N-170).
+      also RISC-V); fork/clone/exec, generic stat/epoll layouts, PL031/Goldfish RTC and a musl
+      BusyBox root running the BusyBox self-test and both runtime suites
+      (`scripts/build-musl-rootfs.sh`, `ARCH=... scripts/run-rootfs-tests.sh`; also RISC-V);
+      next: those runs in the gate; DMA coherency (HA-25 rest); register sanitiser (N-170);
+      PROT_BTI, AT_HWCAP2, arm64 MINSIGSTKSZ.
     - RISC-V: done: zero BSS, hart lottery, `sstatus.FS` Off in the kernel (HR-01, HR-19, HR-20
       part; the M-mode CSR reads go with FP switching). RISC-V Image header and
       relocatable or MMU-early boot (HR-02, HR-03); `satp` mode probe with Sv39 default and
@@ -295,6 +298,17 @@ What does not work yet: `docs/KNOWN-LIMITATIONS.md`.
     `scripts/dev/` helpers; the x86_64 heap sized from the memory map, so small guests boot
     (N-278, HX-02). Open: `knetd` done properly (N-69, with F2); the rest is in the sprint lists
     above and v0.29.
+  - [ ] **Every Linux system call (2026-10-16 directive; whether it lands in v0.27.0 or later is
+    open).** Each call implemented with Linux semantics on all three architectures, numbers from
+    Linux's tables (`abi/syscalls.map`, `tools/compat/gen_syscalls.py`; the AArch64/RISC-V
+    decoders are generated from `abi/linux/syscall.tbl` and pinned by
+    `generic_numbers_match_the_linux_table`). Kernel-modifying and raw-hardware calls
+    (`init_module`/`finit_module`/`delete_module`, `kexec_*`, `iopl`/`ioperm`, `bpf` and
+    similar) are refused by policy with EPERM after Linux's argument checks. Steps: per-arch
+    coverage in `docs/compat/LINUX-SYSCALL-COVERAGE.md` (stale since 2026-10-09, x86_64 only);
+    then group by group (process, signals, time, files, memory, ipc, events, network, sched,
+    mount, system) with fail-first tests; LTP and musl libc-test in the rootfs suite; rewrite
+    `docs/PORTING-GUIDE.md` (it still lists the pre-ADR-0009 native numbers).
   - [ ] **Release:** tri-arch boot with `-smp 4`, runtime suite, CHANGELOG, tag.
 - [ ] **v0.28.0:** the process, signal, time and file syscall tiers (X2 groups, with the open
   ABI-review findings N-194 to N-247 that belong to them).

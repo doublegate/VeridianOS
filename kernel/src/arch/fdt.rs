@@ -192,6 +192,89 @@ impl<'a> Fdt<'a> {
         });
     }
 
+    /// The first `reg` range (base, size) of the first enabled node whose
+    /// `compatible` list names `compat`, read in its parent's address and
+    /// size cells. Only identity bus mappings are followed: a node under
+    /// a bus with a non-empty `ranges` (an address translation, which this
+    /// reader does not apply) is not reported.
+    pub fn compatible_reg(&self, compat: &[u8]) -> Option<(u64, u64)> {
+        /// Deeper nodes are not considered (the specification sets no
+        /// limit; real trees nest a handful of levels).
+        const MAX_DEPTH: usize = 16;
+        #[derive(Clone, Copy)]
+        struct Node<'a> {
+            /// `#address-cells`, `#size-cells` for this node's children.
+            cells: (usize, usize),
+            /// Whether its children's addresses are this bus's own (no
+            /// `ranges` translation between them and the root).
+            identity: bool,
+            hit: bool,
+            enabled: bool,
+            reg: Option<&'a [u8]>,
+        }
+        let blank = Node {
+            cells: (2, 1),
+            identity: true,
+            hit: false,
+            enabled: true,
+            reg: None,
+        };
+        let mut nodes = [blank; MAX_DEPTH + 1];
+        let mut found = None;
+        self.walk(|e| match e {
+            Event::Begin { depth, .. } if depth <= MAX_DEPTH => {
+                // Properties precede subnodes, so the parent's are known.
+                let parent_identity = depth < 2 || nodes[depth - 1].identity;
+                nodes[depth] = Node {
+                    identity: parent_identity,
+                    ..blank
+                };
+            }
+            Event::Prop { depth, name, value } if depth <= MAX_DEPTH => {
+                let n = &mut nodes[depth];
+                match name {
+                    b"#address-cells" => {
+                        if let Some(c) = cells_u64(value) {
+                            n.cells.0 = c as usize;
+                        }
+                    }
+                    b"#size-cells" => {
+                        if let Some(c) = cells_u64(value) {
+                            n.cells.1 = c as usize;
+                        }
+                    }
+                    b"ranges" => n.identity &= value.is_empty(),
+                    b"compatible" => n.hit = value.split(|&c| c == 0).any(|s| s == compat),
+                    b"status" => {
+                        let s = trim_nul(value);
+                        n.enabled = s == b"okay" || s == b"ok";
+                    }
+                    b"reg" => n.reg = Some(value),
+                    _ => {}
+                }
+            }
+            Event::End { depth } if (2..=MAX_DEPTH).contains(&depth) && found.is_none() => {
+                let n = nodes[depth];
+                let parent = nodes[depth - 1];
+                let (ac, sc) = parent.cells;
+                if n.hit
+                    && n.enabled
+                    && parent.identity
+                    && (1..=2).contains(&ac)
+                    && (1..=2).contains(&sc)
+                {
+                    if let Some(r) = n.reg {
+                        reg_ranges(r, (ac, sc), &mut |b, s| {
+                            found.get_or_insert((b, s));
+                        });
+                    }
+                }
+            }
+            _ => {}
+        });
+        found
+    }
+
     /// Call `f(base, size)` for every range firmware reserved: the memory
     /// reservation block, then each child of `/reserved-memory` with a
     /// `reg` (in that node's cells, the root's when it has none). Children
@@ -700,6 +783,136 @@ mod tests {
         b.extend_from_slice(&st);
         b.extend_from_slice(&strings);
         b
+    }
+
+    /// / { #address-cells = <2>; #size-cells = <2>;
+    ///     pl031@9010000 { compatible = "arm,pl031", "arm,primecell";
+    ///         reg = <0 0x9010000 0 0x1000>; };
+    ///     soc { #address-cells = <2>; #size-cells = <2>; ranges;
+    ///         rtc@200 { compatible = "google,goldfish-rtc"; status =
+    /// "disabled";             reg = <0 0x200 0 0x1000>; };
+    ///         rtc@101000 { compatible = "google,goldfish-rtc";
+    ///             reg = <0 0x101000 0 0x1000>; }; };
+    ///     bus { #address-cells = <1>; #size-cells = <1>; ranges = <0
+    /// 0x10000000 0x1000>;         dev@0 { compatible = "test,translated";
+    /// reg = <0 0x100>; }; }; }
+    fn device_sample() -> Vec<u8> {
+        let mut strings = Vec::new();
+        let mut add = |n: &[u8]| {
+            let off = strings.len();
+            strings.extend_from_slice(n);
+            strings.push(0);
+            off
+        };
+        let (ac, sc, reg, compat, status, ranges) = (
+            add(b"#address-cells"),
+            add(b"#size-cells"),
+            add(b"reg"),
+            add(b"compatible"),
+            add(b"status"),
+            add(b"ranges"),
+        );
+        let mut st = Vec::new();
+        let tok = |st: &mut Vec<u8>, t: u32| st.extend_from_slice(&t.to_be_bytes());
+        let name = |st: &mut Vec<u8>, n: &[u8]| {
+            st.extend_from_slice(n);
+            st.push(0);
+            while st.len() % 4 != 0 {
+                st.push(0);
+            }
+        };
+        let prop = |st: &mut Vec<u8>, off: usize, v: &[u8]| {
+            st.extend_from_slice(&FDT_PROP.to_be_bytes());
+            st.extend_from_slice(&(v.len() as u32).to_be_bytes());
+            st.extend_from_slice(&(off as u32).to_be_bytes());
+            st.extend_from_slice(v);
+            while st.len() % 4 != 0 {
+                st.push(0);
+            }
+        };
+        let cells = |v: &[u32]| v.iter().flat_map(|c| c.to_be_bytes()).collect::<Vec<u8>>();
+        tok(&mut st, FDT_BEGIN_NODE);
+        name(&mut st, b"");
+        prop(&mut st, ac, &cells(&[2]));
+        prop(&mut st, sc, &cells(&[2]));
+        tok(&mut st, FDT_BEGIN_NODE);
+        name(&mut st, b"pl031@9010000");
+        prop(&mut st, compat, b"arm,pl031\0arm,primecell\0");
+        prop(&mut st, reg, &cells(&[0, 0x901_0000, 0, 0x1000]));
+        tok(&mut st, FDT_END_NODE);
+        tok(&mut st, FDT_BEGIN_NODE);
+        name(&mut st, b"soc");
+        prop(&mut st, ac, &cells(&[2]));
+        prop(&mut st, sc, &cells(&[2]));
+        prop(&mut st, ranges, b"");
+        tok(&mut st, FDT_BEGIN_NODE);
+        name(&mut st, b"rtc@200");
+        prop(&mut st, compat, b"google,goldfish-rtc\0");
+        prop(&mut st, status, b"disabled\0");
+        prop(&mut st, reg, &cells(&[0, 0x200, 0, 0x1000]));
+        tok(&mut st, FDT_END_NODE);
+        tok(&mut st, FDT_BEGIN_NODE);
+        name(&mut st, b"rtc@101000");
+        prop(&mut st, compat, b"google,goldfish-rtc\0");
+        prop(&mut st, reg, &cells(&[0, 0x10_1000, 0, 0x1000]));
+        tok(&mut st, FDT_END_NODE);
+        tok(&mut st, FDT_END_NODE);
+        tok(&mut st, FDT_BEGIN_NODE);
+        name(&mut st, b"bus");
+        prop(&mut st, ac, &cells(&[1]));
+        prop(&mut st, sc, &cells(&[1]));
+        prop(&mut st, ranges, &cells(&[0, 0x1000_0000, 0x1000]));
+        tok(&mut st, FDT_BEGIN_NODE);
+        name(&mut st, b"dev@0");
+        prop(&mut st, compat, b"test,translated\0");
+        prop(&mut st, reg, &cells(&[0, 0x100]));
+        tok(&mut st, FDT_END_NODE);
+        tok(&mut st, FDT_END_NODE);
+        tok(&mut st, FDT_END_NODE);
+        tok(&mut st, FDT_END);
+
+        let off_struct = 40usize;
+        let off_strings = off_struct + st.len();
+        let total = off_strings + strings.len();
+        let mut b = Vec::new();
+        for v in [
+            FDT_MAGIC,
+            total as u32,
+            off_struct as u32,
+            off_strings as u32,
+            0,
+            17,
+            16,
+            0,
+            strings.len() as u32,
+            st.len() as u32,
+        ] {
+            b.extend_from_slice(&v.to_be_bytes());
+        }
+        b.extend_from_slice(&st);
+        b.extend_from_slice(&strings);
+        b
+    }
+
+    #[test]
+    fn finds_devices_by_compatible() {
+        let blob = device_sample();
+        let fdt = Fdt::new(&blob).unwrap();
+        // Any entry of the list matches, not only the first.
+        assert_eq!(fdt.compatible_reg(b"arm,pl031"), Some((0x901_0000, 0x1000)));
+        assert_eq!(
+            fdt.compatible_reg(b"arm,primecell"),
+            Some((0x901_0000, 0x1000))
+        );
+        // Disabled nodes are skipped; an empty `ranges` is the identity.
+        assert_eq!(
+            fdt.compatible_reg(b"google,goldfish-rtc"),
+            Some((0x10_1000, 0x1000))
+        );
+        // A translating bus is not followed; prefixes do not match.
+        assert_eq!(fdt.compatible_reg(b"test,translated"), None);
+        assert_eq!(fdt.compatible_reg(b"arm,pl03"), None);
+        assert_eq!(fdt.compatible_reg(b"missing"), None);
     }
 
     #[test]

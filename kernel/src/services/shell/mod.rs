@@ -1344,26 +1344,10 @@ fn run_user_process_from_shell(pid: crate::process::ProcessId) -> i32 {
     crate::println!("[SHELL] run_user_process_from_shell: pid={}", pid.0);
 
     // The program runs as dispatcher tasks of its own and the shell (the
-    // boot task) waits for it (ADR 0006 stage D2).
-    #[cfg(target_arch = "x86_64")]
-    {
-        crate::process::run_and_wait(pid).unwrap_or_else(|| {
-            crate::println!("[SHELL] Error: could not start process {}", pid.0);
-            1
-        })
-    }
-
-    // No user mode on AArch64 and RISC-V until sprint E: the loaded program
-    // is freed again. (This used to yield into the old scheduler, which
-    // could jump to the program's entry point in kernel mode.)
-    #[cfg(not(target_arch = "x86_64"))]
-    {
-        crate::println!(
-            "[SHELL] User programs need user mode, not available on this architecture yet"
-        );
-        if let Some(process) = crate::process::get_process(pid) {
-            crate::process::exit::discard_unstarted(&process);
-        }
-        127
-    }
+    // boot task) waits for it (ADR 0006 stage D2), on every architecture
+    // (EL0 and U-mode since sprint E).
+    crate::process::run_and_wait(pid).unwrap_or_else(|| {
+        crate::println!("[SHELL] Error: could not start process {}", pid.0);
+        1
+    })
 }

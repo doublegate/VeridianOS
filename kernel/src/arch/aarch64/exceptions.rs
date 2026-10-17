@@ -271,16 +271,16 @@ extern "C" fn aarch64_user_exception(f: &mut super::switch::UserFrame, vector: u
                     SEGV_ACCERR
                 };
                 if crate::mm::page_fault::handle_page_fault(info).is_err() {
-                    fault(SIGSEGV, code, far);
+                    fault(SIGSEGV, code, far, elr, f.x[30]);
                 }
             }
             EC_UNKNOWN | EC_FP_ACCESS | EC_ILLEGAL_STATE | EC_SYSREG => {
-                fault(SIGILL, ILL_ILLOPC, elr)
+                fault(SIGILL, ILL_ILLOPC, elr, elr, f.x[30])
             }
-            EC_BRK => fault(SIGTRAP, TRAP_BRKPT, elr),
-            EC_PC_ALIGN => fault(SIGBUS, BUS_ADRALN, elr),
-            EC_SP_ALIGN => fault(SIGBUS, BUS_ADRALN, f.sp),
-            _ => fault(SIGBUS, SI_KERNEL, 0),
+            EC_BRK => fault(SIGTRAP, TRAP_BRKPT, elr, elr, f.x[30]),
+            EC_PC_ALIGN => fault(SIGBUS, BUS_ADRALN, elr, elr, f.x[30]),
+            EC_SP_ALIGN => fault(SIGBUS, BUS_ADRALN, f.sp, elr, f.x[30]),
+            _ => fault(SIGBUS, SI_KERNEL, 0, elr, f.x[30]),
         }
     }
     exit_to_user(f, syscall);
@@ -295,11 +295,21 @@ const SIGSEGV: usize = 11;
 
 /// A user fault's signal: queued for its handler if the thread has one
 /// that does not block it, else the process ends (Linux forces the
-/// default action for a blocked or ignored synchronous signal).
-fn fault(sig: usize, code: i32, addr: u64) {
+/// default action for a blocked or ignored synchronous signal) and the
+/// fault is logged, as Linux's show_unhandled_signals does.
+fn fault(sig: usize, code: i32, addr: u64, pc: u64, lr: u64) {
     if !crate::process::signals::queue_fault(crate::process::signals::SigInfo::fault(
         sig, code, addr,
     )) {
+        crate::println!(
+            "[FAULT] pid {}: unhandled signal {} (code {}) at {:#x}, pc {:#x}, lr {:#x}",
+            crate::process::current_process().map_or(0, |p| p.pid.0),
+            sig,
+            code,
+            addr,
+            pc,
+            lr
+        );
         kill_user(sig as u32);
     }
 }

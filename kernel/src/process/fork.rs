@@ -306,6 +306,11 @@ pub fn fork_process_with(opts: &ForkOptions) -> Result<(ProcessId, super::Thread
                 #[cfg(not(target_arch = "x86_64"))]
                 {
                     *new_ctx = (*ctx).clone();
+                    // The live registers of the system call in progress:
+                    // the context is the one saved when the program was
+                    // loaded, so a child started from it ran the program
+                    // again from its entry.
+                    super::load_live_user_registers(&mut new_ctx);
                     new_ctx.set_return_value(0);
                 }
 

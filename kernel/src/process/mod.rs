@@ -302,6 +302,26 @@ pub fn start_thread(
     Ok(())
 }
 
+/// Overwrite `ctx` with the caller's live user registers, the ones the
+/// system call in progress returns with (fork and clone children start
+/// from them). Without a live frame (not in a system call) `ctx` is kept.
+#[cfg(all(
+    target_os = "none",
+    any(target_arch = "aarch64", target_arch = "riscv64")
+))]
+pub(crate) fn load_live_user_registers(ctx: &mut crate::arch::context::ArchThreadContext) {
+    #[cfg(target_arch = "aarch64")]
+    if let Some(frame) = crate::arch::aarch64::switch::live_user_frame() {
+        // The kernel never writes TPIDR_EL0, so it still holds the
+        // caller's thread pointer (musl sets it from user mode).
+        ctx.load_user_frame(&frame, crate::arch::aarch64::switch::read_tls());
+    }
+    #[cfg(target_arch = "riscv64")]
+    if let Some(frame) = crate::arch::riscv64::switch::live_user_frame() {
+        ctx.load_user_frame(&frame);
+    }
+}
+
 /// AArch64: start `thread` as a dispatcher task entering EL0 with the
 /// registers of its saved context (x0-x30, sp, pc) and its TLS register
 /// (TPIDR_EL0). `inherit_fpu` gives it a copy of the calling thread's live

@@ -92,6 +92,22 @@ pub unsafe fn seed_user_thread(stack_top: usize, frame: &UserFrame) -> usize {
     sp
 }
 
+/// A copy of the user registers the exception in progress saved (the
+/// per-CPU block's `syscall_frame`): where the current system call returns
+/// to. `None` outside one.
+pub fn live_user_frame() -> Option<UserFrame> {
+    // SAFETY: this CPU's own block; `syscall_frame` is the current task's
+    // frame on its kernel stack (set by the exception entry and switched
+    // with the task), or 0.
+    let frame =
+        unsafe { (*crate::arch::percpu::this_arch_cpu()).syscall_frame } as *const UserFrame;
+    if frame.is_null() {
+        return None;
+    }
+    // SAFETY: as above, a live frame.
+    Some(unsafe { *frame })
+}
+
 /// The user TLS register (TPIDR_EL0) of the running thread.
 pub fn read_tls() -> u64 {
     let v: u64;

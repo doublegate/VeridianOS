@@ -250,6 +250,12 @@ pub fn kernel_init() -> KernelResult<()> {
         kprintln!("[BOOTSTRAP] PAT configured (WC available)");
         crate::arch::x86_64::rtc::init();
     }
+    // AArch64 and RISC-V: the wall clock from a device-tree RTC.
+    #[cfg(all(
+        any(target_arch = "aarch64", target_arch = "riscv64"),
+        target_os = "none"
+    ))]
+    crate::arch::mmio_rtc::init();
 
     kprintln!("[BOOTSTRAP] Architecture initialized");
 
@@ -2246,15 +2252,23 @@ fn run_process_tests(passed: &mut u32, failed: &mut u32) {
 
         // The embedded init (`/sbin/init`, userspace/embedded.rs) runs and
         // exits 0: its numbers are RISC-V's (write 64, exit_group 94).
-        let status = crate::userspace::loader::load_user_program("/sbin/init", &[], &[])
-            .ok()
-            .and_then(crate::process::run_and_wait);
+        let status = run_embedded_init();
         if status != Some(0) {
             crate::println!("    status {:?}", status);
         }
         report_test(
             "riscv_embedded_init_runs",
             status == Some(0),
+            passed,
+            failed,
+        );
+        report_fork(
+            crate::arch::riscv64::usermode::test_fork_program(),
+            passed,
+            failed,
+        );
+        report_exec(
+            crate::arch::riscv64::usermode::test_exec_program(),
             passed,
             failed,
         );
@@ -2345,9 +2359,7 @@ fn run_process_tests(passed: &mut u32, failed: &mut u32) {
 
         // The embedded init (`/sbin/init`) runs and exits 0 with arm64's
         // numbers (write 64, exit_group 94).
-        let status = crate::userspace::loader::load_user_program("/sbin/init", &[], &[])
-            .ok()
-            .and_then(crate::process::run_and_wait);
+        let status = run_embedded_init();
         if status != Some(0) {
             crate::println!("    status {:?}", status);
         }
@@ -2357,7 +2369,57 @@ fn run_process_tests(passed: &mut u32, failed: &mut u32) {
             passed,
             failed,
         );
+        report_fork(
+            crate::arch::aarch64::usermode::test_fork_program(),
+            passed,
+            failed,
+        );
+        report_exec(
+            crate::arch::aarch64::usermode::test_exec_program(),
+            passed,
+            failed,
+        );
     }
+}
+
+/// exec starts the new image at its own entry (`/tmp/embedded-init`, from
+/// `run_embedded_init`, exits 0); the return used to go through the old
+/// frame into the unmapped old image.
+#[cfg(all(
+    feature = "alloc",
+    any(target_arch = "riscv64", target_arch = "aarch64")
+))]
+fn report_exec(code: &[u8], passed: &mut u32, failed: &mut u32) {
+    let (_, status) = run_user_code(code);
+    if status != Some(0) {
+        crate::println!("    status {:?}", status);
+    }
+    report_test(
+        "user_exec_enters_new_image",
+        status == Some(0),
+        passed,
+        failed,
+    );
+}
+
+/// A fork child resumes after the call with its parent's registers (it
+/// used to start from the load-time context, the program's entry, and
+/// fork again): the program exits with its child's status, 7.
+#[cfg(all(
+    feature = "alloc",
+    any(target_arch = "riscv64", target_arch = "aarch64")
+))]
+fn report_fork(code: &[u8], passed: &mut u32, failed: &mut u32) {
+    let (_, status) = run_user_code(code);
+    if status != Some(7) {
+        crate::println!("    status {:?}", status);
+    }
+    report_test(
+        "user_fork_child_resumes_after_call",
+        status == Some(7),
+        passed,
+        failed,
+    );
 }
 /// Run `code` (position-independent) as a new process in user mode: one
 /// executable page at 0x40_0000, four stack pages below 0x80_4000. Returns
@@ -2498,6 +2560,23 @@ fn report_static_tls(passed: &mut u32, failed: &mut u32) {
         crate::println!("    status {:?}", status);
     }
     report_test("user_static_tls_block", status == Some(42), passed, failed);
+}
+
+/// Run the kernel's embedded init (`userspace::embedded::init_elf`) through
+/// the loader and wait for it: from `/tmp`, since `/sbin/init` is the root
+/// filesystem's own init when one is mounted (it never exits).
+#[cfg(all(
+    feature = "alloc",
+    any(target_arch = "riscv64", target_arch = "aarch64")
+))]
+fn run_embedded_init() -> Option<i32> {
+    let elf = crate::userspace::embedded::init_elf();
+    crate::fs::write_file("/tmp/embedded-init", &elf)
+        .ok()
+        .and_then(|_| {
+            crate::userspace::loader::load_user_program("/tmp/embedded-init", &[], &[]).ok()
+        })
+        .and_then(crate::process::run_and_wait)
 }
 
 /// Build (not start) a process that runs `code` as [`run_user_code`] does.
@@ -3265,10 +3344,18 @@ fn run_usercopy_tests(passed: &mut u32, failed: &mut u32) {
             fdt.memory_ranges(|_, size| ram += size);
         }
         let managed = crate::mm::FRAME_ALLOCATOR.lock().get_stats().total_frames * 4096;
-        // The image, firmware below it and the pool's guard: well under 64 MiB.
-        let ok = ram > 0 && managed + (64 << 20) >= ram && managed <= ram;
+        // The kernel heap is taken out of the managed frames (about a
+        // third of RAM: 512 MiB at 2 GiB); the image, firmware below it and the
+        // pool's guard are well under 64 MiB.
+        let heap = crate::mm::heap::heap_size() as u64;
+        let ok = ram > 0 && managed + heap + (64 << 20) >= ram && managed <= ram;
         if !ok {
-            crate::println!("    device tree RAM {:#x}, managed {:#x}", ram, managed);
+            crate::println!(
+                "    device tree RAM {:#x}, managed {:#x}, heap {:#x}",
+                ram,
+                managed,
+                heap
+            );
         }
         report_test("memory_map_from_device_tree", ok, passed, failed);
     }

@@ -2083,6 +2083,9 @@ static void test_thread_guards(void)
 {
     pid_t pid = fork();
     if (pid == 0) {
+#if defined(__x86_64__)
+        /* x86_64 only: the TLS base goes into IA32_FS_BASE. arm64 and
+         * RISC-V accept any value for TPIDR_EL0 / tp, as Linux does. */
         static char stack[16384] __attribute__((aligned(16)));
         long flags = CLONE_VM | CLONE_FS | CLONE_FILES | CLONE_SIGHAND | CLONE_THREAD |
                      CLONE_SYSVSEM | CLONE_SETTLS;
@@ -2090,6 +2093,7 @@ static void test_thread_guards(void)
         long r = syscall(SYS_clone, flags, stack + sizeof(stack), 0, 0, 0x8000000000000000UL);
         if (!(r == -1 && errno == EINVAL))
             _exit(10);
+#endif
 
         static volatile unsigned long spins;
         pthread_t a, b;
@@ -2615,7 +2619,15 @@ static void test_spawn(void)
     report("musl_system", WIFEXITED(st) && WEXITSTATUS(st) == 6, why);
 }
 
-/* The auxiliary vector (ADR 0010), as getauxval reads it. */
+/* The auxiliary vector (ADR 0010), as getauxval reads it. AT_PLATFORM is
+ * Linux's string for the architecture. */
+#if defined(__x86_64__)
+#define AUXV_PLATFORM "x86_64"
+#elif defined(__aarch64__)
+#define AUXV_PLATFORM "aarch64"
+#else
+#define AUXV_PLATFORM "riscv64"
+#endif
 static void test_auxv(const char *argv0)
 {
     const unsigned char *random = (const unsigned char *)getauxval(AT_RANDOM);
@@ -2625,7 +2637,7 @@ static void test_auxv(const char *argv0)
     for (int i = 0; random && i < 16; i++)
         random_set |= random[i];
     int ok = getauxval(AT_PAGESZ) == 4096 && random_set && execfn && argv0
-             && strcmp(execfn, argv0) == 0 && platform && strcmp(platform, "x86_64") == 0
+             && strcmp(execfn, argv0) == 0 && platform && strcmp(platform, AUXV_PLATFORM) == 0
              && getauxval(AT_PHDR) != 0 && getauxval(AT_PHNUM) > 0
              && getauxval(AT_PHENT) == 56 && getauxval(AT_ENTRY) != 0
              && getauxval(AT_UID) == getuid() && getauxval(AT_EUID) == geteuid()
@@ -3331,12 +3343,20 @@ static void test_flock_blocking(void)
     pid_t pid = fork();
     if (pid == 0) {
         int c = open(path, O_RDWR);
+        /* Tell the parent the request is about to start, so its 40 ms are
+         * measured from here (a slow start, as under emulation, used to eat
+         * into them). */
+        char ready = 'r';
+        (void)!write(fds[1], &ready, 1);
         long long t0 = mono_ns();
         int ok = c >= 0 && flock(c, LOCK_EX) == 0;
         long waited = (long)((mono_ns() - t0) / 1000000);
         (void)!write(fds[1], &waited, sizeof(waited));
         _exit(ok ? 0 : 1);
     }
+    char ready = 0;
+    if (pid > 0)
+        (void)!read(fds[0], &ready, 1);
     struct timespec d40 = {0, 40000000};
     nanosleep(&d40, NULL);
     flock(a, LOCK_UN);
@@ -3466,6 +3486,22 @@ static volatile int *tlb_page;
 static volatile int tlb_seen_new, tlb_reading, tlb_reader_cpu = -1, tlb_first;
 static cpu_set_t tlb_cpu;
 
+/* Between the munmap and the MAP_FIXED mmap nothing is mapped at the
+ * page, and a reader preempted into that gap faults (as on Linux): such a
+ * fault is retried, a bounded number of times, once the main thread has
+ * mapped the page again. Any other fault is fatal as usual. */
+static volatile int tlb_gap_faults;
+
+static void tlb_on_segv(int sig, siginfo_t *info, void *ctx)
+{
+    (void)ctx;
+    if (info->si_addr == (void *)tlb_page && ++tlb_gap_faults < 1000) {
+        sched_yield();
+        return;
+    }
+    signal(sig, SIG_DFL);
+}
+
 static void *tlb_reader(void *arg)
 {
     (void)arg;
@@ -3502,6 +3538,12 @@ static void test_tlb_remote_flush(void)
     int *p = mmap(0, PG, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     int ok = p != MAP_FAILED;
     pthread_t t;
+    struct sigaction segv, old_segv;
+    memset(&segv, 0, sizeof(segv));
+    segv.sa_sigaction = tlb_on_segv;
+    segv.sa_flags = SA_SIGINFO;
+    tlb_gap_faults = 0;
+    sigaction(SIGSEGV, &segv, &old_segv);
     if (ok) {
         *p = 1;
         tlb_page = p;
@@ -3532,6 +3574,7 @@ static void test_tlb_remote_flush(void)
         if (blocker != MAP_FAILED)
             munmap(blocker, PG);
     }
+    sigaction(SIGSEGV, &old_segv, 0);
     sched_setaffinity(0, sizeof(all), &all);
     static char why[128];
     snprintf(why, sizeof(why), "cpus=%ld ok=%d seen_new=%d reader_cpu=%d main_cpu=%d first=%d", ncpu,

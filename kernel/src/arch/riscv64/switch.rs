@@ -142,6 +142,22 @@ unsafe extern "C" fn user_trampoline() {
     );
 }
 
+/// A copy of the user registers the exception in progress saved (the
+/// per-CPU block's `syscall_frame`): where the current system call returns
+/// to. `None` outside one.
+pub fn live_user_frame() -> Option<UserFrame> {
+    // SAFETY: this CPU's own block; `syscall_frame` is the current task's
+    // frame on its kernel stack (set by the exception entry and switched
+    // with the task), or 0.
+    let frame =
+        unsafe { (*crate::arch::percpu::this_arch_cpu()).syscall_frame } as *const UserFrame;
+    if frame.is_null() {
+        return None;
+    }
+    // SAFETY: as above, a live frame.
+    Some(unsafe { *frame })
+}
+
 /// Seed a kernel stack so that switching to it enters user mode with
 /// `frame`. Returns the saved stack pointer.
 ///

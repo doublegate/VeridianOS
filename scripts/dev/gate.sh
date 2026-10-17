@@ -6,8 +6,9 @@
 #   CI's Quick Checks (syscall numbers, libc host tests, vsh), and the host
 #   unit tests. With --boot also build every
 #   architecture and boot each in QEMU (scripts/boot-test.sh); with --rootfs
-#   also run the x86_64 user-space runtime suite (scripts/run-rootfs-tests.sh,
-#   musl checks required). The boots (and with --rootfs the runtime suite)
+#   also run the user-space runtime suites (scripts/run-rootfs-tests.sh,
+#   musl checks required): x86_64's, then AArch64's and RISC-V's musl roots
+#   (scripts/build-musl-rootfs.sh). The boots (and with --rootfs the runtime suite)
 #   then run again on four CPUs, since the `smp` feature is on by default;
 #   --no-smp skips that second round (--smp is accepted and is the default).
 #   Exits non-zero if any step fails; each step's output is kept in
@@ -103,6 +104,13 @@ if [ $rootfs -eq 1 ]; then
     step rootfs-image scripts/build-busybox-rootfs.sh blockfs
     REQUIRE_MUSL=1 step rootfs-tests scripts/run-rootfs-tests.sh 900
     tail -1 "$log_dir/rootfs-tests.log"
+    # AArch64 and RISC-V: the musl BusyBox root (built from source, so the
+    # test programs are current) under TCG.
+    for arch in aarch64 riscv64; do
+        step "rootfs-stage-$arch" scripts/build-musl-rootfs.sh "$arch"
+        ARCH=$arch REQUIRE_MUSL=1 step "rootfs-tests-$arch" scripts/run-rootfs-tests.sh
+        tail -1 "$log_dir/rootfs-tests-$arch.log"
+    done
 fi
 if [ $smp -eq 1 ] && { [ $boot -eq 1 ] || [ $rootfs -eq 1 ]; }; then
     # The same kernel (the `smp` feature is on by default) on four CPUs.

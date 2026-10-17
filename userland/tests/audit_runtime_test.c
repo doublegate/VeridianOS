@@ -22,6 +22,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <veridian/syscall.h> /* raw system calls (veridian_syscallN) */
+#include <veridian/sysno.h>   /* system call numbers (ADR 0009) */
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/un.h>
@@ -717,10 +719,20 @@ static int child_faults(int which)
             break;
         }
         case 3: { /* execute from the brk heap */
-            unsigned char *h = sbrk(4096);
-            if (h == (void *)-1)
+            /* The brk system call itself: musl's sbrk only reports the
+             * break (sbrk(0)), the native libc's also moves it. */
+            unsigned long cur = (unsigned long)veridian_syscall1(SYS_brk, 0);
+            if ((unsigned long)veridian_syscall1(SYS_brk, cur + 4096) < cur + 4096)
                 _exit(2);
-            h[0] = 0xC3;
+            unsigned char *h = (unsigned char *)cur;
+            /* A return instruction for this architecture. */
+#if defined(__aarch64__)
+            memcpy(h, "\xc0\x03\x5f\xd6", 4); /* ret */
+#elif defined(__riscv)
+            memcpy(h, "\x67\x80\x00\x00", 4); /* ret (jalr x0, 0(ra)) */
+#else
+            h[0] = 0xC3; /* ret */
+#endif
             ((void (*)(void))(unsigned long)h)();
             break;
         }

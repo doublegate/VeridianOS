@@ -288,6 +288,8 @@ pub fn sys_thread_clone(
             child_ctx.r9 = frame.r9;
             child_ctx.r10 = frame.r10;
         }
+        #[cfg(not(target_arch = "x86_64"))]
+        crate::process::load_live_user_registers(&mut child_ctx);
 
         child_ctx.set_stack_pointer(newsp);
         child_ctx.set_return_value(0); // child sees 0 return
@@ -343,23 +345,13 @@ pub fn sys_thread_clone(
     // The new thread runs as its own dispatcher task (stage D2), starting
     // from the registers prepared above and a copy of the caller's vector
     // state. (CLONE_CHILD_CLEARTID is honoured by exit_dispatched.)
-    #[cfg(target_arch = "x86_64")]
-    {
-        if crate::process::start_thread(&proc, &thread, true).is_err() {
-            // The thread never ran: take it out again (with its kernel
-            // stack), or it counted as alive and its process could never
-            // finish exiting (N-46).
-            drop(thread);
-            let _ = crate::process::exit::cleanup_thread(&proc, tid);
-            return Err(SyscallError::OutOfMemory);
-        }
-        Ok(tid.0 as usize)
-    }
-    // No user threads without the dispatcher (sprint E).
-    #[cfg(not(target_arch = "x86_64"))]
-    {
+    if crate::process::start_thread(&proc, &thread, true).is_err() {
+        // The thread never ran: take it out again (with its kernel
+        // stack), or it counted as alive and its process could never
+        // finish exiting (N-46).
         drop(thread);
         let _ = crate::process::exit::cleanup_thread(&proc, tid);
-        Err(SyscallError::InvalidState)
+        return Err(SyscallError::OutOfMemory);
     }
+    Ok(tid.0 as usize)
 }

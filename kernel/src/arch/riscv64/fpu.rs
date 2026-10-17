@@ -9,11 +9,14 @@
 //! from the device tree's `riscv,isa`: `misa` is an M-mode CSR, which
 //! S-mode code cannot read (HR-21).
 
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use crate::arch::riscv::context::FpuState;
 
 static PRESENT: AtomicBool = AtomicBool::new(false);
+/// AT_HWCAP for user programs (`elf::dynamic::riscv_hwcap`), from the same
+/// device-tree ISA description.
+static HWCAP: AtomicU64 = AtomicU64::new(0);
 
 /// sstatus.FS.
 const FS: usize = 3 << 13;
@@ -33,7 +36,14 @@ pub fn init_from_device_tree(dtb_pa: u64) {
                 .property(&["cpus", "cpu"], "riscv,isa")
                 .is_some_and(|isa| crate::arch::fdt::isa_has_base_extension(isa, l))
     };
-    PRESENT.store(has(b'f') && has(b'd'), Ordering::Relaxed);
+    let fp = has(b'f') && has(b'd');
+    PRESENT.store(fp, Ordering::Relaxed);
+    HWCAP.store(crate::elf::dynamic::riscv_hwcap(has, fp), Ordering::Relaxed);
+}
+
+/// The AT_HWCAP word user programs get (0 before `init_from_device_tree`).
+pub fn hwcap() -> u64 {
+    HWCAP.load(Ordering::Relaxed)
 }
 
 /// Whether user programs have F/D registers to switch.

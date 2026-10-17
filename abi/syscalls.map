@@ -125,6 +125,7 @@ fchownat
 mknod
 rename
 renameat
+renameat2
 link
 linkat
 symlink

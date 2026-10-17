@@ -38,7 +38,7 @@ VeridianOS intentionally prioritizes architectural clarity over feature velocity
 
 ### Platform
 
-- **Multi-architecture** -- x86_64 (UEFI), AArch64 and RISC-V 64 (OpenSBI) boot and pass the in-kernel tests under QEMU. User programs run on x86_64 and, without a C library yet, on RISC-V; AArch64 runs with its MMU on but no user mode yet; none has run on real hardware yet ([`docs/KNOWN-LIMITATIONS.md`](docs/KNOWN-LIMITATIONS.md))
+- **Multi-architecture** -- x86_64 (UEFI), AArch64 and RISC-V 64 (OpenSBI) boot and pass the in-kernel tests under QEMU. On all three a BusyBox root runs with fork, exec, threads and signals (x86_64 with the native libc, AArch64 and RISC-V with musl); the runtime suites run on four CPUs on x86_64 and on one CPU so far on AArch64 and RISC-V (their boot tests run on four); none has run on real hardware yet ([`docs/KNOWN-LIMITATIONS.md`](docs/KNOWN-LIMITATIONS.md))
 - **Self-hosting** -- Native GCC 14.2 and Rust compiler toolchain; BusyBox 1.36.1 with 95 applets compiled on-target
 - **Package management** -- DPLL SAT dependency resolver, ports system, reproducible builds, Ed25519 package signing
 - **Complete C library** -- Full stdio/stdlib/string/unistd with POSIX headers, math library, and architecture-specific setjmp/longjmp
@@ -91,27 +91,28 @@ The design goal is a microkernel that provides only memory management, schedulin
 
 ## Project Status
 
-**Version**: v0.26.0 | **All development phases complete (0-12)** | **84 releases published**
+**Version**: v0.26.0 | **All development phases complete (0-12)** | **84 releases published** | v0.27 in development (draft PR #18)
 
 | Metric | Value |
 | --- | --- |
 | Build | 0 errors, 0 warnings across all 3 architectures |
-| Boot tests | 34/34 (Stage 6 BOOTOK on all architectures) |
-| Host-target unit tests | 4,475 passing, 1 ignored on purpose (pins N-47) |
-| In-guest runtime suite | `audit_runtime_test` 27/27 and BusyBox all-pass on the BlockFS root (x86_64) |
+| Boot tests | x86_64 41/41, AArch64 60/60, RISC-V 53/53 (Stage 6 BOOTOK; also with `-smp 4`) |
+| Host-target unit tests | 4,698 passing |
+| In-guest runtime suites | BusyBox self-test, `audit_runtime_test` and `musl_runtime_test` all passing on the BlockFS root of each architecture (AArch64 and RISC-V: 88/88 and 59/59) |
 | CI pipeline | GitHub Actions + Codecov; patch coverage of the v0.26.0 changes 75% (gaps tracked) |
 | Unsafe code | 5 justified `static mut` (early serial, boot info, heap, per-CPU data, ready queue); unsafe blocks carry SAFETY comments |
 
-Figures as of v0.26.0 (2026-10-06); sources: [`docs/PERFORMANCE-REPORT.md`](docs/PERFORMANCE-REPORT.md),
+Test counts from the v0.27 development branch (`feat/v0.27`, 2026-10-16), other figures as of
+v0.26.0 (2026-10-06); sources: [`docs/PERFORMANCE-REPORT.md`](docs/PERFORMANCE-REPORT.md),
 [`CHANGELOG.md`](CHANGELOG.md).
 
 ### Architecture Support
 
 | Architecture | Boot Method | Status |
 | --- | --- | --- |
-| x86_64 | UEFI via OVMF | Boots to BOOTOK (34/34); 1280x800 UEFI GOP, Ring 3 user programs, native compilation |
-| AArch64 | Direct kernel loading | Boots to BOOTOK (34/34); PL011 UART, virtio-MMIO, BlockFS root. MMU on, kernel in the upper half (ADR 0015); no user mode yet |
-| RISC-V 64 | OpenSBI | Boots to BOOTOK (34/34); Sv48 page tables, virtio-MMIO, BlockFS root. No user mode yet |
+| x86_64 | UEFI via OVMF | Boots to BOOTOK (41/41); 1280x800 UEFI GOP, Ring 3 user programs, native compilation |
+| AArch64 | Direct kernel loading or arm64 Image | Boots to BOOTOK (60/60); PL011 UART, PL031 RTC, virtio-MMIO, BlockFS root. MMU on, kernel in the upper half (ADR 0015); EL0 programs with musl |
+| RISC-V 64 | OpenSBI | Boots to BOOTOK (53/53); Sv48 page tables, Goldfish RTC, virtio-MMIO, BlockFS root. U-mode programs with musl |
 
 ### Performance
 
@@ -125,7 +126,7 @@ TSC. Method and full tables: [`docs/PERFORMANCE-REPORT.md`](docs/PERFORMANCE-REP
 | Frame allocation | < 1us | 62 ns per-CPU cache, 272 ns global allocator |
 | Capability lookup | < 100 ns | 93 ns (hash table) |
 | Concurrent processes | 1000+ | not measured |
-| TLB shootdown | < 5us/CPU | not applicable: one CPU runs, shootdown has no callers yet (MEM-SEC-02, v0.27) |
+| TLB shootdown | < 5us/CPU | not measured; acknowledged on every CPU (boot test `tlb_shootdown_confirmed` with `-smp 4`) |
 
 ---
 
@@ -217,10 +218,10 @@ For detailed build instructions, see [BUILD-INSTRUCTIONS.md](docs/BUILD-INSTRUCT
 | --- | --- | --- | --- |
 | Boot | UEFI via OVMF | Direct `-kernel` | OpenSBI `-bios default` |
 | Display | 1280x800 UEFI GOP | ramfb | ramfb |
-| Minimum RAM | 2GB | 256MB | 256MB |
+| Minimum RAM | 256MB (2GB for the BlockFS root) | 256MB | 256MB |
 | Native compilation | 1.5GB+ | -- | -- |
 
-**Minimum**: 64-bit CPU with MMU, 2GB RAM (x86_64) or 256MB RAM (AArch64/RISC-V), 1GB storage.
+**Minimum**: 64-bit CPU with MMU, 256MB RAM (2GB on x86_64 for the BlockFS root and native compilation), 1GB storage.
 **Recommended**: Multi-core CPU with virtualization support, 4GB+ RAM, NVMe storage.
 
 ---
