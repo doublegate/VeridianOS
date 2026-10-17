@@ -195,7 +195,8 @@ What does not work yet: `docs/KNOWN-LIMITATIONS.md`.
       (`scripts/build-musl-rootfs.sh`, `ARCH=... scripts/run-rootfs-tests.sh`; also RISC-V);
       those runs in the gate on one and four CPUs; PSTATE sanitised on every return to EL0 and
       by sigreturn, with a test that panics the kernel without it (N-170); next: DMA coherency
-      (HA-25 rest); PROT_BTI, AT_HWCAP2, arm64 MINSIGSTKSZ.
+      (HA-25 rest); PROT_BTI (guarded pages, SCTLR_EL1.BT0, HWCAP2_BTI; test with `-cpu max`);
+      done: AT_HWCAP2 (instructions needing no kernel support), arm64 MINSIGSTKSZ 5120.
     - RISC-V: done: zero BSS, hart lottery, `sstatus.FS` Off in the kernel (HR-01, HR-19, HR-20
       part; the M-mode CSR reads go with FP switching). RISC-V Image header and
       relocatable or MMU-early boot (HR-02, HR-03); `satp` mode probe with Sv39 default and

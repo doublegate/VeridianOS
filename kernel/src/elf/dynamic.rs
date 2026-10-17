@@ -164,6 +164,35 @@ pub fn arm64_hwcap(pfr0: u64, isar0: u64) -> u64 {
     hwcap
 }
 
+/// AArch64: Linux's arm64 AT_HWCAP2 bits (`arch/arm64/kernel/cpufeature.c`)
+/// for instructions EL0 can use with no kernel support, from
+/// ID_AA64ISAR0/1/2_EL1: DCPODP (0), FLAGM2 (7), FRINT (8), I8MM (13), BF16
+/// (14), DGH (15), RNG (16), EBF16 (32), CSSC (34), RPRFM (35), HBC (44),
+/// LRCPC3 (46). Not reported, as the kernel does not provide what they
+/// need: BTI (no PROT_BTI or guarded pages), MOPS (exceptions on migration),
+/// WFxT, ECV, AFP, RPRES, and the SVE, SME and MTE families.
+pub fn arm64_hwcap2(isar0: u64, isar1: u64, isar2: u64) -> u64 {
+    let field = |r: u64, at: u32| (r >> at) & 0xF;
+    // (register, field position, minimum value, AT_HWCAP2 bit)
+    let caps = [
+        (isar1, 0, 2, 0),   // DPB2: DC CVADP
+        (isar0, 52, 2, 7),  // TS: FLAGM2
+        (isar1, 32, 1, 8),  // FRINTTS
+        (isar1, 52, 1, 13), // I8MM
+        (isar1, 44, 1, 14), // BF16
+        (isar1, 48, 1, 15), // DGH
+        (isar0, 60, 1, 16), // RNDR
+        (isar1, 44, 2, 32), // EBF16
+        (isar2, 52, 1, 34), // CSSC
+        (isar2, 48, 1, 35), // RPRFM
+        (isar2, 20, 1, 44), // BC: HBC
+        (isar1, 20, 3, 46), // LRCPC3
+    ];
+    caps.iter()
+        .filter(|&&(reg, at, min, _)| field(reg, at) >= min)
+        .fold(0, |acc, &(_, _, _, bit)| acc | 1 << bit)
+}
+
 /// RISC-V: Linux's AT_HWCAP, one bit per single-letter extension (bit
 /// `letter - 'a'`) of those it reports (I, M, A, F, D, C; V is left out:
 /// no vector state is switched, Linux likewise reports V only with its
@@ -179,13 +208,16 @@ pub fn riscv_hwcap(has: impl Fn(u8) -> bool, user_fp: bool) -> u64 {
 
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 fn hwcaps() -> (u64, u64) {
-    let (pfr0, isar0): (u64, u64);
-    // SAFETY: the ID registers are readable at EL1 and have no side effects.
+    let (pfr0, isar0, isar1, isar2): (u64, u64, u64, u64);
+    // SAFETY: the ID registers are readable at EL1 and have no side effects
+    // (ID_AA64ISAR2_EL1 reads as zero before Armv8.7, by its generic name).
     unsafe {
         core::arch::asm!("mrs {0}, id_aa64pfr0_el1", out(reg) pfr0, options(nomem, nostack));
         core::arch::asm!("mrs {0}, id_aa64isar0_el1", out(reg) isar0, options(nomem, nostack));
+        core::arch::asm!("mrs {0}, id_aa64isar1_el1", out(reg) isar1, options(nomem, nostack));
+        core::arch::asm!("mrs {0}, s3_0_c0_c6_2", out(reg) isar2, options(nomem, nostack));
     }
-    (arm64_hwcap(pfr0, isar0), 0)
+    (arm64_hwcap(pfr0, isar0), arm64_hwcap2(isar0, isar1, isar2))
 }
 
 #[cfg(all(target_arch = "riscv64", target_os = "none"))]
@@ -239,9 +271,10 @@ pub fn aux_vector(
     push(AtEgid, process.egid as u64);
     push(AtSecure, process.secure as u64);
     push(AtRandom, stack.random);
-    #[cfg(target_arch = "x86_64")]
+    // As Linux: x86_64 and arm64 define ELF_HWCAP2, RISC-V does not.
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     push(AtHwcap2, hwcap2);
-    #[cfg(not(target_arch = "x86_64"))]
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
     let _ = hwcap2;
     push(AtExecfn, stack.execfn);
     push(AtPlatform, stack.platform);
@@ -255,6 +288,29 @@ mod tests {
 
     fn value(aux: &[AuxVecEntry], t: AuxType) -> Option<u64> {
         aux.iter().find(|e| e.type_id == t).map(|e| e.value)
+    }
+
+    #[test]
+    fn arm64_hwcap2_reports_only_plain_instructions() {
+        // Cortex-A72: none of them.
+        assert_eq!(arm64_hwcap2(0x0001_1120, 0, 0), 0);
+        // ISAR0: TS = 2 (FLAGM2), RNDR = 1; ISAR1: DPB = 2, LRCPC = 3,
+        // FRINTTS = 1, BF16 = 2 (EBF16), DGH = 1, I8MM = 1; ISAR2: CSSC,
+        // RPRFM, BC = 1.
+        let isar0 = (1 << 60) | (2 << 52);
+        let isar1 = 2 | (3 << 20) | (1 << 32) | (2 << 44) | (1 << 48) | (1 << 52);
+        let isar2 = (1 << 52) | (1 << 48) | (1 << 20);
+        let want = [0, 7, 8, 13, 14, 15, 16, 32, 34, 35, 44, 46]
+            .iter()
+            .fold(0u64, |a, b| a | 1 << b);
+        assert_eq!(arm64_hwcap2(isar0, isar1, isar2), want);
+        // Lower levels: TS = 1 is FLAGM only (an AT_HWCAP bit), DPB = 1 and
+        // LRCPC = 2 not enough, BF16 = 1 is BF16 without EBF16.
+        let lower = arm64_hwcap2(1 << 52, 1 | (2 << 20) | (1 << 44), 0);
+        assert_eq!(lower, 1 << 14);
+        // Kernel-dependent features stay clear: MOPS (ISAR2[19:16]), WFxT
+        // (ISAR2[3:0]), RPRES (ISAR2[7:4]).
+        assert_eq!(arm64_hwcap2(0, 0, (1 << 16) | 1 | (1 << 4)), 0);
     }
 
     #[test]

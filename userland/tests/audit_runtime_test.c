@@ -2680,6 +2680,19 @@ static void test_sigreturn_sanitises(void)
     ok = waitpid(pid, &st, 0) == pid && WIFEXITED(st) && WEXITSTATUS(st) == 0;
     snprintf(why, sizeof(why), "status 0x%x", (unsigned)st);
     report("sigreturn_keeps_el0_and_unmasked", ok, why);
+
+    /* arm64's MINSIGSTKSZ is 5120 (its frames are larger): a smaller
+     * alternate stack is ENOMEM, as on Linux. Through the system call
+     * itself: musl's wrapper refuses below its own 6144 first. */
+    static char alt[8192] __attribute__((aligned(16)));
+    stack_t ss = {.ss_sp = alt, .ss_flags = 0, .ss_size = 4096};
+    long r_small = veridian_syscall2(SYS_sigaltstack, &ss, 0);
+    ss.ss_size = 5120;
+    long r_fits = veridian_syscall2(SYS_sigaltstack, &ss, 0);
+    ss.ss_flags = SS_DISABLE;
+    veridian_syscall2(SYS_sigaltstack, &ss, 0);
+    snprintf(why, sizeof(why), "4096: %ld; 5120: %ld", r_small, r_fits);
+    report("sigaltstack_arm64_minimum", r_small == -ENOMEM && r_fits == 0, why);
 #endif
 }
 #endif

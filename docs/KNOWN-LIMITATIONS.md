@@ -163,8 +163,6 @@ What remains:
 - **No timer or I/O siginfo.** POSIX timers (timer_create) and SIGIO (F_SETOWN, O_ASYNC) do
   not exist yet, so no signal arrives with SI_TIMER or POLL_* information; kill, tkill,
   sigqueue, SIGCHLD and fault signals carry Linux's siginfo (N-259).
-- **Signal stacks on AArch64 use x86_64's minimum.** `MINSIGSTKSZ` is 2048 on every
-  architecture; arm64's is 5120, so a smaller sigaltstack is accepted there.
 
 ### Processes, exec and credentials
 
@@ -212,10 +210,13 @@ Still open:
   clone and exec run (the child resumes from the parent's live registers, and exec enters the
   new image), and `scripts/build-musl-rootfs.sh aarch64` builds a BusyBox root with musl
   (`tools/cross/build-musl-arch.sh`) that `ARCH=aarch64 scripts/run-rootfs-tests.sh` runs:
-  the BusyBox self-test, `audit_runtime_test` and `musl_runtime_test` all pass. Not yet: the
-  gate does not run it, `PROT_BTI` is refused by mmap and mprotect (glibc sets it; musl does not),
-  and `AT_HWCAP2` is not passed. (The boot also sets SCTLR_EL1's RES1 bits and the EL2 state the
-  kernel relies on, N-177, HA-14, and uses the device tree firmware passes, HA-01.)
+  the BusyBox self-test, `audit_runtime_test` and `musl_runtime_test` all pass, on one and four
+  CPUs, and `scripts/dev/gate.sh --rootfs` runs them. Not yet: `PROT_BTI` is refused by mmap
+  and mprotect, as Linux does on a CPU without BTI (QEMU's Cortex-A72), but also on one with it
+  (glibc sets it there; musl does not). `AT_HWCAP2` reports only instructions that need no
+  kernel support (not BTI, MOPS, SVE, SME, MTE). (The boot also sets SCTLR_EL1's RES1 bits and
+  the EL2 state the kernel relies on, N-177, HA-14, and uses the device tree firmware passes,
+  HA-01.)
 - **RISC-V runs musl programs and a BusyBox root (ADR 0013, ADR 0014).** Paging is
   on, the kernel runs in the upper half, and programs from the VFS run in U-mode as dispatcher
   tasks with system calls, page faults, fault-tolerant user copies, user FP state and signal
@@ -223,7 +224,7 @@ Still open:
   where Linux uses its vDSO), and fault-tolerant user
   compare-and-exchange for futexes, and static TLS (`tp` at the PT_TLS block). fork, clone and
   exec run as on AArch64, and `scripts/build-musl-rootfs.sh riscv64` builds the same BusyBox root,
-  which `ARCH=riscv64 scripts/run-rootfs-tests.sh` runs. Not yet: the gate does not run it.
+  which `ARCH=riscv64 scripts/run-rootfs-tests.sh` runs (in the gate, on one and four harts).
 
 ### FPU and vector registers: no SVE or RISC-V V state (N-41 part)
 

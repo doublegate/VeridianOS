@@ -2,6 +2,15 @@
 
 ### Added
 
+- **AT_HWCAP2 on AArch64; arm64's MINSIGSTKSZ.** AArch64 programs now get AT_HWCAP2, as Linux
+  passes it on arm64 (not on RISC-V): the instructions EL0 can use with no kernel support, from
+  ID_AA64ISAR0/1/2_EL1 (DCPODP, FLAGM2, FRINT, I8MM, BF16, EBF16, DGH, RNG, CSSC, RPRFM, HBC,
+  LRCPC3; `arm64_hwcap2`, host-tested); BTI, MOPS, WFxT, ECV, AFP, RPRES and the SVE, SME and
+  MTE bits stay clear. sigaltstack's minimum is arm64's 5120 bytes there (2048 elsewhere), so a
+  smaller alternate stack is ENOMEM as on Linux (`audit_runtime_test`
+  `sigaltstack_arm64_minimum`, through the system call itself since musl's wrapper refuses below
+  its own 6144; the old kernel accepted 4096).
+
 - **sigreturn cannot raise privilege on AArch64 and RISC-V (N-170), tested; the AArch64 and RISC-V
   runtime suites on four CPUs.** Every return to EL0 keeps only PSTATE's condition flags
   (`user_spsr`) and every return to U-mode forces `sstatus` to user mode (`user_sstatus`);

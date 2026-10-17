@@ -464,7 +464,14 @@ pub const SS_DISABLE: i32 = 2;
 /// `stack_t.ss_flags`: disarm the alternate stack while a handler runs on
 /// it, re-arming it when the handler returns (Linux 4.7).
 pub const SS_AUTODISARM: i32 = i32::MIN;
-/// The smallest alternate stack sigaltstack accepts (x86_64 MINSIGSTKSZ).
+/// The smallest alternate stack sigaltstack accepts: each architecture's
+/// uapi MINSIGSTKSZ (arm64 5120, for its larger signal frame; x86_64 and
+/// RISC-V 2048, asm-generic's).
+#[cfg(target_arch = "aarch64")]
+pub const MINSIGSTKSZ: u64 = 5120;
+/// The smallest alternate stack sigaltstack accepts: each architecture's
+/// uapi MINSIGSTKSZ (arm64 5120; x86_64 and RISC-V 2048, asm-generic's).
+#[cfg(not(target_arch = "aarch64"))]
 pub const MINSIGSTKSZ: u64 = 2048;
 
 /// The fields of Linux `stack_t`: a sigaltstack request, or the state saved
