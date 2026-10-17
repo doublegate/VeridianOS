@@ -663,6 +663,25 @@ pub const fn make_dev(major: u32, minor: u32) -> u32 {
     (minor & 0xff) | ((major & 0xfff) << 8) | ((minor & !0xff) << 12)
 }
 
+/// Which file a node names, for tables that find something by its inode (a
+/// FIFO's pipe, the socket bound to a socket file): `file_identity` where
+/// the filesystem has one (BlockFS), otherwise the node's address, which
+/// stays unique while the table holds the node.
+pub(crate) fn inode_key(node: &Arc<dyn VfsNode>) -> (u64, u64) {
+    node.file_identity()
+        .unwrap_or((0, Arc::as_ptr(node) as *const () as u64))
+}
+
+/// A special inode found by number (BlockFS's `file_identity`) lost its
+/// last link and was freed. Forget what its FIFO table and socket bindings
+/// hold under that key, so a new file that is given the same inode number
+/// starts fresh; open FIFO ends and the bound socket keep working, as on
+/// Linux, where an unlinked inode lives until its last reference goes.
+pub(crate) fn special_inode_freed(key: (u64, u64)) {
+    fifo::forget(key);
+    crate::net::unix_socket::forget_file(key);
+}
+
 /// The kind of file a mknod `mode` asks for (Linux's `may_mknod`): a type
 /// of 0 is a regular file; a directory is EPERM (`Err(true)`) and any
 /// other unknown type EINVAL (`Err(false)`).
@@ -1472,6 +1491,23 @@ impl Vfs {
         permissions: Permissions,
     ) -> Result<Arc<dyn VfsNode>, KernelError> {
         self.mkdir_in(&self.kernel_context(), path, permissions, |_| Ok(()))
+    }
+
+    /// Make a special file (FIFO, device or socket) in the kernel's context,
+    /// as [`Self::mkdir`] makes a directory.
+    pub fn mknod(
+        &self,
+        path: &str,
+        kind: NodeType,
+        permissions: Permissions,
+        rdev: u32,
+    ) -> Result<Arc<dyn VfsNode>, KernelError> {
+        self.create_in(
+            &self.kernel_context(),
+            path,
+            |_| Ok(()),
+            |parent, name| parent.mknod(name, kind, permissions, rdev),
+        )
     }
 
     fn mkdir_in(

@@ -516,6 +516,12 @@ impl BlockFsNode {
         let mut fs = self.fs.write();
         let result = op(&mut fs);
         fs.writeback_if_over_limit();
+        let freed = core::mem::take(&mut fs.freed_special);
+        drop(fs);
+        // Outside the lock: the FIFO and socket tables are locked after it.
+        for inode in freed {
+            super::special_inode_freed((Arc::as_ptr(&self.fs) as u64, inode as u64));
+        }
         result
     }
 }
@@ -723,6 +729,11 @@ pub struct BlockFsInner {
     /// Pages of files shared by the processes that map them (ADR 0010),
     /// dropped whenever a file's data changes or its inode is freed.
     page_cache: crate::mm::page_cache::PageCacheTable,
+    /// Special inodes (FIFOs, sockets) freed by the current operation, for
+    /// [`BlockFsNode::mutate`] to report once the lock is released: what was
+    /// found by that inode number must not be found by the next file to get
+    /// it (`fs::special_inode_freed`).
+    freed_special: Vec<u32>,
 }
 
 impl BlockFsInner {
@@ -763,6 +774,7 @@ impl BlockFsInner {
             device_blocks: 0,
             disk_writable: false,
             page_cache: crate::mm::page_cache::PageCacheTable::new(),
+            freed_special: Vec::new(),
         };
 
         // Create "." and ".." entries in the root directory (both point to inode 0)
@@ -1302,6 +1314,7 @@ impl BlockFsInner {
             device_blocks: 0,
             disk_writable: false,
             page_cache: crate::mm::page_cache::PageCacheTable::new(),
+            freed_special: Vec::new(),
         };
         fs.attach_disk(backend)?;
 
@@ -2712,6 +2725,7 @@ impl BlockFsInner {
         // A special file has no blocks; its device number is not one.
         if self.inode_table[inode_num as usize].is_special() {
             self.inode_table[inode_num as usize].direct_blocks = [0; DIRECT_BLOCKS];
+            self.freed_special.push(inode_num);
             return Ok(());
         }
         // Free direct blocks

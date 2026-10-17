@@ -2,6 +2,22 @@
 
 ### Added
 
+- **bind() of a Unix socket makes its socket file.** The bound name used to live only in the
+  socket layer's table: `ls` did not show it, a relative name was not resolved against the working
+  directory, and a second bind was EINVAL. Now, as Linux's `unix_bind_bsd` and `unix_find_bsd`:
+  bind makes a socket file (mode 0777 less the umask, with mknod's MAC and permission checks) and
+  an existing name is EADDRINUSE; connect follows the name to the file, needs write permission on
+  it (EACCES), and is ECONNREFUSED for a file no listening socket holds or one that is not a
+  socket. Unlinking the file leaves the socket working but unreachable, and the file outlives the
+  socket. A bind reserves the socket before it makes the file, so it never has to remove the
+  file again by path. `musl_unix_socket_file` (also passes on Linux) covers it; `musl_peercred` now
+  makes its socket file writable for its uid-4500 client, which Linux requires.
+- **A new FIFO or socket file on BlockFS could reach the pipe or socket of an unlinked one.**
+  BlockFS finds both by inode number and reuses a freed number, so a FIFO made after an open one
+  was unlinked could join the old pipe (a documented limitation of mknod) and a socket file could
+  reach, or be refused by, a socket still bound to the old file. When BlockFS frees a special
+  inode, the FIFO table and the socket bindings now forget it; open ends and bound sockets keep
+  working, as on Linux. Host tests on BlockFS pin both.
 - **mknod and mknodat, with FIFOs and device nodes (N-201).** mknod was always EPERM, so
   `mkfifo` failed; mknodat had no number. Both now follow Linux's `filename_mknodat`:
   - a regular file (type 0 or S_IFREG), FIFO, character or block device or socket file; a

@@ -273,7 +273,24 @@ fn setup_dbus_stub_socket() {
             }
         };
 
-        if unix_socket::socket_bind(stub_id, path).is_err() {
+        // The socket file a client's connect finds, in its directory.
+        let vfs = crate::fs::get_vfs();
+        for (i, _) in path.match_indices('/').skip(1) {
+            let _ = vfs.mkdir(&path[..i], crate::fs::Permissions::from_mode(0o755));
+        }
+        let file = match vfs.mknod(
+            path,
+            crate::fs::NodeType::Socket,
+            crate::fs::Permissions::from_mode(0o777),
+            0,
+        ) {
+            Ok(file) => file,
+            Err(_) => {
+                println!("[KDE] D-Bus stub ({}): socket file not made", path);
+                continue;
+            }
+        };
+        if unix_socket::socket_bind(stub_id, file, path).is_err() {
             println!("[KDE] D-Bus stub ({}): bind failed", path);
             continue;
         }

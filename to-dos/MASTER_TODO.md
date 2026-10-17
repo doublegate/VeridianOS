@@ -315,8 +315,8 @@ What does not work yet: `docs/KNOWN-LIMITATIONS.md`.
     per-program opt-in (ELF note) and prctl PR_SET_MDWE/PR_GET_MDWE (ADR 0017); mknod and
     mknodat (FIFOs with Linux's open/read/write/poll rules, device nodes opening their device by
     number, socket files; special files on RamFS, tmpfs and BlockFS and in mkfs-blockfs images;
-    st_rdev in stat; N-201); next: a tool that adds the W^X note to an existing binary; bind()
-    of a Unix socket making its socket file.
+    st_rdev in stat; N-201); bind() of a Unix socket makes its socket file and connect() finds
+    the socket through it; next: a tool that adds the W^X note to an existing binary.
   - [ ] **Release:** tri-arch boot with `-smp 4`, runtime suite, CHANGELOG, tag.
 - [ ] **v0.28.0:** the process, signal, time and file syscall tiers (X2 groups, with the open
   ABI-review findings N-194 to N-247 that belong to them).

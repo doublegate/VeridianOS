@@ -6,7 +6,9 @@
 //!
 //! Supported features:
 //! - Stream (SOCK_STREAM) and datagram (SOCK_DGRAM) modes
-//! - Path-based binding (`/run/wayland-0`, `/tmp/.X11-unix/X0`)
+//! - Binding to a socket file (`/run/wayland-0`, `/tmp/.X11-unix/X0`): bind
+//!   makes the file and a connect finds the socket through it, by inode, as
+//!   Linux's `unix_find_bsd` (the caller makes and resolves it)
 //! - `socketpair()` for anonymous connected socket pairs
 //! - SCM_RIGHTS for file descriptor passing (Wayland buffer handles)
 //! - Backlog queue for pending connections
@@ -14,13 +16,17 @@
 use alloc::{
     collections::{BTreeMap, VecDeque},
     string::{String, ToString},
+    sync::Arc,
     vec::Vec,
 };
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use spin::Mutex;
 
-use crate::error::{KernelError, KernelResult};
+use crate::{
+    error::{KernelError, KernelResult},
+    fs::VfsNode,
+};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -124,8 +130,14 @@ pub struct UnixSocket {
     pub socket_type: UnixSocketType,
     /// Current state.
     pub state: UnixSocketState,
-    /// Bound path (None if unbound or anonymous).
+    /// Bound path as given to bind, for getsockname (None if unbound or
+    /// anonymous).
     pub path: Option<String>,
+    /// The socket file it is bound to, by `fs::inode_key`.
+    bound_key: Option<NameKey>,
+    /// A bind has reserved the socket and is making its socket file
+    /// ([`socket_reserve_bind`]).
+    binding: bool,
     /// Peer socket ID (for connected stream sockets).
     pub peer_id: Option<u64>,
     /// Receive buffer (incoming messages).
@@ -203,6 +215,8 @@ impl UnixSocket {
             socket_type,
             state: UnixSocketState::Unbound,
             path: None,
+            bound_key: None,
+            binding: false,
             peer_id: None,
             recv_buffer: VecDeque::new(),
             recv_buffer_max: 65536,
@@ -237,8 +251,42 @@ static NEXT_SOCKET_ID: AtomicU64 = AtomicU64::new(1);
 /// Global registry of all Unix sockets, keyed by socket ID.
 static UNIX_SOCKETS: Mutex<BTreeMap<u64, UnixSocket>> = Mutex::new(BTreeMap::new());
 
-/// Path-to-socket-ID mapping for bound sockets.
-static PATH_REGISTRY: Mutex<BTreeMap<String, u64>> = Mutex::new(BTreeMap::new());
+/// Which socket file a bound socket holds: the file's `fs::inode_key`.
+pub type NameKey = (u64, u64);
+
+/// A bound socket and its socket file, held so that a key made from the
+/// node's address cannot be reused while the binding lasts.
+struct BoundName {
+    socket_id: u64,
+    _file: Arc<dyn VfsNode>,
+}
+
+/// Socket file to bound socket. An entry lasts as long as the socket: as on
+/// Linux, unlinking the file leaves the socket bound but unreachable, and a
+/// closed socket leaves its file behind.
+static PATH_REGISTRY: Mutex<BTreeMap<NameKey, BoundName>> = Mutex::new(BTreeMap::new());
+
+/// The socket file `key` names is gone (`fs::special_inode_freed`): a
+/// socket still bound to it stays bound but cannot be reached, and a new
+/// file given the same key can be bound.
+pub fn forget_file(key: NameKey) {
+    let stale = PATH_REGISTRY.lock().remove(&key);
+    // The node, after the lock: dropping it may reach its filesystem.
+    drop(stale);
+}
+
+/// The socket bound to `file`, if any.
+fn bound_to(file: &Arc<dyn VfsNode>) -> KernelResult<u64> {
+    let key = crate::fs::inode_key(file);
+    PATH_REGISTRY
+        .lock()
+        .get(&key)
+        .map(|b| b.socket_id)
+        .ok_or(KernelError::NotFound {
+            resource: "unix_socket_path",
+            id: 0,
+        })
+}
 
 // ---------------------------------------------------------------------------
 // Socket API
@@ -275,8 +323,37 @@ pub fn socket_create(socket_type: UnixSocketType, owner_pid: u64) -> KernelResul
     Ok(id)
 }
 
-/// Bind a Unix socket to a filesystem path.
-pub fn socket_bind(socket_id: u64, path: &str) -> KernelResult<()> {
+/// Reserve an unbound socket for a bind, before its socket file is made:
+/// a socket that is bound, or that another bind has reserved, is
+/// InvalidState (EINVAL). With the reservation held, [`socket_bind`] can
+/// fail only for a file another socket holds, so a bind never has to take
+/// the file it made back out by path. [`socket_bind`] ends the reservation;
+/// [`socket_release_bind`] ends it if the file could not be made.
+pub fn socket_reserve_bind(socket_id: u64) -> KernelResult<()> {
+    let mut sockets = UNIX_SOCKETS.lock();
+    let socket = sockets.get_mut(&socket_id).ok_or(KernelError::NotFound {
+        resource: "unix_socket",
+        id: socket_id,
+    })?;
+    if socket.state != UnixSocketState::Unbound || socket.path.is_some() || socket.binding {
+        return Err(KernelError::InvalidState {
+            expected: "unbound",
+            actual: "bound or binding",
+        });
+    }
+    socket.binding = true;
+    Ok(())
+}
+
+/// End a reservation from [`socket_reserve_bind`] without binding.
+pub fn socket_release_bind(socket_id: u64) {
+    if let Some(socket) = UNIX_SOCKETS.lock().get_mut(&socket_id) {
+        socket.binding = false;
+    }
+}
+
+/// Bind a Unix socket to the socket file `file`, made for it at `path`.
+pub fn socket_bind(socket_id: u64, file: Arc<dyn VfsNode>, path: &str) -> KernelResult<()> {
     if path.is_empty() || path.len() > UNIX_PATH_MAX {
         return Err(KernelError::InvalidArgument {
             name: "path",
@@ -284,8 +361,9 @@ pub fn socket_bind(socket_id: u64, path: &str) -> KernelResult<()> {
         });
     }
 
+    let key = crate::fs::inode_key(&file);
     let mut paths = PATH_REGISTRY.lock();
-    if paths.contains_key(path) {
+    if paths.contains_key(&key) {
         return Err(KernelError::AlreadyExists {
             resource: "unix_socket_path",
             id: 0,
@@ -298,6 +376,7 @@ pub fn socket_bind(socket_id: u64, path: &str) -> KernelResult<()> {
         id: socket_id,
     })?;
 
+    socket.binding = false;
     if socket.state != UnixSocketState::Unbound {
         return Err(KernelError::InvalidState {
             expected: "unbound",
@@ -306,8 +385,15 @@ pub fn socket_bind(socket_id: u64, path: &str) -> KernelResult<()> {
     }
 
     socket.path = Some(path.to_string());
+    socket.bound_key = Some(key);
     socket.state = UnixSocketState::Bound;
-    paths.insert(path.to_string(), socket_id);
+    paths.insert(
+        key,
+        BoundName {
+            socket_id,
+            _file: file,
+        },
+    );
 
     Ok(())
 }
@@ -344,20 +430,14 @@ pub fn socket_listen(socket_id: u64, backlog: usize) -> KernelResult<()> {
     Ok(())
 }
 
-/// Connect a stream socket to a listening socket at the given path.
+/// Connect a stream socket to the listening socket bound to the socket
+/// file `file` (NotFound if none is).
 ///
 /// Returns Ok(()) on success. The connection is immediately established
 /// (no three-way handshake for local sockets).
-pub fn socket_connect(socket_id: u64, path: &str) -> KernelResult<()> {
+pub fn socket_connect(socket_id: u64, file: &Arc<dyn VfsNode>) -> KernelResult<()> {
     let _changed = ReadinessChange;
-    // Find the target socket by path.
-    let target_id = {
-        let paths = PATH_REGISTRY.lock();
-        *paths.get(path).ok_or(KernelError::NotFound {
-            resource: "unix_socket_path",
-            id: 0,
-        })?
-    };
+    let target_id = bound_to(file)?;
 
     let cred = PeerCred::current();
     let mut sockets = UNIX_SOCKETS.lock();
@@ -620,10 +700,16 @@ pub fn socket_close(socket_id: u64) -> KernelResult<()> {
     let mut sockets = UNIX_SOCKETS.lock();
 
     let removed = sockets.remove(&socket_id);
+    let mut unbound = None;
     if let Some(socket) = removed.as_ref() {
-        // Remove path binding if any.
-        if let Some(ref path) = socket.path {
-            PATH_REGISTRY.lock().remove(path);
+        // Remove the binding; the file stays, as on Linux.
+        // Only its own: once its file was freed the key may name another
+        // socket's file.
+        if let Some(key) = socket.bound_key {
+            let mut paths = PATH_REGISTRY.lock();
+            if paths.get(&key).is_some_and(|b| b.socket_id == socket_id) {
+                unbound = paths.remove(&key);
+            }
         }
 
         // Notify peer of disconnection.
@@ -640,12 +726,15 @@ pub fn socket_close(socket_id: u64) -> KernelResult<()> {
     // closes that socket, which takes this lock again.
     drop(sockets);
     drop(removed);
+    // The socket file's node too: dropping it may reach its filesystem.
+    drop(unbound);
 
     Ok(())
 }
 
-/// Send a datagram to a named socket (connectionless).
-pub fn socket_sendto(socket_id: u64, data: &[u8], dest_path: &str) -> KernelResult<usize> {
+/// Send a datagram to the socket bound to the socket file `dest`
+/// (connectionless).
+pub fn socket_sendto(socket_id: u64, data: &[u8], dest: &Arc<dyn VfsNode>) -> KernelResult<usize> {
     let _changed = ReadinessChange;
     if data.len() > UNIX_DGRAM_MAX {
         return Err(KernelError::InvalidArgument {
@@ -654,13 +743,7 @@ pub fn socket_sendto(socket_id: u64, data: &[u8], dest_path: &str) -> KernelResu
         });
     }
 
-    let dest_id = {
-        let paths = PATH_REGISTRY.lock();
-        *paths.get(dest_path).ok_or(KernelError::NotFound {
-            resource: "unix_socket_path",
-            id: 0,
-        })?
-    };
+    let dest_id = bound_to(dest)?;
 
     let mut sockets = UNIX_SOCKETS.lock();
     let dest = sockets.get_mut(&dest_id).ok_or(KernelError::NotFound {
@@ -748,6 +831,83 @@ pub fn socket_poll_readiness(socket_id: u64) -> u16 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A socket is found through the file it is bound to, not a name: a
+    /// second bind to the file fails, another file reaches nothing, and the
+    /// binding ends with the socket.
+    #[test]
+    fn binding_is_by_socket_file() {
+        use crate::fs::{ramfs::RamFs, Filesystem, NodeType, Permissions};
+        let fs = RamFs::new();
+        let perms = Permissions::from_mode(0o777);
+        let a = fs.root().mknod("a", NodeType::Socket, perms, 0).unwrap();
+        let b = fs.root().mknod("b", NodeType::Socket, perms, 0).unwrap();
+        let srv = socket_create(UnixSocketType::Stream, 1).unwrap();
+        let other = socket_create(UnixSocketType::Stream, 1).unwrap();
+        let cli = socket_create(UnixSocketType::Stream, 1).unwrap();
+        // One bind at a time reserves a socket; a bound one cannot be.
+        assert_eq!(socket_reserve_bind(srv), Ok(()));
+        assert!(socket_reserve_bind(srv).is_err());
+        socket_release_bind(srv);
+        assert_eq!(socket_reserve_bind(srv), Ok(()));
+        assert_eq!(socket_bind(srv, a.clone(), "/x/a"), Ok(()));
+        assert!(socket_reserve_bind(srv).is_err());
+        assert!(matches!(
+            socket_bind(other, a.clone(), "/y/a"),
+            Err(KernelError::AlreadyExists { .. })
+        ));
+        socket_listen(srv, 4).unwrap();
+        assert!(matches!(
+            socket_connect(cli, &b),
+            Err(KernelError::NotFound { .. })
+        ));
+        assert_eq!(socket_connect(cli, &a), Ok(()));
+        socket_close(srv).unwrap();
+        let late = socket_create(UnixSocketType::Stream, 1).unwrap();
+        assert!(matches!(
+            socket_connect(late, &a),
+            Err(KernelError::NotFound { .. })
+        ));
+        // The file is free again once its socket is gone.
+        assert_eq!(socket_bind(other, a, "/x/a"), Ok(()));
+        for s in [other, cli, late] {
+            socket_close(s).unwrap();
+        }
+    }
+
+    /// BlockFS finds a file by inode number and reuses a freed number:
+    /// a new socket file given the number of an unlinked one that a socket
+    /// is still bound to must be bindable, reach only its own socket, and
+    /// survive the old socket's close.
+    #[test]
+    fn freed_blockfs_socket_file_number_is_not_the_old_binding() {
+        use crate::fs::{blockfs::BlockFs, Filesystem, NodeType, Permissions};
+        let fs = BlockFs::format(1024, 64).unwrap();
+        let root = fs.root();
+        let perms = Permissions::from_mode(0o777);
+        let old_file = root.mknod("s", NodeType::Socket, perms, 0).unwrap();
+        let old = socket_create(UnixSocketType::Stream, 1).unwrap();
+        socket_bind(old, old_file.clone(), "/s").unwrap();
+        socket_listen(old, 4).unwrap();
+        root.unlink("s").unwrap();
+        let new_file = root.mknod("t", NodeType::Socket, perms, 0).unwrap();
+        assert_eq!(
+            crate::fs::inode_key(&new_file),
+            crate::fs::inode_key(&old_file),
+            "the test needs the inode number reused"
+        );
+        let new = socket_create(UnixSocketType::Stream, 1).unwrap();
+        assert_eq!(socket_bind(new, new_file.clone(), "/t"), Ok(()));
+        let cli = socket_create(UnixSocketType::Stream, 1).unwrap();
+        // Not listening yet: it must not reach the old, listening socket.
+        assert!(socket_connect(cli, &new_file).is_err());
+        socket_close(old).unwrap();
+        socket_listen(new, 4).unwrap();
+        assert_eq!(socket_connect(cli, &new_file), Ok(()));
+        for s in [new, cli] {
+            socket_close(s).unwrap();
+        }
+    }
 
     /// A zero-length stream send carries nothing, so it must not queue a
     /// message: the peer's recv would return 0, which reads as EOF (review

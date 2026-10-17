@@ -3265,10 +3265,29 @@ fn sys_socket_bind(fd: usize, addr_ptr: usize, addr_len: usize) -> SyscallResult
             Ok(0)
         }
         SocketHandle::Unix(id) => {
-            let path = read_sockaddr_un(addr_ptr, addr_len)?;
-            crate::net::unix_socket::socket_bind(id, &path)
-                .map(|()| 0)
-                .map_err(|_| SyscallError::InvalidState)
+            use crate::net::unix_socket;
+            let name = read_sockaddr_un(addr_ptr, addr_len)?;
+            // Reserve the socket before its file is made (EINVAL if it is
+            // bound or being bound), so the bind below cannot lose a race
+            // and leave a file to take back out by path, which a swapped
+            // symlink or directory could redirect.
+            unix_socket::socket_reserve_bind(id).map_err(|e| match e {
+                crate::error::KernelError::NotFound { .. } => SyscallError::BadFileDescriptor,
+                _ => SyscallError::InvalidArgument,
+            })?;
+            let made = filesystem::make_socket_file(&name).and_then(|file| {
+                // With the reservation held this fails only if a concurrent
+                // connect changed the socket; the file is then left in place.
+                unix_socket::socket_bind(id, file, &name).map_err(|e| match e {
+                    crate::error::KernelError::AlreadyExists { .. } => SyscallError::AddressInUse,
+                    _ => SyscallError::InvalidArgument,
+                })
+            });
+            if made.is_err() {
+                unix_socket::socket_release_bind(id);
+            }
+            made?;
+            Ok(0)
         }
     }
 }
@@ -3303,11 +3322,15 @@ fn sys_socket_connect(fd: usize, addr_ptr: usize, addr_len: usize) -> SyscallRes
             Ok(0)
         }
         SocketHandle::Unix(id) => {
-            let path = read_sockaddr_un(addr_ptr, addr_len)?;
-            crate::net::unix_socket::socket_connect(id, &path)
+            let name = read_sockaddr_un(addr_ptr, addr_len)?;
+            let file = filesystem::find_socket_file(&name)?;
+            crate::net::unix_socket::socket_connect(id, &file)
                 .map(|()| 0)
-                // ENOENT: no socket bound at that path.
-                .map_err(|_| SyscallError::ResourceNotFound)
+                .map_err(|e| match e {
+                    crate::error::KernelError::ResourceExhausted { .. } => SyscallError::WouldBlock,
+                    // No socket holds the file, or it does not listen.
+                    _ => SyscallError::ConnectionRefused,
+                })
         }
     }
 }

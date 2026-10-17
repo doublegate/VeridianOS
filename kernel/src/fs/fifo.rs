@@ -39,9 +39,7 @@ fn fifo_event() {
 type Key = (u64, u64);
 
 fn key_of(inode: &Arc<dyn VfsNode>) -> Key {
-    inode
-        .file_identity()
-        .unwrap_or((0, Arc::as_ptr(inode) as *const () as u64))
+    super::inode_key(inode)
 }
 
 /// The open FIFOs, by inode. Entries are weak: a FIFO goes away with its
@@ -75,6 +73,14 @@ impl Drop for Fifo {
             fifos.remove(&self.key);
         }
     }
+}
+
+/// Forget the FIFO of a freed inode (`fs::special_inode_freed`): its open
+/// ends keep their pipe, and the next open of a new file with that key gets
+/// a new one.
+pub(super) fn forget(key: Key) {
+    let stale = FIFOS.lock().remove(&key);
+    drop(stale);
 }
 
 /// The FIFO of `inode`, made on its first open.
@@ -325,6 +331,35 @@ mod tests {
             .root()
             .mknod("f", NodeType::Pipe, Permissions::from_mode(0o644), 0)
             .unwrap()
+    }
+
+    /// BlockFS reuses a freed inode number: a new FIFO given the number of
+    /// an unlinked one that is still open gets its own pipe, and the old
+    /// one's open ends keep theirs.
+    #[test]
+    fn new_fifo_on_a_freed_blockfs_number_gets_a_new_pipe() {
+        let fs = crate::fs::blockfs::BlockFs::format(1024, 64).unwrap();
+        let root = fs.root();
+        let perms = Permissions::from_mode(0o644);
+        let old = root.mknod("f", NodeType::Pipe, perms, 0).unwrap();
+        let old_end = FifoEnd::open(old.clone(), true, true, false).unwrap();
+        assert_eq!(old_end.write(0, b"old"), Ok(3));
+        root.unlink("f").unwrap();
+        let new = root.mknod("g", NodeType::Pipe, perms, 0).unwrap();
+        assert_eq!(
+            super::super::inode_key(&new),
+            super::super::inode_key(&old),
+            "the test needs the inode number reused"
+        );
+        let new_end = FifoEnd::open(new, true, true, false).unwrap();
+        let mut b = [0u8; 8];
+        assert_eq!(
+            new_end.read(0, &mut b),
+            Err(KernelError::WouldBlock),
+            "empty, with a writer"
+        );
+        assert_eq!(old_end.read(0, &mut b), Ok(3));
+        assert_eq!(&b[..3], b"old");
     }
 
     #[test]

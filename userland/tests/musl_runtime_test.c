@@ -1782,7 +1782,11 @@ static void test_peercred(void)
     unlink(a.sun_path);
     len = sizeof(c);
     if (getsockopt(l, SOL_SOCKET, SO_PEERCRED, &c, &len) != 0 || c.pid != 0 || c.uid != 65534) f |= 4;
-    if (bind(l, (struct sockaddr *)&a, sizeof(a)) != 0 || listen(l, 1) != 0) f |= 8;
+    /* connect needs write permission on the socket file, which root's
+     * umask leaves to root alone: open it to the uid-4500 client. */
+    if (bind(l, (struct sockaddr *)&a, sizeof(a)) != 0 || chmod(a.sun_path, 0777) != 0
+        || listen(l, 1) != 0)
+        f |= 8;
     pid_t pid = fork();
     if (pid == 0)
         _exit(pc_client());
@@ -2306,6 +2310,97 @@ static void test_mknod(void)
     rmdir(dir);
     snprintf(why, sizeof(why), "f=%#x child=%#x errno=%d", f, cst, errno);
     report("musl_mknod", f == 0, why);
+}
+
+static int un_socket(const char *path, int do_bind)
+{
+    struct sockaddr_un a = {.sun_family = AF_UNIX};
+    snprintf(a.sun_path, sizeof(a.sun_path), "%s", path);
+    int s = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (s < 0)
+        return -1;
+    int r = do_bind ? bind(s, (struct sockaddr *)&a, sizeof(a))
+                    : connect(s, (struct sockaddr *)&a, sizeof(a));
+    if (r != 0) {
+        int e = errno;
+        close(s);
+        errno = e;
+        return -1;
+    }
+    return s;
+}
+
+/* bind() makes a socket file, as on Linux: stat shows S_IFSOCK with the
+ * umask applied, a second bind to the name is EADDRINUSE, connect finds the
+ * socket through the file (relative names against the cwd; ENOENT once it
+ * is unlinked, while the socket itself goes on working; ECONNREFUSED for a
+ * file that no listening socket holds), and the file outlives the socket. */
+static void test_unix_socket_file(void)
+{
+    const char *dir = "/tmp/musl_sockfile";
+    static char why[80];
+    char p[64];
+    int f = 0;
+    struct stat st;
+    mkdir(dir, 0777);
+    snprintf(p, sizeof(p), "%s/s", dir);
+    unlink(p);
+    mode_t old = umask(022);
+    int l = un_socket(p, 1);
+    umask(old);
+    if (l < 0 || listen(l, 4) != 0)
+        f |= 1;
+    if (stat(p, &st) != 0 || !S_ISSOCK(st.st_mode) || (st.st_mode & 0777) != 0755)
+        f |= 2;
+    int s2 = un_socket(p, 1);
+    if (s2 != -1 || errno != EADDRINUSE)
+        f |= 4;
+    if (s2 >= 0)
+        close(s2);
+    char cwd[128];
+    int c = -1;
+    if (getcwd(cwd, sizeof(cwd)) && chdir(dir) == 0) {
+        c = un_socket("s", 0);
+        if (chdir(cwd) != 0)
+            f |= 8;
+    }
+    if (c < 0)
+        f |= 8;
+    /* Only with a connection queued: accept would wait for ever. */
+    int a = l >= 0 && c >= 0 ? accept(l, NULL, NULL) : -1;
+    char b = 0;
+    if (a < 0 || write(c, "x", 1) != 1 || read(a, &b, 1) != 1 || b != 'x')
+        f |= 16;
+    unlink(p);
+    int c2 = un_socket(p, 0);
+    if (c2 != -1 || errno != ENOENT)
+        f |= 32;
+    if (c2 >= 0)
+        close(c2);
+    if (a >= 0 && (write(a, "y", 1) != 1 || read(c, &b, 1) != 1 || b != 'y'))
+        f |= 64;
+    snprintf(p, sizeof(p), "%s/reg", dir);
+    close(open(p, O_CREAT | O_WRONLY, 0666));
+    int c3 = un_socket(p, 0);
+    if (c3 != -1 || errno != ECONNREFUSED)
+        f |= 128;
+    unlink(p);
+    snprintf(p, sizeof(p), "%s/gone", dir);
+    unlink(p);
+    int g = un_socket(p, 1);
+    if (g >= 0)
+        close(g);
+    int c4 = un_socket(p, 0);
+    if (g < 0 || stat(p, &st) != 0 || !S_ISSOCK(st.st_mode) || c4 != -1 || errno != ECONNREFUSED)
+        f |= 256;
+    unlink(p);
+    int fds[] = {l, a, c, c3, c4};
+    for (unsigned i = 0; i < sizeof(fds) / sizeof(fds[0]); i++)
+        if (fds[i] >= 0)
+            close(fds[i]);
+    rmdir(dir);
+    snprintf(why, sizeof(why), "f=%#x errno=%d", f, errno);
+    report("musl_unix_socket_file", f == 0, why);
 }
 
 /* open with O_CREAT names a file, so Linux refuses it with EISDIR for a
@@ -4613,6 +4708,7 @@ int main(int argc, char **argv)
     test_mkfifo();
     test_mknod();
     test_open_creat_dir();
+    test_unix_socket_file();
     test_threads();
     test_thread_guards();
     test_signals();

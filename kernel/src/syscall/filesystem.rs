@@ -3306,24 +3306,41 @@ pub fn sys_mknodat(dirfd: usize, path_ptr: usize, mode: usize, dev: usize) -> Sy
         }
     })?;
     let path = resolve_at_path(dirfd, &rel_path)?;
-    match vfs()?.resolve_path_no_follow(&path) {
+    let perms = creation_perms(mode);
+    make_node(&path, rel_path.ends_with('/'), kind, perms, dev as u32)?;
+    Ok(0)
+}
+
+/// Make the special file (or, for `NodeType::File`, regular file) `kind` at
+/// the absolute `path`, owned by the caller, as mknodat does: EEXIST for an
+/// existing name (not followed), ENOENT for a name that ended in '/'
+/// (`trailing_slash`), the parent's MAC, write and search checks, and
+/// privilege for a device. `rdev` is used only for a device. bind() of a
+/// Unix socket makes its socket file through this too.
+pub(crate) fn make_node(
+    path: &str,
+    trailing_slash: bool,
+    kind: crate::fs::NodeType,
+    perms: Permissions,
+    rdev: u32,
+) -> Result<alloc::sync::Arc<dyn crate::fs::VfsNode>, SyscallError> {
+    match vfs()?.resolve_path_no_follow(path) {
         Ok(_) => return Err(SyscallError::FileExists),
         Err(e) if is_not_found(&e) => {}
         Err(e) => return Err(map_resolve_err(e)),
     }
     // "name/" can only be a directory, which mknod does not make.
-    if rel_path.ends_with('/') {
+    if trailing_slash {
         return Err(SyscallError::ResourceNotFound);
     }
-    let perms = creation_perms(mode);
     let device = matches!(
         kind,
         crate::fs::NodeType::CharDevice | crate::fs::NodeType::BlockDevice
     );
-    let rdev = if device { dev as u32 } else { 0 };
+    let rdev = if device { rdev } else { 0 };
     // Every type, regular files included, goes through one resolution of
     // the parent for the MAC check, the permission checks and the creation.
-    let node = vfs()?.mknod_checked(&path, kind, perms, rdev, |dir| {
+    let node = vfs()?.mknod_checked(path, kind, perms, rdev, |dir| {
         let denied = crate::error::KernelError::PermissionDenied {
             operation: "create directory entry",
         };
@@ -3345,7 +3362,44 @@ pub fn sys_mknodat(dirfd: usize, path_ptr: usize, mode: usize, dev: usize) -> Sy
         e => super::map_kernel_error(e),
     })?;
     own_new_node(&node);
-    Ok(0)
+    Ok(node)
+}
+
+/// The socket file bind() of a Unix socket makes for the name `name`
+/// (relative to the working directory), as Linux's `unix_bind_bsd`: a
+/// socket file with mode 0777 less the umask, through [`make_node`], so an
+/// existing name is EADDRINUSE.
+pub(crate) fn make_socket_file(
+    name: &str,
+) -> Result<alloc::sync::Arc<dyn crate::fs::VfsNode>, SyscallError> {
+    let path = resolve_at_path(AT_FDCWD, name)?;
+    make_node(
+        &path,
+        name.ends_with('/'),
+        crate::fs::NodeType::Socket,
+        creation_perms(0o777),
+        0,
+    )
+    .map_err(|e| match e {
+        SyscallError::FileExists => SyscallError::AddressInUse,
+        e => e,
+    })
+}
+
+/// The socket file a connect (or an addressed send) to the Unix socket name
+/// `name` reaches, as Linux's `unix_find_bsd`: the name is followed like any
+/// path, the caller needs write permission on the file (EACCES), and
+/// anything but a socket file is ECONNREFUSED.
+pub(crate) fn find_socket_file(
+    name: &str,
+) -> Result<alloc::sync::Arc<dyn crate::fs::VfsNode>, SyscallError> {
+    let path = resolve_at_path(AT_FDCWD, name)?;
+    let file = vfs()?.resolve_path(&path).map_err(map_resolve_err)?;
+    require_open_access(&file, &OpenFlags::write_only())?;
+    if file.node_type() != crate::fs::NodeType::Socket {
+        return Err(SyscallError::ConnectionRefused);
+    }
+    Ok(file)
 }
 
 #[cfg(test)]
