@@ -73,8 +73,9 @@ exposed were fixed (N-182 to N-189); the rest are listed, with their targets, in
   0017).
   - A program that needs it (a JIT) opts in with the VeridianOS ELF note
     (`<veridian/wxneeded.h>`) and then behaves as on Linux.
-  - An unmodified Linux binary carries no note, so it must be relinked with the header. No tool
-    adds the note to an existing binary yet.
+  - An unmodified Linux binary carries no note. `tools/veridian-elfctl set wxneeded FILE` adds
+    one without relinking (a new program header table at the end of the file; run it after
+    `strip`), and `clear` takes the opt-in away again.
   - Without the note, a JIT must write code through a writable mapping and run it from an
     executable one (a second mapping of a memfd, or mprotect between the two).
   - PR_SET_MDWE follows Linux. It is reported only when set: the default W^X is not MDWE,

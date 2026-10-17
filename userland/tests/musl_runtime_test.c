@@ -2097,6 +2097,33 @@ static void test_wx_opt_in(void)
     report("musl_wx_opt_in", st == 0 && strcmp(out, "WX OK 42") == 0, why);
 }
 
+/* tools/veridian-elfctl (scripts/build-wx-note-tests.sh): a copy built
+ * without the note is refused W+X like any Linux binary; the tool's added
+ * note -- in a new program header table, static PIE and dynamic -- opts it
+ * in; and clearing the bit of a program that has the note opts it out. */
+static void test_wx_note_tool(void)
+{
+    static const struct {
+        const char *path, *arg, *want;
+    } cases[] = {
+        {"/bin/wx_plain_test", "refused", "WX REFUSED OK"},
+        {"/bin/wx_patched_test", NULL, "WX OK 42"},
+        {"/bin/wx_patched_dyn_test", NULL, "WX OK 42"},
+        {"/bin/wx_cleared_test", "refused", "WX REFUSED OK"},
+    };
+    static char out[128], why[200];
+    int f = 0;
+    why[0] = 0;
+    for (unsigned i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        int st = run_capture(cases[i].path, cases[i].arg, out, sizeof(out));
+        if (st != 0 || strcmp(out, cases[i].want) != 0) {
+            f |= 1 << i;
+            snprintf(why, sizeof(why), "%s: status=%#x output: %s", cases[i].path, st, out);
+        }
+    }
+    report("musl_wx_note_tool", f == 0, why);
+}
+
 /* PR_SET_MDWE as Linux: argument checks, one way (EPERM), no RWX and no
  * exec gain, kept across fork and exec -- where it overrides the W^X
  * note -- unless set with PR_MDWE_NO_INHERIT. In children: it is
@@ -4704,6 +4731,7 @@ int main(int argc, char **argv)
     test_mprotect();
     test_wx_default();
     test_wx_opt_in();
+    test_wx_note_tool();
     test_mdwe();
     test_mkfifo();
     test_mknod();

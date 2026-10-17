@@ -71,3 +71,19 @@ Other systems settle this in one of three ways:
   - runtime, on all three architectures: `musl_wx_refused_by_default`, `musl_wx_opt_in`
     (userland/tests/wx_needed_test.c writes code into an RWX mapping and runs it) and
     `musl_mdwe`.
+
+## Update (2026-10-17): the tool
+
+`tools/veridian-elfctl` adds the note to an existing binary, as elfctl(1) and paxctl(8) do for
+theirs, so a Linux binary that needs W+X no longer has to be relinked:
+
+- `show FILE`, and `set wxneeded` / `clear wxneeded FILE [-o OUT]`;
+- a binary that has the note gets its feature word changed in place;
+- otherwise the note is added the way patchelf grows a program header table: a new table (the
+  old entries, a PT_LOAD that maps it, the PT_NOTE, and PT_PHDR moved or added) is written at the
+  end of the file, so AT_PHDR still names a loaded table for musl's and glibc's loaders.
+
+Patched static, static-PIE and dynamic programs (musl and glibc, x86_64, AArch64 and RISC-V,
+64 KiB alignment included) still run on Linux, and `musl_wx_note_tool` checks the kernel's reading
+of them on all three architectures (`scripts/build-wx-note-tests.sh`). The decision above is
+unchanged.

@@ -2,6 +2,15 @@
 
 ### Added
 
+- **`tools/veridian-elfctl`: the W^X opt-in for an existing binary (ADR 0017).** A Linux binary
+  that needs writable and executable memory had to be relinked with `<veridian/wxneeded.h>`. The
+  tool shows, sets or clears the VeridianOS feature note: it flips the bit of a note that is
+  there, or adds one without relinking, as patchelf grows a program header table (a new table at
+  the end of the file with a PT_LOAD that maps it, the PT_NOTE, and PT_PHDR moved or added).
+  Patched musl and glibc programs, static, static-PIE and dynamic, still run on Linux on all
+  three architectures; `musl_wx_note_tool` checks that the kernel refuses W+X to a copy built
+  without the note, allows it once the tool adds one (static PIE and dynamic), and refuses it
+  again when the tool clears the bit.
 - **bind() of a Unix socket makes its socket file.** The bound name used to live only in the
   socket layer's table: `ls` did not show it, a relative name was not resolved against the working
   directory, and a second bind was EINVAL. Now, as Linux's `unix_bind_bsd` and `unix_find_bsd`:

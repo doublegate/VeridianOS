@@ -9,6 +9,10 @@
  *                           PR_SET_MDWE set, which exec keeps).
  *
  * Prints one line ("WX ... OK" or what failed) and exits 0 on success.
+ *
+ * Built with -DWX_NO_NOTE it carries no note, as a binary built for Linux:
+ * the rootfs scripts run tools/veridian-elfctl on such copies to test the
+ * note it adds (and one it clears).
  */
 #include <errno.h>
 #include <stdio.h>
@@ -16,7 +20,9 @@
 #include <sys/mman.h>
 #include <sys/prctl.h>
 
+#ifndef WX_NO_NOTE
 #include <veridian/wxneeded.h>
+#endif
 
 #ifndef PR_SET_MDWE
 #define PR_SET_MDWE 65

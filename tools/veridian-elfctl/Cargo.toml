@@ -1,0 +1,12 @@
+[package]
+name = "veridian-elfctl"
+version = "0.1.0"
+edition = "2021"
+description = "Show, set or clear VeridianOS feature-control notes (the W^X opt-in) in ELF binaries"
+
+# NOT part of the workspace -- standalone host tool
+# Build with: cd tools/veridian-elfctl && cargo build --release
+
+[[bin]]
+name = "veridian-elfctl"
+path = "src/main.rs"
