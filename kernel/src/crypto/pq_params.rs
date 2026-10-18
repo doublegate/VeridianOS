@@ -8,12 +8,16 @@
 //! - FIPS 204: Module-Lattice-Based Digital Signature Standard
 //! - NIST PQC Standardization Process: <https://csrc.nist.gov/projects/post-quantum-cryptography>
 
-/// ML-DSA (Dilithium) Parameter Sets
+/// ML-DSA (Dilithium) Parameter Sets.
+///
+/// Sizes are the FIPS 204 (final) encodings, Table 2. They used to be the
+/// round-3 Dilithium values (e.g. a 3293-byte ML-DSA-65 signature), which
+/// differ because FIPS 204 lengthens c_tilde to lambda/4 bytes (N-55).
 pub mod dilithium {
     /// ML-DSA-44 (Security Level 2 - equivalent to AES-128)
     pub mod level2 {
         pub const PUBLIC_KEY_SIZE: usize = 1312;
-        pub const SECRET_KEY_SIZE: usize = 2528;
+        pub const SECRET_KEY_SIZE: usize = 2560;
         pub const SIGNATURE_SIZE: usize = 2420;
 
         // Lattice parameters
@@ -33,8 +37,8 @@ pub mod dilithium {
     /// ML-DSA-65 (Security Level 3 - equivalent to AES-192)
     pub mod level3 {
         pub const PUBLIC_KEY_SIZE: usize = 1952;
-        pub const SECRET_KEY_SIZE: usize = 4000;
-        pub const SIGNATURE_SIZE: usize = 3293;
+        pub const SECRET_KEY_SIZE: usize = 4032;
+        pub const SIGNATURE_SIZE: usize = 3309;
 
         pub const Q: u32 = 8380417;
         pub const D: u32 = 13;
@@ -52,8 +56,8 @@ pub mod dilithium {
     /// ML-DSA-87 (Security Level 5 - equivalent to AES-256)
     pub mod level5 {
         pub const PUBLIC_KEY_SIZE: usize = 2592;
-        pub const SECRET_KEY_SIZE: usize = 4864;
-        pub const SIGNATURE_SIZE: usize = 4595;
+        pub const SECRET_KEY_SIZE: usize = 4896;
+        pub const SIGNATURE_SIZE: usize = 4627;
 
         pub const Q: u32 = 8380417;
         pub const D: u32 = 13;

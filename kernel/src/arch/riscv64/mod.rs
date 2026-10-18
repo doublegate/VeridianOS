@@ -8,6 +8,8 @@ pub mod boot;
 pub mod bootstrap;
 pub mod entry;
 pub mod serial;
+#[cfg(feature = "smp")]
+pub mod smp;
 pub mod usermode;
 
 // Re-export context, PLIC, and timer from parent riscv module
@@ -127,14 +129,24 @@ fn read_mmu_type(dtb_pa: u64) {
     }
 }
 
-/// scause: interrupt bit, and the supervisor timer interrupt code.
+/// scause: interrupt bit, and the supervisor software (IPI) and timer
+/// interrupt codes.
 const SCAUSE_INTERRUPT: usize = 1 << 63;
+const IRQ_S_SOFT: usize = 1;
 const IRQ_S_TIMER: usize = 5;
 
 /// Rust side of the trap vector. Returns only for handled interrupts.
 extern "C" fn riscv_trap(scause: usize, sepc: usize, stval: usize) {
     if scause == SCAUSE_INTERRUPT | IRQ_S_TIMER {
         super::riscv::timer::handle_interrupt();
+        return;
+    }
+    if scause == SCAUSE_INTERRUPT | IRQ_S_SOFT {
+        // An IPI (SBI send_ipi sets sip.SSIP). Acknowledge it by clearing
+        // SSIP, or it stays pending and traps again on return.
+        // SAFETY: clears only the supervisor software-interrupt pending bit.
+        unsafe { core::arch::asm!("csrc sip, {0}", in(reg) 2usize, options(nomem, nostack)) };
+        crate::arch::percpu::note_ipi();
         return;
     }
     riscv_fatal_trap(scause, sepc, stval)
@@ -191,6 +203,16 @@ pub fn init() {
     // SAFETY: the trap vector is installed (above), so supervisor
     // interrupts can be taken.
     unsafe { core::arch::asm!("csrsi sstatus, 2", options(nomem, nostack)) };
+
+    let satp: usize;
+    // SAFETY: reads the address-translation CSR; no side effects.
+    unsafe { core::arch::asm!("csrr {}, satp", out(reg) satp, options(nomem, nostack)) };
+    println!(
+        "[RISCV64] Paging: satp mode {} root {:#x}, kernel at {:#x}",
+        satp >> 60,
+        (satp & 0xFFF_FFFF_FFFF) << 12,
+        init as *const () as usize
+    );
 
     println!("[RISCV64] Architecture initialization complete (timer interrupts on)");
 }
@@ -273,9 +295,6 @@ pub fn serial_init() -> crate::serial::Uart16550Compat {
     uart.init();
     uart
 }
-
-/// Kernel heap start address (16MB into QEMU virt RAM at 0x80000000)
-pub const HEAP_START: usize = 0x81000000;
 
 /// Flush TLB for a specific virtual address. Called via
 /// `crate::arch::tlb_flush_address()`.

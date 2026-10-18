@@ -54,7 +54,6 @@ pub fn validate_phase2_complete() -> bool {
         crate::println!("   • Process Server with resource management");
         crate::println!("   • ELF loader with dynamic linking");
         crate::println!("   • Thread management APIs with TLS");
-        crate::println!("   • Standard library foundation");
         crate::println!("   • Driver registration system");
         crate::println!("   • PCI/USB bus drivers");
         crate::println!("   • Network drivers (Ethernet + Loopback)");

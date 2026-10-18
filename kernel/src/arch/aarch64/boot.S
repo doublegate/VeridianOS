@@ -102,6 +102,45 @@ halt:
     wfe
     b 1b
 
+// Secondary CPU entry (PSCI CPU_ON): MMU and caches off, DAIF masked,
+// x0 = context_id = &ApBootArgs (arch/smp_boot.rs). Entered at EL2 when the
+// CPU has it, else EL1; drops to EL1 like the boot CPU, then takes the
+// stack and the per-CPU block from the boot args and enters Rust.
+.section ".text.boot"
+.global veridian_secondary_entry
+veridian_secondary_entry:
+    mov x19, x0
+    mrs x1, CurrentEL
+    and x1, x1, #0xC
+    cmp x1, #0x8
+    b.ne 3f
+    mov x1, #0x3c5
+    msr spsr_el2, x1
+    adr x1, 3f
+    msr elr_el2, x1
+    mov x1, #(1 << 31)
+    msr hcr_el2, x1
+    mov x1, #3
+    msr cnthctl_el2, x1
+    msr cntvoff_el2, xzr
+    msr sctlr_el1, xzr
+    eret
+3:
+    mov x1, #(3 << 20)
+    msr cpacr_el1, x1
+    isb
+    ldr x1, [x19, #0x08]
+    and sp, x1, #~15
+    ldr x1, [x19, #0x10]
+    msr tpidr_el1, x1
+    mov x29, #0
+    mov x30, #0
+    mov x0, x19
+    bl veridian_secondary_rust
+4:
+    wfe
+    b 4b
+
 .section .bss
 .align 16
 _stack_bottom:

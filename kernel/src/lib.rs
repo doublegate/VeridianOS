@@ -6,7 +6,6 @@
 #![no_std]
 #![cfg_attr(all(test, target_os = "none"), no_main)]
 #![feature(custom_test_frameworks)]
-#![feature(abi_x86_interrupt)]
 #![cfg_attr(target_os = "none", feature(alloc_error_handler))]
 // naked_functions is stable since Rust 1.88.0, no feature flag needed
 // Custom test runner only for bare-metal; host target uses standard #[test] harness.
@@ -19,21 +18,61 @@ extern crate alloc;
 // On bare-metal targets use the custom kernel heap allocators.
 // On host (x86_64-unknown-linux-gnu) for coverage/testing, delegate to the
 // system allocator so that test code using Vec/String/alloc compiles and runs.
-#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+#[cfg(all(
+    any(target_arch = "x86_64", target_arch = "riscv64"),
+    target_os = "none"
+))]
 use linked_list_allocator::LockedHeap;
 
-// Also built for host unit tests, which exercise it on a Vec-backed heap.
-#[cfg(any(target_arch = "riscv64", target_arch = "aarch64", test))]
+// The bump allocator AArch64 uses until its MMU is on (N-28: locks need
+// exclusives, unreliable on Device memory). Also built for host unit tests,
+// which exercise it on a Vec-backed heap.
+#[cfg(any(target_arch = "aarch64", test))]
 #[cfg_attr(test, allow(dead_code))]
 mod simple_alloc_unsafe;
-#[cfg(any(target_arch = "riscv64", target_arch = "aarch64"))]
+#[cfg(target_arch = "aarch64")]
 use simple_alloc_unsafe::UnsafeBumpAllocator;
 
-#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+/// x86_64 and RISC-V: a real heap that reuses freed memory (MEM-SEC-03).
+#[cfg(all(
+    any(target_arch = "x86_64", target_arch = "riscv64"),
+    target_os = "none"
+))]
 #[global_allocator]
-static ALLOCATOR: LockedHeap = LockedHeap::empty();
+static ALLOCATOR: IrqSafeHeap = IrqSafeHeap(LockedHeap::empty());
 
-#[cfg(any(target_arch = "riscv64", target_arch = "aarch64"))]
+/// The kernel heap with its lock taken with interrupts off (Linux's
+/// allocators are interrupt-safe the same way). Interrupt handlers allocate
+/// -- waking a task inserts it into a run queue -- and system calls run with
+/// interrupts on (N-139), so an interrupt arriving while its CPU held the
+/// plain spinlock would spin on it forever, and every other CPU with it.
+#[cfg(all(
+    any(target_arch = "x86_64", target_arch = "riscv64"),
+    target_os = "none"
+))]
+pub struct IrqSafeHeap(LockedHeap);
+
+#[cfg(all(
+    any(target_arch = "x86_64", target_arch = "riscv64"),
+    target_os = "none"
+))]
+// SAFETY: forwards to LockedHeap's GlobalAlloc, which upholds the contract;
+// masking interrupts around it changes nothing the caller can observe.
+unsafe impl core::alloc::GlobalAlloc for IrqSafeHeap {
+    unsafe fn alloc(&self, layout: core::alloc::Layout) -> *mut u8 {
+        let _irq = crate::arch::disable_interrupts();
+        // SAFETY: the caller's contract, passed on.
+        unsafe { self.0.alloc(layout) }
+    }
+
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: core::alloc::Layout) {
+        let _irq = crate::arch::disable_interrupts();
+        // SAFETY: the caller's contract, passed on.
+        unsafe { self.0.dealloc(ptr, layout) }
+    }
+}
+
+#[cfg(target_arch = "aarch64")]
 #[global_allocator]
 pub static ALLOCATOR: UnsafeBumpAllocator = UnsafeBumpAllocator::new();
 
@@ -45,9 +84,12 @@ extern crate std;
 static SYSTEM_ALLOCATOR: std::alloc::System = std::alloc::System;
 
 /// Get a reference to the global allocator
-#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+#[cfg(all(
+    any(target_arch = "x86_64", target_arch = "riscv64"),
+    target_os = "none"
+))]
 pub fn get_allocator() -> &'static LockedHeap {
-    &ALLOCATOR
+    &ALLOCATOR.0
 }
 
 #[macro_use]
@@ -83,7 +125,6 @@ pub mod sched;
 pub mod security;
 pub mod serial;
 pub mod services;
-pub mod stdlib;
 pub mod sync;
 mod syscall;
 pub mod sysfs;
@@ -124,8 +165,6 @@ pub mod bench;
 // Re-export for tests and benchmarks
 // Re-export memory management for tests
 pub use mm::{FrameNumber, MemoryRegion, FRAME_SIZE};
-// Re-export scheduler items for tests
-pub use sched::{Priority, SchedClass, Task};
 // Re-exported so the `UserPod` compile_fail doctest can name the accessor;
 // `syscall` itself stays private.
 #[doc(hidden)]

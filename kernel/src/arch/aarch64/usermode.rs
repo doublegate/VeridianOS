@@ -24,8 +24,8 @@ pub fn try_enter_usermode() -> Result<(), crate::error::KernelError> {
     // 2. Exception vectors (VBAR_EL1) configured to handle SVC from EL0
     // 3. Physical frame allocation for user code + stack pages
     //
-    // Currently, the kernel runs with a basic identity mapping set up during
-    // early boot. Full user-space page table management (TTBR0_EL1 for
+    // Currently, the kernel runs with the MMU off (N-28): there are no page
+    // tables at all. Full user-space page table management (TTBR0_EL1 for
     // user-space, TTBR1_EL1 for kernel-space) requires the VMM to create
     // per-process address spaces with proper PTE_USER (AP[1]=1) bits.
     //
@@ -100,20 +100,26 @@ pub fn try_enter_usermode() -> Result<(), crate::error::KernelError> {
 pub unsafe fn enter_usermode(entry_point: u64, user_stack: u64) -> ! {
     // Set SPSR_EL1: return to EL0t (EL0 using SP_EL0)
     // Bits: M[3:0]=0b0000 (EL0t), DAIF cleared (interrupts enabled)
-    asm!(
-        // Configure SPSR_EL1 for EL0t with interrupts enabled
-        "msr SPSR_EL1, {spsr}",
-        // Set return address to user entry point
-        "msr ELR_EL1, {entry}",
-        // Set user stack pointer
-        "msr SP_EL0, {stack}",
-        // Synchronize
-        "isb",
-        // Transition to EL0
-        "eret",
-        spsr = in(reg) 0u64,       // EL0t, all interrupts enabled
-        entry = in(reg) entry_point,
-        stack = in(reg) user_stack,
-        options(noreturn)
-    );
+    // SAFETY: forwarded from this function's contract: the entry point is
+    // mapped executable for EL0, the stack is a valid 16-byte aligned user
+    // stack, TTBR0_EL1 holds User-accessible tables and VBAR_EL1 handles EL0
+    // exceptions, so eret lands in a well-formed EL0 context.
+    unsafe {
+        asm!(
+            // Configure SPSR_EL1 for EL0t with interrupts enabled
+            "msr SPSR_EL1, {spsr}",
+            // Set return address to user entry point
+            "msr ELR_EL1, {entry}",
+            // Set user stack pointer
+            "msr SP_EL0, {stack}",
+            // Synchronize
+            "isb",
+            // Transition to EL0
+            "eret",
+            spsr = in(reg) 0u64,       // EL0t, all interrupts enabled
+            entry = in(reg) entry_point,
+            stack = in(reg) user_stack,
+            options(noreturn)
+        )
+    };
 }

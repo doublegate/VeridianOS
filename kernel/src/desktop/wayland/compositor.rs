@@ -295,7 +295,10 @@ impl Compositor {
         Ok(any_drawn)
     }
 
-    /// Get a snapshot of the back-buffer for presentation to hardware.
+    /// A copy of the back-buffer, for tests only: presentation uses
+    /// [`Self::with_back_buffer`], which does not copy the frame (BM-DRV-02
+    /// reported a per-frame clone, but this was its only caller).
+    #[cfg(test)]
     pub fn back_buffer(&self) -> Vec<u32> {
         self.back_buffer.read().clone()
     }

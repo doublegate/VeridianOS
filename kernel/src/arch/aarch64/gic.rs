@@ -447,6 +447,21 @@ pub fn init() -> KernelResult<()> {
         })
 }
 
+/// Initialize the calling secondary CPU's GIC CPU interface (its banked
+/// registers; the distributor is set up once by the boot CPU). Plain MMIO
+/// stores and no lock, so it is usable before the MMU is on (N-28).
+pub fn init_secondary_cpu_interface() {
+    // SAFETY: GICC_BASE is the GICv2 CPU interface on QEMU virt, banked per
+    // CPU; these are the same writes `init_cpu_interface` makes on the boot
+    // CPU.
+    unsafe {
+        ptr::write_volatile((GICC_BASE + GICC_PMR) as *mut u32, 0xFF);
+        ptr::write_volatile((GICC_BASE + GICC_BPR) as *mut u32, 0);
+        ptr::write_volatile((GICC_BASE + GICC_CTLR) as *mut u32, 1);
+        core::arch::asm!("dsb sy", "isb", options(nostack));
+    }
+}
+
 /// Enable a specific IRQ line.
 ///
 /// Enables the interrupt with the given ID in the GIC distributor.

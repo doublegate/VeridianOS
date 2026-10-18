@@ -154,6 +154,105 @@ impl<'a> Fdt<'a> {
     }
 }
 
+/// One `/cpus/cpu@N` node, for CPU enumeration.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CpuNode<'a> {
+    /// `reg`: hart id (RISC-V) or MPIDR affinity (AArch64).
+    pub reg: Option<u64>,
+    /// `status`, when present ("okay", "disabled", ...), without the NUL.
+    pub status: Option<&'a [u8]>,
+    /// `enable-method` ("psci", "spin-table"), without the NUL.
+    pub enable_method: Option<&'a [u8]>,
+    /// `mmu-type` (RISC-V), without the NUL.
+    pub mmu_type: Option<&'a [u8]>,
+}
+
+impl CpuNode<'_> {
+    /// Usable: `status` absent or "okay"/"ok".
+    pub fn is_available(&self) -> bool {
+        matches!(self.status, None | Some(b"okay") | Some(b"ok"))
+    }
+}
+
+/// A string property without its terminating NUL.
+fn trim_nul(v: &[u8]) -> &[u8] {
+    v.split(|&c| c == 0).next().unwrap_or(v)
+}
+
+/// Big-endian cell value of 1 or 2 cells.
+fn cells_u64(v: &[u8]) -> Option<u64> {
+    match v.len() {
+        4 => Some(u64::from(be32(v, 0)?)),
+        8 => Some((u64::from(be32(v, 0)?) << 32) | u64::from(be32(v, 4)?)),
+        _ => None,
+    }
+}
+
+impl<'a> Fdt<'a> {
+    /// Call `f` for every direct child of `/cpus` whose base name is `cpu`,
+    /// in blob order. Nodes nested inside a CPU node (interrupt
+    /// controllers, caches) are skipped. Stops quietly at malformed data.
+    pub fn cpus(&self, mut f: impl FnMut(CpuNode<'a>)) {
+        let b = self.structs;
+        let mut off = 0usize;
+        let mut depth = 0usize;
+        let mut in_cpus = false; // inside /cpus (depth 2)
+        let mut cur: Option<CpuNode<'a>> = None; // inside /cpus/cpu@N (depth 3)
+        let mut step = || -> Option<bool> {
+            let token = be32(b, off)?;
+            off = off.checked_add(4)?;
+            match token {
+                FDT_BEGIN_NODE => {
+                    let name = cstr(b, off)?;
+                    off = align4(off.checked_add(name.len() + 1)?)?;
+                    depth += 1;
+                    let base = name.split(|&c| c == b'@').next().unwrap_or(name);
+                    if depth == 2 && name == b"cpus" {
+                        in_cpus = true;
+                    } else if depth == 3 && in_cpus && base == b"cpu" {
+                        cur = Some(CpuNode::default());
+                    }
+                }
+                FDT_END_NODE => {
+                    if depth == 0 {
+                        return None;
+                    }
+                    if depth == 3 {
+                        if let Some(node) = cur.take() {
+                            f(node);
+                        }
+                    } else if depth == 2 && in_cpus {
+                        return Some(false); // /cpus is closed: done
+                    }
+                    depth -= 1;
+                }
+                FDT_PROP => {
+                    let len = be32(b, off)? as usize;
+                    let nameoff = be32(b, off.checked_add(4)?)? as usize;
+                    let val_off = off.checked_add(8)?;
+                    let value = b.get(val_off..val_off.checked_add(len)?)?;
+                    off = align4(val_off.checked_add(len)?)?;
+                    if depth == 3 {
+                        if let Some(node) = cur.as_mut() {
+                            match cstr(self.strings, nameoff)? {
+                                b"reg" => node.reg = cells_u64(value),
+                                b"status" => node.status = Some(trim_nul(value)),
+                                b"enable-method" => node.enable_method = Some(trim_nul(value)),
+                                b"mmu-type" => node.mmu_type = Some(trim_nul(value)),
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+                FDT_NOP => {}
+                _ => return None,
+            }
+            Some(true)
+        };
+        while let Some(true) = step() {}
+    }
+}
+
 /// Whether a RISC-V ISA description lists extension `ext` (ASCII,
 /// case-insensitive): a `riscv,isa` string ("rv64imafdc_zicsr_sstc") or a
 /// `riscv,isa-extensions` NUL-separated string list.
@@ -265,6 +364,113 @@ mod tests {
         assert_eq!(fdt.property(&["cpus"], "riscv,isa"), None);
         assert_eq!(fdt.property(&["nope"], "timebase-frequency"), None);
         assert_eq!(Fdt::total_size(&blob), Some(blob.len()));
+    }
+
+    #[test]
+    fn enumerates_cpus() {
+        // The sample has one cpu@0 without reg; check that, then a richer
+        // tree built the same way.
+        let blob = sample();
+        let fdt = Fdt::new(&blob).unwrap();
+        let mut n = 0;
+        fdt.cpus(|c| {
+            n += 1;
+            assert_eq!(c.reg, None);
+            assert!(c.is_available());
+        });
+        assert_eq!(n, 1);
+
+        let mut strings = Vec::new();
+        let reg = strings.len();
+        strings.extend_from_slice(b"reg\0");
+        let status = strings.len();
+        strings.extend_from_slice(b"status\0");
+        let method = strings.len();
+        strings.extend_from_slice(b"enable-method\0");
+        let mut st = Vec::new();
+        let tok = |st: &mut Vec<u8>, t: u32| st.extend_from_slice(&t.to_be_bytes());
+        let name = |st: &mut Vec<u8>, n: &[u8]| {
+            st.extend_from_slice(n);
+            st.push(0);
+            while st.len() % 4 != 0 {
+                st.push(0);
+            }
+        };
+        let prop = |st: &mut Vec<u8>, off: usize, v: &[u8]| {
+            st.extend_from_slice(&FDT_PROP.to_be_bytes());
+            st.extend_from_slice(&(v.len() as u32).to_be_bytes());
+            st.extend_from_slice(&(off as u32).to_be_bytes());
+            st.extend_from_slice(v);
+            while st.len() % 4 != 0 {
+                st.push(0);
+            }
+        };
+        tok(&mut st, FDT_BEGIN_NODE);
+        name(&mut st, b"");
+        tok(&mut st, FDT_BEGIN_NODE);
+        name(&mut st, b"cpus");
+        for (i, (r, stat)) in [(2u32, &b"okay\0"[..]), (5, b"disabled\0"), (7, b"")]
+            .iter()
+            .enumerate()
+        {
+            tok(&mut st, FDT_BEGIN_NODE);
+            name(&mut st, alloc::format!("cpu@{i}").as_bytes());
+            prop(&mut st, reg, &r.to_be_bytes());
+            if !stat.is_empty() {
+                prop(&mut st, status, stat);
+            }
+            prop(&mut st, method, b"psci\0");
+            // A nested node with its own reg must not be taken for a CPU.
+            tok(&mut st, FDT_BEGIN_NODE);
+            name(&mut st, b"interrupt-controller");
+            prop(&mut st, reg, &99u32.to_be_bytes());
+            tok(&mut st, FDT_END_NODE);
+            tok(&mut st, FDT_END_NODE);
+        }
+        tok(&mut st, FDT_BEGIN_NODE);
+        name(&mut st, b"cpu-map");
+        tok(&mut st, FDT_END_NODE);
+        tok(&mut st, FDT_END_NODE);
+        tok(&mut st, FDT_END_NODE);
+        tok(&mut st, FDT_END);
+        let off_struct = 40usize;
+        let off_strings = off_struct + st.len();
+        let total = off_strings + strings.len();
+        let mut b = Vec::new();
+        for v in [
+            FDT_MAGIC,
+            total as u32,
+            off_struct as u32,
+            off_strings as u32,
+            0,
+            17,
+            16,
+            0,
+            strings.len() as u32,
+            st.len() as u32,
+        ] {
+            b.extend_from_slice(&v.to_be_bytes());
+        }
+        b.extend_from_slice(&st);
+        b.extend_from_slice(&strings);
+
+        let fdt = Fdt::new(&b).unwrap();
+        let mut got = Vec::new();
+        fdt.cpus(|c| got.push((c.reg, c.is_available(), c.enable_method)));
+        assert_eq!(
+            got,
+            [
+                (Some(2), true, Some(&b"psci"[..])),
+                (Some(5), false, Some(&b"psci"[..])),
+                (Some(7), true, Some(&b"psci"[..])),
+            ]
+        );
+        // Truncated anywhere: never panics.
+        for cut in 0..b.len() {
+            if let Some(fdt) = Fdt::new(&b[..cut]) {
+                fdt.cpus(|_| {});
+            }
+        }
     }
 
     #[test]

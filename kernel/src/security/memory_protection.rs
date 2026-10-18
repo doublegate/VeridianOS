@@ -2,8 +2,6 @@
 //!
 //! Implements ASLR, stack canaries, and other memory protection mechanisms.
 
-#![allow(clippy::not_unsafe_ptr_arg_deref)]
-
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use spin::RwLock;
@@ -142,23 +140,30 @@ impl StackCanary {
     }
 
     /// Place canary on stack
-    pub fn place(&self, stack_ptr: *mut u64) {
-        // SAFETY: The caller must ensure stack_ptr points to a valid, aligned, writable
-        // u64 location within the process's stack. This is used during process creation
-        // where the stack is freshly allocated and the canary location is computed from
-        // the known stack base.
+    ///
+    /// # Safety
+    ///
+    /// `stack_ptr` must point to a valid, aligned, writable `u64` location
+    /// within the process's stack that nothing else is accessing.
+    pub unsafe fn place(&self, stack_ptr: *mut u64) {
+        // SAFETY: forwarded from this function's contract: stack_ptr points
+        // to a valid, aligned, writable u64 location within the stack.
         unsafe {
             *stack_ptr = self.value;
         }
     }
 
     /// Check canary on stack
-    pub fn check(&self, stack_ptr: *const u64) -> bool {
-        // SAFETY: The caller must ensure stack_ptr points to a valid, aligned, readable
-        // u64 location where a canary was previously placed via place(). If the canary
-        // has been overwritten by a buffer overflow, this read is still safe (it
-        // returns valid u64 data), but the comparison will fail indicating
-        // corruption.
+    ///
+    /// # Safety
+    ///
+    /// `stack_ptr` must point to a valid, aligned, readable `u64` location
+    /// (normally one previously written by [`Self::place`]).
+    pub unsafe fn check(&self, stack_ptr: *const u64) -> bool {
+        // SAFETY: forwarded from this function's contract: stack_ptr points
+        // to a valid, aligned, readable u64. If the canary has been
+        // overwritten by a buffer overflow, this read is still sound (any bit
+        // pattern is a valid u64); the comparison just fails.
         unsafe { *stack_ptr == self.value }
     }
 }
@@ -389,6 +394,7 @@ impl Kpti {
         }
         let cr3 = self.kernel_cr3.load(Ordering::SeqCst);
         if cr3 != 0 {
+            crate::mm::tlb::note_root(cr3);
             // SAFETY: Writing CR3 switches the page table root. cr3 was
             // previously set via set_kernel_cr3 and points to a valid PML4.
             unsafe {
@@ -405,6 +411,7 @@ impl Kpti {
         }
         let cr3 = self.user_cr3.load(Ordering::SeqCst);
         if cr3 != 0 {
+            crate::mm::tlb::note_root(cr3);
             // SAFETY: Writing CR3 switches the page table root. cr3 was
             // previously set via set_user_cr3 and points to a valid PML4.
             unsafe {

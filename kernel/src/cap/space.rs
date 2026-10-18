@@ -193,6 +193,13 @@ impl CapTable {
     }
 }
 
+/// Give back every capability `table` held (see `CapabilityManager::hold`).
+fn release_all(table: &CapTable) {
+    for entry in table.entries() {
+        super::manager::cap_manager().release(entry.capability.id());
+    }
+}
+
 /// Per-process capability space
 pub struct CapabilitySpace {
     table: RwLock<CapTable>,
@@ -298,6 +305,8 @@ impl CapabilitySpace {
         table.insert_new(entry);
         self.used.store(table.full, Ordering::Relaxed);
         self.stats.total_caps.fetch_add(1, Ordering::Relaxed);
+        drop(table);
+        super::manager::cap_manager().hold(id);
         Ok(())
     }
 
@@ -314,6 +323,8 @@ impl CapabilitySpace {
         let entry = table.remove_at(i)?;
         self.used.store(table.full, Ordering::Relaxed);
         self.stats.total_caps.fetch_sub(1, Ordering::Relaxed);
+        drop(table);
+        super::manager::cap_manager().release(cap.id());
         Some(entry.object)
     }
 
@@ -338,9 +349,10 @@ impl CapabilitySpace {
 
     /// Clear all capabilities
     pub fn clear(&self) {
-        *self.table.write() = CapTable::default();
+        let old = core::mem::take(&mut *self.table.write());
         self.used.store(0, Ordering::Relaxed);
         self.stats.total_caps.store(0, Ordering::Relaxed);
+        release_all(&old);
     }
 
     /// Copies of every entry, taken under the lock and returned after it is
@@ -366,7 +378,11 @@ impl CapabilitySpace {
             table.insert_new(entry);
         }
         let count = table.full;
-        *self.table.write() = table;
+        for entry in table.entries() {
+            super::manager::cap_manager().hold(entry.capability.id());
+        }
+        let old = core::mem::replace(&mut *self.table.write(), table);
+        release_all(&old);
         self.used.store(count, Ordering::Relaxed);
         self.stats.total_caps.store(count as u64, Ordering::Relaxed);
 
@@ -452,6 +468,12 @@ impl CapabilitySpace {
     /// Lookup and get full capability entry
     pub fn lookup_entry(&self, cap: CapabilityToken) -> Option<(ObjectRef, Rights)> {
         self.with_exact(cap, |e| (e.object.clone(), e.rights))
+    }
+}
+
+impl Drop for CapabilitySpace {
+    fn drop(&mut self) {
+        release_all(self.table.get_mut());
     }
 }
 

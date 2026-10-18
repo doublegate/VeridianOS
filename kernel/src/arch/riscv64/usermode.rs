@@ -95,26 +95,32 @@ pub fn try_enter_usermode() -> Result<(), crate::error::KernelError> {
 /// - sscratch must contain the kernel stack pointer
 #[allow(dead_code)] // User-space transition API -- used when user processes are launched
 pub unsafe fn enter_usermode(entry_point: u64, user_stack: u64, kernel_sp: u64) -> ! {
-    asm!(
-        // Save kernel stack pointer in sscratch for ecall handler
-        "csrw sscratch, {ksp}",
-        // Set sepc to user entry point
-        "csrw sepc, {entry}",
-        // Clear sstatus.SPP (bit 8) to return to U-mode
-        "csrc sstatus, {spp_mask}",
-        // Set sstatus.SPIE (bit 5) to enable interrupts after sret
-        "csrs sstatus, {spie_mask}",
-        // Set user stack pointer
-        "mv sp, {stack}",
-        // Fence for safety
-        "sfence.vma",
-        // Transition to U-mode
-        "sret",
-        entry = in(reg) entry_point,
-        stack = in(reg) user_stack,
-        ksp = in(reg) kernel_sp,
-        spp_mask = in(reg) (1u64 << 8),
-        spie_mask = in(reg) (1u64 << 5),
-        options(noreturn)
-    );
+    // SAFETY: forwarded from this function's contract: the entry point and
+    // stack are valid user addresses, satp holds User-accessible tables,
+    // stvec handles U-mode ecalls and `kernel_sp` is a valid kernel stack, so
+    // sret lands in a well-formed U-mode context.
+    unsafe {
+        asm!(
+            // Save kernel stack pointer in sscratch for ecall handler
+            "csrw sscratch, {ksp}",
+            // Set sepc to user entry point
+            "csrw sepc, {entry}",
+            // Clear sstatus.SPP (bit 8) to return to U-mode
+            "csrc sstatus, {spp_mask}",
+            // Set sstatus.SPIE (bit 5) to enable interrupts after sret
+            "csrs sstatus, {spie_mask}",
+            // Set user stack pointer
+            "mv sp, {stack}",
+            // Fence for safety
+            "sfence.vma",
+            // Transition to U-mode
+            "sret",
+            entry = in(reg) entry_point,
+            stack = in(reg) user_stack,
+            ksp = in(reg) kernel_sp,
+            spp_mask = in(reg) (1u64 << 8),
+            spie_mask = in(reg) (1u64 << 5),
+            options(noreturn)
+        )
+    };
 }

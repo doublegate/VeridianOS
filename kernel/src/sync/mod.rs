@@ -11,6 +11,7 @@ pub mod hazard;
 pub mod lockfree_queue;
 pub mod once_lock;
 pub mod rcu;
+pub mod sleep_mutex;
 
 pub use lockfree_queue::LockFreeQueue;
 pub use once_lock::{GlobalState, LazyLock, OnceLock};

@@ -8,6 +8,28 @@ use core::arch::global_asm;
 // Include the assembly boot code
 global_asm!(include_str!("boot.S"));
 
+/// Rust entry of a secondary CPU (from `veridian_secondary_entry` in
+/// boot.S, which already set the stack and TPIDR_EL1). Defined in every
+/// build because boot.S references it; CPUs are only started with the
+/// `smp` feature.
+#[no_mangle]
+extern "C" fn veridian_secondary_rust(args: &'static crate::arch::smp_boot::ApBootArgs) -> ! {
+    let cpu = args.cpu_id.load(core::sync::atomic::Ordering::Acquire) as usize;
+    let mpidr: u64;
+    // SAFETY: reading MPIDR_EL1 at EL1 has no side effects.
+    unsafe { core::arch::asm!("mrs {}, mpidr_el1", out(reg) mpidr, options(nomem, nostack)) };
+    // SAFETY: first Rust code on this CPU; `cpu` is the logical id the boot
+    // CPU assigned it, and nothing else touches that block now.
+    unsafe { crate::arch::percpu::install(cpu, (mpidr & 0x00FF_FFFF) as u32) };
+    #[cfg(feature = "smp")]
+    crate::arch::smp_boot::ap_main();
+    #[cfg(not(feature = "smp"))]
+    loop {
+        // SAFETY: waits for an event; interrupts are masked.
+        unsafe { core::arch::asm!("wfe", options(nomem, nostack)) };
+    }
+}
+
 /// Entry point from assembly code
 ///
 /// # Safety
@@ -23,9 +45,23 @@ pub unsafe extern "C" fn _start_rust() -> ! {
     use crate::arch::aarch64::direct_uart::uart_write_str;
 
     // Write startup messages
-    uart_write_str("[BOOT] AArch64 Rust entry point reached\n");
-    uart_write_str("[BOOT] Stack initialized and BSS cleared\n");
-    uart_write_str("[BOOT] Preparing to enter kernel_main...\n");
+    // SAFETY: with the MMU disabled (this function's contract) physical
+    // address 0x09000000 is directly accessible, and it is the PL011 UART on
+    // the QEMU virt machine this boot path targets.
+    unsafe {
+        uart_write_str("[BOOT] AArch64 Rust entry point reached\n");
+        uart_write_str("[BOOT] Stack initialized and BSS cleared\n");
+        uart_write_str("[BOOT] Preparing to enter kernel_main...\n");
+    }
+
+    // The boot CPU is logical CPU 0; TPIDR_EL1 now points at its per-CPU
+    // block. Its hardware id is the MPIDR affinity (Aff0..Aff2).
+    let mpidr: u64;
+    // SAFETY: reading MPIDR_EL1 at EL1 has no side effects.
+    unsafe { core::arch::asm!("mrs {}, mpidr_el1", out(reg) mpidr, options(nomem, nostack)) };
+    // SAFETY: first Rust code on the boot CPU, before anything reads
+    // TPIDR_EL1.
+    unsafe { crate::arch::percpu::install(0, (mpidr & 0x00FF_FFFF) as u32) };
 
     // Arm boot-stack overflow detection before anything deep runs.
     crate::arch::stack_canary::install();
@@ -34,5 +70,9 @@ pub unsafe extern "C" fn _start_rust() -> ! {
     extern "C" {
         fn kernel_main() -> !;
     }
-    kernel_main()
+    // SAFETY: kernel_main is the kernel's `extern "C" fn() -> !` entry point
+    // defined in main.rs; it takes no arguments and expects exactly the
+    // state this function's contract provides (stack set up, BSS cleared,
+    // EL1).
+    unsafe { kernel_main() }
 }

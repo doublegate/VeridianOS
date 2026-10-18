@@ -208,8 +208,15 @@ pub enum FsError {
     SymlinkLoop,
     /// No space left on device (ENOSPC)
     NoSpace,
+    /// The operation was cancelled (ECANCELED): a timerfd's clock was set
+    Canceled,
     /// Operation would cross filesystems (EXDEV)
     CrossDevice,
+    /// Refused by the object's own state, not by permission bits (EPERM):
+    /// a sealed memfd, for one
+    OperationNotPermitted,
+    /// In use (EBUSY): F_SEAL_WRITE on a memfd that is mapped shared
+    Busy,
 }
 
 /// Result type alias for kernel operations

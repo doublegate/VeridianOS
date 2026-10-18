@@ -250,6 +250,8 @@ pub fn enable_smap() -> Result<(), KernelError> {
         // PAN was already enabled in enable_smep(). On AArch64 PAN covers
         // both execution and data access prevention for user pages.
         // Re-asserting is harmless.
+        // SAFETY: 0xD500419F is `msr PAN, #1`, which only sets PSTATE.PAN at
+        // EL1; it reads and writes no memory.
         unsafe {
             core::arch::asm!(".inst 0xD500419F", options(nomem, nostack),);
         }

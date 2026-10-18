@@ -26,8 +26,6 @@ static SSTC: AtomicBool = AtomicBool::new(false);
 static PERIOD: AtomicU64 = AtomicU64::new(0);
 /// Tick period in milliseconds.
 static PERIOD_MS: AtomicU64 = AtomicU64::new(0);
-/// Deadline currently armed.
-static NEXT: AtomicU64 = AtomicU64::new(0);
 
 /// stimecmp CSR number (Sstc).
 const CSR_STIMECMP: usize = 0x14D;
@@ -112,7 +110,7 @@ pub fn start(hz: u32) {
     PERIOD.store(period, Ordering::Relaxed);
     PERIOD_MS.store((1000 / hz.max(1) as u64).max(1), Ordering::Relaxed);
     let first = read_time() + period;
-    NEXT.store(first, Ordering::Relaxed);
+    crate::arch::percpu::set_timer_next(first);
     arm(first);
     // SAFETY: sets sie.STIE only; delivery still needs sstatus.SIE, which
     // the caller sets once the trap vector is installed.
@@ -127,6 +125,22 @@ pub fn start(hz: u32) {
     );
 }
 
+/// Start this hart's tick, at the period the boot hart configured (a
+/// secondary hart). Interrupt delivery still needs sstatus.SIE.
+pub fn start_secondary() {
+    let period = PERIOD.load(Ordering::Relaxed);
+    if period == 0 {
+        return;
+    }
+    let first = read_time() + period;
+    crate::arch::percpu::set_timer_next(first);
+    arm(first);
+    // SAFETY: sets sie.STIE on this hart only.
+    unsafe {
+        core::arch::asm!("csrs sie, {0}", in(reg) SIE_STIE, options(nomem, nostack));
+    }
+}
+
 /// Handle a supervisor timer interrupt (called from the trap handler).
 ///
 /// Re-arms by whole periods so the tick does not drift, skipping ticks that
@@ -134,7 +148,9 @@ pub fn start(hz: u32) {
 /// wheel are advanced: preempting the interrupted kernel code from here is
 /// not supported yet.
 pub fn handle_interrupt() {
-    TICKS.fetch_add(1, Ordering::Relaxed);
+    if crate::arch::percpu::is_timekeeper() {
+        TICKS.fetch_add(1, Ordering::Relaxed);
+    }
     let period = PERIOD.load(Ordering::Relaxed);
     if period == 0 {
         // Spurious: no tick configured. Push the deadline out so the
@@ -142,12 +158,11 @@ pub fn handle_interrupt() {
         arm(u64::MAX);
         return;
     }
-    let now = read_time();
-    let mut next = NEXT.load(Ordering::Relaxed).wrapping_add(period);
-    if next <= now {
-        next = now + period;
-    }
-    NEXT.store(next, Ordering::Relaxed);
+    // Per-CPU deadline (stimecmp is per hart); only the timekeeping hart
+    // advances global time.
+    let next = crate::arch::percpu::advance_timer(read_time(), period);
     arm(next);
-    crate::timer::timer_tick(PERIOD_MS.load(Ordering::Relaxed));
+    if crate::arch::percpu::is_timekeeper() {
+        crate::timer::clock_tick();
+    }
 }

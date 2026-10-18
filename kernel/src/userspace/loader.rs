@@ -57,7 +57,9 @@ pub fn load_user_program(
 ) -> Result<ProcessId, KernelError> {
     // Open the file
     let file_node = get_vfs()
-        .open(path, crate::fs::file::OpenFlags::read_only())
+        .as_caller()
+        .open_follow_canonical(path, crate::fs::file::OpenFlags::read_only(), true)
+        .map(|(node, _)| node)
         .map_err(|_| KernelError::NotFound {
             resource: "program file",
             id: 0,
@@ -117,19 +119,6 @@ pub fn load_user_program(
         *process.exe_path.lock() = String::from(path);
     }
 
-    // NOTE: Do NOT call set_linux_abi() here.
-    //
-    // Cross-compiled musl binaries (from tools/cross/) contain a patched
-    // __veridian_remap_syscall() function that translates Linux syscall
-    // numbers to VeridianOS numbers BEFORE the `syscall` instruction.
-    // The kernel therefore receives VeridianOS-native syscall numbers
-    // and must use the native ABI dispatch path (Syscall::try_from).
-    //
-    // If set_linux_abi() were called, the kernel would re-translate the
-    // already-translated numbers through translate_linux_syscall(), causing
-    // wrong handler dispatch (e.g., VeridianOS mmap=20 would be treated
-    // as Linux writev=20).
-
     #[cfg(target_arch = "x86_64")]
     // SAFETY: raw_serial_str writes to the COM1 I/O port for diagnostic output.
     unsafe {
@@ -155,32 +144,35 @@ pub fn load_user_program(
 
         let ft = process.file_table.lock();
 
-        // fd 0 = stdin (read-only)
+        // fds 0-2 read-write, as the dups of one open of /dev/console that
+        // Linux's init hands down (`more` and `less` read keys from fd 2).
+        // fd 0 = stdin
         let stdin_file = Arc::new(File::new_with_path(
             console_node.clone(),
-            OpenFlags::read_only(),
+            OpenFlags::read_write(),
             String::from("/dev/console"),
         ));
         let _ = ft.install(0, stdin_file);
 
-        // fd 1 = stdout (write-only)
+        // fd 1 = stdout
         let stdout_file = Arc::new(File::new_with_path(
             console_node.clone(),
-            OpenFlags::write_only(),
+            OpenFlags::read_write(),
             String::from("/dev/console"),
         ));
         let _ = ft.install(1, stdout_file);
 
-        // fd 2 = stderr (write-only)
+        // fd 2 = stderr
         let stderr_file = Arc::new(File::new_with_path(
             console_node,
-            OpenFlags::write_only(),
+            OpenFlags::read_write(),
             String::from("/dev/console"),
         ));
         let _ = ft.install(2, stderr_file);
     }
 
-    // Load the ELF segments into the process's address space.
+    // Load the program (ADR 0010), and for a dynamic one its interpreter,
+    // which then runs first; then its stack, with the auxiliary vector.
     //
     // On RISC-V, the MMU is not enabled (satp = Bare mode), so ELF load
     // addresses (e.g. 0x400000) map directly to physical addresses that
@@ -190,193 +182,43 @@ pub fn load_user_program(
     // is still created for bookkeeping.
     #[cfg(not(target_arch = "riscv64"))]
     if let Some(process) = crate::process::get_process(pid) {
-        let mut memory_space = process.memory_space.lock();
-
-        #[cfg(target_arch = "x86_64")]
-        // SAFETY: raw_serial_str writes to the COM1 I/O port for diagnostic output.
-        unsafe {
-            crate::arch::x86_64::idt::raw_serial_str(b"[LOADER] loading ELF segments\n");
-        }
-
-        // Use the ELF loader to load the binary into the process's address space
-        let entry = ElfLoader::load(&buffer, &mut *memory_space)?;
-
-        // Verify the entry point matches
-        if entry != binary.entry_point {
-            return Err(KernelError::InvalidState {
-                expected: "matching entry point",
-                actual: "entry point mismatch after loading",
-            });
-        }
-
-        // Handle dynamic linking if needed
-        if binary.dynamic {
-            if let Some(interpreter) = &binary.interpreter {
-                match load_dynamic_linker(&process, interpreter, &binary) {
-                    Ok(interp_entry) => {
-                        // Update process entry point to the interpreter.
-                        // The dynamic linker will initialize GOT/PLT then jump
-                        // to the main binary's entry point.
-                        if let Some(main_tid) = process.get_main_thread_id() {
-                            if let Some(thread) = process.get_thread(main_tid) {
-                                use crate::arch::context::ThreadContext;
-                                let mut ctx = thread.context.lock();
-                                ctx.set_instruction_pointer(interp_entry as usize);
-                            }
-                        }
-                    }
-                    Err(_e) => {
-                        // No dynamic linker available in rootfs -- warn and
-                        // fall through to the main entry point. The binary
-                        // will likely GP fault due to uninitialized GOT/PLT.
-                        println!(
-                            "[LOADER] WARNING: dynamic binary requires interpreter '{}' but it \
-                             could not be loaded; proceeding with main entry (expect GP fault)",
-                            interpreter
-                        );
-                    }
-                }
-            } else {
-                println!(
-                    "[LOADER] WARNING: binary is dynamically linked but has no interpreter set"
-                );
-            }
-        }
-    }
-
-    // Post-load setup: Build auxiliary vector and set up TLS for the loaded
-    // ELF binary. musl libc needs AT_PAGESZ (at minimum) from the auxv, and
-    // PT_TLS for thread-local storage initialization. Without these, musl's
-    // __init_tls crashes immediately after entering user mode.
-    #[cfg(not(target_arch = "riscv64"))]
-    if let Some(process) = crate::process::get_process(pid) {
-        use crate::elf::dynamic::{AuxType, AuxVecEntry};
-
-        // Build auxiliary vector from parsed ELF binary.
-        // AT_PHDR must point to the program header table in memory: musl's
-        // __init_libc iterates the program headers via AT_PHDR to find
-        // PT_TLS, PT_GNU_STACK, etc., and misparses (then crashes) if it
-        // points anywhere else. phdr_vaddr() takes it from PT_PHDR or the
-        // PT_LOAD that holds e_phoff; load_base + e_phoff is only the
-        // fallback for a table outside every segment.
-        let phdr_addr = binary.phdr_address().ok_or(KernelError::InvalidArgument {
-            name: "e_phoff",
-            value: "program header address overflows",
-        })?;
-
-        let auxv = vec![
-            AuxVecEntry::new(AuxType::AtPhdr, phdr_addr),
-            AuxVecEntry::new(AuxType::AtPhent, binary.phentsize as u64),
-            AuxVecEntry::new(AuxType::AtPhnum, binary.phnum as u64),
-            AuxVecEntry::new(AuxType::AtPagesz, 0x1000),
-            AuxVecEntry::new(AuxType::AtEntry, binary.entry_point),
-            AuxVecEntry::new(AuxType::AtNull, 0),
-        ];
-
-        // Re-setup the user stack with auxv included. The initial stack was
-        // set up by create_process_with_options with None for auxv. We rebuild
-        // it now that we have the ELF info.
-        let argv_refs: Vec<&str> = argv.to_vec();
-        let envp_refs: Vec<&str> = envp.to_vec();
-
-        // If argv is empty, use the program name as argv[0]
-        let default_argv;
-        let argv_for_stack = if argv_refs.is_empty() {
-            default_argv = vec![path];
-            &default_argv[..]
-        } else {
-            &argv_refs[..]
+        let not_elf = |_| KernelError::InvalidArgument {
+            name: "elf_binary",
+            value: "not a loadable ELF image",
         };
+        let plan = crate::elf::image::plan(&binary, buffer.len(), crate::elf::image::PIE_BASE)
+            .map_err(not_elf)?;
+        let interp = match &binary.interpreter {
+            Some(interp_path) => {
+                let (node, data) = lifecycle::read_executable(interp_path, &process.credentials())?;
+                let parsed = ElfLoader::new().parse(&data).map_err(not_elf)?;
+                Some((node, data, parsed))
+            }
+            None => None,
+        };
+        let loaded = crate::elf::image::load(
+            &process.memory_space.lock(),
+            (&binary, &*file_node, &buffer, &plan),
+            interp
+                .as_ref()
+                .map(|(node, data, parsed)| (parsed, &**node, data.as_slice())),
+        )?;
+        if interp.is_none() {
+            lifecycle::setup_static_tls(&process, &binary, &buffer);
+        }
 
+        // argv[0] is the program name if no arguments were given.
+        let default_argv = [path];
+        let argv_for_stack: &[&str] = if argv.is_empty() { &default_argv } else { argv };
         let stack_top =
-            lifecycle::setup_exec_stack_pub(&process, argv_for_stack, &envp_refs, Some(&auxv))?;
+            lifecycle::setup_exec_stack_pub(&process, argv_for_stack, envp, path, &loaded.aux)?;
 
-        // Update the thread context with the new stack pointer
         if let Some(main_tid) = process.get_main_thread_id() {
             if let Some(thread) = process.get_thread(main_tid) {
                 use crate::arch::context::ThreadContext;
                 let mut ctx = thread.context.lock();
+                ctx.set_instruction_pointer(loaded.start as usize);
                 ctx.set_stack_pointer(stack_top);
-            }
-        }
-
-        // Set up TLS (Thread-Local Storage) from PT_TLS segment if present.
-        // x86_64 uses TLS variant II: FS_BASE points to the TCB at the END
-        // of the TLS block. TLS variables are at negative offsets from FS_BASE.
-        #[cfg(target_arch = "x86_64")]
-        {
-            if let Some(tls_seg) = binary
-                .segments
-                .iter()
-                .find(|s| s.segment_type == crate::elf::SegmentType::Tls)
-            {
-                let tls_memsz = tls_seg.memory_size as usize;
-                let tls_filesz = tls_seg.file_size as usize;
-                // TLS block: the image (data+bss) rounded up to p_align, then
-                // the 8-byte TCB self-pointer at the p_align-aligned thread
-                // pointer. An alignment the page-aligned block cannot honour
-                // skips the setup; musl's __init_tls builds TLS itself.
-                let layout = crate::elf::tls_layout(tls_memsz, tls_seg.alignment);
-
-                let memory_space = process.memory_space.lock();
-                // Either way of skipping is logged: a silent skip left no
-                // trace of why a process started without kernel-built TLS.
-                let mapped = match layout {
-                    None => {
-                        crate::println!(
-                            "[LOADER] PT_TLS alignment {} unsupported; leaving TLS to libc",
-                            tls_seg.alignment
-                        );
-                        None
-                    }
-                    Some((size, tcb)) => {
-                        match memory_space.mmap(size, crate::mm::vas::MappingType::Data) {
-                            Ok(base) => Some((base, tcb)),
-                            Err(e) => {
-                                crate::println!(
-                                    "[LOADER] TLS block of {} bytes not mapped: {:?}",
-                                    size,
-                                    e
-                                );
-                                None
-                            }
-                        }
-                    }
-                };
-                if let Some((tls_base_vaddr, tcb_offset)) = mapped {
-                    let tls_base = tls_base_vaddr.as_usize();
-                    let tcb_addr = tls_base + tcb_offset;
-
-                    // Copy TLS init data from the ELF file buffer. Variant II
-                    // addresses the image at TP - round_up(memsz, p_align),
-                    // which is tls_base; any padding follows the image.
-                    if tls_filesz > 0 {
-                        let tls_file_offset = tls_seg.file_offset as usize;
-                        if tls_file_offset + tls_filesz <= buffer.len() {
-                            let tls_init = &buffer[tls_file_offset..tls_file_offset + tls_filesz];
-                            let _ = crate::elf::write_to_user_pages(
-                                &memory_space,
-                                tls_base as u64,
-                                tls_init,
-                            );
-                        }
-                    }
-
-                    // Write TCB self-pointer: *(u64*)tcb_addr = tcb_addr
-                    let self_ptr_bytes = (tcb_addr as u64).to_le_bytes();
-                    let _ = crate::elf::write_to_user_pages(
-                        &memory_space,
-                        tcb_addr as u64,
-                        &self_ptr_bytes,
-                    );
-
-                    drop(memory_space);
-
-                    // Store FS_BASE so enter_usermode / run_user_process sets it
-                    process
-                        .tls_fs_base
-                        .store(tcb_addr as u64, core::sync::atomic::Ordering::Release);
-                }
             }
         }
     }
@@ -388,170 +230,6 @@ pub fn load_user_program(
     }
 
     Ok(pid)
-}
-
-/// Load the dynamic linker/interpreter for dynamically linked binaries
-#[cfg(all(feature = "alloc", not(target_arch = "riscv64")))]
-fn load_dynamic_linker(
-    process: &crate::process::Process,
-    interpreter_path: &str,
-    _main_binary: &crate::elf::ElfBinary,
-) -> Result<u64, KernelError> {
-    use crate::mm::PageFlags;
-
-    // Read the interpreter from filesystem
-    let file_node = get_vfs()
-        .open(interpreter_path, crate::fs::file::OpenFlags::read_only())
-        .map_err(|_| KernelError::NotFound {
-            resource: "interpreter",
-            id: 0,
-        })?;
-
-    let metadata = file_node
-        .metadata()
-        .map_err(|_| KernelError::FsError(crate::error::FsError::IoError))?;
-    let file_size = metadata.size;
-
-    let mut buffer = Vec::with_capacity(file_size);
-    buffer.resize(file_size, 0);
-
-    file_node
-        .read(0, &mut buffer)
-        .map_err(|_| KernelError::FsError(crate::error::FsError::IoError))?;
-
-    // Parse the interpreter ELF
-    let loader = ElfLoader::new();
-    let interp_binary = loader
-        .parse(&buffer)
-        .map_err(|_| KernelError::InvalidArgument {
-            name: "interpreter_elf",
-            value: "failed to parse interpreter ELF",
-        })?;
-
-    // Load interpreter at a high address to avoid collision with main binary
-    // Standard Linux ld.so loads at 0x7f00_0000_0000 region
-    let interp_base = 0x7F00_0000_0000_u64;
-
-    let mut memory_space = process.memory_space.lock();
-
-    // Map and load each segment of the interpreter
-    for segment in &interp_binary.segments {
-        if segment.segment_type != crate::elf::SegmentType::Load {
-            continue;
-        }
-
-        // Calculate adjusted virtual address
-        let adjusted_vaddr = interp_base + segment.virtual_addr;
-        let page_start = adjusted_vaddr & !0xFFF;
-        let page_end = (adjusted_vaddr + segment.memory_size + 0xFFF) & !0xFFF;
-        let num_pages = ((page_end - page_start) / 0x1000) as usize;
-
-        // Determine page flags
-        let mut flags = PageFlags::USER | PageFlags::PRESENT;
-        if (segment.flags & 0x2) != 0 {
-            // PF_W
-            flags |= PageFlags::WRITABLE;
-        }
-        if (segment.flags & 0x1) == 0 {
-            // PF_X not set
-            flags |= PageFlags::NO_EXECUTE;
-        }
-
-        // Map pages for this segment
-        for i in 0..num_pages {
-            let addr = page_start + (i as u64 * 0x1000);
-            memory_space.map_page(addr as usize, flags)?;
-        }
-
-        // Copy segment data
-        if segment.file_size > 0 {
-            // SAFETY: 'dest' points to freshly mapped pages at adjusted_vaddr
-            // (mapped in the loop above). 'src' is buffer.as_ptr() offset by
-            // file_offset, which is within the ELF buffer (validated by the
-            // segment parser). copy_nonoverlapping is valid because the mapped
-            // virtual pages and the ELF buffer do not overlap.
-            unsafe {
-                let dest = adjusted_vaddr as *mut u8;
-                let src = buffer.as_ptr().add(segment.file_offset as usize);
-                core::ptr::copy_nonoverlapping(src, dest, segment.file_size as usize);
-            }
-        }
-
-        // Zero BSS
-        if segment.memory_size > segment.file_size {
-            // SAFETY: bss_start is within the mapped page range (pages were
-            // mapped for the full memory_size above). bss_size is the
-            // difference between memory_size and file_size, so write_bytes
-            // stays within the mapped region. Zeroing BSS is required by
-            // the ELF specification.
-            unsafe {
-                let bss_start = (adjusted_vaddr + segment.file_size) as *mut u8;
-                let bss_size = (segment.memory_size - segment.file_size) as usize;
-                core::ptr::write_bytes(bss_start, 0, bss_size);
-            }
-        }
-    }
-
-    // Calculate interpreter entry point (adjusted for base address)
-    let interp_entry = interp_base + interp_binary.entry_point;
-
-    // Set up auxiliary vector (auxv) for the interpreter
-    // This provides information about the main program to the dynamic linker
-    setup_auxiliary_vector(process, _main_binary, interp_base)?;
-
-    Ok(interp_entry)
-}
-
-/// Set up the auxiliary vector for dynamic linking
-#[cfg(all(feature = "alloc", not(target_arch = "riscv64")))]
-fn setup_auxiliary_vector(
-    _process: &crate::process::Process,
-    main_binary: &crate::elf::ElfBinary,
-    interp_base: u64,
-) -> Result<(), KernelError> {
-    // Auxiliary vector types (from Linux elf.h)
-    const AT_NULL: u64 = 0; // End of vector
-    const AT_PHDR: u64 = 3; // Program headers for program
-    const AT_PHENT: u64 = 4; // Size of program header entry
-    const AT_PHNUM: u64 = 5; // Number of program headers
-    const AT_PAGESZ: u64 = 6; // System page size
-    const AT_BASE: u64 = 7; // Base address of interpreter
-    const AT_ENTRY: u64 = 9; // Entry point of program
-    const AT_UID: u64 = 11; // Real user ID
-    const AT_EUID: u64 = 12; // Effective user ID
-    const AT_GID: u64 = 13; // Real group ID
-    const AT_EGID: u64 = 14; // Effective group ID
-
-    // Build auxiliary vector entries
-    let _auxv: Vec<(u64, u64)> = vec![
-        (AT_PAGESZ, 0x1000),                 // Page size
-        (AT_BASE, interp_base),              // Interpreter base
-        (AT_ENTRY, main_binary.entry_point), // Main program entry
-        // e_phnum/e_phentsize, which can differ from the parsed segments.
-        (AT_PHNUM, main_binary.phnum as u64),
-        (AT_PHENT, main_binary.phentsize as u64),
-        (
-            AT_PHDR,
-            main_binary
-                .phdr_address()
-                .ok_or(KernelError::InvalidArgument {
-                    name: "e_phoff",
-                    value: "program header address overflows",
-                })?,
-        ), /* Program headers address (not the ELF
-            * header at load_base) */
-        (AT_UID, 0), // Root user
-        (AT_EUID, 0),
-        (AT_GID, 0),
-        (AT_EGID, 0),
-        (AT_NULL, 0), // End of auxv
-    ];
-
-    // The auxiliary vector would typically be pushed onto the stack
-    // after the environment pointers. For now, we just prepare the data.
-    // The actual stack setup happens in the setup_args function.
-
-    Ok(())
 }
 
 /// Create a minimal init process when no init binary is available
@@ -681,39 +359,26 @@ impl crate::fs::VfsNode for SerialConsoleNode {
         crate::fs::NodeType::CharDevice
     }
 
+    fn is_stream(&self) -> bool {
+        true
+    }
+
+    /// The console's shared line discipline; WouldBlock until it has
+    /// something to return, and read(2) waits (N-118).
     fn read(&self, _offset: usize, buffer: &mut [u8]) -> Result<usize, KernelError> {
-        // Blocking read from serial (same logic as sys_read stdin fallback)
-        #[cfg(target_arch = "x86_64")]
-        {
-            let mut count = 0;
-            for slot in buffer.iter_mut() {
-                loop {
-                    let status: u8;
-                    // SAFETY: Reading COM1 line status register (0x3FD) via x86 port I/O.
-                    unsafe {
-                        core::arch::asm!("in al, dx", out("al") status, in("dx") 0x3FDu16);
-                    }
-                    if (status & 1) != 0 {
-                        let byte: u8;
-                        // SAFETY: Reading COM1 data register (0x3F8) after confirming data ready.
-                        unsafe {
-                            core::arch::asm!("in al, dx", out("al") byte, in("dx") 0x3F8u16);
-                        }
-                        *slot = byte;
-                        count += 1;
-                        break;
-                    }
-                    core::hint::spin_loop();
-                }
-            }
-            Ok(count)
-        }
-        #[cfg(not(target_arch = "x86_64"))]
-        {
-            // Non-x86: no serial polling available, return EOF
-            let _ = buffer;
-            Ok(0)
-        }
+        crate::drivers::console_input::read_node(buffer)
+    }
+
+    fn poll_readiness(&self) -> u16 {
+        crate::drivers::console_input::tty_readiness()
+    }
+
+    fn wakes_io_waiters(&self) -> bool {
+        cfg!(target_arch = "x86_64")
+    }
+
+    fn ready_at_ns(&self) -> Option<u64> {
+        crate::drivers::console_input::tty_ready_at()
     }
 
     fn write(&self, _offset: usize, data: &[u8]) -> Result<usize, KernelError> {

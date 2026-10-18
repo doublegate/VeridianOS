@@ -42,7 +42,7 @@ pub enum TrustLevel {
 /// # Examples
 ///
 /// ```ignore
-/// // Production: require both Ed25519 and Dilithium, minimum Developer trust
+/// // Production: Ed25519 required; ML-DSA-65 only once a key is provisioned
 /// let policy = SignaturePolicy::production();
 ///
 /// // Development: skip all signature checks
