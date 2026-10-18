@@ -1,7 +1,7 @@
 //! File descriptors and file operations
 
 use alloc::{string::String, sync::Arc, vec::Vec};
-use core::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 
 #[cfg(not(target_arch = "aarch64"))]
 use spin::RwLock;
@@ -18,6 +18,10 @@ pub type FileDescriptor = usize;
 pub const STDIN: FileDescriptor = 0;
 pub const STDOUT: FileDescriptor = 1;
 pub const STDERR: FileDescriptor = 2;
+
+/// Highest number of descriptors a process can hold (fds 0..MAX_FDS);
+/// RLIMIT_NOFILE reports it.
+pub const MAX_FDS: usize = 1024;
 
 /// File open flags
 #[derive(Debug, Clone, Copy)]
@@ -144,6 +148,21 @@ pub struct File {
     /// Absolute path this file was opened with (for dirfd resolution in *at
     /// syscalls)
     pub path: Option<String>,
+
+    /// The flock(2) owner identity (this open file's address) once the file
+    /// has asked for a flock lock, else 0. Set before any lock is taken and
+    /// never cleared, so the last close releases whatever the file holds
+    /// (review of N-120 and N-207).
+    pub flock_owner: AtomicU64,
+}
+
+impl Drop for File {
+    fn drop(&mut self) {
+        let owner = *self.flock_owner.get_mut();
+        if owner != 0 {
+            let _ = crate::fs::flock::flock(self.flock_key(), owner, crate::fs::flock::LOCK_UN);
+        }
+    }
 }
 
 impl File {
@@ -151,6 +170,18 @@ impl File {
     /// decided by the node itself rather than the path it was opened with.
     pub fn is_drm_device(&self) -> bool {
         matches!(self.node.device_id(), Some((major, _)) if major == crate::fs::devfs::DRM_MAJOR)
+    }
+
+    /// The flock(2) table key of the file: its (filesystem, inode) identity
+    /// where the filesystem has one, else the shared node's address. Either
+    /// is stable while this open file exists, and the lock is released when
+    /// it closes.
+    pub fn flock_key(&self) -> u64 {
+        match self.node.file_identity() {
+            // Two opens of one BlockFS file get different node objects.
+            Some((fs, ino)) => fs ^ ino.wrapping_mul(0x9E37_79B9_7F4A_7C15),
+            None => Arc::as_ptr(&self.node) as *const () as u64,
+        }
     }
 
     /// Create a new file structure
@@ -163,6 +194,7 @@ impl File {
             position: RwLock::new(0),
             refcount: RwLock::new(1),
             path: None,
+            flock_owner: AtomicU64::new(0),
         }
     }
 
@@ -176,6 +208,7 @@ impl File {
             position: RwLock::new(0),
             refcount: RwLock::new(1),
             path: Some(path),
+            flock_owner: AtomicU64::new(0),
         }
     }
 
@@ -187,10 +220,25 @@ impl File {
             });
         }
 
+        if self.is_stream() {
+            return self.node.read(0, buffer);
+        }
         let mut pos = self.position.write();
         let bytes_read = self.node.read(*pos, buffer)?;
         *pos += bytes_read;
         Ok(bytes_read)
+    }
+
+    /// Whether the file is a stream -- pipe, socket, character device,
+    /// eventfd and the like -- with no file position. Its reads and writes
+    /// take no position lock: a read that sleeps (an empty pipe or eventfd)
+    /// used to hold the lock, so a writer of the same open file, from
+    /// another thread or a forked child, spun on it forever (N-118).
+    fn is_stream(&self) -> bool {
+        !matches!(
+            self.node.node_type(),
+            super::NodeType::File | super::NodeType::Directory | super::NodeType::BlockDevice
+        )
     }
 
     /// Write to the file
@@ -201,6 +249,9 @@ impl File {
             });
         }
 
+        if self.is_stream() {
+            return self.node.write(0, data);
+        }
         let mut pos = self.position.write();
 
         if self.flags.append {
@@ -209,9 +260,27 @@ impl File {
             *pos = metadata.size;
         }
 
-        let bytes_written = self.node.write(*pos, data)?;
+        let len = super::check_fsize(&*self.node, *pos, data.len())?;
+        let bytes_written = self.node.write(*pos, &data[..len])?;
         *pos += bytes_written;
+        super::remove_privs_after_write(&*self.node);
         Ok(bytes_written)
+    }
+
+    /// How many of `count` bytes written now RLIMIT_FSIZE allows
+    /// ([`super::check_fsize`] at the position a write would use). A write
+    /// split into pieces is checked once, whole, so that only one starting
+    /// at the limit is refused (and signalled), as on Linux.
+    pub fn fsize_room(&self, count: usize) -> Result<usize, KernelError> {
+        if self.is_stream() {
+            return Ok(count);
+        }
+        let pos = if self.flags.append {
+            self.node.metadata()?.size
+        } else {
+            *self.position.read()
+        };
+        super::check_fsize(&*self.node, pos, count)
     }
 
     /// Seek to a position in the file
@@ -222,7 +291,7 @@ impl File {
             SeekFrom::Start(offset) => offset,
             SeekFrom::Current(offset) => {
                 if offset < 0 {
-                    pos.checked_sub((-offset) as usize)
+                    pos.checked_sub(offset.unsigned_abs())
                         .ok_or(KernelError::InvalidArgument {
                             name: "offset",
                             value: "seek before start of file",
@@ -238,7 +307,7 @@ impl File {
             SeekFrom::End(offset) => {
                 let metadata = self.node.metadata()?;
                 if offset < 0 {
-                    metadata.size.checked_sub((-offset) as usize).ok_or(
+                    metadata.size.checked_sub(offset.unsigned_abs()).ok_or(
                         KernelError::InvalidArgument {
                             name: "offset",
                             value: "seek before start of file",
@@ -300,6 +369,12 @@ pub struct FileTable {
     /// here instead of from 0. Updated with the `files` write lock held;
     /// every path that frees a slot lowers it, allocation raises it.
     free_hint: AtomicUsize,
+
+    /// New descriptors are below this (RLIMIT_NOFILE's soft limit, at most
+    /// MAX_FDS): allocation past it is EMFILE, F_DUPFD EINVAL, a dup2 or
+    /// dup3 target EBADF, as on Linux. Descriptors already open above a
+    /// lowered limit stay open.
+    limit: AtomicUsize,
 }
 
 /// All three standard descriptors are the implicit console.
@@ -319,6 +394,7 @@ impl FileTable {
             files: RwLock::new(files),
             console_fds: AtomicU8::new(CONSOLE_FDS_ALL),
             free_hint: AtomicUsize::new(3),
+            limit: AtomicUsize::new(MAX_FDS),
         }
     }
 }
@@ -330,6 +406,16 @@ impl Default for FileTable {
 }
 
 impl FileTable {
+    /// The descriptor limit (see `limit`).
+    pub fn limit(&self) -> usize {
+        self.limit.load(Ordering::Acquire)
+    }
+
+    /// Set the descriptor limit (RLIMIT_NOFILE), at most MAX_FDS.
+    pub fn set_limit(&self, limit: usize) {
+        self.limit.store(limit.min(MAX_FDS), Ordering::Release);
+    }
+
     /// Whether `fd` is free for allocation: no entry, and not an fd that is
     /// still the implicit console.
     fn is_allocatable(&self, files: &[Option<FileEntry>], fd: FileDescriptor) -> bool {
@@ -370,7 +456,7 @@ impl FileTable {
     /// process's standard descriptors, which `open` would never hand out
     /// while they are still the implicit console.
     pub fn install(&self, fd: FileDescriptor, file: Arc<File>) -> Result<(), KernelError> {
-        if fd >= 1024 {
+        if fd >= MAX_FDS {
             return Err(KernelError::FsError(FsError::TooManyOpenFiles));
         }
         let mut files = self.files.write();
@@ -403,9 +489,11 @@ impl FileTable {
 
         let entry = FileEntry { file, cloexec };
 
-        // Find the lowest free slot, starting at the hint
-        let start = self.free_hint.load(Ordering::Acquire).min(files.len());
-        if let Some(fd) = (start..files.len()).find(|&fd| self.is_allocatable(&files, fd)) {
+        // Find the lowest free slot below the limit, starting at the hint
+        let limit = self.limit();
+        let end = files.len().min(limit);
+        let start = self.free_hint.load(Ordering::Acquire).min(end);
+        if let Some(fd) = (start..end).find(|&fd| self.is_allocatable(&files, fd)) {
             files[fd] = Some(entry);
             self.free_hint.store(fd + 1, Ordering::Release);
             return Ok(fd);
@@ -416,7 +504,7 @@ impl FileTable {
         // grew the table, so open returned one fd and stored the file at
         // another.
         let fd = files.len();
-        if fd >= 1024 {
+        if fd >= limit {
             return Err(KernelError::FsError(FsError::TooManyOpenFiles));
         }
 
@@ -505,6 +593,15 @@ impl FileTable {
         min_fd: FileDescriptor,
         cloexec: bool,
     ) -> Result<FileDescriptor, KernelError> {
+        // F_DUPFD at or past the limit is EINVAL, and must not grow the
+        // table (it was unbounded).
+        let limit = self.limit();
+        if min_fd >= limit {
+            return Err(KernelError::InvalidArgument {
+                name: "min_fd",
+                value: "at or above the descriptor limit",
+            });
+        }
         let file = self
             .get(fd)
             .ok_or(KernelError::FsError(FsError::BadFileDescriptor))?;
@@ -519,8 +616,9 @@ impl FileTable {
             files.push(None);
         }
 
-        // Find the lowest free slot >= min_fd
-        if let Some(slot_fd) = (min_fd..files.len()).find(|&fd| self.is_allocatable(&files, fd)) {
+        // Find the lowest free slot >= min_fd, below the limit
+        let end = files.len().min(limit);
+        if let Some(slot_fd) = (min_fd..end).find(|&fd| self.is_allocatable(&files, fd)) {
             files[slot_fd] = Some(entry);
             self.note_filled(slot_fd);
             return Ok(slot_fd);
@@ -529,7 +627,8 @@ impl FileTable {
         // No free slot >= min_fd: append. (This used a separate counter
         // that could point at an occupied slot, which was then overwritten.)
         let new_fd = files.len();
-        if new_fd >= 1024 {
+        if new_fd >= limit {
+            entry.file.dec_ref();
             return Err(KernelError::FsError(FsError::TooManyOpenFiles));
         }
         files.push(Some(entry));
@@ -548,6 +647,11 @@ impl FileTable {
             return Ok(());
         }
 
+        // A target past the limit is EBADF, and must not grow the table (it
+        // was unbounded).
+        if new_fd >= self.limit() {
+            return Err(KernelError::FsError(FsError::BadFileDescriptor));
+        }
         let file = self
             .get(old_fd)
             .ok_or(KernelError::FsError(FsError::BadFileDescriptor))?;
@@ -589,6 +693,11 @@ impl FileTable {
             });
         }
 
+        // A target past the limit is EBADF, and must not grow the table (it
+        // was unbounded).
+        if new_fd >= self.limit() {
+            return Err(KernelError::FsError(FsError::BadFileDescriptor));
+        }
         let file = self
             .get(old_fd)
             .ok_or(KernelError::FsError(FsError::BadFileDescriptor))?;
@@ -689,6 +798,7 @@ impl FileTable {
             files: RwLock::new(new_files),
             console_fds: AtomicU8::new(self.console_fds.load(Ordering::Acquire)),
             free_hint: AtomicUsize::new(self.free_hint.load(Ordering::Acquire)),
+            limit: AtomicUsize::new(self.limit()),
         }
     }
 
@@ -720,6 +830,50 @@ mod tests {
         (0..)
             .find(|&fd| fd >= files.len() || table.is_allocatable(&files, fd))
             .unwrap()
+    }
+
+    /// A dup target at or past MAX_FDS fails without growing the table
+    /// (it allocated up to whatever number the caller passed).
+    #[test]
+    fn dup_targets_are_bounded() {
+        let table = FileTable::new();
+        let fd = table.open_with_flags(some_file(), false).unwrap();
+        let before = table.files.read().len();
+        assert!(matches!(
+            table.dup2(fd, usize::MAX >> 4),
+            Err(KernelError::FsError(FsError::BadFileDescriptor))
+        ));
+        assert!(matches!(
+            table.dup3(fd, MAX_FDS, false),
+            Err(KernelError::FsError(FsError::BadFileDescriptor))
+        ));
+        assert!(table.dup_at_least(fd, MAX_FDS, false).is_err());
+        assert_eq!(table.files.read().len(), before);
+        assert_eq!(table.dup2(fd, MAX_FDS - 1), Ok(()));
+        assert!(table.get(MAX_FDS - 1).is_some());
+    }
+
+    /// RLIMIT_NOFILE: no fd at or past the table's limit, by any route.
+    #[test]
+    fn descriptor_limit_bounds_every_allocation() {
+        let table = FileTable::new();
+        table.set_limit(5);
+        let opened: alloc::vec::Vec<_> = (0..5)
+            .map_while(|_| table.open_with_flags(some_file(), false).ok())
+            .collect();
+        assert_eq!(opened.iter().max().copied(), Some(4));
+        assert!(matches!(
+            table.open_with_flags(some_file(), false),
+            Err(KernelError::FsError(FsError::TooManyOpenFiles))
+        ));
+        // F_DUPFD at or past the limit is EINVAL; dup2 there is EBADF.
+        assert!(table.dup_at_least(opened[0], 5, false).is_err());
+        assert!(table.dup2(opened[0], 5).is_err());
+        // Closing one makes room again; dup2 below the limit still works.
+        table.close(4).unwrap();
+        assert_eq!(table.dup2(opened[0], 4), Ok(()));
+        // fork keeps the limit.
+        assert_eq!(table.clone_for_fork().limit(), 5);
     }
 
     #[test]

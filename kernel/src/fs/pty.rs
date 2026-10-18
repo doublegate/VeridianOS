@@ -34,6 +34,9 @@ use crate::{error::KernelError, process::ProcessId, sync::once_lock::GlobalState
 /// PTY buffer size
 const PTY_BUFFER_SIZE: usize = 4096;
 
+const POLLIN: u16 = 0x0001;
+const POLLOUT: u16 = 0x0004;
+
 /// Terminal control characters
 pub mod termios {
     pub const VINTR: u8 = 0; // ^C
@@ -141,50 +144,74 @@ impl PtyMaster {
         self.id
     }
 
-    /// Read from slave output (what the slave wrote)
+    /// Read from slave output (what the slave wrote). Nothing to read is
+    /// `WouldBlock` (EAGAIN, or a sleep for a blocking descriptor): it used
+    /// to return 0, which a reader takes as end of file.
     pub fn read(&self, buffer: &mut [u8]) -> Result<usize, KernelError> {
-        let mut output = self.output_buffer.write();
-        let bytes_to_read = buffer.len().min(output.len());
-
-        for i in 0..bytes_to_read {
-            // bytes_to_read <= output.len(), so pop_front cannot return None
-            buffer[i] = output.pop_front().expect("output buffer underrun");
+        let bytes_to_read = {
+            let mut output = self.output_buffer.write();
+            let n = buffer.len().min(output.len());
+            for slot in buffer.iter_mut().take(n) {
+                // n <= output.len(), so pop_front cannot return None
+                *slot = output.pop_front().expect("output buffer underrun");
+            }
+            n
+        };
+        if bytes_to_read == 0 && !buffer.is_empty() {
+            return Err(KernelError::WouldBlock);
         }
-
+        // Space freed for the slave's writes.
+        crate::sched::dispatch::io_event();
         Ok(bytes_to_read)
     }
 
-    /// Write to slave input (what the slave will read)
-    pub fn write(&self, data: &[u8]) -> Result<usize, KernelError> {
-        let mut input = self.input_buffer.write();
-        let flags = self.flags.read();
-
-        for &byte in data {
-            // Handle special characters if signals are enabled
-            if flags.isig {
-                if byte == termios::VINTR_CHAR {
-                    // Send SIGINT to foreground process group (^C)
-                    self.send_signal_to_foreground_group(2);
-                    continue;
-                }
-
-                if byte == termios::VSUSP_CHAR {
-                    // Send SIGTSTP to foreground process group (^Z)
-                    self.send_signal_to_foreground_group(20);
-                    continue;
-                }
-            }
-
-            if input.len() < PTY_BUFFER_SIZE {
-                input.push_back(byte);
-            } else {
-                return Err(KernelError::ResourceExhausted {
-                    resource: "pty_input_buffer",
-                });
-            }
+    /// poll bits for the master side: POLLIN when the slave has written
+    /// something, POLLOUT when the slave's input has room.
+    pub fn master_readiness(&self) -> u16 {
+        let mut ready = 0;
+        if !self.output_buffer.read().is_empty() {
+            ready |= POLLIN;
         }
+        if self.input_buffer.read().len() < PTY_BUFFER_SIZE {
+            ready |= POLLOUT;
+        }
+        ready
+    }
 
-        Ok(data.len())
+    /// poll bits for the slave side: POLLIN when the master has written
+    /// input, POLLOUT when the output has room.
+    pub fn slave_readiness(&self) -> u16 {
+        let mut ready = 0;
+        if !self.input_buffer.read().is_empty() {
+            ready |= POLLIN;
+        }
+        if self.output_buffer.read().len() < PTY_BUFFER_SIZE {
+            ready |= POLLOUT;
+        }
+        ready
+    }
+
+    /// Write to slave input (what the slave will read).
+    ///
+    /// Returns how many bytes were taken: fewer than `data.len()` when the
+    /// input buffer fills, `WouldBlock` (EAGAIN) when none fit. Signals
+    /// from ^C/^Z are sent after the buffer lock is released (N-128).
+    pub fn write(&self, data: &[u8]) -> Result<usize, KernelError> {
+        let isig = self.flags.read().isig;
+        let mut signals = Vec::new();
+        let taken = {
+            let mut input = self.input_buffer.write();
+            master_input(data, isig, &mut input, &mut signals)
+        };
+        for sig in signals {
+            self.send_signal_to_foreground_group(sig);
+        }
+        if taken == 0 && !data.is_empty() {
+            return Err(KernelError::WouldBlock);
+        }
+        // Input for the slave's readers.
+        crate::sched::dispatch::io_event();
+        Ok(taken)
     }
 
     /// Send a signal to all processes in the foreground process group.
@@ -198,7 +225,10 @@ impl PtyMaster {
             crate::process::table::PROCESS_TABLE.for_each(|proc| {
                 let proc_pgid = proc.pgid.load(Ordering::Acquire);
                 if proc_pgid == fg_pgid && proc.is_alive() {
-                    if let Err(_e) = proc.send_signal(signal as usize) {
+                    if let Err(_e) = {
+                        crate::process::signals::notify(proc, signal as usize);
+                        Ok::<(), crate::error::KernelError>(())
+                    } {
                         crate::println!(
                             "[PTY] Warning: failed to send signal {} to PID {}: {:?}",
                             signal,
@@ -314,14 +344,20 @@ impl PtySlave {
     pub fn read(&self, buffer: &mut [u8]) -> Result<usize, KernelError> {
         // Get master and read from input buffer
         if let Some(master) = get_pty_master(self.master_id) {
-            let mut input = master.input_buffer.write();
-            let bytes_to_read = buffer.len().min(input.len());
-
-            for i in 0..bytes_to_read {
-                // bytes_to_read <= input.len(), so pop_front cannot return None
-                buffer[i] = input.pop_front().expect("input buffer underrun");
+            let bytes_to_read = {
+                let mut input = master.input_buffer.write();
+                let n = buffer.len().min(input.len());
+                for slot in buffer.iter_mut().take(n) {
+                    // n <= input.len(), so pop_front cannot return None
+                    *slot = input.pop_front().expect("input buffer underrun");
+                }
+                n
+            };
+            // Nothing typed yet: wait (or EAGAIN), not end of file.
+            if bytes_to_read == 0 && !buffer.is_empty() {
+                return Err(KernelError::WouldBlock);
             }
-
+            crate::sched::dispatch::io_event();
             Ok(bytes_to_read)
         } else {
             Err(KernelError::NotFound {
@@ -335,27 +371,14 @@ impl PtySlave {
     pub fn write(&self, data: &[u8]) -> Result<usize, KernelError> {
         // Get master and write to output buffer
         if let Some(master) = get_pty_master(self.master_id) {
-            let mut output = master.output_buffer.write();
-            let flags = master.flags.read();
-
-            for &byte in data {
-                // Process output if opost is enabled
-                if flags.opost && byte == b'\n' {
-                    // Convert \n to \r\n
-                    if output.len() < PTY_BUFFER_SIZE - 1 {
-                        output.push_back(b'\r');
-                        output.push_back(b'\n');
-                    }
-                } else if output.len() < PTY_BUFFER_SIZE {
-                    output.push_back(byte);
-                } else {
-                    return Err(KernelError::ResourceExhausted {
-                        resource: "pty_output_buffer",
-                    });
-                }
+            let opost = master.flags.read().opost;
+            let taken = slave_output(data, opost, &mut master.output_buffer.write());
+            if taken == 0 && !data.is_empty() {
+                return Err(KernelError::WouldBlock);
             }
-
-            Ok(data.len())
+            // Output for the master's readers.
+            crate::sched::dispatch::io_event();
+            Ok(taken)
         } else {
             Err(KernelError::NotFound {
                 resource: "pty_master",
@@ -363,6 +386,52 @@ impl PtySlave {
             })
         }
     }
+}
+
+/// Move master-side input into `input` (at most [`PTY_BUFFER_SIZE`]
+/// bytes queued). With `isig`, ^C and ^Z are consumed and their signals
+/// (SIGINT 2, SIGTSTP 20) appended to `signals` for the caller to send
+/// once the lock is dropped. Returns the number of bytes of `data` taken.
+fn master_input(
+    data: &[u8],
+    isig: bool,
+    input: &mut VecDeque<u8>,
+    signals: &mut Vec<i32>,
+) -> usize {
+    for (i, &byte) in data.iter().enumerate() {
+        if isig && byte == termios::VINTR_CHAR {
+            signals.push(2);
+            continue;
+        }
+        if isig && byte == termios::VSUSP_CHAR {
+            signals.push(20);
+            continue;
+        }
+        if input.len() >= PTY_BUFFER_SIZE {
+            return i;
+        }
+        input.push_back(byte);
+    }
+    data.len()
+}
+
+/// Move slave output into `output` (at most [`PTY_BUFFER_SIZE`] bytes
+/// queued), turning `\n` into `\r\n` with `opost`. A byte is taken only if
+/// all of its output fits, so the count returned is exact: the old code
+/// dropped a `\n` that did not fit and still reported success (N-128).
+fn slave_output(data: &[u8], opost: bool, output: &mut VecDeque<u8>) -> usize {
+    for (i, &byte) in data.iter().enumerate() {
+        let expanded = opost && byte == b'\n';
+        let need = if expanded { 2 } else { 1 };
+        if output.len() + need > PTY_BUFFER_SIZE {
+            return i;
+        }
+        if expanded {
+            output.push_back(b'\r');
+        }
+        output.push_back(byte);
+    }
+    data.len()
 }
 
 /// PTY Manager for creating and managing PTY pairs
@@ -497,6 +566,10 @@ impl VfsNode for PtyMasterNode {
         NodeType::CharDevice
     }
 
+    fn is_stream(&self) -> bool {
+        true
+    }
+
     /// Read bytes produced by the slave (the program's stdout/stderr).
     fn read(&self, _offset: usize, buffer: &mut [u8]) -> Result<usize, KernelError> {
         self.master.read(buffer)
@@ -505,6 +578,16 @@ impl VfsNode for PtyMasterNode {
     /// Write bytes that the slave will read (simulate keyboard input).
     fn write(&self, _offset: usize, data: &[u8]) -> Result<usize, KernelError> {
         self.master.write(data)
+    }
+
+    fn poll_readiness(&self) -> u16 {
+        self.master.master_readiness()
+    }
+
+    /// Every buffer change calls `io_event`, so poll, epoll and blocking
+    /// reads sleep instead of re-checking every 10 ms.
+    fn wakes_io_waiters(&self) -> bool {
+        true
     }
 
     fn metadata(&self) -> Result<Metadata, KernelError> {
@@ -589,6 +672,10 @@ impl VfsNode for PtySlaveNode {
         NodeType::CharDevice
     }
 
+    fn is_stream(&self) -> bool {
+        true
+    }
+
     /// Read bytes that the master wrote (keyboard input / program stdin).
     fn read(&self, _offset: usize, buffer: &mut [u8]) -> Result<usize, KernelError> {
         self.slave.read(buffer)
@@ -598,6 +685,16 @@ impl VfsNode for PtySlaveNode {
     /// output).
     fn write(&self, _offset: usize, data: &[u8]) -> Result<usize, KernelError> {
         self.slave.write(data)
+    }
+
+    fn poll_readiness(&self) -> u16 {
+        // A slave whose master is gone reads end of file and writes fail:
+        // report it readable so pollers notice.
+        get_pty_master(self.slave.master_id()).map_or(POLLIN, |m| m.slave_readiness())
+    }
+
+    fn wakes_io_waiters(&self) -> bool {
+        true
     }
 
     fn metadata(&self) -> Result<Metadata, KernelError> {
@@ -651,6 +748,30 @@ impl VfsNode for PtySlaveNode {
 
 #[cfg(test)]
 mod tests {
+    /// Readiness follows the buffers, and an empty read is WouldBlock (a
+    /// sleep for a blocking reader), not 0, which reads as end of file.
+    #[test]
+    fn readiness_and_empty_reads_follow_the_buffers() {
+        let master = PtyMaster::new(91);
+        let mut buf = [0u8; 8];
+        assert_eq!(master.master_readiness(), POLLOUT);
+        assert_eq!(master.slave_readiness(), POLLOUT);
+        assert!(matches!(
+            master.read(&mut buf),
+            Err(KernelError::WouldBlock)
+        ));
+        assert_eq!(master.write(b"ls").unwrap(), 2);
+        assert_eq!(master.slave_readiness(), POLLIN | POLLOUT);
+        assert!(master.master_readiness() & POLLIN == 0);
+        master.output_buffer.write().push_back(b'x');
+        assert_eq!(master.master_readiness(), POLLIN | POLLOUT);
+        assert_eq!(master.read(&mut buf).unwrap(), 1);
+        assert_eq!(master.master_readiness(), POLLOUT);
+        // A full input buffer is not writable.
+        master.input_buffer.write().resize(PTY_BUFFER_SIZE, b'a');
+        assert_eq!(master.master_readiness() & POLLOUT, 0);
+    }
+
     use super::*;
 
     #[test]
@@ -688,5 +809,44 @@ mod tests {
 
         assert_eq!(retrieved.rows, 30);
         assert_eq!(retrieved.cols, 100);
+    }
+
+    /// N-128: ^C/^Z become signals without being queued, and a full input
+    /// buffer gives a short count instead of an error after the fact.
+    #[test]
+    fn master_input_reports_short_writes_and_signals() {
+        let mut input = VecDeque::new();
+        let mut sigs = Vec::new();
+        let data = [b'a', termios::VINTR_CHAR, b'b', termios::VSUSP_CHAR];
+        assert_eq!(master_input(&data, true, &mut input, &mut sigs), 4);
+        assert_eq!(input, VecDeque::from(alloc::vec![b'a', b'b']));
+        assert_eq!(sigs, alloc::vec![2, 20]);
+        // Without ISIG the control characters are data.
+        input.clear();
+        sigs.clear();
+        assert_eq!(master_input(&data, false, &mut input, &mut sigs), 4);
+        assert_eq!(input.len(), 4);
+        assert!(sigs.is_empty());
+        // Room for two more bytes: three offered, two taken.
+        input = VecDeque::from(alloc::vec![0u8; PTY_BUFFER_SIZE - 2]);
+        assert_eq!(master_input(b"xyz", false, &mut input, &mut sigs), 2);
+        assert_eq!(input.len(), PTY_BUFFER_SIZE);
+    }
+
+    /// N-128: an OPOST newline needs two slots; it is taken whole or not
+    /// at all, and the count says which.
+    #[test]
+    fn slave_output_counts_opost_newlines_exactly() {
+        let mut out = VecDeque::new();
+        assert_eq!(slave_output(b"a\nb", true, &mut out), 3);
+        assert_eq!(out, VecDeque::from(alloc::vec![b'a', b'\r', b'\n', b'b']));
+        // One slot left: "x" fits, the newline does not.
+        let mut out = VecDeque::from(alloc::vec![0u8; PTY_BUFFER_SIZE - 2]);
+        assert_eq!(slave_output(b"x\n", true, &mut out), 1);
+        assert_eq!(out.len(), PTY_BUFFER_SIZE - 1);
+        // Without OPOST the newline takes one slot.
+        assert_eq!(slave_output(b"\n", false, &mut out), 1);
+        assert_eq!(out.len(), PTY_BUFFER_SIZE);
+        assert_eq!(slave_output(b"z", false, &mut out), 0);
     }
 }

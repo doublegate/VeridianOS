@@ -14,7 +14,13 @@ pub struct RwLock<T: ?Sized> {
     data: UnsafeCell<T>,
 }
 
+// SAFETY: RwLock owns its `T`, so sending the lock sends the `T`, which is
+// sound for `T: Send`.
 unsafe impl<T: ?Sized + Send> Send for RwLock<T> {}
+// SAFETY: NOT enforced by the type: read()/write() hand out references
+// without any locking. This is sound only under the module's usage rule
+// that the lock is used single-threaded during AArch64 kernel-mode init and
+// that no write guard coexists with any other guard.
 unsafe impl<T: ?Sized + Send + Sync> Sync for RwLock<T> {}
 
 pub struct RwLockReadGuard<'a, T: ?Sized> {

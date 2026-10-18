@@ -878,8 +878,9 @@ mod tests {
         let y_black = rgb_to_y(0, 0, 0);
         assert!(y_black < 30);
 
-        // Y should be in BT.601 range
-        assert!(y_white <= 255);
+        // Y should be in the BT.601 studio range (16..=235); the upper bound
+        // is the meaningful one (a u8 is always <= 255).
+        assert!(y_white <= 235);
         assert!(y_black >= 16);
     }
 

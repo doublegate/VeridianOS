@@ -231,6 +231,16 @@ impl Message {
         }
     }
 
+    /// Replace the capability token (a transferred capability arrives as
+    /// the receiver's own delegated token, not the sender's).
+    pub fn set_capability(&mut self, capability: u64) {
+        match self {
+            Message::Small(msg) => msg.capability = capability,
+            Message::Large(msg) => msg.header.capability = capability,
+            Message::Buffered(msg) => msg.header.capability = capability,
+        }
+    }
+
     /// Get the operation code from the message
     pub fn opcode(&self) -> u32 {
         match self {

@@ -1258,7 +1258,6 @@ mod tests {
     fn test_parse_response_a_record() {
         // Build a minimal DNS response with one A record
         let mut msg = vec![0u8; 512];
-        let mut pos = 0;
 
         // Header: id=1, QR=1, RD=1, RA=1, QDCOUNT=1, ANCOUNT=1
         msg[0..2].copy_from_slice(&1u16.to_be_bytes()); // ID
@@ -1267,7 +1266,7 @@ mod tests {
         msg[6..8].copy_from_slice(&1u16.to_be_bytes()); // ANCOUNT
         msg[8..10].copy_from_slice(&0u16.to_be_bytes()); // NSCOUNT
         msg[10..12].copy_from_slice(&0u16.to_be_bytes()); // ARCOUNT
-        pos = 12;
+        let mut pos = 12;
 
         // Question: example.com A IN
         let name_bytes = [

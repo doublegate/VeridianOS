@@ -12,8 +12,18 @@ use spin::Mutex;
 
 use crate::error::KernelError;
 
+/// Wake whoever waits on a pipe: data or space appeared, or an end closed.
+fn pipe_event() {
+    #[cfg(feature = "alloc")]
+    crate::sched::dispatch::io_event();
+}
+
 /// Default pipe capacity (64 KB).
 const PIPE_CAPACITY: usize = 64 * 1024;
+
+/// Writes of at most this many bytes are atomic: all or nothing, never
+/// interleaved with another writer's data (POSIX PIPE_BUF, Linux 4096).
+pub const PIPE_BUF: usize = 4096;
 
 /// Internal shared state of a pipe.
 struct PipeInner {
@@ -98,23 +108,28 @@ impl PipeReader {
 
     /// Non-blocking read: return immediately if no data available.
     pub fn try_read(&self, buf: &mut [u8]) -> Result<usize, KernelError> {
-        let mut pipe = self.inner.lock();
-        if pipe.buffer.is_empty() {
-            if pipe.write_closed {
-                return Ok(0); // EOF
+        let to_read = {
+            let mut pipe = self.inner.lock();
+            if pipe.buffer.is_empty() {
+                if pipe.write_closed {
+                    return Ok(0); // EOF
+                }
+                return Err(KernelError::WouldBlock);
             }
-            return Err(KernelError::WouldBlock);
-        }
-        let to_read = buf.len().min(pipe.buffer.len());
-        for byte in buf.iter_mut().take(to_read) {
-            *byte = pipe.buffer.pop_front().unwrap_or(0);
-        }
+            let to_read = buf.len().min(pipe.buffer.len());
+            for byte in buf.iter_mut().take(to_read) {
+                *byte = pipe.buffer.pop_front().unwrap_or(0);
+            }
+            to_read
+        };
+        pipe_event(); // room for a waiting writer
         Ok(to_read)
     }
 
     /// Close the read end.
     pub fn close(&self) {
         self.inner.lock().read_closed = true;
+        pipe_event();
     }
 
     /// Check if there is data available to read.
@@ -135,17 +150,28 @@ impl PipeWriter {
     /// Returns the number of bytes written. Returns an error if the read
     /// end has been closed (broken pipe).
     pub fn write(&self, data: &[u8]) -> Result<usize, KernelError> {
-        let mut pipe = self.inner.lock();
-        if pipe.read_closed {
-            return Err(KernelError::BrokenPipe);
-        }
-        if pipe.write_closed {
-            return Err(KernelError::BrokenPipe);
-        }
-        let available = pipe.capacity.saturating_sub(pipe.buffer.len());
-        let to_write = data.len().min(available);
-        for &byte in &data[..to_write] {
-            pipe.buffer.push_back(byte);
+        let to_write = {
+            let mut pipe = self.inner.lock();
+            if pipe.read_closed {
+                return Err(KernelError::BrokenPipe);
+            }
+            if pipe.write_closed {
+                return Err(KernelError::BrokenPipe);
+            }
+            let available = pipe.capacity.saturating_sub(pipe.buffer.len());
+            // A write of up to PIPE_BUF bytes goes in whole or waits (one
+            // larger than the whole pipe could never go in whole).
+            if data.len() <= PIPE_BUF.min(pipe.capacity) && available < data.len() {
+                return Err(KernelError::WouldBlock);
+            }
+            let to_write = data.len().min(available);
+            for &byte in &data[..to_write] {
+                pipe.buffer.push_back(byte);
+            }
+            to_write
+        };
+        if to_write > 0 {
+            pipe_event(); // data for a waiting reader
         }
         Ok(to_write)
     }
@@ -166,6 +192,7 @@ impl PipeWriter {
     /// Close the write end.
     pub fn close(&self) {
         self.inner.lock().write_closed = true;
+        pipe_event();
     }
 }
 
@@ -214,7 +241,7 @@ impl PipeReadNode {
 
 impl VfsNode for PipeReadNode {
     fn node_type(&self) -> NodeType {
-        NodeType::CharDevice
+        NodeType::Pipe
     }
 
     fn read(&self, _offset: usize, buffer: &mut [u8]) -> Result<usize, KernelError> {
@@ -243,10 +270,14 @@ impl VfsNode for PipeReadNode {
         events
     }
 
+    fn wakes_io_waiters(&self) -> bool {
+        true
+    }
+
     fn metadata(&self) -> Result<Metadata, KernelError> {
         Ok(Metadata {
             size: 0,
-            node_type: NodeType::CharDevice,
+            node_type: NodeType::Pipe,
             permissions: Permissions::from_mode(0o444),
             uid: 0,
             gid: 0,
@@ -308,7 +339,7 @@ impl PipeWriteNode {
 
 impl VfsNode for PipeWriteNode {
     fn node_type(&self) -> NodeType {
-        NodeType::CharDevice
+        NodeType::Pipe
     }
 
     fn read(&self, _offset: usize, _buffer: &mut [u8]) -> Result<usize, KernelError> {
@@ -333,10 +364,14 @@ impl VfsNode for PipeWriteNode {
         events
     }
 
+    fn wakes_io_waiters(&self) -> bool {
+        true
+    }
+
     fn metadata(&self) -> Result<Metadata, KernelError> {
         Ok(Metadata {
             size: 0,
-            node_type: NodeType::CharDevice,
+            node_type: NodeType::Pipe,
             permissions: Permissions::from_mode(0o222),
             uid: 0,
             gid: 0,
@@ -423,6 +458,23 @@ mod tests {
         let mut buf = [0u8; 32];
         let n = reader.read(&mut buf).unwrap();
         assert_eq!(n, 16);
+    }
+
+    /// A write of up to PIPE_BUF bytes is never split: with too little
+    /// room it waits (WouldBlock) and leaves the buffer unchanged.
+    #[test]
+    fn test_pipe_buf_writes_are_atomic() {
+        let (reader, writer) = create_pipe_with_capacity(8192).unwrap();
+        assert_eq!(writer.write(&[1u8; 6000]).unwrap(), 6000);
+        assert!(matches!(
+            writer.write(&[2u8; 4096]),
+            Err(KernelError::WouldBlock)
+        ));
+        let mut buf = [0u8; 8192];
+        assert_eq!(reader.try_read(&mut buf).unwrap(), 6000);
+        assert_eq!(writer.write(&[2u8; 4096]).unwrap(), 4096);
+        // Larger than PIPE_BUF: may be split.
+        assert_eq!(writer.write(&[3u8; 5000]).unwrap(), 4096);
     }
 
     #[test]

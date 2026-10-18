@@ -23,8 +23,6 @@
 
 // Virtio-blk driver -- exercised when block device is attached
 
-use core::sync::atomic::{self, Ordering};
-
 use spin::Mutex;
 
 use super::{
@@ -424,8 +422,8 @@ impl VirtioBlkDevice {
                 .write_desc(desc_status, status_phys, 1, VIRTQ_DESC_F_WRITE, 0);
         }
 
-        // Ensure all descriptor writes are visible before notifying
-        atomic::fence(Ordering::Release);
+        // push_avail orders the descriptors before the index it publishes,
+        // and notify_queue the index before the doorbell (CRIT-SEC-01).
         self.queue.push_avail(desc_header);
         self.transport.notify_queue(0);
 

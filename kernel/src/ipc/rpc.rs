@@ -56,6 +56,7 @@ impl From<IpcError> for RpcError {
             IpcError::InvalidMemoryRegion => -14,
             IpcError::ResourceBusy => -15,
             IpcError::NotInitialized => -16,
+            IpcError::Interrupted => -17,
         };
         RpcError {
             request_id: 0,

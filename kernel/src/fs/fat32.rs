@@ -278,7 +278,10 @@ impl LfnDirEntry {
         // SAFETY: addr_of! on packed fields avoids creating unaligned refs;
         // read_unaligned handles alignment.
         let name1: [u16; 5] = unsafe { core::ptr::read_unaligned(core::ptr::addr_of!(self.name1)) };
+        // SAFETY: as for name1: addr_of! avoids an unaligned reference and
+        // read_unaligned copies the packed field.
         let name2: [u16; 6] = unsafe { core::ptr::read_unaligned(core::ptr::addr_of!(self.name2)) };
+        // SAFETY: as for name1.
         let name3: [u16; 2] = unsafe { core::ptr::read_unaligned(core::ptr::addr_of!(self.name3)) };
 
         for &c in &name1 {

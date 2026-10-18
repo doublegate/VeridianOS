@@ -4,7 +4,12 @@
 //! locking (fcntl/POSIX semantics). Per-inode lock tables track ownership
 //! by PID, with deadlock detection for blocking lock requests.
 //!
-//! - `flock()`: whole-file advisory locks (LOCK_SH, LOCK_EX, LOCK_UN)
+//! - `flock()`: whole-file advisory locks (LOCK_SH, LOCK_EX, LOCK_UN), owned by
+//!   an open file as on Linux (the caller passes its identity): duplicates and
+//!   fork children share a lock, two opens of one file do not, and the lock
+//!   goes with the open file's last close. A request that conflicts returns
+//!   `WouldBlock`; a blocking caller sleeps in [`FLOCK_WAITERS`], which every
+//!   release wakes (N-207)
 //! - `fcntl_setlk()`: byte-range locks (F_SETLK semantics, non-blocking)
 //! - `fcntl_setlkw()`: byte-range locks (F_SETLKW semantics, blocking with
 //!   deadlock detection)
@@ -85,8 +90,20 @@ impl FileLock {
 pub struct FlockEntry {
     /// Lock type: LOCK_SH or LOCK_EX.
     pub lock_type: u32,
-    /// PID of the lock owner.
+    /// The owning open file's identity.
     pub pid: u64,
+}
+
+/// Tasks waiting in flock(2) without LOCK_NB; woken whenever a flock lock
+/// is released.
+#[cfg(feature = "alloc")]
+pub static FLOCK_WAITERS: crate::sched::dispatch::WaitQueue =
+    crate::sched::dispatch::WaitQueue::new();
+
+/// A flock lock went: let blocked requests try again.
+fn flock_released() {
+    #[cfg(feature = "alloc")]
+    FLOCK_WAITERS.wake_all();
 }
 
 /// Per-system lock table tracking all file locks by inode.
@@ -113,19 +130,18 @@ static LOCK_TABLE: RwLock<LockTable> = RwLock::new(LockTable::new());
 // flock() implementation
 // ---------------------------------------------------------------------------
 
-/// Apply a whole-file advisory lock (flock semantics).
+/// Apply a whole-file advisory lock (flock semantics) for the open file
+/// `owner`.
 ///
-/// `operation` is a combination of LOCK_SH/LOCK_EX/LOCK_UN and optionally
-/// LOCK_NB. Returns `WouldBlock` when LOCK_NB is set and the lock cannot
-/// be acquired immediately.
-pub fn flock(inode: u64, pid: u64, operation: u32) -> Result<(), KernelError> {
-    let op = operation & !LOCK_NB;
-    let non_blocking = (operation & LOCK_NB) != 0;
-
-    match op {
-        LOCK_UN => flock_unlock(inode, pid),
-        LOCK_SH => flock_lock(inode, pid, LOCK_SH, non_blocking),
-        LOCK_EX => flock_lock(inode, pid, LOCK_EX, non_blocking),
+/// `operation` is LOCK_SH, LOCK_EX or LOCK_UN, optionally with LOCK_NB.
+/// A request that conflicts with another open file's lock returns
+/// `WouldBlock` whether or not LOCK_NB is set: a blocking caller waits in
+/// [`FLOCK_WAITERS`] and asks again.
+pub fn flock(inode: u64, owner: u64, operation: u32) -> Result<(), KernelError> {
+    match operation & !LOCK_NB {
+        LOCK_UN => flock_unlock(inode, owner),
+        LOCK_SH => flock_lock(inode, owner, LOCK_SH),
+        LOCK_EX => flock_lock(inode, owner, LOCK_EX),
         _ => Err(KernelError::InvalidArgument {
             name: "operation",
             value: "invalid flock operation",
@@ -133,46 +149,64 @@ pub fn flock(inode: u64, pid: u64, operation: u32) -> Result<(), KernelError> {
     }
 }
 
-/// Acquire a whole-file lock (shared or exclusive).
-fn flock_lock(inode: u64, pid: u64, lock_type: u32, non_blocking: bool) -> Result<(), KernelError> {
-    let mut table = LOCK_TABLE.write();
-    let entries = table.flock_locks.entry(inode).or_default();
-
-    // Check for conflicts with existing locks.
-    for entry in entries.iter() {
-        // Same process can upgrade/downgrade its own lock.
-        if entry.pid == pid {
-            continue;
+/// Acquire a whole-file lock (shared or exclusive). Converting a lock the
+/// owner holds drops it first, as Linux and BSD do: a conversion that has to
+/// wait (or fails with LOCK_NB) has given up the old lock meanwhile.
+fn flock_lock(inode: u64, owner: u64, lock_type: u32) -> Result<(), KernelError> {
+    let (released, conflict) = {
+        let mut table = LOCK_TABLE.write();
+        let entries = table.flock_locks.entry(inode).or_default();
+        if entries
+            .iter()
+            .any(|e| e.pid == owner && e.lock_type == lock_type)
+        {
+            return Ok(());
         }
-        // Shared locks conflict only with exclusive requests.
-        // Exclusive locks conflict with any other lock.
-        let conflict = lock_type == LOCK_EX || entry.lock_type == LOCK_EX;
-        if conflict {
-            if non_blocking {
-                return Err(KernelError::WouldBlock);
-            }
-            // In a real kernel we would block here. For now, return WouldBlock
-            // since we have no wait-queue infrastructure wired for flock.
-            return Err(KernelError::WouldBlock);
-        }
-    }
-
-    // Remove any existing lock from this PID (upgrade/downgrade).
-    entries.retain(|e| e.pid != pid);
-
-    // Insert the new lock.
-    entries.push(FlockEntry { lock_type, pid });
-    Ok(())
-}
-
-/// Release a whole-file lock held by the given PID.
-fn flock_unlock(inode: u64, pid: u64) -> Result<(), KernelError> {
-    let mut table = LOCK_TABLE.write();
-    if let Some(entries) = table.flock_locks.get_mut(&inode) {
-        entries.retain(|e| e.pid != pid);
-        if entries.is_empty() {
+        let held = entries.len();
+        entries.retain(|e| e.pid != owner);
+        let released = entries.len() != held;
+        // Shared locks conflict only with exclusive ones; an exclusive
+        // request with any other lock.
+        let conflict = entries
+            .iter()
+            .any(|e| lock_type == LOCK_EX || e.lock_type == LOCK_EX);
+        if !conflict {
+            entries.push(FlockEntry {
+                lock_type,
+                pid: owner,
+            });
+        } else if entries.is_empty() {
             table.flock_locks.remove(&inode);
         }
+        (released, conflict)
+    };
+    if released {
+        flock_released();
+    }
+    if conflict {
+        Err(KernelError::WouldBlock)
+    } else {
+        Ok(())
+    }
+}
+
+/// Release the whole-file lock `owner` holds, if any.
+fn flock_unlock(inode: u64, owner: u64) -> Result<(), KernelError> {
+    let released = {
+        let mut table = LOCK_TABLE.write();
+        let mut released = false;
+        if let Some(entries) = table.flock_locks.get_mut(&inode) {
+            let held = entries.len();
+            entries.retain(|e| e.pid != owner);
+            released = entries.len() != held;
+            if entries.is_empty() {
+                table.flock_locks.remove(&inode);
+            }
+        }
+        released
+    };
+    if released {
+        flock_released();
     }
     Ok(())
 }
@@ -436,28 +470,10 @@ pub fn fcntl_getlk(inode: u64, lock: &FileLock) -> Result<Option<FileLock>, Kern
 // Process cleanup
 // ---------------------------------------------------------------------------
 
-/// Remove all locks (flock and range) held by the specified PID.
-///
-/// Called during process exit to prevent leaked locks.
+/// Remove the byte-range (fcntl) locks the process `pid` holds, at its
+/// exit. flock locks belong to open files and go with their last close.
 pub fn cleanup_process_locks(pid: u64) {
     let mut table = LOCK_TABLE.write();
-
-    // Clean up flock entries.
-    let empty_flock_inodes: Vec<u64> = table
-        .flock_locks
-        .iter_mut()
-        .filter_map(|(&inode, entries)| {
-            entries.retain(|e| e.pid != pid);
-            if entries.is_empty() {
-                Some(inode)
-            } else {
-                None
-            }
-        })
-        .collect();
-    for inode in empty_flock_inodes {
-        table.flock_locks.remove(&inode);
-    }
 
     // Clean up range locks.
     let empty_range_inodes: Vec<u64> = table
@@ -543,6 +559,22 @@ mod tests {
         assert!(flock(ids[0], 100, LOCK_SH).is_ok());
         // Same PID can upgrade to exclusive.
         assert!(flock(ids[0], 100, LOCK_EX).is_ok());
+    }
+
+    /// A conversion that cannot be granted has dropped the old lock (Linux
+    /// and BSD), so the other holder can then convert.
+    #[test]
+    fn test_flock_failed_conversion_drops_the_old_lock() {
+        let ids = unique_inodes(1);
+        assert!(flock(ids[0], 100, LOCK_SH).is_ok());
+        assert!(flock(ids[0], 200, LOCK_SH).is_ok());
+        assert_eq!(
+            flock(ids[0], 100, LOCK_EX | LOCK_NB),
+            Err(KernelError::WouldBlock)
+        );
+        assert!(flock(ids[0], 200, LOCK_EX | LOCK_NB).is_ok());
+        // Re-requesting a held lock is a no-op.
+        assert!(flock(ids[0], 200, LOCK_EX).is_ok());
     }
 
     #[test]
@@ -834,18 +866,21 @@ mod tests {
 
     // ---- cleanup tests ----
 
+    /// flock locks belong to open files, not processes: a process exit
+    /// (which may leave the file open in a fork child) does not drop them.
     #[test]
-    fn test_cleanup_process_locks_flock() {
-        let ids = unique_inodes(2);
-        // Use unique PIDs.
-        let pid_owner: u64 = 7000;
-        let pid_other: u64 = 7001;
-        assert!(flock(ids[0], pid_owner, LOCK_EX).is_ok());
-        assert!(flock(ids[1], pid_owner, LOCK_SH).is_ok());
-        cleanup_process_locks(pid_owner);
-        // Both inodes should now be unlocked.
-        assert!(flock(ids[0], pid_other, LOCK_EX).is_ok());
-        assert!(flock(ids[1], pid_other, LOCK_EX).is_ok());
+    fn test_cleanup_process_locks_keeps_flock_locks() {
+        let ids = unique_inodes(1);
+        let file_owner: u64 = 7000;
+        let other: u64 = 7001;
+        assert!(flock(ids[0], file_owner, LOCK_EX).is_ok());
+        cleanup_process_locks(file_owner);
+        assert_eq!(
+            flock(ids[0], other, LOCK_EX | LOCK_NB),
+            Err(KernelError::WouldBlock)
+        );
+        assert!(flock(ids[0], file_owner, LOCK_UN).is_ok());
+        assert!(flock(ids[0], other, LOCK_EX | LOCK_NB).is_ok());
     }
 
     #[test]

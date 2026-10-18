@@ -219,19 +219,7 @@ impl Ext4Inode {
     }
 
     fn permissions(&self) -> Permissions {
-        let mode = self.mode;
-        Permissions {
-            owner_read: (mode & 0o400) != 0,
-            owner_write: (mode & 0o200) != 0,
-            owner_exec: (mode & 0o100) != 0,
-            group_read: (mode & 0o040) != 0,
-            group_write: (mode & 0o020) != 0,
-            group_exec: (mode & 0o010) != 0,
-            other_read: (mode & 0o004) != 0,
-            other_write: (mode & 0o002) != 0,
-            other_exec: (mode & 0o001) != 0,
-            sticky: (mode & 0o1000) != 0,
-        }
+        Permissions::from_mode(self.mode as u32)
     }
 }
 

@@ -212,10 +212,22 @@ pub fn shm_unlink(name: &str) -> KernelResult<()> {
     }
 }
 
+/// Whether `obj` may change size now (N-88): not while any process maps
+/// it. Its frames move on a resize, so a mapping would keep the old,
+/// freed frames -- a use-after-free once they are reused.
+fn check_resizable(obj: &ShmObject) -> KernelResult<()> {
+    if obj.mappings.lock().is_empty() {
+        Ok(())
+    } else {
+        Err(KernelError::FsError(crate::error::FsError::Busy))
+    }
+}
+
 /// Set the size of a shared memory object (analogous to ftruncate).
 ///
-/// Allocates (or reallocates) the physical backing memory. Existing
-/// mappings are NOT updated; callers must re-map after truncating.
+/// Refused (`Busy`) while the object is mapped. The contents up to the
+/// smaller of the old and new size are kept, and new bytes read as zero,
+/// as POSIX `ftruncate` does; they used to be discarded.
 pub fn shm_truncate(name: &str, size: usize) -> KernelResult<()> {
     if size > SHM_MAX_SIZE {
         return Err(KernelError::InvalidArgument {
@@ -229,41 +241,46 @@ pub fn shm_truncate(name: &str, size: usize) -> KernelResult<()> {
         resource: "shm_object",
         id: 0,
     })?;
+    check_resizable(obj)?;
 
-    // Free old frames if any.
+    // New backing first (zeroed), so a failed allocation changes nothing.
+    let num_frames = size.div_ceil(4096);
+    let new_frame = if num_frames > 0 {
+        let frame = crate::mm::FRAME_ALLOCATOR
+            .lock()
+            .allocate_frames(num_frames, None)
+            .map_err(|_| KernelError::OutOfMemory {
+                requested: size,
+                available: 0,
+            })?;
+        let virt = crate::mm::phys_to_virt_addr(frame.as_u64() * 4096);
+        // SAFETY: `virt` is the physical-memory-map address of the
+        // `num_frames` frames just allocated, owned here and unmapped
+        // elsewhere.
+        unsafe { core::ptr::write_bytes(virt as *mut u8, 0, num_frames * 4096) };
+        Some(frame)
+    } else {
+        None
+    };
+
+    // Carry the old contents over, then release the old frames.
     if obj.num_frames > 0 {
-        let frame = crate::mm::FrameNumber::new(obj.phys_frame as u64);
+        if let Some(frame) = new_frame {
+            let keep = obj.size.min(size);
+            let from = crate::mm::phys_to_virt_addr(obj.phys_frame as u64 * 4096);
+            let to = crate::mm::phys_to_virt_addr(frame.as_u64() * 4096);
+            // SAFETY: both ranges are this object's frames (old and new,
+            // disjoint allocations) through the physical-memory map, and
+            // `keep` is within both sizes.
+            unsafe { core::ptr::copy_nonoverlapping(from as *const u8, to as *mut u8, keep) };
+        }
+        let old = crate::mm::FrameNumber::new(obj.phys_frame as u64);
         let _ = crate::mm::FRAME_ALLOCATOR
             .lock()
-            .free_frames(frame, obj.num_frames);
-        obj.phys_frame = 0;
-        obj.num_frames = 0;
+            .free_frames(old, obj.num_frames);
     }
 
-    if size == 0 {
-        obj.size = 0;
-        return Ok(());
-    }
-
-    // Allocate new contiguous frames.
-    let num_frames = size.div_ceil(4096);
-    let frame = crate::mm::FRAME_ALLOCATOR
-        .lock()
-        .allocate_frames(num_frames, None)
-        .map_err(|_| KernelError::OutOfMemory {
-            requested: size,
-            available: 0,
-        })?;
-
-    // Zero the memory.
-    let phys_addr = frame.as_u64() * 4096;
-    let virt_addr = crate::mm::phys_to_virt_addr(phys_addr);
-    // SAFETY: virt_addr points to freshly allocated frames mapped by bootloader.
-    unsafe {
-        core::ptr::write_bytes(virt_addr as *mut u8, 0, num_frames * 4096);
-    }
-
-    obj.phys_frame = frame.as_u64() as usize;
+    obj.phys_frame = new_frame.map_or(0, |f| f.as_u64() as usize);
     obj.num_frames = num_frames;
     obj.size = size;
 
@@ -314,4 +331,45 @@ pub fn shm_stat(name: &str) -> KernelResult<(u64, usize, u32)> {
 /// Get the number of active shared memory objects.
 pub fn shm_count() -> usize {
     SHM_REGISTRY.lock().len()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn object() -> ShmObject {
+        ShmObject {
+            name: String::from("t"),
+            id: 1,
+            size: 0,
+            phys_frame: 0,
+            num_frames: 0,
+            ref_count: AtomicU32::new(1),
+            mappings: Mutex::new(BTreeMap::new()),
+            owner: ProcessId(1),
+            unlinked: false,
+        }
+    }
+
+    /// N-88: an object some process maps cannot be resized (its frames
+    /// would be freed under the mapping); unmapped, it can.
+    #[test]
+    fn mapped_objects_refuse_resize() {
+        let obj = object();
+        assert!(check_resizable(&obj).is_ok());
+        obj.mappings.lock().insert(
+            7,
+            ShmMapping {
+                virt_addr: 0x4000_0000,
+                size: 4096,
+                read_only: false,
+            },
+        );
+        assert!(matches!(
+            check_resizable(&obj),
+            Err(KernelError::FsError(crate::error::FsError::Busy))
+        ));
+        obj.mappings.lock().clear();
+        assert!(check_resizable(&obj).is_ok());
+    }
 }
