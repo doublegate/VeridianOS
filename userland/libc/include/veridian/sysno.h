@@ -187,6 +187,8 @@
 #define SYS_getresuid                    118
 #define SYS_setresgid                    119
 #define SYS_getresgid                    120
+#define SYS_setfsuid                     122
+#define SYS_setfsgid                     123
 #define SYS_getgroups                    115
 #define SYS_setgroups                    116
 #define SYS_VERIDIAN_AUTH                1352
@@ -448,6 +450,8 @@
 #define SYS_getresuid                    148
 #define SYS_setresgid                    149
 #define SYS_getresgid                    150
+#define SYS_setfsuid                     151
+#define SYS_setfsgid                     152
 #define SYS_getgroups                    158
 #define SYS_setgroups                    159
 #define SYS_VERIDIAN_AUTH                1352
@@ -705,6 +709,8 @@
 #define SYS_getresuid                    148
 #define SYS_setresgid                    149
 #define SYS_getresgid                    150
+#define SYS_setfsuid                     151
+#define SYS_setfsgid                     152
 #define SYS_getgroups                    158
 #define SYS_setgroups                    159
 #define SYS_VERIDIAN_AUTH                1352

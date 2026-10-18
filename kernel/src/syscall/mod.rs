@@ -971,6 +971,8 @@ fn handle_syscall(
         Syscall::Setreuid => process::sys_setreuid(arg1, arg2),
         Syscall::Setregid => process::sys_setregid(arg1, arg2),
         Syscall::Setresuid => process::sys_setresuid(arg1, arg2, arg3),
+        Syscall::Setfsuid => process::sys_setfsuid(arg1),
+        Syscall::Setfsgid => process::sys_setfsgid(arg1),
         Syscall::Getresuid => process::sys_getresuid(arg1, arg2, arg3),
         Syscall::Setresgid => process::sys_setresgid(arg1, arg2, arg3),
         Syscall::Getresgid => process::sys_getresgid(arg1, arg2, arg3),

@@ -163,8 +163,12 @@ impl VfsNode for ProcNode {
                             let parent = process.parent().unwrap_or(crate::process::ProcessId(0));
 
                             format!(
-                                "Name:\t{}\nPid:\t{}\nPPid:\t{}\nState:\t{}\n",
-                                name, pid, parent.0, state
+                                "Name:\t{}\nPid:\t{}\nPPid:\t{}\nState:\t{}\n{}",
+                                name,
+                                pid,
+                                parent.0,
+                                state,
+                                status_ids(&process.credentials())
                             )
                         } else {
                             format!("Name:\tProcess\nPid:\t{}\nState:\tR (running)\n", pid)
@@ -213,10 +217,17 @@ impl VfsNode for ProcNode {
             _ => NodeType::File,
         };
 
+        // As on Linux: everyone may walk the directories and read the
+        // files; links (self/exe) are rwxrwxrwx.
+        let permissions = Permissions::from_mode(match node_type {
+            NodeType::Directory => 0o555,
+            NodeType::Symlink => 0o777,
+            _ => 0o444,
+        });
         Ok(Metadata {
             node_type,
             size: 0,
-            permissions: Permissions::read_only(),
+            permissions,
             uid: 0,
             gid: 0,
             created: 0,
@@ -379,6 +390,14 @@ impl VfsNode for ProcNode {
                         "exe" => Ok(Arc::new(ProcNode {
                             node_type: ProcNodeType::SelfExe,
                         }) as Arc<dyn VfsNode>),
+                        // The caller's own files, as /proc/<its pid>/...
+                        // (Linux's /proc/self is a link to that directory).
+                        "status" | "cmdline" => crate::process::current_process()
+                            .map(|p| {
+                                Arc::new(ProcNode::new_process_file(p.pid.0, String::from(name)))
+                                    as Arc<dyn VfsNode>
+                            })
+                            .ok_or(KernelError::FsError(FsError::NotFound)),
                         "maps" => Ok(
                             Arc::new(ProcNode::new_system_file(format!("self/{}", name)))
                                 as Arc<dyn VfsNode>,
@@ -520,6 +539,23 @@ fn generate_cpuinfo() -> String {
             riscv_mmu_name(crate::mm::page_table::paging_levels())
         )
     }
+}
+
+/// The `Uid:`, `Gid:` and `Groups:` lines of /proc/[pid]/status, as Linux
+/// prints them: real, effective, saved and filesystem IDs, tab-separated,
+/// then the supplementary groups separated by spaces.
+fn status_ids(c: &crate::process::creds::Credentials) -> String {
+    let mut groups = String::new();
+    for (i, g) in c.groups().iter().enumerate() {
+        if i > 0 {
+            groups.push(' ');
+        }
+        groups.push_str(&format!("{}", g));
+    }
+    format!(
+        "Uid:\t{}\t{}\t{}\t{}\nGid:\t{}\t{}\t{}\t{}\nGroups:\t{}\n",
+        c.ruid, c.euid, c.suid, c.fsuid, c.rgid, c.egid, c.sgid, c.fsgid, groups
+    )
 }
 
 /// Linux's `mmu` field of a RISC-V /proc/cpuinfo: the paging mode in use
@@ -699,6 +735,41 @@ impl Filesystem for ProcFs {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Everyone may walk /proc and read its files, as on Linux: directories
+    /// r-xr-xr-x, files r--r--r--. (Directories had no execute bit, so a
+    /// non-root process could open nothing below /proc.)
+    #[test]
+    fn proc_nodes_are_world_readable() {
+        let dir = ProcNode::new_root().metadata().unwrap();
+        assert_eq!(dir.permissions, Permissions::from_mode(0o555));
+        let pid_dir = ProcNode::new_process_dir(1).metadata().unwrap();
+        assert_eq!(pid_dir.permissions, Permissions::from_mode(0o555));
+        let file = ProcNode::new_system_file(String::from("uptime"))
+            .metadata()
+            .unwrap();
+        assert_eq!(file.permissions, Permissions::from_mode(0o444));
+    }
+
+    /// Status shows all four user and group IDs, filesystem ones last.
+    #[test]
+    fn status_shows_every_id() {
+        let mut c = crate::process::creds::Credentials::new(0, 0);
+        c.setgroups(&[10, 20]).unwrap();
+        c.setresgid(5, 6, 7).unwrap();
+        c.setfsgid(8);
+        c.setresuid(1, 2, 3).unwrap();
+        assert_eq!(
+            status_ids(&c),
+            "Uid:\t1\t2\t3\t2\nGid:\t5\t6\t7\t8\nGroups:\t10 20\n"
+        );
+        let mut c = crate::process::creds::Credentials::new(0, 0);
+        c.setfsuid(1000);
+        assert_eq!(
+            status_ids(&c),
+            "Uid:\t0\t0\t0\t1000\nGid:\t0\t0\t0\t0\nGroups:\t\n"
+        );
+    }
 
     /// The RISC-V `mmu` field names the mode, as Linux prints it.
     #[test]

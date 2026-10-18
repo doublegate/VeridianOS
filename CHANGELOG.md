@@ -292,6 +292,17 @@
   the table (AArch64 34/34, 36/36 on four CPUs). It failed before the move, and a probe `udf` at
   the top of `_start_rust` now prints `[EXCEPTION] unhandled sync`.
 
+- **setfsuid and setfsgid; filesystem IDs.** Credentials carry Linux's filesystem uid and gid:
+  they follow the effective IDs through every set*id call and exec, and setfsuid/setfsgid set
+  them apart (returning the old value, -1 to read it, only to one of the caller's own IDs unless
+  privileged). File permission checks, new files' owners, chown/chmod/utimes rules, the sticky
+  bit, exec permission and `faccessat(AT_EACCESS)` use them, and file-access privilege is
+  filesystem uid 0, as Linux drops the filesystem capabilities when the fsuid leaves 0. A
+  changed filesystem ID makes the process non-dumpable, as `commit_creds` does.
+  `/proc/<pid>/status` shows `Uid:`, `Gid:` (real, effective, saved, filesystem) and `Groups:`,
+  and `/proc/self/status` and `/proc/self/cmdline` are the caller's own. New runtime test
+  `musl_fs_ids`.
+
 - **Syscall coverage per architecture.** `tools/compat/syscall_coverage.py` reads the vendored
   Linux v7.2 tables and writes one report each for x86_64 (385 calls: 178 implemented, 9 stubbed,
   182 missing), AArch64 (327: 151, 9, 165) and RISC-V (328: 150, 9, 167), from the generic
@@ -1196,6 +1207,10 @@
 - The unused in-kernel `stdlib` module (1,018 lines with no callers).
 
 ### Fixed
+
+- **Only root could open anything below /proc.** procfs reported its directories as r--r--r--,
+  so a path walk by any other user failed at /proc itself. Directories are r-xr-xr-x, files
+  r--r--r-- and the self/exe link rwxrwxrwx, as on Linux.
 
 - **mmap ignored its address hint.** Without MAP_FIXED, every mapping went to the kernel's
   cursor, wherever the program asked. A hint is now used when the page-rounded range there is

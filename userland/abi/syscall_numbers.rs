@@ -169,6 +169,8 @@ pub mod sysno {
     pub const SYS_getresuid: usize = 118;
     pub const SYS_setresgid: usize = 119;
     pub const SYS_getresgid: usize = 120;
+    pub const SYS_setfsuid: usize = 122;
+    pub const SYS_setfsgid: usize = 123;
     pub const SYS_getgroups: usize = 115;
     pub const SYS_setgroups: usize = 116;
     pub const SYS_VERIDIAN_AUTH: usize = 1352;
@@ -406,6 +408,8 @@ pub mod sysno {
     pub const SYS_getresuid: usize = 148;
     pub const SYS_setresgid: usize = 149;
     pub const SYS_getresgid: usize = 150;
+    pub const SYS_setfsuid: usize = 151;
+    pub const SYS_setfsgid: usize = 152;
     pub const SYS_getgroups: usize = 158;
     pub const SYS_setgroups: usize = 159;
     pub const SYS_VERIDIAN_AUTH: usize = 1352;
@@ -639,6 +643,8 @@ pub mod sysno {
     pub const SYS_getresuid: usize = 148;
     pub const SYS_setresgid: usize = 149;
     pub const SYS_getresgid: usize = 150;
+    pub const SYS_setfsuid: usize = 151;
+    pub const SYS_setfsgid: usize = 152;
     pub const SYS_getgroups: usize = 158;
     pub const SYS_setgroups: usize = 159;
     pub const SYS_VERIDIAN_AUTH: usize = 1352;

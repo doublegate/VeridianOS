@@ -931,6 +931,19 @@ pub fn sys_setresgid(r: usize, e: usize, s: usize) -> SyscallResult {
     Ok(0)
 }
 
+/// setfsuid(fsuid): the old filesystem uid, whether or not it changed;
+/// never fails (Linux).
+pub fn sys_setfsuid(uid: usize) -> SyscallResult {
+    let proc = current_process().ok_or(SyscallError::InvalidState)?;
+    Ok(proc.update_credentials(|c| c.setfsuid(id_arg(uid))) as usize)
+}
+
+/// setfsgid(fsgid): the old filesystem gid, as setfsuid.
+pub fn sys_setfsgid(gid: usize) -> SyscallResult {
+    let proc = current_process().ok_or(SyscallError::InvalidState)?;
+    Ok(proc.update_credentials(|c| c.setfsgid(id_arg(gid))) as usize)
+}
+
 /// getresuid / getresgid: write the three IDs (each a 4-byte uid_t) to
 /// the three pointers.
 fn write_id_triple(ids: [u32; 3], ptrs: [usize; 3]) -> SyscallResult {

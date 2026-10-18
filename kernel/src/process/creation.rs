@@ -369,7 +369,7 @@ pub(crate) fn read_executable(
         .resolve_path(path)
         .map_err(|_| KernelError::FsError(crate::error::FsError::NotFound))?;
     let meta = node.metadata()?;
-    if !may_execute(&meta, creds.euid, creds.gid_for(meta.gid)) {
+    if !may_execute(&meta, creds.fsuid, creds.gid_for(meta.gid)) {
         return Err(KernelError::PermissionDenied { operation: "exec" });
     }
     let mut data = alloc::vec![0u8; meta.size];
@@ -492,7 +492,7 @@ pub fn exec_process(path: &str, argv: &[&str], envp: &[&str]) -> Result<(), Kern
         let creds = process.credentials();
         let readable = |meta: &crate::fs::Metadata| {
             meta.permissions
-                .can_read(creds.euid, creds.gid_for(meta.gid), meta.uid, meta.gid)
+                .can_read(creds.fsuid, creds.gid_for(meta.gid), meta.uid, meta.gid)
         };
         let meta = file_node.metadata()?;
         let perms = meta.permissions;

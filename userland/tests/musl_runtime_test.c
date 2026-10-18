@@ -31,6 +31,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/file.h>
+#include <sys/fsuid.h>
 #include <sys/mman.h>
 #include <sys/prctl.h>
 #include <sys/resource.h>
@@ -1807,6 +1808,59 @@ static void test_accounts(void)
     static char why[64];
     snprintf(why, sizeof(why), "fail=%#x st=%#x", f, st2);
     report("musl_accounts", f == 0, why);
+}
+
+/* setfsuid/setfsgid: the filesystem IDs are what file access is checked
+ * as and new files belong to, apart from the effective IDs; each call
+ * returns the old value, -1 only reads it, and an unprivileged process can
+ * only pick one of its own IDs. /proc/self/status shows them fourth. */
+static int fs_ids_root(void)
+{
+    int f = 0;
+    const char *dir = "/tmp/musl_fsuid", *mine = "/tmp/musl_fsuid/mine",
+               *secret = "/tmp/musl_fsuid/secret";
+    unlink(mine);
+    unlink(secret);
+    rmdir(dir);
+    if (mkdir(dir, 0777) != 0 || chmod(dir, 0777) != 0) return 1;
+    int s = open(secret, O_CREAT | O_WRONLY, 0600);
+    if (s < 0) return 2;
+    close(s);
+    if (setfsuid(1000) != 0 || setfsuid(-1) != 1000 || geteuid() != 0) f |= 4;
+    if (setfsgid(1001) != 0 || setfsgid(-1) != 1001 || getegid() != 0) f |= 4;
+    int fd = open(mine, O_CREAT | O_WRONLY, 0600);
+    struct stat st;
+    if (fd < 0 || fstat(fd, &st) != 0 || st.st_uid != 1000 || st.st_gid != 1001) f |= 8;
+    if (fd >= 0) close(fd);
+    errno = 0;
+    if (open(secret, O_RDONLY) != -1 || errno != EACCES) f |= 16;
+    char buf[1024] = {0};
+    int p = open("/proc/self/status", O_RDONLY);
+    if (p < 0 || read(p, buf, sizeof(buf) - 1) <= 0 || !strstr(buf, "Uid:\t0\t0\t0\t1000\n")
+        || !strstr(buf, "Gid:\t0\t0\t0\t1001\n"))
+        f |= 32;
+    if (p >= 0) close(p);
+    if (setfsuid(0) != 1000 || setfsgid(0) != 1001 || open(secret, O_RDONLY) < 0) f |= 64;
+    unlink(mine);
+    unlink(secret);
+    rmdir(dir);
+    return f;
+}
+
+static int fs_ids_user(void)
+{
+    if (setresgid(1000, 1000, 1000) != 0 || setresuid(1000, 1000, 1000) != 0) return 1;
+    if (setfsuid(0) != 1000 || setfsuid(-1) != 1000) return 2;
+    if (setfsgid(0) != 1000 || setfsgid(-1) != 1000) return 4;
+    return 0;
+}
+
+static void test_fs_ids(void)
+{
+    int a = in_child(fs_ids_root), b = in_child(fs_ids_user);
+    static char why[64];
+    snprintf(why, sizeof(why), "root st=%#x user st=%#x", a, b);
+    report("musl_fs_ids", exited_zero(a) && exited_zero(b), why);
 }
 
 /* SO_PEERCRED (N-236): a socketpair's ends see their creator; across
@@ -4824,6 +4878,7 @@ static const struct {
     {"relative_entry_paths", test_relative_entry_paths},
     {"priority_inheritance", test_priority_inheritance},
     {"unix_accept_blocks", test_unix_accept_blocks},
+    {"fs_ids", test_fs_ids},
 };
 
 int main(int argc, char **argv)
@@ -4904,6 +4959,7 @@ int main(int argc, char **argv)
     test_accounts();
     test_unix_accept_blocks();
     test_peercred();
+    test_fs_ids();
     test_siginfo();
     test_pty();
     test_console();

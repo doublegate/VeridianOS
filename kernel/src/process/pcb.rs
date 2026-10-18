@@ -355,9 +355,12 @@ impl Process {
     /// new one through ptrace. exec decides dumpability itself afterwards.
     pub fn update_credentials<R>(&self, f: impl FnOnce(&mut super::creds::Credentials) -> R) -> R {
         let mut creds = self.creds.lock();
-        let (euid, egid) = (creds.euid, creds.egid);
+        // Linux's commit_creds: a changed effective or filesystem ID makes
+        // the process non-dumpable.
+        let ids = |c: &super::creds::Credentials| (c.euid, c.egid, c.fsuid, c.fsgid);
+        let before = ids(&creds);
         let result = f(&mut creds);
-        if creds.euid != euid || creds.egid != egid {
+        if ids(&creds) != before {
             self.dumpable
                 .store(false, core::sync::atomic::Ordering::Release);
         }

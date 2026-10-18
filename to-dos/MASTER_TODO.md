@@ -322,7 +322,10 @@ What does not work yet: `docs/KNOWN-LIMITATIONS.md`.
     number, socket files; special files on RamFS, tmpfs and BlockFS and in mkfs-blockfs images;
     st_rdev in stat; N-201); bind() of a Unix socket makes its socket file and connect() finds
     the socket through it; `tools/veridian-elfctl` adds or clears the W^X note in an existing
-    binary.
+    binary. Process group: done: setfsuid and setfsgid (filesystem IDs used by every file
+    permission check and for new files' owners; `/proc/<pid>/status` Uid/Gid/Groups lines);
+    next: capget/capset, personality, kcmp, execveat, clone3, the pidfd calls,
+    process_vm_readv/writev, rseq, unshare/setns.
   - [ ] **Release:** tri-arch boot with `-smp 4`, runtime suite, CHANGELOG, tag.
 - [ ] **v0.28.0:** the process, signal, time and file syscall tiers (X2 groups, with the open
   ABI-review findings N-194 to N-247 that belong to them).

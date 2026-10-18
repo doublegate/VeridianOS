@@ -1,7 +1,9 @@
-//! Process credentials (N-248): real, effective and saved user and group
-//! IDs and the supplementary groups, with the Linux rules for changing
-//! them. Privilege is effective uid 0 (Linux's CAP_SETUID / CAP_SETGID
-//! without a capability model, N-131).
+//! Process credentials (N-248): real, effective, saved and filesystem user
+//! and group IDs and the supplementary groups, with the Linux rules for
+//! changing them. Privilege is effective uid 0 (Linux's CAP_SETUID /
+//! CAP_SETGID without a capability model, N-131); filesystem privilege is
+//! filesystem uid 0, since Linux drops the filesystem capabilities (CHOWN,
+//! DAC_OVERRIDE, FOWNER, MKNOD, ...) when the fsuid leaves 0.
 
 use super::super::syscall::SyscallError;
 
@@ -19,6 +21,11 @@ pub struct Credentials {
     pub rgid: u32,
     pub egid: u32,
     pub sgid: u32,
+    /// The IDs file access is checked as and new files are owned by
+    /// (Linux's fsuid, fsgid): the effective ones, unless set apart with
+    /// setfsuid / setfsgid.
+    pub fsuid: u32,
+    pub fsgid: u32,
     ngroups: usize,
     groups: [u32; NGROUPS_MAX],
 }
@@ -40,6 +47,8 @@ impl Credentials {
             rgid: gid,
             egid: gid,
             sgid: gid,
+            fsuid: uid,
+            fsgid: gid,
             ngroups: 0,
             groups: [0; NGROUPS_MAX],
         }
@@ -53,20 +62,26 @@ impl Credentials {
         self.euid == 0
     }
 
-    /// Whether the process is in group `gid` (effective or supplementary).
+    /// Whether file access is unrestricted: filesystem uid 0.
+    pub fn fs_privileged(&self) -> bool {
+        self.fsuid == 0
+    }
+
+    /// Whether the process is in group `gid` for file access (its
+    /// filesystem gid or a supplementary group; Linux's `in_group_p`).
     pub fn in_group(&self, gid: u32) -> bool {
-        self.egid == gid || self.groups().contains(&gid)
+        self.fsgid == gid || self.groups().contains(&gid)
     }
 
     /// The group ID a permission check should use against a file owned by
     /// `file_gid`: that group if the process belongs to it, otherwise the
-    /// effective gid. With `Permissions::can_*` this gives POSIX's
+    /// filesystem gid. With `Permissions::can_*` this gives POSIX's
     /// owner/group/other precedence over all the process's groups.
     pub fn gid_for(&self, file_gid: u32) -> u32 {
         if self.in_group(file_gid) {
             file_gid
         } else {
-            self.egid
+            self.fsgid
         }
     }
 
@@ -98,7 +113,35 @@ impl Credentials {
         }
         new.suid = new.euid;
         new.sgid = new.egid;
+        new.fsuid = new.euid;
+        new.fsgid = new.egid;
         new
+    }
+
+    /// setfsuid(uid): returns the old filesystem uid whatever happens. It
+    /// changes only to the real, effective, saved or current filesystem
+    /// uid, or anything when privileged; -1 just reads it (Linux's
+    /// `__sys_setfsuid`).
+    pub fn setfsuid(&mut self, uid: u32) -> u32 {
+        let old = self.fsuid;
+        if uid != UNCHANGED
+            && (self.privileged() || [self.ruid, self.euid, self.suid, old].contains(&uid))
+        {
+            self.fsuid = uid;
+        }
+        old
+    }
+
+    /// setfsgid(gid), the group counterpart of `setfsuid` (privilege still
+    /// decided by the effective uid).
+    pub fn setfsgid(&mut self, gid: u32) -> u32 {
+        let old = self.fsgid;
+        if gid != UNCHANGED
+            && (self.privileged() || [self.rgid, self.egid, self.sgid, old].contains(&gid))
+        {
+            self.fsgid = gid;
+        }
+        old
     }
 
     /// setresuid(r, e, s): `UNCHANGED` keeps a value. Unprivileged, each
@@ -121,6 +164,7 @@ impl Credentials {
         if s != UNCHANGED {
             self.suid = s;
         }
+        self.fsuid = self.euid;
         Ok(())
     }
 
@@ -144,6 +188,7 @@ impl Credentials {
         if s != UNCHANGED {
             self.sgid = s;
         }
+        self.fsgid = self.egid;
         Ok(())
     }
 
@@ -170,6 +215,7 @@ impl Credentials {
         if r != UNCHANGED || (e != UNCHANGED && e != old.ruid) {
             self.suid = self.euid;
         }
+        self.fsuid = self.euid;
         Ok(())
     }
 
@@ -193,6 +239,7 @@ impl Credentials {
         if r != UNCHANGED || (e != UNCHANGED && e != old.rgid) {
             self.sgid = self.egid;
         }
+        self.fsgid = self.egid;
         Ok(())
     }
 
@@ -211,6 +258,7 @@ impl Credentials {
         } else {
             return Err(SyscallError::OperationNotPermitted);
         }
+        self.fsuid = self.euid;
         Ok(())
     }
 
@@ -228,6 +276,7 @@ impl Credentials {
         } else {
             return Err(SyscallError::OperationNotPermitted);
         }
+        self.fsgid = self.egid;
         Ok(())
     }
 
@@ -250,6 +299,62 @@ mod tests {
     use super::*;
 
     const U: u32 = UNCHANGED;
+
+    /// The filesystem IDs (Linux's fsuid/fsgid) follow the effective IDs
+    /// through every change and exec, unless set apart with setfsuid or
+    /// setfsgid; permission checks and file ownership use them.
+    #[test]
+    fn fs_ids_follow_the_effective_ids() {
+        let mut c = Credentials::new(0, 0);
+        assert_eq!((c.fsuid, c.fsgid), (0, 0));
+        c.setresgid(U, 100, U).unwrap();
+        assert_eq!(c.fsgid, 100);
+        c.setresuid(U, 1000, U).unwrap();
+        assert_eq!(c.fsuid, 1000);
+        c.setresuid(U, 0, U).unwrap(); // back through the saved ID
+        assert_eq!(c.fsuid, 0);
+        c.setreuid(U, 7).unwrap();
+        assert_eq!(c.fsuid, 7);
+        let mut c = Credentials::new(0, 0);
+        c.setregid(U, 9).unwrap();
+        c.setgid(8).unwrap();
+        c.setuid(42).unwrap();
+        assert_eq!((c.fsuid, c.fsgid), (42, 8));
+        let c = Credentials::new(1000, 100).after_exec(Some(0), Some(5), true);
+        assert_eq!((c.fsuid, c.fsgid), (0, 5));
+    }
+
+    /// setfsuid/setfsgid return the old value whatever happens, take -1 as
+    /// a query, and change the ID only to the real, effective, saved or
+    /// current filesystem ID, unless the caller is privileged (Linux's
+    /// `__sys_setfsuid`). Filesystem privilege and group checks follow.
+    #[test]
+    fn setfsuid_rules() {
+        let mut root = Credentials::new(0, 0);
+        assert_eq!(root.setfsuid(1000), 0);
+        assert_eq!(root.setfsuid(U), 1000);
+        assert_eq!((root.euid, root.fsuid), (0, 1000));
+        assert!(!root.fs_privileged());
+        assert_eq!(root.setfsgid(50), 0);
+        assert!(!root.in_group(0) && root.in_group(50));
+        assert_eq!(root.gid_for(50), 50);
+        assert_eq!(root.gid_for(60), 50);
+        // Still privileged by euid: may go back.
+        assert_eq!(root.setfsuid(0), 1000);
+        assert!(root.fs_privileged());
+
+        let mut user = Credentials::new(1000, 100);
+        assert_eq!(user.setfsuid(0), 1000);
+        assert_eq!(user.fsuid, 1000, "not one of its IDs");
+        assert_eq!(user.setfsgid(0), 100);
+        assert_eq!(user.fsgid, 100);
+        // A setuid-root program's saved ID is allowed.
+        let mut c = Credentials::new(1000, 100);
+        c.suid = 0;
+        assert_eq!(c.setfsuid(0), 1000);
+        assert_eq!(c.fsuid, 0);
+        assert!(c.fs_privileged());
+    }
 
     #[test]
     fn exec_of_a_setuid_program_takes_its_owner() {

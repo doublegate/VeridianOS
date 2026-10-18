@@ -1260,11 +1260,11 @@ fn enter_directory(
         return Err(SyscallError::NotADirectory);
     }
     let creds = caller_creds();
-    if creds.euid != 0 {
+    if !creds.fs_privileged() {
         let meta = node.metadata().map_err(super::map_kernel_error)?;
         if !meta
             .permissions
-            .can_run(creds.euid, creds.gid_for(meta.gid), meta.uid, meta.gid)
+            .can_run(creds.fsuid, creds.gid_for(meta.gid), meta.uid, meta.gid)
         {
             return Err(SyscallError::PermissionDenied);
         }
@@ -1335,13 +1335,13 @@ pub fn sys_utimensat(
     let only_now = specs.is_none_or(|[a, m]| a[1] == UTIME_NOW && m[1] == UTIME_NOW);
     let creds = caller_creds();
     let meta = node.metadata().map_err(super::map_kernel_error)?;
-    if creds.euid != 0 && meta.uid != creds.euid {
+    if !creds.fs_privileged() && meta.uid != creds.fsuid {
         if !only_now {
             return Err(SyscallError::OperationNotPermitted);
         }
         if !meta
             .permissions
-            .can_write(creds.euid, creds.gid_for(meta.gid), meta.uid, meta.gid)
+            .can_write(creds.fsuid, creds.gid_for(meta.gid), meta.uid, meta.gid)
         {
             return Err(SyscallError::PermissionDenied);
         }
@@ -1878,7 +1878,7 @@ pub(crate) fn creation_perms(mode: usize) -> Permissions {
 /// in a hard link to a root-owned file and take ownership of it.
 pub(crate) fn own_new_node(node: &alloc::sync::Arc<dyn crate::fs::VfsNode>) {
     let creds = caller_creds();
-    let (uid, gid) = (creds.euid, creds.egid);
+    let (uid, gid) = (creds.fsuid, creds.fsgid);
     if uid != 0 || gid != 0 {
         let _ = node.chown(Some(uid), Some(gid));
     }
@@ -1907,11 +1907,11 @@ pub(crate) fn chmod_perms(
     gid: u32,
     mode: usize,
 ) -> Result<Permissions, SyscallError> {
-    if creds.euid != 0 && creds.euid != uid {
+    if !creds.fs_privileged() && creds.fsuid != uid {
         return Err(SyscallError::OperationNotPermitted);
     }
     let mut perms = Permissions::from_mode(mode as u32 & 0o7777);
-    if creds.euid != 0 && !creds.in_group(gid) {
+    if !creds.fs_privileged() && !creds.in_group(gid) {
         perms.set_gid = false;
     }
     Ok(perms)
@@ -1925,7 +1925,7 @@ pub(crate) fn require_open_access(
     flags: &OpenFlags,
 ) -> Result<(), SyscallError> {
     let creds = caller_creds();
-    let uid = creds.euid;
+    let uid = creds.fsuid;
     if uid == 0 {
         return Ok(());
     }
@@ -1993,7 +1993,7 @@ fn rename_entry(old: &str, new: &str) -> SyscallResult {
         if old_parent_canon != new_parent_canon {
             let creds = caller_creds();
             let meta = src.metadata().map_err(super::map_kernel_error)?;
-            let (uid, gid) = (creds.euid, creds.gid_for(meta.gid));
+            let (uid, gid) = (creds.fsuid, creds.gid_for(meta.gid));
             if uid != 0 && !meta.permissions.can_write(uid, gid, meta.uid, meta.gid) {
                 return Err(SyscallError::PermissionDenied);
             }
@@ -2052,7 +2052,7 @@ pub(crate) fn parent_dir_canonical(
 /// on it (FS-SEC-02).
 pub(crate) fn check_dir_write(dir: &dyn crate::fs::VfsNode) -> Result<(), SyscallError> {
     let creds = caller_creds();
-    let uid = creds.euid;
+    let uid = creds.fsuid;
     if uid == 0 {
         return Ok(());
     }
@@ -2074,7 +2074,7 @@ pub(crate) fn check_may_remove(
     name: &str,
 ) -> Result<(), SyscallError> {
     check_dir_write(dir)?;
-    let uid = caller_creds().euid;
+    let uid = caller_creds().fsuid;
     if uid == 0 {
         return Ok(());
     }
@@ -2251,7 +2251,7 @@ fn access_path(path: &str, mode: usize, flags: usize) -> SyscallResult {
     let meta = node.metadata().map_err(super::map_kernel_error)?;
     let creds = caller_creds();
     let (uid, gid) = if flags & AT_EACCESS != 0 {
-        (creds.euid, creds.gid_for(meta.gid))
+        (creds.fsuid, creds.gid_for(meta.gid))
     } else {
         (creds.ruid, creds.real_gid_for(meta.gid))
     };
@@ -3229,10 +3229,10 @@ pub(crate) fn may_chown(
     uid: Option<u32>,
     gid: Option<u32>,
 ) -> bool {
-    if creds.euid == 0 {
+    if creds.fs_privileged() {
         return true;
     }
-    let owner = creds.euid == file_uid;
+    let owner = creds.fsuid == file_uid;
     let uid_ok = uid.is_none_or(|u| owner && u == file_uid);
     let gid_ok = gid.is_none_or(|g| owner && (g == file_gid || creds.in_group(g)));
     uid_ok && gid_ok
@@ -3345,7 +3345,7 @@ pub(crate) fn make_node(
             operation: "create directory entry",
         };
         check_dir_write(dir).map_err(|_| denied)?;
-        if device && caller_creds().euid != 0 {
+        if device && !caller_creds().fs_privileged() {
             return Err(crate::error::KernelError::FsError(
                 crate::error::FsError::OperationNotPermitted,
             ));

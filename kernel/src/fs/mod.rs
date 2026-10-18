@@ -152,7 +152,7 @@ pub fn remove_privs_after_write(node: &dyn VfsNode) {
         return;
     };
     let creds = process.credentials();
-    if creds.euid == 0 {
+    if creds.fs_privileged() {
         return;
     }
     let Ok(meta) = node.metadata() else {
@@ -160,7 +160,7 @@ pub fn remove_privs_after_write(node: &dyn VfsNode) {
     };
     if let Some(kept) = meta
         .permissions
-        .after_write(creds.euid, creds.in_group(meta.gid))
+        .after_write(creds.fsuid, creds.in_group(meta.gid))
     {
         let _ = node.chmod(kept);
     }
@@ -905,7 +905,7 @@ impl MountTable {
                 let meta = node.metadata()?;
                 if !meta
                     .permissions
-                    .can_run(c.euid, c.gid_for(meta.gid), meta.uid, meta.gid)
+                    .can_run(c.fsuid, c.gid_for(meta.gid), meta.uid, meta.gid)
                 {
                     return Err(KernelError::FsError(
                         crate::error::FsError::PermissionDenied,
@@ -1299,7 +1299,7 @@ impl Vfs {
         }
         if let Some(process) = crate::process::current_process() {
             ctx.pid = process.pid.0;
-            ctx.creds = Some(process.credentials()).filter(|c| c.euid != 0);
+            ctx.creds = Some(process.credentials()).filter(|c| !c.fs_privileged());
         }
         ctx
     }

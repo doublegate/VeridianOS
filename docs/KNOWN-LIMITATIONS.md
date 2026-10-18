@@ -183,8 +183,9 @@ What remains:
 - **exec (N-101 remainder):** a multithreaded process cannot exec (EAGAIN, above). Fork children
   are runnable before setup completes (N-110).
 - **Credentials (N-131 remainder, planned v0.30):** real, effective and saved IDs,
-  supplementary groups (N-248) and set-user-ID/set-group-ID exec exist, but there are no
-  filesystem IDs and no Linux capabilities (privilege is effective uid 0). A directory's
+  filesystem IDs (setfsuid, setfsgid), supplementary groups (N-248) and set-user-ID/set-group-ID
+  exec exist, but there are no Linux capabilities: privilege is effective uid 0, and file-access
+  privilege filesystem uid 0 (Linux drops the filesystem capabilities when the fsuid leaves 0). A directory's
   set-group-ID bit is kept but not acted on: new entries take the creator's group, not the
   directory's.
 - **chroot (N-250):** a working directory outside the new root is moved to the root, where Linux

@@ -207,6 +207,8 @@ setresuid
 getresuid
 setresgid
 getresgid
+setfsuid
+setfsgid
 getgroups
 setgroups
 VeridianAuth            private 1352
