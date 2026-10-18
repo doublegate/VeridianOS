@@ -17,7 +17,9 @@ What VeridianOS does not do yet, or does only partly, as of the v0.27 developmen
   [`to-dos/MASTER_TODO.md`](../to-dos/MASTER_TODO.md).
 
 Linux system-call coverage, call by call, is in
-[`docs/compat/LINUX-SYSCALL-COVERAGE.md`](compat/LINUX-SYSCALL-COVERAGE.md). For the KDE Plasma
+[`docs/compat/LINUX-SYSCALL-COVERAGE.md`](compat/LINUX-SYSCALL-COVERAGE.md) (x86_64),
+[`-AARCH64.md`](compat/LINUX-SYSCALL-COVERAGE-AARCH64.md) and
+[`-RISCV64.md`](compat/LINUX-SYSCALL-COVERAGE-RISCV64.md). For the KDE Plasma
 port, see [`userland/integration/KNOWN-LIMITATIONS.md`](../userland/integration/KNOWN-LIMITATIONS.md).
 
 A claim elsewhere in the documentation that contradicts this page is wrong. Please report it.

@@ -52,6 +52,7 @@ step asm-flags python3 "$root/scripts/dev/check-asm-flags.py"
 # generator (a hand edit of numbers.rs failed CI once), the native libc
 # host tests, and vsh's formatting and build.
 step syscall-numbers python3 "$root/tools/compat/gen_syscalls.py" --check
+step syscall-coverage python3 "$root/tools/compat/syscall_coverage.py" --check
 step libc-host-tests bash -c 'for t in "$0"/userland/libc/tests/test-*.sh; do bash "$t" || exit 1; done' "$root"
 step vsh-fmt bash -c 'cd "$0/userland/vsh" && cargo fmt -- --check' "$root"
 step vsh-build bash -c 'cd "$0/userland/vsh" && cargo build --target x86_64-unknown-none -Zbuild-std=core,compiler_builtins,alloc' "$root"

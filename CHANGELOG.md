@@ -292,6 +292,11 @@
   the table (AArch64 34/34, 36/36 on four CPUs). It failed before the move, and a probe `udf` at
   the top of `_start_rust` now prints `[EXCEPTION] unhandled sync`.
 
+- **Syscall coverage per architecture.** `tools/compat/syscall_coverage.py` reads the vendored
+  Linux v7.2 tables and writes one report each for x86_64 (385 calls: 178 implemented, 9 stubbed,
+  182 missing), AArch64 (327: 151, 9, 165) and RISC-V (328: 150, 9, 167), from the generic
+  `syscall.tbl` with each architecture's ABIs; `--check` fails the gate and CI when one is stale.
+
 - **DMA cache maintenance for non-coherent devices (HA-25, ADR 0019).** Most AArch64 boards (Pi
   4 and 5, RK3588, Allwinner) and the T-Head and SpacemiT RISC-V SoCs do not keep DMA coherent with
   the CPU caches, and the kernel did no maintenance for DMA buffers. `mm::dma` follows Linux's

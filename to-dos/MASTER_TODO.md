@@ -312,9 +312,9 @@ What does not work yet: `docs/KNOWN-LIMITATIONS.md`.
     decoders are generated from `abi/linux/syscall.tbl` and pinned by
     `generic_numbers_match_the_linux_table`). Kernel-modifying and raw-hardware calls
     (`init_module`/`finit_module`/`delete_module`, `kexec_*`, `iopl`/`ioperm`, `bpf` and
-    similar) are refused by policy with EPERM after Linux's argument checks. Steps: per-arch
-    coverage in `docs/compat/LINUX-SYSCALL-COVERAGE.md` (stale since 2026-10-09, x86_64 only);
-    then group by group (process, signals, time, files, memory, ipc, events, network, sched,
+    similar) are refused by policy with EPERM after Linux's argument checks. Steps: done: per-arch
+    coverage reports in `docs/compat/LINUX-SYSCALL-COVERAGE{,-AARCH64,-RISCV64}.md`, checked for
+    staleness by the gate and CI; then group by group (process, signals, time, files, memory, ipc, events, network, sched,
     mount, system) with fail-first tests; LTP and musl libc-test in the rootfs suite; rewrite
     `docs/PORTING-GUIDE.md` (it still lists the pre-ADR-0009 native numbers). Done: W^X
     per-program opt-in (ELF note) and prctl PR_SET_MDWE/PR_GET_MDWE (ADR 0017); mknod and

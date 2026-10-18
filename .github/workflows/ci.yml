@@ -69,6 +69,10 @@ jobs:
             # kernel, libc and Rust copies must match it (ADR 0009).
             - name: Syscall numbers are up to date
               run: python3 tools/compat/gen_syscalls.py --check
+            # The per-architecture coverage reports (docs/compat) follow
+            # the map and the vendored Linux tables.
+            - name: Syscall coverage reports are up to date
+              run: python3 tools/compat/syscall_coverage.py --check
             # Host-run checks of native libc code (PNG decoder, C++ EH,
             # division helpers, inet conversions, sscanf fields).
             - name: Native libc host tests
