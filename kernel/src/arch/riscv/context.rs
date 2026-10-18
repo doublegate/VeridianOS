@@ -71,8 +71,9 @@ pub struct RiscVContext {
 #[cfg(any(target_arch = "riscv32", target_arch = "riscv64"))]
 #[derive(Debug, Clone)]
 pub struct FpuState {
-    /// Floating-point registers (f0-f31)
-    pub f: [f64; 32],
+    /// Floating-point registers (f0-f31), as raw bits: the soft-float
+    /// kernel never holds them as floating-point values (N-178).
+    pub f: [u64; 32],
     /// Floating-point control and status register
     pub fcsr: u32,
 }
@@ -149,7 +150,7 @@ impl RiscVContext {
             // Clear FPU state
             #[cfg(any(target_arch = "riscv32", target_arch = "riscv64"))]
             fp_regs: FpuState {
-                f: [0.0; 32],
+                f: [0; 32],
                 fcsr: 0,
             },
         }
@@ -197,7 +198,7 @@ impl Default for RiscVContext {
             satp: 0,
             #[cfg(any(target_arch = "riscv32", target_arch = "riscv64"))]
             fp_regs: FpuState {
-                f: [0.0; 32],
+                f: [0; 32],
                 fcsr: 0,
             },
         }
@@ -290,7 +291,7 @@ pub fn save_fpu_state(state: &mut FpuState) {
         return;
     }
     // SAFETY: Saves all 32 double-precision FP registers via FSD instructions.
-    // The FpuState struct has repr(C, align(16)) layout with f: [f64; 32].
+    // The FpuState struct has repr(C, align(16)) layout with f: [u64; 32].
     // The D extension is confirmed available by the has_d_extension() check above.
     unsafe {
         let base = state.f.as_mut_ptr() as *mut u8;
@@ -353,7 +354,7 @@ pub fn restore_fpu_state(state: &FpuState) {
         return;
     }
     // SAFETY: Restores all 32 double-precision FP registers via FLD instructions.
-    // The FpuState struct has repr(C, align(16)) layout with f: [f64; 32].
+    // The FpuState struct has repr(C, align(16)) layout with f: [u64; 32].
     // The D extension is confirmed available by the has_d_extension() check above.
     unsafe {
         let fcsr = state.fcsr;

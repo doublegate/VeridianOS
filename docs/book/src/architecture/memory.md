@@ -147,8 +147,8 @@ Shootdown modes:
 
 The kernel heap is managed by `linked_list_allocator` (first fit, coalescing
 adjacent free blocks) on every architecture, with its lock taken with
-interrupts off. On x86_64 the region is frames from the frame allocator; on
-AArch64 and RISC-V it is a fixed static region. (AArch64 and RISC-V used a bump
+interrupts off. On every architecture the region is frames from the frame
+allocator, sized from the memory map at boot. (AArch64 and RISC-V used a bump
 allocator that did not reuse freed memory until v0.27, MEM-SEC-03.) There is no slab allocator: an earlier one
 was never wired in and has been removed (MEM-INC-02).
 

@@ -156,8 +156,8 @@ pub struct Process {
 
     /// RISC-V: the user address of the page holding the sigreturn
     /// trampoline signal handlers return to (Linux uses its vDSO), or 0
-    /// before the first handler. Checked before every use, so a stale value
-    /// (after exec) is replaced.
+    /// before the first handler. Cleared by exec, and checked again under
+    /// the address-space lock before a page is mapped for it.
     pub sigtramp: AtomicU64,
 
     /// A stop or continue the parent has not collected with `wait` yet, as

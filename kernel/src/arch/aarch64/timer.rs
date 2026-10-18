@@ -100,8 +100,9 @@ pub fn start(hz: u32) -> crate::error::KernelResult<()> {
 /// stays asserted until the compare value moves past the counter, which
 /// this does before `aarch64_irq` ends the interrupt at the GIC, and IRQs
 /// stay masked throughout. Preempting the interrupted kernel code from
-/// here is not supported; tasks switch at scheduling points.
-pub fn handle_interrupt() {
+/// here is not supported; tasks switch at scheduling points. `user`: the
+/// interrupt came from EL0, so this tick is the task's user time.
+pub fn handle_interrupt(user: bool) {
     if crate::arch::percpu::is_timekeeper() {
         TICKS.fetch_add(1, Ordering::Relaxed);
     }
@@ -119,7 +120,7 @@ pub fn handle_interrupt() {
     // Time slices, accounting, balancing; on the timekeeper also the
     // sleepers (as x86_64's and RISC-V's tick).
     #[cfg(feature = "alloc")]
-    crate::sched::dispatch::tick(false);
+    crate::sched::dispatch::tick(user);
     // Per-CPU deadline (CNTV_CVAL_EL0 is per CPU), from the time the work
     // ended (see above).
     let next = crate::arch::percpu::advance_timer(counter(), period);

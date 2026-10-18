@@ -67,11 +67,12 @@ x86_64)
     ;;
 aarch64)
     img="$root/target/aarch64-unknown-none-softfloat/$profile/veridian-kernel"
-    [[ ${AARCH64_IMAGE:-0} == 1 ]] && img="$img.img"
+    # A load address implies the raw Image (the ELF cannot be loaded there).
+    [[ ${AARCH64_IMAGE:-0} == 1 || -n ${AARCH64_LOAD_ADDR:-} ]] && img="$img.img"
     cmd=(qemu-system-aarch64 -M virt -cpu "${AARCH64_CPU:-cortex-a72}" -smp "$smp" -m 256M -kernel "$img" -device ramfb)
     if [[ -n ${AARCH64_LOAD_ADDR:-} ]]; then
         cmd=(qemu-system-aarch64 -M virt -cpu "${AARCH64_CPU:-cortex-a72}" -smp "$smp" -m 256M
-            -device "loader,file=$img.img,addr=$AARCH64_LOAD_ADDR"
+            -device "loader,file=$img,addr=$AARCH64_LOAD_ADDR"
             -device "loader,addr=$AARCH64_LOAD_ADDR,cpu-num=0" -device ramfb)
     fi
     ;;

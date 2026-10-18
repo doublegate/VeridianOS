@@ -130,6 +130,8 @@ def arch_of(path, text, start):
         return AARCH64
     if "x86_64" in parts:
         return X86
+    if "riscv" in parts or "riscv64" in parts:
+        return set()  # RISC-V has no flags register to clobber
     before = text[max(0, start - 600) : start]
     found = re.findall(r'target_arch\s*=\s*"(\w+)"', before)
     if found:

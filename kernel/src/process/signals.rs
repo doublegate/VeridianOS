@@ -1143,7 +1143,16 @@ mod generic {
                 return Some(at);
             }
         }
+        let seen = at;
         let vas = process.memory_space.lock();
+        // Another thread may have mapped one while this one waited for the
+        // lock (two first signals at once): use that page, not a second.
+        // Compared with what was seen rather than read back, since a user
+        // read may fault, and the fault path takes this lock.
+        let now = process.sigtramp.load(Ordering::Acquire);
+        if now != 0 && now != seen {
+            return Some(now);
+        }
         let page = vas.reserve_mmap_area(4096).ok()?;
         vas.map_region_flags(
             page,
@@ -1278,9 +1287,7 @@ mod generic {
             if crate::arch::riscv64::fpu::present() {
                 let mut fp = crate::arch::riscv64::fpu::initial();
                 crate::arch::riscv64::fpu::save(&mut fp);
-                for (d, s) in mc.fpregs.iter_mut().zip(fp.f.iter()) {
-                    *d = s.to_bits();
-                }
+                mc.fpregs = fp.f;
                 mc.fcsr = fp.fcsr;
             }
         }
@@ -1458,9 +1465,7 @@ mod generic {
             }
             if crate::arch::riscv64::fpu::present() {
                 let mut fp = crate::arch::riscv64::fpu::initial();
-                for (d, s) in fp.f.iter_mut().zip(mc.fpregs.iter()) {
-                    *d = f64::from_bits(*s);
-                }
+                fp.f = mc.fpregs;
                 fp.fcsr = mc.fcsr;
                 crate::arch::riscv64::fpu::restore(&fp);
             }

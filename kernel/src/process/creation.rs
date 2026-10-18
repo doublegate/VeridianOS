@@ -521,6 +521,16 @@ pub fn exec_process(path: &str, argv: &[&str], envp: &[&str]) -> Result<(), Kern
 
             // Clear existing mappings before loading new program
             memory_space.clear();
+            // Nothing of the old image survives: a new image starts with a
+            // thread pointer of 0 (as on Linux) unless its own PT_TLS sets
+            // one, and the signal trampoline (a page of the old image) is
+            // mapped again on the next handler (PR #19 review).
+            process
+                .tls_fs_base
+                .store(0, core::sync::atomic::Ordering::Release);
+            process
+                .sigtramp
+                .store(0, core::sync::atomic::Ordering::Release);
 
             // Reinitialize the address space for the new program
             memory_space.init()?;

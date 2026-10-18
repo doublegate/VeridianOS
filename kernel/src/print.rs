@@ -213,7 +213,10 @@ static CONSOLE_OWNER: core::sync::atomic::AtomicUsize =
 /// `Results: [P50/50 passed` with four RISC-V harts printing). Reentrant on
 /// one CPU, so a fault or panic while printing still prints; and a CPU that
 /// stopped while holding it (a panic on another CPU) is waited for only so
-/// long, then written over, rather than silencing the console.
+/// long, then its ownership is taken over, rather than silencing the
+/// console. Taking it over (not printing without it) keeps the waiting
+/// CPUs from all writing at once, and each from waiting out the timeout
+/// again on every message (PR #19 review).
 #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
 pub fn with_console<R>(f: impl FnOnce() -> R) -> R {
     use core::sync::atomic::Ordering;
@@ -223,13 +226,23 @@ pub fn with_console<R>(f: impl FnOnce() -> R) -> R {
         return f();
     }
     let mut spins: u64 = 0;
-    while CONSOLE_OWNER
-        .compare_exchange_weak(CONSOLE_FREE, me, Ordering::Acquire, Ordering::Relaxed)
-        .is_err()
+    let mut seen = CONSOLE_FREE;
+    while let Err(owner) =
+        CONSOLE_OWNER.compare_exchange_weak(CONSOLE_FREE, me, Ordering::Acquire, Ordering::Relaxed)
     {
+        // The wait restarts whenever the console changes hands: only an
+        // owner that holds it the whole time is taken over.
+        if owner != seen {
+            seen = owner;
+            spins = 0;
+        }
         spins += 1;
-        if spins > 100_000_000 {
-            return f();
+        if spins > 100_000_000
+            && CONSOLE_OWNER
+                .compare_exchange(owner, me, Ordering::Acquire, Ordering::Relaxed)
+                .is_ok()
+        {
+            break;
         }
         core::hint::spin_loop();
     }

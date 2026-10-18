@@ -62,9 +62,16 @@ fn cow_flags_for(old: PageFlags, requested: PageFlags, shared: bool) -> PageFlag
 /// (`write`, from `user` mode). A copy-on-write page is not writable until
 /// its fault is resolved.
 fn access_allowed(flags: PageFlags, write: bool, user: bool) -> bool {
+    access_allowed_for(flags, write, user, false)
+}
+
+/// [`access_allowed`], and for an instruction fetch (`exec`) an executable
+/// page too.
+fn access_allowed_for(flags: PageFlags, write: bool, user: bool, exec: bool) -> bool {
     flags.contains(PageFlags::PRESENT)
         && (!user || flags.contains(PageFlags::USER))
         && (!write || (flags.contains(PageFlags::WRITABLE) && !flags.contains(PageFlags::COW)))
+        && (!exec || !flags.contains(PageFlags::NO_EXECUTE))
 }
 
 /// Frame allocator wrapper implementing the page_table::FrameAllocator trait.
@@ -212,6 +219,19 @@ pub fn sync_icache() {
     crate::arch::aarch64::sync_icache_all();
     #[cfg(all(target_arch = "riscv64", target_os = "none"))]
     crate::arch::riscv::sbi::remote_fence_i_all();
+}
+
+/// The whole pages `start..start + len` touches, as (first page, length);
+/// none for an empty range, and clamped at the top of the address space.
+fn whole_pages(start: u64, len: u64) -> (u64, u64) {
+    let first = start & !0xFFF;
+    if len == 0 {
+        return (first, 0);
+    }
+    // Past the last byte's page, in 128 bits so the top page fits.
+    let last = start.saturating_add(len - 1);
+    let end = u128::from(last | 0xFFF) + 1;
+    (first, (end - u128::from(first)) as u64)
 }
 
 /// Free all user-space page table frames in a page table hierarchy.
@@ -1339,6 +1359,15 @@ impl VirtualAddressSpace {
     pub fn sync_code(&self, start: u64, len: u64) {
         self.clean_code(start, len);
         sync_icache();
+    }
+
+    /// [`Self::sync_code`] over the whole pages `start..start + len`
+    /// touches: what a mapping or mprotect makes executable is pages, and
+    /// the tail of the last one past `len` can be fetched too (PR #19
+    /// review).
+    pub fn sync_code_pages(&self, start: u64, len: u64) {
+        let (start, len) = whole_pages(start, len);
+        self.sync_code(start, len);
     }
 
     /// Get page table root
@@ -2537,6 +2566,14 @@ impl VirtualAddressSpace {
             Err(_) => return Ok(false),
         };
         if !flags.contains(PageFlags::COW) {
+            // Another CPU resolved it first (a copy-on-write copy, made by
+            // another thread or seen through this CPU's stale read-only TLB
+            // entry): the page is writable now, so the write only needs
+            // retrying after this CPU drops its stale entry (PR #19/#20).
+            if access_allowed(flags, true, false) {
+                crate::arch::tlb_flush_address(page);
+                return Ok(true);
+            }
             return Ok(false);
         }
 
@@ -2578,7 +2615,7 @@ impl VirtualAddressSpace {
     /// copy); Linux retries the access then. The caller holds the
     /// memory-space lock, which the fault paths that change a page (demand
     /// paging, copy-on-write) hold while they do.
-    pub fn page_allows(&self, vaddr: u64, write: bool, user: bool) -> bool {
+    pub fn page_allows(&self, vaddr: u64, write: bool, user: bool, exec: bool) -> bool {
         let root = self.page_table_root.load(Ordering::Acquire);
         if root == 0 {
             return false;
@@ -2589,7 +2626,7 @@ impl VirtualAddressSpace {
         let mapper = unsafe { create_mapper_from_root(root) };
         mapper
             .translate_page(VirtualAddress(vaddr & !0xFFF))
-            .is_ok_and(|(_, flags)| access_allowed(flags, write, user))
+            .is_ok_and(|(_, flags)| access_allowed_for(flags, write, user, exec))
     }
 
     /// Make the user page at `vaddr` this address space's to write and
@@ -3720,6 +3757,23 @@ mod tests {
 
     use super::*;
 
+    /// Code syncs cover whole pages: an executable mapping or mprotect of a
+    /// length that is no page multiple still makes its last page's tail
+    /// executable (PR #19 review).
+    #[test]
+    fn code_syncs_cover_whole_pages() {
+        assert_eq!(whole_pages(0x1000, 1), (0x1000, 0x1000));
+        assert_eq!(whole_pages(0x1000, 0x1000), (0x1000, 0x1000));
+        assert_eq!(whole_pages(0x1000, 0x1001), (0x1000, 0x2000));
+        assert_eq!(whole_pages(0x1234, 0x10), (0x1000, 0x1000));
+        assert_eq!(whole_pages(0x1FF0, 0x20), (0x1000, 0x2000));
+        assert_eq!(whole_pages(0x1000, 0), (0x1000, 0));
+        assert_eq!(
+            whole_pages(u64::MAX - 0xFFF, 0x2000),
+            (u64::MAX - 0xFFF, 0x1000)
+        );
+    }
+
     /// Freeing a user half walks as deep as the paging mode: under Sv39 the
     /// root's entries point at L2 tables (ADR 0018). Every table below the
     /// root goes, the root and the kernel half stay.
@@ -4000,6 +4054,22 @@ mod tests {
         assert!(!access_allowed(kernel, false, true));
         assert!(access_allowed(kernel, true, false));
         assert!(!access_allowed(rw.without(PageFlags::PRESENT), false, true));
+        // An instruction fetch needs an executable page: retrying a fetch
+        // from a no-execute page would fault forever (PR #20 review).
+        let code = PageFlags::PRESENT | PageFlags::USER;
+        assert!(access_allowed_for(code, false, true, true));
+        assert!(!access_allowed_for(
+            ro | PageFlags::NO_EXECUTE,
+            false,
+            true,
+            true
+        ));
+        assert!(access_allowed_for(
+            ro | PageFlags::NO_EXECUTE,
+            false,
+            true,
+            false
+        ));
     }
 
     // --- MappingType tests ---

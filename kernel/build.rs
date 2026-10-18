@@ -49,13 +49,12 @@ fn main() {
 
     // `dispatch`: the architectures whose kernel runs tasks on their own
     // stacks (ADR 0006): x86_64 and, since sprint E, RISC-V and AArch64;
-    // host builds never dispatch.
+    // host builds never dispatch, whatever their architecture (an
+    // aarch64-linux host runs the host tests too).
     println!("cargo:rustc-check-cfg=cfg(dispatch)");
-    if target == "x86_64-veridian"
-        || target == "x86_64-unknown-none"
-        || target.starts_with("riscv64")
-        || target.starts_with("aarch64")
-    {
+    let bare_metal = env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("none");
+    let arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default();
+    if bare_metal && matches!(arch.as_str(), "x86_64" | "riscv64" | "aarch64") {
         println!("cargo:rustc-cfg=dispatch");
     }
 

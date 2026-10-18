@@ -242,15 +242,22 @@ el1_entry:
     cmp x7, x12
     b.lo 5b
 
-    // The tables were written with the caches off: drop any stale lines
-    // for them before the walker may read through the cache (HA-25).
+    // BSS (the tables in it) and the boot stack were written with the
+    // caches off: drop any stale lines for them before the walker or a
+    // load may read through the cache (HA-25). All of BSS, not only the
+    // tables: a stale line left by the firmware would otherwise bring back
+    // nonzero "zeroed" data once the caches are on (PR #19 review).
     dsb sy
     mrs x6, ctr_el0
     ubfx x6, x6, #16, #4
     mov x7, #4
     lsl x7, x7, x6                  // data cache line size
-    adrp x8, veridian_pt_start
-    adrp x9, veridian_pt_end
+    adrp x8, __bss_start
+    add x8, x8, :lo12:__bss_start
+    sub x10, x7, #1
+    bic x8, x8, x10                 // from the line holding __bss_start
+    adrp x9, __stack_top
+    add x9, x9, :lo12:__stack_top
 6:
     dc ivac, x8
     add x8, x8, x7
@@ -281,6 +288,21 @@ el1_entry:
     stp x5, x0, [x9, #16]
     adrp x14, veridian_pt_empty
     str x14, [x9, #32]
+    dsb sy
+    // Those stores went to memory (caches off): drop any stale line over
+    // them, so the boot CPU reads them back once its caches are on.
+    mrs x10, ctr_el0
+    ubfx x10, x10, #16, #4
+    mov x11, #4
+    lsl x10, x11, x10               // data cache line size
+    sub x12, x10, #1
+    bic x11, x9, x12                // from the line holding the first byte
+    add x12, x9, #40                // to past the last
+7:
+    dc ivac, x11
+    add x11, x11, x10
+    cmp x11, x12
+    b.lo 7b
     dsb sy
     msr mair_el1, x6
     msr tcr_el1, x7

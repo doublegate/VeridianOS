@@ -195,9 +195,9 @@ What remains:
 ### SMP: what is not done yet (sprint D5 leftovers, planned v0.28)
 
 The `smp` feature is on by default since v0.27: the other CPUs are started on every architecture (x86
-INIT-SIPI-SIPI, AArch64 PSCI, RISC-V SBI HSM). Only x86_64 runs tasks on them (ADR 0012): tasks are
-placed on idle CPUs, balanced every 4 ms and moved by sched_setaffinity. RISC-V does the same on
-every hart since v0.27 (sprint E), and AArch64 on every CPU since v0.27 too, user tasks included. Since D5a every CPU gets the boot CPU's
+INIT-SIPI-SIPI, AArch64 PSCI, RISC-V SBI HSM), and all three architectures run tasks on them
+(ADR 0012), user tasks included: tasks are placed on idle CPUs, balanced every 4 ms and moved by
+sched_setaffinity. Since D5a every CPU gets the boot CPU's
 syscall MSRs and XCR0 (N-172), IPIs go to APIC IDs with the ICR written under one interrupt-off
 sequence (N-173), and bring-up stops at the first CPU that fails, with guarded stacks (N-180). Since
 D5b the timer wheel advances by elapsed clock time and an x86_64 CPU whose TSC is not synchronised

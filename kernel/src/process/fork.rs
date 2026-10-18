@@ -309,7 +309,12 @@ pub fn fork_process_with(opts: &ForkOptions) -> Result<(ProcessId, super::Thread
                     // The live registers of the system call in progress:
                     // the context is the one saved when the program was
                     // loaded, so a child started from it ran the program
-                    // again from its entry.
+                    // again from its entry. (Gated as the function is
+                    // defined: bare-metal AArch64 and RISC-V.)
+                    #[cfg(all(
+                        target_os = "none",
+                        any(target_arch = "aarch64", target_arch = "riscv64")
+                    ))]
                     super::load_live_user_registers(&mut new_ctx);
                     new_ctx.set_return_value(0);
                 }

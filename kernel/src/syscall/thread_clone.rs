@@ -288,7 +288,11 @@ pub fn sys_thread_clone(
             child_ctx.r9 = frame.r9;
             child_ctx.r10 = frame.r10;
         }
-        #[cfg(not(target_arch = "x86_64"))]
+        // Gated as the function is defined: bare-metal AArch64 and RISC-V.
+        #[cfg(all(
+            target_os = "none",
+            any(target_arch = "aarch64", target_arch = "riscv64")
+        ))]
         crate::process::load_live_user_registers(&mut child_ctx);
 
         child_ctx.set_stack_pointer(newsp);

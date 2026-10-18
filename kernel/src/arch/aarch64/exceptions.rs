@@ -246,7 +246,7 @@ extern "C" fn aarch64_user_exception(f: &mut super::switch::UserFrame, vector: u
     // SA_RESTART (the return value overwrites x0).
     let mut syscall = None;
     if vector == 9 {
-        aarch64_irq();
+        irq(true);
     } else {
         let (esr, elr, far) = syndrome();
         match esr >> 26 {
@@ -369,9 +369,16 @@ pub fn vectors_base() -> u64 {
     core::ptr::addr_of!(veridian_aarch64_vectors) as u64
 }
 
-/// IRQ handler: acknowledge and dispatch everything pending at the GIC.
-/// Bounded so a stuck level-triggered source cannot hold the CPU here.
+/// IRQ handler for interrupts taken at EL1 (the vector table's entry).
 extern "C" fn aarch64_irq() {
+    irq(false);
+}
+
+/// Acknowledge and dispatch everything pending at the GIC; `user` says
+/// whether the interrupt was taken from EL0, so the timer tick is
+/// accounted as user time (as RISC-V's trap path does). Bounded so a stuck
+/// level-triggered source cannot hold the CPU here.
+fn irq(user: bool) {
     for _ in 0..16 {
         let Some(iar) = super::gic::acknowledge_raw() else {
             return;
@@ -380,7 +387,7 @@ extern "C" fn aarch64_irq() {
         // taking it ends the target's wait, and it reaches its next
         // scheduling point.
         if iar & 0x3FF == VIRTUAL_TIMER_INTID {
-            super::timer::handle_interrupt();
+            super::timer::handle_interrupt(user);
         }
         super::gic::end_of_interrupt_raw(iar);
     }

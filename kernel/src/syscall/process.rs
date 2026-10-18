@@ -252,11 +252,15 @@ fn enter_new_image() -> SyscallResult {
     use crate::arch::context::ThreadContext;
     #[cfg(target_arch = "riscv64")]
     use crate::arch::riscv64::switch;
-    if crate::sched::dispatch::current_owner().is_none() {
-        return Err(SyscallError::InvalidState);
-    }
     let thread = crate::process::current_thread().ok_or(SyscallError::InvalidState)?;
     let process = current_process().ok_or(SyscallError::InvalidState)?;
+    // The old image is gone (exec_process succeeded): a failure from here
+    // on must not return into it, so the process dies of SIGSEGV, as Linux
+    // does with force_sigsegv (PR #19 review).
+    if crate::sched::dispatch::current_owner().is_none() {
+        crate::process::exit::set_kill_pending(&process, 11);
+        return Err(SyscallError::InvalidState);
+    }
     let (entry, stack) = {
         let ctx = thread.context.lock();
         (
@@ -273,6 +277,7 @@ fn enter_new_image() -> SyscallResult {
     let frame =
         unsafe { (*crate::arch::percpu::this_arch_cpu()).syscall_frame } as *mut switch::UserFrame;
     if root == 0 || frame.is_null() {
+        crate::process::exit::set_kill_pending(&process, 11);
         return Err(SyscallError::InvalidState);
     }
     let old = switch::current_root();

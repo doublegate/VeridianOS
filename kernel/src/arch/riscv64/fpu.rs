@@ -55,7 +55,7 @@ pub fn present() -> bool {
 /// nearest, no flags.
 pub fn initial() -> alloc::boxed::Box<FpuState> {
     alloc::boxed::Box::new(FpuState {
-        f: [0.0; 32],
+        f: [0; 32],
         fcsr: 0,
     })
 }

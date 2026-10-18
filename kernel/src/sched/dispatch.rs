@@ -23,9 +23,9 @@
 //! - **Reaping.** An exited task is removed and its stack freed in
 //!   [`finish_switch`], on the next task's stack.
 //!
-//! x86_64 and RISC-V have the switch primitive (the `dispatch` cfg, set by
-//! build.rs); elsewhere -- AArch64 until its MMU work, and host tests --
-//! [`start`] declines and every entry point is a no-op.
+//! The bare-metal kernels of all three architectures have the switch
+//! primitive (the `dispatch` cfg, set by build.rs); in host tests [`start`]
+//! declines and every entry point is a no-op.
 
 // Only the `dispatch` architectures switch tasks (host tests exercise the
 // logic, not the switch), so elsewhere the task machinery is compiled but
@@ -1212,6 +1212,9 @@ pub fn join(key: TaskKey) {
     EXITED.wait_until(|| lookup(key).is_none());
 }
 
+/// How often a tick tries its CPU's lock before skipping the slice check.
+const TICK_LOCK_TRIES: usize = 256;
+
 /// Timer tick on this CPU (interrupt context), which interrupted user mode
 /// if `user`. Charges the running task its time and the tick sample, and
 /// marks it for rescheduling when the policy says so; the switch itself
@@ -1223,11 +1226,35 @@ pub fn tick(user: bool) {
     let Some(cpu) = this_cpu() else {
         return;
     };
-    if let Some(mut guard) = CPUS[cpu].try_lock() {
+    // The tick sample goes to the running task without the CPU lock, which
+    // the tick only tries: the CPUs' ticks run nearly in phase and each
+    // balances, taking the others' locks, so under load a tick that came
+    // on time -- in user mode -- lost that race and its sample, and a busy
+    // user task showed only system time (the late ticks, deferred until a
+    // system call turned interrupts back on). The counters are atomics.
+    let p = CURRENT[cpu].load(Ordering::Acquire);
+    if !p.is_null() {
+        // SAFETY: as in `current_owner` -- the current task stays alive
+        // while it is current, and only this CPU replaces it, with
+        // interrupts off, as they are here.
+        unsafe { (*p).usage.tick(user) };
+    }
+    // A balancing CPU holds this lock only briefly, so retry a little
+    // before giving up the slice check (never spin unbounded: the
+    // interrupted code may hold a lock the holder is waiting for).
+    let guard = (0..TICK_LOCK_TRIES).find_map(|_| {
+        let g = CPUS[cpu].try_lock();
+        if g.is_none() {
+            core::hint::spin_loop();
+        }
+        g
+    });
+    if let Some(mut guard) = guard {
         if let Some(st) = guard.as_mut() {
+            // A charge missed with the lock is not lost: `acct_start` stays
+            // put until the next one.
             let t = now();
             st.charge(t);
-            st.current.usage.tick(user);
             if st.rq.tick(t) {
                 st.need_resched = true;
             }

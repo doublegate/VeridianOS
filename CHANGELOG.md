@@ -1203,7 +1203,8 @@ items listed in `to-dos/MASTER_TODO.md`. What does not work yet is in `docs/KNOW
 - **The reduced AArch64 secondary-CPU stage (N-28 fixed).** AArch64 secondaries parked with
   interrupts masked, taking no lock and no timer, because exclusives were unreliable with the MMU
   off. They now enable their own timer PPI (banked per CPU in GICv2), tick, and idle with
-  interrupts on. They still run no tasks; AArch64 has no dispatcher yet. Boot test
+  interrupts on. At this stage they ran no tasks; the dispatcher reached AArch64 later in v0.27
+  (sprint E, see Added). Boot test
   `smp_cpus_online_and_ticking` requires ticks on every secondary on AArch64 too (it failed
   before): 40/40 on four CPUs.
 
@@ -1246,6 +1247,52 @@ items listed in `to-dos/MASTER_TODO.md`. What does not work yet is in `docs/KNOW
 - The unused in-kernel `stdlib` module (1,018 lines with no callers).
 
 ### Fixed
+
+- **AArch64 counted all of a program's CPU time as system time.** An interrupt from EL0 reached
+  the timer through the same handler as one from the kernel, which recorded every tick as kernel
+  time, so `getrusage`, `times` and SIGCHLD accounting showed no user time. The EL0 path now
+  says so, as RISC-V's does. `musl_clocks_and_usage` checks that a child computing 40 ms in user
+  mode shows at least half of it as user time (it showed 0).
+- **exec kept the old image's thread pointer and signal trampoline.** A new image without
+  PT_TLS (or a dynamic one) started with the previous image's thread pointer, and the cached
+  trampoline address pointed into the old image, where the next first signal probed whatever
+  the new image had mapped there. exec clears both, and two threads taking a first signal at
+  once no longer map two trampoline pages.
+- **A failure after a committed exec returned into the old, unmapped image.** On AArch64 and
+  RISC-V the process now dies of SIGSEGV, as `exec_process`'s own late failures and Linux's
+  `force_sigsegv` do.
+- **A program that failed to start stayed in the process table** with its address space and
+  stacks (`run_and_wait_all`); it is discarded as the shell's launch path did.
+- **Two calls to `load_live_user_registers`** were gated "not x86_64" while the function exists
+  only on bare-metal AArch64 and RISC-V, so a host build on an Arm machine failed.
+- **A write to a page another CPU had just made writable could kill the program.** The fault
+  handler found the page writable and no longer copy-on-write, treated the fault as real and sent
+  SIGSEGV (`musl_cow_concurrent_readers` on four CPUs). A fault on a page that now allows the
+  access flushes the stale translation and retries, whatever the fault's reason. Every
+  architecture now reports whether the access was an instruction fetch, so the retry checks
+  execute permission (RISC-V reported every fetch fault as no-execute, and AArch64 classed a
+  fetch from a no-execute page as a plain protection fault, which would have retried forever).
+- **Busy user programs showed only system time on several CPUs under load.** A tick that could
+  not get its CPU's lock at once dropped its sample, and the CPUs' ticks collide with each
+  other's balancing; the ticks deferred to a system call got through and counted as system time.
+  The sample now goes to the running task without the lock, and the tick retries the lock
+  briefly before skipping its slice check.
+- **Executable mappings synced only `length` bytes for instruction fetch**, not the rest of the
+  last page; mprotect likewise. MAP_SHARED mappings of a memfd were not synced at all.
+- **AArch64 invalidated only the boot page tables after zeroing BSS with the caches off;** it
+  now invalidates all of BSS and the boot stack, and the saved MMU registers the secondaries
+  read.
+- **The console's stuck-owner timeout let every waiting CPU print at once**, each again after the
+  full wait on every message. A waiter now takes ownership from a CPU that held the console for
+  the whole wait.
+- **The RISC-V FP save area held its registers as `f64` values** in a kernel that must never
+  handle floating point (N-178); it holds their bits.
+- **build.rs enabled the task switch for any AArch64 or RISC-V target**, host builds included; it
+  now requires a bare-metal target. `check-asm-flags.py` no longer treats RISC-V assembly as
+  x86_64 or AArch64 code, and `boot-test.sh` no longer looks for `veridian-kernel.img.img` when
+  `AARCH64_IMAGE` and `AARCH64_LOAD_ADDR` are both set.
+- **`audit_runtime_test` killed every process** (`kill(-1)`) when a fork failed in its exec
+  round, and on a pipe failure ran the round reading the console; it skips the round instead.
 
 - **Only root could open anything below /proc.** procfs reported its directories as r--r--r--,
   so a path walk by any other user failed at /proc itself. Directories are r-xr-xr-x, files

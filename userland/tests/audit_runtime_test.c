@@ -2541,10 +2541,28 @@ static void test_wait_and_groups(void)
      * the child must already count as exec'd then (it did not, CI run
      * 38927521498). */
     for (int round = 0; round < 16; round++) {
-        int hold[2], execd[2];
-        if (pipe(hold) != 0 || pipe(execd) != 0 || fcntl(execd[1], F_SETFD, FD_CLOEXEC) != 0)
+        int hold[2] = {-1, -1}, execd[2] = {-1, -1};
+        /* Without both pipes the round proves nothing (and a child would
+         * read the console): skip it. */
+        if (pipe(hold) != 0 || pipe(execd) != 0 || fcntl(execd[1], F_SETFD, FD_CLOEXEC) != 0) {
             fails |= 16;
+            for (int i = 0; i < 2; i++) {
+                if (hold[i] >= 0) close(hold[i]);
+                if (execd[i] >= 0) close(execd[i]);
+            }
+            continue;
+        }
         pid = fork();
+        if (pid < 0) {
+            /* No child: nothing to kill or reap (pid -1 would signal every
+             * process). */
+            fails |= 16;
+            close(hold[0]);
+            close(hold[1]);
+            close(execd[0]);
+            close(execd[1]);
+            continue;
+        }
         if (pid == 0) {
             dup2(hold[0], 0);
             close(hold[1]);

@@ -367,8 +367,8 @@ pub struct MemoryWatermarks {
 ## Integration Points
 
 ### Kernel Heap
-- `linked_list_allocator` on every architecture: frames from the frame
-  allocator on x86_64, a fixed static region on AArch64/RISC-V
+- `linked_list_allocator` on every architecture, on frames from the frame
+  allocator sized from the memory map at boot
 - An earlier slab allocator was never wired in and was removed (MEM-INC-02)
 
 ### Virtual Memory Manager

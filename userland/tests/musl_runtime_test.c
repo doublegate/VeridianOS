@@ -185,6 +185,21 @@ static void burn_cpu(long ms)
     } while ((long long)now.tv_sec * 1000000000LL + now.tv_nsec < until);
 }
 
+/* Spin for at least `ms` of CPU time, nearly all of it in user mode: a
+ * long loop between clock reads (each read is a system call, and under
+ * emulation one costs about as much as burn_cpu's whole inner loop). */
+static void burn_user_cpu(long ms)
+{
+    struct timespec start, now;
+    clock_gettime(CLOCK_THREAD_CPUTIME_ID, &start);
+    long long until = (long long)start.tv_sec * 1000000000LL + start.tv_nsec + ms * 1000000LL;
+    do {
+        for (volatile int i = 0; i < 1000000; i++)
+            ;
+        clock_gettime(CLOCK_THREAD_CPUTIME_ID, &now);
+    } while ((long long)now.tv_sec * 1000000000LL + now.tv_nsec < until);
+}
+
 static long long ms_of(struct timespec t)
 {
     return (long long)t.tv_sec * 1000 + t.tv_nsec / 1000000;
@@ -301,7 +316,7 @@ static void test_clocks_and_usage(void)
     if (getrusage(7, &ru) != -1 || errno != EINVAL) f |= 512;
     pid = fork();
     if (pid == 0) {
-        burn_cpu(40);
+        burn_user_cpu(40);
         _exit(0);
     }
     struct rusage child_ru;
@@ -316,6 +331,12 @@ static void test_clocks_and_usage(void)
     /* Microseconds summed before converting: truncating utime and stime to
      * milliseconds separately lost up to 2 ms (40 ms read as 39). */
     if (got != pid || rusage_ms(&child_ru) < 40) f |= 1024;
+    /* The child computed 40 ms in user mode (burn_user_cpu): at least half
+     * of that shows as user time. Its fork and exit add system time of
+     * their own, so the total is no yardstick. AArch64 counted every timer
+     * tick as system time, which made this 0 (PR #19 review). */
+    long child_user_us = child_ru.ru_utime.tv_sec * 1000000L + child_ru.ru_utime.tv_usec;
+    if (child_user_us < 20000) f |= 8192;
     if (getrusage(RUSAGE_CHILDREN, &ru) != 0 || rusage_ms(&ru) < 40) f |= 1024;
     struct tms tm;
     clock_t since_boot = times(&tm);
@@ -331,8 +352,9 @@ static void test_clocks_and_usage(void)
 
     static char why[160];
     snprintf(why, sizeof(why),
-             "fail=%#x proc_us=%ld thread_us=%ld wait_errno=%d child_ms=%ld children_ms=%ld", f,
-             proc_us, thr_us, wait_errno, rusage_ms(&child_ru), rusage_ms(&ru));
+             "fail=%#x proc_us=%ld thread_us=%ld wait_errno=%d child_ms=%ld child_user_us=%ld "
+             "children_ms=%ld",
+             f, proc_us, thr_us, wait_errno, rusage_ms(&child_ru), child_user_us, rusage_ms(&ru));
     report("musl_clocks_and_usage", f == 0, why);
 }
 

@@ -41,6 +41,9 @@ pub struct PageFaultInfo {
     pub was_write: bool,
     /// Whether the fault occurred while executing in user mode.
     pub was_user_mode: bool,
+    /// Whether the access was an instruction fetch (a retry must then find
+    /// the page executable).
+    pub was_fetch: bool,
     /// Instruction pointer at the time of the fault.
     pub instruction_pointer: u64,
 }
@@ -188,13 +191,19 @@ fn try_demand_page_in(
     {
         // Another thread of this process mapped the page since this one
         // faulted, or was replacing it (a copy-on-write copy unmaps the
-        // shared page first): retry the access, as Linux does. Only a
-        // not-present fault, and only if the page now allows this access,
-        // so a real fault is never retried forever. The local flush drops
-        // a stale invalid translation a RISC-V hart may keep.
-        if info.reason == PageFaultReason::NotPresent
-            && memory_space.page_allows(info.faulting_address, info.was_write, info.was_user_mode)
-        {
+        // shared page first), or this CPU still caches the old entry (a
+        // write to a page another CPU has just made writable): retry the
+        // access, as Linux does with a spurious fault. Whatever the fault's
+        // reason, but only if the page now allows exactly this access --
+        // including execution for an instruction fetch -- so a real fault
+        // is never retried forever. The local flush drops the stale
+        // translation (PR #19, #20 reviews).
+        if memory_space.page_allows(
+            info.faulting_address,
+            info.was_write,
+            info.was_user_mode,
+            info.was_fetch,
+        ) {
             crate::arch::tlb_flush_address(info.faulting_address & !(PAGE_SIZE as u64 - 1));
             return Ok(());
         }
@@ -434,6 +443,7 @@ pub fn from_x86_64(error_code: u64, cr2: u64, rip: u64) -> PageFaultInfo {
         reason,
         was_write,
         was_user_mode: was_user,
+        was_fetch,
         instruction_pointer: rip,
     }
 }
@@ -444,7 +454,8 @@ pub fn from_x86_64(error_code: u64, cr2: u64, rip: u64) -> PageFaultInfo {
 /// ISS encoding for Data Abort (EC=0b100100/0b100101):
 /// - Bit 6 (WnR): 0 = read, 1 = write
 /// - Bits [5:0] (DFSC): fault status code
-#[cfg(target_arch = "aarch64")]
+// Pure decoding: built everywhere so host tests check it.
+#[cfg_attr(not(target_arch = "aarch64"), allow(dead_code))]
 pub fn from_aarch64(esr_el1: u64, far_el1: u64, elr_el1: u64) -> PageFaultInfo {
     let dfsc = (esr_el1 & 0x3F) as u8;
     // EC field is bits [31:26]
@@ -454,15 +465,19 @@ pub fn from_aarch64(esr_el1: u64, far_el1: u64, elr_el1: u64) -> PageFaultInfo {
     let was_write = matches!(ec, 0x24 | 0x25) && (esr_el1 & (1 << 6)) != 0;
     // From a lower EL (user mode): instruction abort 0x20, data abort 0x24.
     let was_user = matches!(ec, 0x20 | 0x24);
+    let was_fetch = matches!(ec, 0x20 | 0x21);
 
     // The full fault status code: a synchronous external abort on a table
     // walk (0x14-0x17) must not read as a translation fault.
     let reason = match dfsc {
         // Translation faults (levels 0-3)
         0x04..=0x07 => PageFaultReason::NotPresent,
-        // Permission faults (levels 0-3)
+        // Permission faults (levels 0-3): on an instruction abort, a fetch
+        // from a no-execute page, as x86_64 and RISC-V report it.
         0x0C..=0x0F => {
-            if was_write {
+            if was_fetch {
+                PageFaultReason::ExecuteNoExecute
+            } else if was_write {
                 PageFaultReason::WriteToReadOnly
             } else {
                 PageFaultReason::ProtectionViolation
@@ -476,6 +491,7 @@ pub fn from_aarch64(esr_el1: u64, far_el1: u64, elr_el1: u64) -> PageFaultInfo {
         reason,
         was_write,
         was_user_mode: was_user,
+        was_fetch,
         instruction_pointer: elr_el1,
     }
 }
@@ -507,6 +523,7 @@ pub fn from_riscv(cause: u64, stval: u64, sepc: u64) -> PageFaultInfo {
         reason,
         was_write,
         was_user_mode: true,
+        was_fetch,
         instruction_pointer: sepc,
     }
 }
@@ -524,6 +541,27 @@ mod tests {
         );
     }
 
+    /// An instruction fetch is reported as one on every architecture, so a
+    /// spurious-fault retry checks execute permission and a fetch from a
+    /// no-execute page faults instead of retrying forever (PR #20 review).
+    #[test]
+    fn fetch_faults_say_so() {
+        // x86_64: P=1, U=1, I/D=1 (a fetch from a present NX page).
+        let x = from_x86_64(0x15, 0x4000, 0x4000);
+        assert!(x.was_fetch && x.reason == PageFaultReason::ExecuteNoExecute);
+        assert!(!from_x86_64(0x7, 0x4000, 0x1000).was_fetch);
+        // AArch64: instruction abort from EL0 (EC 0x20), permission fault
+        // level 3 (IFSC 0x0F).
+        let a = from_aarch64((0x20 << 26) | 0x0F, 0x4000, 0x4000);
+        assert!(a.was_fetch && a.reason == PageFaultReason::ExecuteNoExecute);
+        // A translation fault on a fetch is still "not present".
+        let a = from_aarch64((0x20 << 26) | 0x07, 0x4000, 0x4000);
+        assert!(a.was_fetch && a.reason == PageFaultReason::NotPresent);
+        // A data abort read permission fault is no fetch.
+        let d = from_aarch64((0x24 << 26) | 0x0F, 0x4000, 0x1000);
+        assert!(!d.was_fetch && d.reason == PageFaultReason::ProtectionViolation);
+    }
+
     #[test]
     fn test_page_fault_info_construction() {
         let info = PageFaultInfo {
@@ -531,6 +569,7 @@ mod tests {
             reason: PageFaultReason::NotPresent,
             was_write: false,
             was_user_mode: true,
+            was_fetch: false,
             instruction_pointer: 0x4010_0000,
         };
         assert_eq!(info.faulting_address, 0xDEAD_BEEF);
@@ -545,6 +584,7 @@ mod tests {
             reason: PageFaultReason::WriteToReadOnly,
             was_write: true,
             was_user_mode: true,
+            was_fetch: false,
             instruction_pointer: 0x2000,
         };
         assert!(info.was_write);
@@ -558,6 +598,7 @@ mod tests {
             reason: PageFaultReason::ProtectionViolation,
             was_write: false,
             was_user_mode: false,
+            was_fetch: false,
             instruction_pointer: 0xFFFF_8000_0010_0000,
         };
         assert!(!info.was_user_mode);

@@ -403,6 +403,12 @@ pub fn sys_mmap(
                 let start = vas
                     .map_shared_frames(at, &frames, page_flags, may_write)
                     .map_err(|_| SyscallError::OutOfMemory)?;
+                // The memfd's pages may hold code written through another
+                // mapping or write(): sync them as any executable file
+                // mapping (PR #19 review).
+                if prot & PROT_EXEC != 0 {
+                    vas.sync_code_pages(start.0, bytes);
+                }
                 vas.set_backing(start, file.node.clone(), offset);
                 return Ok(start.as_usize());
             }
@@ -565,7 +571,7 @@ pub fn sys_mmap(
             // every CPU (HA-25; Linux does this as it installs an
             // executable page).
             if prot & PROT_EXEC != 0 {
-                memory_space.sync_code(mapped_addr as u64, length as u64);
+                memory_space.sync_code_pages(mapped_addr as u64, length as u64);
             }
         }
 
@@ -699,7 +705,7 @@ pub fn sys_mprotect(addr: usize, length: usize, prot: usize) -> SyscallResult {
     // page when it is installed. A program that writes its own code still
     // syncs it itself (`__clear_cache`).
     if prot & PROT_EXEC != 0 {
-        memory_space.sync_code(addr as u64, length as u64);
+        memory_space.sync_code_pages(addr as u64, length as u64);
     }
 
     Ok(0)

@@ -424,7 +424,12 @@ pub fn run_and_wait_all(pids: &[ProcessId]) -> alloc::vec::Vec<Option<i32>> {
         .map(|&pid| {
             let process = table::get_process(pid)?;
             let thread = process.threads.lock().values().next().cloned()?;
-            start_thread(&process, &thread, false).ok()?;
+            if start_thread(&process, &thread, false).is_err() {
+                // Never ran: free its address space, tables and stacks, as
+                // the shell's launch path did (PR #19 review).
+                exit::discard_unstarted(&process);
+                return None;
+            }
             Some(process)
         })
         .collect();
