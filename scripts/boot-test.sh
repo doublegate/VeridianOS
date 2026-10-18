@@ -16,6 +16,8 @@
 #        the `smp` feature is on by default), PROFILE (debug or release,
 #        default debug; release boots the `./build-kernel.sh <arch> release` build),
 #        AARCH64_CPU (QEMU -cpu for AArch64, default cortex-a72; `max` has BTI),
+#        RISCV_CPU (QEMU -cpu for RISC-V, default QEMU's; `rv64,sv48=off`
+#        leaves Sv39 as the only paging mode, ADR 0018),
 #        AARCH64_IMAGE=1 (boot the raw arm64 Image, veridian-kernel.img, which
 #        QEMU loads through the Linux boot protocol with the DTB in x0, instead
 #        of the ELF), AARCH64_LOAD_ADDR=<addr> (load that Image at another
@@ -74,6 +76,7 @@ aarch64)
 riscv64)
     img="$root/target/riscv64imac-unknown-none-elf/$profile/veridian-kernel"
     cmd=(qemu-system-riscv64 -M virt -smp "$smp" -m 256M -bios default -kernel "$img" -device ramfb)
+    [[ -n ${RISCV_CPU:-} ]] && cmd+=(-cpu "$RISCV_CPU")
     ;;
 *)
     echo "unknown architecture: $arch"

@@ -20,7 +20,8 @@ veridian_boot_lottery:
 
 .balign 8
 .global veridian_kernel_satp
-# The kernel's satp (Sv48 and the kernel root, no identity map).
+# The kernel's satp: the paging mode boot found (MODE 9 Sv48, else 8 Sv39)
+# and the kernel root, no identity map. Rust reads the mode from it.
 veridian_kernel_satp:
     .dword 0
 # The trampoline's satp: the kernel root plus the identity map, for the
@@ -29,23 +30,33 @@ veridian_kernel_satp:
 veridian_trampoline_satp:
     .dword 0
 
-# Early page tables (E-RV3), zeroed with the rest of .bss.
+# Early page tables (E-RV3), zeroed with the rest of .bss. Everything the
+# kernel maps is in Sv39's kernel half, 0xFFFF_FFC0_0000_0000 and up, so one
+# table, veridian_early_l3_kernel, holds all of it in both modes (ADR 0018):
+#
+#   Sv48: kernel root = veridian_kernel_root (L4[511] -> that table);
+#         trampoline root = veridian_early_root (also L4[0] -> the
+#         identity table).
+#   Sv39: kernel root = veridian_early_l3_kernel itself (its entries 0..255,
+#         the user half, are empty); trampoline root = the identity table
+#         with the kernel half (256..511) copied in.
 .section .bss
 .balign 4096
-# The kernel root: L4[511] only, so the lower half is free for user
-# address spaces (they share that entry). Everything the kernel maps is in
-# Sv39's kernel half, 0xFFFF_FFC0_0000_0000 and up (ADR 0018).
+# Sv48's kernel root: L4[511] only, so the lower half is free for user
+# address spaces (they share that entry).
 .global veridian_kernel_root
 veridian_kernel_root:
     .space 4096
-# The trampoline root: the same plus L4[0], the identity map.
+# Sv48's trampoline root: the same plus L4[0], the identity map.
 veridian_early_root:
     .space 4096
-# The identity map, for the trampoline only: 512 GiB in 1 GiB pages at
-# their physical address (L4[0]).
+# The identity map, for the trampoline only: the first 256 GiB in 1 GiB
+# pages at their physical address (L4[0] under Sv48; the lower half of the
+# trampoline root under Sv39).
 veridian_early_l3_phys:
     .space 4096
-# The kernel half (L4[511]), in 1 GiB pages:
+# The kernel half (L4[511] under Sv48, the root under Sv39), in 1 GiB
+# pages:
 #   L3[256..383]  the physical map, 128 GiB: virtual = physical +
 #                 0xFFFF_FFC0_0000_0000;
 #   L3[384..399]  the kernel stacks (mm::kstack), filled in later;
@@ -154,7 +165,7 @@ _start:
     # PPN sits at bit 10, so an aligned physical address >> 2.
     la a0, veridian_early_l3_phys
     li t1, 0
-    li t2, 512
+    li t2, 256
     li t3, 0x40000000
     li t4, 0xEF
 6:
@@ -210,26 +221,60 @@ _start:
     add t6, a0, t1
     sd t3, 0(t6)
 
-    # satp = Sv48 (mode 9) | root PPN, for each root. satp is WARL: a hart
-    # without Sv48 keeps it 0, and then the jump below would fault, so stop
-    # instead.
+    # Find the paging mode the way Linux's set_satp_mode() does: write satp
+    # with the trampoline root and read it back. satp is WARL, and a write
+    # of an unsupported MODE has no effect, so it reads back unchanged (0).
+    # Sv48 first, then Sv39 (Sv57 is not used). The identity map keeps this
+    # code running once a write takes.
     li t6, 9
     slli t6, t6, 60
-    la a0, veridian_kernel_root
-    srli t5, a0, 12
-    or t5, t5, t6
-    la a0, veridian_kernel_satp
-    sd t5, 0(a0)
     la a0, veridian_early_root
     srli t5, a0, 12
     or t5, t5, t6
-    la a0, veridian_trampoline_satp
-    sd t5, 0(a0)
     sfence.vma
     csrw satp, t5
     sfence.vma
-    csrr t6, satp
-    bne t6, t5, .Lno_sv48
+    csrr a1, satp
+    bne a1, t5, .Ltry_sv39
+    la a0, veridian_kernel_root
+    j .Lpaging_on
+
+.Ltry_sv39:
+    # The trampoline root is the identity table plus the kernel half:
+    # copy entries 256..511 of the kernel table into it.
+    la a0, veridian_early_l3_kernel
+    la a1, veridian_early_l3_phys
+    li t1, 256 * 8
+    add a0, a0, t1
+    add a1, a1, t1
+    li t2, 256
+10:
+    ld t1, 0(a0)
+    sd t1, 0(a1)
+    addi a0, a0, 8
+    addi a1, a1, 8
+    addi t2, t2, -1
+    bnez t2, 10b
+    li t6, 8
+    slli t6, t6, 60
+    la a0, veridian_early_l3_phys
+    srli t5, a0, 12
+    or t5, t5, t6
+    sfence.vma
+    csrw satp, t5
+    sfence.vma
+    csrr a1, satp
+    bne a1, t5, .Lno_paging
+    la a0, veridian_early_l3_kernel
+
+.Lpaging_on:
+    # t6 = MODE << 60, t5 = the trampoline satp, a0 = the kernel root.
+    la t1, veridian_trampoline_satp
+    sd t5, 0(t1)
+    srli t5, a0, 12
+    or t5, t5, t6
+    la t1, veridian_kernel_satp
+    sd t5, 0(t1)
 
     # Continue at the link (upper-half) address of .Lhigh.
     ld t0, .Lhigh_addr
@@ -252,9 +297,9 @@ _start:
     wfi
     j 1b
 
-# No Sv48: print "no Sv48" through SBI and stop (Sv39 is HR-09).
-.Lno_sv48:
-    la t0, .Lno_sv48_msg
+# Neither Sv48 nor Sv39: print a message through SBI and stop.
+.Lno_paging:
+    la t0, .Lno_paging_msg
 7:
     lbu a0, 0(t0)
     beqz a0, 8f
@@ -265,8 +310,8 @@ _start:
 8:
     wfi
     j 8b
-.Lno_sv48_msg:
-    .asciz "no Sv48: cannot enable paging\n"
+.Lno_paging_msg:
+    .asciz "no Sv39 or Sv48: cannot enable paging\n"
 .balign 4
 
 # A hart that lost the lottery asks SBI HSM to stop it (EID "HSM", FID 1

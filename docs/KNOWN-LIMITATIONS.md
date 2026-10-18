@@ -544,10 +544,10 @@ order are in `ref-docs/HARDWARE-X86_64.md`, `ref-docs/HARDWARE-AARCH64.md` and
     zeroed and a hart lottery runs since v0.27, HR-01/HR-19.)
   - **Fixed addresses.** Writes to 0x1000_0000, a clock controller on the HiFive Unmatched (HR-04).
     (RAM comes from the device tree since v0.27, HR-07.)
-  - **Paging.** On since v0.27, Sv48 only (ADR 0013): the walker has four levels, while the
-    common boards are Sv39-only (HR-09). The address layout already fits Sv39 (ADR 0018): what the
-    kernel places is below 256 GiB on every hart, programs can map above it on Sv48 as on
-    Linux, and RAM above 128 GiB is not used. The kernel image is one writable, executable mapping (no W^X yet).
+  - **Paging.** On since v0.27, in Sv48 when the hart has it and Sv39 otherwise (ADR 0018;
+    tested on QEMU with `sv48=off`, not yet on a board). Sv57 is not used. What the kernel places
+    is below 256 GiB on every hart, programs can map above it on Sv48 as on Linux, and RAM above
+    128 GiB is not used. All harts are assumed to have the boot hart's mode. The kernel image is one writable, executable mapping (no W^X yet).
   - **Interrupts.** Computes the PLIC context wrongly on boards whose hart 0 is a monitor core
     (HR-12) and treats device interrupts as fatal (HR-31).
   - **Privileged registers.** The unused FP save/restore code reads `misa` and the FP

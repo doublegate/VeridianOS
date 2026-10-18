@@ -514,7 +514,22 @@ fn generate_cpuinfo() -> String {
 
     #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
     {
-        format!("processor\t: 0\narchitecture\t: riscv64\nmodel name\t: RISC-V Processor\n")
+        format!(
+            "processor\t: 0\narchitecture\t: riscv64\nmodel name\t: RISC-V Processor\nmmu\t\t: \
+             {}\n",
+            riscv_mmu_name(crate::mm::page_table::paging_levels())
+        )
+    }
+}
+
+/// Linux's `mmu` field of a RISC-V /proc/cpuinfo: the paging mode in use
+/// (ADR 0018), which user programs read to learn their address-space limit.
+#[cfg_attr(any(target_arch = "x86_64", target_arch = "aarch64"), allow(dead_code))]
+fn riscv_mmu_name(levels: u8) -> &'static str {
+    if levels == 3 {
+        "sv39"
+    } else {
+        "sv48"
     }
 }
 
@@ -684,6 +699,13 @@ impl Filesystem for ProcFs {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The RISC-V `mmu` field names the mode, as Linux prints it.
+    #[test]
+    fn riscv_mmu_field_names_the_paging_mode() {
+        assert_eq!(riscv_mmu_name(3), "sv39");
+        assert_eq!(riscv_mmu_name(4), "sv48");
+    }
     use crate::mm::{vas::MappingType, PageFlags};
 
     #[test]

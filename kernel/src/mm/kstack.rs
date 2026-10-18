@@ -7,9 +7,10 @@
 //! overwriting whatever frame lay next to the stack in the direct physical
 //! map, which is where stacks used to live.
 //!
-//! The region's L4 entry is created once at boot, before any process copies
-//! the kernel half of the page table, so every address space shares the
-//! tables below it and sees each stack as it is mapped.
+//! The region's root entries are created once at boot, before any process
+//! copies the kernel half of the page table, so every address space shares
+//! the tables below them and sees each stack as it is mapped (one entry on
+//! x86_64, AArch64 and RISC-V Sv48; 16 under Sv39, one per GiB).
 //!
 //! On AArch64 the region is in the TTBR1 half, which every address space
 //! shares anyway (ADR 0015). On AArch64 and RISC-V an overflow faults on the
@@ -72,26 +73,40 @@ mod region {
         }
     }
 
-    /// Create the region's page tables (its L4 entry in particular) so that
-    /// address spaces created from now on share them.
+    /// Where [`init`] builds the page-table path: the region's start, and on
+    /// RISC-V the start of each of its GiB. Under Sv39 each GiB is its own
+    /// root entry, copied into an address space when it is created, so all
+    /// of them exist from boot (ADR 0018); under Sv48 they share one.
+    fn probes() -> impl Iterator<Item = u64> {
+        #[cfg(target_arch = "riscv64")]
+        let count = (MAX_SLOTS as u64 * SLOT_SIZE) >> 30;
+        #[cfg(not(target_arch = "riscv64"))]
+        let count = 1;
+        (0..count).map(|i| REGION_BASE + (i << 30))
+    }
+
+    /// Create the region's page tables (its root entries in particular) so
+    /// that address spaces created from now on share them.
     pub(super) fn init() {
         let _guard = MAP_LOCK.lock();
         let mut m = mapper();
-        let probe = VirtualAddress(REGION_BASE);
-        // Mapping and unmapping one page builds the L4 -> L1 path.
+        // Mapping and unmapping one page builds the root -> L1 path.
         // Bound first: a guard temporary in the `if let` would stay locked
         // across map_page, which allocates the tables from the same lock.
         let probe_frame = FRAME_ALLOCATOR.lock().allocate_frames(1, None);
         if let Ok(frame) = probe_frame {
-            if m.map_page(
-                probe,
-                frame,
-                PageFlags::PRESENT | PageFlags::WRITABLE,
-                &mut crate::mm::vas::VasFrameAllocator,
-            )
-            .is_ok()
-            {
-                let _ = m.unmap_page(probe);
+            for probe in probes() {
+                let probe = VirtualAddress(probe);
+                if m.map_page(
+                    probe,
+                    frame,
+                    PageFlags::PRESENT | PageFlags::WRITABLE,
+                    &mut crate::mm::vas::VasFrameAllocator,
+                )
+                .is_ok()
+                {
+                    let _ = m.unmap_page(probe);
+                }
             }
             let _ = FRAME_ALLOCATOR.lock().free_frames(frame, 1);
         }

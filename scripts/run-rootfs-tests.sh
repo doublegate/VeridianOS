@@ -26,7 +26,8 @@
 #        target/rootfs-blockfs.img), TEST_WAIT (seconds for the audit suite,
 #        120), MUSL_WAIT (seconds for the musl suite, 600; it runs for
 #        several minutes, and a result ends the wait at once), SMP (CPU
-#        count, default 1)
+#        count, default 1), RISCV_CPU (QEMU -cpu for RISC-V, default QEMU's;
+#        `rv64,sv48=off` leaves Sv39 as the only paging mode, ADR 0018)
 set -u
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
@@ -71,6 +72,7 @@ aarch64 | riscv64)
     else
         img="$root/target/riscv64imac-unknown-none-elf/debug/veridian-kernel"
         qemu=(qemu-system-riscv64 -M virt -bios default)
+        [[ -n ${RISCV_CPU:-} ]] && qemu+=(-cpu "$RISCV_CPU")
     fi
     # shellcheck disable=SC2054 # the commas are in QEMU option values
     qemu+=(-kernel "$img" -device ramfb

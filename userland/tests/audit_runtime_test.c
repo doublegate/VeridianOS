@@ -621,12 +621,68 @@ static void test_timed_waits(void)
 }
 
 /* --- User address-space limit (mm::user_layout). ----------------------- */
+/* The first address past user space: 47-bit everywhere but RISC-V under
+ * Sv39, where it is 256 GiB less a page (ADR 0018). Found by asking for the
+ * last page below the 47-bit limit as a hint: honoured if that is user
+ * space, else the kernel picks somewhere else. Elsewhere an ignored hint
+ * gives 0, which fails the checks below. */
+static unsigned long user_space_end(void)
+{
+    static unsigned long end;
+    static int probed;
+    if (!probed) {
+        probed = 1;
+        void *top = (void *)0x7FFFFFFFE000UL;
+        void *p = mmap(top, 4096, PROT_READ, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        end = p == top ? 0x7FFFFFFFF000UL : 0;
+#ifdef __riscv
+        if (p != top)
+            end = 0x3FFFFFF000UL;
+#endif
+        if (p != MAP_FAILED)
+            munmap(p, 4096);
+    }
+    return end;
+}
+
+#ifdef __riscv
+/* The paging mode /proc/cpuinfo reports, as Linux does ("mmu : sv39"):
+ * 39 or 48, 0 if it says neither. */
+static int riscv_mmu_bits(void)
+{
+    FILE *f = fopen("/proc/cpuinfo", "r");
+    char line[128];
+    int bits = 0;
+    if (!f)
+        return 0;
+    while (fgets(line, sizeof(line), f))
+        if (strncmp(line, "mmu", 3) == 0)
+            bits = strstr(line, "sv39") ? 39 : strstr(line, "sv48") ? 48 : 0;
+    fclose(f);
+    return bits;
+}
+#endif
+
+/* Whether the probed limit is the paging mode's: a Sv48 hart that wrongly
+ * refused the high page would otherwise pass as Sv39. */
+static int user_end_matches_mode(void)
+{
+    unsigned long end = user_space_end();
+#ifdef __riscv
+    int bits = riscv_mmu_bits();
+    return (bits == 39 && end == 0x3FFFFFF000UL) || (bits == 48 && end == 0x7FFFFFFFF000UL);
+#else
+    return end == 0x7FFFFFFFF000UL;
+#endif
+}
+
 static void test_map_fixed_limits(void)
 {
     int flags = MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED;
+    unsigned long end = user_space_end();
     /* Highest legitimate page: allowed. */
-    void *top = mmap((void *)0x7FFFFFFFE000UL, 4096, PROT_READ | PROT_WRITE, flags, -1, 0);
-    int ok_top = top == (void *)0x7FFFFFFFE000UL;
+    void *top = mmap((void *)(end - 0x1000), 4096, PROT_READ | PROT_WRITE, flags, -1, 0);
+    int ok_top = top == (void *)(end - 0x1000);
     if (ok_top) {
         *(volatile int *)top = 42;
         ok_top = *(volatile int *)top == 42;
@@ -634,27 +690,31 @@ static void test_map_fixed_limits(void)
     }
     /* Reserved top canonical page (SYSRET / Ryzen) and the kernel half:
      * rejected. */
-    void *guard = mmap((void *)0x7FFFFFFFF000UL, 4096, PROT_READ, flags, -1, 0);
+    void *guard = mmap((void *)end, 4096, PROT_READ, flags, -1, 0);
     void *kern = mmap((void *)0xFFFF800000000000UL, 4096, PROT_READ, flags, -1, 0);
     /* A range that starts below the limit but runs past it. */
-    void *span = mmap((void *)0x7FFFFFFFE000UL, 8192, PROT_READ, flags, -1, 0);
+    void *span = mmap((void *)(end - 0x1000), 8192, PROT_READ, flags, -1, 0);
     static char why[96];
-    snprintf(why, sizeof(why), "top=%p guard=%p kernel=%p span=%p", top, guard, kern, span);
+    int mode = user_end_matches_mode();
+    snprintf(why, sizeof(why), "end=%#lx mode_ok=%d top=%p guard=%p kernel=%p span=%p", end,
+             mode, top, guard, kern, span);
     report("map_fixed_user_limits",
-           ok_top && guard == MAP_FAILED && kern == MAP_FAILED && span == MAP_FAILED, why);
+           mode && ok_top && guard == MAP_FAILED && kern == MAP_FAILED && span == MAP_FAILED, why);
 }
 
 /* Memory anywhere in the lower half is the process's own, including
  * 0x4444_4444_0000, which a stale kernel-heap address used to make fork
  * share between parent and child (their page tables for that whole
  * 512 GiB slot). The child must see a copy, and a page it maps there must
- * not appear in the parent. */
+ * not appear in the parent. Under Sv39 (256 GiB of user space) the address
+ * is 0x24_4444_0000, also away from everything placed by default. */
 static void test_lower_half_fork_isolation(void)
 {
-    volatile int *p = mmap((void *)0x444444440000UL, 4096, PROT_READ | PROT_WRITE,
+    unsigned long at = user_space_end() > (1UL << 40) ? 0x444444440000UL : 0x2444440000UL;
+    volatile int *p = mmap((void *)at, 4096, PROT_READ | PROT_WRITE,
                            MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
     if (p == MAP_FAILED) {
-        report("lower_half_fork_isolation", 0, "mmap at 0x444444440000 failed");
+        report("lower_half_fork_isolation", 0, "mmap at the test address failed");
         return;
     }
     *p = 1;
@@ -662,7 +722,7 @@ static void test_lower_half_fork_isolation(void)
     if (pid == 0) {
         int saw = *p;
         *p = 2;
-        void *q = mmap((void *)0x444444441000UL, 4096, PROT_READ | PROT_WRITE,
+        void *q = mmap((void *)(at + 0x1000), 4096, PROT_READ | PROT_WRITE,
                        MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
         if (q != MAP_FAILED)
             *(volatile int *)q = 3;
@@ -675,7 +735,7 @@ static void test_lower_half_fork_isolation(void)
     int unmapped = 0;
     if (pipe(fds) == 0) {
         errno = 0;
-        unmapped = write(fds[1], (void *)0x444444441000UL, 1) == -1 && errno == EFAULT;
+        unmapped = write(fds[1], (void *)(at + 0x1000), 1) == -1 && errno == EFAULT;
         close(fds[0]);
         close(fds[1]);
     }

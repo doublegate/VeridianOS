@@ -192,6 +192,22 @@ impl FileData {
 // Syscall implementations
 // ============================================================================
 
+/// Where a mapping without MAP_FIXED goes when `addr` is a hint, as in
+/// Linux's `get_unmapped_area`: the hint rounded up to a page, if the
+/// page-rounded range from there is user space and `is_free` says nothing is
+/// mapped in it. `None` (the kernel chooses) otherwise, and for no hint.
+fn hinted_start(addr: usize, len: usize, is_free: impl FnOnce(u64, u64) -> bool) -> Option<usize> {
+    if addr == 0 {
+        return None;
+    }
+    let start = addr.checked_next_multiple_of(PAGE_SIZE)?;
+    let len = len.checked_next_multiple_of(PAGE_SIZE)?;
+    if !crate::mm::user_layout::is_user_range(start, len) {
+        return None;
+    }
+    is_free(start as u64, (start + len) as u64).then_some(start)
+}
+
 /// Map memory into the process address space (syscall 20).
 ///
 /// Allocates physical frames, creates page table entries in the process's
@@ -341,7 +357,6 @@ pub fn sys_mmap(
                     .share_pages(offset / PAGE_SIZE, pages, prot & PROT_WRITE != 0)
             {
                 let frames = frames.map_err(super::map_kernel_error)?;
-                let at = is_fixed.then_some(VirtualAddress(addr as u64));
                 // May mprotect make it writable later? Not through a
                 // read-only fd, nor past a write seal.
                 let write_sealed = file.node.seals().is_some_and(|s| {
@@ -350,6 +365,14 @@ pub fn sys_mmap(
                 let may_write = file.flags.write && !write_sealed;
                 let vas = proc.memory_space.lock();
                 let bytes = (pages * PAGE_SIZE) as u64;
+                // Fixed, at a free hint (decided under the lock that the
+                // mapping is made under), or where the kernel chooses.
+                let at = if is_fixed {
+                    Some(addr)
+                } else {
+                    hinted_start(addr, length, |s, e| vas.range_is_free(s, e))
+                }
+                .map(|a| VirtualAddress(a as u64));
                 if no_replace && !vas.range_is_free(addr as u64, addr as u64 + bytes) {
                     for &frame in &frames {
                         if crate::mm::frame_refs::release(frame) {
@@ -411,6 +434,16 @@ pub fn sys_mmap(
 
     let memory_space = proc.memory_space.lock();
 
+    // Without MAP_FIXED the address is a hint: used if the range is free,
+    // as on Linux (it used to be ignored). Checked under the lock the
+    // mapping is made under, so nothing can take the range in between.
+    // 2 MiB mappings keep their kernel-chosen, aligned placement.
+    let hint = if is_fixed || (is_anonymous && flags & MAP_HUGETLB != 0) {
+        None
+    } else {
+        hinted_start(addr, length, |s, e| memory_space.range_is_free(s, e))
+    };
+
     // MAP_FIXED_NOREPLACE: nothing may be mapped in the range (EEXIST).
     if no_replace {
         let end =
@@ -460,6 +493,17 @@ pub fn sys_mmap(
                 )
                 .map_err(|_| SyscallError::OutOfMemory)?;
             addr
+        } else if let Some(at) = hint {
+            // A free hint: nothing there to replace.
+            memory_space
+                .map_region_fixed(
+                    VirtualAddress(at as u64),
+                    length,
+                    mapping_type,
+                    Some(page_flags),
+                )
+                .map_err(|_| SyscallError::OutOfMemory)?;
+            at
         } else if is_anonymous && flags & MAP_HUGETLB != 0 {
             // 2 MiB pages (MEM-ARCH-01): a 2 MiB-aligned address, the length
             // rounded up to 2 MiB.
@@ -1237,6 +1281,29 @@ pub fn sys_brk(addr: usize) -> SyscallResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A free hint in user space is where the mapping goes (rounded up to
+    /// a page); a busy, out-of-range or absent one leaves it to the kernel.
+    #[test]
+    fn mmap_honours_a_free_hint() {
+        let end = crate::mm::user_layout::user_space_end();
+        let free = |_: u64, _: u64| true;
+        assert_eq!(hinted_start(0x7000_0000, 0x1000, free), Some(0x7000_0000));
+        assert_eq!(hinted_start(0x7000_0001, 0x10, free), Some(0x7000_1000));
+        assert_eq!(hinted_start(end - 0x1000, 0x1000, free), Some(end - 0x1000));
+        let mut asked = None;
+        hinted_start(0x7000_0000, 0x1001, |s, e| {
+            asked = Some((s, e));
+            true
+        });
+        assert_eq!(asked, Some((0x7000_0000, 0x7000_2000)));
+        assert_eq!(hinted_start(0x7000_0000, 0x1000, |_, _| false), None);
+        assert_eq!(hinted_start(0, 0x1000, free), None);
+        assert_eq!(hinted_start(end - 0x1000, 0x2000, free), None);
+        assert_eq!(hinted_start(end, 0x1000, free), None);
+        assert_eq!(hinted_start(usize::MAX - 0x10, 0x1000, free), None);
+        assert_eq!(hinted_start(0x1000, usize::MAX, free), None);
+    }
 
     #[test]
     fn prot_bti_follows_arm64_linux() {

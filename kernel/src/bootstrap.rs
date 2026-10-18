@@ -3512,6 +3512,38 @@ fn run_usercopy_tests(passed: &mut u32, failed: &mut u32) {
             passed,
             failed,
         );
+
+        // Every GiB of the kernel-stack region has its table from boot, so
+        // an address space created before a stack is mapped there still sees
+        // it: under Sv39 each GiB is a root entry, copied when the space is
+        // made (ADR 0018); under Sv48 they are entries of L4[511]'s table.
+        let levels = crate::mm::page_table::paging_levels();
+        let gib = if levels == 3 {
+            Some(l4)
+        } else {
+            l4[511].addr().map(|a| {
+                // SAFETY: a present kernel-half table, through the physical
+                // map; only read.
+                unsafe {
+                    &*(crate::mm::phys_to_virt_addr(a.as_u64())
+                        as *const crate::mm::page_table::PageTable)
+                }
+            })
+        };
+        let missing = gib.map(|t| (384..400).find(|&i| !t[i].is_present()));
+        if missing != Some(None) {
+            crate::println!(
+                "    {} levels: kernel-stack GiB entry missing: {:?}",
+                levels,
+                missing
+            );
+        }
+        report_test(
+            "kernel_stack_region_prebuilt",
+            missing == Some(None),
+            passed,
+            failed,
+        );
     }
 }
 

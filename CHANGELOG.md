@@ -720,10 +720,23 @@
   places in user space is below 256 GiB on every hart, as Linux keeps hint-less mappings there:
   the mmap area from 64 GiB, PIE programs at 0x2A_AAAA_A000 (Linux's Sv39 `ELF_ET_DYN_BASE`) and
   the stacks. The user limit follows the paging mode, set at boot from satp, so a program on a
-  Sv48 hart can still map up to 128 TiB by asking, as on Linux. Paging is still Sv48; the Sv39
-  probe and 3-level walk are stage B. The user layout is now defined once per architecture in
+  Sv48 hart can still map up to 128 TiB by asking, as on Linux. Stage B (the next entry) runs
+  the kernel in Sv39 where Sv48 is missing. The user layout is now defined once per architecture in
   `mm::user_layout` (x86_64 and AArch64 unchanged), and the mmap area ends at the PIE base on
   every architecture instead of running into the program.
+
+- **RISC-V runs on harts without Sv48 (ADR 0018 stage B, HR-08, HR-09).** Most boards (JH7110,
+  FU740, D1, TH1520, SG2042, K1) implement only Sv39, and the kernel stopped on them with "no
+  Sv48". boot.S now finds the mode as Linux's `set_satp_mode()` does, writing satp and reading
+  it back, Sv48 first, then Sv39, instead of trusting the first cpu node's `mmu-type` (wrong on
+  boards whose hart 0 is a monitor core). Under Sv39 the kernel root is the table that holds the
+  whole kernel half in both modes. The page-table walker takes its depth from the mode, starting
+  at the root's 1 GiB entries under Sv39, and refuses addresses the mode cannot translate, which
+  would have aliased another range; translation also handles 1 GiB pages now. Freeing an address
+  space's tables walks at the same depth, user-pointer translation uses the walker, and every
+  GiB of the kernel-stack region gets its table at boot, since under Sv39 each is a root entry
+  copied into a new address space. `/proc/cpuinfo` reports `mmu : sv39` or `sv48`, as on Linux.
+  The gate boots and runs the RISC-V runtime suites with `-cpu rv64,sv48=off` too.
 
 - **Page-table entries have an architecture format (HR-10).** The walker wrote x86_64 entries
   on every architecture, which RISC-V cannot use: there a pointer to the next table carries only
@@ -1146,6 +1159,12 @@
 - The unused in-kernel `stdlib` module (1,018 lines with no callers).
 
 ### Fixed
+
+- **mmap ignored its address hint.** Without MAP_FIXED, every mapping went to the kernel's
+  cursor, wherever the program asked. A hint is now used when the page-rounded range there is
+  user space and free, as Linux's `get_unmapped_area` does; it is checked under the lock the
+  mapping is made under. 2 MiB (MAP_HUGETLB) mappings keep their aligned placement. Found by the
+  RISC-V runtime tests, which learn the user limit from a hint near the 47-bit top.
 
 - **A thread touching a page another CPU was copying got SIGSEGV.** A write to a page a fork
   shares replaces it with a copy, unmapping the shared page first; a second thread of the process

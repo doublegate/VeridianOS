@@ -200,10 +200,10 @@ What does not work yet: `docs/KNOWN-LIMITATIONS.md`.
       SCTLR_EL1.BT0, HWCAP2_BTI; boot-tested on `-cpu max` in the gate).
     - RISC-V: done: zero BSS, hart lottery, `sstatus.FS` Off in the kernel (HR-01, HR-19, HR-20
       part; the M-mode CSR reads go with FP switching). RISC-V Image header and
-      relocatable or MMU-early boot (HR-02, HR-03); `satp` mode probe with Sv39 default and
-      3/4/5-level tables from the boot hart's cpu node (HR-08, HR-09; ADR 0018: done, stage A,
-      the kernel and user layout inside Sv39's halves; next, stage B, the probe and a 3-level
-      walk); RISC-V PTE encoder with A/D
+      relocatable or MMU-early boot (HR-02, HR-03); done: `satp` mode probe (Sv48, then Sv39)
+      and 3/4-level tables (HR-08, HR-09; ADR 0018 stage A, the kernel and user layout inside
+      Sv39's halves, and stage B, the probe and the 3-level walk; gate runs `sv48=off`);
+      RISC-V PTE encoder with A/D
       (HR-10, done: `mm::pte`), Svpbmt/XTheadMae (HR-11); done: paging on and the kernel in the
       upper half, Sv48 (E-RV3, ADR 0013); identity map only in the trampoline, MMIO through the
       physical map, user address spaces share the kernel half (E-RV4); guarded kernel stacks,

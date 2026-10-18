@@ -216,12 +216,13 @@ pub fn sync_icache() {
 
 /// Free all user-space page table frames in a page table hierarchy.
 ///
-/// Walks the L4 table and for each **user-space** L4 entry (indices 0..256),
-/// recursively frees L3, L2, and L1 table frames. Kernel-space entries
-/// (indices 256..512) are left untouched because they are shared across all
-/// address spaces (copied from the boot page tables).
+/// Frees every table under the root's **user-space** entries (indices
+/// 0..256), at the depth the paging mode walks (four levels, or three under
+/// RISC-V Sv39). Kernel-space entries (indices 256..512) are left untouched
+/// because they are shared across all address spaces (copied from the boot
+/// page tables).
 ///
-/// Finally, frees the L4 frame itself.
+/// Finally, frees the root frame itself.
 ///
 /// Returns the number of frames freed.
 pub fn free_user_page_table_frames(l4_phys: u64) -> usize {
@@ -237,176 +238,83 @@ pub fn free_user_page_table_frames(l4_phys: u64) -> usize {
     #[cfg(all(target_arch = "aarch64", feature = "alloc"))]
     crate::arch::aarch64::switch::release_asid(l4_phys);
 
+    let mut free = |frame: FrameNumber| {
+        FRAME_ALLOCATOR.lock().free_frames(frame, 1).ok();
+    };
+    let freed = free_user_tables_with(l4_phys, super::page_table::paging_levels(), &mut free);
+    // Free the root frame itself
+    free(FrameNumber::new(l4_phys / FRAME_SIZE as u64));
+    freed + 1
+}
+
+/// Free user-space page table subtrees but keep the root frame.
+///
+/// Used during exec to reclaim intermediate page table frames from the old
+/// executable's mappings while keeping the root for reuse. After this
+/// call, user-space root entries (0..256) are cleared so fresh intermediate
+/// tables will be allocated by subsequent `map_page` calls.
+fn free_user_page_table_subtrees(l4_phys: u64) {
+    free_user_tables_with(
+        l4_phys,
+        super::page_table::paging_levels(),
+        &mut |frame: FrameNumber| {
+            FRAME_ALLOCATOR.lock().free_frames(frame, 1).ok();
+        },
+    );
+}
+
+/// Free every table under the user half (entries 0..256) of the root at
+/// `root_phys`, for a walk `levels` deep, and clear those entries. `free`
+/// gets each table's frame; returns how many. The root stays.
+fn free_user_tables_with(root_phys: u64, levels: u8, free: &mut impl FnMut(FrameNumber)) -> usize {
     let phys_offset_val = super::PHYS_MEM_OFFSET.load(core::sync::atomic::Ordering::Acquire);
-    let mut freed = 0usize;
-
-    // SAFETY: l4_phys is a valid physical address of an L4 page table.
-    // phys_to_virt_addr maps it to the kernel's identity-mapped region.
-    let l4_table = unsafe { &*(super::phys_to_virt_addr(l4_phys) as *const PageTable) };
-
-    // Only walk user-space entries (0..256). Kernel entries (256..512) are
-    // shared references to the boot page tables and must NOT be freed.
-    for l4_idx in 0..256 {
-        let l4_entry = &l4_table[l4_idx];
-        if !l4_entry.is_present() {
+    // SAFETY: root_phys is a valid physical address of a root page table,
+    // reached through the physical map; the caller owns the address space.
+    let root = unsafe { &mut *(super::phys_to_virt_addr(root_phys) as *mut PageTable) };
+    let mut freed = 0;
+    for idx in 0..256 {
+        let entry = root[idx];
+        if !entry.is_present() {
             continue;
         }
-
-        // Also skip the physical memory mapping L4 entry (bootloader puts
-        // the identity map in a lower-half L4 slot).
-        if phys_offset_val != 0 {
-            let phys_l4_idx = ((phys_offset_val >> 39) & 0x1FF) as usize;
-            if l4_idx == phys_l4_idx {
-                continue;
+        // Skip the physical memory mapping's entry, should the bootloader
+        // have put it in the lower half (x86_64).
+        if levels == 4 && phys_offset_val != 0 && idx == ((phys_offset_val >> 39) & 0x1FF) as usize
+        {
+            continue;
+        }
+        if !entry.is_huge() {
+            if let Some(a) = entry.addr() {
+                freed += free_table_tree(a.as_u64(), levels - 1, free);
             }
         }
-
-        let l3_phys = match l4_entry.addr() {
-            Some(a) => a.as_u64(),
-            None => continue,
-        };
-
-        // Walk L3 table
-        // SAFETY: l3_phys is from a present L4 entry; phys_to_virt_addr maps it into
-        // the kernel's identity-mapped region.
-        let l3_table = unsafe { &*(super::phys_to_virt_addr(l3_phys) as *const PageTable) };
-        for l3_idx in 0..PAGE_TABLE_ENTRIES {
-            let l3_entry = &l3_table[l3_idx];
-            if !l3_entry.is_present() {
-                continue;
-            }
-            // Skip huge pages (1GB) -- they have no L2 subtable
-            if l3_entry.is_huge() {
-                continue;
-            }
-
-            let l2_phys = match l3_entry.addr() {
-                Some(a) => a.as_u64(),
-                None => continue,
-            };
-
-            // Walk L2 table
-            // SAFETY: l2_phys is from a present L3 entry; phys_to_virt_addr maps it into
-            // the kernel's identity-mapped region.
-            let l2_table = unsafe { &*(super::phys_to_virt_addr(l2_phys) as *const PageTable) };
-            for l2_idx in 0..PAGE_TABLE_ENTRIES {
-                let l2_entry = &l2_table[l2_idx];
-                if !l2_entry.is_present() {
-                    continue;
-                }
-                // Skip huge pages (2MB) -- they have no L1 subtable
-                if l2_entry.is_huge() {
-                    continue;
-                }
-
-                let l1_phys = match l2_entry.addr() {
-                    Some(a) => a.as_u64(),
-                    None => continue,
-                };
-
-                // Free the L1 table frame
-                let l1_frame = FrameNumber::new(l1_phys / FRAME_SIZE as u64);
-                FRAME_ALLOCATOR.lock().free_frames(l1_frame, 1).ok();
-                freed += 1;
-            }
-
-            // Free the L2 table frame
-            let l2_frame = FrameNumber::new(l2_phys / FRAME_SIZE as u64);
-            FRAME_ALLOCATOR.lock().free_frames(l2_frame, 1).ok();
-            freed += 1;
-        }
-
-        // Free the L3 table frame
-        let l3_frame = FrameNumber::new(l3_phys / FRAME_SIZE as u64);
-        FRAME_ALLOCATOR.lock().free_frames(l3_frame, 1).ok();
-        freed += 1;
+        // So new mappings get fresh page tables
+        root[idx].clear();
     }
-
-    // Free the L4 table frame itself
-    let l4_frame = FrameNumber::new(l4_phys / FRAME_SIZE as u64);
-    FRAME_ALLOCATOR.lock().free_frames(l4_frame, 1).ok();
-    freed += 1;
-
     freed
 }
 
-/// Free user-space page table subtrees (L3/L2/L1) but keep the L4 frame.
-///
-/// Used during exec to reclaim intermediate page table frames from the old
-/// executable's mappings while keeping the L4 root for reuse. After this
-/// call, user-space L4 entries (0..256) are cleared so fresh intermediate
-/// tables will be allocated by subsequent `map_page` calls.
-fn free_user_page_table_subtrees(l4_phys: u64) {
-    let phys_offset_val = super::PHYS_MEM_OFFSET.load(core::sync::atomic::Ordering::Acquire);
-
-    // SAFETY: l4_phys is a valid physical address of an L4 page table.
-    let l4_table = unsafe { &mut *(super::phys_to_virt_addr(l4_phys) as *mut PageTable) };
-
-    for l4_idx in 0..256 {
-        let l4_entry = &l4_table[l4_idx];
-        if !l4_entry.is_present() {
-            continue;
-        }
-
-        // Skip the physical memory mapping L4 entry
-        if phys_offset_val != 0 {
-            let phys_l4_idx = ((phys_offset_val >> 39) & 0x1FF) as usize;
-            if l4_idx == phys_l4_idx {
+/// Free the table at `phys`, `level` levels above the pages (1: its entries
+/// map 4 KiB pages), and every table below it. Huge leaves have no table
+/// below them. Returns how many frames `free` got.
+fn free_table_tree(phys: u64, level: u8, free: &mut impl FnMut(FrameNumber)) -> usize {
+    let mut freed = 0;
+    if level > 1 {
+        // SAFETY: phys is from a present table entry; reached through the
+        // physical map.
+        let table = unsafe { &*(super::phys_to_virt_addr(phys) as *const PageTable) };
+        for idx in 0..PAGE_TABLE_ENTRIES {
+            let entry = &table[idx];
+            if !entry.is_present() || entry.is_huge() {
                 continue;
             }
-        }
-
-        let l3_phys = match l4_entry.addr() {
-            Some(a) => a.as_u64(),
-            None => continue,
-        };
-
-        // Walk and free L3 subtree
-        // SAFETY: l3_phys is from a present L4 entry; phys_to_virt_addr maps it into
-        // the kernel's identity-mapped region.
-        let l3_table = unsafe { &*(super::phys_to_virt_addr(l3_phys) as *const PageTable) };
-        for l3_idx in 0..PAGE_TABLE_ENTRIES {
-            let l3_entry = &l3_table[l3_idx];
-            if !l3_entry.is_present() || l3_entry.is_huge() {
-                continue;
+            if let Some(a) = entry.addr() {
+                freed += free_table_tree(a.as_u64(), level - 1, free);
             }
-
-            let l2_phys = match l3_entry.addr() {
-                Some(a) => a.as_u64(),
-                None => continue,
-            };
-
-            // SAFETY: l2_phys is from a present L3 entry; phys_to_virt_addr maps it into
-            // the kernel's identity-mapped region.
-            let l2_table = unsafe { &*(super::phys_to_virt_addr(l2_phys) as *const PageTable) };
-            for l2_idx in 0..PAGE_TABLE_ENTRIES {
-                let l2_entry = &l2_table[l2_idx];
-                if !l2_entry.is_present() || l2_entry.is_huge() {
-                    continue;
-                }
-
-                let l1_phys = match l2_entry.addr() {
-                    Some(a) => a.as_u64(),
-                    None => continue,
-                };
-
-                // Free L1 frame
-                let l1_frame = FrameNumber::new(l1_phys / FRAME_SIZE as u64);
-                FRAME_ALLOCATOR.lock().free_frames(l1_frame, 1).ok();
-            }
-
-            // Free L2 frame
-            let l2_frame = FrameNumber::new(l2_phys / FRAME_SIZE as u64);
-            FRAME_ALLOCATOR.lock().free_frames(l2_frame, 1).ok();
         }
-
-        // Free L3 frame
-        let l3_frame = FrameNumber::new(l3_phys / FRAME_SIZE as u64);
-        FRAME_ALLOCATOR.lock().free_frames(l3_frame, 1).ok();
-
-        // Clear the L4 entry so new mappings get fresh page tables
-        l4_table[l4_idx].clear();
     }
+    free(FrameNumber::new(phys / FRAME_SIZE as u64));
+    freed + 1
 }
 
 /// Memory mapping types
@@ -3811,6 +3719,50 @@ mod tests {
     use alloc::vec;
 
     use super::*;
+
+    /// Freeing a user half walks as deep as the paging mode: under Sv39 the
+    /// root's entries point at L2 tables (ADR 0018). Every table below the
+    /// root goes, the root and the kernel half stay.
+    #[test]
+    fn user_tables_are_freed_at_the_modes_depth() {
+        use super::super::page_table::HeapTables;
+        for levels in [3u8, 4] {
+            let mut tables = HeapTables(alloc::vec::Vec::new());
+            let root = tables.table();
+            // SAFETY: `root` is a live, zeroed table owned by `tables`.
+            let mut m = unsafe { PageMapper::with_levels(root, levels) };
+            let user = PageFlags::PRESENT | PageFlags::USER | PageFlags::WRITABLE;
+            for va in [0x1000u64, 0x20_0000_0000, 0x3F_FFFF_E000] {
+                m.map_page(VirtualAddress(va), FrameNumber::new(7), user, &mut tables)
+                    .unwrap();
+            }
+            m.map_page(
+                VirtualAddress(0xFFFF_FFC0_0000_0000),
+                FrameNumber::new(8),
+                PageFlags::PRESENT | PageFlags::WRITABLE,
+                &mut tables,
+            )
+            .unwrap();
+            let kernel_tables = if levels == 3 { 2 } else { 3 };
+            let below_root = tables.0.len() - 1 - kernel_tables;
+            let mut freed = alloc::vec::Vec::new();
+            let n = free_user_tables_with(root as u64, levels, &mut |f| freed.push(f));
+            assert_eq!(n, below_root, "levels {levels}");
+            assert_eq!(freed.len(), n);
+            // The tables freed are the user half's, none twice.
+            let first_kernel = tables.0.len() - kernel_tables;
+            for &t in &tables.0[1..first_kernel] {
+                assert!(freed.contains(&FrameNumber::new(t as u64 >> 12)));
+            }
+            // SAFETY: `root` is still live.
+            let r = unsafe { &*root };
+            assert!((0..256).all(|i| !r[i].is_present()));
+            assert!(r[(0..512).find(|&i| r[i].is_present()).unwrap()]
+                .addr()
+                .is_some());
+            assert!(m.translate_page(VirtualAddress(0x1000)).is_err());
+        }
+    }
 
     /// A mapping record of `pages` pages at `start` with distinct frames.
     fn record(start: u64, pages: usize, kind: MappingType) -> VirtualMapping {

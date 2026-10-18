@@ -1,7 +1,7 @@
 # ADR 0013: The RISC-V kernel runs in the upper half
 
 - Status: accepted; the layout (physical map at L4[256]) is replaced by ADR 0018, which keeps
-  everything inside Sv39's kernel half
+  everything inside Sv39's kernel half and adds Sv39 paging for harts without Sv48
 - Date: 2026-10-16
 - Tracking: v0.27.0 sprint E (E-RV3); N-14, HR-02, HR-10
 

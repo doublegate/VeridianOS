@@ -12,6 +12,29 @@ global_asm!(include_str!("boot.S"));
 extern "C" {
     /// Boot hart id saved by boot.S from `a0`.
     static veridian_boot_hartid: u64;
+    /// The kernel's satp, with the paging mode boot.S found.
+    static veridian_kernel_satp: u64;
+}
+
+/// satp MODE values (privileged spec, "satp").
+pub const SATP_MODE_SV39: u64 = 8;
+pub const SATP_MODE_SV48: u64 = 9;
+
+/// The paging mode boot.S turned on: [`SATP_MODE_SV48`] if the hart has
+/// Sv48, else [`SATP_MODE_SV39`] (ADR 0018). Every address space uses it.
+pub fn satp_mode() -> u64 {
+    // SAFETY: written once by boot.S before any Rust code runs; read-only
+    // afterwards.
+    unsafe { core::ptr::addr_of!(veridian_kernel_satp).read_volatile() >> 60 }
+}
+
+/// Page-table levels of the paging mode: 3 under Sv39, 4 under Sv48.
+pub fn paging_levels() -> u8 {
+    if satp_mode() == SATP_MODE_SV39 {
+        3
+    } else {
+        4
+    }
 }
 
 /// The kernel image's link address minus its load address (`link.ld`):
@@ -65,12 +88,8 @@ pub extern "C" fn _start_rust() -> ! {
     // boot.S turned paging on: physical memory is reached through its map
     // from here on (`mm::phys_to_virt_addr`).
     crate::mm::set_phys_mem_offset(PHYS_MAP_BASE);
-    // The user limit follows the mode boot.S turned on (ADR 0018): satp
-    // MODE 8 is Sv39 (three levels), 9 Sv48 (four).
-    let satp: u64;
-    // SAFETY: reads satp, which has no side effects.
-    unsafe { core::arch::asm!("csrr {}, satp", out(reg) satp, options(nomem, nostack)) };
-    crate::mm::user_layout::set_riscv_paging_levels(if satp >> 60 == 8 { 3 } else { 4 });
+    // The user limit follows the mode boot.S turned on (ADR 0018).
+    crate::mm::user_layout::set_riscv_paging_levels(u32::from(paging_levels()));
 
     // The boot hart is logical CPU 0; `tp` now points at its per-CPU block.
     // SAFETY: first Rust code on the boot hart, before anything reads `tp`.

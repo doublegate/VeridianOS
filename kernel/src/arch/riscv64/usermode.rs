@@ -25,17 +25,9 @@ pub fn try_enter_usermode() -> Result<(), crate::error::KernelError> {
     // 2. stvec configured to handle ecall traps from U-mode
     // 3. Physical frame allocation for user code + stack pages
     //
-    // Currently, the RISC-V kernel runs with the MMU disabled (satp = 0,
-    // Bare mode). All memory accesses use physical addresses directly.
-    // Enabling the MMU requires:
-    //   - Building Sv39 page tables with proper PTE flags (V, R, W, X, U)
-    //   - Setting satp with MODE=8 (Sv39) and PPN of root page table
-    //   - Configuring sfence.vma for TLB management
-    //
-    // The trap vector (stvec) must handle:
-    //   - Environment call from U-mode (ecall → syscall dispatch)
-    //   - Timer interrupts (mtime/mtimecmp via SBI)
-    //   - Page faults (for demand paging)
+    // boot.S turns paging on in Sv48 or Sv39 (ADR 0018), and user programs
+    // run from the rootfs through exec, each in its own address space. This
+    // fallback for the embedded init binary is not wired up.
 
     // Check that we are running in S-mode by reading sstatus
     // (if we can read it without trapping, we're in S-mode or M-mode)
@@ -72,15 +64,11 @@ pub fn try_enter_usermode() -> Result<(), crate::error::KernelError> {
         });
     }
 
-    // Prerequisites not yet met for full U-mode transition.
-    // The MMU must be enabled with Sv39 page tables containing
-    // U-bit entries before sret can safely transfer to U-mode.
-    // The embedded init binary (RISC-V ecall-based) is ready in
-    // userspace::embedded and will be used once the MMU and trap
-    // infrastructure supports U-mode execution.
+    // The embedded init binary (RISC-V ecall-based) in userspace::embedded
+    // is not entered from here; programs start through exec instead.
     let _ = sstatus; // Used for prerequisite check above
     Err(crate::error::KernelError::OperationNotSupported {
-        operation: "RISC-V U-mode entry (requires Sv39 page tables + ecall handler)",
+        operation: "RISC-V embedded init entry (programs start through exec)",
     })
 }
 

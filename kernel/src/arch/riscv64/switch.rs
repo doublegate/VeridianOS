@@ -210,7 +210,7 @@ pub fn current_root() -> u64 {
 }
 
 /// Load the address space whose root table is at physical `root`, if it is
-/// not the active one (Sv48).
+/// not the active one, in the paging mode boot found (Sv39 or Sv48).
 ///
 /// # Safety
 /// `root` must be a valid root table that maps the kernel half.
@@ -218,7 +218,7 @@ pub unsafe fn switch_address_space(root: u64) {
     if root == 0 || root == current_root() {
         return;
     }
-    let satp = (9u64 << 60) | (root >> 12);
+    let satp = (super::boot::satp_mode() << 60) | (root >> 12);
     // SAFETY: per the contract the new tables map the kernel, so execution
     // continues; the fence drops translations of the old space.
     unsafe {

@@ -77,6 +77,11 @@ if [ $boot -eq 1 ]; then
     # x86_64.
     QEMU_EXTRA="-icount shift=4" step boot-riscv64-slow scripts/boot-test.sh riscv64 300
     tail -1 "$log_dir/boot-riscv64-slow.log"
+    # A RISC-V hart without Sv48, as most boards are: the kernel must find
+    # Sv39 and run in it (ADR 0018).
+    RISCV_CPU=rv64,sv48=off step boot-riscv64-sv39 scripts/boot-test.sh riscv64
+    tail -1 "$log_dir/boot-riscv64-sv39.log"
+    step boot-riscv64-sv39-mode grep -q "Paging: Sv39" "$root/target/boot-logs/boot-riscv64.log"
     QEMU_EXTRA="-icount shift=4" step boot-aarch64-slow scripts/boot-test.sh aarch64 300
     tail -1 "$log_dir/boot-aarch64-slow.log"
     # The AArch64 arm64 Image (HA-03), which QEMU boots through the Linux
@@ -116,6 +121,9 @@ if [ $rootfs -eq 1 ]; then
         ARCH=$arch REQUIRE_MUSL=1 step "rootfs-tests-$arch" scripts/run-rootfs-tests.sh
         tail -1 "$log_dir/rootfs-tests-$arch.log"
     done
+    # The RISC-V root again under Sv39: 256 GiB of user space (ADR 0018).
+    ARCH=riscv64 RISCV_CPU=rv64,sv48=off REQUIRE_MUSL=1 step rootfs-tests-riscv64-sv39 scripts/run-rootfs-tests.sh
+    tail -1 "$log_dir/rootfs-tests-riscv64-sv39.log"
 fi
 if [ $smp -eq 1 ] && { [ $boot -eq 1 ] || [ $rootfs -eq 1 ]; }; then
     # The same kernel (the `smp` feature is on by default) on four CPUs.

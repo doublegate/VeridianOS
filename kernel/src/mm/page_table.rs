@@ -1,8 +1,10 @@
 //! Page table management for virtual memory
 //!
-//! Provides page table structures and operations for 4-level paging
+//! Provides page table structures and operations for 4-level paging, and
+//! for 3-level paging (RISC-V Sv39, where the root is the L3 table; ADR
+//! 0018).
 
-// Page table management -- 4-level paging for all architectures
+// Page table management
 #![allow(dead_code)]
 
 use core::{
@@ -341,14 +343,12 @@ impl ActivePageTable {
 
         #[cfg(target_arch = "riscv64")]
         {
-            // MODE 9 = Sv48: these tables have four levels. (MODE 8 is Sv39,
-            // three levels; the value here used to be 8.)
-            if !crate::arch::riscv64::sv48_supported() {
-                panic!("RISC-V: page tables are 4-level (Sv48) but this hart lacks Sv48");
-            }
-            let satp = (9u64 << 60) | (self.l4_table.as_u64() >> 12);
-            // SAFETY: Writing satp switches the active page table in S-mode
-            // (MODE 9 = Sv48, 4-level). `self.l4_table` must be the physical
+            // The mode boot found (Sv39 or Sv48), which every table was
+            // built for (ADR 0018).
+            let satp =
+                (crate::arch::riscv64::boot::satp_mode() << 60) | (self.l4_table.as_u64() >> 12);
+            // SAFETY: Writing satp switches the active page table in S-mode.
+            // `self.l4_table` must be the physical
             // address of a root table that maps everything the kernel needs to
             // keep executing; the caller guarantees that.
             // sfence.vma: the privileged spec requires it after a satp
@@ -365,11 +365,28 @@ impl ActivePageTable {
     }
 }
 
+/// How many levels the hardware walks: 4 (x86_64 4-level paging, AArch64
+/// with 48-bit addresses, RISC-V Sv48) or 3 (RISC-V Sv39, ADR 0018).
+pub fn paging_levels() -> u8 {
+    #[cfg(all(target_arch = "riscv64", target_os = "none"))]
+    {
+        crate::arch::riscv64::boot::paging_levels()
+    }
+    #[cfg(not(all(target_arch = "riscv64", target_os = "none")))]
+    {
+        4
+    }
+}
+
 /// Page mapper for modifying page tables
 pub struct PageMapper {
+    /// The root table: an L4 table under 4-level paging, an L3 table (1 GiB
+    /// entries) under 3-level.
     l4_table: *mut PageTable,
     /// Recursive mapping index (typically 510 on x86_64)
     recursive_index: Option<PageTableIndex>,
+    /// Levels below and including the root: 3 or 4 ([`paging_levels`]).
+    levels: u8,
 }
 
 impl PageMapper {
@@ -385,6 +402,21 @@ impl PageMapper {
         Self {
             l4_table,
             recursive_index: None,
+            levels: paging_levels(),
+        }
+    }
+
+    /// A mapper for a root walked with `levels` levels (3 or 4) rather than
+    /// the active mode's.
+    ///
+    /// # Safety
+    ///
+    /// As for [`Self::new`].
+    pub unsafe fn with_levels(l4_table: *mut PageTable, levels: u8) -> Self {
+        Self {
+            l4_table,
+            recursive_index: None,
+            levels,
         }
     }
 
@@ -401,7 +433,55 @@ impl PageMapper {
         Self {
             l4_table,
             recursive_index: Some(recursive_index),
+            levels: paging_levels(),
         }
+    }
+
+    /// The root's entry index for `va`. Entries 256 and up are the kernel
+    /// half in every mode (ADR 0018).
+    fn root_index(&self, va: u64) -> usize {
+        ((va >> (12 + 9 * (u32::from(self.levels) - 1))) & 0x1FF) as usize
+    }
+
+    /// Refuse an address the walk cannot translate: the bits above the top
+    /// translated one (47 with four levels, 38 with three) must all copy
+    /// it, or the root index would alias another range.
+    fn check_canonical(&self, page: VirtualAddress) -> Result<(), KernelError> {
+        let shift = 64 - (12 + 9 * u32::from(self.levels));
+        let va = page.as_u64();
+        if (((va << shift) as i64) >> shift) as u64 == va {
+            Ok(())
+        } else {
+            Err(KernelError::InvalidAddress { addr: va as usize })
+        }
+    }
+
+    /// The table of 1 GiB entries (the L3 table) covering `page`: the root
+    /// itself under three levels, else the table under the root's entry.
+    /// `grant_user` marks that entry user-accessible. Unmapped if absent.
+    fn l3_table(
+        &self,
+        page: VirtualAddress,
+        grant_user: bool,
+    ) -> Result<*mut PageTable, KernelError> {
+        self.check_canonical(page)?;
+        if self.levels == 3 {
+            return Ok(self.l4_table);
+        }
+        // SAFETY: `self.l4_table` was provided by the caller of
+        // `PageMapper::new`, who guaranteed it is a valid, mapped page table
+        // this mapper has exclusive access to.
+        let root = unsafe { &mut *self.l4_table };
+        let entry = &mut root[self.root_index(page.as_u64())];
+        if !entry.is_present() || entry.is_huge() {
+            return Err(KernelError::UnmappedMemory {
+                addr: page.as_u64() as usize,
+            });
+        }
+        if grant_user {
+            entry.grant_user_table();
+        }
+        Ok(super::phys_to_virt_addr(l3_phys_from_entry(entry, page)?) as *mut PageTable)
     }
 
     /// Walk to the L2 entry for `page`, creating the L3 and L2 tables if
@@ -413,99 +493,43 @@ impl PageMapper {
         flags: PageFlags,
         allocator: &mut impl FrameAllocator,
     ) -> Result<*mut PageTableEntry, KernelError> {
+        self.check_canonical(page)?;
         let breakdown = VirtualAddressBreakdown::new(page);
 
         // The upper half belongs to the kernel and its tables are shared by
         // every address space: a user mapping there would mark them USER for
         // all processes (N-133).
-        if flags.contains(PageFlags::USER) && usize::from(breakdown.l4_index) >= 256 {
+        let user = flags.contains(PageFlags::USER);
+        if user && self.root_index(page.as_u64()) >= 256 {
             return Err(KernelError::PermissionDenied {
                 operation: "user mapping in the kernel half",
             });
         }
 
-        // Get L4 table
-        // SAFETY: `self.l4_table` was provided by the caller of `PageMapper::new`
-        // who guaranteed it points to a valid, mapped, 4096-byte-aligned page table
-        // that remains valid for the lifetime of this PageMapper. No other mutable
-        // references to this table exist (exclusive access contract from `new`).
-        let l4_table = unsafe { &mut *self.l4_table };
-        let l4_entry = &mut l4_table[breakdown.l4_index];
-
         // The path to a user page must allow user access (x86_64 checks
         // USER at every level; on RISC-V table entries carry none).
-        let user = flags.contains(PageFlags::USER);
-
-        // Get or create L3 table
-        if !l4_entry.is_present() {
-            let frame =
-                allocator
-                    .allocate_frames(1, None)
-                    .map_err(|_| KernelError::OutOfMemory {
-                        requested: 1,
-                        available: 0,
-                    })?;
-            // Zero the new page table frame before use
-            // SAFETY: phys_to_virt_addr converts the physical frame address
-            // to a valid virtual address in the kernel's memory mapping.
-            unsafe {
-                let virt = super::phys_to_virt_addr(frame.as_u64() << 12);
-                crate::mm::page_ops::clear_page(virt as *mut u8);
-            }
-            l4_entry.set_table(frame, user);
-        } else if user {
-            // Existing entry needs USER bit added for user-space child mapping
-            l4_entry.grant_user_table();
-        }
-        // The entry was just set to PRESENT (either already was, or we set it above),
-        // so `addr()` is guaranteed to return `Some`.
-        let l3_phys = l4_entry.addr().ok_or(KernelError::InvalidState {
-            expected: "L4 entry present",
-            actual: "not present",
-        })?;
-        // SAFETY: phys_to_virt_addr converts the physical address to the
-        // corresponding virtual address. The frame is either pre-existing
-        // (valid page table) or freshly allocated and zeroed above.
-        let l3_table =
-            unsafe { &mut *(super::phys_to_virt_addr(l3_phys.as_u64()) as *mut PageTable) };
-        let l3_entry = &mut l3_table[breakdown.l3_index];
-
+        let l3_table = if self.levels == 3 {
+            self.l4_table
+        } else {
+            // SAFETY: `self.l4_table` was provided by the caller of
+            // `PageMapper::new`, who guaranteed it points to a valid, mapped,
+            // 4096-byte-aligned page table that remains valid for the
+            // lifetime of this PageMapper, with exclusive access.
+            let root = unsafe { &mut *self.l4_table };
+            next_table_or_create(&mut root[breakdown.l4_index], user, allocator)?
+        };
+        // SAFETY: a live table: the root, or one reached through the
+        // physical map from a present entry (or freshly allocated, zeroed).
+        let l3_entry = unsafe { &mut (&mut *l3_table)[breakdown.l3_index] };
         if l3_entry.is_huge() {
             return Err(KernelError::AlreadyExists {
                 resource: "page mapping (1 GiB page)",
                 id: page.as_u64(),
             });
         }
-
-        // Get or create L2 table
-        if !l3_entry.is_present() {
-            let frame =
-                allocator
-                    .allocate_frames(1, None)
-                    .map_err(|_| KernelError::OutOfMemory {
-                        requested: 1,
-                        available: 0,
-                    })?;
-            // Zero the new page table frame before use
-            // SAFETY: Physical address converted to virtual via identity-mapped region;
-            // frame is freshly allocated and exclusively owned.
-            unsafe {
-                let virt = super::phys_to_virt_addr(frame.as_u64() << 12);
-                crate::mm::page_ops::clear_page(virt as *mut u8);
-            }
-            l3_entry.set_table(frame, user);
-        } else if user {
-            l3_entry.grant_user_table();
-        }
-        let l2_phys = l3_entry.addr().ok_or(KernelError::InvalidState {
-            expected: "L3 entry present",
-            actual: "not present",
-        })?;
-        // SAFETY: Physical address from a present L3 entry, converted to virtual via
-        // identity-mapped region.
-        let l2_table =
-            unsafe { &mut *(super::phys_to_virt_addr(l2_phys.as_u64()) as *mut PageTable) };
-        Ok(&mut l2_table[breakdown.l2_index] as *mut PageTableEntry)
+        let l2_table = next_table_or_create(l3_entry, user, allocator)?;
+        // SAFETY: as above.
+        Ok(unsafe { &mut (&mut *l2_table)[breakdown.l2_index] } as *mut PageTableEntry)
     }
 
     /// Map a 2 MiB page: an L2 leaf (HUGE) for the 512 frames starting at
@@ -540,11 +564,14 @@ impl PageMapper {
     /// first frame. The caller flushes the TLB on every CPU.
     pub fn unmap_huge_2m(&mut self, page: VirtualAddress) -> Result<FrameNumber, KernelError> {
         let breakdown = VirtualAddressBreakdown::new(page);
-        // SAFETY: as in translate_page; exclusive access per PageMapper::new.
-        let l4_table = unsafe { &*self.l4_table };
-        let l3_phys = l3_phys_from_entry(&l4_table[breakdown.l4_index], page)?;
-        // SAFETY: a present L4 entry's table, through the physical map.
-        let l3_table = unsafe { &*(super::phys_to_virt_addr(l3_phys) as *const PageTable) };
+        // SAFETY: the root or a present entry's table, through the physical
+        // map; exclusive access per PageMapper::new.
+        let l3_table = unsafe { &*self.l3_table(page, false)? };
+        if l3_table[breakdown.l3_index].is_huge() {
+            return Err(KernelError::UnmappedMemory {
+                addr: page.as_u64() as usize,
+            });
+        }
         let l2_phys = l3_phys_from_entry(&l3_table[breakdown.l3_index], page)?;
         // SAFETY: a present L3 entry's table, through the physical map.
         let l2_table = unsafe { &mut *(super::phys_to_virt_addr(l2_phys) as *mut PageTable) };
@@ -581,34 +608,9 @@ impl PageMapper {
             });
         }
 
-        // Get or create L1 table
-        if !l2_entry.is_present() {
-            let frame =
-                allocator
-                    .allocate_frames(1, None)
-                    .map_err(|_| KernelError::OutOfMemory {
-                        requested: 1,
-                        available: 0,
-                    })?;
-            // Zero the new page table frame before use
-            // SAFETY: Physical address converted to virtual via identity-mapped region;
-            // frame is freshly allocated and exclusively owned.
-            unsafe {
-                let virt = super::phys_to_virt_addr(frame.as_u64() << 12);
-                crate::mm::page_ops::clear_page(virt as *mut u8);
-            }
-            l2_entry.set_table(frame, user);
-        } else if user {
-            l2_entry.grant_user_table();
-        }
-        let l1_phys = l2_entry.addr().ok_or(KernelError::InvalidState {
-            expected: "L2 entry present",
-            actual: "not present",
-        })?;
-        // SAFETY: Physical address from a present L2 entry, converted to virtual via
-        // identity-mapped region.
-        let l1_table =
-            unsafe { &mut *(super::phys_to_virt_addr(l1_phys.as_u64()) as *mut PageTable) };
+        // SAFETY: a table reached through the physical map from a present
+        // entry, or freshly allocated and zeroed.
+        let l1_table = unsafe { &mut *next_table_or_create(l2_entry, user, allocator)? };
 
         // Map the page
         let entry = &mut l1_table[breakdown.l1_index];
@@ -633,29 +635,24 @@ impl PageMapper {
     ) -> Result<(FrameNumber, PageFlags), KernelError> {
         let breakdown = VirtualAddressBreakdown::new(page);
 
-        // SAFETY: Same invariants as other PageMapper methods — self.l4_table
-        // was validated by the caller of PageMapper::new.
-        let l4_table = unsafe { &*self.l4_table };
-        let l4_entry = &l4_table[breakdown.l4_index];
-        if !l4_entry.is_present() {
-            return Err(KernelError::UnmappedMemory {
-                addr: page.as_u64() as usize,
-            });
-        }
-
-        let l3_phys = l4_entry.addr().ok_or(KernelError::InvalidState {
-            expected: "L4 entry has address",
-            actual: "no address",
-        })?;
-        // SAFETY: Physical address from a present L4 entry, converted to virtual via
-        // identity-mapped region.
-        let l3_table =
-            unsafe { &*(super::phys_to_virt_addr(l3_phys.as_u64()) as *const PageTable) };
+        // SAFETY: the root or a present entry's table, through the physical
+        // map (same invariants as the other PageMapper methods).
+        let l3_table = unsafe { &*self.l3_table(page, false)? };
         let l3_entry = &l3_table[breakdown.l3_index];
         if !l3_entry.is_present() {
             return Err(KernelError::UnmappedMemory {
                 addr: page.as_u64() as usize,
             });
+        }
+        // A 1 GiB leaf (the kernel's physical map): the 4 KiB frame in it.
+        if l3_entry.is_huge() {
+            let base = l3_entry.frame().ok_or(KernelError::UnmappedMemory {
+                addr: page.as_u64() as usize,
+            })?;
+            return Ok((
+                FrameNumber::new(base.as_u64() + (page.as_u64() >> 12 & 0x3FFFF)),
+                l3_entry.flags() | PageFlags::HUGE,
+            ));
         }
 
         let l2_phys = l3_entry.addr().ok_or(KernelError::InvalidState {
@@ -718,30 +715,18 @@ impl PageMapper {
         // (musl's thread stacks: mmap PROT_NONE, then mprotect). Never in
         // the kernel half.
         let grant_user =
-            new_flags.contains(PageFlags::USER) && usize::from(breakdown.l4_index) < 256;
+            new_flags.contains(PageFlags::USER) && self.root_index(page.as_u64()) < 256;
         let add_user = |entry: &mut PageTableEntry| {
             if grant_user {
                 entry.grant_user_table();
             }
         };
 
-        // SAFETY: Same invariants as other PageMapper methods.
-        let l4_table = unsafe { &mut *self.l4_table };
-        let l4_entry = &mut l4_table[breakdown.l4_index];
-        if !l4_entry.is_present() {
-            return Err(KernelError::UnmappedMemory {
-                addr: page.as_u64() as usize,
-            });
-        }
-
-        add_user(l4_entry);
-        let l3_phys = l3_phys_from_entry(l4_entry, page)?;
-        // SAFETY: Physical address from a present L4 entry, converted to virtual via
-        // identity-mapped region.
-        let l3_table =
-            unsafe { &mut *(super::phys_to_virt_addr(l3_phys as u64) as *mut PageTable) };
+        // SAFETY: the root or a present entry's table, through the physical
+        // map (same invariants as the other PageMapper methods).
+        let l3_table = unsafe { &mut *self.l3_table(page, grant_user)? };
         let l3_entry = &mut l3_table[breakdown.l3_index];
-        if !l3_entry.is_present() {
+        if !l3_entry.is_present() || l3_entry.is_huge() {
             return Err(KernelError::UnmappedMemory {
                 addr: page.as_u64() as usize,
             });
@@ -790,28 +775,11 @@ impl PageMapper {
         let breakdown = VirtualAddressBreakdown::new(page);
 
         // Walk the page table hierarchy
-        // SAFETY: `self.l4_table` was validated by the caller of `PageMapper::new`
-        // to point to a valid, mapped page table. Exclusive access is guaranteed by
-        // the PageMapper ownership contract.
-        let l4_table = unsafe { &mut *self.l4_table };
-        let l4_entry = &l4_table[breakdown.l4_index];
-        if !l4_entry.is_present() {
-            return Err(KernelError::UnmappedMemory {
-                addr: page.as_u64() as usize,
-            });
-        }
-
-        // `is_present()` returned true, so `addr()` is guaranteed to return `Some`.
-        let l3_phys = l4_entry.addr().ok_or(KernelError::InvalidState {
-            expected: "L4 entry has address",
-            actual: "no address",
-        })?;
-        // SAFETY: Physical address from a present L4 entry, converted to virtual via
-        // identity-mapped region.
-        let l3_table =
-            unsafe { &mut *(super::phys_to_virt_addr(l3_phys.as_u64()) as *mut PageTable) };
+        // SAFETY: the root or a present entry's table, through the physical
+        // map; exclusive access per the PageMapper ownership contract.
+        let l3_table = unsafe { &mut *self.l3_table(page, false)? };
         let l3_entry = &l3_table[breakdown.l3_index];
-        if !l3_entry.is_present() {
+        if !l3_entry.is_present() || l3_entry.is_huge() {
             return Err(KernelError::UnmappedMemory {
                 addr: page.as_u64() as usize,
             });
@@ -856,8 +824,9 @@ impl PageMapper {
         entry.clear();
 
         // Flush the TLB entry for the unmapped page to ensure stale translations
-        // are not used. Each architecture has its own invalidation instruction.
-        #[cfg(target_arch = "x86_64")]
+        // are not used. Each architecture has its own invalidation instruction
+        // (not on the host, where it would fault).
+        #[cfg(all(target_arch = "x86_64", target_os = "none"))]
         crate::arch::x86_64::mmu::flush_tlb_address(page.as_u64());
 
         #[cfg(target_arch = "aarch64")]
@@ -890,6 +859,39 @@ impl PageMapper {
     }
 }
 
+/// The table under `entry`, reached through the physical map. An empty
+/// entry first gets a freshly allocated, zeroed table; `user` marks the path
+/// user-accessible.
+fn next_table_or_create(
+    entry: &mut PageTableEntry,
+    user: bool,
+    allocator: &mut impl FrameAllocator,
+) -> Result<*mut PageTable, KernelError> {
+    if !entry.is_present() {
+        let frame = allocator
+            .allocate_frames(1, None)
+            .map_err(|_| KernelError::OutOfMemory {
+                requested: 1,
+                available: 0,
+            })?;
+        // SAFETY: the frame is freshly allocated and exclusively owned,
+        // reached through the physical map.
+        unsafe {
+            let virt = super::phys_to_virt_addr(frame.as_u64() << 12);
+            crate::mm::page_ops::clear_page(virt as *mut u8);
+        }
+        entry.set_table(frame, user);
+    } else if user {
+        // Existing entry needs USER bit added for user-space child mapping
+        entry.grant_user_table();
+    }
+    let phys = entry.addr().ok_or(KernelError::InvalidState {
+        expected: "page table entry present",
+        actual: "not present",
+    })?;
+    Ok(super::phys_to_virt_addr(phys.as_u64()) as *mut PageTable)
+}
+
 /// Extract a physical address from a present page table entry.
 /// Returns the address as a raw u64 suitable for casting to a pointer.
 fn l3_phys_from_entry(entry: &PageTableEntry, page: VirtualAddress) -> Result<u64, KernelError> {
@@ -912,8 +914,145 @@ pub trait FrameAllocator {
 }
 
 #[cfg(test)]
+/// Hands out zeroed, page-aligned tables from the heap. On the host the
+/// physical map's offset is 0, so a table's address is its "physical"
+/// one and the walker reaches it directly.
+pub(crate) struct HeapTables(pub(crate) alloc::vec::Vec<*mut PageTable>);
+
+#[cfg(test)]
+impl HeapTables {
+    pub(crate) fn table(&mut self) -> *mut PageTable {
+        let t = alloc::boxed::Box::into_raw(alloc::boxed::Box::new(PageTable::new()));
+        self.0.push(t);
+        t
+    }
+}
+
+#[cfg(test)]
+impl FrameAllocator for HeapTables {
+    fn allocate_frames(
+        &mut self,
+        count: usize,
+        _numa_node: Option<usize>,
+    ) -> Result<FrameNumber, crate::mm::FrameAllocatorError> {
+        assert_eq!(count, 1);
+        Ok(FrameNumber::new(self.table() as u64 >> 12))
+    }
+}
+
+#[cfg(test)]
+impl Drop for HeapTables {
+    fn drop(&mut self) {
+        for &t in &self.0 {
+            // SAFETY: each pointer came from alloc::boxed::Box::into_raw above and is
+            // dropped once.
+            drop(unsafe { alloc::boxed::Box::from_raw(t) });
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
+    use alloc::vec::Vec;
+
     use super::*;
+
+    fn present_entries(t: *const PageTable) -> Vec<usize> {
+        // SAFETY: a live table from HeapTables.
+        let t = unsafe { &*t };
+        (0..PAGE_TABLE_ENTRIES)
+            .filter(|&i| t[i].is_present())
+            .collect()
+    }
+
+    const USER: PageFlags = PageFlags::PRESENT
+        .union(PageFlags::USER)
+        .union(PageFlags::WRITABLE);
+
+    /// Sv39 (ADR 0018): the root is indexed by VA[38:30], the walk is three
+    /// levels deep, and the kernel/user split is still root entry 256.
+    #[test]
+    fn three_level_walk_starts_at_the_root() {
+        let mut tables = HeapTables(Vec::new());
+        let root = tables.table();
+        // SAFETY: `root` is a live, zeroed table owned by `tables`.
+        let mut m = unsafe { PageMapper::with_levels(root, 3) };
+        // The last user page under Sv39: root entry 255.
+        let va = VirtualAddress(0x3F_FFFF_E000);
+        m.map_page(va, FrameNumber::new(0x1234), USER, &mut tables)
+            .unwrap();
+        assert_eq!(present_entries(root), [255]);
+        // Root, L2, L1: two tables below the root.
+        assert_eq!(tables.0.len(), 3);
+        let (frame, flags) = m.translate_page(va).unwrap();
+        assert_eq!(frame, FrameNumber::new(0x1234));
+        assert!(flags.contains(PageFlags::USER));
+        m.update_page_flags(va, PageFlags::PRESENT | PageFlags::USER)
+            .unwrap();
+        assert!(!m
+            .translate_page(va)
+            .unwrap()
+            .1
+            .contains(PageFlags::WRITABLE));
+        assert_eq!(m.unmap_page(va).unwrap(), FrameNumber::new(0x1234));
+        assert!(m.translate_page(va).is_err());
+
+        // The kernel half is root entries 256 and up: no user mapping there.
+        let kernel = VirtualAddress(0xFFFF_FFC0_0000_0000);
+        assert!(m
+            .map_page(kernel, FrameNumber::new(1), USER, &mut tables)
+            .is_err());
+        // A kernel mapping goes to root entry 256.
+        m.map_page(
+            kernel,
+            FrameNumber::new(1),
+            PageFlags::PRESENT | PageFlags::WRITABLE,
+            &mut tables,
+        )
+        .unwrap();
+        assert_eq!(present_entries(root), [255, 256]);
+        // 256 GiB is not an Sv39 address (bits 63..39 must copy bit 38): it
+        // would alias root entry 256 or 0.
+        for bad in [0x40_0000_0000u64, 0x80_0000_0000, 0xFFFF_FF80_0000_0000] {
+            let bad = VirtualAddress(bad);
+            assert!(m
+                .map_page(bad, FrameNumber::new(2), USER, &mut tables)
+                .is_err());
+            assert!(m.translate_page(bad).is_err());
+            assert!(m.unmap_page(bad).is_err());
+        }
+        assert_eq!(present_entries(root), [255, 256]);
+    }
+
+    /// The same page under four levels goes through root entry 0, and
+    /// 256 GiB is an ordinary user address there.
+    #[test]
+    fn four_level_walk_goes_through_root_entry_0() {
+        let mut tables = HeapTables(Vec::new());
+        let root = tables.table();
+        // SAFETY: `root` is a live, zeroed table owned by `tables`.
+        let mut m = unsafe { PageMapper::with_levels(root, 4) };
+        let va = VirtualAddress(0x3F_FFFF_E000);
+        m.map_page(va, FrameNumber::new(0x1234), USER, &mut tables)
+            .unwrap();
+        assert_eq!(present_entries(root), [0]);
+        assert_eq!(tables.0.len(), 4);
+        assert_eq!(m.translate_page(va).unwrap().0, FrameNumber::new(0x1234));
+        let high = VirtualAddress(0x40_0000_0000);
+        m.map_page(high, FrameNumber::new(5), USER, &mut tables)
+            .unwrap();
+        assert_eq!(m.translate_page(high).unwrap().0, FrameNumber::new(5));
+        // Not canonical under 4 levels (bits 63..48 must copy bit 47).
+        assert!(m
+            .map_page(
+                VirtualAddress(0x8000_0000_0000),
+                FrameNumber::new(6),
+                USER,
+                &mut tables
+            )
+            .is_err());
+        assert_eq!(present_entries(root), [0]);
+    }
 
     #[test]
     fn entry_flags_keep_no_execute_and_cow() {

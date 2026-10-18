@@ -1354,11 +1354,78 @@ static int touch_faults(volatile char *p, int write)
     return WIFSIGNALED(st) && WTERMSIG(st) == SIGSEGV;
 }
 
+/* The first address past user space: 47-bit everywhere but RISC-V under
+ * Sv39, where it is 256 GiB less a page (ADR 0018). Found by asking for the
+ * last page below the 47-bit limit as a hint: honoured if that is user
+ * space, else the kernel picks somewhere else. Elsewhere an ignored hint
+ * gives 0, which fails the checks below. */
+static unsigned long user_space_end(void)
+{
+    static unsigned long end;
+    static int probed;
+    if (!probed) {
+        probed = 1;
+        void *top = (void *)0x7FFFFFFFE000UL;
+        void *p = mmap(top, 4096, PROT_READ, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        end = p == top ? 0x7FFFFFFFF000UL : 0;
+#ifdef __riscv
+        if (p != top)
+            end = 0x3FFFFFF000UL;
+#endif
+        if (p != MAP_FAILED)
+            munmap(p, 4096);
+    }
+    return end;
+}
+
+#ifdef __riscv
+/* The paging mode /proc/cpuinfo reports, as Linux does ("mmu : sv39"):
+ * 39 or 48, 0 if it says neither. */
+static int riscv_mmu_bits(void)
+{
+    FILE *f = fopen("/proc/cpuinfo", "r");
+    char line[128];
+    int bits = 0;
+    if (!f)
+        return 0;
+    while (fgets(line, sizeof(line), f))
+        if (strncmp(line, "mmu", 3) == 0)
+            bits = strstr(line, "sv39") ? 39 : strstr(line, "sv48") ? 48 : 0;
+    fclose(f);
+    return bits;
+}
+#endif
+
+/* Whether the probed limit is the paging mode's: a Sv48 hart that wrongly
+ * refused the high page would otherwise pass as Sv39. */
+static int user_end_matches_mode(void)
+{
+    unsigned long end = user_space_end();
+#ifdef __riscv
+    int bits = riscv_mmu_bits();
+    return (bits == 39 && end == 0x3FFFFFF000UL) || (bits == 48 && end == 0x7FFFFFFFF000UL);
+#else
+    return end == 0x7FFFFFFFF000UL;
+#endif
+}
+
+/* User addresses no mapping uses: 80 and 96 TiB, or under Sv39 192 and
+ * 208 GiB, between the PIE and the thread stacks (ADR 0018). */
+static unsigned long far_unmapped(int which)
+{
+    if (user_space_end() > (1UL << 40))
+        return which ? 0x600000000000UL : 0x500000000000UL;
+    return which ? 0x3400000000UL : 0x3000000000UL;
+}
+
 static int mm_args(void)
 {
     int f = 0;
     char *p = mmap(NULL, 3 * PG, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     if (p == MAP_FAILED) return 1;
+    /* The far addresses below come from the limit, which must be the
+     * paging mode's. */
+    if (!user_end_matches_mode()) f |= 256;
     /* munmap: address 0 and an empty range are fine, length 0 is not. */
     if (munmap(NULL, PG) != 0) f |= 2;
     errno = 0;
@@ -1368,7 +1435,7 @@ static int mm_args(void)
     errno = 0;
     if (munmap((void *)0x7ffffffff000UL, 2 * PG) != -1 || errno != EINVAL) f |= 2;
     /* Lengths past 256 MiB are fine. */
-    if (munmap((void *)0x600000000000UL, 512UL << 20) != 0) f |= 4;
+    if (munmap((void *)far_unmapped(1), 512UL << 20) != 0) f |= 4;
     /* MAP_SHARED_VALIDATE checks its flags; MAP_FIXED_NOREPLACE does not
      * replace (N-241). */
     char *v = mmap(NULL, PG, PROT_READ, MAP_SHARED_VALIDATE | MAP_ANONYMOUS, -1, 0);
@@ -1464,7 +1531,7 @@ static int mm_mremap(void)
     errno = 0;
     if (mremap(p, 0, PG, MREMAP_MAYMOVE) != MAP_FAILED || errno != EINVAL) f |= 128;
     errno = 0;
-    if (mremap((void *)0x500000000000UL, PG, 2 * PG, MREMAP_MAYMOVE) != MAP_FAILED || errno != EFAULT)
+    if (mremap((void *)far_unmapped(0), PG, 2 * PG, MREMAP_MAYMOVE) != MAP_FAILED || errno != EFAULT)
         f |= 128;
     /* Old length 0 on a shared mapping: the same pages, twice. */
     char *s = mmap(NULL, PG, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
@@ -1552,7 +1619,7 @@ static int mm_madvise(void)
     errno = 0;
     if (madvise(p + 1, PG, MADV_NORMAL) != -1 || errno != EINVAL) f |= 128;
     errno = 0;
-    if (madvise((void *)0x500000000000UL, PG, MADV_WILLNEED) != -1 || errno != ENOMEM) f |= 128;
+    if (madvise((void *)far_unmapped(0), PG, MADV_WILLNEED) != -1 || errno != ENOMEM) f |= 128;
     if (madvise(p, 0, MADV_DONTNEED) != 0 || madvise(p, 2 * PG, MADV_HUGEPAGE) != 0) f |= 128;
     return f;
 }

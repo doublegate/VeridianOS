@@ -1,6 +1,6 @@
 # ADR 0018: RISC-V on Sv39 and Sv48, one address layout for both
 
-- Status: accepted (stage A: the layout; stage B: Sv39 paging, in progress)
+- Status: accepted; implemented (stage A: the layout; stage B: Sv39 paging)
 - Date: 2026-10-17
 - Tracking: HR-08, HR-09 (`ref-docs/HARDWARE-RISCV64.md`); amends ADR 0002 (the RISC-V user range)
   and ADR 0013 (the RISC-V kernel layout)
@@ -86,6 +86,11 @@ Linux handles this with:
      in both modes.
    - Each GiB of the kernel-stack region is its own Sv39 root entry, so all of them are created
      before the first address space is.
+   - The probe replaces the device tree's `mmu-type`, which was read from the first cpu node
+     (HR-08): on boards whose hart 0 is a monitor core that node has none. Secondary harts use the
+     boot hart's mode; mixed harts are not supported (Linux makes the same assumption).
+   - `/proc/cpuinfo` reports the mode as Linux does (`mmu : sv39`), so user programs and the
+     runtime tests can check the address-space limit against it.
 
 ## Consequences
 

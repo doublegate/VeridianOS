@@ -196,42 +196,10 @@ extern "C" {
     static veridian_dtb_pa: u64;
 }
 
-/// Whether the hart supports Sv48, from the device tree's `mmu-type`
-/// (`riscv,sv48` or `riscv,sv57`, which implies Sv48). Assumed true when the
-/// device tree does not say (QEMU virt supports up to Sv57).
-static SV48: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(true);
-
-/// Whether the kernel's 4-level page tables (Sv48) can be used.
-pub fn sv48_supported() -> bool {
-    SV48.load(core::sync::atomic::Ordering::Relaxed)
-}
-
 /// The device tree's physical address, as firmware passed it in a1.
 pub fn dtb_pa() -> u64 {
     // SAFETY: veridian_dtb_pa is written once by boot.S before Rust runs.
     unsafe { core::ptr::read_volatile(core::ptr::addr_of!(veridian_dtb_pa)) }
-}
-
-/// Record the MMU type from the device tree.
-fn read_mmu_type(dtb_pa: u64) {
-    // SAFETY: dtb_pa is what firmware passed in a1 (saved by boot.S).
-    let Some(fdt) = (unsafe { crate::arch::fdt::Fdt::from_phys(dtb_pa) }) else {
-        return;
-    };
-    if let Some(mmu) = fdt.property(&["cpus", "cpu"], "mmu-type") {
-        let mmu = mmu.split(|&c| c == 0).next().unwrap_or(&[]);
-        let sv48 = mmu == b"riscv,sv48" || mmu == b"riscv,sv57";
-        SV48.store(sv48, core::sync::atomic::Ordering::Relaxed);
-        println!(
-            "[RISCV64] MMU: {} ({})",
-            core::str::from_utf8(mmu).unwrap_or("?"),
-            if sv48 {
-                "Sv48 available"
-            } else {
-                "no Sv48: user mode unavailable"
-            }
-        );
-    }
 }
 
 /// scause: interrupt bit, and the supervisor software (IPI) and timer
@@ -424,7 +392,6 @@ pub fn init() {
     let dtb_pa = unsafe { core::ptr::read_volatile(core::ptr::addr_of!(veridian_dtb_pa)) };
     super::riscv::timer::init_from_device_tree(dtb_pa);
     fpu::init_from_device_tree(dtb_pa);
-    read_mmu_type(dtb_pa);
     super::riscv::timer::start(1000);
 
     // SAFETY: the trap vector is installed (above), so supervisor
@@ -434,8 +401,15 @@ pub fn init() {
     let satp: usize;
     // SAFETY: reads the address-translation CSR; no side effects.
     unsafe { core::arch::asm!("csrr {}, satp", out(reg) satp, options(nomem, nostack)) };
+    // boot.S found the mode by writing satp (ADR 0018), so the device
+    // tree's `mmu-type` is not consulted.
     println!(
-        "[RISCV64] Paging: satp mode {} root {:#x}, kernel at {:#x}",
+        "[RISCV64] Paging: {} (satp mode {}) root {:#x}, kernel at {:#x}",
+        if satp as u64 >> 60 == boot::SATP_MODE_SV39 {
+            "Sv39"
+        } else {
+            "Sv48"
+        },
         satp >> 60,
         (satp & 0xFFF_FFFF_FFFF) << 12,
         init as *const () as usize
