@@ -18,13 +18,18 @@ SECTIONS
         *(.text .text.*)
     }
 
+    /* Section bounds for the image's page permissions (W^X): code is
+     * [_start, __text_end), read-only data up to __rodata_end, the rest
+     * (data, BSS, boot stack) writable and not executable. */
     . = ALIGN(4K);
+    __text_end = .;
     .rodata : AT(ADDR(.rodata) - KERNEL_OFFSET) {
         *(.rodata .rodata.*)
         *(.srodata .srodata.*)
     }
 
     . = ALIGN(4K);
+    __rodata_end = .;
     .data : AT(ADDR(.data) - KERNEL_OFFSET) {
         *(.data .data.*)
         *(.sdata .sdata.*)

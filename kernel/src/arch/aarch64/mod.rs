@@ -12,6 +12,8 @@ pub mod direct_uart;
 pub mod entry;
 pub mod exceptions;
 pub mod gic;
+#[cfg(feature = "alloc")]
+pub mod kmap;
 pub mod platform;
 pub mod psci;
 pub mod serial;

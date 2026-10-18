@@ -53,6 +53,7 @@ veridian_early_root:
 # The identity map, for the trampoline only: the first 256 GiB in 1 GiB
 # pages at their physical address (L4[0] under Sv48; the lower half of the
 # trampoline root under Sv39).
+.global veridian_early_l3_phys
 veridian_early_l3_phys:
     .space 4096
 # The kernel half (L4[511] under Sv48, the root under Sv39), in 1 GiB
@@ -197,12 +198,14 @@ _start:
     addi t2, t2, -1
     bnez t2, 6b
 
-    # The physical map: L3[256 + i] = physical i GiB, for 128 GiB.
+    # The physical map: L3[256 + i] = physical i GiB, for 128 GiB. Never
+    # executable (W^X: it also reaches the image): V R W G A D = 0xE7.
     la a0, veridian_early_l3_kernel
     li t6, 256 * 8
     add a0, a0, t6
     li t1, 0
     li t2, 128
+    li t4, 0xE7
 9:
     srli t5, t1, 2
     or t5, t5, t4
@@ -212,6 +215,9 @@ _start:
     addi t2, t2, -1
     bnez t2, 9b
 
+    # The image, writable and executable until Rust maps it page by page
+    # with its sections' permissions (arch::riscv64::kmap).
+    li t4, 0xEF
     la a0, veridian_early_l3_kernel
     li t6, 510 * 8
     add t6, a0, t6

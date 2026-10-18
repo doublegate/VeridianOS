@@ -52,7 +52,9 @@ Linux on RISC-V links the kernel high and turns paging on in its first instructi
 - Only Sv48 is used, with 1 GiB pages. QEMU `virt` offers Sv57; most boards are Sv39-only
   (HR-09), which needs a three-level walker and a different early map.
 - The kernel image mapping is writable and executable as a whole (one 1 GiB page); splitting
-  text, rodata and data permissions (W^X) needs 4 KiB or 2 MiB mappings, later.
+  text, rodata and data permissions (W^X) needs 4 KiB or 2 MiB mappings, later. (Done in v0.27:
+  `arch::riscv64::kmap` remaps the image in 4 KiB pages once the frame allocator is up, and the
+  physical map is not executable.)
 - Memory attributes come from the platform's PMAs, so mapping holes and MMIO cacheable in the
   page tables is harmless on RISC-V without Svpbmt; with Svpbmt (HR-11) the physical map will
   need the right types.

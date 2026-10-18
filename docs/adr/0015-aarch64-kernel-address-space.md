@@ -70,7 +70,9 @@ the TTBR1 half.
   removed one at a time, each with its boot test un-skipped.
 - The kernel half of an address space has the same shape on all three architectures.
 - The kernel image is mapped writable and executable as a whole; W^X needs 4 KiB mappings, later
-  (as on RISC-V).
+  (as on RISC-V). (Done in v0.27: `arch::aarch64::kmap` builds a TTBR1 root with the image in
+  4 KiB pages and switches to it from the identity map, as Linux's `cpu_replace_ttbr1`, because
+  splitting the live blocks would need break-before-make on the running code.)
 - Without ASIDs (HA-26), a TTBR0 switch must invalidate the TLB; that comes with EL0.
 - Device and Normal memory are told apart only by the fixed QEMU `virt` rule until the device-tree
   memory map is used. On hardware the rule is wrong, and the first board port must replace it.

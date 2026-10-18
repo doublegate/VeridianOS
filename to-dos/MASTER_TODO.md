@@ -215,7 +215,9 @@ What does not work yet: `docs/KNOWN-LIMITATIONS.md`.
       (HR-31); IPIs by hart id (HR-33); U-mode with `tp` via `sscratch` (N-14); done: `sstatus`
       never taken from user state, sigreturn refuses a kernel pc (N-170).
     - Both: kernel stack guard pages (N-26; done on both, which still need an overflow stack
-      for the exception). Done: soft-float kernels (N-178,
+      for the exception). Done: W^X for the kernel image, mapped in 4 KiB pages with its
+      sections' permissions, and a non-executable physical map (`arch::*::kmap`, boot test
+      `kernel_image_w_xor_x`, also guarding x86_64's bootloader mapping). Done: soft-float kernels (N-178,
       `aarch64-unknown-none-softfloat`, `riscv64imac-unknown-none-elf`); E0 boot tests report
       what cannot run as skipped.
   - [ ] **F, networking, storage and protocols:**

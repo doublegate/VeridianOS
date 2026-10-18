@@ -266,6 +266,13 @@ pub fn kernel_init() -> KernelResult<()> {
     // is taken from the frame allocator.
     mm::init_default();
 
+    // W^X for the kernel image, before another hart runs or an address
+    // space copies the kernel half.
+    #[cfg(all(target_arch = "riscv64", target_os = "none", feature = "alloc"))]
+    crate::arch::riscv64::kmap::protect_image();
+    #[cfg(all(target_arch = "aarch64", target_os = "none", feature = "alloc"))]
+    crate::arch::aarch64::kmap::protect_image();
+
     // Kernel stack region (N-26): its page tables must exist before the
     // first address space copies the kernel half.
     mm::kstack::init();
@@ -3578,6 +3585,119 @@ fn run_usercopy_tests(passed: &mut u32, failed: &mut u32) {
             );
         }
         report_test("riscv_image_header", ok, passed, failed);
+    }
+
+    // W^X for the kernel image on x86_64: the bootloader maps each ELF
+    // segment with its own permissions (RW, R E, R, RW) and the physical
+    // map without execute, so no image page may be both writable and
+    // executable, and the code must be read-only and executable.
+    #[cfg(all(target_arch = "x86_64", target_os = "none"))]
+    {
+        extern "C" {
+            static __kernel_end: u8;
+        }
+        use crate::mm::PageFlags;
+        let end = core::ptr::addr_of!(__kernel_end) as u64;
+        let root = crate::mm::get_kernel_page_table() as u64 & 0x000F_FFFF_FFFF_F000;
+        // SAFETY: the active root, through the physical map; only read.
+        let mapper = unsafe { crate::mm::vas::create_mapper_from_root_pub(root) };
+        let wx =
+            |f: PageFlags| f.contains(PageFlags::WRITABLE) && !f.contains(PageFlags::NO_EXECUTE);
+        let mut bad = None;
+        let mut va = 0xFFFF_FFFF_8010_0000u64;
+        while va < end && bad.is_none() {
+            if let Ok((frame, f)) = mapper.translate_page(crate::mm::VirtualAddress(va)) {
+                let alias = crate::mm::phys_to_virt_addr(frame.as_u64() << 12);
+                let alias_x = mapper
+                    .translate_page(crate::mm::VirtualAddress(alias))
+                    .is_ok_and(|(_, a)| !a.contains(PageFlags::NO_EXECUTE));
+                if wx(f) || alias_x {
+                    bad = Some(va);
+                }
+            }
+            va += 4096;
+        }
+        let code = mapper
+            .translate_page(crate::mm::VirtualAddress(
+                kernel_init_main as *const () as u64,
+            ))
+            .is_ok_and(|(_, f)| {
+                !f.contains(PageFlags::WRITABLE) && !f.contains(PageFlags::NO_EXECUTE)
+            });
+        if bad.is_some() || !code {
+            crate::println!(
+                "    writable and executable at {:?}; code read-execute: {}",
+                bad,
+                code
+            );
+        }
+        report_test(
+            "kernel_image_w_xor_x",
+            bad.is_none() && code,
+            passed,
+            failed,
+        );
+    }
+
+    // W^X for the kernel image (AArch64 and RISC-V).
+    #[cfg(all(
+        any(target_arch = "aarch64", target_arch = "riscv64"),
+        target_os = "none"
+    ))]
+    {
+        // W^X for the kernel: each image page has its section's
+        // permissions -- code read and execute, read-only data read,
+        // everything after it read and write but not execute -- and the
+        // physical map, which also reaches the image, executes nothing.
+        extern "C" {
+            static _start: u8;
+            static __text_end: u8;
+            static __rodata_end: u8;
+            static __kernel_end: u8;
+        }
+        #[cfg(target_arch = "aarch64")]
+        use crate::arch::aarch64::boot::kernel_phys;
+        #[cfg(target_arch = "riscv64")]
+        use crate::arch::riscv64::boot::kernel_phys;
+        let start = core::ptr::addr_of!(_start);
+        let text_end = core::ptr::addr_of!(__text_end) as u64;
+        let rodata_end = core::ptr::addr_of!(__rodata_end) as u64;
+        let end = core::ptr::addr_of!(__kernel_end) as u64;
+        // The kernel root: TTBR1's on AArch64 (ADR 0015).
+        let root = crate::mm::get_kernel_page_table() as u64;
+        // SAFETY: the active root, through the physical map; only read.
+        let mapper = unsafe { crate::mm::vas::create_mapper_from_root_pub(root) };
+        use crate::mm::PageFlags;
+        let mut bad = None;
+        let mut va = start as u64;
+        while va < end && bad.is_none() {
+            let want_w = va >= rodata_end;
+            let want_x = va < text_end;
+            let ok = mapper
+                .translate_page(crate::mm::VirtualAddress(va))
+                .is_ok_and(|(frame, f)| {
+                    f.contains(PageFlags::WRITABLE) == want_w
+                        && f.contains(PageFlags::NO_EXECUTE) != want_x
+                        && frame.as_u64() << 12 == kernel_phys(va)
+                });
+            let alias = crate::mm::phys_to_virt_addr(kernel_phys(va));
+            let alias_ok = mapper
+                .translate_page(crate::mm::VirtualAddress(alias))
+                .is_ok_and(|(_, f)| f.contains(PageFlags::NO_EXECUTE));
+            if !ok || !alias_ok {
+                bad = Some((va, ok, alias_ok));
+            }
+            va += 4096;
+        }
+        if let Some((va, ok, alias_ok)) = bad {
+            crate::println!(
+                "    {:#x}: image page right: {}, physical-map alias not executable: {}",
+                va,
+                ok,
+                alias_ok
+            );
+        }
+        report_test("kernel_image_w_xor_x", bad.is_none(), passed, failed);
     }
 }
 

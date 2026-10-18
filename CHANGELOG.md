@@ -292,6 +292,18 @@
   the table (AArch64 34/34, 36/36 on four CPUs). It failed before the move, and a probe `udf` at
   the top of `_start_rust` now prints `[EXCEPTION] unhandled sync`.
 
+- **W^X for the kernel image (AArch64, RISC-V).** boot.S maps the image with writable,
+  executable 1 GiB pages (RISC-V) or 2 MiB blocks (AArch64), so a write anywhere in kernel data
+  could plant code. Once the frame allocator is up, before any other CPU starts or an address
+  space copies the kernel half, the image is mapped in 4 KiB pages with its sections'
+  permissions: code read and execute, read-only data read, data, BSS and the boot stack read and
+  write (`mm::kimage`, new linker symbols `__text_end` and `__rodata_end`). RISC-V swaps the new
+  tables in with one store; AArch64 builds a new TTBR1 root and switches to it from the identity
+  map, as Linux's `cpu_replace_ttbr1` does, since splitting live blocks needs break-before-make.
+  RISC-V's physical map is no longer executable (AArch64's never was). The boot test
+  `kernel_image_w_xor_x` checks every image page and its physical-map alias, and on x86_64 that
+  the bootloader's per-segment mapping stays W^X.
+
 - **RISC-V Image (HR-03).** boot.S starts with Linux's 64-byte RISC-V Image header
   (`text_offset` 2 MiB, `image_size` covering BSS and the boot stack, version 0.2, magics `RISCV`
   and `RSC\x05`), which U-Boot `booti` and EFI loaders need, and `build-kernel.sh` writes the flat

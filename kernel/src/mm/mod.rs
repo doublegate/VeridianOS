@@ -15,6 +15,7 @@ pub mod frame_allocator;
 #[cfg(feature = "alloc")]
 pub mod frame_refs;
 pub mod heap;
+pub mod kimage;
 pub mod ksm;
 pub mod kstack;
 #[cfg(feature = "alloc")]

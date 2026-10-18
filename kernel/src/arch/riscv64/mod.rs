@@ -8,6 +8,8 @@ pub mod boot;
 pub mod bootstrap;
 pub mod entry;
 pub mod fpu;
+#[cfg(feature = "alloc")]
+pub mod kmap;
 pub mod serial;
 #[cfg(feature = "smp")]
 pub mod smp;
