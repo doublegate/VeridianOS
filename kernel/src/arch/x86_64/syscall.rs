@@ -4,124 +4,110 @@
 //! transitions. The key components are:
 //! - `syscall_entry`: naked assembly handler invoked by the SYSCALL instruction
 //! - `PerCpuData`: per-CPU storage for kernel/user RSP, accessed via GS segment
-//! - `init_syscall`: MSR configuration (EFER, STAR, LSTAR, SFMASK,
-//!   KernelGsBase)
+//! - `init_syscall`: MSR configuration (EFER, STAR, LSTAR, SFMASK) and the boot
+//!   CPU's per-CPU block
 
 #![allow(function_casts_as_integer)]
 
-use core::{
-    cell::UnsafeCell,
-    sync::atomic::{AtomicU64, Ordering},
-};
+use crate::{arch::percpu::this_arch_cpu_ptr, syscall::syscall_handler};
 
-use crate::syscall::syscall_handler;
+/// Saved user registers of a system call: the same [`TrapFrame`] layout the
+/// exception entry builds (`vector` = `SYSCALL_VECTOR`, `error_code` = the
+/// system call number). `rcx` and `r11` hold the user RIP and RFLAGS as the
+/// `syscall` instruction left them; `rip`, `rflags` and `rsp` are what the
+/// return path loads, so code that redirects the return (exec, signal
+/// delivery, sigreturn) changes those.
+pub type SyscallFrame = super::trap::TrapFrame;
 
-/// Saved user register frame from SYSCALL entry.
-///
-/// This struct matches the exact push order in `syscall_entry` assembly.
-/// After all pushes, RSP points to this layout (lowest address = first field).
-/// The struct is used by `fork_process()` to capture the live register state
-/// of the parent at the moment of the fork() syscall, so the child gets a
-/// copy of the parent's actual CPU registers rather than the stale
-/// ThreadContext from process creation time.
-#[repr(C)]
-#[derive(Debug, Clone, Copy)]
-pub struct SyscallFrame {
-    pub r9: u64,  // arg6 (pushed last)
-    pub r8: u64,  // arg5
-    pub r10: u64, // arg4
-    pub rdx: u64, // arg3
-    pub rsi: u64, // arg2
-    pub rdi: u64, // arg1
-    pub r15: u64,
-    pub r14: u64,
-    pub r13: u64,
-    pub r12: u64,
-    pub rbx: u64,
-    pub rbp: u64,
-    pub r11: u64, // User RFLAGS (clobbered by SYSCALL)
-    pub rcx: u64, // User RIP (clobbered by SYSCALL)
-}
-
-/// Kernel stack pointer after all user registers are saved in syscall_entry.
-/// Points to a valid `SyscallFrame` during syscall handler execution.
-/// Set to 0 outside of syscall context.
-static SYSCALL_FRAME_PTR: AtomicU64 = AtomicU64::new(0);
-
-/// Get a reference to the saved syscall register frame.
+/// Get a reference to the saved syscall register frame of the syscall this
+/// CPU is executing.
 ///
 /// Only valid during syscall handler execution. Returns `None` if called
-/// outside of a syscall context.
+/// outside of a syscall context. The pointer is per CPU (`gs:[0x10]`), so
+/// with more than one CPU a syscall never reads another CPU's frame (N-35).
 ///
 /// # Safety
 /// The returned reference points to the kernel stack. It is valid only while
 /// the syscall handler is executing (before registers are popped on return).
 pub fn get_syscall_frame() -> Option<&'static SyscallFrame> {
-    let ptr = SYSCALL_FRAME_PTR.load(Ordering::Acquire);
+    let cpu = this_arch_cpu_ptr();
+    if !crate::arch::percpu::is_arch_cpu_block(cpu as u64) {
+        return None;
+    }
+    // SAFETY: `cpu` is this CPU's block (checked); only this CPU writes it.
+    let ptr = unsafe { (*cpu).syscall_frame };
     if ptr == 0 {
         return None;
     }
-    // SAFETY: SYSCALL_FRAME_PTR is set by syscall_entry to point to the
-    // kernel stack after all registers are pushed. The pointer is valid
-    // for the duration of the syscall handler. The SyscallFrame layout
-    // matches the exact push order in the assembly.
+    // SAFETY: syscall_entry stores the kernel stack address after all
+    // registers are pushed, and clears it before they are popped, so a
+    // non-zero value is a live SyscallFrame for the duration of the
+    // handler. The layout matches the push order in the assembly.
     Some(unsafe { &*(ptr as *const SyscallFrame) })
 }
 
-/// Get the user RSP saved by syscall_entry into per-CPU data.
-///
-/// Only valid during syscall handler execution.
-pub fn get_saved_user_rsp() -> u64 {
-    // SAFETY: PER_CPU_AREA.user_rsp is set by syscall_entry (mov gs:[0x8], rsp)
-    // before switching to the kernel stack. It is valid during syscall handling.
-    unsafe { (*PER_CPU_AREA.0.get()).user_rsp }
+/// Run `f` on the frame of the system call this CPU is executing, mutably
+/// (rt_sigreturn rewrites the registers the call returns with). `None`
+/// outside a system call.
+pub fn with_syscall_frame<R>(f: impl FnOnce(&mut SyscallFrame) -> R) -> Option<R> {
+    let cpu = this_arch_cpu_ptr();
+    if !crate::arch::percpu::is_arch_cpu_block(cpu as u64) {
+        return None;
+    }
+    // SAFETY: this CPU's block; only this CPU writes it.
+    let ptr = unsafe { (*cpu).syscall_frame };
+    if ptr == 0 {
+        return None;
+    }
+    // SAFETY: as in get_syscall_frame; the frame belongs to the system call
+    // running on this CPU, which is the only code touching it now.
+    Some(f(unsafe { &mut *(ptr as *mut SyscallFrame) }))
 }
 
-/// Per-CPU data accessed via GS segment register during syscall entry/exit.
-///
-/// The `syscall_entry` naked asm reads `kernel_rsp` from `gs:[0x0]` and saves
-/// `user_rsp` to `gs:[0x8]`. This struct must be `#[repr(C)]` to guarantee
-/// field layout matches the assembly offsets.
-#[repr(C)]
-pub struct PerCpuData {
-    /// Kernel stack pointer (offset 0x0) -- loaded into RSP on syscall entry
-    pub kernel_rsp: u64,
-    /// User stack pointer (offset 0x8) -- saved from RSP on syscall entry
-    pub user_rsp: u64,
-}
+/// Per-CPU data accessed via GS during syscall entry/exit: the architecture
+/// per-CPU block (`kernel_rsp` at `gs:[0x0]`, `user_rsp` at `gs:[0x8]`,
+/// `syscall_frame` at `gs:[0x10]`).
+pub type PerCpuData = crate::arch::percpu::ArchCpu;
 
-#[repr(transparent)]
-pub(super) struct PerCpuDataCell(UnsafeCell<PerCpuData>);
-
-// SAFETY: Per-CPU data is only accessed via GS register from the current CPU
-// during syscall entry/exit. On a single-CPU system (our current QEMU config),
-// there are no concurrent accesses. The naked asm in syscall_entry uses
-// `mov gs:[offset]` which does not go through Rust's aliasing rules.
-unsafe impl Sync for PerCpuDataCell {}
-
-pub(super) static PER_CPU_AREA: PerCpuDataCell = PerCpuDataCell(UnsafeCell::new(PerCpuData {
-    kernel_rsp: 0,
-    user_rsp: 0,
-}));
-
-// CR3 switching removed: Process page tables now contain complete kernel
-// mapping (L4 entries 256-511 copied from boot tables), so syscalls run
-// with user CR3 active. This eliminates the GP fault on CR3 restore that
-// occurred when switching back to incompatible user page tables.
-
-/// Get a mutable pointer to the per-CPU data.
-///
-/// Used to update `kernel_rsp` on context switch and to set up KernelGsBase
-/// during init. The returned pointer is valid for the lifetime of the kernel.
+/// Get a mutable pointer to the calling CPU's per-CPU data.
 pub fn per_cpu_data_ptr() -> *mut PerCpuData {
-    PER_CPU_AREA.0.get()
+    this_arch_cpu_ptr()
+}
+
+/// Decide how a system call returns, after sanitising its frame (N-170).
+/// Returns 1 if `sysretq` can return it, 0 if it must use `iretq`.
+///
+/// `sysretq` loads RIP from RCX and RFLAGS from R11, so it can only return a
+/// frame whose `rcx`/`r11` still equal `rip`/`rflags` (not one rewritten by
+/// exec or sigreturn). It is also kept away from the top user page: on
+/// Intel CPUs a `sysretq` with a non-canonical RCX raises #GP in ring 0 with
+/// the user stack loaded (CVE-2012-0217), and Linux likewise refuses the
+/// last page below the canonical boundary (N-171).
+extern "C" fn syscall_exit_prepare(frame: &mut SyscallFrame) -> u64 {
+    // A task whose slice ran out during the call gives up the CPU first.
+    #[cfg(feature = "alloc")]
+    crate::sched::dispatch::preempt_user();
+    // A thread whose process received a fatal signal (or an exit_group by
+    // another thread) leaves here instead of returning.
+    crate::process::user_return_check();
+    // Pending signals: default actions, or a handler frame (sprint D3).
+    #[cfg(feature = "alloc")]
+    if crate::sched::dispatch::current_owner().is_some() {
+        crate::process::signals::deliver_on_return(frame);
+    }
+    super::trap::sanitize_user_frame(frame);
+    let sysret_ok = frame.rcx == frame.rip
+        && frame.r11 == frame.rflags
+        && frame.rip < super::trap::USER_END - 4096;
+    sysret_ok as u64
 }
 
 /// x86_64 SYSCALL instruction entry point
 ///
-/// This function handles the transition from user mode to kernel mode
-/// when a SYSCALL instruction is executed. It saves the user context,
-/// switches to the kernel stack, and calls the system call handler.
+/// Builds a [`TrapFrame`](super::trap::TrapFrame) on this CPU's entry stack
+/// (`gs:[0x0]`), calls the system call handler, stores its result in the
+/// frame, and returns through `sysretq` when the frame allows it and through
+/// `iretq` otherwise (see `syscall_exit_prepare`).
 ///
 /// # Safety
 /// This function must only be called by the CPU's SYSCALL instruction.
@@ -130,126 +116,98 @@ pub fn per_cpu_data_ptr() -> *mut PerCpuData {
 #[unsafe(naked)]
 pub unsafe extern "C" fn syscall_entry() {
     core::arch::naked_asm!(
-        // Save user context on kernel stack
-        "swapgs",                    // Switch to kernel GS
-        "mov gs:[0x8], rsp",        // Save user RSP in per-CPU data (offset 0x8)
-        "mov rsp, gs:[0x0]",        // Load kernel RSP from per-CPU data (offset 0x0)
+        // Interrupts are off (SFMASK clears IF) until the handler enables
+        // them, so nothing can arrive while GS and RSP are being switched.
+        "swapgs",
+        "mov gs:[0x8], rsp",          // user RSP (scratch)
+        "mov rsp, gs:[0x0]",          // this CPU's entry stack (16-byte aligned)
 
-        // CR3 switching removed: Process page tables contain complete kernel
-        // mapping, so we can access kernel data structures directly without
-        // switching to boot page tables.
-
-        // Save all user registers.
-        // rcx and r11 are clobbered by SYSCALL (RIP / RFLAGS), saved first.
-        // Callee-saved: rbp, rbx, r12-r15. Caller-saved / args: rdi, rsi,
-        // rdx, r10, r8, r9. All must be preserved so the user sees correct
-        // values after SYSRET (except rax which holds the return value).
-        "push rcx",                  // User RIP
-        "push r11",                  // User RFLAGS
-        "push rbp",
+        // Hardware-style frame: ss, rsp, rflags, cs, rip; then error_code
+        // (the syscall number) and vector.
+        "push {user_ss}",
+        "push qword ptr gs:[0x8]",
+        "push r11",                   // user RFLAGS
+        "push {user_cs}",
+        "push rcx",                   // user RIP
+        "push rax",                   // error_code = syscall number
+        "push -1",                    // vector = SYSCALL_VECTOR
+        "push rax",
         "push rbx",
+        "push rcx",
+        "push rdx",
+        "push rsi",
+        "push rdi",
+        "push rbp",
+        "push r8",
+        "push r9",
+        "push r10",
+        "push r11",
         "push r12",
         "push r13",
         "push r14",
         "push r15",
-        "push rdi",                  // arg1 (will be clobbered by ABI shuffle)
-        "push rsi",                  // arg2
-        "push rdx",                  // arg3
-        "push r10",                  // arg4
-        "push r8",                   // arg5
-        "push r9",                   // arg6
+        "mov gs:[0x10], rsp",         // this CPU's frame pointer (N-35)
 
-        // Save frame pointer for fork() register capture.
-        // RSP now points to the complete SyscallFrame on the kernel stack.
-        // fork_process() reads this to give the child a copy of the parent's
-        // live registers instead of the stale ThreadContext from exec/load.
-        "mov [{frame_ptr}], rsp",
-
-        // Save user SSE registers (xmm0-xmm15).
-        // The kernel is compiled with +sse2 and LLVM may use XMM registers
-        // in any Rust function (memcpy, memset, optimizations). Without
-        // saving them here, the kernel clobbers user SSE state.
-        "sub rsp, 256",              // 16 registers * 16 bytes
-        "movdqu [rsp],      xmm0",
-        "movdqu [rsp+0x10], xmm1",
-        "movdqu [rsp+0x20], xmm2",
-        "movdqu [rsp+0x30], xmm3",
-        "movdqu [rsp+0x40], xmm4",
-        "movdqu [rsp+0x50], xmm5",
-        "movdqu [rsp+0x60], xmm6",
-        "movdqu [rsp+0x70], xmm7",
-        "movdqu [rsp+0x80], xmm8",
-        "movdqu [rsp+0x90], xmm9",
-        "movdqu [rsp+0xa0], xmm10",
-        "movdqu [rsp+0xb0], xmm11",
-        "movdqu [rsp+0xc0], xmm12",
-        "movdqu [rsp+0xd0], xmm13",
-        "movdqu [rsp+0xe0], xmm14",
-        "movdqu [rsp+0xf0], xmm15",
-
-        // Rearrange registers from SYSCALL ABI to C calling convention.
-        //
-        // SYSCALL ABI:  rax=number, rdi=arg1, rsi=arg2, rdx=arg3, r10=arg4, r8=arg5
-        // C convention: rdi=param1, rsi=param2, rdx=param3, rcx=param4, r8=param5, r9=param6
-        //
-        // We need: rdi=rax, rsi=rdi, rdx=rsi, rcx=rdx, r8=r10, r9=r8
-        // Use xchg chain through rax as accumulator to rotate the values.
-        "xchg rdi, rax",             // rdi = syscall_num (rax), rax = arg1 (old rdi)
-        "xchg rsi, rax",             // rsi = arg1 (rax), rax = arg2 (old rsi)
-        "xchg rdx, rax",             // rdx = arg2 (rax), rax = arg3 (old rdx)
-        "mov rcx, rax",              // rcx = arg3 (old rdx)
-        "mov r9, r8",                // r9 = arg5 (must precede r8 overwrite)
-        "mov r8, r10",               // r8 = arg4
-
+        // SYSCALL ABI (rax = number, rdi rsi rdx r10 r8 = args) to the C
+        // ABI (rdi = number, rsi rdx rcx r8 r9 = args).
+        "xchg rdi, rax",
+        "xchg rsi, rax",
+        "xchg rdx, rax",
+        "mov rcx, rax",
+        "mov r9, r8",
+        "mov r8, r10",
+        "cld",
+        // Interrupts on for the system call itself (N-139): the frame is
+        // complete and GS is the kernel's, so an interrupt now is an
+        // ordinary ring-0 one. A CPU that spun in a long system call with
+        // interrupts off could neither be preempted by its own timer nor
+        // answer a TLB shootdown, and one CPU waiting for that
+        // acknowledgement while the other waited for its lock deadlocked.
+        "sti",
         "call {handler}",
 
-        // Clear frame pointer now that handler has returned.
-        // This prevents stale pointer use outside syscall context.
-        "mov qword ptr [{frame_ptr}], 0",
-
-        // Restore user SSE registers (xmm0-xmm15)
-        "movdqu xmm0,  [rsp]",
-        "movdqu xmm1,  [rsp+0x10]",
-        "movdqu xmm2,  [rsp+0x20]",
-        "movdqu xmm3,  [rsp+0x30]",
-        "movdqu xmm4,  [rsp+0x40]",
-        "movdqu xmm5,  [rsp+0x50]",
-        "movdqu xmm6,  [rsp+0x60]",
-        "movdqu xmm7,  [rsp+0x70]",
-        "movdqu xmm8,  [rsp+0x80]",
-        "movdqu xmm9,  [rsp+0x90]",
-        "movdqu xmm10, [rsp+0xa0]",
-        "movdqu xmm11, [rsp+0xb0]",
-        "movdqu xmm12, [rsp+0xc0]",
-        "movdqu xmm13, [rsp+0xd0]",
-        "movdqu xmm14, [rsp+0xe0]",
-        "movdqu xmm15, [rsp+0xf0]",
-        "add rsp, 256",
-
-        // Restore user registers (reverse order of saves).
-        // rax holds the syscall return value and is NOT restored.
-        "pop r9",
-        "pop r8",
-        "pop r10",
-        "pop rdx",
-        "pop rsi",
-        "pop rdi",
+        // The handler may have enabled interrupts (waits); nothing may
+        // arrive from here to the return, or it would see a ring-0 CS
+        // with the user GS base after the swapgs.
+        "cli",
+        "mov [rsp + {rax_off}], rax",         // result into frame.rax
+        "mov qword ptr gs:[0x10], 0",
+        "mov rdi, rsp",
+        "call {prepare}",
+        "test eax, eax",                      // flags survive until the jz
         "pop r15",
         "pop r14",
         "pop r13",
         "pop r12",
-        "pop rbx",
+        "pop r11",
+        "pop r10",
+        "pop r9",
+        "pop r8",
         "pop rbp",
-        "pop r11",                   // User RFLAGS
-        "pop rcx",                   // User RIP
+        "pop rdi",
+        "pop rsi",
+        "pop rdx",
+        "pop rcx",
+        "pop rbx",
+        "pop rax",
+        "jz 2f",
 
-        // Restore user stack and return (no CR3 switching)
-        "mov rsp, gs:[0x8]",        // Restore user RSP
-        "swapgs",                    // Switch back to user GS
+        // sysretq: rcx == rip and r11 == rflags (checked above).
+        "mov rsp, [rsp + 16 + 24]",   // user RSP from frame.rsp
+        "swapgs",
         "sysretq",
 
+        // iretq: the frame's rip/cs/rflags/rsp/ss.
+        "2:",
+        "add rsp, 16",                // vector, error_code
+        "swapgs",
+        "iretq",
+
         handler = sym syscall_handler,
-        frame_ptr = sym SYSCALL_FRAME_PTR,
+        prepare = sym syscall_exit_prepare,
+        user_ss = const super::trap::USER_SS,
+        user_cs = const super::trap::USER_CS,
+        rax_off = const core::mem::offset_of!(super::trap::TrapFrame, rax),
     );
 }
 
@@ -260,12 +218,30 @@ pub unsafe extern "C" fn syscall_entry() {
 /// - **LSTAR**: Set syscall entry point to `syscall_entry`
 /// - **STAR**: Set segment selectors for SYSCALL (kernel) and SYSRET (user)
 /// - **SFMASK**: Mask IF flag so syscall entry runs with interrupts disabled
-/// - **KernelGsBase**: Point to `PerCpuData` for swapgs in syscall_entry
+/// - **GS_BASE**: the boot CPU's per-CPU block
 ///
 /// Must be called after `gdt::init()` and before any user-mode transitions.
 pub fn init_syscall() {
+    init_syscall_msrs();
+
+    // Per-CPU block: GS_BASE while ring 0 runs; syscall_entry's swapgs
+    // brings it in from KernelGsBase on entry from ring 3.
+
+    // The boot CPU is logical CPU 0; its hardware id is the initial APIC ID.
+    // SAFETY: CPUID leaf 1 is unprivileged and side-effect free.
+    let apic_id = unsafe { core::arch::x86_64::__cpuid(1).ebx >> 24 };
+    // SAFETY: runs once on the boot CPU, before any syscall or other use of
+    // its per-CPU block.
+    unsafe { crate::arch::percpu::install(0, apic_id) };
+}
+
+/// This CPU's SYSCALL/SYSRET MSRs (EFER.SCE, LSTAR, STAR, SFMASK). Every
+/// CPU needs them: an AP without them jumped to RIP 0 in ring 0 on its
+/// first system call (N-172). The selectors are the same on every CPU
+/// (`gdt::init_ap` uses the boot CPU's layout).
+pub fn init_syscall_msrs() {
     use x86_64::registers::{
-        model_specific::{Efer, EferFlags, KernelGsBase, LStar, SFMask, Star},
+        model_specific::{Efer, EferFlags, LStar, SFMask, Star},
         rflags::RFlags,
     };
 
@@ -328,16 +304,4 @@ pub fn init_syscall() {
             | RFlags::ALIGNMENT_CHECK
             | RFlags::NESTED_TASK,
     );
-
-    // Set up per-CPU data for swapgs.
-    // KernelGsBase is swapped with GsBase on the `swapgs` instruction.
-    // After swapgs in syscall_entry, GS points to our PerCpuData so the
-    // assembly can read kernel_rsp from gs:[0x0] and save user_rsp to gs:[0x8].
-    //
-    // CR3 initialization removed: Process page tables now contain complete
-    // kernel mappings (L4 entries 256-511), so syscalls run with user CR3
-    // and can directly access kernel data structures.
-
-    let per_cpu_addr = per_cpu_data_ptr() as u64;
-    KernelGsBase::write(x86_64::VirtAddr::new(per_cpu_addr));
 }

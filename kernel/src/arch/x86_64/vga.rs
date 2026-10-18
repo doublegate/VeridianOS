@@ -95,6 +95,7 @@ impl Writer {
                 // at 0xb8000. Row indices are bounded by BUFFER_HEIGHT (loop range 1..25),
                 // and col by BUFFER_WIDTH (0..80). row-1 is always >= 0 since row starts at 1.
                 let character = unsafe { core::ptr::read_volatile(&self.buffer.chars[row][col]) };
+                // SAFETY: same buffer and bounds as the read above; row - 1 >= 0.
                 unsafe {
                     write_volatile(&mut self.buffer.chars[row - 1][col], character);
                 }

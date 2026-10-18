@@ -355,11 +355,29 @@ impl LocalApic {
     /// - `dest`: Destination APIC ID.
     /// - `vector`: Interrupt vector.
     pub fn send_ipi(&self, dest: u8, vector: u8) {
-        // Write high dword first (destination in bits 31:24).
-        self.write(LAPIC_ICR_HIGH, (dest as u32) << 24);
-        // Write low dword (vector + delivery mode Fixed). Writing ICR low
-        // triggers the IPI.
-        self.write(LAPIC_ICR_LOW, vector as u32);
+        // The ICR is two registers written in turn: an interrupt handler
+        // sending its own IPI in between would overwrite the destination
+        // (N-173). Interrupts stay off for the whole sequence, and the
+        // previous IPI must have left (delivery status idle) first.
+        x86_64::instructions::interrupts::without_interrupts(|| {
+            self.wait_icr_idle();
+            // Destination in bits 31:24, then the low dword (vector,
+            // delivery mode Fixed), whose write sends.
+            self.write(LAPIC_ICR_HIGH, (dest as u32) << 24);
+            self.write(LAPIC_ICR_LOW, vector as u32);
+        });
+    }
+
+    /// Wait (at most 10 ms) until the previous IPI has been accepted.
+    fn wait_icr_idle(&self) {
+        let start = super::tsc::read();
+        let limit = super::tsc::hz() / 100;
+        while self.read(LAPIC_ICR_LOW) & (1 << 12) != 0 {
+            if super::tsc::read().wrapping_sub(start) > limit {
+                return;
+            }
+            core::hint::spin_loop();
+        }
     }
 
     /// Send an INIT IPI to a target CPU (used in AP startup sequence).
@@ -378,13 +396,39 @@ impl LocalApic {
         self.write(LAPIC_ICR_LOW, 0x00004600 | startup_page as u32);
     }
 
+    /// Write the ICR for `dest` and wait until the IPI has been accepted
+    /// (Delivery Status, bit 12, clears), as Linux's
+    /// `safe_apic_wait_icr_idle` does. Returns false on a timeout.
+    fn icr_send_wait(&self, dest: u8, low: u32) -> bool {
+        self.write(LAPIC_ICR_HIGH, (dest as u32) << 24);
+        self.write(LAPIC_ICR_LOW, low);
+        let start = super::tsc::read();
+        let limit = super::tsc::hz() / 100; // 10 ms
+        while self.read(LAPIC_ICR_LOW) & (1 << 12) != 0 {
+            if super::tsc::read().wrapping_sub(start) > limit {
+                return false;
+            }
+            core::hint::spin_loop();
+        }
+        true
+    }
+
+    /// Clear the Error Status Register (a write arms it, then a read).
+    fn clear_esr(&self) -> u32 {
+        self.write(LAPIC_ESR, 0);
+        self.read(LAPIC_ESR)
+    }
+
     /// Broadcast IPI to all CPUs except self.
     pub fn send_ipi_all_excluding_self(&self, vector: u8) {
-        // Shorthand = 11 (all excluding self), no destination field needed.
-        self.write(
-            LAPIC_ICR_LOW,
-            0x000C0000 | vector as u32, // shorthand=11, dest_mode=physical, delivery=fixed
-        );
+        x86_64::instructions::interrupts::without_interrupts(|| {
+            self.wait_icr_idle();
+            // Shorthand = 11 (all excluding self), no destination field.
+            self.write(
+                LAPIC_ICR_LOW,
+                0x000C0000 | vector as u32, // shorthand=11, dest_mode=physical, delivery=fixed
+            );
+        });
     }
 }
 
@@ -490,9 +534,9 @@ impl IoApic {
 // Global APIC state (no static mut -- uses spin::Mutex)
 // ---------------------------------------------------------------------------
 
-/// Combined Local APIC + I/O APIC state, protected by a spinlock.
+/// I/O APIC state, protected by a spinlock. The I/O APIC is one device
+/// shared by every CPU; the Local APIC is not kept here (see `LAPIC_BASE`).
 struct ApicState {
-    local_apic: LocalApic,
     io_apic: IoApic,
 }
 
@@ -503,6 +547,21 @@ unsafe impl Send for ApicState {}
 
 /// Global APIC state. Initialized once by `init()`.
 static APIC_STATE: Mutex<Option<ApicState>> = Mutex::new(None);
+
+/// Virtual address of the Local APIC registers (0 before `init`). Every CPU
+/// sees its own Local APIC at this one address, so EOI, IPIs and the local
+/// timer need no lock. They used to take `APIC_STATE`'s spinlock, which
+/// serialised every CPU's EOI and would deadlock an interrupt handler's EOI
+/// if the interrupted code held the lock.
+static LAPIC_BASE: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+/// The calling CPU's Local APIC, once initialized.
+fn lapic() -> Option<LocalApic> {
+    match LAPIC_BASE.load(Ordering::Acquire) {
+        0 => None,
+        base => Some(LocalApic::new(base)),
+    }
+}
 
 /// Flag indicating whether the APIC subsystem has been initialized.
 static APIC_INITIALIZED: AtomicBool = AtomicBool::new(false);
@@ -597,10 +656,8 @@ pub fn init() -> KernelResult<()> {
 
     // Store global state.
     let mut state = APIC_STATE.lock();
-    *state = Some(ApicState {
-        local_apic: lapic,
-        io_apic: ioapic,
-    });
+    LAPIC_BASE.store(lapic.base, Ordering::Release);
+    *state = Some(ApicState { io_apic: ioapic });
     APIC_INITIALIZED.store(true, Ordering::Release);
 
     println!("[APIC] APIC subsystem initialized successfully");
@@ -616,16 +673,14 @@ pub fn is_initialized() -> bool {
 ///
 /// Must be called at the end of every APIC-sourced interrupt handler.
 pub fn send_eoi() {
-    let state = APIC_STATE.lock();
-    if let Some(ref s) = *state {
-        s.local_apic.send_eoi();
+    if let Some(l) = lapic() {
+        l.send_eoi();
     }
 }
 
 /// Read the Local APIC ID of the current CPU.
 pub fn read_id() -> Option<u8> {
-    let state = APIC_STATE.lock();
-    state.as_ref().map(|s| s.local_apic.read_id())
+    lapic().map(|l| l.read_id())
 }
 
 /// Configure the Local APIC timer for periodic interrupts.
@@ -642,10 +697,9 @@ pub fn read_id() -> Option<u8> {
 ///   - `0x0B` = divide by 1
 /// - `initial_count`: Initial countdown value.
 pub fn setup_timer(vector: u8, divide: u8, initial_count: u32) -> KernelResult<()> {
-    let state = APIC_STATE.lock();
-    match state.as_ref() {
-        Some(s) => {
-            s.local_apic.setup_timer(vector, divide, initial_count);
+    match lapic() {
+        Some(l) => {
+            l.setup_timer(vector, divide, initial_count);
             println!(
                 "[APIC] Timer configured: vector={}, divide={:#x}, count={}",
                 vector, divide, initial_count
@@ -658,10 +712,9 @@ pub fn setup_timer(vector: u8, divide: u8, initial_count: u32) -> KernelResult<(
 
 /// Stop the Local APIC timer.
 pub fn stop_timer() -> KernelResult<()> {
-    let state = APIC_STATE.lock();
-    match state.as_ref() {
-        Some(s) => {
-            s.local_apic.stop_timer();
+    match lapic() {
+        Some(l) => {
+            l.stop_timer();
             Ok(())
         }
         None => Err(KernelError::NotInitialized { subsystem: "APIC" }),
@@ -714,22 +767,38 @@ pub fn unmask_irq(irq: u8) -> KernelResult<()> {
 /// - `dest`: Destination APIC ID.
 /// - `vector`: Interrupt vector.
 pub fn send_ipi(dest: u8, vector: u8) -> KernelResult<()> {
-    let state = APIC_STATE.lock();
-    match state.as_ref() {
-        Some(s) => {
-            s.local_apic.send_ipi(dest, vector);
+    match lapic() {
+        Some(l) => {
+            l.send_ipi(dest, vector);
             Ok(())
         }
         None => Err(KernelError::NotInitialized { subsystem: "APIC" }),
     }
 }
 
+/// Send `vector` to logical CPU `cpu`: its APIC ID comes from the per-CPU
+/// block (the logical id was used as the APIC destination before, N-173).
+pub fn send_ipi_to_cpu(cpu: usize, vector: u8) -> KernelResult<()> {
+    if cpu >= crate::arch::smp_boot::online_cpus() as usize {
+        return Err(KernelError::InvalidArgument {
+            name: "cpu",
+            value: "not online",
+        });
+    }
+    // SAFETY: an online CPU's block is initialised and its hw_id fixed.
+    let hw = unsafe { (*crate::arch::percpu::arch_cpu_ptr(cpu)).hw_id };
+    let dest = u8::try_from(hw).map_err(|_| KernelError::InvalidArgument {
+        name: "cpu",
+        value: "APIC ID above 255 (x2APIC)",
+    })?;
+    send_ipi(dest, vector)
+}
+
 /// Send INIT IPI to a target CPU for AP startup sequence.
 pub fn send_init_ipi(dest: u8) -> KernelResult<()> {
-    let state = APIC_STATE.lock();
-    match state.as_ref() {
-        Some(s) => {
-            s.local_apic.send_init_ipi(dest);
+    match lapic() {
+        Some(l) => {
+            l.send_init_ipi(dest);
             Ok(())
         }
         None => Err(KernelError::NotInitialized { subsystem: "APIC" }),
@@ -741,22 +810,97 @@ pub fn send_init_ipi(dest: u8) -> KernelResult<()> {
 /// `startup_page` is the physical page number where AP trampoline code resides
 /// (e.g., 0x08 for physical address 0x8000).
 pub fn send_startup_ipi(dest: u8, startup_page: u8) -> KernelResult<()> {
-    let state = APIC_STATE.lock();
-    match state.as_ref() {
-        Some(s) => {
-            s.local_apic.send_startup_ipi(dest, startup_page);
+    match lapic() {
+        Some(l) => {
+            l.send_startup_ipi(dest, startup_page);
             Ok(())
         }
         None => Err(KernelError::NotInitialized { subsystem: "APIC" }),
     }
 }
 
+/// Busy-wait `us` microseconds on the TSC.
+fn udelay(us: u64) {
+    let start = super::tsc::read();
+    let ticks = super::tsc::hz() / 1_000_000 * us;
+    while super::tsc::read().wrapping_sub(start) < ticks {
+        core::hint::spin_loop();
+    }
+}
+
+/// Whether firmware left the Local APIC in x2APIC mode (MMIO disabled;
+/// this driver is xAPIC only).
+pub fn x2apic_enabled() -> bool {
+    rdmsr(IA32_APIC_BASE_MSR) & (1 << 10) != 0
+}
+
+/// Start the CPU with Local APIC ID `apic_id` at physical page
+/// `vector_page` (`page << 12` is the trampoline): INIT assert and
+/// de-assert, 10 ms, then two STARTUP IPIs 200 us apart, with the timings of
+/// the SDM's MP initialisation sequence (Vol. 3A, "MP Initialization").
+/// Both SIPIs are always sent: one that arrives after the CPU left
+/// wait-for-SIPI is ignored, and one that was missed needs the second.
+pub fn start_ap(apic_id: u8, vector_page: u8) -> Result<(), &'static str> {
+    let l = lapic().ok_or("APIC not initialized")?;
+    l.clear_esr();
+    if !l.icr_send_wait(apic_id, 0x0000_C500) {
+        return Err("INIT assert not delivered");
+    }
+    if !l.icr_send_wait(apic_id, 0x0000_8500) {
+        return Err("INIT de-assert not delivered");
+    }
+    udelay(10_000);
+    for _ in 0..2 {
+        l.clear_esr();
+        if !l.icr_send_wait(apic_id, 0x0000_4600 | vector_page as u32) {
+            return Err("STARTUP IPI not delivered");
+        }
+        udelay(200);
+        if l.clear_esr() & 0xEF != 0 {
+            return Err("APIC error after STARTUP IPI");
+        }
+    }
+    Ok(())
+}
+
+/// Set up the calling secondary CPU's Local APIC: mask the LVT entries,
+/// software-enable it, accept all priorities. Lock-free (its own LAPIC).
+pub fn init_local_secondary() {
+    if let Some(l) = lapic() {
+        l.mask_all_lvt();
+        l.enable();
+        l.set_task_priority(0);
+    }
+}
+
+/// Start the calling secondary CPU's tick, in the mode and at the period
+/// the boot CPU chose.
+pub fn start_local_timer() {
+    let Some(l) = lapic() else { return };
+    if !APIC_TIMER_ACTIVE.load(Ordering::Acquire) {
+        return;
+    }
+    let period = DEADLINE_PERIOD_TSC.load(Ordering::Relaxed);
+    if period != 0 {
+        l.setup_deadline_timer(APIC_TIMER_VECTOR);
+        let first = super::tsc::read() + period;
+        crate::arch::percpu::set_timer_next(first);
+        write_tsc_deadline(first);
+        return;
+    }
+    let tpm = APIC_TICKS_PER_MS.load(Ordering::Relaxed) as u64;
+    let hz = APIC_TIMER_HZ.load(Ordering::Relaxed).max(1) as u64;
+    let count = tpm * 1000 / hz;
+    if count != 0 && count <= u32::MAX as u64 {
+        l.setup_timer(APIC_TIMER_VECTOR, 0x03, count as u32);
+    }
+}
+
 /// Broadcast an IPI to all CPUs except self. Used for TLB shootdown.
 pub fn send_ipi_all_excluding_self(vector: u8) -> KernelResult<()> {
-    let state = APIC_STATE.lock();
-    match state.as_ref() {
-        Some(s) => {
-            s.local_apic.send_ipi_all_excluding_self(vector);
+    match lapic() {
+        Some(l) => {
+            l.send_ipi_all_excluding_self(vector);
             Ok(())
         }
         None => Err(KernelError::NotInitialized { subsystem: "APIC" }),
@@ -778,8 +922,6 @@ static APIC_TIMER_HZ: core::sync::atomic::AtomicU32 = core::sync::atomic::Atomic
 
 /// TSC-deadline mode: period in TSC ticks (0 = periodic LAPIC mode).
 static DEADLINE_PERIOD_TSC: AtomicU64 = AtomicU64::new(0);
-/// TSC-deadline mode: the deadline currently armed.
-static NEXT_DEADLINE_TSC: AtomicU64 = AtomicU64::new(0);
 
 /// Arm IA32_TSC_DEADLINE. Intel requires the LVT write that selected
 /// deadline mode to be ordered before this WRMSR (WRMSR to this MSR is not
@@ -799,14 +941,8 @@ pub fn rearm_deadline_timer() {
     if period == 0 {
         return;
     }
-    let now = super::tsc::read();
-    let mut next = NEXT_DEADLINE_TSC
-        .load(Ordering::Relaxed)
-        .wrapping_add(period);
-    if next <= now {
-        next = now + period;
-    }
-    NEXT_DEADLINE_TSC.store(next, Ordering::Relaxed);
+    // The deadline bookkeeping is per CPU, like the MSR it mirrors.
+    let next = crate::arch::percpu::advance_timer(super::tsc::read(), period);
     write_tsc_deadline(next);
 }
 
@@ -839,12 +975,7 @@ pub fn ticks_per_ms() -> u32 {
 ///
 /// Must be called after `init()` and before `start_timer()`.
 pub fn calibrate_timer() -> KernelResult<u32> {
-    let state = APIC_STATE.lock();
-    let s = state
-        .as_ref()
-        .ok_or(KernelError::NotInitialized { subsystem: "APIC" })?;
-
-    let lapic = &s.local_apic;
+    let lapic = lapic().ok_or(KernelError::NotInitialized { subsystem: "APIC" })?;
 
     // Use divide-by-16 for calibration (gives good resolution).
     let divide = 0x03u8; // divide by 16
@@ -937,14 +1068,11 @@ pub fn start_timer(freq_hz: u32) -> KernelResult<()> {
     let tsc_hz = super::tsc::hz();
     if super::tsc::deadline_mode_supported() && tsc_hz != 0 && freq_hz != 0 {
         let period = tsc_hz / freq_hz as u64;
-        let state = APIC_STATE.lock();
-        let s = state
-            .as_ref()
-            .ok_or(KernelError::NotInitialized { subsystem: "APIC" })?;
-        s.local_apic.setup_deadline_timer(APIC_TIMER_VECTOR);
+        let l = lapic().ok_or(KernelError::NotInitialized { subsystem: "APIC" })?;
+        l.setup_deadline_timer(APIC_TIMER_VECTOR);
         DEADLINE_PERIOD_TSC.store(period, Ordering::Relaxed);
         let first = super::tsc::read() + period;
-        NEXT_DEADLINE_TSC.store(first, Ordering::Relaxed);
+        crate::arch::percpu::set_timer_next(first);
         write_tsc_deadline(first);
         APIC_TIMER_HZ.store(freq_hz, Ordering::Relaxed);
         APIC_TIMER_ACTIVE.store(true, Ordering::Release);
@@ -976,14 +1104,10 @@ pub fn start_timer(freq_hz: u32) -> KernelResult<()> {
         });
     }
 
-    let state = APIC_STATE.lock();
-    let s = state
-        .as_ref()
-        .ok_or(KernelError::NotInitialized { subsystem: "APIC" })?;
+    let l = lapic().ok_or(KernelError::NotInitialized { subsystem: "APIC" })?;
 
     // Configure periodic mode at APIC_TIMER_VECTOR with divide-by-16.
-    s.local_apic
-        .setup_timer(APIC_TIMER_VECTOR, 0x03, initial_count as u32);
+    l.setup_timer(APIC_TIMER_VECTOR, 0x03, initial_count as u32);
 
     APIC_TIMER_HZ.store(freq_hz, Ordering::Relaxed);
     APIC_TIMER_ACTIVE.store(true, Ordering::Release);

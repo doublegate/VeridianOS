@@ -23,8 +23,13 @@ pub mod multiboot;
 pub mod pat;
 pub mod rtc;
 pub mod serial;
+#[cfg(all(feature = "smp", target_os = "none"))]
+pub mod smp;
+#[cfg(feature = "alloc")]
+pub mod switch;
 pub mod syscall;
 pub mod timer;
+pub mod trap;
 pub mod tsc;
 #[cfg(target_os = "none")]
 pub(crate) mod usercopy;
@@ -58,7 +63,6 @@ pub fn init() {
 
     println!("[ARCH] Starting GDT init...");
     gdt::init();
-    gdt::init_tss_rsp0_ptr();
     println!("[ARCH] GDT initialized");
 
     // Initialize SYSCALL/SYSRET support (must be after GDT init so that
@@ -69,6 +73,7 @@ pub fn init() {
 
     println!("[ARCH] Starting IDT init...");
     idt::init();
+    trap::enable_machine_check();
     println!("[ARCH] IDT initialized");
 
     // Initialize PIC (8259) before enabling interrupts
@@ -275,7 +280,9 @@ pub fn serial_init() -> uart_16550::SerialPort {
 /// intended device. Writing to an incorrect port can cause undefined
 /// hardware behavior.
 pub unsafe fn outb(port: u16, value: u8) {
-    x86_64::instructions::port::Port::new(port).write(value);
+    // SAFETY: forwarded from this function's contract: `port` is a valid
+    // I/O port for the intended device.
+    unsafe { x86_64::instructions::port::Port::new(port).write(value) };
 }
 
 /// Read a byte from an x86_64 I/O port.
@@ -285,7 +292,9 @@ pub unsafe fn outb(port: u16, value: u8) {
 /// intended device. Reading from an incorrect port may return garbage
 /// or trigger hardware side effects.
 pub unsafe fn inb(port: u16) -> u8 {
-    x86_64::instructions::port::Port::new(port).read()
+    // SAFETY: forwarded from this function's contract: `port` is a valid
+    // I/O port for the intended device.
+    unsafe { x86_64::instructions::port::Port::new(port).read() }
 }
 
 /// Write a 16-bit word to an x86_64 I/O port.
@@ -294,7 +303,9 @@ pub unsafe fn inb(port: u16) -> u8 {
 /// The caller must ensure `port` is a valid I/O port address for the
 /// intended device and that the device expects a 16-bit write.
 pub unsafe fn outw(port: u16, value: u16) {
-    x86_64::instructions::port::Port::new(port).write(value);
+    // SAFETY: forwarded from this function's contract: `port` is a valid
+    // I/O port whose device expects a 16-bit write.
+    unsafe { x86_64::instructions::port::Port::new(port).write(value) };
 }
 
 /// Read a 16-bit word from an x86_64 I/O port.
@@ -303,7 +314,9 @@ pub unsafe fn outw(port: u16, value: u16) {
 /// The caller must ensure `port` is a valid I/O port address for the
 /// intended device and that the device produces valid 16-bit reads.
 pub unsafe fn inw(port: u16) -> u16 {
-    x86_64::instructions::port::Port::new(port).read()
+    // SAFETY: forwarded from this function's contract: `port` is a valid
+    // I/O port whose device produces 16-bit reads.
+    unsafe { x86_64::instructions::port::Port::new(port).read() }
 }
 
 /// Write a 32-bit dword to an x86_64 I/O port.
@@ -312,7 +325,9 @@ pub unsafe fn inw(port: u16) -> u16 {
 /// The caller must ensure `port` is a valid I/O port address for the
 /// intended device and that the device expects a 32-bit write.
 pub unsafe fn outl(port: u16, value: u32) {
-    x86_64::instructions::port::Port::new(port).write(value);
+    // SAFETY: forwarded from this function's contract: `port` is a valid
+    // I/O port whose device expects a 32-bit write.
+    unsafe { x86_64::instructions::port::Port::new(port).write(value) };
 }
 
 /// Read a 32-bit dword from an x86_64 I/O port.
@@ -321,11 +336,10 @@ pub unsafe fn outl(port: u16, value: u32) {
 /// The caller must ensure `port` is a valid I/O port address for the
 /// intended device and that the device produces valid 32-bit reads.
 pub unsafe fn inl(port: u16) -> u32 {
-    x86_64::instructions::port::Port::new(port).read()
+    // SAFETY: forwarded from this function's contract: `port` is a valid
+    // I/O port whose device produces 32-bit reads.
+    unsafe { x86_64::instructions::port::Port::new(port).read() }
 }
-
-/// Kernel heap start address (mapped by bootloader 0.9)
-pub const HEAP_START: usize = 0x444444440000;
 
 /// Flush TLB for a specific virtual address. Called via
 /// `crate::arch::tlb_flush_address()`.

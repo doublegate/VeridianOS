@@ -49,6 +49,8 @@ pub fn init() {
     let epoch = rtc_to_epoch(&time);
     BOOT_EPOCH.store(epoch, Ordering::Relaxed);
     BOOT_TSC.store(crate::arch::timer::read_hw_timestamp(), Ordering::Relaxed);
+    // The wall clock (CLOCK_REALTIME) starts from this reading (N-219).
+    crate::timer::realtime::set_from_rtc(epoch, crate::timer::monotonic_ns());
     crate::println!(
         "[RTC] Boot time: {:04}-{:02}-{:02} {:02}:{:02}:{:02} (epoch={})",
         time.year,
