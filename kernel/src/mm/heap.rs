@@ -1,354 +1,111 @@
-//! Kernel heap allocator
+//! Kernel heap
 //!
-//! Implements a slab allocator for the kernel heap with size classes
-//! and per-CPU caches for performance.
+//! The backing memory and initialisation of the global allocator: a
+//! `linked_list_allocator::LockedHeap` on x86_64 and RISC-V, and a bump
+//! allocator on AArch64 until its MMU is on (N-28; MEM-SEC-03 tracks giving
+//! it a real heap). The
+//! slab allocator that used to live here was never instantiated -- every
+//! request went to its fallback -- and was removed (MEM-INC-02).
 
-#![allow(dead_code, clippy::unwrap_or_default)]
+use core::sync::atomic::{AtomicUsize, Ordering};
 
-#[cfg(target_arch = "x86_64")]
-use core::{alloc::Layout, ptr::NonNull};
-
-#[cfg(target_arch = "x86_64")]
-use linked_list_allocator::LockedHeap;
-#[cfg(target_arch = "x86_64")]
-use spin::Mutex;
-
-#[cfg(target_arch = "x86_64")]
-use super::VirtualAddress;
-
-// Static heap storage - kept in BSS for layout stability across all
-// architectures. x86_64 uses this directly; AArch64/RISC-V use fixed physical
-// addresses instead to avoid BSS/heap overlap issues.
+// x86_64 (N-278): the heap is a run of physical frames taken from the frame
+// allocator at boot and used through the physical-memory map, sized from the
+// RAM the bootloader reports (`heap_size_for`). It used to be a 1 GiB static
+// array in the BSS, which made every guest need more than 1 GiB of RAM just
+// to load the kernel. The sizing keeps the old capacity where the memory is
+// there: a third of usable RAM rounded down to a power of two, 512 MiB at
+// `-m 2048M`, the old 1 GiB from 4 GiB --
+// what loading the self-hosting toolchain needs (cc1 is 35 MB, and exec
+// keeps a second copy while loading it; the BlockFS cache, VFS metadata and
+// the Rust toolchain rootfs come on top).
 //
-// SAFETY JUSTIFICATION: This static mut is intentionally kept because:
-// 1. It provides the raw backing memory for the kernel heap allocator
-// 2. It must exist before the heap is initialized (pre-heap bootstrap)
-// 3. Only accessed via addr_of_mut!() in init(), never through &mut references
-// 4. After init, all access goes through the allocator's own synchronization
-// 5. Cannot use OnceLock/GlobalState as those require heap allocation
-//    themselves
-// x86_64 uses a 512MB heap to support loading the self-hosting toolchain
-// rootfs (~57MB TAR with BusyBox source + GCC toolchain) and Phase C native
-// compilation. The rootfs extracts to ~54MB of VFS content (cc1 alone is
-// 35MB). During exec, fs::read_file() creates a second 35MB copy of cc1
-// for ELF loading. Combined with VFS metadata (~10MB), the BlockFS block
-// cache (below), process structures, and heap fragmentation from Phase B
-// tests, 384MB was insufficient when both BlockFS and native compilation
-// are active.
-// 1GB provides headroom for BlockFS cache, VFS, native compilation, and
-// the Rust toolchain rootfs (rustc+cargo+std ~400MB). Requires QEMU -m 4096M
-// minimum (typically -m 32768M for Phase 6.5 self-hosting).
-// AArch64/RISC-V keep 8MB since they have less RAM (128MB default). Their
-// bump allocator never frees, so the BlockFS block cache recycles its
-// buffers. Its configured capacity is 1 MiB there (16 MiB on x86_64). That
-// is a target, not a hard limit: dirty blocks stay pinned until sync and can
-// grow the slot pool past it, and the slots are recycled rather than freed,
-// so the pool stays that large after a sync (fs/blockfs/cache.rs, ADR 0003).
-#[cfg(target_arch = "x86_64")]
-#[allow(static_mut_refs)]
-static mut HEAP_MEMORY: [u8; 1024 * 1024 * 1024] = [0; 1024 * 1024 * 1024];
-
+// AArch64/RISC-V keep a static 8 MiB heap until their MMU work (sprint E):
+// the BlockFS cache there is 1 MiB (fs/blockfs/cache.rs, ADR 0003/0011).
+//
+// SAFETY JUSTIFICATION for the static: it is the raw backing memory of the
+// heap, needed before any allocation exists; it is only accessed through
+// addr_of_mut!() in init(), and afterwards only through the allocator.
 #[cfg(not(target_arch = "x86_64"))]
 #[allow(static_mut_refs)]
 static mut HEAP_MEMORY: [u8; 8 * 1024 * 1024] = [0; 8 * 1024 * 1024];
 
-/// Kernel heap size
-#[cfg(target_arch = "x86_64")]
-pub const HEAP_SIZE: usize = 1024 * 1024 * 1024;
-
+/// Size of the static heap (AArch64, RISC-V).
 #[cfg(not(target_arch = "x86_64"))]
 pub const HEAP_SIZE: usize = 8 * 1024 * 1024;
 
-/// Kernel heap start address (re-exported from architecture module)
-pub const HEAP_START: usize = crate::arch::HEAP_START;
+/// Smallest x86_64 heap: what the boot tests and the BusyBox root need.
+pub const MIN_HEAP_SIZE: usize = 32 * 1024 * 1024;
 
-/// Return the virtual address of the last byte of the HEAP_MEMORY array.
-///
-/// Used by the memory management init code when `__kernel_end` translation
-/// fails. The heap is the largest BSS object; its end address is a tight
-/// lower bound on the kernel's physical extent.
-///
-/// # Safety
-///
-/// Accesses the static `HEAP_MEMORY` address. This is safe because we only
-/// compute the pointer value -- we do not read from or write to it.
-pub fn heap_end_vaddr() -> u64 {
-    // SAFETY: We only compute the address of the end of HEAP_MEMORY.
-    // `addr_of!` avoids creating a reference to the `static mut`, which
-    // would be UB under Rust 2024 rules. The pointer arithmetic is valid
-    // as long as HEAP_MEMORY has been placed by the linker.
-    unsafe { (core::ptr::addr_of!(HEAP_MEMORY) as *const u8).add(HEAP_SIZE) as u64 }
+/// Largest x86_64 heap.
+pub const MAX_HEAP_SIZE: usize = 1024 * 1024 * 1024;
+
+/// Bytes the heap was given at init (0 before).
+static HEAP_BYTES: AtomicUsize = AtomicUsize::new(0);
+
+/// The kernel heap's size in bytes.
+pub fn heap_size() -> usize {
+    HEAP_BYTES.load(Ordering::Relaxed)
+}
+
+/// The x86_64 heap size for `ram` bytes of usable memory: a third of it,
+/// rounded down to a power of two (the buddy allocator's unit), clamped to
+/// `MIN_HEAP_SIZE..=MAX_HEAP_SIZE`. A third rather than a quarter: usable
+/// RAM is a little below the guest's size, and a quarter of it would round
+/// down to half the intended heap.
+pub fn heap_size_for(ram: usize) -> usize {
+    let third = ram / 3;
+    let pow2 = if third == 0 {
+        0
+    } else {
+        1usize << (usize::BITS - 1 - third.leading_zeros())
+    };
+    pow2.clamp(MIN_HEAP_SIZE, MAX_HEAP_SIZE)
 }
 
 /// Get current heap statistics (x86_64 only).
 ///
 /// Returns (total, used, free) in bytes.
-#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+#[cfg(all(
+    any(target_arch = "x86_64", target_arch = "riscv64"),
+    target_os = "none"
+))]
 pub fn get_heap_stats() -> (usize, usize, usize) {
+    // Interrupts off while the heap lock is held (see `IrqSafeHeap`).
+    let _irq = crate::arch::disable_interrupts();
     let allocator = crate::get_allocator().lock();
-    let total = HEAP_SIZE;
+    let total = heap_size();
     let free = allocator.free();
     let used = total.saturating_sub(free);
     (total, used, free)
 }
 
-/// Slab allocator for efficient small allocations (x86_64 only, uses
-/// LockedHeap)
-#[cfg(target_arch = "x86_64")]
-pub struct SlabAllocator {
-    /// Size classes for slab allocation
-    slabs: [Option<Slab>; 10],
-    /// Fallback allocator for large allocations
-    fallback: LockedHeap,
-    /// Statistics
-    stats: Mutex<HeapStats>,
-}
-
-#[cfg(target_arch = "x86_64")]
-/// A slab for a specific size class
-struct Slab {
-    /// Object size for this slab
-    object_size: usize,
-    /// Free list head
-    free_list: Option<NonNull<FreeObject>>,
-    /// Number of free objects
-    free_count: usize,
-    /// Total objects in slab
-    total_objects: usize,
-    /// Base address of slab
-    base: VirtualAddress,
-}
-
-#[cfg(target_arch = "x86_64")]
-/// Free object in slab free list
-struct FreeObject {
-    next: Option<NonNull<FreeObject>>,
-}
-
-#[cfg(target_arch = "x86_64")]
-/// Heap statistics
-#[derive(Debug, Default, Clone)]
-pub struct HeapStats {
-    /// Total bytes allocated
-    pub allocated_bytes: usize,
-    /// Total bytes freed
-    pub freed_bytes: usize,
-    /// Current bytes in use
-    pub used_bytes: usize,
-    /// Peak bytes used
-    pub peak_bytes: usize,
-    /// Number of allocations
-    pub allocation_count: u64,
-    /// Number of frees
-    pub free_count: u64,
-}
-
-#[cfg(target_arch = "x86_64")]
-/// Size classes for slab allocator (in bytes)
-const SIZE_CLASSES: [usize; 10] = [8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096];
-
-#[cfg(target_arch = "x86_64")]
-impl Default for SlabAllocator {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-#[cfg(target_arch = "x86_64")]
-impl SlabAllocator {
-    /// Create a new slab allocator
-    pub const fn new() -> Self {
-        Self {
-            slabs: [const { None }; 10],
-            fallback: LockedHeap::empty(),
-            stats: Mutex::new(HeapStats {
-                allocated_bytes: 0,
-                freed_bytes: 0,
-                used_bytes: 0,
-                peak_bytes: 0,
-                allocation_count: 0,
-                free_count: 0,
-            }),
-        }
-    }
-
-    /// Initialize the slab allocator with heap memory
-    ///
-    /// # Safety
-    ///
-    /// The caller must ensure that:
-    /// - The heap_start address is valid and properly aligned
-    /// - The heap_size bytes starting at heap_start are available for use
-    /// - This function is called only once
-    pub unsafe fn init(&self, heap_start: usize, heap_size: usize) {
-        // Reserve some memory for slab metadata
-        let metadata_size = heap_size / 16; // 1/16 of heap for metadata
-        let slab_area_size = heap_size - metadata_size;
-
-        // Initialize fallback allocator with metadata area
-        self.fallback
-            .lock()
-            .init(heap_start as *mut u8, metadata_size);
-
-        // Initialize slabs
-        let mut current_addr = heap_start + metadata_size;
-        let slab_size = slab_area_size / SIZE_CLASSES.len();
-
-        for &size in SIZE_CLASSES.iter() {
-            if current_addr + slab_size > heap_start + heap_size {
-                break;
-            }
-
-            // Create slab for this size class
-            let _slab = self.init_slab(VirtualAddress::new(current_addr as u64), slab_size, size);
-
-            // Store in array (this is a bit tricky without mut self)
-            // In real implementation, would need interior mutability
-            // For now, this is a placeholder
-
-            current_addr += slab_size;
-        }
-    }
-
-    /// Initialize a single slab
-    fn init_slab(&self, base: VirtualAddress, size: usize, object_size: usize) -> Slab {
-        let objects_per_slab = size / object_size;
-        let mut free_list = None;
-
-        // Build free list
-        for i in (0..objects_per_slab).rev() {
-            let obj_addr = base.as_u64() + (i * object_size) as u64;
-            let obj_ptr = obj_addr as *mut FreeObject;
-
-            // SAFETY: `obj_ptr` is derived from `base` (the slab's base virtual address)
-            // plus a bounded offset `i * object_size` where `i < objects_per_slab` and
-            // `objects_per_slab = size / object_size`, so the pointer stays within the
-            // slab's allocated memory region [base, base + size). The slab memory was
-            // reserved during `init()` and is exclusively owned by this allocator.
-            // `obj_ptr` is non-null because `base` is a valid non-zero virtual address
-            // and the offset is bounded, so `NonNull::new_unchecked` is sound.
-            unsafe {
-                (*obj_ptr).next = free_list;
-                free_list = Some(NonNull::new_unchecked(obj_ptr));
-            }
-        }
-
-        Slab {
-            object_size,
-            free_list,
-            free_count: objects_per_slab,
-            total_objects: objects_per_slab,
-            base,
-        }
-    }
-
-    /// Allocate from appropriate slab
-    fn allocate(&self, layout: Layout) -> *mut u8 {
-        let size = layout.size().max(layout.align());
-
-        // Find appropriate size class
-        for &class_size in SIZE_CLASSES.iter() {
-            if size <= class_size {
-                // Try to allocate from this slab
-                // In real implementation, would need proper synchronization
-                // This is a placeholder
-                return self
-                    .fallback
-                    .lock()
-                    .allocate_first_fit(layout)
-                    .map(|ptr| ptr.as_ptr())
-                    .unwrap_or(core::ptr::null_mut());
-            }
-        }
-
-        // Large allocation - use fallback
-        self.fallback
-            .lock()
-            .allocate_first_fit(layout)
-            .map(|ptr| ptr.as_ptr())
-            .unwrap_or(core::ptr::null_mut())
-    }
-
-    /// Free to appropriate slab
-    fn deallocate(&self, ptr: *mut u8, layout: Layout) {
-        let size = layout.size().max(layout.align());
-
-        // Find appropriate size class
-        for &class_size in SIZE_CLASSES.iter() {
-            if size <= class_size {
-                // Return to slab
-                // In real implementation, would need proper synchronization
-                // SAFETY: `ptr` was returned by a prior `allocate_first_fit` call on the
-                // same `fallback` allocator, so it is a valid, non-null, properly aligned
-                // pointer to an allocation of the given `layout`. The caller guarantees
-                // the pointer is no longer in use (standard dealloc contract).
-                // `NonNull::new_unchecked` is sound because `ptr` originated from
-                // `allocate_first_fit` which only returns non-null pointers.
-                unsafe {
-                    self.fallback
-                        .lock()
-                        .deallocate(NonNull::new_unchecked(ptr), layout);
-                }
-                return;
-            }
-        }
-
-        // Large allocation - use fallback
-        // SAFETY: Same invariants as above -- `ptr` was returned by a prior
-        // `allocate_first_fit` call for this `layout`, so it is valid, non-null,
-        // and properly aligned. The caller guarantees exclusive ownership has been
-        // relinquished.
-        unsafe {
-            self.fallback
-                .lock()
-                .deallocate(NonNull::new_unchecked(ptr), layout);
-        }
-    }
-
-    /// Get heap statistics
-    pub fn stats(&self) -> HeapStats {
-        self.stats.lock().clone()
-    }
-}
-
-// Global slab allocator instance (not used for now)
-// static SLAB_ALLOCATOR: SlabAllocator = SlabAllocator::new();
-
 /// Initialize the kernel heap
 pub fn init() -> Result<(), crate::error::KernelError> {
     kprintln!("[HEAP] Initializing kernel heap");
 
-    // SAFETY: We access `HEAP_MEMORY`, a static mut byte array in the kernel's BSS
-    // section. This function is called exactly once during kernel initialization
-    // (single-threaded boot context), so there are no concurrent accesses. The
-    // resulting `heap_start` pointer is valid for `heap_size` bytes and the memory
-    // does not overlap with any other allocation because it is a dedicated static
-    // array in the kernel binary.
+    // SAFETY: called exactly once, during single-threaded early boot. The
+    // region is exclusively the heap's: the static array on AArch64/RISC-V,
+    // and on x86_64 frames taken from the frame allocator and never freed.
     #[allow(unused_unsafe, unused_variables)]
     unsafe {
-        let heap_start = core::ptr::addr_of_mut!(HEAP_MEMORY) as *mut u8;
-        let heap_size = HEAP_SIZE;
+        #[cfg(not(target_arch = "x86_64"))]
+        let (heap_start, heap_size) = (core::ptr::addr_of_mut!(HEAP_MEMORY) as *mut u8, HEAP_SIZE);
+        #[cfg(target_arch = "x86_64")]
+        let (heap_start, heap_size) = frame_backed_region()?;
+        HEAP_BYTES.store(heap_size, Ordering::Relaxed);
 
-        // RISC-V: Use UnsafeBumpAllocator (same as AArch64).
-        // LockedHeap's linked-list free list gets corrupted on RISC-V bare
-        // metal ("Hole list out of order?"), so we use the simpler bump
-        // allocator with a 4MB heap that provides ample space for boot.
-        #[cfg(target_arch = "riscv64")]
+        // RISC-V: the same LockedHeap as x86_64 (MEM-SEC-03). It used to
+        // use the never-freeing bump allocator because the linked-list free
+        // list was corrupted ("Hole list out of order?"); the cause was the
+        // frame allocator handing out frames inside the kernel image, where
+        // this static heap lives, and that has since been fixed (the
+        // allocator starts after the kernel end).
+        #[cfg(all(target_arch = "riscv64", target_os = "none"))]
         {
-            println!("[HEAP] Initializing RISC-V UnsafeBumpAllocator");
-            println!(
-                "[HEAP] Heap start: {:p}, size: {} bytes",
-                heap_start, heap_size
-            );
-
-            // SAFETY: `ALLOCATOR` is the global bump allocator. `heap_start` points to
-            // valid memory of at least `heap_size` bytes (the static HEAP_MEMORY array).
-            // This is called once during single-threaded boot, so no concurrent access.
-            unsafe {
-                crate::ALLOCATOR.init(heap_start, heap_size);
-            }
-
-            println!("[HEAP] RISC-V heap initialization complete");
+            let mut allocator = crate::get_allocator().lock();
+            allocator.init(heap_start, heap_size);
+            drop(allocator);
         }
 
         // AArch64: Use lock-free UnsafeBumpAllocator (LockedHeap deadlocks on AArch64)
@@ -378,7 +135,7 @@ pub fn init() -> Result<(), crate::error::KernelError> {
             // which is required after writing to the allocator's atomic fields so
             // that the allocator state is visible before any allocation attempts.
             unsafe {
-                core::arch::asm!("dsb sy", "isb", options(nomem, nostack));
+                core::arch::asm!("dsb sy", "isb", options(nostack));
             }
 
             uart_write_str("[HEAP] ALLOCATOR initialized\n");
@@ -396,9 +153,9 @@ pub fn init() -> Result<(), crate::error::KernelError> {
 
         // x86_64: Use LockedHeap
         // Note: The `init` call on LockedHeap is unsafe because it trusts the
-        // caller to provide valid memory. The outer unsafe block already
-        // establishes that `heap_start`/`heap_size` describe valid, exclusive
-        // memory from the static HEAP_MEMORY array.
+        // caller to provide valid memory. `frame_backed_region` returned
+        // `heap_size` bytes of frames owned by the heap from now on, mapped
+        // through the physical-memory map.
         #[cfg(all(target_arch = "x86_64", target_os = "none"))]
         {
             let mut allocator = crate::get_allocator().lock();
@@ -409,18 +166,59 @@ pub fn init() -> Result<(), crate::error::KernelError> {
         println!(
             "[HEAP] Heap initialized: {} KB at {:p}",
             heap_size / 1024,
-            core::ptr::addr_of!(HEAP_MEMORY)
+            heap_start
         );
     }
 
     Ok(())
 }
 
+/// x86_64: take the heap from the frame allocator (N-278): `heap_size_for`
+/// the usable RAM, halving down to `MIN_HEAP_SIZE` if no run that long is
+/// free. Needs the frame allocator initialized and the boot page-table
+/// frames reserved (`mm::init_default` does both first), but no heap.
+#[cfg(target_arch = "x86_64")]
+fn frame_backed_region() -> Result<(*mut u8, usize), crate::error::KernelError> {
+    use crate::mm::{FRAME_ALLOCATOR, FRAME_SIZE};
+    let ram = FRAME_ALLOCATOR.lock().get_stats().free_frames as usize * FRAME_SIZE;
+    let mut size = heap_size_for(ram);
+    loop {
+        if let Ok(frame) = FRAME_ALLOCATOR
+            .lock()
+            .allocate_contiguous(size / FRAME_SIZE)
+        {
+            let virt = crate::mm::phys_to_virt_addr(frame.as_u64() * FRAME_SIZE as u64);
+            return Ok((virt as *mut u8, size));
+        }
+        if size <= MIN_HEAP_SIZE {
+            return Err(crate::error::KernelError::OutOfMemory {
+                requested: size,
+                available: ram,
+            });
+        }
+        size /= 2;
+    }
+}
+
 #[cfg(all(test, not(target_os = "none")))]
 mod tests {
     use alloc::{boxed::Box, vec::Vec};
 
-    use super::*;
+    /// N-278: a third of usable RAM, a power of two, within 32 MiB..=1 GiB;
+    /// `-m 2048M` (about 1,950 MiB usable) gets 512 MiB, 4 GiB or more the
+    /// old 1 GiB.
+    #[test]
+    fn heap_size_follows_ram() {
+        use super::{heap_size_for, MAX_HEAP_SIZE, MIN_HEAP_SIZE};
+        const MIB: usize = 1024 * 1024;
+        assert_eq!(heap_size_for(1950 * MIB), 512 * MIB);
+        assert_eq!(heap_size_for(1500 * MIB), 256 * MIB, "rounded down");
+        assert_eq!(heap_size_for(220 * MIB), 64 * MIB);
+        assert_eq!(heap_size_for(64 * MIB), MIN_HEAP_SIZE);
+        assert_eq!(heap_size_for(0), MIN_HEAP_SIZE);
+        assert_eq!(heap_size_for(4096 * MIB), MAX_HEAP_SIZE);
+        assert_eq!(heap_size_for(32768 * MIB), MAX_HEAP_SIZE);
+    }
 
     #[test]
     fn test_heap_allocation() {
@@ -433,14 +231,5 @@ mod tests {
             v.push(i);
         }
         assert_eq!(v.len(), 100);
-    }
-
-    #[test]
-    fn test_size_classes() {
-        // Test that size classes are powers of 2 or nice round numbers
-        for &size in &SIZE_CLASSES {
-            assert!(size >= 8);
-            assert!(size <= 4096);
-        }
     }
 }

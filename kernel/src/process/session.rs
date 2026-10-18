@@ -179,6 +179,8 @@ impl SessionManager {
         // Read TSC as login time (or 0 if unavailable).
         #[cfg(target_arch = "x86_64")]
         {
+            // SAFETY: RDTSC is available on every x86_64 CPU and only reads
+            // the time-stamp counter.
             session.login_time = unsafe { core::arch::x86_64::_rdtsc() };
         }
         #[cfg(not(target_arch = "x86_64"))]

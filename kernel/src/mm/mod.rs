@@ -9,16 +9,22 @@
 pub mod bootloader;
 pub mod cache_aligned;
 pub mod cache_topology;
-pub mod demand_paging;
 pub mod frame_allocator;
+#[cfg(feature = "alloc")]
+pub mod frame_refs;
 pub mod heap;
 pub mod ksm;
+pub mod kstack;
+#[cfg(feature = "alloc")]
+pub mod page_cache;
 pub mod page_fault;
+pub mod page_ops;
 pub mod page_table;
+pub mod pte;
+pub mod tlb;
 pub mod user_layout;
 pub mod user_validation;
 pub mod vas;
-pub mod vmm;
 
 #[cfg(feature = "alloc")]
 extern crate alloc;
@@ -41,8 +47,9 @@ pub const PAGE_SIZE: usize = 4096;
 /// Physical memory offset: virtual = physical + PHYS_MEM_OFFSET.
 ///
 /// On x86_64 with bootloader 0.11, physical memory is mapped at a dynamic
-/// offset provided by the bootloader. On AArch64 and RISC-V, physical
-/// memory is identity-mapped (offset = 0).
+/// offset provided by the bootloader. On RISC-V boot.S maps it at
+/// 0xFFFF_8000_0000_0000 (ADR 0013). On AArch64, which runs with the MMU
+/// off, the offset is 0.
 pub(crate) static PHYS_MEM_OFFSET: AtomicU64 = AtomicU64::new(0);
 
 /// Set the physical memory offset (called once during early boot).
@@ -52,8 +59,7 @@ pub fn set_phys_mem_offset(offset: u64) {
 
 /// Convert a physical address to a virtual pointer.
 ///
-/// On x86_64, adds the bootloader's physical memory mapping offset.
-/// On AArch64/RISC-V, returns the address unchanged (identity-mapped).
+/// Adds the physical-memory map's offset (0 on AArch64, MMU off).
 #[inline]
 pub fn phys_to_virt_addr(phys: u64) -> u64 {
     phys + PHYS_MEM_OFFSET.load(Ordering::Acquire)
@@ -139,7 +145,7 @@ pub enum PageSize {
 }
 
 /// Page flags
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PageFlags(u64);
 
 impl PageFlags {
@@ -152,6 +158,9 @@ impl PageFlags {
     pub const DIRTY: Self = Self(1 << 6);
     pub const HUGE: Self = Self(1 << 7);
     pub const GLOBAL: Self = Self(1 << 8);
+    /// Software bit (ignored by the MMU): the page is shared copy-on-write
+    /// and mapped read-only; a write fault gives the writer a private copy.
+    pub const COW: Self = Self(1 << 9);
     pub const NO_EXECUTE: Self = Self(1 << 63);
 
     // Alias for NO_EXECUTE
@@ -159,6 +168,36 @@ impl PageFlags {
 
     pub fn contains(&self, other: Self) -> bool {
         (self.0 & other.0) == other.0
+    }
+
+    /// No flags.
+    pub const fn empty() -> Self {
+        Self(0)
+    }
+
+    /// The raw bits (the x86_64 entry layout, `mm::pte::x86`).
+    pub const fn bits(self) -> u64 {
+        self.0
+    }
+
+    /// These flags and `other` (a `const` `|`).
+    pub const fn union(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
+
+    /// Whether every flag of `other` is set, in a `const` context.
+    pub const fn has(self, other: Self) -> bool {
+        self.0 & other.0 == other.0
+    }
+
+    /// Flags from raw bits (the x86_64 entry layout).
+    pub const fn from_bits(bits: u64) -> Self {
+        Self(bits)
+    }
+
+    /// These flags without `other`.
+    pub const fn without(self, other: Self) -> Self {
+        Self(self.0 & !other.0)
     }
 }
 
@@ -387,26 +426,6 @@ pub fn init_default() {
         let kernel_end_virt = unsafe { &__kernel_end as *const u8 as u64 };
         let kernel_end_phys = translate_kernel_vaddr(kernel_end_virt);
 
-        // If __kernel_end translation failed, try translating the last byte
-        // of HEAP_MEMORY instead. The heap is the largest object in BSS
-        // (~512MB) and its end address is a tight lower bound on the kernel's
-        // physical extent. __kernel_end may fail translation if the
-        // bootloader's page table walk hits an unmapped intermediate entry
-        // for the very last page of the BSS.
-        let kernel_end_phys = if kernel_end_phys != 0 {
-            kernel_end_phys
-        } else {
-            let heap_end_virt = heap::heap_end_vaddr();
-            let heap_end_phys = translate_kernel_vaddr(heap_end_virt);
-            if heap_end_phys != 0 {
-                kprintln!(
-                    "[MM] __kernel_end translation failed, using heap end at phys {:#x}",
-                    heap_end_phys
-                );
-            }
-            heap_end_phys
-        };
-
         // Round up to next 2MB boundary for safety margin, then add 2MB
         let alloc_start = if kernel_end_phys != 0 {
             let aligned = (kernel_end_phys + 0x1FFFFF) & !0x1FFFFF; // Round up to 2MB
@@ -419,16 +438,15 @@ pub fn init_default() {
             );
             start
         } else {
-            // Fallback: compute a safe start from HEAP_SIZE. The kernel's
-            // physical footprint is dominated by the BSS (which contains
-            // HEAP_MEMORY). Add 64MB for code, rodata, data, stacks, and
-            // the bootloader's own allocations.
-            let safe_start = (heap::HEAP_SIZE as u64 + 64 * 1024 * 1024 + 0x1FFFFF) & !0x1FFFFF;
+            // Fallback when __kernel_end does not translate: the kernel
+            // image is about 15 MiB (code, data and a 2 MiB BSS -- the heap
+            // is no longer in it, N-278), so starting at 64 MiB leaves
+            // margin. The bootloader's memory map already marks the image
+            // as not usable; this only clips further.
+            let safe_start: u64 = 64 * 1024 * 1024;
             kprintln!(
-                "[MM] WARNING: Could not find kernel physical end, using {} MB start (heap={}MB + \
-                 64MB margin)",
-                safe_start / (1024 * 1024),
-                heap::HEAP_SIZE / (1024 * 1024)
+                "[MM] WARNING: Could not find kernel physical end, using {} MB start",
+                safe_start / (1024 * 1024)
             );
             safe_start
         };
@@ -471,8 +489,9 @@ pub fn init_default() {
         (regions, count)
     };
 
-    // AArch64 and RISC-V boot with the MMU off or identity-mapped, so the
-    // linker's __kernel_end is the kernel's physical end. The pool starts
+    // AArch64 runs with the MMU off, so the linker's __kernel_end is the
+    // kernel's physical end; RISC-V runs the image in the upper half (ADR
+    // 0013) and converts it. The pool starts
     // after it and ends at 128 MiB of RAM -- QEMU `virt`'s default when no
     // `-m` is given. Under-estimating only leaves memory unused; over-
     // estimating would hand out frames that do not exist.
@@ -484,6 +503,9 @@ pub fn init_default() {
         }
         // Only the linker symbol's address is taken; it is never read.
         let kernel_end = core::ptr::addr_of!(__kernel_end) as u64;
+        // RISC-V runs the kernel at its link address in the upper half.
+        #[cfg(target_arch = "riscv64")]
+        let kernel_end = crate::arch::riscv64::boot::kernel_phys(kernel_end);
         #[cfg(target_arch = "aarch64")]
         let ram_end: u64 = 0x4000_0000 + 128 * 1024 * 1024;
         #[cfg(target_arch = "riscv64")]
@@ -502,6 +524,12 @@ pub fn init_default() {
     init(&regions[..count]);
 
     kprintln!("[MM] init returned successfully");
+
+    // The x86_64 heap is taken from the frame allocator (N-278), so the
+    // boot page-table frames must be reserved first or it could be given
+    // frames those tables still use.
+    #[cfg(target_arch = "x86_64")]
+    reserve_boot_page_table_frames();
 
     // Initialize heap allocator after frame allocator is ready
     init_heap().expect("Heap initialization failed");
@@ -703,14 +731,16 @@ pub struct MemoryStats {
     pub cached_frames: usize,
 }
 
-/// Get memory statistics
+/// Get memory statistics. Free frames include those waiting in the per-CPU
+/// caches (counted after the global lock is released: a cache refill takes
+/// the two locks one after the other, never nested).
 pub fn get_memory_stats() -> MemoryStats {
-    let allocator = FRAME_ALLOCATOR.lock();
-    let stats = allocator.get_stats();
+    let stats = FRAME_ALLOCATOR.lock().get_stats();
+    let cached = frame_allocator::per_cpu_cached_frames();
 
     MemoryStats {
         total_frames: stats.total_frames as usize,
-        free_frames: stats.free_frames as usize,
+        free_frames: (stats.free_frames + cached) as usize,
         cached_frames: PAGE_CACHE_FRAMES.load(Ordering::Relaxed) as usize,
     }
 }
