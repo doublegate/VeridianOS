@@ -540,8 +540,10 @@ order are in `ref-docs/HARDWARE-X86_64.md`, `ref-docs/HARDWARE-AARCH64.md` and
     QEMU models no caches, so none of it is tested against stale data. It can start secondary
     CPUs only through PSCI, not the Raspberry Pi 4's spin-table (HA-22).
 - **RISC-V:**
-  - **Boot.** Has no Image header, so U-Boot `booti` and EFI cannot load it (HR-03). (BSS is
-    zeroed and a hart lottery runs since v0.27, HR-01/HR-19.)
+  - **Boot.** Runs only at its link address, physical 0x8020_0000, so boards whose RAM starts
+    elsewhere (VisionFive 2: 0x4000_0000) cannot boot it yet (HR-02). It has an Image header for
+    U-Boot `booti` since v0.27 (HR-03), but no PE/COFF header for EFI. (BSS is zeroed and a hart
+    lottery runs since v0.27, HR-01/HR-19.)
   - **Fixed addresses.** Writes to 0x1000_0000, a clock controller on the HiFive Unmatched (HR-04).
     (RAM comes from the device tree since v0.27, HR-07.)
   - **Paging.** On since v0.27, in Sv48 when the hart has it and Sv39 otherwise (ADR 0018;

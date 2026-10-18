@@ -3544,6 +3544,40 @@ fn run_usercopy_tests(passed: &mut u32, failed: &mut u32) {
             passed,
             failed,
         );
+
+        // The kernel starts with Linux's RISC-V Image header (HR-03,
+        // Documentation/arch/riscv/boot-image-header.rst), which U-Boot
+        // `booti` and EFI loaders read from the flat Image: version 0.2, both
+        // magics, the 2 MiB text_offset, and image_size covering everything
+        // up to the kernel's end (BSS and boot stack included).
+        extern "C" {
+            static _start: u8;
+            static __kernel_end: u8;
+        }
+        let start = core::ptr::addr_of!(_start);
+        // SAFETY: `_start` begins the image's first 64 bytes, in .text,
+        // mapped for the kernel's lifetime; only read.
+        let h = unsafe { core::slice::from_raw_parts(start, 64) };
+        let u32_at = |o: usize| u32::from_le_bytes([h[o], h[o + 1], h[o + 2], h[o + 3]]);
+        let u64_at = |o: usize| u64::from(u32_at(o)) | (u64::from(u32_at(o + 4)) << 32);
+        let size = core::ptr::addr_of!(__kernel_end) as u64 - start as u64;
+        let ok = u64_at(0x08) == 0x20_0000
+            && u64_at(0x10) == size
+            && u64_at(0x18) == 0
+            && u32_at(0x20) == 2
+            && &h[0x30..0x38] == b"RISCV\0\0\0"
+            && &h[0x38..0x3C] == b"RSC\x05"
+            && u32_at(0x3C) == 0;
+        if !ok {
+            crate::println!(
+                "    header: text_offset {:#x} image_size {:#x} (want {:#x}) version {:#x}",
+                u64_at(0x08),
+                u64_at(0x10),
+                size,
+                u32_at(0x20)
+            );
+        }
+        report_test("riscv_image_header", ok, passed, failed);
     }
 }
 

@@ -199,8 +199,8 @@ What does not work yet: `docs/KNOWN-LIMITATIONS.md`.
       MINSIGSTKSZ 5120, BTI for user programs (PROT_BTI, GP pages, loader property notes,
       SCTLR_EL1.BT0, HWCAP2_BTI; boot-tested on `-cpu max` in the gate).
     - RISC-V: done: zero BSS, hart lottery, `sstatus.FS` Off in the kernel (HR-01, HR-19, HR-20
-      part; the M-mode CSR reads go with FP switching). RISC-V Image header and
-      relocatable or MMU-early boot (HR-02, HR-03); done: `satp` mode probe (Sv48, then Sv39)
+      part; the M-mode CSR reads go with FP switching). Relocatable or MMU-early boot (HR-02);
+      done: the RISC-V Image header and flat Image, boot-tested (HR-03); done: `satp` mode probe (Sv48, then Sv39)
       and 3/4-level tables (HR-08, HR-09; ADR 0018 stage A, the kernel and user layout inside
       Sv39's halves, and stage B, the probe and the 3-level walk; gate runs `sv48=off`);
       RISC-V PTE encoder with A/D

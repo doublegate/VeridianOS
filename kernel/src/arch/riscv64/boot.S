@@ -68,7 +68,27 @@ veridian_early_l3_kernel:
 .section .text.boot
 .global _start
 
+# Linux's RISC-V Image header (HR-03; Documentation/arch/riscv/
+# boot-image-header.rst), so that the flat Image (`objcopy -O binary`,
+# veridian-kernel.img) loads through U-Boot `booti` and EFI loaders. It is
+# the first 64 bytes of the image; execution starts at code0.
 _start:
+    .option push
+    .option norvc
+    j .Lboot                         # code0 (4 bytes: no compressed jump)
+    .option pop
+    .word 0                          # code1
+    .dword 0x200000                  # text_offset: the link base is RAM + 2 MiB
+    .dword __veridian_image_size     # image_size, BSS and boot stack included
+    .dword 0                         # flags: little-endian
+    .word 2                          # version 0.2
+    .word 0                          # res1
+    .dword 0                         # res2
+    .ascii "RISCV\0\0\0"             # magic (deprecated)
+    .ascii "RSC\x05"                 # magic2
+    .word 0                          # res3: no PE/COFF header
+
+.Lboot:
     la t0, veridian_boot_lottery
     li t1, 1
     # The assembler may not see the target's A extension here (release

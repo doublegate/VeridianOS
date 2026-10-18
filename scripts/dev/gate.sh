@@ -82,6 +82,10 @@ if [ $boot -eq 1 ]; then
     RISCV_CPU=rv64,sv48=off step boot-riscv64-sv39 scripts/boot-test.sh riscv64
     tail -1 "$log_dir/boot-riscv64-sv39.log"
     step boot-riscv64-sv39-mode grep -q "Paging: Sv39" "$root/target/boot-logs/boot-riscv64.log"
+    # The flat RISC-V Image with its Linux header (HR-03), as U-Boot
+    # `booti` would load it; QEMU puts it at RAM + 2 MiB.
+    RISCV_IMAGE=1 step boot-riscv64-image scripts/boot-test.sh riscv64
+    tail -1 "$log_dir/boot-riscv64-image.log"
     QEMU_EXTRA="-icount shift=4" step boot-aarch64-slow scripts/boot-test.sh aarch64 300
     tail -1 "$log_dir/boot-aarch64-slow.log"
     # The AArch64 arm64 Image (HA-03), which QEMU boots through the Linux

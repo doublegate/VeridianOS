@@ -292,6 +292,13 @@
   the table (AArch64 34/34, 36/36 on four CPUs). It failed before the move, and a probe `udf` at
   the top of `_start_rust` now prints `[EXCEPTION] unhandled sync`.
 
+- **RISC-V Image (HR-03).** boot.S starts with Linux's 64-byte RISC-V Image header
+  (`text_offset` 2 MiB, `image_size` covering BSS and the boot stack, version 0.2, magics `RISCV`
+  and `RSC\x05`), which U-Boot `booti` and EFI loaders need, and `build-kernel.sh` writes the flat
+  image as `veridian-kernel.img`. A boot test, `riscv_image_header`, reads the header back, and
+  `gate.sh --boot` boots the Image (`RISCV_IMAGE=1 scripts/boot-test.sh riscv64`). The Image still
+  runs only where it is linked, physical 0x8020_0000 (HR-02).
+
 - **AArch64 arm64 Image (HA-03).** boot.S starts with the 64-byte Linux arm64 Image header
   (`text_offset` 2 MiB, `image_size` covering BSS and the boot stack, 4 KiB pages, magic `ARM\x64`),
   and `build-kernel.sh` writes the raw image next to the ELF as `veridian-kernel.img`. QEMU boots it

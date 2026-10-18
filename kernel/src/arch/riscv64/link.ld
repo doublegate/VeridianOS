@@ -3,7 +3,7 @@ ENTRY(_start)
 /* The kernel runs in the upper half (sprint E, HR-02): linked at
  * KERNEL_VMA, loaded by OpenSBI/QEMU at KERNEL_LMA (they load each segment
  * at its physical address and enter at the lowest one, so `_start` must
- * stay first). boot.S starts at the physical address with the MMU off,
+ * stay first; it is also the Image header, HR-03). boot.S starts at the physical address with the MMU off,
  * maps both, turns paging on and jumps up. */
 KERNEL_LMA = 0x80200000;
 KERNEL_VMA = 0xFFFFFFFF80200000;
@@ -51,6 +51,9 @@ SECTIONS
      * the physical one) */
     . = ALIGN(4K);
     __kernel_end = .;
+    /* The Image header's image_size: what a loader must leave free from
+     * the load address, BSS and the boot stack included (HR-03). */
+    __veridian_image_size = __kernel_end - _start;
 
     /* Discard unwanted sections */
     /DISCARD/ : {
