@@ -2,7 +2,7 @@
 
 > **Authoritative specification**: [docs/design/IPC-DESIGN.md](https://github.com/doublegate/VeridianOS/blob/main/docs/design/IPC-DESIGN.md)
 >
-> **Status (v0.26.0):** the IPC paths are implemented in the kernel but **not reachable from user space**. Native syscall numbers 0-7 are routed to the Linux compatibility layer, so no user program can send, receive or share memory through IPC yet (audit N-33). They are verified by host unit tests only. Making them reachable is part of the v0.28 ABI work. Latency figures measure in-kernel helpers, not a process-to-process round trip.
+> **Status (v0.27.0):** the native IPC calls have private numbers 1024-1031 (ADR 0009). A user program can create an endpoint, send to it and receive from it, and a receive sleeps until a message arrives (runtime test `native_ipc_send_receive_blocks`). Shared regions, the 16 KiB buffered tier and the planned design (typed rights, reply capabilities, direct switch) are verified by host unit tests or not built yet; the redesign is planned for v0.28 (N-79 to N-91). Latency figures measure in-kernel helpers, not a process-to-process round trip.
 
 The VeridianOS Inter-Process Communication (IPC) system provides high-performance message passing with integrated capability support. The design emphasizes zero-copy transfers and minimal kernel involvement.
 

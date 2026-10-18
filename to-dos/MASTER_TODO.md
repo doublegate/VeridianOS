@@ -1,6 +1,6 @@
 # VeridianOS Master TODO List
 
-**Last Updated**: 2026-10-06 (v0.26.0: audit remediation P0 + P1)
+**Last Updated**: 2026-10-18 (v0.27.0 released: process model, SMP, user mode on all three architectures)
 
 ## Project Overview Status
 
@@ -19,7 +19,13 @@
 - [x] **Phase 11: KDE Plasma 6 Default Desktop Integration** - COMPLETE (100%) v0.24.0 (March 2026)
 - [x] **Phase 12: KDE Plasma 6 Cross-Compilation** - COMPLETE (100%) v0.25.0 (March 2026)
 
-## Current Version: v0.26.0 (October 2026)
+## Current Version: v0.27.0 (October 2026)
+
+### v0.27.0: process model, SMP and user mode on all three architectures
+
+Released 2026-10-18, cut early at the user's decision: sprints A to E, X1, credentials, dynamic
+linking (part) and the first system calls of the Linux program are in it (CHANGELOG `[v0.27.0]`);
+the items still open below are carried to v0.28 (list under v0.28.0).
 
 ### v0.26.0: audit remediation (P0 + P1)
 
@@ -31,9 +37,10 @@ Tracking checklist: `docs/audit/AUDIT-VERIFICATION-2026-10-05.md`.
 
 What does not work yet: `docs/KNOWN-LIMITATIONS.md`.
 
-### Roadmap after v0.26.0
+### Roadmap after v0.26.0 (v0.27.0 released 2026-10-18)
 
-- [ ] **v0.27.0: process model and SMP (C5, X0).** Sprints, in dependency order; IDs are in
+- [x] **v0.27.0: process model and SMP (C5, X0), released 2026-10-18.** Items still open below
+  are carried to v0.28 (see v0.28.0). Sprints, in dependency order; IDs are in
   `docs/audit/AUDIT-VERIFICATION-2026-10-05.md`:
   - [x] **A, foundations and hygiene:** done (N-07 moves to C with copy-on-write).
     - N-56 workspace lints and the clippy allow-list (C2).
@@ -76,7 +83,8 @@ What does not work yet: `docs/KNOWN-LIMITATIONS.md`.
     - Truthful claims: KNOWN-LIMITATIONS "hardening not active" (KPTI, KASLR, canaries, retpoline,
       Spectre, SMEP/SMAP), TLS, MAC, seccomp, Kani/TLA+, file mmap; README/book/overview corrections
       (N-145, N-146, N-150, N-152, N-163, N-165).
-  - [ ] **DL, dynamic linking (ADR 0010; X3 loader pulled forward from v0.29, 2026-10-08).** KDE
+  - [ ] **DL, dynamic linking (ADR 0010; X3 loader pulled forward from v0.29, 2026-10-08; open
+    items carried to v0.28).** KDE
     switches from static archives to shared libraries loaded by musl's dynamic linker:
     - [x] Program loader: every PT_LOAD validated before exec commits (malformed files fail, the
       kernel no longer panics on them), page plan with shared-page merging, PIE programs at
@@ -116,7 +124,7 @@ What does not work yet: `docs/KNOWN-LIMITATIONS.md`.
       Done 2026-10-07: every launcher (boot, shell, KDE session) uses `process::run_and_wait`;
       musl pthreads run concurrently. Open: N-111 (Zombie->Dead CAS) and N-112 with SMP (D5);
       waits poll through `dispatch::wait_in_syscall` until the blocking step.
-    - [ ] Blocking: wait-queue primitive, sleep queue, no spinlock held across I/O, user copies
+    - [ ] Blocking (open item carried to v0.28 with F1): wait-queue primitive, sleep queue, no spinlock held across I/O, user copies
       or waits; file table lock dropped after fd lookup; sleeping address-space lock (N-118,
       N-119, N-138); pipes with reader/writer counts and PIPE_BUF atomicity; futex queues with
       timespec timeouts (N-104). Done: `wait_event` + timer sleepers, sleeping nanosleep/
@@ -126,7 +134,7 @@ What does not work yet: `docs/KNOWN-LIMITATIONS.md`.
       with the cache unlocked (N-118 BlockFS part), pty readiness wakeups and blocking pty reads
       (Unix sockets done before), console reads that sleep on a shared input buffer (N-118
       console part). Open: INET socket readiness goes with the F1 socket layer.
-    - [ ] D3: timer preemption of ring 3 (done: `dispatch::preempt_user` on trap and syscall
+    - [ ] D3 (N-115 and N-260 carried to v0.28): timer preemption of ring 3 (done: `dispatch::preempt_user` on trap and syscall
       exit; kill acted on in every dispatched wait); device IRQs on the kernel stack (done, ADR 0008);
       signal delivery with rt_sigframe/restorer, per-thread mask/pending, ignored dropped, Linux
       set layout (done: N-96, N-98, N-109 part, N-113; stop/continue done; siginfo, sigqueue and sigtimedwait
@@ -137,7 +145,7 @@ What does not work yet: `docs/KNOWN-LIMITATIONS.md`.
       N-101; the exec'ing thread keeps its tid); relative paths per thread (N-115); MAP_SHARED anon (done, N-140) and
       MAP_FIXED semantics (done, N-141); pty fixes (done, N-128); thread placement (N-114 partly done: no unused
       clone stacks; main tid == pid and keyed futex queues done, N-114 fixed).
-    - [ ] Threads: clone through the dispatcher, native libc clone stub, TCB join, TLS errno
+    - [x] Threads: clone through the dispatcher, native libc clone stub, TCB join, TLS errno
       (N-102); N-46, N-50, N-54; `thread_join` sleeps on an exit queue instead of yielding
       (N-269). Done: N-102 (`clone_<arch>.S`, errno in the TCB, native pthreads tested by
       `audit_runtime_test`), N-269.
@@ -148,7 +156,7 @@ What does not work yet: `docs/KNOWN-LIMITATIONS.md`.
       N-81 part, N-84, N-85), D4c (nested boot model, `boot_futex_spin` and `FUTEX_TABLE` deleted;
       N-54, N-279), D4d (old scheduler modules, `Task`, `TaskContext`, `context_switch`,
       `process::sync`/`wait` deleted; N-50, N-156, N-181).
-    - [ ] D5, SMP S2/S3: per-CPU run queues and current task, idle and balancing on every CPU,
+    - [ ] D5, SMP S2/S3 (leftovers N-52 frees, N-261, N-282 carried to v0.28): per-CPU run queues and current task, idle and balancing on every CPU,
       `cpu_init_local()` on APs (N-172), IPI fixes (N-173), interrupts enabled in syscalls with
       deferred frees and per-mm TLB masks (N-139, N-143 flushes), smp_boot stop + guarded AP
       stacks (N-180), timer advance by elapsed time (N-179), `smp` on by default; N-51, N-52;
@@ -169,7 +177,8 @@ What does not work yet: `docs/KNOWN-LIMITATIONS.md`.
     - [x] Syscalls `sched_setattr/getattr`, `sched_setscheduler`, `nice`/`setpriority`, real
       `sched_setaffinity`/`getaffinity`, `sched_yield` on the new policy (SCHED-INC-02 resolved
       by the deadline class).
-  - [ ] **E, user mode beyond x86_64** (also the boot-critical hardware items, since they coincide
+  - [ ] **E, user mode beyond x86_64** (open: RISC-V HR-02, HR-04 to HR-06, HR-11, carried to
+    v0.28; also the boot-critical hardware items, since they coincide
     with turning the MMU on; `ref-docs/HARDWARE-AARCH64.md`, `ref-docs/HARDWARE-RISCV64.md`):
     - AArch64: done: DTB from x0, Linux-style EL2/SCTLR setup on boot and secondary paths (HA-01,
       HA-14, HA-15 part, N-177); arm64 Image header and flat binary, booted in the gate (HA-03);
@@ -221,7 +230,7 @@ What does not work yet: `docs/KNOWN-LIMITATIONS.md`.
       `kernel_image_w_xor_x`, also guarding x86_64's bootloader mapping). Done: soft-float kernels (N-178,
       `aarch64-unknown-none-softfloat`, `riscv64imac-unknown-none-elf`); E0 boot tests report
       what cannot run as skipped.
-  - [ ] **F, networking, storage and protocols:**
+  - [ ] **F, networking, storage and protocols (carried to v0.28):**
     - F1 socket layer: sockaddr decoding, UDP send/receive/demux/checksum, errno and readiness
       (N-64 to N-68, N-72).
     - F2 network thread with NIC interrupts and per-socket wait queues (N-69, N-75); generic
@@ -234,7 +243,7 @@ What does not work yet: `docs/KNOWN-LIMITATIONS.md`.
       (N-52, N-74, N-121 durability), then NVMe queues.
     - WireGuard (NET-INC-02) after F1/F2; priority inheritance (SCHED-INC-01, done in D: PI
       futexes through the policy boost); namespaces (VIRT-INC-01).
-  - [ ] **G, hardening and correctness:** enable retpoline, stack protector, eIBRS/AutoIBRS, IBPB,
+  - [ ] **G, hardening and correctness (carried to v0.28):** enable retpoline, stack protector, eIBRS/AutoIBRS, IBPB,
     UMIP, SMEP/SMAP (N-15) and decide KPTI (N-145, N-146); entropy sources and fast key erasure
     (N-149); crypto KATs and RustCrypto primitives (N-154); package verifier cleanup (N-148);
     passwords (N-153); POSIX shm access control (N-88); on-disk validation and fuzzing, `mkfs`
@@ -250,7 +259,7 @@ What does not work yet: `docs/KNOWN-LIMITATIONS.md`.
       stashed in SP_EL0, which the return to EL0 reloads; RISC-V: `sscratch`), then a per-CPU
       overflow stack and a fatal report, as x86_64's IST does; tested by a feature-gated boot
       that overflows on purpose (none of the three architectures tests its report yet).
-  - [ ] **H, real hardware** (`ref-docs/HARDWARE-{X86_64,AARCH64,RISCV64}.md`: HX-01..34,
+  - [ ] **H, real hardware (carried to v0.28)** (`ref-docs/HARDWARE-{X86_64,AARCH64,RISCV64}.md`: HX-01..34,
     HA-01..30, HR-01..40; items already in E are not repeated):
     - Shared infrastructure: one FDT parser (cells, ranges, `dma-ranges`, interrupt cells,
       `/chosen`, `reserved-memory`; fuzzed) and ACPI table parsers (MADT, FADT, MCFG, SPCR, DBG2,
@@ -294,10 +303,10 @@ What does not work yet: `docs/KNOWN-LIMITATIONS.md`.
     request):** setresuid/setresgid/getres*id, setreuid/setregid, setgroups/getgroups, permission
     checks on effective ids and groups; fchdir; chroot through the path resolver; utimensat.
     Native libc and musl use them.
-  - [ ] **ABI review, security and D/F items:** N-190 to N-193 (permission checks) with D;
+  - [ ] **ABI review, security and D/F items (carried to v0.28):** N-190 to N-193 (permission checks) with D;
     N-207, N-209 to N-211, N-217, N-221, N-222, N-225 with D3/threads/scheduling syscalls;
     N-231, N-235 to N-238 with F1.
-  - [ ] **Consolidation and the 2026-10 audit intake (2026-10-14;
+  - [ ] **Consolidation and the 2026-10 audit intake (open item N-69 carried to v0.28; 2026-10-14;
     `docs/audit/AUDIT-INTAKE-2026-10-10.md`).** Done: another agent's unmerged work audited,
     archived and reverted, its private files kept out of git; frame-allocator zones; BlockFS
     early data write-back and lock-free misses (N-263, N-118 BlockFS part; ADR 0011); IPC and
@@ -306,8 +315,8 @@ What does not work yet: `docs/KNOWN-LIMITATIONS.md`.
     `scripts/dev/` helpers; the x86_64 heap sized from the memory map, so small guests boot
     (N-278, HX-02). Open: `knetd` done properly (N-69, with F2); the rest is in the sprint lists
     above and v0.29.
-  - [ ] **Every Linux system call (2026-10-16 directive; whether it lands in v0.27.0 or later is
-    open).** Each call implemented with Linux semantics on all three architectures, numbers from
+  - [ ] **Every Linux system call (2026-10-16 directive; the rest carried to v0.28, decided
+    2026-10-18).** Each call implemented with Linux semantics on all three architectures, numbers from
     Linux's tables (`abi/syscalls.map`, `tools/compat/gen_syscalls.py`; the AArch64/RISC-V
     decoders are generated from `abi/linux/syscall.tbl` and pinned by
     `generic_numbers_match_the_linux_table`). Kernel-modifying and raw-hardware calls
@@ -326,8 +335,26 @@ What does not work yet: `docs/KNOWN-LIMITATIONS.md`.
     permission check and for new files' owners; `/proc/<pid>/status` Uid/Gid/Groups lines);
     next: capget/capset, personality, kcmp, execveat, clone3, the pidfd calls,
     process_vm_readv/writev, rseq, unshare/setns.
-  - [ ] **Release:** tri-arch boot with `-smp 4`, runtime suite, CHANGELOG, tag.
-- [ ] **v0.28.0:** the process, signal, time and file syscall tiers (X2 groups, with the open
+  - [x] **Release:** tri-arch boot with `-smp 4`, runtime suite, CHANGELOG, tag (2026-10-18).
+- [ ] **v0.28.0:** first the items carried over from v0.27.0, which was cut early (2026-10-18):
+  - [ ] The rest of the Linux system calls, group by group, with LTP and musl libc-test in the
+    rootfs suite and the `docs/PORTING-GUIDE.md` rewrite. Decisions of 2026-10-18: capget/capset
+    on a full Linux capability model (permitted, effective, inheritable, bounding, ambient; file
+    capabilities at exec; every privilege check by capability; N-131 pulled forward, ADR first);
+    personality's READ_IMPLIES_EXEC honoured only for programs with the W^X opt-in (ADR 0017);
+    unshare/setns with every Linux namespace type (PID, mount, UTS, IPC, network, user, cgroup,
+    time; `/proc/<pid>/ns`).
+  - [ ] Sprints F, G and H as listed under v0.27.0 above; INET socket readiness with F1;
+    `knetd` (N-69) with F2.
+  - [ ] DL: KDE with shared libraries and its media backend (FFmpeg, ALSA, then PipeWire).
+  - [ ] D leftovers: per-thread relative paths (N-115), SA_RESTART restarts (N-260), per-CPU
+    frees (N-52, N-261), the 1-page mmap cost with four processes (N-282).
+  - [ ] RISC-V: relocatable or MMU-early boot (HR-02), no raw 0x1000_0000 stores or QEMU-only
+    probes (HR-04 to HR-06), Svpbmt/XTheadMae (HR-11).
+  - [ ] ABI-review items N-190 to N-193, N-207, N-209 to N-211, N-217, N-221, N-222, N-225,
+    N-231, N-235 to N-238.
+
+  Then the process, signal, time and file syscall tiers (X2 groups, with the open
   ABI-review findings N-194 to N-247 that belong to them).
   - [ ] **IPC redesign** (makes IPC reachable and correct): one endpoint object held by capabilities,
     typed rights, per-endpoint sender/receiver wait queues, one-shot reply capabilities and a direct

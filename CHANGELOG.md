@@ -1,5 +1,44 @@
 ## [Unreleased]
 
+---
+
+## [v0.27.0] - 2026-10-18
+
+### v0.27.0: process model, SMP and user mode on all three architectures
+
+v0.27.0 replaces the nested, single-CPU process model with scheduler-dispatched tasks running on
+every CPU, brings AArch64 and RISC-V user mode up to x86_64's, and moves the user ABI to Linux's
+system call numbers. Highlights, with the decision records:
+
+- **Process model and scheduling:** every thread a dispatched task on its own guarded kernel stack
+  (ADR 0006), an EEVDF fair class with FIFO/RR and SCHED_DEADLINE above it (ADR 0007), a new x86_64
+  entry layer (ADR 0008), timer preemption of user code, signals with Linux's frames, sleeping
+  waits instead of polling, and the old scheduler and nested boot dispatch removed.
+- **SMP:** application processors brought up on all three architectures (ADR 0004), every CPU
+  dispatching its own run queue with placement and balancing (ADR 0012), targeted TLB shootdown,
+  and the `smp` feature on by default; the gate runs every suite on one and four CPUs.
+- **Memory:** copy-on-write fork (ADR 0005), 2 MiB pages, guarded kernel stacks, a runtime-sized
+  x86_64 heap, W^X for user memory with a per-program opt-in (ADR 0017) and for the kernel image.
+- **AArch64 and RISC-V:** the MMU and caches on with the kernel in the upper half (ADRs 0013,
+  0015), EL0 and U-mode programs with musl (ADRs 0014, 0016), the BusyBox self-test and both runtime
+  suites on each; arm64 and RISC-V Image headers; RISC-V on Sv39-only harts (ADR 0018); DMA cache
+  maintenance for non-coherent devices (ADR 0019); BTI for AArch64 user programs.
+- **Compatibility:** Linux system call numbers as the only user ABI on every architecture (ADR
+  0009), dynamic linking with musl's loader and a page cache for file mappings (ADR 0010), Linux
+  credential and file rules, setfsuid/setfsgid, mknod, and coverage reports per architecture
+  (x86_64: 180 of 385 calls implemented).
+- **Storage and audits:** BlockFS data written back before sync (ADR 0011), lock-free cache
+  misses, and the 2026-10 audit intake.
+
+Tests: 4,735 host unit tests; boot tests x86_64 43/43, AArch64 64/64, RISC-V 57/57 (47, 68 and 61
+on four CPUs); runtime suites x86_64 91/91 and 71/71, AArch64 91/91 and 69/69, RISC-V 89/89 and
+69/69, on one and four CPUs and on RISC-V also under Sv39.
+
+**Moved to v0.28 (v0.27.0 was cut early, 2026-10-18):** sprints F (networking, storage), G
+(hardening) and H (real hardware), the remaining system call groups with LTP and musl libc-test, the
+KDE shared-library pipeline and its media backend, relocatable RISC-V boot (HR-02), and the open
+items listed in `to-dos/MASTER_TODO.md`. What does not work yet is in `docs/KNOWN-LIMITATIONS.md`.
+
 ### Added
 
 - **`tools/veridian-elfctl`: the W^X opt-in for an existing binary (ADR 0017).** A Linux binary

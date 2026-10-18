@@ -1,7 +1,7 @@
 # Known Limitations
 
-What VeridianOS does not do yet, or does only partly, as of the v0.27 development branch
-(updated 2026-10-07). Each entry gives its tracking ID and when it is planned:
+What VeridianOS does not do yet, or does only partly, as of v0.27.0
+(2026-10-18). Each entry gives its tracking ID and when it is planned:
 
 - N-01 to N-63 and the original audit IDs (MEM-SEC-01 and so on) are tracked in
   [`docs/audit/AUDIT-VERIFICATION-2026-10-05.md`](audit/AUDIT-VERIFICATION-2026-10-05.md).
@@ -14,7 +14,8 @@ What VeridianOS does not do yet, or does only partly, as of the v0.27 developmen
 - HX-, HA- and HR- IDs (real hardware) are in `ref-docs/HARDWARE-X86_64.md`,
   `ref-docs/HARDWARE-AARCH64.md` and `ref-docs/HARDWARE-RISCV64.md`.
 - Sprint letters (D0, D, E, F, G, H) refer to the v0.27.0 plan in
-  [`to-dos/MASTER_TODO.md`](../to-dos/MASTER_TODO.md).
+  [`to-dos/MASTER_TODO.md`](../to-dos/MASTER_TODO.md). v0.27.0 was cut before F, G and H and
+  before the last D and E items; those are planned for v0.28.
 
 Linux system-call coverage, call by call, is in
 [`docs/compat/LINUX-SYSCALL-COVERAGE.md`](compat/LINUX-SYSCALL-COVERAGE.md) (x86_64),
@@ -116,7 +117,7 @@ runtime test `native_ipc_send_receive_blocks` covers this.
   in a message is not transferred to the receiver; and kernel memory used by IPC is not accounted.
   No program uses native IPC yet.
 
-### Process model gaps (C5, ADR 0006; planned v0.27 sprint D)
+### Process model gaps (C5, ADR 0006; sprint D, the rest planned v0.28)
 
 Since stage D2, every user thread (x86_64) runs as a dispatcher task of its own, on its own
 kernel stack and with its own saved vector state. Programs, forked children and `clone` threads
@@ -191,7 +192,7 @@ What remains:
 - **chroot (N-250):** a working directory outside the new root is moved to the root, where Linux
   would leave it outside.
 
-### SMP: what is not done yet (v0.27 sprint D5; E for AArch64 and RISC-V)
+### SMP: what is not done yet (sprint D5 leftovers, planned v0.28)
 
 The `smp` feature is on by default since v0.27: the other CPUs are started on every architecture (x86
 INIT-SIPI-SIPI, AArch64 PSCI, RISC-V SBI HSM). Only x86_64 runs tasks on them (ADR 0012): tasks are
@@ -359,7 +360,7 @@ sockets instead.
 `cap_lookup` measures 93 ns in a dev build: within the 100 ns target, but only just. Release-build
 numbers have not been recorded.
 
-### Hardening features are not active (N-145, N-146, N-15; planned v0.27 sprint G)
+### Hardening features are not active (N-145, N-146, N-15; planned v0.28, sprint G)
 
 Present as code but not in effect, despite older documentation:
 
@@ -373,7 +374,7 @@ Present as code but not in effect, despite older documentation:
 - **SMEP/SMAP:** not enabled (N-15).
 - **AArch64:** no branch-predictor or BHB hardening on entry from EL0 and no SSBD (HA-30).
 
-### Network sockets do not work from user programs (N-64 to N-69; planned v0.27 sprint F)
+### Network sockets do not work from user programs (N-64 to N-69; planned v0.28, sprint F)
 
 `bind` and `connect` misread `struct sockaddr_in`, UDP datagrams are neither sent nor received
 through the socket layer, TCP `connect` reports success without a handshake, and received packets
@@ -509,7 +510,7 @@ allow-list (N-159, N-160).
 The CSPRNG is seeded only from timer jitter on AArch64, RISC-V and x86 CPUs without RDRAND, which
 is close to deterministic under QEMU TCG.
 
-### Runs only under QEMU (planned v0.27 sprints E and H)
+### Runs only under QEMU (planned v0.28: sprint H and the open E items)
 
 Every architecture depends on QEMU-specific addresses and devices, and AArch64 and RISC-V can
 only be loaded as ELF files at one fixed address. Real-hardware requirements and the bring-up
@@ -559,7 +560,8 @@ order are in `ref-docs/HARDWARE-X86_64.md`, `ref-docs/HARDWARE-AARCH64.md` and
   - **Privileged registers.** The unused FP save/restore code reads `misa` and the FP
     initialisation writes `mstatus`, M-mode registers that trap in S-mode (HR-20, HR-21); fixed
     with FP state switching in sprint E. `sstatus.FS` is Off in the kernel since v0.27.
-  - **Missing support.** No PCIe, no non-coherent DMA and no shutdown or reboot path
+  - **Missing support.** No PCIe, no DMA maintenance for non-coherent devices on harts without
+    Zicbom (the T-Head vendor instructions), and no shutdown or reboot path
     (HR-24, HR-34, HR-38).
 
 Sprint E fixes the boot-critical AArch64 and RISC-V items together with turning the MMU on;

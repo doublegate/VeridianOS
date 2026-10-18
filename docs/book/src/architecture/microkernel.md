@@ -1,6 +1,6 @@
 # Microkernel Architecture
 
-> **Status (v0.26.0):** this chapter describes the design. Device drivers, filesystems, the network stack and the desktop currently run in the kernel, and IPC is not yet reachable from user programs. See [Known Limitations](https://github.com/doublegate/VeridianOS/blob/main/docs/KNOWN-LIMITATIONS.md).
+> **Status (v0.27.0):** this chapter describes the design. Device drivers, filesystems, the network stack and the desktop currently run in the kernel, and user programs reach native IPC only for endpoint send and receive. See [Known Limitations](https://github.com/doublegate/VeridianOS/blob/main/docs/KNOWN-LIMITATIONS.md).
 
 VeridianOS implements a capability-based microkernel architecture that prioritizes security, reliability, and performance through minimal kernel design and component isolation.
 
