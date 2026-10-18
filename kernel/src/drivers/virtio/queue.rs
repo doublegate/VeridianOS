@@ -136,6 +136,10 @@ pub struct VirtQueue {
     desc_offset: usize,
     avail_offset: usize,
     used_offset: usize,
+    /// Whether the device's DMA is coherent with the CPU caches; if not,
+    /// the rings are cleaned and invalidated around every exchange
+    /// (`mm::dma`, HA-25).
+    coherent: bool,
 }
 
 impl VirtQueue {
@@ -221,7 +225,31 @@ impl VirtQueue {
             desc_offset: 0,
             avail_offset: desc_size,
             used_offset,
+            coherent: true,
         })
+    }
+
+    /// Record whether the device's DMA is coherent. Before a non-coherent
+    /// device uses the queue, the zeroed rings are written back: a dirty
+    /// line evicted later would overwrite what the device wrote.
+    pub fn set_coherent(&mut self, coherent: bool) {
+        self.coherent = coherent;
+        crate::mm::dma::sync_for_device(
+            phys_to_kernel_virt(self.phys_base),
+            self.num_frames * FRAME_SIZE,
+            crate::mm::dma::DmaDirection::Bidirectional,
+            coherent,
+        );
+    }
+
+    /// Whether the device's DMA is coherent (see [`Self::set_coherent`]).
+    pub fn coherent(&self) -> bool {
+        self.coherent
+    }
+
+    /// The used ring's header (flags and idx), for cache maintenance.
+    fn used_header(&self) -> usize {
+        self.used as usize
     }
 
     /// Get the physical page frame number for the QUEUE_ADDRESS register.
@@ -348,10 +376,30 @@ impl VirtQueue {
 
             // The descriptors and the ring entry must reach the device's view
             // before the index that publishes them (DMA ordering, not just
-            // CPU ordering: `fence(Release)` is a CPU barrier only).
-            crate::arch::barriers::dma_wmb();
+            // CPU ordering: `fence(Release)` is a CPU barrier only). On a
+            // non-coherent device they are written back to memory first;
+            // the whole descriptor table and ring, as the chain may use any
+            // descriptor. `sync_for_device` ends with the barrier.
+            crate::mm::dma::sync_for_device(
+                self.desc as usize,
+                16 * self.size as usize,
+                crate::mm::dma::DmaDirection::ToDevice,
+                self.coherent,
+            );
+            crate::mm::dma::sync_for_device(
+                core::ptr::addr_of!((*self.avail).ring) as usize,
+                2 * self.size as usize,
+                crate::mm::dma::DmaDirection::ToDevice,
+                self.coherent,
+            );
 
             core::ptr::write_volatile(idx_ptr, idx.wrapping_add(1));
+            crate::mm::dma::sync_for_device(
+                self.avail as usize,
+                4,
+                crate::mm::dma::DmaDirection::ToDevice,
+                self.coherent,
+            );
         }
     }
 
@@ -363,8 +411,15 @@ impl VirtQueue {
     /// The caller should free the returned descriptor chain via `free_chain()`.
     pub fn poll_used(&mut self) -> Option<(u16, u32)> {
         // Read barrier: ensure we see the device's writes to the used ring
-        // before we read the index.
+        // before we read the index (and on a non-coherent device, not a
+        // stale cached copy of it).
         atomic::fence(Ordering::Acquire);
+        crate::mm::dma::sync_for_cpu(
+            self.used_header(),
+            4,
+            crate::mm::dma::DmaDirection::FromDevice,
+            self.coherent,
+        );
 
         // SAFETY: self.used points to valid VirtqUsed memory we own. The
         // device writes it, so the reads are volatile.
@@ -378,6 +433,13 @@ impl VirtQueue {
         crate::arch::barriers::dma_rmb();
 
         let ring_idx = self.last_used_idx as usize % self.size as usize;
+        crate::mm::dma::sync_for_cpu(
+            // SAFETY: ring_idx is within [0, size): an address in the ring.
+            unsafe { core::ptr::addr_of!((*self.used).ring[ring_idx]) } as usize,
+            8,
+            crate::mm::dma::DmaDirection::FromDevice,
+            self.coherent,
+        );
         // SAFETY: ring_idx is modular-reduced to within [0, size).
         let elem =
             unsafe { core::ptr::read_volatile(core::ptr::addr_of!((*self.used).ring[ring_idx])) };
@@ -396,6 +458,12 @@ impl VirtQueue {
     /// Check if any completions are pending without consuming them.
     pub fn has_used(&self) -> bool {
         atomic::fence(Ordering::Acquire);
+        crate::mm::dma::sync_for_cpu(
+            self.used_header(),
+            4,
+            crate::mm::dma::DmaDirection::FromDevice,
+            self.coherent,
+        );
         // SAFETY: self.used is valid; the device writes it (volatile read).
         let used_idx = unsafe { core::ptr::read_volatile(core::ptr::addr_of!((*self.used).idx)) };
         self.last_used_idx != used_idx

@@ -6,6 +6,7 @@
 
 pub mod boot;
 pub mod bootstrap;
+pub mod cmo;
 pub mod entry;
 pub mod fpu;
 #[cfg(feature = "alloc")]
@@ -394,6 +395,7 @@ pub fn init() {
     let dtb_pa = unsafe { core::ptr::read_volatile(core::ptr::addr_of!(veridian_dtb_pa)) };
     super::riscv::timer::init_from_device_tree(dtb_pa);
     fpu::init_from_device_tree(dtb_pa);
+    cmo::init_from_device_tree(dtb_pa);
     super::riscv::timer::start(1000);
 
     // SAFETY: the trap vector is installed (above), so supervisor

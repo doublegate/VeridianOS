@@ -221,6 +221,15 @@ fn write_fwcfg_dma(
     // this call's alone.
     unsafe { core::ptr::write_unaligned(desc, dma_access) };
     let dma_addr = frame.phys + DESC_OFFSET as u64;
+    // The device reads the data and the descriptor and writes the
+    // descriptor's control word back (HA-25).
+    let coherent = crate::mm::dma::device_coherent(b"qemu,fw-cfg-mmio", FWCFG_PHYS);
+    crate::mm::dma::sync_for_device(
+        frame.virt,
+        DESC_OFFSET + core::mem::size_of::<FwCfgDmaAccess>(),
+        crate::mm::dma::DmaDirection::Bidirectional,
+        coherent,
+    );
 
     // Write the DMA descriptor address (big-endian, split into high/low 32-bit)
     // SAFETY: MMIO writes to the fw_cfg DMA register to initiate a write transfer.
@@ -236,6 +245,12 @@ fn write_fwcfg_dma(
     // SAFETY: `desc` points at the descriptor written above.
     let control_ptr = unsafe { core::ptr::addr_of!((*desc).control) };
     for _ in 0..1_000_000 {
+        crate::mm::dma::sync_for_cpu(
+            control_ptr as usize,
+            4,
+            crate::mm::dma::DmaDirection::Bidirectional,
+            coherent,
+        );
         // SAFETY: Reading the DMA control field to check completion. The
         // field is modified by the hypervisor (QEMU) when the DMA completes.
         // control_ptr points into the descriptor in the DMA frame, 64 bytes

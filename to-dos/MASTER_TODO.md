@@ -194,8 +194,9 @@ What does not work yet: `docs/KNOWN-LIMITATIONS.md`.
       BusyBox root running the BusyBox self-test and both runtime suites
       (`scripts/build-musl-rootfs.sh`, `ARCH=... scripts/run-rootfs-tests.sh`; also RISC-V);
       those runs in the gate on one and four CPUs; PSTATE sanitised on every return to EL0 and
-      by sigreturn, with a test that panics the kernel without it (N-170); next: DMA coherency
-      (HA-25 rest); done: AT_HWCAP2 (instructions needing no kernel support), arm64
+      by sigreturn, with a test that panics the kernel without it (N-170); done: DMA coherency
+      (HA-25 rest; ADR 0019: `mm::dma`, coherency per device from the device tree, AArch64
+      `dc cvac/civac`, RISC-V Zicbom, the virtio drivers and ramfb); done: AT_HWCAP2 (instructions needing no kernel support), arm64
       MINSIGSTKSZ 5120, BTI for user programs (PROT_BTI, GP pages, loader property notes,
       SCTLR_EL1.BT0, HWCAP2_BTI; boot-tested on `-cpu max` in the gate).
     - RISC-V: done: zero BSS, hart lottery, `sstatus.FS` Off in the kernel (HR-01, HR-19, HR-20

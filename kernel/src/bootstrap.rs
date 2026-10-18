@@ -3587,6 +3587,48 @@ fn run_usercopy_tests(passed: &mut u32, failed: &mut u32) {
         report_test("riscv_image_header", ok, passed, failed);
     }
 
+    // Streaming-DMA cache maintenance (HA-25): QEMU's devices are all
+    // coherent, so the non-coherent path runs here on a frame instead. The
+    // cleans and invalidations must keep its data, and on RISC-V the
+    // device tree's Zicbom must have been found; QEMU's virtio-mmio nodes
+    // must read as coherent (`dma-coherent` on them or their bus).
+    {
+        use crate::mm::dma::{self, DmaDirection};
+        let ok = match crate::drivers::dma_frame::DmaFrame::alloc() {
+            Ok(mut frame) => {
+                for (i, b) in frame.bytes_mut().iter_mut().enumerate() {
+                    *b = (i * 7) as u8;
+                }
+                for dir in [
+                    DmaDirection::ToDevice,
+                    DmaDirection::FromDevice,
+                    DmaDirection::Bidirectional,
+                ] {
+                    dma::sync_for_device(frame.virt + 3, 4000, dir, false);
+                    dma::sync_for_cpu(frame.virt + 3, 4000, dir, false);
+                }
+                frame
+                    .bytes()
+                    .iter()
+                    .enumerate()
+                    .all(|(i, &b)| b == (i * 7) as u8)
+            }
+            Err(_) => false,
+        };
+        #[cfg(all(target_arch = "riscv64", target_os = "none"))]
+        let ok = ok && crate::arch::riscv64::cmo::present();
+        #[cfg(all(
+            any(target_arch = "aarch64", target_arch = "riscv64"),
+            target_os = "none"
+        ))]
+        let ok = ok
+            && crate::drivers::virtio::mmio::slots()
+                .next()
+                .map(crate::drivers::virtio::mmio::VirtioMmioTransport::new)
+                .is_some_and(|t| t.dma_coherent());
+        report_test("dma_cache_maintenance", ok, passed, failed);
+    }
+
     // W^X for the kernel image on x86_64: the bootloader maps each ELF
     // segment with its own permissions (RW, R E, R, RW) and the physical
     // map without execute, so no image page may be both writable and

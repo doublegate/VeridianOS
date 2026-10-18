@@ -11,6 +11,7 @@ pub mod asid;
 pub mod bootloader;
 pub mod cache_aligned;
 pub mod cache_topology;
+pub mod dma;
 pub mod frame_allocator;
 #[cfg(feature = "alloc")]
 pub mod frame_refs;

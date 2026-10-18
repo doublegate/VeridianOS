@@ -534,10 +534,11 @@ order are in `ref-docs/HARDWARE-X86_64.md`, `ref-docs/HARDWARE-AARCH64.md` and
   - **Platform devices.** Hard-codes the QEMU PL011 UART and GICv2 addresses (HA-05, HA-07), and
     supports no GICv3 or PCIe (HA-20). RAM comes from the device tree's memory nodes, less its
     reservations, since v0.27 (HA-17); without a device tree 128 MiB is assumed.
-  - **Caches and CPU start.** Maintains the caches for its boot page tables and for code it writes
+  - **Caches and CPU start.** Maintains the caches for its boot page tables, for code it writes
     for user programs (cleaned to the point of unification unless CTR_EL0.IDC, instruction caches
-    invalidated unless CTR_EL0.DIC), but not for DMA buffers, which QEMU keeps coherent (HA-25).
-    QEMU models no caches, so none of it is tested against stale data. It can start secondary
+    invalidated unless CTR_EL0.DIC), and since v0.27 for DMA buffers of devices the device tree
+    does not mark `dma-coherent` (ADR 0019; virtio, ramfb). QEMU models no caches, so none of it
+    is tested against stale data. It can start secondary
     CPUs only through PSCI, not the Raspberry Pi 4's spin-table (HA-22).
 - **RISC-V:**
   - **Boot.** Runs only at its link address, physical 0x8020_0000, so boards whose RAM starts

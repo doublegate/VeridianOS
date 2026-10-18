@@ -198,6 +198,29 @@ impl<'a> Fdt<'a> {
     /// a bus with a non-empty `ranges` (an address translation, which this
     /// reader does not apply) is not reported.
     pub fn compatible_reg(&self, compat: &[u8]) -> Option<(u64, u64)> {
+        self.find_compatible(compat, |_| true)
+            .map(|(base, size, _)| (base, size))
+    }
+
+    /// Whether DMA by the enabled `compat` node whose first `reg` range
+    /// starts at `base` is coherent with the CPU caches: its own
+    /// `dma-coherent` (true) or `dma-noncoherent` (false), else its nearest
+    /// ancestor's, as Linux's `of_dma_is_coherent`. `None` when no node on
+    /// the path says (the architecture's default applies) or there is no
+    /// such node.
+    pub fn dma_coherent(&self, compat: &[u8], base: u64) -> Option<bool> {
+        self.find_compatible(compat, |b| b == base)
+            .and_then(|(_, _, coherent)| coherent)
+    }
+
+    /// The first enabled `compat` node (as [`Self::compatible_reg`] finds
+    /// them) whose first `reg` base `pick` accepts: that range and the
+    /// node's DMA coherency (see [`Self::dma_coherent`]).
+    fn find_compatible(
+        &self,
+        compat: &[u8],
+        mut pick: impl FnMut(u64) -> bool,
+    ) -> Option<(u64, u64, Option<bool>)> {
         /// Deeper nodes are not considered (the specification sets no
         /// limit; real trees nest a handful of levels).
         const MAX_DEPTH: usize = 16;
@@ -211,6 +234,8 @@ impl<'a> Fdt<'a> {
             hit: bool,
             enabled: bool,
             reg: Option<&'a [u8]>,
+            /// `dma-coherent` / `dma-noncoherent` here or on an ancestor.
+            coherent: Option<bool>,
         }
         let blank = Node {
             cells: (2, 1),
@@ -218,15 +243,17 @@ impl<'a> Fdt<'a> {
             hit: false,
             enabled: true,
             reg: None,
+            coherent: None,
         };
         let mut nodes = [blank; MAX_DEPTH + 1];
         let mut found = None;
         self.walk(|e| match e {
             Event::Begin { depth, .. } if depth <= MAX_DEPTH => {
                 // Properties precede subnodes, so the parent's are known.
-                let parent_identity = depth < 2 || nodes[depth - 1].identity;
+                let parent = (depth >= 1).then(|| nodes[depth - 1]);
                 nodes[depth] = Node {
-                    identity: parent_identity,
+                    identity: depth < 2 || parent.is_some_and(|p| p.identity),
+                    coherent: parent.and_then(|p| p.coherent),
                     ..blank
                 };
             }
@@ -250,6 +277,8 @@ impl<'a> Fdt<'a> {
                         n.enabled = s == b"okay" || s == b"ok";
                     }
                     b"reg" => n.reg = Some(value),
+                    b"dma-coherent" => n.coherent = Some(true),
+                    b"dma-noncoherent" => n.coherent = Some(false),
                     _ => {}
                 }
             }
@@ -264,9 +293,13 @@ impl<'a> Fdt<'a> {
                     && (1..=2).contains(&sc)
                 {
                     if let Some(r) = n.reg {
+                        let mut first = None;
                         reg_ranges(r, (ac, sc), &mut |b, s| {
-                            found.get_or_insert((b, s));
+                            first.get_or_insert((b, s));
                         });
+                        if let Some((b, s)) = first.filter(|&(b, _)| pick(b)) {
+                            found = Some((b, s, n.coherent));
+                        }
                     }
                 }
             }
@@ -804,13 +837,15 @@ mod tests {
             strings.push(0);
             off
         };
-        let (ac, sc, reg, compat, status, ranges) = (
+        let (ac, sc, reg, compat, status, ranges, coherent, noncoherent) = (
             add(b"#address-cells"),
             add(b"#size-cells"),
             add(b"reg"),
             add(b"compatible"),
             add(b"status"),
             add(b"ranges"),
+            add(b"dma-coherent"),
+            add(b"dma-noncoherent"),
         );
         let mut st = Vec::new();
         let tok = |st: &mut Vec<u8>, t: u32| st.extend_from_slice(&t.to_be_bytes());
@@ -841,10 +876,27 @@ mod tests {
         prop(&mut st, reg, &cells(&[0, 0x901_0000, 0, 0x1000]));
         tok(&mut st, FDT_END_NODE);
         tok(&mut st, FDT_BEGIN_NODE);
+        name(&mut st, b"virtio_mmio@5000");
+        prop(&mut st, compat, b"virtio,mmio\0");
+        prop(&mut st, reg, &cells(&[0, 0x5000, 0, 0x200]));
+        tok(&mut st, FDT_END_NODE);
+        tok(&mut st, FDT_BEGIN_NODE);
         name(&mut st, b"soc");
         prop(&mut st, ac, &cells(&[2]));
         prop(&mut st, sc, &cells(&[2]));
         prop(&mut st, ranges, b"");
+        prop(&mut st, coherent, b"");
+        tok(&mut st, FDT_BEGIN_NODE);
+        name(&mut st, b"virtio_mmio@3000");
+        prop(&mut st, compat, b"virtio,mmio\0");
+        prop(&mut st, noncoherent, b"");
+        prop(&mut st, reg, &cells(&[0, 0x3000, 0, 0x200]));
+        tok(&mut st, FDT_END_NODE);
+        tok(&mut st, FDT_BEGIN_NODE);
+        name(&mut st, b"virtio_mmio@4000");
+        prop(&mut st, compat, b"virtio,mmio\0");
+        prop(&mut st, reg, &cells(&[0, 0x4000, 0, 0x200]));
+        tok(&mut st, FDT_END_NODE);
         tok(&mut st, FDT_BEGIN_NODE);
         name(&mut st, b"rtc@200");
         prop(&mut st, compat, b"google,goldfish-rtc\0");
@@ -913,6 +965,28 @@ mod tests {
         assert_eq!(fdt.compatible_reg(b"test,translated"), None);
         assert_eq!(fdt.compatible_reg(b"arm,pl03"), None);
         assert_eq!(fdt.compatible_reg(b"missing"), None);
+    }
+
+    /// DMA coherency as Linux's `of_dma_is_coherent` decides it: the
+    /// node's own `dma-coherent` or `dma-noncoherent`, else its nearest
+    /// ancestor's; unspecified (`None`, the architecture's default) when no
+    /// node on the path says, or no enabled node has that `reg` base.
+    #[test]
+    fn dma_coherency_follows_the_tree() {
+        let blob = device_sample();
+        let fdt = Fdt::new(&blob).unwrap();
+        assert_eq!(fdt.dma_coherent(b"virtio,mmio", 0x4000), Some(true));
+        assert_eq!(fdt.dma_coherent(b"virtio,mmio", 0x3000), Some(false));
+        assert_eq!(fdt.dma_coherent(b"virtio,mmio", 0x5000), None);
+        assert_eq!(fdt.dma_coherent(b"virtio,mmio", 0x6000), None);
+        // Disabled nodes are not devices.
+        assert_eq!(fdt.dma_coherent(b"google,goldfish-rtc", 0x200), None);
+        assert_eq!(
+            fdt.dma_coherent(b"google,goldfish-rtc", 0x10_1000),
+            Some(true)
+        );
+        // The first match is still the first in tree order.
+        assert_eq!(fdt.compatible_reg(b"virtio,mmio"), Some((0x5000, 0x200)));
     }
 
     #[test]

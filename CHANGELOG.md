@@ -292,6 +292,19 @@
   the table (AArch64 34/34, 36/36 on four CPUs). It failed before the move, and a probe `udf` at
   the top of `_start_rust` now prints `[EXCEPTION] unhandled sync`.
 
+- **DMA cache maintenance for non-coherent devices (HA-25, ADR 0019).** Most AArch64 boards (Pi
+  4 and 5, RK3588, Allwinner) and the T-Head and SpacemiT RISC-V SoCs do not keep DMA coherent with
+  the CPU caches, and the kernel did no maintenance for DMA buffers. `mm::dma` follows Linux's
+  streaming-DMA model: `sync_for_device` cleans a buffer to the point of coherency before the
+  device uses it, `sync_for_cpu` cleans and invalidates it before the CPU reads what the device
+  wrote. Whether a device needs it comes from its device-tree node or an ancestor
+  (`dma-coherent`, `dma-noncoherent`; `Fdt::dma_coherent`, as Linux's `of_dma_is_coherent`), with
+  Linux's defaults otherwise: non-coherent on AArch64, coherent on RISC-V and x86_64. AArch64 uses
+  `dc cvac`/`dc civac`, RISC-V Zicbom's `cbo.clean`/`cbo.flush` (found in the device tree, with its
+  block size). The virtqueue, virtio-blk, virtio-net and the ramfb fw_cfg descriptor use it. QEMU's
+  devices are coherent, so the boot test `dma_cache_maintenance` runs the non-coherent path on a
+  frame.
+
 - **W^X for the kernel image (AArch64, RISC-V).** boot.S maps the image with writable,
   executable 1 GiB pages (RISC-V) or 2 MiB blocks (AArch64), so a write anywhere in kernel data
   could plant code. Once the frame allocator is up, before any other CPU starts or an address

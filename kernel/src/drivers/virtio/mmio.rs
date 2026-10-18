@@ -121,6 +121,14 @@ impl VirtioMmioTransport {
         Self { base }
     }
 
+    /// Whether the device's DMA is coherent, from its device-tree node
+    /// (`dma-coherent`, `dma-noncoherent`) or the architecture's default
+    /// (`mm::dma::device_coherent`; HA-25).
+    pub fn dma_coherent(&self) -> bool {
+        let offset = crate::mm::PHYS_MEM_OFFSET.load(core::sync::atomic::Ordering::Acquire);
+        crate::mm::dma::device_coherent(b"virtio,mmio", self.base as u64 - offset)
+    }
+
     #[inline]
     fn read32(&self, offset: usize) -> u32 {
         // SAFETY: base + offset is an MMIO region mapped in the kernel's phys window.
@@ -335,7 +343,8 @@ pub fn try_init_mmio_blk(
         });
     }
 
-    let queue = crate::drivers::virtio::queue::VirtQueue::new(qmax)?;
+    let mut queue = crate::drivers::virtio::queue::VirtQueue::new(qmax)?;
+    queue.set_coherent(transport.dma_coherent());
     transport.set_queue_size(queue.size());
     if transport.is_legacy() {
         transport.write_queue_pfn(queue.pfn());

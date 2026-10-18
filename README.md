@@ -96,8 +96,8 @@ The design goal is a microkernel that provides only memory management, schedulin
 | Metric | Value |
 | --- | --- |
 | Build | 0 errors, 0 warnings across all 3 architectures |
-| Boot tests | x86_64 42/42, AArch64 63/63, RISC-V 56/56 (Stage 6 BOOTOK; also with `-smp 4`) |
-| Host-target unit tests | 4,729 passing |
+| Boot tests | x86_64 43/43, AArch64 64/64, RISC-V 57/57 (Stage 6 BOOTOK; also with `-smp 4`) |
+| Host-target unit tests | 4,731 passing |
 | In-guest runtime suites | BusyBox self-test, `audit_runtime_test` and `musl_runtime_test` all passing on the BlockFS root of each architecture (x86_64: 91/91 and 70/70; AArch64: 91/91 and 68/68; RISC-V: 89/89 and 68/68) |
 | CI pipeline | GitHub Actions + Codecov; patch coverage of the v0.26.0 changes 75% (gaps tracked) |
 | Unsafe code | 5 justified `static mut` (early serial, boot info, heap, per-CPU data, ready queue); unsafe blocks carry SAFETY comments |
@@ -110,9 +110,9 @@ v0.26.0 (2026-10-06); sources: [`docs/PERFORMANCE-REPORT.md`](docs/PERFORMANCE-R
 
 | Architecture | Boot Method | Status |
 | --- | --- | --- |
-| x86_64 | UEFI via OVMF | Boots to BOOTOK (42/42); 1280x800 UEFI GOP, Ring 3 user programs, native compilation |
-| AArch64 | Direct kernel loading or arm64 Image | Boots to BOOTOK (63/63); PL011 UART, PL031 RTC, virtio-MMIO, BlockFS root. MMU on, kernel in the upper half (ADR 0015); EL0 programs with musl |
-| RISC-V 64 | OpenSBI | Boots to BOOTOK (56/56); Sv48 or Sv39 page tables, Goldfish RTC, virtio-MMIO, BlockFS root. U-mode programs with musl |
+| x86_64 | UEFI via OVMF | Boots to BOOTOK (43/43); 1280x800 UEFI GOP, Ring 3 user programs, native compilation |
+| AArch64 | Direct kernel loading or arm64 Image | Boots to BOOTOK (64/64); PL011 UART, PL031 RTC, virtio-MMIO, BlockFS root. MMU on, kernel in the upper half (ADR 0015); EL0 programs with musl |
+| RISC-V 64 | OpenSBI | Boots to BOOTOK (57/57); Sv48 or Sv39 page tables, Goldfish RTC, virtio-MMIO, BlockFS root. U-mode programs with musl |
 
 ### Performance
 

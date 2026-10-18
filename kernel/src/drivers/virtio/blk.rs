@@ -94,6 +94,16 @@ pub const MAX_REQUEST_BYTES: usize = FRAME_SIZE;
 /// Offset of the status byte within the control frame (after the header).
 const STATUS_OFFSET: usize = 64;
 
+/// Which way a request's data moves: into memory for a read (IN), out of
+/// it otherwise.
+fn data_dir(type_: u32) -> crate::mm::dma::DmaDirection {
+    if type_ == req_type::VIRTIO_BLK_T_IN {
+        crate::mm::dma::DmaDirection::FromDevice
+    } else {
+        crate::mm::dma::DmaDirection::ToDevice
+    }
+}
+
 /// DMA memory reused by every request (DRV-PERF-02): a control frame
 /// holding the request header and status byte, and a data frame. The old
 /// driver allocated and zeroed a fresh frame for each 512-byte request.
@@ -367,6 +377,16 @@ impl VirtioBlkDevice {
             frames.write_header(type_, sector);
             // Anything but OK if the device never writes the status.
             frames.set_status(0xFF);
+            // A non-coherent device sees the header, the status byte and
+            // the data only once they are written back (HA-25).
+            let coherent = self.queue.coherent();
+            crate::mm::dma::sync_for_device(
+                frames.ctrl.virt,
+                STATUS_OFFSET + 1,
+                crate::mm::dma::DmaDirection::Bidirectional,
+                coherent,
+            );
+            crate::mm::dma::sync_for_device(frames.data.virt, len, data_dir(type_), coherent);
             (frames.ctrl.phys, frames.data.phys, frames.status_phys())
         };
 
@@ -462,6 +482,18 @@ impl VirtioBlkDevice {
         }
         self.queue.free_chain(desc_header);
 
+        // The device is done: what it wrote (status, read data) replaces
+        // any cached copy.
+        if let Some(frames) = self.frames.as_ref() {
+            let coherent = self.queue.coherent();
+            crate::mm::dma::sync_for_cpu(
+                frames.ctrl.virt,
+                STATUS_OFFSET + 1,
+                crate::mm::dma::DmaDirection::Bidirectional,
+                coherent,
+            );
+            crate::mm::dma::sync_for_cpu(frames.data.virt, len, data_dir(type_), coherent);
+        }
         let status = self.frames.as_ref().map_or(0xFF, |f| f.status());
         match status {
             blk_status::VIRTIO_BLK_S_OK => Ok(()),

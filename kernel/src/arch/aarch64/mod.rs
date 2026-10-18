@@ -166,6 +166,34 @@ pub fn clean_dcache_lines_to_pou(addr: usize, len: usize, line: usize) {
     unsafe { core::arch::asm!("dsb ish", options(nostack)) };
 }
 
+/// Clean the data cache lines of `addr..addr + len` (kernel addresses) to
+/// the point of coherency, where a non-coherent device reads memory
+/// (streaming DMA, `mm::dma`; HA-25).
+pub fn dcache_clean_poc(addr: usize, len: usize) {
+    let line = 4 << ((ctr_el0() >> 16) & 0xF);
+    for a in crate::mm::page_ops::cache_line_starts(addr, len, line) {
+        // SAFETY: `dc cvac` cleans the line holding `a`, a mapped kernel
+        // address (the caller's range); it changes no data.
+        unsafe { core::arch::asm!("dc cvac, {0}", in(reg) a, options(nostack)) };
+    }
+    // SAFETY: a barrier only: the cleans complete before a device is told.
+    unsafe { core::arch::asm!("dsb sy", options(nostack)) };
+}
+
+/// Clean and invalidate the data cache lines of `addr..addr + len` to the
+/// point of coherency, so the CPU next reads what a non-coherent device
+/// wrote (`mm::dma`; HA-25).
+pub fn dcache_clean_inval_poc(addr: usize, len: usize) {
+    let line = 4 << ((ctr_el0() >> 16) & 0xF);
+    for a in crate::mm::page_ops::cache_line_starts(addr, len, line) {
+        // SAFETY: `dc civac` writes back and drops the line holding `a`, a
+        // mapped kernel address; memory keeps the line's data.
+        unsafe { core::arch::asm!("dc civac, {0}", in(reg) a, options(nostack)) };
+    }
+    // SAFETY: a barrier only.
+    unsafe { core::arch::asm!("dsb sy", options(nostack)) };
+}
+
 /// Make code just written (and, without CTR_EL0.IDC, cleaned with
 /// [`clean_dcache_to_pou`]) visible to instruction fetch on every CPU:
 /// invalidate the instruction caches to the inner-shareable domain, unless
