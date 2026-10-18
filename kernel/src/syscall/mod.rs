@@ -141,11 +141,20 @@ fn syscall_arg6() -> Result<usize, SyscallError> {
 /// `last_refill`, so concurrent syscalls can neither double-spend a token
 /// nor wrap the counter (SYS-PERF-01). Elapsed time is converted from
 /// hardware ticks to seconds before it becomes tokens.
+///
+/// The global budget ([`Self::REFILL_PER_SEC`], [`Self::MAX_TOKENS`]) is
+/// split into one bucket per CPU, each on its own cache line, so system
+/// calls on different CPUs do not contend for one counter; the shares sum
+/// to the global budget, so the machine-wide rate is unchanged.
 struct SyscallRateLimiter {
     /// Tokens available.
     tokens: AtomicU64,
     /// Hardware timestamp up to which elapsed time has been credited.
     last_refill: AtomicU64,
+    /// Tokens per second this bucket earns.
+    rate: u64,
+    /// Most tokens it holds.
+    burst: u64,
 }
 
 impl SyscallRateLimiter {
@@ -158,14 +167,30 @@ impl SyscallRateLimiter {
     /// the limiter is correct but does not throttle normal workloads.
     const REFILL_PER_SEC: u64 = 50_000_000;
 
-    const fn new() -> Self {
-        Self::with_tokens(Self::MAX_TOKENS)
+    /// Buckets the global budget is split into (one per CPU).
+    const SHARDS: u64 = crate::sched::smp::MAX_CPUS as u64;
+
+    /// One CPU's bucket: its share of the global budget, full.
+    const fn shard() -> Self {
+        Self::with(
+            Self::MAX_TOKENS / Self::SHARDS,
+            Self::REFILL_PER_SEC / Self::SHARDS,
+            Self::MAX_TOKENS / Self::SHARDS,
+        )
     }
 
+    /// A bucket with the whole global budget holding `tokens` (tests).
+    #[cfg(test)]
     const fn with_tokens(tokens: u64) -> Self {
+        Self::with(tokens, Self::REFILL_PER_SEC, Self::MAX_TOKENS)
+    }
+
+    const fn with(tokens: u64, rate: u64, burst: u64) -> Self {
         Self {
             tokens: AtomicU64::new(tokens),
             last_refill: AtomicU64::new(0),
+            rate,
+            burst,
         }
     }
 
@@ -191,14 +216,14 @@ impl SyscallRateLimiter {
         }
         let last = self.last_refill.load(Ordering::Acquire);
         let elapsed = now.saturating_sub(last) as u128;
-        let earned = elapsed * Self::REFILL_PER_SEC as u128 / ticks_per_sec as u128;
+        let earned = elapsed * self.rate as u128 / ticks_per_sec as u128;
         if earned == 0 {
             // Leave last_refill alone so sub-token intervals accumulate.
             return;
         }
         // Credit only the ticks that produced whole tokens, so the
         // remainder is not lost; only the CAS winner adds the tokens.
-        let credited = (earned * ticks_per_sec as u128 / Self::REFILL_PER_SEC as u128) as u64;
+        let credited = (earned * ticks_per_sec as u128 / self.rate as u128) as u64;
         if self
             .last_refill
             .compare_exchange(last, last + credited, Ordering::AcqRel, Ordering::Acquire)
@@ -206,16 +231,26 @@ impl SyscallRateLimiter {
         {
             return;
         }
-        let earned = earned.min(Self::MAX_TOKENS as u128) as u64;
+        let earned = earned.min(self.burst as u128) as u64;
         let _ = self
             .tokens
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |t| {
-                Some(t.saturating_add(earned).min(Self::MAX_TOKENS))
+                Some(t.saturating_add(earned).min(self.burst))
             });
     }
 }
 
-static SYSCALL_RATE_LIMITER: SyscallRateLimiter = SyscallRateLimiter::new();
+/// One rate-limit bucket per CPU (see [`SyscallRateLimiter`]).
+static SYSCALL_RATE_LIMITERS: [crate::mm::cache_aligned::CacheAligned<SyscallRateLimiter>;
+    crate::sched::smp::MAX_CPUS] =
+    [const { crate::mm::cache_aligned::CacheAligned::new(SyscallRateLimiter::shard()) };
+        crate::sched::smp::MAX_CPUS];
+
+/// Charge one system call to this CPU's bucket.
+fn rate_limit_allows() -> bool {
+    let cpu = (crate::arch::percpu::this_cpu_id() as usize).min(SYSCALL_RATE_LIMITERS.len() - 1);
+    SYSCALL_RATE_LIMITERS[cpu].check()
+}
 
 /// Syscall statistics for monitoring
 static SYSCALL_COUNT: AtomicU64 = AtomicU64::new(0);
@@ -261,12 +296,37 @@ use self::debug::*;
 mod memory;
 use self::memory::*;
 
+// Scheduling policy, priority and affinity (N-221)
+pub(crate) mod scheduling;
+
+// Password checks for pam_veridian
+mod veridian_auth;
+
+// getrusage, times, sysinfo (N-223)
+mod usage;
+
+// getrlimit, setrlimit, prlimit64 (N-224)
+mod limits;
+
+// poll, ppoll, select, pselect6
+mod multiplex;
+use self::multiplex::{sys_poll, sys_ppoll, sys_pselect6, sys_select};
+
 // Import user space utilities
 mod arch_prctl;
 mod futex;
+#[cfg(feature = "alloc")]
+mod futex_pi;
+
+/// A thread is exiting: hand on the PI futexes it holds (futex_pi.rs).
+#[cfg(feature = "alloc")]
+pub(crate) fn futex_pi_owner_exiting(owner: (u64, u64)) {
+    futex_pi::owner_exiting(owner);
+}
 pub(crate) mod linux_compat;
 mod thread_clone;
 pub(crate) mod userspace;
+pub(crate) use filesystem::rename_paths;
 pub use futex::sys_futex_wake;
 
 // Import Phase 6 syscall modules
@@ -286,299 +346,11 @@ mod pty;
 #[allow(unused_imports)]
 use self::pty::{sys_grantpt, sys_openpty, sys_ptsname, sys_unlockpt};
 
-/// System call numbers
-#[repr(usize)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Syscall {
-    // IPC system calls
-    IpcSend = 0,
-    IpcReceive = 1,
-    IpcCall = 2,
-    IpcReply = 3,
-    IpcCreateEndpoint = 4,
-    IpcBindEndpoint = 5,
-    IpcShareMemory = 6,
-    IpcMapMemory = 7,
-
-    // Process management
-    ProcessYield = 10,
-    ProcessExit = 11,
-    ProcessFork = 12,
-    ProcessExec = 13,
-    ProcessWait = 14,
-    ProcessGetPid = 15,
-    ProcessGetPPid = 16,
-    ProcessSetPriority = 17,
-    ProcessGetPriority = 18,
-
-    // Thread management
-    ThreadCreate = 40,
-    ThreadExit = 41,
-    ThreadJoin = 42,
-    ThreadGetTid = 43,
-    ThreadSetAffinity = 44,
-    ThreadGetAffinity = 45,
-    ThreadClone = 46,
-
-    // Memory management
-    MemoryMap = 20,
-    MemoryUnmap = 21,
-    MemoryProtect = 22,
-    MemoryBrk = 23,
-
-    // Capability management
-    CapabilityGrant = 30,
-    CapabilityRevoke = 31,
-
-    // Filesystem operations
-    FileOpen = 50,
-    FileClose = 51,
-    FileRead = 52,
-    FileWrite = 53,
-    FileSeek = 54,
-    FileStat = 55,
-    FileTruncate = 56,
-
-    // Directory operations
-    DirMkdir = 60,
-    DirRmdir = 61,
-    DirOpendir = 62,
-    DirReaddir = 63,
-    DirClosedir = 64,
-    FilePipe2 = 65,
-    FileDup3 = 66,
-
-    // Filesystem management
-    FsMount = 70,
-    FsUnmount = 71,
-    FsSync = 72,
-    FsFsync = 73,
-
-    // Kernel information
-    KernelGetInfo = 80,
-
-    // Package management
-    PkgInstall = 90,
-    PkgRemove = 91,
-    PkgQuery = 92,
-    PkgList = 93,
-    PkgUpdate = 94,
-
-    // Extended filesystem operations
-    FileDup = 57,
-    FileDup2 = 58,
-    FilePipe = 59,
-
-    // Time management
-    TimeGetUptime = 100,
-    TimeCreateTimer = 101,
-    TimeCancelTimer = 102,
-
-    // Extended process operations
-    ProcessGetcwd = 110,
-    ProcessChdir = 111,
-    FileIoctl = 112,
-    ProcessKill = 113,
-
-    // Signal management
-    SigAction = 120,
-    SigProcmask = 121,
-    SigSuspend = 122,
-    SigReturn = 123,
-
-    // POSIX time syscalls
-    ClockGettime = 160,
-    ClockGetres = 161,
-    Nanosleep = 162,
-    Gettimeofday = 163,
-
-    // Identity syscalls
-    Getuid = 170,
-    Geteuid = 171,
-    Getgid = 172,
-    Getegid = 173,
-    Setuid = 174,
-    Setgid = 175,
-
-    // Process group / session syscalls
-    Setpgid = 176,
-    Getpgid = 177,
-    Getpgrp = 178,
-    Setsid = 179,
-    Getsid = 180,
-
-    // Scatter/gather I/O
-    Readv = 183,
-    Writev = 184,
-
-    // Debug / tracing
-    Ptrace = 140,
-
-    // Extended filesystem operations (Phase 4B)
-    FileStatPath = 150,
-    FileLstat = 151,
-    FileReadlink = 152,
-    FileAccess = 153,
-    FileRename = 154,
-    FileLink = 155,
-    FileSymlink = 156,
-    FileUnlink = 157,
-    FileFcntl = 158,
-
-    // New filesystem ops for self-hosting (Phase 4A)
-    FileChmod = 185,
-    FileFchmod = 186,
-    ProcessUmask = 187,
-    FileTruncatePath = 188,
-    FilePoll = 189,
-    FileOpenat = 190,
-    FileFstatat = 191,
-    FileUnlinkat = 192,
-    FileMkdirat = 193,
-    FileRenameat = 194,
-    FilePread = 195,
-    FilePwrite = 196,
-
-    // Ownership and device node syscalls
-    FileChown = 197,
-    FileFchown = 198,
-    FileMknod = 199,
-    FileSelect = 200,
-    FutexWait = 201,
-    FutexWake = 202,
-    ArchPrctl = 203,
-
-    // System information
-    ProcessUname = 204,
-    /// Look up an environment variable by name from the process's env_vars.
-    ///
-    /// Required because some CRT implementations (e.g. GCC's internal CRT)
-    /// skip __libc_start_main, leaving the libc `environ` pointer NULL.
-    ProcessGetenv = 205,
-
-    // POSIX shared memory
-    ShmOpen = 210,
-    ShmUnlink = 211,
-    ShmTruncate = 212,
-
-    // Socket operations
-    SocketCreate = 220,
-    SocketBind = 221,
-    SocketListen = 222,
-    SocketConnect = 223,
-    SocketAccept = 224,
-    SocketSend = 225,
-    SocketRecv = 226,
-    SocketClose = 227,
-    SocketPair = 228,
-
-    // Graphics / framebuffer (Phase 6)
-    FbGetInfo = 230,
-    FbMap = 231,
-    InputPoll = 232,
-    InputRead = 233,
-    FbSwap = 234,
-
-    // Wayland compositor (Phase 6)
-    WlConnect = 240,
-    WlDisconnect = 241,
-    WlSendMessage = 242,
-    WlRecvMessage = 243,
-    WlCreateShmPool = 244,
-    WlCreateSurface = 245,
-    WlCommitSurface = 246,
-    WlGetEvents = 247,
-
-    // Network (Phase 6) -- AF_INET extensions
-    NetSendTo = 250,
-    NetRecvFrom = 251,
-    NetGetSockName = 252,
-    NetGetPeerName = 253,
-    NetSetSockOpt = 254,
-    NetGetSockOpt = 255,
-
-    // Resource limits (Phase 6.5)
-    GetRlimit = 260,
-    SetRlimit = 261,
-
-    // epoll I/O multiplexing (Phase 6.5)
-    EpollCreate = 262,
-    EpollCtl = 263,
-    EpollWait = 264,
-
-    // Process groups / sessions (Phase 6.5)
-    SetPgid = 270,
-    GetPgid = 271,
-    SetSid = 272,
-    GetSid = 273,
-    TcSetPgrp = 274,
-    TcGetPgrp = 275,
-
-    // PTY (Phase 6.5)
-    OpenPty = 280,
-    GrantPty = 281,
-    UnlockPty = 282,
-    PtsName = 283,
-
-    // Filesystem extensions (Phase 6.5)
-    Link = 290,
-    Symlink = 291,
-    Readlink = 292,
-    Lstat = 293,
-    Fchmod = 294,
-    Fchown = 295,
-    Umask = 296,
-    Access = 297,
-
-    // Poll/fcntl (Phase 6.5)
-    Poll = 300,
-    Fcntl = 301,
-
-    // Threading (Phase 6.5)
-    Clone = 310,
-    Futex = 311,
-
-    // Audio (Phase 7)
-    AudioOpen = 320,
-    AudioClose = 321,
-    AudioWrite = 322,
-    AudioSetVolume = 323,
-    AudioGetInfo = 324,
-    AudioStart = 325,
-    AudioStop = 326,
-    AudioPause = 327,
-
-    // musl libc compatibility syscalls
-    Getdents64 = 340,
-    Prlimit64 = 341,
-    InotifyInit1 = 342,
-    InotifyAddWatch = 343,
-    InotifyRmWatch = 344,
-    Madvise = 345,
-
-    // *at() syscalls for musl (dirfd-relative path operations)
-    Fchmodat = 346,
-    Fchownat = 347,
-    Linkat = 348,
-    Symlinkat = 349,
-    Readlinkat = 350,
-    MemfdCreate = 351,
-    SetTidAddress = 352,
-    SetRobustList = 353,
-    ClockNanosleep = 354,
-
-    // Event/timer notification fds (KDE/Wayland infrastructure)
-    Getrandom = 330,
-    EventfdCreate = 331,
-    EventfdRead = 332,
-    EventfdWrite = 333,
-    TimerfdCreate = 334,
-    TimerfdSettime = 335,
-    TimerfdGettime = 336,
-    SignalfdCreate = 337,
-    SendMsg = 338,
-    RecvMsg = 339,
-}
+// System call numbers, generated from abi/syscalls.map (ADR 0009): Linux
+// x86_64 numbers for the calls Linux has, private numbers from 1024 for the
+// rest.
+mod numbers;
+pub use self::numbers::Syscall;
 
 /// System call result type
 pub type SyscallResult = Result<usize, SyscallError>;
@@ -640,6 +412,41 @@ pub enum SyscallError {
     NotASocket = -88,
     /// Unknown or unsupported socket option (ENOPROTOOPT, errno 92).
     ProtocolOptionNotAvailable = -92,
+    /// No child process to wait for (ECHILD, errno 10; N-99).
+    NoChildProcess = -110,
+    /// Operation not permitted for this caller (EPERM, errno 1): signals,
+    /// credentials, process groups. File access denials stay EACCES.
+    OperationNotPermitted = -111,
+    /// No space left on the device (ENOSPC, errno 28; N-127).
+    NoSpace = -112,
+    /// Resource busy, e.g. already mounted (EBUSY, errno 16).
+    Busy = -113,
+    /// File too large (EFBIG, errno 27).
+    FileTooLarge = -114,
+    /// Operation not supported by this object (EOPNOTSUPP, errno 95).
+    NotSupported = -115,
+    /// No such device or filesystem type (ENODEV, errno 19).
+    NoDevice = -116,
+    /// Not an executable format (ENOEXEC, errno 8).
+    ExecFormat = -117,
+    /// A timed wait ran out (ETIMEDOUT, errno 110).
+    TimedOut = -118,
+    AddressFamilyNotSupported = -119,
+    ProtocolNotSupported = -120,
+    IllegalSeek = -121,
+    RangeError = -122,
+    NameTooLong = -123,
+    AddressInUse = -124,
+    ConnectionRefused = -125,
+    NotConnected = -126,
+    AlreadyConnected = -127,
+    InProgress = -128,
+    ConnectionReset = -129,
+    /// ECANCELED: a timerfd's wall clock was set (TFD_TIMER_CANCEL_ON_SET).
+    Canceled = -130,
+    /// The operation would deadlock, e.g. locking a PI futex one already
+    /// owns (EDEADLK, errno 35).
+    Deadlock = -131,
 }
 
 impl From<IpcError> for SyscallError {
@@ -651,6 +458,8 @@ impl From<IpcError> for SyscallError {
             IpcError::OutOfMemory => SyscallError::OutOfMemory,
             IpcError::WouldBlock => SyscallError::WouldBlock,
             IpcError::PermissionDenied => SyscallError::PermissionDenied,
+            IpcError::Interrupted => SyscallError::Interrupted,
+            IpcError::EndpointBusy | IpcError::ResourceBusy => SyscallError::Busy,
             _ => SyscallError::InvalidArgument,
         }
     }
@@ -694,16 +503,41 @@ pub fn map_kernel_error(err: crate::error::KernelError) -> SyscallError {
             FsError::ReadOnly => SyscallError::PermissionDenied,
             FsError::InvalidPath => SyscallError::InvalidArgument,
             FsError::NoRootFs => SyscallError::ResourceNotFound,
-            FsError::TooManyOpenFiles => SyscallError::OutOfMemory,
+            FsError::TooManyOpenFiles => SyscallError::ResourceLimitExceeded,
             FsError::CrossDevice => SyscallError::CrossDevice,
-            _ => SyscallError::InvalidState,
+            // One errno per cause (N-127); no catch-all, so a new FsError
+            // variant has to be given one.
+            FsError::AlreadyMounted => SyscallError::Busy,
+            FsError::NotMounted => SyscallError::InvalidArgument,
+            FsError::UnknownFsType => SyscallError::NoDevice,
+            FsError::NotSupported => SyscallError::NotSupported,
+            FsError::NotASymlink => SyscallError::InvalidArgument,
+            FsError::FileTooLarge => SyscallError::FileTooLarge,
+            FsError::CorruptedData => SyscallError::IoError,
+            FsError::SymlinkLoop => SyscallError::SymlinkLoop,
+            FsError::NoSpace => SyscallError::NoSpace,
+            FsError::OperationNotPermitted => SyscallError::OperationNotPermitted,
+            FsError::Busy => SyscallError::Busy,
+            FsError::Canceled => SyscallError::Canceled,
         },
         KernelError::OutOfMemory { .. } => SyscallError::OutOfMemory,
+        KernelError::InvalidArgument { .. } => SyscallError::InvalidArgument,
+        KernelError::OperationNotSupported { .. } => SyscallError::NotSupported,
+        KernelError::ResourceExhausted { .. } => SyscallError::OutOfMemory,
+        KernelError::UnmappedMemory { .. } | KernelError::InvalidAddress { .. } => {
+            SyscallError::InvalidPointer
+        }
         KernelError::PermissionDenied { .. } => SyscallError::PermissionDenied,
         KernelError::AlreadyExists { .. } => SyscallError::FileExists,
         KernelError::NotFound { .. } => SyscallError::ResourceNotFound,
         KernelError::BrokenPipe => SyscallError::BrokenPipe,
         KernelError::WouldBlock => SyscallError::WouldBlock,
+        KernelError::InvalidCapability { reason, .. } => match reason {
+            crate::error::CapError::NotFound => SyscallError::CapabilityNotFound,
+            crate::error::CapError::InsufficientRights => SyscallError::InsufficientRights,
+            crate::error::CapError::CapabilityRevoked => SyscallError::CapabilityRevoked,
+            _ => SyscallError::InvalidCapability,
+        },
         _ => SyscallError::InvalidState,
     }
 }
@@ -727,18 +561,23 @@ pub extern "C" fn syscall_handler(
     crate::arch::x86_64::kpti::on_syscall_entry();
 
     // Track syscall count and last syscall info (for PF handler diagnostics)
-    #[cfg_attr(not(target_arch = "x86_64"), allow(unused_variables))]
+    #[cfg_attr(
+        not(all(target_arch = "x86_64", feature = "trace")),
+        allow(unused_variables)
+    )]
     let count = SYSCALL_COUNT.fetch_add(1, Ordering::Relaxed);
     LAST_SYSCALL_NUM.store(syscall_num as u64, Ordering::Relaxed);
     LAST_SYSCALL_ARG1.store(arg1 as u64, Ordering::Relaxed);
     LAST_SYSCALL_ARG2.store(arg2 as u64, Ordering::Relaxed);
 
-    // Diagnostic: print first 500 syscalls via raw serial for KDE bringup.
-    // Uses unbuffered port I/O so output appears immediately regardless of
-    // serial mode (-serial stdio vs -serial file:).  Limit to 500 to avoid
-    // flooding serial output during normal operation.
-    #[cfg(target_arch = "x86_64")]
+    // Diagnostic (`trace` feature): the first 500 syscalls via raw serial,
+    // unbuffered so output appears immediately regardless of serial mode.
+    // Off by default: it costs a port write per byte and shows every
+    // process's arguments on the console.
+    #[cfg(all(target_arch = "x86_64", feature = "trace"))]
     if count < 500 {
+        // SAFETY: COM1 (port 0x3F8) is present on the x86_64 platforms this
+        // kernel targets, which is the raw_serial_* contract.
         unsafe {
             crate::arch::x86_64::idt::raw_serial_str(b"SC#");
             crate::arch::x86_64::idt::raw_serial_hex(syscall_num as u64);
@@ -758,7 +597,7 @@ pub extern "C" fn syscall_handler(
     );
 
     // Rate limiting check
-    if !SYSCALL_RATE_LIMITER.check() {
+    if !rate_limit_allows() {
         SYSCALL_ERRORS.fetch_add(1, Ordering::Relaxed);
         // Through the shared conversion like every other error: the raw
         // VeridianOS value (-6) is not EAGAIN (-11) to musl (review of the
@@ -766,89 +605,32 @@ pub extern "C" fn syscall_handler(
         return linux_compat::to_linux_errno(SyscallError::WouldBlock);
     }
 
-    // Get caller PID for audit logging
+    // Caller PID for audit logging. The process reference is dropped here:
+    // exit and exec do not return, so an Arc held across the dispatch would
+    // never be released.
     let caller_pid = crate::process::current_process()
         .map(|p| p.pid.0)
         .unwrap_or(0);
 
-    // Check per-process flag: does this process use the Linux x86_64 syscall ABI?
-    // Musl/glibc binaries loaded from the rootfs set this flag during
-    // load_user_program. When set, ALL syscall numbers are dispatched through
-    // the Linux compat layer (not VeridianOS numbering), and error codes are
-    // translated to Linux errno values on return.
-    let linux_abi = linux_compat::is_linux_abi(caller_pid);
-
-    let result = if linux_abi {
-        // Handle ppoll specially (different arg layout from poll)
-        if syscall_num == 271 {
-            // ppoll(fds, nfds, timespec*, sigmask, sigsetsize)
-            linux_compat::handle_ppoll(arg1, arg2, arg3)
-        } else if linux_compat::is_faccessat(syscall_num) {
-            sys_faccessat(arg1, arg2, arg3, arg4)
-        } else if let Some(syscall) = linux_compat::translate_linux_syscall(syscall_num) {
-            handle_syscall(syscall, arg1, arg2, arg3, arg4, arg5)
-        } else if let Some(result) = linux_compat::handle_linux_stub(syscall_num) {
-            result
-        } else {
-            // SAFETY: Writing to COM1 I/O port for diagnostic output.
-            #[cfg(target_arch = "x86_64")]
-            unsafe {
-                crate::arch::x86_64::idt::raw_serial_str(b"SC_UNK#");
-                crate::arch::x86_64::idt::raw_serial_hex(syscall_num as u64);
-                crate::arch::x86_64::idt::raw_serial_str(b"\n");
+    // One table for every caller (ADR 0009): Linux x86_64 numbers, and
+    // private numbers from 1024 for VeridianOS-only calls. An unknown
+    // number is ENOSYS, as on Linux.
+    let result = match Syscall::try_from(syscall_num) {
+        Ok(syscall) => {
+            let result = handle_syscall(syscall, arg1, arg2, arg3, arg4, arg5);
+            if result == Err(SyscallError::Interrupted) && never_restarted(syscall) {
+                if let Some(thread) = crate::process::current_thread() {
+                    thread.no_restart.store(true, Ordering::Release);
+                }
             }
-            Err(SyscallError::InvalidSyscall)
+            if result == Err(SyscallError::BrokenPipe) && raises_sigpipe(syscall, arg3, arg4) {
+                crate::process::signals::send_to_current(
+                    crate::process::exit::signals::SIGPIPE as usize,
+                );
+            }
+            result
         }
-    } else {
-        // VeridianOS native ABI: dispatch syscalls from musl-patched binaries.
-        //
-        // Cross-compiled musl binaries (kwin, plasmashell, dbus-daemon) contain
-        // a __veridian_remap_syscall() patch that translates Linux syscall
-        // numbers to VeridianOS numbers. However, the musl patch has several
-        // bugs (swapped epoll numbers, wrong timerfd numbers, sigaltstack->
-        // setsid mismap, etc.) that must be corrected at the kernel level since
-        // the musl binary is pre-compiled and cannot be re-patched.
-        //
-        // Additionally, Qt/KWin C++ code and GCC runtime libraries may issue
-        // raw Linux x86_64 syscall numbers that bypass musl's remap entirely
-        // (via inline asm or direct `syscall` instructions). The kernel must
-        // handle BOTH musl-remapped VeridianOS numbers AND raw Linux numbers.
-        //
-        // The dispatch strategy is:
-        // 1. Fix known musl remap bugs (specific number intercepts)
-        // 2. For IPC range (0-7): disambiguate Linux file I/O vs VeridianOS IPC
-        // 3. Try VeridianOS Syscall::try_from() for musl-remapped numbers
-        // 4. Fall back to Linux translation for raw Linux numbers
-        // 5. Try Linux stubs for optional/advisory syscalls
-        //
-        // === musl remap bugs fixed here ===
-        //
-        // Bug 1: epoll_ctl/epoll_create1 SWAPPED
-        //   musl: Linux epoll_ctl(233) -> 262, Linux epoll_create1(281) -> 263
-        //   Correct: epoll_ctl -> EpollCtl(263), epoll_create1 -> EpollCreate(262)
-        //   Effect: 262 and 263 are swapped. Fix: swap them back.
-        //
-        // Bug 2: epoll_create1(291) -> FileDup3(66) instead of EpollCreate(262)
-        //   musl confused Linux 291 (epoll_create1) with dup3.
-        //   Already handled by arg-pattern heuristic at 66.
-        //
-        // Bug 3: dup3(292) -> FilePipe2(65) instead of FileDup3(66)
-        //   musl confused Linux 292 (dup3) with pipe2.
-        //   Already handled by arg-pattern heuristic at 65.
-        //
-        // Bug 4: sigaltstack(131) -> Setsid(179)
-        //   Linux 131 = sigaltstack, NOT setsid. musl incorrectly maps it.
-        //   Fix: intercept 179 and check if it's really setsid or sigaltstack.
-        //
-        // Bug 5: timerfd numbers wrong (322/325/326 instead of 283/286/287)
-        //   Dead code in musl remap (never triggered). Kernel intercepts
-        //   the correct raw Linux numbers (283/286/287) via default passthrough.
-        //
-        // Bug 6: truncate(76)/ftruncate(77) SWAPPED
-        //   musl: truncate(76) -> FileTruncate(56, fd-based)
-        //         ftruncate(77) -> FileTruncatePath(188, path-based)
-        //   Fix: intercept 56 and 188 for correct routing.
-        dispatch_native_abi(syscall_num, arg1, arg2, arg3, arg4, arg5)
+        Err(()) => Err(SyscallError::InvalidSyscall),
     };
 
     // Audit log: syscall with result.
@@ -867,24 +649,19 @@ pub extern "C" fn syscall_handler(
     let ret = match result {
         Ok(value) => value as isize,
         Err(error) => {
-            // Always translate error codes to Linux errno values.
-            //
-            // Both the linux_abi path (raw Linux syscall numbers) and the
-            // native ABI path (musl-remapped VeridianOS numbers) ultimately
-            // return to musl's __syscall_ret(), which interprets negative
-            // return values as -errno (Linux convention).
-            //
-            // Previously, native ABI returned raw VeridianOS error codes
-            // (e.g., ResourceNotFound = -4). musl interpreted -4 as -EINTR
-            // (errno 4) and retried the syscall in an infinite loop, because
-            // Linux ENOENT is -2, not -4.
+            // Errors are Linux errno values (-errno), which both C
+            // libraries' __syscall_ret expect. Raw VeridianOS codes were
+            // misread: ResourceNotFound (-4) is EINTR to musl, which then
+            // retried forever.
             linux_compat::to_linux_errno(error)
         }
     };
 
-    // Diagnostic: print syscall results for first 500 calls
-    #[cfg(target_arch = "x86_64")]
+    // Diagnostic (`trace` feature): results of the first 500 syscalls.
+    #[cfg(all(target_arch = "x86_64", feature = "trace"))]
     if count < 500 {
+        // SAFETY: COM1 (port 0x3F8) is present on the x86_64 platforms this
+        // kernel targets, which is the raw_serial_* contract.
         unsafe {
             crate::arch::x86_64::idt::raw_serial_str(b"  =>");
             crate::arch::x86_64::idt::raw_serial_hex(ret as u64);
@@ -903,298 +680,43 @@ pub extern "C" fn syscall_handler(
     #[cfg(target_arch = "x86_64")]
     crate::arch::x86_64::kpti::on_syscall_exit();
 
-    // Boot-path cooperative yield: if this process was dispatched as a clone
-    // child from futex_wait's spin loop, yield back to the parent after each
-    // syscall so the parent can re-check the futex word.
-    #[cfg(target_arch = "x86_64")]
-    {
-        if crate::arch::x86_64::usermode::BOOT_CLONE_YIELD_PENDING
-            .load(core::sync::atomic::Ordering::Acquire)
-            && crate::arch::x86_64::usermode::has_boot_return_context()
-        {
-            // Save the child's live register state back to its ThreadContext
-            // so the next dispatch uses the correct RIP/RSP/GPRs.
-            // Without this, the child would restart from the clone return
-            // point on every dispatch instead of progressing.
-            if let Some(thread) = crate::process::current_thread() {
-                if let Some(frame) = crate::arch::x86_64::syscall::get_syscall_frame() {
-                    let mut ctx = thread.context.lock();
-                    ctx.rip = frame.rcx; // RCX = user RIP (saved by SYSCALL)
-                    ctx.rflags = frame.r11; // R11 = user RFLAGS
-                    ctx.rsp = crate::arch::x86_64::syscall::get_saved_user_rsp();
-                    ctx.rax = ret as u64; // syscall return value
-                    ctx.rbx = frame.rbx;
-                    ctx.rbp = frame.rbp;
-                    ctx.rdi = frame.rdi;
-                    ctx.rsi = frame.rsi;
-                    ctx.rdx = frame.rdx;
-                    ctx.r8 = frame.r8;
-                    ctx.r9 = frame.r9;
-                    ctx.r10 = frame.r10;
-                    ctx.r12 = frame.r12;
-                    ctx.r13 = frame.r13;
-                    ctx.r14 = frame.r14;
-                    ctx.r15 = frame.r15;
-                }
-            }
-
-            // SAFETY: boot return context is valid (checked above).
-            // boot_return_to_kernel restores the parent's saved
-            // context from enter_forked_child_returnable and returns
-            // to the parent's dispatch loop in boot_futex_spin.
-            unsafe {
-                crate::arch::x86_64::usermode::boot_return_to_kernel();
-            }
-        }
-    }
-
     ret
 }
 
-/// Dispatch a syscall using the native VeridianOS ABI, with corrections for
-/// musl remap bugs and fallback to Linux x86_64 translation.
-///
-/// This is the primary dispatch path for cross-compiled musl binaries
-/// (kwin_wayland, plasmashell, dbus-daemon). It handles:
-/// 1. Known musl __veridian_remap_syscall() bugs (swapped/wrong numbers)
-/// 2. Raw Linux x86_64 syscall numbers from C++ code bypassing musl
-/// 3. Correct VeridianOS-numbered syscalls from musl's remap
-fn dispatch_native_abi(
-    syscall_num: usize,
-    arg1: usize,
-    arg2: usize,
-    arg3: usize,
-    arg4: usize,
-    arg5: usize,
-) -> SyscallResult {
-    // ---------------------------------------------------------------
-    // Phase 1: Fix known musl remap bugs (specific number intercepts)
-    // ---------------------------------------------------------------
-
-    // --- Raw Linux epoll_ctl (233) bypass fix ---
-    // Some code paths (e.g., statically linked Qt/KDE) may call epoll_ctl
-    // via raw syscall(233, ...) bypassing musl's __veridian_remap_syscall().
-    // VeridianOS 233 = InputRead, which silently fails. Intercept it here.
-    if syscall_num == 233 {
-        // epoll_ctl(epfd, op, fd, event_ptr): op is 1/2/3
-        if arg2 <= 3 {
-            return handle_syscall(Syscall::EpollCtl, arg1, arg2, arg3, arg4, arg5);
-        }
-        // Fall through to InputRead for genuine InputRead calls
+/// Whether EPIPE from `syscall` comes with SIGPIPE for the caller, as on
+/// Linux: from a write always (pipe_write; a socket written with write),
+/// from a send unless its flags (`arg3` for sendmsg, `arg4` for sendto)
+/// carry MSG_NOSIGNAL.
+fn raises_sigpipe(syscall: Syscall, arg3: usize, arg4: usize) -> bool {
+    const MSG_NOSIGNAL: usize = 0x4000;
+    match syscall {
+        Syscall::Write | Syscall::Writev | Syscall::SocketSend => true,
+        Syscall::Sendto => arg4 & MSG_NOSIGNAL == 0,
+        Syscall::Sendmsg => arg3 & MSG_NOSIGNAL == 0,
+        _ => false,
     }
+}
 
-    // --- epoll swap fix (Bug 1) ---
-    // musl maps: Linux epoll_ctl(233) -> 262, Linux epoll_create1(281) -> 263
-    // Correct:   epoll_ctl -> EpollCtl(263), epoll_create1 -> EpollCreate(262)
-    // So 262 arrives when musl meant EpollCtl, and 263 when musl meant EpollCreate.
-    if syscall_num == 262 {
-        // 262 can be EITHER:
-        // (a) musl's buggy remap: Linux epoll_ctl(233) -> 262 (swap bug)
-        // (b) Raw Linux newfstatat(262) via musl's SYS_newfstatat path
-        //
-        // Disambiguate by argument patterns:
-        //   newfstatat(dirfd, pathname, statbuf, flags):
-        //     arg1 = AT_FDCWD (0xffffffffffffff9c = -100 sign-extended) or valid fd
-        //     arg2 = pathname pointer (large user-space address)
-        //   epoll_ctl(epfd, op, fd, event_ptr):
-        //     arg1 = epoll fd (small non-negative integer, usually < 256)
-        //     arg2 = EPOLL_CTL_ADD/MOD/DEL (1, 2, or 3)
-        let at_fdcwd = 0xffffffffffffff9c_usize; // AT_FDCWD = -100 as usize
-        if arg1 == at_fdcwd || (arg2 > 4096 && arg2 < USER_SPACE_END) {
-            // Looks like fstatat(AT_FDCWD, path, ...) or fstatat(fd, path, ...)
-            return handle_syscall(Syscall::FileFstatat, arg1, arg2, arg3, arg4, arg5);
-        }
-        // Looks like epoll_ctl(epfd, op, fd, event_ptr)
-        return handle_syscall(Syscall::EpollCtl, arg1, arg2, arg3, arg4, arg5);
-    }
-    if syscall_num == 263 {
-        // 263 can be EITHER:
-        // (a) musl's buggy remap of Linux epoll_create1(291) -> 263 (swap bug)
-        // (b) musl's buggy remap of Linux epoll_pwait(281) -> 263 (mislabeled as
-        // epoll_ctl)
-        //
-        // Disambiguate by argument patterns:
-        //   epoll_create1(flags): arg1 = 0 or O_CLOEXEC(0x80000), arg2 = 0
-        //   epoll_pwait(epfd, events_ptr, maxevents, timeout, sigmask, sigsetsize):
-        //     arg1 = epoll fd (small non-negative int)
-        //     arg2 = events pointer (large user-space address)
-        //     arg3 = maxevents (small positive int)
-        if arg2 > 4096 && arg2 < USER_SPACE_END {
-            // Looks like epoll_pwait (arg2 is a user-space pointer to events array)
-            return handle_syscall(Syscall::EpollWait, arg1, arg2, arg3, arg4, arg5);
-        }
-        // Looks like epoll_create1 (arg2 = 0, arg1 = flags)
-        return handle_syscall(Syscall::EpollCreate, arg1, arg2, arg3, arg4, arg5);
-    }
-
-    // --- epoll_create1 via wrong dup3 mapping (Bug 2) ---
-    // musl maps: Linux epoll_create1(291) -> 66 (FileDup3, wrong)
-    // Also: VeridianOS FileDup3 IS 66 (correct for actual dup3 calls)
-    // Heuristic: epoll_create1 flags are 0 or O_CLOEXEC(0x80000);
-    //            dup3(oldfd, newfd, flags) has oldfd as a small non-zero integer.
-    if syscall_num == 66 {
-        if arg1 == 0 || arg1 == 0x80000 {
-            return handle_syscall(Syscall::EpollCreate, arg1, arg2, arg3, arg4, arg5);
-        }
-        return handle_syscall(Syscall::FileDup3, arg1, arg2, arg3, arg4, arg5);
-    }
-
-    // --- dup3 via wrong pipe2 mapping (Bug 3) ---
-    // musl maps: Linux dup3(292) -> 65 (FilePipe2, wrong; should be FileDup3=66)
-    // Also: VeridianOS FilePipe2 IS 65 (correct for actual pipe2 calls)
-    // Heuristic: pipe2(pipefd_ptr, flags) has arg1 as a pointer (large value);
-    //            dup3(oldfd, newfd, flags) has arg1 as a small fd integer.
-    if syscall_num == 65 {
-        if arg1 > 4096 {
-            return handle_syscall(Syscall::FilePipe2, arg1, arg2, arg3, arg4, arg5);
-        }
-        return handle_syscall(Syscall::FileDup3, arg1, arg2, arg3, arg4, arg5);
-    }
-
-    // --- ppoll passthrough (not in musl remap, arrives as raw Linux 271) ---
-    // Linux ppoll(271) has no musl remap case; `default: return nr` passes
-    // 271 through. Collides with VeridianOS GetPgid(271).
-    // ppoll args: (fds_ptr, nfds, timespec_ptr, sigmask, sigsetsize)
-    //   arg1 = fds pointer (large value)
-    // getpgid args: (pid) where arg1 is a small integer or 0
-    if syscall_num == 271 {
-        if arg1 > 4096 {
-            // Looks like ppoll (fds pointer)
-            return linux_compat::handle_ppoll(arg1, arg2, arg3);
-        }
-        // Looks like getpgid (pid as small int)
-        return handle_syscall(Syscall::Getpgid, arg1, arg2, arg3, arg4, arg5);
-    }
-
-    // --- epoll_pwait passthrough (musl remap maps 281->263, but raw Linux 281
-    // also arrives from Qt/KDE C++ code or libstdc++ bypassing musl) ---
-    // Linux epoll_pwait(281) collides with VeridianOS GrantPty(281).
-    // epoll_pwait args: (epfd, events_ptr, maxevents, timeout, sigmask, sigsetsize)
-    //   arg1 = epoll fd (small non-negative int)
-    //   arg2 = events pointer (large user-space address)
-    // grantpt args: (master_fd) where arg2 is unused/0
-    if syscall_num == 281 {
-        if arg2 > 4096 && arg2 < USER_SPACE_END {
-            // Looks like epoll_pwait (arg2 is user-space events pointer)
-            return handle_syscall(Syscall::EpollWait, arg1, arg2, arg3, arg4, arg5);
-        }
-        // Looks like grantpt (arg2 = 0 or small)
-        return handle_syscall(Syscall::GrantPty, arg1, arg2, arg3, arg4, arg5);
-    }
-
-    // --- timerfd passthrough (not in musl remap, arrives as raw Linux 283/286/287)
-    // ---
-    if syscall_num == 283 {
-        return handle_syscall(Syscall::TimerfdCreate, arg1, arg2, arg3, arg4, arg5);
-    }
-    if syscall_num == 286 {
-        return handle_syscall(Syscall::TimerfdSettime, arg1, arg2, arg3, arg4, arg5);
-    }
-    if syscall_num == 287 {
-        return handle_syscall(Syscall::TimerfdGettime, arg1, arg2, arg3, arg4, arg5);
-    }
-
-    // --- statx stub (Linux 332, not in musl remap) ---
-    // Collides with VeridianOS EventfdRead(332).
-    // Qt may call statx directly. Return ENOSYS so caller falls back to fstatat.
-    // Heuristic: statx has arg1=dirfd (small int), EventfdRead has arg1=efd_id.
-    // Since eventfd IDs are also small ints, prefer ENOSYS which is safe for both
-    // (Qt retries with fstatat, eventfd read falls back to VfsNode path).
-    if syscall_num == 332 {
-        return Err(SyscallError::NotImplemented);
-    }
-
-    // ---------------------------------------------------------------
-    // Phase 2: IPC range (0-7) -> always route to Linux translation
-    // ---------------------------------------------------------------
-    // musl's remap translates Linux file I/O (0-7) to VeridianOS equivalents
-    // that are ALL outside the 0-7 range:
-    //   Linux 0(read)->52, 1(write)->53, 2(open)->50, 3(close)->51,
-    //   4(stat)->150, 5(fstat)->55, 6(lstat)->151, 7(poll)->300
-    //
-    // Therefore, if the kernel receives 0-7, it is ALWAYS a raw Linux
-    // syscall (from C++ code or libstdc++ bypassing musl's remap).
-    // It is NEVER a musl-remapped output. Safe to route through Linux
-    // translation unconditionally.
-    //
-    // This fixes kwin crash: Qt/libstdc++ code issues raw Linux open(2)
-    // and close(3) which collide with VeridianOS IpcCall(2)/IpcReply(3).
-    if syscall_num <= 7 {
-        if let Some(syscall) = linux_compat::translate_linux_syscall(syscall_num) {
-            return handle_syscall(syscall, arg1, arg2, arg3, arg4, arg5);
-        }
-    }
-
-    // ---------------------------------------------------------------
-    // Phase 3: Handle specific known collisions in the 8-63 range
-    // ---------------------------------------------------------------
-    // We CANNOT use blanket Linux-first dispatch for these ranges because
-    // musl's remap OUTPUTS fall within them. For example:
-    //   - musl remaps Linux mmap(9) -> VeridianOS 20 (MemoryMap)
-    //   - Linux 20 = writev
-    //   - Linux-first would wrongly dispatch VeridianOS 20 as writev
-    //
-    // However, some specific Linux syscalls DO bypass musl's remap
-    // (via libstdc++ or Qt inline asm). Handle these individually:
-
-    // Linux connect(42) collides with VeridianOS ThreadJoin(42).
-    // Heuristic: connect(fd, sockaddr_ptr, addrlen) always has arg2 as
-    // a user-space pointer (large address > 4096). ThreadJoin(tid, retval_ptr)
-    // typically has a small tid and retval_ptr is 0 or a stack pointer.
-    // When arg2 is a valid user-space pointer AND we just created a socket
-    // (arg1 is a plausible fd), treat as connect.
-    if syscall_num == 42 && arg2 > 4096 && arg3 > 0 && arg3 < 256 {
-        // arg3 is addrlen (small value like 110 for sockaddr_un)
-        return handle_syscall(Syscall::SocketConnect, arg1, arg2, arg3, arg4, arg5);
-    }
-
-    // Linux getpeername(52) collides with VeridianOS NetGetPeerName(253).
-    // musl maps it to 253. Raw Linux 52 would collide with FileRead(52).
-    // But musl also maps Linux read(0)->52. So 52 is always FileRead.
-    // (No fix needed -- covered by musl remap)
-
-    // Linux setsockopt(54) collides with VeridianOS FileSeek(54).
-    // musl maps it to 254. So 54 is always FileSeek. (No fix needed)
-
-    // Linux flock(73) collides with VeridianOS FsFsync(73).
-    // musl does not remap flock, so it arrives as raw 73.
-    // flock(fd, operation) has arg2 = LOCK_SH(1)/LOCK_EX(2)/LOCK_UN(8)/LOCK_NB(4)
-    // fsync(fd) has no meaningful arg2 (undefined/0).
-    // Heuristic: if arg2 is a valid flock operation (1-15), treat as flock.
-    if syscall_num == 73 && arg2 > 0 && arg2 <= 15 {
-        // Accept flock silently (no-op -- VeridianOS doesn't have file locking)
-        return Ok(0);
-    }
-
-    // ---------------------------------------------------------------
-    // Phase 5: Standard VeridianOS dispatch with Linux fallback
-    // ---------------------------------------------------------------
-    // At this point, the number is either:
-    // - A correctly musl-remapped VeridianOS number (most common case)
-    // - A VeridianOS-only number (no Linux collision)
-    // - An unmapped Linux number > 63 that fell through Phase 4
-    match Syscall::try_from(syscall_num) {
-        Ok(syscall) => handle_syscall(syscall, arg1, arg2, arg3, arg4, arg5),
-        Err(_) => {
-            // Not a valid VeridianOS number -- try Linux translation
-            if linux_compat::is_faccessat(syscall_num) {
-                sys_faccessat(arg1, arg2, arg3, arg4)
-            } else if let Some(syscall) = linux_compat::translate_linux_syscall(syscall_num) {
-                handle_syscall(syscall, arg1, arg2, arg3, arg4, arg5)
-            } else if let Some(result) = linux_compat::handle_linux_stub(syscall_num) {
-                result
-            } else {
-                // SAFETY: Writing to COM1 I/O port for diagnostic output.
-                #[cfg(target_arch = "x86_64")]
-                unsafe {
-                    crate::arch::x86_64::idt::raw_serial_str(b"SC_UNK#");
-                    crate::arch::x86_64::idt::raw_serial_hex(syscall_num as u64);
-                    crate::arch::x86_64::idt::raw_serial_str(b"\n");
-                }
-                Err(SyscallError::InvalidSyscall)
-            }
-        }
-    }
+/// System calls a signal handler never restarts, SA_RESTART or not: they
+/// return EINTR after it (Linux: sigsuspend and the sleeps and polls,
+/// ERESTARTNOHAND or a restart block; sigtimedwait, plain EINTR). A
+/// restarted sigsuspend would wait again after the handler it was waiting
+/// for.
+fn never_restarted(syscall: Syscall) -> bool {
+    matches!(
+        syscall,
+        Syscall::RtSigsuspend
+            | Syscall::RtSigtimedwait
+            | Syscall::Nanosleep
+            | Syscall::ClockNanosleep
+            | Syscall::Poll
+            | Syscall::Ppoll
+            | Syscall::Select
+            | Syscall::Pselect6
+            | Syscall::EpollWait
+            | Syscall::EpollPwait
+            | Syscall::EpollPwait2
+    )
 }
 
 /// Handle individual system calls
@@ -1217,59 +739,63 @@ fn handle_syscall(
         Syscall::IpcBindEndpoint => sys_ipc_bind_endpoint(arg1, arg2),
         Syscall::IpcShareMemory => sys_ipc_share_memory(arg1, arg2, arg3, arg4),
         Syscall::IpcMapMemory => sys_ipc_map_memory(arg1, arg2, arg3),
+        Syscall::CapabilityRevoke => crate::cap::revocation::sys_capability_revoke(arg1 as u64)
+            .map(|()| 0)
+            .map_err(map_kernel_error),
 
         // Process management
-        Syscall::ProcessYield => sys_yield(),
-        Syscall::ProcessExit => sys_exit(arg1),
-        Syscall::ProcessFork => sys_fork(),
-        Syscall::ProcessExec => sys_exec(arg1, arg2, arg3),
-        Syscall::ProcessWait => sys_wait(arg1 as isize, arg2, arg3),
-        Syscall::ProcessGetPid => sys_getpid(),
-        Syscall::ProcessGetPPid => sys_getppid(),
+        Syscall::SchedYield => sys_yield(),
+        Syscall::ExitGroup => sys_exit(arg1),
+        Syscall::Fork => sys_fork(),
+        Syscall::Vfork => process::sys_vfork(),
+        Syscall::Execve => sys_exec(arg1, arg2, arg3),
+        Syscall::Wait4 => sys_wait4(arg1 as isize, arg2, arg3, arg4),
+        Syscall::Getpid => sys_getpid(),
+        Syscall::Getppid => sys_getppid(),
         Syscall::ProcessSetPriority => sys_setpriority(arg1, arg2, arg3),
         Syscall::ProcessGetPriority => sys_getpriority(arg1, arg2),
 
         // Thread management
         Syscall::ThreadCreate => sys_thread_create(arg1, arg2, arg3, arg4),
-        Syscall::ThreadExit => sys_thread_exit(arg1),
+        Syscall::Exit => sys_thread_exit(arg1),
         Syscall::ThreadJoin => sys_thread_join(arg1, arg2),
-        Syscall::ThreadGetTid => sys_gettid(),
+        Syscall::Gettid => sys_gettid(),
         Syscall::ThreadSetAffinity => sys_thread_setaffinity(arg1, arg2, arg3),
         Syscall::ThreadGetAffinity => sys_thread_getaffinity(arg1, arg2, arg3),
-        Syscall::ThreadClone => thread_clone::sys_thread_clone(arg1, arg2, arg3, arg4, arg5),
+        Syscall::Clone => thread_clone::sys_thread_clone(arg1, arg2, arg3, arg4, arg5),
 
         // Filesystem operations
-        Syscall::FileOpen => sys_open(arg1, arg2, arg3),
-        Syscall::FileClose => sys_close(arg1),
-        Syscall::FileRead => sys_read(arg1, arg2, arg3),
-        Syscall::FileWrite => sys_write(arg1, arg2, arg3),
-        Syscall::FileSeek => sys_seek(arg1, arg2 as isize, arg3),
-        Syscall::FileStat => sys_stat(arg1, arg2),
-        Syscall::FileTruncate => sys_truncate(arg1, arg2),
-        Syscall::FileDup => sys_dup(arg1),
-        Syscall::FileDup2 => sys_dup2(arg1, arg2),
-        Syscall::FilePipe => sys_pipe(arg1),
+        Syscall::Open => sys_open(arg1, arg2, arg3),
+        Syscall::Close => sys_close(arg1),
+        Syscall::Read => sys_read(arg1, arg2, arg3),
+        Syscall::Write => sys_write(arg1, arg2, arg3),
+        Syscall::Lseek => sys_seek(arg1, arg2 as isize, arg3),
+        Syscall::Fstat => sys_stat(arg1, arg2),
+        Syscall::Ftruncate => sys_ftruncate(arg1, arg2),
+        Syscall::Dup => sys_dup(arg1),
+        Syscall::Dup2 => sys_dup2(arg1, arg2),
+        Syscall::Pipe => sys_pipe(arg1),
 
         // Memory management
-        Syscall::MemoryMap => sys_mmap(arg1, arg2, arg3, arg4, arg5),
-        Syscall::MemoryUnmap => sys_munmap(arg1, arg2),
-        Syscall::MemoryProtect => sys_mprotect(arg1, arg2, arg3),
-        Syscall::MemoryBrk => sys_brk(arg1),
+        Syscall::Mmap => sys_mmap(arg1, arg2, arg3, arg4, arg5),
+        Syscall::Munmap => sys_munmap(arg1, arg2),
+        Syscall::Mprotect => sys_mprotect(arg1, arg2, arg3),
+        Syscall::Brk => sys_brk(arg1),
 
         // Directory operations
-        Syscall::DirMkdir => sys_mkdir(arg1, arg2),
-        Syscall::DirRmdir => sys_rmdir(arg1),
+        Syscall::Mkdir => sys_mkdir(arg1, arg2),
+        Syscall::Rmdir => sys_rmdir(arg1),
         Syscall::DirOpendir => sys_opendir(arg1),
         Syscall::DirReaddir => sys_readdir(arg1, arg2, arg3),
         Syscall::DirClosedir => sys_closedir(arg1),
-        Syscall::FilePipe2 => sys_pipe2(arg1, arg2),
-        Syscall::FileDup3 => sys_dup3(arg1, arg2, arg3),
+        Syscall::Pipe2 => sys_pipe2(arg1, arg2),
+        Syscall::Dup3 => sys_dup3(arg1, arg2, arg3),
 
         // Filesystem management
         Syscall::FsMount => sys_mount(arg1, arg2, arg3, arg4),
         Syscall::FsUnmount => sys_unmount(arg1),
-        Syscall::FsSync => sys_sync(),
-        Syscall::FsFsync => sys_fsync(arg1),
+        Syscall::Sync => sys_sync(),
+        Syscall::Fsync | Syscall::Fdatasync => sys_fsync(arg1),
 
         // Kernel information
         Syscall::KernelGetInfo => sys_get_kernel_info(arg1),
@@ -1282,10 +808,10 @@ fn handle_syscall(
         Syscall::PkgUpdate => sys_pkg_update(arg1),
 
         // Extended process operations
-        Syscall::ProcessGetcwd => sys_getcwd(arg1, arg2),
-        Syscall::ProcessChdir => sys_chdir(arg1),
-        Syscall::FileIoctl => sys_ioctl(arg1, arg2, arg3),
-        Syscall::ProcessKill => sys_kill(arg1, arg2),
+        Syscall::Getcwd => sys_getcwd(arg1, arg2),
+        Syscall::Chdir => sys_chdir(arg1),
+        Syscall::Ioctl => sys_ioctl(arg1, arg2, arg3),
+        Syscall::Kill => sys_kill(arg1, arg2),
 
         // Time management
         Syscall::TimeGetUptime => sys_time_get_uptime(),
@@ -1293,16 +819,19 @@ fn handle_syscall(
         Syscall::TimeCancelTimer => sys_time_cancel_timer(arg1),
 
         // Signal management
-        Syscall::SigAction => sys_sigaction(arg1, arg2, arg3),
-        Syscall::SigProcmask => sys_sigprocmask(arg1, arg2, arg3),
-        Syscall::SigSuspend => sys_sigsuspend(arg1),
-        Syscall::SigReturn => sys_sigreturn(arg1),
+        Syscall::RtSigaction => sys_sigaction(arg1, arg2, arg3),
+        Syscall::RtSigprocmask => sys_sigprocmask(arg1, arg2, arg3),
+        Syscall::RtSigsuspend => sys_sigsuspend(arg1),
+        Syscall::RtSigreturn => sys_sigreturn(arg1),
 
         // POSIX time syscalls
         Syscall::ClockGettime => sys_clock_gettime(arg1, arg2),
         Syscall::ClockGetres => sys_clock_getres(arg1, arg2),
         Syscall::Nanosleep => sys_nanosleep(arg1, arg2),
         Syscall::Gettimeofday => sys_gettimeofday(arg1, arg2),
+        Syscall::Settimeofday => sys_settimeofday(arg1, arg2),
+        Syscall::ClockSettime => sys_clock_settime(arg1, arg2),
+        Syscall::Time => sys_time(arg1),
 
         // Identity syscalls
         Syscall::Getuid => sys_getuid(),
@@ -1311,6 +840,17 @@ fn handle_syscall(
         Syscall::Getegid => sys_getegid(),
         Syscall::Setuid => sys_setuid(arg1),
         Syscall::Setgid => sys_setgid(arg1),
+        Syscall::Setreuid => process::sys_setreuid(arg1, arg2),
+        Syscall::Setregid => process::sys_setregid(arg1, arg2),
+        Syscall::Setresuid => process::sys_setresuid(arg1, arg2, arg3),
+        Syscall::Getresuid => process::sys_getresuid(arg1, arg2, arg3),
+        Syscall::Setresgid => process::sys_setresgid(arg1, arg2, arg3),
+        Syscall::Getresgid => process::sys_getresgid(arg1, arg2, arg3),
+        Syscall::Getgroups => process::sys_getgroups(arg1, arg2),
+        Syscall::Setgroups => process::sys_setgroups(arg1, arg2),
+        Syscall::Fchdir => sys_fchdir(arg1),
+        Syscall::Chroot => sys_chroot(arg1),
+        Syscall::Utimensat => sys_utimensat(arg1, arg2, arg3, arg4),
 
         // Process group / session syscalls
         Syscall::Setpgid => sys_setpgid(arg1, arg2),
@@ -1327,40 +867,42 @@ fn handle_syscall(
         Syscall::Ptrace => sys_ptrace(arg1, arg2, arg3, arg4),
 
         // Extended filesystem operations
-        Syscall::FileStatPath => sys_stat_path(arg1, arg2),
-        Syscall::FileLstat => sys_lstat(arg1, arg2),
-        Syscall::FileReadlink => sys_readlink(arg1, arg2, arg3),
-        Syscall::FileAccess => sys_access(arg1, arg2),
-        Syscall::FileRename => sys_rename(arg1, arg2),
-        Syscall::FileLink => sys_link(arg1, arg2),
-        Syscall::FileSymlink => sys_symlink(arg1, arg2),
-        Syscall::FileUnlink => sys_unlink(arg1),
-        Syscall::FileFcntl => sys_fcntl(arg1, arg2, arg3),
+        Syscall::Stat => sys_stat_path(arg1, arg2),
+        Syscall::Lstat => sys_lstat(arg1, arg2),
+        Syscall::Readlink => sys_readlink(arg1, arg2, arg3),
+        Syscall::Access => sys_access(arg1, arg2),
+        Syscall::Rename => sys_rename(arg1, arg2),
+        Syscall::Link => sys_link(arg1, arg2),
+        Syscall::Symlink => sys_symlink(arg1, arg2),
+        Syscall::Unlink => sys_unlink(arg1),
+        Syscall::Fcntl => sys_fcntl(arg1, arg2, arg3),
 
         // Self-hosting filesystem ops
-        Syscall::FileChmod => sys_chmod(arg1, arg2),
-        Syscall::FileFchmod => sys_fchmod(arg1, arg2),
-        Syscall::ProcessUmask => sys_umask(arg1),
-        Syscall::FileTruncatePath => sys_truncate_path(arg1, arg2),
-        Syscall::FilePoll => sys_poll(arg1, arg2, arg3),
-        Syscall::FileOpenat => sys_openat(arg1, arg2, arg3, arg4),
-        Syscall::FileFstatat => sys_fstatat(arg1, arg2, arg3, arg4),
-        Syscall::FileUnlinkat => sys_unlinkat(arg1, arg2, arg3),
-        Syscall::FileMkdirat => sys_mkdirat(arg1, arg2, arg3),
-        Syscall::FileRenameat => sys_renameat(arg1, arg2, arg3, arg4),
-        Syscall::FilePread => sys_pread(arg1, arg2, arg3, arg4),
-        Syscall::FilePwrite => sys_pwrite(arg1, arg2, arg3, arg4),
-        Syscall::FileChown => sys_chown(arg1, arg2, arg3),
-        Syscall::FileFchown => sys_fchown(arg1, arg2, arg3),
-        Syscall::FileMknod => sys_mknod(arg1, arg2, arg3),
-        Syscall::FileSelect => sys_select(arg1, arg2, arg3, arg4, arg5),
+        Syscall::Chmod => sys_chmod(arg1, arg2),
+        Syscall::Fchmod => sys_fchmod(arg1, arg2),
+        Syscall::Umask => sys_umask(arg1),
+        Syscall::Truncate => sys_truncate(arg1, arg2),
+        Syscall::Poll => sys_poll(arg1, arg2, arg3),
+        Syscall::Openat => sys_openat(arg1, arg2, arg3, arg4),
+        Syscall::Newfstatat => sys_fstatat(arg1, arg2, arg3, arg4),
+        Syscall::Unlinkat => sys_unlinkat(arg1, arg2, arg3),
+        Syscall::Mkdirat => sys_mkdirat(arg1, arg2, arg3),
+        Syscall::Renameat => sys_renameat(arg1, arg2, arg3, arg4),
+        Syscall::Pread64 => sys_pread(arg1, arg2, arg3, arg4),
+        Syscall::Pwrite64 => sys_pwrite(arg1, arg2, arg3, arg4),
+        Syscall::Chown => sys_chown(arg1, arg2, arg3),
+        Syscall::Fchown => sys_fchown(arg1, arg2, arg3),
+        Syscall::Mknod => sys_mknod(arg1, arg2, arg3),
+        Syscall::Select => sys_select(arg1, arg2, arg3, arg4, arg5),
+        // pselect6(nfds, readfds, writefds, exceptfds, timeout, sig)
+        Syscall::Pselect6 => sys_pselect6(arg1, arg2, arg3, arg4, arg5, syscall_arg6()?),
         // Futex entrypoint: dispatch all futex ops (wait/wake/requeue/bitset/wake_op)
         Syscall::FutexWait => {
             futex::sys_futex_dispatch(arg1, arg2, arg3, arg4, arg5).map(|v| v as usize)
         }
         Syscall::FutexWake => futex::sys_futex_wake(arg1, arg2, arg3).map(|v| v as usize),
         Syscall::ArchPrctl => arch_prctl::sys_arch_prctl(arg1, arg2).map(|v| v as usize),
-        Syscall::ProcessUname => sys_uname(arg1),
+        Syscall::Uname => sys_uname(arg1),
         Syscall::ProcessGetenv => sys_getenv(arg1, arg2, arg3, arg4),
 
         // POSIX shared memory
@@ -1369,19 +911,18 @@ fn handle_syscall(
         Syscall::ShmTruncate => sys_shm_truncate(arg1, arg2, arg3),
 
         // Socket operations
-        Syscall::SocketCreate => sys_socket_create(arg1, arg2),
-        Syscall::SocketBind => sys_socket_bind(arg1, arg2, arg3),
-        Syscall::SocketListen => sys_socket_listen(arg1, arg2),
-        Syscall::SocketConnect => sys_socket_connect(arg1, arg2, arg3),
-        // Linux ABI: accept4(fd, addr, addrlen_ptr, flags)
-        // accept (Linux 43) also maps here via remap patch.
-        Syscall::SocketAccept => sys_socket_accept(arg1, arg2, arg3),
+        Syscall::Socket => sys_socket_create(arg1, arg2, arg3),
+        Syscall::Bind => sys_socket_bind(arg1, arg2, arg3),
+        Syscall::Listen => sys_socket_listen(arg1, arg2),
+        Syscall::Connect => sys_socket_connect(arg1, arg2, arg3),
+        Syscall::Accept => sys_socket_accept(arg1, arg2, arg3, 0),
+        Syscall::Accept4 => sys_socket_accept(arg1, arg2, arg3, arg4),
         Syscall::SocketSend => sys_socket_send(arg1, arg2, arg3),
         Syscall::SocketRecv => sys_socket_recv(arg1, arg2, arg3),
         Syscall::SocketClose => sys_socket_close(arg1),
         // Linux ABI: socketpair(domain, type, protocol, sv[2])
         // arg1=domain, arg2=type, arg3=protocol, arg4=sv pointer
-        Syscall::SocketPair => sys_socket_pair(arg1, arg2, arg3, arg4),
+        Syscall::Socketpair => sys_socket_pair(arg1, arg2, arg3, arg4),
 
         // Graphics / framebuffer (Phase 6)
         Syscall::FbGetInfo => sys_fb_get_info(arg1),
@@ -1401,95 +942,60 @@ fn handle_syscall(
         Syscall::WlGetEvents => sys_wl_get_events(arg1, arg2, arg3),
 
         // Network extensions (Phase 6)
-        Syscall::NetSendTo => sys_net_sendto(arg1, arg2, arg3, arg4, arg5),
-        Syscall::NetRecvFrom => sys_net_recvfrom(arg1, arg2, arg3, arg4, arg5),
-        Syscall::NetGetSockName => sys_net_getsockname(arg1, arg2, arg3),
-        Syscall::NetGetPeerName => sys_net_getpeername(arg1, arg2, arg3),
-        Syscall::NetSetSockOpt => sys_net_setsockopt(arg1, arg2, arg3, arg4, arg5),
-        Syscall::NetGetSockOpt => sys_net_getsockopt(arg1, arg2, arg3, arg4, arg5),
+        Syscall::Sendto => sys_net_sendto(arg1, arg2, arg3, arg4, arg5),
+        Syscall::Recvfrom => sys_net_recvfrom(arg1, arg2, arg3, arg4, arg5),
+        Syscall::Getsockname => sys_net_getsockname(arg1, arg2, arg3),
+        Syscall::Getpeername => sys_net_getpeername(arg1, arg2, arg3),
+        Syscall::Setsockopt => sys_net_setsockopt(arg1, arg2, arg3, arg4, arg5),
+        Syscall::Getsockopt => sys_net_getsockopt(arg1, arg2, arg3, arg4, arg5),
 
         // Resource limits (Phase 6.5)
-        Syscall::GetRlimit => memory::sys_getrlimit(arg1, arg2),
-        Syscall::SetRlimit => memory::sys_setrlimit(arg1, arg2),
+        #[cfg(feature = "alloc")]
+        Syscall::Getrlimit => limits::sys_getrlimit(arg1, arg2),
+        #[cfg(feature = "alloc")]
+        Syscall::Setrlimit => limits::sys_setrlimit(arg1, arg2),
 
-        // epoll I/O multiplexing (Phase 6.5)
+        // epoll (N-234, N-245): the instance is its file.
         Syscall::EpollCreate => {
-            let _flags = arg1; // epoll_create1 flags (EPOLL_CLOEXEC)
-            let cloexec = (arg1 & 0x80000) != 0; // EPOLL_CLOEXEC = O_CLOEXEC
-            let pid = crate::process::current_process()
-                .map(|p| p.pid.0)
-                .unwrap_or(0);
-            let epoll_id =
-                crate::net::epoll::epoll_create(pid).map_err(|_| SyscallError::OutOfMemory)?;
-            // Wrap as VfsNode for real fd semantics
-            let node: alloc::sync::Arc<dyn crate::fs::VfsNode> =
-                alloc::sync::Arc::new(crate::net::epoll::EpollNode::new(epoll_id));
-            let file = crate::fs::file::File::new(node, crate::fs::OpenFlags::read_only());
-            let proc = crate::process::current_process().ok_or(SyscallError::InvalidState)?;
-            let file_table = proc.file_table.lock();
-            let fd = file_table
-                .open_with_flags(alloc::sync::Arc::new(file), cloexec)
-                .map_err(|_| SyscallError::OutOfMemory)?;
-            Ok(fd)
-        }
-        Syscall::EpollCtl => {
-            let epoll_fd = arg1;
-            let op = arg2 as u32;
-            let fd = arg3 as i32;
-            let event_ptr = arg4;
-
-            let epoll_id = resolve_epoll_id(epoll_fd)?;
-            // struct epoll_event is packed (12 bytes on x86_64): copied
-            // field by field through the fault-tolerant reader rather than
-            // borrowed from user memory (review of the v0.26.0 stack).
-            let event = if event_ptr != 0 {
-                let mut raw = [0u8; 12];
-                userspace::read_user_bytes(event_ptr, &mut raw)?;
-                let mut events = [0u8; 4];
-                let mut data = [0u8; 8];
-                events.copy_from_slice(&raw[..4]);
-                data.copy_from_slice(&raw[4..]);
-                Some(crate::net::epoll::EpollEvent {
-                    events: u32::from_ne_bytes(events),
-                    data: u64::from_ne_bytes(data),
-                })
-            } else {
-                None
-            };
-            crate::net::epoll::epoll_ctl(epoll_id, op, fd, event.as_ref())
-                .map(|_| 0)
-                .map_err(|_| SyscallError::InvalidArgument)
-        }
-        Syscall::EpollWait => {
-            let epoll_fd = arg1;
-            let events_ptr = arg2;
-            let max_events = arg3;
-            let timeout_ms = arg4 as i32;
-            let epoll_id = resolve_epoll_id(epoll_fd)?;
-            // Linux caps maxevents at INT_MAX / sizeof(struct epoll_event);
-            // the byte count must not wrap (W-16).
-            let event_size = core::mem::size_of::<crate::net::epoll::EpollEvent>();
-            if max_events == 0 || max_events > i32::MAX as usize / event_size {
+            if arg1 as i32 <= 0 {
                 return Err(SyscallError::InvalidArgument);
             }
-            validate_user_buffer(events_ptr, max_events * event_size)?;
-            // SAFETY: events_ptr validated by validate_user_buffer above as non-null and in
-            // user-space.
-            let events = unsafe {
-                core::slice::from_raw_parts_mut(
-                    events_ptr as *mut crate::net::epoll::EpollEvent,
-                    max_events,
+            sys_epoll_create1(0)
+        }
+        Syscall::EpollCreate1 => sys_epoll_create1(arg1),
+        Syscall::EpollCtl => sys_epoll_ctl(arg1, arg2, arg3, arg4),
+        Syscall::EpollWait => sys_epoll_wait(arg1, arg2, arg3, epoll_timeout_ms(arg4)),
+        // epoll_pwait(epfd, events, maxevents, timeout, sigmask, sigsetsize)
+        Syscall::EpollPwait => {
+            let size = if arg5 != 0 { syscall_arg6()? } else { 0 };
+            let mask = signal::begin_wait_sigmask(arg5, size)?;
+            let result = sys_epoll_wait(arg1, arg2, arg3, epoll_timeout_ms(arg4));
+            mask.end(&result);
+            result
+        }
+        // epoll_pwait2: the timeout is a timespec (NULL: none).
+        Syscall::EpollPwait2 => {
+            let timeout = if arg4 == 0 {
+                None
+            } else {
+                let [sec, nsec] = userspace::read_user::<[i64; 2]>(arg4)?;
+                if sec < 0 || !(0..1_000_000_000).contains(&nsec) {
+                    return Err(SyscallError::InvalidArgument);
+                }
+                Some(
+                    (sec as u64)
+                        .saturating_mul(1_000_000_000)
+                        .saturating_add(nsec as u64),
                 )
             };
-            crate::net::epoll::epoll_wait(epoll_id, events, timeout_ms)
-                .map_err(|_| SyscallError::InvalidArgument)
+            let size = if arg5 != 0 { syscall_arg6()? } else { 0 };
+            let mask = signal::begin_wait_sigmask(arg5, size)?;
+            let result = sys_epoll_wait(arg1, arg2, arg3, timeout);
+            mask.end(&result);
+            result
         }
         // Process groups / sessions (Phase 6.5) -- delegate to existing
         // implementations which also back the older syscall numbers 176-180.
-        Syscall::SetPgid => sys_setpgid(arg1, arg2),
-        Syscall::GetPgid => sys_getpgid(arg1),
-        Syscall::SetSid => sys_setsid(),
-        Syscall::GetSid => sys_getsid(arg1),
         Syscall::TcSetPgrp => sys_tcsetpgrp(arg1, arg2),
         Syscall::TcGetPgrp => sys_tcgetpgrp(arg1),
         // PTY syscalls (Phase 6.5)
@@ -1497,42 +1003,97 @@ fn handle_syscall(
         Syscall::GrantPty => pty::sys_grantpt(arg1),
         Syscall::UnlockPty => pty::sys_unlockpt(arg1),
         Syscall::PtsName => pty::sys_ptsname(arg1, arg2, arg3),
-        Syscall::Link => sys_link(arg1, arg2),
-        Syscall::Symlink => sys_symlink(arg1, arg2),
-        Syscall::Readlink => sys_readlink(arg1, arg2, arg3),
-        Syscall::Lstat => sys_lstat(arg1, arg2),
-        Syscall::Fchmod => sys_fchmod(arg1, arg2),
-        Syscall::Fchown => sys_fchown(arg1, arg2, arg3),
-        Syscall::Umask => sys_umask(arg1),
-        Syscall::Access => sys_access(arg1, arg2),
         // Duplicate POSIX aliases -- delegate to the primary implementations.
-        Syscall::Poll => filesystem::sys_poll(arg1, arg2, arg3),
-        Syscall::Fcntl => filesystem::sys_fcntl(arg1, arg2, arg3),
-        Syscall::Clone => thread_clone::sys_thread_clone(arg1, arg2, arg3, arg4, arg5),
         Syscall::Futex => {
             // Linux ABI: futex(uaddr, op, val, timeout/val2, uaddr2, val3)
             // arg1=uaddr, arg2=op, arg3=val, arg4=timeout/val2, arg5=uaddr2
             // Linux futex(uaddr, op, val, timeout|val2, uaddr2, val3).
             // val3 (arg6) is not a handler parameter; it is read from the
-            // saved syscall frame. Mask off FUTEX_PRIVATE_FLAG (bit 7 = 128)
-            // -- VeridianOS is single-address-space per process, so
-            // private == shared.
-            let cmd = (arg2 as u32) & 0x7F;
+            // saved syscall frame. The command is the op without
+            // FUTEX_PRIVATE_FLAG (128) and FUTEX_CLOCK_REALTIME (256), as
+            // Linux's FUTEX_CMD_MASK: any other bit makes an unknown
+            // command (ENOSYS), not a different one. Futex words are keyed
+            // by (process, address), so private and shared are the same.
+            let cmd = (arg2 as u32) & !(0x80 | 0x100);
+            // FUTEX_CLOCK_REALTIME: a WAIT_BITSET or LOCK_PI2 deadline is on
+            // the wall clock. Linux accepts it only on those and on WAIT
+            // (ENOSYS otherwise).
+            let realtime = arg2 & 0x100 != 0;
+            if realtime && cmd != 0 && cmd != 9 && cmd != 13 {
+                return Err(SyscallError::NotImplemented);
+            }
             match cmd {
-                // FUTEX_WAIT: wait if *uaddr == val
-                0 => futex::sys_futex_wait(arg1, arg3 as u32, arg4, 0, arg2).map(|v| v as usize),
+                // FUTEX_WAIT: wait if *uaddr == val; the timeout is a
+                // relative timespec (N-104).
+                0 => {
+                    let deadline = futex::linux_timeout(arg4, futex::FutexTimeout::Relative)?;
+                    futex::futex_wait_until(
+                        arg1,
+                        arg3 as u32,
+                        deadline,
+                        futex::FUTEX_WAIT_BITSET_MATCH_ANY,
+                    )
+                    .map(|v| v as usize)
+                }
                 // FUTEX_WAKE: wake up to val waiters
                 1 => futex::sys_futex_wake(arg1, arg3, 0).map(|v| v as usize),
-                // FUTEX_REQUEUE: wake val waiters, requeue rest to uaddr2
-                3 => futex::sys_futex_requeue(arg1, arg3, arg5, 0).map(|v| v as usize),
+                // FUTEX_REQUEUE: wake val waiters, move up to val2 (arg4)
+                // of the rest to uaddr2. The count was passed as 0, so
+                // nobody moved.
+                3 => futex::sys_futex_requeue(arg1, arg3, arg5, arg4).map(|v| v as usize),
+                // FUTEX_CMP_REQUEUE: the same, if *uaddr still equals val3.
+                4 => futex::sys_futex_cmp_requeue(arg1, arg3, arg5, arg4, syscall_arg6()? as u32)
+                    .map(|v| v as usize),
                 // FUTEX_WAKE_OP(uaddr, val, val2 = arg4, uaddr2, encoded op = val3).
                 // Passing 0 for the encoded op meant "*uaddr2 = 0" on every call.
                 5 => futex::sys_futex_wake_op(arg1, arg3, arg5, arg4, syscall_arg6()?)
                     .map(|v| v as usize),
-                // FUTEX_WAIT_BITSET: the bitset is val3 (arg6).
-                9 => futex::sys_futex_wait(arg1, arg3 as u32, arg4, syscall_arg6()?, arg2)
-                    .map(|v| v as usize),
-                _ => Err(SyscallError::InvalidArgument),
+                // FUTEX_WAIT_BITSET: the bitset is val3 (arg6), and the
+                // timeout is an absolute time (N-104).
+                9 => {
+                    let bitset = syscall_arg6()? as u32;
+                    if bitset == 0 {
+                        return Err(SyscallError::InvalidArgument);
+                    }
+                    let deadline = futex::linux_timeout(
+                        arg4,
+                        if realtime {
+                            futex::FutexTimeout::Realtime
+                        } else {
+                            futex::FutexTimeout::Monotonic
+                        },
+                    )?;
+                    futex::futex_wait_until(arg1, arg3 as u32, deadline, bitset).map(|v| v as usize)
+                }
+                // FUTEX_WAKE_BITSET: wake up to val waiters whose wait
+                // bitset shares a bit with val3 (N-226); 0 is EINVAL.
+                10 => {
+                    let bitset = syscall_arg6()? as u32;
+                    if bitset == 0 {
+                        return Err(SyscallError::InvalidArgument);
+                    }
+                    futex::sys_futex_wake(arg1, arg3, bitset as usize).map(|v| v as usize)
+                }
+                // Priority inheritance (SCHED-INC-01, futex_pi.rs).
+                // FUTEX_LOCK_PI: the timeout is an absolute CLOCK_REALTIME
+                // time; FUTEX_LOCK_PI2: CLOCK_MONOTONIC unless
+                // FUTEX_CLOCK_REALTIME.
+                6 | 13 => {
+                    let kind = if cmd == 6 || realtime {
+                        futex::FutexTimeout::Realtime
+                    } else {
+                        futex::FutexTimeout::Monotonic
+                    };
+                    let deadline = futex::linux_timeout(arg4, kind)?;
+                    futex_pi::lock_pi(arg1, deadline, false)
+                }
+                7 => futex_pi::unlock_pi(arg1),
+                8 => futex_pi::lock_pi(arg1, None, true),
+                // FUTEX_FD (removed from Linux in 2.6.26), WAIT_REQUEUE_PI
+                // and CMP_REQUEUE_PI (glibc's PI condition variables; musl
+                // does not use them) and unknown commands: ENOSYS, as
+                // Linux's do_futex.
+                _ => Err(SyscallError::NotImplemented),
             }
         }
 
@@ -1568,13 +1129,16 @@ fn handle_syscall(
             let stream_id = crate::audio::client::AudioStreamId(arg1 as u32);
             let buf_ptr = arg2;
             let sample_count = arg3;
-            let byte_len = sample_count * 2; // i16 = 2 bytes
-            validate_user_buffer(buf_ptr, byte_len)?;
-            // SAFETY: buf_ptr validated by validate_user_buffer above as non-null and in
-            // user-space.
-            let samples =
-                unsafe { core::slice::from_raw_parts(buf_ptr as *const i16, sample_count) };
-            crate::audio::client::with_client(|client| client.write_samples(stream_id, samples))
+            let byte_len = sample_count
+                .checked_mul(2) // i16 = 2 bytes
+                .ok_or(SyscallError::InvalidArgument)?;
+            // Copied in through the fault-tolerant reader (N-43).
+            let bytes = userspace::read_user_vec(buf_ptr, byte_len, userspace::MAX_USER_MESSAGE)?;
+            let samples: alloc::vec::Vec<i16> = bytes
+                .chunks_exact(2)
+                .map(|b| i16::from_ne_bytes([b[0], b[1]]))
+                .collect();
+            crate::audio::client::with_client(|client| client.write_samples(stream_id, &samples))
                 .map_err(|_| SyscallError::InvalidState)?
                 .map_err(|_| SyscallError::InvalidArgument)
         }
@@ -1599,13 +1163,7 @@ fn handle_syscall(
                 )
             })
             .map_err(|_| SyscallError::InvalidState)?;
-            // SAFETY: info_ptr validated by validate_user_buffer(info_ptr, 12) above.
-            unsafe {
-                let ptr = info_ptr as *mut u32;
-                ptr.write(info.0);
-                ptr.add(1).write(info.1);
-                ptr.add(2).write(info.2);
-            }
+            userspace::write_user::<[u32; 3]>(info_ptr, [info.0, info.1, info.2])?;
             Ok(0)
         }
         Syscall::AudioStart => {
@@ -1636,61 +1194,19 @@ fn handle_syscall(
         // getrandom(buf, buflen, flags) -> bytes_written
         Syscall::Getrandom => sys_getrandom(arg1, arg2, arg3),
 
-        // eventfd syscall -- creates VfsNode-backed fd for musl compat
-        Syscall::EventfdCreate => {
-            let initval = arg1 as u32;
-            let flags = arg2 as u32;
-            let cloexec = (flags & crate::fs::eventfd::EFD_CLOEXEC) != 0;
-            // Create the internal eventfd instance
-            let efd_id = crate::fs::eventfd::eventfd_create(initval, flags)? as u32;
-            // Wrap as VfsNode for real fd semantics (read/write/close/epoll)
-            let node: alloc::sync::Arc<dyn crate::fs::VfsNode> =
-                alloc::sync::Arc::new(crate::fs::eventfd::EventFdNode::new(efd_id));
-            let file = crate::fs::file::File::new(node, crate::fs::OpenFlags::read_write());
-            let proc = crate::process::current_process().ok_or(SyscallError::InvalidState)?;
-            let file_table = proc.file_table.lock();
-            let fd = file_table
-                .open_with_flags(alloc::sync::Arc::new(file), cloexec)
-                .map_err(|_| SyscallError::OutOfMemory)?;
-            Ok(fd)
-        }
-        // EventfdRead/EventfdWrite kept for backward compat with internal callers
-        // but musl programs will use read()/write() via VfsNode path
-        Syscall::EventfdRead => {
-            let efd_id = arg1 as u32;
-            let buf_ptr = arg2;
-            validate_user_buffer(buf_ptr, 8)?;
-            let val = crate::fs::eventfd::eventfd_read(efd_id)?;
-            // SAFETY: buf_ptr validated by validate_user_buffer above.
-            unsafe {
-                *(buf_ptr as *mut u64) = val;
-            }
-            Ok(8)
-        }
-        Syscall::EventfdWrite => {
-            let efd_id = arg1 as u32;
-            let buf_ptr = arg2;
-            validate_user_buffer(buf_ptr, 8)?;
-            // SAFETY: buf_ptr validated by validate_user_buffer above.
-            let val = unsafe { *(buf_ptr as *const u64) };
-            crate::fs::eventfd::eventfd_write(efd_id, val)
-        }
-
-        // timerfd syscalls -- create returns VfsNode-backed fd
+        // eventfd2(initval, flags), timerfd_create(clockid, flags): the
+        // NONBLOCK flag is the file's, as fcntl sees it (N-232).
+        Syscall::Eventfd2 => sys_eventfd2(arg1, arg2),
+        // eventfd(initval): eventfd2 without flags.
+        Syscall::Eventfd => sys_eventfd2(arg1, 0),
         Syscall::TimerfdCreate => {
-            let clockid = arg1 as u32;
             let flags = arg2 as u32;
-            let cloexec = (flags & crate::fs::timerfd::TFD_CLOEXEC) != 0;
-            let tfd_id = crate::fs::timerfd::timerfd_create(clockid, flags)? as u32;
-            let node: alloc::sync::Arc<dyn crate::fs::VfsNode> =
-                alloc::sync::Arc::new(crate::fs::timerfd::TimerFdNode::new(tfd_id));
-            let file = crate::fs::file::File::new(node, crate::fs::OpenFlags::read_only());
-            let proc = crate::process::current_process().ok_or(SyscallError::InvalidState)?;
-            let file_table = proc.file_table.lock();
-            let fd = file_table
-                .open_with_flags(alloc::sync::Arc::new(file), cloexec)
-                .map_err(|_| SyscallError::OutOfMemory)?;
-            Ok(fd)
+            let tfd_id = crate::fs::timerfd::timerfd_create(arg1 as u32, flags)? as u32;
+            install_event_file(
+                alloc::sync::Arc::new(crate::fs::timerfd::TimerFdNode::new(tfd_id)),
+                flags & crate::fs::timerfd::TFD_NONBLOCK != 0,
+                flags & crate::fs::timerfd::TFD_CLOEXEC != 0,
+            )
         }
         // timerfd_settime/gettime: musl passes the real fd, so we look up
         // the internal tfd_id via as_any() downcast on the VfsNode.
@@ -1700,17 +1216,20 @@ fn handle_syscall(
             let new_ptr = arg3;
             let old_ptr = arg4;
             let tfd_id = resolve_timerfd_id(fd)?;
-            validate_user_ptr_typed::<crate::fs::timerfd::Itimerspec>(new_ptr)?;
-            // SAFETY: new_ptr validated above.
-            let new_spec = unsafe { &*(new_ptr as *const crate::fs::timerfd::Itimerspec) };
-            let old_spec = if old_ptr != 0 {
-                validate_user_ptr_typed::<crate::fs::timerfd::Itimerspec>(old_ptr)?;
-                // SAFETY: old_ptr validated above.
-                Some(unsafe { &mut *(old_ptr as *mut crate::fs::timerfd::Itimerspec) })
-            } else {
-                None
-            };
-            crate::fs::timerfd::timerfd_settime(tfd_id, flags, new_spec, old_spec)
+            // Copied in, and the previous value copied out, through the
+            // fault-tolerant accessors (N-43).
+            let new_spec: crate::fs::timerfd::Itimerspec = userspace::read_user(new_ptr)?;
+            let mut old_spec = crate::fs::timerfd::Itimerspec::default();
+            let result = crate::fs::timerfd::timerfd_settime(
+                tfd_id,
+                flags,
+                &new_spec,
+                (old_ptr != 0).then_some(&mut old_spec),
+            );
+            if result.is_ok() && old_ptr != 0 {
+                userspace::write_user(old_ptr, old_spec)?;
+            }
+            result
         }
         Syscall::TimerfdGettime => {
             let fd = arg1;
@@ -1718,49 +1237,30 @@ fn handle_syscall(
             let tfd_id = resolve_timerfd_id(fd)?;
             validate_user_ptr_typed::<crate::fs::timerfd::Itimerspec>(curr_ptr)?;
             let spec = crate::fs::timerfd::timerfd_gettime(tfd_id)?;
-            // SAFETY: curr_ptr validated above.
-            unsafe {
-                *(curr_ptr as *mut crate::fs::timerfd::Itimerspec) = spec;
-            }
+            userspace::write_user(curr_ptr, spec)?;
             Ok(0)
         }
 
-        // signalfd syscall -- creates VfsNode-backed fd
-        Syscall::SignalfdCreate => {
-            let fd_arg = arg1 as i32;
-            let mask = arg2 as u64;
-            let flags = arg3 as u32;
-            let cloexec = (flags & crate::fs::signalfd::SFD_CLOEXEC) != 0;
-            let sfd_id = crate::fs::signalfd::signalfd_create(fd_arg, mask, flags)? as u32;
-            // If updating an existing signalfd (fd_arg != -1), return the same fd
-            if fd_arg != -1 {
-                return Ok(fd_arg as usize);
-            }
-            let node: alloc::sync::Arc<dyn crate::fs::VfsNode> =
-                alloc::sync::Arc::new(crate::fs::signalfd::SignalFdNode::new(sfd_id));
-            let file = crate::fs::file::File::new(node, crate::fs::OpenFlags::read_only());
-            let proc = crate::process::current_process().ok_or(SyscallError::InvalidState)?;
-            let file_table = proc.file_table.lock();
-            let fd = file_table
-                .open_with_flags(alloc::sync::Arc::new(file), cloexec)
-                .map_err(|_| SyscallError::OutOfMemory)?;
-            Ok(fd)
-        }
+        // signalfd4(fd, mask, sizemask, flags) (N-233): the mask is a
+        // sigset_t in user memory, sizemask its size (8); fd -1 makes a new
+        // signalfd, an existing signalfd's fd gets the new mask.
+        Syscall::Signalfd4 => sys_signalfd4(arg1, arg2, arg3, arg4),
+        // signalfd(fd, mask, sizemask): signalfd4 without flags.
+        Syscall::Signalfd => sys_signalfd4(arg1, arg2, arg3, 0),
 
         // sendmsg/recvmsg -- delegate to unix socket module for SCM_RIGHTS
-        Syscall::SendMsg => sys_sendmsg(arg1, arg2, arg3),
-        Syscall::RecvMsg => sys_recvmsg(arg1, arg2, arg3),
+        Syscall::Sendmsg => sys_sendmsg(arg1, arg2, arg3),
+        Syscall::Recvmsg => sys_recvmsg(arg1, arg2, arg3),
 
         // musl libc compatibility syscalls
         Syscall::Getdents64 => sys_getdents64(arg1, arg2, arg3),
-        Syscall::Prlimit64 => sys_prlimit64(arg1, arg2, arg3, arg4),
+        #[cfg(feature = "alloc")]
+        Syscall::Prlimit64 => limits::sys_prlimit64(arg1, arg2, arg3, arg4),
         Syscall::InotifyInit1 => Err(SyscallError::NotImplemented),
         Syscall::InotifyAddWatch => Err(SyscallError::NotImplemented),
         Syscall::InotifyRmWatch => Err(SyscallError::NotImplemented),
-        Syscall::Madvise => {
-            // madvise is advisory -- always succeed (no-op).
-            Ok(0)
-        }
+        #[cfg(feature = "alloc")]
+        Syscall::Madvise => memory::sys_madvise(arg1, arg2, arg3),
 
         // *at() syscalls -- dirfd-relative path operations for musl
         Syscall::Fchmodat => sys_fchmodat(arg1, arg2, arg3),
@@ -1771,10 +1271,124 @@ fn handle_syscall(
         Syscall::MemfdCreate => sys_memfd_create(arg1, arg2),
         Syscall::SetTidAddress => sys_set_tid_address(arg1),
         Syscall::SetRobustList => sys_set_robust_list(arg1, arg2),
-        Syscall::ClockNanosleep => sys_clock_nanosleep(arg1, arg2, arg3, arg4),
+        Syscall::GetRobustList => sys_get_robust_list(arg1, arg2, arg3),
+        Syscall::ClockNanosleep => time::sys_clock_nanosleep(arg1, arg2, arg3, arg4),
+        Syscall::Prctl => linux_compat::sys_prctl(arg1, arg2, arg3, arg4, arg5),
+        Syscall::VeridianAuth => veridian_auth::sys_veridian_auth(arg1, arg2, arg3, arg4),
+        Syscall::Flock => sys_flock(arg1, arg2),
+        Syscall::Tkill => process::sys_tkill(arg1, arg2),
+        Syscall::Tgkill => process::sys_tgkill(arg1, arg2, arg3),
+        Syscall::Waitid => process::sys_waitid(arg1, arg2, arg3, arg4, arg5),
+        Syscall::RtSigpending => signal::sys_sigpending(arg1, arg2),
+        #[cfg(feature = "alloc")]
+        Syscall::RtSigtimedwait => signal::sys_rt_sigtimedwait(arg1, arg2, arg3, arg4),
+        #[cfg(feature = "alloc")]
+        Syscall::RtSigqueueinfo => signal::sys_rt_sigqueueinfo(arg1, arg2, arg3),
+        #[cfg(feature = "alloc")]
+        Syscall::RtTgsigqueueinfo => signal::sys_rt_tgsigqueueinfo(arg1, arg2, arg3, arg4),
+        Syscall::Ppoll => sys_ppoll(arg1, arg2, arg3, arg4, arg5),
+        // faccessat has no flags argument; faccessat2 adds one.
+        Syscall::Faccessat => sys_faccessat(arg1, arg2, arg3, 0),
+        Syscall::Faccessat2 => sys_faccessat(arg1, arg2, arg3, arg4),
+        #[cfg(feature = "alloc")]
+        Syscall::Mremap => memory::sys_mremap(arg1, arg2, arg3, arg4, arg5),
+        #[cfg(feature = "alloc")]
+        Syscall::Getrusage => usage::sys_getrusage(arg1, arg2),
+        #[cfg(feature = "alloc")]
+        Syscall::Sysinfo => usage::sys_sysinfo(arg1),
+        #[cfg(feature = "alloc")]
+        Syscall::Times => usage::sys_times(arg1),
+        Syscall::Rseq
+        | Syscall::Statx
+        | Syscall::Clone3
+        | Syscall::Fallocate
+        | Syscall::Statfs
+        | Syscall::Fstatfs => Err(SyscallError::NotImplemented),
+        Syscall::Sigaltstack => signal::sys_sigaltstack(arg1, arg2),
+        // Scheduling policy, priority and affinity (N-221).
+        Syscall::SchedSetscheduler => scheduling::sys_sched_setscheduler(arg1, arg2, arg3),
+        Syscall::SchedGetscheduler => scheduling::sys_sched_getscheduler(arg1),
+        Syscall::SchedSetparam => scheduling::sys_sched_setparam(arg1, arg2),
+        Syscall::SchedGetparam => scheduling::sys_sched_getparam(arg1, arg2),
+        Syscall::SchedSetattr => scheduling::sys_sched_setattr(arg1, arg2, arg3),
+        Syscall::SchedGetattr => scheduling::sys_sched_getattr(arg1, arg2, arg3, arg4),
+        Syscall::SchedGetPriorityMax => scheduling::sys_sched_get_priority_max(arg1),
+        Syscall::SchedGetPriorityMin => scheduling::sys_sched_get_priority_min(arg1),
+        Syscall::SchedRrGetInterval => scheduling::sys_sched_rr_get_interval(arg1, arg2),
+        Syscall::SchedSetaffinity => scheduling::sys_sched_setaffinity(arg1, arg2, arg3),
+        Syscall::SchedGetaffinity => scheduling::sys_sched_getaffinity(arg1, arg2, arg3),
+        Syscall::Getcpu => scheduling::sys_getcpu(arg1, arg2, arg3),
+        Syscall::Getpriority => scheduling::sys_getpriority(arg1, arg2),
+        Syscall::Setpriority => scheduling::sys_setpriority(arg1, arg2, arg3),
 
         _ => Err(SyscallError::InvalidSyscall),
     }
+}
+
+/// eventfd2(initval, flags): the NONBLOCK flag is the file's, as fcntl
+/// sees it (N-232).
+#[cfg(feature = "alloc")]
+fn sys_eventfd2(initval: usize, flags: usize) -> SyscallResult {
+    let flags = flags as u32;
+    let efd_id = crate::fs::eventfd::eventfd_create(initval as u32, flags)? as u32;
+    install_event_file(
+        alloc::sync::Arc::new(crate::fs::eventfd::EventFdNode::new(efd_id)),
+        flags & crate::fs::eventfd::EFD_NONBLOCK != 0,
+        flags & crate::fs::eventfd::EFD_CLOEXEC != 0,
+    )
+}
+
+/// signalfd4(fd, mask, sizemask, flags) (N-233): a new signalfd for the
+/// signals in `*mask`, or, given a signalfd, a new mask for it.
+#[cfg(feature = "alloc")]
+fn sys_signalfd4(fd: usize, mask_ptr: usize, sizemask: usize, flags: usize) -> SyscallResult {
+    use crate::fs::signalfd::{SignalFdNode, SFD_CLOEXEC, SFD_NONBLOCK};
+    let (fd, flags) = (fd as i32, flags as u32);
+    if sizemask != 8 || flags & !(SFD_NONBLOCK | SFD_CLOEXEC) != 0 {
+        return Err(SyscallError::InvalidArgument);
+    }
+    let mask: u64 = userspace::read_user(mask_ptr)?;
+    if fd != -1 {
+        let proc = crate::process::current_process().ok_or(SyscallError::InvalidState)?;
+        let file = proc
+            .file_table
+            .lock()
+            .get(fd as usize)
+            .ok_or(SyscallError::BadFileDescriptor)?;
+        let node = file
+            .node
+            .as_any()
+            .and_then(|any| any.downcast_ref::<SignalFdNode>())
+            .ok_or(SyscallError::InvalidArgument)?;
+        node.set_mask(mask);
+        return Ok(fd as usize);
+    }
+    install_event_file(
+        alloc::sync::Arc::new(SignalFdNode::new(mask)),
+        flags & SFD_NONBLOCK != 0,
+        flags & SFD_CLOEXEC != 0,
+    )
+}
+
+/// Put an event object (eventfd, timerfd, signalfd) in the calling
+/// process's file table: readable and writable, O_NONBLOCK and FD_CLOEXEC
+/// as the creating call's flags ask.
+#[cfg(feature = "alloc")]
+fn install_event_file(
+    node: alloc::sync::Arc<dyn crate::fs::VfsNode>,
+    nonblock: bool,
+    cloexec: bool,
+) -> SyscallResult {
+    let mut flags = crate::fs::OpenFlags::read_write();
+    flags.nonblock = nonblock;
+    let file = crate::fs::file::File::new(node, flags);
+    let proc = crate::process::current_process().ok_or(SyscallError::InvalidState)?;
+    let fd = proc
+        .file_table
+        .lock()
+        .open_with_flags(alloc::sync::Arc::new(file), cloexec)
+        .map_err(map_kernel_error)?;
+    Ok(fd)
 }
 
 /// Resolve a file descriptor to an internal timerfd ID.
@@ -1792,39 +1406,191 @@ fn resolve_timerfd_id(fd: usize) -> Result<u32, SyscallError> {
     Ok(tfd_node.tfd_id())
 }
 
-/// Resolve a file descriptor to an internal epoll ID.
-fn resolve_epoll_id(fd: usize) -> Result<u32, SyscallError> {
+/// epoll_create1(flags): EPOLL_CLOEXEC is the only flag (EINVAL otherwise).
+#[cfg(feature = "alloc")]
+fn sys_epoll_create1(flags: usize) -> SyscallResult {
+    use crate::net::epoll::{EpollNode, EPOLL_CLOEXEC};
+    if flags & !(EPOLL_CLOEXEC as usize) != 0 {
+        return Err(SyscallError::InvalidArgument);
+    }
+    let file = crate::fs::file::File::new(
+        alloc::sync::Arc::new(EpollNode::new()),
+        crate::fs::OpenFlags::read_write(),
+    );
     let proc = crate::process::current_process().ok_or(SyscallError::InvalidState)?;
-    let file_table = proc.file_table.lock();
-    let file = file_table.get(fd).ok_or(SyscallError::BadFileDescriptor)?;
-    let any = file.node.as_any().ok_or(SyscallError::BadFileDescriptor)?;
-    let epoll_node = any
-        .downcast_ref::<crate::net::epoll::EpollNode>()
-        .ok_or(SyscallError::BadFileDescriptor)?;
-    Ok(epoll_node.epoll_id())
+    let fd = proc
+        .file_table
+        .lock()
+        .open_with_flags(alloc::sync::Arc::new(file), flags != 0)
+        .map_err(map_kernel_error)?;
+    Ok(fd)
 }
 
-/// getrandom syscall -- fills user buffer with cryptographically secure random
-/// bytes.
-///
-/// # Arguments
-/// - `buf_ptr`: User-space buffer to fill.
-/// - `buflen`: Number of bytes to generate.
-/// - `flags`: 0 for blocking (always succeeds), GRND_NONBLOCK (1) for
-///   non-blocking.
-fn sys_getrandom(buf_ptr: usize, buflen: usize, _flags: usize) -> SyscallResult {
-    if buflen == 0 {
-        return Ok(0);
+/// The open file behind `fd` in the calling process (EBADF if none).
+fn current_file(fd: usize) -> Result<alloc::sync::Arc<crate::fs::file::File>, SyscallError> {
+    if fd > i32::MAX as usize {
+        return Err(SyscallError::BadFileDescriptor);
     }
-    // Cap at 256 bytes per call to avoid holding the RNG lock too long
-    let len = buflen.min(256);
-    validate_user_buffer(buf_ptr, len)?;
+    let proc = crate::process::current_process().ok_or(SyscallError::InvalidState)?;
+    let file = proc.file_table.lock().get(fd);
+    file.ok_or(SyscallError::BadFileDescriptor)
+}
 
+/// epoll_ctl(epfd, op, fd, event), with Linux's checks in Linux's order:
+/// the event (EFAULT, for ADD and MOD), both descriptors (EBADF), a target
+/// without readiness (EPERM), then the rest ([`crate::net::epoll::CtlError`]).
+#[cfg(feature = "alloc")]
+fn sys_epoll_ctl(epfd: usize, op: usize, fd: usize, event_ptr: usize) -> SyscallResult {
+    use crate::net::epoll::{CtlError, EpollNode, EPOLL_CTL_ADD, EPOLL_CTL_MOD};
+    let op = op as u32;
+    // struct epoll_event is packed (12 bytes on x86_64): copied field by
+    // field through the fault-tolerant reader rather than borrowed from
+    // user memory (review of the v0.26.0 stack).
+    let event = if op == EPOLL_CTL_ADD || op == EPOLL_CTL_MOD {
+        let mut raw = [0u8; EPOLL_EVENT_BYTES];
+        userspace::read_user_bytes(event_ptr, &mut raw)?;
+        Some(epoll_event_from_bytes(&raw))
+    } else {
+        None
+    };
+    let ep_file = current_file(epfd)?;
+    let target = current_file(fd)?;
+    EpollNode::ctl(&ep_file, op, fd as i32, &target, event.as_ref())
+        .map(|()| 0)
+        .map_err(|e| match e {
+            CtlError::Invalid => SyscallError::InvalidArgument,
+            CtlError::Exists => SyscallError::FileExists,
+            CtlError::NotFound => SyscallError::ResourceNotFound,
+            CtlError::NotPollable => SyscallError::OperationNotPermitted,
+            CtlError::Loop => SyscallError::SymlinkLoop,
+            CtlError::NoSpace => SyscallError::NoSpace,
+        })
+}
+
+/// An epoll_wait timeout in milliseconds as a wait limit: negative waits
+/// without one.
+fn epoll_timeout_ms(timeout: usize) -> Option<u64> {
+    let ms = timeout as i32;
+    (ms >= 0).then(|| ms as u64 * 1_000_000)
+}
+
+/// epoll_wait and its variants: up to `max_events` events into the user
+/// array, waiting up to `timeout_ns` (`None`: no limit). maxevents is
+/// checked first (EINVAL), then the array (EFAULT), then the descriptor
+/// (EBADF, EINVAL if not an epoll file).
+#[cfg(feature = "alloc")]
+fn sys_epoll_wait(
+    epfd: usize,
+    events_ptr: usize,
+    max_events: usize,
+    timeout_ns: Option<u64>,
+) -> SyscallResult {
+    use crate::net::epoll::{EpollEvent, EpollNode};
+    validate_user_buffer(events_ptr, epoll_events_buffer_len(max_events)?)?;
+    let file = current_file(epfd)?;
+    let ep = EpollNode::of(&file).ok_or(SyscallError::InvalidArgument)?;
+    // Events are gathered in a kernel array (at most 1024 per call, as a
+    // short count is always allowed) and copied out packed, through the
+    // fault-tolerant writer (N-43).
+    let mut events = alloc::vec![EpollEvent { events: 0, data: 0 }; max_events.min(1024)];
+    let n = ep.wait(&mut events, timeout_ns).map_err(|e| match e {
+        crate::error::KernelError::WouldBlock => SyscallError::Interrupted,
+        _ => SyscallError::InvalidArgument,
+    })?;
+    userspace::write_user_bytes(events_ptr, &epoll_events_to_bytes(&events[..n]))?;
+    Ok(n)
+}
+
+/// `sizeof(struct epoll_event)`: packed `u32 events` + `u64 data`.
+const EPOLL_EVENT_BYTES: usize = core::mem::size_of::<crate::net::epoll::EpollEvent>();
+
+/// Decode a user `struct epoll_event`.
+fn epoll_event_from_bytes(raw: &[u8; EPOLL_EVENT_BYTES]) -> crate::net::epoll::EpollEvent {
+    let mut events = [0u8; 4];
+    let mut data = [0u8; 8];
+    events.copy_from_slice(&raw[..4]);
+    data.copy_from_slice(&raw[4..]);
+    crate::net::epoll::EpollEvent {
+        events: u32::from_ne_bytes(events),
+        data: u64::from_ne_bytes(data),
+    }
+}
+
+/// Bytes of the user buffer epoll_wait may fill for `max_events` events.
+/// Linux caps maxevents at INT_MAX / sizeof(struct epoll_event); the byte
+/// count must not wrap (W-16). Zero is EINVAL as well.
+fn epoll_events_buffer_len(max_events: usize) -> Result<usize, SyscallError> {
+    if max_events == 0 || max_events > i32::MAX as usize / EPOLL_EVENT_BYTES {
+        return Err(SyscallError::InvalidArgument);
+    }
+    Ok(max_events * EPOLL_EVENT_BYTES)
+}
+
+/// `events` as the packed user array epoll_wait returns.
+fn epoll_events_to_bytes(events: &[crate::net::epoll::EpollEvent]) -> alloc::vec::Vec<u8> {
+    let mut out = alloc::vec::Vec::with_capacity(events.len() * EPOLL_EVENT_BYTES);
+    for ev in events {
+        let (flags, data) = (ev.events, ev.data);
+        out.extend_from_slice(&flags.to_ne_bytes());
+        out.extend_from_slice(&data.to_ne_bytes());
+    }
+    out
+}
+
+/// getrandom(buf, count, flags) (N-244), as Linux: GRND_NONBLOCK, GRND_RANDOM
+/// (the same pool since Linux 5.6) and GRND_INSECURE, any other bit or
+/// INSECURE with RANDOM EINVAL. The kernel generator is seeded before user
+/// space runs, so a call never blocks. Up to MAX_RW_COUNT bytes, a block at
+/// a time through a kernel buffer (N-43); at each page boundary a pending
+/// signal ends the call with the count so far, and the CPU is given up if
+/// the slice ran out. A fault returns the count so far, EFAULT if none.
+fn sys_getrandom(buf_ptr: usize, buflen: usize, flags: usize) -> SyscallResult {
+    const GRND_NONBLOCK: usize = 1;
+    const GRND_RANDOM: usize = 2;
+    const GRND_INSECURE: usize = 4;
+    /// Linux's MAX_RW_COUNT on x86_64 (INT_MAX rounded down to a page).
+    const MAX_RW_COUNT: usize = 0x7fff_f000;
+    const BLOCK: usize = 256;
+    if flags & !(GRND_NONBLOCK | GRND_RANDOM | GRND_INSECURE) != 0
+        || flags & (GRND_INSECURE | GRND_RANDOM) == GRND_INSECURE | GRND_RANDOM
+    {
+        return Err(SyscallError::InvalidArgument);
+    }
+    let len = buflen.min(MAX_RW_COUNT);
     let rng = crate::crypto::random::get_random();
-    // SAFETY: buf_ptr validated by validate_user_buffer above.
-    let buf = unsafe { core::slice::from_raw_parts_mut(buf_ptr as *mut u8, len) };
-    rng.fill_bytes(buf).map_err(|_| SyscallError::IoError)?;
-    Ok(len)
+    let mut buf = [0u8; BLOCK];
+    let mut done = 0;
+    while done < len {
+        let n = (len - done).min(BLOCK);
+        if rng.fill_bytes(&mut buf[..n]).is_err() {
+            buf.fill(0);
+            return if done > 0 {
+                Ok(done)
+            } else {
+                Err(SyscallError::IoError)
+            };
+        }
+        let copied = userspace::write_user_bytes(buf_ptr.wrapping_add(done), &buf[..n]);
+        if copied.is_err() {
+            buf.fill(0);
+            return if done > 0 {
+                Ok(done)
+            } else {
+                Err(SyscallError::InvalidPointer)
+            };
+        }
+        done += n;
+        if done < len && done % 4096 == 0 {
+            if crate::process::wait_interrupted() {
+                break;
+            }
+            #[cfg(feature = "alloc")]
+            crate::sched::dispatch::preempt_user();
+        }
+    }
+    // The random bytes are not left on the kernel stack.
+    buf.fill(0);
+    Ok(done)
 }
 
 /// getdents64 syscall -- read directory entries in Linux struct linux_dirent64
@@ -1839,7 +1605,8 @@ fn sys_getrandom(buf_ptr: usize, buflen: usize, _flags: usize) -> SyscallResult 
 /// - `buf_size`: Size of the buffer in bytes.
 ///
 /// # Returns
-/// Number of bytes written to buf, or 0 when no more entries.
+/// Number of bytes written to buf, or 0 when no more entries. A buffer too
+/// small for the next entry is EINVAL.
 fn sys_getdents64(fd: usize, buf_ptr: usize, buf_size: usize) -> SyscallResult {
     if buf_size == 0 {
         return Err(SyscallError::InvalidArgument);
@@ -1860,8 +1627,44 @@ fn sys_getdents64(fd: usize, buf_ptr: usize, buf_size: usize) -> SyscallResult {
         return Ok(0);
     }
 
+    // Records are built in a kernel buffer and copied out once (N-43).
+    let (out, idx) = build_dirents64(&entries, pos, buf_size)?;
+
+    userspace::write_user_bytes(buf_ptr, &out)?;
+
+    // Advance file position
+    if idx > pos {
+        let _ = file_desc.seek(crate::fs::SeekFrom::Start(idx));
+    }
+
+    Ok(out.len())
+}
+
+/// `d_type` of a `linux_dirent64` for a node of type `node_type`.
+fn dirent64_type(node_type: crate::fs::NodeType) -> u8 {
+    match node_type {
+        crate::fs::NodeType::File => 8,        // DT_REG
+        crate::fs::NodeType::Directory => 4,   // DT_DIR
+        crate::fs::NodeType::CharDevice => 2,  // DT_CHR
+        crate::fs::NodeType::BlockDevice => 6, // DT_BLK
+        crate::fs::NodeType::Symlink => 10,    // DT_LNK
+        crate::fs::NodeType::Pipe => 1,        // DT_FIFO
+        crate::fs::NodeType::Socket => 12,     // DT_SOCK
+    }
+}
+
+/// Build `linux_dirent64` records for `entries[pos..]`, as many as fit in
+/// `buf_size` bytes. Returns the records and the index of the first entry
+/// not included (no records at all past the last entry), or EINVAL if not
+/// even the first remaining record fits.
+fn build_dirents64(
+    entries: &[crate::fs::DirEntry],
+    pos: usize,
+    buf_size: usize,
+) -> Result<(alloc::vec::Vec<u8>, usize), SyscallError> {
     let mut offset = 0usize;
     let mut idx = pos;
+    let mut out: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
 
     while idx < entries.len() {
         let entry = &entries[idx];
@@ -1875,80 +1678,36 @@ fn sys_getdents64(fd: usize, buf_ptr: usize, buf_size: usize) -> SyscallResult {
             break;
         }
 
-        let d_type: u8 = match entry.node_type {
-            crate::fs::NodeType::File => 8,        // DT_REG
-            crate::fs::NodeType::Directory => 4,   // DT_DIR
-            crate::fs::NodeType::CharDevice => 2,  // DT_CHR
-            crate::fs::NodeType::BlockDevice => 6, // DT_BLK
-            crate::fs::NodeType::Symlink => 10,    // DT_LNK
-            crate::fs::NodeType::Pipe => 1,        // DT_FIFO
-            crate::fs::NodeType::Socket => 12,     // DT_SOCK
+        // d_ino (use inode from entry, default 1)
+        let ino = if entry.inode == 0 {
+            (idx + 1) as u64
+        } else {
+            entry.inode
         };
-
-        // SAFETY: buf_ptr + offset is within the validated user buffer.
-        unsafe {
-            let base = (buf_ptr + offset) as *mut u8;
-            // d_ino (use inode from entry, default 1)
-            let ino = if entry.inode == 0 {
-                (idx + 1) as u64
-            } else {
-                entry.inode
-            };
-            *(base as *mut u64) = ino;
-            // d_off (offset to next entry)
-            *((base.add(8)) as *mut u64) = (offset + reclen) as u64;
-            // d_reclen
-            *((base.add(16)) as *mut u16) = reclen as u16;
-            // d_type
-            *base.add(18) = d_type;
-            // d_name (NUL-terminated)
-            core::ptr::copy_nonoverlapping(name_bytes.as_ptr(), base.add(19), name_bytes.len());
-            *base.add(19 + name_bytes.len()) = 0;
-            // Zero-fill padding
-            let written = 19 + name_bytes.len() + 1;
-            for i in written..reclen {
-                *base.add(i) = 0;
-            }
-        }
+        out.extend_from_slice(&ino.to_ne_bytes());
+        // d_off: the directory position of the next entry. Positions are
+        // entry indices (see the seek in sys_getdents64), and musl's
+        // telldir/seekdir hand d_off to lseek; this used to be the byte
+        // offset of the next record in this buffer.
+        out.extend_from_slice(&((idx + 1) as u64).to_ne_bytes());
+        // d_reclen
+        out.extend_from_slice(&(reclen as u16).to_ne_bytes());
+        // d_type
+        out.push(dirent64_type(entry.node_type));
+        // d_name (NUL-terminated), then zero padding to reclen
+        out.extend_from_slice(name_bytes);
+        out.resize(offset + reclen, 0);
 
         offset += reclen;
         idx += 1;
     }
-
-    // Advance file position
-    if idx > pos {
-        let _ = file_desc.seek(crate::fs::SeekFrom::Start(idx));
+    if out.is_empty() && pos < entries.len() {
+        // Linux: EINVAL when the buffer cannot hold the next record. An
+        // empty result here used to read as end of directory, so a short
+        // buffer silently truncated the listing.
+        return Err(SyscallError::InvalidArgument);
     }
-
-    Ok(offset)
-}
-
-/// prlimit64 syscall -- get/set resource limits for a process.
-///
-/// Combines getrlimit and setrlimit in one call. musl uses this for both.
-///
-/// # Arguments
-/// - `pid`: Process ID (0 = current process).
-/// - `resource`: RLIMIT_* constant.
-/// - `new_rlim_ptr`: Pointer to new Rlimit (0 = don't set).
-/// - `old_rlim_ptr`: Pointer to receive old Rlimit (0 = don't get).
-fn sys_prlimit64(
-    _pid: usize,
-    resource: usize,
-    new_rlim_ptr: usize,
-    old_rlim_ptr: usize,
-) -> SyscallResult {
-    // Get old limits if requested
-    if old_rlim_ptr != 0 {
-        memory::sys_getrlimit(resource, old_rlim_ptr)?;
-    }
-
-    // Set new limits if requested
-    if new_rlim_ptr != 0 {
-        memory::sys_setrlimit(resource, new_rlim_ptr)?;
-    }
-
-    Ok(0)
+    Ok((out, idx))
 }
 
 /// fchmodat syscall -- chmod relative to a directory fd.
@@ -1965,11 +1724,7 @@ fn sys_fchmodat(dirfd: usize, path_ptr: usize, mode: usize) -> SyscallResult {
     let node = vfs
         .resolve_path(&abs_path)
         .map_err(filesystem::map_resolve_err)?;
-    filesystem::require_owner_or_root(&node)?;
-    let perms = crate::fs::Permissions::from_mode(mode as u32);
-    node.chmod(perms)
-        .map_err(|_| SyscallError::InvalidArgument)?;
-    Ok(0)
+    filesystem::chmod_node(&node, mode)
 }
 
 /// fchownat syscall -- chown relative to a directory fd.
@@ -2021,19 +1776,13 @@ fn sys_linkat(
     let new_rel = filesystem::read_user_path(newpath_ptr)?;
     let old_abs = filesystem::resolve_at_path(olddirfd, &old_rel)?;
     let new_abs = filesystem::resolve_at_path(newdirfd, &new_rel)?;
-    filesystem::require_dir_write(&new_abs)?;
-
-    let vfs = filesystem::vfs()?;
+    // Checked and linked in the same directory node (N-51).
+    let (parent, link_name) = filesystem::parent_dir(&new_abs)?;
+    filesystem::check_dir_write(&*parent)?;
 
     // Resolve old path to get target node
-    let target = vfs
+    let target = filesystem::vfs()?
         .resolve_path(&old_abs)
-        .map_err(filesystem::map_resolve_err)?;
-
-    // Split new path into parent + name, create link in parent
-    let (parent_path, link_name) = filesystem::split_path(&new_abs)?;
-    let parent = vfs
-        .resolve_path(&parent_path)
         .map_err(filesystem::map_resolve_err)?;
     parent
         .link(&link_name, target)
@@ -2051,15 +1800,9 @@ fn sys_symlinkat(target_ptr: usize, newdirfd: usize, linkpath_ptr: usize) -> Sys
     let target = filesystem::read_user_path(target_ptr)?;
     let link_rel = filesystem::read_user_path(linkpath_ptr)?;
     let link_abs = filesystem::resolve_at_path(newdirfd, &link_rel)?;
-    filesystem::require_dir_write(&link_abs)?;
-
-    let vfs = filesystem::vfs()?;
-
-    // Split link path into parent + name, create symlink in parent
-    let (parent_path, link_name) = filesystem::split_path(&link_abs)?;
-    let parent = vfs
-        .resolve_path(&parent_path)
-        .map_err(filesystem::map_resolve_err)?;
+    // Checked and created in the same directory node (N-51).
+    let (parent, link_name) = filesystem::parent_dir(&link_abs)?;
+    filesystem::check_dir_write(&*parent)?;
     let node = parent
         .symlink(&link_name, &target)
         .map_err(|_| SyscallError::InvalidArgument)?;
@@ -2092,27 +1835,55 @@ fn sys_readlinkat(dirfd: usize, path_ptr: usize, buf_ptr: usize, buf_size: usize
 
     let bytes = target.as_bytes();
     let copy_len = bytes.len().min(buf_size);
-    // SAFETY: buf_ptr validated by validate_user_buffer above.
-    unsafe {
-        core::ptr::copy_nonoverlapping(bytes.as_ptr(), buf_ptr as *mut u8, copy_len);
-    }
+    userspace::write_user_bytes(buf_ptr, &bytes[..copy_len])?;
     Ok(copy_len)
 }
 
-/// memfd_create syscall -- create anonymous memory-backed file descriptor.
-///
-/// Returns an fd backed by anonymous memory. Used by Wayland for shared
-/// buffers and by various libraries for temporary file-like objects.
-///
-/// # Arguments
-/// - `name_ptr`: User-space pointer to name string (for debugging).
-/// - `flags`: MFD_CLOEXEC (0x01), MFD_ALLOW_SEALING (0x02).
-fn sys_memfd_create(_name_ptr: usize, _flags: usize) -> SyscallResult {
-    // Create an anonymous memory region as a pseudo-fd via eventfd's
-    // infrastructure (counter=0, non-blocking). This provides a valid fd
-    // that can be mmap'd. In a full implementation this would use a
-    // dedicated memfd subsystem with sealing support.
-    crate::fs::eventfd::eventfd_create(0, crate::fs::eventfd::EFD_NONBLOCK)
+/// memfd_create (N-229): a read-write fd on an anonymous regular file in no
+/// directory, which can be sized, read, written, mapped and sealed
+/// (fcntl F_ADD_SEALS) -- what Wayland clients put their buffers in. It
+/// returned an eventfd registry id that was never installed as an fd.
+/// Flags as on Linux: MFD_CLOEXEC, MFD_ALLOW_SEALING, MFD_NOEXEC_SEAL,
+/// MFD_EXEC; names over 249 bytes are EINVAL.
+fn sys_memfd_create(name_ptr: usize, flags: usize) -> SyscallResult {
+    const MFD_CLOEXEC: usize = 0x1;
+    const MFD_ALLOW_SEALING: usize = 0x2;
+    const MFD_NOEXEC_SEAL: usize = 0x8;
+    const MFD_EXEC: usize = 0x10;
+    /// NAME_MAX less the "memfd:" prefix Linux shows the name with.
+    const MFD_NAME_MAX: usize = 249;
+
+    // MFD_HUGETLB (0x4) and its size bits are refused with the unknown
+    // flags: there is no hugetlbfs.
+    if flags & !(MFD_CLOEXEC | MFD_ALLOW_SEALING | MFD_NOEXEC_SEAL | MFD_EXEC) != 0
+        || (flags & MFD_NOEXEC_SEAL != 0 && flags & MFD_EXEC != 0)
+    {
+        return Err(SyscallError::InvalidArgument);
+    }
+    let name = userspace::read_user_cstr(name_ptr, MFD_NAME_MAX)?;
+    let proc = crate::process::current_process().ok_or(SyscallError::InvalidState)?;
+    let creds = proc.credentials();
+    // MFD_NOEXEC_SEAL: not executable, the mode's execute bits sealed, and
+    // sealable as with MFD_ALLOW_SEALING.
+    let noexec = flags & MFD_NOEXEC_SEAL != 0;
+    let node = crate::fs::memfd::MemfdNode::new(
+        crate::fs::Permissions::from_mode(if noexec { 0o666 } else { 0o777 }),
+        creds.euid,
+        creds.egid,
+        flags & (MFD_ALLOW_SEALING | MFD_NOEXEC_SEAL) != 0,
+        if noexec { crate::fs::seals::EXEC } else { 0 },
+    );
+    let file = crate::fs::file::File::new_with_path(
+        node,
+        crate::fs::OpenFlags::read_write(),
+        alloc::format!("/memfd:{} (deleted)", name),
+    );
+    let fd = proc
+        .file_table
+        .lock()
+        .open_with_flags(alloc::sync::Arc::new(file), flags & MFD_CLOEXEC != 0)
+        .map_err(map_kernel_error)?;
+    Ok(fd)
 }
 
 /// set_tid_address syscall -- register the calling thread's clear_child_tid
@@ -2155,50 +1926,60 @@ fn sys_set_tid_address(tidptr: usize) -> SyscallResult {
     Ok(tid)
 }
 
-/// set_robust_list syscall -- register robust futex list head for cleanup on
-/// abnormal thread termination.
-///
-/// musl calls this during thread initialization. If a thread holding a
-/// robust futex dies, the kernel walks the list and marks the futexes as
-/// owner-died (FUTEX_OWNER_DIED) so waiting threads can recover.
-///
-/// # Arguments
-/// - `head_ptr`: Pointer to `struct robust_list_head` in user space.
-/// - `len`: Size of the structure (must match kernel expectation).
-///
-/// # Returns
-/// 0 on success.
+/// set_robust_list(head, len): the calling thread's robust futex list,
+/// walked when it exits (N-225). `len` must be
+/// `sizeof(struct robust_list_head)`; the pointer is only stored, as Linux
+/// does (a bad one ends the walk).
 fn sys_set_robust_list(head_ptr: usize, len: usize) -> SyscallResult {
-    // Expected size: 3 * sizeof(void*) = 24 bytes on 64-bit
-    if len != 24 {
+    use crate::process::robust_list::ROBUST_LIST_HEAD_SIZE;
+    if len != ROBUST_LIST_HEAD_SIZE {
         return Err(SyscallError::InvalidArgument);
     }
-    if head_ptr != 0 {
-        validate_user_pointer(head_ptr, len)?;
-    }
-
-    let proc = crate::process::current_process().ok_or(SyscallError::InvalidState)?;
-    proc.set_robust_list(head_ptr);
+    let thread = crate::process::current_thread().ok_or(SyscallError::InvalidState)?;
+    thread
+        .robust_list
+        .store(head_ptr, core::sync::atomic::Ordering::Release);
     Ok(0)
 }
 
-/// clock_nanosleep syscall -- sleep with clock selection.
-///
-/// Linux ABI: `clock_nanosleep(clockid, flags, request, remain)`
-/// musl maps Linux 230 -> VeridianOS 354.
-///
-/// We ignore clockid (always use monotonic) and flags (TIMER_ABSTIME not
-/// supported), delegating to the existing nanosleep implementation.
-fn sys_clock_nanosleep(
-    _clockid: usize,
-    _flags: usize,
-    req_ptr: usize,
-    rem_ptr: usize,
-) -> SyscallResult {
-    // Delegate to nanosleep -- ignores clockid and flags for now.
-    // TIMER_ABSTIME (flags=1) would require reading the clock and computing
-    // relative sleep, but for MVP this is acceptable.
-    time::sys_nanosleep(req_ptr, rem_ptr)
+/// get_robust_list(tid, head_ptr, len_ptr): the robust list of the thread
+/// `tid` (0: the caller), for a caller allowed to trace it (ESRCH, EPERM).
+fn sys_get_robust_list(tid: usize, head_out: usize, len_out: usize) -> SyscallResult {
+    use crate::process::robust_list::ROBUST_LIST_HEAD_SIZE;
+    let tid = tid as u32 as i32;
+    let head = if tid == 0 {
+        let thread = crate::process::current_thread().ok_or(SyscallError::InvalidState)?;
+        thread
+            .robust_list
+            .load(core::sync::atomic::Ordering::Acquire)
+    } else {
+        if tid < 0 {
+            return Err(SyscallError::ProcessNotFound);
+        }
+        let caller = crate::process::current_process().ok_or(SyscallError::InvalidState)?;
+        let mut found = None;
+        crate::process::table::PROCESS_TABLE.for_each(|p| {
+            if found.is_none() {
+                if let Some(t) = p.get_thread(crate::process::ThreadId(tid as u64)) {
+                    found = Some((
+                        p.credentials(),
+                        p.dumpable.load(core::sync::atomic::Ordering::Acquire),
+                        t,
+                    ));
+                }
+            }
+        });
+        let (target_creds, target_dumpable, thread) = found.ok_or(SyscallError::ProcessNotFound)?;
+        if !debug::may_access(&caller.credentials(), &target_creds, target_dumpable) {
+            return Err(SyscallError::OperationNotPermitted);
+        }
+        thread
+            .robust_list
+            .load(core::sync::atomic::Ordering::Acquire)
+    };
+    userspace::write_user(head_out, head as u64)?;
+    userspace::write_user(len_out, ROBUST_LIST_HEAD_SIZE as u64)?;
+    Ok(0)
 }
 
 /// sendmsg syscall -- sends data with optional ancillary data (SCM_RIGHTS).
@@ -2214,38 +1995,25 @@ fn sys_clock_nanosleep(
 /// For SCM_RIGHTS: msg_control points to a cmsghdr with cmsg_level=SOL_SOCKET,
 /// cmsg_type=SCM_RIGHTS, followed by an array of i32 file descriptors.
 fn sys_sendmsg(socket_fd: usize, msghdr_ptr: usize, _flags: usize) -> SyscallResult {
-    // Validate msghdr pointer (7 fields, ~56 bytes on 64-bit)
-    validate_user_buffer(msghdr_ptr, 56)?;
-
-    // SAFETY: msghdr_ptr validated above.
-    let (iov_ptr, iov_len, control_ptr, control_len) = unsafe {
-        let base = msghdr_ptr as *const usize;
-        // msg_name = offset 0, msg_namelen = offset 1
-        // msg_iov = offset 2, msg_iovlen = offset 3
-        let iov_ptr = *base.add(2);
-        let iov_len = *base.add(3);
-        // msg_control = offset 4, msg_controllen = offset 5
-        let control_ptr = *base.add(4);
-        let control_len = *base.add(5);
-        (iov_ptr, iov_len, control_ptr, control_len)
-    };
+    // The msghdr is copied in whole through the fault-tolerant reader
+    // (N-43). In usize words: msg_name = 0, msg_namelen = 1, msg_iov = 2,
+    // msg_iovlen = 3, msg_control = 4, msg_controllen = 5.
+    let hdr: [usize; 7] = userspace::read_user(msghdr_ptr)?;
+    let (iov_ptr, iov_len, control_ptr, control_len) = (hdr[2], hdr[3], hdr[4], hdr[5]);
+    if iov_len > IOV_MAX_MSG {
+        return Err(SyscallError::InvalidArgument);
+    }
 
     // Gather data from iovec array
     let mut data = alloc::vec::Vec::new();
     if iov_len > 0 && iov_ptr != 0 {
-        let iov_byte_len = iov_len * core::mem::size_of::<[usize; 2]>();
-        validate_user_buffer(iov_ptr, iov_byte_len)?;
         for i in 0..iov_len {
-            // SAFETY: iov_ptr validated above, each iovec is (base, len).
-            let (base, len) = unsafe {
-                let entry = (iov_ptr as *const usize).add(i * 2);
-                (*entry, *entry.add(1))
-            };
+            let [base, len]: [usize; 2] = userspace::read_user_index(iov_ptr, i)?;
             if len > 0 && base != 0 {
-                validate_user_buffer(base, len)?;
-                // SAFETY: base validated above.
-                let slice = unsafe { core::slice::from_raw_parts(base as *const u8, len) };
-                data.extend_from_slice(slice);
+                // Bounded in total, so a sender cannot make the kernel
+                // buffer an arbitrary amount (N-43).
+                let room = userspace::MAX_USER_MESSAGE.saturating_sub(data.len());
+                data.extend_from_slice(&userspace::read_user_vec(base, len, room)?);
             }
         }
     }
@@ -2334,6 +2102,21 @@ fn parse_scm_rights(
     }
     let mut hdr = [0u8; CMSGHDR_SIZE];
     userspace::read_user_bytes(control_ptr, &mut hdr)?;
+    let fd_count = scm_rights_fd_count(&hdr, control_len)?;
+    let mut raw = [0u8; 4 * SCM_MAX_FDS];
+    let raw = &mut raw[..4 * fd_count];
+    // CMSGHDR_SIZE + 4 * fd_count <= cmsg_len <= control_len.
+    userspace::read_user_bytes(control_ptr + CMSGHDR_SIZE, raw)?;
+    Ok(decode_scm_fds(raw))
+}
+
+/// The number of fds announced by the cmsghdr `hdr` at the start of a
+/// `control_len`-byte control buffer, with the checks `parse_scm_rights`
+/// documents. 0 means nothing to pass (another level, or an empty array).
+fn scm_rights_fd_count(
+    hdr: &[u8; CMSGHDR_SIZE],
+    control_len: usize,
+) -> Result<usize, SyscallError> {
     let cmsg_len = u64::from_ne_bytes([
         hdr[0], hdr[1], hdr[2], hdr[3], hdr[4], hdr[5], hdr[6], hdr[7],
     ]);
@@ -2344,7 +2127,7 @@ fn parse_scm_rights(
         return Err(SyscallError::InvalidArgument);
     }
     if level != SOL_SOCKET_LEVEL {
-        return Ok(alloc::vec::Vec::new());
+        return Ok(0);
     }
     if kind != SCM_RIGHTS_TYPE {
         return Err(SyscallError::InvalidArgument);
@@ -2353,14 +2136,39 @@ fn parse_scm_rights(
     if fd_count > SCM_MAX_FDS {
         return Err(SyscallError::InvalidArgument);
     }
-    let mut raw = [0u8; 4 * SCM_MAX_FDS];
-    let raw = &mut raw[..4 * fd_count];
-    // CMSGHDR_SIZE + 4 * fd_count <= cmsg_len <= control_len.
-    userspace::read_user_bytes(control_ptr + CMSGHDR_SIZE, raw)?;
-    Ok(raw
-        .chunks_exact(4)
+    Ok(fd_count)
+}
+
+/// The native-endian `int` fds of an SCM_RIGHTS payload (a trailing
+/// partial fd is ignored).
+fn decode_scm_fds(raw: &[u8]) -> alloc::vec::Vec<i32> {
+    raw.chunks_exact(4)
         .map(|c| i32::from_ne_bytes([c[0], c[1], c[2], c[3]]))
-        .collect())
+        .collect()
+}
+
+/// How many fds a `control_len`-byte control buffer at `control_ptr` can
+/// report in one SCM_RIGHTS message (0 without a usable buffer).
+fn scm_rights_room(control_ptr: usize, control_len: usize) -> usize {
+    if control_ptr != 0 && control_len >= CMSGHDR_SIZE {
+        (control_len - CMSGHDR_SIZE) / 4
+    } else {
+        0
+    }
+}
+
+/// One SCM_RIGHTS cmsghdr carrying `fds`, laid out as `parse_scm_rights`
+/// reads it; `cmsg_len` is the whole message length.
+fn scm_rights_cmsg(fds: &[u32]) -> alloc::vec::Vec<u8> {
+    let needed = CMSGHDR_SIZE + fds.len() * 4;
+    let mut cmsg = alloc::vec::Vec::with_capacity(needed);
+    cmsg.extend_from_slice(&(needed as u64).to_ne_bytes());
+    cmsg.extend_from_slice(&SOL_SOCKET_LEVEL.to_ne_bytes());
+    cmsg.extend_from_slice(&SCM_RIGHTS_TYPE.to_ne_bytes());
+    for &fd in fds {
+        cmsg.extend_from_slice(&(fd as i32).to_ne_bytes());
+    }
+    cmsg
 }
 
 /// recvmsg syscall -- receives data with optional ancillary data (SCM_RIGHTS).
@@ -2370,29 +2178,23 @@ fn parse_scm_rights(
 /// On return, if SCM_RIGHTS fds were received, they are written into the
 /// msg_control buffer as a cmsghdr.
 fn sys_recvmsg(socket_fd: usize, msghdr_ptr: usize, _flags: usize) -> SyscallResult {
-    validate_user_buffer(msghdr_ptr, 56)?;
+    // The msghdr is copied in whole through the fault-tolerant reader
+    // (N-43). In usize words: msg_name = 0, msg_namelen = 1, msg_iov = 2,
+    // msg_iovlen = 3, msg_control = 4, msg_controllen = 5.
+    let hdr: [usize; 7] = userspace::read_user(msghdr_ptr)?;
+    let (iov_ptr, iov_len, control_ptr, control_len) = (hdr[2], hdr[3], hdr[4], hdr[5]);
+    if iov_len > IOV_MAX_MSG {
+        return Err(SyscallError::InvalidArgument);
+    }
 
-    // SAFETY: msghdr_ptr validated above.
-    let (iov_ptr, iov_len, control_ptr, control_len) = unsafe {
-        let base = msghdr_ptr as *const usize;
-        let iov_ptr = *base.add(2);
-        let iov_len = *base.add(3);
-        let control_ptr = *base.add(4);
-        let control_len = *base.add(5);
-        (iov_ptr, iov_len, control_ptr, control_len)
-    };
+    let iov_at = |i| userspace::read_user_index::<[usize; 2]>(iov_ptr, i);
 
     // Calculate total receive buffer size from iovec
-    let mut total_buf_len: usize = 0;
-    if iov_len > 0 && iov_ptr != 0 {
-        let iov_byte_len = iov_len * core::mem::size_of::<[usize; 2]>();
-        validate_user_buffer(iov_ptr, iov_byte_len)?;
-        for i in 0..iov_len {
-            // SAFETY: iov_ptr validated above.
-            let len = unsafe { *((iov_ptr as *const usize).add(i * 2 + 1)) };
-            total_buf_len = total_buf_len.saturating_add(len);
-        }
-    }
+    let total_buf_len = if iov_len > 0 && iov_ptr != 0 {
+        iovs_total_len(iov_len, iov_at)?
+    } else {
+        0
+    };
 
     // Allocate a temporary kernel buffer to receive into
     let mut recv_buf = alloc::vec![0u8; total_buf_len.min(65536)];
@@ -2402,31 +2204,13 @@ fn sys_recvmsg(socket_fd: usize, msghdr_ptr: usize, _flags: usize) -> SyscallRes
         with_socket_fd(socket_fd, |s| s.recv(&mut recv_buf))?.map_err(socket_err)?;
 
     // Scatter received data into iovec buffers
-    let mut offset = 0usize;
     if iov_len > 0 && iov_ptr != 0 {
-        for i in 0..iov_len {
-            if offset >= received {
-                break;
-            }
-            // SAFETY: iov_ptr validated above.
-            let (base, len) = unsafe {
-                let entry = (iov_ptr as *const usize).add(i * 2);
-                (*entry, *entry.add(1))
-            };
-            if len > 0 && base != 0 {
-                let copy_len = (received - offset).min(len);
-                validate_user_buffer(base, copy_len)?;
-                // SAFETY: base validated above.
-                unsafe {
-                    core::ptr::copy_nonoverlapping(
-                        recv_buf[offset..].as_ptr(),
-                        base as *mut u8,
-                        copy_len,
-                    );
-                }
-                offset += copy_len;
-            }
-        }
+        scatter_iovs(
+            &recv_buf[..received],
+            iov_len,
+            iov_at,
+            userspace::write_user_bytes,
+        )?;
     }
 
     // Passed files become new fds in the receiver's own table -- only as
@@ -2437,11 +2221,7 @@ fn sys_recvmsg(socket_fd: usize, msghdr_ptr: usize, _flags: usize) -> SyscallRes
     let mut delivered_fds = 0usize;
     if let Some(scm) = rights {
         sent_fds = scm.files.len();
-        let room = if control_ptr != 0 && control_len >= CMSGHDR_SIZE {
-            (control_len - CMSGHDR_SIZE) / 4
-        } else {
-            0
-        };
+        let room = scm_rights_room(control_ptr, control_len);
         let process = crate::process::current_process().ok_or(SyscallError::InvalidState)?;
         let table = process.file_table.lock();
         let mut fds = alloc::vec::Vec::with_capacity(scm.files.len().min(room));
@@ -2465,8 +2245,8 @@ fn sys_recvmsg(socket_fd: usize, msghdr_ptr: usize, _flags: usize) -> SyscallRes
     }
     if !wrote_control {
         // No control data: msg_controllen = 0 so the caller does not parse
-        // stale bytes. SAFETY: msghdr_ptr was validated for 56 bytes above.
-        unsafe { core::ptr::write_unaligned((msghdr_ptr as *mut usize).add(5), 0) };
+        // stale bytes.
+        userspace::write_user::<usize>(msghdr_ptr + 5 * core::mem::size_of::<usize>(), 0)?;
     }
     // msg_flags is always written, so the caller never reads back what it
     // left there, and carries MSG_CTRUNC when fds were dropped (review of
@@ -2478,6 +2258,9 @@ fn sys_recvmsg(socket_fd: usize, msghdr_ptr: usize, _flags: usize) -> SyscallRes
 
     Ok(received)
 }
+
+/// Most iovec entries one sendmsg/recvmsg accepts (Linux `UIO_MAXIOV`).
+const IOV_MAX_MSG: usize = 1024;
 
 /// `MSG_CTRUNC`: control data was discarded for lack of room.
 const MSG_CTRUNC: i32 = 0x8;
@@ -2492,6 +2275,44 @@ fn recvmsg_flags(sent: usize, delivered: usize) -> i32 {
     } else {
         0
     }
+}
+
+/// Sum of the lengths of the `iov_count` iovec entries `iov_at` yields
+/// (`[iov_base, iov_len]`), saturating.
+fn iovs_total_len(
+    iov_count: usize,
+    mut iov_at: impl FnMut(usize) -> Result<[usize; 2], SyscallError>,
+) -> Result<usize, SyscallError> {
+    let mut total = 0usize;
+    for i in 0..iov_count {
+        let [_, len] = iov_at(i)?;
+        total = total.saturating_add(len);
+    }
+    Ok(total)
+}
+
+/// Copy `data` into the iovec entries `iov_at` yields, in order, through
+/// `write(base, bytes)`. Entries with a zero base or length are skipped,
+/// and no entry is read once `data` is used up. Returns the bytes copied.
+fn scatter_iovs(
+    data: &[u8],
+    iov_count: usize,
+    mut iov_at: impl FnMut(usize) -> Result<[usize; 2], SyscallError>,
+    mut write: impl FnMut(usize, &[u8]) -> Result<(), SyscallError>,
+) -> Result<usize, SyscallError> {
+    let mut offset = 0usize;
+    for i in 0..iov_count {
+        if offset >= data.len() {
+            break;
+        }
+        let [base, len] = iov_at(i)?;
+        if len > 0 && base != 0 {
+            let copy_len = (data.len() - offset).min(len);
+            write(base, &data[offset..offset + copy_len])?;
+            offset += copy_len;
+        }
+    }
+    Ok(offset)
 }
 
 /// Write SCM_RIGHTS fds into the user's msg_control buffer as one cmsghdr
@@ -2510,13 +2331,7 @@ fn write_scm_rights(
     // Built in a kernel buffer and copied out with the fault-tolerant
     // routine; the raw unaligned stores this replaces faulted in the kernel
     // on an unmapped page (agy review of the v0.26.0 stack, PR #10).
-    let mut cmsg = alloc::vec::Vec::with_capacity(needed);
-    cmsg.extend_from_slice(&(needed as u64).to_ne_bytes());
-    cmsg.extend_from_slice(&SOL_SOCKET_LEVEL.to_ne_bytes());
-    cmsg.extend_from_slice(&SCM_RIGHTS_TYPE.to_ne_bytes());
-    for &fd in fds {
-        cmsg.extend_from_slice(&(fd as i32).to_ne_bytes());
-    }
+    let cmsg = scm_rights_cmsg(fds);
     // msg_controllen is the sixth usize-sized field of the 56-byte msghdr.
     userspace::write_user_bytes(control_ptr, &cmsg).is_ok()
         && userspace::write_user::<usize>(msghdr_ptr + 5 * core::mem::size_of::<usize>(), needed)
@@ -2539,33 +2354,64 @@ fn message_from_user(
     ptr: usize,
     len: usize,
 ) -> Result<Message, SyscallError> {
-    use crate::ipc::message::{BufferedMessage, MAX_BUFFERED_PAYLOAD};
+    use crate::ipc::message::BufferedMessage;
 
-    const SMALL: usize = core::mem::size_of::<SmallMessage>();
-    if len == 0 {
-        return Err(SyscallError::InvalidArgument);
-    }
-    if len <= SMALL {
-        let mut bytes = [0u8; SMALL];
-        userspace::read_user_bytes(ptr, &mut bytes[..len])?;
-        // SAFETY: SmallMessage is repr(C) plain data (u64, u32, u32,
-        // [u64; 4]) without padding, so every byte pattern is a valid value;
-        // read_unaligned imposes no alignment on the stack buffer.
-        let mut msg: SmallMessage =
-            unsafe { core::ptr::read_unaligned(bytes.as_ptr() as *const SmallMessage) };
-        if let Some(cap) = capability {
-            msg.capability = cap;
+    match message_tier(len)? {
+        MessageTier::Small => {
+            let mut bytes = [0u8; SMALL_MESSAGE_BYTES];
+            userspace::read_user_bytes(ptr, &mut bytes[..len])?;
+            Ok(Message::Small(small_message_from_bytes(&bytes, capability)))
         }
-        return Ok(Message::Small(msg));
+        MessageTier::Buffered => {
+            let mut payload = alloc::vec![0u8; len];
+            userspace::read_user_bytes(ptr, &mut payload)?;
+            BufferedMessage::new(capability.unwrap_or(0), 0, payload)
+                .map(Message::Buffered)
+                .ok_or(SyscallError::InvalidArgument)
+        }
     }
-    if len > MAX_BUFFERED_PAYLOAD {
-        return Err(SyscallError::InvalidArgument);
+}
+
+/// `sizeof(SmallMessage)`: the largest message passed by value.
+const SMALL_MESSAGE_BYTES: usize = core::mem::size_of::<SmallMessage>();
+
+/// How `message_from_user` carries a message of a given length.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MessageTier {
+    /// By value, zero-padded to `SMALL_MESSAGE_BYTES`.
+    Small,
+    /// Copied into a kernel buffer.
+    Buffered,
+}
+
+/// The tier for a `len`-byte message: empty and over-`MAX_BUFFERED_PAYLOAD`
+/// messages are EINVAL (the latter need a shared region).
+fn message_tier(len: usize) -> Result<MessageTier, SyscallError> {
+    use crate::ipc::message::MAX_BUFFERED_PAYLOAD;
+
+    match len {
+        0 => Err(SyscallError::InvalidArgument),
+        1..=SMALL_MESSAGE_BYTES => Ok(MessageTier::Small),
+        _ if len > MAX_BUFFERED_PAYLOAD => Err(SyscallError::InvalidArgument),
+        _ => Ok(MessageTier::Buffered),
     }
-    let mut payload = alloc::vec![0u8; len];
-    userspace::read_user_bytes(ptr, &mut payload)?;
-    BufferedMessage::new(capability.unwrap_or(0), 0, payload)
-        .map(Message::Buffered)
-        .ok_or(SyscallError::InvalidArgument)
+}
+
+/// A small message from its bytes; `capability`, when given, replaces the
+/// capability the sender wrote.
+fn small_message_from_bytes(
+    bytes: &[u8; SMALL_MESSAGE_BYTES],
+    capability: Option<u64>,
+) -> SmallMessage {
+    // SAFETY: SmallMessage is repr(C) plain data (u64, u32, u32, [u64; 4])
+    // without padding, so every byte pattern is a valid value;
+    // read_unaligned imposes no alignment on the byte array.
+    let mut msg: SmallMessage =
+        unsafe { core::ptr::read_unaligned(bytes.as_ptr() as *const SmallMessage) };
+    if let Some(cap) = capability {
+        msg.capability = cap;
+    }
+    msg
 }
 
 /// Bytes of a `repr(C)` plain-data value.
@@ -2698,9 +2544,16 @@ fn sys_ipc_receive(endpoint: usize, buffer: usize, buffer_len: usize) -> Syscall
     if let Err(e) = crate::cap::ipc_integration::check_receive_permission(cap_token, &cap_space) {
         return Err(e.into());
     }
+    // The endpoint is the one the capability names: the token's value used
+    // to be passed as the endpoint number, which found no endpoint (N-81).
+    let endpoint_id = match cap_space.lookup_entry(cap_token) {
+        Some((crate::cap::object::ObjectRef::Endpoint { endpoint }, _rights)) => endpoint.id(),
+        _ => return Err(SyscallError::InvalidCapability),
+    };
     drop(cap_space);
 
-    let message = sync_receive(endpoint as u64).map_err(SyscallError::from)?;
+    // Sleeps until a message arrives; a signal ends the wait with EINTR.
+    let message = sync_receive(endpoint_id).map_err(SyscallError::from)?;
     message_to_user(&message, buffer, buffer_len)
 }
 
@@ -2717,8 +2570,21 @@ fn sys_ipc_call(
     }
     validate_user_buffer(recv_buf, recv_size)?;
 
+    // The endpoint is the one the capability names, not the token's value
+    // (the token used to be passed as the endpoint number).
+    let endpoint = {
+        let process = crate::process::current_process().ok_or(SyscallError::InvalidState)?;
+        let space = process.capability_space.lock();
+        let token = crate::cap::CapabilityToken::from_u64(capability as u64);
+        crate::cap::ipc_integration::check_send_permission(token, &space)
+            .map_err(SyscallError::from)?;
+        match space.lookup_entry(token) {
+            Some((crate::cap::object::ObjectRef::Endpoint { endpoint }, _)) => endpoint.id(),
+            _ => return Err(SyscallError::InvalidCapability),
+        }
+    };
     let message = message_from_user(Some(capability as u64), send_msg, send_size)?;
-    let reply = sync_call(message, capability as u64).map_err(SyscallError::from)?;
+    let reply = sync_call(message, endpoint).map_err(SyscallError::from)?;
     message_to_user(&reply, recv_buf, recv_size)
 }
 
@@ -2925,293 +2791,6 @@ fn sys_ipc_map_memory(capability: usize, addr_hint: usize, flags: usize) -> Sysc
     Ok(vaddr.as_usize())
 }
 
-impl TryFrom<usize> for Syscall {
-    type Error = ();
-
-    fn try_from(value: usize) -> Result<Self, Self::Error> {
-        match value {
-            // IPC system calls
-            0 => Ok(Syscall::IpcSend),
-            1 => Ok(Syscall::IpcReceive),
-            2 => Ok(Syscall::IpcCall),
-            3 => Ok(Syscall::IpcReply),
-            4 => Ok(Syscall::IpcCreateEndpoint),
-            5 => Ok(Syscall::IpcBindEndpoint),
-            6 => Ok(Syscall::IpcShareMemory),
-            7 => Ok(Syscall::IpcMapMemory),
-
-            // Process management
-            10 => Ok(Syscall::ProcessYield),
-            11 => Ok(Syscall::ProcessExit),
-            12 => Ok(Syscall::ProcessFork),
-            13 => Ok(Syscall::ProcessExec),
-            14 => Ok(Syscall::ProcessWait),
-            15 => Ok(Syscall::ProcessGetPid),
-            16 => Ok(Syscall::ProcessGetPPid),
-            17 => Ok(Syscall::ProcessSetPriority),
-            18 => Ok(Syscall::ProcessGetPriority),
-
-            // Memory management
-            20 => Ok(Syscall::MemoryMap),
-            21 => Ok(Syscall::MemoryUnmap),
-            22 => Ok(Syscall::MemoryProtect),
-            23 => Ok(Syscall::MemoryBrk),
-
-            // Capability management
-            30 => Ok(Syscall::CapabilityGrant),
-            31 => Ok(Syscall::CapabilityRevoke),
-
-            // Thread management
-            40 => Ok(Syscall::ThreadCreate),
-            41 => Ok(Syscall::ThreadExit),
-            42 => Ok(Syscall::ThreadJoin),
-            43 => Ok(Syscall::ThreadGetTid),
-            44 => Ok(Syscall::ThreadSetAffinity),
-            45 => Ok(Syscall::ThreadGetAffinity),
-            46 => Ok(Syscall::ThreadClone),
-
-            // Filesystem operations
-            50 => Ok(Syscall::FileOpen),
-            51 => Ok(Syscall::FileClose),
-            52 => Ok(Syscall::FileRead),
-            53 => Ok(Syscall::FileWrite),
-            54 => Ok(Syscall::FileSeek),
-            55 => Ok(Syscall::FileStat),
-            56 => Ok(Syscall::FileTruncate),
-            57 => Ok(Syscall::FileDup),
-            58 => Ok(Syscall::FileDup2),
-            59 => Ok(Syscall::FilePipe),
-
-            // Directory operations
-            60 => Ok(Syscall::DirMkdir),
-            61 => Ok(Syscall::DirRmdir),
-            62 => Ok(Syscall::DirOpendir),
-            63 => Ok(Syscall::DirReaddir),
-            64 => Ok(Syscall::DirClosedir),
-            65 => Ok(Syscall::FilePipe2),
-            66 => Ok(Syscall::FileDup3),
-
-            // Filesystem management
-            70 => Ok(Syscall::FsMount),
-            71 => Ok(Syscall::FsUnmount),
-            72 => Ok(Syscall::FsSync),
-            73 => Ok(Syscall::FsFsync),
-
-            // Kernel information
-            80 => Ok(Syscall::KernelGetInfo),
-
-            // Package management
-            90 => Ok(Syscall::PkgInstall),
-            91 => Ok(Syscall::PkgRemove),
-            92 => Ok(Syscall::PkgQuery),
-            93 => Ok(Syscall::PkgList),
-            94 => Ok(Syscall::PkgUpdate),
-
-            // Time management
-            100 => Ok(Syscall::TimeGetUptime),
-            101 => Ok(Syscall::TimeCreateTimer),
-            102 => Ok(Syscall::TimeCancelTimer),
-
-            // Extended process operations
-            110 => Ok(Syscall::ProcessGetcwd),
-            111 => Ok(Syscall::ProcessChdir),
-            112 => Ok(Syscall::FileIoctl),
-            113 => Ok(Syscall::ProcessKill),
-
-            // Signal management
-            120 => Ok(Syscall::SigAction),
-            121 => Ok(Syscall::SigProcmask),
-            122 => Ok(Syscall::SigSuspend),
-            123 => Ok(Syscall::SigReturn),
-
-            // Debug / tracing
-            140 => Ok(Syscall::Ptrace),
-
-            // POSIX time syscalls
-            160 => Ok(Syscall::ClockGettime),
-            161 => Ok(Syscall::ClockGetres),
-            162 => Ok(Syscall::Nanosleep),
-            163 => Ok(Syscall::Gettimeofday),
-
-            // Identity syscalls
-            170 => Ok(Syscall::Getuid),
-            171 => Ok(Syscall::Geteuid),
-            172 => Ok(Syscall::Getgid),
-            173 => Ok(Syscall::Getegid),
-            174 => Ok(Syscall::Setuid),
-            175 => Ok(Syscall::Setgid),
-
-            // Process group / session syscalls
-            176 => Ok(Syscall::Setpgid),
-            177 => Ok(Syscall::Getpgid),
-            178 => Ok(Syscall::Getpgrp),
-            179 => Ok(Syscall::Setsid),
-            180 => Ok(Syscall::Getsid),
-
-            // Scatter/gather I/O
-            183 => Ok(Syscall::Readv),
-            184 => Ok(Syscall::Writev),
-
-            // Extended filesystem operations
-            150 => Ok(Syscall::FileStatPath),
-            151 => Ok(Syscall::FileLstat),
-            152 => Ok(Syscall::FileReadlink),
-            153 => Ok(Syscall::FileAccess),
-            154 => Ok(Syscall::FileRename),
-            155 => Ok(Syscall::FileLink),
-            156 => Ok(Syscall::FileSymlink),
-            157 => Ok(Syscall::FileUnlink),
-            158 => Ok(Syscall::FileFcntl),
-
-            // Self-hosting filesystem ops
-            185 => Ok(Syscall::FileChmod),
-            186 => Ok(Syscall::FileFchmod),
-            187 => Ok(Syscall::ProcessUmask),
-            188 => Ok(Syscall::FileTruncatePath),
-            189 => Ok(Syscall::FilePoll),
-            190 => Ok(Syscall::FileOpenat),
-            191 => Ok(Syscall::FileFstatat),
-            192 => Ok(Syscall::FileUnlinkat),
-            193 => Ok(Syscall::FileMkdirat),
-            194 => Ok(Syscall::FileRenameat),
-            195 => Ok(Syscall::FilePread),
-            196 => Ok(Syscall::FilePwrite),
-            197 => Ok(Syscall::FileChown),
-            198 => Ok(Syscall::FileFchown),
-            199 => Ok(Syscall::FileMknod),
-            200 => Ok(Syscall::FileSelect),
-            201 => Ok(Syscall::FutexWait),
-            202 => Ok(Syscall::FutexWake),
-            203 => Ok(Syscall::ArchPrctl),
-            204 => Ok(Syscall::ProcessUname),
-            205 => Ok(Syscall::ProcessGetenv),
-
-            // POSIX shared memory
-            210 => Ok(Syscall::ShmOpen),
-            211 => Ok(Syscall::ShmUnlink),
-            212 => Ok(Syscall::ShmTruncate),
-
-            // Socket operations
-            220 => Ok(Syscall::SocketCreate),
-            221 => Ok(Syscall::SocketBind),
-            222 => Ok(Syscall::SocketListen),
-            223 => Ok(Syscall::SocketConnect),
-            224 => Ok(Syscall::SocketAccept),
-            225 => Ok(Syscall::SocketSend),
-            226 => Ok(Syscall::SocketRecv),
-            227 => Ok(Syscall::SocketClose),
-            228 => Ok(Syscall::SocketPair),
-
-            // Graphics / framebuffer (Phase 6)
-            230 => Ok(Syscall::FbGetInfo),
-            231 => Ok(Syscall::FbMap),
-            232 => Ok(Syscall::InputPoll),
-            233 => Ok(Syscall::InputRead),
-            234 => Ok(Syscall::FbSwap),
-
-            // Wayland compositor (Phase 6)
-            240 => Ok(Syscall::WlConnect),
-            241 => Ok(Syscall::WlDisconnect),
-            242 => Ok(Syscall::WlSendMessage),
-            243 => Ok(Syscall::WlRecvMessage),
-            244 => Ok(Syscall::WlCreateShmPool),
-            245 => Ok(Syscall::WlCreateSurface),
-            246 => Ok(Syscall::WlCommitSurface),
-            247 => Ok(Syscall::WlGetEvents),
-
-            // Network extensions (Phase 6)
-            250 => Ok(Syscall::NetSendTo),
-            251 => Ok(Syscall::NetRecvFrom),
-            252 => Ok(Syscall::NetGetSockName),
-            253 => Ok(Syscall::NetGetPeerName),
-            254 => Ok(Syscall::NetSetSockOpt),
-            255 => Ok(Syscall::NetGetSockOpt),
-
-            // Resource limits (Phase 6.5)
-            260 => Ok(Syscall::GetRlimit),
-            261 => Ok(Syscall::SetRlimit),
-
-            // epoll I/O multiplexing (Phase 6.5)
-            262 => Ok(Syscall::EpollCreate),
-            263 => Ok(Syscall::EpollCtl),
-            264 => Ok(Syscall::EpollWait),
-
-            // Process groups / sessions (Phase 6.5)
-            270 => Ok(Syscall::SetPgid),
-            271 => Ok(Syscall::GetPgid),
-            272 => Ok(Syscall::SetSid),
-            273 => Ok(Syscall::GetSid),
-            274 => Ok(Syscall::TcSetPgrp),
-            275 => Ok(Syscall::TcGetPgrp),
-
-            // PTY (Phase 6.5)
-            280 => Ok(Syscall::OpenPty),
-            281 => Ok(Syscall::GrantPty),
-            282 => Ok(Syscall::UnlockPty),
-            283 => Ok(Syscall::PtsName),
-
-            // Filesystem extensions (Phase 6.5)
-            290 => Ok(Syscall::Link),
-            291 => Ok(Syscall::Symlink),
-            292 => Ok(Syscall::Readlink),
-            293 => Ok(Syscall::Lstat),
-            294 => Ok(Syscall::Fchmod),
-            295 => Ok(Syscall::Fchown),
-            296 => Ok(Syscall::Umask),
-            297 => Ok(Syscall::Access),
-
-            // Poll/fcntl (Phase 6.5)
-            300 => Ok(Syscall::Poll),
-            301 => Ok(Syscall::Fcntl),
-
-            // Threading (Phase 6.5)
-            310 => Ok(Syscall::Clone),
-            311 => Ok(Syscall::Futex),
-
-            // Audio (Phase 7)
-            320 => Ok(Syscall::AudioOpen),
-            321 => Ok(Syscall::AudioClose),
-            322 => Ok(Syscall::AudioWrite),
-            323 => Ok(Syscall::AudioSetVolume),
-            324 => Ok(Syscall::AudioGetInfo),
-            325 => Ok(Syscall::AudioStart),
-            326 => Ok(Syscall::AudioStop),
-            327 => Ok(Syscall::AudioPause),
-
-            // Event/timer notification fds (KDE/Wayland infrastructure)
-            330 => Ok(Syscall::Getrandom),
-            331 => Ok(Syscall::EventfdCreate),
-            332 => Ok(Syscall::EventfdRead),
-            333 => Ok(Syscall::EventfdWrite),
-            334 => Ok(Syscall::TimerfdCreate),
-            335 => Ok(Syscall::TimerfdSettime),
-            336 => Ok(Syscall::TimerfdGettime),
-            337 => Ok(Syscall::SignalfdCreate),
-            338 => Ok(Syscall::SendMsg),
-            339 => Ok(Syscall::RecvMsg),
-
-            // musl libc compatibility
-            340 => Ok(Syscall::Getdents64),
-            341 => Ok(Syscall::Prlimit64),
-            342 => Ok(Syscall::InotifyInit1),
-            343 => Ok(Syscall::InotifyAddWatch),
-            344 => Ok(Syscall::InotifyRmWatch),
-            345 => Ok(Syscall::Madvise),
-            346 => Ok(Syscall::Fchmodat),
-            347 => Ok(Syscall::Fchownat),
-            348 => Ok(Syscall::Linkat),
-            349 => Ok(Syscall::Symlinkat),
-            350 => Ok(Syscall::Readlinkat),
-            351 => Ok(Syscall::MemfdCreate),
-            352 => Ok(Syscall::SetTidAddress),
-            353 => Ok(Syscall::SetRobustList),
-            354 => Ok(Syscall::ClockNanosleep),
-
-            _ => Err(()),
-        }
-    }
-}
-
 // ---------------------------------------------------------------------------
 // POSIX Shared Memory syscall handlers
 // ---------------------------------------------------------------------------
@@ -3311,7 +2890,7 @@ fn sys_shm_truncate(name_ptr: usize, _name_len: usize, size: usize) -> SyscallRe
 
     crate::ipc::posix_shm::shm_truncate(&name, size)
         .map(|()| 0)
-        .map_err(|_| SyscallError::OutOfMemory)
+        .map_err(map_kernel_error)
 }
 
 // ---------------------------------------------------------------------------
@@ -3330,6 +2909,17 @@ use crate::net::socket_fd::{SocketHandle, SocketNode};
 
 /// Run `f` on the socket behind `fd` in the caller's own file table.
 /// Fails with EBADF for an unknown fd and ENOTSOCK for a non-socket.
+/// Whether descriptor `fd` is in non-blocking mode (O_NONBLOCK).
+fn fd_nonblocking(fd: usize) -> Result<bool, SyscallError> {
+    let process = crate::process::current_process().ok_or(SyscallError::InvalidState)?;
+    let file = process
+        .file_table
+        .lock()
+        .get(fd)
+        .ok_or(SyscallError::BadFileDescriptor)?;
+    Ok(file.nonblock.load(Ordering::Acquire))
+}
+
 pub(super) fn with_socket_fd<R>(
     fd: usize,
     f: impl FnOnce(&SocketNode) -> R,
@@ -3348,20 +2938,52 @@ pub(super) fn with_socket_fd<R>(
     Ok(f(node))
 }
 
+/// Linux SOCK_NONBLOCK and SOCK_CLOEXEC: OR-ed into socket()'s type, and
+/// accept4()'s flags.
+const SOCK_NONBLOCK: usize = 0x800;
+const SOCK_CLOEXEC: usize = 0x8_0000;
+
+/// Descriptor flags of a new socket.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+struct SocketFdFlags {
+    cloexec: bool,
+    nonblock: bool,
+}
+
+/// Split socket()'s type into the base type (low 4 bits) and the
+/// descriptor flags. Any other bit is EINVAL, as on Linux; they were
+/// masked off and lost, so a "non-blocking" socket blocked.
+fn socket_type_flags(raw: usize) -> Result<(usize, SocketFdFlags), SyscallError> {
+    let flags = raw & !0xF;
+    if flags & !(SOCK_NONBLOCK | SOCK_CLOEXEC) != 0 {
+        return Err(SyscallError::InvalidArgument);
+    }
+    Ok((
+        raw & 0xF,
+        SocketFdFlags {
+            cloexec: flags & SOCK_CLOEXEC != 0,
+            nonblock: flags & SOCK_NONBLOCK != 0,
+        },
+    ))
+}
+
 /// Install a new socket in the caller's file table and return its fd. If
 /// that fails the node is dropped, which closes the socket.
-fn install_socket(handle: SocketHandle) -> SyscallResult {
+fn install_socket(handle: SocketHandle, fd_flags: SocketFdFlags) -> SyscallResult {
     let process = crate::process::current_process().ok_or(SyscallError::InvalidState)?;
     let node: alloc::sync::Arc<dyn crate::fs::VfsNode> =
         alloc::sync::Arc::new(SocketNode::new(handle));
     let file = alloc::sync::Arc::new(crate::fs::file::File::new(
         node,
-        crate::fs::file::OpenFlags::read_write(),
+        crate::fs::file::OpenFlags {
+            nonblock: fd_flags.nonblock,
+            ..crate::fs::file::OpenFlags::read_write()
+        },
     ));
     let fd = process
         .file_table
         .lock()
-        .open(file)
+        .open_with_flags(file, fd_flags.cloexec)
         .map_err(|_| SyscallError::ResourceLimitExceeded);
     fd
 }
@@ -3377,24 +2999,24 @@ pub(super) fn socket_err(e: crate::error::KernelError) -> SyscallError {
 
 /// Read an INET address passed as (4 address bytes, big-endian port).
 fn read_inet_addr(addr_ptr: usize) -> Result<crate::net::SocketAddr, SyscallError> {
-    validate_user_buffer(addr_ptr, 6)?;
-    // SAFETY: addr_ptr validated above as non-null, in user space, 6 bytes.
-    let ip_bytes = unsafe { core::ptr::read_unaligned(addr_ptr as *const [u8; 4]) };
-    // SAFETY: as above; bytes 4..6 are inside the validated range.
-    let port = unsafe { core::ptr::read_unaligned((addr_ptr + 4) as *const u16) }.to_be();
-    Ok(crate::net::SocketAddr::v4(
-        crate::net::Ipv4Address(ip_bytes),
-        port,
-    ))
+    let mut raw = [0u8; 6];
+    userspace::read_user_bytes(addr_ptr, &mut raw)?;
+    Ok(inet_addr_from_bytes(&raw))
 }
 
-/// Convert user-space socket type to UnixSocketType.
+/// Decode an INET address passed as (4 address bytes, big-endian port).
+fn inet_addr_from_bytes(raw: &[u8; 6]) -> crate::net::SocketAddr {
+    crate::net::SocketAddr::v4(
+        crate::net::Ipv4Address([raw[0], raw[1], raw[2], raw[3]]),
+        u16::from_be_bytes([raw[4], raw[5]]),
+    )
+}
+
+/// The Unix socket type for a base socket type (flags already removed by
+/// `socket_type_flags`).
 fn to_unix_socket_type(
-    sock_type: usize,
+    base_type: usize,
 ) -> Result<crate::net::unix_socket::UnixSocketType, SyscallError> {
-    // Mask off SOCK_CLOEXEC (0x80000) and SOCK_NONBLOCK (0x800) flags
-    // that musl passes alongside the base socket type.
-    let base_type = sock_type & 0xF;
     match base_type {
         SOCK_STREAM => Ok(crate::net::unix_socket::UnixSocketType::Stream),
         SOCK_DGRAM => Ok(crate::net::unix_socket::UnixSocketType::Datagram),
@@ -3402,47 +3024,85 @@ fn to_unix_socket_type(
     }
 }
 
-/// SYS_SOCKET_CREATE: Create a new socket and return an fd for it.
-///
-/// # Arguments
-/// - domain: AF_UNIX (1) or AF_INET (2)
-/// - sock_type: SOCK_STREAM (1) or SOCK_DGRAM (2)
-fn sys_socket_create(domain: usize, sock_type: usize) -> SyscallResult {
+/// IPPROTO_TCP and IPPROTO_UDP, the protocols AF_INET sockets accept
+/// besides 0 (the type's default).
+const IPPROTO_TCP: usize = 6;
+const IPPROTO_UDP: usize = 17;
+
+/// What socket(domain, type, protocol) creates, or Linux's error for it:
+/// EAFNOSUPPORT for an unknown domain, EINVAL for an unknown type,
+/// EPROTONOSUPPORT for a protocol the type does not use.
+#[derive(Debug, PartialEq, Eq)]
+enum SocketKind {
+    Unix(usize),
+    Inet(usize),
+}
+
+fn socket_kind(
+    domain: usize,
+    base_type: usize,
+    protocol: usize,
+) -> Result<SocketKind, SyscallError> {
+    match domain {
+        AF_UNIX => {
+            if base_type != SOCK_STREAM && base_type != SOCK_DGRAM {
+                return Err(SyscallError::InvalidArgument);
+            }
+            if protocol != 0 && protocol != AF_UNIX {
+                return Err(SyscallError::ProtocolNotSupported);
+            }
+            Ok(SocketKind::Unix(base_type))
+        }
+        AF_INET => {
+            let default = match base_type {
+                SOCK_STREAM => IPPROTO_TCP,
+                SOCK_DGRAM => IPPROTO_UDP,
+                _ => return Err(SyscallError::InvalidArgument),
+            };
+            if protocol != 0 && protocol != default {
+                return Err(SyscallError::ProtocolNotSupported);
+            }
+            Ok(SocketKind::Inet(base_type))
+        }
+        _ => Err(SyscallError::AddressFamilyNotSupported),
+    }
+}
+
+/// SYS_socket: socket(domain, type | SOCK_NONBLOCK | SOCK_CLOEXEC, protocol).
+fn sys_socket_create(domain: usize, sock_type: usize, protocol: usize) -> SyscallResult {
+    let (base_type, fd_flags) = socket_type_flags(sock_type)?;
     let pid = crate::process::current_process()
         .map(|p| p.pid.0)
         .unwrap_or(0);
 
-    match domain {
-        AF_UNIX => {
-            let utype = to_unix_socket_type(sock_type)?;
+    match socket_kind(domain, base_type, protocol)? {
+        SocketKind::Unix(base_type) => {
+            let utype = to_unix_socket_type(base_type)?;
             let id = crate::net::unix_socket::socket_create(utype, pid)
                 .map_err(|_| SyscallError::OutOfMemory)?;
-            install_socket(SocketHandle::Unix(id))
+            install_socket(SocketHandle::Unix(id), fd_flags)
         }
-        AF_INET => {
+        SocketKind::Inet(base_type) => {
             let sock_domain = crate::net::socket::SocketDomain::Inet;
-            // Mask off SOCK_CLOEXEC/SOCK_NONBLOCK flags
-            let base_type = sock_type & 0xF;
-            let (sock_tp, proto) = match base_type {
-                SOCK_STREAM => (
+            let (sock_tp, proto) = if base_type == SOCK_STREAM {
+                (
                     crate::net::socket::SocketType::Stream,
                     crate::net::socket::SocketProtocol::Tcp,
-                ),
-                SOCK_DGRAM => (
+                )
+            } else {
+                (
                     crate::net::socket::SocketType::Dgram,
                     crate::net::socket::SocketProtocol::Udp,
-                ),
-                _ => return Err(SyscallError::InvalidArgument),
+                )
             };
             let id = crate::net::socket::create_socket(sock_domain, sock_tp, proto)
                 .map_err(|_| SyscallError::OutOfMemory)?;
-            install_socket(SocketHandle::Inet(id))
+            install_socket(SocketHandle::Inet(id), fd_flags)
         }
-        _ => Err(SyscallError::InvalidArgument),
     }
 }
 
-/// SYS_SOCKET_BIND: Bind a socket to an address/path.
+/// SYS_bind: Bind a socket to an address/path.
 fn sys_socket_bind(fd: usize, addr_ptr: usize, addr_len: usize) -> SyscallResult {
     match with_socket_fd(fd, SocketNode::handle)? {
         SocketHandle::Inet(id) => {
@@ -3461,7 +3121,7 @@ fn sys_socket_bind(fd: usize, addr_ptr: usize, addr_len: usize) -> SyscallResult
     }
 }
 
-/// SYS_SOCKET_LISTEN: Start listening on a bound socket.
+/// SYS_listen: Start listening on a bound socket.
 fn sys_socket_listen(fd: usize, backlog: usize) -> SyscallResult {
     match with_socket_fd(fd, SocketNode::handle)? {
         SocketHandle::Inet(id) => {
@@ -3476,7 +3136,7 @@ fn sys_socket_listen(fd: usize, backlog: usize) -> SyscallResult {
     }
 }
 
-/// SYS_SOCKET_CONNECT: Connect to a listening socket.
+/// SYS_connect: Connect to a listening socket.
 ///
 /// For Unix sockets, `addr_ptr` points to `struct sockaddr_un`:
 ///   `{ sa_family_t sun_family; char sun_path[108]; }`
@@ -3500,14 +3160,25 @@ fn sys_socket_connect(fd: usize, addr_ptr: usize, addr_len: usize) -> SyscallRes
     }
 }
 
-/// SYS_SOCKET_ACCEPT: Accept a pending connection and return an fd for it.
+/// SYS_accept: Accept a pending connection and return an fd for it.
 ///
 /// Linux ABI: `accept4(fd, addr, addrlen_ptr, flags)`.
 /// `addr_ptr` is optional (may be 0). When non-null, `addrlen_ptr` must
 /// point at the buffer size: at most that many bytes of the peer address
 /// (sockaddr_in, or an unnamed sockaddr_un for Unix sockets) are written,
 /// and its full length is stored back in `*addrlen_ptr`.
-fn sys_socket_accept(fd: usize, addr_ptr: usize, addrlen_ptr: usize) -> SyscallResult {
+/// accept and accept4: `flags` is accept4's SOCK_NONBLOCK | SOCK_CLOEXEC
+/// for the new descriptor (0 for accept); any other bit is EINVAL.
+fn sys_socket_accept(
+    fd: usize,
+    addr_ptr: usize,
+    addrlen_ptr: usize,
+    flags: usize,
+) -> SyscallResult {
+    let (base, fd_flags) = socket_type_flags(flags)?;
+    if base != 0 {
+        return Err(SyscallError::InvalidArgument);
+    }
     match with_socket_fd(fd, SocketNode::handle)? {
         SocketHandle::Inet(id) => {
             let (new_sock, remote) = crate::net::socket::with_socket(id, |s| s.accept())
@@ -3522,14 +3193,33 @@ fn sys_socket_accept(fd: usize, addr_ptr: usize, addrlen_ptr: usize) -> SyscallR
                 new_sock.protocol,
             )
             .map_err(|_| SyscallError::OutOfMemory)?;
-            let new_fd = install_socket(SocketHandle::Inet(new_id))?;
+            let new_fd = install_socket(SocketHandle::Inet(new_id), fd_flags)?;
             let peer = network_ext_syscalls::sockaddr_in_bytes(&remote);
             finish_accept(new_fd, addr_ptr, addrlen_ptr, &peer)
         }
         SocketHandle::Unix(id) => {
-            let (new_id, _connecting_id) =
-                crate::net::unix_socket::socket_accept(id).map_err(socket_err)?;
-            let new_fd = install_socket(SocketHandle::Unix(new_id))?;
+            // A blocking accept waits for a connection (it returned EAGAIN,
+            // so a server whose client had not connected yet failed); a
+            // signal ends the wait with EINTR. Every connect reports a
+            // readiness change.
+            let (new_id, _connecting_id) = loop {
+                match crate::net::unix_socket::socket_accept(id) {
+                    #[cfg(feature = "alloc")]
+                    Err(crate::error::KernelError::WouldBlock)
+                        if !fd_nonblocking(fd)?
+                            && crate::sched::dispatch::current_owner().is_some() =>
+                    {
+                        crate::sched::dispatch::wait_event(
+                            &crate::sched::dispatch::IO_EVENTS,
+                            None,
+                            || crate::net::unix_socket::accept_ready(id),
+                        )
+                        .map_err(|_| SyscallError::Interrupted)?;
+                    }
+                    r => break r.map_err(socket_err)?,
+                }
+            };
+            let new_fd = install_socket(SocketHandle::Unix(new_id), fd_flags)?;
             // The peer of an accepted Unix connection is reported unnamed:
             // sun_family only, length 2 (bound client paths are not
             // tracked).
@@ -3577,22 +3267,20 @@ fn copy_sockaddr_out(addr_ptr: usize, addrlen_ptr: usize, addr: &[u8]) -> Result
 
 /// SYS_SOCKET_SEND: Send data on a connected socket.
 fn sys_socket_send(fd: usize, buf_ptr: usize, buf_len: usize) -> SyscallResult {
-    validate_user_buffer(buf_ptr, buf_len)?;
-    // SAFETY: buf_ptr validated above as non-null, in user-space, within size
-    // limits.
-    let data = unsafe { core::slice::from_raw_parts(buf_ptr as *const u8, buf_len) };
-    with_socket_fd(fd, |s| s.send(data, None))?.map_err(socket_err)
+    let data = userspace::read_user_vec(buf_ptr, buf_len, userspace::MAX_USER_MESSAGE)?;
+    with_socket_fd(fd, |s| s.send(&data, None))?.map_err(socket_err)
 }
 
 /// SYS_SOCKET_RECV: Receive data from a socket.
 fn sys_socket_recv(fd: usize, buf_ptr: usize, buf_len: usize) -> SyscallResult {
     validate_user_buffer(buf_ptr, buf_len)?;
-    // SAFETY: buf_ptr validated above as non-null, in user-space, within size
-    // limits.
-    let buf = unsafe { core::slice::from_raw_parts_mut(buf_ptr as *mut u8, buf_len) };
-    with_socket_fd(fd, |s| s.recv(buf))?
+    // Received into a kernel buffer, then copied out fault-tolerantly (N-43).
+    let mut kbuf = alloc::vec![0u8; buf_len.min(userspace::USER_COPY_CHUNK)];
+    let n = with_socket_fd(fd, |s| s.recv(&mut kbuf))?
         .map(|(n, _)| n)
-        .map_err(socket_err)
+        .map_err(socket_err)?;
+    userspace::write_user_bytes(buf_ptr, &kbuf[..n])?;
+    Ok(n)
 }
 
 /// SYS_SOCKET_CLOSE: Close a socket fd. The socket itself closes when the
@@ -3609,24 +3297,24 @@ fn sys_socket_close(fd: usize) -> SyscallResult {
     result
 }
 
-/// The Unix socket type for `socketpair(domain, sock_type, protocol, sv)`:
-/// AF_UNIX only, protocol 0 or PF_UNIX (as Linux accepts), and the type
-/// mapped like socket() does. The type and protocol used to be ignored, so
-/// a SOCK_DGRAM pair silently got stream semantics (review of the v0.26.0
-/// stack, PR #10). SOCK_CLOEXEC / SOCK_NONBLOCK are masked off and not yet
-/// honoured, as for socket().
+/// The Unix socket type and descriptor flags for
+/// `socketpair(domain, sock_type, protocol, sv)`, checked as socket()
+/// checks them. Only AF_UNIX makes pairs: AF_INET is EOPNOTSUPP, as on
+/// Linux. The type and protocol used to be ignored, so a SOCK_DGRAM pair
+/// silently got stream semantics (review of the v0.26.0 stack, PR #10).
 fn socketpair_type(
     domain: usize,
     sock_type: usize,
     protocol: usize,
-) -> Result<crate::net::unix_socket::UnixSocketType, SyscallError> {
-    if domain != AF_UNIX || (protocol != 0 && protocol != AF_UNIX) {
-        return Err(SyscallError::InvalidArgument);
+) -> Result<(crate::net::unix_socket::UnixSocketType, SocketFdFlags), SyscallError> {
+    let (base_type, fd_flags) = socket_type_flags(sock_type)?;
+    match socket_kind(domain, base_type, protocol)? {
+        SocketKind::Unix(base_type) => Ok((to_unix_socket_type(base_type)?, fd_flags)),
+        SocketKind::Inet(_) => Err(SyscallError::NotSupported),
     }
-    to_unix_socket_type(sock_type)
 }
 
-/// SYS_SOCKET_PAIR: Create a connected socket pair.
+/// SYS_socketpair: Create a connected socket pair.
 ///
 /// # Arguments
 /// - domain: AF_UNIX only
@@ -3639,7 +3327,7 @@ fn sys_socket_pair(
     protocol: usize,
     result_ptr: usize,
 ) -> SyscallResult {
-    let utype = socketpair_type(domain, sock_type, protocol)?;
+    let (utype, fd_flags) = socketpair_type(domain, sock_type, protocol)?;
     // Linux writes int sv[2] (two i32 values = 8 bytes).
     validate_user_buffer(result_ptr, 2 * core::mem::size_of::<i32>())?;
 
@@ -3649,8 +3337,8 @@ fn sys_socket_pair(
 
     let (id_a, id_b) =
         crate::net::unix_socket::socketpair(utype, pid).map_err(|_| SyscallError::OutOfMemory)?;
-    let fd_a = install_socket(SocketHandle::Unix(id_a));
-    let fd_b = install_socket(SocketHandle::Unix(id_b));
+    let fd_a = install_socket(SocketHandle::Unix(id_a), fd_flags);
+    let fd_b = install_socket(SocketHandle::Unix(id_b), fd_flags);
     let (fd_a, fd_b) = match (fd_a, fd_b) {
         (Ok(a), Ok(b)) => (a, b),
         (Ok(a), Err(e)) | (Err(e), Ok(a)) => {
@@ -3676,12 +3364,52 @@ fn sys_socket_pair(
     Ok(0)
 }
 
+/// flock(fd, operation): a whole-file lock owned by the open file (dups and
+/// fork children share it; another open of the file does not), released at
+/// its last close. Without LOCK_NB a conflicting request sleeps until the
+/// lock is granted, or fails with EINTR if a signal must be handled first
+/// (N-207).
+fn sys_flock(fd: usize, operation: usize) -> SyscallResult {
+    use crate::fs::flock::{flock, LOCK_EX, LOCK_NB, LOCK_SH};
+    let process = crate::process::current_process().ok_or(SyscallError::InvalidState)?;
+    let file = process
+        .file_table
+        .lock()
+        .get(fd)
+        .ok_or(SyscallError::BadFileDescriptor)?;
+    drop(process);
+    let op = operation as u32;
+    let key = file.flock_key();
+    let owner = alloc::sync::Arc::as_ptr(&file) as u64;
+    // The open file notes that it uses flock before it can hold a lock,
+    // and never forgets it, so its last close (File::drop) always releases
+    // whatever it holds. Recording "held" after the fact raced with another
+    // thread's flock on the same file and could leave a lock no close
+    // would release.
+    if matches!(op & !LOCK_NB, LOCK_SH | LOCK_EX) {
+        file.flock_owner
+            .store(owner, core::sync::atomic::Ordering::Release);
+    }
+    let result = match flock(key, owner, op) {
+        #[cfg(feature = "alloc")]
+        Err(crate::error::KernelError::WouldBlock)
+            if op & LOCK_NB == 0 && crate::sched::dispatch::current_owner().is_some() =>
+        {
+            crate::sched::dispatch::wait_event(&crate::fs::flock::FLOCK_WAITERS, None, || {
+                flock(key, owner, op | LOCK_NB).is_ok()
+            })
+            .map_err(|_| SyscallError::Interrupted)
+        }
+        Err(crate::error::KernelError::WouldBlock) => Err(SyscallError::WouldBlock),
+        Err(_) => Err(SyscallError::InvalidArgument),
+        Ok(()) => Ok(()),
+    };
+    result.map(|()| 0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // --- Numbers the musl remap patch relies on (review of the v0.26.0
-    // stack, PR #8) ---
 
     #[test]
     fn missing_sixth_argument_is_an_error_not_zero() {
@@ -3708,18 +3436,57 @@ mod tests {
         assert!(parse_sockaddr_un(&[0u8; SOCKADDR_UN_LEN + 1]).is_err());
     }
 
+    /// The generated table (ADR 0009): every call decodes from its own
+    /// number, Linux calls are below 1024 and VeridianOS calls from 1024.
     #[test]
-    fn musl_remap_targets_have_the_expected_meaning() {
-        // tools/cross/musl-patches/0001-veridian-syscall-remap.patch.
-        // faccessat (Linux 269) is left unmapped: it must not be a native
-        // number, so it reaches the faccessat fallback. It used to be
-        // remapped to 347, native fchownat, which chowned the file.
-        assert!(Syscall::try_from(269).is_err());
-        assert!(linux_compat::is_faccessat(269));
-        assert_eq!(Syscall::try_from(347), Ok(Syscall::Fchownat)); // Linux 260
-        assert_eq!(Syscall::try_from(191), Ok(Syscall::FileFstatat)); // Linux 262
-        assert_eq!(Syscall::try_from(260), Ok(Syscall::GetRlimit)); // Linux 97
-        assert_eq!(Syscall::try_from(261), Ok(Syscall::SetRlimit)); // Linux 160
+    fn syscall_numbers_round_trip() {
+        for &call in numbers::ALL {
+            let n = call as usize;
+            assert_eq!(Syscall::try_from(n), Ok(call), "number {}", n);
+            assert_eq!(call.linux_name().is_some(), n < 1024, "{:?}", call);
+        }
+        assert!(Syscall::try_from(9999).is_err());
+        assert!(Syscall::try_from(1023).is_err());
+    }
+
+    /// Linux numbers that the old musl remap or the old Linux translation
+    /// table sent to the wrong call now reach the right one.
+    #[test]
+    fn linux_numbers_reach_the_linux_call() {
+        let cases: &[(usize, Syscall)] = &[
+            (60, Syscall::Exit),
+            (231, Syscall::ExitGroup),
+            (73, Syscall::Flock),
+            (74, Syscall::Fsync),
+            (76, Syscall::Truncate),
+            (77, Syscall::Ftruncate),
+            (97, Syscall::Getrlimit),
+            (110, Syscall::Getppid),
+            (121, Syscall::Getpgid),
+            (127, Syscall::RtSigpending),
+            (128, Syscall::RtSigtimedwait),
+            (129, Syscall::RtSigqueueinfo),
+            (297, Syscall::RtTgsigqueueinfo),
+            (130, Syscall::RtSigsuspend),
+            (131, Syscall::Sigaltstack),
+            (157, Syscall::Prctl),
+            (160, Syscall::Setrlimit),
+            (233, Syscall::EpollCtl),
+            (260, Syscall::Fchownat),
+            (262, Syscall::Newfstatat),
+            (269, Syscall::Faccessat),
+            (271, Syscall::Ppoll),
+            (281, Syscall::EpollPwait),
+            (288, Syscall::Accept4),
+            (291, Syscall::EpollCreate1),
+            (292, Syscall::Dup3),
+            (293, Syscall::Pipe2),
+            (294, Syscall::InotifyInit1),
+            (439, Syscall::Faccessat2),
+        ];
+        for &(n, call) in cases {
+            assert_eq!(Syscall::try_from(n), Ok(call), "Linux {}", n);
+        }
     }
 
     // --- SCM_RIGHTS control messages (Linux LP64 cmsghdr) ---
@@ -3804,6 +3571,207 @@ mod tests {
         );
     }
 
+    fn cmsg_hdr(len: u64, level: i32, kind: i32) -> [u8; CMSGHDR_SIZE] {
+        let mut h = [0u8; CMSGHDR_SIZE];
+        h.copy_from_slice(&cmsg(len, level, kind, &[]));
+        h
+    }
+
+    #[test]
+    fn scm_rights_fd_count_from_header() {
+        assert_eq!(scm_rights_fd_count(&cmsg_hdr(16 + 12, 1, 1), 64), Ok(3));
+        // A trailing partial fd does not count.
+        assert_eq!(scm_rights_fd_count(&cmsg_hdr(16 + 6, 1, 1), 64), Ok(1));
+        // cmsg_len exactly at the buffer end is fine, one past is not.
+        assert_eq!(scm_rights_fd_count(&cmsg_hdr(24, 1, 1), 24), Ok(2));
+        assert_eq!(
+            scm_rights_fd_count(&cmsg_hdr(25, 1, 1), 24),
+            Err(SyscallError::InvalidArgument)
+        );
+        assert_eq!(
+            scm_rights_fd_count(&cmsg_hdr(15, 1, 1), 64),
+            Err(SyscallError::InvalidArgument)
+        );
+        // Another level is skipped before its type is looked at.
+        assert_eq!(scm_rights_fd_count(&cmsg_hdr(20, 41, 99), 64), Ok(0));
+        assert_eq!(
+            scm_rights_fd_count(&cmsg_hdr(20, 1, 2), 64),
+            Err(SyscallError::InvalidArgument)
+        );
+        let max = (16 + 4 * SCM_MAX_FDS) as u64;
+        assert_eq!(
+            scm_rights_fd_count(&cmsg_hdr(max, 1, 1), 1024),
+            Ok(SCM_MAX_FDS)
+        );
+        assert_eq!(
+            scm_rights_fd_count(&cmsg_hdr(max + 4, 1, 1), 1024),
+            Err(SyscallError::InvalidArgument)
+        );
+        // A huge cmsg_len that the buffer length does not rule out is
+        // still EINVAL (too many fds), not an overflow.
+        assert_eq!(
+            scm_rights_fd_count(&cmsg_hdr(u64::MAX, 1, 1), usize::MAX),
+            Err(SyscallError::InvalidArgument)
+        );
+    }
+
+    #[test]
+    fn scm_fds_decode_native_ints() {
+        let mut raw = alloc::vec::Vec::new();
+        for fd in [0i32, 9, -1, i32::MAX] {
+            raw.extend_from_slice(&fd.to_ne_bytes());
+        }
+        raw.push(0xFF); // partial trailing fd
+        assert_eq!(decode_scm_fds(&raw), alloc::vec![0, 9, -1, i32::MAX]);
+        assert!(decode_scm_fds(&[]).is_empty());
+    }
+
+    #[test]
+    fn scm_rights_room_counts_whole_fds() {
+        assert_eq!(scm_rights_room(0x1000, 16), 0);
+        assert_eq!(scm_rights_room(0x1000, 19), 0);
+        assert_eq!(scm_rights_room(0x1000, 20), 1);
+        assert_eq!(scm_rights_room(0x1000, 16 + 4 * 5 + 3), 5);
+        // No buffer, or one shorter than a header.
+        assert_eq!(scm_rights_room(0, 64), 0);
+        assert_eq!(scm_rights_room(0x1000, 15), 0);
+        assert_eq!(scm_rights_room(0x1000, 0), 0);
+    }
+
+    /// What recvmsg writes is what sendmsg parses.
+    #[test]
+    fn scm_rights_cmsg_round_trips() {
+        let b = scm_rights_cmsg(&[3, 4, 10]);
+        assert_eq!(b.len(), 16 + 12);
+        assert_eq!(b, cmsg(28, 1, 1, &[3, 4, 10]));
+        assert_eq!(
+            parse_scm_rights(b.as_ptr() as usize, b.len()),
+            Ok(alloc::vec![3, 4, 10])
+        );
+        assert_eq!(scm_rights_cmsg(&[]), cmsg(16, 1, 1, &[]));
+    }
+
+    #[test]
+    fn write_scm_rights_sets_controllen_or_writes_nothing() {
+        // msghdr as 7 usize words; msg_controllen is word 5.
+        let mut hdr = [usize::MAX; 7];
+        let mut control = [0xEEu8; 32];
+        let hdr_ptr = hdr.as_mut_ptr() as usize;
+        assert!(write_scm_rights(
+            control.as_mut_ptr() as usize,
+            control.len(),
+            &[7, 8],
+            hdr_ptr
+        ));
+        assert_eq!(hdr[5], 24);
+        assert_eq!(&control[..24], &cmsg(24, 1, 1, &[7, 8])[..]);
+        assert!(control[24..].iter().all(|&b| b == 0xEE));
+
+        // Too small: nothing written, msg_controllen untouched.
+        let mut hdr = [usize::MAX; 7];
+        let mut control = [0xEEu8; 23];
+        assert!(!write_scm_rights(
+            control.as_mut_ptr() as usize,
+            control.len(),
+            &[7, 8],
+            hdr.as_mut_ptr() as usize
+        ));
+        assert_eq!(hdr[5], usize::MAX);
+        assert!(control.iter().all(|&b| b == 0xEE));
+    }
+
+    #[test]
+    fn scm_rights_rejects_short_control_buffer() {
+        let b = cmsg(16, 1, 1, &[]);
+        assert_eq!(
+            parse_scm_rights(b.as_ptr() as usize, CMSGHDR_SIZE - 1),
+            Err(SyscallError::InvalidArgument)
+        );
+    }
+
+    // --- iovec gather/scatter ---
+
+    fn iovs(entries: &[[usize; 2]]) -> impl FnMut(usize) -> Result<[usize; 2], SyscallError> + '_ {
+        move |i| entries.get(i).copied().ok_or(SyscallError::InvalidPointer)
+    }
+
+    #[test]
+    fn iovs_total_len_sums_and_saturates() {
+        assert_eq!(iovs_total_len(0, iovs(&[])), Ok(0));
+        assert_eq!(
+            iovs_total_len(3, iovs(&[[1, 4], [0, 7], [2, 0]])),
+            Ok(11),
+            "a null base still counts, as before"
+        );
+        assert_eq!(
+            iovs_total_len(2, iovs(&[[1, usize::MAX], [2, 5]])),
+            Ok(usize::MAX)
+        );
+        // An unreadable entry fails the call.
+        assert_eq!(
+            iovs_total_len(2, iovs(&[[1, 4]])),
+            Err(SyscallError::InvalidPointer)
+        );
+    }
+
+    #[test]
+    fn scatter_iovs_fills_in_order_and_skips_empty_entries() {
+        let data: alloc::vec::Vec<u8> = (1..=10).collect();
+        let mut writes = alloc::vec::Vec::new();
+        let n = scatter_iovs(
+            &data,
+            4,
+            iovs(&[[0x100, 3], [0, 5], [0x200, 0], [0x300, 100]]),
+            |base, bytes| {
+                writes.push((base, alloc::vec::Vec::from(bytes)));
+                Ok(())
+            },
+        );
+        assert_eq!(n, Ok(10));
+        assert_eq!(
+            writes,
+            alloc::vec![
+                (0x100, alloc::vec![1, 2, 3]),
+                (0x300, alloc::vec![4, 5, 6, 7, 8, 9, 10]),
+            ]
+        );
+    }
+
+    #[test]
+    fn scatter_iovs_stops_reading_entries_once_data_is_placed() {
+        // Entry 1 is unreadable but never needed: 2 bytes fit in entry 0.
+        let mut out = alloc::vec::Vec::new();
+        assert_eq!(
+            scatter_iovs(&[9, 8], 5, iovs(&[[0x100, 4]]), |_, b| {
+                out.extend_from_slice(b);
+                Ok(())
+            }),
+            Ok(2)
+        );
+        assert_eq!(out, [9, 8]);
+        // Nothing received: no entry is read at all.
+        assert_eq!(scatter_iovs(&[], 5, iovs(&[]), |_, _| Ok(())), Ok(0));
+        // More data than room: the excess is dropped.
+        assert_eq!(
+            scatter_iovs(&[1, 2, 3], 1, iovs(&[[0x100, 2]]), |_, _| Ok(())),
+            Ok(2)
+        );
+    }
+
+    #[test]
+    fn scatter_iovs_propagates_errors() {
+        assert_eq!(
+            scatter_iovs(&[1, 2, 3], 2, iovs(&[[0x100, 1]]), |_, _| Ok(())),
+            Err(SyscallError::InvalidPointer)
+        );
+        assert_eq!(
+            scatter_iovs(&[1], 1, iovs(&[[0x100, 1]]), |_, _| Err(
+                SyscallError::UnmappedMemory
+            )),
+            Err(SyscallError::UnmappedMemory)
+        );
+    }
+
     /// recvmsg reports dropped fds with MSG_CTRUNC (review of the v0.26.0
     /// stack, PR #10).
     #[test]
@@ -3815,22 +3783,27 @@ mod tests {
         assert_eq!(recvmsg_flags(1, 0), MSG_CTRUNC);
     }
 
-    /// socketpair honours the type and accepts protocol 0 or PF_UNIX only
+    /// socketpair honours the type, the descriptor flags and the protocol
     /// (review of the v0.26.0 stack, PR #10).
     #[test]
     fn socketpair_type_maps_type_and_protocol() {
         use crate::net::unix_socket::UnixSocketType;
+        let none = SocketFdFlags::default();
+        let cloexec = SocketFdFlags {
+            cloexec: true,
+            nonblock: false,
+        };
         assert_eq!(
             socketpair_type(AF_UNIX, SOCK_STREAM, 0),
-            Ok(UnixSocketType::Stream)
+            Ok((UnixSocketType::Stream, none))
         );
         assert_eq!(
-            socketpair_type(AF_UNIX, SOCK_DGRAM | 0x80000, 0),
-            Ok(UnixSocketType::Datagram)
+            socketpair_type(AF_UNIX, SOCK_DGRAM | SOCK_CLOEXEC, 0),
+            Ok((UnixSocketType::Datagram, cloexec))
         );
         assert_eq!(
             socketpair_type(AF_UNIX, SOCK_DGRAM, AF_UNIX),
-            Ok(UnixSocketType::Datagram)
+            Ok((UnixSocketType::Datagram, none))
         );
         assert_eq!(
             socketpair_type(AF_UNIX, 7, 0),
@@ -3838,11 +3811,61 @@ mod tests {
         );
         assert_eq!(
             socketpair_type(AF_UNIX, SOCK_STREAM, 6),
+            Err(SyscallError::ProtocolNotSupported)
+        );
+        assert_eq!(
+            socketpair_type(AF_INET, SOCK_STREAM, 0),
+            Err(SyscallError::NotSupported)
+        );
+        assert_eq!(
+            socketpair_type(99, SOCK_STREAM, 0),
+            Err(SyscallError::AddressFamilyNotSupported)
+        );
+    }
+
+    /// socket() keeps SOCK_NONBLOCK / SOCK_CLOEXEC instead of masking them
+    /// off, rejects other type bits, and checks the protocol.
+    #[test]
+    fn socket_type_flags_and_protocol_are_checked() {
+        assert_eq!(
+            socket_type_flags(SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC),
+            Ok((
+                SOCK_STREAM,
+                SocketFdFlags {
+                    cloexec: true,
+                    nonblock: true
+                }
+            ))
+        );
+        assert_eq!(
+            socket_type_flags(SOCK_STREAM | 0x100),
             Err(SyscallError::InvalidArgument)
         );
         assert_eq!(
-            socketpair_type(2, SOCK_STREAM, 0),
-            Err(SyscallError::InvalidArgument)
+            socket_kind(AF_INET, SOCK_STREAM, 6),
+            Ok(SocketKind::Inet(SOCK_STREAM))
+        );
+        assert_eq!(
+            socket_kind(AF_INET, SOCK_DGRAM, 17),
+            Ok(SocketKind::Inet(SOCK_DGRAM))
+        );
+        assert_eq!(
+            socket_kind(AF_INET, SOCK_DGRAM, 6),
+            Err(SyscallError::ProtocolNotSupported)
+        );
+        assert_eq!(
+            socket_kind(AF_UNIX, SOCK_STREAM, 0),
+            Ok(SocketKind::Unix(SOCK_STREAM))
+        );
+        assert_eq!(
+            socket_kind(10, SOCK_STREAM, 0),
+            Err(SyscallError::AddressFamilyNotSupported)
+        );
+        // accept4 takes only the two descriptor flags.
+        assert_eq!(socket_type_flags(SOCK_CLOEXEC).map(|(b, _)| b), Ok(0));
+        assert_eq!(
+            socket_type_flags(SOCK_STREAM).map(|(b, _)| b),
+            Ok(SOCK_STREAM)
         );
     }
 
@@ -3912,6 +3935,282 @@ mod tests {
         assert_eq!(scm_fd_index(7), Ok(7));
     }
 
+    // --- IPC message size tiers (IPC-ARCH-02) ---
+
+    #[test]
+    fn message_tier_boundaries() {
+        use crate::ipc::message::MAX_BUFFERED_PAYLOAD;
+        assert_eq!(SMALL_MESSAGE_BYTES, 48);
+        assert_eq!(message_tier(0), Err(SyscallError::InvalidArgument));
+        assert_eq!(message_tier(1), Ok(MessageTier::Small));
+        assert_eq!(message_tier(SMALL_MESSAGE_BYTES), Ok(MessageTier::Small));
+        assert_eq!(
+            message_tier(SMALL_MESSAGE_BYTES + 1),
+            Ok(MessageTier::Buffered)
+        );
+        assert_eq!(
+            message_tier(MAX_BUFFERED_PAYLOAD),
+            Ok(MessageTier::Buffered)
+        );
+        assert_eq!(
+            message_tier(MAX_BUFFERED_PAYLOAD + 1),
+            Err(SyscallError::InvalidArgument)
+        );
+        assert_eq!(message_tier(usize::MAX), Err(SyscallError::InvalidArgument));
+    }
+
+    fn small_bytes(msg: &SmallMessage) -> [u8; SMALL_MESSAGE_BYTES] {
+        let mut b = [0u8; SMALL_MESSAGE_BYTES];
+        b.copy_from_slice(pod_bytes(msg));
+        b
+    }
+
+    #[test]
+    fn small_message_capability_is_replaced_only_when_given() {
+        let sent = SmallMessage::new(0x1111, 7)
+            .with_flags(3)
+            .with_data(0, 0xAA)
+            .with_data(3, 0xDD);
+        let bytes = small_bytes(&sent);
+        assert_eq!(small_message_from_bytes(&bytes, None), sent);
+        let got = small_message_from_bytes(&bytes, Some(0x9999));
+        assert_eq!(got.capability, 0x9999);
+        assert_eq!((got.opcode, got.flags, got.data), (7, 3, sent.data));
+    }
+
+    #[test]
+    fn message_from_user_picks_the_tier_and_pads_short_messages() {
+        // A short small message is zero-padded.
+        let raw = 0x0102_0304_0506_0708u64.to_ne_bytes();
+        match message_from_user(Some(5), raw.as_ptr() as usize, raw.len()) {
+            Ok(Message::Small(m)) => {
+                assert_eq!(m.capability, 5, "the validated capability wins");
+                assert_eq!((m.opcode, m.flags, m.data), (0, 0, [0; 4]));
+            }
+            _ => panic!("expected a small message"),
+        }
+        let full = small_bytes(&SmallMessage::new(1, 2).with_data(1, 9));
+        match message_from_user(None, full.as_ptr() as usize, full.len()) {
+            Ok(Message::Small(m)) => assert_eq!(m, SmallMessage::new(1, 2).with_data(1, 9)),
+            _ => panic!("expected a small message"),
+        }
+        // One byte more is buffered, with the capability in the header.
+        let payload = [0x5Au8; SMALL_MESSAGE_BYTES + 1];
+        match message_from_user(Some(77), payload.as_ptr() as usize, payload.len()) {
+            Ok(Message::Buffered(m)) => {
+                assert_eq!(m.payload, payload);
+                assert_eq!(m.header.capability, 77);
+                assert_eq!(m.header.total_size, payload.len() as u64);
+            }
+            _ => panic!("expected a buffered message"),
+        }
+        assert!(matches!(
+            message_from_user(None, payload.as_ptr() as usize, 0),
+            Err(SyscallError::InvalidArgument)
+        ));
+    }
+
+    #[test]
+    fn message_to_user_copies_and_truncates() {
+        use crate::ipc::message::{BufferedMessage, MessageHeader};
+        const HEADER: usize = core::mem::size_of::<MessageHeader>();
+
+        let small = SmallMessage::new(4, 5).with_data(2, 6);
+        let mut out = [0u8; SMALL_MESSAGE_BYTES + 4];
+        assert_eq!(
+            message_to_user(&Message::Small(small), out.as_mut_ptr() as usize, out.len()),
+            Ok(SMALL_MESSAGE_BYTES)
+        );
+        assert_eq!(&out[..SMALL_MESSAGE_BYTES], &small_bytes(&small)[..]);
+        // A small message never goes into a shorter buffer.
+        assert_eq!(
+            message_to_user(&Message::Small(small), out.as_mut_ptr() as usize, 47),
+            Err(SyscallError::InvalidArgument)
+        );
+
+        let payload: alloc::vec::Vec<u8> = (0..100).collect();
+        let msg = Message::Buffered(BufferedMessage::new(8, 0, payload.clone()).unwrap());
+        // Room for the header and 10 payload bytes: the full length is
+        // reported so the receiver sees what it missed.
+        let mut out = [0xEEu8; HEADER + 12];
+        assert_eq!(
+            message_to_user(&msg, out.as_mut_ptr() as usize, HEADER + 10),
+            Ok(HEADER + 100)
+        );
+        assert_eq!(&out[HEADER..HEADER + 10], &payload[..10]);
+        assert_eq!(&out[HEADER + 10..], &[0xEE, 0xEE]);
+        assert_eq!(u64::from_ne_bytes(out[..8].try_into().unwrap()), 8);
+        assert_eq!(
+            message_to_user(&msg, out.as_mut_ptr() as usize, HEADER - 1),
+            Err(SyscallError::InvalidArgument)
+        );
+    }
+
+    // --- epoll_event layout ---
+
+    #[test]
+    fn epoll_event_is_packed_and_round_trips() {
+        use crate::net::epoll::EpollEvent;
+        assert_eq!(EPOLL_EVENT_BYTES, 12);
+        let mut raw = [0u8; 12];
+        raw[..4].copy_from_slice(&0x8000_0011u32.to_ne_bytes());
+        raw[4..].copy_from_slice(&0xDEAD_BEEF_0000_0042u64.to_ne_bytes());
+        let ev = epoll_event_from_bytes(&raw);
+        let (events, data) = (ev.events, ev.data);
+        assert_eq!((events, data), (0x8000_0011, 0xDEAD_BEEF_0000_0042));
+
+        let second = EpollEvent { events: 1, data: 2 };
+        let bytes = epoll_events_to_bytes(&[ev, second]);
+        assert_eq!(bytes.len(), 24);
+        assert_eq!(&bytes[..12], &raw);
+        assert_eq!(&bytes[12..16], &1u32.to_ne_bytes());
+        assert_eq!(&bytes[16..], &2u64.to_ne_bytes());
+        assert!(epoll_events_to_bytes(&[]).is_empty());
+    }
+
+    /// W-16: the byte count for maxevents must not wrap.
+    #[test]
+    fn epoll_buffer_len_bounds_maxevents() {
+        let cap = i32::MAX as usize / 12;
+        assert_eq!(epoll_events_buffer_len(1), Ok(12));
+        assert_eq!(epoll_events_buffer_len(cap), Ok(cap * 12));
+        assert_eq!(
+            epoll_events_buffer_len(cap + 1),
+            Err(SyscallError::InvalidArgument)
+        );
+        assert_eq!(
+            epoll_events_buffer_len(0),
+            Err(SyscallError::InvalidArgument)
+        );
+        assert_eq!(
+            epoll_events_buffer_len(usize::MAX),
+            Err(SyscallError::InvalidArgument)
+        );
+    }
+
+    #[test]
+    fn inet_addr_is_address_then_big_endian_port() {
+        let a = inet_addr_from_bytes(&[10, 0, 2, 15, 0x1F, 0x90]);
+        assert_eq!(
+            a,
+            crate::net::SocketAddr::v4(crate::net::Ipv4Address([10, 0, 2, 15]), 8080)
+        );
+        let raw = [192u8, 168, 1, 1, 0, 53];
+        assert_eq!(
+            read_inet_addr(raw.as_ptr() as usize),
+            Ok(inet_addr_from_bytes(&raw))
+        );
+        assert!(read_inet_addr(0).is_err());
+    }
+
+    // --- getdents64 records ---
+
+    fn dir_entry(name: &str, node_type: crate::fs::NodeType, inode: u64) -> crate::fs::DirEntry {
+        crate::fs::DirEntry {
+            name: alloc::string::String::from(name),
+            node_type,
+            inode,
+        }
+    }
+
+    /// (d_ino, d_off, d_reclen, d_type, name) of each record in `buf`.
+    fn parse_dirents(buf: &[u8]) -> alloc::vec::Vec<(u64, u64, usize, u8, alloc::string::String)> {
+        let mut out = alloc::vec::Vec::new();
+        let mut at = 0;
+        while at < buf.len() {
+            let rec = &buf[at..];
+            let reclen = u16::from_ne_bytes([rec[16], rec[17]]) as usize;
+            let name_end = rec[19..reclen].iter().position(|&b| b == 0).unwrap();
+            out.push((
+                u64::from_ne_bytes(rec[..8].try_into().unwrap()),
+                u64::from_ne_bytes(rec[8..16].try_into().unwrap()),
+                reclen,
+                rec[18],
+                alloc::string::String::from_utf8(rec[19..19 + name_end].to_vec()).unwrap(),
+            ));
+            at += reclen;
+        }
+        out
+    }
+
+    #[test]
+    fn dirent64_types_match_linux() {
+        use crate::fs::NodeType;
+        assert_eq!(dirent64_type(NodeType::Pipe), 1);
+        assert_eq!(dirent64_type(NodeType::CharDevice), 2);
+        assert_eq!(dirent64_type(NodeType::Directory), 4);
+        assert_eq!(dirent64_type(NodeType::BlockDevice), 6);
+        assert_eq!(dirent64_type(NodeType::File), 8);
+        assert_eq!(dirent64_type(NodeType::Symlink), 10);
+        assert_eq!(dirent64_type(NodeType::Socket), 12);
+    }
+
+    #[test]
+    fn dirents64_are_aligned_terminated_and_bounded() {
+        use crate::fs::NodeType;
+        let entries = [
+            dir_entry(".", NodeType::Directory, 0),
+            dir_entry("hello.txt", NodeType::File, 42),
+            dir_entry("abcd", NodeType::Symlink, 7),
+        ];
+        // 19 + 1 + 1 = 21 -> 24; 19 + 9 + 1 = 29 -> 32; 19 + 4 + 1 = 24.
+        let (buf, next) = build_dirents64(&entries, 0, 4096).unwrap();
+        assert_eq!(next, 3);
+        assert_eq!(buf.len(), 24 + 32 + 24);
+        let recs = parse_dirents(&buf);
+        assert_eq!(recs.len(), 3);
+        // A missing inode number becomes index + 1.
+        assert_eq!((recs[0].0, recs[0].2, recs[0].3), (1, 24, 4));
+        assert_eq!(recs[0].4, ".");
+        assert_eq!((recs[1].0, recs[1].2, recs[1].3), (42, 32, 8));
+        assert_eq!(recs[1].4, "hello.txt");
+        assert_eq!((recs[2].0, recs[2].3), (7, 10));
+        // Padding after the name is zeroed.
+        assert!(buf[24 + 19 + 9..56].iter().all(|&b| b == 0));
+
+        // A buffer that ends inside a record stops before it.
+        let (buf, next) = build_dirents64(&entries, 0, 24 + 31).unwrap();
+        assert_eq!((buf.len(), next), (24, 1));
+        // Resuming at an index continues from there.
+        let (buf, next) = build_dirents64(&entries, 2, 24).unwrap();
+        assert_eq!((buf.len(), next), (24, 3));
+        assert_eq!(parse_dirents(&buf)[0].4, "abcd");
+        // Nothing left is end of directory; no room for even one record is
+        // EINVAL, as on Linux, not a short directory.
+        assert_eq!(build_dirents64(&entries, 3, 4096), Ok((alloc::vec![], 3)));
+        assert_eq!(build_dirents64(&entries, 7, 4096), Ok((alloc::vec![], 7)));
+        assert_eq!(
+            build_dirents64(&entries, 0, 23),
+            Err(SyscallError::InvalidArgument)
+        );
+        assert_eq!(
+            build_dirents64(&entries, 1, 31),
+            Err(SyscallError::InvalidArgument)
+        );
+    }
+
+    /// d_off is the position to seek to for the next entry. A directory
+    /// fd's position is an entry index, and musl's telldir/seekdir pass
+    /// d_off straight to lseek, so it must be an index, not a byte offset
+    /// into this call's buffer.
+    #[test]
+    fn dirent64_d_off_is_the_next_entry_index() {
+        use crate::fs::NodeType;
+        let entries = [
+            dir_entry("a", NodeType::File, 0),
+            dir_entry("bb", NodeType::File, 0),
+            dir_entry("ccc", NodeType::File, 0),
+        ];
+        let (buf, _) = build_dirents64(&entries, 0, 4096).unwrap();
+        let offs: alloc::vec::Vec<u64> = parse_dirents(&buf).iter().map(|r| r.1).collect();
+        assert_eq!(offs, [1, 2, 3]);
+        // Resuming at the d_off of the first record yields the second.
+        let (buf, _) = build_dirents64(&entries, offs[0] as usize, 4096).unwrap();
+        let recs = parse_dirents(&buf);
+        assert_eq!(recs[0].4, "bb");
+        assert_eq!(recs[0].1, 2);
+    }
+
     // --- Rate limiter (SYS-PERF-01) ---
 
     const HZ: u64 = 1_000_000_000;
@@ -3965,83 +4264,102 @@ mod tests {
         assert!(limiter.tokens.load(Ordering::Relaxed) >= SyscallRateLimiter::MAX_TOKENS - 1);
     }
 
+    #[test]
+    fn rate_limiter_shards_share_the_global_budget() {
+        let shard = SyscallRateLimiter::shard();
+        let n = SyscallRateLimiter::SHARDS;
+        // The shares never add up to more than the global budget.
+        assert!(shard.rate * n <= SyscallRateLimiter::REFILL_PER_SEC);
+        assert!(shard.burst * n <= SyscallRateLimiter::MAX_TOKENS);
+        // A shard refills at its own rate and stops at its own burst.
+        let s = SyscallRateLimiter::with(0, shard.rate, shard.burst);
+        s.check_at(0, HZ);
+        s.check_at(HZ / 1_000, HZ); // 1 ms
+        let got = s.tokens.load(Ordering::Relaxed) + 1;
+        assert_eq!(got, shard.rate / 1_000);
+        s.check_at(10 * HZ, HZ);
+        assert!(s.tokens.load(Ordering::Relaxed) <= shard.burst);
+        // One CPU's share still exceeds what it can issue (~0.5M calls/s).
+        assert!(shard.rate > 1_000_000);
+    }
+
     // --- Syscall TryFrom tests ---
 
     #[test]
     fn test_syscall_try_from_ipc_send() {
-        let result = Syscall::try_from(0);
+        let result = Syscall::try_from(1024);
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), Syscall::IpcSend);
     }
 
     #[test]
     fn test_syscall_try_from_ipc_receive() {
-        assert_eq!(Syscall::try_from(1).unwrap(), Syscall::IpcReceive);
+        assert_eq!(Syscall::try_from(1025).unwrap(), Syscall::IpcReceive);
     }
 
     #[test]
     fn test_syscall_try_from_ipc_call() {
-        assert_eq!(Syscall::try_from(2).unwrap(), Syscall::IpcCall);
+        assert_eq!(Syscall::try_from(1026).unwrap(), Syscall::IpcCall);
     }
 
     #[test]
     fn test_syscall_try_from_ipc_reply() {
-        assert_eq!(Syscall::try_from(3).unwrap(), Syscall::IpcReply);
+        assert_eq!(Syscall::try_from(1027).unwrap(), Syscall::IpcReply);
     }
 
     #[test]
     fn test_syscall_try_from_process_yield() {
-        assert_eq!(Syscall::try_from(10).unwrap(), Syscall::ProcessYield);
+        assert_eq!(Syscall::try_from(24).unwrap(), Syscall::SchedYield);
     }
 
     #[test]
     fn test_syscall_try_from_process_exit() {
-        assert_eq!(Syscall::try_from(11).unwrap(), Syscall::ProcessExit);
+        assert_eq!(Syscall::try_from(231).unwrap(), Syscall::ExitGroup);
     }
 
     #[test]
     fn test_syscall_try_from_process_fork() {
-        assert_eq!(Syscall::try_from(12).unwrap(), Syscall::ProcessFork);
+        assert_eq!(Syscall::try_from(57).unwrap(), Syscall::Fork);
     }
 
     #[test]
     fn test_syscall_try_from_process_getpid() {
-        assert_eq!(Syscall::try_from(15).unwrap(), Syscall::ProcessGetPid);
+        assert_eq!(Syscall::try_from(39).unwrap(), Syscall::Getpid);
     }
 
     #[test]
     fn test_syscall_try_from_memory_map() {
-        assert_eq!(Syscall::try_from(20).unwrap(), Syscall::MemoryMap);
+        assert_eq!(Syscall::try_from(9).unwrap(), Syscall::Mmap);
     }
 
     #[test]
     fn test_syscall_try_from_capability_grant() {
-        assert_eq!(Syscall::try_from(30).unwrap(), Syscall::CapabilityGrant);
+        assert_eq!(Syscall::try_from(1054).unwrap(), Syscall::CapabilityGrant);
     }
 
     #[test]
     fn test_syscall_try_from_thread_create() {
-        assert_eq!(Syscall::try_from(40).unwrap(), Syscall::ThreadCreate);
+        assert_eq!(Syscall::try_from(1064).unwrap(), Syscall::ThreadCreate);
     }
 
     #[test]
     fn test_syscall_try_from_file_open() {
-        assert_eq!(Syscall::try_from(50).unwrap(), Syscall::FileOpen);
+        assert_eq!(Syscall::try_from(2).unwrap(), Syscall::Open);
     }
 
     #[test]
     fn test_syscall_try_from_dir_mkdir() {
-        assert_eq!(Syscall::try_from(60).unwrap(), Syscall::DirMkdir);
+        assert_eq!(Syscall::try_from(83).unwrap(), Syscall::Mkdir);
     }
 
     #[test]
     fn test_syscall_try_from_fs_mount() {
-        assert_eq!(Syscall::try_from(70).unwrap(), Syscall::FsMount);
+        assert_eq!(Syscall::try_from(1094).unwrap(), Syscall::FsMount);
     }
 
     #[test]
     fn test_syscall_try_from_kernel_get_info() {
-        assert_eq!(Syscall::try_from(80).unwrap(), Syscall::KernelGetInfo);
+        assert_eq!(Syscall::try_from(1104).unwrap(), Syscall::KernelGetInfo);
     }
 
     #[test]
@@ -4051,12 +4369,12 @@ mod tests {
 
     #[test]
     fn test_syscall_try_from_gap_value() {
-        // Values between defined syscalls should fail (e.g., 8 is between IPC and
-        // Process)
-        assert!(Syscall::try_from(8).is_err());
-        assert!(Syscall::try_from(9).is_err());
-        assert!(Syscall::try_from(19).is_err());
-        assert!(Syscall::try_from(25).is_err());
+        // Linux numbers with no call yet, and the gap below the private
+        // range, are not decoded.
+        assert!(Syscall::try_from(26).is_err()); // msync
+        assert!(Syscall::try_from(155).is_err()); // pivot_root
+        assert!(Syscall::try_from(500).is_err());
+        assert!(Syscall::try_from(1023).is_err());
     }
 
     // --- Syscall round-trip tests ---
@@ -4064,14 +4382,14 @@ mod tests {
     #[test]
     fn test_all_ipc_syscalls() {
         let ipc_syscalls = [
-            (0, Syscall::IpcSend),
-            (1, Syscall::IpcReceive),
-            (2, Syscall::IpcCall),
-            (3, Syscall::IpcReply),
-            (4, Syscall::IpcCreateEndpoint),
-            (5, Syscall::IpcBindEndpoint),
-            (6, Syscall::IpcShareMemory),
-            (7, Syscall::IpcMapMemory),
+            (1024, Syscall::IpcSend),
+            (1025, Syscall::IpcReceive),
+            (1026, Syscall::IpcCall),
+            (1027, Syscall::IpcReply),
+            (1028, Syscall::IpcCreateEndpoint),
+            (1029, Syscall::IpcBindEndpoint),
+            (1030, Syscall::IpcShareMemory),
+            (1031, Syscall::IpcMapMemory),
         ];
 
         for (num, expected) in &ipc_syscalls {
@@ -4084,15 +4402,15 @@ mod tests {
     #[test]
     fn test_all_process_syscalls() {
         let proc_syscalls = [
-            (10, Syscall::ProcessYield),
-            (11, Syscall::ProcessExit),
-            (12, Syscall::ProcessFork),
-            (13, Syscall::ProcessExec),
-            (14, Syscall::ProcessWait),
-            (15, Syscall::ProcessGetPid),
-            (16, Syscall::ProcessGetPPid),
-            (17, Syscall::ProcessSetPriority),
-            (18, Syscall::ProcessGetPriority),
+            (24, Syscall::SchedYield),
+            (231, Syscall::ExitGroup),
+            (57, Syscall::Fork),
+            (59, Syscall::Execve),
+            (61, Syscall::Wait4),
+            (39, Syscall::Getpid),
+            (110, Syscall::Getppid),
+            (1041, Syscall::ProcessSetPriority),
+            (1042, Syscall::ProcessGetPriority),
         ];
 
         for (num, expected) in &proc_syscalls {
@@ -4103,12 +4421,12 @@ mod tests {
     #[test]
     fn test_all_thread_syscalls() {
         let thread_syscalls = [
-            (40, Syscall::ThreadCreate),
-            (41, Syscall::ThreadExit),
-            (42, Syscall::ThreadJoin),
-            (43, Syscall::ThreadGetTid),
-            (44, Syscall::ThreadSetAffinity),
-            (45, Syscall::ThreadGetAffinity),
+            (1064, Syscall::ThreadCreate),
+            (60, Syscall::Exit),
+            (1066, Syscall::ThreadJoin),
+            (186, Syscall::Gettid),
+            (1068, Syscall::ThreadSetAffinity),
+            (1069, Syscall::ThreadGetAffinity),
         ];
 
         for (num, expected) in &thread_syscalls {
@@ -4119,13 +4437,13 @@ mod tests {
     #[test]
     fn test_all_file_syscalls() {
         let file_syscalls = [
-            (50, Syscall::FileOpen),
-            (51, Syscall::FileClose),
-            (52, Syscall::FileRead),
-            (53, Syscall::FileWrite),
-            (54, Syscall::FileSeek),
-            (55, Syscall::FileStat),
-            (56, Syscall::FileTruncate),
+            (2, Syscall::Open),
+            (3, Syscall::Close),
+            (0, Syscall::Read),
+            (1, Syscall::Write),
+            (8, Syscall::Lseek),
+            (5, Syscall::Fstat),
+            (77, Syscall::Ftruncate),
         ];
 
         for (num, expected) in &file_syscalls {
@@ -4136,11 +4454,11 @@ mod tests {
     #[test]
     fn test_all_dir_syscalls() {
         let dir_syscalls = [
-            (60, Syscall::DirMkdir),
-            (61, Syscall::DirRmdir),
-            (62, Syscall::DirOpendir),
-            (63, Syscall::DirReaddir),
-            (64, Syscall::DirClosedir),
+            (83, Syscall::Mkdir),
+            (84, Syscall::Rmdir),
+            (1086, Syscall::DirOpendir),
+            (1087, Syscall::DirReaddir),
+            (1088, Syscall::DirClosedir),
         ];
 
         for (num, expected) in &dir_syscalls {

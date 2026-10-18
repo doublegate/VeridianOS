@@ -8,12 +8,11 @@
 //! - Atomic re-check of expected value before sleeping
 //! - Bitset-aware wake filtering for `FUTEX_WAIT_BITSET` / `FUTEX_WAKE` callers
 
-use alloc::{collections::BTreeMap, vec::Vec};
+use alloc::vec::Vec;
 
 use spin::Mutex;
 
 use crate::{
-    arch::timer::get_ticks,
     process, sched,
     syscall::{userspace::validate_user_ptr, SyscallError},
 };
@@ -49,49 +48,20 @@ const FUTEX_WAKE_OP: u32 = 5;
 
 /// Special bitset value that matches any waiter, equivalent to plain
 /// `FUTEX_WAKE`.  Linux defines this as `FUTEX_BITSET_MATCH_ANY`.
-const FUTEX_WAIT_BITSET_MATCH_ANY: u32 = 0xFFFF_FFFF;
+pub(crate) const FUTEX_WAIT_BITSET_MATCH_ANY: u32 = 0xFFFF_FFFF;
 
 // Futex wait queue keyed by (pid, uaddr)
-type FutexKey = (u64, usize);
-
-struct FutexWaiter {
-    task: core::ptr::NonNull<sched::task::Task>,
-    priority: u8,
-    /// Bitset supplied by the waiting thread.  A waker only unblocks this
-    /// waiter when `wake_bitset & waiter.bitset != 0`.
-    bitset: u32,
-}
-
-// SAFETY: FutexWaiter holds a NonNull<Task> that is only accessed while the
-// futex bucket lock is held or by the scheduler after the waiter has been
-// dequeued.  Send/Sync are required so the BTreeMap can live in a static
-// Mutex, which is safe because all accesses are serialised by the spinlock.
-unsafe impl Send for FutexWaiter {}
-unsafe impl Sync for FutexWaiter {}
-
-/// Waiters for one hash bucket.
-type FutexBucket = Mutex<BTreeMap<FutexKey, Vec<FutexWaiter>>>;
+pub(super) type FutexKey = (u64, usize);
 
 /// Number of futex hash buckets (power of two).
 const FUTEX_BUCKETS: usize = 256;
 
-/// Futex waiters, hashed by (pid, uaddr) into independently locked,
-/// cache-line-aligned buckets (SYS-PERF-02): waits and wakes on unrelated
-/// futexes no longer serialize on one global lock.
-static FUTEX_TABLE: [crate::mm::cache_aligned::CacheAligned<FutexBucket>; FUTEX_BUCKETS] =
-    [const { crate::mm::cache_aligned::CacheAligned::new(Mutex::new(BTreeMap::new())) };
-        FUTEX_BUCKETS];
-
-/// Bucket index for a key: multiplicative hash of the word index and pid.
+/// Bucket index for a key: multiplicative hash of the word index and pid
+/// (SYS-PERF-02: waits and wakes on unrelated futexes do not share a lock).
 fn bucket_index(key: FutexKey) -> usize {
     let (pid, uaddr) = key;
     let h = ((uaddr as u64) >> 2) ^ pid.wrapping_mul(0x9E37_79B9_7F4A_7C15);
     (h.wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 56) as usize % FUTEX_BUCKETS
-}
-
-/// The bucket holding `key`'s waiters.
-fn bucket(key: FutexKey) -> &'static FutexBucket {
-    &FUTEX_TABLE[bucket_index(key)]
 }
 
 /// Perform a `FUTEX_WAIT` or `FUTEX_WAIT_BITSET` operation.
@@ -150,7 +120,8 @@ pub fn sys_futex_wait(
         FUTEX_WAIT_BITSET_MATCH_ANY
     };
 
-    // Optional timeout: expect a u64 ticks value
+    // Optional timeout: the native ABI passes a u64 of milliseconds,
+    // relative, or absolute since boot with bit 8 of `op`.
     let deadline = if timeout_ptr != 0 {
         if aux != 0 && op_base != FUTEX_WAIT_BITSET && aux != core::mem::size_of::<u64>() {
             // For plain WAIT the caller must supply sizeof(u64) to document
@@ -158,107 +129,85 @@ pub fn sys_futex_wait(
             return Err(SyscallError::InvalidArgument);
         }
         validate_user_ptr(timeout_ptr as *const u64, core::mem::size_of::<u64>())?;
-        // SAFETY: `timeout_ptr` has been validated as a properly-aligned,
-        // mapped, user-space pointer to a u64.  Volatile read is used because
-        // the caller could theoretically share this memory with another thread.
-        let rel = unsafe { core::ptr::read_volatile(timeout_ptr as *const u64) };
-        // If op uses absolute time (FUTEX_CLOCK_REALTIME bit), treat rel as absolute
-        // ticks
+        let ms: u64 = super::userspace::read_user(timeout_ptr)?;
+        let ns = ms.saturating_mul(1_000_000);
         if (op & 0x100) != 0 {
-            Some(rel)
+            Some(ns)
         } else {
-            Some(get_ticks().saturating_add(rel))
+            Some(crate::timer::monotonic_ns().saturating_add(ns))
         }
     } else {
         None
     };
+    futex_wait_until(uaddr, expected, deadline, bitset_mask)
+}
 
-    let pid = process::current_process()
-        .ok_or(SyscallError::InvalidState)?
-        .pid
-        .0;
-    let key = (pid, uaddr);
+/// How a Linux futex timeout is meant.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FutexTimeout {
+    /// Relative to now (FUTEX_WAIT, whatever clock flag it has).
+    Relative,
+    /// An absolute time on CLOCK_MONOTONIC (FUTEX_WAIT_BITSET).
+    Monotonic,
+    /// An absolute time on CLOCK_REALTIME (FUTEX_WAIT_BITSET with
+    /// FUTEX_CLOCK_REALTIME: musl's timed mutex, condition and semaphore
+    /// waits).
+    Realtime,
+}
 
-    // Check if we are in boot-launched mode (no scheduler task for this thread).
-    // In the boot path, user processes run directly via iretq from
-    // enter_usermode_returnable, not through the scheduler.  The scheduler has
-    // no "current task" for us, so we cannot block via the normal
-    // task-state-based path.  Instead, cooperatively dispatch child threads
-    // from the scheduler's ready queue and spin-poll the futex word.
-    let has_sched_task = {
-        let sched = crate::sched::scheduler::current_scheduler();
-        let slock = sched.lock();
-        slock.current().is_some()
-    };
+/// A Linux futex timeout: the `struct timespec` at `ptr` (none if null),
+/// read as `kind` says (Linux's futex_init_timeout). Returns the
+/// `monotonic_ns` deadline (N-104: these used to be read as raw ticks).
+pub(crate) fn linux_timeout(ptr: usize, kind: FutexTimeout) -> Result<Option<u64>, SyscallError> {
+    if ptr == 0 {
+        return Ok(None);
+    }
+    let [sec, nsec]: [i64; 2] = super::userspace::read_user(ptr)?;
+    if sec < 0 || !(0..1_000_000_000).contains(&nsec) {
+        return Err(SyscallError::InvalidArgument);
+    }
+    let ns = (sec as u64)
+        .saturating_mul(1_000_000_000)
+        .saturating_add(nsec as u64);
+    Ok(Some(match kind {
+        FutexTimeout::Relative => crate::timer::monotonic_ns().saturating_add(ns),
+        FutexTimeout::Monotonic => ns,
+        FutexTimeout::Realtime => {
+            crate::timer::realtime::monotonic_at(ns.min(i64::MAX as u64) as i64)
+        }
+    }))
+}
 
-    if !has_sched_task {
-        return boot_futex_spin(uaddr, expected, deadline);
+/// Wait on the futex word at `uaddr` while it holds `expected`, until
+/// woken (by a wake whose bitset meets `bitset`), until `deadline`
+/// (`monotonic_ns`; ETIMEDOUT), or until a signal must be acted on (EINTR).
+pub(crate) fn futex_wait_until(
+    uaddr: usize,
+    expected: u32,
+    deadline: Option<u64>,
+    bitset_mask: u32,
+) -> Result<isize, SyscallError> {
+    if uaddr == 0 || uaddr & 0x3 != 0 || bitset_mask == 0 {
+        return Err(SyscallError::InvalidArgument);
+    }
+    validate_user_ptr(uaddr as *const u32, core::mem::size_of::<u32>())?;
+    if crate::syscall::userspace::read_user::<u32>(uaddr)? != expected {
+        return Err(SyscallError::WouldBlock);
     }
 
-    let task_ptr = {
-        // The value check and the enqueue happen under the bucket lock, which
-        // every waker of this futex also takes: a wake that changes the word
-        // either happens before the check (we return WouldBlock) or finds us
-        // queued. Checking before taking the lock lost wakeups in between.
-        let mut table = bucket(key).lock();
-        if crate::syscall::userspace::read_user::<u32>(uaddr)? != expected {
-            return Err(SyscallError::WouldBlock);
-        }
-        let sched = crate::sched::scheduler::current_scheduler();
-        let slock = sched.lock();
-        let task = slock.current().ok_or(SyscallError::InvalidState)?;
-        // SAFETY: We hold the scheduler lock, which guarantees exclusive
-        // access to the current task's state field.  The pointer is valid
-        // because it was obtained from the scheduler's active task list.
-        let prio = unsafe {
-            (*task.as_ptr()).state = process::ProcessState::Blocked;
-            (*task.as_ptr()).priority as u8
-        };
-        drop(slock);
-        table.entry(key).or_default().push(FutexWaiter {
-            task,
-            priority: prio,
-            bitset: bitset_mask,
-        });
-        task
-    };
-
-    // reschedule
-    sched::SCHEDULER.lock().schedule();
-
-    // Helper to remove this waiter from the queue (used on timeout/interruption)
-    let remove_self = |reason: SyscallError| -> Result<isize, SyscallError> {
-        let mut table = bucket(key).lock();
-        if let Some(waiters) = table.get_mut(&key) {
-            waiters.retain(|w| w.task != task_ptr);
-            if waiters.is_empty() {
-                table.remove(&key);
-            }
-        }
-        Err(reason)
-    };
-
-    // If awoken, distinguish signals vs normal wake/timeout. Pending signals
-    // are tracked at the process level.
-    if let Some(proc) = process::current_process() {
-        if proc
-            .pending_signals
-            .load(core::sync::atomic::Ordering::Acquire)
-            != 0
-        {
-            return remove_self(SyscallError::Interrupted);
-        }
+    // A thread running as its own dispatcher task (stage D2) sleeps on a
+    // keyed wait (see `dwait`). The old paths below would either block on
+    // the old scheduler, which never runs, or run sibling threads nested
+    // from their saved context.
+    #[cfg(feature = "alloc")]
+    if crate::sched::dispatch::current_owner().is_some() {
+        return dwait(uaddr, expected, deadline, bitset_mask);
     }
 
-    // Check timeout after wake
-    if let Some(deadline) = deadline {
-        let now = get_ticks();
-        if now >= deadline {
-            return remove_self(SyscallError::WouldBlock);
-        }
-    }
-
-    Ok(0)
+    // Not a dispatched thread: no user thread runs otherwise (the old
+    // scheduler's futex table and the nested boot dispatch went in sprint
+    // D4, N-279).
+    Err(SyscallError::InvalidState)
 }
 
 /// Perform a `FUTEX_WAKE` operation, waking up to `num_wake` threads
@@ -298,54 +247,15 @@ pub fn sys_futex_wake(
         wake_bitset as u32
     };
 
-    let pid = process::current_process()
-        .ok_or(SyscallError::InvalidState)?
-        .pid
-        .0;
-    let key = (pid, uaddr);
-    let mut woken = 0;
-
-    let mut to_wake: Vec<core::ptr::NonNull<sched::task::Task>> = Vec::new();
-    {
-        let mut table = bucket(key).lock();
-        if let Some(waiters) = table.get_mut(&key) {
-            // Sort by priority descending, then FIFO
-            waiters.sort_by(|a, b| b.priority.cmp(&a.priority));
-
-            // Drain eligible waiters whose bitset overlaps with wake_bits
-            let mut i = 0;
-            while i < waiters.len() && woken < num_wake {
-                if waiters[i].bitset & wake_bits != 0 {
-                    let w = waiters.remove(i);
-                    to_wake.push(w.task);
-                    woken += 1;
-                } else {
-                    i += 1;
-                }
-            }
-            if waiters.is_empty() {
-                table.remove(&key);
-            }
-        }
+    #[cfg(feature = "alloc")]
+    if crate::sched::dispatch::current_owner().is_some() {
+        return dwake(uaddr, num_wake, wake_bits);
     }
 
-    // Wake tasks outside the table lock to minimise lock hold time
-    if woken > 0 {
-        let scheduler = crate::sched::scheduler::current_scheduler();
-        let slock = scheduler.lock();
-        for task_ptr in to_wake {
-            // SAFETY: `task_ptr` was obtained from the futex wait queue and
-            // is guaranteed to be valid because blocked tasks are not freed
-            // while they reside on a wait queue.  We transition the task
-            // from Blocked -> Ready and re-enqueue it in the scheduler.
-            unsafe {
-                (*task_ptr.as_ptr()).state = process::ProcessState::Ready;
-            }
-            slock.enqueue(task_ptr);
-        }
-    }
-
-    Ok(woken as isize)
+    // Not a dispatched thread: no user thread runs otherwise (the old
+    // scheduler's futex table and the nested boot dispatch went in sprint
+    // D4, N-279).
+    Err(SyscallError::InvalidState)
 }
 
 /// Top-level futex dispatcher matching the Linux `futex(2)` parameter order.
@@ -484,378 +394,213 @@ pub fn sys_futex_requeue(
     validate_user_ptr(uaddr as *const u32, core::mem::size_of::<u32>())?;
     validate_user_ptr(uaddr2 as *const u32, core::mem::size_of::<u32>())?;
 
-    let pid = process::current_process()
-        .ok_or(SyscallError::InvalidState)?
-        .pid
-        .0;
-    let key1 = (pid, uaddr);
-    let key2 = (pid, uaddr2);
-
-    let mut woken = 0;
-    let mut moved = 0;
-    let mut to_wake: Vec<core::ptr::NonNull<sched::task::Task>> = Vec::new();
-    let mut to_move: Vec<FutexWaiter> = Vec::new();
-
-    {
-        // Both buckets are held while waiters move, taken in index order so
-        // two requeues in opposite directions cannot deadlock.
-        let (i1, i2) = (bucket_index(key1), bucket_index(key2));
-        let (mut first, mut second) = match i1.cmp(&i2) {
-            core::cmp::Ordering::Less => (FUTEX_TABLE[i1].lock(), Some(FUTEX_TABLE[i2].lock())),
-            core::cmp::Ordering::Greater => {
-                let hi = FUTEX_TABLE[i2].lock();
-                let lo = FUTEX_TABLE[i1].lock();
-                (lo, Some(hi))
-            }
-            core::cmp::Ordering::Equal => (FUTEX_TABLE[i1].lock(), None),
-        };
-        let src = &mut *first;
-        if let Some(waiters) = src.get_mut(&key1) {
-            waiters.sort_by(|a, b| b.priority.cmp(&a.priority));
-            let wc = core::cmp::min(wake_count, waiters.len());
-            for w in waiters.drain(..wc) {
-                to_wake.push(w.task);
-                woken += 1;
-            }
-            let rc = core::cmp::min(requeue_count, waiters.len());
-            to_move.extend(waiters.drain(..rc));
-            moved = to_move.len();
-            if waiters.is_empty() {
-                src.remove(&key1);
-            }
-        }
-
-        if moved > 0 {
-            let dst = match second.as_mut() {
-                Some(g) => &mut **g,
-                None => &mut *first,
-            };
-            dst.entry(key2).or_default().extend(to_move);
-        }
+    #[cfg(feature = "alloc")]
+    if crate::sched::dispatch::current_owner().is_some() {
+        return drequeue(uaddr, wake_count, uaddr2, requeue_count, None);
     }
 
-    if woken > 0 {
-        let scheduler = crate::sched::scheduler::current_scheduler();
-        let slock = scheduler.lock();
-        for task_ptr in to_wake {
-            // SAFETY: `task_ptr` was obtained from the futex wait queue and
-            // is valid because blocked tasks are not freed while on a queue.
-            // We transition Blocked -> Ready and re-enqueue.
-            unsafe {
-                (*task_ptr.as_ptr()).state = process::ProcessState::Ready;
-            }
-            slock.enqueue(task_ptr);
-        }
-    }
-
-    Ok((woken + moved) as isize)
+    // Not a dispatched thread: no user thread runs otherwise (the old
+    // scheduler's futex table and the nested boot dispatch went in sprint
+    // D4, N-279).
+    Err(SyscallError::InvalidState)
 }
 
 // ============================================================================
 // Boot-path futex spin for processes launched outside the scheduler
 // ============================================================================
 
-/// Cooperative futex wait for boot-launched processes.
-///
-/// When the parent thread has no scheduler task (running via direct iretq from
-/// the boot path), we cannot block through the normal scheduler.  Instead, we
-/// spin-poll the futex word while dispatching child threads from the scheduler
-/// ready queue.
-///
-/// Each iteration:
-/// 1. Re-read the futex word -- if changed, return `Ok(0)`.
-/// 2. Dequeue a ready child task from the scheduler.
-/// 3. Set the `BOOT_CLONE_YIELD_PENDING` flag so `syscall_handler` yields after
-///    the child's next syscall.
-/// 4. Dispatch the child via `enter_forked_child_returnable` (blocks until
-///    `boot_return_to_kernel` is called from the child's syscall path).
-/// 5. Repeat.
-///
-/// Timeout handling: if a deadline is given and expires, return `WouldBlock`.
-#[cfg(target_arch = "x86_64")]
-fn boot_futex_spin(
+/// A dispatched thread waiting on a futex. It sleeps on its own wait
+/// queue until a waker sets `woken`; FUTEX_REQUEUE moves the entry to
+/// another key without touching the sleeper.
+#[cfg(feature = "alloc")]
+struct DWaiter {
+    key: FutexKey,
+    bitset: u32,
+    woken: alloc::sync::Arc<core::sync::atomic::AtomicBool>,
+    wq: alloc::sync::Arc<sched::dispatch::WaitQueue>,
+}
+
+/// Dispatched futex waiters, hashed by key like `FUTEX_TABLE`.
+#[cfg(feature = "alloc")]
+static DFUTEX: [crate::mm::cache_aligned::CacheAligned<Mutex<Vec<DWaiter>>>; FUTEX_BUCKETS] =
+    [const { crate::mm::cache_aligned::CacheAligned::new(Mutex::new(Vec::new())) }; FUTEX_BUCKETS];
+
+/// Key of the futex word at `uaddr` for the calling process: the physical
+/// address when the word is in `MAP_SHARED` memory, so waiters in every
+/// process mapping it meet (N-114), otherwise (pid, address).
+#[cfg(feature = "alloc")]
+pub(super) fn futex_key(uaddr: usize) -> Result<FutexKey, SyscallError> {
+    /// The "pid" of keys for shared memory.
+    const SHARED: u64 = u64::MAX;
+    let proc = process::current_process().ok_or(SyscallError::InvalidState)?;
+    let shared = proc
+        .memory_space
+        .lock()
+        .shared_phys_addr(crate::mm::VirtualAddress(uaddr as u64));
+    Ok(match shared {
+        Some(phys) => (SHARED, phys as usize),
+        None => (proc.pid.0, uaddr),
+    })
+}
+
+/// Take up to `n` waiters on `key` whose bitset meets `bitset` out of
+/// `list`, marking them woken; returns their queues.
+#[cfg(feature = "alloc")]
+fn take_waiters(
+    list: &mut Vec<DWaiter>,
+    key: FutexKey,
+    bitset: u32,
+    n: usize,
+) -> Vec<alloc::sync::Arc<sched::dispatch::WaitQueue>> {
+    let mut woken = Vec::new();
+    let mut i = 0;
+    while i < list.len() && woken.len() < n {
+        if list[i].key == key && list[i].bitset & bitset != 0 {
+            let w = list.remove(i);
+            w.woken.store(true, core::sync::atomic::Ordering::Release);
+            woken.push(w.wq);
+        } else {
+            i += 1;
+        }
+    }
+    woken
+}
+
+/// FUTEX_WAIT for a dispatched thread: queued under the bucket lock after
+/// re-checking the word (a wake that changed it either came first, and we
+/// return EAGAIN, or finds us queued), then asleep until woken, the
+/// deadline (ETIMEDOUT) or a signal (EINTR). It used to poll the word.
+#[cfg(feature = "alloc")]
+fn dwait(
     uaddr: usize,
     expected: u32,
     deadline: Option<u64>,
+    bitset: u32,
 ) -> Result<isize, SyscallError> {
-    use core::sync::atomic::Ordering;
+    use alloc::sync::Arc;
+    use core::sync::atomic::{AtomicBool, Ordering};
 
-    use crate::arch::x86_64::usermode::{
-        ForkChildRegs, BOOT_CLONE_YIELD_PENDING, BOOT_RETURN_CR3, BOOT_RETURN_RSP,
-        BOOT_STACK_CANARY,
-    };
+    use sched::dispatch::{self, WaitError};
 
-    const MAX_SPINS: u32 = 100_000;
-    // After this many consecutive iterations with no dispatchable child tasks,
-    // assume all children are dead and stop waiting.
-    const MAX_EMPTY_ITERS: u32 = 50;
-
-    // Cache parent identity before the loop so we can skip the parent's own
-    // task when dequeuing from the scheduler.
-    let parent_pid = crate::process::current_process()
-        .map(|p| p.pid)
-        .unwrap_or(crate::process::ProcessId(0));
-    let parent_tid = crate::process::current_thread()
-        .map(|t| t.tid)
-        .unwrap_or(crate::process::thread::ThreadId(0));
-
-    let mut empty_iters: u32 = 0;
-
-    for _ in 0..MAX_SPINS {
-        // Re-check the futex word
-        let cur = unsafe { core::ptr::read_volatile(uaddr as *const u32) };
-        if cur != expected {
-            return Ok(0);
+    let key = futex_key(uaddr)?;
+    let woken = Arc::new(AtomicBool::new(false));
+    let wq = Arc::new(dispatch::WaitQueue::new());
+    {
+        let mut list = DFUTEX[bucket_index(key)].lock();
+        if super::userspace::read_user::<u32>(uaddr)? != expected {
+            return Err(SyscallError::WouldBlock);
         }
-
-        // Check timeout
-        if let Some(dl) = deadline {
-            if get_ticks() >= dl {
-                return Err(SyscallError::WouldBlock);
-            }
-        }
-
-        // Try to dequeue a ready child task and dispatch it.
-        // Only the parent's own clone() threads qualify: another process's
-        // task or a kernel task would otherwise run in ring 3 under the
-        // parent's boot context (review of the v0.26.0 stack, PR #14).
-        let child_task = {
-            let sched = crate::sched::scheduler::current_scheduler();
-            let slock = sched.lock();
-            let mut found = None;
-            // Drain a bounded number of tasks looking for a sibling thread;
-            // every task that does not qualify goes back on the queue.
-            let mut skipped = alloc::vec::Vec::new();
-            for _ in 0..BOOT_DISPATCH_SCAN {
-                match slock.pick_next() {
-                    Some(t) => {
-                        // SAFETY: a task handed out by the scheduler is valid
-                        // while we hold it; we only read its ids.
-                        let (pid, tid) = unsafe { (t.as_ref().pid, t.as_ref().tid) };
-                        if is_boot_dispatchable(pid, tid, parent_pid, parent_tid) {
-                            found = Some(t);
-                            break;
-                        }
-                        skipped.push(t);
-                    }
-                    None => break,
-                }
-            }
-            // Re-enqueue any skipped tasks
-            for t in skipped {
-                slock.enqueue(t);
-            }
-            found
-        };
-
-        let child_task = match child_task {
-            Some(t) => {
-                empty_iters = 0;
-                t
-            }
-            None => {
-                empty_iters += 1;
-                if empty_iters >= MAX_EMPTY_ITERS {
-                    // No dispatchable child tasks for many iterations.
-                    // All children likely exited/crashed. Return WouldBlock
-                    // so the parent can continue.
-                    return Err(SyscallError::WouldBlock);
-                }
-                // Halt until the APIC timer fires (advances UPTIME_MS)
-                // without letting it preempt this syscall (W-13).
-                crate::sched::wait_for_interrupt_in_syscall();
-                continue;
-            }
-        };
-
-        // Extract the child's thread context for user-mode dispatch.
-        // `child_task` is already off the run queue, so every path that does
-        // not dispatch it must put it back, or it is lost for good.
-        let requeue = |t| {
-            let sched = crate::sched::scheduler::current_scheduler();
-            sched.lock().enqueue(t);
-        };
-        let (regs, child_pid, child_tid, cr3) = unsafe {
-            let task_ref = child_task.as_ref();
-
-            // Find the child's ThreadContext via the process table.
-            let proc = match crate::process::get_process(task_ref.pid) {
-                Some(p) => p,
-                None => {
-                    requeue(child_task);
-                    continue;
-                }
-            };
-
-            let thread = match proc.get_thread(task_ref.tid) {
-                Some(t) => t,
-                None => {
-                    requeue(child_task);
-                    continue;
-                }
-            };
-
-            let ctx = thread.context.lock();
-            let r = ForkChildRegs {
-                rip: ctx.rip,
-                rsp: ctx.rsp,
-                rflags: ctx.rflags | 0x200, // Ensure IF is set
-                rax: ctx.rax,
-                rbx: ctx.rbx,
-                rcx: ctx.rcx,
-                rdx: ctx.rdx,
-                rsi: ctx.rsi,
-                rdi: ctx.rdi,
-                rbp: ctx.rbp,
-                r8: ctx.r8,
-                r9: ctx.r9,
-                r10: ctx.r10,
-                r11: ctx.r11,
-                r12: ctx.r12,
-                r13: ctx.r13,
-                r14: ctx.r14,
-                r15: ctx.r15,
-                fs_base: ctx.tls_base,
-            };
-            drop(ctx);
-
-            let cr3 = proc.memory_space.lock().get_page_table();
-            (r, task_ref.pid, task_ref.tid, cr3)
-        };
-
-        if cr3 == 0 {
-            requeue(child_task);
-            continue;
-        }
-
-        // Save parent's boot return context
-        let saved_rsp = BOOT_RETURN_RSP.load(Ordering::SeqCst);
-        let saved_cr3 = BOOT_RETURN_CR3.load(Ordering::SeqCst);
-        let saved_canary = BOOT_STACK_CANARY.load(Ordering::SeqCst);
-
-        let per_cpu = crate::arch::x86_64::syscall::per_cpu_data_ptr();
-        let saved_kernel_rsp = unsafe { (*per_cpu).kernel_rsp };
-        let saved_user_rsp = unsafe { (*per_cpu).user_rsp };
-
-        // Save parent's FS_BASE.  boot_return_to_kernel zeroes FS via
-        // `mov fs, ax`, which clears FS_BASE.  We restore it after the
-        // child dispatch so the parent's TLS remains correct.
-        let saved_fs_base: u64 = unsafe {
-            let lo: u32;
-            let hi: u32;
-            core::arch::asm!(
-                "rdmsr",
-                in("ecx") 0xC0000100u32,
-                out("eax") lo,
-                out("edx") hi,
-                options(nomem, nostack),
-            );
-            ((hi as u64) << 32) | (lo as u64)
-        };
-
-        // Set child as boot-current
-        crate::process::set_boot_current(child_pid, child_tid);
-
-        // Set the yield flag so syscall_handler returns to us after the
-        // child's next syscall.
-        BOOT_CLONE_YIELD_PENDING.store(true, Ordering::Release);
-
-        // Rebalance swapgs: we are in syscall context (GS.base=per_cpu_data).
-        // enter_forked_child_returnable expects KernelGsBase=per_cpu_data.
-        unsafe { core::arch::asm!("swapgs", options(nomem, nostack)) };
-
-        let kernel_rsp_ptr = per_cpu as u64;
-
-        // Dispatch child to user mode (blocks until boot_return_to_kernel)
-        unsafe {
-            crate::arch::x86_64::usermode::enter_forked_child_returnable(
-                &regs,
-                cr3,
-                kernel_rsp_ptr,
-            );
-        }
-
-        // Child yielded back. Restore GS state.
-        unsafe { core::arch::asm!("swapgs", options(nomem, nostack)) };
-
-        // Restore parent's FS_BASE (zeroed by boot_return_to_kernel)
-        unsafe {
-            core::arch::asm!(
-                "wrmsr",
-                in("ecx") 0xC0000100u32,
-                in("eax") saved_fs_base as u32,
-                in("edx") (saved_fs_base >> 32) as u32,
-                options(nomem, nostack),
-            );
-        }
-
-        // Restore parent's per-CPU state
-        unsafe {
-            (*per_cpu).kernel_rsp = saved_kernel_rsp;
-            (*per_cpu).user_rsp = saved_user_rsp;
-        }
-
-        // Restore parent as boot-current
-        crate::process::set_boot_current(parent_pid, parent_tid);
-
-        // Restore boot return context
-        BOOT_RETURN_RSP.store(saved_rsp, Ordering::SeqCst);
-        BOOT_RETURN_CR3.store(saved_cr3, Ordering::SeqCst);
-        BOOT_STACK_CANARY.store(saved_canary, Ordering::SeqCst);
-
-        // Clear yield flag
-        BOOT_CLONE_YIELD_PENDING.store(false, Ordering::Release);
-
-        // Re-enqueue the child task if it didn't exit.
-        // The child's ThreadContext was updated by the yield path in
-        // syscall_handler, so the next dispatch will resume the child
-        // at the correct instruction. If the child called sys_exit,
-        // the process/thread is Zombie -- don't re-enqueue.
-        let child_exited = crate::process::get_process(child_pid)
-            .map(|p| {
-                p.get_state() == crate::process::pcb::ProcessState::Zombie
-                    || p.get_thread(child_tid)
-                        .map(|t| t.get_state() == crate::process::thread::ThreadState::Zombie)
-                        .unwrap_or(true)
-            })
-            .unwrap_or(true);
-
-        if !child_exited {
-            let sched = crate::sched::scheduler::current_scheduler();
-            let slock = sched.lock();
-            slock.enqueue(child_task);
+        list.push(DWaiter {
+            key,
+            bitset,
+            woken: woken.clone(),
+            wq: wq.clone(),
+        });
+    }
+    let result = dispatch::wait_event(&wq, deadline, || woken.load(Ordering::Acquire));
+    if result.is_ok() {
+        return Ok(0);
+    }
+    // Timed out or interrupted: leave the queue -- wherever a requeue put
+    // us -- unless a waker took us first, which counts as woken.
+    let mut found = false;
+    for b in DFUTEX.iter() {
+        let mut list = b.lock();
+        if let Some(i) = list.iter().position(|w| Arc::ptr_eq(&w.woken, &woken)) {
+            list.remove(i);
+            found = true;
+            break;
         }
     }
-
-    // Exhausted spins without the futex word changing
-    Err(SyscallError::WouldBlock)
+    if !found && woken.load(Ordering::Acquire) {
+        return Ok(0);
+    }
+    Err(match result {
+        Err(WaitError::TimedOut) => SyscallError::TimedOut,
+        _ => SyscallError::Interrupted,
+    })
 }
 
-/// How many ready tasks boot dispatch examines per spin when looking for one
-/// of the parent's threads.
-#[cfg(target_arch = "x86_64")]
-const BOOT_DISPATCH_SCAN: usize = 64;
-
-/// Whether boot dispatch may run the task (`pid`, `tid`) while the boot-path
-/// parent (`parent_pid`, `parent_tid`) waits: only the parent's own sibling
-/// threads, never the parent thread itself.
-#[cfg(any(target_arch = "x86_64", test))]
-fn is_boot_dispatchable(
-    pid: crate::process::ProcessId,
-    tid: crate::process::thread::ThreadId,
-    parent_pid: crate::process::ProcessId,
-    parent_tid: crate::process::thread::ThreadId,
-) -> bool {
-    pid == parent_pid && tid != parent_tid
+/// FUTEX_WAKE for dispatched waiters.
+#[cfg(feature = "alloc")]
+fn dwake(uaddr: usize, n: usize, bitset: u32) -> Result<isize, SyscallError> {
+    let key = futex_key(uaddr)?;
+    let queues = take_waiters(&mut DFUTEX[bucket_index(key)].lock(), key, bitset, n);
+    for q in &queues {
+        q.wake_all();
+    }
+    Ok(queues.len() as isize)
 }
 
-/// Stub for non-x86_64 architectures.
-#[cfg(not(target_arch = "x86_64"))]
-fn boot_futex_spin(
-    _uaddr: usize,
-    _expected: u32,
-    _deadline: Option<u64>,
+/// FUTEX_REQUEUE / FUTEX_CMP_REQUEUE for dispatched waiters: wake up to
+/// `nwake` on `uaddr` and move up to `nmove` more to `uaddr2`. With `cmp`,
+/// nothing happens (EAGAIN) unless `*uaddr` still equals it.
+#[cfg(feature = "alloc")]
+fn drequeue(
+    uaddr: usize,
+    nwake: usize,
+    uaddr2: usize,
+    nmove: usize,
+    cmp: Option<u32>,
 ) -> Result<isize, SyscallError> {
+    let (k1, k2) = (futex_key(uaddr)?, futex_key(uaddr2)?);
+    let (i1, i2) = (bucket_index(k1), bucket_index(k2));
+    // Both buckets in index order, so opposite requeues cannot deadlock.
+    let (mut lo, mut hi) = match i1.cmp(&i2) {
+        core::cmp::Ordering::Less => (DFUTEX[i1].lock(), Some(DFUTEX[i2].lock())),
+        core::cmp::Ordering::Greater => {
+            let hi = DFUTEX[i2].lock();
+            (DFUTEX[i1].lock(), Some(hi))
+        }
+        core::cmp::Ordering::Equal => (DFUTEX[i1].lock(), None),
+    };
+    if let Some(v) = cmp {
+        if super::userspace::read_user::<u32>(uaddr)? != v {
+            return Err(SyscallError::WouldBlock);
+        }
+    }
+    let woken = take_waiters(&mut lo, k1, FUTEX_WAIT_BITSET_MATCH_ANY, nwake);
+    let mut moved = 0usize;
+    let mut i = 0;
+    while i < lo.len() && moved < nmove {
+        if lo[i].key == k1 {
+            let mut w = lo.remove(i);
+            w.key = k2;
+            match hi.as_mut() {
+                Some(h) => h.push(w),
+                None => lo.push(w),
+            }
+            moved += 1;
+        } else {
+            i += 1;
+        }
+    }
+    drop(hi);
+    drop(lo);
+    for q in &woken {
+        q.wake_all();
+    }
+    Ok((woken.len() + moved) as isize)
+}
+
+/// FUTEX_CMP_REQUEUE: requeue only if `*uaddr == cmp` (EAGAIN otherwise).
+pub fn sys_futex_cmp_requeue(
+    uaddr: usize,
+    nwake: usize,
+    uaddr2: usize,
+    nmove: usize,
+    cmp: u32,
+) -> Result<isize, SyscallError> {
+    if uaddr == 0 || uaddr & 0x3 != 0 || uaddr2 == 0 || uaddr2 & 0x3 != 0 {
+        return Err(SyscallError::InvalidArgument);
+    }
+    validate_user_ptr(uaddr as *const u32, core::mem::size_of::<u32>())?;
+    validate_user_ptr(uaddr2 as *const u32, core::mem::size_of::<u32>())?;
+    #[cfg(feature = "alloc")]
+    if crate::sched::dispatch::current_owner().is_some() {
+        return drequeue(uaddr, nwake, uaddr2, nmove, Some(cmp));
+    }
+    let _ = (nwake, nmove, cmp);
     Err(SyscallError::InvalidState)
 }
 
@@ -898,26 +643,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn boot_dispatch_takes_only_the_parents_sibling_threads() {
-        use crate::process::{thread::ThreadId, ProcessId};
-        let (ppid, ptid) = (ProcessId(5), ThreadId(5));
-        // A sibling thread of the parent qualifies.
-        assert!(is_boot_dispatchable(ProcessId(5), ThreadId(6), ppid, ptid));
-        // The parent thread itself does not.
-        assert!(!is_boot_dispatchable(ProcessId(5), ThreadId(5), ppid, ptid));
-        // Another process's thread, or a kernel task, does not.
-        assert!(!is_boot_dispatchable(ProcessId(7), ThreadId(8), ppid, ptid));
-        assert!(!is_boot_dispatchable(ProcessId(0), ThreadId(1), ppid, ptid));
-    }
-
-    /// Linux's FUTEX_OP() macro.
-    const fn futex_op(op: u32, oparg: u32, cmp: u32, cmparg: u32) -> u32 {
-        ((op & 0xF) << 28) | ((cmp & 0xF) << 24) | ((oparg & 0xFFF) << 12) | (cmparg & 0xFFF)
-    }
-
-    /// SYS-CONC-01: the fields used to be read from the wrong bits (op and
-    /// cmp swapped, oparg and cmparg swapped).
-    #[test]
     fn futex_keys_spread_over_buckets() {
         // Adjacent futex words of one process (a typical mutex array) and the
         // same address in different processes land in many buckets.
@@ -935,6 +660,13 @@ mod tests {
         assert_eq!(bucket_index((3, 0x1234)), bucket_index((3, 0x1234)));
     }
 
+    /// Linux's FUTEX_OP() macro.
+    const fn futex_op(op: u32, oparg: u32, cmp: u32, cmparg: u32) -> u32 {
+        ((op & 0xF) << 28) | ((cmp & 0xF) << 24) | ((oparg & 0xFFF) << 12) | (cmparg & 0xFFF)
+    }
+
+    /// SYS-CONC-01: the fields used to be read from the wrong bits (op and
+    /// cmp swapped, oparg and cmparg swapped).
     #[test]
     fn wake_op_decodes_linux_layout() {
         // *uaddr2 += 5; wake uaddr2 if old > 1.

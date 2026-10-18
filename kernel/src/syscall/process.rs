@@ -3,15 +3,12 @@
 //! Implements system calls for process and thread management including
 //! creation, termination, and state management.
 
-use alloc::format;
-use core::slice;
-
 use super::{validate_user_buffer, validate_user_string_ptr, SyscallError, SyscallResult};
 #[cfg(target_arch = "x86_64")]
 use crate::arch::context::ThreadContext;
 use crate::process::{
-    create_thread, current_process, exec_process, exit::exit_process, exit_thread, fork_process,
-    get_thread_tid, set_thread_affinity, ProcessId, ProcessPriority, ThreadId,
+    create_thread, current_process, exec_process, exit::exit_process, exit_thread, get_thread_tid,
+    set_thread_affinity, ProcessId, ProcessPriority, ThreadId,
 };
 
 /// Fork the current process
@@ -19,11 +16,28 @@ use crate::process::{
 /// Creates a new process that is a copy of the current process.
 /// Returns the PID of the child in the parent, and 0 in the child.
 pub fn sys_fork() -> SyscallResult {
+    sys_fork_with(&crate::process::fork::ForkOptions::default())
+}
+
+/// vfork: a child sharing the caller's memory, the caller suspended until
+/// the child execs or exits (N-210). musl's vfork wrapper and BusyBox use
+/// it.
+pub fn sys_vfork() -> SyscallResult {
+    sys_fork_with(&crate::process::fork::ForkOptions {
+        share_vm: true,
+        vfork: true,
+        ..Default::default()
+    })
+}
+
+/// fork, vfork and clone without CLONE_THREAD: a new process as `opts`
+/// describe; the parent gets its pid.
+pub(crate) fn sys_fork_with(opts: &crate::process::fork::ForkOptions) -> SyscallResult {
     // Get current process before forking
     let current = current_process().ok_or(SyscallError::InvalidState)?;
 
-    match fork_process() {
-        Ok(child_pid) => {
+    match crate::process::fork::fork_process_with(opts) {
+        Ok((child_pid, _)) => {
             // In parent process, inherit capabilities to child
             if let Some(child_process) = crate::process::get_process(child_pid) {
                 let parent_cap_space = current.capability_space.lock();
@@ -37,6 +51,36 @@ pub fn sys_fork() -> SyscallResult {
                     // Log error but don't fail the fork
                     println!("[WARN] Failed to inherit capabilities to child process");
                 }
+                drop(child_cap_space);
+                drop(parent_cap_space);
+
+                // A dispatched parent's child runs as its own task, from the
+                // parent's registers at this syscall (rax = 0) and a copy of
+                // its vector state.
+                #[cfg(all(feature = "alloc", target_arch = "x86_64"))]
+                if crate::sched::dispatch::current_owner().is_some() {
+                    let thread = child_process.threads.lock().values().next().cloned();
+                    let started = thread.is_some_and(|t| {
+                        crate::process::start_thread(&child_process, &t, true).is_ok()
+                    });
+                    if !started {
+                        // Freed whole, not just unlisted (N-46).
+                        crate::process::exit::discard_unstarted(&child_process);
+                        return Err(SyscallError::OutOfMemory);
+                    }
+                }
+
+                // vfork: the parent runs again once the child has exec'd or
+                // exited (it may be using the parent's memory and stack
+                // until then).
+                #[cfg(feature = "alloc")]
+                if opts.vfork {
+                    crate::sched::dispatch::PROCESS_EVENTS.wait_until(|| {
+                        !child_process
+                            .vfork_pending
+                            .load(core::sync::atomic::Ordering::Acquire)
+                    });
+                }
             }
 
             // In parent process, return child PID
@@ -47,9 +91,8 @@ pub fn sys_fork() -> SyscallResult {
             // which is EAGAIN in user space -- the POSIX-correct errno
             // for fork() when the process limit is reached.
             match e {
-                crate::error::KernelError::ResourceExhausted { .. } => {
-                    Err(SyscallError::WouldBlock)
-                }
+                crate::error::KernelError::ResourceExhausted { .. }
+                | crate::error::KernelError::WouldBlock => Err(SyscallError::WouldBlock),
                 _ => Err(SyscallError::OutOfMemory),
             }
         }
@@ -82,40 +125,20 @@ pub fn sys_exec(path_ptr: usize, argv_ptr: usize, envp_ptr: usize) -> SyscallRes
     // envp (string data + NUL terminators + pointer slots). If the combined
     // size exceeds ARG_MAX (131072 bytes), returns E2BIG.
     //
+    let mut arg_total_bytes: usize = 0;
     // SAFETY: argv_ptr and envp_ptr are user-space pointers to null-terminated
     // arrays of string pointers. copy_string_array_from_user_tracked handles
     // null pointer checks internally and bounds-checks string lengths.
-    let mut arg_total_bytes: usize = 0;
     let argv = unsafe { copy_string_array_from_user_tracked(argv_ptr, &mut arg_total_bytes)? };
 
-    let mut envp = unsafe { copy_string_array_from_user_tracked(envp_ptr, &mut arg_total_bytes)? };
+    // A NULL or empty envp is an empty environment, as on Linux: it used to
+    // inherit the caller's, so `env -i` passed everything on (N-211).
+    //
+    // SAFETY: as for argv above -- the callee validates every user pointer.
+    let envp = unsafe { copy_string_array_from_user_tracked(envp_ptr, &mut arg_total_bytes)? };
 
-    // If envp is empty (NULL pointer from user-space), inherit the parent
-    // process's environment variables. This handles the case where libc's
-    // `environ` is NULL (e.g., GCC's libiberty overrides `environ` symbol)
-    // or the caller explicitly passes NULL for envp.
-    if envp.is_empty() {
-        if let Some(current) = current_process() {
-            let parent_env = current.env_vars.lock();
-            for (key, value) in parent_env.iter() {
-                envp.push(format!("{}={}", key, value));
-            }
-        }
-    }
-
-    // Get current process capability space before exec
-    let current = current_process().ok_or(SyscallError::InvalidState)?;
-    let old_cap_space = current.capability_space.lock();
-
-    // Create new capability space for exec'd process
-    let new_cap_space = crate::cap::CapabilitySpace::new();
-
-    // Inherit only capabilities marked for exec preservation
-    if let Err(_e) =
-        crate::cap::inheritance::exec_inherit_capabilities(&old_cap_space, &new_cap_space)
-    {
-        println!("[WARN] Failed to inherit capabilities during exec");
-    }
+    // exec_process keeps only PRESERVE_EXEC capabilities once the new
+    // image is in place (N-30, N-94).
 
     // Convert to slices for exec_process
     #[cfg(feature = "alloc")]
@@ -125,9 +148,10 @@ pub fn sys_exec(path_ptr: usize, argv_ptr: usize, envp_ptr: usize) -> SyscallRes
     let argv_refs: Vec<&str> = argv.iter().map(|s| s.as_str()).collect();
     let envp_refs: Vec<&str> = envp.iter().map(|s| s.as_str()).collect();
 
-    // Drop the capability space lock before exec_process, which diverges
-    // via enter_usermode (-> !) on success, leaking any held lock guards.
-    drop(old_cap_space);
+    // exec replaces the address space every thread of the process runs in,
+    // so the other threads go first (N-101).
+    #[cfg(feature = "alloc")]
+    de_thread()?;
 
     match exec_process(&path, &argv_refs, &envp_refs) {
         Ok(_) => {
@@ -138,10 +162,8 @@ pub fn sys_exec(path_ptr: usize, argv_ptr: usize, envp_ptr: usize) -> SyscallRes
             #[cfg(target_arch = "x86_64")]
             // SAFETY: current_thread() returns the thread that called exec.
             // Its context was updated by exec_process with the new entry
-            // point and stack pointer. swapgs undoes the swapgs from
-            // syscall_entry so GS_BASE/KERNEL_GS_BASE are correct for
-            // user mode. enter_usermode builds an iretq frame and
-            // transitions to Ring 3.
+            // point and stack pointer. enter_usermode builds an iretq frame,
+            // swaps GS to the user value and transitions to Ring 3.
             unsafe {
                 let current_thread =
                     crate::process::current_thread().expect("no current thread after exec");
@@ -162,7 +184,20 @@ pub fn sys_exec(path_ptr: usize, argv_ptr: usize, envp_ptr: usize) -> SyscallRes
                     let new_cr3 = memory_space.get_page_table();
                     drop(memory_space);
                     if new_cr3 != 0 {
+                        let old_cr3: u64;
+                        core::arch::asm!("mov {}, cr3", out(reg) old_cr3);
+                        crate::mm::tlb::note_root(new_cr3);
                         core::arch::asm!("mov cr3, {}", in(reg) new_cr3);
+                        // A dispatched thread owns its old tables: nothing
+                        // else will free them (the nested launchers free
+                        // their child's pre-exec root themselves).
+                        let old_root = old_cr3 & 0x000F_FFFF_FFFF_F000;
+                        if crate::sched::dispatch::current_owner().is_some()
+                            && old_root != new_cr3
+                            && old_root != 0
+                        {
+                            crate::mm::vas::free_user_page_table_frames(old_root);
+                        }
                     }
                 }
 
@@ -183,10 +218,6 @@ pub fn sys_exec(path_ptr: usize, argv_ptr: usize, envp_ptr: usize) -> SyscallRes
                     }
                 }
 
-                // Undo the swapgs from syscall_entry so GS_BASE and
-                // KERNEL_GS_BASE are correct for user mode.
-                core::arch::asm!("swapgs");
-
                 crate::arch::x86_64::usermode::enter_usermode(
                     entry, stack, 0x33, // User CS (Ring 3)
                     0x2B, // User SS (Ring 3)
@@ -198,7 +229,12 @@ pub fn sys_exec(path_ptr: usize, argv_ptr: usize, envp_ptr: usize) -> SyscallRes
             Err(SyscallError::InvalidState)
         }
         // Report the real cause (not-found, bad image, out of memory);
-        // every failure used to surface as ENOENT.
+        // every failure used to surface as ENOENT. An image that does not
+        // parse is ENOEXEC, as on Linux.
+        Err(crate::error::KernelError::InvalidArgument {
+            name: "elf" | "interpreter",
+            ..
+        }) => Err(SyscallError::ExecFormat),
         Err(e) => Err(super::map_kernel_error(e)),
     }
 }
@@ -212,66 +248,30 @@ pub fn sys_exec(path_ptr: usize, argv_ptr: usize, envp_ptr: usize) -> SyscallRes
 /// If no current thread is found (e.g., called from a context without a
 /// proper task), halts the CPU as a last resort.
 pub fn sys_exit(exit_code: usize) -> SyscallResult {
-    // Check for boot return context FIRST, before exit_thread/exit_process.
-    // Both of those call sched::exit_task() which does a context switch and
-    // never returns, preventing boot_return_to_kernel from being reached.
-    #[cfg(target_arch = "x86_64")]
-    {
-        let has_ctx = crate::arch::x86_64::usermode::has_boot_return_context();
-        if has_ctx {
-            // Mark the process as Zombie and notify parent before returning
-            // to the boot context. This is needed for nested child execution:
-            // when a forked child exits, the parent's wait loop must find it
-            // as a Zombie to reap it.
-            //
-            // CRITICAL: We must also call cleanup_process to close all file
-            // descriptors. Without this, pipe write ends are never closed,
-            // so the parent's pipe read never gets EOF -- causing hangs in
-            // command substitution `$(cmd)` where the parent waits for EOF.
-            if let Some(process) = current_process() {
-                process.set_exit_code(exit_code as i32);
+    exit_current(exit_code as i32, 0)
+}
 
-                #[cfg(feature = "alloc")]
-                {
-                    let threads = process.threads.lock();
-                    for (_, thread) in threads.iter() {
-                        thread.set_state(crate::process::thread::ThreadState::Zombie);
-                    }
-                }
-
-                // Close all file descriptors (pipes, files, etc.) BEFORE
-                // marking as Zombie. This ensures pipe write_closed is set
-                // so parent reads get EOF.
-                crate::process::exit::cleanup_process(&process);
-
-                process.set_state(crate::process::pcb::ProcessState::Zombie);
-
-                // Wake parent if blocked in waitpid
-                if let Some(parent_pid) = process.parent() {
-                    if let Some(parent) = crate::process::table::get_process(parent_pid) {
-                        if parent.get_state() == crate::process::pcb::ProcessState::Blocked {
-                            parent.set_state(crate::process::pcb::ProcessState::Ready);
-                            crate::sched::wake_up_process(parent_pid);
-                        }
-                    }
-                }
-            }
-
-            // SAFETY: The boot return context was saved by
-            // enter_usermode_returnable (or enter_forked_child_returnable)
-            // and is still valid on the kernel stack.
-            unsafe {
-                crate::arch::x86_64::usermode::boot_return_to_kernel();
-            }
+/// Terminate the calling process: with `exit_code`, or killed by
+/// `term_signal` when it is nonzero (reported to `wait` as WIFSIGNALED).
+pub(crate) fn exit_current(exit_code: i32, term_signal: u32) -> SyscallResult {
+    if term_signal != 0 {
+        if let Some(process) = current_process() {
+            process.set_term_signal(term_signal);
         }
+    }
+    // A thread running as its own dispatcher task (stage D2) leaves through
+    // the dispatcher. The native exit call ends the whole process.
+    #[cfg(feature = "alloc")]
+    if crate::sched::dispatch::current_owner().is_some() {
+        crate::process::exit::exit_dispatched(exit_code, true);
     }
 
     // Normal path: exit_thread calls sched::exit_task (never returns).
-    exit_thread(exit_code as i32);
+    exit_thread(exit_code);
 
     // exit_thread returned, meaning current_thread() was None.
     // Fall back to exit_process which calls sched::exit_task too.
-    exit_process(exit_code as i32);
+    exit_process(exit_code);
 
     // No boot context, no scheduler — halt as a last resort.
     loop {
@@ -286,42 +286,148 @@ pub fn sys_exit(exit_code: usize) -> SyscallResult {
 /// - status_ptr: Pointer to store exit status
 /// - options: Wait options bitmask (WNOHANG=1, WUNTRACED=2, WCONTINUED=8)
 pub fn sys_wait(pid: isize, status_ptr: usize, options: usize) -> SyscallResult {
-    use crate::{process::exit::WaitOptions, syscall::userspace::copy_to_user};
+    sys_wait4(pid, status_ptr, options, 0)
+}
 
-    let wait_pid = if pid == -1 {
-        None
-    } else if pid > 0 {
-        Some(ProcessId(pid as u64))
-    } else {
-        return Err(SyscallError::InvalidArgument);
+/// Before an exec: end every other thread of the calling process and wait
+/// until their tasks are off the CPU, as Linux's `de_thread` (N-101). They
+/// leave as by `pthread_exit` at their next return to user mode or wakeup
+/// (`EXEC_PENDING`). Two threads exec'ing at once: the second one gets
+/// EINTR and leaves at its syscall exit.
+/// A fatal signal or an `exit_group` arriving meanwhile wins: the exec
+/// fails with EINTR and the signal is acted on at the syscall exit.
+#[cfg(feature = "alloc")]
+fn de_thread() -> Result<(), SyscallError> {
+    use core::sync::atomic::Ordering;
+
+    use crate::{process::exit::EXEC_PENDING, sched::dispatch};
+
+    let Some((pid, tid)) = dispatch::current_owner() else {
+        return Ok(());
+    };
+    if dispatch::tasks_of(pid).len() <= 1 {
+        return Ok(());
+    }
+    let process = crate::process::current_process().ok_or(SyscallError::InvalidState)?;
+    match process.kill_pending.compare_exchange(
+        0,
+        EXEC_PENDING,
+        Ordering::AcqRel,
+        Ordering::Acquire,
+    ) {
+        Ok(_) => {}
+        // Another thread is exec'ing, or a fatal signal is pending: fail
+        // with EINTR so this call unwinds and frees what it holds (path,
+        // argv, envp). At the syscall exit `user_return_check` then makes
+        // this thread leave (EXEC_PENDING) or acts on the signal. Exiting
+        // from here leaked them (security review of 0d72e1b1).
+        Err(_) => return Err(SyscallError::Interrupted),
+    }
+    process.exec_tid.store(tid, Ordering::Release);
+    // Threads asleep in a wait notice at once.
+    for task in dispatch::tasks_of(pid) {
+        dispatch::wake(&task);
+    }
+    // Uninterruptible: this thread does not leave on EXEC_PENDING, and a
+    // real fatal signal replaces EXEC_PENDING, which ends the wait too.
+    dispatch::PROCESS_EVENTS.wait_until(|| {
+        dispatch::tasks_of(pid).len() <= 1
+            || process.kill_pending.load(Ordering::Acquire) != EXEC_PENDING
+    });
+    if process
+        .kill_pending
+        .compare_exchange(EXEC_PENDING, 0, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return Err(SyscallError::Interrupted);
+    }
+    // The other threads are gone; drop their entries.
+    process.threads.lock().retain(|t, _| t.0 == tid);
+    Ok(())
+}
+
+/// wait4: [`sys_wait`], and the child's resource usage (with its own
+/// waited-for children's) at `rusage_ptr` if not NULL (N-213).
+pub fn sys_wait4(
+    pid: isize,
+    status_ptr: usize,
+    options: usize,
+    rusage_ptr: usize,
+) -> SyscallResult {
+    use crate::{
+        process::exit::{WaitFilter, WaitOptions},
+        syscall::userspace::copy_to_user,
+    };
+
+    // -1 any child, > 0 that child, 0 the caller's process group, < -1 the
+    // group -pid (N-99). pid_t is an int: its low 32 bits (N-212).
+    let pid = pid as u32 as i32;
+    let filter = match pid {
+        -1 => WaitFilter::Any,
+        p if p > 0 => WaitFilter::Pid(ProcessId(p as u64)),
+        0 => WaitFilter::Group(
+            current_process()
+                .ok_or(SyscallError::InvalidState)?
+                .pgid
+                .load(core::sync::atomic::Ordering::Acquire),
+        ),
+        p => WaitFilter::Group(p.unsigned_abs() as u64),
     };
 
     // Parse options bitmask into WaitOptions struct
     const WNOHANG: usize = 1;
     const WUNTRACED: usize = 2;
     const WCONTINUED: usize = 8;
+    /// __WNOTHREAD, __WALL, __WCLONE: accepted, as every child here is a
+    /// process that signals its parent.
+    const WTHREAD_FLAGS: usize = 0x2000_0000 | 0x4000_0000 | 0x8000_0000;
+    if options & !(WNOHANG | WUNTRACED | WCONTINUED | WTHREAD_FLAGS) != 0 {
+        return Err(SyscallError::InvalidArgument);
+    }
 
     let wait_options = WaitOptions {
         no_hang: (options & WNOHANG) != 0,
         untraced: (options & WUNTRACED) != 0,
         continued: (options & WCONTINUED) != 0,
+        skip_exited: false,
+        keep: false,
     };
 
-    let wait_result = crate::process::exit::wait_process_with_options(wait_pid, wait_options);
+    let wait_result = crate::process::exit::wait_children(filter, wait_options);
 
     match wait_result {
-        Ok((child_pid, exit_status)) => {
-            // Write exit status to user space if pointer provided
-            if status_ptr != 0 {
-                // SAFETY: status_ptr is non-zero; copy_to_user validates it is within
-                // user-space.
-                unsafe {
-                    copy_to_user(status_ptr, &exit_status)?;
+        Ok(waited) => {
+            // Write the status and usage if a child was reported: WNOHANG
+            // with nothing to report returns 0 and leaves them alone
+            // (N-213).
+            if waited.pid.0 != 0 {
+                if status_ptr != 0 {
+                    // SAFETY: status_ptr is non-zero; copy_to_user validates it is within
+                    // user-space.
+                    unsafe {
+                        copy_to_user(status_ptr, &waited.status)?;
+                    }
                 }
+                super::usage::write_rusage(rusage_ptr, waited.usage, waited.maxrss_pages)?;
             }
-            Ok(child_pid.0 as usize)
+            Ok(waited.pid.0 as usize)
         }
-        Err(_) => Err(SyscallError::ResourceNotFound),
+        Err(e) => Err(wait_error(e)),
+    }
+}
+
+/// Errno for a failed wait: ECHILD when there is nothing to wait for (it
+/// was ENOENT, so loops that wait until ECHILD never ended; N-99), EINTR
+/// when a signal interrupted it.
+pub(crate) fn wait_error(e: crate::error::KernelError) -> SyscallError {
+    match e {
+        // No such child of the caller (it was EINVAL for a pid that is not
+        // a child, N-213).
+        crate::error::KernelError::NotFound { .. }
+        | crate::error::KernelError::ProcessNotFound { .. } => SyscallError::NoChildProcess,
+        // The wait loop reports a signal interruption as WouldBlock.
+        crate::error::KernelError::WouldBlock => SyscallError::Interrupted,
+        _ => SyscallError::InvalidArgument,
     }
 }
 
@@ -382,6 +488,12 @@ pub fn sys_thread_create(
 /// # Arguments
 /// - exit_code: Thread exit code
 pub fn sys_thread_exit(exit_code: usize) -> SyscallResult {
+    // A dispatched thread ends alone (pthread_exit); its process lives on
+    // until its last thread leaves.
+    #[cfg(feature = "alloc")]
+    if crate::sched::dispatch::current_owner().is_some() {
+        crate::process::exit::exit_dispatched(exit_code as i32, false);
+    }
     exit_thread(exit_code as i32);
     // Should never reach here
     unreachable!("exit_thread returned");
@@ -394,6 +506,13 @@ pub fn sys_gettid() -> SyscallResult {
 
 /// Join with a thread, waiting for its termination
 ///
+/// Waits until thread `tid` of the caller's process is gone. An exited
+/// thread is removed once its task is reaped (`user_task_reaped`, as Linux
+/// frees CLONE_THREAD threads), possibly before the join; a thread no longer
+/// in the table has therefore finished, and the join reports 0 for it. The
+/// native C library checks the id against its own threads and takes the
+/// return value from its thread block.
+///
 /// # Arguments
 /// - tid: Thread ID to join
 /// - retval_ptr: Pointer to store thread return value
@@ -404,6 +523,37 @@ pub fn sys_thread_join(tid: usize, retval_ptr: usize) -> SyscallResult {
 
     // Get current process
     let current = current_process().ok_or(SyscallError::InvalidState)?;
+    if target_tid == get_thread_tid() {
+        return Err(SyscallError::InvalidArgument); // joining oneself
+    }
+    // A thread of this process leaves the thread table only once it has
+    // exited and its task is reaped (`user_task_reaped`), which can happen
+    // before the joiner gets here; so a thread not in the table has
+    // finished. The C library checks the id against its own threads first.
+
+    // A dispatched joiner sleeps until the thread has exited and its task
+    // is off the CPU (its kernel stack is in use until then); every task
+    // reap wakes PROCESS_EVENTS. A signal ends the wait (N-269: it spun on
+    // yield_cpu, and could not be interrupted).
+    #[cfg(feature = "alloc")]
+    if crate::sched::dispatch::current_owner().is_some() {
+        use crate::sched::dispatch::{self, WaitError};
+        let pid = current.pid.0;
+        let finished = || match current.threads.lock().get(&target_tid) {
+            None => true,
+            Some(t) => {
+                t.get_state() == crate::process::thread::ThreadState::Zombie
+                    && !dispatch::tasks_of(pid)
+                        .iter()
+                        .any(|task| task.owner() == Some((pid, target_tid.0)))
+            }
+        };
+        if let Err(WaitError::Interrupted) =
+            dispatch::wait_event(&dispatch::PROCESS_EVENTS, None, finished)
+        {
+            return Err(SyscallError::Interrupted);
+        }
+    }
 
     // Find target thread in current process
     loop {
@@ -448,8 +598,14 @@ pub fn sys_thread_join(tid: usize, retval_ptr: usize) -> SyscallResult {
                 crate::sched::yield_cpu();
             }
             None => {
-                // Thread doesn't exist
-                return Err(SyscallError::ResourceNotFound);
+                // Exited and reaped (see above). Its exit value went with
+                // it; the C library keeps the real one in its own thread
+                // block, so 0 is reported.
+                if retval_ptr != 0 {
+                    // SAFETY: copy_to_user validates the user pointer.
+                    unsafe { copy_to_user(retval_ptr, &0usize)? };
+                }
+                return Ok(0);
             }
         }
     }
@@ -473,11 +629,11 @@ pub fn sys_thread_setaffinity(tid: usize, cpuset_ptr: usize, cpuset_size: usize)
         ThreadId(tid as u64)
     };
 
-    // Read CPU set from user space
-    // SAFETY: cpuset_ptr was validated as non-zero and cpuset_size > 0
-    // above. The caller must provide a valid, readable user-space buffer
-    // of at least cpuset_size bytes containing the CPU affinity mask.
-    let cpuset = unsafe { slice::from_raw_parts(cpuset_ptr as *const u8, cpuset_size) };
+    // Read the CPU set from user space: at most 128 bytes (1024 CPUs) are
+    // meaningful, copied through the fault-tolerant reader. This read used
+    // to borrow `cpuset_size` user bytes unvalidated (N-43).
+    let mut cpuset = alloc::vec![0u8; cpuset_size.min(128)];
+    super::userspace::read_user_bytes(cpuset_ptr, &mut cpuset)?;
 
     // Extract CPU mask from cpuset (simplified)
     let cpu_mask = if cpuset_size >= 8 {
@@ -607,31 +763,6 @@ pub fn sys_setpriority(which: usize, who: usize, priority: usize) -> SyscallResu
     // Actually set the priority
     if let Some(process) = crate::process::table::get_process(pid) {
         process.set_priority(new_priority);
-
-        // Update scheduler tasks for all threads
-        #[cfg(feature = "alloc")]
-        {
-            let threads = process.threads.lock();
-            for (_, thread) in threads.iter() {
-                if let Some(task_ptr) = thread.get_task_ptr() {
-                    // SAFETY: task_ptr is a valid NonNull<Task> obtained from
-                    // the thread's stored task pointer. We modify the priority
-                    // field while holding the threads lock, preventing
-                    // concurrent modification.
-                    unsafe {
-                        let task = task_ptr.as_ptr();
-                        (*task).priority = match new_priority {
-                            ProcessPriority::RealTime => crate::sched::task::Priority::RealTimeHigh,
-                            ProcessPriority::System => crate::sched::task::Priority::SystemHigh,
-                            ProcessPriority::Normal => crate::sched::task::Priority::UserNormal,
-                            ProcessPriority::Low => crate::sched::task::Priority::UserLow,
-                            ProcessPriority::Idle => crate::sched::task::Priority::Idle,
-                        };
-                    }
-                }
-            }
-        }
-
         Ok(0)
     } else {
         Err(SyscallError::ResourceNotFound)
@@ -642,77 +773,138 @@ pub fn sys_setpriority(which: usize, who: usize, priority: usize) -> SyscallResu
 // Identity syscalls (170-175)
 // ============================================================================
 
-/// Get real user ID (SYS_GETUID = 170)
+/// getuid: the real user ID.
 pub fn sys_getuid() -> SyscallResult {
     let proc = current_process().ok_or(SyscallError::InvalidState)?;
-    Ok(proc.uid() as usize)
+    Ok(proc.credentials().ruid as usize)
 }
 
-/// Get effective user ID (SYS_GETEUID = 171)
-///
-/// VeridianOS does not yet distinguish real/effective UIDs, so this returns
-/// the same value as getuid.
+/// geteuid: the effective user ID.
 pub fn sys_geteuid() -> SyscallResult {
-    sys_getuid()
+    let proc = current_process().ok_or(SyscallError::InvalidState)?;
+    Ok(proc.credentials().euid as usize)
 }
 
-/// Get real group ID (SYS_GETGID = 172)
+/// getgid: the real group ID.
 pub fn sys_getgid() -> SyscallResult {
     let proc = current_process().ok_or(SyscallError::InvalidState)?;
-    Ok(proc.gid() as usize)
+    Ok(proc.credentials().rgid as usize)
 }
 
-/// Get effective group ID (SYS_GETEGID = 173)
+/// getegid: the effective group ID.
 pub fn sys_getegid() -> SyscallResult {
-    sys_getgid()
+    let proc = current_process().ok_or(SyscallError::InvalidState)?;
+    Ok(proc.credentials().egid as usize)
 }
 
-/// Set user ID (SYS_SETUID = 174)
-///
-/// Only uid 0 (root) can change to a different UID. Non-root processes
-/// may only "set" their uid to the current value (a no-op).
+/// An ID argument: uid_t/gid_t is 32 bits, so the upper half of the
+/// register is ignored, as on Linux.
+fn id_arg(arg: usize) -> u32 {
+    arg as u32
+}
+
+/// setuid: Linux rules (`Credentials::setuid`).
 pub fn sys_setuid(uid: usize) -> SyscallResult {
     let proc = current_process().ok_or(SyscallError::InvalidState)?;
-    let current_uid = proc.uid();
-    let new_uid = uid as u32;
-
-    // Non-root can only set uid to current value (no-op)
-    if current_uid != 0 && new_uid != current_uid {
-        return Err(SyscallError::PermissionDenied);
-    }
-
-    // If already the requested uid, nothing to do
-    if new_uid == current_uid {
-        return Ok(0);
-    }
-
-    // Root changing uid.
-    proc.set_uid(new_uid);
+    proc.update_credentials(|c| c.setuid(id_arg(uid)))?;
     Ok(0)
 }
 
-/// Set group ID (SYS_SETGID = 175)
-///
-/// Only uid 0 (root) can change to a different GID. Non-root processes
-/// may only "set" their gid to the current value (a no-op).
+/// setgid: Linux rules (`Credentials::setgid`).
 pub fn sys_setgid(gid: usize) -> SyscallResult {
     let proc = current_process().ok_or(SyscallError::InvalidState)?;
-    let current_uid = proc.uid();
-    let current_gid = proc.gid();
-    let new_gid = gid as u32;
+    proc.update_credentials(|c| c.setgid(id_arg(gid)))?;
+    Ok(0)
+}
 
-    // Non-root can only set gid to current value (no-op)
-    if current_uid != 0 && new_gid != current_gid {
-        return Err(SyscallError::PermissionDenied);
+/// setreuid(ruid, euid); -1 leaves an ID unchanged.
+pub fn sys_setreuid(r: usize, e: usize) -> SyscallResult {
+    let proc = current_process().ok_or(SyscallError::InvalidState)?;
+    proc.update_credentials(|c| c.setreuid(id_arg(r), id_arg(e)))?;
+    Ok(0)
+}
+
+/// setregid(rgid, egid); -1 leaves an ID unchanged.
+pub fn sys_setregid(r: usize, e: usize) -> SyscallResult {
+    let proc = current_process().ok_or(SyscallError::InvalidState)?;
+    proc.update_credentials(|c| c.setregid(id_arg(r), id_arg(e)))?;
+    Ok(0)
+}
+
+/// setresuid(ruid, euid, suid); -1 leaves an ID unchanged.
+pub fn sys_setresuid(r: usize, e: usize, s: usize) -> SyscallResult {
+    let proc = current_process().ok_or(SyscallError::InvalidState)?;
+    proc.update_credentials(|c| c.setresuid(id_arg(r), id_arg(e), id_arg(s)))?;
+    Ok(0)
+}
+
+/// setresgid(rgid, egid, sgid); -1 leaves an ID unchanged.
+pub fn sys_setresgid(r: usize, e: usize, s: usize) -> SyscallResult {
+    let proc = current_process().ok_or(SyscallError::InvalidState)?;
+    proc.update_credentials(|c| c.setresgid(id_arg(r), id_arg(e), id_arg(s)))?;
+    Ok(0)
+}
+
+/// getresuid / getresgid: write the three IDs (each a 4-byte uid_t) to
+/// the three pointers.
+fn write_id_triple(ids: [u32; 3], ptrs: [usize; 3]) -> SyscallResult {
+    for (id, ptr) in ids.into_iter().zip(ptrs) {
+        super::userspace::write_user::<u32>(ptr, id)?;
     }
+    Ok(0)
+}
 
-    // If already the requested gid, nothing to do
-    if new_gid == current_gid {
-        return Ok(0);
+pub fn sys_getresuid(r: usize, e: usize, s: usize) -> SyscallResult {
+    let c = current_process()
+        .ok_or(SyscallError::InvalidState)?
+        .credentials();
+    write_id_triple([c.ruid, c.euid, c.suid], [r, e, s])
+}
+
+pub fn sys_getresgid(r: usize, e: usize, s: usize) -> SyscallResult {
+    let c = current_process()
+        .ok_or(SyscallError::InvalidState)?
+        .credentials();
+    write_id_triple([c.rgid, c.egid, c.sgid], [r, e, s])
+}
+
+/// getgroups(size, list): with size 0, the number of supplementary
+/// groups; otherwise copies them (EINVAL if `size` is too small).
+pub fn sys_getgroups(size: usize, list: usize) -> SyscallResult {
+    let c = current_process()
+        .ok_or(SyscallError::InvalidState)?
+        .credentials();
+    let groups = c.groups();
+    let size = size as u32 as i32;
+    if size < 0 {
+        return Err(SyscallError::InvalidArgument);
     }
+    if size == 0 {
+        return Ok(groups.len());
+    }
+    if (size as usize) < groups.len() {
+        return Err(SyscallError::InvalidArgument);
+    }
+    for (i, &g) in groups.iter().enumerate() {
+        super::userspace::write_user::<u32>(list + i * 4, g)?;
+    }
+    Ok(groups.len())
+}
 
-    // Root changing gid.
-    proc.set_gid(new_gid);
+/// setgroups(size, list): replace the supplementary groups (root only;
+/// EINVAL above NGROUPS_MAX).
+pub fn sys_setgroups(size: usize, list: usize) -> SyscallResult {
+    use crate::process::creds::NGROUPS_MAX;
+    let size = size as u32 as i32;
+    if size < 0 || size as usize > NGROUPS_MAX {
+        return Err(SyscallError::InvalidArgument);
+    }
+    let mut groups = [0u32; NGROUPS_MAX];
+    for (i, slot) in groups.iter_mut().take(size as usize).enumerate() {
+        *slot = super::userspace::read_user::<u32>(list + i * 4)?;
+    }
+    let proc = current_process().ok_or(SyscallError::InvalidState)?;
+    proc.update_credentials(|c| c.setgroups(&groups[..size as usize]))?;
     Ok(0)
 }
 
@@ -720,54 +912,69 @@ pub fn sys_setgid(gid: usize) -> SyscallResult {
 // Process group / session syscalls (176-180)
 // ============================================================================
 
-/// Set process group ID (SYS_SETPGID = 176)
+/// Set process group ID (SYS_setpgid = 109)
 ///
 /// # Arguments
 /// - `pid`: Target process (0 = calling process)
 /// - `pgid`: New process group (0 = use pid as pgid)
 pub fn sys_setpgid(pid: usize, pgid: usize) -> SyscallResult {
+    use core::sync::atomic::Ordering;
     let proc = current_process().ok_or(SyscallError::InvalidState)?;
-
-    let target_pid = if pid == 0 {
-        proc.pid
-    } else {
-        ProcessId(pid as u64)
+    // Linux's rules (N-216; pid_t arguments are ints, N-212).
+    let (pid, pgid) = (pid as u32 as i32, pgid as u32 as i32);
+    if pgid < 0 {
+        return Err(SyscallError::InvalidArgument);
+    }
+    let target_pid = match pid {
+        0 => proc.pid,
+        p if p > 0 => ProcessId(p as u64),
+        _ => return Err(SyscallError::ProcessNotFound),
     };
     let new_pgid = if pgid == 0 { target_pid.0 } else { pgid as u64 };
-
-    // Can only set pgid for self or children
+    let target =
+        crate::process::table::get_process(target_pid).ok_or(SyscallError::ProcessNotFound)?;
+    let sid = proc.sid.load(Ordering::Acquire);
+    // The caller itself or one of its children (ESRCH); a child that has
+    // exec'd is out of reach (EACCES).
     if target_pid != proc.pid {
-        // Check if target is a child
-        #[cfg(feature = "alloc")]
-        {
-            let children = proc.children.lock();
-            if !children.contains(&target_pid) {
-                return Err(SyscallError::PermissionDenied);
-            }
+        if target.parent() != Some(proc.pid) {
+            return Err(SyscallError::ProcessNotFound);
+        }
+        if target.did_exec.load(Ordering::Acquire) {
+            return Err(SyscallError::PermissionDenied);
         }
     }
-
-    // Apply to the target process
-    if let Some(target) = crate::process::table::get_process(target_pid) {
-        target
-            .pgid
-            .store(new_pgid, core::sync::atomic::Ordering::Release);
-        Ok(0)
-    } else {
-        Err(SyscallError::ProcessNotFound)
+    // A session leader keeps its group; the target must be in the
+    // caller's session, and so must the group it joins (EPERM).
+    if target.sid.load(Ordering::Acquire) == target_pid.0
+        || target.sid.load(Ordering::Acquire) != sid
+    {
+        return Err(SyscallError::OperationNotPermitted);
     }
+    if new_pgid != target_pid.0 {
+        let mut exists = false;
+        crate::process::table::PROCESS_TABLE.for_each(|p| {
+            if p.pgid.load(Ordering::Acquire) == new_pgid && p.sid.load(Ordering::Acquire) == sid {
+                exists = true;
+            }
+        });
+        if !exists {
+            return Err(SyscallError::OperationNotPermitted);
+        }
+    }
+    target.pgid.store(new_pgid, Ordering::Release);
+    Ok(0)
 }
 
-/// Get process group ID (SYS_GETPGID = 177)
+/// Get process group ID (SYS_getpgid = 121)
 ///
 /// # Arguments
 /// - `pid`: Target process (0 = calling process)
 pub fn sys_getpgid(pid: usize) -> SyscallResult {
-    let target_pid = if pid == 0 {
-        let proc = current_process().ok_or(SyscallError::InvalidState)?;
-        proc.pid
-    } else {
-        ProcessId(pid as u64)
+    let target_pid = match pid as u32 as i32 {
+        0 => current_process().ok_or(SyscallError::InvalidState)?.pid,
+        p if p > 0 => ProcessId(p as u64),
+        _ => return Err(SyscallError::ProcessNotFound),
     };
 
     if let Some(target) = crate::process::table::get_process(target_pid) {
@@ -777,22 +984,23 @@ pub fn sys_getpgid(pid: usize) -> SyscallResult {
     }
 }
 
-/// Get process group ID of calling process (SYS_GETPGRP = 178)
+/// Get process group ID of calling process (SYS_getpgrp = 111)
 pub fn sys_getpgrp() -> SyscallResult {
     sys_getpgid(0)
 }
 
-/// Create a new session (SYS_SETSID = 179)
+/// Create a new session (SYS_setsid = 112)
 ///
 /// Makes the calling process the session leader and process group leader
 /// of a new session. The process must not already be a process group leader.
 pub fn sys_setsid() -> SyscallResult {
     let proc = current_process().ok_or(SyscallError::InvalidState)?;
 
-    // Process must not already be a process group leader
+    // Process must not already be a process group leader (EPERM; it was
+    // EACCES, N-215)
     let current_pgid = proc.pgid.load(core::sync::atomic::Ordering::Acquire);
     if current_pgid == proc.pid.0 {
-        return Err(SyscallError::PermissionDenied);
+        return Err(SyscallError::OperationNotPermitted);
     }
 
     // Set both pgid and sid to our pid (new session + group leader)
@@ -804,16 +1012,15 @@ pub fn sys_setsid() -> SyscallResult {
     Ok(proc.pid.0 as usize)
 }
 
-/// Get session ID (SYS_GETSID = 180)
+/// Get session ID (SYS_getsid = 124)
 ///
 /// # Arguments
 /// - `pid`: Target process (0 = calling process)
 pub fn sys_getsid(pid: usize) -> SyscallResult {
-    let target_pid = if pid == 0 {
-        let proc = current_process().ok_or(SyscallError::InvalidState)?;
-        proc.pid
-    } else {
-        ProcessId(pid as u64)
+    let target_pid = match pid as u32 as i32 {
+        0 => current_process().ok_or(SyscallError::InvalidState)?.pid,
+        p if p > 0 => ProcessId(p as u64),
+        _ => return Err(SyscallError::ProcessNotFound),
     };
 
     if let Some(target) = crate::process::table::get_process(target_pid) {
@@ -983,11 +1190,12 @@ pub fn sys_getenv(
     }
 
     // Read the variable name from user space
-    validate_user_buffer(name_ptr, name_len)?;
-    // SAFETY: name_ptr validated by validate_user_buffer above as non-null and in
-    // user-space.
-    let name_bytes = unsafe { slice::from_raw_parts(name_ptr as *const u8, name_len) };
-    let name = core::str::from_utf8(name_bytes).map_err(|_| SyscallError::InvalidArgument)?;
+    if name_len > 4096 {
+        return Err(SyscallError::InvalidArgument);
+    }
+    let mut name_bytes = alloc::vec![0u8; name_len];
+    super::userspace::read_user_bytes(name_ptr, &mut name_bytes)?;
+    let name = core::str::from_utf8(&name_bytes).map_err(|_| SyscallError::InvalidArgument)?;
 
     // Look up in the current process's env_vars
     let process = current_process().ok_or(SyscallError::InvalidState)?;
@@ -1006,16 +1214,219 @@ pub fn sys_getenv(
             return Ok(val_len); // Return required length so caller can retry
         }
 
-        // Write value + NUL to user buffer
-        validate_user_buffer(buf_ptr, val_len + 1)?;
-        // SAFETY: buf_ptr validated by validate_user_buffer above as non-null and in
-        // user-space.
-        let buf = unsafe { slice::from_raw_parts_mut(buf_ptr as *mut u8, val_len + 1) };
-        buf[..val_len].copy_from_slice(value.as_bytes());
-        buf[val_len] = 0;
+        // Write value + NUL to user buffer (fault-tolerant, N-43).
+        let mut out = alloc::vec::Vec::with_capacity(val_len + 1);
+        out.extend_from_slice(value.as_bytes());
+        out.push(0);
+        super::userspace::write_user_bytes(buf_ptr, &out)?;
 
         Ok(val_len)
     } else {
         Err(SyscallError::ResourceNotFound)
+    }
+}
+
+/// The process that owns thread `tid`, if any.
+pub(super) fn process_of_thread(tid: usize) -> Option<ProcessId> {
+    let mut owner = None;
+    crate::process::table::PROCESS_TABLE.for_each(|p| {
+        if owner.is_none() && p.get_thread(crate::process::ThreadId(tid as u64)).is_some() {
+            owner = Some(p.pid);
+        }
+    });
+    owner
+}
+
+/// tkill(2): signal a thread. Signals are process-directed until per-thread
+/// signal state exists (N-109), so this signals the thread's process; musl
+/// uses it for raise() and abort() (N-103).
+pub fn sys_tkill(tid: usize, signal: usize) -> SyscallResult {
+    // A pid_t: its low 32 bits; not positive is EINVAL (N-212).
+    let tid = positive_id(tid)?;
+    let caller = current_process().ok_or(SyscallError::InvalidState)?;
+    let pid = process_of_thread(tid).ok_or(SyscallError::ProcessNotFound)?;
+    // An int: its low 32 bits. Signals 1..=64 (0 tests for existence).
+    let sig = Some(signal as u32 as i32)
+        .filter(|s| (0..=crate::process::signals::NSIG as i32).contains(s))
+        .ok_or(SyscallError::InvalidArgument)?;
+    // A thread of a dispatched process gets the signal itself (sprint D3):
+    // existence and permission as for kill, then queued for that thread.
+    #[cfg(feature = "alloc")]
+    if sig != 0 {
+        if let Some(target) = crate::process::get_process(pid) {
+            if target
+                .dispatched
+                .load(core::sync::atomic::Ordering::Acquire)
+            {
+                if let Some(thread) = target.get_thread(ThreadId(tid as u64)) {
+                    super::filesystem::kill_one(&caller, pid, 0)?;
+                    let info = crate::process::signals::SigInfo::from_process(
+                        sig as usize,
+                        crate::process::signals::SI_TKILL,
+                        caller.pid.0,
+                        caller.credentials().ruid,
+                    );
+                    crate::process::signals::send_to_thread(&target, &thread, info)
+                        .map_err(super::map_kernel_error)?;
+                    return Ok(0);
+                }
+            }
+        }
+    }
+    super::filesystem::kill_one(&caller, pid, sig)
+}
+
+/// tgkill(2): like tkill, but the thread must belong to process `tgid`.
+pub fn sys_tgkill(tgid: usize, tid: usize, signal: usize) -> SyscallResult {
+    let (tgid, tid) = (positive_id(tgid)?, positive_id(tid)?);
+    if process_of_thread(tid) != Some(ProcessId(tgid as u64)) {
+        return Err(SyscallError::ProcessNotFound);
+    }
+    sys_tkill(tid, signal)
+}
+
+/// A pid_t argument that must name one thread or process: the register's
+/// low 32 bits, positive (EINVAL otherwise, as Linux; N-212).
+pub(super) fn positive_id(raw: usize) -> Result<usize, SyscallError> {
+    match raw as u32 as i32 {
+        id if id > 0 => Ok(id as usize),
+        _ => Err(SyscallError::InvalidArgument),
+    }
+}
+
+/// waitid(2) for P_ALL and P_PID, with WEXITED, WSTOPPED, WCONTINUED and
+/// WNOHANG (N-103). The result is written as a Linux `siginfo_t`.
+pub fn sys_waitid(
+    idtype: usize,
+    id: usize,
+    infop: usize,
+    options: usize,
+    rusage_ptr: usize,
+) -> SyscallResult {
+    use crate::process::exit::{WaitFilter, WaitOptions};
+    const P_ALL: usize = 0;
+    const P_PID: usize = 1;
+    const P_PGID: usize = 2;
+    const WNOHANG: usize = 1;
+    const WSTOPPED: usize = 2;
+    const WEXITED: usize = 4;
+    const WCONTINUED: usize = 8;
+    const WNOWAIT: usize = 0x0100_0000;
+
+    // id is a pid_t: its low 32 bits (N-212).
+    let id = id as u32 as i32;
+    let filter = match idtype {
+        P_ALL => WaitFilter::Any,
+        P_PID if id > 0 => WaitFilter::Pid(ProcessId(id as u64)),
+        // id 0: the caller's own group.
+        P_PGID if id == 0 => WaitFilter::Group(
+            current_process()
+                .ok_or(SyscallError::InvalidState)?
+                .pgid
+                .load(core::sync::atomic::Ordering::Acquire),
+        ),
+        P_PGID if id > 0 => WaitFilter::Group(id as u64),
+        // A negative id, or a pidfd (P_PIDFD, not yet supported): EINVAL.
+        _ => return Err(SyscallError::InvalidArgument),
+    };
+    if options & (WEXITED | WSTOPPED | WCONTINUED) == 0
+        || options & !(WNOHANG | WSTOPPED | WEXITED | WCONTINUED | WNOWAIT) != 0
+    {
+        return Err(SyscallError::InvalidArgument);
+    }
+    let waited = crate::process::exit::wait_children(
+        filter,
+        WaitOptions {
+            no_hang: options & WNOHANG != 0,
+            untraced: options & WSTOPPED != 0,
+            continued: options & WCONTINUED != 0,
+            skip_exited: options & WEXITED == 0,
+            // WNOWAIT: report, but leave the child to a later wait (N-213).
+            keep: options & WNOWAIT != 0,
+        },
+    )
+    .map_err(wait_error)?;
+
+    if infop != 0 {
+        let info = waitid_siginfo(waited.pid.0, waited.status);
+        // SAFETY: copy_to_user validates that infop is writable user memory.
+        unsafe { crate::syscall::userspace::copy_to_user(infop, &info) }?;
+    }
+    if waited.pid.0 != 0 {
+        super::usage::write_rusage(rusage_ptr, waited.usage, waited.maxrss_pages)?;
+    }
+    Ok(0)
+}
+
+/// A Linux `siginfo_t` (128 bytes) for a waitid result; all zero when no
+/// child changed state (WNOHANG).
+fn waitid_siginfo(pid: u64, status: i32) -> [u8; 128] {
+    const SIGCHLD: i32 = 17;
+    const CLD_EXITED: i32 = 1;
+    const CLD_KILLED: i32 = 2;
+    const CLD_DUMPED: i32 = 3;
+    const CLD_STOPPED: i32 = 5;
+    const CLD_CONTINUED: i32 = 6;
+    const SIGCONT: i32 = 18;
+    let mut info = [0u8; 128];
+    if pid == 0 {
+        return info;
+    }
+    let (code, value) = if status == 0xffff {
+        (CLD_CONTINUED, SIGCONT)
+    } else if status & 0xff == 0x7f {
+        (CLD_STOPPED, (status >> 8) & 0xff)
+    } else if status & 0x7f == 0 {
+        (CLD_EXITED, (status >> 8) & 0xff)
+    } else if status & 0x80 != 0 {
+        (CLD_DUMPED, status & 0x7f)
+    } else {
+        (CLD_KILLED, status & 0x7f)
+    };
+    info[0..4].copy_from_slice(&SIGCHLD.to_ne_bytes()); // si_signo
+    info[8..12].copy_from_slice(&code.to_ne_bytes()); // si_code
+    info[16..20].copy_from_slice(&(pid as i32).to_ne_bytes()); // si_pid
+    info[24..28].copy_from_slice(&value.to_ne_bytes()); // si_status
+    info
+}
+
+#[cfg(test)]
+mod waitid_tests {
+    use super::waitid_siginfo;
+
+    fn field(info: &[u8; 128], at: usize) -> i32 {
+        i32::from_ne_bytes(info[at..at + 4].try_into().unwrap())
+    }
+
+    #[test]
+    fn siginfo_encodes_exit_kill_and_nothing() {
+        let exited = waitid_siginfo(42, 3 << 8);
+        assert_eq!((field(&exited, 0), field(&exited, 8)), (17, 1));
+        assert_eq!((field(&exited, 16), field(&exited, 24)), (42, 3));
+        let killed = waitid_siginfo(7, 9);
+        assert_eq!((field(&killed, 8), field(&killed, 24)), (2, 9));
+        let dumped = waitid_siginfo(7, 0x8b);
+        assert_eq!((field(&dumped, 8), field(&dumped, 24)), (3, 11));
+        assert!(waitid_siginfo(0, 0).iter().all(|&b| b == 0));
+        // Stopped by SIGTSTP, and continued (N-99).
+        let stopped = waitid_siginfo(7, 0x7f | (20 << 8));
+        assert_eq!((field(&stopped, 8), field(&stopped, 24)), (5, 20));
+        let continued = waitid_siginfo(7, 0xffff);
+        assert_eq!((field(&continued, 8), field(&continued, 24)), (6, 18));
+    }
+}
+
+#[cfg(test)]
+mod pid_argument_tests {
+    use super::{positive_id, SyscallError};
+
+    /// pid_t arguments are ints: a zero-extended -1 is -1, not pid
+    /// 4294967295, and tkill/tgkill refuse anything not positive (N-212).
+    #[test]
+    fn pid_arguments_use_the_low_32_bits() {
+        assert_eq!(positive_id(7), Ok(7));
+        assert_eq!(positive_id(0xFFFF_FFFF), Err(SyscallError::InvalidArgument));
+        assert_eq!(positive_id(0), Err(SyscallError::InvalidArgument));
+        assert_eq!(positive_id(0x1_0000_0005), Ok(5));
     }
 }

@@ -39,32 +39,11 @@ pub fn validate_user_ptr<T>(ptr: *const T, len: usize) -> Result<(), SyscallErro
         return Err(SyscallError::InvalidPointer);
     }
 
-    // Validate page mappings for the entire range
-    validate_page_mappings(addr, end)?;
-
-    Ok(())
-}
-
-/// Validate that all pages in the given range are mapped and accessible
-fn validate_page_mappings(start: usize, end: usize) -> Result<(), SyscallError> {
-    // Range check: verify all pages fall within user space.
-    // Note: translate_user_address() walks page tables using raw physical
-    // addresses as pointers, which requires identity mapping. Since syscalls
-    // run with user CR3 (no identity mapping), the page table walk faults.
-    // The range check is sufficient: if a page is truly unmapped, the
-    // subsequent volatile read/write will trigger a proper page fault.
-    for page_addr in (start..end).step_by(PAGE_SIZE) {
-        if !crate::mm::is_user_addr_valid(page_addr) {
-            return Err(SyscallError::UnmappedMemory);
-        }
-    }
-
-    if !end.is_multiple_of(PAGE_SIZE) {
-        let last_page = (end - 1) & !(PAGE_SIZE - 1);
-        if !crate::mm::is_user_addr_valid(last_page) {
-            return Err(SyscallError::UnmappedMemory);
-        }
-    }
+    // Whether the pages are mapped is not checked here: the copy itself
+    // finds out. On x86_64 a fault in the user-copy routines returns EFAULT
+    // through the exception table (MEM-SEC-01); AArch64 and RISC-V get that
+    // with user mode (sprint E, ARCH-MEM-03). The per-page loop that used to
+    // follow only re-checked the bound above, once per page (PB-MEM-07).
 
     Ok(())
 }
@@ -114,6 +93,25 @@ pub fn read_user_cstr(addr: usize, max_len: usize) -> Result<String, SyscallErro
     Err(SyscallError::InvalidArgument)
 }
 
+/// Linux's `strncpy_from_user`: copy the string at `addr` into `dst`, up
+/// to its NUL or `dst.len()` bytes, whichever comes first; the bytes copied
+/// (without a NUL). As in [`read_user_cstr`], no read crosses into a page
+/// past the one holding the NUL, and an unmapped page is EFAULT.
+pub fn strncpy_from_user(addr: usize, dst: &mut [u8]) -> Result<usize, SyscallError> {
+    const PAGE: usize = 4096;
+    let mut done = 0;
+    while done < dst.len() {
+        let cursor = addr.checked_add(done).ok_or(SyscallError::InvalidPointer)?;
+        let want = (PAGE - cursor % PAGE).min(dst.len() - done);
+        read_user_bytes(cursor, &mut dst[done..done + want])?;
+        if let Some(nul) = dst[done..done + want].iter().position(|&b| b == 0) {
+            return Ok(done + nul);
+        }
+        done += want;
+    }
+    Ok(done)
+}
+
 /// Copy data from user space to kernel space
 ///
 /// # Safety
@@ -152,7 +150,10 @@ pub unsafe fn copy_slice_to_user(user_ptr: usize, data: &[u8]) -> Result<(), Sys
 /// This function reads from user-provided pointers and must validate them
 pub unsafe fn copy_string_array_from_user(array_ptr: usize) -> Result<Vec<String>, SyscallError> {
     let mut cumulative = 0usize;
-    copy_string_array_from_user_tracked(array_ptr, &mut cumulative)
+    // SAFETY: the callee validates every pointer it reads; it has no
+    // precondition beyond being called from syscall context, which this
+    // function's contract passes on.
+    unsafe { copy_string_array_from_user_tracked(array_ptr, &mut cumulative) }
 }
 
 /// Copy a null-terminated string array from user space with cumulative
@@ -181,8 +182,8 @@ pub unsafe fn copy_string_array_from_user_tracked(
 
     // Read pointers until we hit null
     loop {
-        validate_user_ptr(current_ptr as *const usize, 8)?; // 64-bit pointer
-        let string_ptr = ptr::read_volatile(current_ptr as *const usize);
+        // 64-bit pointer
+        let string_ptr: usize = read_user(current_ptr)?;
 
         if string_ptr == 0 {
             break;
@@ -193,7 +194,9 @@ pub unsafe fn copy_string_array_from_user_tracked(
             return Err(SyscallError::ArgumentListTooLong);
         }
 
-        let string = copy_string_from_user(string_ptr)?;
+        // SAFETY: copy_string_from_user is fault-tolerant and validates
+        // `string_ptr` itself; it has no additional precondition.
+        let string = unsafe { copy_string_from_user(string_ptr)? };
 
         // Account for string bytes + NUL terminator + one 8-byte pointer
         let entry_cost = string.len() + 1 + core::mem::size_of::<usize>();
@@ -212,8 +215,6 @@ pub unsafe fn copy_string_array_from_user_tracked(
 
     Ok(strings)
 }
-
-use core::ptr;
 
 #[cfg(feature = "alloc")]
 extern crate alloc;
@@ -248,7 +249,7 @@ unsafe fn raw_copy(dst: *mut u8, src: *const u8, len: usize) -> Result<(), Sysca
     {
         // SAFETY: forwarded from this function's contract; user and kernel
         // ranges never overlap.
-        unsafe { ptr::copy_nonoverlapping(src, dst, len) };
+        unsafe { core::ptr::copy_nonoverlapping(src, dst, len) };
         Ok(())
     }
 }
@@ -378,6 +379,107 @@ pub fn read_user_bytes(addr: usize, dst: &mut [u8]) -> Result<(), SyscallError> 
     unsafe { raw_copy(dst.as_mut_ptr(), addr as *const u8, dst.len()) }
 }
 
+/// Largest single message (a datagram, a Wayland request) copied whole into
+/// the kernel by [`read_user_vec`].
+pub(crate) const MAX_USER_MESSAGE: usize = 1024 * 1024;
+
+/// Copy `len` bytes of user memory at `addr` into a new kernel buffer, for
+/// data that must be handled in one piece (a datagram, a protocol message).
+/// More than `max` bytes is `InvalidArgument` (EMSGSIZE-like), so a caller
+/// cannot make the kernel allocate without bound.
+pub fn read_user_vec(addr: usize, len: usize, max: usize) -> Result<Vec<u8>, SyscallError> {
+    if len > max {
+        return Err(SyscallError::InvalidArgument);
+    }
+    let mut buf = alloc::vec![0u8; len];
+    read_user_bytes(addr, &mut buf)?;
+    Ok(buf)
+}
+
+/// Bounce-buffer size for bulk transfers between the kernel and user memory.
+pub(crate) const USER_COPY_CHUNK: usize = 64 * 1024;
+
+/// Move up to `count` bytes produced by the kernel into user memory at
+/// `addr`, one bounded kernel buffer at a time.
+///
+/// `produce` fills the buffer it is given and returns how many bytes it
+/// wrote. With `repeat`, another chunk follows a full one (regular files,
+/// where a further read cannot block); without it `produce` runs exactly
+/// once, so a pipe, socket or tty read keeps its one-call semantics.
+///
+/// User memory is touched only through [`write_user_bytes`]: an unmapped
+/// page gives EFAULT, or the partial count if some bytes already reached the
+/// caller, as Linux does. Bytes `produce` consumed but that could not be
+/// copied out are lost, as they are for Linux on a mid-copy fault. Before
+/// v0.27 these paths built slices over user memory and faulted in the kernel
+/// instead (N-43).
+pub fn produce_to_user(
+    addr: usize,
+    count: usize,
+    repeat: bool,
+    mut produce: impl FnMut(&mut [u8]) -> Result<usize, SyscallError>,
+) -> Result<usize, SyscallError> {
+    if count == 0 {
+        return Ok(0);
+    }
+    validate_user_ptr(addr as *const u8, count)?;
+    let mut kbuf = alloc::vec![0u8; count.min(USER_COPY_CHUNK)];
+    let mut total = 0;
+    while total < count {
+        let want = (count - total).min(kbuf.len());
+        let n = match produce(&mut kbuf[..want]) {
+            Ok(n) => n.min(want),
+            Err(e) if total == 0 => return Err(e),
+            Err(_) => break,
+        };
+        if n > 0 {
+            if let Err(e) = write_user_bytes(addr + total, &kbuf[..n]) {
+                return if total > 0 { Ok(total) } else { Err(e) };
+            }
+        }
+        total += n;
+        if !repeat || n < want {
+            break;
+        }
+    }
+    Ok(total)
+}
+
+/// Hand up to `count` bytes of user memory at `addr` to `consume`, one
+/// bounded kernel buffer at a time. `consume` returns how many bytes it
+/// accepted; a short count ends the transfer. `repeat` as for
+/// [`produce_to_user`]. An unmapped page gives EFAULT, or the count accepted
+/// so far.
+pub fn consume_from_user(
+    addr: usize,
+    count: usize,
+    repeat: bool,
+    mut consume: impl FnMut(&[u8]) -> Result<usize, SyscallError>,
+) -> Result<usize, SyscallError> {
+    if count == 0 {
+        return Ok(0);
+    }
+    validate_user_ptr(addr as *const u8, count)?;
+    let mut kbuf = alloc::vec![0u8; count.min(USER_COPY_CHUNK)];
+    let mut total = 0;
+    while total < count {
+        let want = (count - total).min(kbuf.len());
+        if let Err(e) = read_user_bytes(addr + total, &mut kbuf[..want]) {
+            return if total > 0 { Ok(total) } else { Err(e) };
+        }
+        let n = match consume(&kbuf[..want]) {
+            Ok(n) => n.min(want),
+            Err(e) if total == 0 => return Err(e),
+            Err(_) => break,
+        };
+        total += n;
+        if !repeat || n < want {
+            break;
+        }
+    }
+    Ok(total)
+}
+
 /// Copy `src` into user memory at `addr`.
 pub fn write_user_bytes(addr: usize, src: &[u8]) -> Result<(), SyscallError> {
     if src.is_empty() {
@@ -487,6 +589,67 @@ mod accessor_tests {
             unsafe { copy_from_user::<[u32; 2]>(base) }.unwrap()[0],
             -5i32 as u32
         );
+    }
+
+    #[test]
+    fn produce_to_user_chunks_regular_reads_and_stops_short() {
+        // A source of 150_000 bytes, more than two chunks.
+        let src: alloc::vec::Vec<u8> = (0..150_000u32).map(|i| i as u8).collect();
+        let mut dst = alloc::vec![0u8; 200_000];
+        let mut pos = 0;
+        let n = produce_to_user(dst.as_mut_ptr() as usize, dst.len(), true, |k| {
+            let n = k.len().min(src.len() - pos);
+            k[..n].copy_from_slice(&src[pos..pos + n]);
+            pos += n;
+            Ok(n)
+        })
+        .unwrap();
+        assert_eq!(n, 150_000);
+        assert_eq!(&dst[..n], &src[..]);
+        // Without repeat, exactly one producer call, however large the request.
+        let mut calls = 0;
+        let n = produce_to_user(dst.as_mut_ptr() as usize, dst.len(), false, |k| {
+            calls += 1;
+            Ok(k.len())
+        })
+        .unwrap();
+        assert_eq!((n, calls), (USER_COPY_CHUNK, 1));
+        // An error before anything is copied is returned; after, the count.
+        assert_eq!(
+            produce_to_user(dst.as_mut_ptr() as usize, 10, true, |_| Err(
+                SyscallError::WouldBlock
+            )),
+            Err(SyscallError::WouldBlock)
+        );
+        let mut first = true;
+        let n = produce_to_user(dst.as_mut_ptr() as usize, dst.len(), true, |k| {
+            if first {
+                first = false;
+                Ok(k.len())
+            } else {
+                Err(SyscallError::IoError)
+            }
+        })
+        .unwrap();
+        assert_eq!(n, USER_COPY_CHUNK);
+        assert!(produce_to_user(KERNEL_ADDR, 8, true, |k| Ok(k.len())).is_err());
+    }
+
+    #[test]
+    fn consume_from_user_hands_over_chunks_until_short() {
+        let src: alloc::vec::Vec<u8> = (0..100_000u32).map(|i| (i * 7) as u8).collect();
+        let mut got = alloc::vec::Vec::new();
+        let n = consume_from_user(src.as_ptr() as usize, src.len(), true, |k| {
+            got.extend_from_slice(k);
+            Ok(k.len())
+        })
+        .unwrap();
+        assert_eq!((n, &got[..]), (src.len(), &src[..]));
+        // A consumer that accepts less ends the transfer there.
+        let n =
+            consume_from_user(src.as_ptr() as usize, src.len(), true, |k| Ok(k.len() / 2)).unwrap();
+        assert_eq!(n, USER_COPY_CHUNK / 2);
+        assert!(consume_from_user(KERNEL_ADDR, 8, true, |k| Ok(k.len())).is_err());
     }
 
     #[test]

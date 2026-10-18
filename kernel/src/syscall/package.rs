@@ -10,7 +10,7 @@ use super::{validate_user_ptr_typed, validate_user_string_ptr, SyscallError, Sys
 #[cfg(feature = "alloc")]
 extern crate alloc;
 #[cfg(feature = "alloc")]
-use alloc::{string::String, vec::Vec};
+use alloc::string::String;
 
 /// Read a null-terminated string from a user-space pointer.
 ///
@@ -19,30 +19,11 @@ fn read_user_string(ptr: usize, max_len: usize) -> Result<String, SyscallError> 
     // Validate pointer is in user space
     validate_user_string_ptr(ptr)?;
 
-    // SAFETY: ptr was validated as non-null and in user-space above. We read
-    // bytes one at a time from the user-space pointer until we find a null
-    // terminator or reach the max_len limit. The caller must provide a valid,
-    // null-terminated string in mapped user memory.
-    let bytes = unsafe {
-        let mut buf = Vec::new();
-        let mut p = ptr as *const u8;
-
-        for _ in 0..max_len {
-            let byte = *p;
-            if byte == 0 {
-                break;
-            }
-            buf.push(byte);
-            p = p.add(1);
-        }
-        buf
-    };
-
-    let s = core::str::from_utf8(&bytes).map_err(|_| SyscallError::InvalidArgument)?;
-    Ok(String::from(s))
+    // Fault-tolerant copy (N-43); no NUL within max_len bytes is EINVAL.
+    super::userspace::read_user_cstr(ptr, max_len)
 }
 
-/// Install a package by name (SYS_PKG_INSTALL = 90)
+/// Install a package by name (SYS_PKG_INSTALL = 1114)
 ///
 /// # Arguments
 /// - `name_ptr`: Pointer to null-terminated package name string
@@ -84,7 +65,7 @@ pub fn sys_pkg_install(name_ptr: usize, _name_len: usize) -> SyscallResult {
     }
 }
 
-/// Remove a package (SYS_PKG_REMOVE = 91)
+/// Remove a package (SYS_PKG_REMOVE = 1115)
 ///
 /// # Arguments
 /// - `name_ptr`: Pointer to null-terminated package name string
@@ -125,7 +106,7 @@ pub fn sys_pkg_remove(name_ptr: usize, _name_len: usize) -> SyscallResult {
     }
 }
 
-/// Query package information (SYS_PKG_QUERY = 92)
+/// Query package information (SYS_PKG_QUERY = 1116)
 ///
 /// # Arguments
 /// - `name_ptr`: Pointer to null-terminated package name string
@@ -143,7 +124,7 @@ pub fn sys_pkg_query(name_ptr: usize, _info_buf: usize) -> SyscallResult {
     }
 }
 
-/// List installed packages (SYS_PKG_LIST = 93)
+/// List installed packages (SYS_PKG_LIST = 1117)
 ///
 /// # Arguments
 /// - `buf_ptr`: Pointer to buffer for writing package count
@@ -162,19 +143,13 @@ pub fn sys_pkg_list(buf_ptr: usize, _buf_size: usize) -> SyscallResult {
         // Validate buffer pointer is in user space and aligned for usize
         validate_user_ptr_typed::<usize>(buf_ptr)?;
 
-        // SAFETY: buf_ptr was validated as non-null, in user-space, properly
-        // sized and aligned for usize above. We write a single usize value
-        // (the package count).
-        unsafe {
-            let out = buf_ptr as *mut usize;
-            *out = count;
-        }
+        super::userspace::write_user(buf_ptr, count)?;
     }
 
     Ok(count)
 }
 
-/// Update repository index (SYS_PKG_UPDATE = 94)
+/// Update repository index (SYS_PKG_UPDATE = 1118)
 ///
 /// # Arguments
 /// - `flags`: Reserved for future use (must be 0)

@@ -32,8 +32,10 @@ pub(super) fn sys_wl_send_message(
 ) -> SyscallResult {
     super::validate_user_buffer(msg_ptr, msg_len)?;
 
-    // SAFETY: msg_ptr validated.
-    let msg_bytes = unsafe { core::slice::from_raw_parts(msg_ptr as *const u8, msg_len) };
+    // Copied in whole through the fault-tolerant reader (N-43).
+    let msg_bytes =
+        super::userspace::read_user_vec(msg_ptr, msg_len, super::userspace::MAX_USER_MESSAGE)?;
+    let msg_bytes = &msg_bytes[..];
 
     crate::desktop::wayland::handle_client_message(client_id as u32, msg_bytes)
         .map_err(|_| SyscallError::InvalidArgument)?;
