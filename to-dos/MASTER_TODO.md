@@ -353,6 +353,10 @@ What does not work yet: `docs/KNOWN-LIMITATIONS.md`.
     probes (HR-04 to HR-06), Svpbmt/XTheadMae (HR-11).
   - [ ] ABI-review items N-190 to N-193, N-207, N-209 to N-211, N-217, N-221, N-222, N-225,
     N-231, N-235 to N-238.
+  - [ ] MFA through PAM (decision of 2026-10-19: no MFA fixes before this): TOTP per RFC 6238,
+    pam_veridian checking the second factor, and only then the `/etc/veridian/mfa` policy -- a
+    line naming no account (no `:`) protects no account today, while a named line with a bad
+    secret or an unreadable file fails closed (PR #26 review, `docs/KNOWN-LIMITATIONS.md`).
 
   Then the process, signal, time and file syscall tiers (X2 groups, with the open
   ABI-review findings N-194 to N-247 that belong to them).
