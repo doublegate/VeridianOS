@@ -284,7 +284,7 @@ pub fn cpu_supports_vmx() -> bool {
     }
 }
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
 /// Read a model-specific register.
 ///
 /// # Safety
@@ -302,7 +302,7 @@ pub(crate) unsafe fn read_msr(msr: u32) -> u64 {
     ((high as u64) << 32) | (low as u64)
 }
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
 /// Write a model-specific register.
 ///
 /// # Safety

@@ -280,12 +280,14 @@ impl Credentials {
         Ok(())
     }
 
-    /// setgroups: privileged only; at most `NGROUPS_MAX` groups.
+    /// setgroups: privileged only; at most `NGROUPS_MAX` groups, none of
+    /// them (gid_t)-1, which is no group (EINVAL, as Linux's
+    /// groups_from_user; it was installed -- PR #22 review).
     pub fn setgroups(&mut self, list: &[u32]) -> Result<(), SyscallError> {
         if !self.privileged() {
             return Err(SyscallError::OperationNotPermitted);
         }
-        if list.len() > NGROUPS_MAX {
+        if list.len() > NGROUPS_MAX || list.contains(&UNCHANGED) {
             return Err(SyscallError::InvalidArgument);
         }
         self.groups[..list.len()].copy_from_slice(list);
@@ -297,6 +299,21 @@ impl Credentials {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn setgroups_refuses_the_invalid_gid() {
+        let mut root = Credentials::new(0, 0);
+        assert_eq!(
+            root.setgroups(&[5, u32::MAX]),
+            Err(SyscallError::InvalidArgument)
+        );
+        assert!(root.groups().is_empty(), "nothing installed");
+        let mut user = Credentials::new(1000, 1000);
+        assert_eq!(
+            user.setgroups(&[u32::MAX]),
+            Err(SyscallError::OperationNotPermitted)
+        );
+    }
 
     const U: u32 = UNCHANGED;
 

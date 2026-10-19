@@ -22,7 +22,7 @@
 
 #[allow(unused_imports)]
 use alloc::{collections::VecDeque, format, sync::Arc, vec::Vec};
-use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
 use spin::RwLock;
 
@@ -33,6 +33,8 @@ const PTY_BUFFER_SIZE: usize = 4096;
 
 const POLLIN: u16 = 0x0001;
 const POLLOUT: u16 = 0x0004;
+const POLLERR: u16 = 0x0008;
+const POLLHUP: u16 = 0x0010;
 
 /// Terminal control characters
 pub mod termios {
@@ -120,6 +122,17 @@ pub struct PtyMaster {
     /// SIGTSTP). Background processes accessing this terminal receive
     /// SIGTTIN/SIGTTOU.
     foreground_pgid: AtomicU64,
+
+    /// Open slave nodes, and whether there ever was one: once the last
+    /// slave closes, the master reads EIO when drained and polls POLLHUP,
+    /// as on Linux (PR #24 review: it waited forever).
+    slaves: AtomicUsize,
+    had_slave: AtomicBool,
+}
+
+/// EIO, what a terminal whose other side is gone reads and writes.
+fn hung_up() -> KernelError {
+    KernelError::FsError(crate::error::FsError::IoError)
 }
 
 impl PtyMaster {
@@ -133,7 +146,27 @@ impl PtyMaster {
             flags: RwLock::new(TermiosFlags::default()),
             controller: RwLock::new(None),
             foreground_pgid: AtomicU64::new(0),
+            slaves: AtomicUsize::new(0),
+            had_slave: AtomicBool::new(false),
         }
+    }
+
+    /// A slave node was opened.
+    pub fn slave_opened(&self) {
+        self.slaves.fetch_add(1, Ordering::AcqRel);
+        self.had_slave.store(true, Ordering::Release);
+    }
+
+    /// A slave node closed; the last one hangs the terminal up.
+    pub fn slave_closed(&self) {
+        if self.slaves.fetch_sub(1, Ordering::AcqRel) == 1 {
+            crate::sched::dispatch::io_event();
+        }
+    }
+
+    /// Every slave that was open has closed.
+    fn hung(&self) -> bool {
+        self.had_slave.load(Ordering::Acquire) && self.slaves.load(Ordering::Acquire) == 0
     }
 
     /// Get PTY ID
@@ -155,7 +188,11 @@ impl PtyMaster {
             n
         };
         if bytes_to_read == 0 && !buffer.is_empty() {
-            return Err(KernelError::WouldBlock);
+            return Err(if self.hung() {
+                hung_up()
+            } else {
+                KernelError::WouldBlock
+            });
         }
         // Space freed for the slave's writes.
         crate::sched::dispatch::io_event();
@@ -171,6 +208,9 @@ impl PtyMaster {
         }
         if self.input_buffer.read().len() < PTY_BUFFER_SIZE {
             ready |= POLLOUT;
+        }
+        if self.hung() {
+            ready |= POLLHUP;
         }
         ready
     }
@@ -357,10 +397,9 @@ impl PtySlave {
             crate::sched::dispatch::io_event();
             Ok(bytes_to_read)
         } else {
-            Err(KernelError::NotFound {
-                resource: "pty_master",
-                id: self.master_id as u64,
-            })
+            // The master is gone: EIO, as Linux's hung-up terminal (it was
+            // ENOENT).
+            Err(hung_up())
         }
     }
 
@@ -377,10 +416,7 @@ impl PtySlave {
             crate::sched::dispatch::io_event();
             Ok(taken)
         } else {
-            Err(KernelError::NotFound {
-                resource: "pty_master",
-                id: self.master_id as u64,
-            })
+            Err(hung_up())
         }
     }
 }
@@ -546,6 +582,17 @@ pub struct PtyMasterNode {
     master: Arc<PtyMaster>,
 }
 
+/// The last reference to the master side closes the terminal: the PTY
+/// leaves the manager (nothing ever removed it, so every openpty leaked
+/// one; PR #23 review), and its slaves hang up.
+impl Drop for PtyMasterNode {
+    fn drop(&mut self) {
+        let id = self.master.id();
+        let _ = with_pty_manager(|mgr| mgr.close_pty(id));
+        crate::sched::dispatch::io_event();
+    }
+}
+
 impl PtyMasterNode {
     /// Wrap an existing [`PtyMaster`] as a VfsNode.
     pub fn new(master: Arc<PtyMaster>) -> Self {
@@ -650,6 +697,9 @@ pub struct PtySlaveNode {
 impl PtySlaveNode {
     /// Wrap a [`PtySlave`] as a VfsNode.
     pub fn new(slave: PtySlave) -> Self {
+        if let Some(master) = get_pty_master(slave.master_id()) {
+            master.slave_opened();
+        }
         Self { slave }
     }
 
@@ -661,6 +711,14 @@ impl PtySlaveNode {
     /// Return the path that would be exposed as the slave device name.
     pub fn pts_path(&self) -> alloc::string::String {
         format!("/dev/pts/{}", self.slave.id())
+    }
+}
+
+impl Drop for PtySlaveNode {
+    fn drop(&mut self) {
+        if let Some(master) = get_pty_master(self.slave.master_id()) {
+            master.slave_closed();
+        }
     }
 }
 
@@ -685,9 +743,9 @@ impl VfsNode for PtySlaveNode {
     }
 
     fn poll_readiness(&self) -> u16 {
-        // A slave whose master is gone reads end of file and writes fail:
-        // report it readable so pollers notice.
-        get_pty_master(self.slave.master_id()).map_or(POLLIN, |m| m.slave_readiness())
+        // A slave whose master is gone is hung up: reads and writes give
+        // EIO, and poll says so (POLLIN promised data a read did not give).
+        get_pty_master(self.slave.master_id()).map_or(POLLHUP | POLLERR, |m| m.slave_readiness())
     }
 
     fn wakes_io_waiters(&self) -> bool {
@@ -747,6 +805,27 @@ impl VfsNode for PtySlaveNode {
 mod tests {
     /// Readiness follows the buffers, and an empty read is WouldBlock (a
     /// sleep for a blocking reader), not 0, which reads as end of file.
+    /// Once the last slave closes, the drained master reads EIO and polls
+    /// POLLHUP, as on Linux; before any slave, or while one is open, an
+    /// empty read waits (PR #24 review).
+    #[test]
+    fn the_master_hangs_up_after_its_last_slave() {
+        let m = PtyMaster::new(9);
+        let mut buf = [0u8; 4];
+        assert!(matches!(m.read(&mut buf), Err(KernelError::WouldBlock)));
+        m.slave_opened();
+        m.slave_opened();
+        m.slave_closed();
+        assert!(matches!(m.read(&mut buf), Err(KernelError::WouldBlock)));
+        assert_eq!(m.master_readiness() & POLLHUP, 0);
+        m.slave_closed();
+        assert!(matches!(
+            m.read(&mut buf),
+            Err(KernelError::FsError(crate::error::FsError::IoError))
+        ));
+        assert_ne!(m.master_readiness() & POLLHUP, 0);
+    }
+
     #[test]
     fn readiness_and_empty_reads_follow_the_buffers() {
         let master = PtyMaster::new(91);

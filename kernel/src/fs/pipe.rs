@@ -35,6 +35,9 @@ struct PipeInner {
     write_closed: bool,
     /// True when the read end has been closed.
     read_closed: bool,
+    /// Counts this pipe's changes (data in, data out, an end closed), for
+    /// edge-triggered epoll (`VfsNode::io_generation`).
+    generation: u64,
 }
 
 impl PipeInner {
@@ -44,6 +47,7 @@ impl PipeInner {
             capacity,
             write_closed: false,
             read_closed: false,
+            generation: 0,
         }
     }
 }
@@ -120,6 +124,7 @@ impl PipeReader {
             for byte in buf.iter_mut().take(to_read) {
                 *byte = pipe.buffer.pop_front().unwrap_or(0);
             }
+            pipe.generation += 1;
             to_read
         };
         pipe_event(); // room for a waiting writer
@@ -128,8 +133,16 @@ impl PipeReader {
 
     /// Close the read end.
     pub fn close(&self) {
-        self.inner.lock().read_closed = true;
+        let mut pipe = self.inner.lock();
+        pipe.read_closed = true;
+        pipe.generation += 1;
+        drop(pipe);
         pipe_event();
+    }
+
+    /// This pipe's change count (see `PipeInner::generation`).
+    pub fn generation(&self) -> u64 {
+        self.inner.lock().generation
     }
 
     /// Check if there is data available to read.
@@ -164,10 +177,17 @@ impl PipeWriter {
             if data.len() <= PIPE_BUF.min(pipe.capacity) && available < data.len() {
                 return Err(KernelError::WouldBlock);
             }
+            // A larger write to a full pipe takes nothing: EAGAIN too, as
+            // Linux's pipe_write. Ok(0) told a non-blocking writer that
+            // nothing could ever be written (PR #24 review).
+            if available == 0 && !data.is_empty() {
+                return Err(KernelError::WouldBlock);
+            }
             let to_write = data.len().min(available);
             for &byte in &data[..to_write] {
                 pipe.buffer.push_back(byte);
             }
+            pipe.generation += 1;
             to_write
         };
         if to_write > 0 {
@@ -180,19 +200,29 @@ impl PipeWriter {
     pub fn write_all(&self, data: &[u8]) -> Result<(), KernelError> {
         let mut offset = 0;
         while offset < data.len() {
-            let written = self.write(&data[offset..])?;
-            if written == 0 {
-                core::hint::spin_loop();
+            // A full pipe is WouldBlock now, not Ok(0): spin until there
+            // is room.
+            match self.write(&data[offset..]) {
+                Ok(written) => offset += written,
+                Err(KernelError::WouldBlock) => core::hint::spin_loop(),
+                Err(e) => return Err(e),
             }
-            offset += written;
         }
         Ok(())
     }
 
     /// Close the write end.
     pub fn close(&self) {
-        self.inner.lock().write_closed = true;
+        let mut pipe = self.inner.lock();
+        pipe.write_closed = true;
+        pipe.generation += 1;
+        drop(pipe);
         pipe_event();
+    }
+
+    /// This pipe's change count (see `PipeInner::generation`).
+    pub fn generation(&self) -> u64 {
+        self.inner.lock().generation
     }
 }
 
@@ -242,6 +272,10 @@ impl PipeReadNode {
 impl VfsNode for PipeReadNode {
     fn node_type(&self) -> NodeType {
         NodeType::Pipe
+    }
+
+    fn io_generation(&self) -> Option<u64> {
+        Some(self.reader.lock().generation())
     }
 
     fn read(&self, _offset: usize, buffer: &mut [u8]) -> Result<usize, KernelError> {
@@ -342,6 +376,10 @@ impl VfsNode for PipeWriteNode {
         NodeType::Pipe
     }
 
+    fn io_generation(&self) -> Option<u64> {
+        Some(self.writer.lock().generation())
+    }
+
     fn read(&self, _offset: usize, _buffer: &mut [u8]) -> Result<usize, KernelError> {
         Err(KernelError::PermissionDenied {
             operation: "read from pipe write end",
@@ -420,6 +458,18 @@ impl VfsNode for PipeWriteNode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A write larger than PIPE_BUF into a full pipe is EAGAIN, not 0
+    /// (PR #24 review).
+    #[test]
+    fn a_large_write_to_a_full_pipe_would_block() {
+        let (_reader, writer) = create_pipe_with_capacity(16).unwrap();
+        assert_eq!(writer.write(&[1u8; 16]).unwrap(), 16);
+        assert!(matches!(
+            writer.write(&[2u8; 5000]),
+            Err(KernelError::WouldBlock)
+        ));
+    }
 
     #[test]
     fn test_pipe_basic_read_write() {

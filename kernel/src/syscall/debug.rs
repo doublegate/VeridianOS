@@ -78,9 +78,14 @@ impl TryFrom<usize> for PtraceRequest {
 /// Looks up the target process via the process table, finds the VAS mapping
 /// containing the target address, locates the backing physical frame, and
 /// reads the word from the kernel's physical memory window.
-fn ptrace_peek(target_pid: process::ProcessId, addr: usize) -> Result<usize, SyscallError> {
+fn ptrace_peek(
+    target_pid: process::ProcessId,
+    caller_pid: u64,
+    addr: usize,
+) -> Result<usize, SyscallError> {
     let target = process::find_process(target_pid).ok_or(SyscallError::ProcessNotFound)?;
     let memory_space = target.memory_space.lock();
+    still_traced(&target, caller_pid)?;
 
     // Find the mapping that contains this address: EIO for none, as
     // Linux's ptrace_access_vm, and for device memory, whose reads can
@@ -135,11 +140,13 @@ fn ptrace_peek(target_pid: process::ProcessId, addr: usize) -> Result<usize, Sys
 /// and shared pages the tracee may not write are refused.
 fn ptrace_poke(
     target_pid: process::ProcessId,
+    caller_pid: u64,
     addr: usize,
     value: usize,
 ) -> Result<(), SyscallError> {
     let target = process::find_process(target_pid).ok_or(SyscallError::ProcessNotFound)?;
     let memory_space = target.memory_space.lock();
+    still_traced(&target, caller_pid)?;
     #[cfg(feature = "alloc")]
     {
         memory_space
@@ -234,6 +241,21 @@ pub(super) fn may_access(
     caller.euid == 0 || (same_user && target_dumpable)
 }
 
+/// Checked again with the target's address space locked (the lock exec's
+/// clear takes): the caller still traces it -- a detach by another thread
+/// of the tracer may have come in between -- and no exec is replacing the
+/// image, whose new set-ID program a tracer must not write before the
+/// set-ID decision (PR #23 review). ESRCH, as for a process not traced.
+fn still_traced(target: &process::Process, caller_pid: u64) -> Result<(), SyscallError> {
+    use core::sync::atomic::Ordering;
+    if target.tracer.load(Ordering::Acquire) != caller_pid
+        || target.exec_in_progress.load(Ordering::Acquire)
+    {
+        return Err(SyscallError::ProcessNotFound);
+    }
+    Ok(())
+}
+
 /// The process `pid` if the caller is its tracer; ESRCH otherwise, as
 /// Linux answers requests about a process the caller does not trace.
 /// Reading or writing another process's memory needs this relationship;
@@ -294,7 +316,14 @@ pub fn sys_ptrace(request: usize, pid: usize, addr: usize, data: usize) -> Sysca
 
         PtraceRequest::Detach => {
             let target = traced_by_caller(pid, caller_pid)?;
-            target.tracer.store(0, Ordering::Release);
+            // Under the guard an exec decides set-ID credentials under,
+            // and only if still this caller's (another of its threads may
+            // have detached and someone else attached since).
+            let _guard = target.cred_guard.lock();
+            target
+                .tracer
+                .compare_exchange(caller_pid, 0, Ordering::AcqRel, Ordering::Acquire)
+                .map_err(|_| SyscallError::ProcessNotFound)?;
             Ok(0)
         }
 
@@ -302,14 +331,14 @@ pub fn sys_ptrace(request: usize, pid: usize, addr: usize, data: usize) -> Sysca
             // The word goes to *data and the call returns 0: the raw
             // syscall's convention, which the C library wrappers unpack.
             let target = traced_by_caller(pid, caller_pid)?;
-            let word = ptrace_peek(target.pid, addr)?;
+            let word = ptrace_peek(target.pid, caller_pid, addr)?;
             super::userspace::write_user::<usize>(data, word)?;
             Ok(0)
         }
 
         PtraceRequest::PokeText | PtraceRequest::PokeData => {
             let target = traced_by_caller(pid, caller_pid)?;
-            ptrace_poke(target.pid, addr, data)?;
+            ptrace_poke(target.pid, caller_pid, addr, data)?;
             Ok(0)
         }
 

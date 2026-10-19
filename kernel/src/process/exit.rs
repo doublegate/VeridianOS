@@ -190,8 +190,9 @@ pub fn wait_children(filter: WaitFilter, options: WaitOptions) -> Result<Waited,
                     // Remove from children list
                     current.children.lock().retain(|&p| p != *child_pid);
 
-                    // Remove from process table
-                    table::remove_process(*child_pid);
+                    // Remove from process table (kept for the reap of a
+                    // task it may still have).
+                    super::remove_waited(*child_pid);
 
                     println!(
                         "[PROCESS] Process {} reaped child {} (exit code {})",
@@ -567,15 +568,22 @@ pub fn exit_dispatched(exit_code: i32, group: bool) -> ! {
         } else if !group && pending == 0 {
             process.set_exit_code(exit_code);
         }
-        thread.set_exited(exit_code);
-
-        let others_alive = process.threads.lock().values().any(|t| {
-            t.tid != thread.tid
-                && !matches!(
-                    t.get_state(),
-                    super::thread::ThreadState::Zombie | super::thread::ThreadState::Dead
-                )
-        });
+        // This thread's exit and the look at the others under one hold of
+        // the threads lock: done apart, the last two threads of an
+        // exit_group could each see the other already exited, and both
+        // tear the process down and signal the parent (PR #22 review;
+        // Linux decides group_dead by an atomic decrement).
+        let others_alive = {
+            let threads = process.threads.lock();
+            thread.set_exited(exit_code);
+            threads.values().any(|t| {
+                t.tid != thread.tid
+                    && !matches!(
+                        t.get_state(),
+                        super::thread::ThreadState::Zombie | super::thread::ThreadState::Dead
+                    )
+            })
+        };
         if !others_alive {
             cleanup_process(&process);
             process.set_state(ProcessState::Zombie);
@@ -734,25 +742,33 @@ pub fn cleanup_process(process: &Process) {
     // freed by clear() above), so they do not need separate cleanup here.
     #[cfg(feature = "alloc")]
     {
-        let threads = process.threads.lock();
-        for (_, thread) in threads.iter() {
-            let frame_num = thread.kernel_stack.phys_frame.load(Ordering::Acquire);
-            let page_count = thread.kernel_stack.phys_page_count.load(Ordering::Acquire);
-            if frame_num != 0 && page_count > 0 {
-                // Unmaps the guard-paged stack (N-26) on every CPU, then
-                // returns its frames.
-                crate::mm::kstack::free(crate::mm::kstack::KernelStack {
-                    base: thread.kernel_stack.base,
-                    frame: crate::mm::FrameNumber::new(frame_num),
-                    pages: page_count,
-                });
-                // Mark as freed to prevent double-free
-                thread.kernel_stack.phys_frame.store(0, Ordering::Release);
-                thread
-                    .kernel_stack
-                    .phys_page_count
-                    .store(0, Ordering::Release);
-            }
+        // Each stack is claimed with a swap (one claimant even if two
+        // cleanups race) under the threads lock, and freed after it is
+        // released: freeing flushes every CPU's TLB, and a CPU spinning on
+        // the lock with interrupts off could never answer (N-139; PR #22
+        // review), as `cleanup_thread` already avoids.
+        let stacks: alloc::vec::Vec<crate::mm::kstack::KernelStack> = {
+            let threads = process.threads.lock();
+            threads
+                .values()
+                .filter_map(|thread| {
+                    let frame_num = thread.kernel_stack.phys_frame.swap(0, Ordering::AcqRel);
+                    let page_count = thread
+                        .kernel_stack
+                        .phys_page_count
+                        .swap(0, Ordering::AcqRel);
+                    (frame_num != 0 && page_count > 0).then(|| crate::mm::kstack::KernelStack {
+                        base: thread.kernel_stack.base,
+                        frame: crate::mm::FrameNumber::new(frame_num),
+                        pages: page_count,
+                    })
+                })
+                .collect()
+        };
+        // Unmaps each guard-paged stack (N-26) on every CPU, then returns
+        // its frames.
+        for stack in stacks {
+            crate::mm::kstack::free(stack);
         }
     }
 
@@ -936,14 +952,15 @@ pub fn cleanup_thread(process: &Process, tid: ThreadId) -> Result<(), KernelErro
         // ThreadBuilder::build() records the frame number and page count
         // in the Stack struct for exactly this purpose.
         {
+            // Claimed with a swap, as in `cleanup_process`: one claimant.
             let frame_num = thread
                 .kernel_stack
                 .phys_frame
-                .load(core::sync::atomic::Ordering::Acquire);
+                .swap(0, core::sync::atomic::Ordering::AcqRel);
             let page_count = thread
                 .kernel_stack
                 .phys_page_count
-                .load(core::sync::atomic::Ordering::Acquire);
+                .swap(0, core::sync::atomic::Ordering::AcqRel);
             if frame_num != 0 && page_count > 0 {
                 crate::mm::kstack::free(crate::mm::kstack::KernelStack {
                     base: thread.kernel_stack.base,
@@ -955,15 +972,6 @@ pub fn cleanup_thread(process: &Process, tid: ThreadId) -> Result<(), KernelErro
                     "[PROCESS] Freed kernel stack for tid {} ({} frames)",
                     tid.0, page_count
                 );
-                // Mark as freed to prevent double-free
-                thread
-                    .kernel_stack
-                    .phys_frame
-                    .store(0, core::sync::atomic::Ordering::Release);
-                thread
-                    .kernel_stack
-                    .phys_page_count
-                    .store(0, core::sync::atomic::Ordering::Release);
             }
         }
 

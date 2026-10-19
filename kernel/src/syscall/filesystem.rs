@@ -97,8 +97,12 @@ fn read_console_waiting(out: &mut [u8]) -> Result<usize, SyscallError> {
                 .into_iter()
                 .flatten()
                 .min();
+            // Until the read would return: poll readiness was "a byte is
+            // waiting", true while a raw read waited for VMIN bytes, so the
+            // wait returned at once and the loop spun (PR #24 review).
+            let want = out.len();
             match dispatch::wait_event(&console_input::CONSOLE_INPUT, deadline, || {
-                console_input::tty_readiness() & 0x0001 != 0
+                console_input::read_would_return(want)
             }) {
                 Ok(()) | Err(WaitError::TimedOut) => {}
                 Err(WaitError::Interrupted) => return Err(SyscallError::Interrupted),
@@ -198,6 +202,12 @@ fn open_path(path: &str, flags: usize, mode: usize) -> SyscallResult {
     let open_flags = OpenFlags::from_bits(flags as u32).ok_or(SyscallError::InvalidArgument)?;
     let cloexec = flags & O_CLOEXEC != 0;
     let follow = flags & O_NOFOLLOW == 0;
+    // O_CREAT with O_DIRECTORY is EINVAL whether the name exists or not,
+    // as on Linux since 6.4: it made a regular file, then failed with
+    // ENOTDIR and left the file behind (PR #23 review).
+    if open_flags.create && flags & O_DIRECTORY != 0 {
+        return Err(SyscallError::InvalidArgument);
+    }
 
     let (node, created, canonical) = match vfs()?.open_follow_canonical(path, open_flags, follow) {
         Ok((node, canonical)) => {
@@ -360,6 +370,14 @@ pub fn sys_close(fd: usize) -> SyscallResult {
 /// embedded shell to accept keyboard input before a full console subsystem
 /// is initialized.
 pub fn sys_read(fd: usize, buffer: usize, count: usize) -> SyscallResult {
+    let result = read_fd(fd, buffer, count);
+    // However the read ended (data, EINTR, EAGAIN), a console read's VTIME
+    // timer ends with it.
+    crate::drivers::console_input::end_read();
+    result
+}
+
+fn read_fd(fd: usize, buffer: usize, count: usize) -> SyscallResult {
     if count == 0 {
         return Ok(0);
     }
@@ -541,7 +559,10 @@ fn write_fd(
             Err(e) => return Some(Err(e)),
         }
         #[cfg(feature = "alloc")]
-        if let Err(e) = wait_ready(&file_desc, POLLOUT | POLLERR, &mut retry_now) {
+        // POLLHUP too: a stream socket whose peer closed reports only
+        // that, and a writer waiting for POLLOUT or POLLERR slept forever
+        // (PR #23 review); the retried write then gets EPIPE.
+        if let Err(e) = wait_ready(&file_desc, POLLOUT | POLLERR | POLLHUP, &mut retry_now) {
             return Some(if done > 0 { Ok(done) } else { Err(e) });
         }
     }
@@ -607,12 +628,25 @@ fn file_read_to_user(file: &crate::fs::file::File, buf: usize, count: usize) -> 
         crate::fs::NodeType::Directory => return Err(SyscallError::IsADirectory),
         _ => false,
     };
-    super::userspace::produce_to_user(buf, count, regular, |kbuf| match file.read(kbuf) {
-        Ok(n) => Ok(n),
-        Err(crate::error::KernelError::BrokenPipe) => Ok(0),
-        Err(crate::error::KernelError::WouldBlock) => Err(SyscallError::WouldBlock),
-        Err(e) => Err(super::map_kernel_error(e)),
-    })
+    // A regular file is read as one step (see `File::io_lock`).
+    let _io = regular.then(|| file.io_lock.lock());
+    super::userspace::produce_to_user(
+        buf,
+        count,
+        regular,
+        |kbuf| match file.read(kbuf) {
+            Ok(n) => Ok(n),
+            Err(crate::error::KernelError::BrokenPipe) => Ok(0),
+            Err(crate::error::KernelError::WouldBlock) => Err(SyscallError::WouldBlock),
+            Err(e) => Err(super::map_kernel_error(e)),
+        },
+        // What did not reach the caller is read again next time.
+        |unread| {
+            if regular {
+                let _ = file.seek(crate::fs::file::SeekFrom::Current(-(unread as isize)));
+            }
+        },
+    )
 }
 
 /// Write up to `count` bytes of user memory at `buf` to an open file, in
@@ -624,6 +658,8 @@ fn file_write_from_user(file: &crate::fs::file::File, buf: usize, count: usize) 
         return Err(SyscallError::BadFileDescriptor);
     }
     let count = file.fsize_room(count).map_err(super::map_kernel_error)?;
+    // A regular file is written as one step (see `File::io_lock`).
+    let _io = (file.node.node_type() == crate::fs::NodeType::File).then(|| file.io_lock.lock());
     super::userspace::consume_from_user(buf, count, true, |kbuf| match file.write(kbuf) {
         Ok(n) => Ok(n),
         Err(crate::error::KernelError::BrokenPipe) => Err(SyscallError::BrokenPipe),
@@ -3067,7 +3103,9 @@ pub fn sys_unlinkat(dirfd: usize, path_ptr: usize, flags: usize) -> SyscallResul
     }
     let (dir, name) = parent_dir(&abs_path)?;
     check_may_remove(&*dir, &name)?;
-    dir.unlink(&name).map_err(super::map_kernel_error)?;
+    // The type checked above is checked again where the removal happens.
+    dir.unlink_kind(&name, remove_dir)
+        .map_err(super::map_kernel_error)?;
     Ok(0)
 }
 
@@ -3147,11 +3185,17 @@ pub fn sys_pread(fd: usize, buf: usize, count: usize, offset: usize) -> SyscallR
     // Read at `offset` through the VfsNode, bypassing the File position,
     // a chunk at a time through a kernel buffer (N-43).
     let mut at = offset;
-    super::userspace::produce_to_user(buf, count, true, |kbuf| {
-        let n = file.node.read(at, kbuf).map_err(super::map_kernel_error)?;
-        at += n;
-        Ok(n)
-    })
+    super::userspace::produce_to_user(
+        buf,
+        count,
+        true,
+        |kbuf| {
+            let n = file.node.read(at, kbuf).map_err(super::map_kernel_error)?;
+            at += n;
+            Ok(n)
+        },
+        |_| {},
+    ) // no file position to give bytes back to
 }
 
 /// Write to a file descriptor at a given offset without changing position

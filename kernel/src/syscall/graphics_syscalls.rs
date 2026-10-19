@@ -99,11 +99,15 @@ pub(super) fn sys_input_read(events_ptr: usize, max_count: usize) -> SyscallResu
         if let Some(event) = crate::drivers::input_event::read_event() {
             // InputEvent has no implicit padding (u64, u16, u16, i32).
             // Copied out fault-tolerantly (N-43); an event already dequeued
-            // when the copy fails is lost, as with a short read.
-            super::userspace::write_user(
+            // when the copy fails is lost. The events before it were
+            // delivered, so their count is returned, as evdev returns a
+            // short read; EFAULT only if none was (PR #23 review).
+            if let Err(e) = super::userspace::write_user(
                 events_ptr + count * core::mem::size_of::<InputEvent>(),
                 event,
-            )?;
+            ) {
+                return if count > 0 { Ok(count) } else { Err(e) };
+            }
             count += 1;
         } else {
             break;

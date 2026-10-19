@@ -98,6 +98,13 @@ pub fn poll_hardware() -> bool {
         }
         any = true;
     }
+    // Whoever drained the UART -- the tick, or a reader or poll in task
+    // context -- the waiters are woken at the next tick: a reader asleep
+    // while another task's poll moved its newline into the ring was not
+    // (PR #24 review).
+    if any {
+        WAKE_PENDING.store(true, core::sync::atomic::Ordering::Relaxed);
+    }
     any
 }
 
@@ -172,9 +179,99 @@ static LINE: Mutex<Line> = Mutex::new(Line {
     complete: false,
 });
 
-/// Raw mode with VMIN = 0, VTIME > 0: when the current timed read gives up
-/// (`monotonic_ns`; 0 when none is running).
-static VTIME_DEADLINE: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+/// A raw-mode read's VTIME timer: when it gives up (`monotonic_ns`), and
+/// how many bytes had arrived when it was (re)started -- an inter-byte
+/// timer restarts with each new byte.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Timer {
+    deadline: u64,
+    seen: usize,
+}
+
+/// The VTIME timer of each reader in a timed raw-mode read, by thread:
+/// one per read, ended by [`end_read`] however the read ends. A single
+/// global timer was shared by concurrent readers and outlived a read that
+/// ended in EINTR or EAGAIN, so the next timed read returned 0 at once
+/// (PR #24 review).
+static TIMERS: Mutex<alloc::collections::BTreeMap<u64, Timer>> =
+    Mutex::new(alloc::collections::BTreeMap::new());
+
+/// The reading thread (0 outside a dispatched task).
+fn reader() -> u64 {
+    #[cfg(feature = "alloc")]
+    {
+        crate::sched::dispatch::current_owner().map_or(0, |(_, tid)| tid)
+    }
+    #[cfg(not(feature = "alloc"))]
+    {
+        0
+    }
+}
+
+/// The calling thread's read of the console has ended: its VTIME timer, if
+/// any, goes. Called when every read system call returns.
+pub fn end_read() {
+    let me = reader();
+    let mut timers = TIMERS.lock();
+    if !timers.is_empty() {
+        timers.remove(&me);
+    }
+}
+
+/// What a raw-mode read does now, by POSIX's MIN and TIME (Linux's
+/// n_tty_read), with `avail` bytes waiting, room for `out_len`, and the
+/// reader's VTIME timer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Raw {
+    /// Return what is waiting (possibly nothing, for MIN = TIME = 0).
+    Take,
+    /// The timer ran out with nothing to return: 0 bytes.
+    Zero,
+    /// Wait, keeping (or starting) this timer.
+    Wait(Option<Timer>),
+}
+
+fn raw_step(
+    vmin: u8,
+    vtime: u8,
+    avail: usize,
+    out_len: usize,
+    now: u64,
+    timer: Option<Timer>,
+) -> Raw {
+    let want = usize::from(vmin).min(out_len);
+    let period = u64::from(vtime) * 100_000_000;
+    match (vmin, vtime) {
+        // Polling read.
+        (0, 0) => Raw::Take,
+        // MIN bytes, however long that takes.
+        (_, 0) if avail >= want => Raw::Take,
+        (_, 0) => Raw::Wait(None),
+        // Timed read: what arrives within TIME, else 0.
+        (0, _) if avail > 0 => Raw::Take,
+        (0, _) => match timer {
+            None => Raw::Wait(Some(Timer {
+                deadline: now.saturating_add(period),
+                seen: 0,
+            })),
+            Some(t) if now >= t.deadline => Raw::Zero,
+            Some(t) => Raw::Wait(Some(t)),
+        },
+        // MIN bytes, or fewer once TIME passes between two of them; the
+        // first byte is waited for without limit. It used to return on the
+        // first byte (PR #24 review).
+        _ if avail >= want => Raw::Take,
+        _ if avail == 0 => Raw::Wait(None),
+        _ => match timer {
+            Some(t) if t.seen == avail && now >= t.deadline => Raw::Take,
+            Some(t) if t.seen == avail => Raw::Wait(Some(t)),
+            _ => Raw::Wait(Some(Timer {
+                deadline: now.saturating_add(period),
+                seen: avail,
+            })),
+        },
+    }
+}
 
 fn echo_bytes(bytes: &[u8]) {
     for &b in bytes {
@@ -250,52 +347,63 @@ pub fn read_tty(out: &mut [u8]) -> Result<usize, crate::error::KernelError> {
         }
         return Ok(n);
     }
-    // Raw mode. VMIN > 0 with VTIME = 0 waits until that many bytes (at
-    // most the buffer) have arrived.
+    // Raw mode. Bytes a canonical read already gathered come first (they
+    // were stranded once ICANON went off; PR #24 review), then the ring;
+    // how many there are and taking them is one step under both locks
+    // (LINE, then the ring), so a reader on another CPU cannot take the
+    // bytes this one counted.
     let (vmin, vtime) = (terminal::get_vmin(), terminal::get_vtime());
-    let want = usize::from(vmin).min(out.len());
-    if vtime == 0 && want > 1 {
-        poll_hardware();
-        if with_ring(|r| r.len) < want {
-            return Err(crate::error::KernelError::WouldBlock);
+    poll_hardware();
+    let me = reader();
+    let now = now_ns();
+    let timer = TIMERS.lock().get(&me).copied();
+    let mut line = LINE.lock();
+    let step = with_ring(|r| {
+        let avail = line.len + r.len;
+        let step = raw_step(vmin, vtime, avail, out.len(), now, timer);
+        if step != Raw::Take {
+            return (step, 0, 0);
         }
-    }
-    let mut n = 0;
-    while n < out.len() {
-        let Some(byte) = try_read() else {
-            break;
-        };
-        out[n] = byte;
-        n += 1;
-    }
-    if echo {
-        echo_bytes(&out[..n]);
-    }
-    if n > 0 {
-        VTIME_DEADLINE.store(0, core::sync::atomic::Ordering::Relaxed);
-        return Ok(n);
-    }
-    match (vmin, vtime) {
-        // Polling read.
-        (0, 0) => Ok(0),
-        // Timed read: 0 bytes once VTIME tenths of a second pass.
-        (0, t) => {
-            let now = now_ns();
-            let deadline = VTIME_DEADLINE.load(core::sync::atomic::Ordering::Relaxed);
-            if deadline == 0 {
-                VTIME_DEADLINE.store(
-                    now + u64::from(t) * 100_000_000,
-                    core::sync::atomic::Ordering::Relaxed,
-                );
-                Err(crate::error::KernelError::WouldBlock)
-            } else if now >= deadline {
-                VTIME_DEADLINE.store(0, core::sync::atomic::Ordering::Relaxed);
-                Ok(0)
-            } else {
-                Err(crate::error::KernelError::WouldBlock)
+        let from_line = line.len.min(out.len());
+        out[..from_line].copy_from_slice(&line.buf[..from_line]);
+        let len = line.len;
+        line.buf.copy_within(from_line..len, 0);
+        line.len -= from_line;
+        if line.len == 0 {
+            line.complete = false;
+        }
+        let mut n = from_line;
+        while n < out.len() {
+            let Some(byte) = r.pop() else {
+                break;
+            };
+            out[n] = byte;
+            n += 1;
+        }
+        (step, from_line, n)
+    });
+    drop(line);
+    match step {
+        (Raw::Take, from_line, n) => {
+            TIMERS.lock().remove(&me);
+            // The gathered line was echoed as it was typed.
+            if echo {
+                echo_bytes(&out[from_line..n]);
             }
+            Ok(n)
         }
-        _ => Err(crate::error::KernelError::WouldBlock),
+        (Raw::Zero, ..) => {
+            TIMERS.lock().remove(&me);
+            Ok(0)
+        }
+        (Raw::Wait(t), ..) => {
+            let mut timers = TIMERS.lock();
+            match t {
+                Some(t) => timers.insert(me, t),
+                None => timers.remove(&me),
+            };
+            Err(crate::error::KernelError::WouldBlock)
+        }
     }
 }
 
@@ -324,22 +432,62 @@ fn dispatched() -> bool {
     }
 }
 
-/// poll bits of the console: always writable, readable when a byte or a
-/// finished line is waiting.
+/// poll bits of the console: always writable; readable as Linux's
+/// input_available_p says -- in canonical mode a whole line (or ^D), in
+/// raw mode MIN bytes when TIME is 0, else one. "Any byte in the ring" made
+/// a partial canonical line readable, and a reader waiting on that spun in
+/// the kernel (PR #24 review).
 pub fn tty_readiness() -> u16 {
-    let mut ready = POLLOUT;
-    if has_input() || LINE.lock().complete {
-        ready |= POLLIN;
-    }
-    ready
+    use crate::drivers::terminal;
+    poll_hardware();
+    let line = LINE.lock();
+    let readable = if terminal::is_canonical_mode() {
+        line.complete || with_ring(|r| ring_has_line_end(r))
+    } else {
+        let (vmin, vtime) = (terminal::get_vmin(), terminal::get_vtime());
+        raw_readable(vmin, vtime, line.len + with_ring(|r| r.len))
+    };
+    POLLOUT | if readable { POLLIN } else { 0 }
 }
 
-/// When a timed raw-mode read gives up, for the waiter's deadline.
-pub fn tty_ready_at() -> Option<u64> {
-    match VTIME_DEADLINE.load(core::sync::atomic::Ordering::Relaxed) {
-        0 => None,
-        t => Some(t),
+/// Whether a read of up to `out_len` bytes would return now (not
+/// `WouldBlock`): what a reader sleeping on [`CONSOLE_INPUT`] waits for.
+/// Stricter than poll readiness for a raw read waiting out its
+/// inter-byte timer.
+pub fn read_would_return(out_len: usize) -> bool {
+    use crate::drivers::terminal;
+    poll_hardware();
+    let line = LINE.lock();
+    if terminal::is_canonical_mode() {
+        return line.complete || with_ring(|r| ring_has_line_end(r));
     }
+    let (vmin, vtime) = (terminal::get_vmin(), terminal::get_vtime());
+    let avail = line.len + with_ring(|r| r.len);
+    let timer = TIMERS.lock().get(&reader()).copied();
+    !matches!(
+        raw_step(vmin, vtime, avail, out_len, now_ns(), timer),
+        Raw::Wait(_)
+    )
+}
+
+/// Raw-mode poll readiness with `avail` bytes waiting (Linux's `amt`).
+fn raw_readable(vmin: u8, vtime: u8, avail: usize) -> bool {
+    let amt = if vtime == 0 && vmin > 0 {
+        usize::from(vmin)
+    } else {
+        1
+    };
+    avail >= amt
+}
+
+/// Whether the ring holds what ends a canonical line.
+fn ring_has_line_end(r: &Ring) -> bool {
+    (0..r.len).any(|i| matches!(r.buf[(r.head + i) % CAPACITY], b'\n' | b'\r' | EOF_CHAR))
+}
+
+/// When the calling reader's VTIME timer gives up, for its wait's deadline.
+pub fn tty_ready_at() -> Option<u64> {
+    TIMERS.lock().get(&reader()).map(|t| t.deadline)
 }
 
 #[cfg(test)]
@@ -379,6 +527,96 @@ mod tests {
         let mut line = LINE.lock();
         line.len = 0;
         line.complete = false;
+    }
+
+    /// POSIX MIN/TIME (PR #24 review): MIN > 0 with TIME > 0 waits for the
+    /// first byte without limit, then returns at MIN bytes or once TIME
+    /// passes with no new byte; MIN = 0 with TIME > 0 returns what comes
+    /// within TIME, else 0.
+    #[test]
+    fn raw_reads_follow_min_and_time() {
+        const T: u64 = 100_000_000; // VTIME 1
+                                    // MIN 2, TIME 1.
+        assert_eq!(raw_step(2, 1, 0, 8, 0, None), Raw::Wait(None));
+        let started = raw_step(2, 1, 1, 8, 50, None);
+        assert_eq!(
+            started,
+            Raw::Wait(Some(Timer {
+                deadline: 50 + T,
+                seen: 1
+            }))
+        );
+        let Raw::Wait(t) = started else {
+            unreachable!()
+        };
+        assert_eq!(raw_step(2, 1, 1, 8, 60, t), Raw::Wait(t), "within TIME");
+        assert_eq!(raw_step(2, 1, 1, 8, 50 + T, t), Raw::Take, "TIME passed");
+        // A new byte restarts the inter-byte timer.
+        assert_eq!(raw_step(2, 1, 2, 8, 70, t), Raw::Take, "MIN reached");
+        assert_eq!(
+            raw_step(5, 1, 3, 8, 70, t),
+            Raw::Wait(Some(Timer {
+                deadline: 70 + T,
+                seen: 3
+            }))
+        );
+        // MIN 0, TIME 1.
+        let r = raw_step(0, 1, 0, 8, 10, None);
+        let Raw::Wait(t) = r else { panic!("{r:?}") };
+        assert_eq!(raw_step(0, 1, 0, 8, 10 + T, t), Raw::Zero);
+        assert_eq!(raw_step(0, 1, 1, 8, 20, t), Raw::Take);
+        // MIN 2, TIME 0, and the polling read.
+        assert_eq!(raw_step(2, 0, 1, 8, 0, None), Raw::Wait(None));
+        assert_eq!(
+            raw_step(2, 0, 1, 1, 0, None),
+            Raw::Take,
+            "MIN capped by the buffer"
+        );
+        assert_eq!(raw_step(0, 0, 0, 8, 0, None), Raw::Take);
+        // Poll readiness, Linux's amt.
+        assert!(!raw_readable(2, 0, 1) && raw_readable(2, 0, 2));
+        assert!(raw_readable(2, 1, 1) && !raw_readable(0, 1, 0));
+    }
+
+    /// Typed bytes with no line end are not readable in canonical mode,
+    /// before a read gathered them as after (PR #24 review).
+    #[test]
+    fn a_partial_canonical_line_is_not_readable() {
+        let _g = SERIAL.lock();
+        reset();
+        inject(b"ab");
+        assert_eq!(tty_readiness() & POLLIN, 0);
+        assert!(!read_would_return(8));
+        inject(b"\n");
+        assert_ne!(tty_readiness() & POLLIN, 0);
+        assert!(read_would_return(8));
+        reset();
+    }
+
+    /// What a canonical read gathered is read first once ICANON goes off
+    /// (it was stranded until canonical mode came back; PR #24 review).
+    #[test]
+    fn raw_mode_reads_the_gathered_line_first() {
+        use crate::drivers::terminal;
+        let _g = SERIAL.lock();
+        reset();
+        terminal::init();
+        let canonical = terminal::get_termios_snapshot();
+        let mut out = [0u8; 8];
+        inject(b"ab");
+        assert_eq!(
+            read_tty(&mut out),
+            Err(crate::error::KernelError::WouldBlock)
+        );
+        let mut raw = canonical;
+        raw.c_lflag &= !(terminal::ICANON | terminal::ECHO);
+        terminal::set_termios(&raw);
+        inject(b"c");
+        let got = read_tty(&mut out);
+        terminal::set_termios(&canonical);
+        assert_eq!(got, Ok(3));
+        assert_eq!(&out[..3], b"abc");
+        reset();
     }
 
     #[test]

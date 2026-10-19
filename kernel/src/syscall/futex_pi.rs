@@ -139,6 +139,14 @@ fn propagate(table: &mut BTreeMap<FutexKey, PiState>, mut holder: Owner) {
 }
 
 /// The highest-priority waiter (first come among equals), removed.
+/// The word that takes a free PI lock (`val`, tid 0) for `tid`: the
+/// waiters bit if others are queued, and FUTEX_OWNER_DIED kept -- the next
+/// owner of a robust mutex reads EOWNERDEAD from it (Linux's
+/// futex_lock_pi_atomic keeps it; PR #23 review).
+fn free_lock_word(val: u32, tid: u32, queued: bool) -> u32 {
+    tid | (val & FUTEX_OWNER_DIED) | if queued { FUTEX_WAITERS } else { 0 }
+}
+
 fn take_top(state: &mut PiState) -> Option<Waiter> {
     let i = state
         .waiters
@@ -179,10 +187,25 @@ fn hand_off(
     let word = (next.owner.1 as u32 & FUTEX_TID_MASK) | more | extra;
     // The word is ours (or the dead owner's); only user space racing
     // against its own lock could change it, and the kernel's word wins.
-    let mut val = read_user::<u32>(uaddr)?;
+    // If the word cannot be reached (another thread unmapped it), the
+    // waiter goes back on the queue: dropped, it slept forever (PR #23
+    // review).
+    let mut val = match read_user::<u32>(uaddr) {
+        Ok(v) => v,
+        Err(e) => {
+            state.waiters.push(next);
+            return Err(e);
+        }
+    };
     let mut tries = 0;
     loop {
-        let seen = cmpxchg_user_u32(uaddr, val, word)?;
+        let seen = match cmpxchg_user_u32(uaddr, val, word) {
+            Ok(seen) => seen,
+            Err(e) => {
+                state.waiters.push(next);
+                return Err(e);
+            }
+        };
         if seen == val {
             break;
         }
@@ -236,7 +259,7 @@ pub(crate) fn lock_pi(
                     // Free (also after its owner died): take it, keeping the
                     // waiters bit if others queued meanwhile.
                     let queued = table.get(&key).is_some_and(|s| !s.waiters.is_empty());
-                    let new = my_tid | if queued { FUTEX_WAITERS } else { 0 };
+                    let new = free_lock_word(val, my_tid, queued);
                     if cmpxchg_user_u32(uaddr, val, new)? != val {
                         continue;
                     }
@@ -384,9 +407,10 @@ pub(crate) fn owner_exiting(owner: Owner) {
         .collect();
     for key in held {
         let (keyspace, addr) = key;
-        if keyspace == owner.0 {
-            let _ = hand_off(&mut table, key, addr, FUTEX_OWNER_DIED);
-        } else {
+        // A private lock is handed to its top waiter. If its word cannot
+        // be written (unmapped meanwhile), the waiters start over as for a
+        // shared lock below: nobody else would ever hand it on.
+        if keyspace != owner.0 || hand_off(&mut table, key, addr, FUTEX_OWNER_DIED).is_err() {
             // A shared-memory lock: its key is a physical address, and the
             // word cannot be reached from here. Its waiters start over: a
             // robust lock now shows FUTEX_OWNER_DIED with no owner and is
@@ -414,6 +438,37 @@ mod tests {
                 .map(|&(owner, prio, seq)| Waiter { owner, prio, seq })
                 .collect(),
         }
+    }
+
+    /// A hand-off that cannot reach the futex word (unmapped meanwhile by
+    /// another thread) keeps the waiter queued: dropped, it slept forever
+    /// (PR #23 review).
+    #[test]
+    fn a_failed_hand_off_keeps_the_waiter() {
+        let mut t = BTreeMap::new();
+        t.insert(
+            (1, 0x1000),
+            state((1, 1), &[((1, 2), 10, 1), ((1, 3), 20, 2)]),
+        );
+        assert!(hand_off(&mut t, (1, 0x1000), 0, 0).is_err());
+        assert_eq!(t.get(&(1, 0x1000)).map(|s| s.waiters.len()), Some(2));
+    }
+
+    /// Taking a free lock whose owner died keeps FUTEX_OWNER_DIED, which
+    /// is how the next owner of a robust mutex learns EOWNERDEAD; it was
+    /// cleared (PR #23 review).
+    #[test]
+    fn a_free_lock_word_keeps_owner_died() {
+        assert_eq!(free_lock_word(0, 7, false), 7);
+        assert_eq!(
+            free_lock_word(FUTEX_OWNER_DIED, 7, false),
+            7 | FUTEX_OWNER_DIED
+        );
+        assert_eq!(
+            free_lock_word(FUTEX_OWNER_DIED | FUTEX_WAITERS, 7, true),
+            7 | FUTEX_OWNER_DIED | FUTEX_WAITERS
+        );
+        assert_eq!(free_lock_word(FUTEX_WAITERS, 7, false), 7);
     }
 
     #[test]

@@ -325,6 +325,11 @@ impl LoginScreen {
     }
 }
 
+/// The user ID of account `name`, from the account store.
+fn account_uid(name: &str) -> Option<u32> {
+    crate::security::auth::try_auth_manager().and_then(|auth| auth.user_id_of(name))
+}
+
 // ---------------------------------------------------------------------------
 // Display session
 // ---------------------------------------------------------------------------
@@ -577,7 +582,11 @@ impl DisplayManager {
     pub fn auto_login(&mut self) -> bool {
         if self.auto_login_enabled && !self.auto_login_user.is_empty() {
             let username = self.auto_login_user.clone();
-            self.spawn_session(SessionType::Desktop, 0, &username);
+            // The account's own user ID (every session ran as root).
+            let Some(uid) = account_uid(&username) else {
+                return false;
+            };
+            self.spawn_session(SessionType::Desktop, uid, &username);
             return true;
         }
         false
@@ -612,7 +621,13 @@ impl DisplayManager {
             let success = self.login_screen.authenticate();
             if success {
                 let username = self.login_screen.username_buffer.clone();
-                self.spawn_session(SessionType::Desktop, 0, &username);
+                // The session runs as the user who logged in: every one
+                // was given user ID 0, and sessions keyed by user ID
+                // replaced one another (PR #25 review).
+                let Some(uid) = account_uid(&username) else {
+                    return false;
+                };
+                self.spawn_session(SessionType::Desktop, uid, &username);
                 return true;
             }
         }
@@ -983,10 +998,14 @@ mod tests {
 
     #[test]
     fn test_display_manager_auto_login() {
+        // A session runs as its account's user ID, from the account store
+        // (every one ran as user 0, PR #25 review). An account the store
+        // does not know -- here there is no store -- gets no session.
         let mut dm = DisplayManager::new();
-        dm.set_auto_login("root");
-        assert!(dm.auto_login());
-        assert!(!dm.showing_login);
+        dm.set_auto_login("nobody-known");
+        assert!(!dm.auto_login());
+        assert!(dm.showing_login);
+        assert!(dm.current_session.is_none());
     }
 
     #[test]

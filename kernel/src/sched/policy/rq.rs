@@ -277,6 +277,15 @@ impl RunQueue {
         }
     }
 
+    /// Whether a task could run now: not merely queued, as a throttled
+    /// deadline or real-time task is, which waits for its replenishment
+    /// (the tick's job). The idle loop asks this: counting throttled
+    /// tasks, it rescheduled without halting while only they were queued
+    /// (PR #21 review).
+    pub fn has_ready(&self) -> bool {
+        self.peek().is_some()
+    }
+
     /// The task that should run now, without changing anything.
     pub fn peek(&self) -> Option<TaskKey> {
         self.dl
@@ -733,6 +742,19 @@ mod tests {
         assert_eq!(rq.dl_earliest(), Some(20 * MS));
         let w: Vec<_> = rq.dl_waiting().collect();
         assert_eq!(w, [(30 * MS, 1)]);
+    }
+
+    #[test]
+    fn a_throttled_task_is_queued_but_not_ready() {
+        let mut rq = RunQueue::new();
+        let d = DlEntity::new(10 * MS, 100 * MS, 100 * MS).unwrap();
+        rq.enqueue(1, Entity::new(Policy::Deadline(d)), 0);
+        assert_eq!(rq.pick_next(0), Some(1));
+        rq.tick(10 * MS); // its whole runtime: throttled until 100 ms
+        assert!(!rq.is_empty());
+        assert!(!rq.has_ready());
+        rq.pick_next(100 * MS); // replenished
+        assert!(rq.has_ready());
     }
 
     #[test]

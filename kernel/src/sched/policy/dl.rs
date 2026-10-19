@@ -66,14 +66,17 @@ impl DlEntity {
         bandwidth(self.runtime, self.period)
     }
 
-    /// CBS wakeup rule.
+    /// CBS wakeup rule: a new reservation if the deadline has passed or
+    /// the runtime left would exceed the reserved bandwidth. A reservation
+    /// used up before its deadline is not renewed here: the run queue keeps
+    /// such a task throttled until its replenishment (`DlRq::enqueue`).
     pub fn on_wakeup(&mut self, now: u64) {
         let expired = self.deadline <= now;
         // remaining/(deadline-now) > runtime/period, cross-multiplied.
         let overflows = !expired
             && (self.remaining.max(0) as u128) * (self.period as u128)
                 > (self.runtime as u128) * ((self.deadline - now) as u128);
-        if expired || overflows || self.remaining <= 0 {
+        if expired || overflows {
             self.deadline = now.saturating_add(self.rel_deadline);
             self.remaining = self.runtime as i64;
         }
@@ -133,21 +136,41 @@ impl DlRq {
         self.throttled.contains_key(&key)
     }
 
-    /// Queue a waking task (CBS wakeup rule applied).
+    /// Queue a waking task (CBS wakeup rule applied). One whose
+    /// reservation ran out before its deadline stays throttled until then:
+    /// blocking and waking does not buy a new budget (Linux keeps it
+    /// throttled; PR #21 review).
     pub fn enqueue(&mut self, key: TaskKey, mut e: DlEntity, now: u64) {
+        if e.remaining <= 0 && e.deadline > now {
+            self.insert_throttled(key, e);
+            return;
+        }
         e.on_wakeup(now);
         self.ready.insert((e.deadline, key));
         self.tasks.insert(key, e);
     }
 
-    /// Queue a task moved from another CPU, keeping its reservation (no
-    /// wakeup rule: it was runnable all along). A reservation that has run
-    /// out is replenished as a wakeup would.
+    /// Queue a task moved from another CPU, keeping its reservation: no
+    /// wakeup rule, as it was runnable all along, so an overdue task keeps
+    /// its absolute deadline (EDF order). A reservation that has run out
+    /// stays throttled until its deadline, or is replenished if that has
+    /// passed (PR #21 review).
     pub fn enqueue_migrated(&mut self, key: TaskKey, mut e: DlEntity, now: u64) {
-        if e.remaining <= 0 || e.deadline <= now {
-            e.on_wakeup(now);
+        if e.remaining <= 0 {
+            if e.deadline > now {
+                self.insert_throttled(key, e);
+                return;
+            }
+            e.replenish(now);
         }
         self.ready.insert((e.deadline, key));
+        self.tasks.insert(key, e);
+    }
+
+    /// Queue a task whose reservation is used up, replenished at its
+    /// deadline (as `charge` throttles one).
+    fn insert_throttled(&mut self, key: TaskKey, e: DlEntity) {
+        self.throttled.insert(key, e.deadline);
         self.tasks.insert(key, e);
     }
 
@@ -292,6 +315,52 @@ mod tests {
         let d = e.deadline;
         e.on_wakeup(105 * MS);
         assert_eq!(e.deadline, d);
+    }
+
+    /// A reservation used up before the task blocked stays used up until
+    /// its replenishment time: waking early gives no new budget (Linux
+    /// keeps the task throttled; PR #21 review).
+    #[test]
+    fn waking_early_after_depletion_stays_throttled() {
+        let mut rq = DlRq::new();
+        rq.enqueue(1, DlEntity::new(10 * MS, 100 * MS, 100 * MS).unwrap(), 0);
+        assert!(rq.charge(1, 10 * MS), "runtime used up");
+        let e = rq.dequeue(1).unwrap(); // blocks
+        rq.enqueue(1, e, 11 * MS); // wakes long before 100 ms
+        assert!(rq.is_throttled(1));
+        assert_eq!(rq.pick(), None);
+        assert!(!rq.replenish_due(99 * MS));
+        assert!(rq.replenish_due(100 * MS));
+        assert_eq!(rq.pick(), Some(1));
+        assert_eq!(rq.get(1).unwrap().remaining, (10 * MS) as i64);
+    }
+
+    /// Migration is no new activation: an overdue but runnable task keeps
+    /// its absolute deadline (EDF order), and a depleted one stays
+    /// throttled (PR #21 review).
+    #[test]
+    fn migration_keeps_the_reservation() {
+        let mut e = DlEntity::new(5 * MS, 20 * MS, 100 * MS).unwrap();
+        e.on_wakeup(0);
+        assert_eq!(e.deadline, 20 * MS);
+        e.remaining = MS as i64;
+        let mut rq = DlRq::new();
+        rq.enqueue_migrated(1, e, 30 * MS);
+        assert_eq!(rq.get(1).unwrap().deadline, 20 * MS);
+        assert_eq!(rq.pick(), Some(1));
+
+        e.remaining = 0;
+        let mut rq = DlRq::new();
+        rq.enqueue_migrated(2, e, 10 * MS);
+        assert!(rq.is_throttled(2));
+        assert!(rq.replenish_due(20 * MS));
+        assert_eq!(rq.pick(), Some(2));
+
+        // Depleted with its deadline already past: replenished at once.
+        let mut rq = DlRq::new();
+        rq.enqueue_migrated(3, e, 30 * MS);
+        assert!(!rq.is_throttled(3));
+        assert!(rq.get(3).unwrap().remaining > 0);
     }
 
     #[test]

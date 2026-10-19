@@ -108,6 +108,13 @@ pub struct SleepMutexGuard<'a, T> {
     lock: &'a SleepMutex<T>,
 }
 
+// SAFETY: a shared guard gives out only `&T` (Deref), so sharing it between
+// threads is sharing `&T`, which needs `T: Sync`. Without this impl the
+// guard was Sync whenever `T: Send` (through `&SleepMutex<T>`), and two
+// threads could hold `&Cell<_>` at once (PR #25 review; std's MutexGuard
+// has the same bound).
+unsafe impl<T: Sync> Sync for SleepMutexGuard<'_, T> {}
+
 impl<T> Deref for SleepMutexGuard<'_, T> {
     type Target = T;
     fn deref(&self) -> &T {

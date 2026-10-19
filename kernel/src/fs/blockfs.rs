@@ -586,6 +586,25 @@ impl VfsNode for BlockFsNode {
         self.mutate(|fs| fs.unlink_from_dir(self.inode_num, name))
     }
 
+    /// The entry's type checked under the filesystem lock the removal
+    /// holds (see [`VfsNode::unlink_kind`]).
+    fn unlink_kind(&self, name: &str, want_dir: bool) -> Result<(), KernelError> {
+        self.mutate(|fs| {
+            let child = fs.lookup_in_dir(self.inode_num, name)?;
+            let is_dir = fs
+                .inode_table
+                .get(child as usize)
+                .is_some_and(|inode| inode.is_dir());
+            let kind = if is_dir {
+                NodeType::Directory
+            } else {
+                NodeType::File
+            };
+            super::check_unlink_kind(kind, want_dir)?;
+            fs.unlink_from_dir(self.inode_num, name)
+        })
+    }
+
     fn truncate(&self, size: usize) -> Result<(), KernelError> {
         self.mutate(|fs| fs.truncate_inode(self.inode_num, size))
     }
@@ -734,6 +753,13 @@ pub struct BlockFsInner {
     /// found by that inode number must not be found by the next file to get
     /// it (`fs::special_inode_freed`).
     freed_special: Vec<u32>,
+}
+
+/// The wall clock in seconds since 1970, as the inode times are stored
+/// (utimensat sets atime and mtime in them). ctime held raw hardware timer
+/// ticks cut to 32 bits, reported as the file's change time (PR #24 review).
+fn now_secs() -> u32 {
+    (crate::timer::realtime::now_ns().max(0) / 1_000_000_000).min(u32::MAX as i64) as u32
 }
 
 impl BlockFsInner {
@@ -2172,7 +2198,7 @@ impl BlockFsInner {
         let type_bits = inode.mode & 0xF000;
         let perm_bits = permissions_to_mode(permissions, false) & 0x0FFF;
         inode.mode = type_bits | perm_bits;
-        inode.ctime = crate::arch::timer::read_hw_timestamp() as u32;
+        inode.ctime = now_secs();
 
         Ok(())
     }
@@ -2197,7 +2223,7 @@ impl BlockFsInner {
         if let Some(mtime) = mtime {
             inode.mtime = clamp(mtime);
         }
-        inode.ctime = crate::arch::timer::read_hw_timestamp() as u32;
+        inode.ctime = now_secs();
         Ok(())
     }
 
@@ -2229,7 +2255,7 @@ impl BlockFsInner {
         if let Some(gid) = gid {
             inode.gid = gid;
         }
-        inode.ctime = crate::arch::timer::read_hw_timestamp() as u32;
+        inode.ctime = now_secs();
         Ok(())
     }
 

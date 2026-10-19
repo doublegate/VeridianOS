@@ -343,8 +343,8 @@ items listed in `to-dos/MASTER_TODO.md`. What does not work yet is in `docs/KNOW
   `musl_fs_ids`.
 
 - **Syscall coverage per architecture.** `tools/compat/syscall_coverage.py` reads the vendored
-  Linux v7.2 tables and writes one report each for x86_64 (385 calls: 178 implemented, 9 stubbed,
-  182 missing), AArch64 (327: 151, 9, 165) and RISC-V (328: 150, 9, 167), from the generic
+  Linux v7.2 tables and writes one report each for x86_64 (385 calls: 180 implemented, 9 stubbed,
+  180 missing, as released), AArch64 (327: 153, 9, 163) and RISC-V (328: 152, 9, 165), from the generic
   `syscall.tbl` with each architecture's ABIs; `--check` fails the gate and CI when one is stale.
 
 - **DMA cache maintenance for non-coherent devices (HA-25, ADR 0019).** Most AArch64 boards (Pi
@@ -1293,6 +1293,79 @@ items listed in `to-dos/MASTER_TODO.md`. What does not work yet is in `docs/KNOW
   `AARCH64_IMAGE` and `AARCH64_LOAD_ADDR` are both set.
 - **`audit_runtime_test` killed every process** (`kill(-1)`) when a fork failed in its exec
   round, and on a pipe failure ran the round reading the console; it skips the round instead.
+- **Findings of the review of all kernel code since v0.26.0 (PRs #20 to #25)**, each checked
+  against the current tree first (the declined ones are answered on the PRs with evidence):
+  - *Denial of service:* FUTEX_CMP_REQUEUE between two keys of one hash bucket looped forever
+    with the bucket locked; an expired, unread timerfd made poll, select and epoll spin in the
+    kernel; `mmap` of a huge length of a file allocated that length in the kernel heap before any
+    limit (now only the file's part, with `try_reserve`, after the RLIMIT_AS check), and the
+    page-cache path a page list as long as the mapping; an ELF segment with a huge memory size
+    planned a page per page (images over 1 GiB are ENOMEM); a `#!` script naming itself recursed
+    until the kernel stack overflowed (ELOOP after 4 interpreters).
+  - *Memory and isolation:* after fork the copy-on-write flush named the child's page tables, so
+    CPUs running the parent's other threads kept writable translations of shared frames (and an
+    error part-way skipped the flush); the page cache took its reference on a frame after
+    releasing the lock, so an invalidation could free it first; stack growth checked the guard
+    gap and limits under one lock and mapped under another, and compared RLIMIT_STACK with the
+    fault address instead of whole pages; a copy-on-write retry that found a page without the
+    user bit retried forever instead of faulting.
+  - *exec and ptrace:* the other threads of a process were ended before the program was found,
+    so a failed exec killed them (now at the point of no return); malformed BTI property notes
+    killed the caller after the point of no return instead of ENOEXEC; a tracer could poke a
+    set-ID image while it was built and detach before the set-ID decision (exec records the
+    tracer at its start, PEEK and POKE refuse during an exec, detach takes the credential guard).
+  - *Processes and scheduling:* a zombie waited for before its last task was reaped leaked its
+    page tables; the last two threads of an exit_group could both tear the process down; kernel
+    stacks were freed while the threads lock was held; RLIMIT_NPROC was checked apart from the
+    creation it limits; a depleted SCHED_DEADLINE reservation got a new budget by blocking and
+    waking, and migration reset an overdue task's deadline; the idle loop counted throttled tasks
+    as runnable and never halted; user and system time could go backwards (Linux's
+    `cputime_adjust`); an RT thread could set any nice value for later; policy changes were
+    applied after the parameters were unlocked.
+  - *x86_64 and AArch64:* kernel threads started with a misaligned stack; the syscall return did
+    its lock-taking work with interrupts off (the N-139 deadlock); the INIT and SIPI IPIs wrote
+    the ICR halves with interrupts on; the kernel-image page tables replaced TTBR1 without
+    break-before-make; a secondary CPU without BTI came online while the boot CPU enforced it.
+  - *Futexes and signals:* a PI hand-off that could not reach the futex word dropped its waiter,
+    and taking a free PI lock cleared FUTEX_OWNER_DIED (robust mutexes lost EOWNERDEAD); a
+    timed-out waiter could miss its own entry after a requeue; sigaction read and installed an
+    action in two halves; queued real-time signals shared one RLIMIT_SIGPENDING charge, so after a
+    change of real user new signals were charged to the old one (each now keeps its own); the old, unreachable signal delivery and sigreturn code is removed.
+  - *Files, pipes and terminals:* the console's raw mode now follows MIN and TIME (it returned on
+    the first byte with both set), reads first what a canonical read gathered, consumes
+    atomically, keeps one VTIME timer per reader that ends with its read, and is readable only for
+    a complete line or MIN bytes (a reader spun on a partial line); a non-blocking write larger
+    than PIPE_BUF to a full pipe returns EAGAIN, not 0; reads and writes of regular files hold a
+    per-file lock across their chunks, and a fault part-way returns what was copied and moves the
+    position by that; a blocking writer waits for POLLHUP too; O_CREAT with O_DIRECTORY is EINVAL;
+    unlink and rmdir check the entry's type where they remove it; tmpfs charged no symlink bytes
+    but refunded them, and refunded a replaced file twice; a memfd grow that ran out of frames
+    kept them, and a shrink under a shared mapping is EBUSY; a PTY master learns its last slave
+    closed (EIO, POLLHUP), a slave whose master is gone reads EIO, and a closed master frees its
+    PTY (every openpty leaked one); openpty closes its descriptors when it cannot report them;
+    epoll round-robins short results, and an edge-triggered pipe re-fires only on its own changes;
+    nanosleep writes `rem` only when interrupted; `mremap` checks RLIMIT_AS before unmapping a
+    MREMAP_FIXED target, and an MREMAP_DONTUNMAP move that cannot map the old range again moves
+    its pages back; MADV_DONTNEED no longer leaks page-cache references on an error; stream
+    sends over 1 MiB send what fits; a write to a read-only filesystem is EROFS.
+  - *IPC and capabilities:* a late reply to an interrupted call answered the caller's next call
+    (calls are numbered, and an abandoned request is withdrawn); a capability was counted as held
+    after it became visible, copies after the source was unlocked, and a failed create leaked its
+    registry entry; collecting unheld delegations rescanned the whole derivation tree per child.
+  - *Accounts and security:* an unreadable or malformed MFA file let the password alone log in
+    (now a second factor nobody can give); any error resolving an account file read as "missing",
+    so a later save could overwrite it; a password change that could not be saved stayed active
+    until reboot; `useradd` could leave the two account stores disagreeing; the shell's password
+    prompt left copies in memory; the display manager started every session as user 0;
+    `SleepMutexGuard` was `Sync` for any `T: Send`.
+  - *Drivers and the rest:* ramfb took 3 MiB on every boot without the device, freed its DMA
+    frame on a timeout and wrote its doorbell without `io_wmb`; PCI configuration accesses at
+    unaligned or out-of-range offsets read or wrote the wrong bytes; BlockFS stored raw timer
+    ticks as ctime; the trace rings aliased a `&mut` (and the unused lock-free queue is removed,
+    closing N-59); the audit log's appends could overwrite each other and short ones counted as
+    persisted; a failed program load left its process in the table; the shell's `mv` fallback
+    wrote through a destination symlink and ignored short writes; the KDE D-Bus stub failed on
+    every boot after the first.
 
 - **Only root could open anything below /proc.** procfs reported its directories as r--r--r--,
   so a path walk by any other user failed at /proc itself. Directories are r-xr-xr-x, files

@@ -359,12 +359,22 @@ impl LocalApic {
         // sending its own IPI in between would overwrite the destination
         // (N-173). Interrupts stay off for the whole sequence, and the
         // previous IPI must have left (delivery status idle) first.
+        // Delivery mode Fixed: the low dword is just the vector.
+        self.icr_write(dest, vector as u32);
+    }
+
+    /// Send the IPI `low` (vector, delivery mode, level) to `dest`: the
+    /// previous IPI accepted first, then the destination (bits 31:24 of
+    /// the high dword) and the low dword, whose write sends, with
+    /// interrupts off in between. Every sender goes through here: the
+    /// INIT/SIPI paths wrote the two halves with interrupts on, so a wakeup
+    /// IPI sent by an interrupt handler in between could send INIT to the
+    /// CPU it was waking (N-173; PR #21 review).
+    fn icr_write(&self, dest: u8, low: u32) {
         x86_64::instructions::interrupts::without_interrupts(|| {
             self.wait_icr_idle();
-            // Destination in bits 31:24, then the low dword (vector,
-            // delivery mode Fixed), whose write sends.
             self.write(LAPIC_ICR_HIGH, (dest as u32) << 24);
-            self.write(LAPIC_ICR_LOW, vector as u32);
+            self.write(LAPIC_ICR_LOW, low);
         });
     }
 
@@ -382,26 +392,23 @@ impl LocalApic {
 
     /// Send an INIT IPI to a target CPU (used in AP startup sequence).
     pub fn send_init_ipi(&self, dest: u8) {
-        self.write(LAPIC_ICR_HIGH, (dest as u32) << 24);
         // INIT: delivery mode = 0b101 (INIT), level assert
-        self.write(LAPIC_ICR_LOW, 0x00004500);
+        self.icr_write(dest, 0x00004500);
     }
 
     /// Send a Startup IPI (SIPI) to a target CPU.
     ///
     /// `startup_page` is the physical page number (e.g., 0x08 for 0x8000).
     pub fn send_startup_ipi(&self, dest: u8, startup_page: u8) {
-        self.write(LAPIC_ICR_HIGH, (dest as u32) << 24);
         // SIPI: delivery mode = 0b110 (StartUp), vector = page number
-        self.write(LAPIC_ICR_LOW, 0x00004600 | startup_page as u32);
+        self.icr_write(dest, 0x00004600 | startup_page as u32);
     }
 
     /// Write the ICR for `dest` and wait until the IPI has been accepted
     /// (Delivery Status, bit 12, clears), as Linux's
     /// `safe_apic_wait_icr_idle` does. Returns false on a timeout.
     fn icr_send_wait(&self, dest: u8, low: u32) -> bool {
-        self.write(LAPIC_ICR_HIGH, (dest as u32) << 24);
-        self.write(LAPIC_ICR_LOW, low);
+        self.icr_write(dest, low);
         let start = super::tsc::read();
         let limit = super::tsc::hz() / 100; // 10 ms
         while self.read(LAPIC_ICR_LOW) & (1 << 12) != 0 {

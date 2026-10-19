@@ -157,6 +157,10 @@ pub fn span(binary: &ElfBinary, file_len: usize) -> Result<(u64, u64), ElfError>
     Ok((start, end))
 }
 
+/// The largest image `plan` accepts: well above any program here (the
+/// largest, kwin_wayland, maps 66 MiB), and refused with ENOMEM above it.
+pub const MAX_IMAGE_BYTES: u64 = 1 << 30;
+
 /// Plan the image of `binary` (a file of `file_len` bytes). An ET_DYN file
 /// is placed with its first page at `base`; an ET_EXEC file at its link
 /// addresses (`base` unused). The image must lie in user space and the
@@ -173,6 +177,13 @@ pub fn plan(binary: &ElfBinary, file_len: usize, base: u64) -> Result<ImagePlan,
         0
     };
     let size = end - start;
+    // Every page of the image is planned and given a frame now (BSS is not
+    // mapped lazily yet), so an image larger than any real program -- a
+    // crafted p_memsz near the size of user space -- is refused before
+    // that: the kernel heap running out is fatal (PR #25 review).
+    if size > MAX_IMAGE_BYTES {
+        return Err(ElfError::MemoryAllocationFailed);
+    }
     let loaded = start.wrapping_add(bias);
     if loaded % PAGE != 0 || !crate::mm::user_layout::is_user_range(loaded as usize, size as usize)
     {
@@ -279,26 +290,40 @@ pub struct Loaded {
 /// [`check_interpreter`]) into `vas`: each given as its parsed form, the
 /// file node it was read from (for the page cache) and the data read. The
 /// interpreter goes in the mmap area, like a library the loader maps later.
+/// Which images BTI guards, as (program, interpreter), decided from their
+/// property notes before anything is replaced (an exec calls this ahead of
+/// its point of no return: a malformed note is ENOEXEC with the caller
+/// intact, as Linux's load_elf_binary parses the notes before
+/// begin_new_exec; it used to kill the caller -- PR #20 review). BTI
+/// guarded code (arm64 `arch_elf_adjust_prot`): the kernel guards the
+/// program only when it has no interpreter, and the interpreter by its own
+/// note; an interpreter guards what it loads itself. Nothing is guarded
+/// where the CPU has no BTI (`bti`).
+pub fn bti_guards(
+    program: (&ElfBinary, &[u8]),
+    interpreter: Option<(&ElfBinary, &[u8])>,
+    bti: bool,
+) -> Result<(bool, bool), ElfError> {
+    if !bti {
+        return Ok((false, false));
+    }
+    Ok(match interpreter {
+        None => (wants_bti(program.0, program.1)?, false),
+        Some((interp, data)) => (false, wants_bti(interp, data)?),
+    })
+}
+
 pub fn load(
     vas: &crate::mm::VirtualAddressSpace,
     program: (&ElfBinary, &dyn crate::fs::VfsNode, &[u8], &ImagePlan),
     interpreter: Option<(&ElfBinary, &dyn crate::fs::VfsNode, &[u8])>,
+    guards: (bool, bool),
 ) -> Result<Loaded, crate::error::KernelError> {
     let (binary, node, data, program_plan) = program;
-    // BTI guarded code (arm64 `arch_elf_adjust_prot`): the kernel guards
-    // the program only when it has no interpreter, and the interpreter by
-    // its own note; an interpreter guards what it loads itself. A
-    // malformed property note is ENOEXEC.
-    let note_error = |_| crate::error::KernelError::InvalidArgument {
-        name: "PT_GNU_PROPERTY",
-        value: "malformed GNU property note",
-    };
+    let (program_guarded, interp_guarded) = guards;
     // W^X follows the new program's note (the interpreter's does not
     // count), and PR_SET_MDWE the old program's (ADR 0017).
     vas.set_wx_policy(vas.wx_policy().exec(wants_wx(binary, data)));
-    let bti = crate::arch::bti_supported();
-    let program_guarded =
-        bti && interpreter.is_none() && wants_bti(binary, data).map_err(note_error)?;
     map_image(vas, node, data, program_plan, program_guarded)?;
     let mut interpreter_plan = None;
     let (start, base) = match interpreter {
@@ -310,8 +335,7 @@ pub fn load(
             let size = check_interpreter(interp, interp_data.len()).map_err(bad)?;
             let at = vas.reserve_mmap_area(size as usize)?;
             let interp_plan = plan(interp, interp_data.len(), at.as_u64()).map_err(bad)?;
-            let guarded = bti && wants_bti(interp, interp_data).map_err(note_error)?;
-            map_image(vas, interp_node, interp_data, &interp_plan, guarded)?;
+            map_image(vas, interp_node, interp_data, &interp_plan, interp_guarded)?;
             let entry = (interp_plan.entry, interp_plan.bias);
             interpreter_plan = Some(interp_plan);
             entry
@@ -765,6 +789,29 @@ mod tests {
             interpreter: None,
             dynamic: false,
         }
+    }
+
+    /// An image larger than any program the kernel can load is refused
+    /// before a page is planned: a crafted p_memsz near the size of user
+    /// space built one plan entry per page and then a frame for each, and
+    /// the kernel heap running out is fatal (PR #25 review).
+    #[test]
+    fn huge_images_are_refused_before_planning() {
+        let b = binary(
+            ElfType::Executable,
+            0x40_0000,
+            alloc::vec![load(0x40_0000, 0, 0x1000, 1 << 44, PF_R | PF_X | PF_W)],
+        );
+        assert!(matches!(
+            plan(&b, 0x1000, 0),
+            Err(ElfError::MemoryAllocationFailed)
+        ));
+        let fits = binary(
+            ElfType::Executable,
+            0x40_0000,
+            alloc::vec![load(0x40_0000, 0, 0x1000, 64 << 20, PF_R | PF_X | PF_W)],
+        );
+        assert!(plan(&fits, 0x1000, 0).is_ok());
     }
 
     /// Another architecture's program is not planned (ENOEXEC at exec).

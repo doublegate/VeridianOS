@@ -139,6 +139,13 @@ pub struct File {
     /// Current position in file
     pub position: RwLock<usize>,
 
+    /// Held across a whole read or write of a regular file, chunk after
+    /// chunk, as Linux's f_pos_lock and inode lock: concurrent writers
+    /// (O_APPEND ones too) and readers no longer interleave at the 64 KiB
+    /// chunks the system calls copy in (PR #23 review). A sleeping lock,
+    /// since a chunk may read the disk; streams never take it (N-118).
+    pub io_lock: crate::sync::sleep_mutex::SleepMutex<()>,
+
     /// Reference count
     pub refcount: RwLock<usize>,
 
@@ -189,6 +196,7 @@ impl File {
             flags,
             nonblock: AtomicBool::new(nb),
             position: RwLock::new(0),
+            io_lock: crate::sync::sleep_mutex::SleepMutex::new(()),
             refcount: RwLock::new(1),
             path: None,
             flock_owner: AtomicU64::new(0),
@@ -203,6 +211,7 @@ impl File {
             flags,
             nonblock: AtomicBool::new(nb),
             position: RwLock::new(0),
+            io_lock: crate::sync::sleep_mutex::SleepMutex::new(()),
             refcount: RwLock::new(1),
             path: Some(path),
             flock_owner: AtomicU64::new(0),

@@ -77,9 +77,13 @@ impl FileCache {
         }
         let mut pages = self.pages.lock();
         if let Some(&cached) = pages.get(&index) {
+            // Another fill won: take the caller's reference under the lock,
+            // as the first lookup does. Taken after unlocking, an
+            // invalidation in between could drop the cache's last owner and
+            // free the frame the caller then maps (PR #22 review).
+            super::frame_refs::share(cached);
             drop(pages);
             free(frame);
-            super::frame_refs::share(cached);
             return Ok(cached);
         }
         pages.insert(index, frame);
@@ -127,9 +131,11 @@ fn free(frame: FrameNumber) {
 
 /// The frames of pages `[first, first + count)` of the file `node` names,
 /// from its page cache, each with one more owner for the caller's mapping
-/// (`VirtualAddressSpace::install_file_pages`); a page past the end of the
-/// file is `None` (the mapping keeps a zero page there). `None` overall if
-/// the file has no page cache.
+/// (`VirtualAddressSpace::install_file_pages`). The list ends at the end of
+/// the file: the mapping keeps zero pages past it, so a mapping far longer
+/// than the file allocates nothing for the rest (a list as long as the
+/// mapping could exhaust the kernel heap; PR #23 review). `None` overall
+/// if the file has no page cache.
 pub fn file_pages(
     node: &dyn crate::fs::VfsNode,
     first: usize,
@@ -138,12 +144,15 @@ pub fn file_pages(
     let cache = node.page_cache()?;
     Some((|| {
         let pages = node.metadata()?.size.div_ceil(4096);
-        let mut frames = alloc::vec::Vec::with_capacity(count);
-        for index in first..first.saturating_add(count) {
-            if index >= pages {
-                frames.push(None);
-                continue;
-            }
+        let within = pages.saturating_sub(first).min(count);
+        let mut frames = alloc::vec::Vec::new();
+        frames
+            .try_reserve_exact(within)
+            .map_err(|_| KernelError::OutOfMemory {
+                requested: within,
+                available: 0,
+            })?;
+        for index in first..first + within {
             match cache.get(index as u64, |page| {
                 node.read(index * 4096, page).map(|_| ())
             }) {

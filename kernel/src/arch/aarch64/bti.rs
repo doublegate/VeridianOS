@@ -22,10 +22,20 @@ pub fn has_bti(pfr1: u64) -> bool {
     pfr1 & 0xF != 0
 }
 
-/// Enable BTI for EL0 on this CPU if it has it; the boot CPU decides
-/// whether the system offers it. Runs once on each CPU at bring-up, before
-/// it runs a user program.
-pub fn init_cpu(boot_cpu: bool) {
+/// Whether a secondary CPU may join a system that does (`system`) or does
+/// not offer BTI, given its own support (`this`). One without it would run
+/// migrated tasks unprotected while the system advertises BTI, so it stays
+/// offline, as Linux keeps a late CPU missing a system feature; an extra
+/// feature is harmless (PR #20 review).
+pub fn secondary_compatible(system: bool, this: bool) -> bool {
+    !system || this
+}
+
+/// Enable BTI for EL0 on this CPU if the system offers it; the boot CPU
+/// decides whether it does. Runs once on each CPU at bring-up, before it
+/// runs a user program. A secondary that cannot enforce what the system
+/// offers is refused.
+pub fn init_cpu(boot_cpu: bool) -> Result<(), &'static str> {
     let pfr1: u64;
     // SAFETY: an ID register read at EL1, with no side effects.
     unsafe { core::arch::asm!("mrs {0}, id_aa64pfr1_el1", out(reg) pfr1, options(nomem, nostack)) };
@@ -40,10 +50,10 @@ pub fn init_cpu(boot_cpu: bool) {
                 "not available (no FEAT_BTI)"
             }
         );
-    } else if has != supported() {
-        crate::println!("[BTI] warning: this CPU's BTI support differs from the boot CPU's");
+    } else if !secondary_compatible(supported(), has) {
+        return Err("no BTI, which the boot CPU enforces");
     }
-    if has {
+    if supported() {
         // SAFETY: sets only SCTLR_EL1.BT0, which affects EL0 execution in
         // guarded pages; the kernel's own pages are never guarded. The isb
         // makes the change take effect before any return to EL0.
@@ -59,6 +69,7 @@ pub fn init_cpu(boot_cpu: bool) {
             );
         }
     }
+    Ok(())
 }
 
 /// Whether the system offers BTI to user programs.

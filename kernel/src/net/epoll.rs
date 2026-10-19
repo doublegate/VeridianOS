@@ -321,6 +321,12 @@ pub struct EpollNode {
     watchers: Mutex<Vec<Weak<File>>>,
     /// The user its registrations are charged to (its creator's uid).
     owner: u32,
+    /// The registration a collecting scan reported last: the next one
+    /// starts after it, so a short result does not always return the same
+    /// first entries and starve the rest -- the level-triggered ones that
+    /// stay ready (Linux puts a still-ready item back at the tail of its
+    /// ready list; PR #24 review).
+    cursor: Mutex<Option<Key>>,
 }
 
 /// Serialises adding epoll files to epoll files, so two concurrent adds
@@ -339,6 +345,7 @@ impl EpollNode {
             interest: Mutex::new(BTreeMap::new()),
             watchers: Mutex::new(Vec::new()),
             owner: crate::process::current_process().map_or(0, |p| p.uid()),
+            cursor: Mutex::new(None),
         }
     }
 
@@ -562,7 +569,7 @@ impl EpollNode {
                 .filter_map(|(key, entry)| Some((*key, entry.file.upgrade()?)))
                 .collect()
         };
-        let looked: Vec<(Key, u32, bool)> = live
+        let mut looked: Vec<(Key, u32, bool, u64)> = live
             .iter()
             .map(|(key, file)| {
                 let (bits, announces, ready_at) = match Self::of(file) {
@@ -581,13 +588,28 @@ impl EpollNode {
                 };
                 scan.precise &= announces;
                 scan.wake_at = [scan.wake_at, ready_at].into_iter().flatten().min();
-                (*key, bits, announces)
+                // The file's own change count where it keeps one, else the
+                // system's I/O count.
+                let file_seq = file.node.io_generation().unwrap_or(seq);
+                (*key, bits, announces, file_seq)
             })
             .collect();
         drop(live);
+        // Round robin: from the first registration after the last one
+        // reported.
+        if collect {
+            if let Some(after) = *self.cursor.lock() {
+                let from = looked
+                    .iter()
+                    .position(|(key, ..)| *key > after)
+                    .unwrap_or(0);
+                looked.rotate_left(from);
+            }
+        }
 
         let mut interest = self.interest.lock();
-        for (key, bits, announces) in looked {
+        let mut last_reported = None;
+        for (key, bits, announces, file_seq) in looked {
             if scan.count >= out.len() {
                 break;
             }
@@ -610,7 +632,7 @@ impl EpollNode {
                     entry.last_seq,
                     entry.last_ns,
                     ready,
-                    seq,
+                    file_seq,
                     now,
                     announces,
                 );
@@ -622,11 +644,16 @@ impl EpollNode {
                 scan.count += 1;
                 if collect {
                     entry.last = ready;
-                    entry.last_seq = seq;
+                    entry.last_seq = file_seq;
                     entry.last_ns = now;
                     entry.disabled = entry.mode & EPOLLONESHOT != 0;
+                    last_reported = Some(key);
                 }
             }
+        }
+        drop(interest);
+        if last_reported.is_some() {
+            *self.cursor.lock() = last_reported;
         }
         scan
     }
@@ -972,6 +999,65 @@ mod tests {
         assert_eq!(reported(&ep, 0, 0), [(EPOLLIN, 1)]);
         probe.set(EPOLLHUP | EPOLLERR | 0x20 /* POLLNVAL */);
         assert_eq!(reported(&ep, 0, 0), [(EPOLLERR | EPOLLHUP, 1)]);
+    }
+
+    /// Short results take turns: with room for one event and three files
+    /// always readable, three scans report three different files; the
+    /// first one came back every time (PR #24 review).
+    #[test]
+    fn short_results_take_turns() {
+        let epf = epoll_file();
+        let ep = EpollNode::of(&epf).unwrap();
+        let mut keep = Vec::new();
+        for fd in 3..6 {
+            let (file, probe) = Probe::file(NodeType::Socket, true);
+            EpollNode::ctl(
+                &epf,
+                EPOLL_CTL_ADD,
+                fd,
+                &file,
+                Some(&ev(EPOLLIN, fd as u64)),
+            )
+            .unwrap();
+            probe.set(EPOLLIN);
+            keep.push((file, probe));
+        }
+        let mut seen = Vec::new();
+        for _ in 0..3 {
+            let mut out = [ev(0, 0); 1];
+            assert_eq!(ep.scan(&mut out, true, 0, 0).count, 1);
+            seen.push(out[0].data);
+        }
+        seen.sort_unstable();
+        assert_eq!(seen, [3, 4, 5]);
+    }
+
+    /// An edge-triggered pipe is reported again for its own changes only:
+    /// I/O elsewhere in the system (the global count moving) does not
+    /// re-fire it (PR #24 review).
+    #[test]
+    fn edge_triggered_pipes_ignore_other_files_io() {
+        let (reader, writer) = crate::fs::pipe::create_pipe().unwrap();
+        let read_end = Arc::new(File::new(
+            Arc::new(crate::fs::pipe::PipeReadNode::new(reader)),
+            OpenFlags::read_only(),
+        ));
+        let epf = epoll_file();
+        let ep = EpollNode::of(&epf).unwrap();
+        EpollNode::ctl(
+            &epf,
+            EPOLL_CTL_ADD,
+            3,
+            &read_end,
+            Some(&ev(EPOLLIN | EPOLLET, 1)),
+        )
+        .unwrap();
+        writer.write(b"x").unwrap();
+        assert_eq!(reported(&ep, 0, 0), [(EPOLLIN, 1)]);
+        assert_eq!(reported(&ep, 1, 0), [], "another file's I/O");
+        assert_eq!(reported(&ep, 2, 0), []);
+        writer.write(b"y").unwrap();
+        assert_eq!(reported(&ep, 2, 0), [(EPOLLIN, 1)], "its own new data");
     }
 
     #[test]

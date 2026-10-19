@@ -94,7 +94,9 @@ pub fn fork_process_with(opts: &ForkOptions) -> Result<(ProcessId, super::Thread
         super::current_process().ok_or(KernelError::ProcessNotFound { pid: 0 })?;
 
     // RLIMIT_NPROC: EAGAIN, as Linux.
-    super::rlimit::check_nproc(&current_process).map_err(|_| KernelError::WouldBlock)?;
+    // Held until the child is in the process table.
+    let _nproc =
+        super::rlimit::check_nproc(&current_process).map_err(|_| KernelError::WouldBlock)?;
 
     let current_thread = super::current_thread().ok_or(KernelError::ThreadNotFound { tid: 0 })?;
 
@@ -192,8 +194,14 @@ pub fn fork_process_with(opts: &ForkOptions) -> Result<(ProcessId, super::Thread
 
         // Signal dispositions and the blocked mask are inherited (POSIX fork);
         // pending signals are not.
-        *new_process.signal_handlers.lock() = *current_process.signal_handlers.lock();
-        *new_process.signal_action_extra.lock() = *current_process.signal_action_extra.lock();
+        {
+            // Both tables together, in their lock order (handler, then the
+            // rest), so no action is copied half old and half new.
+            let handlers = current_process.signal_handlers.lock();
+            let extra = current_process.signal_action_extra.lock();
+            *new_process.signal_handlers.lock() = *handlers;
+            *new_process.signal_action_extra.lock() = *extra;
+        }
         new_process.signal_mask.store(
             current_process
                 .signal_mask

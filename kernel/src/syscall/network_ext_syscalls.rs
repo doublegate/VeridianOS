@@ -52,9 +52,27 @@ pub(super) fn sys_net_sendto(
         super::validate_user_buffer(addr_ptr, addr_len)?;
     }
 
-    // The datagram is copied in whole through the fault-tolerant reader (N-43).
-    let data =
-        super::userspace::read_user_vec(buf_ptr, buf_len, super::userspace::MAX_USER_MESSAGE)?;
+    // A datagram is copied in whole through the fault-tolerant reader
+    // (N-43), and one over the limit is refused. A stream may send part: at
+    // most the limit goes, and the count sent is returned, as a short
+    // write (PR #23 review: every send() of more than 1 MiB on a TCP or
+    // Unix stream failed with EINVAL).
+    let stream = match socket_handle(fd)? {
+        SocketHandle::Inet(id) => crate::net::socket::with_socket(id, |s| {
+            s.socket_type == crate::net::socket::SocketType::Stream
+        })
+        .unwrap_or(false),
+        SocketHandle::Unix(id) => {
+            crate::net::unix_socket::socket_type(id)
+                == Some(crate::net::unix_socket::UnixSocketType::Stream)
+        }
+    };
+    let len = if stream {
+        buf_len.min(super::userspace::MAX_USER_MESSAGE)
+    } else {
+        buf_len
+    };
+    let data = super::userspace::read_user_vec(buf_ptr, len, super::userspace::MAX_USER_MESSAGE)?;
     let data = &data[..];
 
     let dest = if addr_ptr != 0 {

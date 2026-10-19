@@ -82,6 +82,15 @@ pub fn init(width: u32, height: u32) -> Result<*mut u8, KernelError> {
     let stride = width * 4; // 4 bytes per pixel (XRGB8888)
     let fb_size = (stride * height) as usize;
 
+    // The device first, then its DMA frame, then the framebuffer: every
+    // boot without `-device ramfb` (the default) failed after taking 3
+    // MiB of frames for it and never gave them back (PR #24 review).
+    let selector = find_fwcfg_file("etc/ramfb").ok_or(KernelError::NotFound {
+        resource: "fw_cfg etc/ramfb selector",
+        id: 0,
+    })?;
+    let mut dma = crate::drivers::dma_frame::DmaFrame::alloc()?;
+
     // Allocate contiguous physical frames for the framebuffer.
     let num_frames = fb_size.div_ceil(FRAME_SIZE);
     let frame_num = FRAME_ALLOCATOR
@@ -114,16 +123,9 @@ pub fn init(width: u32, height: u32) -> Result<*mut u8, KernelError> {
         stride: stride.to_be(),
     };
 
-    // Find the "etc/ramfb" fw_cfg selector by scanning the directory
-    let selector = find_fwcfg_file("etc/ramfb").ok_or(KernelError::NotFound {
-        resource: "fw_cfg etc/ramfb selector",
-        id: 0,
-    })?;
-
     // Write the config via fw_cfg DMA. The device reads the config and the
     // DMA descriptor by physical address, so both go in a DMA frame (they
     // were on the stack, whose address is not a physical one).
-    let mut dma = crate::drivers::dma_frame::DmaFrame::alloc()?;
     // SAFETY: the frame holds a page; the 28-byte config is copied to its
     // start, and nothing else uses the frame.
     unsafe {
@@ -133,13 +135,27 @@ pub fn init(width: u32, height: u32) -> Result<*mut u8, KernelError> {
             core::mem::size_of::<RamfbConfig>(),
         );
     }
-    write_fwcfg_dma(
+    match write_fwcfg_dma(
         selector,
         &mut dma,
         core::mem::size_of::<RamfbConfig>() as u32,
-    )?;
-
-    Ok(fb_ptr)
+    ) {
+        Ok(()) => Ok(fb_ptr),
+        // The device may still write the descriptor: its frame is leaked,
+        // never freed under it (DmaFrame's contract), and so is the
+        // framebuffer it was told about (PR #24 review).
+        Err(e @ KernelError::Timeout { .. }) => {
+            core::mem::forget(dma);
+            Err(e)
+        }
+        Err(e) => {
+            FRAME_ALLOCATOR
+                .lock()
+                .free_frames(frame_num, num_frames)
+                .ok();
+            Err(e)
+        }
+    }
 }
 
 /// Whether QEMU offers a ramfb device (`-device ramfb`): fw_cfg lists
@@ -231,6 +247,10 @@ fn write_fwcfg_dma(
         coherent,
     );
 
+    // The descriptor's stores reach memory before the doorbell (Linux's
+    // writel: `fence w,o` on RISC-V, which the DMA sync's `fence w,w` is
+    // not).
+    crate::arch::barriers::io_wmb();
     // Write the DMA descriptor address (big-endian, split into high/low 32-bit)
     // SAFETY: MMIO writes to the fw_cfg DMA register to initiate a write transfer.
     unsafe {

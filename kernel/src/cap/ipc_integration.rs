@@ -156,8 +156,9 @@ impl CapabilityCheckedIpc {
         cap_space: &CapabilitySpace,
         msg: crate::ipc::Message,
     ) -> Result<(), IpcError> {
-        // Check send permission
-        check_send_permission(cap, cap_space)?;
+        // The capability must name this endpoint with SEND: rights for
+        // some other endpoint allowed sending here (PR #25 review).
+        check_endpoint_permission(cap, cap_space, endpoint_id, IpcRights::SEND)?;
 
         // Perform the actual send
         crate::ipc::sync_send(msg, endpoint_id)
@@ -169,8 +170,8 @@ impl CapabilityCheckedIpc {
         cap: CapabilityToken,
         cap_space: &CapabilitySpace,
     ) -> Result<crate::ipc::Message, IpcError> {
-        // Check receive permission
-        check_receive_permission(cap, cap_space)?;
+        // The capability must name this endpoint with RECEIVE.
+        check_endpoint_permission(cap, cap_space, endpoint_id, IpcRights::RECEIVE)?;
 
         // Perform the actual receive
         crate::ipc::sync_receive(endpoint_id)

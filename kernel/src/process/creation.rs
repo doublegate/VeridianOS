@@ -310,6 +310,8 @@ struct ExecIds {
     set_gid: Option<u32>,
     /// The caller may read the program (and its loader).
     readable: bool,
+    /// The process's tracer (0: none) when the exec started.
+    tracer_at_start: u64,
 }
 
 /// Install the credentials a program runs with (Linux's
@@ -326,10 +328,13 @@ fn install_exec_credentials(process: &super::Process, thread: &super::Thread, id
     use core::sync::atomic::Ordering;
 
     let _guard = process.cred_guard.lock();
-    let traced_unprivileged = match process.tracer.load(Ordering::Acquire) {
+    // Traced without privilege as the exec started or now: either denies.
+    let unprivileged = |tracer: u64| match tracer {
         0 => false,
         tracer => super::table::get_process(super::ProcessId(tracer)).is_none_or(|t| t.euid() != 0),
     };
+    let traced_unprivileged =
+        unprivileged(ids.tracer_at_start) || unprivileged(process.tracer.load(Ordering::Acquire));
     // exec runs only in a single-threaded process, so this thread is the
     // process's only user of its filesystem state.
     let fs_shared = thread.fs().users.load(Ordering::Acquire) > 1;
@@ -399,8 +404,41 @@ fn may_execute(meta: &crate::fs::Metadata, uid: u32, gid: u32) -> bool {
 /// interpreter specified on the shebang line is executed instead, with the
 /// script path prepended to the argument list. Also supports PATH search --
 /// if the path does not start with `/`, standard directories are searched.
+///
+/// `before_commit` runs just before the point of no return, once the
+/// program (and its interpreter and set-ID bits) checked out: the system
+/// call ends the process's other threads there (Linux's de_thread in
+/// begin_new_exec), so an exec that fails -- a PATH search meeting ENOENT
+/// -- leaves them running (PR #23 review).
 #[cfg(feature = "alloc")]
-pub fn exec_process(path: &str, argv: &[&str], envp: &[&str]) -> Result<(), KernelError> {
+pub fn exec_process(
+    path: &str,
+    argv: &[&str],
+    envp: &[&str],
+    before_commit: &dyn Fn() -> Result<(), KernelError>,
+) -> Result<(), KernelError> {
+    exec_at_depth(path, argv, envp, before_commit, 0)
+}
+
+/// How many `#!` interpreters an exec follows (Linux's
+/// BINPRM_MAX_RECURSION): a script whose interpreter is itself, or two
+/// naming each other, recursed until the kernel stack overflowed (PR #22
+/// review). ELOOP past it.
+pub const MAX_INTERPRETER_DEPTH: usize = 4;
+
+/// Whether an exec `depth` interpreters deep may follow one more.
+pub fn may_follow_interpreter(depth: usize) -> bool {
+    depth < MAX_INTERPRETER_DEPTH
+}
+
+#[cfg(feature = "alloc")]
+fn exec_at_depth(
+    path: &str,
+    argv: &[&str],
+    envp: &[&str],
+    before_commit: &dyn Fn() -> Result<(), KernelError>,
+    depth: usize,
+) -> Result<(), KernelError> {
     use crate::elf::ElfLoader;
 
     let process = super::current_process().ok_or(KernelError::ProcessNotFound { pid: 0 })?;
@@ -439,10 +477,13 @@ pub fn exec_process(path: &str, argv: &[&str], envp: &[&str]) -> Result<(), Kern
             new_argv.extend_from_slice(&argv[1..]);
         }
 
-        // Recursively exec the interpreter; the set-user-ID and
-        // set-group-ID bits of the script itself are ignored, as on Linux,
-        // and the command name is the script's (N-227).
-        exec_process(&interpreter, &new_argv, envp)?;
+        // Exec the interpreter; the set-user-ID and set-group-ID bits of
+        // the script itself are ignored, as on Linux, and the command name
+        // is the script's (N-227).
+        if !may_follow_interpreter(depth) {
+            return Err(KernelError::FsError(crate::error::FsError::SymlinkLoop));
+        }
+        exec_at_depth(&interpreter, &new_argv, envp, before_commit, depth + 1)?;
         *current_thread.comm.lock() = super::thread::comm_from(basename(&resolved_path).as_bytes());
         return Ok(());
     }
@@ -459,7 +500,14 @@ pub fn exec_process(path: &str, argv: &[&str], envp: &[&str]) -> Result<(), Kern
     let elf_binary = ElfLoader::new().parse(&file_data).map_err(not_elf)?;
     let program_plan =
         crate::elf::image::plan(&elf_binary, file_data.len(), crate::elf::image::PIE_BASE)
-            .map_err(not_elf)?;
+            .map_err(|e| match e {
+                // Too large to load: ENOMEM, as Linux's mapping would fail.
+                crate::elf::ElfError::MemoryAllocationFailed => KernelError::OutOfMemory {
+                    requested: 0,
+                    available: 0,
+                },
+                e => not_elf(e),
+            })?;
 
     // The interpreter (PT_INTERP) is opened, permission-checked and checked
     // before the point of no return as well, as Linux does: a missing or
@@ -504,7 +552,41 @@ pub fn exec_process(path: &str, argv: &[&str], envp: &[&str]) -> Result<(), Kern
             set_uid: perms.set_uid.then_some(meta.uid),
             set_gid: (perms.set_gid && perms.group_exec).then_some(meta.gid),
             readable: readable(&meta) && interp_readable,
+            tracer_at_start: 0,
         }
+    };
+
+    // BTI guarding, from the images' property notes: a malformed one is
+    // ENOEXEC here, with the caller intact.
+    let guards = crate::elf::image::bti_guards(
+        (&elf_binary, &file_data),
+        interp
+            .as_ref()
+            .map(|(_, data, parsed)| (parsed, data.as_slice())),
+        crate::arch::bti_supported(),
+    )
+    .map_err(not_elf)?;
+
+    // The other threads go now, with everything checked (see
+    // `exec_process`).
+    before_commit()?;
+
+    // Under the credential guard, as ptrace attach and detach: who traces
+    // the process as the exec starts (a tracer that detaches before the
+    // set-ID decision still denies it), and that an exec is under way, so
+    // PEEK and POKE do not write into the image being built (PR #23
+    // review: a tracer could poke the new set-ID image, then detach before
+    // the decision and have the privilege granted to its modified image).
+    let tracer_at_start = {
+        let _guard = process.cred_guard.lock();
+        process
+            .exec_in_progress
+            .store(true, core::sync::atomic::Ordering::Release);
+        process.tracer.load(core::sync::atomic::Ordering::Acquire)
+    };
+    let set_ids = ExecIds {
+        tracer_at_start,
+        ..set_ids
     };
 
     // Point of no return: from clear() on, a failure cannot go back to the
@@ -564,6 +646,7 @@ pub fn exec_process(path: &str, argv: &[&str], envp: &[&str]) -> Result<(), Kern
                 interp
                     .as_ref()
                     .map(|(node, data, binary)| (binary, &**node, data.as_slice())),
+                guards,
             )?
         };
 
@@ -583,6 +666,9 @@ pub fn exec_process(path: &str, argv: &[&str], envp: &[&str]) -> Result<(), Kern
         let stack_top = setup_exec_stack(&process, argv, envp, &resolved_path, &loaded.aux)?;
         Ok((loaded.start, stack_top))
     })();
+    process
+        .exec_in_progress
+        .store(false, core::sync::atomic::Ordering::Release);
     let (final_entry, stack_top) = match committed {
         Ok(v) => v,
         Err(e) => {
@@ -673,7 +759,12 @@ pub fn exec_process(path: &str, argv: &[&str], envp: &[&str]) -> Result<(), Kern
 }
 
 #[cfg(not(feature = "alloc"))]
-pub fn exec_process(_path: &str, _argv: &[&str], _envp: &[&str]) -> Result<(), KernelError> {
+pub fn exec_process(
+    _path: &str,
+    _argv: &[&str],
+    _envp: &[&str],
+    _before_commit: &dyn Fn() -> Result<(), KernelError>,
+) -> Result<(), KernelError> {
     Err(KernelError::NotImplemented {
         feature: "exec (requires alloc)",
     })
@@ -1031,6 +1122,16 @@ pub(crate) fn exec_stack_layout<'a>(
 mod tests {
     use super::*;
     use crate::elf::dynamic::{AuxType, ProcessAux, ProgramAux};
+
+    /// An exec follows at most four `#!` interpreters, as Linux, and then
+    /// fails with ELOOP: a script naming itself recursed until the kernel
+    /// stack overflowed (PR #22 review).
+    #[test]
+    fn interpreter_chains_are_bounded() {
+        assert!((0..MAX_INTERPRETER_DEPTH).all(may_follow_interpreter));
+        assert!(!may_follow_interpreter(MAX_INTERPRETER_DEPTH));
+        assert_eq!(MAX_INTERPRETER_DEPTH, 4);
+    }
 
     const TOP: usize = 0x7FFF_F000;
 

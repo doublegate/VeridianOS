@@ -3293,9 +3293,18 @@ fn run_usercopy_tests(passed: &mut u32, failed: &mut u32) {
     {
         use crate::arch::percpu::arch_cpu_ptr;
         let online = crate::arch::smp_boot::online_cpus() as usize;
-        let start_ms = crate::timer::get_uptime_ms();
-        while crate::timer::get_uptime_ms().saturating_sub(start_ms) < 20 {
-            core::hint::spin_loop();
+        // Time for the secondaries to tick, only if there are any, and
+        // bounded as tests 34 and 36 are: a clock that does not advance
+        // must not hang the boot (PR #25 review).
+        if online > 1 {
+            let start_ms = crate::timer::get_uptime_ms();
+            let mut spins = 0u64;
+            while crate::timer::get_uptime_ms().saturating_sub(start_ms) < 20
+                && spins < 2_000_000_000
+            {
+                core::hint::spin_loop();
+                spins += 1;
+            }
         }
         let mut ok = true;
         for cpu in 0..online {

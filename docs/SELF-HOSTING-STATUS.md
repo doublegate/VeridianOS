@@ -96,7 +96,7 @@ Build VeridianOS kernel ON VeridianOS  <-- FULL SELF-HOSTING
 | Kernel | Syscall interface (79+) | `kernel/src/syscall/` |
 | Kernel | Thread support (clone/futex) | `kernel/src/syscall/{futex,thread_clone,arch_prctl}.rs` |
 | Kernel | ELF loader (multi-LOAD) | `kernel/src/elf/mod.rs` |
-| Kernel | Signal delivery (tri-arch) | `kernel/src/process/signal_delivery.rs` |
+| Kernel | Signal delivery (tri-arch) | `kernel/src/process/signals.rs` (`deliver_on_return`, `rt_sigreturn`) |
 | Kernel | Virtio-blk (PCI + MMIO) | `kernel/src/drivers/virtio/` |
 | Userland | C library (libc) | `userland/libc/` (17 src, 25+ headers) |
 | Userland | Math library (libm) | `userland/libm/` |

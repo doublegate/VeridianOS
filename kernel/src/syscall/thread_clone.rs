@@ -200,7 +200,8 @@ pub fn sys_thread_clone(
 
     let proc = process::current_process().ok_or(SyscallError::InvalidState)?;
     // RLIMIT_NPROC counts threads too (EAGAIN).
-    process::rlimit::check_nproc(&proc)?;
+    // Held until the thread is added.
+    let _nproc = process::rlimit::check_nproc(&proc)?;
 
     // Clone current user context so child resumes at same PC with retval=0.
     // The caller pushed start_routine/arg on the user stack before invoking clone.

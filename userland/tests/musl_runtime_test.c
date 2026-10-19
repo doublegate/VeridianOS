@@ -1377,60 +1377,7 @@ static int touch_faults(volatile char *p, int write)
     return WIFSIGNALED(st) && WTERMSIG(st) == SIGSEGV;
 }
 
-/* The first address past user space: 47-bit everywhere but RISC-V under
- * Sv39, where it is 256 GiB less a page (ADR 0018). Found by asking for the
- * last page below the 47-bit limit as a hint: honoured if that is user
- * space, else the kernel picks somewhere else. Elsewhere an ignored hint
- * gives 0, which fails the checks below. */
-static unsigned long user_space_end(void)
-{
-    static unsigned long end;
-    static int probed;
-    if (!probed) {
-        probed = 1;
-        void *top = (void *)0x7FFFFFFFE000UL;
-        void *p = mmap(top, 4096, PROT_READ, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-        end = p == top ? 0x7FFFFFFFF000UL : 0;
-#ifdef __riscv
-        if (p != top)
-            end = 0x3FFFFFF000UL;
-#endif
-        if (p != MAP_FAILED)
-            munmap(p, 4096);
-    }
-    return end;
-}
-
-#ifdef __riscv
-/* The paging mode /proc/cpuinfo reports, as Linux does ("mmu : sv39"):
- * 39 or 48, 0 if it says neither. */
-static int riscv_mmu_bits(void)
-{
-    FILE *f = fopen("/proc/cpuinfo", "r");
-    char line[128];
-    int bits = 0;
-    if (!f)
-        return 0;
-    while (fgets(line, sizeof(line), f))
-        if (strncmp(line, "mmu", 3) == 0)
-            bits = strstr(line, "sv39") ? 39 : strstr(line, "sv48") ? 48 : 0;
-    fclose(f);
-    return bits;
-}
-#endif
-
-/* Whether the probed limit is the paging mode's: a Sv48 hart that wrongly
- * refused the high page would otherwise pass as Sv39. */
-static int user_end_matches_mode(void)
-{
-    unsigned long end = user_space_end();
-#ifdef __riscv
-    int bits = riscv_mmu_bits();
-    return (bits == 39 && end == 0x3FFFFFF000UL) || (bits == 48 && end == 0x7FFFFFFFF000UL);
-#else
-    return end == 0x7FFFFFFFF000UL;
-#endif
-}
+#include "user_layout.h"
 
 /* User addresses no mapping uses: 80 and 96 TiB, or under Sv39 192 and
  * 208 GiB, between the PIE and the thread stacks (ADR 0018). */
@@ -2369,14 +2316,27 @@ static void test_mkfifo(void)
         f |= 8;
     if (r >= 0)
         close(r);
+    /* The child starts its clock, then says so; the parent's wait starts
+     * after that, so a child scheduled late does not measure too short a
+     * wait (PR #20 review: a slow start made it fail). */
+    int started[2];
+    if (pipe(started) != 0)
+        f |= 128;
     pid_t pid = fork();
     if (pid == 0) {
         long t0 = now_ms();
+        if (write(started[1], "s", 1) != 1)
+            _exit(3);
         int w = open(path, O_WRONLY);
         long waited = now_ms() - t0;
         int ok = w >= 0 && waited >= 100 && write(w, "fifo data", 9) == 9;
         _exit(ok ? 0 : (w < 0 ? 1 : 2));
     }
+    char go;
+    if (pid > 0 && read(started[0], &go, 1) != 1)
+        f |= 128;
+    close(started[0]);
+    close(started[1]);
     usleep(300000); /* the writer's open waits for this reader */
     r = open(path, O_RDONLY);
     int n = 0, k;
@@ -4875,11 +4835,202 @@ static void test_many_threads(void)
     report("musl_many_threads", made == 600, why);
 }
 
+/* Fixes from the review of v0.27.0 (PRs #20-#25) that need a real process
+ * to show: each check failed, hung or crashed the kernel before its fix. */
+static volatile int review_spin_stop;
+static volatile unsigned long review_spins;
+
+static void *review_spinner(void *arg)
+{
+    (void)arg;
+    while (!review_spin_stop)
+        review_spins++;
+    return NULL;
+}
+
+static int review_futex_word;
+
+static void *review_futex_waiter(void *arg)
+{
+    (void)arg;
+    struct timespec two = {2, 0};
+    syscall(SYS_futex, &review_futex_word, FUTEX_WAIT_PRIVATE, 0, &two, NULL, 0);
+    return NULL;
+}
+
+static void test_review_fixes(void)
+{
+    static char why[128];
+    int st;
+
+    /* A script naming itself as its interpreter: ELOOP (Linux's
+     * BINPRM_MAX_RECURSION), not a kernel stack overflow. */
+    {
+        const char *path = "/tmp/review_loop.sh";
+        int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0755);
+        int ok = fd >= 0 && write(fd, "#!/tmp/review_loop.sh\n", 22) == 22;
+        if (fd >= 0)
+            close(fd);
+        pid_t pid = fork();
+        if (pid == 0) {
+            execl(path, "loop", (char *)0);
+            _exit(errno == ELOOP ? 0 : 1);
+        }
+        ok = ok && pid > 0 && waitpid(pid, &st, 0) == pid && WIFEXITED(st)
+             && WEXITSTATUS(st) == 0;
+        unlink(path);
+        snprintf(why, sizeof(why), "status=%#x", st);
+        report("review_shebang_loop_is_eloop", ok, why);
+    }
+
+    /* A failed exec leaves the other threads running: they used to be
+     * ended before the program was even found. */
+    {
+        pid_t pid = fork();
+        if (pid == 0) {
+            pthread_t t;
+            review_spin_stop = 0;
+            if (pthread_create(&t, NULL, review_spinner, NULL) != 0)
+                _exit(2);
+            usleep(20000);
+            int failed = execl("/nonexistent/review", "x", (char *)0) == -1 && errno == ENOENT;
+            unsigned long before = review_spins;
+            usleep(50000);
+            int alive = review_spins != before;
+            review_spin_stop = 1;
+            pthread_join(t, NULL);
+            _exit(failed && alive ? 0 : 1);
+        }
+        int ok = pid > 0 && waitpid(pid, &st, 0) == pid && WIFEXITED(st) && WEXITSTATUS(st) == 0;
+        snprintf(why, sizeof(why), "status=%#x", st);
+        report("review_failed_exec_keeps_threads", ok, why);
+    }
+
+    /* A read into memory that ends part-way returns what was copied and
+     * moves the file position only by that. */
+    {
+        const char *path = "/tmp/review_read";
+        int fd = open(path, O_RDWR | O_CREAT | O_TRUNC, 0644);
+        static char data[8192];
+        memset(data, 'r', sizeof(data));
+        int ok = fd >= 0 && write(fd, data, sizeof(data)) == (ssize_t)sizeof(data)
+                 && lseek(fd, 0, SEEK_SET) == 0;
+        char *p = mmap(NULL, 8192, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        ok = ok && p != MAP_FAILED && munmap(p + 4096, 4096) == 0;
+        ssize_t n = ok ? read(fd, p, 8192) : -2;
+        off_t at = fd >= 0 ? lseek(fd, 0, SEEK_CUR) : -2;
+        ok = ok && n == 4096 && at == 4096;
+        if (p != MAP_FAILED)
+            munmap(p, 4096);
+        if (fd >= 0)
+            close(fd);
+        unlink(path);
+        snprintf(why, sizeof(why), "n=%ld at=%ld", (long)n, (long)at);
+        report("review_partial_read_keeps_position", ok, why);
+    }
+
+    /* Shrinking a memfd under a MAP_SHARED mapping is EBUSY (the mapping
+     * would stop sharing with the file); unmapped, it shrinks. */
+    {
+        int fd = memfd_create("review", 0);
+        int ok = fd >= 0 && ftruncate(fd, 8192) == 0;
+        void *p = ok ? mmap(NULL, 8192, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0) : MAP_FAILED;
+        errno = 0;
+        int busy = p != MAP_FAILED && ftruncate(fd, 0) == -1 && errno == EBUSY;
+        if (p != MAP_FAILED)
+            munmap(p, 8192);
+        ok = ok && busy && ftruncate(fd, 0) == 0;
+        if (fd >= 0)
+            close(fd);
+        snprintf(why, sizeof(why), "busy=%d errno=%d", busy, errno);
+        report("review_memfd_shrink_mapped_is_ebusy", ok, why);
+    }
+
+    /* O_CREAT | O_DIRECTORY is EINVAL and makes nothing (Linux 6.4+). */
+    {
+        const char *path = "/tmp/review_odir";
+        unlink(path);
+        errno = 0;
+        int fd = open(path, O_CREAT | O_DIRECTORY | O_RDONLY, 0644);
+        int err = errno;
+        int ok = fd == -1 && err == EINVAL && access(path, F_OK) == -1;
+        if (fd >= 0)
+            close(fd);
+        unlink(path);
+        snprintf(why, sizeof(why), "fd=%d errno=%d", fd, err);
+        report("review_creat_directory_is_einval", ok, why);
+    }
+
+    /* A completed nanosleep leaves rem alone: a bad pointer there is not
+     * EFAULT. */
+    {
+        struct timespec ts = {0, 1000000};
+        long r = syscall(SYS_nanosleep, &ts, (void *)8);
+        snprintf(why, sizeof(why), "r=%ld errno=%d", r, errno);
+        report("review_nanosleep_leaves_rem_alone", r == 0, why);
+    }
+
+    /* A non-blocking write larger than PIPE_BUF into a full pipe is EAGAIN,
+     * not 0. */
+    {
+        int p[2];
+        static char chunk[4096];
+        int ok = pipe2(p, O_NONBLOCK) == 0;
+        while (ok && write(p[1], chunk, sizeof(chunk)) > 0)
+            ;
+        errno = 0;
+        static char big[5000];
+        ssize_t w = ok ? write(p[1], big, sizeof(big)) : 0;
+        int err = errno;
+        ok = ok && w == -1 && err == EAGAIN;
+        close(p[0]);
+        close(p[1]);
+        snprintf(why, sizeof(why), "w=%ld errno=%d", (long)w, err);
+        report("review_full_pipe_large_write_is_eagain", ok, why);
+    }
+
+    /* poll for POLLOUT on an expired, unread timerfd times out: the past
+     * expiry was a wake time, and the wait spun in the kernel. */
+    {
+        int tfd = timerfd_create(CLOCK_MONOTONIC, 0);
+        struct itimerspec its = {{0, 0}, {0, 1000000}};
+        int ok = tfd >= 0 && timerfd_settime(tfd, 0, &its, NULL) == 0;
+        usleep(5000);
+        struct pollfd pfd = {tfd, POLLOUT, 0};
+        long t0 = now_ms();
+        int r = ok ? poll(&pfd, 1, 100) : -2;
+        long took = now_ms() - t0;
+        ok = ok && r == 0 && took >= 80;
+        if (tfd >= 0)
+            close(tfd);
+        snprintf(why, sizeof(why), "r=%d took=%ldms", r, took);
+        report("review_expired_timerfd_poll_times_out", ok, why);
+    }
+
+    /* FUTEX_CMP_REQUEUE onto the same word returns (it looped forever in
+     * the kernel with the bucket locked). */
+    {
+        pthread_t t;
+        review_futex_word = 0;
+        int ok = pthread_create(&t, NULL, review_futex_waiter, NULL) == 0;
+        usleep(20000);
+        long r = ok ? syscall(SYS_futex, &review_futex_word, FUTEX_CMP_REQUEUE_PRIVATE, 0,
+                              (void *)1000, &review_futex_word, 0)
+                    : -2;
+        syscall(SYS_futex, &review_futex_word, FUTEX_WAKE_PRIVATE, 1, NULL, NULL, 0);
+        if (ok)
+            pthread_join(t, NULL);
+        snprintf(why, sizeof(why), "r=%ld errno=%d", r, errno);
+        report("review_requeue_same_word_returns", ok && r >= 0, why);
+    }
+}
+
 /* Tests `--only NAME` can run alone (for debugging a single test). */
 static const struct {
     const char *name;
     void (*fn)(void);
 } only_tests[] = {
+    {"review_fixes", test_review_fixes},
     {"threads", test_threads},
     {"cow_race", test_cow_race},
     {"signals", test_signals},
@@ -4978,6 +5129,7 @@ int main(int argc, char **argv)
     test_sigpipe();
     test_memory_calls();
     test_file_calls();
+    test_review_fixes();
     test_accounts();
     test_unix_accept_blocks();
     test_peercred();

@@ -134,16 +134,24 @@ pub fn nproc_allows(tasks: usize, limit: u64) -> bool {
 /// copy_process): its real user may not already have as many tasks --
 /// threads, and processes not yet reaped -- as the limit allows. Root is
 /// exempt, as Linux exempts the root user and CAP_SYS_RESOURCE.
+///
+/// The check and the new task's arrival in the process table must be one
+/// step, or two creations by the same user could both see its last free
+/// slot (PR #22 review; Linux increments the per-user count and checks it
+/// at once). The returned guard keeps every other limited creation out
+/// until the caller drops it, after adding the task; unlimited ones (root,
+/// RLIM_INFINITY, the default) take no lock.
 #[cfg(feature = "alloc")]
-pub fn check_nproc(process: &super::Process) -> Result<(), SyscallError> {
+pub fn check_nproc(process: &super::Process) -> Result<NprocGuard, SyscallError> {
     let creds = process.credentials();
     if creds.ruid == 0 || creds.euid == 0 {
-        return Ok(());
+        return Ok(NprocGuard { _held: None });
     }
     let limit = process.limits().cur(RLIMIT_NPROC);
     if limit == RLIM_INFINITY {
-        return Ok(());
+        return Ok(NprocGuard { _held: None });
     }
+    let guard = NPROC.lock();
     let mut tasks = 0usize;
     super::table::PROCESS_TABLE.for_each(|p| {
         if p.credentials().ruid == creds.ruid {
@@ -151,10 +159,23 @@ pub fn check_nproc(process: &super::Process) -> Result<(), SyscallError> {
         }
     });
     if nproc_allows(tasks, limit) {
-        Ok(())
+        Ok(NprocGuard { _held: Some(guard) })
     } else {
         Err(SyscallError::WouldBlock)
     }
+}
+
+/// Serialises RLIMIT_NPROC-limited task creation (see [`check_nproc`]).
+#[cfg(feature = "alloc")]
+static NPROC: crate::sync::sleep_mutex::SleepMutex<()> =
+    crate::sync::sleep_mutex::SleepMutex::new(());
+
+/// Held from [`check_nproc`] until the new task is in the process table.
+#[cfg(feature = "alloc")]
+#[must_use = "hold it until the new task is added"]
+pub struct NprocGuard {
+    /// Released when dropped.
+    _held: Option<crate::sync::sleep_mutex::SleepMutexGuard<'static, ()>>,
 }
 
 /// What RLIMIT_CPU does to a process that has used `used_ns` of CPU time

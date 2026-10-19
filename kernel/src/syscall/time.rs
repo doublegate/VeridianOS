@@ -146,11 +146,12 @@ impl Clock {
     }
 }
 
-/// The nanoseconds a CPU clock of `kind` reads from `times`.
-fn cpu_clock_ns(times: crate::sched::cputime::CpuTimes, kind: CpuClockKind) -> u64 {
+/// The nanoseconds a CPU clock of `kind` reads from `times`, whose user
+/// part is `user_ns` (from its `PrevSplit`, so the clock never goes back).
+fn cpu_clock_ns(times: crate::sched::cputime::CpuTimes, user_ns: u64, kind: CpuClockKind) -> u64 {
     match kind {
         CpuClockKind::Prof | CpuClockKind::Sched => times.runtime_ns,
-        CpuClockKind::Virt => times.user_system_ns().0,
+        CpuClockKind::Virt => user_ns,
     }
 }
 
@@ -166,7 +167,8 @@ fn read_cpu_clock(clock: Clock) -> Result<u64, SyscallError> {
                 Some(pid) => crate::process::find_process(crate::process::ProcessId(pid))
                     .ok_or(SyscallError::InvalidArgument)?,
             };
-            Ok(cpu_clock_ns(process.cpu_times(), kind))
+            let (times, (user, _)) = process.cpu_split();
+            Ok(cpu_clock_ns(times, user, kind))
         }
         Clock::ThreadCpu(tid, kind) => {
             let tid = match tid {
@@ -181,8 +183,9 @@ fn read_cpu_clock(clock: Clock) -> Result<u64, SyscallError> {
             if caller.get_thread(crate::process::ThreadId(tid)).is_none() {
                 return Err(SyscallError::InvalidArgument);
             }
-            let times = crate::sched::dispatch::thread_cpu((caller.pid.0, tid)).unwrap_or_default();
-            Ok(cpu_clock_ns(times, kind))
+            let (times, (user, _)) =
+                crate::sched::dispatch::thread_cpu_split((caller.pid.0, tid)).unwrap_or_default();
+            Ok(cpu_clock_ns(times, user, kind))
         }
         _ => Err(SyscallError::InvalidArgument),
     }
@@ -401,7 +404,7 @@ pub fn sys_time(tloc: usize) -> SyscallResult {
 /// - `req_ptr`: User-space pointer to a `struct timespec` with the requested
 ///   sleep duration.
 /// - `rem_ptr`: User-space pointer to a `struct timespec` for remaining time
-///   (may be NULL). Set to zero on normal completion.
+///   (may be NULL), written only when the sleep is interrupted.
 ///
 /// # Returns
 /// 0 on success.
@@ -435,23 +438,17 @@ pub fn sys_nanosleep(req_ptr: usize, rem_ptr: usize) -> SyscallResult {
         }
     }
 
-    // Write zero remaining time
-    if rem_ptr != 0 {
-        validate_user_ptr_typed::<Timespec>(rem_ptr)?;
-        let zero = Timespec {
-            tv_sec: 0,
-            tv_nsec: 0,
-        };
-        super::userspace::write_user(rem_ptr, zero)?;
-    }
-
+    // A completed sleep leaves `rem` alone (see `sleep_until`).
+    let _ = rem_ptr;
     Ok(0)
 }
 
 /// Sleep the calling dispatched thread until `deadline` (`monotonic_ns`):
 /// off the run queue until the timer wakes it, or a signal does -- then
 /// EINTR, with the time left written to `rem_ptr` (if non-zero) as Linux
-/// does. On completion `rem_ptr` gets zero.
+/// does. A completed sleep does not touch `rem_ptr`, as on Linux: writing
+/// zero there made a sleep with a bad `rem` pointer fail with EFAULT after
+/// it had slept (PR #23 review).
 #[cfg(feature = "alloc")]
 pub(crate) fn sleep_until(deadline: u64, rem_ptr: usize) -> SyscallResult {
     use crate::sched::dispatch;
@@ -460,12 +457,8 @@ pub(crate) fn sleep_until(deadline: u64, rem_ptr: usize) -> SyscallResult {
         dispatch::wait_event(&SLEEP, Some(deadline), || false),
         Err(dispatch::WaitError::Interrupted)
     );
-    if rem_ptr != 0 {
-        let left = if interrupted {
-            deadline.saturating_sub(dispatch::clock_ns())
-        } else {
-            0
-        };
+    if interrupted && rem_ptr != 0 {
+        let left = deadline.saturating_sub(dispatch::clock_ns());
         let rem = Timespec {
             tv_sec: (left / 1_000_000_000) as i64,
             tv_nsec: (left % 1_000_000_000) as i64,
@@ -589,8 +582,9 @@ mod tests {
             system_ticks: 1,
             ..crate::sched::cputime::CpuTimes::ZERO
         };
-        assert_eq!(cpu_clock_ns(times, CpuClockKind::Sched), 100);
-        assert_eq!(cpu_clock_ns(times, CpuClockKind::Prof), 100);
-        assert_eq!(cpu_clock_ns(times, CpuClockKind::Virt), 50);
+        let user = times.user_system_ns().0;
+        assert_eq!(cpu_clock_ns(times, user, CpuClockKind::Sched), 100);
+        assert_eq!(cpu_clock_ns(times, user, CpuClockKind::Prof), 100);
+        assert_eq!(cpu_clock_ns(times, user, CpuClockKind::Virt), 50);
     }
 }

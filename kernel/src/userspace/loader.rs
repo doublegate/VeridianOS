@@ -174,45 +174,14 @@ pub fn load_user_program(
     // Load the program (ADR 0010), and for a dynamic one its interpreter,
     // which then runs first; then its stack, with the auxiliary vector.
     // (RISC-V skipped this while it ran with paging off; ADR 0013.)
+    // A failure from here on discards the process: it was left in the
+    // table, Ready, with its address space and console descriptors, on
+    // every failed load (PR #25 review).
     if let Some(process) = crate::process::get_process(pid) {
-        let not_elf = |_| KernelError::InvalidArgument {
-            name: "elf_binary",
-            value: "not a loadable ELF image",
-        };
-        let plan = crate::elf::image::plan(&binary, buffer.len(), crate::elf::image::PIE_BASE)
-            .map_err(not_elf)?;
-        let interp = match &binary.interpreter {
-            Some(interp_path) => {
-                let (node, data) = lifecycle::read_executable(interp_path, &process.credentials())?;
-                let parsed = ElfLoader::new().parse(&data).map_err(not_elf)?;
-                Some((node, data, parsed))
-            }
-            None => None,
-        };
-        let loaded = crate::elf::image::load(
-            &process.memory_space.lock(),
-            (&binary, &*file_node, &buffer, &plan),
-            interp
-                .as_ref()
-                .map(|(node, data, parsed)| (parsed, &**node, data.as_slice())),
-        )?;
-        if interp.is_none() {
-            lifecycle::setup_static_tls(&process, &binary, &buffer);
-        }
-
-        // argv[0] is the program name if no arguments were given.
-        let default_argv = [path];
-        let argv_for_stack: &[&str] = if argv.is_empty() { &default_argv } else { argv };
-        let stack_top =
-            lifecycle::setup_exec_stack_pub(&process, argv_for_stack, envp, path, &loaded.aux)?;
-
-        if let Some(main_tid) = process.get_main_thread_id() {
-            if let Some(thread) = process.get_thread(main_tid) {
-                use crate::arch::context::ThreadContext;
-                let mut ctx = thread.context.lock();
-                ctx.set_instruction_pointer(loaded.start as usize);
-                ctx.set_stack_pointer(stack_top);
-            }
+        let loaded = load_image(&process, &binary, &file_node, &buffer, path, argv, envp);
+        if let Err(e) = loaded {
+            crate::process::exit::discard_unstarted(&process);
+            return Err(e);
         }
     }
 
@@ -223,6 +192,73 @@ pub fn load_user_program(
     }
 
     Ok(pid)
+}
+
+/// Load `binary` (the file `file_node`, contents `buffer`) into `process`
+/// and set its main thread at the entry with the stack built.
+fn load_image(
+    process: &crate::process::Process,
+    binary: &crate::elf::ElfBinary,
+    file_node: &alloc::sync::Arc<dyn crate::fs::VfsNode>,
+    buffer: &[u8],
+    path: &str,
+    argv: &[&str],
+    envp: &[&str],
+) -> Result<(), KernelError> {
+    {
+        let not_elf = |_| KernelError::InvalidArgument {
+            name: "elf_binary",
+            value: "not a loadable ELF image",
+        };
+        let plan = crate::elf::image::plan(binary, buffer.len(), crate::elf::image::PIE_BASE)
+            .map_err(not_elf)?;
+        let interp = match &binary.interpreter {
+            Some(interp_path) => {
+                let (node, data) = lifecycle::read_executable(interp_path, &process.credentials())?;
+                let parsed = ElfLoader::new().parse(&data).map_err(not_elf)?;
+                Some((node, data, parsed))
+            }
+            None => None,
+        };
+        let guards = crate::elf::image::bti_guards(
+            (binary, buffer),
+            interp
+                .as_ref()
+                .map(|(_, data, parsed)| (parsed, data.as_slice())),
+            crate::arch::bti_supported(),
+        )
+        .map_err(|_| KernelError::InvalidArgument {
+            name: "PT_GNU_PROPERTY",
+            value: "malformed GNU property note",
+        })?;
+        let loaded = crate::elf::image::load(
+            &process.memory_space.lock(),
+            (binary, &**file_node, buffer, &plan),
+            interp
+                .as_ref()
+                .map(|(node, data, parsed)| (parsed, &**node, data.as_slice())),
+            guards,
+        )?;
+        if interp.is_none() {
+            lifecycle::setup_static_tls(process, binary, buffer);
+        }
+
+        // argv[0] is the program name if no arguments were given.
+        let default_argv = [path];
+        let argv_for_stack: &[&str] = if argv.is_empty() { &default_argv } else { argv };
+        let stack_top =
+            lifecycle::setup_exec_stack_pub(process, argv_for_stack, envp, path, &loaded.aux)?;
+
+        if let Some(main_tid) = process.get_main_thread_id() {
+            if let Some(thread) = process.get_thread(main_tid) {
+                use crate::arch::context::ThreadContext;
+                let mut ctx = thread.context.lock();
+                ctx.set_instruction_pointer(loaded.start as usize);
+                ctx.set_stack_pointer(stack_top);
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Create a minimal init process when no init binary is available
@@ -259,20 +295,9 @@ fn create_minimal_init() -> Result<ProcessId, KernelError> {
     // AArch64: likewise. The kernel used to store a "b ." at the user
     // address directly, which only worked with the MMU off; with the lower
     // half belonging to the process (ADR 0015) the store would fault.
-    #[cfg(target_arch = "riscv64")]
-    {
-        // RISC-V: Cannot directly write to user-space virtual addresses during
-        // early boot because map_page() only records the mapping in a BTreeMap
-        // without creating hardware page table entries. With SATP in Bare mode,
-        // address 0x200000 maps to physical 0x200000, which is not RAM on the
-        // QEMU virt machine (RAM starts at 0x80000000). Writing there causes a
-        // store access fault and, with no trap handler (stvec) configured, the
-        // CPU reboots via OpenSBI.
-        //
-        // The init process PCB is created for bookkeeping. Actual user-space
-        // code loading will require proper page table activation in a future
-        // phase.
-    }
+    // RISC-V: the same; programs are loaded through the ELF path into the
+    // process's own Sv39/Sv48 tables (a note here described the Bare-mode
+    // boot of before sprint E; PR #25 review).
 
     Ok(pid)
 }

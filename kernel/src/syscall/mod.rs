@@ -481,6 +481,11 @@ pub enum SyscallError {
     Deadlock = -131,
     /// No such device or address (ENXIO, errno 6).
     NoDeviceOrAddress = -132,
+    /// A value does not fit its type, e.g. an mmap offset whose range
+    /// wraps (EOVERFLOW, errno 75).
+    Overflow = -133,
+    /// A write to a read-only filesystem (EROFS, errno 30).
+    ReadOnlyFilesystem = -134,
 }
 
 impl From<IpcError> for SyscallError {
@@ -534,7 +539,7 @@ pub fn map_kernel_error(err: crate::error::KernelError) -> SyscallError {
             FsError::BadFileDescriptor => SyscallError::BadFileDescriptor,
             FsError::IoError => SyscallError::IoError,
             FsError::NotAFile => SyscallError::InvalidArgument,
-            FsError::ReadOnly => SyscallError::PermissionDenied,
+            FsError::ReadOnly => SyscallError::ReadOnlyFilesystem,
             FsError::InvalidPath => SyscallError::InvalidArgument,
             FsError::NoRootFs => SyscallError::ResourceNotFound,
             FsError::TooManyOpenFiles => SyscallError::ResourceLimitExceeded,

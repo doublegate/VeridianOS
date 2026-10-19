@@ -41,6 +41,30 @@ struct RamNode {
 }
 
 impl RamNode {
+    /// [`VfsNode::unlink`], and with `kind` [`VfsNode::unlink_kind`]: the
+    /// entry's type is checked under the children lock the removal holds.
+    fn unlink_checked(&self, name: &str, kind: Option<bool>) -> Result<(), KernelError> {
+        let mut children = self.children.write();
+
+        if let Some(node) = children.get(name) {
+            if let Some(want_dir) = kind {
+                super::check_unlink_kind(node.node_type, want_dir)?;
+            }
+            if node.node_type == NodeType::Directory {
+                // Check if directory is empty
+                let dir_children = node.children.read();
+                if !dir_children.is_empty() {
+                    return Err(KernelError::FsError(FsError::DirectoryNotEmpty));
+                }
+            }
+
+            children.remove(name);
+            Ok(())
+        } else {
+            Err(KernelError::FsError(FsError::NotFound))
+        }
+    }
+
     /// Create a new file node
     fn new_file(inode: u64, parent_inode: u64, fs_id: u64, permissions: Permissions) -> Self {
         Self {
@@ -300,22 +324,14 @@ impl VfsNode for RamNode {
             return Err(KernelError::FsError(FsError::NotADirectory));
         }
 
-        let mut children = self.children.write();
+        self.unlink_checked(name, None)
+    }
 
-        if let Some(node) = children.get(name) {
-            if node.node_type == NodeType::Directory {
-                // Check if directory is empty
-                let dir_children = node.children.read();
-                if !dir_children.is_empty() {
-                    return Err(KernelError::FsError(FsError::DirectoryNotEmpty));
-                }
-            }
-
-            children.remove(name);
-            Ok(())
-        } else {
-            Err(KernelError::FsError(FsError::NotFound))
+    fn unlink_kind(&self, name: &str, want_dir: bool) -> Result<(), KernelError> {
+        if self.node_type != NodeType::Directory {
+            return Err(KernelError::FsError(FsError::NotADirectory));
         }
+        self.unlink_checked(name, Some(want_dir))
     }
 
     fn truncate(&self, size: usize) -> Result<(), crate::error::KernelError> {
@@ -629,6 +645,28 @@ mod tests {
     use alloc::vec;
 
     use super::*;
+
+    /// unlink removes no directory and rmdir nothing else, the type being
+    /// checked where the entry is removed (PR #23 review).
+    #[test]
+    fn unlink_and_rmdir_check_the_type_they_remove() {
+        let fs = RamFs::new();
+        let root = fs.root();
+        root.mkdir("d", Permissions::default()).unwrap();
+        root.create("f", Permissions::default()).unwrap();
+        assert!(matches!(
+            root.unlink_kind("d", false),
+            Err(KernelError::FsError(FsError::IsADirectory))
+        ));
+        assert!(matches!(
+            root.unlink_kind("f", true),
+            Err(KernelError::FsError(FsError::NotADirectory))
+        ));
+        assert!(root.lookup("d").is_ok() && root.lookup("f").is_ok());
+        root.unlink_kind("d", true).unwrap();
+        root.unlink_kind("f", false).unwrap();
+        assert!(root.lookup("d").is_err() && root.lookup("f").is_err());
+    }
 
     // --- Offsets and sizes (N-122) ---
 

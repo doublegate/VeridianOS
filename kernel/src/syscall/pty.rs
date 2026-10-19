@@ -95,9 +95,20 @@ pub fn sys_openpty(master_fd_ptr: usize, slave_fd_ptr: usize) -> SyscallResult {
         super::map_kernel_error(e)
     })?;
 
-    // Write the fd numbers to user space (fault-tolerant, N-43).
-    super::userspace::write_user::<i32>(master_fd_ptr, master_fd as i32)?;
-    super::userspace::write_user::<i32>(slave_fd_ptr, slave_fd as i32)?;
+    drop(file_table);
+
+    // Write the fd numbers to user space (fault-tolerant, N-43), without
+    // the file table locked. If either copy faults, both descriptors are
+    // closed again, which also frees the PTY: they were left open, and
+    // the caller never learned their numbers (PR #23 review).
+    let copied = super::userspace::write_user::<i32>(master_fd_ptr, master_fd as i32)
+        .and_then(|()| super::userspace::write_user::<i32>(slave_fd_ptr, slave_fd as i32));
+    if let Err(e) = copied {
+        let file_table = proc.file_table.lock();
+        file_table.close_on_rollback(slave_fd, "openpty");
+        file_table.close_on_rollback(master_fd, "openpty");
+        return Err(e);
+    }
 
     crate::println!(
         "[PTY] openpty: master_fd={}, slave_fd={}, pty_id={}",

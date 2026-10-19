@@ -28,9 +28,6 @@ pub struct AsyncChannel {
     owner: ProcessId,
     /// Ring buffer for messages
     buffer: RingBuffer<Message>,
-    /// Subscribers waiting for messages
-    #[cfg(feature = "alloc")]
-    subscribers: spin::Mutex<alloc::vec::Vec<ProcessId>>,
     /// Pollers, woken when a message arrives or the channel closes.
     #[cfg(feature = "alloc")]
     waiters: crate::sched::dispatch::WaitQueue,
@@ -56,7 +53,6 @@ impl AsyncChannel {
             owner,
             buffer: RingBuffer::new(capacity),
             #[cfg(feature = "alloc")]
-            subscribers: spin::Mutex::new(alloc::vec::Vec::new()),
             #[cfg(feature = "alloc")]
             waiters: crate::sched::dispatch::WaitQueue::new(),
             stats: ChannelStats {
@@ -167,25 +163,6 @@ impl AsyncChannel {
                 Err(WaitError::Interrupted) => return Err(IpcError::Interrupted),
             }
         }
-    }
-
-    /// Subscribe to channel notifications
-    #[cfg(feature = "alloc")]
-    pub fn subscribe(&self, pid: ProcessId) -> Result<()> {
-        if !self.active.load(Ordering::Acquire) {
-            return Err(IpcError::EndpointNotFound);
-        }
-
-        let mut subscribers = self.subscribers.lock();
-        if !subscribers.contains(&pid) {
-            subscribers.push(pid);
-        }
-        Ok(())
-    }
-
-    #[cfg(not(feature = "alloc"))]
-    pub fn subscribe(&self, _pid: ProcessId) -> Result<()> {
-        Ok(())
     }
 
     /// Get channel statistics

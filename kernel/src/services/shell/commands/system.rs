@@ -1981,11 +1981,20 @@ impl BuiltinCommand for UseraddCommand {
                 return CommandResult::Success(1);
             }
         };
+        // Both stores or neither: a failure after the user database took
+        // the name leaves it there with no account, or the other way round,
+        // and they disagreed until the next boot (PR #25 review).
+        let undo_db = || {
+            let _ = crate::syscall::userland_ext::with_user_db_mut(|db| db.remove_user(username));
+        };
         if let Err(e) = auth.add_account(username, uid) {
+            undo_db();
             crate::println!("useradd: cannot add '{}': {:?}", username, e);
             return CommandResult::Success(1);
         }
         if let Err(e) = crate::security::accounts::save() {
+            let _ = auth.delete_user(username);
+            undo_db();
             crate::println!("useradd: account files not written: {:?}", e);
             return CommandResult::Success(1);
         }

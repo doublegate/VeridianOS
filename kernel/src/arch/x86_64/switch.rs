@@ -185,7 +185,9 @@ pub unsafe fn seed_kernel_thread(
     let mut sp = stack_top & !0xF;
     // SAFETY: within the caller's writable stack top.
     unsafe {
-        push(&mut sp, 0); // keeps rsp 16-aligned after the ret below
+        // No padding: after switch_stacks pops six registers and returns
+        // here, RSP is `stack_top`, aligned for the trampoline's call (a
+        // padding word left it 8 off; PR #21 review).
         push(&mut sp, kthread_trampoline as *const () as u64);
         push(&mut sp, 0); // rbp
         push(&mut sp, 0); // rbx
@@ -194,7 +196,7 @@ pub unsafe fn seed_kernel_thread(
         push(&mut sp, 0); // r14
         push(&mut sp, 0); // r15
     }
-    debug_assert_eq!((stack_top & !0xF) - sp, (SWITCH_REGS + 2) * 8);
+    debug_assert_eq!((stack_top & !0xF) - sp, (SWITCH_REGS + 1) * 8);
     sp
 }
 
@@ -391,5 +393,59 @@ pub mod xsave {
             // SAFETY: allocated in `new` with this layout.
             unsafe { dealloc(self.ptr, self.layout) };
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    extern "C" fn nothing(_: usize) {}
+
+    /// A seeded stack, once `switch_stacks` has popped its registers and
+    /// returned into the trampoline, leaves RSP 16-byte aligned: the
+    /// trampolines' first instruction is a `call`, and the SysV ABI wants
+    /// RSP aligned at every call. The kernel-thread seed had a padding word
+    /// that left it 8 off (PR #21 review).
+    #[test]
+    fn seeded_stacks_enter_their_trampolines_aligned() {
+        #[repr(C, align(16))]
+        struct Stack([u64; 128]);
+        let mut stack = Stack([0; 128]);
+        let top = stack.0.as_mut_ptr() as usize + core::mem::size_of::<Stack>();
+        let after_ret = |sp: usize| sp + (SWITCH_REGS + 1) * 8;
+
+        // SAFETY: `stack` is writable, 16-byte aligned and unused.
+        let sp = unsafe { seed_kernel_thread(top, nothing, 7) };
+        assert_eq!(after_ret(sp) % 16, 0);
+        // SAFETY: `sp` was just seeded within `stack`.
+        let ret = unsafe { ((sp + SWITCH_REGS * 8) as *const u64).read() };
+        assert_eq!(ret, kthread_trampoline as *const () as u64);
+
+        let frame = UserFrame {
+            r15: 0,
+            r14: 0,
+            r13: 0,
+            r12: 0,
+            r11: 0,
+            r10: 0,
+            r9: 0,
+            r8: 0,
+            rbp: 0,
+            rdi: 0,
+            rsi: 0,
+            rdx: 0,
+            rcx: 0,
+            rbx: 0,
+            rax: 0,
+            rip: 0x40_0000,
+            cs: USER_CS,
+            rflags: 0x202,
+            rsp: 0x7FFF_0000,
+            ss: USER_SS,
+        };
+        // SAFETY: as above.
+        let sp = unsafe { seed_user_thread(top, &frame) };
+        assert_eq!(after_ret(sp) % 16, 0);
     }
 }

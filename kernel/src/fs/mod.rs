@@ -421,6 +421,18 @@ pub trait VfsNode: Send + Sync {
     /// Remove a file or empty directory
     fn unlink(&self, name: &str) -> Result<(), KernelError>;
 
+    /// Remove `name` only if it is a directory (`want_dir`, rmdir) or only
+    /// if it is not (unlink): EISDIR or ENOTDIR otherwise. Filesystems that
+    /// can check the entry's type under the lock the removal takes do so;
+    /// checked apart, another thread could replace the entry in between,
+    /// and unlink(2) removed a directory or rmdir(2) a file (PR #23
+    /// review; Linux checks under the parent's lock). This default does
+    /// the two steps apart.
+    fn unlink_kind(&self, name: &str, want_dir: bool) -> Result<(), KernelError> {
+        check_unlink_kind(self.lookup(name)?.node_type(), want_dir)?;
+        self.unlink(name)
+    }
+
     /// Truncate the file to the specified size
     fn truncate(&self, size: usize) -> Result<(), KernelError>;
 
@@ -591,6 +603,15 @@ pub trait VfsNode: Send + Sync {
     /// Whether every readiness change of this node calls
     /// [`crate::sched::dispatch::io_event`]. Waiters on such a node sleep
     /// until woken; on any other they also re-check periodically.
+    /// A count of this file's own readiness changes, if it keeps one:
+    /// edge-triggered epoll reports a still-ready file again only when its
+    /// own count moved (Linux's per-file wakeup callback). Without one, any
+    /// I/O event in the system counts as a change (PR #24 review: that
+    /// re-fired every edge-triggered registration of every file).
+    fn io_generation(&self) -> Option<u64> {
+        None
+    }
+
     fn wakes_io_waiters(&self) -> bool {
         false
     }
@@ -1622,6 +1643,15 @@ impl Vfs {
         }
 
         Ok(())
+    }
+}
+
+/// EISDIR for unlink of a directory, ENOTDIR for rmdir of anything else.
+pub fn check_unlink_kind(node_type: NodeType, want_dir: bool) -> Result<(), KernelError> {
+    match (node_type == NodeType::Directory, want_dir) {
+        (true, false) => Err(KernelError::FsError(FsError::IsADirectory)),
+        (false, true) => Err(KernelError::FsError(FsError::NotADirectory)),
+        _ => Ok(()),
     }
 }
 

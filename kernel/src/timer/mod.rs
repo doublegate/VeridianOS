@@ -376,16 +376,21 @@ pub(crate) fn cancel_timer(id: TimerId) -> KernelResult<()> {
         .unwrap_or(Err(KernelError::NotInitialized { subsystem: "timer" }))
 }
 
-/// The clock reading (ms) the wheel has been advanced to; 0 before the
-/// first tick.
-static WHEEL_SEEN_MS: AtomicU64 = AtomicU64::new(0);
+/// No clock reading yet.
+const UNSEEN: u64 = u64::MAX;
+
+/// The clock reading (ms) the wheel has been advanced to; [`UNSEEN`]
+/// before the first tick.
+static WHEEL_SEEN_MS: AtomicU64 = AtomicU64::new(UNSEEN);
 
 /// Milliseconds since the last reading in `seen`, which is moved to `now`:
 /// `None` on the first reading (it only sets the baseline) or when the clock
-/// has not moved on.
+/// has not moved on. "No reading" is a sentinel of its own: it was 0, so a
+/// first reading of 0 ms was stored as 1 and the step to 1 ms was lost
+/// (PR #25 review).
 fn elapsed_since(seen: &AtomicU64, now: u64) -> Option<u64> {
-    let prev = seen.swap(now.max(1), Ordering::AcqRel);
-    (prev != 0 && now > prev).then(|| now - prev)
+    let prev = seen.swap(now, Ordering::AcqRel);
+    (prev != UNSEEN && now > prev).then(|| now - prev)
 }
 
 /// From the timekeeping CPU's tick: advance the timers by the time that
@@ -489,7 +494,7 @@ mod tests {
     /// ticks came; the first reading only sets the baseline.
     #[test]
     fn wheel_advances_by_elapsed_clock_time() {
-        let seen = AtomicU64::new(0);
+        let seen = AtomicU64::new(UNSEEN);
         assert_eq!(elapsed_since(&seen, 1_000), None, "baseline");
         assert_eq!(elapsed_since(&seen, 1_001), Some(1));
         // Three ticks were lost: one tick still advances all 4 ms.
@@ -497,6 +502,10 @@ mod tests {
         // A tick in the same millisecond advances nothing.
         assert_eq!(elapsed_since(&seen, 1_005), None);
         assert_eq!(elapsed_since(&seen, 1_006), Some(1));
+        // A first reading of 0 ms is a baseline like any other.
+        let seen = AtomicU64::new(UNSEEN);
+        assert_eq!(elapsed_since(&seen, 0), None);
+        assert_eq!(elapsed_since(&seen, 1), Some(1));
     }
 
     #[test]

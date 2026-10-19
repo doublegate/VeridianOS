@@ -21,16 +21,19 @@ extern "C" {
     /// the switch runs), TTBR1 and the empty root, which secondary CPUs
     /// load with their MMU off.
     static mut veridian_mmu_regs: [u64; 5];
-    fn veridian_replace_ttbr1(root: u64, idroot: u64, step_phys: u64, high: u64);
+    fn veridian_replace_ttbr1(root: u64, idroot: u64, step_phys: u64, high: u64, empty: u64);
     static veridian_replace_ttbr1_step: u8;
     static veridian_replace_ttbr1_high: u8;
 }
 
 // Switch TTBR1 to x0 while running from the identity map (x1, loaded into
 // TTBR0): branch to the physical address of the step (x2), where no TTBR1
-// translation is used, replace TTBR1 and invalidate the TLB, then return to
-// the upper half (x3) and restore TTBR0. Interrupts are masked throughout;
-// between the two branches only registers are touched.
+// translation is used; install the empty root (x4) and invalidate the TLB,
+// so no walk through the old root can refill a block entry that would
+// conflict with the new root's pages (break-before-make, as Linux's
+// idmap_cpu_replace_ttbr1; PR #20 review); then the new root, invalidate
+// again, return to the upper half (x3) and restore TTBR0. Interrupts are
+// masked throughout; between the two branches only registers are touched.
 core::arch::global_asm!(
     ".section .text",
     ".balign 4",
@@ -39,7 +42,7 @@ core::arch::global_asm!(
     "    mrs x5, daif",
     "    msr daifset, #0xf",
     "    dsb ish",
-    "    mrs x4, ttbr0_el1",
+    "    mrs x6, ttbr0_el1",
     "    msr ttbr0_el1, x1",
     "    isb",
     "    tlbi vmalle1",
@@ -48,6 +51,11 @@ core::arch::global_asm!(
     "    br x2",
     ".global veridian_replace_ttbr1_step",
     "veridian_replace_ttbr1_step:",
+    "    msr ttbr1_el1, x4",
+    "    isb",
+    "    tlbi vmalle1",
+    "    dsb nsh",
+    "    isb",
     "    msr ttbr1_el1, x0",
     "    isb",
     "    tlbi vmalle1",
@@ -56,7 +64,7 @@ core::arch::global_asm!(
     "    br x3",
     ".global veridian_replace_ttbr1_high",
     "veridian_replace_ttbr1_high:",
-    "    msr ttbr0_el1, x4",
+    "    msr ttbr0_el1, x6",
     "    isb",
     "    tlbi vmalle1",
     "    dsb nsh",
@@ -140,6 +148,9 @@ pub fn protect_image() {
     let kphys = |p: *const u8| super::boot::kernel_phys(p as u64);
     // SAFETY: boot.S wrote the block before Rust ran; only read.
     let idroot = unsafe { addr_of!(veridian_mmu_regs[2]).read_volatile() };
+    // SAFETY: as above; the empty root boot.S leaves in TTBR0 after the
+    // switch to the upper half, all zero, so it maps nothing.
+    let empty = unsafe { addr_of!(veridian_mmu_regs[4]).read_volatile() };
     // SAFETY: `root_phys` maps the kernel half as the old root does, with
     // the image's pages at the same frames; the identity root maps the
     // switch code at its physical address; no other CPU runs yet.
@@ -149,6 +160,7 @@ pub fn protect_image() {
             idroot,
             kphys(addr_of!(veridian_replace_ttbr1_step)),
             addr_of!(veridian_replace_ttbr1_high) as u64,
+            empty,
         );
     }
     // Secondary CPUs read their TTBR1 with the caches off: write it back

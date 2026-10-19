@@ -1607,7 +1607,7 @@ fn has_runnable(cpu: usize) -> bool {
     CPUS[cpu]
         .lock()
         .as_ref()
-        .is_some_and(|st| !st.rq.is_empty())
+        .is_some_and(|st| st.rq.has_ready())
 }
 
 /// Body of every CPU's idle task: run whatever becomes runnable, halt
@@ -2060,6 +2060,18 @@ pub fn thread_cpu(owner: (u64, u64)) -> Option<super::cputime::CpuTimes> {
         .find(|t| t.owner == Some(owner))
         .cloned()?;
     Some(task_cpu(&task))
+}
+
+/// The CPU time of the user thread `owner` (pid, tid), if a task runs it,
+/// with its (user, system) split, never below what it reported before.
+pub fn thread_cpu_split(owner: (u64, u64)) -> Option<(super::cputime::CpuTimes, (u64, u64))> {
+    let task = TASKS
+        .lock()
+        .values()
+        .find(|t| t.owner == Some(owner))
+        .cloned()?;
+    let times = task_cpu(&task);
+    Some((times, task.usage.split(&times)))
 }
 
 /// The CPU time of the live threads of process `pid` (the process adds what

@@ -159,21 +159,27 @@ pub fn sys_sigaction(signum: usize, act_ptr: usize, oldact_ptr: usize) -> Syscal
     let proc = process::current_process().ok_or(SyscallError::InvalidState)?;
 
     // The whole previous action, not just the handler: flags, restorer and
-    // mask used to come back as zero (N-95).
+    // mask used to come back as zero (N-95). The old action is taken and
+    // the new one installed in one step, then the old one copied out: a
+    // fault on `oldact` leaves the new action installed, as on Linux,
+    // where it used to leave it uninstalled (PR #23 review).
     if oldact_ptr != 0 {
         validate_user_ptr_typed::<SigAction>(oldact_ptr)?;
-        let old_handler = proc.get_signal_handler(signum).unwrap_or(0);
-        let (flags, restorer, mask) = proc.signal_action_extra.lock()[signum];
+    }
+    let new = new_act.map(|act| {
+        (
+            act.sa_handler as u64,
+            (act.sa_flags, act.restorer(), act.sa_mask),
+        )
+    });
+    let (old_handler, (flags, restorer, mask)) = proc
+        .swap_signal_action(signum, new)
+        .map_err(|_| SyscallError::InvalidArgument)?;
+    if oldact_ptr != 0 {
         super::userspace::write_user(
             oldact_ptr,
             SigAction::new(old_handler, flags, restorer, mask),
         )?;
-    }
-
-    if let Some(act) = new_act {
-        proc.set_signal_handler(signum, act.sa_handler as u64)
-            .map_err(|_| SyscallError::InvalidArgument)?;
-        proc.signal_action_extra.lock()[signum] = (act.sa_flags, act.restorer(), act.sa_mask);
     }
 
     Ok(0)
@@ -663,37 +669,10 @@ pub fn sys_sigreturn(frame_ptr: usize) -> SyscallResult {
         return super::process::exit_current(0, 11);
     }
 
-    if frame_ptr == 0 {
-        return Err(SyscallError::InvalidArgument);
-    }
-
-    let proc = process::current_process().ok_or(SyscallError::InvalidState)?;
-    let thread = process::current_thread().ok_or(SyscallError::InvalidState)?;
-
-    // Restore the saved context from the signal frame on the user stack.
-    // This reads the SignalFrame at frame_ptr, restores all general-purpose
-    // registers, RIP, RFLAGS, RSP, and the signal mask.
-    process::signal_delivery::restore_signal_frame(&proc, &thread, frame_ptr)
-        .map_err(|_| SyscallError::InvalidArgument)?;
-
-    // Return 0. The normal syscall return path will load the restored context
-    // (RIP, RSP, etc.) and resume execution where the signal interrupted.
-    Ok(0)
-}
-
-/// Check for pending signals and deliver them if a handler is registered.
-///
-/// This function can be called from the syscall return path to deliver
-/// signals at a safe point (between system calls, when the thread is about
-/// to return to user mode).
-///
-/// # Returns
-/// - `Ok(true)` if a signal was delivered (thread context modified).
-/// - `Ok(false)` if no deliverable signal was pending.
-/// - `Err(...)` on failure.
-pub fn check_pending_signals() -> SyscallResult {
-    match process::signal_delivery::check_pending_signals() {
-        Ok(delivered) => Ok(if delivered { 1 } else { 0 }),
-        Err(_) => Ok(0), // Silently ignore errors (process may not exist yet)
-    }
+    // Every user thread is a dispatched task (since D4), so nothing gets
+    // here. The old path restored a frame read from `frame_ptr` without a
+    // user-range check, and its delivery half had no callers: both were
+    // removed (PR #22 review).
+    let _ = frame_ptr;
+    Err(SyscallError::InvalidState)
 }

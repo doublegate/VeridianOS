@@ -310,6 +310,17 @@ fn resolve_cow_in(
 /// RLIMIT_STACK (8 MiB by default; Linux's acct_stack_growth) and the new
 /// pages within RLIMIT_AS, and no other mapping is within the guard gap,
 /// we extend the stack by mapping new pages.
+/// Whether a stack whose top is `stack_top` may grow down to the page at
+/// `fault_page` under an RLIMIT_STACK of `limit` bytes: the whole stack,
+/// in pages, within the limit (Linux's acct_stack_growth). The fault's
+/// byte address was compared, so a limit one byte above the stack let it
+/// grow a page past the limit (PR #22 review).
+fn stack_growth_allowed(stack_top: u64, fault_page: u64, limit: u64) -> bool {
+    stack_top
+        .checked_sub(fault_page)
+        .is_some_and(|size| size <= limit)
+}
+
 fn try_stack_growth(info: &PageFaultInfo) -> Result<(), KernelError> {
     // Stack growth only applies to user-mode faults.
     if !info.was_user_mode {
@@ -324,7 +335,11 @@ fn try_stack_growth(info: &PageFaultInfo) -> Result<(), KernelError> {
     // Only user-mode faults get here (checked above): no kernel lock held.
     let may_sleep = true;
 
-    let memory_space =
+    // One lock from the checks to the mapping: released in between,
+    // another thread could map into the checked gap (which map_page would
+    // then make writable) or use up RLIMIT_AS, and two growth faults could
+    // record different sizes (PR #22 review).
+    let mut memory_space =
         process
             .memory_space
             .lock_if_may_sleep(may_sleep)
@@ -348,9 +363,12 @@ fn try_stack_growth(info: &PageFaultInfo) -> Result<(), KernelError> {
     // (This used to be measured from the already-grown size, so the limit
     // moved down with every growth and the stack had none; N-136.)
     let limits = process.limits();
-    let absolute_bottom =
-        stack_top.saturating_sub(limits.cur(crate::process::rlimit::RLIMIT_STACK));
-    if fault < absolute_bottom {
+    let fault_page = fault & !(PAGE_SIZE as u64 - 1);
+    if !stack_growth_allowed(
+        stack_top,
+        fault_page,
+        limits.cur(crate::process::rlimit::RLIMIT_STACK),
+    ) {
         // Too far below the stack -- real SIGSEGV.
         return Err(KernelError::InvalidAddress {
             addr: fault as usize,
@@ -358,7 +376,6 @@ fn try_stack_growth(info: &PageFaultInfo) -> Result<(), KernelError> {
     }
 
     // Calculate how many pages to grow (from current bottom down to fault).
-    let fault_page = fault & !(PAGE_SIZE as u64 - 1);
     let pages_needed = ((stack_bottom - fault_page) / PAGE_SIZE as u64) as usize;
 
     if pages_needed == 0 {
@@ -384,26 +401,15 @@ fn try_stack_growth(info: &PageFaultInfo) -> Result<(), KernelError> {
         }
     }
 
-    // Drop the lock and re-acquire as mutable to map pages.
-    drop(memory_space);
-
     let flags = PageFlags::PRESENT | PageFlags::WRITABLE | PageFlags::USER | PageFlags::NO_EXECUTE;
-
-    let mut memory_space_mut =
-        process
-            .memory_space
-            .lock_if_may_sleep(may_sleep)
-            .ok_or(KernelError::NotInitialized {
-                subsystem: "memory_space (lock held, stack map)",
-            })?;
     for i in 0..pages_needed {
         let page_addr = (stack_bottom - ((i + 1) as u64 * PAGE_SIZE as u64)) as usize;
-        memory_space_mut.map_page(page_addr, flags)?;
+        memory_space.map_page(page_addr, flags)?;
     }
 
     // Update stack size to reflect the growth so future faults work correctly.
     let new_size = stack_size as usize + (pages_needed * PAGE_SIZE);
-    memory_space_mut.set_stack_size(new_size);
+    memory_space.set_stack_size(new_size);
 
     Ok(())
 }
@@ -531,6 +537,17 @@ pub fn from_riscv(cause: u64, stval: u64, sepc: u64) -> PageFaultInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stack_growth_counts_whole_pages_against_the_limit() {
+        let top = 0x7FFF_0000_0000u64;
+        let size = 8 * 4096;
+        let bottom = top - size;
+        // A limit one byte above the stack: the next page would pass it.
+        assert!(!stack_growth_allowed(top, bottom - 4096, size + 1));
+        assert!(stack_growth_allowed(top, bottom - 4096, size + 4096));
+        assert!(stack_growth_allowed(top, 0, u64::MAX)); // RLIM_INFINITY
+    }
 
     #[test]
     fn test_page_fault_reason_equality() {

@@ -147,6 +147,11 @@ pub fn sys_veridian_auth(
         _ => {
             let new = Secret::read(new_secret)?;
             let new = new.as_str().ok_or(SyscallError::InvalidArgument)?;
+            // The account as it was, for a change the files cannot record:
+            // left in memory, the new password worked until the next boot
+            // and the old one came back after it, though the caller was
+            // told the change failed (PR #23 review).
+            let before = auth.account_snapshot(name);
             let changed = if secret == 0 {
                 if creds.euid != 0 {
                     return Err(SyscallError::OperationNotPermitted);
@@ -158,7 +163,12 @@ pub fn sys_veridian_auth(
                 auth.change_password(name, old, new)
             };
             changed.map_err(super::map_kernel_error)?;
-            crate::security::accounts::save().map_err(|_| SyscallError::IoError)?;
+            if crate::security::accounts::save().is_err() {
+                if let Some(account) = before {
+                    auth.restore_account(name, account);
+                }
+                return Err(SyscallError::IoError);
+            }
             Ok(0)
         }
     }

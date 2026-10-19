@@ -35,6 +35,32 @@ struct TmpNode {
 }
 
 impl TmpNode {
+    /// [`VfsNode::unlink`], and with `kind` [`VfsNode::unlink_kind`]: the
+    /// entry's type is checked under the children lock the removal holds.
+    fn unlink_checked(&self, name: &str, kind: Option<bool>) -> Result<(), KernelError> {
+        let mut children = self.children.write();
+
+        if let Some(node) = children.get(name) {
+            if let Some(want_dir) = kind {
+                super::check_unlink_kind(node.node_type, want_dir)?;
+            }
+            if node.node_type == NodeType::Directory {
+                let dir_children = node.children.read();
+                if !dir_children.is_empty() {
+                    return Err(KernelError::FsError(FsError::DirectoryNotEmpty));
+                }
+            }
+
+            // The bytes go back to the size budget when the node itself is
+            // dropped (see `Drop for TmpNode`), not here: another hard link
+            // or an open file can still hold the data.
+            children.remove(name);
+            Ok(())
+        } else {
+            Err(KernelError::FsError(FsError::NotFound))
+        }
+    }
+
     fn new_file(
         inode: u64,
         parent_inode: u64,
@@ -331,24 +357,14 @@ impl VfsNode for TmpNode {
             return Err(KernelError::FsError(FsError::NotADirectory));
         }
 
-        let mut children = self.children.write();
+        self.unlink_checked(name, None)
+    }
 
-        if let Some(node) = children.get(name) {
-            if node.node_type == NodeType::Directory {
-                let dir_children = node.children.read();
-                if !dir_children.is_empty() {
-                    return Err(KernelError::FsError(FsError::DirectoryNotEmpty));
-                }
-            }
-
-            // The bytes go back to the size budget when the node itself is
-            // dropped (see `Drop for TmpNode`), not here: another hard link
-            // or an open file can still hold the data.
-            children.remove(name);
-            Ok(())
-        } else {
-            Err(KernelError::FsError(FsError::NotFound))
+    fn unlink_kind(&self, name: &str, want_dir: bool) -> Result<(), KernelError> {
+        if self.node_type != NodeType::Directory {
+            return Err(KernelError::FsError(FsError::NotADirectory));
         }
+        self.unlink_checked(name, Some(want_dir))
     }
 
     fn truncate(&self, size: usize) -> Result<(), KernelError> {
@@ -464,14 +480,10 @@ impl VfsNode for TmpNode {
                 }
                 (false, false) => {}
             }
-            if existing.node_type == NodeType::File {
-                let freed = existing.data.read().len();
-                let _ =
-                    self.bytes_used
-                        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |used| {
-                            Some(used.saturating_sub(freed))
-                        });
-            }
+            // The replaced file's bytes go back when its node is dropped
+            // (`Drop for TmpNode`), as for unlink: refunded here as well,
+            // they were counted back twice, or while another link or an
+            // open file still held them (PR #24 review).
         }
 
         src.remove(old_name);
@@ -573,6 +585,11 @@ impl VfsNode for TmpNode {
             return Err(KernelError::FsError(FsError::AlreadyExists));
         }
 
+        // The target's bytes are charged, as a file's are: Drop gives every
+        // node's data back, so an uncharged symlink, once removed, lowered
+        // the count below what live files use and the limit could be
+        // exceeded (PR #24 review; Linux's shmem charges long symlinks).
+        self.reserve_space(target.len())?;
         let inode = TMPFS_NEXT_INODE.fetch_add(1, Ordering::Relaxed);
         let new_symlink = Arc::new(TmpNode::new_symlink(
             inode,
@@ -795,6 +812,28 @@ mod tests {
         let n = file.read(0, &mut buf).unwrap();
         assert_eq!(n, 13);
         assert_eq!(&buf[..13], b"Hello, tmpfs!");
+    }
+
+    /// The size budget counts what is stored once: a symlink's target is
+    /// charged (it was refunded on removal without ever being charged), and
+    /// a file replaced by rename is refunded once, when its node goes (it
+    /// was refunded at the rename too) (PR #24 review).
+    #[test]
+    fn the_size_budget_counts_symlinks_and_renames_once() {
+        let fs = TmpFs::new(100);
+        let root = fs.root();
+        let a = root.create("a", Permissions::default()).unwrap();
+        a.write(0, &[1u8; 30]).unwrap();
+        root.symlink("l", "12345678").unwrap();
+        assert_eq!(fs.bytes_used(), 38);
+        root.unlink("l").unwrap();
+        assert_eq!(fs.bytes_used(), 30);
+
+        let b = root.create("b", Permissions::default()).unwrap();
+        b.write(0, &[2u8; 20]).unwrap();
+        drop((a, b));
+        root.rename("b", &root, "a").unwrap();
+        assert_eq!(fs.bytes_used(), 20, "the replaced file refunded once");
     }
 
     #[test]

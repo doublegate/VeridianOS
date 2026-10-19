@@ -35,7 +35,8 @@ pub fn init() {
     }
 
     // BTI for user programs, if this CPU has it (before any EL0 code).
-    bti::init_cpu(true);
+    // The boot CPU decides what the system offers; it is never refused.
+    let _ = bti::init_cpu(true);
 
     // Initialize the GIC (Generic Interrupt Controller)
     if let Err(_e) = gic::init() {

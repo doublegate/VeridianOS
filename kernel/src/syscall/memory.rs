@@ -152,16 +152,28 @@ impl FileData {
     ) -> Result<Self, SyscallError> {
         match crate::mm::page_cache::file_pages(node, offset / PAGE_SIZE, len / PAGE_SIZE) {
             Some(frames) => Ok(Self::Cached(frames.map_err(super::map_kernel_error)?)),
-            None => Ok(Self::copy(node, offset, len)),
+            None => Self::copy(node, offset, len),
         }
     }
 
-    /// A copy of `len` bytes of `node` from `offset`; past the end of the
-    /// file, zeros.
-    fn copy(node: &dyn crate::fs::VfsNode, offset: usize, len: usize) -> Self {
-        let mut buf = alloc::vec![0u8; len];
+    /// A copy of `node` from `offset`, up to `len` bytes but no further
+    /// than the end of the file: the freshly mapped pages past it are
+    /// already zero. Allocating `len` itself let a mapping of a huge length
+    /// exhaust the kernel heap, whose failure is fatal (PR #23 review);
+    /// ENOMEM if even the file's part does not fit.
+    fn copy(
+        node: &dyn crate::fs::VfsNode,
+        offset: usize,
+        len: usize,
+    ) -> Result<Self, SyscallError> {
+        let size = node.metadata().ok().map(|m| m.size);
+        let n = copy_extent(size, offset, len);
+        let mut buf = alloc::vec::Vec::new();
+        buf.try_reserve_exact(n)
+            .map_err(|_| SyscallError::OutOfMemory)?;
+        buf.resize(n, 0);
         let _ = node.read(offset, &mut buf);
-        Self::Copy(buf)
+        Ok(Self::Copy(buf))
     }
 
     /// Not used: the cached pages' owners go back.
@@ -186,6 +198,20 @@ impl FileData {
                 .map_err(super::map_kernel_error),
         }
     }
+}
+
+/// How many bytes of a file of `size` bytes (unknown: `None`) a copy of
+/// `len` bytes from `offset` holds: none past the end of the file.
+fn copy_extent(size: Option<usize>, offset: usize, len: usize) -> usize {
+    size.map_or(len, |size| size.saturating_sub(offset).min(len))
+}
+
+/// The end of the file range an mmap of `length` bytes at `offset` covers
+/// (whole pages), or `None` if it wraps.
+fn file_range_end(offset: usize, length: usize) -> Option<usize> {
+    length
+        .checked_next_multiple_of(PAGE_SIZE)
+        .and_then(|len| offset.checked_add(len))
 }
 
 // ============================================================================
@@ -311,12 +337,24 @@ pub fn sys_mmap(
     // DRM device mappings are checked before any memory is mapped: the
     // device is identified by its node, not by the path it was opened with
     // (W-7), and the caller must be allowed this exact range (W-6).
-    let is_drm_mmap = !is_anonymous
-        && proc
-            .file_table
-            .lock()
-            .get(fd)
-            .is_some_and(|file| file.is_drm_device());
+    //
+    // The fd is looked up once: the checks below and the read of the
+    // contents use the same open file, so a dup2 onto `fd` by another
+    // thread in between cannot swap in a file the checks did not see (PR
+    // #23 review).
+    let mapped_file = if is_anonymous {
+        None
+    } else {
+        Some(
+            proc.file_table
+                .lock()
+                .get(fd)
+                .ok_or(SyscallError::BadFileDescriptor)?,
+        )
+    };
+    let is_drm_mmap = mapped_file
+        .as_ref()
+        .is_some_and(|file| file.is_drm_device());
     if is_drm_mmap && !crate::graphics::drm_ioctl::may_mmap(caller_pid, fd as i32, offset, length) {
         return Err(SyscallError::PermissionDenied);
     }
@@ -336,11 +374,10 @@ pub fn sys_mmap(
         if offset & (PAGE_SIZE - 1) != 0 {
             return Err(SyscallError::InvalidArgument);
         }
-        let file = proc
-            .file_table
-            .lock()
-            .get(fd)
-            .ok_or(SyscallError::BadFileDescriptor)?;
+        // The file range must not wrap (EOVERFLOW, as Linux's do_mmap): the
+        // offset is kept for mremap and madvise, which add to it.
+        file_range_end(offset, length).ok_or(SyscallError::Overflow)?;
+        let file = mapped_file.clone().ok_or(SyscallError::BadFileDescriptor)?;
         if !file.flags.read || (shared && prot & PROT_WRITE != 0 && !file.flags.write) {
             return Err(SyscallError::PermissionDenied);
         }
@@ -421,17 +458,34 @@ pub fn sys_mmap(
     // cache maps the cached pages, shared read-only or copy-on-write (ADR
     // 0010); other file mappings get a copy. The file is taken out of the
     // table, which is not held across the read either.
+    //
+    // RLIMIT_AS is checked first too (again below, under the lock the
+    // mapping is made under), so a mapping the limit refuses reads nothing.
+    #[cfg(feature = "alloc")]
+    let (vm_bytes, vm_skip, vm_data) = {
+        const HUGE: usize = 2 * 1024 * 1024;
+        let unit = if is_anonymous && !is_fixed && flags & MAP_HUGETLB != 0 {
+            HUGE
+        } else {
+            PAGE_SIZE
+        };
+        let bytes = length.div_ceil(unit).saturating_mul(unit) as u64;
+        let skip = if is_fixed {
+            (addr as u64, addr as u64 + bytes)
+        } else {
+            (0, 0)
+        };
+        (bytes, skip, private && prot & PROT_WRITE != 0)
+    };
     let (file_data, file_node) = if !is_anonymous && !is_drm_mmap {
-        let file = proc
-            .file_table
-            .lock()
-            .get(fd)
-            .ok_or(SyscallError::BadFileDescriptor)?;
+        let file = mapped_file.ok_or(SyscallError::BadFileDescriptor)?;
+        #[cfg(feature = "alloc")]
+        may_expand_vm(&proc, &proc.memory_space.lock(), vm_skip, vm_bytes, vm_data)?;
         let len = length.div_ceil(PAGE_SIZE) * PAGE_SIZE;
         let data = if private {
             FileData::read(&*file.node, offset, len)?
         } else {
-            FileData::copy(&*file.node, offset, len)
+            FileData::copy(&*file.node, offset, len)?
         };
         (Some(data), Some((file.node.clone(), file.flags.write)))
     } else {
@@ -465,20 +519,7 @@ pub fn sys_mmap(
     // RLIMIT_AS and RLIMIT_DATA, for the pages the mapping will take.
     #[cfg(feature = "alloc")]
     {
-        const HUGE: usize = 2 * 1024 * 1024;
-        let unit = if is_anonymous && !is_fixed && flags & MAP_HUGETLB != 0 {
-            HUGE
-        } else {
-            PAGE_SIZE
-        };
-        let bytes = length.div_ceil(unit).saturating_mul(unit) as u64;
-        let skip = if is_fixed {
-            (addr as u64, addr as u64 + bytes)
-        } else {
-            (0, 0)
-        };
-        let data = private && prot & PROT_WRITE != 0;
-        if let Err(e) = may_expand_vm(&proc, &memory_space, skip, bytes, data) {
+        if let Err(e) = may_expand_vm(&proc, &memory_space, vm_skip, vm_bytes, vm_data) {
             if let Some(file_data) = file_data {
                 file_data.release();
             }
@@ -810,8 +851,19 @@ pub fn sys_madvise(addr: usize, len: usize, advice: usize) -> SyscallResult {
                     restore.into_iter().for_each(|(_, data)| data.release());
                     return Err(super::map_kernel_error(e));
                 }
+                // After a failed install (which gives back its own pages),
+                // the rest still hold page-cache owners: released, not
+                // dropped (PR #23 review).
+                let mut failed = None;
                 for (from, data) in restore {
-                    data.install(&vas, from as usize)?;
+                    if failed.is_some() {
+                        data.release();
+                    } else if let Err(e) = data.install(&vas, from as usize) {
+                        failed = Some(e);
+                    }
+                }
+                if let Some(e) = failed {
+                    return Err(e);
                 }
             }
             madv::FREE => {
@@ -1129,6 +1181,18 @@ fn remap_locked(
     let moved_len = r.old_len.min(r.new_len);
     let dest = match r.target {
         Some(t) => {
+            // The growth is checked against RLIMIT_AS before the target is
+            // unmapped (not counting the target's own pages, which it
+            // replaces): checked after, a refusal left the target's
+            // mappings destroyed (PR #23 review; Linux checks the delta in
+            // check_prep_vma, before mremap_to unmaps).
+            if grow > 0 {
+                let target = (t as u64, (t + r.new_len) as u64);
+                if let Err(e) = may_expand_vm(proc, vas, target, grow, m.is_data()) {
+                    release(growth);
+                    return Err(e);
+                }
+            }
             if let Err(e) = vas.unmap(t, r.new_len) {
                 release(growth);
                 return Err(super::map_kernel_error(e));
@@ -1158,14 +1222,22 @@ fn remap_locked(
         return Err(super::map_kernel_error(e));
     }
     if r.dont_unmap {
-        // Private anonymous memory only (checked): fresh zero pages.
-        vas.map_region_fixed(
-            VirtualAddress(r.old as u64),
-            r.old_len,
-            m.mapping_type,
-            Some(m.flags),
-        )
-        .map_err(|_| nomem)?;
+        // Private anonymous memory only (checked): fresh zero pages. If
+        // they cannot be had, the pages go back, so a failed call leaves
+        // the old range as it was (PR #23 review). Old and new lengths are
+        // equal here, so there is no file growth to release.
+        if vas
+            .map_region_fixed(
+                VirtualAddress(r.old as u64),
+                r.old_len,
+                m.mapping_type,
+                Some(m.flags),
+            )
+            .is_err()
+        {
+            let _ = vas.move_range(dest as u64, moved_len as u64, r.old as u64);
+            return Err(nomem);
+        }
     }
     if r.new_len > moved_len {
         // The moved mapping's record, for extending it.
@@ -1287,6 +1359,20 @@ pub fn sys_brk(addr: usize) -> SyscallResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A file mapping reads no further than the file, so a huge length
+    /// costs nothing to read; and an offset whose range wraps is refused
+    /// (EOVERFLOW) before anything adds to it (PR #23 review).
+    #[test]
+    fn file_mappings_read_only_the_file_and_never_wrap() {
+        assert_eq!(copy_extent(Some(10_000), 0, 1 << 40), 10_000);
+        assert_eq!(copy_extent(Some(10_000), 8192, 4096), 1808);
+        assert_eq!(copy_extent(Some(10_000), 12_288, 4096), 0);
+        assert_eq!(copy_extent(None, 0, 4096), 4096);
+        assert_eq!(file_range_end(4096, 1), Some(8192));
+        assert_eq!(file_range_end(usize::MAX & !0xFFF, 4096), None);
+        assert_eq!(file_range_end(0, usize::MAX), None);
+    }
 
     /// A free hint in user space is where the mapping goes (rounded up to
     /// a page); a busy, out-of-range or absent one leaves it to the kernel.

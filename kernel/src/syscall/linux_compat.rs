@@ -50,6 +50,8 @@ pub(crate) fn to_linux_errno(err: super::SyscallError) -> isize {
     const LINUX_EFBIG: isize = -27;
     const LINUX_EOPNOTSUPP: isize = -95;
     const LINUX_ENODEV: isize = -19;
+    const LINUX_EOVERFLOW: isize = -75;
+    const LINUX_EROFS: isize = -30;
     const LINUX_ENOEXEC: isize = -8;
     const LINUX_ETIMEDOUT: isize = -110;
     const LINUX_EAFNOSUPPORT: isize = -97;
@@ -124,6 +126,8 @@ pub(crate) fn to_linux_errno(err: super::SyscallError) -> isize {
         SyscallError::Canceled => LINUX_ECANCELED,
         SyscallError::Deadlock => LINUX_EDEADLK,
         SyscallError::NoDeviceOrAddress => LINUX_ENXIO,
+        SyscallError::Overflow => LINUX_EOVERFLOW,
+        SyscallError::ReadOnlyFilesystem => LINUX_EROFS,
     }
 }
 
@@ -253,7 +257,10 @@ mod tests {
         assert_eq!(errno(FsError::SymlinkLoop), -40);
         assert_eq!(errno(FsError::CorruptedData), -5);
         assert_eq!(errno(FsError::BadFileDescriptor), -9);
-        assert_eq!(errno(FsError::ReadOnly), -13);
+        // A write to a read-only filesystem is EROFS, as on Linux; it was
+        // EACCES (PR #23 review).
+        assert_eq!(errno(FsError::ReadOnly), -30);
+        assert_eq!(to_linux_errno(SyscallError::Overflow), -75);
         assert_eq!(to_linux_errno(SyscallError::ExecFormat), -8);
         assert_eq!(
             to_linux_errno(super::super::map_kernel_error(

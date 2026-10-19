@@ -750,6 +750,7 @@ impl Bus for PciBus {
     }
 
     fn read_config(&self, device: &DeviceInfo, offset: u16, size: u8) -> Result<u32, KernelError> {
+        check_config_access(offset, size)?;
         // Extract location from device address
         let address = device.address as u32;
         let bus = ((address >> 16) & 0xFF) as u8;
@@ -778,6 +779,7 @@ impl Bus for PciBus {
         value: u32,
         size: u8,
     ) -> Result<(), KernelError> {
+        check_config_access(offset, size)?;
         // Extract location from device address
         let address = device.address as u32;
         let bus = ((address >> 16) & 0xFF) as u8;
@@ -1049,9 +1051,51 @@ fn command_with_flags(dword: u32, flags: u16) -> u32 {
     (dword & 0xFFFF) | flags as u32
 }
 
+/// A configuration access of `size` bytes at `offset`: naturally aligned
+/// and within the 256 bytes the legacy mechanism reaches, as Linux's
+/// pci_bus_read_config_* (PCIBIOS_BAD_REGISTER_NUMBER) and conf1 require.
+/// A word at offset 3 read one byte of the dword and dropped the other, a
+/// write shifted it out, and offsets above 255 wrapped (PR #24 review).
+fn check_config_access(offset: u16, size: u8) -> Result<(), KernelError> {
+    let bad = |value| {
+        Err(KernelError::InvalidArgument {
+            name: "offset",
+            value,
+        })
+    };
+    match size {
+        1 | 2 | 4 => {}
+        _ => {
+            return Err(KernelError::InvalidArgument {
+                name: "size",
+                value: "must be 1, 2, or 4",
+            })
+        }
+    }
+    if offset & (u16::from(size) - 1) != 0 {
+        return bad("not aligned to the access size");
+    }
+    if u32::from(offset) + u32::from(size) > 256 {
+        return bad("past the 256-byte configuration space");
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn config_accesses_are_aligned_and_in_range() {
+        assert!(check_config_access(0x10, 4).is_ok());
+        assert!(check_config_access(0x02, 2).is_ok());
+        assert!(check_config_access(0xFF, 1).is_ok());
+        assert!(check_config_access(0x03, 2).is_err());
+        assert!(check_config_access(0x02, 4).is_err());
+        assert!(check_config_access(0xFE, 4).is_err());
+        assert!(check_config_access(0x100, 1).is_err());
+        assert!(check_config_access(0, 3).is_err());
+    }
 
     #[test]
     fn command_write_sets_flags_and_never_writes_status_back() {

@@ -70,26 +70,38 @@ impl TraceEvent {
 /// Number of events per CPU ring buffer (4096 events = 128KB per CPU)
 const RING_SIZE: usize = 4096;
 
-/// Per-CPU trace ring buffer
+/// Per-CPU trace ring buffer. Used through shared references only: a
+/// writer reserves its slot with one atomic add and writes it through a raw
+/// pointer, so a writer interrupted by another on the same CPU (a
+/// tracepoint in an interrupt) gets a slot of its own, and no `&mut` to the
+/// ring ever coexists with a reader's `&` (PR #25 review: `record` took
+/// `&mut self` while `total_events` read the same ring).
 struct TraceRing {
-    events: [TraceEvent; RING_SIZE],
+    events: [UnsafeCell<TraceEvent>; RING_SIZE],
     write_idx: AtomicUsize,
+    /// Writers inside [`Self::record`]: a dump waits for none.
+    writers: AtomicUsize,
 }
 
 impl TraceRing {
     const fn new() -> Self {
         Self {
-            events: [TraceEvent::empty(); RING_SIZE],
+            events: [const { UnsafeCell::new(TraceEvent::empty()) }; RING_SIZE],
             write_idx: AtomicUsize::new(0),
+            writers: AtomicUsize::new(0),
         }
     }
 
     /// Record an event into the ring buffer (overwrites oldest on wrap).
     #[inline]
-    fn record(&mut self, event: TraceEvent) {
-        let idx = self.write_idx.load(Ordering::Relaxed) % RING_SIZE;
-        self.events[idx] = event;
-        self.write_idx.fetch_add(1, Ordering::Relaxed);
+    fn record(&self, event: TraceEvent) {
+        self.writers.fetch_add(1, Ordering::Acquire);
+        let idx = self.write_idx.fetch_add(1, Ordering::Relaxed) % RING_SIZE;
+        // SAFETY: the slot index is this call's alone until the ring wraps
+        // RING_SIZE events later; the write goes through the cell's raw
+        // pointer, never a reference to the ring.
+        unsafe { self.events[idx].get().write_volatile(event) };
+        self.writers.fetch_sub(1, Ordering::Release);
     }
 
     /// Get the total number of events recorded (may wrap)
@@ -97,8 +109,10 @@ impl TraceRing {
         self.write_idx.load(Ordering::Relaxed)
     }
 
-    /// Read events from the ring buffer (most recent first, up to `count`)
-    fn read_recent(&self, count: usize) -> impl Iterator<Item = &TraceEvent> {
+    /// Read events from the ring buffer (most recent first, up to `count`),
+    /// as copies. Only with tracing disabled and no writer left (see
+    /// `dump_trace`).
+    fn read_recent(&self, count: usize) -> impl Iterator<Item = TraceEvent> + '_ {
         let total = self.total_events();
         let available = total.min(RING_SIZE);
         let to_read = count.min(available);
@@ -109,26 +123,31 @@ impl TraceRing {
             total.saturating_sub(to_read)
         };
 
-        (start_raw..start_raw + to_read).map(move |i| &self.events[i % RING_SIZE])
+        // SAFETY: no writer is active (the caller's condition); the slot
+        // is read through its raw pointer.
+        (start_raw..start_raw + to_read)
+            .map(move |i| unsafe { self.events[i % RING_SIZE].get().read_volatile() })
     }
 }
 
 /// Maximum CPUs for trace ring allocation
 const MAX_TRACE_CPUS: usize = 16;
 
-/// Per-CPU trace rings with interior mutability.
+/// Per-CPU trace rings.
 ///
-/// Each CPU writes only to its own ring via `current_cpu_id()`.
-/// Reading is done with tracing disabled or from the shell (single-threaded).
-struct PerCpuTraceRings([UnsafeCell<TraceRing>; MAX_TRACE_CPUS]);
+/// Each CPU normally writes its own ring (`current_cpu_id()`); a migrated
+/// or nested writer is safe too, since every slot is reserved atomically.
+/// Events are read only with tracing disabled and every ring's writers
+/// gone (`dump_trace`).
+struct PerCpuTraceRings([TraceRing; MAX_TRACE_CPUS]);
 
-// SAFETY: Per-CPU access pattern ensures no data races -- each CPU only
-// writes to its own ring (indexed by cpu_id). Reading is done with tracing
-// disabled, preventing concurrent writes.
+// SAFETY: a ring is used through `&TraceRing` only: its counters are
+// atomics and each slot is written by the one writer that reserved it,
+// through the cell's raw pointer.
 unsafe impl Sync for PerCpuTraceRings {}
 
 static TRACE_RINGS: PerCpuTraceRings =
-    PerCpuTraceRings([const { UnsafeCell::new(TraceRing::new()) }; MAX_TRACE_CPUS]);
+    PerCpuTraceRings([const { TraceRing::new() }; MAX_TRACE_CPUS]);
 
 /// Record a trace event (inline, minimal overhead).
 ///
@@ -149,11 +168,7 @@ pub(crate) fn trace_event(event_type: TraceEventType, data0: u64, data1: u64) {
         data: [data0, data1],
     };
 
-    // SAFETY: Each CPU writes only to its own ring. The cpu index is
-    // bounded by MAX_TRACE_CPUS via the min() call.
-    unsafe {
-        (*TRACE_RINGS.0[cpu.min(MAX_TRACE_CPUS - 1)].get()).record(event);
-    }
+    TRACE_RINGS.0[cpu.min(MAX_TRACE_CPUS - 1)].record(event);
 }
 
 /// Enable tracing
@@ -177,6 +192,15 @@ pub(crate) fn is_enabled() -> bool {
 pub(crate) fn dump_trace(count: usize) {
     let was_enabled = is_enabled();
     disable(); // Pause tracing during dump
+               // A CPU that saw tracing enabled just before may still be writing: wait
+               // (boundedly) until no ring has a writer (PR #25 review).
+    for ring in TRACE_RINGS.0.iter() {
+        let mut spins = 0u32;
+        while ring.writers.load(Ordering::Acquire) != 0 && spins < 1_000_000 {
+            core::hint::spin_loop();
+            spins += 1;
+        }
+    }
 
     crate::println!("=== Trace Dump (most recent {} per CPU) ===", count);
     crate::println!(
@@ -190,9 +214,7 @@ pub(crate) fn dump_trace(count: usize) {
 
     #[allow(clippy::needless_range_loop)]
     for cpu in 0..MAX_TRACE_CPUS {
-        // SAFETY: We disabled tracing, so no concurrent writes.
-        // We only read from the ring buffer.
-        let ring = unsafe { &*TRACE_RINGS.0[cpu].get() };
+        let ring = &TRACE_RINGS.0[cpu];
         let total = ring.total_events();
         if total == 0 {
             continue;
@@ -214,11 +236,7 @@ pub(crate) fn dump_trace(count: usize) {
         }
     }
 
-    let total: usize = (0..MAX_TRACE_CPUS)
-        // SAFETY: tracing is still disabled here (re-enabled below), so no
-        // CPU is writing a ring; the shared reference only reads write_idx.
-        .map(|cpu| unsafe { (*TRACE_RINGS.0[cpu].get()).total_events() })
-        .sum();
+    let total: usize = TRACE_RINGS.0.iter().map(TraceRing::total_events).sum();
     crate::println!("=== Total events recorded: {} ===", total);
 
     if was_enabled {
@@ -228,13 +246,7 @@ pub(crate) fn dump_trace(count: usize) {
 
 /// Get total events across all CPUs
 pub(crate) fn total_events() -> usize {
-    (0..MAX_TRACE_CPUS)
-        // SAFETY: only the atomic write_idx is read, so the value is never
-        // torn. NOTE: tracing may be enabled, so another CPU can hold a
-        // `&mut TraceRing` in record() while this shared reference exists;
-        // that overlap is formally outside Rust's aliasing rules.
-        .map(|cpu| unsafe { (*TRACE_RINGS.0[cpu].get()).total_events() })
-        .sum()
+    TRACE_RINGS.0.iter().map(TraceRing::total_events).sum()
 }
 
 fn event_type_name(t: u8) -> &'static str {

@@ -322,6 +322,29 @@ pub fn cleanup_capability(cap_id: u64) {
     }
 }
 
+/// Remove from `parent`'s children those with no children of their own
+/// that `removable` accepts, under one hold of the tree lock; returns them
+/// and how many children `parent` keeps. A capability has one parent, so
+/// only `parent`'s list holds them: this costs the children, where
+/// [`cleanup_capability`] per child scanned every list in the tree each
+/// time (PR #25 review).
+#[cfg(feature = "alloc")]
+pub fn prune_children(parent: u64, mut removable: impl FnMut(u64) -> bool) -> (Vec<u64>, usize) {
+    let mut tree = DERIVATION_TREE.write();
+    let Some(children) = tree.get(&parent).cloned() else {
+        return (Vec::new(), 0);
+    };
+    let (gone, kept): (Vec<u64>, Vec<u64>) = children
+        .into_iter()
+        .partition(|&child| tree.get(&child).is_none_or(|c| c.is_empty()) && removable(child));
+    for child in &gone {
+        tree.remove(child);
+    }
+    let left = kept.len();
+    tree.insert(parent, kept);
+    (gone, left)
+}
+
 /// Get the direct children of a capability in the derivation tree.
 #[cfg(feature = "alloc")]
 pub fn get_children(cap_id: u64) -> Vec<u64> {
@@ -520,6 +543,25 @@ mod tests {
     use alloc::vec;
 
     use super::*;
+
+    /// Pruning removes the leaf children `removable` accepts and keeps the
+    /// rest, those with children of their own included.
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn prune_children_removes_accepted_leaves_only() {
+        let parent = 0xFEED_0001;
+        let (leaf, held, inner, grandchild) = (0xFEED_0002, 0xFEED_0003, 0xFEED_0004, 0xFEED_0005);
+        for child in [leaf, held, inner] {
+            record_derivation(parent, child);
+        }
+        record_derivation(inner, grandchild);
+        let (gone, left) = prune_children(parent, |c| c != held);
+        assert_eq!(gone, alloc::vec![leaf]);
+        assert_eq!(left, 2);
+        assert_eq!(get_children(parent), alloc::vec![held, inner]);
+        cleanup_capability(parent);
+        cleanup_capability(inner);
+    }
 
     /// N-89: only a holder with REVOKE rights may revoke. Revocation used to
     /// check only that the capability existed somewhere, so anyone who

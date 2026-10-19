@@ -58,7 +58,13 @@ impl Rusage {
     /// The usage `times` and a peak resident set of `maxrss_pages`
     /// describe.
     pub(crate) fn from_times(times: CpuTimes, maxrss_pages: usize) -> Self {
-        let (user, system) = times.user_system_ns();
+        Self::from_split(times, times.user_system_ns(), maxrss_pages)
+    }
+
+    /// The same with the (user, system) split already made (a total read
+    /// more than once: see `PrevSplit`).
+    pub(crate) fn from_split(times: CpuTimes, split: (u64, u64), maxrss_pages: usize) -> Self {
+        let (user, system) = split;
         Self {
             ru_utime: Timeval::from_ns(user),
             ru_stime: Timeval::from_ns(system),
@@ -92,10 +98,10 @@ const RUSAGE_THREAD: i32 = 1;
 #[cfg(feature = "alloc")]
 pub fn sys_getrusage(who: usize, usage_ptr: usize) -> SyscallResult {
     let process = crate::process::current_process().ok_or(SyscallError::InvalidState)?;
-    let (times, maxrss) = match who as i32 {
-        RUSAGE_SELF => (process.cpu_times(), process.peak_rss_pages()),
+    let ((times, split), maxrss) = match who as i32 {
+        RUSAGE_SELF => (process.cpu_split(), process.peak_rss_pages()),
         RUSAGE_CHILDREN => (
-            process.children_cpu_times(),
+            process.children_cpu_split(),
             process.children_peak_rss_pages(),
         ),
         RUSAGE_THREAD => {
@@ -104,13 +110,13 @@ pub fn sys_getrusage(who: usize, usage_ptr: usize) -> SyscallResult {
                 .tid
                 .0;
             (
-                crate::sched::dispatch::thread_cpu((process.pid.0, tid)).unwrap_or_default(),
+                crate::sched::dispatch::thread_cpu_split((process.pid.0, tid)).unwrap_or_default(),
                 process.peak_rss_pages(),
             )
         }
         _ => return Err(SyscallError::InvalidArgument),
     };
-    super::userspace::write_user(usage_ptr, Rusage::from_times(times, maxrss))?;
+    super::userspace::write_user(usage_ptr, Rusage::from_split(times, split, maxrss))?;
     Ok(0)
 }
 
@@ -135,9 +141,11 @@ struct Tms {
 unsafe impl super::userspace::UserPod for Tms {}
 
 impl Tms {
-    fn new(own: CpuTimes, children: CpuTimes) -> Self {
-        let (u, s) = own.user_system_ns();
-        let (cu, cs) = children.user_system_ns();
+    /// From the (user, system) splits of the process's own time and its
+    /// children's.
+    fn new(own: (u64, u64), children: (u64, u64)) -> Self {
+        let (u, s) = own;
+        let (cu, cs) = children;
         Self {
             tms_utime: ticks(u),
             tms_stime: ticks(s),
@@ -154,7 +162,7 @@ impl Tms {
 pub fn sys_times(buf: usize) -> SyscallResult {
     if buf != 0 {
         let process = crate::process::current_process().ok_or(SyscallError::InvalidState)?;
-        let tms = Tms::new(process.cpu_times(), process.children_cpu_times());
+        let tms = Tms::new(process.cpu_split().1, process.children_cpu_split().1);
         super::userspace::write_user(buf, tms)?;
     }
     Ok(ticks(crate::timer::monotonic_ns()) as usize)
@@ -257,7 +265,7 @@ mod tests {
             ..CpuTimes::ZERO
         };
         assert_eq!(
-            Tms::new(own, children),
+            Tms::new(own.user_system_ns(), children.user_system_ns()),
             Tms {
                 tms_utime: 100,
                 tms_stime: 0,

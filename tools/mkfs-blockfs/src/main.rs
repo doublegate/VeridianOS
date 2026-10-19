@@ -924,8 +924,16 @@ mod tests {
     #[test]
     fn populate_keeps_fifos() {
         let root = env::temp_dir().join(format!("mkfs-blockfs-fifo-{}", std::process::id()));
+        // Removed however the test ends, a failed assertion included.
+        struct Cleanup(std::path::PathBuf);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = fs::remove_dir_all(&self.0);
+            }
+        }
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).unwrap();
+        let _cleanup = Cleanup(root.clone());
         let ok = std::process::Command::new("mkfifo")
             .args(["-m", "640"])
             .arg(root.join("pipe"))
@@ -938,7 +946,6 @@ mod tests {
         let inode = &b.inodes[paths["/pipe"] as usize];
         assert_eq!(inode.mode, S_IFIFO | 0o640);
         assert_eq!(inode.direct_blocks, [0; DIRECT_BLOCKS]);
-        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]

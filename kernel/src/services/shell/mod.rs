@@ -1213,14 +1213,18 @@ impl Shell {
     pub(crate) fn read_secret(prompt: &str) -> Option<String> {
         crate::print!("{}", prompt);
         crate::graphics::fbcon::flush();
-        let mut buf: Vec<u8> = Vec::new();
+        // One allocation of the largest key, so growing never leaves a copy
+        // in freed memory; the result is made from a borrow, not a clone;
+        // and the whole buffer is wiped, the bytes erased with backspace
+        // included (PR #25 review: those copies stayed in the heap).
+        let mut buf: Vec<u8> = Vec::with_capacity(crate::security::crypt::MAX_KEY);
         let result = loop {
             let Some(byte) = Self::read_char() else {
                 core::hint::spin_loop();
                 continue;
             };
             match byte {
-                b'\r' | b'\n' => break String::from_utf8(buf.clone()).ok(),
+                b'\r' | b'\n' => break core::str::from_utf8(&buf).ok().map(String::from),
                 0x03 | 0x04 => break None,
                 0x08 | 0x7f => {
                     buf.pop();
@@ -1229,6 +1233,7 @@ impl Shell {
                 _ => {}
             }
         };
+        buf.resize(buf.capacity(), 0);
         for byte in buf.iter_mut() {
             // SAFETY: `byte` is a valid, aligned reference into `buf`;
             // volatile so the wipe is not dropped as a dead store.

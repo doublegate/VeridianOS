@@ -388,11 +388,12 @@ impl UserDatabase {
         (count, bad)
     }
 
-    /// The user ID useradd gives next: the lowest free one from 1000.
+    /// The user ID useradd gives next: one above the highest given so far,
+    /// and at least 1000, as useradd's default. Every inserted ID moves
+    /// `next_uid` past itself, so the gaps below it are not reused; the
+    /// search this replaced never got past its first value (PR #23 review).
     pub fn next_free_uid(&self) -> u32 {
-        (self.next_uid.max(1000)..)
-            .find(|uid| !self.users.contains_key(uid))
-            .unwrap_or(self.next_uid)
+        self.next_uid.max(1000)
     }
 
     /// Every (name, user ID) pair, for the account store.

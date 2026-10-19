@@ -448,16 +448,19 @@ pub(crate) const USER_COPY_CHUNK: usize = 64 * 1024;
 /// once, so a pipe, socket or tty read keeps its one-call semantics.
 ///
 /// User memory is touched only through [`write_user_bytes`]: an unmapped
-/// page gives EFAULT, or the partial count if some bytes already reached the
-/// caller, as Linux does. Bytes `produce` consumed but that could not be
-/// copied out are lost, as they are for Linux on a mid-copy fault. Before
-/// v0.27 these paths built slices over user memory and faulted in the kernel
-/// instead (N-43).
+/// page gives EFAULT, or the count of bytes that reached the caller, as
+/// Linux does -- up to the faulting page, not just whole chunks: the rest
+/// of a chunk that faulted part-way is handed to `unread`, so a regular
+/// file moves its position back over it (Linux advances f_pos only by what
+/// was copied; PR #23 review). A stream cannot take bytes back: they are
+/// lost. Before v0.27 these paths built slices over user memory and
+/// faulted in the kernel instead (N-43).
 pub fn produce_to_user(
     addr: usize,
     count: usize,
     repeat: bool,
     mut produce: impl FnMut(&mut [u8]) -> Result<usize, SyscallError>,
+    mut unread: impl FnMut(usize),
 ) -> Result<usize, SyscallError> {
     if count == 0 {
         return Ok(0);
@@ -474,6 +477,9 @@ pub fn produce_to_user(
         };
         if n > 0 {
             if let Err(e) = write_user_bytes(addr + total, &kbuf[..n]) {
+                let copied = write_user_prefix(addr + total, &kbuf[..n]);
+                unread(n - copied);
+                total += copied;
                 return if total > 0 { Ok(total) } else { Err(e) };
             }
         }
@@ -485,11 +491,42 @@ pub fn produce_to_user(
     Ok(total)
 }
 
+/// The longest prefix of `data` that can be written to user memory at
+/// `addr`, written, page by page (a fault comes at a page boundary).
+fn write_user_prefix(addr: usize, data: &[u8]) -> usize {
+    let mut done = 0;
+    while done < data.len() {
+        let at = addr + done;
+        let n = (PAGE_SIZE - at % PAGE_SIZE).min(data.len() - done);
+        if write_user_bytes(at, &data[done..done + n]).is_err() {
+            break;
+        }
+        done += n;
+    }
+    done
+}
+
+/// The longest prefix of `buf` that can be read from user memory at
+/// `addr`, read, page by page.
+fn read_user_prefix(addr: usize, buf: &mut [u8]) -> usize {
+    let mut done = 0;
+    while done < buf.len() {
+        let at = addr + done;
+        let n = (PAGE_SIZE - at % PAGE_SIZE).min(buf.len() - done);
+        if read_user_bytes(at, &mut buf[done..done + n]).is_err() {
+            break;
+        }
+        done += n;
+    }
+    done
+}
+
 /// Hand up to `count` bytes of user memory at `addr` to `consume`, one
 /// bounded kernel buffer at a time. `consume` returns how many bytes it
 /// accepted; a short count ends the transfer. `repeat` as for
 /// [`produce_to_user`]. An unmapped page gives EFAULT, or the count accepted
-/// so far.
+/// so far -- including the readable part of a chunk that faulted part-way,
+/// which `consume` still gets (it was dropped; PR #23 review).
 pub fn consume_from_user(
     addr: usize,
     count: usize,
@@ -505,6 +542,12 @@ pub fn consume_from_user(
     while total < count {
         let want = (count - total).min(kbuf.len());
         if let Err(e) = read_user_bytes(addr + total, &mut kbuf[..want]) {
+            let readable = read_user_prefix(addr + total, &mut kbuf[..want]);
+            if readable > 0 {
+                if let Ok(n) = consume(&kbuf[..readable]) {
+                    total += n.min(readable);
+                }
+            }
             return if total > 0 { Ok(total) } else { Err(e) };
         }
         let n = match consume(&kbuf[..want]) {
@@ -637,42 +680,64 @@ mod accessor_tests {
         let src: alloc::vec::Vec<u8> = (0..150_000u32).map(|i| i as u8).collect();
         let mut dst = alloc::vec![0u8; 200_000];
         let mut pos = 0;
-        let n = produce_to_user(dst.as_mut_ptr() as usize, dst.len(), true, |k| {
-            let n = k.len().min(src.len() - pos);
-            k[..n].copy_from_slice(&src[pos..pos + n]);
-            pos += n;
-            Ok(n)
-        })
+        let n = produce_to_user(
+            dst.as_mut_ptr() as usize,
+            dst.len(),
+            true,
+            |k| {
+                let n = k.len().min(src.len() - pos);
+                k[..n].copy_from_slice(&src[pos..pos + n]);
+                pos += n;
+                Ok(n)
+            },
+            |_| {},
+        )
         .unwrap();
         assert_eq!(n, 150_000);
         assert_eq!(&dst[..n], &src[..]);
         // Without repeat, exactly one producer call, however large the request.
         let mut calls = 0;
-        let n = produce_to_user(dst.as_mut_ptr() as usize, dst.len(), false, |k| {
-            calls += 1;
-            Ok(k.len())
-        })
+        let n = produce_to_user(
+            dst.as_mut_ptr() as usize,
+            dst.len(),
+            false,
+            |k| {
+                calls += 1;
+                Ok(k.len())
+            },
+            |_| {},
+        )
         .unwrap();
         assert_eq!((n, calls), (USER_COPY_CHUNK, 1));
         // An error before anything is copied is returned; after, the count.
         assert_eq!(
-            produce_to_user(dst.as_mut_ptr() as usize, 10, true, |_| Err(
-                SyscallError::WouldBlock
-            )),
+            produce_to_user(
+                dst.as_mut_ptr() as usize,
+                10,
+                true,
+                |_| Err(SyscallError::WouldBlock),
+                |_| {}
+            ),
             Err(SyscallError::WouldBlock)
         );
         let mut first = true;
-        let n = produce_to_user(dst.as_mut_ptr() as usize, dst.len(), true, |k| {
-            if first {
-                first = false;
-                Ok(k.len())
-            } else {
-                Err(SyscallError::IoError)
-            }
-        })
+        let n = produce_to_user(
+            dst.as_mut_ptr() as usize,
+            dst.len(),
+            true,
+            |k| {
+                if first {
+                    first = false;
+                    Ok(k.len())
+                } else {
+                    Err(SyscallError::IoError)
+                }
+            },
+            |_| {},
+        )
         .unwrap();
         assert_eq!(n, USER_COPY_CHUNK);
-        assert!(produce_to_user(KERNEL_ADDR, 8, true, |k| Ok(k.len())).is_err());
+        assert!(produce_to_user(KERNEL_ADDR, 8, true, |k| Ok(k.len()), |_| {}).is_err());
     }
 
     #[test]

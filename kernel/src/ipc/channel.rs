@@ -27,6 +27,15 @@ pub const MAX_CHANNEL_QUEUE_SIZE: usize = 1024;
 static ENDPOINT_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 /// IPC endpoint for bidirectional communication
+/// Which call a queued request starts: the calling thread and the call's
+/// number, so a server's reply can be matched to that call and no later
+/// one (PR #24 review).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CallTag {
+    pub caller: u64,
+    pub id: u64,
+}
+
 pub struct Endpoint {
     /// Unique endpoint ID
     id: u64,
@@ -34,9 +43,10 @@ pub struct Endpoint {
     pub owner: ProcessId,
     /// Bound process ID (if connected)
     bound_to: Mutex<Option<ProcessId>>,
-    /// Incoming message queue
+    /// Incoming message queue, each with the call it starts if it is a
+    /// `sync_call` request.
     #[cfg(feature = "alloc")]
-    receive_queue: Mutex<VecDeque<Message>>,
+    receive_queue: Mutex<VecDeque<(Message, Option<CallTag>)>>,
     /// Receivers waiting for a message and senders waiting for room, woken
     /// whenever the queue changes or the endpoint closes. They used to be
     /// pid lists for the old scheduler, whose blocking never blocked under
@@ -89,6 +99,13 @@ impl Endpoint {
     /// (`Interrupted`); a closed endpoint is `EndpointNotFound`.
     #[cfg(feature = "alloc")]
     pub fn send_sync(&self, msg: Message, _sender: ProcessId) -> Result<()> {
+        self.send_tagged(msg, None)
+    }
+
+    /// [`Self::send_sync`] for a call's request, tagged with the call.
+    #[cfg(feature = "alloc")]
+    pub fn send_tagged(&self, msg: Message, tag: Option<CallTag>) -> Result<()> {
+        let mut msg = Some(msg);
         loop {
             if !self.active.load(Ordering::Acquire) {
                 return Err(IpcError::EndpointNotFound);
@@ -96,7 +113,9 @@ impl Endpoint {
             {
                 let mut queue = self.receive_queue.lock();
                 if queue.len() < MAX_CHANNEL_QUEUE_SIZE {
-                    queue.push_back(msg);
+                    if let Some(msg) = msg.take() {
+                        queue.push_back((msg, tag));
+                    }
                     drop(queue);
                     self.waiters.wake_all();
                     return Ok(());
@@ -130,17 +149,37 @@ impl Endpoint {
     /// endpoint is `EndpointNotFound`.
     #[cfg(feature = "alloc")]
     pub fn receive_sync(&self, _receiver: ProcessId) -> Result<Message> {
+        self.receive_tagged().map(|(msg, _)| msg)
+    }
+
+    /// [`Self::receive_sync`], with the call the message starts, if any.
+    #[cfg(feature = "alloc")]
+    pub fn receive_tagged(&self) -> Result<(Message, Option<CallTag>)> {
         loop {
             if !self.active.load(Ordering::Acquire) {
                 return Err(IpcError::EndpointNotFound);
             }
-            if let Some(msg) = self.receive_queue.lock().pop_front() {
+            if let Some(entry) = self.receive_queue.lock().pop_front() {
                 // A sender may be waiting for this room.
                 self.waiters.wake_all();
-                return Ok(msg);
+                return Ok(entry);
             }
             self.wait(|| !self.receive_queue.lock().is_empty())?;
         }
+    }
+
+    /// Take back the request of call `tag` if no server has received it
+    /// yet (its caller gave up). Returns whether it was still queued.
+    #[cfg(feature = "alloc")]
+    pub fn withdraw(&self, tag: CallTag) -> bool {
+        let mut queue = self.receive_queue.lock();
+        let Some(at) = queue.iter().position(|(_, t)| *t == Some(tag)) else {
+            return false;
+        };
+        queue.remove(at);
+        drop(queue);
+        self.waiters.wake_all();
+        true
     }
 
     #[cfg(not(feature = "alloc"))]
@@ -163,7 +202,7 @@ impl Endpoint {
         if queue.len() >= MAX_CHANNEL_QUEUE_SIZE {
             return Err(IpcError::ChannelFull);
         }
-        queue.push_back(msg);
+        queue.push_back((msg, None));
         drop(queue);
         self.waiters.wake_all();
         Ok(())
@@ -185,7 +224,7 @@ impl Endpoint {
             return Err(IpcError::EndpointNotFound);
         }
 
-        let msg = self.receive_queue.lock().pop_front();
+        let msg = self.receive_queue.lock().pop_front().map(|(msg, _)| msg);
         if msg.is_some() {
             self.waiters.wake_all(); // room for a waiting sender
         }
@@ -281,6 +320,21 @@ mod tests {
     fn test_channel_creation() {
         let channel = Channel::new(ProcessId(1), 100);
         assert_ne!(channel.send_id(), channel.receive_id());
+    }
+
+    /// A call's request carries the call to the server, and one whose
+    /// caller gave up can be taken back while no server has it.
+    #[test]
+    fn call_requests_are_tagged_and_can_be_withdrawn() {
+        let endpoint = Endpoint::new(ProcessId(1));
+        let a = CallTag { caller: 40, id: 1 };
+        let b = CallTag { caller: 40, id: 2 };
+        endpoint.send_tagged(Message::small(1, 1), Some(a)).unwrap();
+        endpoint.send_tagged(Message::small(2, 1), Some(b)).unwrap();
+        assert!(endpoint.withdraw(a));
+        assert!(!endpoint.withdraw(a));
+        let (msg, tag) = endpoint.receive_tagged().unwrap();
+        assert_eq!((msg.capability(), tag), (2, Some(b)));
     }
 
     #[test]

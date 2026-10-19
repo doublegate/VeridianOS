@@ -181,8 +181,13 @@ What remains:
   directory fd through the canonical path recorded at open, not the open directory. If the
   directory is renamed afterwards they fail with ENOENT (where Linux would still use it); they
   never act on a different directory that now has the old name.
-- **exec (N-101 remainder):** a multithreaded process cannot exec (EAGAIN, above). Fork children
-  are runnable before setup completes (N-110).
+- **exec (N-101 remainder):** fork children are runnable before setup completes (N-110). A
+  multithreaded process can exec: its other threads end at the point of no return, once the
+  program has been found and checked, as Linux's de_thread.
+- **ptrace is partial:** PTRACE_TRACEME and PTRACE_ATTACH make the caller the tracer for
+  PEEKDATA and POKEDATA (and deny the tracee set-ID privilege at exec), but the tracee is not
+  stopped, the tracer's `wait` does not report it, and the register and resume requests (GETREGS,
+  SETREGS, CONT, SINGLESTEP) fail. A debugger cannot drive a process yet (planned v0.28).
 - **Credentials (N-131 remainder, planned v0.30):** real, effective and saved IDs,
   filesystem IDs (setfsuid, setfsgid), supplementary groups (N-248) and set-user-ID/set-group-ID
   exec exist, but there are no Linux capabilities: privilege is effective uid 0, and file-access
@@ -407,7 +412,8 @@ two processes mapping one file do not see each other's changes.
   mmap regions at the bottom of the mmap area, stacks at the top (sprint G).
 - **No vDSO:** `clock_gettime` and friends are real system calls; the auxiliary vector has no
   AT_SYSINFO_EHDR.
-- **No setuid exec:** set-user-ID and set-group-ID bits are not applied by `exec`.
+- **Image size:** a program (with its BSS) larger than 1 GiB is refused with ENOMEM: every page is
+  given a frame at exec, as BSS is not mapped lazily yet.
 - **Dynamically linked programs** run with musl's loader, which the BusyBox root filesystem ships
   with the shared C++ runtime (`libstdc++.so.6`, `libgcc_s.so.1`). Programs built against glibc
   do not run: there is no glibc and no `ld-linux-x86-64.so.2`.
@@ -426,6 +432,9 @@ Page protections now follow `prot` (fixed in v0.27, N-132 to N-137). What remain
   EINVAL (`MAP_FIXED` replacement and `munmap` across mappings work since v0.27, N-141).
   `mprotect` of part of a mapping does not split it (N-135 remainder).
 - **Memory is allocated eagerly** at `mmap` time, not on first touch (v0.29 memory work).
+- **A memfd cannot shrink under a shared mapping:** `ftruncate` that would drop a page still
+  mapped `MAP_SHARED` fails with EBUSY. Linux shrinks it and unmaps those pages (access raises
+  SIGBUS); mappings cannot be invalidated here yet (v0.29 memory work).
 - **RAM above the eighth memory region is lost (N-142, HX-07).** Only the eight largest usable
   regions are used; UEFI firmware on real machines reports 50 to 150.
 - **POSIX shared memory (N-88)** has no access control, and unlinked names can still be opened.

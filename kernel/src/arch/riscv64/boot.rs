@@ -127,7 +127,7 @@ pub extern "C" fn _start_rust() -> ! {
 /// Must run in S-mode under SBI firmware (OpenSBI) that implements the
 /// legacy console_putchar extension.
 #[inline]
-unsafe fn sbi_putchar(ch: u8) {
+pub(super) unsafe fn sbi_putchar(ch: u8) {
     // SAFETY: the SBI legacy console_putchar call (a7 = 1) only asks the
     // firmware to print one character; it touches no kernel memory. SBI
     // firmware is present per this function's contract.

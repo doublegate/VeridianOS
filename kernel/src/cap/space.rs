@@ -288,15 +288,25 @@ impl CapabilitySpace {
 
     /// Insert a complete entry (keeps its inheritance flags).
     pub(crate) fn insert_entry(&self, entry: CapabilityEntry) -> Result<(), KernelError> {
+        let id = entry.capability.id();
+        // This space counts as a holder before the entry can be seen: held
+        // after publishing, a remove in between released it first and the
+        // count ended one too high (or a collection dropped a capability
+        // still held; PR #25 review). Given back if the insert fails.
+        let manager = super::manager::cap_manager();
+        manager.hold(id);
         let mut table = self.table.write();
         // Checked under the lock, so concurrent inserts cannot overshoot.
         if table.full >= self.quota {
+            drop(table);
+            manager.release(id);
             return Err(KernelError::ResourceExhausted {
                 resource: "capability quota",
             });
         }
-        let id = entry.capability.id();
         if table.find(id).is_some() {
+            drop(table);
+            manager.release(id);
             return Err(KernelError::AlreadyExists {
                 resource: "capability slot",
                 id,
@@ -305,8 +315,6 @@ impl CapabilitySpace {
         table.insert_new(entry);
         self.used.store(table.full, Ordering::Relaxed);
         self.stats.total_caps.fetch_add(1, Ordering::Relaxed);
-        drop(table);
-        super::manager::cap_manager().hold(id);
         Ok(())
     }
 
@@ -366,21 +374,27 @@ impl CapabilitySpace {
     /// Copies all capabilities from the source space to this space.
     /// Used during fork() to give child process same capabilities as parent.
     pub fn clone_from(&self, other: &Self) -> Result<(), KernelError> {
-        // Copy first, then publish: the two locks are never held together.
-        let copies: Vec<CapabilityEntry> = other
-            .table
-            .read()
-            .entries()
-            .map(CapabilityEntry::copy_for_new_space)
-            .collect();
+        // Copy first, then publish: the two tables are never locked
+        // together. The copies are counted as held while the source is
+        // still locked: counted after, the source's last copy could be
+        // removed and collected in between, leaving this space a dead
+        // capability (PR #25 review).
+        let copies: Vec<CapabilityEntry> = {
+            let source = other.table.read();
+            let copies: Vec<CapabilityEntry> = source
+                .entries()
+                .map(CapabilityEntry::copy_for_new_space)
+                .collect();
+            for entry in &copies {
+                super::manager::cap_manager().hold(entry.capability.id());
+            }
+            copies
+        };
         let mut table = CapTable::default();
         for entry in copies {
             table.insert_new(entry);
         }
         let count = table.full;
-        for entry in table.entries() {
-            super::manager::cap_manager().hold(entry.capability.id());
-        }
         let old = core::mem::replace(&mut *self.table.write(), table);
         release_all(&old);
         self.used.store(count, Ordering::Relaxed);

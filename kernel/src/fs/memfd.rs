@@ -88,17 +88,40 @@ impl MemfdNode {
     }
 
     /// Resize to `size` bytes: new pages are zeroed frames; pages past the
-    /// end are released (a mapping that still holds one keeps it).
+    /// end are released.
+    ///
+    /// A shrink that would drop a page still mapped MAP_SHARED is EBUSY:
+    /// the mapping kept the old frame while a later grow gave the file a
+    /// new one, so the two stopped sharing (PR #24 review). Linux unmaps
+    /// such pages instead (access then raises SIGBUS); mappings cannot be
+    /// invalidated here yet (docs/KNOWN-LIMITATIONS.md). A grow that runs
+    /// out of frames part-way gives back what it took, leaving the file as
+    /// it was.
     fn resize(&self, pages: &mut Pages, size: usize) -> Result<(), KernelError> {
         if size > super::MAX_RAM_FILE_SIZE {
             return Err(KernelError::FsError(FsError::FileTooLarge));
         }
         let want = size.div_ceil(PAGE);
+        if pages
+            .frames
+            .get(want..)
+            .is_some_and(|dropped| dropped.iter().any(|&f| crate::mm::frame_refs::is_shared(f)))
+        {
+            return Err(KernelError::FsError(FsError::Busy));
+        }
+        let had = pages.frames.len();
         while pages.frames.len() < want {
-            let frame = FRAME_ALLOCATOR
-                .lock()
-                .allocate_frames(1, None)
-                .map_err(|_| KernelError::FsError(FsError::NoSpace))?;
+            let frame = match FRAME_ALLOCATOR.lock().allocate_frames(1, None) {
+                Ok(frame) => frame,
+                Err(_) => {
+                    while pages.frames.len() > had {
+                        if let Some(frame) = pages.frames.pop() {
+                            release(frame);
+                        }
+                    }
+                    return Err(KernelError::FsError(FsError::NoSpace));
+                }
+            };
             // SAFETY: `frame` was just allocated, is RAM reached through the
             // physical map and is mapped nowhere yet.
             unsafe { core::ptr::write_bytes(frame_bytes(frame), 0, PAGE) };

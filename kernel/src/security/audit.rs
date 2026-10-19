@@ -578,21 +578,45 @@ fn persist_event(event: &AuditEvent) {
     }
 
     // Try to append to the audit log file; ignore errors if VFS is not
-    // mounted or the path does not exist yet.
-    if append_persisted(AUDIT_LOG_PATH, bytes) {
-        AUDIT_STATS.record_persisted();
-    } else {
-        // Not written (no VFS yet, say): give the budget back.
-        PERSISTED_BYTES.fetch_sub(len, Ordering::AcqRel);
+    // mounted or the path does not exist yet. One append at a time: the
+    // size read and the write at it are two steps, so two CPUs appending at
+    // once wrote one record over the other (PR #25 review). The lock is
+    // only tried (an event may come from code that must not sleep), a
+    // little longer than any append takes on another CPU; failing that,
+    // the event stays in the memory log only.
+    let written = (0..PERSIST_LOCK_TRIES)
+        .find_map(|_| {
+            let held = PERSIST_LOCK.try_lock();
+            if held.is_none() {
+                core::hint::spin_loop();
+            }
+            held
+        })
+        .and_then(|_held| append_persisted(AUDIT_LOG_PATH, bytes));
+    match written {
+        Some(n) if n == bytes.len() => AUDIT_STATS.record_persisted(),
+        // Not written (no VFS yet, say), or only part of it: not
+        // persisted, and the budget not used goes back (a short write
+        // counted as persisted).
+        Some(n) => {
+            PERSISTED_BYTES.fetch_sub(len - n as u64, Ordering::AcqRel);
+        }
+        None => {
+            PERSISTED_BYTES.fetch_sub(len, Ordering::AcqRel);
+        }
     }
 }
+
+/// Serialises appends to the audit log (see `persist_event`).
+static PERSIST_LOCK: spin::Mutex<()> = spin::Mutex::new(());
+const PERSIST_LOCK_TRIES: usize = 1 << 16;
 
 /// Append `bytes` to the audit log at `path`: through the VFS on the
 /// kernel, into an in-memory log in host tests (which have no VFS), so the
 /// persistence path and its statistics are exercised there too.
 #[cfg(not(test))]
-fn append_persisted(path: &str, bytes: &[u8]) -> bool {
-    crate::fs::append_file(path, bytes).is_ok()
+fn append_persisted(path: &str, bytes: &[u8]) -> Option<usize> {
+    crate::fs::append_file(path, bytes).ok()
 }
 
 #[cfg(test)]
@@ -600,11 +624,11 @@ static TEST_PERSISTED: spin::Mutex<alloc::vec::Vec<(alloc::string::String, alloc
     spin::Mutex::new(alloc::vec::Vec::new());
 
 #[cfg(test)]
-fn append_persisted(path: &str, bytes: &[u8]) -> bool {
+fn append_persisted(path: &str, bytes: &[u8]) -> Option<usize> {
     TEST_PERSISTED
         .lock()
         .push((alloc::string::String::from(path), bytes.to_vec()));
-    true
+    Some(bytes.len())
 }
 
 // ---------------------------------------------------------------------------
@@ -1012,9 +1036,16 @@ mod tests {
         // Logging only tries the filter lock and drops the event when it is
         // held (best effort, by design), and tests running in parallel use
         // the same global filter: retry until one event gets through.
+        // This test's own event, by its pid, not the global count other
+        // tests also raise (PR #25 review).
+        let mine = || {
+            TEST_PERSISTED.lock().iter().any(|(_, bytes)| {
+                core::str::from_utf8(bytes).is_ok_and(|line| line.split('|').nth(2) == Some("456"))
+            })
+        };
         let recorded = (0..1000).any(|_| {
             log_process_create(456, 1000, 0);
-            get_stats().0 > 0
+            mine()
         });
         assert!(recorded);
     }

@@ -149,11 +149,18 @@ pub fn sys_exec(path_ptr: usize, argv_ptr: usize, envp_ptr: usize) -> SyscallRes
     let envp_refs: Vec<&str> = envp.iter().map(|s| s.as_str()).collect();
 
     // exec replaces the address space every thread of the process runs in,
-    // so the other threads go first (N-101).
-    #[cfg(feature = "alloc")]
-    de_thread()?;
+    // so the other threads go (N-101) -- at the point of no return, once
+    // the program checked out (`exec_process`).
+    let before_commit = || -> Result<(), crate::error::KernelError> {
+        #[cfg(feature = "alloc")]
+        de_thread().map_err(|_| crate::error::KernelError::InvalidArgument {
+            name: "exec",
+            value: "interrupted",
+        })?;
+        Ok(())
+    };
 
-    match exec_process(&path, &argv_refs, &envp_refs) {
+    match exec_process(&path, &argv_refs, &envp_refs, &before_commit) {
         Ok(_) => {
             // exec succeeded. The current process's address space has been
             // replaced with the new program image. We cannot return via
@@ -234,6 +241,10 @@ pub fn sys_exec(path_ptr: usize, argv_ptr: usize, envp_ptr: usize) -> SyscallRes
             name: "elf" | "interpreter",
             ..
         }) => Err(SyscallError::ExecFormat),
+        // de_thread lost to a fatal signal or another exec (EINTR).
+        Err(crate::error::KernelError::InvalidArgument { name: "exec", .. }) => {
+            Err(SyscallError::Interrupted)
+        }
         Err(e) => Err(super::map_kernel_error(e)),
     }
 }

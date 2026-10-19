@@ -1062,6 +1062,29 @@ impl VirtualAddressSpace {
 
             const KERNEL_SPACE_START: u64 = 0xFFFF_8000_0000_0000;
 
+            // Once a parent page is made read-only for copy-on-write, every
+            // CPU running the parent must drop its writable translation, on
+            // every way out of the loop: the flush names the PARENT's root
+            // (it named the child's, which no CPU runs, so CPUs running the
+            // parent's other threads kept writing frames the child now
+            // shares), and an error part-way returned without one (PR #22
+            // review; Linux's dup_mmap ends with flush_tlb_mm(oldmm)).
+            struct FlushParent {
+                root: u64,
+                downgraded: bool,
+            }
+            impl Drop for FlushParent {
+                fn drop(&mut self) {
+                    if self.downgraded {
+                        super::tlb::flush_all_in(self.root);
+                    }
+                }
+            }
+            let mut flush = FlushParent {
+                root: parent_root,
+                downgraded: false,
+            };
+
             for (addr, mapping) in parent_mappings.iter() {
                 // Only deep-copy user-space mappings
                 if addr.0 >= KERNEL_SPACE_START {
@@ -1070,8 +1093,6 @@ impl VirtualAddressSpace {
                     continue;
                 }
 
-                let num_pages = mapping.size / 4096;
-
                 // MADV_DONTFORK: not in the child at all. MADV_WIPEONFORK:
                 // fresh zero pages. (A CLONE_VM child shares the whole
                 // address space, as Linux, so neither applies to it.)
@@ -1079,6 +1100,7 @@ impl VirtualAddressSpace {
                     continue;
                 }
                 if mapping.wipe_on_fork && !share_all {
+                    let num_pages = mapping.size / 4096;
                     let mut child_mapping = mapping.clone();
                     child_mapping.physical_frames = Vec::new();
                     for i in 0..num_pages {
@@ -1143,7 +1165,6 @@ impl VirtualAddressSpace {
                 // (`resolve_cow_fault`); read-only pages are simply shared.
                 // Every frame gains an owner here, so whichever side releases
                 // it last frees it.
-                let _ = num_pages;
 
                 // Huge pages are not shared copy-on-write (ADR 0005): the
                 // child gets its own copy of every 2 MiB chunk. A mapping may
@@ -1225,6 +1246,7 @@ impl VirtualAddressSpace {
                     };
                     let flags = if flags.contains(PageFlags::WRITABLE) && !keep_writable {
                         let cow = flags.without(PageFlags::WRITABLE) | PageFlags::COW;
+                        flush.downgraded = true;
                         parent_mapper.update_page_flags(vaddr, cow)?;
                         cow
                     } else {
@@ -1239,9 +1261,9 @@ impl VirtualAddressSpace {
                 }
             }
 
-            // The parent's writable pages just became read-only: drop any
-            // writable translation every CPU may still hold.
-            super::tlb::flush_all_in(self.get_page_table());
+            // The parent's writable pages just became read-only: `flush`
+            // drops every CPU's writable translation of them here.
+            drop(flush);
         }
 
         // Copy metadata
@@ -2570,7 +2592,11 @@ impl VirtualAddressSpace {
             // another thread or seen through this CPU's stale read-only TLB
             // entry): the page is writable now, so the write only needs
             // retrying after this CPU drops its stale entry (PR #19/#20).
-            if access_allowed(flags, true, false) {
+            // Only if a user write is allowed now: every page resolved here
+            // is a user page, and one without USER (PROT_NONE) must fault
+            // for real, not be retried forever (security review of
+            // 9cfe177b).
+            if access_allowed(flags, true, true) {
                 crate::arch::tlb_flush_address(page);
                 return Ok(true);
             }

@@ -136,9 +136,14 @@ fn decide(
         (SCHED_DEADLINE, None) => return Err(SyscallError::InvalidArgument),
         _ => None,
     };
-    let nice = req.nice.map_or(cur.nice, |n| n.clamp(-20, 19) as i8);
+    let fair = matches!(req.policy, SCHED_NORMAL | SCHED_BATCH | SCHED_IDLE);
+    // Only a fair policy takes a nice value, as Linux's
+    // __setscheduler_params (see the test).
+    let nice = match req.nice {
+        Some(n) if fair => n.clamp(-20, 19) as i8,
+        _ => cur.nice,
+    };
     if !privileged {
-        let fair = matches!(req.policy, SCHED_NORMAL | SCHED_BATCH | SCHED_IDLE);
         let perm = SyscallError::OperationNotPermitted;
         if fair && nice < cur.nice && !allow.can_nice(nice) {
             return Err(perm);
@@ -266,8 +271,12 @@ fn set(
     }
     reserve_deadline(&params, &new)?;
     *params = new;
-    drop(params);
+    // Applied with the parameters still locked: released first, two
+    // concurrent calls could leave the dispatcher on one's policy and the
+    // thread's parameters on the other's (PR #23 review). Nothing in the
+    // dispatcher takes a thread's `sched` lock.
     crate::sched::dispatch::set_policy((owner_pid, thread.tid.0), new.to_policy());
+    drop(params);
     Ok(0)
 }
 
@@ -557,10 +566,10 @@ pub fn sys_sched_setaffinity(pid: usize, len: usize, mask: usize) -> SyscallResu
         return Err(SyscallError::Busy);
     }
     thread.set_affinity(wanted as usize);
-    drop(params);
     // A thread on a CPU it may no longer use moves now (itself: before
-    // this call returns to user mode).
+    // this call returns to user mode). Under the lock, as the policy is.
     crate::sched::dispatch::set_affinity((tpid, thread.tid.0), wanted);
+    drop(params);
     Ok(0)
 }
 
@@ -653,9 +662,9 @@ pub fn sys_setpriority(which: usize, who: usize, nice: usize) -> SyscallResult {
             continue;
         }
         params.nice = nice;
-        let policy = params.to_policy();
+        // Applied under the lock, as in sched_setattr.
+        crate::sched::dispatch::set_policy((pid, thread.tid.0), params.to_policy());
         drop(params);
-        crate::sched::dispatch::set_policy((pid, thread.tid.0), policy);
     }
     result
 }
@@ -672,6 +681,26 @@ mod tests {
             dl: None,
             reset_on_fork: false,
         }
+    }
+
+    /// A nice value comes only with a fair policy, as Linux's
+    /// __setscheduler_params: an RT thread setting SCHED_FIFO with nice
+    /// -20 kept -20, unchecked against RLIMIT_NICE, for when it went back
+    /// to SCHED_NORMAL (PR #23 review).
+    #[test]
+    fn nice_is_set_only_with_a_fair_policy() {
+        let cur = SchedParams {
+            policy: SCHED_FIFO,
+            rt_priority: 10,
+            nice: 0,
+            ..SchedParams::default()
+        };
+        let mut r = req(SCHED_FIFO, 10);
+        r.nice = Some(-20);
+        assert_eq!(
+            decide(&cur, &r, false, Allowance::NONE).map(|p| p.nice),
+            Ok(0)
+        );
     }
 
     #[test]

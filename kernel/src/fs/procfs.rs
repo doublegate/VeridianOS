@@ -205,7 +205,9 @@ impl VfsNode for ProcNode {
     }
 
     fn write(&self, _offset: usize, _data: &[u8]) -> Result<usize, KernelError> {
-        Err(KernelError::FsError(FsError::ReadOnly))
+        // EACCES, as Linux's read-only /proc files give (EROFS would say
+        // the filesystem is mounted read-only).
+        Err(KernelError::FsError(FsError::PermissionDenied))
     }
 
     fn metadata(&self) -> Result<Metadata, KernelError> {
@@ -416,7 +418,7 @@ impl VfsNode for ProcNode {
         _name: &str,
         _permissions: Permissions,
     ) -> Result<Arc<dyn VfsNode>, KernelError> {
-        Err(KernelError::FsError(FsError::ReadOnly))
+        Err(KernelError::FsError(FsError::PermissionDenied))
     }
 
     fn mkdir(
@@ -424,15 +426,15 @@ impl VfsNode for ProcNode {
         _name: &str,
         _permissions: Permissions,
     ) -> Result<Arc<dyn VfsNode>, KernelError> {
-        Err(KernelError::FsError(FsError::ReadOnly))
+        Err(KernelError::FsError(FsError::PermissionDenied))
     }
 
     fn unlink(&self, _name: &str) -> Result<(), KernelError> {
-        Err(KernelError::FsError(FsError::ReadOnly))
+        Err(KernelError::FsError(FsError::PermissionDenied))
     }
 
     fn truncate(&self, _size: usize) -> Result<(), KernelError> {
-        Err(KernelError::FsError(FsError::ReadOnly))
+        Err(KernelError::FsError(FsError::PermissionDenied))
     }
 }
 

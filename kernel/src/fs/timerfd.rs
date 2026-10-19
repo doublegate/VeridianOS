@@ -311,14 +311,22 @@ pub fn is_readable(tfd_id: u32) -> bool {
     })
 }
 
-/// When the timer next expires, if it is armed and has no expirations
-/// waiting to be read (`VfsNode::ready_at_ns`).
+/// When the timer next expires, if it is armed, has no expirations waiting
+/// to be read and has not expired yet (`VfsNode::ready_at_ns`).
 pub fn next_expiry(tfd_id: u32) -> Option<u64> {
     let registry = TIMERFD_REGISTRY.lock();
     registry
         .get(&tfd_id)
-        .filter(|i| i.armed && i.expirations == 0)
-        .map(|i| i.next_expiry_ns)
+        .and_then(|i| future_expiry(i, monotonic_now_ns()))
+}
+
+/// The expiry a waiter should wake at, if still to come at `now`. A time
+/// already past is no wake time: the timer is readable now, and a waiter
+/// not interested in reading it (POLLOUT only, or an edge already
+/// reported) handed a past wake time would loop in the kernel without
+/// sleeping (PR #23 review).
+fn future_expiry(i: &TimerFdInstance, now: u64) -> Option<u64> {
+    (i.armed && i.expirations == 0 && i.next_expiry_ns > now).then_some(i.next_expiry_ns)
 }
 
 fn io_changed() {
@@ -556,6 +564,27 @@ mod tests {
     /// Expirations are counted against the clock: a periodic timer counts
     /// every period that passed and moves on; a one-shot timer counts once
     /// and disarms.
+    #[test]
+    fn an_expired_timer_offers_no_wake_time() {
+        let t = TimerFdInstance {
+            clock_id: CLOCK_MONOTONIC,
+            spec: Itimerspec::default(),
+            next_expiry_ns: 1000,
+            expirations: 0,
+            armed: true,
+            wall_absolute: false,
+            cancel_on_set: None,
+        };
+        assert_eq!(future_expiry(&t, 999), Some(1000));
+        assert_eq!(future_expiry(&t, 1000), None);
+        assert_eq!(future_expiry(&t, 5000), None);
+        let read_pending = TimerFdInstance {
+            expirations: 1,
+            ..t
+        };
+        assert_eq!(future_expiry(&read_pending, 0), None);
+    }
+
     #[test]
     fn expirations_follow_the_clock() {
         let mut t = TimerFdInstance {

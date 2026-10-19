@@ -34,7 +34,6 @@ pub mod pcb;
 pub mod rlimit;
 pub mod robust_list;
 pub mod session;
-pub mod signal_delivery;
 pub mod signals;
 pub mod table;
 pub mod thread;
@@ -459,7 +458,46 @@ pub fn run_and_wait_all(pids: &[ProcessId]) -> alloc::vec::Vec<Option<i32>> {
 /// the process, and [`user_task_reaped`] must still free its page tables.
 #[cfg(feature = "alloc")]
 pub fn process_for_reap(pid: u64) -> Option<alloc::sync::Arc<Process>> {
-    table::get_process(ProcessId(pid))
+    table::get_process(ProcessId(pid)).or_else(|| {
+        AWAITING_REAP
+            .lock()
+            .iter()
+            .find(|p| p.pid.0 == pid)
+            .cloned()
+    })
+}
+
+/// Zombies a parent has waited for while a task of theirs had still to be
+/// reaped. A zombie can be waited for as soon as it is one, as on Linux --
+/// its last thread marks it before leaving the CPU -- and the reap of that
+/// task frees the page tables, which needs the process: out of the table,
+/// it was not found and they leaked (PR #22 review). Each stays here until
+/// its page tables are freed.
+#[cfg(feature = "alloc")]
+static AWAITING_REAP: spin::Mutex<alloc::vec::Vec<alloc::sync::Arc<Process>>> =
+    spin::Mutex::new(alloc::vec::Vec::new());
+
+/// Take the waited-for zombie `pid` out of the process table, keeping it
+/// for its tasks' reap if they still need it.
+#[cfg(feature = "alloc")]
+pub(crate) fn remove_waited(pid: ProcessId) {
+    let Some(process) = table::get_process(pid) else {
+        return;
+    };
+    // Kept before it leaves the table, so a reap never finds it in
+    // neither place; dropped again if its page tables are already freed
+    // (a reap that came first).
+    AWAITING_REAP.lock().push(process.clone());
+    table::remove_process(pid);
+    if process.memory_space.lock().get_page_table() == 0 {
+        release_reaped(pid.0);
+    }
+}
+
+/// The page tables of `pid` are freed: nothing of it is waited for.
+#[cfg(feature = "alloc")]
+fn release_reaped(pid: u64) {
+    AWAITING_REAP.lock().retain(|p| p.pid.0 != pid);
 }
 
 /// A dispatcher task of `process` has been reaped (it is off every CPU and
@@ -496,6 +534,7 @@ pub fn user_task_reaped(process: Option<alloc::sync::Arc<Process>>, tid: u64) {
         return;
     }
     free_page_tables(&process);
+    release_reaped(process.pid.0);
     crate::sched::dispatch::PROCESS_EVENTS.wake_all();
 }
 

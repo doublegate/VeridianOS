@@ -610,10 +610,10 @@ const RFLAGS_IF: u64 = 1 << 9;
 
 /// Interrupts enabled for the rest of a fault handler, disabled again when
 /// dropped.
-struct FaultIrq(bool);
+pub(super) struct FaultIrq(bool);
 
 impl FaultIrq {
-    fn enable_if(on: bool) -> Self {
+    pub(super) fn enable_if(on: bool) -> Self {
         if on {
             x86_64::instructions::interrupts::enable();
         }

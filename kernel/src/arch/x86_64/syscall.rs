@@ -84,6 +84,12 @@ pub fn per_cpu_data_ptr() -> *mut PerCpuData {
 /// the user stack loaded (CVE-2012-0217), and Linux likewise refuses the
 /// last page below the canonical boundary (N-171).
 extern "C" fn syscall_exit_prepare(frame: &mut SyscallFrame) -> u64 {
+    // This work takes locks (the process's threads, its signal state), so
+    // it runs with interrupts on, as the trap return's `exit_to_user` does:
+    // a CPU spinning on such a lock with them off could not answer the TLB
+    // shootdown of the CPU holding it (N-139; PR #21 review). The frame is
+    // on the task's own kernel stack. Off again before the return.
+    let irq = super::trap::FaultIrq::enable_if(true);
     // A task whose slice ran out during the call gives up the CPU first.
     #[cfg(feature = "alloc")]
     crate::sched::dispatch::preempt_user();
@@ -95,6 +101,7 @@ extern "C" fn syscall_exit_prepare(frame: &mut SyscallFrame) -> u64 {
     if crate::sched::dispatch::current_owner().is_some() {
         crate::process::signals::deliver_on_return(frame);
     }
+    drop(irq);
     super::trap::sanitize_user_frame(frame);
     let sysret_ok = frame.rcx == frame.rip
         && frame.r11 == frame.rflags
@@ -166,9 +173,11 @@ pub unsafe extern "C" fn syscall_entry() {
         "sti",
         "call {handler}",
 
-        // The handler may have enabled interrupts (waits); nothing may
-        // arrive from here to the return, or it would see a ring-0 CS
-        // with the user GS base after the swapgs.
+        // The handler may have enabled interrupts (waits). The result and
+        // the frame pointer are stored with them off; syscall_exit_prepare
+        // enables them for its own work and returns with them off, and
+        // nothing may arrive from there to the return, or it would see a
+        // ring-0 CS with the user GS base after the swapgs.
         "cli",
         "mov [rsp + {rax_off}], rax",         // result into frame.rax
         "mov qword ptr gs:[0x10], 0",

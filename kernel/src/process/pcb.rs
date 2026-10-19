@@ -191,6 +191,9 @@ pub struct Process {
     /// credentials (and may not attach). Held only briefly, never across
     /// anything that waits.
     pub cred_guard: Mutex<()>,
+    /// An exec is replacing the image (set under `cred_guard`): ptrace
+    /// PEEK and POKE refuse until it is done.
+    pub exec_in_progress: core::sync::atomic::AtomicBool,
 
     /// Linux's mm dumpable flag (PR_SET_DUMPABLE): when clear, only root
     /// may ptrace the process or read its robust list. Inherited on fork,
@@ -208,6 +211,10 @@ pub struct Process {
     /// (Linux's signal_struct sums; N-218, N-223).
     cpu_exited: Mutex<crate::sched::cputime::CpuTimes>,
     cpu_children: Mutex<crate::sched::cputime::CpuTimes>,
+    /// The last user/system split reported for each of those totals, so
+    /// neither part goes back (Linux's prev_cputime).
+    cpu_split: crate::sched::cputime::PrevSplit,
+    children_cpu_split: crate::sched::cputime::PrevSplit,
     /// The largest resident set seen (pages), and the largest of the
     /// children waited for (getrusage ru_maxrss).
     peak_rss_pages: core::sync::atomic::AtomicUsize,
@@ -426,6 +433,7 @@ impl Process {
             pgid: AtomicU64::new(pid.0),
             tracer: AtomicU64::new(0),
             cred_guard: Mutex::new(()),
+            exec_in_progress: core::sync::atomic::AtomicBool::new(false),
             dumpable: core::sync::atomic::AtomicBool::new(true),
             rlimits: Mutex::new(super::rlimit::Limits::defaults()),
             cpu_limit_ns: [
@@ -434,6 +442,8 @@ impl Process {
             ],
             cpu_exited: Mutex::new(crate::sched::cputime::CpuTimes::ZERO),
             cpu_children: Mutex::new(crate::sched::cputime::CpuTimes::ZERO),
+            cpu_split: crate::sched::cputime::PrevSplit::new(),
+            children_cpu_split: crate::sched::cputime::PrevSplit::new(),
             peak_rss_pages: core::sync::atomic::AtomicUsize::new(0),
             children_peak_rss_pages: core::sync::atomic::AtomicUsize::new(0),
             sid: AtomicU64::new(pid.0),
@@ -555,6 +565,19 @@ impl Process {
         #[cfg(not(feature = "alloc"))]
         let total = *exited;
         total
+    }
+
+    /// [`Self::cpu_times`] with its (user, system) split, never below what
+    /// the process reported before.
+    pub fn cpu_split(&self) -> (crate::sched::cputime::CpuTimes, (u64, u64)) {
+        let times = self.cpu_times();
+        (times, self.cpu_split.split(&times))
+    }
+
+    /// [`Self::children_cpu_times`] with its split, likewise.
+    pub fn children_cpu_split(&self) -> (crate::sched::cputime::CpuTimes, (u64, u64)) {
+        let times = self.children_cpu_times();
+        (times, self.children_cpu_split.split(&times))
     }
 
     /// The CPU time of the children waited for and their own children
@@ -685,6 +708,62 @@ impl Process {
         let old = handlers[signum];
         handlers[signum] = handler;
         Ok(old)
+    }
+
+    /// Signal `signum`'s whole action: handler and (sa_flags, sa_restorer,
+    /// sa_mask), read together. The two tables are always locked in this
+    /// order, handler then the rest, by everything that needs both, so no
+    /// reader sees one action's handler with another's flags (PR #23
+    /// review: sigaction, delivery and SA_RESETHAND each took them apart).
+    pub fn signal_action(&self, signum: usize) -> Option<(u64, (u64, u64, u64))> {
+        if signum > super::signals::NSIG {
+            return None;
+        }
+        let handlers = self.signal_handlers.lock();
+        let extra = self.signal_action_extra.lock();
+        Some((handlers[signum], extra[signum]))
+    }
+
+    /// Install `new` (if any) as `signum`'s whole action and return the one
+    /// it replaces, in one step. SIGKILL and SIGSTOP refuse a new one.
+    pub fn swap_signal_action(
+        &self,
+        signum: usize,
+        new: Option<(u64, (u64, u64, u64))>,
+    ) -> Result<(u64, (u64, u64, u64)), KernelError> {
+        if signum == 0 || signum > super::signals::NSIG {
+            return Err(KernelError::InvalidArgument {
+                name: "signum",
+                value: "out of range",
+            });
+        }
+        if new.is_some() && (signum == 9 || signum == 19) {
+            return Err(KernelError::PermissionDenied {
+                operation: "change handler for SIGKILL or SIGSTOP",
+            });
+        }
+        let mut handlers = self.signal_handlers.lock();
+        let mut extra = self.signal_action_extra.lock();
+        let old = (handlers[signum], extra[signum]);
+        if let Some((handler, rest)) = new {
+            handlers[signum] = handler;
+            extra[signum] = rest;
+        }
+        Ok(old)
+    }
+
+    /// SA_RESETHAND: back to the default action, if `signum`'s is still the
+    /// one delivered (`handler`).
+    pub fn reset_signal_action(&self, signum: usize, handler: u64) {
+        if signum > super::signals::NSIG {
+            return;
+        }
+        let mut handlers = self.signal_handlers.lock();
+        let mut extra = self.signal_action_extra.lock();
+        if handlers[signum] == handler {
+            handlers[signum] = 0;
+            extra[signum] = (0, 0, 0);
+        }
     }
 
     /// Get a signal handler
@@ -1157,6 +1236,24 @@ mod tests {
 
         proc.clear_pending_signal(7);
         assert!(!proc.is_signal_pending(7));
+    }
+
+    /// sigaction's old action and its new one are taken and installed as a
+    /// whole (PR #23 review), SA_RESETHAND resets only the action that was
+    /// delivered, and SIGKILL keeps its default.
+    #[test]
+    fn signal_actions_change_as_a_whole() {
+        let proc = make_process(33, "sig_swap");
+        let a = (0x1000, (4, 0x2000, 1 << 1));
+        assert_eq!(proc.swap_signal_action(2, Some(a)), Ok((0, (0, 0, 0))));
+        assert_eq!(proc.swap_signal_action(2, None), Ok(a));
+        assert_eq!(proc.signal_action(2), Some(a));
+        proc.reset_signal_action(2, 0x9999); // not the one delivered
+        assert_eq!(proc.signal_action(2), Some(a));
+        proc.reset_signal_action(2, 0x1000);
+        assert_eq!(proc.signal_action(2), Some((0, (0, 0, 0))));
+        assert!(proc.swap_signal_action(9, Some(a)).is_err());
+        assert_eq!(proc.swap_signal_action(9, None), Ok((0, (0, 0, 0))));
     }
 
     #[test]

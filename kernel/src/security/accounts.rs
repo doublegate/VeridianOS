@@ -8,8 +8,11 @@
 //!
 //! [`load`] reads them once the root filesystem is mounted; [`save`] writes
 //! them after every change -- each file whole, to a temporary file renamed
-//! over the old one, so a crash leaves the old or the new file and never
-//! half of one -- and syncs, since BlockFS writes only at a sync.
+//! over the old one -- and syncs, since BlockFS writes only at a sync. A
+//! crash between two syncs leaves the old or the new file, never half of
+//! one; a crash during the sync itself can leave BlockFS inconsistent, as
+//! it orders no metadata yet (docs/KNOWN-LIMITATIONS.md, N-121; PR #25
+//! review).
 //!
 //! The kernel shell (`passwd`, `useradd`, `userdel`), `veridian_auth` (the
 //! PAM module's password change) and the login screens all go through here,
@@ -44,14 +47,22 @@ pub const SHADOW: &str = "/etc/shadow";
 pub const OPASSWD: &str = "/etc/security/opasswd";
 pub const MFA: &str = "/etc/veridian/mfa";
 
-/// A file's text: empty if it does not exist; `None` if it exists but
-/// cannot be read as UTF-8 text.
+/// A file's text: empty if it does not exist; `None` if it cannot be read
+/// as UTF-8 text, or cannot be read at all.
 fn read_text(path: &str) -> Option<String> {
-    if !crate::fs::file_exists(path) {
-        return Some(String::new());
+    text_from(crate::fs::read_file(path))
+}
+
+/// [`read_text`] from the read's result. Only "not found" is a missing
+/// file: an existence test turned any lookup failure -- a disk read error
+/// on the way -- into an empty file, loaded as complete, and the next save
+/// overwrote the real accounts (PR #25 review).
+fn text_from(read: Result<alloc::vec::Vec<u8>, KernelError>) -> Option<String> {
+    match read {
+        Ok(bytes) => String::from_utf8(bytes).ok(),
+        Err(KernelError::FsError(crate::error::FsError::NotFound)) => Some(String::new()),
+        Err(_) => None,
     }
-    let bytes = crate::fs::read_file(path).ok()?;
-    String::from_utf8(bytes).ok()
 }
 
 /// [`read_text`], recording a file that exists but was not read.
@@ -77,8 +88,21 @@ pub fn load() {
         crate::syscall::userland_ext::with_user_db(|db| db.name_uid_pairs()).unwrap_or_default();
     let shadow = read_or_mark(SHADOW);
     let opasswd = read_or_mark(OPASSWD);
-    let mfa = read_or_mark(MFA);
+    let mfa_text = read_text(MFA);
+    if mfa_text.is_none() {
+        LOAD_INCOMPLETE.store(true, Ordering::Release);
+    }
+    let mfa = mfa_text.clone().unwrap_or_default();
     let bad = skipped + auth.load(&users, &shadow, &opasswd, &mfa);
+    // Who has a second factor is unknown: every account needs one that
+    // cannot be given, rather than none (it failed open, PR #25 review).
+    if mfa_text.is_none() {
+        crate::println!(
+            "[AUTH] {}: unreadable; password logins are refused until it is fixed",
+            MFA
+        );
+        auth.require_unknown_mfa();
+    }
     if bad > 0 {
         crate::println!("[AUTH] {} malformed account line(s) skipped", bad);
         LOAD_INCOMPLETE.store(true, Ordering::Release);
@@ -190,4 +214,29 @@ fn write_atomic(path: &str, data: &[u8], mode: u32) -> Result<(), KernelError> {
     parent.rename(&tmp, &parent, name).inspect_err(|_| {
         let _ = parent.unlink(&tmp);
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Only a missing file reads as empty; any other failure is "not
+    /// read", which keeps the next save from overwriting the real file
+    /// (PR #25 review).
+    #[test]
+    fn only_a_missing_file_reads_as_empty() {
+        assert_eq!(
+            text_from(Ok(b"root:x".to_vec())),
+            Some(String::from("root:x"))
+        );
+        assert_eq!(
+            text_from(Err(KernelError::FsError(crate::error::FsError::NotFound))),
+            Some(String::new())
+        );
+        assert_eq!(
+            text_from(Err(KernelError::FsError(crate::error::FsError::IoError))),
+            None
+        );
+        assert_eq!(text_from(Ok(alloc::vec![0xFF, 0xFE])), None);
+    }
 }

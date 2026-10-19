@@ -151,7 +151,6 @@ fn bench_ipc_stats() -> BenchResult {
     })
 }
 
-/// Benchmark: the dispatcher's current-task lookup
 /// Benchmark: zeroing one 4 KiB frame through the physical map
 /// (`mm::page_ops::clear_page`), as every fresh user page is (N-281). The
 /// same frame each time, so it is cache-warm: this measures the clearing
@@ -179,6 +178,7 @@ fn bench_page_clear() -> BenchResult {
     result
 }
 
+/// Benchmark: the dispatcher's current-task lookup
 fn bench_sched_current() -> BenchResult {
     run_bench("sched_current", 1000, 200, || {
         black_box(crate::sched::dispatch::current_owner());

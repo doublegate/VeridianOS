@@ -86,8 +86,9 @@ impl IdAllocator {
     }
 }
 
-/// Most capabilities that may be delegated from one capability. Revoked
-/// delegations still count until the parent is deleted.
+/// Most capabilities that may be delegated from one capability. Children
+/// no space holds any more (and with none of their own) are collected when
+/// the limit is reached (`collect_unheld_delegations`); the rest count.
 #[cfg(feature = "alloc")]
 const MAX_DELEGATIONS: usize = 1024;
 
@@ -189,10 +190,14 @@ impl CapabilityManager {
             self.registry.write().insert(id, entry);
         }
 
-        // Insert into capability space
-        cap_space
-            .insert(cap, object, rights)
-            .map_err(|_| CapError::OutOfMemory)?;
+        // Insert into capability space; if that fails, the registry entry
+        // and the ID go back (they leaked; PR #25 review).
+        if cap_space.insert(cap, object, rights).is_err() {
+            #[cfg(feature = "alloc")]
+            self.registry.write().remove(&id);
+            self.id_allocator.recycle(id);
+            return Err(CapError::OutOfMemory);
+        }
 
         self.stats
             .capabilities_created
@@ -366,18 +371,15 @@ impl CapabilityManager {
     /// no new capability can match a revocation-list entry of an old one.
     #[cfg(feature = "alloc")]
     fn collect_unheld_delegations(&self, parent: u64) -> usize {
+        // Lock order: registry, then the derivation tree.
         let mut registry = self.registry.write();
-        let children = super::revocation::get_children(parent);
-        let mut left = children.len();
-        for child in children {
-            let unheld = registry
+        let (gone, left) = super::revocation::prune_children(parent, |child| {
+            registry
                 .get(&child)
-                .is_none_or(|e| e.holders.load(Ordering::Acquire) == 0);
-            if unheld && super::revocation::get_children(child).is_empty() {
-                registry.remove(&child);
-                super::revocation::cleanup_capability(child);
-                left -= 1;
-            }
+                .is_none_or(|e| e.holders.load(Ordering::Acquire) == 0)
+        });
+        for child in gone {
+            registry.remove(&child);
         }
         left
     }
@@ -532,6 +534,30 @@ mod tests {
         assert_eq!(ids.allocate(), Ok(1));
         assert_eq!(ids.recycled_len.load(Ordering::Relaxed), 0);
         assert_eq!(ids.allocate(), Ok(3));
+    }
+
+    /// A capability that cannot go into the space leaves nothing behind:
+    /// its registry entry and its ID were leaked (PR #25 review).
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn a_failed_create_gives_its_id_and_entry_back() {
+        let manager = CapabilityManager::new();
+        let full = crate::cap::space::CapabilitySpace::with_quota(0);
+        let endpoint =
+            alloc::sync::Arc::new(crate::ipc::Endpoint::new(crate::process::ProcessId(3)));
+        let object = ObjectRef::Endpoint { endpoint };
+        let before = manager.id_allocator.allocate().unwrap();
+        manager.id_allocator.recycle(before);
+        assert_eq!(
+            manager.create_capability(object, Rights::READ, &full),
+            Err(CapError::OutOfMemory)
+        );
+        assert!(manager.registry.read().is_empty());
+        assert_eq!(
+            manager.id_allocator.allocate(),
+            Ok(before),
+            "the ID is reused"
+        );
     }
 
     #[test]

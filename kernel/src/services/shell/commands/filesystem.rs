@@ -335,8 +335,36 @@ impl BuiltinCommand for MvCommand {
                         return CommandResult::Error(format!("mv: cannot read '{}': {}", source, e))
                     }
                 };
-                if let Err(e) = crate::fs::write_file(dest, &data) {
-                    return CommandResult::Error(format!("mv: cannot write '{}': {}", dest, e));
+                // The destination is replaced, not written through: a
+                // symlink there had its target overwritten and stayed, as GNU
+                // mv removes the destination first (PR #25 review).
+                if let Ok(existing) = crate::fs::get_vfs().resolve_path_no_follow(dest) {
+                    if existing.node_type() == crate::fs::NodeType::Directory {
+                        return CommandResult::Error(format!("mv: '{}' is a directory", dest));
+                    }
+                    if let Err(e) = crate::fs::get_vfs().unlink(dest) {
+                        return CommandResult::Error(format!(
+                            "mv: cannot replace '{}': {}",
+                            dest, e
+                        ));
+                    }
+                }
+                // All of it, or the source stays: a short write was taken as
+                // success and the source removed (PR #25 review).
+                match crate::fs::write_file(dest, &data) {
+                    Ok(n) if n == data.len() => {}
+                    Ok(n) => {
+                        return CommandResult::Error(format!(
+                            "mv: '{}': only {} of {} bytes written; '{}' kept",
+                            dest,
+                            n,
+                            data.len(),
+                            source
+                        ))
+                    }
+                    Err(e) => {
+                        return CommandResult::Error(format!("mv: cannot write '{}': {}", dest, e))
+                    }
                 }
                 match crate::fs::get_vfs().unlink(source) {
                     Ok(()) => CommandResult::Success(0),

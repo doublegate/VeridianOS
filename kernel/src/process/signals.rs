@@ -225,7 +225,7 @@ impl SigInfo {
     pub fn child(sig: usize, code: i32, child: &Process, status: i32) -> Self {
         let mut info = Self::from_process(sig, code, child.pid.0, child.credentials().ruid);
         info.fields[1] = status as u32 as u64;
-        let (user, system) = child.cpu_times().user_system_ns();
+        let (user, system) = child.cpu_split().1;
         // clock_t in USER_HZ (100) ticks, as times() reports them.
         info.fields[2] = user / 10_000_000;
         info.fields[3] = system / 10_000_000;
@@ -301,14 +301,13 @@ struct Queued {
     /// pending standard signal (the first sender's: a standard signal sent
     /// again while pending is not queued twice), one per queued instance of
     /// a real-time signal.
-    infos: alloc::collections::VecDeque<SigInfo>,
-    /// Real-time instances in `infos`, each charged to `uid`.
-    rt: u64,
-    /// The user the queued real-time instances are charged to: the
-    /// receiver's real user when the first was queued. Instances keep that
-    /// charge until taken, even if the process changes its real user
-    /// meanwhile.
-    uid: u32,
+    /// Each with the user a real-time instance is charged to: the
+    /// receiver's real user when it was queued, given back to that user
+    /// when it is taken, cleared or dropped, whatever the process's real
+    /// user is by then (Linux keeps the ucounts with each sigqueue). One
+    /// user for the whole queue charged new signals after a setuid to the
+    /// old user while one was still queued (PR #22 review).
+    infos: alloc::collections::VecDeque<(SigInfo, Option<u32>)>,
 }
 
 /// Pending signal instances with their siginfo, beside the pending set's
@@ -323,8 +322,6 @@ impl RtQueue {
     pub const fn new() -> Self {
         Self(spin::Mutex::new(Queued {
             infos: alloc::collections::VecDeque::new(),
-            rt: 0,
-            uid: 0,
         }))
     }
 
@@ -348,24 +345,14 @@ impl RtQueue {
             if pending.load(Ordering::Acquire) & bit == 0 {
                 // A pending bit cleared without the queue (job control)
                 // leaves its record behind: drop it for the new one.
-                q.infos.retain(|i| i.signo() != sig);
-                q.infos.push_back(info);
+                q.infos.retain(|(i, _)| i.signo() != sig);
+                q.infos.push_back((info, None));
                 pending.fetch_or(bit, Ordering::AcqRel);
             }
             return Ok(());
         }
-        let charge = if q.rt > 0 {
-            Charge {
-                uid: q.uid,
-                ..charge
-            }
-        } else {
-            charge
-        };
         if charge_user(charge) {
-            q.uid = charge.uid;
-            q.rt += 1;
-            q.infos.push_back(info);
+            q.infos.push_back((info, Some(charge.uid)));
         } else if overflow == Overflow::Fail {
             return Err(QueueFull);
         }
@@ -384,18 +371,17 @@ impl RtQueue {
         if pending.load(Ordering::Acquire) & bit == 0 {
             return None;
         }
-        let info = match q.infos.iter().position(|i| i.signo() == sig) {
+        let info = match q.infos.iter().position(|(i, _)| i.signo() == sig) {
             Some(at) => {
-                let info = q.infos.remove(at).unwrap_or_default();
-                if sig >= SIGRTMIN {
-                    q.rt -= 1;
-                    uncharge_user(q.uid, 1);
+                let (info, charged) = q.infos.remove(at).unwrap_or_default();
+                if let Some(uid) = charged {
+                    uncharge_user(uid, 1);
                 }
                 info
             }
             None => SigInfo::with(sig, SI_USER),
         };
-        if sig < SIGRTMIN || !q.infos.iter().any(|i| i.signo() == sig) {
+        if sig < SIGRTMIN || !q.infos.iter().any(|(i, _)| i.signo() == sig) {
             pending.fetch_and(!bit, Ordering::AcqRel);
         }
         Some(info)
@@ -405,12 +391,13 @@ impl RtQueue {
     /// discarded signal, job control).
     pub fn clear(&self, pending: &core::sync::atomic::AtomicU64, bits: u64) {
         let mut q = self.0.lock();
-        let rt_before = q.infos.iter().filter(|i| i.signo() >= SIGRTMIN).count();
-        q.infos.retain(|i| bits & sig_bit(i.signo()) == 0);
-        let rt_after = q.infos.iter().filter(|i| i.signo() >= SIGRTMIN).count();
-        let dropped = (rt_before - rt_after) as u64;
-        q.rt -= dropped;
-        uncharge_user(q.uid, dropped);
+        q.infos.retain(|(i, charged)| {
+            let keep = bits & sig_bit(i.signo()) == 0;
+            if let (false, Some(uid)) = (keep, charged) {
+                uncharge_user(*uid, 1);
+            }
+            keep
+        });
         pending.fetch_and(!bits, Ordering::AcqRel);
     }
 }
@@ -418,7 +405,11 @@ impl RtQueue {
 impl Drop for RtQueue {
     fn drop(&mut self) {
         let q = self.0.get_mut();
-        uncharge_user(q.uid, q.rt);
+        for (_, charged) in q.infos.drain(..) {
+            if let Some(uid) = charged {
+                uncharge_user(uid, 1);
+            }
+        }
     }
 }
 
@@ -1340,8 +1331,9 @@ mod generic {
         }
         set_mask(process, thread, blocked);
         if flags & SA_RESETHAND != 0 {
-            let _ = process.set_signal_handler(sig, SIG_DFL);
-            process.signal_action_extra.lock()[sig] = (0, 0, 0);
+            // Only if it is still the action delivered (sigaction may have
+            // replaced it meanwhile), both halves at once.
+            process.reset_signal_action(sig, handler);
         }
         true
     }
@@ -1375,7 +1367,9 @@ mod generic {
                     return;
                 };
                 let sig = info.signo();
-                let handler = process.get_signal_handler(sig).unwrap_or(SIG_DFL);
+                // The whole action at once (see `Process::signal_action`).
+                let (handler, (sa_flags, sa_restorer, sa_mask)) =
+                    process.signal_action(sig).unwrap_or((SIG_DFL, (0, 0, 0)));
                 match handler {
                     SIG_IGN => None,
                     SIG_DFL => match default_action(sig) {
@@ -1396,7 +1390,7 @@ mod generic {
                         _ => None,
                     },
                     addr => {
-                        let (flags, restorer, mask) = process.signal_action_extra.lock()[sig];
+                        let (flags, restorer, mask) = (sa_flags, sa_restorer, sa_mask);
                         if setup_frame(
                             f, syscall, &process, &thread, info, addr, flags, restorer, mask,
                         ) {
@@ -1756,8 +1750,9 @@ mod frame {
         }
         set_mask(process, thread, blocked);
         if flags & SA_RESETHAND != 0 {
-            let _ = process.set_signal_handler(sig, SIG_DFL);
-            process.signal_action_extra.lock()[sig] = (0, 0, 0);
+            // Only if it is still the action delivered (sigaction may have
+            // replaced it meanwhile), both halves at once.
+            process.reset_signal_action(sig, handler);
         }
         true
     }
@@ -1796,7 +1791,9 @@ mod frame {
                     return;
                 };
                 let sig = info.signo();
-                let handler = process.get_signal_handler(sig).unwrap_or(SIG_DFL);
+                // The whole action at once (see `Process::signal_action`).
+                let (handler, (sa_flags, sa_restorer, sa_mask)) =
+                    process.signal_action(sig).unwrap_or((SIG_DFL, (0, 0, 0)));
                 match handler {
                     SIG_IGN => None,
                     SIG_DFL => match default_action(sig) {
@@ -1815,7 +1812,7 @@ mod frame {
                         _ => None,
                     },
                     addr => {
-                        let (flags, restorer, mask) = process.signal_action_extra.lock()[sig];
+                        let (flags, restorer, mask) = (sa_flags, sa_restorer, sa_mask);
                         if setup_frame(f, &process, &thread, info, addr, flags, restorer, mask) {
                             sanitize_user_frame(f);
                             return;
@@ -2025,6 +2022,27 @@ mod tests {
             .unwrap();
         q.clear(&pending, sig_bit(33));
         assert_eq!(q.take(&pending, 33), None);
+    }
+
+    /// Each queued real-time signal is charged to the user current when it
+    /// was queued, and given back to that user: after a setuid, new signals
+    /// went on the old user's count while one was still queued (PR #22
+    /// review; Linux keeps the ucounts with each sigqueue).
+    #[test]
+    fn each_queued_signal_keeps_its_own_charge() {
+        let q = RtQueue::new();
+        let pending = core::sync::atomic::AtomicU64::new(0);
+        let (old, new) = (0xA001, 0xA002);
+        let as_user = |uid| Charge { uid, limit: 10 };
+        q.push(&pending, queued(40, 1), as_user(old), Overflow::Fail)
+            .unwrap();
+        q.push(&pending, queued(40, 2), as_user(new), Overflow::Fail)
+            .unwrap();
+        assert_eq!((queued_by_user(old), queued_by_user(new)), (1, 1));
+        q.take(&pending, 40).unwrap();
+        assert_eq!((queued_by_user(old), queued_by_user(new)), (0, 1));
+        q.clear(&pending, sig_bit(40));
+        assert_eq!(queued_by_user(new), 0);
     }
 
     /// Past the queue limit a kill-style send pends without a record and

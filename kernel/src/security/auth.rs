@@ -586,6 +586,24 @@ impl AuthManager {
     }
 
     /// Whether an account named `username` exists.
+    /// The user ID of account `username`.
+    pub fn user_id_of(&self, username: &str) -> Option<UserId> {
+        self.accounts.read().get(username).map(|a| a.user_id)
+    }
+
+    /// A copy of `username`'s account (for undoing a change that could not
+    /// be saved).
+    pub fn account_snapshot(&self, username: &str) -> Option<UserAccount> {
+        self.accounts.read().get(username).cloned()
+    }
+
+    /// Put back an account taken by [`Self::account_snapshot`].
+    pub fn restore_account(&self, username: &str, account: UserAccount) {
+        self.accounts
+            .write()
+            .insert(String::from(username), account);
+    }
+
     pub fn has_account(&self, username: &str) -> bool {
         self.accounts.read().contains_key(username)
     }
@@ -907,21 +925,32 @@ impl AuthManager {
             }
         }
         for line in mfa.lines().filter(|l| !l.trim().is_empty()) {
-            let parsed = line
+            let name = line.split_once(':').map(|(name, _)| name);
+            let secret = line
                 .split_once(':')
-                .and_then(|(name, hex)| Some((name, decode_hex32(hex.trim())?)));
-            match parsed {
-                Some((name, secret)) => {
-                    if let Some(account) = accounts.get_mut(name) {
-                        account.mfa_secret = Some(secret);
-                        account.mfa_enabled = true;
-                    }
-                }
-                None => bad += 1,
+                .and_then(|(_, hex)| decode_hex32(hex.trim()));
+            // An account whose MFA line is malformed still has a second
+            // factor -- one no token matches -- rather than none: the
+            // password alone logged in (PR #25 review).
+            if let Some(account) = name.and_then(|n| accounts.get_mut(n)) {
+                account.mfa_secret = secret;
+                account.mfa_enabled = true;
+            }
+            if secret.is_none() {
+                bad += 1;
             }
         }
         *self.accounts.write() = accounts;
         bad
+    }
+
+    /// The MFA file could not be read: every account needs a second
+    /// factor no token satisfies, until the file is fixed.
+    pub fn require_unknown_mfa(&self) {
+        for account in self.accounts.write().values_mut() {
+            account.mfa_enabled = true;
+            account.mfa_secret = None;
+        }
     }
 
     /// `/etc/shadow`, one line per account, in name order.
@@ -1087,6 +1116,54 @@ mod tests {
     const NOW: u64 = 100;
     const DAY: u64 = 20_000;
     const TODAY: Option<u64> = Some(DAY);
+
+    /// A change undone with the snapshot taken before it leaves the old
+    /// password working (the account change syscall when the files cannot
+    /// be written; PR #23 review).
+    /// A malformed MFA line, or an unreadable MFA file, leaves the
+    /// account needing a second factor no token gives: it fell back to the
+    /// password alone (PR #25 review).
+    #[test]
+    fn unknown_mfa_fails_closed() {
+        let auth = with_user("frank", "pass-word-1");
+        let users = [(String::from("frank"), 1000)];
+        let shadow = auth.shadow_file();
+        assert_eq!(auth.load(&users, &shadow, "", "frank:zz\n"), 1);
+        assert_eq!(
+            auth.authenticate("frank", "pass-word-1"),
+            AuthResult::MfaRequired
+        );
+        assert_eq!(
+            auth.authenticate_mfa("frank", "pass-word-1", 0),
+            AuthResult::InvalidCredentials
+        );
+        assert_eq!(auth.load(&users, &shadow, "", ""), 0);
+        assert_eq!(
+            auth.authenticate("frank", "pass-word-1"),
+            AuthResult::Success
+        );
+        auth.require_unknown_mfa();
+        assert_eq!(
+            auth.authenticate("frank", "pass-word-1"),
+            AuthResult::MfaRequired
+        );
+    }
+
+    #[test]
+    fn a_restored_account_has_its_old_password() {
+        let auth = with_user("erin", "old-password-1");
+        let before = auth.account_snapshot("erin").unwrap();
+        auth.reset_password("erin", "new-password-2").unwrap();
+        auth.restore_account("erin", before);
+        assert_eq!(
+            auth.authenticate("erin", "old-password-1"),
+            AuthResult::Success
+        );
+        assert_ne!(
+            auth.authenticate("erin", "new-password-2"),
+            AuthResult::Success
+        );
+    }
 
     #[test]
     fn test_password_hashing() {

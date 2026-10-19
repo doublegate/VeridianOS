@@ -418,6 +418,52 @@ struct DWaiter {
     bitset: u32,
     woken: alloc::sync::Arc<core::sync::atomic::AtomicBool>,
     wq: alloc::sync::Arc<sched::dispatch::WaitQueue>,
+    /// The `DFUTEX` bucket holding the entry, changed only by a requeue
+    /// holding both buckets' locks: a waiter leaving by timeout or signal
+    /// finds its entry there (PR #23 review: a scan of the buckets one by
+    /// one could miss an entry a requeue moved behind it).
+    bucket: alloc::sync::Arc<core::sync::atomic::AtomicUsize>,
+}
+
+/// Move up to `nmove` waiters on `k1` in `lo` to `k2`: into `hi` (its
+/// bucket `to`), or, when both keys hash to the bucket of `lo` (`hi` is
+/// `None`), retagged where they are -- pushing them back onto `lo` would
+/// meet them again and loop until `nmove`, which the caller chooses
+/// (PR #23 review). Returns how many moved.
+#[cfg(feature = "alloc")]
+fn move_waiters(
+    lo: &mut Vec<DWaiter>,
+    hi: Option<&mut Vec<DWaiter>>,
+    to: usize,
+    k1: FutexKey,
+    k2: FutexKey,
+    nmove: usize,
+) -> usize {
+    use core::sync::atomic::Ordering;
+    let mut moved = 0usize;
+    match hi {
+        Some(h) => {
+            let mut i = 0;
+            while i < lo.len() && moved < nmove {
+                if lo[i].key == k1 {
+                    let mut w = lo.remove(i);
+                    w.key = k2;
+                    w.bucket.store(to, Ordering::Release);
+                    h.push(w);
+                    moved += 1;
+                } else {
+                    i += 1;
+                }
+            }
+        }
+        None => {
+            for w in lo.iter_mut().filter(|w| w.key == k1).take(nmove) {
+                w.key = k2;
+                moved += 1;
+            }
+        }
+    }
+    moved
 }
 
 /// Dispatched futex waiters, hashed by key like `FUTEX_TABLE`.
@@ -485,6 +531,7 @@ fn dwait(
     let key = futex_key(uaddr)?;
     let woken = Arc::new(AtomicBool::new(false));
     let wq = Arc::new(dispatch::WaitQueue::new());
+    let bucket = Arc::new(core::sync::atomic::AtomicUsize::new(bucket_index(key)));
     {
         let mut list = DFUTEX[bucket_index(key)].lock();
         if super::userspace::read_user::<u32>(uaddr)? != expected {
@@ -495,6 +542,7 @@ fn dwait(
             bitset,
             woken: woken.clone(),
             wq: wq.clone(),
+            bucket: bucket.clone(),
         });
     }
     let result = dispatch::wait_event(&wq, deadline, || woken.load(Ordering::Acquire));
@@ -502,16 +550,20 @@ fn dwait(
         return Ok(0);
     }
     // Timed out or interrupted: leave the queue -- wherever a requeue put
-    // us -- unless a waker took us first, which counts as woken.
-    let mut found = false;
-    for b in DFUTEX.iter() {
-        let mut list = b.lock();
+    // us -- unless a waker took us first, which counts as woken. With the
+    // bucket's lock held, an entry not there and a bucket index unchanged
+    // mean a waker removed it; a changed index means a requeue moved it.
+    let found = loop {
+        let at = bucket.load(Ordering::Acquire);
+        let mut list = DFUTEX[at].lock();
         if let Some(i) = list.iter().position(|w| Arc::ptr_eq(&w.woken, &woken)) {
             list.remove(i);
-            found = true;
-            break;
+            break true;
         }
-    }
+        if bucket.load(Ordering::Acquire) == at {
+            break false;
+        }
+    };
     if !found && woken.load(Ordering::Acquire) {
         return Ok(0);
     }
@@ -560,21 +612,7 @@ fn drequeue(
         }
     }
     let woken = take_waiters(&mut lo, k1, FUTEX_WAIT_BITSET_MATCH_ANY, nwake);
-    let mut moved = 0usize;
-    let mut i = 0;
-    while i < lo.len() && moved < nmove {
-        if lo[i].key == k1 {
-            let mut w = lo.remove(i);
-            w.key = k2;
-            match hi.as_mut() {
-                Some(h) => h.push(w),
-                None => lo.push(w),
-            }
-            moved += 1;
-        } else {
-            i += 1;
-        }
-    }
+    let moved = move_waiters(&mut lo, hi.as_deref_mut(), i2, k1, k2, nmove);
     drop(hi);
     drop(lo);
     for q in &woken {
@@ -641,6 +679,41 @@ fn wake_op_eval(encoded: u32, old: u32) -> Result<(u32, bool), SyscallError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "alloc")]
+    fn waiter(key: FutexKey) -> DWaiter {
+        use alloc::sync::Arc;
+        DWaiter {
+            key,
+            bitset: FUTEX_WAIT_BITSET_MATCH_ANY,
+            woken: Arc::new(core::sync::atomic::AtomicBool::new(false)),
+            wq: Arc::new(sched::dispatch::WaitQueue::new()),
+            bucket: Arc::new(core::sync::atomic::AtomicUsize::new(0)),
+        }
+    }
+
+    /// A requeue between two keys of one bucket ends, moving what it may:
+    /// it pushed each waiter back onto the same list and met it again,
+    /// looping under the bucket lock until `nmove` (from the user) moved
+    /// (PR #23 review).
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn requeue_within_one_bucket_terminates() {
+        let (k1, k2, other) = ((1, 0x1000), (1, 0x2000), (1, 0x3000));
+        let mut lo = alloc::vec![waiter(k1), waiter(other), waiter(k1)];
+        assert_eq!(move_waiters(&mut lo, None, 0, k1, k2, usize::MAX), 2);
+        assert_eq!(lo.iter().filter(|w| w.key == k2).count(), 2);
+        assert_eq!(lo.iter().filter(|w| w.key == other).count(), 1);
+        // A limit is honoured, and between buckets the moved ones say where
+        // they went.
+        let mut lo = alloc::vec![waiter(k1), waiter(k1), waiter(k1)];
+        let mut hi = alloc::vec::Vec::new();
+        assert_eq!(move_waiters(&mut lo, Some(&mut hi), 9, k1, k2, 2), 2);
+        assert_eq!((lo.len(), hi.len()), (1, 2));
+        assert!(hi
+            .iter()
+            .all(|w| w.key == k2 && w.bucket.load(core::sync::atomic::Ordering::Acquire) == 9));
+    }
 
     #[test]
     fn futex_keys_spread_over_buckets() {

@@ -278,20 +278,36 @@ fn setup_dbus_stub_socket() {
         for (i, _) in path.match_indices('/').skip(1) {
             let _ = vfs.mkdir(&path[..i], crate::fs::Permissions::from_mode(0o755));
         }
-        let file = match vfs.mknod(
-            path,
-            crate::fs::NodeType::Socket,
-            crate::fs::Permissions::from_mode(0o777),
-            0,
-        ) {
+        let make = || {
+            vfs.mknod(
+                path,
+                crate::fs::NodeType::Socket,
+                crate::fs::Permissions::from_mode(0o777),
+                0,
+            )
+        };
+        // /run is on the persistent root: the previous boot's socket file
+        // is still there and is replaced, as dbus-daemon replaces a stale
+        // one. mknod failed with EEXIST on every boot after the first, and
+        // no stub was bound (PR #20 review).
+        let made = match make() {
+            Err(crate::error::KernelError::FsError(crate::error::FsError::AlreadyExists)) => {
+                let _ = vfs.unlink(path);
+                make()
+            }
+            other => other,
+        };
+        let file = match made {
             Ok(file) => file,
             Err(_) => {
                 println!("[KDE] D-Bus stub ({}): socket file not made", path);
+                let _ = unix_socket::socket_close(stub_id);
                 continue;
             }
         };
         if unix_socket::socket_bind(stub_id, file, path).is_err() {
             println!("[KDE] D-Bus stub ({}): bind failed", path);
+            let _ = unix_socket::socket_close(stub_id);
             continue;
         }
 
