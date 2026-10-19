@@ -114,7 +114,10 @@ in [`docs/KNOWN-LIMITATIONS.md`](docs/KNOWN-LIMITATIONS.md), which is the author
    - Credentials with real, effective, saved and filesystem IDs, supplementary groups and Linux's
      permission rules; RLIMIT_* limits
    - Salted password hashes compared in constant time, with a password history (as
-     pam_pwhistory's `remember`) and multi-factor authentication that fails closed
+     pam_pwhistory's `remember`)
+   - Multi-factor authentication is not usable yet: TOTP does not follow RFC 6238, and pam_veridian
+     cannot check a second factor, so an account with MFA enabled fails every PAM login. A malformed
+     MFA record fails closed rather than skipping the factor.
    - A MAC policy parser with an RBAC/MLS model and audit logging; enforcement is path-blind and
      partial (N-152)
 

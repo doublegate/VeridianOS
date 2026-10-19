@@ -65,20 +65,20 @@ The runtime suites run on the BlockFS root, on one and four CPUs, and on RISC-V 
 
 ## Performance Benchmarks
 
-Measured with the in-kernel `perf` command on QEMU x86_64 with KVM (i9-10850K), dev kernel,
-calibrated TSC (v0.26.0 run):
+Measured with the in-kernel `perf` command on QEMU x86_64 with KVM (i9-10850K), one vCPU,
+calibrated TSC, 1,000 iterations (2026-10-15):
 
-| Benchmark | Average | Target |
-|-----------|--------:|-------:|
-| syscall_getpid | 46 ns | 500 ns |
-| frame_alloc_1 (per-CPU cache) | 62 ns | 2,000 ns |
-| frame_alloc_global | 272 ns | 4,000 ns |
-| cap_lookup | 93 ns | 100 ns |
-| ipc_stats_read | 19 ns | 100 ns |
-| sched_current | 27 ns | 200 ns |
+| Benchmark | Release kernel | Dev kernel | Target |
+|-----------|---------------:|-----------:|-------:|
+| syscall_getpid | 33 ns | 86 ns | 500 ns |
+| frame_alloc_1 (per-CPU cache) | 74 ns | 2,115 ns | 2,000 ns |
+| frame_alloc_global | 85 ns | 297 ns | 4,000 ns |
+| cap_lookup | 29 ns | 97 ns | 100 ns |
+| ipc_stats_read | 8 ns | 20 ns | 100 ns |
+| sched_current | 32 ns | 81 ns | 200 ns |
 
 IPC latency and context-switch time are not measured yet. Dev kernels overstate anything that
-copies or clears memory (N-281); method and every table:
+copies or clears memory (a dev `frame_alloc_1` includes an unoptimised page clear, N-281); method and every table:
 [Performance Report](https://github.com/doublegate/VeridianOS/blob/main/docs/PERFORMANCE-REPORT.md).
 
 ## Self-Hosting Status
@@ -105,8 +105,9 @@ v0.28 work; AArch64 and RISC-V builds are future work. Details:
 ## Next Steps
 
 - **v0.28**: the remaining Linux system call groups with LTP and musl libc-test; the full
-  capability model and every namespace type; the KDE shared-library pipeline and media backend
-- Then networking and storage (sprint F), hardening (G) and real hardware (H), as planned in
+  capability model and every namespace type; the KDE shared-library pipeline and media backend;
+  and sprints F (networking and storage), G (hardening) and H (real hardware), carried over from
+  v0.27.0. The plan is in
   [`to-dos/MASTER_TODO.md`](https://github.com/doublegate/VeridianOS/blob/main/to-dos/MASTER_TODO.md)
 
 ## Project Resources

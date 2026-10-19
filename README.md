@@ -115,15 +115,16 @@ Test counts and coverage as of v0.27.0 (2026-10-18); sources: [`docs/PERFORMANCE
 
 ### Performance
 
-Measured with the in-kernel `perf` command: x86_64 under KVM on an i9-10850K, dev build, calibrated
-TSC. Method and full tables: [`docs/PERFORMANCE-REPORT.md`](docs/PERFORMANCE-REPORT.md).
+Measured with the in-kernel `perf` command: x86_64 under KVM on an i9-10850K, release kernel, one
+vCPU, calibrated TSC (2026-10-15). Dev kernels overstate anything that clears or copies memory
+(N-281). Method and full tables: [`docs/PERFORMANCE-REPORT.md`](docs/PERFORMANCE-REPORT.md).
 
 | Metric | Target | Measured (avg) |
 | --- | --- | --- |
 | IPC latency | < 1us | not measured; every message is queued on its endpoint (no register fast path until the v0.28 IPC redesign) |
 | Context switch | < 10us | not measured |
-| Frame allocation | < 1us | 62 ns per-CPU cache, 272 ns global allocator |
-| Capability lookup | < 100 ns | 93 ns (hash table) |
+| Frame allocation | < 1us | 74 ns per-CPU cache, 85 ns global allocator |
+| Capability lookup | < 100 ns | 29 ns (hash table) |
 | Concurrent processes | 1000+ | not measured |
 | TLB shootdown | < 5us/CPU | not measured; acknowledged on every CPU (boot test `tlb_shootdown_confirmed` with `-smp 4`) |
 

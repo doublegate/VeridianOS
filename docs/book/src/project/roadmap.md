@@ -43,8 +43,8 @@ VeridianOS has completed all 13 development phases, progressing from bare-metal 
 |--------|--------|----------|
 | IPC Latency | <1us | not measured (messages are queued on the endpoint; the IPC redesign is v0.28 work) |
 | Context Switch | <10us | not measured |
-| Memory Allocation | <1us | 62 ns per-CPU cache, 272 ns global allocator |
-| Capability Lookup | O(1), <100 ns | 93 ns (hash table) |
+| Memory Allocation | <1us | 74 ns per-CPU cache, 85 ns global allocator (release kernel) |
+| Capability Lookup | O(1), <100 ns | 29 ns (hash table, release kernel) |
 | Concurrent Processes | 1000+ | not measured |
 
 Figures from the in-kernel `perf` command; see the
@@ -57,10 +57,10 @@ Figures from the in-kernel `perf` command; see the
 - The remaining Linux system call groups, tested with LTP and musl libc-test
 - A full Linux capability model (capget/capset) and every namespace type (unshare/setns)
 - The KDE shared-library pipeline and a media backend; relocatable RISC-V boot
+- Networking and storage (sprint F), hardening (G) and real hardware (H), carried over from v0.27.0
 
 ### After v0.28
 
-- Networking and storage (sprint F), hardening (G), real hardware (H)
 - Drivers and services moved out of the kernel (critique C6)
 - A full KDE Plasma 6 runtime
 

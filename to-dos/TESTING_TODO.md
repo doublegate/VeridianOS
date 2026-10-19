@@ -5,7 +5,7 @@
 **Boot Tests**: x86_64 43/43, AArch64 64/64, RISC-V 57/57 in-kernel tests (47, 68 and 61 with four CPUs), run by `scripts/boot-test.sh` and in CI.
 **Host-Target Tests**: 4,770 passing (`cargo test --lib --features alloc -p veridian-kernel --target x86_64-unknown-linux-gnu`); coverage via `cargo llvm-cov` to Codecov (56.2% of lines).
 **Runtime Suites**: the BusyBox self-test, `audit_runtime_test` (91/91, 91/91, 89/89) and `musl_runtime_test` (80/80, 78/78, 78/78) on the BlockFS root of each architecture, on one and four CPUs (`scripts/run-rootfs-tests.sh`).
-**Current Status**: `scripts/dev/gate.sh --boot --rootfs` runs all of the above before every commit. Next: LTP and musl libc-test with the v0.28 system call work.
+**Current Status**: before every commit, `scripts/dev/gate.sh --boot --rootfs` runs fmt, clippy on every target, the host tests, the builds, the boot tests and the runtime suites (coverage runs in CI only). Next: LTP and musl libc-test with the v0.28 system call work.
 
 ## 🧪 Testing Strategy Overview
 

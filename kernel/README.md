@@ -26,18 +26,23 @@ kernel/
 The kernel requires a custom target specification and must be built with the nightly Rust compiler:
 
 ```bash
-# Build for x86_64
-cargo build --target ../targets/x86_64-veridian.json -Zbuild-std=core,compiler_builtins,alloc
+# From the repository root: build every architecture (x86_64 also gets its UEFI disk image)
+./build-kernel.sh all dev
 
-# Build for all architectures
-just build-all
+# Or one architecture by hand
+cargo build --target targets/x86_64-veridian.json -p veridian-kernel -Zbuild-std=core,compiler_builtins,alloc
+cargo build --target aarch64-unknown-none-softfloat -p veridian-kernel
+cargo build --target riscv64imac-unknown-none-elf -p veridian-kernel
 ```
 
 ## Architecture Support
 
-- **x86_64**: Full support with VGA output, GDT/IDT, paging
-- **AArch64**: Full support with PL011 UART, MMU configuration
-- **RISC-V**: Full support with SBI interface, UART output
+All three boot under QEMU on one and four CPUs and run user programs; none has run on real
+hardware yet ([`docs/KNOWN-LIMITATIONS.md`](../docs/KNOWN-LIMITATIONS.md)).
+
+- **x86_64**: UEFI boot, GDT/IDT, local APIC, Ring 3 user programs with the native libc
+- **AArch64**: PL011 UART, MMU and caches on with the kernel in the upper half, EL0 programs with musl
+- **RISC-V**: OpenSBI, Sv48 or Sv39 paging, U-mode programs with musl
 
 ## Key Components
 
@@ -47,9 +52,9 @@ just build-all
 - Page table manipulation
 
 ### Scheduler (`sched/`)
-- Round-robin scheduler (Phase 1)
-- Priority-based scheduling (Phase 2)
-- Real-time support (Phase 3)
+- Every thread a dispatched task on its own guarded kernel stack (ADR 0006)
+- EEVDF fair class with SCHED_FIFO/RR and SCHED_DEADLINE above it (ADR 0007)
+- Per-CPU run queues with wake placement and load balancing (ADR 0012)
 
 ### IPC (`ipc/`)
 - Synchronous message passing
@@ -78,13 +83,9 @@ architecture are in the top-level [README](../README.md#quick-start).
 
 ## Debugging
 
-```bash
-# Debug with GDB
-just debug-x86_64
-
-# View assembly
-just objdump-x86_64
-```
+Add `-s -S` to a QEMU command line to wait for GDB on port 1234, then attach with the scripts in
+`scripts/gdb/` (`gdb -x scripts/gdb/x86_64.gdb`; `gdb-multiarch` for AArch64 and RISC-V). Full
+guide: [`docs/GDB-DEBUGGING.md`](../docs/GDB-DEBUGGING.md).
 
 ## Contributing
 

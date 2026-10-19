@@ -2,7 +2,7 @@
 
 > **Authoritative specification**: [docs/design/MEMORY-ALLOCATOR-DESIGN.md](https://github.com/doublegate/VeridianOS/blob/main/docs/design/MEMORY-ALLOCATOR-DESIGN.md)
 >
-> **Implementation Status (v0.27.0)**: hybrid bitmap and buddy frame allocator with per-CPU frame caches (v0.26.0, MEM-PERF-01): 62 ns per-CPU, 272 ns global (dev kernel, KVM). Copy-on-write fork with per-frame reference counts (ADR 0005) and 2 MiB pages.
+> **Implementation Status (v0.27.0)**: hybrid bitmap and buddy frame allocator with per-CPU frame caches (v0.26.0, MEM-PERF-01): 74 ns per-CPU, 85 ns global (release kernel, KVM; dev kernels overstate them, N-281). Copy-on-write fork with per-frame reference counts (ADR 0005) and 2 MiB pages.
 
 The VeridianOS memory allocator uses a hybrid approach combining buddy and bitmap allocators for optimal performance across different allocation sizes. This design achieves < 1μs allocation latency while minimizing fragmentation.
 
