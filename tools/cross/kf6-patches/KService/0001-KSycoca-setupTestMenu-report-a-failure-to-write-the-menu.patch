@@ -1,0 +1,25 @@
+VeridianOS: KSycoca::setupTestMenu(): report a failure to write the menu
+
+GCC reported ignoring return value of QFile::open [-Wunused-result] in
+src/sycoca/ksycoca.cpp:828 (the deprecated KSycoca::setupTestMenu(), still
+built because KSERVICE_BUILD_DEPRECATED_SINCE(6, 29) is on). When the test
+menu file could not be opened the write failed silently and tests then ran
+without the expected applications.menu. It now logs the file name and
+QFile::errorString() with the existing SYCOCA category and returns. No
+change when the file can be written.
+
+diff -ru a/src/sycoca/ksycoca.cpp b/src/sycoca/ksycoca.cpp
+--- a/src/sycoca/ksycoca.cpp	2026-10-08 17:31:21.199705991 -0400
++++ b/src/sycoca/ksycoca.cpp	2026-10-08 17:31:21.251483998 -0400
+@@ -825,7 +825,10 @@
+     const QString destDir = QStandardPaths::writableLocation(QStandardPaths::GenericConfigLocation) + QLatin1String("/menus");
+     QDir(destDir).mkpath(QStringLiteral("."));
+     QFile output(destDir + QLatin1String("/applications.menu"));
+-    output.open(QIODevice::ReadWrite | QIODevice::Truncate);
++    if (!output.open(QIODevice::ReadWrite | QIODevice::Truncate)) {
++        qCWarning(SYCOCA) << "Could not write the test menu" << output.fileName() << ":" << output.errorString();
++        return;
++    }
+     output.write(content);
+ }
+ #endif

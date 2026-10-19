@@ -53,4 +53,9 @@
 /* POSIX ssize_t limit */
 #define SSIZE_MAX   __LONG_MAX__
 
+/* Supplementary groups a process can hold (the kernel's NGROUPS_MAX). */
+#ifndef NGROUPS_MAX
+#define NGROUPS_MAX 64
+#endif
+
 #endif /* _LIMITS_H */

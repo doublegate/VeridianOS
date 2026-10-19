@@ -1,0 +1,137 @@
+VeridianOS: meinproc: fail when the output cannot be written; drop deprecated libxml2 globals
+
+GCC reported, for the VeridianOS cross build (libxml2 2.15.4):
+
+- src/meinproc_common.cpp:76, :83, :108: ignoring return value of
+  QFile::open [-Wunused-result]. Real bug: when meinproc6 could not open
+  stdout, the --output file, index.html or one of the chunk files, the
+  QFile::write() calls failed silently and meinproc6 still exited 0, so a
+  documentation build "succeeded" with missing or partial HTML. doOutput()
+  now logs the file and QFile::errorString() with the existing KDocToolsLog
+  category and returns false, and meinproc6 dies with exit status 1 through
+  its existing DIE() macro, like every other failure it reports.
+- src/meinproc.cpp:188: 'xmlMemoryDump' is deprecated
+  [-Wdeprecated-declarations]. In libxml2 2.15 the function body is empty
+  ("This feature was removed"); remove the call. No behaviour change.
+- libxml/parser.h:1356 (expanded from src/xslt.cpp): '__xmlIndentTreeOutput'
+  is deprecated [-Wdeprecated-declarations]. KDocTools::transform() set the
+  thread-local xmlIndentTreeOutput to the top-level stylesheet's indent
+  value before xsltSaveResultTo(). libxml2 only consults that global when it
+  serializes with format == 1, and libxslt passes format = (indent == 1)
+  only for the "xml" output method (HTML/XHTML/text output never read it).
+  So for every stylesheet whose top-level xsl:output sets indent, the result
+  is identical without the assignment (indent="yes" -> global 1, which is
+  also libxml2's default). It differs only for "xml"-method output: a
+  stylesheet whose indent="yes" comes from an imported stylesheet while the
+  top-level one leaves indent unset, and xsl:document / exsl:document
+  results with indent="yes" (saved with their own style): libxslt already
+  emitted the newlines but KDocTools suppressed the indentation spaces;
+  both now follow the stylesheet as XSLT specifies. transform() also no
+  longer leaves the calling thread's xmlIndentTreeOutput set to 0 for later
+  libxml2 serializations. KDE's own stylesheets use the html and text
+  methods, and meinproc6 and kio_help serialize nothing else, so they are
+  unaffected. The deprecated global is no longer touched.
+
+diff -ru a/src/meinproc_common.cpp b/src/meinproc_common.cpp
+--- a/src/meinproc_common.cpp	2026-10-08 17:06:35.253411069 -0400
++++ b/src/meinproc_common.cpp	2026-10-08 17:06:35.401326850 -0400
+@@ -3,6 +3,7 @@
+ 
+ #include "docbookxslt.h"
+ #include "docbookxslt_p.h"
++#include "loggingcategory.h"
+ 
+ #include <QDir>
+ #include <QFileInfo>
+@@ -68,19 +69,24 @@
+     return CheckSuccess;
+ }
+ 
+-void doOutput(QString output, bool usingStdOut, bool usingOutput, const QString &outputOption, bool replaceCharset)
++bool doOutput(QString output, bool usingStdOut, bool usingOutput, const QString &outputOption, bool replaceCharset)
+ {
+     if (output.indexOf(QStringLiteral("<FILENAME ")) == -1 || usingStdOut || usingOutput) {
+         QFile file;
++        bool opened;
+         if (usingStdOut) {
+-            file.open(stdout, QIODevice::WriteOnly);
++            opened = file.open(stdout, QIODevice::WriteOnly);
+         } else {
+             if (usingOutput) {
+                 file.setFileName(outputOption);
+             } else {
+                 file.setFileName(QStringLiteral("index.html"));
+             }
+-            file.open(QIODevice::WriteOnly);
++            opened = file.open(QIODevice::WriteOnly);
++        }
++        if (!opened) {
++            qCCritical(KDocToolsLog) << "Could not open" << (usingStdOut ? QStringLiteral("stdout") : file.fileName()) << "for writing:" << file.errorString();
++            return false;
+         }
+         if (replaceCharset) {
+             replaceCharsetHeader(output);
+@@ -105,7 +111,10 @@
+ 
+             QString filedata = splitOut(output, index);
+             QFile file(filename);
+-            file.open(QIODevice::WriteOnly);
++            if (!file.open(QIODevice::WriteOnly)) {
++                qCCritical(KDocToolsLog) << "Could not open" << filename << "for writing:" << file.errorString();
++                return false;
++            }
+             if (replaceCharset) {
+                 replaceCharsetHeader(filedata);
+             }
+@@ -116,4 +125,5 @@
+             index += 8;
+         }
+     }
++    return true;
+ }
+diff -ru a/src/meinproc_common.h b/src/meinproc_common.h
+--- a/src/meinproc_common.h	2026-10-08 17:06:35.275527821 -0400
++++ b/src/meinproc_common.h	2026-10-08 17:06:35.400363862 -0400
+@@ -21,7 +21,7 @@
+ 
+ CheckResult check(const QString &checkFilename, const QString &exe, const QByteArray &catalogs);
+ 
+-void doOutput(QString output, bool usingStdOut, bool usingOutput, const QString &outputOption, bool replaceCharset);
++bool doOutput(QString output, bool usingStdOut, bool usingOutput, const QString &outputOption, bool replaceCharset);
+ 
+ // FIXME: To remove ?
+ #ifdef _WIN32
+diff -ru a/src/meinproc.cpp b/src/meinproc.cpp
+--- a/src/meinproc.cpp	2026-10-08 17:06:35.296588982 -0400
++++ b/src/meinproc.cpp	2026-10-08 17:06:35.401473760 -0400
+@@ -180,11 +180,12 @@
+     }
+ #endif
+ 
+-    doOutput(output, usingStdOut, usingOutput, outputOption, true /* replaceCharset */);
++    if (!doOutput(output, usingStdOut, usingOutput, outputOption, true /* replaceCharset */)) {
++        DIE("Unable to write the output of" << checkFilename);
++    }
+ #ifndef MEINPROC_NO_KARCHIVE
+ end:
+ #endif
+     xmlCleanupParser();
+-    xmlMemoryDump();
+     return (0);
+ }
+diff -ru a/src/xslt.cpp b/src/xslt.cpp
+--- a/src/xslt.cpp	2026-10-08 17:06:35.320574441 -0400
++++ b/src/xslt.cpp	2026-10-08 17:06:35.401646864 -0400
+@@ -152,12 +152,6 @@
+     if (!style_sheet) {
+         return parsed;
+     }
+-    if (style_sheet->indent == 1) {
+-        xmlIndentTreeOutput = 1;
+-    } else {
+-        xmlIndentTreeOutput = 0;
+-    }
+-
+     INFO(i18n("Parsing document"));
+ 
+     xmlParserCtxtPtr pctxt;

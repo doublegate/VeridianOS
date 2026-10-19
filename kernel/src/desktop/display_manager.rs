@@ -304,21 +304,30 @@ impl LoginScreen {
 
     /// Attempt authentication using the security subsystem.
     pub fn authenticate(&mut self) -> bool {
-        // Delegate to security::auth
-        #[cfg(feature = "alloc")]
-        {
-            let _username = &self.username_buffer;
-            let _password = &self.password_buffer;
-            // In a real system, call crate::security::auth::authenticate()
-            // For now, accept "root" with any non-empty password
-            if self.username_buffer == "root" && !self.password_buffer.is_empty() {
+        // The account store (N-131); it accepted "root" with any non-empty
+        // password.
+        use crate::security::auth::AuthResult;
+        let result = crate::security::auth::try_auth_manager()
+            .map(|auth| auth.authenticate(&self.username_buffer, &self.password_buffer));
+        let message = match result {
+            Some(AuthResult::Success) => {
                 self.set_auth_result(true, "");
                 return true;
             }
-        }
-        self.set_auth_result(false, "Invalid credentials");
+            Some(AuthResult::AccountLocked) => "Account locked",
+            Some(AuthResult::AccountExpired) => "Account expired",
+            Some(AuthResult::PasswordExpired) => "Password expired: change it on the console",
+            Some(AuthResult::MfaRequired) => "A second factor is required",
+            _ => "Invalid credentials",
+        };
+        self.set_auth_result(false, message);
         false
     }
+}
+
+/// The user ID of account `name`, from the account store.
+fn account_uid(name: &str) -> Option<u32> {
+    crate::security::auth::try_auth_manager().and_then(|auth| auth.user_id_of(name))
 }
 
 // ---------------------------------------------------------------------------
@@ -573,7 +582,11 @@ impl DisplayManager {
     pub fn auto_login(&mut self) -> bool {
         if self.auto_login_enabled && !self.auto_login_user.is_empty() {
             let username = self.auto_login_user.clone();
-            self.spawn_session(SessionType::Desktop, 0, &username);
+            // The account's own user ID (every session ran as root).
+            let Some(uid) = account_uid(&username) else {
+                return false;
+            };
+            self.spawn_session(SessionType::Desktop, uid, &username);
             return true;
         }
         false
@@ -608,7 +621,13 @@ impl DisplayManager {
             let success = self.login_screen.authenticate();
             if success {
                 let username = self.login_screen.username_buffer.clone();
-                self.spawn_session(SessionType::Desktop, 0, &username);
+                // The session runs as the user who logged in: every one
+                // was given user ID 0, and sessions keyed by user ID
+                // replaced one another (PR #25 review).
+                let Some(uid) = account_uid(&username) else {
+                    return false;
+                };
+                self.spawn_session(SessionType::Desktop, uid, &username);
                 return true;
             }
         }
@@ -901,10 +920,24 @@ mod tests {
         assert_eq!(ls.username_buffer, "a");
     }
 
+    /// Root with the password "pass" in the (global) account store.
+    fn root_with_password() {
+        let _ = crate::security::auth::init();
+        let auth = crate::security::auth::get_auth_manager();
+        let _ = auth.add_account("root", 0);
+        // Fails harmlessly when another test already set the same one.
+        let _ = auth.reset_password("root", "pass");
+    }
+
+    /// The login screen checks the account store: the right password logs
+    /// in, a wrong one does not (it accepted root with any password).
     #[test]
     fn test_login_screen_authenticate_root() {
+        root_with_password();
         let mut ls = LoginScreen::new();
         ls.username_buffer = String::from("root");
+        ls.password_buffer = String::from("wrong");
+        assert!(!ls.authenticate());
         ls.password_buffer = String::from("pass");
         assert!(ls.authenticate());
         assert_eq!(ls.state, LoginField::Success);
@@ -965,10 +998,14 @@ mod tests {
 
     #[test]
     fn test_display_manager_auto_login() {
+        // A session runs as its account's user ID, from the account store
+        // (every one ran as user 0, PR #25 review). An account the store
+        // does not know -- here there is no store -- gets no session.
         let mut dm = DisplayManager::new();
-        dm.set_auto_login("root");
-        assert!(dm.auto_login());
-        assert!(!dm.showing_login);
+        dm.set_auto_login("nobody-known");
+        assert!(!dm.auto_login());
+        assert!(dm.showing_login);
+        assert!(dm.current_session.is_none());
     }
 
     #[test]
@@ -983,6 +1020,7 @@ mod tests {
 
     #[test]
     fn test_display_manager_handle_key() {
+        root_with_password();
         let mut dm = DisplayManager::new();
         // Type "root\tpass\n"
         for c in b"root" {

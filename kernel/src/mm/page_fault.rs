@@ -41,6 +41,9 @@ pub struct PageFaultInfo {
     pub was_write: bool,
     /// Whether the fault occurred while executing in user mode.
     pub was_user_mode: bool,
+    /// Whether the access was an instruction fetch (a retry must then find
+    /// the page executable).
+    pub was_fetch: bool,
     /// Instruction pointer at the time of the fault.
     pub instruction_pointer: u64,
 }
@@ -48,9 +51,8 @@ pub struct PageFaultInfo {
 /// Default stack guard region size (one page below the mapped stack).
 const _STACK_GUARD_SIZE: usize = PAGE_SIZE;
 
-/// Maximum stack growth beyond initial allocation (8 MiB).
-/// cc1 (GCC compiler proper) uses deep recursion for complex expressions.
-const MAX_STACK_GROWTH: usize = 8 * 1024 * 1024;
+/// Gap kept free below a growing stack (Linux `stack_guard_gap`).
+const STACK_GUARD_GAP: u64 = 1024 * 1024;
 
 /// Main page fault handler.
 ///
@@ -61,7 +63,9 @@ const MAX_STACK_GROWTH: usize = 8 * 1024 * 1024;
 ///    private copy and remap as writable.
 /// 3. **Stack growth** -- the faulting address is just below the current stack
 ///    mapping; extend the stack downward.
-/// 4. If none of the above apply, deliver SIGSEGV / return an error.
+/// 4. If none of the above apply, return an error. The caller (the
+///    architecture's trap handler) sends the signal: it knows the cause and
+///    builds the siginfo, so a fault is signalled exactly once.
 pub fn handle_page_fault(info: PageFaultInfo) -> Result<(), KernelError> {
     // Attempt demand paging first.
     if let Ok(()) = try_demand_page(&info) {
@@ -81,7 +85,9 @@ pub fn handle_page_fault(info: PageFaultInfo) -> Result<(), KernelError> {
     }
 
     // None of the handlers could resolve the fault.
-    signal_segv(&info)
+    Err(KernelError::InvalidAddress {
+        addr: info.faulting_address as usize,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -97,53 +103,111 @@ fn try_demand_page(info: &PageFaultInfo) -> Result<(), KernelError> {
     let process = crate::process::current_process().ok_or(KernelError::NotInitialized {
         subsystem: "process",
     })?;
-    try_demand_page_in(&process, info)
+    try_demand_page_in(&process, info, info.was_user_mode)
 }
 
 /// Resolve a fault the kernel took while copying to or from user memory
 /// (x86_64 `usercopy`). Returns whether the page is now present.
 ///
 /// Deliberately narrower than [`handle_page_fault`]:
-/// - only not-present faults: a protection fault on a present page is never
+/// - not-present faults, and writes to copy-on-write pages of mappings the
+///   process may write: any other protection fault on a present page is never
 ///   "fixed" on the kernel's behalf, so a syscall can never write a page the
-///   process itself may not write;
-/// - only demand paging, checked against the mapping as a *user* access (USER
-///   required, WRITABLE required for writes) -- no CoW, no stack growth;
+///   process itself may not write (a `read()` into a buffer shared after a fork
+///   would otherwise fail with EFAULT);
+/// - demand paging, checked against the mapping as a *user* access (USER
+///   required, WRITABLE required for writes), and CoW -- no stack growth;
 /// - no blocking on the scheduler lock, and never a signal: on any failure the
 ///   copy returns EFAULT instead.
 pub fn resolve_user_copy_fault(info: &PageFaultInfo) -> bool {
-    if info.reason != PageFaultReason::NotPresent {
-        return false;
-    }
     let Some(process) = crate::process::try_current_process() else {
         return false;
     };
+    if info.reason != PageFaultReason::NotPresent {
+        return info.was_write && resolve_cow_in(&process, info, false).is_ok();
+    }
     let as_user = PageFaultInfo {
         was_user_mode: true,
         ..*info
     };
-    try_demand_page_in(&process, &as_user).is_ok()
+    // Never sleeps: the system call may hold a spinlock (security review
+    // of d1e2b47); a held address-space lock gives EFAULT, as before.
+    // RISC-V's scause does not tell a missing page from a protection fault
+    // (`from_riscv` reports NotPresent for both), so a write to a present
+    // page still shared after a fork arrives here: it is resolved as CoW,
+    // which acts only on pages fork marked copy-on-write.
+    try_demand_page_in(&process, &as_user, false).is_ok()
+        || (info.was_write && resolve_cow_in(&process, info, false).is_ok())
 }
 
+/// The SIGSEGV code for a user fault at `addr` that could not be resolved,
+/// as Linux chooses it: SEGV_ACCERR when a mapping covers the address (the
+/// access was not allowed), SEGV_MAPERR when none does. For RISC-V, whose
+/// scause does not tell the two apart (`from_riscv`). Called from a user
+/// fault, where the thread holds no kernel lock.
+pub fn user_segv_code(addr: u64) -> i32 {
+    #[cfg(feature = "alloc")]
+    let mapped = crate::process::try_current_process().is_some_and(|p| {
+        p.memory_space
+            .lock_if_may_sleep(true)
+            .is_some_and(|ms| ms.find_mapping(VirtualAddress::new(addr)).is_some())
+    });
+    #[cfg(not(feature = "alloc"))]
+    let mapped = {
+        let _ = addr;
+        false
+    };
+    if mapped {
+        crate::process::signals::SEGV_ACCERR
+    } else {
+        crate::process::signals::SEGV_MAPERR
+    }
+}
+
+/// `may_sleep`: whether the address-space lock may be waited for. Only a
+/// fault taken in user mode may: the thread holds no kernel lock then. A
+/// fault in kernel mode -- a system call copying user memory, perhaps under
+/// a spinlock -- only tries it.
 fn try_demand_page_in(
     process: &crate::process::Process,
     info: &PageFaultInfo,
+    may_sleep: bool,
 ) -> Result<(), KernelError> {
     let vaddr = VirtualAddress::new(info.faulting_address);
 
     // Check whether the faulting address is within any existing mapping.
-    // Use try_lock() to avoid deadlock: the page fault handler runs from IST
-    // interrupt context, so if the syscall path already holds memory_space.lock(),
-    // a blocking .lock() would spin forever and GP fault on the IST stack.
-    let memory_space = process
-        .memory_space
-        .try_lock()
-        .ok_or(KernelError::NotInitialized {
-            subsystem: "memory_space (lock held)",
-        })?;
+    // The lock sleeps if another thread holds it (N-138); it is refused
+    // only when this thread holds it itself (a system call copying user
+    // memory under it), where waiting would deadlock.
+    let memory_space =
+        process
+            .memory_space
+            .lock_if_may_sleep(may_sleep)
+            .ok_or(KernelError::NotInitialized {
+                subsystem: "memory_space (held by this thread)",
+            })?;
 
     #[cfg(feature = "alloc")]
     {
+        // Another thread of this process mapped the page since this one
+        // faulted, or was replacing it (a copy-on-write copy unmaps the
+        // shared page first), or this CPU still caches the old entry (a
+        // write to a page another CPU has just made writable): retry the
+        // access, as Linux does with a spurious fault. Whatever the fault's
+        // reason, but only if the page now allows exactly this access --
+        // including execution for an instruction fetch -- so a real fault
+        // is never retried forever. The local flush drops the stale
+        // translation (PR #19, #20 reviews).
+        if memory_space.page_allows(
+            info.faulting_address,
+            info.was_write,
+            info.was_user_mode,
+            info.was_fetch,
+        ) {
+            crate::arch::tlb_flush_address(info.faulting_address & !(PAGE_SIZE as u64 - 1));
+            return Ok(());
+        }
+
         let mapping = memory_space.find_mapping(vaddr);
         match mapping {
             Some(m) => {
@@ -177,13 +241,12 @@ fn try_demand_page_in(
                 drop(memory_space);
 
                 let page_addr = (info.faulting_address & !(PAGE_SIZE as u64 - 1)) as usize;
-                let mut memory_space_mut =
-                    process
-                        .memory_space
-                        .try_lock()
-                        .ok_or(KernelError::NotInitialized {
-                            subsystem: "memory_space (lock held, map)",
-                        })?;
+                let mut memory_space_mut = process
+                    .memory_space
+                    .lock_if_may_sleep(may_sleep)
+                    .ok_or(KernelError::NotInitialized {
+                        subsystem: "memory_space (lock held, map)",
+                    })?;
                 memory_space_mut.map_page(page_addr, m.flags)?;
 
                 Ok(())
@@ -208,25 +271,56 @@ fn try_demand_page_in(
 /// If the page is mapped read-only and is marked for CoW, create a private
 /// copy of the page, map it as writable, and return success.
 fn try_copy_on_write(info: &PageFaultInfo) -> Result<(), KernelError> {
-    // Copy-on-write requires detecting CoW-marked pages. The current VAS
-    // implementation does not track CoW state, so we cannot resolve it yet.
-    // When CoW tracking is added (e.g., a `cow: bool` field on
-    // VirtualMapping), this handler will:
-    //   1. Allocate a new physical frame.
-    //   2. Copy the old frame's contents to the new frame.
-    //   3. Remap the page as writable with the new frame.
-    //   4. Flush the TLB entry.
-    let _ = info;
-    Err(KernelError::NotImplemented {
-        feature: "copy-on-write page handling",
+    let process = crate::process::current_process().ok_or(KernelError::NotInitialized {
+        subsystem: "process",
+    })?;
+    resolve_cow_in(&process, info, info.was_user_mode)
+}
+
+/// Resolve a write to a copy-on-write page of `process` (see
+/// `VirtualAddressSpace::resolve_cow_fault`). `may_sleep` as for
+/// `try_demand_page_in`.
+fn resolve_cow_in(
+    process: &crate::process::Process,
+    info: &PageFaultInfo,
+    may_sleep: bool,
+) -> Result<(), KernelError> {
+    #[cfg(feature = "alloc")]
+    {
+        let memory_space = process.memory_space.lock_if_may_sleep(may_sleep).ok_or(
+            KernelError::NotInitialized {
+                subsystem: "memory_space (lock held)",
+            },
+        )?;
+        if memory_space.resolve_cow_fault(info.faulting_address)? {
+            return Ok(());
+        }
+    }
+    #[cfg(not(feature = "alloc"))]
+    let _ = (process, info);
+    Err(KernelError::InvalidAddress {
+        addr: info.faulting_address as usize,
     })
 }
 
 /// Try to resolve the fault by growing the user stack.
 ///
-/// The stack grows downward. If the faulting address is within one
-/// [`MAX_STACK_GROWTH`] below the current stack mapping and above the stack
-/// guard page, we extend the stack by mapping new pages.
+/// The stack grows downward. If the faulting address is below the current
+/// stack mapping, the whole stack would stay within the process's
+/// RLIMIT_STACK (8 MiB by default; Linux's acct_stack_growth) and the new
+/// pages within RLIMIT_AS, and no other mapping is within the guard gap,
+/// we extend the stack by mapping new pages.
+/// Whether a stack whose top is `stack_top` may grow down to the page at
+/// `fault_page` under an RLIMIT_STACK of `limit` bytes: the whole stack,
+/// in pages, within the limit (Linux's acct_stack_growth). The fault's
+/// byte address was compared, so a limit one byte above the stack let it
+/// grow a page past the limit (PR #22 review).
+fn stack_growth_allowed(stack_top: u64, fault_page: u64, limit: u64) -> bool {
+    stack_top
+        .checked_sub(fault_page)
+        .is_some_and(|size| size <= limit)
+}
+
 fn try_stack_growth(info: &PageFaultInfo) -> Result<(), KernelError> {
     // Stack growth only applies to user-mode faults.
     if !info.was_user_mode {
@@ -238,13 +332,20 @@ fn try_stack_growth(info: &PageFaultInfo) -> Result<(), KernelError> {
     let process = crate::process::current_process().ok_or(KernelError::NotInitialized {
         subsystem: "process",
     })?;
+    // Only user-mode faults get here (checked above): no kernel lock held.
+    let may_sleep = true;
 
-    let memory_space = process
-        .memory_space
-        .try_lock()
-        .ok_or(KernelError::NotInitialized {
-            subsystem: "memory_space (lock held, stack)",
-        })?;
+    // One lock from the checks to the mapping: released in between,
+    // another thread could map into the checked gap (which map_page would
+    // then make writable) or use up RLIMIT_AS, and two growth faults could
+    // record different sizes (PR #22 review).
+    let mut memory_space =
+        process
+            .memory_space
+            .lock_if_may_sleep(may_sleep)
+            .ok_or(KernelError::NotInitialized {
+                subsystem: "memory_space (lock held, stack)",
+            })?;
     let stack_top = memory_space.stack_top() as u64;
     let stack_size = memory_space.user_stack_size() as u64;
     let stack_bottom = stack_top - stack_size;
@@ -258,10 +359,16 @@ fn try_stack_growth(info: &PageFaultInfo) -> Result<(), KernelError> {
         });
     }
 
-    // Check the fault isn't beyond the maximum growable region.
-    let max_total_stack = stack_size as usize + MAX_STACK_GROWTH;
-    let absolute_bottom = stack_top.saturating_sub(max_total_stack as u64);
-    if fault < absolute_bottom {
+    // The stack may span at most RLIMIT_STACK below its top in total.
+    // (This used to be measured from the already-grown size, so the limit
+    // moved down with every growth and the stack had none; N-136.)
+    let limits = process.limits();
+    let fault_page = fault & !(PAGE_SIZE as u64 - 1);
+    if !stack_growth_allowed(
+        stack_top,
+        fault_page,
+        limits.cur(crate::process::rlimit::RLIMIT_STACK),
+    ) {
         // Too far below the stack -- real SIGSEGV.
         return Err(KernelError::InvalidAddress {
             addr: fault as usize,
@@ -269,7 +376,6 @@ fn try_stack_growth(info: &PageFaultInfo) -> Result<(), KernelError> {
     }
 
     // Calculate how many pages to grow (from current bottom down to fault).
-    let fault_page = fault & !(PAGE_SIZE as u64 - 1);
     let pages_needed = ((stack_bottom - fault_page) / PAGE_SIZE as u64) as usize;
 
     if pages_needed == 0 {
@@ -278,50 +384,34 @@ fn try_stack_growth(info: &PageFaultInfo) -> Result<(), KernelError> {
         });
     }
 
-    // Drop the lock and re-acquire as mutable to map pages.
-    drop(memory_space);
+    // Never grow into, or within a guard gap of, another mapping: growing
+    // over one rewrote its protection to read-write (N-136; Linux keeps
+    // `stack_guard_gap`, 1 MiB).
+    #[cfg(feature = "alloc")]
+    {
+        let gap_bottom = fault_page.saturating_sub(STACK_GUARD_GAP);
+        let usage = memory_space.vm_usage(0, 0);
+        let bytes = (pages_needed * PAGE_SIZE) as u64;
+        if !memory_space.range_is_free(gap_bottom, stack_bottom)
+            || !crate::process::rlimit::may_expand_vm(&limits, usage, bytes, false)
+        {
+            return Err(KernelError::InvalidAddress {
+                addr: fault as usize,
+            });
+        }
+    }
 
     let flags = PageFlags::PRESENT | PageFlags::WRITABLE | PageFlags::USER | PageFlags::NO_EXECUTE;
-
-    let mut memory_space_mut =
-        process
-            .memory_space
-            .try_lock()
-            .ok_or(KernelError::NotInitialized {
-                subsystem: "memory_space (lock held, stack map)",
-            })?;
     for i in 0..pages_needed {
         let page_addr = (stack_bottom - ((i + 1) as u64 * PAGE_SIZE as u64)) as usize;
-        memory_space_mut.map_page(page_addr, flags)?;
+        memory_space.map_page(page_addr, flags)?;
     }
 
     // Update stack size to reflect the growth so future faults work correctly.
     let new_size = stack_size as usize + (pages_needed * PAGE_SIZE);
-    memory_space_mut.set_stack_size(new_size);
+    memory_space.set_stack_size(new_size);
 
     Ok(())
-}
-
-/// Deliver SIGSEGV to the faulting process or return an error for kernel
-/// faults.
-fn signal_segv(info: &PageFaultInfo) -> Result<(), KernelError> {
-    if info.was_user_mode {
-        // Attempt to deliver SIGSEGV to the process.
-        if let Some(process) = crate::process::current_process() {
-            use crate::process::exit::signals::SIGSEGV;
-            if let Err(_e) = crate::process::exit::kill_process(process.pid, SIGSEGV) {
-                kprintln!(
-                    "[MM] Warning: Failed to deliver SIGSEGV to pid {}: {:?}",
-                    process.pid,
-                    _e
-                );
-            }
-        }
-    }
-
-    Err(KernelError::InvalidAddress {
-        addr: info.faulting_address as usize,
-    })
 }
 
 // ---------------------------------------------------------------------------
@@ -359,6 +449,7 @@ pub fn from_x86_64(error_code: u64, cr2: u64, rip: u64) -> PageFaultInfo {
         reason,
         was_write,
         was_user_mode: was_user,
+        was_fetch,
         instruction_pointer: rip,
     }
 }
@@ -369,21 +460,30 @@ pub fn from_x86_64(error_code: u64, cr2: u64, rip: u64) -> PageFaultInfo {
 /// ISS encoding for Data Abort (EC=0b100100/0b100101):
 /// - Bit 6 (WnR): 0 = read, 1 = write
 /// - Bits [5:0] (DFSC): fault status code
-#[cfg(target_arch = "aarch64")]
+// Pure decoding: built everywhere so host tests check it.
+#[cfg_attr(not(target_arch = "aarch64"), allow(dead_code))]
 pub fn from_aarch64(esr_el1: u64, far_el1: u64, elr_el1: u64) -> PageFaultInfo {
     let dfsc = (esr_el1 & 0x3F) as u8;
-    let was_write = (esr_el1 & (1 << 6)) != 0;
     // EC field is bits [31:26]
     let ec = ((esr_el1 >> 26) & 0x3F) as u8;
-    // If EC == 0b100100 the abort came from a lower EL (user mode)
-    let was_user = ec == 0b100100;
+    // A data abort (0x24/0x25) says in WnR whether it was a write; an
+    // instruction abort (0x20/0x21) is a fetch.
+    let was_write = matches!(ec, 0x24 | 0x25) && (esr_el1 & (1 << 6)) != 0;
+    // From a lower EL (user mode): instruction abort 0x20, data abort 0x24.
+    let was_user = matches!(ec, 0x20 | 0x24);
+    let was_fetch = matches!(ec, 0x20 | 0x21);
 
-    let reason = match dfsc & 0x0F {
+    // The full fault status code: a synchronous external abort on a table
+    // walk (0x14-0x17) must not read as a translation fault.
+    let reason = match dfsc {
         // Translation faults (levels 0-3)
         0x04..=0x07 => PageFaultReason::NotPresent,
-        // Permission faults (levels 0-3)
+        // Permission faults (levels 0-3): on an instruction abort, a fetch
+        // from a no-execute page, as x86_64 and RISC-V report it.
         0x0C..=0x0F => {
-            if was_write {
+            if was_fetch {
+                PageFaultReason::ExecuteNoExecute
+            } else if was_write {
                 PageFaultReason::WriteToReadOnly
             } else {
                 PageFaultReason::ProtectionViolation
@@ -397,6 +497,7 @@ pub fn from_aarch64(esr_el1: u64, far_el1: u64, elr_el1: u64) -> PageFaultInfo {
         reason,
         was_write,
         was_user_mode: was_user,
+        was_fetch,
         instruction_pointer: elr_el1,
     }
 }
@@ -428,6 +529,7 @@ pub fn from_riscv(cause: u64, stval: u64, sepc: u64) -> PageFaultInfo {
         reason,
         was_write,
         was_user_mode: true,
+        was_fetch,
         instruction_pointer: sepc,
     }
 }
@@ -435,6 +537,17 @@ pub fn from_riscv(cause: u64, stval: u64, sepc: u64) -> PageFaultInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stack_growth_counts_whole_pages_against_the_limit() {
+        let top = 0x7FFF_0000_0000u64;
+        let size = 8 * 4096;
+        let bottom = top - size;
+        // A limit one byte above the stack: the next page would pass it.
+        assert!(!stack_growth_allowed(top, bottom - 4096, size + 1));
+        assert!(stack_growth_allowed(top, bottom - 4096, size + 4096));
+        assert!(stack_growth_allowed(top, 0, u64::MAX)); // RLIM_INFINITY
+    }
 
     #[test]
     fn test_page_fault_reason_equality() {
@@ -445,6 +558,27 @@ mod tests {
         );
     }
 
+    /// An instruction fetch is reported as one on every architecture, so a
+    /// spurious-fault retry checks execute permission and a fetch from a
+    /// no-execute page faults instead of retrying forever (PR #20 review).
+    #[test]
+    fn fetch_faults_say_so() {
+        // x86_64: P=1, U=1, I/D=1 (a fetch from a present NX page).
+        let x = from_x86_64(0x15, 0x4000, 0x4000);
+        assert!(x.was_fetch && x.reason == PageFaultReason::ExecuteNoExecute);
+        assert!(!from_x86_64(0x7, 0x4000, 0x1000).was_fetch);
+        // AArch64: instruction abort from EL0 (EC 0x20), permission fault
+        // level 3 (IFSC 0x0F).
+        let a = from_aarch64((0x20 << 26) | 0x0F, 0x4000, 0x4000);
+        assert!(a.was_fetch && a.reason == PageFaultReason::ExecuteNoExecute);
+        // A translation fault on a fetch is still "not present".
+        let a = from_aarch64((0x20 << 26) | 0x07, 0x4000, 0x4000);
+        assert!(a.was_fetch && a.reason == PageFaultReason::NotPresent);
+        // A data abort read permission fault is no fetch.
+        let d = from_aarch64((0x24 << 26) | 0x0F, 0x4000, 0x1000);
+        assert!(!d.was_fetch && d.reason == PageFaultReason::ProtectionViolation);
+    }
+
     #[test]
     fn test_page_fault_info_construction() {
         let info = PageFaultInfo {
@@ -452,6 +586,7 @@ mod tests {
             reason: PageFaultReason::NotPresent,
             was_write: false,
             was_user_mode: true,
+            was_fetch: false,
             instruction_pointer: 0x4010_0000,
         };
         assert_eq!(info.faulting_address, 0xDEAD_BEEF);
@@ -466,6 +601,7 @@ mod tests {
             reason: PageFaultReason::WriteToReadOnly,
             was_write: true,
             was_user_mode: true,
+            was_fetch: false,
             instruction_pointer: 0x2000,
         };
         assert!(info.was_write);
@@ -479,6 +615,7 @@ mod tests {
             reason: PageFaultReason::ProtectionViolation,
             was_write: false,
             was_user_mode: false,
+            was_fetch: false,
             instruction_pointer: 0xFFFF_8000_0010_0000,
         };
         assert!(!info.was_user_mode);

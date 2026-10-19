@@ -44,7 +44,9 @@ pub fn slots() -> impl Iterator<Item = usize> {
     let (base, count, stride) = (0x1000_1000usize, 8usize, 0x1000usize);
     #[cfg(not(any(target_arch = "aarch64", target_arch = "riscv64")))]
     let (base, count, stride) = (0usize, 0usize, 0usize);
-    (0..count).map(move |i| base + i * stride)
+    // Kernel virtual addresses of the slots, through the physical-memory
+    // map (RISC-V runs with paging on; on AArch64 the offset is 0).
+    (0..count).map(move |i| crate::mm::phys_to_virt_addr((base + i * stride) as u64) as usize)
 }
 
 /// MMIO register offsets (per virtio spec 4.2.2, legacy interface).
@@ -101,8 +103,8 @@ mod status {
 /// Wraps the kernel-virtual base address of a virtio-mmio register region
 /// and provides typed read/write accessors. The base address must point to
 /// a valid 0x200-byte MMIO region that is mapped in the kernel's address
-/// space (identity-mapped on AArch64/RISC-V, or via the physical memory
-/// window on x86_64).
+/// space (through the physical-memory map; AArch64 still runs with the MMU
+/// off, offset 0).
 ///
 /// # Safety Invariant
 ///
@@ -117,6 +119,14 @@ pub struct VirtioMmioTransport {
 impl VirtioMmioTransport {
     pub fn new(base: usize) -> Self {
         Self { base }
+    }
+
+    /// Whether the device's DMA is coherent, from its device-tree node
+    /// (`dma-coherent`, `dma-noncoherent`) or the architecture's default
+    /// (`mm::dma::device_coherent`; HA-25).
+    pub fn dma_coherent(&self) -> bool {
+        let offset = crate::mm::PHYS_MEM_OFFSET.load(core::sync::atomic::Ordering::Acquire);
+        crate::mm::dma::device_coherent(b"virtio,mmio", self.base as u64 - offset)
     }
 
     #[inline]
@@ -249,6 +259,8 @@ impl VirtioMmioTransport {
     }
 
     pub fn notify_queue(&self, idx: u16) {
+        // The ring updates must be visible to the device before the kick.
+        crate::arch::barriers::io_wmb();
         self.write32(regs::QUEUE_NOTIFY, idx as u32);
     }
 
@@ -331,7 +343,8 @@ pub fn try_init_mmio_blk(
         });
     }
 
-    let queue = crate::drivers::virtio::queue::VirtQueue::new(qmax)?;
+    let mut queue = crate::drivers::virtio::queue::VirtQueue::new(qmax)?;
+    queue.set_coherent(transport.dma_coherent());
     transport.set_queue_size(queue.size());
     if transport.is_legacy() {
         transport.write_queue_pfn(queue.pfn());

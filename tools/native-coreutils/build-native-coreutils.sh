@@ -2,15 +2,17 @@
 # build-native-coreutils.sh -- Native compilation of 6 coreutils on VeridianOS
 #
 # Compiles echo, cat, wc, ls, sort, and pipeline_test natively using
-# GCC 14.2.0 running on VeridianOS itself. Follows the same CFLAGS/LDFLAGS
+# the native GCC running on VeridianOS itself. Follows the same CFLAGS/LDFLAGS
 # pattern as build-native-programs.sh.
 #
 # Usage: ash /usr/src/build-native-coreutils.sh
 
 CC=/usr/bin/gcc
+# The native compiler's own directory (its version, not hardcoded).
+GCC_LIBDIR="/usr/lib/gcc/x86_64-veridian/$(/usr/bin/gcc -dumpfullversion)"
 CFLAGS="-std=c11 -static -O2 -nostdinc \
  -isystem /usr/include \
- -isystem /usr/lib/gcc/x86_64-veridian/14.2.0/include \
+ -isystem ${GCC_LIBDIR}/include \
  -fno-stack-protector -ffreestanding \
  -mno-red-zone -mcmodel=small \
  -Wall -Wextra -Wno-unused-parameter \
@@ -48,7 +50,7 @@ for prog in echo cat wc ls sort pipeline_test; do
     echo -n "  [CC+LD] ${prog}.c ... "
     $CC $CFLAGS $LDFLAGS -o "$out" \
         /usr/lib/crt0.o "$src" \
-        -L /usr/lib -L /usr/lib/gcc/x86_64-veridian/14.2.0 \
+        -L /usr/lib -L ${GCC_LIBDIR} \
         -lc -lgcc 2>&1
 
     if [ -f "$out" ]; then

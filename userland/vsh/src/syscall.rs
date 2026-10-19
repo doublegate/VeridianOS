@@ -303,60 +303,11 @@ pub unsafe fn syscall6(
 }
 
 // ---------------------------------------------------------------------------
-// Syscall number constants (must match kernel/src/syscall/mod.rs)
+// System call numbers, generated from abi/syscalls.map (ADR 0009).
 // ---------------------------------------------------------------------------
 
-// Process management
-pub const SYS_PROCESS_EXIT: usize = 11;
-pub const SYS_PROCESS_FORK: usize = 12;
-pub const SYS_PROCESS_EXEC: usize = 13;
-pub const SYS_PROCESS_WAIT: usize = 14;
-pub const SYS_PROCESS_GETPID: usize = 15;
-#[allow(dead_code)]
-pub const SYS_PROCESS_GETPPID: usize = 16;
-
-// Memory management
-pub const SYS_MEMORY_MAP: usize = 20;
-pub const SYS_MEMORY_UNMAP: usize = 21;
-
-// File operations
-pub const SYS_FILE_OPEN: usize = 50;
-pub const SYS_FILE_CLOSE: usize = 51;
-pub const SYS_FILE_READ: usize = 52;
-pub const SYS_FILE_WRITE: usize = 53;
-#[allow(dead_code)]
-pub const SYS_FILE_STAT: usize = 55;
-#[allow(dead_code)]
-pub const SYS_FILE_DUP: usize = 57;
-pub const SYS_FILE_DUP2: usize = 58;
-pub const SYS_FILE_PIPE: usize = 59;
-
-// Directory operations
-#[allow(dead_code)]
-pub const SYS_DIR_OPENDIR: usize = 62;
-#[allow(dead_code)]
-pub const SYS_DIR_READDIR: usize = 63;
-#[allow(dead_code)]
-pub const SYS_DIR_CLOSEDIR: usize = 64;
-
-// Extended process operations
-pub const SYS_PROCESS_GETCWD: usize = 110;
-pub const SYS_PROCESS_CHDIR: usize = 111;
-#[allow(dead_code)]
-pub const SYS_PROCESS_KILL: usize = 113;
-
-// Signal handling
-#[allow(dead_code)]
-pub const SYS_SIGACTION: usize = 120;
-
-// Extended filesystem
-#[allow(dead_code)]
-pub const SYS_FILE_STAT_PATH: usize = 150;
-pub const SYS_FILE_ACCESS: usize = 153;
-
-// Identity
-#[allow(dead_code)]
-pub const SYS_GETUID: usize = 170;
+include!("../../abi/syscall_numbers.rs");
+pub use sysno::*;
 
 // mmap constants
 pub const PROT_READ: usize = 0x1;
@@ -397,35 +348,21 @@ pub const WNOHANG: i32 = 1;
 /// negative error code.
 pub fn sys_write(fd: i32, buf: &[u8]) -> isize {
     // SAFETY: syscall3 performs a kernel-validated write.
-    unsafe {
-        syscall3(
-            SYS_FILE_WRITE,
-            fd as usize,
-            buf.as_ptr() as usize,
-            buf.len(),
-        )
-    }
+    unsafe { syscall3(SYS_write, fd as usize, buf.as_ptr() as usize, buf.len()) }
 }
 
 /// Read bytes from a file descriptor. Returns number of bytes read or
 /// negative error code.
 pub fn sys_read(fd: i32, buf: &mut [u8]) -> isize {
     // SAFETY: syscall3 performs a kernel-validated read.
-    unsafe {
-        syscall3(
-            SYS_FILE_READ,
-            fd as usize,
-            buf.as_mut_ptr() as usize,
-            buf.len(),
-        )
-    }
+    unsafe { syscall3(SYS_read, fd as usize, buf.as_mut_ptr() as usize, buf.len()) }
 }
 
 /// Exit the process with the given status code.
 pub fn sys_exit(status: i32) -> ! {
     // SAFETY: This syscall terminates the process.
     unsafe {
-        syscall1(SYS_PROCESS_EXIT, status as usize);
+        syscall1(SYS_exit_group, status as usize);
     }
     // Should never reach here, but provide a diverging fallback.
     #[allow(clippy::empty_loop)]
@@ -435,27 +372,20 @@ pub fn sys_exit(status: i32) -> ! {
 /// Get the current process ID.
 pub fn sys_getpid() -> i32 {
     // SAFETY: getpid has no side effects.
-    unsafe { syscall0(SYS_PROCESS_GETPID) as i32 }
+    unsafe { syscall0(SYS_getpid) as i32 }
 }
 
 /// Fork the current process. Returns 0 in child, child PID in parent,
 /// or negative error code.
 pub fn sys_fork() -> isize {
     // SAFETY: fork is a standard process creation syscall.
-    unsafe { syscall0(SYS_PROCESS_FORK) }
+    unsafe { syscall0(SYS_fork) }
 }
 
 /// Execute a program, replacing the current process image.
 pub fn sys_execve(path: *const u8, argv: *const *const u8, envp: *const *const u8) -> isize {
     // SAFETY: Kernel validates all pointers.
-    unsafe {
-        syscall3(
-            SYS_PROCESS_EXEC,
-            path as usize,
-            argv as usize,
-            envp as usize,
-        )
-    }
+    unsafe { syscall3(SYS_execve, path as usize, argv as usize, envp as usize) }
 }
 
 /// Wait for a child process. Returns (pid, status) or negative error.
@@ -464,7 +394,7 @@ pub fn sys_waitpid(pid: i32, options: i32) -> (isize, i32) {
     // SAFETY: Kernel validates the status pointer.
     let ret = unsafe {
         syscall3(
-            SYS_PROCESS_WAIT,
+            SYS_wait4,
             pid as usize,
             &mut status as *mut i32 as usize,
             options as usize,
@@ -476,38 +406,38 @@ pub fn sys_waitpid(pid: i32, options: i32) -> (isize, i32) {
 /// Open a file. Returns file descriptor or negative error.
 pub fn sys_open(path: *const u8, flags: usize, mode: usize) -> isize {
     // SAFETY: Kernel validates the path pointer and flags.
-    unsafe { syscall3(SYS_FILE_OPEN, path as usize, flags, mode) }
+    unsafe { syscall3(SYS_open, path as usize, flags, mode) }
 }
 
 /// Close a file descriptor.
 pub fn sys_close(fd: i32) -> isize {
     // SAFETY: Kernel validates the fd.
-    unsafe { syscall1(SYS_FILE_CLOSE, fd as usize) }
+    unsafe { syscall1(SYS_close, fd as usize) }
 }
 
 /// Duplicate a file descriptor to a specific target.
 pub fn sys_dup2(oldfd: i32, newfd: i32) -> isize {
     // SAFETY: Kernel validates both fds.
-    unsafe { syscall2(SYS_FILE_DUP2, oldfd as usize, newfd as usize) }
+    unsafe { syscall2(SYS_dup2, oldfd as usize, newfd as usize) }
 }
 
 /// Create a pipe. Writes two fds into `pipefd`.
 pub fn sys_pipe(pipefd: &mut [i32; 2]) -> isize {
     // SAFETY: Kernel writes exactly 2 i32 values.
-    unsafe { syscall1(SYS_FILE_PIPE, pipefd.as_mut_ptr() as usize) }
+    unsafe { syscall1(SYS_pipe, pipefd.as_mut_ptr() as usize) }
 }
 
 /// Get the current working directory into `buf`. Returns bytes written
 /// or negative error.
 pub fn sys_getcwd(buf: &mut [u8]) -> isize {
     // SAFETY: Kernel writes at most buf.len() bytes.
-    unsafe { syscall2(SYS_PROCESS_GETCWD, buf.as_mut_ptr() as usize, buf.len()) }
+    unsafe { syscall2(SYS_getcwd, buf.as_mut_ptr() as usize, buf.len()) }
 }
 
 /// Change the current working directory.
 pub fn sys_chdir(path: *const u8) -> isize {
     // SAFETY: Kernel validates the path pointer.
-    unsafe { syscall1(SYS_PROCESS_CHDIR, path as usize) }
+    unsafe { syscall1(SYS_chdir, path as usize) }
 }
 
 /// Map anonymous memory pages.
@@ -515,7 +445,7 @@ pub fn sys_mmap(addr: usize, length: usize, prot: usize, flags: usize) -> isize 
     // SAFETY: Kernel validates all arguments and allocates pages.
     unsafe {
         syscall6(
-            SYS_MEMORY_MAP,
+            SYS_mmap,
             addr,
             length,
             prot,
@@ -530,11 +460,11 @@ pub fn sys_mmap(addr: usize, length: usize, prot: usize, flags: usize) -> isize 
 #[allow(dead_code)]
 pub fn sys_munmap(addr: usize, length: usize) -> isize {
     // SAFETY: Kernel validates the address range.
-    unsafe { syscall2(SYS_MEMORY_UNMAP, addr, length) }
+    unsafe { syscall2(SYS_munmap, addr, length) }
 }
 
 /// Check file accessibility.
 pub fn sys_access(path: *const u8, mode: usize) -> isize {
     // SAFETY: Kernel validates the path pointer.
-    unsafe { syscall2(SYS_FILE_ACCESS, path as usize, mode) }
+    unsafe { syscall2(SYS_access, path as usize, mode) }
 }

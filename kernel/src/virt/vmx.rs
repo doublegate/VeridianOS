@@ -119,25 +119,25 @@ impl VmcsFields {
     pub const GUEST_PHYSICAL_ADDRESS: u32 = 0x2400;
 }
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
 const IA32_VMX_BASIC: u32 = 0x480;
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
 const IA32_VMX_CR0_FIXED0: u32 = 0x486;
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
 const IA32_VMX_CR0_FIXED1: u32 = 0x487;
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
 const IA32_FEATURE_CONTROL: u32 = 0x3A;
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
 const IA32_VMX_PINBASED_CTLS: u32 = 0x481;
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
 const IA32_VMX_PROCBASED_CTLS: u32 = 0x482;
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
 const IA32_VMX_EXIT_CTLS: u32 = 0x483;
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
 const IA32_VMX_ENTRY_CTLS: u32 = 0x484;
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
 const IA32_VMX_PROCBASED_CTLS2: u32 = 0x48B;
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
 const CR4_VMXE: u64 = 1 << 13;
 
 pub struct Vmcs {
@@ -146,7 +146,7 @@ pub struct Vmcs {
 }
 
 impl Vmcs {
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(all(target_arch = "x86_64", target_os = "none"))]
     pub fn allocate() -> Result<Self, VmError> {
         use crate::mm::frame_allocator::FRAME_ALLOCATOR;
         let frame = {
@@ -170,7 +170,7 @@ impl Vmcs {
         })
     }
 
-    #[cfg(not(target_arch = "x86_64"))]
+    #[cfg(not(all(target_arch = "x86_64", target_os = "none")))]
     pub fn allocate() -> Result<Self, VmError> {
         Err(VmError::VmxNotSupported)
     }
@@ -179,7 +179,7 @@ impl Vmcs {
         self.frame.as_u64() * crate::mm::FRAME_SIZE as u64
     }
 
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(all(target_arch = "x86_64", target_os = "none"))]
     pub fn clear(&mut self) -> Result<(), VmError> {
         let phys_addr = self.physical_address();
         // SAFETY: VMCLEAR on our owned VMCS region.
@@ -198,12 +198,12 @@ impl Vmcs {
         Ok(())
     }
 
-    #[cfg(not(target_arch = "x86_64"))]
+    #[cfg(not(all(target_arch = "x86_64", target_os = "none")))]
     pub fn clear(&mut self) -> Result<(), VmError> {
         Err(VmError::VmxNotSupported)
     }
 
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(all(target_arch = "x86_64", target_os = "none"))]
     pub fn load(&mut self) -> Result<(), VmError> {
         let phys_addr = self.physical_address();
         // SAFETY: VMPTRLD loads our owned VMCS.
@@ -222,12 +222,12 @@ impl Vmcs {
         Ok(())
     }
 
-    #[cfg(not(target_arch = "x86_64"))]
+    #[cfg(not(all(target_arch = "x86_64", target_os = "none")))]
     pub fn load(&mut self) -> Result<(), VmError> {
         Err(VmError::VmxNotSupported)
     }
 
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(all(target_arch = "x86_64", target_os = "none"))]
     pub fn write_field(&self, field: u32, value: u64) -> Result<(), VmError> {
         if !self.active {
             return Err(VmError::VmcsFieldError);
@@ -247,12 +247,12 @@ impl Vmcs {
         Ok(())
     }
 
-    #[cfg(not(target_arch = "x86_64"))]
+    #[cfg(not(all(target_arch = "x86_64", target_os = "none")))]
     pub fn write_field(&self, _field: u32, _value: u64) -> Result<(), VmError> {
         Err(VmError::VmxNotSupported)
     }
 
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(all(target_arch = "x86_64", target_os = "none"))]
     pub fn read_field(&self, field: u32) -> Result<u64, VmError> {
         if !self.active {
             return Err(VmError::VmcsFieldError);
@@ -273,7 +273,7 @@ impl Vmcs {
         Ok(value)
     }
 
-    #[cfg(not(target_arch = "x86_64"))]
+    #[cfg(not(all(target_arch = "x86_64", target_os = "none")))]
     pub fn read_field(&self, _field: u32) -> Result<u64, VmError> {
         Err(VmError::VmxNotSupported)
     }
@@ -288,7 +288,7 @@ impl Vmcs {
 
 // VMX enable/disable
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
 pub fn vmx_enable() -> Result<(), VmError> {
     use crate::mm::frame_allocator::FRAME_ALLOCATOR;
     {
@@ -303,6 +303,8 @@ pub fn vmx_enable() -> Result<(), VmError> {
         return Err(VmError::VmxNotSupported);
     }
 
+    // SAFETY: CPUID reported VMX support just above, so IA32_FEATURE_CONTROL
+    // exists and RDMSR of it in Ring 0 cannot #GP.
     let feature_control = unsafe { super::read_msr(IA32_FEATURE_CONTROL) };
     let lock_bit = feature_control & 1;
     let vmx_outside_smx = (feature_control >> 2) & 1;
@@ -310,9 +312,12 @@ pub fn vmx_enable() -> Result<(), VmError> {
         return Err(VmError::VmxNotSupported);
     }
     if lock_bit == 0 {
+        // SAFETY: the MSR is unlocked (bit 0 clear), so setting the lock and
+        // VMX-outside-SMX bits is a permitted write; it only enables VMXON.
         unsafe { super::write_msr(IA32_FEATURE_CONTROL, feature_control | (1 << 2) | 1) };
     }
 
+    // SAFETY: VMX is supported (checked above), so IA32_VMX_BASIC exists.
     let vmx_basic = unsafe { super::read_msr(IA32_VMX_BASIC) };
     let revision_id = (vmx_basic & 0x7FFF_FFFF) as u32;
 
@@ -372,12 +377,12 @@ pub fn vmx_enable() -> Result<(), VmError> {
     Ok(())
 }
 
-#[cfg(not(target_arch = "x86_64"))]
+#[cfg(not(all(target_arch = "x86_64", target_os = "none")))]
 pub fn vmx_enable() -> Result<(), VmError> {
     Err(VmError::VmxNotSupported)
 }
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
 pub fn vmx_disable() -> Result<(), VmError> {
     let mut state = VMX_STATE.lock();
     match state.as_ref() {
@@ -398,7 +403,7 @@ pub fn vmx_disable() -> Result<(), VmError> {
     Ok(())
 }
 
-#[cfg(not(target_arch = "x86_64"))]
+#[cfg(not(all(target_arch = "x86_64", target_os = "none")))]
 pub fn vmx_disable() -> Result<(), VmError> {
     Err(VmError::VmxNotSupported)
 }
@@ -413,15 +418,18 @@ pub fn vmcs_revision_id() -> Option<u32> {
     state.as_ref().map(|s| s.revision_id)
 }
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
 fn adjust_controls(msr: u32, desired: u32) -> u32 {
+    // SAFETY: callers pass IA32_VMX_* capability MSRs from setup_vmcs, which
+    // runs only with an active VMCS, so VMX is supported and these MSRs
+    // exist. NOTE: `msr` itself is not checked to be one of them.
     let msr_val = unsafe { super::read_msr(msr) };
     let required = msr_val as u32;
     let allowed = (msr_val >> 32) as u32;
     (desired | required) & allowed
 }
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
 pub fn setup_vmcs(vmcs: &Vmcs, guest_entry: u64, guest_stack: u64) -> Result<(), VmError> {
     if !vmcs.is_active() {
         return Err(VmError::VmcsFieldError);
@@ -584,15 +592,22 @@ pub fn setup_vmcs(vmcs: &Vmcs, guest_entry: u64, guest_stack: u64) -> Result<(),
     Ok(())
 }
 
-#[cfg(not(target_arch = "x86_64"))]
+#[cfg(not(all(target_arch = "x86_64", target_os = "none")))]
 pub fn setup_vmcs(_vmcs: &Vmcs, _guest_entry: u64, _guest_stack: u64) -> Result<(), VmError> {
     Err(VmError::VmxNotSupported)
 }
 
-#[cfg(target_arch = "x86_64")]
-pub fn vm_launch() -> Result<VmExitReason, VmError> {
-    // SAFETY: VMLAUNCH transfers to guest. If it fails, we return error.
+/// Enter the guest of the current VMCS.
+///
+/// # Safety
+/// VMX operation must be on (`vmx_enable`), a VMCS current and set up
+/// (`setup_vmcs`, with valid HOST_RIP and HOST_RSP): outside VMX operation
+/// VMLAUNCH raises #UD, and a VM exit resumes at HOST_RIP, not here. It was
+/// a safe function that checked none of this (PR #25 review).
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+pub unsafe fn vm_launch() -> Result<VmExitReason, VmError> {
     let success: u8;
+    // SAFETY: the caller's contract above.
     unsafe {
         core::arch::asm!("vmlaunch", "setna {success}", success = out(reg_byte) success, options(nostack));
     }
@@ -602,15 +617,21 @@ pub fn vm_launch() -> Result<VmExitReason, VmError> {
     Err(VmError::VmEntryFailed)
 }
 
-#[cfg(not(target_arch = "x86_64"))]
-pub fn vm_launch() -> Result<VmExitReason, VmError> {
+/// # Safety
+/// None needed: VMX is not available here.
+#[cfg(not(all(target_arch = "x86_64", target_os = "none")))]
+pub unsafe fn vm_launch() -> Result<VmExitReason, VmError> {
     Err(VmError::VmxNotSupported)
 }
 
-#[cfg(target_arch = "x86_64")]
-pub fn vm_resume() -> Result<VmExitReason, VmError> {
-    // SAFETY: VMRESUME transfers back to guest.
+/// Return to the guest of the current, launched VMCS.
+///
+/// # Safety
+/// As [`vm_launch`], and the current VMCS must have been launched.
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+pub unsafe fn vm_resume() -> Result<VmExitReason, VmError> {
     let success: u8;
+    // SAFETY: the caller's contract above.
     unsafe {
         core::arch::asm!("vmresume", "setna {success}", success = out(reg_byte) success, options(nostack));
     }
@@ -620,12 +641,14 @@ pub fn vm_resume() -> Result<VmExitReason, VmError> {
     Err(VmError::VmEntryFailed)
 }
 
-#[cfg(not(target_arch = "x86_64"))]
-pub fn vm_resume() -> Result<VmExitReason, VmError> {
+/// # Safety
+/// None needed: VMX is not available here.
+#[cfg(not(all(target_arch = "x86_64", target_os = "none")))]
+pub unsafe fn vm_resume() -> Result<VmExitReason, VmError> {
     Err(VmError::VmxNotSupported)
 }
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
 extern "C" fn vm_exit_handler() {
     let raw_reason: u64;
     // SAFETY: VMREAD after VM exit, VMCS is current.

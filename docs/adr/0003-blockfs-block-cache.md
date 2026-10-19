@@ -1,6 +1,6 @@
 # ADR 0003: BlockFS block cache
 
-- Status: accepted
+- Status: accepted; the dirty-block rule is amended by [ADR 0011](0011-blockfs-early-data-writeback.md) (file data may be written back before sync)
 - Date: 2026-10-06
 - Tracking: FS-PERF-01, DRV-PERF-02, audit verification N-29
 

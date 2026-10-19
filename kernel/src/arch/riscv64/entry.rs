@@ -25,16 +25,8 @@ pub fn arch_early_init() {
     }
 }
 
-/// SBI console putchar using ecall
-#[inline]
-unsafe fn sbi_putchar(ch: u8) {
-    core::arch::asm!(
-        "ecall",
-        in("a0") ch as usize,     // Character to print
-        in("a7") 0x01usize,       // SBI function ID 0x01 = console_putchar (legacy)
-        options(nostack, nomem)
-    );
-}
+// The early SBI putchar is `boot::sbi_putchar` (one copy; PR #25 review).
+use super::boot::sbi_putchar;
 
 pub fn arch_panic_handler(_info: &PanicInfo) {
     println!("[KERNEL PANIC] {}", _info);

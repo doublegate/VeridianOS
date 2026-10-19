@@ -1,6 +1,6 @@
 # Microkernel Architecture
 
-> **Status (v0.26.0):** this chapter describes the design. Device drivers, filesystems, the network stack and the desktop currently run in the kernel, and IPC is not yet reachable from user programs. See [Known Limitations](https://github.com/doublegate/VeridianOS/blob/main/docs/KNOWN-LIMITATIONS.md).
+> **Status (v0.27.0):** this chapter describes the design. Device drivers, filesystems, the network stack and the desktop currently run in the kernel, and user programs reach native IPC only for endpoint send and receive. See [Known Limitations](https://github.com/doublegate/VeridianOS/blob/main/docs/KNOWN-LIMITATIONS.md).
 
 VeridianOS implements a capability-based microkernel architecture that prioritizes security, reliability, and performance through minimal kernel design and component isolation.
 
@@ -269,7 +269,7 @@ match driver_process.wait_for_exit() {
 | **IPC Small Message** | <5μs | ~0.8μs | ≤64 bytes, register-based |
 | **IPC Large Transfer** | <10μs | ~3.2μs | Zero-copy shared memory |
 | **Context Switch** | <10μs | ~8.5μs | Including TLB flush |
-| **Memory Allocation** | <1μs | ~0.6μs | Slab allocator |
+| **Memory Allocation** | <1μs | ~1.5μs | Global frame allocator (`frame_alloc_global`, PERFORMANCE-REPORT.md); target not met |
 | **Capability Validation** | <500ns | ~0.2μs | O(1) lookup |
 | **System Call** | <1μs | ~0.4μs | Kernel entry/exit |
 

@@ -598,6 +598,134 @@ mod tests {
     }
 
     #[test]
+    fn test_split_packet_skips_options() {
+        // IHL 6: a 4-byte option precedes the payload.
+        let mut bytes = packet(6, 28, &[0xAA, 0xBB, 0xCC, 0xDD, 1, 2, 3, 4], 0);
+        assert_eq!(Ipv4Header::from_bytes(&bytes).unwrap().header_len(), 24);
+        let (_, payload) = split_packet(&bytes).unwrap();
+        assert_eq!(payload, &[1, 2, 3, 4]);
+        // total_length equal to the header: an empty datagram.
+        bytes[2..4].copy_from_slice(&24u16.to_be_bytes());
+        assert!(split_packet(&bytes).unwrap().1.is_empty());
+    }
+
+    #[test]
+    fn test_from_bytes_rejects_short_and_non_ipv4() {
+        let good = packet(5, 20, &[], 0);
+        assert!(Ipv4Header::from_bytes(&good[..19]).is_err());
+        assert!(Ipv4Header::from_bytes(&[]).is_err());
+        let mut v6 = good.clone();
+        v6[0] = (6 << 4) | 5;
+        assert!(Ipv4Header::from_bytes(&v6).is_err());
+        assert!(split_packet(&v6).is_err());
+    }
+
+    /// The common textbook vector (RFC 1071 one's-complement sum): a UDP
+    /// header from 192.168.0.1 to 192.168.0.199 checksums to 0xB861.
+    #[test]
+    fn test_checksum_known_vector() {
+        let wire: [u8; 20] = [
+            0x45, 0x00, 0x00, 0x73, 0x00, 0x00, 0x40, 0x00, 0x40, 0x11, 0xB8, 0x61, 0xC0, 0xA8,
+            0x00, 0x01, 0xC0, 0xA8, 0x00, 0xC7,
+        ];
+        let mut h = Ipv4Header::from_bytes(&wire).unwrap();
+        assert_eq!((h.flags, h.fragment_offset), (0x02, 0));
+        assert_eq!(h.total_length, 0x73);
+        assert_eq!(h.to_bytes(), wire, "encoding round-trips");
+        h.calculate_checksum();
+        assert_eq!(h.checksum, 0xB861);
+        // A header carrying its own checksum sums to 0xFFFF.
+        let sum: u32 = wire
+            .chunks_exact(2)
+            .map(|c| u16::from_be_bytes([c[0], c[1]]) as u32)
+            .sum();
+        assert_eq!((sum & 0xFFFF) + (sum >> 16), 0xFFFF);
+    }
+
+    #[test]
+    fn test_flags_and_fragment_offset_share_two_bytes() {
+        let mut h = Ipv4Header::new(Ipv4Address::ANY, Ipv4Address::BROADCAST, IpProtocol::Icmp);
+        h.flags = 0x01; // MF
+        h.fragment_offset = 0x1ABC; // 13 bits
+        h.tos = 0xB8;
+        h.identification = 0xBEEF;
+        let b = h.to_bytes();
+        assert_eq!((b[6], b[7]), (0x3A, 0xBC));
+        let p = Ipv4Header::from_bytes(&b).unwrap();
+        assert_eq!((p.flags, p.fragment_offset), (0x01, 0x1ABC));
+        assert_eq!(
+            (p.tos, p.identification, p.ttl, p.protocol),
+            (0xB8, 0xBEEF, 64, 1)
+        );
+    }
+
+    #[test]
+    fn route_prefix_matching_edges() {
+        let default = route([0, 0, 0, 0], [0, 0, 0, 0], Some([10, 0, 0, 1]), "eth0");
+        let host = route([10, 0, 0, 5], [255, 255, 255, 255], None, "eth0");
+        assert_eq!((default.prefix_len(), host.prefix_len()), (0, 32));
+        assert!(default.matches(Ipv4Address([203, 0, 113, 9])));
+        assert!(host.matches(Ipv4Address([10, 0, 0, 5])));
+        assert!(!host.matches(Ipv4Address([10, 0, 0, 6])));
+        // Host bits in a route's destination are masked off.
+        let sloppy = route([10, 0, 0, 77], [255, 255, 255, 0], None, "eth0");
+        assert!(sloppy.matches(Ipv4Address([10, 0, 0, 1])));
+        let routes = [default, host.clone()];
+        assert_eq!(best_route(&routes, Ipv4Address([10, 0, 0, 5])), Some(&host));
+        assert!(best_route(&[], Ipv4Address([10, 0, 0, 5])).is_none());
+    }
+
+    #[test]
+    fn config_routes_follow_mask_and_gateway() {
+        assert!(config_routes(&config([0; 4], [0; 4], None), "eth0").is_empty());
+        // Mask only: the connected subnet, host bits cleared.
+        assert_eq!(
+            config_routes(&config([10, 0, 2, 15], [255, 255, 255, 0], None), "eth0"),
+            alloc::vec![route([10, 0, 2, 0], [255, 255, 255, 0], None, "eth0")]
+        );
+        // Gateway only: just the default route.
+        assert_eq!(
+            config_routes(
+                &config([10, 0, 2, 15], [0; 4], Some([10, 0, 2, 2])),
+                "wlan0"
+            ),
+            alloc::vec![route([0; 4], [0; 4], Some([10, 0, 2, 2]), "wlan0")]
+        );
+    }
+
+    #[test]
+    fn insert_route_replaces_only_the_same_prefix() {
+        let mut routes = Vec::new();
+        insert_route(
+            &mut routes,
+            route([10, 0, 0, 0], [255, 0, 0, 0], None, "eth0"),
+        );
+        insert_route(
+            &mut routes,
+            route([10, 0, 0, 0], [255, 255, 0, 0], None, "eth0"),
+        );
+        assert_eq!(routes.len(), 2, "different mask, different prefix");
+        insert_route(
+            &mut routes,
+            route([10, 0, 0, 0], [255, 0, 0, 0], None, "eth1"),
+        );
+        assert_eq!(routes.len(), 2);
+        assert_eq!(routes[1].interface, "eth1", "the replacement is appended");
+    }
+
+    #[test]
+    fn replace_interface_routes_without_interfaces_is_a_no_op() {
+        let lease = config([10, 0, 2, 15], [255, 255, 255, 0], Some([10, 0, 2, 2]));
+        let keep = route([10, 0, 2, 0], [255, 255, 255, 0], None, "eth0");
+        let mut routes = alloc::vec![keep.clone()];
+        replace_interface_routes(&mut routes, &lease, None, &lease, None);
+        assert_eq!(routes, alloc::vec![keep]);
+        // Losing the interface removes the old routes and adds none.
+        replace_interface_routes(&mut routes, &lease, Some("eth0"), &lease, None);
+        assert!(routes.is_empty());
+    }
+
+    #[test]
     fn test_ipv4_header() {
         let src = Ipv4Address::new(192, 168, 1, 1);
         let dst = Ipv4Address::new(192, 168, 1, 2);

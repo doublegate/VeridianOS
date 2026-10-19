@@ -28,6 +28,10 @@
 #include <errno.h>
 #include <stdio.h>
 #include <sys/types.h>
+#include <unistd.h>
+#include <limits.h>
+#include <grp.h>
+#include <veridian/syscall.h>
 
 /* ========================================================================= */
 /* libgen.h -- basename() and dirname()                                      */
@@ -268,21 +272,33 @@ char *strsignal(int sig)
     }
 }
 
-char *ttyname(int fd)
-{
-    (void)fd;
-    return "/dev/console";
-}
-
+/*
+ * The terminal open on fd. The native ABI has no fd-to-path query; the
+ * terminal a native program sees is the console, so a tty fd is named
+ * /dev/console and anything else is ENOTTY.
+ */
 int ttyname_r(int fd, char *buf, size_t buflen)
 {
-    (void)fd;
-    if (buf == NULL || buflen < 13) {
-        errno = ERANGE;
+    static const char console[] = "/dev/console";
+
+    if (!isatty(fd))
+        return errno == EBADF ? EBADF : ENOTTY;
+    if (buf == NULL || buflen < sizeof(console))
         return ERANGE;
-    }
-    strcpy(buf, "/dev/console");
+    memcpy(buf, console, sizeof(console));
     return 0;
+}
+
+char *ttyname(int fd)
+{
+    static char name[32];
+    int err = ttyname_r(fd, name, sizeof(name));
+
+    if (err) {
+        errno = err;
+        return NULL;
+    }
+    return name;
 }
 
 int getpagesize(void)
@@ -307,12 +323,60 @@ int mkfifo(const char *pathname, mode_t mode)
 }
 
 /* seteuid / setegid / setreuid / setregid / getgroups / setgroups */
-int seteuid(uid_t uid)   { (void)uid; return 0; }
-int setegid(gid_t gid)   { (void)gid; return 0; }
-int setreuid(uid_t ruid, uid_t euid) { (void)ruid; (void)euid; return 0; }
-int setregid(gid_t rgid, gid_t egid) { (void)rgid; (void)egid; return 0; }
-int getgroups(int size, gid_t list[]) { (void)size; (void)list; return 0; }
-int setgroups(size_t size, const gid_t *list) { (void)size; (void)list; return 0; }
+/* Credentials (N-248): the kernel keeps real, effective and saved IDs and
+ * the supplementary groups and enforces the Linux rules. These reported
+ * success without changing anything. (uid_t)-1 leaves an ID unchanged. */
+int seteuid(uid_t uid)
+{
+    return (int)__syscall_ret(veridian_syscall3(SYS_setresuid, -1L, (long)uid, -1L));
+}
+
+int setegid(gid_t gid)
+{
+    return (int)__syscall_ret(veridian_syscall3(SYS_setresgid, -1L, (long)gid, -1L));
+}
+
+int setreuid(uid_t ruid, uid_t euid)
+{
+    return (int)__syscall_ret(veridian_syscall2(SYS_setreuid, (long)ruid, (long)euid));
+}
+
+int setregid(gid_t rgid, gid_t egid)
+{
+    return (int)__syscall_ret(veridian_syscall2(SYS_setregid, (long)rgid, (long)egid));
+}
+
+int setresuid(uid_t ruid, uid_t euid, uid_t suid)
+{
+    return (int)__syscall_ret(
+        veridian_syscall3(SYS_setresuid, (long)ruid, (long)euid, (long)suid));
+}
+
+int setresgid(gid_t rgid, gid_t egid, gid_t sgid)
+{
+    return (int)__syscall_ret(
+        veridian_syscall3(SYS_setresgid, (long)rgid, (long)egid, (long)sgid));
+}
+
+int getresuid(uid_t *ruid, uid_t *euid, uid_t *suid)
+{
+    return (int)__syscall_ret(veridian_syscall3(SYS_getresuid, ruid, euid, suid));
+}
+
+int getresgid(gid_t *rgid, gid_t *egid, gid_t *sgid)
+{
+    return (int)__syscall_ret(veridian_syscall3(SYS_getresgid, rgid, egid, sgid));
+}
+
+int getgroups(int size, gid_t list[])
+{
+    return (int)__syscall_ret(veridian_syscall2(SYS_getgroups, (long)size, list));
+}
+
+int setgroups(size_t size, const gid_t *list)
+{
+    return (int)__syscall_ret(veridian_syscall2(SYS_setgroups, (long)size, list));
+}
 
 /* dup3() -- dup2 with flags */
 int dup3(int oldfd, int newfd, int flags)
@@ -322,12 +386,11 @@ int dup3(int oldfd, int newfd, int flags)
     return dup2(oldfd, newfd);
 }
 
-/* pipe2() -- pipe with flags */
+/* pipe2() -- pipe with flags (O_CLOEXEC, O_NONBLOCK). It ignored the flags
+ * and called pipe(), so a close-on-exec pipe leaked into exec'd programs. */
 int pipe2(int pipefd[2], int flags)
 {
-    (void)flags;
-    extern int pipe(int[2]);
-    return pipe(pipefd);
+    return (int)__syscall_ret(veridian_syscall2(SYS_pipe2, pipefd, flags));
 }
 
 /* clock_gettime() -- already defined in time.c, not duplicated here */
@@ -337,12 +400,7 @@ int pipe2(int pipefd[2], int flags)
 #include <sys/ioctl.h>
 #include <stdarg.h>
 
-/* vfork() -- equivalent to fork() on VeridianOS */
-pid_t vfork(void)
-{
-    extern pid_t fork(void);
-    return fork();
-}
+/* vfork() is in vfork_x86_64.S. */
 
 /* execvp() -- already defined in unistd.c, not duplicated here */
 #include <unistd.h>
@@ -386,20 +444,31 @@ int execvpe(const char *file, char *const argv[], char *const envp[])
     return -1;
 }
 
-/* waitid() -- wait for process (stub using waitpid) */
+/* waitid() -- the kernel's waitid: P_ALL, P_PID, P_PGID; WEXITED,
+ * WSTOPPED, WCONTINUED, WNOHANG, WNOWAIT. */
 #include <sys/wait.h>
 
-/* wait3() / wait4() -- BSD-style wait */
-pid_t wait3(int *wstatus, int options, void *rusage)
+int waitid(idtype_t idtype, id_t id, siginfo_t *infop, int options)
 {
-    (void)rusage;
-    return waitpid(-1, wstatus, options);
+    return (int)__syscall_ret(
+        veridian_syscall5(SYS_waitid, idtype, id, infop, options, 0));
 }
 
-pid_t wait4(pid_t pid, int *wstatus, int options, void *rusage)
+/*
+ * wait3() / wait4() -- BSD-style wait, with the child's resource usage
+ * (the kernel fills it, as on Linux).
+ */
+#include <sys/resource.h>
+
+pid_t wait4(pid_t pid, int *wstatus, int options, struct rusage *rusage)
 {
-    (void)rusage;
-    return waitpid(pid, wstatus, options);
+    return (pid_t)__syscall_ret(
+        veridian_syscall4(SYS_wait4, pid, wstatus, options, rusage));
+}
+
+pid_t wait3(int *wstatus, int options, struct rusage *rusage)
+{
+    return wait4(-1, wstatus, options, rusage);
 }
 
 /* ========================================================================= */
@@ -933,16 +1002,34 @@ struct group *getgrent(void)
     return (struct group *)0;
 }
 
+/* The groups `user` belongs to: `group` first, then every /etc/group entry
+ * that lists the user. Returns the count, or -1 when it does not fit in
+ * *ngroups (which is then set to the count needed), as glibc does. It
+ * reported only `group`. */
 int getgrouplist(const char *user, gid_t group, gid_t *groups, int *ngroups)
 {
-    (void)user;
-    if (groups && *ngroups >= 1) {
-        groups[0] = group;
-        *ngroups = 1;
-        return 1;
+    int n = 0, cap = *ngroups;
+    struct group *gr;
+
+    if (n < cap)
+        groups[n] = group;
+    n++;
+    setgrent();
+    while ((gr = getgrent()) != NULL) {
+        if (gr->gr_gid == group || !gr->gr_mem)
+            continue;
+        for (char **m = gr->gr_mem; *m; m++) {
+            if (strcmp(*m, user) == 0) {
+                if (n < cap)
+                    groups[n] = gr->gr_gid;
+                n++;
+                break;
+            }
+        }
     }
-    *ngroups = 1;
-    return -1;
+    endgrent();
+    *ngroups = n;
+    return n <= cap ? n : -1;
 }
 
 /* --- Time functions ------------------------------------------------------ */
@@ -980,30 +1067,15 @@ char *strptime(const char *s, const char *format, struct tm *tm)
 #include <sys/times.h>
 #include <sched.h>
 
+/* sysinfo() and times(): the kernel's figures (they were made up). */
 int sysinfo(struct sysinfo *info)
 {
-    if (info == NULL) {
-        errno = EFAULT;
-        return -1;
-    }
-    memset(info, 0, sizeof(*info));
-    info->uptime = 60;
-    info->totalram = 256 * 1024 * 1024UL;
-    info->freeram = 128 * 1024 * 1024UL;
-    info->procs = 1;
-    info->mem_unit = 1;
-    return 0;
+    return (int)__syscall_ret(veridian_syscall1(SYS_sysinfo, info));
 }
 
 clock_t times(struct tms *buf)
 {
-    if (buf) {
-        buf->tms_utime = 0;
-        buf->tms_stime = 0;
-        buf->tms_cutime = 0;
-        buf->tms_cstime = 0;
-    }
-    return (clock_t)0;
+    return (clock_t)__syscall_ret(veridian_syscall1(SYS_times, buf));
 }
 
 int sched_getaffinity(pid_t pid, size_t cpusetsize, cpu_set_t *mask)
@@ -1032,28 +1104,30 @@ int prctl(int option, unsigned long arg2, unsigned long arg3,
 
 #include <signal.h>
 
+#include <veridian/syscall.h>
+
+/* Wait with `mask` until a signal is caught (rt_sigsuspend); always ends
+ * with EINTR. It returned at once without waiting. */
 int sigsuspend(const sigset_t *mask)
 {
-    (void)mask;
-    errno = EINTR;
+    long ret = veridian_syscall1(SYS_rt_sigsuspend, (long)mask);
+    errno = ret < 0 ? (int)(-ret) : EINTR;
     return -1;
 }
 
+/* Both did nothing and reported success (N-249). */
 int utimensat(int dirfd, const char *pathname,
               const struct timespec times[2], int flags)
 {
-    (void)dirfd;
-    (void)pathname;
-    (void)times;
-    (void)flags;
-    return 0;
+    return (int)__syscall_ret(
+        veridian_syscall4(SYS_utimensat, (long)dirfd, pathname, times, (long)flags));
 }
 
 int futimens(int fd, const struct timespec times[2])
 {
-    (void)fd;
-    (void)times;
-    return 0;
+    /* A NULL path makes utimensat act on the fd itself. */
+    return (int)__syscall_ret(
+        veridian_syscall4(SYS_utimensat, (long)fd, 0L, times, 0L));
 }
 
 /* --- fnmatch ------------------------------------------------------------- */
@@ -1210,25 +1284,34 @@ static int __glob_has_magic(const char *p)
     return 0;
 }
 
+/*
+ * Slots allocated for an array holding `used` slots: the next power of two,
+ * minimum 16. glob_t has no capacity field, so the capacity is always this
+ * function of the slot count, and __glob_add grows the array (by doubling)
+ * only when the next entry crosses it.
+ */
+static size_t __glob_capacity(size_t used)
+{
+    size_t cap = 16;
+    while (cap < used)
+        cap *= 2;
+    return cap;
+}
+
 /* Helper: add a path to the glob result, growing the array as needed. */
 static int __glob_add(glob_t *pglob, const char *path)
 {
     size_t idx = pglob->gl_pathc + pglob->gl_offs;
-    /* Grow by doubling, minimum 16 slots. */
     size_t needed = idx + 2; /* +1 for entry, +1 for trailing NULL */
-    size_t capacity = 0;
-    /* Calculate current capacity from gl_pathv allocation. */
-    if (pglob->gl_pathv == NULL)
-        capacity = 0;
-    else {
-        /* We need at least 'needed' slots. */
-        capacity = needed; /* simplification: always realloc */
-    }
+    size_t capacity = pglob->gl_pathv == NULL ? 0 : __glob_capacity(idx + 1);
 
-    char **nv = (char **)realloc(pglob->gl_pathv, needed * sizeof(char *));
-    if (nv == NULL)
-        return GLOB_NOSPACE;
-    pglob->gl_pathv = nv;
+    if (needed > capacity) {
+        char **nv = (char **)realloc(pglob->gl_pathv,
+                                     __glob_capacity(needed) * sizeof(char *));
+        if (nv == NULL)
+            return GLOB_NOSPACE;
+        pglob->gl_pathv = nv;
+    }
 
     /* Initialize gl_offs entries to NULL on first allocation. */
     if (pglob->gl_pathc == 0) {
@@ -1403,65 +1486,7 @@ void globfree(glob_t *pglob)
     pglob->gl_pathc = 0;
 }
 
-/* --- setjmp / longjmp (x86_64 only) -------------------------------------- */
-/* These MUST be in assembly for real correctness, but we provide minimal
- * C stubs that work for simple cases (save/restore callee-saved registers
- * is not possible from C).  A real implementation needs asm.
- *
- * For BusyBox, setjmp/longjmp are used in the shell (ash) for error
- * recovery.  A trivial stub that always returns 0 from setjmp and
- * makes longjmp call _exit() is the minimum viable approach.
- */
-
-#include <setjmp.h>
-
-/* Minimal setjmp: save rsp and rip into jmp_buf, return 0.
- * This is an assembly-level operation; the C version below is a placeholder
- * that will NOT correctly restore state.  For BusyBox to actually use
- * setjmp/longjmp properly, this needs a proper assembly implementation.
- */
-
-/* Provide weak symbols so a proper asm implementation can override */
-__attribute__((naked))
-int setjmp(jmp_buf env)
-{
-    __asm__ volatile (
-        "mov %%rbx, 0(%%rdi)\n\t"
-        "mov %%rbp, 8(%%rdi)\n\t"
-        "mov %%r12, 16(%%rdi)\n\t"
-        "mov %%r13, 24(%%rdi)\n\t"
-        "mov %%r14, 32(%%rdi)\n\t"
-        "mov %%r15, 40(%%rdi)\n\t"
-        "lea 8(%%rsp), %%rdx\n\t"  /* rsp before call */
-        "mov %%rdx, 48(%%rdi)\n\t"
-        "mov (%%rsp), %%rdx\n\t"   /* return address */
-        "mov %%rdx, 56(%%rdi)\n\t"
-        "xor %%eax, %%eax\n\t"
-        "ret"
-        ::: "memory"
-    );
-}
-
-__attribute__((naked, noreturn))
-void longjmp(jmp_buf env, int val)
-{
-    __asm__ volatile (
-        "mov %%esi, %%eax\n\t"
-        "test %%eax, %%eax\n\t"
-        "jnz 1f\n\t"
-        "mov $1, %%eax\n\t"
-        "1:\n\t"
-        "mov 0(%%rdi), %%rbx\n\t"
-        "mov 8(%%rdi), %%rbp\n\t"
-        "mov 16(%%rdi), %%r12\n\t"
-        "mov 24(%%rdi), %%r13\n\t"
-        "mov 32(%%rdi), %%r14\n\t"
-        "mov 40(%%rdi), %%r15\n\t"
-        "mov 48(%%rdi), %%rsp\n\t"
-        "jmp *56(%%rdi)"
-        ::: "memory"
-    );
-}
+/* setjmp / longjmp are assembly: src/setjmp_<arch>.S. */
 
 /* h_errno global */
 int h_errno = 0;
@@ -1522,12 +1547,12 @@ struct hostent *gethostbyname(const char *name)
 /*
  * getpeername() -- get name of connected peer socket.
  *
- * Kernel syscall SYS_NET_GETPEERNAME (253): (fd, addr_ptr, len_ptr)
+ * Kernel syscall SYS_getpeername (52): (fd, addr_ptr, len_ptr)
  * The kernel writes the remote address into *addr and sets *addrlen to 16.
  */
 int getpeername(int sockfd, struct sockaddr *addr, socklen_t *addrlen)
 {
-    long ret = veridian_syscall3(SYS_NET_GETPEERNAME, sockfd, addr, addrlen);
+    long ret = veridian_syscall3(SYS_getpeername, sockfd, addr, addrlen);
     if (ret < 0) {
         errno = (int)(-ret);
         return -1;
@@ -1538,12 +1563,12 @@ int getpeername(int sockfd, struct sockaddr *addr, socklen_t *addrlen)
 /*
  * getsockname() -- get socket name (local bound address).
  *
- * Kernel syscall SYS_NET_GETSOCKNAME (252): (fd, addr_ptr, len_ptr)
+ * Kernel syscall SYS_getsockname (51): (fd, addr_ptr, len_ptr)
  * The kernel writes the local address into *addr and sets *addrlen to 16.
  */
 int getsockname(int sockfd, struct sockaddr *addr, socklen_t *addrlen)
 {
-    long ret = veridian_syscall3(SYS_NET_GETSOCKNAME, sockfd, addr, addrlen);
+    long ret = veridian_syscall3(SYS_getsockname, sockfd, addr, addrlen);
     if (ret < 0) {
         errno = (int)(-ret);
         return -1;
@@ -1551,26 +1576,12 @@ int getsockname(int sockfd, struct sockaddr *addr, socklen_t *addrlen)
     return 0;
 }
 
-int inet_aton(const char *cp, struct in_addr *inp)
-{
-    (void)cp;
-    (void)inp;
-    return 0;
-}
-
-char *inet_ntoa(struct in_addr in)
-{
-    static char buf[16];
-    unsigned char *b = (unsigned char *)&in.s_addr;
-    int n = snprintf(buf, sizeof(buf), "%u.%u.%u.%u", b[0], b[1], b[2], b[3]);
-    (void)n;
-    return buf;
-}
+/* inet_aton, inet_ntoa and the other address conversions: inet.c */
 
 /*
  * sendto() -- send a message to a specific destination address.
  *
- * Kernel syscall SYS_NET_SENDTO (250): (fd, buf_ptr, buf_len, addr_ptr, addr_len)
+ * Kernel syscall SYS_sendto (44): (fd, buf_ptr, buf_len, addr_ptr, addr_len)
  * The flags argument is not forwarded (not yet implemented in the kernel).
  * When dest_addr is NULL (connected socket), falls back to SYS_SOCKET_SEND.
  */
@@ -1580,7 +1591,7 @@ ssize_t sendto(int sockfd, const void *buf, size_t len, int flags,
     (void)flags;
     long ret;
     if (dest_addr != NULL) {
-        ret = veridian_syscall5(SYS_NET_SENDTO,
+        ret = veridian_syscall5(SYS_sendto,
                                  sockfd, buf, len, dest_addr, addrlen);
     } else {
         /* No destination address: send on connected socket. */
@@ -1596,7 +1607,7 @@ ssize_t sendto(int sockfd, const void *buf, size_t len, int flags,
 /*
  * recvfrom() -- receive a message and optionally capture sender's address.
  *
- * Kernel syscall SYS_NET_RECVFROM (251): (fd, buf_ptr, buf_len, addr_ptr)
+ * Kernel syscall SYS_recvfrom (45): (fd, buf_ptr, buf_len, addr_ptr)
  * addr_ptr may be NULL (kernel handles gracefully).  addrlen is updated to
  * the fixed sockaddr size (16) when an address was written.
  * The flags argument is not forwarded.
@@ -1605,7 +1616,7 @@ ssize_t recvfrom(int sockfd, void *buf, size_t len, int flags,
                  struct sockaddr *src_addr, socklen_t *addrlen)
 {
     (void)flags;
-    long ret = veridian_syscall4(SYS_NET_RECVFROM,
+    long ret = veridian_syscall4(SYS_recvfrom,
                                   sockfd, buf, len, src_addr);
     if (ret < 0) {
         errno = (int)(-ret);
@@ -1621,12 +1632,12 @@ ssize_t recvfrom(int sockfd, void *buf, size_t len, int flags,
 /*
  * socketpair() -- create a pair of connected sockets (AF_UNIX only).
  *
- * Kernel syscall SYS_SOCKET_PAIR (228) takes the Linux argument order
+ * Kernel syscall SYS_socketpair (53) takes the Linux argument order
  * (domain, type, protocol, int sv[2]) and writes the two new fds into sv.
  */
 int socketpair(int domain, int type, int protocol, int sv[2])
 {
-    long ret = veridian_syscall4(SYS_SOCKET_PAIR, domain, type, protocol, sv);
+    long ret = veridian_syscall4(SYS_socketpair, domain, type, protocol, sv);
     if (ret < 0) {
         errno = (int)(-ret);
         return -1;
@@ -1637,7 +1648,7 @@ int socketpair(int domain, int type, int protocol, int sv[2])
 /* sendmsg()/recvmsg() -- data plus ancillary data (SCM_RIGHTS). */
 ssize_t sendmsg(int sockfd, const struct msghdr *msg, int flags)
 {
-    long ret = veridian_syscall3(SYS_SENDMSG, sockfd, msg, flags);
+    long ret = veridian_syscall3(SYS_sendmsg, sockfd, msg, flags);
     if (ret < 0) {
         errno = (int)(-ret);
         return -1;
@@ -1647,7 +1658,7 @@ ssize_t sendmsg(int sockfd, const struct msghdr *msg, int flags)
 
 ssize_t recvmsg(int sockfd, struct msghdr *msg, int flags)
 {
-    long ret = veridian_syscall3(SYS_RECVMSG, sockfd, msg, flags);
+    long ret = veridian_syscall3(SYS_recvmsg, sockfd, msg, flags);
     if (ret < 0) {
         errno = (int)(-ret);
         return -1;
@@ -1655,27 +1666,30 @@ ssize_t recvmsg(int sockfd, struct msghdr *msg, int flags)
     return (ssize_t)ret;
 }
 
+/* Set the supplementary groups to those `user` belongs to (plus `group`).
+ * It did nothing and reported success. */
 int initgroups(const char *user, gid_t group)
 {
-    (void)user;
-    (void)group;
-    return 0;
+    gid_t groups[NGROUPS_MAX];
+    int n = NGROUPS_MAX;
+
+    if (getgrouplist(user, group, groups, &n) < 0) {
+        errno = EINVAL;  /* more groups than the kernel holds */
+        return -1;
+    }
+    return setgroups((size_t)n, groups);
 }
 
 /* endgrent() is implemented above with setgrent()/getgrent(). */
 
 int chroot(const char *path)
 {
-    (void)path;
-    errno = ENOSYS;
-    return -1;
+    return (int)__syscall_ret(veridian_syscall1(SYS_chroot, path));
 }
 
 int fchdir(int fd)
 {
-    (void)fd;
-    errno = ENOSYS;
-    return -1;
+    return (int)__syscall_ret(veridian_syscall1(SYS_fchdir, (long)fd));
 }
 
 int settimeofday(const struct timeval *tv, const struct timezone *tz)

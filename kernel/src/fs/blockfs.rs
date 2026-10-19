@@ -23,17 +23,13 @@ use alloc::{
 };
 use core::mem::size_of;
 
-use spin::Mutex;
-#[cfg(not(target_arch = "aarch64"))]
-use spin::RwLock;
+use spin::{Mutex, RwLock};
 
-#[cfg(target_arch = "aarch64")]
-use super::bare_lock::RwLock;
 use super::{DirEntry, Filesystem, Metadata, NodeType, Permissions, VfsNode};
 use crate::error::{FsError, KernelError};
 
 mod cache;
-use cache::{BlockCache, Disk};
+use cache::{BlockCache, Disk, Lookup};
 
 /// Block size (4KB)
 pub const BLOCK_SIZE: usize = 4096;
@@ -292,26 +288,63 @@ impl DiskInode {
         }
     }
 
+    /// The file type bits of `mode` (S_IFMT). Each type is one value of
+    /// them, not a bit: tested as bits, a block device (0x6000) and a
+    /// socket (0xC000) both looked like directories.
+    fn file_type_bits(&self) -> u16 {
+        self.mode & 0xF000
+    }
+
     pub fn is_dir(&self) -> bool {
-        (self.mode & 0x4000) != 0
+        self.file_type_bits() == 0x4000
     }
 
     pub fn is_file(&self) -> bool {
-        (self.mode & 0x8000) != 0
+        self.file_type_bits() == 0x8000
     }
 
     pub fn is_symlink(&self) -> bool {
-        (self.mode & 0xA000) == 0xA000
+        self.file_type_bits() == 0xA000
+    }
+
+    /// A FIFO, device or socket (mknod): no data blocks, and a device
+    /// keeps its number in `direct_blocks[0]`, as ext2 does.
+    pub fn is_special(&self) -> bool {
+        matches!(self.file_type_bits(), 0x1000 | 0x2000 | 0x6000 | 0xC000)
+    }
+
+    /// The device number of a device inode (Linux's encoding).
+    pub fn rdev(&self) -> u32 {
+        if matches!(self.file_type_bits(), 0x2000 | 0x6000) {
+            self.direct_blocks[0]
+        } else {
+            0
+        }
     }
 
     pub fn node_type(&self) -> NodeType {
-        if self.is_dir() {
-            NodeType::Directory
-        } else if self.is_symlink() {
-            NodeType::Symlink
-        } else {
-            NodeType::File
+        match self.file_type_bits() {
+            0x4000 => NodeType::Directory,
+            0xA000 => NodeType::Symlink,
+            0x1000 => NodeType::Pipe,
+            0x2000 => NodeType::CharDevice,
+            0x6000 => NodeType::BlockDevice,
+            0xC000 => NodeType::Socket,
+            _ => NodeType::File,
         }
+    }
+}
+
+/// The file type bits (S_IFMT) of a node type.
+fn type_mode(kind: NodeType) -> u16 {
+    match kind {
+        NodeType::File => 0x8000,
+        NodeType::Directory => 0x4000,
+        NodeType::Symlink => 0xA000,
+        NodeType::Pipe => 0x1000,
+        NodeType::CharDevice => 0x2000,
+        NodeType::BlockDevice => 0x6000,
+        NodeType::Socket => 0xC000,
     }
 }
 
@@ -344,6 +377,24 @@ impl DiskDirEntry {
     pub const FT_DIR: u8 = 2;
     /// File type constant for symlinks
     pub const FT_SYMLINK: u8 = 7;
+    /// File type constants for special files (ext2's values)
+    pub const FT_CHRDEV: u8 = 3;
+    pub const FT_BLKDEV: u8 = 4;
+    pub const FT_FIFO: u8 = 5;
+    pub const FT_SOCK: u8 = 6;
+
+    /// The entry type for a node type.
+    pub fn file_type_of(kind: NodeType) -> u8 {
+        match kind {
+            NodeType::File => Self::FT_REG_FILE,
+            NodeType::Directory => Self::FT_DIR,
+            NodeType::Symlink => Self::FT_SYMLINK,
+            NodeType::CharDevice => Self::FT_CHRDEV,
+            NodeType::BlockDevice => Self::FT_BLKDEV,
+            NodeType::Pipe => Self::FT_FIFO,
+            NodeType::Socket => Self::FT_SOCK,
+        }
+    }
 
     /// Create a new directory entry
     pub fn new(inode: u32, name: &str, file_type: u8) -> Self {
@@ -375,6 +426,10 @@ impl DiskDirEntry {
         match self.file_type {
             Self::FT_DIR => NodeType::Directory,
             Self::FT_SYMLINK => NodeType::Symlink,
+            Self::FT_CHRDEV => NodeType::CharDevice,
+            Self::FT_BLKDEV => NodeType::BlockDevice,
+            Self::FT_FIFO => NodeType::Pipe,
+            Self::FT_SOCK => NodeType::Socket,
             _ => NodeType::File,
         }
     }
@@ -386,6 +441,7 @@ fn align4(val: usize) -> usize {
 }
 
 /// Block allocation bitmap
+#[derive(Clone)]
 pub struct BlockBitmap {
     bitmap: Vec<u8>,
     total_blocks: usize,
@@ -449,9 +505,38 @@ impl BlockFsNode {
     pub fn new(inode_num: u32, fs: Arc<RwLock<BlockFsInner>>) -> Self {
         Self { inode_num, fs }
     }
+
+    /// Run one whole modifying operation under the filesystem write lock,
+    /// then write back excess unpinned data. The write-back runs only here,
+    /// between operations, never half-way through one.
+    fn mutate<R>(
+        &self,
+        op: impl FnOnce(&mut BlockFsInner) -> Result<R, KernelError>,
+    ) -> Result<R, KernelError> {
+        let mut fs = self.fs.write();
+        let result = op(&mut fs);
+        fs.writeback_if_over_limit();
+        let freed = core::mem::take(&mut fs.freed_special);
+        drop(fs);
+        // Outside the lock: the FIFO and socket tables are locked after it.
+        for inode in freed {
+            super::special_inode_freed((Arc::as_ptr(&self.fs) as u64, inode as u64));
+        }
+        result
+    }
 }
 
 impl VfsNode for BlockFsNode {
+    fn file_identity(&self) -> Option<(u64, u64)> {
+        Some((Arc::as_ptr(&self.fs) as u64, self.inode_num as u64))
+    }
+
+    fn page_cache(&self) -> Option<Arc<crate::mm::page_cache::FileCache>> {
+        let fs = self.fs.read();
+        let meta = fs.get_metadata(self.inode_num).ok()?;
+        (meta.node_type == NodeType::File).then(|| fs.page_cache.file(self.inode_num as u64))
+    }
+
     fn node_type(&self) -> NodeType {
         self.metadata()
             .map(|m| m.node_type)
@@ -464,8 +549,7 @@ impl VfsNode for BlockFsNode {
     }
 
     fn write(&self, offset: usize, data: &[u8]) -> Result<usize, KernelError> {
-        let mut fs = self.fs.write();
-        fs.write_inode(self.inode_num, offset, data)
+        self.mutate(|fs| fs.write_inode(self.inode_num, offset, data))
     }
 
     fn metadata(&self) -> Result<Metadata, KernelError> {
@@ -489,30 +573,44 @@ impl VfsNode for BlockFsNode {
         name: &str,
         permissions: Permissions,
     ) -> Result<Arc<dyn VfsNode>, KernelError> {
-        let mut fs = self.fs.write();
-        let new_inode = fs.create_file(self.inode_num, name, permissions)?;
+        let new_inode = self.mutate(|fs| fs.create_file(self.inode_num, name, permissions))?;
         Ok(Arc::new(BlockFsNode::new(new_inode, self.fs.clone())))
     }
 
     fn mkdir(&self, name: &str, permissions: Permissions) -> Result<Arc<dyn VfsNode>, KernelError> {
-        let mut fs = self.fs.write();
-        let new_inode = fs.create_directory(self.inode_num, name, permissions)?;
+        let new_inode = self.mutate(|fs| fs.create_directory(self.inode_num, name, permissions))?;
         Ok(Arc::new(BlockFsNode::new(new_inode, self.fs.clone())))
     }
 
     fn unlink(&self, name: &str) -> Result<(), KernelError> {
-        let mut fs = self.fs.write();
-        fs.unlink_from_dir(self.inode_num, name)
+        self.mutate(|fs| fs.unlink_from_dir(self.inode_num, name))
+    }
+
+    /// The entry's type checked under the filesystem lock the removal
+    /// holds (see [`VfsNode::unlink_kind`]).
+    fn unlink_kind(&self, name: &str, want_dir: bool) -> Result<(), KernelError> {
+        self.mutate(|fs| {
+            let child = fs.lookup_in_dir(self.inode_num, name)?;
+            let is_dir = fs
+                .inode_table
+                .get(child as usize)
+                .is_some_and(|inode| inode.is_dir());
+            let kind = if is_dir {
+                NodeType::Directory
+            } else {
+                NodeType::File
+            };
+            super::check_unlink_kind(kind, want_dir)?;
+            fs.unlink_from_dir(self.inode_num, name)
+        })
     }
 
     fn truncate(&self, size: usize) -> Result<(), KernelError> {
-        let mut fs = self.fs.write();
-        fs.truncate_inode(self.inode_num, size)
+        self.mutate(|fs| fs.truncate_inode(self.inode_num, size))
     }
 
     fn symlink(&self, name: &str, target: &str) -> Result<Arc<dyn VfsNode>, KernelError> {
-        let mut fs = self.fs.write();
-        let new_inode = fs.create_symlink(self.inode_num, name, target)?;
+        let new_inode = self.mutate(|fs| fs.create_symlink(self.inode_num, name, target))?;
         Ok(Arc::new(BlockFsNode::new(new_inode, self.fs.clone())))
     }
 
@@ -538,8 +636,47 @@ impl VfsNode for BlockFsNode {
         fs.chown_inode(self.inode_num, uid, gid)
     }
 
+    fn set_times(&self, atime: Option<u64>, mtime: Option<u64>) -> Result<(), KernelError> {
+        let mut fs = self.fs.write();
+        fs.set_times_inode(self.inode_num, atime, mtime)
+    }
+
     fn as_any(&self) -> Option<&dyn core::any::Any> {
         Some(self)
+    }
+
+    fn mknod(
+        &self,
+        name: &str,
+        kind: NodeType,
+        permissions: Permissions,
+        rdev: u32,
+    ) -> Result<Arc<dyn VfsNode>, KernelError> {
+        let new_inode =
+            self.mutate(|fs| fs.create_special(self.inode_num, name, kind, permissions, rdev))?;
+        Ok(Arc::new(BlockFsNode::new(new_inode, self.fs.clone())))
+    }
+
+    fn is_special_inode(&self) -> bool {
+        let fs = self.fs.read();
+        fs.inode_table
+            .get(self.inode_num as usize)
+            .is_some_and(DiskInode::is_special)
+    }
+
+    fn device_id(&self) -> Option<(u32, u32)> {
+        let fs = self.fs.read();
+        let inode = fs.inode_table.get(self.inode_num as usize)?;
+        matches!(
+            inode.node_type(),
+            NodeType::CharDevice | NodeType::BlockDevice
+        )
+        .then(|| {
+            (
+                super::dev_major(inode.rdev()),
+                super::dev_minor(inode.rdev()),
+            )
+        })
     }
 
     fn rename(
@@ -553,9 +690,8 @@ impl VfsNode for BlockFsNode {
             .and_then(|a| a.downcast_ref::<BlockFsNode>())
             .filter(|np| Arc::ptr_eq(&np.fs, &self.fs))
             .ok_or(KernelError::FsError(FsError::CrossDevice))?;
-        self.fs
-            .write()
-            .rename_entry(self.inode_num, old_name, np.inode_num, new_name)
+        let np_inode = np.inode_num;
+        self.mutate(|fs| fs.rename_entry(self.inode_num, old_name, np_inode, new_name))
     }
 
     fn link(&self, name: &str, target: Arc<dyn VfsNode>) -> Result<(), KernelError> {
@@ -577,8 +713,9 @@ impl VfsNode for BlockFsNode {
         let target_meta = target.metadata()?;
         let target_node_type = target.node_type();
 
-        let mut fs = self.fs.write();
-        fs.link_in_dir_with_meta(self.inode_num, name, &target_meta, target_node_type)
+        self.mutate(|fs| {
+            fs.link_in_dir_with_meta(self.inode_num, name, &target_meta, target_node_type)
+        })
     }
 }
 
@@ -591,6 +728,15 @@ pub struct BlockFsInner {
     /// sync (FS-PERF-01). Locked separately so readers holding the
     /// filesystem's read lock can still fill it.
     cache: RwLock<BlockCache>,
+    /// Readers waiting for another reader's fill of the same block
+    /// ([`cache::Lookup::Busy`]); woken after every fill.
+    fill_waiters: crate::sched::dispatch::WaitQueue,
+    /// Blocks freed since the last sync, with a disk attached. They stay
+    /// marked in `block_bitmap` until a sync has written a bitmap without
+    /// them, so they are not reused while the last-synced inodes may still
+    /// point at them; that is what lets file data be written back before
+    /// sync (ADR 0011).
+    quarantine: Vec<u32>,
     /// Optional disk backend for persistence. When `None`, BlockFS operates
     /// as a pure RAM filesystem (all data lost on reboot) and the cache
     /// holds every block.
@@ -599,6 +745,21 @@ pub struct BlockFsInner {
     device_blocks: u64,
     /// Whether the backend accepts writes, sampled when attached.
     disk_writable: bool,
+    /// Pages of files shared by the processes that map them (ADR 0010),
+    /// dropped whenever a file's data changes or its inode is freed.
+    page_cache: crate::mm::page_cache::PageCacheTable,
+    /// Special inodes (FIFOs, sockets) freed by the current operation, for
+    /// [`BlockFsNode::mutate`] to report once the lock is released: what was
+    /// found by that inode number must not be found by the next file to get
+    /// it (`fs::special_inode_freed`).
+    freed_special: Vec<u32>,
+}
+
+/// The wall clock in seconds since 1970, as the inode times are stored
+/// (utimensat sets atime and mtime in them). ctime held raw hardware timer
+/// ticks cut to 32 bits, reported as the file's change time (PR #24 review).
+fn now_secs() -> u32 {
+    (crate::timer::realtime::now_ns().max(0) / 1_000_000_000).min(u32::MAX as i64) as u32
 }
 
 impl BlockFsInner {
@@ -633,9 +794,13 @@ impl BlockFsInner {
                 block_count as usize,
                 cache::DEFAULT_CAPACITY_BLOCKS,
             )),
+            fill_waiters: crate::sched::dispatch::WaitQueue::new(),
+            quarantine: Vec::new(),
             disk: None,
             device_blocks: 0,
             disk_writable: false,
+            page_cache: crate::mm::page_cache::PageCacheTable::new(),
+            freed_special: Vec::new(),
         };
 
         // Create "." and ".." entries in the root directory (both point to inode 0)
@@ -658,8 +823,10 @@ impl BlockFsInner {
     fn allocate_inode(&mut self) -> Option<u32> {
         for (idx, inode) in self.inode_table.iter().enumerate() {
             if inode.links_count == 0 && idx > 0 {
-                // Don't allocate root
+                // Don't allocate root. A cache of the inode's previous file
+                // must not serve the new one.
                 self.superblock.free_inodes -= 1;
+                self.page_cache.invalidate(idx as u64);
                 return Some(idx as u32);
             }
         }
@@ -667,11 +834,20 @@ impl BlockFsInner {
     }
 
     /// Allocate a block. Its contents start as zeros and are dirty, so the
-    /// old bytes on the disk can never be read back through it.
+    /// old bytes on the disk can never be read back through it. Blocks in
+    /// quarantine are used only when no other block is free, and are then
+    /// pinned until sync (ADR 0011).
     fn allocate_block(&mut self) -> Option<u32> {
-        let block = self.block_bitmap.allocate_block()?;
-        if self.cache.get_mut().insert_zeroed(block).is_err() {
-            self.block_bitmap.free_block(block);
+        let (block, reused) = match self.block_bitmap.allocate_block() {
+            Some(block) => (block, false),
+            None => (self.quarantine.pop()?, true),
+        };
+        if self.cache.get_mut().insert_zeroed(block, reused).is_err() {
+            if reused {
+                self.quarantine.push(block);
+            } else {
+                self.block_bitmap.free_block(block);
+            }
             return None;
         }
         self.superblock.free_blocks -= 1;
@@ -679,8 +855,13 @@ impl BlockFsInner {
     }
 
     fn free_block(&mut self, block: u32) {
-        self.block_bitmap.free_block(block);
         self.superblock.free_blocks += 1;
+        if self.disk.is_some() {
+            // Not reusable until a sync has recorded it as free.
+            self.quarantine.push(block);
+        } else {
+            self.block_bitmap.free_block(block);
+        }
         // The data is logically gone: drop it without writing it back.
         self.cache.get_mut().discard(block);
     }
@@ -695,20 +876,90 @@ impl BlockFsInner {
 
     /// Run `f` on a block's contents, reading it from the disk on a miss.
     /// Unallocated blocks read as zeros.
+    ///
+    /// Neither the cache lock nor the disk is held longer than needed
+    /// (N-118 / BM-DRV-06): a hit takes only the cache lock, and a miss
+    /// reads the disk with the cache unlocked (see `cache`'s module docs),
+    /// so other readers keep hitting while it waits for the device. The
+    /// disk mutex is taken only for the read itself.
     fn with_block<R>(&self, idx: u32, f: impl FnOnce(&[u8]) -> R) -> Result<R, KernelError> {
         let allocated = self.block_bitmap.is_allocated(idx);
-        let guard = self.disk.as_ref().map(|d| d.lock());
-        let view = self.disk_view(guard.as_deref());
-        self.cache.write().read(idx, allocated, view, f)
+        loop {
+            let ticket = {
+                let mut cache = self.cache.write();
+                match cache.lookup(idx, allocated)? {
+                    Lookup::Hit(slot) => return Ok(f(cache.data(slot))),
+                    Lookup::Zero => return Ok(f(&ZERO_BLOCK)),
+                    Lookup::Busy => None,
+                    Lookup::Fill(ticket) => Some(ticket),
+                }
+            };
+            match ticket {
+                // Another reader is filling it: sleep until that fill ends
+                // (the fill wakes every waiter), then look again.
+                None => self
+                    .fill_waiters
+                    .wait_until(|| !self.cache.write().is_filling(idx)),
+                Some(mut t) => {
+                    let read = match self.disk.as_ref() {
+                        Some(d) if (idx as u64) < self.device_blocks => {
+                            d.lock().read_block(idx as u64, t.buf())
+                        }
+                        // RAM mode, or past the end of the device: zeros.
+                        _ => {
+                            t.buf().fill(0);
+                            Ok(())
+                        }
+                    };
+                    let done = self.cache.write().finish_fill(t, read);
+                    self.fill_waiters.wake_all();
+                    done?;
+                    // Resident now: the next lookup hits.
+                }
+            }
+        }
     }
 
-    /// Mutable access to a block, which is marked dirty.
+    /// Mutable access to a metadata block (a directory or indirect-pointer
+    /// block), which is marked dirty and pinned until the next sync.
     fn block_mut(&mut self, idx: u32) -> Result<&mut [u8], KernelError> {
+        self.block_mut_pinned(idx, true)
+    }
+
+    /// Mutable access to a block of file data (a regular file's or a
+    /// symlink's contents), which may be written back before sync.
+    fn data_block_mut(&mut self, idx: u32) -> Result<&mut [u8], KernelError> {
+        self.block_mut_pinned(idx, false)
+    }
+
+    fn block_mut_pinned(&mut self, idx: u32, pin: bool) -> Result<&mut [u8], KernelError> {
         let allocated = self.block_bitmap.is_allocated(idx);
         let disk = self.disk.clone();
         let guard = disk.as_ref().map(|d| d.lock());
         let view = self.disk_view(guard.as_deref());
-        self.cache.get_mut().write(idx, allocated, view)
+        self.cache.get_mut().write(idx, allocated, view, pin)
+    }
+
+    /// At the end of a filesystem operation: if enough unpinned dirty data
+    /// has accumulated, write it back so it can be evicted (BM-FS-01). Data
+    /// that cannot be written stays dirty, as before; the next sync reports
+    /// it.
+    fn writeback_if_over_limit(&mut self) {
+        if !self.disk_writable || !self.cache.get_mut().over_dirty_limit() {
+            return;
+        }
+        let Some(disk) = self.disk.clone() else {
+            return;
+        };
+        let backend = disk.lock();
+        let view = Disk {
+            backend: &*backend,
+            device_blocks: self.device_blocks,
+            writable: true,
+        };
+        if let Err(_e) = self.cache.get_mut().writeback_unpinned(view) {
+            crate::println!("[BLOCKFS] early write-back failed: {:?}", _e);
+        }
     }
 
     /// Sync all dirty blocks and metadata to the disk backend.
@@ -754,10 +1005,18 @@ impl BlockFsInner {
         // Update superblock write time and mount count
         self.superblock.write_time = crate::arch::timer::read_hw_timestamp();
 
-        // Write metadata (superblock, bitmap, inode table)
+        // Write metadata (superblock, bitmap, inode table). The bitmap on
+        // the disk shows the quarantined blocks free; in memory they become
+        // reusable only once all of the metadata is written.
+        let mut on_disk_bitmap = self.block_bitmap.clone();
+        for &block in &self.quarantine {
+            on_disk_bitmap.free_block(block);
+        }
         self.serialize_superblock(&*backend)?;
-        self.serialize_bitmap(&*backend)?;
+        self.serialize_bitmap(&*backend, &on_disk_bitmap)?;
         self.serialize_inode_table(&*backend)?;
+        self.block_bitmap = on_disk_bitmap;
+        self.quarantine.clear();
         synced += 1; // Count metadata as one sync unit
 
         Ok(synced)
@@ -868,19 +1127,22 @@ impl BlockFsInner {
     }
 
     /// Serialize the block bitmap to disk (blocks 1..1+bitmap_blocks).
-    fn serialize_bitmap(&self, backend: &dyn DiskBackend) -> Result<(), KernelError> {
+    fn serialize_bitmap(
+        &self,
+        backend: &dyn DiskBackend,
+        block_bitmap: &BlockBitmap,
+    ) -> Result<(), KernelError> {
         let bm_blocks = bitmap_blocks(self.superblock.block_count);
         let bitmap_start = SUPERBLOCK_BLOCK + 1;
 
         for i in 0..bm_blocks {
             let mut buf = [0u8; BLOCK_SIZE];
             let byte_offset = i as usize * BLOCK_SIZE;
-            let bytes_remaining = self.block_bitmap.bitmap.len().saturating_sub(byte_offset);
+            let bytes_remaining = block_bitmap.bitmap.len().saturating_sub(byte_offset);
             let copy_len = bytes_remaining.min(BLOCK_SIZE);
             if copy_len > 0 {
-                buf[..copy_len].copy_from_slice(
-                    &self.block_bitmap.bitmap[byte_offset..byte_offset + copy_len],
-                );
+                buf[..copy_len]
+                    .copy_from_slice(&block_bitmap.bitmap[byte_offset..byte_offset + copy_len]);
             }
             backend.write_block((bitmap_start + i) as u64, &buf)?;
         }
@@ -1072,9 +1334,13 @@ impl BlockFsInner {
             block_bitmap,
             inode_table,
             cache: RwLock::new(BlockCache::new(block_count, cache_blocks)),
+            fill_waiters: crate::sched::dispatch::WaitQueue::new(),
+            quarantine: Vec::new(),
             disk: None,
             device_blocks: 0,
             disk_writable: false,
+            page_cache: crate::mm::page_cache::PageCacheTable::new(),
+            freed_special: Vec::new(),
         };
         fs.attach_disk(backend)?;
 
@@ -1234,6 +1500,9 @@ impl BlockFsInner {
             .inode_table
             .get(inode_num as usize)
             .ok_or(KernelError::FsError(FsError::NotFound))?;
+        if inode.is_special() {
+            return Err(KernelError::FsError(FsError::NotAFile));
+        }
 
         if offset >= inode.size as usize {
             return Ok(0);
@@ -1278,6 +1547,14 @@ impl BlockFsInner {
         offset: usize,
         data: &[u8],
     ) -> Result<usize, KernelError> {
+        if self
+            .inode_table
+            .get(inode_num as usize)
+            .is_some_and(DiskInode::is_special)
+        {
+            return Err(KernelError::FsError(FsError::NotAFile));
+        }
+        self.page_cache.invalidate(inode_num as u64);
         // Collect block information in multiple passes to avoid borrow conflicts
         let mut blocks_needed: Vec<(usize, usize, usize)> = Vec::new();
         let mut current_offset = offset;
@@ -1310,7 +1587,7 @@ impl BlockFsInner {
         let mut bytes_written = 0;
         for (i, (_, block_offset, copy_len)) in blocks_needed.iter().enumerate() {
             let block_num = block_numbers[i];
-            self.block_mut(block_num)?[*block_offset..*block_offset + *copy_len]
+            self.data_block_mut(block_num)?[*block_offset..*block_offset + *copy_len]
                 .copy_from_slice(&data[bytes_written..bytes_written + *copy_len]);
             bytes_written += *copy_len;
         }
@@ -1560,6 +1837,50 @@ impl BlockFsInner {
         Ok(inode_num)
     }
 
+    /// Create special file `name` (mknod) in `parent`: a FIFO, a device
+    /// numbered `rdev` or a socket. It has no data blocks; a device's
+    /// number is kept in `direct_blocks[0]`.
+    fn create_special(
+        &mut self,
+        parent: u32,
+        name: &str,
+        kind: NodeType,
+        permissions: Permissions,
+        rdev: u32,
+    ) -> Result<u32, KernelError> {
+        if !matches!(
+            kind,
+            NodeType::Pipe | NodeType::CharDevice | NodeType::BlockDevice | NodeType::Socket
+        ) {
+            return Err(KernelError::FsError(FsError::NotSupported));
+        }
+        if name.is_empty() || name.len() > MAX_FILENAME_LEN {
+            return Err(KernelError::InvalidArgument {
+                name: "filename",
+                value: "empty or exceeds maximum length",
+            });
+        }
+        if self.find_dir_entry(parent, name)?.is_some() {
+            return Err(KernelError::FsError(FsError::AlreadyExists));
+        }
+        let inode_num = self
+            .allocate_inode()
+            .ok_or(KernelError::ResourceExhausted { resource: "inodes" })?;
+        let mode = type_mode(kind) | (permissions.to_mode() & 0o7777) as u16;
+        let mut inode = DiskInode::new(mode, 0, 0);
+        if matches!(kind, NodeType::CharDevice | NodeType::BlockDevice) {
+            inode.direct_blocks[0] = rdev;
+        }
+        self.inode_table[inode_num as usize] = inode;
+        let file_type = DiskDirEntry::file_type_of(kind);
+        if let Err(e) = self.write_dir_entry(parent, inode_num, name, file_type) {
+            self.inode_table[inode_num as usize] = DiskInode::free();
+            self.superblock.free_inodes += 1;
+            return Err(e);
+        }
+        Ok(inode_num)
+    }
+
     /// Point the directory entry at (`dir`, `block_idx`, `offset`) at
     /// `inode` (0 deletes it). Link counts are the caller's business.
     fn set_dir_entry_inode(
@@ -1771,6 +2092,14 @@ impl BlockFsInner {
     }
 
     fn truncate_inode(&mut self, inode_num: u32, size: usize) -> Result<(), KernelError> {
+        if self
+            .inode_table
+            .get(inode_num as usize)
+            .is_some_and(DiskInode::is_special)
+        {
+            return Err(KernelError::FsError(FsError::NotAFile));
+        }
+        self.page_cache.invalidate(inode_num as u64);
         let old_size = {
             let inode = self
                 .inode_table
@@ -1821,7 +2150,7 @@ impl BlockFsInner {
                 if let Some(block_num) = phys_block {
                     let zero_from = size % BLOCK_SIZE;
                     if zero_from > 0 {
-                        self.block_mut(block_num)?[zero_from..BLOCK_SIZE].fill(0);
+                        self.data_block_mut(block_num)?[zero_from..BLOCK_SIZE].fill(0);
                     }
                 }
             }
@@ -1869,8 +2198,32 @@ impl BlockFsInner {
         let type_bits = inode.mode & 0xF000;
         let perm_bits = permissions_to_mode(permissions, false) & 0x0FFF;
         inode.mode = type_bits | perm_bits;
-        inode.ctime = crate::arch::timer::read_hw_timestamp() as u32;
+        inode.ctime = now_secs();
 
+        Ok(())
+    }
+
+    /// Set an inode's access and/or modification time. On-disk times are
+    /// 32-bit seconds; later times are clamped to the largest, as Linux
+    /// clamps to what a filesystem can store.
+    fn set_times_inode(
+        &mut self,
+        inode_num: u32,
+        atime: Option<u64>,
+        mtime: Option<u64>,
+    ) -> Result<(), KernelError> {
+        let inode = self
+            .inode_table
+            .get_mut(inode_num as usize)
+            .ok_or(KernelError::FsError(FsError::NotFound))?;
+        let clamp = |t: u64| t.min(u32::MAX as u64) as u32;
+        if let Some(atime) = atime {
+            inode.atime = clamp(atime);
+        }
+        if let Some(mtime) = mtime {
+            inode.mtime = clamp(mtime);
+        }
+        inode.ctime = now_secs();
         Ok(())
     }
 
@@ -1902,7 +2255,7 @@ impl BlockFsInner {
         if let Some(gid) = gid {
             inode.gid = gid;
         }
-        inode.ctime = crate::arch::timer::read_hw_timestamp() as u32;
+        inode.ctime = now_secs();
         Ok(())
     }
 
@@ -1948,11 +2301,8 @@ impl BlockFsInner {
         }
 
         // Determine file type for directory entry
-        let file_type = if self.inode_table[target_inode as usize].is_symlink() {
-            DiskDirEntry::FT_SYMLINK
-        } else {
-            DiskDirEntry::FT_REG_FILE
-        };
+        let file_type =
+            DiskDirEntry::file_type_of(self.inode_table[target_inode as usize].node_type());
 
         // Add directory entry
         self.write_dir_entry(dir_inode, target_inode, name, file_type)?;
@@ -2227,6 +2577,49 @@ impl BlockFsInner {
         Ok(None)
     }
 
+    /// A deleted entry (inode 0) of directory `dir_inode` whose record is at
+    /// least `need` bytes: its direct block index, offset and record length.
+    fn free_dir_slot(
+        &self,
+        dir_inode: u32,
+        need: usize,
+    ) -> Result<Option<(usize, usize, usize)>, KernelError> {
+        let Some(inode) = self.inode_table.get(dir_inode as usize) else {
+            return Ok(None);
+        };
+        let dir_size = inode.size as usize;
+        for i in 0..12 {
+            let block_num = inode.direct_blocks[i];
+            let block_start = i * BLOCK_SIZE;
+            if block_num == 0 || block_start >= dir_size {
+                break;
+            }
+            let block_end = BLOCK_SIZE.min(dir_size - block_start);
+            let found = self.with_block(block_num, |block| {
+                let mut offset = 0;
+                while offset + DIR_ENTRY_HEADER_SIZE <= block_end {
+                    let entry = self.read_dir_entry(block, offset);
+                    let rec_len = entry.rec_len as usize;
+                    if rec_len < DIR_ENTRY_HEADER_SIZE
+                        || !rec_len.is_multiple_of(4)
+                        || offset + rec_len > BLOCK_SIZE
+                    {
+                        break;
+                    }
+                    if entry.inode == 0 && rec_len >= need {
+                        return Some((i, offset, rec_len));
+                    }
+                    offset += rec_len;
+                }
+                None
+            })?;
+            if found.is_some() {
+                return Ok(found);
+            }
+        }
+        Ok(None)
+    }
+
     /// Write a new directory entry into a directory inode's data blocks.
     ///
     /// Appends the entry at the end of the directory's current content.
@@ -2240,6 +2633,14 @@ impl BlockFsInner {
     ) -> Result<(), KernelError> {
         let entry = DiskDirEntry::new(target_inode, name, file_type);
         let entry_size = align4(DIR_ENTRY_HEADER_SIZE + entry.name_len as usize);
+
+        // A deleted entry big enough takes the new one, keeping its record
+        // length so the entries after it stay where they are. Appending every
+        // new name filled the directory's 12 blocks after a few thousand
+        // creates and deletes, and it stayed full however few names it held.
+        if let Some((block_idx, offset, rec_len)) = self.free_dir_slot(dir_inode, entry_size)? {
+            return self.serialize_dir_entry(dir_inode, block_idx, offset, &entry, rec_len);
+        }
 
         let dir_size = self.inode_table[dir_inode as usize].size as usize;
 
@@ -2346,6 +2747,13 @@ impl BlockFsInner {
 
     /// Free all data blocks belonging to an inode (direct + indirect).
     fn free_inode_blocks(&mut self, inode_num: u32) -> Result<(), KernelError> {
+        self.page_cache.invalidate(inode_num as u64);
+        // A special file has no blocks; its device number is not one.
+        if self.inode_table[inode_num as usize].is_special() {
+            self.inode_table[inode_num as usize].direct_blocks = [0; DIRECT_BLOCKS];
+            self.freed_special.push(inode_num);
+            return Ok(());
+        }
         // Free direct blocks
         for i in 0..DIRECT_BLOCKS {
             let block_num = self.inode_table[inode_num as usize].direct_blocks[i];
@@ -2367,46 +2775,10 @@ impl BlockFsInner {
 }
 
 fn permissions_to_mode(perms: Permissions, is_dir: bool) -> u16 {
-    let mut mode = 0u16;
-
-    if is_dir {
-        mode |= 0x4000;
-    } else {
-        mode |= 0x8000;
-    }
-
-    if perms.owner_read {
-        mode |= 0o400;
-    }
-    if perms.owner_write {
-        mode |= 0o200;
-    }
-    if perms.owner_exec {
-        mode |= 0o100;
-    }
-    if perms.group_read {
-        mode |= 0o040;
-    }
-    if perms.group_write {
-        mode |= 0o020;
-    }
-    if perms.group_exec {
-        mode |= 0o010;
-    }
-    if perms.other_read {
-        mode |= 0o004;
-    }
-    if perms.other_write {
-        mode |= 0o002;
-    }
-    if perms.other_exec {
-        mode |= 0o001;
-    }
-    if perms.sticky {
-        mode |= 0o1000;
-    }
-
-    mode
+    let type_bits: u16 = if is_dir { 0x4000 } else { 0x8000 };
+    // The twelve permission bits: rwx for owner, group and others, sticky,
+    // set-group-ID and set-user-ID.
+    type_bits | (perms.to_mode() & 0o7777) as u16
 }
 
 /// A shared zero block for reads of unmaterialized (sparse) blocks.
@@ -2561,6 +2933,57 @@ pub fn attach_virtio_backend(fs: &BlockFs, load_from_disk: bool) -> bool {
 mod tests {
     use super::*;
 
+    /// mknod on BlockFS: each special type reads back as itself (the type
+    /// bits were tested as bits, so a block device and a socket came back
+    /// as directories), a device keeps its number, nothing reads or writes
+    /// its data, and removing it frees no block.
+    #[test]
+    fn special_files_keep_their_type_and_number() {
+        let fs = BlockFs::format(1000, 100).unwrap();
+        let root = fs.root();
+        let perms = Permissions::from_mode(0o640);
+        let rdev = crate::fs::make_dev(8, 300);
+        for (name, kind) in [
+            ("fifo", NodeType::Pipe),
+            ("chr", NodeType::CharDevice),
+            ("blk", NodeType::BlockDevice),
+            ("sock", NodeType::Socket),
+        ] {
+            let node = root.mknod(name, kind, perms, rdev).unwrap();
+            assert_eq!(node.node_type(), kind, "{name}");
+            assert!(node.is_special_inode());
+            let meta = root.lookup(name).unwrap().metadata().unwrap();
+            assert_eq!((meta.node_type, meta.permissions.to_mode()), (kind, 0o640));
+            let device = matches!(kind, NodeType::CharDevice | NodeType::BlockDevice);
+            assert_eq!(node.device_id(), device.then_some((8, 300)), "{name}");
+            assert!(node.write(0, b"x").is_err() && node.truncate(4).is_err());
+        }
+        let types: Vec<_> = root
+            .readdir()
+            .unwrap()
+            .into_iter()
+            .filter(|e| e.name != "." && e.name != "..")
+            .map(|e| (e.name, e.node_type))
+            .collect();
+        assert!(types.contains(&(String::from("blk"), NodeType::BlockDevice)));
+        assert!(types.contains(&(String::from("sock"), NodeType::Socket)));
+        assert!(matches!(
+            root.mknod("fifo", NodeType::Pipe, perms, 0),
+            Err(KernelError::FsError(FsError::AlreadyExists))
+        ));
+        assert!(root.lookup("fifo").unwrap().is_special_inode());
+        let free = fs.inner.read().superblock.free_blocks;
+        for name in ["fifo", "chr", "blk", "sock"] {
+            root.unlink(name).unwrap();
+        }
+        let inner = fs.inner.read();
+        assert_eq!(
+            inner.superblock.free_blocks, free,
+            "a device number was freed as a block"
+        );
+        assert_eq!(inner.superblock.free_inodes, 99);
+    }
+
     #[test]
     fn test_superblock_creation() {
         let sb = Superblock::new(10000, 1000);
@@ -2608,6 +3031,29 @@ mod tests {
         assert!(root_a.lookup("h").is_ok());
     }
 
+    /// Deleted directory entries are reused: a directory that keeps
+    /// creating and removing names stays usable (it is limited to 12 blocks,
+    /// and appending every new entry filled them after a few thousand).
+    #[test]
+    fn test_directory_churn_reuses_entries() {
+        let fs = BlockFs::format(4000, 400).unwrap();
+        let dir = fs.root().mkdir("churn", Permissions::default()).unwrap();
+        for i in 0..5000 {
+            let name = alloc::format!("f{}", i % 7);
+            dir.create(&name, Permissions::default())
+                .unwrap_or_else(|e| panic!("create {} failed at {}: {:?}", name, i, e));
+            dir.unlink(&name).unwrap();
+        }
+        // Rename over an existing entry, as `mv new old` does.
+        for i in 0..5000 {
+            dir.symlink("tmp", "target")
+                .unwrap_or_else(|e| panic!("symlink at {}: {:?}", i, e));
+            dir.rename("tmp", &dir, "link").unwrap();
+        }
+        // Still one block: every new name took a freed slot.
+        assert!(dir.metadata().unwrap().size <= BLOCK_SIZE);
+    }
+
     #[test]
     fn test_sticky_bit_persists_through_chmod() {
         let fs = BlockFs::format(1000, 100).unwrap();
@@ -2637,6 +3083,14 @@ mod tests {
         }
         fn writes(&self) -> usize {
             self.writes.load(core::sync::atomic::Ordering::Relaxed)
+        }
+        /// The disk as it is now, as a separate disk: what a crash at this
+        /// instant would leave behind.
+        fn snapshot(&self) -> Arc<Self> {
+            Arc::new(Self {
+                blocks: Mutex::new(self.blocks.lock().clone()),
+                writes: core::sync::atomic::AtomicUsize::new(0),
+            })
         }
     }
 
@@ -2907,5 +3361,92 @@ mod tests {
         );
         assert_eq!(read_all(&root.lookup("new").unwrap()), pattern(9, 70_000));
         assert_eq!(read_all(&root.lookup("f4").unwrap()), pattern(4, 5000));
+    }
+
+    /// BM-FS-01 / ADR 0011: file data past the dirty limit is written back
+    /// before sync, yet a crash at that point leaves the last-synced
+    /// filesystem intact: the blocks of a file deleted since then are not
+    /// reused (quarantine), and directories and inodes stay unwritten.
+    #[test]
+    fn early_writeback_keeps_the_last_synced_state_after_a_crash() {
+        let disk = MemDisk::new(2048);
+        let fs = BlockFs::format(2048, 128).unwrap();
+        fs.set_disk_backend(backend(&disk), false).unwrap();
+        let root = fs.root();
+        let old = pattern(5, 200 * 1024);
+        root.create("old", Permissions::default())
+            .unwrap()
+            .write(0, &old)
+            .unwrap();
+        fs.sync().unwrap();
+        fs.inner.write().cache.get_mut().set_dirty_limit(8);
+
+        // Delete the synced file, then write a new one larger than the
+        // dirty limit: data reaches the disk before any sync.
+        let before = disk.writes();
+        root.unlink("old").unwrap();
+        let new = pattern(9, 300 * 1024);
+        root.create("new", Permissions::default())
+            .unwrap()
+            .write(0, &new)
+            .unwrap();
+        assert!(disk.writes() > before, "data was written back before sync");
+        assert!(fs.inner.read().cache.read().stats().early_writebacks > 0);
+
+        // A crash now: the disk still mounts as the last-synced filesystem.
+        let crashed = BlockFs::open_existing(backend(&disk.snapshot())).unwrap();
+        let croot = crashed.root();
+        assert_eq!(read_all(&croot.lookup("old").unwrap()), old);
+        assert!(croot.lookup("new").is_err());
+
+        // After sync the new state is on the disk, and the quarantined
+        // blocks are free again.
+        fs.sync().unwrap();
+        drop((root, fs));
+        let fs = BlockFs::open_existing(backend(&disk)).unwrap();
+        let root = fs.root();
+        assert!(root.lookup("old").is_err());
+        assert_eq!(read_all(&root.lookup("new").unwrap()), new);
+        let inner = fs.inner.read();
+        assert_eq!(
+            inner.superblock.free_blocks as usize,
+            (0..inner.superblock.block_count)
+                .filter(|&b| !inner.block_bitmap.is_allocated(b))
+                .count(),
+            "the bitmap and the free count agree after the quarantine is released"
+        );
+    }
+
+    /// With every free block used, quarantined blocks are reused, but then
+    /// pinned: nothing about the deleted file changes on the disk before
+    /// sync.
+    #[test]
+    fn reused_quarantined_blocks_stay_pinned_until_sync() {
+        let disk = MemDisk::new(256);
+        let fs = BlockFs::format(256, 16).unwrap();
+        fs.set_disk_backend(backend(&disk), false).unwrap();
+        let root = fs.root();
+        let free = fs.inner.read().superblock.free_blocks as usize;
+        // Fill nearly the whole disk with one file (its indirect block
+        // takes one more), then sync.
+        let old = pattern(3, (free - 4) * BLOCK_SIZE);
+        root.create("old", Permissions::default())
+            .unwrap()
+            .write(0, &old)
+            .unwrap();
+        fs.sync().unwrap();
+        fs.inner.write().cache.get_mut().set_dirty_limit(1);
+        root.unlink("old").unwrap();
+        let new = pattern(7, 64 * BLOCK_SIZE);
+        root.create("new", Permissions::default())
+            .unwrap()
+            .write(0, &new)
+            .unwrap();
+        let crashed = BlockFs::open_existing(backend(&disk.snapshot())).unwrap();
+        assert_eq!(read_all(&crashed.root().lookup("old").unwrap()), old);
+        fs.sync().unwrap();
+        drop((root, fs));
+        let fs = BlockFs::open_existing(backend(&disk)).unwrap();
+        assert_eq!(read_all(&fs.root().lookup("new").unwrap()), new);
     }
 }

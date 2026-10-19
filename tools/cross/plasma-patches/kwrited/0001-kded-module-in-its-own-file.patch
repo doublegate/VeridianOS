@@ -1,0 +1,104 @@
+VeridianOS: kwrited's KDED module in its own source file
+
+kwrited is built either as an executable (without libutempter, as here)
+or as a KDED module. kwrited.cpp held both, the module part and its
+"#include "kwrited.moc"" under #if !BUILD_AS_EXECUTABLE. AutoMoc does not
+evaluate #if, so the executable build ran moc for kwrited.cpp as well,
+which (with the module compiled out) found nothing: "kwrited.cpp: note:
+No relevant classes found. No output generated."
+
+The module's constructor, destructor and plugin factory move unchanged
+into kwritedmodule.cpp, compiled only for the KDED module; kwrited.cpp is
+what both builds share. Both builds produce the same code as before.
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 655c52b..c32ca6f 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -89,7 +89,7 @@ if (BUILD_AS_EXECUTABLE)
+     install(FILES kwrited-autostart.desktop DESTINATION ${KDE_INSTALL_AUTOSTARTDIR})
+ else ()
+     kcoreaddons_add_plugin(kded_kwrited
+-        SOURCES kwrited.cpp
++        SOURCES kwrited.cpp kwritedmodule.cpp
+         INSTALL_NAMESPACE "kf6/kded"
+     )
+     set_target_properties(kded_kwrited PROPERTIES OUTPUT_NAME kwrited)
+diff --git a/kwrited.cpp b/kwrited.cpp
+index f527e14..821c3a0 100644
+--- a/kwrited.cpp
++++ b/kwrited.cpp
+@@ -21,8 +21,6 @@
+ #include <signal.h>
+ #include <sys/types.h>
+ #include <unistd.h>
+-#else
+-#include <kpluginfactory.h>
+ #endif
+ 
+ static inline KAboutData aboutData()
+@@ -64,21 +62,6 @@ int main(int argc, char **argv)
+     return a.exec();
+ }
+ 
+-#else // BUILD_AS_EXECUTABLE
+-
+-KWritedModule::KWritedModule(QObject *parent, const QList<QVariant> &)
+-    : KDEDModule(parent)
+-{
+-    pro = new KWrited;
+-}
+-
+-KWritedModule::~KWritedModule()
+-{
+-    delete pro;
+-}
+-
+-K_PLUGIN_FACTORY_WITH_JSON(KWritedFactory, "kwrited.json", registerPlugin<KWritedModule>();)
+-
+ #endif // BUILD_AS_EXECUTABLE
+ 
+ KWrited::KWrited()
+@@ -143,8 +126,4 @@ void KWrited::block_in()
+     notification->sendEvent();
+ }
+ 
+-#if !BUILD_AS_EXECUTABLE
+-#include "kwrited.moc"
+-#endif
+-
+ #include "moc_kwrited.cpp"
+diff --git a/kwritedmodule.cpp b/kwritedmodule.cpp
+new file mode 100644
+index 0000000..ada1db0
+--- /dev/null
++++ b/kwritedmodule.cpp
+@@ -0,0 +1,28 @@
++/*
++    kwrited is a write(1) receiver for KDE.
++    SPDX-FileCopyrightText: 2008 George Kiagiadakis <gkiagia@users.sourceforge.net>
++
++    SPDX-License-Identifier: GPL-2.0-or-later
++*/
++
++// The KDED module (built when kwrited is not an executable), in its own
++// file so that the executable build does not run moc for a factory it
++// does not compile.
++#include "kwrited.h"
++
++#include <kpluginfactory.h>
++
++KWritedModule::KWritedModule(QObject *parent, const QList<QVariant> &)
++    : KDEDModule(parent)
++{
++    pro = new KWrited;
++}
++
++KWritedModule::~KWritedModule()
++{
++    delete pro;
++}
++
++K_PLUGIN_FACTORY_WITH_JSON(KWritedFactory, "kwrited.json", registerPlugin<KWritedModule>();)
++
++#include "kwritedmodule.moc"

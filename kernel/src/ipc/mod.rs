@@ -13,7 +13,6 @@ pub mod channel;
 pub mod error;
 pub mod fast_path;
 pub mod message;
-pub mod message_passing;
 pub mod perf;
 pub mod posix_shm;
 pub mod rate_limit;

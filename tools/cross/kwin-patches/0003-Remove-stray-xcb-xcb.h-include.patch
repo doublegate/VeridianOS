@@ -1,0 +1,25 @@
+From 712c069da7b899ff8fdc73740c523e4332e70380 Mon Sep 17 00:00:00 2001
+From: Vlad Zahorodnii <vlad.zahorodnii@kde.org>
+Date: Mon, 5 Oct 2026 16:04:48 +0300
+Subject: [PATCH] Remove stray xcb/xcb.h include
+
+BUG: 526250
+---
+ src/screenedge.h | 1 -
+ 1 file changed, 1 deletion(-)
+
+diff --git a/src/screenedge.h b/src/screenedge.h
+index 6885fc0a09d..8e50ec37abd 100644
+--- a/src/screenedge.h
++++ b/src/screenedge.h
+@@ -28,7 +28,6 @@
+ #include <QObject>
+ 
+ #include <memory>
+-#include <xcb/xcb.h>
+ 
+ class QAction;
+ 
+-- 
+GitLab
+

@@ -1,0 +1,52 @@
+VeridianOS: gobject: invalid ids no longer dereference NULL
+
+GCC reported -Wnull-dereference ("potential null pointer dereference") at
+gobject/gsignal.c:2004 and gobject/gtypemodule.c:420. Both are real, if
+only reachable through API misuse:
+
+- g_signal_override_class_closure() looked up the signal node and used it
+  without checking it; an out-of-range signal id dereferenced NULL. It now
+  emits the same "invalid signal id" critical and returns, as
+  g_signal_add_emission_hook() and the other entry points already do.
+- g_type_module_register_type() assumed that a type whose plugin is this
+  module was registered through g_type_module_register_type(); a type
+  registered with g_type_register_dynamic() directly and this module as
+  plugin made g_type_module_find_type_info() return NULL, which was
+  dereferenced. It now emits a critical and returns 0, as it does for the
+  "two different plugins" case just above.
+
+Valid calls behave exactly as before.
+
+diff -ru a/gobject/gsignal.c b/gobject/gsignal.c
+--- a/gobject/gsignal.c	2026-10-08 17:01:06.908860164 -0400
++++ b/gobject/gsignal.c	2026-10-08 17:11:02.395266238 -0400
+@@ -2000,6 +2000,12 @@
+   
+   SIGNAL_LOCK ();
+   node = LOOKUP_SIGNAL_NODE (signal_id);
++  if (!node)
++    {
++      g_critical ("%s: invalid signal id '%u'", G_STRLOC, signal_id);
++      SIGNAL_UNLOCK ();
++      return;
++    }
+   node_check_deprecated (node);
+   if (!g_type_is_a (instance_type, node->itype))
+     g_critical ("%s: type '%s' cannot be overridden for signal id '%u'", G_STRLOC, type_debug_name (instance_type), signal_id);
+diff -ru a/gobject/gtypemodule.c b/gobject/gtypemodule.c
+--- a/gobject/gtypemodule.c	2026-10-08 17:01:06.962859750 -0400
++++ b/gobject/gtypemodule.c	2026-10-08 17:11:02.395766902 -0400
+@@ -417,6 +417,13 @@
+     {
+       module_type_info = g_type_module_find_type_info (module, type);
+ 
++      if (module_type_info == NULL)
++	{
++	  g_critical ("Type '%s' was registered with this module as its plugin, "
++		      "but not through g_type_module_register_type().", type_name);
++	  return 0;
++	}
++
+       if (module_type_info->parent_type != parent_type)
+ 	{
+ 	  const gchar *parent_type_name = g_type_name (parent_type);

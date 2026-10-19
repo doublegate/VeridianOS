@@ -1,0 +1,25 @@
+VeridianOS: socat declares the protoent buffers only where they are used
+
+sockname() declares a struct protoent and a pointer to one whenever the
+system has getprotobynumber() or getprotobynumber_r(), but they are used
+only where SO_PROTOCOL or SO_PROTOTYPE exists and getprotobynumber_r() is
+available, and the pointer not by its third (AIX/OpenBSD) variant. With
+musl (getprotobynumber() only) both were unused (-Wunused-variable). They
+are now declared under exactly the conditions of their uses.
+
+--- a/fdname.c
++++ b/fdname.c
+@@ -226,8 +226,11 @@
+ #define FDNAME_OPTLEN 256
+ #define FDNAME_NAMELEN 256
+    socklen_t optlen;
+-#if (WITH_IP4 || WITH_IP6) && ( HAVE_GETPROTOBYNUMBER || HAVE_GETPROTOBYNUMBER_R )
+-   struct protoent protoent, *protoentp;
++#if (WITH_IP4 || WITH_IP6) && ( defined(SO_PROTOCOL) || defined(SO_PROTOTYPE) ) && HAVE_GETPROTOBYNUMBER_R
++   struct protoent protoent;
++#if HAVE_GETPROTOBYNUMBER_R != 3
++   struct protoent *protoentp;
++#endif
+ #endif
+ #define PROTONAMEMAX 1024
+    char protoname[PROTONAMEMAX] = "";

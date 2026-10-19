@@ -1,185 +1,91 @@
-//! Process and thread scheduling module
+//! Scheduling.
 //!
-//! Implements a multi-level scheduler with support for:
-//! - Multiple scheduling algorithms (round-robin, priority, CFS)
-//! - Real-time scheduling classes
-//! - SMP load balancing
-//! - CPU affinity
-//! - Context switching for x86_64, AArch64, and RISC-V
+//! The scheduler is the dispatcher ([`dispatch`], ADR 0006) with its policy
+//! classes ([`policy`], ADR 0007): every user thread and kernel thread is a
+//! dispatcher task. The older scheduler (one global ready queue, a `Task`
+//! control block of its own, a separate context switch, process
+//! "adapters" and pid-keyed IPC blocking) never ran once the dispatcher
+//! started and was removed in sprint D4.
 //!
-//! This module is a facade that re-exports the public API from submodules:
-//! - [`scheduler`] - Core scheduler algorithm and state
-//! - [`task`] - Task control block and priority types
-//! - [`metrics`] - Performance metrics and measurement
-//! - [`smp`] - Symmetric multiprocessing support
-//! - [`queue`] - Ready queue management
-//! - [`numa`] - NUMA-aware scheduling
-//! - [`init`] - Initialization and timer setup
-//! - [`runtime`] - Scheduler execution loop and idle task
-//! - [`process_compat`] - Process compatibility wrapper types
-//! - [`ipc_blocking`] - IPC blocking/waking and wait queues
-//! - [`task_management`] - Task creation, exit, and thread scheduling
-//! - [`load_balance`] - Load balancing and task migration
+//! - [`dispatch`] - tasks, run queues, wait queues, sleeping and waking
+//! - [`policy`] - deadline, real-time and fair classes
+//! - [`smp`] - CPU topology and per-CPU data
+//! - [`cputime`], [`loadavg`], [`metrics`] - accounting
 
-#![allow(dead_code, function_casts_as_integer)]
-
-// ---- Submodule declarations ----
-
-pub mod deadline;
-pub mod init;
-pub mod ipc_blocking;
-pub mod load_balance;
+pub mod cputime;
+#[cfg(feature = "alloc")]
+pub mod dispatch;
+pub mod loadavg;
 pub mod metrics;
-pub mod numa;
-pub mod percpu_queue;
-pub mod process_compat;
-pub mod queue;
-pub mod runtime;
-pub mod scheduler;
+#[cfg(feature = "alloc")]
+pub mod policy;
 pub mod smp;
-pub mod task;
-pub mod task_management;
-pub mod task_ptr;
 
-#[cfg(target_arch = "riscv64")]
-pub mod riscv_scheduler;
+pub(crate) use crate::process::ProcessId;
 
-// ---- Re-exports: scheduler types ----
-
-#[cfg(not(target_arch = "riscv64"))]
-pub(crate) use queue::READY_QUEUE;
-#[cfg(target_arch = "riscv64")]
-pub use scheduler::SchedAlgorithm;
-#[cfg(not(target_arch = "riscv64"))]
-pub use scheduler::SchedAlgorithm;
-#[cfg(not(target_arch = "riscv64"))]
-pub(crate) use scheduler::SCHEDULER;
-
-#[cfg(target_arch = "riscv64")]
-pub(crate) static SCHEDULER: riscv_scheduler::RiscvScheduler =
-    riscv_scheduler::RiscvScheduler::new();
-
-// ---- Re-exports: initialization ----
-pub use init::{init, init_with_bootstrap};
-// ---- Re-exports: IPC blocking/waking ----
-pub use ipc_blocking::{
-    block_on_ipc, block_process, wake_up_endpoint_waiters, wake_up_process, yield_cpu,
-};
-// ---- Re-exports: load balancing ----
-#[cfg(feature = "alloc")]
-pub use load_balance::{balance_load, cleanup_dead_tasks};
-// ---- Re-exports: process compatibility ----
-pub use process_compat::{
-    alloc_pid, current_process, find_process, switch_to_process, TaskProcessAdapter,
-};
-/// Type alias for backward compatibility.
-pub type Process = TaskProcessAdapter;
-// ---- Re-exports: runtime ----
-pub use runtime::{has_ready_tasks, idle_task_entry, run, set_algorithm, start, timer_tick};
-pub use task::{Priority, SchedClass, SchedPolicy, Task};
-pub use task_management::exit_task;
-// ---- Re-exports: task management ----
-#[cfg(feature = "alloc")]
-pub use task_management::{create_task, create_task_from_thread, schedule_thread};
-
-// Export functions needed by tests
-pub use self::scheduler::should_preempt;
-// ---- Remaining items that stay in mod.rs ----
-
-/// Depth of "a syscall is polling and has interrupts enabled only to let
-/// the clock advance". While non-zero the timer tick must not call
-/// `schedule()`: it would switch tasks from interrupt context on the
-/// syscall's kernel stack (W-13). Single counter because only CPU 0 runs
-/// (per-CPU with SMP bring-up).
-static SYSCALL_WAIT_DEPTH: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
-
-/// Whether a syscall is inside `wait_for_interrupt_in_syscall`.
-pub fn in_syscall_wait() -> bool {
-    SYSCALL_WAIT_DEPTH.load(core::sync::atomic::Ordering::Acquire) != 0
+/// Initialize CPU bookkeeping (SMP topology). The dispatcher itself is
+/// started by `dispatch::start` (x86_64; the other architectures get it in
+/// sprint E).
+pub fn init() {
+    kprintln!("[SCHED] Initializing scheduler...");
+    smp::init();
+    kprintln!("[SCHED] Scheduler initialized");
 }
 
-/// From inside a syscall that polls for a condition (sleep, poll, epoll,
-/// timerfd, futex), give the CPU away until something may have changed.
-///
-/// x86_64: halt until the next interrupt so the clock advances, without
-/// letting the timer preempt the syscall from interrupt context (W-13).
-/// Syscall entry clears IF, so a plain `hlt` would never wake. A voluntary
-/// yield is not possible here yet: user programs run nested in the boot
-/// context, and switching to another task from inside one of their
-/// syscalls breaks it (tested: the program faults). So a task waiting in a
-/// syscall keeps the CPU until its wait ends; other tasks run once the
-/// process model dispatches user tasks through the scheduler (C5).
-///
-/// AArch64 / RISC-V (kernel tasks only, no user mode): yield if another
-/// task is ready, else WFI until the next 1000 Hz timer interrupt (WFI
-/// wakes on a pending interrupt even if interrupts are masked).
-pub fn wait_for_interrupt_in_syscall() {
-    #[cfg(target_arch = "x86_64")]
-    {
-        use core::sync::atomic::Ordering;
-        SYSCALL_WAIT_DEPTH.fetch_add(1, Ordering::AcqRel);
-        // SAFETY: enables interrupts for exactly one halt and disables them
-        // again; the timer handler sees SYSCALL_WAIT_DEPTH and only counts
-        // the tick, so no context switch happens on this stack.
-        unsafe { core::arch::asm!("sti; hlt; cli", options(nomem, nostack)) };
-        SYSCALL_WAIT_DEPTH.fetch_sub(1, Ordering::AcqRel);
+/// Idle forever (the boot flow's end when it has nothing left to run).
+pub fn start() -> ! {
+    kprintln!("[SCHED] Entering idle loop");
+    loop {
+        crate::arch::idle();
     }
-    #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
+}
+
+/// Give the CPU to another runnable task, if any.
+pub fn yield_cpu() {
+    #[cfg(feature = "alloc")]
+    if dispatch::started() {
+        dispatch::yield_now();
+        return;
+    }
+    core::hint::spin_loop();
+}
+
+/// From inside a system call that polls for a condition, give the CPU away
+/// until something may have changed. Returns true if a signal must be
+/// acted on (the caller fails with EINTR).
+///
+/// A dispatched thread lets other tasks run. Outside one (no user thread
+/// is, without the dispatcher) the CPU waits for the next interrupt.
+#[must_use]
+pub fn wait_for_interrupt_in_syscall() -> bool {
+    #[cfg(feature = "alloc")]
+    if dispatch::current_owner().is_some() {
+        return dispatch::wait_in_syscall();
+    }
+    // Halt until the next interrupt, keeping the caller's interrupt flag.
+    #[cfg(all(target_arch = "x86_64", target_os = "none"))]
     {
-        if has_ready_tasks() {
-            yield_cpu();
-        } else {
-            // SAFETY: WFI only waits for an interrupt or event.
-            unsafe { core::arch::asm!("wfi", options(nomem, nostack)) };
+        let was_on = x86_64::instructions::interrupts::are_enabled();
+        x86_64::instructions::interrupts::enable_and_hlt();
+        if !was_on {
+            x86_64::instructions::interrupts::disable();
         }
     }
+    #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
+    // SAFETY: WFI only waits for an interrupt or event.
+    unsafe {
+        core::arch::asm!("wfi", options(nomem, nostack));
+    }
+    false
 }
 
-// Import ProcessState from process module (used by submodules via super::)
-pub(crate) use crate::process::ProcessState;
-// Use process module types (used by submodules via super::)
-pub(crate) use crate::process::{ProcessId, ThreadId};
-
-/// Get the current thread ID from the running task.
+/// The calling user thread's id, or 0 for kernel threads and the boot task.
 pub fn get_current_thread_id() -> u64 {
-    let sched = scheduler::SCHEDULER.lock();
-    if let Some(current) = sched.current() {
-        // SAFETY: `current` is a valid NonNull<Task> from the scheduler.
-        // We hold the scheduler lock, so the task won't be modified.
-        unsafe { current.as_ref().tid.0 }
-    } else {
-        1 // Fallback: boot thread
-    }
+    crate::process::current_thread().map_or(0, |t| t.tid.0)
 }
 
-/// Get the PID of the currently running task.
+/// The calling user process's id, or 0 for kernel threads and the boot
+/// task (the old fallback answered 1, init, which it was not).
 pub fn current_process_id() -> ProcessId {
-    let sched = scheduler::SCHEDULER.lock();
-    if let Some(current) = sched.current() {
-        // SAFETY: Same as get_current_thread_id.
-        unsafe { current.as_ref().pid }
-    } else {
-        ProcessId(1) // Fallback: init
-    }
-}
-
-/// Set current task (for testing)
-///
-/// # Safety
-/// The caller must ensure that the task pointer is valid and properly
-/// initialized
-pub unsafe fn set_current_task(task: *mut Task) {
-    // This is a test helper function
-    let scheduler = scheduler::current_scheduler();
-    let mut sched = scheduler.lock();
-    if !task.is_null() {
-        // SAFETY: Caller guarantees `task` is a valid, non-null pointer to a
-        // properly initialized Task. `NonNull::new_unchecked` is safe here
-        // because we just checked `!task.is_null()`.
-        sched.set_current(Some(task_ptr::TaskPtr::new(
-            core::ptr::NonNull::new_unchecked(task),
-        )));
-    } else {
-        sched.set_current(None);
-    }
+    crate::process::current_process().map_or(ProcessId(0), |p| p.pid)
 }

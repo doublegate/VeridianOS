@@ -1,0 +1,63 @@
+VeridianOS: fix an uninitialized read, a short buffer and an unused variable
+
+libxkbfile is built with Meson (libxkbfile-build). GCC reported:
+
+- src/xkmread.c:1245 (XkmReadFileSectionName) "'tmpTOC.type' may be used
+  uninitialized [-Wmaybe-uninitialized]": real bug. The default case
+  (section type that has no name) reported the error with tmpTOC.type,
+  which is only read from the file in the other cases, so the message was
+  built from an uninitialized value. It now uses toc->type, the type that
+  was actually rejected.
+- src/xkbtext.c:773 (XkbGeomFPText) "'snprintf' output may be truncated
+  before the last format character [-Wformat-truncation]": real (edge
+  case). With XkbGeomPtsPerMM == 10 the longest text is "-214748364.8"
+  (val == INT_MIN), 12 characters plus the NUL, one more than the 12-byte
+  buffer, so the last digit was cut off. The buffer is now 13 bytes.
+- src/xkmout.c:1307 (WriteXKMFile) "variable 'total' set but not used":
+  removed 'total' and the 'tmp' it was computed from. The fwrite() result
+  stays ignored, as every other write in this writer ignores its result;
+  no behaviour change.
+
+
+diff -ru a/src/xkbtext.c b/src/xkbtext.c
+--- a/src/xkbtext.c	2026-10-08 17:18:31.267060252 -0400
++++ b/src/xkbtext.c	2026-10-08 17:18:57.748168135 -0400
+@@ -756,7 +756,8 @@
+ {
+     int whole, frac;
+     char *buf;
+-    const int bufsize = 12;
++    /* Longest output: "-214748364.8" (val == INT_MIN) plus the NUL. */
++    const int bufsize = 13;
+ 
+     buf = tbGetBuffer(bufsize);
+     if (format == XkbCFile) {
+diff -ru a/src/xkmout.c b/src/xkmout.c
+--- a/src/xkmout.c	2026-10-08 17:18:31.245112209 -0400
++++ b/src/xkmout.c	2026-10-08 17:18:31.320752444 -0400
+@@ -1304,11 +1304,10 @@
+              int num_toc, xkmSectionInfo *toc, XkmInfo *info)
+ {
+     register int i;
+-    unsigned tmp, size, total = 0;
++    unsigned size;
+ 
+     for (i = 0; i < num_toc; i++) {
+-        tmp = fwrite(&toc[i], SIZEOF(xkmSectionInfo), 1, file);
+-        total += tmp * SIZEOF(xkmSectionInfo);
++        fwrite(&toc[i], SIZEOF(xkmSectionInfo), 1, file);
+         switch (toc[i].type) {
+         case XkmTypesIndex:
+             size = WriteXKMKeyTypes(file, result);
+diff -ru a/src/xkmread.c b/src/xkmread.c
+--- a/src/xkmread.c	2026-10-08 17:18:31.215888644 -0400
++++ b/src/xkmread.c	2026-10-08 17:18:31.320564526 -0400
+@@ -1242,7 +1242,7 @@
+         break;
+     default:
+         _XkbLibError(_XkbErrBadImplementation,
+-                     XkbConfigText(tmpTOC.type, XkbMessage), 0);
++                     XkbConfigText(toc->type, XkbMessage), 0);
+         break;
+     }
+     return NULL;

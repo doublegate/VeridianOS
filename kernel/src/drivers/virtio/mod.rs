@@ -68,6 +68,15 @@ pub enum VirtioTransport {
 }
 
 impl VirtioTransport {
+    /// Whether the device's DMA is coherent with the CPU caches: always on
+    /// PCI (x86_64), from the device tree for virtio-mmio (HA-25).
+    pub fn dma_coherent(&self) -> bool {
+        match self {
+            Self::Pci(_) => true,
+            Self::Mmio(m) => m.dma_coherent(),
+        }
+    }
+
     pub fn begin_init(&self) {
         match self {
             Self::Pci(p) => p.begin_init(),
@@ -300,6 +309,8 @@ impl VirtioPciTransport {
     /// Notify (kick) the device that new buffers are available in the given
     /// queue.
     pub fn notify_queue(&self, queue_index: u16) {
+        // The ring updates must be visible to the device before the kick.
+        crate::arch::barriers::io_wmb();
         self.write16(regs::QUEUE_NOTIFY, queue_index);
     }
 

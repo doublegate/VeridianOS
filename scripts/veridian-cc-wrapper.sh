@@ -12,7 +12,8 @@
 TOOLCHAIN="/opt/veridian/toolchain"
 CC="${TOOLCHAIN}/bin/x86_64-veridian-gcc"
 SYSROOT="${TOOLCHAIN}/sysroot"
-GCC_LIBDIR="${TOOLCHAIN}/lib/gcc/x86_64-veridian/14.2.0"
+# The compiler's own version (its private headers and libgcc), not hardcoded.
+GCC_LIBDIR="${TOOLCHAIN}/lib/gcc/x86_64-veridian/$("$CC" -dumpfullversion)"
 GCC_INCDIR="${GCC_LIBDIR}/include"
 
 # CRT objects for linking
@@ -61,9 +62,6 @@ if [ "$IS_COMPILE" = "1" ]; then
         -mcmodel=small \
         -D__veridian__ \
         -D__linux__ \
-        -Wno-unused-parameter \
-        -Wno-implicit-function-declaration \
-        -Wno-return-type \
         "$@"
 elif [ "$IS_LINK" = "1" ]; then
     # ---- Link step ----
@@ -134,6 +132,5 @@ else
         -fno-stack-protector \
         -ffreestanding \
         -D__veridian__ \
-        -Wno-implicit-function-declaration \
         "$@"
 fi

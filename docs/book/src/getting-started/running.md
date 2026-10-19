@@ -37,7 +37,7 @@ qemu-system-x86_64 -enable-kvm \
 ```bash
 ./build-kernel.sh aarch64 dev
 qemu-system-aarch64 -M virt -cpu cortex-a72 -m 256M \
-    -kernel target/aarch64-unknown-none/debug/veridian-kernel \
+    -kernel target/aarch64-unknown-none-softfloat/debug/veridian-kernel \
     -serial stdio -display none
 ```
 
@@ -46,7 +46,7 @@ qemu-system-aarch64 -M virt -cpu cortex-a72 -m 256M \
 ```bash
 ./build-kernel.sh riscv64 dev
 qemu-system-riscv64 -M virt -m 256M -bios default \
-    -kernel target/riscv64gc-unknown-none-elf/debug/veridian-kernel \
+    -kernel target/riscv64imac-unknown-none-elf/debug/veridian-kernel \
     -serial stdio -display none
 ```
 
@@ -55,8 +55,8 @@ qemu-system-riscv64 -M virt -m 256M -bios default \
 | Arch | Boot | Firmware | Image | KVM |
 |------|------|----------|-------|-----|
 | x86_64 | UEFI disk | OVMF.4m.fd | `target/x86_64-veridian/debug/veridian-uefi.img` | Required |
-| AArch64 | Direct `-kernel` | None | `target/aarch64-unknown-none/debug/veridian-kernel` | N/A |
-| RISC-V | `-kernel` + `-bios default` | OpenSBI | `target/riscv64gc-unknown-none-elf/debug/veridian-kernel` | N/A |
+| AArch64 | Direct `-kernel` | None | `target/aarch64-unknown-none-softfloat/debug/veridian-kernel` | N/A |
+| RISC-V | `-kernel` + `-bios default` | OpenSBI | `target/riscv64imac-unknown-none-elf/debug/veridian-kernel` | N/A |
 
 ## Expected Output
 

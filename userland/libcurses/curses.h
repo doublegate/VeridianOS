@@ -42,7 +42,9 @@ typedef chtype attr_t;
 #define OK  0
 #endif
 
-#if !defined(__cplusplus) && !defined(__bool_true_false_are_defined)
+/* bool is a keyword in C23 (GCC 15+ default) and C++; earlier C gets a typedef. */
+#if !defined(__cplusplus) && !defined(__bool_true_false_are_defined) && \
+    (!defined(__STDC_VERSION__) || __STDC_VERSION__ < 202311L)
 typedef int bool;
 #endif
 

@@ -15,10 +15,7 @@ pub(super) fn sys_fb_get_info(info_ptr: usize) -> SyscallResult {
 
     let fb_info = crate::graphics::framebuffer::get_fb_info().ok_or(SyscallError::InvalidState)?;
 
-    // SAFETY: info_ptr validated as non-null, aligned, and in user space.
-    unsafe {
-        *(info_ptr as *mut FbInfo) = fb_info;
-    }
+    super::userspace::write_user(info_ptr, fb_info)?;
 
     Ok(0)
 }
@@ -97,13 +94,19 @@ pub(super) fn sys_input_read(events_ptr: usize, max_count: usize) -> SyscallResu
     super::validate_user_buffer(events_ptr, byte_size)?;
 
     let mut count = 0usize;
-    let events = events_ptr as *mut InputEvent;
 
     while count < max_count {
         if let Some(event) = crate::drivers::input_event::read_event() {
-            // SAFETY: events_ptr validated for max_count entries.
-            unsafe {
-                events.add(count).write(event);
+            // InputEvent has no implicit padding (u64, u16, u16, i32).
+            // Copied out fault-tolerantly (N-43); an event already dequeued
+            // when the copy fails is lost. The events before it were
+            // delivered, so their count is returned, as evdev returns a
+            // short read; EFAULT only if none was (PR #23 review).
+            if let Err(e) = super::userspace::write_user(
+                events_ptr + count * core::mem::size_of::<InputEvent>(),
+                event,
+            ) {
+                return if count > 0 { Ok(count) } else { Err(e) };
             }
             count += 1;
         } else {

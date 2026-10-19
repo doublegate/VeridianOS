@@ -321,21 +321,62 @@ impl BuiltinCommand for MvCommand {
         let source = &args[0];
         let dest = &args[1];
 
-        // Read source
-        let data = match crate::fs::read_file(source) {
-            Ok(d) => d,
-            Err(e) => return CommandResult::Error(format!("mv: cannot read '{}': {}", source, e)),
-        };
-
-        // Write to destination
-        if let Err(e) = crate::fs::write_file(dest, &data) {
-            return CommandResult::Error(format!("mv: cannot write '{}': {}", dest, e));
-        }
-
-        // Remove source
-        match crate::fs::get_vfs().unlink(source) {
-            Ok(()) => CommandResult::Success(0),
-            Err(e) => CommandResult::Error(format!("mv: cannot remove '{}': {}", source, e)),
+        // A real rename (BM-FS-05): atomic, keeps the inode (owner, mode,
+        // times, hard links) and moves directories. It used to read the
+        // whole file into memory, write a copy and unlink the original.
+        match crate::syscall::rename_paths(source, dest) {
+            Ok(_) => CommandResult::Success(0),
+            // Across filesystems a rename is impossible; a regular file is
+            // copied and the original removed, as mv(1) does.
+            Err(crate::syscall::SyscallError::CrossDevice) => {
+                let data = match crate::fs::read_file(source) {
+                    Ok(d) => d,
+                    Err(e) => {
+                        return CommandResult::Error(format!("mv: cannot read '{}': {}", source, e))
+                    }
+                };
+                // The destination is replaced, not written through: a
+                // symlink there had its target overwritten and stayed, as GNU
+                // mv removes the destination first (PR #25 review).
+                if let Ok(existing) = crate::fs::get_vfs().resolve_path_no_follow(dest) {
+                    if existing.node_type() == crate::fs::NodeType::Directory {
+                        return CommandResult::Error(format!("mv: '{}' is a directory", dest));
+                    }
+                    if let Err(e) = crate::fs::get_vfs().unlink(dest) {
+                        return CommandResult::Error(format!(
+                            "mv: cannot replace '{}': {}",
+                            dest, e
+                        ));
+                    }
+                }
+                // All of it, or the source stays: a short write was taken as
+                // success and the source removed (PR #25 review).
+                match crate::fs::write_file(dest, &data) {
+                    Ok(n) if n == data.len() => {}
+                    Ok(n) => {
+                        return CommandResult::Error(format!(
+                            "mv: '{}': only {} of {} bytes written; '{}' kept",
+                            dest,
+                            n,
+                            data.len(),
+                            source
+                        ))
+                    }
+                    Err(e) => {
+                        return CommandResult::Error(format!("mv: cannot write '{}': {}", dest, e))
+                    }
+                }
+                match crate::fs::get_vfs().unlink(source) {
+                    Ok(()) => CommandResult::Success(0),
+                    Err(e) => {
+                        CommandResult::Error(format!("mv: cannot remove '{}': {}", source, e))
+                    }
+                }
+            }
+            Err(e) => CommandResult::Error(format!(
+                "mv: cannot move '{}' to '{}': {:?}",
+                source, dest, e
+            )),
         }
     }
 }

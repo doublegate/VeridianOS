@@ -1,0 +1,27 @@
+VeridianOS: KirigamiAddons date and time: types.h is Android-only
+
+src/dateandtime/types.h declares its one QML type (the Android
+integration singleton, a Q_GADGET) inside #ifdef Q_OS_ANDROID; elsewhere
+it declares nothing. It was a source of the plugin on every platform, so
+AutoMoc ran moc on it, which outside Android found nothing:
+"types.h: note: No relevant classes found. No output generated." It is
+now added to the plugin only when building for Android, next to that
+platform's other sources. Nothing changes on Android, and elsewhere the
+plugin had no type from it.
+
+--- a/src/dateandtime/CMakeLists.txt
++++ b/src/dateandtime/CMakeLists.txt
+@@ -32,8 +32,12 @@
+     yearmodel.cpp
+     monthmodel.cpp
+     infinitecalendarviewmodel.cpp
+-    types.h
+ )
++
++# The QML types in types.h exist only on Android.
++if (ANDROID)
++    target_sources(dateandtimeplugin PRIVATE types.h)
++endif()
+ 
+ ecm_target_qml_sources(dateandtimeplugin SOURCES
+     DatePopup.qml

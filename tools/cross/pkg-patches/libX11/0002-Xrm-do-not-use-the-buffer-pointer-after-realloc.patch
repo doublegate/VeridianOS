@@ -1,0 +1,49 @@
+VeridianOS: Xrm: do not use the old buffer pointer after realloc
+
+GCC reported, in src/Xrm.c:
+
+- 1496 (GetDatabase) "pointer 'rhs' may be used after 'realloc'
+  [-Wuse-after-free]": when the value buffer grows, the write position was
+  rebased with temp_str + (ptr - rhs), reading rhs after Xrealloc() had
+  possibly freed it, which is undefined behaviour (it happened to work
+  because only the address is used). The offset is now taken before the
+  realloc. Real (latent) bug; the result is the same pointer.
+- 900 (XrmQPutResource) "logical not is only applied to the left hand side
+  of comparison [-Wlogical-not-parentheses]": checked, not a bug. The
+  expression "!quarks[2] != table->leaf" is meant as (!quarks[2]) !=
+  table->leaf: when bumping to the loose table, its leafness must match
+  whether this is the last quark (quarks[2] == NULLQUARK means the next
+  level holds values), exactly like the explicit tight-table checks above
+  it; the other grouping would compare a quark with a 1-bit flag. Added the
+  parentheses the code already meant; no behaviour change.
+
+
+diff -ru a/src/Xrm.c b/src/Xrm.c
+--- a/src/Xrm.c	2026-10-08 17:12:35.353661019 -0400
++++ b/src/Xrm.c	2026-10-08 17:14:22.180096355 -0400
+@@ -897,7 +897,7 @@
+ 		    /* bump to loose table, if any */
+ 		    table = *(prev = &table->next);
+ 		    if (!table || table->name != q ||
+-			!quarks[2] != table->leaf)
++			(!quarks[2]) != table->leaf)
+ 			break; /* not found */
+ 		}
+ 	    }
+@@ -1482,6 +1482,7 @@
+ 
+ 	    if (ptr + len > ptr_max) {
+ 		char * temp_str;
++		size_t ptr_offset = (size_t) (ptr - rhs);
+ 
+ 		alloc_chars += BUFSIZ/10;
+ 		temp_str = Xrealloc(rhs, sizeof(char) * alloc_chars);
+@@ -1493,7 +1494,7 @@
+ 		    return;
+ 		}
+ 
+-		ptr = temp_str + (ptr - rhs); /* reset pointer. */
++		ptr = temp_str + ptr_offset; /* reset pointer. */
+ 		rhs = temp_str;
+ 		ptr_max = rhs + alloc_chars - 4;
+ 	    }

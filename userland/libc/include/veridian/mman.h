@@ -5,7 +5,7 @@
  * SPDX-License-Identifier: MIT OR Apache-2.0
  *
  * Memory mapping flags, protection bits, and mmap/munmap/mprotect declarations.
- * Corresponds to kernel SYS_MEMORY_MAP (20) and SYS_MEMORY_UNMAP (21).
+ * Corresponds to kernel SYS_mmap (9) and SYS_munmap (11).
  */
 
 #ifndef VERIDIAN_MMAN_H
@@ -44,6 +44,9 @@ extern "C" {
 
 /** Alias for MAP_ANONYMOUS */
 #define MAP_ANON        MAP_ANONYMOUS
+
+/** Back an anonymous mapping with 2 MiB pages (Linux value) */
+#define MAP_HUGETLB     0x40000
 
 /* ========================================================================= */
 /* Return Values                                                             */
@@ -115,6 +118,24 @@ int mprotect(void *addr, size_t length, int prot);
  * @return 0 on success, -1 on error.
  */
 int msync(void *addr, size_t length, int flags);
+
+/** memfd_create flags */
+#define MFD_CLOEXEC       0x0001U
+#define MFD_ALLOW_SEALING 0x0002U
+#define MFD_HUGETLB       0x0004U
+#define MFD_NOEXEC_SEAL   0x0008U
+#define MFD_EXEC          0x0010U
+
+/**
+ * Create an anonymous file: a read-write fd on a regular file in no
+ * directory, which can be sized, mapped and (with MFD_ALLOW_SEALING)
+ * sealed with fcntl(F_ADD_SEALS).
+ *
+ * @param name   Name shown as "memfd:<name>" (at most 249 bytes).
+ * @param flags  MFD_CLOEXEC, MFD_ALLOW_SEALING, MFD_NOEXEC_SEAL, MFD_EXEC.
+ * @return the new fd, or -1 with errno set.
+ */
+int memfd_create(const char *name, unsigned int flags);
 
 #ifdef __cplusplus
 }

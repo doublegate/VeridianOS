@@ -22,15 +22,33 @@ pub fn read_char() -> Option<u8> {
         if let Some(key) = crate::drivers::keyboard::read_key() {
             return Some(key);
         }
-        // Fall back to serial port (COM1 at 0x3F8)
-        read_serial_x86_64()
+        // Then the serial console, through the shared input ring.
+        crate::drivers::console_input::try_read()
     }
 
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        crate::drivers::console_input::try_read()
+    }
+}
+
+/// One byte straight from the console UART, if it holds one. Only
+/// [`crate::drivers::console_input`] calls this; everything else reads the
+/// shared ring, so no two readers split a line between them.
+pub(crate) fn read_uart_raw() -> Option<u8> {
+    #[cfg(all(target_arch = "x86_64", target_os = "none"))]
+    {
+        read_serial_x86_64()
+    }
+    // Host-target tests have no UART.
+    #[cfg(all(target_arch = "x86_64", not(target_os = "none")))]
+    {
+        None
+    }
     #[cfg(target_arch = "aarch64")]
     {
         read_uart_aarch64()
     }
-
     #[cfg(any(target_arch = "riscv32", target_arch = "riscv64"))]
     {
         read_sbi_riscv()
@@ -90,7 +108,7 @@ fn poll_ps2_keyboard() {
 }
 
 /// Read from COM1 serial port (x86_64).
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
 fn read_serial_x86_64() -> Option<u8> {
     let status: u8;
     // SAFETY: Reading the Line Status Register (port 0x3FD) to check if
@@ -105,6 +123,8 @@ fn read_serial_x86_64() -> Option<u8> {
     }
     if (status & 1) != 0 {
         let data: u8;
+        // SAFETY: reading the COM1 data register (port 0x3F8) after LSR
+        // reported data ready; the IN only consumes one received byte.
         unsafe {
             core::arch::asm!(
                 "in al, dx",
@@ -122,7 +142,7 @@ fn read_serial_x86_64() -> Option<u8> {
 /// Read from PL011 UART (AArch64, QEMU virt).
 #[cfg(target_arch = "aarch64")]
 fn read_uart_aarch64() -> Option<u8> {
-    const UART_BASE: usize = 0x0900_0000;
+    const UART_BASE: usize = crate::arch::aarch64::platform::PL011;
     const UART_FR: usize = UART_BASE + 0x18; // Flag register
     const UART_DR: usize = UART_BASE; // Data register
 

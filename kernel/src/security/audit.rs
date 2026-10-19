@@ -53,7 +53,7 @@ pub enum AuditEventType {
 
 impl AuditEventType {
     /// Convert to bitmask flag for filtering.
-    pub fn to_flag(self) -> u32 {
+    pub const fn to_flag(self) -> u32 {
         1u32 << (self as u8)
     }
 
@@ -261,6 +261,16 @@ impl AuditFilter {
         }
     }
 
+    /// The boot default: every event type except `Syscall`. Auditing every
+    /// system call is opt-in (`enable_event_type`), as on Linux, where no
+    /// system call is audited without a rule: it cost each system call a
+    /// formatted record and a synchronous file append (~200 us).
+    pub const fn default_policy() -> Self {
+        Self {
+            enabled_types: !AuditEventType::Syscall.to_flag(),
+        }
+    }
+
     /// Create a filter that blocks all event types.
     pub const fn deny_all() -> Self {
         Self { enabled_types: 0 }
@@ -318,6 +328,8 @@ struct AuditStats {
     filtered_events: AtomicU64,
     /// Events written to persistent storage
     persisted_events: AtomicU64,
+    /// Events not written because the persistent log is full
+    persist_dropped: AtomicU64,
     /// Alerts triggered
     alerts_triggered: AtomicU64,
     /// Per-type event counts (indexed by AuditEventType discriminant)
@@ -330,6 +342,7 @@ impl AuditStats {
             total_events: AtomicU64::new(0),
             filtered_events: AtomicU64::new(0),
             persisted_events: AtomicU64::new(0),
+            persist_dropped: AtomicU64::new(0),
             alerts_triggered: AtomicU64::new(0),
             per_type_counts: [
                 AtomicU64::new(0),
@@ -399,6 +412,43 @@ static AUDIT_STATS: AuditStats = AuditStats::new();
 
 /// Path for the persistent audit log file.
 const AUDIT_LOG_PATH: &str = "/var/log/audit.log";
+
+/// Most bytes written to the persistent log per boot. Past it events stay
+/// in the in-memory ring only and are counted as dropped (Linux bounds its
+/// queue the same way, `audit_backlog_limit`): an unbounded log let any
+/// process fill memory just by making audited calls.
+const MAX_PERSISTED_BYTES: u64 = 4 << 20;
+
+/// The part of [`MAX_PERSISTED_BYTES`] only critical events may use
+/// (`is_critical_event`): a process that floods the log with routine events
+/// must not be able to keep its permission failures or escalation attempts
+/// out of it.
+const CRITICAL_RESERVE_BYTES: u64 = 1 << 20;
+
+/// Set once the persistent log has refused an event (reported once).
+static PERSIST_FULL_REPORTED: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+
+/// The budget an event may write up to: the whole log for a critical one,
+/// the log less the critical reserve otherwise.
+fn persist_limit(critical: bool) -> u64 {
+    if critical {
+        MAX_PERSISTED_BYTES
+    } else {
+        MAX_PERSISTED_BYTES - CRITICAL_RESERVE_BYTES
+    }
+}
+
+/// Bytes written to the persistent log so far.
+static PERSISTED_BYTES: AtomicU64 = AtomicU64::new(0);
+
+/// Reserve `len` bytes of the persistent log's `max`, `used` so far.
+fn reserve_persist(used: &AtomicU64, len: u64, max: u64) -> bool {
+    used.fetch_update(Ordering::AcqRel, Ordering::Acquire, |u| {
+        u.checked_add(len).filter(|&n| n <= max)
+    })
+    .is_ok()
+}
 
 // ---------------------------------------------------------------------------
 // Timestamp Helper
@@ -509,18 +559,76 @@ fn fire_alerts(event: &AuditEvent) {
 fn persist_event(event: &AuditEvent) {
     let serialized = event.serialize();
     let bytes = serialized.as_bytes();
+    let len = bytes.len() as u64;
+    if !reserve_persist(
+        &PERSISTED_BYTES,
+        len,
+        persist_limit(is_critical_event(event)),
+    ) {
+        AUDIT_STATS.persist_dropped.fetch_add(1, Ordering::Relaxed);
+        // Like Linux's audit_failure printk: say so once on the console.
+        if !PERSIST_FULL_REPORTED.swap(true, Ordering::AcqRel) {
+            println!(
+                "[AUDIT] persistent log full ({} bytes): further routine events are kept in \
+                 memory only",
+                MAX_PERSISTED_BYTES
+            );
+        }
+        return;
+    }
 
-    // VFS is only available on bare-metal; skip persistence in host tests.
-    #[cfg(not(test))]
-    {
-        // Try to append to the audit log file; ignore errors if VFS is not
-        // mounted or the path does not exist yet.
-        if crate::fs::append_file(AUDIT_LOG_PATH, bytes).is_ok() {
-            AUDIT_STATS.record_persisted();
+    // Try to append to the audit log file; ignore errors if VFS is not
+    // mounted or the path does not exist yet. One append at a time: the
+    // size read and the write at it are two steps, so two CPUs appending at
+    // once wrote one record over the other (PR #25 review). The lock is
+    // only tried (an event may come from code that must not sleep), a
+    // little longer than any append takes on another CPU; failing that,
+    // the event stays in the memory log only.
+    let written = (0..PERSIST_LOCK_TRIES)
+        .find_map(|_| {
+            let held = PERSIST_LOCK.try_lock();
+            if held.is_none() {
+                core::hint::spin_loop();
+            }
+            held
+        })
+        .and_then(|_held| append_persisted(AUDIT_LOG_PATH, bytes));
+    match written {
+        Some(n) if n == bytes.len() => AUDIT_STATS.record_persisted(),
+        // Not written (no VFS yet, say), or only part of it: not
+        // persisted, and the budget not used goes back (a short write
+        // counted as persisted).
+        Some(n) => {
+            PERSISTED_BYTES.fetch_sub(len - n as u64, Ordering::AcqRel);
+        }
+        None => {
+            PERSISTED_BYTES.fetch_sub(len, Ordering::AcqRel);
         }
     }
-    #[cfg(test)]
-    let _ = bytes;
+}
+
+/// Serialises appends to the audit log (see `persist_event`).
+static PERSIST_LOCK: spin::Mutex<()> = spin::Mutex::new(());
+const PERSIST_LOCK_TRIES: usize = 1 << 16;
+
+/// Append `bytes` to the audit log at `path`: through the VFS on the
+/// kernel, into an in-memory log in host tests (which have no VFS), so the
+/// persistence path and its statistics are exercised there too.
+#[cfg(not(test))]
+fn append_persisted(path: &str, bytes: &[u8]) -> Option<usize> {
+    crate::fs::append_file(path, bytes).ok()
+}
+
+#[cfg(test)]
+static TEST_PERSISTED: spin::Mutex<alloc::vec::Vec<(alloc::string::String, alloc::vec::Vec<u8>)>> =
+    spin::Mutex::new(alloc::vec::Vec::new());
+
+#[cfg(test)]
+fn append_persisted(path: &str, bytes: &[u8]) -> Option<usize> {
+    TEST_PERSISTED
+        .lock()
+        .push((alloc::string::String::from(path), bytes.to_vec()));
+    Some(bytes.len())
 }
 
 // ---------------------------------------------------------------------------
@@ -602,6 +710,14 @@ pub fn log_capability_op(pid: u64, cap_id: u64, result: i32) {
 ///
 /// Called from the syscall dispatch path.
 pub fn log_syscall(pid: u64, uid: u32, syscall_nr: usize, result: bool) {
+    // Every system call comes here: decide before formatting a record.
+    if !AUDIT_ENABLED.load(Ordering::Acquire)
+        || !AUDIT_FILTER
+            .try_lock()
+            .is_some_and(|f| f.is_enabled(AuditEventType::Syscall))
+    {
+        return;
+    }
     log_event(AuditEvent::new(
         AuditEventType::Syscall,
         pid,
@@ -733,6 +849,7 @@ pub fn get_detailed_stats() -> AuditStatistics {
         total_events: AUDIT_STATS.total_events.load(Ordering::Relaxed),
         filtered_events: AUDIT_STATS.filtered_events.load(Ordering::Relaxed),
         persisted_events: AUDIT_STATS.persisted_events.load(Ordering::Relaxed),
+        persist_dropped: AUDIT_STATS.persist_dropped.load(Ordering::Relaxed),
         alerts_triggered: AUDIT_STATS.alerts_triggered.load(Ordering::Relaxed),
         buffer_count: AUDIT_COUNT.load(Ordering::Relaxed) as u64,
         buffer_capacity: MAX_AUDIT_LOG as u64,
@@ -748,6 +865,8 @@ pub struct AuditStatistics {
     pub filtered_events: u64,
     /// Events written to persistent storage
     pub persisted_events: u64,
+    /// Events not written because the persistent log was full
+    pub persist_dropped: u64,
     /// Alerts triggered
     pub alerts_triggered: u64,
     /// Events currently in buffer
@@ -784,8 +903,8 @@ pub fn init() -> Result<(), KernelError> {
     AUDIT_HEAD.store(0, Ordering::Relaxed);
     AUDIT_COUNT.store(0, Ordering::Relaxed);
 
-    // Set default filter (all events enabled)
-    set_filter(AuditFilter::allow_all());
+    // Default filter: everything but per-syscall records (opt-in).
+    set_filter(AuditFilter::default_policy());
 
     // Try to create the audit log directory (best-effort)
     // The VFS may not be mounted yet; persistent logging will start
@@ -848,12 +967,87 @@ mod tests {
         assert!(event.result);
     }
 
+    /// Persistence goes through the same path and statistics on the host
+    /// (an in-memory log) as on the kernel (the VFS file).
+    #[test]
+    fn test_events_are_persisted_to_the_audit_log() {
+        let event = AuditEvent::new(
+            AuditEventType::ProcessCreate,
+            789,
+            1000,
+            AuditAction::Create,
+            "process",
+            true,
+            "persist-probe",
+        );
+        let before = get_detailed_stats().persisted_events;
+        persist_event(&event);
+        assert!(get_detailed_stats().persisted_events > before);
+        // Other tests persist events concurrently, so look for this one.
+        let expected = event.serialize();
+        let log = TEST_PERSISTED.lock();
+        assert!(
+            log.iter()
+                .any(|(path, bytes)| path == AUDIT_LOG_PATH
+                    && bytes.as_slice() == expected.as_bytes())
+        );
+    }
+
+    #[test]
+    fn syscalls_are_not_audited_by_default() {
+        let f = AuditFilter::default_policy();
+        assert!(!f.is_enabled(AuditEventType::Syscall));
+        assert!(f.is_enabled(AuditEventType::ProcessCreate));
+        assert!(f.is_enabled(AuditEventType::CapabilityOp));
+    }
+
+    #[test]
+    fn persistent_log_is_bounded() {
+        let used = AtomicU64::new(0);
+        assert!(reserve_persist(&used, 60, 100));
+        assert!(!reserve_persist(&used, 60, 100), "past the cap");
+        assert!(reserve_persist(&used, 40, 100), "exactly to the cap");
+        assert!(!reserve_persist(&used, 1, 100));
+        assert_eq!(used.load(Ordering::Relaxed), 100);
+        let near_max = AtomicU64::new(u64::MAX - 1);
+        assert!(!reserve_persist(&near_max, 2, u64::MAX), "no overflow");
+    }
+
+    #[test]
+    fn routine_events_cannot_use_the_critical_reserve() {
+        let used = AtomicU64::new(0);
+        let routine = persist_limit(false);
+        assert!(reserve_persist(&used, routine, routine));
+        assert!(
+            !reserve_persist(&used, 1, persist_limit(false)),
+            "routine log full"
+        );
+        assert!(
+            reserve_persist(&used, 1, persist_limit(true)),
+            "a critical event still fits"
+        );
+        assert_eq!(persist_limit(true) - routine, CRITICAL_RESERVE_BYTES);
+    }
+
     #[test]
     fn test_log_event() {
         enable(); // Auditing is disabled by default; must enable before logging
-        log_process_create(456, 1000, 0);
-        let (count, _) = get_stats();
-        assert!(count > 0);
+
+        // Logging only tries the filter lock and drops the event when it is
+        // held (best effort, by design), and tests running in parallel use
+        // the same global filter: retry until one event gets through.
+        // This test's own event, by its pid, not the global count other
+        // tests also raise (PR #25 review).
+        let mine = || {
+            TEST_PERSISTED.lock().iter().any(|(_, bytes)| {
+                core::str::from_utf8(bytes).is_ok_and(|line| line.split('|').nth(2) == Some("456"))
+            })
+        };
+        let recorded = (0..1000).any(|_| {
+            log_process_create(456, 1000, 0);
+            mine()
+        });
+        assert!(recorded);
     }
 
     #[test]

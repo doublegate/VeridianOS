@@ -13,7 +13,7 @@
 // called from user-space syscall paths. Will be exercised once the process
 // lifecycle is driven by real user-space programs.
 
-use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicU64, Ordering};
 
 #[cfg(feature = "alloc")]
 extern crate alloc;
@@ -24,18 +24,19 @@ use crate::println;
 
 // Re-export submodules
 pub mod creation;
+pub mod creds;
 pub mod cwd;
 pub mod exit;
 pub mod fork;
 pub mod lifecycle;
 pub mod memory;
 pub mod pcb;
+pub mod rlimit;
+pub mod robust_list;
 pub mod session;
-pub mod signal_delivery;
-pub mod sync;
+pub mod signals;
 pub mod table;
 pub mod thread;
-pub mod wait;
 
 // Re-export common types
 pub use lifecycle::{exec_process, fork_process, wait_process as wait_for_child};
@@ -57,79 +58,21 @@ pub const MAX_PROCESSES: usize = 1024;
 /// Maximum threads per process
 pub const MAX_THREADS_PER_PROCESS: usize = 256;
 
-/// Process ID allocator
-static NEXT_PID: AtomicU64 = AtomicU64::new(1);
-
-/// Thread ID allocator
-static NEXT_TID: AtomicU64 = AtomicU64::new(1);
-
-/// Boot-launched process tracking.
-///
-/// During bootstrap, user processes are launched via
-/// `enter_usermode_returnable()` without registering them in the scheduler.
-/// When these processes make syscalls (e.g., fork), `current_process()` queries
-/// the scheduler which only knows about the idle task (pid=0). These atomics
-/// provide a fallback: the bootstrap wrapper sets them before entering user
-/// mode, and `current_process()`/`current_thread()` check them when the
-/// scheduler returns no valid process.
-///
-/// Using atomics avoids the SCHEDULER lock entirely, which is critical because
-/// acquiring the lock from the bootstrap stack corrupts SSE alignment (movaps
-/// GP fault).
-pub(crate) static BOOT_CURRENT_PID: AtomicU64 = AtomicU64::new(0);
-pub(crate) static BOOT_CURRENT_TID: AtomicU64 = AtomicU64::new(0);
-/// The scheduler task (`sched::scheduler::RUNNING_TASK`) that registered the
-/// boot-launched process. The registration applies only while that task is
-/// still the one running: any other task the scheduler runs in the meantime
-/// keeps its own identity (W-8).
-static BOOT_DISPATCH_TASK: AtomicUsize = AtomicUsize::new(0);
-
-/// The boot-launched (pid, tid), if one is registered *and* we are running
-/// in the context that registered it. Lock-free (see above).
-fn boot_context() -> Option<(u64, u64)> {
-    let pid = BOOT_CURRENT_PID.load(Ordering::Acquire);
-    if pid == 0 {
-        return None;
-    }
-    let running = crate::sched::scheduler::RUNNING_TASK.load(Ordering::Acquire);
-    if running != BOOT_DISPATCH_TASK.load(Ordering::Acquire) {
-        return None;
-    }
-    Some((pid, BOOT_CURRENT_TID.load(Ordering::Acquire)))
-}
-
-/// Register a boot-launched process as the current process.
-///
-/// Called from the bootstrap wrapper before entering user mode via
-/// `enter_usermode_returnable()`. This allows `current_process()` and
-/// `current_thread()` to return the correct process/thread during syscalls.
-pub fn set_boot_current(pid: ProcessId, tid: ThreadId) {
-    BOOT_DISPATCH_TASK.store(
-        crate::sched::scheduler::RUNNING_TASK.load(Ordering::Acquire),
-        Ordering::Release,
-    );
-    BOOT_CURRENT_TID.store(tid.0, Ordering::Release);
-    BOOT_CURRENT_PID.store(pid.0, Ordering::Release);
-}
-
-/// Clear the boot-launched process tracking.
-///
-/// Called from the bootstrap wrapper after the user process exits and control
-/// returns to the kernel bootstrap code.
-pub fn clear_boot_current() {
-    BOOT_CURRENT_PID.store(0, Ordering::Release);
-    BOOT_CURRENT_TID.store(0, Ordering::Release);
-    BOOT_DISPATCH_TASK.store(0, Ordering::Release);
-}
+/// Process and thread IDs share one space, as on Linux: a process's first
+/// thread has the process's ID as its thread ID (`ThreadBuilder::tid`), and
+/// every other thread an ID no process has, so gettid, tkill and tgkill name
+/// threads and processes without ambiguity (N-217).
+static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
 /// Allocate a new process ID
 pub fn alloc_pid() -> ProcessId {
-    ProcessId(NEXT_PID.fetch_add(1, Ordering::Relaxed))
+    ProcessId(NEXT_ID.fetch_add(1, Ordering::Relaxed))
 }
 
-/// Allocate a new thread ID
+/// Allocate a new thread ID for a thread other than a process's first
+/// (from the same space as process IDs).
 pub fn alloc_tid() -> ThreadId {
-    ThreadId(NEXT_TID.fetch_add(1, Ordering::Relaxed))
+    ThreadId(NEXT_ID.fetch_add(1, Ordering::Relaxed))
 }
 
 /// Initialize process management subsystem without creating init process
@@ -175,59 +118,32 @@ pub fn init() {
     println!("[PROCESS] Process management initialized");
 }
 
-/// Get current process
-pub fn current_process() -> Option<alloc::sync::Arc<Process>> {
-    // A process launched directly by the boot/cooperative dispatcher
-    // (enter_usermode_returnable) is not the scheduler's current task -- the
-    // scheduler still reports the dispatching task. While that dispatching
-    // task is the one running, the registered boot process is the caller.
-    // This check takes no locks: taking the SCHEDULER lock on the bootstrap
-    // stack misaligns SSE state.
-    if let Some((boot_pid, _)) = boot_context() {
-        if let Some(proc) = table::get_process(ProcessId(boot_pid)) {
-            return Some(proc);
-        }
+/// The (pid, tid) of the user thread the running dispatcher task belongs
+/// to (ADR 0006 stage D2). Lock-free.
+fn dispatched_context() -> Option<(u64, u64)> {
+    #[cfg(feature = "alloc")]
+    {
+        crate::sched::dispatch::current_owner()
     }
-
-    // Get from current CPU's scheduler
-    if let Some(task) = crate::sched::SCHEDULER.lock().current() {
-        // SAFETY: `task` is a NonNull<Task> returned by the scheduler's
-        // current() method. The scheduler guarantees the pointer is valid
-        // for the lifetime of the lock. We read pid to look up the process.
-        unsafe {
-            let task_ref = task.as_ref();
-            if let Some(proc) = table::get_process(task_ref.pid) {
-                return Some(proc);
-            }
-        }
+    #[cfg(not(feature = "alloc"))]
+    {
+        None
     }
-
-    None
 }
 
-/// Like [`current_process`], but never waits for the scheduler lock:
-/// returns `None` if it is held. For fault handlers that may run while the
-/// interrupted code holds that lock.
+/// Get current process: the process of the user thread running as the
+/// current dispatcher task. `None` for kernel threads and the boot task (the
+/// old scheduler's current task and the boot-launched registration went in
+/// sprint D4).
+pub fn current_process() -> Option<alloc::sync::Arc<Process>> {
+    let (pid, _) = dispatched_context()?;
+    table::get_process(ProcessId(pid))
+}
+
+/// Like [`current_process`]; takes no scheduler lock, so fault handlers may
+/// use it whatever the interrupted code holds.
 pub fn try_current_process() -> Option<alloc::sync::Arc<Process>> {
-    if let Some((boot_pid, _)) = boot_context() {
-        return table::get_process(ProcessId(boot_pid));
-    }
-    // The riscv64 scheduler has no try_lock; nothing on riscv64 calls this
-    // from a fault handler (the user-copy fixup is x86_64-only).
-    #[cfg(target_arch = "riscv64")]
-    {
-        current_process()
-    }
-    #[cfg(not(target_arch = "riscv64"))]
-    {
-        let sched = crate::sched::SCHEDULER.try_lock()?;
-        let task = sched.current()?;
-        // SAFETY: as in current_process(): the scheduler's current task
-        // pointer is valid while its lock is held; only the pid is read.
-        let pid = unsafe { task.as_ref().pid };
-        drop(sched);
-        table::get_process(pid)
-    }
+    current_process()
 }
 
 /// Find process by ID
@@ -240,72 +156,460 @@ pub fn get_current_process() -> Option<alloc::sync::Arc<Process>> {
     current_process()
 }
 
-/// Get current thread
+/// Get current thread (same rule as [`current_process`], so the two never
+/// name different processes).
 pub fn current_thread() -> Option<alloc::sync::Arc<Thread>> {
-    // Same rule as current_process(), so the two never name different
-    // processes.
-    if let Some((boot_pid, boot_tid)) = boot_context() {
-        if let Some(process) = table::get_process(ProcessId(boot_pid)) {
-            if let Some(thread) = process.get_thread(ThreadId(boot_tid)) {
-                return Some(thread);
+    let (pid, tid) = dispatched_context()?;
+    table::get_process(ProcessId(pid))?.get_thread(ThreadId(tid))
+}
+
+/// Start `thread` of `process` as a dispatcher task (ADR 0006 stage D2):
+/// it enters ring 3 with the registers in its saved context. `inherit_fpu`
+/// gives it a copy of the calling thread's live vector registers (fork,
+/// clone) instead of the initial state (a new program).
+#[cfg(all(feature = "alloc", target_arch = "x86_64"))]
+pub fn start_thread(
+    process: &Process,
+    thread: &Thread,
+    inherit_fpu: bool,
+) -> crate::error::KernelResult<()> {
+    use crate::arch::x86_64::switch::{xsave::Area, UserFrame};
+
+    let (frame, ctx_tls) = {
+        let ctx = thread.context.lock();
+        let frame =
+            UserFrame::from_context(&ctx).ok_or(crate::error::KernelError::InvalidArgument {
+                name: "thread context",
+                value: "entry point or stack outside user space",
+            })?;
+        (frame, ctx.tls_base)
+    };
+    let cr3 = process.memory_space.lock().get_page_table();
+    if cr3 == 0 {
+        return Err(crate::error::KernelError::InvalidState {
+            expected: "address space",
+            actual: "no page table",
+        });
+    }
+    let fs_base = if ctx_tls != 0 {
+        ctx_tls
+    } else {
+        process.tls_fs_base.load(Ordering::Acquire)
+    };
+    // Loaded into IA32_FS_BASE at every switch: it must be a user address
+    // (a non-canonical value faults in ring 0).
+    if !crate::arch::x86_64::trap::is_user_address(fs_base) {
+        return Err(crate::error::KernelError::InvalidArgument {
+            name: "thread TLS base",
+            value: "outside user space",
+        });
+    }
+    let mut area = Area::new().ok_or(crate::error::KernelError::OutOfMemory {
+        requested: crate::arch::x86_64::switch::xsave::size(),
+        available: 0,
+    })?;
+    // A new thread or a fork child inherits the caller's GS base (Linux
+    // copies it with the thread); a fresh program starts with 0.
+    let mut gs_base = 0;
+    if inherit_fpu {
+        // The kernel is soft-float, so the CPU still holds the calling
+        // thread's user vector state.
+        area.save();
+        gs_base = crate::arch::x86_64::switch::read_user_gs_base();
+    }
+    process
+        .dispatched
+        .store(true, core::sync::atomic::Ordering::Release);
+    let policy = thread.sched.lock().to_policy();
+    crate::sched::dispatch::spawn_user(
+        (process.pid.0, thread.tid.0),
+        &frame,
+        cr3,
+        fs_base,
+        area,
+        gs_base,
+        policy,
+        thread.get_affinity() as u64,
+    )?;
+    Ok(())
+}
+
+/// RISC-V: start `thread` as a dispatcher task entering user mode with the
+/// registers of its saved context (pc, sp, gp, tp, the argument registers).
+/// `inherit_fpu` gives it a copy of the calling thread's live FP registers
+/// (fork, clone) instead of the initial state (a new program).
+#[cfg(all(feature = "alloc", target_arch = "riscv64", target_os = "none"))]
+pub fn start_thread(
+    process: &Process,
+    thread: &Thread,
+    inherit_fpu: bool,
+) -> crate::error::KernelResult<()> {
+    use crate::arch::riscv64::switch::UserFrame;
+    let mut fp = crate::arch::riscv64::fpu::initial();
+    if inherit_fpu {
+        // The kernel is soft-float: the FP registers still hold the calling
+        // thread's user state.
+        crate::arch::riscv64::fpu::save(&mut fp);
+    }
+    let frame = {
+        let ctx = thread.context.lock();
+        let user = crate::syscall::userspace::is_user_address;
+        if !user(ctx.pc) || !user(ctx.sp) {
+            return Err(crate::error::KernelError::InvalidArgument {
+                name: "thread context",
+                value: "entry point or stack outside user space",
+            });
+        }
+        let mut f = UserFrame::default();
+        // The thread pointer: the context's (a clone's CLONE_SETTLS, a
+        // fork's), else the static program's TLS block (`setup_static_tls`).
+        let tp = if ctx.tp != 0 {
+            ctx.tp
+        } else {
+            process.tls_fs_base.load(Ordering::Acquire) as usize
+        };
+        let regs = [
+            ctx.ra, ctx.sp, ctx.gp, tp, ctx.t0, ctx.t1, ctx.t2, ctx.s0, ctx.s1, ctx.a0, ctx.a1,
+            ctx.a2, ctx.a3, ctx.a4, ctx.a5, ctx.a6, ctx.a7, ctx.s2, ctx.s3, ctx.s4, ctx.s5, ctx.s6,
+            ctx.s7, ctx.s8, ctx.s9, ctx.s10, ctx.s11, ctx.t3, ctx.t4, ctx.t5, ctx.t6,
+        ];
+        for (i, r) in regs.iter().enumerate() {
+            f.x[i + 1] = *r as u64;
+        }
+        f.sepc = ctx.pc as u64;
+        f
+    };
+    let root = process.memory_space.lock().get_page_table();
+    if root == 0 {
+        return Err(crate::error::KernelError::InvalidState {
+            expected: "address space",
+            actual: "no page table",
+        });
+    }
+    process
+        .dispatched
+        .store(true, core::sync::atomic::Ordering::Release);
+    let policy = thread.sched.lock().to_policy();
+    crate::sched::dispatch::spawn_user(
+        (process.pid.0, thread.tid.0),
+        &frame,
+        root,
+        fp,
+        policy,
+        thread.get_affinity() as u64,
+    )?;
+    Ok(())
+}
+
+/// Overwrite `ctx` with the caller's live user registers, the ones the
+/// system call in progress returns with (fork and clone children start
+/// from them). Without a live frame (not in a system call) `ctx` is kept.
+#[cfg(all(
+    target_os = "none",
+    any(target_arch = "aarch64", target_arch = "riscv64")
+))]
+pub(crate) fn load_live_user_registers(ctx: &mut crate::arch::context::ArchThreadContext) {
+    #[cfg(target_arch = "aarch64")]
+    if let Some(frame) = crate::arch::aarch64::switch::live_user_frame() {
+        // The kernel never writes TPIDR_EL0, so it still holds the
+        // caller's thread pointer (musl sets it from user mode).
+        ctx.load_user_frame(&frame, crate::arch::aarch64::switch::read_tls());
+    }
+    #[cfg(target_arch = "riscv64")]
+    if let Some(frame) = crate::arch::riscv64::switch::live_user_frame() {
+        ctx.load_user_frame(&frame);
+    }
+}
+
+/// AArch64: start `thread` as a dispatcher task entering EL0 with the
+/// registers of its saved context (x0-x30, sp, pc) and its TLS register
+/// (TPIDR_EL0). `inherit_fpu` gives it a copy of the calling thread's live
+/// FP/SIMD registers (fork, clone) instead of the initial state.
+#[cfg(all(feature = "alloc", target_arch = "aarch64", target_os = "none"))]
+pub fn start_thread(
+    process: &Process,
+    thread: &Thread,
+    inherit_fpu: bool,
+) -> crate::error::KernelResult<()> {
+    use crate::arch::aarch64::switch::UserFrame;
+    let mut fp = crate::arch::aarch64::context::initial_fpu();
+    if inherit_fpu {
+        // The kernel is soft-float: the FP registers still hold the calling
+        // thread's user state.
+        crate::arch::aarch64::context::save_fpu_state(&mut fp);
+    }
+    let (frame, tls) = {
+        let ctx = thread.context.lock();
+        let user = crate::syscall::userspace::is_user_address;
+        if !user(ctx.pc as usize) || !user(ctx.sp as usize) {
+            return Err(crate::error::KernelError::InvalidArgument {
+                name: "thread context",
+                value: "entry point or stack outside user space",
+            });
+        }
+        let f = UserFrame {
+            x: ctx.x,
+            sp: ctx.sp,
+            elr: ctx.pc,
+            spsr: 0,
+        };
+        // The thread pointer: the context's (a clone's CLONE_SETTLS, a
+        // fork's), else the static program's TLS block (`setup_static_tls`).
+        let tls = if ctx.tpidr_el0 != 0 {
+            ctx.tpidr_el0
+        } else {
+            process.tls_fs_base.load(Ordering::Acquire)
+        };
+        (f, tls)
+    };
+    let root = process.memory_space.lock().get_page_table();
+    if root == 0 {
+        return Err(crate::error::KernelError::InvalidState {
+            expected: "address space",
+            actual: "no page table",
+        });
+    }
+    process
+        .dispatched
+        .store(true, core::sync::atomic::Ordering::Release);
+    let policy = thread.sched.lock().to_policy();
+    crate::sched::dispatch::spawn_user(
+        (process.pid.0, thread.tid.0),
+        &frame,
+        root,
+        tls,
+        fp,
+        policy,
+        thread.get_affinity() as u64,
+    )?;
+    Ok(())
+}
+
+/// Run a freshly created (or exec'd) process as dispatcher tasks and wait
+/// for it to end (stage D2): its first thread is started, the caller blocks
+/// until the process is a zombie whose last task is off the CPU, and the
+/// zombie is reaped. Returns the exit code, or 128 + the signal that killed
+/// it (the shell convention). `None` if the process could not be started.
+#[cfg(all(
+    feature = "alloc",
+    any(
+        target_arch = "x86_64",
+        all(
+            any(target_arch = "riscv64", target_arch = "aarch64"),
+            target_os = "none"
+        )
+    )
+))]
+pub fn run_and_wait(pid: ProcessId) -> Option<i32> {
+    run_and_wait_all(&[pid])[0]
+}
+
+/// [`run_and_wait`] for several processes at once: all are started before
+/// any is waited for, so they run concurrently. One status per pid, in
+/// order (`None` for one that could not be started).
+#[cfg(all(
+    feature = "alloc",
+    any(
+        target_arch = "x86_64",
+        all(
+            any(target_arch = "riscv64", target_arch = "aarch64"),
+            target_os = "none"
+        )
+    )
+))]
+pub fn run_and_wait_all(pids: &[ProcessId]) -> alloc::vec::Vec<Option<i32>> {
+    let started: alloc::vec::Vec<Option<alloc::sync::Arc<Process>>> = pids
+        .iter()
+        .map(|&pid| {
+            let process = table::get_process(pid)?;
+            let thread = process.threads.lock().values().next().cloned()?;
+            if start_thread(&process, &thread, false).is_err() {
+                // Never ran: free its address space, tables and stacks, as
+                // the shell's launch path did (PR #19 review).
+                exit::discard_unstarted(&process);
+                return None;
             }
+            Some(process)
+        })
+        .collect();
+    pids.iter()
+        .zip(started)
+        .map(|(&pid, process)| {
+            let process = process?;
+            crate::sched::dispatch::PROCESS_EVENTS.wait_until(|| {
+                process.get_state() == ProcessState::Zombie
+                    && crate::sched::dispatch::tasks_of(pid.0).is_empty()
+            });
+            let sig = process.term_signal.load(Ordering::Acquire);
+            let code = if sig != 0 {
+                128 + sig as i32
+            } else {
+                process.get_exit_code()
+            };
+            drop(process);
+            table::remove_process(pid);
+            Some(code)
+        })
+        .collect()
+}
+
+/// The process of a dispatcher task about to be reaped, looked up before
+/// the task leaves the task table: once it has, a waiting parent may remove
+/// the process, and [`user_task_reaped`] must still free its page tables.
+#[cfg(feature = "alloc")]
+pub fn process_for_reap(pid: u64) -> Option<alloc::sync::Arc<Process>> {
+    table::get_process(ProcessId(pid)).or_else(|| {
+        AWAITING_REAP
+            .lock()
+            .iter()
+            .find(|p| p.pid.0 == pid)
+            .cloned()
+    })
+}
+
+/// Zombies a parent has waited for while a task of theirs had still to be
+/// reaped. A zombie can be waited for as soon as it is one, as on Linux --
+/// its last thread marks it before leaving the CPU -- and the reap of that
+/// task frees the page tables, which needs the process: out of the table,
+/// it was not found and they leaked (PR #22 review). Each stays here until
+/// its page tables are freed.
+#[cfg(feature = "alloc")]
+static AWAITING_REAP: spin::Mutex<alloc::vec::Vec<alloc::sync::Arc<Process>>> =
+    spin::Mutex::new(alloc::vec::Vec::new());
+
+/// Take the waited-for zombie `pid` out of the process table, keeping it
+/// for its tasks' reap if they still need it.
+#[cfg(feature = "alloc")]
+pub(crate) fn remove_waited(pid: ProcessId) {
+    let Some(process) = table::get_process(pid) else {
+        return;
+    };
+    // Kept before it leaves the table, so a reap never finds it in
+    // neither place; dropped again if its page tables are already freed
+    // (a reap that came first).
+    AWAITING_REAP.lock().push(process.clone());
+    table::remove_process(pid);
+    if process.memory_space.lock().get_page_table() == 0 {
+        release_reaped(pid.0);
+    }
+}
+
+/// The page tables of `pid` are freed: nothing of it is waited for.
+#[cfg(feature = "alloc")]
+fn release_reaped(pid: u64) {
+    AWAITING_REAP.lock().retain(|p| p.pid.0 != pid);
+}
+
+/// A dispatcher task of `process` has been reaped (it is off every CPU and
+/// out of the task table). Once a zombie process has no task left, its page
+/// tables -- which a running thread was still using when it tore the rest
+/// down -- are freed. Runs in the reaper thread: it may sleep.
+#[cfg(feature = "alloc")]
+pub fn user_task_reaped(process: Option<alloc::sync::Arc<Process>>, tid: u64) {
+    // A thread other than the main one that has exited while its process
+    // lives on is gone for good, as on Linux: its entry (and the kernel
+    // stack its builder allocated) is freed now. C libraries join through
+    // the CLONE_CHILD_CLEARTID futex, not the kernel, so nothing else ever
+    // removed it, and a process stopped creating threads after 255.
+    if let Some(p) = &process {
+        let exited = p.get_thread(ThreadId(tid)).is_some_and(|t| {
+            matches!(
+                t.get_state(),
+                thread::ThreadState::Zombie | thread::ThreadState::Dead
+            )
+        });
+        if tid != p.pid.0 && exited && p.get_state() != ProcessState::Zombie {
+            let _ = exit::cleanup_thread(p, ThreadId(tid));
         }
     }
+    // Every reap: an exec waits for its process's other tasks to go
+    // (N-101), not only for the whole process.
+    crate::sched::dispatch::PROCESS_EVENTS.wake_all();
+    let Some(process) = process else {
+        return;
+    };
+    if process.get_state() != ProcessState::Zombie
+        || !crate::sched::dispatch::tasks_of(process.pid.0).is_empty()
+    {
+        return;
+    }
+    free_page_tables(&process);
+    release_reaped(process.pid.0);
+    crate::sched::dispatch::PROCESS_EVENTS.wake_all();
+}
 
-    // Get from current CPU's scheduler
-    if let Some(task) = crate::sched::SCHEDULER.lock().current() {
-        // SAFETY: `task` is a NonNull<Task> returned by the scheduler's
-        // current() method. The scheduler guarantees the pointer is valid
-        // for the lifetime of the lock. We read pid and tid to look up
-        // the thread via the process table.
-        unsafe {
-            let task_ref = task.as_ref();
-            if let Some(process) = table::get_process(task_ref.pid) {
-                if let Some(thread) = process.get_thread(task_ref.tid) {
-                    return Some(thread);
+/// Free a process's page tables (its root and what is left below it). Only
+/// once no CPU can be running in its address space.
+#[cfg(feature = "alloc")]
+pub(crate) fn free_page_tables(process: &Process) {
+    let root = {
+        let vas = process.memory_space.lock();
+        let root = vas.get_page_table();
+        vas.set_page_table(0);
+        root
+    };
+    if root != 0 {
+        crate::mm::vas::free_user_page_table_frames(root);
+    }
+}
+
+/// Whether a dispatched thread waiting in a system call must stop waiting
+/// and fail with EINTR: its process has a fatal signal to act on. The
+/// signal is acted on at the system-call exit, once the call has unwound.
+pub fn wait_interrupted() -> bool {
+    if dispatched_context().is_none() {
+        return false;
+    }
+    let (Some(process), Some(thread)) = (current_process(), current_thread()) else {
+        return false;
+    };
+    match process.kill_pending.load(Ordering::Acquire) {
+        0 => signals::deliverable(&process, &thread) != 0,
+        // An exec in progress interrupts every thread but the exec'ing one.
+        exit::EXEC_PENDING => process.exec_tid.load(Ordering::Acquire) != thread.tid.0,
+        _ => true,
+    }
+}
+
+/// Run on every return to user mode of a dispatched thread: a thread whose
+/// process received a fatal signal exits here instead (the signal is acted
+/// on by the process's own threads, never torn down under them).
+pub extern "C" fn user_return_check() {
+    #[cfg(feature = "alloc")]
+    if dispatched_context().is_some() {
+        if let Some(process) = current_process() {
+            // RLIMIT_CPU: SIGXCPU or SIGKILL, acted on just below or by
+            // the signal delivery that follows.
+            rlimit::check_cpu(&process);
+            let sig = process.kill_pending.load(Ordering::Acquire);
+            if sig == exit::GROUP_EXIT_PENDING {
+                drop(process);
+                exit::exit_dispatched(0, true);
+            } else if sig == exit::EXEC_PENDING {
+                // Another thread is exec'ing: this one leaves.
+                let me = current_thread().map(|t| t.tid.0);
+                if me != Some(process.exec_tid.load(Ordering::Acquire)) {
+                    drop(process);
+                    exit::exit_dispatched(0, false);
                 }
+            } else if sig != 0 {
+                drop(process);
+                let _ = crate::syscall::process::exit_current(0, sig);
             }
         }
     }
-
-    None
 }
 
-/// Yield current thread
-pub fn yield_thread() {
-    crate::sched::yield_cpu();
-}
-
-/// Exit current thread
+/// Exit the calling thread (pthread_exit). Every user thread is a
+/// dispatcher task, which leaves through `exit::exit_dispatched` (robust
+/// futexes, CLONE_CHILD_CLEARTID, CPU time, and the process's teardown if it
+/// is the last thread). Returns only when called outside a user thread.
 pub fn exit_thread(exit_code: i32) {
-    if let (Some(thread), Some(process)) = (current_thread(), current_process()) {
-        println!(
-            "[PROCESS] Thread {} exiting with code {}",
-            thread.tid.0, exit_code
-        );
-
-        // Handle CLONE_CHILD_CLEARTID first, while the thread is intact:
-        // clear *clear_tid and wake one futex waiter (best effort).
-        let clear_ptr = thread.clear_tid.load(core::sync::atomic::Ordering::Acquire);
-        if clear_ptr != 0 {
-            let _ = crate::syscall::userspace::write_user(clear_ptr, 0u32);
-            let _ = crate::syscall::sys_futex_wake(clear_ptr, 1, 0);
-        }
-
-        // Mark thread as exited with state synchronization
-        thread.set_exited(exit_code);
-
-        // A detached thread is never joined, so it must be reaped -- but not
-        // here: cleanup_thread frees the kernel stack this code is running
-        // on and drops `thread` (PROC-SEC-02). Defer it to the idle loop.
-        #[cfg(feature = "alloc")]
-        if thread.detached.load(core::sync::atomic::Ordering::Acquire) {
-            crate::sched::load_balance::defer_thread_reap(process.pid, thread.tid);
-        }
-
-        // Never return - schedule another thread
-        crate::sched::exit_task(exit_code);
+    #[cfg(feature = "alloc")]
+    if crate::sched::dispatch::current_owner().is_some() {
+        exit::exit_dispatched(exit_code, false);
     }
+    let _ = exit_code;
 }
 
 /// Terminate a specific thread
@@ -319,59 +623,12 @@ pub fn terminate_thread(pid: ProcessId, tid: ThreadId) -> crate::error::KernelRe
 
             // Mark thread as dead
             thread.set_state(thread::ThreadState::Dead);
-
-            // Remove from scheduler if it has a task
-            if let Some(task_ptr) = thread.get_task_ptr() {
-                // SAFETY: task_ptr is a NonNull<Task> stored in the thread.
-                // We set the task state to Dead so the scheduler will not
-                // run this task again. The thread was found via a valid
-                // process/thread lookup above.
-                unsafe {
-                    let task = task_ptr.as_ptr();
-                    (*task).state = ProcessState::Dead;
-                }
-            }
-
             Ok(())
         } else {
             Err(crate::error::KernelError::ThreadNotFound { tid: tid.0 })
         }
     } else {
         Err(crate::error::KernelError::ProcessNotFound { pid: pid.0 })
-    }
-}
-
-/// Block current thread
-pub fn block_thread() {
-    if let Some(thread) = current_thread() {
-        // Update thread state to blocked
-        thread.set_blocked(None);
-        crate::sched::yield_cpu();
-    }
-}
-
-/// Wake up a thread
-pub fn wake_thread(tid: ThreadId) {
-    println!("[PROCESS] Waking thread {}", tid.0);
-
-    // Find thread in current process
-    if let Some(current_process) = get_current_process() {
-        let threads = current_process.threads.lock();
-        if let Some(thread) = threads.get(&tid) {
-            // Mark thread as ready
-            thread.set_ready();
-
-            // Wake up in scheduler if it has a task
-            if let Some(task_ptr) = thread.get_task_ptr() {
-                // SAFETY: task_ptr is a NonNull<Task> stored in the thread.
-                // We read the pid field to wake the process in the
-                // scheduler. The thread was found via the threads lock.
-                unsafe {
-                    let task = task_ptr.as_ptr();
-                    crate::sched::wake_up_process((*task).pid);
-                }
-            }
-        }
     }
 }
 
@@ -394,7 +651,11 @@ pub fn create_thread(
             use thread::ThreadBuilder;
 
             // Build thread with real stack allocation via ThreadBuilder
+            let sched = current_thread()
+                .map(|t| t.sched.lock().for_child())
+                .unwrap_or_default();
             let thread = ThreadBuilder::new(process.pid, String::from("user_thread"), entry_point)
+                .sched(sched)
                 .user_stack_size(1024 * 1024) // 1MB user stack
                 .kernel_stack_size(64 * 1024) // 64KB kernel stack
                 .build()?;
@@ -482,32 +743,3 @@ pub fn get_process_list() -> Option<alloc::vec::Vec<u64>> {
 }
 
 // get_process is already re-exported at the top of the module
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::sched::scheduler::RUNNING_TASK;
-
-    /// W-8: a boot-launched registration applies only while the task that
-    /// registered it is running; any other scheduled task keeps its own
-    /// identity, and clearing removes it.
-    #[test]
-    fn boot_context_is_scoped_to_the_registering_task() {
-        let saved = RUNNING_TASK.load(Ordering::Acquire);
-
-        RUNNING_TASK.store(0x1000, Ordering::Release);
-        set_boot_current(ProcessId(77), ThreadId(78));
-        assert_eq!(boot_context(), Some((77, 78)));
-
-        RUNNING_TASK.store(0x2000, Ordering::Release); // another task runs
-        assert_eq!(boot_context(), None);
-
-        RUNNING_TASK.store(0x1000, Ordering::Release); // dispatcher resumes
-        assert_eq!(boot_context(), Some((77, 78)));
-
-        clear_boot_current();
-        assert_eq!(boot_context(), None);
-
-        RUNNING_TASK.store(saved, Ordering::Release);
-    }
-}

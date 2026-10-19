@@ -1,0 +1,201 @@
+VeridianOS: fix plasma5support compiler warnings (deprecations, sign-compare, unused parameter)
+
+GCC reported, and this change fixes:
+
+- dataengineconsumer.cpp: -Wunused-parameter 'job'. The parameter is used
+  only inside the #ifndef NDEBUG block, so release builds never read it; it
+  is now [[maybe_unused]]. The slot signature (connected by SIGNAL/SLOT
+  string) is unchanged.
+- datamodel.cpp: QSortFilterProxyModel::invalidateFilter() is deprecated
+  (Qt 6.13). Ported to the documented replacement: beginFilterChange()
+  before the filter callback is replaced, endFilterChange() after it
+  (default Direction::Both, which is what invalidateFilter() did). One
+  difference: beginFilterChange() builds the proxy's root
+  mapping if it does not exist yet (filterAcceptsRow() over all source
+  rows); if the proxy had not been queried yet, endFilterChange() then
+  reports the difference as rowsRemoved/rowsInserted where
+  invalidateFilter() emitted nothing. The resulting rows are the same.
+- ion_noaa.cpp: QString::count() is deprecated; use size() (identical).
+- datasource.cpp: QQmlPropertyMap(QObject *) is deprecated; use the
+  documented QQmlPropertyMap::create(parent) factory (same object, same
+  parent).
+- ion_wettercom.cpp: QDateTime::fromSecsSinceEpoch(qint64, Qt::TimeSpec)
+  is deprecated; pass QTimeZone::LocalTime instead of Qt::LocalTime (same
+  local-time result).
+- powermanagementjob.cpp: -Wsign-compare at the two "cookie != -1" checks.
+  The cookies are uint and -1 meant "no inhibition active" (it converted to
+  UINT_MAX, so the code worked). A named constant NoInhibitionCookie =
+  std::numeric_limits<uint>::max() now replaces every use of -1 for these
+  cookies (initialisers, checks, resets), so the sentinel is the same value
+  and behaviour is unchanged.
+
+Not handled here: "'TRANSLATION_DOMAIN' redefined" (0001).
+
+diff -ru a/src/dataengines/powermanagement/powermanagementjob.cpp b/src/dataengines/powermanagement/powermanagementjob.cpp
+--- a/src/dataengines/powermanagement/powermanagementjob.cpp	2026-10-08 18:39:44.958436767 -0400
++++ b/src/dataengines/powermanagement/powermanagementjob.cpp	2026-10-08 18:40:38.342539655 -0400
+@@ -34,7 +34,7 @@
+     const QString operation = operationName();
+     // qDebug() << "starting operation  ... " << operation;
+     if (operation == QLatin1String("beginSuppressingSleep")) {
+-        if (m_sleepInhibitionCookie != -1) { // an inhibition request is already active; don't trigger another one
++        if (m_sleepInhibitionCookie != NoInhibitionCookie) { // an inhibition request is already active; don't trigger another one
+             setResult(true);
+             return;
+         }
+@@ -44,7 +44,7 @@
+                                                           QStringLiteral("Inhibit"));
+         msg << QCoreApplication::applicationName() << parameters().value(QStringLiteral("reason")).toString();
+         QDBusReply<uint> reply = QDBusConnection::sessionBus().call(msg);
+-        m_sleepInhibitionCookie = reply.isValid() ? reply.value() : -1;
++        m_sleepInhibitionCookie = reply.isValid() ? reply.value() : NoInhibitionCookie;
+         setResult(reply.isValid());
+         if (reply.isValid() && !parameters().value(QStringLiteral("silent")).toBool()) {
+             QDBusMessage osdMsg = QDBusMessage::createMethodCall(QStringLiteral("org.kde.plasmashell"),
+@@ -62,7 +62,7 @@
+                                                           QStringLiteral("UnInhibit"));
+         msg << m_sleepInhibitionCookie;
+         QDBusReply<void> reply = QDBusConnection::sessionBus().call(msg);
+-        m_sleepInhibitionCookie = reply.isValid() ? -1 : m_sleepInhibitionCookie; // reset cookie if the stop request was successful
++        m_sleepInhibitionCookie = reply.isValid() ? NoInhibitionCookie : m_sleepInhibitionCookie; // reset cookie if the stop request was successful
+         setResult(reply.isValid());
+         if (reply.isValid() && !parameters().value(QStringLiteral("silent")).toBool()) {
+             QDBusMessage osdMsg = QDBusMessage::createMethodCall(QStringLiteral("org.kde.plasmashell"),
+@@ -74,7 +74,7 @@
+         }
+         return;
+     } else if (operation == QLatin1String("beginSuppressingScreenPowerManagement")) {
+-        if (m_lockInhibitionCookie != -1) { // an inhibition request is already active; don't trigger another one
++        if (m_lockInhibitionCookie != NoInhibitionCookie) { // an inhibition request is already active; don't trigger another one
+             setResult(true);
+             return;
+         }
+@@ -84,7 +84,7 @@
+                                                           QStringLiteral("Inhibit"));
+         msg << QCoreApplication::applicationName() << parameters().value(QStringLiteral("reason")).toString();
+         QDBusReply<uint> reply = QDBusConnection::sessionBus().call(msg);
+-        m_lockInhibitionCookie = reply.isValid() ? reply.value() : -1;
++        m_lockInhibitionCookie = reply.isValid() ? reply.value() : NoInhibitionCookie;
+         setResult(reply.isValid());
+         return;
+     } else if (operation == QLatin1String("stopSuppressingScreenPowerManagement")) {
+@@ -94,7 +94,7 @@
+                                                           QStringLiteral("UnInhibit"));
+         msg << m_lockInhibitionCookie;
+         QDBusReply<void> reply = QDBusConnection::sessionBus().call(msg);
+-        m_lockInhibitionCookie = reply.isValid() ? -1 : m_lockInhibitionCookie; // reset cookie if the stop request was successful
++        m_lockInhibitionCookie = reply.isValid() ? NoInhibitionCookie : m_lockInhibitionCookie; // reset cookie if the stop request was successful
+         setResult(reply.isValid());
+         return;
+     } else if (operation == QLatin1String("setPowerProfile")) {
+diff -ru a/src/dataengines/powermanagement/powermanagementjob.h b/src/dataengines/powermanagement/powermanagementjob.h
+--- a/src/dataengines/powermanagement/powermanagementjob.h	2026-10-08 18:39:44.967188420 -0400
++++ b/src/dataengines/powermanagement/powermanagementjob.h	2026-10-08 18:40:38.340689754 -0400
+@@ -9,6 +9,8 @@
+ // plasma
+ #include <Plasma5Support/ServiceJob>
+ 
++#include <limits>
++
+ class SessionManagement;
+ class QDBusPendingCall;
+ 
+@@ -26,6 +28,8 @@
+ private:
+     QDBusPendingCall setPowerProfile(const QString &value);
+     SessionManagement *m_session;
+-    inline static uint m_sleepInhibitionCookie = -1;
+-    inline static uint m_lockInhibitionCookie = -1;
++    // Inhibition cookies are unsigned; this value marks "no inhibition active".
++    static constexpr uint NoInhibitionCookie = std::numeric_limits<uint>::max();
++    inline static uint m_sleepInhibitionCookie = NoInhibitionCookie;
++    inline static uint m_lockInhibitionCookie = NoInhibitionCookie;
+ };
+diff -ru a/src/dataengines/weather/ions/noaa/ion_noaa.cpp b/src/dataengines/weather/ions/noaa/ion_noaa.cpp
+--- a/src/dataengines/weather/ions/noaa/ion_noaa.cpp	2026-10-08 18:39:44.931921161 -0400
++++ b/src/dataengines/weather/ions/noaa/ion_noaa.cpp	2026-10-08 18:40:38.339539676 -0400
+@@ -71,7 +71,7 @@
+ 
+     QHash<QString, NOAAIon::StationInfo>::const_iterator it = m_places.constBegin();
+     // If the source name might look like a station ID, check these too and return the name
+-    bool checkState = source.count() == 2;
++    bool checkState = source.size() == 2;
+ 
+     while (it != m_places.constEnd()) {
+         if (checkState) {
+diff -ru a/src/dataengines/weather/ions/wetter.com/ion_wettercom.cpp b/src/dataengines/weather/ions/wetter.com/ion_wettercom.cpp
+--- a/src/dataengines/weather/ions/wetter.com/ion_wettercom.cpp	2026-10-08 18:39:44.950353466 -0400
++++ b/src/dataengines/weather/ions/wetter.com/ion_wettercom.cpp	2026-10-08 18:40:38.340562836 -0400
+@@ -23,6 +23,7 @@
+ 
+ #include <QCryptographicHash>
+ #include <QLocale>
++#include <QTimeZone>
+ #include <QXmlStreamReader>
+ 
+ /*
+@@ -531,7 +532,7 @@
+             if (elementName == QLatin1String("date")) {
+                 // we have parsed a complete day
+ 
+-                forecastPeriod->period = QDateTime::fromSecsSinceEpoch(summaryUtcTime, Qt::LocalTime);
++                forecastPeriod->period = QDateTime::fromSecsSinceEpoch(summaryUtcTime, QTimeZone::LocalTime);
+                 QString weatherString = QString::number(summaryWeather);
+                 forecastPeriod->iconName = getWeatherIcon(dayIcons(), weatherString);
+                 forecastPeriod->summary = getWeatherCondition(dayConditions(), weatherString);
+@@ -549,13 +550,13 @@
+                 // yep, that field is written to more often than needed...
+                 weatherData.timeDifference = localTime - utcTime;
+ 
+-                forecast->period = QDateTime::fromSecsSinceEpoch(utcTime, Qt::LocalTime);
++                forecast->period = QDateTime::fromSecsSinceEpoch(utcTime, QTimeZone::LocalTime);
+                 QString weatherString = QString::number(weather);
+                 forecast->tempHigh = tempMax;
+                 forecast->tempLow = tempMin;
+                 forecast->probability = probability;
+ 
+-                QTime localWeatherTime = QDateTime::fromSecsSinceEpoch(utcTime, Qt::LocalTime).time();
++                QTime localWeatherTime = QDateTime::fromSecsSinceEpoch(utcTime, QTimeZone::LocalTime).time();
+                 localWeatherTime = localWeatherTime.addSecs(weatherData.timeDifference);
+ 
+                 // TODO use local sunset/sunrise time
+diff -ru a/src/declarativeimports/datamodel.cpp b/src/declarativeimports/datamodel.cpp
+--- a/src/declarativeimports/datamodel.cpp	2026-10-08 18:39:44.919227225 -0400
++++ b/src/declarativeimports/datamodel.cpp	2026-10-08 18:40:38.338588998 -0400
+@@ -138,8 +138,9 @@
+         return;
+     }
+ 
++    beginFilterChange();
+     m_filterCallback = callback;
+-    invalidateFilter();
++    endFilterChange();
+ 
+     Q_EMIT filterCallbackChanged(callback);
+ }
+diff -ru a/src/declarativeimports/datasource.cpp b/src/declarativeimports/datasource.cpp
+--- a/src/declarativeimports/datasource.cpp	2026-10-08 18:39:44.941106773 -0400
++++ b/src/declarativeimports/datasource.cpp	2026-10-08 18:40:38.340196054 -0400
+@@ -18,8 +18,8 @@
+     , m_interval(0)
+     , m_intervalAlignment(Plasma5Support::Types::NoAlignment)
+ {
+-    m_models = new QQmlPropertyMap(this);
+-    m_data = new QQmlPropertyMap(this);
++    m_models = QQmlPropertyMap::create(this);
++    m_data = QQmlPropertyMap::create(this);
+     setObjectName(QStringLiteral("DataSource"));
+ }
+ 
+diff -ru a/src/plasma5support/dataengineconsumer.cpp b/src/plasma5support/dataengineconsumer.cpp
+--- a/src/plasma5support/dataengineconsumer.cpp	2026-10-08 18:39:44.908996129 -0400
++++ b/src/plasma5support/dataengineconsumer.cpp	2026-10-08 18:40:38.338409540 -0400
+@@ -19,7 +19,7 @@
+ 
+ namespace Plasma5Support
+ {
+-void DataEngineConsumerPrivate::slotJobFinished(Plasma5Support::ServiceJob *job)
++void DataEngineConsumerPrivate::slotJobFinished([[maybe_unused]] Plasma5Support::ServiceJob *job)
+ {
+ #ifndef NDEBUG
+     // qCDebug(LOG_PLASMA) << "engine ready!";

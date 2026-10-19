@@ -12,7 +12,7 @@ All memory allocator features fully implemented and benchmarked:
 - Per-CPU page frame cache (64-frame) for fast allocation
 - TLB shootdown reduction via `TlbFlushBatch`
 - Benchmarks (QEMU x86_64+KVM): frame_alloc_global 1,525ns, frame_alloc_1 (per-CPU) 2,215ns
-- Memory zones (DMA, Normal), kernel heap with slab allocator
+- Memory zones (DMA, Normal); kernel heap: a linked-list allocator on every architecture (no slab allocator; see MEM-INC-02)
 - Virtual Address Space management with user-space safety
 
 ## Executive Summary
@@ -108,7 +108,9 @@ pub struct BitmapAllocator {
 - **Bit Manipulation**: Use POPCNT, TZCNT for fast searches
 - **Cache Line Alignment**: 64-bit atomic operations
 - **Search Optimization**: Remember last allocation position
-- **Lock-Free**: Atomic compare-and-swap operations
+- **Locking**: Not lock-free. The allocator sits behind the global `FRAME_ALLOCATOR` mutex, with
+  per-CPU frame caches in front of it (MEM-PERF-01); most callers still take the global lock
+  per frame (see `docs/audit/AUDIT-REEVALUATION-2026-10-07.md`)
 
 ### Implementation
 ```rust
@@ -343,7 +345,6 @@ pub struct MemoryWatermarks {
 
 ### Reclamation
 - Page cache eviction
-- Slab cache shrinking
 - Process memory pressure signals
 
 ## Testing Strategy
@@ -365,9 +366,10 @@ pub struct MemoryWatermarks {
 
 ## Integration Points
 
-### Slab Allocator
-- Built on top of frame allocator
-- Efficient for kernel objects
+### Kernel Heap
+- `linked_list_allocator` on every architecture, on frames from the frame
+  allocator sized from the memory map at boot
+- An earlier slab allocator was never wired in and was removed (MEM-INC-02)
 
 ### Virtual Memory Manager
 - Physical frame provider
@@ -400,7 +402,7 @@ pub struct MemoryWatermarks {
 ### Key Implementation Details
 - Hybrid allocator fully operational with bitmap/buddy threshold at 512 frames
 - NUMA-aware allocation working for multi-node systems
-- Lock-free bitmap operations using atomic compare-and-swap
+- Bitmap operations run under the global `FRAME_ALLOCATOR` lock (the earlier "lock-free" claim was wrong)
 - Performance targets achieved (< 1μs for allocations)
 
 ## Open Questions

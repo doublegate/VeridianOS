@@ -11,10 +11,10 @@
 /// used on other architectures.
 macro_rules! aarch64_boot_print {
     ($s:expr) => {
-        // SAFETY: uart_write_str writes to the QEMU virt machine UART at
-        // 0x0900_0000.  This address is valid and mapped during early boot
-        // on the AArch64 QEMU virt platform.  The function only performs
-        // MMIO register writes and cannot cause memory corruption.
+        // SAFETY: uart_write_str writes to the QEMU virt machine UART
+        // (`platform::PL011`), mapped by boot.S before any Rust code runs.  The
+        // function only performs MMIO register writes and cannot cause memory
+        // corruption.
         unsafe {
             crate::arch::aarch64::direct_uart::uart_write_str(concat!($s, "\n"));
         }

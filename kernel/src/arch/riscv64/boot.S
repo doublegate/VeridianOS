@@ -6,12 +6,104 @@
 veridian_dtb_pa:
     .dword 0
 
+.global veridian_boot_hartid
+# Hart id of the boot hart, which SBI passes in a0. It need not be 0
+# (OpenSBI picks the boot hart), so it is saved before the registers are
+# cleared below.
+veridian_boot_hartid:
+    .dword 0
+
+# Hart lottery (HR-19): the first hart to reach _start boots; the others
+# stop. Firmware without SBI HSM starts every hart here at once.
+veridian_boot_lottery:
+    .word 0
+
+.balign 8
+.global veridian_kernel_satp
+# The kernel's satp: the paging mode boot found (MODE 9 Sv48, else 8 Sv39)
+# and the kernel root, no identity map. Rust reads the mode from it.
+veridian_kernel_satp:
+    .dword 0
+# The trampoline's satp: the kernel root plus the identity map, for the
+# few instructions between turning paging on at the physical address and
+# running at the kernel's own. Secondary harts use it the same way.
+veridian_trampoline_satp:
+    .dword 0
+
+# Early page tables (E-RV3), zeroed with the rest of .bss. Everything the
+# kernel maps is in Sv39's kernel half, 0xFFFF_FFC0_0000_0000 and up, so one
+# table, veridian_early_l3_kernel, holds all of it in both modes (ADR 0018):
+#
+#   Sv48: kernel root = veridian_kernel_root (L4[511] -> that table);
+#         trampoline root = veridian_early_root (also L4[0] -> the
+#         identity table).
+#   Sv39: kernel root = veridian_early_l3_kernel itself (its entries 0..255,
+#         the user half, are empty); trampoline root = the identity table
+#         with the kernel half (256..511) copied in.
+.section .bss
+.balign 4096
+# Sv48's kernel root: L4[511] only, so the lower half is free for user
+# address spaces (they share that entry).
+.global veridian_kernel_root
+veridian_kernel_root:
+    .space 4096
+# Sv48's trampoline root: the same plus L4[0], the identity map.
+veridian_early_root:
+    .space 4096
+# The identity map, for the trampoline only: the first 256 GiB in 1 GiB
+# pages at their physical address (L4[0] under Sv48; the lower half of the
+# trampoline root under Sv39).
+.global veridian_early_l3_phys
+veridian_early_l3_phys:
+    .space 4096
+# The kernel half (L4[511] under Sv48, the root under Sv39), in 1 GiB
+# pages:
+#   L3[256..383]  the physical map, 128 GiB: virtual = physical +
+#                 0xFFFF_FFC0_0000_0000;
+#   L3[384..399]  the kernel stacks (mm::kstack), filled in later;
+#   L3[510..511]  the image at its link address, 0xFFFF_FFFF_8000_0000 +
+#                 2 MiB = physical 2..4 GiB.
+veridian_early_l3_kernel:
+    .space 4096
+
 .section .text.boot
 .global _start
 
+# Linux's RISC-V Image header (HR-03; Documentation/arch/riscv/
+# boot-image-header.rst), so that the flat Image (`objcopy -O binary`,
+# veridian-kernel.img) loads through U-Boot `booti` and EFI loaders. It is
+# the first 64 bytes of the image; execution starts at code0.
 _start:
+    .option push
+    .option norvc
+    j .Lboot                         # code0 (4 bytes: no compressed jump)
+    .option pop
+    .word 0                          # code1
+    .dword 0x200000                  # text_offset: the link base is RAM + 2 MiB
+    .dword __veridian_image_size     # image_size, BSS and boot stack included
+    .dword 0                         # flags: little-endian
+    .word 2                          # version 0.2
+    .word 0                          # res1
+    .dword 0                         # res2
+    .ascii "RISCV\0\0\0"             # magic (deprecated)
+    .ascii "RSC\x05"                 # magic2
+    .word 0                          # res3: no PE/COFF header
+
+.Lboot:
+    la t0, veridian_boot_lottery
+    li t1, 1
+    # The assembler may not see the target's A extension here (release
+    # LTO builds this file without it), so name it.
+    .option push
+    .option arch, +a
+    amoadd.w t1, t1, (t0)
+    .option pop
+    bnez t1, .Llost_lottery
+
     la t0, veridian_dtb_pa
     sd a1, 0(t0)
+    la t0, veridian_boot_hartid
+    sd a0, 0(t0)
 
     # Use SBI console putchar (ecall) for output
     # SBI legacy extension: function ID 0x01 for putchar
@@ -72,6 +164,157 @@ _start:
     # Set up stack - use __stack_top from linker script
     la sp, __stack_top
 
+    # Zero .bss (HR-01): QEMU's ELF loader does, but a flat Image loaded
+    # by U-Boot or EFI carries no bss contents.
+    la t0, __bss_start
+    la t1, __bss_end
+3:
+    bgeu t0, t1, 4f
+    sd zero, 0(t0)
+    addi t0, t0, 8
+    j 3b
+4:
+
+    # FP off (HR-20): the kernel is soft-float (N-178), so an FP
+    # instruction in kernel code traps instead of using user registers.
+    li t0, 0x6000
+    csrc sstatus, t0
+
+    # Paging (E-RV3). This code runs at its physical address (`la` is
+    # PC-relative), the kernel is linked in the upper half. Leaves are
+    # 1 GiB pages: V R W X G A D = 0xEF; a table pointer is V = 1; the
+    # PPN sits at bit 10, so an aligned physical address >> 2.
+    la a0, veridian_early_l3_phys
+    li t1, 0
+    li t2, 256
+    li t3, 0x40000000
+    li t4, 0xEF
+6:
+    srli t5, t1, 2
+    or t5, t5, t4
+    sd t5, 0(a0)
+    addi a0, a0, 8
+    add t1, t1, t3
+    addi t2, t2, -1
+    bnez t2, 6b
+
+    # The physical map: L3[256 + i] = physical i GiB, for 128 GiB. Never
+    # executable (W^X: it also reaches the image): V R W G A D = 0xE7.
+    la a0, veridian_early_l3_kernel
+    li t6, 256 * 8
+    add a0, a0, t6
+    li t1, 0
+    li t2, 128
+    li t4, 0xE7
+9:
+    srli t5, t1, 2
+    or t5, t5, t4
+    sd t5, 0(a0)
+    addi a0, a0, 8
+    add t1, t1, t3
+    addi t2, t2, -1
+    bnez t2, 9b
+
+    # The image, writable and executable until Rust maps it page by page
+    # with its sections' permissions (arch::riscv64::kmap).
+    li t4, 0xEF
+    la a0, veridian_early_l3_kernel
+    li t6, 510 * 8
+    add t6, a0, t6
+    li t1, 0x80000000
+    srli t5, t1, 2
+    or t5, t5, t4
+    sd t5, 0(t6)
+    li t1, 0xC0000000
+    srli t5, t1, 2
+    or t5, t5, t4
+    sd t5, 8(t6)
+
+    # Both roots: L4[511] (the kernel half); the trampoline root also L4[0]
+    # (identity).
+    la t1, veridian_early_l3_phys
+    srli t2, t1, 2
+    ori t2, t2, 1
+    la t1, veridian_early_l3_kernel
+    srli t3, t1, 2
+    ori t3, t3, 1
+    li t1, 511 * 8
+    la a0, veridian_kernel_root
+    add t6, a0, t1
+    sd t3, 0(t6)
+    la a0, veridian_early_root
+    sd t2, 0(a0)
+    add t6, a0, t1
+    sd t3, 0(t6)
+
+    # Find the paging mode the way Linux's set_satp_mode() does: write satp
+    # with the trampoline root and read it back. satp is WARL, and a write
+    # of an unsupported MODE has no effect, so it reads back unchanged (0).
+    # Sv48 first, then Sv39 (Sv57 is not used). The identity map keeps this
+    # code running once a write takes.
+    li t6, 9
+    slli t6, t6, 60
+    la a0, veridian_early_root
+    srli t5, a0, 12
+    or t5, t5, t6
+    sfence.vma
+    csrw satp, t5
+    sfence.vma
+    csrr a1, satp
+    bne a1, t5, .Ltry_sv39
+    la a0, veridian_kernel_root
+    j .Lpaging_on
+
+.Ltry_sv39:
+    # The trampoline root is the identity table plus the kernel half:
+    # copy entries 256..511 of the kernel table into it.
+    la a0, veridian_early_l3_kernel
+    la a1, veridian_early_l3_phys
+    li t1, 256 * 8
+    add a0, a0, t1
+    add a1, a1, t1
+    li t2, 256
+10:
+    ld t1, 0(a0)
+    sd t1, 0(a1)
+    addi a0, a0, 8
+    addi a1, a1, 8
+    addi t2, t2, -1
+    bnez t2, 10b
+    li t6, 8
+    slli t6, t6, 60
+    la a0, veridian_early_l3_phys
+    srli t5, a0, 12
+    or t5, t5, t6
+    sfence.vma
+    csrw satp, t5
+    sfence.vma
+    csrr a1, satp
+    bne a1, t5, .Lno_paging
+    la a0, veridian_early_l3_kernel
+
+.Lpaging_on:
+    # t6 = MODE << 60, t5 = the trampoline satp, a0 = the kernel root.
+    la t1, veridian_trampoline_satp
+    sd t5, 0(t1)
+    srli t5, a0, 12
+    or t5, t5, t6
+    la t1, veridian_kernel_satp
+    sd t5, 0(t1)
+
+    # Continue at the link (upper-half) address of .Lhigh.
+    ld t0, .Lhigh_addr
+    jr t0
+.balign 8
+.Lhigh_addr:
+    .dword .Lhigh
+.Lhigh:
+    # Now at the kernel's own address: drop the identity map.
+    ld t0, veridian_kernel_satp
+    csrw satp, t0
+    sfence.vma
+    la sp, __stack_top
+
     # Jump to Rust code (use `call` for 32-bit range; `jal` only reaches +/-1MB)
     call _start_rust
 
@@ -79,3 +322,67 @@ _start:
 1:
     wfi
     j 1b
+
+# Neither Sv48 nor Sv39: print a message through SBI and stop.
+.Lno_paging:
+    la t0, .Lno_paging_msg
+7:
+    lbu a0, 0(t0)
+    beqz a0, 8f
+    li a7, 0x01
+    ecall
+    addi t0, t0, 1
+    j 7b
+8:
+    wfi
+    j 8b
+.Lno_paging_msg:
+    .asciz "no Sv39 or Sv48: cannot enable paging\n"
+.balign 4
+
+# A hart that lost the lottery asks SBI HSM to stop it (EID "HSM", FID 1
+# hart_stop), so the boot hart can start it later as a secondary. It
+# returns only if HSM is missing; then the hart waits here for good.
+.Llost_lottery:
+    li a7, 0x48534D
+    li a6, 1
+    ecall
+5:
+    wfi
+    j 5b
+
+# Secondary hart entry (SBI HSM hart_start): S-mode, satp = 0, sstatus.SIE =
+# 0, a0 = hartid, a1 = &ApBootArgs (arch/smp_boot.rs). Takes the stack and
+# the per-CPU block from the boot args, installs the trap vector, then
+# enters Rust.
+.global veridian_hart_entry
+veridian_hart_entry:
+    csrw sie, zero
+    csrw sip, zero
+    li t0, 0x6000
+    csrc sstatus, t0
+    # Entered at the physical address with the MMU off: the kernel's
+    # tables first, then the upper-half code; a1 (the boot block) is a
+    # kernel virtual address, used only after this.
+    ld t0, veridian_trampoline_satp
+    sfence.vma
+    csrw satp, t0
+    sfence.vma
+    ld t0, .Lhart_high_addr
+    jr t0
+.balign 8
+.Lhart_high_addr:
+    .dword .Lhart_high
+.Lhart_high:
+    ld t0, veridian_kernel_satp
+    csrw satp, t0
+    sfence.vma
+    ld sp, 8(a1)
+    ld tp, 16(a1)
+    csrw sscratch, zero
+    la t0, veridian_riscv_trap
+    csrw stvec, t0
+    call veridian_secondary_rust
+2:
+    wfi
+    j 2b

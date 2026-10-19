@@ -1,33 +1,42 @@
 //! AArch64 (ARM 64-bit) architecture support.
 //!
-//! Provides initialization, interrupt control (DAIF), serial I/O (PL011
-//! UART at 0x0900_0000), and I/O port stubs for the AArch64 platform.
+//! Provides initialization, interrupt control (DAIF), serial I/O (the PL011
+//! UART, `platform::PL011`), and I/O port stubs for the AArch64 platform.
 
 // Include the boot module
 pub mod boot;
 pub mod bootstrap;
+pub mod bti;
 pub mod context;
 pub mod direct_uart;
 pub mod entry;
 pub mod exceptions;
 pub mod gic;
+#[cfg(feature = "alloc")]
+pub mod kmap;
+pub mod platform;
+pub mod psci;
 pub mod serial;
+#[cfg(feature = "smp")]
+pub mod smp;
+pub mod switch;
 pub mod timer;
+pub mod usercopy;
 pub mod usermode;
 
 /// Called from bootstrap on AArch64 via `crate::arch::init()`.
 pub fn init() {
-    // SAFETY: uart_write_str performs a raw MMIO write to the PL011 UART at
-    // 0x09000000. This is safe during kernel init as the UART is memory-mapped
-    // by QEMU's virt machine and the write is non-destructive.
+    // SAFETY: uart_write_str performs a raw MMIO write to the PL011 UART
+    // (`platform::PL011`). This is safe during kernel init as the UART is
+    // memory-mapped by QEMU's virt machine and the write is non-destructive.
     unsafe {
         use crate::arch::aarch64::direct_uart::uart_write_str;
         uart_write_str("[ARCH] Performing AArch64-specific initialization\n");
     }
 
-    // Exception vectors first: from here on an exception is reported
-    // instead of vectoring to address 0.
-    exceptions::install();
+    // BTI for user programs, if this CPU has it (before any EL0 code).
+    // The boot CPU decides what the system offers; it is never refused.
+    let _ = bti::init_cpu(true);
 
     // Initialize the GIC (Generic Interrupt Controller)
     if let Err(_e) = gic::init() {
@@ -120,36 +129,121 @@ pub fn disable_interrupts() -> impl Drop {
     }
 }
 
+/// CTR_EL0, the cache type register.
+fn ctr_el0() -> u64 {
+    let ctr: u64;
+    // SAFETY: reading CTR_EL0 has no side effects.
+    unsafe { core::arch::asm!("mrs {0}, ctr_el0", out(reg) ctr, options(nomem, nostack)) };
+    ctr
+}
+
+/// CTR_EL0.IDC: data written need not be cleaned to the point of
+/// unification for instruction fetch to see it.
+const CTR_IDC: u64 = 1 << 28;
+/// CTR_EL0.DIC: the instruction caches need no invalidation for it either.
+const CTR_DIC: u64 = 1 << 29;
+
+/// Clean the data cache lines of `addr..addr + len` (kernel addresses,
+/// such as the physical map's alias of a user page) to the point of
+/// unification, so instruction fetch can see what was written there
+/// (HA-25). Nothing to do on a core with CTR_EL0.IDC; [`sync_icache_all`]
+/// must follow either way.
+pub fn clean_dcache_to_pou(addr: usize, len: usize) {
+    let ctr = ctr_el0();
+    if ctr & CTR_IDC == 0 {
+        clean_dcache_lines_to_pou(addr, len, 4 << ((ctr >> 16) & 0xF));
+    }
+}
+
+/// [`clean_dcache_to_pou`] whatever CTR_EL0.IDC says, with lines of
+/// `line` bytes (CTR_EL0.DminLine).
+pub fn clean_dcache_lines_to_pou(addr: usize, len: usize, line: usize) {
+    for a in crate::mm::page_ops::cache_line_starts(addr, len, line) {
+        // SAFETY: `dc cvau` cleans the line holding `a`, a mapped kernel
+        // address (the caller's range); it changes no data.
+        unsafe { core::arch::asm!("dc cvau, {0}", in(reg) a, options(nostack)) };
+    }
+    // SAFETY: a barrier only: the cleans complete before what follows.
+    unsafe { core::arch::asm!("dsb ish", options(nostack)) };
+}
+
+/// Clean the data cache lines of `addr..addr + len` (kernel addresses) to
+/// the point of coherency, where a non-coherent device reads memory
+/// (streaming DMA, `mm::dma`; HA-25).
+pub fn dcache_clean_poc(addr: usize, len: usize) {
+    let line = 4 << ((ctr_el0() >> 16) & 0xF);
+    for a in crate::mm::page_ops::cache_line_starts(addr, len, line) {
+        // SAFETY: `dc cvac` cleans the line holding `a`, a mapped kernel
+        // address (the caller's range); it changes no data.
+        unsafe { core::arch::asm!("dc cvac, {0}", in(reg) a, options(nostack)) };
+    }
+    // SAFETY: a barrier only: the cleans complete before a device is told.
+    unsafe { core::arch::asm!("dsb sy", options(nostack)) };
+}
+
+/// Clean and invalidate the data cache lines of `addr..addr + len` to the
+/// point of coherency, so the CPU next reads what a non-coherent device
+/// wrote (`mm::dma`; HA-25).
+pub fn dcache_clean_inval_poc(addr: usize, len: usize) {
+    let line = 4 << ((ctr_el0() >> 16) & 0xF);
+    for a in crate::mm::page_ops::cache_line_starts(addr, len, line) {
+        // SAFETY: `dc civac` writes back and drops the line holding `a`, a
+        // mapped kernel address; memory keeps the line's data.
+        unsafe { core::arch::asm!("dc civac, {0}", in(reg) a, options(nostack)) };
+    }
+    // SAFETY: a barrier only.
+    unsafe { core::arch::asm!("dsb sy", options(nostack)) };
+}
+
+/// Make code just written (and, without CTR_EL0.IDC, cleaned with
+/// [`clean_dcache_to_pou`]) visible to instruction fetch on every CPU:
+/// invalidate the instruction caches to the inner-shareable domain, unless
+/// CTR_EL0.DIC says they need none. Another CPU synchronises its context
+/// on its next exception return to EL0.
+pub fn sync_icache_all() {
+    if ctr_el0() & CTR_DIC != 0 {
+        // SAFETY: barriers only.
+        unsafe { core::arch::asm!("dsb ish", "isb", options(nostack)) };
+    } else {
+        // SAFETY: cache maintenance and barriers only.
+        unsafe { core::arch::asm!("dsb ish", "ic ialluis", "dsb ish", "isb", options(nostack)) };
+    }
+}
+
 /// Serial initialization for compatibility with the arch-generic interface.
 #[allow(dead_code)] // Arch-generic interface -- AArch64 serial initialized differently
 pub fn serial_init() -> crate::serial::Pl011Uart {
-    crate::serial::Pl011Uart::new(0x0900_0000)
+    crate::serial::Pl011Uart::new(platform::PL011)
 }
-
-/// Kernel heap start address (16MB into QEMU virt RAM at 0x40000000)
-pub const HEAP_START: usize = 0x41000000;
 
 /// Flush TLB for a specific virtual address. Called via
 /// `crate::arch::tlb_flush_address()`.
 pub fn tlb_flush_address(addr: u64) {
-    // SAFETY: `tlbi vae1` invalidates the TLB entry at EL1. Address is shifted
-    // right by 12 for page-number format. DSB SY + ISB ensure completion.
+    // SAFETY: `tlbi vaae1is` invalidates the EL1 entries for this page, any
+    // ASID, on every CPU in the Inner Shareable domain (MEM-ARCH-03: the
+    // non-shareable `vae1` reached only the local CPU). `dsb ishst` orders
+    // the page-table update before it; `dsb ish` waits for completion
+    // everywhere; `isb` resynchronises this CPU.
     unsafe {
-        let page_addr = addr >> 12;
-        core::arch::asm!("tlbi vae1, {}", in(reg) page_addr);
-        core::arch::asm!("dsb sy");
-        core::arch::asm!("isb");
+        let page_addr = (addr >> 12) & 0x0000_0FFF_FFFF_FFFF;
+        core::arch::asm!("dsb ishst", "tlbi vaae1is, {}", "dsb ish", "isb",
+            in(reg) page_addr, options(nostack));
     }
 }
 
 /// Flush entire TLB. Called via `crate::arch::tlb_flush_all()`.
 pub fn tlb_flush_all() {
-    // SAFETY: `tlbi vmalle1` invalidates all EL1 TLB entries. DSB SY + ISB
-    // ensure completion. Architectural maintenance instructions, safe at EL1.
+    // SAFETY: `tlbi vmalle1is` invalidates all EL1 entries on every CPU in
+    // the Inner Shareable domain (MEM-ARCH-03); the barriers order and
+    // complete it as in `tlb_flush_address`.
     unsafe {
-        core::arch::asm!("tlbi vmalle1");
-        core::arch::asm!("dsb sy");
-        core::arch::asm!("isb");
+        core::arch::asm!(
+            "dsb ishst",
+            "tlbi vmalle1is",
+            "dsb ish",
+            "isb",
+            options(nostack)
+        );
     }
 }
 

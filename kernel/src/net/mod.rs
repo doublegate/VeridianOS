@@ -253,9 +253,6 @@ pub fn init() -> Result<(), KernelError> {
     // Initialize socket layer
     socket::init()?;
 
-    // Initialize epoll I/O multiplexing
-    epoll::init()?;
-
     // Register hardware network drivers
     if let Err(_e) = integration::register_drivers() {
         println!(

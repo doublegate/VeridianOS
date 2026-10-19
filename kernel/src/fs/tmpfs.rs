@@ -4,14 +4,11 @@
 //! Data is stored in heap-backed buffers and is lost on unmount.
 //! Supports all standard VFS operations including symlinks.
 
-use alloc::{collections::BTreeMap, string::String, sync::Arc, vec, vec::Vec};
+use alloc::{collections::BTreeMap, string::String, sync::Arc, vec::Vec};
 use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
-#[cfg(not(target_arch = "aarch64"))]
 use spin::RwLock;
 
-#[cfg(target_arch = "aarch64")]
-use super::bare_lock::RwLock;
 use super::{DirEntry, Filesystem, Metadata, NodeType, Permissions, VfsNode};
 use crate::error::{FsError, KernelError};
 
@@ -25,6 +22,9 @@ struct TmpNode {
     children: RwLock<BTreeMap<String, Arc<TmpNode>>>,
     metadata: RwLock<Metadata>,
     inode: u64,
+    /// Device number of a device node (Linux's encoding, `fs::make_dev`);
+    /// 0 for anything else.
+    rdev: u32,
     /// Parent directory inode (".."); changes when a rename moves this
     /// directory.
     parent_inode: core::sync::atomic::AtomicU64,
@@ -35,6 +35,32 @@ struct TmpNode {
 }
 
 impl TmpNode {
+    /// [`VfsNode::unlink`], and with `kind` [`VfsNode::unlink_kind`]: the
+    /// entry's type is checked under the children lock the removal holds.
+    fn unlink_checked(&self, name: &str, kind: Option<bool>) -> Result<(), KernelError> {
+        let mut children = self.children.write();
+
+        if let Some(node) = children.get(name) {
+            if let Some(want_dir) = kind {
+                super::check_unlink_kind(node.node_type, want_dir)?;
+            }
+            if node.node_type == NodeType::Directory {
+                let dir_children = node.children.read();
+                if !dir_children.is_empty() {
+                    return Err(KernelError::FsError(FsError::DirectoryNotEmpty));
+                }
+            }
+
+            // The bytes go back to the size budget when the node itself is
+            // dropped (see `Drop for TmpNode`), not here: another hard link
+            // or an open file can still hold the data.
+            children.remove(name);
+            Ok(())
+        } else {
+            Err(KernelError::FsError(FsError::NotFound))
+        }
+    }
+
     fn new_file(
         inode: u64,
         parent_inode: u64,
@@ -58,6 +84,7 @@ impl TmpNode {
                 inode,
             }),
             inode,
+            rdev: 0,
             parent_inode: core::sync::atomic::AtomicU64::new(parent_inode),
             bytes_used,
             size_limit,
@@ -87,6 +114,7 @@ impl TmpNode {
                 inode,
             }),
             inode,
+            rdev: 0,
             parent_inode: core::sync::atomic::AtomicU64::new(parent_inode),
             bytes_used,
             size_limit,
@@ -118,6 +146,7 @@ impl TmpNode {
                 inode,
             }),
             inode,
+            rdev: 0,
             parent_inode: core::sync::atomic::AtomicU64::new(parent_inode),
             bytes_used,
             size_limit,
@@ -126,16 +155,57 @@ impl TmpNode {
 
     /// Check if writing `additional` bytes would exceed the size limit.
     /// Returns Ok(()) if within limits, Err if exceeded.
-    fn check_space(&self, additional: usize) -> Result<(), KernelError> {
-        if self.size_limit == 0 {
-            return Ok(()); // No limit
+    /// Charge `additional` bytes to the filesystem, atomically: a separate
+    /// check and add let concurrent writers exceed the limit (N-122).
+    fn reserve_space(&self, additional: usize) -> Result<(), KernelError> {
+        if additional == 0 {
+            return Ok(());
         }
-        let current = self.bytes_used.load(Ordering::Relaxed);
-        if current.saturating_add(additional) > self.size_limit {
-            return Err(KernelError::FsError(FsError::NoSpace));
-        }
-        Ok(())
+        let limit = self.size_limit;
+        self.bytes_used
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |cur| {
+                let new = cur.checked_add(additional)?;
+                (limit == 0 || new <= limit).then_some(new)
+            })
+            .map(|_| ())
+            .map_err(|_| KernelError::FsError(FsError::NoSpace))
     }
+
+    fn release_space(&self, bytes: usize) {
+        let _ = self
+            .bytes_used
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |cur| {
+                Some(cur.saturating_sub(bytes))
+            });
+    }
+}
+
+impl Drop for TmpNode {
+    /// A file's bytes are charged to its tmpfs while the node exists, so
+    /// they are released when the last name and the last open file are
+    /// gone. Releasing at unlink let a hard link keep data alive uncounted.
+    fn drop(&mut self) {
+        let freed = self.data.get_mut().len();
+        if freed > 0 {
+            let _ = self
+                .bytes_used
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |used| {
+                    Some(used.saturating_sub(freed))
+                });
+        }
+    }
+}
+
+/// Recover the concrete `Arc<TmpNode>` behind a VFS node, if it is one.
+fn as_tmp_arc(node: Arc<dyn VfsNode>) -> Option<Arc<TmpNode>> {
+    node.as_any()?.downcast_ref::<TmpNode>()?;
+    // SAFETY: the downcast above proved the value behind this `Arc<dyn
+    // VfsNode>` is a `TmpNode`, so the allocation is an `ArcInner<TmpNode>` and the
+    // data pointer, stripped of its vtable, is the pointer `Arc<TmpNode>` would
+    // hold. This is the reverse of the unsizing coercion that made the
+    // trait object, and is how `Arc::downcast` is implemented. The strong
+    // count moves from `node` to the result unchanged.
+    Some(unsafe { Arc::from_raw(Arc::into_raw(node) as *const TmpNode) })
 }
 
 impl VfsNode for TmpNode {
@@ -166,31 +236,16 @@ impl VfsNode for TmpNode {
             return Err(KernelError::FsError(FsError::NotAFile));
         }
 
+        let end = super::ram_write_end(offset, data.len())?;
         let mut file_data = self.data.write();
-        let old_len = file_data.len();
+        let growth = end.saturating_sub(file_data.len());
 
-        // Calculate new size after write
-        let new_len = core::cmp::max(old_len, offset + data.len());
-        let growth = new_len.saturating_sub(old_len);
-
-        // Check space before expanding
-        if growth > 0 {
-            self.check_space(growth)?;
+        self.reserve_space(growth)?;
+        if let Err(e) = super::grow_ram_file(&mut file_data, end) {
+            self.release_space(growth);
+            return Err(e);
         }
-
-        // Extend file if necessary
-        if offset > file_data.len() {
-            file_data.resize(offset, 0);
-        }
-        if offset + data.len() > file_data.len() {
-            file_data.resize(offset + data.len(), 0);
-        }
-        file_data[offset..offset + data.len()].copy_from_slice(data);
-
-        // Update bytes used counter
-        if growth > 0 {
-            self.bytes_used.fetch_add(growth, Ordering::Relaxed);
-        }
+        file_data[offset..end].copy_from_slice(data);
 
         let mut metadata = self.metadata.write();
         metadata.size = file_data.len();
@@ -302,35 +357,14 @@ impl VfsNode for TmpNode {
             return Err(KernelError::FsError(FsError::NotADirectory));
         }
 
-        let mut children = self.children.write();
+        self.unlink_checked(name, None)
+    }
 
-        if let Some(node) = children.get(name) {
-            if node.node_type == NodeType::Directory {
-                let dir_children = node.children.read();
-                if !dir_children.is_empty() {
-                    return Err(KernelError::FsError(FsError::DirectoryNotEmpty));
-                }
-            }
-
-            // Reclaim bytes if it's a file
-            if node.node_type == NodeType::File {
-                let data = node.data.read();
-                let freed = data.len();
-                if freed > 0 {
-                    // Saturating sub to avoid underflow on race
-                    let prev = self.bytes_used.fetch_sub(freed, Ordering::Relaxed);
-                    // Guard against underflow (should not happen but be safe)
-                    if prev < freed {
-                        self.bytes_used.store(0, Ordering::Relaxed);
-                    }
-                }
-            }
-
-            children.remove(name);
-            Ok(())
-        } else {
-            Err(KernelError::FsError(FsError::NotFound))
+    fn unlink_kind(&self, name: &str, want_dir: bool) -> Result<(), KernelError> {
+        if self.node_type != NodeType::Directory {
+            return Err(KernelError::FsError(FsError::NotADirectory));
         }
+        self.unlink_checked(name, Some(want_dir))
     }
 
     fn truncate(&self, size: usize) -> Result<(), KernelError> {
@@ -344,17 +378,16 @@ impl VfsNode for TmpNode {
         if size > old_len {
             // Growing: check space
             let growth = size - old_len;
-            self.check_space(growth)?;
-            data.resize(size, 0);
-            self.bytes_used.fetch_add(growth, Ordering::Relaxed);
+            self.reserve_space(growth)?;
+            if let Err(e) = super::grow_ram_file(&mut data, size) {
+                self.release_space(growth);
+                return Err(e);
+            }
         } else if size < old_len {
             // Shrinking: reclaim space
             let freed = old_len - size;
             data.truncate(size);
-            let prev = self.bytes_used.fetch_sub(freed, Ordering::Relaxed);
-            if prev < freed {
-                self.bytes_used.store(0, Ordering::Relaxed);
-            }
+            self.release_space(freed);
         }
 
         let mut metadata = self.metadata.write();
@@ -447,14 +480,10 @@ impl VfsNode for TmpNode {
                 }
                 (false, false) => {}
             }
-            if existing.node_type == NodeType::File {
-                let freed = existing.data.read().len();
-                let _ =
-                    self.bytes_used
-                        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |used| {
-                            Some(used.saturating_sub(freed))
-                        });
-            }
+            // The replaced file's bytes go back when its node is dropped
+            // (`Drop for TmpNode`), as for unlink: refunded here as well,
+            // they were counted back twice, or while another link or an
+            // open file still held them (PR #24 review).
         }
 
         src.remove(old_name);
@@ -473,6 +502,56 @@ impl VfsNode for TmpNode {
         Some(self)
     }
 
+    fn mknod(
+        &self,
+        name: &str,
+        kind: NodeType,
+        permissions: Permissions,
+        rdev: u32,
+    ) -> Result<Arc<dyn VfsNode>, KernelError> {
+        if self.node_type != NodeType::Directory {
+            return Err(KernelError::FsError(FsError::NotADirectory));
+        }
+        if !matches!(
+            kind,
+            NodeType::Pipe | NodeType::CharDevice | NodeType::BlockDevice | NodeType::Socket
+        ) {
+            return Err(KernelError::FsError(FsError::NotSupported));
+        }
+        let mut children = self.children.write();
+        if children.contains_key(name) {
+            return Err(KernelError::FsError(FsError::AlreadyExists));
+        }
+        let inode = TMPFS_NEXT_INODE.fetch_add(1, Ordering::Relaxed);
+        let mut node = TmpNode::new_file(
+            inode,
+            self.inode,
+            permissions,
+            self.bytes_used.clone(),
+            self.size_limit,
+        );
+        node.node_type = kind;
+        node.metadata.get_mut().node_type = kind;
+        if matches!(kind, NodeType::CharDevice | NodeType::BlockDevice) {
+            node.rdev = rdev;
+        }
+        let node = Arc::new(node);
+        children.insert(String::from(name), node.clone());
+        Ok(node as Arc<dyn VfsNode>)
+    }
+
+    fn is_special_inode(&self) -> bool {
+        matches!(
+            self.node_type,
+            NodeType::Pipe | NodeType::CharDevice | NodeType::BlockDevice | NodeType::Socket
+        )
+    }
+
+    fn device_id(&self) -> Option<(u32, u32)> {
+        matches!(self.node_type, NodeType::CharDevice | NodeType::BlockDevice)
+            .then(|| (super::dev_major(self.rdev), super::dev_minor(self.rdev)))
+    }
+
     fn link(&self, name: &str, target: Arc<dyn VfsNode>) -> Result<(), KernelError> {
         if self.node_type != NodeType::Directory {
             return Err(KernelError::FsError(FsError::NotADirectory));
@@ -482,33 +561,17 @@ impl VfsNode for TmpNode {
             return Err(KernelError::FsError(FsError::IsADirectory));
         }
 
+        // Same node, same tmpfs instance only (N-45): a copy drifted apart
+        // from the original and was charged twice against the size limit.
+        let target = as_tmp_arc(target)
+            .filter(|t| Arc::ptr_eq(&t.bytes_used, &self.bytes_used))
+            .ok_or(KernelError::FsError(FsError::CrossDevice))?;
+
         let mut children = self.children.write();
         if children.contains_key(name) {
             return Err(KernelError::FsError(FsError::AlreadyExists));
         }
-
-        // Copy data for hard link (same pattern as RamFS)
-        let target_meta = target.metadata()?;
-        let inode = target_meta.inode;
-
-        let new_node = Arc::new(TmpNode::new_file(
-            inode,
-            self.inode,
-            target_meta.permissions,
-            self.bytes_used.clone(),
-            self.size_limit,
-        ));
-
-        let mut buf = vec![0u8; target_meta.size];
-        if !buf.is_empty() {
-            let bytes_read = target.read(0, &mut buf)?;
-            buf.truncate(bytes_read);
-        }
-        if !buf.is_empty() {
-            new_node.write(0, &buf)?;
-        }
-
-        children.insert(String::from(name), new_node);
+        children.insert(String::from(name), target);
         Ok(())
     }
 
@@ -522,6 +585,11 @@ impl VfsNode for TmpNode {
             return Err(KernelError::FsError(FsError::AlreadyExists));
         }
 
+        // The target's bytes are charged, as a file's are: Drop gives every
+        // node's data back, so an uncharged symlink, once removed, lowered
+        // the count below what live files use and the limit could be
+        // exceeded (PR #24 review; Linux's shmem charges long symlinks).
+        self.reserve_space(target.len())?;
         let inode = TMPFS_NEXT_INODE.fetch_add(1, Ordering::Relaxed);
         let new_symlink = Arc::new(TmpNode::new_symlink(
             inode,
@@ -550,6 +618,17 @@ impl VfsNode for TmpNode {
         let mut metadata = self.metadata.write();
         metadata.permissions = permissions;
         metadata.modified = crate::arch::timer::get_timestamp_secs();
+        Ok(())
+    }
+
+    fn set_times(&self, atime: Option<u64>, mtime: Option<u64>) -> Result<(), KernelError> {
+        let mut metadata = self.metadata.write();
+        if let Some(atime) = atime {
+            metadata.accessed = atime;
+        }
+        if let Some(mtime) = mtime {
+            metadata.modified = mtime;
+        }
         Ok(())
     }
 
@@ -640,6 +719,57 @@ mod tests {
     use super::*;
 
     #[test]
+    fn hard_link_shares_the_file_and_its_bytes() {
+        let fs = TmpFs::new(1024 * 1024);
+        let root = fs.root();
+        let a = root.create("a", Permissions::default()).unwrap();
+        a.write(0, b"one").unwrap();
+        root.link("b", a.clone()).unwrap();
+        // One file, counted once against the size limit (N-45).
+        assert_eq!(fs.bytes_used(), 3);
+        root.lookup("b").unwrap().write(0, b"two").unwrap();
+        let mut buf = [0u8; 3];
+        a.read(0, &mut buf).unwrap();
+        assert_eq!(&buf, b"two");
+    }
+
+    #[test]
+    fn bytes_are_released_when_the_last_link_goes() {
+        let fs = TmpFs::new(8);
+        let root = fs.root();
+        let a = root.create("a", Permissions::default()).unwrap();
+        a.write(0, b"12345678").unwrap();
+        root.link("b", a.clone()).unwrap();
+        drop(a);
+        // Unlinking one name must not return bytes still reachable through
+        // the other, or link + unlink would grow tmpfs past its limit.
+        root.unlink("a").unwrap();
+        assert_eq!(fs.bytes_used(), 8);
+        let c = root.create("c", Permissions::default()).unwrap();
+        assert!(c.write(0, b"x").is_err());
+        drop(c);
+        root.unlink("b").unwrap();
+        assert_eq!(fs.bytes_used(), 0);
+    }
+
+    #[test]
+    fn hard_link_across_tmpfs_instances_is_exdev() {
+        let fs1 = TmpFs::new(1024 * 1024);
+        let fs2 = TmpFs::new(1024 * 1024);
+        let a = fs1.root().create("a", Permissions::default()).unwrap();
+        assert_eq!(
+            fs2.root().link("b", a).err(),
+            Some(KernelError::FsError(FsError::CrossDevice))
+        );
+        let ram = super::super::ramfs::RamFs::new();
+        let r = ram.root().create("r", Permissions::default()).unwrap();
+        assert_eq!(
+            fs1.root().link("r", r).err(),
+            Some(KernelError::FsError(FsError::CrossDevice))
+        );
+    }
+
+    #[test]
     fn test_tmpfs_new() {
         let fs = TmpFs::new(1024 * 1024);
         assert_eq!(fs.name(), "tmpfs");
@@ -682,6 +812,28 @@ mod tests {
         let n = file.read(0, &mut buf).unwrap();
         assert_eq!(n, 13);
         assert_eq!(&buf[..13], b"Hello, tmpfs!");
+    }
+
+    /// The size budget counts what is stored once: a symlink's target is
+    /// charged (it was refunded on removal without ever being charged), and
+    /// a file replaced by rename is refunded once, when its node goes (it
+    /// was refunded at the rename too) (PR #24 review).
+    #[test]
+    fn the_size_budget_counts_symlinks_and_renames_once() {
+        let fs = TmpFs::new(100);
+        let root = fs.root();
+        let a = root.create("a", Permissions::default()).unwrap();
+        a.write(0, &[1u8; 30]).unwrap();
+        root.symlink("l", "12345678").unwrap();
+        assert_eq!(fs.bytes_used(), 38);
+        root.unlink("l").unwrap();
+        assert_eq!(fs.bytes_used(), 30);
+
+        let b = root.create("b", Permissions::default()).unwrap();
+        b.write(0, &[2u8; 20]).unwrap();
+        drop((a, b));
+        root.rename("b", &root, "a").unwrap();
+        assert_eq!(fs.bytes_used(), 20, "the replaced file refunded once");
     }
 
     #[test]
@@ -748,6 +900,10 @@ mod tests {
         assert_eq!(fs.bytes_used(), 9);
 
         root.unlink("temp.txt").unwrap();
+        // Still open: the data exists, so it stays charged (as on Linux,
+        // where an unlinked open file keeps its blocks until the last close).
+        assert_eq!(fs.bytes_used(), 9);
+        drop(file);
         assert_eq!(fs.bytes_used(), 0);
     }
 

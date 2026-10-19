@@ -1,0 +1,99 @@
+VeridianOS: fix compiler warnings in Aurorae
+
+GCC reported:
+
+- -Wunused-result for QFile::open() in ConfigurationModule::initQml()
+  (config/auroraeconfig.cpp). Real bug: if the theme's config.ui could not
+  be opened, or opened but did not parse, QUiLoader::load() returned
+  nullptr and the next line dereferenced it
+  (customConfigForm->objectName()), crashing the configuration module.
+  Both failures are now logged and return, as the function already does
+  when the theme package, its metadata or the files are missing.
+  (Prepared for upstream, invent.kde.org/plasma/aurorae.)
+- -Wdeprecated-declarations for QHoverEvent::pos() and posF():
+  - v1/aurorae.cpp, Decoration::hoverMoveEvent(): posF() -> position(),
+    which posF() returned; unchanged.
+  - v1/renderer.cpp, Renderer::forwardMouseEvent(): pos() -> position().toPoint(),
+    which pos() returned; unchanged (the old position next to it is the
+    integer oldPos() as well).
+  - v2/decorationbuttongroup.cpp, DecorationButtonGroup::eventFilter():
+    pos() -> position(); boundingRect() is a QRectF, so the hover test now
+    uses the unrounded position instead of rounding it to whole pixels
+    first.
+- -Wdeprecated-declarations for QVariant::type() in
+  Decoration::updateBlur() (v1/aurorae.cpp): compared through typeId(),
+  which gives the same id for the built-in QRegion type; unchanged.
+
+diff -ru a/config/auroraeconfig.cpp b/config/auroraeconfig.cpp
+--- a/config/auroraeconfig.cpp
++++ b/config/auroraeconfig.cpp
+@@ -12,6 +12,7 @@
+ #include <KPluginFactory>
+ #include <QComboBox>
+ #include <QCoreApplication>
++#include <QDebug>
+ #include <QFileInfo>
+ #include <QHBoxLayout>
+ #include <QLabel>
+@@ -107,8 +108,15 @@ void ConfigurationModule::initQml()
+     QUiLoader *loader = new QUiLoader(this);
+     loader->setLanguageChangeEnabled(true);
+     QFile uiFile(ui);
+-    uiFile.open(QFile::ReadOnly);
++    if (!uiFile.open(QFile::ReadOnly)) {
++        qWarning() << "Failed to open" << ui << uiFile.errorString();
++        return;
++    }
+     QWidget *customConfigForm = loader->load(&uiFile, widget());
++    if (!customConfigForm) {
++        qWarning() << "Failed to load" << ui << loader->errorString();
++        return;
++    }
+     translator->addContextToMonitor(customConfigForm->objectName());
+     uiFile.close();
+     widget()->setLayout(new QVBoxLayout);
+diff -ru a/v1/aurorae.cpp b/v1/aurorae.cpp
+--- a/v1/aurorae.cpp	2026-10-08 17:19:33.407052479 -0400
++++ b/v1/aurorae.cpp	2026-10-08 17:20:28.587445985 -0400
+@@ -478,7 +478,7 @@
+ {
+     if (m_view) {
+         // turn a hover event into a mouse because we don't follow hovers as we don't think we have focus
+-        QMouseEvent cloneEvent(QEvent::MouseMove, event->posF(), Qt::NoButton, Qt::NoButton, Qt::NoModifier);
++        QMouseEvent cloneEvent(QEvent::MouseMove, event->position(), Qt::NoButton, Qt::NoButton, Qt::NoModifier);
+         event->setAccepted(false);
+         m_view->forwardMouseEvent(&cloneEvent);
+         event->setAccepted(cloneEvent.isAccepted());
+@@ -563,7 +563,7 @@
+         mask = QRect(0, 0, m_item->width(), m_item->height());
+     } else {
+         const QVariant maskProperty = m_item->property("decorationMask");
+-        if (static_cast<QMetaType::Type>(maskProperty.type()) == QMetaType::QRegion) {
++        if (maskProperty.typeId() == QMetaType::QRegion) {
+             mask = maskProperty.value<QRegion>();
+ 
+             if (!mask.isNull()) {
+diff -ru a/v1/renderer.cpp b/v1/renderer.cpp
+--- a/v1/renderer.cpp	2026-10-08 17:19:33.388833819 -0400
++++ b/v1/renderer.cpp	2026-10-08 17:20:28.587346387 -0400
+@@ -232,7 +232,7 @@
+     case QEvent::HoverLeave:
+     case QEvent::HoverMove: {
+         QHoverEvent *he = static_cast<QHoverEvent *>(e);
+-        const QPointF widgetPos = d->m_view->mapFromGlobal(he->pos());
++        const QPointF widgetPos = d->m_view->mapFromGlobal(he->position().toPoint());
+         const QPointF oldWidgetPos = d->m_view->mapFromGlobal(he->oldPos());
+         QHoverEvent cloneEvent(he->type(), widgetPos, oldWidgetPos, he->modifiers());
+         cloneEvent.setAccepted(false);
+diff -ru a/v2/decorationbuttongroup.cpp b/v2/decorationbuttongroup.cpp
+--- a/v2/decorationbuttongroup.cpp	2026-10-08 17:19:33.348572331 -0400
++++ b/v2/decorationbuttongroup.cpp	2026-10-08 17:20:28.587293105 -0400
+@@ -44,7 +44,7 @@
+ bool DecorationButtonGroup::eventFilter(QObject *obj, QEvent *event)
+ {
+     if (event->type() == QEvent::HoverMove) {
+-        const bool hovered = boundingRect().contains(static_cast<QHoverEvent *>(event)->pos());
++        const bool hovered = boundingRect().contains(static_cast<QHoverEvent *>(event)->position());
+ 
+         if (m_hovered != hovered) {
+             applyHoveredToAllButtons(hovered);

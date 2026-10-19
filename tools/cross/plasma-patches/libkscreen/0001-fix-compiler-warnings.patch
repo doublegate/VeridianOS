@@ -1,0 +1,66 @@
+VeridianOS: fix compiler warnings in libkscreen (DPMS helper, fake backend)
+
+GCC reported:
+
+- -Wmaybe-uninitialized for 'mode' in Dpms::org_kde_kwin_dpms_done()
+  (src/libdpms/waylanddpmshelper.cpp). m_mode holds the uint the compositor
+  sent in the mode event, cast to the protocol enum; the switch covered only
+  the four known values, so any other value (a newer compositor) emitted
+  modeChanged() with an uninitialized KScreen::Dpms::Mode. Small real bug:
+  an unknown value is now logged with the file's KSCREEN_DPMS category and
+  nothing is emitted. Known values behave as before.
+- -Wdeprecated-declarations for QVariant::type(), canConvert(int) and
+  convert(int) in Parser (backends/fake/parser.cpp). Ported to
+  QVariant::metaType() with canConvert(QMetaType)/convert(QMetaType), which
+  the deprecated overloads forward to. Same behaviour for built-in types;
+  for user-registered types type() collapsed the id to QVariant::UserType,
+  so the new code converts them correctly where the old code could not.
+- -Wunused-result for QFile::open() in Fake::edid() (backends/fake/fake.cpp).
+  A failed open fell through to parsing an empty read, which also ended in
+  an empty QByteArray; it now logs the error with KSCREEN_FAKE and returns
+  QByteArray() directly, as the parser's own file loading does.
+
+diff -ru a/backends/fake/fake.cpp b/backends/fake/fake.cpp
+--- a/backends/fake/fake.cpp	2026-10-08 17:06:51.791580706 -0400
++++ b/backends/fake/fake.cpp	2026-10-08 17:07:51.237792291 -0400
+@@ -105,7 +105,10 @@
+ {
+     Q_UNUSED(outputId);
+     QFile file(mConfigFile);
+-    file.open(QIODevice::ReadOnly);
++    if (!file.open(QIODevice::ReadOnly)) {
++        qCWarning(KSCREEN_FAKE) << "Cannot open" << mConfigFile << file.errorString();
++        return QByteArray();
++    }
+ 
+     const QJsonDocument jsonDoc = QJsonDocument::fromJson(file.readAll());
+     const QJsonObject json = jsonDoc.object();
+diff -ru a/backends/fake/parser.cpp b/backends/fake/parser.cpp
+--- a/backends/fake/parser.cpp	2026-10-08 17:06:51.772552373 -0400
++++ b/backends/fake/parser.cpp	2026-10-08 17:07:49.767803357 -0400
+@@ -89,8 +89,8 @@
+         Q_ASSERT(property.isValid());
+         if (property.isValid()) {
+             QVariant value = iter.value();
+-            if (value.canConvert(property.type())) {
+-                value.convert(property.type());
++            if (value.canConvert(property.metaType())) {
++                value.convert(property.metaType());
+                 object->setProperty(iter.key().toLatin1().constData(), value);
+             } else if (QLatin1String("QVariant") == QLatin1String(property.typeName())) {
+                 object->setProperty(iter.key().toLatin1().constData(), value);
+diff -ru a/src/libdpms/waylanddpmshelper.cpp b/src/libdpms/waylanddpmshelper.cpp
+--- a/src/libdpms/waylanddpmshelper.cpp	2026-10-08 17:06:51.758750027 -0400
++++ b/src/libdpms/waylanddpmshelper.cpp	2026-10-08 17:07:48.319814258 -0400
+@@ -64,6 +64,11 @@
+         case Dpms::mode_Off:
+             mode = KScreen::Dpms::Off;
+             break;
++        default:
++            // The mode arrives as a plain uint from the compositor; there is
++            // nothing to report for a value this client does not know.
++            qCWarning(KSCREEN_DPMS) << "Unknown DPMS mode" << m_mode << "for" << m_screen;
++            return;
+         }
+         if (m_dpms) {
+             Q_EMIT m_dpms->modeChanged(mode, m_screen);

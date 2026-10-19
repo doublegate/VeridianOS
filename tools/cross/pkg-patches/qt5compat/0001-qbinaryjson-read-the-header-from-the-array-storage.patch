@@ -1,0 +1,37 @@
+VeridianOS: qbinaryjson: read the header from the array's own storage
+
+GCC reported, in QBinaryJson::fromBinaryData()
+(src/core5/serialization/qbinaryjson.cpp:165): "array subscript 'long
+unsigned int[0]' is partly outside array bounds of 'const char [1]'
+[-Warray-bounds]", the one-byte object being QByteArray::_empty.
+QByteArray::constData() returns that shared empty string for a null
+array; the function has already returned for any array shorter than the
+header and base, so a null array never gets here, but GCC does not
+connect size() with that branch and saw an 8-byte memcpy from a 1-byte
+object.
+
+The header and base are now read through data.constBegin(), which is the
+array's own storage (constData() without the empty-string substitution)
+and is the same pointer for any non-empty array. No behaviour change.
+
+
+diff -ru a/src/core5/serialization/qbinaryjson.cpp b/src/core5/serialization/qbinaryjson.cpp
+--- a/src/core5/serialization/qbinaryjson.cpp	2026-10-08 17:33:09.625858235 -0400
++++ b/src/core5/serialization/qbinaryjson.cpp	2026-10-08 17:33:23.650501558 -0400
+@@ -161,10 +161,14 @@
+     if (size_t(data.size()) < sizeof(QBinaryJsonPrivate::Header) + sizeof(QBinaryJsonPrivate::Base))
+         return QJsonDocument();
+ 
++    // Non-empty, so constBegin() is the array's own storage (constData() may
++    // also return the one-byte shared empty string, which the compiler cannot
++    // rule out here).
++    const char *raw = data.constBegin();
+     QBinaryJsonPrivate::Header h;
+-    memcpy(&h, data.constData(), sizeof(QBinaryJsonPrivate::Header));
++    memcpy(&h, raw, sizeof(QBinaryJsonPrivate::Header));
+     QBinaryJsonPrivate::Base root;
+-    memcpy(&root, data.constData() + sizeof(QBinaryJsonPrivate::Header),
++    memcpy(&root, raw + sizeof(QBinaryJsonPrivate::Header),
+            sizeof(QBinaryJsonPrivate::Base));
+ 
+     uint size = 0;

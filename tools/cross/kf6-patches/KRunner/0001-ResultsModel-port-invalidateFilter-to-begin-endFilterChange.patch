@@ -1,0 +1,67 @@
+VeridianOS: ResultsModel: port invalidateFilter() to begin/endFilterChange()
+
+GCC reported 'void QSortFilterProxyModel::invalidateFilter()' is deprecated:
+Use begin/endFilterChange() instead [-Wdeprecated-declarations] at five
+places in src/model/resultsmodel.cpp (Qt 6.12 headers).
+
+In Qt, invalidateFilter() is filter_changed(Rows | Columns), which is exactly
+endFilterChange() with its default Direction::Both.
+
+- CategoryDistributionProxyModel::setSourceModel(): the rowsInserted,
+  rowsMoved and rowsRemoved connections now call endFilterChange() from a
+  lambda; the source rows have already changed when they fire. No behaviour
+  change.
+- CategoryDistributionProxyModel::setLimit() and
+  HideRootLevelProxyModel::setTreeModel(): use the documented pattern,
+  beginFilterChange() before the filter parameter changes and
+  endFilterChange() after it. beginFilterChange() only creates the root
+  mapping if it does not exist yet (otherwise it is a no-op), so refiltering
+  is computed against the pre-change state; the result is the same.
+
+Requires Qt >= 6.10 (endFilterChange()).
+
+diff -ru a/src/model/resultsmodel.cpp b/src/model/resultsmodel.cpp
+--- a/src/model/resultsmodel.cpp	2026-10-08 17:15:44.798272770 -0400
++++ b/src/model/resultsmodel.cpp	2026-10-08 17:15:44.837366143 -0400
+@@ -110,9 +110,16 @@
+         QSortFilterProxyModel::setSourceModel(sourceModel);
+ 
+         if (sourceModel) {
+-            connect(sourceModel, &QAbstractItemModel::rowsInserted, this, &CategoryDistributionProxyModel::invalidateFilter);
+-            connect(sourceModel, &QAbstractItemModel::rowsMoved, this, &CategoryDistributionProxyModel::invalidateFilter);
+-            connect(sourceModel, &QAbstractItemModel::rowsRemoved, this, &CategoryDistributionProxyModel::invalidateFilter);
++            // The source rows have already changed; refilter both rows and columns.
++            connect(sourceModel, &QAbstractItemModel::rowsInserted, this, [this] {
++                endFilterChange();
++            });
++            connect(sourceModel, &QAbstractItemModel::rowsMoved, this, [this] {
++                endFilterChange();
++            });
++            connect(sourceModel, &QAbstractItemModel::rowsRemoved, this, [this] {
++                endFilterChange();
++            });
+         }
+     }
+ 
+@@ -126,8 +133,9 @@
+         if (m_limit == limit) {
+             return;
+         }
++        beginFilterChange();
+         m_limit = limit;
+-        invalidateFilter();
++        endFilterChange();
+         Q_EMIT limitChanged();
+     }
+ 
+@@ -205,8 +213,9 @@
+     }
+     void setTreeModel(QAbstractItemModel *treeModel)
+     {
++        beginFilterChange();
+         m_treeModel = treeModel;
+-        invalidateFilter();
++        endFilterChange();
+     }
+ 
+ protected:

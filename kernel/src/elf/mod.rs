@@ -7,6 +7,8 @@
 #![allow(clippy::slow_vector_initialization, clippy::unnecessary_cast)]
 
 pub mod dynamic;
+#[cfg(feature = "alloc")]
+pub mod image;
 pub mod types;
 
 // Re-export all types for backward compatibility
@@ -84,200 +86,10 @@ pub fn write_to_user_pages(
     Ok(())
 }
 
-/// Zero user-space memory through the physical memory window.
-///
-/// Same approach as `write_to_user_pages` but fills with zeroes (for BSS).
-fn zero_user_pages(
-    vas: &crate::mm::VirtualAddressSpace,
-    user_vaddr: u64,
-    size: usize,
-) -> Result<(), crate::error::KernelError> {
-    use crate::mm::{phys_to_virt_addr, vas::create_mapper_from_root_pub, VirtualAddress};
-
-    let pt_root = vas.get_page_table();
-    if pt_root == 0 {
-        return Err(crate::error::KernelError::InvalidArgument {
-            name: "vas",
-            value: "page table root is 0",
-        });
-    }
-
-    // SAFETY: pt_root was validated non-zero above; it points to a valid page table
-    // root.
-    let mapper = unsafe { create_mapper_from_root_pub(pt_root) };
-    let mut offset = 0usize;
-
-    while offset < size {
-        let vaddr = user_vaddr + offset as u64;
-        let page_vaddr = vaddr & !0xFFF;
-        let in_page_offset = (vaddr & 0xFFF) as usize;
-        let bytes_in_page = core::cmp::min(0x1000 - in_page_offset, size - offset);
-
-        let (frame, _flags) = mapper
-            .translate_page(VirtualAddress(page_vaddr))
-            .map_err(|_| crate::error::KernelError::InvalidArgument {
-                name: "vaddr",
-                value: "page not mapped in VAS",
-            })?;
-
-        let phys_base = frame.as_u64() << 12;
-        let virt = phys_to_virt_addr(phys_base + in_page_offset as u64);
-
-        // SAFETY: virt points into the kernel's physical memory window.
-        // We zero exactly bytes_in_page bytes within the page boundary.
-        unsafe {
-            core::ptr::write_bytes(virt as *mut u8, 0, bytes_in_page);
-        }
-
-        offset += bytes_in_page;
-    }
-
-    Ok(())
-}
-
 impl ElfLoader {
     /// Create a new ELF loader
     pub fn new() -> Self {
         Self
-    }
-
-    /// Load an ELF binary directly into a VAS
-    pub fn load(
-        data: &[u8],
-        vas: &mut crate::mm::vas::VirtualAddressSpace,
-    ) -> Result<u64, crate::error::KernelError> {
-        let loader = Self::new();
-        let binary =
-            loader
-                .parse(data)
-                .map_err(|_| crate::error::KernelError::InvalidArgument {
-                    name: "elf_data",
-                    value: "failed to parse ELF binary",
-                })?;
-
-        // Process each LOAD segment
-        let mut _load_idx = 0u32;
-        for segment in &binary.segments {
-            if segment.segment_type == SegmentType::Load {
-                // Calculate page-aligned addresses
-                let page_start = segment.virtual_addr & !0xFFF;
-                let page_end = (segment.virtual_addr + segment.memory_size + 0xFFF) & !0xFFF;
-                let num_pages = ((page_end - page_start) / 0x1000) as usize;
-
-                // Diagnostic: log each LOAD segment for multi-LOAD debugging
-                #[cfg(target_arch = "x86_64")]
-                // SAFETY: raw_serial_str writes to the COM1 I/O port for diagnostic output.
-                unsafe {
-                    crate::arch::x86_64::idt::raw_serial_str(b"[ELF] LOAD#");
-                    crate::arch::x86_64::idt::raw_serial_hex(_load_idx as u64);
-                    crate::arch::x86_64::idt::raw_serial_str(b" va=0x");
-                    crate::arch::x86_64::idt::raw_serial_hex(segment.virtual_addr);
-                    crate::arch::x86_64::idt::raw_serial_str(b" memsz=0x");
-                    crate::arch::x86_64::idt::raw_serial_hex(segment.memory_size);
-                    crate::arch::x86_64::idt::raw_serial_str(b" pages=0x");
-                    crate::arch::x86_64::idt::raw_serial_hex(num_pages as u64);
-                    crate::arch::x86_64::idt::raw_serial_str(b" flags=0x");
-                    crate::arch::x86_64::idt::raw_serial_hex(segment.flags as u64);
-                    crate::arch::x86_64::idt::raw_serial_str(b"\n");
-                }
-                _load_idx += 1;
-
-                // Map pages for this segment
-                for i in 0..num_pages {
-                    let addr = page_start + (i as u64 * 0x1000);
-
-                    // Determine page flags based on segment flags
-                    let mut flags = crate::mm::PageFlags::USER | crate::mm::PageFlags::PRESENT;
-                    if (segment.flags & 0x2) != 0 {
-                        // PF_W
-                        flags |= crate::mm::PageFlags::WRITABLE;
-                    }
-                    if (segment.flags & 0x1) == 0 {
-                        // PF_X
-                        flags |= crate::mm::PageFlags::NO_EXECUTE;
-                    }
-
-                    vas.map_page(addr as usize, flags)?;
-
-                    // Optional: sanity check that the page resolves in the mapper
-                    #[cfg(feature = "alloc")]
-                    {
-                        use crate::mm::{vas::create_mapper_from_root_pub, VirtualAddress};
-                        let pt_root = vas.get_page_table();
-                        if pt_root != 0 {
-                            // SAFETY: pt_root validated non-zero; points to a valid page table
-                            // root.
-                            let mapper = unsafe { create_mapper_from_root_pub(pt_root) };
-                            mapper.translate_page(VirtualAddress(addr)).map_err(|_| {
-                                crate::error::KernelError::UnmappedMemory {
-                                    addr: addr as usize,
-                                }
-                            })?;
-                        }
-                    }
-                }
-
-                // Copy segment data from file via physical memory window.
-                // User-space VAs (e.g. 0x400000) are only mapped in the
-                // process's page tables, not the kernel's CR3. We translate
-                // each page through the process's page tables and write via
-                // phys_to_virt_addr().
-                if segment.file_size > 0 {
-                    let src_slice = &data[segment.file_offset as usize
-                        ..(segment.file_offset + segment.file_size) as usize];
-                    write_to_user_pages(vas, segment.virtual_addr, src_slice)?;
-                }
-
-                // Zero BSS portion if memory size > file size
-                if segment.memory_size > segment.file_size {
-                    let bss_size = (segment.memory_size - segment.file_size) as usize;
-                    zero_user_pages(vas, segment.virtual_addr + segment.file_size, bss_size)?;
-                }
-            }
-        }
-
-        // Sanity-check that the entry point is mapped and executable
-        #[cfg(feature = "alloc")]
-        {
-            let pt_root = vas.get_page_table();
-            if pt_root == 0 {
-                return Err(crate::error::KernelError::InvalidArgument {
-                    name: "vas",
-                    value: "page table root is 0",
-                });
-            }
-
-            // SAFETY: pt_root was validated non-zero above.
-            let mapper = unsafe { crate::mm::vas::create_mapper_from_root_pub(pt_root) };
-            use crate::mm::VirtualAddress;
-
-            let entry_page = VirtualAddress(binary.entry_point & !0xFFF);
-            let (_, flags) = mapper.translate_page(entry_page).map_err(|_| {
-                crate::error::KernelError::UnmappedMemory {
-                    addr: binary.entry_point as usize,
-                }
-            })?;
-
-            // Require PRESENT|USER and executable (i.e., not NO_EXECUTE)
-            use crate::mm::PageFlags;
-            let needed = PageFlags::PRESENT | PageFlags::USER;
-            if !flags.contains(needed) || flags.contains(PageFlags::NO_EXECUTE) {
-                return Err(crate::error::KernelError::PermissionDenied {
-                    operation: "execute entry point",
-                });
-            }
-        }
-
-        // Diagnostic: log the parsed entry point
-        #[cfg(target_arch = "x86_64")]
-        // SAFETY: raw_serial_str writes to the COM1 I/O port for diagnostic output.
-        unsafe {
-            crate::arch::x86_64::idt::raw_serial_str(b"[ELF] entry=0x");
-            crate::arch::x86_64::idt::raw_serial_hex(binary.entry_point);
-            crate::arch::x86_64::idt::raw_serial_str(b"\n");
-        }
-
-        Ok(binary.entry_point)
     }
 
     /// Parse an ELF binary from a byte slice
@@ -330,6 +142,8 @@ impl ElfLoader {
         }
 
         Ok(ElfBinary {
+            elf_type: header.elf_type,
+            machine: header.machine,
             entry_point: header.entry,
             load_base,
             load_size,
@@ -515,12 +329,16 @@ impl ElfLoader {
                 break;
             }
 
-            // SAFETY: entry_offset + entry_size <= data.len() was checked above.
-            // i64 and u64 are primitive types that can be read from any byte
-            // alignment on the platforms we support. The values are copied out
-            // immediately.
-            let tag = unsafe { *(data[entry_offset..].as_ptr() as *const i64) };
-            let value = unsafe { *(data[entry_offset + 8..].as_ptr() as *const u64) };
+            // SAFETY: entry_offset + entry_size (16) <= data.len() was checked
+            // above, so both 8-byte fields are in bounds. read_unaligned is
+            // used because ELF data in a byte buffer has no alignment
+            // guarantee; every bit pattern is a valid i64/u64.
+            let tag =
+                unsafe { core::ptr::read_unaligned(data[entry_offset..].as_ptr() as *const i64) };
+            // SAFETY: as above, for the second field at entry_offset + 8.
+            let value = unsafe {
+                core::ptr::read_unaligned(data[entry_offset + 8..].as_ptr() as *const u64)
+            };
 
             match tag {
                 0 => break, // DT_NULL - end of dynamic section
@@ -674,15 +492,23 @@ impl ElfLoader {
             // Parse symbol entry
             // SAFETY: sym_offset + sym_entry_size (24) <= data.len() was checked
             // above. Each field is read at its correct offset within the Elf64_Sym
-            // structure layout. The primitive types (u32, u16, u64) are copied out
-            // immediately. Alignment is handled by reading through pointer casts
-            // of packed ELF data.
-            let name_idx = unsafe { *(data[sym_offset..].as_ptr() as *const u32) };
+            // structure layout. read_unaligned is used because ELF data in a
+            // byte buffer has no alignment guarantee; every bit pattern is a
+            // valid integer.
+            let name_idx =
+                unsafe { core::ptr::read_unaligned(data[sym_offset..].as_ptr() as *const u32) };
             let info = data[sym_offset + 4];
             let other = data[sym_offset + 5];
-            let shndx = unsafe { *(data[sym_offset + 6..].as_ptr() as *const u16) };
-            let value = unsafe { *(data[sym_offset + 8..].as_ptr() as *const u64) };
-            let size = unsafe { *(data[sym_offset + 16..].as_ptr() as *const u64) };
+            // SAFETY: as above, for the u16 at sym_offset + 6.
+            let shndx =
+                unsafe { core::ptr::read_unaligned(data[sym_offset + 6..].as_ptr() as *const u16) };
+            // SAFETY: as above, for the u64 at sym_offset + 8.
+            let value =
+                unsafe { core::ptr::read_unaligned(data[sym_offset + 8..].as_ptr() as *const u64) };
+            // SAFETY: as above, for the u64 at sym_offset + 16.
+            let size = unsafe {
+                core::ptr::read_unaligned(data[sym_offset + 16..].as_ptr() as *const u64)
+            };
 
             // Get symbol name from string table
             let name = if (name_idx as usize) < strtab_size {
@@ -1511,6 +1337,8 @@ mod tests {
             .min()
             .unwrap_or(0);
         ElfBinary {
+            elf_type: 2,
+            machine: NATIVE_MACHINE,
             entry_point: load_base,
             load_base,
             load_size: 0,
@@ -1581,6 +1409,19 @@ mod tests {
         assert_eq!(b.phdr_address(), None);
         b.load_base = 0x40_0000;
         assert_eq!(b.phdr_address(), Some(0x40_5000));
+    }
+
+    #[test]
+    fn tls_layout_above_tp_places_the_image_after_the_tcb() {
+        // AArch64: a 16-byte TCB at the thread pointer, then the image.
+        assert_eq!(tls_layout_above_tp(0x13, 8, 16), Some((0x30, 0x10)));
+        // A larger alignment moves the image up to it.
+        assert_eq!(tls_layout_above_tp(0x13, 64, 16), Some((0x60, 0x40)));
+        // RISC-V: no TCB, the image at the thread pointer.
+        assert_eq!(tls_layout_above_tp(0x13, 8, 0), Some((0x20, 0)));
+        assert_eq!(tls_layout_above_tp(0, 0, 0), Some((0x10, 0)));
+        assert_eq!(tls_layout_above_tp(0x13, 24, 16), None);
+        assert_eq!(tls_layout_above_tp(0x13, 8192, 0), None);
     }
 
     #[test]

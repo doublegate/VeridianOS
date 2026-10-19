@@ -1,0 +1,27 @@
+VeridianOS: look for socat in the target system
+
+pam_kwallet_init (installed by this package, started at login) passes the
+login to kwalletd through socat, so socat is a run-time requirement on the
+system kwallet-pam runs on. CMakeLists.txt checks for it with
+find_program(), which when cross compiling searched the build host: a
+cross build reported the build host's socat and could not tell that the
+target lacked it. It now searches the target's root (CMAKE_FIND_ROOT_PATH)
+when cross compiling.
+
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -21,7 +21,13 @@
+ find_package(PkgConfig REQUIRED)
+ pkg_check_modules(LIBGCRYPT REQUIRED IMPORTED_TARGET libgcrypt)
+ 
+-find_program(SOCAT_EXECUTABLE socat)
++# A run-time dependency of pam_kwallet_init: when cross compiling, the
++# target's program.
++if(CMAKE_CROSSCOMPILING)
++  find_program(SOCAT_EXECUTABLE socat ONLY_CMAKE_FIND_ROOT_PATH)
++else()
++  find_program(SOCAT_EXECUTABLE socat)
++endif()
+ 
+ if (SOCAT_EXECUTABLE)
+   message (STATUS "Found socat executable: ${SOCAT_EXECUTABLE}")

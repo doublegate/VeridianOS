@@ -96,7 +96,7 @@ QVariant QVeridianTheme::themeHint(ThemeHint hint) const
             QStringLiteral("/usr/share/icons"),
             QStringLiteral("/usr/local/share/icons"),
         };
-    case QPlatformTheme::IconThemeName:
+    case QPlatformTheme::SystemIconThemeName:
         return QStringLiteral("breeze");
     case QPlatformTheme::StyleNames:
         return QStringList{QStringLiteral("breeze"), QStringLiteral("fusion")};

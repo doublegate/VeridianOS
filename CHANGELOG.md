@@ -2,6 +2,1949 @@
 
 ---
 
+## [v0.27.0] - 2026-10-18
+
+### v0.27.0: process model, SMP and user mode on all three architectures
+
+v0.27.0 replaces the nested, single-CPU process model with scheduler-dispatched tasks running on
+every CPU, brings AArch64 and RISC-V user mode up to x86_64's, and moves the user ABI to Linux's
+system call numbers. Highlights, with the decision records:
+
+- **Process model and scheduling:** every thread a dispatched task on its own guarded kernel stack
+  (ADR 0006), an EEVDF fair class with FIFO/RR and SCHED_DEADLINE above it (ADR 0007), a new x86_64
+  entry layer (ADR 0008), timer preemption of user code, signals with Linux's frames, sleeping
+  waits instead of polling, and the old scheduler and nested boot dispatch removed.
+- **SMP:** application processors brought up on all three architectures (ADR 0004), every CPU
+  dispatching its own run queue with placement and balancing (ADR 0012), targeted TLB shootdown,
+  and the `smp` feature on by default; the gate runs every suite on one and four CPUs.
+- **Memory:** copy-on-write fork (ADR 0005), 2 MiB pages, guarded kernel stacks, a runtime-sized
+  x86_64 heap, W^X for user memory with a per-program opt-in (ADR 0017) and for the kernel image.
+- **AArch64 and RISC-V:** the MMU and caches on with the kernel in the upper half (ADRs 0013,
+  0015), EL0 and U-mode programs with musl (ADRs 0014, 0016), the BusyBox self-test and both runtime
+  suites on each; arm64 and RISC-V Image headers; RISC-V on Sv39-only harts (ADR 0018); DMA cache
+  maintenance for non-coherent devices (ADR 0019); BTI for AArch64 user programs.
+- **Compatibility:** Linux system call numbers as the only user ABI on every architecture (ADR
+  0009), dynamic linking with musl's loader and a page cache for file mappings (ADR 0010), Linux
+  credential and file rules, setfsuid/setfsgid, mknod, and coverage reports per architecture
+  (x86_64: 180 of 385 calls implemented).
+- **Storage and audits:** BlockFS data written back before sync (ADR 0011), lock-free cache
+  misses, and the 2026-10 audit intake.
+
+Tests: 4,735 host unit tests; boot tests x86_64 43/43, AArch64 64/64, RISC-V 57/57 (47, 68 and 61
+on four CPUs); runtime suites x86_64 91/91 and 71/71, AArch64 91/91 and 69/69, RISC-V 89/89 and
+69/69, on one and four CPUs and on RISC-V also under Sv39.
+
+**Moved to v0.28 (v0.27.0 was cut early, 2026-10-18):** sprints F (networking, storage), G
+(hardening) and H (real hardware), the remaining system call groups with LTP and musl libc-test, the
+KDE shared-library pipeline and its media backend, relocatable RISC-V boot (HR-02), and the open
+items listed in `to-dos/MASTER_TODO.md`. What does not work yet is in `docs/KNOWN-LIMITATIONS.md`.
+
+### Added
+
+- **`tools/veridian-elfctl`: the W^X opt-in for an existing binary (ADR 0017).** A Linux binary
+  that needs writable and executable memory had to be relinked with `<veridian/wxneeded.h>`. The
+  tool shows, sets or clears the VeridianOS feature note: it flips the bit of a note that is
+  there, or adds one without relinking, as patchelf grows a program header table (a new table at
+  the end of the file with a PT_LOAD that maps it, the PT_NOTE, and PT_PHDR moved or added).
+  Patched musl and glibc programs, static, static-PIE and dynamic, still run on Linux on all
+  three architectures; `musl_wx_note_tool` checks that the kernel refuses W+X to a copy built
+  without the note, allows it once the tool adds one (static PIE and dynamic), and refuses it
+  again when the tool clears the bit.
+- **bind() of a Unix socket makes its socket file.** The bound name used to live only in the
+  socket layer's table: `ls` did not show it, a relative name was not resolved against the working
+  directory, and a second bind was EINVAL. Now, as Linux's `unix_bind_bsd` and `unix_find_bsd`:
+  bind makes a socket file (mode 0777 less the umask, with mknod's MAC and permission checks) and
+  an existing name is EADDRINUSE; connect follows the name to the file, needs write permission on
+  it (EACCES), and is ECONNREFUSED for a file no listening socket holds or one that is not a
+  socket. Unlinking the file leaves the socket working but unreachable, and the file outlives the
+  socket. A bind reserves the socket before it makes the file, so it never has to remove the
+  file again by path. `musl_unix_socket_file` (also passes on Linux) covers it; `musl_peercred` now
+  makes its socket file writable for its uid-4500 client, which Linux requires.
+- **A new FIFO or socket file on BlockFS could reach the pipe or socket of an unlinked one.**
+  BlockFS finds both by inode number and reuses a freed number, so a FIFO made after an open one
+  was unlinked could join the old pipe (a documented limitation of mknod) and a socket file could
+  reach, or be refused by, a socket still bound to the old file. When BlockFS frees a special
+  inode, the FIFO table and the socket bindings now forget it; open ends and bound sockets keep
+  working, as on Linux. Host tests on BlockFS pin both.
+- **mknod and mknodat, with FIFOs and device nodes (N-201).** mknod was always EPERM, so
+  `mkfifo` failed; mknodat had no number. Both now follow Linux's `filename_mknodat`:
+  - a regular file (type 0 or S_IFREG), FIFO, character or block device or socket file; a
+    directory type is EPERM and any other EINVAL; an existing name is EEXIST, `name/` ENOENT;
+  - write and search permission on the parent (EACCES); devices need privilege (EPERM; root,
+    standing in for CAP_MKNOD); the umask applies; a filesystem without special files (devfs,
+    procfs) is EPERM.
+
+  RamFS, tmpfs and BlockFS hold special files; BlockFS keeps a device's number in
+  `direct_blocks[0]` as ext2 does, and mkfs-blockfs copies FIFOs, devices and sockets from the
+  source tree. Opening a FIFO follows Linux's `fifo_open` (`fs::fifo`): one pipe per inode,
+  shared by every open; read-only waits for a writer and write-only for a reader (O_NONBLOCK:
+  read-only succeeds, write-only is ENXIO); read-write never waits; no writer reads as end of
+  file and no reader is EPIPE; poll as `pipe_poll`. A device node opens the device its number
+  names (`devfs::open_device`; ENXIO for a number with no device), and a socket file is ENXIO
+  to open. stat reports st_rdev in Linux's encoding, for /dev's own nodes too (it was 0). Host
+  tests for each filesystem, the FIFO rules and the device table; runtime tests `musl_mkfifo`
+  (also passes on Linux) and `musl_mknod` on all three architectures.
+- **W^X opt-in per program, and PR_SET_MDWE (ADR 0017).** W^X stays the default (mmap and
+  mprotect with PROT_WRITE|PROT_EXEC are EACCES). A program that needs writable and executable
+  memory, such as a JIT, opts in with a VeridianOS ELF note in the main program
+  (`<veridian/wxneeded.h>`; owner `VeridianOS`, NT_VERIDIAN_FEATURE_CTL, bit WXNEEDED) and then
+  gets Linux's behaviour. Only the main program's note counts, at exec (not an interpreter's or a
+  library's); nothing turns W^X off at run time; a malformed note is no opt-in. prctl
+  PR_SET_MDWE/PR_GET_MDWE follow Linux 6.3+:
+  - the argument checks (EINVAL), and one way (EPERM);
+  - no W+X even with the note, and no memory gaining exec;
+  - a W+X segment fails exec under it;
+  - kept across fork and exec unless PR_MDWE_NO_INHERIT.
+
+  The policy lives in the address space (`mm::wx`). Runtime tests on all three architectures:
+  `musl_wx_refused_by_default`, `musl_wx_opt_in` (runs code written into an RWX mapping) and
+  `musl_mdwe`.
+- **BTI for user programs on AArch64 (PROT_BTI).** On a CPU with FEAT_BTI (ID_AA64PFR1_EL1.BT)
+  the kernel enforces guarded pages at EL0 as Linux does: SCTLR_EL1.BT0 on every CPU
+  (`arch::aarch64::bti`), the PTE GP bit for PROT_BTI (`PageFlags::GUARDED`), mprotect accepting
+  PROT_BTI and mmap applying it, the loader guarding the code of a static program (or of the
+  interpreter) whose PT_GNU_PROPERTY note sets GNU_PROPERTY_AARCH64_FEATURE_1_BTI
+  (`image::note_wants_bti`, a bounds-checked parser of the untrusted note; a malformed one is
+  ENOEXEC), HWCAP2_BTI, and a BTI exception (EC 0x0D) delivered as SIGILL/ILL_ILLOPC. SPSR's BTYPE
+  survives returns to EL0 and sigreturn, and signal handlers start as after a BLR (BTYPE=C).
+  Without FEAT_BTI (QEMU's Cortex-A72) mprotect refuses PROT_BTI with EINVAL and mmap drops it,
+  as on Linux. Host tests for the PTE bit, the protection mapping, the PROT_BTI rules and the
+  note parser; boot tests `user_bti_guards_indirect_branches` and `loader_guards_bti_programs`,
+  which run on both CPU models (`scripts/boot-test.sh` takes `AARCH64_CPU`; the gate boots
+  `-cpu max` and checks BTI was enforced). Each failed first on `-cpu max` (without the GP bit,
+  and without the loader's guarding). AArch64 62/62, `-smp 4` 66/66.
+
+- **AT_HWCAP2 on AArch64; arm64's MINSIGSTKSZ.** AArch64 programs now get AT_HWCAP2, as Linux
+  passes it on arm64 (not on RISC-V): the instructions EL0 can use with no kernel support, from
+  ID_AA64ISAR0/1/2_EL1 (DCPODP, FLAGM2, FRINT, I8MM, BF16, EBF16, DGH, RNG, CSSC, RPRFM, HBC,
+  LRCPC3; `arm64_hwcap2`, host-tested); BTI, MOPS, WFxT, ECV, AFP, RPRES and the SVE, SME and
+  MTE bits stay clear. sigaltstack's minimum is arm64's 5120 bytes there (2048 elsewhere), so a
+  smaller alternate stack is ENOMEM as on Linux (`audit_runtime_test`
+  `sigaltstack_arm64_minimum`, through the system call itself since musl's wrapper refuses below
+  its own 6144; the old kernel accepted 4096).
+
+- **sigreturn cannot raise privilege on AArch64 and RISC-V (N-170), tested; the AArch64 and RISC-V
+  runtime suites on four CPUs.** Every return to EL0 keeps only PSTATE's condition flags
+  (`user_spsr`) and every return to U-mode forces `sstatus` to user mode (`user_sstatus`);
+  sigreturn takes only the flags and refuses a kernel-half pc or sp. New `audit_runtime_test`
+  checks `sigreturn_refuses_kernel_pc` (both) and `sigreturn_keeps_el0_and_unmasked` (AArch64: a
+  handler that writes EL1h with DAIF masked into its frame); with both masks removed the second
+  panics the kernel (an instruction abort at EL1 on the program's code). `scripts/dev/gate.sh`
+  runs the AArch64 and RISC-V suites with `-smp 4` as well. The SA_RESTART checks no longer
+  depend on fork timing: on four emulated RISC-V harts the second fork took longer than the
+  test's 90 ms margin, so the slow child exited before the signal was sent; it now exits only
+  after the signal (a byte on a pipe).
+
+- **BusyBox and musl programs on AArch64 and RISC-V.** `scripts/build-musl-rootfs.sh aarch64|riscv64`
+  builds a BlockFS root with the musl cross toolchain: BusyBox 1.36.1 (static), `/sbin/init`,
+  `audit_runtime_test`, `musl_runtime_test` and the dynamically linked C++ test with musl's
+  loader. `ARCH=aarch64|riscv64 scripts/run-rootfs-tests.sh` boots it and runs the BusyBox
+  self-test and both suites; all pass (BUSYBOX_ALL_PASS, AUDIT-RUNTIME 88/88,
+  MUSL-RUNTIME 59/59) on both. `scripts/dev/gate.sh --rootfs` runs both after x86_64's
+  suite (it needs the toolchains). Getting there fixed:
+  - **fork and clone** had never worked on either: the child is now built from the parent's live
+    trap frame (`live_user_frame`, `load_user_frame`, TPIDR_EL0 / `tp`) and its thread is started
+    on every architecture (it was x86_64-only); `clone` takes arm64/RISC-V's argument order
+    (CLONE_BACKWARDS: flags, stack, ptid, tls, ctid).
+  - **exec** returned into the old, freed image: it now switches TTBR0 or `satp`, sets TLS,
+    resets FP state and rewrites the trap frame for the new entry point and stack.
+  - **The shell** ran user programs only on x86_64.
+  - **ABI layouts:** `stat` is asm-generic's 128-byte layout off x86_64 (the 144-byte x86 one
+    overran musl's buffer: ash crashed at pc 0); `epoll_event` is unpacked (data at offset 8);
+    arm64's `O_DIRECTORY`/`O_NOFOLLOW` are 0x4000/0x8000 (its 0x20000 is O_LARGEFILE).
+  - **renameat2** (x86_64 316, generic 276, from `abi/syscalls.map`; flags 0, else EINVAL), and a
+    host test,
+    `generic_numbers_match_the_linux_table`, that checks every AArch64 and RISC-V number the
+    kernel decodes against Linux's `scripts/syscall.tbl`, in both directions.
+  - **Signal masks:** the mask pselect, ppoll and epoll_pwait install is kept for the handler
+    when they are interrupted on every architecture (it was x86_64-only).
+  - **RISC-V copy-on-write in system calls:** `scause` does not tell a missing page from a
+    protection fault, so a `read()` into a page still shared after fork failed with EFAULT
+    (ash lost its script after its first fork); the user-copy path now resolves it as CoW.
+    For the same reason a fault on a mapped page it may not access is now SEGV_ACCERR there
+    (a mapping covers it, as Linux decides), not always SEGV_MAPERR.
+  - **Wall clock:** CLOCK_REALTIME comes from the device tree's PL031 (AArch64) or Goldfish
+    (RISC-V) RTC (`arch::mmio_rtc`, `Fdt::compatible_reg`, host-tested); it counted from boot.
+  - **AT_HWCAP** from the ID registers on AArch64 and from the ISA string on RISC-V (F/D only
+    with user FP state), host-tested.
+  - **Faults** of user programs log the signal, code, address, pc and lr on AArch64.
+  Boot tests `user_fork_child_resumes_after_call` and `user_exec_enters_new_image` (each failed
+  first: the child hung; exec ended with status 139): AArch64 60/60, RISC-V 53/53.
+  `memory_map_from_device_tree` counts the kernel heap, which comes out of managed RAM (it
+  failed with 2 GiB). The tests themselves became portable (TLB-retry handler, a ready byte in
+  the flock test, the x86_64-only TLS check guarded, `brk` through the system call).
+
+- **musl and GCC cross toolchains for AArch64 and RISC-V.** `tools/cross/veridian-paths.sh` takes
+  `VERIDIAN_ARCH` (x86_64, aarch64, riscv64); x86_64 keeps its locations, the others get their own
+  sysroot, toolchain and build trees (`-aarch64`, `-riscv64`), so one never replaces another.
+  `tools/cross/build-musl-arch.sh <arch>` bootstraps without a host cross compiler: Linux 7.2.11 UAPI
+  headers (`build-linux-headers.sh`, `make headers_install`), musl built by clang (lld, no compiler
+  runtime), a first-stage GCC 16.2 (compiler and static libgcc), musl again with it, then the full
+  toolchain (C, C++, shared runtimes), checked by running static and dynamic C and C++ programs
+  (exceptions, threads, `thread_local`, `dlopen`) under qemu-user. RISC-V targets RV64GC/lp64d.
+  `build-musl.sh` records the compiler that built musl and rebuilds when it changes.
+  The runtime tests build for both with it: `musl_runtime_test` guards the x86_64-only calls
+  (`eventfd`, `signalfd`, `epoll_create`, `select`, `arch_prctl`; `select` is checked through
+  `pselect6` where it is missing), and `audit_runtime_test` gets each architecture's traps
+  (AArch64 `udf`/`brk`/EL1 register, RISC-V `unimp`/`ebreak`/S-mode CSR) and `clone`'s argument
+  order (arm64 and RISC-V put the child TID last). They run there since the BusyBox root
+  for those architectures (above).
+
+- **RAM from the device tree, and a heap sized from it, on AArch64 and RISC-V (HA-17, HR-07).**
+  Both assumed 128 MiB of RAM and had a static 8 MiB heap, too small for a BlockFS root (with a
+  disk attached, a 1 MiB allocation failed). The frame allocator now takes the device tree's
+  memory nodes, less the memory reservation block, `/reserved-memory` and the blob itself
+  (`Fdt::memory_ranges`, `Fdt::reserved_ranges`, `mm::carve`, host-tested), and the heap is taken
+  from frames as on x86_64 (N-278): 64 MiB at 256 MiB of RAM, 256 MiB at 1 GiB. Without a device
+  tree 128 MiB is still assumed. Boot test `memory_map_from_device_tree` (it fails with the old
+  map: 114 of 256 MiB managed). AArch64 58/58, RISC-V 51/51.
+
+- **Guard pages under AArch64 kernel stacks (N-26).** AArch64 kernel stacks came from the physical
+  map, so an overflow silently overwrote the neighbouring frame. They now come from the stack region
+  (0xFFFF_E000_0000_0000, in the TTBR1 half every address space shares), each at the top of its own
+  slot with unmapped pages below, as on x86_64 and RISC-V; the pages are global, so no ASID tags
+  them. The boot test `kernel_stack_guard_page` now runs on AArch64 (it was skipped, and fails with
+  the old allocator). AArch64 57/57. An overflow still faults again on the same stack instead of
+  reporting (no overflow stack yet, as on RISC-V).
+
+- **Cache maintenance for user code on AArch64 (HA-25); instruction-cache sync for executable
+  mappings on both AArch64 and RISC-V.** The kernel cleaned no data cache lines before user code
+  ran, relying on QEMU's CTR_EL0.IDC. Code it writes is now cleaned to the point of unification
+  (`dc cvau`) unless CTR_EL0.IDC is set, and the instruction caches are invalidated unless
+  CTR_EL0.DIC is set (`VirtualAddressSpace::sync_code`). This covers the loader, mmap of a file with
+  PROT_EXEC and mprotect adding PROT_EXEC; the last two had no instruction-cache sync at all, on
+  RISC-V either (now `fence.i` on every hart). QEMU models no caches, so stale code cannot be shown
+  there: the boot test `aarch64_dcache_clean_to_pou` runs the clean over a user code page and then
+  the code, and a host test covers the line arithmetic. AArch64 55/55. ADR 0016 amended.
+
+- **ASIDs on AArch64 (HA-26).** Each user address space gets an address-space identifier
+  (`mm::asid`, 16-bit where the CPU has them), so switching address spaces no longer invalidates
+  the TLB: other spaces' entries stay, tagged with their own ASIDs. An ASID is released with a
+  broadcast `tlbi aside1is` when its page tables are freed, before it can be reused; ASID 0 is the
+  fallback when all are in use, with the old invalidation. Boot test
+  `aarch64_asids_isolate_address_spaces`: three processes keep their pid at the same stack address
+  while switching (with one ASID for every root, two read another's). Host tests for the
+  allocator. AArch64 54/54. ADR 0016 amended.
+
+- **Static TLS on AArch64 and RISC-V.** The loader gives a static program with a PT_TLS segment
+  its initial TLS block on these architectures too (it did only on x86_64), laid out as each
+  psABI's variant I: the thread pointer (TPIDR_EL0, `tp`) is the block base, and the image lies
+  above it, after a 16-byte TCB on AArch64 and at it on RISC-V (`elf::tls_layout_above_tp`, with a
+  host test). A new thread starts with that pointer unless its context carries one (a clone's
+  CLONE_SETTLS, a fork's). Boot test `user_static_tls_block`: a static ELF reads its first TLS word
+  through the thread pointer and exits with it (it fails with status 139 when the pointer is not
+  set). AArch64 53/53, RISC-V 50/50.
+
+- **Fault-tolerant user compare-and-exchange on AArch64 and RISC-V (ARCH-MEM-03).** The futex
+  atomic (`cmpxchg_user_u32`: FUTEX_WAKE_OP, PI futexes, robust lists) used a plain atomic on the
+  user address there, so an unmapped or read-only page faulted in the kernel. It is now an
+  LDAXR/STLXR loop (AArch64) or LR/SC loop (RISC-V, with SUM set only around it). Both memory
+  instructions have fixup entries; a fault is offered to demand paging and copy-on-write, and
+  the loop reloads after the exception clears the monitor or reservation, otherwise it returns
+  EFAULT. Boot tests: `usercopy_cmpxchg_fault_returns_efault` now runs on both, and the new
+  `user_futex_wake_op_updates_word` has a user program change a stack word through FUTEX_WAKE_OP
+  (it fails with the store disabled). AArch64 52/52, RISC-V 49/49.
+
+- **Signal handlers on AArch64 and RISC-V.** Signals reach handlers with Linux's frames:
+  - **AArch64:** the arm64 `rt_sigframe`, with an `fpsimd_context` record and a frame record,
+    returning through the C library's SA_RESTORER.
+  - **RISC-V:** the RISC-V `rt_sigframe`, with the D state. Its `struct sigaction` is the 24-byte
+    layout with no restorer, and handlers return through a trampoline page the kernel maps lazily,
+    where Linux uses its vDSO.
+  - **Both:** x86_64's decision loop (stops, SA_RESTART with the first argument put back,
+    SA_ONSTACK, SA_NODEFER, SA_RESETHAND). Faults with an unblocked handler are queued for it
+    (`signals::queue_fault`, now shared with x86_64), and AT_MINSIGSTKSZ is reported.
+
+  New boot test `user_signal_handler_round_trip`: the handler rewrites a saved register in its
+  `ucontext`, and the test checks `rt_sigreturn` restores it. It fails with the restore skipped.
+  AArch64 is now 50/50 and RISC-V 47/47. The user-mode boot tests now get four stack pages, which
+  the 4.7 KiB AArch64 frame needs.
+
+- **User FP state on AArch64 and RISC-V (N-41 part).** Each user task carries an FP area that
+  `arch_switch` saves and restores eagerly, as XSAVE does on x86_64. AArch64 switches v0-v31, FPCR
+  and FPSR and enables FP at EL0 (CPACR_EL1.FPEN = 11). RISC-V switches f0-f31 and fcsr, keeps FS
+  off while the kernel runs (it is now cleared at every trap from U-mode) and returns with FS Clean.
+  A new program starts zeroed; fork and clone copy the caller's registers. RISC-V learns F/D from
+  the device tree's `riscv,isa` (`fdt::isa_has_base_extension`, host-tested): its FP code read
+  `misa` and wrote `mstatus`, M-mode CSRs that S-mode cannot touch (HR-20/21). Boot test
+  `user_fp_state_survives_switches` runs two processes that each keep their pid in two FP
+  registers across 64 yields. It fails with the switch disabled, and replaces
+  `aarch64_user_fp_is_trapped`. `process::run_and_wait_all` starts several processes before waiting.
+
+- **AArch64 runs user programs at EL0 (E-A6; ADR 0016).** Exceptions from EL0 land on the task's
+  kernel stack, since the return to EL0 leaves SP_EL1 at its top. They are saved as a 272-byte
+  `UserFrame` and handled by ESR class:
+  - `svc` is a system call with Linux's generic numbers and arm64's ABIs
+    (`Syscall::from_aarch64`: RISC-V's plus `renameat`);
+  - instruction and data aborts go through `mm::page_fault`;
+  - other classes become SIGILL, SIGTRAP or SIGBUS.
+
+  TPIDR_EL0 and the frame pointer are switched with the task. FP/SIMD traps at EL0
+  (CPACR_EL1.FPEN = 01) until its state is switched. User copies are fault-tolerant, served by a
+  new EL1 synchronous-exception handler, and loaded code is made fetchable (`sync_icache_all`).
+  `mm::page_fault::from_aarch64` now counts instruction aborts as user faults and decodes the full
+  fault status code. The embedded init and shell used x86_64's numbers (1, 231) and now use arm64's
+  (64, 94). New boot tests, which give AArch64 49/49 and 53/53 on four CPUs:
+  `aarch64_user_syscall_round_trip`, `aarch64_user_fault_kills_process`,
+  `aarch64_user_mode_is_unprivileged`, `aarch64_user_fp_is_trapped` (it fails with FP enabled at
+  EL0), `aarch64_elf_program_runs`, `aarch64_embedded_init_runs`; `usercopy_fault_returns_efault`
+  now runs on AArch64 too.
+
+- **AArch64 dispatches kernel tasks on every CPU (E-A5, E-A5c; ADR 0006).** New
+  `arch/aarch64/switch.rs`: `switch_stacks` saves x19-x30, a kernel-thread trampoline, TTBR0 as the
+  task's root (switched with a TLB invalidate, since there are no ASIDs yet, HA-26), DAIF-based IRQ
+  save and enable, a WFI idle that wakes on a masked pending IRQ, and kicks as GICv2 SGIs
+  (`gic::send_sgi_raw`). The GIC acknowledge now returns the whole IAR value so an SGI ends with
+  its source-CPU bits, as GICv2 requires. The timer tick runs `dispatch::tick` and re-arms after
+  the work. The `dispatch` cfg covers AArch64, and secondaries enter `run_secondary`. Newly run
+  boot tests: `dispatch_kthreads_interleave_and_reap` and `dispatch_waitqueue_wake_and_join`
+  (40/40); with four CPUs also `dispatch_runs_on_every_cpu` and `dispatch_places_on_idle_cpus`
+  (44/44). `gate.sh --boot` also boots the debug AArch64 kernel under `-icount shift=4`.
+
+- **AArch64: no identity map after the MMU switch (ADR 0015 amendment).** The UART, GIC, console
+  input and debug writes reach their devices through the physical-memory map
+  (`arch::aarch64::platform`). After the branch to the upper half every CPU loads an empty root
+  into TTBR0, so the lower half is free for processes. New boot test
+  `lower_half_unmapped_after_boot` (AArch64 36/36, 38/38 on four CPUs) failed with the identity
+  root left in place.
+
+- **AArch64 runs with the MMU and caches on, in the upper half (N-28 part, HA-04, HA-16; ADR
+  0015).** The kernel is linked at 0xFFFF_FFFF_8020_0000 and loaded 2 MiB into RAM; boot.S runs
+  position-independent at the load address, builds the boot tables in `.bss` and switches. TTBR1
+  holds the kernel root: all physical memory at 0xFFFF_8000_0000_0000 in 1 GiB blocks (the first
+  GiB Device, the rest Normal, as QEMU `virt` lays it out) and the image at its link address in 2
+  MiB blocks from wherever it was loaded. TTBR0 holds a temporary identity map. MAIR and TCR match
+  `mm::pte::arm`, with IPS from PARange. The table lines are invalidated before the switch. boot.S
+  then branches high and reloads the stack and VBAR. Secondary CPUs get the physical addresses of
+  their entry and boot block from PSCI CPU_ON, load the boot CPU's MMU registers and switch the
+  same way. `kernel_phys` uses the offset boot.S measured, `get_kernel_page_table` reads TTBR1,
+  and `PHYS_MEM_OFFSET` is set. New boot test `mmu_on_kernel_in_upper_half` checks SCTLR, the
+  running address and an `AT S1E1R` translation to Normal memory (AArch64 35/35, 37/37 on four
+  CPUs). `gate.sh --boot` also boots the Image loaded 4 MiB higher (`AARCH64_LOAD_ADDR`). Still to
+  do: MMIO through the physical map, then removing the MMU-off workarounds.
+
+- **AArch64 exception vectors before any Rust code.** boot.S writes VBAR_EL1 as soon as each CPU
+  has a stack (boot and secondary paths), instead of Stage 1 hardware init doing it after
+  `kernel_main` had already run. A fault in the earliest Rust code is now reported with ESR/ELR/FAR,
+  where it used to vector wherever firmware left VBAR_EL1 (address 0 under QEMU; a silent hang on
+  hardware). Boot test `vectors_installed_before_rust` compares the VBAR `_start_rust` finds with
+  the table (AArch64 34/34, 36/36 on four CPUs). It failed before the move, and a probe `udf` at
+  the top of `_start_rust` now prints `[EXCEPTION] unhandled sync`.
+
+- **setfsuid and setfsgid; filesystem IDs.** Credentials carry Linux's filesystem uid and gid:
+  they follow the effective IDs through every set*id call and exec, and setfsuid/setfsgid set
+  them apart (returning the old value, -1 to read it, only to one of the caller's own IDs unless
+  privileged). File permission checks, new files' owners, chown/chmod/utimes rules, the sticky
+  bit, exec permission and `faccessat(AT_EACCESS)` use them, and file-access privilege is
+  filesystem uid 0, as Linux drops the filesystem capabilities when the fsuid leaves 0. A
+  changed filesystem ID makes the process non-dumpable, as `commit_creds` does.
+  `/proc/<pid>/status` shows `Uid:`, `Gid:` (real, effective, saved, filesystem) and `Groups:`,
+  and `/proc/self/status` and `/proc/self/cmdline` are the caller's own. New runtime test
+  `musl_fs_ids`.
+
+- **Syscall coverage per architecture.** `tools/compat/syscall_coverage.py` reads the vendored
+  Linux v7.2 tables and writes one report each for x86_64 (385 calls: 180 implemented, 9 stubbed,
+  180 missing, as released), AArch64 (327: 153, 9, 163) and RISC-V (328: 152, 9, 165), from the generic
+  `syscall.tbl` with each architecture's ABIs; `--check` fails the gate and CI when one is stale.
+
+- **DMA cache maintenance for non-coherent devices (HA-25, ADR 0019).** Most AArch64 boards (Pi
+  4 and 5, RK3588, Allwinner) and the T-Head and SpacemiT RISC-V SoCs do not keep DMA coherent with
+  the CPU caches, and the kernel did no maintenance for DMA buffers. `mm::dma` follows Linux's
+  streaming-DMA model: `sync_for_device` cleans a buffer to the point of coherency before the
+  device uses it, `sync_for_cpu` cleans and invalidates it before the CPU reads what the device
+  wrote. Whether a device needs it comes from its device-tree node or an ancestor
+  (`dma-coherent`, `dma-noncoherent`; `Fdt::dma_coherent`, as Linux's `of_dma_is_coherent`), with
+  Linux's defaults otherwise: non-coherent on AArch64, coherent on RISC-V and x86_64. AArch64 uses
+  `dc cvac`/`dc civac`, RISC-V Zicbom's `cbo.clean`/`cbo.flush` (found in the device tree, with its
+  block size). The virtqueue, virtio-blk, virtio-net and the ramfb fw_cfg descriptor use it. QEMU's
+  devices are coherent, so the boot test `dma_cache_maintenance` runs the non-coherent path on a
+  frame.
+
+- **W^X for the kernel image (AArch64, RISC-V).** boot.S maps the image with writable,
+  executable 1 GiB pages (RISC-V) or 2 MiB blocks (AArch64), so a write anywhere in kernel data
+  could plant code. Once the frame allocator is up, before any other CPU starts or an address
+  space copies the kernel half, the image is mapped in 4 KiB pages with its sections'
+  permissions: code read and execute, read-only data read, data, BSS and the boot stack read and
+  write (`mm::kimage`, new linker symbols `__text_end` and `__rodata_end`). RISC-V swaps the new
+  tables in with one store; AArch64 builds a new TTBR1 root and switches to it from the identity
+  map, as Linux's `cpu_replace_ttbr1` does, since splitting live blocks needs break-before-make.
+  RISC-V's physical map is no longer executable (AArch64's never was). The boot test
+  `kernel_image_w_xor_x` checks every image page and its physical-map alias, and on x86_64 that
+  the bootloader's per-segment mapping stays W^X.
+
+- **RISC-V Image (HR-03).** boot.S starts with Linux's 64-byte RISC-V Image header
+  (`text_offset` 2 MiB, `image_size` covering BSS and the boot stack, version 0.2, magics `RISCV`
+  and `RSC\x05`), which U-Boot `booti` and EFI loaders need, and `build-kernel.sh` writes the flat
+  image as `veridian-kernel.img`. A boot test, `riscv_image_header`, reads the header back, and
+  `gate.sh --boot` boots the Image (`RISCV_IMAGE=1 scripts/boot-test.sh riscv64`). The Image still
+  runs only where it is linked, physical 0x8020_0000 (HR-02).
+
+- **AArch64 arm64 Image (HA-03).** boot.S starts with the 64-byte Linux arm64 Image header
+  (`text_offset` 2 MiB, `image_size` covering BSS and the boot stack, 4 KiB pages, magic `ARM\x64`),
+  and `build-kernel.sh` writes the raw image next to the ELF as `veridian-kernel.img`. QEMU boots it
+  through the Linux protocol, as U-Boot `booti` and the Raspberry Pi firmware will, with the device
+  tree in x0. A new boot test, `device_tree_found`, checks the device tree and logs whether x0
+  carried it. `gate.sh --boot` boots the Image (`AARCH64_IMAGE=1 scripts/boot-test.sh aarch64`)
+  and requires x0. Before the header, QEMU loaded the image at the wrong address and boot hung
+  after the GIC.
+
+- **Every RISC-V hart dispatches.** Secondary harts turn their boot flow into an idle task and run
+  tasks, as x86_64's CPUs do (ADR 0012), and the loader fences new program code on every hart
+  (SBI `remote_fence_i`: instruction fetch is not coherent with stores on RISC-V). The SMP
+  dispatcher boot tests `dispatch_runs_on_every_cpu` and `dispatch_places_on_idle_cpus` run on
+  RISC-V. The placement test now starts its spinners together: created one by one under
+  emulation (40 ms each), the first had finished before the last existed. Kernel stacks are
+  cleared page by page with `clear_page`.
+- **RISC-V runs ELF programs.** The loader no longer skips segment loading on RISC-V (it did while
+  RISC-V ran with paging off): a static ELF program from the VFS is loaded, given its arguments
+  on the stack and the console as fds 0-2, and run in U-mode. Boot test `riscv_elf_program_runs`
+  (it writes its own line to the console and exits with its argc). The embedded RISC-V init and
+  shell used x86_64's numbers for write and exit_group; they use RISC-V's now (boot test
+  `riscv_embedded_init_runs`, which fails with the old ones).
+- **RISC-V user mode (ADR 0014).** Threads enter and leave U-mode as dispatcher tasks: the trap
+  vector tells a user trap by swapping `tp` with `sscratch` (so the kernel's per-CPU pointer is
+  back before any kernel code runs, N-14), saves the registers on the task's kernel stack, and
+  handles `ecall` system calls (Linux's generic numbers), page faults, interrupts and illegal
+  instructions; every return to U-mode passes the preemption and fatal-signal checks with a
+  sanitised `sstatus`. User copies are fault-tolerant and the only code that may touch user pages
+  (`sstatus.SUM`; ARCH-MEM-03). Boot tests on RISC-V: `riscv_user_syscall_round_trip`,
+  `riscv_user_fault_kills_process`, `riscv_user_mode_is_unprivileged` (each failed when the
+  return went to supervisor mode), `usercopy_fault_returns_efault` and
+  `unstarted_process_freed_whole` (both skipped before). Programs from disk, user FP, signal
+  handlers and SMP dispatch follow.
+- **RISC-V system call numbers (ADR 0009).** `tools/compat/gen_syscalls.py` also reads Linux's
+  generic table (`abi/linux/syscall.tbl`, v7.2), which RISC-V and arm64 use: the kernel gets
+  `Syscall::from_riscv64`, and `<veridian/sysno.h>` and the Rust constants give RISC-V programs
+  their numbers (`write` 64, `exit_group` 94), with no number for the calls that table leaves to
+  user space (`open`, `fork`). `docs/compat/SYSCALL-NUMBERS.md` lists both columns. Host test
+  `riscv64_numbers_are_the_generic_table`.
+- **RISC-V runs the dispatcher (ADR 0006).** A switch primitive (`arch/riscv64/switch.rs`:
+  callee-saved registers on the task's stack, seeded kernel threads, `satp` per task), interrupt
+  masking through `sstatus.SIE`, an idle loop that cannot miss a wake (`wfi` with interrupts
+  masked) and IPIs through SBI. The boot flow becomes the boot hart's first task, the timer
+  interrupt drives the scheduler tick, and kernel threads run: the boot tests
+  `dispatch_kthreads_interleave_and_reap` and `dispatch_waitqueue_wake_and_join` pass on RISC-V
+  (they were skipped). Secondary harts do not dispatch yet. The architectures that dispatch are
+  the `dispatch` cfg, set by build.rs. The two SMP dispatcher tests are now reported as skipped
+  where they cannot run (they were left out silently).
+- **RISC-V kernel stacks have guard pages (N-26).** With paging on, RISC-V uses the same stack
+  region as x86_64: each stack in its own slot of the kernel half with unmapped pages below it,
+  so an overflow faults instead of overwriting the neighbouring frame. The boot test
+  `kernel_stack_guard_page` runs on RISC-V (it was skipped). The trap is still taken on the
+  overflowed stack, so it does not report cleanly yet.
+- **RISC-V runs with paging on, the kernel in the upper half (ADR 0013).** The kernel ran with
+  `satp` Bare at its load address, in what is the user half of an address space. It is now
+  linked at 0xFFFF_FFFF_8020_0000 and loaded at 0x8020_0000; `_start` builds early page tables
+  (all physical memory at 0xFFFF_8000_0000_0000 and the image at its link address), turns on
+  Sv48 through a trampoline root that also maps the image at its physical address (stopping with
+  a message on a hart without Sv48), jumps up and switches to the kernel root, whose lower half
+  is empty (boot test `kernel_root_lower_half_empty`). Secondary harts do the same. MMIO (PLIC,
+  virtio-mmio, the early UART) and the virtio rings go through the physical-memory map. Sv39-only boards are
+  not supported yet (HR-09).
+- **Tasks run on every CPU (SMP stage S3, D5e; ADR 0012).** With the `smp` feature, a new or woken
+  task is placed on an idle CPU it may use (or stays where its cache is warm), an idle CPU pulls
+  waiting work from the busiest one, and every CPU rebalances every 4 ms when the load differs by
+  more than 25% (ADR 0007's policy, now applied). sched_setaffinity moves a thread off a CPU it may
+  no longer use before the call returns; sched_getaffinity, the processor count
+  (`_SC_NPROCESSORS_ONLN`) and deadline admission count every CPU that runs tasks; getcpu (new)
+  reports the caller's CPU. Boot test `dispatch_places_on_idle_cpus`; runtime test
+  `musl_smp_placement` (a thread pinned to each CPU in turn runs there; threads spread over all
+  CPUs).
+- **Deadline tasks move between CPUs (D5).** A CPU takes a waiting SCHED_DEADLINE task from
+  another when that task's deadline is earlier than anything it runs itself (Linux
+  `pull_dl_task`), checked on every tick and whenever a CPU goes idle; the task keeps its current
+  reservation. A waking deadline task goes to a CPU with no deadline work, else to the one whose
+  earliest deadline is the latest, if later than its own (Linux `find_later_rq`). Deadline tasks
+  used to be placed only at wakeup and never moved, so busy ones that started on one CPU stayed
+  there over its capacity. Host tests for both decisions; runtime test `musl_dl_balance` (four
+  busy threads reserving 45% each all run at least 230 ms of a 600 ms window).
+- **A deadline thread must allow every online CPU, as on Linux.** Admission counts the bandwidth
+  of all of them, so deadline threads restricted to a few CPUs could be admitted and still
+  overload those. sched_setattr to SCHED_DEADLINE now fails with EPERM for a thread whose mask
+  leaves out an online CPU, and sched_setaffinity with EBUSY when it would narrow a deadline
+  thread's mask. `musl_dl_balance` checks both.
+- **arch_prctl ARCH_SET_GS and ARCH_GET_GS.** A thread's user GS base, inherited by its threads
+  and fork children. Runtime test `musl_gs_base_per_thread`.
+- **Priority-inheritance mutexes (SCHED-INC-01).** FUTEX_LOCK_PI, FUTEX_LOCK_PI2, FUTEX_TRYLOCK_PI and
+  FUTEX_UNLOCK_PI, with Linux's futex word protocol: while a PI lock has waiters its holder runs at
+  the highest waiting priority (through the scheduler's real-time boost, passed along chains of
+  locks), unlock hands the lock to the highest-priority waiter, and a holder that exits passes its
+  locks on with FUTEX_OWNER_DIED. musl's PTHREAD_PRIO_INHERIT mutexes, reported unsupported before,
+  now work. Runtime test `musl_priority_inheritance` (the classic inversion: with a CPU hog of
+  middle priority, the high-priority waiter still gets the lock). The requeue-PI operations
+  (glibc's PI condition variables) remain ENOSYS.
+- **Signals carry their siginfo; sigqueue and sigtimedwait (N-259).** Every pending signal
+  instance has its Linux `siginfo_t`: a real-time signal one per send, in order, a standard signal
+  its first sender's. kill gives SI_USER and tkill/tgkill SI_TKILL with the sender's pid and real
+  user; sigqueue (rt_sigqueueinfo, rt_tgsigqueueinfo, new) SI_QUEUE with its value; SIGCHLD how
+  the child exited, was killed, dumped core, stopped or continued, with its status and CPU times;
+  faults their code and address (SEGV_MAPERR/ACCERR, FPE_* from the x87 and SSE status,
+  ILL_ILLOPN, BUS_ADRALN), and a fault is signalled once (a SIGSEGV handler ran a second time,
+  for a copy the memory manager sent without siginfo). SA_SIGINFO handlers and signalfd see it;
+  handlers used to get only the signal number. rt_sigtimedwait (new) takes a pending signal or
+  waits for one, with a timeout. sigqueue to another process may not pose as kill (EPERM), and
+  fails with EAGAIN past RLIMIT_SIGPENDING. Runtime test `musl_siginfo`.
+
+- **Program loading for dynamic linking (ADR 0010).** The ELF loader plans every image before
+  exec commits: each PT_LOAD is checked against the file and user space, pages two segments share
+  get both, and position-independent programs load at `0x5555_5555_4000`. A program with
+  PT_INTERP starts in its interpreter, loaded in the mmap area, as Linux does. Every program now
+  gets Linux's auxiliary vector (AT_RANDOM, AT_HWCAP, AT_CLKTCK, AT_UID to AT_EGID, AT_SECURE,
+  AT_EXECFN, AT_PLATFORM, AT_MINSIGSTKSZ and the rest); static programs had none and dynamic ones
+  an incomplete one with an AT_PHNUM of 1. exec and the initial program loader share the code.
+  The musl runtime suite now runs as a static PIE (`musl_auxv`, `musl_pie_loaded`).
+- **Shared file pages (ADR 0010).** A BlockFS file keeps the pages processes map in a page cache:
+  private file mappings and the pages of loaded programs use the cached frames, read-only or
+  copy-on-write, so every process running a program or mapping a file shares one copy. Writing,
+  truncating or deleting the file drops its cache. `/proc/meminfo` `Cached:` reports it (it
+  showed the frame allocator's per-CPU lists). Runtime tests `musl_page_cache` and
+  `musl_program_pages_shared`.
+- **Dynamically linked programs run.** The BusyBox root filesystem ships musl's dynamic loader
+  (`/lib/ld-musl-x86_64.so.1`) and the shared C++ runtime; `musl_dynamic_program` runs a
+  dynamically linked C++ program that throws, runs threads with `thread_local` destructors and
+  `dlopen`s a C++ library.
+
+- **Clocks, CPU time and resource usage (N-218 to N-220, N-223, N-213).** CLOCK_REALTIME
+  counted from boot and only clocks 0 and 1 existed, so musl's `clock()` failed and every wall
+  time was in 1970. The wall clock now starts from the RTC (x86_64) and is set by
+  clock_settime and settimeofday (root only); every Linux clock exists, including the process
+  and thread CPU-time clocks and those clock_getcpuclockid and pthread_getcpuclockid make. The
+  dispatcher charges each task the time it runs and samples user or kernel mode at each tick,
+  which getrusage (now implemented), times (new), wait4 and waitid report, with the peak
+  resident set and context switches. sysinfo is implemented, and the load averages (Linux's
+  calc_load) replace the constant 0.00 in /proc/loadavg. Absolute CLOCK_REALTIME deadlines --
+  clock_nanosleep, FUTEX_CLOCK_REALTIME waits (musl's timed mutex, condition and semaphore
+  waits) and timerfds -- are converted to the monotonic clock; timerfds follow clock changes,
+  and TFD_TIMER_CANCEL_ON_SET reads fail with ECANCELED after one. gettimeofday accepts NULL.
+  Runtime test `musl_clocks_and_usage`.
+- **Resource limits (N-224).** getrlimit returned fixed numbers for five resources, setrlimit
+  did nothing and prlimit64 ignored its pid. Each process now has Linux's sixteen limits,
+  inherited on fork and kept across exec, changed under Linux's rules (only root raises a hard
+  limit; another process's limits need root or a matching real user and group). They are
+  enforced as on Linux: open descriptors (EMFILE), file size (a write is shortened at the limit,
+  and one starting there fails with EFBIG and SIGXFSZ), processes and threads per user (EAGAIN),
+  address space and data (mmap ENOMEM, brk unchanged, mprotect making private memory
+  writable ENOMEM), stack growth, CPU time (SIGXCPU, then
+  SIGKILL at the hard limit), nice and real-time priority (the scheduling calls now allow what
+  RLIMIT_NICE and RLIMIT_RTPRIO grant), and queued real-time signals per user (tkill and tgkill
+  fail with EAGAIN; kill still makes the signal pending). The native C library's getrlimit and
+  setrlimit, which were stubs, call the kernel, and it gains prlimit, getpriority and
+  setpriority. A full descriptor table now fails with EMFILE everywhere: open, pipe, openpty,
+  epoll_create, eventfd, timerfd_create and signalfd reported ENOMEM, and a
+  DRM PRIME export reported an unrelated error. Runtime test `musl_rlimits`.
+- **Set-user-ID and set-group-ID programs.** Files had no set-ID bits at all (chmod 4755 lost
+  them). They are now kept by every filesystem and reported by stat, and exec follows Linux's
+  rules: a set-user-ID file runs with its owner as effective user, a set-group-ID file with
+  group execute with its group, the saved IDs take the effective ones, and AT_SECURE tells the
+  dynamic loader to ignore LD_PRELOAD and LD_LIBRARY_PATH. Nothing is gained under
+  no_new_privs, while traced by an unprivileged tracer, or while another process shares the
+  program's directories and umask (CLONE_FS), as Linux's LSM_UNSAFE_SHARE; exec decides and
+  installs the credentials under a per-process guard that ptrace attach also takes (Linux's
+  cred_guard_mutex), so a tracer cannot attach in between. The bits go when a non-root caller
+  writes or truncates the file (set-group-ID only where it means set-group-ID), on any chown of
+  a non-directory, and set-group-ID when a caller outside the file's group chmods it. A file's
+  owner may now change its group to one it belongs to (POSIX `_POSIX_CHOWN_RESTRICTED`); chmod
+  and chown by anyone else fail with EPERM, as on Linux (they were EACCES). Runtime tests
+  `musl_setuid_exec` and `musl_setuid_cleared`.
+- **prctl names threads and sets no_new_privs (N-227).** PR_SET_NAME reported success and stored
+  nothing; each thread now has Linux's command name (15 bytes), set at creation, by exec (the
+  program's file name, or the script's) and by PR_SET_NAME, and inherited by threads and fork
+  children. PR_SET_NO_NEW_PRIVS and PR_GET_NO_NEW_PRIVS exist with Linux's argument checks;
+  the flag is one-way and inherited. PR_SET_DUMPABLE and PR_GET_DUMPABLE exist too
+  (ssh-agent, gpg-agent and kdesud use them to keep their user's other processes out): only
+  root may ptrace a non-dumpable process or read its robust list, fork keeps the flag, a change
+  of effective user or group clears it (a root process that drops to a user keeps root's data
+  in memory), and exec clears it for a set-ID program or one the caller cannot read, setting it
+  otherwise, as Linux does. Runtime test `musl_prctl`.
+- **Password checks for PAM: `veridian_auth` and pam_veridian.** A VeridianOS system call
+  (private 1352) checks a password, reports an account's state, or changes a password, against
+  the kernel's account store, so passwords never leave the kernel and there is no
+  `/etc/shadow`. Root may act on any account and anyone else only on its own (by real user ID),
+  as Linux's `unix_chkpwd` allows, so a user can neither guess another's password nor lock that
+  account by failing. `userland/pam_veridian` is the Linux-PAM module over it (auth, account,
+  password), built into the KDE sysroot; the screen locker (PAM service `kde`) and polkit
+  (`polkit-1`) authenticate with it.
+- **KDE Plasma builds on shared libraries.** The Plasma phase of the cross pipeline completes,
+  through plasma-desktop. Added for it: the X11 client libraries KDE expects even without an X
+  server (libXrender, libXcursor, libICE, libSM, libxkbfile, libXft; plasma-workspace is built
+  with X11 support for ksmserver, which the Wayland session uses, but no X11 session), polkit 127
+  with polkit-qt-1, Linux-PAM, libgudev and libwacom, KDE Frameworks' qqc2-desktop-style and
+  Kirigami Addons. Every new source is checked against its signature or published checksum.
+  The KDE root filesystem carries accounts (`/etc/passwd`, `/etc/group`), PAM services that
+  refuse anything unconfigured, and the set-user-ID helpers (pkexec, polkit-agent-helper-1,
+  dbus-daemon-launch-helper); its assembly fails if any program depends on a build-host path.
+  The session's applications and services followed: System Settings, the polkit
+  authentication agent, kde-cli-tools, KScreen, kmenuedit, kinfocenter, kwrited, ksystemstats,
+  the system monitor, kdeplasma-addons, kwallet-pam, ksshaskpass and Aurorae, with the
+  frameworks and libraries they need (KPty, KSu, KImageFormats, QtKeychain, libusb).
+  kdeplasma-addons' QMK keyboard helper is Rust: Corrosion (built for the host) drives a pinned
+  Rust toolchain targeting x86_64-unknown-linux-musl, linked dynamically against the sysroot's
+  C library like every other program.
+
+- **Scheduling calls take effect (N-221).** sched_setscheduler, sched_getscheduler and the
+  affinity calls were stubs that returned 0. Each thread now has Linux's scheduling parameters --
+  policy (SCHED_OTHER, FIFO, RR, BATCH, IDLE, DEADLINE), real-time priority, nice value and
+  SCHED_RESET_ON_FORK -- which the dispatcher runs it with, which threads and fork children
+  inherit, and which these calls set and report with Linux's checks: EINVAL for bad arguments,
+  EPERM or EACCES for unprivileged changes, EBUSY past SCHED_DEADLINE's 95% admission limit.
+  sched_setparam, sched_getparam, sched_setattr, sched_getattr, sched_rr_get_interval,
+  getpriority and setpriority are added; sched_getaffinity reports the CPUs that run tasks (one,
+  until SMP). Runtime test `musl_sched`.
+
+- **Robust mutexes recover when their owner dies (N-225).** set_robust_list stored the list per
+  process and nothing ever read it, so a process-shared robust mutex held by a thread that died
+  stayed locked for good. The list is now per thread and walked when the thread exits (for any
+  reason), as Linux does: mutexes it held are marked owner-died and a waiter is woken, so the
+  next locker gets EOWNERDEAD and can recover. get_robust_list is added. Runtime test
+  `musl_robust_futex`.
+
+- **flock waits, and its locks belong to open files (N-207).** flock without LOCK_NB failed with
+  EWOULDBLOCK instead of waiting; it now sleeps until the lock is granted, or fails with EINTR
+  for a signal. Locks were owned by the process, so two opens of one file in a process did not
+  conflict and a process exit dropped locks its fork child still held; they are now owned by the
+  open file, as on Linux, and a lock conversion drops the old lock first. Runtime test
+  `musl_flock_blocking`.
+
+- **Thread IDs follow Linux (N-217).** A process's first thread had its own ID, unlike its
+  PID, and thread IDs came from a separate counter, so a thread could have another process's
+  PID as its ID. Process and thread IDs now share one counter, and the first thread of a new or
+  forked process has the process's ID. `arch_prctl(ARCH_SET_FS)` outside user space is EPERM as
+  on Linux (it was EACCES; N-215). Runtime tests `musl_tids` and `musl_arch_prctl`.
+
+- **select waits, and pselect6 exists (N-194).** select reported every open descriptor ready at
+  once and ignored its timeout and exceptfds. select and the new pselect6 now share poll's wait:
+  they sleep until a descriptor is ready, the timeout passes or a signal arrives, report
+  readable, writable and exceptional descriptors as Linux does, fail with EBADF for a closed
+  descriptor and EINVAL for a bad timeout, and write the time left back; pselect6 applies its
+  signal mask for the wait. poll takes up to 1024 descriptors (it stopped at 256) and reports
+  POLLRDNORM and POLLWRNORM (N-206). Runtime test `musl_select`.
+
+- **epoll follows Linux (N-234, N-245).** The instance is its file, so duplicates and fork
+  children share it. A registration belongs to the descriptor number and the open file it named:
+  it goes away when the open file is closed for good, not when the number is reused, and keeps
+  reporting while a duplicate holds the file open. EPOLLET is edge-triggered (it was level-
+  triggered, so mio/tokio, which register every socket for EPOLLIN|EPOLLOUT|EPOLLET, spun on
+  writable sockets) and EPOLLONESHOT disables until re-armed. epoll_ctl returns Linux's errors
+  (EEXIST, ENOENT, EBADF, EPERM for regular files, ELOOP for cycles and deep nesting; everything
+  was EINVAL), an epoll file can watch another, and every readiness bit is reported.
+  `epoll_pwait` applies its signal mask for the wait, `epoll_create` and `epoll_pwait2` are
+  added, and `ppoll` honours its signal mask too (N-258). Runtime test `musl_epoll`.
+
+- **eventfd, timerfd and signalfd follow Linux (N-232, N-233).** Their NONBLOCK flag is the
+  open file's, so `fcntl` reports and changes it, and a blocking read, `poll` or `epoll_wait`
+  sleeps until the object is ready: an eventfd write or a signal wakes the waiters, and a timerfd
+  wait sleeps to the timer's next expiry. signalfd works: it read the mask pointer as the mask
+  and the size as the flags, and was never readable; it now returns the reader's pending signals
+  in its mask as `signalfd_siginfo` records, and signalfd4 on an existing signalfd changes its
+  mask. timerfd checks its clock, flags and times (EINVAL), `timerfd_settime` returns the old
+  setting, and CLOCK_BOOTTIME and TFD_TIMER_CANCEL_ON_SET are accepted. The original `eventfd`
+  and `signalfd` calls are added; the native-only eventfd read and write calls are removed.
+  Runtime tests `musl_event_fds` and `musl_signalfd`.
+
+- **Alternate signal stacks (N-222).** `sigaltstack` used to report success without doing
+  anything. It now keeps a per-thread alternate stack with Linux's rules: handlers installed with
+  `SA_ONSTACK` run on it, it reports `SS_ONSTACK` while in use and refuses changes then (EPERM),
+  `SS_AUTODISARM` disarms it for the duration of a handler, and `rt_sigreturn` restores it. New
+  threads start without one, fork children keep it, exec clears it. The native libc gains
+  `stack_t` and `sigaltstack()`.
+
+- **Shared mappings of memfds (N-230).** A memfd's pages are now physical frames the file owns,
+  and `mmap(MAP_SHARED)` maps those frames themselves, so every mapping, `read` and `write` see
+  one copy (and a child keeps sharing it after fork) -- how a Wayland client and its compositor
+  share a buffer; it was a private copy. F_SEAL_WRITE is EBUSY while the memfd is mapped, and a
+  write-sealed memfd cannot be mapped writable. `mmap` also checks file mappings as Linux does:
+  EBADF for a closed fd (it silently became anonymous memory), EINVAL for an unaligned offset,
+  EACCES for the wrong access mode, ENODEV for a directory or stream. MAP_SHARED of other files
+  is still a copy until the v0.29 page cache. Runtime test `memfd_shared_mappings`.
+- **fork- and vfork-style clone, and vfork (N-210).** Only thread-creating `clone` existed, so
+  musl's and glibc's `posix_spawn` -- and with it `system` and `popen` -- failed with EINVAL, and
+  `vfork` was missing (the native libc's was a `fork`). `clone` without CLONE_THREAD now makes a
+  process: with CLONE_VM the child maps the parent's own pages writable (the parent's
+  copy-on-write pages made its own first), with CLONE_VFORK the parent waits until the child execs
+  or exits; the exit signal (clone's low byte), a new stack, TLS and the parent/child TID flags
+  are honoured. `vfork` (58) is a system call, and the native libc implements it in assembly.
+  Sharing is per page as at the clone; CLONE_FILES and CLONE_SIGHAND across processes are refused.
+  Runtime tests `vfork_and_process_clone`, `musl_posix_spawn`, `musl_posix_spawn_reports_enoent`,
+  `musl_system`.
+- **Signals 32 to 64, queued (N-209).** Only signals 1-31 existed: `sigaction`, `kill`, `tkill` and
+  `tgkill` refused the rest with EINVAL, though musl's `pthread_cancel` sends signal 33. All 64 now
+  work, and real-time signals (32-64) queue as POSIX requires: each send is delivered once, where
+  a standard signal sent twice before delivery is delivered once; a queue holds 1024 instances
+  (EAGAIN beyond). Pending signals now survive exec, as POSIX requires, except ignored ones. The
+  native libc defines `_NSIG` 65 and `SIGRTMIN`/`SIGRTMAX`. Runtime test `realtime_signals_queue`;
+  host tests for queuing, the bound and exec.
+- **memfd_create and file seals (N-229).** `memfd_create` returned an eventfd registry id that was
+  never installed as an fd, so every caller (Wayland clients, Qt) got a number that named nothing.
+  It now creates a read-write fd on an anonymous file that can be sized, read, written and mapped,
+  with Linux's flags (MFD_CLOEXEC, MFD_ALLOW_SEALING, MFD_NOEXEC_SEAL, MFD_EXEC) and sealing through
+  `fcntl(F_ADD_SEALS/F_GET_SEALS)`: shrink, grow, write, future-write, exec and seal seals are
+  enforced (EPERM). The native libc declares it in `<sys/mman.h>`. A `MAP_SHARED` mapping of it is
+  still a private copy (N-230). Runtime test `memfd_create_file_and_seals`; host tests for the
+  seals.
+- **Credentials (N-248).** Processes have real, effective and saved user and group IDs and up
+  to 64 supplementary groups, changed by Linux's rules: `setresuid`/`setresgid`,
+  `setreuid`/`setregid`, `setuid`/`setgid`, `getresuid`/`getresgid`, `getgroups`/`setgroups`.
+  File access, path search, exec, `kill` and `ptrace` use the effective IDs and every group of
+  the process. In the native libc, `seteuid`, `setegid` and `initgroups` used to report success
+  without changing anything; `getgrouplist` now reads `/etc/group`.
+- **chroot, fchdir and utimensat (N-249, N-250).** `chroot` gives a process a root directory that
+  the path resolver never leaves, through `..`, absolute paths or absolute symlinks. `fchdir`
+  changes to an open directory. `utimensat` (and `futimens`, `utimes`) set access and
+  modification times on ramfs, tmpfs and BlockFS. All three were stubs in the native libc.
+- **util-linux libblkid and libmount (2.42.4)** are built into the KDE sysroot. KF6 6.30's
+  KCoreAddons requires libmount, and KIO and Solid now build their mount-point and fstab support
+  instead of having it patched out.
+- **Waits sleep (blocking step of sprint D).** A new dispatcher primitive, `wait_event`, puts a
+  task to sleep on a wait queue until its condition holds, a deadline passes (a sleeper list the
+  timer tick wakes) or a signal arrives. On it:
+  - `nanosleep` and `clock_nanosleep` (now with TIMER_ABSTIME), `sigsuspend` and timerfd reads
+    sleep until their deadline or a signal; an interrupted `nanosleep` reports the time left;
+  - futex waits sleep on keyed queues and are woken directly. FUTEX_REQUEUE moves the waiters it
+    should (the requeue count was passed as 0) and FUTEX_CMP_REQUEUE exists. A futex in
+    MAP_SHARED memory is keyed by its physical address, so processes sharing it meet (N-114).
+    Linux timeouts are timespecs, relative for FUTEX_WAIT and absolute for WAIT_BITSET, and
+    expire with ETIMEDOUT (N-104);
+  - pipe and eventfd reads and writes sleep until the other end acts, and `poll`/`epoll_wait`
+    sleep between scans with no 30 s cap on an infinite wait.
+
+  These all used to poll: re-check, yield or halt, re-check. musl runtime tests
+  `musl_sleeps_block_and_wake`, `musl_futex_queues` and `musl_blocking_io_wakes`.
+- **Job control (sprint D3, N-99).** SIGSTOP, SIGTSTP, SIGTTIN and SIGTTOU with the default action
+  stop every thread of the process (each parks on its way back to user mode; a system call the
+  stop interrupted runs again afterwards), and SIGCONT continues it whatever its action. A stop
+  signal discards a pending SIGCONT and the reverse; SIGKILL ends a stopped process. The parent
+  gets SIGCHLD (unless it set SA_NOCLDSTOP) and `wait` reports each stop (WUNTRACED) and continue
+  (WCONTINUED) once. `wait` and `waitid` can now wait for a process group (`pid` 0 or below -1,
+  `P_PGID`), `waitid` without WEXITED skips exits, and its siginfo carries CLD_STOPPED and
+  CLD_CONTINUED. These signals used to be dropped. Runtime test `stop_continue_and_group_wait`.
+- **Multiprocessor bring-up (stage S1, `smp` feature; ADR 0004).** Built with
+  `FEATURES=smp`, the kernel starts the other CPUs on every architecture:
+  - x86_64 uses INIT-SIPI-SIPI and a real-to-long-mode trampoline, and gives each CPU its own
+    GDT and TSS;
+  - AArch64 uses PSCI `CPU_ON` over HVC or SMC;
+  - RISC-V uses SBI HSM `hart_start`.
+
+  Secondary CPUs come online and idle; they run no tasks yet. QEMU `-smp 4` brings 4/4 online
+  on all three architectures. CI boots each architecture both with and without the feature.
+- **Per-CPU blocks on every architecture:**
+  - only CPU 0 advances the global clock;
+  - the x86 Local APIC is used without a lock;
+  - the x86 syscall frame pointer is per CPU (N-35);
+  - RISC-V works when OpenSBI boots on a hart other than 0.
+- **TLB shootdown (MEM-SEC-02, MEM-ARCH-03).** Unmapping invalidates the translation on every
+  online CPU and waits for all of them before the frames are reused: x86 by IPI with
+  acknowledgement, RISC-V through SBI RFENCE, AArch64 with broadcast TLB maintenance.
+  Address-space teardown used to free frames before flushing.
+- **Task dispatcher, stage D1 (ADR 0006).** On x86_64 the boot flow becomes CPU 0's first
+  task, with an idle task beside it, and kernel threads run on their own guarded kernel
+  stacks. The run queue is the ADR 0007 policy (EEVDF, real-time and deadline classes).
+  - **Switching.** `schedule()` holds no lock across a switch. The outgoing task stays marked
+    `on_cpu` until the incoming one has finished switching.
+  - **Waiting.** Wait queues use a prepare-to-wait protocol, so a wake between the condition
+    check and the switch is not lost.
+  - **Exit.** An exited thread is reaped, and its stack freed, after it has left the CPU.
+  - **Tests.** Two boot tests (41 in total) check interleaving through `yield_now`, wait-queue
+    wakeups, the idle task, and reaping.
+
+  User programs still run nested in the boot task until stage D2.
+- **User threads run as tasks, stage D2 (ADR 0006).** Every user thread on x86_64 is a
+  dispatcher task with its own kernel stack, address space root, TLS base and XSAVE area (user
+  vector state is switched eagerly, N-41). Programs, forked children and `clone` threads now run
+  alongside each other instead of nested inside whatever started them:
+  - **Launching.** The kernel shell and the boot launcher start a program and wait for it.
+  - **Exit.** `exit` ends the process and `pthread_exit` only its thread (N-106). The last thread
+    out tears the process down; its page tables are freed once it has left the CPU (N-108).
+  - **Wait and kill.** `wait` blocks on a process-event queue (N-107). A fatal signal sent to a
+    dispatched process is acted on by its own threads at their next return to user mode.
+  - **Waits and faults.** Waits inside system calls let other tasks run. User faults leave
+    through the normal exit path.
+  - **Tests.** The runtime suites now run entirely on the dispatcher, and a new musl test
+    checks concurrent pthreads with a mutex, `pthread_join` and `pthread_exit`.
+- **Signal handlers (sprint D3; N-96, N-98, N-109, N-113).** Dispatched threads on x86_64 take
+  signals as Linux does:
+  - **Sets and state.** Sets use the Linux layout (bit `sig - 1`) in the kernel and the native
+    C library alike. Each thread has its own mask and pending set.
+  - **Generation.** An ignored signal is dropped when sent, so a default-ignored SIGCHLD no
+    longer interrupts waits. Other signals pend and wake their target.
+  - **Delivery.** On the way back to user mode, the default actions run, or a handler gets a
+    Linux `rt_sigframe` (restorer return address, `ucontext` with the interrupted registers and
+    mask, `siginfo`, FXSAVE image) with `sa_mask` and the signal blocked. SA_RESTART, SA_NODEFER
+    and SA_RESETHAND work, and a fault reaches an installed SIGSEGV/SIGFPE handler.
+  - **rt_sigreturn** restores registers (sanitised), mask and FPU state (MXCSR checked).
+  - **sigsuspend and sigpending** work.
+  - **Native libc.** The native C library installs a restorer (SA_RESTORER), and its
+    `sigpending` and `sigsuspend` are real system calls instead of stubs.
+  - **Tests.** Seven runtime tests (native and musl).
+- **User code is preempted (stage D3).** When the tick finds a task's slice used up (EEVDF, 3 ms
+  base slice), the task gives up the CPU on its way back to user mode, from an interrupt or a
+  system call. A program that computes without system calls no longer keeps the CPU from
+  everything else. Runtime test: a parent sleeps and kills a child spinning in user mode.
+- **Three new boot tests** (39 in total with the two added earlier in this cycle) check:
+  - per-CPU identity and ticks;
+  - that uptime follows the hardware clock;
+  - that a TLB shootdown is confirmed by every CPU.
+
+- **Copy-on-write fork (MEM-PERF-03, PROC-ARCH-01; ADR 0005).** Fork shares the parent's
+  pages instead of copying them. The first write by either side takes a private copy, and
+  shared frames are freed by their last owner. `/proc/meminfo` reports `CowShared`.
+  `mprotect` and the loader keep a shared frame read-only; granting write access makes it
+  copy-on-write rather than writable in both processes.
+
+- **RISC-V has a real kernel heap (MEM-SEC-03).** It uses the same linked-list allocator as
+  x86_64 instead of a bump allocator that never reused freed memory. AArch64 follows once its
+  MMU is enabled.
+
+- **2 MiB pages (MEM-ARCH-01).** `mmap(MAP_HUGETLB)` backs an anonymous mapping with 2 MiB pages.
+  The old huge-page path wrote the HUGE bit into an L1 entry, where it means PAT, used frames
+  that were not 2 MiB aligned, and leaked 511 of every 512 frames on unmap.
+
+### Changed
+
+- **RISC-V: the address layout fits Sv39 (ADR 0018, stage A of HR-09).** Most RISC-V boards
+  implement only Sv39, whose kernel and user halves are 256 GiB each; the layout was Sv48's. The
+  physical map moves to 0xFFFF_FFC0_0000_0000 (128 GiB; more RAM is not used), the kernel stacks
+  to 0xFFFF_FFE0_0000_0000, both beside the image under one top-level entry. What the kernel
+  places in user space is below 256 GiB on every hart, as Linux keeps hint-less mappings there:
+  the mmap area from 64 GiB, PIE programs at 0x2A_AAAA_A000 (Linux's Sv39 `ELF_ET_DYN_BASE`) and
+  the stacks. The user limit follows the paging mode, set at boot from satp, so a program on a
+  Sv48 hart can still map up to 128 TiB by asking, as on Linux. Stage B (the next entry) runs
+  the kernel in Sv39 where Sv48 is missing. The user layout is now defined once per architecture in
+  `mm::user_layout` (x86_64 and AArch64 unchanged), and the mmap area ends at the PIE base on
+  every architecture instead of running into the program.
+
+- **RISC-V runs on harts without Sv48 (ADR 0018 stage B, HR-08, HR-09).** Most boards (JH7110,
+  FU740, D1, TH1520, SG2042, K1) implement only Sv39, and the kernel stopped on them with "no
+  Sv48". boot.S now finds the mode as Linux's `set_satp_mode()` does, writing satp and reading
+  it back, Sv48 first, then Sv39, instead of trusting the first cpu node's `mmu-type` (wrong on
+  boards whose hart 0 is a monitor core). Under Sv39 the kernel root is the table that holds the
+  whole kernel half in both modes. The page-table walker takes its depth from the mode, starting
+  at the root's 1 GiB entries under Sv39, and refuses addresses the mode cannot translate, which
+  would have aliased another range; translation also handles 1 GiB pages now. Freeing an address
+  space's tables walks at the same depth, user-pointer translation uses the walker, and every
+  GiB of the kernel-stack region gets its table at boot, since under Sv39 each is a root entry
+  copied into a new address space. `/proc/cpuinfo` reports `mmu : sv39` or `sv48`, as on Linux.
+  The gate boots and runs the RISC-V runtime suites with `-cpu rv64,sv48=off` too.
+
+- **Page-table entries have an architecture format (HR-10).** The walker wrote x86_64 entries
+  on every architecture, which RISC-V cannot use: there a pointer to the next table carries only
+  V (U, A and D are reserved) and any entry with R, W or X is a leaf. `mm::pte` holds the x86_64
+  and RISC-V Sv39/Sv48 formats as pure functions with host tests, and the walker asks the
+  native one to write a leaf, a table pointer and the user path, and to recognise a large page.
+  x86_64 entries are bit-for-bit what they were. RISC-V paging itself is the next step.
+- **The AArch64 and RISC-V kernels are built soft-float (N-178).** They were built for the
+  hard-float `aarch64-unknown-none` and `riscv64gc-unknown-none-elf` targets, so the compiler
+  could use the FP/SIMD registers in kernel code (839 such instructions in the AArch64 kernel),
+  and AArch64 saved all 32 vector registers on every interrupt in a 720-byte frame. RISC-V saved
+  none, so FP code there would have corrupted state. They are now built for
+  `aarch64-unknown-none-softfloat` and `riscv64imac-unknown-none-elf`: no FP/SIMD instruction in
+  either kernel, a 192-byte AArch64 interrupt frame, and the FP registers left for user threads,
+  whose state is switched with the task (only the save and restore code names them). The build
+  output moves to `target/aarch64-unknown-none-softfloat/` and
+  `target/riscv64imac-unknown-none-elf/`; scripts, CI and docs follow.
+- **Pages are cleared and copied with string instructions (N-281).** Every fresh user page was
+  zeroed with `write_bytes`, whose `memset` comes from `compiler_builtins` built at the kernel's
+  own opt-level: in a dev kernel about 30 cycles a byte, so a 16-page anonymous mmap took
+  ~590 us, nearly all of it zeroing (it had been put down to page faults, but anonymous mappings
+  take none). `mm::page_ops::clear_page` and `copy_page` (`rep stosq`/`rep movsq` on x86_64, as
+  Linux's `clear_page`) now zero and copy every whole frame: mmap, brk, demand paging, page
+  tables, huge pages, fork and copy-on-write. A 16-page mmap takes 31 us in a dev kernel and
+  3 us in a release one (was 19 us). New `perf` benchmark `page_clear` (36 ns dev, 31 ns
+  release; 32,889 and 868 ns with `write_bytes`).
+
+- **The syscall rate limiter has a bucket per CPU (SYS-PERF-01).** Every system call on every CPU
+  updated the same two counters. Each CPU now has its own cache-aligned bucket holding its share
+  of the unchanged machine-wide budget. A single CPU's share, 3.1 million calls per second, is
+  still far above what one CPU issues.
+- **SMP is on by default.** The `smp` feature is now a default feature: the kernel starts every
+  CPU the machine has and, on x86_64, runs tasks on all of them (ADR 0012). A one-CPU machine runs
+  the same kernel. CI's 4-CPU boot jobs no longer build a separate kernel, CI runs the user-space
+  runtime suite on one CPU and again on four, and `scripts/dev/gate.sh --boot --rootfs` does the
+  same by default (`--no-smp` skips the 4-CPU round).
+
+- **TLB shootdowns go only to the CPUs running the address space (N-262).** A change to a user
+  address space used to interrupt every CPU. Each CPU now records the page-table root it loads,
+  and a flush of a user address space reaches only the CPUs on that root, plus any with no record
+  yet. Kernel-half changes still reach every CPU. This is safe because user mappings are not
+  global and PCIDs are not used: a CPU that switched away dropped those entries. Host test
+  `flush_targets_only_cpus_on_the_address_space`; runtime test `musl_tlb_remote_flush`.
+
+- **The x86_64 kernel heap is sized from RAM; small guests boot (N-278, HX-02).** The heap was a
+  1 GiB array in the kernel's BSS, so loading the kernel alone needed more than 1 GiB and a guest
+  with less memory could not boot. At boot the heap is now a run of physical frames used through
+  the physical-memory map: a third of usable RAM rounded down to a power of two, between 32 MiB
+  and 1 GiB. That is 512 MiB at `-m 2048M` (the runtime suite passes with it) and the old 1 GiB
+  from 4 GiB; a 256 MiB guest boots with all boot tests passing. The heap is set up after the
+  boot page-table frames are reserved, so it can never be given one of them. AArch64 and RISC-V
+  keep their 8 MiB static heap until sprint E. (An unmerged attempt by another agent had shrunk
+  the static array to 32 MiB, which broke the root filesystem and native compilation.)
+- **BlockFS writes file data back before sync, and reads without holding the cache (BM-FS-01,
+  N-118, ADR 0011).** Dirty blocks used to stay in memory until `sync`, so a large write grew the
+  block cache by its whole size. Now, after any operation that leaves more than 16 MiB (1 MiB on
+  AArch64/RISC-V) of dirty file data, that data is written back and becomes evictable. This stays
+  crash-safe without a journal: a block freed since the last sync is not reused until a sync has
+  written a bitmap without it, and directory and indirect-pointer blocks still wait for sync, so a
+  crash between syncs mounts as the last-synced filesystem. A cache miss no longer holds the cache
+  lock and the disk across the read; other readers keep hitting, and readers of the same block wait
+  on a queue. Cache hits no longer take the disk lock at all.
+- **mkfs-blockfs keeps modes, owners and symlinks.** Images gave every file 0755 or 0644 and
+  every directory 0755, dropping set-ID and sticky bits, and copied each symlink's target in its
+  place (every BusyBox applet link was a full copy of BusyBox). Files and directories now keep
+  their permission bits within 0755 (so private files stay private, and a builder's
+  group-writable umask or set-ID file never becomes a writable or set-ID file owned by root),
+  symlinks are stored as BlockFS symlinks, `--attrs FILE` sets owners and any other mode by
+  image path (a path missing from the image is an error), and the inode table is sized for the
+  tree being imaged.
+- **Linux system call numbers are the only user ABI (X1, ADR 0009).** A call Linux has uses
+  Linux's x86_64 number and name (`write` is 1); a VeridianOS-only call (IPC, capabilities,
+  packages, framebuffer, Wayland, audio) has a private number from 1024. `abi/syscalls.map` is
+  the single source: `tools/compat/gen_syscalls.py` generates the kernel's `Syscall` enum, the C
+  header `<veridian/sysno.h>`, the Rust constants for rust-std and vsh, and
+  `docs/compat/SYSCALL-NUMBERS.md`, and CI fails when any of them is stale. Each call has one
+  name (`Syscall::RtSigaction`, `SYS_rt_sigaction`). The dispatcher decodes the number and
+  nothing else: the per-process Linux-ABI flag, its translation table, and the guessing of a
+  call from its argument values are gone. musl is built stock. The native libc, rust-std, vsh,
+  the dynamic loader, the test programs and the kernel's embedded programs and signal
+  trampolines all take their numbers from the generated files; several had private copies, some
+  already wrong. **Programs built before this change must be rebuilt** (rootfs and KDE stack).
+  Coverage: 133 Linux calls implemented (118 before, as calls reachable only through the musl
+  remap now count).
+- **Every handler behind a Linux number was reviewed against Linux.** About 80 differences are
+  recorded as N-182 to N-251 in `docs/audit/ABI-REVIEW-2026-10-07.md`; those fixed here are listed
+  under Security and Fixed, the rest are scheduled.
+- **Builds treat warnings as errors.** The native libc is built with `-Wall -Wextra -Werror`,
+  the rootfs programs and test suites with `-Wall -Wextra`, and the cross-compiler wrapper and
+  BusyBox config no longer suppress `-Wunused-parameter`, `-Wimplicit-function-declaration` or
+  `-Wreturn-type`. Doing so exposed ten functions the native libc defined but never declared
+  (see Fixed).
+- **Toolchain and cross-built stack moved to the latest stable releases (2026-10-07).**
+  - Cross and native GCC 16.2.0 with binutils 2.47, MPFR 4.2.2 and MPC 1.4.1 (were 14.2.0,
+    2.43, 4.2.1 and 1.3.1). The VeridianOS target patches were regenerated against the new
+    sources and apply without fuzz; the binutils one was ported by hand, since 2.47
+    restructured `config.sub` and moved the `config.bfd` anchors. Ports and the in-kernel
+    native-compile test follow.
+  - musl 1.2.6 (was 1.2.5); its syscall-remap patch applies unchanged, and `build-musl.sh`
+    now verifies the tarball checksum.
+  - BusyBox stays at 1.36.1, the latest release busybox.net calls stable.
+  - The KDE stack scripts pin Qt 6.12.0, KDE Frameworks 6.30.0, Plasma, KWin and KDecoration
+    6.7.5, Mesa 26.2.4, Wayland 1.26.0 and current releases of every library under them. D-Bus
+    1.16 is meson-only, so `build-dbus.sh` now uses meson. Qt 6.10+ builds WaylandClient in
+    qtbase, so the host Wayland scanner is built first. Removed Mesa and at-spi2-core options
+    were dropped or renamed. Plasma, KWin and the KF6 configs take their versions from one
+    variable each instead of literals. Full table:
+    `docs/book/src/phases/phase12-kde-crosscompile.md`.
+  - Verified: the toolchain, musl, native libc, BusyBox and runtime tests build on GCC 16.2,
+    and the rootfs suite and boot tests pass as before. Fixes this needed: the BusyBox
+    compiler wrapper and the self-host scripts read the GCC version instead of hardcoding
+    14.2.0; `curses.h` no longer typedefs `bool`, a C23 keyword (GCC 15+ default); `edit`
+    finds the in-tree `curses.h`; downloads use curl first, because `wget` here may be a
+    firejail wrapper that cannot write to `/opt`. The KDE stack has not been rebuilt yet.
+- **Cross-built artifacts moved out of `target/`.** `cargo clean` deletes `target/` whole, which
+  lost the musl/KDE sysroot and 36 GB of KDE build trees on 2026-10-07.
+  `tools/cross/veridian-paths.sh` now places them in `/opt/veridian/musl-sysroot`,
+  `/opt/veridian/cross-build` and a source cache `/opt/veridian/sources` (each overridable); the
+  CMake/meson cross files, `kernel/build.rs` and the rootfs script use the same default.
+  `build-all-kde.sh` archives the sysroot after every phase, and the toolchain once per GCC
+  version, to `~/Code/Backups/veridian-builds/` (`--no-snapshot` to skip).
+- The AArch64 kernel is linked at 0x40200000 (was 0x40080000), so QEMU has room to load the
+  device tree below it.
+- **CI gates releases on the tests (N-159, N-160).** Release artifacts and the CI summary now
+  require the host unit tests, the boot tests and the rootfs runtime suite; previously a release
+  was packaged even when they failed. The release profile is booted on all three architectures
+  (`PROFILE=release scripts/boot-test.sh`). Clippy runs on the three bare-metal targets as built,
+  and the 40-entry lint allow-list (which included `static_mut_refs`) is gone. The release
+  README no longer gives an x86_64 QEMU command that cannot work or the wrong licence.
+- **Documentation states what is in effect (N-145, N-146, N-163, N-165).** README, the
+  architecture overview, the book and the allocator design no longer claim user-space drivers,
+  lock-free allocation, sub-microsecond IPC, ML-KEM, or active KPTI/KASLR/SMEP/SMAP/retpoline.
+  `docs/KNOWN-LIMITATIONS.md` now covers every open finding of both audits and the real-hardware
+  research. The shell's `kpti` command reports KPTI inactive, since CR3 is never switched; it
+  used to report "Meltdown mitigation: enabled".
+
+### Security
+
+- **Creating or removing a directory entry checks the directory it acts on (N-51).** The write
+  and search permission check resolved the parent directory, and the operation then resolved the
+  path again. A symlink swapped in between let an unprivileged process create files in a
+  directory it may not write. Reproduced on four CPUs: 21 files landed in a root-owned 0755
+  directory. open with O_CREAT, mkdir, link, symlink, unlink, rename, linkat and symlinkat now
+  resolve the parent once, then check and operate on that node; mkdir passes its check to the VFS,
+  which runs it on the same node as the MAC check. rename takes its cross-mount and
+  into-own-subtree checks from the same resolution as the directories it moves between (found by
+  review). Runtime test `musl_dir_check_race`.
+- **IPC and capability authority (N-80, N-83, N-87, N-88, N-89).** Several of these were reported
+  fixed by another agent's unmerged session but never were.
+  - Only an endpoint capability now confers IPC rights, and only on its own endpoint. SEND is the
+    WRITE bit, which process and memory capabilities also carry, and such a capability used to pass
+    the send check and skip the endpoint match.
+  - `ipc_call` sends to the endpoint its capability names. It used to pass the token itself as the
+    endpoint number.
+  - A reply is accepted only for a caller with a call outstanding, only once, and only from a holder
+    of RECEIVE rights on the endpoint it called. Any process could "reply" to any blocked process.
+    The reply is stored in the call's own kernel slot, keyed by the calling thread, instead of
+    being sent to an endpoint numbered by the caller's pid (any endpoint could have that number);
+    a thread has one call at a time, and a call that ends without a reply (an error or a signal,
+    now EINTR) is no longer outstanding.
+  - Capability revocation (native call 1055) is dispatched and requires the caller to hold the
+    capability with REVOKE rights. It checked only that the token existed somewhere.
+  - The message-passing endpoint registry hands out shared references. The old `&'static` pointers
+    into a by-value map dangled whenever the map moved its entries.
+  - Resizing a mapped POSIX shared-memory object is refused instead of freeing frames still mapped,
+    and a resize keeps the contents.
+  - The revocation cache updates incrementally instead of copying the whole set.
+- **No built-in password; accounts on disk (N-131, N-153).** The kernel created `root` with the
+  password `veridian` at every boot, kept accounts only in memory, and the graphical display
+  manager accepted root with any password, so the KDE screen lock protected nothing. Accounts now
+  live in `/etc/passwd` and `/etc/shadow` (mode 0600), loaded at boot and rewritten atomically after
+  every change, with password history in `/etc/security/opasswd`. Hashes are SHA-512-crypt with
+  the round count stored, the form musl's crypt(3) reads, so BusyBox's `login` and `su` check the
+  same passwords as PAM; shadow's aging fields apply, failing closed while the date is unknown.
+  The kernel shell and the account store were two user databases; they are one, and the shell's
+  `passwd` (which reported success without changing anything) sets passwords, prompting without
+  echo, with `-l` and `-u` to lock and unlock. Nobody can log in with a password until one is
+  set: `passwd` on the console, or `VERIDIAN_ROOT_PASSWORD` when building the KDE root filesystem.
+  Saves are serialized, and none is made if the files were not fully read at boot (it would
+  replace them with the part that was). A second factor is asked for before an expired password
+  is reported, which PAM callers treat as authenticated. Runtime test `musl_accounts`.
+- **SO_PEERCRED (N-236).** Unix sockets report their peer's process and effective user and group
+  IDs, as Linux records them at socketpair, listen and connect. Programs that check who is on the
+  other end -- D-Bus's EXTERNAL authentication, kdesu's daemon socket -- had nothing to check.
+  Runtime test `musl_peercred`.
+- **KDE: KAuth had no backend, and kdesu checked its socket loosely.** polkit-qt-1 was built
+  after KAuth, so KAuth built no backend and Plasma's privileged helpers (fonts, date and time,
+  backlight) could not run; it is now built first, and a KAuth without its polkit backend is
+  rebuilt. KSu's configure check for `struct ucred` failed under musl (it needs `_GNU_SOURCE`),
+  so kdesu fell back to checking its daemon socket's owner by path; the check now passes and the
+  build fails if it does not. KDED, QCA and KWallet are built before KIO, which looks for them.
+- **Passwords are compared in constant time, and failed attempts lock for ten minutes.** The
+  account store compared password hashes with `==`, which stops at the first differing byte; it
+  now uses the constant-time comparison. Five failed attempts locked an account until reboot,
+  which a screen locker would turn into a lockout of the session's user; the lock now lasts 600
+  seconds (pam_faillock's default) and is separate from an administrator's lock. Changing a
+  password checks the old one the same way (it skipped the lockout and the failure count, so
+  it could be used to guess the password without limit).
+- **A malformed executable no longer panics the kernel.** The loader sliced each segment's file
+  range and added its addresses unchecked, so an ELF file whose PT_LOAD ran past the end of the
+  file, or whose sizes overflowed, crashed the kernel on exec. Such files now fail with ENOEXEC
+  (host tests in `elf::image`).
+- **epoll registrations are limited per user, and scans hold no lock while polling.** Moving
+  the epoll instance into its file dropped the old system-wide caps (256 instances of 1024
+  registrations), so one process could register millions of watches and exhaust kernel memory,
+  and every wait polled them all under the instance's lock. Each user may now hold 16,384
+  registrations (ENOSPC past it, as Linux's `max_user_watches`), charged per registration and
+  given back when it goes; a wait takes a snapshot of the registrations under the lock and looks
+  at their files with no lock held.
+- **Signal frames written by the AArch64 and RISC-V delivery respect copy-on-write (N-257).**
+  That code wrote frames through the physical map into whatever frame backed the user stack, so
+  a page shared after fork or held in a file's page cache would have changed for every process
+  sharing it. It was not reachable (x86_64 delivers signals through `write_user_bytes`, the other
+  architectures have no user mode yet); it now writes through `write_bytes_private`, which copies
+  a shared page first. `musl_page_cache` also checks that a read-only mapping of a cached page
+  made writable with `mprotect` copies the page.
+- **Fork no longer shares a slice of user memory between parent and child (N-256).** Every new
+  address space and every fork copied the L4 entry of a kernel heap that has not lived there since
+  bootloader 0.9 (`0x4400_0000_0000`, a 512 GiB slot of user space). A program that mapped memory
+  there and forked shared those page tables with its child, without copy-on-write, and the child's
+  page copies were written into the parent's tables. Nothing is copied into the user half of an
+  address space now. Boot test `user_half_starts_empty`, runtime test
+  `lower_half_fork_isolation`.
+- **Kernel writes for ptrace and clone stay in user memory (N-255).** ptrace POKETEXT/POKEDATA
+  wrote through whatever frame the tracee's page tables mapped, and kernel pages are mapped in
+  every address space, so a tracer could write kernel memory; it could also write device memory
+  and shared pages its tracee may not write, such as a write-sealed memfd. The address must now
+  be inside one of the tracee's user mappings: device memory is refused, and shared pages only
+  while the mapping is writable. clone's TID stores now honour page protection and, as on Linux,
+  are skipped rather than failing a clone whose child already exists. PEEKTEXT/PEEKDATA refuse
+  device memory and return EIO for an unmapped address. Found by the automated security review
+  of the N-252 change.
+- **A write seal holds against mprotect (N-254).** A read-only shared mapping of a write-sealed
+  memfd could be made writable with `mprotect`, writing past the seal. Such mappings now carry
+  Linux's "may never write" mark and `mprotect` refuses them (EACCES). Found by the automated
+  security review of the N-230 change.
+- **ptrace writes reach the tracee only (N-252).** POKETEXT/POKEDATA wrote into the physical
+  frame behind the tracee's page, which after a fork is shared with its parent and siblings, so a
+  breakpoint set in a child also changed its parent. A shared page is now copied first, as a
+  write fault would; MAP_SHARED memory stays shared. Found while implementing N-210.
+- **execve with an empty environment passes none (N-211).** A NULL or empty `envp` made the
+  kernel substitute the caller's environment, so `env -i` and programs that clear the environment
+  before running something passed every variable on. It is now empty, as on Linux.
+- **pread/pwrite, truncate/ftruncate and mkdir check access (N-190 to N-192).** `pwrite` worked
+  through a read-only fd and `pread` through a write-only one, `ftruncate` through any fd,
+  `truncate` and `mkdir` checked no permission at all, so any user could empty a file it could
+  not write or create directories anywhere. They now follow Linux: EBADF for the wrong access
+  mode, EINVAL from `ftruncate` unless the fd is a regular file open for writing, EACCES without
+  write permission on the file (`truncate`) or the parent (`mkdir`, after EEXIST as `mkdir -p`
+  expects), EINVAL for a negative offset or length, EISDIR for a directory. Pipes, sockets,
+  terminals and event fds are streams (`VfsNode::is_stream`): `pread`, `pwrite` and `lseek` on
+  them are ESPIPE, and a pipe reports `S_IFIFO` instead of a character device. Runtime tests
+  `pread_pwrite_ftruncate_checks`, `nonroot_truncate_mkdir_denied`.
+- **Kernel path lookups no longer use the calling process's root (N-251).** Every lookup used
+  the current thread's root, working directory and credentials, so kernel code running during a
+  system call -- the audit log, the package manager -- resolved paths inside a chrooted caller's
+  tree (a chrooted process could have the audit log written to a file it owns) and with its
+  permissions. `Vfs` methods now always use the kernel's view; system calls, exec and the program
+  loader use an explicit caller view (`Vfs::as_caller()`), which does not fall back to the kernel's,
+  so a missing operation fails to compile instead of escaping the chroot. `mount` and `umount`
+  resolve their target in the caller's view and require a directory. Found by the automated
+  security review; tests `kernel_lookups_ignore_the_callers_root`,
+  `caller_mounts_are_placed_inside_its_root`.
+- **A directory fd can no longer act on a different directory.** `fchdir` and `*at` calls
+  checked the fd's directory but resolved the path it was opened by, so after that directory was
+  renamed and another created at its old name they acted on the newcomer. The recorded path must
+  now still name the same directory (ENOENT otherwise). Found by the automated security review;
+  runtime test `fchdir_never_enters_a_replacement`.
+- **The native libc inflater overflowed a stack array on crafted streams.** A dynamic Huffman
+  block may declare 288 length and 32 distance codes, though only 286 and 30 exist; the 320 code
+  lengths were written into a 316-entry array. A crafted zlib stream, or a PNG carrying one,
+  overwrote the stack. Such blocks are now rejected, as zlib does. The PNG decoder also refuses
+  headers the specification forbids. Both are tested under AddressSanitizer.
+- **access() checked only the "other" permission bits (N-193).** It now uses owner, group and
+  other bits with the real IDs (effective with AT_EACCESS), and root needs an execute bit to
+  execute.
+- **ptrace needs a tracer relationship (N-187).** Any process could read and write any other
+  process's memory with PTRACE_PEEK/POKE. Now TRACEME makes the parent the tracer, ATTACH
+  requires the same uid or root and refuses a traced or own process, DETACH ends it, and an
+  exiting tracer is detached; PEEK/POKE work only on a process the caller traces (ESRCH
+  otherwise), and PEEK stores the word at `*data` as Linux does.
+- **The fd table no longer grows to any number a caller names (N-185).** `dup2`, `dup3` and
+  `fcntl(F_DUPFD)` allocated up to the target fd, so one call could exhaust kernel memory. Targets
+  at or past 1024 (`MAX_FDS`) are EBADF or EINVAL, and RLIMIT_NOFILE reports 1024 (it said 256).
+- **The native libc PNG decoder overran the caller's rows.** `png_read_image` guessed the row
+  length by searching for a divisor of the data size and wrote past the row buffers (a heap
+  overflow on most images), and always unfiltered with one byte per pixel. It now decodes from
+  the image header: every colour type and bit depth, Adam7 interlacing, exact inflated size.
+  `png_read_row` and `png_read_rows` work (they did nothing).
+- **Security review of stage D2.** Three defects, each fixed with a regression test:
+  - `clone(CLONE_SETTLS)` accepted any TLS base, which was loaded into IA32_FS_BASE at every
+    switch, so a non-canonical value faulted (#GP) in ring 0. It is now rejected (EINVAL), and
+    the switch never loads a non-user value.
+  - exec in a multithreaded process freed page tables its other threads still ran on. It is
+    refused (EAGAIN) until those threads are stopped first (N-101).
+  - A process blocked in a sleep, `poll` or another in-kernel wait could not be killed until
+    the wait ended. Every dispatched wait now ends with EINTR when a fatal signal is pending,
+    and the signal is acted on at the system-call exit. (The first version of this fix exited
+    from inside the wait and leaked whatever the system call held; found by a second review.)
+- **Blocking pipe reads and writes wait (N-119, part).** A dispatched reader of an empty pipe
+  waits for data or end of file, and a writer to a full pipe waits for room; both used to get
+  EAGAIN. That broke `$(sort f | head -n 1)` once the two ran at the same time. O_NONBLOCK
+  still gets EAGAIN. Runtime test `pipe_read_blocks_for_writer`.
+
+- **x86_64 kernel entry rebuilt (N-166, N-169, N-170, N-171, N-175; ADR 0008).**
+  - **One frame and dispatcher.** Every exception and interrupt enters through an assembly stub
+    and one Rust dispatcher, and the system call builds the same register frame.
+  - **GS base.** The GS base is swapped exactly once on each ring-3 entry and exit, with an
+    `lfence` against the SWAPGS speculation issue. Until now it depended on how a context was
+    entered.
+  - **Stacks.** IST stacks are used only for #DF, NMI and #MC. Page faults and interrupts no
+    longer share four unguarded 20 KiB stacks, where a nested fault overwrote the live frame.
+  - **Return to user.** `sysretq` is used only for a canonical user return address, with an
+    `iretq` fallback. Every return to user mode sanitises RFLAGS, RIP and RSP, so sigreturn can
+    no longer raise IOPL and grant a process port I/O.
+  - **Exceptions.** User exceptions kill the process with the signal Linux sends (SIGILL,
+    SIGFPE, SIGTRAP, SIGBUS or SIGSEGV), where several previously halted the CPU. NMI, #MC,
+    #DB, #NM, #MF and #XM now have handlers. Machine checks are delivered as #MC instead of
+    shutting the CPU down.
+  - **Tests.** Runtime tests check each trap.
+- **Syscall arguments are no longer printed to the console.** The first 500 system calls and
+  their results, nested-child registers and thread stack addresses were written to the serial
+  port in every build; they now need the `trace` feature.
+- **`kill` signals real processes (N-92).** It used to update a separate bookkeeping table and
+  never reach the target, with no permission check: `kill -9` could not stop a program, and
+  any user could "signal" any process. It now applies the signal, requires root or a matching
+  uid (EPERM), reports ESRCH and ECHILD, handles process groups and `kill(-1)` over the whole
+  process table, and a process that kills itself exits through the normal path.
+- **`open` honours O_EXCL, O_TRUNC, O_NOFOLLOW and O_DIRECTORY (N-116).** `O_CREAT|O_EXCL`
+  opened an existing file (breaking `mkstemp` and lock files in `/tmp`), `openat` never
+  truncated (and musl sends every `open` through it), and a final symlink was followed even
+  with O_NOFOLLOW. Opening a directory for writing is EISDIR; a lost create race is EEXIST or a
+  plain open, never ENOENT.
+- **File offsets cannot exhaust kernel memory (N-122).** A write at a huge offset made ramfs
+  or tmpfs allocate the whole range and abort the kernel; RAM-backed files are limited to
+  1 GiB (EFBIG), growth fails with ENOSPC instead of aborting, tmpfs charges space
+  atomically, and `lseek` rejects negative absolute offsets.
+- **Forked children keep their parent's credentials (N-93).** A process that dropped to an
+  unprivileged user forked children running as root, in `/`, with default umask, signal
+  handlers and mask. They now inherit uid, gid, working directory, umask, handlers and mask.
+- **exec drops capabilities not marked for exec (N-94).** The filtered capability space was
+  built and then discarded, so every capability survived exec; it is now installed once the
+  new image is in place.
+- **`arch_prctl(ARCH_SET_FS)` refuses non-user addresses (N-100)**, which faulted the kernel.
+- **`prctl` fails closed (N-151).** It reported success for every option, so
+  `PR_SET_NO_NEW_PRIVS` and `PR_SET_SECCOMP` appeared to take effect; only the name and
+  timer-slack options are accepted now.
+- **A malformed package header no longer halts the kernel (N-147)** before its signature is
+  checked.
+- **Memory protections are enforced (N-132 to N-137).** `mmap` and `brk` used to ignore
+  `prot`: anonymous, shared and heap memory was writable and executable, and `PROT_NONE` gave
+  full access. Page flags now follow `prot` (no-execute unless `PROT_EXEC`), `mprotect` can
+  revoke access, checks that the whole range is mapped, and cannot give borrowed device or
+  shared-region mappings rights they were not granted. A huge `mmap` or `brk` length used to
+  halt the kernel; it now fails with ENOMEM, the mmap cursor cannot leave user space, and no
+  user mapping can be created in the kernel half. The physical memory map moved from a
+  lower-half slot inside the user address range to the base of the kernel half. Stack growth
+  has a fixed limit and a 1 MiB guard gap, and `brk` can no longer run into another mapping.
+- **x86_64 kernel stacks have guard pages (N-26).** Each thread's kernel stack is mapped into
+  its own slot of a dedicated region with unmapped pages below it, so an overflow faults
+  instead of silently overwriting the neighbouring frame in the physical map. Freeing a stack
+  unmaps it on every CPU before its frames are reused. AArch64 and RISC-V follow when they
+  run the kernel with paging (sprint E).
+- **Forked children no longer run with executable data pages (N-62).** Reading a page-table
+  entry dropped its no-execute bit, so fork mapped the child's data, heap and stack executable.
+- **Package signatures use real FIPS 204 ML-DSA-65 verification (N-55).** The previous
+  "Dilithium" verifier never used the public key and accepted any non-zero signature. It is
+  replaced by the RustCrypto `ml-dsa` crate, pinned to NIST ACVP vectors. No post-quantum
+  trusted key is provisioned yet, so a policy that requires the PQ signature fails closed.
+  Ed25519, which the default policy uses, is unaffected.
+- **Every syscall copies user memory fault-tolerantly (N-43).** An unmapped page inside a
+  user buffer now gives EFAULT instead of a kernel fault. Bulk transfers go through bounded
+  bounce buffers, and messages and datagrams are capped at 1 MiB.
+
+### Removed
+
+- **The reduced AArch64 secondary-CPU stage (N-28 fixed).** AArch64 secondaries parked with
+  interrupts masked, taking no lock and no timer, because exclusives were unreliable with the MMU
+  off. They now enable their own timer PPI (banked per CPU in GICv2), tick, and idle with
+  interrupts on. At this stage they ran no tasks; the dispatcher reached AArch64 later in v0.27
+  (sprint E, see Added). Boot test
+  `smp_cpus_online_and_ticking` requires ticks on every secondary on AArch64 too (it failed
+  before): 40/40 on four CPUs.
+
+- **The AArch64 bump allocator (MEM-SEC-03, N-28 part).** AArch64 used a heap that never reused
+  freed memory, because the linked-list allocator's lock needs exclusives, which hung with the MMU
+  off. With the MMU on it uses the same interrupt-safe `LockedHeap` as x86_64 and RISC-V, and
+  `simple_alloc_unsafe.rs` is deleted. Boot test `heap_reuses_freed_memory` now runs on AArch64
+  (it failed with the bump allocator): 38/38, 40/40 on four CPUs.
+
+- **`fs::bare_lock` (N-28 part).** The AArch64 filesystems (ramfs, tmpfs, devfs, blockfs, ext4,
+  FAT32, pty, inotify, flock, xattr, file) locked with an `UnsafeCell` wrapper that did not lock,
+  because exclusive loads and stores hung with the MMU off. With the MMU on (ADR 0015) they use
+  `spin::RwLock` like the other architectures, and the AArch64 timer counts ticks with `fetch_add`.
+  New boot test `exclusives_and_locks_work` (atomic read-modify-write; a writer refused while a
+  reader holds the lock): AArch64 37/37, 39/39 on four CPUs.
+
+- **The old scheduler (sprint D4).** The scheduler that predates the dispatcher (a global ready
+  queue, a `Task` control block of its own, per-CPU and NUMA queues, an EDF module, pid-keyed IPC
+  blocking, process "adapters" and a separate context switch on all three architectures) never ran
+  once the dispatcher started; it is deleted (about 7,800 lines with its 64 unit tests), together
+  with the unused `process::sync` (`KernelMutex`, `KernelSemaphore`, `PiMutex`) and
+  `process::wait`. The scheduler is the dispatcher with its ADR 0007 policy classes. The shell's and
+  desktop panel's scheduler counters now count the dispatcher's switches (they stayed at zero), the
+  GDB stub lists dispatched threads, and `kernel/tests/scheduler_tests.rs` (old-scheduler tests that
+  no longer compiled) is gone. Real priority inheritance is open (SCHED-INC-01).
+- **The nested boot execution model (sprint D4).** Before the dispatcher, programs ran nested inside
+  the boot flow: `enter_usermode_returnable` saved the kernel's context, the program's exit jumped
+  back to it, a forked child was run inline from its parent's wait loop or pipe read, and a futex
+  wait ran sibling threads from their saved registers. Every user thread has been a dispatcher task
+  since stage D2, so all of that is deleted (about 1,100 lines), together with the futex table it
+  used (N-279: a waiter and a waker on different tables would have missed each other; N-54) and
+  the unused x86_64 `try_enter_usermode`. The dispatcher failing to start now stops the boot, and
+  `current_process` is the current dispatcher task's process, nothing else.
+- **The musl syscall remap patch,** the kernel's Linux translation table and per-process ABI flag,
+  and fifteen duplicate system calls that served an existing handler under a second number
+  (ADR 0009).
+- The unused slab allocator and `mm/vmm.rs` (MEM-INC-02).
+- The never-consulted global demand-paging and CoW tables, and the dead fork and fault paths
+  that used them (MEM-ARCH-02, N-07).
+- The unused in-kernel `stdlib` module (1,018 lines with no callers).
+
+### Fixed
+
+- **AArch64 counted all of a program's CPU time as system time.** An interrupt from EL0 reached
+  the timer through the same handler as one from the kernel, which recorded every tick as kernel
+  time, so `getrusage`, `times` and SIGCHLD accounting showed no user time. The EL0 path now
+  says so, as RISC-V's does. `musl_clocks_and_usage` checks that a child computing 40 ms in user
+  mode shows at least half of it as user time (it showed 0).
+- **exec kept the old image's thread pointer and signal trampoline.** A new image without
+  PT_TLS (or a dynamic one) started with the previous image's thread pointer, and the cached
+  trampoline address pointed into the old image, where the next first signal probed whatever
+  the new image had mapped there. exec clears both, and two threads taking a first signal at
+  once no longer map two trampoline pages.
+- **A failure after a committed exec returned into the old, unmapped image.** On AArch64 and
+  RISC-V the process now dies of SIGSEGV, as `exec_process`'s own late failures and Linux's
+  `force_sigsegv` do.
+- **A program that failed to start stayed in the process table** with its address space and
+  stacks (`run_and_wait_all`); it is discarded as the shell's launch path did.
+- **Two calls to `load_live_user_registers`** were gated "not x86_64" while the function exists
+  only on bare-metal AArch64 and RISC-V, so a host build on an Arm machine failed.
+- **A write to a page another CPU had just made writable could kill the program.** The fault
+  handler found the page writable and no longer copy-on-write, treated the fault as real and sent
+  SIGSEGV (`musl_cow_concurrent_readers` on four CPUs). A fault on a page that now allows the
+  access flushes the stale translation and retries, whatever the fault's reason. Every
+  architecture now reports whether the access was an instruction fetch, so the retry checks
+  execute permission (RISC-V reported every fetch fault as no-execute, and AArch64 classed a
+  fetch from a no-execute page as a plain protection fault, which would have retried forever).
+- **Busy user programs showed only system time on several CPUs under load.** A tick that could
+  not get its CPU's lock at once dropped its sample, and the CPUs' ticks collide with each
+  other's balancing; the ticks deferred to a system call got through and counted as system time.
+  The sample now goes to the running task without the lock, and the tick retries the lock
+  briefly before skipping its slice check.
+- **Executable mappings synced only `length` bytes for instruction fetch**, not the rest of the
+  last page; mprotect likewise. MAP_SHARED mappings of a memfd were not synced at all.
+- **AArch64 invalidated only the boot page tables after zeroing BSS with the caches off;** it
+  now invalidates all of BSS and the boot stack, and the saved MMU registers the secondaries
+  read.
+- **The console's stuck-owner timeout let every waiting CPU print at once**, each again after the
+  full wait on every message. A waiter now takes ownership from a CPU that held the console for
+  the whole wait.
+- **The RISC-V FP save area held its registers as `f64` values** in a kernel that must never
+  handle floating point (N-178); it holds their bits.
+- **build.rs enabled the task switch for any AArch64 or RISC-V target**, host builds included; it
+  now requires a bare-metal target. `check-asm-flags.py` no longer treats RISC-V assembly as
+  x86_64 or AArch64 code, and `boot-test.sh` no longer looks for `veridian-kernel.img.img` when
+  `AARCH64_IMAGE` and `AARCH64_LOAD_ADDR` are both set.
+- **`audit_runtime_test` killed every process** (`kill(-1)`) when a fork failed in its exec
+  round, and on a pipe failure ran the round reading the console; it skips the round instead.
+- **Findings of the review of all kernel code since v0.26.0 (PRs #20 to #25)**, each checked
+  against the current tree first (the declined ones are answered on the PRs with evidence):
+  - *Denial of service:* FUTEX_CMP_REQUEUE between two keys of one hash bucket looped forever
+    with the bucket locked; an expired, unread timerfd made poll, select and epoll spin in the
+    kernel; `mmap` of a huge length of a file allocated that length in the kernel heap before any
+    limit (now only the file's part, with `try_reserve`, after the RLIMIT_AS check), and the
+    page-cache path a page list as long as the mapping; an ELF segment with a huge memory size
+    planned a page per page (images over 1 GiB are ENOMEM); a `#!` script naming itself recursed
+    until the kernel stack overflowed (ELOOP after 4 interpreters).
+  - *Memory and isolation:* after fork the copy-on-write flush named the child's page tables, so
+    CPUs running the parent's other threads kept writable translations of shared frames (and an
+    error part-way skipped the flush); the page cache took its reference on a frame after
+    releasing the lock, so an invalidation could free it first; stack growth checked the guard
+    gap and limits under one lock and mapped under another, and compared RLIMIT_STACK with the
+    fault address instead of whole pages; a copy-on-write retry that found a page without the
+    user bit retried forever instead of faulting.
+  - *exec and ptrace:* the other threads of a process were ended before the program was found,
+    so a failed exec killed them (now at the point of no return); malformed BTI property notes
+    killed the caller after the point of no return instead of ENOEXEC; a tracer could poke a
+    set-ID image while it was built and detach before the set-ID decision (exec records the
+    tracer at its start, PEEK and POKE refuse during an exec, detach takes the credential guard).
+  - *Processes and scheduling:* a zombie waited for before its last task was reaped leaked its
+    page tables; the last two threads of an exit_group could both tear the process down; kernel
+    stacks were freed while the threads lock was held; RLIMIT_NPROC was checked apart from the
+    creation it limits; a depleted SCHED_DEADLINE reservation got a new budget by blocking and
+    waking, and migration reset an overdue task's deadline; the idle loop counted throttled tasks
+    as runnable and never halted; user and system time could go backwards (Linux's
+    `cputime_adjust`); an RT thread could set any nice value for later; policy changes were
+    applied after the parameters were unlocked.
+  - *x86_64 and AArch64:* kernel threads started with a misaligned stack; the syscall return did
+    its lock-taking work with interrupts off (the N-139 deadlock); the INIT and SIPI IPIs wrote
+    the ICR halves with interrupts on; the kernel-image page tables replaced TTBR1 without
+    break-before-make; a secondary CPU without BTI came online while the boot CPU enforced it.
+  - *Futexes and signals:* a PI hand-off that could not reach the futex word dropped its waiter,
+    and taking a free PI lock cleared FUTEX_OWNER_DIED (robust mutexes lost EOWNERDEAD); a
+    timed-out waiter could miss its own entry after a requeue; sigaction read and installed an
+    action in two halves; queued real-time signals shared one RLIMIT_SIGPENDING charge, so after a
+    change of real user new signals were charged to the old one (each now keeps its own); the old, unreachable signal delivery and sigreturn code is removed.
+  - *Files, pipes and terminals:* the console's raw mode now follows MIN and TIME (it returned on
+    the first byte with both set), reads first what a canonical read gathered, consumes
+    atomically, keeps one VTIME timer per reader that ends with its read, and is readable only for
+    a complete line or MIN bytes (a reader spun on a partial line); a non-blocking write larger
+    than PIPE_BUF to a full pipe returns EAGAIN, not 0; reads and writes of regular files hold a
+    per-file lock across their chunks, and a fault part-way returns what was copied and moves the
+    position by that; a blocking writer waits for POLLHUP too; O_CREAT with O_DIRECTORY is EINVAL;
+    unlink and rmdir check the entry's type where they remove it; tmpfs charged no symlink bytes
+    but refunded them, and refunded a replaced file twice; a memfd grow that ran out of frames
+    kept them, and a shrink under a shared mapping is EBUSY; a PTY master learns its last slave
+    closed (EIO, POLLHUP), a slave whose master is gone reads EIO, and a closed master frees its
+    PTY (every openpty leaked one); openpty closes its descriptors when it cannot report them;
+    epoll round-robins short results, and an edge-triggered pipe re-fires only on its own changes;
+    nanosleep writes `rem` only when interrupted; `mremap` checks RLIMIT_AS before unmapping a
+    MREMAP_FIXED target, and an MREMAP_DONTUNMAP move that cannot map the old range again moves
+    its pages back; MADV_DONTNEED no longer leaks page-cache references on an error; stream
+    sends over 1 MiB send what fits; a write to a read-only filesystem is EROFS.
+  - *IPC and capabilities:* a late reply to an interrupted call answered the caller's next call
+    (calls are numbered, and an abandoned request is withdrawn); a capability was counted as held
+    after it became visible, copies after the source was unlocked, and a failed create leaked its
+    registry entry; collecting unheld delegations rescanned the whole derivation tree per child.
+  - *Accounts and security:* an unreadable or malformed MFA file let the password alone log in
+    (now a second factor nobody can give); any error resolving an account file read as "missing",
+    so a later save could overwrite it; a password change that could not be saved stayed active
+    until reboot; `useradd` could leave the two account stores disagreeing; the shell's password
+    prompt left copies in memory; the display manager started every session as user 0;
+    `SleepMutexGuard` was `Sync` for any `T: Send`.
+  - *Drivers and the rest:* ramfb took 3 MiB on every boot without the device, freed its DMA
+    frame on a timeout and wrote its doorbell without `io_wmb`; PCI configuration accesses at
+    unaligned or out-of-range offsets read or wrote the wrong bytes; BlockFS stored raw timer
+    ticks as ctime; the trace rings aliased a `&mut` (and the unused lock-free queue is removed,
+    closing N-59); the audit log's appends could overwrite each other and short ones counted as
+    persisted; a failed program load left its process in the table; the shell's `mv` fallback
+    wrote through a destination symlink and ignored short writes; the KDE D-Bus stub failed on
+    every boot after the first.
+
+- **Only root could open anything below /proc.** procfs reported its directories as r--r--r--,
+  so a path walk by any other user failed at /proc itself. Directories are r-xr-xr-x, files
+  r--r--r-- and the self/exe link rwxrwxrwx, as on Linux.
+
+- **mmap ignored its address hint.** Without MAP_FIXED, every mapping went to the kernel's
+  cursor, wherever the program asked. A hint is now used when the page-rounded range there is
+  user space and free, as Linux's `get_unmapped_area` does; it is checked under the lock the
+  mapping is made under. 2 MiB (MAP_HUGETLB) mappings keep their aligned placement. Found by the
+  RISC-V runtime tests, which learn the user limit from a hint near the 47-bit top.
+
+- **A thread touching a page another CPU was copying got SIGSEGV.** A write to a page a fork
+  shares replaces it with a copy, unmapping the shared page first; a second thread of the process
+  faulting on it meanwhile found the page already backed and was sent SIGSEGV. The same happened
+  when two threads first touched one page at once. A not-present fault on a page that now allows
+  the access is retried, as on Linux, after a local TLB flush. `musl_clone_tls_and_multithreaded_exec`
+  failed now and then on AArch64 with `-smp 4` for this reason; `musl_cow_concurrent_readers`
+  (three threads reading while the fourth writes 256 shared pages) failed 5 of 5 runs there and
+  passes 10 of 10.
+- **open with O_CREAT skipped the MAC check on the file it created**, which mkdir and mknod make
+  (found in the security review of mknod). The creation now goes through the same single
+  resolution of the parent for the MAC check, the directory permission check and the create, and
+  a MAC denial is EACCES. O_CREAT also follows Linux for directories: a name ending in `/` is
+  EISDIR and creates nothing (it was EINVAL), and so is an existing directory, even opened
+  read-only (it opened). `musl_open_creat_dir` covers this.
+- **BlockFS read the type of a block device or socket inode as a directory.** The type bits
+  were tested as single bits (`mode & 0x4000`), so S_IFBLK (0x6000) and S_IFSOCK (0xC000) looked
+  like directories, and FIFOs and character devices like regular files. Each type is now one
+  value of `mode & 0xF000`, and directory entries carry ext2's types for special files.
+- **A boot-test result line could be split by another CPU's message.** The `Results:` line and each
+  test's line are printed in several pieces, and on 4 CPUs `[INIT] Results: 62/[PROCESS] Dropping
+  process 29` made the boot test unparseable (all tests had passed). AArch64 and RISC-V now hold
+  the console lock across each line (`print::with_console`, reentrant).
+
+- **The loader ran other architectures' programs.** The ELF check accepted x86_64, AArch64 and
+  RISC-V programs on every architecture, so an x86_64 `/sbin/init` on an AArch64 root was started
+  and died with SIGBUS. `elf::image::plan` now refuses any machine but the kernel's own (ENOEXEC,
+  as Linux's `elf_check_arch`), with a host test.
+
+- **AArch64 user programs could not read CTR_EL0 or do their own cache maintenance.** SCTLR_EL1
+  left UCT, UCI and DZE clear, so `mrs ctr_el0`, `dc cvau`/`ic ivau` (`__clear_cache`, JITs) and
+  `dc zva` (memset) at EL0 were undefined instructions and killed the program with SIGILL. They are
+  allowed now, as on Linux. Boot test `aarch64_el0_cache_maintenance` (status 132 before, 0 after).
+  AArch64 56/56.
+
+- **exec marked a process as exec'd only after closing its close-on-exec descriptors.** A parent
+  that took EOF on a close-on-exec pipe as the sign of the exec could call `setpgid` on another CPU
+  before the flag was set and succeed instead of getting EACCES (`getcwd_wait_and_groups` bit 2048,
+  CI run 38927521498 on 4 CPUs). The flag is now set once the exec can no longer fail, before
+  that step. The check runs 16 times in `audit_runtime_test`; with a delay injected between the
+  two steps it failed before the fix and passes after.
+
+- **`pthread_join` could fail with EINVAL on several CPUs (ISSUE-0023).** `sys_thread_join` saw
+  the target as a zombie, then had the thread removed under it by the reaper on another CPU, and
+  reported the resulting ThreadNotFound as EINVAL. A thread already removed has finished, so the
+  join now succeeds. Seen once in about 40 four-CPU runs of `audit_runtime_test`.
+
+- **Console lines from several CPUs interleaved (AArch64, RISC-V).** The RISC-V `print!` and the
+  AArch64 `print!` and direct UART writes took no lock, so with every hart dispatching a line from
+  one CPU could land inside another's. A four-hart boot's tally came out as `Results: [P50/50
+  passed`, which the boot test could not parse. `print::with_console` now serialises each
+  message across CPUs with interrupts off. It is reentrant on one CPU, so a fault or panic while
+  printing still prints, and its wait is bounded, so a CPU that stopped holding it cannot
+  silence the console. x86_64 already held its serial port's lock.
+
+- **AArch64 process address spaces could not be built.** `map_kernel_space` gave every AArch64
+  process root three fake "kernel regions" (2 MiB code, 2 MiB data, 16 MiB heap, from fresh frames),
+  which failed and left `VirtualAddressSpace::init` returning an error. They were also useless,
+  since TTBR0 never translates the upper half. With the kernel half in TTBR1 (ADR 0015) a process
+  root now holds only the user half. `user_half_starts_empty` runs on AArch64 (it failed first)
+  and checks the upper half is empty and that building a root takes a few frames;
+  `unstarted_process_freed_whole` runs there too: 42/42, 46/46 on four CPUs.
+
+- **`unstarted_process_freed_whole` raced other CPUs.** The boot test compares the machine-wide
+  free-frame count before and after building and discarding a process. Since every RISC-V hart
+  dispatches tasks, another hart can free frames in the middle of the measurement (seen once on four
+  harts: 16 frames more free after than before). The test now takes up to three measurements. A
+  leak still fails every one; a concurrent change elsewhere does not repeat.
+
+- **Release AArch64 kernels reported passing boot tests as failed.** The PL011 print loop's inline
+  assembly (`direct_uart.rs`) declared `options(preserves_flags)` but runs `cmp`. LLVM therefore kept
+  a comparison made before a print live across it, and the code afterwards branched on the loop's
+  flags. CI's release boot failed `cap_quota_enforced` on one build and `heap_reuses_freed_memory`
+  on the next, wherever the optimiser happened to schedule a comparison across a print; gdb
+  showed the heap test completing all 64 iterations before being reported as failed. The option
+  is gone. A new lint, `scripts/dev/check-asm-flags.py`, rejects any `asm!` block that claims
+  `preserves_flags` and contains a flag-setting instruction (the other 60 such blocks are clean),
+  and `gate.sh --boot` now also builds and boots release kernels, as CI does.
+
+- **A slow timer tick no longer livelocks the CPU (RISC-V, x86_64).** The tick re-armed the next
+  deadline before doing its work (scheduler accounting, deadline pulls, balancing), so a tick that
+  outlasted the 1 ms period returned with the next interrupt already due. The debug RISC-V kernel
+  on CI's slower runners never got past starting the dispatcher. The re-arm now follows the work,
+  against the time it ended, so the interrupted code always gets a whole period. `gate.sh --boot`
+  adds a debug RISC-V boot under `-icount shift=4`, which hung before the fix and passes 45/45
+  after it.
+- **AArch64 boot sets up EL1 and EL2 properly (N-177, HA-01, HA-14).** The EL2 path wrote 0 to
+  SCTLR_EL1, clearing its RES1 bits, and a direct EL1 entry never wrote it; both (and secondary
+  CPUs) now write the ARMv8.0 RES1 value with the MMU off. The EL2 drop also stops trapping
+  FP/SIMD and coprocessor accesses and lets EL1 read the real MIDR/MPIDR (CPTR_EL2, HSTR_EL2,
+  VPIDR_EL2, VMPIDR_EL2, as Linux's init_el2). The device tree pointer firmware passes in x0 is
+  kept (the first instruction overwrote it) and used, with QEMU `virt`'s fixed address for a
+  bare ELF as the fallback. Booted at EL1 and at EL2 (`-machine virtualization=on`).
+- **ramfb works on AArch64 and RISC-V.** It never initialised: the 3 MiB framebuffer was asked
+  of the general allocator, which refuses runs of 512 frames or more from the bitmap (and below
+  512 MiB of RAM there is no buddy region; `allocate_contiguous` serves them now), the fw_cfg
+  base was AArch64's on RISC-V too (QEMU puts it at 0x1010_0000 there), and the config block and
+  DMA descriptor were on the stack, whose address was handed to the device as a physical one
+  (they go in a DMA frame now). The boot tests run with `-device ramfb` on both, and
+  `fbcon_initialized` checks the console whenever fw_cfg lists `etc/ramfb`.
+- **New RISC-V address spaces share the kernel half.** `map_kernel_space` read the kernel's
+  tables only on x86_64 and gave other architectures 18 MiB of freshly allocated frames mapped at
+  kernel addresses instead; RISC-V now copies the kernel root's entries 256-511 (boot test
+  `user_half_starts_empty`, now also checking the sharing).
+- **RISC-V boot no longer relies on the loader (HR-01, HR-19, HR-20).** `_start` zeroes `.bss`
+  (QEMU's ELF loader does, a flat Image from U-Boot or EFI does not), runs a hart lottery so
+  that, with firmware that starts every hart at once, one boots and the others stop through SBI
+  HSM instead of sharing one stack, and turns `sstatus.FS` off so that an FP instruction in the
+  soft-float kernel traps.
+- **Free memory counts the per-CPU frame caches.** `/proc/meminfo`, sysinfo and the shell
+  reported only the global allocator's free frames, leaving out up to 64 per CPU waiting in the
+  per-CPU caches. Frames the caches give back to the global allocator are now checked like any
+  other free, and a refused one is reported (it was dropped silently).
+- **A new thread inherits its creator's CPU mask.** clone gave every new thread all CPUs, so a
+  thread created by one restricted with sched_setaffinity could run anywhere (Linux copies the
+  mask). Checked by `musl_smp_placement`.
+- **CPU clocks no longer go backwards.** A thread's CPU clock read its total and its running slice
+  separately; a timer tick between the two reads lost up to a tick. A process's CPU clock lost
+  what an exited thread ran while tearing itself down, once the thread's task was freed. It also
+  lost the moved time for an instant while a thread's time moved into the exited total. Each
+  case went back by up to half a millisecond; now the reads and the moves are atomic with
+  respect to each other. Runtime test `musl_process_clock_monotonic`; `musl_clocks_and_usage`
+  passes 40 runs in a row on one and four CPUs (it failed now and then).
+- **A process can create more than 255 threads over its life.** An exited thread's kernel state
+  stayed until the process exited, because C libraries join through the CLONE_CHILD_CLEARTID
+  futex, not a kernel call. The 256th create failed with EAGAIN. Its entry and an unused kernel
+  stack are now freed as soon as its task is, as on Linux. Runtime test `musl_many_threads`
+  (600 threads).
+- **BlockFS directories reuse the entries of deleted names.** New entries were always appended,
+  and a directory has at most 12 blocks, so a directory where names keep coming and going (`/tmp`,
+  a rename-over loop) filled up after a few thousand creates. After that every create failed,
+  however few names it held. A new entry now takes a deleted one's place when it fits. Host test
+  `test_directory_churn_reuses_entries` (it failed at the 4,090th create before).
+- **System calls no longer cost ~200 us each.** Every system call wrote an audit record to
+  `/var/log/audit.log`, synchronously and without limit: a formatted string and a file append per
+  call, and a log that grew until memory ran out. Auditing each system call is now opt-in, as
+  on Linux, where none is audited without a rule; the other audit events still go to the in-memory
+  ring and the file. The file stops at 4 MiB per boot: routine events at 3 MiB, the last MiB kept for
+  critical ones (permission denials, privilege escalation, failed logins, security configuration
+  changes), so flooding the log with routine events cannot keep those out. The first refusal is
+  reported on the console, and the shell's `audit` command counts the events not persisted. Measured under KVM on four CPUs: getppid and clock_gettime went
+  from ~200 us to ~1.8 us, and the x86_64 runtime suite from over ten minutes to under two.
+- **A signal reaches a thread running on another CPU at once.** Sending one woke the target if it
+  slept, but a thread running user code on another CPU noticed only at that CPU's next tick (up to
+  1 ms). The sender now interrupts that CPU, and the interrupt's return to user mode delivers the
+  signal; kill, tgkill, a fatal signal and exit_group all do this. Runtime test `musl_signal_kick`
+  (mean latency over 50 signals: ~960 us before, now under the 200 us bound).
+- **TLB shootdowns can no longer deadlock (N-139).** A CPU waiting with interrupts off cannot
+  acknowledge a shootdown, so any lock it spins on must never be held by a CPU that issues one.
+  Three paths broke that rule, all found running the runtime suite on four CPUs: page faults were
+  handled with interrupts off while taking the address space's lock; the return to user mode
+  after an interrupt took the process's locks with interrupts off; and joining a thread freed its
+  kernel stack (a shootdown) while holding the process's thread table. Page faults and the return
+  to user mode now run with interrupts on when the interrupted code had them on, as on Linux, and
+  the thread table is released before the stacks are freed.
+- **Exited tasks are freed by a reaper thread.** The switch path freed them on whatever task ran
+  next, often a CPU's idle task, and freeing a process's page tables can sleep on its address
+  space lock. An idle task that slept stayed "running" off every run queue, and the next waker
+  spun on it forever. A `reaper` kernel thread now does it, and an idle task never sleeps: it
+  polls. The reaper also looks the process up before the task leaves the task table; otherwise a
+  parent that reaped the process in between left its page tables allocated.
+- **The kernel heap is interrupt-safe.** Its lock was a plain spinlock, and interrupt handlers
+  allocate (a wake inserts the task into a run queue). Since system calls run with interrupts on,
+  an interrupt that arrived while its CPU held the heap lock spun on it forever, and every CPU
+  that allocated next stopped with it; on four CPUs the runtime suite hung this way within
+  minutes. The heap now takes its lock with interrupts masked, as Linux's allocators do.
+- **Programs started from the kernel shell with arguments get the right argv.** The shell passed
+  the arguments alone, so the first argument became argv[0] (`prog -x y` ran with
+  `argv = {"-x", "y"}`). The rootfs harness now checks a run with arguments.
+- **pipe2 honours its flags in the native C library.** It ignored them and called pipe, so
+  O_CLOEXEC and O_NONBLOCK had no effect.
+- **The user GS base belongs to the thread.** While the kernel runs, a thread's user GS base sits
+  in a per-CPU register (after the entry's `swapgs`), and switching tasks did not save it: the
+  next task to return to user mode on that CPU got the previous one's value, and a thread that
+  moved to another CPU lost its own. It is now saved and restored with the task, like the FS
+  base.
+- **System calls run with interrupts enabled (N-139).** The x86_64 system-call entry kept
+  interrupts off for the whole call, so a CPU in a long system call could not take a timer tick, a
+  reschedule IPI or a TLB-shootdown IPI, and a shootdown aimed at it would have waited until the
+  call returned. Interrupts are now enabled once the entry has switched to the kernel stack; the
+  keyboard driver, which the interrupt handler and system calls share, takes its state with
+  interrupts off, and an idle wait inside a system call restores the caller's interrupt state
+  instead of disabling it. A CPU that spins on a lock with interrupts off still cannot answer a
+  shootdown; that goes with deferred frees in D5e.
+- **A blocking accept on a Unix socket waits for a connection.** It returned EAGAIN when no client
+  had connected yet, as if the socket were nonblocking; programs only worked when the client
+  happened to connect first. It now sleeps until a connection arrives (EINTR on a signal), and a
+  nonblocking accept still returns EAGAIN. Found when enabling interrupts in system calls changed
+  which process ran first. Runtime test `musl_unix_accept_blocks`.
+- **Timers no longer fall behind after lost ticks; clock checks on every CPU (N-179).** The timer
+  wheel advanced one tick period per timer interrupt, so ticks lost while interrupts were off
+  (or skipped by the TSC-deadline rearm) made every kernel timer late; it now advances by the time
+  the clock actually moved. TSC reads are fenced so a later timestamp cannot read smaller, PIT
+  calibration can no longer hang the boot (it stops with a message), and with the `smp` feature an
+  x86_64 CPU whose TSC is not synchronised with the boot CPU's stays offline instead of making the
+  clock jump when a task moves to it.
+- **Priority-inheritance locks cannot be used to boost another process's thread.** (Found by review
+  before release.) A private PI futex's holder must be a thread of the caller's process, and a
+  shared one's a thread whose scheduling the caller could change; the futex word is faulted in
+  before the PI lock is taken, and compare-and-swap retries are bounded (EAGAIN).
+- **Secondary CPUs are set up like the boot CPU, and bring-up stops at the first failure (N-172,
+  N-173, N-180).** With the `smp` feature, the other CPUs never got the SYSCALL MSRs (a system
+  call there would have jumped to address 0 in ring 0) or the boot CPU's XCR0 (restoring a task's
+  AVX state there would have faulted); IPIs used logical CPU numbers as APIC IDs and wrote the
+  two-part ICR with interrupts on; a CPU that failed to start was skipped, leaving a gap that would
+  have made every later TLB shootdown wait forever; and AP stacks had no guard page. All fixed. The
+  SMP boot tests ran before any secondary started and checked nothing; secondaries now come up
+  first, and the tests are reported skipped when one CPU is online.
+
+- **Starting the KDE session no longer frees its page tables twice.** After the session process
+  exited, the KDE launcher freed the page tables and reaped the process itself, on top of the
+  dispatcher already doing both; the same page-table frames were freed twice.
+- **The kernel shell on AArch64 and RISC-V no longer jumps into a program in kernel mode.** With no
+  user mode there yet, starting a program yielded into the old scheduler, which could start the
+  program's entry point in kernel mode. The shell now says user programs are not available on
+  that architecture and frees the loaded program.
+- **Native IPC reaches its endpoints, and a receive waits (N-47, N-81 part, N-84, N-85).** Since
+  ADR 0009 the native IPC calls could be made, but did nothing useful: an endpoint capability named
+  a second endpoint object that nothing could reach, send looked endpoints up in a registry nothing
+  filled, receive used the capability's value as the endpoint number, and a receive returned an
+  empty message at once instead of waiting. Now a program can create an endpoint and send and
+  receive through it; a receive sleeps until a message arrives (or the endpoint closes), and a
+  signal ends the wait with EINTR. A send to a full endpoint waits for room instead of failing
+  after three tries. The register fast path, which only the old scheduler could use, is gone
+  (it returns with the v0.28 IPC design). Runtime test `native_ipc_send_receive_blocks`.
+- **Boot tests no longer count what they do not run.** Seven in-kernel boot tests reported a pass
+  on AArch64 and RISC-V without checking anything (the two dispatcher tests, framebuffer console,
+  keyboard, both user-copy fault tests and, on AArch64, heap reuse). They are now reported as
+  skipped, with the reason, and the tally says so: AArch64 `34/34 passed (7 skipped)`, RISC-V
+  `35/35 passed (6 skipped)`, x86_64 unchanged at 42/42. The earlier 41/41 figures overstated both.
+- **A failed fork frees the child (N-46); exits leave shared regions.** A fork that failed after
+  copying the address space, or whose child could not be started, leaked the child's frames, page
+  tables, kernel stack, capabilities and open files (dropping a process frees nothing); a clone
+  whose thread could not be started left a thread that never ran, so its process could never
+  finish exiting. Both are now undone whole. Every process creation and fork also stopped
+  building an unused task for the old scheduler, which was queued and never freed. An exiting
+  process now leaves the shared regions it mapped; it used to keep counting as a user, so a region
+  it had mapped could never be unregistered. Boot test `unstarted_process_freed_whole` (with the old
+  behaviour it reports 36 frames leaked).
+- **Native C library threads work (N-102).** The native libc's `pthread_create` could never
+  have worked: the new thread "returned" from a C clone wrapper through a stack frame it did not
+  have, the kernel cleared the thread id that `pthread_join` looked the thread up by, `errno` was
+  one global, and the thread pointer did not point at a self pointer, which x86_64 TLS reads at
+  `%fs:0`. Threads now start in an assembly entry (`clone_<arch>.S`), the exit word is its own
+  field, and each thread has its errno in its control block. The native thread, allocator
+  (LIBC-SEC-01) and detach (PROC-SEC-02) checks in `audit_runtime_test` now run by default.
+- **thread_join sleeps (N-269).** The native join system call (1066) spun on yield and could not
+  be interrupted. A dispatched joiner now sleeps until the thread has exited and is off the CPU,
+  and a signal ends the wait with EINTR. Runtime test `native_thread_join_sleeps`.
+- **A process reading the console sleeps instead of spinning (N-118, console part).** The
+  `/dev/console` node, the loader's stdin node and the stdin fallback of read(2) each busy-waited
+  on the serial port, so a program waiting for a key kept every other task off the CPU, and two
+  readers could split a line between them. Received bytes now go into one buffer that the timer
+  tick fills and that wakes readers; all of them share one line discipline (canonical lines with
+  erase and ^D kept across reads, raw mode with VMIN/VTIME), poll and epoll see the console's real
+  readiness, and a signal ends the wait with EINTR. On AArch64 and RISC-V, which have no tick hook
+  yet, readers re-check every 10 ms.
+- **Ptys block and report readiness (N-128).** Reading an empty pty returned 0, which programs
+  take as end of file, and poll, epoll and select saw ptys as always ready (they re-checked every
+  10 ms). An empty side now reads as EAGAIN, or sleeps for a blocking reader until the other side
+  writes; readiness follows the buffers, and every change wakes waiters.
+- **exec from a multithreaded process works (N-101).** It failed with EAGAIN while any other
+  thread was alive (it had once freed page tables they still used). As Linux does, exec now ends
+  the other threads first: each leaves at its next return to user mode or wakeup, including one
+  spinning in user mode (timer preemption), and exec waits until their tasks are off the CPU.
+  Two threads exec'ing at once: the second one leaves. A fatal signal or an `exit_group` arriving
+  meanwhile wins and the exec fails with EINTR; the three places that make a fatal signal
+  pending now go through one helper so that such a SIGKILL is never lost.
+- **VirtIO doorbells are ordered after the ring updates on AArch64 and RISC-V (CRIT-SEC-01).** No
+  barrier separated the store publishing a request from the doorbell write, and the one ordering the
+  ring entry was a CPU-only fence. On a weakly ordered CPU the device could be kicked before it could
+  see the request. New `dma_wmb`, `dma_rmb` and `io_wmb` (as Linux's: `dmb oshst`/`oshld` on
+  AArch64, `fence w,w`/`r,r`/`w,o` on RISC-V) are used for virtio-blk and virtio-net. The barrier
+  functions also stop being `nomem` asm, which the compiler could move memory accesses across.
+- **Memory-management fixes from the 2026-10 audit intake.**
+  - A copy-on-write fault finds its mapping in O(log n) instead of scanning every mapping
+    (PB-MEM-05).
+  - User-pointer validation no longer re-checks the same bound once per page (PB-MEM-07).
+  - The user-address translation walk reaches page tables through the physical-memory map rather
+    than dereferencing physical addresses, which became user addresses when the map moved
+    (INC-MEM-03; the walk has no caller today).
+  - The heap module's description of which architectures use which allocator is corrected.
+- **The kernel shell's `mv` renames** instead of copying the file through memory and deleting the
+  original, so it keeps the inode and moves directories; across filesystems it still copies. The
+  compositor's frame-copying `back_buffer()` is test-only (its only production use had already
+  gone).
+- **Zone-limited frame allocations stay in their zone.** A DMA-zone request could be served by any
+  node's allocator without a zone check; a first attempt at the check (not released) tested only
+  the first frame, so a run starting below 16 MiB and ending above it was accepted. The bitmap and
+  buddy allocators now search only inside the zone (the buddy splits a straddling block towards
+  it). The per-allocator statistics count each successful allocation once.
+- **SA_RESTART no longer restarts sigsuspend, sleeps and polls (N-260).** A signal handler with
+  SA_RESTART restarted every interrupted system call, so sigsuspend went back to waiting after
+  the very handler it waited for, and nanosleep, poll, select and epoll_wait started over with
+  their full timeout. As on Linux, these (and sigtimedwait) now return EINTR after a handler;
+  read, write and the other restartable calls are unchanged.
+- **Memory system calls (N-240 to N-246).** mremap answered ENOMEM to everything (musl's
+  realloc then copied); it now shrinks and grows in place, moves mappings by moving their pages
+  (MREMAP_MAYMOVE, MREMAP_FIXED, MREMAP_DONTUNMAP) and maps a shared mapping a second time,
+  with grown pages zero, the file's next pages or a memfd's own. madvise succeeded without
+  effect; MADV_DONTNEED now zeroes private anonymous memory and restores private file mappings
+  from their file, MADV_REMOVE zeroes shared memory, MADV_DONTFORK and MADV_WIPEONFORK change what
+  fork gives the child, and Linux's argument checks apply. munmap and mprotect rejected lengths
+  over 256 MiB and address 0 and answered EACCES for kernel addresses; they follow Linux now,
+  and a partial mprotect splits the mapping instead of leaving it with the old protection
+  recorded. Lowering the program break frees the pages above it (it was ignored). mmap accepts
+  MAP_SHARED_VALIDATE (EOPNOTSUPP for a flag it does not know) and MAP_FIXED_NOREPLACE (EEXIST),
+  both of which failed with EINVAL. Runtime test `musl_memory_calls`.
+- **unlink, rmdir, unlinkat and the stat family (N-195, N-196, N-203).** unlink refused a
+  relative path, nothing checked whether the target was a file or a directory, and AT_REMOVEDIR
+  was ignored; they now follow Linux's do_unlinkat and do_rmdir (EISDIR, ENOTDIR, ENOTEMPTY,
+  EBUSY, and a symlink is removed rather than its target). newfstatat honours
+  AT_SYMLINK_NOFOLLOW (symlinks were always followed) and AT_EMPTY_PATH. An empty path is ENOENT
+  and a path without a terminator within PATH_MAX is ENAMETOOLONG (it was cut short and used).
+  lstat no longer reports a missing Wayland socket as an existing one, and fstatat and lstat no
+  longer print every path to the serial console. Runtime test `musl_file_calls`.
+- **Partial munmap of a read-only shared mapping.** The pieces left by unmapping part of a
+  mapping were rebuilt from its type alone, so what remained of a mapping of a read-only file
+  or write-sealed memfd lost its no-write mark and mprotect could make it writable. The pieces
+  keep every attribute now. A MAP_SHARED mapping of an ordinary file opened read-only was never
+  marked at all (only memfds were); it is, so mprotect(PROT_WRITE) on it fails with EACCES, as
+  on Linux.
+- **getrandom** stopped at 256 bytes per call and ignored its flags (N-244); it fills the whole
+  request (a signal ends it at a page boundary) and rejects unknown flags. **futex** gains
+  FUTEX_WAKE_BITSET, and unknown and priority-inheritance operations are ENOSYS (N-226).
+- **SIGPIPE.** A write to a pipe with no reader failed with EPIPE but raised no signal, so a
+  program that relies on SIGPIPE to stop (a producer in a pipeline whose consumer exited) kept
+  running. EPIPE from write, writev, send, sendto and sendmsg now raises SIGPIPE, except a send
+  passing MSG_NOSIGNAL, and a pipe write that loses its reader part-way raises it too, as on
+  Linux. A Unix stream socket whose peer has closed now fails a send with EPIPE; it reported an
+  invalid-state error. Runtime test `musl_sigpipe`.
+- **KDE cross pipeline:** SQLite was built without a SONAME, so Qt's SQL plugin recorded the
+  sysroot's path to it and could never load on the target; it now has its historical SONAME,
+  `libsqlite3.so.0`. kded6 compiled in the build host's path to kconf_update. Build tools
+  imported from earlier packages were not run through the target launcher when the package's
+  CMake config called `find_dependency()` after defining them (KDocTools' meinproc6, so a
+  package with documentation ran it with the host's libraries); every imported tool is wrapped
+  now. plasma-desktop compiled the sysroot's path to the XKB data into its keyboard settings.
+- **KDE cross pipeline: the build machine no longer leaks into what is built.**
+  - Every autotools package decided it was *not* cross compiling, because the build host's musl
+    loader ran its test program, and then took the host's answers (against the host's `/lib`)
+    for the target. Configures now get `--build`.
+  - KDocTools installed `all-l10n.xml` with the sysroot's absolute paths; it is relocatable like
+    the rest of its stylesheets. A plasma-workspace kconf_update script would have run the
+    build host's `qtpaths`.
+  - Run-time programs were looked up on the build host (kwallet-pam's socat, plasma-desktop's
+    xdg-user-dir, kinfocenter's tools, ksystemstats, jq). They are looked up in the target, and
+    socat (pam_kwallet_init passes the login through it), xdg-user-dirs and jq are now built.
+  - Compiled-in source paths (assertions, log contexts, debug information) named
+    `/opt/veridian/...`; the cross compiler maps them (`-ffile-prefix-map`, a specs file).
+  - The KDE root filesystem lacked the shell scripts the system runs (the session's
+    `plasma-dbus-run-session-if-needed` and `plasma-sourceenv.sh`, pam_kwallet_init, kdeeject),
+    and the sysroot received the host-side integration scripts. `plasma-apply-aurorae` asked for
+    `/usr/bin/bash`; it is POSIX sh.
+  - KWin's QML imports libplasma and milou, which were built after it; KDED and KWallet were
+    built after KIO; KAuth was built before polkit-qt-1 and had no backend. Brazilian
+    Portuguese handbooks did not find their KDE customization (`pt-BR` vs `pt_br.xml`).
+- **KDE cross pipeline: 2,319 build warnings down to 43.** A clean build of the whole stack (musl
+  and the toolchain through Plasma) printed 2,319 compiler, linker, libtool, configure, CMake,
+  moc and documentation-tool warnings; each was removed by fixing its cause, with no `-Wno-*`
+  and no pragmas (90 warning patches and patch scripts, listed in `tools/cross/PATCHES.md`).
+  The 43 left are listed with their causes in `userland/integration/KNOWN-LIMITATIONS.md`.
+- **Defects in third-party packages,** found while removing their warnings (45 patches; list in
+  `tools/cross/PATCHES.md`, *Upstream candidates*): use after realloc and printf-format text from
+  a file in libX11; overflows in xcb-util-wm, socat and ICU's test framework; NULL dereferences
+  in GLib, D-Bus and Solid's predicate parser; KCoreAddons unmapping shared memory twice;
+  KPty's logout clearing one byte; tools that exited 0 after failing to write (meinproc6,
+  kcmmetadatagenerator); KWallet's portal reporting a secret written that was not; crashes in
+  plasma-workspace's icon, cursor and GTK settings on non-archive files; polkit-qt-1 never
+  connecting ConsoleKit seat signals; ksystemstats reading uninitialized memory values and
+  overflowing a stack array; libksysguard's KiB values with metric units. QCA's OpenSSL plugin
+  is ported to the OpenSSL 3 APIs; its keystore (smart card) keys, which crashed on OpenSSL 3,
+  work through a provider, and three TLS memory errors are fixed.
+- **No executable stacks, and a warning-free userland build.** The VeridianOS GCC target never
+  emitted `.note.GNU-stack`, nor did the crt objects, so every program the cross toolchain
+  linked got an executable stack and ld warned for each. The target now marks objects as FreeBSD
+  and GNU/Linux do (`ports/gcc/patches/0001-veridian-target.patch`) and the crt sources carry the
+  note; the native libc builds cleanly with `-Wpedantic` too. The toolchain builder records each
+  patch's hash, so a tree patched with an older version is reported instead of being reused.
+- **wait, getcwd and process groups behave as on Linux (N-212 to N-216).** pid arguments are
+  ints (a zero-extended -1 was pid 4294967295); waiting for a non-child is ECHILD, WNOHANG with
+  nothing to report no longer writes the status, and `waitid` supports WNOWAIT; `getcwd` returns
+  the length with its NUL and ERANGE for a short buffer; `setpgid` follows Linux's rules
+  (ESRCH, EPERM across sessions or to a missing group, EACCES after the child's exec) and
+  `setsid` from a group leader is EPERM. Runtime test `getcwd_wait_and_groups`.
+- **The native libc's `siginfo_t` and `pid_t` match the kernel (N-253).** `siginfo_t` was a
+  32-byte struct while the kernel writes Linux's 128-byte layout, so SA_SIGINFO handlers read the
+  wrong fields; `pid_t` was 64 bits. Both now follow Linux, and `waitid` exists.
+- **read and write report Linux's errors (N-197).** The wrong access mode was EACCES and a write
+  to an unopened fd EINVAL; both are EBADF, and reading a directory is EISDIR. timerfd, signalfd
+  and epoll fds are opened read-write, and a process's console fds 0-2 are one read-write open
+  of `/dev/console`, as on Linux (`more` and `less` read keys from fd 2).
+- **chdir resolves to the real directory and checks search permission;** `*at` calls report
+  EBADF for a bad directory fd and ENOTDIR for a non-directory, and an fd records the canonical
+  path it opened rather than the path as written (N-204).
+- **The native libc passes `socket()`'s protocol,** which the kernel now checks.
+- **KWin 6.7.5 needs no session patch:** upstream opens the DRM device itself; the build checks
+  that it still does.
+- **Linux numbers reach the Linux call (N-182, N-183).** The musl remap sent dup3 to pipe2,
+  epoll_create1 to dup3, epoll_ctl to epoll_create, sigaltstack to setsid, getppid to getpgid,
+  pipe2 to inotify_init1 and execveat/mlock2/copy_file_range to the timerfd calls, and swapped
+  truncate and ftruncate; the kernel table sent Linux `exit` (one thread) to whole-process exit.
+  A musl file `mmap` read fd 0, because the native path unpacked fd and offset from one register.
+- **pipe2 and dup3 take Linux flags (N-184).** They decoded O_CLOEXEC as 0x2000, which no C
+  library sends: `dup3(.., O_CLOEXEC)` was EINVAL and pipe2 ignored O_CLOEXEC and O_NONBLOCK.
+- **socket, socketpair and accept4 keep SOCK_NONBLOCK and SOCK_CLOEXEC (N-186)** instead of
+  masking them off, reject unknown type bits, check the protocol (EPROTONOSUPPORT) and return
+  EAFNOSUPPORT for an unknown domain.
+- **Native libc:**
+  - the C++ exception runtime chose catch handlers without looking at the type, so `catch (A&)`
+    caught any exception and a privately derived class was caught by its base; it now matches
+    exact types, public bases through single, multiple and virtual inheritance (binding the
+    handler to the base subobject) and `catch (...)`, and honours exception specifications;
+  - `inet_addr`, `inet_pton` and `inet_ntop` were declared but never defined, and `inet_aton`
+    always failed; all five conversions are implemented (IPv4 and IPv6, matching glibc);
+  - ten functions were defined but undeclared (vfork, utimes, inet_aton, wait3, ttyname_r,
+    seteuid, setegid, initgroups, fchdir, chroot), so callers got implicit `int` prototypes;
+  - `ttyname`/`ttyname_r` named every fd `/dev/console`; non-terminals are now ENOTTY, and
+    `isatty` keeps EBADF;
+  - `wait3`/`wait4` take a `struct rusage *` and fill it;
+  - the 64- and 128-bit division helpers start at the quotient's top bit instead of always
+    running 64 or 128 steps;
+  - `glob` grows its result array by doubling instead of reallocating per match;
+  - `hb_language_get_default` follows LC_ALL/LC_CTYPE/LANG and tags are canonicalised;
+  - `flock` and `fsync` use their own system calls (they shared one, told apart by an argument);
+  - a duplicate C `setjmp`/`longjmp` that shadowed the assembly version is gone, and the rootfs
+    build assembles the architecture `.S` files as the Makefile does;
+  - host tests for all of the above run in CI (`userland/libc/tests/`).
+- **BusyBox and musl build without warnings.** Two BusyBox variables set but never read and a GCC
+  16 false positive in musl's `getcwd` are patched (`tools/busybox/patches/`,
+  `tools/cross/musl-patches/`).
+- **Kernel host tests build without warnings,** and the audit log is persisted (to an in-memory
+  sink) in host tests too, with a test.
+- **The VeridianOS Qt platform plugin builds.** `qveridian` is compiled into qtbase as a static
+  platform plugin (`libqveridian.a`) for Qt 6.12, with its entry point, metadata and xdg-shell
+  bindings generated at build time. It builds; running it under the compositor is not verified.
+- **KDE stack build fixes for the current releases:** Mesa 26's thin glapi archive and new
+  library layout, xkbcommon's tools, D-Bus's `-pthread` in `dbus-1.pc`, and the qtdeclarative
+  tools gate for cross builds.
+- **Unix socket reads lost data.** Data the peer sent just before closing was discarded (a read
+  returned end-of-file while it was still queued), and a stream read into a buffer smaller than
+  a queued message dropped the rest of the message. Buffered data is now read before end-of-file,
+  and a short stream read leaves the remainder queued (datagrams are still truncated). Unix
+  sockets also report every readiness change, so blocked reads and `poll` wake at once. Host
+  tests `data_before_close_is_read_before_eof` and
+  `short_reads_keep_stream_bytes_and_cut_datagrams`; musl runtime test `musl_unix_socket_wakeups`.
+- **Pipe writes were short and could interleave.** A blocking write to a pipe, socket or terminal
+  returned as soon as the buffer filled, with however much had fit; it now waits until all of it
+  is written (a signal or a closed reader returns the count so far). Writes of up to PIPE_BUF
+  (4096) bytes to a pipe are atomic: never split, so two writers' blocks never interleave. musl
+  runtime test `musl_pipe_write_whole_and_atomic`.
+- **A page fault that met a held address-space lock killed the thread (N-138).** The fault path
+  could only `try_lock` the address space, so a fault while another thread of the process held
+  it (in `mmap`, say) failed and the thread got SIGSEGV. The address space is now a sleeping
+  mutex (`sync::SleepMutex`): a fault taken in user mode waits for the holder. A fault in
+  kernel mode (a system call copying user memory, possibly under a spinlock) never sleeps; it
+  only tries the lock and gives EFAULT if it is held. Host tests for the mutex.
+- **A sleeping read stopped every other thread's file calls (N-118).** `read` held the process
+  file-table spinlock across the read, and file position locks were held across reads of pipes
+  and eventfds; once such a read could sleep, a write from another thread spun on the lock
+  forever. The table lock now covers only the descriptor lookup (read, write, seek, fstat,
+  truncate, pread, pwrite), and streams (pipes, sockets, character devices) take no position
+  lock. A bad descriptor in those calls is EBADF instead of EINVAL.
+- **Every thread cost a 256 KiB stack it never used (N-114).** `clone` requires the caller's
+  stack, yet the kernel also mapped a stack of its own for each new thread, placed by thread id.
+  It no longer does; a child forked from such a thread still gets a full stack size for a later
+  `exec`. musl runtime test `musl_thread_fork_exec`.
+- **File system calls reported most errors as EINVAL or ENOENT (N-127).** read, write, lseek,
+  fstat, truncate, mount, sync, the fd-table calls and the path lookups now return the errno of
+  the actual cause: ENOSPC, EMFILE, EBUSY, EFBIG, EOPNOTSUPP, ENODEV and EIO are new, symlink
+  loops give ELOOP, and an exec of a file that is not a program gives ENOEXEC instead of EINVAL.
+  Host test `filesystem_errors_keep_their_errno`; the exec runtime test checks ENOEXEC.
+- **pty writes lost data and signalled under a lock (N-128).** With output processing on, a
+  newline that did not fit was dropped while the write still reported every byte written, and a
+  full buffer failed the whole write after part of it had been queued. ^C and ^Z sent their
+  signals while holding the input buffer lock. Writes now return the exact number of bytes
+  taken (EAGAIN when none fit), and signals go out after the lock is released. Host tests
+  `master_input_reports_short_writes_and_signals` and `slave_output_counts_opost_newlines_exactly`.
+- **`MAP_FIXED` and `munmap` followed Linux only for single mappings (N-141).** `MAP_FIXED` over
+  existing memory failed with ENOMEM instead of replacing it (dynamic loaders map this way), and
+  `munmap` of a range covering several mappings or a hole failed with EINVAL. `MAP_FIXED` now
+  replaces what is there under the same lock, `munmap` removes whatever is mapped in the range
+  (an empty range succeeds), and a kernel-chosen address skips a fixed mapping placed ahead of
+  it. Host tests `munmap_spans_mappings_and_holes` and
+  `munmap_refuses_part_of_a_huge_page_atomically`; runtime test
+  `map_fixed_replaces_and_munmap_spans`.
+- **`MAP_SHARED` memory stopped being shared at fork (N-140).** fork made shared pages
+  copy-on-write like private ones, so a child's writes never reached the parent. Shared
+  mappings now keep the same frames, writable, in both processes, and an `mprotect` round trip
+  no longer turns them copy-on-write. Runtime test `map_shared_survives_fork`.
+- **exec ignored execute permission and survived a failed load (N-101).** Any readable file
+  could be executed. exec now requires a regular file the caller may execute (root needs at
+  least one execute bit, as on Linux) and returns EACCES otherwise. A failure after the old
+  address space has been cleared (a missing interpreter, out of memory while loading) used to
+  return to that empty address space; the process is now killed with SIGSEGV at the system-call
+  exit, as Linux does. The check and the read use the same file node, and the dynamic loader
+  (PT_INTERP) is checked and read before the point of no return too. Runtime test
+  `exec_requires_execute_permission` (root, directory, non-root and a control exec).
+- **Relative paths ignored the program's working directory (N-115).** Every path lookup in a
+  system call resolved against the kernel shell's directory, so after `chdir` a program's
+  `getcwd` changed but its relative paths did not. Lookups now use the calling thread's
+  directory, and a new process starts in its creator's. Runtime test
+  `relative_paths_follow_own_cwd` (fails on the previous kernel, passes now).
+
+- **musl `sigpending()` suspended the caller.** The musl patch mapped Linux 127 (rt_sigpending)
+  to the native sigsuspend, so `sigpending` waited for a signal and consumed it; Linux 130
+  (rt_sigsuspend) was not mapped at all. 127 now maps to the new native sigpending (360) and
+  130 to sigsuspend (122). KDE binaries built before this need a rebuild.
+- **A pipe on stdin did not block.** `read(0, ...)` returned from a special case before the
+  blocking path, so `head` on a pipe whose writer had not written yet failed (`$(sort f | head
+  -n 1)` came back empty).
+
+- **`mprotect` from PROT_NONE to read-write left the memory inaccessible.** A user-accessible
+  leaf needs the user bit at every page-table level; `mprotect` set it only on the leaf, so
+  tables first created for kernel-only (PROT_NONE) pages kept user code out. musl's thread
+  stacks are made exactly this way. Regression test `mprotect_none_to_rw_fresh_tables`.
+- **musl `pthread_exit` ended the whole process.** The musl patch mapped `exit` (60) to the
+  native process exit; it now maps to the native thread exit (41), and `exit_group` (231) to the
+  process exit.
+- **`tools/cross/build-musl.sh` ignored a changed patch.** It skipped patching whenever the tree
+  had been patched once, so a patch change never reached `libc.a`. The tree is now stamped with
+  a hash of the patch set and re-extracted when the stamp differs.
+
+- **`sigaction` no longer overwrites its caller's stack (N-95).** The native libc passed its
+  24-byte `struct sigaction` where the kernel reads and writes 32 bytes, so every `signal()`
+  call corrupted 8 bytes after its local; flags, restorer and mask were also discarded and
+  reported as 0. The libc now translates, the kernel keeps the whole action, SIG_IGN survives
+  exec as POSIX requires, and SIGKILL/SIGSTOP can be queried (changing them is EINVAL).
+- **musl programs reach the right system calls (N-103, N-151).** musl passed `prctl`, `flock`,
+  `tkill`, `tgkill` and `waitid` through unmapped, so they landed on unrelated native calls
+  (`prctl` became `unlink` of a small integer, `abort()` became `select`). The musl patch maps
+  them to new native calls 355-359, `waitid` is implemented, and `prctl` sent by binaries
+  built with the old patch is still recognised. A new `musl_runtime_test`, built against the
+  patched musl and run in CI, checks these paths, which the native-libc suite never covered.
+- **A musl parent survives a forked child (FS base).** After a child ran, the parent returned
+  to user mode with the child's FS base, so its first TLS access (the stack canary) faulted.
+- **`sigprocmask` with the same buffer for both sets applies the new mask (N-97).**
+- **`flock` works and `fsync` is never mistaken for it (N-120).** Both are syscall 73 (musl
+  remaps Linux `fsync` onto native `fsync` and passes `flock` through); the second argument now
+  decides, as a lock operation is never 0 and both C libraries pass 0 for `fsync`. The native
+  libc's `flock` was a stub that always succeeded. A lock belongs to the open file and is
+  released on its last close or when its process exits; locks are keyed by (filesystem,
+  inode), so two opens of one file conflict as they should.
+- **No more serial output for every page fault and `open` (N-176, N-130).** The bring-up
+  tracing is behind the new `trace` feature.
+- **PCI configuration reads no longer transmute arbitrary offsets into an enum (N-155).**
+- **A child killed by a signal is reported as such (N-99, part).** `wait` reported a process
+  killed by SIGSEGV or SIGKILL as a normal exit with status 0; it now reports `WIFSIGNALED`,
+  `WTERMSIG` and, for core-dumping signals, `WCOREDUMP`.
+- **The rootfs build installs every libc header subdirectory.** A fixed list left out
+  `net/`, which only a fresh sysroot (CI's) exposed as a BusyBox build failure.
+- **Hard links on ramfs and tmpfs are real links (N-45).** `link()` used to copy the file,
+  so the two names diverged on the next write. It also copied files from other filesystems
+  instead of returning EXDEV. Both names now refer to one node.
+
+- **Capability revocation cascades (CAP-INC-02).** A delegated capability now has its own ID,
+  recorded under its parent. Revoking one delegation leaves the parent intact, and revoking
+  the parent also revokes every capability derived from it. Previously a delegation reused the
+  parent's ID, so revoking any copy revoked them all, and the cascade never ran.
+- **tmpfs releases a file's space when the last link or open file goes.** Freeing it at
+  unlink let a hard link keep data beyond the size limit.
+
+- **getdents64 `d_off` is the next entry's position.** It was a byte offset inside the
+  caller's buffer, so `seekdir(telldir())` jumped to the wrong entry. A buffer too small
+  for the next record now returns EINVAL, as on Linux, instead of reporting end of
+  directory.
+
+---
+
 ## [v0.26.0] - 2026-10-06
 
 ### v0.26.0: Audit Remediation -- Security, Stability and Performance (P0 + P1)

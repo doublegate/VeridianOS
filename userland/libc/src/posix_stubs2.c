@@ -99,9 +99,17 @@ int getloadavg(double loadavg[], int nelem)
 /* sigpending                                                                */
 /* ========================================================================= */
 
+#include <veridian/syscall.h>
+
+/* The signals pending while blocked (rt_sigpending). */
 int sigpending(sigset_t *set)
 {
-    if (set) *set = 0;
+    long ret = veridian_syscall2(SYS_rt_sigpending, (long)set,
+                                 (long)sizeof(*set));
+    if (ret < 0) {
+        errno = (int)(-ret);
+        return -1;
+    }
     return 0;
 }
 
@@ -395,10 +403,25 @@ int utime(const char *filename, const struct utimbuf *times)
 /* utimes (sys/time.h)                                                       */
 /* ========================================================================= */
 
-int utimes(const char *filename, const void *times)
+#include <sys/time.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+
+/* Through utimensat; it did nothing (N-249). */
+int utimes(const char *filename, const struct timeval times[2])
 {
-    (void)filename; (void)times;
-    return 0;
+    struct timespec ts[2];
+    if (times) {
+        for (int i = 0; i < 2; i++) {
+            if (times[i].tv_usec < 0 || times[i].tv_usec >= 1000000) {
+                errno = EINVAL;
+                return -1;
+            }
+            ts[i].tv_sec = times[i].tv_sec;
+            ts[i].tv_nsec = times[i].tv_usec * 1000;
+        }
+    }
+    return utimensat(AT_FDCWD, filename, times ? ts : NULL, 0);
 }
 
 /* ========================================================================= */
@@ -623,52 +646,34 @@ int getnameinfo(const struct sockaddr *sa, socklen_t salen,
  * interface defined in <veridian/syscall.h>.
  *
  * Syscall number layout:
- *   SYS_SOCKET_CREATE  (220) -- socket()
- *   SYS_SOCKET_BIND    (221) -- bind()
- *   SYS_SOCKET_LISTEN  (222) -- listen()
- *   SYS_SOCKET_CONNECT (223) -- connect()
- *   SYS_SOCKET_ACCEPT  (224) -- accept()
+ *   SYS_socket  (220) -- socket()
+ *   SYS_bind    (221) -- bind()
+ *   SYS_listen  (222) -- listen()
+ *   SYS_connect (42) -- connect()
+ *   SYS_accept  (224) -- accept()
  *   SYS_SOCKET_SEND    (225) -- send()
  *   SYS_SOCKET_RECV    (226) -- recv()
  *   SYS_SOCKET_CLOSE   (227) -- shutdown() (best-effort)
- *   SYS_SOCKET_PAIR    (228) -- socketpair()
- *   SYS_NET_SENDTO     (250) -- sendto()
- *   SYS_NET_RECVFROM   (251) -- recvfrom()
- *   SYS_NET_GETSOCKNAME(252) -- getsockname()
- *   SYS_NET_GETPEERNAME(253) -- getpeername()
- *   SYS_NET_SETSOCKOPT (254) -- setsockopt()
- *   SYS_NET_GETSOCKOPT (255) -- getsockopt()
+ *   SYS_socketpair    (228) -- socketpair()
+ *   SYS_sendto     (250) -- sendto()
+ *   SYS_recvfrom   (251) -- recvfrom()
+ *   SYS_getsockname(252) -- getsockname()
+ *   SYS_getpeername(253) -- getpeername()
+ *   SYS_setsockopt (54) -- setsockopt()
+ *   SYS_getsockopt (55) -- getsockopt()
  */
 
 #include <veridian/syscall.h>
 
-/*
- * Helper shared with posix_stubs3.c: translate a raw syscall return value
- * to the POSIX convention (negative -> errno + return -1).
- * (Cannot use the static __syscall_ret from syscall.c here since that file
- * is compiled separately; we duplicate the one-liner inline.)
- */
-static inline long __sock_ret(long r)
-{
-    if (r < 0) {
-        errno = (int)(-r);
-        return -1L;
-    }
-    return r;
-}
 
 /*
- * socket() -- create an endpoint for communication.
- *
- * Kernel args: (domain, sock_type)
- * The protocol argument is not forwarded (kernel derives it from domain +
- * sock_type); ignored here following the same approach as Linux glibc.
+ * socket() -- create an endpoint for communication (Linux socket: the
+ * kernel checks the protocol and honours SOCK_NONBLOCK / SOCK_CLOEXEC).
  */
 int socket(int domain, int type, int protocol)
 {
-    (void)protocol;
-    long ret = veridian_syscall2(SYS_SOCKET_CREATE, domain, type);
-    return (int)__sock_ret(ret);
+    long ret = veridian_syscall3(SYS_socket, domain, type, protocol);
+    return (int)__syscall_ret(ret);
 }
 
 /*
@@ -678,8 +683,8 @@ int socket(int domain, int type, int protocol)
  */
 int connect(int sockfd, const struct sockaddr *addr, socklen_t addrlen)
 {
-    long ret = veridian_syscall3(SYS_SOCKET_CONNECT, sockfd, addr, addrlen);
-    return (int)__sock_ret(ret);
+    long ret = veridian_syscall3(SYS_connect, sockfd, addr, addrlen);
+    return (int)__syscall_ret(ret);
 }
 
 /*
@@ -689,8 +694,8 @@ int connect(int sockfd, const struct sockaddr *addr, socklen_t addrlen)
  */
 int bind(int sockfd, const struct sockaddr *addr, socklen_t addrlen)
 {
-    long ret = veridian_syscall3(SYS_SOCKET_BIND, sockfd, addr, addrlen);
-    return (int)__sock_ret(ret);
+    long ret = veridian_syscall3(SYS_bind, sockfd, addr, addrlen);
+    return (int)__syscall_ret(ret);
 }
 
 /*
@@ -700,8 +705,8 @@ int bind(int sockfd, const struct sockaddr *addr, socklen_t addrlen)
  */
 int listen(int sockfd, int backlog)
 {
-    long ret = veridian_syscall2(SYS_SOCKET_LISTEN, sockfd, backlog);
-    return (int)__sock_ret(ret);
+    long ret = veridian_syscall2(SYS_listen, sockfd, backlog);
+    return (int)__syscall_ret(ret);
 }
 
 /*
@@ -714,7 +719,7 @@ int listen(int sockfd, int backlog)
  */
 int accept(int sockfd, struct sockaddr *addr, socklen_t *addrlen)
 {
-    long ret = veridian_syscall3(SYS_SOCKET_ACCEPT, sockfd, addr, addrlen);
+    long ret = veridian_syscall3(SYS_accept, sockfd, addr, addrlen);
     if (ret < 0) {
         errno = (int)(-ret);
         return -1;
@@ -732,7 +737,7 @@ long send(int sockfd, const void *buf, unsigned long len, int flags)
 {
     (void)flags;
     long ret = veridian_syscall3(SYS_SOCKET_SEND, sockfd, buf, len);
-    return __sock_ret(ret);
+    return __syscall_ret(ret);
 }
 
 /*
@@ -745,7 +750,7 @@ long recv(int sockfd, void *buf, unsigned long len, int flags)
 {
     (void)flags;
     long ret = veridian_syscall3(SYS_SOCKET_RECV, sockfd, buf, len);
-    return __sock_ret(ret);
+    return __syscall_ret(ret);
 }
 
 /*
@@ -756,9 +761,9 @@ long recv(int sockfd, void *buf, unsigned long len, int flags)
 int setsockopt(int sockfd, int level, int optname,
                const void *optval, unsigned int optlen)
 {
-    long ret = veridian_syscall5(SYS_NET_SETSOCKOPT,
+    long ret = veridian_syscall5(SYS_setsockopt,
                                   sockfd, level, optname, optval, optlen);
-    return (int)__sock_ret(ret);
+    return (int)__syscall_ret(ret);
 }
 
 /*
@@ -771,7 +776,7 @@ int setsockopt(int sockfd, int level, int optname,
 int getsockopt(int sockfd, int level, int optname,
                void *optval, unsigned int *optlen)
 {
-    long ret = veridian_syscall5(SYS_NET_GETSOCKOPT,
+    long ret = veridian_syscall5(SYS_getsockopt,
                                   sockfd, level, optname, optval, optlen);
     if (ret < 0) {
         errno = (int)(-ret);
@@ -795,7 +800,7 @@ int shutdown(int sockfd, int how)
 #define SHUT_RDWR_LOCAL 2
     if (how == SHUT_RDWR_LOCAL) {
         long ret = veridian_syscall1(SYS_SOCKET_CLOSE, sockfd);
-        return (int)__sock_ret(ret);
+        return (int)__syscall_ret(ret);
     }
     /* Half-shutdown not supported; succeed silently. */
     (void)sockfd;

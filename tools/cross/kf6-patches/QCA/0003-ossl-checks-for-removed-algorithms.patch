@@ -1,0 +1,39 @@
+VeridianOS: qca-ossl's checks for algorithms OpenSSL 3 no longer has
+
+With the OpenSSL 3 port (0002), qca-ossl requires OpenSSL 3.0 or later.
+
+- SHA-0 (EVP_sha) was removed in OpenSSL 1.1.0, so the check for it can
+  never succeed and always warned ("qca-ossl will be compiled without
+  SHA-0 digest algorithm support"). The check is removed; the plugin's
+  SHA-0 code stays behind HAVE_OPENSSL_SHA0, which is no longer defined.
+- MD2 exists only in an OpenSSL built with enable-md2, which no current
+  build is (OPENSSL_NO_MD2 is OpenSSL's default; MD2 is broken). Its
+  absence is the normal configuration, so it is reported with the other
+  configuration results (message STATUS) rather than as a warning.
+
+--- a/plugins/qca-ossl/CMakeLists.txt
++++ b/plugins/qca-ossl/CMakeLists.txt
+@@ -16,7 +16,7 @@
+   if(HAVE_OPENSSL_MD2)
+     add_definitions(-DHAVE_OPENSSL_MD2)
+   else()
+-    message(WARNING "qca-ossl will be compiled without MD2 digest algorithm support")
++    message(STATUS "qca-ossl: this OpenSSL has no MD2 (OPENSSL_NO_MD2, its default); MD2 digests are not provided")
+   endif()
+ 
+   check_function_exists(EVP_aes_128_ctr HAVE_OPENSSL_AES_CTR)
+@@ -40,12 +40,8 @@
+     message(WARNING "qca-ossl will be compiled without AES CCM mode encryption support")
+   endif()
+ 
+-  check_function_exists(EVP_sha HAVE_OPENSSL_SHA0)
+-  if(HAVE_OPENSSL_SHA0)
+-    add_definitions(-DHAVE_OPENSSL_SHA0)
+-  else()
+-    message(WARNING "qca-ossl will be compiled without SHA-0 digest algorithm support")
+-  endif()
++  # SHA-0 (EVP_sha) was removed in OpenSSL 1.1.0; OpenSSL 3.0 or later is
++  # required, so there is no SHA-0 support to look for.
+ 
+   set(QCA_OSSL_SOURCES
+       qca-ossl.cpp)

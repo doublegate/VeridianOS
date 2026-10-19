@@ -16,10 +16,18 @@ use crate::error::KernelError;
 #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
 const DRM_FORMAT_XRGB8888: u32 = 0x34325258; // 'XR24'
 
-/// fw_cfg MMIO base address for QEMU virt machine.
-/// AArch64 and RISC-V virt machines use the same address.
+/// fw_cfg MMIO base (physical) on QEMU `virt` (`hw/arm/virt.c`,
+/// `hw/riscv/virt.c`). The two machines differ; it was AArch64's on both.
+#[cfg(target_arch = "aarch64")]
+const FWCFG_PHYS: u64 = 0x0902_0000;
+#[cfg(target_arch = "riscv64")]
+const FWCFG_PHYS: u64 = 0x1010_0000;
+
+/// A fw_cfg register, through the physical-memory map.
 #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
-const FWCFG_BASE: usize = 0x0902_0000;
+fn fwcfg_reg(offset: usize) -> usize {
+    crate::mm::phys_to_virt_addr(FWCFG_PHYS) as usize + offset
+}
 
 /// fw_cfg register offsets (MMIO, big-endian).
 #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
@@ -74,19 +82,30 @@ pub fn init(width: u32, height: u32) -> Result<*mut u8, KernelError> {
     let stride = width * 4; // 4 bytes per pixel (XRGB8888)
     let fb_size = (stride * height) as usize;
 
+    // The device first, then its DMA frame, then the framebuffer: every
+    // boot without `-device ramfb` (the default) failed after taking 3
+    // MiB of frames for it and never gave them back (PR #24 review).
+    let selector = find_fwcfg_file("etc/ramfb").ok_or(KernelError::NotFound {
+        resource: "fw_cfg etc/ramfb selector",
+        id: 0,
+    })?;
+    let mut dma = crate::drivers::dma_frame::DmaFrame::alloc()?;
+
     // Allocate contiguous physical frames for the framebuffer.
     let num_frames = fb_size.div_ceil(FRAME_SIZE);
     let frame_num = FRAME_ALLOCATOR
         .lock()
-        .allocate_frames(num_frames, None)
+        // A run this long (768 frames at 1024x768) needs the large-run
+        // path: on a machine under 512 MiB there is no buddy region, and
+        // the general path refuses bitmap runs of 512 frames or more.
+        .allocate_contiguous(num_frames)
         .map_err(|_| KernelError::ResourceExhausted {
             resource: "physical frames for ramfb",
         })?;
     let fb_phys = frame_num.as_addr().as_u64() as usize;
-
-    // On AArch64/RISC-V QEMU virt, physical memory is identity-mapped or
-    // accessible at its physical address during early boot.
-    let fb_ptr = fb_phys as *mut u8;
+    // The CPU writes it through the physical-memory map; the device gets
+    // the physical address.
+    let fb_ptr = crate::mm::phys_to_virt_addr(fb_phys as u64) as *mut u8;
 
     // SAFETY: fb_ptr points to freshly allocated physical memory.
     // Writing zeros initializes the framebuffer to black.
@@ -104,16 +123,46 @@ pub fn init(width: u32, height: u32) -> Result<*mut u8, KernelError> {
         stride: stride.to_be(),
     };
 
-    // Find the "etc/ramfb" fw_cfg selector by scanning the directory
-    let selector = find_fwcfg_file("etc/ramfb").ok_or(KernelError::NotFound {
-        resource: "fw_cfg etc/ramfb selector",
-        id: 0,
-    })?;
+    // Write the config via fw_cfg DMA. The device reads the config and the
+    // DMA descriptor by physical address, so both go in a DMA frame (they
+    // were on the stack, whose address is not a physical one).
+    // SAFETY: the frame holds a page; the 28-byte config is copied to its
+    // start, and nothing else uses the frame.
+    unsafe {
+        core::ptr::copy_nonoverlapping(
+            &config as *const RamfbConfig as *const u8,
+            dma.bytes_mut().as_mut_ptr(),
+            core::mem::size_of::<RamfbConfig>(),
+        );
+    }
+    match write_fwcfg_dma(
+        selector,
+        &mut dma,
+        core::mem::size_of::<RamfbConfig>() as u32,
+    ) {
+        Ok(()) => Ok(fb_ptr),
+        // The device may still write the descriptor: its frame is leaked,
+        // never freed under it (DmaFrame's contract), and so is the
+        // framebuffer it was told about (PR #24 review).
+        Err(e @ KernelError::Timeout { .. }) => {
+            core::mem::forget(dma);
+            Err(e)
+        }
+        Err(e) => {
+            FRAME_ALLOCATOR
+                .lock()
+                .free_frames(frame_num, num_frames)
+                .ok();
+            Err(e)
+        }
+    }
+}
 
-    // Write the config via fw_cfg DMA
-    write_fwcfg_dma(selector, &config as *const RamfbConfig as *const u8, 28)?;
-
-    Ok(fb_ptr)
+/// Whether QEMU offers a ramfb device (`-device ramfb`): fw_cfg lists
+/// `etc/ramfb`.
+#[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
+pub fn present() -> bool {
+    find_fwcfg_file("etc/ramfb").is_some()
 }
 
 /// Stub for architectures that don't support ramfb.
@@ -130,7 +179,7 @@ fn find_fwcfg_file(name: &str) -> Option<u16> {
     // Select the file directory (selector 0x0019)
     // SAFETY: MMIO writes to fw_cfg control registers.
     unsafe {
-        let selector_reg = (FWCFG_BASE + FWCFG_SELECTOR) as *mut u16;
+        let selector_reg = fwcfg_reg(FWCFG_SELECTOR) as *mut u16;
         selector_reg.write_volatile(0x0019u16.to_be());
     }
 
@@ -138,7 +187,7 @@ fn find_fwcfg_file(name: &str) -> Option<u16> {
     let count: u32;
     // SAFETY: Reading from fw_cfg data register after selecting the directory.
     unsafe {
-        let data_reg = (FWCFG_BASE + FWCFG_DATA) as *const u32;
+        let data_reg = fwcfg_reg(FWCFG_DATA) as *const u32;
         count = u32::from_be(data_reg.read_volatile());
     }
 
@@ -148,7 +197,7 @@ fn find_fwcfg_file(name: &str) -> Option<u16> {
         let mut entry = [0u8; 64];
         // SAFETY: Reading sequential bytes from the fw_cfg data register.
         unsafe {
-            let data_reg = FWCFG_BASE as *const u8;
+            let data_reg = fwcfg_reg(FWCFG_DATA) as *const u8;
             for byte in &mut entry {
                 *byte = data_reg.read_volatile();
             }
@@ -166,34 +215,67 @@ fn find_fwcfg_file(name: &str) -> Option<u16> {
     None
 }
 
-/// Write data to a fw_cfg file selector using DMA.
+/// Offset of the DMA descriptor in the DMA frame (the data is at 0).
 #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
-fn write_fwcfg_dma(selector: u16, data: *const u8, length: u32) -> Result<(), KernelError> {
+const DESC_OFFSET: usize = 64;
+
+/// Write the first `length` bytes of `frame` to a fw_cfg file selector
+/// using DMA; the descriptor goes in the same frame.
+#[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
+fn write_fwcfg_dma(
+    selector: u16,
+    frame: &mut crate::drivers::dma_frame::DmaFrame,
+    length: u32,
+) -> Result<(), KernelError> {
     let dma_access = FwCfgDmaAccess {
         control: (FWCFG_DMA_SELECT | FWCFG_DMA_WRITE | ((selector as u32) << 16)).to_be(),
         length: length.to_be(),
-        address: (data as u64).to_be(),
+        address: frame.phys.to_be(),
     };
+    let desc = (frame.virt + DESC_OFFSET) as *mut FwCfgDmaAccess;
+    // SAFETY: the descriptor fits in the frame after the data; the frame is
+    // this call's alone.
+    unsafe { core::ptr::write_unaligned(desc, dma_access) };
+    let dma_addr = frame.phys + DESC_OFFSET as u64;
+    // The device reads the data and the descriptor and writes the
+    // descriptor's control word back (HA-25).
+    let coherent = crate::mm::dma::device_coherent(b"qemu,fw-cfg-mmio", FWCFG_PHYS);
+    crate::mm::dma::sync_for_device(
+        frame.virt,
+        DESC_OFFSET + core::mem::size_of::<FwCfgDmaAccess>(),
+        crate::mm::dma::DmaDirection::Bidirectional,
+        coherent,
+    );
 
-    let dma_addr = &dma_access as *const FwCfgDmaAccess as u64;
-
+    // The descriptor's stores reach memory before the doorbell (Linux's
+    // writel: `fence w,o` on RISC-V, which the DMA sync's `fence w,w` is
+    // not).
+    crate::arch::barriers::io_wmb();
     // Write the DMA descriptor address (big-endian, split into high/low 32-bit)
     // SAFETY: MMIO writes to the fw_cfg DMA register to initiate a write transfer.
     unsafe {
-        let dma_reg_hi = (FWCFG_BASE + FWCFG_DMA) as *mut u32;
-        let dma_reg_lo = (FWCFG_BASE + FWCFG_DMA + 4) as *mut u32;
+        let dma_reg_hi = fwcfg_reg(FWCFG_DMA) as *mut u32;
+        let dma_reg_lo = fwcfg_reg(FWCFG_DMA + 4) as *mut u32;
         dma_reg_hi.write_volatile(((dma_addr >> 32) as u32).to_be());
         dma_reg_lo.write_volatile((dma_addr as u32).to_be());
     }
 
     // Poll for completion (control field becomes 0 when done).
     // Use raw pointer arithmetic to avoid referencing a packed field.
-    let control_ptr = core::ptr::addr_of!(dma_access.control);
-    // SAFETY: Reading the DMA control field to check completion. The
-    // field is modified by the hypervisor (QEMU) when the DMA completes.
-    // read_unaligned handles the packed struct alignment.
+    // SAFETY: `desc` points at the descriptor written above.
+    let control_ptr = unsafe { core::ptr::addr_of!((*desc).control) };
     for _ in 0..1_000_000 {
-        let val = unsafe { core::ptr::read_unaligned(control_ptr) };
+        crate::mm::dma::sync_for_cpu(
+            control_ptr as usize,
+            4,
+            crate::mm::dma::DmaDirection::Bidirectional,
+            coherent,
+        );
+        // SAFETY: Reading the DMA control field to check completion. The
+        // field is modified by the hypervisor (QEMU) when the DMA completes.
+        // control_ptr points into the descriptor in the DMA frame, 64 bytes
+        // in, so it is aligned; volatile, as the device writes it.
+        let val = unsafe { core::ptr::read_volatile(control_ptr) };
         if val == 0 {
             return Ok(());
         }

@@ -43,10 +43,6 @@ pub fn init() {
     crate::thread_api::init();
     kprintln!("[SERVICES] Thread management initialized");
 
-    kprintln!("[SERVICES] Initializing standard library...");
-    crate::stdlib::init();
-    kprintln!("[SERVICES] Standard library initialized");
-
     kprintln!("[SERVICES] Initializing shell...");
     shell::init();
     kprintln!("[SERVICES] Shell initialized");

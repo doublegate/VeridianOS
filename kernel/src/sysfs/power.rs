@@ -335,6 +335,10 @@ pub(crate) fn sysfs_power_init() -> KernelResult<()> {
 mod tests {
     use super::*;
 
+    /// Held by the tests that set and read `BACKLIGHT_BRIGHTNESS`, which run
+    /// in parallel otherwise: a write in one made another's read fail.
+    static BRIGHTNESS_LOCK: spin::Mutex<()> = spin::Mutex::new(());
+
     #[test]
     fn test_power_state_read() {
         let states = power_state_read();
@@ -349,6 +353,7 @@ mod tests {
 
     #[test]
     fn test_backlight_brightness_read() {
+        let _brightness = BRIGHTNESS_LOCK.lock();
         BACKLIGHT_BRIGHTNESS.store(75, Ordering::Release);
         let val = backlight_brightness_read();
         assert_eq!(val, "75");
@@ -356,6 +361,7 @@ mod tests {
 
     #[test]
     fn test_backlight_brightness_write_valid() {
+        let _brightness = BRIGHTNESS_LOCK.lock();
         let result = backlight_brightness_write("50");
         assert!(result.is_ok());
         assert_eq!(BACKLIGHT_BRIGHTNESS.load(Ordering::Acquire), 50);
@@ -363,6 +369,7 @@ mod tests {
 
     #[test]
     fn test_backlight_brightness_write_clamp() {
+        let _brightness = BRIGHTNESS_LOCK.lock();
         let result = backlight_brightness_write("200");
         assert!(result.is_ok());
         assert_eq!(BACKLIGHT_BRIGHTNESS.load(Ordering::Acquire), 100);

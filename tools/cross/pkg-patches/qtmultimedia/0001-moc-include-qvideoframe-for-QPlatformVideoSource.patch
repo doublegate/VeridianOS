@@ -1,0 +1,33 @@
+VeridianOS: complete QVideoFrame in QPlatformVideoSource's meta-object code
+
+GCC 16 reported, in Multimedia's mocs_compilation.cpp: "qvideoframe.h:26:
+defining 'QVideoFrame', which previously failed to be complete in a SFINAE
+context [-Wsfinae-incomplete]". platform/qplatformvideosource_p.h only
+forward-declares QVideoFrame but declares the signal
+newVideoFrame(const QVideoFrame &); its moc code, included in
+mocs_compilation.cpp before moc_qvideoframe.cpp, asks QMetaType whether
+QVideoFrame is complete, gets "no", and qvideoframe.h then defines it in
+the same translation unit. The meta-type answer must not differ within a
+program, so this is a real (if benign so far) inconsistency.
+
+Q_MOC_INCLUDE(<QtMultimedia/qvideoframe.h>) makes moc include the full
+definition in the generated code, which is the documented mechanism for
+forward-declared signal argument types and is already used for
+qvideoframe.h in multimediaquick/qquickvideooutput_p.h. The header itself
+still only forward-declares the class; the compiler ignores
+Q_MOC_INCLUDE. No behaviour change.
+
+
+diff -ru a/src/multimedia/platform/qplatformvideosource_p.h b/src/multimedia/platform/qplatformvideosource_p.h
+--- a/src/multimedia/platform/qplatformvideosource_p.h	2026-10-08 17:34:50.382615903 -0400
++++ b/src/multimedia/platform/qplatformvideosource_p.h	2026-10-08 17:35:11.008767437 -0400
+@@ -30,6 +30,9 @@
+ class Q_MULTIMEDIA_EXPORT QPlatformVideoSource : public QObject
+ {
+     Q_OBJECT
++    // QVideoFrame is only forward-declared here; the meta-object code for
++    // newVideoFrame() needs the complete type.
++    Q_MOC_INCLUDE(<QtMultimedia/qvideoframe.h>)
+ public:
+     using QObject::QObject;
+ 

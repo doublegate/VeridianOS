@@ -115,7 +115,7 @@ echo "Installing Rust nightly and components..."
 rustup toolchain install nightly-2025-01-15
 rustup default nightly-2025-01-15
 rustup component add rust-src llvm-tools-preview rustfmt clippy
-rustup target add x86_64-unknown-none aarch64-unknown-none riscv64gc-unknown-none-elf
+rustup target add x86_64-unknown-none aarch64-unknown-none-softfloat riscv64imac-unknown-none-elf
 
 # Install cargo tools
 echo "Installing cargo tools..."

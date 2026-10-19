@@ -1,0 +1,38 @@
+VeridianOS: FindKSystemStats names its results after the package, and
+looks in the target system
+
+cmake/FindKSystemStats.cmake passed "ksystemstats" to
+find_package_handle_standard_args() for find_package(KSystemStats), which
+CMake reports ("The package name passed to
+find_package_handle_standard_args() (ksystemstats) does not match the name
+of the calling package (KSystemStats)"), and which set ksystemstats_FOUND
+rather than the KSystemStats_FOUND the feature summary reads. The results
+are now named after the package.
+
+ksystemstats is a run-time dependency (the system monitor talks to it); a
+cross build found the build host's /usr/bin/ksystemstats, as programs are
+looked up on the host. When cross compiling it is now looked up in the
+target's root (CMAKE_FIND_ROOT_PATH), where it is installed.
+
+--- a/cmake/FindKSystemStats.cmake
++++ b/cmake/FindKSystemStats.cmake
+@@ -1,10 +1,15 @@
+ # SPDX-License-Identifier: BSD-3-Clause
+ # SPDX-FileCopyrightText: 2021 David Redondo <kde@david-redondo.de>
+ 
+-find_program(ksystemstats_EXE ksystemstats)
++# A run-time dependency: when cross compiling, the target's program.
++if(CMAKE_CROSSCOMPILING)
++    find_program(KSystemStats_EXE ksystemstats ONLY_CMAKE_FIND_ROOT_PATH)
++else()
++    find_program(KSystemStats_EXE ksystemstats)
++endif()
+ 
+ include(FindPackageHandleStandardArgs)
+-find_package_handle_standard_args(ksystemstats
+-    FOUND_VAR ksystemstats_FOUND
+-    REQUIRED_VARS ksystemstats_EXE
++find_package_handle_standard_args(KSystemStats
++    FOUND_VAR KSystemStats_FOUND
++    REQUIRED_VARS KSystemStats_EXE
+ )

@@ -4,9 +4,15 @@
 **Date**: 2026-03-10
 **Status**: Implementation Complete (100%)
 
-### Current Implementation Status (v0.25.1)
+> **Superseded (2026-10-15).** The scheduler this document describes was replaced by the dispatcher
+> (ADR 0006) and the policy classes of ADR 0007, and deleted in v0.27 (sprint D4). Its status list
+> below was never true of the running kernel: only CPU 0 ran tasks, and the PiMutex, EDF module and
+> per-CPU queues had no users. See ADR 0006, ADR 0007 and `docs/KNOWN-LIMITATIONS.md` for what
+> runs today. The rest of this document is kept as the original design.
 
-All scheduler features fully implemented and benchmarked:
+### Implementation Status as recorded for v0.25.1 (not accurate; see above)
+
+Listed as implemented:
 - CFS (Completely Fair Scheduler) with multi-level priority queues
 - SMP support with per-CPU run queues and work-stealing
 - CPU hotplug (cpu_up/cpu_down) and Inter-Processor Interrupts

@@ -1,0 +1,15 @@
+VeridianOS: klipper: no moc include for historyitem.h
+
+klipper/historyitem.cpp includes "moc_historyitem.cpp", but historyitem.h
+declares nothing for moc (no Q_OBJECT, Q_GADGET or Q_NAMESPACE), so
+AutoMoc ran moc on it for nothing: "historyitem.h: note: No relevant
+classes found. No output generated." The include is removed, as upstream
+master has done.
+
+--- a/klipper/historyitem.cpp
++++ b/klipper/historyitem.cpp
+@@ -66,4 +66,3 @@
+     return std::make_shared<HistoryItem>(std::move(uuid), std::move(mimeTypes), std::move(text));
+ }
+ 
+-#include "moc_historyitem.cpp"

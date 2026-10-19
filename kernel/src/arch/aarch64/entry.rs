@@ -8,8 +8,8 @@ use core::panic::PanicInfo;
 pub fn arch_early_init() {
     use crate::arch::aarch64::direct_uart::uart_write_str;
 
-    // SAFETY: uart_write_str performs raw MMIO writes to the PL011 UART at
-    // 0x09000000 using assembly to bypass LLVM loop compilation issues on
+    // SAFETY: uart_write_str performs raw MMIO writes to the PL011 UART
+    // (`platform::PL011`) using assembly to bypass LLVM loop compilation issues on
     // AArch64. The UART is memory-mapped by QEMU's virt machine and writing
     // is non-destructive. Called during early single-threaded boot.
     unsafe {
@@ -25,8 +25,8 @@ pub fn arch_early_init() {
 pub fn arch_panic_handler(_info: &PanicInfo) {
     use crate::arch::aarch64::direct_uart::uart_write_str;
 
-    // SAFETY: uart_write_str performs raw MMIO writes to the PL011 UART at
-    // 0x09000000. Safe during panic as only diagnostic output is produced.
+    // SAFETY: uart_write_str performs raw MMIO writes to the PL011 UART
+    // (`platform::PL011`). Safe during panic as only diagnostic output is produced.
     unsafe {
         uart_write_str("\n[PANIC] Kernel panic occurred!\n");
 

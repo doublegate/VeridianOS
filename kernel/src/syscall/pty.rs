@@ -87,21 +87,27 @@ pub fn sys_openpty(master_fd_ptr: usize, slave_fd_ptr: usize) -> SyscallResult {
 
     let master_fd = file_table
         .open(master_file)
-        .map_err(|_| SyscallError::OutOfMemory)?;
+        .map_err(super::map_kernel_error)?;
 
-    let slave_fd = file_table.open(slave_file).map_err(|_| {
+    let slave_fd = file_table.open(slave_file).map_err(|e| {
         // Roll back the master fd on failure.
         file_table.close_on_rollback(master_fd, "openpty");
-        SyscallError::OutOfMemory
+        super::map_kernel_error(e)
     })?;
 
-    // Write the fd numbers to user space.
-    // SAFETY: Both pointers were validated as aligned, non-null, and in user
-    // space by validate_user_ptr_typed above.  No other thread can alias
-    // these locations because they are caller-owned stack/heap slots.
-    unsafe {
-        core::ptr::write(master_fd_ptr as *mut i32, master_fd as i32);
-        core::ptr::write(slave_fd_ptr as *mut i32, slave_fd as i32);
+    drop(file_table);
+
+    // Write the fd numbers to user space (fault-tolerant, N-43), without
+    // the file table locked. If either copy faults, both descriptors are
+    // closed again, which also frees the PTY: they were left open, and
+    // the caller never learned their numbers (PR #23 review).
+    let copied = super::userspace::write_user::<i32>(master_fd_ptr, master_fd as i32)
+        .and_then(|()| super::userspace::write_user::<i32>(slave_fd_ptr, slave_fd as i32));
+    if let Err(e) = copied {
+        let file_table = proc.file_table.lock();
+        file_table.close_on_rollback(slave_fd, "openpty");
+        file_table.close_on_rollback(master_fd, "openpty");
+        return Err(e);
     }
 
     crate::println!(
@@ -223,16 +229,11 @@ pub fn sys_ptsname(master_fd: usize, buf_ptr: usize, buf_len: usize) -> SyscallR
         return Err(SyscallError::InvalidArgument);
     }
 
-    // Copy path into user space.
-    // SAFETY: buf_ptr was validated as non-null and within user-space bounds
-    // covering buf_len bytes.  path_bytes.len() < buf_len so the write does
-    // not exceed the validated region.
-    unsafe {
-        let dst = buf_ptr as *mut u8;
-        core::ptr::copy_nonoverlapping(path_bytes.as_ptr(), dst, path_bytes.len());
-        // NUL terminate.
-        core::ptr::write(dst.add(path_bytes.len()), 0u8);
-    }
+    // Copy the NUL-terminated path into user space (N-43).
+    let mut out = alloc::vec::Vec::with_capacity(path_bytes.len() + 1);
+    out.extend_from_slice(path_bytes);
+    out.push(0);
+    super::userspace::write_user_bytes(buf_ptr, &out)?;
 
     Ok(path_bytes.len())
 }
@@ -261,6 +262,9 @@ pub struct UserWinsize {
     pub ws_xpixel: u16,
     pub ws_ypixel: u16,
 }
+
+// SAFETY: repr(C), four u16 fields, no padding.
+unsafe impl crate::syscall::userspace::UserPod for UserWinsize {}
 
 /// Handle ioctl commands that target a PTY master or slave file descriptor.
 ///
@@ -306,9 +310,7 @@ pub fn handle_pty_ioctl(master_fd: usize, cmd: usize, arg: usize) -> Option<Sysc
                         ws_xpixel: w.xpixel,
                         ws_ypixel: w.ypixel,
                     };
-                    // SAFETY: arg was validated above.
-                    unsafe { core::ptr::write(arg as *mut UserWinsize, user_ws) };
-                    Ok(0)
+                    super::userspace::write_user(arg, user_ws).map(|()| 0)
                 }
                 None => Err(SyscallError::ResourceNotFound),
             }
@@ -322,8 +324,10 @@ pub fn handle_pty_ioctl(master_fd: usize, cmd: usize, arg: usize) -> Option<Sysc
                 return Some(Err(e));
             }
 
-            // SAFETY: arg was validated above.
-            let user_ws = unsafe { core::ptr::read(arg as *const UserWinsize) };
+            let user_ws: UserWinsize = match super::userspace::read_user(arg) {
+                Ok(ws) => ws,
+                Err(e) => return Some(Err(e)),
+            };
 
             let new_ws = crate::fs::pty::Winsize {
                 rows: user_ws.ws_row,

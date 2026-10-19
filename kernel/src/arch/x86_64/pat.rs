@@ -86,13 +86,17 @@ pub unsafe fn apply_write_combining(vaddr: usize, size: usize) {
 
     // Read CR3 for PML4 physical address
     let cr3: u64;
-    core::arch::asm!("mov {}, cr3", out(reg) cr3);
+    // SAFETY: reading CR3 in Ring 0 has no side effects.
+    unsafe { core::arch::asm!("mov {}, cr3", out(reg) cr3) };
     let pml4_phys = (cr3 & 0x000F_FFFF_FFFF_F000) as usize;
 
     let num_pages = size / 4096;
     for i in 0..num_pages {
         let addr = vaddr + i * 4096;
-        set_page_wc(pml4_phys, addr);
+        // SAFETY: pml4_phys is the active PML4 from CR3, and `addr` is one
+        // page of the range this function's caller guarantees is
+        // page-aligned and mapped with 4KB pages.
+        unsafe { set_page_wc(pml4_phys, addr) };
     }
 }
 
@@ -100,6 +104,13 @@ pub unsafe fn apply_write_combining(vaddr: usize, size: usize) {
 ///
 /// Walks PML4 -> PDPT -> PD -> PT, reads the leaf PTE, sets PWT=1,
 /// clears PCD and PAT, writes back, and flushes the TLB for that address.
+///
+/// # Safety
+///
+/// `pml4_phys` must be the physical address of the active PML4, and the
+/// physical memory window used by `phys_to_virt` must map every page-table
+/// frame it references. Changing the memory type of `vaddr` must be
+/// acceptable to every user of that page.
 unsafe fn set_page_wc(pml4_phys: usize, vaddr: usize) {
     // Extract page table indices from the virtual address
     let pml4_idx = (vaddr >> 39) & 0x1FF;
@@ -112,7 +123,9 @@ unsafe fn set_page_wc(pml4_phys: usize, vaddr: usize) {
         Some(v) => v as *const u64,
         None => return,
     };
-    let pml4_entry = pml4_virt.add(pml4_idx).read_volatile();
+    // SAFETY: pml4_virt maps the active PML4 page (this function's
+    // contract) and pml4_idx is masked to 0..512.
+    let pml4_entry = unsafe { pml4_virt.add(pml4_idx).read_volatile() };
     if (pml4_entry & PTE_PRESENT) == 0 {
         return;
     }
@@ -123,7 +136,9 @@ unsafe fn set_page_wc(pml4_phys: usize, vaddr: usize) {
         Some(v) => v as *const u64,
         None => return,
     };
-    let pdpt_entry = pdpt_virt.add(pdpt_idx).read_volatile();
+    // SAFETY: pdpt_phys came from a present PML4 entry, so it is a page
+    // table frame mapped by phys_to_virt; pdpt_idx is masked to 0..512.
+    let pdpt_entry = unsafe { pdpt_virt.add(pdpt_idx).read_volatile() };
     if (pdpt_entry & PTE_PRESENT) == 0 {
         return;
     }
@@ -138,7 +153,9 @@ unsafe fn set_page_wc(pml4_phys: usize, vaddr: usize) {
         Some(v) => v as *const u64,
         None => return,
     };
-    let pd_entry = pd_virt.add(pd_idx).read_volatile();
+    // SAFETY: pd_phys came from a present, non-huge PDPT entry, so it is a
+    // page table frame mapped by phys_to_virt; pd_idx is masked to 0..512.
+    let pd_entry = unsafe { pd_virt.add(pd_idx).read_volatile() };
     if (pd_entry & PTE_PRESENT) == 0 {
         return;
     }
@@ -153,8 +170,11 @@ unsafe fn set_page_wc(pml4_phys: usize, vaddr: usize) {
         Some(v) => v as *mut u64,
         None => return,
     };
-    let pt_entry_ptr = pt_virt.add(pt_idx);
-    let mut pte = pt_entry_ptr.read_volatile();
+    // SAFETY: pt_phys came from a present, non-huge PD entry, so it is a
+    // page table frame mapped by phys_to_virt; pt_idx is masked to 0..512.
+    let pt_entry_ptr = unsafe { pt_virt.add(pt_idx) };
+    // SAFETY: pt_entry_ptr is a valid, mapped PTE slot (see above).
+    let mut pte = unsafe { pt_entry_ptr.read_volatile() };
     if (pte & PTE_PRESENT) == 0 {
         return;
     }
@@ -163,7 +183,10 @@ unsafe fn set_page_wc(pml4_phys: usize, vaddr: usize) {
     pte |= PTE_PWT;
     pte &= !PTE_PCD;
     pte &= !PTE_PAT;
-    pt_entry_ptr.write_volatile(pte);
+    // SAFETY: pt_entry_ptr is a valid, mapped PTE slot; only the cache
+    // attribute bits of a present mapping change, which this function's
+    // contract permits.
+    unsafe { pt_entry_ptr.write_volatile(pte) };
 
     // Flush TLB for this address
     super::tlb_flush_address(vaddr as u64);

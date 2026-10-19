@@ -1,5 +1,11 @@
 # VeridianOS Kernel Tests
 
+> **These tests do not build (N-280).** None of the programs here compiles against the current
+> kernel, and no CI job builds them. The kernel's real tests are the host unit tests
+> (`cargo test --lib --features alloc -p veridian-kernel --target x86_64-unknown-linux-gnu`), the
+> in-kernel boot tests (`scripts/boot-test.sh`) and the rootfs runtime suites
+> (`scripts/dev/runtime-tests.sh`). Porting or removing this directory is tracked as N-280.
+
 This directory contains integration tests for the VeridianOS kernel.
 
 ## Running Tests
@@ -23,7 +29,6 @@ cargo test --test basic_boot --target x86_64-unknown-none -- --nocapture
 - `memory_tests` - Memory management subsystem tests
 - `ipc_basic` - Basic IPC functionality tests
 - `ipc_integration_tests` - Comprehensive IPC integration tests
-- `scheduler_tests` - Scheduler and task management tests
 - `process_tests` - Process lifecycle and management tests
 - `should_panic` - Test framework validation (should panic)
 

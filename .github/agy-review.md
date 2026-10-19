@@ -122,8 +122,8 @@ Authoritative context:
   - `cargo fmt --all --check`.
   - `cargo clippy -- -D warnings` on four targets:
     - `targets/x86_64-veridian.json` with `-Zbuild-std`;
-    - `aarch64-unknown-none`;
-    - `riscv64gc-unknown-none-elf`;
+    - `aarch64-unknown-none-softfloat`;
+    - `riscv64imac-unknown-none-elf`;
     - the host.
   - All three architectures boot to BOOTOK with every in-kernel test passing.
 - **Out of scope for review.** Do not ask for changes to vendored or generated trees: `target/`, the

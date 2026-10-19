@@ -35,11 +35,12 @@ use crate::{
 // QEMU virt machine GICv2 base addresses
 // ---------------------------------------------------------------------------
 
-/// GIC Distributor base address on QEMU virt machine.
-const GICD_BASE: usize = 0x0800_0000;
+/// GIC Distributor on the QEMU virt machine (physical 0x0800_0000, through
+/// the physical-memory map).
+const GICD_BASE: usize = super::platform::GICD;
 
-/// GIC CPU Interface base address on QEMU virt machine.
-const GICC_BASE: usize = 0x0801_0000;
+/// GIC CPU Interface on the QEMU virt machine (physical 0x0801_0000).
+const GICC_BASE: usize = super::platform::GICC;
 
 // ---------------------------------------------------------------------------
 // GIC Distributor (GICD) register offsets
@@ -66,6 +67,9 @@ const GICD_IPRIORITYR: usize = 0x400;
 const GICD_ITARGETSR: usize = 0x800;
 /// Interrupt Configuration Registers (2 bits per interrupt).
 const GICD_ICFGR: usize = 0xC00;
+/// Software Generated Interrupt Register: target list (bits 16-23) and
+/// SGI number (bits 0-3).
+const GICD_SGIR: usize = 0xF00;
 
 // ---------------------------------------------------------------------------
 // GIC CPU Interface (GICC) register offsets
@@ -402,19 +406,36 @@ impl Gic {
 /// Reads GICC_IAR directly instead of through the `GIC` mutex: the CPU
 /// interface is banked per CPU, IAR/EOIR need no shared state, and an
 /// interrupt handler must never wait for a lock the interrupted code holds.
-/// Returns `None` for a spurious read (1023).
+/// Returns the whole IAR value, `None` for a spurious read (1023): its
+/// interrupt ID is bits 0-9, and for an SGI bits 10-12 name the CPU that
+/// sent it. End the interrupt with the whole value (`end_of_interrupt_raw`),
+/// as GICv2 requires for SGIs.
 pub fn acknowledge_raw() -> Option<u32> {
     // SAFETY: GICC_BASE + GICC_IAR is the GICv2 CPU interface's IAR on the
     // QEMU virt machine (mapped, as for all GIC accesses here).
     let iar = unsafe { ptr::read_volatile((GICC_BASE + GICC_IAR) as *const u32) };
-    let id = iar & 0x3FF;
-    (id != GIC_SPURIOUS_IRQ).then_some(id)
+    (iar & 0x3FF != GIC_SPURIOUS_IRQ).then_some(iar)
 }
 
-/// Signal end of interrupt for `id` from IRQ context (see `acknowledge_raw`).
-pub fn end_of_interrupt_raw(id: u32) {
-    // SAFETY: as acknowledge_raw; EOIR takes the ID returned by IAR.
-    unsafe { ptr::write_volatile((GICC_BASE + GICC_EOIR) as *mut u32, id) };
+/// Signal end of interrupt from IRQ context with the value
+/// `acknowledge_raw` returned.
+pub fn end_of_interrupt_raw(iar: u32) {
+    // SAFETY: as acknowledge_raw; EOIR takes the value IAR returned.
+    unsafe { ptr::write_volatile((GICC_BASE + GICC_EOIR) as *mut u32, iar) };
+}
+
+/// Send SGI `sgi` (0-15) to the CPU with GIC CPU interface number `target`
+/// (0-7). SGIs are always enabled in GICv2, so the target takes it as soon
+/// as its priority mask allows.
+pub fn send_sgi_raw(target: u32, sgi: u32) {
+    let value = ((1u32 << (target & 7)) << 16) | (sgi & 0xF);
+    // SAFETY: GICD_SGIR on the QEMU virt machine's distributor; the write
+    // only raises an interrupt. The barrier makes the caller's stores (the
+    // work the target is woken for) visible first.
+    unsafe {
+        core::arch::asm!("dsb ishst", options(nostack, preserves_flags));
+        ptr::write_volatile((GICD_BASE + GICD_SGIR) as *mut u32, value);
+    }
 }
 
 /// Initialize the GICv2 controller.
@@ -430,8 +451,8 @@ pub fn init() -> KernelResult<()> {
     gic.init_cpu_interface();
 
     // Print initialization info via direct UART (println! is a no-op on AArch64)
-    // SAFETY: uart_write_str performs raw MMIO writes to the PL011 UART at
-    // 0x0900_0000. The UART is memory-mapped by QEMU's virt machine and the
+    // SAFETY: uart_write_str performs raw MMIO writes to the PL011 UART
+    // (`platform::PL011`). The UART is memory-mapped by QEMU's virt machine and the
     // write is non-destructive. Called during single-threaded kernel init.
     unsafe {
         use crate::arch::aarch64::direct_uart::uart_write_str;
@@ -445,6 +466,21 @@ pub fn init() -> KernelResult<()> {
             resource: "GIC",
             id: 0,
         })
+}
+
+/// Initialize the calling secondary CPU's GIC CPU interface (its banked
+/// registers; the distributor is set up once by the boot CPU). Plain MMIO
+/// stores and no lock, so it is usable before the MMU is on (N-28).
+pub fn init_secondary_cpu_interface() {
+    // SAFETY: GICC_BASE is the GICv2 CPU interface on QEMU virt, banked per
+    // CPU; these are the same writes `init_cpu_interface` makes on the boot
+    // CPU.
+    unsafe {
+        ptr::write_volatile((GICC_BASE + GICC_PMR) as *mut u32, 0xFF);
+        ptr::write_volatile((GICC_BASE + GICC_BPR) as *mut u32, 0);
+        ptr::write_volatile((GICC_BASE + GICC_CTLR) as *mut u32, 1);
+        core::arch::asm!("dsb sy", "isb", options(nostack));
+    }
 }
 
 /// Enable a specific IRQ line.

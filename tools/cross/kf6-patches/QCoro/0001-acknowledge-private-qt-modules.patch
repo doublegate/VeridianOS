@@ -1,0 +1,24 @@
+VeridianOS: QCoro acknowledges the private Qt modules it requests
+
+QCoro's QtQuick and QML integration is built on Qt internals by design and
+requests QuickPrivate and QmlPrivate. Qt then warns that the project is
+tied to this Qt build ("This project is using headers of the QuickPrivate
+module ..."), unless the project says it knows: KDE projects get that
+from ECM's KDECMakeSettings (QT_NO_PRIVATE_MODULE_WARNING, "We use private
+Qt modules in various places"), which QCoro does not use. QCoro now sets
+it where it asks for those modules. (The coupling is real and handled:
+the stack builds QCoro against the Qt it runs with.)
+
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -64,6 +64,10 @@
+ endif()
+ if (QCORO_WITH_QTWEBSOCKETS)
+     list(APPEND REQUIRED_QT_COMPONENTS WebSockets)
++endif()
++if (QCORO_WITH_QTQUICK OR QCORO_WITH_QML)
++    # The QtQuick and QML integrations use Qt internals by design.
++    set(QT_NO_PRIVATE_MODULE_WARNING ON)
+ endif()
+ if (QCORO_WITH_QTQUICK)
+     list(APPEND REQUIRED_QT_COMPONENTS Gui Quick QuickPrivate)

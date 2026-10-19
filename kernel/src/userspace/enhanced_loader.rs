@@ -343,7 +343,7 @@ impl EnhancedElfLoader {
 
         // User stack typically starts at a high address and grows down
         // Use the process's configured stack pointer
-        let stack_top = crate::mm::user_layout::USER_SPACE_END as u64; // top of user space
+        let stack_top = crate::mm::user_layout::user_space_end() as u64; // top of user space
         let stack_size = 0x10000_u64; // 64KB stack
 
         // Map stack pages
@@ -514,9 +514,10 @@ pub fn load_and_execute(path: &str, args: ProgramArgs) -> Result<ProcessId, Kern
     println!("[ELF-LOADER] Loading program: {}", path);
 
     // Read file from filesystem
-    let vfs = crate::fs::get_vfs();
-    let file_node = vfs
-        .open(path, crate::fs::file::OpenFlags::read_only())
+    let file_node = crate::fs::get_vfs()
+        .as_caller()
+        .open_follow_canonical(path, crate::fs::file::OpenFlags::read_only(), true)
+        .map(|(node, _)| node)
         .map_err(|_| KernelError::NotFound {
             resource: "file",
             id: 0,
@@ -606,9 +607,10 @@ fn load_interpreter(process: &Process, interp_path: &str) -> Result<VirtualAddre
     println!("[ELF-LOADER] Loading interpreter from {}", interp_path);
 
     // Read interpreter from filesystem
-    let vfs = crate::fs::get_vfs();
-    let file_node = vfs
-        .open(interp_path, crate::fs::file::OpenFlags::read_only())
+    let file_node = crate::fs::get_vfs()
+        .as_caller()
+        .open_follow_canonical(interp_path, crate::fs::file::OpenFlags::read_only(), true)
+        .map(|(node, _)| node)
         .map_err(|_| KernelError::NotFound {
             resource: "interpreter",
             id: 0,
@@ -636,7 +638,7 @@ fn load_interpreter(process: &Process, interp_path: &str) -> Result<VirtualAddre
 
     // Load interpreter at a different base address to avoid collision
     // Typically interpreters are position-independent, so we load at a high address
-    let interp_base = 0x7F00_0000_0000_u64;
+    let interp_base = crate::mm::user_layout::LEGACY_INTERP_BASE as u64;
 
     let mut memory_space = process.memory_space.lock();
 

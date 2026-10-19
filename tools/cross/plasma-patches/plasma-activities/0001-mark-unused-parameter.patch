@@ -1,0 +1,18 @@
+VeridianOS: mark Manager::serviceOwnerChanged()'s unused newOwner parameter
+
+GCC reported -Wunused-parameter for 'newOwner' in src/lib/manager_p.cpp. The
+slot re-queries the bus for the service state instead of using the owner
+arguments; it already marks oldOwner with Q_UNUSED, and now marks newOwner
+the same way. Behaviour is unchanged.
+
+diff -ru a/src/lib/manager_p.cpp b/src/lib/manager_p.cpp
+--- a/src/lib/manager_p.cpp	2026-10-08 17:00:33.244735099 -0400
++++ b/src/lib/manager_p.cpp	2026-10-08 17:00:42.336048667 -0400
+@@ -92,6 +92,7 @@
+ void Manager::serviceOwnerChanged(const QString &serviceName, const QString &oldOwner, const QString &newOwner)
+ {
+     Q_UNUSED(oldOwner);
++    Q_UNUSED(newOwner);
+ 
+     if (serviceName == KAMD_DBUS_SERVICE) {
+         const bool isRunning = QDBusConnection::sessionBus().interface()->isServiceRegistered(KAMD_DBUS_SERVICE);

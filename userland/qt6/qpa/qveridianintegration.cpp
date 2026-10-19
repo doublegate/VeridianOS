@@ -142,8 +142,6 @@ bool QVeridianIntegration::hasCapability(QPlatformIntegration::Capability cap) c
         return true;
     case ThreadedOpenGL:
         return true;
-    case RasterGLSurface:
-        return true;
     case WindowManagement:
         return true;
     default:

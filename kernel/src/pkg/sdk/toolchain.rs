@@ -418,13 +418,13 @@ impl LinkerConfig {
 /// The script defines entry points and section layout appropriate for each
 /// supported architecture:
 /// - x86_64: kernel mapped at `0xFFFFFFFF80100000` (higher-half)
-/// - aarch64: loaded at `0x40080000` (QEMU virt)
+/// - aarch64: loaded at `0x40200000` (QEMU virt, 2 MiB into RAM)
 /// - riscv64: loaded at `0x80200000` (OpenSBI payload)
 #[cfg(feature = "alloc")]
 pub fn generate_linker_script(target: &str) -> String {
     let (entry, origin) = match target {
         "x86_64-veridian" | "x86_64-unknown-none" => ("_start", "0xFFFFFFFF80100000"),
-        "aarch64-veridian" | "aarch64-unknown-none" => ("_start", "0x40080000"),
+        "aarch64-veridian" | "aarch64-unknown-none" => ("_start", "0x40200000"),
         "riscv64gc-veridian" | "riscv64gc-unknown-none-elf" => ("_start", "0x80200000"),
         _ => ("_start", "0x100000"),
     };

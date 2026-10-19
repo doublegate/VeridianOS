@@ -1,0 +1,18 @@
+VeridianOS: colors KCM: no leftover debug message(WARNING)
+
+kcms/colors/CMakeLists.txt printed the accent colour D-Bus adaptor's
+generated file names as a CMake warning on every configure
+("message(WARNING "${plasma-accentcolor-service_DBUS_SRCS}")"), a debug
+line left behind (still on upstream master). Removed; nothing else uses
+it.
+
+--- a/kcms/colors/CMakeLists.txt
++++ b/kcms/colors/CMakeLists.txt
+@@ -51,7 +51,6 @@
+     org.kde.plasmashell.accentColor.xml
+     OPTIONS -M
+ )
+-message(WARNING "${plasma-accentcolor-service_DBUS_SRCS}")
+ target_sources(plasma-apply-colorscheme PRIVATE ${plasma-accentcolor-service_DBUS_SRCS})
+ target_sources(plasma-apply-colorscheme PRIVATE 
+     plasma-apply-colorscheme.cpp

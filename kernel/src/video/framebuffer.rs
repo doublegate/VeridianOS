@@ -202,24 +202,32 @@ pub(crate) unsafe fn blit_to_framebuffer(
 
             if a == 0xFF {
                 // Opaque -- direct write
-                // SAFETY: dst_off is within the framebuffer region (clipped above).
-                let dst = fb_ptr.add(dst_off);
-                *dst = b;
-                *dst.add(1) = g;
-                *dst.add(2) = r;
-                *dst.add(3) = 0xFF;
+                // SAFETY: dst_off is within the framebuffer region (clipped
+                // above), and this function's caller guarantees fb_addr is
+                // writable for fb_stride * fb_height bytes.
+                unsafe {
+                    let dst = fb_ptr.add(dst_off);
+                    *dst = b;
+                    *dst.add(1) = g;
+                    *dst.add(2) = r;
+                    *dst.add(3) = 0xFF;
+                }
             } else if a > 0 {
                 // Alpha blend with existing framebuffer content
-                // SAFETY: dst_off is within the framebuffer region (clipped above).
-                let dst = fb_ptr.add(dst_off);
-                let bg_b = *dst;
-                let bg_g = *dst.add(1);
-                let bg_r = *dst.add(2);
-                let (br, bg, bb) = alpha_blend(r, g, b, a, bg_r, bg_g, bg_b);
-                *dst = bb;
-                *dst.add(1) = bg;
-                *dst.add(2) = br;
-                *dst.add(3) = 0xFF;
+                // SAFETY: dst_off is within the framebuffer region (clipped
+                // above), and this function's caller guarantees fb_addr is
+                // readable and writable for fb_stride * fb_height bytes.
+                unsafe {
+                    let dst = fb_ptr.add(dst_off);
+                    let bg_b = *dst;
+                    let bg_g = *dst.add(1);
+                    let bg_r = *dst.add(2);
+                    let (br, bg, bb) = alpha_blend(r, g, b, a, bg_r, bg_g, bg_b);
+                    *dst = bb;
+                    *dst.add(1) = bg;
+                    *dst.add(2) = br;
+                    *dst.add(3) = 0xFF;
+                }
             }
             // a == 0: fully transparent, skip
         }

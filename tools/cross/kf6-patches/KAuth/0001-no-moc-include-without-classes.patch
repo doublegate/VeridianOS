@@ -1,0 +1,18 @@
+VeridianOS: KAuth polkit backend: no moc include for a file without classes
+
+Polkit1Backend.cpp includes "Polkit1Backend.moc", but the file declares
+nothing for moc (its QObject classes and the plugin metadata are in
+Polkit1Backend.h, covered by the moc_Polkit1Backend.cpp include next to
+it), so AutoMoc printed "Polkit1Backend.cpp: note: No relevant classes
+found. No output generated." The include is removed; no generated code
+changes.
+
+--- a/src/backends/polkit-1/Polkit1Backend.cpp
++++ b/src/backends/polkit-1/Polkit1Backend.cpp
+@@ -246,6 +246,4 @@
+ 
+ } // namespace Auth
+ 
+-#include "Polkit1Backend.moc"
+-
+ #include "moc_Polkit1Backend.cpp"

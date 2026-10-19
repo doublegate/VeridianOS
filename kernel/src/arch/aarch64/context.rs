@@ -2,8 +2,6 @@
 
 use core::arch::asm;
 
-use crate::sched::task::TaskContext;
-
 /// AArch64 CPU context
 #[repr(C)]
 #[derive(Debug, Clone)]
@@ -49,6 +47,18 @@ pub struct FpuState {
 }
 
 impl AArch64Context {
+    /// Take the user registers of `frame` (a live exception frame) and the
+    /// TLS register `tls`: a fork or clone child resumes where its parent's
+    /// system call returns to, not at the program's entry.
+    pub fn load_user_frame(&mut self, frame: &crate::arch::aarch64::switch::UserFrame, tls: u64) {
+        self.x = frame.x;
+        self.sp = frame.sp;
+        self.pc = frame.elr;
+        self.elr = frame.elr;
+        self.tpidr_el0 = tls;
+        self.tls_base = tls;
+    }
+
     /// Create new context for a task
     pub fn new(entry_point: usize, stack_pointer: usize) -> Self {
         Self {
@@ -160,112 +170,6 @@ impl crate::arch::context::ThreadContext for AArch64Context {
     fn clone_from(&mut self, other: &Self) {
         *self = other.clone();
     }
-
-    fn to_task_context(&self) -> TaskContext {
-        TaskContext::AArch64(self.clone())
-    }
-}
-
-/// Switch context using the ThreadContext interface
-pub fn switch_context(from: &mut AArch64Context, to: &AArch64Context) {
-    // SAFETY: Both `from` and `to` are valid references to AArch64Context structs
-    // with repr(C) layout. context_switch saves all registers from the current CPU
-    // state into `from` and restores them from `to`. Interrupts must be disabled
-    // by the caller to prevent concurrent access to the contexts.
-    unsafe {
-        context_switch(from as *mut _, to as *const _);
-    }
-}
-
-/// Switch from current context to new context
-///
-/// # Safety
-/// This function manipulates CPU state directly and must be called
-/// with interrupts disabled.
-#[no_mangle]
-pub unsafe extern "C" fn context_switch(current: *mut AArch64Context, next: *const AArch64Context) {
-    // Cannot use naked functions with asm! macro in current Rust version
-    // Using inline assembly in regular function
-    asm!(
-        // Save current context
-        // x0 = current context pointer
-        // x1 = next context pointer
-
-        // Save general purpose registers x2-x30 (x0-x1 are parameters)
-        "stp x2, x3, [x0, #16]",
-        "stp x4, x5, [x0, #32]",
-        "stp x6, x7, [x0, #48]",
-        "stp x8, x9, [x0, #64]",
-        "stp x10, x11, [x0, #80]",
-        "stp x12, x13, [x0, #96]",
-        "stp x14, x15, [x0, #112]",
-        "stp x16, x17, [x0, #128]",
-        "stp x18, x19, [x0, #144]",
-        "stp x20, x21, [x0, #160]",
-        "stp x22, x23, [x0, #176]",
-        "stp x24, x25, [x0, #192]",
-        "stp x26, x27, [x0, #208]",
-        "stp x28, x29, [x0, #224]",
-        "str x30, [x0, #240]", // x30 is link register
-        // Save stack pointer
-        "mov x2, sp",
-        "str x2, [x0, #248]",
-        // Save return address as PC
-        "str x30, [x0, #256]",
-        // Save SPSR and ELR
-        "mrs x2, SPSR_EL1",
-        "mrs x3, ELR_EL1",
-        "stp x2, x3, [x0, #264]",
-        // Save thread pointers
-        "mrs x2, TPIDR_EL0",
-        "mrs x3, TPIDR_EL1",
-        "stp x2, x3, [x0, #280]",
-        // Save translation table base
-        "mrs x2, TTBR0_EL1",
-        "str x2, [x0, #296]",
-        // Load new context
-        // Load TTBR0_EL1 first (if different)
-        "ldr x3, [x1, #296]", // New TTBR0
-        "cmp x2, x3",         // Compare with current
-        "b.eq 1f",            // Skip if same
-        "msr TTBR0_EL1, x3",  // Set new page table
-        "isb",                // Ensure completion
-        "1:",
-        // Load thread pointers
-        "ldp x2, x3, [x1, #280]",
-        "msr TPIDR_EL0, x2",
-        "msr TPIDR_EL1, x3",
-        // Load SPSR and ELR
-        "ldp x2, x3, [x1, #264]",
-        "msr SPSR_EL1, x2",
-        "msr ELR_EL1, x3",
-        // Load general purpose registers
-        "ldp x2, x3, [x1, #16]",
-        "ldp x4, x5, [x1, #32]",
-        "ldp x6, x7, [x1, #48]",
-        "ldp x8, x9, [x1, #64]",
-        "ldp x10, x11, [x1, #80]",
-        "ldp x12, x13, [x1, #96]",
-        "ldp x14, x15, [x1, #112]",
-        "ldp x16, x17, [x1, #128]",
-        "ldp x18, x19, [x1, #144]",
-        "ldp x20, x21, [x1, #160]",
-        "ldp x22, x23, [x1, #176]",
-        "ldp x24, x25, [x1, #192]",
-        "ldp x26, x27, [x1, #208]",
-        "ldp x28, x29, [x1, #224]",
-        "ldr x30, [x1, #240]",
-        // Load stack pointer
-        "ldr x0, [x1, #248]",
-        "mov sp, x0",
-        // Load x0 and x1 last
-        "ldp x0, x1, [x1, #0]",
-        // Return to new context
-        "ret",
-        in("x0") current,
-        in("x1") next,
-        options(noreturn)
-    );
 }
 
 /// Initialize FPU for current CPU
@@ -285,6 +189,16 @@ pub fn init_fpu() {
     }
 }
 
+/// The FP/SIMD state a new program starts with: every register zero, FPCR
+/// zero (round to nearest, no traps, no flush-to-zero), FPSR zero.
+pub fn initial_fpu() -> alloc::boxed::Box<FpuState> {
+    alloc::boxed::Box::new(FpuState {
+        v: [[0; 2]; 32],
+        fpcr: 0,
+        fpsr: 0,
+    })
+}
+
 /// Save FPU/NEON state to the given FpuState buffer
 ///
 /// Saves all 32 SIMD registers (Q0-Q31) plus FPCR and FPSR.
@@ -295,6 +209,9 @@ pub fn save_fpu_state(state: &mut FpuState) {
     unsafe {
         let base = state.v.as_mut_ptr() as *mut u64;
         asm!(
+            // The kernel is built without FP/SIMD (N-178); only this
+            // save/restore of user state uses those registers.
+            ".arch_extension fp",
             "stp q0,  q1,  [{base}]",
             "stp q2,  q3,  [{base}, #32]",
             "stp q4,  q5,  [{base}, #64]",
@@ -315,8 +232,8 @@ pub fn save_fpu_state(state: &mut FpuState) {
         );
         let mut fpcr: u32;
         let mut fpsr: u32;
-        asm!("mrs {fpcr:x}, FPCR", fpcr = out(reg) fpcr);
-        asm!("mrs {fpsr:x}, FPSR", fpsr = out(reg) fpsr);
+        asm!(".arch_extension fp", "mrs {fpcr:x}, FPCR", fpcr = out(reg) fpcr);
+        asm!(".arch_extension fp", "mrs {fpsr:x}, FPSR", fpsr = out(reg) fpsr);
         state.fpcr = fpcr;
         state.fpsr = fpsr;
     }
@@ -332,10 +249,13 @@ pub fn restore_fpu_state(state: &FpuState) {
     unsafe {
         let fpcr = state.fpcr;
         let fpsr = state.fpsr;
-        asm!("msr FPCR, {fpcr:x}", fpcr = in(reg) fpcr);
-        asm!("msr FPSR, {fpsr:x}", fpsr = in(reg) fpsr);
+        asm!(".arch_extension fp", "msr FPCR, {fpcr:x}", fpcr = in(reg) fpcr);
+        asm!(".arch_extension fp", "msr FPSR, {fpsr:x}", fpsr = in(reg) fpsr);
         let base = state.v.as_ptr() as *const u64;
         asm!(
+            // The kernel is built without FP/SIMD (N-178); only this
+            // save/restore of user state uses those registers.
+            ".arch_extension fp",
             "ldp q0,  q1,  [{base}]",
             "ldp q2,  q3,  [{base}, #32]",
             "ldp q4,  q5,  [{base}, #64]",
@@ -398,56 +318,4 @@ pub fn current_el() -> u8 {
         asm!("mrs {}, CurrentEL", out(reg) current_el);
         ((current_el >> 2) & 0x3) as u8
     }
-}
-
-/// Load context for first time (no previous context to save)
-///
-/// # Safety
-/// This function manipulates CPU state directly and must be called
-/// with interrupts disabled.
-#[no_mangle]
-pub unsafe extern "C" fn load_context(context: *const AArch64Context) {
-    // Cannot use naked functions with asm! macro in current Rust version
-    // Using inline assembly in regular function
-    asm!(
-        // x0 = context pointer
-
-        // Load translation table base
-        "ldr x1, [x0, #296]",
-        "msr TTBR0_EL1, x1",
-        "isb",
-        // Load thread pointers
-        "ldp x1, x2, [x0, #280]",
-        "msr TPIDR_EL0, x1",
-        "msr TPIDR_EL1, x2",
-        // Load SPSR and ELR
-        "ldp x1, x2, [x0, #264]",
-        "msr SPSR_EL1, x1",
-        "msr ELR_EL1, x2",
-        // Load general purpose registers
-        "ldp x2, x3, [x0, #16]",
-        "ldp x4, x5, [x0, #32]",
-        "ldp x6, x7, [x0, #48]",
-        "ldp x8, x9, [x0, #64]",
-        "ldp x10, x11, [x0, #80]",
-        "ldp x12, x13, [x0, #96]",
-        "ldp x14, x15, [x0, #112]",
-        "ldp x16, x17, [x0, #128]",
-        "ldp x18, x19, [x0, #144]",
-        "ldp x20, x21, [x0, #160]",
-        "ldp x22, x23, [x0, #176]",
-        "ldp x24, x25, [x0, #192]",
-        "ldp x26, x27, [x0, #208]",
-        "ldp x28, x29, [x0, #224]",
-        "ldr x30, [x0, #240]",
-        // Load stack pointer
-        "ldr x1, [x0, #248]",
-        "mov sp, x1",
-        // Load x0 and x1
-        "ldp x0, x1, [x0, #0]",
-        // Return to loaded context via exception return
-        "eret",
-        in("x0") context,
-        options(noreturn)
-    );
 }

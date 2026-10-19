@@ -1,0 +1,58 @@
+VeridianOS: fix KCodecs compiler warnings (redundant attribute, dead loop)
+
+GCC reported, for the VeridianOS cross build:
+
+- src/probers/LangBulgarianModel.cpp:148, :150: 'visibility' attribute
+  ignored [-Wattributes]. Latin5BulgarianModel and Win1251BulgarianModel are
+  first declared in nsSBCharSetProber.h ("extern const SequenceModel ...")
+  without the attribute, so GCC ignores KCODECS_NO_EXPORT on the later
+  definition. Drop it, like every other language model definition in
+  src/probers. The library is built with -fvisibility=hidden, so the symbols
+  stay hidden. No behaviour change.
+- src/kemailaddress.cpp:601: variable 'atCount' set but not used
+  [-Wunused-but-set-variable]. In KEmailAddress::isValidSimpleAddress() the
+  loop that tracks inQuotedString and decrements atCount computes values
+  that are never read afterwards (validation is done by the regular
+  expression that follows); remove the dead loop and both variables. No
+  behaviour change.
+
+diff -ru a/src/kemailaddress.cpp b/src/kemailaddress.cpp
+--- a/src/kemailaddress.cpp	2026-10-08 17:26:23.297598894 -0400
++++ b/src/kemailaddress.cpp	2026-10-08 17:26:23.309764042 -0400
+@@ -597,23 +597,6 @@
+         return false;
+     }
+ 
+-    bool inQuotedString = false;
+-    int atCount = localPart.count(QLatin1Char('@'));
+-
+-    unsigned int strlen = localPart.length();
+-    for (unsigned int index = 0; index < strlen; index++) {
+-        switch (localPart[index].toLatin1()) {
+-        case '"':
+-            inQuotedString = !inQuotedString;
+-            break;
+-        case '@':
+-            if (inQuotedString) {
+-                --atCount;
+-            }
+-            break;
+-        }
+-    }
+-
+     QString addrRx;
+ 
+     if (localPart[0] == QLatin1Char('\"') || localPart[localPart.length() - 1] == QLatin1Char('\"')) {
+diff -ru a/src/probers/LangBulgarianModel.cpp b/src/probers/LangBulgarianModel.cpp
+--- a/src/probers/LangBulgarianModel.cpp	2026-10-08 17:26:23.293958608 -0400
++++ b/src/probers/LangBulgarianModel.cpp	2026-10-08 17:26:23.309634112 -0400
+@@ -145,7 +145,7 @@
+     1, 1, 1, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
+ };
+ 
+-const SequenceModel KCODECS_NO_EXPORT Latin5BulgarianModel = {Latin5_BulgarianCharToOrderMap, BulgarianLangModel, (float)0.969392, false, "ISO-8859-5"};
++const SequenceModel Latin5BulgarianModel = {Latin5_BulgarianCharToOrderMap, BulgarianLangModel, (float)0.969392, false, "ISO-8859-5"};
+ 
+-const SequenceModel KCODECS_NO_EXPORT Win1251BulgarianModel = {win1251BulgarianCharToOrderMap, BulgarianLangModel, (float)0.969392, false, "windows-1251"};
++const SequenceModel Win1251BulgarianModel = {win1251BulgarianCharToOrderMap, BulgarianLangModel, (float)0.969392, false, "windows-1251"};
+ }

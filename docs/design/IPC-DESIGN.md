@@ -2,11 +2,13 @@
 
 **Version**: 1.5
 **Date**: 2026-10-06
-**Status**: Implemented in the kernel; not reachable from user space yet (see below)
+**Status**: Implemented in the kernel; since v0.27.0 user programs reach endpoint send and receive (see below)
 
-### Current Implementation Status (v0.26.0)
+### Current Implementation Status (v0.26.0; reachability updated for v0.27.0)
 
-What exists, and what the v0.26 audit work established:
+Since v0.27.0 a user program can create an endpoint, send to it and receive from it through the
+native calls at private numbers 1024-1031 (ADR 0009; `docs/KNOWN-LIMITATIONS.md`). What exists,
+and what the v0.26 audit work established:
 
 - **Three message size tiers** (IPC-ARCH-02):
 
@@ -24,10 +26,12 @@ What exists, and what the v0.26 audit work established:
   SHARE right, flushing the TLB per page. Copy-on-write transfer is refused until frame reference
   counting lands in v0.27. Before v0.26, "mapping" a region allocated fresh zeroed frames, so
   nothing was shared (IPC-INC-02).
-- **Not reachable from user space.** Native syscall numbers 0-7 (IPC send, receive, call, reply,
-  create, bind, share and map) are routed to Linux translation, because Qt and libstdc++ issue raw
-  Linux numbers (audit N-33). As a result:
-  - the IPC paths above are verified only by host unit tests and review;
+- **Reachable from user space since v0.27.0, in part.** In v0.26.0 the native numbers 0-7 were
+  routed to Linux translation (audit N-33). Since ADR 0009 the native calls have private numbers
+  1024-1031, and a program can create an endpoint, send to it and receive from it
+  (`native_ipc_send_receive_blocks`). Still:
+  - shared regions, the buffered tier and call/reply are verified only by host unit tests and
+    review;
   - the "<1us" figure measures in-kernel helpers, not a user-to-user round trip.
 
   The fix is the v0.28 ABI work (X1): one Linux ABI, with VeridianOS IPC calls in a separate number

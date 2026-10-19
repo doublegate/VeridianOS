@@ -1,0 +1,24 @@
+VeridianOS: ctestfw getNextLevel without its unbounded scratch copy
+
+getNextLevel() copied each test path component into a local char n[255]
+with strncpy and the component's length, without checking it, then
+NUL-terminated it at that length: a component of 255 characters or more
+(a test path is given on the command line) wrote past the array. n was
+read only by a commented-out debug printf, so the copy and the array are
+removed; the function's results (*nameLen, *nextName) are unchanged.
+
+--- a/tools/ctestfw/ctest.c
++++ b/tools/ctestfw/ctest.c
+@@ -159,12 +159,8 @@
+ 
+     if( *nextName != 0 )
+     {
+-        char n[255];
+         *nameLen = (int)((*nextName) - name);
+         (*nextName)++; /* skip '/' */
+-        strncpy(n, name, *nameLen);
+-        n[*nameLen] = 0;
+-        /*printf("->%s-< [%d] -> [%s]\n", name, *nameLen, *nextName);*/
+     }
+     else {
+         *nameLen = (int)strlen(name);

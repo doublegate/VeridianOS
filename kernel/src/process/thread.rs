@@ -11,7 +11,6 @@ extern crate alloc;
 
 #[cfg(feature = "alloc")]
 use alloc::{string::String, sync::Arc};
-use core::ptr::NonNull;
 
 use spin::Mutex;
 
@@ -20,7 +19,6 @@ use crate::{
     arch::context::{ArchThreadContext, ThreadContext},
     error::KernelError,
     mm::{FRAME_ALLOCATOR, FRAME_SIZE},
-    sched::task::Task,
 };
 
 /// Per-thread filesystem state for CLONE_FS support.
@@ -36,13 +34,23 @@ use crate::{
 #[cfg(feature = "alloc")]
 #[derive(Debug)]
 pub struct ThreadFs {
-    /// Current working directory path. Protected by a spinlock because
-    /// it can be read from syscall paths (getcwd) and modified from
-    /// others (chdir) concurrently.
+    /// Current working directory, relative to `root` (what getcwd
+    /// reports). Protected by a spinlock because it can be read from
+    /// syscall paths (getcwd) and modified from others (chdir)
+    /// concurrently.
     pub cwd: Mutex<alloc::string::String>,
+    /// Root directory (chroot), as a canonical path in the whole tree; "/"
+    /// unless the process called chroot. Path lookups never leave it.
+    pub root: Mutex<alloc::string::String>,
     /// File creation mask (umask). Atomic because it can be read/written
     /// from concurrent syscall paths without holding a lock.
     pub umask: AtomicU32,
+    /// The threads using this state (Linux's fs->users): each thread
+    /// counts itself from creation until it is dropped. More than the
+    /// threads of one process means another process can change this one's
+    /// directories and umask (CLONE_FS), so exec grants no set-ID
+    /// privilege (LSM_UNSAFE_SHARE).
+    pub users: AtomicUsize,
 }
 
 #[cfg(feature = "alloc")]
@@ -53,7 +61,20 @@ impl ThreadFs {
     pub fn new_root() -> Arc<Self> {
         Arc::new(Self {
             cwd: Mutex::new(alloc::string::String::from("/")),
+            root: Mutex::new(alloc::string::String::from("/")),
             umask: AtomicU32::new(0o022),
+            users: AtomicUsize::new(0),
+        })
+    }
+
+    /// Filesystem state starting in `cwd` under `root`, umask 0o022: a new
+    /// process's first thread starts in its creator's directories.
+    pub fn with_cwd(cwd: alloc::string::String, root: alloc::string::String) -> Arc<Self> {
+        Arc::new(Self {
+            cwd: Mutex::new(cwd),
+            root: Mutex::new(root),
+            umask: AtomicU32::new(0o022),
+            users: AtomicUsize::new(0),
         })
     }
 
@@ -73,7 +94,9 @@ impl ThreadFs {
     pub fn clone_copy(src: &Arc<Self>) -> Arc<Self> {
         Arc::new(Self {
             cwd: Mutex::new(src.cwd.lock().clone()),
+            root: Mutex::new(src.root.lock().clone()),
             umask: AtomicU32::new(src.umask.load(Ordering::Acquire)),
+            users: AtomicUsize::new(0),
         })
     }
 }
@@ -93,7 +116,7 @@ pub const GUARD_PAGE_COUNT: usize = 1;
 
 /// Base virtual address for user thread stacks.
 /// Grows downward from near the top of user address space.
-const USER_STACK_REGION_BASE: usize = 0x0000_7FFE_0000_0000;
+const USER_STACK_REGION_BASE: usize = crate::mm::user_layout::THREAD_STACKS_TOP;
 
 /// Base virtual address for TLS regions.
 #[allow(dead_code)] // TLS mapping base address -- used when TLS is wired
@@ -121,16 +144,6 @@ fn free_stack_frames(frame: crate::mm::FrameNumber, page_count: usize) {
     let allocator = FRAME_ALLOCATOR.lock();
     let _ = allocator.free_frames(frame, page_count);
 }
-
-/// Safe wrapper for task pointer that implements Send + Sync
-///
-/// Safety: Task pointers are only accessed from within the scheduler
-/// which has its own synchronization mechanisms.
-#[derive(Debug)]
-pub struct TaskPtr(Option<NonNull<Task>>);
-
-unsafe impl Send for TaskPtr {}
-unsafe impl Sync for TaskPtr {}
 
 /// Thread ID type
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -377,11 +390,49 @@ pub struct Thread {
     /// Floating point state saved flag
     pub fpu_used: AtomicU32,
 
-    /// Scheduler task pointer (if scheduled)
-    pub task_ptr: Mutex<TaskPtr>,
-
     /// clear_tid pointer for CLONE_CHILD_CLEARTID
     pub clear_tid: AtomicUsize,
+
+    /// Signals this thread blocks (Linux layout: bit `sig - 1`; N-96, N-109).
+    pub sigmask: AtomicU64,
+
+    /// Signals sent to this thread alone (tkill, tgkill, faults), same layout.
+    /// Process-directed signals pend on the process.
+    pub sigpending: AtomicU64,
+    /// Queued real-time signals behind `sigpending` (N-209).
+    pub rt_queue: super::signals::RtQueue,
+
+    /// The mask to restore when the handler that interrupted `sigsuspend`
+    /// returns (`has_saved_sigmask` says whether one is saved).
+    pub saved_sigmask: AtomicU64,
+    pub has_saved_sigmask: AtomicBool,
+    /// The system call a signal just interrupted returns EINTR even to a
+    /// handler with SA_RESTART (sigsuspend, sigtimedwait, sleeps, poll and
+    /// friends, as Linux's ERESTARTNOHAND and plain EINTR). Set by the
+    /// system call dispatcher, consumed by the next signal delivery.
+    pub no_restart: AtomicBool,
+    /// The alternate signal stack (sigaltstack; N-222). A new thread has
+    /// none; fork copies the parent thread's.
+    pub altstack: Mutex<super::signals::SigAltStack>,
+    /// The robust futex list head (set_robust_list; N-225), walked when the
+    /// thread exits. A new thread has none; exec clears it.
+    pub robust_list: AtomicUsize,
+    /// Scheduling policy and parameters (sched_setscheduler, sched_setattr,
+    /// setpriority; N-221). The dispatcher task running the thread follows
+    /// them.
+    pub sched: Mutex<SchedParams>,
+    /// prctl(PR_SET_NO_NEW_PRIVS): exec never grants this thread more
+    /// privilege (no setuid or setgid). It cannot be cleared, and every
+    /// thread and process the thread creates inherits it.
+    pub no_new_privs: AtomicBool,
+    /// The command name (Linux `comm`): up to 15 bytes and a NUL, the
+    /// thread's name at creation, its program's file name after exec, or
+    /// what PR_SET_NAME set (N-227). Threads and fork children inherit it.
+    pub comm: Mutex<[u8; COMM_LEN]>,
+    /// The thread no longer counts as a user of its filesystem state
+    /// ([`Thread::release_fs`]).
+    #[cfg(feature = "alloc")]
+    fs_released: AtomicBool,
     /// Detached flag (pthread_detach)
     pub detached: AtomicBool,
     /// Filesystem view (cwd, umask)
@@ -440,6 +491,21 @@ impl Stack {
     }
 }
 
+/// The size of a command name with its NUL (Linux TASK_COMM_LEN).
+pub const COMM_LEN: usize = 16;
+
+/// `name` as a command name: its first 15 bytes, NUL-padded.
+pub fn comm_from(name: &[u8]) -> [u8; COMM_LEN] {
+    let mut comm = [0u8; COMM_LEN];
+    let n = name
+        .iter()
+        .take(COMM_LEN - 1)
+        .position(|&b| b == 0)
+        .unwrap_or(name.len().min(COMM_LEN - 1));
+    comm[..n].copy_from_slice(&name[..n]);
+    comm
+}
+
 /// Thread creation parameters
 #[cfg(feature = "alloc")]
 pub struct ThreadParams {
@@ -451,6 +517,15 @@ pub struct ThreadParams {
     pub user_stack_size: usize,
     pub kernel_stack_base: usize,
     pub kernel_stack_size: usize,
+}
+
+/// A thread that goes without exiting (a process torn down whole) stops
+/// using its filesystem state here.
+#[cfg(feature = "alloc")]
+impl Drop for Thread {
+    fn drop(&mut self) {
+        self.release_fs();
+    }
 }
 
 impl Thread {
@@ -476,6 +551,8 @@ impl Thread {
             kernel_stack_base + kernel_stack_size,
         );
 
+        let comm = comm_from(name.as_bytes());
+        fs.users.fetch_add(1, Ordering::AcqRel);
         Self {
             tid,
             process,
@@ -493,8 +570,19 @@ impl Thread {
             exit_code: AtomicU32::new(0),
             priority: 2, // Normal priority
             fpu_used: AtomicU32::new(0),
-            task_ptr: Mutex::new(TaskPtr(None)),
             clear_tid: AtomicUsize::new(0),
+            sigmask: AtomicU64::new(0),
+            sigpending: AtomicU64::new(0),
+            rt_queue: super::signals::RtQueue::new(),
+            saved_sigmask: AtomicU64::new(0),
+            has_saved_sigmask: AtomicBool::new(false),
+            no_restart: AtomicBool::new(false),
+            altstack: Mutex::new(super::signals::SigAltStack::default()),
+            robust_list: AtomicUsize::new(0),
+            sched: Mutex::new(SchedParams::default()),
+            no_new_privs: AtomicBool::new(false),
+            comm: Mutex::new(comm),
+            fs_released: AtomicBool::new(false),
             detached: AtomicBool::new(false),
             fs,
         }
@@ -573,76 +661,26 @@ impl Thread {
         self.cpu_time.fetch_add(microseconds, Ordering::Relaxed);
     }
 
-    /// Set scheduler task pointer
-    pub fn set_task_ptr(&self, task: Option<NonNull<Task>>) {
-        self.task_ptr.lock().0 = task;
-    }
-
-    /// Get scheduler task pointer
-    pub fn get_task_ptr(&self) -> Option<NonNull<Task>> {
-        self.task_ptr.lock().0
-    }
-
-    /// Synchronize state with scheduler task
-    pub fn sync_state_with_scheduler(&self, new_state: ThreadState) {
-        // Update our state
-        self.set_state(new_state);
-
-        // Update scheduler task state if linked
-        if let Some(task_ptr) = self.get_task_ptr() {
-            // SAFETY: task_ptr is a NonNull<Task> obtained from
-            // get_task_ptr(), which returns a valid pointer to the
-            // scheduler's task. Writing the state field synchronizes the
-            // thread state with the scheduler's view. The pointer is valid
-            // because the task is not freed while the thread holds a
-            // reference to it.
-            unsafe {
-                let task = task_ptr.as_ptr();
-                (*task).state = match new_state {
-                    ThreadState::Creating => crate::process::ProcessState::Creating,
-                    ThreadState::Ready => crate::process::ProcessState::Ready,
-                    ThreadState::Running => crate::process::ProcessState::Running,
-                    ThreadState::Blocked => crate::process::ProcessState::Blocked,
-                    ThreadState::Sleeping => crate::process::ProcessState::Sleeping,
-                    ThreadState::Zombie => crate::process::ProcessState::Zombie,
-                    ThreadState::Dead => crate::process::ProcessState::Dead,
-                };
-            }
-        }
-    }
-
     /// Mark thread as ready to run
     pub fn set_ready(&self) {
-        self.sync_state_with_scheduler(ThreadState::Ready);
+        self.set_state(ThreadState::Ready);
     }
 
     /// Mark thread as blocked
-    pub fn set_blocked(&self, reason: Option<u64>) {
-        self.sync_state_with_scheduler(ThreadState::Blocked);
-
-        // Update scheduler task blocked_on field if linked
-        if let Some(task_ptr) = self.get_task_ptr() {
-            // SAFETY: task_ptr is a NonNull<Task> from get_task_ptr(),
-            // pointing to the scheduler's task entry. Writing blocked_on
-            // records the blocking reason. The pointer remains valid because
-            // the task is not freed while the thread references it.
-            unsafe {
-                let task = task_ptr.as_ptr();
-                (*task).blocked_on = reason;
-            }
-        }
+    pub fn set_blocked(&self, _reason: Option<u64>) {
+        self.set_state(ThreadState::Blocked);
     }
 
     /// Mark thread as running on CPU
     pub fn set_running(&self, cpu: u8) {
         self.current_cpu.store(cpu as u32, Ordering::Release);
-        self.sync_state_with_scheduler(ThreadState::Running);
+        self.set_state(ThreadState::Running);
     }
 
     /// Mark thread as exited
     pub fn set_exited(&self, exit_code: i32) {
         self.exit_code.store(exit_code as u32, Ordering::Release);
-        self.sync_state_with_scheduler(ThreadState::Zombie);
+        self.set_state(ThreadState::Zombie);
     }
 
     /// Get total CPU time
@@ -694,6 +732,94 @@ impl Thread {
     pub fn fs(&self) -> Arc<ThreadFs> {
         self.fs.clone()
     }
+
+    /// Stop counting as a user of the filesystem state ([`ThreadFs::users`]),
+    /// once: when the thread exits (Linux's exit_fs), or when it is dropped
+    /// without having exited.
+    #[cfg(feature = "alloc")]
+    pub fn release_fs(&self) {
+        if !self.fs_released.swap(true, Ordering::AcqRel) {
+            self.fs.users.fetch_sub(1, Ordering::AcqRel);
+        }
+    }
+}
+
+/// Linux scheduling policies (`SCHED_*`).
+pub const SCHED_NORMAL: u32 = 0;
+pub const SCHED_FIFO: u32 = 1;
+pub const SCHED_RR: u32 = 2;
+pub const SCHED_BATCH: u32 = 3;
+pub const SCHED_IDLE: u32 = 5;
+pub const SCHED_DEADLINE: u32 = 6;
+
+/// A thread's scheduling parameters, as Linux keeps them: the policy, the
+/// real-time priority, the nice value (kept across policy changes, so a
+/// thread returning to SCHED_NORMAL gets its nice back), the deadline
+/// reservation, and SCHED_RESET_ON_FORK.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SchedParams {
+    pub policy: u32,
+    /// 1..=99 for SCHED_FIFO and SCHED_RR, 0 otherwise.
+    pub rt_priority: u8,
+    /// -20..=19.
+    pub nice: i8,
+    /// SCHED_DEADLINE's validated reservation.
+    pub deadline: Option<crate::sched::policy::dl::DlEntity>,
+    pub reset_on_fork: bool,
+}
+
+impl Default for SchedParams {
+    fn default() -> Self {
+        Self {
+            policy: SCHED_NORMAL,
+            rt_priority: 0,
+            nice: 0,
+            deadline: None,
+            reset_on_fork: false,
+        }
+    }
+}
+
+impl SchedParams {
+    /// The policy the dispatcher runs the thread with.
+    pub fn to_policy(&self) -> crate::sched::policy::Policy {
+        use crate::sched::policy::Policy;
+        match (self.policy, self.deadline) {
+            (SCHED_FIFO, _) => Policy::Fifo {
+                prio: self.rt_priority,
+            },
+            (SCHED_RR, _) => Policy::RoundRobin {
+                prio: self.rt_priority,
+            },
+            (SCHED_BATCH, _) => Policy::Batch { nice: self.nice },
+            (SCHED_IDLE, _) => Policy::Idle,
+            (SCHED_DEADLINE, Some(dl)) => Policy::Deadline(dl),
+            _ => Policy::Normal { nice: self.nice },
+        }
+    }
+
+    /// What a new thread or fork child starts with: the same parameters,
+    /// except that SCHED_RESET_ON_FORK returns a real-time or deadline
+    /// policy to SCHED_NORMAL and a negative nice to 0 (and is itself
+    /// cleared), as Linux's sched_fork. A deadline reservation is never
+    /// inherited (Linux refuses to fork a SCHED_DEADLINE task without the
+    /// reset; the creator keeps its own).
+    pub fn for_child(&self) -> Self {
+        let mut child = *self;
+        if self.reset_on_fork {
+            if matches!(self.policy, SCHED_FIFO | SCHED_RR | SCHED_DEADLINE) {
+                child.policy = SCHED_NORMAL;
+                child.rt_priority = 0;
+            }
+            child.nice = child.nice.max(0);
+            child.reset_on_fork = false;
+        }
+        if child.policy == SCHED_DEADLINE {
+            child.policy = SCHED_NORMAL;
+        }
+        child.deadline = None;
+        child
+    }
 }
 
 /// Builder for creating new threads with specific configurations.
@@ -734,6 +860,8 @@ pub struct ThreadBuilder {
     clear_tid: usize,
     tls_base: Option<usize>,
     fs: Option<Arc<ThreadFs>>,
+    sched: SchedParams,
+    tid: Option<ThreadId>,
 }
 
 #[cfg(feature = "alloc")]
@@ -756,6 +884,8 @@ impl ThreadBuilder {
             clear_tid: 0,
             tls_base: None,
             fs: None,
+            tid: None,
+            sched: SchedParams::default(),
         }
     }
 
@@ -800,6 +930,20 @@ impl ThreadBuilder {
         self
     }
 
+    /// Give the thread this ID instead of a new one: a process's first
+    /// thread takes the process's ID (N-217).
+    /// The thread's scheduling parameters (a new thread inherits its
+    /// creator's: [`SchedParams::for_child`]).
+    pub fn sched(mut self, sched: SchedParams) -> Self {
+        self.sched = sched;
+        self
+    }
+
+    pub fn tid(mut self, tid: ThreadId) -> Self {
+        self.tid = Some(tid);
+        self
+    }
+
     /// Set the TLS (Thread-Local Storage) base address for the new thread.
     ///
     /// This corresponds to `CLONE_SETTLS` on Linux or `arch_prctl(ARCH_SET_FS)`
@@ -827,7 +971,7 @@ impl ThreadBuilder {
     /// Stack pointers are set to the top of each allocated region since stacks
     /// grow downward on all supported architectures (x86_64, AArch64, RISC-V).
     pub fn build(self) -> Result<Thread, KernelError> {
-        let tid = super::alloc_tid();
+        let tid = self.tid.unwrap_or_else(super::alloc_tid);
 
         // Calculate page counts for stacks
         let user_stack_pages = self.user_stack_size.div_ceil(FRAME_SIZE);
@@ -841,31 +985,24 @@ impl ThreadBuilder {
         // Those VAS-managed frames are the ones actually used and properly
         // freed by VAS::clear(). Allocating frames here would orphan them.
 
-        // Allocate physical frames for kernel stack
-        let kernel_frame = allocate_stack_frames(kernel_stack_pages).inspect_err(|_| {
+        // Kernel stack: on x86_64 mapped into its own slot of the stack
+        // region with unmapped guard pages below it (N-26); elsewhere its
+        // direct-map address. Zeroed by `allocate`.
+        let kstack = crate::mm::kstack::allocate(kernel_stack_pages).inspect_err(|_| {
             crate::println!(
                 "[THREAD] Failed to allocate {} kernel stack frames for tid {}",
                 kernel_stack_pages,
                 tid.0
             );
         })?;
+        let kernel_frame = kstack.frame;
+        #[cfg_attr(not(feature = "trace"), allow(unused_variables))]
         let kernel_stack_phys = kernel_frame.as_addr().as_usize();
+        let kernel_stack_usable_base = kstack.base;
 
-        // Compute virtual addresses for stacks.
-        // Use the thread index (tid) to space stacks apart so each thread
-        // gets a unique region. Each region includes a guard page below.
+        // Space user stacks apart by thread index; each region includes a
+        // guard page below.
         let thread_index = tid.0 as usize;
-
-        // Kernel stack virtual address: the frames' address in the kernel's
-        // direct physical map, which every address space shares. A per-thread
-        // address under KERNEL_STACK_REGION_BASE used to be computed here but
-        // was never mapped, so the first dispatch of any scheduler-run thread
-        // (pthread_create, clone) page-faulted on its own stack. The frames
-        // are contiguous (allocate_stack_frames) and are freed by frame
-        // number, so nothing else depends on the old address. There is no
-        // guard page below the stack yet.
-        let kernel_stack_usable_base =
-            crate::mm::phys_to_virt_addr(kernel_stack_phys as u64) as usize;
 
         // User stack virtual address: similar layout in user space
         let user_region_size = (user_stack_pages + GUARD_PAGE_COUNT) * FRAME_SIZE;
@@ -875,18 +1012,6 @@ impl ThreadBuilder {
         // Calculate actual stack sizes based on full pages
         let user_stack_size = user_stack_pages * FRAME_SIZE;
         let kernel_stack_size = kernel_stack_pages * FRAME_SIZE;
-
-        // Zero the kernel stack region for safety
-        // SAFETY: `kernel_stack_phys` is the physical address of frames we
-        // just allocated from the frame allocator. On x86_64 with bootloader
-        // 0.11, physical memory is mapped at a dynamic offset (not identity-
-        // mapped), so we must convert via phys_to_virt_addr(). We write
-        // zeroes to exactly `kernel_stack_size` bytes. No other code
-        // references these frames yet.
-        unsafe {
-            let virt = crate::mm::phys_to_virt_addr(kernel_stack_phys as u64);
-            core::ptr::write_bytes(virt as *mut u8, 0, kernel_stack_size);
-        }
 
         let mut thread = Thread::new(
             tid,
@@ -911,6 +1036,7 @@ impl ThreadBuilder {
             .store(kernel_stack_pages, Ordering::Release);
 
         thread.priority = self.priority;
+        *thread.sched.lock() = self.sched;
         thread.set_affinity(self.cpu_affinity);
         thread.clear_tid.store(self.clear_tid, Ordering::Release);
         if let Some(base) = self.tls_base {
@@ -920,6 +1046,7 @@ impl ThreadBuilder {
             thread.context.lock().set_tls_base(base as u64);
         }
 
+        #[cfg(feature = "trace")]
         crate::println!(
             "[THREAD] Allocated stacks for tid {}: user={:#x}..{:#x}, kernel={:#x}..{:#x} \
              (phys={:#x})",
@@ -930,13 +1057,6 @@ impl ThreadBuilder {
             kernel_stack_usable_base + kernel_stack_size,
             kernel_stack_phys,
         );
-
-        #[cfg(target_arch = "x86_64")]
-        // SAFETY: raw_serial_str writes directly to the COM1 serial port (0x3F8).
-        // This is safe to call at any point during kernel execution.
-        unsafe {
-            crate::arch::x86_64::idt::raw_serial_str(b"[THREAD] build() returning Ok\n");
-        }
 
         Ok(thread)
     }

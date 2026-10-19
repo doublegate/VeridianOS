@@ -13,12 +13,17 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <grp.h>
 #include <poll.h>
 #include <pthread.h>
 #include <stdio.h>
+#include <signal.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <veridian/syscall.h> /* raw system calls (veridian_syscallN) */
+#include <veridian/sysno.h>   /* system call numbers (ADR 0009) */
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/un.h>
@@ -59,6 +64,142 @@ static void test_fork_exit(void)
     report("fork_exit_reap_x40", ok, "fork/waitpid/exit status mismatch");
 }
 
+/* --- Copy-on-write fork (MEM-PERF-03, PROC-ARCH-01). ------------------
+ * Parent and child share pages after fork; each side's writes must stay its
+ * own. The child's read() lands in a page it still shares with its parent,
+ * so the kernel's user-copy write has to take a private copy (a protection
+ * fault on a present page, resolved as COW instead of EFAULT), and the
+ * parent must not see the data. The pipe is filled before the fork so no
+ * syscall blocks (a blocked syscall cannot yet yield to another process). */
+static int cow_global = 7;
+
+/* CowShared from /proc/meminfo, in kB (-1 if unreadable). */
+static int cow_shared_kb(void)
+{
+    char info[1024];
+    int mfd = open("/proc/meminfo", O_RDONLY);
+    if (mfd < 0)
+        return -1;
+    ssize_t m = read(mfd, info, sizeof(info) - 1);
+    close(mfd);
+    if (m <= 0)
+        return -1;
+    info[m] = 0;
+    const char *c = strstr(info, "CowShared:");
+    return c ? atoi(c + 10) : -1;
+}
+
+static void test_cow(void)
+{
+    char stack_buf[64];
+    memset(stack_buf, 's', sizeof(stack_buf));
+    char *heap = malloc(8192);
+    int fds[2];
+    if (!heap || pipe(fds) != 0 || write(fds[1], "hello", 5) != 5) {
+        report("fork_copy_on_write_isolation", 0, "setup failed");
+        return;
+    }
+    memset(heap, 'p', 8192);
+    /* CowShared counts every frame with more than one owner, once: the
+     * baseline includes this program's text, shared with the page cache
+     * (ADR 0010). */
+    int shared_before = cow_shared_kb();
+    pid_t pid = fork();
+    if (pid < 0) {
+        report("fork_copy_on_write_isolation", 0, "fork failed");
+        return;
+    }
+    if (pid == 0) {
+        /* While the parent is alive its data pages are shared too, which
+         * /proc/meminfo reports as more CowShared (a deep-copying fork
+         * adds nothing). */
+        if (cow_shared_kb() <= shared_before)
+            _exit(5);
+        cow_global = 99;
+        stack_buf[0] = 'S';
+        heap[4096] = 'C';
+        ssize_t n = read(fds[0], heap, 5);
+        int ok = n == 5 && memcmp(heap, "hello", 5) == 0 && cow_global == 99 &&
+                 stack_buf[0] == 'S' && heap[4096] == 'C';
+        _exit(ok ? 0 : (n < 0 ? 10 + (errno & 0x3f) : 1));
+    }
+    int status = 0;
+    int child_ok = waitpid(pid, &status, 0) == pid && WIFEXITED(status) &&
+                   WEXITSTATUS(status) == 0;
+    int parent_ok = cow_global == 7 && stack_buf[0] == 's' && heap[0] == 'p' &&
+                    heap[4096] == 'p';
+    /* With the child gone its sharing ends: owner counts drop back. */
+    int shared_after = cow_shared_kb();
+    parent_ok = parent_ok && shared_after == shared_before;
+    cow_global = 8; /* the last owner just regains write access */
+    parent_ok = parent_ok && cow_global == 8;
+    static char why[96];
+    snprintf(why, sizeof(why), "child %d (status 0x%x) parent %d, CowShared %d kB before, %d after",
+             child_ok, (unsigned)status, parent_ok, shared_before, shared_after);
+    report("fork_copy_on_write_isolation", child_ok && parent_ok, why);
+    close(fds[0]);
+    close(fds[1]);
+    free(heap);
+}
+
+/* --- 2 MiB pages through mmap(MAP_HUGETLB) (MEM-ARCH-01). -------------
+ * Map 4 MiB, use every 2 MiB page, check fork gives the child its own
+ * copy, and that munmap returns all 1024 frames (MemFree is back). */
+static long mem_free_kb(void)
+{
+    char info[1024];
+    int fd = open("/proc/meminfo", O_RDONLY);
+    if (fd < 0)
+        return -1;
+    ssize_t n = read(fd, info, sizeof(info) - 1);
+    close(fd);
+    if (n <= 0)
+        return -1;
+    info[n] = 0;
+    const char *m = strstr(info, "MemFree:");
+    return m ? atol(m + 8) : -1;
+}
+
+static void test_huge_pages(void)
+{
+    const size_t len = 4u << 20;
+    long before = mem_free_kb();
+    unsigned char *p = mmap(NULL, len, PROT_READ | PROT_WRITE,
+                            MAP_PRIVATE | MAP_ANONYMOUS | MAP_HUGETLB, -1, 0);
+    if (p == MAP_FAILED) {
+        report("mmap_huge_pages", 0, "mmap(MAP_HUGETLB) failed");
+        return;
+    }
+    int ok = ((unsigned long)p & ((2u << 20) - 1)) == 0;
+    for (size_t off = 0; off < len; off += 4096)
+        p[off] = (unsigned char)(off >> 12);
+    for (size_t off = 0; off < len; off += 4096)
+        ok = ok && p[off] == (unsigned char)(off >> 12);
+    int zero_ok = p[1] == 0 && p[len - 1] == 0;
+    pid_t pid = fork();
+    if (pid == 0) {
+        /* The child has its own copy of every 2 MiB chunk, holding the
+         * parent's data (a multi-chunk mapping once copied only the first). */
+        int c_ok = 1;
+        for (size_t off = 0; off < len; off += 4096)
+            c_ok = c_ok && p[off] == (unsigned char)(off >> 12);
+        p[0] = 0xAA;
+        p[len - 4096] = 0xBB;
+        _exit(c_ok && p[0] == 0xAA ? 0 : 1);
+    }
+    int status = 0;
+    int child_ok = pid > 0 && waitpid(pid, &status, 0) == pid && WIFEXITED(status) &&
+                   WEXITSTATUS(status) == 0;
+    int parent_ok = p[0] == 0 && p[len - 4096] == (unsigned char)((len - 4096) >> 12);
+    int unmap_ok = munmap(p, len) == 0;
+    long after = mem_free_kb();
+    int freed_ok = before > 0 && after >= before - 64; /* small slack for tables */
+    static char why[128];
+    snprintf(why, sizeof(why), "aligned+rw %d zero %d child %d parent %d unmap %d free %ld -> %ld kB",
+             ok, zero_ok, child_ok, parent_ok, unmap_ok, before, after);
+    report("mmap_huge_pages", ok && zero_ok && child_ok && parent_ok && unmap_ok && freed_ok, why);
+}
+
 /* --- Joinable and detached thread exit (PROC-SEC-02). ------------------ */
 static void *thread_ret(void *arg)
 {
@@ -89,6 +230,52 @@ static void test_threads(void)
     report("thread_detach_x20", ok, "create/detach");
 }
 
+/* --- errno is per thread (N-102). ---------------------------------------- */
+static volatile int errno_go;
+
+static void *errno_worker(void *arg)
+{
+    int mine = (int)(long)arg;
+    errno = mine;
+    while (!errno_go)
+        sched_yield(); /* the other threads set theirs meanwhile */
+    for (int i = 0; i < 1000; i++) {
+        if (errno != mine)
+            return (void *)1;
+        sched_yield();
+    }
+    /* A failing call sets this thread's errno only. */
+    if (close(-1) != -1 || errno != EBADF)
+        return (void *)2;
+    return NULL;
+}
+
+static void test_errno_per_thread(void)
+{
+    pthread_t t[3];
+    int ok = 1, created = 0;
+    errno = 0;
+    for (int i = 0; i < 3; i++) {
+        if (pthread_create(&t[created], NULL, errno_worker, (void *)(long)(100 + i)) != 0)
+            ok = 0;
+        else
+            created++;
+    }
+    errno = 7;
+    errno_go = 1;
+    long bad = 0;
+    for (int i = 0; i < created; i++) {
+        void *r = NULL;
+        if (pthread_join(t[i], &r) != 0)
+            ok = 0;
+        bad |= (long)r;
+    }
+    int main_errno = errno;
+    static char why[64];
+    snprintf(why, sizeof(why), "created %d worker %ld main errno %d", created, bad, main_errno);
+    report("errno_per_thread", ok && created == 3 && bad == 0 && main_errno == 7, why);
+}
+
 /* --- Allocator under threads (LIBC-SEC-01) and aligned_alloc. ---------- */
 static void *alloc_worker(void *arg)
 {
@@ -104,7 +291,7 @@ static void *alloc_worker(void *arg)
             size_t sz = 1 + (seed >> 8) % 1500;
             slots[k] = (seed & 7) == 0 ? aligned_alloc(64, sz) : malloc(sz);
             if (!slots[k])
-                return (void *)1;
+                return (void *)(long)(i + 1); /* the failing iteration */
             memset(slots[k], k, sz);
         }
     }
@@ -118,20 +305,36 @@ static void test_allocator(void)
     pthread_t t[4];
     int ok = 1;
     int created = 0;
+    int create_err = 0, join_err = 0;
+    long failed_at = 0;
     /* Join only the threads that were created: t[i] is unset after a
      * failed pthread_create (review of the v0.26.0 stack, PR #9). */
     for (int i = 0; i < 4; i++) {
-        if (pthread_create(&t[created], NULL, alloc_worker, (void *)(long)(i + 1)) != 0)
+        int e = pthread_create(&t[created], NULL, alloc_worker, (void *)(long)(i + 1));
+        if (e != 0) {
             ok = 0;
-        else
+            create_err = e;
+        } else {
             created++;
+        }
     }
     for (int i = 0; i < created; i++) {
         void *r = NULL;
-        if (pthread_join(t[i], &r) != 0 || r)
+        int e = pthread_join(t[i], &r);
+        if (e != 0) {
             ok = 0;
+            join_err = e;
+        } else if (r) {
+            ok = 0;
+            failed_at = (long)r;
+        }
     }
-    report("malloc_threads_4x20000", ok, "allocation failed or thread error");
+    /* Which step failed: thread creation, join, or a NULL allocation (and
+     * at which iteration of the worker). */
+    static char why[96];
+    snprintf(why, sizeof(why), "created %d create err %d join err %d alloc NULL at iter %ld",
+             created, create_err, join_err, failed_at);
+    report("malloc_threads_4x20000", ok, why);
 
     void *p = aligned_alloc(4096, 100);
     ok = p && ((unsigned long)p & 4095) == 0;
@@ -418,12 +621,15 @@ static void test_timed_waits(void)
 }
 
 /* --- User address-space limit (mm::user_layout). ----------------------- */
+#include "user_layout.h"
+
 static void test_map_fixed_limits(void)
 {
     int flags = MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED;
+    unsigned long end = user_space_end();
     /* Highest legitimate page: allowed. */
-    void *top = mmap((void *)0x7FFFFFFFE000UL, 4096, PROT_READ | PROT_WRITE, flags, -1, 0);
-    int ok_top = top == (void *)0x7FFFFFFFE000UL;
+    void *top = mmap((void *)(end - 0x1000), 4096, PROT_READ | PROT_WRITE, flags, -1, 0);
+    int ok_top = top == (void *)(end - 0x1000);
     if (ok_top) {
         *(volatile int *)top = 42;
         ok_top = *(volatile int *)top == 42;
@@ -431,14 +637,351 @@ static void test_map_fixed_limits(void)
     }
     /* Reserved top canonical page (SYSRET / Ryzen) and the kernel half:
      * rejected. */
-    void *guard = mmap((void *)0x7FFFFFFFF000UL, 4096, PROT_READ, flags, -1, 0);
+    void *guard = mmap((void *)end, 4096, PROT_READ, flags, -1, 0);
     void *kern = mmap((void *)0xFFFF800000000000UL, 4096, PROT_READ, flags, -1, 0);
     /* A range that starts below the limit but runs past it. */
-    void *span = mmap((void *)0x7FFFFFFFE000UL, 8192, PROT_READ, flags, -1, 0);
+    void *span = mmap((void *)(end - 0x1000), 8192, PROT_READ, flags, -1, 0);
     static char why[96];
-    snprintf(why, sizeof(why), "top=%p guard=%p kernel=%p span=%p", top, guard, kern, span);
+    int mode = user_end_matches_mode();
+    snprintf(why, sizeof(why), "end=%#lx mode_ok=%d top=%p guard=%p kernel=%p span=%p", end,
+             mode, top, guard, kern, span);
     report("map_fixed_user_limits",
-           ok_top && guard == MAP_FAILED && kern == MAP_FAILED && span == MAP_FAILED, why);
+           mode && ok_top && guard == MAP_FAILED && kern == MAP_FAILED && span == MAP_FAILED, why);
+}
+
+/* Memory anywhere in the lower half is the process's own, including
+ * 0x4444_4444_0000, which a stale kernel-heap address used to make fork
+ * share between parent and child (their page tables for that whole
+ * 512 GiB slot). The child must see a copy, and a page it maps there must
+ * not appear in the parent. Under Sv39 (256 GiB of user space) the address
+ * is 0x24_4444_0000, also away from everything placed by default. */
+static void test_lower_half_fork_isolation(void)
+{
+    unsigned long at = user_space_end() > (1UL << 40) ? 0x444444440000UL : 0x2444440000UL;
+    volatile int *p = mmap((void *)at, 4096, PROT_READ | PROT_WRITE,
+                           MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
+    if (p == MAP_FAILED) {
+        report("lower_half_fork_isolation", 0, "mmap at the test address failed");
+        return;
+    }
+    *p = 1;
+    pid_t pid = fork();
+    if (pid == 0) {
+        int saw = *p;
+        *p = 2;
+        void *q = mmap((void *)(at + 0x1000), 4096, PROT_READ | PROT_WRITE,
+                       MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
+        if (q != MAP_FAILED)
+            *(volatile int *)q = 3;
+        _exit(saw == 1 && q != MAP_FAILED ? 0 : 1);
+    }
+    int status = -1;
+    int waited = pid > 0 && waitpid(pid, &status, 0) == pid;
+    /* The child's page must not exist here: writing from it is EFAULT. */
+    int fds[2];
+    int unmapped = 0;
+    if (pipe(fds) == 0) {
+        errno = 0;
+        unmapped = write(fds[1], (void *)(at + 0x1000), 1) == -1 && errno == EFAULT;
+        close(fds[0]);
+        close(fds[1]);
+    }
+    static char why[96];
+    snprintf(why, sizeof(why), "parent=%d child_status=%x child_page_unmapped=%d", *p,
+             status, unmapped);
+    report("lower_half_fork_isolation",
+           waited && WIFEXITED(status) && WEXITSTATUS(status) == 0 && *p == 1 && unmapped, why);
+    munmap((void *)p, 4096);
+}
+
+/* --- Memory protection (N-132 to N-137). -------------------------------
+ * Each probe runs in a child that must die on its access; reaching _exit(0)
+ * means the access was allowed. */
+static int last_status;
+
+static int child_faults(int which)
+{
+    pid_t pid = fork();
+    if (pid == 0) {
+        volatile unsigned char *p;
+        switch (which) {
+        case 0: /* write to a PROT_READ mapping */
+            p = mmap(0, 4096, PROT_READ, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+            if (p == MAP_FAILED)
+                _exit(2);
+            p[0] = 1;
+            break;
+        case 1: /* read a PROT_NONE mapping */
+            p = mmap(0, 4096, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+            if (p == MAP_FAILED)
+                _exit(2);
+            (void)p[0];
+            break;
+        case 2: { /* execute from a PROT_READ|PROT_WRITE mapping */
+            p = mmap(0, 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+            if (p == MAP_FAILED)
+                _exit(2);
+            p[0] = 0xC3; /* ret */
+            ((void (*)(void))(unsigned long)p)();
+            break;
+        }
+        case 3: { /* execute from the brk heap */
+            /* The brk system call itself: musl's sbrk only reports the
+             * break (sbrk(0)), the native libc's also moves it. */
+            unsigned long cur = (unsigned long)veridian_syscall1(SYS_brk, 0);
+            if ((unsigned long)veridian_syscall1(SYS_brk, cur + 4096) < cur + 4096)
+                _exit(2);
+            unsigned char *h = (unsigned char *)cur;
+            /* A return instruction for this architecture. */
+#if defined(__aarch64__)
+            memcpy(h, "\xc0\x03\x5f\xd6", 4); /* ret */
+#elif defined(__riscv)
+            memcpy(h, "\x67\x80\x00\x00", 4); /* ret (jalr x0, 0(ra)) */
+#else
+            h[0] = 0xC3; /* ret */
+#endif
+            ((void (*)(void))(unsigned long)h)();
+            break;
+        }
+        case 4: /* read after mprotect(PROT_NONE) */
+            p = mmap(0, 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+            if (p == MAP_FAILED || mprotect((void *)p, 4096, PROT_NONE) != 0)
+                _exit(2);
+            (void)p[0];
+            break;
+        }
+        _exit(0);
+    }
+    int status = 0;
+    if (pid < 0 || waitpid(pid, &status, 0) != pid)
+        return 0;
+    last_status = status;
+    /* Killed by SIGSEGV, reported as such (N-99). */
+    return WIFSIGNALED(status) && WTERMSIG(status) == SIGSEGV;
+}
+
+static void test_memory_protection(void)
+{
+    static const char *names[] = {
+        "mmap_prot_read_blocks_write", "mmap_prot_none_blocks_read",
+        "mmap_rw_not_executable", "brk_heap_not_executable",
+        "mprotect_none_revokes_access",
+    };
+    for (int i = 0; i < 5; i++) {
+        int ok = child_faults(i);
+        static char why[64];
+        snprintf(why, sizeof(why), "access was allowed (wait status 0x%x)", last_status);
+        report(names[i], ok, why);
+    }
+
+    /* mprotect round trip keeps the contents; partly unmapped -> ENOMEM. */
+    int *q = mmap(0, 8192, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    int ok = q != MAP_FAILED;
+    if (ok) {
+        q[0] = 1234;
+        ok = mprotect(q, 4096, PROT_NONE) == 0 && mprotect(q, 4096, PROT_READ | PROT_WRITE) == 0 &&
+             q[0] == 1234;
+        munmap((char *)q + 4096, 4096);
+        errno = 0;
+        ok = ok && mprotect(q, 8192, PROT_READ) != 0 && errno == ENOMEM;
+        munmap(q, 4096);
+    }
+    report("mprotect_restore_and_enomem", ok, "contents lost or no ENOMEM for a hole");
+
+    /* PROT_NONE -> read-write in fresh page tables (musl's thread stacks:
+     * mmap PROT_NONE, mprotect all but the guard). The tables created for
+     * the kernel-only pages lacked the user bit, which mprotect did not
+     * add, so the writes faulted. In a child, since that is the failure. */
+    pid_t gp = fork();
+    if (gp == 0) {
+        const size_t len = 4UL << 20;
+        volatile char *m = mmap(0, len, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        if (m == MAP_FAILED || mprotect((char *)m + 8192, len - 8192, PROT_READ | PROT_WRITE) != 0)
+            _exit(2);
+        for (size_t off = 8192; off < len; off += 1UL << 20)
+            m[off] = 1;
+        m[len - 1] = 1;
+        _exit(0);
+    }
+    int gst = 0;
+    int gok = gp > 0 && waitpid(gp, &gst, 0) == gp && WIFEXITED(gst) && WEXITSTATUS(gst) == 0;
+    static char gwhy[48];
+    snprintf(gwhy, sizeof(gwhy), "status=0x%x", gst);
+    report("mprotect_none_to_rw_fresh_tables", gok, gwhy);
+
+    /* Absurd sizes fail cleanly instead of halting the kernel. */
+    void *huge = mmap(0, 1UL << 46, PROT_READ, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    void *huge2 = mmap(0, (size_t)-4096, PROT_READ, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    void *brk_huge = sbrk((intptr_t)1 << 45);
+    void *after = mmap(0, 4096, PROT_READ, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    static char why[96];
+    snprintf(why, sizeof(why), "huge=%p huge2=%p brk=%p after=%p", huge, huge2, brk_huge, after);
+    report("mmap_brk_huge_lengths_fail_cleanly",
+           huge == MAP_FAILED && huge2 == MAP_FAILED && brk_huge == (void *)-1 &&
+               after != MAP_FAILED,
+           why);
+}
+
+/* --- fork inherits credentials and cwd; sigprocmask in place (N-93, N-97). */
+static void test_fork_inheritance(void)
+{
+    pid_t pid = fork();
+    if (pid == 0) {
+        if (chdir("/tmp") != 0 || setgid(1000) != 0 || setuid(1000) != 0)
+            _exit(2);
+        pid_t g = fork();
+        if (g == 0) {
+            char cwd[64];
+            int ok = getuid() == 1000 && getgid() == 1000 && getcwd(cwd, sizeof(cwd)) &&
+                     strcmp(cwd, "/tmp") == 0;
+            _exit(ok ? 0 : 1);
+        }
+        int st = 0;
+        if (g < 0 || waitpid(g, &st, 0) != g)
+            _exit(3);
+        _exit(WIFEXITED(st) ? WEXITSTATUS(st) : 4);
+    }
+    int status = 0;
+    int ok = pid > 0 && waitpid(pid, &status, 0) == pid && WIFEXITED(status) &&
+             WEXITSTATUS(status) == 0;
+    static char why[48];
+    snprintf(why, sizeof(why), "child status 0x%x", status);
+    report("fork_inherits_uid_gid_cwd", ok, why);
+
+    sigset_t s, cur, saved;
+    sigprocmask(SIG_SETMASK, NULL, &saved);
+    sigemptyset(&s);
+    sigaddset(&s, SIGUSR1);
+    /* Same buffer for set and oldset: the new mask must still be applied.
+     * (Deliberately aliased, against the C prototype's restrict: the kernel
+     * must read the set before writing the old one.) */
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wrestrict"
+    int r = sigprocmask(SIG_BLOCK, &s, &s);
+#pragma GCC diagnostic pop
+    sigprocmask(SIG_SETMASK, NULL, &cur);
+    int applied = r == 0 && sigismember(&cur, SIGUSR1) == 1 && sigismember(&s, SIGUSR1) == 0;
+    sigprocmask(SIG_SETMASK, &saved, NULL);
+    report("sigprocmask_same_buffer", applied, "mask not applied or oldset wrong");
+}
+
+/* --- open(2) flags (N-116) and kill(2) (N-92, N-99). -------------------- */
+static void test_open_flags(void)
+{
+    unlink("/tmp/of_x");
+    int fd = open("/tmp/of_x", O_CREAT | O_EXCL | O_RDWR, 0644);
+    int created = fd >= 0 && write(fd, "0123456789", 10) == 10;
+    if (fd >= 0)
+        close(fd);
+    errno = 0;
+    int ex = open("/tmp/of_x", O_CREAT | O_EXCL | O_RDWR, 0644);
+    int ex_errno = errno;
+    /* openat with O_TRUNC truncates (it used to skip it). */
+    int tfd = openat(AT_FDCWD, "/tmp/of_x", O_WRONLY | O_TRUNC);
+    struct stat stt;
+    int truncated = tfd >= 0 && fstat(tfd, &stt) == 0 && stt.st_size == 0;
+    if (tfd >= 0)
+        close(tfd);
+    errno = 0;
+    int nd = open("/tmp/of_x", O_RDONLY | O_DIRECTORY);
+    int nd_errno = errno;
+    symlink("/tmp/of_x", "/tmp/of_link");
+    errno = 0;
+    int nf = open("/tmp/of_link", O_RDONLY | O_NOFOLLOW);
+    int nf_errno = errno;
+    errno = 0;
+    int dw = open("/tmp", O_WRONLY);
+    int dw_errno = errno;
+    static char why[128];
+    snprintf(why, sizeof(why), "created=%d excl=%d/%d trunc=%d dir=%d/%d nofollow=%d/%d dirw=%d/%d",
+             created, ex, ex_errno, truncated, nd, nd_errno, nf, nf_errno, dw, dw_errno);
+    report("open_excl_trunc_directory_nofollow",
+           created && ex == -1 && ex_errno == EEXIST && truncated && nd == -1 &&
+               nd_errno == ENOTDIR && nf == -1 && nf_errno == ELOOP && dw == -1 &&
+               dw_errno == EISDIR,
+           why);
+}
+
+static void test_kill(void)
+{
+    /* A non-root process may not signal a root one (EPERM). Signal 0
+     * checks permission without delivering anything. */
+    pid_t pid = fork();
+    if (pid == 0) {
+        pid_t parent = getppid();
+        if (setuid(1000) != 0)
+            _exit(2);
+        errno = 0;
+        int r = kill(parent, 0);
+        _exit(r == -1 && errno == EPERM ? 0 : 1);
+    }
+    int st = 0;
+    int eperm = pid > 0 && waitpid(pid, &st, 0) == pid && WIFEXITED(st) && WEXITSTATUS(st) == 0;
+
+    /* kill reaches the real process, and the parent sees the signal. */
+    pid = fork();
+    if (pid == 0) {
+        kill(getpid(), SIGTERM);
+        _exit(0);
+    }
+    int st2 = 0;
+    int self = pid > 0 && waitpid(pid, &st2, 0) == pid && WIFSIGNALED(st2) &&
+               WTERMSIG(st2) == SIGTERM;
+
+    /* No such process: ESRCH; nothing left to wait for: ECHILD. */
+    errno = 0;
+    int esrch = kill(99999, 0) == -1 && errno == ESRCH;
+    /* Checked in a fresh child, which has no children of its own. */
+    pid = fork();
+    if (pid == 0) {
+        errno = 0;
+        int r = waitpid(-1, NULL, 0);
+        _exit(r == -1 && errno == ECHILD ? 0 : 1);
+    }
+    int st3 = 0;
+    int echild = pid > 0 && waitpid(pid, &st3, 0) == pid && WIFEXITED(st3) &&
+                 WEXITSTATUS(st3) == 0;
+    static char why[96];
+    snprintf(why, sizeof(why), "eperm=%d(0x%x) self=%d(0x%x) esrch=%d echild=%d", eperm, st, self,
+             st2, esrch, echild);
+    report("kill_permissions_esrch_echild", eperm && self && esrch && echild, why);
+}
+
+/* --- sigaction keeps the whole action and fits its struct (N-95, N-105). - */
+static void on_usr1(int sig) { (void)sig; }
+
+static void test_sigaction(void)
+{
+    /* A guard after `old`: the kernel used to write 32 bytes into the
+     * 24-byte struct and overwrite whatever followed it. */
+    struct {
+        struct sigaction old;
+        unsigned long guard;
+    } box;
+    box.guard = 0xA5A5A5A5A5A5A5A5UL;
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = on_usr1;
+    sa.sa_flags = SA_RESTART;
+    sigemptyset(&sa.sa_mask);
+    sigaddset(&sa.sa_mask, SIGUSR2);
+    int r1 = sigaction(SIGUSR1, &sa, NULL);
+    int r2 = sigaction(SIGUSR1, NULL, &box.old);
+    int kept = r1 == 0 && r2 == 0 && box.old.sa_handler == on_usr1 &&
+               (box.old.sa_flags & SA_RESTART) && sigismember(&box.old.sa_mask, SIGUSR2) == 1;
+    int guard_ok = box.guard == 0xA5A5A5A5A5A5A5A5UL;
+    signal(SIGUSR1, SIG_DFL);
+    /* SIGKILL may be queried; changing it is EINVAL. */
+    struct sigaction q;
+    int query = sigaction(SIGKILL, NULL, &q);
+    errno = 0;
+    int set = sigaction(SIGKILL, &sa, NULL);
+    int set_errno = errno;
+    static char why[96];
+    snprintf(why, sizeof(why), "kept=%d guard=%d query=%d set=%d/%d", kept, guard_ok, query, set,
+             set_errno);
+    report("sigaction_roundtrip", kept && guard_ok && query == 0 && set == -1 && set_errno == EINVAL,
+           why);
 }
 
 /* --- Directory rename (FS-PERF-03): the node moves, ".." follows. ----- */
@@ -652,11 +1195,11 @@ static void test_dir_search_permission(void)
  * clear again by the time the wait path copied the status out (what clears
  * it was not determined). ------------------------------------------------ */
 #define DF_GUARD 64
-#define VERIDIAN_SYS_WAIT 14 /* Syscall::ProcessWait */
+#include <veridian/sysno.h> /* system call numbers (ADR 0009) */
 
+#if defined(__x86_64__)
 static long raw_syscall4_df(long nr, long a, long b, long c, long d)
 {
-#if defined(__x86_64__)
     register long rax __asm__("rax") = nr;
     register long rdi __asm__("rdi") = a;
     register long rsi __asm__("rsi") = b;
@@ -667,19 +1210,15 @@ static long raw_syscall4_df(long nr, long a, long b, long c, long d)
                      : "r"(rdi), "r"(rsi), "r"(rdx), "r"(r10)
                      : "rcx", "r11", "memory", "cc");
     return rax;
-#else
-    (void)nr; (void)a; (void)b; (void)c; (void)d;
-    return -1;
-#endif
 }
+#endif
 
 static void test_direction_flag(void)
 {
 #if defined(__x86_64__)
-    /* The native wait call stores the status through the kernel's
-     * validated user copy (`rep movsb`). With DF set that copy ran
-     * downwards from the status address. Raw numbers are the native ABI;
-     * only 0-7 are translated as Linux numbers (N-33). */
+    /* wait4 stores the status through the kernel's validated user copy
+     * (`rep movsb`). With DF set that copy ran downwards from the status
+     * address. */
     unsigned char area[DF_GUARD + sizeof(int) + DF_GUARD];
     memset(area, 0x55, sizeof(area));
     /* Let the child become a zombie first, so the wait does not block: a
@@ -690,7 +1229,7 @@ static void test_direction_flag(void)
         _exit(42);
     struct timespec nap = {0, 200 * 1000 * 1000};
     nanosleep(&nap, NULL);
-    long r = raw_syscall4_df(VERIDIAN_SYS_WAIT, pid, (long)(area + DF_GUARD), 0, 0);
+    long r = raw_syscall4_df(SYS_wait4, pid, (long)(area + DF_GUARD), 0, 0);
     int status;
     memcpy(&status, area + DF_GUARD, sizeof(status));
     int guards = 1;
@@ -704,18 +1243,1500 @@ static void test_direction_flag(void)
 #endif
 }
 
+/* --- Exceptions in user code (N-168, N-175). ------------------------------
+ * Each trap kills only the child that caused it, with the signal Linux
+ * sends; the parent and the kernel carry on. The traps are the
+ * architecture's own (an integer divide by zero does not trap on AArch64 or
+ * RISC-V, so only x86_64 checks SIGFPE). */
+static const struct {
+    const char *name;
+    int sig;
+} trap_cases[] = {
+#if defined(__x86_64__)
+    {"trap_ud2_sigill", SIGILL},        {"trap_divide_sigfpe", SIGFPE},
+    {"trap_int3_sigtrap", SIGTRAP},     {"trap_hlt_sigsegv", SIGSEGV},
+    {"trap_kernel_vector_sigsegv", SIGSEGV},
+#elif defined(__aarch64__)
+    {"trap_udf_sigill", SIGILL},
+    {"trap_brk_sigtrap", SIGTRAP},
+    {"trap_el1_sysreg_sigill", SIGILL},
+#elif defined(__riscv)
+    {"trap_unimp_sigill", SIGILL},
+    {"trap_ebreak_sigtrap", SIGTRAP},
+    {"trap_smode_csr_sigill", SIGILL},
+#endif
+};
+
+static void trap(int which)
+{
+#if defined(__x86_64__)
+    switch (which) {
+    case 0: /* #UD -> SIGILL */
+        __asm__ volatile("ud2");
+        break;
+    case 1: /* #DE -> SIGFPE (asm: GCC rewrites 1 / x as a branch) */
+        __asm__ volatile("xor %%edx, %%edx\n\tmov $1, %%eax\n\txor %%ecx, %%ecx\n\tdiv %%ecx"
+                         ::: "eax", "ecx", "edx");
+        break;
+    case 2: /* #BP from int3 (a DPL-3 gate) -> SIGTRAP */
+        __asm__ volatile("int3");
+        break;
+    case 3: /* privileged instruction, #GP -> SIGSEGV */
+        __asm__ volatile("hlt");
+        break;
+    case 4: /* int to a kernel-only vector, #GP -> SIGSEGV */
+        __asm__ volatile("int $0x30");
+        break;
+    }
+#elif defined(__aarch64__)
+    switch (which) {
+    case 0: /* permanently undefined -> SIGILL */
+        __asm__ volatile("udf #0");
+        break;
+    case 1: /* breakpoint -> SIGTRAP */
+        __asm__ volatile("brk #0");
+        break;
+    case 2: /* an EL1 register from EL0, trapped -> SIGILL */
+        __asm__ volatile("mrs x0, sctlr_el1" ::: "x0");
+        break;
+    }
+#elif defined(__riscv)
+    switch (which) {
+    case 0: /* illegal instruction -> SIGILL */
+        __asm__ volatile("unimp");
+        break;
+    case 1: /* breakpoint -> SIGTRAP */
+        __asm__ volatile("ebreak");
+        break;
+    case 2: /* an S-mode CSR from U-mode -> SIGILL */
+        __asm__ volatile("csrr t0, sstatus" ::: "t0");
+        break;
+    }
+#endif
+}
+
+static int child_traps(int which)
+{
+    pid_t pid = fork();
+    if (pid == 0) {
+        trap(which);
+        _exit(0);
+    }
+    int st = 0;
+    if (pid < 0 || waitpid(pid, &st, 0) != pid)
+        return -1;
+    last_status = st;
+    return WIFSIGNALED(st) ? WTERMSIG(st) : 0;
+}
+
+static void test_traps(void)
+{
+    for (size_t i = 0; i < sizeof(trap_cases) / sizeof(trap_cases[0]); i++) {
+        int sig = child_traps((int)i);
+        static char why[64];
+        snprintf(why, sizeof(why), "got signal %d (status 0x%x)", sig, last_status);
+        report(trap_cases[i].name, sig == trap_cases[i].sig, why);
+    }
+}
+
+/* --- Timer preemption of user code (ADR 0006 stage D3). -------------------
+ * A child spins in user mode without system calls. The parent must still
+ * run (its sleep ends), and SIGKILL must stop the spinning child. Without
+ * preemption the parent never runs again and the suite hangs. */
+static void test_preemption(void)
+{
+    pid_t pid = fork();
+    if (pid == 0) {
+        for (;;)
+            __asm__ volatile("" ::: "memory");
+    }
+    struct timespec ts = {0, 50 * 1000 * 1000};
+    int slept = pid > 0 && nanosleep(&ts, 0) == 0;
+    int killed = pid > 0 && kill(pid, SIGKILL) == 0;
+    int st = 0;
+    int reaped = pid > 0 && waitpid(pid, &st, 0) == pid;
+    static char why[80];
+    snprintf(why, sizeof(why), "slept=%d killed=%d reaped=%d status=0x%x", slept, killed, reaped, st);
+    report("preempt_spinning_child_then_kill", slept && killed && reaped && WIFSIGNALED(st) &&
+                                                    WTERMSIG(st) == SIGKILL,
+           why);
+}
+
+/* --- A fatal signal ends a process blocked in a system call. ------------
+ * The child sleeps for ten minutes; SIGKILL must end it at once (it used to
+ * be acted on only when the sleep returned; security review of stage D2). */
+static void test_kill_sleeping(void)
+{
+    pid_t pid = fork();
+    if (pid == 0) {
+        struct timespec ts = {600, 0};
+        nanosleep(&ts, 0);
+        _exit(0);
+    }
+    struct timespec ts = {0, 20 * 1000 * 1000};
+    nanosleep(&ts, 0);
+    int killed = pid > 0 && kill(pid, SIGKILL) == 0;
+    int st = 0;
+    int reaped = pid > 0 && waitpid(pid, &st, 0) == pid;
+    static char why[64];
+    snprintf(why, sizeof(why), "killed=%d reaped=%d status=0x%x", killed, reaped, st);
+    report("kill_ends_blocked_sleep", killed && reaped && WIFSIGNALED(st) && WTERMSIG(st) == SIGKILL,
+           why);
+}
+
+/* --- A blocking pipe read waits for the writer (N-119). ----------------
+ * The child writes after a delay while the parent is already reading; the
+ * read must block and return the byte, not fail with EAGAIN. Then EOF
+ * once the writer has gone. */
+static void test_blocking_pipe(void)
+{
+    int fds[2];
+    if (pipe(fds) != 0) {
+        report("pipe_read_blocks_for_writer", 0, "pipe failed");
+        return;
+    }
+    pid_t pid = fork();
+    if (pid == 0) {
+        close(fds[0]);
+        struct timespec ts = {0, 30 * 1000 * 1000};
+        nanosleep(&ts, 0);
+        _exit(write(fds[1], "x", 1) == 1 ? 0 : 1);
+    }
+    close(fds[1]);
+    char c = 0;
+    errno = 0;
+    ssize_t n = read(fds[0], &c, 1);
+    int e1 = errno;
+    ssize_t eof = read(fds[0], &c, 1);
+    close(fds[0]);
+    int st = 0;
+    waitpid(pid, &st, 0);
+    static char why[64];
+    snprintf(why, sizeof(why), "n=%d errno=%d c=%d eof=%d", (int)n, e1, c, (int)eof);
+    report("pipe_read_blocks_for_writer", n == 1 && c == 'x' && eof == 0, why);
+}
+
+/* --- Signal handlers (sprint D3; N-96, N-98, N-109, N-113). ------------- */
+static volatile int d3_usr1_count, d3_usr2_count;
+static void d3_on_usr1(int sig) { (void)sig; d3_usr1_count++; }
+static void d3_on_usr2(int sig)
+{
+    /* Clobber the FP registers: the interrupted code must not notice. */
+    volatile double x = 1.0;
+    for (int i = 0; i < 64; i++)
+        x = x * 1.000001 + 0.5;
+    (void)sig;
+    d3_usr2_count++;
+}
+static void d3_on_segv(int sig) { (void)sig; _exit(42); }
+
+static int d3_install(int sig, void (*fn)(int), int flags)
+{
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = fn;
+    sa.sa_flags = flags;
+    sigemptyset(&sa.sa_mask);
+    return sigaction(sig, &sa, 0);
+}
+
+static void test_signal_handlers(void)
+{
+    /* A handler runs on the way back from the kill that raised it. */
+    d3_usr1_count = 0;
+    d3_install(SIGUSR1, d3_on_usr1, 0);
+    kill(getpid(), SIGUSR1);
+    report("signal_handler_runs", d3_usr1_count == 1, "handler did not run");
+
+    /* A blocked signal waits; unblocking delivers it (Linux set layout). */
+    sigset_t set, old;
+    sigemptyset(&set);
+    sigaddset(&set, SIGUSR1);
+    sigprocmask(SIG_BLOCK, &set, &old);
+    kill(getpid(), SIGUSR1);
+    int held = d3_usr1_count == 1;
+    sigprocmask(SIG_SETMASK, &old, 0);
+    report("signal_mask_blocks_then_delivers", held && d3_usr1_count == 2, "mask not honoured");
+
+    /* Asynchronous handlers interrupt FP work without corrupting it. */
+    d3_usr2_count = 0;
+    d3_install(SIGUSR2, d3_on_usr2, 0);
+    pid_t parent = getpid();
+    pid_t pid = fork();
+    if (pid == 0) {
+        for (int i = 0; i < 20; i++) {
+            struct timespec ts = {0, 2 * 1000 * 1000};
+            nanosleep(&ts, 0);
+            kill(parent, SIGUSR2);
+        }
+        _exit(0);
+    }
+    double a = 0.0, expect = 0.0;
+    for (int i = 1; i <= 2000000; i++)
+        a += 1.0 / (double)i;
+    for (int i = 1; i <= 2000000; i++)
+        expect += 1.0 / (double)i;
+    int st = 0;
+    /* The sender's signals interrupt the wait (no SA_RESTART): retry, so
+     * none is still in flight when the next test starts. */
+    while (waitpid(pid, &st, 0) < 0 && errno == EINTR)
+        ;
+    static char why[80];
+    snprintf(why, sizeof(why), "handlers=%d fp_equal=%d", d3_usr2_count, a == expect);
+    report("signal_handlers_preserve_fp_state", a == expect && d3_usr2_count > 0, why);
+
+    /* SA_RESTART restarts an interrupted wait; without it, EINTR. The
+     * slow child exits only after the poker has signalled (a byte on a
+     * pipe, at most 2 s later), so the signal always lands during the
+     * wait however slowly the second fork runs (four emulated CPUs). */
+    for (int restart = 1; restart >= 0; restart--) {
+        d3_install(SIGUSR1, d3_on_usr1, restart ? SA_RESTART : 0);
+        int go[2];
+        if (pipe(go) != 0) {
+            report(restart ? "signal_sa_restart_restarts_wait" : "signal_without_restart_eintr",
+                   0, "pipe failed");
+            continue;
+        }
+        pid_t slow = fork();
+        if (slow == 0) {
+            close(go[1]);
+            struct pollfd p = {go[0], POLLIN, 0};
+            poll(&p, 1, 2000);
+            _exit(5);
+        }
+        pid_t poker = fork();
+        if (poker == 0) {
+            close(go[0]);
+            struct timespec ts = {0, 30 * 1000 * 1000};
+            nanosleep(&ts, 0);
+            kill(parent, SIGUSR1);
+            /* Give the handler a moment to interrupt the wait first. */
+            nanosleep(&ts, 0);
+            (void)write(go[1], "g", 1);
+            _exit(0);
+        }
+        close(go[0]);
+        close(go[1]);
+        int s2 = 0;
+        errno = 0;
+        pid_t r = waitpid(slow, &s2, 0);
+        int e = errno;
+        if (r != slow)
+            while (waitpid(slow, &s2, 0) < 0 && errno == EINTR)
+                ;
+        while (waitpid(poker, 0, 0) < 0 && errno == EINTR)
+            ;
+        static char why2[64];
+        snprintf(why2, sizeof(why2), "r=%d errno=%d", (int)r, e);
+        if (restart)
+            report("signal_sa_restart_restarts_wait", r == slow && WEXITSTATUS(s2) == 5, why2);
+        else
+            report("signal_without_restart_eintr", r == -1 && e == EINTR, why2);
+    }
+
+    /* SIGCHLD's default action is to ignore it: it must not end a sleep
+     * (N-98). */
+    signal(SIGCHLD, SIG_DFL);
+    pid = fork();
+    if (pid == 0)
+        _exit(0);
+    struct timespec ts = {0, 40 * 1000 * 1000};
+    int slept = nanosleep(&ts, 0);
+    waitpid(pid, 0, 0);
+    report("sigchld_default_does_not_interrupt", slept == 0, "nanosleep was interrupted");
+
+    /* A fault reaches an installed SIGSEGV handler. */
+    pid = fork();
+    if (pid == 0) {
+        d3_install(SIGSEGV, d3_on_segv, 0);
+        /* An unmapped address, chosen at run time so the store is a real
+         * fault rather than something the compiler reasons about. */
+        volatile uintptr_t unmapped = 8;
+        *(volatile int *)unmapped = 1;
+        _exit(1);
+    }
+    st = 0;
+    waitpid(pid, &st, 0);
+    static char why3[48];
+    snprintf(why3, sizeof(why3), "status=0x%x", st);
+    report("sigsegv_handler_runs", WIFEXITED(st) && WEXITSTATUS(st) == 42, why3);
+
+    signal(SIGUSR1, SIG_DFL);
+    signal(SIGUSR2, SIG_DFL);
+}
+
+/* --- Relative paths follow the caller's own working directory (N-115). ---
+ * They resolved against the kernel shell's directory, whatever the program
+ * had chdir'd to. A child's chdir must not move the parent either. */
+static void test_relative_paths(void)
+{
+    char saved[256];
+    if (!getcwd(saved, sizeof(saved)))
+        strcpy(saved, "/");
+    unlink("/tmp/relprobe");
+    unlink("/relprobe_child");
+    int ok = chdir("/tmp") == 0;
+    int fd = open("relprobe", O_CREAT | O_WRONLY, 0644);
+    if (fd >= 0)
+        close(fd);
+    struct stat st;
+    int in_tmp = stat("/tmp/relprobe", &st) == 0;
+
+    pid_t pid = fork();
+    if (pid == 0) {
+        if (chdir("/") != 0)
+            _exit(2);
+        int cfd = open("relprobe_child", O_CREAT | O_WRONLY, 0644);
+        _exit(cfd >= 0 ? 0 : 1);
+    }
+    int cst = 0;
+    waitpid(pid, &cst, 0);
+    int child_in_root = stat("/relprobe_child", &st) == 0;
+    int parent_unmoved = stat("relprobe", &st) == 0; /* still /tmp */
+    unlink("/tmp/relprobe");
+    unlink("/relprobe_child");
+    if (chdir(saved) != 0)
+        ok = 0;
+    static char why[80];
+    snprintf(why, sizeof(why), "in_tmp=%d child_in_root=%d parent_unmoved=%d", in_tmp,
+             child_in_root, parent_unmoved);
+    report("relative_paths_follow_own_cwd", ok && in_tmp && child_in_root && parent_unmoved, why);
+}
+
+/* N-101: exec needs an executable regular file; a refused exec leaves the
+ * caller running. Root needs at least one execute bit, as on Linux. */
+static void test_exec_permission(void)
+{
+    const char *path = "/tmp/noexec_probe";
+    unlink(path);
+    int fd = open(path, O_CREAT | O_WRONLY | O_TRUNC, 0644);
+    if (fd >= 0) {
+        const char body[] = "#!/bin/sh\nexit 0\n";
+        if (write(fd, body, sizeof(body) - 1) < 0) {
+            /* checked through the exec results below */
+        }
+        close(fd);
+    }
+    chmod(path, 0644);
+    char *args[] = {(char *)path, NULL};
+    char *env[] = {NULL};
+
+    /* Root, no execute bit anywhere: EACCES, and we are still here. */
+    errno = 0;
+    int r = execve(path, args, env);
+    int root_eacces = r == -1 && errno == EACCES;
+
+    /* A directory is not executable either. */
+    char *dargs[] = {"/tmp", NULL};
+    errno = 0;
+    r = execve("/tmp", dargs, env);
+    int dir_eacces = r == -1 && errno == EACCES;
+
+    /* Executable but not a program: ENOEXEC (N-127), caller unharmed. */
+    const char *junk = "/tmp/noexec_junk";
+    int jfd = open(junk, O_CREAT | O_WRONLY | O_TRUNC, 0755);
+    if (jfd >= 0) {
+        if (write(jfd, "junk\n", 5) < 0) {
+            /* checked through the exec result */
+        }
+        close(jfd);
+    }
+    chmod(junk, 0755);
+    char *jargs[] = {(char *)junk, NULL};
+    errno = 0;
+    r = execve(junk, jargs, env);
+    int noexec = r == -1 && errno == ENOEXEC;
+    unlink(junk);
+
+    /* Non-root, mode 0700 owned by root: EACCES in the child. */
+    chmod(path, 0700);
+    pid_t pid = fork();
+    if (pid == 0) {
+        if (setuid(1000) != 0)
+            _exit(3);
+        execve(path, args, env);
+        _exit(errno == EACCES ? 0 : 1);
+    }
+    int st = 0;
+    waitpid(pid, &st, 0);
+    int user_eacces = WIFEXITED(st) && WEXITSTATUS(st) == 0;
+
+    /* Control: an executable program still runs (busybox false -> 1). */
+    pid = fork();
+    if (pid == 0) {
+        char *fargs[] = {"false", NULL};
+        execve("/bin/false", fargs, env);
+        _exit(42);
+    }
+    st = 0;
+    waitpid(pid, &st, 0);
+    int control = WIFEXITED(st) && WEXITSTATUS(st) == 1;
+    unlink(path);
+
+    static char why[112];
+    snprintf(why, sizeof(why), "root=%d dir=%d noexec=%d user=%d control=%d(st=%#x)",
+             root_eacces, dir_eacces, noexec, user_eacces, control, st);
+    report("exec_requires_execute_permission",
+           root_eacces && dir_eacces && noexec && user_eacces && control, why);
+}
+
+/* N-140: MAP_SHARED anonymous memory stays shared with a forked child,
+ * also after an mprotect round trip; MAP_PRIVATE stays private. */
+static void test_shared_anon_fork(void)
+{
+    volatile int *sh = mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    volatile int *pr =
+        mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (sh == MAP_FAILED || pr == MAP_FAILED) {
+        report("map_shared_survives_fork", 0, "mmap failed");
+        return;
+    }
+    sh[0] = 1;
+    sh[1] = 1;
+    pr[0] = 1;
+    pid_t pid = fork();
+    if (pid == 0) {
+        sh[0] = 42;
+        pr[0] = 42;
+        _exit(0);
+    }
+    int st = 0;
+    waitpid(pid, &st, 0);
+    int seen_child = sh[0] == 42;
+    int private_kept = pr[0] == 1;
+
+    /* Read-only and back: still the shared page, not a private copy. */
+    int prot_ok = mprotect((void *)sh, 4096, PROT_READ) == 0 &&
+                  mprotect((void *)sh, 4096, PROT_READ | PROT_WRITE) == 0;
+    pid = fork();
+    if (pid == 0) {
+        sh[1] = 7;
+        _exit(0);
+    }
+    waitpid(pid, &st, 0);
+    sh[0] = 5; /* parent write after the child is gone */
+    int after_prot = sh[1] == 7 && sh[0] == 5;
+    munmap((void *)sh, 4096);
+    munmap((void *)pr, 4096);
+
+    static char why[96];
+    snprintf(why, sizeof(why), "child_write=%d private=%d prot=%d after_prot=%d", seen_child,
+             private_kept, prot_ok, after_prot);
+    report("map_shared_survives_fork", seen_child && private_kept && prot_ok && after_prot, why);
+}
+
+/* N-141: MAP_FIXED replaces what is mapped; munmap spans mappings and
+ * holes; munmap of an unmapped range succeeds. */
+static void test_map_fixed_replace(void)
+{
+    char *base = mmap(NULL, 4 * 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (base == MAP_FAILED) {
+        report("map_fixed_replaces_and_munmap_spans", 0, "mmap failed");
+        return;
+    }
+    memset(base, 'a', 4 * 4096);
+    /* Replace the middle two pages: fresh zero pages, neighbours kept. */
+    char *mid = mmap(base + 4096, 2 * 4096, PROT_READ | PROT_WRITE,
+                     MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
+    int replaced = mid == base + 4096 && mid[0] == 0 && mid[4096] == 0 && base[0] == 'a' &&
+                   base[3 * 4096] == 'a';
+    /* Punch a hole, then unmap across both sides of it at once. */
+    int hole = munmap(base + 4096, 4096) == 0;
+    int span = munmap(base, 4 * 4096) == 0;
+    /* The range is free again: MAP_FIXED there works without replacing. */
+    char *again = mmap(base, 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED,
+                       -1, 0);
+    int reuse = again == base && again[0] == 0;
+    int empty = munmap(base, 4096) == 0 && munmap(base, 4 * 4096) == 0;
+
+    /* A fixed mapping just ahead of the kernel's mmap cursor must not make
+     * the next kernel-chosen mapping fail. */
+    char *p = mmap(NULL, 4096, PROT_READ, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    char *ahead = p == MAP_FAILED ? MAP_FAILED
+                                  : mmap(p + 2 * 4096, 4096, PROT_READ,
+                                         MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
+    char *next = mmap(NULL, 4 * 4096, PROT_READ, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    int cursor = p != MAP_FAILED && ahead != MAP_FAILED && next != MAP_FAILED;
+    if (p != MAP_FAILED)
+        munmap(p, 4096);
+    if (ahead != MAP_FAILED)
+        munmap(ahead, 4096);
+    if (next != MAP_FAILED)
+        munmap(next, 4 * 4096);
+
+    static char why[112];
+    snprintf(why, sizeof(why), "replaced=%d hole=%d span=%d reuse=%d empty=%d cursor=%d",
+             replaced, hole, span, reuse, empty, cursor);
+    report("map_fixed_replaces_and_munmap_spans",
+           replaced && hole && span && reuse && empty && cursor, why);
+}
+
+/* D3 job control and N-99: SIGSTOP stops every thread of the child and
+ * waitpid(WUNTRACED) reports it once; SIGCONT resumes it and
+ * waitpid(WCONTINUED) reports that; SIGKILL ends a stopped child; a
+ * process-group wait finds a child by its group. */
+static void test_stop_continue(void)
+{
+    volatile unsigned long *ctr =
+        mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    if (ctr == MAP_FAILED) {
+        report("stop_continue_and_group_wait", 0, "mmap failed");
+        return;
+    }
+    ctr[0] = 0;
+    pid_t pid = fork();
+    if (pid == 0) {
+        if (setpgid(0, 0) != 0)
+            _exit(3);
+        for (;;)
+            ctr[0]++;
+    }
+    struct timespec ms20 = {0, 20 * 1000 * 1000};
+    /* Let it run, so a stop is observable. */
+    for (int i = 0; i < 100 && ctr[0] == 0; i++)
+        nanosleep(&ms20, NULL);
+    int st = 0;
+
+    kill(pid, SIGSTOP);
+    pid_t r = waitpid(pid, &st, WUNTRACED);
+    int stopped = r == pid && WIFSTOPPED(st) && WSTOPSIG(st) == SIGSTOP;
+    unsigned long a = ctr[0];
+    nanosleep(&ms20, NULL);
+    nanosleep(&ms20, NULL);
+    int frozen = ctr[0] == a;
+    /* Reported once: a second WNOHANG wait sees nothing new. */
+    int once = waitpid(pid, &st, WUNTRACED | WNOHANG) == 0;
+
+    kill(pid, SIGCONT);
+    r = waitpid(pid, &st, WCONTINUED);
+    int continued = r == pid && WIFCONTINUED(st);
+    unsigned long b = ctr[0];
+    for (int i = 0; i < 100 && ctr[0] == b; i++)
+        nanosleep(&ms20, NULL);
+    int resumed = ctr[0] != b;
+
+    /* Stopped again, then killed: SIGKILL ends it; the wait goes by the
+     * child's own process group. */
+    kill(pid, SIGTSTP);
+    r = waitpid(-pid, &st, WUNTRACED);
+    int tstp = r == pid && WIFSTOPPED(st) && WSTOPSIG(st) == SIGTSTP;
+    kill(pid, SIGKILL);
+    r = waitpid(-pid, &st, 0);
+    int killed = r == pid && WIFSIGNALED(st) && WTERMSIG(st) == SIGKILL;
+    munmap((void *)ctr, 4096);
+
+    static char why[112];
+    snprintf(why, sizeof(why), "stop=%d frozen=%d once=%d cont=%d resumed=%d tstp=%d kill=%d",
+             stopped, frozen, once, continued, resumed, tstp, killed);
+    report("stop_continue_and_group_wait",
+           stopped && frozen && once && continued && resumed && tstp && killed, why);
+}
+
+/* --- Credentials, chroot, fchdir, utimensat (N-248 to N-250). ---------
+ * Each check runs in a child, so changed IDs, root or cwd never leak into
+ * the rest of the suite. A child reports failures as a bitmask exit code. */
+static int child_result(pid_t pid)
+{
+    int status = 0;
+    if (waitpid(pid, &status, 0) != pid)
+        return 254;
+    return WIFEXITED(status) ? WEXITSTATUS(status) : 255;
+}
+
+static void report_child(const char *name, pid_t pid)
+{
+    int code = child_result(pid);
+    static char why[64];
+    snprintf(why, sizeof(why), "child exit code %d (bitmask of failures)", code);
+    report(name, code == 0, why);
+}
+
+static void test_credentials_and_paths(void)
+{
+    /* A setuid-root style process: real 1000, effective and saved 0. It
+     * can drop the effective ID and take it back through the saved one;
+     * once all three are 1000 it cannot. seteuid used to report success
+     * without changing anything. */
+    pid_t pid = fork();
+    if (pid == 0) {
+        int f = 0;
+        uid_t r, e, s;
+        if (setresuid(1000, 0, 0) != 0) f |= 1;
+        if (seteuid(1000) != 0 || geteuid() != 1000) f |= 2;
+        if (seteuid(0) != 0 || geteuid() != 0) f |= 4;
+        if (getresuid(&r, &e, &s) != 0 || r != 1000 || e != 0 || s != 0) f |= 8;
+        if (setresuid(1000, 1000, 1000) != 0) f |= 16;
+        if (seteuid(0) == 0 || errno != EPERM) f |= 32;
+        _exit(f);
+    }
+    report_child("saved_uid_round_trip_and_final_drop", pid);
+
+    /* Supplementary groups grant group access; only root may set them. */
+    write_file("/tmp/audit_grp", "g", 0640);
+    chown("/tmp/audit_grp", 0, 20);
+    pid = fork();
+    if (pid == 0) {
+        int f = 0;
+        gid_t list[4] = {0};
+        gid_t want[2] = {20, 30};
+        if (setgroups(2, want) != 0) f |= 1;
+        if (getgroups(0, NULL) != 2) f |= 2;
+        if (getgroups(4, list) != 2 || list[0] != 20 || list[1] != 30) f |= 4;
+        if (setgid(100) != 0 || setuid(1000) != 0) f |= 8;
+        int fd = open("/tmp/audit_grp", O_RDONLY);
+        if (fd < 0) f |= 16;
+        else close(fd);
+        if (setgroups(0, NULL) == 0 || errno != EPERM) f |= 32;
+        _exit(f);
+    }
+    report_child("supplementary_groups_grant_access", pid);
+    pid = fork();
+    if (pid == 0) {
+        setgroups(0, NULL);
+        if (setgid(100) != 0 || setuid(1000) != 0)
+            _exit(100);
+        _exit(open("/tmp/audit_grp", O_RDONLY) >= 0 ? 1 : 0);
+    }
+    report_child("no_group_no_group_access", pid);
+
+    /* access(2): owner bits for the owner (it checked only "other"). */
+    write_file("/tmp/audit_owned", "o", 0700);
+    chown("/tmp/audit_owned", 1000, 1000);
+    write_file("/tmp/audit_noexec", "n", 0644);
+    pid = fork();
+    if (pid == 0) {
+        int f = 0;
+        if (access("/tmp/audit_noexec", X_OK) == 0) f |= 1; /* root needs an x bit */
+        if (setuid(1000) != 0) _exit(100);
+        if (access("/tmp/audit_owned", R_OK | W_OK | X_OK) != 0) f |= 2;
+        _exit(f);
+    }
+    report_child("access_uses_owner_bits", pid);
+
+    /* chroot: lookups stay inside, including "..", absolute paths and
+     * absolute symlink targets; only root may call it. */
+    mkdir("/tmp/audit_jail", 0755);
+    mkdir("/tmp/audit_jail/etc", 0755);
+    write_file("/tmp/audit_jail/etc/hello", "jail", 0644);
+    write_file("/tmp/audit_outside", "out", 0644);
+    unlink("/tmp/audit_jail/link");
+    symlink("/etc", "/tmp/audit_jail/link");
+    pid = fork();
+    if (pid == 0) {
+        int f = 0;
+        char buf[64];
+        if (chroot("/tmp/audit_jail") != 0) _exit(100);
+        if (chdir("/") != 0) f |= 1;
+        int fd = open("/etc/hello", O_RDONLY);
+        if (fd < 0) f |= 2;
+        else close(fd);
+        if (open("/../../tmp/audit_outside", O_RDONLY) >= 0) f |= 4;
+        if (open("/link/hello", O_RDONLY) < 0) f |= 8;
+        if (!getcwd(buf, sizeof(buf)) || strcmp(buf, "/") != 0) f |= 16;
+        if (chdir("..") != 0 || !getcwd(buf, sizeof(buf)) || strcmp(buf, "/") != 0) f |= 32;
+        if (setuid(1000) != 0 || chroot("/") == 0 || errno != EPERM) f |= 64;
+        _exit(f);
+    }
+    report_child("chroot_confines_lookups", pid);
+
+    /* fchdir: to an open directory; ENOTDIR for a file, EBADF for a bad fd. */
+    pid = fork();
+    if (pid == 0) {
+        int f = 0;
+        char buf[64];
+        int dfd = open("/tmp", O_RDONLY | O_DIRECTORY);
+        int ffd = open("/tmp/audit_outside", O_RDONLY);
+        if (dfd < 0 || ffd < 0) _exit(100);
+        if (chdir("/") != 0 || fchdir(dfd) != 0) f |= 1;
+        if (!getcwd(buf, sizeof(buf)) || strcmp(buf, "/tmp") != 0) f |= 2;
+        if (fchdir(ffd) == 0 || errno != ENOTDIR) f |= 4;
+        if (fchdir(999) == 0 || errno != EBADF) f |= 8;
+        _exit(f);
+    }
+    report_child("fchdir_changes_directory", pid);
+
+    /* A directory renamed after it was opened, with another created at its
+     * old name: fchdir must never land in the newcomer (the fd's recorded
+     * path no longer names its directory; this fails closed with ENOENT). */
+    pid = fork();
+    if (pid == 0) {
+        char buf[64];
+        rmdir("/tmp/audit_swap");
+        rmdir("/tmp/audit_swap_moved");
+        if (mkdir("/tmp/audit_swap", 0755) != 0) _exit(100);
+        int dfd = open("/tmp/audit_swap", O_RDONLY | O_DIRECTORY);
+        if (dfd < 0 || rename("/tmp/audit_swap", "/tmp/audit_swap_moved") != 0 ||
+            mkdir("/tmp/audit_swap", 0755) != 0)
+            _exit(101);
+        if (fchdir(dfd) == 0 && getcwd(buf, sizeof(buf)) && strcmp(buf, "/tmp/audit_swap") == 0)
+            _exit(1);
+        _exit(0);
+    }
+    report_child("fchdir_never_enters_a_replacement", pid);
+
+    /* utimensat / futimens: explicit times, UTIME_OMIT, and EPERM for a
+     * non-owner setting explicit times (they did nothing). */
+    write_file("/tmp/audit_times", "t", 0666);
+    chmod("/tmp/audit_times", 0666); /* past the umask: writable by others */
+    struct timespec ts[2] = {{1000, 0}, {2000, 0}};
+    struct stat st = {0};
+    int ok = utimensat(AT_FDCWD, "/tmp/audit_times", ts, 0) == 0 &&
+             stat("/tmp/audit_times", &st) == 0 && st.st_atime == 1000 && st.st_mtime == 2000;
+    int fd = open("/tmp/audit_times", O_RDONLY);
+    struct timespec omit[2] = {{0, UTIME_OMIT}, {3000, 0}};
+    ok = ok && fd >= 0 && futimens(fd, omit) == 0 && stat("/tmp/audit_times", &st) == 0 &&
+         st.st_atime == 1000 && st.st_mtime == 3000;
+    if (fd >= 0)
+        close(fd);
+    static char why_t[80];
+    snprintf(why_t, sizeof(why_t), "atime %ld mtime %ld", (long)st.st_atime, (long)st.st_mtime);
+    report("utimensat_sets_times", ok, why_t);
+    pid = fork();
+    if (pid == 0) {
+        int f = 0;
+        if (setuid(1001) != 0) _exit(100);
+        if (utimensat(AT_FDCWD, "/tmp/audit_times", ts, 0) == 0 || errno != EPERM) f |= 1;
+        if (utimensat(AT_FDCWD, "/tmp/audit_times", NULL, 0) != 0) f |= 2; /* writable */
+        _exit(f);
+    }
+    report_child("utimensat_owner_rules", pid);
+}
+
+/* --- pread/pwrite, truncate/ftruncate and mkdir checks (N-190..N-192):
+ * the access mode was ignored (pwrite worked through O_RDONLY), streams
+ * accepted an offset, lengths were unsigned, truncate and mkdir checked no
+ * permission. Error order as Linux's ksys_pread64/do_sys_ftruncate. ---- */
+static void test_positioned_io_and_truncate(void)
+{
+    int fails = 0;
+    char c = 'x';
+    write_file("/tmp/audit_pio", "abcdef", 0644);
+    int rd = open("/tmp/audit_pio", O_RDONLY);
+    errno = 0;
+    if (pwrite(rd, &c, 1, 0) != -1 || errno != EBADF)
+        fails |= 1;                             /* not open for writing */
+    errno = 0;
+    if (ftruncate(rd, 0) != -1 || errno != EINVAL)
+        fails |= 2;                             /* not open for writing */
+    errno = 0;
+    if (pread(rd, &c, 1, -1) != -1 || errno != EINVAL)
+        fails |= 4;                             /* negative offset */
+    close(rd);
+    int wr = open("/tmp/audit_pio", O_WRONLY);
+    errno = 0;
+    if (pread(wr, &c, 1, 0) != -1 || errno != EBADF)
+        fails |= 8;                             /* not open for reading */
+    errno = 0;
+    if (ftruncate(wr, -1) != -1 || errno != EINVAL)
+        fails |= 16;                            /* negative length */
+    if (ftruncate(wr, 3) != 0)
+        fails |= 32;
+    close(wr);
+    int p[2];
+    if (pipe(p) == 0) {
+        errno = 0;
+        if (pread(p[0], &c, 1, 0) != -1 || errno != ESPIPE)
+            fails |= 64;                        /* a stream has no offset */
+        errno = 0;
+        if (pwrite(p[1], &c, 1, 0) != -1 || errno != ESPIPE)
+            fails |= 128;
+        errno = 0;
+        if (lseek(p[0], 0, SEEK_SET) != -1 || errno != ESPIPE)
+            fails |= 2048;
+        struct stat pst = {0};
+        if (fstat(p[0], &pst) != 0 || !S_ISFIFO(pst.st_mode))
+            fails |= 4096;                      /* a pipe is a FIFO */
+        close(p[0]);
+        close(p[1]);
+    } else {
+        fails |= 64;
+    }
+    errno = 0;
+    if (truncate("/tmp", 0) != -1 || errno != EISDIR)
+        fails |= 256;
+    errno = 0;
+    if (truncate("/tmp/audit_pio", -1) != -1 || errno != EINVAL)
+        fails |= 512;
+    struct stat st = {0};
+    if (stat("/tmp/audit_pio", &st) != 0 || st.st_size != 3)
+        fails |= 1024;
+    /* read/write: the wrong access mode and an unopened fd are EBADF, a
+     * directory read EISDIR (N-197). */
+    rd = open("/tmp/audit_pio", O_RDONLY);
+    wr = open("/tmp/audit_pio", O_WRONLY);
+    errno = 0;
+    if (write(rd, &c, 1) != -1 || errno != EBADF)
+        fails |= 8192;
+    errno = 0;
+    if (read(wr, &c, 1) != -1 || errno != EBADF)
+        fails |= 16384;
+    close(rd);
+    close(wr);
+    errno = 0;
+    if (write(999, &c, 1) != -1 || errno != EBADF)
+        fails |= 32768;
+    int dfd = open("/tmp", O_RDONLY | O_DIRECTORY);
+    errno = 0;
+    if (dfd < 0 || read(dfd, &c, 1) != -1 || errno != EISDIR)
+        fails |= 65536;
+    if (dfd >= 0)
+        close(dfd);
+    static char why[64];
+    snprintf(why, sizeof(why), "bitmask of failures %d", fails);
+    report("pread_pwrite_ftruncate_checks", fails == 0, why);
+
+    /* As a user: no write permission on the file or the directory. */
+    write_file("/tmp/audit_ro", "data", 0644);  /* root-owned */
+    mkdir("/tmp/audit_rodir", 0755);
+    rmdir("/tmp/audit_rodir/sub");
+    pid_t pid = fork();
+    if (pid == 0) {
+        int child_fails = 0;
+        if (setuid(1000) != 0)
+            _exit(100);
+        errno = 0;
+        if (truncate("/tmp/audit_ro", 0) != -1 || errno != EACCES)
+            child_fails |= 1;
+        errno = 0;
+        if (mkdir("/tmp/audit_rodir/sub", 0755) != -1 || errno != EACCES)
+            child_fails |= 2;
+        _exit(child_fails);
+    }
+    report_child("nonroot_truncate_mkdir_denied", pid);
+    int kept = stat("/tmp/audit_ro", &st) == 0 && st.st_size == 4 &&
+               stat("/tmp/audit_rodir/sub", &st) != 0;
+    report("nonroot_truncate_mkdir_left_no_trace", kept, "file truncated or directory created");
+}
+
+/* --- execve with an empty or NULL envp passes no environment (N-211):
+ * the kernel substituted the caller's, so `env -i` leaked it. A child
+ * re-executes this program with AUDIT_ENV_MARK in its environment; that
+ * image (exec_env_helper) then runs sh with an empty or NULL envp, and sh
+ * exits 0 only if the mark did not come through. ---------------------- */
+static void exec_env_helper(const char *mode)
+{
+    char *args[] = {"sh", "-c", "test -z \"$AUDIT_ENV_MARK\"", NULL};
+    char *empty[] = {NULL};
+    execve("/bin/sh", args, strcmp(mode, "exec-env-null") == 0 ? NULL : empty);
+    _exit(100);
+}
+
+static void exec_without_env(const char *mode, const char *name)
+{
+    pid_t pid = fork();
+    if (pid == 0) {
+        char *args[] = {"audit_runtime_test", (char *)mode, NULL};
+        char *env[] = {"AUDIT_ENV_MARK=leaked", NULL};
+        execve("/bin/audit_runtime_test", args, env);
+        _exit(101);
+    }
+    report_child(name, pid);
+}
+
+static void test_exec_environment(void)
+{
+    exec_without_env("exec-env-empty", "execve_empty_envp_is_empty");
+    exec_without_env("exec-env-null", "execve_null_envp_is_empty");
+}
+
+/* --- memfd_create (N-229): it returned an eventfd id that was never an
+ * fd. Now a sizeable, readable, mappable, sealable anonymous file. ---- */
+static void test_memfd(void)
+{
+    int fails = 0;
+    int fd = memfd_create("audit", MFD_CLOEXEC | MFD_ALLOW_SEALING);
+    struct stat st = {0};
+    char buf[8] = {0};
+    if (fd < 0) {
+        report("memfd_create_file_and_seals", 0, "memfd_create failed");
+        return;
+    }
+    if (ftruncate(fd, 4096) != 0)
+        fails |= 1;
+    if (pwrite(fd, "seal", 4, 100) != 4 || pread(fd, buf, 4, 100) != 4 || memcmp(buf, "seal", 4) != 0)
+        fails |= 2;
+    if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size != 4096)
+        fails |= 4;
+    if (!(fcntl(fd, F_GETFD) & FD_CLOEXEC))
+        fails |= 8;
+    char *map = mmap(NULL, 4096, PROT_READ, MAP_PRIVATE, fd, 0);
+    if (map == MAP_FAILED || memcmp(map + 100, "seal", 4) != 0)
+        fails |= 16;
+    if (map != MAP_FAILED)
+        munmap(map, 4096);
+    if (fcntl(fd, F_ADD_SEALS, F_SEAL_SHRINK | F_SEAL_SEAL) != 0)
+        fails |= 32;
+    errno = 0;
+    if (ftruncate(fd, 0) != -1 || errno != EPERM)
+        fails |= 64;                            /* shrinking is sealed */
+    if (ftruncate(fd, 8192) != 0)
+        fails |= 128;                           /* growing is not */
+    if (fcntl(fd, F_GET_SEALS) != (F_SEAL_SHRINK | F_SEAL_SEAL))
+        fails |= 256;
+    errno = 0;
+    if (fcntl(fd, F_ADD_SEALS, F_SEAL_GROW) != -1 || errno != EPERM)
+        fails |= 512;                           /* F_SEAL_SEAL */
+    close(fd);
+
+    /* Without MFD_ALLOW_SEALING no seal can be added. */
+    fd = memfd_create("plain", 0);
+    errno = 0;
+    if (fd < 0 || fcntl(fd, F_GET_SEALS) != F_SEAL_SEAL ||
+        fcntl(fd, F_ADD_SEALS, F_SEAL_WRITE) != -1 || errno != EPERM)
+        fails |= 1024;
+    if (fd >= 0 && (fcntl(fd, F_GETFD) & FD_CLOEXEC))
+        fails |= 2048;
+    if (fd >= 0)
+        close(fd);
+    /* A regular file cannot be sealed; unknown flags are refused. */
+    write_file("/tmp/audit_seal", "x", 0644);
+    fd = open("/tmp/audit_seal", O_RDWR);
+    errno = 0;
+    if (fcntl(fd, F_ADD_SEALS, F_SEAL_WRITE) != -1 || errno != EINVAL)
+        fails |= 4096;
+    close(fd);
+    errno = 0;
+    if (memfd_create("bad", 0x100) != -1 || errno != EINVAL)
+        fails |= 8192;
+    errno = 0;
+    if (memfd_create("huge", MFD_HUGETLB) != -1 || errno != EINVAL)
+        fails |= 16384;
+    static char why[64];
+    snprintf(why, sizeof(why), "bitmask of failures %d", fails);
+    report("memfd_create_file_and_seals", fails == 0, why);
+
+    /* MAP_SHARED of a memfd maps its own pages (N-230): two mappings,
+     * write() and a forked child all see one copy -- a Wayland buffer. */
+    int sfails = 0;
+    fd = memfd_create("shared", MFD_ALLOW_SEALING);
+    if (fd < 0 || ftruncate(fd, 8192) != 0) {
+        report("memfd_shared_mappings", 0, "setup failed");
+        return;
+    }
+    char *a = mmap(NULL, 8192, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    char *b = mmap(NULL, 8192, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    if (a == MAP_FAILED || b == MAP_FAILED || a == b)
+        sfails |= 1;
+    else {
+        strcpy(a + 5000, "one copy");
+        if (strcmp(b + 5000, "one copy") != 0)
+            sfails |= 2;                        /* mapping to mapping */
+        char got[9] = {0};
+        if (pread(fd, got, 8, 5000) != 8 || strcmp(got, "one copy") != 0)
+            sfails |= 4;                        /* mapping to read() */
+        if (pwrite(fd, "pw", 2, 0) != 2 || a[0] != 'p' || b[1] != 'w')
+            sfails |= 8;                        /* write() to mappings */
+        pid_t pid = fork();
+        if (pid == 0) {
+            a[100] = 'C';                       /* the child's mapping */
+            _exit(0);
+        }
+        int cst = 0;
+        waitpid(pid, &cst, 0);
+        if (b[100] != 'C')
+            sfails |= 16;                       /* shared across fork */
+        errno = 0;
+        if (fcntl(fd, F_ADD_SEALS, F_SEAL_WRITE) != -1 || errno != EBUSY)
+            sfails |= 32;                       /* mapped: EBUSY */
+        munmap(a, 8192);
+        munmap(b, 8192);
+        if (fcntl(fd, F_ADD_SEALS, F_SEAL_WRITE) != 0)
+            sfails |= 64;                       /* unmapped: allowed */
+        errno = 0;
+        if (mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0) != MAP_FAILED ||
+            errno != EPERM)
+            sfails |= 128;                      /* write-sealed */
+        char *ro = mmap(NULL, 4096, PROT_READ, MAP_SHARED, fd, 0);
+        if (ro == MAP_FAILED || ro[0] != 'p')
+            sfails |= 256;                      /* read-only still fine */
+        errno = 0;
+        if (ro != MAP_FAILED &&
+            (mprotect(ro, 4096, PROT_READ | PROT_WRITE) != -1 || errno != EACCES))
+            sfails |= 4096;                     /* no upgrade past the seal */
+        if (ro != MAP_FAILED)
+            munmap(ro, 4096);
+    }
+    close(fd);
+    /* mmap's own checks: offset alignment, the fd, its access mode. */
+    errno = 0;
+    if (mmap(NULL, 4096, PROT_READ, MAP_PRIVATE, 999, 0) != MAP_FAILED || errno != EBADF)
+        sfails |= 512;                          /* was silently anonymous */
+    fd = open("/tmp/audit_seal", O_RDONLY);
+    errno = 0;
+    if (mmap(NULL, 4096, PROT_READ, MAP_PRIVATE, fd, 100) != MAP_FAILED || errno != EINVAL)
+        sfails |= 1024;
+    errno = 0;
+    if (mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0) != MAP_FAILED ||
+        errno != EACCES)
+        sfails |= 2048;                         /* O_RDONLY */
+    close(fd);
+    snprintf(why, sizeof(why), "bitmask of failures %d", sfails);
+    report("memfd_shared_mappings", sfails == 0, why);
+}
+
+/* --- Signals 32-64 (N-209): EINVAL before, though musl's pthread_cancel
+ * uses 33. Real-time signals queue, standard ones do not. ------------- */
+static volatile int rt_hits, std_hits;
+static void on_rt(int sig) { (void)sig; rt_hits++; }
+static void on_std(int sig) { (void)sig; std_hits++; }
+
+static void test_realtime_signals(void)
+{
+    int fails = 0;
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = on_rt;
+    if (sigaction(SIGRTMIN + 1, &sa, NULL) != 0 || sigaction(SIGRTMAX, &sa, NULL) != 0)
+        fails |= 1;
+    sa.sa_handler = on_std;
+    sigaction(SIGUSR2, &sa, NULL);
+
+    sigset_t block, old;
+    sigemptyset(&block);
+    sigaddset(&block, SIGRTMIN + 1);
+    sigaddset(&block, SIGUSR2);
+    sigprocmask(SIG_BLOCK, &block, &old);
+    for (int i = 0; i < 3; i++) {
+        if (kill(getpid(), SIGRTMIN + 1) != 0 || kill(getpid(), SIGUSR2) != 0)
+            fails |= 2;
+    }
+    sigprocmask(SIG_SETMASK, &old, NULL);
+    for (int i = 0; i < 8 && rt_hits < 3; i++)
+        getpid();                               /* returns to user mode */
+    if (rt_hits != 3)
+        fails |= 4;                             /* each instance once */
+    if (std_hits != 1)
+        fails |= 8;                             /* merged */
+    kill(getpid(), SIGRTMAX);
+    if (rt_hits != 4)
+        fails |= 16;
+    errno = 0;
+    if (sigaction(65, &sa, NULL) != -1 || errno != EINVAL)
+        fails |= 32;
+    errno = 0;
+    if (kill(getpid(), 65) != -1 || errno != EINVAL)
+        fails |= 64;
+    sa.sa_handler = SIG_DFL;
+    sigaction(SIGRTMIN + 1, &sa, NULL);
+    sigaction(SIGRTMAX, &sa, NULL);
+    sigaction(SIGUSR2, &sa, NULL);
+    static char why[64];
+    snprintf(why, sizeof(why), "bitmask of failures %d (rt %d, std %d)", fails, rt_hits, std_hits);
+    report("realtime_signals_queue", fails == 0, why);
+}
+
+/* --- vfork, and clone without CLONE_THREAD (N-210): vfork was fork,
+ * and every non-thread clone EINVAL, so posix_spawn, system and popen
+ * failed. ------------------------------------------------------------- */
+#include <veridian/syscall.h>
+
+static volatile int vfork_mark;
+static volatile int settid_slot;
+
+static int exit_code_of(pid_t pid)
+{
+    int st = 0;
+    if (waitpid(pid, &st, 0) != pid || !WIFEXITED(st))
+        return -1;
+    return WEXITSTATUS(st);
+}
+
+/* clone(flags, 0, ptid, ctid) without a new stack (a fork). The argument
+ * order is the architecture's: x86_64 has (flags, stack, ptid, ctid, tls),
+ * arm64 and RISC-V Linux's CLONE_BACKWARDS (flags, stack, ptid, tls, ctid). */
+static long raw_clone(unsigned long flags, volatile int *ptid, volatile int *ctid)
+{
+#if defined(__x86_64__)
+    return veridian_syscall5(SYS_clone, flags, 0, ptid, ctid, 0);
+#else
+    return veridian_syscall5(SYS_clone, flags, 0, ptid, 0, ctid);
+#endif
+}
+
+/* The clone checks, apart from test_vfork_and_clone's vfork calls (the raw
+ * system calls' register variables could not live across those). */
+static __attribute__((noinline)) int clone_checks(void)
+{
+    int fails = 0;
+    /* clone(SIGCHLD) is fork. */
+    long r = raw_clone(SIGCHLD, 0, 0);
+    if (r == 0)
+        _exit(5);
+    if (r < 0 || exit_code_of((pid_t)r) != 5)
+        fails |= 8;
+
+    /* CLONE_CHILD_SETTID writes the child's copy only;
+     * CLONE_PARENT_SETTID the parent's. */
+    settid_slot = 0;
+    r = raw_clone(CLONE_CHILD_SETTID | SIGCHLD, 0, &settid_slot);
+    if (r == 0)
+        _exit(settid_slot != 0 ? 0 : 1);
+    if (r < 0 || exit_code_of((pid_t)r) != 0 || settid_slot != 0)
+        fails |= 16;
+    r = raw_clone(CLONE_PARENT_SETTID | SIGCHLD, &settid_slot, 0);
+    if (r == 0)
+        _exit(0);
+    if (r < 0 || exit_code_of((pid_t)r) != 0 || settid_slot == 0)
+        fails |= 32;
+
+    /* A file table shared between processes is not supported. */
+    if (raw_clone(CLONE_FILES | SIGCHLD, 0, 0) != -EINVAL)
+        fails |= 64;
+    return fails;
+}
+
+static void test_vfork_and_clone(void)
+{
+    /* Live across vfork, which returns twice: volatile. */
+    volatile int fails = 0;
+    vfork_mark = 0;
+    pid_t pid = vfork();
+    if (pid == 0) {
+        vfork_mark = 42;                        /* the parent's memory */
+        _exit(7);
+    }
+    if (vfork_mark != 42)
+        fails |= 1;                             /* shared, and the parent waited */
+    if (exit_code_of(pid) != 7)
+        fails |= 2;
+
+    pid = vfork();
+    if (pid == 0) {
+        execl("/bin/sh", "sh", "-c", "exit 3", (char *)0);
+        _exit(127);
+    }
+    if (exit_code_of(pid) != 3)
+        fails |= 4;
+
+    fails |= clone_checks();
+
+    /* What posix_spawn, system and popen rest on. */
+    FILE *p = popen("echo spawned", "r");
+    char line[32] = {0};
+    if (!p || !fgets(line, sizeof(line), p) || strcmp(line, "spawned\n") != 0)
+        fails |= 128;
+    if (p)
+        pclose(p);
+    static char why[64];
+    snprintf(why, sizeof(why), "bitmask of failures %d", fails);
+    report("vfork_and_process_clone", fails == 0, why);
+}
+
+/* --- getcwd, wait and process groups as Linux (N-212 to N-216). ----- */
+static void test_wait_and_groups(void)
+{
+    int fails = 0;
+    char buf[256];
+    long n = veridian_syscall2(SYS_getcwd, buf, sizeof(buf));
+    if (n <= 0 || (size_t)n != strlen(buf) + 1)
+        fails |= 1;                             /* counts the NUL */
+    if (veridian_syscall2(SYS_getcwd, buf, 1) != -ERANGE ||
+        veridian_syscall2(SYS_getcwd, buf, 0) != -ERANGE)
+        fails |= 2;
+
+    /* wait4's pid is an int: a zero-extended -1 is "any child". */
+    pid_t pid = fork();
+    if (pid == 0)
+        _exit(9);
+    int st = 0;
+    long r = veridian_syscall4(SYS_wait4, 0xFFFFFFFFul, &st, 0, 0);
+    if (r != pid || !WIFEXITED(st) || WEXITSTATUS(st) != 9)
+        fails |= 4;
+    errno = 0;
+    if (waitpid(1, &st, 0) != -1 || errno != ECHILD)
+        fails |= 8;                             /* not a child */
+
+    /* WNOHANG with nothing to report leaves the status alone; WNOWAIT
+     * reports without reaping. */
+    int p[2];
+    if (pipe(p) != 0)
+        fails |= 16;
+    pid = fork();
+    if (pid == 0) {
+        char c;
+        close(p[1]);
+        if (read(p[0], &c, 1) < 0)
+            _exit(1);
+        _exit(4);
+    }
+    close(p[0]);
+    st = 12345;
+    if (waitpid(pid, &st, WNOHANG) != 0 || st != 12345)
+        fails |= 32;
+    close(p[1]);                                /* let it exit */
+    siginfo_t si;
+    memset(&si, 0, sizeof(si));
+    if (waitid(P_PID, pid, &si, WEXITED | WNOWAIT) != 0 || si.si_pid != pid)
+        fails |= 64;
+    if (waitpid(pid, &st, 0) != pid || WEXITSTATUS(st) != 4)
+        fails |= 128;                           /* still there to reap */
+
+    /* setpgid: EINVAL, ESRCH, EPERM for a group that does not exist,
+     * EACCES for a child that has exec'd. */
+    errno = 0;
+    if (setpgid(0, -1) != -1 || errno != EINVAL)
+        fails |= 256;
+    errno = 0;
+    if (setpgid(1, 1) != -1 || errno != ESRCH)
+        fails |= 512;
+    errno = 0;
+    if (setpgid(0, 99999) != -1 || errno != EPERM)
+        fails |= 1024;
+    /* The child blocks reading a pipe, never the console: a read of the
+     * inherited stdin took the harness's next command. Repeated: on SMP
+     * the parent can see EOF the moment the exec closes the pipe, and
+     * the child must already count as exec'd then (it did not, CI run
+     * 38927521498). */
+    for (int round = 0; round < 16; round++) {
+        int hold[2] = {-1, -1}, execd[2] = {-1, -1};
+        /* Without both pipes the round proves nothing (and a child would
+         * read the console): skip it. */
+        if (pipe(hold) != 0 || pipe(execd) != 0 || fcntl(execd[1], F_SETFD, FD_CLOEXEC) != 0) {
+            fails |= 16;
+            for (int i = 0; i < 2; i++) {
+                if (hold[i] >= 0) close(hold[i]);
+                if (execd[i] >= 0) close(execd[i]);
+            }
+            continue;
+        }
+        pid = fork();
+        if (pid < 0) {
+            /* No child: nothing to kill or reap (pid -1 would signal every
+             * process). */
+            fails |= 16;
+            close(hold[0]);
+            close(hold[1]);
+            close(execd[0]);
+            close(execd[1]);
+            continue;
+        }
+        if (pid == 0) {
+            dup2(hold[0], 0);
+            close(hold[1]);
+            close(execd[0]);
+            execl("/bin/sh", "sh", "-c", "read x", (char *)0);
+            _exit(127);
+        }
+        close(hold[0]);
+        /* The exec closes the child's end of `execd` (close-on-exec): EOF
+         * here means it has exec'd. (Yielding a few times was not enough
+         * once the child ran on another CPU.) */
+        close(execd[1]);
+        char ignored;
+        while (read(execd[0], &ignored, 1) > 0)
+            ;
+        close(execd[0]);
+        errno = 0;
+        if (setpgid(pid, pid) != -1 || errno != EACCES)
+            fails |= 2048;
+        kill(pid, SIGKILL);
+        waitpid(pid, &st, 0);
+        close(hold[1]);
+    }
+
+    /* setsid from a process-group leader: EPERM. */
+    pid = fork();
+    if (pid == 0) {
+        if (setpgid(0, 0) != 0)
+            _exit(1);
+        errno = 0;
+        _exit(setsid() == -1 && errno == EPERM ? 0 : 2);
+    }
+    if (exit_code_of(pid) != 0)
+        fails |= 4096;
+    static char why[64];
+    snprintf(why, sizeof(why), "bitmask of failures %d", fails);
+    report("getcwd_wait_and_groups", fails == 0, why);
+}
+
+/* --- sigaltstack: handlers on the alternate stack (N-222). -------------- */
+
+static char alt_mem[4 * SIGSTKSZ];
+static volatile uintptr_t alt_handler_sp;
+static volatile int alt_handler_flags, alt_handler_eperm;
+
+static void alt_handler(int sig)
+{
+    int local;
+    stack_t now, other;
+    (void)sig;
+    alt_handler_sp = (uintptr_t)&local;
+    alt_handler_flags = sigaltstack(NULL, &now) == 0 ? now.ss_flags : -1;
+    other.ss_sp = alt_mem;
+    other.ss_size = sizeof(alt_mem);
+    other.ss_flags = 0;
+    alt_handler_eperm = sigaltstack(&other, NULL) == -1 && errno == EPERM;
+}
+
+static int alt_contains(uintptr_t sp)
+{
+    return sp > (uintptr_t)alt_mem && sp - (uintptr_t)alt_mem <= sizeof(alt_mem);
+}
+
+static void test_sigaltstack(void)
+{
+    stack_t st, q;
+    struct sigaction sa;
+
+    /* No stack at first; size and flag errors. */
+    int initial = sigaltstack(NULL, &q) == 0 && (q.ss_flags & SS_DISABLE);
+    st.ss_sp = alt_mem;
+    st.ss_size = MINSIGSTKSZ - 1;
+    st.ss_flags = 0;
+    int small = sigaltstack(&st, NULL) == -1 && errno == ENOMEM;
+    st.ss_size = sizeof(alt_mem);
+    st.ss_flags = 4;
+    int badflags = sigaltstack(&st, NULL) == -1 && errno == EINVAL;
+    report("sigaltstack_errors", initial && small && badflags,
+           "expected SS_DISABLE, then ENOMEM and EINVAL");
+
+    /* A handler with SA_ONSTACK runs on the alternate stack, sees
+     * SS_ONSTACK, and may not change the stack there (EPERM). */
+    st.ss_flags = 0;
+    int set = sigaltstack(&st, NULL) == 0;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = alt_handler;
+    sa.sa_flags = SA_ONSTACK;
+    sigaction(SIGUSR1, &sa, NULL);
+    alt_handler_sp = 0;
+    raise(SIGUSR1);
+    int on_alt = alt_contains(alt_handler_sp) && (alt_handler_flags & SS_ONSTACK) &&
+                 alt_handler_eperm;
+    /* Without SA_ONSTACK the handler stays on the normal stack. */
+    sa.sa_flags = 0;
+    sigaction(SIGUSR2, &sa, NULL);
+    alt_handler_sp = 0;
+    raise(SIGUSR2);
+    int off_alt = alt_handler_sp != 0 && !alt_contains(alt_handler_sp);
+    report("sigaltstack_handler", set && on_alt && off_alt,
+           "SA_ONSTACK handler not on the alternate stack, or the plain one was");
+
+    /* SS_AUTODISARM: disarmed while the handler runs, armed again after. */
+    st.ss_flags = (int)SS_AUTODISARM;
+    sigaltstack(&st, NULL);
+    raise(SIGUSR1);
+    int disarmed = (alt_handler_flags & SS_DISABLE) && alt_contains(alt_handler_sp);
+    int rearmed = sigaltstack(NULL, &q) == 0 && q.ss_sp == (void *)alt_mem &&
+                  q.ss_size == sizeof(alt_mem) && (q.ss_flags & (int)SS_AUTODISARM);
+    report("sigaltstack_autodisarm", disarmed && rearmed,
+           "SS_AUTODISARM did not disarm in the handler or re-arm after it");
+
+    /* A fork child keeps the stack; SS_DISABLE removes it. */
+    pid_t child = fork();
+    if (child == 0) {
+        _exit(sigaltstack(NULL, &q) == 0 && q.ss_sp == (void *)alt_mem ? 0 : 1);
+    }
+    int status = -1;
+    waitpid(child, &status, 0);
+    st.ss_flags = SS_DISABLE;
+    int disabled = sigaltstack(&st, NULL) == 0 && sigaltstack(NULL, &q) == 0 &&
+                   (q.ss_flags & SS_DISABLE);
+    signal(SIGUSR1, SIG_DFL);
+    signal(SIGUSR2, SIG_DFL);
+    report("sigaltstack_fork_disable",
+           WIFEXITED(status) && WEXITSTATUS(status) == 0 && disabled,
+           "fork child lost the stack, or SS_DISABLE did not take effect");
+}
+
+/* --- sigreturn sanitises the user's registers (N-170). --------------------
+ * A handler may rewrite its saved context, but never into privileged state:
+ * a kernel-half pc kills the thread with SIGSEGV (Linux's bad frame), and
+ * on AArch64 the exception level and interrupt masks in PSTATE are ignored
+ * (only the condition flags come back), so the program goes on at EL0 with
+ * signals and preemption working. x86_64 has its own check (D3). */
+#if defined(__aarch64__) || defined(__riscv)
+#include <ucontext.h>
+static volatile int n170_hits;
+static void n170_kernel_pc(int sig, siginfo_t *si, void *ctx)
+{
+    (void)sig;
+    (void)si;
+    ucontext_t *uc = ctx;
+#if defined(__aarch64__)
+    uc->uc_mcontext.pc = 0xffff800000000000UL;
+#else
+    uc->uc_mcontext.__gregs[REG_PC] = 0xffffffc000000000UL;
+#endif
+}
+#if defined(__aarch64__)
+static void n170_el1_pstate(int sig, siginfo_t *si, void *ctx)
+{
+    (void)sig;
+    (void)si;
+    ucontext_t *uc = ctx;
+    /* EL1h (M = 5), D, A, I and F masked; keep the flags. */
+    uc->uc_mcontext.pstate = (uc->uc_mcontext.pstate & 0xf0000000UL) | 0x3c5;
+    n170_hits++;
+}
+#endif
+
+static void test_sigreturn_sanitises(void)
+{
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_flags = SA_SIGINFO;
+    sigemptyset(&sa.sa_mask);
+    pid_t pid = fork();
+    if (pid == 0) {
+        sa.sa_sigaction = n170_kernel_pc;
+        sigaction(SIGUSR1, &sa, 0);
+        kill(getpid(), SIGUSR1);
+        _exit(0); /* reached only if the kernel pc was refused */
+    }
+    int st = 0;
+    int ok = waitpid(pid, &st, 0) == pid && WIFSIGNALED(st) && WTERMSIG(st) == SIGSEGV;
+    static char why[64];
+    snprintf(why, sizeof(why), "status 0x%x", (unsigned)st);
+    report("sigreturn_refuses_kernel_pc", ok, why);
+#if defined(__aarch64__)
+    pid = fork();
+    if (pid == 0) {
+        sa.sa_sigaction = n170_el1_pstate;
+        sigaction(SIGUSR1, &sa, 0);
+        kill(getpid(), SIGUSR1);
+        /* Still at EL0 with interrupts on: another signal arrives, and a
+         * sleep ends through the timer interrupt. */
+        kill(getpid(), SIGUSR1);
+        struct timespec ts = {0, 5 * 1000 * 1000};
+        nanosleep(&ts, 0);
+        _exit(n170_hits == 2 ? 0 : 1);
+    }
+    st = 0;
+    ok = waitpid(pid, &st, 0) == pid && WIFEXITED(st) && WEXITSTATUS(st) == 0;
+    snprintf(why, sizeof(why), "status 0x%x", (unsigned)st);
+    report("sigreturn_keeps_el0_and_unmasked", ok, why);
+
+    /* arm64's MINSIGSTKSZ is 5120 (its frames are larger): a smaller
+     * alternate stack is ENOMEM, as on Linux. Through the system call
+     * itself: musl's wrapper refuses below its own 6144 first. */
+    static char alt[8192] __attribute__((aligned(16)));
+    stack_t ss = {.ss_sp = alt, .ss_flags = 0, .ss_size = 4096};
+    long r_small = veridian_syscall2(SYS_sigaltstack, &ss, 0);
+    ss.ss_size = 5120;
+    long r_fits = veridian_syscall2(SYS_sigaltstack, &ss, 0);
+    ss.ss_flags = SS_DISABLE;
+    veridian_syscall2(SYS_sigaltstack, &ss, 0);
+    snprintf(why, sizeof(why), "4096: %ld; 5120: %ld", r_small, r_fits);
+    report("sigaltstack_arm64_minimum", r_small == -ENOMEM && r_fits == 0, why);
+#endif
+}
+#endif
+
 int main(int argc, char **argv)
 {
     setvbuf(stdout, NULL, _IONBF, 0);
+    if (argc > 1 && strncmp(argv[1], "exec-env-", 9) == 0)
+        exec_env_helper(argv[1]);
     test_fd_numbering();
     test_scanf();
-    /* User threads need a ring-3 entry path in the scheduler that does not
-     * exist yet (see KNOWN-LIMITATIONS); run those checks only on request. */
-    if (argc > 1 && strcmp(argv[1], "threads") == 0) {
-        test_allocator();
-        test_threads();
-    }
+    /* Native libc threads (N-102): clone through clone_<arch>.S, errno
+     * per thread. */
+    test_allocator();
+    test_threads();
+    test_errno_per_thread();
     test_fork_exit();
+    test_cow();
+    test_huge_pages();
     test_rename();
     test_nonroot_permissions();
     test_sticky_dir();
@@ -723,12 +2744,39 @@ int main(int argc, char **argv)
     test_sockets();
     test_timed_waits();
     test_map_fixed_limits();
+    test_lower_half_fork_isolation();
+    test_memory_protection();
+    test_fork_inheritance();
+    test_open_flags();
+    test_kill();
+    test_sigaction();
     test_rename_directory();
     test_closed_stdio();
     test_unix_bind_connect();
     test_socket_api_details();
     test_dir_search_permission();
     test_direction_flag();
+    test_traps();
+    test_preemption();
+    test_kill_sleeping();
+    test_blocking_pipe();
+    test_signal_handlers();
+#if defined(__aarch64__) || defined(__riscv)
+    test_sigreturn_sanitises();
+#endif
+    test_relative_paths();
+    test_exec_permission();
+    test_shared_anon_fork();
+    test_map_fixed_replace();
+    test_stop_continue();
+    test_credentials_and_paths();
+    test_positioned_io_and_truncate();
+    test_exec_environment();
+    test_memfd();
+    test_realtime_signals();
+    test_vfork_and_clone();
+    test_wait_and_groups();
+    test_sigaltstack();
     printf("AUDIT-RUNTIME: %d/%d\n", passed, total);
     return passed == total ? 0 : 1;
 }

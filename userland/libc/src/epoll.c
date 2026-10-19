@@ -13,9 +13,7 @@
 #include <veridian/syscall.h>
 
 /* Epoll syscall numbers (must match kernel/src/syscall/mod.rs) */
-#define SYS_EPOLL_CREATE  262
-#define SYS_EPOLL_CTL     263
-#define SYS_EPOLL_WAIT    264
+#include <veridian/sysno.h> /* system call numbers (ADR 0009) */
 
 /*
  * Translate raw syscall return to POSIX convention.
@@ -36,19 +34,19 @@ int epoll_create(int size)
         errno = EINVAL;
         return -1;
     }
-    long ret = veridian_syscall1(SYS_EPOLL_CREATE, 0);
+    long ret = veridian_syscall1(SYS_epoll_create1, 0);
     return __epoll_ret(ret);
 }
 
 int epoll_create1(int flags)
 {
-    long ret = veridian_syscall1(SYS_EPOLL_CREATE, flags);
+    long ret = veridian_syscall1(SYS_epoll_create1, flags);
     return __epoll_ret(ret);
 }
 
 int epoll_ctl(int epfd, int op, int fd, struct epoll_event *event)
 {
-    long ret = veridian_syscall4(SYS_EPOLL_CTL, epfd, op, fd, event);
+    long ret = veridian_syscall4(SYS_epoll_ctl, epfd, op, fd, event);
     return __epoll_ret(ret);
 }
 
@@ -59,7 +57,7 @@ int epoll_wait(int epfd, struct epoll_event *events,
         errno = EINVAL;
         return -1;
     }
-    long ret = veridian_syscall4(SYS_EPOLL_WAIT, epfd, events,
+    long ret = veridian_syscall4(SYS_epoll_wait, epfd, events,
                                   maxevents, timeout);
     return __epoll_ret(ret);
 }

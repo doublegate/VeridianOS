@@ -1,8 +1,8 @@
 /*
  * VeridianOS libc -- pthread.h
  *
- * Minimal, strictly functional pthread subset backed by SYS_THREAD_CLONE
- * and SYS_FUTEX. Designed to match POSIX semantics closely enough for
+ * Minimal, strictly functional pthread subset backed by SYS_clone
+ * and SYS_futex. Designed to match POSIX semantics closely enough for
  * libc, GCC, and build tooling.
  */
 

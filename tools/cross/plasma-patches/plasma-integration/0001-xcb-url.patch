@@ -1,0 +1,20 @@
+VeridianOS: XCB's URL as ECM's FindXCB gives it
+
+plasma-integration sets XCB's FeatureSummary URL to
+"https://xcb.freedesktop.org", ECM's FindXCB (and Qt's copy of it) to
+"https://xcb.freedesktop.org/"; each find_package and the project's
+set_package_properties then replaced the other's value, and
+FeatureSummary warned twice ("Property URL already set"). The same URL,
+with the slash, ends that.
+
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -56,7 +56,7 @@
+ find_package(XCB COMPONENTS XCB)
+ set_package_properties(XCB PROPERTIES
+     DESCRIPTION "X protocol C-language Binding"
+-    URL "https://xcb.freedesktop.org"
++    URL "https://xcb.freedesktop.org/"
+     TYPE REQUIRED
+     PURPOSE "Required to pass style properties to native Windows on X11 Platform"
+ )

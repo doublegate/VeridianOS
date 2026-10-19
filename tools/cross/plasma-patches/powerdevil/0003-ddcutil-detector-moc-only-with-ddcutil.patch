@@ -1,0 +1,40 @@
+VeridianOS: powerdevil: moc for the ddcutil detector only with ddcutil
+
+daemon/controllers/ddcutildetector.cpp declares its QObject
+(DDCutilPrivateSingleton) inside #ifdef WITH_DDCUTIL, but includes
+"ddcutildetector.moc" whatever the configuration. AutoMoc does not
+evaluate #ifdef, so a build without ddcutil (as here) ran moc on the
+file for nothing: "ddcutildetector.cpp: note: No relevant classes found.
+No output generated." Without ddcutil the source is now left to AutoMoc
+(SKIP_AUTOMOC) and its two moc includes are compiled only with ddcutil;
+the header's QObject (DDCutilDetector) is then compiled through AutoMoc's
+mocs_compilation.cpp, as for any header no source includes the output
+of. With ddcutil nothing changes.
+
+--- a/daemon/controllers/ddcutildetector.cpp
++++ b/daemon/controllers/ddcutildetector.cpp
+@@ -291,5 +291,9 @@
+     return result;
+ }
+ 
++// Only with ddcutil: without it the file declares nothing for moc and is
++// left to AutoMoc (daemon/CMakeLists.txt).
++#ifdef WITH_DDCUTIL
+ #include "ddcutildetector.moc"
+ #include "moc_ddcutildetector.cpp"
++#endif
+--- a/daemon/CMakeLists.txt
++++ b/daemon/CMakeLists.txt
+@@ -4,6 +4,12 @@
+                     ${CMAKE_CURRENT_BINARY_DIR})
+ 
+ add_subdirectory(actions)
++
++# ddcutildetector.cpp has a QObject only with ddcutil (WITH_DDCUTIL); its
++# header's moc output is compiled through mocs_compilation.cpp without it.
++if(NOT DDCUtil_FOUND)
++    set_source_files_properties(controllers/ddcutildetector.cpp PROPERTIES SKIP_AUTOMOC ON)
++endif()
+ 
+ # target no.1 - powerdevil core library
+ set(powerdevilcore_SRCS

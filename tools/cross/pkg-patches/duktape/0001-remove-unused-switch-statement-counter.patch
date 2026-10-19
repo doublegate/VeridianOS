@@ -1,0 +1,41 @@
+VeridianOS: remove an unused statement counter in the switch parser
+
+GCC reported "variable 'num_stmts' set but not used
+[-Wunused-but-set-variable]" at duk_js_compiler.c:5628
+(duk__parse_switch_stmt). The counter of statements in a case clause is
+incremented but never read (the comment above it explains why an empty
+clause needs no special handling). Removed; no behaviour change.
+
+The build (Makefile.sharedlibrary) compiles the amalgamated src/duktape.c,
+so that is the file changed; the #line-mapped duk_js_compiler.c lines
+after the edit shift by three in debug information. src-input/,
+src-noline/ and src-separate/ hold the same code and are not built.
+
+
+diff -ru a/src/duktape.c b/src/duktape.c
+--- a/src/duktape.c	2026-10-08 17:21:18.844834529 -0400
++++ b/src/duktape.c	2026-10-08 17:21:19.000833386 -0400
+@@ -74787,7 +74787,6 @@
+ 	temp_at_loop = DUK__GETTEMP(comp_ctx);
+ 
+ 	for (;;) {
+-		duk_int_t num_stmts;
+ 		duk_small_uint_t tok;
+ 
+ 		/* sufficient for keeping temp reg numbers in check */
+@@ -74862,7 +74861,6 @@
+ 		 *  test-bug-case-fallthrough.js.
+ 		 */
+ 
+-		num_stmts = 0;
+ 		if (pc_default == -2) {
+ 			pc_default = duk__get_current_pc(comp_ctx);
+ 		}
+@@ -74880,7 +74878,6 @@
+ 			if (tok == DUK_TOK_CASE || tok == DUK_TOK_DEFAULT || tok == DUK_TOK_RCURLY) {
+ 				break;
+ 			}
+-			num_stmts++;
+ 			duk__parse_stmt(comp_ctx, res, 0 /*allow_source_elem*/);
+ 		}
+ 

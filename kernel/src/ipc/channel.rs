@@ -10,15 +10,13 @@ extern crate alloc;
 
 #[cfg(feature = "alloc")]
 use alloc::collections::VecDeque;
-#[cfg(feature = "alloc")]
-use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use spin::Mutex;
 
 use super::{
     error::{IpcError, Result},
-    Message, SmallMessage,
+    Message,
 };
 use crate::{process::ProcessId, raii::ChannelGuard};
 
@@ -29,6 +27,15 @@ pub const MAX_CHANNEL_QUEUE_SIZE: usize = 1024;
 static ENDPOINT_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 /// IPC endpoint for bidirectional communication
+/// Which call a queued request starts: the calling thread and the call's
+/// number, so a server's reply can be matched to that call and no later
+/// one (PR #24 review).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CallTag {
+    pub caller: u64,
+    pub id: u64,
+}
+
 pub struct Endpoint {
     /// Unique endpoint ID
     id: u64,
@@ -36,29 +43,18 @@ pub struct Endpoint {
     pub owner: ProcessId,
     /// Bound process ID (if connected)
     bound_to: Mutex<Option<ProcessId>>,
-    /// Incoming message queue
+    /// Incoming message queue, each with the call it starts if it is a
+    /// `sync_call` request.
     #[cfg(feature = "alloc")]
-    receive_queue: Mutex<VecDeque<Message>>,
-    /// Waiting senders (for synchronous IPC)
+    receive_queue: Mutex<VecDeque<(Message, Option<CallTag>)>>,
+    /// Receivers waiting for a message and senders waiting for room, woken
+    /// whenever the queue changes or the endpoint closes. They used to be
+    /// pid lists for the old scheduler, whose blocking never blocked under
+    /// the dispatcher (N-84, N-85).
     #[cfg(feature = "alloc")]
-    waiting_senders: Mutex<Vec<WaitingProcess>>,
-    /// Waiting receivers (for synchronous IPC)
-    #[cfg(feature = "alloc")]
-    waiting_receivers: Mutex<Vec<WaitingProcess>>,
+    waiters: crate::sched::dispatch::WaitQueue,
     /// Endpoint state
     active: AtomicBool,
-}
-
-/// Process waiting on IPC operation
-struct WaitingProcess {
-    /// Process ID
-    pid: ProcessId,
-    /// Message being sent (for senders)
-    #[allow(dead_code)] // Used when sender blocks with pending message (Phase 6)
-    message: Option<Message>,
-    /// Timeout in ticks (0 = infinite)
-    #[allow(dead_code)] // Timeout-based blocking deferred to Phase 6
-    timeout: u64,
 }
 
 impl Endpoint {
@@ -71,9 +67,7 @@ impl Endpoint {
             #[cfg(feature = "alloc")]
             receive_queue: Mutex::new(VecDeque::with_capacity(MAX_CHANNEL_QUEUE_SIZE)),
             #[cfg(feature = "alloc")]
-            waiting_senders: Mutex::new(Vec::new()),
-            #[cfg(feature = "alloc")]
-            waiting_receivers: Mutex::new(Vec::new()),
+            waiters: crate::sched::dispatch::WaitQueue::new(),
             active: AtomicBool::new(true),
         }
     }
@@ -100,38 +94,45 @@ impl Endpoint {
         Ok(())
     }
 
-    /// Send a message through this endpoint (synchronous)
+    /// Send a message through this endpoint (synchronous): queue it,
+    /// waiting for room while the queue is full. A signal ends the wait
+    /// (`Interrupted`); a closed endpoint is `EndpointNotFound`.
     #[cfg(feature = "alloc")]
     pub fn send_sync(&self, msg: Message, _sender: ProcessId) -> Result<()> {
-        if !self.active.load(Ordering::Acquire) {
-            return Err(IpcError::EndpointNotFound);
-        }
+        self.send_tagged(msg, None)
+    }
 
-        // Check if there's a waiting receiver
-        let mut receivers = self.waiting_receivers.lock();
-        if let Some(receiver) = receivers.pop() {
-            drop(receivers);
-
-            // Queue the message so the receiver finds it when woken
-            let mut queue = self.receive_queue.lock();
-            queue.push_back(msg);
-            drop(queue);
-
-            // Wake the receiver for direct delivery (<5us latency target)
-            crate::sched::ipc_blocking::wake_up_process(receiver.pid);
-
-            Ok(())
-        } else {
-            drop(receivers);
-
-            // No waiting receiver, queue the message
-            let mut queue = self.receive_queue.lock();
-            if queue.len() >= MAX_CHANNEL_QUEUE_SIZE {
-                return Err(IpcError::ChannelFull);
+    /// [`Self::send_sync`] for a call's request, tagged with the call.
+    #[cfg(feature = "alloc")]
+    pub fn send_tagged(&self, msg: Message, tag: Option<CallTag>) -> Result<()> {
+        let mut msg = Some(msg);
+        loop {
+            if !self.active.load(Ordering::Acquire) {
+                return Err(IpcError::EndpointNotFound);
             }
-            queue.push_back(msg);
-            Ok(())
+            {
+                let mut queue = self.receive_queue.lock();
+                if queue.len() < MAX_CHANNEL_QUEUE_SIZE {
+                    if let Some(msg) = msg.take() {
+                        queue.push_back((msg, tag));
+                    }
+                    drop(queue);
+                    self.waiters.wake_all();
+                    return Ok(());
+                }
+            }
+            self.wait(|| self.receive_queue.lock().len() < MAX_CHANNEL_QUEUE_SIZE)?;
         }
+    }
+
+    /// Sleep until `ready` holds or the endpoint closes; a signal ends the
+    /// wait.
+    #[cfg(feature = "alloc")]
+    fn wait(&self, ready: impl Fn() -> bool) -> Result<()> {
+        crate::sched::dispatch::wait_event(&self.waiters, None, || {
+            ready() || !self.active.load(Ordering::Acquire)
+        })
+        .map_err(|_| IpcError::Interrupted)
     }
 
     #[cfg(not(feature = "alloc"))]
@@ -143,44 +144,42 @@ impl Endpoint {
         Err(IpcError::WouldBlock)
     }
 
-    /// Receive a message from this endpoint (synchronous)
+    /// Receive a message from this endpoint (synchronous), sleeping until
+    /// one arrives. A signal ends the wait (`Interrupted`); a closed
+    /// endpoint is `EndpointNotFound`.
     #[cfg(feature = "alloc")]
-    pub fn receive_sync(&self, receiver: ProcessId) -> Result<Message> {
-        if !self.active.load(Ordering::Acquire) {
-            return Err(IpcError::EndpointNotFound);
-        }
+    pub fn receive_sync(&self, _receiver: ProcessId) -> Result<Message> {
+        self.receive_tagged().map(|(msg, _)| msg)
+    }
 
-        // Check message queue first
-        let mut queue = self.receive_queue.lock();
-        if let Some(msg) = queue.pop_front() {
-            return Ok(msg);
+    /// [`Self::receive_sync`], with the call the message starts, if any.
+    #[cfg(feature = "alloc")]
+    pub fn receive_tagged(&self) -> Result<(Message, Option<CallTag>)> {
+        loop {
+            if !self.active.load(Ordering::Acquire) {
+                return Err(IpcError::EndpointNotFound);
+            }
+            if let Some(entry) = self.receive_queue.lock().pop_front() {
+                // A sender may be waiting for this room.
+                self.waiters.wake_all();
+                return Ok(entry);
+            }
+            self.wait(|| !self.receive_queue.lock().is_empty())?;
         }
+    }
+
+    /// Take back the request of call `tag` if no server has received it
+    /// yet (its caller gave up). Returns whether it was still queued.
+    #[cfg(feature = "alloc")]
+    pub fn withdraw(&self, tag: CallTag) -> bool {
+        let mut queue = self.receive_queue.lock();
+        let Some(at) = queue.iter().position(|(_, t)| *t == Some(tag)) else {
+            return false;
+        };
+        queue.remove(at);
         drop(queue);
-
-        // Register as waiting receiver and block until message arrives
-        let mut receivers = self.waiting_receivers.lock();
-        receivers.push(WaitingProcess {
-            pid: receiver,
-            message: None,
-            timeout: 0,
-        });
-        drop(receivers);
-
-        // Block current process on this endpoint and yield CPU.
-        // When a sender calls send_sync/send_async, it will wake us via
-        // ipc_blocking::wake_up_process(). On wake, re-check the queue.
-        crate::sched::ipc_blocking::block_on_ipc_unless(self.id, || {
-            !self.receive_queue.lock().is_empty()
-        });
-
-        // Woken up (or the message arrived while registering) -- dequeue it
-        let mut queue = self.receive_queue.lock();
-        if let Some(msg) = queue.pop_front() {
-            Ok(msg)
-        } else {
-            // Woken spuriously (e.g., endpoint closed) or timed out
-            Err(IpcError::WouldBlock)
-        }
+        self.waiters.wake_all();
+        true
     }
 
     #[cfg(not(feature = "alloc"))]
@@ -203,16 +202,9 @@ impl Endpoint {
         if queue.len() >= MAX_CHANNEL_QUEUE_SIZE {
             return Err(IpcError::ChannelFull);
         }
-        queue.push_back(msg);
+        queue.push_back((msg, None));
         drop(queue);
-
-        // Wake one waiting receiver (if any)
-        let mut receivers = self.waiting_receivers.lock();
-        if let Some(receiver) = receivers.pop() {
-            drop(receivers);
-            crate::sched::ipc_blocking::wake_up_process(receiver.pid);
-        }
-
+        self.waiters.wake_all();
         Ok(())
     }
 
@@ -232,8 +224,11 @@ impl Endpoint {
             return Err(IpcError::EndpointNotFound);
         }
 
-        let mut queue = self.receive_queue.lock();
-        queue.pop_front().ok_or(IpcError::ChannelEmpty)
+        let msg = self.receive_queue.lock().pop_front().map(|(msg, _)| msg);
+        if msg.is_some() {
+            self.waiters.wake_all(); // room for a waiting sender
+        }
+        msg.ok_or(IpcError::ChannelEmpty)
     }
 
     #[cfg(not(feature = "alloc"))]
@@ -249,26 +244,9 @@ impl Endpoint {
     #[cfg(feature = "alloc")]
     pub fn close(&self) {
         self.active.store(false, Ordering::Release);
-
-        // Wake all waiting receivers and senders with error
-        let receivers: Vec<WaitingProcess> = {
-            let mut r = self.waiting_receivers.lock();
-            r.drain(..).collect()
-        };
-        let senders: Vec<WaitingProcess> = {
-            let mut s = self.waiting_senders.lock();
-            s.drain(..).collect()
-        };
-
-        for waiter in receivers.iter().chain(senders.iter()) {
-            crate::sched::ipc_blocking::wake_up_process(waiter.pid);
-        }
-
-        // Drain any buffered messages
+        // Drain any buffered messages; waiters see the endpoint closed.
         self.receive_queue.lock().clear();
-
-        // Wake all processes blocked on this endpoint via the scheduler
-        crate::sched::ipc_blocking::wake_up_endpoint_waiters(self.id);
+        self.waiters.wake_all();
     }
 
     /// Close the endpoint (no-alloc fallback)
@@ -326,65 +304,6 @@ impl Channel {
     }
 }
 
-/// Fast-path IPC for small messages
-///
-/// This function implements the register-based fast path for messages
-/// that fit entirely in CPU registers.
-#[inline(always)]
-pub fn fast_ipc_send(msg: &SmallMessage, target: ProcessId) -> Result<()> {
-    // O(1) capability validation: check non-zero and within valid range.
-    // Full capability table lookup is deferred to the slow path; the fast
-    // path trusts that capabilities in the valid range were granted by the
-    // capability system and performs a range check only.
-    if msg.capability == 0 {
-        return Err(IpcError::InvalidCapability);
-    }
-
-    // Wake target if blocked, allowing it to receive via the slow path.
-    // Direct register transfer requires per-task IpcRegs (Phase 6).
-    crate::sched::ipc_blocking::wake_up_process(target);
-
-    Ok(())
-}
-
-/// IPC call with reply (RPC-style)
-///
-/// Sends a request message to the target, blocks until a reply arrives on the
-/// same endpoint, then returns the reply. This is the fundamental RPC
-/// primitive.
-#[cfg(feature = "alloc")]
-pub fn call_reply(request: Message, target: ProcessId) -> Result<Message> {
-    // Create a temporary reply endpoint for this call
-    let caller = crate::sched::current_process_id();
-    let reply_endpoint = Endpoint::new(caller);
-    let reply_id = reply_endpoint.id();
-
-    // Send the request (include reply endpoint ID in capability field)
-    let mut req = request;
-    // Encode reply endpoint in flags for the server to find
-    req.set_flags(reply_id as u32);
-
-    // Wake target to process the request
-    crate::sched::ipc_blocking::wake_up_process(target);
-
-    // Block until reply arrives on our reply endpoint
-    crate::sched::ipc_blocking::block_on_ipc(reply_id);
-
-    // Check for reply
-    let mut queue = reply_endpoint.receive_queue.lock();
-    if let Some(reply) = queue.pop_front() {
-        Ok(reply)
-    } else {
-        Err(IpcError::WouldBlock)
-    }
-}
-
-/// IPC call with reply (no-alloc fallback)
-#[cfg(not(feature = "alloc"))]
-pub fn call_reply(_request: Message, _target: ProcessId) -> Result<Message> {
-    Err(IpcError::WouldBlock)
-}
-
 #[cfg(all(test, not(target_os = "none")))]
 mod tests {
     use super::*;
@@ -401,6 +320,49 @@ mod tests {
     fn test_channel_creation() {
         let channel = Channel::new(ProcessId(1), 100);
         assert_ne!(channel.send_id(), channel.receive_id());
+    }
+
+    /// A call's request carries the call to the server, and one whose
+    /// caller gave up can be taken back while no server has it.
+    #[test]
+    fn call_requests_are_tagged_and_can_be_withdrawn() {
+        let endpoint = Endpoint::new(ProcessId(1));
+        let a = CallTag { caller: 40, id: 1 };
+        let b = CallTag { caller: 40, id: 2 };
+        endpoint.send_tagged(Message::small(1, 1), Some(a)).unwrap();
+        endpoint.send_tagged(Message::small(2, 1), Some(b)).unwrap();
+        assert!(endpoint.withdraw(a));
+        assert!(!endpoint.withdraw(a));
+        let (msg, tag) = endpoint.receive_tagged().unwrap();
+        assert_eq!((msg.capability(), tag), (2, Some(b)));
+    }
+
+    #[test]
+    fn receive_sync_takes_a_queued_message_without_waiting() {
+        let endpoint = Endpoint::new(ProcessId(1));
+        endpoint
+            .send_sync(Message::small(7, 1), ProcessId(2))
+            .unwrap();
+        assert_eq!(endpoint.receive_sync(ProcessId(1)).unwrap().capability(), 7);
+    }
+
+    #[test]
+    fn closed_endpoint_refuses_both_sides_and_drops_messages() {
+        let endpoint = Endpoint::new(ProcessId(1));
+        endpoint.send_async(Message::small(7, 1)).unwrap();
+        endpoint.close();
+        assert_eq!(
+            endpoint.receive_sync(ProcessId(1)).err(),
+            Some(IpcError::EndpointNotFound)
+        );
+        assert_eq!(
+            endpoint.send_sync(Message::small(8, 1), ProcessId(2)).err(),
+            Some(IpcError::EndpointNotFound)
+        );
+        assert_eq!(
+            endpoint.try_receive().err(),
+            Some(IpcError::EndpointNotFound)
+        );
     }
 
     #[test]

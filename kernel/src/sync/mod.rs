@@ -5,12 +5,13 @@
 //! Includes lock-free data structures for high-performance kernel paths:
 //! - RCU (Read-Copy-Update) for read-heavy data structures
 //! - Hazard pointers for safe memory reclamation
-//! - Lock-free MPSC queue for scheduler ready queues
+//!
+//! (A lock-free queue was removed: nothing used it, and its safe `pop` let
+//! two consumers race though it supports one; PR #25 review, N-59.)
 
 pub mod hazard;
-pub mod lockfree_queue;
 pub mod once_lock;
 pub mod rcu;
+pub mod sleep_mutex;
 
-pub use lockfree_queue::LockFreeQueue;
 pub use once_lock::{GlobalState, LazyLock, OnceLock};

@@ -180,7 +180,8 @@ impl VirtioNetDriver {
                 code: 3,
             });
         }
-        let queue = VirtQueue::new(size)?;
+        let mut queue = VirtQueue::new(size)?;
+        queue.set_coherent(transport.dma_coherent());
         transport.set_queue_size(queue.size());
         transport.write_queue_address(queue.pfn());
         transport.write_queue_phys(queue.phys_desc(), queue.phys_avail(), queue.phys_used());
@@ -196,6 +197,14 @@ impl VirtioNetDriver {
             self.rx
                 .write_desc(desc, buf.phys, FRAME_SIZE as u32, VIRTQ_DESC_F_WRITE, 0);
         }
+        // No dirty line of the buffer may be evicted over the packet the
+        // device writes (HA-25).
+        crate::mm::dma::sync_for_device(
+            buf.virt,
+            FRAME_SIZE,
+            crate::mm::dma::DmaDirection::FromDevice,
+            self.rx.coherent(),
+        );
         self.rx.push_avail(desc);
     }
 
@@ -249,6 +258,12 @@ impl VirtioNetDriver {
         bytes[..hdr_len].fill(0); // no offloads requested
         bytes[hdr_len..total].copy_from_slice(frame);
         let phys = buf.phys;
+        crate::mm::dma::sync_for_device(
+            buf.virt,
+            total,
+            crate::mm::dma::DmaDirection::ToDevice,
+            self.tx.coherent(),
+        );
 
         // SAFETY: `desc` was just allocated; the buffer stays owned by this
         // descriptor (tx_busy) until the device returns it via the used ring.
@@ -278,6 +293,12 @@ impl VirtioNetDriver {
 
         // The device-reported length is untrusted: clamp to the buffer.
         let len = (len as usize).min(FRAME_SIZE);
+        crate::mm::dma::sync_for_cpu(
+            self.rx_bufs[index].1.virt,
+            len,
+            crate::mm::dma::DmaDirection::FromDevice,
+            self.rx.coherent(),
+        );
         let packet = if len > self.hdr_len {
             let frame = &self.rx_bufs[index].1.bytes()[self.hdr_len..len];
             self.stats.rx_packets += 1;

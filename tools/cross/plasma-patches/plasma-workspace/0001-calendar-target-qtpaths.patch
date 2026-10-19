@@ -1,0 +1,52 @@
+VeridianOS: no build-host Qt paths in plasma-workspace's installed files
+
+Two kinds of installed file have a Qt tool's path compiled in, which in a
+cross build is the build host's Qt (its tools are the ones CMake imports):
+
+- components/calendar: migrate-calendar-to-plugin-id.py (kconf_update)
+  runs qtpaths from $<TARGET_FILE:Qt6::qtpaths>.
+- the top-level CMakeLists.txt: ecm_query_qt(QtBinariesDir
+  QT_INSTALL_BINS) names qdbus's directory for the systemd user units
+  plasma-restoresession.service and plasma-kcminit-phase1.service.
+
+Cross compiling, both now name KDE_INSTALL_FULL_BINDIR (/usr/bin), where a
+Qt that ships its tools for the target installs them. On VeridianOS that
+Qt build installs no target tools (only build-host wrappers, which
+build-rootfs-kde.sh leaves out), the kconf_update script needs Python and
+the units systemd, none of which the system has: nothing here runs on
+VeridianOS today. The change keeps /opt/veridian/... out of the installed
+files.
+
+--- a/components/calendar/CMakeLists.txt
++++ b/components/calendar/CMakeLists.txt
+@@ -48,7 +48,13 @@
+ 
+ ecm_finalize_qml_module(calendarplugin)
+ 
+-set(QTPATHS_PATH "$<TARGET_FILE:${QT_CMAKE_EXPORT_NAMESPACE}::qtpaths>")
++# The kconf_update script runs qtpaths on the system it is installed on;
++# when cross compiling, the qtpaths target is the build host's tool.
++if (CMAKE_CROSSCOMPILING)
++    set(QTPATHS_PATH "${KDE_INSTALL_FULL_BINDIR}/qtpaths")
++else()
++    set(QTPATHS_PATH "$<TARGET_FILE:${QT_CMAKE_EXPORT_NAMESPACE}::qtpaths>")
++endif()
+ configure_file(kconf_update/migrate-calendar-to-plugin-id.py.in ${CMAKE_CURRENT_BINARY_DIR}/migrate-calendar-to-plugin-id.py.in @ONLY)
+ file(GENERATE OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/migrate-calendar-to-plugin-id.py INPUT ${CMAKE_CURRENT_BINARY_DIR}/migrate-calendar-to-plugin-id.py.in)
+ install(PROGRAMS ${CMAKE_CURRENT_BINARY_DIR}/migrate-calendar-to-plugin-id.py DESTINATION ${KDE_INSTALL_KCONFUPDATEDIR})
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -399,7 +399,12 @@
+ add_definitions(-DQT_NO_URL_CAST_FROM_STRING)
+ 
+ # locate qdbus in the Qt path because not every distro makes a symlink at /usr/bin/qdbus
+-ecm_query_qt(QtBinariesDir QT_INSTALL_BINS)
++if (CMAKE_CROSSCOMPILING)
++    # The units run qdbus on the system they are installed on, not the build host's.
++    set(QtBinariesDir "${KDE_INSTALL_FULL_BINDIR}")
++else()
++    ecm_query_qt(QtBinariesDir QT_INSTALL_BINS)
++endif()
+ 
+ if(KF6DocTools_FOUND)
+   add_subdirectory(doc)

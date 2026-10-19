@@ -83,7 +83,7 @@ impl VfsNode for ProcNode {
                 match name.as_str() {
                     "version" => {
                         format!(
-                            "VeridianOS version 0.5.0 (gcc 14.2.0) #1 SMP {}\n",
+                            "VeridianOS version 0.5.0 (gcc 16.2.0) #1 SMP {}\n",
                             env!("CARGO_PKG_VERSION")
                         )
                     }
@@ -98,8 +98,10 @@ impl VfsNode for ProcNode {
                         let total_kb = stats.total_frames * 4; // 4KB per frame
                         let free_kb = stats.free_frames * 4;
                         let used_kb = total_kb.saturating_sub(free_kb);
-                        let cached_kb = stats.cached_frames * 4;
-                        let available_kb = free_kb + cached_kb;
+                        // Cached: the file page cache (ADR 0010). Frames on
+                        // the allocator's per-CPU lists are free memory too.
+                        let cached_kb = crate::mm::page_cache::cached_pages() * 4;
+                        let available_kb = free_kb + stats.cached_frames * 4;
                         let buffers_kb = 0usize;
                         let slab_kb = 0usize;
 
@@ -110,7 +112,8 @@ impl VfsNode for ProcNode {
                              Buffers:        {:>8} kB\n\
                              Cached:         {:>8} kB\n\
                              Slab:           {:>8} kB\n\
-                             MemUsed:        {:>8} kB\n",
+                             MemUsed:        {:>8} kB\n\
+                             CowShared:      {:>8} kB\n",
                             total_kb,
                             free_kb,
                             available_kb,
@@ -118,6 +121,10 @@ impl VfsNode for ProcNode {
                             cached_kb,
                             slab_kb,
                             used_kb,
+                            // Frames with more than one owner (each counted
+                            // once): shared copy-on-write after fork, or a
+                            // cached file page that processes map.
+                            crate::mm::frame_refs::shared_frames() * 4,
                         )
                     }
                     "cpuinfo" => generate_cpuinfo(),
@@ -156,8 +163,12 @@ impl VfsNode for ProcNode {
                             let parent = process.parent().unwrap_or(crate::process::ProcessId(0));
 
                             format!(
-                                "Name:\t{}\nPid:\t{}\nPPid:\t{}\nState:\t{}\n",
-                                name, pid, parent.0, state
+                                "Name:\t{}\nPid:\t{}\nPPid:\t{}\nState:\t{}\n{}",
+                                name,
+                                pid,
+                                parent.0,
+                                state,
+                                status_ids(&process.credentials())
                             )
                         } else {
                             format!("Name:\tProcess\nPid:\t{}\nState:\tR (running)\n", pid)
@@ -194,7 +205,9 @@ impl VfsNode for ProcNode {
     }
 
     fn write(&self, _offset: usize, _data: &[u8]) -> Result<usize, KernelError> {
-        Err(KernelError::FsError(FsError::ReadOnly))
+        // EACCES, as Linux's read-only /proc files give (EROFS would say
+        // the filesystem is mounted read-only).
+        Err(KernelError::FsError(FsError::PermissionDenied))
     }
 
     fn metadata(&self) -> Result<Metadata, KernelError> {
@@ -206,10 +219,17 @@ impl VfsNode for ProcNode {
             _ => NodeType::File,
         };
 
+        // As on Linux: everyone may walk the directories and read the
+        // files; links (self/exe) are rwxrwxrwx.
+        let permissions = Permissions::from_mode(match node_type {
+            NodeType::Directory => 0o555,
+            NodeType::Symlink => 0o777,
+            _ => 0o444,
+        });
         Ok(Metadata {
             node_type,
             size: 0,
-            permissions: Permissions::read_only(),
+            permissions,
             uid: 0,
             gid: 0,
             created: 0,
@@ -372,6 +392,14 @@ impl VfsNode for ProcNode {
                         "exe" => Ok(Arc::new(ProcNode {
                             node_type: ProcNodeType::SelfExe,
                         }) as Arc<dyn VfsNode>),
+                        // The caller's own files, as /proc/<its pid>/...
+                        // (Linux's /proc/self is a link to that directory).
+                        "status" | "cmdline" => crate::process::current_process()
+                            .map(|p| {
+                                Arc::new(ProcNode::new_process_file(p.pid.0, String::from(name)))
+                                    as Arc<dyn VfsNode>
+                            })
+                            .ok_or(KernelError::FsError(FsError::NotFound)),
                         "maps" => Ok(
                             Arc::new(ProcNode::new_system_file(format!("self/{}", name)))
                                 as Arc<dyn VfsNode>,
@@ -390,7 +418,7 @@ impl VfsNode for ProcNode {
         _name: &str,
         _permissions: Permissions,
     ) -> Result<Arc<dyn VfsNode>, KernelError> {
-        Err(KernelError::FsError(FsError::ReadOnly))
+        Err(KernelError::FsError(FsError::PermissionDenied))
     }
 
     fn mkdir(
@@ -398,15 +426,15 @@ impl VfsNode for ProcNode {
         _name: &str,
         _permissions: Permissions,
     ) -> Result<Arc<dyn VfsNode>, KernelError> {
-        Err(KernelError::FsError(FsError::ReadOnly))
+        Err(KernelError::FsError(FsError::PermissionDenied))
     }
 
     fn unlink(&self, _name: &str) -> Result<(), KernelError> {
-        Err(KernelError::FsError(FsError::ReadOnly))
+        Err(KernelError::FsError(FsError::PermissionDenied))
     }
 
     fn truncate(&self, _size: usize) -> Result<(), KernelError> {
-        Err(KernelError::FsError(FsError::ReadOnly))
+        Err(KernelError::FsError(FsError::PermissionDenied))
     }
 }
 
@@ -507,7 +535,39 @@ fn generate_cpuinfo() -> String {
 
     #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
     {
-        format!("processor\t: 0\narchitecture\t: riscv64\nmodel name\t: RISC-V Processor\n")
+        format!(
+            "processor\t: 0\narchitecture\t: riscv64\nmodel name\t: RISC-V Processor\nmmu\t\t: \
+             {}\n",
+            riscv_mmu_name(crate::mm::page_table::paging_levels())
+        )
+    }
+}
+
+/// The `Uid:`, `Gid:` and `Groups:` lines of /proc/[pid]/status, as Linux
+/// prints them: real, effective, saved and filesystem IDs, tab-separated,
+/// then the supplementary groups separated by spaces.
+fn status_ids(c: &crate::process::creds::Credentials) -> String {
+    let mut groups = String::new();
+    for (i, g) in c.groups().iter().enumerate() {
+        if i > 0 {
+            groups.push(' ');
+        }
+        groups.push_str(&format!("{}", g));
+    }
+    format!(
+        "Uid:\t{}\t{}\t{}\t{}\nGid:\t{}\t{}\t{}\t{}\nGroups:\t{}\n",
+        c.ruid, c.euid, c.suid, c.fsuid, c.rgid, c.egid, c.sgid, c.fsgid, groups
+    )
+}
+
+/// Linux's `mmu` field of a RISC-V /proc/cpuinfo: the paging mode in use
+/// (ADR 0018), which user programs read to learn their address-space limit.
+#[cfg_attr(any(target_arch = "x86_64", target_arch = "aarch64"), allow(dead_code))]
+fn riscv_mmu_name(levels: u8) -> &'static str {
+    if levels == 3 {
+        "sv39"
+    } else {
+        "sv48"
     }
 }
 
@@ -538,7 +598,12 @@ fn generate_loadavg() -> String {
         .unwrap_or(1);
 
     // Linux format: 1min 5min 15min running/total last_pid
-    format!("0.00 0.00 0.00 {}/{} {}\n", running, total, last_pid)
+    let [one, five, fifteen] =
+        crate::sched::loadavg::averages().map(crate::sched::loadavg::format_parts);
+    format!(
+        "{}.{:02} {}.{:02} {}.{:02} {}/{} {}\n",
+        one.0, one.1, five.0, five.1, fifteen.0, fifteen.1, running, total, last_pid
+    )
 }
 
 /// Read CPUID vendor ID string (x86_64 only).
@@ -672,6 +737,48 @@ impl Filesystem for ProcFs {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Everyone may walk /proc and read its files, as on Linux: directories
+    /// r-xr-xr-x, files r--r--r--. (Directories had no execute bit, so a
+    /// non-root process could open nothing below /proc.)
+    #[test]
+    fn proc_nodes_are_world_readable() {
+        let dir = ProcNode::new_root().metadata().unwrap();
+        assert_eq!(dir.permissions, Permissions::from_mode(0o555));
+        let pid_dir = ProcNode::new_process_dir(1).metadata().unwrap();
+        assert_eq!(pid_dir.permissions, Permissions::from_mode(0o555));
+        let file = ProcNode::new_system_file(String::from("uptime"))
+            .metadata()
+            .unwrap();
+        assert_eq!(file.permissions, Permissions::from_mode(0o444));
+    }
+
+    /// Status shows all four user and group IDs, filesystem ones last.
+    #[test]
+    fn status_shows_every_id() {
+        let mut c = crate::process::creds::Credentials::new(0, 0);
+        c.setgroups(&[10, 20]).unwrap();
+        c.setresgid(5, 6, 7).unwrap();
+        c.setfsgid(8);
+        c.setresuid(1, 2, 3).unwrap();
+        assert_eq!(
+            status_ids(&c),
+            "Uid:\t1\t2\t3\t2\nGid:\t5\t6\t7\t8\nGroups:\t10 20\n"
+        );
+        let mut c = crate::process::creds::Credentials::new(0, 0);
+        c.setfsuid(1000);
+        assert_eq!(
+            status_ids(&c),
+            "Uid:\t0\t0\t0\t1000\nGid:\t0\t0\t0\t0\nGroups:\t\n"
+        );
+    }
+
+    /// The RISC-V `mmu` field names the mode, as Linux prints it.
+    #[test]
+    fn riscv_mmu_field_names_the_paging_mode() {
+        assert_eq!(riscv_mmu_name(3), "sv39");
+        assert_eq!(riscv_mmu_name(4), "sv48");
+    }
     use crate::mm::{vas::MappingType, PageFlags};
 
     #[test]

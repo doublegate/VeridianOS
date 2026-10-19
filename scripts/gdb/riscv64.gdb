@@ -71,6 +71,26 @@ define examine-opensbi
     x/16i 0x80200000
 end
 
+# Page table indices for RISC-V. The kernel runs in Sv48 when the hart has
+# it and in Sv39 otherwise (satp MODE 9 or 8; ADR 0018): use the macro for
+# the mode `p/x $satp >> 60` shows.
+define walk-page-table-sv48
+    if $argc != 1
+        echo Usage: walk-page-table-sv48 <virtual_address>\n
+    else
+        set $vaddr = $arg0
+        echo Virtual Address: 
+        printf "0x%016lx\n", $vaddr
+
+        # Sv48: 4-level page table
+        printf "VPN[3]: %d\n", ($vaddr >> 39) & 0x1ff
+        printf "VPN[2]: %d\n", ($vaddr >> 30) & 0x1ff
+        printf "VPN[1]: %d\n", ($vaddr >> 21) & 0x1ff
+        printf "VPN[0]: %d\n", ($vaddr >> 12) & 0x1ff
+        printf "Page Offset: 0x%03x\n", $vaddr & 0xfff
+    end
+end
+
 # Page table walk for RISC-V Sv39
 define walk-page-table-sv39
     if $argc != 1
@@ -144,6 +164,7 @@ alias dcsr = dump-csr
 alias duart = dump-uart-8250
 alias esbi = examine-opensbi
 alias wpt39 = walk-page-table-sv39
+alias wpt48 = walk-page-table-sv48
 alias trap = analyze-trap
 
 echo [GDB] RISC-V 64-specific configuration loaded\n

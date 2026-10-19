@@ -13,14 +13,11 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 use super::{
     error::{IpcError, Result},
-    fast_path::fast_receive,
     message::Message,
 };
-use crate::{
-    arch::entropy::read_timestamp,
-    process::{ProcessId, ProcessState},
-    sched::{current_process, find_process},
-};
+use crate::arch::entropy::read_timestamp;
+#[cfg(test)]
+use crate::process::ProcessId;
 
 /// Statistics for synchronous IPC
 pub struct SyncIpcStats {
@@ -45,134 +42,217 @@ pub fn send_message(msg: Message, target_endpoint: u64) -> Result<()> {
     sync_send(msg, target_endpoint)
 }
 
-/// Synchronous message send
-///
-/// Blocks until message is delivered to receiver.
+/// Synchronous message send: the message is queued on the endpoint,
+/// waiting for room while its queue is full (a signal ends the wait).
 pub fn sync_send(msg: Message, target_endpoint: u64) -> Result<()> {
+    send_tagged(msg, target_endpoint, None)
+}
+
+/// [`sync_send`] of a call's request, tagged with the call.
+fn send_tagged(
+    msg: Message,
+    target_endpoint: u64,
+    tag: Option<super::channel::CallTag>,
+) -> Result<()> {
     let start = read_timestamp();
     SYNC_STATS.send_count.fetch_add(1, Ordering::Relaxed);
-
-    match msg {
-        Message::Small(small_msg) => {
-            // Small messages also take the queued path for now. A direct
-            // hand-off needs the receiver to be claimed atomically from a
-            // receive-only wait list bound to this endpoint; the shared
-            // IPC wait queue cannot do that (senders blocked on a full
-            // endpoint park under the same key, and the task can change
-            // state between lookup and delivery). The queued path checks
-            // the capability's endpoint binding and wakes waiters
-            // correctly. Restored with the IPC-SYNC-01/02 wait rework.
-            SYNC_STATS.slow_path_count.fetch_add(1, Ordering::Relaxed);
-            sync_send_slow_path(Message::Small(small_msg), target_endpoint)?;
-            update_latency_stats(start);
-            Ok(())
-        }
-        msg @ (Message::Large(_) | Message::Buffered(_)) => {
-            // Large and buffered messages always use slow path
-            SYNC_STATS.slow_path_count.fetch_add(1, Ordering::Relaxed);
-            sync_send_slow_path(msg, target_endpoint)?;
-            update_latency_stats(start);
-            Ok(())
-        }
-    }
-}
-
-/// Synchronous message receive
-///
-/// Blocks until a message is available.
-pub fn sync_receive(endpoint: u64) -> Result<Message> {
-    let start = read_timestamp();
-    SYNC_STATS.receive_count.fetch_add(1, Ordering::Relaxed);
-
-    // Try fast path for small messages
-    match fast_receive(endpoint, None) {
-        Ok(msg) => {
-            SYNC_STATS.fast_path_count.fetch_add(1, Ordering::Relaxed);
-            update_latency_stats(start);
-            Ok(msg)
-        }
-        Err(IpcError::WouldBlock) => {
-            // Fall back to slow path
-            SYNC_STATS.slow_path_count.fetch_add(1, Ordering::Relaxed);
-            let msg = sync_receive_slow_path(endpoint)?;
-            update_latency_stats(start);
-            Ok(msg)
-        }
-        Err(e) => Err(e),
-    }
-}
-
-/// Call operation (send and wait for reply)
-pub fn sync_call(request: Message, target: u64) -> Result<Message> {
-    // Send request
-    sync_send(request, target)?;
-
-    // Mark ourselves as waiting for reply
-    let current = current_process();
-    current.state = ProcessState::Blocked;
-
-    // Wait for reply using process ID as endpoint
-    sync_receive(current.pid.0)
-}
-
-/// Reply to a previous call
-pub fn sync_reply(reply: Message, caller: u64) -> Result<()> {
-    // Find caller process
-    let caller_process = find_process(ProcessId(caller)).ok_or(IpcError::ProcessNotFound)?;
-
-    // Verify caller is waiting for reply
-    if caller_process.state != ProcessState::Blocked {
-        return Err(IpcError::InvalidMessage);
-    }
-
-    // Send reply directly
-    sync_send(reply, caller)?;
-
-    // Wake the caller process after reply is sent
-    crate::sched::ipc_blocking::wake_up_process(ProcessId(caller));
+    SYNC_STATS.slow_path_count.fetch_add(1, Ordering::Relaxed);
+    validate_send_capability(&msg, target_endpoint)?;
+    send_to(target_endpoint, msg, tag)?;
+    update_latency_stats(start);
     Ok(())
 }
 
-/// Slow path for synchronous send
-fn sync_send_slow_path(msg: Message, target_endpoint: u64) -> Result<()> {
-    // Validate send capability
-    validate_send_capability(&msg, target_endpoint)?;
+/// Synchronous message receive: sleeps until a message is available, the
+/// endpoint closes or a signal must be acted on (N-84: it yielded once and
+/// returned an empty message). The caller checks the RECEIVE right.
+pub fn sync_receive(endpoint: u64) -> Result<Message> {
+    let start = read_timestamp();
+    SYNC_STATS.receive_count.fetch_add(1, Ordering::Relaxed);
+    let msg = receive_from(endpoint)?;
+    update_latency_stats(start);
+    Ok(msg)
+}
 
-    // Use message passing subsystem with retry-on-full blocking
+/// Queue `msg` on endpoint `id` of the IPC registry, where endpoints are
+/// created. The send path used to look them up in a second registry that
+/// nothing filled, so it reached no endpoint (N-47).
+#[cfg(feature = "alloc")]
+fn send_to(id: u64, msg: Message, tag: Option<super::channel::CallTag>) -> Result<()> {
+    super::registry::lookup_endpoint(id)?.send_tagged(msg, tag)
+}
+
+#[cfg(not(feature = "alloc"))]
+fn send_to(_id: u64, _msg: Message, _tag: Option<super::channel::CallTag>) -> Result<()> {
+    Err(IpcError::OutOfMemory)
+}
+
+/// The next message of endpoint `id`, sleeping until there is one.
+#[cfg(feature = "alloc")]
+fn receive_from(id: u64) -> Result<Message> {
+    let (msg, tag) = super::registry::lookup_endpoint(id)?.receive_tagged()?;
+    // A call's request: this server thread now serves that call, and its
+    // reply to the caller answers this call and no other.
+    if let (Some(tag), Some(server)) = (tag, crate::process::current_thread()) {
+        SERVED.lock().insert((server.tid.0, tag.caller), tag.id);
+    }
+    Ok(msg)
+}
+
+#[cfg(not(feature = "alloc"))]
+fn receive_from(_id: u64) -> Result<Message> {
+    Err(IpcError::OutOfMemory)
+}
+
+/// An outstanding call (N-80): the endpoint called, and the reply once a
+/// server has given it.
+#[cfg(feature = "alloc")]
+struct PendingCall {
+    endpoint: u64,
+    /// The call's number: a reply must come from a server that received
+    /// this call's request. Keyed by thread alone, a late reply to a call
+    /// that was interrupted answered the thread's next call to the same
+    /// endpoint, whose own reply was then refused (PR #24 review).
+    id: u64,
+    reply: Option<Message>,
+}
+
+/// Numbers calls.
+#[cfg(feature = "alloc")]
+static NEXT_CALL: AtomicU64 = AtomicU64::new(1);
+
+/// The call each server thread received from each caller, by (server
+/// thread, caller thread): what its reply may answer.
+#[cfg(feature = "alloc")]
+static SERVED: spin::Mutex<alloc::collections::BTreeMap<(u64, u64), u64>> =
+    spin::Mutex::new(alloc::collections::BTreeMap::new());
+
+/// Outstanding calls by caller thread id. A reply goes into the call's own
+/// slot here, never through an endpoint: endpoint numbers and thread or
+/// process ids are different namespaces, and no ordinary send can reach a
+/// slot. A thread has at most one call outstanding.
+#[cfg(feature = "alloc")]
+static PENDING_CALLS: spin::Mutex<alloc::collections::BTreeMap<u64, PendingCall>> =
+    spin::Mutex::new(alloc::collections::BTreeMap::new());
+
+/// Woken whenever a reply is stored.
+#[cfg(feature = "alloc")]
+static REPLIES: crate::sched::dispatch::WaitQueue = crate::sched::dispatch::WaitQueue::new();
+
+/// Call operation (send and wait for reply). The caller is identified to
+/// the server by its thread id (how a server learns it is part of the
+/// reply-capability design, v0.28).
+pub fn sync_call(request: Message, target: u64) -> Result<Message> {
     #[cfg(feature = "alloc")]
     {
-        const MAX_RETRIES: u32 = 3;
-        for _attempt in 0..MAX_RETRIES {
-            match crate::ipc::message_passing::send_to_endpoint(msg.clone(), target_endpoint) {
-                Ok(()) => {
-                    // Wake any processes waiting on this endpoint
-                    crate::sched::ipc_blocking::wake_up_endpoint_waiters(target_endpoint);
-                    return Ok(());
-                }
-                Err(IpcError::ChannelFull) => {
-                    // Block until space available
-                    crate::sched::ipc_blocking::block_on_ipc(target_endpoint);
-                }
-                Err(e) => return Err(e),
+        let me = crate::process::current_thread()
+            .ok_or(IpcError::ProcessNotFound)?
+            .tid
+            .0;
+        let id = NEXT_CALL.fetch_add(1, Ordering::Relaxed);
+        {
+            let mut pending = PENDING_CALLS.lock();
+            if pending.contains_key(&me) {
+                return Err(IpcError::EndpointBusy);
+            }
+            pending.insert(
+                me,
+                PendingCall {
+                    endpoint: target,
+                    id,
+                    reply: None,
+                },
+            );
+        }
+        let tag = super::channel::CallTag { caller: me, id };
+        let result = send_tagged(request, target, Some(tag)).and_then(|()| {
+            let has_reply = || {
+                PENDING_CALLS
+                    .lock()
+                    .get(&me)
+                    .is_some_and(|c| c.reply.is_some())
+            };
+            crate::sched::dispatch::wait_event(&REPLIES, None, has_reply)
+                .map_err(|_| IpcError::Interrupted)
+        });
+        // Whatever the outcome the call is over: a later reply finds no
+        // entry, or a later call's, and is refused. A request no server
+        // took yet is taken back.
+        let call = PENDING_CALLS.lock().remove(&me);
+        if result.is_err() {
+            if let Ok(endpoint) = super::registry::lookup_endpoint(target) {
+                endpoint.withdraw(tag);
             }
         }
-        Err(IpcError::ChannelFull)
+        result?;
+        call.and_then(|c| c.reply).ok_or(IpcError::InvalidMessage)
     }
     #[cfg(not(feature = "alloc"))]
     {
+        let _ = (request, target);
         Err(IpcError::OutOfMemory)
     }
 }
 
-/// Slow path for synchronous receive
-fn sync_receive_slow_path(endpoint: u64) -> Result<Message> {
-    // Use message passing subsystem with blocking
+/// Store `reply` for `caller`'s outstanding call if the holder of
+/// `cap_space` may answer it: `cap` names the endpoint called with RECEIVE
+/// rights, and the call has no reply yet (one reply per call).
+#[cfg(feature = "alloc")]
+fn authorize_reply(
+    pending: &mut alloc::collections::BTreeMap<u64, PendingCall>,
+    served: Option<u64>,
+    caller: u64,
+    cap: crate::cap::CapabilityToken,
+    cap_space: &crate::cap::space::CapabilitySpace,
+    reply: Message,
+) -> Result<()> {
+    let call = pending.get_mut(&caller).ok_or(IpcError::InvalidMessage)?;
+    if call.reply.is_some() || served != Some(call.id) {
+        return Err(IpcError::InvalidMessage);
+    }
+    crate::cap::ipc_integration::check_endpoint_permission(
+        cap,
+        cap_space,
+        call.endpoint,
+        crate::cap::ipc_integration::IpcRights::RECEIVE,
+    )?;
+    call.reply = Some(reply);
+    Ok(())
+}
+
+/// Reply to the outstanding call of thread `caller`. Only a server of the
+/// endpoint called may reply (N-80): `reply`'s capability must name that
+/// endpoint with RECEIVE rights. Any process could reply to any blocked
+/// one before, and replies went to an endpoint numbered by the caller's
+/// pid, a number any endpoint could have.
+pub fn sync_reply(reply: Message, caller: u64) -> Result<()> {
     #[cfg(feature = "alloc")]
     {
-        crate::ipc::message_passing::receive_from_endpoint(endpoint, true)
+        let process = crate::process::current_process().ok_or(IpcError::ProcessNotFound)?;
+        let server = crate::process::current_thread()
+            .ok_or(IpcError::ProcessNotFound)?
+            .tid
+            .0;
+        let space = process.capability_space.lock();
+        let cap = crate::cap::CapabilityToken::from_u64(reply.capability());
+        let served = SERVED.lock().get(&(server, caller)).copied();
+        authorize_reply(
+            &mut PENDING_CALLS.lock(),
+            served,
+            caller,
+            cap,
+            &space,
+            reply,
+        )?;
+        // Answered: this server's record of the call goes.
+        SERVED.lock().remove(&(server, caller));
+        drop(space);
+        REPLIES.wake_all();
+        Ok(())
     }
     #[cfg(not(feature = "alloc"))]
     {
+        let _ = (reply, caller);
         Err(IpcError::OutOfMemory)
     }
 }
@@ -188,35 +268,15 @@ fn validate_send_capability(msg: &Message, endpoint_id: u64) -> Result<()> {
     // Convert capability ID to token
     let cap_token = crate::cap::CapabilityToken::from_u64(cap_id);
 
-    // Check if the capability grants send permission for this endpoint
-    // Note: This checks the capability exists, is valid, and has SEND rights
-    crate::cap::ipc_integration::check_send_permission(cap_token, &cap_space).map_err(
-        |e| match e {
-            IpcError::InvalidCapability => IpcError::InvalidCapability,
-            IpcError::PermissionDenied => IpcError::PermissionDenied,
-            _ => IpcError::InvalidCapability,
-        },
+    // The capability must name this endpoint and carry SEND (N-80): one
+    // for another object, or another endpoint, does not let the holder send
+    // here.
+    crate::cap::ipc_integration::check_endpoint_permission(
+        cap_token,
+        &cap_space,
+        endpoint_id,
+        crate::cap::ipc_integration::IpcRights::SEND,
     )?;
-
-    // Verify the capability is associated with the target endpoint.
-    // Look up the full capability entry to check the ObjectRef.
-    // Non-endpoint capabilities are also valid for general IPC
-    // (e.g., process capabilities can send on any endpoint they
-    // have SEND rights for).
-    #[cfg(feature = "alloc")]
-    {
-        if let Some((crate::cap::object::ObjectRef::Endpoint { endpoint }, _rights)) =
-            cap_space.lookup_entry(cap_token)
-        {
-            if endpoint.id() != endpoint_id {
-                return Err(IpcError::InvalidCapability);
-            }
-        }
-    }
-    #[cfg(not(feature = "alloc"))]
-    {
-        let _ = endpoint_id;
-    }
 
     Ok(())
 }
@@ -278,6 +338,62 @@ pub struct SyncStatsSummary {
 mod tests {
     use super::*;
 
+    /// N-80: a reply needs an outstanding call from that caller, a
+    /// RECEIVE capability for the endpoint it called, and no reply yet.
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn reply_requires_the_called_endpoint_and_an_outstanding_call() {
+        use alloc::{collections::BTreeMap, sync::Arc};
+
+        use crate::cap::{ipc_integration::IpcRights, manager::cap_manager, object::ObjectRef};
+        let space = crate::cap::space::CapabilitySpace::new();
+        let ep = Arc::new(crate::ipc::Endpoint::new(ProcessId(3)));
+        let ep_id = ep.id();
+        let server = cap_manager()
+            .create_capability(
+                ObjectRef::Endpoint { endpoint: ep },
+                IpcRights::RECEIVE,
+                &space,
+            )
+            .unwrap();
+        let other = Arc::new(crate::ipc::Endpoint::new(ProcessId(3)));
+        let wrong = cap_manager()
+            .create_capability(
+                ObjectRef::Endpoint { endpoint: other },
+                IpcRights::RECEIVE,
+                &space,
+            )
+            .unwrap();
+        let msg = || Message::Small(crate::ipc::SmallMessage::new(0, 7));
+        let mut pending = BTreeMap::new();
+        // No call outstanding.
+        assert!(authorize_reply(&mut pending, Some(1), 40, server, &space, msg()).is_err());
+        pending.insert(
+            40,
+            PendingCall {
+                endpoint: ep_id,
+                id: 2,
+                reply: None,
+            },
+        );
+        // A capability for another endpoint does not authorize the reply.
+        assert!(authorize_reply(&mut pending, Some(2), 40, wrong, &space, msg()).is_err());
+        assert!(pending[&40].reply.is_none());
+        // A server that received another call of this thread (an earlier
+        // one, interrupted), or none, does not answer this one (PR #24
+        // review).
+        assert!(authorize_reply(&mut pending, Some(1), 40, server, &space, msg()).is_err());
+        assert!(authorize_reply(&mut pending, None, 40, server, &space, msg()).is_err());
+        assert!(pending[&40].reply.is_none());
+        assert!(authorize_reply(&mut pending, Some(2), 40, server, &space, msg()).is_ok());
+        assert!(
+            pending[&40].reply.is_some(),
+            "stored in the call's own slot"
+        );
+        // One reply per call.
+        assert!(authorize_reply(&mut pending, Some(2), 40, server, &space, msg()).is_err());
+    }
+
     #[test]
     fn test_sync_stats() {
         let stats = get_sync_stats();
@@ -286,28 +402,15 @@ mod tests {
         assert_eq!(stats.fast_path_percentage, 0);
     }
 
-    /// N-33 pin. Endpoints are created in `ipc::registry`, but the send and
-    /// receive paths `sync_send`/`sync_receive` use (`message_passing::
-    /// send_to_endpoint`/`receive_from_endpoint`) look them up in
-    /// `message_passing::ENDPOINT_REGISTRY`, which nothing ever populates.
-    /// So every send fails with `EndpointNotFound`. Un-ignore this when the
-    /// IPC rework unifies the registries (review of the v0.26.0 stack,
-    /// PR #8).
+    /// N-47: an endpoint created in the registry is the one the send and
+    /// receive paths reach (they used a second registry nothing filled).
     #[cfg(feature = "alloc")]
     #[test]
-    #[ignore = "N-33: native IPC unreachable; endpoint registries split"]
     fn endpoint_from_registry_round_trips_through_send_path() {
         crate::ipc::registry::init();
         let (id, _cap) = crate::ipc::registry::create_endpoint(ProcessId(1)).unwrap();
-        assert!(
-            crate::ipc::message_passing::ENDPOINT_REGISTRY
-                .get(id)
-                .is_some(),
-            "endpoint {} is missing from the registry the send path uses",
-            id
-        );
-        crate::ipc::message_passing::send_to_endpoint(Message::small(0, 7), id).unwrap();
-        let received = crate::ipc::message_passing::receive_from_endpoint(id, false).unwrap();
+        send_to(id, Message::small(0, 7), None).unwrap();
+        let received = receive_from(id).unwrap();
         assert_eq!(received.opcode(), 7);
     }
 }

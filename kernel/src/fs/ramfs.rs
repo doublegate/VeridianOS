@@ -2,13 +2,10 @@
 //!
 //! A simple in-memory filesystem for testing and temporary storage.
 
-use alloc::{collections::BTreeMap, string::String, sync::Arc, vec, vec::Vec};
+use alloc::{collections::BTreeMap, string::String, sync::Arc, vec::Vec};
 
-#[cfg(not(target_arch = "aarch64"))]
 use spin::RwLock;
 
-#[cfg(target_arch = "aarch64")]
-use super::bare_lock::RwLock;
 use super::{DirEntry, Filesystem, Metadata, NodeType, Permissions, VfsNode};
 use crate::error::{FsError, KernelError};
 
@@ -29,6 +26,10 @@ struct RamNode {
     /// Inode number
     inode: u64,
 
+    /// Device number of a device node (Linux's encoding, `fs::make_dev`);
+    /// 0 for anything else.
+    rdev: u32,
+
     /// Which `RamFs` instance this node belongs to. Every instance's nodes
     /// downcast to `RamNode`, so this is what tells two mounts apart.
     fs_id: u64,
@@ -40,6 +41,30 @@ struct RamNode {
 }
 
 impl RamNode {
+    /// [`VfsNode::unlink`], and with `kind` [`VfsNode::unlink_kind`]: the
+    /// entry's type is checked under the children lock the removal holds.
+    fn unlink_checked(&self, name: &str, kind: Option<bool>) -> Result<(), KernelError> {
+        let mut children = self.children.write();
+
+        if let Some(node) = children.get(name) {
+            if let Some(want_dir) = kind {
+                super::check_unlink_kind(node.node_type, want_dir)?;
+            }
+            if node.node_type == NodeType::Directory {
+                // Check if directory is empty
+                let dir_children = node.children.read();
+                if !dir_children.is_empty() {
+                    return Err(KernelError::FsError(FsError::DirectoryNotEmpty));
+                }
+            }
+
+            children.remove(name);
+            Ok(())
+        } else {
+            Err(KernelError::FsError(FsError::NotFound))
+        }
+    }
+
     /// Create a new file node
     fn new_file(inode: u64, parent_inode: u64, fs_id: u64, permissions: Permissions) -> Self {
         Self {
@@ -58,6 +83,7 @@ impl RamNode {
                 inode,
             }),
             inode,
+            rdev: 0,
             fs_id,
             parent_inode: core::sync::atomic::AtomicU64::new(parent_inode),
         }
@@ -81,6 +107,7 @@ impl RamNode {
                 inode,
             }),
             inode,
+            rdev: 0,
             fs_id,
             parent_inode: core::sync::atomic::AtomicU64::new(parent_inode),
         }
@@ -108,10 +135,41 @@ impl RamNode {
                 inode,
             }),
             inode,
+            rdev: 0,
             fs_id,
             parent_inode: core::sync::atomic::AtomicU64::new(parent_inode),
         }
     }
+}
+
+impl RamNode {
+    /// Create a special file node (mknod): a FIFO, device or socket.
+    fn new_special(
+        kind: NodeType,
+        inode: u64,
+        parent_inode: u64,
+        fs_id: u64,
+        permissions: Permissions,
+        rdev: u32,
+    ) -> Self {
+        let mut node = Self::new_file(inode, parent_inode, fs_id, permissions);
+        node.node_type = kind;
+        node.metadata.get_mut().node_type = kind;
+        node.rdev = rdev;
+        node
+    }
+}
+
+/// Recover the concrete `Arc<RamNode>` behind a VFS node, if it is one.
+fn as_ram_arc(node: Arc<dyn VfsNode>) -> Option<Arc<RamNode>> {
+    node.as_any()?.downcast_ref::<RamNode>()?;
+    // SAFETY: the downcast above proved the value behind this `Arc<dyn
+    // VfsNode>` is a `RamNode`, so the allocation is an `ArcInner<RamNode>` and the
+    // data pointer, stripped of its vtable, is the pointer `Arc<RamNode>` would
+    // hold. This is the reverse of the unsizing coercion that made the
+    // trait object, and is how `Arc::downcast` is implemented. The strong
+    // count moves from `node` to the result unchanged.
+    Some(unsafe { Arc::from_raw(Arc::into_raw(node) as *const RamNode) })
 }
 
 impl VfsNode for RamNode {
@@ -143,18 +201,10 @@ impl VfsNode for RamNode {
             return Err(KernelError::FsError(FsError::NotAFile));
         }
 
+        let end = super::ram_write_end(offset, data.len())?;
         let mut file_data = self.data.write();
-
-        // Extend file if necessary
-        if offset > file_data.len() {
-            file_data.resize(offset, 0);
-        }
-
-        // Write data
-        if offset + data.len() > file_data.len() {
-            file_data.resize(offset + data.len(), 0);
-        }
-        file_data[offset..offset + data.len()].copy_from_slice(data);
+        super::grow_ram_file(&mut file_data, end)?;
+        file_data[offset..end].copy_from_slice(data);
 
         // Update metadata
         let mut metadata = self.metadata.write();
@@ -274,22 +324,14 @@ impl VfsNode for RamNode {
             return Err(KernelError::FsError(FsError::NotADirectory));
         }
 
-        let mut children = self.children.write();
+        self.unlink_checked(name, None)
+    }
 
-        if let Some(node) = children.get(name) {
-            if node.node_type == NodeType::Directory {
-                // Check if directory is empty
-                let dir_children = node.children.read();
-                if !dir_children.is_empty() {
-                    return Err(KernelError::FsError(FsError::DirectoryNotEmpty));
-                }
-            }
-
-            children.remove(name);
-            Ok(())
-        } else {
-            Err(KernelError::FsError(FsError::NotFound))
+    fn unlink_kind(&self, name: &str, want_dir: bool) -> Result<(), KernelError> {
+        if self.node_type != NodeType::Directory {
+            return Err(KernelError::FsError(FsError::NotADirectory));
         }
+        self.unlink_checked(name, Some(want_dir))
     }
 
     fn truncate(&self, size: usize) -> Result<(), crate::error::KernelError> {
@@ -298,7 +340,11 @@ impl VfsNode for RamNode {
         }
 
         let mut data = self.data.write();
-        data.resize(size, 0);
+        if size > data.len() {
+            super::grow_ram_file(&mut data, size)?;
+        } else {
+            data.truncate(size);
+        }
 
         let mut metadata = self.metadata.write();
         metadata.size = size;
@@ -404,6 +450,52 @@ impl VfsNode for RamNode {
         Some(self)
     }
 
+    fn mknod(
+        &self,
+        name: &str,
+        kind: NodeType,
+        permissions: Permissions,
+        rdev: u32,
+    ) -> Result<Arc<dyn VfsNode>, KernelError> {
+        if self.node_type != NodeType::Directory {
+            return Err(KernelError::FsError(FsError::NotADirectory));
+        }
+        if !matches!(
+            kind,
+            NodeType::Pipe | NodeType::CharDevice | NodeType::BlockDevice | NodeType::Socket
+        ) {
+            return Err(KernelError::FsError(FsError::NotSupported));
+        }
+        let mut children = self.children.write();
+        if children.contains_key(name) {
+            return Err(KernelError::FsError(FsError::AlreadyExists));
+        }
+        let inode = NEXT_INODE.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        let devices = matches!(kind, NodeType::CharDevice | NodeType::BlockDevice);
+        let node = Arc::new(RamNode::new_special(
+            kind,
+            inode,
+            self.inode,
+            self.fs_id,
+            permissions,
+            if devices { rdev } else { 0 },
+        ));
+        children.insert(String::from(name), node.clone());
+        Ok(node as Arc<dyn VfsNode>)
+    }
+
+    fn is_special_inode(&self) -> bool {
+        matches!(
+            self.node_type,
+            NodeType::Pipe | NodeType::CharDevice | NodeType::BlockDevice | NodeType::Socket
+        )
+    }
+
+    fn device_id(&self) -> Option<(u32, u32)> {
+        matches!(self.node_type, NodeType::CharDevice | NodeType::BlockDevice)
+            .then(|| (super::dev_major(self.rdev), super::dev_minor(self.rdev)))
+    }
+
     fn link(&self, name: &str, target: Arc<dyn VfsNode>) -> Result<(), KernelError> {
         if self.node_type != NodeType::Directory {
             return Err(KernelError::FsError(FsError::NotADirectory));
@@ -414,37 +506,19 @@ impl VfsNode for RamNode {
             return Err(KernelError::FsError(FsError::IsADirectory));
         }
 
+        // A hard link names the same node, and only within one RamFs
+        // instance; anything else is EXDEV. The old code copied the data
+        // into a new node, so the two names drifted apart on the next write
+        // and a file from another filesystem was silently duplicated (N-45).
+        let target = as_ram_arc(target)
+            .filter(|t| t.fs_id == self.fs_id)
+            .ok_or(KernelError::FsError(FsError::CrossDevice))?;
+
         let mut children = self.children.write();
         if children.contains_key(name) {
             return Err(KernelError::FsError(FsError::AlreadyExists));
         }
-
-        // RamFS hard link: create a new node that copies the target's data
-        // and shares the same inode number. This provides POSIX-compatible
-        // semantics (same inode visible via stat) although the data is
-        // copied rather than shared. True shared-data hard links would
-        // require Arc downcasting or a different internal representation.
-        let target_meta = target.metadata()?;
-        let inode = target_meta.inode;
-
-        let new_node = Arc::new(RamNode::new_file(
-            inode,
-            self.inode,
-            self.fs_id,
-            target_meta.permissions,
-        ));
-
-        // Copy file data from the target
-        let mut buf = vec![0u8; target_meta.size];
-        if !buf.is_empty() {
-            let bytes_read = target.read(0, &mut buf)?;
-            buf.truncate(bytes_read);
-        }
-        if !buf.is_empty() {
-            new_node.write(0, &buf)?;
-        }
-
-        children.insert(String::from(name), new_node);
+        children.insert(String::from(name), target);
         Ok(())
     }
 
@@ -483,6 +557,17 @@ impl VfsNode for RamNode {
         Ok(())
     }
 
+    fn set_times(&self, atime: Option<u64>, mtime: Option<u64>) -> Result<(), KernelError> {
+        let mut metadata = self.metadata.write();
+        if let Some(atime) = atime {
+            metadata.accessed = atime;
+        }
+        if let Some(mtime) = mtime {
+            metadata.modified = mtime;
+        }
+        Ok(())
+    }
+
     fn chown(&self, uid: Option<u32>, gid: Option<u32>) -> Result<(), KernelError> {
         let mut metadata = self.metadata.write();
         if let Some(uid) = uid {
@@ -498,6 +583,12 @@ impl VfsNode for RamNode {
 
 /// Global inode counter
 static NEXT_INODE: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(1);
+
+/// A fresh inode number from the RAM filesystems' counter, for in-memory
+/// files outside them (memfds) so their numbers never collide.
+pub(crate) fn next_inode() -> u64 {
+    NEXT_INODE.fetch_add(1, core::sync::atomic::Ordering::Relaxed)
+}
 
 /// Source of `RamNode::fs_id`, one per `RamFs` instance.
 static NEXT_FS_ID: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(1);
@@ -554,6 +645,73 @@ mod tests {
     use alloc::vec;
 
     use super::*;
+
+    /// unlink removes no directory and rmdir nothing else, the type being
+    /// checked where the entry is removed (PR #23 review).
+    #[test]
+    fn unlink_and_rmdir_check_the_type_they_remove() {
+        let fs = RamFs::new();
+        let root = fs.root();
+        root.mkdir("d", Permissions::default()).unwrap();
+        root.create("f", Permissions::default()).unwrap();
+        assert!(matches!(
+            root.unlink_kind("d", false),
+            Err(KernelError::FsError(FsError::IsADirectory))
+        ));
+        assert!(matches!(
+            root.unlink_kind("f", true),
+            Err(KernelError::FsError(FsError::NotADirectory))
+        ));
+        assert!(root.lookup("d").is_ok() && root.lookup("f").is_ok());
+        root.unlink_kind("d", true).unwrap();
+        root.unlink_kind("f", false).unwrap();
+        assert!(root.lookup("d").is_err() && root.lookup("f").is_err());
+    }
+
+    // --- Offsets and sizes (N-122) ---
+
+    #[test]
+    fn huge_offsets_fail_instead_of_allocating() {
+        let fs = RamFs::new();
+        let f = fs.root().create("f", Permissions::default()).unwrap();
+        assert!(f.write(1 << 40, b"x").is_err(), "write past the size limit");
+        assert!(f.write(usize::MAX, b"xy").is_err(), "offset + len overflow");
+        assert!(f.truncate(usize::MAX).is_err(), "truncate past the limit");
+        assert_eq!(f.write(0, b"ok").unwrap(), 2);
+        assert_eq!(f.metadata().unwrap().size, 2);
+    }
+
+    // --- Hard links (N-45) ---
+
+    #[test]
+    fn hard_link_shares_the_file() {
+        let fs = RamFs::new();
+        let root = fs.root();
+        let a = root.create("a", Permissions::default()).unwrap();
+        a.write(0, b"one").unwrap();
+        root.link("b", a.clone()).unwrap();
+        // A write through either name is visible through the other.
+        root.lookup("b").unwrap().write(0, b"two").unwrap();
+        let mut buf = [0u8; 3];
+        a.read(0, &mut buf).unwrap();
+        assert_eq!(&buf, b"two");
+        // Removing one name leaves the file reachable through the other.
+        root.unlink("a").unwrap();
+        root.lookup("b").unwrap().read(0, &mut buf).unwrap();
+        assert_eq!(&buf, b"two");
+    }
+
+    #[test]
+    fn hard_link_across_ramfs_instances_is_exdev() {
+        let fs1 = RamFs::new();
+        let fs2 = RamFs::new();
+        let a = fs1.root().create("a", Permissions::default()).unwrap();
+        assert_eq!(
+            fs2.root().link("b", a).err(),
+            Some(KernelError::FsError(FsError::CrossDevice))
+        );
+        assert!(fs2.root().lookup("b").is_err());
+    }
 
     // --- RamFs construction tests ---
 

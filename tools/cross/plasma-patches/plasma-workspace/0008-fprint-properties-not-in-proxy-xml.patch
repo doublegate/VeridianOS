@@ -1,0 +1,82 @@
+VeridianOS: users KCM: no fprintd properties qdbusxml2cpp cannot name
+
+qdbusxml2cpp warned four times (kcms/users/src/net.reactivated.Fprint.
+Device.xml): "Invalid D-Bus member name 'num-enroll-stages' found in
+interface 'net.reactivated.Fprint.Device'" (and scan-type,
+finger-present, finger-needed). fprintd names these properties with
+dashes, which D-Bus member names cannot contain, so the generated proxy
+never had accessors for them: qdbusxml2cpp skips them. The KCM reads them
+by name through org.freedesktop.DBus.Properties.Get (fprintdevice.cpp).
+The four elements are removed from the interface description used for
+the proxy, which is generated exactly as before; the property names are
+recorded in a comment there.
+
+--- a/kcms/users/src/net.reactivated.Fprint.Device.xml
++++ b/kcms/users/src/net.reactivated.Fprint.Device.xml
+@@ -591,54 +591,18 @@
+ 
+ 		<!-- ************************************************************ -->
+ 
+-		<property name="num-enroll-stages" type="i" access="read">
+-			<doc:doc>
+-				<doc:description>
+-					<doc:para>
+-						The number of enrollment stages for the device. This is only available when the device has been claimed, otherwise it will be undefined (-1).
+-					</doc:para>
+-					<doc:seealso>
+-						<doc:ref type="method" to="Device.Claim">Device.Claim</doc:ref> and <doc:ref type="method" to="Device.EnrollStart">Device.EnrollStart</doc:ref>.
+-					</doc:seealso>
+-				</doc:description>
+-			</doc:doc>
+-		</property>
+-
+-		<!-- ************************************************************ -->
+-
+-		<property name="scan-type" type="s" access="read">
+-			<doc:doc>
+-				<doc:description>
+-					<doc:para>
+-						The scan type of the device, either "press" if you place your finger on the device, or "swipe" if you have to swipe your finger.
+-					</doc:para>
+-				</doc:description>
+-			</doc:doc>
+-		</property>
+-
+-		<!-- ************************************************************ -->
+-
+-		<property name="finger-present" type="b" access="read">
+-			<doc:doc>
+-				<doc:description>
+-					<doc:para>
+-						Whether the finger is on sensor.
+-					</doc:para>
+-				</doc:description>
+-			</doc:doc>
+-		</property>
+-
+-		<!-- ************************************************************ -->
+-
+-		<property name="finger-needed" type="b" access="read">
+-			<doc:doc>
+-				<doc:description>
+-					<doc:para>
+-						Whether the sensor is waiting for the finger.
+-					</doc:para>
+-				</doc:description>
+-			</doc:doc>
+-		</property>
++		<!-- VeridianOS: fprintd's properties num-enroll-stages, scan-type,
++		     finger-present and finger-needed are not valid D-Bus member names;
++		     the KCM reads them with org.freedesktop.DBus.Properties.Get. -->
++
++		<!-- ************************************************************ -->
++
++
++		<!-- ************************************************************ -->
++
++
++		<!-- ************************************************************ -->
++
+ 
+ 	</interface>
+ </node>

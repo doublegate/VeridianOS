@@ -57,6 +57,7 @@ struct itimerval {
 } while (0)
 
 int settimeofday(const struct timeval *tv, const struct timezone *tz);
+int utimes(const char *filename, const struct timeval times[2]);
 int getitimer(int which, struct itimerval *curr_value);
 int setitimer(int which, const struct itimerval *new_value,
               struct itimerval *old_value);

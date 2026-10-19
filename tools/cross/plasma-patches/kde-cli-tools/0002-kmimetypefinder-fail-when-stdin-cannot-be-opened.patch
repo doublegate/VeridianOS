@@ -1,0 +1,35 @@
+VeridianOS: kmimetypefinder: report errors reading standard input
+
+GCC reported -Wunused-result for QFile::open(FILE *, ...) in main()
+(kmimetypefinder/kmimetypefinder.cpp), used for the "-" (read from stdin)
+argument.
+
+Small real bug, though not where the warning points (a read-only open of
+stdin does not fail in Qt 6): the read was not checked. With stdin a
+directory or closed, readAll() returned an empty buffer,
+QMimeDatabase::mimeTypeForData() classified it as application/x-zerosize,
+and the tool printed that and exited 0, as if stdin had been an empty
+file. The open and the read are now checked; an error is printed on
+stdout, the way the tool reports its other errors, with exit status 1.
+The normal path is unchanged. (Prepared for upstream,
+invent.kde.org/plasma/kde-cli-tools.)
+
+--- a/kmimetypefinder/kmimetypefinder.cpp
++++ b/kmimetypefinder/kmimetypefinder.cpp
+@@ -47,8 +47,15 @@ int main(int argc, char *argv[])
+     QMimeType mime;
+     if (fileName == QLatin1String("-")) {
+         QFile qstdin;
+-        qstdin.open(stdin, QIODevice::ReadOnly);
++        if (!qstdin.open(stdin, QIODevice::ReadOnly)) {
++            printf("Could not open standard input: %s\n", qPrintable(qstdin.errorString()));
++            return 1;
++        }
+         const QByteArray data = qstdin.readAll();
++        if (qstdin.error() != QFile::NoError) {
++            printf("Could not read standard input: %s\n", qPrintable(qstdin.errorString()));
++            return 1;
++        }
+         mime = db.mimeTypeForData(data);
+     } else if (parser.isSet(QStringLiteral("c"))) {
+         mime = db.mimeTypeForFile(fileName, QMimeDatabase::MatchContent);

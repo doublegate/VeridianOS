@@ -240,6 +240,87 @@ void *__dynamic_cast(const void *src_ptr,
 }
 
 /* ========================================================================= */
+/* Catch-clause matching (used by __gxx_personality_v0)                      */
+/* ========================================================================= */
+
+static int is_si(const struct __class_type_info *t)
+{
+    return t->__vtable == (void **)(_ZTVN10__cxxabiv120__si_class_type_infoE + 2);
+}
+
+static int is_vmi(const struct __class_type_info *t)
+{
+    return t->__vtable == (void **)(_ZTVN10__cxxabiv121__vmi_class_type_infoE + 2);
+}
+
+/*
+ * Search the public bases of `type` (whose object is at `obj`) for
+ * `target`, depth first. On a match, *found is the address of the base
+ * subobject. A virtual base's offset is read from the object's vtable:
+ * __offset_flags then holds the (negative) vtable offset of that slot.
+ */
+static int find_public_base(const struct __class_type_info *type,
+                            const void *obj,
+                            const struct __class_type_info *target,
+                            const void **found, int depth)
+{
+    if (depth > 64 || !type)
+        return 0;
+    if (types_equal(type, target)) {
+        *found = obj;
+        return 1;
+    }
+    if (is_si(type)) {
+        const struct __si_class_type_info *si =
+            (const struct __si_class_type_info *)type;
+        return find_public_base(si->__base_type, obj, target, found, depth + 1);
+    }
+    if (is_vmi(type)) {
+        const struct __vmi_class_type_info *vmi =
+            (const struct __vmi_class_type_info *)type;
+        for (unsigned int i = 0; i < vmi->__base_count; i++) {
+            const struct __base_class_type_info *b = &vmi->__base_info[i];
+            if (!(b->__offset_flags & __base_class_public_mask))
+                continue;
+            long off = b->__offset_flags >> __base_class_offset_shift;
+            if (b->__offset_flags & __base_class_virtual_mask) {
+                const char *vptr = *(const char *const *)obj;
+                off = *(const long *)(vptr + off);
+            }
+            if (find_public_base(b->__base_type, (const char *)obj + off,
+                                 target, found, depth + 1))
+                return 1;
+        }
+    }
+    return 0;
+}
+
+/*
+ * Whether a handler for `catch_type` catches an exception object of
+ * `thrown_type` at `thrown_obj` ([except.handle]/3 for class types: the
+ * same type, or an unambiguous public base). On success *adjusted is the
+ * object (or base subobject) the handler binds to. Other categories
+ * (pointers, fundamental types) compare by type identity, since this
+ * runtime provides only the class type_info vtables.
+ */
+int __veridian_can_catch(const void *catch_type, const void *thrown_type,
+                         void *thrown_obj, void **adjusted)
+{
+    const struct __class_type_info *c = catch_type;
+    const struct __class_type_info *t = thrown_type;
+    const void *found = thrown_obj;
+
+    if (!c || !t)
+        return 0;
+    if (types_equal(c, t) ||
+        find_public_base(t, thrown_obj, c, &found, 0)) {
+        *adjusted = (void *)found;
+        return 1;
+    }
+    return 0;
+}
+
+/* ========================================================================= */
 /* __cxa_bad_cast                                                            */
 /* ========================================================================= */
 

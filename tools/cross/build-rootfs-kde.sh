@@ -1,171 +1,291 @@
 #!/usr/bin/env bash
 # Assemble the KDE Plasma rootfs image for VeridianOS
 #
-# Creates a BlockFS disk image containing all KDE binaries, libraries,
-# fonts, configs, and integration scripts for QEMU boot.
+# Stages everything the KDE session needs at run time from the sysroot
+# (every package was configured for /usr and /etc on the target and staged
+# there, see lib/cross-env.sh): the target programs, musl's dynamic loader
+# and the shared libraries, plugins and QML modules (ADR 0010), the data under
+# /usr/share (keymaps, ALSA configuration, fonts and fontconfig rules, D-Bus
+# configuration and services, libinput quirks, icons, sounds, Plasma
+# packages, translations) and the configuration under /etc, with the root
+# filesystem's own files (tools/cross/rootfs: accounts, PAM services).
+# Build-only files stay behind: headers, pkg-config and CMake files,
+# development links, documentation, and scripts that only serve builds.
+# No program may depend on a build-host path. The staging tree becomes a
+# BlockFS image (tools/mkfs-blockfs) with the owners and modes
+# tools/cross/rootfs/attrs gives: the set-user-ID helpers (pkexec,
+# polkit-agent-helper-1, dbus-daemon-launch-helper) among them.
 #
-# Prerequisites:
-#   - All KDE components built (run build-all-kde.sh first)
-#   - tools/mkfs-blockfs/ (Rust tool) available
+# /etc/shadow (mode 0600) gives every account of etc/passwd no password,
+# except root when VERIDIAN_ROOT_PASSWORD is set: its SHA-512-crypt hash
+# (openssl passwd -6, read from stdin so the password is in no process's
+# arguments). Without it nobody can log in with a password -- the screen
+# lock included -- until `passwd` on the kernel console sets one (N-131).
+#
+# Prerequisites: build-all-kde.sh up to the plasma phase.
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
-SYSROOT="${VERIDIAN_SYSROOT:-${PROJECT_ROOT}/target/veridian-sysroot}"
+# shellcheck source=veridian-paths.sh
+source "${SCRIPT_DIR}/veridian-paths.sh"
+SYSROOT="${VERIDIAN_SYSROOT}"
 STAGING="${PROJECT_ROOT}/target/rootfs-kde-staging"
 OUTPUT="${PROJECT_ROOT}/target/rootfs-kde-blockfs.img"
-MKFS_BLOCKFS="${PROJECT_ROOT}/tools/mkfs-blockfs"
-JOBS="${JOBS:-$(nproc)}"
+MKFS_DIR="${PROJECT_ROOT}/tools/mkfs-blockfs"
+ROOTFS_FILES="${SCRIPT_DIR}/rootfs"
+
+# Programs the session cannot start without.
+REQUIRED_PROGRAMS=(
+    usr/bin/kwin_wayland
+    usr/bin/plasmashell
+    usr/bin/startplasma-wayland
+    usr/bin/plasma_session
+    usr/bin/ksmserver
+    usr/bin/dbus-daemon
+    usr/bin/dbus-run-session
+    usr/bin/pkexec
+    usr/lib/polkit-1/polkitd
+    usr/lib/polkit-1/polkit-agent-helper-1
+    usr/lib/libexec/kscreenlocker_greet
+)
+
+# Build-only parts of /usr/share and /usr/lib.
+EXCLUDED_DATA=(
+    share/aclocal share/bash-completion share/cmake share/doc share/ECM
+    share/gettext share/gir-1.0 share/gtk-doc share/info share/man
+    share/pkgconfig share/vala share/zsh share/qt6/mkspecs
+    share/glib-2.0/codegen share/glib-2.0/gdb share/gdb
+    lib/cmake lib/pkgconfig lib/qt6/mkspecs lib/qt6/metatypes lib/qt6/modules
+    lib/qt6/sbom
+)
 
 log() { echo "[rootfs-kde] $*"; }
 die() { echo "[rootfs-kde] ERROR: $*" >&2; exit 1; }
 
-# ── Clean staging area ────────────────────────────────────────────────
 prepare_staging() {
     log "Preparing staging directory..."
     rm -rf "${STAGING}"
-    mkdir -p "${STAGING}"/{usr/{bin,lib,share},etc,run,tmp}
-    mkdir -p "${STAGING}/etc/dbus-1"
-    mkdir -p "${STAGING}/etc/fonts"
-    mkdir -p "${STAGING}/etc/xdg"
-    mkdir -p "${STAGING}/etc/veridian"
-    mkdir -p "${STAGING}/run/dbus"
-    mkdir -p "${STAGING}/usr/share/fonts/truetype"
-    mkdir -p "${STAGING}/usr/share/plasma"
-    mkdir -p "${STAGING}/usr/share/kf6"
-    mkdir -p "${STAGING}/usr/share/icons"
-    mkdir -p "${STAGING}/usr/share/veridian"
+    mkdir -p "${STAGING}"/{usr/bin,usr/lib,usr/share,etc,root,run,tmp,var/cache/fontconfig,var/lib/dbus}
 }
 
-# ── Copy binaries ────────────────────────────────────────────────────
-copy_binaries() {
-    log "Copying binaries..."
-    local bins=(kwin_wayland kwin_wayland_wrapper kwin_killer_helper plasmashell dbus-daemon)
-    for bin in "${bins[@]}"; do
-        if [[ -f "${SYSROOT}/usr/bin/${bin}" ]]; then
-            cp "${SYSROOT}/usr/bin/${bin}" "${STAGING}/usr/bin/"
-            log "  ${bin}: $(stat -c%s "${SYSROOT}/usr/bin/${bin}" 2>/dev/null || echo "?") bytes"
+STRIP="${VERIDIAN_TOOLCHAIN}/bin/${VERIDIAN_TARGET}-strip"
+READELF="${VERIDIAN_TOOLCHAIN}/bin/${VERIDIAN_TARGET}-readelf"
+
+# stage_elf FILE DEST: FILE, stripped, at DEST under the staging tree.
+stage_elf() {
+    mkdir -p "$(dirname "${STAGING}/$2")"
+    "${STRIP}" --strip-unneeded -o "${STAGING}/$2" "$1" || die "cannot strip $1"
+    chmod 755 "${STAGING}/$2"
+}
+
+# Compared as hex: a command substitution drops NUL bytes (with a warning
+# per file), so the raw bytes cannot be compared.
+is_elf() { [[ "$(head -c 4 "$1" | od -An -tx1 | tr -d ' \n')" == 7f454c46 ]]; }
+
+# Shell scripts in the program directories that serve only builds: the
+# libraries' *-config scripts and Qt's build wrappers (qmake, qtpaths and
+# qt-cmake run the build host's Qt tools for the target).
+BUILD_SCRIPTS=(
+    usr/bin/glib-gettextize usr/bin/qmake usr/bin/qmake6 usr/bin/qtpaths usr/bin/qtpaths6
+    usr/bin/qt-cmake usr/bin/qt-cmake-create usr/bin/qt-configure-module
+)
+
+# A POSIX shell script (#!/bin/sh) the system runs: the session's helpers
+# (plasma-dbus-run-session-if-needed, plasma-sourceenv.sh), pam_kwallet_init,
+# kdeeject, kinfo, ... -- not a build script. Scripts for other interpreters
+# (Python, Perl, bash) are build or developer tools; the system has none of
+# those interpreters.
+is_runtime_script() {
+    local rel="$1" first
+    [[ "${rel}" != *-config ]] || return 1
+    local s
+    for s in "${BUILD_SCRIPTS[@]}"; do
+        [[ "${rel}" != "${s}" ]] || return 1
+    done
+    IFS= read -r first < "${SYSROOT}/${rel}" || return 1
+    [[ "${first}" =~ ^\#![[:space:]]*/bin/sh([[:space:]]|$) ]] ||
+        [[ "${rel}" == usr/lib/libexec/plasma-sourceenv.sh ]]
+}
+
+# Every ELF program the build installed, and the shell scripts the system
+# runs (is_runtime_script).
+copy_programs() {
+    log "Copying programs..."
+    local dir file rel count=0 scripts=0
+    for dir in usr/bin usr/libexec usr/lib/libexec; do
+        [[ -d "${SYSROOT}/${dir}" ]] || continue
+        while IFS= read -r -d '' file; do
+            rel="${file#"${SYSROOT}/"}"
+            if is_elf "${file}"; then
+                stage_elf "${file}" "${rel}"
+                count=$((count + 1))
+            elif is_runtime_script "${rel}"; then
+                install -Dm755 "${file}" "${STAGING}/${rel}"
+                scripts=$((scripts + 1))
+            fi
+        done < <(find "${SYSROOT}/${dir}" -type f -print0)
+    done
+    log "  ${count} programs, ${scripts} scripts."
+}
+
+# musl's dynamic loader, and every shared library, plugin and QML plugin
+# (ADR 0010). A library directly in /usr/lib goes in once, under its
+# SONAME, the name programs ask for (the loader asks for nothing else, so
+# the version links, libfoo.so.1.2.3 behind libfoo.so.1, and the development
+# link, libfoo.so, serve only builds).
+# Plugins and modules in subdirectories keep their paths (they are opened
+# by path). The loader is musl's libc.so itself, which also answers a
+# libc.so dependency, so /usr/lib gets no second copy.
+copy_libraries() {
+    log "Copying the dynamic loader and shared libraries..."
+    stage_elf "${SYSROOT}/usr/lib/libc.so" lib/ld-musl-x86_64.so.1
+    local file rel soname count=0
+    while IFS= read -r -d '' file; do
+        is_elf "${file}" || continue
+        rel="${file#"${SYSROOT}/"}"
+        [[ "${rel}" == usr/lib/libc.so ]] && continue
+        if [[ "$(dirname "${rel}")" == usr/lib ]]; then
+            soname="$("${READELF}" -d "${file}" | sed -n 's/.*Library soname: \[\(.*\)\]/\1/p')"
+            [[ -n "${soname}" ]] && rel="usr/lib/${soname}"
+        fi
+        stage_elf "${file}" "${rel}"
+        count=$((count + 1))
+    done < <(find "${SYSROOT}/usr/lib" -type f \( -name '*.so' -o -name '*.so.*' \) \
+                  -not -path '*/libexec/*' -print0)
+    log "  ${count} libraries and plugins."
+}
+
+# /usr/share, and the run-time data under /usr/lib (QML modules' qmldir and
+# QML files, ...), minus the build-only parts; the ELF files are staged
+# above.
+copy_data() {
+    log "Copying data and configuration..."
+    local excludes=() item
+    for item in "${EXCLUDED_DATA[@]}"; do
+        excludes+=(--exclude="/${item}")
+    done
+    rsync -a "${excludes[@]}" --exclude='*.a' --exclude='*.la' --exclude='*.h' \
+        "${SYSROOT}/usr/share" "${STAGING}/usr/"
+    rsync -a "${excludes[@]}" --exclude='*.a' --exclude='*.la' --exclude='*.h' \
+        --exclude='*.so' --exclude='*.so.*' --exclude='/lib/libexec' --exclude='*.prl' \
+        "${SYSROOT}/usr/lib" "${STAGING}/usr/"
+    rsync -a "${SYSROOT}/etc/" "${STAGING}/etc/"
+    # The root filesystem's own: accounts and PAM services.
+    rsync -a "${ROOTFS_FILES}/etc/" "${STAGING}/etc/"
+    # The session configuration (userland/integration).
+    install -Dm644 "${PROJECT_ROOT}/userland/integration/default-session.conf" \
+        "${STAGING}/etc/veridian/session.conf"
+}
+
+# /etc/shadow: a line per account of /etc/passwd, none with a password but
+# root's when VERIDIAN_ROOT_PASSWORD is set. The kernel reads it at boot and
+# rewrites it when a password changes (security::accounts).
+make_shadow() {
+    local shadow="${STAGING}/etc/shadow" today name hash
+    today=$(( $(date -u +%s) / 86400 ))
+    : > "${shadow}"
+    chmod 600 "${shadow}"
+    while IFS=: read -r name _; do
+        [[ -n "${name}" ]] || continue
+        hash='!'
+        if [[ "${name}" == root && -n "${VERIDIAN_ROOT_PASSWORD:-}" ]]; then
+            command -v openssl >/dev/null || die "openssl is needed to hash VERIDIAN_ROOT_PASSWORD"
+            hash=$(printf '%s\n' "${VERIDIAN_ROOT_PASSWORD}" | openssl passwd -6 -stdin) \
+                || die "hashing the root password failed"
+            [[ "${hash}" == "\$6\$"* ]] || die "unexpected root password hash form"
+        fi
+        if [[ "${hash}" == '!' ]]; then
+            printf '%s:!:::::::\n' "${name}" >> "${shadow}"
         else
-            log "  WARNING: ${bin} not found (optional)"
+            printf '%s:%s:%s:0:99999:7:::\n' "${name}" "${hash}" "${today}" >> "${shadow}"
+        fi
+    done < "${STAGING}/etc/passwd"
+    if [[ -n "${VERIDIAN_ROOT_PASSWORD:-}" ]]; then
+        log "root password set from VERIDIAN_ROOT_PASSWORD"
+    else
+        log "root has no password: set one with \`passwd\` on the kernel console (or VERIDIAN_ROOT_PASSWORD)"
+    fi
+}
+
+# GLib reads compiled schemas only; the host GLib tools (build-dbus.sh)
+# compile the staged ones.
+compile_schemas() {
+    local dir="${STAGING}/usr/share/glib-2.0/schemas"
+    [[ -d "${dir}" ]] || return 0
+    "${VERIDIAN_HOST_TOOLS}/bin/glib-compile-schemas" --strict "${dir}" ||
+        die "glib-compile-schemas failed"
+}
+
+# No staged program or library may name a build-host path as a dependency
+# or library search path: the dynamic loader would look for it on the
+# target (a library without a SONAME, linked by path, records its path).
+check_host_paths() {
+    log "Checking dependencies for build-host paths..."
+    local file bad=0 found
+    while IFS= read -r -d '' file; do
+        is_elf "${file}" || continue
+        # A dependency named by absolute path, or a search path under a
+        # build-host directory (/usr/lib, the target's own, is harmless). A
+        # failing readelf or awk stops the build (pipefail), so the check
+        # cannot pass by not running.
+        found="$("${READELF}" -d "${file}" |
+            awk '(/\(NEEDED\)/ && /\[\//) ||
+                 (/\((RPATH|RUNPATH)\)/ && /[ :[]\/(opt|home|tmp)\//)')"
+        if [[ -n "${found}" ]]; then
+            log "  ${file#"${STAGING}/"}: ${found}"
+            bad=$((bad + 1))
+        fi
+    done < <(find "${STAGING}" -type f -print0)
+    # Symlinks go into the image as they are: one into a build-host
+    # directory would point nowhere on the target.
+    while IFS= read -r -d '' file; do
+        found="$(readlink "${file}")"
+        if [[ "${found}" =~ ^/(opt|home|tmp)/ ]]; then
+            log "  ${file#"${STAGING}/"} -> ${found}"
+            bad=$((bad + 1))
+        fi
+    done < <(find "${STAGING}" -type l -print0)
+    [[ ${bad} -eq 0 ]] || die "${bad} files depend on build-host paths"
+}
+
+verify() {
+    log "Verifying rootfs..."
+    local errors=0 item
+    for item in "${REQUIRED_PROGRAMS[@]}" lib/ld-musl-x86_64.so.1 \
+                etc/veridian/session.conf etc/fonts/fonts.conf etc/ssl/openssl.cnf \
+                etc/passwd etc/group etc/shadow etc/pam.d/kde etc/pam.d/polkit-1 etc/pam.d/other \
+                usr/lib/security/pam_veridian.so usr/lib/security/pam_deny.so \
+                usr/share/X11/xkb/rules/evdev usr/share/alsa/alsa.conf \
+                usr/share/dbus-1/session.conf usr/share/libinput \
+                usr/share/fonts/dejavu/DejaVuSans.ttf; do
+        if [[ -e "${STAGING}/${item}" ]]; then
+            log "  OK: ${item}"
+        else
+            log "  MISSING: ${item}"
+            errors=$((errors + 1))
         fi
     done
+    [[ $errors -eq 0 ]] || die "${errors} items missing from the rootfs"
 }
 
-# ── Copy fonts ───────────────────────────────────────────────────────
-copy_fonts() {
-    log "Copying fonts..."
-    if [[ -d "${SYSROOT}/usr/share/fonts" ]]; then
-        cp -r "${SYSROOT}/usr/share/fonts/"* "${STAGING}/usr/share/fonts/" 2>/dev/null || true
-    fi
-    local count
-    count=$(find "${STAGING}/usr/share/fonts" -name '*.ttf' 2>/dev/null | wc -l)
-    log "  ${count} font files copied."
-}
-
-# ── Copy configs ─────────────────────────────────────────────────────
-copy_configs() {
-    log "Copying configuration files..."
-
-    # D-Bus configs
-    if [[ -d "${SYSROOT}/etc/dbus-1" ]]; then
-        cp -r "${SYSROOT}/etc/dbus-1/"* "${STAGING}/etc/dbus-1/"
-    fi
-
-    # Fontconfig
-    if [[ -f "${SYSROOT}/etc/fonts/fonts.conf" ]]; then
-        cp "${SYSROOT}/etc/fonts/fonts.conf" "${STAGING}/etc/fonts/"
-    fi
-
-    # VeridianOS session config
-    cat > "${STAGING}/etc/veridian/session.conf" << 'CONF'
-# VeridianOS session configuration
-# Default session type: plasma (KDE Plasma 6)
-session=plasma
-CONF
-
-    # XDG environment
-    cat > "${STAGING}/etc/xdg/plasma-workspace.conf" << 'XDG'
-[General]
-DesktopSession=plasma
-XDG_CURRENT_DESKTOP=KDE
-XDG_SESSION_TYPE=wayland
-XDG
-}
-
-# ── Copy icons and theme data ─────────────────────────────────────────
-copy_theme_data() {
-    log "Copying theme data..."
-    if [[ -d "${SYSROOT}/usr/share/icons/breeze" ]]; then
-        cp -r "${SYSROOT}/usr/share/icons/breeze" "${STAGING}/usr/share/icons/"
-        log "  Breeze icons copied."
-    fi
-    if [[ -d "${SYSROOT}/usr/share/plasma" ]]; then
-        cp -r "${SYSROOT}/usr/share/plasma/"* "${STAGING}/usr/share/plasma/" 2>/dev/null || true
-    fi
-}
-
-# ── Copy integration scripts ─────────────────────────────────────────
-copy_integration() {
-    log "Copying integration scripts..."
-    local scripts_dir="${PROJECT_ROOT}/userland/integration"
-    if [[ -d "${scripts_dir}" ]]; then
-        for script in "${scripts_dir}"/*.sh; do
-            [[ -f "$script" ]] || continue
-            install -Dm755 "$script" "${STAGING}/usr/share/veridian/$(basename "$script")"
-        done
-    fi
-
-    # Also copy from sysroot if present
-    if [[ -d "${SYSROOT}/usr/share/veridian" ]]; then
-        cp "${SYSROOT}/usr/share/veridian/"*.sh "${STAGING}/usr/share/veridian/" 2>/dev/null || true
-    fi
-}
-
-# ── Build BlockFS image ──────────────────────────────────────────────
 build_image() {
     log "Building BlockFS image..."
-
-    if [[ ! -d "${MKFS_BLOCKFS}" ]]; then
-        die "mkfs-blockfs tool not found at ${MKFS_BLOCKFS}"
-    fi
-
-    # Build mkfs-blockfs if needed
-    local mkfs_bin="${MKFS_BLOCKFS}/target/release/mkfs-blockfs"
-    if [[ ! -f "${mkfs_bin}" ]]; then
-        mkfs_bin="${MKFS_BLOCKFS}/target/x86_64-unknown-linux-gnu/release/mkfs-blockfs"
-    fi
-    if [[ ! -f "${mkfs_bin}" ]]; then
-        log "Building mkfs-blockfs tool..."
-        (cd "${MKFS_BLOCKFS}" && cargo build --release)
-        mkfs_bin="${MKFS_BLOCKFS}/target/x86_64-unknown-linux-gnu/release/mkfs-blockfs"
-        if [[ ! -f "${mkfs_bin}" ]]; then
-            mkfs_bin="${MKFS_BLOCKFS}/target/release/mkfs-blockfs"
-        fi
-    fi
-
-    # Calculate image size (staging + 50% headroom, minimum 256MB)
-    local staging_size
-    staging_size=$(du -sb "${STAGING}" | awk '{print $1}')
-    local img_size=$(( (staging_size * 3 / 2) > 268435456 ? (staging_size * 3 / 2) : 268435456 ))
-    local img_size_mb=$(( img_size / 1048576 ))
-    log "  Staging: $(( staging_size / 1048576 )) MB, Image: ${img_size_mb} MB"
-
-    "${mkfs_bin}" \
-        --populate "${STAGING}" \
-        --output "${OUTPUT}" \
-        --size "${img_size_mb}" \
-        2>&1 || {
-        # Fallback: create raw image with tar
-        log "  mkfs-blockfs failed, creating tar-based image..."
-        tar -cf "${OUTPUT}" -C "${STAGING}" .
-    }
-
-    log "Image: ${OUTPUT}"
-    log "  Size: $(stat -c%s "${OUTPUT}" 2>/dev/null || echo "?") bytes"
+    local mkfs="${MKFS_DIR}/target/x86_64-unknown-linux-gnu/release/mkfs-blockfs"
+    (cd "${MKFS_DIR}" && cargo build --release --target x86_64-unknown-linux-gnu) ||
+        die "mkfs-blockfs did not build"
+    # Staging plus 50% headroom, at least 256 MB.
+    local staging_mb img_mb
+    staging_mb=$(( $(du -sb "${STAGING}" | cut -f1) / 1048576 ))
+    img_mb=$(( staging_mb * 3 / 2 ))
+    (( img_mb >= 256 )) || img_mb=256
+    log "  Staging: ${staging_mb} MB, image: ${img_mb} MB"
+    "${mkfs}" --populate "${STAGING}" --attrs "${ROOTFS_FILES}/attrs" \
+        --output "${OUTPUT}" --size "${img_mb}" || die "mkfs-blockfs failed"
+    log "Image: ${OUTPUT} ($(stat -c%s "${OUTPUT}") bytes)"
 }
 
-# ── Print QEMU launch command ─────────────────────────────────────────
 print_qemu_cmd() {
     cat << 'QEMU'
 
@@ -180,41 +300,19 @@ qemu-system-x86_64 -enable-kvm \
     -m 2G -serial stdio
 
 Then at the shell prompt: startgui
-
 QEMU
 }
 
-# ── Verify ────────────────────────────────────────────────────────────
-verify() {
-    log "Verifying rootfs..."
-    local errors=0
-    for item in \
-        "${STAGING}/etc/veridian/session.conf" \
-    ; do
-        if [[ -f "$item" ]]; then
-            log "  OK: ${item#${STAGING}}"
-        else
-            log "  MISSING: ${item#${STAGING}}"
-            errors=$((errors + 1))
-        fi
-    done
-    local bin_count
-    bin_count=$(find "${STAGING}/usr/bin" -type f 2>/dev/null | wc -l)
-    log "  ${bin_count} binaries in rootfs."
-    if [[ $errors -gt 0 ]]; then
-        log "WARNING: ${errors} items missing."
-    fi
-}
-
-# ── Main ──────────────────────────────────────────────────────────────
 main() {
     log "=== Assembling KDE Plasma rootfs for VeridianOS ==="
+    command -v rsync >/dev/null || die "rsync not found"
     prepare_staging
-    copy_binaries
-    copy_fonts
-    copy_configs
-    copy_theme_data
-    copy_integration
+    copy_programs
+    copy_libraries
+    copy_data
+    make_shadow
+    compile_schemas
+    check_host_paths
     verify
     build_image
     print_qemu_cmd

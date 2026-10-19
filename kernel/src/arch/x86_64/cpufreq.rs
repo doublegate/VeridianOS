@@ -282,6 +282,9 @@ fn check_eist_support() -> bool {
 
     // Also check CPUID leaf 1, ECX bit 7 for EIST.
     let ecx_leaf1: u32;
+    // SAFETY: CPUID is a non-privileged, side-effect-free instruction that
+    // reads CPU identification data. RBX is saved/restored around it because
+    // LLVM reserves RBX and CPUID clobbers it.
     unsafe {
         core::arch::asm!(
             "push rbx",

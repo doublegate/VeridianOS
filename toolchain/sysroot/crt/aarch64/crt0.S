@@ -83,3 +83,6 @@ _exit:
     brk     #1
 
 .size _exit, . - _exit
+
+/* No executable stack. */
+.section .note.GNU-stack,"",%progbits

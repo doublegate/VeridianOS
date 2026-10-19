@@ -518,7 +518,7 @@ access is mediated through unforgeable capability tokens.
 
 ### Communication Channels
 
-- **Discord**: [discord.gg/veridian-os](https://discord.gg/veridian-os) - Real-time chat
+- **Discord**: [discord.gg/WGcgrnuVHt](https://discord.gg/WGcgrnuVHt) - Real-time chat
 - **Forums**: [forum.veridian-os.org](https://forum.veridian-os.org) - Long-form discussions
 - **Mailing List**: dev@veridian-os.org - Development discussions
 - **Blog**: [blog.veridian-os.org](https://blog.veridian-os.org) - Project updates

@@ -12,20 +12,16 @@
  *   EXEC_TEST_PASS
  *
  * Syscall numbers from kernel/src/syscall/mod.rs:
- *   SYS_PROCESS_EXIT = 11  (status)
- *   SYS_PROCESS_FORK = 12  ()
- *   SYS_PROCESS_EXEC = 13  (path_ptr, argv_ptr, envp_ptr)
- *   SYS_PROCESS_WAIT = 14  (pid, status_ptr, options)
- *   SYS_FILE_WRITE   = 53  (fd, buf, count)
+ *   SYS_exit_group = 231  (status)
+ *   SYS_fork = 57  ()
+ *   SYS_execve = 59  (path_ptr, argv_ptr, envp_ptr)
+ *   SYS_wait4 = 61  (pid, status_ptr, options)
+ *   SYS_write   = 53  (fd, buf, count)
  *
  * Build: ${CC} -nostdlib -nostdinc -static -ffreestanding -o exec_test exec_test.c
  */
 
-#define SYS_PROCESS_EXIT 11
-#define SYS_PROCESS_FORK 12
-#define SYS_PROCESS_EXEC 13
-#define SYS_PROCESS_WAIT 14
-#define SYS_FILE_WRITE   53
+#include <veridian/sysno.h> /* system call numbers (ADR 0009) */
 #define STDOUT_FD        1
 
 #if defined(__x86_64__)
@@ -74,12 +70,12 @@ static void write_str(const char *s)
 {
     long len = 0;
     while (s[len]) len++;
-    syscall3(SYS_FILE_WRITE, STDOUT_FD, (long)s, len);
+    syscall3(SYS_write, STDOUT_FD, (long)s, len);
 }
 
 void _start(void)
 {
-    long pid = syscall0(SYS_PROCESS_FORK);
+    long pid = syscall0(SYS_fork);
 
     if (pid == 0) {
         /* Child process -- exec /bin/minimal */
@@ -87,23 +83,23 @@ void _start(void)
         static const char *argv[] = { "minimal", (const char *)0 };
         static const char *envp[] = { (const char *)0 };
 
-        syscall3(SYS_PROCESS_EXEC, (long)path, (long)argv, (long)envp);
+        syscall3(SYS_execve, (long)path, (long)argv, (long)envp);
 
         /* exec failed if we reach here */
         write_str("EXEC_FAILED\n");
-        syscall1(SYS_PROCESS_EXIT, 1);
+        syscall1(SYS_exit_group, 1);
         __builtin_unreachable();
     } else if (pid > 0) {
         /* Parent process -- wait for child */
         int status = 0;
-        syscall3(SYS_PROCESS_WAIT, pid, (long)&status, 0);
+        syscall3(SYS_wait4, pid, (long)&status, 0);
         write_str("EXEC_TEST_PASS\n");
-        syscall1(SYS_PROCESS_EXIT, 0);
+        syscall1(SYS_exit_group, 0);
         __builtin_unreachable();
     } else {
         /* Fork failed */
         write_str("FORK_FAILED\n");
-        syscall1(SYS_PROCESS_EXIT, 1);
+        syscall1(SYS_exit_group, 1);
         __builtin_unreachable();
     }
 }

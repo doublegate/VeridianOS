@@ -1,7 +1,8 @@
 //! AArch64 serial output via PL011 UART.
 //!
 //! Provides a `Uart16550Compat` wrapper that writes to the PL011 UART data
-//! register at `0x0900_0000` (QEMU virt machine). Used for kernel console
+//! register (`platform::PL011`, physical 0x0900_0000 on the QEMU virt
+//! machine). Used for kernel console
 //! output on AArch64.
 
 use core::fmt;
@@ -31,7 +32,7 @@ impl fmt::Write for Pl011Uart {
         while i < bytes.len() {
             // SAFETY: The PL011 UART data register at base_addr + 0x000 is
             // memory-mapped I/O. Writing a byte to it transmits the character.
-            // base_addr is set to 0x09000000 for QEMU's virt machine.
+            // base_addr is `platform::PL011` for QEMU's virt machine.
             unsafe {
                 // Direct write without FIFO check for simplicity
                 let uart_dr = (self.base_addr + UARTDR) as *mut u8;
@@ -46,7 +47,7 @@ impl fmt::Write for Pl011Uart {
 pub type SerialPort = Pl011Uart;
 
 pub fn create_serial_port() -> SerialPort {
-    Pl011Uart::new(0x0900_0000)
+    Pl011Uart::new(super::platform::PL011)
 }
 
 #[doc(hidden)]

@@ -21,7 +21,7 @@ pub mod layout {
     pub const USER_SPACE_START: usize = 0x0000_0000_0001_0000;
 
     /// User space end (exclusive; defined in mm::user_layout)
-    pub use crate::mm::user_layout::USER_SPACE_END;
+    pub use crate::mm::user_layout::user_space_end;
 
     /// Default code segment start
     pub const CODE_START: usize = 0x0000_0000_0040_0000;
@@ -35,8 +35,9 @@ pub mod layout {
     /// Maximum heap size (8GB) -- supports rustc self-compilation (4-8GB peak)
     pub const MAX_HEAP_SIZE: usize = 8 * 1024 * 1024 * 1024;
 
-    /// Stack end address (grows down from here)
-    pub const STACK_END: usize = 0x0000_7FFF_0000_0000;
+    /// Stack end address (grows down from here): 4 GiB below the main
+    /// stack's top, above the thread stacks.
+    pub const STACK_END: usize = crate::mm::user_layout::STACK_TOP - (1 << 32) + 0x1_0000;
 
     /// Default stack size (8MB)
     pub const DEFAULT_STACK_SIZE: usize = 8 * 1024 * 1024;

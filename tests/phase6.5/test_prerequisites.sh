@@ -188,7 +188,7 @@ done
 if [[ $BUILD_OK -eq 1 ]]; then
     echo ""
     echo "Running clippy on all 3 architectures..."
-    for target_spec in "targets/x86_64-veridian.json" "aarch64-unknown-none" "riscv64gc-unknown-none-elf"; do
+    for target_spec in "targets/x86_64-veridian.json" "aarch64-unknown-none-softfloat" "riscv64imac-unknown-none-elf"; do
         arch_name="${target_spec%%/*}"
         [[ "$arch_name" == "targets" ]] && arch_name="x86_64"
         if cargo clippy --target "$target_spec" -p veridian-kernel \

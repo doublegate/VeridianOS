@@ -1,0 +1,77 @@
+VeridianOS: text-art, digraphs-to-dot: print non-diagnostic text without pp_printf
+
+GCC's -Wformat-diag (on when GCC is built by a GCC that checks its
+diagnostic formats) reported:
+
+  gcc/text-art/style.cc:149:25 and 159:25: warning: spurious leading
+    punctuation sequence ';' in format [-Wformat-diag]
+  gcc/diagnostics/digraphs-to-dot-from-cfg.cc:173:36: spurious leading
+    punctuation sequence '<' in format; 173:43: spurious trailing
+    punctuation sequence '>:' in format; 246:26: spurious leading
+    punctuation sequence '[' in format [-Wformat-diag]
+
+pp_printf's format is checked as a GCC diagnostic message, but these
+calls do not print diagnostics: style.cc writes the parameters of an SGR
+escape sequence (";5;N", ";2;R;G;B"), digraphs-to-dot-from-cfg.cc writes
+a Graphviz node label ("<bb N>:") and an edge label ("[N%]").  They now
+use the pretty-printer's plain output functions, as the code around them
+already does (pp_string (pp, "38") just above in style.cc): pp_string /
+pp_semicolon / pp_left_bracket for the punctuation, pp_decimal_int for
+the int values (%d, same as %i), pp_scalar with "%li" for the long
+values.  The text produced is identical.
+
+diff -ru a/gcc/text-art/style.cc b/gcc/text-art/style.cc
+--- a/gcc/text-art/style.cc	2026-08-07 03:46:09.859595367 -0400
++++ b/gcc/text-art/style.cc	2026-10-08 17:03:09.098926954 -0400
+@@ -146,7 +146,8 @@
+ 	  pp_string (pp, "38");
+ 	else
+ 	  pp_string (pp, "48");
+-	pp_printf (pp, ";5;%i", (int)u.m_8bit);
++	pp_string (pp, ";5;");
++	pp_decimal_int (pp, (int)u.m_8bit);
+       }
+       break;
+     case kind::BITS_24:
+@@ -156,10 +157,12 @@
+ 	  pp_string (pp, "38");
+ 	else
+ 	  pp_string (pp, "48");
+-	pp_printf (pp, ";2;%i;%i;%i",
+-		   (int)u.m_24bit.r,
+-		   (int)u.m_24bit.g,
+-		   (int)u.m_24bit.b);
++	pp_string (pp, ";2;");
++	pp_decimal_int (pp, (int)u.m_24bit.r);
++	pp_semicolon (pp);
++	pp_decimal_int (pp, (int)u.m_24bit.g);
++	pp_semicolon (pp);
++	pp_decimal_int (pp, (int)u.m_24bit.b);
+       }
+       break;
+     }
+diff -ru a/gcc/diagnostics/digraphs-to-dot-from-cfg.cc b/gcc/diagnostics/digraphs-to-dot-from-cfg.cc
+--- a/gcc/diagnostics/digraphs-to-dot-from-cfg.cc	2026-08-07 03:46:06.112823616 -0400
++++ b/gcc/diagnostics/digraphs-to-dot-from-cfg.cc	2026-10-08 17:03:11.733906898 -0400
+@@ -170,7 +170,9 @@
+ 		  xp.push_tag ("td", true);
+ 		  xp.set_attr ("align", "left");
+ 		  pretty_printer pp;
+-		  pp_printf (&pp, "<bb %li>:", bb_index);
++		  pp_string (&pp, "<bb ");
++		  pp_scalar (&pp, "%li", bb_index);
++		  pp_string (&pp, ">:");
+ 		  xp.add_text_from_pp (pp);
+ 		  xp.pop_tag ("td");
+ 		  xp.pop_tag ("tr");
+@@ -243,7 +245,9 @@
+ 				       probability_pc))
+       {
+ 	pretty_printer pp;
+-	pp_printf (&pp, "[%li%%]", probability_pc);
++	pp_left_bracket (&pp);
++	pp_scalar (&pp, "%li", probability_pc);
++	pp_string (&pp, "%]");
+ 	output_edge.set_label (dot::id (pp_formatted_text (&pp)));
+       }
+   }

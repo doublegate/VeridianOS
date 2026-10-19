@@ -20,7 +20,7 @@
 
 **VeridianOS** is a research operating system written in Rust, focused on **correctness, isolation, and explicit architectural invariants**. It serves as **executable documentation of high-assurance systems design** -- exploring how capability-oriented architecture, strong isolation boundaries, and disciplined use of unsafe code produce systems that are _auditable, teachable, and resilient to failure_.
 
-The system implements a capability-based security model, a message-passing IPC layer (implemented in the kernel; not yet reachable from user programs, see [Known Limitations](docs/KNOWN-LIMITATIONS.md)), and runs on three architectures (x86_64, AArch64, RISC-V). It is self-hosting, ships a Wayland desktop environment, supports containerized and virtualized workloads, and includes formal verification infrastructure -- all while keeping the microkernel under 15K lines of trusted code.
+The system implements a capability-based security model, a message-passing IPC layer (implemented in the kernel; user programs reach endpoint send and receive so far, see [Known Limitations](docs/KNOWN-LIMITATIONS.md)), and runs on three architectures (x86_64, AArch64, RISC-V). It is self-hosting, ships a Wayland desktop environment, supports containerized and virtualized workloads, and includes formal verification infrastructure -- all while keeping the microkernel under 15K lines of trusted code.
 
 VeridianOS intentionally prioritizes architectural clarity over feature velocity. Native APIs are capability-based; compatibility layers (POSIX, Wayland) are implemented as user-space libraries that translate to native interfaces, never as kernel-level compromises.
 
@@ -32,14 +32,14 @@ VeridianOS intentionally prioritizes architectural clarity over feature velocity
 
 - **Microkernel architecture** -- Designed for a minimal trusted computing base with drivers and services in user space; today they run in the kernel (critique C6, see [`docs/KNOWN-LIMITATIONS.md`](docs/KNOWN-LIMITATIONS.md))
 - **Written in Rust** -- Memory safety without garbage collection; strict unsafe code policy
-- **Capability-based security** -- 64-bit unforgeable tokens for all resource access with O(1) lookup, hierarchical delegation, and cascading revocation
-- **IPC** -- Register-sized, kernel-buffered (up to 16 KiB) and shared-region message tiers, capability-checked. Not yet reachable from user programs: native syscalls 0-7 are routed to the Linux compatibility layer (audit N-33, fix planned for v0.28)
-- **Formal verification** -- 38 Kani proof harnesses and 6 TLA+ specifications covering boot chain, IPC, memory allocation, and capability invariants
+- **Capability-based security** -- 64-bit tokens with generation counters, O(1) lookup, hierarchical delegation and cascading revocation. Capabilities guard IPC, memory sharing and process creation; files, sockets and devices use ordinary Unix permissions, and cascading revocation does not yet follow every grant path (N-89)
+- **IPC** -- Register-sized, kernel-buffered (up to 16 KiB) and shared-region message tiers, capability-checked. User programs can create endpoints and send and receive through them since v0.27.0 (private numbers 1024-1031, ADR 0009); the full IPC redesign is planned for v0.28
+- **Formal verification** -- 38 Kani proof harnesses and 6 TLA+ specifications for boot chain, IPC, memory allocation and capability invariants. They prove standalone models rather than the kernel's own functions, and CI runs neither (N-163)
 
 ### Platform
 
-- **Multi-architecture** -- Full support for x86_64 (UEFI), AArch64, and RISC-V 64 (OpenSBI)
-- **Self-hosting** -- Native GCC 14.2 and Rust compiler toolchain; BusyBox 1.36.1 with 95 applets compiled on-target
+- **Multi-architecture** -- x86_64 (UEFI), AArch64 and RISC-V 64 (OpenSBI) boot and pass the in-kernel tests under QEMU. On all three a BusyBox root runs with fork, exec, threads and signals (x86_64 with the native libc, AArch64 and RISC-V with musl), on one and on four CPUs; none has run on real hardware yet ([`docs/KNOWN-LIMITATIONS.md`](docs/KNOWN-LIMITATIONS.md))
+- **Self-hosting** -- Native GCC 14.2 on x86_64; BusyBox 1.36.1 with 95 applets compiled on-target. A native LLVM/rustc pipeline is scripted but not yet verified on VeridianOS
 - **Package management** -- DPLL SAT dependency resolver, ports system, reproducible builds, Ed25519 package signing
 - **Complete C library** -- Full stdio/stdlib/string/unistd with POSIX headers, math library, and architecture-specific setjmp/longjmp
 - **Bash-compatible shell (vsh)** -- Pure Rust shell with 153 builtins (power, user, service, network, filesystem, storage, devtools, diagnostics, desktop, cloud/container), job control, readline, scripting, and POSIX word expansion
@@ -57,22 +57,22 @@ VeridianOS intentionally prioritizes architectural clarity over feature velocity
 
 ### Infrastructure
 
-- **Networking** -- TCP/IP dual-stack (IPv4 + IPv6), zero-copy DMA, E1000 NIC driver, TCP Reno/Cubic/SACK, DNS, DHCP, VLAN, bonding, netfilter firewall with conntrack/NAT, RIP/OSPF routing, WiFi 802.11, Bluetooth L2CAP/RFCOMM, VPN tunnels, TLS 1.3, SSH, HTTP, QUIC, WireGuard, mDNS
+- **Networking** -- Protocol code for TCP/IP dual-stack (IPv4 + IPv6), E1000 and virtio-net drivers, TCP Reno/Cubic/SACK, DNS, DHCP, VLAN, bonding, netfilter firewall with conntrack/NAT, RIP/OSPF routing, WiFi 802.11, Bluetooth L2CAP/RFCOMM, VPN tunnels, TLS 1.3, SSH, HTTP, QUIC, WireGuard, mDNS. User-space INET sockets do not work yet and TCP is incomplete (N-64 to N-76, NET-INC-01); loopback and Unix sockets work
 - **Virtualization** -- Intel VMX hypervisor with VMCS/EPT, KVM API compatibility, QEMU device model with live migration, VFIO PCI passthrough, SR-IOV, CPU/memory/PCI hotplug
-- **Containers** -- OCI runtime with PID/mount/network/UTS namespaces, cgroup memory+CPU, overlay filesystem, seccomp BPF, veth networking
+- **Containers** -- OCI runtime structures, namespace and cgroup bookkeeping, overlay filesystem, seccomp BPF and veth code. Namespaces are not enforced yet (VIRT-INC-01) and the seccomp filter is never consulted
 - **Cloud-native** -- CRI/CNI/CSI interfaces, service mesh with mTLS and SPIFFE identity, L4/L7 load balancer, cloud-init metadata service
 - **Enterprise** -- LDAP v3, Kerberos v5, NFS v4, SMB2/3, iSCSI initiator, software RAID 0/1/5
 
 ### Security
 
-- **Defense in depth** -- KPTI shadow page tables, KASLR, stack canaries, SMEP/SMAP, retpoline, W^X enforcement, guard pages
-- **Post-quantum cryptography** -- Dilithium3 (round-3 sizes, not yet the FIPS 204 ML-DSA-65 encoding; N-55) and Kyber/ML-KEM alongside ChaCha20-Poly1305, Ed25519, X25519
-- **Hardware security** -- TPM 2.0 integration, secure boot verification, IOMMU protection
-- **Mandatory access control** -- Policy parser, RBAC, MLS enforcement, structured audit logging
+- **Defense in depth** -- NX/W^X page protections from `mmap`/`mprotect` flags, guarded kernel stacks and a W^X kernel image on all three architectures, checked user-memory access. KPTI, KASLR, stack canaries, SMEP/SMAP and retpoline exist as code but are not active (N-145, N-146, N-15)
+- **Post-quantum cryptography** -- ML-DSA-65 signature verification (FIPS 204, checked against NIST ACVP vectors); an experimental, non-standard Kyber KEM (N-57); alongside ChaCha20-Poly1305, Ed25519, X25519
+- **Hardware security** -- TPM 2.0 and secure-boot verification code; IOMMU tables are parsed but DMA isolation is not enabled (N-77)
+- **Mandatory access control** -- Policy parser, RBAC/MLS model and audit logging; enforcement is path-blind and partial (N-152)
 
 ### Developer Tools
 
-- **Compiler toolchain** -- Cross and native GCC 14.2, Rust std platform port (`std::sys::veridian`), LLVM 19 bootstrap pipeline
+- **Compiler toolchain** -- Cross GCC 16.2 with binutils 2.47 (the native GCC was built at 14.2; its scripts now pin 16.2), Rust std platform port (`std::sys::veridian`), LLVM 19 bootstrap pipeline
 - **Debugging** -- GDB remote serial protocol, kernel debug scripts, QEMU integration on all architectures
 - **Development environment** -- IDE with gap buffer editor and LSP client, CI runner, profiler with flame graph rendering, native git client
 - **Build system** -- Build orchestrator with dependency topological sort, package repository server
@@ -91,27 +91,27 @@ The design goal is a microkernel that provides only memory management, schedulin
 
 ## Project Status
 
-**Version**: v0.26.0 | **All development phases complete (0-12)** | **84 releases published**
+**Version**: v0.27.0 | **All development phases complete (0-12)** | **85 releases published** | v0.28 next (the rest of the Linux system calls, then networking, hardening, real hardware)
 
 | Metric | Value |
 | --- | --- |
 | Build | 0 errors, 0 warnings across all 3 architectures |
-| Boot tests | 34/34 (Stage 6 BOOTOK on all architectures) |
-| Host-target unit tests | 4,475 passing, 1 ignored on purpose (pins N-47) |
-| In-guest runtime suite | `audit_runtime_test` 27/27 and BusyBox all-pass on the BlockFS root (x86_64) |
+| Boot tests | x86_64 43/43, AArch64 64/64, RISC-V 57/57 (Stage 6 BOOTOK; also with `-smp 4`) |
+| Host-target unit tests | 4,735 passing |
+| In-guest runtime suites | BusyBox self-test, `audit_runtime_test` and `musl_runtime_test` all passing on the BlockFS root of each architecture (x86_64: 91/91 and 71/71; AArch64: 91/91 and 69/69; RISC-V: 89/89 and 69/69) |
 | CI pipeline | GitHub Actions + Codecov; patch coverage of the v0.26.0 changes 75% (gaps tracked) |
-| Unsafe code | 5 justified `static mut` (early serial, boot info, heap, per-CPU data, ready queue); unsafe blocks carry SAFETY comments |
+| Unsafe code | 3 justified `static mut` (early serial, boot info, per-CPU data); unsafe blocks carry SAFETY comments |
 
-Figures as of v0.26.0 (2026-10-06); sources: [`docs/PERFORMANCE-REPORT.md`](docs/PERFORMANCE-REPORT.md),
+Test counts as of v0.27.0 (2026-10-18), coverage as of v0.26.0 (2026-10-06); sources: [`docs/PERFORMANCE-REPORT.md`](docs/PERFORMANCE-REPORT.md),
 [`CHANGELOG.md`](CHANGELOG.md).
 
 ### Architecture Support
 
 | Architecture | Boot Method | Status |
 | --- | --- | --- |
-| x86_64 | UEFI via OVMF | Boots to BOOTOK (34/34); 1280x800 UEFI GOP, Ring 3 user programs, native compilation |
-| AArch64 | Direct kernel loading | Boots to BOOTOK (34/34); PL011 UART, virtio-MMIO, BlockFS root. No user mode yet: the MMU is off (N-28) |
-| RISC-V 64 | OpenSBI | Boots to BOOTOK (34/34); Sv48 page tables, virtio-MMIO, BlockFS root. No user mode yet |
+| x86_64 | UEFI via OVMF | Boots to BOOTOK (43/43); 1280x800 UEFI GOP, Ring 3 user programs, native compilation |
+| AArch64 | Direct kernel loading or arm64 Image | Boots to BOOTOK (64/64); PL011 UART, PL031 RTC, virtio-MMIO, BlockFS root. MMU on, kernel in the upper half (ADR 0015); EL0 programs with musl |
+| RISC-V 64 | OpenSBI | Boots to BOOTOK (57/57); Sv48 or Sv39 page tables, Goldfish RTC, virtio-MMIO, BlockFS root. U-mode programs with musl |
 
 ### Performance
 
@@ -120,12 +120,12 @@ TSC. Method and full tables: [`docs/PERFORMANCE-REPORT.md`](docs/PERFORMANCE-REP
 
 | Metric | Target | Measured (avg) |
 | --- | --- | --- |
-| IPC latency | < 1us | not measured: IPC is not reachable from user space yet (N-33) |
+| IPC latency | < 1us | not measured; every message is queued on its endpoint (no register fast path until the v0.28 IPC redesign) |
 | Context switch | < 10us | not measured |
 | Frame allocation | < 1us | 62 ns per-CPU cache, 272 ns global allocator |
 | Capability lookup | < 100 ns | 93 ns (hash table) |
 | Concurrent processes | 1000+ | not measured |
-| TLB shootdown | < 5us/CPU | not applicable: one CPU runs, shootdown has no callers yet (MEM-SEC-02, v0.27) |
+| TLB shootdown | < 5us/CPU | not measured; acknowledged on every CPU (boot test `tlb_shootdown_confirmed` with `-smp 4`) |
 
 ---
 
@@ -182,12 +182,12 @@ qemu-system-x86_64 -enable-kvm \
 
 # Run in QEMU (AArch64)
 qemu-system-aarch64 -M virt -cpu cortex-a72 -m 256M \
-    -kernel target/aarch64-unknown-none/debug/veridian-kernel \
+    -kernel target/aarch64-unknown-none-softfloat/debug/veridian-kernel \
     -serial stdio -display none
 
 # Run in QEMU (RISC-V)
 qemu-system-riscv64 -M virt -m 256M -bios default \
-    -kernel target/riscv64gc-unknown-none-elf/debug/veridian-kernel \
+    -kernel target/riscv64imac-unknown-none-elf/debug/veridian-kernel \
     -serial stdio -display none
 
 # Run tests
@@ -217,10 +217,10 @@ For detailed build instructions, see [BUILD-INSTRUCTIONS.md](docs/BUILD-INSTRUCT
 | --- | --- | --- | --- |
 | Boot | UEFI via OVMF | Direct `-kernel` | OpenSBI `-bios default` |
 | Display | 1280x800 UEFI GOP | ramfb | ramfb |
-| Minimum RAM | 2GB | 256MB | 256MB |
+| Minimum RAM | 256MB (2GB for the BlockFS root) | 256MB | 256MB |
 | Native compilation | 1.5GB+ | -- | -- |
 
-**Minimum**: 64-bit CPU with MMU, 2GB RAM (x86_64) or 256MB RAM (AArch64/RISC-V), 1GB storage.
+**Minimum**: 64-bit CPU with MMU, 256MB RAM (2GB on x86_64 for the BlockFS root and native compilation), 1GB storage.
 **Recommended**: Multi-core CPU with virtualization support, 4GB+ RAM, NVMe storage.
 
 ---
@@ -247,7 +247,7 @@ For detailed build instructions, see [BUILD-INSTRUCTIONS.md](docs/BUILD-INSTRUCT
 - [Rust Compiler Porting Guide](docs/RUST-COMPILER-PORTING.md) -- Porting rustc via LLVM 19
 - [Persistent Storage Guide](docs/PERSISTENT-STORAGE.md) -- BlockFS filesystem and disk images
 - [vsh Shell Guide](docs/VSH-SHELL-GUIDE.md) -- Bash-compatible shell usage and internals
-- [Release History](docs/RELEASE-HISTORY.md) -- Detailed per-release notes
+- [Release History](CHANGELOG.md) -- Detailed per-release notes (summaries up to v0.25.2: [archive](docs/archive/reports/RELEASE-HISTORY.md))
 
 ---
 
@@ -275,14 +275,14 @@ See [Unsafe Policy](docs/UNSAFE-POLICY.md) for the full policy.
 
 ## Security
 
-Security is a foundational design principle, not a bolt-on layer:
+Security is a foundational design goal. What is in effect today, and what is not, is listed in [`docs/KNOWN-LIMITATIONS.md`](docs/KNOWN-LIMITATIONS.md):
 
-- **Capability-based access control** -- Fine-grained, unforgeable permissions for all resources
-- **Memory safety** -- Rust ownership guarantees plus KPTI, KASLR, SMEP/SMAP, W^X, and guard pages
-- **Post-quantum cryptography** -- Dilithium3 (pre-FIPS 204 sizes, N-55) and Kyber/ML-KEM alongside classical algorithms
-- **Mandatory access control** -- Policy-driven RBAC and MLS enforcement
-- **Hardware security** -- TPM 2.0, secure boot chain, IOMMU isolation
-- **Formal verification** -- Kani proofs for critical kernel invariants; TLA+ specifications for protocol correctness
+- **Capability-based access control** -- Fine-grained permissions for IPC, memory sharing and process creation
+- **Memory safety** -- Rust ownership guarantees, NX/W^X page protections and guarded kernel stacks (KPTI, KASLR and SMEP/SMAP are not active yet: N-145, N-146, N-15)
+- **Post-quantum cryptography** -- ML-DSA-65 verification (FIPS 204) and an experimental, non-standard Kyber KEM (N-57) alongside classical algorithms
+- **Mandatory access control** -- Policy-driven RBAC and MLS model (enforcement partial, N-152)
+- **Hardware security** -- TPM 2.0 and secure boot chain code; no IOMMU isolation yet (N-77)
+- **Formal verification** -- Kani proofs and TLA+ specifications of kernel models (not yet of the kernel's own code, and not run in CI: N-163)
 
 ---
 
@@ -294,7 +294,7 @@ Contributions are welcome. Please see the [Contributing Guide](CONTRIBUTING.md) 
 
 ## Community
 
-- [Discord Server](https://discord.gg/24KbHS4C) -- Real-time chat
+- [Discord Server](https://discord.gg/WGcgrnuVHt) -- Real-time chat
 - [Issue Tracker](https://github.com/doublegate/VeridianOS/issues) -- Bug reports and feature requests
 
 ---

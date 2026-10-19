@@ -20,7 +20,7 @@ Measured with 7 in-kernel micro-benchmarks on QEMU x86_64 with KVM (i9-10850K):
 
 | Metric | Target | Achieved |
 |--------|--------|----------|
-| IPC Latency | <5us | not measured: IPC is not reachable from user space yet (see Known Limitations) |
+| IPC Latency | <5us | not measured: user programs reach only endpoint send and receive so far, and no round trip is benchmarked (see Known Limitations) |
 | Context Switch | <10us | <10us |
 | Memory Allocation | <1us | <1us |
 | Capability Lookup | O(1) | O(1) |
@@ -41,9 +41,10 @@ This runs all 7 micro-benchmarks and prints TSC-based timing results.
 Key performance features implemented:
 - **Per-CPU page frame cache** (64-frame) minimizes allocator lock contention
 - **TLB shootdown reduction** via `TlbFlushBatch` and ASID management
-- **Fast-path IPC** with register-based transfer for small messages (<64 bytes)
-- **Direct IPC context switching** with priority inheritance (`PiMutex`)
-- **CFS scheduler** with per-CPU run queues and work-stealing
+- **Dispatcher** (ADR 0006) with EEVDF fair, real-time and deadline classes (ADR 0007); one CPU
+  runs tasks until SMP stage S2 (v0.27 sprint D5)
+- No IPC fast path or priority inheritance yet: both were removed with the old scheduler in v0.27
+  (IPC hand-off returns with the v0.28 IPC redesign; priority inheritance is SCHED-INC-01)
 - **Cache-aware allocation** to prevent false sharing
 - **Write-combining PAT** for framebuffer (1200+ MB/s vs 200 MB/s UC)
 

@@ -1,0 +1,41 @@
+VeridianOS: fix compiler warnings in kcursorgen and the Breeze style
+
+GCC reported:
+
+- -Wunused-function for the five Options::*() functions in
+  cursors/src/kcursorgen/options.h, compiling kcursorgen.cpp. The functions
+  are static (internal linkage) and only main.cpp uses them; kcursorgen.cpp
+  included the header without using anything from it. The unneeded include
+  is removed from kcursorgen.cpp.
+- -Wunused-parameter for 'corners' in Helper::renderStaticTabBarTab()
+  (kstyle/breezehelper.cpp). The static tab is drawn with plain rectangles,
+  unlike renderTabBarTab(), which rounds the given corners; the parameter
+  exists to keep the two signatures alike. It is marked Q_UNUSED, as the
+  file does for other such parameters.
+
+Behaviour is unchanged.
+
+diff -ru a/cursors/src/kcursorgen/kcursorgen.cpp b/cursors/src/kcursorgen/kcursorgen.cpp
+--- a/cursors/src/kcursorgen/kcursorgen.cpp	2026-10-08 17:01:25.682065386 -0400
++++ b/cursors/src/kcursorgen/kcursorgen.cpp	2026-10-08 17:03:36.129721341 -0400
+@@ -4,7 +4,6 @@
+ */
+ 
+ #include "kcursorgen.h"
+-#include "options.h"
+ 
+ #include <QCollator>
+ #include <QDebug>
+diff -ru a/kstyle/breezehelper.cpp b/kstyle/breezehelper.cpp
+--- a/kstyle/breezehelper.cpp	2026-10-08 17:01:25.707209293 -0400
++++ b/kstyle/breezehelper.cpp	2026-10-08 17:03:38.630702331 -0400
+@@ -1303,6 +1303,9 @@
+                                    Corners corners,
+                                    qreal animation) const
+ {
++    // static tabs are drawn with square corners
++    Q_UNUSED(corners)
++
+     bool enabled = stateProperties.value("enabled", true);
+     bool hovered = stateProperties.value("hovered");
+     bool selected = stateProperties.value("selected");

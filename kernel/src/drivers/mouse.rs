@@ -113,6 +113,9 @@ mod x86_64_impl {
     // SAFETY: MouseBuffer uses atomic operations for synchronization.
     // Single producer (poll_mouse) / single consumer (read_event).
     unsafe impl Send for MouseBuffer {}
+    // SAFETY: the fields are a plain-data array and atomics. The only
+    // mutation of `buf` goes through `push(&mut self)`; `&self` methods only
+    // read, so shared references cannot race on the array.
     unsafe impl Sync for MouseBuffer {}
 
     static MOUSE_BUFFER: Mutex<MouseBuffer> = Mutex::new(MouseBuffer::new());

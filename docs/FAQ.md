@@ -174,7 +174,7 @@ We follow:
 
 ### How do I get help?
 
-- Discord: [#help channel](https://discord.gg/veridian)
+- Discord: [#help channel](https://discord.gg/WGcgrnuVHt)
 - Mailing list: help@veridian-os.org
 - Stack Overflow: tag `veridian-os`
 - GitHub Discussions
@@ -270,7 +270,7 @@ Ensure:
 ## More Questions?
 
 - Check documentation in `docs/`
-- Ask on [Discord](https://discord.gg/veridian)
+- Ask on [Discord](https://discord.gg/WGcgrnuVHt)
 - Email: info@veridian-os.org
 - Create a GitHub issue
 

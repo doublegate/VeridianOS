@@ -38,7 +38,7 @@ The benchmark suite is implemented in `kernel/src/perf/bench.rs`. Each benchmark
 |--------|--------|--------|
 | System call latency | < 500 ns | Measured via `syscall_getpid` |
 | Context switch time | < 10 us | Measured via `sched_current` (proxy) |
-| IPC small message | < 1 us | Measured via fast path stats |
+| IPC small message | < 1 us | Not measured: the fast-path counters read zero since the fast path was removed (v0.27); see IPC-USAGE-GUIDE.md |
 | Frame allocation (per-CPU) | < 500 ns | Measured via `frame_alloc_1` |
 | Capability lookup | < 100 ns | Measured via `cap_validate` |
 

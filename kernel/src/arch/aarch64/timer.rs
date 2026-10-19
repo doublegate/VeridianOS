@@ -18,8 +18,6 @@ static TICKS: AtomicU64 = AtomicU64::new(0);
 static PERIOD: AtomicU64 = AtomicU64::new(0);
 /// Tick period in milliseconds.
 static PERIOD_MS: AtomicU64 = AtomicU64::new(0);
-/// Deadline currently armed.
-static NEXT: AtomicU64 = AtomicU64::new(0);
 
 /// CNTV_CTL_EL0: ENABLE, with IMASK clear.
 const CTL_ENABLE: u64 = 1;
@@ -41,6 +39,27 @@ fn set_compare(deadline: u64) {
     }
 }
 
+/// Start this CPU's tick at the period the boot CPU configured (a secondary
+/// CPU). The timer interrupt is a PPI, whose enable and priority registers
+/// are banked per CPU in GICv2, so each CPU enables its own. The caller
+/// unmasks IRQs afterwards.
+pub fn start_secondary() -> crate::error::KernelResult<()> {
+    let period = PERIOD.load(Ordering::Relaxed);
+    if period == 0 {
+        return Ok(());
+    }
+    let first = counter() + period;
+    crate::arch::percpu::set_timer_next(first);
+    set_compare(first);
+    // SAFETY: enables this CPU's EL1 virtual timer with its interrupt
+    // unmasked; its vectors and GIC CPU interface are set up.
+    unsafe {
+        core::arch::asm!("msr cntv_ctl_el0, {0}", "isb", in(reg) CTL_ENABLE, options(nostack));
+    }
+    super::gic::set_irq_priority(super::exceptions::VIRTUAL_TIMER_INTID, 0x80)?;
+    super::gic::enable_irq(super::exceptions::VIRTUAL_TIMER_INTID)
+}
+
 /// Start a periodic tick at `hz`: arm the virtual timer and enable its PPI
 /// at the GIC. The vector table must be installed and the GIC initialized;
 /// the caller unmasks IRQs afterwards.
@@ -50,7 +69,7 @@ pub fn start(hz: u32) -> crate::error::KernelResult<()> {
     PERIOD.store(period, Ordering::Relaxed);
     PERIOD_MS.store((1000 / hz.max(1) as u64).max(1), Ordering::Relaxed);
     let first = counter() + period;
-    NEXT.store(first, Ordering::Relaxed);
+    crate::arch::percpu::set_timer_next(first);
     set_compare(first);
     // SAFETY: enables the EL1 virtual timer with its interrupt unmasked.
     unsafe {
@@ -73,18 +92,20 @@ pub fn start(hz: u32) -> crate::error::KernelResult<()> {
 
 /// Handle the virtual timer interrupt (called from the IRQ vector).
 ///
-/// Re-arms first (the timer interrupt is level-triggered and stays asserted
-/// until the compare value moves past the counter), skipping missed ticks
-/// rather than firing a burst. Only the clock and the timer wheel advance:
-/// preempting the interrupted kernel code from here is not supported yet.
-pub fn handle_interrupt() {
-    // Only this handler writes TICKS, so a plain load and store suffice. An
-    // atomic read-modify-write would use exclusive load/store, which is not
-    // architecturally reliable while the MMU is off (N-28).
-    TICKS.store(
-        TICKS.load(Ordering::Relaxed).wrapping_add(1),
-        Ordering::Relaxed,
-    );
+/// Advances the clock (on the timekeeper) and runs the dispatcher's tick,
+/// then re-arms by whole periods, skipping missed ticks rather than firing
+/// a burst. The re-arm follows the work, against the time it ended, so a
+/// tick that outlasts the period still leaves the interrupted code a whole
+/// one (as on RISC-V and x86_64). The interrupt is level-triggered and
+/// stays asserted until the compare value moves past the counter, which
+/// this does before `aarch64_irq` ends the interrupt at the GIC, and IRQs
+/// stay masked throughout. Preempting the interrupted kernel code from
+/// here is not supported; tasks switch at scheduling points. `user`: the
+/// interrupt came from EL0, so this tick is the task's user time.
+pub fn handle_interrupt(user: bool) {
+    if crate::arch::percpu::is_timekeeper() {
+        TICKS.fetch_add(1, Ordering::Relaxed);
+    }
     let period = PERIOD.load(Ordering::Relaxed);
     if period == 0 {
         // Not started: silence the timer.
@@ -92,12 +113,16 @@ pub fn handle_interrupt() {
         unsafe { core::arch::asm!("msr cntv_ctl_el0, xzr", "isb", options(nostack)) };
         return;
     }
-    let now = counter();
-    let mut next = NEXT.load(Ordering::Relaxed).wrapping_add(period);
-    if next <= now {
-        next = now + period;
+    // Only the timekeeping CPU advances global time.
+    if crate::arch::percpu::is_timekeeper() {
+        crate::timer::clock_tick();
     }
-    NEXT.store(next, Ordering::Relaxed);
+    // Time slices, accounting, balancing; on the timekeeper also the
+    // sleepers (as x86_64's and RISC-V's tick).
+    #[cfg(feature = "alloc")]
+    crate::sched::dispatch::tick(user);
+    // Per-CPU deadline (CNTV_CVAL_EL0 is per CPU), from the time the work
+    // ended (see above).
+    let next = crate::arch::percpu::advance_timer(counter(), period);
     set_compare(next);
-    crate::timer::timer_tick(PERIOD_MS.load(Ordering::Relaxed));
 }

@@ -6,10 +6,6 @@
 
 use core::fmt;
 
-/// UART base address for QEMU virt machine
-#[allow(dead_code)] // Hardware constant -- address used in assembly below
-const UART0_BASE: usize = 0x0900_0000;
-
 /// Write bytes to UART using pure assembly - avoiding all Rust constructs
 ///
 /// This implementation uses pure inline assembly for the entire operation.
@@ -17,39 +13,49 @@ const UART0_BASE: usize = 0x0900_0000;
 /// # Safety
 ///
 /// `ptr` must point to a valid byte buffer of at least `len` bytes.
-/// The PL011 UART at address 0x09000000 must be memory-mapped and
-/// accessible (as on the QEMU virt machine).
+/// The PL011 UART (`platform::PL011`, through the physical-memory map) must
+/// be accessible, as on the QEMU virt machine.
 unsafe fn uart_write_bytes_asm(ptr: *const u8, len: usize) {
     // Use inline assembly to perform the entire operation
     // Pass UART address as an input rather than loading it in assembly
-    let uart_addr: usize = 0x0900_0000;
-    core::arch::asm!(
-        "mov {i}, #0",                    // Initialize counter
-        "1:",                             // Loop start
-        "cmp {i}, {len}",                 // Compare counter with length
-        "b.ge 2f",                        // Branch if counter >= length
-        "ldrb {byte:w}, [{ptr}, {i}]",   // Load byte from string[i]
-        "strb {byte:w}, [{uart}]",       // Store byte to UART
-        "add {i}, {i}, #1",               // Increment counter
-        "b 1b",                           // Branch back to loop
-        "2:",                             // End
-        ptr = in(reg) ptr,
-        len = in(reg) len,
-        uart = in(reg) uart_addr,
-        i = out(reg) _,
-        byte = out(reg) _,
-        options(nostack, preserves_flags)
-    );
+    let uart_addr: usize = super::platform::PL011;
+    // SAFETY: forwarded from this function's contract: `ptr` is readable for
+    // `len` bytes (the loop reads offsets 0..len only) and the PL011 data
+    // register is mapped (Device memory), so each store transmits one byte.
+    unsafe {
+        core::arch::asm!(
+            "mov {i}, #0",                    // Initialize counter
+            "1:",                             // Loop start
+            "cmp {i}, {len}",                 // Compare counter with length
+            "b.ge 2f",                        // Branch if counter >= length
+            "ldrb {byte:w}, [{ptr}, {i}]",   // Load byte from string[i]
+            "strb {byte:w}, [{uart}]",       // Store byte to UART
+            "add {i}, {i}, #1",               // Increment counter
+            "b 1b",                           // Branch back to loop
+            "2:",                             // End
+            ptr = in(reg) ptr,
+            len = in(reg) len,
+            uart = in(reg) uart_addr,
+            i = out(reg) _,
+            byte = out(reg) _,
+            // Not `preserves_flags`: the loop's `cmp` overwrites NZCV. With
+            // that option LLVM kept a comparison made before a print live
+            // across it, so release kernels branched on this loop's flags
+            // and boot tests passed silently reported "failed".
+            options(nostack)
+        )
+    };
 }
 
 /// Print a string directly to UART
 pub fn direct_print_str(s: &str) {
     // SAFETY: s.as_ptr() and s.len() provide a valid byte buffer from the &str.
-    // uart_write_bytes_asm writes each byte to the PL011 UART at 0x09000000 via
-    // assembly, avoiding LLVM loop compilation issues on AArch64.
-    unsafe {
+    // uart_write_bytes_asm writes each byte to the PL011 UART (`platform::PL011`)
+    // via assembly, avoiding LLVM loop compilation issues on AArch64. One
+    // message at a time across CPUs (`print::with_console`).
+    crate::print::with_console(|| unsafe {
         uart_write_bytes_asm(s.as_ptr(), s.len());
-    }
+    });
 }
 
 /// Output a string to UART without using any loops or iterators
@@ -57,12 +63,14 @@ pub fn direct_print_str(s: &str) {
 ///
 /// # Safety
 ///
-/// The caller must ensure that the PL011 UART at address 0x09000000
-/// is memory-mapped and accessible (as is the case on the QEMU virt
-/// machine). This function writes each byte of `s` directly to the
-/// UART data register via assembly MMIO stores.
+/// The caller must ensure that the PL011 UART (`platform::PL011`) is
+/// accessible (as is the case on the QEMU virt machine). This function writes
+/// each byte of `s` directly to the UART data register via assembly MMIO
+/// stores.
 pub unsafe fn uart_write_str(s: &str) {
-    uart_write_bytes_asm(s.as_ptr(), s.len());
+    // SAFETY: `s` is a valid buffer of `s.len()` bytes, and the UART mapping
+    // is forwarded from this function's contract.
+    unsafe { uart_write_bytes_asm(s.as_ptr(), s.len()) };
 }
 
 /// Print a single character directly to UART

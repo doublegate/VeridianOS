@@ -5,16 +5,16 @@
  * verifying the full self-hosting compilation pipeline:
  *
  *   cc1 + as + ld (step-by-step):
- *     /usr/libexec/gcc/x86_64-veridian/14.2.0/cc1 -isystem /usr/include \
- *       -isystem /usr/lib/gcc/x86_64-veridian/14.2.0/include \
+ *     /usr/libexec/gcc/x86_64-veridian/16.2.0/cc1 -isystem /usr/include \
+ *       -isystem /usr/lib/gcc/x86_64-veridian/16.2.0/include \
  *       /usr/src/selfhost_test.c -o /tmp/test.s -quiet
  *     /usr/bin/as -o /tmp/test.o /tmp/test.s
  *     /usr/bin/ld -static -o /tmp/selfhost_test \
  *       /usr/lib/crt0.o /usr/lib/crti.o \
- *       /usr/lib/gcc/x86_64-veridian/14.2.0/crtbegin.o \
- *       /tmp/test.o -L/usr/lib -L/usr/lib/gcc/x86_64-veridian/14.2.0 \
+ *       /usr/lib/gcc/x86_64-veridian/16.2.0/crtbegin.o \
+ *       /tmp/test.o -L/usr/lib -L/usr/lib/gcc/x86_64-veridian/16.2.0 \
  *       -lc -lgcc \
- *       /usr/lib/gcc/x86_64-veridian/14.2.0/crtend.o /usr/lib/crtn.o
+ *       /usr/lib/gcc/x86_64-veridian/16.2.0/crtend.o /usr/lib/crtn.o
  *     /tmp/selfhost_test
  *
  * Expected output: "SELF_HOSTED_PASS"
@@ -22,13 +22,13 @@
 
 #include <veridian/syscall.h>
 
-/* Raw syscall: write(fd, buf, len) via VeridianOS SYS_FILE_WRITE (53) */
+/* Raw syscall: write(fd, buf, len) via VeridianOS SYS_write (1) */
 static long do_write(int fd, const void *buf, unsigned long len) {
     long ret;
     __asm__ volatile (
         "syscall"
         : "=a" (ret)
-        : "0" ((long)SYS_FILE_WRITE),
+        : "0" ((long)SYS_write),
           "D" ((long)fd),     /* rdi = fd */
           "S" ((long)buf),    /* rsi = buf */
           "d" ((long)len)     /* rdx = len */
@@ -37,12 +37,12 @@ static long do_write(int fd, const void *buf, unsigned long len) {
     return ret;
 }
 
-/* Raw syscall: exit(code) via VeridianOS SYS_PROCESS_EXIT (11) */
+/* Raw syscall: exit(code) via VeridianOS SYS_exit_group (231) */
 static void do_exit(int code) {
     __asm__ volatile (
         "syscall"
         :
-        : "a" ((long)SYS_PROCESS_EXIT),
+        : "a" ((long)SYS_exit_group),
           "D" ((long)code)
         : "rcx", "r11", "memory"
     );

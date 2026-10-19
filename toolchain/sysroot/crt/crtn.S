@@ -61,3 +61,6 @@
 #else
 #error "Unsupported architecture for VeridianOS crtn.S"
 #endif
+
+/* No executable stack. */
+.section .note.GNU-stack,"",%progbits

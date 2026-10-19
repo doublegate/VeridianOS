@@ -1,0 +1,31 @@
+VeridianOS: KZoneAllocator: count leftover blocks only in debug builds
+
+GCC reported variable 'count' set but not used [-Wunused-but-set-variable]
+in KZoneAllocator::~KZoneAllocator() (src/kzoneallocator.cpp:101). The
+counter is only read by the "zone still contained %u blocks" diagnostic
+under #ifndef NDEBUG; declare and update it under the same condition. No
+behaviour change.
+
+diff -ru a/src/kzoneallocator.cpp b/src/kzoneallocator.cpp
+--- a/src/kzoneallocator.cpp	2026-10-08 17:31:21.168623583 -0400
++++ b/src/kzoneallocator.cpp	2026-10-08 17:31:21.251317382 -0400
+@@ -98,7 +98,9 @@
+ 
+ KZoneAllocator::~KZoneAllocator()
+ {
++#ifndef NDEBUG
+     unsigned int count = 0;
++#endif
+     if (d->hashList) {
+         /* No need to maintain the different lists in d->hashList[] anymore.
+            I.e. no need to use delBlock().  */
+@@ -112,7 +114,9 @@
+     for (; d->currentBlock; d->currentBlock = next) {
+         next = d->currentBlock->older;
+         delete d->currentBlock;
++#ifndef NDEBUG
+         count++;
++#endif
+     }
+ #ifndef NDEBUG // as this is called quite late in the app, we don't care
+     // to use qDebug

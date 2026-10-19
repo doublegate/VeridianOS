@@ -1,0 +1,23 @@
+VeridianOS: look for xdg-user-dir in the target system
+
+xdg-user-dir is a run-time dependency (the desktop's standard folders);
+FindXdgUserDir.cmake looked it up with find_program(), which when cross
+compiling searched the build host and reported its program. It now
+searches the target's root (CMAKE_FIND_ROOT_PATH) when cross compiling.
+
+--- a/cmake/modules/FindXdgUserDir.cmake
++++ b/cmake/modules/FindXdgUserDir.cmake
+@@ -1,7 +1,12 @@
+ # SPDX-License-Identifier: BSD-3-Clause
+ # SPDX-FileCopyrightText: 2021 Méven Car meven.car@enioka.com
+ 
+-find_program(XdgUserDir_EXEC xdg-user-dir)
++# A run-time dependency: when cross compiling, the target's program.
++if(CMAKE_CROSSCOMPILING)
++    find_program(XdgUserDir_EXEC xdg-user-dir ONLY_CMAKE_FIND_ROOT_PATH)
++else()
++    find_program(XdgUserDir_EXEC xdg-user-dir)
++endif()
+ 
+ include(FindPackageHandleStandardArgs)
+ find_package_handle_standard_args(XdgUserDir

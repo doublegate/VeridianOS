@@ -1,0 +1,21 @@
+VeridianOS: KSDCMapping: mark 'flush' [[maybe_unused]]
+
+GCC reported unused parameter 'flush' [-Wunused-parameter] in
+KSDCMapping::detachFromSharedMemory() (src/lib/caching/ksdcmapping_p.h:150).
+The parameter is only read under #ifdef KSDC_MSYNC_SUPPORTED, which needs
+_POSIX_SYNCHRONIZED_IO; musl does not define it, so on VeridianOS the msync()
+branch is compiled out. Mark the parameter [[maybe_unused]]. No behaviour
+change.
+
+diff -ru a/src/lib/caching/ksdcmapping_p.h b/src/lib/caching/ksdcmapping_p.h
+--- a/src/lib/caching/ksdcmapping_p.h	2026-10-08 17:30:13.345661744 -0400
++++ b/src/lib/caching/ksdcmapping_p.h	2026-10-08 17:30:13.411008105 -0400
+@@ -147,7 +147,7 @@
+     // completely detaching from shared memory (such as to respond to an
+     // unrecoverable error).
+     // m_mapSize must already be set to the amount of memory mapped to m_mapped.
+-    void detachFromSharedMemory(const bool flush = false)
++    void detachFromSharedMemory([[maybe_unused]] const bool flush = false)
+     {
+         // The lock holds a reference into shared memory, so this must be
+         // cleared before m_mapped is removed.

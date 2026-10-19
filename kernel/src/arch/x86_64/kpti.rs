@@ -16,6 +16,15 @@
 //! - **CR3 switching**: `switch_to_user()` loads the shadow CR3 before
 //!   returning to Ring 3; `switch_to_kernel()` restores the full CR3 on entry
 //!   to Ring 0.
+//!
+//! ## Status: not active (N-145)
+//!
+//! Only the shadow table is built. No entry or exit path switches CR3, so
+//! the kernel runs with the mitigation off; the shadow table also maps its
+//! L4[511] slot user-accessible and must not be loaded as it stands. Real
+//! KPTI (entry trampoline, PCID), or a decision to rely on CPUs that report
+//! RDCL_NO in `IA32_ARCH_CAPABILITIES`, is sprint G work. See
+//! `docs/KNOWN-LIMITATIONS.md`.
 
 #![allow(dead_code)]
 
@@ -239,30 +248,30 @@ pub fn switch_to_kernel() {
 
 /// Called at the start of every syscall handler.
 ///
-/// Currently a no-op because the syscall entry assembly switches CR3
-/// before reaching Rust code. This hook exists for future use (e.g.,
-/// per-CPU KPTI state tracking, telemetry).
+/// A no-op: nothing switches CR3 on kernel entry yet (N-145).
 #[inline(always)]
-pub fn on_syscall_entry() {
-    // CR3 switch is handled in assembly (syscall_entry) for performance.
-    // This Rust-level hook is reserved for bookkeeping/diagnostics.
-}
+pub fn on_syscall_entry() {}
 
 /// Called at the end of every syscall handler, just before SYSRET.
 ///
-/// Currently a no-op; the SYSRET path in assembly handles CR3 restore.
+/// A no-op: nothing switches CR3 on kernel exit yet (N-145).
 #[inline(always)]
-pub fn on_syscall_exit() {
-    // CR3 switch back to shadow is handled in assembly (syscall_return).
-}
+pub fn on_syscall_exit() {}
 
 // ===========================================================================
 // Query / Diagnostics
 // ===========================================================================
 
-/// Check whether KPTI is initialized and active.
-pub fn is_active() -> bool {
+/// Whether the shadow page table has been built.
+pub fn shadow_tables_built() -> bool {
     SHADOW_CR3.load(Ordering::Acquire) != 0
+}
+
+/// Whether KPTI protects the kernel: the shadow table is loaded while user
+/// code runs. Always false until the entry and exit paths switch CR3
+/// (N-145), whatever `shadow_tables_built` says.
+pub fn is_active() -> bool {
+    false
 }
 
 /// Get the current KPTI page table pair (for diagnostics).
@@ -349,10 +358,10 @@ mod tests {
 
     #[test]
     fn test_kpti_not_active_initially() {
-        // KPTI requires actual page tables, so it should not be active
-        // in a test environment without hardware initialization.
-        // Just verify the atomic loads don't panic.
-        let _ = is_active();
+        // Building the shadow table does not make KPTI active: no path
+        // switches CR3 yet (N-145).
+        let _ = shadow_tables_built();
+        assert!(!is_active());
     }
 
     #[test]

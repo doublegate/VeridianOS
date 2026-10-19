@@ -1,0 +1,31 @@
+VeridianOS: qrspec: state the minimum symbol width the frame code needs
+
+GCC reported -Wstringop-overflow at qrspec.c:418 ("writing 4 bytes into a
+region of size 0", putFinderPattern() inlined into QRspec_createFrame())
+and qrspec.c:447 ("writing 1 byte into a region of size 0",
+p[width - 8]). The width comes from qrspecCapacity[version]; GCC does not
+see that QRspec_newFrame() only passes versions 1..40, whose widths are
+21..177, so it considered widths below 8, for which the finder patterns
+and separators would write before or past the malloc(width * width)
+buffer. Not a bug for current callers.
+
+QRspec_createFrame() now returns NULL (its existing failure result, as for
+a failed malloc) when the width is below 21, the version-1 size that the
+fixed 7x7 finder patterns and 8-module separators assume. Only
+qrspecCapacity[0] has such a width, and QRspec_newFrame() never asks for
+it, so behaviour is unchanged.
+
+
+diff -ru a/qrspec.c b/qrspec.c
+--- a/qrspec.c	2026-10-08 17:22:17.223877438 -0400
++++ b/qrspec.c	2026-10-08 17:22:17.266008796 -0400
+@@ -431,6 +431,9 @@
+ 	unsigned int verinfo, v;
+ 
+ 	width = qrspecCapacity[version].width;
++	/* The finder patterns and separators below need at least the 21x21
++	 * symbol of version 1; only qrspecCapacity[0] (no symbol) is smaller. */
++	if(width < 21) return NULL;
+ 	frame = (unsigned char *)malloc((size_t)(width * width));
+ 	if(frame == NULL) return NULL;
+ 

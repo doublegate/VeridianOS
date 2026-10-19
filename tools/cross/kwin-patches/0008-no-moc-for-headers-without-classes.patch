@@ -1,0 +1,79 @@
+VeridianOS: KWin: no moc runs for headers without Q_OBJECT
+
+AutoMoc printed "No relevant classes found. No output generated." for six
+headers whose moc_<header>.cpp a source includes although the header
+declares nothing for moc (no Q_OBJECT, Q_GADGET or Q_NAMESPACE):
+
+- core/gbmgraphicsbufferallocator.cpp, core/shmgraphicsbufferallocator.cpp,
+  wayland/textinput.cpp, plugins/screenshot/screenshot.cpp: the
+  moc_<header>.cpp include is removed (the .cpp files' own ".moc" includes,
+  for their Q_OBJECT classes, stay), as upstream master has done for the
+  first three.
+- wayland/idleinhibit_v1.cpp: includes moc_idleinhibit_v1_p.cpp for the
+  private header, which has no QObject; the include is removed
+  (moc_idleinhibit_v1.cpp, for the public header, stays; master likewise).
+- rules.cpp is also compiled into the window rules KCM with KCMRULES
+  defined, where rules.h's QObject is excluded and moc has nothing to
+  generate. The KCM's directory marks that copy SKIP_AUTOMOC, and the
+  moc_rules.cpp include is kept for KWin core only (#ifndef KCMRULES).
+
+No generated code changes: moc produced nothing for these headers.
+
+--- a/src/core/gbmgraphicsbufferallocator.cpp
++++ b/src/core/gbmgraphicsbufferallocator.cpp
+@@ -337,4 +337,3 @@
+ } // namespace KWin
+ 
+ #include "gbmgraphicsbufferallocator.moc"
+-#include "moc_gbmgraphicsbufferallocator.cpp"
+--- a/src/core/shmgraphicsbufferallocator.cpp
++++ b/src/core/shmgraphicsbufferallocator.cpp
+@@ -144,5 +144,4 @@
+ 
+ } // namespace KWin
+ 
+-#include "moc_shmgraphicsbufferallocator.cpp"
+ #include "shmgraphicsbufferallocator.moc"
+--- a/src/wayland/textinput.cpp
++++ b/src/wayland/textinput.cpp
+@@ -5,5 +5,3 @@
+ */
+ 
+ #include "textinput.h"
+-
+-#include "moc_textinput.cpp"
+--- a/src/plugins/screenshot/screenshot.cpp
++++ b/src/plugins/screenshot/screenshot.cpp
+@@ -277,5 +277,3 @@
+ }
+ 
+ } // namespace KWin
+-
+-#include "moc_screenshot.cpp"
+--- a/src/wayland/idleinhibit_v1.cpp
++++ b/src/wayland/idleinhibit_v1.cpp
+@@ -64,4 +64,3 @@
+ }
+ 
+ #include "moc_idleinhibit_v1.cpp"
+-#include "moc_idleinhibit_v1_p.cpp"
+--- a/src/rules.cpp
++++ b/src/rules.cpp
+@@ -1105,4 +1105,6 @@
+ 
+ } // namespace
+ 
++#ifndef KCMRULES
+ #include "moc_rules.cpp"
++#endif
+--- a/src/kcms/rules/CMakeLists.txt
++++ b/src/kcms/rules/CMakeLists.txt
+@@ -1,6 +1,8 @@
+ # KI18N Translation Domain for this library
+ add_definitions(-DTRANSLATION_DOMAIN=\"kcm_kwinrules\")
+ add_definitions(-DKCMRULES)
++# rules.h declares its QObject only for KWin core (#ifndef KCMRULES)
++set_source_files_properties(../../rules.cpp PROPERTIES SKIP_AUTOMOC ON)
+ 
+ set(kwinrules_SRCS
+     ../../rulebooksettings.cpp
