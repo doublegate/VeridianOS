@@ -30,9 +30,10 @@ system call numbers. Highlights, with the decision records:
 - **Storage and audits:** BlockFS data written back before sync (ADR 0011), lock-free cache
   misses, and the 2026-10 audit intake.
 
-Tests: 4,735 host unit tests; boot tests x86_64 43/43, AArch64 64/64, RISC-V 57/57 (47, 68 and 61
-on four CPUs); runtime suites x86_64 91/91 and 71/71, AArch64 91/91 and 69/69, RISC-V 89/89 and
-69/69, on one and four CPUs and on RISC-V also under Sv39.
+Tests: 4,770 host unit tests; boot tests x86_64 43/43, AArch64 64/64, RISC-V 57/57 (47, 68 and 61
+on four CPUs); runtime suites x86_64 91/91 and 80/80, AArch64 91/91 and 78/78, RISC-V 89/89 and
+78/78, on one and four CPUs and on RISC-V also under Sv39. Before the tag, every finding of a bot
+review of all v0.27 code (review PRs #19 to #25) was fixed or answered on its PR.
 
 **Moved to v0.28 (v0.27.0 was cut early, 2026-10-18):** sprints F (networking, storage), G
 (hardening) and H (real hardware), the remaining system call groups with LTP and musl libc-test, the

@@ -4,7 +4,7 @@ This directory contains TODO tracking for the VeridianOS project.
 
 ## Current Status
 
-**All Phases Complete (0-12)** | **Version**: v0.25.1 | **Released**: March 10, 2026
+**All Phases Complete (0-12)** | **Version**: v0.27.0 | **Released**: October 18, 2026 | v0.28 next (see [MASTER_TODO.md](MASTER_TODO.md))
 
 ## Active TODO Files
 
@@ -12,7 +12,7 @@ This directory contains TODO tracking for the VeridianOS project.
 - **[MASTER_TODO.md](MASTER_TODO.md)** - Master tracking document with overall project status
 
 ### Ongoing Activity Tracking
-- **[TESTING_TODO.md](TESTING_TODO.md)** - All testing activities (4,095+ tests passing)
+- **[TESTING_TODO.md](TESTING_TODO.md)** - All testing activities (4,770 host tests; boot and runtime suites on all three architectures)
 - **[ISSUES_TODO.md](ISSUES_TODO.md)** - Bug and issue tracking (18 resolved, 0 open)
 - **[ENHANCEMENTS_TODO.md](ENHANCEMENTS_TODO.md)** - Future features and improvements
 - **[DOCUMENTATION_TODO.md](DOCUMENTATION_TODO.md)** - Documentation tasks

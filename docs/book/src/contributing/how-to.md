@@ -163,10 +163,12 @@ Aim for:
 1. **Run all checks locally**:
    ```bash
    cargo fmt --all --check
-   cargo clippy --target x86_64-unknown-none -p veridian-kernel -- -D warnings
-   cargo clippy --target aarch64-unknown-none-softfloat -p veridian-kernel -- -D warnings
-   cargo clippy --target riscv64imac-unknown-none-elf -p veridian-kernel -- -D warnings
-   cargo test
+   BS="-Zbuild-std=core,compiler_builtins,alloc -Zbuild-std-features=compiler-builtins-mem"
+   cargo clippy --target targets/x86_64-veridian.json -p veridian-kernel $BS -- -D warnings
+   cargo clippy --target aarch64-unknown-none-softfloat -p veridian-kernel $BS -- -D warnings
+   cargo clippy --target riscv64imac-unknown-none-elf -p veridian-kernel $BS -- -D warnings
+   cargo test --lib --features alloc -p veridian-kernel --target x86_64-unknown-linux-gnu
+   scripts/dev/gate.sh --boot --rootfs   # everything, including QEMU boots
    ```
 
 2. **Update documentation**:
@@ -219,14 +221,14 @@ Your PR must:
 ### Running Tests
 
 ```bash
-# Run all host-target tests (4,095+ passing)
-cargo test
+# Run all host-target tests (4,770 passing)
+cargo test --lib --features alloc -p veridian-kernel --target x86_64-unknown-linux-gnu
 
 # Run specific test
-cargo test test_name
+cargo test --lib --features alloc -p veridian-kernel --target x86_64-unknown-linux-gnu test_name
 
 # Run with output
-cargo test -- --nocapture
+cargo test --lib --features alloc -p veridian-kernel --target x86_64-unknown-linux-gnu -- --nocapture
 ```
 
 ### Debugging

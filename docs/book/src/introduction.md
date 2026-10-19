@@ -10,7 +10,7 @@
 
 ## Welcome to VeridianOS
 
-VeridianOS is a modern microkernel operating system written entirely in Rust, emphasizing security, modularity, and performance. All 13 development phases (0-12) are complete as of v0.25.1, including full KDE Plasma 6 desktop integration cross-compiled from source.
+VeridianOS is a modern microkernel operating system written entirely in Rust, emphasizing security, modularity, and performance. All 13 development phases (0-12) are complete. Since v0.27.0 every thread is a scheduler-dispatched task on every CPU, and user programs run on all three architectures with Linux system call numbers.
 
 This book serves as the comprehensive guide for understanding, building, and contributing to VeridianOS.
 
@@ -21,9 +21,9 @@ listed in [Known Limitations](https://github.com/doublegate/VeridianOS/blob/main
 
 - **Capability-based security** - 64-bit tokens with generation counters and O(1) lookup, guarding IPC, memory sharing and process creation
 - **Microkernel architecture** - Designed for drivers and services in user space; today they still run in the kernel (C6)
-- **Written in Rust** - Memory safety without garbage collection, 99%+ SAFETY comment coverage
+- **Written in Rust** - Memory safety without garbage collection; every `unsafe` block carries a SAFETY comment
 - **Performance-oriented design** - Per-CPU frame caches, shared-region (zero-copy) IPC, an EEVDF/real-time/deadline scheduling policy
-- **Multi-architecture** - x86_64, AArch64 and RISC-V all boot to Stage 6 under QEMU; user programs run on x86_64 only so far
+- **Multi-architecture** - x86_64, AArch64 and RISC-V boot under QEMU on one and four CPUs, and run a BusyBox root with fork, exec, threads and signals; none has run on real hardware yet
 - **Security focused** - Post-quantum crypto (ML-DSA-65 verification per FIPS 204; experimental non-standard Kyber, N-57), NX/W^X page protections, MAC/RBAC model
 - **KDE Plasma 6 desktop** - Cross-compiled from source with Qt 6.8.3, KDE Frameworks 6.12.0 (the build scripts now pin Qt 6.12.0, KDE Frameworks 6.30.0 and Plasma 6.7.5; not yet rebuilt)
 - **Self-hosting** - Native GCC 14.2, binutils, make, ninja, vpkg toolchain
@@ -50,12 +50,14 @@ VeridianOS follows these core principles:
 
 ## Current Status
 
-**Version**: v0.25.1 (March 10, 2026) | **All Phases Complete** (0-12)
+**Version**: v0.27.0 (October 18, 2026) | **All Phases Complete** (0-12) | v0.28 next
 
-- 4,095+ tests passing across host-target and kernel boot tests
-- 3 architectures booting to Stage 6 BOOTOK with 29/29 tests each
-- CI pipeline: 11/11 jobs passing
-- Zero clippy warnings across all targets
+- 4,770 host unit tests
+- In-kernel boot tests: x86_64 43/43, AArch64 64/64, RISC-V 57/57 (47, 68 and 61 with four CPUs)
+- In-guest runtime suites on the BlockFS root of each architecture: the BusyBox self-test,
+  `audit_runtime_test` (91, 91, 89 checks) and `musl_runtime_test` (80, 78, 78)
+- CI: builds, clippy with `-D warnings`, host tests with coverage, boot tests on one and four CPUs
+  for every architecture, and the x86_64 runtime suite
 - KDE Plasma 6 cross-compiled from source (kwin_wayland, plasmashell, dbus-daemon)
 - 153 shell builtins, 9 desktop apps, 8 settings panels
 

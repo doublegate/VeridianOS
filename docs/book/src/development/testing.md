@@ -1,20 +1,24 @@
 # Testing
 
-VeridianOS has 4,095+ tests passing across host-target unit tests and kernel boot tests.
+VeridianOS has 4,770 host-target unit tests, in-kernel boot tests on every architecture (x86_64 43, AArch64 64, RISC-V 57; more with four CPUs) and in-guest runtime suites on the BlockFS root.
 
 ## Test Commands
 
 ```bash
-# Host-target unit tests (4,095+ passing)
-cargo test
+# Host-target unit tests (plain `cargo test` targets bare metal and does not work)
+cargo test --lib --features alloc -p veridian-kernel --target x86_64-unknown-linux-gnu
 
 # Format check
 cargo fmt --all --check
 
-# Lint all bare-metal targets
-cargo clippy --target x86_64-unknown-none -p veridian-kernel -- -D warnings
-cargo clippy --target aarch64-unknown-none-softfloat -p veridian-kernel -- -D warnings
-cargo clippy --target riscv64imac-unknown-none-elf -p veridian-kernel -- -D warnings
+# Lint all bare-metal targets (x86_64 uses the custom target JSON, as CI does)
+BS="-Zbuild-std=core,compiler_builtins,alloc -Zbuild-std-features=compiler-builtins-mem"
+cargo clippy --target targets/x86_64-veridian.json -p veridian-kernel $BS -- -D warnings
+cargo clippy --target aarch64-unknown-none-softfloat -p veridian-kernel $BS -- -D warnings
+cargo clippy --target riscv64imac-unknown-none-elf -p veridian-kernel $BS -- -D warnings
+
+# Everything: the above plus builds, QEMU boot tests and the runtime suites
+scripts/dev/gate.sh --boot --rootfs
 ```
 
 ## Testing Strategy

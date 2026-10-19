@@ -18,6 +18,7 @@ Thumbs.db
 # Build artifacts
 target/
 build/
+# (artifacts/ is also where CI artifact downloads land)
 artifacts/
 *.o
 *.a
@@ -183,9 +184,6 @@ tools/iso_build/boot/veridian-kernel
 # Python build artifacts
 *.pyc
 
-# Artifacts directory (CI downloads)
-artifacts/
-
 # Node/NPM (if accidentally created)
 node_modules/
 package-lock.json
@@ -221,7 +219,6 @@ desktop.ini
 ehthumbs.db
 
 # Linux artifacts
-*~
 .directory
 
 # Vim session files
@@ -276,9 +273,6 @@ vmcore*
 # GDB server artifacts
 .gdbserver
 
-# QEMU OVMF firmware copies
-OVMF*.fd
-
 # Agent output files
 *.output
 
@@ -290,7 +284,7 @@ OVMF*.fd
 # target/rootfs-build/, target/rootfs.tar, etc.
 # Build scripts use /tmp/veridian-* for intermediate work (outside project).
 # Cross-toolchain installs to /opt/veridian/toolchain (outside project).
-# *.tar (line 230) covers rootfs.tar copied to project root by build-rootfs.sh.
+# The *.tar rule covers rootfs.tar copied to project root by build-rootfs.sh.
 
 # Userland/coreutils build artifacts (cross-compiled objects)
 userland/coreutils/*.o

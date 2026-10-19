@@ -1,9 +1,9 @@
 # Release Management TODO
 
 **Purpose**: Track release planning, milestones, and deployment tasks
-**Last Updated**: 2026-03-10
-**Current Version**: v0.25.1 (Released March 10, 2026)
-**Current Status**: All Phases (0-12) Complete. 60+ releases published (v0.1.0 through v0.25.1).
+**Last Updated**: 2026-10-18
+**Current Version**: v0.27.0 (Released October 18, 2026)
+**Current Status**: All Phases (0-12) Complete. 85 releases published (v0.1.0 through v0.27.0). The v0.28 plan is in [MASTER_TODO.md](MASTER_TODO.md).
 
 ## 🎯 Release Strategy
 
@@ -323,14 +323,14 @@ Following Semantic Versioning (SemVer):
 
 ## 🎯 Next Release Planning
 
-### v0.5.0 - Self-Hosting Tier 6 + Performance
-**Target**: Q2 2026
-**Current Status**: Tier 6 coded on `test-codex`, needs merge + QEMU validation
+### v0.28.0
+**Planned in**: [MASTER_TODO.md](MASTER_TODO.md), under v0.28.0
 **Key Deliverables**:
-- Merge `test-codex` branch (T6-0 through T6-5)
-- QEMU-validate all Tier 6 items
-- Native GCC on VeridianOS (T7-3)
-- Performance optimization sprint
+- The items carried over from v0.27.0, which was cut early
+- The remaining Linux system call groups, with LTP and musl libc-test
+- A full capability model for capget/capset, every namespace type for unshare/setns
+- The KDE shared-library pipeline and its media backend; relocatable RISC-V boot (HR-02)
+- One pull request per system call group or sprint
 
 ## 🔧 Release Artifacts
 

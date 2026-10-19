@@ -26,8 +26,13 @@ The authoritative changelog for VeridianOS is maintained in the repository root:
 | v0.23.0 | 10 | KDE Limitations Remediation |
 | v0.24.0 | 11 | KDE Default Desktop Integration |
 | v0.25.0 | 12 | KDE Cross-Compilation |
-| v0.25.1 | -- | KDE Session Launch Fix |
+| v0.25.1-v0.25.2 | -- | KDE Session Launch Fix |
+| v0.26.0 | -- | Audit Remediation (P0 + P1) |
+| v0.27.0 | -- | Process model, SMP, user mode on all three architectures |
 
 ## Latest Release
 
-**v0.25.1** (March 10, 2026) - KDE session launch fix: direct ELF binary execution fallback chain. kwin_wayland loads into Ring 3 (4 LOAD segments, ~66MB VA). Stripped rootfs 180MB.
+**v0.27.0** (October 18, 2026) - Every thread a scheduler-dispatched task on every CPU (EEVDF,
+FIFO/RR and SCHED_DEADLINE classes), copy-on-write fork, AArch64 and RISC-V user mode with musl,
+Linux system call numbers as the only user ABI, dynamic linking, and W^X for user memory and the
+kernel image. See the [v0.27.0 release](https://github.com/doublegate/VeridianOS/releases/tag/v0.27.0).

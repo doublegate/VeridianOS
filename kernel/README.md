@@ -64,15 +64,17 @@ just build-all
 ## Testing
 
 ```bash
-# Run unit tests
-cargo test
+# Run unit tests (from the repository root)
+cargo test --lib --features alloc -p veridian-kernel --target x86_64-unknown-linux-gnu
 
-# Run benchmarks
-cargo bench
-
-# Run in QEMU
-just run-x86_64
+# Build, then boot an architecture in QEMU and check the in-kernel tests
+./build-kernel.sh all dev
+scripts/boot-test.sh x86_64      # or aarch64, riscv64
 ```
+
+Benchmarks run inside the kernel: the shell's `perf` command (method and results in
+[`docs/PERFORMANCE-REPORT.md`](../docs/PERFORMANCE-REPORT.md)). The QEMU command lines for each
+architecture are in the top-level [README](../README.md#quick-start).
 
 ## Debugging
 

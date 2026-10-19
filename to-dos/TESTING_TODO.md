@@ -1,10 +1,11 @@
 # Testing TODO
 
 **Purpose**: Track all testing activities across the project lifecycle
-**Last Updated**: 2026-03-10
-**Phase 0-12 Status**: All complete. 29/29 boot tests passing on all 3 architectures.
-**Host-Target Tests**: 4,095+ passing via `cargo llvm-cov --lib --target x86_64-unknown-linux-gnu`. Codecov integrated.
-**Current Status**: Boot test suite operational (29/29). Host-target unit tests operational (4,095+). Automated bare-metal test execution still blocked by Rust toolchain lang items limitation. Testing via QEMU boot verification is the primary validation method for kernel functionality. Phases 5-12 testing is integrated into the host-target test suite.
+**Last Updated**: 2026-10-18 (v0.27.0)
+**Boot Tests**: x86_64 43/43, AArch64 64/64, RISC-V 57/57 in-kernel tests (47, 68 and 61 with four CPUs), run by `scripts/boot-test.sh` and in CI.
+**Host-Target Tests**: 4,770 passing (`cargo test --lib --features alloc -p veridian-kernel --target x86_64-unknown-linux-gnu`); coverage via `cargo llvm-cov` to Codecov (56.2% of lines).
+**Runtime Suites**: the BusyBox self-test, `audit_runtime_test` (91/91, 91/91, 89/89) and `musl_runtime_test` (80/80, 78/78, 78/78) on the BlockFS root of each architecture, on one and four CPUs (`scripts/run-rootfs-tests.sh`).
+**Current Status**: `scripts/dev/gate.sh --boot --rootfs` runs all of the above before every commit. Next: LTP and musl libc-test with the v0.28 system call work.
 
 ## 🧪 Testing Strategy Overview
 
