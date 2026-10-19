@@ -56,8 +56,10 @@ GitHub Actions (`.github/workflows/ci.yml`) runs:
 - The x86_64 rootfs runtime suite
 - `cargo audit` and the documentation build
 
-`scripts/dev/gate.sh --boot --rootfs` runs the same checks locally, plus the AArch64 and RISC-V
-runtime suites and further boot variants, and is run before every commit.
+`scripts/dev/gate.sh --boot --rootfs` runs before every commit: fmt, clippy on every target, the
+system call checks, the native libc and host tests, the builds, the boot tests (with more variants
+than CI) and the runtime suites on all three architectures. It does not run `cargo audit`, build
+the documentation or measure coverage; those run in CI only.
 
 ## Writing Tests
 
