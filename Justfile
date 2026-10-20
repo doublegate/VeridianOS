@@ -57,11 +57,11 @@ build-riscv64:
     ./build-kernel.sh riscv64 dev
 
 # Run x86_64 in a QEMU window (UEFI boot; stops other QEMU instances first)
-run:
+run: build-x86_64
     ./scripts/run-veridian.sh --display
 
 # Run x86_64 with the persistent BlockFS root (build it with scripts/build-busybox-rootfs.sh)
-run-blockfs:
+run-blockfs: build-x86_64
     ./scripts/run-veridian.sh --blockfs --display
 
 # Run AArch64 (serial console)

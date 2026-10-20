@@ -31,9 +31,14 @@ set history size 10000
 set history filename ~/.gdb_history
 
 # Useful kernel debugging commands
+# kernel-symbols <target-dir> [release]: symbols from the dev build, or the
+# release build when the second argument is given.
 define kernel-symbols
-    # Load kernel symbols from the ELF file
-    symbol-file target/$arg0/debug/veridian-kernel
+    if $argc == 2
+        symbol-file target/$arg0/$arg1/veridian-kernel
+    else
+        symbol-file target/$arg0/debug/veridian-kernel
+    end
     echo [GDB] Loaded symbols for $arg0\n
 end
 
@@ -70,16 +75,20 @@ define break-boot-x86_64
     echo [GDB] Hardware breakpoint set on x86_64 _start\n
 end
 
+# AArch64 starts at the physical load address with the MMU off; under QEMU's
+# gdbstub neither _start (linked high) nor the physical entry stops, so the
+# first stop is _start_rust.
 define break-boot-aarch64
-    break _start
     break _start_rust
-    echo [GDB] Breakpoints set on AArch64 _start and _start_rust\n
+    echo [GDB] Breakpoint set on AArch64 _start_rust\n
 end
 
+# RISC-V: OpenSBI jumps to the physical entry, 0x80200000; _start (linked
+# high) never stops, so break on the physical address, then _start_rust.
 define break-boot-riscv64
-    break _start
+    break *0x80200000
     break _start_rust
-    echo [GDB] Breakpoints set on RISC-V _start and _start_rust\n
+    echo [GDB] Breakpoints set on the RISC-V physical entry (0x80200000) and _start_rust\n
 end
 
 # Memory examination helpers

@@ -13,7 +13,7 @@ This directory contains TODO tracking for the VeridianOS project.
 
 ### Ongoing Activity Tracking
 - **[TESTING_TODO.md](TESTING_TODO.md)** - All testing activities (4,770 host tests; boot and runtime suites on all three architectures)
-- **[ISSUES_TODO.md](ISSUES_TODO.md)** - Bug and issue tracking (18 resolved, 0 open)
+- **[ISSUES_TODO.md](ISSUES_TODO.md)** - Bug and issue tracking (23 resolved, 0 open)
 - **[ENHANCEMENTS_TODO.md](ENHANCEMENTS_TODO.md)** - Future features and improvements
 - **[DOCUMENTATION_TODO.md](DOCUMENTATION_TODO.md)** - Documentation tasks
 - **[QA_TODO.md](QA_TODO.md)** - Quality assurance processes
@@ -52,7 +52,7 @@ Completed phase TODOs have been moved to `archive/`:
 - **Runtime Suites**: BusyBox self-test, `audit_runtime_test` and `musl_runtime_test` pass on every architecture
 - **CI Pipeline**: green (builds, clippy, host tests, coverage, boot tests on 1 and 4 CPUs, x86_64 runtime suite)
 - **Clippy Warnings**: 0 across all targets (`-D warnings`)
-- **Issues**: ISSUES_TODO lists 18 resolved; open findings are tracked as N-xx in `docs/audit/` and `docs/KNOWN-LIMITATIONS.md`
+- **Issues**: ISSUES_TODO lists 23 resolved; open findings are tracked as N-xx in `docs/audit/` and `docs/KNOWN-LIMITATIONS.md`
 - **Phases**: 13 complete (0-12)
 
 ## Quick Links

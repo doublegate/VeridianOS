@@ -106,8 +106,4 @@ echo [GDB] Additional commands: dump-regs, dump-system-regs, dump-uart-pl011, ex
 break-boot-aarch64
 break-panic
 
-# Also break on our known working entry points
-break *0x40200000
-break _start_rust
-
 echo [GDB] Ready to debug AArch64 kernel. Use 'continue' to start.\n

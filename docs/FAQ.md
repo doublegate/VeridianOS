@@ -26,9 +26,11 @@ Key differentiators:
 
 ### What's the project status?
 
-VeridianOS released v0.2.0 on June 12, 2025, marking the completion of Phase 1 (Microkernel Core). The project achieved 100% completion of all core microkernel subsystems including IPC (<1μs latency), memory management, process management, scheduler, and capability system. All foundation infrastructure is operational and the project is ready for Phase 2 (User Space Foundation). See [PROJECT-STATUS.md](PROJECT-STATUS.md) for details.
-
-**Recent Updates (December 2025)**: Fixed x86_64 build issues, improved boot sequence, and created automated build tools.
+VeridianOS is at v0.27.0 (October 2026), with all 13 development phases complete. Every thread is
+a scheduler-dispatched task on every CPU, and user programs (BusyBox, musl) run on x86_64, AArch64
+and RISC-V under QEMU, using Linux system call numbers. It has not run on real hardware yet. IPC
+latency has not been measured. See the [README's project status](../README.md#project-status) and
+[Known Limitations](KNOWN-LIMITATIONS.md) for what is not done.
 
 ### When will it be ready for production use?
 
@@ -55,7 +57,9 @@ A microkernel runs minimal code in kernel space - only:
 - Inter-process communication (IPC)
 - Basic security enforcement
 
-Everything else (drivers, filesystems, networking) runs in user space as isolated services.
+The design moves everything else (drivers, filesystems, networking) into user space as isolated
+services. Today they still run in the kernel; moving them out is planned work (critique C6, see
+[Known Limitations](KNOWN-LIMITATIONS.md)).
 
 ### What are capabilities?
 
@@ -95,7 +99,8 @@ VeridianOS uses synchronous IPC with:
 
 ### What about drivers?
 
-Drivers run in user space with:
+Drivers are designed to run in user space with the following (today they run in the kernel,
+critique C6):
 - Memory-mapped I/O access via capabilities
 - Interrupt handling via IPC
 - DMA buffer management
@@ -155,8 +160,8 @@ just run
 # Run all tests
 just test
 
-# Run specific test
-cargo test test_name
+# Run specific host test
+cargo test --lib --features alloc -p veridian-kernel --target x86_64-unknown-linux-gnu test_name
 
 # Run in QEMU
 just run
@@ -212,7 +217,7 @@ Yes! VeridianOS is dual-licensed under MIT and Apache 2.0. Choose whichever lice
 | Architecture | Microkernel | Monolithic |
 | Language | Rust | C |
 | Security | Capability-based | DAC/MAC |
-| Drivers | User space | Kernel space |
+| Drivers | Kernel space today; user space is the design goal (C6) | Kernel space |
 | Legacy | None | 30+ years |
 
 ### How does it compare to seL4?
@@ -255,16 +260,17 @@ Check:
 ### Tests fail locally
 
 Ensure:
-1. Latest Rust nightly
-2. All dependencies installed
-3. Clean build: `cargo clean`
-4. Run: `just test`
+1. The pinned Rust nightly (`rust-toolchain.toml`; `rustup` installs it on first use)
+2. All dependencies installed (`./scripts/install-deps.sh`)
+3. Run: `just test`
+
+Do not run `cargo clean`: `target/` also holds the cross-built sysroot and rootfs trees.
 
 ### Where are the logs?
 
 - Build logs: `target/`
 - QEMU output: Serial console
-- Enable debug: `RUST_LOG=debug just run`
+- Serial tracing of page faults and `open()`: build with `FEATURES=trace ./build-kernel.sh x86_64 dev`
 
 ## More Questions?
 

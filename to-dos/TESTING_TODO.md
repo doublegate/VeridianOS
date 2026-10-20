@@ -50,7 +50,8 @@
   - [x] Endpoint management
   - [x] Buffer handling
   - [x] Error cases
-  - [x] Fast path <1μs latency
+  - Fast path: removed in v0.27 with the old scheduler (it was never reachable from user space);
+    IPC latency is not measured. The IPC redesign is v0.28 work.
   - [x] Zero-copy transfers
   - [x] Async channels
 - [x] Capability tests (100% complete)
@@ -59,7 +60,7 @@
   - [x] Derivation rules
   - [x] Revocation
   - [x] Inheritance
-  - [x] Per-CPU cache
+  - [x] Per-process hash-table lookup (replaced the per-CPU cache in v0.26.0, CAP-PERF-01)
 
 ### Driver Unit Tests
 - [ ] Driver framework tests
@@ -279,7 +280,8 @@ None. The host tests, the QEMU boot tests and the runtime suites all pass, in CI
 - Kernel unit tests (all subsystems)
 - Boot testing (all architectures)
 - Basic integration tests
-- Performance benchmarks (<1μs IPC achieved)
+- Performance benchmarks (the <1μs IPC figure was never measured end to end; see
+  docs/PERFORMANCE-REPORT.md)
 
 ### Phase 2 Testing
 - Driver testing
@@ -309,9 +311,8 @@ None. The host tests, the QEMU boot tests and the runtime suites all pass, in CI
 ## Testing Resources
 
 ### Documentation
-- [Testing Guide](../docs/TESTING-GUIDE.md)
-- [Test Plan Template](templates/test-plan.md)
-- [Bug Report Template](templates/bug-report.md)
+- [Testing Strategy](../docs/TESTING-STRATEGY.md)
+- [Bug Report Template](../.github/ISSUE_TEMPLATE/bug_report.md)
 
 ### Tools
 - Test frameworks: ____

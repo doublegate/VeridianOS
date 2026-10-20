@@ -27,7 +27,10 @@ Key differentiators:
 
 ### What's the project status?
 
-VeridianOS has completed Phase 0 (Foundation) as of v0.1.0 (June 2025) and is now starting Phase 1 (Microkernel Core). All foundation infrastructure is in place and development is proceeding to kernel implementation.
+VeridianOS is at v0.27.0 (October 2026), with all 13 development phases complete. User programs run
+on x86_64, AArch64 and RISC-V under QEMU, on one CPU and on four; it has not run on real hardware
+yet. See [Project Status](./status.md) and
+[Known Limitations](https://github.com/doublegate/VeridianOS/blob/main/docs/KNOWN-LIMITATIONS.md).
 
 ### When will it be ready for daily use?
 
@@ -59,13 +62,14 @@ A microkernel runs minimal code in privileged mode:
 - Inter-process communication (IPC)
 - Capability management
 
-Everything else runs in user space:
+The design runs everything else in user space:
 - Device drivers
 - File systems
 - Network stack
 - System services
 
-Benefits include better security, reliability, and modularity.
+Benefits include better security, reliability, and modularity. Today drivers, filesystems and the
+network stack still run in the kernel; moving them out is planned work (critique C6).
 
 ### What are capabilities?
 
@@ -112,7 +116,8 @@ Native VeridianOS applications will have better:
 
 ### How fast is the IPC?
 
-Performance targets:
+These are targets; IPC latency and throughput have not been measured yet, and the IPC redesign is
+v0.28 work:
 - **Small messages (≤64 bytes)**: < 1μs latency
 - **Large transfers**: Zero-copy via shared memory
 - **Throughput**: > 1M messages/second

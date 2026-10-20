@@ -69,7 +69,8 @@ Following Semantic Versioning (SemVer):
 **Achievements**:
 - [x] IPC implementation (100% complete)
   - [x] Synchronous message passing
-  - [x] Fast path optimization (<1μs achieved!)
+  - Fast path optimization: removed in v0.27 (never reachable from user space; IPC latency not
+    measured)
   - [x] Zero-copy transfers
   - [x] Asynchronous channels
   - [x] Performance benchmarks
@@ -94,7 +95,7 @@ Following Semantic Versioning (SemVer):
 - [x] Capability system (100% complete)
   - [x] Inheritance mechanisms
   - [x] Cascading revocation
-  - [x] Per-CPU cache
+  - Per-CPU cache: replaced by a per-process hash table in v0.26.0 (CAP-PERF-01)
 
 #### v0.3.x - User Space Foundation -- RELEASED (v0.3.0 through v0.3.9)
 **Released**: February 14-15, 2026
@@ -468,8 +469,8 @@ Thanks to all contributors!
 - Distribution network
 
 ### Documentation
-- [Release Process](../docs/RELEASE-PROCESS.md)
-- [Versioning Policy](../docs/VERSIONING.md)
+- [Release Process](#release-process) (this file)
+- [Versioning Scheme](#versioning-scheme) (this file)
 - [Security Policy](../SECURITY.md)
 
 ---

@@ -1,7 +1,7 @@
 # Issues and Bug Tracking TODO
 
 **Purpose**: Central tracking for all bugs, issues, and defects
-**Last Updated**: February 20, 2026
+**Last Updated**: October 20, 2026
 
 ## Issue Categories
 
@@ -20,9 +20,11 @@
 
 ## Critical Issues (P0)
 
-Currently no critical issues. All 18 historical issues resolved.
+Currently no critical issues. All 23 recorded issues are resolved (ISSUE-0001 to ISSUE-0023,
+except the unused 0004, and the multi-LOAD ELF issue below). Findings of the audits are tracked as
+N-xx in `docs/audit/` and, while open, in `docs/KNOWN-LIMITATIONS.md`.
 
-## Open Issues
+## Recent Issues
 
 ### ISSUE-0023: Rare `pthread_join` EINVAL in `malloc_threads_4x20000` on four CPUs
 - **Status**: RESOLVED (October 16, 2026), by analysis: the failure is too rare to reproduce on
@@ -170,8 +172,9 @@ Currently no high priority issues.
 
 ## Medium Priority Issues (P2)
 
-### PENDING: /bin/sh ELF Multi-LOAD GP Fault
-- **Status**: Fix coded on `test-codex` branch (T6-0), pending merge + QEMU validation
+### RESOLVED: /bin/sh ELF Multi-LOAD GP Fault
+- **Status**: RESOLVED: the `test-codex` Tier 6 work (T6-0) merged in v0.5.0; multi-segment
+  BusyBox and musl programs run in every runtime suite since
 - **Component**: Kernel/ELF Loader
 - **Description**: `/bin/sh` (2 LOAD segments, 41 KB) GP faults during `iretq` before any syscall. Single-segment `/bin/minimal` works fine.
 - **Root cause**: ELF loader does not correctly handle multi-segment binaries (stack mapping lost during second LOAD segment mapping)
@@ -372,11 +375,11 @@ Currently no low priority issues.
 ## Issue Statistics
 
 ### Overall Status
-- **Total Issues**: 18
+- **Total Issues**: 23
 - **Open Issues**: 0
 - **In Progress**: 0
-- **Fixed**: 18
-- **Verified**: 18
+- **Fixed**: 23
+- **Verified**: 23
 - **Closed**: 0
 
 ### Current Architecture Boot Status (v0.5.0)
@@ -541,7 +544,7 @@ Document common configuration problems and solutions.
 ### Related Documents
 - [Testing TODO](TESTING_TODO.md)
 - [QA TODO](QA_TODO.md)
-- [Known Issues](../docs/KNOWN-ISSUES.md)
+- [Known Limitations](../docs/KNOWN-LIMITATIONS.md)
 
 ---
 

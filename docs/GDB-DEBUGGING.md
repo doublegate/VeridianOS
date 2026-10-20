@@ -45,7 +45,9 @@ Dev builds carry the symbols:
 Add `-s` (GDB server on port 1234) and `-S` (pause at start) to the usual command lines:
 
 ```bash
-# x86_64 (UEFI boot; -kernel does not work for x86_64)
+# x86_64 (UEFI boot; -kernel does not work for x86_64). The OVMF path varies by distribution
+# (Debian/Ubuntu: /usr/share/OVMF/OVMF_CODE_4M.fd; Fedora: /usr/share/edk2/ovmf/OVMF_CODE.fd);
+# without a writable /dev/kvm, replace -enable-kvm with -cpu qemu64.
 qemu-system-x86_64 -enable-kvm -m 256M \
     -drive if=pflash,format=raw,readonly=on,file=/usr/share/edk2/x64/OVMF.4m.fd \
     -drive id=disk0,if=none,format=raw,file=target/x86_64-veridian/debug/veridian-uefi.img \
@@ -107,7 +109,8 @@ gdb-multiarch -x scripts/gdb/riscv64.gdb
 Our GDB scripts provide custom commands for kernel debugging:
 
 #### Common Commands (all architectures)
-- `kernel-symbols <target-dir>` - Load kernel symbols from `target/<target-dir>/debug/veridian-kernel`
+- `kernel-symbols <target-dir> [release]` - Load kernel symbols from
+  `target/<target-dir>/debug/veridian-kernel`, or the release build with `release`
 - `break-panic` - Set breakpoint on `core::panicking::panic_fmt` (every panic goes through it)
 - `hbreak-panic` - The same with a hardware breakpoint (x86_64 under UEFI)
 - `break-main` - Set breakpoint on `veridian_kernel::bootstrap::kernel_init`
@@ -166,12 +169,14 @@ break-boot-x86_64   # or break-boot-aarch64, break-boot-riscv64
 continue
 ```
 
-- **x86_64** runs under KVM and boots through UEFI: the bootloader loads the kernel after GDB has
-  attached and overwrites any software breakpoint set before then, so use `hbreak` (there are four
-  hardware breakpoints; the script uses two).
-- **AArch64 and RISC-V** start at `_start` at its physical load address, before the MMU maps the
-  kernel at its linked (high) address, so a breakpoint on `_start` does not fire. The first stop is
-  `_start_rust`.
+- **x86_64** boots through UEFI (under KVM when `/dev/kvm` is writable): the bootloader loads the
+  kernel after GDB has attached and overwrites any software breakpoint set before then, so use
+  `hbreak` (there are four hardware breakpoints; the script uses two).
+- **AArch64 and RISC-V** start at their physical load address, before the MMU maps the kernel at
+  its linked (high) address, so a breakpoint on `_start` does not fire. On RISC-V,
+  `break-boot-riscv64` breaks at the physical entry (0x80200000, where OpenSBI jumps) and then at
+  `_start_rust`. On AArch64 not even the physical entry (0x40200000) stops under QEMU's gdbstub,
+  so the first stop is `_start_rust`.
 
 ### 2. Panic Debugging
 To catch panics:
@@ -206,7 +211,7 @@ GDB can show source code if symbols are loaded:
 list
 
 # List specific function
-list kernel_main
+list veridian_kernel::bootstrap::kernel_init
 
 # Set breakpoint by line
 break main.rs:42

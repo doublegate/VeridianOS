@@ -74,11 +74,14 @@ calibrated TSC, 1,000 iterations (2026-10-15):
 | frame_alloc_1 (per-CPU cache) | 74 ns | 2,115 ns | 2,000 ns |
 | frame_alloc_global | 85 ns | 297 ns | 4,000 ns |
 | cap_lookup | 29 ns | 97 ns | 100 ns |
+| atomic_counter | 13 ns | 14 ns | 50 ns |
 | ipc_stats_read | 8 ns | 20 ns | 100 ns |
 | sched_current | 32 ns | 81 ns | 200 ns |
+| page_clear (4 KiB) | 31 ns | 36 ns | -- |
 
 IPC latency and context-switch time are not measured yet. Dev kernels overstate anything that
-copies or clears memory (a dev `frame_alloc_1` includes an unoptimised page clear, N-281); method and every table:
+copies or clears memory (a dev `frame_alloc_1` includes an unoptimised page clear, N-281). Method
+and full benchmark tables:
 [Performance Report](https://github.com/doublegate/VeridianOS/blob/main/docs/PERFORMANCE-REPORT.md).
 
 ## Self-Hosting Status

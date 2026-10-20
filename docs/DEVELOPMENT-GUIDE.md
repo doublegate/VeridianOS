@@ -1,7 +1,7 @@
 # VeridianOS Development Guide
 
-**Last Updated**: June 17, 2025  
-**Latest Release**: v0.2.1 - Maintenance release with all three architectures booting to Stage 6
+**Last Updated**: October 20, 2026
+**Latest Release**: v0.27.0 - process model, SMP and user mode on all three architectures
 
 ## Getting Started
 
@@ -25,16 +25,10 @@ This guide covers everything you need to know to start developing VeridianOS, fr
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 
 # Install specific nightly version
-rustup toolchain install nightly-2025-01-15
-rustup default nightly-2025-01-15
+# rust-toolchain.toml pins the nightly; rustup installs it on first use
+rustup toolchain install nightly-2025-11-15 --component rust-src,llvm-tools-preview,rustfmt,clippy
 
-# Add required components
-rustup component add rust-src llvm-tools-preview rustfmt clippy
-
-# Add target architectures
-rustup target add x86_64-unknown-none
-rustup target add aarch64-unknown-none-softfloat
-rustup target add riscv64imac-unknown-none-elf
+# No `rustup target add` is needed: the kernel builds core/alloc itself (-Zbuild-std)
 ```
 
 #### 2. Install System Dependencies
@@ -114,8 +108,8 @@ cargo install cargo-profiling
 **`.vscode/settings.json`:**
 ```json
 {
-    "rust-analyzer.cargo.target": "x86_64-unknown-none",
-    "rust-analyzer.cargo.features": ["test-harness"],
+    "rust-analyzer.cargo.target": "x86_64-unknown-linux-gnu",
+    "rust-analyzer.cargo.features": ["alloc"],
     "rust-analyzer.checkOnSave.allTargets": false,
     "rust-analyzer.checkOnSave.command": "clippy",
     "editor.formatOnSave": true,
@@ -134,35 +128,30 @@ cargo install cargo-profiling
 ## Project Structure
 
 ```
-veridian-os/
-├── kernel/                 # Microkernel implementation
-│   ├── src/
-│   │   ├── arch/          # Architecture-specific code
-│   │   ├── mm/            # Memory management
-│   │   ├── sched/         # Scheduler
-│   │   ├── ipc/           # Inter-process communication
-│   │   ├── cap/           # Capability system
-│   │   └── main.rs        # Kernel entry point
-│   └── Cargo.toml
-├── drivers/               # User-space drivers
-│   ├── block/            # Block device drivers
-│   ├── net/              # Network drivers
-│   ├── gpu/              # Graphics drivers
-│   └── common/           # Shared driver code
-├── services/             # System services
-│   ├── init/             # Init system
-│   ├── vfs/              # Virtual file system
-│   ├── network/          # Network stack
-│   └── display/          # Display server
-├── libs/                 # Libraries
-│   ├── veridian-abi/     # System call interface
-│   ├── veridian-std/     # Standard library
-│   └── common/           # Shared utilities
-├── userland/             # User applications
-├── tools/                # Development tools
-├── tests/                # Integration tests
-├── docs/                 # Documentation
-└── targets/              # Custom target specifications
+VeridianOS/
+├── kernel/                # The kernel crate
+│   └── src/
+│       ├── arch/          # x86_64, aarch64, riscv64
+│       ├── mm/            # Memory management
+│       ├── sched/         # Scheduler and dispatcher
+│       ├── ipc/           # Inter-process communication
+│       ├── cap/           # Capability system
+│       ├── process/       # Processes, threads, signals
+│       ├── syscall/       # System calls (Linux numbers, ADR 0009)
+│       ├── fs/            # VFS, BlockFS, tmpfs, procfs
+│       ├── drivers/       # Device drivers (in the kernel today; critique C6)
+│       ├── net/           # Network stack (in the kernel today)
+│       ├── services/      # Shell and system services (in the kernel today)
+│       └── desktop/       # Built-in desktop environment
+├── userland/              # libc, programs, tests, KDE/Qt ports
+├── abi/                   # The system call table (abi/syscalls.map)
+├── tools/                 # Host tools (mkfs-blockfs, bootimage-builder, cross scripts)
+├── scripts/               # Build, test, debug and gate scripts
+├── targets/               # Custom target specifications
+├── verification/          # Kani proofs and TLA+ specifications
+├── ports/                 # Ports system recipes
+├── docs/                  # Documentation and the mdBook
+└── to-dos/                # Planning and tracking
 ```
 
 ## Development Workflow
@@ -182,7 +171,7 @@ veridian-os/
 
 **Alternative - Using Just:**
 ```bash
-# Build for default target (x86_64)
+# Build every architecture (dev)
 just build
 
 # Build for specific architecture
@@ -190,13 +179,12 @@ just build-x86_64
 just build-aarch64
 just build-riscv64
 
-# Build everything
-just build-all
-
-# Clean build
-just clean
-just build
+# Release builds of everything
+just build-release
 ```
+
+There is no `clean` recipe: `target/` also holds the cross-built sysroot and rootfs trees, which
+`cargo clean` would delete.
 
 **Note**: The x86_64 build requires special handling with kernel code model to avoid relocation errors.
 
@@ -632,8 +620,7 @@ fn debug_memory_state() {
 
 ### Community
 
-- Discord: [VeridianOS Discord](#)
-- Forums: [VeridianOS Forums](#)
+- Discord: [VeridianOS Discord](https://discord.gg/WGcgrnuVHt)
 - IRC: #veridian-os on irc.libera.chat
 - GitHub Issues: <https://github.com/doublegate/VeridianOS/issues>
 

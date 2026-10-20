@@ -17,9 +17,23 @@ echo -e "${GREEN}VeridianOS x86_64 Debug Script${NC}"
 echo -e "${YELLOW}Building the dev kernel...${NC}"
 ./build-kernel.sh x86_64 dev
 
+# The same firmware search and accelerator choice as scripts/boot-test.sh.
+ovmf=""
+for f in /usr/share/edk2/x64/OVMF.4m.fd /usr/share/OVMF/OVMF_CODE_4M.fd \
+    /usr/share/OVMF/OVMF_CODE.fd /usr/share/edk2/ovmf/OVMF_CODE.fd \
+    /usr/share/qemu/OVMF.fd; do
+    [[ -r $f ]] && { ovmf=$f; break; }
+done
+if [[ -z $ovmf ]]; then
+    echo -e "${RED}No OVMF firmware found (install edk2-ovmf / ovmf)${NC}"
+    exit 1
+fi
+accel=(-cpu qemu64)
+[[ -w /dev/kvm ]] && accel=(-enable-kvm -cpu host)
+
 echo -e "${YELLOW}Starting QEMU (paused) with a GDB server on port 1234...${NC}"
-qemu-system-x86_64 -enable-kvm -m 256M \
-    -drive if=pflash,format=raw,readonly=on,file=/usr/share/edk2/x64/OVMF.4m.fd \
+qemu-system-x86_64 "${accel[@]}" -m 256M \
+    -drive "if=pflash,format=raw,readonly=on,file=$ovmf" \
     -drive id=disk0,if=none,format=raw,file=target/x86_64-veridian/debug/veridian-uefi.img \
     -device ide-hd,drive=disk0 \
     -serial file:target/debug-x86_64-serial.log -display none -monitor none \
@@ -43,8 +57,8 @@ echo "step (s)         - Step into"
 echo "info registers   - Show registers"
 echo "x/<n><f> <addr>  - Examine memory"
 echo ""
-echo "Under KVM, use hbreak (hardware breakpoints) for code the bootloader has"
-echo "not loaded yet: a software breakpoint set before then is overwritten."
+echo "Use hbreak (hardware breakpoints) for kernel code: UEFI loads the kernel"
+echo "after GDB attaches and overwrites software breakpoints set before then."
 echo "==========================="
 echo ""
 
