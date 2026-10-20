@@ -103,7 +103,7 @@ echo [GDB] AArch64-specific configuration loaded\n
 echo [GDB] Additional commands: dump-regs, dump-system-regs, dump-uart-pl011, examine-boot-area\n
 
 # Set initial breakpoints
-break-boot "aarch64"
+break-boot-aarch64
 break-panic
 
 # Also break on our known working entry points

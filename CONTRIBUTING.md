@@ -15,7 +15,7 @@ First off, thank you for considering contributing to VeridianOS! It's people lik
 
 ## Code of Conduct
 
-Everyone participating in this project is expected to be respectful and constructive. Please report unacceptable behavior to the maintainer, [@doublegate](https://github.com/doublegate), on GitHub or Discord.
+This project and everyone participating in it is governed by our [Code of Conduct](CODE_OF_CONDUCT.md) (Contributor Covenant 2.1). By participating, you are expected to uphold it. Report unacceptable behavior as its [Enforcement](CODE_OF_CONDUCT.md#enforcement) section describes: privately by Discord direct message to the server owner, or publicly through GitHub Issues.
 
 ## Getting Started
 

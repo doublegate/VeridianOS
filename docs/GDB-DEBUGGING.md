@@ -18,76 +18,66 @@ We provide architecture-specific debug scripts that handle all the setup:
 ```
 
 These scripts will:
-1. Build the kernel with debug symbols
-2. Start QEMU with GDB server enabled (paused)
-3. Launch GDB with the appropriate configuration
-4. Clean up when you exit GDB
+1. Build the dev kernel with `./build-kernel.sh <arch> dev` (x86_64 also gets its UEFI disk image)
+2. Start QEMU paused with a GDB server on port 1234, the guest's serial output going to
+   `target/debug-<arch>-serial.log`
+3. Launch GDB with the architecture's script from `scripts/gdb/`, which connects, loads the kernel
+   symbols and sets the boot and panic breakpoints
+4. Stop QEMU when you exit GDB
+
+GDB reads its commands from standard input, so a session can also be scripted:
+`./scripts/debug-aarch64.sh < commands.gdb`. `just debug-<arch>` runs the same scripts.
 
 ## Manual Debugging
 
 ### 1. Build with Debug Symbols
 
-Always build with debug symbols for debugging:
+Dev builds carry the symbols:
 
 ```bash
-# x86_64
-cargo build --target targets/x86_64-veridian.json -p veridian-kernel \
-    -Zbuild-std=core,compiler_builtins,alloc \
-    -Zbuild-std-features=compiler-builtins-mem
-
-# AArch64
-cargo build --target targets/aarch64-veridian.json -p veridian-kernel \
-    -Zbuild-std=core,compiler_builtins,alloc \
-    -Zbuild-std-features=compiler-builtins-mem
-
-# RISC-V
-cargo build --target targets/riscv64gc-veridian.json -p veridian-kernel \
-    -Zbuild-std=core,compiler_builtins,alloc \
-    -Zbuild-std-features=compiler-builtins-mem
+./build-kernel.sh x86_64 dev     # target/x86_64-veridian/debug/veridian-kernel (+ veridian-uefi.img)
+./build-kernel.sh aarch64 dev    # target/aarch64-unknown-none-softfloat/debug/veridian-kernel
+./build-kernel.sh riscv64 dev    # target/riscv64imac-unknown-none-elf/debug/veridian-kernel
 ```
 
 ### 2. Start QEMU with GDB Server
 
-Start QEMU with `-s` (GDB server on port 1234) and `-S` (pause at start):
+Add `-s` (GDB server on port 1234) and `-S` (pause at start) to the usual command lines:
 
 ```bash
-# x86_64
-qemu-system-x86_64 \
-    -drive format=raw,file=target/x86_64-veridian/debug/bootimage-veridian-kernel.bin \
-    -serial stdio \
-    -display none \
+# x86_64 (UEFI boot; -kernel does not work for x86_64)
+qemu-system-x86_64 -enable-kvm -m 256M \
+    -drive if=pflash,format=raw,readonly=on,file=/usr/share/edk2/x64/OVMF.4m.fd \
+    -drive id=disk0,if=none,format=raw,file=target/x86_64-veridian/debug/veridian-uefi.img \
+    -device ide-hd,drive=disk0 \
+    -serial stdio -display none \
     -s -S
 
 # AArch64
-qemu-system-aarch64 \
-    -M virt \
-    -cpu cortex-a53 \
-    -nographic \
-    -kernel target/aarch64-veridian/debug/veridian-kernel \
-    -serial mon:stdio \
+qemu-system-aarch64 -M virt -cpu cortex-a72 -m 256M \
+    -kernel target/aarch64-unknown-none-softfloat/debug/veridian-kernel \
+    -serial stdio -display none \
     -s -S
 
 # RISC-V
-qemu-system-riscv64 \
-    -M virt \
-    -nographic \
-    -kernel target/riscv64gc-veridian/debug/veridian-kernel \
-    -serial mon:stdio \
+qemu-system-riscv64 -M virt -m 256M -bios default \
+    -kernel target/riscv64imac-unknown-none-elf/debug/veridian-kernel \
+    -serial stdio -display none \
     -s -S
 ```
 
 ### 3. Connect GDB
 
-In another terminal, start GDB:
+In another terminal, from the repository root (the scripts use relative paths):
 
 ```bash
 # For x86_64
 gdb -x scripts/gdb/x86_64.gdb
 
-# For AArch64 (use gdb-multiarch if available)
+# For AArch64 (use gdb-multiarch if your gdb is single-architecture)
 gdb-multiarch -x scripts/gdb/aarch64.gdb
 
-# For RISC-V (use gdb-multiarch if available)
+# For RISC-V (use gdb-multiarch if your gdb is single-architecture)
 gdb-multiarch -x scripts/gdb/riscv64.gdb
 ```
 
@@ -117,13 +107,19 @@ gdb-multiarch -x scripts/gdb/riscv64.gdb
 Our GDB scripts provide custom commands for kernel debugging:
 
 #### Common Commands (all architectures)
-- `kernel-symbols <arch>` - Load kernel symbols
-- `break-panic` - Set breakpoint on panic handler
-- `break-main` - Set breakpoint on kernel_main
-- `break-boot <arch>` - Set architecture-specific boot breakpoints
-- `examine-stack` - Display stack contents
-- `examine-uart <arch>` - Display UART registers
+- `kernel-symbols <target-dir>` - Load kernel symbols from `target/<target-dir>/debug/veridian-kernel`
+- `break-panic` - Set breakpoint on `core::panicking::panic_fmt` (every panic goes through it)
+- `hbreak-panic` - The same with a hardware breakpoint (x86_64 under UEFI)
+- `break-main` - Set breakpoint on `veridian_kernel::bootstrap::kernel_init`
+- `break-boot-x86_64`, `break-boot-aarch64`, `break-boot-riscv64` - Boot entry breakpoints
+- `examine-stack` - Display stack contents at `$sp`
+- `examine-uart-aarch64`, `examine-uart-riscv64` - Display UART registers (x86_64's COM1 is an
+  I/O port, which `x` cannot read)
 - `kernel-state` - Display overall kernel state
+
+GDB cannot compare string arguments on a bare-metal target (a string literal needs `malloc` in the
+inferior), so the architecture-specific helpers are separate commands rather than one command that
+takes the architecture name.
 
 #### x86_64 Specific
 - `dump-gdt` - Display Global Descriptor Table
@@ -153,9 +149,9 @@ Short aliases are available for common commands:
 - `ks` = kernel-symbols
 - `bp` = break-panic
 - `bm` = break-main
-- `bb` = break-boot
+- `bb` = break-boot (prints the per-architecture commands)
 - `es` = examine-stack
-- `eu` = examine-uart
+- `eu` = examine-uart (prints the per-architecture commands)
 - `kst` = kernel-state
 
 Architecture-specific aliases vary by platform.
@@ -163,12 +159,19 @@ Architecture-specific aliases vary by platform.
 ## Debugging Tips
 
 ### 1. Early Boot Issues
-For early boot debugging, set breakpoints at the entry point:
+The scripts set the boot breakpoints already; by hand:
 ```gdb
 # In GDB
-break-boot x86_64  # or aarch64, riscv64
+break-boot-x86_64   # or break-boot-aarch64, break-boot-riscv64
 continue
 ```
+
+- **x86_64** runs under KVM and boots through UEFI: the bootloader loads the kernel after GDB has
+  attached and overwrites any software breakpoint set before then, so use `hbreak` (there are four
+  hardware breakpoints; the script uses two).
+- **AArch64 and RISC-V** start at `_start` at its physical load address, before the MMU maps the
+  kernel at its linked (high) address, so a breakpoint on `_start` does not fire. The first stop is
+  `_start_rust`.
 
 ### 2. Panic Debugging
 To catch panics:
@@ -183,20 +186,16 @@ To examine specific memory regions:
 # Stack
 examine-stack
 
-# UART (architecture specific)
-examine-uart x86_64
+# UART (AArch64, RISC-V)
+examine-uart-aarch64
 
 # Custom address
 x/32xb 0x1000
 ```
 
 ### 4. AArch64 Specific Tips
-For AArch64, the kernel loads at 0x40080000:
 ```gdb
-# Examine kernel load address
-x/16i 0x40080000
-
-# Check UART output buffer
+# Check the PL011 UART registers
 x/16xb 0x09000000
 ```
 
@@ -237,16 +236,10 @@ break main.rs:42
 
 ## Advanced Usage
 
-### Remote Debugging
-To debug on actual hardware (when supported):
-```bash
-# On target machine
-gdbserver :1234 /path/to/kernel
-
-# On development machine
-gdb
-target remote <target-ip>:1234
-```
+### Real Hardware
+None of the architectures has run on real hardware yet (see `docs/KNOWN-LIMITATIONS.md`). For
+x86_64 the kernel contains a GDB remote-protocol stub on COM2 (`kernel/src/debug/gdb_stub.rs`);
+it is not enabled in a default build.
 
 ### Debugging with VS Code
 VS Code can be configured to use GDB. Create `.vscode/launch.json`:

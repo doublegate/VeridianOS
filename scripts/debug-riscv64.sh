@@ -1,53 +1,37 @@
 #!/bin/bash
-# Debug script for RISC-V 64 VeridianOS kernel
+# Debug script for the RISC-V 64 VeridianOS kernel: builds the dev kernel, starts
+# QEMU paused with a GDB server on port 1234, and attaches GDB with
+# scripts/gdb/riscv64.gdb (symbols from target/riscv64imac-unknown-none-elf/debug/veridian-kernel).
+# GDB reads its commands from stdin, so a command file can be piped in.
 
 set -e
+cd "$(dirname "$0")/.."
 
-# Colors for output
-RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
-NC='\033[0m' # No Color
+RED='\033[0;31m'
+NC='\033[0m'
 
 echo -e "${GREEN}VeridianOS RISC-V 64 Debug Script${NC}"
-echo "===================================="
 
-# Build the kernel with debug info
-echo -e "${YELLOW}Building kernel with debug symbols...${NC}"
-cargo build --target targets/riscv64gc-veridian.json -p veridian-kernel \
-    -Zbuild-std=core,compiler_builtins,alloc \
-    -Zbuild-std-features=compiler-builtins-mem
+echo -e "${YELLOW}Building the dev kernel...${NC}"
+./build-kernel.sh riscv64 dev
 
-# Check if build succeeded
-if [ $? -ne 0 ]; then
-    echo -e "${RED}Build failed!${NC}"
-    exit 1
-fi
-
-echo -e "${GREEN}Build successful!${NC}"
-
-# Start QEMU in the background with GDB server
-echo -e "${YELLOW}Starting QEMU with GDB server on port 1234...${NC}"
-qemu-system-riscv64 \
-    -M virt \
-    -nographic \
-    -kernel target/riscv64gc-veridian/debug/veridian-kernel \
-    -serial mon:stdio \
+echo -e "${YELLOW}Starting QEMU (paused) with a GDB server on port 1234...${NC}"
+qemu-system-riscv64 -M virt -m 256M -bios default \
+    -kernel target/riscv64imac-unknown-none-elf/debug/veridian-kernel \
+    -serial file:target/debug-riscv64-serial.log -display none -monitor none \
     -s -S &
-
 QEMU_PID=$!
+trap 'kill $QEMU_PID 2>/dev/null || true; wait $QEMU_PID 2>/dev/null || true' EXIT
 
-# Give QEMU time to start
 sleep 2
-
-# Check if QEMU is running
-if ! ps -p $QEMU_PID > /dev/null; then
-    echo -e "${RED}QEMU failed to start!${NC}"
+if ! kill -0 $QEMU_PID 2>/dev/null; then
+    echo -e "${RED}QEMU failed to start${NC}"
     exit 1
 fi
 
-echo -e "${GREEN}QEMU started (PID: $QEMU_PID)${NC}"
-echo -e "${YELLOW}Starting GDB...${NC}"
+echo -e "${GREEN}QEMU started (PID $QEMU_PID); serial output: target/debug-riscv64-serial.log${NC}"
 echo ""
 echo "=== GDB Quick Reference ==="
 echo "continue (c)     - Start/continue execution"
@@ -55,29 +39,19 @@ echo "break <symbol>   - Set breakpoint"
 echo "next (n)         - Step over"
 echo "step (s)         - Step into"
 echo "info registers   - Show registers"
-echo "x/<n><f> <addr> - Examine memory"
+echo "x/<n><f> <addr>  - Examine memory"
 echo ""
 echo "=== RISC-V Specific ==="
-echo "dr               - Dump all registers"
 echo "dcsr             - Dump CSRs"
-echo "duart            - Dump UART registers"
 echo "trap             - Analyze trap"
 echo "==========================="
 echo ""
 
-# Use gdb-multiarch if available, otherwise regular gdb
-if command -v gdb-multiarch &> /dev/null; then
-    GDB_CMD="gdb-multiarch"
+if command -v gdb-multiarch >/dev/null 2>&1; then
+    GDB_CMD=gdb-multiarch
 else
-    GDB_CMD="gdb"
+    GDB_CMD=gdb
 fi
+$GDB_CMD -q -x scripts/gdb/riscv64.gdb
 
-# Start GDB with our RISC-V configuration
-$GDB_CMD -x scripts/gdb/riscv64.gdb
-
-# When GDB exits, kill QEMU
-echo -e "${YELLOW}Cleaning up...${NC}"
-kill $QEMU_PID 2>/dev/null || true
-wait $QEMU_PID 2>/dev/null || true
-
-echo -e "${GREEN}Debug session ended.${NC}"
+echo -e "${YELLOW}Debug session ended.${NC}"
