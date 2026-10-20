@@ -192,7 +192,8 @@ qemu-system-riscv64 -M virt -m 256M -bios default \
     -kernel target/riscv64imac-unknown-none-elf/debug/veridian-kernel \
     -serial stdio -display none
 
-# Run the host unit tests (plain `cargo test` targets bare metal and does not work)
+# Run the host unit tests (`--lib` matters: plain `cargo test` also builds the bare-metal
+# binary and test targets for the host and fails on a duplicate lang item)
 cargo test --lib --features alloc -p veridian-kernel --target x86_64-unknown-linux-gnu
 
 # Run the full pre-commit gate: fmt, clippy on every target, host tests, builds,

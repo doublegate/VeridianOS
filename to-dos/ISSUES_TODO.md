@@ -3,7 +3,7 @@
 **Purpose**: Central tracking for all bugs, issues, and defects
 **Last Updated**: February 20, 2026
 
-## 🐛 Issue Categories
+## Issue Categories
 
 ### Severity Levels
 - **P0 - Critical**: System crash, data loss, security vulnerability
@@ -18,7 +18,7 @@
 - **Security**: Security vulnerability or concern
 - **Compatibility**: Hardware or software compatibility issue
 
-## 🚨 Critical Issues (P0)
+## Critical Issues (P0)
 
 Currently no critical issues. All 18 historical issues resolved.
 
@@ -100,7 +100,7 @@ Currently no critical issues. All 18 historical issues resolved.
 - **Verification**: x86_64 now boots to Stage 6 BOOTOK with 27/27 tests and zero warnings
 
 ### ISSUE-0013: AArch64 Function Call Hang
-- **Status**: RESOLVED ✅
+- **Status**: RESOLVED
 - **Component**: Kernel/Boot
 - **Reported**: 2025-06-13
 - **Resolved**: 2025-06-17
@@ -136,7 +136,7 @@ Currently no critical issues. All 18 historical issues resolved.
 - **Verification**: RISC-V boots to Stage 6 BOOTOK with 27/27 tests and zero warnings
 
 ### ISSUE-0014: Context Switching Not Connected
-- **Status**: RESOLVED ✅
+- **Status**: RESOLVED
 - **Component**: Kernel/Scheduler
 - **Reported**: 2025-06-15
 - **Resolved**: 2025-06-15
@@ -164,11 +164,11 @@ Currently no critical issues. All 18 historical issues resolved.
 - **Fix**: PR# or commit hash when fixed
 -->
 
-## 🔴 High Priority Issues (P1)
+## High Priority Issues (P1)
 
 Currently no high priority issues.
 
-## 🟡 Medium Priority Issues (P2)
+## Medium Priority Issues (P2)
 
 ### PENDING: /bin/sh ELF Multi-LOAD GP Fault
 - **Status**: Fix coded on `test-codex` branch (T6-0), pending merge + QEMU validation
@@ -177,14 +177,14 @@ Currently no high priority issues.
 - **Root cause**: ELF loader does not correctly handle multi-segment binaries (stack mapping lost during second LOAD segment mapping)
 - **Fix**: `test-codex` branch adds multi-LOAD handling with stack preservation in `elf/mod.rs` and `process/creation.rs`
 
-## 🟢 Low Priority Issues (P3)
+## Low Priority Issues (P3)
 
 Currently no low priority issues.
 
-## ✅ Recently Resolved Issues
+## Recently Resolved Issues
 
 ### ISSUE-0015: x86_64 Context Switch Infinite Loop
-- **Status**: RESOLVED ✅
+- **Status**: RESOLVED
 - **Component**: Kernel/Context Switching
 - **Reported**: 2025-06-15
 - **Resolved**: 2025-06-15
@@ -198,7 +198,7 @@ Currently no low priority issues.
 - **Details**: `iretq` expects interrupt frame on stack, but kernel-to-kernel switches don't have that
 
 ### ISSUE-0016: x86_64 Memory Mapping Errors
-- **Status**: RESOLVED ✅
+- **Status**: RESOLVED
 - **Component**: Kernel/Memory Management
 - **Reported**: 2025-06-15
 - **Resolved**: 2025-06-15
@@ -248,7 +248,7 @@ Currently no low priority issues.
 - **Fix**: Removed Cargo.lock from .gitignore and committed it (commit: 8790414)
 
 ### ISSUE-0005: Clippy warnings for unused code
-- **Status**: Fixed/Verified ✅
+- **Status**: Fixed/Verified
 - **Component**: Kernel
 - **Reported**: 2025-06-06
 - **Reporter**: CI/Clippy
@@ -267,10 +267,10 @@ Currently no low priority issues.
     - sched/mod.rs:3 (init)
     - sched/mod.rs:11 (run)
   - Fixed all formatting issues with `cargo fmt`
-  - **Result: CI/CD pipeline now 100% passing all checks!** 🎉
+  - **Result: CI/CD pipeline now 100% passing all checks!**
 
 ### ISSUE-0006: AArch64 Boot Sequence Not Reaching Rust Code
-- **Status**: Fixed/Verified ✅
+- **Status**: Fixed/Verified
 - **Component**: Kernel/Boot
 - **Reported**: 2025-06-06
 - **Reporter**: QEMU Testing
@@ -287,7 +287,7 @@ Currently no low priority issues.
   - Removed all iterator usage in AArch64 boot path
   - Created working-simple/ directory for known-good implementations
   - Files renamed to match x86_64/riscv64 pattern
-  - **Result: AArch64 now boots successfully to kernel_main!** 🎉
+  - **Result: AArch64 now boots successfully to kernel_main!**
 
 ### ISSUE-0007: GDB break-boot command "No symbol" errors
 - **Type**: Tool/Debugging
@@ -369,7 +369,7 @@ Currently no low priority issues.
   - Deferred stats tracking until after initialization complete
   - **Result: RISC-V now boots successfully through all subsystems!**
 
-## 📊 Issue Statistics
+## Issue Statistics
 
 ### Overall Status
 - **Total Issues**: 18
@@ -405,7 +405,7 @@ Currently no low priority issues.
 | Performance | 0 | 0 | 0 |
 | Security | 0 | 0 | 0 |
 
-## 🔄 Regressions
+## Regressions
 
 ### Regression Tracking
 Track features that have broken after previously working.
@@ -421,7 +421,7 @@ Currently no regressions.
 - **Root Cause**: What caused the regression
 -->
 
-## 🔒 Security Issues
+## Security Issues
 
 ### Security Vulnerability Tracking
 Security issues are tracked separately with restricted access.
@@ -432,7 +432,7 @@ Security issues are tracked separately with restricted access.
 
 For security issues, see [SECURITY.md](../SECURITY.md)
 
-## 🎯 Issue Resolution Goals
+## Issue Resolution Goals
 
 ### SLA Targets
 | Severity | Response Time | Resolution Target |
@@ -447,7 +447,7 @@ For security issues, see [SECURITY.md](../SECURITY.md)
 - **Average Resolution Time**: N/A
 - **SLA Compliance**: N/A
 
-## 🛠️ Issue Management Process
+## Issue Management Process
 
 ### Issue Lifecycle
 1. **Reported** - Issue identified and logged
@@ -465,7 +465,7 @@ For security issues, see [SECURITY.md](../SECURITY.md)
 - Component owners review their queues
 - SLA tracking and escalation
 
-## 📝 Issue Templates
+## Issue Templates
 
 ### Bug Report Template
 ```markdown
@@ -504,7 +504,7 @@ For security issues, see [SECURITY.md](../SECURITY.md)
 **Analysis**: Initial investigation findings
 ```
 
-## 🔍 Common Issues and Solutions
+## Common Issues and Solutions
 
 ### Build Issues
 Document common build problems and solutions.
@@ -515,7 +515,7 @@ Document common runtime problems and solutions.
 ### Configuration Issues
 Document common configuration problems and solutions.
 
-## 📅 Issue Review Schedule
+## Issue Review Schedule
 
 ### Daily
 - P0 issue review
@@ -532,7 +532,7 @@ Document common configuration problems and solutions.
 - SLA compliance
 - Root cause analysis
 
-## 🔗 External References
+## External References
 
 ### Issue Tracking
 - GitHub Issues: <https://github.com/doublegate/VeridianOS/issues>

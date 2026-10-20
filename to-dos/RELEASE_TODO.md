@@ -225,7 +225,7 @@ Following Semantic Versioning (SemVer):
 - [x] dead_code audit, TODO(future) recategorization to phase5/phase6
 
 #### v0.7.0 - Phase 7: Production Readiness
-**Target Date**: Q3 2026
+**Released**: 2026-02-27 (historical plan below)
 **Phase**: Phase 7
 **Goals**:
 - [ ] GPU driver framework (Intel i915/AMD/virtio-gpu)
@@ -450,16 +450,14 @@ Thanks to all contributors!
 - Q2: v0.1.0 (Foundation), v0.2.0 (Core Kernel), v0.2.1 (Boot Fixes)
 - Q4: v0.2.5, v0.3.0 (Architecture cleanup)
 
-### 2026 (Completed + In Progress)
-- Q1: v0.3.1 through v0.6.2 (User Space, Security, Packages, Shell, Self-hosting, Phase 5, Phase 6 core)
-- Q2-Q3: v0.7.0 (Phase 7: GPU, multimedia, advanced Wayland) -- PLANNED
-- Q4: v0.8.0 (Phase 7: virtualization, cloud-native) -- PLANNED
+### 2026
+- Q1: v0.3.1 through v0.25.2 (all 13 development phases, including Phase 7 in v0.7.0 to v0.10.0
+  and the KDE work in v0.22.0 to v0.25.x)
+- Q4: v0.26.0 (audit remediation), v0.27.0 (process model, SMP, user mode on all architectures)
+- Next: v0.28.0, planned in [MASTER_TODO.md](MASTER_TODO.md); no date set
 
-### 2027
-- Q1: v0.8.0 (Performance + Polish)
-- Q2: v0.9.0 (GUI)
-- Q3: v1.0.0 (Stable)
-- Q4: v1.1.0 (LTS candidate)
+### Later
+- v1.0.0 (stable): target Q3 2027, with the criteria listed above
 
 ## Release Resources
 

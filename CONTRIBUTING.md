@@ -15,7 +15,7 @@ First off, thank you for considering contributing to VeridianOS! It's people lik
 
 ## Code of Conduct
 
-This project and everyone participating in it is governed by our [Code of Conduct](CODE_OF_CONDUCT.md). By participating, you are expected to uphold this code. Please report unacceptable behavior to [conduct@veridian-os.org](mailto:conduct@veridian-os.org).
+Everyone participating in this project is expected to be respectful and constructive. Please report unacceptable behavior to the maintainer, [@doublegate](https://github.com/doublegate), on GitHub or Discord.
 
 ## Getting Started
 
@@ -109,7 +109,8 @@ git checkout -b feature/my-feature
 1. **Write code** following our coding standards
 2. **Add tests** for new functionality
 3. **Update documentation** as needed
-4. **Run tests locally** (plain `cargo test` targets bare metal and does not work):
+4. **Run tests locally** (plain `cargo test` also builds the kernel's bare-metal binary and test
+   targets for the host and fails on a duplicate `panic_impl` lang item; `--lib` avoids them):
    ```bash
    cargo test --lib --features alloc -p veridian-kernel --target x86_64-unknown-linux-gnu
    ```
@@ -327,7 +328,7 @@ Fixes #456
 
 - Delete your feature branch
 - Update your local repository
-- Celebrate your contribution! 🎉
+- Celebrate your contribution!
 
 ## Communication
 

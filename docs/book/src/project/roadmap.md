@@ -87,6 +87,6 @@ Figures from the in-kernel `perf` command; see the
 | Third-party security audit | Planned |
 | Community contributor onboarding | Planned |
 
-The project has achieved all original development goals across 13 phases. The path to v1.0.0 runs
+All 13 development phases are complete; the targets above are still open. The path to v1.0.0 runs
 through Linux system call compatibility, real hardware and hardening; the open items are listed in
 [Known Limitations](https://github.com/doublegate/VeridianOS/blob/main/docs/KNOWN-LIMITATIONS.md).

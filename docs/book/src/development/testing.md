@@ -5,7 +5,8 @@ VeridianOS has 4,770 host-target unit tests, in-kernel boot tests on every archi
 ## Test Commands
 
 ```bash
-# Host-target unit tests (plain `cargo test` targets bare metal and does not work)
+# Host-target unit tests (`--lib` matters: plain `cargo test` also builds the bare-metal
+# binary and test targets for the host and fails on a duplicate lang item)
 cargo test --lib --features alloc -p veridian-kernel --target x86_64-unknown-linux-gnu
 
 # Format check

@@ -42,7 +42,7 @@
   - [x] Priority handling
   - [x] Load balancing
   - [x] Race conditions
-  - [x] CFS implementation
+  - [x] EEVDF fair class, FIFO/RR and SCHED_DEADLINE (ADR 0007)
   - [x] SMP support
   - [x] CPU hotplug
 - [x] IPC tests (100% complete)
@@ -257,17 +257,16 @@
 ## Test Issues
 
 ### Known Test Failures
-1. Issue: Automated test execution blocked by Rust toolchain
-   - Test: All kernel tests
-   - Impact: Cannot run automated tests due to duplicate lang items
-   - Status: Documented in docs/TESTING-STATUS.md
-   - Workaround: Manual testing with QEMU, code review validation
+None. The host tests, the QEMU boot tests and the runtime suites all pass, in CI and in
+`scripts/dev/gate.sh`.
 
 ### Test Infrastructure Issues
-1. Issue: Duplicate lang items in no-std test framework
-   - Component: Rust toolchain test harness
-   - Workaround: Manual QEMU testing, kernel/run-tests.sh script
-   - Fix ETA: Requires upstream Rust toolchain changes
+1. Issue: Rust's standard test harness cannot run the kernel's bare-metal `[[bin]]` and `[[test]]`
+   targets (duplicate lang items when they are built for the host)
+   - Component: Rust toolchain test harness (no_std custom targets)
+   - Workaround: the kernel's tests run as host unit tests (`cargo test --lib ...`), as in-kernel
+     boot tests (`scripts/boot-test.sh`) and as in-guest runtime suites
+     (`scripts/run-rootfs-tests.sh`); all three are automated
 
 ## Testing Schedule
 

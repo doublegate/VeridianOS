@@ -51,9 +51,7 @@ Help improve our test coverage:
 
 Your ideas matter! Share them through:
 - GitHub Issues for feature requests
-- Discussions for general ideas
-- Discord for real-time chat
-- Mailing list for longer discussions
+- Discord for real-time chat and longer discussions
 
 ## Coding Standards
 
@@ -250,8 +248,7 @@ If you need help:
 1. **Read the documentation**: Check if it's already explained
 2. **Search issues**: Someone might have asked before
 3. **Ask on Discord**: Quick questions and discussions
-4. **Open an issue**: For bugs or unclear documentation
-5. **Mailing list**: For design discussions
+4. **Open an issue**: For bugs, unclear documentation and design discussions
 
 ## Recognition
 
