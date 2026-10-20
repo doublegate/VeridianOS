@@ -20,8 +20,8 @@
 
 ## Critical Issues (P0)
 
-Currently no critical issues. All 23 recorded issues are resolved (ISSUE-0001 to ISSUE-0023,
-except the unused 0004, and the multi-LOAD ELF issue below). Findings of the audits are tracked as
+Currently no critical issues. All 23 recorded issues are resolved: the 22 numbered ones
+(ISSUE-0001 to ISSUE-0023; 0004 was never assigned) and the unnumbered multi-LOAD ELF issue below. Findings of the audits are tracked as
 N-xx in `docs/audit/` and, while open, in `docs/KNOWN-LIMITATIONS.md`.
 
 ## Recent Issues
@@ -390,23 +390,30 @@ Currently no low priority issues.
 ### By Component
 | Component | Open | In Progress | Fixed | Total |
 |-----------|------|-------------|-------|-------|
-| Kernel | 0 | 0 | 10 | 10 |
+| Kernel | 0 | 0 | 14 | 14 |
 | Drivers | 0 | 0 | 0 | 0 |
 | Services | 0 | 0 | 0 | 0 |
-| Libraries | 0 | 0 | 0 | 0 |
+| Libraries | 0 | 0 | 1 | 1 |
 | Tools | 0 | 0 | 1 | 1 |
 | Documentation | 0 | 0 | 0 | 0 |
 | Build System | 0 | 0 | 2 | 2 |
 | CI/CD | 0 | 0 | 5 | 5 |
+| **Total** | 0 | 0 | 23 | 23 |
+
+Kernel: 0005, 0006, 0008 to 0018 and the multi-LOAD ELF issue; Libraries: 0023 (native libc);
+Tools: 0007; Build System: 0001, 0002; CI/CD: 0003, 0019 to 0022.
 
 ### By Type
 | Type | Open | Fixed | Total |
 |------|------|-------|-------|
-| Bug | 0 | 14 | 14 |
-| CI/CD | 0 | 4 | 4 |
+| Bug | 0 | 17 | 17 |
+| CI/CD | 0 | 6 | 6 |
 | Regression | 0 | 0 | 0 |
 | Performance | 0 | 0 | 0 |
 | Security | 0 | 0 | 0 |
+| **Total** | 0 | 23 | 23 |
+
+CI/CD: 0001, 0003, 0019 to 0022; every other issue is a bug.
 
 ## Regressions
 

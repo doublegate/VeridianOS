@@ -31,10 +31,16 @@ fi
 accel=(-cpu qemu64)
 [[ -w /dev/kvm ]] && accel=(-enable-kvm -cpu host)
 
+img=target/x86_64-veridian/debug/veridian-uefi.img
+if [[ ! -r $img ]]; then
+    echo -e "${RED}UEFI disk image not found: $img (see the bootimage step in the build output above)${NC}"
+    exit 1
+fi
+
 echo -e "${YELLOW}Starting QEMU (paused) with a GDB server on port 1234...${NC}"
 qemu-system-x86_64 "${accel[@]}" -m 256M \
     -drive "if=pflash,format=raw,readonly=on,file=$ovmf" \
-    -drive id=disk0,if=none,format=raw,file=target/x86_64-veridian/debug/veridian-uefi.img \
+    -drive "id=disk0,if=none,format=raw,file=$img" \
     -device ide-hd,drive=disk0 \
     -serial file:target/debug-x86_64-serial.log -display none -monitor none \
     -s -S &

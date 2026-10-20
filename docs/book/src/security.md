@@ -45,7 +45,8 @@ isolation, seccomp, TLS certificate verification) are tracked in Known Limitatio
 - Checked arithmetic in critical paths
 
 ### Accounts and Access Control
-- Credentials with real, effective, saved and filesystem IDs and supplementary groups
+- Credentials with real, effective, saved and filesystem IDs and supplementary groups (`/etc/group`
+  is not applied at login, N-153)
 - Salted password hashes compared in constant time, with a password history
 - The kernel console has no login, and `su`/`sudo` there are stubs (N-131); MFA cannot be
   completed through PAM yet (planned for v0.28)

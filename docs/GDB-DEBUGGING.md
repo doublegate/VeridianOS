@@ -45,8 +45,9 @@ Dev builds carry the symbols:
 Add `-s` (GDB server on port 1234) and `-S` (pause at start) to the usual command lines:
 
 ```bash
-# x86_64 (UEFI boot; -kernel does not work for x86_64). The OVMF path varies by distribution
-# (Debian/Ubuntu: /usr/share/OVMF/OVMF_CODE_4M.fd; Fedora: /usr/share/edk2/ovmf/OVMF_CODE.fd);
+# x86_64 (UEFI boot; -kernel does not work for x86_64). The OVMF path below is Arch's; it varies
+# by distribution (Debian/Ubuntu: /usr/share/OVMF/OVMF_CODE_4M.fd; Fedora:
+# /usr/share/edk2/ovmf/OVMF_CODE.fd);
 # without a writable /dev/kvm, replace -enable-kvm with -cpu qemu64.
 qemu-system-x86_64 -enable-kvm -m 256M \
     -drive if=pflash,format=raw,readonly=on,file=/usr/share/edk2/x64/OVMF.4m.fd \

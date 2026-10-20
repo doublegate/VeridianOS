@@ -416,9 +416,11 @@ just debug-x86_64      # or debug-aarch64, debug-riscv64
 ```
 
 GDB commands:
+
 ```gdb
 # Set breakpoint (on x86_64 use hbreak until the kernel is loaded)
 (gdb) break veridian_kernel::bootstrap::kernel_init
+(gdb) hbreak veridian_kernel::bootstrap::kernel_init   # x86_64
 (gdb) break kernel/src/mm/frame_allocator.rs:42
 
 # Continue execution

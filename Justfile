@@ -32,7 +32,7 @@ check-commit-msg MSG:
     set -euo pipefail
     f=$(mktemp)
     trap 'rm -f "$f"' EXIT
-    printf '%s\n' "{{ MSG }}" > "$f"
+    printf '%s\n' {{ quote(MSG) }} > "$f"
     bash .githooks/commit-msg "$f"
 
 # Build the kernel for every architecture (x86_64 also gets its UEFI disk image)
@@ -116,7 +116,7 @@ test-riscv64: build-riscv64
     ./scripts/boot-test.sh riscv64
 
 # Build and boot-test every architecture
-test-all: build test-x86_64 test-aarch64 test-riscv64
+test-all: test-x86_64 test-aarch64 test-riscv64
     @echo "All architecture boot tests passed"
 
 # Format code

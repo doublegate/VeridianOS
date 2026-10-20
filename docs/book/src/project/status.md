@@ -3,7 +3,7 @@
 ## Current Status: All Phases Complete (0-12)
 
 **Latest Release**: v0.27.0 (October 18, 2026): process model, SMP and user mode on all three architectures
-**All 13 Phases**: COMPLETE; v0.28 next (the remaining Linux system calls, then networking, hardening and real hardware)
+**All 13 Phases** (0-12; 5.5, 6.5 and 7.5 are subphases): COMPLETE; v0.28 next (the remaining Linux system calls, then networking, hardening and real hardware)
 **Tests**: 4,770 host unit tests; in-kernel boot tests and in-guest runtime suites on every architecture (below)
 **CI Pipeline**: builds, clippy, host tests with coverage, boot tests on one and four CPUs, x86_64 runtime suite
 

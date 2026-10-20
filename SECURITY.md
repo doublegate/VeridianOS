@@ -118,7 +118,8 @@ in [`docs/KNOWN-LIMITATIONS.md`](docs/KNOWN-LIMITATIONS.md), which is the author
    - The serial and VGA kernel console has no login: whoever can type at it runs the kernel shell
      with full control, and `su` and `sudo` there are stubs (N-131)
    - Credentials with real, effective, saved and filesystem IDs, supplementary groups and Linux's
-     permission rules; RLIMIT_* limits
+     permission rules; RLIMIT_* limits. `useradd` writes no `/etc/group` entry, and the
+     supplementary groups in `/etc/group` are not applied at login (N-153)
    - Salted password hashes compared in constant time, with a password history (as
      pam_pwhistory's `remember`)
    - Multi-factor authentication is not usable yet: TOTP does not follow RFC 6238, and pam_veridian
