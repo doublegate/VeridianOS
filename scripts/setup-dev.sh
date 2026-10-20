@@ -95,8 +95,10 @@ echo -e "${GREEN}  ✓ Git aliases configured${NC}"
 echo ""
 echo "🦀 Verifying Rust toolchain..."
 
-REQUIRED_TOOLCHAIN="nightly-2025-01-15"
-CURRENT_TOOLCHAIN=$(rustc --version | grep -oE 'nightly-[0-9]{4}-[0-9]{2}-[0-9]{2}' || echo "stable")
+# The pin is rust-toolchain.toml's; rustc --version prints a commit date, not
+# the toolchain name, so ask rustup which toolchain is active.
+REQUIRED_TOOLCHAIN=$(sed -n 's/^channel *= *"\(.*\)"/\1/p' rust-toolchain.toml)
+CURRENT_TOOLCHAIN=$(rustup show active-toolchain 2>/dev/null | grep -oE 'nightly-[0-9]{4}-[0-9]{2}-[0-9]{2}' || echo "none")
 
 if [ "$CURRENT_TOOLCHAIN" != "$REQUIRED_TOOLCHAIN" ]; then
     echo -e "${YELLOW}  ⚠️  Wrong toolchain active${NC}"
@@ -105,7 +107,7 @@ if [ "$CURRENT_TOOLCHAIN" != "$REQUIRED_TOOLCHAIN" ]; then
     echo ""
     echo "  To install and use the correct toolchain:"
     echo "    rustup toolchain install $REQUIRED_TOOLCHAIN"
-    echo "    rustup override set $REQUIRED_TOOLCHAIN"
+    echo "  (rust-toolchain.toml selects it inside the repository once installed)"
 else
     echo -e "${GREEN}  ✓ Correct toolchain active${NC}"
 fi

@@ -60,64 +60,36 @@ if command_exists rustfmt; then
     fi
 fi
 
-# 3. Run clippy (for protected branches)
-if [ $IS_PROTECTED -eq 1 ]; then
-    echo "📎 Running clippy checks (protected branch)..."
-    if command_exists cargo-clippy; then
-        if ! cargo clippy --all-targets --all-features -- -D warnings 2>/dev/null; then
-            echo -e "${RED}❌ Clippy warnings found${NC}"
-            echo "Fix clippy warnings before pushing to $CURRENT_BRANCH"
-            exit 1
-        else
-            echo -e "${GREEN}✓ Clippy checks passed${NC}"
-        fi
-    fi
-fi
-
-# 4. Check that Cargo.lock is up to date
+# 3. Cargo.lock up to date (cargo metadata checks it without building; a
+# plain `cargo check` builds the kernel's bare-metal binary for the host and
+# fails for that reason, not the lockfile's)
 echo "🔒 Checking Cargo.lock..."
-if ! cargo check --locked >/dev/null 2>&1; then
+if ! cargo metadata --locked --format-version 1 >/dev/null 2>&1; then
     echo -e "${RED}❌ Cargo.lock is out of date${NC}"
-    echo "Run 'cargo check' and commit the updated Cargo.lock"
+    echo "Run 'cargo update -w' and commit the updated Cargo.lock"
     exit 1
 else
     echo -e "${GREEN}✓ Cargo.lock is up to date${NC}"
 fi
 
-# 5. Run tests (configurable)
-if [ "${RUN_TESTS_PREPUSH:-1}" = "1" ]; then
-    echo "🧪 Running tests..."
-    
-    # For x86_64 we can run tests
-    if command_exists qemu-system-x86_64; then
-        echo "  Running x86_64 tests..."
-        if cargo test --target targets/x86_64-veridian.json -p veridian-kernel \
-           -Zbuild-std=core,compiler_builtins,alloc \
-           -Zbuild-std-features=compiler-builtins-mem >/dev/null 2>&1; then
-            echo -e "${GREEN}  ✓ x86_64 tests passed${NC}"
-        else
-            echo -e "${RED}  ❌ x86_64 tests failed${NC}"
-            echo "Fix failing tests or set RUN_TESTS_PREPUSH=0"
-            exit 1
-        fi
+# 4-5. Clippy on every target and the host tests: the gate without QEMU
+# (always for protected branches; RUN_TESTS_PREPUSH=0 skips it elsewhere)
+if [ $IS_PROTECTED -eq 1 ] || [ "${RUN_TESTS_PREPUSH:-1}" = "1" ]; then
+    echo "🧪 Running scripts/dev/gate.sh (fmt, clippy, syscall checks, host tests)..."
+    if scripts/dev/gate.sh >/dev/null 2>&1; then
+        echo -e "${GREEN}✓ Gate passed${NC}"
     else
-        echo -e "${YELLOW}  ⚠️  QEMU not found, skipping integration tests${NC}"
-    fi
-    
-    # Run doc tests
-    echo "  Running doc tests..."
-    if cargo test --doc >/dev/null 2>&1; then
-        echo -e "${GREEN}  ✓ Doc tests passed${NC}"
-    else
-        echo -e "${YELLOW}  ⚠️  Some doc tests failed${NC}"
+        echo -e "${RED}❌ Gate failed${NC}"
+        echo "Run scripts/dev/gate.sh to see the failing step, or set RUN_TESTS_PREPUSH=0"
+        exit 1
     fi
 else
-    echo -e "${YELLOW}⚠️  Tests skipped (RUN_TESTS_PREPUSH=0)${NC}"
+    echo -e "${YELLOW}⚠️  Gate skipped (RUN_TESTS_PREPUSH=0)${NC}"
 fi
 
 # 6. Check documentation builds
 echo "📚 Checking documentation..."
-if ! cargo doc --no-deps --quiet 2>/dev/null; then
+if ! cargo doc --lib --features alloc -p veridian-kernel --target x86_64-unknown-linux-gnu --no-deps --quiet 2>/dev/null; then
     echo -e "${YELLOW}⚠️  Documentation build warnings${NC}"
 fi
 

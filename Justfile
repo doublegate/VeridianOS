@@ -28,9 +28,12 @@ pre-commit:
 
 # Validate commit message
 check-commit-msg MSG:
-    @echo "{{ MSG }}" > .tmp-commit-msg
-    @bash .githooks/commit-msg .tmp-commit-msg || true
-    @rm -f .tmp-commit-msg
+    #!/usr/bin/env bash
+    set -euo pipefail
+    f=$(mktemp)
+    trap 'rm -f "$f"' EXIT
+    printf '%s\n' "{{ MSG }}" > "$f"
+    bash .githooks/commit-msg "$f"
 
 # Build the kernel for every architecture (x86_64 also gets its UEFI disk image)
 build:
@@ -103,13 +106,13 @@ test-verbose:
     cargo test --lib --features alloc -p veridian-kernel --target x86_64-unknown-linux-gnu -- --nocapture
 
 # Boot one architecture in QEMU and check the in-kernel tests (needs a build)
-test-x86_64:
+test-x86_64: build-x86_64
     ./scripts/boot-test.sh x86_64
 
-test-aarch64:
+test-aarch64: build-aarch64
     ./scripts/boot-test.sh aarch64
 
-test-riscv64:
+test-riscv64: build-riscv64
     ./scripts/boot-test.sh riscv64
 
 # Build and boot-test every architecture

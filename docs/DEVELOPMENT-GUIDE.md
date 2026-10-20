@@ -191,30 +191,31 @@ There is no `clean` recipe: `target/` also holds the cross-built sysroot and roo
 ### 2. Running in QEMU
 
 ```bash
-# Run with default settings
+# x86_64 in a QEMU window (builds first)
 just run
 
-# Run with debugging enabled
-just debug
+# x86_64 with the persistent BlockFS root
+just run-blockfs
 
-# Run with specific memory/CPU configuration
-just run-custom MEMORY=1024 CPUS=4
+# AArch64 or RISC-V on the serial console
+just run-aarch64
+just run-riscv64
 
-# Run and attach GDB
-just gdb
+# Debug with GDB (builds, starts QEMU paused, attaches GDB)
+just debug            # x86_64; also debug-aarch64, debug-riscv64
 ```
+
+For other memory sizes or CPU counts, use the QEMU command lines in the README's Quick Start
+with `-m` and `-smp` changed.
 
 ### 3. Development Commands
 
 ```bash
-# Watch for changes and rebuild
-cargo watch -x build
-
-# Run tests
+# Run the host unit tests
 just test
 
-# Run specific test
-cargo test test_name
+# Run specific host test
+cargo test --lib --features alloc -p veridian-kernel --target x86_64-unknown-linux-gnu test_name
 
 # Check code formatting
 just fmt-check
@@ -222,11 +223,14 @@ just fmt-check
 # Format code
 just fmt
 
-# Run clippy lints
+# Run clippy on every target
 just clippy
 
-# Generate documentation
+# Build the mdBook guide
 just doc
+
+# The full pre-commit gate (fmt, clippy, tests, builds, QEMU boots, runtime suites)
+just gate
 ```
 
 ## Code Style Guidelines
@@ -384,195 +388,99 @@ fn test_cross_process_memory_sharing() {
 ### Running Tests
 
 ```bash
-# Run all tests
+# Run all host tests
 just test
 
-# Run tests for specific package
-cargo test -p veridian-kernel
-
 # Run with verbose output
-cargo test -- --nocapture
+cargo test --lib --features alloc -p veridian-kernel --target x86_64-unknown-linux-gnu -- --nocapture
 
 # Run specific test
-cargo test test_name
+cargo test --lib --features alloc -p veridian-kernel --target x86_64-unknown-linux-gnu test_name
 
-# Run tests with coverage
-cargo tarpaulin
+# Boot one architecture and run the in-kernel tests
+just test-x86_64
+
+# Coverage, as CI measures it
+cargo llvm-cov --lib --features alloc -p veridian-kernel --target x86_64-unknown-linux-gnu
 ```
 
 ## Debugging
 
 ### Kernel Debugging with GDB
 
-1. Build with debug symbols:
+The debug scripts build the kernel, start QEMU paused with a GDB server and attach GDB with the
+right symbols and boot breakpoints; see [GDB-DEBUGGING.md](GDB-DEBUGGING.md).
+
 ```bash
-just build-debug
+just debug-x86_64      # or debug-aarch64, debug-riscv64
 ```
 
-2. Start QEMU with GDB server:
-```bash
-just gdb-server
-```
-
-3. In another terminal, connect GDB:
-```bash
-just gdb-connect
-```
-
-4. GDB commands:
+GDB commands:
 ```gdb
-# Set breakpoint
-(gdb) break kernel_main
-(gdb) break kernel/src/mm/physical.rs:42
+# Set breakpoint (on x86_64 use hbreak until the kernel is loaded)
+(gdb) break veridian_kernel::bootstrap::kernel_init
+(gdb) break kernel/src/mm/frame_allocator.rs:42
 
 # Continue execution
 (gdb) continue
 
-# Print variable
-(gdb) print allocator
-
-# Examine memory
-(gdb) x/10x 0xffff800000000000
-
 # Backtrace
 (gdb) bt
+
+# Examine memory
+(gdb) x/10x $sp
 ```
 
 ### Logging
 
-Use the logging framework:
+The kernel has no log framework: it writes to the serial console with `println!`, which the
+QEMU command lines send to the terminal (`-serial stdio`). Serial tracing of every page fault and
+`open()` is a build feature:
 
-```rust
-use log::{debug, info, warn, error};
-
-pub fn init_memory() {
-    info!("Initializing memory subsystem");
-    
-    debug!("Available memory: {} MB", available_mb);
-    
-    if available_mb < 64 {
-        warn!("Low memory detected");
-    }
-    
-    if let Err(e) = setup_page_tables() {
-        error!("Failed to setup page tables: {}", e);
-    }
-}
-```
-
-Configure log level:
 ```bash
-RUST_LOG=debug just run
+FEATURES=trace ./build-kernel.sh x86_64 dev
 ```
 
 ### Performance Profiling
 
-#### Using Flamegraph
-
-```bash
-# Generate flamegraph
-cargo flamegraph --bin kernel
-
-# Profile specific scenario
-just profile-scenario boot
-```
-
-#### Using perf
-
-```bash
-# Record performance data
-perf record -g target/release/kernel
-
-# Generate report
-perf report
-```
+The kernel measures itself: the shell's `perf` command runs the in-kernel micro-benchmarks
+(system call, frame allocation, capability lookup, scheduler and others) and prints timings from
+the calibrated clock source. Use a release kernel for figures (`./build-kernel.sh x86_64
+release`); dev kernels overstate anything that clears or copies memory (N-281). Method and
+results: [PERFORMANCE-REPORT.md](PERFORMANCE-REPORT.md).
 
 ## Common Tasks
 
 ### Adding a New System Call
 
-1. Define the system call number in `kernel/src/syscall/numbers.rs`:
-```rust
-pub const SYS_NEW_CALL: usize = 100;
-```
-
-2. Add handler in `kernel/src/syscall/mod.rs`:
-```rust
-match nr {
-    SYS_NEW_CALL => handle_new_call(arg1, arg2),
-    // ...
-}
-```
-
-3. Implement handler:
-```rust
-fn handle_new_call(arg1: usize, arg2: usize) -> Result<usize, SyscallError> {
-    // Implementation
-}
-```
-
-4. Add user-space wrapper in `libs/veridian-abi/src/syscalls.rs`:
-```rust
-pub fn new_call(arg1: usize, arg2: usize) -> Result<usize, Error> {
-    unsafe { syscall2(SYS_NEW_CALL, arg1, arg2) }
-}
-```
+1. Add the call to `abi/syscalls.map`: the Linux system call it implements (its number comes from
+   the vendored Linux tables), or `private N` for a VeridianOS call with no Linux equivalent.
+2. Regenerate the numbers: `python3 tools/compat/gen_syscalls.py`. This writes
+   `kernel/src/syscall/numbers.rs`, `userland/libc/include/veridian/sysno.h` and
+   `userland/abi/syscall_numbers.rs`; never edit them by hand (`gen_syscalls.py --check` fails CI
+   when they are stale).
+3. Define the capability requirements in `kernel/src/cap/` if the call needs any.
+4. Add the handler in `kernel/src/syscall/` and dispatch the new `Syscall` variant to it.
+5. Add the user-space wrapper in `userland/libc/src/syscall.c` if the native libc needs one.
+6. Add tests: host unit tests for the handler's logic and, where it matters, a runtime test in
+   `userland/tests/`.
 
 ### Adding a New Driver
 
-1. Create driver crate:
-```bash
-cargo new --lib drivers/mydriver
-```
+Drivers live in the kernel today (`kernel/src/drivers/`; moving them to user space is critique C6):
 
-2. Implement driver trait:
-```rust
-use veridian_driver::Driver;
-
-pub struct MyDriver {
-    // Driver state
-}
-
-impl Driver for MyDriver {
-    fn init(&mut self, device: DeviceInfo) -> Result<(), Error> {
-        // Initialize hardware
-    }
-    
-    fn handle_interrupt(&mut self, vector: u8) {
-        // Handle device interrupt
-    }
-}
-```
-
-3. Add to workspace in root `Cargo.toml`:
-```toml
-[workspace]
-members = [
-    # ...
-    "drivers/mydriver",
-]
-```
+1. Add a module under `kernel/src/drivers/` and declare it in `kernel/src/drivers/mod.rs`.
+2. Implement the `Driver` trait (`kernel/src/services/driver_framework.rs`).
+3. Register and initialize it during boot (see how existing drivers such as `e1000` or
+   `virtio_net` are wired in).
+4. Gate architecture-specific code with `#[cfg(target_arch = ...)]`, and bare-metal-only code with
+   `#[cfg(all(target_arch = "x86_64", target_os = "none"))]` so host tests still build.
 
 ### Memory Debugging
 
-Enable memory debugging features:
-
-```toml
-[features]
-memory-debug = ["heap-tracking", "allocation-stats"]
-```
-
-Use memory debugging tools:
-
-```rust
-#[cfg(feature = "memory-debug")]
-fn debug_memory_state() {
-    let stats = ALLOCATOR.stats();
-    debug!("Allocated: {} bytes", stats.allocated);
-    debug!("Free: {} bytes", stats.free);
-    debug!("Fragmentation: {:.2}%", stats.fragmentation * 100.0);
-}
-```
+`/proc/meminfo` and the shell's `perf` command show the frame allocator's and heap's state. The
+`frame_alloc_1`/`frame_alloc_global` benchmarks and the host unit tests in `kernel/src/mm/` cover
+the allocators.
 
 ## Contributing
 

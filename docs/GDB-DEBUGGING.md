@@ -143,7 +143,8 @@ takes the architecture name.
 - `dump-csr` - Display Control and Status Registers
 - `dump-uart-8250` - Display 8250 UART registers
 - `examine-opensbi` - Examine OpenSBI region
-- `walk-page-table-sv39 <addr>` - Walk RISC-V Sv39 page tables
+- `walk-page-table-sv48 <addr>` - Walk RISC-V Sv48 page tables (QEMU `virt` default)
+- `walk-page-table-sv39 <addr>` - Walk RISC-V Sv39 page tables (Sv39-only harts)
 - `analyze-trap` - Analyze trap cause
 
 ### Aliases
@@ -179,9 +180,10 @@ continue
   so the first stop is `_start_rust`.
 
 ### 2. Panic Debugging
-To catch panics:
+To catch panics (the scripts set this already):
 ```gdb
-break-panic
+break-panic      # AArch64, RISC-V
+hbreak-panic     # x86_64: a software breakpoint set before UEFI loads the kernel is overwritten
 continue
 ```
 
