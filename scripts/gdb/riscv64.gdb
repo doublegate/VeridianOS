@@ -13,7 +13,7 @@ set riscv use-compressed-breakpoints on
 target remote localhost:1234
 
 # Load kernel symbols
-kernel-symbols riscv64gc-veridian
+kernel-symbols riscv64imac-unknown-none-elf
 
 # RISC-V specific commands
 define dump-regs

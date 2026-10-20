@@ -635,7 +635,7 @@ fn debug_memory_state() {
 - Discord: [VeridianOS Discord](#)
 - Forums: [VeridianOS Forums](#)
 - IRC: #veridian-os on irc.libera.chat
-- Mailing List: dev@veridian-os.org
+- GitHub Issues: <https://github.com/doublegate/VeridianOS/issues>
 
 ### Troubleshooting
 

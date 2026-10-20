@@ -175,9 +175,8 @@ We follow:
 ### How do I get help?
 
 - Discord: [#help channel](https://discord.gg/WGcgrnuVHt)
-- Mailing list: help@veridian-os.org
 - Stack Overflow: tag `veridian-os`
-- GitHub Discussions
+- GitHub Issues: <https://github.com/doublegate/VeridianOS/issues>
 
 ### How do I report bugs?
 
@@ -271,7 +270,6 @@ Ensure:
 
 - Check documentation in `docs/`
 - Ask on [Discord](https://discord.gg/WGcgrnuVHt)
-- Email: info@veridian-os.org
 - Create a GitHub issue
 
 This FAQ is regularly updated based on community questions!

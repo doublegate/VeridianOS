@@ -30,9 +30,10 @@ The kernel requires a custom target specification and must be built with the nig
 ./build-kernel.sh all dev
 
 # Or one architecture by hand
-cargo build --target targets/x86_64-veridian.json -p veridian-kernel -Zbuild-std=core,compiler_builtins,alloc
-cargo build --target aarch64-unknown-none-softfloat -p veridian-kernel
-cargo build --target riscv64imac-unknown-none-elf -p veridian-kernel
+BS="-Zbuild-std=core,compiler_builtins,alloc"   # as build-kernel.sh passes it
+cargo build --target targets/x86_64-veridian.json -p veridian-kernel $BS
+cargo build --target aarch64-unknown-none-softfloat -p veridian-kernel $BS
+cargo build --target riscv64imac-unknown-none-elf -p veridian-kernel $BS
 ```
 
 ## Architecture Support
@@ -57,14 +58,16 @@ hardware yet ([`docs/KNOWN-LIMITATIONS.md`](../docs/KNOWN-LIMITATIONS.md)).
 - Per-CPU run queues with wake placement and load balancing (ADR 0012)
 
 ### IPC (`ipc/`)
-- Synchronous message passing
-- Asynchronous channels
-- Zero-copy transfers
+- Endpoints with queued messages: small messages by value, larger ones through kernel buffers or
+  shared regions
+- Capability-checked; user programs reach endpoint send and receive through private system call
+  numbers 1024-1031 (ADR 0009)
+- The IPC redesign (reply capabilities, per-endpoint wait queues) is v0.28 work
 
 ### Capability System (`cap/`)
-- Unforgeable capability tokens
-- O(1) capability lookups
-- Hardware security integration
+- Unforgeable 64-bit capability tokens with generation counters
+- A per-process hash table with O(1) average lookup
+- Hierarchical delegation and cascading revocation (not yet along every grant path, N-89)
 
 ## Testing
 

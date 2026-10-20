@@ -80,10 +80,13 @@ Figures from the in-kernel `perf` command; see the
 
 | Feature | Status |
 |---------|--------|
-| Kernel syscall completeness | Pending |
-| KDE Plasma 6 full runtime | Pending (ELF loads, syscalls needed) |
-| Real hardware boot | Pending |
+| Linux system call coverage | In progress: 180 of 385 x86_64 calls implemented in v0.27.0; the remaining groups are v0.28 work |
+| KDE Plasma 6 full runtime | Pending: the shared-library build and media backend are v0.28 work |
+| Real hardware boot | Pending: QEMU only so far; sprint H (v0.28) |
+| Drivers and services in user space | Planned (critique C6) |
 | Third-party security audit | Planned |
 | Community contributor onboarding | Planned |
 
-The project has achieved all original development goals across 13 phases. The path to v1.0.0 focuses on polishing the kernel-userspace interface to enable the cross-compiled KDE stack to run fully.
+The project has achieved all original development goals across 13 phases. The path to v1.0.0 runs
+through Linux system call compatibility, real hardware and hardening; the open items are listed in
+[Known Limitations](https://github.com/doublegate/VeridianOS/blob/main/docs/KNOWN-LIMITATIONS.md).

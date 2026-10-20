@@ -261,4 +261,4 @@ All contributors are recognized in our [CONTRIBUTORS.md](https://github.com/doub
 
 By contributing, you agree that your contributions will be licensed under the same terms as VeridianOS (MIT/Apache 2.0 dual license).
 
-Thank you for helping make VeridianOS better! 🦀
+Thank you for helping make VeridianOS better!

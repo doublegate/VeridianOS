@@ -108,7 +108,7 @@ v0.28 work; AArch64 and RISC-V builds are future work. Details:
   capability model and every namespace type; the KDE shared-library pipeline and media backend;
   and sprints F (networking and storage), G (hardening) and H (real hardware), carried over from
   v0.27.0. The plan is in
-  [`to-dos/MASTER_TODO.md`](https://github.com/doublegate/VeridianOS/blob/main/to-dos/MASTER_TODO.md)
+  [`to-dos/MASTER_TODO.md`](https://github.com/doublegate/VeridianOS/blob/main/to-dos/MASTER_TODO.md).
 
 ## Project Resources
 

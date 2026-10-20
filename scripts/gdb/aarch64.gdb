@@ -13,7 +13,7 @@ set-arch-aarch64
 target remote localhost:1234
 
 # Load kernel symbols
-kernel-symbols aarch64-veridian
+kernel-symbols aarch64-unknown-none-softfloat
 
 # AArch64 specific commands
 define dump-regs

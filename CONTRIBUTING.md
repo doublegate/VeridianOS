@@ -335,7 +335,7 @@ Fixes #456
 
 - **Discord**: [#dev-help](https://discord.gg/WGcgrnuVHt)
 - **Matrix**: #veridian-dev:matrix.org
-- **Mailing List**: dev@veridian-os.org
+- **GitHub Issues**: <https://github.com/doublegate/VeridianOS/issues>
 
 ### Discussions
 
@@ -367,37 +367,40 @@ Contributors are recognized in several ways:
 export RUSTC_WRAPPER=sccache
 
 # Limit parallel jobs if low on RAM
-cargo build -j 2
+CARGO_BUILD_JOBS=2 ./build-kernel.sh x86_64 dev
 
-# Build only specific component
-cargo build -p veridian-kernel
+# Build one architecture only
+./build-kernel.sh aarch64 dev
 ```
 
 ### Debugging
 
 ```bash
-# Enable debug logging
-RUST_LOG=debug just run
+# Boot x86_64 with a framebuffer window and the BlockFS root
+./scripts/run-veridian.sh --blockfs --display
 
-# Run with GDB
-just gdb
-
-# Use QEMU monitor
-just run -- -monitor stdio
+# Debug with GDB: add -s -S to a QEMU command line, then attach
+gdb -x scripts/gdb/x86_64.gdb          # gdb-multiarch for aarch64.gdb / riscv64.gdb
 ```
+
+QEMU command lines for every architecture are in the README's Quick Start, and the full GDB
+guide is [docs/GDB-DEBUGGING.md](docs/GDB-DEBUGGING.md).
 
 ### Testing
 
 ```bash
-# Run specific test
-cargo test test_name
+# Run specific host test
+cargo test --lib --features alloc -p veridian-kernel --target x86_64-unknown-linux-gnu test_name
 
 # Run tests with output
-cargo test -- --nocapture
+cargo test --lib --features alloc -p veridian-kernel --target x86_64-unknown-linux-gnu -- --nocapture
 
-# Run benchmarks
-cargo bench
+# Boot one architecture and run the in-kernel tests
+scripts/boot-test.sh x86_64
 ```
+
+Benchmarks run inside the kernel: the shell's `perf` command
+([docs/PERFORMANCE-REPORT.md](docs/PERFORMANCE-REPORT.md)).
 
 ## Questions?
 
@@ -405,7 +408,7 @@ If you have questions not covered here:
 
 1. Check the [FAQ](docs/FAQ.md)
 2. Ask on [Discord](https://discord.gg/WGcgrnuVHt)
-3. Email [dev@veridian-os.org](mailto:dev@veridian-os.org)
+3. Open a [GitHub issue](https://github.com/doublegate/VeridianOS/issues)
 
 Thank you for contributing to VeridianOS! Your efforts help build a better operating system for everyone.
 

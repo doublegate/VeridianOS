@@ -102,8 +102,9 @@ The design goal is a microkernel that provides only memory management, schedulin
 | CI pipeline | GitHub Actions + Codecov: builds, boots on 1 and 4 CPUs, and the x86_64 runtime suite; host-test line coverage 56.2% |
 | Unsafe code | 3 justified `static mut` (early serial, boot info, per-CPU data); unsafe blocks carry SAFETY comments |
 
-Test counts and coverage as of v0.27.0 (2026-10-18); sources: [`docs/PERFORMANCE-REPORT.md`](docs/PERFORMANCE-REPORT.md),
-[`CHANGELOG.md`](CHANGELOG.md).
+Test counts and coverage as of v0.27.0 (2026-10-18); sources: the `[v0.27.0]` section of
+[`CHANGELOG.md`](CHANGELOG.md) (test counts) and [Codecov](https://codecov.io/gh/doublegate/VeridianOS)
+(coverage); performance figures: [`docs/PERFORMANCE-REPORT.md`](docs/PERFORMANCE-REPORT.md).
 
 ### Architecture Support
 

@@ -362,8 +362,8 @@ sockets instead.
 
 ### Capability lookup in debug builds
 
-`cap_lookup` measures 93 ns in a dev build: within the 100 ns target, but only just. Release-build
-numbers have not been recorded.
+`cap_lookup` measures 97 ns in a dev build: within the 100 ns target, but only just. A release
+kernel measures 29 ns (2026-10-15, `docs/PERFORMANCE-REPORT.md`, N-281).
 
 ### Hardening features are not active (N-145, N-146, N-15; planned v0.28, sprint G)
 

@@ -535,8 +535,8 @@ Document common configuration problems and solutions.
 ## 🔗 External References
 
 ### Issue Tracking
-- GitHub Issues: [Link when available]
-- Security Issues: security@veridian-os.org
+- GitHub Issues: <https://github.com/doublegate/VeridianOS/issues>
+- Security Issues: private reports through <https://github.com/doublegate/VeridianOS/security/advisories/new> (see SECURITY.md)
 
 ### Related Documents
 - [Testing TODO](TESTING_TODO.md)
