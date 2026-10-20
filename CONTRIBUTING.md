@@ -125,6 +125,7 @@ git checkout -b feature/my-feature
    cargo clippy --target aarch64-unknown-none-softfloat -p veridian-kernel $BS -- -D warnings
    cargo clippy --target riscv64imac-unknown-none-elf -p veridian-kernel $BS -- -D warnings
    cargo clippy --lib --features alloc -p veridian-kernel --target x86_64-unknown-linux-gnu -- -D warnings
+   cargo clippy --lib --all-features -- -D warnings   # feature-gated code such as `trace`
    ```
 
 ### 4. Testing Requirements

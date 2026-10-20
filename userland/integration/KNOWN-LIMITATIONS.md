@@ -15,7 +15,7 @@
 | OpenGL ES 2.0 only | No OpenGL 3.x/4.x core profile support | KWin's GLES2 backend handles this transparently |
 | Complex script rendering | Arabic/Devanagari ligature rendering may have edge cases | Install additional fonts; Latin/CJK fully supported |
 
-### Media, cameras and X11 (v0.27 shared-library build)
+### Media, cameras and X11 (the media backend and the shared-library KDE build are v0.28 work)
 
 | Limitation | Details | Workaround |
 |-----------|---------|------------|

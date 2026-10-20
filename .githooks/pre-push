@@ -48,7 +48,7 @@ else
     echo -e "${GREEN}No WIP commits${NC}"
 fi
 
-# 3. Cargo.lock up to date (cargo metadata checks it without building; a
+# 2. Cargo.lock up to date (cargo metadata checks it without building; a
 # plain `cargo check` builds the kernel's bare-metal binary for the host and
 # fails for that reason, not the lockfile's)
 echo "Checking Cargo.lock..."
@@ -60,12 +60,13 @@ else
     echo -e "${GREEN}Cargo.lock is up to date${NC}"
 fi
 
-# 4-5. Formatting, clippy on every target and the host tests: the gate
+# 3. Formatting, clippy on every target and the host tests: the gate
 # without QEMU. Pushes to main or develop always run it; elsewhere
 # RUN_TESTS_PREPUSH=0 skips it, and then only formatting is checked.
 if [ $IS_PROTECTED -eq 1 ] || [ "${RUN_TESTS_PREPUSH:-1}" = "1" ]; then
     echo "Running scripts/dev/gate.sh (fmt, clippy, syscall checks, host tests)..."
     GATE_LOG=$(mktemp)
+    trap 'rm -f "$GATE_LOG"' EXIT
     if scripts/dev/gate.sh >"$GATE_LOG" 2>&1; then
         rm -f "$GATE_LOG"
         echo -e "${GREEN}Gate passed${NC}"
@@ -94,13 +95,13 @@ else
     fi
 fi
 
-# 6. Check documentation builds
+# 4. Check documentation builds
 echo "Checking documentation..."
 if ! cargo doc --lib --features alloc -p veridian-kernel --target x86_64-unknown-linux-gnu --no-deps --quiet 2>/dev/null; then
     echo -e "${YELLOW}Documentation build warnings${NC}"
 fi
 
-# 7. Security check for sensitive files
+# 5. Security check for sensitive files
 echo "Checking for sensitive files..."
 SENSITIVE_PATTERNS=(
     "*.key"
@@ -132,13 +133,13 @@ else
     echo -e "${GREEN}No sensitive files detected${NC}"
 fi
 
-# 8. Check branch naming
+# 6. Check branch naming
 if [[ ! "$CURRENT_BRANCH" =~ ^(main|develop|feature/.*|bugfix/.*|hotfix/.*|release/.*|chore/.*)$ ]]; then
     echo -e "${YELLOW}Non-standard branch name: $CURRENT_BRANCH${NC}"
     echo "Consider using: feature/, bugfix/, hotfix/, release/, or chore/"
 fi
 
-# 9. Size check - warn about large pushes
+# 7. Size check - warn about large pushes
 COMMIT_COUNT=$(git rev-list --count @{u}..)
 if [ "$COMMIT_COUNT" -gt 20 ]; then
     echo -e "${YELLOW}Large push detected ($COMMIT_COUNT commits)${NC}"

@@ -133,6 +133,7 @@ clippy:
     cargo clippy --target aarch64-unknown-none-softfloat -p veridian-kernel {{ bs }} -- -D warnings
     cargo clippy --target riscv64imac-unknown-none-elf -p veridian-kernel {{ bs }} -- -D warnings
     cargo clippy --lib --features alloc -p veridian-kernel --target x86_64-unknown-linux-gnu -- -D warnings
+    cargo clippy --lib --all-features -- -D warnings
 
 # The pre-commit gate without QEMU: fmt, clippy, syscall checks, host tests
 ci-checks:

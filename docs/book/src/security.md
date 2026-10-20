@@ -75,7 +75,8 @@ Do not expose a VeridianOS system to untrusted users or networks.
   - Capability revocation: cache invalidation before revoke
   - Compositor bounds checking
   - ACPI checked arithmetic
-- **v0.26.0 and v0.27.0**: audit remediation; every finding is tracked as N-xx in `docs/audit/`
+- **v0.26.0 and v0.27.0**: audit remediation; every finding is tracked in `docs/audit/`, under `N-xx`
+  numbers and the original audit identifiers (such as `MEM-SEC-01`)
   and, while open, in Known Limitations
 
 ## Supported Versions

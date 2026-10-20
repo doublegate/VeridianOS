@@ -27,7 +27,7 @@ We take the security of VeridianOS seriously. If you believe you have found a se
 
 1. Report it privately through GitHub: open the repository's **Security** tab and choose
    **Report a vulnerability** (<https://github.com/doublegate/VeridianOS/security/advisories/new>).
-   Only the maintainers can see the report.
+   The report is private from the public and visible to the maintainers and to you.
 2. Include the following information:
    - Type of vulnerability
    - Full paths of source file(s) related to the issue
@@ -161,7 +161,8 @@ Our threat model considers:
   (`scripts/dev/gate.sh --boot --rootfs`)
 - An in-kernel mutation fuzzer (`kernel/src/security/fuzzing.rs`); coverage-guided fuzzing of the
   parsers is planned with sprint G
-- Audits: `docs/audit/` tracks every finding (N-xx) with its status
+- Audits: `docs/audit/` tracks every finding and its status, under `N-xx` numbers and the
+  original audit identifiers (such as `MEM-SEC-01`)
 
 ### Incident Response
 

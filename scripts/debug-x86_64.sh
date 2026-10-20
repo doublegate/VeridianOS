@@ -32,8 +32,10 @@ accel=(-cpu qemu64)
 [[ -w /dev/kvm ]] && accel=(-enable-kvm -cpu host)
 
 img=target/x86_64-veridian/debug/veridian-uefi.img
-if [[ ! -r $img ]]; then
-    echo -e "${RED}UEFI disk image not found: $img (see the bootimage step in the build output above)${NC}"
+# build-kernel.sh only warns when the bootimage step fails, so an image left by
+# an earlier build would boot a kernel other than the one GDB has symbols for.
+if [[ ! -r $img || target/x86_64-veridian/debug/veridian-kernel -nt $img ]]; then
+    echo -e "${RED}UEFI disk image missing or older than the kernel: $img (see the bootimage step in the build output above)${NC}"
     exit 1
 fi
 
