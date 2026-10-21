@@ -1,5 +1,13 @@
 ## [Unreleased]
 
+### Changed
+
+- The x86_64 BusyBox rootfs build (`scripts/build-busybox-rootfs.sh`) and `scripts/build-libcurses.sh`
+  keep their work tree in `/opt/veridian/busybox-x86_64` (override with `VERIDIAN_BUSYBOX_WORK`)
+  instead of `/tmp/VeridianOS`. systemd-tmpfiles deletes files under `/tmp` after 10 days, which
+  removed the BusyBox build and left the gate testing a stale rootfs image. The downloaded tarball
+  is now checked against busybox.net's SHA-256, as `build-musl-rootfs.sh` already did.
+
 ---
 
 ## [v0.27.0] - 2026-10-18

@@ -18,7 +18,8 @@ RANLIB="${TOOLCHAIN_PREFIX}/bin/x86_64-veridian-ranlib"
 SYSROOT="${TOOLCHAIN_PREFIX}/sysroot"
 
 SRC="${PROJECT_ROOT}/userland/libcurses"
-BUILD="/tmp/VeridianOS/libcurses-build"
+# Out of /tmp (aged out by systemd-tmpfiles), beside build-busybox-rootfs.sh's tree.
+BUILD="${VERIDIAN_BUSYBOX_WORK:-${VERIDIAN_PREFIX:-/opt/veridian}/busybox-x86_64}/libcurses-build"
 
 # Verify cross-compiler exists
 if [ ! -x "$CC" ]; then

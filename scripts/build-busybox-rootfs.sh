@@ -8,7 +8,8 @@
 #
 # Prerequisites:
 #   - Cross-compiler: /opt/veridian/toolchain/bin/x86_64-veridian-gcc (GCC 16.2.0, scripts/build-cross-toolchain.sh)
-#   - BusyBox source: downloaded automatically to /tmp/VeridianOS/busybox-1.36.1/
+#   - BusyBox source: downloaded automatically to $WORK_DIR/busybox-1.36.1/
+#     (default /opt/veridian/busybox-x86_64; set VERIDIAN_BUSYBOX_WORK to move it)
 #   - Native GCC toolchain: target/native-gcc-static/ (from build-native-gcc-static.sh)
 #
 # Usage: ./scripts/build-busybox-rootfs.sh [phase]
@@ -22,9 +23,14 @@ PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 # 1.38.0 "unstable".
 BUSYBOX_VERSION="1.36.1"
 BUSYBOX_URL="https://busybox.net/downloads/busybox-${BUSYBOX_VERSION}.tar.bz2"
+# busybox.net's busybox-1.36.1.tar.bz2.sha256 (as in build-musl-rootfs.sh).
+BUSYBOX_SHA256="b8cc24c9574d809e7279c3be349795c5d5ceb6fdf19ca709f80cde50e47de314"
 
-# Directories
-WORK_DIR="/tmp/VeridianOS"
+# Directories. The work tree (source, build, libc objects, logs) is kept out
+# of /tmp, which systemd-tmpfiles ages out after 10 days and a reboot clears,
+# and out of target/, which `cargo clean` deletes; /opt/veridian already holds
+# the cross toolchain and the musl build trees (tools/cross/veridian-paths.sh).
+WORK_DIR="${VERIDIAN_BUSYBOX_WORK:-${VERIDIAN_PREFIX:-/opt/veridian}/busybox-x86_64}"
 BB_SRC="${WORK_DIR}/busybox-${BUSYBOX_VERSION}"
 BB_BUILD="${WORK_DIR}/busybox-build"
 BB_PATCHES="${PROJECT_ROOT}/tools/busybox/patches"
@@ -65,8 +71,10 @@ phase_download() {
         local tarball="${WORK_DIR}/busybox-${BUSYBOX_VERSION}.tar.bz2"
         if [ ! -f "$tarball" ]; then
             echo "  Downloading ${BUSYBOX_URL}..."
-            curl -L -o "$tarball" "$BUSYBOX_URL"
+            curl -fsSL -o "${tarball}.part" "$BUSYBOX_URL" || { rm -f "${tarball}.part"; echo "  ERROR: download failed"; exit 1; }
+            mv "${tarball}.part" "$tarball"
         fi
+        echo "${BUSYBOX_SHA256}  ${tarball}" | sha256sum -c --quiet - || { echo "  ERROR: BusyBox checksum mismatch"; exit 1; }
         echo "  Extracting..."
         cd "$WORK_DIR"
         tar xjf "$tarball"
@@ -387,7 +395,7 @@ phase_rootfs() {
     local curses_src="${PROJECT_ROOT}/userland/libcurses"
     if [ -f "${curses_src}/curses.c" ]; then
         echo -n "    libcurses.a... "
-        local curses_build="/tmp/VeridianOS/libcurses-rootfs-build"
+        local curses_build="${WORK_DIR}/libcurses-rootfs-build"
         rm -rf "$curses_build"
         mkdir -p "$curses_build"
         local curses_cflags="-static -O2 -Wall -Wextra"
