@@ -34,6 +34,9 @@ VERIDIAN_CROSS_BUILD="${VERIDIAN_CROSS_BUILD:-${VERIDIAN_PREFIX}/cross-build${_v
 # Downloaded source tarballs, kept apart from the build trees so a clean
 # rebuild never downloads again.
 VERIDIAN_SOURCES="${VERIDIAN_SOURCES:-${VERIDIAN_PREFIX}/sources}"
+# A relative override is taken from the directory the build was started in
+# (as scripts/build-busybox-rootfs.sh does), since build scripts cd later.
+case "${VERIDIAN_SOURCES}" in /*) ;; *) VERIDIAN_SOURCES="${PWD}/${VERIDIAN_SOURCES}" ;; esac
 
 # The cross toolchain every phase after musl compiles with
 # (build-musl-toolchain.sh): GCC and binutils for this triple, with
