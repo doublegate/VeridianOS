@@ -11,12 +11,13 @@
 - `scripts/install-deps.sh` installs the cargo tools with the toolchain pinned in
   `rust-toolchain.toml`, so it no longer depends on a rustup default toolchain.
 - The x86_64 BusyBox rootfs build (`scripts/build-busybox-rootfs.sh`) and `scripts/build-libcurses.sh`
-  keep their work tree in `/opt/veridian/busybox-x86_64` (override with `VERIDIAN_BUSYBOX_WORK`)
+  keep their work tree in `/opt/veridian/busybox-x86_64` (override with `VERIDIAN_BUSYBOX_WORK`;
+  a relative path is taken from the current directory)
   instead of `/tmp/VeridianOS`. systemd-tmpfiles deletes files under `/tmp` after 10 days, which
   removed the BusyBox build and left the gate testing a stale rootfs image. The tarball is shared
   with `build-musl-rootfs.sh` in `/opt/veridian/sources` (`VERIDIAN_SOURCES`) and checked against
   busybox.net's SHA-256 before it enters the cache (each download uses its own temporary file, so
-  the two scripts can download at the same time); a bad copy is deleted, and extraction goes
+  the two scripts can download at the same time); both scripts delete a bad copy, and extraction goes
   through a scratch directory so an interrupted run cannot leave a partial source tree.
   `build-libcurses.sh` puts its build directory beside a custom toolchain prefix given as its
   argument.

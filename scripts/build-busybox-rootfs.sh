@@ -33,6 +33,9 @@ BUSYBOX_SHA256="b8cc24c9574d809e7279c3be349795c5d5ceb6fdf19ca709f80cde50e47de314
 WORK_DIR="${VERIDIAN_BUSYBOX_WORK:-${VERIDIAN_PREFIX:-/opt/veridian}/busybox-x86_64}"
 # The tarball cache build-musl-rootfs.sh uses (tools/cross/veridian-paths.sh).
 SOURCES_DIR="${VERIDIAN_SOURCES:-${VERIDIAN_PREFIX:-/opt/veridian}/sources}"
+# Relative values are made absolute here: the build phases cd into $BB_SRC.
+case "$WORK_DIR" in /*) ;; *) WORK_DIR="${PWD}/${WORK_DIR}" ;; esac
+case "$SOURCES_DIR" in /*) ;; *) SOURCES_DIR="${PWD}/${SOURCES_DIR}" ;; esac
 BB_SRC="${WORK_DIR}/busybox-${BUSYBOX_VERSION}"
 BB_BUILD="${WORK_DIR}/busybox-build"
 BB_PATCHES="${PROJECT_ROOT}/tools/busybox/patches"

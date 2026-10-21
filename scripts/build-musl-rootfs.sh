@@ -64,7 +64,8 @@ build_busybox() {
         chmod a+r "${part}"  # mktemp creates it 0600
         mv "${part}" "${tarball}"
     fi
-    echo "${BUSYBOX_SHA256}  ${tarball}" | sha256sum -c --quiet - || die "BusyBox checksum mismatch"
+    # A bad tarball is removed, so the next run downloads it again.
+    echo "${BUSYBOX_SHA256}  ${tarball}" | sha256sum -c --quiet - || { rm -f "${tarball}"; die "BusyBox checksum mismatch (removed ${tarball})"; }
     log "Building BusyBox ${BUSYBOX_VERSION}..."
     rm -rf "${BB_SRC}"
     mkdir -p "$(dirname "${BB_SRC}")"
