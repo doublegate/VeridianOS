@@ -115,8 +115,9 @@ This document records the baseline performance measurements from Phase 0 and cur
 ## Benchmark Infrastructure
 
 ### Running the Benchmarks
-The micro-benchmarks run inside the kernel: boot an architecture (`scripts/run-veridian.sh`) and
-type `perf` at the shell (`perf stats` prints the counters too). Each runs 1,000 iterations
+The micro-benchmarks run inside the kernel: boot an architecture (`scripts/run-veridian.sh` for
+x86_64; the AArch64 and RISC-V QEMU commands are in `docs/BUILD-INSTRUCTIONS.md`) and type `perf`
+at the shell (`perf stats` prints the counters too). Each runs 1,000 iterations
 after 10 warmup iterations; `docs/PERFORMANCE-REPORT.md` has the method and the recorded
 results, which are added there by hand.
 

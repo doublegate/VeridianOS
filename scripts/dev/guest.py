@@ -10,8 +10,8 @@ prompt. The whole serial output goes to LOG. Prints "ok" when every command
 returned to the prompt, otherwise "timeout/exit", and exits 0 or 1 to match.
 
 A command has finished when a root prompt, in any working directory, appears in
-the output written after it was typed and after its echo. A command that itself
-prints a root prompt at that point ends its wait early.
+the output after the shell has echoed the whole command. A command that itself
+prints a root prompt ends its wait early.
 
 Environment: SMP (CPU count, default 1), RISCV_CPU (QEMU -cpu for RISC-V),
 PROMPT_TIMEOUT (seconds to wait for each prompt, default 600).
@@ -87,31 +87,28 @@ def main() -> int:
     timeout = int(os.environ.get("PROMPT_TIMEOUT", "600"))
     # Checked before LOG is truncated.
     command = qemu_command(arch)
+    Path(log).parent.mkdir(parents=True, exist_ok=True)
     ok = False
-    with open(log, "wb") as out:
+    with open(log, "wb") as out, open(log, "rb") as reader:
         proc = subprocess.Popen(
             command,
             stdin=subprocess.PIPE,
             stdout=out,
             stderr=subprocess.STDOUT,
         )
-
-        def output() -> bytes:
-            with open(log, "rb") as f:
-                return f.read()
+        data = bytearray()
 
         def wait(start: int, echo: bytes) -> int | None:
-            """The end of the first prompt written after `start` (and after
-            `echo`, once it has appeared), or None on timeout or exit."""
+            """The end of the first prompt written after `start` and after
+            the whole of `echo`, or None on timeout or exit."""
             began = time.time()
             while time.time() - began < timeout:
-                data = output()
+                data.extend(reader.read())
                 at = start
                 if echo:
                     seen = data.find(echo, start)
-                    if seen >= 0:
-                        at = seen + len(echo)
-                match = PROMPT.search(data, at)
+                    at = seen + len(echo) if seen >= 0 else -1
+                match = PROMPT.search(data, at) if at >= 0 else None
                 if match:
                     return match.end()
                 if proc.poll() is not None:
@@ -125,8 +122,12 @@ def main() -> int:
                 if end is None:
                     break
                 assert proc.stdin is not None
-                proc.stdin.write(cmd.encode() + b"\n")
-                proc.stdin.flush()
+                try:
+                    proc.stdin.write(cmd.encode() + b"\n")
+                    proc.stdin.flush()
+                except BrokenPipeError:
+                    end = None
+                    break
                 end = wait(end, cmd.encode())
             ok = end is not None
         finally:
