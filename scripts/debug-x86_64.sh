@@ -1,61 +1,62 @@
 #!/bin/bash
-# Debug script for x86_64 VeridianOS kernel
+# Debug script for the x86_64 VeridianOS kernel: builds the dev kernel, starts
+# QEMU paused with a GDB server on port 1234, and attaches GDB with
+# scripts/gdb/x86_64.gdb (symbols from target/x86_64-veridian/debug/veridian-kernel).
+# GDB reads its commands from stdin, so a command file can be piped in.
 
 set -e
+cd "$(dirname "$0")/.."
 
-# Colors for output
-RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
-NC='\033[0m' # No Color
+RED='\033[0;31m'
+NC='\033[0m'
 
 echo -e "${GREEN}VeridianOS x86_64 Debug Script${NC}"
-echo "================================"
 
-# Build the kernel with debug info
-echo -e "${YELLOW}Building kernel with debug symbols...${NC}"
-cargo build --target targets/x86_64-veridian.json -p veridian-kernel \
-    -Zbuild-std=core,compiler_builtins,alloc \
-    -Zbuild-std-features=compiler-builtins-mem
+echo -e "${YELLOW}Building the dev kernel...${NC}"
+# stdin is GDB's (a piped command file), so the build must not read it.
+./build-kernel.sh x86_64 dev </dev/null
 
-# Check if build succeeded
-if [ $? -ne 0 ]; then
-    echo -e "${RED}Build failed!${NC}"
+# The same firmware search and accelerator choice as scripts/boot-test.sh.
+ovmf=""
+for f in /usr/share/edk2/x64/OVMF.4m.fd /usr/share/OVMF/OVMF_CODE_4M.fd \
+    /usr/share/OVMF/OVMF_CODE.fd /usr/share/edk2/ovmf/OVMF_CODE.fd \
+    /usr/share/qemu/OVMF.fd; do
+    [[ -r $f ]] && { ovmf=$f; break; }
+done
+if [[ -z $ovmf ]]; then
+    echo -e "${RED}No OVMF firmware found (install edk2-ovmf / ovmf)${NC}"
+    exit 1
+fi
+accel=(-cpu qemu64)
+[[ -w /dev/kvm ]] && accel=(-enable-kvm -cpu host)
+
+img=target/x86_64-veridian/debug/veridian-uefi.img
+# build-kernel.sh only warns when the bootimage step fails, so an image left by
+# an earlier build would boot a kernel other than the one GDB has symbols for.
+if [[ ! -r $img || target/x86_64-veridian/debug/veridian-kernel -nt $img ]]; then
+    echo -e "${RED}UEFI disk image missing or older than the kernel: $img (see the bootimage step in the build output above)${NC}"
     exit 1
 fi
 
-echo -e "${GREEN}Build successful!${NC}"
-
-# Build bootimage for x86_64
-echo -e "${YELLOW}Creating bootimage...${NC}"
-cargo bootimage --target targets/x86_64-veridian.json
-
-if [ $? -ne 0 ]; then
-    echo -e "${RED}Bootimage creation failed!${NC}"
-    exit 1
-fi
-
-# Start QEMU in the background with GDB server
-echo -e "${YELLOW}Starting QEMU with GDB server on port 1234...${NC}"
-qemu-system-x86_64 \
-    -drive format=raw,file=target/x86_64-veridian/debug/bootimage-veridian-kernel.bin \
-    -serial stdio \
-    -display none \
+echo -e "${YELLOW}Starting QEMU (paused) with a GDB server on port 1234...${NC}"
+qemu-system-x86_64 "${accel[@]}" -m 256M \
+    -drive "if=pflash,format=raw,readonly=on,file=$ovmf" \
+    -drive "id=disk0,if=none,format=raw,file=$img" \
+    -device ide-hd,drive=disk0 \
+    -serial file:target/debug-x86_64-serial.log -display none -monitor none \
     -s -S &
-
 QEMU_PID=$!
+trap 'kill $QEMU_PID 2>/dev/null || true; wait $QEMU_PID 2>/dev/null || true' EXIT
 
-# Give QEMU time to start
 sleep 2
-
-# Check if QEMU is running
-if ! ps -p $QEMU_PID > /dev/null; then
-    echo -e "${RED}QEMU failed to start!${NC}"
+if ! kill -0 $QEMU_PID 2>/dev/null; then
+    echo -e "${RED}QEMU failed to start${NC}"
     exit 1
 fi
 
-echo -e "${GREEN}QEMU started (PID: $QEMU_PID)${NC}"
-echo -e "${YELLOW}Starting GDB...${NC}"
+echo -e "${GREEN}QEMU started (PID $QEMU_PID); serial output: target/debug-x86_64-serial.log${NC}"
 echo ""
 echo "=== GDB Quick Reference ==="
 echo "continue (c)     - Start/continue execution"
@@ -63,16 +64,14 @@ echo "break <symbol>   - Set breakpoint"
 echo "next (n)         - Step over"
 echo "step (s)         - Step into"
 echo "info registers   - Show registers"
-echo "x/<n><f> <addr> - Examine memory"
+echo "x/<n><f> <addr>  - Examine memory"
+echo ""
+echo "Use hbreak (hardware breakpoints) for kernel code: UEFI loads the kernel"
+echo "after GDB attaches and overwrites software breakpoints set before then."
 echo "==========================="
 echo ""
 
-# Start GDB with our x86_64 configuration
-gdb -x scripts/gdb/x86_64.gdb
+GDB_CMD=gdb
+$GDB_CMD -q -x scripts/gdb/x86_64.gdb
 
-# When GDB exits, kill QEMU
-echo -e "${YELLOW}Cleaning up...${NC}"
-kill $QEMU_PID 2>/dev/null || true
-wait $QEMU_PID 2>/dev/null || true
-
-echo -e "${GREEN}Debug session ended.${NC}"
+echo -e "${YELLOW}Debug session ended.${NC}"

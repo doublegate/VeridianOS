@@ -26,18 +26,24 @@ kernel/
 The kernel requires a custom target specification and must be built with the nightly Rust compiler:
 
 ```bash
-# Build for x86_64
-cargo build --target ../targets/x86_64-veridian.json -Zbuild-std=core,compiler_builtins,alloc
+# From the repository root: build every architecture (x86_64 also gets its UEFI disk image)
+./build-kernel.sh all dev
 
-# Build for all architectures
-just build-all
+# Or one architecture by hand
+BS="-Zbuild-std=core,compiler_builtins,alloc"   # as build-kernel.sh passes it
+cargo build --target targets/x86_64-veridian.json -p veridian-kernel $BS
+cargo build --target aarch64-unknown-none-softfloat -p veridian-kernel $BS
+cargo build --target riscv64imac-unknown-none-elf -p veridian-kernel $BS
 ```
 
 ## Architecture Support
 
-- **x86_64**: Full support with VGA output, GDT/IDT, paging
-- **AArch64**: Full support with PL011 UART, MMU configuration
-- **RISC-V**: Full support with SBI interface, UART output
+All three boot under QEMU on one and four CPUs and run user programs; none has run on real
+hardware yet ([`docs/KNOWN-LIMITATIONS.md`](../docs/KNOWN-LIMITATIONS.md)).
+
+- **x86_64**: UEFI boot, GDT/IDT, local APIC, Ring 3 user programs with the native libc
+- **AArch64**: PL011 UART, MMU and caches on with the kernel in the upper half, EL0 programs with musl
+- **RISC-V**: OpenSBI, Sv48 or Sv39 paging, U-mode programs with musl
 
 ## Key Components
 
@@ -47,42 +53,42 @@ just build-all
 - Page table manipulation
 
 ### Scheduler (`sched/`)
-- Round-robin scheduler (Phase 1)
-- Priority-based scheduling (Phase 2)
-- Real-time support (Phase 3)
+- Every thread a dispatched task on its own guarded kernel stack (ADR 0006)
+- EEVDF fair class with SCHED_FIFO/RR and SCHED_DEADLINE above it (ADR 0007)
+- Per-CPU run queues with wake placement and load balancing (ADR 0012)
 
 ### IPC (`ipc/`)
-- Synchronous message passing
-- Asynchronous channels
-- Zero-copy transfers
+- Endpoints with queued messages: small messages by value, larger ones through kernel buffers or
+  shared regions
+- Capability-checked; user programs reach endpoint send and receive through private system call
+  numbers 1024-1031 (ADR 0009)
+- The IPC redesign (reply capabilities, per-endpoint wait queues) is v0.28 work
 
 ### Capability System (`cap/`)
-- Unforgeable capability tokens
-- O(1) capability lookups
-- Hardware security integration
+- Unforgeable 64-bit capability tokens with generation counters
+- A per-process hash table with O(1) average lookup
+- Hierarchical delegation and cascading revocation (not yet along every grant path, N-89)
 
 ## Testing
 
 ```bash
-# Run unit tests
-cargo test
+# Run unit tests (from the repository root)
+cargo test --lib --features alloc -p veridian-kernel --target x86_64-unknown-linux-gnu
 
-# Run benchmarks
-cargo bench
-
-# Run in QEMU
-just run-x86_64
+# Build, then boot an architecture in QEMU and check the in-kernel tests
+./build-kernel.sh all dev
+scripts/boot-test.sh x86_64      # or aarch64, riscv64
 ```
+
+Benchmarks run inside the kernel: the shell's `perf` command (method and results in
+[`docs/PERFORMANCE-REPORT.md`](../docs/PERFORMANCE-REPORT.md)). The QEMU command lines for each
+architecture are in the top-level [README](../README.md#quick-start).
 
 ## Debugging
 
-```bash
-# Debug with GDB
-just debug-x86_64
-
-# View assembly
-just objdump-x86_64
-```
+Add `-s -S` to a QEMU command line to wait for GDB on port 1234, then attach with the scripts in
+`scripts/gdb/` (`gdb -x scripts/gdb/x86_64.gdb`; `gdb-multiarch` for AArch64 and RISC-V). Full
+guide: [`docs/GDB-DEBUGGING.md`](../docs/GDB-DEBUGGING.md).
 
 ## Contributing
 

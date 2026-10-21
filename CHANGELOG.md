@@ -30,9 +30,10 @@ system call numbers. Highlights, with the decision records:
 - **Storage and audits:** BlockFS data written back before sync (ADR 0011), lock-free cache
   misses, and the 2026-10 audit intake.
 
-Tests: 4,735 host unit tests; boot tests x86_64 43/43, AArch64 64/64, RISC-V 57/57 (47, 68 and 61
-on four CPUs); runtime suites x86_64 91/91 and 71/71, AArch64 91/91 and 69/69, RISC-V 89/89 and
-69/69, on one and four CPUs and on RISC-V also under Sv39.
+Tests: 4,770 host unit tests; boot tests x86_64 43/43, AArch64 64/64, RISC-V 57/57 (47, 68 and 61
+on four CPUs); runtime suites x86_64 91/91 and 80/80, AArch64 91/91 and 78/78, RISC-V 89/89 and
+78/78, on one and four CPUs and on RISC-V also under Sv39. Before the tag, every finding of a bot
+review of all v0.27 code (review PRs #19 to #25) was fixed or answered on its PR.
 
 **Moved to v0.28 (v0.27.0 was cut early, 2026-10-18):** sprints F (networking, storage), G
 (hardening) and H (real hardware), the remaining system call groups with LTP and musl libc-test, the
@@ -41,6 +42,9 @@ items listed in `to-dos/MASTER_TODO.md`. What does not work yet is in `docs/KNOW
 
 ### Added
 
+- **A code of conduct (`CODE_OF_CONDUCT.md`, Contributor Covenant 2.1).** CONTRIBUTING linked to a
+  file that did not exist; reports go privately to the maintainer on the project Discord server,
+  or publicly through GitHub Issues.
 - **`tools/veridian-elfctl`: the W^X opt-in for an existing binary (ADR 0017).** A Linux binary
   that needs writable and executable memory had to be relinked with `<veridian/wxneeded.h>`. The
   tool shows, sets or clears the VeridianOS feature note: it flips the bit of a note that is
@@ -1248,6 +1252,17 @@ items listed in `to-dos/MASTER_TODO.md`. What does not work yet is in `docs/KNOW
 
 ### Fixed
 
+- **Developer tooling on the current targets.** The Justfile built AArch64 and RISC-V for the old
+  custom targets, booted x86_64 with `-kernel` (the UEFI image cannot boot that way), ran a plain
+  `cargo test` that cannot work, and had a `clean` recipe that would delete the cross sysroot in
+  `target/`; its recipes now call `build-kernel.sh`, `run-veridian.sh`, `boot-test.sh` and
+  `gate.sh`, and `clean` is gone. `scripts/debug-*.sh` and `docs/GDB-DEBUGGING.md` build with
+  `build-kernel.sh` and boot the same QEMU command lines as the boot tests, and the AArch64 and
+  RISC-V GDB scripts load symbols from the current target directories. The GDB helpers that took
+  the architecture as a string (`break-boot`, `examine-uart`) failed on a bare-metal target, which
+  has no `malloc` for GDB to place the string in; they are now one command per architecture, and
+  `break-panic` breaks on `core::panicking::panic_fmt` (`panic_handler` did not exist). All three
+  debug scripts were run against QEMU and stop at the boot breakpoint with symbols.
 - **AArch64 counted all of a program's CPU time as system time.** An interrupt from EL0 reached
   the timer through the same handler as one from the kernel, which recorded every tick as kernel
   time, so `getrusage`, `times` and SIGCHLD accounting showed no user time. The EL0 path now

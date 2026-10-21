@@ -353,6 +353,15 @@ What does not work yet: `docs/KNOWN-LIMITATIONS.md`.
     probes (HR-04 to HR-06), Svpbmt/XTheadMae (HR-11).
   - [ ] ABI-review items N-190 to N-193, N-207, N-209 to N-211, N-217, N-221, N-222, N-225,
     N-231, N-235 to N-238.
+  - [ ] Legacy scripts superseded in v0.27.0 and still on the pre-v0.27 targets (PR #26 review):
+    `scripts/test-{x86_64,aarch64,riscv64}.sh` (replaced by `scripts/boot-test.sh`) and
+    `scripts/benchmark.sh` (replaced by the in-kernel `perf` command), and `scripts/coverage.sh`
+    (cargo-tarpaulin; CI measures with cargo-llvm-cov); nothing calls them since the Justfile was
+    rewritten. Remove them or port them.
+  - [ ] MFA through PAM (decision of 2026-10-19: no MFA fixes before this): TOTP per RFC 6238,
+    pam_veridian checking the second factor, and only then the `/etc/veridian/mfa` policy -- a
+    line naming no account (no `:`) protects no account today, while a named line with a bad
+    secret or an unreadable file fails closed (PR #26 review, `docs/KNOWN-LIMITATIONS.md`).
 
   Then the process, signal, time and file syscall tiers (X2 groups, with the open
   ABI-review findings N-194 to N-247 that belong to them).
@@ -573,19 +582,19 @@ See [REMEDIATION_TODO.md](REMEDIATION_TODO.md) for 37 identified gaps from Phase
 
 ## Quick Links
 
-- [Phase 0 TODO](PHASE0_TODO.md) - COMPLETE
-- [Phase 1 TODO](PHASE1_TODO.md) - COMPLETE
-- [Phase 2 TODO](PHASE2_TODO.md) - COMPLETE
-- [Phase 3 TODO](PHASE3_TODO.md) - COMPLETE
-- [Phase 4 TODO](PHASE4_TODO.md) - COMPLETE
-- [Phase 5 TODO](PHASE5_TODO.md) - ~90%
-- [Phase 5.5 TODO](PHASE5.5_TODO.md) - 100% COMPLETE (all 12 sprints, v0.5.13)
-- [Phase 6 TODO](PHASE6_TODO.md) - ~40% (core graphical path complete)
-- [Phase 7 TODO](PHASE7_TODO.md) - ~100% (All 6 Waves complete)
-- [Phase 7.5 TODO](PHASE7.5_TODO.md) - **COMPLETE** (all 8 waves, 80/80, v0.16.0)
-- [Phase 8 TODO](PHASE8_TODO.md) - COMPLETE (next-generation features)
-- [Phase 9 TODO](PHASE9_TODO.md) - COMPLETE (KDE Plasma 6 porting)
-- [Phase 10 TODO](PHASE10_TODO.md) - **COMPLETE** (KDE Known Limitations Remediation, v0.23.0)
+- [Phase 0 TODO](archive/PHASE0_TODO.md) - COMPLETE
+- [Phase 1 TODO](archive/PHASE1_TODO.md) - COMPLETE
+- [Phase 2 TODO](archive/PHASE2_TODO.md) - COMPLETE
+- [Phase 3 TODO](archive/PHASE3_TODO.md) - COMPLETE
+- [Phase 4 TODO](archive/PHASE4_TODO.md) - COMPLETE
+- [Phase 5 TODO](archive/PHASE5_TODO.md) - ~90%
+- [Phase 5.5 TODO](archive/PHASE5.5_TODO.md) - 100% COMPLETE (all 12 sprints, v0.5.13)
+- [Phase 6 TODO](archive/PHASE6_TODO.md) - ~40% (core graphical path complete)
+- [Phase 7 TODO](archive/PHASE7_TODO.md) - ~100% (All 6 Waves complete)
+- [Phase 7.5 TODO](archive/PHASE7.5_TODO.md) - **COMPLETE** (all 8 waves, 80/80, v0.16.0)
+- [Phase 8 TODO](archive/PHASE8_TODO.md) - COMPLETE (next-generation features)
+- [Phase 9 TODO](archive/PHASE9_TODO.md) - COMPLETE (KDE Plasma 6 porting)
+- [Phase 10 TODO](archive/PHASE10_TODO.md) - **COMPLETE** (KDE Known Limitations Remediation, v0.23.0)
 - [Remediation TODO](REMEDIATION_TODO.md) - Gaps from Phases 0-4
 - [Issues TODO](ISSUES_TODO.md) - Issue history
 - [Testing TODO](TESTING_TODO.md) - Testing status

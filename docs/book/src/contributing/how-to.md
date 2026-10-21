@@ -51,9 +51,7 @@ Help improve our test coverage:
 
 Your ideas matter! Share them through:
 - GitHub Issues for feature requests
-- Discussions for general ideas
-- Discord for real-time chat
-- Mailing list for longer discussions
+- Discord for real-time chat and longer discussions
 
 ## Coding Standards
 
@@ -163,10 +161,14 @@ Aim for:
 1. **Run all checks locally**:
    ```bash
    cargo fmt --all --check
-   cargo clippy --target x86_64-unknown-none -p veridian-kernel -- -D warnings
-   cargo clippy --target aarch64-unknown-none-softfloat -p veridian-kernel -- -D warnings
-   cargo clippy --target riscv64imac-unknown-none-elf -p veridian-kernel -- -D warnings
-   cargo test
+   BS="-Zbuild-std=core,compiler_builtins,alloc -Zbuild-std-features=compiler-builtins-mem"
+   cargo clippy --target targets/x86_64-veridian.json -p veridian-kernel $BS -- -D warnings
+   cargo clippy --target aarch64-unknown-none-softfloat -p veridian-kernel $BS -- -D warnings
+   cargo clippy --target riscv64imac-unknown-none-elf -p veridian-kernel $BS -- -D warnings
+   cargo clippy --lib --features alloc -p veridian-kernel --target x86_64-unknown-linux-gnu -- -D warnings
+   cargo clippy --lib --all-features -- -D warnings   # feature-gated code such as `trace`
+   cargo test --lib --features alloc -p veridian-kernel --target x86_64-unknown-linux-gnu
+   scripts/dev/gate.sh --boot --rootfs   # everything, including QEMU boots
    ```
 
 2. **Update documentation**:
@@ -219,14 +221,14 @@ Your PR must:
 ### Running Tests
 
 ```bash
-# Run all host-target tests (4,095+ passing)
-cargo test
+# Run all host-target tests (4,770 passing)
+cargo test --lib --features alloc -p veridian-kernel --target x86_64-unknown-linux-gnu
 
 # Run specific test
-cargo test test_name
+cargo test --lib --features alloc -p veridian-kernel --target x86_64-unknown-linux-gnu test_name
 
 # Run with output
-cargo test -- --nocapture
+cargo test --lib --features alloc -p veridian-kernel --target x86_64-unknown-linux-gnu -- --nocapture
 ```
 
 ### Debugging
@@ -247,8 +249,7 @@ If you need help:
 1. **Read the documentation**: Check if it's already explained
 2. **Search issues**: Someone might have asked before
 3. **Ask on Discord**: Quick questions and discussions
-4. **Open an issue**: For bugs or unclear documentation
-5. **Mailing list**: For design discussions
+4. **Open an issue**: For bugs, unclear documentation and design discussions
 
 ## Recognition
 
@@ -258,4 +259,4 @@ All contributors are recognized in our [CONTRIBUTORS.md](https://github.com/doub
 
 By contributing, you agree that your contributions will be licensed under the same terms as VeridianOS (MIT/Apache 2.0 dual license).
 
-Thank you for helping make VeridianOS better! 🦀
+Thank you for helping make VeridianOS better!

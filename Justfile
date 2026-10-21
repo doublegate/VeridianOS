@@ -1,4 +1,12 @@
 # VeridianOS build commands
+#
+# Every recipe delegates to the scripts the gate and CI use (build-kernel.sh,
+# scripts/boot-test.sh, scripts/dev/gate.sh), so `just` cannot drift from them.
+# There is deliberately no `clean` recipe: target/ also holds the cross-built
+# sysroot and rootfs trees, which `cargo clean` would delete.
+
+# Bare-metal builds need the standard library built for the target.
+bs := "-Zbuild-std=core,compiler_builtins,alloc -Zbuild-std-features=compiler-builtins-mem"
 
 # Default target
 default: build
@@ -20,41 +28,56 @@ pre-commit:
 
 # Validate commit message
 check-commit-msg MSG:
-    @echo "{{MSG}}" > .tmp-commit-msg
-    @bash .githooks/commit-msg .tmp-commit-msg || true
-    @rm -f .tmp-commit-msg
+    #!/usr/bin/env bash
+    set -euo pipefail
+    f=$(mktemp)
+    trap 'rm -f "$f"' EXIT
+    printf '%s\n' {{ quote(MSG) }} > "$f"
+    bash .githooks/commit-msg "$f"
 
-# Build the kernel
+# Build the kernel for every architecture (x86_64 also gets its UEFI disk image)
 build:
-    @echo "Building VeridianOS..."
-    cargo build --release --target targets/x86_64-veridian.json -p veridian-kernel
+    ./build-kernel.sh all dev
 
-# Build for specific architecture
-build-arch ARCH:
-    @echo "Building for {{ARCH}}..."
-    cargo build --release --target targets/{{ARCH}}-veridian.json -p veridian-kernel
+# Release builds for every architecture
+build-release:
+    ./build-kernel.sh all release
+
+# Build one architecture: just build-arch aarch64 [release]
+build-arch ARCH PROFILE="dev":
+    ./build-kernel.sh {{ ARCH }} {{ PROFILE }}
 
 # Build for x86_64
 build-x86_64:
-    cargo build --release --target targets/x86_64-veridian.json -p veridian-kernel
+    ./build-kernel.sh x86_64 dev
 
 # Build for aarch64
 build-aarch64:
-    cargo build --release --target targets/aarch64-veridian.json -p veridian-kernel
+    ./build-kernel.sh aarch64 dev
 
 # Build for riscv64
 build-riscv64:
-    cargo build --release --target targets/riscv64gc-veridian.json -p veridian-kernel
+    ./build-kernel.sh riscv64 dev
 
-# Run in QEMU
-run: build
-    @echo "Running VeridianOS in QEMU..."
-    qemu-system-x86_64 \
-        -enable-kvm \
-        -m 2G \
-        -smp 4 \
-        -serial stdio \
-        -kernel target/x86_64-unknown-none/release/veridian_kernel
+# Run x86_64 in a QEMU window (UEFI boot; stops other QEMU instances first)
+run: build-x86_64
+    ./scripts/run-veridian.sh --display
+
+# Run x86_64 with the persistent BlockFS root (build it with scripts/build-busybox-rootfs.sh)
+run-blockfs: build-x86_64
+    ./scripts/run-veridian.sh --blockfs --display
+
+# Run AArch64 (serial console)
+run-aarch64: build-aarch64
+    qemu-system-aarch64 -M virt -cpu cortex-a72 -m 256M \
+        -kernel target/aarch64-unknown-none-softfloat/debug/veridian-kernel \
+        -serial stdio -display none
+
+# Run RISC-V (serial console)
+run-riscv64: build-riscv64
+    qemu-system-riscv64 -M virt -m 256M -bios default \
+        -kernel target/riscv64imac-unknown-none-elf/debug/veridian-kernel \
+        -serial stdio -display none
 
 # Debug x86_64 kernel
 debug-x86_64:
@@ -74,178 +97,106 @@ debug-riscv64:
 # Generic debug command (defaults to x86_64)
 debug: debug-x86_64
 
-# Run tests for x86_64
-test-x86_64:
-    @echo "Running x86_64 tests..."
-    ./scripts/test-x86_64.sh
+# Host unit tests (plain `cargo test` also builds the bare-metal targets and fails)
+test:
+    cargo test --lib --features alloc -p veridian-kernel --target x86_64-unknown-linux-gnu
 
-# Run tests for AArch64
-test-aarch64:
-    @echo "Running AArch64 tests..."
-    ./scripts/test-aarch64.sh
-
-# Run tests for RISC-V
-test-riscv64:
-    @echo "Running RISC-V tests..."
-    ./scripts/test-riscv64.sh
-
-# Run tests for all architectures
-test-all: test-x86_64 test-aarch64 test-riscv64
-    @echo "All architecture tests complete!"
-
-# Run tests (defaults to x86_64)
-test: test-x86_64
-
-# Run tests with output
+# Host unit tests with output
 test-verbose:
-    cargo test --all -- --nocapture
+    cargo test --lib --features alloc -p veridian-kernel --target x86_64-unknown-linux-gnu -- --nocapture
 
-# Run benchmarks for x86_64
-bench-x86_64:
-    @echo "Running x86_64 benchmarks..."
-    ./scripts/benchmark.sh -a x86_64
+# Boot one architecture in QEMU and check the in-kernel tests (needs a build)
+test-x86_64: build-x86_64
+    ./scripts/boot-test.sh x86_64
 
-# Run benchmarks for AArch64
-bench-aarch64:
-    @echo "Running AArch64 benchmarks..."
-    ./scripts/benchmark.sh -a aarch64
+test-aarch64: build-aarch64
+    ./scripts/boot-test.sh aarch64
 
-# Run benchmarks for RISC-V
-bench-riscv64:
-    @echo "Running RISC-V benchmarks..."
-    ./scripts/benchmark.sh -a riscv64
+test-riscv64: build-riscv64
+    ./scripts/boot-test.sh riscv64
 
-# Run benchmarks for all architectures
-bench-all: bench-x86_64 bench-aarch64 bench-riscv64
-    @echo "All benchmarks complete!"
-
-# Run benchmarks (defaults to x86_64)
-bench: bench-x86_64
-
-# Run specific benchmark
-bench-ipc:
-    ./scripts/benchmark.sh -b ipc
-
-bench-context:
-    ./scripts/benchmark.sh -b context
-
-bench-memory:
-    ./scripts/benchmark.sh -b memory
+# Build and boot-test every architecture
+test-all: test-x86_64 test-aarch64 test-riscv64
+    @echo "All architecture boot tests passed"
 
 # Format code
 fmt:
-    @echo "Formatting code..."
     cargo fmt --all
 
 # Check formatting
 fmt-check:
-    @echo "Checking code formatting..."
     cargo fmt --all -- --check
 
-# Run clippy
+# Run clippy on every target, as the gate and CI do
 clippy:
-    @echo "Running clippy..."
-    cargo clippy --all-targets --all-features -- -D warnings
+    cargo clippy --target targets/x86_64-veridian.json -p veridian-kernel {{ bs }} -- -D warnings
+    cargo clippy --target aarch64-unknown-none-softfloat -p veridian-kernel {{ bs }} -- -D warnings
+    cargo clippy --target riscv64imac-unknown-none-elf -p veridian-kernel {{ bs }} -- -D warnings
+    cargo clippy --lib --features alloc -p veridian-kernel --target x86_64-unknown-linux-gnu -- -D warnings
+    cargo clippy --lib --all-features -- -D warnings
 
-# Run all CI checks
-ci-checks: fmt-check clippy test
-    @echo "All CI checks passed!"
+# The pre-commit gate without QEMU: fmt, clippy, syscall checks, host tests
+ci-checks:
+    scripts/dev/gate.sh
 
-# Clean build artifacts
-clean:
-    @echo "Cleaning build artifacts..."
-    cargo clean
-    rm -rf build/
+# The full pre-commit gate: also builds, boot tests and the runtime suites
+gate:
+    scripts/dev/gate.sh --boot --rootfs
 
-# Build documentation
+# Build the mdBook guide into docs/book/book
 doc:
-    @echo "Building documentation..."
-    cargo doc --no-deps --open
-
-# Build ISO image
-build-iso: build
-    @echo "Building ISO image..."
-    mkdir -p build/iso/boot/grub
-    cp target/x86_64-unknown-none/release/veridian_kernel build/iso/boot/
-    echo 'set timeout=0' > build/iso/boot/grub/grub.cfg
-    echo 'set default=0' >> build/iso/boot/grub/grub.cfg
-    echo '' >> build/iso/boot/grub/grub.cfg
-    echo 'menuentry "VeridianOS" {' >> build/iso/boot/grub/grub.cfg
-    echo '    multiboot2 /boot/veridian_kernel' >> build/iso/boot/grub/grub.cfg
-    echo '    boot' >> build/iso/boot/grub/grub.cfg
-    echo '}' >> build/iso/boot/grub/grub.cfg
-    grub-mkrescue -o build/veridian.iso build/iso
-
-# Run from ISO
-run-iso: build-iso
-    @echo "Running ISO in QEMU..."
-    qemu-system-x86_64 \
-        -enable-kvm \
-        -m 2G \
-        -smp 4 \
-        -serial stdio \
-        -cdrom build/veridian.iso
-
-# Watch for changes and rebuild
-watch:
-    @echo "Watching for changes..."
-    cargo watch -x build
+    cd docs/book && mdbook build
 
 # Update dependencies
 update:
-    @echo "Updating dependencies..."
     cargo update
 
 # Audit dependencies for security issues
 audit:
-    @echo "Auditing dependencies..."
     cargo audit
 
 # Check for outdated dependencies
 outdated:
-    @echo "Checking for outdated dependencies..."
     cargo outdated
 
-# Generate target specifications
-gen-targets:
-    @echo "Generating target specifications..."
-    mkdir -p targets/
-    @echo "Target files would be generated here"
-
-# Install development tools
+# Install development tools (the toolchain is pinned by rust-toolchain.toml)
 install-tools:
-    @echo "Installing development tools..."
-    rustup toolchain install nightly-2025-01-15
-    rustup component add rust-src llvm-tools-preview rustfmt clippy --toolchain nightly-2025-01-15
-    rustup override set nightly-2025-01-15
-    cargo install bootimage cargo-xbuild cargo-binutils cargo-watch cargo-expand cargo-audit cargo-outdated
+    rustup toolchain install "$(sed -n 's/^channel *= *"\(.*\)"/\1/p' rust-toolchain.toml)" --component rust-src,llvm-tools-preview,rustfmt,clippy
+    cargo install --locked cargo-audit cargo-llvm-cov cargo-outdated
+    cargo install mdbook --version 0.4.37 --locked
 
 # Print system info
 info:
-    @echo "System information:"
     @echo "Rust version:"
     @rustc --version
     @echo "Cargo version:"
     @cargo --version
-    @echo "QEMU version:"
+    @echo "QEMU versions:"
     @qemu-system-x86_64 --version | head -n1
+    @qemu-system-aarch64 --version | head -n1
+    @qemu-system-riscv64 --version | head -n1
 
 # Help command
 help:
     @echo "VeridianOS build commands:"
     @echo ""
-    @echo "  just build          - Build the kernel"
-    @echo "  just run            - Run in QEMU"
+    @echo "  just build          - Build every architecture (dev)"
+    @echo "  just build-release  - Build every architecture (release)"
+    @echo "  just run            - Run x86_64 in a QEMU window"
+    @echo "  just run-blockfs    - Run x86_64 with the BlockFS root"
+    @echo "  just run-aarch64    - Run AArch64 (serial)"
+    @echo "  just run-riscv64    - Run RISC-V (serial)"
     @echo "  just debug          - Debug with GDB (x86_64)"
-    @echo "  just debug-x86_64   - Debug x86_64 kernel"
     @echo "  just debug-aarch64  - Debug AArch64 kernel"
     @echo "  just debug-riscv64  - Debug RISC-V kernel"
-    @echo "  just test           - Run tests"
+    @echo "  just test           - Host unit tests"
+    @echo "  just test-all       - Build and boot-test every architecture"
     @echo "  just fmt            - Format code"
-    @echo "  just clippy         - Run linter"
-    @echo "  just ci-checks      - Run all CI checks"
-    @echo "  just doc            - Build documentation"
-    @echo "  just clean          - Clean build artifacts"
+    @echo "  just clippy         - Lint every target"
+    @echo "  just ci-checks      - Gate without QEMU"
+    @echo "  just gate           - Full pre-commit gate"
+    @echo "  just doc            - Build the mdBook guide"
     @echo "  just help           - Show this help"
     @echo ""
+    @echo "Benchmarks run inside the kernel: the shell's perf command."
     @echo "See Justfile for more commands"

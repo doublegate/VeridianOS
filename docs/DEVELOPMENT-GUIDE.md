@@ -1,7 +1,7 @@
 # VeridianOS Development Guide
 
-**Last Updated**: June 17, 2025  
-**Latest Release**: v0.2.1 - Maintenance release with all three architectures booting to Stage 6
+**Last Updated**: October 20, 2026
+**Latest Release**: v0.27.0 - process model, SMP and user mode on all three architectures
 
 ## Getting Started
 
@@ -24,17 +24,11 @@ This guide covers everything you need to know to start developing VeridianOS, fr
 # Install rustup
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 
-# Install specific nightly version
-rustup toolchain install nightly-2025-01-15
-rustup default nightly-2025-01-15
+# The nightly pinned in rust-toolchain.toml, with its components
+rustup toolchain install "$(sed -n 's/^channel *= *"\(.*\)"/\1/p' rust-toolchain.toml)" \
+    --component rust-src,llvm-tools-preview,rustfmt,clippy
 
-# Add required components
-rustup component add rust-src llvm-tools-preview rustfmt clippy
-
-# Add target architectures
-rustup target add x86_64-unknown-none
-rustup target add aarch64-unknown-none-softfloat
-rustup target add riscv64imac-unknown-none-elf
+# No `rustup target add` is needed: the kernel builds core/alloc itself (-Zbuild-std)
 ```
 
 #### 2. Install System Dependencies
@@ -47,6 +41,7 @@ sudo apt install -y \
     qemu-system-x86 \
     qemu-system-arm \
     qemu-system-misc \
+    ovmf \
     gdb-multiarch \
     nasm \
     mtools \
@@ -66,6 +61,7 @@ sudo dnf install -y \
     qemu-system-x86 \
     qemu-system-aarch64 \
     qemu-system-riscv \
+    edk2-ovmf \
     gdb \
     nasm \
     mtools \
@@ -82,22 +78,18 @@ sudo dnf install -y \
 
 ```bash
 # Cargo extensions
-cargo install cargo-xbuild
-cargo install bootimage
-cargo install cargo-watch
-cargo install cargo-expand
-cargo install cargo-tree
-cargo install cargo-audit
-cargo install cargo-outdated
-cargo install cargo-nextest
+cargo install --locked cargo-audit
+cargo install --locked cargo-llvm-cov      # coverage, as CI measures it
+cargo install --locked cargo-outdated      # `just outdated`
+cargo install mdbook --version 0.4.37 --locked
 
 # Just (command runner)
 cargo install just
-
-# Optional: Performance tools
-cargo install flamegraph
-cargo install cargo-profiling
 ```
+
+`./scripts/install-deps.sh` installs the toolchain and these tools in one step. The x86_64 UEFI
+disk image is built by `tools/bootimage-builder`, which `build-kernel.sh` runs; no `bootimage` or
+`cargo-xbuild` is needed.
 
 ### IDE Setup
 
@@ -114,8 +106,8 @@ cargo install cargo-profiling
 **`.vscode/settings.json`:**
 ```json
 {
-    "rust-analyzer.cargo.target": "x86_64-unknown-none",
-    "rust-analyzer.cargo.features": ["test-harness"],
+    "rust-analyzer.cargo.target": "x86_64-unknown-linux-gnu",
+    "rust-analyzer.cargo.features": ["alloc"],
     "rust-analyzer.checkOnSave.allTargets": false,
     "rust-analyzer.checkOnSave.command": "clippy",
     "editor.formatOnSave": true,
@@ -134,35 +126,30 @@ cargo install cargo-profiling
 ## Project Structure
 
 ```
-veridian-os/
-├── kernel/                 # Microkernel implementation
-│   ├── src/
-│   │   ├── arch/          # Architecture-specific code
-│   │   ├── mm/            # Memory management
-│   │   ├── sched/         # Scheduler
-│   │   ├── ipc/           # Inter-process communication
-│   │   ├── cap/           # Capability system
-│   │   └── main.rs        # Kernel entry point
-│   └── Cargo.toml
-├── drivers/               # User-space drivers
-│   ├── block/            # Block device drivers
-│   ├── net/              # Network drivers
-│   ├── gpu/              # Graphics drivers
-│   └── common/           # Shared driver code
-├── services/             # System services
-│   ├── init/             # Init system
-│   ├── vfs/              # Virtual file system
-│   ├── network/          # Network stack
-│   └── display/          # Display server
-├── libs/                 # Libraries
-│   ├── veridian-abi/     # System call interface
-│   ├── veridian-std/     # Standard library
-│   └── common/           # Shared utilities
-├── userland/             # User applications
-├── tools/                # Development tools
-├── tests/                # Integration tests
-├── docs/                 # Documentation
-└── targets/              # Custom target specifications
+VeridianOS/
+├── kernel/                # The kernel crate
+│   └── src/
+│       ├── arch/          # x86_64, aarch64, riscv64
+│       ├── mm/            # Memory management
+│       ├── sched/         # Scheduler and dispatcher
+│       ├── ipc/           # Inter-process communication
+│       ├── cap/           # Capability system
+│       ├── process/       # Processes, threads, signals
+│       ├── syscall/       # System calls (Linux numbers, ADR 0009)
+│       ├── fs/            # VFS, BlockFS, tmpfs, procfs
+│       ├── drivers/       # Device drivers (in the kernel today; critique C6)
+│       ├── net/           # Network stack (in the kernel today)
+│       ├── services/      # Shell and system services (in the kernel today)
+│       └── desktop/       # Built-in desktop environment
+├── userland/              # libc, programs, tests, KDE/Qt ports
+├── abi/                   # The system call table (abi/syscalls.map)
+├── tools/                 # Host tools (mkfs-blockfs, bootimage-builder, cross scripts)
+├── scripts/               # Build, test, debug and gate scripts
+├── targets/               # Custom target specifications
+├── verification/          # Kani proofs and TLA+ specifications
+├── ports/                 # Ports system recipes
+├── docs/                  # Documentation and the mdBook
+└── to-dos/                # Planning and tracking
 ```
 
 ## Development Workflow
@@ -182,7 +169,7 @@ veridian-os/
 
 **Alternative - Using Just:**
 ```bash
-# Build for default target (x86_64)
+# Build every architecture (dev)
 just build
 
 # Build for specific architecture
@@ -190,43 +177,43 @@ just build-x86_64
 just build-aarch64
 just build-riscv64
 
-# Build everything
-just build-all
-
-# Clean build
-just clean
-just build
+# Release builds of everything
+just build-release
 ```
+
+There is no `clean` recipe: `target/` also holds the cross-built sysroot and rootfs trees, which
+`cargo clean` would delete.
 
 **Note**: The x86_64 build requires special handling with kernel code model to avoid relocation errors.
 
 ### 2. Running in QEMU
 
 ```bash
-# Run with default settings
+# x86_64 in a QEMU window (builds first)
 just run
 
-# Run with debugging enabled
-just debug
+# x86_64 with the persistent BlockFS root
+just run-blockfs
 
-# Run with specific memory/CPU configuration
-just run-custom MEMORY=1024 CPUS=4
+# AArch64 or RISC-V on the serial console
+just run-aarch64
+just run-riscv64
 
-# Run and attach GDB
-just gdb
+# Debug with GDB (builds, starts QEMU paused, attaches GDB)
+just debug            # x86_64; also debug-aarch64, debug-riscv64
 ```
+
+For other memory sizes or CPU counts, use the QEMU command lines in the README's Quick Start
+with `-m` and `-smp` changed.
 
 ### 3. Development Commands
 
 ```bash
-# Watch for changes and rebuild
-cargo watch -x build
-
-# Run tests
+# Run the host unit tests
 just test
 
-# Run specific test
-cargo test test_name
+# Run specific host test
+cargo test --lib --features alloc -p veridian-kernel --target x86_64-unknown-linux-gnu test_name
 
 # Check code formatting
 just fmt-check
@@ -234,11 +221,14 @@ just fmt-check
 # Format code
 just fmt
 
-# Run clippy lints
+# Run clippy on every target
 just clippy
 
-# Generate documentation
+# Build the mdBook guide
 just doc
+
+# The full pre-commit gate (fmt, clippy, tests, builds, QEMU boots, runtime suites)
+just gate
 ```
 
 ## Code Style Guidelines
@@ -279,23 +269,16 @@ pub struct FrameAllocator {
 
 #### Error Handling
 
-Use `Result<T, Error>` for fallible operations:
+Use `Result<T, KernelError>` for fallible operations. The kernel is `no_std` and has no
+`thiserror`; errors are plain enums (`kernel/src/error.rs`), and `#[must_use]` on the result
+catches ignored errors:
 
 ```rust
-#[derive(Debug, thiserror::Error)]
-pub enum MemoryError {
-    #[error("out of memory")]
-    OutOfMemory,
-    
-    #[error("invalid address {0:#x}")]
-    InvalidAddress(usize),
-    
-    #[error("alignment error: address {addr:#x} not aligned to {align}")]
-    AlignmentError { addr: usize, align: usize },
-}
-
-pub fn allocate_page() -> Result<Page, MemoryError> {
-    // ...
+pub fn allocate_page() -> Result<FrameNumber, KernelError> {
+    FRAME_ALLOCATOR
+        .lock()
+        .allocate_frames(1, None)
+        .map_err(|_| KernelError::OutOfMemory { requested: 4096, available: 0 })
 }
 ```
 
@@ -312,10 +295,14 @@ Minimize unsafe code and document safety requirements:
 /// - `ptr` must be properly aligned
 /// - The memory must not be mutated while this function executes
 unsafe fn read_raw(ptr: *const u8, size: usize) -> Vec<u8> {
-    // Safety: Caller ensures preconditions are met
-    std::slice::from_raw_parts(ptr, size).to_vec()
+    // SAFETY: the caller guarantees `ptr` is valid and aligned for `size`
+    // bytes and not mutated meanwhile (the contract above).
+    unsafe { core::slice::from_raw_parts(ptr, size) }.to_vec()
 }
 ```
+
+Every `unsafe` block needs a `// SAFETY:` comment (uppercase); clippy's
+`undocumented_unsafe_blocks` enforces it.
 
 ### Git Workflow
 
@@ -380,222 +367,104 @@ mod tests {
 
 ### Integration Tests
 
-Create integration tests in `tests/`:
+Behaviour across subsystems is tested inside the running kernel and in user space rather than
+with a `tests/` crate:
 
-```rust
-// tests/memory_integration.rs
-use veridian_test::*;
-
-#[test]
-fn test_cross_process_memory_sharing() {
-    let env = TestEnvironment::new();
-    // Test implementation
-}
-```
-
-### Running Tests
-
-```bash
-# Run all tests
-just test
-
-# Run tests for specific package
-cargo test -p veridian-kernel
-
-# Run with verbose output
-cargo test -- --nocapture
-
-# Run specific test
-cargo test test_name
-
-# Run tests with coverage
-cargo tarpaulin
-```
+- In-kernel boot tests (`kernel/src/test_framework.rs` and the boot test list in
+  `kernel/src/bootstrap.rs`) run at every boot; `scripts/boot-test.sh <arch>` checks them.
+- User-space runtime suites in `userland/tests/` (`audit_runtime_test.c`, `musl_runtime_test.c`,
+  `busybox_test.sh`) run on the BlockFS root; `scripts/run-rootfs-tests.sh` runs them.
 
 ## Debugging
 
 ### Kernel Debugging with GDB
 
-1. Build with debug symbols:
+The debug scripts build the kernel, start QEMU paused with a GDB server and attach GDB with the
+right symbols and boot breakpoints; see [GDB-DEBUGGING.md](GDB-DEBUGGING.md).
+
 ```bash
-just build-debug
+just debug-x86_64      # or debug-aarch64, debug-riscv64
 ```
 
-2. Start QEMU with GDB server:
-```bash
-just gdb-server
-```
+GDB commands:
 
-3. In another terminal, connect GDB:
-```bash
-just gdb-connect
-```
-
-4. GDB commands:
 ```gdb
-# Set breakpoint
-(gdb) break kernel_main
-(gdb) break kernel/src/mm/physical.rs:42
+# Set breakpoint (on x86_64 use hbreak until the kernel is loaded)
+(gdb) break veridian_kernel::bootstrap::kernel_init
+(gdb) hbreak veridian_kernel::bootstrap::kernel_init   # x86_64
+(gdb) break kernel/src/mm/frame_allocator.rs:42
 
 # Continue execution
 (gdb) continue
 
-# Print variable
-(gdb) print allocator
-
-# Examine memory
-(gdb) x/10x 0xffff800000000000
-
 # Backtrace
 (gdb) bt
+
+# Examine memory
+(gdb) x/10x $sp
 ```
 
 ### Logging
 
-Use the logging framework:
+The kernel has no log framework: it writes to the serial console with `println!`, which the
+QEMU command lines send to the terminal (`-serial stdio`). Serial tracing of every page fault and
+`open()` is a build feature:
 
-```rust
-use log::{debug, info, warn, error};
-
-pub fn init_memory() {
-    info!("Initializing memory subsystem");
-    
-    debug!("Available memory: {} MB", available_mb);
-    
-    if available_mb < 64 {
-        warn!("Low memory detected");
-    }
-    
-    if let Err(e) = setup_page_tables() {
-        error!("Failed to setup page tables: {}", e);
-    }
-}
-```
-
-Configure log level:
 ```bash
-RUST_LOG=debug just run
+FEATURES=trace ./build-kernel.sh x86_64 dev
 ```
 
 ### Performance Profiling
 
-#### Using Flamegraph
-
-```bash
-# Generate flamegraph
-cargo flamegraph --bin kernel
-
-# Profile specific scenario
-just profile-scenario boot
-```
-
-#### Using perf
-
-```bash
-# Record performance data
-perf record -g target/release/kernel
-
-# Generate report
-perf report
-```
+The kernel measures itself: the shell's `perf` command runs the in-kernel micro-benchmarks
+(system call, frame allocation, capability lookup, scheduler and others) and prints timings from
+the calibrated clock source. Use a release kernel for figures (`./build-kernel.sh x86_64
+release`); dev kernels overstate anything that clears or copies memory (N-281). Method and
+results: [PERFORMANCE-REPORT.md](PERFORMANCE-REPORT.md).
 
 ## Common Tasks
 
 ### Adding a New System Call
 
-1. Define the system call number in `kernel/src/syscall/numbers.rs`:
-```rust
-pub const SYS_NEW_CALL: usize = 100;
-```
-
-2. Add handler in `kernel/src/syscall/mod.rs`:
-```rust
-match nr {
-    SYS_NEW_CALL => handle_new_call(arg1, arg2),
-    // ...
-}
-```
-
-3. Implement handler:
-```rust
-fn handle_new_call(arg1: usize, arg2: usize) -> Result<usize, SyscallError> {
-    // Implementation
-}
-```
-
-4. Add user-space wrapper in `libs/veridian-abi/src/syscalls.rs`:
-```rust
-pub fn new_call(arg1: usize, arg2: usize) -> Result<usize, Error> {
-    unsafe { syscall2(SYS_NEW_CALL, arg1, arg2) }
-}
-```
+1. Add the call to `abi/syscalls.map`: the Linux system call it implements (its number comes from
+   the vendored Linux tables), or `private N` for a VeridianOS call with no Linux equivalent.
+2. Regenerate the numbers: `python3 tools/compat/gen_syscalls.py`. This writes
+   `kernel/src/syscall/numbers.rs`, `userland/libc/include/veridian/sysno.h` and
+   `userland/abi/syscall_numbers.rs`; never edit them by hand (`gen_syscalls.py --check` fails CI
+   when they are stale).
+3. Define the capability requirements in `kernel/src/cap/` if the call needs any.
+4. Add the handler in `kernel/src/syscall/` and dispatch the new `Syscall` variant to it.
+5. Add the user-space wrapper in `userland/libc/src/syscall.c` if the native libc needs one.
+6. Add tests: host unit tests for the handler's logic and, where it matters, a runtime test in
+   `userland/tests/`.
 
 ### Adding a New Driver
 
-1. Create driver crate:
-```bash
-cargo new --lib drivers/mydriver
-```
+Drivers live in the kernel today (`kernel/src/drivers/`; moving them to user space is critique C6):
 
-2. Implement driver trait:
-```rust
-use veridian_driver::Driver;
-
-pub struct MyDriver {
-    // Driver state
-}
-
-impl Driver for MyDriver {
-    fn init(&mut self, device: DeviceInfo) -> Result<(), Error> {
-        // Initialize hardware
-    }
-    
-    fn handle_interrupt(&mut self, vector: u8) {
-        // Handle device interrupt
-    }
-}
-```
-
-3. Add to workspace in root `Cargo.toml`:
-```toml
-[workspace]
-members = [
-    # ...
-    "drivers/mydriver",
-]
-```
+1. Add a module under `kernel/src/drivers/` and declare it in `kernel/src/drivers/mod.rs`.
+2. Implement the `Driver` trait (`kernel/src/services/driver_framework.rs`).
+3. Register and initialize it during boot (see how existing drivers such as `e1000` or
+   `virtio_net` are wired in).
+4. Gate architecture-specific code with `#[cfg(target_arch = ...)]`, and bare-metal-only code with
+   `#[cfg(all(target_arch = "x86_64", target_os = "none"))]` so host tests still build.
 
 ### Memory Debugging
 
-Enable memory debugging features:
-
-```toml
-[features]
-memory-debug = ["heap-tracking", "allocation-stats"]
-```
-
-Use memory debugging tools:
-
-```rust
-#[cfg(feature = "memory-debug")]
-fn debug_memory_state() {
-    let stats = ALLOCATOR.stats();
-    debug!("Allocated: {} bytes", stats.allocated);
-    debug!("Free: {} bytes", stats.free);
-    debug!("Fragmentation: {:.2}%", stats.fragmentation * 100.0);
-}
-```
+`/proc/meminfo` and the shell's `perf` command show the frame allocator's and heap's state. The
+`frame_alloc_1`/`frame_alloc_global` benchmarks and the host unit tests in `kernel/src/mm/` cover
+the allocators.
 
 ## Contributing
 
 ### Before Submitting
 
-1. **Run tests**: `just test`
-2. **Check formatting**: `just fmt-check`
-3. **Run clippy**: `just clippy`
-4. **Update documentation**: `just doc`
-5. **Add tests for new features**
-6. **Update CHANGELOG.md**
+1. **Run the full gate**: `just gate` (`scripts/dev/gate.sh --boot --rootfs`: formatting, clippy
+   on every target, host tests, builds, QEMU boots and the runtime suites); it must pass on the
+   tree you submit
+2. **Add tests for new features**
+3. **Update the documentation** with the change (`just doc` builds the mdBook)
+4. **Update CHANGELOG.md**
 
 ### Pull Request Process
 
@@ -632,10 +501,9 @@ fn debug_memory_state() {
 
 ### Community
 
-- Discord: [VeridianOS Discord](#)
-- Forums: [VeridianOS Forums](#)
+- Discord: [VeridianOS Discord](https://discord.gg/WGcgrnuVHt)
 - IRC: #veridian-os on irc.libera.chat
-- Mailing List: dev@veridian-os.org
+- GitHub Issues: <https://github.com/doublegate/VeridianOS/issues>
 
 ### Troubleshooting
 

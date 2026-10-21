@@ -111,22 +111,20 @@ else
 fi
 
 # Install required Rust components
-echo "Installing Rust nightly and components..."
-rustup toolchain install nightly-2025-01-15
-rustup default nightly-2025-01-15
-rustup component add rust-src llvm-tools-preview rustfmt clippy
-rustup target add x86_64-unknown-none aarch64-unknown-none-softfloat riscv64imac-unknown-none-elf
+# The toolchain is pinned by rust-toolchain.toml and selected automatically
+# inside the repository; no `rustup target add` is needed, because the
+# kernel builds core and alloc itself (-Zbuild-std).
+echo "Installing the pinned Rust nightly and components..."
+TOOLCHAIN=$(sed -n 's/^channel *= *"\(.*\)"/\1/p' "$(dirname "$0")/../rust-toolchain.toml")
+rustup toolchain install "$TOOLCHAIN" --component rust-src,llvm-tools-preview,rustfmt,clippy
 
 # Install cargo tools
 echo "Installing cargo tools..."
 cargo install --locked \
-    cargo-binutils \
-    cargo-xbuild \
-    cargo-watch \
-    cargo-expand \
     cargo-audit \
-    cargo-outdated \
-    cargo-tree
+    cargo-llvm-cov \
+    cargo-outdated
+cargo install --locked mdbook --version 0.4.37
 
 # Install just command runner
 if ! command -v just &> /dev/null; then
@@ -136,14 +134,9 @@ else
     echo "just is already installed"
 fi
 
-# Create build directories
-echo "Creating build directories..."
-mkdir -p build/iso
-mkdir -p build/efi
-
-echo "✅ Development dependencies installed successfully!"
+echo "Development dependencies installed successfully."
 echo ""
 echo "Next steps:"
-echo "1. Run 'just build' to build the kernel"
-echo "2. Run 'just run' to run in QEMU"
+echo "1. Run 'just build' to build the kernel for every architecture"
+echo "2. Run 'just run' to boot x86_64 in QEMU"
 echo "3. See docs/DEVELOPMENT-GUIDE.md for more information"

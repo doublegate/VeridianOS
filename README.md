@@ -97,13 +97,14 @@ The design goal is a microkernel that provides only memory management, schedulin
 | --- | --- |
 | Build | 0 errors, 0 warnings across all 3 architectures |
 | Boot tests | x86_64 43/43, AArch64 64/64, RISC-V 57/57 (Stage 6 BOOTOK; also with `-smp 4`) |
-| Host-target unit tests | 4,735 passing |
-| In-guest runtime suites | BusyBox self-test, `audit_runtime_test` and `musl_runtime_test` all passing on the BlockFS root of each architecture (x86_64: 91/91 and 71/71; AArch64: 91/91 and 69/69; RISC-V: 89/89 and 69/69) |
-| CI pipeline | GitHub Actions + Codecov; patch coverage of the v0.26.0 changes 75% (gaps tracked) |
+| Host-target unit tests | 4,770 passing |
+| In-guest runtime suites | BusyBox self-test, `audit_runtime_test` and `musl_runtime_test` all passing on the BlockFS root of each architecture (x86_64: 91/91 and 80/80; AArch64: 91/91 and 78/78; RISC-V: 89/89 and 78/78), on one and four CPUs |
+| CI pipeline | GitHub Actions + Codecov: builds, boots on 1 and 4 CPUs, and the x86_64 runtime suite; host-test line coverage 56.2% |
 | Unsafe code | 3 justified `static mut` (early serial, boot info, per-CPU data); unsafe blocks carry SAFETY comments |
 
-Test counts as of v0.27.0 (2026-10-18), coverage as of v0.26.0 (2026-10-06); sources: [`docs/PERFORMANCE-REPORT.md`](docs/PERFORMANCE-REPORT.md),
-[`CHANGELOG.md`](CHANGELOG.md).
+Test counts and coverage as of v0.27.0 (2026-10-18); sources: the `[v0.27.0]` section of
+[`CHANGELOG.md`](CHANGELOG.md) (test counts) and [Codecov](https://codecov.io/gh/doublegate/VeridianOS)
+(coverage); performance figures: [`docs/PERFORMANCE-REPORT.md`](docs/PERFORMANCE-REPORT.md).
 
 ### Architecture Support
 
@@ -115,15 +116,16 @@ Test counts as of v0.27.0 (2026-10-18), coverage as of v0.26.0 (2026-10-06); sou
 
 ### Performance
 
-Measured with the in-kernel `perf` command: x86_64 under KVM on an i9-10850K, dev build, calibrated
-TSC. Method and full tables: [`docs/PERFORMANCE-REPORT.md`](docs/PERFORMANCE-REPORT.md).
+Measured with the in-kernel `perf` command: x86_64 under KVM on an i9-10850K, release kernel, one
+vCPU, calibrated TSC (2026-10-15). Dev kernels overstate anything that clears or copies memory
+(N-281). Method and full tables: [`docs/PERFORMANCE-REPORT.md`](docs/PERFORMANCE-REPORT.md).
 
 | Metric | Target | Measured (avg) |
 | --- | --- | --- |
 | IPC latency | < 1us | not measured; every message is queued on its endpoint (no register fast path until the v0.28 IPC redesign) |
 | Context switch | < 10us | not measured |
-| Frame allocation | < 1us | 62 ns per-CPU cache, 272 ns global allocator |
-| Capability lookup | < 100 ns | 93 ns (hash table) |
+| Frame allocation | < 1us | 74 ns per-CPU cache, 85 ns global allocator |
+| Capability lookup | < 100 ns | 29 ns (hash table) |
 | Concurrent processes | 1000+ | not measured |
 | TLB shootdown | < 5us/CPU | not measured; acknowledged on every CPU (boot test `tlb_shootdown_confirmed` with `-smp 4`) |
 
@@ -190,8 +192,13 @@ qemu-system-riscv64 -M virt -m 256M -bios default \
     -kernel target/riscv64imac-unknown-none-elf/debug/veridian-kernel \
     -serial stdio -display none
 
-# Run tests
-cargo test
+# Run the host unit tests (`--lib` matters: plain `cargo test` also builds the bare-metal
+# binary and test targets for the host and fails on a duplicate lang item)
+cargo test --lib --features alloc -p veridian-kernel --target x86_64-unknown-linux-gnu
+
+# Run the full pre-commit gate: fmt, clippy on every target, host tests, builds,
+# QEMU boot tests on all three architectures and the BusyBox/runtime suites
+scripts/dev/gate.sh --boot --rootfs
 ```
 
 #### Persistent Storage (BlockFS)

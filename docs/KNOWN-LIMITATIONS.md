@@ -362,8 +362,8 @@ sockets instead.
 
 ### Capability lookup in debug builds
 
-`cap_lookup` measures 93 ns in a dev build: within the 100 ns target, but only just. Release-build
-numbers have not been recorded.
+`cap_lookup` measures 97 ns in a dev build: within the 100 ns target, but only just. A release
+kernel measures 29 ns (2026-10-15, `docs/PERFORMANCE-REPORT.md`, N-281).
 
 ### Hardening features are not active (N-145, N-146, N-15; planned v0.28, sprint G)
 
@@ -464,6 +464,10 @@ KDE root filesystem -- nobody can log in with a password, the screen lock includ
   supplementary groups of `/etc/group` are not applied at login.
 - TOTP does not follow RFC 6238, and pam_veridian cannot check a second factor: an account with
   MFA enabled fails PAM authentication.
+- A line of `/etc/veridian/mfa` with no `:` names no account, so it is only counted as malformed
+  (the boot log says so and the account files are not saved); the account it was meant for keeps
+  password-only login. A line naming an account with a bad secret, or an unreadable file, fails
+  closed.
 - New hashes use 1000 rounds in dev builds (5000, the standard count, in release builds); the count
   is stored with each hash.
 

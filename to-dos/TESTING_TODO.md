@@ -1,12 +1,13 @@
 # Testing TODO
 
 **Purpose**: Track all testing activities across the project lifecycle
-**Last Updated**: 2026-03-10
-**Phase 0-12 Status**: All complete. 29/29 boot tests passing on all 3 architectures.
-**Host-Target Tests**: 4,095+ passing via `cargo llvm-cov --lib --target x86_64-unknown-linux-gnu`. Codecov integrated.
-**Current Status**: Boot test suite operational (29/29). Host-target unit tests operational (4,095+). Automated bare-metal test execution still blocked by Rust toolchain lang items limitation. Testing via QEMU boot verification is the primary validation method for kernel functionality. Phases 5-12 testing is integrated into the host-target test suite.
+**Last Updated**: 2026-10-18 (v0.27.0)
+**Boot Tests**: x86_64 43/43, AArch64 64/64, RISC-V 57/57 in-kernel tests (47, 68 and 61 with four CPUs), run by `scripts/boot-test.sh` and in CI.
+**Host-Target Tests**: 4,770 passing (`cargo test --lib --features alloc -p veridian-kernel --target x86_64-unknown-linux-gnu`); coverage via `cargo llvm-cov` to Codecov (56.2% of lines).
+**Runtime Suites**: the BusyBox self-test, `audit_runtime_test` (91/91, 91/91, 89/89) and `musl_runtime_test` (80/80, 78/78, 78/78) on the BlockFS root of each architecture, on one and four CPUs (`scripts/run-rootfs-tests.sh`).
+**Current Status**: before every commit, `scripts/dev/gate.sh --boot --rootfs` runs fmt, clippy on every target, the host tests, the builds, the boot tests and the runtime suites (coverage runs in CI only). Next: LTP and musl libc-test with the v0.28 system call work.
 
-## 🧪 Testing Strategy Overview
+## Testing Strategy Overview
 
 ### Testing Levels
 1. **Unit Testing** - Individual component testing
@@ -16,49 +17,50 @@
 5. **Security Testing** - Vulnerability assessment
 6. **Compatibility Testing** - Hardware and software compatibility
 
-## 📋 Unit Testing
+## Unit Testing
 
 ### Kernel Unit Tests
-- [x] Memory allocator tests ✅ (100% complete)
-  - [x] Allocation/deallocation ✅
-  - [x] Fragmentation handling ✅
-  - [x] Edge cases ✅
-  - [x] Stress tests ✅
-  - [x] NUMA-aware allocation ✅
-  - [x] Zone management (DMA, Normal, High) ✅
-- [x] Virtual memory tests ✅ (100% complete)
-  - [x] Page table operations ✅
-  - [x] Permission enforcement ✅
-  - [x] TLB consistency ✅
-  - [x] Address space isolation ✅
-  - [x] User-space safety validation ✅
-- [x] Kernel heap tests ✅ (100% complete)
-  - [x] Slab allocation ✅
-  - [x] Size class validation ✅
-  - [x] Cache operations ✅
-- [x] Scheduler tests ✅ (100% complete)
-  - [x] Task creation/deletion ✅
-  - [x] Priority handling ✅
-  - [x] Load balancing ✅
-  - [x] Race conditions ✅
-  - [x] CFS implementation ✅
-  - [x] SMP support ✅
-  - [x] CPU hotplug ✅
-- [x] IPC tests ✅ (100% complete)
-  - [x] Message passing ✅
-  - [x] Endpoint management ✅
-  - [x] Buffer handling ✅
-  - [x] Error cases ✅
-  - [x] Fast path <1μs latency ✅
-  - [x] Zero-copy transfers ✅
-  - [x] Async channels ✅
-- [x] Capability tests ✅ (100% complete)
-  - [x] Creation/deletion ✅
-  - [x] Rights enforcement ✅
-  - [x] Derivation rules ✅
-  - [x] Revocation ✅
-  - [x] Inheritance ✅
-  - [x] Per-CPU cache ✅
+- [x] Memory allocator tests (100% complete)
+  - [x] Allocation/deallocation
+  - [x] Fragmentation handling
+  - [x] Edge cases
+  - [x] Stress tests
+  - [x] NUMA-aware allocation
+  - [x] Zone management (DMA, Normal, High)
+- [x] Virtual memory tests (100% complete)
+  - [x] Page table operations
+  - [x] Permission enforcement
+  - [x] TLB consistency
+  - [x] Address space isolation
+  - [x] User-space safety validation
+- [x] Kernel heap tests (100% complete)
+  - [x] Slab allocation
+  - [x] Size class validation
+  - [x] Cache operations
+- [x] Scheduler tests (100% complete)
+  - [x] Task creation/deletion
+  - [x] Priority handling
+  - [x] Load balancing
+  - [x] Race conditions
+  - [x] EEVDF fair class, FIFO/RR and SCHED_DEADLINE (ADR 0007)
+  - [x] SMP support
+  - [x] CPU hotplug
+- [x] IPC tests (100% complete)
+  - [x] Message passing
+  - [x] Endpoint management
+  - [x] Buffer handling
+  - [x] Error cases
+  - Fast path: removed in v0.27 with the old scheduler (it was never reachable from user space);
+    IPC latency is not measured. The IPC redesign is v0.28 work.
+  - [x] Zero-copy transfers
+  - [x] Async channels
+- [x] Capability tests (100% complete)
+  - [x] Creation/deletion
+  - [x] Rights enforcement
+  - [x] Derivation rules
+  - [x] Revocation
+  - [x] Inheritance
+  - [x] Per-process hash-table lookup (replaced the per-CPU cache in v0.26.0, CAP-PERF-01)
 
 ### Driver Unit Tests
 - [ ] Driver framework tests
@@ -72,7 +74,7 @@
 - [ ] Process management tests
 - [ ] Security policy tests
 
-## 🔗 Integration Testing
+## Integration Testing
 
 ### Kernel Integration
 - [ ] Boot sequence testing
@@ -94,7 +96,7 @@
 - [ ] Resource sharing
 - [ ] Failure propagation
 
-## 🖥️ System Testing
+## System Testing
 
 ### Functional Testing
 - [ ] System calls
@@ -121,7 +123,7 @@
 - [ ] Resource exhaustion
 - [ ] Performance degradation
 
-## ⚡ Performance Testing
+## Performance Testing
 
 ### Benchmarks
 - [ ] Micro-benchmarks
@@ -147,7 +149,7 @@
 - [ ] Process scaling
 - [ ] Network scaling
 
-## 🔒 Security Testing
+## Security Testing
 
 ### Vulnerability Testing
 - [ ] Fuzzing
@@ -176,7 +178,7 @@
 - [ ] Cryptographic validation
 - [ ] Access control verification
 
-## 🔧 Hardware Testing
+## Hardware Testing
 
 ### Platform Testing
 - [ ] x86_64 platforms
@@ -205,7 +207,7 @@
   - [ ] Mice
   - [ ] Touch devices
 
-## 📱 Compatibility Testing
+## Compatibility Testing
 
 ### Software Compatibility
 - [ ] POSIX compliance
@@ -219,7 +221,7 @@
 - [ ] Device protocols
 - [ ] API compatibility
 
-## 🤖 Test Automation
+## Test Automation
 
 ### CI/CD Integration
 - [ ] Automated test execution
@@ -239,7 +241,7 @@
 - [ ] Coverage improvements
 - [ ] Gap analysis
 
-## 📊 Test Metrics
+## Test Metrics
 
 ### Quality Metrics
 - Test pass rate: __%
@@ -253,33 +255,33 @@
 - Test efficiency: __ tests/hour
 - False positive rate: __%
 
-## 🐛 Test Issues
+## Test Issues
 
 ### Known Test Failures
-1. Issue: Automated test execution blocked by Rust toolchain
-   - Test: All kernel tests
-   - Impact: Cannot run automated tests due to duplicate lang items
-   - Status: Documented in docs/TESTING-STATUS.md
-   - Workaround: Manual testing with QEMU, code review validation
+None. The host tests, the QEMU boot tests and the runtime suites all pass, in CI and in
+`scripts/dev/gate.sh`.
 
 ### Test Infrastructure Issues
-1. Issue: Duplicate lang items in no-std test framework
-   - Component: Rust toolchain test harness
-   - Workaround: Manual QEMU testing, kernel/run-tests.sh script
-   - Fix ETA: Requires upstream Rust toolchain changes
+1. Issue: Rust's standard test harness cannot run the kernel's bare-metal `[[bin]]` and `[[test]]`
+   targets (duplicate lang items when they are built for the host)
+   - Component: Rust toolchain test harness (no_std custom targets)
+   - Workaround: the kernel's tests run as host unit tests (`cargo test --lib ...`), as in-kernel
+     boot tests (`scripts/boot-test.sh`) and as in-guest runtime suites
+     (`scripts/run-rootfs-tests.sh`); all three are automated
 
-## 📅 Testing Schedule
+## Testing Schedule
 
 ### Phase 0 Testing (100% COMPLETE - v0.1.0)
-- ✅ Unit test framework setup
-- ✅ Basic CI pipeline (100% passing)
-- ✅ Initial test suite
+- Unit test framework setup
+- Basic CI pipeline (100% passing)
+- Initial test suite
 
 ### Phase 1 Testing (100% COMPLETE - v0.2.0)
-- ✅ Kernel unit tests (all subsystems)
-- ✅ Boot testing (all architectures)
-- ✅ Basic integration tests
-- ✅ Performance benchmarks (<1μs IPC achieved)
+- Kernel unit tests (all subsystems)
+- Boot testing (all architectures)
+- Basic integration tests
+- Performance benchmarks (the <1μs IPC figure was never measured end to end; see
+  docs/PERFORMANCE-REPORT.md)
 
 ### Phase 2 Testing
 - Driver testing
@@ -306,12 +308,11 @@
 - Application testing
 - End-to-end scenarios
 
-## 🔗 Testing Resources
+## Testing Resources
 
 ### Documentation
-- [Testing Guide](../docs/TESTING-GUIDE.md)
-- [Test Plan Template](templates/test-plan.md)
-- [Bug Report Template](templates/bug-report.md)
+- [Testing Strategy](../docs/TESTING-STRATEGY.md)
+- [Bug Report Template](../.github/ISSUE_TEMPLATE/bug_report.md)
 
 ### Tools
 - Test frameworks: ____

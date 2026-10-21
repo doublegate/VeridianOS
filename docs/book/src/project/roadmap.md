@@ -30,29 +30,39 @@ VeridianOS has completed all 13 development phases, progressing from bare-metal 
 | Release | Description |
 |---------|-------------|
 | v0.25.1 | KDE session launch fix: direct ELF binary execution, stripped rootfs |
+| v0.26.0 | Audit remediation (P0 + P1): security fixes, clocks and timers on every architecture, per-CPU allocator, lazy BlockFS cache |
+| v0.27.0 | Process model and SMP: dispatched tasks on every CPU, copy-on-write fork, AArch64 and RISC-V user mode, Linux system call numbers |
 
 ## Version History
 
-60+ releases published from v0.1.0 through v0.25.1. See [CHANGELOG.md](https://github.com/doublegate/VeridianOS/blob/main/CHANGELOG.md) for the complete release history.
+85 releases published from v0.1.0 through v0.27.0. See [CHANGELOG.md](https://github.com/doublegate/VeridianOS/blob/main/CHANGELOG.md) for the complete release history.
 
-## Performance Targets (All Achieved)
+## Performance Targets
 
-| Metric | Target | Achieved |
+| Metric | Target | Measured |
 |--------|--------|----------|
-| IPC Latency | <5us | <1us |
-| Context Switch | <10us | <10us |
-| Memory Allocation | <1us | <1us |
-| Capability Lookup | O(1) | O(1) |
-| Concurrent Processes | 1000+ | 1000+ |
-| Kernel Size | <15K LOC | ~15K LOC |
+| IPC Latency | <1us | not measured (messages are queued on the endpoint; the IPC redesign is v0.28 work) |
+| Context Switch | <10us | not measured |
+| Memory Allocation | <1us | 74 ns per-CPU cache, 85 ns global allocator (release kernel) |
+| Capability Lookup | O(1), <100 ns | 29 ns (hash table, release kernel) |
+| Concurrent Processes | 1000+ | not measured |
+
+Figures from the in-kernel `perf` command; see the
+[Performance Report](https://github.com/doublegate/VeridianOS/blob/main/docs/PERFORMANCE-REPORT.md).
 
 ## Future Directions
 
-### v1.0.0 Release
-- Kernel syscall gap remediation (brk, mmap, write, Unix sockets, epoll)
-- Full KDE Plasma 6 runtime (kwin_wayland currently reaches musl `_start`)
-- llvmpipe Mesa upgrade for GPU rendering
-- Comprehensive real hardware testing
+### v0.28
+
+- The remaining Linux system call groups, tested with LTP and musl libc-test
+- A full Linux capability model (capget/capset) and every namespace type (unshare/setns)
+- The KDE shared-library pipeline and a media backend; relocatable RISC-V boot
+- Networking and storage (sprint F), hardening (G) and real hardware (H), carried over from v0.27.0
+
+### After v0.28
+
+- Drivers and services moved out of the kernel (critique C6)
+- A full KDE Plasma 6 runtime
 
 ### Community Goals
 - First external contributors
@@ -70,10 +80,13 @@ VeridianOS has completed all 13 development phases, progressing from bare-metal 
 
 | Feature | Status |
 |---------|--------|
-| Kernel syscall completeness | Pending |
-| KDE Plasma 6 full runtime | Pending (ELF loads, syscalls needed) |
-| Real hardware boot | Pending |
+| Linux system call coverage | In progress: 180 of 385 x86_64 calls implemented in v0.27.0; the remaining groups are v0.28 work |
+| KDE Plasma 6 full runtime | Pending: the shared-library build and media backend are v0.28 work |
+| Real hardware boot | Pending: QEMU only so far; sprint H (v0.28) |
+| Drivers and services in user space | Planned (critique C6) |
 | Third-party security audit | Planned |
 | Community contributor onboarding | Planned |
 
-The project has achieved all original development goals across 13 phases. The path to v1.0.0 focuses on polishing the kernel-userspace interface to enable the cross-compiled KDE stack to run fully.
+All 13 development phases are complete; the targets above are still open. The path to v1.0.0 runs
+through Linux system call compatibility, real hardware and hardening; the open items are listed in
+[Known Limitations](https://github.com/doublegate/VeridianOS/blob/main/docs/KNOWN-LIMITATIONS.md).

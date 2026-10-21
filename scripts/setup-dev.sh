@@ -19,29 +19,29 @@ command_exists() {
 }
 
 # 1. Check prerequisites
-echo "📋 Checking prerequisites..."
+echo "Checking prerequisites..."
 
 MISSING_DEPS=0
 
 if ! command_exists git; then
-    echo -e "${RED}  ❌ git not found${NC}"
+    echo -e "${RED}git not found${NC}"
     MISSING_DEPS=1
 else
-    echo -e "${GREEN}  ✓ git $(git --version | cut -d' ' -f3)${NC}"
+    echo -e "${GREEN}git $(git --version | cut -d' ' -f3)${NC}"
 fi
 
 if ! command_exists rustc; then
-    echo -e "${RED}  ❌ Rust not found${NC}"
+    echo -e "${RED}Rust not found${NC}"
     MISSING_DEPS=1
 else
-    echo -e "${GREEN}  ✓ Rust $(rustc --version | cut -d' ' -f2)${NC}"
+    echo -e "${GREEN}Rust $(rustc --version | cut -d' ' -f2)${NC}"
 fi
 
 if ! command_exists cargo; then
-    echo -e "${RED}  ❌ Cargo not found${NC}"
+    echo -e "${RED}Cargo not found${NC}"
     MISSING_DEPS=1
 else
-    echo -e "${GREEN}  ✓ Cargo $(cargo --version | cut -d' ' -f2)${NC}"
+    echo -e "${GREEN}Cargo $(cargo --version | cut -d' ' -f2)${NC}"
 fi
 
 if [ $MISSING_DEPS -eq 1 ]; then
@@ -52,32 +52,32 @@ fi
 
 # 2. Install git hooks
 echo ""
-echo "🔗 Installing git hooks..."
+echo "Installing git hooks..."
 if [ -f "scripts/install-hooks.sh" ]; then
     bash scripts/install-hooks.sh
 else
-    echo -e "${YELLOW}  ⚠️  Git hooks installer not found${NC}"
+    echo -e "${YELLOW}Git hooks installer not found${NC}"
 fi
 
 # 3. Configure git settings
 echo ""
-echo "⚙️  Configuring git settings..."
+echo "Configuring git settings..."
 
 # Set up commit signing (optional)
 if command_exists gpg; then
     if [ -z "$(git config --get user.signingkey)" ]; then
-        echo -e "${YELLOW}  ℹ️  No GPG key configured for commit signing${NC}"
+        echo -e "${YELLOW}No GPG key configured for commit signing${NC}"
         echo "  To enable commit signing:"
         echo "    1. git config --global user.signingkey YOUR_KEY_ID"
         echo "    2. git config --global commit.gpgsign true"
     else
-        echo -e "${GREEN}  ✓ GPG signing configured${NC}"
+        echo -e "${GREEN}GPG signing configured${NC}"
     fi
 fi
 
 # Configure git aliases for common tasks
 echo ""
-echo "🎯 Setting up useful git aliases..."
+echo "Setting up useful git aliases..."
 
 git config --local alias.co checkout
 git config --local alias.br branch
@@ -89,42 +89,57 @@ git config --local alias.visual '!gitk'
 git config --local alias.amend 'commit --amend'
 git config --local alias.graph 'log --oneline --graph --decorate'
 
-echo -e "${GREEN}  ✓ Git aliases configured${NC}"
+echo -e "${GREEN}Git aliases configured${NC}"
 
 # 4. Verify Rust toolchain
 echo ""
-echo "🦀 Verifying Rust toolchain..."
+echo "Verifying Rust toolchain..."
 
-REQUIRED_TOOLCHAIN="nightly-2025-01-15"
-CURRENT_TOOLCHAIN=$(rustc --version | grep -oE 'nightly-[0-9]{4}-[0-9]{2}-[0-9]{2}' || echo "stable")
+# The pin is rust-toolchain.toml's; rustc --version prints a commit date, not
+# the toolchain name, so ask rustup which toolchain is active.
+REQUIRED_TOOLCHAIN=$(sed -n 's/^channel *= *"\(.*\)"/\1/p' rust-toolchain.toml 2>/dev/null)
+if [ -z "$REQUIRED_TOOLCHAIN" ]; then
+    echo -e "${RED}Could not read the channel from rust-toolchain.toml${NC}"
+    exit 1
+fi
+# rustup names the active toolchain "<channel>-<host triple> (reason)"; match
+# the pinned channel itself, whatever form it takes (nightly-DATE, stable, 1.x).
+CURRENT_TOOLCHAIN=$(rustup show active-toolchain 2>/dev/null | awk '{print $1}')
+case "$CURRENT_TOOLCHAIN" in
+    "$REQUIRED_TOOLCHAIN"|"$REQUIRED_TOOLCHAIN"-*) CURRENT_TOOLCHAIN=$REQUIRED_TOOLCHAIN ;;
+    "") CURRENT_TOOLCHAIN="none" ;;
+esac
 
 if [ "$CURRENT_TOOLCHAIN" != "$REQUIRED_TOOLCHAIN" ]; then
-    echo -e "${YELLOW}  ⚠️  Wrong toolchain active${NC}"
+    echo -e "${YELLOW}Wrong toolchain active${NC}"
     echo "  Current: $CURRENT_TOOLCHAIN"
     echo "  Required: $REQUIRED_TOOLCHAIN"
     echo ""
     echo "  To install and use the correct toolchain:"
     echo "    rustup toolchain install $REQUIRED_TOOLCHAIN"
-    echo "    rustup override set $REQUIRED_TOOLCHAIN"
+    echo "  (rust-toolchain.toml selects it inside the repository once installed)"
+    echo "  Skipping the component check until it is installed."
 else
-    echo -e "${GREEN}  ✓ Correct toolchain active${NC}"
+    echo -e "${GREEN}Correct toolchain active${NC}"
 fi
 
-# Check for required components
-echo "  Checking components..."
-COMPONENTS=("rust-src" "llvm-tools-preview" "rustfmt" "clippy")
-for comp in "${COMPONENTS[@]}"; do
-    if rustup component list | grep -q "$comp (installed)"; then
-        echo -e "${GREEN}    ✓ $comp${NC}"
-    else
-        echo -e "${YELLOW}    ⚠️  $comp not installed${NC}"
-        echo "       Run: rustup component add $comp"
-    fi
-done
+# Check for required components (of the pinned toolchain, once it is active)
+if [ "$CURRENT_TOOLCHAIN" = "$REQUIRED_TOOLCHAIN" ]; then
+    echo "  Checking components..."
+    COMPONENTS=("rust-src" "llvm-tools-preview" "rustfmt" "clippy")
+    for comp in "${COMPONENTS[@]}"; do
+        if rustup component list | grep -q "$comp (installed)"; then
+            echo -e "${GREEN}$comp${NC}"
+        else
+            echo -e "${YELLOW}$comp not installed${NC}"
+            echo "       Run: rustup component add $comp"
+        fi
+    done
+fi
 
 # 5. Create local development config
 echo ""
-echo "📝 Creating local development configuration..."
+echo "Creating local development configuration..."
 
 # Create .env file if it doesn't exist
 if [ ! -f ".env" ]; then
@@ -132,34 +147,29 @@ if [ ! -f ".env" ]; then
 # Local development environment variables
 # DO NOT COMMIT THIS FILE
 
-# Enable verbose output
+# Backtraces from host tools and host tests
 RUST_BACKTRACE=1
-RUST_LOG=debug
 
-# Git hook configuration
-RUN_CLIPPY_PRECOMMIT=0  # Set to 1 to enable (slow)
-RUN_TESTS_PREPUSH=1     # Set to 0 to disable
-
-# Development settings
-QEMU_DISPLAY=none       # Set to 'gtk' for GUI
-QEMU_SERIAL=stdio       # Serial output to console
+# The git hooks read their switches from the shell environment, not from
+# this file: export RUN_CLIPPY_PRECOMMIT=1 to run clippy before each commit,
+# or RUN_TESTS_PREPUSH=0 to skip the gate before a push to a feature branch.
 EOF
-    echo -e "${GREEN}  ✓ Created .env file${NC}"
+    echo -e "${GREEN}Created .env file${NC}"
 else
-    echo -e "${GREEN}  ✓ .env file already exists${NC}"
+    echo -e "${GREEN}.env file already exists${NC}"
 fi
 
 # 6. Summary
 echo ""
 echo -e "${GREEN}=== Setup Complete ===${NC}"
 echo ""
-echo "📚 Next steps:"
+echo "Next steps:"
 echo "  1. Review branch protection rules in .github/branch-protection.md"
 echo "  2. Configure your IDE/editor (see .vscode/settings.json)"
 echo "  3. Run 'just build' to verify everything works"
 echo "  4. Read CONTRIBUTING.md for development guidelines"
 echo ""
-echo "🔧 Useful commands:"
+echo "Useful commands:"
 echo "  just build       - Build the kernel"
 echo "  just test        - Run tests"
 echo "  just run         - Run in QEMU"
@@ -167,4 +177,4 @@ echo "  just debug       - Debug with GDB"
 echo "  just clippy      - Run clippy checks"
 echo "  just fmt         - Format code"
 echo ""
-echo "Happy hacking! 🚀"
+echo "Happy hacking!"

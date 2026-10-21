@@ -31,68 +31,89 @@ set history size 10000
 set history filename ~/.gdb_history
 
 # Useful kernel debugging commands
+# kernel-symbols <target-dir> [release]: symbols from the dev build, or the
+# release build when the second argument is given.
 define kernel-symbols
-    # Load kernel symbols from the ELF file
-    symbol-file target/$arg0/debug/veridian-kernel
-    echo [GDB] Loaded symbols for $arg0\n
+    if $argc == 0
+        echo Usage: kernel-symbols <target-dir> [release]\n
+    else
+        if $argc == 2
+            symbol-file target/$arg0/$arg1/veridian-kernel
+        else
+            symbol-file target/$arg0/debug/veridian-kernel
+        end
+        echo [GDB] Loaded symbols for $arg0\n
+    end
 end
 
 # Breakpoint helpers
+#
+# GDB cannot compare string arguments on a bare-metal target (a string literal
+# needs malloc in the inferior), so the architecture-specific helpers are
+# separate commands rather than one command taking the architecture name.
+#
+# Every panic goes through core::panicking::panic_fmt.
 define break-panic
-    break panic_handler
-    echo [GDB] Breakpoint set on panic handler\n
+    break core::panicking::panic_fmt
+    echo [GDB] Breakpoint set on core::panicking::panic_fmt\n
+end
+
+# Hardware variant, for x86_64 under UEFI: the bootloader loads the kernel
+# after GDB attaches and overwrites software breakpoints set before then.
+define hbreak-panic
+    hbreak core::panicking::panic_fmt
+    echo [GDB] Hardware breakpoint set on core::panicking::panic_fmt\n
 end
 
 define break-main
-    break kernel_main
-    echo [GDB] Breakpoint set on kernel_main\n
+    break veridian_kernel::bootstrap::kernel_init
+    echo [GDB] Breakpoint set on veridian_kernel::bootstrap::kernel_init\n
 end
 
 define break-boot
-    # Architecture-specific boot breakpoints
-    if $argc == 0
-        echo Usage: break-boot <arch>\n
-    else
-        if $arg0 == "x86_64"
-            break _start
-            echo [GDB] Breakpoint set on x86_64 _start\n
-        end
-        if $arg0 == "aarch64"
-            break _start
-            break _start_rust
-            echo [GDB] Breakpoints set on AArch64 _start and _start_rust\n
-        end
-        if $arg0 == "riscv64"
-            break _start
-            echo [GDB] Breakpoint set on RISC-V _start\n
-        end
-    end
+    echo Usage: break-boot-x86_64, break-boot-aarch64 or break-boot-riscv64\n
+end
+
+define break-boot-x86_64
+    hbreak _start
+    echo [GDB] Hardware breakpoint set on x86_64 _start\n
+end
+
+# AArch64 starts at the physical load address with the MMU off; under QEMU's
+# gdbstub neither _start (linked high) nor the physical entry stops, so the
+# first stop is _start_rust.
+define break-boot-aarch64
+    break _start_rust
+    echo [GDB] Breakpoint set on AArch64 _start_rust\n
+end
+
+# RISC-V: OpenSBI jumps to the physical entry, 0x80200000; _start (linked
+# high) never stops, so break on the physical address, then _start_rust.
+define break-boot-riscv64
+    break *0x80200000
+    break _start_rust
+    echo [GDB] Breakpoints set on the RISC-V physical entry (0x80200000) and _start_rust\n
 end
 
 # Memory examination helpers
 define examine-stack
-    info registers rsp rbp
-    x/32xg $rsp
+    p $sp
+    x/32xg $sp
     echo [GDB] Stack contents displayed\n
 end
 
 define examine-uart
-    if $argc == 0
-        echo Usage: examine-uart <arch>\n
-    else
-        if $arg0 == "x86_64"
-            # COM1 port
-            x/4xb 0x3f8
-        end
-        if $arg0 == "aarch64"
-            # PL011 UART
-            x/16xw 0x09000000
-        end
-        if $arg0 == "riscv64"
-            # RISC-V UART
-            x/16xw 0x10000000
-        end
-    end
+    echo Usage: examine-uart-aarch64 or examine-uart-riscv64 (x86_64's COM1 is an I/O port)\n
+end
+
+define examine-uart-aarch64
+    # PL011 UART
+    x/16xw 0x09000000
+end
+
+define examine-uart-riscv64
+    # 16550 UART
+    x/16xw 0x10000000
 end
 
 # Kernel state inspection
@@ -115,5 +136,5 @@ alias eu = examine-uart
 alias kst = kernel-state
 
 echo [GDB] VeridianOS kernel debugging script loaded\n
-echo [GDB] Available commands: kernel-symbols, break-panic, break-main, break-boot\n
+echo [GDB] Available commands: kernel-symbols, break-panic, break-main, break-boot-<arch>, examine-stack, examine-uart-<arch>\n
 echo [GDB] Aliases: ks, bp, bm, bb, es, eu, kst\n

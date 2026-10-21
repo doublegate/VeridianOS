@@ -1,176 +1,188 @@
 #!/usr/bin/env bash
-# Pre-push hook for VeridianOS
-# Runs tests before pushing to remote
+# Pre-push hook for VeridianOS.
+#
+# git passes the remote name and URL as arguments and one line per pushed ref
+# on stdin: "<local ref> <local oid> <remote ref> <remote oid>". The checks use
+# those records, so they see exactly what is being pushed, to which branch.
 
 set -e
 
-# Colors
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m'
 
-echo "🚀 Running pre-push checks..."
+echo "Running pre-push checks..."
 
-# Get remote and branch info
 REMOTE="$1"
-URL="$2"
-
-# Check if pushing to main/develop (protected branches)
 PROTECTED_BRANCHES=("main" "develop")
-CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD)
 
-IS_PROTECTED=0
-for branch in "${PROTECTED_BRANCHES[@]}"; do
-    if [ "$CURRENT_BRANCH" = "$branch" ]; then
-        IS_PROTECTED=1
-        break
-    fi
-done
-
-# Function to check if command exists
 command_exists() {
     command -v "$1" >/dev/null 2>&1
 }
 
-# 1. Check for WIP commits
-echo "🔍 Checking for WIP commits..."
-WIP_COMMITS=$(git log --oneline @{u}.. | grep -i "^[a-f0-9]* wip" || true)
+# The commits each record adds: remote..local, or for a new remote ref the
+# commits on no remote-tracking ref (git's own sample hook does the same).
+RANGES=()
+DESTINATIONS=()
+IS_PROTECTED=0
+while read -r local_ref local_oid remote_ref remote_oid; do
+    [ -z "$local_ref" ] && continue
+    # A deletion pushes no commits.
+    [[ "$local_oid" =~ ^0+$ ]] && continue
+    DESTINATIONS+=("$remote_ref")
+    for branch in "${PROTECTED_BRANCHES[@]}"; do
+        [ "$remote_ref" = "refs/heads/$branch" ] && IS_PROTECTED=1
+    done
+    if [[ "$remote_oid" =~ ^0+$ ]] || ! git cat-file -e "$remote_oid^{commit}" 2>/dev/null; then
+        RANGES+=("$local_oid --not --remotes")
+    else
+        RANGES+=("$remote_oid..$local_oid")
+    fi
+done
+
+# A push that only deletes remote refs adds no commits: nothing to check.
+if [ ${#RANGES[@]} -eq 0 ]; then
+    echo -e "${GREEN}Nothing to check (no commits pushed)${NC}"
+    exit 0
+fi
+
+GATE_LOG=""
+DOC_LOG=""
+trap 'rm -f "$GATE_LOG" "$DOC_LOG"' EXIT
+
+# Run `git <args> <range>` for every range.
+for_each_range() {
+    local r
+    for r in "${RANGES[@]}"; do
+        # shellcheck disable=SC2086  # a range may be "<oid> --not --remotes"
+        git "$@" $r
+    done
+}
+
+# 1. WIP commits
+echo "Checking for WIP commits..."
+WIP_COMMITS=$(for_each_range log --oneline | grep -i "^[a-f0-9]* wip" || true)
 if [ -n "$WIP_COMMITS" ]; then
-    echo -e "${RED}❌ WIP commits detected:${NC}"
+    echo -e "${RED}WIP commits detected:${NC}"
     echo "$WIP_COMMITS"
     echo ""
     echo "Please squash or amend WIP commits before pushing"
     echo "Use 'git push --no-verify' to force push (not recommended)"
     exit 1
 else
-    echo -e "${GREEN}✓ No WIP commits${NC}"
+    echo -e "${GREEN}No WIP commits${NC}"
 fi
 
-# 2. Run formatting check
-echo "📝 Checking code formatting..."
-if command_exists rustfmt; then
-    if ! cargo fmt -- --check >/dev/null 2>&1; then
-        echo -e "${RED}❌ Code formatting issues detected${NC}"
-        echo "Run 'cargo fmt' to fix formatting"
-        exit 1
-    else
-        echo -e "${GREEN}✓ Code formatting OK${NC}"
-    fi
-fi
-
-# 3. Run clippy (for protected branches)
-if [ $IS_PROTECTED -eq 1 ]; then
-    echo "📎 Running clippy checks (protected branch)..."
-    if command_exists cargo-clippy; then
-        if ! cargo clippy --all-targets --all-features -- -D warnings 2>/dev/null; then
-            echo -e "${RED}❌ Clippy warnings found${NC}"
-            echo "Fix clippy warnings before pushing to $CURRENT_BRANCH"
-            exit 1
-        else
-            echo -e "${GREEN}✓ Clippy checks passed${NC}"
-        fi
-    fi
-fi
-
-# 4. Check that Cargo.lock is up to date
-echo "🔒 Checking Cargo.lock..."
-if ! cargo check --locked >/dev/null 2>&1; then
-    echo -e "${RED}❌ Cargo.lock is out of date${NC}"
-    echo "Run 'cargo check' and commit the updated Cargo.lock"
+# 2. Cargo.lock up to date (cargo metadata checks it without building; a
+# plain `cargo check` builds the kernel's bare-metal binary for the host and
+# fails for that reason, not the lockfile's)
+echo "Checking Cargo.lock..."
+if ! cargo metadata --locked --format-version 1 >/dev/null 2>&1; then
+    echo -e "${RED}Cargo.lock is out of date${NC}"
+    echo "Run 'cargo update -w' and commit the updated Cargo.lock"
     exit 1
 else
-    echo -e "${GREEN}✓ Cargo.lock is up to date${NC}"
+    echo -e "${GREEN}Cargo.lock is up to date${NC}"
 fi
 
-# 5. Run tests (configurable)
-if [ "${RUN_TESTS_PREPUSH:-1}" = "1" ]; then
-    echo "🧪 Running tests..."
-    
-    # For x86_64 we can run tests
-    if command_exists qemu-system-x86_64; then
-        echo "  Running x86_64 tests..."
-        if cargo test --target targets/x86_64-veridian.json -p veridian-kernel \
-           -Zbuild-std=core,compiler_builtins,alloc \
-           -Zbuild-std-features=compiler-builtins-mem >/dev/null 2>&1; then
-            echo -e "${GREEN}  ✓ x86_64 tests passed${NC}"
+# 3. Formatting, clippy on every target and the host tests: the gate without
+# QEMU. A push to main or develop always runs it, with --boot (every
+# architecture built and booted); elsewhere RUN_TESTS_PREPUSH=0 skips it, and
+# then only formatting is checked.
+if [ $IS_PROTECTED -eq 1 ] || [ "${RUN_TESTS_PREPUSH:-1}" = "1" ]; then
+    GATE_ARGS=()
+    [ $IS_PROTECTED -eq 1 ] && GATE_ARGS=(--boot)
+    echo "Running scripts/dev/gate.sh${GATE_ARGS[*]:+ ${GATE_ARGS[*]}} (fmt, clippy, syscall checks, host tests)..."
+    GATE_LOG=$(mktemp)
+    if scripts/dev/gate.sh "${GATE_ARGS[@]}" >"$GATE_LOG" 2>&1; then
+        echo -e "${GREEN}Gate passed${NC}"
+    else
+        tail -n 40 "$GATE_LOG"
+        echo -e "${RED}Gate failed (the last lines are above)${NC}"
+        if [ $IS_PROTECTED -eq 1 ]; then
+            echo "Pushes to main or develop always run the gate; fix the failing step"
         else
-            echo -e "${RED}  ❌ x86_64 tests failed${NC}"
-            echo "Fix failing tests or set RUN_TESTS_PREPUSH=0"
-            exit 1
+            echo "Fix the failing step, or set RUN_TESTS_PREPUSH=0 to skip the gate"
         fi
-    else
-        echo -e "${YELLOW}  ⚠️  QEMU not found, skipping integration tests${NC}"
-    fi
-    
-    # Run doc tests
-    echo "  Running doc tests..."
-    if cargo test --doc >/dev/null 2>&1; then
-        echo -e "${GREEN}  ✓ Doc tests passed${NC}"
-    else
-        echo -e "${YELLOW}  ⚠️  Some doc tests failed${NC}"
+        exit 1
     fi
 else
-    echo -e "${YELLOW}⚠️  Tests skipped (RUN_TESTS_PREPUSH=0)${NC}"
-fi
-
-# 6. Check documentation builds
-echo "📚 Checking documentation..."
-if ! cargo doc --no-deps --quiet 2>/dev/null; then
-    echo -e "${YELLOW}⚠️  Documentation build warnings${NC}"
-fi
-
-# 7. Security check for sensitive files
-echo "🔐 Checking for sensitive files..."
-SENSITIVE_PATTERNS=(
-    "*.key"
-    "*.pem"
-    "*.p12"
-    ".env*"
-    "*_rsa"
-    "*_dsa"
-    "*_ed25519"
-    "*_ecdsa"
-    "*.pfx"
-    "secrets.json"
-    "credentials.json"
-)
-
-FOUND_SENSITIVE=0
-for pattern in "${SENSITIVE_PATTERNS[@]}"; do
-    if git diff --name-only @{u}.. | grep -q "$pattern"; then
-        echo -e "${RED}❌ Potentially sensitive file detected: $pattern${NC}"
-        FOUND_SENSITIVE=1
+    echo -e "${YELLOW}Gate skipped (RUN_TESTS_PREPUSH=${RUN_TESTS_PREPUSH}); checking formatting only${NC}"
+    if command_exists rustfmt; then
+        if ! cargo fmt --all -- --check >/dev/null 2>&1; then
+            echo -e "${RED}Code formatting issues detected${NC}"
+            echo "Run 'cargo fmt' to fix formatting"
+            exit 1
+        else
+            echo -e "${GREEN}Code formatting OK${NC}"
+        fi
     fi
-done
+fi
+
+# 4. Rustdoc warnings, reported but not blocking (CI's docs job does not fail
+# on them either)
+echo "Checking documentation..."
+DOC_LOG=$(mktemp)
+if ! RUSTDOCFLAGS="-D warnings" cargo doc --lib --features alloc -p veridian-kernel \
+    --target x86_64-unknown-linux-gnu --no-deps --quiet >"$DOC_LOG" 2>&1; then
+    tail -n 20 "$DOC_LOG"
+    echo -e "${YELLOW}Documentation has warnings (the last lines are above)${NC}"
+fi
+
+# 5. Sensitive files added or changed by the pushed commits (shell glob
+# patterns, matched against each path's file name). Deletions are not
+# reported (removing a key is the fix), and paths are not C-quoted, so
+# non-ASCII names match too.
+echo "Checking for sensitive files..."
+SENSITIVE_PATTERNS=(
+    "*.key" "*.pem" "*.p12" "*.pfx" ".env" ".env.*"
+    "*_rsa" "*_dsa" "*_ed25519" "*_ecdsa"
+    "secrets.json" "credentials.json"
+)
+FOUND_SENSITIVE=0
+while read -r path; do
+    [ -z "$path" ] && continue
+    name=${path##*/}
+    for pattern in "${SENSITIVE_PATTERNS[@]}"; do
+        # shellcheck disable=SC2053  # the pattern is a glob on purpose
+        if [[ $name == $pattern ]]; then
+            echo -e "${RED}Potentially sensitive file: $path${NC}"
+            FOUND_SENSITIVE=1
+        fi
+    done
+done < <(for_each_range -c core.quotePath=false log --diff-filter=d --name-only --format= | sort -u)
 
 if [ $FOUND_SENSITIVE -eq 1 ]; then
     echo "Ensure no secrets are being committed"
     echo "Use 'git push --no-verify' to force push if intentional"
     exit 1
 else
-    echo -e "${GREEN}✓ No sensitive files detected${NC}"
+    echo -e "${GREEN}No sensitive files detected${NC}"
 fi
 
-# 8. Check branch naming
-if [[ ! "$CURRENT_BRANCH" =~ ^(main|develop|feature/.*|bugfix/.*|hotfix/.*|release/.*|chore/.*)$ ]]; then
-    echo -e "${YELLOW}⚠️  Non-standard branch name: $CURRENT_BRANCH${NC}"
-    echo "Consider using: feature/, bugfix/, hotfix/, release/, or chore/"
-fi
+# 6. Destination branch names
+for dest in "${DESTINATIONS[@]}"; do
+    name=${dest#refs/heads/}
+    if [[ "$dest" == refs/heads/* ]] &&
+        [[ ! "$name" =~ ^(main|develop|(feat|feature|fix|bugfix|hotfix|docs|refactor|test|perf|build|ci|chore|release)/.+)$ ]]; then
+        echo -e "${YELLOW}Non-standard branch name: $name${NC}"
+        echo "Consider <type>/<short-desc> with a Conventional Commits type (feat/, fix/, docs/, ...)"
+    fi
+done
 
-# 9. Size check - warn about large pushes
-COMMIT_COUNT=$(git rev-list --count @{u}..)
+# 7. Size check - warn about large pushes
+COMMIT_COUNT=$(for_each_range rev-list --count | awk '{s += $1} END {print s + 0}')
 if [ "$COMMIT_COUNT" -gt 20 ]; then
-    echo -e "${YELLOW}⚠️  Large push detected ($COMMIT_COUNT commits)${NC}"
+    echo -e "${YELLOW}Large push detected ($COMMIT_COUNT commits)${NC}"
     echo "Consider breaking into smaller PRs"
 fi
 
-# Summary
 echo ""
-echo -e "${GREEN}✅ Pre-push checks completed${NC}"
+echo -e "${GREEN}Pre-push checks completed${NC}"
 echo -e "  Remote: ${BLUE}$REMOTE${NC}"
-echo -e "  Branch: ${BLUE}$CURRENT_BRANCH${NC}"
+echo -e "  Destinations: ${BLUE}${DESTINATIONS[*]:-none}${NC}"
 echo -e "  Commits: ${BLUE}$COMMIT_COUNT${NC}"
 echo ""
 

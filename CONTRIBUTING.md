@@ -15,7 +15,7 @@ First off, thank you for considering contributing to VeridianOS! It's people lik
 
 ## Code of Conduct
 
-This project and everyone participating in it is governed by our [Code of Conduct](CODE_OF_CONDUCT.md). By participating, you are expected to uphold this code. Please report unacceptable behavior to [conduct@veridian-os.org](mailto:conduct@veridian-os.org).
+This project and everyone participating in it is governed by our [Code of Conduct](CODE_OF_CONDUCT.md) (Contributor Covenant 2.1). By participating, you are expected to uphold it. Report unacceptable behavior as its [Enforcement](CODE_OF_CONDUCT.md#enforcement) section describes: privately by Discord direct message to the server owner, or publicly through GitHub Issues.
 
 ## Getting Started
 
@@ -109,9 +109,10 @@ git checkout -b feature/my-feature
 1. **Write code** following our coding standards
 2. **Add tests** for new functionality
 3. **Update documentation** as needed
-4. **Run tests locally**:
+4. **Run tests locally** (plain `cargo test` also builds the kernel's bare-metal binary and test
+   targets for the host and fails on a duplicate `panic_impl` lang item; `--lib` avoids them):
    ```bash
-   cargo test
+   cargo test --lib --features alloc -p veridian-kernel --target x86_64-unknown-linux-gnu
    ```
 5. **Check formatting**:
    ```bash
@@ -119,9 +120,12 @@ git checkout -b feature/my-feature
    ```
 6. **Run lints**:
    ```bash
-   cargo clippy --target x86_64-unknown-none -p veridian-kernel -- -D warnings
-   cargo clippy --target aarch64-unknown-none-softfloat -p veridian-kernel -- -D warnings
-   cargo clippy --target riscv64imac-unknown-none-elf -p veridian-kernel -- -D warnings
+   BS="-Zbuild-std=core,compiler_builtins,alloc -Zbuild-std-features=compiler-builtins-mem"
+   cargo clippy --target targets/x86_64-veridian.json -p veridian-kernel $BS -- -D warnings
+   cargo clippy --target aarch64-unknown-none-softfloat -p veridian-kernel $BS -- -D warnings
+   cargo clippy --target riscv64imac-unknown-none-elf -p veridian-kernel $BS -- -D warnings
+   cargo clippy --lib --features alloc -p veridian-kernel --target x86_64-unknown-linux-gnu -- -D warnings
+   cargo clippy --lib --all-features -- -D warnings   # feature-gated code such as `trace`
    ```
 
 ### 4. Testing Requirements
@@ -168,8 +172,8 @@ pub fn allocate_frame(&mut self) -> Option<Frame> {
 
 #### Error Handling
 
-- Use `Result<T, Error>` for fallible operations
-- Create specific error types using `thiserror`
+- Use `Result<T, KernelError>` for fallible operations
+- Create specific error enums (the kernel is `no_std`; see `kernel/src/error.rs`)
 - Provide helpful error messages
 - Never use `.unwrap()` in non-test code
 
@@ -190,8 +194,8 @@ Example:
 /// - `ptr` must be properly aligned
 /// - The memory must not be mutated during access
 unsafe fn read_raw(ptr: *const u8) -> u8 {
-    // Safety: Caller ensures preconditions
-    *ptr
+    // SAFETY: the caller guarantees `ptr` is valid and aligned (the contract above).
+    unsafe { *ptr }
 }
 ```
 
@@ -276,10 +280,11 @@ Fixes #456
 
 2. **Run all checks**:
    ```bash
-   cargo fmt --all --check
-   cargo clippy --target x86_64-unknown-none -p veridian-kernel -- -D warnings
-   cargo test
+   scripts/dev/gate.sh --boot --rootfs
    ```
+
+   The gate runs fmt, clippy on every target, the host tests, the builds, the QEMU boot tests
+   and the BusyBox and runtime suites; it must exit 0 on the tree you submit.
 
 3. **Update documentation** if needed
 
@@ -324,7 +329,7 @@ Fixes #456
 
 - Delete your feature branch
 - Update your local repository
-- Celebrate your contribution! 🎉
+- Celebrate your contribution!
 
 ## Communication
 
@@ -332,7 +337,7 @@ Fixes #456
 
 - **Discord**: [#dev-help](https://discord.gg/WGcgrnuVHt)
 - **Matrix**: #veridian-dev:matrix.org
-- **Mailing List**: dev@veridian-os.org
+- **GitHub Issues**: <https://github.com/doublegate/VeridianOS/issues>
 
 ### Discussions
 
@@ -364,37 +369,40 @@ Contributors are recognized in several ways:
 export RUSTC_WRAPPER=sccache
 
 # Limit parallel jobs if low on RAM
-cargo build -j 2
+CARGO_BUILD_JOBS=2 ./build-kernel.sh x86_64 dev
 
-# Build only specific component
-cargo build -p veridian-kernel
+# Build one architecture only
+./build-kernel.sh aarch64 dev
 ```
 
 ### Debugging
 
 ```bash
-# Enable debug logging
-RUST_LOG=debug just run
+# Boot x86_64 with a framebuffer window and the BlockFS root
+./scripts/run-veridian.sh --blockfs --display
 
-# Run with GDB
-just gdb
-
-# Use QEMU monitor
-just run -- -monitor stdio
+# Debug with GDB: add -s -S to a QEMU command line, then attach
+gdb -x scripts/gdb/x86_64.gdb          # gdb-multiarch for aarch64.gdb / riscv64.gdb
 ```
+
+QEMU command lines for every architecture are in the README's Quick Start, and the full GDB
+guide is [docs/GDB-DEBUGGING.md](docs/GDB-DEBUGGING.md).
 
 ### Testing
 
 ```bash
-# Run specific test
-cargo test test_name
+# Run specific host test
+cargo test --lib --features alloc -p veridian-kernel --target x86_64-unknown-linux-gnu test_name
 
 # Run tests with output
-cargo test -- --nocapture
+cargo test --lib --features alloc -p veridian-kernel --target x86_64-unknown-linux-gnu -- --nocapture
 
-# Run benchmarks
-cargo bench
+# Boot one architecture and run the in-kernel tests
+scripts/boot-test.sh x86_64
 ```
+
+Benchmarks run inside the kernel: the shell's `perf` command
+([docs/PERFORMANCE-REPORT.md](docs/PERFORMANCE-REPORT.md)).
 
 ## Questions?
 
@@ -402,7 +410,7 @@ If you have questions not covered here:
 
 1. Check the [FAQ](docs/FAQ.md)
 2. Ask on [Discord](https://discord.gg/WGcgrnuVHt)
-3. Email [dev@veridian-os.org](mailto:dev@veridian-os.org)
+3. Open a [GitHub issue](https://github.com/doublegate/VeridianOS/issues)
 
 Thank you for contributing to VeridianOS! Your efforts help build a better operating system for everyone.
 

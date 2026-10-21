@@ -13,7 +13,7 @@ set-arch-aarch64
 target remote localhost:1234
 
 # Load kernel symbols
-kernel-symbols aarch64-veridian
+kernel-symbols aarch64-unknown-none-softfloat
 
 # AArch64 specific commands
 define dump-regs
@@ -103,11 +103,7 @@ echo [GDB] AArch64-specific configuration loaded\n
 echo [GDB] Additional commands: dump-regs, dump-system-regs, dump-uart-pl011, examine-boot-area\n
 
 # Set initial breakpoints
-break-boot "aarch64"
+break-boot-aarch64
 break-panic
-
-# Also break on our known working entry points
-break *0x40200000
-break _start_rust
 
 echo [GDB] Ready to debug AArch64 kernel. Use 'continue' to start.\n

@@ -1,9 +1,9 @@
 # Issues and Bug Tracking TODO
 
 **Purpose**: Central tracking for all bugs, issues, and defects
-**Last Updated**: February 20, 2026
+**Last Updated**: October 20, 2026
 
-## 🐛 Issue Categories
+## Issue Categories
 
 ### Severity Levels
 - **P0 - Critical**: System crash, data loss, security vulnerability
@@ -18,11 +18,13 @@
 - **Security**: Security vulnerability or concern
 - **Compatibility**: Hardware or software compatibility issue
 
-## 🚨 Critical Issues (P0)
+## Critical Issues (P0)
 
-Currently no critical issues. All 18 historical issues resolved.
+Currently no critical issues. All 23 recorded issues are resolved: the 22 numbered ones
+(ISSUE-0001 to ISSUE-0023; 0004 was never assigned) and the unnumbered multi-LOAD ELF issue below. Findings of the audits are tracked as
+N-xx in `docs/audit/` and, while open, in `docs/KNOWN-LIMITATIONS.md`.
 
-## Open Issues
+## Recent Issues
 
 ### ISSUE-0023: Rare `pthread_join` EINVAL in `malloc_threads_4x20000` on four CPUs
 - **Status**: RESOLVED (October 16, 2026), by analysis: the failure is too rare to reproduce on
@@ -100,7 +102,7 @@ Currently no critical issues. All 18 historical issues resolved.
 - **Verification**: x86_64 now boots to Stage 6 BOOTOK with 27/27 tests and zero warnings
 
 ### ISSUE-0013: AArch64 Function Call Hang
-- **Status**: RESOLVED ✅
+- **Status**: RESOLVED
 - **Component**: Kernel/Boot
 - **Reported**: 2025-06-13
 - **Resolved**: 2025-06-17
@@ -136,7 +138,7 @@ Currently no critical issues. All 18 historical issues resolved.
 - **Verification**: RISC-V boots to Stage 6 BOOTOK with 27/27 tests and zero warnings
 
 ### ISSUE-0014: Context Switching Not Connected
-- **Status**: RESOLVED ✅
+- **Status**: RESOLVED
 - **Component**: Kernel/Scheduler
 - **Reported**: 2025-06-15
 - **Resolved**: 2025-06-15
@@ -164,27 +166,28 @@ Currently no critical issues. All 18 historical issues resolved.
 - **Fix**: PR# or commit hash when fixed
 -->
 
-## 🔴 High Priority Issues (P1)
+## High Priority Issues (P1)
 
 Currently no high priority issues.
 
-## 🟡 Medium Priority Issues (P2)
+## Medium Priority Issues (P2)
 
-### PENDING: /bin/sh ELF Multi-LOAD GP Fault
-- **Status**: Fix coded on `test-codex` branch (T6-0), pending merge + QEMU validation
+### RESOLVED: /bin/sh ELF Multi-LOAD GP Fault
+- **Status**: RESOLVED: the `test-codex` Tier 6 work (T6-0) merged in v0.5.0; multi-segment
+  BusyBox and musl programs run in every runtime suite since
 - **Component**: Kernel/ELF Loader
 - **Description**: `/bin/sh` (2 LOAD segments, 41 KB) GP faults during `iretq` before any syscall. Single-segment `/bin/minimal` works fine.
 - **Root cause**: ELF loader does not correctly handle multi-segment binaries (stack mapping lost during second LOAD segment mapping)
 - **Fix**: `test-codex` branch adds multi-LOAD handling with stack preservation in `elf/mod.rs` and `process/creation.rs`
 
-## 🟢 Low Priority Issues (P3)
+## Low Priority Issues (P3)
 
 Currently no low priority issues.
 
-## ✅ Recently Resolved Issues
+## Recently Resolved Issues
 
 ### ISSUE-0015: x86_64 Context Switch Infinite Loop
-- **Status**: RESOLVED ✅
+- **Status**: RESOLVED
 - **Component**: Kernel/Context Switching
 - **Reported**: 2025-06-15
 - **Resolved**: 2025-06-15
@@ -198,7 +201,7 @@ Currently no low priority issues.
 - **Details**: `iretq` expects interrupt frame on stack, but kernel-to-kernel switches don't have that
 
 ### ISSUE-0016: x86_64 Memory Mapping Errors
-- **Status**: RESOLVED ✅
+- **Status**: RESOLVED
 - **Component**: Kernel/Memory Management
 - **Reported**: 2025-06-15
 - **Resolved**: 2025-06-15
@@ -248,7 +251,7 @@ Currently no low priority issues.
 - **Fix**: Removed Cargo.lock from .gitignore and committed it (commit: 8790414)
 
 ### ISSUE-0005: Clippy warnings for unused code
-- **Status**: Fixed/Verified ✅
+- **Status**: Fixed/Verified
 - **Component**: Kernel
 - **Reported**: 2025-06-06
 - **Reporter**: CI/Clippy
@@ -267,10 +270,10 @@ Currently no low priority issues.
     - sched/mod.rs:3 (init)
     - sched/mod.rs:11 (run)
   - Fixed all formatting issues with `cargo fmt`
-  - **Result: CI/CD pipeline now 100% passing all checks!** 🎉
+  - **Result: CI/CD pipeline now 100% passing all checks!**
 
 ### ISSUE-0006: AArch64 Boot Sequence Not Reaching Rust Code
-- **Status**: Fixed/Verified ✅
+- **Status**: Fixed/Verified
 - **Component**: Kernel/Boot
 - **Reported**: 2025-06-06
 - **Reporter**: QEMU Testing
@@ -287,7 +290,7 @@ Currently no low priority issues.
   - Removed all iterator usage in AArch64 boot path
   - Created working-simple/ directory for known-good implementations
   - Files renamed to match x86_64/riscv64 pattern
-  - **Result: AArch64 now boots successfully to kernel_main!** 🎉
+  - **Result: AArch64 now boots successfully to kernel_main!**
 
 ### ISSUE-0007: GDB break-boot command "No symbol" errors
 - **Type**: Tool/Debugging
@@ -369,43 +372,51 @@ Currently no low priority issues.
   - Deferred stats tracking until after initialization complete
   - **Result: RISC-V now boots successfully through all subsystems!**
 
-## 📊 Issue Statistics
+## Issue Statistics
 
 ### Overall Status
-- **Total Issues**: 18
+- **Total Issues**: 23
 - **Open Issues**: 0
 - **In Progress**: 0
-- **Fixed**: 18
-- **Verified**: 18
+- **Fixed**: 23
+- **Verified**: 23
 - **Closed**: 0
 
-### Current Architecture Boot Status (v0.5.0)
-- **x86_64**: Stage 6 BOOTOK, 29/29 tests, zero warnings, interactive shell, /bin/minimal executes
-- **AArch64**: Stage 6 BOOTOK, 29/29 tests, zero warnings, interactive shell
-- **RISC-V**: Stage 6 BOOTOK, 29/29 tests, zero warnings, interactive shell
+### Current Architecture Boot Status (v0.27.0)
+- **x86_64**: Stage 6 BOOTOK, 43/43 in-kernel tests (47/47 on four CPUs), BusyBox and runtime
+  suites pass
+- **AArch64**: Stage 6 BOOTOK, 64/64 (68/68 on four CPUs), BusyBox and runtime suites pass
+- **RISC-V**: Stage 6 BOOTOK, 57/57 (61/61 on four CPUs), BusyBox and runtime suites pass
 
 ### By Component
 | Component | Open | In Progress | Fixed | Total |
 |-----------|------|-------------|-------|-------|
-| Kernel | 0 | 0 | 10 | 10 |
+| Kernel | 0 | 0 | 14 | 14 |
 | Drivers | 0 | 0 | 0 | 0 |
 | Services | 0 | 0 | 0 | 0 |
-| Libraries | 0 | 0 | 0 | 0 |
+| Libraries | 0 | 0 | 1 | 1 |
 | Tools | 0 | 0 | 1 | 1 |
 | Documentation | 0 | 0 | 0 | 0 |
 | Build System | 0 | 0 | 2 | 2 |
 | CI/CD | 0 | 0 | 5 | 5 |
+| **Total** | 0 | 0 | 23 | 23 |
+
+Kernel: 0005, 0006, 0008 to 0018 and the multi-LOAD ELF issue; Libraries: 0023 (native libc);
+Tools: 0007; Build System: 0001, 0002; CI/CD: 0003, 0019 to 0022.
 
 ### By Type
 | Type | Open | Fixed | Total |
 |------|------|-------|-------|
-| Bug | 0 | 14 | 14 |
-| CI/CD | 0 | 4 | 4 |
+| Bug | 0 | 17 | 17 |
+| CI/CD | 0 | 6 | 6 |
 | Regression | 0 | 0 | 0 |
 | Performance | 0 | 0 | 0 |
 | Security | 0 | 0 | 0 |
+| **Total** | 0 | 23 | 23 |
 
-## 🔄 Regressions
+CI/CD: 0001, 0003, 0019 to 0022; every other issue is a bug.
+
+## Regressions
 
 ### Regression Tracking
 Track features that have broken after previously working.
@@ -421,7 +432,7 @@ Currently no regressions.
 - **Root Cause**: What caused the regression
 -->
 
-## 🔒 Security Issues
+## Security Issues
 
 ### Security Vulnerability Tracking
 Security issues are tracked separately with restricted access.
@@ -432,7 +443,7 @@ Security issues are tracked separately with restricted access.
 
 For security issues, see [SECURITY.md](../SECURITY.md)
 
-## 🎯 Issue Resolution Goals
+## Issue Resolution Goals
 
 ### SLA Targets
 | Severity | Response Time | Resolution Target |
@@ -447,7 +458,7 @@ For security issues, see [SECURITY.md](../SECURITY.md)
 - **Average Resolution Time**: N/A
 - **SLA Compliance**: N/A
 
-## 🛠️ Issue Management Process
+## Issue Management Process
 
 ### Issue Lifecycle
 1. **Reported** - Issue identified and logged
@@ -465,7 +476,7 @@ For security issues, see [SECURITY.md](../SECURITY.md)
 - Component owners review their queues
 - SLA tracking and escalation
 
-## 📝 Issue Templates
+## Issue Templates
 
 ### Bug Report Template
 ```markdown
@@ -504,7 +515,7 @@ For security issues, see [SECURITY.md](../SECURITY.md)
 **Analysis**: Initial investigation findings
 ```
 
-## 🔍 Common Issues and Solutions
+## Common Issues and Solutions
 
 ### Build Issues
 Document common build problems and solutions.
@@ -515,7 +526,7 @@ Document common runtime problems and solutions.
 ### Configuration Issues
 Document common configuration problems and solutions.
 
-## 📅 Issue Review Schedule
+## Issue Review Schedule
 
 ### Daily
 - P0 issue review
@@ -532,16 +543,16 @@ Document common configuration problems and solutions.
 - SLA compliance
 - Root cause analysis
 
-## 🔗 External References
+## External References
 
 ### Issue Tracking
-- GitHub Issues: [Link when available]
-- Security Issues: security@veridian-os.org
+- GitHub Issues: <https://github.com/doublegate/VeridianOS/issues>
+- Security Issues: private reports through <https://github.com/doublegate/VeridianOS/security/advisories/new> (see SECURITY.md)
 
 ### Related Documents
 - [Testing TODO](TESTING_TODO.md)
 - [QA TODO](QA_TODO.md)
-- [Known Issues](../docs/KNOWN-ISSUES.md)
+- [Known Limitations](../docs/KNOWN-LIMITATIONS.md)
 
 ---
 

@@ -1,11 +1,11 @@
 # Release Management TODO
 
 **Purpose**: Track release planning, milestones, and deployment tasks
-**Last Updated**: 2026-03-10
-**Current Version**: v0.25.1 (Released March 10, 2026)
-**Current Status**: All Phases (0-12) Complete. 60+ releases published (v0.1.0 through v0.25.1).
+**Last Updated**: 2026-10-18
+**Current Version**: v0.27.0 (Released October 18, 2026)
+**Current Status**: All Phases (0-12) Complete. 85 releases published (v0.1.0 through v0.27.0). The v0.28 plan is in [MASTER_TODO.md](MASTER_TODO.md).
 
-## 🎯 Release Strategy
+## Release Strategy
 
 ### Versioning Scheme
 Following Semantic Versioning (SemVer):
@@ -20,7 +20,7 @@ Following Semantic Versioning (SemVer):
 - **Stable**: Production-ready releases
 - **LTS**: Long-term support versions
 
-## 📅 Release Roadmap
+## Release Roadmap
 
 ### Recent Maintenance Updates (June 2025)
 
@@ -38,63 +38,64 @@ Following Semantic Versioning (SemVer):
 
 ### Pre-1.0 Releases (Development)
 
-#### v0.2.1 - Boot Fixes ✅ RELEASED!
+#### v0.2.1 - Boot Fixes RELEASED!
 **Released**: June 17, 2025  
 **Phase**: 1 (Maintenance)  
 **Achievements**:
-- [x] AArch64 assembly-only workaround for LLVM bug ✅
-- [x] All architectures boot to Stage 6 successfully ✅
-- [x] Zero warnings across all platforms ✅
-- [x] Clippy-clean codebase ✅
-- [x] Updated documentation for boot status ✅
+- [x] AArch64 assembly-only workaround for LLVM bug
+- [x] All architectures boot to Stage 6 successfully
+- [x] Zero warnings across all platforms
+- [x] Clippy-clean codebase
+- [x] Updated documentation for boot status
 
-#### v0.1.0 - Foundation ✅ RELEASED!
+#### v0.1.0 - Foundation RELEASED!
 **Released**: June 7, 2025  
 **Phase**: 0 (Complete)  
 **Achievements**:
-- [x] Basic boot on x86_64 ✅
-- [x] Basic boot on AArch64 ✅
-- [x] Basic boot on RISC-V ✅
-- [x] Build system complete ✅
-- [x] Serial console output ✅
-- [x] CI/CD pipeline 100% operational ✅
-- [x] GDB debugging infrastructure ✅
-- [x] Test framework foundation ✅
-- [x] Documentation framework ✅
-- [x] Version control hooks ✅
+- [x] Basic boot on x86_64
+- [x] Basic boot on AArch64
+- [x] Basic boot on RISC-V
+- [x] Build system complete
+- [x] Serial console output
+- [x] CI/CD pipeline 100% operational
+- [x] GDB debugging infrastructure
+- [x] Test framework foundation
+- [x] Documentation framework
+- [x] Version control hooks
 
-#### v0.2.0 - Core Kernel ✅ RELEASED!
+#### v0.2.0 - Core Kernel RELEASED!
 **Released**: June 12, 2025  
 **Phase**: 1 (Complete)  
 **Achievements**:
-- [x] IPC implementation (100% complete) ✅
-  - [x] Synchronous message passing ✅
-  - [x] Fast path optimization (<1μs achieved!) ✅
-  - [x] Zero-copy transfers ✅
-  - [x] Asynchronous channels ✅
-  - [x] Performance benchmarks ✅
-  - [x] Full capability integration ✅
-  - [x] Rate limiting and registry ✅
-- [x] Memory management (100% complete) ✅
-  - [x] Hybrid frame allocator ✅
-  - [x] Virtual memory manager ✅
-  - [x] Kernel heap with slab allocator ✅
-  - [x] Page tables and TLB management ✅
-  - [x] User space safety validation ✅
-- [x] Process management (100% complete) ✅
-  - [x] Full lifecycle implementation ✅
-  - [x] Context switching all architectures ✅
-  - [x] Synchronization primitives ✅
-  - [x] System calls ✅
-- [x] Scheduler (100% complete) ✅
-  - [x] CFS implementation ✅
-  - [x] SMP support ✅
-  - [x] Load balancing ✅
-  - [x] CPU hotplug ✅
-- [x] Capability system (100% complete) ✅
-  - [x] Inheritance mechanisms ✅
-  - [x] Cascading revocation ✅
-  - [x] Per-CPU cache ✅
+- [x] IPC implementation (100% complete)
+  - [x] Synchronous message passing
+  - Fast path optimization: removed in v0.27 (never reachable from user space; IPC latency not
+    measured)
+  - [x] Zero-copy transfers
+  - [x] Asynchronous channels
+  - [x] Performance benchmarks
+  - [x] Full capability integration
+  - [x] Rate limiting and registry
+- [x] Memory management (100% complete)
+  - [x] Hybrid frame allocator
+  - [x] Virtual memory manager
+  - [x] Kernel heap with slab allocator
+  - [x] Page tables and TLB management
+  - [x] User space safety validation
+- [x] Process management (100% complete)
+  - [x] Full lifecycle implementation
+  - [x] Context switching all architectures
+  - [x] Synchronization primitives
+  - [x] System calls
+- [x] Scheduler (100% complete)
+  - [x] CFS implementation
+  - [x] SMP support
+  - [x] Load balancing
+  - [x] CPU hotplug
+- [x] Capability system (100% complete)
+  - [x] Inheritance mechanisms
+  - [x] Cascading revocation
+  - Per-CPU cache: replaced by a per-process hash table in v0.26.0 (CAP-PERF-01)
 
 #### v0.3.x - User Space Foundation -- RELEASED (v0.3.0 through v0.3.9)
 **Released**: February 14-15, 2026
@@ -225,7 +226,7 @@ Following Semantic Versioning (SemVer):
 - [x] dead_code audit, TODO(future) recategorization to phase5/phase6
 
 #### v0.7.0 - Phase 7: Production Readiness
-**Target Date**: Q3 2026
+**Released**: 2026-02-27 (historical plan below)
 **Phase**: Phase 7
 **Goals**:
 - [ ] GPU driver framework (Intel i915/AMD/virtio-gpu)
@@ -256,7 +257,7 @@ Following Semantic Versioning (SemVer):
 **Target**: 2028  
 **Focus**: Next-generation features
 
-## 📋 Release Process
+## Release Process
 
 ### Pre-Release Checklist
 
@@ -321,18 +322,18 @@ Following Semantic Versioning (SemVer):
    - [ ] Handle issues
    - [ ] Plan patches
 
-## 🎯 Next Release Planning
+## Next Release Planning
 
-### v0.5.0 - Self-Hosting Tier 6 + Performance
-**Target**: Q2 2026
-**Current Status**: Tier 6 coded on `test-codex`, needs merge + QEMU validation
+### v0.28.0
+**Planned in**: [MASTER_TODO.md](MASTER_TODO.md), under v0.28.0
 **Key Deliverables**:
-- Merge `test-codex` branch (T6-0 through T6-5)
-- QEMU-validate all Tier 6 items
-- Native GCC on VeridianOS (T7-3)
-- Performance optimization sprint
+- The items carried over from v0.27.0, which was cut early
+- The remaining Linux system call groups, with LTP and musl libc-test
+- A full capability model for capget/capset, every namespace type for unshare/setns
+- The KDE shared-library pipeline and its media backend; relocatable RISC-V boot (HR-02)
+- One pull request per system call group or sprint
 
-## 🔧 Release Artifacts
+## Release Artifacts
 
 ### Binary Releases
 - [ ] Kernel images (all architectures)
@@ -354,7 +355,7 @@ Following Semantic Versioning (SemVer):
 - [ ] API documentation
 - [ ] Man pages
 
-## 📊 Release Metrics
+## Release Metrics
 
 ### Quality Metrics
 - Bug count by severity
@@ -370,7 +371,7 @@ Following Semantic Versioning (SemVer):
 - Contributor count
 - Package ecosystem size
 
-## 🐛 Release Issues
+## Release Issues
 
 ### Known Issues
 Track issues specific to releases.
@@ -378,7 +379,7 @@ Track issues specific to releases.
 ### Blocking Issues
 Issues that must be fixed before release.
 
-## 📝 Release Notes Template
+## Release Notes Template
 
 ```markdown
 # VeridianOS vX.Y.Z Release Notes
@@ -429,7 +430,7 @@ Thanks to all contributors!
 [Download links]
 ```
 
-## 🔒 Security Releases
+## Security Releases
 
 ### Security Release Process
 1. Security report received
@@ -444,24 +445,22 @@ Thanks to all contributors!
 - Medium: 60 days
 - Low: 90 days
 
-## 📅 Release Calendar
+## Release Calendar
 
 ### 2025 (Completed)
 - Q2: v0.1.0 (Foundation), v0.2.0 (Core Kernel), v0.2.1 (Boot Fixes)
 - Q4: v0.2.5, v0.3.0 (Architecture cleanup)
 
-### 2026 (Completed + In Progress)
-- Q1: v0.3.1 through v0.6.2 (User Space, Security, Packages, Shell, Self-hosting, Phase 5, Phase 6 core)
-- Q2-Q3: v0.7.0 (Phase 7: GPU, multimedia, advanced Wayland) -- PLANNED
-- Q4: v0.8.0 (Phase 7: virtualization, cloud-native) -- PLANNED
+### 2026
+- Q1: v0.3.1 through v0.25.2 (all 13 development phases, including Phase 7 in v0.7.0 to v0.10.0
+  and the KDE work in v0.22.0 to v0.25.x)
+- Q4: v0.26.0 (audit remediation), v0.27.0 (process model, SMP, user mode on all architectures)
+- Next: v0.28.0, planned in [MASTER_TODO.md](MASTER_TODO.md); no date set
 
-### 2027
-- Q1: v0.8.0 (Performance + Polish)
-- Q2: v0.9.0 (GUI)
-- Q3: v1.0.0 (Stable)
-- Q4: v1.1.0 (LTS candidate)
+### Later
+- v1.0.0 (stable): target Q3 2027, with the criteria listed above
 
-## 🔗 Release Resources
+## Release Resources
 
 ### Tools
 - Release automation scripts
@@ -470,8 +469,8 @@ Thanks to all contributors!
 - Distribution network
 
 ### Documentation
-- [Release Process](../docs/RELEASE-PROCESS.md)
-- [Versioning Policy](../docs/VERSIONING.md)
+- [Release Process](#release-process) (this file)
+- [Versioning Scheme](#versioning-scheme) (this file)
 - [Security Policy](../SECURITY.md)
 
 ---
