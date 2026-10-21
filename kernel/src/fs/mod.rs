@@ -2926,9 +2926,10 @@ mod tests {
         assert!(result.is_ok());
     }
 
-    /// /dev/shm is a tmpfs under the /dev mount: whole-path mount
-    /// matching enters it although devfs has no `shm` entry, and a file
-    /// there maps its own pages (`fs::tmpfs`).
+    /// /dev/shm is a tmpfs mounted on devfs's `shm` directory, and a file
+    /// there maps its own pages (`fs::tmpfs`). A caller can unmount it and
+    /// mount it again, which needs the directory (`mount_target`; PR #28
+    /// review).
     #[test]
     fn test_mount_tmpfs_on_dev_shm() {
         let vfs = make_vfs_with_root();
@@ -2944,6 +2945,19 @@ mod tests {
         let frames = f.share_pages(0, 1, true).expect("tmpfs pages").unwrap();
         // The mapping's owner goes back; the file keeps the page.
         assert!(!crate::mm::frame_refs::release(frames[0]));
+
+        let caller = CallerView {
+            vfs: &vfs,
+            ctx: PathContext {
+                cwd: String::from("/"),
+                root: String::from("/"),
+                creds: None,
+                pid: 0,
+            },
+        };
+        caller.unmount("/dev/shm").unwrap();
+        caller.mount_by_type("/dev/shm", "tmpfs", 0).unwrap();
+        assert!(vfs.resolve_path("/dev/shm/seg").is_err(), "a fresh tmpfs");
     }
 
     #[test]

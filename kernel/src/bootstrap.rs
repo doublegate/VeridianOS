@@ -923,7 +923,9 @@ fn mount_blockfs_root() {
     {
         let vfs = get_vfs();
 
-        // Remove existing DevFS/ProcFS mounts (they're on the old root)
+        // Remove existing DevFS/ProcFS mounts (they're on the old root);
+        // /dev/shm too, or mounting it again below fails as already mounted
+        let _ = vfs.unmount("/dev/shm");
         let _ = vfs.unmount("/dev");
         let _ = vfs.unmount("/proc");
 

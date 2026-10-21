@@ -98,6 +98,16 @@ impl ShmemPages {
         self.size
     }
 
+    /// The memory the file holds: whole pages, what a size limit charges.
+    pub(crate) fn allocated_bytes(&self) -> usize {
+        self.frames.len() * PAGE
+    }
+
+    /// The memory a file of `size` bytes holds.
+    pub(crate) fn bytes_for(size: usize) -> usize {
+        size.div_ceil(PAGE) * PAGE
+    }
+
     /// Whether any page is also mapped (has an owner besides the file).
     pub(crate) fn any_mapped(&self) -> bool {
         self.frames
@@ -165,7 +175,12 @@ impl ShmemPages {
     /// such pages instead (access then raises SIGBUS); mappings cannot be
     /// invalidated here yet (docs/KNOWN-LIMITATIONS.md). A grow that runs
     /// out of memory part-way gives back what it took, leaving the file as
-    /// it was (ENOSPC). Past the RAM-file limit: EFBIG.
+    /// it was (ENOSPC), and so does one whose frame list cannot grow. Past
+    /// the RAM-file limit: EFBIG.
+    ///
+    /// A grow zeroes the old last page past the old end: a mapping keeps
+    /// that page through a shrink within it and may have stored there, and
+    /// an extended file reads zeros (POSIX `ftruncate`; PR #28 review).
     pub(crate) fn resize(&mut self, size: usize) -> Result<(), KernelError> {
         if size > super::MAX_RAM_FILE_SIZE {
             return Err(KernelError::FsError(FsError::FileTooLarge));
@@ -179,6 +194,13 @@ impl ShmemPages {
             return Err(KernelError::FsError(FsError::Busy));
         }
         let had = self.frames.len();
+        if want > had {
+            // Fallible, so heap exhaustion is ENOSPC rather than a panic in
+            // `push` (PR #28 review).
+            self.frames
+                .try_reserve_exact(want - had)
+                .map_err(|_| KernelError::FsError(FsError::NoSpace))?;
+        }
         while self.frames.len() < want {
             let Some(frame) = source::allocate() else {
                 while self.frames.len() > had {
@@ -195,12 +217,14 @@ impl ShmemPages {
                 release(frame);
             }
         }
-        // A shrink within the last page zeroes its tail, so a later grow
-        // reads zeros there.
-        if size < self.size && !size.is_multiple_of(PAGE) {
-            if let Some(&frame) = self.frames.last() {
-                let from = size % PAGE;
-                // SAFETY: the file's own last frame; `from < PAGE`.
+        // Bytes past the end of the last page read as zero through a new
+        // mapping: a shrink within the page zeroes its tail, as Linux's
+        // truncate does, and a grow zeroes what was the end of the file.
+        let tail = if size < self.size { size } else { self.size };
+        if size != self.size && !tail.is_multiple_of(PAGE) {
+            if let Some(&frame) = self.frames.get(tail / PAGE) {
+                let from = tail % PAGE;
+                // SAFETY: a frame of this file; `from < PAGE`.
                 unsafe { core::ptr::write_bytes(source::bytes(frame).add(from), 0, PAGE - from) };
             }
         }
@@ -270,6 +294,22 @@ mod tests {
         p.resize(2).unwrap();
         p.resize(6).unwrap();
         assert_eq!(bytes_at(&p, 0, 6), b"se\0\0\0\0");
+    }
+
+    /// A mapping keeps the last page after a shrink within it and can
+    /// store past the new end; a later grow must still expose zeros there,
+    /// as POSIX requires of an extended file (PR #28 review).
+    #[test]
+    fn a_grow_zeroes_what_a_mapping_stored_past_the_end() {
+        let mut p = ShmemPages::new();
+        p.resize(PAGE).unwrap();
+        let frames = p.share(0, 1).unwrap();
+        p.resize(10).unwrap();
+        // SAFETY: the shared frame is a live page of this file.
+        unsafe { source::bytes(frames[0]).add(100).write(7) };
+        p.resize(200).unwrap();
+        assert_eq!(bytes_at(&p, 100, 1), [0]);
+        assert!(!crate::mm::frame_refs::release(frames[0]));
     }
 
     #[test]

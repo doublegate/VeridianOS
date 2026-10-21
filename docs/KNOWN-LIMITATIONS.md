@@ -437,6 +437,10 @@ Page protections now follow `prot` (fixed in v0.27, N-132 to N-137). What remain
 - **A memfd or tmpfs file cannot shrink under a shared mapping:** `ftruncate` that would drop a page still
   mapped `MAP_SHARED` fails with EBUSY. Linux shrinks it and unmaps those pages (access raises
   SIGBUS); mappings cannot be invalidated here yet (v0.29 memory work).
+- **A shared mapping of a memfd or tmpfs file must lie within the file:** `mmap(MAP_SHARED)`
+  of pages past the file's last page fails with EINVAL. Linux maps them and raises SIGBUS when a
+  page wholly beyond the end is touched; that needs the same mapping invalidation. (Before
+  v0.28 such a mapping was a private copy, so it never shared memory either.)
 - **RAM above the eighth memory region is lost (N-142, HX-07).** Only the eight largest usable
   regions are used; UEFI firmware on real machines reports 50 to 150.
 - **POSIX shared memory (N-88)** has no access control, and unlinked names can still be opened.
