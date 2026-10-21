@@ -37,8 +37,8 @@ exposed were fixed (N-182 to N-189); the rest are listed, with their targets, in
 - **Blocking.** recvfrom, accept, sendmsg and recvmsg never block on a blocking socket
   (N-235).
 - **MAP_SHARED of regular files** is a private copy: a write through the mapping does not reach
-  the file or other mappings. Only memfds share their pages (N-230); the rest needs the v0.29
-  page cache.
+  the file or other mappings. Memfds and tmpfs files, including everything in `/dev/shm`, share
+  their pages (N-230); the rest needs the v0.29 page cache.
 - **clone across processes.** A `clone` without CLONE_THREAD makes a process (fork, vfork,
   `posix_spawn`); with CLONE_VM it shares the parent's memory page by page as it is at the
   clone, so a mapping either side adds or removes afterwards is its own (enough for vfork and
@@ -66,8 +66,8 @@ exposed were fixed (N-182 to N-189); the rest are listed, with their targets, in
 - **Memory calls.** mremap, madvise, munmap, mprotect and brk follow Linux (N-240 to N-246),
   except: MADV_FREE keeps the pages (memory is never reclaimed under pressure, which Linux
   permits); MADV_COLLAPSE and the guard-page advice (Linux 6.13) are EINVAL; MADV_REMOVE on a
-  MAP_SHARED regular file zeroes only this process's copy (such a mapping is a private copy until
-  the v0.29 page cache); MREMAP_DONTUNMAP takes only private anonymous memory (Linux 5.7's rule);
+  MAP_SHARED regular file other than a memfd or tmpfs file zeroes only this process's copy (such
+  a mapping is a private copy until the v0.29 page cache); MREMAP_DONTUNMAP takes only private anonymous memory (Linux 5.7's rule);
   moving the heap with mremap leaves the program break where it was; and mappings that Linux
   would merge (two adjacent mmaps alike in every way) stay separate, so an mremap spanning both
   is EFAULT.
@@ -404,7 +404,9 @@ affected. Below the socket layer:
 ### File mmap is a private copy (N-125)
 
 A file mapping is copied in full at `mmap` time. `MAP_SHARED` writes never reach the file, and
-two processes mapping one file do not see each other's changes.
+two processes mapping one file do not see each other's changes. Memfds and tmpfs files (so
+everything in `/dev/shm`, where musl's `shm_open` and LTP keep shared memory) are the exception:
+their pages are the file, and every mapping maps them (N-230).
 
 ### Program loading (ADR 0010)
 
@@ -432,7 +434,7 @@ Page protections now follow `prot` (fixed in v0.27, N-132 to N-137). What remain
   EINVAL (`MAP_FIXED` replacement and `munmap` across mappings work since v0.27, N-141).
   `mprotect` of part of a mapping does not split it (N-135 remainder).
 - **Memory is allocated eagerly** at `mmap` time, not on first touch (v0.29 memory work).
-- **A memfd cannot shrink under a shared mapping:** `ftruncate` that would drop a page still
+- **A memfd or tmpfs file cannot shrink under a shared mapping:** `ftruncate` that would drop a page still
   mapped `MAP_SHARED` fails with EBUSY. Linux shrinks it and unmaps those pages (access raises
   SIGBUS); mappings cannot be invalidated here yet (v0.29 memory work).
 - **RAM above the eighth memory region is lost (N-142, HX-07).** Only the eight largest usable

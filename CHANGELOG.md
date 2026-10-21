@@ -1,5 +1,13 @@
 ## [Unreleased]
 
+### Added
+
+- `/dev/shm` is a tmpfs, as on Linux, and tmpfs regular files keep their contents in pages they
+  own (`fs::shmem`, shared with memfds), so a `MAP_SHARED` mapping of a file there is the file:
+  every mapping, `read` and `write` see one copy (N-230). LTP keeps its results this way, and
+  musl's `shm_open` uses `/dev/shm`. `mount -t tmpfs` works; a tmpfs root is mode 1777 and its
+  default size limit is half of RAM.
+
 ---
 
 ## [v0.27.0] - 2026-10-18

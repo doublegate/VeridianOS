@@ -384,7 +384,7 @@ pub fn sys_mmap(
         if file.node.node_type() == crate::fs::NodeType::Directory || file.node.is_stream() {
             return Err(SyscallError::NoDevice);
         }
-        // A file whose own pages can be mapped (a memfd) is, for
+        // A file whose own pages can be mapped (a memfd, a tmpfs file) is, for
         // MAP_SHARED: the mapping and every other one, read and write see
         // one copy. Other files are still copied (a page cache is v0.29).
         if shared {
@@ -958,10 +958,10 @@ const MREMAP_DONTUNMAP: usize = 4;
 ///   pages after the mapping are free, and otherwise moves the mapping
 ///   (MAYMOVE; ENOMEM without it) -- the pages themselves move, nothing is
 ///   copied. Grown pages are zero for anonymous memory, the file's next pages
-///   for a file mapping and a memfd's own pages for a shared one. FIXED moves
-///   to `new`, replacing what is there; DONTUNMAP moves and leaves the old
-///   range mapped with fresh zero pages; an old length of 0 on a shared mapping
-///   maps its pages a second time.
+///   for a file mapping and a memfd's or tmpfs file's own pages for a shared
+///   one. FIXED moves to `new`, replacing what is there; DONTUNMAP moves and
+///   leaves the old range mapped with fresh zero pages; an old length of 0 on a
+///   shared mapping maps its pages a second time.
 /// - Growth counts against RLIMIT_AS and RLIMIT_DATA (ENOMEM).
 pub fn sys_mremap(
     old_addr: usize,
@@ -1252,9 +1252,9 @@ fn remap_locked(
 }
 
 /// Map the pages added after a mapping (`m`, ending at `at`) that mremap
-/// grows: a memfd's next pages for a shared file mapping, the file's next
-/// pages (`growth`) for a private one, zero pages otherwise; then join them
-/// to it.
+/// grows: a memfd's or tmpfs file's next pages for a shared file mapping, the
+/// file's next pages (`growth`) for a private one, zero pages otherwise; then
+/// join them to it.
 fn extend(
     vas: &crate::mm::VirtualAddressSpace,
     m: &crate::mm::vas::VirtualMapping,

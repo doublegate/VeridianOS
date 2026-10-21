@@ -1,9 +1,7 @@
 //! memfd_create's files (N-229, N-230): anonymous regular files whose pages
-//! are physical frames the file owns, so a MAP_SHARED mapping maps the file
-//! itself -- every mapping, read and write sees one copy, which is how a
-//! Wayland client and its compositor share a buffer. A mapping adds an
-//! owner to each frame it maps (`mm::frame_refs`); a page leaves memory when
-//! its last owner, file or mapping, lets go.
+//! are physical frames the file owns (`fs::shmem`), so a MAP_SHARED mapping
+//! maps the file itself -- every mapping, read and write sees one copy,
+//! which is how a Wayland client and its compositor share a buffer.
 //!
 //! Seals (fcntl F_ADD_SEALS) are enforced here: shrink, grow, write, future
 //! write and exec, and SEAL against further seals.
@@ -13,37 +11,16 @@ use core::sync::atomic::{AtomicU32, Ordering};
 
 use spin::{Mutex, RwLock};
 
-use super::{seals, DirEntry, Metadata, NodeType, Permissions, VfsNode};
+use super::{seals, shmem::ShmemPages, DirEntry, Metadata, NodeType, Permissions, VfsNode};
 use crate::{
     error::{FsError, KernelError},
-    mm::{FrameNumber, FRAME_ALLOCATOR},
+    mm::FrameNumber,
 };
 
-const PAGE: usize = 4096;
-
-/// The pages and their length.
-struct Pages {
-    size: usize,
-    frames: Vec<FrameNumber>,
-}
-
 pub struct MemfdNode {
-    pages: Mutex<Pages>,
+    pages: Mutex<ShmemPages>,
     metadata: RwLock<Metadata>,
     seals: AtomicU32,
-}
-
-/// A frame's bytes in the kernel's physical map.
-fn frame_bytes(frame: FrameNumber) -> *mut u8 {
-    crate::mm::phys_to_virt_addr(frame.as_u64() << 12) as *mut u8
-}
-
-/// Give up the file's ownership of `frame`, freeing it if no mapping holds
-/// it any more.
-fn release(frame: FrameNumber) {
-    if crate::mm::frame_refs::release(frame) {
-        crate::mm::note_free_failure(FRAME_ALLOCATOR.lock().free_frames(frame, 1), frame, "memfd");
-    }
 }
 
 fn eperm() -> KernelError {
@@ -64,10 +41,7 @@ impl MemfdNode {
     ) -> Arc<Self> {
         let now = crate::arch::timer::get_timestamp_secs();
         Arc::new(Self {
-            pages: Mutex::new(Pages {
-                size: 0,
-                frames: Vec::new(),
-            }),
+            pages: Mutex::new(ShmemPages::new()),
             metadata: RwLock::new(Metadata {
                 node_type: NodeType::File,
                 size: 0,
@@ -87,77 +61,15 @@ impl MemfdNode {
         })
     }
 
-    /// Resize to `size` bytes: new pages are zeroed frames; pages past the
-    /// end are released.
-    ///
-    /// A shrink that would drop a page still mapped MAP_SHARED is EBUSY:
-    /// the mapping kept the old frame while a later grow gave the file a
-    /// new one, so the two stopped sharing (PR #24 review). Linux unmaps
-    /// such pages instead (access then raises SIGBUS); mappings cannot be
-    /// invalidated here yet (docs/KNOWN-LIMITATIONS.md). A grow that runs
-    /// out of frames part-way gives back what it took, leaving the file as
-    /// it was.
-    fn resize(&self, pages: &mut Pages, size: usize) -> Result<(), KernelError> {
-        if size > super::MAX_RAM_FILE_SIZE {
-            return Err(KernelError::FsError(FsError::FileTooLarge));
-        }
-        let want = size.div_ceil(PAGE);
-        if pages
-            .frames
-            .get(want..)
-            .is_some_and(|dropped| dropped.iter().any(|&f| crate::mm::frame_refs::is_shared(f)))
-        {
-            return Err(KernelError::FsError(FsError::Busy));
-        }
-        let had = pages.frames.len();
-        while pages.frames.len() < want {
-            let frame = match FRAME_ALLOCATOR.lock().allocate_frames(1, None) {
-                Ok(frame) => frame,
-                Err(_) => {
-                    while pages.frames.len() > had {
-                        if let Some(frame) = pages.frames.pop() {
-                            release(frame);
-                        }
-                    }
-                    return Err(KernelError::FsError(FsError::NoSpace));
-                }
-            };
-            // SAFETY: `frame` was just allocated, is RAM reached through the
-            // physical map and is mapped nowhere yet.
-            unsafe { core::ptr::write_bytes(frame_bytes(frame), 0, PAGE) };
-            pages.frames.push(frame);
-        }
-        while pages.frames.len() > want {
-            if let Some(frame) = pages.frames.pop() {
-                release(frame);
-            }
-        }
-        // A shrink within the last page zeroes its tail, so a later grow
-        // reads zeros there.
-        if size < pages.size && !size.is_multiple_of(PAGE) {
-            if let Some(&frame) = pages.frames.last() {
-                let from = size % PAGE;
-                // SAFETY: the file's own last frame; `from < PAGE`.
-                unsafe { core::ptr::write_bytes(frame_bytes(frame).add(from), 0, PAGE - from) };
-            }
-        }
-        pages.size = size;
+    /// Record the new size and modification time after the pages changed.
+    fn touch(&self, size: usize) {
         let mut meta = self.metadata.write();
         meta.size = size;
         meta.modified = crate::arch::timer::get_timestamp_secs();
-        Ok(())
     }
 
     fn sealed(&self, which: u32) -> bool {
         self.seals.load(Ordering::Acquire) & which != 0
-    }
-}
-
-impl Drop for MemfdNode {
-    fn drop(&mut self) {
-        for frame in self.pages.get_mut().frames.drain(..) {
-            release(frame);
-        }
     }
 }
 
@@ -167,68 +79,32 @@ impl VfsNode for MemfdNode {
     }
 
     fn read(&self, offset: usize, buffer: &mut [u8]) -> Result<usize, KernelError> {
-        let pages = self.pages.lock();
-        if offset >= pages.size {
-            return Ok(0);
-        }
-        let n = buffer.len().min(pages.size - offset);
-        let mut done = 0;
-        while done < n {
-            let at = offset + done;
-            let (page, within) = (at / PAGE, at % PAGE);
-            let chunk = (PAGE - within).min(n - done);
-            // SAFETY: page `page` is below the size, so the file holds its
-            // frame; `within + chunk <= PAGE`.
-            unsafe {
-                core::ptr::copy_nonoverlapping(
-                    frame_bytes(pages.frames[page]).add(within),
-                    buffer[done..].as_mut_ptr(),
-                    chunk,
-                );
-            }
-            done += chunk;
-        }
-        Ok(n)
+        Ok(self.pages.lock().read(offset, buffer))
     }
 
     fn write(&self, offset: usize, data: &[u8]) -> Result<usize, KernelError> {
         let end = super::ram_write_end(offset, data.len())?;
         let mut pages = self.pages.lock();
         if self.sealed(seals::WRITE | seals::FUTURE_WRITE)
-            || (self.sealed(seals::GROW) && end > pages.size)
+            || (self.sealed(seals::GROW) && end > pages.size())
         {
             return Err(eperm());
         }
-        if end > pages.size {
-            self.resize(&mut pages, end)?;
-        }
-        let mut done = 0;
-        while done < data.len() {
-            let at = offset + done;
-            let (page, within) = (at / PAGE, at % PAGE);
-            let chunk = (PAGE - within).min(data.len() - done);
-            // SAFETY: as in read; the file now covers `end`.
-            unsafe {
-                core::ptr::copy_nonoverlapping(
-                    data[done..].as_ptr(),
-                    frame_bytes(pages.frames[page]).add(within),
-                    chunk,
-                );
-            }
-            done += chunk;
-        }
-        self.metadata.write().modified = crate::arch::timer::get_timestamp_secs();
+        pages.write(offset, data)?;
+        self.touch(pages.size());
         Ok(data.len())
     }
 
     fn truncate(&self, size: usize) -> Result<(), KernelError> {
         let mut pages = self.pages.lock();
-        if (self.sealed(seals::SHRINK) && size < pages.size)
-            || (self.sealed(seals::GROW) && size > pages.size)
+        if (self.sealed(seals::SHRINK) && size < pages.size())
+            || (self.sealed(seals::GROW) && size > pages.size())
         {
             return Err(eperm());
         }
-        self.resize(&mut pages, size)
+        pages.resize(size)?;
+        self.touch(size);
+        Ok(())
     }
 
     fn metadata(&self) -> Result<Metadata, KernelError> {
@@ -316,13 +192,7 @@ impl VfsNode for MemfdNode {
         // F_SEAL_WRITE while the file is mapped shared: EBUSY on Linux for a
         // writable mapping. A frame with an owner besides the file is
         // mapped; whether writably is not recorded, so any mapping counts.
-        if add & seals::WRITE != 0
-            && current & seals::WRITE == 0
-            && pages
-                .frames
-                .iter()
-                .any(|&f| crate::mm::frame_refs::is_shared(f))
-        {
+        if add & seals::WRITE != 0 && current & seals::WRITE == 0 && pages.any_mapped() {
             return Err(KernelError::FsError(FsError::Busy));
         }
         self.seals.store(current | add, Ordering::Release);
@@ -339,22 +209,7 @@ impl VfsNode for MemfdNode {
         if writable && self.sealed(seals::WRITE | seals::FUTURE_WRITE) {
             return Some(Err(eperm()));
         }
-        let end = match first_page.checked_add(count) {
-            Some(end) if end <= pages.frames.len() => end,
-            // Linux maps past the end and faults on access (SIGBUS); here
-            // the mapping must lie within the file.
-            _ => {
-                return Some(Err(KernelError::InvalidArgument {
-                    name: "offset",
-                    value: "mapping extends past the end of the memfd",
-                }));
-            }
-        };
-        let frames = pages.frames[first_page..end].to_vec();
-        for &frame in &frames {
-            crate::mm::frame_refs::share(frame);
-        }
-        Some(Ok(frames))
+        Some(pages.share(first_page, count))
     }
 }
 
@@ -366,8 +221,7 @@ mod tests {
         matches!(r, Err(KernelError::FsError(FsError::OperationNotPermitted)))
     }
 
-    // The host tests have no frame allocator: they cover what is decided
-    // before a page is allocated; the runtime test covers the pages.
+    // The pages themselves are tested in fs::shmem.
 
     #[test]
     fn without_allow_sealing_no_seal_can_be_added() {

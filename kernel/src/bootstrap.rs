@@ -1421,10 +1421,11 @@ fn mount_blockfs_root() {
     {
         let vfs = get_vfs();
         vfs.mount("/dev".into(), Arc::new(DevFs::new())).ok();
+        crate::fs::mount_dev_shm(vfs);
         vfs.mount("/proc".into(), Arc::new(ProcFs::new())).ok();
     }
 
-    kprintln!("[ROOTFS] DevFS and ProcFS re-mounted on BlockFS root");
+    kprintln!("[ROOTFS] DevFS (with tmpfs on /dev/shm) and ProcFS re-mounted on BlockFS root");
 }
 
 /// Load the virtio-blk disk contents as a TAR archive into the RamFS.

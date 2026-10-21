@@ -5054,6 +5054,53 @@ static const struct {
     {"fs_ids", test_fs_ids},
 };
 
+/* /dev/shm is a tmpfs whose files are their own pages, as on Linux. LTP
+ * keeps its results in a file there mapped MAP_SHARED, and children that
+ * exec open the file again by path, so a mapping made through a second
+ * open must be the same memory. Before, /dev/shm did not exist and a
+ * MAP_SHARED mapping of a regular file was a copy per mapping. */
+static void test_dev_shm(void)
+{
+    char why[96];
+    const char *path = "/dev/shm/musl_runtime_ipc";
+    struct stat st;
+    int dir = stat("/dev/shm", &st) == 0 && S_ISDIR(st.st_mode) && (st.st_mode & 07777) == 01777;
+    unlink(path);
+    int fd = open(path, O_CREAT | O_EXCL | O_RDWR, 0600);
+    int ok = dir && fd >= 0 && ftruncate(fd, 4096) == 0;
+    volatile char *p = ok ? mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0) : MAP_FAILED;
+    int err = errno;
+    if (fd >= 0)
+        close(fd);
+    ok = ok && p != MAP_FAILED;
+    int seen = -1;
+    if (ok) {
+        pid_t pid = fork();
+        if (pid == 0) {
+            int cfd = open(path, O_RDWR);
+            char *c = cfd < 0 ? MAP_FAILED : mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, cfd, 0);
+            if (c == MAP_FAILED)
+                _exit(1);
+            c[100] = 0x5a;
+            _exit(0);
+        }
+        int status = 0;
+        ok = pid > 0 && waitpid(pid, &status, 0) == pid && WIFEXITED(status) && WEXITSTATUS(status) == 0;
+        seen = p[100];
+        ok = ok && seen == 0x5a;
+        /* read() sees the stores made through the mappings. */
+        char b = 0;
+        int rfd = open(path, O_RDONLY);
+        ok = ok && rfd >= 0 && pread(rfd, &b, 1, 100) == 1 && b == 0x5a;
+        if (rfd >= 0)
+            close(rfd);
+        munmap((void *)p, 4096);
+    }
+    unlink(path);
+    snprintf(why, sizeof(why), "dir=%d fd=%d seen=%d errno=%d", dir, fd, seen, err);
+    report("dev_shm_maps_the_file_s_pages", ok, why);
+}
+
 int main(int argc, char **argv)
 {
     if (argc >= 2 && strcmp(argv[1], "--ids") == 0)
@@ -5140,6 +5187,7 @@ int main(int argc, char **argv)
     test_thread_join();
     test_ipc();
     test_priority_inheritance();
+    test_dev_shm();
     printf("MUSL-RUNTIME: %d/%d\n", passed, total);
     return passed == total ? 0 : 1;
 }

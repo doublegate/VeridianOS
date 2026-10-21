@@ -1,15 +1,16 @@
 //! tmpfs -- Memory-Backed Filesystem
 //!
-//! A temporary in-memory filesystem with configurable size limits.
-//! Data is stored in heap-backed buffers and is lost on unmount.
-//! Supports all standard VFS operations including symlinks.
+//! A temporary in-memory filesystem with configurable size limits, lost on
+//! unmount. A regular file's bytes are pages it owns (`fs::shmem`), so a
+//! MAP_SHARED mapping maps the file itself, as Linux's tmpfs; this is what
+//! `/dev/shm` is. Supports all standard VFS operations including symlinks.
 
 use alloc::{collections::BTreeMap, string::String, sync::Arc, vec::Vec};
 use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use spin::RwLock;
 
-use super::{DirEntry, Filesystem, Metadata, NodeType, Permissions, VfsNode};
+use super::{shmem::ShmemPages, DirEntry, Filesystem, Metadata, NodeType, Permissions, VfsNode};
 use crate::error::{FsError, KernelError};
 
 /// Global inode counter for tmpfs (separate from RamFS)
@@ -18,6 +19,9 @@ static TMPFS_NEXT_INODE: AtomicU64 = AtomicU64::new(1);
 /// tmpfs node
 struct TmpNode {
     node_type: NodeType,
+    /// A regular file's contents.
+    pages: RwLock<ShmemPages>,
+    /// A symlink's target.
     data: RwLock<Vec<u8>>,
     children: RwLock<BTreeMap<String, Arc<TmpNode>>>,
     metadata: RwLock<Metadata>,
@@ -70,6 +74,7 @@ impl TmpNode {
     ) -> Self {
         Self {
             node_type: NodeType::File,
+            pages: RwLock::new(ShmemPages::new()),
             data: RwLock::new(Vec::new()),
             children: RwLock::new(BTreeMap::new()),
             metadata: RwLock::new(Metadata {
@@ -100,6 +105,7 @@ impl TmpNode {
     ) -> Self {
         Self {
             node_type: NodeType::Directory,
+            pages: RwLock::new(ShmemPages::new()),
             data: RwLock::new(Vec::new()),
             children: RwLock::new(BTreeMap::new()),
             metadata: RwLock::new(Metadata {
@@ -132,6 +138,7 @@ impl TmpNode {
         let size = target_bytes.len();
         Self {
             node_type: NodeType::Symlink,
+            pages: RwLock::new(ShmemPages::new()),
             data: RwLock::new(target_bytes),
             children: RwLock::new(BTreeMap::new()),
             metadata: RwLock::new(Metadata {
@@ -185,7 +192,7 @@ impl Drop for TmpNode {
     /// they are released when the last name and the last open file are
     /// gone. Releasing at unlink let a hard link keep data alive uncounted.
     fn drop(&mut self) {
-        let freed = self.data.get_mut().len();
+        let freed = self.data.get_mut().len() + self.pages.get_mut().size();
         if freed > 0 {
             let _ = self
                 .bytes_used
@@ -218,13 +225,7 @@ impl VfsNode for TmpNode {
             return Err(KernelError::FsError(FsError::NotAFile));
         }
 
-        let data = self.data.read();
-        if offset >= data.len() {
-            return Ok(0);
-        }
-
-        let bytes_to_read = core::cmp::min(buffer.len(), data.len() - offset);
-        buffer[..bytes_to_read].copy_from_slice(&data[offset..offset + bytes_to_read]);
+        let bytes_to_read = self.pages.read().read(offset, buffer);
 
         self.metadata.write().accessed = crate::arch::timer::get_timestamp_secs();
 
@@ -237,18 +238,17 @@ impl VfsNode for TmpNode {
         }
 
         let end = super::ram_write_end(offset, data.len())?;
-        let mut file_data = self.data.write();
-        let growth = end.saturating_sub(file_data.len());
+        let mut pages = self.pages.write();
+        let growth = end.saturating_sub(pages.size());
 
         self.reserve_space(growth)?;
-        if let Err(e) = super::grow_ram_file(&mut file_data, end) {
+        if let Err(e) = pages.write(offset, data) {
             self.release_space(growth);
             return Err(e);
         }
-        file_data[offset..end].copy_from_slice(data);
 
         let mut metadata = self.metadata.write();
-        metadata.size = file_data.len();
+        metadata.size = pages.size();
         metadata.modified = crate::arch::timer::get_timestamp_secs();
 
         Ok(data.len())
@@ -372,22 +372,22 @@ impl VfsNode for TmpNode {
             return Err(KernelError::FsError(FsError::NotAFile));
         }
 
-        let mut data = self.data.write();
-        let old_len = data.len();
+        let mut pages = self.pages.write();
+        let old_len = pages.size();
 
         if size > old_len {
             // Growing: check space
             let growth = size - old_len;
             self.reserve_space(growth)?;
-            if let Err(e) = super::grow_ram_file(&mut data, size) {
+            if let Err(e) = pages.resize(size) {
                 self.release_space(growth);
                 return Err(e);
             }
         } else if size < old_len {
-            // Shrinking: reclaim space
-            let freed = old_len - size;
-            data.truncate(size);
-            self.release_space(freed);
+            // Shrinking: reclaim space (EBUSY while a dropped page is
+            // still mapped, `ShmemPages::resize`)
+            pages.resize(size)?;
+            self.release_space(old_len - size);
         }
 
         let mut metadata = self.metadata.write();
@@ -552,6 +552,16 @@ impl VfsNode for TmpNode {
             .then(|| (super::dev_major(self.rdev), super::dev_minor(self.rdev)))
     }
 
+    #[cfg(feature = "alloc")]
+    fn share_pages(
+        &self,
+        first_page: usize,
+        count: usize,
+        _writable: bool,
+    ) -> Option<Result<Vec<crate::mm::FrameNumber>, KernelError>> {
+        (self.node_type == NodeType::File).then(|| self.pages.read().share(first_page, count))
+    }
+
     fn link(&self, name: &str, target: Arc<dyn VfsNode>) -> Result<(), KernelError> {
         if self.node_type != NodeType::Directory {
             return Err(KernelError::FsError(FsError::NotADirectory));
@@ -656,14 +666,14 @@ pub struct TmpFs {
 
 impl TmpFs {
     /// Create a new tmpfs with the given size limit in bytes.
-    /// Pass 0 for unlimited.
+    /// Pass 0 for unlimited. The root is mode 1777, Linux's tmpfs default.
     pub fn new(size_limit: usize) -> Self {
         let bytes_used = Arc::new(AtomicUsize::new(0));
         let root_inode = TMPFS_NEXT_INODE.fetch_add(1, Ordering::Relaxed);
         let root = Arc::new(TmpNode::new_directory(
             root_inode,
             root_inode,
-            Permissions::default(),
+            Permissions::from_mode(0o1777),
             bytes_used.clone(),
             size_limit,
         ));
@@ -673,6 +683,11 @@ impl TmpFs {
             bytes_used,
             size_limit,
         }
+    }
+
+    /// A tmpfs limited to half of RAM, Linux's default size.
+    pub fn half_of_ram() -> Self {
+        Self::new(crate::mm::get_memory_stats().total_frames * 4096 / 2)
     }
 
     /// Get current bytes used
@@ -1001,5 +1016,28 @@ mod tests {
         // One more byte should fail
         let result = f1.write(10, b"x");
         assert!(result.is_err());
+    }
+
+    /// A file's pages are the file (N-230 for tmpfs, so /dev/shm works as
+    /// on Linux): a MAP_SHARED mapping gets the frames themselves, and
+    /// what is stored through one is what read() returns.
+    #[test]
+    fn a_shared_mapping_maps_the_file_s_own_pages() {
+        let fs = TmpFs::new(1 << 20);
+        let f = fs.root().create("ltp_ipc", Permissions::default()).unwrap();
+        f.truncate(4096).unwrap();
+        let frames = f.share_pages(0, 1, true).expect("tmpfs pages").unwrap();
+        assert_eq!(frames.len(), 1);
+        // SAFETY: on the host a shmem frame number is its heap page's
+        // address >> 12 (fs::shmem), and the file keeps the page alive.
+        unsafe { ((frames[0].as_u64() << 12) as *mut u8).add(5).write(42) };
+        let mut b = [0u8; 1];
+        f.read(5, &mut b).unwrap();
+        assert_eq!(b, [42]);
+        // A mapped page cannot be truncated away (EBUSY, as for a memfd).
+        assert!(f.truncate(0).is_err());
+        assert!(!crate::mm::frame_refs::release(frames[0]));
+        f.truncate(0).unwrap();
+        assert_eq!(fs.bytes_used(), 0);
     }
 }
