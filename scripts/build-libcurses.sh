@@ -10,7 +10,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
-TOOLCHAIN_PREFIX="${1:-/opt/veridian/toolchain}"
+TOOLCHAIN_PREFIX="${1:-${VERIDIAN_PREFIX:-/opt/veridian}/toolchain}"
 
 CC="${TOOLCHAIN_PREFIX}/bin/x86_64-veridian-gcc"
 AR="${TOOLCHAIN_PREFIX}/bin/x86_64-veridian-ar"
@@ -18,8 +18,10 @@ RANLIB="${TOOLCHAIN_PREFIX}/bin/x86_64-veridian-ranlib"
 SYSROOT="${TOOLCHAIN_PREFIX}/sysroot"
 
 SRC="${PROJECT_ROOT}/userland/libcurses"
-# Out of /tmp (aged out by systemd-tmpfiles), beside build-busybox-rootfs.sh's tree.
-BUILD="${VERIDIAN_BUSYBOX_WORK:-${VERIDIAN_PREFIX:-/opt/veridian}/busybox-x86_64}/libcurses-build"
+# Out of /tmp (aged out by systemd-tmpfiles), beside build-busybox-rootfs.sh's
+# tree; by default next to the toolchain, so a custom prefix argument alone is
+# enough (/opt/veridian/toolchain -> /opt/veridian/busybox-x86_64).
+BUILD="${VERIDIAN_BUSYBOX_WORK:-${VERIDIAN_PREFIX:-$(dirname "$TOOLCHAIN_PREFIX")}/busybox-x86_64}/libcurses-build"
 
 # Verify cross-compiler exists
 if [ ! -x "$CC" ]; then

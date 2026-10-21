@@ -31,13 +31,15 @@ BUSYBOX_SHA256="b8cc24c9574d809e7279c3be349795c5d5ceb6fdf19ca709f80cde50e47de314
 # and out of target/, which `cargo clean` deletes; /opt/veridian already holds
 # the cross toolchain and the musl build trees (tools/cross/veridian-paths.sh).
 WORK_DIR="${VERIDIAN_BUSYBOX_WORK:-${VERIDIAN_PREFIX:-/opt/veridian}/busybox-x86_64}"
+# The tarball cache build-musl-rootfs.sh uses (tools/cross/veridian-paths.sh).
+SOURCES_DIR="${VERIDIAN_SOURCES:-${VERIDIAN_PREFIX:-/opt/veridian}/sources}"
 BB_SRC="${WORK_DIR}/busybox-${BUSYBOX_VERSION}"
 BB_BUILD="${WORK_DIR}/busybox-build"
 BB_PATCHES="${PROJECT_ROOT}/tools/busybox/patches"
 BB_DEFCONFIG="${PROJECT_ROOT}/tools/busybox/veridian_defconfig"
 
 # Toolchain
-TOOLCHAIN_PREFIX="/opt/veridian/toolchain"
+TOOLCHAIN_PREFIX="${VERIDIAN_PREFIX:-/opt/veridian}/toolchain"
 CC="${TOOLCHAIN_PREFIX}/bin/x86_64-veridian-gcc"
 STRIP="${TOOLCHAIN_PREFIX}/bin/x86_64-veridian-strip"
 READELF="${TOOLCHAIN_PREFIX}/bin/x86_64-veridian-readelf"
@@ -63,21 +65,28 @@ TESTS_DIR="${PROJECT_ROOT}/userland/tests"
 # =========================================================================
 phase_download() {
     echo "=== Phase A-0: Download BusyBox ${BUSYBOX_VERSION} ==="
-    mkdir -p "$WORK_DIR"
+    mkdir -p "$WORK_DIR" "$SOURCES_DIR"
 
     if [ -d "$BB_SRC" ]; then
         echo "  BusyBox source already exists at $BB_SRC"
     else
-        local tarball="${WORK_DIR}/busybox-${BUSYBOX_VERSION}.tar.bz2"
+        local tarball="${SOURCES_DIR}/busybox-${BUSYBOX_VERSION}.tar.bz2"
         if [ ! -f "$tarball" ]; then
             echo "  Downloading ${BUSYBOX_URL}..."
             curl -fsSL -o "${tarball}.part" "$BUSYBOX_URL" || { rm -f "${tarball}.part"; echo "  ERROR: download failed"; exit 1; }
             mv "${tarball}.part" "$tarball"
         fi
-        echo "${BUSYBOX_SHA256}  ${tarball}" | sha256sum -c --quiet - || { echo "  ERROR: BusyBox checksum mismatch"; exit 1; }
+        # A bad tarball is removed, so the next run downloads it again.
+        echo "${BUSYBOX_SHA256}  ${tarball}" | sha256sum -c --quiet - || { rm -f "$tarball"; echo "  ERROR: BusyBox checksum mismatch (removed $tarball)"; exit 1; }
         echo "  Extracting..."
-        cd "$WORK_DIR"
-        tar xjf "$tarball"
+        # Into a scratch directory first: an interrupted extraction must not
+        # leave a partial $BB_SRC that later runs take as complete.
+        local staging="${WORK_DIR}/.extract.$$"
+        rm -rf "$staging"
+        mkdir -p "$staging"
+        tar xjf "$tarball" -C "$staging" || { rm -rf "$staging"; echo "  ERROR: extraction failed"; exit 1; }
+        mv "${staging}/busybox-${BUSYBOX_VERSION}" "$BB_SRC"
+        rm -rf "$staging"
     fi
 
     echo "  BusyBox source: $BB_SRC"
