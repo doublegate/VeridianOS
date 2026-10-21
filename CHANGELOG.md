@@ -7,9 +7,11 @@
   instead of `/tmp/VeridianOS`. systemd-tmpfiles deletes files under `/tmp` after 10 days, which
   removed the BusyBox build and left the gate testing a stale rootfs image. The tarball is shared
   with `build-musl-rootfs.sh` in `/opt/veridian/sources` (`VERIDIAN_SOURCES`) and checked against
-  busybox.net's SHA-256; a bad copy is deleted, and extraction goes through a scratch directory so
-  an interrupted run cannot leave a partial source tree. `build-libcurses.sh` puts its build
-  directory beside a custom toolchain prefix given as its argument.
+  busybox.net's SHA-256 before it enters the cache (each download uses its own temporary file, so
+  the two scripts can download at the same time); a bad copy is deleted, and extraction goes
+  through a scratch directory so an interrupted run cannot leave a partial source tree.
+  `build-libcurses.sh` puts its build directory beside a custom toolchain prefix given as its
+  argument.
 
 ---
 

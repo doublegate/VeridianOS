@@ -73,8 +73,15 @@ phase_download() {
         local tarball="${SOURCES_DIR}/busybox-${BUSYBOX_VERSION}.tar.bz2"
         if [ ! -f "$tarball" ]; then
             echo "  Downloading ${BUSYBOX_URL}..."
-            curl -fsSL -o "${tarball}.part" "$BUSYBOX_URL" || { rm -f "${tarball}.part"; echo "  ERROR: download failed"; exit 1; }
-            mv "${tarball}.part" "$tarball"
+            # A per-process temporary file in the cache, checked before it is
+            # moved into place, so a concurrent download (build-musl-rootfs.sh
+            # shares the cache) never sees or removes a partial archive.
+            local part
+            part="$(mktemp "${tarball}.XXXXXX")"
+            curl -fsSL -o "$part" "$BUSYBOX_URL" || { rm -f "$part"; echo "  ERROR: download failed"; exit 1; }
+            echo "${BUSYBOX_SHA256}  ${part}" | sha256sum -c --quiet - || { rm -f "$part"; echo "  ERROR: BusyBox checksum mismatch in the download"; exit 1; }
+            chmod a+r "$part"  # mktemp creates it 0600
+            mv "$part" "$tarball"
         fi
         # A bad tarball is removed, so the next run downloads it again.
         echo "${BUSYBOX_SHA256}  ${tarball}" | sha256sum -c --quiet - || { rm -f "$tarball"; echo "  ERROR: BusyBox checksum mismatch (removed $tarball)"; exit 1; }
