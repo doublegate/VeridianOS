@@ -120,7 +120,7 @@ rustup toolchain install "$TOOLCHAIN" --component rust-src,llvm-tools-preview,ru
 
 # Install cargo tools
 echo "Installing cargo tools..."
-cargo install --locked \
+cargo +"$TOOLCHAIN" install --locked \
     cargo-audit \
     cargo-llvm-cov \
     cargo-outdated

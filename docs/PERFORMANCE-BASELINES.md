@@ -151,7 +151,7 @@ just bench-riscv64
 ## Tools and Scripts
 
 ### Performance Analysis
-- `scripts/benchmark.sh` - Automated benchmark runner
+- The in-kernel `perf` shell command - the micro-benchmarks (method in `docs/PERFORMANCE-REPORT.md`)
 - `scripts/analyze-kernel.sh` - Binary analysis
 - GDB scripts for runtime analysis
 

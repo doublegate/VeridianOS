@@ -115,6 +115,7 @@ Our GDB scripts provide custom commands for kernel debugging:
 - `break-panic` - Set breakpoint on `core::panicking::panic_fmt` (every panic goes through it)
 - `hbreak-panic` - The same with a hardware breakpoint (x86_64 under UEFI)
 - `break-main` - Set breakpoint on `veridian_kernel::bootstrap::kernel_init`
+- `hbreak-main` - The same with a hardware breakpoint (x86_64 under UEFI)
 - `break-boot-x86_64`, `break-boot-aarch64`, `break-boot-riscv64` - Boot entry breakpoints
 - `examine-stack` - Display stack contents at `$sp`
 - `examine-uart-aarch64`, `examine-uart-riscv64` - Display UART registers (x86_64's COM1 is an

@@ -70,6 +70,12 @@ define break-main
     echo [GDB] Breakpoint set on veridian_kernel::bootstrap::kernel_init\n
 end
 
+# Hardware variant of break-main (see hbreak-panic).
+define hbreak-main
+    hbreak veridian_kernel::bootstrap::kernel_init
+    echo [GDB] Hardware breakpoint set on veridian_kernel::bootstrap::kernel_init\n
+end
+
 define break-boot
     echo Usage: break-boot-x86_64, break-boot-aarch64 or break-boot-riscv64\n
 end
