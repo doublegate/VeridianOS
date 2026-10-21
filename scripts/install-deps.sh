@@ -101,13 +101,15 @@ else
     exit 1
 fi
 
-# Install Rust if not already installed
-if ! command -v rustc &> /dev/null; then
-    echo "Installing Rust..."
+# Install rustup if it is missing; the steps below call it directly. (A
+# distribution rustc alone is not enough: the toolchain is pinned through
+# rustup, and rustup-init reports a conflicting installation itself.)
+if ! command -v rustup &> /dev/null; then
+    echo "Installing rustup..."
     curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
     source "$HOME/.cargo/env"
 else
-    echo "Rust is already installed"
+    echo "rustup is already installed"
 fi
 
 # Install required Rust components
@@ -120,16 +122,16 @@ rustup toolchain install "$TOOLCHAIN" --component rust-src,llvm-tools-preview,ru
 
 # Install cargo tools
 echo "Installing cargo tools..."
-cargo install --locked \
+cargo +"$TOOLCHAIN" install --locked \
     cargo-audit \
     cargo-llvm-cov \
     cargo-outdated
-cargo install --locked mdbook --version 0.4.37
+cargo +"$TOOLCHAIN" install --locked mdbook --version 0.4.37
 
 # Install just command runner
 if ! command -v just &> /dev/null; then
     echo "Installing just..."
-    cargo install --locked just
+    cargo +"$TOOLCHAIN" install --locked just
 else
     echo "just is already installed"
 fi

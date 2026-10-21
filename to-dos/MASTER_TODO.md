@@ -353,11 +353,13 @@ What does not work yet: `docs/KNOWN-LIMITATIONS.md`.
     probes (HR-04 to HR-06), Svpbmt/XTheadMae (HR-11).
   - [ ] ABI-review items N-190 to N-193, N-207, N-209 to N-211, N-217, N-221, N-222, N-225,
     N-231, N-235 to N-238.
-  - [ ] Legacy scripts superseded in v0.27.0 and still on the pre-v0.27 targets (PR #26 review):
-    `scripts/test-{x86_64,aarch64,riscv64}.sh` (replaced by `scripts/boot-test.sh`) and
-    `scripts/benchmark.sh` (replaced by the in-kernel `perf` command), and `scripts/coverage.sh`
-    (cargo-tarpaulin; CI measures with cargo-llvm-cov); nothing calls them since the Justfile was
-    rewritten. Remove them or port them.
+  - [x] Legacy scripts superseded in v0.27.0 and still on the pre-v0.27 targets (PR #26 review)
+    removed: `scripts/test-{x86_64,aarch64,riscv64}.sh` (replaced by `scripts/boot-test.sh`),
+    `scripts/benchmark.sh` (replaced by the in-kernel `perf` command) and `scripts/coverage.sh`
+    (cargo-tarpaulin; CI measures with cargo-llvm-cov).
+  - [x] Post-release chores: the five Gemini workflows removed (Antigravity reviews PRs);
+    `scripts/dev/guest.py` tracked; the `hbreak-main` GDB helper; `install-deps.sh` installs the
+    cargo tools with the pinned toolchain, so it works where no rustup default is set.
   - [ ] MFA through PAM (decision of 2026-10-19: no MFA fixes before this): TOTP per RFC 6238,
     pam_veridian checking the second factor, and only then the `/etc/veridian/mfa` policy -- a
     line naming no account (no `:`) protects no account today, while a named line with a bad

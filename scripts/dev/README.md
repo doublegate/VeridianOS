@@ -9,6 +9,7 @@ otherwise.
 |---|---|
 | `gate.sh [--boot] [--rootfs]` | The pre-commit gate: fmt, clippy `-D warnings` on the three bare-metal targets and the host library, host unit tests; `--boot` adds the tri-arch build and QEMU boot tests, `--rootfs` the x86_64 runtime suite. Non-zero exit if any step fails. |
 | `runtime-tests.sh` | Rebuild the dev kernel, the rootfs staging tree (which compiles the runtime test programs) and the BlockFS image, then run `scripts/run-rootfs-tests.sh` with the musl checks required. |
+| `guest.py ARCH LOG CMD...` | Boot the AArch64 or RISC-V musl root (`target/rootfs-musl-ARCH.img`, snapshot mode) and type each command at the shell, waiting for the prompt after each; the serial output goes to LOG. `SMP`, `RISCV_CPU` and `PROMPT_TIMEOUT` adjust the run. |
 | `rootfs-monitor.sh` | The same suite under QEMU with an HMP monitor socket, QEMU left running afterwards, for inspecting a stall (`info registers`, then `addr2line` on the kernel ELF). |
 | `lint-cross.sh` | Lint the changed `tools/cross` files: `bash -n`, shellcheck, ruff, and `PATCHES.md` up to date. |
 | `mkpatch.py SRC OUT HEADER EDITS.json` | Build a `-p1` patch from exact, once-only text replacements in a source tree (for `tools/cross/*-patches/`) and check it with `patch --dry-run`. |
