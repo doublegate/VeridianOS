@@ -147,17 +147,12 @@ if [ ! -f ".env" ]; then
 # Local development environment variables
 # DO NOT COMMIT THIS FILE
 
-# Enable verbose output
+# Backtraces from host tools and host tests
 RUST_BACKTRACE=1
-RUST_LOG=debug
 
-# Git hook configuration
-RUN_CLIPPY_PRECOMMIT=0  # Set to 1 to enable (slow)
-RUN_TESTS_PREPUSH=1     # Set to 0 to disable
-
-# Development settings
-QEMU_DISPLAY=none       # Set to 'gtk' for GUI
-QEMU_SERIAL=stdio       # Serial output to console
+# The git hooks read their switches from the shell environment, not from
+# this file: export RUN_CLIPPY_PRECOMMIT=1 to run clippy before each commit,
+# or RUN_TESTS_PREPUSH=0 to skip the gate before a push to a feature branch.
 EOF
     echo -e "${GREEN}Created .env file${NC}"
 else

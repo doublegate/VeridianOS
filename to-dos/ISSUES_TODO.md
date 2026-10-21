@@ -382,10 +382,11 @@ Currently no low priority issues.
 - **Verified**: 23
 - **Closed**: 0
 
-### Current Architecture Boot Status (v0.5.0)
-- **x86_64**: Stage 6 BOOTOK, 29/29 tests, zero warnings, interactive shell, /bin/minimal executes
-- **AArch64**: Stage 6 BOOTOK, 29/29 tests, zero warnings, interactive shell
-- **RISC-V**: Stage 6 BOOTOK, 29/29 tests, zero warnings, interactive shell
+### Current Architecture Boot Status (v0.27.0)
+- **x86_64**: Stage 6 BOOTOK, 43/43 in-kernel tests (47/47 on four CPUs), BusyBox and runtime
+  suites pass
+- **AArch64**: Stage 6 BOOTOK, 64/64 (68/68 on four CPUs), BusyBox and runtime suites pass
+- **RISC-V**: Stage 6 BOOTOK, 57/57 (61/61 on four CPUs), BusyBox and runtime suites pass
 
 ### By Component
 | Component | Open | In Progress | Fixed | Total |

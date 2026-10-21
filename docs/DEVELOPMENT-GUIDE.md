@@ -80,6 +80,7 @@ sudo dnf install -y \
 # Cargo extensions
 cargo install cargo-audit
 cargo install cargo-llvm-cov      # coverage, as CI measures it
+cargo install cargo-outdated      # `just outdated`
 cargo install mdbook --version 0.4.37 --locked
 
 # Just (command runner)
@@ -458,12 +459,12 @@ the allocators.
 
 ### Before Submitting
 
-1. **Run tests**: `just test`
-2. **Check formatting**: `just fmt-check`
-3. **Run clippy**: `just clippy`
-4. **Update documentation**: `just doc`
-5. **Add tests for new features**
-6. **Update CHANGELOG.md**
+1. **Run the full gate**: `just gate` (`scripts/dev/gate.sh --boot --rootfs`: formatting, clippy
+   on every target, host tests, builds, QEMU boots and the runtime suites); it must pass on the
+   tree you submit
+2. **Add tests for new features**
+3. **Update the documentation** with the change (`just doc` builds the mdBook)
+4. **Update CHANGELOG.md**
 
 ### Pull Request Process
 

@@ -15,7 +15,8 @@ NC='\033[0m'
 echo -e "${GREEN}VeridianOS AArch64 Debug Script${NC}"
 
 echo -e "${YELLOW}Building the dev kernel...${NC}"
-./build-kernel.sh aarch64 dev
+# stdin is GDB's (a piped command file), so the build must not read it.
+./build-kernel.sh aarch64 dev </dev/null
 
 echo -e "${YELLOW}Starting QEMU (paused) with a GDB server on port 1234...${NC}"
 qemu-system-aarch64 -M virt -cpu cortex-a72 -m 256M \

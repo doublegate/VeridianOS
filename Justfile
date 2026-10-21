@@ -162,7 +162,7 @@ outdated:
 # Install development tools (the toolchain is pinned by rust-toolchain.toml)
 install-tools:
     rustup toolchain install "$(sed -n 's/^channel *= *"\(.*\)"/\1/p' rust-toolchain.toml)" --component rust-src,llvm-tools-preview,rustfmt,clippy
-    cargo install cargo-audit
+    cargo install --locked cargo-audit cargo-llvm-cov cargo-outdated
     cargo install mdbook --version 0.4.37 --locked
 
 # Print system info

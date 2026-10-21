@@ -15,7 +15,8 @@ NC='\033[0m'
 echo -e "${GREEN}VeridianOS x86_64 Debug Script${NC}"
 
 echo -e "${YELLOW}Building the dev kernel...${NC}"
-./build-kernel.sh x86_64 dev
+# stdin is GDB's (a piped command file), so the build must not read it.
+./build-kernel.sh x86_64 dev </dev/null
 
 # The same firmware search and accelerator choice as scripts/boot-test.sh.
 ovmf=""

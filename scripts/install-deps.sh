@@ -121,12 +121,10 @@ rustup toolchain install "$TOOLCHAIN" --component rust-src,llvm-tools-preview,ru
 # Install cargo tools
 echo "Installing cargo tools..."
 cargo install --locked \
-    cargo-binutils \
-    cargo-watch \
-    cargo-expand \
     cargo-audit \
-    cargo-outdated \
-    cargo-tree
+    cargo-llvm-cov \
+    cargo-outdated
+cargo install --locked mdbook --version 0.4.37
 
 # Install just command runner
 if ! command -v just &> /dev/null; then
