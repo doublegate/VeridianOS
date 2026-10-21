@@ -142,7 +142,7 @@ SENSITIVE_PATTERNS=(
     "secrets.json" "credentials.json"
 )
 FOUND_SENSITIVE=0
-while read -r path; do
+while IFS= read -r path; do
     [ -z "$path" ] && continue
     name=${path##*/}
     for pattern in "${SENSITIVE_PATTERNS[@]}"; do

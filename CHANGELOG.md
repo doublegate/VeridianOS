@@ -2,6 +2,14 @@
 
 ### Changed
 
+- The five Gemini workflows (`gemini-cli`, `gemini-dispatch`, `gemini-invoke`,
+  `gemini-pr-review`, `gemini-review`) are removed; pull requests are reviewed by the Antigravity
+  workflow and the review bots.
+- Removed the legacy scripts superseded in v0.27.0: `scripts/test-{x86_64,aarch64,riscv64}.sh`
+  (use `scripts/boot-test.sh`), `scripts/benchmark.sh` (use the in-kernel `perf` command) and
+  `scripts/coverage.sh` (CI measures coverage with cargo-llvm-cov).
+- `scripts/install-deps.sh` installs the cargo tools with the toolchain pinned in
+  `rust-toolchain.toml`, so it no longer depends on a rustup default toolchain.
 - The x86_64 BusyBox rootfs build (`scripts/build-busybox-rootfs.sh`) and `scripts/build-libcurses.sh`
   keep their work tree in `/opt/veridian/busybox-x86_64` (override with `VERIDIAN_BUSYBOX_WORK`)
   instead of `/tmp/VeridianOS`. systemd-tmpfiles deletes files under `/tmp` after 10 days, which
@@ -12,6 +20,17 @@
   through a scratch directory so an interrupted run cannot leave a partial source tree.
   `build-libcurses.sh` puts its build directory beside a custom toolchain prefix given as its
   argument.
+
+### Added
+
+- `scripts/dev/guest.py`: boots the AArch64 or RISC-V musl root filesystem and runs commands at
+  its shell, logging the serial output.
+- GDB helper `hbreak-main`, the hardware-breakpoint variant of `break-main`.
+
+### Fixed
+
+- `.githooks/pre-push` keeps leading and trailing whitespace in path names when scanning for
+  sensitive files.
 
 ---
 

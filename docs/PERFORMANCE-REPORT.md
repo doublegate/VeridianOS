@@ -114,10 +114,9 @@ Three `[[bench]]` targets exist in `kernel/benches/`:
 - `memory_allocation`
 
 These are `#![no_std]` bare-metal binaries requiring custom QEMU boot with specific
-entry points. They cannot run via `cargo bench`. The existing `scripts/benchmark.sh`
-uses `bootimage` (incompatible with current UEFI build system) and `timeout`
-(incompatible with QEMU 10.2). These benchmarks require manual QEMU boot configuration
-to execute.
+entry points. They cannot run via `cargo bench`, and the old `scripts/benchmark.sh` runner
+(`bootimage`, `timeout`) was removed in v0.28. These benchmarks require manual QEMU boot
+configuration to execute; the in-kernel `perf` command is the supported measurement.
 
 ## Summary
 
