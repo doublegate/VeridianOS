@@ -142,5 +142,5 @@ alias eu = examine-uart
 alias kst = kernel-state
 
 echo [GDB] VeridianOS kernel debugging script loaded\n
-echo [GDB] Available commands: kernel-symbols, break-panic, break-main, break-boot-<arch>, examine-stack, examine-uart-<arch>\n
+echo [GDB] Available commands: kernel-symbols, break-panic, hbreak-panic, break-main, hbreak-main, break-boot-<arch>, examine-stack, examine-uart-<arch>\n
 echo [GDB] Aliases: ks, bp, bm, bb, es, eu, kst\n

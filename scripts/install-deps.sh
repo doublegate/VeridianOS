@@ -124,12 +124,12 @@ cargo +"$TOOLCHAIN" install --locked \
     cargo-audit \
     cargo-llvm-cov \
     cargo-outdated
-cargo install --locked mdbook --version 0.4.37
+cargo +"$TOOLCHAIN" install --locked mdbook --version 0.4.37
 
 # Install just command runner
 if ! command -v just &> /dev/null; then
     echo "Installing just..."
-    cargo install --locked just
+    cargo +"$TOOLCHAIN" install --locked just
 else
     echo "just is already installed"
 fi

@@ -9,17 +9,23 @@ changed), waits for the root prompt, then types each CMD and waits for the next
 prompt. The whole serial output goes to LOG. Prints "ok" when every command
 returned to the prompt, otherwise "timeout/exit", and exits 0 or 1 to match.
 
+A command has finished when a root prompt, in any working directory, appears in
+the output written after it was typed and after its echo. A command that itself
+prints a root prompt at that point ends its wait early.
+
 Environment: SMP (CPU count, default 1), RISCV_CPU (QEMU -cpu for RISC-V),
 PROMPT_TIMEOUT (seconds to wait for each prompt, default 600).
 """
 
 import os
+import re
 import subprocess
 import sys
 import time
 from pathlib import Path
 
-PROMPT = b"root@veridian:/#"
+# The kernel shell's root prompt: "root@veridian:" + working directory + "#".
+PROMPT = re.compile(rb"root@veridian:[^\s#]*#")
 ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -48,6 +54,9 @@ def qemu_command(arch: str) -> list[str]:
             cmd += ["-cpu", os.environ["RISCV_CPU"]]
     else:
         sys.exit(f"unknown architecture {arch!r} (aarch64 or riscv64)")
+    kernel = Path(cmd[cmd.index("-kernel") + 1])
+    if not kernel.exists():
+        sys.exit(f"{kernel} not found; build it with ./build-kernel.sh {arch} dev")
     image = ROOT / f"target/rootfs-musl-{arch}.img"
     if not image.exists():
         sys.exit(
@@ -76,40 +85,53 @@ def main() -> int:
         sys.exit(__doc__)
     arch, log, cmds = sys.argv[1], sys.argv[2], sys.argv[3:]
     timeout = int(os.environ.get("PROMPT_TIMEOUT", "600"))
+    # Checked before LOG is truncated.
+    command = qemu_command(arch)
+    ok = False
     with open(log, "wb") as out:
         proc = subprocess.Popen(
-            qemu_command(arch),
+            command,
             stdin=subprocess.PIPE,
             stdout=out,
             stderr=subprocess.STDOUT,
         )
 
-        def prompts() -> int:
+        def output() -> bytes:
             with open(log, "rb") as f:
-                return f.read().count(PROMPT)
+                return f.read()
 
-        def wait(count: int) -> bool:
-            start = time.time()
-            while time.time() - start < timeout:
-                if prompts() >= count:
-                    return True
+        def wait(start: int, echo: bytes) -> int | None:
+            """The end of the first prompt written after `start` (and after
+            `echo`, once it has appeared), or None on timeout or exit."""
+            began = time.time()
+            while time.time() - began < timeout:
+                data = output()
+                at = start
+                if echo:
+                    seen = data.find(echo, start)
+                    if seen >= 0:
+                        at = seen + len(echo)
+                match = PROMPT.search(data, at)
+                if match:
+                    return match.end()
                 if proc.poll() is not None:
-                    return False
+                    return None
                 time.sleep(1)
-            return False
+            return None
 
-        expected = 1
-        ok = wait(expected)
-        for cmd in cmds:
-            if not ok:
-                break
-            assert proc.stdin is not None
-            proc.stdin.write(cmd.encode() + b"\n")
-            proc.stdin.flush()
-            expected += 1
-            ok = wait(expected)
-        proc.kill()
-        proc.wait()
+        try:
+            end = wait(0, b"")
+            for cmd in cmds:
+                if end is None:
+                    break
+                assert proc.stdin is not None
+                proc.stdin.write(cmd.encode() + b"\n")
+                proc.stdin.flush()
+                end = wait(end, cmd.encode())
+            ok = end is not None
+        finally:
+            proc.kill()
+            proc.wait()
     print("ok" if ok else "timeout/exit")
     return 0 if ok else 1
 

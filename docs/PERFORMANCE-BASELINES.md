@@ -114,26 +114,11 @@ This document records the baseline performance measurements from Phase 0 and cur
 
 ## Benchmark Infrastructure
 
-### Available Commands
-```bash
-# Run all benchmarks
-just bench
-
-# Run specific benchmark
-just bench-ipc
-just bench-context  
-just bench-memory
-
-# Architecture-specific
-just bench-x86_64
-just bench-aarch64
-just bench-riscv64
-```
-
-### Result Storage
-- Results saved to `benchmark_results/`
-- Timestamped for tracking progress
-- Markdown summaries generated
+### Running the Benchmarks
+The micro-benchmarks run inside the kernel: boot an architecture (`scripts/run-veridian.sh`) and
+type `perf` at the shell (`perf stats` prints the counters too). Each runs 1,000 iterations
+after 10 warmup iterations; `docs/PERFORMANCE-REPORT.md` has the method and the recorded
+results, which are added there by hand.
 
 ## Success Criteria
 
