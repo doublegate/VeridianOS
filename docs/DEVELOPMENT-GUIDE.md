@@ -78,9 +78,9 @@ sudo dnf install -y \
 
 ```bash
 # Cargo extensions
-cargo install cargo-audit
-cargo install cargo-llvm-cov      # coverage, as CI measures it
-cargo install cargo-outdated      # `just outdated`
+cargo install --locked cargo-audit
+cargo install --locked cargo-llvm-cov      # coverage, as CI measures it
+cargo install --locked cargo-outdated      # `just outdated`
 cargo install mdbook --version 0.4.37 --locked
 
 # Just (command runner)

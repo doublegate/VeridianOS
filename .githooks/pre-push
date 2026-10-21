@@ -42,6 +42,16 @@ while read -r local_ref local_oid remote_ref remote_oid; do
     fi
 done
 
+# A push that only deletes remote refs adds no commits: nothing to check.
+if [ ${#RANGES[@]} -eq 0 ]; then
+    echo -e "${GREEN}Nothing to check (no commits pushed)${NC}"
+    exit 0
+fi
+
+GATE_LOG=""
+DOC_LOG=""
+trap 'rm -f "$GATE_LOG" "$DOC_LOG"' EXIT
+
 # Run `git <args> <range>` for every range.
 for_each_range() {
     local r
@@ -86,7 +96,6 @@ if [ $IS_PROTECTED -eq 1 ] || [ "${RUN_TESTS_PREPUSH:-1}" = "1" ]; then
     [ $IS_PROTECTED -eq 1 ] && GATE_ARGS=(--boot)
     echo "Running scripts/dev/gate.sh${GATE_ARGS[*]:+ ${GATE_ARGS[*]}} (fmt, clippy, syscall checks, host tests)..."
     GATE_LOG=$(mktemp)
-    trap 'rm -f "$GATE_LOG"' EXIT
     if scripts/dev/gate.sh "${GATE_ARGS[@]}" >"$GATE_LOG" 2>&1; then
         echo -e "${GREEN}Gate passed${NC}"
     else
@@ -112,7 +121,8 @@ else
     fi
 fi
 
-# 4. Documentation builds without warnings (as CI's docs job requires)
+# 4. Rustdoc warnings, reported but not blocking (CI's docs job does not fail
+# on them either)
 echo "Checking documentation..."
 DOC_LOG=$(mktemp)
 if ! RUSTDOCFLAGS="-D warnings" cargo doc --lib --features alloc -p veridian-kernel \
@@ -120,10 +130,11 @@ if ! RUSTDOCFLAGS="-D warnings" cargo doc --lib --features alloc -p veridian-ker
     tail -n 20 "$DOC_LOG"
     echo -e "${YELLOW}Documentation has warnings (the last lines are above)${NC}"
 fi
-rm -f "$DOC_LOG"
 
-# 5. Sensitive files among the pushed commits' changes (shell glob patterns,
-# matched against each path's file name)
+# 5. Sensitive files added or changed by the pushed commits (shell glob
+# patterns, matched against each path's file name). Deletions are not
+# reported (removing a key is the fix), and paths are not C-quoted, so
+# non-ASCII names match too.
 echo "Checking for sensitive files..."
 SENSITIVE_PATTERNS=(
     "*.key" "*.pem" "*.p12" "*.pfx" ".env" ".env.*"
@@ -141,7 +152,7 @@ while read -r path; do
             FOUND_SENSITIVE=1
         fi
     done
-done < <(for_each_range log --name-only --format= | sort -u)
+done < <(for_each_range -c core.quotePath=false log --diff-filter=d --name-only --format= | sort -u)
 
 if [ $FOUND_SENSITIVE -eq 1 ]; then
     echo "Ensure no secrets are being committed"
