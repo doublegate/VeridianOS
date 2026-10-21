@@ -118,21 +118,24 @@ if [ "$CURRENT_TOOLCHAIN" != "$REQUIRED_TOOLCHAIN" ]; then
     echo "  To install and use the correct toolchain:"
     echo "    rustup toolchain install $REQUIRED_TOOLCHAIN"
     echo "  (rust-toolchain.toml selects it inside the repository once installed)"
+    echo "  Skipping the component check until it is installed."
 else
     echo -e "${GREEN}Correct toolchain active${NC}"
 fi
 
-# Check for required components
-echo "  Checking components..."
-COMPONENTS=("rust-src" "llvm-tools-preview" "rustfmt" "clippy")
-for comp in "${COMPONENTS[@]}"; do
-    if rustup component list | grep -q "$comp (installed)"; then
-        echo -e "${GREEN}$comp${NC}"
-    else
-        echo -e "${YELLOW}$comp not installed${NC}"
-        echo "       Run: rustup component add $comp"
-    fi
-done
+# Check for required components (of the pinned toolchain, once it is active)
+if [ "$CURRENT_TOOLCHAIN" = "$REQUIRED_TOOLCHAIN" ]; then
+    echo "  Checking components..."
+    COMPONENTS=("rust-src" "llvm-tools-preview" "rustfmt" "clippy")
+    for comp in "${COMPONENTS[@]}"; do
+        if rustup component list | grep -q "$comp (installed)"; then
+            echo -e "${GREEN}$comp${NC}"
+        else
+            echo -e "${YELLOW}$comp not installed${NC}"
+            echo "       Run: rustup component add $comp"
+        fi
+    done
+fi
 
 # 5. Create local development config
 echo ""

@@ -172,8 +172,8 @@ pub fn allocate_frame(&mut self) -> Option<Frame> {
 
 #### Error Handling
 
-- Use `Result<T, Error>` for fallible operations
-- Create specific error types using `thiserror`
+- Use `Result<T, KernelError>` for fallible operations
+- Create specific error enums (the kernel is `no_std`; see `kernel/src/error.rs`)
 - Provide helpful error messages
 - Never use `.unwrap()` in non-test code
 
@@ -194,8 +194,8 @@ Example:
 /// - `ptr` must be properly aligned
 /// - The memory must not be mutated during access
 unsafe fn read_raw(ptr: *const u8) -> u8 {
-    // Safety: Caller ensures preconditions
-    *ptr
+    // SAFETY: the caller guarantees `ptr` is valid and aligned (the contract above).
+    unsafe { *ptr }
 }
 ```
 

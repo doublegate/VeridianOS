@@ -161,7 +161,7 @@ outdated:
 
 # Install development tools (the toolchain is pinned by rust-toolchain.toml)
 install-tools:
-    rustup toolchain install nightly-2025-11-15 --component rust-src,llvm-tools-preview,rustfmt,clippy
+    rustup toolchain install "$(sed -n 's/^channel *= *"\(.*\)"/\1/p' rust-toolchain.toml)" --component rust-src,llvm-tools-preview,rustfmt,clippy
     cargo install cargo-audit
     cargo install mdbook --version 0.4.37 --locked
 

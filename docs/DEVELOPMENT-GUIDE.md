@@ -24,9 +24,9 @@ This guide covers everything you need to know to start developing VeridianOS, fr
 # Install rustup
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 
-# Install specific nightly version
-# rust-toolchain.toml pins the nightly; rustup installs it on first use
-rustup toolchain install nightly-2025-11-15 --component rust-src,llvm-tools-preview,rustfmt,clippy
+# The nightly pinned in rust-toolchain.toml, with its components
+rustup toolchain install "$(sed -n 's/^channel *= *"\(.*\)"/\1/p' rust-toolchain.toml)" \
+    --component rust-src,llvm-tools-preview,rustfmt,clippy
 
 # No `rustup target add` is needed: the kernel builds core/alloc itself (-Zbuild-std)
 ```
@@ -41,6 +41,7 @@ sudo apt install -y \
     qemu-system-x86 \
     qemu-system-arm \
     qemu-system-misc \
+    ovmf \
     gdb-multiarch \
     nasm \
     mtools \
@@ -60,6 +61,7 @@ sudo dnf install -y \
     qemu-system-x86 \
     qemu-system-aarch64 \
     qemu-system-riscv \
+    edk2-ovmf \
     gdb \
     nasm \
     mtools \
@@ -76,22 +78,17 @@ sudo dnf install -y \
 
 ```bash
 # Cargo extensions
-cargo install cargo-xbuild
-cargo install bootimage
-cargo install cargo-watch
-cargo install cargo-expand
-cargo install cargo-tree
 cargo install cargo-audit
-cargo install cargo-outdated
-cargo install cargo-nextest
+cargo install cargo-llvm-cov      # coverage, as CI measures it
+cargo install mdbook --version 0.4.37 --locked
 
 # Just (command runner)
 cargo install just
-
-# Optional: Performance tools
-cargo install flamegraph
-cargo install cargo-profiling
 ```
+
+`./scripts/install-deps.sh` installs the toolchain and these tools in one step. The x86_64 UEFI
+disk image is built by `tools/bootimage-builder`, which `build-kernel.sh` runs; no `bootimage` or
+`cargo-xbuild` is needed.
 
 ### IDE Setup
 
@@ -271,23 +268,16 @@ pub struct FrameAllocator {
 
 #### Error Handling
 
-Use `Result<T, Error>` for fallible operations:
+Use `Result<T, KernelError>` for fallible operations. The kernel is `no_std` and has no
+`thiserror`; errors are plain enums (`kernel/src/error.rs`), and `#[must_use]` on the result
+catches ignored errors:
 
 ```rust
-#[derive(Debug, thiserror::Error)]
-pub enum MemoryError {
-    #[error("out of memory")]
-    OutOfMemory,
-    
-    #[error("invalid address {0:#x}")]
-    InvalidAddress(usize),
-    
-    #[error("alignment error: address {addr:#x} not aligned to {align}")]
-    AlignmentError { addr: usize, align: usize },
-}
-
-pub fn allocate_page() -> Result<Page, MemoryError> {
-    // ...
+pub fn allocate_page() -> Result<FrameNumber, KernelError> {
+    FRAME_ALLOCATOR
+        .lock()
+        .allocate_frames(1, None)
+        .map_err(|_| KernelError::OutOfMemory { requested: 4096, available: 0 })
 }
 ```
 
@@ -304,10 +294,14 @@ Minimize unsafe code and document safety requirements:
 /// - `ptr` must be properly aligned
 /// - The memory must not be mutated while this function executes
 unsafe fn read_raw(ptr: *const u8, size: usize) -> Vec<u8> {
-    // Safety: Caller ensures preconditions are met
-    std::slice::from_raw_parts(ptr, size).to_vec()
+    // SAFETY: the caller guarantees `ptr` is valid and aligned for `size`
+    // bytes and not mutated meanwhile (the contract above).
+    unsafe { core::slice::from_raw_parts(ptr, size) }.to_vec()
 }
 ```
+
+Every `unsafe` block needs a `// SAFETY:` comment (uppercase); clippy's
+`undocumented_unsafe_blocks` enforces it.
 
 ### Git Workflow
 
@@ -372,37 +366,13 @@ mod tests {
 
 ### Integration Tests
 
-Create integration tests in `tests/`:
+Behaviour across subsystems is tested inside the running kernel and in user space rather than
+with a `tests/` crate:
 
-```rust
-// tests/memory_integration.rs
-use veridian_test::*;
-
-#[test]
-fn test_cross_process_memory_sharing() {
-    let env = TestEnvironment::new();
-    // Test implementation
-}
-```
-
-### Running Tests
-
-```bash
-# Run all host tests
-just test
-
-# Run with verbose output
-cargo test --lib --features alloc -p veridian-kernel --target x86_64-unknown-linux-gnu -- --nocapture
-
-# Run specific test
-cargo test --lib --features alloc -p veridian-kernel --target x86_64-unknown-linux-gnu test_name
-
-# Boot one architecture and run the in-kernel tests
-just test-x86_64
-
-# Coverage, as CI measures it
-cargo llvm-cov --lib --features alloc -p veridian-kernel --target x86_64-unknown-linux-gnu
-```
+- In-kernel boot tests (`kernel/src/test_framework.rs` and the boot test list in
+  `kernel/src/bootstrap.rs`) run at every boot; `scripts/boot-test.sh <arch>` checks them.
+- User-space runtime suites in `userland/tests/` (`audit_runtime_test.c`, `musl_runtime_test.c`,
+  `busybox_test.sh`) run on the BlockFS root; `scripts/run-rootfs-tests.sh` runs them.
 
 ## Debugging
 

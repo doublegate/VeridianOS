@@ -21,6 +21,14 @@ URL="$2"
 PROTECTED_BRANCHES=("main" "develop")
 CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD)
 
+# What this push adds: the commits since the upstream, or, on the first push of
+# a new branch (no upstream yet), since the remote's main.
+if git rev-parse --verify --quiet '@{u}' >/dev/null; then
+    BASE='@{u}'
+else
+    BASE="${REMOTE:-origin}/main"
+fi
+
 IS_PROTECTED=0
 for branch in "${PROTECTED_BRANCHES[@]}"; do
     if [ "$CURRENT_BRANCH" = "$branch" ]; then
@@ -36,7 +44,7 @@ command_exists() {
 
 # 1. Check for WIP commits
 echo "Checking for WIP commits..."
-WIP_COMMITS=$(git log --oneline @{u}.. | grep -i "^[a-f0-9]* wip" || true)
+WIP_COMMITS=$(git log --oneline "$BASE".. | grep -i "^[a-f0-9]* wip" || true)
 if [ -n "$WIP_COMMITS" ]; then
     echo -e "${RED}WIP commits detected:${NC}"
     echo "$WIP_COMMITS"
@@ -67,7 +75,10 @@ if [ $IS_PROTECTED -eq 1 ] || [ "${RUN_TESTS_PREPUSH:-1}" = "1" ]; then
     echo "Running scripts/dev/gate.sh (fmt, clippy, syscall checks, host tests)..."
     GATE_LOG=$(mktemp)
     trap 'rm -f "$GATE_LOG"' EXIT
-    if scripts/dev/gate.sh >"$GATE_LOG" 2>&1; then
+    GATE_ARGS=()
+    # Pushes to main and develop also build and boot every architecture.
+    [ $IS_PROTECTED -eq 1 ] && GATE_ARGS=(--boot)
+    if scripts/dev/gate.sh "${GATE_ARGS[@]}" >"$GATE_LOG" 2>&1; then
         rm -f "$GATE_LOG"
         echo -e "${GREEN}Gate passed${NC}"
     else
@@ -119,7 +130,7 @@ SENSITIVE_PATTERNS=(
 
 FOUND_SENSITIVE=0
 for pattern in "${SENSITIVE_PATTERNS[@]}"; do
-    if git diff --name-only @{u}.. | grep -q "$pattern"; then
+    if git diff --name-only "$BASE".. | grep -q "$pattern"; then
         echo -e "${RED}Potentially sensitive file detected: $pattern${NC}"
         FOUND_SENSITIVE=1
     fi
@@ -134,13 +145,13 @@ else
 fi
 
 # 6. Check branch naming
-if [[ ! "$CURRENT_BRANCH" =~ ^(main|develop|feature/.*|bugfix/.*|hotfix/.*|release/.*|chore/.*)$ ]]; then
+if [[ ! "$CURRENT_BRANCH" =~ ^(main|develop|(feat|feature|fix|bugfix|hotfix|docs|refactor|test|perf|build|ci|chore|release)/.+)$ ]]; then
     echo -e "${YELLOW}Non-standard branch name: $CURRENT_BRANCH${NC}"
-    echo "Consider using: feature/, bugfix/, hotfix/, release/, or chore/"
+    echo "Consider <type>/<short-desc> with a Conventional Commits type (feat/, fix/, docs/, ...)"
 fi
 
 # 7. Size check - warn about large pushes
-COMMIT_COUNT=$(git rev-list --count @{u}..)
+COMMIT_COUNT=$(git rev-list --count "$BASE"..)
 if [ "$COMMIT_COUNT" -gt 20 ]; then
     echo -e "${YELLOW}Large push detected ($COMMIT_COUNT commits)${NC}"
     echo "Consider breaking into smaller PRs"

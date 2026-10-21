@@ -34,12 +34,16 @@ set history filename ~/.gdb_history
 # kernel-symbols <target-dir> [release]: symbols from the dev build, or the
 # release build when the second argument is given.
 define kernel-symbols
-    if $argc == 2
-        symbol-file target/$arg0/$arg1/veridian-kernel
+    if $argc == 0
+        echo Usage: kernel-symbols <target-dir> [release]\n
     else
-        symbol-file target/$arg0/debug/veridian-kernel
+        if $argc == 2
+            symbol-file target/$arg0/$arg1/veridian-kernel
+        else
+            symbol-file target/$arg0/debug/veridian-kernel
+        end
+        echo [GDB] Loaded symbols for $arg0\n
     end
-    echo [GDB] Loaded symbols for $arg0\n
 end
 
 # Breakpoint helpers
