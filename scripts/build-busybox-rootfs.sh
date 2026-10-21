@@ -8,7 +8,8 @@
 #
 # Prerequisites:
 #   - Cross-compiler: /opt/veridian/toolchain/bin/x86_64-veridian-gcc (GCC 16.2.0, scripts/build-cross-toolchain.sh)
-#   - BusyBox source: downloaded automatically to /tmp/VeridianOS/busybox-1.36.1/
+#   - BusyBox source: downloaded automatically to $WORK_DIR/busybox-1.36.1/
+#     (default /opt/veridian/busybox-x86_64; set VERIDIAN_BUSYBOX_WORK to move it)
 #   - Native GCC toolchain: target/native-gcc-static/ (from build-native-gcc-static.sh)
 #
 # Usage: ./scripts/build-busybox-rootfs.sh [phase]
@@ -22,16 +23,26 @@ PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 # 1.38.0 "unstable".
 BUSYBOX_VERSION="1.36.1"
 BUSYBOX_URL="https://busybox.net/downloads/busybox-${BUSYBOX_VERSION}.tar.bz2"
+# busybox.net's busybox-1.36.1.tar.bz2.sha256 (as in build-musl-rootfs.sh).
+BUSYBOX_SHA256="b8cc24c9574d809e7279c3be349795c5d5ceb6fdf19ca709f80cde50e47de314"
 
-# Directories
-WORK_DIR="/tmp/VeridianOS"
+# Directories. The work tree (source, build, libc objects, logs) is kept out
+# of /tmp, which systemd-tmpfiles ages out after 10 days and a reboot clears,
+# and out of target/, which `cargo clean` deletes; /opt/veridian already holds
+# the cross toolchain and the musl build trees (tools/cross/veridian-paths.sh).
+WORK_DIR="${VERIDIAN_BUSYBOX_WORK:-${VERIDIAN_PREFIX:-/opt/veridian}/busybox-x86_64}"
+# The tarball cache build-musl-rootfs.sh uses (tools/cross/veridian-paths.sh).
+SOURCES_DIR="${VERIDIAN_SOURCES:-${VERIDIAN_PREFIX:-/opt/veridian}/sources}"
+# Relative values are made absolute here: the build phases cd into $BB_SRC.
+case "$WORK_DIR" in /*) ;; *) WORK_DIR="${PWD}/${WORK_DIR}" ;; esac
+case "$SOURCES_DIR" in /*) ;; *) SOURCES_DIR="${PWD}/${SOURCES_DIR}" ;; esac
 BB_SRC="${WORK_DIR}/busybox-${BUSYBOX_VERSION}"
 BB_BUILD="${WORK_DIR}/busybox-build"
 BB_PATCHES="${PROJECT_ROOT}/tools/busybox/patches"
 BB_DEFCONFIG="${PROJECT_ROOT}/tools/busybox/veridian_defconfig"
 
 # Toolchain
-TOOLCHAIN_PREFIX="/opt/veridian/toolchain"
+TOOLCHAIN_PREFIX="${VERIDIAN_PREFIX:-/opt/veridian}/toolchain"
 CC="${TOOLCHAIN_PREFIX}/bin/x86_64-veridian-gcc"
 STRIP="${TOOLCHAIN_PREFIX}/bin/x86_64-veridian-strip"
 READELF="${TOOLCHAIN_PREFIX}/bin/x86_64-veridian-readelf"
@@ -57,19 +68,35 @@ TESTS_DIR="${PROJECT_ROOT}/userland/tests"
 # =========================================================================
 phase_download() {
     echo "=== Phase A-0: Download BusyBox ${BUSYBOX_VERSION} ==="
-    mkdir -p "$WORK_DIR"
+    mkdir -p "$WORK_DIR" "$SOURCES_DIR"
 
     if [ -d "$BB_SRC" ]; then
         echo "  BusyBox source already exists at $BB_SRC"
     else
-        local tarball="${WORK_DIR}/busybox-${BUSYBOX_VERSION}.tar.bz2"
+        local tarball="${SOURCES_DIR}/busybox-${BUSYBOX_VERSION}.tar.bz2"
         if [ ! -f "$tarball" ]; then
             echo "  Downloading ${BUSYBOX_URL}..."
-            curl -L -o "$tarball" "$BUSYBOX_URL"
+            # A per-process temporary file in the cache, checked before it is
+            # moved into place, so a concurrent download (build-musl-rootfs.sh
+            # shares the cache) never sees or removes a partial archive.
+            local part
+            part="$(mktemp "${tarball}.XXXXXX")"
+            curl -fsSL -o "$part" "$BUSYBOX_URL" || { rm -f "$part"; echo "  ERROR: download failed"; exit 1; }
+            echo "${BUSYBOX_SHA256}  ${part}" | sha256sum -c --quiet - || { rm -f "$part"; echo "  ERROR: BusyBox checksum mismatch in the download"; exit 1; }
+            chmod a+r "$part"  # mktemp creates it 0600
+            mv "$part" "$tarball"
         fi
+        # A bad tarball is removed, so the next run downloads it again.
+        echo "${BUSYBOX_SHA256}  ${tarball}" | sha256sum -c --quiet - || { rm -f "$tarball"; echo "  ERROR: BusyBox checksum mismatch (removed $tarball)"; exit 1; }
         echo "  Extracting..."
-        cd "$WORK_DIR"
-        tar xjf "$tarball"
+        # Into a scratch directory first: an interrupted extraction must not
+        # leave a partial $BB_SRC that later runs take as complete.
+        local staging="${WORK_DIR}/.extract.$$"
+        rm -rf "$staging"
+        mkdir -p "$staging"
+        tar xjf "$tarball" -C "$staging" || { rm -rf "$staging"; echo "  ERROR: extraction failed"; exit 1; }
+        mv "${staging}/busybox-${BUSYBOX_VERSION}" "$BB_SRC"
+        rm -rf "$staging"
     fi
 
     echo "  BusyBox source: $BB_SRC"
@@ -387,7 +414,7 @@ phase_rootfs() {
     local curses_src="${PROJECT_ROOT}/userland/libcurses"
     if [ -f "${curses_src}/curses.c" ]; then
         echo -n "    libcurses.a... "
-        local curses_build="/tmp/VeridianOS/libcurses-rootfs-build"
+        local curses_build="${WORK_DIR}/libcurses-rootfs-build"
         rm -rf "$curses_build"
         mkdir -p "$curses_build"
         local curses_cflags="-static -O2 -Wall -Wextra"
