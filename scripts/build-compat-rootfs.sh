@@ -212,7 +212,11 @@ EOF
         find "${LTP_SRC}/testcases/kernel/syscalls" "${LTP_SRC}/testcases/lib" "${LTP_SRC}/tools/apicmds" -type f -perm -u+x \
             ! -name '*.[cho]' ! -name 'Makefile*' -printf '%f\n'
     } | sort -u | while read -r name; do
-        [[ -f "${bin}/${name}" ]] && install_stripped "${bin}/${name}" "${dst}/${name}"
+        # `if`, not `&&`: under set -e and pipefail a last name that is not
+        # an installed binary would otherwise end the build.
+        if [[ -f "${bin}/${name}" ]]; then
+            install_stripped "${bin}/${name}" "${dst}/${name}"
+        fi
     done
     cp -a "${LTP_STAGE}/opt/ltp/testcases/data" "${OUT}/opt/ltp/testcases/"
     mkdir -p "${OUT}/opt/ltp/runtest"

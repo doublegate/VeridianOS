@@ -17,6 +17,7 @@ Subcommands:
               from the build trees; used by the build script
     run       boot the image in QEMU, run the suites, write results.tsv,
               and compare with tests/compat/expected-<arch>.tsv
+    collect   rebuild results.tsv (and times.tsv) from serial logs
     compare   compare a results.tsv with an expected list (or --update it)
 
 Statuses (one per test):
@@ -289,15 +290,19 @@ def failures(diff, expected, strict, subset):
 def uncovered(results, listed):
     """Listed tests of the suites in `results` that have no result there.
 
-    `listed` maps a suite to the ids the image's list holds. An expected
-    list is only rewritten from results without gaps, or a partial run
-    (--first, an interrupted run's logs) would drop the rest of a suite.
+    `listed` maps a suite to the ids the image's list holds; a suite with
+    no list counts as uncovered (`(no list)`), since what it should hold is
+    unknown. An expected list is only rewritten from results without gaps,
+    or a partial run (--first, an interrupted run's logs) would drop the
+    rest of a suite.
     """
-    suites = {s for s, _ in results}
-    return sorted(
-        ((s, t) for s in suites for t in listed.get(s, ()) if (s, t) not in results),
-        key=_order,
-    )
+    gaps = []
+    for suite in sorted({s for s, _ in results}):
+        if suite not in listed:
+            gaps.append((suite, "(no list)"))
+            continue
+        gaps += [(suite, t) for t in listed[suite] if (suite, t) not in results]
+    return sorted(gaps, key=_order)
 
 
 def listed_tests(root, suites):
@@ -1015,6 +1020,8 @@ def cmd_run(args):
         previous_times = run.out / "times.tsv"
         if previous_times.exists():
             for line in previous_times.read_text().splitlines():
+                if not line.strip() or line.startswith("#"):
+                    continue
                 suite, tid, ms = line.split("\t")
                 if (suite, tid) in have:
                     run.times[(suite, tid)] = int(ms)
@@ -1091,6 +1098,8 @@ def cmd_run(args):
         Path(args.expected) if args.expected else None,
         args.update,
         args.strict,
+        # Tests --first skipped did not run; they are not missing.
+        subset=bool(args.first),
         listed=listed,
     )
 
@@ -1231,7 +1240,9 @@ def cmd_collect(args):
         Path(args.expected) if args.expected else None,
         args.update,
         args.strict,
-        listed=listed_tests(REPO / "target" / f"rootfs-compat-{args.arch}", SUITES),
+        listed=listed_tests(
+            args.root or REPO / "target" / f"rootfs-compat-{args.arch}", SUITES
+        ),
     )
 
 
@@ -1243,7 +1254,9 @@ def cmd_compare(args):
         Path(args.expected) if args.expected else None,
         args.update,
         args.strict,
-        listed=listed_tests(REPO / "target" / f"rootfs-compat-{args.arch}", SUITES),
+        listed=listed_tests(
+            args.root or REPO / "target" / f"rootfs-compat-{args.arch}", SUITES
+        ),
     )
 
 
@@ -1278,6 +1291,11 @@ def main(argv=None):
         p.add_argument("--strict", action="store_true", help="fail on any difference")
         if name == "compare":
             p.add_argument("results")
+    for name in ("compare", "collect"):
+        sub.choices[name].add_argument(
+            "--root",
+            help="the image's tree, for its lists (default target/rootfs-compat-<arch>)",
+        )
     cp = sub.choices["collect"]
     cp.add_argument(
         "--out", help="default target/compat/<arch> (its serial-*.log files)"

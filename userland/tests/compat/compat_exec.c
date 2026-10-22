@@ -21,7 +21,8 @@
  * cannot be run gives rc=127 (exec failed in the child), as sh does.
  *
  * A test that did not exit 0 may not have cleaned up: what LTP's library
- * leaves in /tmp (LTP_* directories) is removed then.
+ * leaves behind (LTP_* directories in /tmp, its ltp_* results files in
+ * /dev/shm) is removed then.
  *
  * Exits 3 when the limit killed the test, 0 otherwise, 2 on bad usage.
  *
@@ -92,22 +93,29 @@ static int remove_one(const char *path, const struct stat *st, int type, struct 
     return 0;
 }
 
-/* Remove the LTP_* directories in /tmp, without starting a process. */
-static void clean_tmp(void)
+/* Remove what starts with `prefix` in `dir`, without starting a process. */
+static void clean_dir(const char *dir, const char *prefix)
 {
     char path[512];
     struct dirent *e;
-    DIR *d = opendir("/tmp");
+    DIR *d = opendir(dir);
 
     if (!d)
         return;
     while ((e = readdir(d)) != NULL) {
-        if (strncmp(e->d_name, "LTP_", 4) != 0)
+        if (strncmp(e->d_name, prefix, strlen(prefix)) != 0)
             continue;
-        snprintf(path, sizeof(path), "/tmp/%s", e->d_name);
+        snprintf(path, sizeof(path), "%s/%s", dir, e->d_name);
         nftw(path, remove_one, 16, FTW_DEPTH | FTW_PHYS);
     }
     closedir(d);
+}
+
+/* What LTP's library leaves when a test dies before its cleanup. */
+static void clean_tmp(void)
+{
+    clean_dir("/tmp", "LTP_");
+    clean_dir("/dev/shm", "ltp_");
 }
 
 /* A line that says what went wrong; LTP's closing counts do not. */
@@ -185,7 +193,9 @@ int main(int argc, char **argv)
     /* OUTFILE is opened (and emptied) here: a test whose output cannot be
      * captured is not run, since its output would reach the console
      * unmarked, and a relative name is the caller's, not DIR's. */
-    out = open(argv[2], O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+    /* Not O_CLOEXEC: if it came back as fd 1 or 2, dup2 onto itself would
+     * leave the flag set and exec would close the test's output. */
+    out = open(argv[2], O_WRONLY | O_CREAT | O_TRUNC, 0644);
     if (out < 0) {
         printf("COMPAT-LOG %s compat_exec: %s: %s\n", argv[3], argv[2], strerror(errno));
         printf("COMPAT-END %s %s rc=127 sig=0 timeout=0 ms=0\n", argv[3], argv[4]);

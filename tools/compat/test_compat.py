@@ -189,6 +189,13 @@ class Compare(unittest.TestCase):
         # A smoke run is a subset: it compares only what it ran.
         self.assertEqual(compat.failures(d, expected, strict=False, subset=True), [])
 
+    def test_update_needs_a_list_for_every_suite(self):
+        # No list for a suite means its coverage is unknown, not complete.
+        self.assertEqual(
+            compat.uncovered({("s", "a"): ("PASS", "")}, {}), [("s", "(no list)")]
+        )
+        self.assertEqual(compat.uncovered({("s", "a"): ("PASS", "")}, {"s": {"a"}}), [])
+
     def test_update_needs_every_listed_test(self):
         listed = {"s": {"a", "b"}, "t": {"c"}}
         self.assertEqual(
