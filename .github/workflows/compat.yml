@@ -15,6 +15,7 @@ on:
         paths:
             - "tests/compat/**"
             - "tools/compat/compat.py"
+            - "tools/compat/test_compat.py"
             - "userland/tests/compat/**"
             - "scripts/build-compat-rootfs.sh"
             - "scripts/run-compat-tests.sh"
@@ -58,7 +59,8 @@ jobs:
               run: |
                   sudo mkdir -p /opt/veridian
                   sudo chown "$USER" /opt/veridian
-            # The same toolchain caches as ci.yml's rootfs job (same keys).
+            # The same toolchain caches as ci.yml's rootfs job (same keys);
+            # whichever job builds one first saves it.
             - name: Restore cross toolchain
               id: toolchain-cache
               uses: actions/cache/restore@v4
@@ -68,6 +70,12 @@ jobs:
             - name: Build cross toolchain
               if: steps.toolchain-cache.outputs.cache-hit != 'true'
               run: ./scripts/build-cross-toolchain.sh --arch x86_64 --prefix /opt/veridian/toolchain
+            - name: Save cross toolchain
+              if: steps.toolchain-cache.outputs.cache-hit != 'true'
+              uses: actions/cache/save@v4
+              with:
+                  path: /opt/veridian/toolchain
+                  key: ${{ steps.toolchain-cache.outputs.cache-primary-key }}
             - name: Build kernel
               run: ./build-kernel.sh x86_64 dev
             - name: Build musl
@@ -80,6 +88,12 @@ jobs:
                   key: veridian-musl-toolchain-${{ hashFiles('tools/cross/build-musl-toolchain.sh', 'tools/cross/build-musl.sh', 'tools/cross/musl-patches/**', 'tools/cross/veridian-paths.sh', 'scripts/build-cross-toolchain.sh') }}
             - name: Build musl toolchain
               run: ./tools/cross/build-musl-toolchain.sh
+            - name: Save musl toolchain
+              if: steps.musl-toolchain-cache.outputs.cache-hit != 'true'
+              uses: actions/cache/save@v4
+              with:
+                  path: /opt/veridian/musl-toolchain
+                  key: ${{ steps.musl-toolchain-cache.outputs.cache-primary-key }}
             - name: Build the base root filesystem
               run: |
                   export PATH=/opt/veridian/toolchain/bin:$PATH

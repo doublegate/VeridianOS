@@ -109,6 +109,9 @@ their check, for a few shared reasons:
   `/proc/sys`, `/proc/self/mounts` and parts of `/proc/<pid>/stat` and `status`.
 - **Memory exhaustion is not ENOMEM.** libc-test's `malloc-oom` and `malloc-brk-fail` run until
   the time limit on x86_64 and AArch64, and stop the whole guest on RISC-V.
+- **A new process can be missing from /proc for a moment.** Open POSIX tests that wait for a
+  child's state in `/proc/<pid>/stat` (its `include/proc.h`) read it right after fork and now and
+  then find no such file (`sem_timedwait/9-1`, once in four x86_64 runs; it is marked FLAKY).
 - **Stress tests are slow.** Open POSIX's `shm_open/23-1` (1,000 processes) does not finish within
   the limit; tearing down that many processes takes longer than a minute.
 - **wordexp.** libc-test's `functional/wordexp` runs until the time limit on all three

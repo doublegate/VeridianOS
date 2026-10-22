@@ -84,6 +84,27 @@ class Parse(unittest.TestCase):
         self.assertEqual(p.summary, 1)
         self.assertIsNone(p.current)
 
+    def test_test_output_is_not_a_prompt_or_a_panic(self):
+        # A test's own output is copied into COMPAT-LOG lines; text there
+        # must not look like the shell coming back or the kernel panicking.
+        p = compat.SerialParser()
+        p.feed(
+            "COMPAT-BEGIN 1 a\nCOMPAT-LOG 1 echo root@veridian:/# done\nCOMPAT-LOG 1 it panicked at x\n"
+        )
+        self.assertEqual((p.prompts, p.panic), (0, False))
+        p.feed("COMPAT-END 1 a rc=1 sig=0 timeout=0 ms=1\nroot@veridian:/# ")
+        self.assertEqual(p.prompts, 1)
+        p.feed("\n[ 9.1] panicked at mm.rs:10\n")
+        self.assertEqual((p.prompts, p.panic), (1, True))
+
+    def test_a_prompt_split_between_pieces_counts_once(self):
+        p = compat.SerialParser()
+        p.feed("root@veri")
+        p.feed("dian:/# ")
+        self.assertEqual(p.prompts, 1)
+        p.feed("/bin/ash x\n")
+        self.assertEqual(p.prompts, 1)
+
     def test_carriage_returns_and_noise(self):
         p = compat.SerialParser()
         p.feed(
@@ -158,6 +179,27 @@ class Compare(unittest.TestCase):
         self.assertEqual(d["missing"], [("s", "gone")])
         self.assertEqual(d["new"], [("s", "new", "FAIL")])
         self.assertEqual(d["changed"], [])
+
+    def test_an_expected_pass_that_did_not_run_fails_a_full_run(self):
+        expected = {("s", "a"): ("PASS", ""), ("s", "b"): ("FAIL", "")}
+        d = compat.compare(expected, {})
+        self.assertEqual(
+            compat.failures(d, expected, strict=False, subset=False), [("s", "a")]
+        )
+        # A smoke run is a subset: it compares only what it ran.
+        self.assertEqual(compat.failures(d, expected, strict=False, subset=True), [])
+
+    def test_update_needs_every_listed_test(self):
+        listed = {"s": {"a", "b"}, "t": {"c"}}
+        self.assertEqual(
+            compat.uncovered({("s", "a"): ("PASS", "")}, listed), [("s", "b")]
+        )
+        self.assertEqual(
+            compat.uncovered(
+                {("s", "a"): ("PASS", ""), ("s", "b"): ("FAIL", "")}, listed
+            ),
+            [],
+        )
 
     def test_other_changes(self):
         d = compat.compare({("s", "a"): ("FAIL", "")}, {("s", "a"): ("TIMEOUT", "")})

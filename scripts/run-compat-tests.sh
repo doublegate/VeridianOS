@@ -26,10 +26,14 @@
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
-arch="${1:-x86_64}"
-[[ $# -gt 0 ]] && shift
-case "$arch" in
-x86_64 | aarch64 | riscv64) ;;
+# The architecture is optional: options alone run x86_64.
+arch=x86_64
+case "${1:-}" in
+x86_64 | aarch64 | riscv64)
+    arch="$1"
+    shift
+    ;;
+-* | "") ;;
 *)
     echo "usage: $0 [x86_64|aarch64|riscv64] [options]" >&2
     exit 2

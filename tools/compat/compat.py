@@ -129,24 +129,32 @@ class SerialParser:
         self.current = None
         self.summary = None
         self.error = None
-        self.prompts = 0
         self.panic = False
         self._buf = ""
         self._logs = {}
-        self._tail = ""
+        self._prompt_lines = 0
+
+    @staticmethod
+    def _quoted(line):
+        # A test's own output, copied by compat_exec: whatever it says, it is
+        # not the shell or the kernel.
+        return "COMPAT-LOG" in line
+
+    @property
+    def prompts(self):
+        """Shell prompts seen; the one ending the output need not end a line."""
+        partial = PROMPT in self._buf and not self._quoted(self._buf)
+        return self._prompt_lines + int(partial)
 
     def feed(self, text):
-        # The prompt does not end a line, so it is counted in the raw text
-        # (with a little overlap so one split across pieces is still seen).
-        scan = self._tail + text
-        self.prompts += scan.count(PROMPT) - self._tail.count(PROMPT)
-        self._tail = scan[-(len(PROMPT) - 1) :]
-        if PANIC.search(scan):
-            self.panic = True
         self._buf += text
         *lines, self._buf = self._buf.split("\n")
         for line in lines:
-            self._line(line.rstrip("\r"))
+            line = line.rstrip("\r")
+            if not self._quoted(line):
+                self._prompt_lines += PROMPT in line
+                self.panic = self.panic or bool(PANIC.search(line))
+            self._line(line)
 
     def _line(self, line):
         i = line.find("COMPAT-")
@@ -263,6 +271,46 @@ def compare(expected, actual):
             out["improved"].append(key + (want, status))
         else:
             out["changed"].append(key + (want, status))
+    return out
+
+
+def failures(diff, expected, strict, subset):
+    """What fails a run: regressions, and in a full run an expected PASS that
+    did not run at all (a test that stopped being run is not a pass)."""
+    bad = [x[:2] for x in diff["regressed"]]
+    if not subset:
+        bad += [k for k in diff["missing"] if expected[k][0] == "PASS"]
+    if strict:
+        bad += [x[:2] for k in ("improved", "changed", "new") for x in diff[k]]
+        bad += [k for k in diff["missing"] if expected[k][0] != "PASS"]
+    return bad
+
+
+def uncovered(results, listed):
+    """Listed tests of the suites in `results` that have no result there.
+
+    `listed` maps a suite to the ids the image's list holds. An expected
+    list is only rewritten from results without gaps, or a partial run
+    (--first, an interrupted run's logs) would drop the rest of a suite.
+    """
+    suites = {s for s, _ in results}
+    return sorted(
+        ((s, t) for s in suites for t in listed.get(s, ()) if (s, t) not in results),
+        key=_order,
+    )
+
+
+def listed_tests(root, suites):
+    """The ids in the image's list of each suite (`root` is its tree)."""
+    out = {}
+    for suite in suites:
+        lst = Path(root) / "usr" / "lib" / "compat" / f"{suite}.list"
+        if lst.exists():
+            out[suite] = {
+                w[1]
+                for w in (line.split(" ", 2) for line in lst.read_text().splitlines())
+                if len(w) > 1
+            }
     return out
 
 
@@ -542,7 +590,7 @@ def cmd_lists(args):
 # --- run -------------------------------------------------------------------
 
 
-def qemu_command(arch, image, smp):
+def qemu_command(arch, image, smp, tcg=False):
     if arch == "x86_64":
         ovmf = next(
             (
@@ -560,11 +608,16 @@ def qemu_command(arch, image, smp):
         )
         if not ovmf:
             sys.exit("FAIL: no OVMF firmware found")
-        accel = (
-            ["-enable-kvm", "-cpu", "host"]
-            if os.access("/dev/kvm", os.W_OK)
-            else ["-cpu", "qemu64"]
-        )
+        # x86_64 is run under KVM: emulated it is about 100 times slower, past
+        # what the limits allow for (--tcg runs it anyway, with TCG limits).
+        if tcg:
+            accel = ["-cpu", "qemu64"]
+        elif os.access("/dev/kvm", os.W_OK):
+            accel = ["-enable-kvm", "-cpu", "host"]
+        else:
+            sys.exit(
+                "FAIL: /dev/kvm is not writable; x86_64 runs under KVM (--tcg to emulate)"
+            )
         kernel = REPO / "target/x86_64-veridian/debug/veridian-uefi.img"
         cmd = [
             "qemu-system-x86_64",
@@ -781,6 +834,10 @@ class Worker:
         while True:
             if run.stop.is_set():
                 return
+            if self.guest is not None and not self.guest.alive():
+                # It died after the last range finished: a new one goes on.
+                self.guest.stop()
+                self.guest = None
             if self.guest is None:
                 self._boot()
             parser = SerialParser()
@@ -822,6 +879,17 @@ class Worker:
                     outcome = "HANG"
             self._record(suite, parser)
             if outcome == "done":
+                # A summary alone does not show that the range ran: every
+                # test in it needs a result (a runner that stopped reading
+                # its list early still prints one).
+                got = {r.n for r in parser.done}
+                gaps = [n for n in range(first, last + 1) if n not in got]
+                if gaps or parser.summary != last:
+                    raise RunError(
+                        f"{list_name} tests {first}-{last}: the runner finished with "
+                        f"{len(gaps)} without a result (first {gaps[:5]}), summary "
+                        f"{parser.summary} (log {self.guest.log_path})"
+                    )
                 self.used = True
                 # The shell prints its prompt after the summary line; read it
                 # here, or the next range's parser takes it for the runner
@@ -897,7 +965,7 @@ class Worker:
 
 def cmd_run(args):
     arch = args.arch
-    tcg = arch != "x86_64"
+    tcg = arch != "x86_64" or args.tcg
     run = argparse.Namespace()
     run.out = Path(args.out or REPO / "target" / "compat" / arch)
     run.out.mkdir(parents=True, exist_ok=True)
@@ -906,7 +974,7 @@ def cmd_run(args):
     run.limit = args.timeout or (180 if tcg else 60)
     run.boot_wait = args.boot_wait or (900 if tcg else 300)
     run.grace = args.grace or (300 if tcg else 90)
-    run.cmd = qemu_command(arch, image, args.smp)
+    run.cmd = qemu_command(arch, image, args.smp, tcg=args.tcg)
     run.max_boots = args.max_boots
     run.boots = 0
     run.lock = threading.Lock()
@@ -917,14 +985,18 @@ def cmd_run(args):
     suites = args.suites.split(",") if args.suites else list(SUITES)
     if args.jobs > 1 and args.first:
         sys.exit("FAIL: --first and --jobs do not go together")
+    if args.update and (args.smoke or args.first):
+        sys.exit("FAIL: --update needs whole suites, not --smoke or --first")
+    # The tests judged at build time, of the suites being run (a smoke run
+    # compares them too: a compile-only test has no list entry).
+    build_tsv = Path(args.build_tsv or run.out / "build.tsv")
+    if build_tsv.exists():
+        run.results.update(
+            {k: v for k, v in read_tsv(build_tsv).items() if k[0] in suites}
+        )
+    listed = listed_tests(root, suites)
     if args.smoke:
-        if args.update:
-            sys.exit("FAIL: --update needs the full suites, not --smoke")
         suites = [f"{s}-smoke" for s in suites]
-    else:
-        build_tsv = Path(args.build_tsv or run.out / "build.tsv")
-        if build_tsv.exists():
-            run.results.update(read_tsv(build_tsv))
 
     have = set()
     if args.resume:
@@ -932,14 +1004,25 @@ def cmd_run(args):
             sys.exit("FAIL: --resume goes with neither --smoke nor --first")
         previous = run.out / "results.tsv"
         if previous.exists():
-            kept = {k: v for k, v in read_tsv(previous).items() if v[0] != "NOTBUILT"}
+            kept = {
+                k: v
+                for k, v in read_tsv(previous).items()
+                if v[0] != "NOTBUILT" and k[0] in {suite_of(x) for x in suites}
+            }
             run.results.update(kept)
             have = set(kept)
+        # And the run times measured then, which times.tsv is rewritten with.
+        previous_times = run.out / "times.tsv"
+        if previous_times.exists():
+            for line in previous_times.read_text().splitlines():
+                suite, tid, ms = line.split("\t")
+                if (suite, tid) in have:
+                    run.times[(suite, tid)] = int(ms)
 
     # Each worker takes its share of every suite, so they finish together.
     shares = [[] for _ in range(args.jobs)]
     pending = []
-    for suite in suites:
+    for si, suite in enumerate(suites):
         lst = root / "usr" / "lib" / "compat" / f"{suite}.list"
         if not lst.exists():
             sys.exit(f"FAIL: no {lst} (run scripts/build-compat-rootfs.sh {arch})")
@@ -952,7 +1035,8 @@ def cmd_run(args):
             ]
             continue
         if args.jobs == 1:
-            shares[0].append((suite, args.first or 1, len(lines)))
+            # --first is where the first suite starts; the others start at 1.
+            shares[0].append((suite, (args.first or 1) if si == 0 else 1, len(lines)))
             continue
         for j, (first, last) in enumerate(split_ranges(len(lines), args.jobs)):
             shares[j].append((suite, first, last))
@@ -1007,6 +1091,7 @@ def cmd_run(args):
         Path(args.expected) if args.expected else None,
         args.update,
         args.strict,
+        listed=listed,
     )
 
 
@@ -1026,11 +1111,19 @@ def _summary(results):
     return lines
 
 
-def report(arch, results, expected_path, update, strict, subset=False):
+def report(arch, results, expected_path, update, strict, subset=False, listed=None):
     for line in _summary(results):
         print(line)
     expected_path = expected_path or REPO / "tests" / "compat" / f"expected-{arch}.tsv"
     if update:
+        gaps = uncovered(results, listed or {})
+        if gaps:
+            print(
+                f"FAIL: not updating {expected_path}: {len(gaps)} listed tests have no result"
+            )
+            for key in gaps[:20]:
+                print("  " + " ".join(key))
+            return 2
         expected = read_tsv(expected_path) if expected_path.exists() else {}
         write_tsv(expected_path, merge_expected(expected, results), arch)
         print(f"updated {expected_path}")
@@ -1054,7 +1147,10 @@ def report(arch, results, expected_path, update, strict, subset=False):
             print("  " + " ".join(item))
         if len(items) > 40:
             print(f"  ... {len(items) - 40} more")
-    bad = diff["regressed"] or (strict and any(diff[k] for k in diff))
+    bad = failures(diff, expected, strict, subset)
+    absent = [k for k in diff["missing"] if expected[k][0] == "PASS"]
+    if absent and not subset:
+        print(f"expected to pass but not run: {len(absent)}")
     print(
         ("FAIL" if bad else "PASS")
         + f" compat {arch}: {len(diff['regressed'])} regressed, "
@@ -1135,6 +1231,7 @@ def cmd_collect(args):
         Path(args.expected) if args.expected else None,
         args.update,
         args.strict,
+        listed=listed_tests(REPO / "target" / f"rootfs-compat-{args.arch}", SUITES),
     )
 
 
@@ -1146,6 +1243,7 @@ def cmd_compare(args):
         Path(args.expected) if args.expected else None,
         args.update,
         args.strict,
+        listed=listed_tests(REPO / "target" / f"rootfs-compat-{args.arch}", SUITES),
     )
 
 
@@ -1199,6 +1297,9 @@ def main(argv=None):
         "--grace", type=int, help="seconds past the limit before a hang (90/300)"
     )
     rp.add_argument("--smp", type=int, default=1)
+    rp.add_argument(
+        "--tcg", action="store_true", help="x86_64 without KVM (TCG limits)"
+    )
     rp.add_argument("--max-boots", type=int, default=200)
     rp.add_argument("--jobs", type=int, default=1, help="guests run side by side (TCG)")
     rp.add_argument(

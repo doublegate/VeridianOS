@@ -44,6 +44,9 @@ export PATH="/opt/ltp/testcases/bin:$PATH"
 export TMPDIR=/tmp
 export LTP_COLORIZE_OUTPUT=0
 
+# ARGs are split into words but never matched against files.
+set -f
+
 if [ ! -r "$list" ]; then
     echo "COMPAT-ERROR no list $list"
     exit 2
@@ -64,10 +67,14 @@ sed -n "$first,\$p" "$list" | {
             echo "COMPAT-END $n $id notbuilt"
             continue
         fi
-        # A test the limit killed leaves its LTP temporary directory behind.
+        # compat_exec also removes what a failed test left in /tmp. It exits 0,
+        # or 3 when the limit killed the test; anything else means it died
+        # before reporting, and the runner stops so that the host records
+        # this test (the prompt comes back during it) and carries on after.
         # shellcheck disable=SC2086 # ARGs are split into words on purpose
-        "$exec_helper" "$limit" "$out" "$n" "$id" "$dir" "$prog" $args </dev/null ||
-            rm -rf /tmp/LTP_* 2>/dev/null
+        "$exec_helper" "$limit" "$out" "$n" "$id" "$dir" "$prog" $args </dev/null
+        rc=$?
+        [ "$rc" -eq 0 ] || [ "$rc" -eq 3 ] || exit 1
     done
     echo "COMPAT-SUMMARY $list $last"
 }

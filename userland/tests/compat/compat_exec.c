@@ -20,8 +20,10 @@
  * the limit killed it, M is the run time in milliseconds. A program that
  * cannot be run gives rc=127 (exec failed in the child), as sh does.
  *
- * Exits 3 when the limit killed the test (the runner then removes what it
- * left in /tmp), 0 otherwise, 2 on bad usage.
+ * A test that did not exit 0 may not have cleaned up: what LTP's library
+ * leaves in /tmp (LTP_* directories) is removed then.
+ *
+ * Exits 3 when the limit killed the test, 0 otherwise, 2 on bad usage.
  *
  * Doing all of this in one program keeps the runner to one process per
  * test: creating processes is slow enough on VeridianOS that a shell
@@ -31,8 +33,10 @@
  * does nothing).
  */
 #define _GNU_SOURCE
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <ftw.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -52,20 +56,16 @@ static long long now_ms(void)
     return (long long)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
 }
 
-static void child(const char *out, const char *dir, char **argv)
+static void child(int out, const char *dir, char **argv)
 {
     int fd;
 
     /* Its own group, so a timeout can kill everything it started. */
     setpgid(0, 0);
-    /* OUTFILE first: a relative name is the caller's, not DIR's. */
-    fd = open(out, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-    if (fd >= 0) {
-        dup2(fd, 1);
-        dup2(fd, 2);
-        if (fd > 2)
-            close(fd);
-    }
+    dup2(out, 1);
+    dup2(out, 2);
+    if (out > 2)
+        close(out);
     fd = open("/dev/null", O_RDONLY);
     if (fd >= 0) {
         dup2(fd, 0);
@@ -81,6 +81,33 @@ static void child(const char *out, const char *dir, char **argv)
     execvp(argv[0], argv);
     fprintf(stderr, "compat_exec: %s: %s\n", argv[0], strerror(errno));
     _exit(127);
+}
+
+static int remove_one(const char *path, const struct stat *st, int type, struct FTW *ftw)
+{
+    (void)st;
+    (void)type;
+    (void)ftw;
+    remove(path);
+    return 0;
+}
+
+/* Remove the LTP_* directories in /tmp, without starting a process. */
+static void clean_tmp(void)
+{
+    char path[512];
+    struct dirent *e;
+    DIR *d = opendir("/tmp");
+
+    if (!d)
+        return;
+    while ((e = readdir(d)) != NULL) {
+        if (strncmp(e->d_name, "LTP_", 4) != 0)
+            continue;
+        snprintf(path, sizeof(path), "/tmp/%s", e->d_name);
+        nftw(path, remove_one, 16, FTW_DEPTH | FTW_PHYS);
+    }
+    closedir(d);
 }
 
 /* A line that says what went wrong; LTP's closing counts do not. */
@@ -143,7 +170,7 @@ int main(int argc, char **argv)
 {
     long limit;
     long long start, deadline;
-    int status = 0, timed_out = 0, rc = -1, sig = 0;
+    int status = 0, timed_out = 0, rc = -1, sig = 0, out;
     pid_t pid, w;
     const struct timespec tick = {0, 20 * 1000 * 1000};
 
@@ -155,6 +182,15 @@ int main(int argc, char **argv)
     if (limit <= 0)
         limit = 60;
 
+    /* OUTFILE is opened (and emptied) here: a test whose output cannot be
+     * captured is not run, since its output would reach the console
+     * unmarked, and a relative name is the caller's, not DIR's. */
+    out = open(argv[2], O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+    if (out < 0) {
+        printf("COMPAT-LOG %s compat_exec: %s: %s\n", argv[3], argv[2], strerror(errno));
+        printf("COMPAT-END %s %s rc=127 sig=0 timeout=0 ms=0\n", argv[3], argv[4]);
+        return 0;
+    }
     fflush(stdout);
     start = now_ms();
     deadline = start + limit * 1000;
@@ -164,7 +200,8 @@ int main(int argc, char **argv)
         return 0;
     }
     if (pid == 0)
-        child(argv[2], argv[5], &argv[6]);
+        child(out, argv[5], &argv[6]);
+    close(out);
     /* Set it from this side too: the child may not have run yet. */
     setpgid(pid, pid);
 
@@ -189,12 +226,17 @@ int main(int argc, char **argv)
     /* Anything still in the group (a test's children) goes too. */
     kill(-pid, SIGKILL);
 
-    if (WIFEXITED(status))
+    if (WIFEXITED(status)) {
         rc = WEXITSTATUS(status);
-    else if (WIFSIGNALED(status))
+        /* It exited on its own just as the limit passed. */
+        timed_out = 0;
+    } else if (WIFSIGNALED(status)) {
         sig = WTERMSIG(status);
-    if (rc != 0)
+    }
+    if (rc != 0) {
         print_log(argv[2], argv[3]);
+        clean_tmp();
+    }
     printf("COMPAT-END %s %s rc=%d sig=%d timeout=%d ms=%lld\n", argv[3], argv[4], rc, sig,
            timed_out, now_ms() - start);
     return timed_out ? 3 : 0;

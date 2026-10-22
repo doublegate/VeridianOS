@@ -36,6 +36,7 @@ all three suites on a 20-core host). Other options:
 | `--resume` | only the tests `results.tsv` has no result for (after an interrupted run) |
 | `--first N` | start the first suite at test N |
 | `--timeout N` | seconds per test |
+| `--tcg` | x86_64 without KVM (refused otherwise: emulated it is about 100 times slower) |
 
 `tools/compat/compat.py collect --arch <arch> [LOG...]` rebuilds `results.tsv`
 from serial logs, for a run that stopped before writing it.

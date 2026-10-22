@@ -203,12 +203,13 @@ EOF
         "${STRIP}" --strip-unneeded -o "${OUT}${VERIDIAN_LDSO}" "${VERIDIAN_SYSROOT}/usr/lib/libc.so"
 
     # LTP: what runtest/syscalls runs, every program built in the syscalls
-    # and library source directories (the tests' helpers and children), and
-    # the data files.
+    # and library source directories (the tests' helpers and children), the
+    # shell API commands its shell tests call (tools/apicmds: tst_resm,
+    # tst_exit, ...), and the data files.
     local bin="${LTP_STAGE}/opt/ltp/testcases/bin" dst="${OUT}/opt/ltp/testcases/bin" name
     {
         grep -v '^#' "${LTP_STAGE}/opt/ltp/runtest/syscalls" | awk 'NF >= 2 { print $2 }'
-        find "${LTP_SRC}/testcases/kernel/syscalls" "${LTP_SRC}/testcases/lib" -type f -perm -u+x \
+        find "${LTP_SRC}/testcases/kernel/syscalls" "${LTP_SRC}/testcases/lib" "${LTP_SRC}/tools/apicmds" -type f -perm -u+x \
             ! -name '*.[cho]' ! -name 'Makefile*' -printf '%f\n'
     } | sort -u | while read -r name; do
         [[ -f "${bin}/${name}" ]] && install_stripped "${bin}/${name}" "${dst}/${name}"

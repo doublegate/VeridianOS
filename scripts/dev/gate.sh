@@ -77,7 +77,8 @@ step clippy-host cargo clippy --lib --features alloc -p veridian-kernel --target
 step clippy-all-features cargo clippy --lib --all-features -- -D warnings
 step host-tests cargo test --lib --features alloc -p veridian-kernel --target x86_64-unknown-linux-gnu
 grep -a 'test result' "$log_dir/host-tests.log"
-if [ $boot -eq 1 ] || [ $rootfs -eq 1 ]; then
+# The kernels the boot, runtime and conformance runs use: the current tree's.
+if [ $boot -eq 1 ] || [ $rootfs -eq 1 ] || [ $compat -eq 1 ]; then
     step build ./build-kernel.sh all dev
 fi
 if [ $boot -eq 1 ]; then
@@ -169,10 +170,17 @@ fi
 if [ $compat -eq 1 ]; then
     # The conformance suites (tests/compat/README.md): a test expected to
     # pass that does not fails the step.
-    [ $rootfs -eq 1 ] || step rootfs-stage scripts/build-busybox-rootfs.sh rootfs
     for arch in ${COMPAT_ARCHES:-x86_64}; do
         jobs=3
         [ "$arch" = x86_64 ] || jobs=7 # emulated: guests side by side
+        # The base root each compat image is built from (--rootfs built them).
+        if [ $rootfs -eq 0 ]; then
+            if [ "$arch" = x86_64 ]; then
+                step rootfs-stage scripts/build-busybox-rootfs.sh rootfs
+            else
+                step "rootfs-stage-$arch" scripts/build-musl-rootfs.sh "$arch"
+            fi
+        fi
         step "compat-image-$arch" scripts/build-compat-rootfs.sh "$arch"
         step "compat-$arch" scripts/run-compat-tests.sh "$arch" --jobs "$jobs"
         grep -aE '^(COMPAT |PASS compat|FAIL compat)' "$log_dir/compat-$arch.log"

@@ -555,7 +555,7 @@ ltp-syscalls	io_uring02	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to sta
 ltp-syscalls	io_uring03	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
 ltp-syscalls	io_uring04	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .config
 ltp-syscalls	ioctl01	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
-ltp-syscalls	ioctl02	EXECFAIL	/opt/ltp/testcases/bin/test_ioctl: line 59: tst_exit: not found
+ltp-syscalls	ioctl02	PASS	
 ltp-syscalls	ioctl03	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
 ltp-syscalls	ioctl04	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
 ltp-syscalls	ioctl05	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
@@ -2745,7 +2745,7 @@ open-posix	conformance/interfaces/sem_timedwait/4-1	PASS
 open-posix	conformance/interfaces/sem_timedwait/6-1	PASS	
 open-posix	conformance/interfaces/sem_timedwait/6-2	PASS	
 open-posix	conformance/interfaces/sem_timedwait/7-1	PASS	
-open-posix	conformance/interfaces/sem_timedwait/9-1	PASS	
+open-posix	conformance/interfaces/sem_timedwait/9-1	FLAKY	PASS in three x86_64 runs, FAIL in a fourth (2026-10-22): a just-forked child was missing from /proc (include/proc.h); last here: PASS
 open-posix	conformance/interfaces/sem_timedwait/10-1	PASS	
 open-posix	conformance/interfaces/sem_timedwait/11-1	PASS	
 open-posix	conformance/interfaces/sem_unlink/1-1	PASS	
