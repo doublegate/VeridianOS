@@ -107,8 +107,10 @@ their check, for a few shared reasons:
 - **Missing calls.** alarm and the interval and POSIX timers, the System V IPC calls, message
   queues, mlock, msync, sched_getparam and the other calls the coverage tables list as missing;
   `/proc/sys`, `/proc/self/mounts` and parts of `/proc/<pid>/stat` and `status`.
-- **Memory exhaustion is not ENOMEM.** libc-test's `malloc-oom` and `malloc-brk-fail` run until
-  the time limit on x86_64 and AArch64, and stop the whole guest on RISC-V.
+- **Memory exhaustion.** libc-test's `malloc-oom`, `malloc-brk-fail` and `pthread_create-oom`
+  stop the whole guest on RISC-V. On x86_64 and AArch64 they ran until the time limit after the
+  full LTP and Open POSIX runs in the same guest, but reached ENOMEM within 10 to 16 s when
+  libc-test ran on its own (x86_64): how they end depends on what ran before.
 - **A new process can be missing from /proc for a moment.** Open POSIX tests that wait for a
   child's state in `/proc/<pid>/stat` (its `include/proc.h`) read it right after fork and now and
   then find no such file (`sem_timedwait/9-1`, once in four x86_64 runs; it is marked FLAKY).

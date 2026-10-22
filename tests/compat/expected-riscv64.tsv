@@ -1802,7 +1802,7 @@ open-posix	conformance/interfaces/aio_return/2-1	CONF	aio_return/2-1.c Second ca
 open-posix	conformance/interfaces/aio_return/3-1	PASS	
 open-posix	conformance/interfaces/aio_return/3-2	CONF	aio_return/3-2.c aio_return() may fail with (-1, 22); failed with (4096, 0) instead
 open-posix	conformance/interfaces/aio_return/4-1	CONF	aio_return/4-1.caio_return() have not failed
-open-posix	conformance/interfaces/aio_suspend/1-1	BROK	aio_suspend/1-1.c Error : AIOCB 6 already completed before suspend
+open-posix	conformance/interfaces/aio_suspend/1-1	FLAKY	PASS locally, BROK on a GitHub runner (2026-10-22): it needs the I/O still in flight when it suspends; last here: BROK
 open-posix	conformance/interfaces/aio_suspend/3-1	PASS	
 open-posix	conformance/interfaces/aio_suspend/4-1	TIMEOUT	aio_suspend/4-1.c PASSED
 open-posix	conformance/interfaces/aio_suspend/5-1	CONF	
@@ -3981,10 +3981,10 @@ libc-test	regression/lseek-large	PASS
 libc-test	regression/lseek-large-static	PASS	
 libc-test	regression/malloc-0	PASS	
 libc-test	regression/malloc-0-static	PASS	
-libc-test	regression/malloc-brk-fail	HANG	known: docs/KNOWN-LIMITATIONS.md (memory exhaustion is not ENOMEM)
-libc-test	regression/malloc-brk-fail-static	HANG	known: docs/KNOWN-LIMITATIONS.md (memory exhaustion is not ENOMEM)
-libc-test	regression/malloc-oom	HANG	known: docs/KNOWN-LIMITATIONS.md (memory exhaustion is not ENOMEM)
-libc-test	regression/malloc-oom-static	HANG	known: docs/KNOWN-LIMITATIONS.md (memory exhaustion is not ENOMEM)
+libc-test	regression/malloc-brk-fail	HANG	known: docs/KNOWN-LIMITATIONS.md (memory exhaustion)
+libc-test	regression/malloc-brk-fail-static	HANG	known: docs/KNOWN-LIMITATIONS.md (memory exhaustion)
+libc-test	regression/malloc-oom	HANG	known: docs/KNOWN-LIMITATIONS.md (memory exhaustion)
+libc-test	regression/malloc-oom-static	HANG	known: docs/KNOWN-LIMITATIONS.md (memory exhaustion)
 libc-test	regression/mbsrtowcs-overflow	PASS	
 libc-test	regression/mbsrtowcs-overflow-static	PASS	
 libc-test	regression/memmem-oob	PASS	

@@ -34,6 +34,7 @@ all three suites on a 20-core host). Other options:
 | `--jobs N` | N guests at once |
 | `--smoke` | only the tests the expected list has as `PASS` (the image's `<suite>-smoke.list`); what the gate runs, about ten minutes on x86_64 with `--jobs 3` |
 | `--resume` | only the tests `results.tsv` has no result for (after an interrupted run) |
+| `--retry` | run a test that regressed once more, on a fresh guest; it counts only if it fails again, and one that passes is reported as a FLAKY candidate (the gate and CI use this) |
 | `--first N` | start the first suite at test N |
 | `--timeout N` | seconds per test |
 | `--tcg` | x86_64 without KVM (refused otherwise: emulated it is about 100 times slower) |
@@ -45,8 +46,14 @@ Results go to `target/compat/<arch>/`: `results.tsv` (same format as the
 expected lists), `times.tsv` (milliseconds per test), `build.tsv` (tests
 judged at build time) and `serial-NNN.log` (`serial-jN-NNN.log` with `--jobs`), one per boot.
 
+`scripts/dev/gate.sh --rootfs` runs the x86_64 smoke subset and `--compat` the
+full suites; `.github/workflows/compat.yml` runs the x86_64 smoke subset weekly
+and on pull requests that change these files. GitHub's runners (KVM nested in
+a VM) take 30 to 90 s for many timer- and fork-heavy tests, so the full suites
+do not fit in a job there.
+
 The run exits non-zero when a test expected to `PASS` does not (a
-regression). Tests that now pass where they did not, and other changes, are
+regression), or, in a full run, does not run at all. Tests that now pass where they did not, and other changes, are
 listed but do not fail it; `--strict` fails on any difference.
 
 ## How it works
@@ -98,5 +105,6 @@ scripts/run-compat-tests.sh x86_64 --update
 `--update` keeps a note written by hand while the status stays the same, and
 keeps `FLAKY` entries. Commit the list with the change that moved it. A test
 whose result varies between runs (timing, load) is marked `FLAKY` by hand,
-with the reason in the note; a failure explained by a documented limitation
+with the reason in the note: the gate's "FLAKY candidate" lines (a test that
+failed once and passed on its retry) are where these turn up; a failure explained by a documented limitation
 cites it, as `known: docs/KNOWN-LIMITATIONS.md (...)`.

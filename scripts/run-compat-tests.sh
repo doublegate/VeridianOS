@@ -18,6 +18,8 @@
 #   --smp N
 #   --jobs N     guests at once; --smoke only the tests expected to pass;
 #   --resume     only the tests results.tsv has no result for
+#   --retry      a test that regressed runs once more; it counts only if it
+#                fails again
 # Output: target/compat/<arch>/results.tsv, times.tsv, serial-NNN.log.
 # Exit:   0 with no regressions (a test expected to PASS that does not).
 #

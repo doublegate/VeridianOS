@@ -345,7 +345,7 @@ What does not work yet: `docs/KNOWN-LIMITATIONS.md`.
     driver that boots again after a hang or crash (`scripts/run-compat-tests.sh`) record each
     test's result in `tests/compat/expected-<arch>.tsv`. The gate runs the tests x86_64 is
     expected to pass (`--rootfs`) and the full suites (`--compat`); a weekly CI workflow runs
-    x86_64. Baseline: LTP 24/1,552 pass on each architecture (most stop on statfs ENOSYS, see
+    the x86_64 smoke subset (the full suites do not fit in a GitHub job). Baseline: LTP 24/1,552 pass on each architecture (most stop on statfs ENOSYS, see
     `docs/KNOWN-LIMITATIONS.md`), Open POSIX about 1,570/1,965, libc-test about 525/560.
   - [ ] The rest of the Linux system calls, group by group, with LTP and musl libc-test in the
     rootfs suite and the `docs/PORTING-GUIDE.md` rewrite. Decisions of 2026-10-18: capget/capset

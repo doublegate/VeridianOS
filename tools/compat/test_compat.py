@@ -301,6 +301,18 @@ class Stall(unittest.TestCase):
         self.assertTrue(compat.stalled(430, 0, 425, 60, 90))
 
 
+class Retry(unittest.TestCase):
+    def test_retry_ranges_name_each_test_in_its_list(self):
+        lists = {
+            "s-smoke": ["1 a - /x/a", "2 b - /x/b", "3 c - /x/c"],
+            "t": ["1 z - /x/z"],
+        }
+        self.assertEqual(
+            compat.retry_ranges([("s", "c"), ("t", "z"), ("s", "gone")], lists),
+            [("s-smoke", 3, 3), ("t", 1, 1)],
+        )
+
+
 class Ranges(unittest.TestCase):
     def test_split_covers_every_test_once(self):
         self.assertEqual(compat.split_ranges(10, 3), [(1, 4), (5, 7), (8, 10)])

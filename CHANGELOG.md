@@ -50,7 +50,8 @@
   1,566 of 1,965, libc-test 523, 525 and 525 of 560; most LTP tests stop in its library because
   statfs is ENOSYS (`docs/KNOWN-LIMITATIONS.md`, "Conformance suites").
   The gate runs the tests expected to pass (`--rootfs`) and, with `--compat`, the full suites; a
-  weekly workflow (`.github/workflows/compat.yml`) runs them on x86_64.
+  weekly workflow (`.github/workflows/compat.yml`) runs the x86_64 tests expected to pass (the
+  full suites do not fit in a GitHub job: there they took over six hours).
 - `musl_runtime_test --only dev_shm_maps_the_file_s_pages` runs the `/dev/shm` test alone.
 
 ### Fixed

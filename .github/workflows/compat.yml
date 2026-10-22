@@ -1,10 +1,14 @@
 name: Conformance
 
-# LTP syscalls, the Open POSIX Test Suite and musl libc-test on x86_64 (KVM),
-# compared with tests/compat/expected-x86_64.tsv: a test expected to pass
-# that does not fails the job (tests/compat/README.md). A full run takes
-# about an hour, so it runs weekly, on demand, and on pull requests that
-# change the suites' tooling or expected lists, not on every push.
+# The conformance tests x86_64 is expected to pass (LTP syscalls, the Open
+# POSIX Test Suite, musl libc-test; tests/compat/expected-x86_64.tsv), on
+# x86_64 under KVM: one that does not fails the job (tests/compat/README.md).
+#
+# Only the smoke subset: on GitHub's runners (KVM nested in a VM) the timer-
+# and fork-heavy tests take 30 to 90 s each, and the full suites did not
+# finish within six hours (2026-10-22); the full run is
+# `scripts/dev/gate.sh --compat`, locally. It runs weekly, on demand, and on
+# pull requests that change the suites' tooling or expected lists.
 
 on:
     schedule:
@@ -101,8 +105,9 @@ jobs:
             - name: Build the compat root filesystem
               run: ./scripts/build-compat-rootfs.sh x86_64
             - name: Run the suites
-              # Three guests at once: the runner has four CPUs and 16 GiB.
-              run: ./scripts/run-compat-tests.sh x86_64 --jobs 3
+              # Three guests at once (the runner has four CPUs and 16 GiB), and
+              # the TCG limits: these runners are much slower than a host.
+              run: ./scripts/run-compat-tests.sh x86_64 --smoke --jobs 3 --timeout 180 --retry
             - name: Upload results
               if: always()
               uses: actions/upload-artifact@v4

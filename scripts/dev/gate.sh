@@ -144,9 +144,11 @@ if [ $rootfs -eq 1 ]; then
     ARCH=riscv64 RISCV_CPU=rv64,sv48=off REQUIRE_MUSL=1 step rootfs-tests-riscv64-sv39 scripts/run-rootfs-tests.sh
     tail -1 "$log_dir/rootfs-tests-riscv64-sv39.log"
     # The conformance tests expected to pass on x86_64 (tests/compat/README.md):
-    # a regression in any of them fails the step.
+    # a regression in any of them fails the step. --retry runs a test that
+    # regressed once more, so one whose result varies (timing) is reported
+    # as a FLAKY candidate instead of costing a whole gate run.
     step compat-image-x86_64 scripts/build-compat-rootfs.sh x86_64
-    step compat-smoke-x86_64 scripts/run-compat-tests.sh x86_64 --smoke --jobs 3
+    step compat-smoke-x86_64 scripts/run-compat-tests.sh x86_64 --smoke --jobs 3 --retry
     grep -aE '^(COMPAT |PASS compat|FAIL compat)' "$log_dir/compat-smoke-x86_64.log"
 fi
 if [ $smp -eq 1 ] && { [ $boot -eq 1 ] || [ $rootfs -eq 1 ]; }; then
@@ -182,7 +184,7 @@ if [ $compat -eq 1 ]; then
             fi
         fi
         step "compat-image-$arch" scripts/build-compat-rootfs.sh "$arch"
-        step "compat-$arch" scripts/run-compat-tests.sh "$arch" --jobs "$jobs"
+        step "compat-$arch" scripts/run-compat-tests.sh "$arch" --jobs "$jobs" --retry
         grep -aE '^(COMPAT |PASS compat|FAIL compat)' "$log_dir/compat-$arch.log"
     done
 fi

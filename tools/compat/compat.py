@@ -788,6 +788,61 @@ def share_ranges(ranges, jobs):
     return shares
 
 
+def retry_ranges(keys, lists):
+    """Single-test ranges, (list, n, n), for (suite, id) keys in these lists.
+
+    `lists` maps a list's name (`<suite>` or `<suite>-smoke`) to its lines;
+    a key whose test is in none of them is left out.
+    """
+    where = {}
+    for name, lines in lists.items():
+        for line in lines:
+            words = line.split(" ", 2)
+            if len(words) >= 2 and words[0].isdigit():
+                where[(suite_of(name), words[1])] = (name, int(words[0]))
+    return sorted({where[k] + (where[k][1],) for k in keys if k in where})
+
+
+def run_retries(run, arch, args, lists):
+    """Run each test that regressed once more; it counts only if it fails again.
+
+    A test whose result varies (timing, load) would otherwise fail a gate
+    that then has to run again in full. One that passes the second time is
+    reported as a FLAKY candidate rather than a regression.
+    """
+    expected_path = Path(
+        args.expected or REPO / "tests" / "compat" / f"expected-{arch}.tsv"
+    )
+    if not expected_path.exists():
+        return []
+    expected = read_tsv(expected_path)
+    if args.smoke or args.first:
+        expected = only_run(expected, run.results)
+    else:
+        expected = {
+            k: v for k, v in expected.items() if k[0] in {s for s, _ in run.results}
+        }
+    regressed = [x[:2] for x in compare(expected, run.results)["regressed"]]
+    ranges = retry_ranges(regressed, lists)
+    if not ranges:
+        return []
+    first = {k: run.results[k] for k in regressed}
+    print(f"retrying {len(ranges)} tests that regressed", flush=True)
+    Worker(run, "retry", ranges)()
+    if run.error:
+        sys.exit(f"FAIL: {run.error}")
+    flaky = []
+    for key in regressed:
+        status, _ = run.results.get(key, ("CRASH", ""))
+        if status == expected[key][0]:
+            flaky.append(key)
+            run.results[key] = (
+                status,
+                f"{first[key][0]} once, then {status} on a retry",
+            )
+    return flaky
+
+
 class Worker:
     """One guest working through (suite, first, last) ranges in turn.
 
@@ -1072,6 +1127,20 @@ def cmd_run(args):
         write_tsv(run.out / "results.tsv", run.results, arch)
         sys.exit(f"FAIL: {run.error} (partial results in {run.out / 'results.tsv'})")
 
+    flaky = []
+    if args.retry and not args.update:
+        lists = {
+            name: (root / "usr" / "lib" / "compat" / f"{name}.list")
+            .read_text()
+            .splitlines()
+            for name in suites
+        }
+        flaky = run_retries(run, arch, args, lists)
+        for key in flaky:
+            print(
+                f"FLAKY candidate (failed once, passed on a retry): {key[0]} {key[1]}"
+            )
+
     if args.smoke:
         write_tsv(run.out / "smoke-results.tsv", run.results, arch)
         print(f"boots: {run.boots}")
@@ -1317,6 +1386,11 @@ def main(argv=None):
     rp.add_argument("--smp", type=int, default=1)
     rp.add_argument(
         "--tcg", action="store_true", help="x86_64 without KVM (TCG limits)"
+    )
+    rp.add_argument(
+        "--retry",
+        action="store_true",
+        help="run a test that regressed once more; it counts only if it fails again",
     )
     rp.add_argument("--max-boots", type=int, default=200)
     rp.add_argument("--jobs", type=int, default=1, help="guests run side by side (TCG)")

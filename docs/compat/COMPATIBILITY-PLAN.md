@@ -157,7 +157,8 @@ Each group lands with its LTP cases. The counts are "missing" entries in the cov
   a time limit and records its result; `tests/compat/expected-<arch>.tsv` holds each test's result,
   and a test expected to pass that does not is a regression. `scripts/dev/gate.sh --rootfs` runs
   the tests x86_64 is expected to pass, `--compat` the full suites, and
-  `.github/workflows/compat.yml` the full x86_64 run weekly.
+  `.github/workflows/compat.yml` the x86_64 tests expected to pass, weekly (the full suites do not
+  fit in a GitHub job).
 - **Results (baseline of 2026-10-22).** Passing tests per suite; WARN is LTP's "kernel older than
   4.4" warning on tests that otherwise passed, and FLAKY tests (varying results, or passing close
   to the time limit) are accepted either way. Open POSIX counts include its 195 compile-only tests.
