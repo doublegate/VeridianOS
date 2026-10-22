@@ -180,6 +180,11 @@ class SerialParser:
 
 
 _LTP_TMP = re.compile(r"/tmp/LTP_\w+")
+# Terminal escape sequences and other control characters (a test whose
+# environment lacks LTP_COLORIZE_OUTPUT=0 colours its output), which tools
+# reading the expected lists refuse.
+_ESCAPE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b[@-_]")
+_CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
 
 # The line that explains each status best, when a test printed several.
 _STATUS_TAG = {"BROK": "TBROK", "FAIL": "TFAIL", "CONF": "TCONF", "WARN": "TWARN"}
@@ -187,7 +192,10 @@ _STATUS_TAG = {"BROK": "TBROK", "FAIL": "TFAIL", "CONF": "TCONF", "WARN": "TWARN
 
 def note_for(record, detail="", status=None):
     """A one-line reason for a result that is not PASS."""
-    lines = [line.replace("\t", " ").strip() for line in record.logs]
+    lines = [
+        _CONTROL.sub("", _ESCAPE.sub("", line)).replace("\t", " ").strip()
+        for line in record.logs
+    ]
     lines = [line for line in lines if line]
     tag = _STATUS_TAG.get(status)
     hit = next((line for line in lines if tag and tag in line), None)

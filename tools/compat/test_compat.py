@@ -99,6 +99,16 @@ class Parse(unittest.TestCase):
         r = compat.Record(2, "x", "rc=1 sig=0 timeout=0 ms=1", ["only\tline"])
         self.assertEqual(compat.note_for(r), "only line")
 
+    def test_note_drops_terminal_escapes(self):
+        # A child exec'd with an empty environment colours its output.
+        r = compat.Record(
+            1,
+            "a",
+            "rc=1 sig=0 timeout=0 ms=1",
+            ["c.c:15: \x1b[1;31mTFAIL: \x1b[0margc is 0\x07"],
+        )
+        self.assertEqual(compat.note_for(r, status="FAIL"), "c.c:15: TFAIL: argc is 0")
+
     def test_note_hides_ltp_temporary_names(self):
         r = compat.Record(
             1,

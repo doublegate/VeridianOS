@@ -200,7 +200,7 @@ ltp-syscalls	execve02	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statf
 ltp-syscalls	execve03	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
 ltp-syscalls	execve04	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
 ltp-syscalls	execve05	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
-ltp-syscalls	execve06	FAIL	exit 5; execve06_child.c:15: [1;31mTFAIL: [0margc is 0, expected 1
+ltp-syscalls	execve06	FAIL	exit 5; execve06_child.c:15: TFAIL: argc is 0, expected 1
 ltp-syscalls	execveat01	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
 ltp-syscalls	execveat02	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
 ltp-syscalls	execveat03	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
