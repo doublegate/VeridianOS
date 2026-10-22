@@ -8,24 +8,30 @@
 #   architecture and boot each in QEMU (scripts/boot-test.sh); with --rootfs
 #   also run the user-space runtime suites (scripts/run-rootfs-tests.sh,
 #   musl checks required): x86_64's, then AArch64's and RISC-V's musl roots
-#   (scripts/build-musl-rootfs.sh). The boots (and with --rootfs the runtime suite)
+#   (scripts/build-musl-rootfs.sh), then the conformance tests x86_64 is
+#   expected to pass (tests/compat). The boots (and with --rootfs the runtime suite)
 #   then run again on four CPUs, since the `smp` feature is on by default;
 #   --no-smp skips that second round (--smp is accepted and is the default).
+#   --compat (after the rootfs stage; implies building x86_64's base root)
+#   builds the x86_64 compat root and runs the conformance suites against
+#   tests/compat/expected-x86_64.tsv (scripts/run-compat-tests.sh, about
+#   two hours); COMPAT_ARCHES="x86_64 aarch64 riscv64" adds the others.
 #   Exits non-zero if any step fails; each step's output is kept in
 #   ${LOG_DIR:-target/dev-logs}.
 #
-# Usage: scripts/dev/gate.sh [--boot] [--rootfs] [--no-smp]
+# Usage: scripts/dev/gate.sh [--boot] [--rootfs] [--no-smp] [--compat]
 set -u
 root="$(git -C "$(dirname "$0")" rev-parse --show-toplevel)" || exit 2
 cd "$root" || exit 2
-boot=0 rootfs=0 smp=1
+boot=0 rootfs=0 smp=1 compat=0
 for arg in "$@"; do
     case $arg in
         --boot) boot=1 ;;
         --rootfs) rootfs=1 ;;
         --smp) smp=1 ;;
         --no-smp) smp=0 ;;
-        *) echo "usage: $0 [--boot] [--rootfs] [--no-smp]" >&2; exit 2 ;;
+        --compat) compat=1 ;;
+        *) echo "usage: $0 [--boot] [--rootfs] [--no-smp] [--compat]" >&2; exit 2 ;;
     esac
 done
 log_dir="${LOG_DIR:-target/dev-logs}"
@@ -55,6 +61,13 @@ step syscall-numbers python3 "$root/tools/compat/gen_syscalls.py" --check
 step syscall-coverage python3 "$root/tools/compat/syscall_coverage.py" --check
 step libc-host-tests bash -c 'for t in "$0"/userland/libc/tests/test-*.sh; do bash "$t" || exit 1; done' "$root"
 step vsh-fmt bash -c 'cd "$0/userland/vsh" && cargo fmt -- --check' "$root"
+# The image tool (its own crate, outside the workspace) and the conformance
+# tooling (tools/compat/compat.py: lists, results, expected-list checks).
+step mkfs-blockfs bash -c 'cd "$0/tools/mkfs-blockfs" && cargo fmt --check && cargo clippy --release --all-targets -- -D warnings && cargo test --release' "$root"
+step compat-tools python3 -I "$root/tools/compat/test_compat.py"
+if command -v ruff >/dev/null; then
+    step compat-ruff ruff check "$root/tools/compat/compat.py" "$root/tools/compat/test_compat.py"
+fi
 step vsh-build bash -c 'cd "$0/userland/vsh" && cargo build --target x86_64-unknown-none -Zbuild-std=core,compiler_builtins,alloc' "$root"
 step clippy-x86_64 cargo clippy --target targets/x86_64-veridian.json -p veridian-kernel "${bs[@]}" -- -D warnings
 step clippy-aarch64 cargo clippy --target aarch64-unknown-none-softfloat -p veridian-kernel "${bs[@]}" -- -D warnings
@@ -129,6 +142,11 @@ if [ $rootfs -eq 1 ]; then
     # The RISC-V root again under Sv39: 256 GiB of user space (ADR 0018).
     ARCH=riscv64 RISCV_CPU=rv64,sv48=off REQUIRE_MUSL=1 step rootfs-tests-riscv64-sv39 scripts/run-rootfs-tests.sh
     tail -1 "$log_dir/rootfs-tests-riscv64-sv39.log"
+    # The conformance tests expected to pass on x86_64 (tests/compat/README.md):
+    # a regression in any of them fails the step.
+    step compat-image-x86_64 scripts/build-compat-rootfs.sh x86_64
+    step compat-smoke-x86_64 scripts/run-compat-tests.sh x86_64 --smoke --jobs 3
+    grep -aE '^(COMPAT |PASS compat|FAIL compat)' "$log_dir/compat-smoke-x86_64.log"
 fi
 if [ $smp -eq 1 ] && { [ $boot -eq 1 ] || [ $rootfs -eq 1 ]; }; then
     # The same kernel (the `smp` feature is on by default) on four CPUs.
@@ -147,6 +165,18 @@ if [ $smp -eq 1 ] && { [ $boot -eq 1 ] || [ $rootfs -eq 1 ]; }; then
             tail -1 "$log_dir/rootfs-tests-smp-$arch.log"
         done
     fi
+fi
+if [ $compat -eq 1 ]; then
+    # The conformance suites (tests/compat/README.md): a test expected to
+    # pass that does not fails the step.
+    [ $rootfs -eq 1 ] || step rootfs-stage scripts/build-busybox-rootfs.sh rootfs
+    for arch in ${COMPAT_ARCHES:-x86_64}; do
+        jobs=3
+        [ "$arch" = x86_64 ] || jobs=7 # emulated: guests side by side
+        step "compat-image-$arch" scripts/build-compat-rootfs.sh "$arch"
+        step "compat-$arch" scripts/run-compat-tests.sh "$arch" --jobs "$jobs"
+        grep -aE '^(COMPAT |PASS compat|FAIL compat)' "$log_dir/compat-$arch.log"
+    done
 fi
 echo "=== GATE rc=$rc"
 exit $rc

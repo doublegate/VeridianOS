@@ -150,10 +150,28 @@ Each group lands with its LTP cases. The counts are "missing" entries in the cov
 
 ## X4. Verification (from v0.27, growing with X2)
 
-- **Suites in the rootfs.** Cross-build LTP (`syscalls` and `open_posix_testsuite`) and musl
-  libc-test into the rootfs.
-- **Runner and CI gate.** `scripts/run-compat-tests.sh` boots QEMU and collects pass/fail results.
-  A CI job gates on regressions, and the counts are published in `docs/compat/`.
+- **Suites in the rootfs (done, v0.28).** `scripts/build-compat-rootfs.sh <arch>` builds LTP
+  20260930 (`runtest/syscalls` and the Open POSIX Test Suite) and musl libc-test with each
+  architecture's musl toolchain into a compat root filesystem (`tests/compat/README.md`).
+- **Runner and gate (done, v0.28).** `scripts/run-compat-tests.sh` boots QEMU, runs every test under
+  a time limit and records its result; `tests/compat/expected-<arch>.tsv` holds each test's result,
+  and a test expected to pass that does not is a regression. `scripts/dev/gate.sh --rootfs` runs
+  the tests x86_64 is expected to pass, `--compat` the full suites, and
+  `.github/workflows/compat.yml` the full x86_64 run weekly.
+- **Results (baseline of 2026-10-22).** Passing tests per suite; WARN is LTP's "kernel older than
+  4.4" warning on tests that otherwise passed, and FLAKY tests (varying results, or passing close
+  to the time limit) are accepted either way. Open POSIX counts include its 195 compile-only tests.
+
+  | Suite | x86_64 | AArch64 | RISC-V |
+  |---|---|---|---|
+  | LTP `syscalls` (1,552) | 23 pass, 417 WARN | 23 pass, 411 WARN | 23 pass, 410 WARN |
+  | Open POSIX (1,965) | 1,571 | 1,566 | 1,566 |
+  | musl libc-test (560) | 523 | 525 | 525 |
+
+  Most LTP tests stop in its library before their check: statfs is ENOSYS, `uname` reports
+  VeridianOS's version, and there is no kernel configuration to read
+  (`docs/KNOWN-LIMITATIONS.md`, "Conformance suites"). Those three are where the system call
+  groups (X2) start paying off first.
 - **Coverage tables.** Regenerate the coverage table every release, add one for arm64, and track
   partial semantics per syscall.
 - **Application ladder.** The ladder above runs as CI smoke tests.

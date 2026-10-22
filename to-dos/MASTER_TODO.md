@@ -337,11 +337,16 @@ What does not work yet: `docs/KNOWN-LIMITATIONS.md`.
     process_vm_readv/writev, rseq, unshare/setns.
   - [x] **Release:** tri-arch boot with `-smp 4`, runtime suite, CHANGELOG, tag (2026-10-18).
 - [ ] **v0.28.0:** first the items carried over from v0.27.0, which was cut early (2026-10-18):
-  - [ ] LTP and musl libc-test in the rootfs suite. Done: `/dev/shm` is a tmpfs whose files are
-    their own pages (`fs::shmem`), so a MAP_SHARED mapping is shared memory there -- LTP keeps
-    its test results in such a file, and children that exec map it again by path. Next: the
-    cross-build scripts, the in-guest runner (TPASS/TFAIL counted, a hang watchdog), expected
-    lists per architecture, a smoke subset in the gate and the full suites in a CI job.
+  - [x] LTP and musl libc-test in the rootfs suite (2026-10-22, `tests/compat/README.md`).
+    `/dev/shm` is a tmpfs whose files are their own pages (`fs::shmem`), so a MAP_SHARED mapping
+    is shared memory there -- LTP keeps its test results in such a file. LTP (`syscalls`, Open
+    POSIX) and musl libc-test are cross-built into a compat root filesystem per architecture
+    (`scripts/build-compat-rootfs.sh`); an in-guest runner with a polling time limit and a host
+    driver that boots again after a hang or crash (`scripts/run-compat-tests.sh`) record each
+    test's result in `tests/compat/expected-<arch>.tsv`. The gate runs the tests x86_64 is
+    expected to pass (`--rootfs`) and the full suites (`--compat`); a weekly CI workflow runs
+    x86_64. Baseline: LTP 23/1,552 pass on each architecture (most stop on statfs ENOSYS, see
+    `docs/KNOWN-LIMITATIONS.md`), Open POSIX about 1,570/1,965, libc-test about 525/560.
   - [ ] The rest of the Linux system calls, group by group, with LTP and musl libc-test in the
     rootfs suite and the `docs/PORTING-GUIDE.md` rewrite. Decisions of 2026-10-18: capget/capset
     on a full Linux capability model (permitted, effective, inheritable, bounding, ambient; file

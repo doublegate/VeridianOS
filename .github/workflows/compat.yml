@@ -1,0 +1,97 @@
+name: Conformance
+
+# LTP syscalls, the Open POSIX Test Suite and musl libc-test on x86_64 (KVM),
+# compared with tests/compat/expected-x86_64.tsv: a test expected to pass
+# that does not fails the job (tests/compat/README.md). A full run takes
+# about an hour, so it runs weekly, on demand, and on pull requests that
+# change the suites' tooling or expected lists, not on every push.
+
+on:
+    schedule:
+        - cron: "17 4 * * 1"
+    workflow_dispatch:
+    pull_request:
+        branches: [main]
+        paths:
+            - "tests/compat/**"
+            - "tools/compat/compat.py"
+            - "userland/tests/compat/**"
+            - "scripts/build-compat-rootfs.sh"
+            - "scripts/run-compat-tests.sh"
+            - "tools/mkfs-blockfs/**"
+            - ".github/workflows/compat.yml"
+
+concurrency:
+    group: compat-${{ github.ref }}
+    cancel-in-progress: true
+
+permissions:
+    contents: read
+
+env:
+    RUST_TOOLCHAIN: nightly-2025-11-15
+
+jobs:
+    compat:
+        name: Conformance (x86_64)
+        runs-on: ubuntu-latest
+        timeout-minutes: 330
+        steps:
+            - uses: actions/checkout@v4
+            - name: Install Rust
+              uses: dtolnay/rust-toolchain@nightly
+              with:
+                  toolchain: ${{ env.RUST_TOOLCHAIN }}
+                  components: rust-src, llvm-tools-preview
+            - name: Install host packages
+              run: |
+                  sudo apt-get update
+                  sudo apt-get install -y qemu-system-x86 ovmf build-essential texinfo \
+                    bison flex wget libgmp-dev libmpfr-dev libmpc-dev
+            - name: Enable KVM
+              run: |
+                  echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+                    | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+                  sudo udevadm control --reload-rules
+                  sudo udevadm trigger --name-match=kvm || true
+            - name: Prepare toolchain prefix
+              run: |
+                  sudo mkdir -p /opt/veridian
+                  sudo chown "$USER" /opt/veridian
+            # The same toolchain caches as ci.yml's rootfs job (same keys).
+            - name: Restore cross toolchain
+              id: toolchain-cache
+              uses: actions/cache/restore@v4
+              with:
+                  path: /opt/veridian/toolchain
+                  key: veridian-toolchain-x86_64-${{ hashFiles('scripts/build-cross-toolchain.sh', 'scripts/build-sysroot.sh', 'ports/binutils/patches/**', 'ports/gcc/patches/**') }}
+            - name: Build cross toolchain
+              if: steps.toolchain-cache.outputs.cache-hit != 'true'
+              run: ./scripts/build-cross-toolchain.sh --arch x86_64 --prefix /opt/veridian/toolchain
+            - name: Build kernel
+              run: ./build-kernel.sh x86_64 dev
+            - name: Build musl
+              run: ./tools/cross/build-musl.sh
+            - name: Restore musl toolchain
+              id: musl-toolchain-cache
+              uses: actions/cache/restore@v4
+              with:
+                  path: /opt/veridian/musl-toolchain
+                  key: veridian-musl-toolchain-${{ hashFiles('tools/cross/build-musl-toolchain.sh', 'tools/cross/build-musl.sh', 'tools/cross/musl-patches/**', 'tools/cross/veridian-paths.sh', 'scripts/build-cross-toolchain.sh') }}
+            - name: Build musl toolchain
+              run: ./tools/cross/build-musl-toolchain.sh
+            - name: Build the base root filesystem
+              run: |
+                  export PATH=/opt/veridian/toolchain/bin:$PATH
+                  ./scripts/build-busybox-rootfs.sh all
+            - name: Build the compat root filesystem
+              run: ./scripts/build-compat-rootfs.sh x86_64
+            - name: Run the suites
+              # Three guests at once: the runner has four CPUs and 16 GiB.
+              run: ./scripts/run-compat-tests.sh x86_64 --jobs 3
+            - name: Upload results
+              if: always()
+              uses: actions/upload-artifact@v4
+              with:
+                  name: compat-x86_64
+                  path: target/compat/x86_64/
