@@ -55,10 +55,17 @@ build_busybox() {
     local tarball="${VERIDIAN_SOURCES}/busybox-${BUSYBOX_VERSION}.tar.bz2"
     if [[ ! -f "${tarball}" ]]; then
         log "Downloading BusyBox ${BUSYBOX_VERSION}..."
-        curl -fsSL -o "${tarball}.part" "${BUSYBOX_URL}" || { rm -f "${tarball}.part"; die "download failed"; }
-        mv "${tarball}.part" "${tarball}"
+        # A per-process temporary file, checked before it is moved into the
+        # shared cache (build-busybox-rootfs.sh downloads there too).
+        local part
+        part="$(mktemp "${tarball}.XXXXXX")"
+        curl -fsSL -o "${part}" "${BUSYBOX_URL}" || { rm -f "${part}"; die "download failed"; }
+        echo "${BUSYBOX_SHA256}  ${part}" | sha256sum -c --quiet - || { rm -f "${part}"; die "BusyBox checksum mismatch in the download"; }
+        chmod a+r "${part}"  # mktemp creates it 0600
+        mv "${part}" "${tarball}"
     fi
-    echo "${BUSYBOX_SHA256}  ${tarball}" | sha256sum -c --quiet - || die "BusyBox checksum mismatch"
+    # A bad tarball is removed, so the next run downloads it again.
+    echo "${BUSYBOX_SHA256}  ${tarball}" | sha256sum -c --quiet - || { rm -f "${tarball}"; die "BusyBox checksum mismatch (removed ${tarball})"; }
     log "Building BusyBox ${BUSYBOX_VERSION}..."
     rm -rf "${BB_SRC}"
     mkdir -p "$(dirname "${BB_SRC}")"

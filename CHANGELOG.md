@@ -1,7 +1,33 @@
 ## [Unreleased]
 
+### Changed
+
+- The five Gemini workflows (`gemini-cli`, `gemini-dispatch`, `gemini-invoke`,
+  `gemini-pr-review`, `gemini-review`) are removed; pull requests are reviewed by the Antigravity
+  workflow and the review bots.
+- Removed the legacy scripts superseded in v0.27.0: `scripts/test-{x86_64,aarch64,riscv64}.sh`
+  (use `scripts/boot-test.sh`), `scripts/benchmark.sh` (use the in-kernel `perf` command) and
+  `scripts/coverage.sh` (CI measures coverage with cargo-llvm-cov).
+- `scripts/install-deps.sh` installs the cargo tools with the toolchain pinned in
+  `rust-toolchain.toml`, so it no longer depends on a rustup default toolchain.
+- The x86_64 BusyBox rootfs build (`scripts/build-busybox-rootfs.sh`) and `scripts/build-libcurses.sh`
+  keep their work tree in `${VERIDIAN_PREFIX:-/opt/veridian}/busybox-x86_64` (override with
+  `VERIDIAN_BUSYBOX_WORK`; a relative path is taken from the current directory)
+  instead of `/tmp/VeridianOS`. systemd-tmpfiles deletes files under `/tmp` after 10 days, which
+  removed the BusyBox build and left the gate testing a stale rootfs image. The tarball is shared
+  with `build-musl-rootfs.sh` in `${VERIDIAN_PREFIX:-/opt/veridian}/sources` (`VERIDIAN_SOURCES`,
+  resolved the same way) and checked against busybox.net's SHA-256 before it enters the cache (each
+  download uses its own temporary file, so the two scripts can download at the same time); both
+  scripts delete a bad copy. `build-busybox-rootfs.sh` extracts through a scratch directory so an
+  interrupted run cannot leave a partial source tree that a later run would reuse.
+  `build-libcurses.sh` puts its build directory beside a custom toolchain prefix given as its
+  argument.
+
 ### Added
 
+- `scripts/dev/guest.py`: boots the AArch64 or RISC-V musl root filesystem and runs commands at
+  its shell, logging the serial output.
+- GDB helper `hbreak-main`, the hardware-breakpoint variant of `break-main`.
 - `/dev/shm` is a tmpfs, as on Linux, and tmpfs regular files keep their contents in pages they
   own (`fs::shmem`, shared with memfds), so a `MAP_SHARED` mapping of a file there is the file:
   every mapping, `read` and `write` see one copy (N-230). LTP keeps its results this way, and
@@ -9,6 +35,11 @@
   VeridianOS's own mount call) accepts `"tmpfs"`; Linux `mount(2)` is not wired yet. A tmpfs
   root is mode 1777, its default size limit is half of RAM, and it charges whole pages against
   the limit (rounded up to whole pages), as Linux does.
+
+### Fixed
+
+- `.githooks/pre-push` keeps leading and trailing whitespace in path names when scanning for
+  sensitive files.
 
 ---
 

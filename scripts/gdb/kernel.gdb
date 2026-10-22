@@ -70,6 +70,12 @@ define break-main
     echo [GDB] Breakpoint set on veridian_kernel::bootstrap::kernel_init\n
 end
 
+# Hardware variant of break-main (see hbreak-panic).
+define hbreak-main
+    hbreak veridian_kernel::bootstrap::kernel_init
+    echo [GDB] Hardware breakpoint set on veridian_kernel::bootstrap::kernel_init\n
+end
+
 define break-boot
     echo Usage: break-boot-x86_64, break-boot-aarch64 or break-boot-riscv64\n
 end
@@ -136,5 +142,5 @@ alias eu = examine-uart
 alias kst = kernel-state
 
 echo [GDB] VeridianOS kernel debugging script loaded\n
-echo [GDB] Available commands: kernel-symbols, break-panic, break-main, break-boot-<arch>, examine-stack, examine-uart-<arch>\n
+echo [GDB] Available commands: kernel-symbols, break-panic, hbreak-panic, break-main, hbreak-main, break-boot-<arch>, examine-stack, examine-uart-<arch>\n
 echo [GDB] Aliases: ks, bp, bm, bb, es, eu, kst\n
