@@ -514,6 +514,12 @@ impl DevRoot {
                 }
             }
         }
+        // The mount point of the /dev/shm tmpfs (`fs::mount_dev_shm`): a real
+        // directory, so /dev lists it and it can be mounted on again.
+        subdirs.insert(
+            String::from("shm"),
+            Arc::new(DevSubDir::new(String::from("shm"))),
+        );
         Self {
             devices: RwLock::new(devices),
             subdirs: RwLock::new(subdirs),
@@ -704,6 +710,20 @@ mod tests {
             .mknod("blk", NodeType::BlockDevice, perms, make_dev(1, 3))
             .unwrap();
         assert_eq!(open_device(blk).err(), enxio);
+    }
+
+    /// /dev/shm is a directory of /dev, so it is listed and a tmpfs can be
+    /// mounted on it again after an unmount (PR #28 review).
+    #[test]
+    fn dev_has_a_shm_directory_to_mount_on() {
+        let root = DevFs::new().root();
+        let shm = root.lookup("shm").unwrap();
+        assert_eq!(shm.node_type(), NodeType::Directory);
+        assert!(root
+            .readdir()
+            .unwrap()
+            .iter()
+            .any(|e| e.name == "shm" && e.node_type == NodeType::Directory));
     }
 
     /// /dev is built from the same table mknod numbers resolve against.

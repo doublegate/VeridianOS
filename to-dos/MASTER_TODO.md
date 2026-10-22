@@ -337,6 +337,11 @@ What does not work yet: `docs/KNOWN-LIMITATIONS.md`.
     process_vm_readv/writev, rseq, unshare/setns.
   - [x] **Release:** tri-arch boot with `-smp 4`, runtime suite, CHANGELOG, tag (2026-10-18).
 - [ ] **v0.28.0:** first the items carried over from v0.27.0, which was cut early (2026-10-18):
+  - [ ] LTP and musl libc-test in the rootfs suite. Done: `/dev/shm` is a tmpfs whose files are
+    their own pages (`fs::shmem`), so a MAP_SHARED mapping is shared memory there -- LTP keeps
+    its test results in such a file, and children that exec map it again by path. Next: the
+    cross-build scripts, the in-guest runner (TPASS/TFAIL counted, a hang watchdog), expected
+    lists per architecture, a smoke subset in the gate and the full suites in a CI job.
   - [ ] The rest of the Linux system calls, group by group, with LTP and musl libc-test in the
     rootfs suite and the `docs/PORTING-GUIDE.md` rewrite. Decisions of 2026-10-18: capget/capset
     on a full Linux capability model (permitted, effective, inheritable, bounding, ambient; file

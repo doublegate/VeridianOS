@@ -28,6 +28,13 @@
 - `scripts/dev/guest.py`: boots the AArch64 or RISC-V musl root filesystem and runs commands at
   its shell, logging the serial output.
 - GDB helper `hbreak-main`, the hardware-breakpoint variant of `break-main`.
+- `/dev/shm` is a tmpfs, as on Linux, and tmpfs regular files keep their contents in pages they
+  own (`fs::shmem`, shared with memfds), so a `MAP_SHARED` mapping of a file there is the file:
+  every mapping, `read` and `write` see one copy (N-230). LTP keeps its results this way, and
+  musl's `shm_open` uses `/dev/shm`. The kernel's mount path (`Vfs::mount_by_type`, used by
+  VeridianOS's own mount call) accepts `"tmpfs"`; Linux `mount(2)` is not wired yet. A tmpfs
+  root is mode 1777, its default size limit is half of RAM, and it charges whole pages against
+  the limit (rounded up to whole pages), as Linux does.
 
 ### Fixed
 

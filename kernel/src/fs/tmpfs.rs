@@ -1,15 +1,16 @@
 //! tmpfs -- Memory-Backed Filesystem
 //!
-//! A temporary in-memory filesystem with configurable size limits.
-//! Data is stored in heap-backed buffers and is lost on unmount.
-//! Supports all standard VFS operations including symlinks.
+//! A temporary in-memory filesystem with configurable size limits, lost on
+//! unmount. A regular file's bytes are pages it owns (`fs::shmem`), so a
+//! MAP_SHARED mapping maps the file itself, as Linux's tmpfs; this is what
+//! `/dev/shm` is. Supports all standard VFS operations including symlinks.
 
 use alloc::{collections::BTreeMap, string::String, sync::Arc, vec::Vec};
 use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use spin::RwLock;
 
-use super::{DirEntry, Filesystem, Metadata, NodeType, Permissions, VfsNode};
+use super::{shmem::ShmemPages, DirEntry, Filesystem, Metadata, NodeType, Permissions, VfsNode};
 use crate::error::{FsError, KernelError};
 
 /// Global inode counter for tmpfs (separate from RamFS)
@@ -18,6 +19,9 @@ static TMPFS_NEXT_INODE: AtomicU64 = AtomicU64::new(1);
 /// tmpfs node
 struct TmpNode {
     node_type: NodeType,
+    /// A regular file's contents.
+    pages: RwLock<ShmemPages>,
+    /// A symlink's target.
     data: RwLock<Vec<u8>>,
     children: RwLock<BTreeMap<String, Arc<TmpNode>>>,
     metadata: RwLock<Metadata>,
@@ -70,6 +74,7 @@ impl TmpNode {
     ) -> Self {
         Self {
             node_type: NodeType::File,
+            pages: RwLock::new(ShmemPages::new()),
             data: RwLock::new(Vec::new()),
             children: RwLock::new(BTreeMap::new()),
             metadata: RwLock::new(Metadata {
@@ -100,6 +105,7 @@ impl TmpNode {
     ) -> Self {
         Self {
             node_type: NodeType::Directory,
+            pages: RwLock::new(ShmemPages::new()),
             data: RwLock::new(Vec::new()),
             children: RwLock::new(BTreeMap::new()),
             metadata: RwLock::new(Metadata {
@@ -132,6 +138,7 @@ impl TmpNode {
         let size = target_bytes.len();
         Self {
             node_type: NodeType::Symlink,
+            pages: RwLock::new(ShmemPages::new()),
             data: RwLock::new(target_bytes),
             children: RwLock::new(BTreeMap::new()),
             metadata: RwLock::new(Metadata {
@@ -185,7 +192,7 @@ impl Drop for TmpNode {
     /// they are released when the last name and the last open file are
     /// gone. Releasing at unlink let a hard link keep data alive uncounted.
     fn drop(&mut self) {
-        let freed = self.data.get_mut().len();
+        let freed = self.data.get_mut().len() + self.pages.get_mut().allocated_bytes();
         if freed > 0 {
             let _ = self
                 .bytes_used
@@ -218,13 +225,7 @@ impl VfsNode for TmpNode {
             return Err(KernelError::FsError(FsError::NotAFile));
         }
 
-        let data = self.data.read();
-        if offset >= data.len() {
-            return Ok(0);
-        }
-
-        let bytes_to_read = core::cmp::min(buffer.len(), data.len() - offset);
-        buffer[..bytes_to_read].copy_from_slice(&data[offset..offset + bytes_to_read]);
+        let bytes_to_read = self.pages.read().read(offset, buffer);
 
         self.metadata.write().accessed = crate::arch::timer::get_timestamp_secs();
 
@@ -237,18 +238,19 @@ impl VfsNode for TmpNode {
         }
 
         let end = super::ram_write_end(offset, data.len())?;
-        let mut file_data = self.data.write();
-        let growth = end.saturating_sub(file_data.len());
+        let mut pages = self.pages.write();
+        // Charged in whole pages, the memory a file holds (PR #28 review).
+        let growth =
+            ShmemPages::bytes_for(end.max(pages.size())).saturating_sub(pages.allocated_bytes());
 
         self.reserve_space(growth)?;
-        if let Err(e) = super::grow_ram_file(&mut file_data, end) {
+        if let Err(e) = pages.write(offset, data) {
             self.release_space(growth);
             return Err(e);
         }
-        file_data[offset..end].copy_from_slice(data);
 
         let mut metadata = self.metadata.write();
-        metadata.size = file_data.len();
+        metadata.size = pages.size();
         metadata.modified = crate::arch::timer::get_timestamp_secs();
 
         Ok(data.len())
@@ -372,22 +374,23 @@ impl VfsNode for TmpNode {
             return Err(KernelError::FsError(FsError::NotAFile));
         }
 
-        let mut data = self.data.write();
-        let old_len = data.len();
+        let mut pages = self.pages.write();
+        // Charged in whole pages, as in `write`.
+        let held = pages.allocated_bytes();
+        let need = ShmemPages::bytes_for(size);
 
-        if size > old_len {
+        if need > held {
             // Growing: check space
-            let growth = size - old_len;
-            self.reserve_space(growth)?;
-            if let Err(e) = super::grow_ram_file(&mut data, size) {
-                self.release_space(growth);
+            self.reserve_space(need - held)?;
+            if let Err(e) = pages.resize(size) {
+                self.release_space(need - held);
                 return Err(e);
             }
-        } else if size < old_len {
-            // Shrinking: reclaim space
-            let freed = old_len - size;
-            data.truncate(size);
-            self.release_space(freed);
+        } else {
+            // Same pages or fewer: reclaim what goes (EBUSY while a
+            // dropped page is still mapped, `ShmemPages::resize`)
+            pages.resize(size)?;
+            self.release_space(held - need);
         }
 
         let mut metadata = self.metadata.write();
@@ -552,6 +555,16 @@ impl VfsNode for TmpNode {
             .then(|| (super::dev_major(self.rdev), super::dev_minor(self.rdev)))
     }
 
+    #[cfg(feature = "alloc")]
+    fn share_pages(
+        &self,
+        first_page: usize,
+        count: usize,
+        _writable: bool,
+    ) -> Option<Result<Vec<crate::mm::FrameNumber>, KernelError>> {
+        (self.node_type == NodeType::File).then(|| self.pages.read().share(first_page, count))
+    }
+
     fn link(&self, name: &str, target: Arc<dyn VfsNode>) -> Result<(), KernelError> {
         if self.node_type != NodeType::Directory {
             return Err(KernelError::FsError(FsError::NotADirectory));
@@ -655,15 +668,17 @@ pub struct TmpFs {
 }
 
 impl TmpFs {
-    /// Create a new tmpfs with the given size limit in bytes.
-    /// Pass 0 for unlimited.
+    /// Create a new tmpfs with the given size limit in bytes, rounded up to
+    /// whole pages as Linux's `size=` is (files are charged in pages).
+    /// Pass 0 for unlimited. The root is mode 1777, Linux's tmpfs default.
     pub fn new(size_limit: usize) -> Self {
+        let size_limit = ShmemPages::bytes_for(size_limit);
         let bytes_used = Arc::new(AtomicUsize::new(0));
         let root_inode = TMPFS_NEXT_INODE.fetch_add(1, Ordering::Relaxed);
         let root = Arc::new(TmpNode::new_directory(
             root_inode,
             root_inode,
-            Permissions::default(),
+            Permissions::from_mode(0o1777),
             bytes_used.clone(),
             size_limit,
         ));
@@ -673,6 +688,13 @@ impl TmpFs {
             bytes_used,
             size_limit,
         }
+    }
+
+    /// A tmpfs limited to half of RAM, Linux's default size. At least one
+    /// page: a limit of 0 means unlimited, which an unknown RAM size must
+    /// not become (PR #28 review).
+    pub fn half_of_ram() -> Self {
+        Self::new((crate::mm::get_memory_stats().total_frames * 4096 / 2).max(4096))
     }
 
     /// Get current bytes used
@@ -718,6 +740,9 @@ mod tests {
 
     use super::*;
 
+    /// tmpfs charges whole pages, as Linux's does.
+    const P: usize = 4096;
+
     #[test]
     fn hard_link_shares_the_file_and_its_bytes() {
         let fs = TmpFs::new(1024 * 1024);
@@ -726,7 +751,7 @@ mod tests {
         a.write(0, b"one").unwrap();
         root.link("b", a.clone()).unwrap();
         // One file, counted once against the size limit (N-45).
-        assert_eq!(fs.bytes_used(), 3);
+        assert_eq!(fs.bytes_used(), P);
         root.lookup("b").unwrap().write(0, b"two").unwrap();
         let mut buf = [0u8; 3];
         a.read(0, &mut buf).unwrap();
@@ -735,7 +760,7 @@ mod tests {
 
     #[test]
     fn bytes_are_released_when_the_last_link_goes() {
-        let fs = TmpFs::new(8);
+        let fs = TmpFs::new(P);
         let root = fs.root();
         let a = root.create("a", Permissions::default()).unwrap();
         a.write(0, b"12345678").unwrap();
@@ -744,7 +769,7 @@ mod tests {
         // Unlinking one name must not return bytes still reachable through
         // the other, or link + unlink would grow tmpfs past its limit.
         root.unlink("a").unwrap();
-        assert_eq!(fs.bytes_used(), 8);
+        assert_eq!(fs.bytes_used(), P);
         let c = root.create("c", Permissions::default()).unwrap();
         assert!(c.write(0, b"x").is_err());
         drop(c);
@@ -806,7 +831,7 @@ mod tests {
         assert_eq!(file.node_type(), NodeType::File);
 
         file.write(0, b"Hello, tmpfs!").unwrap();
-        assert_eq!(fs.bytes_used(), 13);
+        assert_eq!(fs.bytes_used(), P);
 
         let mut buf = vec![0u8; 20];
         let n = file.read(0, &mut buf).unwrap();
@@ -820,53 +845,54 @@ mod tests {
     /// was refunded at the rename too) (PR #24 review).
     #[test]
     fn the_size_budget_counts_symlinks_and_renames_once() {
-        let fs = TmpFs::new(100);
+        let fs = TmpFs::new(4 * P);
         let root = fs.root();
         let a = root.create("a", Permissions::default()).unwrap();
         a.write(0, &[1u8; 30]).unwrap();
         root.symlink("l", "12345678").unwrap();
-        assert_eq!(fs.bytes_used(), 38);
+        assert_eq!(fs.bytes_used(), P + 8);
         root.unlink("l").unwrap();
-        assert_eq!(fs.bytes_used(), 30);
+        assert_eq!(fs.bytes_used(), P);
 
         let b = root.create("b", Permissions::default()).unwrap();
         b.write(0, &[2u8; 20]).unwrap();
         drop((a, b));
         root.rename("b", &root, "a").unwrap();
-        assert_eq!(fs.bytes_used(), 20, "the replaced file refunded once");
+        assert_eq!(fs.bytes_used(), P, "the replaced file refunded once");
     }
 
     #[test]
     fn test_size_limit_enforcement() {
-        let fs = TmpFs::new(10); // 10 byte limit
+        let fs = TmpFs::new(10); // rounded up to one page, as on Linux
+        assert_eq!(fs.size_limit(), P);
         let root = fs.root();
 
         let file = root.create("big.txt", Permissions::default()).unwrap();
 
-        // Write 8 bytes -- should succeed
-        assert!(file.write(0, b"12345678").is_ok());
-        assert_eq!(fs.bytes_used(), 8);
+        // Filling the one page succeeds
+        assert!(file.write(0, &[1u8; P - 2]).is_ok());
+        assert_eq!(fs.bytes_used(), P);
 
-        // Write 5 more bytes (would total 13) -- should fail
-        let result = file.write(8, b"abcde");
+        // Running into a second page fails
+        let result = file.write(P - 2, b"abcde");
         assert!(result.is_err());
         assert_eq!(result.unwrap_err(), KernelError::FsError(FsError::NoSpace));
 
-        // Bytes used should still be 8
-        assert_eq!(fs.bytes_used(), 8);
+        // Still one page used
+        assert_eq!(fs.bytes_used(), P);
     }
 
     #[test]
     fn test_truncate_reclaims_space() {
-        let fs = TmpFs::new(100);
+        let fs = TmpFs::new(4 * P);
         let root = fs.root();
 
         let file = root.create("shrink.txt", Permissions::default()).unwrap();
-        file.write(0, b"0123456789").unwrap();
-        assert_eq!(fs.bytes_used(), 10);
+        file.write(0, &[7u8; 2 * P + 10]).unwrap();
+        assert_eq!(fs.bytes_used(), 3 * P);
 
         file.truncate(3).unwrap();
-        assert_eq!(fs.bytes_used(), 3);
+        assert_eq!(fs.bytes_used(), P);
 
         let meta = file.metadata().unwrap();
         assert_eq!(meta.size, 3);
@@ -874,20 +900,21 @@ mod tests {
 
     #[test]
     fn test_truncate_grow_checks_space() {
-        let fs = TmpFs::new(10);
+        let fs = TmpFs::new(2 * P);
         let root = fs.root();
 
         let file = root.create("grow.txt", Permissions::default()).unwrap();
         file.write(0, b"12345").unwrap();
-        assert_eq!(fs.bytes_used(), 5);
+        assert_eq!(fs.bytes_used(), P);
 
-        // Growing to 10 should work
-        assert!(file.truncate(10).is_ok());
-        assert_eq!(fs.bytes_used(), 10);
+        // Growing to two pages should work
+        assert!(file.truncate(2 * P).is_ok());
+        assert_eq!(fs.bytes_used(), 2 * P);
 
-        // Growing to 11 should fail
-        let result = file.truncate(11);
+        // A third page should fail
+        let result = file.truncate(2 * P + 1);
         assert!(result.is_err());
+        assert_eq!(fs.bytes_used(), 2 * P);
     }
 
     #[test]
@@ -897,12 +924,12 @@ mod tests {
 
         let file = root.create("temp.txt", Permissions::default()).unwrap();
         file.write(0, b"some data").unwrap();
-        assert_eq!(fs.bytes_used(), 9);
+        assert_eq!(fs.bytes_used(), P);
 
         root.unlink("temp.txt").unwrap();
         // Still open: the data exists, so it stays charged (as on Linux,
         // where an unlinked open file keeps its blocks until the last close).
-        assert_eq!(fs.bytes_used(), 9);
+        assert_eq!(fs.bytes_used(), P);
         drop(file);
         assert_eq!(fs.bytes_used(), 0);
     }
@@ -989,17 +1016,46 @@ mod tests {
 
     #[test]
     fn test_multiple_files_share_limit() {
-        let fs = TmpFs::new(20);
+        let fs = TmpFs::new(2 * P);
         let root = fs.root();
 
         let f1 = root.create("a.txt", Permissions::default()).unwrap();
         let f2 = root.create("b.txt", Permissions::default()).unwrap();
 
-        f1.write(0, b"1234567890").unwrap(); // 10 bytes
-        f2.write(0, b"1234567890").unwrap(); // 10 bytes, total 20
+        // Ten bytes each, but each file holds a whole page: the limit is
+        // reached (PR #28 review: one-byte files must not exhaust RAM
+        // under a nearly empty budget).
+        f1.write(0, b"1234567890").unwrap();
+        f2.write(0, b"1234567890").unwrap();
+        assert_eq!(fs.bytes_used(), 2 * P);
 
-        // One more byte should fail
-        let result = f1.write(10, b"x");
-        assert!(result.is_err());
+        let f3 = root.create("c.txt", Permissions::default()).unwrap();
+        assert!(f3.write(0, b"x").is_err());
+        // Growing within a file's last page needs no new page.
+        assert!(f1.write(10, b"x").is_ok());
+        assert!(f1.write(P, b"x").is_err());
+    }
+
+    /// A file's pages are the file (N-230 for tmpfs, so /dev/shm works as
+    /// on Linux): a MAP_SHARED mapping gets the frames themselves, and
+    /// what is stored through one is what read() returns.
+    #[test]
+    fn a_shared_mapping_maps_the_file_s_own_pages() {
+        let fs = TmpFs::new(1 << 20);
+        let f = fs.root().create("ltp_ipc", Permissions::default()).unwrap();
+        f.truncate(4096).unwrap();
+        let frames = f.share_pages(0, 1, true).expect("tmpfs pages").unwrap();
+        assert_eq!(frames.len(), 1);
+        // SAFETY: on the host a shmem frame number is its heap page's
+        // address >> 12 (fs::shmem), and the file keeps the page alive.
+        unsafe { ((frames[0].as_u64() << 12) as *mut u8).add(5).write(42) };
+        let mut b = [0u8; 1];
+        f.read(5, &mut b).unwrap();
+        assert_eq!(b, [42]);
+        // A mapped page cannot be truncated away (EBUSY, as for a memfd).
+        assert!(f.truncate(0).is_err());
+        assert!(!crate::mm::frame_refs::release(frames[0]));
+        f.truncate(0).unwrap();
+        assert_eq!(fs.bytes_used(), 0);
     }
 }

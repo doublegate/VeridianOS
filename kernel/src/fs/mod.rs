@@ -26,9 +26,12 @@ pub mod pipe;
 pub mod procfs;
 pub mod pty;
 pub mod ramfs;
+#[cfg(feature = "alloc")]
+pub mod shmem;
 pub mod signalfd;
 pub mod tar;
 pub mod timerfd;
+#[cfg(feature = "alloc")]
 pub mod tmpfs;
 pub mod xattr;
 
@@ -1264,6 +1267,7 @@ impl Vfs {
             "ramfs" => Arc::new(ramfs::RamFs::new()),
             "devfs" => Arc::new(devfs::DevFs::new()),
             "procfs" => Arc::new(procfs::ProcFs::new()),
+            "tmpfs" => Arc::new(tmpfs::TmpFs::half_of_ram()),
             "blockfs" => Arc::new(blockfs::BlockFs::new(10000, 1000)),
             _ => return Err(KernelError::FsError(crate::error::FsError::UnknownFsType)),
         };
@@ -1662,6 +1666,15 @@ static VFS: crate::sync::once_lock::OnceLock<Vfs> = crate::sync::once_lock::Once
 ///
 /// Panics if the VFS has not been initialized via [`init`].
 /// Prefer [`try_get_vfs`] in contexts where a panic is unacceptable.
+/// Mount a tmpfs on /dev/shm, as Linux systems do: shm_open's objects and
+/// any file there mapped MAP_SHARED share the file's pages (`fs::tmpfs`).
+/// Called after every mount of /dev.
+#[cfg(feature = "alloc")]
+pub fn mount_dev_shm(vfs: &Vfs) {
+    vfs.mount("/dev/shm".into(), Arc::new(tmpfs::TmpFs::half_of_ram()))
+        .ok();
+}
+
 pub fn get_vfs() -> &'static Vfs {
     VFS.get()
         .expect("VFS not initialized: init() was not called")
@@ -1860,9 +1873,10 @@ pub fn init() {
         {
             let vfs = get_vfs();
             vfs.mount("/dev".into(), Arc::new(devfs)).ok();
+            mount_dev_shm(vfs);
         }
 
-        println!("[VFS] Device filesystem mounted at /dev");
+        println!("[VFS] Device filesystem mounted at /dev, tmpfs at /dev/shm");
 
         // Create ProcFS and mount at /proc
         println!("[VFS] Creating process filesystem...");
@@ -2910,6 +2924,40 @@ mod tests {
         let vfs = make_vfs_with_root();
         let result = vfs.mount_by_type("/tmp", "ramfs", 0);
         assert!(result.is_ok());
+    }
+
+    /// /dev/shm is a tmpfs mounted on devfs's `shm` directory, and a file
+    /// there maps its own pages (`fs::tmpfs`). A caller can unmount it and
+    /// mount it again, which needs the directory (`mount_target`; PR #28
+    /// review).
+    #[test]
+    fn test_mount_tmpfs_on_dev_shm() {
+        let vfs = make_vfs_with_root();
+        vfs.mount_by_type("/dev", "devfs", 0).unwrap();
+        vfs.mount_by_type("/dev/shm", "tmpfs", 0).unwrap();
+        let shm = vfs.resolve_path("/dev/shm").unwrap();
+        assert_eq!(
+            shm.metadata().unwrap().permissions.to_mode() & 0o7777,
+            0o1777
+        );
+        let f = shm.create("seg", Permissions::from_mode(0o600)).unwrap();
+        f.truncate(4096).unwrap();
+        let frames = f.share_pages(0, 1, true).expect("tmpfs pages").unwrap();
+        // The mapping's owner goes back; the file keeps the page.
+        assert!(!crate::mm::frame_refs::release(frames[0]));
+
+        let caller = CallerView {
+            vfs: &vfs,
+            ctx: PathContext {
+                cwd: String::from("/"),
+                root: String::from("/"),
+                creds: None,
+                pid: 0,
+            },
+        };
+        caller.unmount("/dev/shm").unwrap();
+        caller.mount_by_type("/dev/shm", "tmpfs", 0).unwrap();
+        assert!(vfs.resolve_path("/dev/shm/seg").is_err(), "a fresh tmpfs");
     }
 
     #[test]
