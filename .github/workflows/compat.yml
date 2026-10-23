@@ -102,8 +102,34 @@ jobs:
               run: |
                   export PATH=/opt/veridian/toolchain/bin:$PATH
                   ./scripts/build-busybox-rootfs.sh all
+            # LTP's tarball and the libc-test mirror, keyed on their pins: an
+            # outage of either host (repo.or.cz, 2026-10-23) then fails no run
+            # whose pins are cached. The build checks the tarball's SHA-256
+            # and the commit's full id, so a cached copy is used only if it is
+            # exactly what is pinned.
+            - name: Test suite source pins
+              id: compat-pins
+              run: |
+                  pins="$(grep -E '^(LTP_VERSION|LTP_SHA256|LIBC_TEST_COMMIT)=' scripts/build-compat-rootfs.sh | sha256sum | cut -c1-16)"
+                  echo "key=$pins" >> "$GITHUB_OUTPUT"
+            - name: Restore test suite sources
+              id: compat-sources-cache
+              uses: actions/cache/restore@v4
+              with:
+                  path: |
+                      /opt/veridian/sources/ltp-full-*.tar.xz
+                      /opt/veridian/sources/libc-test.git
+                  key: veridian-compat-sources-${{ steps.compat-pins.outputs.key }}
             - name: Build the compat root filesystem
               run: ./scripts/build-compat-rootfs.sh x86_64
+            - name: Save test suite sources
+              if: steps.compat-sources-cache.outputs.cache-hit != 'true'
+              uses: actions/cache/save@v4
+              with:
+                  path: |
+                      /opt/veridian/sources/ltp-full-*.tar.xz
+                      /opt/veridian/sources/libc-test.git
+                  key: ${{ steps.compat-sources-cache.outputs.cache-primary-key }}
             - name: Run the suites
               # Three guests at once (the runner has four CPUs and 16 GiB), and
               # the TCG limits: these runners are much slower than a host.

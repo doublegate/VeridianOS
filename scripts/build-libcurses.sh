@@ -19,8 +19,11 @@ SYSROOT="${TOOLCHAIN_PREFIX}/sysroot"
 
 SRC="${PROJECT_ROOT}/userland/libcurses"
 # Out of /tmp (aged out by systemd-tmpfiles), beside build-busybox-rootfs.sh's
-# tree; by default next to the toolchain, so a custom prefix argument alone is
-# enough (/opt/veridian/toolchain -> /opt/veridian/busybox-x86_64).
+# tree. The first of these that is set decides where:
+#   1. VERIDIAN_BUSYBOX_WORK (the BusyBox work tree itself),
+#   2. VERIDIAN_PREFIX (its busybox-x86_64),
+#   3. the directory above the toolchain argument, so a custom prefix argument
+#      alone is enough (/opt/veridian/toolchain -> /opt/veridian/busybox-x86_64).
 BUILD="${VERIDIAN_BUSYBOX_WORK:-${VERIDIAN_PREFIX:-$(dirname "$TOOLCHAIN_PREFIX")}/busybox-x86_64}/libcurses-build"
 
 # Verify cross-compiler exists

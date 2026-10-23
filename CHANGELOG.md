@@ -68,6 +68,21 @@
 - `ctutils` 0.4.4 (RUSTSEC-2026-0385: non-constant-time mask generation and `u128`
   comparisons in 0.4.3). It reaches the kernel through `ml-dsa`, the package signature
   verifier.
+- Conformance runner (PR #30 review follow-ups): `compat_exec` empties every entry of `/tmp` and
+  `/dev/shm` after a failed test, not only the first 256; it no longer reports a killed test as
+  `rc=0` if the wait after the kill fails; and a test output line over 1 KiB with a carriage
+  return in it no longer has its remainder read as further lines. The host driver stops waiting
+  as soon as a test could not start, retries each regressed test on a guest of its own (`--retry`
+  said so, but the retries shared one), and `collect` adds build-time results (NOTBUILT) only for
+  the suites its logs ran. The CI workflow caches LTP's tarball and the libc-test mirror keyed on
+  their pins, so an outage of either host does not fail it.
+- `musl_runtime_test`: the `pthread_cond_timedwait` deadline check started its stopwatch after
+  taking the mutex, so a wait that ended on time could measure under 40 ms (seen once on RISC-V
+  with four CPUs).
+- `scripts/build-busybox-rootfs.sh` exports `VERIDIAN_SOURCES` as the absolute path it resolved,
+  so the helper scripts it runs from inside the BusyBox tree do not create a stray relative
+  directory there; `scripts/build-libcurses.sh` documents which of `VERIDIAN_BUSYBOX_WORK`,
+  `VERIDIAN_PREFIX` and its toolchain argument decides its build directory.
 
 ---
 

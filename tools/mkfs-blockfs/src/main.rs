@@ -977,6 +977,21 @@ mod tests {
         }
     }
 
+    /// A directory that grows counts every block it gains in `blocks`
+    /// (filesystem blocks, as the kernel counts them), so st_blocks of a
+    /// large directory matches what it holds (PR #30 review).
+    #[test]
+    fn a_growing_directory_counts_its_blocks() {
+        let mut b = BlockFsBuilder::new(4096, 2048);
+        for i in 0..1000 {
+            b.create_file(0, &format!("file_with_a_name_{i}"), b"", S_IFREG | 0o644);
+        }
+        let root = &b.inodes[0];
+        let used = root.direct_blocks.iter().filter(|&&blk| blk != 0).count() as u32;
+        assert!(used > 4, "the test needs a directory over several blocks");
+        assert_eq!(root.blocks, used);
+    }
+
     /// The kernel reads only the 12 direct blocks of a directory, so a
     /// longer one is refused instead of written with entries it cannot see.
     #[test]

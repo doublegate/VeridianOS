@@ -36,6 +36,9 @@ SOURCES_DIR="${VERIDIAN_SOURCES:-${VERIDIAN_PREFIX:-/opt/veridian}/sources}"
 # Relative values are made absolute here: the build phases cd into $BB_SRC.
 case "$WORK_DIR" in /*) ;; *) WORK_DIR="${PWD}/${WORK_DIR}" ;; esac
 case "$SOURCES_DIR" in /*) ;; *) SOURCES_DIR="${PWD}/${SOURCES_DIR}" ;; esac
+# Exported absolute, so the scripts this one runs (veridian-paths.sh in a
+# subshell after `cd "$BB_SRC"`) do not resolve a relative one there.
+export VERIDIAN_SOURCES="$SOURCES_DIR"
 BB_SRC="${WORK_DIR}/busybox-${BUSYBOX_VERSION}"
 BB_BUILD="${WORK_DIR}/busybox-build"
 BB_PATCHES="${PROJECT_ROOT}/tools/busybox/patches"

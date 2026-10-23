@@ -50,7 +50,10 @@ judged at build time) and `serial-NNN.log` (`serial-jN-NNN.log` with `--jobs`), 
 full suites; `.github/workflows/compat.yml` runs the x86_64 smoke subset weekly
 and on pull requests that change these files. GitHub's runners (KVM nested in
 a VM) take 30 to 90 s for many timer- and fork-heavy tests, so the full suites
-do not fit in a job there.
+do not fit in a job there. The workflow caches LTP's tarball and the
+libc-test mirror under keys made from their pins (`LTP_VERSION`, `LTP_SHA256`,
+`LIBC_TEST_COMMIT`); the build verifies both, so a cache is used only when it
+holds exactly what is pinned.
 
 The run exits non-zero when a test expected to `PASS` does not (a
 regression), or, in a full run, does not run at all. Tests that now pass where they did not, and other changes, are

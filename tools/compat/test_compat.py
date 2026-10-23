@@ -294,6 +294,22 @@ class Collect(unittest.TestCase):
         self.assertEqual(r[("libc-test", "math/cos")][0], "CRASH")
         self.assertEqual(r[("libc-test", "math/tan")][0], "HANG")
 
+    def test_build_rows_only_for_suites_in_the_logs(self):
+        logged = {
+            ("libc-test", "math/sin"): ("PASS", ""),
+            ("libc-test", "math/x"): ("NOTBUILT", ""),
+        }
+        build = {
+            ("libc-test", "math/x"): ("NOTBUILT", "no musl symbol"),
+            ("libc-test", "math/y"): ("NOTBUILT", "needs glibc"),
+            ("ltp-syscalls", "foo01"): ("NOTBUILT", "needs libaio"),
+        }
+        r = compat.merge_build_rows(logged, build)
+        self.assertEqual(r[("libc-test", "math/x")], ("NOTBUILT", "no musl symbol"))
+        self.assertEqual(r[("libc-test", "math/y")], ("NOTBUILT", "needs glibc"))
+        self.assertEqual(r[("libc-test", "math/sin")], ("PASS", ""))
+        self.assertNotIn(("ltp-syscalls", "foo01"), r)
+
 
 class Smoke(unittest.TestCase):
     def test_smoke_lines_are_the_expected_passes_renumbered(self):

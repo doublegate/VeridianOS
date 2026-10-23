@@ -864,7 +864,9 @@ def run_retries(run, arch, args, lists):
         return []
     first = {k: run.results[k] for k in regressed}
     print(f"retrying {len(ranges)} tests that regressed", flush=True)
-    Worker(run, "retry", ranges)()
+    # Each on a fresh guest: what the first pass left behind (memory, files,
+    # a wedged device) is what makes a result vary in the first place.
+    Worker(run, "retry", ranges, fresh=True)()
     if run.error:
         # The first pass finished: keep its results (and the retries' so far).
         name = "smoke-results.tsv" if args.smoke else "results.tsv"
@@ -889,10 +891,11 @@ class Worker:
     and a new guest carries on after it.
     """
 
-    def __init__(self, run, name, ranges):
+    def __init__(self, run, name, ranges, fresh=False):
         self.run = run
         self.name = name
         self.ranges = ranges
+        self.fresh = fresh  # a new guest for every range
         self.guest = None
         self.boot = 0
         self.retried = None  # the last test run again after it could not start
@@ -965,6 +968,10 @@ class Worker:
                     seen = len(parser.done)
                 if parser.summary is not None:
                     outcome = "done"
+                elif parser.retry:
+                    # The runner stops after a test that could not start;
+                    # there is nothing more to wait for on this guest.
+                    outcome = "RETRY"
                 elif parser.error:
                     raise RunError(f"runner: {parser.error}")
                 elif parser.panic or not self.guest.alive():
@@ -1073,6 +1080,9 @@ class Worker:
     def __call__(self):
         try:
             for suite, first, last in self.ranges:
+                if self.fresh and self.guest is not None:
+                    self.guest.stop()
+                    self.guest = None
                 self._range(suite, first, last)
         except RunError as e:
             self.run.error = self.run.error or str(e)
@@ -1376,6 +1386,23 @@ def results_from_logs(texts, times=None):
     return results
 
 
+def merge_build_rows(logged, build):
+    """The results of the logs plus the build-time rows of the suites they ran.
+
+    Build rows (tests judged when the image was built, such as NOTBUILT) of a
+    suite with no result in the logs are left out, as `run` does: otherwise
+    collecting one suite's logs would report every other suite as built but
+    not run. A logged NOTBUILT keeps the build row's note.
+    """
+    suites = {k[0] for k in logged}
+    results = {k: v for k, v in build.items() if k[0] in suites}
+    for key, value in logged.items():
+        if value[0] == "NOTBUILT" and key in results:
+            value = (value[0], results[key][1] or value[1])
+        results[key] = value
+    return results
+
+
 def cmd_collect(args):
     out = Path(args.out or REPO / "target" / "compat" / args.arch)
     # A full run's logs (smoke runs keep theirs as serial-smoke-*).
@@ -1385,21 +1412,18 @@ def cmd_collect(args):
     )
     if args.logs:
         logs = [Path(p) for p in args.logs]
-    results = {}
     build_tsv = out / "build.tsv"
     if not build_tsv.exists():
         build_tsv = (
             Path(args.root or REPO / "target" / f"rootfs-compat-{args.arch}")
             / "usr/lib/compat/build.tsv"
         )
-    if build_tsv.exists():
-        results.update(read_tsv(build_tsv))
     times = {}
     texts = (p.read_text(errors="replace") for p in logs)
-    for key, value in results_from_logs(texts, times).items():
-        if value[0] == "NOTBUILT" and key in results:
-            value = (value[0], results[key][1] or value[1])
-        results[key] = value
+    results = merge_build_rows(
+        results_from_logs(texts, times),
+        read_tsv(build_tsv) if build_tsv.exists() else {},
+    )
     write_tsv(out / "results.tsv", results, args.arch)
     with open(out / "times.tsv", "w", encoding="utf-8") as f:
         f.writelines(f"{k[0]}\t{k[1]}\t{times[k]}\n" for k in sorted(times, key=_order))
