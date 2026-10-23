@@ -24,7 +24,9 @@
  * leaves behind (LTP_* directories in /tmp, its ltp_* results files in
  * /dev/shm) is removed then.
  *
- * Exits 3 when the limit killed the test, 0 otherwise, 2 on bad usage.
+ * Exits 3 when the limit killed the test, 4 when it could not be started
+ * (no OUTFILE, no fork: the guest is short of something, and the runner
+ * stops so that the host boots a fresh one), 0 otherwise, 2 on bad usage.
  *
  * Doing all of this in one program keeps the runner to one process per
  * test: creating processes is slow enough on VeridianOS that a shell
@@ -205,7 +207,7 @@ int main(int argc, char **argv)
     if (out < 0) {
         printf("COMPAT-LOG %s compat_exec: %s: %s\n", argv[3], argv[2], strerror(errno));
         printf("COMPAT-END %s %s rc=127 sig=0 timeout=0 ms=0\n", argv[3], argv[4]);
-        return 0;
+        return 4;
     }
     fflush(stdout);
     start = now_ms();
@@ -215,7 +217,7 @@ int main(int argc, char **argv)
         /* Say so: out of processes or memory is not a missing program. */
         printf("COMPAT-LOG %s compat_exec: fork: %s\n", argv[3], strerror(errno));
         printf("COMPAT-END %s %s rc=127 sig=0 timeout=0 ms=0\n", argv[3], argv[4]);
-        return 0;
+        return 4;
     }
     if (pid == 0)
         child(out, argv[5], &argv[6]);

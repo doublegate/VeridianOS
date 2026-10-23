@@ -793,6 +793,26 @@ def share_ranges(ranges, jobs):
     return shares
 
 
+def stale_smoke(expected, lists, exclude=()):
+    """Expected passes missing from the image's smoke lists (`<suite>-smoke`).
+
+    The lists are made from the expected list when the image is built; one
+    built before a test was added as PASS would leave it out of a smoke run
+    without a word. `exclude` holds tests judged at build time, which have
+    no list entry.
+    """
+    stale = []
+    for name, lines in lists.items():
+        suite = suite_of(name)
+        ids = {w[1] for w in (line.split(" ", 2) for line in lines) if len(w) > 1}
+        stale += [
+            k
+            for k, (st, _) in expected.items()
+            if k[0] == suite and st == "PASS" and k[1] not in ids and k not in exclude
+        ]
+    return sorted(stale, key=_order)
+
+
 def retry_ranges(keys, lists):
     """Single-test ranges, (list, n, n), for (suite, id) keys in these lists.
 
@@ -1065,6 +1085,22 @@ def cmd_run(args):
     listed = listed_tests(root, suites)
     if args.smoke:
         suites = [f"{s}-smoke" for s in suites]
+        expected_path = Path(
+            args.expected or REPO / "tests" / "compat" / f"expected-{arch}.tsv"
+        )
+        if expected_path.exists():
+            smoke = {}
+            for name in suites:
+                lst = root / "usr" / "lib" / "compat" / f"{name}.list"
+                smoke[name] = lst.read_text().splitlines() if lst.exists() else []
+            stale = stale_smoke(
+                read_tsv(expected_path), smoke, exclude=set(run.results)
+            )
+            if stale:
+                sys.exit(
+                    f"FAIL: the image's smoke lists lack {len(stale)} expected passes "
+                    f"(first {' '.join(stale[0])}); rebuild it: scripts/build-compat-rootfs.sh {arch}"
+                )
 
     have = set()
     if args.resume:

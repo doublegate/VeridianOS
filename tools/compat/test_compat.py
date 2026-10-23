@@ -331,6 +331,20 @@ class Retry(unittest.TestCase):
         )
 
 
+class SmokeList(unittest.TestCase):
+    def test_a_stale_smoke_list_is_found(self):
+        expected = {
+            ("s", "a"): ("PASS", ""),
+            ("s", "b"): ("PASS", ""),
+            ("s", "c"): ("FLAKY", ""),
+        }
+        lists = {"s-smoke": ["1 a - /x/a"]}
+        self.assertEqual(compat.stale_smoke(expected, lists), [("s", "b")])
+        self.assertEqual(
+            compat.stale_smoke(expected, {"s-smoke": ["1 a - -", "2 b - -"]}), []
+        )
+
+
 class Ranges(unittest.TestCase):
     def test_split_covers_every_test_once(self):
         self.assertEqual(compat.split_ranges(10, 3), [(1, 4), (5, 7), (8, 10)])

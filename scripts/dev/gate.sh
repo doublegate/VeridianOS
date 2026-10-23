@@ -147,9 +147,12 @@ if [ $rootfs -eq 1 ]; then
     # a regression in any of them fails the step. --retry runs a test that
     # regressed once more, so one whose result varies (timing) is reported
     # as a FLAKY candidate instead of costing a whole gate run.
-    step compat-image-x86_64 scripts/build-compat-rootfs.sh x86_64
-    step compat-smoke-x86_64 scripts/run-compat-tests.sh x86_64 --smoke --jobs 3 --retry
-    grep -aE '^(COMPAT |PASS compat|FAIL compat)' "$log_dir/compat-smoke-x86_64.log"
+    # (--compat runs all of them anyway.)
+    if [ $compat -eq 0 ]; then
+        step compat-image-x86_64 scripts/build-compat-rootfs.sh x86_64
+        step compat-smoke-x86_64 scripts/run-compat-tests.sh x86_64 --smoke --jobs 3 --retry
+        grep -aE '^(COMPAT |PASS compat|FAIL compat)' "$log_dir/compat-smoke-x86_64.log"
+    fi
 fi
 if [ $smp -eq 1 ] && { [ $boot -eq 1 ] || [ $rootfs -eq 1 ]; }; then
     # The same kernel (the `smp` feature is on by default) on four CPUs.

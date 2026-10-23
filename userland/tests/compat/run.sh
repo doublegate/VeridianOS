@@ -56,7 +56,7 @@ fi
 # reading past a thousand long lines took minutes under emulation. The loop
 # runs in a subshell (the pipeline), so it prints the summary itself;
 # `read` empties n at the end, so the count is kept apart.
-sed -n "$first,\$p" "$list" | {
+sed -n "$first,${stop:-\$}p" "$list" | {
     last=0
     while read -r n id dir prog args; do
         [ -z "$id" ] && continue
@@ -69,8 +69,8 @@ sed -n "$first,\$p" "$list" | {
         fi
         # compat_exec also removes what a failed test left in /tmp. It exits 0,
         # or 3 when the limit killed the test; anything else means it died
-        # before reporting, and the runner stops so that the host records
-        # this test (the prompt comes back during it) and carries on after.
+        # before reporting, or (4) could not start the test, and the runner
+        # stops so that the host boots a fresh guest and carries on.
         # shellcheck disable=SC2086 # ARGs are split into words on purpose
         "$exec_helper" "$limit" "$out" "$n" "$id" "$dir" "$prog" $args </dev/null
         rc=$?
