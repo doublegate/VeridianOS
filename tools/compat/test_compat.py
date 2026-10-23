@@ -130,6 +130,20 @@ class Parse(unittest.TestCase):
         )
         self.assertEqual(compat.note_for(r, status="FAIL"), "c.c:15: TFAIL: argc is 0")
 
+    def test_note_drops_the_build_tree(self):
+        # Old-API LTP tests print their source's absolute path.
+        r = compat.Record(
+            1,
+            "a",
+            "rc=1 sig=0 timeout=0 ms=1",
+            [
+                "/opt/veridian/compat-build/x86_64/ltp-full-20260930/testcases/kernel/x.c:9: TFAIL: no"
+            ],
+        )
+        self.assertEqual(
+            compat.note_for(r, status="FAIL"), "testcases/kernel/x.c:9: TFAIL: no"
+        )
+
     def test_note_hides_ltp_temporary_names(self):
         r = compat.Record(
             1,

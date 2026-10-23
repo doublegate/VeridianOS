@@ -189,6 +189,7 @@ class SerialParser:
 
 
 _LTP_TMP = re.compile(r"/tmp/LTP_\w+")
+_BUILD_TREE = re.compile(r"\S*/ltp-full-\d+/")
 # Terminal escape sequences and other control characters (a test whose
 # environment lacks LTP_COLORIZE_OUTPUT=0 colours its output), which tools
 # reading the expected lists refuse.
@@ -213,7 +214,9 @@ def note_for(record, detail="", status=None):
             (line for line in lines if _FAILURE.search(line)), lines[0] if lines else ""
         )
     note = "; ".join(x for x in (detail, hit) if x)
-    # LTP's temporary directories have random names; keep notes stable.
+    # LTP's temporary directories have random names, and old-API tests
+    # print their source's path in the build tree; keep notes stable.
+    note = _BUILD_TREE.sub("", note)
     return _LTP_TMP.sub("/tmp/LTP_XXXXXX", note)[:160]
 
 
@@ -1061,11 +1064,6 @@ def cmd_run(args):
     if args.smoke:
         suites = [f"{s}-smoke" for s in suites]
 
-    if not args.resume:
-        # A new run's logs only: `collect` reads every serial-*.log here, and
-        # an earlier run's would be taken as this one's.
-        for old in run.out.glob("serial-*.log"):
-            old.unlink()
     have = set()
     if args.resume:
         if args.smoke or args.first:
@@ -1116,6 +1114,12 @@ def cmd_run(args):
             f"resuming: {sum(b - a + 1 for _, a, b in pending)} tests without a result",
             flush=True,
         )
+    if not args.resume:
+        # A new run's logs only (once every list has been found): `collect`
+        # reads every serial-*.log here, and an earlier run's would be taken
+        # as this one's.
+        for old in run.out.glob("serial-*.log"):
+            old.unlink()
     names = [""] if args.jobs == 1 else [f"j{j + 1}" for j in range(args.jobs)]
     workers = [Worker(run, n, share) for n, share in zip(names, shares) if share]
     threads = [threading.Thread(target=w, name=w.name or "worker") for w in workers]
@@ -1131,9 +1135,11 @@ def cmd_run(args):
             t.join()
         raise
     if run.error:
-        # Keep what finished: `collect` can add the rest from the logs.
-        write_tsv(run.out / "results.tsv", run.results, arch)
-        sys.exit(f"FAIL: {run.error} (partial results in {run.out / 'results.tsv'})")
+        # Keep what finished (`collect` can add the rest from the logs), and
+        # in a smoke run not over a full run's results.
+        name = "smoke-results.tsv" if args.smoke else "results.tsv"
+        write_tsv(run.out / name, run.results, arch)
+        sys.exit(f"FAIL: {run.error} (partial results in {run.out / name})")
 
     flaky = []
     if args.retry and not args.update:

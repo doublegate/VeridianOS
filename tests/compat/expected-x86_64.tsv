@@ -459,9 +459,9 @@ ltp-syscalls	getgid01_16	WARN	tst_test.c:1101: TWARN: Kernel is older than minim
 ltp-syscalls	getgid03	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
 ltp-syscalls	getgid03_16	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
 ltp-syscalls	getgroups01	PASS	
-ltp-syscalls	getgroups01_16	CONF	getgroups01_16    1  TCONF  :  /opt/veridian/compat-build/x86_64/ltp-full-20260930/testcases/kernel/syscalls/getgroups/../utils/compat_16.h:82: 16-bit version o
+ltp-syscalls	getgroups01_16	CONF	getgroups01_16    1  TCONF  :  testcases/kernel/syscalls/getgroups/../utils/compat_16.h:82: 16-bit version o
 ltp-syscalls	getgroups03	PASS	
-ltp-syscalls	getgroups03_16	CONF	getgroups03_16    1  TCONF  :  /opt/veridian/compat-build/x86_64/ltp-full-20260930/testcases/kernel/syscalls/getgroups/../utils/compat_16.h:77: 16-bit version o
+ltp-syscalls	getgroups03_16	CONF	getgroups03_16    1  TCONF  :  testcases/kernel/syscalls/getgroups/../utils/compat_16.h:77: 16-bit version o
 ltp-syscalls	gethostbyname_r01	FAIL	exit 5; gethostbyname_r01.c:52: TFAIL: retval (0) != ERANGE (34)
 ltp-syscalls	gethostid01	CONF	tst_test.c:1429: TCONF: sethostid is undefined.
 ltp-syscalls	gethostname01	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
@@ -484,17 +484,17 @@ ltp-syscalls	getrandom03	WARN	tst_test.c:1101: TWARN: Kernel is older than minim
 ltp-syscalls	getrandom04	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
 ltp-syscalls	getrandom05	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
 ltp-syscalls	getresgid01	PASS	
-ltp-syscalls	getresgid01_16	CONF	getresgid01    1  TCONF  :  /opt/veridian/compat-build/x86_64/ltp-full-20260930/testcases/kernel/syscalls/getresgid/../utils/compat_16.h:151: 16-bit version of 
+ltp-syscalls	getresgid01_16	CONF	getresgid01    1  TCONF  :  testcases/kernel/syscalls/getresgid/../utils/compat_16.h:151: 16-bit version of 
 ltp-syscalls	getresgid02	PASS	
-ltp-syscalls	getresgid02_16	CONF	getresgid02    1  TCONF  :  /opt/veridian/compat-build/x86_64/ltp-full-20260930/testcases/kernel/syscalls/getresgid/../utils/compat_16.h:151: 16-bit version of 
+ltp-syscalls	getresgid02_16	CONF	getresgid02    1  TCONF  :  testcases/kernel/syscalls/getresgid/../utils/compat_16.h:151: 16-bit version of 
 ltp-syscalls	getresgid03	PASS	
-ltp-syscalls	getresgid03_16	CONF	getresgid03    1  TCONF  :  /opt/veridian/compat-build/x86_64/ltp-full-20260930/testcases/kernel/syscalls/getresgid/../utils/compat_16.h:151: 16-bit version of 
+ltp-syscalls	getresgid03_16	CONF	getresgid03    1  TCONF  :  testcases/kernel/syscalls/getresgid/../utils/compat_16.h:151: 16-bit version of 
 ltp-syscalls	getresuid01	PASS	
-ltp-syscalls	getresuid01_16	CONF	getresuid01    1  TCONF  :  /opt/veridian/compat-build/x86_64/ltp-full-20260930/testcases/kernel/syscalls/getresuid/../utils/compat_16.h:141: 16-bit version of 
+ltp-syscalls	getresuid01_16	CONF	getresuid01    1  TCONF  :  testcases/kernel/syscalls/getresuid/../utils/compat_16.h:141: 16-bit version of 
 ltp-syscalls	getresuid02	PASS	
-ltp-syscalls	getresuid02_16	CONF	getresuid02    1  TCONF  :  /opt/veridian/compat-build/x86_64/ltp-full-20260930/testcases/kernel/syscalls/getresuid/../utils/compat_16.h:141: 16-bit version of 
+ltp-syscalls	getresuid02_16	CONF	getresuid02    1  TCONF  :  testcases/kernel/syscalls/getresuid/../utils/compat_16.h:141: 16-bit version of 
 ltp-syscalls	getresuid03	PASS	
-ltp-syscalls	getresuid03_16	CONF	getresuid03    1  TCONF  :  /opt/veridian/compat-build/x86_64/ltp-full-20260930/testcases/kernel/syscalls/getresuid/../utils/compat_16.h:141: 16-bit version of 
+ltp-syscalls	getresuid03_16	CONF	getresuid03    1  TCONF  :  testcases/kernel/syscalls/getresuid/../utils/compat_16.h:141: 16-bit version of 
 ltp-syscalls	getrlimit01	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
 ltp-syscalls	getrlimit02	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
 ltp-syscalls	getrlimit03	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
@@ -812,12 +812,12 @@ ltp-syscalls	mprotect02	BROK	mprotect02    1  TBROK  :  tst_fs_type.c:20: tst_fs
 ltp-syscalls	mprotect03	BROK	mprotect03    1  TBROK  :  tst_fs_type.c:20: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): errno=ENOSYS(38): Function not implemented
 ltp-syscalls	mprotect04	BROK	mprotect04    1  TBROK  :  tst_fs_type.c:20: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): errno=ENOSYS(38): Function not implemented
 ltp-syscalls	mprotect05	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
-ltp-syscalls	mq_notify01	BROK	/opt/veridian/compat-build/x86_64/ltp-full-20260930/testcases/kernel/syscalls/mq_notify/../utils/mq.h:51: TBROK: mq_open(/test_mqueue_667,194,0700,0) failed: EN
+ltp-syscalls	mq_notify01	BROK	testcases/kernel/syscalls/mq_notify/../utils/mq.h:51: TBROK: mq_open(/test_mqueue_667,194,0700,0) failed: EN
 ltp-syscalls	mq_notify02	FAIL	exit 5; mq_notify02.c:28: TFAIL: mq_notify(0, &(test->sevp)) expected EINVAL: ENOSYS (38)
 ltp-syscalls	mq_notify03	BROK	mq_notify03.c:76: TBROK: mq_open(/ltp_mq_notify03,194,0600,0x7ffdf555fa00) failed: ENOSYS (38)
 ltp-syscalls	mq_open01	BROK	mq_open01.c:198: TBROK: mq_open(/init_mqueue,194,0700,0) failed: ENOSYS (38)
-ltp-syscalls	mq_timedreceive01	BROK	/opt/veridian/compat-build/x86_64/ltp-full-20260930/testcases/kernel/syscalls/mq_timedreceive/../utils/mq.h:51: TBROK: mq_open(/test_mqueue_679,194,0700,0) fail
-ltp-syscalls	mq_timedsend01	BROK	/opt/veridian/compat-build/x86_64/ltp-full-20260930/testcases/kernel/syscalls/mq_timedsend/../utils/mq.h:51: TBROK: mq_open(/test_mqueue_682,194,0700,0) failed:
+ltp-syscalls	mq_timedreceive01	BROK	testcases/kernel/syscalls/mq_timedreceive/../utils/mq.h:51: TBROK: mq_open(/test_mqueue_679,194,0700,0) fail
+ltp-syscalls	mq_timedsend01	BROK	testcases/kernel/syscalls/mq_timedsend/../utils/mq.h:51: TBROK: mq_open(/test_mqueue_682,194,0700,0) failed:
 ltp-syscalls	mq_unlink01	BROK	mq_unlink01.c:85: TBROK: mq_open(/test_mqueue_685,194,0700,0) failed: ENOSYS (38)
 ltp-syscalls	mremap01	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
 ltp-syscalls	mremap02	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
@@ -1198,7 +1198,7 @@ ltp-syscalls	setfsgid01_16	WARN	tst_test.c:1101: TWARN: Kernel is older than min
 ltp-syscalls	setfsgid02	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
 ltp-syscalls	setfsgid02_16	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
 ltp-syscalls	setfsgid03	PASS	
-ltp-syscalls	setfsgid03_16	CONF	setfsgid03_16    1  TCONF  :  /opt/veridian/compat-build/x86_64/ltp-full-20260930/testcases/kernel/syscalls/setfsgid/../utils/compat_16.h:122: 16-bit version of
+ltp-syscalls	setfsgid03_16	CONF	setfsgid03_16    1  TCONF  :  testcases/kernel/syscalls/setfsgid/../utils/compat_16.h:122: 16-bit version of
 ltp-syscalls	setfsuid01	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
 ltp-syscalls	setfsuid01_16	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
 ltp-syscalls	setfsuid02	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
@@ -1219,9 +1219,9 @@ ltp-syscalls	setgroups02	WARN	tst_test.c:1101: TWARN: Kernel is older than minim
 ltp-syscalls	setgroups02_16	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
 ltp-syscalls	setgroups03	FAIL	exit 5; setgroups03.c:48: TFAIL: setgroups(33, groups_list) succeeded
 ltp-syscalls	setgroups03_16	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
-ltp-syscalls	sethostname01	FAIL	exit 37; /opt/veridian/compat-build/x86_64/ltp-full-20260930/testcases/kernel/syscalls/sethostname/../setdomainname/setdomainname01.c:18: TFAIL: sethostname() f
-ltp-syscalls	sethostname02	FAIL	exit 37; /opt/veridian/compat-build/x86_64/ltp-full-20260930/testcases/kernel/syscalls/sethostname/../setdomainname/setdomainname02.c:39: TFAIL: unexpected errn
-ltp-syscalls	sethostname03	FAIL	exit 37; /opt/veridian/compat-build/x86_64/ltp-full-20260930/testcases/kernel/syscalls/sethostname/../setdomainname/setdomainname03.c:27: TFAIL: unexpected errn
+ltp-syscalls	sethostname01	FAIL	exit 37; testcases/kernel/syscalls/sethostname/../setdomainname/setdomainname01.c:18: TFAIL: sethostname() f
+ltp-syscalls	sethostname02	FAIL	exit 37; testcases/kernel/syscalls/sethostname/../setdomainname/setdomainname02.c:39: TFAIL: unexpected errn
+ltp-syscalls	sethostname03	FAIL	exit 37; testcases/kernel/syscalls/sethostname/../setdomainname/setdomainname03.c:27: TFAIL: unexpected errn
 ltp-syscalls	setitimer01	FAIL	exit 37; setitimer01.c:124: TFAIL: Child: exited with 0
 ltp-syscalls	setitimer02	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
 ltp-syscalls	setns01	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
