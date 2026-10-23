@@ -40,6 +40,9 @@
 
 - `.githooks/pre-push` keeps leading and trailing whitespace in path names when scanning for
   sensitive files.
+- `ctutils` 0.4.4 (RUSTSEC-2026-0385: non-constant-time mask generation and `u128`
+  comparisons in 0.4.3). It reaches the kernel through `ml-dsa`, the package signature
+  verifier.
 
 ---
 
