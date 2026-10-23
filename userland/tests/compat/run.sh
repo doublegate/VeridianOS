@@ -24,7 +24,8 @@
 #   COMPAT-END N ID RESULT   RESULT is "rc=.. sig=.. timeout=.. ms=..", or
 #                            "notbuilt"
 #   COMPAT-SUMMARY LIST N    after the last line
-# compat_exec prints the LOG and END lines.
+# compat_exec prints the LOG and END lines, or COMPAT-RETRY N ID REASON
+# when it could not start the test (the host runs it again on a fresh guest).
 #
 # Everything here but compat_exec is a shell builtin, so each test costs one
 # process (plus the test's own): creating processes is slow on VeridianOS,

@@ -131,6 +131,7 @@ class SerialParser:
         self.done = []
         self.current = None
         self.summary = None
+        self.retry = None  # (n, id, reason): a test compat_exec could not start
         self.error = None
         self.panic = False
         self._buf = ""
@@ -185,6 +186,16 @@ class SerialParser:
             n = rest.split()[-1] if rest.split() else ""
             if n.isdigit():
                 self.summary = int(n)
+                self.current = None
+        elif word == "COMPAT-RETRY":
+            parts = rest.split(" ", 2)
+            if len(parts) >= 2 and parts[0].isdigit():
+                self.retry = (
+                    int(parts[0]),
+                    parts[1],
+                    parts[2].strip() if len(parts) > 2 else "",
+                )
+                self._logs.pop(int(parts[0]), None)
                 self.current = None
         elif word == "COMPAT-ERROR":
             self.error = rest
@@ -884,6 +895,7 @@ class Worker:
         self.ranges = ranges
         self.guest = None
         self.boot = 0
+        self.retried = None  # the last test run again after it could not start
 
     def _boot(self):
         run = self.run
@@ -892,7 +904,7 @@ class Worker:
             if run.boots > run.max_boots:
                 raise RunError(f"more than {run.max_boots} boots; giving up")
         # The next free name: a resumed run keeps the earlier logs.
-        suffix = f"{self.name}-" if self.name else ""
+        suffix = run.log_prefix + (f"{self.name}-" if self.name else "")
         while True:
             self.boot += 1
             log = run.out / f"serial-{suffix}{self.boot:03d}.log"
@@ -990,8 +1002,31 @@ class Worker:
                 ):
                     time.sleep(0.5)
                     parser.feed(self.guest.read())
+                if parser.prompts == 0:
+                    # No prompt after the summary: the next range would wait a
+                    # whole limit on this guest before booting another.
+                    self.guest.stop()
+                    self.guest = None
                 return
-            if parser.current:
+            if parser.retry:
+                n, tid, why = parser.retry
+                if self.retried == (suite, n):
+                    # Not on a fresh guest either: record it and go on.
+                    with run.lock:
+                        run.results[(suite, tid)] = (
+                            "EXECFAIL",
+                            f"could not be started: {why}",
+                        )
+                    print(f"{tag} EXECFAIL at {n} {tid}: {why} (twice)", flush=True)
+                    first = n + 1
+                else:
+                    print(
+                        f"{tag} {n} {tid} could not be started ({why}); booting again",
+                        flush=True,
+                    )
+                    self.retried = (suite, n)
+                    first = n
+            elif parser.current:
                 n, tid = parser.current
                 if parser.panic:
                     why = "kernel panic"
@@ -1069,6 +1104,7 @@ def cmd_run(args):
     run.stop = threading.Event()
     run.error = None
     run.stuck = []
+    run.log_prefix = "smoke-" if args.smoke else ""
     run.results, run.times = {}, {}
     suites = args.suites.split(",") if args.suites else list(SUITES)
     if args.jobs > 1 and args.first:
@@ -1078,6 +1114,9 @@ def cmd_run(args):
     # The tests judged at build time, of the suites being run (a smoke run
     # compares them too: a compile-only test has no list entry).
     build_tsv = Path(args.build_tsv or run.out / "build.tsv")
+    if not build_tsv.exists():
+        # The image carries a copy, should the output directory be new.
+        build_tsv = root / "usr" / "lib" / "compat" / "build.tsv"
     if build_tsv.exists():
         run.results.update(
             {k: v for k, v in read_tsv(build_tsv).items() if k[0] in suites}
@@ -1156,8 +1195,11 @@ def cmd_run(args):
         # A new run's logs only (once every list has been found): `collect`
         # reads every serial-*.log here, and an earlier run's would be taken
         # as this one's.
-        for old in run.out.glob("serial-*.log"):
-            old.unlink()
+        # A smoke run keeps its own logs, apart from a full run's.
+        mine = "serial-smoke-*.log" if args.smoke else "serial-*.log"
+        for old in run.out.glob(mine):
+            if args.smoke or not old.name.startswith("serial-smoke-"):
+                old.unlink()
     names = [""] if args.jobs == 1 else [f"j{j + 1}" for j in range(args.jobs)]
     workers = [Worker(run, n, share) for n, share in zip(names, shares) if share]
     threads = [threading.Thread(target=w, name=w.name or "worker") for w in workers]
@@ -1336,11 +1378,20 @@ def results_from_logs(texts, times=None):
 
 def cmd_collect(args):
     out = Path(args.out or REPO / "target" / "compat" / args.arch)
-    logs = sorted(out.glob("serial-*.log"), key=lambda p: p.stat().st_mtime)
+    # A full run's logs (smoke runs keep theirs as serial-smoke-*).
+    logs = sorted(
+        (p for p in out.glob("serial-*.log") if not p.name.startswith("serial-smoke-")),
+        key=lambda p: p.stat().st_mtime,
+    )
     if args.logs:
         logs = [Path(p) for p in args.logs]
     results = {}
     build_tsv = out / "build.tsv"
+    if not build_tsv.exists():
+        build_tsv = (
+            Path(args.root or REPO / "target" / f"rootfs-compat-{args.arch}")
+            / "usr/lib/compat/build.tsv"
+        )
     if build_tsv.exists():
         results.update(read_tsv(build_tsv))
     times = {}

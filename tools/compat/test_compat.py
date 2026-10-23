@@ -109,6 +109,17 @@ class Parse(unittest.TestCase):
         p.feed("/bin/ash x\n")
         self.assertEqual(p.prompts, 1)
 
+    def test_a_test_that_could_not_start_is_not_a_result(self):
+        # compat_exec could not open its output or fork: the test never ran,
+        # so it gets no result and is run again on a fresh guest.
+        p = compat.SerialParser()
+        p.feed(
+            "COMPAT-BEGIN 7 a\nCOMPAT-RETRY 7 a fork: Resource temporarily unavailable\n"
+        )
+        self.assertEqual(p.done, [])
+        self.assertIsNone(p.current)
+        self.assertEqual(p.retry, (7, "a", "fork: Resource temporarily unavailable"))
+
     def test_carriage_returns_and_noise(self):
         p = compat.SerialParser()
         p.feed(

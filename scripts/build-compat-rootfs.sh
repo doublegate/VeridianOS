@@ -244,6 +244,8 @@ EOF
         --libc-test "${LIBC_TEST}" --libc-test-log "${WORK}/libc-test-make.log" \
         --root "${OUT}" --out "${OUT}/usr/lib/compat" --build-tsv "${RESULTS}/build.tsv" \
         --expected "${ROOT}/tests/compat/expected-${arch}.tsv"
+    # A copy in the image, for a run whose output directory has none.
+    cp "${RESULTS}/build.tsv" "${OUT}/usr/lib/compat/build.tsv"
 }
 
 build_image() {
