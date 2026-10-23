@@ -166,7 +166,7 @@ Each group lands with its LTP cases. The counts are "missing" entries in the cov
   | Suite | x86_64 | AArch64 | RISC-V |
   |---|---|---|---|
   | LTP `syscalls` (1,552) | 24 pass, 417 WARN | 24 pass, 411 WARN | 24 pass, 410 WARN |
-  | Open POSIX (1,965) | 1,571 | 1,566 | 1,566 |
+  | Open POSIX (1,965) | 1,569 | 1,565 | 1,565 |
   | musl libc-test (560) | 523 | 525 | 525 |
 
   Most LTP tests stop in its library before their check: statfs is ENOSYS, `uname` reports

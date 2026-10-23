@@ -266,7 +266,7 @@ fetch_ltp
 fetch_libc_test
 stamp="$(stamp_of)"
 if [[ ${COMPAT_REBUILD:-0} == 1 || ! -f "${WORK}/stamp" || "$(cat "${WORK}/stamp")" != "${stamp}" ||
-    ! -d "${LTP_STAGE}/opt/ltp" || ! -d "${LIBC_TEST}/src" ]]; then
+    ! -d "${LTP_SRC}" || ! -d "${LTP_STAGE}/opt/ltp" || ! -d "${LIBC_TEST}/src" ]]; then
     rm -f "${WORK}/stamp"
     build_ltp
     build_libc_test

@@ -830,7 +830,10 @@ def run_retries(run, arch, args, lists):
     print(f"retrying {len(ranges)} tests that regressed", flush=True)
     Worker(run, "retry", ranges)()
     if run.error:
-        sys.exit(f"FAIL: {run.error}")
+        # The first pass finished: keep its results (and the retries' so far).
+        name = "smoke-results.tsv" if args.smoke else "results.tsv"
+        write_tsv(run.out / name, run.results, arch)
+        sys.exit(f"FAIL: retry: {run.error} (results in {run.out / name})")
     flaky = []
     for key in regressed:
         status, _ = run.results.get(key, ("CRASH", ""))
@@ -1058,6 +1061,11 @@ def cmd_run(args):
     if args.smoke:
         suites = [f"{s}-smoke" for s in suites]
 
+    if not args.resume:
+        # A new run's logs only: `collect` reads every serial-*.log here, and
+        # an earlier run's would be taken as this one's.
+        for old in run.out.glob("serial-*.log"):
+            old.unlink()
     have = set()
     if args.resume:
         if args.smoke or args.first:

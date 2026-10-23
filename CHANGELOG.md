@@ -46,8 +46,8 @@
   from the serial logs (`collect`). Each test's result is recorded in
   `tests/compat/expected-<arch>.tsv`; a test expected to pass that does not fails the run.
   The baseline (2026-10-22), on x86_64, AArch64 and RISC-V: LTP 24 of 1,552 pass (another 410 to
-  417 pass with LTP's warning that the kernel is older than 4.4), Open POSIX 1,571, 1,566 and
-  1,566 of 1,965, libc-test 523, 525 and 525 of 560; most LTP tests stop in its library because
+  417 pass with LTP's warning that the kernel is older than 4.4), Open POSIX 1,569, 1,565 and
+  1,565 of 1,965, libc-test 523, 525 and 525 of 560; most LTP tests stop in its library because
   statfs is ENOSYS (`docs/KNOWN-LIMITATIONS.md`, "Conformance suites").
   The gate runs the tests expected to pass (`--rootfs`) and, with `--compat`, the full suites; a
   weekly workflow (`.github/workflows/compat.yml`) runs the x86_64 tests expected to pass (the

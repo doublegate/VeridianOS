@@ -206,6 +206,8 @@ int main(int argc, char **argv)
     deadline = start + limit * 1000;
     pid = fork();
     if (pid < 0) {
+        /* Say so: out of processes or memory is not a missing program. */
+        printf("COMPAT-LOG %s compat_exec: fork: %s\n", argv[3], strerror(errno));
         printf("COMPAT-END %s %s rc=127 sig=0 timeout=0 ms=0\n", argv[3], argv[4]);
         return 0;
     }
