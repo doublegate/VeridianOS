@@ -401,7 +401,7 @@ impl BlockFsBuilder {
         // The kernel reads a directory a block at a time, so an entry never
         // crosses a block: one that would starts the next block, and the
         // rest of this one stays zero (a record length of 0 ends the scan),
-        // as the kernel's own add_dir_entry does. Only the 12 direct blocks
+        // as the kernel's own write_dir_entry does. Only the 12 direct blocks
         // are read.
         let mut offset = self.inodes[dir_inode as usize].size as usize;
         if offset % BLOCK_SIZE + rec_len > BLOCK_SIZE {

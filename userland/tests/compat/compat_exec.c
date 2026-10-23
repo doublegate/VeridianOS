@@ -20,9 +20,8 @@
  * the limit killed it, M is the run time in milliseconds. A program that
  * cannot be run gives rc=127 (exec failed in the child), as sh does.
  *
- * A test that did not exit 0 may not have cleaned up: what LTP's library
- * leaves behind (LTP_* directories in /tmp, its ltp_* results files in
- * /dev/shm) is removed then.
+ * A test that did not exit 0 may not have cleaned up: everything in /tmp
+ * (but OUTFILE) and /dev/shm is removed then.
  *
  * When the test cannot be started (no OUTFILE, no fork: the guest is short
  * of something) it prints `COMPAT-RETRY N ID REASON` instead of a result
@@ -99,29 +98,45 @@ static int remove_one(const char *path, const struct stat *st, int type, struct 
     return 0;
 }
 
-/* Remove what starts with `prefix` in `dir`, without starting a process. */
-static void clean_dir(const char *dir, const char *prefix)
+#define MAX_CLEAN 256
+
+/* Remove everything in `dir` but `keep`, without starting a process. The
+ * names are read first: removing while readdir runs can skip some. */
+static void clean_dir(const char *dir, const char *keep)
 {
+    static char names[MAX_CLEAN][256];
     char path[512];
     struct dirent *e;
+    int count = 0, i;
     DIR *d = opendir(dir);
 
     if (!d)
         return;
-    while ((e = readdir(d)) != NULL) {
-        if (strncmp(e->d_name, prefix, strlen(prefix)) != 0)
+    while ((e = readdir(d)) != NULL && count < MAX_CLEAN) {
+        if (strcmp(e->d_name, ".") == 0 || strcmp(e->d_name, "..") == 0)
             continue;
-        snprintf(path, sizeof(path), "%s/%s", dir, e->d_name);
-        nftw(path, remove_one, 16, FTW_DEPTH | FTW_PHYS);
+        if (keep && strcmp(e->d_name, keep) == 0)
+            continue;
+        snprintf(names[count++], sizeof(names[0]), "%.255s", e->d_name);
     }
     closedir(d);
+    for (i = 0; i < count; i++) {
+        snprintf(path, sizeof(path), "%.200s/%.255s", dir, names[i]);
+        nftw(path, remove_one, 16, FTW_DEPTH | FTW_PHYS);
+    }
 }
 
-/* What LTP's library leaves when a test dies before its cleanup. */
-static void clean_tmp(void)
+/* What a test that died before its cleanup leaves: LTP's LTP_* directories
+ * and ltp_* results files, and the files, shared memory objects and named
+ * semaphores of Open POSIX tests, under names of their own. Tests run one at
+ * a time, so all of /tmp and /dev/shm is theirs, but this run's OUTFILE. */
+static void clean_tmp(const char *out)
 {
-    clean_dir("/tmp", "LTP_");
-    clean_dir("/dev/shm", "ltp_");
+    const char *base = strrchr(out, '/');
+    int in_tmp = base && (size_t)(base - out) == 4 && strncmp(out, "/tmp", 4) == 0;
+
+    clean_dir("/tmp", in_tmp ? base + 1 : NULL);
+    clean_dir("/dev/shm", NULL);
 }
 
 /* A line that says what went wrong; LTP's closing counts do not. */
@@ -257,7 +272,7 @@ int main(int argc, char **argv)
     }
     if (rc != 0) {
         print_log(argv[2], argv[3]);
-        clean_tmp();
+        clean_tmp(argv[2]);
     }
     printf("COMPAT-END %s %s rc=%d sig=%d timeout=%d ms=%lld\n", argv[3], argv[4], rc, sig,
            timed_out, now_ms() - start);

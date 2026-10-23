@@ -261,7 +261,11 @@ build_image() {
     inodes="$((files + files / 4 + 1024))"
     log "Creating the ${size} MiB BlockFS image (${files} files, ${inodes} inodes)..."
     rm -f "${IMG}"
-    "${mkfs}" --output "${IMG}" --size "${size}" --inodes "${inodes}" --populate "${OUT}" >/dev/null
+    # /tmp as on Linux (mode 1777): mkfs-blockfs keeps host modes within 0755,
+    # and tests that drop to nobody create their directories there.
+    printf '/tmp/ 0 0 1777\n' > "${WORK}/attrs"
+    "${mkfs}" --output "${IMG}" --size "${size}" --inodes "${inodes}" --populate "${OUT}" \
+        --attrs "${WORK}/attrs" >/dev/null
 }
 
 fetch_ltp

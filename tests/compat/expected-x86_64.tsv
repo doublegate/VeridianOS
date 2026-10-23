@@ -871,8 +871,8 @@ ltp-syscalls	nanosleep01	FAIL	exit 5; tst_timer_test.c:314: TFAIL: nanosleep() s
 ltp-syscalls	nanosleep02	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
 ltp-syscalls	nanosleep04	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
 ltp-syscalls	newuname01	BROK	newuname01.c:34: TBROK: Failed to open FILE '/proc/sys/kernel/hostname' for reading: ENOENT (2)
-ltp-syscalls	nftw01	BROK	nftw01      1  TBROK  :  tst_tmpdir.c:270: tst_tmpdir: mkdtemp(/tmp/LTP_XXXXXX) failed: errno=EACCES(13): Permission denied
-ltp-syscalls	nftw6401	BROK	nftw6401    1  TBROK  :  tst_tmpdir.c:270: tst_tmpdir: mkdtemp(/tmp/LTP_XXXXXX) failed: errno=EACCES(13): Permission denied
+ltp-syscalls	nftw01	BROK	nftw01      1  TBROK  :  tst_fs_type.c:20: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): errno=ENOSYS(38): Function not implemented
+ltp-syscalls	nftw6401	BROK	nftw6401    1  TBROK  :  tst_fs_type.c:20: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): errno=ENOSYS(38): Function not implemented
 ltp-syscalls	nice01	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
 ltp-syscalls	nice02	FLAKY	TIMEOUT and WARN in two x86_64 runs (2026-10-22); last here: WARN; tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
 ltp-syscalls	nice03	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
@@ -1413,7 +1413,7 @@ ltp-syscalls	swapon03	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statf
 ltp-syscalls	swapon04	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .config
 ltp-syscalls	switch01	CONF	tst_test.c:1429: TCONF: This system does not support running of switch() syscall
 ltp-syscalls	symlink02	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
-ltp-syscalls	symlink03	BROK	symlink03    1  TBROK  :  tst_tmpdir.c:270: tst_tmpdir: mkdtemp(/tmp/LTP_XXXXXX) failed: errno=EACCES(13): Permission denied
+ltp-syscalls	symlink03	BROK	symlink03    1  TBROK  :  tst_fs_type.c:20: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): errno=ENOSYS(38): Function not implemented
 ltp-syscalls	symlink04	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
 ltp-syscalls	symlinkat01	BROK	symlinkat01    1  TBROK  :  tst_fs_type.c:20: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): errno=ENOSYS(38): Function not implemented
 ltp-syscalls	sync01	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
