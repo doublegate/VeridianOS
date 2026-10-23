@@ -12,11 +12,11 @@ ltp-syscalls	access03	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal 
 ltp-syscalls	access04	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
 ltp-syscalls	acct01	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .config
 ltp-syscalls	acct02	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .config
-ltp-syscalls	add_key01	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
-ltp-syscalls	add_key02	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
-ltp-syscalls	add_key03	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
-ltp-syscalls	add_key04	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
-ltp-syscalls	add_key05	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
+ltp-syscalls	add_key01	CONF	../../../../include/lapi/keyctl.h:27: TCONF: syscall(248) __NR_add_key not supported on your arch
+ltp-syscalls	add_key02	CONF	../../../../include/lapi/keyctl.h:27: TCONF: syscall(248) __NR_add_key not supported on your arch
+ltp-syscalls	add_key03	CONF	../../../../include/lapi/keyctl.h:27: TCONF: syscall(248) __NR_add_key not supported on your arch
+ltp-syscalls	add_key04	CONF	../../../../include/lapi/keyctl.h:52: TCONF: syscall(250) __NR_keyctl not supported on your arch
+ltp-syscalls	add_key05	CONF	tst_cmd.c:270: TCONF: Couldn't find 'useradd' in $PATH
 ltp-syscalls	adjtimex01	BROK	adjtimex01.c:48: TBROK: adjtimex(): failed to save current params: ENOSYS (38)
 ltp-syscalls	adjtimex02	BROK	adjtimex02.c:127: TBROK: adjtimex(): failed to save current params: ENOSYS (38)
 ltp-syscalls	adjtimex03	BROK	adjtimex03.c:55: TBROK: adjtimex(): Unexpeceted error, expecting EINVAL with mode 0x8000: ENOSYS (38)
@@ -25,34 +25,34 @@ ltp-syscalls	alarm03	FAIL	exit 5; alarm03.c:28: TFAIL: alarm(0) in parent proces
 ltp-syscalls	alarm05	FAIL	exit 5; alarm05.c:28: TFAIL: alarm(1) retval 0 != 9: ENOSYS (38)
 ltp-syscalls	alarm06	FAIL	exit 5; alarm06.c:33: TFAIL: alarm(0) retval 0 != 1: ENOSYS (38)
 ltp-syscalls	alarm07	FAIL	exit 5; alarm07.c:34: TFAIL: alarm_cnt (0) != 1 (1)
-ltp-syscalls	arch_prctl01	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
+ltp-syscalls	arch_prctl01	CONF	tst_test.c:1079: TCONF: The test requires kernel 4.12 or newer
 ltp-syscalls	bind01	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
 ltp-syscalls	bind02	FAIL	exit 5; bind02.c:39: TFAIL: bind() succeeded
 ltp-syscalls	bind03	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
 ltp-syscalls	bind04	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
 ltp-syscalls	bind05	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
 ltp-syscalls	bind06	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .config
-ltp-syscalls	bpf_map01	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
-ltp-syscalls	bpf_prog01	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
-ltp-syscalls	bpf_prog02	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
-ltp-syscalls	bpf_prog03	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
+ltp-syscalls	bpf_map01	CONF	../../../../include/lapi/bpf.h:623: TCONF: syscall(321) __NR_bpf not supported on your arch
+ltp-syscalls	bpf_prog01	CONF	../../../../include/lapi/bpf.h:623: TCONF: syscall(321) __NR_bpf not supported on your arch
+ltp-syscalls	bpf_prog02	CONF	tst_capability.c:17: TCONF: syscall(125) __NR_capget not supported on your arch
+ltp-syscalls	bpf_prog03	CONF	tst_capability.c:17: TCONF: syscall(125) __NR_capget not supported on your arch
 ltp-syscalls	bpf_prog04	BROK	tst_taint.c:43: TBROK: Failed to open FILE '/proc/sys/kernel/tainted' for reading: ENOENT (2)
 ltp-syscalls	bpf_prog05	BROK	tst_taint.c:43: TBROK: Failed to open FILE '/proc/sys/kernel/tainted' for reading: ENOENT (2)
-ltp-syscalls	bpf_prog06	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
-ltp-syscalls	bpf_prog07	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
+ltp-syscalls	bpf_prog06	CONF	tst_test.c:1079: TCONF: The test requires kernel 5.8 or newer
+ltp-syscalls	bpf_prog07	CONF	tst_test.c:1079: TCONF: The test requires kernel 5.8 or newer
 ltp-syscalls	brk01	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
 ltp-syscalls	brk02	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
 ltp-syscalls	cacheflush01	CONF	tst_test.c:1429: TCONF: system doesn't support cacheflush()
 ltp-syscalls	cachestat01	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
 ltp-syscalls	cachestat02	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
-ltp-syscalls	cachestat03	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
+ltp-syscalls	cachestat03	CONF	tst_hugepage.c:34: TCONF: hugetlbfs is not supported
 ltp-syscalls	cachestat04	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
-ltp-syscalls	capget01	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
+ltp-syscalls	capget01	CONF	tst_capability.c:17: TCONF: syscall(125) __NR_capget not supported on your arch
 ltp-syscalls	capget02	BROK	tst_pid.c:46: TBROK: Failed to open FILE '/proc/sys/kernel/pid_max' for reading: ENOENT (2)
-ltp-syscalls	capset01	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
-ltp-syscalls	capset02	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
-ltp-syscalls	capset03	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
-ltp-syscalls	capset04	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
+ltp-syscalls	capset01	CONF	capset01.c:41: TCONF: syscall(125) __NR_capget not supported on your arch
+ltp-syscalls	capset02	CONF	capset02.c:85: TCONF: syscall(126) __NR_capset not supported on your arch
+ltp-syscalls	capset03	CONF	capset03.c:41: TCONF: syscall(126) __NR_capset not supported on your arch
+ltp-syscalls	capset04	CONF	capset04.c:44: TCONF: syscall(125) __NR_capget not supported on your arch
 ltp-syscalls	chdir01	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
 ltp-syscalls	chdir02	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
 ltp-syscalls	chdir04	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
@@ -62,7 +62,7 @@ ltp-syscalls	chmod05	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs
 ltp-syscalls	chmod06	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
 ltp-syscalls	chmod07	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
 ltp-syscalls	chmod08	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
-ltp-syscalls	chmod09	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
+ltp-syscalls	chmod09	CONF	tst_test.c:1079: TCONF: The test requires kernel 6.6 or newer
 ltp-syscalls	chown01	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
 ltp-syscalls	chown01_16	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
 ltp-syscalls	chown02	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
@@ -77,8 +77,8 @@ ltp-syscalls	chroot01	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statf
 ltp-syscalls	chroot02	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
 ltp-syscalls	chroot03	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
 ltp-syscalls	chroot04	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
-ltp-syscalls	clock_adjtime01	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
-ltp-syscalls	clock_adjtime02	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
+ltp-syscalls	clock_adjtime01	CONF	clock_adjtime.h:123: TCONF: syscall(305) __NR_clock_adjtime not supported on your arch
+ltp-syscalls	clock_adjtime02	CONF	clock_adjtime.h:123: TCONF: syscall(305) __NR_clock_adjtime not supported on your arch
 ltp-syscalls	clock_getres01	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
 ltp-syscalls	clock_gettime01	BROK	clock_gettime01.c:82: TBROK: Failed to open FILE '/proc/self/stat' for reading: ENOENT (2)
 ltp-syscalls	clock_gettime02	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .config
@@ -90,7 +90,7 @@ ltp-syscalls	clock_nanosleep03	BROK	tst_kconfig.c:289: TBROK: Cannot parse kerne
 ltp-syscalls	clock_nanosleep04	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
 ltp-syscalls	clock_settime01	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
 ltp-syscalls	clock_settime02	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .config
-ltp-syscalls	clock_settime03	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
+ltp-syscalls	clock_settime03	CONF	clock_settime03.c:62: TCONF: syscall(222) __NR_timer_create not supported on your arch
 ltp-syscalls	clock_settime04	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
 ltp-syscalls	clone01	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
 ltp-syscalls	clone02	BROK	clone02     1  TBROK  :  tst_fs_type.c:20: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): errno=ENOSYS(38): Function not implemented
@@ -105,12 +105,12 @@ ltp-syscalls	clone10	BROK	clone10.c:59: TBROK: clone() failed: EINVAL (22)
 ltp-syscalls	clone11	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .config
 ltp-syscalls	clone301	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .config
 ltp-syscalls	clone302	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
-ltp-syscalls	clone303	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
+ltp-syscalls	clone303	CONF	tst_test.c:1079: TCONF: The test requires kernel 5.7 or newer
 ltp-syscalls	clone304	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .config
 ltp-syscalls	close01	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
 ltp-syscalls	close02	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
 ltp-syscalls	close_range01	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
-ltp-syscalls	close_range02	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
+ltp-syscalls	close_range02	CONF	../../../../include/lapi/close_range.h:37: TCONF: Test not supported on kernel version < v5.9
 ltp-syscalls	confstr01	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
 ltp-syscalls	connect01	FAIL	exit 5; connect01.c:139: TFAIL: socket structure address is outside the user's address space succeeded
 ltp-syscalls	connect02	BROK	tst_taint.c:43: TBROK: Failed to open FILE '/proc/sys/kernel/tainted' for reading: ENOENT (2)
@@ -127,7 +127,7 @@ ltp-syscalls	creat07	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs
 ltp-syscalls	creat08	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
 ltp-syscalls	creat09	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
 ltp-syscalls	delete_module01	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .config
-ltp-syscalls	delete_module02	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
+ltp-syscalls	delete_module02	CONF	delete_module02.c:66: TCONF: syscall(176) __NR_delete_module not supported on your arch
 ltp-syscalls	delete_module03	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .config
 ltp-syscalls	dirtyc0w	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
 ltp-syscalls	dirtyc0w_shmem	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
@@ -181,7 +181,7 @@ ltp-syscalls	epoll_wait12	BROK	epoll_wait12.c:83: TBROK: Failed to open FILE '/p
 ltp-syscalls	epoll_wait13	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
 ltp-syscalls	epoll_wait14	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
 ltp-syscalls	epoll_wait15	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
-ltp-syscalls	epoll_wait16	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
+ltp-syscalls	epoll_wait16	CONF	tst_test.c:1079: TCONF: The test requires kernel 4.5 or newer
 ltp-syscalls	eventfd01	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .config
 ltp-syscalls	eventfd02	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .config
 ltp-syscalls	eventfd2_01	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
@@ -225,7 +225,7 @@ ltp-syscalls	fanotify04	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to sta
 ltp-syscalls	fanotify05	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
 ltp-syscalls	fanotify06	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
 ltp-syscalls	fanotify07	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
-ltp-syscalls	fanotify08	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
+ltp-syscalls	fanotify08	CONF	fanotify08.c:34: TCONF: fanotify is not configured in this kernel
 ltp-syscalls	fanotify09	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
 ltp-syscalls	fanotify10	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
 ltp-syscalls	fanotify11	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
@@ -239,7 +239,7 @@ ltp-syscalls	fanotify18	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to sta
 ltp-syscalls	fanotify19	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
 ltp-syscalls	fanotify20	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
 ltp-syscalls	fanotify21	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
-ltp-syscalls	fanotify22	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
+ltp-syscalls	fanotify22	CONF	tst_cmd.c:270: TCONF: Couldn't find 'debugfs' in $PATH
 ltp-syscalls	fanotify23	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
 ltp-syscalls	fanotify24	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
 ltp-syscalls	fanotify25	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .config
@@ -333,18 +333,18 @@ ltp-syscalls	fcntl33	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs
 ltp-syscalls	fcntl33_64	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
 ltp-syscalls	fcntl34	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
 ltp-syscalls	fcntl34_64	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
-ltp-syscalls	fcntl35	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
-ltp-syscalls	fcntl35_64	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
+ltp-syscalls	fcntl35	CONF	fcntl35.c:56: TCONF: /proc/sys/fs/pipe-max-size doesn't exist
+ltp-syscalls	fcntl35_64	CONF	fcntl35.c:56: TCONF: /proc/sys/fs/pipe-max-size doesn't exist
 ltp-syscalls	fcntl36	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
 ltp-syscalls	fcntl36_64	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
-ltp-syscalls	fcntl37	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
-ltp-syscalls	fcntl37_64	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
+ltp-syscalls	fcntl37	CONF	fcntl37.c:64: TCONF: kernel doesn't support F_GET/SETPIPE_SZ
+ltp-syscalls	fcntl37_64	CONF	fcntl37.c:64: TCONF: kernel doesn't support F_GET/SETPIPE_SZ
 ltp-syscalls	fcntl38	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .config
 ltp-syscalls	fcntl38_64	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .config
 ltp-syscalls	fcntl39	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .config
 ltp-syscalls	fcntl39_64	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .config
-ltp-syscalls	fcntl40	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
-ltp-syscalls	fcntl40_64	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
+ltp-syscalls	fcntl40	CONF	tst_test.c:1079: TCONF: The test requires kernel 6.12 or newer
+ltp-syscalls	fcntl40_64	CONF	tst_test.c:1079: TCONF: The test requires kernel 6.12 or newer
 ltp-syscalls	fdatasync01	BROK	fdatasync01    1  TBROK  :  tst_fs_type.c:20: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): errno=ENOSYS(38): Function not implemented
 ltp-syscalls	fdatasync02	FAIL	fdatasync02    2  TFAIL  :  fdatasync02.c:135: Unexpected results for file descriptor to a special file ; returned 0 (expected -1), errno 0 (expected 22)
 ltp-syscalls	fdatasync03	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
@@ -379,7 +379,7 @@ ltp-syscalls	fork09	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(
 ltp-syscalls	fork10	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
 ltp-syscalls	fork11	FLAKY	TIMEOUT and WARN in two x86_64 runs (2026-10-22); last here: WARN; tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
 ltp-syscalls	fork13	BROK	tst_sys_conf.c:73: TBROK: Path not found: /proc/sys/kernel/pid_max: ENOENT (2)
-ltp-syscalls	fork14	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
+ltp-syscalls	fork14	CONF	fork14.c:45: TINFO: mmap() failed
 ltp-syscalls	fpathconf01	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
 ltp-syscalls	fremovexattr01	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
 ltp-syscalls	fremovexattr02	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
@@ -424,13 +424,13 @@ ltp-syscalls	futex_wait05	FAIL	exit 5; tst_timer_test.c:314: TFAIL: futex_wait()
 ltp-syscalls	futex_wait06	FAIL	exit 5; futex_wait06.c:55: TFAIL: uaddr points to unmapped memory expected EFAULT: ETIMEDOUT (110)
 ltp-syscalls	futex_wait07	BROK	futex_wait07.c:63: TBROK: Failed to open FILE '/proc/1374/stat' for reading: ENOENT (2)
 ltp-syscalls	futex_wait_bitset01	FLAKY	FAIL and WARN in two x86_64 runs (2026-10-22); last here: WARN; tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
-ltp-syscalls	futex_waitv01	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
-ltp-syscalls	futex_waitv02	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
-ltp-syscalls	futex_waitv03	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
+ltp-syscalls	futex_waitv01	CONF	tst_test.c:1079: TCONF: The test requires kernel 5.16 or newer
+ltp-syscalls	futex_waitv02	CONF	tst_test.c:1079: TCONF: The test requires kernel 5.16 or newer
+ltp-syscalls	futex_waitv03	CONF	tst_test.c:1079: TCONF: The test requires kernel 5.16 or newer
 ltp-syscalls	futex_wake01	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
 ltp-syscalls	futex_wake02	BROK	futex_utils.h:46: TBROK: opendir(/proc/1387/task/) failed: ENOENT (2)
 ltp-syscalls	futex_wake03	BROK	futex_wake03.c:80: TBROK: Failed to open FILE '/proc/1446/stat' for reading: ENOENT (2)
-ltp-syscalls	futex_wake04	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
+ltp-syscalls	futex_wake04	CONF	tst_hugepage.c:34: TCONF: hugetlbfs is not supported
 ltp-syscalls	futex_wake05	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
 ltp-syscalls	futimesat01	BROK	futimesat01    1  TBROK  :  tst_fs_type.c:20: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): errno=ENOSYS(38): Function not implemented
 ltp-syscalls	get_mempolicy01	CONF	tst_test.c:1429: TCONF: test requires libnuma development packages with LIBNUMA_API_VERSION >= 2
@@ -442,7 +442,7 @@ ltp-syscalls	getcpu02	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal 
 ltp-syscalls	getcwd01	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
 ltp-syscalls	getcwd02	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
 ltp-syscalls	getcwd03	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
-ltp-syscalls	getcwd04	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
+ltp-syscalls	getcwd04	CONF	tst_test.c:1517: TCONF: Test needs at least 2 CPUs online
 ltp-syscalls	getdents01	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
 ltp-syscalls	getdents02	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
 ltp-syscalls	getdomainname01	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
@@ -451,13 +451,13 @@ ltp-syscalls	getegid01_16	WARN	tst_test.c:1101: TWARN: Kernel is older than mini
 ltp-syscalls	getegid02	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
 ltp-syscalls	getegid02_16	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
 ltp-syscalls	geteuid01	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
-ltp-syscalls	geteuid01_16	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
+ltp-syscalls	geteuid01_16	CONF	testcases/kernel/syscalls/geteuid/../utils/compat_tst_16.h:104: TCONF: 16-bit version of geteuid() is not supported on your platform
 ltp-syscalls	geteuid02	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
-ltp-syscalls	geteuid02_16	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
+ltp-syscalls	geteuid02_16	CONF	testcases/kernel/syscalls/geteuid/../utils/compat_tst_16.h:104: TCONF: 16-bit version of geteuid() is not supported on your platform
 ltp-syscalls	getgid01	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
-ltp-syscalls	getgid01_16	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
+ltp-syscalls	getgid01_16	CONF	testcases/kernel/syscalls/getgid/../utils/compat_tst_16.h:99: TCONF: 16-bit version of getgid() is not supported on your platform
 ltp-syscalls	getgid03	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
-ltp-syscalls	getgid03_16	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
+ltp-syscalls	getgid03_16	CONF	testcases/kernel/syscalls/getgid/../utils/compat_tst_16.h:99: TCONF: 16-bit version of getgid() is not supported on your platform
 ltp-syscalls	getgroups01	PASS	
 ltp-syscalls	getgroups01_16	CONF	getgroups01_16    1  TCONF  :  testcases/kernel/syscalls/getgroups/../utils/compat_16.h:82: 16-bit version o
 ltp-syscalls	getgroups03	PASS	
@@ -467,7 +467,7 @@ ltp-syscalls	gethostid01	CONF	tst_test.c:1429: TCONF: sethostid is undefined.
 ltp-syscalls	gethostname01	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
 ltp-syscalls	gethostname02	FAIL	exit 5; gethostname02.c:23: TFAIL: len is smaller than the actual size succeeded
 ltp-syscalls	getitimer01	FAIL	exit 5; getitimer01.c:52: TFAIL: getitimer(tc->which, value) failed: ENOSYS (38)
-ltp-syscalls	getitimer02	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
+ltp-syscalls	getitimer02	CONF	getitimer02.c:36: TCONF: syscall(36) __NR_getitimer not supported on your arch
 ltp-syscalls	getpagesize01	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
 ltp-syscalls	getpeername01	FAIL	exit 5; getpeername01.c:90: TFAIL: getpeername(sockfd, tc->sockaddr, tc->addrlen) expected ENOTCONN: EBADF (9)
 ltp-syscalls	getpgid01	BROK	getpgid01.c:18: TBROK: Failed to open FILE '/proc/1/stat' for reading: ENOENT (2)
@@ -512,9 +512,9 @@ ltp-syscalls	gettid02	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal 
 ltp-syscalls	gettimeofday01	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
 ltp-syscalls	gettimeofday02	TIMEOUT	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
 ltp-syscalls	getuid01	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
-ltp-syscalls	getuid01_16	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
+ltp-syscalls	getuid01_16	CONF	testcases/kernel/syscalls/getuid/../utils/compat_tst_16.h:89: TCONF: 16-bit version of getuid() is not supported on your platform
 ltp-syscalls	getuid03	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
-ltp-syscalls	getuid03_16	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
+ltp-syscalls	getuid03_16	CONF	testcases/kernel/syscalls/getuid/../utils/compat_tst_16.h:89: TCONF: 16-bit version of getuid() is not supported on your platform
 ltp-syscalls	getxattr01	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
 ltp-syscalls	getxattr02	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
 ltp-syscalls	getxattr03	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
@@ -534,8 +534,8 @@ ltp-syscalls	inotify09	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to stat
 ltp-syscalls	inotify10	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
 ltp-syscalls	inotify11	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
 ltp-syscalls	inotify12	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
-ltp-syscalls	inotify_init1_01	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
-ltp-syscalls	inotify_init1_02	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
+ltp-syscalls	inotify_init1_01	CONF	inotify_init1_01.c:24: TCONF: syscall(294) __NR_inotify_init1 not supported on your arch
+ltp-syscalls	inotify_init1_02	CONF	inotify_init1_02.c:24: TCONF: syscall(294) __NR_inotify_init1 not supported on your arch
 ltp-syscalls	io_cancel01	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .config
 ltp-syscalls	io_cancel02	CONF	tst_test.c:1429: TCONF: test requires libaio and it's development packages
 ltp-syscalls	io_destroy01	CONF	tst_test.c:1429: TCONF: test requires libaio and it's development packages
@@ -556,19 +556,19 @@ ltp-syscalls	io_uring03	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to sta
 ltp-syscalls	io_uring04	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .config
 ltp-syscalls	ioctl01	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
 ltp-syscalls	ioctl02	PASS	
-ltp-syscalls	ioctl03	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
+ltp-syscalls	ioctl03	CONF	ioctl03.c:79: TCONF: TUN support is missing?
 ltp-syscalls	ioctl04	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
 ltp-syscalls	ioctl05	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
 ltp-syscalls	ioctl06	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
 ltp-syscalls	ioctl07	BROK	ioctl07.c:27: TBROK: ioctl(3,(( ((2U)<<30) | ((('R'))<<8) | ((0x00)) | ((sizeof(int))<<16) )),...) failed: EINVAL (22)
-ltp-syscalls	ioctl08	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
+ltp-syscalls	ioctl08	CONF	tst_test.c:1079: TCONF: The test requires kernel 4.5 or newer
 ltp-syscalls	ioctl09	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .config
 ltp-syscalls	ioctl10	FAIL	exit 5; ioctl10.c:103: TFAIL: ioctl(fd, PROCMAP_QUERY, q) failed: EINVAL (22)
-ltp-syscalls	ioctl_ficlone01	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
-ltp-syscalls	ioctl_ficlone02	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
-ltp-syscalls	ioctl_ficlone03	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
-ltp-syscalls	ioctl_ficlonerange01	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
-ltp-syscalls	ioctl_ficlonerange02	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
+ltp-syscalls	ioctl_ficlone01	CONF	tst_test.c:1079: TCONF: The test requires kernel 4.5 or newer
+ltp-syscalls	ioctl_ficlone02	CONF	tst_test.c:1079: TCONF: The test requires kernel 4.5 or newer
+ltp-syscalls	ioctl_ficlone03	CONF	tst_test.c:1079: TCONF: The test requires kernel 4.5 or newer
+ltp-syscalls	ioctl_ficlonerange01	CONF	tst_test.c:1079: TCONF: The test requires kernel 4.5 or newer
+ltp-syscalls	ioctl_ficlonerange02	CONF	tst_test.c:1079: TCONF: The test requires kernel 4.5 or newer
 ltp-syscalls	ioctl_fiemap01	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
 ltp-syscalls	ioctl_getlbmd01	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .config
 ltp-syscalls	ioctl_loop01	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .config
@@ -578,55 +578,55 @@ ltp-syscalls	ioctl_loop04	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .co
 ltp-syscalls	ioctl_loop05	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .config
 ltp-syscalls	ioctl_loop06	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .config
 ltp-syscalls	ioctl_loop07	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .config
-ltp-syscalls	ioctl_ns01	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
-ltp-syscalls	ioctl_ns02	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
-ltp-syscalls	ioctl_ns03	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
-ltp-syscalls	ioctl_ns04	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
+ltp-syscalls	ioctl_ns01	CONF	tst_test.c:1079: TCONF: The test requires kernel 4.9 or newer
+ltp-syscalls	ioctl_ns02	CONF	tst_test.c:1079: TCONF: The test requires kernel 4.9 or newer
+ltp-syscalls	ioctl_ns03	CONF	tst_test.c:1079: TCONF: The test requires kernel 4.11 or newer
+ltp-syscalls	ioctl_ns04	CONF	tst_test.c:1079: TCONF: The test requires kernel 4.9 or newer
 ltp-syscalls	ioctl_ns05	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .config
-ltp-syscalls	ioctl_ns06	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
-ltp-syscalls	ioctl_ns07	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
-ltp-syscalls	ioctl_pidfd01	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
+ltp-syscalls	ioctl_ns06	CONF	tst_test.c:1079: TCONF: The test requires kernel 4.9 or newer
+ltp-syscalls	ioctl_ns07	CONF	tst_test.c:1079: TCONF: The test requires kernel 4.11 or newer
+ltp-syscalls	ioctl_pidfd01	CONF	../include/lapi/pidfd.h:85: TCONF: syscall(434) __NR_pidfd_open not supported on your arch
 ltp-syscalls	ioctl_pidfd02	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .config
 ltp-syscalls	ioctl_pidfd03	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .config
 ltp-syscalls	ioctl_pidfd04	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .config
 ltp-syscalls	ioctl_pidfd05	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .config
 ltp-syscalls	ioctl_pidfd06	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .config
-ltp-syscalls	ioctl_sg01	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
+ltp-syscalls	ioctl_sg01	CONF	ioctl_sg01.c:120: TCONF: Could not find any usable SCSI device
 ltp-syscalls	ioperm01	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .config
 ltp-syscalls	ioperm02	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .config
 ltp-syscalls	iopl01	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .config
 ltp-syscalls	iopl02	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .config
-ltp-syscalls	ioprio_get01	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
-ltp-syscalls	ioprio_set01	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
-ltp-syscalls	ioprio_set02	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
-ltp-syscalls	ioprio_set03	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
+ltp-syscalls	ioprio_get01	CONF	ioprio.h:22: TCONF: syscall(252) __NR_ioprio_get not supported on your arch
+ltp-syscalls	ioprio_set01	CONF	ioprio.h:22: TCONF: syscall(252) __NR_ioprio_get not supported on your arch
+ltp-syscalls	ioprio_set02	CONF	ioprio.h:27: TCONF: syscall(251) __NR_ioprio_set not supported on your arch
+ltp-syscalls	ioprio_set03	CONF	ioprio.h:27: TCONF: syscall(251) __NR_ioprio_set not supported on your arch
 ltp-syscalls	kcmp01	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
 ltp-syscalls	kcmp02	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
 ltp-syscalls	kcmp03	TIMEOUT	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
-ltp-syscalls	keyctl01	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
+ltp-syscalls	keyctl01	CONF	../../../../include/lapi/keyctl.h:52: TCONF: syscall(250) __NR_keyctl not supported on your arch
 ltp-syscalls	keyctl02	BROK	keyctl02.c:138: TBROK: Failed to open FILE '/proc/sys/kernel/keys/root_maxkeys' for reading: ENOENT (2)
-ltp-syscalls	keyctl03	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
-ltp-syscalls	keyctl04	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
-ltp-syscalls	keyctl05	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
-ltp-syscalls	keyctl06	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
+ltp-syscalls	keyctl03	CONF	../../../../include/lapi/keyctl.h:27: TCONF: syscall(248) __NR_add_key not supported on your arch
+ltp-syscalls	keyctl04	CONF	../../../../include/lapi/keyctl.h:52: TCONF: syscall(250) __NR_keyctl not supported on your arch
+ltp-syscalls	keyctl05	CONF	../../../../include/lapi/keyctl.h:52: TCONF: syscall(250) __NR_keyctl not supported on your arch
+ltp-syscalls	keyctl06	CONF	../../../../include/lapi/keyctl.h:27: TCONF: syscall(248) __NR_add_key not supported on your arch
 ltp-syscalls	keyctl07	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
-ltp-syscalls	keyctl08	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
+ltp-syscalls	keyctl08	CONF	../../../../include/lapi/keyctl.h:52: TCONF: syscall(250) __NR_keyctl not supported on your arch
 ltp-syscalls	keyctl09	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .config
-ltp-syscalls	keyctl10	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
-ltp-syscalls	keyctl11	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
-ltp-syscalls	keyctl12	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
-ltp-syscalls	keyctl13	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
-ltp-syscalls	keyctl14	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
-ltp-syscalls	keyctl15	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
-ltp-syscalls	keyctl16	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
-ltp-syscalls	keyctl17	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
-ltp-syscalls	keyctl18	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
-ltp-syscalls	keyctl19	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
-ltp-syscalls	keyctl20	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
-ltp-syscalls	keyctl21	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
-ltp-syscalls	keyctl22	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
+ltp-syscalls	keyctl10	CONF	../../../../include/lapi/keyctl.h:52: TCONF: syscall(250) __NR_keyctl not supported on your arch
+ltp-syscalls	keyctl11	CONF	../../../../include/lapi/keyctl.h:52: TCONF: syscall(250) __NR_keyctl not supported on your arch
+ltp-syscalls	keyctl12	CONF	../../../../include/lapi/keyctl.h:52: TCONF: syscall(250) __NR_keyctl not supported on your arch
+ltp-syscalls	keyctl13	CONF	../../../../include/lapi/keyctl.h:52: TCONF: syscall(250) __NR_keyctl not supported on your arch
+ltp-syscalls	keyctl14	CONF	../../../../include/lapi/keyctl.h:52: TCONF: syscall(250) __NR_keyctl not supported on your arch
+ltp-syscalls	keyctl15	CONF	../../../../include/lapi/keyctl.h:52: TCONF: syscall(250) __NR_keyctl not supported on your arch
+ltp-syscalls	keyctl16	CONF	../../../../include/lapi/keyctl.h:52: TCONF: syscall(250) __NR_keyctl not supported on your arch
+ltp-syscalls	keyctl17	CONF	../../../../include/lapi/keyctl.h:52: TCONF: syscall(250) __NR_keyctl not supported on your arch
+ltp-syscalls	keyctl18	CONF	tst_test.c:1079: TCONF: The test requires kernel 5.3 or newer
+ltp-syscalls	keyctl19	CONF	tst_test.c:1079: TCONF: The test requires kernel 5.3 or newer
+ltp-syscalls	keyctl20	CONF	tst_test.c:1079: TCONF: The test requires kernel 5.3 or newer
+ltp-syscalls	keyctl21	CONF	tst_test.c:1079: TCONF: The test requires kernel 5.3 or newer
+ltp-syscalls	keyctl22	CONF	tst_test.c:1079: TCONF: The test requires kernel 4.12 or newer
 ltp-syscalls	keyctl23	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .config
-ltp-syscalls	keyctl24	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
+ltp-syscalls	keyctl24	CONF	tst_test.c:1079: TCONF: The test requires kernel 4.12 or newer
 ltp-syscalls	keyctl25	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .config
 ltp-syscalls	keyctl26	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .config
 ltp-syscalls	keyctl27	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .config
@@ -642,13 +642,13 @@ ltp-syscalls	kill10	FLAKY	TIMEOUT and PASS in two x86_64 runs (2026-10-22); last
 ltp-syscalls	kill11	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
 ltp-syscalls	kill12	FLAKY	TIMEOUT and PASS in two x86_64 runs (2026-10-22); last here: PASS
 ltp-syscalls	kill13	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .config
-ltp-syscalls	landlock01	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
-ltp-syscalls	landlock02	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
+ltp-syscalls	landlock01	CONF	tst_capability.c:17: TCONF: syscall(125) __NR_capget not supported on your arch
+ltp-syscalls	landlock02	CONF	tst_capability.c:17: TCONF: syscall(125) __NR_capget not supported on your arch
 ltp-syscalls	landlock03	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
 ltp-syscalls	landlock04	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
 ltp-syscalls	landlock05	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
 ltp-syscalls	landlock06	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
-ltp-syscalls	landlock07	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
+ltp-syscalls	landlock07	CONF	tst_capability.c:17: TCONF: syscall(125) __NR_capget not supported on your arch
 ltp-syscalls	landlock08	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .config
 ltp-syscalls	landlock09	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
 ltp-syscalls	landlock10	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
@@ -666,10 +666,10 @@ ltp-syscalls	link08	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(
 ltp-syscalls	linkat01	BROK	linkat01    1  TBROK  :  tst_fs_type.c:20: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): errno=ENOSYS(38): Function not implemented
 ltp-syscalls	linkat02	BROK	linkat02    1  TBROK  :  tst_fs_type.c:20: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): errno=ENOSYS(38): Function not implemented
 ltp-syscalls	listen01	FAIL	listen01    3  TFAIL  :  listen01.c:102: UDP listen ; returned -1 (expected -1), errno 22 (expected 95)
-ltp-syscalls	listmount01	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
-ltp-syscalls	listmount02	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
-ltp-syscalls	listmount03	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
-ltp-syscalls	listmount04	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
+ltp-syscalls	listmount01	CONF	tst_test.c:1079: TCONF: The test requires kernel 6.8 or newer
+ltp-syscalls	listmount02	CONF	tst_test.c:1079: TCONF: The test requires kernel 6.8 or newer
+ltp-syscalls	listmount03	CONF	tst_test.c:1079: TCONF: The test requires kernel 6.8 or newer
+ltp-syscalls	listmount04	CONF	tst_test.c:1079: TCONF: The test requires kernel 6.11 or newer
 ltp-syscalls	listxattr01	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
 ltp-syscalls	listxattr02	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
 ltp-syscalls	listxattr03	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
@@ -685,12 +685,12 @@ ltp-syscalls	lseek01	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs
 ltp-syscalls	lseek02	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
 ltp-syscalls	lseek07	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
 ltp-syscalls	lseek11	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
-ltp-syscalls	lsm_get_self_attr01	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
-ltp-syscalls	lsm_get_self_attr02	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
-ltp-syscalls	lsm_get_self_attr03	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
-ltp-syscalls	lsm_list_modules01	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
-ltp-syscalls	lsm_list_modules02	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
-ltp-syscalls	lsm_set_self_attr01	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
+ltp-syscalls	lsm_get_self_attr01	CONF	tst_test.c:1079: TCONF: The test requires kernel 6.8 or newer
+ltp-syscalls	lsm_get_self_attr02	CONF	tst_test.c:1079: TCONF: The test requires kernel 6.8 or newer
+ltp-syscalls	lsm_get_self_attr03	CONF	tst_test.c:1079: TCONF: The test requires kernel 6.8 or newer
+ltp-syscalls	lsm_list_modules01	CONF	tst_test.c:1079: TCONF: The test requires kernel 6.8 or newer
+ltp-syscalls	lsm_list_modules02	CONF	tst_test.c:1079: TCONF: The test requires kernel 6.8 or newer
+ltp-syscalls	lsm_set_self_attr01	CONF	tst_test.c:1079: TCONF: The test requires kernel 6.8 or newer
 ltp-syscalls	lstat01	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
 ltp-syscalls	lstat01_64	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
 ltp-syscalls	lstat02	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
@@ -701,13 +701,13 @@ ltp-syscalls	madvise01	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to stat
 ltp-syscalls	madvise02	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
 ltp-syscalls	madvise03	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
 ltp-syscalls	madvise05	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
-ltp-syscalls	madvise06	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
-ltp-syscalls	madvise07	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
+ltp-syscalls	madvise06	CONF	tst_test.c:1523: TCONF: Test needs at least 800MB SwapFree
+ltp-syscalls	madvise07	CONF	madvise07.c:57: TCONF: CONFIG_MEMORY_FAILURE probably not set in kconfig: EINVAL (22)
 ltp-syscalls	madvise08	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
 ltp-syscalls	madvise09	BROK	tst_cgroup.c:682: TBROK: Can't open /proc/self/mounts: ENOENT (2)
 ltp-syscalls	madvise10	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
 ltp-syscalls	madvise11	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .config
-ltp-syscalls	madvise12	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
+ltp-syscalls	madvise12	CONF	tst_test.c:1079: TCONF: The test requires kernel 6.13 or newer
 ltp-syscalls	mallinfo02	CONF	tst_test.c:1429: TCONF: system doesn't implement non-POSIX mallinfo()
 ltp-syscalls	mallinfo2_01	CONF	tst_test.c:1429: TCONF: system doesn't implement non-POSIX mallinfo2()
 ltp-syscalls	mallopt01	CONF	tst_test.c:1429: TCONF: system doesn't implement non-POSIX mallopt()
@@ -715,13 +715,13 @@ ltp-syscalls	mbind01	CONF	tst_test.c:1429: TCONF: test requires libnuma developm
 ltp-syscalls	mbind02	CONF	tst_test.c:1429: TCONF: test requires libnuma development packages with LIBNUMA_API_VERSION >= 2
 ltp-syscalls	mbind03	CONF	tst_test.c:1429: TCONF: test requires libnuma development packages with LIBNUMA_API_VERSION >= 2
 ltp-syscalls	mbind04	CONF	tst_test.c:1429: TCONF: test requires libnuma development packages with LIBNUMA_API_VERSION >= 2
-ltp-syscalls	membarrier01	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
+ltp-syscalls	membarrier01	CONF	tst_test.c:1079: TCONF: The test requires kernel 4.3.0 or newer
 ltp-syscalls	memcmp01	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
 ltp-syscalls	memcpy01	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
 ltp-syscalls	memfd_create01	BROK	memfd_create01.c:38: TPASS: fcntl(3, F_ADD_SEALS, 4) failed as expected: EPERM (1)
 ltp-syscalls	memfd_create02	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
-ltp-syscalls	memfd_create03	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
-ltp-syscalls	memfd_create04	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
+ltp-syscalls	memfd_create03	CONF	tst_test.c:1079: TCONF: The test requires kernel 4.14 or newer
+ltp-syscalls	memfd_create04	CONF	tst_test.c:1079: TCONF: The test requires kernel 4.14 or newer
 ltp-syscalls	memset01	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
 ltp-syscalls	migrate_pages01	CONF	migrate_pages01    1  TCONF  :  migrate_pages01.c:250: test requires libnuma development packages with LIBNUMA_API_VERSION >= 2
 ltp-syscalls	migrate_pages02	CONF	tst_test.c:1429: TCONF: test requires libnuma development packages with LIBNUMA_API_VERSION >= 2
@@ -754,7 +754,7 @@ ltp-syscalls	mlock03	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal s
 ltp-syscalls	mlock04	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
 ltp-syscalls	mlock05	BROK	mlock05.c:95: TBROK: mlock() failed: ENOSYS (38)
 ltp-syscalls	mlock201	BROK	mlock201.c:101: TBROK: Expected 1 conversions got 0 FILE '/proc/self/status'
-ltp-syscalls	mlock202	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
+ltp-syscalls	mlock202	CONF	mlock202.c:63: TCONF: syscall(325) __NR_mlock2 not supported on your arch
 ltp-syscalls	mlock203	BROK	mlock203.c:31: TBROK: Expected 1 conversions got 0 FILE '/proc/self/status'
 ltp-syscalls	mlockall01	FAIL	mlockall01    1  TFAIL  :  mlockall01.c:110: mlockall(MCL_CURRENT) Failed with return=-1: TEST_ERRNO=ENOSYS(38): Function not implemented
 ltp-syscalls	mlockall02	FAIL	mlockall02    1  TFAIL  :  mlockall02.c:128: mlock() Failed with wrong errno, expected errno=Process exceeds max locked pages, got errno=38 : Function not imple
@@ -772,10 +772,10 @@ ltp-syscalls	mmap13	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(
 ltp-syscalls	mmap14	BROK	mmap14.c:36: TBROK: got EOF from sscanf(): ENOENT (2)
 ltp-syscalls	mmap15	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
 ltp-syscalls	mmap16	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
-ltp-syscalls	mmap17	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
+ltp-syscalls	mmap17	CONF	tst_test.c:1079: TCONF: The test requires kernel 4.17 or newer
 ltp-syscalls	mmap18	FAIL	exit 5; mmap18.c:163: TFAIL: Child: killed by SIGSEGV
 ltp-syscalls	mmap19	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
-ltp-syscalls	mmap20	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
+ltp-syscalls	mmap20	CONF	tst_test.c:1079: TCONF: The test requires kernel 4.15 or newer
 ltp-syscalls	mmap21_01	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
 ltp-syscalls	mmap21_02	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
 ltp-syscalls	mmap22	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
@@ -789,17 +789,17 @@ ltp-syscalls	mount03	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs
 ltp-syscalls	mount04	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
 ltp-syscalls	mount05	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
 ltp-syscalls	mount06	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
-ltp-syscalls	mount07	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
+ltp-syscalls	mount07	CONF	tst_test.c:1079: TCONF: The test requires kernel 5.10 or newer
 ltp-syscalls	mount08	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
 ltp-syscalls	mount_setattr01	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
 ltp-syscalls	mount_setattr02	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
 ltp-syscalls	move_mount01	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
 ltp-syscalls	move_mount02	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
-ltp-syscalls	move_mount03	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
+ltp-syscalls	move_mount03	CONF	tst_test.c:1079: TCONF: The test requires kernel 6.5 or newer
 ltp-syscalls	move_pages01	CONF	move_pages01    1  TCONF  :  move_pages_support.c:411: test requires libnuma development packages with LIBNUMA_API_VERSION >= 2
 ltp-syscalls	move_pages02	CONF	move_pages02    1  TCONF  :  move_pages_support.c:411: test requires libnuma development packages with LIBNUMA_API_VERSION >= 2
 ltp-syscalls	move_pages03	CONF	move_pages03    1  TCONF  :  move_pages_support.c:411: test requires libnuma development packages with LIBNUMA_API_VERSION >= 2
-ltp-syscalls	move_pages04	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
+ltp-syscalls	move_pages04	CONF	move_pages_support.c:411: TCONF: test requires libnuma development packages with LIBNUMA_API_VERSION >= 2
 ltp-syscalls	move_pages05	CONF	move_pages05    1  TCONF  :  move_pages_support.c:411: test requires libnuma development packages with LIBNUMA_API_VERSION >= 2
 ltp-syscalls	move_pages06	CONF	move_pages06    1  TCONF  :  move_pages_support.c:411: test requires libnuma development packages with LIBNUMA_API_VERSION >= 2
 ltp-syscalls	move_pages07	CONF	move_pages07    1  TCONF  :  move_pages_support.c:411: test requires libnuma development packages with LIBNUMA_API_VERSION >= 2
@@ -828,8 +828,8 @@ ltp-syscalls	mremap06	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statf
 ltp-syscalls	mremap07	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .config
 ltp-syscalls	mremap08	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
 ltp-syscalls	mremap09	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
-ltp-syscalls	mseal01	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
-ltp-syscalls	mseal02	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
+ltp-syscalls	mseal01	CONF	mseal01.c:40: TCONF: syscall(462) __NR_mseal not supported on your arch
+ltp-syscalls	mseal02	CONF	mseal02.c:47: TCONF: syscall(462) __NR_mseal not supported on your arch
 ltp-syscalls	msgctl01	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
 ltp-syscalls	msgctl02	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
 ltp-syscalls	msgctl03	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
@@ -863,7 +863,7 @@ ltp-syscalls	munlock02	BROK	munlock02.c:34: TBROK: mlock() failed: ENOSYS (38)
 ltp-syscalls	munlockall01	BROK	munlockall01.c:19: TBROK: Expected 1 conversions got 0 FILE '/proc/self/status'
 ltp-syscalls	munmap01	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
 ltp-syscalls	munmap03	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
-ltp-syscalls	munmap04	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
+ltp-syscalls	munmap04	CONF	tst_test.c:1079: TCONF: The test requires kernel 4.17 or newer
 ltp-syscalls	name_to_handle_at01	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
 ltp-syscalls	name_to_handle_at02	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
 ltp-syscalls	name_to_handle_at03	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
@@ -909,13 +909,13 @@ ltp-syscalls	pause01	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs
 ltp-syscalls	pause02	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
 ltp-syscalls	perf_event_open01	CONF	perf_event_open01    1  TCONF  :  perf_event_open01.c:106: Kernel doesn't have perf_event support
 ltp-syscalls	perf_event_open02	BROK	perf_event_open02.c:95: TBROK: setitimer: ENOSYS (38)
-ltp-syscalls	perf_event_open03	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
+ltp-syscalls	perf_event_open03	CONF	perf_event_open03.c:41: TCONF: intel_pt is not available
 ltp-syscalls	personality01	BROK	personality01.c:58: TBROK: persona(0) failed: ENOSYS (38)
 ltp-syscalls	personality02	BROK	personality02.c:27: TBROK: persona(67108864) failed: ENOSYS (38)
 ltp-syscalls	pidfd_getfd01	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
 ltp-syscalls	pidfd_getfd02	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
-ltp-syscalls	pidfd_open01	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
-ltp-syscalls	pidfd_open02	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
+ltp-syscalls	pidfd_open01	CONF	../../../../include/lapi/pidfd.h:79: TCONF: syscall(434) __NR_pidfd_open not supported on your arch
+ltp-syscalls	pidfd_open02	CONF	../../../../include/lapi/pidfd.h:79: TCONF: syscall(434) __NR_pidfd_open not supported on your arch
 ltp-syscalls	pidfd_open03	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
 ltp-syscalls	pidfd_open04	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
 ltp-syscalls	pidfd_send_signal01	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
@@ -963,11 +963,11 @@ ltp-syscalls	posix_fadvise04	FAIL	exit 5; posix_fadvise04.c:49: TFAIL: unexpecte
 ltp-syscalls	posix_fadvise04_64	FAIL	exit 5; posix_fadvise04.c:49: TFAIL: unexpected return value - 38 : ENOSYS - expected 29
 ltp-syscalls	ppoll01	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
 ltp-syscalls	prctl01	FAIL	exit 5; prctl01.c:25: TFAIL: prctl(PR_SET_PDEATHSIG) failed: EINVAL (22)
-ltp-syscalls	prctl02	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
+ltp-syscalls	prctl02	CONF	tst_capability.c:17: TCONF: syscall(125) __NR_capget not supported on your arch
 ltp-syscalls	prctl03	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
 ltp-syscalls	prctl05	BROK	prctl05.c:67: TBROK: Failed to open FILE '/proc/self/task/1131/comm' for reading: ENOENT (2)
 ltp-syscalls	prctl06	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
-ltp-syscalls	prctl07	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
+ltp-syscalls	prctl07	CONF	prctl07.c:166: TCONF: kernel doesn't support PR_CAP_AMBIENT
 ltp-syscalls	prctl08	FAIL	exit 5; prctl08.c:69: TFAIL: Min prctl(PR_GET_TIMERSLACK) expected 1 got 50000
 ltp-syscalls	prctl09	FAIL	exit 5; tst_timer_test.c:314: TFAIL: prctl() slept for too long
 ltp-syscalls	prctl10	FAIL	exit 5; prctl10.c:72: TFAIL: prctl(PR_SET_TSC, tc->read_stat) failed: EINVAL (22)
@@ -988,10 +988,10 @@ ltp-syscalls	preadv202_64	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to s
 ltp-syscalls	preadv203	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
 ltp-syscalls	preadv203_64	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
 ltp-syscalls	process_madvise01	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .config
-ltp-syscalls	process_vm_readv01	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
+ltp-syscalls	process_vm_readv01	CONF	process_vm01.c:72: TCONF: syscall(310) __NR_process_vm_readv not supported on your arch
 ltp-syscalls	process_vm_readv02	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
 ltp-syscalls	process_vm_readv03	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
-ltp-syscalls	process_vm_writev01	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
+ltp-syscalls	process_vm_writev01	CONF	process_vm01.c:81: TCONF: syscall(311) __NR_process_vm_writev not supported on your arch
 ltp-syscalls	process_vm_writev02	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
 ltp-syscalls	profil01	CONF	profil01    1  TCONF  :  profil01.c:135: system doesn't have profil() support
 ltp-syscalls	prot_hsymlinks	SIGNAL	SIGABRT; prot_hsymlinks    1  TBROK  :  prot_hsymlinks.c:323: Failed to run cmd: useradd hsym
@@ -1060,7 +1060,7 @@ ltp-syscalls	recv01	BROK	recv01      3  TBROK  :  recv01.c:190: client setup1 fa
 ltp-syscalls	recvfrom01	BROK	recvfrom01    3  TBROK  :  recvfrom01.c:214: client setup1 failed - no message ready in 2 sec
 ltp-syscalls	recvmmsg01	BROK	tst_test.c:1973: TBROK: Test killed by SIGSEGV!
 ltp-syscalls	recvmsg01	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
-ltp-syscalls	recvmsg02	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
+ltp-syscalls	recvmsg02	CONF	recvmsg02.c:57: TCONF: socket(10, 524290, 0) failed: EAFNOSUPPORT (97)
 ltp-syscalls	recvmsg03	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
 ltp-syscalls	remap_file_pages01	BROK	remap_file_pages01    1  TBROK  :  tst_fs_type.c:20: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): errno=ENOSYS(38): Function not implemented
 ltp-syscalls	remap_file_pages02	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
@@ -1083,12 +1083,12 @@ ltp-syscalls	rename15	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statf
 ltp-syscalls	renameat01	BROK	renameat01    1  TBROK  :  tst_fs_type.c:20: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): errno=ENOSYS(38): Function not implemented
 ltp-syscalls	renameat201	BROK	renameat201    1  TBROK  :  tst_fs_type.c:20: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): errno=ENOSYS(38): Function not implemented
 ltp-syscalls	renameat202	BROK	renameat202    1  TBROK  :  tst_fs_type.c:20: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): errno=ENOSYS(38): Function not implemented
-ltp-syscalls	request_key01	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
-ltp-syscalls	request_key02	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
-ltp-syscalls	request_key03	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
-ltp-syscalls	request_key04	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
-ltp-syscalls	request_key05	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
-ltp-syscalls	request_key06	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
+ltp-syscalls	request_key01	CONF	../../../../include/lapi/keyctl.h:27: TCONF: syscall(248) __NR_add_key not supported on your arch
+ltp-syscalls	request_key02	CONF	../../../../include/lapi/keyctl.h:27: TCONF: syscall(248) __NR_add_key not supported on your arch
+ltp-syscalls	request_key03	CONF	../../../../include/lapi/keyctl.h:52: TCONF: syscall(250) __NR_keyctl not supported on your arch
+ltp-syscalls	request_key04	CONF	../../../../include/lapi/keyctl.h:52: TCONF: syscall(250) __NR_keyctl not supported on your arch
+ltp-syscalls	request_key05	CONF	request_key05.c:29: TCONF: syscall(249) __NR_request_key not supported on your arch
+ltp-syscalls	request_key06	CONF	../../../../include/lapi/keyctl.h:36: TCONF: syscall(249) __NR_request_key not supported on your arch
 ltp-syscalls	rmdir01	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
 ltp-syscalls	rmdir02	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
 ltp-syscalls	rmdir03	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
@@ -1130,7 +1130,7 @@ ltp-syscalls	sched_setparam05	WARN	tst_test.c:1101: TWARN: Kernel is older than 
 ltp-syscalls	sched_setscheduler01	BROK	tst_pid.c:46: TBROK: Failed to open FILE '/proc/sys/kernel/pid_max' for reading: ENOENT (2)
 ltp-syscalls	sched_setscheduler02	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
 ltp-syscalls	sched_setscheduler03	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
-ltp-syscalls	sched_setscheduler04	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
+ltp-syscalls	sched_setscheduler04	CONF	tst_capability.c:17: TCONF: syscall(125) __NR_capget not supported on your arch
 ltp-syscalls	sched_yield01	PASS	
 ltp-syscalls	seccomp01	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
 ltp-syscalls	select01	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
@@ -1178,7 +1178,7 @@ ltp-syscalls	sendmsg01	BROK	sendmsg01    1  TBROK  :  tst_fs_type.c:20: tst_fs_t
 ltp-syscalls	sendmsg02	BROK	sendmsg02    1  TBROK  :  tst_fs_type.c:20: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): errno=ENOSYS(38): Function not implemented
 ltp-syscalls	sendmsg03	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .config
 ltp-syscalls	sendto01	BROK	sendto01    9  TBROK  :  sendto01.c:392: socket setup failed connect test 8: errno=ENOSYS(38): Function not implemented
-ltp-syscalls	sendto02	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
+ltp-syscalls	sendto02	CONF	sendto02.c:38: TCONF: sctp protocol was not supported
 ltp-syscalls	sendto03	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .config
 ltp-syscalls	set_mempolicy01	CONF	tst_test.c:1429: TCONF: test requires libnuma development packages with LIBNUMA_API_VERSION >= 2
 ltp-syscalls	set_mempolicy02	CONF	tst_test.c:1429: TCONF: test requires libnuma development packages with LIBNUMA_API_VERSION >= 2
@@ -1194,38 +1194,38 @@ ltp-syscalls	setdomainname03	FAIL	exit 37; setdomainname03.c:27: TFAIL: unexpect
 ltp-syscalls	setegid01	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
 ltp-syscalls	setegid02	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
 ltp-syscalls	setfsgid01	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
-ltp-syscalls	setfsgid01_16	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
+ltp-syscalls	setfsgid01_16	CONF	testcases/kernel/syscalls/setfsgid/../utils/compat_tst_16.h:119: TCONF: 16-bit version of setfsgid() is not supported on your platform
 ltp-syscalls	setfsgid02	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
-ltp-syscalls	setfsgid02_16	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
+ltp-syscalls	setfsgid02_16	CONF	testcases/kernel/syscalls/setfsgid/../utils/compat_tst_16.h:119: TCONF: 16-bit version of setfsgid() is not supported on your platform
 ltp-syscalls	setfsgid03	PASS	
 ltp-syscalls	setfsgid03_16	CONF	setfsgid03_16    1  TCONF  :  testcases/kernel/syscalls/setfsgid/../utils/compat_16.h:122: 16-bit version of
 ltp-syscalls	setfsuid01	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
-ltp-syscalls	setfsuid01_16	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
+ltp-syscalls	setfsuid01_16	CONF	testcases/kernel/syscalls/setfsuid/../utils/compat_tst_16.h:114: TCONF: 16-bit version of setfsuid() is not supported on your platform
 ltp-syscalls	setfsuid02	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
-ltp-syscalls	setfsuid02_16	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
+ltp-syscalls	setfsuid02_16	CONF	testcases/kernel/syscalls/setfsuid/../utils/compat_tst_16.h:114: TCONF: 16-bit version of setfsuid() is not supported on your platform
 ltp-syscalls	setfsuid03	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
-ltp-syscalls	setfsuid03_16	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
+ltp-syscalls	setfsuid03_16	CONF	testcases/kernel/syscalls/setfsuid/../utils/compat_tst_16.h:114: TCONF: 16-bit version of setfsuid() is not supported on your platform
 ltp-syscalls	setfsuid04	BROK	setfsuid04    1  TBROK  :  tst_fs_type.c:20: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): errno=ENOSYS(38): Function not implemented
 ltp-syscalls	setfsuid04_16	BROK	setfsuid04_16    1  TBROK  :  tst_fs_type.c:20: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): errno=ENOSYS(38): Function not implemented
 ltp-syscalls	setgid01	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
-ltp-syscalls	setgid01_16	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
+ltp-syscalls	setgid01_16	CONF	testcases/kernel/syscalls/setgid/../utils/compat_tst_16.h:94: TCONF: 16-bit version of setgid() is not supported on your platform
 ltp-syscalls	setgid02	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
-ltp-syscalls	setgid02_16	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
+ltp-syscalls	setgid02_16	CONF	testcases/kernel/syscalls/setgid/../utils/compat_tst_16.h:94: TCONF: 16-bit version of setgid() is not supported on your platform
 ltp-syscalls	setgid03	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
-ltp-syscalls	setgid03_16	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
+ltp-syscalls	setgid03_16	CONF	testcases/kernel/syscalls/setgid/../utils/compat_tst_16.h:94: TCONF: 16-bit version of setgid() is not supported on your platform
 ltp-syscalls	setgroups01	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
-ltp-syscalls	setgroups01_16	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
+ltp-syscalls	setgroups01_16	CONF	testcases/kernel/syscalls/setgroups/../utils/compat_tst_16.h:79: TCONF: 16-bit version of getgroups() is not supported on your platform
 ltp-syscalls	setgroups02	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
-ltp-syscalls	setgroups02_16	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
+ltp-syscalls	setgroups02_16	CONF	testcases/kernel/syscalls/setgroups/../utils/compat_tst_16.h:74: TCONF: 16-bit version of setgroups() is not supported on your platform
 ltp-syscalls	setgroups03	FAIL	exit 5; setgroups03.c:48: TFAIL: setgroups(33, groups_list) succeeded
-ltp-syscalls	setgroups03_16	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
+ltp-syscalls	setgroups03_16	CONF	testcases/kernel/syscalls/setgroups/../utils/compat_tst_16.h:74: TCONF: 16-bit version of setgroups() is not supported on your platform
 ltp-syscalls	sethostname01	FAIL	exit 37; testcases/kernel/syscalls/sethostname/../setdomainname/setdomainname01.c:18: TFAIL: sethostname() f
 ltp-syscalls	sethostname02	FAIL	exit 37; testcases/kernel/syscalls/sethostname/../setdomainname/setdomainname02.c:39: TFAIL: unexpected errn
 ltp-syscalls	sethostname03	FAIL	exit 37; testcases/kernel/syscalls/sethostname/../setdomainname/setdomainname03.c:27: TFAIL: unexpected errn
 ltp-syscalls	setitimer01	FAIL	exit 37; setitimer01.c:124: TFAIL: Child: exited with 0
-ltp-syscalls	setitimer02	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
+ltp-syscalls	setitimer02	CONF	../../../../include/tst_timer.h:382: TCONF: syscall(38) __NR_setitimer not supported on your arch
 ltp-syscalls	setns01	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
-ltp-syscalls	setns02	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
+ltp-syscalls	setns02	CONF	setns02.c:154: TCONF: syscall(308) __NR_setns not supported on your arch
 ltp-syscalls	setpgid01	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
 ltp-syscalls	setpgid02	BROK	setpgid02.c:45: TBROK: Failed to open FILE '/proc/sys/kernel/pid_max' for reading: ENOENT (2)
 ltp-syscalls	setpgid03	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
@@ -1234,43 +1234,43 @@ ltp-syscalls	setpgrp02	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal
 ltp-syscalls	setpriority01	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
 ltp-syscalls	setpriority02	FAIL	exit 5; setpriority02.c:73: TFAIL: setpriority(0, 1, -2) as unprivileged user should fail with EPERM: ESRCH (3)
 ltp-syscalls	setregid01	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
-ltp-syscalls	setregid01_16	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
+ltp-syscalls	setregid01_16	CONF	testcases/kernel/syscalls/setregid/../utils/compat_tst_16.h:128: TCONF: 16-bit version of setregid() is not supported on your platform
 ltp-syscalls	setregid02	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
-ltp-syscalls	setregid02_16	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
+ltp-syscalls	setregid02_16	CONF	testcases/kernel/syscalls/setregid/../utils/compat_tst_16.h:128: TCONF: 16-bit version of setregid() is not supported on your platform
 ltp-syscalls	setregid03	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
-ltp-syscalls	setregid03_16	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
+ltp-syscalls	setregid03_16	CONF	testcases/kernel/syscalls/setregid/../utils/compat_tst_16.h:128: TCONF: 16-bit version of setregid() is not supported on your platform
 ltp-syscalls	setregid04	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
-ltp-syscalls	setregid04_16	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
+ltp-syscalls	setregid04_16	CONF	testcases/kernel/syscalls/setregid/../utils/compat_tst_16.h:128: TCONF: 16-bit version of setregid() is not supported on your platform
 ltp-syscalls	setresgid01	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
-ltp-syscalls	setresgid01_16	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
+ltp-syscalls	setresgid01_16	CONF	testcases/kernel/syscalls/setresgid/../utils/compat_tst_16.h:138: TCONF: 16-bit version of setresgid() is not supported on your platform
 ltp-syscalls	setresgid02	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
-ltp-syscalls	setresgid02_16	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
+ltp-syscalls	setresgid02_16	CONF	testcases/kernel/syscalls/setresgid/../utils/compat_tst_16.h:138: TCONF: 16-bit version of setresgid() is not supported on your platform
 ltp-syscalls	setresgid03	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
-ltp-syscalls	setresgid03_16	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
+ltp-syscalls	setresgid03_16	CONF	testcases/kernel/syscalls/setresgid/../utils/compat_tst_16.h:138: TCONF: 16-bit version of setresgid() is not supported on your platform
 ltp-syscalls	setresgid04	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
 ltp-syscalls	setresgid04_16	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
 ltp-syscalls	setresuid01	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
-ltp-syscalls	setresuid01_16	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
+ltp-syscalls	setresuid01_16	CONF	testcases/kernel/syscalls/setresuid/../utils/compat_tst_16.h:133: TCONF: 16-bit version of setresuid() is not supported on your platform
 ltp-syscalls	setresuid02	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
-ltp-syscalls	setresuid02_16	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
+ltp-syscalls	setresuid02_16	CONF	testcases/kernel/syscalls/setresuid/../utils/compat_tst_16.h:133: TCONF: 16-bit version of setresuid() is not supported on your platform
 ltp-syscalls	setresuid03	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
-ltp-syscalls	setresuid03_16	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
+ltp-syscalls	setresuid03_16	CONF	testcases/kernel/syscalls/setresuid/../utils/compat_tst_16.h:133: TCONF: 16-bit version of setresuid() is not supported on your platform
 ltp-syscalls	setresuid04	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
 ltp-syscalls	setresuid04_16	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
 ltp-syscalls	setresuid05	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
 ltp-syscalls	setresuid05_16	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
 ltp-syscalls	setreuid01	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
-ltp-syscalls	setreuid01_16	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
+ltp-syscalls	setreuid01_16	CONF	testcases/kernel/syscalls/setreuid/../utils/compat_tst_16.h:124: TCONF: 16-bit version of setreuid() is not supported on your platform
 ltp-syscalls	setreuid02	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
-ltp-syscalls	setreuid02_16	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
+ltp-syscalls	setreuid02_16	CONF	testcases/kernel/syscalls/setreuid/../utils/compat_tst_16.h:124: TCONF: 16-bit version of setreuid() is not supported on your platform
 ltp-syscalls	setreuid03	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
-ltp-syscalls	setreuid03_16	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
+ltp-syscalls	setreuid03_16	CONF	testcases/kernel/syscalls/setreuid/../utils/compat_tst_16.h:124: TCONF: 16-bit version of setreuid() is not supported on your platform
 ltp-syscalls	setreuid04	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
-ltp-syscalls	setreuid04_16	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
+ltp-syscalls	setreuid04_16	CONF	testcases/kernel/syscalls/setreuid/../utils/compat_tst_16.h:124: TCONF: 16-bit version of setreuid() is not supported on your platform
 ltp-syscalls	setreuid05	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
-ltp-syscalls	setreuid05_16	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
+ltp-syscalls	setreuid05_16	CONF	testcases/kernel/syscalls/setreuid/../utils/compat_tst_16.h:124: TCONF: 16-bit version of setreuid() is not supported on your platform
 ltp-syscalls	setreuid06	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
-ltp-syscalls	setreuid06_16	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
+ltp-syscalls	setreuid06_16	CONF	testcases/kernel/syscalls/setreuid/../utils/compat_tst_16.h:124: TCONF: 16-bit version of setreuid() is not supported on your platform
 ltp-syscalls	setreuid07	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
 ltp-syscalls	setreuid07_16	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
 ltp-syscalls	setrlimit01	BROK	setrlimit01    1  TBROK  :  tst_fs_type.c:20: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): errno=ENOSYS(38): Function not implemented
@@ -1281,7 +1281,7 @@ ltp-syscalls	setrlimit05	FAIL	exit 5; setrlimit05.c:32: TFAIL: setrlimit()  succ
 ltp-syscalls	setrlimit06	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
 ltp-syscalls	setsid01	PASS	
 ltp-syscalls	setsockopt01	FAIL	exit 5; setsockopt01.c:93: TFAIL: setsockopt() succeeded unexpectedly
-ltp-syscalls	setsockopt02	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
+ltp-syscalls	setsockopt02	CONF	setsockopt02.c:55: TCONF: socket(17, 3, 768) failed: EAFNOSUPPORT (97)
 ltp-syscalls	setsockopt03	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
 ltp-syscalls	setsockopt04	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
 ltp-syscalls	setsockopt05	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .config
@@ -1292,11 +1292,11 @@ ltp-syscalls	setsockopt09	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .co
 ltp-syscalls	setsockopt10	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .config
 ltp-syscalls	setsockopt11	BROK	tst_taint.c:43: TBROK: Failed to open FILE '/proc/sys/kernel/tainted' for reading: ENOENT (2)
 ltp-syscalls	settimeofday01	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
-ltp-syscalls	settimeofday02	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
+ltp-syscalls	settimeofday02	CONF	tst_capability.c:17: TCONF: syscall(125) __NR_capget not supported on your arch
 ltp-syscalls	setuid01	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
-ltp-syscalls	setuid01_16	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
+ltp-syscalls	setuid01_16	CONF	testcases/kernel/syscalls/setuid/../utils/compat_tst_16.h:84: TCONF: 16-bit version of setuid() is not supported on your platform
 ltp-syscalls	setuid03	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
-ltp-syscalls	setuid03_16	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
+ltp-syscalls	setuid03_16	CONF	testcases/kernel/syscalls/setuid/../utils/compat_tst_16.h:84: TCONF: 16-bit version of setuid() is not supported on your platform
 ltp-syscalls	setuid04	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
 ltp-syscalls	setuid04_16	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
 ltp-syscalls	setxattr01	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
@@ -1311,7 +1311,7 @@ ltp-syscalls	shmctl01	BROK	shmctl01.c:246: TBROK: shmget(0, 2048, 380) failed: E
 ltp-syscalls	shmctl02	BROK	shmctl02.c:109: TBROK: shmget(0, 2048, 380) failed: ENOSYS (38)
 ltp-syscalls	shmctl03	FAIL	exit 5; shmctl03.c:23: TFAIL: shmctl(0, IPC_INFO, ...) returned -1: ENOSYS (38)
 ltp-syscalls	shmctl04	BROK	shmctl04.c:163: TBROK: shmget(0, 2048, 380) failed: ENOSYS (38)
-ltp-syscalls	shmctl05	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
+ltp-syscalls	shmctl05	CONF	shmctl05.c:47: TCONF: syscall(216) __NR_remap_file_pages not supported on your arch
 ltp-syscalls	shmctl06	CONF	tst_test.c:1429: TCONF: test requires struct shmid64_ds to have the time_high fields
 ltp-syscalls	shmctl07	BROK	shmctl07.c:56: TBROK: shmget(0, 2048, 380) failed: ENOSYS (38)
 ltp-syscalls	shmctl08	BROK	shmctl08.c:91: TBROK: shmget(0, 2048, 3b6) failed: ENOSYS (38)
@@ -1349,9 +1349,9 @@ ltp-syscalls	sigwait01	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal
 ltp-syscalls	sigwaitinfo01	TIMEOUT	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
 ltp-syscalls	socket01	FAIL	exit 5; socket01.c:67: TFAIL: expected EPROTONOSUPPORT(93): EINVAL (22)
 ltp-syscalls	socket02	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
-ltp-syscalls	socketcall01	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
-ltp-syscalls	socketcall02	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
-ltp-syscalls	socketcall03	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
+ltp-syscalls	socketcall01	CONF	socketcall01.c:39: TCONF: syscall(-1) __NR_socketcall not supported on your arch
+ltp-syscalls	socketcall02	CONF	socketcall02.c:38: TCONF: syscall(-1) __NR_socketcall not supported on your arch
+ltp-syscalls	socketcall03	CONF	socketcall03.c:32: TCONF: syscall(-1) __NR_socketcall not supported on your arch
 ltp-syscalls	socketpair01	FAIL	exit 5; socketpair01.c:73: TFAIL: expected EPROTONOSUPPORT(93): EINVAL (22)
 ltp-syscalls	socketpair02	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
 ltp-syscalls	sockioctl01	BROK	sockioctl01    1  TBROK  :  tst_fs_type.c:20: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): errno=ENOSYS(38): Function not implemented
@@ -1360,10 +1360,10 @@ ltp-syscalls	splice02	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statf
 ltp-syscalls	splice03	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
 ltp-syscalls	splice04	FAIL	exit 5; splice04.c:56: TFAIL: splice error: ENOSYS (38)
 ltp-syscalls	splice05	FAIL	exit 5; splice05.c:69: TFAIL: splice error: ENOSYS (38)
-ltp-syscalls	splice06	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
+ltp-syscalls	splice06	CONF	tst_test.c:1079: TCONF: The test requires kernel 5.11 or newer
 ltp-syscalls	splice07	FAIL	exit 37; splice07.c:56: TFAIL: splice() on file -> file expected EBADF, EINVAL: ENOSYS (38)
-ltp-syscalls	splice08	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
-ltp-syscalls	splice09	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
+ltp-syscalls	splice08	CONF	tst_test.c:1079: TCONF: The test requires kernel 6.7 or newer
+ltp-syscalls	splice09	CONF	tst_test.c:1079: TCONF: The test requires kernel 6.7 or newer
 ltp-syscalls	ssetmask01	BROK	ssetmask01    1  TBROK  :  tst_fs_type.c:20: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): errno=ENOSYS(38): Function not implemented
 ltp-syscalls	stat01	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
 ltp-syscalls	stat01_64	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
@@ -1379,25 +1379,25 @@ ltp-syscalls	statfs02	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statf
 ltp-syscalls	statfs02_64	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
 ltp-syscalls	statfs03	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
 ltp-syscalls	statfs03_64	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
-ltp-syscalls	statmount01	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
-ltp-syscalls	statmount02	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
-ltp-syscalls	statmount03	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
-ltp-syscalls	statmount04	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
-ltp-syscalls	statmount05	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
-ltp-syscalls	statmount06	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
-ltp-syscalls	statmount07	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
-ltp-syscalls	statmount08	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
-ltp-syscalls	statmount09	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
+ltp-syscalls	statmount01	CONF	tst_test.c:1079: TCONF: The test requires kernel 6.8 or newer
+ltp-syscalls	statmount02	CONF	tst_test.c:1079: TCONF: The test requires kernel 6.8 or newer
+ltp-syscalls	statmount03	CONF	tst_test.c:1079: TCONF: The test requires kernel 6.8 or newer
+ltp-syscalls	statmount04	CONF	tst_test.c:1079: TCONF: The test requires kernel 6.8 or newer
+ltp-syscalls	statmount05	CONF	tst_test.c:1079: TCONF: The test requires kernel 6.8 or newer
+ltp-syscalls	statmount06	CONF	tst_test.c:1079: TCONF: The test requires kernel 6.8 or newer
+ltp-syscalls	statmount07	CONF	tst_test.c:1079: TCONF: The test requires kernel 6.8 or newer
+ltp-syscalls	statmount08	CONF	tst_test.c:1079: TCONF: The test requires kernel 6.8 or newer
+ltp-syscalls	statmount09	CONF	tst_test.c:1079: TCONF: The test requires kernel 6.11 or newer
 ltp-syscalls	statvfs01	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
 ltp-syscalls	statvfs02	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
-ltp-syscalls	statx01	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
-ltp-syscalls	statx02	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
-ltp-syscalls	statx03	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
-ltp-syscalls	statx04	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
-ltp-syscalls	statx05	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
-ltp-syscalls	statx06	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
-ltp-syscalls	statx07	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
-ltp-syscalls	statx08	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
+ltp-syscalls	statx01	CONF	tst_test.c:1079: TCONF: The test requires kernel 4.11 or newer
+ltp-syscalls	statx02	CONF	tst_test.c:1079: TCONF: The test requires kernel 4.11 or newer
+ltp-syscalls	statx03	CONF	tst_test.c:1079: TCONF: The test requires kernel 4.11 or newer
+ltp-syscalls	statx04	CONF	tst_test.c:1079: TCONF: The test requires kernel 4.11 or newer
+ltp-syscalls	statx05	CONF	tst_test.c:1079: TCONF: The test requires kernel 4.11 or newer
+ltp-syscalls	statx06	CONF	tst_test.c:1079: TCONF: The test requires kernel 4.11 or newer
+ltp-syscalls	statx07	CONF	tst_test.c:1079: TCONF: The test requires kernel 4.16 or newer
+ltp-syscalls	statx08	CONF	tst_test.c:1079: TCONF: The test requires kernel 4.11 or newer
 ltp-syscalls	statx09	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .config
 ltp-syscalls	statx10	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
 ltp-syscalls	statx11	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
@@ -1423,19 +1423,19 @@ ltp-syscalls	syncfs01	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statf
 ltp-syscalls	syscall01	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
 ltp-syscalls	syscall02	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
 ltp-syscalls	sysconf01	PASS	
-ltp-syscalls	sysctl01	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
-ltp-syscalls	sysctl03	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
-ltp-syscalls	sysctl04	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
-ltp-syscalls	sysfs01	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
-ltp-syscalls	sysfs02	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
-ltp-syscalls	sysfs03	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
-ltp-syscalls	sysfs04	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
-ltp-syscalls	sysfs05	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
+ltp-syscalls	sysctl01	CONF	sysctl01.c:53: TCONF: syscall(156) __NR__sysctl not supported on your arch
+ltp-syscalls	sysctl03	CONF	sysctl03.c:55: TCONF: syscall(156) __NR__sysctl not supported on your arch
+ltp-syscalls	sysctl04	CONF	sysctl04.c:52: TCONF: syscall(156) __NR__sysctl not supported on your arch
+ltp-syscalls	sysfs01	CONF	sysfs01.c:20: TCONF: syscall(139) __NR_sysfs not supported on your arch
+ltp-syscalls	sysfs02	CONF	sysfs02.c:23: TCONF: syscall(139) __NR_sysfs not supported on your arch
+ltp-syscalls	sysfs03	CONF	sysfs03.c:19: TCONF: syscall(139) __NR_sysfs not supported on your arch
+ltp-syscalls	sysfs04	CONF	sysfs04.c:20: TCONF: syscall(139) __NR_sysfs not supported on your arch
+ltp-syscalls	sysfs05	CONF	sysfs05.c:33: TCONF: syscall(139) __NR_sysfs not supported on your arch
 ltp-syscalls	sysinfo01	BROK	sysinfo01.c:37: TBROK: Expected 1 conversions got 0 FILE '/proc/meminfo'
 ltp-syscalls	sysinfo02	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
 ltp-syscalls	sysinfo03	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .config
 ltp-syscalls	syslog11	BROK	tst_sys_conf.c:73: TBROK: Path not found: /proc/sys/kernel/printk: ENOENT (2)
-ltp-syscalls	syslog12	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
+ltp-syscalls	syslog12	CONF	syslog12.c:70: TCONF: syscall(103) __NR_syslog not supported on your arch
 ltp-syscalls	tee01	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
 ltp-syscalls	tee02	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
 ltp-syscalls	tgkill01	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
@@ -1445,12 +1445,12 @@ ltp-syscalls	time01	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal su
 ltp-syscalls	timer_create01	NOTBUILT	not built: uses glibc's private struct sigevent member _sigev_un
 ltp-syscalls	timer_create02	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .config
 ltp-syscalls	timer_create03	NOTBUILT	not built: uses glibc's private struct sigevent member _sigev_un
-ltp-syscalls	timer_delete01	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
-ltp-syscalls	timer_delete02	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
-ltp-syscalls	timer_getoverrun01	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
+ltp-syscalls	timer_delete01	CONF	timer_delete01.c:35: TCONF: syscall(222) __NR_timer_create not supported on your arch
+ltp-syscalls	timer_delete02	CONF	timer_delete02.c:26: TCONF: syscall(226) __NR_timer_delete not supported on your arch
+ltp-syscalls	timer_getoverrun01	CONF	timer_getoverrun01.c:31: TCONF: syscall(222) __NR_timer_create not supported on your arch
 ltp-syscalls	timer_gettime01	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
-ltp-syscalls	timer_settime01	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
-ltp-syscalls	timer_settime02	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
+ltp-syscalls	timer_settime01	CONF	timer_settime01.c:116: TCONF: syscall(222) __NR_timer_create not supported on your arch
+ltp-syscalls	timer_settime02	CONF	timer_settime02.c:100: TCONF: syscall(222) __NR_timer_create not supported on your arch
 ltp-syscalls	timer_settime03	BROK	timer_settime03.c:65: TBROK: timer_create(CLOCK_REALTIME) failed: ENOSYS (38)
 ltp-syscalls	timerfd01	FLAKY	FAIL and WARN in two x86_64 runs (2026-10-22); last here: WARN; tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
 ltp-syscalls	timerfd02	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
@@ -1485,16 +1485,16 @@ ltp-syscalls	unlink10	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statf
 ltp-syscalls	unlinkat01	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
 ltp-syscalls	unshare01	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
 ltp-syscalls	unshare02	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
-ltp-syscalls	unshare03	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
+ltp-syscalls	unshare03	CONF	tst_sys_conf.c:73: TCONF: Path not found: /proc/sys/fs/nr_open: ENOENT (2)
 ltp-syscalls	unshare04	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
 ltp-syscalls	unshare05	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .config
-ltp-syscalls	userfaultfd01	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
-ltp-syscalls	userfaultfd02	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
+ltp-syscalls	userfaultfd01	CONF	../../../../include/lapi/userfaultfd.h:259: TCONF: syscall(323) __NR_userfaultfd not supported on your arch
+ltp-syscalls	userfaultfd02	CONF	tst_test.c:1079: TCONF: The test requires kernel 6.8 or newer
 ltp-syscalls	userfaultfd03	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .config
 ltp-syscalls	userfaultfd04	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .config
 ltp-syscalls	userfaultfd05	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .config
-ltp-syscalls	userfaultfd06	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
-ltp-syscalls	userfaultfd07	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
+ltp-syscalls	userfaultfd06	CONF	../../../../include/lapi/userfaultfd.h:259: TCONF: syscall(323) __NR_userfaultfd not supported on your arch
+ltp-syscalls	userfaultfd07	CONF	tst_test.c:1079: TCONF: The test requires kernel 5.14 or newer
 ltp-syscalls	ustat01	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(.): ENOSYS (38)
 ltp-syscalls	ustat02	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(.): ENOSYS (38)
 ltp-syscalls	utime01	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
@@ -1508,8 +1508,8 @@ ltp-syscalls	utimensat01	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to st
 ltp-syscalls	utimes01	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
 ltp-syscalls	vfork01	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
 ltp-syscalls	vfork02	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
-ltp-syscalls	vhangup01	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
-ltp-syscalls	vhangup02	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
+ltp-syscalls	vhangup01	CONF	vhangup01.c:32: TCONF: syscall(153) __NR_vhangup not supported on your arch
+ltp-syscalls	vhangup02	CONF	vhangup02.c:29: TCONF: syscall(153) __NR_vhangup not supported on your arch
 ltp-syscalls	vmsplice01	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
 ltp-syscalls	vmsplice02	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
 ltp-syscalls	vmsplice03	BROK	vmsplice03.c:34: TBROK: vmsplice() failed: ENOSYS (38)
@@ -1549,7 +1549,7 @@ ltp-syscalls	write05	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs
 ltp-syscalls	write06	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
 ltp-syscalls	writev01	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
 ltp-syscalls	writev02	BROK	writev02    1  TBROK  :  tst_fs_type.c:20: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): errno=ENOSYS(38): Function not implemented
-ltp-syscalls	writev03	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
+ltp-syscalls	writev03	CONF	tst_test.c:1517: TCONF: Test needs at least 2 CPUs online
 ltp-syscalls	writev05	BROK	writev05    1  TBROK  :  tst_fs_type.c:20: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): errno=ENOSYS(38): Function not implemented
 ltp-syscalls	writev06	BROK	writev06    1  TBROK  :  tst_fs_type.c:20: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): errno=ENOSYS(38): Function not implemented
 ltp-syscalls	writev07	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)

@@ -156,6 +156,12 @@ static void print_log(const char *out, const char *n)
         return;
     while (fgets(line, sizeof(line), f)) {
         size_t len = strcspn(line, "\r\n");
+        int c;
+        /* A line longer than the buffer: drop the rest of it, so its tail
+         * is not read as a line of its own. */
+        if (line[len] == '\0' && len == sizeof(line) - 1)
+            while ((c = fgetc(f)) != EOF && c != '\n')
+                ;
         line[len] = '\0';
         if (len == 0)
             continue;

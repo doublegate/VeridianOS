@@ -21,6 +21,10 @@ class Classify(unittest.TestCase):
         self.assertEqual(c("ltp-syscalls", "rc=32 sig=0 timeout=0 ms=5")[0], "CONF")
         self.assertEqual(c("ltp-syscalls", "rc=33 sig=0 timeout=0 ms=5")[0], "FAIL")
         self.assertEqual(c("ltp-syscalls", "rc=4 sig=0 timeout=0 ms=5")[0], "WARN")
+        # LTP sets TCONF only when nothing passed (do_exit in lib/tst_test.c):
+        # a skipped test that also warned is a skip, not a pass.
+        self.assertEqual(c("ltp-syscalls", "rc=36 sig=0 timeout=0 ms=5")[0], "CONF")
+        self.assertEqual(c("ltp-syscalls", "rc=38 sig=0 timeout=0 ms=5")[0], "BROK")
 
     def test_open_posix_exit_codes(self):
         c = compat.classify

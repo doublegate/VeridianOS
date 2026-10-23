@@ -106,10 +106,12 @@ def classify(suite, result):
             status = "BROK"
         elif rc & _TFAIL:
             status = "FAIL"
+        elif rc & _TCONF:
+            # LTP sets TCONF only when nothing passed (do_exit in
+            # lib/tst_test.c), so a skip that also warned is still a skip.
+            status = "CONF"
         elif rc & _TWARN:
             status = "WARN"
-        elif rc == _TCONF:
-            status = "CONF"
         else:
             status = "FAIL"
     elif suite == "open-posix":
@@ -589,7 +591,7 @@ def cmd_lists(args):
         args.arch,
         header=f"# Tests judged at build time for {args.arch}: suite, test, status, note.\n",
     )
-    for name in ("ltp-syscalls", "open-posix", "libc-test"):
+    for name in SUITES:
         count = len((out / f"{name}.list").read_text().splitlines())
         print(f"{name}: {count} tests")
     print(f"build-time results: {len(build)}")

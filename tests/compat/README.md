@@ -92,7 +92,9 @@ listed but do not fail it; `--strict` fails on any difference.
 | `FLAKY` | (expected lists only) any result is accepted; the note says why |
 
 LTP's exit status combines its result flags, and the most serious one is
-taken: `TBROK` before `TFAIL`, then `TWARN`; `TCONF` alone is `CONF`.
+taken: `TBROK`, then `TFAIL`, then `TCONF` (LTP sets it only when nothing
+passed, so a skip that also warned is `CONF`), then `TWARN` (passed, with a
+warning).
 
 ## Updating the expected lists
 

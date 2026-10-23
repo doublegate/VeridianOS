@@ -101,7 +101,8 @@ their check, for a few shared reasons:
 - **statfs is ENOSYS.** LTP's library asks for the filesystem type of its temporary directory, so
   about 630 of the 1,552 tests are TBROK before they start.
 - **The release `uname` reports.** LTP warns that the kernel is "older than minimal supported 4.4"
-  (TWARN) in about 420 tests that otherwise passed: VeridianOS reports its own version.
+  (TWARN) in every new-API test: VeridianOS reports its own version. About 205 of them otherwise
+  passed; in the rest the warning comes with the real outcome (a skip, a failure).
 - **No kernel configuration.** Tests that check a `CONFIG_*` option (about 95) find neither
   `/proc/config.gz` nor `/boot/config-<release>` and are TBROK.
 - **Missing calls.** alarm and the interval and POSIX timers, the System V IPC calls, message
