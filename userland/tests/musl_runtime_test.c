@@ -5026,6 +5026,7 @@ static void test_review_fixes(void)
 }
 
 /* Tests `--only NAME` can run alone (for debugging a single test). */
+static void test_dev_shm(void); /* defined after the table */
 static const struct {
     const char *name;
     void (*fn)(void);
@@ -5052,6 +5053,7 @@ static const struct {
     {"priority_inheritance", test_priority_inheritance},
     {"unix_accept_blocks", test_unix_accept_blocks},
     {"fs_ids", test_fs_ids},
+    {"dev_shm_maps_the_file_s_pages", test_dev_shm},
 };
 
 /* /dev/shm is a tmpfs whose files are their own pages, as on Linux. LTP

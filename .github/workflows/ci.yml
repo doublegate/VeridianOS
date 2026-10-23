@@ -82,6 +82,16 @@ jobs:
                     bash "$t"
                     echo "::endgroup::"
                   done
+            # The BlockFS image tool is its own crate (outside the
+            # workspace), and the conformance tooling has host tests.
+            - name: mkfs-blockfs checks and tests
+              run: |
+                  cd tools/mkfs-blockfs
+                  cargo fmt --check
+                  cargo clippy --release --all-targets -- -D warnings
+                  cargo test --release
+            - name: Conformance tooling tests
+              run: python3 -I tools/compat/test_compat.py
             - name: Check vsh formatting
               run: cd userland/vsh && cargo fmt -- --check
             - name: Build vsh (x86_64)

@@ -91,6 +91,37 @@ exposed were fixed (N-182 to N-189); the rest are listed, with their targets, in
 - **Errnos.** Many errors come back as EINVAL where Linux is specific (N-202, N-212 to N-216,
   N-234, N-238).
 
+### Conformance suites: what most failures come from (tests/compat)
+
+LTP's `syscalls`, the Open POSIX Test Suite and musl libc-test run on all three architectures, and
+`tests/compat/expected-<arch>.tsv` records every test's result with the reason it gave (counts in
+[`docs/compat/COMPATIBILITY-PLAN.md`](compat/COMPATIBILITY-PLAN.md)). Most LTP tests never reach
+their check, for a few shared reasons:
+
+- **statfs is ENOSYS.** LTP's library asks for the filesystem type of its temporary directory, so
+  about 630 of the 1,552 tests are TBROK before they start.
+- **The release `uname` reports.** LTP warns that the kernel is "older than minimal supported 4.4"
+  (TWARN) in every new-API test: VeridianOS reports its own version. About 205 of them otherwise
+  passed; in the rest the warning comes with the real outcome (a skip, a failure).
+- **No kernel configuration.** Tests that check a `CONFIG_*` option (about 95) find neither
+  `/proc/config.gz` nor `/boot/config-<release>` and are TBROK.
+- **Missing calls.** alarm and the interval and POSIX timers, the System V IPC calls, message
+  queues, mlock, msync, sched_getparam and the other calls the coverage tables list as missing;
+  `/proc/sys`, `/proc/self/mounts` and parts of `/proc/<pid>/stat` and `status`.
+- **Memory exhaustion.** libc-test's `malloc-oom`, `malloc-brk-fail` and `pthread_create-oom`
+  stop the whole guest on RISC-V. On x86_64 and AArch64 they ran until the time limit after the
+  full LTP and Open POSIX runs in the same guest, but reached ENOMEM within 10 to 16 s when
+  libc-test ran on its own (x86_64): how they end depends on what ran before.
+- **A new process can be missing from /proc for a moment.** Open POSIX tests that wait for a
+  child's state in `/proc/<pid>/stat` (its `include/proc.h`) read it right after fork and now and
+  then find no such file (`sem_timedwait/9-1`, once in four x86_64 runs; it is marked FLAKY).
+- **Stress tests are slow.** Open POSIX's `shm_open/23-1` (1,000 processes) does not finish within
+  the limit; tearing down that many processes takes longer than a minute.
+- **wordexp.** libc-test's `functional/wordexp` runs until the time limit on all three
+  architectures. On x86_64 the first error it reports is the root filesystem's, not the kernel's:
+  BusyBox ash there is built without arithmetic (`tools/busybox/veridian_defconfig`), and the test
+  expands `$((3*4))`.
+
 ### Drivers and services run in the kernel (C6, planned v0.28+)
 
 The microkernel design places drivers, filesystems, network protocols and the desktop in user-space

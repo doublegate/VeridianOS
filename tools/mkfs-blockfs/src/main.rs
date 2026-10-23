@@ -398,8 +398,21 @@ impl BlockFsBuilder {
         entry[7] = file_type;
         entry[8..8 + name_len].copy_from_slice(&name_bytes[..name_len]);
 
-        let current_size = self.inodes[dir_inode as usize].size as usize;
-        self.write_inode_data(dir_inode, current_size, &entry);
+        // The kernel reads a directory a block at a time, so an entry never
+        // crosses a block: one that would starts the next block, and the
+        // rest of this one stays zero (a record length of 0 ends the scan),
+        // as the kernel's own write_dir_entry does. Only the 12 direct blocks
+        // are read.
+        let mut offset = self.inodes[dir_inode as usize].size as usize;
+        if offset % BLOCK_SIZE + rec_len > BLOCK_SIZE {
+            offset = offset.next_multiple_of(BLOCK_SIZE);
+        }
+        assert!(
+            (offset + rec_len).div_ceil(BLOCK_SIZE) <= DIRECT_BLOCKS,
+            "{name}: the directory needs more than its {DIRECT_BLOCKS} direct blocks (directory \
+             direct blocks, the kernel reads no others)"
+        );
+        self.write_inode_data(dir_inode, offset, &entry);
     }
 
     /// Create a file inode and add it to a parent directory
@@ -910,6 +923,75 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The names in directory `dir`, read the way the kernel reads them
+    /// (`BlockFs::find_dir_entry`): each of the 12 direct blocks on its own,
+    /// from offset 0, stopping at a record length under the header size.
+    fn kernel_dir_names(b: &BlockFsBuilder, dir: u32) -> Vec<String> {
+        let inode = &b.inodes[dir as usize];
+        let size = inode.size as usize;
+        let mut names = Vec::new();
+        for (i, &blk) in inode.direct_blocks.iter().enumerate() {
+            if blk == 0 || i * BLOCK_SIZE >= size {
+                break;
+            }
+            let block = &b.blocks[blk as usize];
+            let end = BLOCK_SIZE.min(size - i * BLOCK_SIZE);
+            let mut off = 0;
+            while off + DIR_ENTRY_HEADER_SIZE <= end {
+                let rec = u16::from_le_bytes([block[off + 4], block[off + 5]]) as usize;
+                if rec < DIR_ENTRY_HEADER_SIZE || !rec.is_multiple_of(4) || off + rec > BLOCK_SIZE {
+                    break;
+                }
+                let ino = u32::from_le_bytes(block[off..off + 4].try_into().unwrap());
+                let len = block[off + 6] as usize;
+                if ino != 0 && len > 0 {
+                    names
+                        .push(String::from_utf8_lossy(&block[off + 8..off + 8 + len]).into_owned());
+                }
+                off += rec;
+            }
+        }
+        names
+    }
+
+    /// A directory over one block keeps every entry inside a block, so the
+    /// kernel, which reads a block at a time, finds all of them.
+    #[test]
+    fn directory_entries_never_cross_a_block() {
+        let mut b = BlockFsBuilder::new(4096, 2048);
+        for i in 0..1000 {
+            b.create_file(0, &format!("file_with_a_name_{i}"), b"", S_IFREG | 0o644);
+        }
+        let size = b.inodes[0].size as usize;
+        assert!(
+            size > 4 * BLOCK_SIZE,
+            "the test needs a directory over several blocks"
+        );
+        let names = kernel_dir_names(&b, 0);
+        for i in 0..1000 {
+            assert!(
+                names.contains(&format!("file_with_a_name_{i}")),
+                "entry {i} not found"
+            );
+        }
+    }
+
+    /// The kernel reads only the 12 direct blocks of a directory, so a
+    /// longer one is refused instead of written with entries it cannot see.
+    #[test]
+    #[should_panic(expected = "directory direct blocks")]
+    fn a_directory_over_twelve_blocks_is_refused() {
+        let mut b = BlockFsBuilder::new(8192, 4096);
+        for i in 0..3000 {
+            b.create_file(
+                0,
+                &format!("a_rather_long_file_name_number_{i:05}"),
+                b"",
+                S_IFREG | 0o644,
+            );
+        }
+    }
 
     /// Host device numbers become Linux's 32-bit encoding.
     #[test]

@@ -35,8 +35,33 @@
   VeridianOS's own mount call) accepts `"tmpfs"`; Linux `mount(2)` is not wired yet. A tmpfs
   root is mode 1777, its default size limit is half of RAM, and it charges whole pages against
   the limit (rounded up to whole pages), as Linux does.
+- Conformance suites on all three architectures (`tests/compat/README.md`): LTP 20260930's
+  `runtest/syscalls`, the Open POSIX Test Suite and musl libc-test, built with each
+  architecture's musl toolchain into a compat root filesystem
+  (`scripts/build-compat-rootfs.sh <arch>`), and run in QEMU by `scripts/run-compat-tests.sh`.
+  An in-guest runner (`userland/tests/compat/run.sh` with `compat_exec`, which keeps a time
+  limit by polling, since VeridianOS has no `alarm` yet) prints one line per test; the host
+  driver (`tools/compat/compat.py`) boots the guest again after a test that hangs or crashes it,
+  can split a run between several guests (`--jobs`), resume one (`--resume`) and rebuild results
+  from the serial logs (`collect`). Each test's result is recorded in
+  `tests/compat/expected-<arch>.tsv`; a test expected to pass that does not fails the run.
+  The baseline (2026-10-22), on x86_64, AArch64 and RISC-V: LTP 24 of 1,552 pass (another 202 to
+  206 pass with LTP's warning that the kernel is older than 4.4), Open POSIX 1,569, 1,565 and
+  1,565 of 1,965, libc-test 523, 525 and 525 of 560; most LTP tests stop in its library because
+  statfs is ENOSYS (`docs/KNOWN-LIMITATIONS.md`, "Conformance suites").
+  The gate runs the tests expected to pass (`--rootfs`) and, with `--compat`, the full suites; a
+  weekly workflow (`.github/workflows/compat.yml`) runs the x86_64 tests expected to pass (the
+  full suites do not fit in a GitHub job: there they took over six hours).
+- `musl_runtime_test --only dev_shm_maps_the_file_s_pages` runs the `/dev/shm` test alone.
 
 ### Fixed
+
+- `mkfs-blockfs` let a directory entry cross a 4 KiB block boundary, and the kernel reads a
+  directory a block at a time: in a directory over one block most names could not be found (855 of
+  1,000 in a test). Entries now start a new block when they would cross one, as the kernel's own
+  writer does, and a directory longer than the 12 direct blocks the kernel reads is refused. The
+  existing images were not affected (every directory fit in one block); the compat image's 1,600
+  LTP binaries in one directory would have been. Its tests now run in the gate and CI.
 
 - `.githooks/pre-push` keeps leading and trailing whitespace in path names when scanning for
   sensitive files.
