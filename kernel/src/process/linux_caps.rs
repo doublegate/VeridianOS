@@ -315,6 +315,20 @@ impl CapSets {
         Ok(())
     }
 
+    /// The effective set access(2) checks with (Linux's do_faccessat),
+    /// which acts as the caller's real self: unless SECBIT_NO_SETUID_FIXUP,
+    /// nothing for a real uid other than 0, and the permitted set for real
+    /// uid 0.
+    pub fn access_effective(&self, ruid: u32) -> LinuxCaps {
+        if self.secure(SECURE_NO_SETUID_FIXUP) {
+            self.effective
+        } else if ruid == 0 {
+            self.permitted
+        } else {
+            LinuxCaps::EMPTY
+        }
+    }
+
     /// The fixup after setuid, setreuid or setresuid (Linux's
     /// `cap_emulate_setxuid`, unless SECBIT_NO_SETUID_FIXUP).
     pub fn fix_setuid(&mut self, old: Uids, new: Uids) {
@@ -634,6 +648,19 @@ mod tests {
         assert!(cap_valid(40) && !cap_valid(41) && !cap_valid(u64::MAX));
         assert!(FS_SET.has(CAP_LINUX_IMMUTABLE) && FS_SET.has(CAP_MAC_OVERRIDE));
         assert!(!FS_SET.has(CAP_KILL));
+    }
+
+    /// access(2) checks as the caller's real self (do_faccessat): a real
+    /// uid other than 0 holds nothing, real uid 0 its permitted set, and
+    /// SECBIT_NO_SETUID_FIXUP keeps the effective set.
+    #[test]
+    fn access_checks_as_the_real_user() {
+        let mut c = CapSets::ROOT;
+        c.effective = caps(&[CAP_KILL]);
+        assert_eq!(c.access_effective(1000), LinuxCaps::EMPTY);
+        assert_eq!(c.access_effective(0), CapSets::ROOT.permitted);
+        c.securebits |= secbit(SECURE_NO_SETUID_FIXUP);
+        assert_eq!(c.access_effective(1000), caps(&[CAP_KILL]));
     }
 
     #[test]

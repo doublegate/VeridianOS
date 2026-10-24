@@ -307,46 +307,22 @@ impl Permissions {
         (kept != *self).then_some(kept)
     }
 
-    /// Check if the given uid/gid has read access.
-    pub fn can_read(&self, uid: u32, gid: u32, file_uid: u32, file_gid: u32) -> bool {
-        if uid == 0 {
-            return true; // root bypasses permission checks
-        }
-        if uid == file_uid {
-            self.owner_read
-        } else if gid == file_gid {
-            self.group_read
+    /// The access bits (MAY_READ, MAY_WRITE, MAY_EXEC) of one class: the
+    /// owner's, the group's, or everyone else's.
+    fn class_bits(&self, owner: bool, group: bool) -> u32 {
+        let (r, w, x) = if owner {
+            (self.owner_read, self.owner_write, self.owner_exec)
+        } else if group {
+            (self.group_read, self.group_write, self.group_exec)
         } else {
-            self.other_read
-        }
+            (self.other_read, self.other_write, self.other_exec)
+        };
+        ((r as u32) * MAY_READ) | ((w as u32) * MAY_WRITE) | ((x as u32) * MAY_EXEC)
     }
 
-    /// Check if the given uid/gid has write access.
-    pub fn can_write(&self, uid: u32, gid: u32, file_uid: u32, file_gid: u32) -> bool {
-        if uid == 0 {
-            return true;
-        }
-        if uid == file_uid {
-            self.owner_write
-        } else if gid == file_gid {
-            self.group_write
-        } else {
-            self.other_write
-        }
-    }
-
-    /// Check if the given uid/gid has run access.
-    pub fn can_run(&self, uid: u32, gid: u32, file_uid: u32, file_gid: u32) -> bool {
-        if uid == 0 {
-            return true;
-        }
-        if uid == file_uid {
-            self.owner_exec
-        } else if gid == file_gid {
-            self.group_exec
-        } else {
-            self.other_exec
-        }
+    /// Whether any class may execute.
+    pub fn any_exec(&self) -> bool {
+        self.owner_exec || self.group_exec || self.other_exec
     }
 }
 
@@ -362,6 +338,39 @@ pub struct Metadata {
     pub modified: u64,
     pub accessed: u64,
     pub inode: u64,
+}
+
+/// Access asked of a node, as Linux's MAY_* bits (the same values as
+/// access(2)'s R_OK, W_OK and X_OK).
+pub const MAY_EXEC: u32 = 1;
+pub const MAY_WRITE: u32 = 2;
+pub const MAY_READ: u32 = 4;
+
+/// Whether `caller` may access a node with `meta` as `mask` asks (MAY_*
+/// bits), as Linux's generic_permission (ADR 0020): the mode bits of the
+/// first class that applies -- owner, then group (any of the caller's
+/// groups), then other -- and then the capabilities that override them. On
+/// a directory CAP_DAC_READ_SEARCH grants anything but writing and
+/// CAP_DAC_OVERRIDE everything; on anything else CAP_DAC_READ_SEARCH grants
+/// reading alone, and CAP_DAC_OVERRIDE reading and writing, and executing
+/// only where some execute bit is set.
+pub fn permission(caller: &crate::process::creds::Caller, meta: &Metadata, mask: u32) -> bool {
+    use crate::process::linux_caps::{CAP_DAC_OVERRIDE, CAP_DAC_READ_SEARCH};
+    let c = &caller.creds;
+    let p = &meta.permissions;
+    let owner = c.fsuid == meta.uid;
+    let granted = p.class_bits(owner, !owner && c.in_group(meta.gid));
+    if mask & !granted == 0 {
+        return true;
+    }
+    if meta.node_type == NodeType::Directory {
+        return (mask & MAY_WRITE == 0 && caller.capable(CAP_DAC_READ_SEARCH))
+            || caller.capable(CAP_DAC_OVERRIDE);
+    }
+    if mask == MAY_READ && caller.capable(CAP_DAC_READ_SEARCH) {
+        return true;
+    }
+    (mask & MAY_EXEC == 0 || p.any_exec()) && caller.capable(CAP_DAC_OVERRIDE)
 }
 
 /// Directory entry
@@ -878,7 +887,7 @@ impl MountTable {
         cwd: &str,
         follow_last: bool,
         symlink_depth: usize,
-        creds: Option<crate::process::creds::Credentials>,
+        creds: Option<crate::process::creds::Caller>,
     ) -> Result<(Arc<dyn VfsNode>, String), KernelError> {
         self.resolve_in(path, cwd, "/", follow_last, symlink_depth, creds)
     }
@@ -896,7 +905,7 @@ impl MountTable {
         root: &str,
         follow_last: bool,
         symlink_depth: usize,
-        creds: Option<crate::process::creds::Credentials>,
+        creds: Option<crate::process::creds::Caller>,
     ) -> Result<(Arc<dyn VfsNode>, String), KernelError> {
         use alloc::collections::VecDeque;
 
@@ -925,12 +934,8 @@ impl MountTable {
             if node.node_type() != NodeType::Directory {
                 return Err(KernelError::FsError(crate::error::FsError::NotADirectory));
             }
-            if let Some(c) = creds {
-                let meta = node.metadata()?;
-                if !meta
-                    .permissions
-                    .can_run(c.fsuid, c.gid_for(meta.gid), meta.uid, meta.gid)
-                {
+            if let Some(c) = &creds {
+                if !permission(c, &node.metadata()?, MAY_EXEC) {
                     return Err(KernelError::FsError(
                         crate::error::FsError::PermissionDenied,
                     ));
@@ -1030,7 +1035,7 @@ pub struct PathContext {
     /// The root directory, as a canonical path in the whole tree.
     pub root: String,
     /// Whose search permission a walk checks; `None` checks none.
-    pub creds: Option<crate::process::creds::Credentials>,
+    pub creds: Option<crate::process::creds::Caller>,
     /// The process MAC policy is checked for (0: the kernel).
     pub pid: u64,
 }
@@ -1311,8 +1316,9 @@ impl Vfs {
     }
 
     /// The calling thread's view: its working directory and root
-    /// (chroot), its process's credentials for search permission (none
-    /// for root) and its pid for MAC. Without a current thread or process
+    /// (chroot), who it is for search permission (`Caller`: CAP_DAC_OVERRIDE
+    /// and CAP_DAC_READ_SEARCH pass it) and its pid for MAC. Without a
+    /// current thread or process
     /// (the kernel shell) that part is the kernel's.
     pub fn caller_context(&self) -> PathContext {
         let mut ctx = self.kernel_context();
@@ -1324,7 +1330,7 @@ impl Vfs {
         }
         if let Some(process) = crate::process::current_process() {
             ctx.pid = process.pid.0;
-            ctx.creds = Some(process.credentials()).filter(|c| !c.fs_privileged());
+            ctx.creds = Some(crate::process::creds::Caller::current());
         }
         ctx
     }
@@ -2320,6 +2326,74 @@ mod tests {
         assert!(p.set_uid && p.set_gid && !p.sticky);
     }
 
+    /// fs::permission is Linux's generic_permission: the first class that
+    /// applies decides from the mode bits, then the DAC capabilities
+    /// override -- not uid 0 (ADR 0020).
+    #[test]
+    fn permission_is_mode_bits_then_capabilities() {
+        use crate::process::{
+            creds::{Caller, Credentials},
+            linux_caps::{LinuxCaps, CAP_DAC_OVERRIDE, CAP_DAC_READ_SEARCH},
+        };
+        let meta = |node_type, mode, uid, gid| Metadata {
+            node_type,
+            size: 0,
+            permissions: Permissions::from_mode(mode),
+            uid,
+            gid,
+            created: 0,
+            modified: 0,
+            accessed: 0,
+            inode: 1,
+        };
+        let who = |uid, caps: &[u32]| Caller {
+            creds: Credentials::new(uid, uid),
+            caps: caps.iter().fold(LinuxCaps::EMPTY, |s, &c| s.with(c)),
+        };
+        let file = NodeType::File;
+        let dir = NodeType::Directory;
+        let user = who(1000, &[]);
+        // The owner class alone decides for the owner, even if others may.
+        assert!(!permission(&user, &meta(file, 0o077, 1000, 1000), MAY_READ));
+        assert!(permission(&user, &meta(file, 0o640, 0, 1000), MAY_READ));
+        assert!(!permission(&user, &meta(file, 0o640, 0, 1000), MAY_WRITE));
+        assert!(permission(&user, &meta(file, 0o604, 0, 0), MAY_READ));
+        // Root without capabilities is an ordinary user.
+        let bare_root = who(0, &[]);
+        assert!(!permission(
+            &bare_root,
+            &meta(file, 0o600, 1000, 1000),
+            MAY_READ
+        ));
+        assert!(permission(
+            &Caller::KERNEL,
+            &meta(file, 0o600, 1000, 1000),
+            MAY_READ
+        ));
+        // CAP_DAC_OVERRIDE: read and write anything, execute only with an
+        // execute bit; any directory.
+        let dac = who(1000, &[CAP_DAC_OVERRIDE]);
+        let secret = meta(file, 0o000, 0, 0);
+        assert!(permission(&dac, &secret, MAY_READ | MAY_WRITE));
+        assert!(!permission(&dac, &secret, MAY_EXEC));
+        assert!(permission(&dac, &meta(file, 0o001, 0, 0), MAY_EXEC));
+        assert!(permission(
+            &dac,
+            &meta(dir, 0o000, 0, 0),
+            MAY_WRITE | MAY_EXEC
+        ));
+        // CAP_DAC_READ_SEARCH: read files, read and search directories.
+        let rs = who(1000, &[CAP_DAC_READ_SEARCH]);
+        assert!(permission(&rs, &secret, MAY_READ));
+        assert!(!permission(&rs, &secret, MAY_READ | MAY_WRITE));
+        assert!(permission(
+            &rs,
+            &meta(dir, 0o000, 0, 0),
+            MAY_READ | MAY_EXEC
+        ));
+        assert!(!permission(&rs, &meta(dir, 0o000, 0, 0), MAY_WRITE));
+    }
+
     /// Linux's file_remove_privs: a write by anyone but root drops
     /// set-user-ID; set-group-ID goes with group execute or when the writer
     /// is outside the group, and stays as a locking mark otherwise.
@@ -2448,7 +2522,10 @@ mod tests {
             .unwrap();
         open.create("f", Permissions::from_mode(0o644)).unwrap();
         let table = vfs.snapshot();
-        let other = Some(crate::process::creds::Credentials::new(1000, 1000));
+        let other = Some(crate::process::creds::Caller {
+            creds: crate::process::creds::Credentials::new(1000, 1000),
+            caps: crate::process::linux_caps::LinuxCaps::EMPTY,
+        });
         // Root-owned 0700: another user cannot pass through it, even to a
         // world-readable file, and not by ".." either.
         assert!(matches!(

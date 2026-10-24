@@ -358,23 +358,23 @@ fn basename(path: &str) -> &str {
     path.rsplit('/').next().unwrap_or(path)
 }
 
-/// Read the file at `path` for exec: it must be a regular file the caller
-/// (`uid`, `gid`) may execute -- root needs at least one execute bit, as on
-/// Linux -- or the result is `PermissionDenied` (EACCES). The check and the
-/// read use the same resolved node, so the file cannot be swapped between
-/// them (N-101). The node comes back too: the loader maps the file's pages
-/// from its page cache (ADR 0010).
+/// Read the file at `path` for exec: it must be a regular file `caller`
+/// may execute (`fs::permission`: CAP_DAC_OVERRIDE needs at least one
+/// execute bit, as on Linux), or the result is `PermissionDenied` (EACCES). The
+/// check and the read use the same resolved node, so the file cannot be swapped
+/// between them (N-101). The node comes back too: the loader maps the file's
+/// pages from its page cache (ADR 0010).
 #[cfg(feature = "alloc")]
 pub(crate) fn read_executable(
     path: &str,
-    creds: &super::creds::Credentials,
+    caller: &super::creds::Caller,
 ) -> Result<(alloc::sync::Arc<dyn crate::fs::VfsNode>, Vec<u8>), KernelError> {
     let node = crate::fs::get_vfs()
         .as_caller()
         .resolve_path(path)
         .map_err(|_| KernelError::FsError(crate::error::FsError::NotFound))?;
     let meta = node.metadata()?;
-    if !may_execute(&meta, creds.fsuid, creds.gid_for(meta.gid)) {
+    if !may_execute(&meta, caller) {
         return Err(KernelError::PermissionDenied { operation: "exec" });
     }
     let mut data = alloc::vec![0u8; meta.size];
@@ -383,16 +383,12 @@ pub(crate) fn read_executable(
     Ok((node, data))
 }
 
-/// Whether `uid`/`gid` may execute a node with metadata `meta`.
+/// Whether `caller` may execute a node with metadata `meta`: a regular
+/// file only.
 #[cfg(feature = "alloc")]
-fn may_execute(meta: &crate::fs::Metadata, uid: u32, gid: u32) -> bool {
-    let perms = &meta.permissions;
+fn may_execute(meta: &crate::fs::Metadata, caller: &super::creds::Caller) -> bool {
     meta.node_type == crate::fs::NodeType::File
-        && if uid == 0 {
-            perms.owner_exec || perms.group_exec || perms.other_exec
-        } else {
-            perms.can_run(uid, gid, meta.uid, meta.gid)
-        }
+        && crate::fs::permission(caller, meta, crate::fs::MAY_EXEC)
 }
 
 /// Execute a new program in current process
@@ -453,7 +449,7 @@ fn exec_at_depth(
 
     // Step 1: Load new program from filesystem, checking execute
     // permission on the node that is read (N-101).
-    let (file_node, file_data) = read_executable(&resolved_path, &process.credentials())?;
+    let (file_node, file_data) = read_executable(&resolved_path, &super::creds::Caller::current())?;
 
     // Step 1b: Check for shebang (#!) and delegate to interpreter if found
     if let Some((interpreter, opt_arg)) = parse_shebang(&file_data) {
@@ -519,7 +515,7 @@ fn exec_at_depth(
     );
     let interp: Option<Interp> = match &elf_binary.interpreter {
         Some(path) => {
-            let (node, data) = read_executable(path, &process.credentials())?;
+            let (node, data) = read_executable(path, &super::creds::Caller::current())?;
             let bad = |_| KernelError::InvalidArgument {
                 name: "interpreter",
                 value: "not a loadable ELF image",
@@ -537,11 +533,9 @@ fn exec_at_depth(
     // A program (or loader) the caller may run but not read must not be
     // readable through the process either (Linux's would_dump).
     let set_ids = {
-        let creds = process.credentials();
-        let readable = |meta: &crate::fs::Metadata| {
-            meta.permissions
-                .can_read(creds.fsuid, creds.gid_for(meta.gid), meta.uid, meta.gid)
-        };
+        let caller = super::creds::Caller::current();
+        let readable =
+            |meta: &crate::fs::Metadata| crate::fs::permission(&caller, meta, crate::fs::MAY_READ);
         let meta = file_node.metadata()?;
         let perms = meta.permissions;
         let interp_readable = match &interp {
@@ -1257,21 +1251,36 @@ mod tests {
     }
 
     /// N-101: exec needs a regular file with an execute bit the caller
-    /// holds; root needs any execute bit, and never a directory.
+    /// holds; CAP_DAC_OVERRIDE (root) needs any execute bit, and never a
+    /// directory.
     #[test]
     fn exec_permission_follows_linux_rules() {
-        use crate::fs::NodeType;
+        use crate::{
+            fs::NodeType,
+            process::creds::{Caller, Credentials},
+        };
         let file = NodeType::File;
+        let root = Caller::KERNEL;
+        let user = |uid: u32, gid: u32| Caller {
+            creds: Credentials::new(uid, gid),
+            caps: crate::process::linux_caps::LinuxCaps::EMPTY,
+        };
         // Root: any execute bit, but at least one.
-        assert!(!may_execute(&meta(file, 0o644, 0, 0), 0, 0));
-        assert!(may_execute(&meta(file, 0o001, 5, 5), 0, 0));
-        assert!(!may_execute(&meta(NodeType::Directory, 0o755, 0, 0), 0, 0));
+        assert!(!may_execute(&meta(file, 0o644, 0, 0), &root));
+        assert!(may_execute(&meta(file, 0o001, 5, 5), &root));
+        assert!(!may_execute(&meta(NodeType::Directory, 0o755, 0, 0), &root));
         // Owner, group and other classes.
-        assert!(may_execute(&meta(file, 0o700, 1000, 1000), 1000, 1000));
-        assert!(!may_execute(&meta(file, 0o700, 0, 0), 1000, 1000));
-        assert!(may_execute(&meta(file, 0o710, 0, 100), 1000, 100));
-        assert!(may_execute(&meta(file, 0o701, 0, 0), 1000, 1000));
+        assert!(may_execute(
+            &meta(file, 0o700, 1000, 1000),
+            &user(1000, 1000)
+        ));
+        assert!(!may_execute(&meta(file, 0o700, 0, 0), &user(1000, 1000)));
+        assert!(may_execute(&meta(file, 0o710, 0, 100), &user(1000, 100)));
+        assert!(may_execute(&meta(file, 0o701, 0, 0), &user(1000, 1000)));
         // The owner class decides for the owner, even if others may run it.
-        assert!(!may_execute(&meta(file, 0o611, 1000, 0), 1000, 1000));
+        assert!(!may_execute(&meta(file, 0o611, 1000, 0), &user(1000, 1000)));
+        // Uid 0 without CAP_DAC_OVERRIDE is held to the mode bits.
+        assert!(!may_execute(&meta(file, 0o100, 5, 5), &user(0, 0)));
+        assert!(may_execute(&meta(file, 0o100, 5, 5), &root));
     }
 }

@@ -214,7 +214,10 @@ fn load_image(
             .map_err(not_elf)?;
         let interp = match &binary.interpreter {
             Some(interp_path) => {
-                let (node, data) = lifecycle::read_executable(interp_path, &process.credentials())?;
+                let (node, data) = lifecycle::read_executable(
+                    interp_path,
+                    &crate::process::creds::Caller::current(),
+                )?;
                 let parsed = ElfLoader::new().parse(&data).map_err(not_elf)?;
                 Some((node, data, parsed))
             }

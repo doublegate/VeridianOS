@@ -19,7 +19,7 @@ use super::{
 };
 use crate::{
     fs::{try_get_vfs, OpenFlags, Permissions, SeekFrom},
-    process,
+    process::{self, creds::Caller},
 };
 
 // ---------------------------------------------------------------------------
@@ -1295,15 +1295,9 @@ fn enter_directory(
     if node.node_type() != crate::fs::NodeType::Directory {
         return Err(SyscallError::NotADirectory);
     }
-    let creds = caller_creds();
-    if !creds.fs_privileged() {
-        let meta = node.metadata().map_err(super::map_kernel_error)?;
-        if !meta
-            .permissions
-            .can_run(creds.fsuid, creds.gid_for(meta.gid), meta.uid, meta.gid)
-        {
-            return Err(SyscallError::PermissionDenied);
-        }
+    let meta = node.metadata().map_err(super::map_kernel_error)?;
+    if !crate::fs::permission(&Caller::current(), &meta, crate::fs::MAY_EXEC) {
+        return Err(SyscallError::PermissionDenied);
     }
     let fs = thread.fs();
     let root = fs.root.lock().clone();
@@ -1375,10 +1369,7 @@ pub fn sys_utimensat(
         if !only_now {
             return Err(SyscallError::OperationNotPermitted);
         }
-        if !meta
-            .permissions
-            .can_write(creds.fsuid, creds.gid_for(meta.gid), meta.uid, meta.gid)
-        {
+        if !crate::fs::permission(&Caller::current(), &meta, crate::fs::MAY_WRITE) {
             return Err(SyscallError::PermissionDenied);
         }
     }
@@ -1960,21 +1951,17 @@ pub(crate) fn require_open_access(
     node: &alloc::sync::Arc<dyn crate::fs::VfsNode>,
     flags: &OpenFlags,
 ) -> Result<(), SyscallError> {
-    let creds = caller_creds();
-    let uid = creds.fsuid;
-    if uid == 0 {
-        return Ok(());
-    }
     let meta = node
         .metadata()
         .map_err(|_| SyscallError::PermissionDenied)?;
-    let gid = creds.gid_for(meta.gid);
-    let p = meta.permissions;
-    if flags.read && !p.can_read(uid, gid, meta.uid, meta.gid) {
-        return Err(SyscallError::PermissionDenied);
+    let mut mask = 0;
+    if flags.read {
+        mask |= crate::fs::MAY_READ;
     }
-    if (flags.write || flags.append || flags.truncate) && !p.can_write(uid, gid, meta.uid, meta.gid)
-    {
+    if flags.write || flags.append || flags.truncate {
+        mask |= crate::fs::MAY_WRITE;
+    }
+    if mask != 0 && !crate::fs::permission(&Caller::current(), &meta, mask) {
         return Err(SyscallError::PermissionDenied);
     }
     Ok(())
@@ -2027,10 +2014,8 @@ fn rename_entry(old: &str, new: &str) -> SyscallResult {
         // Moving it to another parent rewrites its "..", which needs write
         // permission on the directory itself.
         if old_parent_canon != new_parent_canon {
-            let creds = caller_creds();
             let meta = src.metadata().map_err(super::map_kernel_error)?;
-            let (uid, gid) = (creds.fsuid, creds.gid_for(meta.gid));
-            if uid != 0 && !meta.permissions.can_write(uid, gid, meta.uid, meta.gid) {
+            if !crate::fs::permission(&Caller::current(), &meta, crate::fs::MAY_WRITE) {
                 return Err(SyscallError::PermissionDenied);
             }
         }
@@ -2087,15 +2072,9 @@ pub(crate) fn parent_dir_canonical(
 /// Creating or removing an entry in `dir` needs write and search permission
 /// on it (FS-SEC-02).
 pub(crate) fn check_dir_write(dir: &dyn crate::fs::VfsNode) -> Result<(), SyscallError> {
-    let creds = caller_creds();
-    let uid = creds.fsuid;
-    if uid == 0 {
-        return Ok(());
-    }
     let meta = dir.metadata().map_err(super::map_kernel_error)?;
-    let gid = creds.gid_for(meta.gid);
-    let p = meta.permissions;
-    if p.can_write(uid, gid, meta.uid, meta.gid) && p.can_run(uid, gid, meta.uid, meta.gid) {
+    let mask = crate::fs::MAY_WRITE | crate::fs::MAY_EXEC;
+    if crate::fs::permission(&Caller::current(), &meta, mask) {
         Ok(())
     } else {
         Err(SyscallError::PermissionDenied)
@@ -2246,28 +2225,22 @@ pub fn sys_faccessat(dirfd: usize, path_ptr: usize, mode: usize, flags: usize) -
 const AT_EACCESS: usize = 0x200;
 const AT_SYMLINK_NOFOLLOW_FLAG: usize = 0x100;
 
-/// Whether access mode `mode` (R_OK 4, W_OK 2, X_OK 1) is granted to a
-/// process with IDs (uid, gid as `gid_for` chose it) on a file with `meta`.
-/// Root may read and write anything and execute anything with an execute
-/// bit set, or any directory, as on Linux.
-fn access_granted(
-    uid: u32,
-    gid: u32,
-    meta: &crate::fs::Metadata,
-    is_dir: bool,
-    mode: usize,
-) -> bool {
-    let p = &meta.permissions;
-    if uid == 0 {
-        let any_x = p.owner_exec || p.group_exec || p.other_exec;
-        return mode & 1 == 0 || any_x || is_dir;
+/// Who access(2) checks for (Linux's do_faccessat): the real IDs as the
+/// filesystem IDs, and unless SECBIT_NO_SETUID_FIXUP, no capabilities for
+/// a real uid other than 0 and the permitted set for real uid 0 -- what
+/// the caller would hold as its real self.
+fn access_caller() -> Caller {
+    let mut caller = Caller::current();
+    let c = &mut caller.creds;
+    c.fsuid = c.ruid;
+    c.fsgid = c.rgid;
+    if let Some(thread) = process::current_thread() {
+        caller.caps = thread.caps.lock().access_effective(caller.creds.ruid);
     }
-    (mode & 4 == 0 || p.can_read(uid, gid, meta.uid, meta.gid))
-        && (mode & 2 == 0 || p.can_write(uid, gid, meta.uid, meta.gid))
-        && (mode & 1 == 0 || p.can_run(uid, gid, meta.uid, meta.gid))
+    caller
 }
 
-/// access(2): checked with the real IDs (the effective ones with
+/// access(2): checked as [`access_caller`] (as the caller itself with
 /// AT_EACCESS), owner, then group (any of the process's groups), then
 /// other bits. It checked only the "other" bits (N-193).
 fn access_path(path: &str, mode: usize, flags: usize) -> SyscallResult {
@@ -2285,14 +2258,12 @@ fn access_path(path: &str, mode: usize, flags: usize) -> SyscallResult {
         return Ok(0); // F_OK: it exists
     }
     let meta = node.metadata().map_err(super::map_kernel_error)?;
-    let creds = caller_creds();
-    let (uid, gid) = if flags & AT_EACCESS != 0 {
-        (creds.fsuid, creds.gid_for(meta.gid))
+    let caller = if flags & AT_EACCESS != 0 {
+        Caller::current()
     } else {
-        (creds.ruid, creds.real_gid_for(meta.gid))
+        access_caller()
     };
-    let is_dir = node.node_type() == crate::fs::NodeType::Directory;
-    if access_granted(uid, gid, &meta, is_dir, mode) {
+    if crate::fs::permission(&caller, &meta, mode as u32) {
         Ok(0)
     } else {
         Err(SyscallError::PermissionDenied)
@@ -3582,18 +3553,29 @@ mod tests {
 
     /// access(2) uses owner, then group, then other bits (it checked only
     /// "other", so a 0700 file failed for its owner), and root needs an
-    /// execute bit to execute (N-193).
+    /// execute bit to execute (N-193). Its mode argument is the MAY_* mask.
     #[test]
     fn access_uses_owner_group_other_precedence() {
+        let granted = |uid: u32, gid: u32, m: &crate::fs::Metadata, mode: u32| {
+            let caller = Caller {
+                creds: Credentials::new(uid, gid),
+                caps: crate::process::linux_caps::LinuxCaps::EMPTY,
+            };
+            crate::fs::permission(&caller, m, mode)
+        };
         let m = meta(0o750, 1000, 100);
-        assert!(access_granted(1000, 100, &m, false, 7));
-        assert!(access_granted(2000, 100, &m, false, 4 | 1));
-        assert!(!access_granted(2000, 100, &m, false, 2));
-        assert!(!access_granted(2000, 200, &m, false, 4));
-        assert!(access_granted(0, 0, &m, false, 7));
+        assert!(granted(1000, 100, &m, 7));
+        assert!(granted(2000, 100, &m, 4 | 1));
+        assert!(!granted(2000, 100, &m, 2));
+        assert!(!granted(2000, 200, &m, 4));
+        assert!(crate::fs::permission(&Caller::KERNEL, &m, 7));
         let noexec = meta(0o644, 1000, 100);
-        assert!(!access_granted(0, 0, &noexec, false, 1));
-        assert!(access_granted(0, 0, &noexec, true, 1));
+        assert!(!crate::fs::permission(&Caller::KERNEL, &noexec, 1));
+        let dir = crate::fs::Metadata {
+            node_type: crate::fs::NodeType::Directory,
+            ..noexec
+        };
+        assert!(crate::fs::permission(&Caller::KERNEL, &dir, 1));
     }
 
     /// utimensat times: UTIME_NOW, UTIME_OMIT, a valid time, and EINVAL

@@ -82,15 +82,6 @@ impl Credentials {
         }
     }
 
-    /// `gid_for` with the real group ID: what access(2) checks against.
-    pub fn real_gid_for(&self, file_gid: u32) -> u32 {
-        if self.rgid == file_gid || self.groups().contains(&file_gid) {
-            file_gid
-        } else {
-            self.rgid
-        }
-    }
-
     /// The credentials a program runs with after exec (Linux's
     /// bprm_fill_uid and cap_bprm_creds_from_file). `set_uid` is the
     /// owner of a set-user-ID file, `set_gid` the group of a set-group-ID
@@ -288,6 +279,48 @@ impl Credentials {
         self.groups[..list.len()].copy_from_slice(list);
         self.ngroups = list.len();
         Ok(())
+    }
+}
+
+/// Who a privilege or permission check is made for (ADR 0020, decision 3):
+/// the process's credentials and the calling thread's effective
+/// capabilities. Linux keeps both in the task's `cred`; here the IDs are
+/// per process and the capability sets per thread.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Caller {
+    pub creds: Credentials,
+    /// The effective set (pE): what the checks consult.
+    pub caps: super::linux_caps::LinuxCaps,
+}
+
+impl Caller {
+    /// The kernel itself (no current process, as the kernel console):
+    /// root with every capability.
+    pub const KERNEL: Self = Self {
+        creds: Credentials::new(0, 0),
+        caps: super::linux_caps::LinuxCaps::FULL,
+    };
+
+    /// The calling thread: its process's credentials and its own
+    /// effective set. Kernel context, with no process, is [`Self::KERNEL`];
+    /// a process without a current thread holds nothing (fails closed).
+    pub fn current() -> Self {
+        let Some(process) = super::current_process() else {
+            return Self::KERNEL;
+        };
+        let caps = super::current_thread().map_or(super::linux_caps::LinuxCaps::EMPTY, |t| {
+            t.caps.lock().effective
+        });
+        Self {
+            creds: process.credentials(),
+            caps,
+        }
+    }
+
+    /// Whether the caller holds `cap` (Linux's `capable`, and
+    /// `capable_wrt_inode_uidgid`, in the initial user namespace).
+    pub const fn capable(&self, cap: u32) -> bool {
+        self.caps.has(cap)
     }
 }
 
