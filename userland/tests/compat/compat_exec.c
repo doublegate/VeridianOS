@@ -47,7 +47,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/stat.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
@@ -90,12 +89,16 @@ static void child(int out, const char *dir, char **argv)
     _exit(127);
 }
 
+/* Entries removed, at any depth, since clean_dir last reset it. */
+static int clean_removed;
+
 static int remove_one(const char *path, const struct stat *st, int type, struct FTW *ftw)
 {
     (void)st;
     (void)type;
     (void)ftw;
-    remove(path);
+    if (remove(path) == 0)
+        clean_removed++;
     return 0;
 }
 
@@ -108,19 +111,19 @@ static void clean_dir(const char *dir, const char *keep)
     static char names[MAX_CLEAN][256];
     char path[512];
     struct dirent *e;
-    struct stat st;
-    int count, removed, i;
+    int count, i;
 
-    /* MAX_CLEAN names a pass; passes repeat while one fills up and still
-     * removes something, so a directory with more entries is emptied too
-     * and one that cannot be is not retried forever. */
+    /* MAX_CLEAN names a pass. Passes repeat while entries remain and the
+     * last pass removed something at any depth: nftw can skip entries of a
+     * large subdirectory for the same reason, leaving it behind. A tree that
+     * cannot be emptied stops the loop, since such a pass removes nothing. */
     do {
         DIR *d = opendir(dir);
 
         if (!d)
             return;
         count = 0;
-        removed = 0;
+        clean_removed = 0;
         while ((e = readdir(d)) != NULL && count < MAX_CLEAN) {
             if (strcmp(e->d_name, ".") == 0 || strcmp(e->d_name, "..") == 0)
                 continue;
@@ -132,10 +135,8 @@ static void clean_dir(const char *dir, const char *keep)
         for (i = 0; i < count; i++) {
             snprintf(path, sizeof(path), "%.200s/%.255s", dir, names[i]);
             nftw(path, remove_one, 16, FTW_DEPTH | FTW_PHYS);
-            if (lstat(path, &st) != 0)
-                removed++;
         }
-    } while (count == MAX_CLEAN && removed > 0);
+    } while (count > 0 && clean_removed > 0);
 }
 
 /* What a test that died before its cleanup leaves: LTP's LTP_* directories

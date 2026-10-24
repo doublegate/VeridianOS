@@ -30,6 +30,14 @@ BUSYBOX_SHA256="b8cc24c9574d809e7279c3be349795c5d5ceb6fdf19ca709f80cde50e47de314
 # of /tmp, which systemd-tmpfiles ages out after 10 days and a reboot clears,
 # and out of target/, which `cargo clean` deletes; /opt/veridian already holds
 # the cross toolchain and the musl build trees (tools/cross/veridian-paths.sh).
+# A relative override is taken from the directory the build was started in and
+# exported absolute, since the build phases cd into $BB_SRC and the scripts they
+# run (veridian-paths.sh) derive their paths from these.
+for _var in VERIDIAN_PREFIX VERIDIAN_CROSS_BUILD; do
+    _val="${!_var:-}"
+    case "$_val" in "" | /*) ;; *) export "$_var=${PWD}/${_val}" ;; esac
+done
+unset _var _val
 WORK_DIR="${VERIDIAN_BUSYBOX_WORK:-${VERIDIAN_PREFIX:-/opt/veridian}/busybox-x86_64}"
 # The tarball cache build-musl-rootfs.sh uses (tools/cross/veridian-paths.sh).
 SOURCES_DIR="${VERIDIAN_SOURCES:-${VERIDIAN_PREFIX:-/opt/veridian}/sources}"

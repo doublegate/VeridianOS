@@ -279,9 +279,11 @@ static void test_clocks_and_usage(void)
     int slept = clock_nanosleep(CLOCK_REALTIME, TIMER_ABSTIME, &rt, NULL);
     clock_gettime(CLOCK_MONOTONIC, &b);
     if (slept != 0 || ms_of(b) - ms_of(a) < 40 || ms_of(b) - ms_of(a) > 2000) f |= 64;
-    /* The stopwatch starts before the deadline is taken: started after the
-     * lock, it missed however long the lock took, and a wait that ended on
-     * time measured short (seen once on RISC-V with four CPUs). */
+    /* The stopwatch starts before the deadline is taken. Started after it,
+     * any delay in between (this thread preempted; the lock itself is
+     * uncontended) fell outside the measurement, and a wait that ended on
+     * time measured short (seen once on RISC-V with four CPUs). A delay
+     * before the deadline can now only lengthen the measurement. */
     clock_gettime(CLOCK_MONOTONIC, &a);
     clock_gettime(CLOCK_REALTIME, &rt);
     rt.tv_nsec += 50000000;

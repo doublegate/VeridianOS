@@ -998,6 +998,11 @@ class Worker:
                         f"{parser.summary} (log {self.guest.log_path})"
                     )
                 self.used = True
+                if self.fresh:
+                    # The next range boots another guest: no prompt to wait for.
+                    self.guest.stop()
+                    self.guest = None
+                    return
                 # The shell prints its prompt after the summary line; read it
                 # here, or the next range's parser takes it for the runner
                 # having died.
@@ -1293,7 +1298,9 @@ def _summary(results):
     return lines
 
 
-def report(arch, results, expected_path, update, strict, subset=False, listed=None):
+def report(
+    arch, results, expected_path, update, strict, subset=False, listed=None, suites=()
+):
     for line in _summary(results):
         print(line)
     expected_path = expected_path or REPO / "tests" / "compat" / f"expected-{arch}.tsv"
@@ -1315,7 +1322,9 @@ def report(arch, results, expected_path, update, strict, subset=False, listed=No
             f"no expected list at {expected_path}; nothing to compare (--update writes one)"
         )
         return 0
-    suites = {s for s, _ in results}
+    # The suites compared: those with results, and any the caller knows were
+    # started (a suite that stopped before its first test has none).
+    suites = set(suites) | {s for s, _ in results}
     expected = {k: v for k, v in read_tsv(expected_path).items() if k[0] in suites}
     if subset:
         expected = only_run(expected, results)
@@ -1363,12 +1372,13 @@ def _collect_finish(results, suite, parser, times):
         )
 
 
-def results_from_logs(texts, times=None):
+def results_from_logs(texts, times=None, attempted=None):
     """Results read back from serial logs (`collect`), in the order given.
 
     A test that began and never ended is CRASH if the kernel panicked after
     it began, HANG otherwise; the driver's own record of why is not in the
-    log. `times`, if given, gets each test's run time in milliseconds.
+    log. `times`, if given, gets each test's run time in milliseconds;
+    `attempted`, if given, every suite the logs started, with results or not.
     """
     results = {}
     for text in texts:
@@ -1376,6 +1386,8 @@ def results_from_logs(texts, times=None):
         for line in text.splitlines():
             m = _RUN_LINE.search(line)
             if m and "COMPAT-" not in line:
+                if attempted is not None:
+                    attempted.add(suite_of(m[1]))
                 if suite_of(m[1]) != suite or (parser and parser.current):
                     _collect_finish(results, suite, parser, times)
                     suite, parser = suite_of(m[1]), SerialParser()
@@ -1386,15 +1398,16 @@ def results_from_logs(texts, times=None):
     return results
 
 
-def merge_build_rows(logged, build):
+def merge_build_rows(logged, build, attempted=()):
     """The results of the logs plus the build-time rows of the suites they ran.
 
     Build rows (tests judged when the image was built, such as NOTBUILT) of a
-    suite with no result in the logs are left out, as `run` does: otherwise
-    collecting one suite's logs would report every other suite as built but
-    not run. A logged NOTBUILT keeps the build row's note.
+    suite the logs neither started (`attempted`) nor have a result for are
+    left out, as `run` does: otherwise collecting one suite's logs would
+    report every other suite as built but not run. A logged NOTBUILT keeps
+    the build row's note.
     """
-    suites = {k[0] for k in logged}
+    suites = {k[0] for k in logged} | set(attempted)
     results = {k: v for k, v in build.items() if k[0] in suites}
     for key, value in logged.items():
         if value[0] == "NOTBUILT" and key in results:
@@ -1418,11 +1431,12 @@ def cmd_collect(args):
             Path(args.root or REPO / "target" / f"rootfs-compat-{args.arch}")
             / "usr/lib/compat/build.tsv"
         )
-    times = {}
+    times, attempted = {}, set()
     texts = (p.read_text(errors="replace") for p in logs)
     results = merge_build_rows(
-        results_from_logs(texts, times),
+        results_from_logs(texts, times, attempted),
         read_tsv(build_tsv) if build_tsv.exists() else {},
+        attempted,
     )
     write_tsv(out / "results.tsv", results, args.arch)
     with open(out / "times.tsv", "w", encoding="utf-8") as f:
@@ -1439,6 +1453,7 @@ def cmd_collect(args):
         listed=listed_tests(
             args.root or REPO / "target" / f"rootfs-compat-{args.arch}", SUITES
         ),
+        suites=attempted,
     )
 
 
