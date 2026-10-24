@@ -1713,14 +1713,42 @@ pub fn sys_kill(pid: usize, signal: usize) -> SyscallResult {
     }
 }
 
-/// Whether `caller` may signal `target` (Linux kill(2)): root, or the
-/// sender's real or effective uid is the target's real or saved uid.
-fn may_signal(caller: &crate::process::Process, target: &crate::process::Process) -> bool {
-    let (c, t) = (caller.credentials(), target.credentials());
-    c.euid == 0
+/// Whether the calling thread of `caller` may send `sig` to `target`
+/// (Linux's check_kill_permission).
+fn may_signal(
+    caller: &crate::process::Process,
+    target: &crate::process::Process,
+    sig: i32,
+) -> bool {
+    use core::sync::atomic::Ordering;
+    let same_session = caller.sid.load(Ordering::Acquire) == target.sid.load(Ordering::Acquire);
+    kill_ok(
+        &Caller::current(),
+        &target.credentials(),
+        caller.pid == target.pid,
+        sig,
+        same_session,
+    )
+}
+
+/// Linux's kill rule: a process may always signal itself; otherwise the
+/// sender's real or effective uid must be the target's real or saved uid,
+/// or the sender must hold CAP_KILL -- except that SIGCONT may go to any
+/// process in the sender's session.
+fn kill_ok(
+    caller: &Caller,
+    target: &crate::process::creds::Credentials,
+    same_process: bool,
+    sig: i32,
+    same_session: bool,
+) -> bool {
+    let c = &caller.creds;
+    same_process
         || [c.ruid, c.euid]
             .iter()
-            .any(|&id| id == t.ruid || id == t.suid)
+            .any(|&id| id == target.ruid || id == target.suid)
+        || caller.capable(crate::process::linux_caps::CAP_KILL)
+        || (sig == crate::process::exit::signals::SIGCONT && same_session)
 }
 
 /// Signal one process; `sig` 0 only checks that it exists and may be
@@ -1734,7 +1762,7 @@ pub(crate) fn kill_one(
     if !target.is_alive() {
         return Err(SyscallError::ProcessNotFound);
     }
-    if !may_signal(caller, &target) {
+    if !may_signal(caller, &target, sig) {
         return Err(SyscallError::OperationNotPermitted);
     }
     if sig == 0 {
@@ -3526,6 +3554,29 @@ mod tests {
             caps: LinuxCaps::EMPTY,
         };
         assert!(!may_chown(&bare_root, 1001, 7, Some(5), None));
+    }
+
+    /// kill(2): uid matches or CAP_KILL, not uid 0; oneself always; SIGCONT
+    /// within the session (check_kill_permission).
+    #[test]
+    fn kill_needs_a_uid_match_or_cap_kill() {
+        use crate::process::{exit::signals::SIGCONT, linux_caps::CAP_KILL};
+        let target = Credentials::new(2000, 2000);
+        let mut saved = Credentials::new(3000, 3000);
+        saved.suid = 1000;
+        let u = user();
+        assert!(!kill_ok(&u, &target, false, 15, false));
+        assert!(kill_ok(&u, &saved, false, 15, false), "target's saved uid");
+        assert!(kill_ok(&u, &target, true, 15, false), "itself");
+        assert!(kill_ok(&user_with(&[CAP_KILL]), &target, false, 15, false));
+        assert!(kill_ok(&u, &target, false, SIGCONT, true));
+        assert!(!kill_ok(&u, &target, false, SIGCONT, false));
+        let bare_root = Caller {
+            creds: Credentials::new(0, 0),
+            caps: LinuxCaps::EMPTY,
+        };
+        assert!(!kill_ok(&bare_root, &target, false, 15, false));
+        assert!(kill_ok(&Caller::KERNEL, &target, false, 15, false));
     }
 
     /// loff_t is signed: a negative offset or length (as a register value)
