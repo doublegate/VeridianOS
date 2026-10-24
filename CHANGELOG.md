@@ -52,8 +52,11 @@
   capability: CAP_FOWNER for chmod, explicit utimes and sticky directories, CAP_FSETID to keep the
   set-ID bits through a write or a set-group-ID bit outside the group, CAP_CHOWN for chown,
   CAP_MKNOD for device nodes and CAP_SYS_CHROOT for chroot. kill(2) needs a uid match or CAP_KILL
-  (SIGCONT within the sender's session, as on Linux). Setting the clock needs CAP_SYS_TIME. The
-  other privilege checks still use `euid == 0` until later steps.
+  (SIGCONT within the sender's session, as on Linux). Setting the clock needs CAP_SYS_TIME.
+  Scheduling another user's threads, raising priority or nice and the real-time policies need
+  CAP_SYS_NICE; another process's limits and a raised hard limit CAP_SYS_RESOURCE; RLIMIT_NPROC
+  spares real uid 0 and CAP_SYS_RESOURCE or CAP_SYS_ADMIN. The other privilege checks still use
+  `euid == 0` until later steps.
 - `pause` on x86_64 (system call 34 had no handler, so musl's `pause()` returned ENOSYS at once and a
   forked child meant to wait ran on): it waits as `ppoll` with no descriptors and no timeout,
   which is what musl does on AArch64 and RISC-V, and returns EINTR after a handler.
