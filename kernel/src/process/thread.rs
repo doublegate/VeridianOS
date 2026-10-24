@@ -425,6 +425,11 @@ pub struct Thread {
     /// privilege (no setuid or setgid). It cannot be cleared, and every
     /// thread and process the thread creates inherits it.
     pub no_new_privs: AtomicBool,
+    /// The Linux capability sets and securebits (ADR 0020). Per thread, as
+    /// on Linux: capset changes only the calling thread's. A new thread has
+    /// the initial sets (full, as root has); fork and clone copy the
+    /// creator's.
+    pub caps: Mutex<super::linux_caps::CapSets>,
     /// The command name (Linux `comm`): up to 15 bytes and a NUL, the
     /// thread's name at creation, its program's file name after exec, or
     /// what PR_SET_NAME set (N-227). Threads and fork children inherit it.
@@ -581,6 +586,7 @@ impl Thread {
             robust_list: AtomicUsize::new(0),
             sched: Mutex::new(SchedParams::default()),
             no_new_privs: AtomicBool::new(false),
+            caps: Mutex::new(super::linux_caps::CapSets::ROOT),
             comm: Mutex::new(comm),
             fs_released: AtomicBool::new(false),
             detached: AtomicBool::new(false),

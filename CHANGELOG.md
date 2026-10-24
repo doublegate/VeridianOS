@@ -25,6 +25,11 @@
 
 ### Added
 
+- ADR 0020: Linux capabilities, per thread (effective, permitted, inheritable, bounding and
+  ambient sets plus securebits), replacing the `euid == 0` privilege checks in steps. First step:
+  `process::linux_caps`, the pure rules for capset, the set*id fix-ups, the capability prctl
+  options and exec, with tests transcribed from Linux 7.3's `security/commoncap.c`; nothing
+  calls it yet.
 - `scripts/dev/guest.py`: boots the AArch64 or RISC-V musl root filesystem and runs commands at
   its shell, logging the serial output.
 - GDB helper `hbreak-main`, the hardware-breakpoint variant of `break-main`.

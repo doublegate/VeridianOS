@@ -29,6 +29,7 @@ pub mod cwd;
 pub mod exit;
 pub mod fork;
 pub mod lifecycle;
+pub mod linux_caps;
 pub mod memory;
 pub mod pcb;
 pub mod rlimit;

@@ -368,8 +368,8 @@ pub fn fork_process_with(opts: &ForkOptions) -> Result<(ProcessId, super::Thread
         }
 
         // The calling thread's blocked mask (per thread, N-109), alternate
-        // signal stack (N-222), command name (N-227) and no_new_privs: a fork
-        // or vfork child keeps them all.
+        // signal stack (N-222), command name (N-227), no_new_privs and
+        // capability sets (ADR 0020): a fork or vfork child keeps them all.
         new_thread.sigmask.store(
             current_thread
                 .sigmask
@@ -384,6 +384,7 @@ pub fn fork_process_with(opts: &ForkOptions) -> Result<(ProcessId, super::Thread
                 .load(core::sync::atomic::Ordering::Acquire),
             core::sync::atomic::Ordering::Release,
         );
+        *new_thread.caps.lock() = *current_thread.caps.lock();
         new_process.add_thread(new_thread)?;
         Ok(new_tid)
     };

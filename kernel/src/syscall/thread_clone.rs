@@ -243,7 +243,8 @@ pub fn sys_thread_clone(
     let thread = builder.build().map_err(|_| SyscallError::InvalidState)?;
     let tid = thread.tid;
     // A new thread starts with its creator's blocked mask (N-109), command
-    // name (N-227) and no_new_privs, as Linux copies them.
+    // name (N-227), no_new_privs and capability sets (ADR 0020), as Linux
+    // copies them.
     thread.sigmask.store(
         current_thread
             .sigmask
@@ -257,6 +258,7 @@ pub fn sys_thread_clone(
             .load(core::sync::atomic::Ordering::Acquire),
         core::sync::atomic::Ordering::Release,
     );
+    *thread.caps.lock() = *current_thread.caps.lock();
 
     // Override context with cloned registers so the child returns 0 from clone.
     //
