@@ -166,13 +166,22 @@ impl VfsNode for ProcNode {
 
                             let parent = process.parent().unwrap_or(crate::process::ProcessId(0));
 
+                            // The sets are per thread; the process's are its
+                            // main thread's, as on Linux.
+                            let caps = process
+                                .get_main_thread_id()
+                                .and_then(|tid| process.get_thread(tid))
+                                .map(|t| status_caps(&t.caps.lock()))
+                                .unwrap_or_default();
+
                             format!(
-                                "Name:\t{}\nPid:\t{}\nPPid:\t{}\nState:\t{}\n{}",
+                                "Name:\t{}\nPid:\t{}\nPPid:\t{}\nState:\t{}\n{}{}",
                                 name,
                                 pid,
                                 parent.0,
                                 state,
-                                status_ids(&process.credentials())
+                                status_ids(&process.credentials()),
+                                caps
                             )
                         } else {
                             format!("Name:\tProcess\nPid:\t{}\nState:\tR (running)\n", pid)
@@ -568,6 +577,25 @@ fn status_ids(c: &crate::process::creds::Credentials) -> String {
     )
 }
 
+/// The capability lines of /proc/[pid]/status, as Linux prints them (ADR
+/// 0020): each set as 16 hexadecimal digits.
+fn status_caps(c: &crate::process::linux_caps::CapSets) -> String {
+    format!(
+        concat!(
+            "CapInh:\t{:016x}\n",
+            "CapPrm:\t{:016x}\n",
+            "CapEff:\t{:016x}\n",
+            "CapBnd:\t{:016x}\n",
+            "CapAmb:\t{:016x}\n",
+        ),
+        c.inheritable.bits(),
+        c.permitted.bits(),
+        c.effective.bits(),
+        c.bounding.bits(),
+        c.ambient.bits()
+    )
+}
+
 /// Linux's `mmu` field of a RISC-V /proc/cpuinfo: the paging mode in use
 /// (ADR 0018), which user programs read to learn their address-space limit.
 #[cfg_attr(any(target_arch = "x86_64", target_arch = "aarch64"), allow(dead_code))]
@@ -778,6 +806,36 @@ mod tests {
         assert_eq!(
             status_ids(&c),
             "Uid:\t0\t0\t0\t1000\nGid:\t0\t0\t0\t0\nGroups:\t\n"
+        );
+    }
+
+    /// Status shows the five capability sets as Linux does: 16 hex digits,
+    /// in the order inheritable, permitted, effective, bounding, ambient.
+    #[test]
+    fn status_shows_the_capability_sets() {
+        use crate::process::linux_caps::{CapSets, LinuxCaps, CAP_KILL, CAP_NET_BIND_SERVICE};
+        assert_eq!(
+            status_caps(&CapSets::ROOT),
+            concat!(
+                "CapInh:\t0000000000000000\n",
+                "CapPrm:\t000001ffffffffff\n",
+                "CapEff:\t000001ffffffffff\n",
+                "CapBnd:\t000001ffffffffff\n",
+                "CapAmb:\t0000000000000000\n",
+            )
+        );
+        let mut caps = CapSets::NONE;
+        caps.inheritable = LinuxCaps::of(CAP_KILL);
+        caps.ambient = LinuxCaps::of(CAP_NET_BIND_SERVICE);
+        assert_eq!(
+            status_caps(&caps),
+            concat!(
+                "CapInh:\t0000000000000020\n",
+                "CapPrm:\t0000000000000000\n",
+                "CapEff:\t0000000000000000\n",
+                "CapBnd:\t000001ffffffffff\n",
+                "CapAmb:\t0000000000000400\n",
+            )
         );
     }
 

@@ -39,6 +39,31 @@ pub fn translate_address(addr: usize) -> Option<PageTableEntry> {
     Some(entry)
 }
 
+/// The flags of the page holding the user address `addr` in the active
+/// address space, or `None` if it is not mapped. Takes no lock (a system
+/// call may hold any), and reads the root of the lower half: CR3 and satp
+/// hold the whole address space, AArch64's TTBR0_EL1 the user half (ADR
+/// 0015).
+#[cfg(target_os = "none")]
+pub fn active_user_page_flags(addr: usize) -> Option<PageFlags> {
+    #[cfg(target_arch = "aarch64")]
+    let root = {
+        let ttbr0: u64;
+        // SAFETY: reading TTBR0_EL1 has no side effects at EL1.
+        unsafe { core::arch::asm!("mrs {}, TTBR0_EL1", out(reg) ttbr0) };
+        ttbr0 & 0x0000_FFFF_FFFF_F000
+    };
+    #[cfg(not(target_arch = "aarch64"))]
+    let root = crate::mm::get_kernel_page_table() as u64 & 0x000F_FFFF_FFFF_F000;
+    // SAFETY: the active root, mapped by the physical-memory map for the
+    // kernel's lifetime; the mapper only reads here.
+    let mapper = unsafe { crate::mm::vas::create_mapper_from_root_pub(root) };
+    mapper
+        .translate_page(crate::mm::VirtualAddress(addr as u64 & !0xFFF))
+        .ok()
+        .map(|(_, flags)| flags)
+}
+
 /// Extension trait for PageTableEntry to check user accessibility
 pub trait PageTableEntryExt {
     fn is_user_accessible(&self) -> bool;

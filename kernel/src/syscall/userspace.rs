@@ -40,12 +40,32 @@ pub fn validate_user_ptr<T>(ptr: *const T, len: usize) -> Result<(), SyscallErro
     }
 
     // Whether the pages are mapped is not checked here: the copy itself
-    // finds out. On x86_64 a fault in the user-copy routines returns EFAULT
-    // through the exception table (MEM-SEC-01); AArch64 and RISC-V get that
-    // with user mode (sprint E, ARCH-MEM-03). The per-page loop that used to
-    // follow only re-checked the bound above, once per page (PB-MEM-07).
+    // finds out. A fault in the user-copy routines returns EFAULT through
+    // the exception table (MEM-SEC-01, ARCH-MEM-03, ADR 0016), after the
+    // fault path has tried the page as a user access. What the copy cannot
+    // find out is a present page user mode may not touch: a PROT_NONE leaf
+    // is kept for the kernel only, so the kernel's access does not fault.
+    // Those are refused here, as Linux's not-present PROT_NONE entries are.
+    #[cfg(all(target_os = "none", feature = "alloc"))]
+    {
+        let mut page = addr & !(PAGE_SIZE - 1);
+        while page < end {
+            if present_but_not_user(crate::mm::user_validation::active_user_page_flags(page)) {
+                return Err(SyscallError::InvalidPointer);
+            }
+            page += PAGE_SIZE;
+        }
+    }
 
     Ok(())
+}
+
+/// Whether a page the kernel would copy through is one user mode may not
+/// access (PROT_NONE): present, without the user bit. A page that is not
+/// present is left to the copy's fault path.
+fn present_but_not_user(flags: Option<crate::mm::PageFlags>) -> bool {
+    use crate::mm::PageFlags;
+    flags.is_some_and(|f| f.contains(PageFlags::PRESENT) && !f.contains(PageFlags::USER))
 }
 
 /// Whether `addr` is in user space.
@@ -850,5 +870,20 @@ mod accessor_tests {
     fn empty_writes_need_no_valid_pointer() {
         assert!(write_user_slice::<u32>(0, &[]).is_ok());
         assert!(write_user_bytes(0, &[]).is_ok());
+    }
+
+    /// Only a present page without the user bit (PROT_NONE) is refused
+    /// before the copy; a missing page is left to the fault path.
+    #[test]
+    fn prot_none_pages_are_refused_before_the_copy() {
+        use super::present_but_not_user as refused;
+        use crate::mm::PageFlags as F;
+        let user = F::PRESENT | F::USER;
+        assert!(!refused(Some(user)));
+        assert!(!refused(Some(user | F::WRITABLE)));
+        assert!(refused(Some(F::PRESENT)));
+        assert!(refused(Some(F::PRESENT | F::WRITABLE | F::NO_EXECUTE)));
+        assert!(!refused(None));
+        assert!(!refused(Some(F::USER)));
     }
 }

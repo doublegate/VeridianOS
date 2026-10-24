@@ -50,7 +50,7 @@ ltp-syscalls	cachestat04	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to st
 ltp-syscalls	capget01	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
 ltp-syscalls	capget02	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
 ltp-syscalls	capset01	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
-ltp-syscalls	capset02	BROK	capset02.c:91: TBROK: drop CAP_KILL failed: EINVAL (22)
+ltp-syscalls	capset02	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
 ltp-syscalls	capset03	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
 ltp-syscalls	capset04	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
 ltp-syscalls	chdir01	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
@@ -163,7 +163,7 @@ ltp-syscalls	epoll_ctl07	WARN	tst_test.c:1101: TWARN: Kernel is older than minim
 ltp-syscalls	epoll_pwait01	BROK	epoll_pwait01.c:60: TBROK: Failed to open FILE '/proc/498/stat' for reading: ENOENT (2)
 ltp-syscalls	epoll_pwait02	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
 ltp-syscalls	epoll_pwait03	FAIL	exit 5; tst_timer_test.c:314: TFAIL: do_epoll_pwait() slept for too long
-ltp-syscalls	epoll_pwait04	FAIL	exit 5; epoll_pwait04.c:23: TFAIL: with an invalid sigmask pointer invalid retval 1: SUCCESS (0)
+ltp-syscalls	epoll_pwait04	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
 ltp-syscalls	epoll_pwait05	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
 ltp-syscalls	epoll_pwait06	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
 ltp-syscalls	epoll_wait01	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
@@ -421,7 +421,7 @@ ltp-syscalls	futex_wait02	BROK	futex_wait02.c:35: TBROK: Failed to open FILE '/p
 ltp-syscalls	futex_wait03	BROK	futex_wait03.c:33: TBROK: Failed to open FILE '/proc/1359/stat' for reading: ENOENT (2)
 ltp-syscalls	futex_wait04	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
 ltp-syscalls	futex_wait05	FAIL	exit 5; tst_timer_test.c:314: TFAIL: futex_wait() slept for too long
-ltp-syscalls	futex_wait06	FAIL	exit 5; futex_wait06.c:55: TFAIL: uaddr points to unmapped memory expected EFAULT: ETIMEDOUT (110)
+ltp-syscalls	futex_wait06	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
 ltp-syscalls	futex_wait07	BROK	futex_wait07.c:63: TBROK: Failed to open FILE '/proc/1374/stat' for reading: ENOENT (2)
 ltp-syscalls	futex_wait_bitset01	FLAKY	FAIL and WARN in two x86_64 runs (2026-10-22); last here: WARN; tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
 ltp-syscalls	futex_waitv01	CONF	tst_test.c:1079: TCONF: The test requires kernel 5.16 or newer
@@ -769,7 +769,7 @@ ltp-syscalls	mmap08	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(
 ltp-syscalls	mmap09	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
 ltp-syscalls	mmap12	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
 ltp-syscalls	mmap13	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
-ltp-syscalls	mmap14	BROK	mmap14.c:36: TBROK: got EOF from sscanf(): ENOENT (2)
+ltp-syscalls	mmap14	FAIL	exit 5; mmap14.c:63: TFAIL: Expected 1024K locked, get 0K locked
 ltp-syscalls	mmap15	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
 ltp-syscalls	mmap16	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
 ltp-syscalls	mmap17	CONF	tst_test.c:1079: TCONF: The test requires kernel 4.17 or newer
@@ -963,7 +963,7 @@ ltp-syscalls	posix_fadvise04	FAIL	exit 5; posix_fadvise04.c:49: TFAIL: unexpecte
 ltp-syscalls	posix_fadvise04_64	FAIL	exit 5; posix_fadvise04.c:49: TFAIL: unexpected return value - 38 : ENOSYS - expected 29
 ltp-syscalls	ppoll01	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
 ltp-syscalls	prctl01	FAIL	exit 5; prctl01.c:25: TFAIL: prctl(PR_SET_PDEATHSIG) failed: EINVAL (22)
-ltp-syscalls	prctl02	FAIL	exit 5; prctl02.c:155: TFAIL: prctl() succeeded unexpectedly
+ltp-syscalls	prctl02	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
 ltp-syscalls	prctl03	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
 ltp-syscalls	prctl05	BROK	prctl05.c:67: TBROK: Failed to open FILE '/proc/self/task/1131/comm' for reading: ENOENT (2)
 ltp-syscalls	prctl06	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
@@ -1121,7 +1121,7 @@ ltp-syscalls	sched_rr_get_interval02	BROK	tst_cgroup.c:682: TBROK: Can't open /p
 ltp-syscalls	sched_rr_get_interval03	BROK	tst_cgroup.c:682: TBROK: Can't open /proc/self/mounts: ENOENT (2)
 ltp-syscalls	sched_setaffinity01	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
 ltp-syscalls	sched_setattr01	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
-ltp-syscalls	sched_setattr02	FAIL	exit 5; sched_setattr02.c:126: TFAIL: sched_setattr() with invalid sched_attr address succeeded
+ltp-syscalls	sched_setattr02	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
 ltp-syscalls	sched_setparam01	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
 ltp-syscalls	sched_setparam02	BROK	tst_cgroup.c:682: TBROK: Can't open /proc/self/mounts: ENOENT (2)
 ltp-syscalls	sched_setparam03	BROK	tst_cgroup.c:682: TBROK: Can't open /proc/self/mounts: ENOENT (2)
@@ -1277,7 +1277,7 @@ ltp-syscalls	setrlimit01	BROK	setrlimit01    1  TBROK  :  tst_fs_type.c:20: tst_
 ltp-syscalls	setrlimit02	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
 ltp-syscalls	setrlimit03	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
 ltp-syscalls	setrlimit04	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
-ltp-syscalls	setrlimit05	FAIL	exit 5; setrlimit05.c:32: TFAIL: setrlimit()  succeeded unexpectedly
+ltp-syscalls	setrlimit05	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
 ltp-syscalls	setrlimit06	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
 ltp-syscalls	setsid01	PASS	
 ltp-syscalls	setsockopt01	FAIL	exit 5; setsockopt01.c:93: TFAIL: setsockopt() succeeded unexpectedly
@@ -1343,7 +1343,7 @@ ltp-syscalls	sigpending02	WARN	tst_test.c:1101: TWARN: Kernel is older than mini
 ltp-syscalls	sigprocmask01	PASS	
 ltp-syscalls	sigrelse01	BROK	sigrelse01    1  TBROK  :  tst_fs_type.c:20: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): errno=ENOSYS(38): Function not implemented
 ltp-syscalls	sigsuspend01	TIMEOUT	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
-ltp-syscalls	sigsuspend02	TIMEOUT	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
+ltp-syscalls	sigsuspend02	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
 ltp-syscalls	sigtimedwait01	TIMEOUT	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
 ltp-syscalls	sigwait01	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
 ltp-syscalls	sigwaitinfo01	TIMEOUT	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4

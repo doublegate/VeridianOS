@@ -809,6 +809,35 @@ static void test_memory_protection(void)
     snprintf(gwhy, sizeof(gwhy), "status=0x%x", gst);
     report("mprotect_none_to_rw_fresh_tables", gok, gwhy);
 
+    /* A system call cannot reach a PROT_NONE page either: EFAULT, as on
+     * Linux, both reading it (write from it) and writing it (read into
+     * it). The page is present -- touched, then mprotect -- which is the
+     * case the kernel's own copy did not fault on: the leaf is kept for
+     * the kernel only (LTP capset02's bad address, guard pages). */
+    char *pn = mmap(0, 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    int pfd[2];
+    int pnok = pn != MAP_FAILED && pipe(pfd) == 0;
+    long pw = 0, pr = 0;
+    int pwe = 0, pre = 0;
+    if (pnok) {
+        pn[0] = 'x';
+        pnok = mprotect(pn, 4096, PROT_NONE) == 0;
+        errno = 0;
+        pw = write(pfd[1], pn, 1);
+        pwe = errno;
+        (void)!write(pfd[1], "y", 1);
+        errno = 0;
+        pr = read(pfd[0], pn, 1);
+        pre = errno;
+        close(pfd[0]);
+        close(pfd[1]);
+        munmap(pn, 4096);
+    }
+    static char pnwhy[64];
+    snprintf(pnwhy, sizeof(pnwhy), "write=%ld errno=%d read=%ld errno=%d", pw, pwe, pr, pre);
+    report("syscall_on_prot_none_is_efault",
+           pnok && pw == -1 && pwe == EFAULT && pr == -1 && pre == EFAULT, pnwhy);
+
     /* Absurd sizes fail cleanly instead of halting the kernel. */
     void *huge = mmap(0, 1UL << 46, PROT_READ, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     void *huge2 = mmap(0, (size_t)-4096, PROT_READ, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);

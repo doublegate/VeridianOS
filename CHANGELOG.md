@@ -34,8 +34,12 @@
   capget reads any thread by id and probes the version when the data pointer is NULL; capset changes
   only the caller's sets. `/proc/sys/kernel/cap_last_cap` reports 40, and
   `/proc/sys/kernel/pid_max` 4194304 (Linux's 64-bit limit; ids here never wrap, see
-  KNOWN-LIMITATIONS). LTP `capget01`, `capget02`, `capset01`, `capset03` and `capset04` pass; the privilege checks still use `euid == 0` until
-  later steps.
+  KNOWN-LIMITATIONS). LTP `capget01`, `capget02`, `capset01`, `capset03` and `capset04` pass. The
+  capability prctl options act on the calling thread's sets (`PR_CAPBSET_READ`/`DROP`,
+  `PR_GET`/`SET_SECUREBITS`, `PR_GET`/`SET_KEEPCAPS`, `PR_CAP_AMBIENT`), and `/proc/<pid>/status`
+  shows the main thread's sets as `CapInh`, `CapPrm`, `CapEff`, `CapBnd` and `CapAmb`; LTP
+  `capset02` and `prctl02` now pass every case they run. The privilege checks still use
+  `euid == 0` until later steps.
 - `pause` on x86_64 (system call 34 had no handler, so musl's `pause()` returned ENOSYS at once and a
   forked child meant to wait ran on): it waits as `ppoll` with no descriptors and no timeout,
   which is what musl does on AArch64 and RISC-V, and returns EINTR after a handler.
@@ -70,6 +74,11 @@
 
 ### Fixed
 
+- A system call could read and write a `PROT_NONE` page that had been touched before `mprotect`
+  (N-132 follow-up): such a page keeps its frame mapped for the kernel only, so the kernel's own
+  copy did not fault and `write` from it or `read` into it succeeded where Linux returns EFAULT.
+  User pointers are now refused when a page they cover is present without user access; LTP
+  `capset02`'s bad address and guard pages behave as on Linux.
 - `scripts/run-compat-tests.sh --update` dropped the comment lines written by hand at the top of an
   expected list (the baseline's date and versions); it now keeps them.
 - `mkfs-blockfs` let a directory entry cross a 4 KiB block boundary, and the kernel reads a

@@ -155,6 +155,17 @@ pub(crate) fn sys_prctl(
     const PR_SET_MDWE: usize = 65;
     const PR_GET_MDWE: usize = 66;
     let thread = || crate::process::current_thread().ok_or(super::SyscallError::InvalidState);
+    // The capability options (ADR 0020) act on the calling thread's sets,
+    // and are tried first, as Linux's security_task_prctl is.
+    if let Ok(op) = u32::try_from(option) {
+        let r = thread()?
+            .caps
+            .lock()
+            .prctl(op, arg2 as u64, arg3 as u64, arg4 as u64, arg5 as u64);
+        if let Some(r) = r {
+            return r;
+        }
+    }
     match option {
         // The thread's command name (N-227): up to 15 bytes of the string,
         // EFAULT for a bad pointer.

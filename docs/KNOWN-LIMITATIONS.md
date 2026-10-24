@@ -222,8 +222,9 @@ What remains:
   SETREGS, CONT, SINGLESTEP) fail. A debugger cannot drive a process yet (planned v0.28).
 - **Credentials (N-131 remainder, planned v0.30):** real, effective and saved IDs,
   filesystem IDs (setfsuid, setfsgid), supplementary groups (N-248) and set-user-ID/set-group-ID
-  exec exist. Each thread has Linux capability sets (ADR 0020), which `capget` and `capset` read
-  and change, but nothing checks them yet: privilege is still effective uid 0, and file-access
+  exec exist. Each thread has Linux capability sets (ADR 0020), which `capget`, `capset` and the
+  capability prctl options read and change and `/proc/<pid>/status` shows, but nothing checks
+  them yet: privilege is still effective uid 0, and file-access
   privilege filesystem uid 0 (Linux drops the filesystem capabilities when the fsuid leaves 0). A directory's
   set-group-ID bit is kept but not acted on: new entries take the creator's group, not the
   directory's.
