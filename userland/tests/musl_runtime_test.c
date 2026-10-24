@@ -279,6 +279,12 @@ static void test_clocks_and_usage(void)
     int slept = clock_nanosleep(CLOCK_REALTIME, TIMER_ABSTIME, &rt, NULL);
     clock_gettime(CLOCK_MONOTONIC, &b);
     if (slept != 0 || ms_of(b) - ms_of(a) < 40 || ms_of(b) - ms_of(a) > 2000) f |= 64;
+    /* The stopwatch starts before the deadline is taken. Started after it,
+     * any delay in between (this thread preempted; the lock itself is
+     * uncontended) fell outside the measurement, and a wait that ended on
+     * time measured short (seen once on RISC-V with four CPUs). A delay
+     * before the deadline can now only lengthen the measurement. */
+    clock_gettime(CLOCK_MONOTONIC, &a);
     clock_gettime(CLOCK_REALTIME, &rt);
     rt.tv_nsec += 50000000;
     if (rt.tv_nsec >= 1000000000) {
@@ -286,7 +292,6 @@ static void test_clocks_and_usage(void)
         rt.tv_nsec -= 1000000000;
     }
     pthread_mutex_lock(&cond_lock);
-    clock_gettime(CLOCK_MONOTONIC, &a);
     while (!cond_waited) {
         if (pthread_cond_timedwait(&cond_never, &cond_lock, &rt) == ETIMEDOUT)
             break;
@@ -5025,37 +5030,6 @@ static void test_review_fixes(void)
     }
 }
 
-/* Tests `--only NAME` can run alone (for debugging a single test). */
-static void test_dev_shm(void); /* defined after the table */
-static const struct {
-    const char *name;
-    void (*fn)(void);
-} only_tests[] = {
-    {"review_fixes", test_review_fixes},
-    {"threads", test_threads},
-    {"cow_race", test_cow_race},
-    {"signals", test_signals},
-    {"futex_queues", test_futex_queues},
-    {"blocking_io", test_blocking_io},
-    {"unix_socket_wakeups", test_unix_socket_wakeups},
-    {"robust_futex", test_robust_futex},
-    {"sched", test_sched},
-    {"smp_placement", test_smp_placement},
-    {"dl_balance", test_dl_balance},
-    {"gs_base", test_gs_base},
-    {"tlb_remote_flush", test_tlb_remote_flush},
-    {"clocks_and_usage", test_clocks_and_usage},
-    {"process_clock_monotonic", test_process_clock_monotonic},
-    {"many_threads", test_many_threads},
-    {"signal_kick", test_signal_kick},
-    {"dir_check_race", test_dir_check_race},
-    {"relative_entry_paths", test_relative_entry_paths},
-    {"priority_inheritance", test_priority_inheritance},
-    {"unix_accept_blocks", test_unix_accept_blocks},
-    {"fs_ids", test_fs_ids},
-    {"dev_shm_maps_the_file_s_pages", test_dev_shm},
-};
-
 /* /dev/shm is a tmpfs whose files are their own pages, as on Linux. LTP
  * keeps its results in a file there mapped MAP_SHARED, and children that
  * exec open the file again by path, so a mapping made through a second
@@ -5102,6 +5076,36 @@ static void test_dev_shm(void)
     snprintf(why, sizeof(why), "dir=%d fd=%d seen=%d errno=%d", dir, fd, seen, err);
     report("dev_shm_maps_the_file_s_pages", ok, why);
 }
+
+/* Tests `--only NAME` can run alone (for debugging a single test). */
+static const struct {
+    const char *name;
+    void (*fn)(void);
+} only_tests[] = {
+    {"review_fixes", test_review_fixes},
+    {"threads", test_threads},
+    {"cow_race", test_cow_race},
+    {"signals", test_signals},
+    {"futex_queues", test_futex_queues},
+    {"blocking_io", test_blocking_io},
+    {"unix_socket_wakeups", test_unix_socket_wakeups},
+    {"robust_futex", test_robust_futex},
+    {"sched", test_sched},
+    {"smp_placement", test_smp_placement},
+    {"dl_balance", test_dl_balance},
+    {"gs_base", test_gs_base},
+    {"tlb_remote_flush", test_tlb_remote_flush},
+    {"clocks_and_usage", test_clocks_and_usage},
+    {"process_clock_monotonic", test_process_clock_monotonic},
+    {"many_threads", test_many_threads},
+    {"signal_kick", test_signal_kick},
+    {"dir_check_race", test_dir_check_race},
+    {"relative_entry_paths", test_relative_entry_paths},
+    {"priority_inheritance", test_priority_inheritance},
+    {"unix_accept_blocks", test_unix_accept_blocks},
+    {"fs_ids", test_fs_ids},
+    {"dev_shm_maps_the_file_s_pages", test_dev_shm},
+};
 
 int main(int argc, char **argv)
 {

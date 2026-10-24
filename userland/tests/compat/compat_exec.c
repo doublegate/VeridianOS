@@ -89,12 +89,16 @@ static void child(int out, const char *dir, char **argv)
     _exit(127);
 }
 
+/* Entries removed, at any depth, since clean_dir last reset it. */
+static int clean_removed;
+
 static int remove_one(const char *path, const struct stat *st, int type, struct FTW *ftw)
 {
     (void)st;
     (void)type;
     (void)ftw;
-    remove(path);
+    if (remove(path) == 0)
+        clean_removed++;
     return 0;
 }
 
@@ -107,23 +111,32 @@ static void clean_dir(const char *dir, const char *keep)
     static char names[MAX_CLEAN][256];
     char path[512];
     struct dirent *e;
-    int count = 0, i;
-    DIR *d = opendir(dir);
+    int count, i;
 
-    if (!d)
-        return;
-    while ((e = readdir(d)) != NULL && count < MAX_CLEAN) {
-        if (strcmp(e->d_name, ".") == 0 || strcmp(e->d_name, "..") == 0)
-            continue;
-        if (keep && strcmp(e->d_name, keep) == 0)
-            continue;
-        snprintf(names[count++], sizeof(names[0]), "%.255s", e->d_name);
-    }
-    closedir(d);
-    for (i = 0; i < count; i++) {
-        snprintf(path, sizeof(path), "%.200s/%.255s", dir, names[i]);
-        nftw(path, remove_one, 16, FTW_DEPTH | FTW_PHYS);
-    }
+    /* MAX_CLEAN names a pass. Passes repeat while entries remain and the
+     * last pass removed something at any depth: nftw can skip entries of a
+     * large subdirectory for the same reason, leaving it behind. A tree that
+     * cannot be emptied stops the loop, since such a pass removes nothing. */
+    do {
+        DIR *d = opendir(dir);
+
+        if (!d)
+            return;
+        count = 0;
+        clean_removed = 0;
+        while ((e = readdir(d)) != NULL && count < MAX_CLEAN) {
+            if (strcmp(e->d_name, ".") == 0 || strcmp(e->d_name, "..") == 0)
+                continue;
+            if (keep && strcmp(e->d_name, keep) == 0)
+                continue;
+            snprintf(names[count++], sizeof(names[0]), "%.255s", e->d_name);
+        }
+        closedir(d);
+        for (i = 0; i < count; i++) {
+            snprintf(path, sizeof(path), "%.200s/%.255s", dir, names[i]);
+            nftw(path, remove_one, 16, FTW_DEPTH | FTW_PHYS);
+        }
+    } while (count > 0 && clean_removed > 0);
 }
 
 /* What a test that died before its cleanup leaves: LTP's LTP_* directories
@@ -176,11 +189,12 @@ static void print_log(const char *out, const char *n)
     if (!f)
         return;
     while (fgets(line, sizeof(line), f)) {
-        size_t len = strcspn(line, "\r\n");
+        size_t full = strlen(line), len = strcspn(line, "\r\n");
         int c;
-        /* A line longer than the buffer: drop the rest of it, so its tail
-         * is not read as a line of its own. */
-        if (line[len] == '\0' && len == sizeof(line) - 1)
+        /* A line longer than the buffer (fgets filled it and stopped short
+         * of the newline): drop the rest of it, so its tail is not read as a
+         * line of its own. A '\r' earlier in the line does not change that. */
+        if (full == sizeof(line) - 1 && line[full - 1] != '\n')
             while ((c = fgetc(f)) != EOF && c != '\n')
                 ;
         line[len] = '\0';
@@ -254,6 +268,9 @@ int main(int argc, char **argv)
             timed_out = 1;
             kill(-pid, SIGKILL);
             kill(pid, SIGKILL);
+            /* Killed, unless waitpid says otherwise: a failing wait must not
+             * leave the last WNOHANG status (0, "exited 0") as the result. */
+            status = SIGKILL;
             while (waitpid(pid, &status, 0) < 0 && errno == EINTR)
                 ;
             break;

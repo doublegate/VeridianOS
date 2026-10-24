@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 """Unit tests for tools/compat/compat.py (run by scripts/dev/gate.sh)."""
 
+import contextlib
+import io
 import os
 import sys
 import tempfile
 import unittest
+from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -293,6 +296,43 @@ class Collect(unittest.TestCase):
         self.assertEqual(r[("libc-test", "math/sin")], ("FAIL", "bad"))
         self.assertEqual(r[("libc-test", "math/cos")][0], "CRASH")
         self.assertEqual(r[("libc-test", "math/tan")][0], "HANG")
+
+    def test_build_rows_only_for_suites_in_the_logs(self):
+        logged = {
+            ("libc-test", "math/sin"): ("PASS", ""),
+            ("libc-test", "math/x"): ("NOTBUILT", ""),
+        }
+        build = {
+            ("libc-test", "math/x"): ("NOTBUILT", "no musl symbol"),
+            ("libc-test", "math/y"): ("NOTBUILT", "needs glibc"),
+            ("ltp-syscalls", "foo01"): ("NOTBUILT", "needs libaio"),
+        }
+        r = compat.merge_build_rows(logged, build)
+        self.assertEqual(r[("libc-test", "math/x")], ("NOTBUILT", "no musl symbol"))
+        self.assertEqual(r[("libc-test", "math/y")], ("NOTBUILT", "needs glibc"))
+        self.assertEqual(r[("libc-test", "math/sin")], ("PASS", ""))
+        self.assertNotIn(("ltp-syscalls", "foo01"), r)
+
+    def test_a_suite_started_without_results_is_still_checked(self):
+        # The guest asked for a retry before the first test of the suite.
+        log = (
+            "x /usr/lib/compat/run.sh /usr/lib/compat/ltp-syscalls.list 1 60\n"
+            "COMPAT-RETRY 1\n"
+        )
+        attempted = set()
+        logged = compat.results_from_logs([log], attempted=attempted)
+        self.assertEqual(attempted, {"ltp-syscalls"})
+        build = {("ltp-syscalls", "foo01"): ("NOTBUILT", "needs libaio")}
+        results = compat.merge_build_rows(logged, build, attempted)
+        self.assertIn(("ltp-syscalls", "foo01"), results)
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "e.tsv"
+            compat.write_tsv(path, {("ltp-syscalls", "read01"): ("PASS", "")}, "x86_64")
+            with contextlib.redirect_stdout(io.StringIO()):
+                rc = compat.report(
+                    "x86_64", logged, path, False, False, suites=attempted
+                )
+        self.assertEqual(rc, 1)
 
 
 class Smoke(unittest.TestCase):
