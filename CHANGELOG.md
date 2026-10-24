@@ -48,8 +48,11 @@
   then CAP_DAC_OVERRIDE (read and write anything, search any directory, execute where some
   execute bit is set) and CAP_DAC_READ_SEARCH (read files, read and search directories), where
   they used to let filesystem uid 0 through; `access` checks as the caller's real self, as Linux's
-  `do_faccessat` does (no capabilities for a real uid other than 0). The other privilege checks
-  still use `euid == 0` or filesystem uid 0 until later steps.
+  `do_faccessat` does (no capabilities for a real uid other than 0). Ownership checks take their
+  capability: CAP_FOWNER for chmod, explicit utimes and sticky directories, CAP_FSETID to keep the
+  set-ID bits through a write or a set-group-ID bit outside the group, CAP_CHOWN for chown,
+  CAP_MKNOD for device nodes and CAP_SYS_CHROOT for chroot. The other privilege checks still use
+  `euid == 0` until later steps.
 - `pause` on x86_64 (system call 34 had no handler, so musl's `pause()` returned ENOSYS at once and a
   forked child meant to wait ran on): it waits as `ppoll` with no descriptors and no timeout,
   which is what musl does on AArch64 and RISC-V, and returns EINTR after a handler.

@@ -151,19 +151,15 @@ pub fn remove_privs_after_write(node: &dyn VfsNode) {
     if node.node_type() != NodeType::File {
         return;
     }
-    let Some(process) = crate::process::current_process() else {
-        return;
-    };
-    let creds = process.credentials();
-    if creds.fs_privileged() {
-        return;
-    }
+    // The kernel itself (no process) holds CAP_FSETID.
+    let caller = crate::process::creds::Caller::current();
     let Ok(meta) = node.metadata() else {
         return;
     };
+    let fsetid = caller.capable(crate::process::linux_caps::CAP_FSETID);
     if let Some(kept) = meta
         .permissions
-        .after_write(creds.fsuid, creds.in_group(meta.gid))
+        .after_write(fsetid, caller.creds.in_group(meta.gid))
     {
         let _ = node.chmod(kept);
     }
@@ -277,13 +273,13 @@ impl Permissions {
     }
 
     /// Linux's file_remove_privs: the permissions a file keeps after a
-    /// write or truncate by `uid` (`in_group`: the writer belongs to the
-    /// file's group). Root keeps the bits (CAP_FSETID); anyone else drops
-    /// set-user-ID, and set-group-ID where it means set-group-ID (group
-    /// execute set) or the writer is outside the group. `None` when nothing
-    /// changes.
-    pub fn after_write(&self, uid: u32, in_group: bool) -> Option<Self> {
-        if uid == 0 {
+    /// write or truncate (`fsetid`: the writer holds CAP_FSETID;
+    /// `in_group`: it belongs to the file's group). With CAP_FSETID the
+    /// bits stay; otherwise set-user-ID goes, and set-group-ID where it
+    /// means set-group-ID (group execute set) or the writer is outside the
+    /// group. `None` when nothing changes.
+    pub fn after_write(&self, fsetid: bool, in_group: bool) -> Option<Self> {
+        if fsetid {
             return None;
         }
         let mut kept = *self;
@@ -2394,20 +2390,26 @@ mod tests {
         assert!(!permission(&rs, &meta(dir, 0o000, 0, 0), MAY_WRITE));
     }
 
-    /// Linux's file_remove_privs: a write by anyone but root drops
+    /// Linux's file_remove_privs: a write without CAP_FSETID drops
     /// set-user-ID; set-group-ID goes with group execute or when the writer
     /// is outside the group, and stays as a locking mark otherwise.
     #[test]
-    fn writes_drop_set_id_bits_except_for_root() {
+    fn writes_drop_set_id_bits_without_cap_fsetid() {
         let suid = Permissions::from_mode(0o4755);
-        assert_eq!(suid.after_write(0, false), None);
-        assert_eq!(suid.after_write(1000, true).unwrap().to_mode(), 0o755);
+        assert_eq!(suid.after_write(true, false), None);
+        assert_eq!(suid.after_write(false, true).unwrap().to_mode(), 0o755);
         let sgid = Permissions::from_mode(0o2755);
-        assert_eq!(sgid.after_write(1000, true).unwrap().to_mode(), 0o755);
+        assert_eq!(sgid.after_write(false, true).unwrap().to_mode(), 0o755);
         let lock_mark = Permissions::from_mode(0o2644);
-        assert_eq!(lock_mark.after_write(1000, true), None);
-        assert_eq!(lock_mark.after_write(1000, false).unwrap().to_mode(), 0o644);
-        assert_eq!(Permissions::from_mode(0o644).after_write(1000, false), None);
+        assert_eq!(lock_mark.after_write(false, true), None);
+        assert_eq!(
+            lock_mark.after_write(false, false).unwrap().to_mode(),
+            0o644
+        );
+        assert_eq!(
+            Permissions::from_mode(0o644).after_write(false, false),
+            None
+        );
     }
 
     /// chown drops set-user-ID always and set-group-ID with group execute.

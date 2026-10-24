@@ -1363,13 +1363,13 @@ pub fn sys_utimensat(
         Some([a, m]) => (utime_spec(a, now)?, utime_spec(m, now)?),
     };
     let only_now = specs.is_none_or(|[a, m]| a[1] == UTIME_NOW && m[1] == UTIME_NOW);
-    let creds = caller_creds();
+    let caller = Caller::current();
     let meta = node.metadata().map_err(super::map_kernel_error)?;
-    if !creds.fs_privileged() && meta.uid != creds.fsuid {
+    if !caller.owner_or_capable(meta.uid) {
         if !only_now {
             return Err(SyscallError::OperationNotPermitted);
         }
-        if !crate::fs::permission(&Caller::current(), &meta, crate::fs::MAY_WRITE) {
+        if !crate::fs::permission(&caller, &meta, crate::fs::MAY_WRITE) {
             return Err(SyscallError::PermissionDenied);
         }
     }
@@ -1441,13 +1441,13 @@ pub fn sys_fchdir(fd: usize) -> SyscallResult {
 
 /// chroot (N-250): make `path` the root for every later lookup of this
 /// process's threads that share its filesystem state (and of children,
-/// which inherit it). Root only (EPERM), as without CAP_SYS_CHROOT on
-/// Linux. The working directory stays where it is if it is under the new
+/// which inherit it). CAP_SYS_CHROOT only (EPERM), as on Linux. The
+/// working directory stays where it is if it is under the new
 /// root; otherwise it becomes the new root, where Linux would leave it
 /// outside (the classic way out of a chroot).
 pub fn sys_chroot(path_ptr: usize) -> SyscallResult {
     let path = read_user_path(path_ptr)?;
-    if caller_creds().euid != 0 {
+    if !Caller::current().capable(crate::process::linux_caps::CAP_SYS_CHROOT) {
         return Err(SyscallError::OperationNotPermitted);
     }
     let thread = process::current_thread().ok_or(SyscallError::InvalidState)?;
@@ -1878,15 +1878,6 @@ pub(crate) fn read_user_path_or_empty(ptr: usize) -> Result<alloc::string::Strin
         .map_err(|_| SyscallError::InvalidArgument)
 }
 
-/// Credentials of the calling process. Kernel context, with no process,
-/// acts as root. Checks use the effective IDs, and a file's group grants
-/// access to any process in that group (`Credentials::gid_for`).
-fn caller_creds() -> crate::process::creds::Credentials {
-    process::current_process().map_or(crate::process::creds::Credentials::new(0, 0), |p| {
-        p.credentials()
-    })
-}
-
 /// Permissions for a new node: the requested `mode` minus the calling
 /// thread's umask (POSIX). The umask never removes the sticky bit.
 pub(crate) fn creation_perms(mode: usize) -> Permissions {
@@ -1904,41 +1895,40 @@ pub(crate) fn creation_perms(mode: usize) -> Permissions {
 /// again would chown whatever is at that name by then -- a user could swap
 /// in a hard link to a root-owned file and take ownership of it.
 pub(crate) fn own_new_node(node: &alloc::sync::Arc<dyn crate::fs::VfsNode>) {
-    let creds = caller_creds();
+    let creds = Caller::current().creds;
     let (uid, gid) = (creds.fsuid, creds.fsgid);
     if uid != 0 || gid != 0 {
         let _ = node.chown(Some(uid), Some(gid));
     }
 }
 
-/// chmod-style operations: only the owner or root may change a node's
-/// mode (FS-SEC-02).
+/// chmod-style operations: only the owner or a caller with CAP_FOWNER may
+/// change a node's mode (FS-SEC-02).
 pub(crate) fn chmod_node(
     node: &alloc::sync::Arc<dyn crate::fs::VfsNode>,
     mode: usize,
 ) -> SyscallResult {
-    let creds = caller_creds();
     let meta = node.metadata().map_err(super::map_kernel_error)?;
-    let perms = chmod_perms(&creds, meta.uid, meta.gid, mode)?;
+    let perms = chmod_perms(&Caller::current(), meta.uid, meta.gid, mode)?;
     node.chmod(perms).map_err(super::map_kernel_error)?;
     Ok(0)
 }
 
-/// The mode a chmod by `creds` stores on a file owned by `uid`:`gid`.
-/// EPERM unless the caller owns the file or is root; and as Linux's
-/// setattr_copy, a caller other than root outside the file's group cannot
-/// set the set-group-ID bit (it is dropped, not refused).
+/// The mode a chmod by `caller` stores on a file owned by `uid`:`gid`.
+/// EPERM unless the caller owns the file or holds CAP_FOWNER; and as
+/// Linux's setattr_copy, a caller outside the file's group without
+/// CAP_FSETID cannot set the set-group-ID bit (it is dropped, not refused).
 pub(crate) fn chmod_perms(
-    creds: &crate::process::creds::Credentials,
+    caller: &Caller,
     uid: u32,
     gid: u32,
     mode: usize,
 ) -> Result<Permissions, SyscallError> {
-    if !creds.fs_privileged() && creds.fsuid != uid {
+    if !caller.owner_or_capable(uid) {
         return Err(SyscallError::OperationNotPermitted);
     }
     let mut perms = Permissions::from_mode(mode as u32 & 0o7777);
-    if !creds.fs_privileged() && !creds.in_group(gid) {
+    if !caller.creds.in_group(gid) && !caller.capable(crate::process::linux_caps::CAP_FSETID) {
         perms.set_gid = false;
     }
     Ok(perms)
@@ -2083,16 +2073,14 @@ pub(crate) fn check_dir_write(dir: &dyn crate::fs::VfsNode) -> Result<(), Syscal
 
 /// Check that the caller may remove or rename entry `name` of `dir`: write
 /// and search permission on `dir` and, if it is sticky, ownership of the
-/// entry or the directory (or root).
+/// entry or the directory, or CAP_FOWNER (Linux's check_sticky).
 pub(crate) fn check_may_remove(
     dir: &dyn crate::fs::VfsNode,
     name: &str,
 ) -> Result<(), SyscallError> {
     check_dir_write(dir)?;
-    let uid = caller_creds().fsuid;
-    if uid == 0 {
-        return Ok(());
-    }
+    let caller = Caller::current();
+    let uid = caller.creds.fsuid;
     let dir_meta = dir.metadata().map_err(super::map_kernel_error)?;
     if !dir_meta.permissions.sticky || dir_meta.uid == uid {
         return Ok(());
@@ -2102,7 +2090,7 @@ pub(crate) fn check_may_remove(
         .map_err(map_resolve_err)?
         .metadata()
         .map_err(super::map_kernel_error)?;
-    if entry_meta.uid == uid {
+    if caller.owner_or_capable(entry_meta.uid) {
         Ok(())
     } else {
         Err(SyscallError::PermissionDenied)
@@ -3235,18 +3223,19 @@ fn chown_id(id: usize) -> Option<u32> {
 
 /// Whether `creds` may give a file owned by `file_uid`:`file_gid` the
 /// owner `uid` and group `gid` (`None`: unchanged), as Linux's chown_ok and
-/// chgrp_ok with _POSIX_CHOWN_RESTRICTED: root may do anything; the owner
-/// may keep the owner and set the group to one it belongs to.
+/// chgrp_ok with _POSIX_CHOWN_RESTRICTED: CAP_CHOWN may do anything; the
+/// owner may keep the owner and set the group to one it belongs to.
 pub(crate) fn may_chown(
-    creds: &crate::process::creds::Credentials,
+    caller: &Caller,
     file_uid: u32,
     file_gid: u32,
     uid: Option<u32>,
     gid: Option<u32>,
 ) -> bool {
-    if creds.fs_privileged() {
+    if caller.capable(crate::process::linux_caps::CAP_CHOWN) {
         return true;
     }
+    let creds = &caller.creds;
     let owner = creds.fsuid == file_uid;
     let uid_ok = uid.is_none_or(|u| owner && u == file_uid);
     let gid_ok = gid.is_none_or(|g| owner && (g == file_gid || creds.in_group(g)));
@@ -3265,7 +3254,7 @@ pub(crate) fn chown_node(
         return Ok(0);
     }
     let meta = node.metadata().map_err(super::map_kernel_error)?;
-    if !may_chown(&caller_creds(), meta.uid, meta.gid, uid, gid) {
+    if !may_chown(&Caller::current(), meta.uid, meta.gid, uid, gid) {
         return Err(SyscallError::OperationNotPermitted);
     }
     node.chown(uid, gid).map_err(super::map_kernel_error)?;
@@ -3360,7 +3349,7 @@ pub(crate) fn make_node(
             operation: "create directory entry",
         };
         check_dir_write(dir).map_err(|_| denied)?;
-        if device && !caller_creds().fs_privileged() {
+        if device && !Caller::current().capable(crate::process::linux_caps::CAP_MKNOD) {
             return Err(crate::error::KernelError::FsError(
                 crate::error::FsError::OperationNotPermitted,
             ));
@@ -3453,19 +3442,29 @@ mod tests {
     }
 
     use super::*;
-    use crate::process::creds::Credentials;
+    use crate::process::{
+        creds::Credentials,
+        linux_caps::{LinuxCaps, CAP_CHOWN, CAP_FOWNER, CAP_FSETID},
+    };
 
-    /// A user 1000 in group 100 and supplementary group 20.
-    fn user() -> Credentials {
+    /// A user 1000 in group 100 and supplementary group 20, holding `caps`.
+    fn user_with(caps: &[u32]) -> Caller {
         let mut c = Credentials::new(0, 0);
         c.setgroups(&[20], true).unwrap();
         c.setresgid(100, 100, 100, true).unwrap();
         c.setresuid(1000, 1000, 1000, true).unwrap();
-        c
+        Caller {
+            creds: c,
+            caps: caps.iter().fold(LinuxCaps::EMPTY, |s, &cap| s.with(cap)),
+        }
     }
 
-    /// chmod: the owner or root (EPERM for others); set-group-ID is
-    /// dropped for a non-root caller outside the file's group.
+    fn user() -> Caller {
+        user_with(&[])
+    }
+
+    /// chmod: the owner or CAP_FOWNER (EPERM for others); set-group-ID is
+    /// dropped for a caller outside the file's group without CAP_FSETID.
     #[test]
     fn chmod_follows_linux_rules() {
         let u = user();
@@ -3479,10 +3478,23 @@ mod tests {
         );
         assert_eq!(chmod_perms(&u, 1000, 20, 0o2755).unwrap().to_mode(), 0o2755);
         assert_eq!(chmod_perms(&u, 1000, 7, 0o6755).unwrap().to_mode(), 0o4755);
-        let root = Credentials::new(0, 0);
+        let root = Caller::KERNEL;
         assert_eq!(
             chmod_perms(&root, 1000, 7, 0o2755).unwrap().to_mode(),
             0o2755
+        );
+        // The capabilities decide, not uid 0.
+        let fowner = user_with(&[CAP_FOWNER]);
+        assert_eq!(chmod_perms(&fowner, 0, 7, 0o2755).unwrap().to_mode(), 0o755);
+        let both = user_with(&[CAP_FOWNER, CAP_FSETID]);
+        assert_eq!(chmod_perms(&both, 0, 7, 0o2755).unwrap().to_mode(), 0o2755);
+        let bare_root = Caller {
+            creds: Credentials::new(0, 0),
+            caps: LinuxCaps::EMPTY,
+        };
+        assert_eq!(
+            chmod_perms(&bare_root, 1000, 7, 0o644),
+            Err(SyscallError::OperationNotPermitted)
         );
         // File type bits in the argument are ignored.
         assert_eq!(
@@ -3491,7 +3503,8 @@ mod tests {
         );
     }
 
-    /// chown: root anything; the owner only its own groups, never the user.
+    /// chown: CAP_CHOWN anything; the owner only its own groups, never the
+    /// user.
     #[test]
     fn chown_is_restricted_to_root_and_owner_chgrp() {
         let u = user();
@@ -3500,13 +3513,19 @@ mod tests {
         assert!(!may_chown(&u, 1000, 100, None, Some(7)));
         assert!(!may_chown(&u, 1000, 100, Some(1001), None));
         assert!(!may_chown(&u, 1001, 100, None, Some(100)));
+        assert!(may_chown(&Caller::KERNEL, 1001, 7, Some(5), Some(9)));
         assert!(may_chown(
-            &Credentials::new(0, 0),
+            &user_with(&[CAP_CHOWN]),
             1001,
             7,
             Some(5),
             Some(9)
         ));
+        let bare_root = Caller {
+            creds: Credentials::new(0, 0),
+            caps: LinuxCaps::EMPTY,
+        };
+        assert!(!may_chown(&bare_root, 1001, 7, Some(5), None));
     }
 
     /// loff_t is signed: a negative offset or length (as a register value)

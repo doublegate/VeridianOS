@@ -2,9 +2,8 @@
 //! and group IDs and the supplementary groups, with the Linux rules for
 //! changing them. The privilege to change them is the calling thread's
 //! CAP_SETUID or CAP_SETGID, which the caller passes in (ADR 0020).
-//! Filesystem privilege is still filesystem uid 0 (`fs_privileged`), the
-//! approximation of Linux's filesystem capabilities (CHOWN, DAC_OVERRIDE,
-//! FOWNER, MKNOD, ...), which leave the effective set with the fsuid.
+//! [`Caller`] pairs the credentials with the calling thread's
+//! capabilities, which every other privilege check consults.
 
 use super::super::syscall::SyscallError;
 
@@ -57,11 +56,6 @@ impl Credentials {
 
     pub fn groups(&self) -> &[u32] {
         &self.groups[..self.ngroups]
-    }
-
-    /// Whether file access is unrestricted: filesystem uid 0.
-    pub fn fs_privileged(&self) -> bool {
-        self.fsuid == 0
     }
 
     /// Whether the process is in group `gid` for file access (its
@@ -322,6 +316,12 @@ impl Caller {
     pub const fn capable(&self, cap: u32) -> bool {
         self.caps.has(cap)
     }
+
+    /// Whether the caller owns a file owned by `file_uid` or holds
+    /// CAP_FOWNER (Linux's inode_owner_or_capable).
+    pub const fn owner_or_capable(&self, file_uid: u32) -> bool {
+        self.creds.fsuid == file_uid || self.capable(super::linux_caps::CAP_FOWNER)
+    }
 }
 
 #[cfg(test)]
@@ -372,21 +372,19 @@ mod tests {
     /// setfsuid/setfsgid return the old value whatever happens, take -1 as
     /// a query, and change the ID only to the real, effective, saved or
     /// current filesystem ID, unless the caller holds CAP_SETUID (Linux's
-    /// `__sys_setfsuid`). Filesystem privilege and group checks follow.
+    /// `__sys_setfsuid`). Group checks follow.
     #[test]
     fn setfsuid_rules() {
         let mut root = Credentials::new(0, 0);
         assert_eq!(root.setfsuid(1000, true), 0);
         assert_eq!(root.setfsuid(U, true), 1000);
         assert_eq!((root.euid, root.fsuid), (0, 1000));
-        assert!(!root.fs_privileged());
         assert_eq!(root.setfsgid(50, true), 0);
         assert!(!root.in_group(0) && root.in_group(50));
         assert_eq!(root.gid_for(50), 50);
         assert_eq!(root.gid_for(60), 50);
         // Still holds CAP_SETUID: may go back.
         assert_eq!(root.setfsuid(0, true), 1000);
-        assert!(root.fs_privileged());
 
         let mut user = Credentials::new(1000, 100);
         assert_eq!(user.setfsuid(0, false), 1000);
@@ -398,7 +396,6 @@ mod tests {
         c.suid = 0;
         assert_eq!(c.setfsuid(0, false), 1000);
         assert_eq!(c.fsuid, 0);
-        assert!(c.fs_privileged());
     }
 
     #[test]
