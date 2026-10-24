@@ -28,8 +28,17 @@
 - ADR 0020: Linux capabilities, per thread (effective, permitted, inheritable, bounding and
   ambient sets plus securebits), replacing the `euid == 0` privilege checks in steps. First step:
   `process::linux_caps`, the pure rules for capset, the set*id fix-ups, the capability prctl
-  options and exec, with tests transcribed from Linux 7.3's `security/commoncap.c`; nothing
-  calls it yet.
+  options and exec, with tests transcribed from Linux 7.3's `security/commoncap.c`. Every thread
+  carries its sets (root's full sets at boot; fork and clone copy the creator's), and
+  `capget`/`capset` read and change them with Linux's header versions 1 to 3:
+  capget reads any thread by id and probes the version when the data pointer is NULL; capset changes
+  only the caller's sets. `/proc/sys/kernel/cap_last_cap` reports 40, and
+  `/proc/sys/kernel/pid_max` 4194304 (Linux's 64-bit limit; ids here never wrap, see
+  KNOWN-LIMITATIONS). LTP `capget01`, `capget02`, `capset01`, `capset03` and `capset04` pass; the privilege checks still use `euid == 0` until
+  later steps.
+- `pause` on x86_64 (system call 34 had no handler, so musl's `pause()` returned ENOSYS at once and a
+  forked child meant to wait ran on): it waits as `ppoll` with no descriptors and no timeout,
+  which is what musl does on AArch64 and RISC-V, and returns EINTR after a handler.
 - `scripts/dev/guest.py`: boots the AArch64 or RISC-V musl root filesystem and runs commands at
   its shell, logging the serial output.
 - GDB helper `hbreak-main`, the hardware-breakpoint variant of `break-main`.
@@ -61,6 +70,8 @@
 
 ### Fixed
 
+- `scripts/run-compat-tests.sh --update` dropped the comment lines written by hand at the top of an
+  expected list (the baseline's date and versions); it now keeps them.
 - `mkfs-blockfs` let a directory entry cross a 4 KiB block boundary, and the kernel reads a
   directory a block at a time: in a directory over one block most names could not be found (855 of
   1,000 in a test). Entries now start a new block when they would cross one, as the kernel's own

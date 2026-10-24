@@ -65,6 +65,13 @@ pub const MAX_THREADS_PER_PROCESS: usize = 256;
 /// threads and processes without ambiguity (N-217).
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
+/// What /proc/sys/kernel/pid_max reports: Linux's limit on 64-bit systems
+/// (`PID_MAX_LIMIT`). Linux allocates ids below it and wraps around to
+/// reuse freed ones; `NEXT_ID` only counts up and never reuses an id, so the
+/// file is a bound programs size tables by, not where ids stop
+/// (docs/KNOWN-LIMITATIONS.md).
+pub const PID_MAX: u64 = 4_194_304;
+
 /// Allocate a new process ID
 pub fn alloc_pid() -> ProcessId {
     ProcessId(NEXT_ID.fetch_add(1, Ordering::Relaxed))

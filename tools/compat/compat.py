@@ -258,12 +258,28 @@ def _order(key):
     )
 
 
+_STATUSES_LINE = "# Statuses and the update procedure: tests/compat/README.md.\n"
+
+
+def read_header(path):
+    """The leading comment lines of a list, minus the standard last one, so
+    that a line written by hand (a baseline's date) survives an --update."""
+    lines = []
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            if not line.startswith("#"):
+                break
+            if line != _STATUSES_LINE:
+                lines.append(line)
+    return "".join(lines) or None
+
+
 def write_tsv(path, rows, arch, header=None):
     with open(path, "w", encoding="utf-8") as f:
         f.write(
             header or f"# Conformance results for {arch}: suite, test, status, note.\n"
         )
-        f.write("# Statuses and the update procedure: tests/compat/README.md.\n")
+        f.write(_STATUSES_LINE)
         for key in sorted(rows, key=_order):
             status, note = rows[key]
             f.write("\t".join((key[0], key[1], status, note.replace("\t", " "))) + "\n")
@@ -1313,8 +1329,10 @@ def report(
             for key in gaps[:20]:
                 print("  " + " ".join(key))
             return 2
-        expected = read_tsv(expected_path) if expected_path.exists() else {}
-        write_tsv(expected_path, merge_expected(expected, results), arch)
+        expected, header = {}, None
+        if expected_path.exists():
+            expected, header = read_tsv(expected_path), read_header(expected_path)
+        write_tsv(expected_path, merge_expected(expected, results), arch, header)
         print(f"updated {expected_path}")
         return 0
     if not expected_path.exists():

@@ -336,6 +336,40 @@ What does not work yet: `docs/KNOWN-LIMITATIONS.md`.
     next: capget/capset, personality, kcmp, execveat, clone3, the pidfd calls,
     process_vm_readv/writev, rseq, unshare/setns.
   - [x] **Release:** tri-arch boot with `-smp 4`, runtime suite, CHANGELOG, tag (2026-10-18).
+- [ ] **v0.28.0, order of work (set 2026-10-24).** One branch and pull request per group; each
+  step is gated (`scripts/dev/gate.sh --boot --rootfs`) and committed on its own, and a change that
+  moves LTP results updates `tests/compat/expected-<arch>.tsv` from full runs. The items are
+  described in the list below this one.
+  1. [ ] Linux capabilities, ADR 0020 (`feat/v0.28-linux-caps`):
+     - [x] steps 1-2: the rules (`process::linux_caps`) and per-thread sets
+     - [ ] step 3: capget, capset, `/proc/sys/kernel/cap_last_cap` and `pid_max`; pause on x86_64
+     - [ ] step 4: the capability prctl options; `Cap*` lines in `/proc/<pid>/status`
+     - [ ] step 5: the set*id fix-ups on every thread; CAP_SETUID/CAP_SETGID decide privilege
+     - [ ] step 6: every `euid == 0` check replaced by its capability, one subsystem per commit
+     - [ ] step 7: exec computes the sets (no file capabilities yet)
+     - [ ] step 8: persistent BlockFS xattrs (format version bump, migration in mkfs-blockfs) and
+       the xattr calls
+     - [ ] step 9: file capabilities (`security.capability`) at exec and cleared on write
+     - [ ] step 10: docs (N-131 in KNOWN-LIMITATIONS, PORTING-GUIDE, CHANGELOG); then the PR
+  2. [ ] statfs and fstatfs per filesystem type: most LTP tests stop on their ENOSYS in setup, so
+     this comes first among the remaining groups (it makes the later ones measurable).
+  3. [ ] The remaining syscall groups: personality (READ_IMPLIES_EXEC with the W^X opt-in only),
+     unshare/setns with every namespace type and `/proc/<pid>/ns`, then the process, signal, time
+     and file tiers with ABI-review findings N-194 to N-247; the `docs/PORTING-GUIDE.md` rewrite.
+  4. [ ] ABI-review items N-190 to N-193, N-207, N-209 to N-211, N-217, N-221, N-222, N-225, N-231,
+     N-235 to N-238.
+  5. [ ] D leftovers: N-115, N-260, N-52/N-261, N-282.
+  6. [ ] Decision point: cut v0.28.0 here (moving 7 to 13 to v0.29) or continue.
+  7. [ ] Sprint F (networking, storage), with `knetd` (N-69) and INET socket readiness.
+  8. [ ] Sprint G (hardening).
+  9. [ ] Sprint H (real hardware, the parts QEMU can check).
+  10. [ ] RISC-V boot: HR-02, HR-04 to HR-06, HR-11.
+  11. [ ] DL: KDE with shared libraries and its media backend.
+  12. [ ] MFA through PAM.
+  13. [ ] IPC redesign (N-79 to N-91); package signing keys (N-55 follow-up).
+  14. [ ] Release v0.28.0 (the tag and GitHub release need the maintainer's confirmation).
+  - Outside the groups: pin every workflow `uses:` to a commit SHA with Dependabot (one ci: pull
+    request); delete merged branches once the maintainer agrees.
 - [ ] **v0.28.0:** first the items carried over from v0.27.0, which was cut early (2026-10-18):
   - [x] LTP and musl libc-test in the rootfs suite (2026-10-22, `tests/compat/README.md`).
     `/dev/shm` is a tmpfs whose files are their own pages (`fs::shmem`), so a MAP_SHARED mapping

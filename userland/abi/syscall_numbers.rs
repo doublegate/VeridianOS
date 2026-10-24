@@ -151,6 +151,7 @@ pub mod sysno {
     pub const SYS_rt_sigaction: usize = 13;
     pub const SYS_rt_sigprocmask: usize = 14;
     pub const SYS_rt_sigsuspend: usize = 130;
+    pub const SYS_pause: usize = 34;
     pub const SYS_rt_sigreturn: usize = 15;
     pub const SYS_rt_sigpending: usize = 127;
     pub const SYS_rt_sigtimedwait: usize = 128;
@@ -173,6 +174,8 @@ pub mod sysno {
     pub const SYS_setfsgid: usize = 123;
     pub const SYS_getgroups: usize = 115;
     pub const SYS_setgroups: usize = 116;
+    pub const SYS_capget: usize = 125;
+    pub const SYS_capset: usize = 126;
     pub const SYS_VERIDIAN_AUTH: usize = 1352;
     pub const SYS_setpgid: usize = 109;
     pub const SYS_getpgid: usize = 121;
@@ -412,6 +415,8 @@ pub mod sysno {
     pub const SYS_setfsgid: usize = 152;
     pub const SYS_getgroups: usize = 158;
     pub const SYS_setgroups: usize = 159;
+    pub const SYS_capget: usize = 90;
+    pub const SYS_capset: usize = 91;
     pub const SYS_VERIDIAN_AUTH: usize = 1352;
     pub const SYS_setpgid: usize = 154;
     pub const SYS_getpgid: usize = 155;
@@ -647,6 +652,8 @@ pub mod sysno {
     pub const SYS_setfsgid: usize = 152;
     pub const SYS_getgroups: usize = 158;
     pub const SYS_setgroups: usize = 159;
+    pub const SYS_capget: usize = 90;
+    pub const SYS_capset: usize = 91;
     pub const SYS_VERIDIAN_AUTH: usize = 1352;
     pub const SYS_setpgid: usize = 154;
     pub const SYS_getpgid: usize = 155;

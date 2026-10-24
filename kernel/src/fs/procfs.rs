@@ -131,6 +131,10 @@ impl VfsNode for ProcNode {
                     "loadavg" => generate_loadavg(),
                     // Qt/KDE compatibility files
                     "core_pattern" => String::from("core\n"),
+                    "pid_max" => format!("{}\n", crate::process::PID_MAX),
+                    "cap_last_cap" => {
+                        format!("{}\n", crate::process::linux_caps::CAP_LAST_CAP)
+                    }
                     "boot_id" => String::from("00000000-0000-0000-0000-000000000001\n"),
                     "self/maps" => crate::process::current_process()
                         .map(|p| generate_maps(p.pid.0))
@@ -376,6 +380,10 @@ impl VfsNode for ProcNode {
                         "core_pattern" => Ok(Arc::new(ProcNode::new_system_file(String::from(
                             "core_pattern",
                         ))) as Arc<dyn VfsNode>),
+                        "cap_last_cap" | "pid_max" => {
+                            Ok(Arc::new(ProcNode::new_system_file(String::from(name)))
+                                as Arc<dyn VfsNode>)
+                        }
                         "random" => Ok(Arc::new(ProcNode {
                             node_type: ProcNodeType::SubDir(String::from("sys/kernel/random")),
                         }) as Arc<dyn VfsNode>),
@@ -771,6 +779,32 @@ mod tests {
             status_ids(&c),
             "Uid:\t0\t0\t0\t1000\nGid:\t0\t0\t0\t0\nGroups:\t\n"
         );
+    }
+
+    /// /proc/sys/kernel/cap_last_cap is the highest capability number, which
+    /// libcap and LTP read to size their sets.
+    #[test]
+    fn cap_last_cap_names_the_highest_capability() {
+        let dir = ProcNode {
+            node_type: ProcNodeType::SubDir(String::from("sys/kernel")),
+        };
+        let file = dir.lookup("cap_last_cap").unwrap();
+        let mut buf = [0u8; 16];
+        let n = file.read(0, &mut buf).unwrap();
+        assert_eq!(&buf[..n], b"40\n");
+    }
+
+    /// /proc/sys/kernel/pid_max is Linux's 64-bit limit (PID_MAX_LIMIT);
+    /// VeridianOS ids do not wrap at it (docs/KNOWN-LIMITATIONS.md).
+    #[test]
+    fn pid_max_is_the_linux_64_bit_limit() {
+        let dir = ProcNode {
+            node_type: ProcNodeType::SubDir(String::from("sys/kernel")),
+        };
+        let file = dir.lookup("pid_max").unwrap();
+        let mut buf = [0u8; 16];
+        let n = file.read(0, &mut buf).unwrap();
+        assert_eq!(&buf[..n], b"4194304\n");
     }
 
     /// The RISC-V `mmu` field names the mode, as Linux prints it.

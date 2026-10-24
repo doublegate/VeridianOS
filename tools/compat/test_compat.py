@@ -278,6 +278,36 @@ class Compare(unittest.TestCase):
             compat.write_tsv(path, rows, "x86_64")
             self.assertEqual(compat.read_tsv(path), rows)
 
+    def test_update_keeps_the_header_comments(self):
+        # A line written by hand into the header (the baseline's date and
+        # versions) survives an --update; the standard lines are not doubled.
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "expected-x86_64.tsv"
+            compat.write_tsv(path, {("s", "a"): ("FAIL", "")}, "x86_64")
+            lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+            lines.insert(1, "# Baseline of 2026-10-22.\n")
+            path.write_text("".join(lines), encoding="utf-8")
+            with contextlib.redirect_stdout(io.StringIO()):
+                rc = compat.report(
+                    "x86_64",
+                    {("s", "a"): ("PASS", "")},
+                    path,
+                    update=True,
+                    strict=False,
+                    listed={"s": {"a"}},
+                )
+            self.assertEqual(rc, 0)
+            text = path.read_text(encoding="utf-8")
+            self.assertEqual(
+                text.splitlines()[:3],
+                [
+                    "# Conformance results for x86_64: suite, test, status, note.",
+                    "# Baseline of 2026-10-22.",
+                    "# Statuses and the update procedure: tests/compat/README.md.",
+                ],
+            )
+            self.assertEqual(compat.read_tsv(path), {("s", "a"): ("PASS", "")})
+
 
 class Collect(unittest.TestCase):
     def test_results_from_serial_logs(self):

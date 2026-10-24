@@ -574,6 +574,37 @@ pub const fn data_words(version: u32) -> Option<usize> {
     }
 }
 
+/// One `struct __user_cap_data_struct`: the effective, permitted and
+/// inheritable words, in that order.
+pub type CapData = [u32; 3];
+
+impl CapSets {
+    /// The two data structs capget(2) fills: the low 32 bits of each set,
+    /// then the high 32 (a version 1 header copies only the first).
+    pub const fn user_data(&self) -> [CapData; 2] {
+        let (e, p, i) = (
+            self.effective.bits(),
+            self.permitted.bits(),
+            self.inheritable.bits(),
+        );
+        [
+            [e as u32, p as u32, i as u32],
+            [(e >> 32) as u32, (p >> 32) as u32, (i >> 32) as u32],
+        ]
+    }
+}
+
+/// The (effective, permitted, inheritable) sets capset(2) reads from its
+/// data structs; a struct the header version does not cover is all zero.
+pub const fn sets_from_user_data(data: [CapData; 2]) -> (LinuxCaps, LinuxCaps, LinuxCaps) {
+    let [low, high] = data;
+    (
+        LinuxCaps::from_words(low[0], high[0]),
+        LinuxCaps::from_words(low[1], high[1]),
+        LinuxCaps::from_words(low[2], high[2]),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1031,5 +1062,42 @@ mod tests {
         assert_eq!(data_words(LINUX_CAPABILITY_VERSION_2), Some(2));
         assert_eq!(data_words(LINUX_CAPABILITY_VERSION_3), Some(2));
         assert_eq!(data_words(0), None);
+    }
+
+    #[test]
+    fn capget_splits_each_set_into_two_words() {
+        let mut c = CapSets::NONE;
+        c.effective = caps(&[CAP_KILL, CAP_BPF]);
+        c.permitted = caps(&[CAP_KILL, CAP_BPF, CAP_SYSLOG]);
+        c.inheritable = caps(&[CAP_CHOWN]);
+        let low = 1 << CAP_KILL;
+        assert_eq!(
+            c.user_data(),
+            [
+                [low, low, 1 << CAP_CHOWN],
+                [
+                    1 << (CAP_BPF - 32),
+                    1 << (CAP_BPF - 32) | 1 << (CAP_SYSLOG - 32),
+                    0
+                ],
+            ]
+        );
+        assert_eq!(CapSets::ROOT.user_data()[1], [0x1ff, 0x1ff, 0]);
+    }
+
+    #[test]
+    fn capset_data_round_trips_and_drops_unknown_bits() {
+        let mut c = CapSets::NONE;
+        c.effective = caps(&[CAP_SETUID, CAP_PERFMON]);
+        c.permitted = caps(&[CAP_SETUID, CAP_PERFMON, CAP_SYS_ADMIN]);
+        c.inheritable = caps(&[CAP_NET_RAW]);
+        assert_eq!(
+            sets_from_user_data(c.user_data()),
+            (c.effective, c.permitted, c.inheritable)
+        );
+        // Bits above CAP_LAST_CAP are ignored, as mk_kernel_cap does.
+        let (e, p, i) = sets_from_user_data([[0, 0, 0], [u32::MAX, u32::MAX, u32::MAX]]);
+        let high = LinuxCaps::from_bits(0x1ff << 32);
+        assert_eq!((e, p, i), (high, high, high));
     }
 }

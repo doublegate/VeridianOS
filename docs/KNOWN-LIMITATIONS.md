@@ -107,7 +107,8 @@ their check, for a few shared reasons:
   `/proc/config.gz` nor `/boot/config-<release>` and are TBROK.
 - **Missing calls.** alarm and the interval and POSIX timers, the System V IPC calls, message
   queues, mlock, msync, sched_getparam and the other calls the coverage tables list as missing;
-  `/proc/sys`, `/proc/self/mounts` and parts of `/proc/<pid>/stat` and `status`.
+  most of `/proc/sys` (it has `kernel/pid_max`, `kernel/cap_last_cap` and
+  `kernel/core_pattern`), `/proc/self/mounts` and parts of `/proc/<pid>/stat` and `status`.
 - **Memory exhaustion.** libc-test's `malloc-oom`, `malloc-brk-fail` and `pthread_create-oom`
   stop the whole guest on RISC-V. On x86_64 and AArch64 they ran until the time limit after the
   full LTP and Open POSIX runs in the same guest, but reached ENOMEM within 10 to 16 s when
@@ -221,10 +222,17 @@ What remains:
   SETREGS, CONT, SINGLESTEP) fail. A debugger cannot drive a process yet (planned v0.28).
 - **Credentials (N-131 remainder, planned v0.30):** real, effective and saved IDs,
   filesystem IDs (setfsuid, setfsgid), supplementary groups (N-248) and set-user-ID/set-group-ID
-  exec exist, but there are no Linux capabilities: privilege is effective uid 0, and file-access
+  exec exist. Each thread has Linux capability sets (ADR 0020), which `capget` and `capset` read
+  and change, but nothing checks them yet: privilege is still effective uid 0, and file-access
   privilege filesystem uid 0 (Linux drops the filesystem capabilities when the fsuid leaves 0). A directory's
   set-group-ID bit is kept but not acted on: new entries take the creator's group, not the
   directory's.
+- **Process ids never wrap.** `/proc/sys/kernel/pid_max` reports 4194304, Linux's limit on
+  64-bit systems, but the kernel does not keep ids below it: process and thread ids count up from
+  1 and are never reused, where Linux wraps at `pid_max` and reuses freed ids. A system that
+  creates more than 4194303 processes and threads gets ids above `pid_max`, and an id past
+  2147483647 no longer fits in `pid_t`. Programs that read `pid_max` to size a table, or that use
+  it as an id no process has (LTP's `tst_get_unused_pid`), work until then.
 - **chroot (N-250):** a working directory outside the new root is moved to the root, where Linux
   would leave it outside.
 

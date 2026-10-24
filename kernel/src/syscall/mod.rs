@@ -356,6 +356,8 @@ pub(crate) fn futex_pi_owner_exiting(owner: (u64, u64)) {
     futex_pi::owner_exiting(owner);
 }
 pub(crate) mod linux_compat;
+// capget, capset (ADR 0020)
+mod linux_caps;
 mod thread_clone;
 pub(crate) mod userspace;
 pub(crate) use filesystem::rename_paths;
@@ -833,6 +835,7 @@ fn never_restarted(syscall: Syscall) -> bool {
     matches!(
         syscall,
         Syscall::RtSigsuspend
+            | Syscall::Pause
             | Syscall::RtSigtimedwait
             | Syscall::Nanosleep
             | Syscall::ClockNanosleep
@@ -955,6 +958,8 @@ fn handle_syscall(
         Syscall::RtSigaction => sys_sigaction(arg1, arg2, arg3),
         Syscall::RtSigprocmask => sys_sigprocmask(arg1, arg2, arg3),
         Syscall::RtSigsuspend => sys_sigsuspend(arg1),
+        // pause(): what musl does on the generic table, which has no pause.
+        Syscall::Pause => sys_ppoll(0, 0, 0, 0, 0),
         Syscall::RtSigreturn => sys_sigreturn(arg1),
 
         // POSIX time syscalls
@@ -983,6 +988,8 @@ fn handle_syscall(
         Syscall::Getresgid => process::sys_getresgid(arg1, arg2, arg3),
         Syscall::Getgroups => process::sys_getgroups(arg1, arg2),
         Syscall::Setgroups => process::sys_setgroups(arg1, arg2),
+        Syscall::Capget => linux_caps::sys_capget(arg1, arg2),
+        Syscall::Capset => linux_caps::sys_capset(arg1, arg2),
         Syscall::Fchdir => sys_fchdir(arg1),
         Syscall::Chroot => sys_chroot(arg1),
         Syscall::Utimensat => sys_utimensat(arg1, arg2, arg3, arg4),
@@ -3772,6 +3779,14 @@ mod tests {
 
     /// Linux numbers that the old musl remap or the old Linux translation
     /// table sent to the wrong call now reach the right one.
+    /// pause, like sigsuspend, returns EINTR after a handler and is never
+    /// restarted (Linux: ERESTARTNOHAND).
+    #[test]
+    fn pause_is_never_restarted() {
+        assert!(never_restarted(Syscall::Pause));
+        assert!(!never_restarted(Syscall::Read));
+    }
+
     #[test]
     fn linux_numbers_reach_the_linux_call() {
         let cases: &[(usize, Syscall)] = &[
@@ -3788,6 +3803,9 @@ mod tests {
             (128, Syscall::RtSigtimedwait),
             (129, Syscall::RtSigqueueinfo),
             (297, Syscall::RtTgsigqueueinfo),
+            (34, Syscall::Pause),
+            (125, Syscall::Capget),
+            (126, Syscall::Capset),
             (130, Syscall::RtSigsuspend),
             (131, Syscall::Sigaltstack),
             (157, Syscall::Prctl),

@@ -47,12 +47,12 @@ ltp-syscalls	cachestat01	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to st
 ltp-syscalls	cachestat02	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
 ltp-syscalls	cachestat03	CONF	tst_hugepage.c:34: TCONF: hugetlbfs is not supported
 ltp-syscalls	cachestat04	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
-ltp-syscalls	capget01	CONF	tst_capability.c:17: TCONF: syscall(90) __NR_capget not supported on your arch
-ltp-syscalls	capget02	BROK	tst_pid.c:46: TBROK: Failed to open FILE '/proc/sys/kernel/pid_max' for reading: ENOENT (2)
-ltp-syscalls	capset01	CONF	capset01.c:41: TCONF: syscall(90) __NR_capget not supported on your arch
-ltp-syscalls	capset02	CONF	capset02.c:85: TCONF: syscall(91) __NR_capset not supported on your arch
-ltp-syscalls	capset03	CONF	capset03.c:41: TCONF: syscall(91) __NR_capset not supported on your arch
-ltp-syscalls	capset04	CONF	capset04.c:44: TCONF: syscall(90) __NR_capget not supported on your arch
+ltp-syscalls	capget01	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
+ltp-syscalls	capget02	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
+ltp-syscalls	capset01	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
+ltp-syscalls	capset02	BROK	capset02.c:91: TBROK: drop CAP_KILL failed: EINVAL (22)
+ltp-syscalls	capset03	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
+ltp-syscalls	capset04	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
 ltp-syscalls	chdir01	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
 ltp-syscalls	chdir02	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
 ltp-syscalls	chdir04	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
@@ -435,7 +435,7 @@ ltp-syscalls	futex_wake05	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to s
 ltp-syscalls	futimesat01	BROK	futimesat01    1  TBROK  :  tst_fs_type.c:20: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): errno=ENOSYS(38): Function not implemented
 ltp-syscalls	get_mempolicy01	CONF	tst_test.c:1429: TCONF: test requires libnuma development packages with LIBNUMA_API_VERSION >= 2
 ltp-syscalls	get_mempolicy02	CONF	tst_test.c:1429: TCONF: test requires libnuma development packages with LIBNUMA_API_VERSION >= 2
-ltp-syscalls	get_robust_list01	BROK	get_robust_list01    1  TBROK  :  tst_pid.c:46: Failed to open FILE '/proc/sys/kernel/pid_max' for reading: errno=ENOENT(2): No such file or directory
+ltp-syscalls	get_robust_list01	FAIL	get_robust_list01    5  TFAIL  :  get_robust_list01.c:172: get_robust_list failed unexpectedly: errno=ESRCH(3): No such process
 ltp-syscalls	getcontext01	CONF	tst_test.c:1429: TCONF: system doesn't have getcontext support
 ltp-syscalls	getcpu01	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
 ltp-syscalls	getcpu02	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
@@ -471,10 +471,10 @@ ltp-syscalls	getitimer02	CONF	getitimer02.c:36: TCONF: syscall(102) __NR_getitim
 ltp-syscalls	getpagesize01	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
 ltp-syscalls	getpeername01	FAIL	exit 5; getpeername01.c:90: TFAIL: getpeername(sockfd, tc->sockaddr, tc->addrlen) expected ENOTCONN: EBADF (9)
 ltp-syscalls	getpgid01	BROK	getpgid01.c:18: TBROK: Failed to open FILE '/proc/1/stat' for reading: ENOENT (2)
-ltp-syscalls	getpgid02	BROK	tst_pid.c:46: TBROK: Failed to open FILE '/proc/sys/kernel/pid_max' for reading: ENOENT (2)
+ltp-syscalls	getpgid02	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
 ltp-syscalls	getpgrp01	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
-ltp-syscalls	getpid01	BROK	getpid01.c:18: TBROK: Failed to open FILE '/proc/sys/kernel/pid_max' for reading: ENOENT (2)
-ltp-syscalls	getppid01	BROK	getppid01.c:18: TBROK: Failed to open FILE '/proc/sys/kernel/pid_max' for reading: ENOENT (2)
+ltp-syscalls	getpid01	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
+ltp-syscalls	getppid01	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
 ltp-syscalls	getppid02	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
 ltp-syscalls	getpriority01	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
 ltp-syscalls	getpriority02	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
@@ -501,9 +501,9 @@ ltp-syscalls	getrlimit03	WARN	tst_test.c:1101: TWARN: Kernel is older than minim
 ltp-syscalls	getrusage01	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
 ltp-syscalls	getrusage02	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
 ltp-syscalls	getrusage03	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
-ltp-syscalls	getrusage04	FAIL	getrusage04    1  TFAIL  :  getrusage04.c:133: stime increased > 5000us:
+ltp-syscalls	getrusage04	PASS	
 ltp-syscalls	getsid01	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
-ltp-syscalls	getsid02	BROK	tst_pid.c:46: TBROK: Failed to open FILE '/proc/sys/kernel/pid_max' for reading: ENOENT (2)
+ltp-syscalls	getsid02	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
 ltp-syscalls	getsockname01	FAIL	exit 5; getsockname01.c:49: TFAIL: invalid socklen succeeded
 ltp-syscalls	getsockopt01	FAIL	exit 5; getsockopt01.c:70: TFAIL: invalid option buffer succeeded
 ltp-syscalls	getsockopt02	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
@@ -634,7 +634,7 @@ ltp-syscalls	keyctl28	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .config
 ltp-syscalls	keyctl29	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .config
 ltp-syscalls	keyctl30	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .config
 ltp-syscalls	kill02	PASS	
-ltp-syscalls	kill03	BROK	tst_pid.c:46: TBROK: Failed to open FILE '/proc/sys/kernel/pid_max' for reading: ENOENT (2)
+ltp-syscalls	kill03	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
 ltp-syscalls	kill05	BROK	kill05.c:89: TBROK: shmget(1627455497, 4096, 3b6) failed: ENOSYS (38)
 ltp-syscalls	kill06	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
 ltp-syscalls	kill08	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
@@ -963,7 +963,7 @@ ltp-syscalls	posix_fadvise04	FAIL	exit 5; posix_fadvise04.c:49: TFAIL: unexpecte
 ltp-syscalls	posix_fadvise04_64	FAIL	exit 5; posix_fadvise04.c:49: TFAIL: unexpected return value - 38 : ENOSYS - expected 29
 ltp-syscalls	ppoll01	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
 ltp-syscalls	prctl01	FAIL	exit 5; prctl01.c:25: TFAIL: prctl(PR_SET_PDEATHSIG) failed: EINVAL (22)
-ltp-syscalls	prctl02	CONF	tst_capability.c:17: TCONF: syscall(90) __NR_capget not supported on your arch
+ltp-syscalls	prctl02	FAIL	exit 5; prctl02.c:155: TFAIL: prctl() succeeded unexpectedly
 ltp-syscalls	prctl03	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
 ltp-syscalls	prctl05	BROK	prctl05.c:67: TBROK: Failed to open FILE '/proc/self/task/217/comm' for reading: ENOENT (2)
 ltp-syscalls	prctl06	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
@@ -1003,7 +1003,7 @@ ltp-syscalls	pselect03	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to stat
 ltp-syscalls	pselect03_64	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
 ltp-syscalls	ptrace01	BROK	ptrace01.c:111: TBROK: waitpid(310,0x7ffdfb1cb998,0) failed: ECHILD (10)
 ltp-syscalls	ptrace02	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
-ltp-syscalls	ptrace03	BROK	tst_pid.c:46: TBROK: Failed to open FILE '/proc/sys/kernel/pid_max' for reading: ENOENT (2)
+ltp-syscalls	ptrace03	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
 ltp-syscalls	ptrace04	CONF	ptrace04    1  TCONF  :  ptrace04.c:103: test not supported for your arch (yet)
 ltp-syscalls	ptrace05	BROK	ptrace05.c:65: TBROK: ptrace() failed: ENOSYS (38)
 ltp-syscalls	ptrace06	TIMEOUT	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
@@ -1109,28 +1109,28 @@ ltp-syscalls	sched_get_priority_max01	WARN	tst_test.c:1101: TWARN: Kernel is old
 ltp-syscalls	sched_get_priority_max02	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
 ltp-syscalls	sched_get_priority_min01	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
 ltp-syscalls	sched_get_priority_min02	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
-ltp-syscalls	sched_getaffinity01	BROK	tst_pid.c:46: TBROK: Failed to open FILE '/proc/sys/kernel/pid_max' for reading: ENOENT (2)
+ltp-syscalls	sched_getaffinity01	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
 ltp-syscalls	sched_getattr01	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
 ltp-syscalls	sched_getattr02	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
 ltp-syscalls	sched_getparam01	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
-ltp-syscalls	sched_getparam03	BROK	tst_pid.c:46: TBROK: Failed to open FILE '/proc/sys/kernel/pid_max' for reading: ENOENT (2)
+ltp-syscalls	sched_getparam03	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
 ltp-syscalls	sched_getscheduler01	BROK	tst_cgroup.c:682: TBROK: Can't open /proc/self/mounts: ENOENT (2)
-ltp-syscalls	sched_getscheduler02	BROK	tst_pid.c:46: TBROK: Failed to open FILE '/proc/sys/kernel/pid_max' for reading: ENOENT (2)
+ltp-syscalls	sched_getscheduler02	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
 ltp-syscalls	sched_rr_get_interval01	BROK	tst_cgroup.c:682: TBROK: Can't open /proc/self/mounts: ENOENT (2)
 ltp-syscalls	sched_rr_get_interval02	BROK	tst_cgroup.c:682: TBROK: Can't open /proc/self/mounts: ENOENT (2)
 ltp-syscalls	sched_rr_get_interval03	BROK	tst_cgroup.c:682: TBROK: Can't open /proc/self/mounts: ENOENT (2)
 ltp-syscalls	sched_setaffinity01	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
 ltp-syscalls	sched_setattr01	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
-ltp-syscalls	sched_setattr02	BROK	tst_pid.c:46: TBROK: Failed to open FILE '/proc/sys/kernel/pid_max' for reading: ENOENT (2)
+ltp-syscalls	sched_setattr02	FAIL	exit 5; sched_setattr02.c:126: TFAIL: sched_setattr() with invalid sched_attr address succeeded
 ltp-syscalls	sched_setparam01	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
 ltp-syscalls	sched_setparam02	BROK	tst_cgroup.c:682: TBROK: Can't open /proc/self/mounts: ENOENT (2)
 ltp-syscalls	sched_setparam03	BROK	tst_cgroup.c:682: TBROK: Can't open /proc/self/mounts: ENOENT (2)
-ltp-syscalls	sched_setparam04	BROK	tst_pid.c:46: TBROK: Failed to open FILE '/proc/sys/kernel/pid_max' for reading: ENOENT (2)
+ltp-syscalls	sched_setparam04	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
 ltp-syscalls	sched_setparam05	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
-ltp-syscalls	sched_setscheduler01	BROK	tst_pid.c:46: TBROK: Failed to open FILE '/proc/sys/kernel/pid_max' for reading: ENOENT (2)
+ltp-syscalls	sched_setscheduler01	FAIL	exit 5; sched_setscheduler01.c:67: TFAIL: sched_setscheduler(1, 99, 0x460d40) expected EINVAL: ESRCH (3)
 ltp-syscalls	sched_setscheduler02	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
 ltp-syscalls	sched_setscheduler03	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
-ltp-syscalls	sched_setscheduler04	CONF	tst_capability.c:17: TCONF: syscall(90) __NR_capget not supported on your arch
+ltp-syscalls	sched_setscheduler04	FAIL	exit 37; sched_setscheduler04.c:55: TFAIL: Policy NOT reset to SCHED_NORMAL
 ltp-syscalls	sched_yield01	PASS	
 ltp-syscalls	seccomp01	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
 ltp-syscalls	select01	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
@@ -1227,7 +1227,7 @@ ltp-syscalls	setitimer02	CONF	../../../../include/tst_timer.h:382: TCONF: syscal
 ltp-syscalls	setns01	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
 ltp-syscalls	setns02	CONF	setns02.c:154: TCONF: syscall(268) __NR_setns not supported on your arch
 ltp-syscalls	setpgid01	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
-ltp-syscalls	setpgid02	BROK	setpgid02.c:45: TBROK: Failed to open FILE '/proc/sys/kernel/pid_max' for reading: ENOENT (2)
+ltp-syscalls	setpgid02	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
 ltp-syscalls	setpgid03	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
 ltp-syscalls	setpgrp01	PASS	
 ltp-syscalls	setpgrp02	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
@@ -1292,7 +1292,7 @@ ltp-syscalls	setsockopt09	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .co
 ltp-syscalls	setsockopt10	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .config
 ltp-syscalls	setsockopt11	BROK	tst_taint.c:43: TBROK: Failed to open FILE '/proc/sys/kernel/tainted' for reading: ENOENT (2)
 ltp-syscalls	settimeofday01	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
-ltp-syscalls	settimeofday02	CONF	tst_capability.c:17: TCONF: syscall(90) __NR_capget not supported on your arch
+ltp-syscalls	settimeofday02	FAIL	exit 5; settimeofday02.c:33: TFAIL: settimeofday(&tc->tv, NULL) succeeded
 ltp-syscalls	setuid01	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
 ltp-syscalls	setuid01_16	CONF	testcases/kernel/syscalls/setuid/../utils/compat_tst_16.h:84: TCONF: 16-bit version of setuid() is not supported on your platform
 ltp-syscalls	setuid03	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
@@ -1517,7 +1517,7 @@ ltp-syscalls	vmsplice04	BROK	vmsplice04.c:74: TBROK: fcntl(4,F_GETPIPE_SZ,...) f
 ltp-syscalls	wait01	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
 ltp-syscalls	wait02	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
 ltp-syscalls	wait401	BROK	wait401.c:28: TBROK: Failed to open FILE '/proc/373/stat' for reading: ENOENT (2)
-ltp-syscalls	wait402	BROK	wait402.c:28: TBROK: Failed to open FILE '/proc/sys/kernel/pid_max' for reading: ENOENT (2)
+ltp-syscalls	wait402	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
 ltp-syscalls	wait403	BROK	tst_taint.c:43: TBROK: Failed to open FILE '/proc/sys/kernel/tainted' for reading: ENOENT (2)
 ltp-syscalls	waitid01	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
 ltp-syscalls	waitid02	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4

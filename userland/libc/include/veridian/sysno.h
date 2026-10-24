@@ -168,6 +168,7 @@
 #define SYS_rt_sigaction                 13
 #define SYS_rt_sigprocmask               14
 #define SYS_rt_sigsuspend                130
+#define SYS_pause                        34
 #define SYS_rt_sigreturn                 15
 #define SYS_rt_sigpending                127
 #define SYS_rt_sigtimedwait              128
@@ -191,6 +192,8 @@
 #define SYS_setfsgid                     123
 #define SYS_getgroups                    115
 #define SYS_setgroups                    116
+#define SYS_capget                       125
+#define SYS_capset                       126
 #define SYS_VERIDIAN_AUTH                1352
 /* Process groups and sessions */
 #define SYS_setpgid                      109
@@ -454,6 +457,8 @@
 #define SYS_setfsgid                     152
 #define SYS_getgroups                    158
 #define SYS_setgroups                    159
+#define SYS_capget                       90
+#define SYS_capset                       91
 #define SYS_VERIDIAN_AUTH                1352
 /* Process groups and sessions */
 #define SYS_setpgid                      154
@@ -713,6 +718,8 @@
 #define SYS_setfsgid                     152
 #define SYS_getgroups                    158
 #define SYS_setgroups                    159
+#define SYS_capget                       90
+#define SYS_capset                       91
 #define SYS_VERIDIAN_AUTH                1352
 /* Process groups and sessions */
 #define SYS_setpgid                      154
