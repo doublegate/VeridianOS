@@ -1,9 +1,10 @@
 //! Process credentials (N-248): real, effective, saved and filesystem user
 //! and group IDs and the supplementary groups, with the Linux rules for
-//! changing them. Privilege is effective uid 0 (Linux's CAP_SETUID /
-//! CAP_SETGID without a capability model, N-131); filesystem privilege is
-//! filesystem uid 0, since Linux drops the filesystem capabilities (CHOWN,
-//! DAC_OVERRIDE, FOWNER, MKNOD, ...) when the fsuid leaves 0.
+//! changing them. The privilege to change them is the calling thread's
+//! CAP_SETUID or CAP_SETGID, which the caller passes in (ADR 0020).
+//! Filesystem privilege is still filesystem uid 0 (`fs_privileged`), the
+//! approximation of Linux's filesystem capabilities (CHOWN, DAC_OVERRIDE,
+//! FOWNER, MKNOD, ...), which leave the effective set with the fsuid.
 
 use super::super::syscall::SyscallError;
 
@@ -56,10 +57,6 @@ impl Credentials {
 
     pub fn groups(&self) -> &[u32] {
         &self.groups[..self.ngroups]
-    }
-
-    fn privileged(&self) -> bool {
-        self.euid == 0
     }
 
     /// Whether file access is unrestricted: filesystem uid 0.
@@ -120,25 +117,24 @@ impl Credentials {
 
     /// setfsuid(uid): returns the old filesystem uid whatever happens. It
     /// changes only to the real, effective, saved or current filesystem
-    /// uid, or anything when privileged; -1 just reads it (Linux's
-    /// `__sys_setfsuid`).
-    pub fn setfsuid(&mut self, uid: u32) -> u32 {
+    /// uid, or anything when `may` (the caller holds CAP_SETUID); -1 just
+    /// reads it (Linux's `__sys_setfsuid`).
+    ///
+    /// In every set*id rule here `may` is the calling thread's capability
+    /// (ADR 0020): CAP_SETUID for the user IDs, CAP_SETGID for the group
+    /// IDs and the supplementary groups.
+    pub fn setfsuid(&mut self, uid: u32, may: bool) -> u32 {
         let old = self.fsuid;
-        if uid != UNCHANGED
-            && (self.privileged() || [self.ruid, self.euid, self.suid, old].contains(&uid))
-        {
+        if uid != UNCHANGED && (may || [self.ruid, self.euid, self.suid, old].contains(&uid)) {
             self.fsuid = uid;
         }
         old
     }
 
-    /// setfsgid(gid), the group counterpart of `setfsuid` (privilege still
-    /// decided by the effective uid).
-    pub fn setfsgid(&mut self, gid: u32) -> u32 {
+    /// setfsgid(gid), the group counterpart of `setfsuid`.
+    pub fn setfsgid(&mut self, gid: u32, may: bool) -> u32 {
         let old = self.fsgid;
-        if gid != UNCHANGED
-            && (self.privileged() || [self.rgid, self.egid, self.sgid, old].contains(&gid))
-        {
+        if gid != UNCHANGED && (may || [self.rgid, self.egid, self.sgid, old].contains(&gid)) {
             self.fsgid = gid;
         }
         old
@@ -146,9 +142,9 @@ impl Credentials {
 
     /// setresuid(r, e, s): `UNCHANGED` keeps a value. Unprivileged, each
     /// new value must be one of the current real, effective or saved IDs.
-    pub fn setresuid(&mut self, r: u32, e: u32, s: u32) -> Result<(), SyscallError> {
+    pub fn setresuid(&mut self, r: u32, e: u32, s: u32, may: bool) -> Result<(), SyscallError> {
         let current = [self.ruid, self.euid, self.suid];
-        if !self.privileged()
+        if !may
             && [r, e, s]
                 .iter()
                 .any(|&id| id != UNCHANGED && !current.contains(&id))
@@ -168,11 +164,10 @@ impl Credentials {
         Ok(())
     }
 
-    /// setresgid(r, e, s), with the same rules over the group IDs (and
-    /// privilege still decided by the effective uid).
-    pub fn setresgid(&mut self, r: u32, e: u32, s: u32) -> Result<(), SyscallError> {
+    /// setresgid(r, e, s), with the same rules over the group IDs.
+    pub fn setresgid(&mut self, r: u32, e: u32, s: u32, may: bool) -> Result<(), SyscallError> {
         let current = [self.rgid, self.egid, self.sgid];
-        if !self.privileged()
+        if !may
             && [r, e, s]
                 .iter()
                 .any(|&id| id != UNCHANGED && !current.contains(&id))
@@ -196,9 +191,9 @@ impl Credentials {
     /// effective one, the effective ID any of the three. The saved ID
     /// follows the new effective ID when the real ID is set, or the
     /// effective ID is set to something other than the old real ID.
-    pub fn setreuid(&mut self, r: u32, e: u32) -> Result<(), SyscallError> {
+    pub fn setreuid(&mut self, r: u32, e: u32, may: bool) -> Result<(), SyscallError> {
         let old = *self;
-        if !self.privileged() {
+        if !may {
             if r != UNCHANGED && r != old.ruid && r != old.euid {
                 return Err(SyscallError::OperationNotPermitted);
             }
@@ -220,9 +215,9 @@ impl Credentials {
     }
 
     /// setregid(r, e), the group counterpart of `setreuid`.
-    pub fn setregid(&mut self, r: u32, e: u32) -> Result<(), SyscallError> {
+    pub fn setregid(&mut self, r: u32, e: u32, may: bool) -> Result<(), SyscallError> {
         let old = *self;
-        if !self.privileged() {
+        if !may {
             if r != UNCHANGED && r != old.rgid && r != old.egid {
                 return Err(SyscallError::OperationNotPermitted);
             }
@@ -243,13 +238,13 @@ impl Credentials {
         Ok(())
     }
 
-    /// setuid(uid): privileged, sets all three IDs; otherwise `uid` must
+    /// setuid(uid): with `may`, sets all three IDs; otherwise `uid` must
     /// be the real or saved ID and only the effective ID changes.
-    pub fn setuid(&mut self, uid: u32) -> Result<(), SyscallError> {
+    pub fn setuid(&mut self, uid: u32, may: bool) -> Result<(), SyscallError> {
         if uid == UNCHANGED {
             return Err(SyscallError::InvalidArgument);
         }
-        if self.privileged() {
+        if may {
             self.ruid = uid;
             self.euid = uid;
             self.suid = uid;
@@ -263,11 +258,11 @@ impl Credentials {
     }
 
     /// setgid(gid), the group counterpart of `setuid`.
-    pub fn setgid(&mut self, gid: u32) -> Result<(), SyscallError> {
+    pub fn setgid(&mut self, gid: u32, may: bool) -> Result<(), SyscallError> {
         if gid == UNCHANGED {
             return Err(SyscallError::InvalidArgument);
         }
-        if self.privileged() {
+        if may {
             self.rgid = gid;
             self.egid = gid;
             self.sgid = gid;
@@ -280,11 +275,11 @@ impl Credentials {
         Ok(())
     }
 
-    /// setgroups: privileged only; at most `NGROUPS_MAX` groups, none of
+    /// setgroups: only with `may`; at most `NGROUPS_MAX` groups, none of
     /// them (gid_t)-1, which is no group (EINVAL, as Linux's
     /// groups_from_user; it was installed -- PR #22 review).
-    pub fn setgroups(&mut self, list: &[u32]) -> Result<(), SyscallError> {
-        if !self.privileged() {
+    pub fn setgroups(&mut self, list: &[u32], may: bool) -> Result<(), SyscallError> {
+        if !may {
             return Err(SyscallError::OperationNotPermitted);
         }
         if list.len() > NGROUPS_MAX || list.contains(&UNCHANGED) {
@@ -304,13 +299,13 @@ mod tests {
     fn setgroups_refuses_the_invalid_gid() {
         let mut root = Credentials::new(0, 0);
         assert_eq!(
-            root.setgroups(&[5, u32::MAX]),
+            root.setgroups(&[5, u32::MAX], true),
             Err(SyscallError::InvalidArgument)
         );
         assert!(root.groups().is_empty(), "nothing installed");
         let mut user = Credentials::new(1000, 1000);
         assert_eq!(
-            user.setgroups(&[u32::MAX]),
+            user.setgroups(&[u32::MAX], false),
             Err(SyscallError::OperationNotPermitted)
         );
     }
@@ -324,18 +319,18 @@ mod tests {
     fn fs_ids_follow_the_effective_ids() {
         let mut c = Credentials::new(0, 0);
         assert_eq!((c.fsuid, c.fsgid), (0, 0));
-        c.setresgid(U, 100, U).unwrap();
+        c.setresgid(U, 100, U, true).unwrap();
         assert_eq!(c.fsgid, 100);
-        c.setresuid(U, 1000, U).unwrap();
+        c.setresuid(U, 1000, U, true).unwrap();
         assert_eq!(c.fsuid, 1000);
-        c.setresuid(U, 0, U).unwrap(); // back through the saved ID
+        c.setresuid(U, 0, U, false).unwrap(); // back through the saved ID
         assert_eq!(c.fsuid, 0);
-        c.setreuid(U, 7).unwrap();
+        c.setreuid(U, 7, true).unwrap();
         assert_eq!(c.fsuid, 7);
         let mut c = Credentials::new(0, 0);
-        c.setregid(U, 9).unwrap();
-        c.setgid(8).unwrap();
-        c.setuid(42).unwrap();
+        c.setregid(U, 9, true).unwrap();
+        c.setgid(8, true).unwrap();
+        c.setuid(42, true).unwrap();
         assert_eq!((c.fsuid, c.fsgid), (42, 8));
         let c = Credentials::new(1000, 100).after_exec(Some(0), Some(5), true);
         assert_eq!((c.fsuid, c.fsgid), (0, 5));
@@ -343,32 +338,32 @@ mod tests {
 
     /// setfsuid/setfsgid return the old value whatever happens, take -1 as
     /// a query, and change the ID only to the real, effective, saved or
-    /// current filesystem ID, unless the caller is privileged (Linux's
+    /// current filesystem ID, unless the caller holds CAP_SETUID (Linux's
     /// `__sys_setfsuid`). Filesystem privilege and group checks follow.
     #[test]
     fn setfsuid_rules() {
         let mut root = Credentials::new(0, 0);
-        assert_eq!(root.setfsuid(1000), 0);
-        assert_eq!(root.setfsuid(U), 1000);
+        assert_eq!(root.setfsuid(1000, true), 0);
+        assert_eq!(root.setfsuid(U, true), 1000);
         assert_eq!((root.euid, root.fsuid), (0, 1000));
         assert!(!root.fs_privileged());
-        assert_eq!(root.setfsgid(50), 0);
+        assert_eq!(root.setfsgid(50, true), 0);
         assert!(!root.in_group(0) && root.in_group(50));
         assert_eq!(root.gid_for(50), 50);
         assert_eq!(root.gid_for(60), 50);
-        // Still privileged by euid: may go back.
-        assert_eq!(root.setfsuid(0), 1000);
+        // Still holds CAP_SETUID: may go back.
+        assert_eq!(root.setfsuid(0, true), 1000);
         assert!(root.fs_privileged());
 
         let mut user = Credentials::new(1000, 100);
-        assert_eq!(user.setfsuid(0), 1000);
+        assert_eq!(user.setfsuid(0, false), 1000);
         assert_eq!(user.fsuid, 1000, "not one of its IDs");
-        assert_eq!(user.setfsgid(0), 100);
+        assert_eq!(user.setfsgid(0, false), 100);
         assert_eq!(user.fsgid, 100);
         // A setuid-root program's saved ID is allowed.
         let mut c = Credentials::new(1000, 100);
         c.suid = 0;
-        assert_eq!(c.setfsuid(0), 1000);
+        assert_eq!(c.setfsuid(0, false), 1000);
         assert_eq!(c.fsuid, 0);
         assert!(c.fs_privileged());
     }
@@ -402,9 +397,10 @@ mod tests {
     #[test]
     fn root_drops_privilege_for_good_with_setuid() {
         let mut c = Credentials::new(0, 0);
-        c.setuid(1000).unwrap();
+        c.setuid(1000, true).unwrap();
         assert_eq!((c.ruid, c.euid, c.suid), (1000, 1000, 1000));
-        assert_eq!(c.setuid(0), Err(SyscallError::OperationNotPermitted));
+        // The setuid fixup has cleared its capabilities.
+        assert_eq!(c.setuid(0, false), Err(SyscallError::OperationNotPermitted));
     }
 
     #[test]
@@ -413,9 +409,9 @@ mod tests {
         let mut c = Credentials::new(1000, 100);
         c.euid = 0;
         c.suid = 0;
-        c.setresuid(U, 1000, U).unwrap(); // seteuid(1000)
+        c.setresuid(U, 1000, U, true).unwrap(); // seteuid(1000)
         assert_eq!((c.ruid, c.euid, c.suid), (1000, 1000, 0));
-        c.setresuid(U, 0, U).unwrap(); // back through the saved ID
+        c.setresuid(U, 0, U, false).unwrap(); // back through the saved ID
         assert_eq!(c.euid, 0);
     }
 
@@ -423,38 +419,67 @@ mod tests {
     fn unprivileged_cannot_take_new_ids() {
         let mut c = Credentials::new(1000, 100);
         assert_eq!(
-            c.setresuid(U, 0, U),
+            c.setresuid(U, 0, U, false),
             Err(SyscallError::OperationNotPermitted)
         );
         assert_eq!(
-            c.setresgid(U, 0, U),
+            c.setresgid(U, 0, U, false),
             Err(SyscallError::OperationNotPermitted)
         );
         assert_eq!(
-            c.setreuid(2000, U),
+            c.setreuid(2000, U, false),
             Err(SyscallError::OperationNotPermitted)
         );
-        assert_eq!(c.setgroups(&[5]), Err(SyscallError::OperationNotPermitted));
+        assert_eq!(
+            c.setgroups(&[5], false),
+            Err(SyscallError::OperationNotPermitted)
+        );
         assert_eq!(c, Credentials::new(1000, 100));
         // Values it already holds are allowed.
-        c.setresuid(1000, 1000, 1000).unwrap();
+        c.setresuid(1000, 1000, 1000, false).unwrap();
+    }
+
+    /// The capability decides, not uid 0 (ADR 0020): a non-root caller
+    /// holding CAP_SETUID may take any ID, and root without it may not.
+    #[test]
+    fn the_capability_decides_not_uid_0() {
+        let mut c = Credentials::new(1000, 100);
+        c.setuid(0, true).unwrap();
+        assert_eq!((c.ruid, c.euid, c.suid, c.fsuid), (0, 0, 0, 0));
+        let mut c = Credentials::new(1000, 100);
+        c.setresgid(5, 5, 5, true).unwrap();
+        c.setgroups(&[7], true).unwrap();
+        assert_eq!((c.rgid, c.groups()), (5, &[7][..]));
+
+        let mut root = Credentials::new(0, 0);
+        assert_eq!(
+            root.setresuid(U, 1000, U, false),
+            Err(SyscallError::OperationNotPermitted)
+        );
+        assert_eq!(
+            root.setgroups(&[5], false),
+            Err(SyscallError::OperationNotPermitted)
+        );
+        assert_eq!(root.setfsuid(1000, false), 0);
+        assert_eq!(root.fsuid, 0, "not one of its IDs");
+        assert_eq!(root, Credentials::new(0, 0));
     }
 
     #[test]
     fn setreuid_updates_the_saved_id_like_linux() {
         let mut c = Credentials::new(0, 0);
-        c.setreuid(U, 1000).unwrap(); // effective != old real: saved follows
+        c.setreuid(U, 1000, true).unwrap(); // effective != old real: saved follows
         assert_eq!((c.ruid, c.euid, c.suid), (0, 1000, 1000));
         let mut c = Credentials::new(0, 0);
-        c.setreuid(1000, 1000).unwrap();
+        c.setreuid(1000, 1000, true).unwrap();
         assert_eq!((c.ruid, c.euid, c.suid), (1000, 1000, 1000));
     }
 
     #[test]
     fn supplementary_groups_grant_group_access() {
         let mut c = Credentials::new(0, 0);
-        c.setgroups(&[10, 20]).unwrap();
-        c.setresuid(1000, 1000, 1000).unwrap();
+        c.setgroups(&[10, 20], true).unwrap();
+        c.setresuid(1000, 1000, 1000, true).unwrap();
         assert!(c.in_group(20));
         assert_eq!(c.gid_for(20), 20);
         assert_eq!(c.gid_for(30), c.egid);
@@ -462,7 +487,7 @@ mod tests {
         let too_many = [0u32; NGROUPS_MAX + 1];
         let mut root = Credentials::new(0, 0);
         assert_eq!(
-            root.setgroups(&too_many),
+            root.setgroups(&too_many, true),
             Err(SyscallError::InvalidArgument)
         );
     }

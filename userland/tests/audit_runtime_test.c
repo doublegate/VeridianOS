@@ -1880,6 +1880,28 @@ static void report_child(const char *name, pid_t pid)
     report(name, code == 0, why);
 }
 
+/* The calling thread's capability sets, version 3 (two structs of
+ * effective, permitted, inheritable): c[0] and c[1] are the low words of
+ * pE and pP. */
+static int capget_self(uint32_t c[6])
+{
+    struct {
+        uint32_t version;
+        int pid;
+    } hdr = {0x20080522, 0};
+    return (int)veridian_syscall2(SYS_capget, &hdr, c);
+}
+
+/* Started before the uid drop; checks its own sets once told it happened. */
+static void *caps_after_drop(void *arg)
+{
+    char b;
+    uint32_t c[6];
+    if (read(*(int *)arg, &b, 1) != 1 || capget_self(c) != 0)
+        return (void *)1;
+    return (c[0] == 0 && c[1] == 0) ? NULL : (void *)2;
+}
+
 static void test_credentials_and_paths(void)
 {
     /* A setuid-root style process: real 1000, effective and saved 0. It
@@ -1899,6 +1921,39 @@ static void test_credentials_and_paths(void)
         _exit(f);
     }
     report_child("saved_uid_round_trip_and_final_drop", pid);
+
+    /* Leaving root clears the capability sets of every thread (ADR 0020,
+     * decision 5), unless keep-caps keeps the permitted set; the effective
+     * set follows the effective uid. A thread started before the change
+     * sees it too. capget with pid 0 reads the calling thread. */
+    pid = fork();
+    if (pid == 0) {
+        int f = 0;
+        int go[2];
+        pthread_t t;
+        if (pipe(go) != 0 || pthread_create(&t, NULL, caps_after_drop, &go[0]) != 0)
+            _exit(1);
+        uint32_t c[6];
+        if (capget_self(c) != 0 || c[0] == 0 || c[1] == 0) f |= 2;
+        if (setresuid(1000, 1000, 1000) != 0) f |= 4;
+        if (capget_self(c) != 0 || c[0] != 0 || c[1] != 0) f |= 8;
+        (void)!write(go[1], "x", 1);
+        void *tr = NULL;
+        if (pthread_join(t, &tr) != 0 || tr != NULL) f |= 16;
+        _exit(f);
+    }
+    report_child("uid_drop_clears_every_threads_caps", pid);
+    pid = fork();
+    if (pid == 0) {
+        int f = 0;
+        uint32_t c[6];
+        if (veridian_syscall5(SYS_prctl, 8 /* PR_SET_KEEPCAPS */, 1, 0, 0, 0) != 0) f |= 1;
+        if (setresuid(1000, 1000, 1000) != 0) f |= 2;
+        /* Permitted kept, effective cleared by the effective uid change. */
+        if (capget_self(c) != 0 || c[0] != 0 || c[1] == 0) f |= 4;
+        _exit(f);
+    }
+    report_child("keepcaps_keeps_permitted_across_uid_drop", pid);
 
     /* Supplementary groups grant group access; only root may set them. */
     write_file("/tmp/audit_grp", "g", 0640);

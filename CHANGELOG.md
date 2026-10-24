@@ -38,8 +38,12 @@
   capability prctl options act on the calling thread's sets (`PR_CAPBSET_READ`/`DROP`,
   `PR_GET`/`SET_SECUREBITS`, `PR_GET`/`SET_KEEPCAPS`, `PR_CAP_AMBIENT`), and `/proc/<pid>/status`
   shows the main thread's sets as `CapInh`, `CapPrm`, `CapEff`, `CapBnd` and `CapAmb`; LTP
-  `capset02` and `prctl02` now pass every case they run. The privilege checks still use
-  `euid == 0` until later steps.
+  `capset02` and `prctl02` now pass every case they run. The set*id calls take their privilege
+  from the calling thread's capabilities, CAP_SETUID for the user IDs and setfsuid and CAP_SETGID
+  for the group IDs, setfsgid and setgroups, and a change of the user IDs applies Linux's fixup to
+  every thread's sets: leaving every root ID clears the permitted and effective sets (unless
+  keep-caps) and the ambient set, the effective set follows the effective uid, and the filesystem
+  capabilities follow fsuid 0. The other privilege checks still use `euid == 0` until later steps.
 - `pause` on x86_64 (system call 34 had no handler, so musl's `pause()` returned ENOSYS at once and a
   forked child meant to wait ran on): it waits as `ppoll` with no descriptors and no timeout,
   which is what musl does on AArch64 and RISC-V, and returns EINTR after a handler.

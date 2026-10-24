@@ -223,9 +223,9 @@ What remains:
 - **Credentials (N-131 remainder, planned v0.30):** real, effective and saved IDs,
   filesystem IDs (setfsuid, setfsgid), supplementary groups (N-248) and set-user-ID/set-group-ID
   exec exist. Each thread has Linux capability sets (ADR 0020), which `capget`, `capset` and the
-  capability prctl options read and change and `/proc/<pid>/status` shows, but nothing checks
-  them yet: privilege is still effective uid 0, and file-access
-  privilege filesystem uid 0 (Linux drops the filesystem capabilities when the fsuid leaves 0). A directory's
+  capability prctl options read and change and `/proc/<pid>/status` shows, and which the set*id
+  calls check (CAP_SETUID, CAP_SETGID) and fix up as Linux does. No other check uses them yet:
+  other privilege is still effective uid 0, and file-access privilege filesystem uid 0. A directory's
   set-group-ID bit is kept but not acted on: new entries take the creator's group, not the
   directory's.
 - **Process ids never wrap.** `/proc/sys/kernel/pid_max` reports 4194304, Linux's limit on

@@ -793,16 +793,16 @@ mod tests {
     #[test]
     fn status_shows_every_id() {
         let mut c = crate::process::creds::Credentials::new(0, 0);
-        c.setgroups(&[10, 20]).unwrap();
-        c.setresgid(5, 6, 7).unwrap();
-        c.setfsgid(8);
-        c.setresuid(1, 2, 3).unwrap();
+        c.setgroups(&[10, 20], true).unwrap();
+        c.setresgid(5, 6, 7, true).unwrap();
+        c.setfsgid(8, true);
+        c.setresuid(1, 2, 3, true).unwrap();
         assert_eq!(
             status_ids(&c),
             "Uid:\t1\t2\t3\t2\nGid:\t5\t6\t7\t8\nGroups:\t10 20\n"
         );
         let mut c = crate::process::creds::Credentials::new(0, 0);
-        c.setfsuid(1000);
+        c.setfsuid(1000, true);
         assert_eq!(
             status_ids(&c),
             "Uid:\t0\t0\t0\t1000\nGid:\t0\t0\t0\t0\nGroups:\t\n"

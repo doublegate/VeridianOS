@@ -374,6 +374,45 @@ impl Process {
         result
     }
 
+    /// Change the user IDs with a set*id rule (`f`) and apply Linux's
+    /// capability fixup to every thread's sets in the same step (ADR 0020,
+    /// decision 5): the IDs belong to the process and the sets to each
+    /// thread, which is fixed under its own securebits. `fs` selects
+    /// setfsuid's fixup (the filesystem capabilities follow fsuid 0)
+    /// instead of setuid's. Lock order: the thread map, the credentials,
+    /// then each thread's sets; the map held throughout keeps a thread from
+    /// being added between the change and its fixup (clone copies its
+    /// creator's sets under the map too).
+    #[cfg(feature = "alloc")]
+    pub fn change_uids<R>(
+        &self,
+        fs: bool,
+        f: impl FnOnce(&mut super::creds::Credentials) -> R,
+    ) -> R {
+        use super::linux_caps::Uids;
+        let uids = |c: &super::creds::Credentials| Uids {
+            ruid: c.ruid,
+            euid: c.euid,
+            suid: c.suid,
+            fsuid: c.fsuid,
+        };
+        let threads = self.threads.lock();
+        let (result, old, new) = self.update_credentials(|c| {
+            let old = uids(c);
+            let result = f(c);
+            (result, old, uids(c))
+        });
+        for thread in threads.values() {
+            let mut caps = thread.caps.lock();
+            if fs {
+                caps.fix_setfsuid(old.fsuid, new.fsuid);
+            } else {
+                caps.fix_setuid(old, new);
+            }
+        }
+        result
+    }
+
     /// Real user ID.
     pub fn uid(&self) -> u32 {
         self.creds.lock().ruid
@@ -900,6 +939,57 @@ mod tests {
         )
     }
 
+    /// A process with threads `tids`, each with root's capability sets.
+    fn with_threads(proc: &Process, tids: &[u64]) -> Vec<Arc<Thread>> {
+        tids.iter()
+            .map(|&tid| {
+                let thread = Thread::new(
+                    ThreadId(tid),
+                    proc.pid,
+                    alloc::string::String::from("t"),
+                    0,
+                    0x10_0000,
+                    0x1000,
+                    0x20_0000,
+                    0x1000,
+                    super::super::thread::ThreadFs::new_root(),
+                );
+                proc.add_thread(thread).unwrap()
+            })
+            .collect()
+    }
+
+    /// A user-ID change fixes every thread's capability sets (ADR 0020,
+    /// decision 5): dropping every root ID clears pP and pE everywhere; an
+    /// fsuid leaving 0 drops only the filesystem capabilities, and coming
+    /// back raises them again from pP.
+    #[test]
+    fn uid_changes_fix_every_threads_sets() {
+        use super::super::linux_caps::{CapSets, LinuxCaps, CAP_CHOWN, CAP_KILL};
+        let proc = make_process(4, "fixup");
+        let threads = with_threads(&proc, &[40, 41]);
+
+        proc.change_uids(true, |c| c.setfsuid(1000, true));
+        for t in &threads {
+            let caps = *t.caps.lock();
+            assert!(!caps.capable(CAP_CHOWN), "a filesystem capability");
+            assert!(caps.capable(CAP_KILL), "not a filesystem capability");
+            assert_eq!(caps.permitted, CapSets::ROOT.permitted);
+        }
+        proc.change_uids(true, |c| c.setfsuid(0, true));
+        assert!(threads.iter().all(|t| t.caps.lock().capable(CAP_CHOWN)));
+
+        proc.change_uids(false, |c| c.setresuid(1000, 1000, 1000, true))
+            .unwrap();
+        for t in &threads {
+            let caps = *t.caps.lock();
+            assert_eq!(caps.permitted, LinuxCaps::EMPTY);
+            assert_eq!(caps.effective, LinuxCaps::EMPTY);
+            assert_eq!(caps.bounding, CapSets::ROOT.bounding);
+        }
+        assert_eq!(proc.credentials().euid, 1000);
+    }
+
     /// A change of effective user or group makes the process non-dumpable
     /// (Linux's commit_creds); other credential changes leave it.
     #[test]
@@ -907,9 +997,9 @@ mod tests {
         use core::sync::atomic::Ordering;
         let proc = make_process(3, "creds");
         assert!(proc.dumpable.load(Ordering::Acquire));
-        proc.update_credentials(|c| c.setgroups(&[5]).unwrap());
+        proc.update_credentials(|c| c.setgroups(&[5], true).unwrap());
         assert!(proc.dumpable.load(Ordering::Acquire));
-        proc.update_credentials(|c| c.setuid(1000).unwrap());
+        proc.update_credentials(|c| c.setuid(1000, true).unwrap());
         assert!(!proc.dumpable.load(Ordering::Acquire));
     }
 

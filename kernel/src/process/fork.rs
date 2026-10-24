@@ -384,6 +384,9 @@ pub fn fork_process_with(opts: &ForkOptions) -> Result<(ProcessId, super::Thread
                 .load(core::sync::atomic::Ordering::Acquire),
             core::sync::atomic::Ordering::Release,
         );
+        // Read after the credentials (above): a set*id call on another
+        // thread in between can leave the child with fewer capabilities
+        // than its IDs, never more.
         *new_thread.caps.lock() = *current_thread.caps.lock();
         new_process.add_thread(new_thread)?;
         Ok(new_tid)

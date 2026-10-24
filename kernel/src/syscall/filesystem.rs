@@ -3487,9 +3487,9 @@ mod tests {
     /// A user 1000 in group 100 and supplementary group 20.
     fn user() -> Credentials {
         let mut c = Credentials::new(0, 0);
-        c.setgroups(&[20]).unwrap();
-        c.setresgid(100, 100, 100).unwrap();
-        c.setresuid(1000, 1000, 1000).unwrap();
+        c.setgroups(&[20], true).unwrap();
+        c.setresgid(100, 100, 100, true).unwrap();
+        c.setresuid(1000, 1000, 1000, true).unwrap();
         c
     }
 

@@ -244,7 +244,8 @@ pub fn sys_thread_clone(
     let tid = thread.tid;
     // A new thread starts with its creator's blocked mask (N-109), command
     // name (N-227), no_new_privs and capability sets (ADR 0020), as Linux
-    // copies them.
+    // copies them. The sets are copied again once the thread is in the
+    // process (below).
     thread.sigmask.store(
         current_thread
             .sigmask
@@ -348,6 +349,14 @@ pub fn sys_thread_clone(
     let thread = proc
         .add_thread(thread)
         .map_err(|_| SyscallError::InvalidState)?;
+    // A set*id call on another thread fixes every thread's sets under the
+    // thread map (`Process::change_uids`). Copied again under the map, the
+    // new thread's sets either went through that fixup or are taken from a
+    // creator that already has.
+    {
+        let _threads = proc.threads.lock();
+        *thread.caps.lock() = *current_thread.caps.lock();
+    }
 
     // The new thread runs as its own dispatcher task (stage D2), starting
     // from the registers prepared above and a copy of the caller's vector
