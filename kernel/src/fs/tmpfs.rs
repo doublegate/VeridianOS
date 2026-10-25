@@ -24,6 +24,9 @@ struct TmpNode {
     /// A symlink's target.
     data: RwLock<Vec<u8>>,
     children: RwLock<BTreeMap<String, Arc<TmpNode>>>,
+
+    /// Extended attributes (`fs::xattr`), kept with the node.
+    xattrs: RwLock<super::xattr::XattrSet>,
     metadata: RwLock<Metadata>,
     inode: u64,
     /// Device number of a device node (Linux's encoding, `fs::make_dev`);
@@ -77,6 +80,7 @@ impl TmpNode {
             pages: RwLock::new(ShmemPages::new()),
             data: RwLock::new(Vec::new()),
             children: RwLock::new(BTreeMap::new()),
+            xattrs: RwLock::new(super::xattr::XattrSet::new()),
             metadata: RwLock::new(Metadata {
                 node_type: NodeType::File,
                 size: 0,
@@ -108,6 +112,7 @@ impl TmpNode {
             pages: RwLock::new(ShmemPages::new()),
             data: RwLock::new(Vec::new()),
             children: RwLock::new(BTreeMap::new()),
+            xattrs: RwLock::new(super::xattr::XattrSet::new()),
             metadata: RwLock::new(Metadata {
                 node_type: NodeType::Directory,
                 size: 0,
@@ -141,6 +146,7 @@ impl TmpNode {
             pages: RwLock::new(ShmemPages::new()),
             data: RwLock::new(target_bytes),
             children: RwLock::new(BTreeMap::new()),
+            xattrs: RwLock::new(super::xattr::XattrSet::new()),
             metadata: RwLock::new(Metadata {
                 node_type: NodeType::Symlink,
                 size,
@@ -216,6 +222,17 @@ fn as_tmp_arc(node: Arc<dyn VfsNode>) -> Option<Arc<TmpNode>> {
 }
 
 impl VfsNode for TmpNode {
+    fn xattrs(&self) -> Result<super::xattr::XattrSet, KernelError> {
+        Ok(self.xattrs.read().clone())
+    }
+
+    fn update_xattrs(
+        &self,
+        f: &mut dyn FnMut(&mut super::xattr::XattrSet) -> Result<(), KernelError>,
+    ) -> Result<(), KernelError> {
+        super::xattr::update_in_memory(&mut self.xattrs.write(), f)
+    }
+
     fn node_type(&self) -> NodeType {
         self.node_type
     }

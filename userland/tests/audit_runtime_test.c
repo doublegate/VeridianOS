@@ -2279,6 +2279,91 @@ static void test_exec_caps(void)
     report("exec_computes_capability_sets", root == 7 && user == 0 && amb == 11, why);
 }
 
+/* --- Extended attributes (ADR 0020 step 8), through the raw calls (the
+ * native libc has no wrappers): sizes, flags, lists, the f* and l* forms,
+ * the namespace rules. Each failure sets one bit of `fails`. ------------ */
+#define XA_CREATE 1
+#define XA_REPLACE 2
+
+static long xa_set(const char *p, const char *n, const void *v, size_t len, int flags)
+{
+    return veridian_syscall5(SYS_setxattr, p, n, v, len, flags);
+}
+
+static long xa_get(const char *p, const char *n, void *v, size_t len)
+{
+    return veridian_syscall4(SYS_getxattr, p, n, v, len);
+}
+
+/* The raw calls return -errno (errno itself is not set). */
+static int failed_with(long r, int err)
+{
+    return r == -err;
+}
+
+static void test_xattrs(void)
+{
+    const char *f = "/tmp/audit_xattr", *link = "/tmp/audit_xlink";
+    int fails = 0;
+    char buf[64];
+    unlink(link);
+    write_file(f, "x", 0644);
+    if (xa_set(f, "user.k", "v1", 2, 0) != 0) fails |= 1 << 0;
+    if (xa_get(f, "user.k", NULL, 0) != 2) fails |= 1 << 1;
+    if (!failed_with(xa_get(f, "user.k", buf, 1), ERANGE)) fails |= 1 << 2;
+    if (xa_get(f, "user.k", buf, sizeof(buf)) != 2 || memcmp(buf, "v1", 2) != 0) fails |= 1 << 3;
+    if (!failed_with(xa_set(f, "user.k", "v2", 2, XA_CREATE), EEXIST)) fails |= 1 << 4;
+    if (!failed_with(xa_set(f, "user.none", "v", 1, XA_REPLACE), ENODATA)) fails |= 1 << 5;
+    if (veridian_syscall3(SYS_listxattr, f, NULL, 0) != 7) fails |= 1 << 6;
+    if (veridian_syscall3(SYS_listxattr, f, buf, sizeof(buf)) != 7 || memcmp(buf, "user.k", 7) != 0)
+        fails |= 1 << 7;
+    int fd = open(f, O_RDONLY);
+    if (fd < 0 || veridian_syscall5(SYS_fsetxattr, fd, "user.empty", "", 0, 0) != 0 ||
+        veridian_syscall4(SYS_fgetxattr, fd, "user.empty", buf, sizeof(buf)) != 0)
+        fails |= 1 << 8;
+    if (fd >= 0)
+        close(fd);
+    if (veridian_syscall2(SYS_removexattr, f, "user.k") != 0 ||
+        !failed_with(xa_get(f, "user.k", buf, sizeof(buf)), ENODATA) ||
+        !failed_with(veridian_syscall2(SYS_removexattr, f, "user.k"), ENODATA))
+        fails |= 1 << 9;
+    if (!failed_with(xa_set(f, "os2.x", "v", 1, 0), EOPNOTSUPP)) fails |= 1 << 10;
+    if (!failed_with(xa_set(f, "user.", "v", 1, 0), EINVAL)) fails |= 1 << 11;
+    if (!failed_with(xa_set(f, "", "v", 1, 0), ERANGE)) fails |= 1 << 12;
+    if (!failed_with(xa_set(f, "user.k", "v", 1, 4), EINVAL)) fails |= 1 << 13;
+    /* user.* is for regular files and directories: a symlink itself
+     * refuses it (EPERM to set, ENODATA to read). */
+    if (symlink(f, link) != 0 ||
+        !failed_with(veridian_syscall5(SYS_lsetxattr, link, "user.x", "v", 1, 0), EPERM) ||
+        !failed_with(veridian_syscall4(SYS_lgetxattr, link, "user.x", buf, sizeof(buf)), ENODATA))
+        fails |= 1 << 14;
+    /* Through the link, the file's own. */
+    if (xa_get(link, "user.empty", buf, sizeof(buf)) != 0) fails |= 1 << 15;
+    /* trusted.*: root (CAP_SYS_ADMIN) only; hidden from a user's list. */
+    if (xa_set(f, "trusted.t", "s", 1, 0) != 0) fails |= 1 << 16;
+    pid_t pid = fork();
+    if (pid == 0) {
+        int cf = 0;
+        char b[64];
+        if (setresuid(1000, 1000, 1000) != 0) _exit(1);
+        if (!failed_with(xa_get(f, "trusted.t", b, sizeof(b)), ENODATA)) cf |= 2;
+        if (!failed_with(xa_set(f, "trusted.t", "u", 1, 0), EPERM)) cf |= 4;
+        /* user.empty only: 11 bytes. */
+        if (veridian_syscall3(SYS_listxattr, f, b, sizeof(b)) != 11) cf |= 8;
+        /* Not the owner, mode 0644: no write. */
+        if (!failed_with(xa_set(f, "user.u", "u", 1, 0), EACCES)) cf |= 16;
+        _exit(cf);
+    }
+    int st = 0;
+    if (waitpid(pid, &st, 0) != pid || !WIFEXITED(st) || WEXITSTATUS(st) != 0)
+        fails |= 1 << 17 | (WIFEXITED(st) ? WEXITSTATUS(st) : 0x40) << 20;
+    unlink(link);
+    unlink(f);
+    static char why[48];
+    snprintf(why, sizeof(why), "fails=0x%x", fails);
+    report("xattr_calls_follow_linux", fails == 0, why);
+}
+
 /* --- memfd_create (N-229): it returned an eventfd id that was never an
  * fd. Now a sizeable, readable, mappable, sealable anonymous file. ---- */
 static void test_memfd(void)
@@ -2916,6 +3001,7 @@ int main(int argc, char **argv)
     test_exec_environment();
     test_exec_caps();
     test_memfd();
+    test_xattrs();
     test_realtime_signals();
     test_vfork_and_clone();
     test_wait_and_groups();

@@ -20,6 +20,9 @@ struct RamNode {
     /// Children (for directories)
     children: RwLock<BTreeMap<String, Arc<RamNode>>>,
 
+    /// Extended attributes (`fs::xattr`), kept with the node.
+    xattrs: RwLock<super::xattr::XattrSet>,
+
     /// Metadata
     metadata: RwLock<Metadata>,
 
@@ -71,6 +74,7 @@ impl RamNode {
             node_type: NodeType::File,
             data: RwLock::new(Vec::new()),
             children: RwLock::new(BTreeMap::new()),
+            xattrs: RwLock::new(super::xattr::XattrSet::new()),
             metadata: RwLock::new(Metadata {
                 node_type: NodeType::File,
                 size: 0,
@@ -95,6 +99,7 @@ impl RamNode {
             node_type: NodeType::Directory,
             data: RwLock::new(Vec::new()),
             children: RwLock::new(BTreeMap::new()),
+            xattrs: RwLock::new(super::xattr::XattrSet::new()),
             metadata: RwLock::new(Metadata {
                 node_type: NodeType::Directory,
                 size: 0,
@@ -123,6 +128,7 @@ impl RamNode {
             node_type: NodeType::Symlink,
             data: RwLock::new(target_bytes),
             children: RwLock::new(BTreeMap::new()),
+            xattrs: RwLock::new(super::xattr::XattrSet::new()),
             metadata: RwLock::new(Metadata {
                 node_type: NodeType::Symlink,
                 size,
@@ -173,6 +179,17 @@ fn as_ram_arc(node: Arc<dyn VfsNode>) -> Option<Arc<RamNode>> {
 }
 
 impl VfsNode for RamNode {
+    fn xattrs(&self) -> Result<super::xattr::XattrSet, KernelError> {
+        Ok(self.xattrs.read().clone())
+    }
+
+    fn update_xattrs(
+        &self,
+        f: &mut dyn FnMut(&mut super::xattr::XattrSet) -> Result<(), KernelError>,
+    ) -> Result<(), KernelError> {
+        super::xattr::update_in_memory(&mut self.xattrs.write(), f)
+    }
+
     fn node_type(&self) -> NodeType {
         self.node_type
     }

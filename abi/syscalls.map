@@ -142,6 +142,24 @@ select
 pselect6
 getdents64
 
+## Extended attributes (ADR 0020)
+setxattr
+lsetxattr
+fsetxattr
+getxattr
+lgetxattr
+fgetxattr
+listxattr
+llistxattr
+flistxattr
+removexattr
+lremovexattr
+fremovexattr
+setxattrat
+getxattrat
+listxattrat
+removexattrat
+
 ## Directories
 mkdir
 mkdirat

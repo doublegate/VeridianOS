@@ -128,6 +128,7 @@ pub(crate) fn to_linux_errno(err: super::SyscallError) -> isize {
         SyscallError::NoDeviceOrAddress => LINUX_ENXIO,
         SyscallError::Overflow => LINUX_EOVERFLOW,
         SyscallError::ReadOnlyFilesystem => LINUX_EROFS,
+        SyscallError::NoData => LINUX_ENODATA,
     }
 }
 

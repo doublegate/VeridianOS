@@ -7,7 +7,7 @@
 //! The on-disk layout matches what the kernel's BlockFS driver expects:
 //!
 //! ```text
-//! Block 0:              Superblock (62 bytes serialized, padded to 4KB)
+//! Block 0:              Superblock (66 bytes serialized, padded to 4KB)
 //! Blocks 1..1+B:        Block bitmap (B = ceil(total_blocks / 32768))
 //! Blocks 1+B..1+B+I:    Inode table (I = ceil(inode_count * 96 / 4096))
 //! Blocks 1+B+I..end:    Data blocks
@@ -15,6 +15,12 @@
 //!
 //! Usage:
 //!   mkfs-blockfs --output <path> --size <MB> [--populate <dir>]
+//!   mkfs-blockfs --upgrade <image>
+//!
+//! Format revision 1 (the kernel's `BLOCKFS_REVISION`) gives an inode an
+//! extended-attribute block in bytes 92..96, once an unused triple-indirect
+//! pointer. Images are written at revision 1; `--upgrade` raises a revision
+//! 0 image in place, after checking that no inode uses those bytes.
 
 use std::{
     collections::{HashMap, VecDeque},
@@ -35,6 +41,8 @@ const S_IFCHR: u16 = 0x2000;
 const S_IFBLK: u16 = 0x6000;
 const S_IFSOCK: u16 = 0xC000;
 const BLOCKFS_MAGIC: u32 = 0x424C4B46; // "BLKF"
+/// The format revision written (the kernel's `BLOCKFS_REVISION`).
+const BLOCKFS_REVISION: u32 = 1;
 const DISK_INODE_SIZE: usize = 96;
 const INODES_PER_BLOCK: usize = BLOCK_SIZE / DISK_INODE_SIZE; // 42
 const DIRECT_BLOCKS: usize = 12;
@@ -87,6 +95,7 @@ struct Superblock {
     max_mount_count: u16,
     state: u16,
     errors: u16,
+    revision: u32,
 }
 
 impl Superblock {
@@ -108,6 +117,7 @@ impl Superblock {
         buf[56..58].copy_from_slice(&self.max_mount_count.to_le_bytes());
         buf[58..60].copy_from_slice(&self.state.to_le_bytes());
         buf[60..62].copy_from_slice(&self.errors.to_le_bytes());
+        buf[62..66].copy_from_slice(&self.revision.to_le_bytes());
         buf
     }
 }
@@ -129,7 +139,8 @@ struct DiskInode {
     direct_blocks: [u32; 12],
     indirect_block: u32,
     double_indirect_block: u32,
-    triple_indirect_block: u32,
+    /// The extended-attribute block (revision 1); none are written here.
+    xattr_block: u32,
 }
 
 impl DiskInode {
@@ -149,7 +160,7 @@ impl DiskInode {
             direct_blocks: [0; 12],
             indirect_block: 0,
             double_indirect_block: 0,
-            triple_indirect_block: 0,
+            xattr_block: 0,
         }
     }
 
@@ -171,7 +182,7 @@ impl DiskInode {
         }
         buf[84..88].copy_from_slice(&self.indirect_block.to_le_bytes());
         buf[88..92].copy_from_slice(&self.double_indirect_block.to_le_bytes());
-        buf[92..96].copy_from_slice(&self.triple_indirect_block.to_le_bytes());
+        buf[92..96].copy_from_slice(&self.xattr_block.to_le_bytes());
     }
 }
 
@@ -627,6 +638,7 @@ impl BlockFsBuilder {
             max_mount_count: 100,
             state: 1, // Clean
             errors: 0,
+            revision: BLOCKFS_REVISION,
         };
 
         file.seek(SeekFrom::Start(0))?;
@@ -765,6 +777,52 @@ fn parse_attr_line(line: &str) -> Result<Attr<'_>, String> {
     })
 }
 
+/// Raise a revision 0 image to revision 1 in place: every inode's bytes
+/// 92..96 (the unused triple-indirect pointer) must be 0, since revision 1
+/// reads them as the extended-attribute block. The message on success.
+fn upgrade(path: &Path) -> Result<String, String> {
+    use std::io::Read;
+    let mut file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
+        .map_err(|e| format!("cannot open {}: {}", path.display(), e))?;
+    let mut sb = [0u8; BLOCK_SIZE];
+    file.read_exact(&mut sb)
+        .map_err(|e| format!("cannot read the superblock: {}", e))?;
+    let word = |b: &[u8], at: usize| u32::from_le_bytes([b[at], b[at + 1], b[at + 2], b[at + 3]]);
+    if word(&sb, 0) != BLOCKFS_MAGIC {
+        return Err(String::from("not a BlockFS image"));
+    }
+    match word(&sb, 62) {
+        0 => {}
+        BLOCKFS_REVISION => return Ok(format!("already revision {}", BLOCKFS_REVISION)),
+        r => return Err(format!("revision {} is newer than this tool", r)),
+    }
+    let (block_count, inode_count) = (word(&sb, 4), word(&sb, 8));
+    let table_start = 1 + bitmap_blocks(block_count) as u64;
+    let mut table = vec![0u8; inode_table_blocks(inode_count) as usize * BLOCK_SIZE];
+    file.seek(SeekFrom::Start(table_start * BLOCK_SIZE as u64))
+        .and_then(|_| file.read_exact(&mut table))
+        .map_err(|e| format!("cannot read the inode table: {}", e))?;
+    for i in 0..inode_count as usize {
+        let blk = i / INODES_PER_BLOCK;
+        let at = blk * BLOCK_SIZE + (i % INODES_PER_BLOCK) * DISK_INODE_SIZE;
+        if word(&table, at + 92) != 0 {
+            return Err(format!(
+                "inode {} uses bytes 92..96; not a revision 0 image",
+                i
+            ));
+        }
+    }
+    sb[62..66].copy_from_slice(&BLOCKFS_REVISION.to_le_bytes());
+    file.seek(SeekFrom::Start(0))
+        .and_then(|_| file.write_all(&sb))
+        .and_then(|_| file.sync_all())
+        .map_err(|e| format!("cannot write the superblock: {}", e))?;
+    Ok(format!("upgraded to revision {}", BLOCKFS_REVISION))
+}
+
 fn print_usage() {
     eprintln!(
         "Usage: mkfs-blockfs --output <path> --size <MB> [--populate <dir> [--attrs <file>]]"
@@ -776,6 +834,7 @@ fn print_usage() {
     eprintln!("  --populate <dir>   Populate filesystem from host directory");
     eprintln!("  --inodes <count>   Number of inodes (default: auto-calculated)");
     eprintln!("  --attrs <file>     Owners and modes: lines of PATH UID GID [MODE]");
+    eprintln!("  --upgrade <image>  Raise a revision 0 image to revision 1 in place");
     eprintln!();
     eprintln!("Example:");
     eprintln!("  mkfs-blockfs --output rootfs.img --size 128 --populate target/rootfs-busybox/");
@@ -812,6 +871,23 @@ fn main() {
             "--attrs" => {
                 i += 1;
                 attrs_file = Some(args[i].clone());
+            }
+            "--upgrade" => {
+                i += 1;
+                let Some(image) = args.get(i) else {
+                    print_usage();
+                    std::process::exit(1);
+                };
+                match upgrade(Path::new(image)) {
+                    Ok(msg) => {
+                        println!("mkfs-blockfs: {}: {}", image, msg);
+                        return;
+                    }
+                    Err(e) => {
+                        eprintln!("Error: {}: {}", image, e);
+                        std::process::exit(1);
+                    }
+                }
             }
             "--help" | "-h" => {
                 print_usage();
@@ -953,6 +1029,49 @@ mod tests {
             }
         }
         names
+    }
+
+    /// Images are written at revision 1, and `--upgrade` raises a
+    /// revision 0 image (revision bytes zero) only if no inode uses the
+    /// bytes revision 1 gives the extended-attribute block.
+    #[test]
+    fn images_are_revision_1_and_revision_0_upgrades() {
+        use std::io::Read;
+        let dir = std::env::temp_dir().join(format!("mkfs-blockfs-upgrade-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let img = dir.join("fs.img");
+        let mut b = BlockFsBuilder::new(1024, 64);
+        b.create_file(0, "f", b"data", S_IFREG | 0o644);
+        b.write_image(&img).unwrap();
+        let revision = |img: &Path| {
+            let mut sb = [0u8; 66];
+            File::open(img).unwrap().read_exact(&mut sb).unwrap();
+            u32::from_le_bytes(sb[62..66].try_into().unwrap())
+        };
+        assert_eq!(revision(&img), BLOCKFS_REVISION);
+        assert!(upgrade(&img).unwrap().contains("already"));
+
+        // As a revision 0 image.
+        let mut f = fs::OpenOptions::new().write(true).open(&img).unwrap();
+        f.seek(SeekFrom::Start(62)).unwrap();
+        f.write_all(&[0; 4]).unwrap();
+        drop(f);
+        assert_eq!(revision(&img), 0);
+        assert!(upgrade(&img).unwrap().contains("upgraded"));
+        assert_eq!(revision(&img), BLOCKFS_REVISION);
+
+        // An inode with the bytes in use is not a revision 0 image.
+        let mut f = fs::OpenOptions::new().write(true).open(&img).unwrap();
+        f.seek(SeekFrom::Start(62)).unwrap();
+        f.write_all(&[0; 4]).unwrap();
+        let table = (1 + bitmap_blocks(1024)) as u64 * BLOCK_SIZE as u64;
+        f.seek(SeekFrom::Start(table + DISK_INODE_SIZE as u64 + 92))
+            .unwrap();
+        f.write_all(&7u32.to_le_bytes()).unwrap();
+        drop(f);
+        assert!(upgrade(&img).unwrap_err().contains("inode 1"));
+        assert_eq!(revision(&img), 0, "left as it was");
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     /// A directory over one block keeps every entry inside a block, so the

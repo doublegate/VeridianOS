@@ -1,569 +1,485 @@
-//! Extended Attributes (xattr) -- Per-Inode Metadata Store
+//! Extended attributes (ADR 0020, decision 6).
 //!
-//! Provides POSIX-compatible extended file attributes with namespace support.
-//! Attributes are stored in-memory (suitable for RamFS/tmpfs) using a global
-//! store keyed by inode number. Each attribute has a namespaced name (e.g.,
-//! "user.mime_type" or "system.selinux") and an arbitrary byte value.
-//!
-//! Syscall-level functions: [`getxattr`], [`setxattr`], [`listxattr`],
-//! [`removexattr`]. Call [`cleanup_inode_xattrs`] when an inode is deleted.
+//! Names, limits and flags are Linux's (`include/uapi/linux/xattr.h`,
+//! `limits.h`), and so are the namespace rules: `fs/xattr.c`'s
+//! `xattr_permission` and `xattr_resolve_name`, and the capability module's
+//! `cap_inode_setxattr` / `cap_inode_removexattr`. [`XattrSet`] holds one
+//! node's attributes: tmpfs and ramfs keep it in the node, BlockFS encodes it
+//! in one attribute block per inode (`XattrSet::encode`).
 
 use alloc::{collections::BTreeMap, string::String, vec::Vec};
 
-use spin::RwLock;
+use crate::{
+    error::{FsError, KernelError},
+    fs::{permission, Metadata, NodeType, MAY_READ, MAY_WRITE},
+    process::{
+        creds::Caller,
+        linux_caps::{CAP_SETFCAP, CAP_SYS_ADMIN},
+    },
+};
 
-use crate::error::{FsError, KernelError};
+/// Longest attribute name, prefix included (XATTR_NAME_MAX).
+pub const XATTR_NAME_MAX: usize = 255;
 
-// ---------------------------------------------------------------------------
-// Constants
-// ---------------------------------------------------------------------------
+/// Largest attribute value (XATTR_SIZE_MAX).
+pub const XATTR_SIZE_MAX: usize = 65536;
 
-/// Maximum size of a single attribute value (64 KB).
-pub const XATTR_MAX_VALUE_SIZE: usize = 65536;
+/// Largest name list `listxattr` returns (XATTR_LIST_MAX).
+pub const XATTR_LIST_MAX: usize = 65536;
 
-/// Maximum number of attributes per inode.
-pub const XATTR_MAX_ATTRS_PER_INODE: usize = 256;
-
-/// Maximum length of an attribute name (including namespace prefix).
-pub const XATTR_MAX_NAME_LEN: usize = 255;
-
-/// Flag: fail if the attribute already exists (exclusive create).
+/// setxattr: fail if the attribute exists (EEXIST).
 pub const XATTR_CREATE: u32 = 1;
 
-/// Flag: fail if the attribute does not already exist (replace only).
+/// setxattr: fail if the attribute does not exist (ENODATA).
 pub const XATTR_REPLACE: u32 = 2;
 
-// ---------------------------------------------------------------------------
-// Store
-// ---------------------------------------------------------------------------
+/// The file capability attribute (step 9 of ADR 0020).
+pub const XATTR_NAME_CAPS: &str = "security.capability";
 
-/// Global extended attribute store.
-///
-/// Maps inode number -> (attribute name -> value).  All access is serialised
-/// through a single `RwLock` which is acceptable for the current single-CPU
-/// boot context.  A per-inode lock design can be adopted later if contention
-/// becomes measurable.
-struct XattrStore {
-    /// inode -> { name -> value }
-    attrs: BTreeMap<u64, BTreeMap<String, Vec<u8>>>,
+/// The namespaces Linux's handlers serve.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Namespace {
+    User,
+    Trusted,
+    Security,
+    /// POSIX ACLs (`system.posix_acl_*`), which VeridianOS does not keep:
+    /// every operation on them is EOPNOTSUPP.
+    System,
 }
 
-impl XattrStore {
-    const fn new() -> Self {
-        Self {
-            attrs: BTreeMap::new(),
-        }
-    }
-}
-
-/// Global singleton for the extended attribute store.
-static XATTR_STORE: RwLock<XattrStore> = RwLock::new(XattrStore::new());
-
-// ---------------------------------------------------------------------------
-// Namespace validation
-// ---------------------------------------------------------------------------
-
-/// Recognised xattr namespace prefixes.
-const VALID_NAMESPACES: &[&str] = &["user.", "system."];
-
-/// Validate that `name` begins with a supported namespace prefix and is
-/// otherwise well-formed.
-fn validate_name(name: &str) -> Result<(), KernelError> {
-    if name.is_empty() {
-        return Err(KernelError::InvalidArgument {
-            name: "xattr_name",
-            value: "empty name",
-        });
-    }
-
-    if name.len() > XATTR_MAX_NAME_LEN {
-        return Err(KernelError::InvalidArgument {
-            name: "xattr_name",
-            value: "name too long",
-        });
-    }
-
-    for ns in VALID_NAMESPACES {
-        if name.starts_with(ns) {
-            // The attribute-specific part must not be empty.
-            if name.len() == ns.len() {
+/// The namespace of `name` (Linux's xattr_resolve_name): EOPNOTSUPP for an
+/// unknown prefix, EINVAL for a prefix with nothing after it.
+pub fn namespace(name: &str) -> Result<Namespace, KernelError> {
+    const PREFIXES: [(&str, Namespace); 4] = [
+        ("user.", Namespace::User),
+        ("trusted.", Namespace::Trusted),
+        ("security.", Namespace::Security),
+        ("system.", Namespace::System),
+    ];
+    for (prefix, ns) in PREFIXES {
+        if let Some(rest) = name.strip_prefix(prefix) {
+            if rest.is_empty() {
                 return Err(KernelError::InvalidArgument {
-                    name: "xattr_name",
-                    value: "empty attribute after namespace",
+                    name: "xattr name",
+                    value: "nothing after the namespace",
                 });
             }
-            return Ok(());
+            return Ok(ns);
         }
     }
+    Err(KernelError::FsError(FsError::NotSupported))
+}
 
-    Err(KernelError::InvalidArgument {
-        name: "xattr_name",
-        value: "unsupported namespace",
+/// The error for an access the namespace rules refuse: EPERM for a write,
+/// ENODATA (as if absent) for a read (xattr_permission_error).
+fn refused(write: bool) -> KernelError {
+    KernelError::FsError(if write {
+        FsError::OperationNotPermitted
+    } else {
+        FsError::NoData
     })
 }
 
-// ---------------------------------------------------------------------------
-// Public API
-// ---------------------------------------------------------------------------
-
-/// Retrieve the value of an extended attribute.
-///
-/// Returns the attribute value as a byte vector, or an error if the inode or
-/// attribute name does not exist.
-pub fn getxattr(inode: u64, name: &str) -> Result<Vec<u8>, KernelError> {
-    validate_name(name)?;
-
-    let store = XATTR_STORE.read();
-    let inode_attrs = store
-        .attrs
-        .get(&inode)
-        .ok_or(KernelError::FsError(FsError::NotFound))?;
-
-    inode_attrs
-        .get(name)
-        .cloned()
-        .ok_or(KernelError::FsError(FsError::NotFound))
+/// Whether `caller` may read (`write` false) or set and remove (`write`
+/// true) attribute `name` of a node with `meta`: Linux's xattr_permission,
+/// then the capability module's checks on `security.*`.
+pub fn check_access(
+    caller: &Caller,
+    meta: &Metadata,
+    name: &str,
+    write: bool,
+) -> Result<(), KernelError> {
+    match namespace(name)? {
+        Namespace::System => Err(KernelError::FsError(FsError::NotSupported)),
+        // No check from the VFS; writing needs CAP_SYS_ADMIN, except the
+        // file capability attribute, which CAP_SETFCAP sets and removes.
+        Namespace::Security => {
+            let cap = if name == XATTR_NAME_CAPS {
+                CAP_SETFCAP
+            } else {
+                CAP_SYS_ADMIN
+            };
+            if write && !caller.capable(cap) {
+                return Err(KernelError::FsError(FsError::OperationNotPermitted));
+            }
+            Ok(())
+        }
+        Namespace::Trusted => {
+            if caller.capable(CAP_SYS_ADMIN) {
+                Ok(())
+            } else {
+                Err(refused(write))
+            }
+        }
+        // Only regular files, directories and sockets; in a sticky directory
+        // only its owner or CAP_FOWNER may write. Then the file's own
+        // permission bits.
+        Namespace::User => {
+            match meta.node_type {
+                NodeType::File | NodeType::Socket => {}
+                NodeType::Directory => {
+                    if write && meta.permissions.sticky && !caller.owner_or_capable(meta.uid) {
+                        return Err(KernelError::FsError(FsError::OperationNotPermitted));
+                    }
+                }
+                _ => return Err(refused(write)),
+            }
+            let mask = if write { MAY_WRITE } else { MAY_READ };
+            if permission(caller, meta, mask) {
+                Ok(())
+            } else {
+                Err(KernelError::FsError(FsError::PermissionDenied))
+            }
+        }
+    }
 }
 
-/// Set (create or replace) an extended attribute.
-///
-/// `flags` controls behaviour when the attribute already exists or not:
-///
-/// | flags | Exists | Does not exist |
-/// |-------|--------|----------------|
-/// | 0     | Replace | Create        |
-/// | `XATTR_CREATE`  | Error | Create |
-/// | `XATTR_REPLACE` | Replace | Error |
-///
-/// Returns an error if value exceeds [`XATTR_MAX_VALUE_SIZE`] or the inode
-/// already has [`XATTR_MAX_ATTRS_PER_INODE`] attributes.
-pub fn setxattr(inode: u64, name: &str, value: &[u8], flags: u32) -> Result<(), KernelError> {
-    validate_name(name)?;
+/// Whether `listxattr` shows `name` to `caller`: `trusted.*` only with
+/// CAP_SYS_ADMIN, as ext4's and tmpfs's trusted handlers list them.
+pub fn listed(caller: &Caller, name: &str) -> bool {
+    !name.starts_with("trusted.") || caller.capable(CAP_SYS_ADMIN)
+}
 
-    if value.len() > XATTR_MAX_VALUE_SIZE {
-        return Err(KernelError::InvalidArgument {
-            name: "xattr_value",
-            value: "value too large",
-        });
+/// Magic number of a BlockFS attribute block ("XATR").
+const BLOCK_MAGIC: u32 = 0x5254_4158;
+
+/// Bytes before the first entry of an attribute block: magic, count and two
+/// reserved bytes.
+const BLOCK_HEADER: usize = 8;
+
+/// Bytes before an entry's name: name length, a reserved byte and the
+/// value length.
+const ENTRY_HEADER: usize = 4;
+
+/// The attributes of one node, by name.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct XattrSet {
+    entries: BTreeMap<String, Vec<u8>>,
+}
+
+impl XattrSet {
+    pub const fn new() -> Self {
+        Self {
+            entries: BTreeMap::new(),
+        }
     }
 
-    let mut store = XATTR_STORE.write();
-    let inode_attrs = store.attrs.entry(inode).or_default();
-
-    let exists = inode_attrs.contains_key(name);
-
-    // Enforce XATTR_CREATE / XATTR_REPLACE semantics.
-    if flags & XATTR_CREATE != 0 && exists {
-        return Err(KernelError::FsError(FsError::AlreadyExists));
-    }
-    if flags & XATTR_REPLACE != 0 && !exists {
-        return Err(KernelError::FsError(FsError::NotFound));
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
     }
 
-    // Enforce per-inode limit (only when inserting a new key).
-    if !exists && inode_attrs.len() >= XATTR_MAX_ATTRS_PER_INODE {
-        return Err(KernelError::ResourceExhausted {
-            resource: "xattr slots",
-        });
+    /// The value of `name`.
+    pub fn get(&self, name: &str) -> Option<&[u8]> {
+        self.entries.get(name).map(Vec::as_slice)
     }
 
-    inode_attrs.insert(String::from(name), Vec::from(value));
+    /// The names, in order.
+    pub fn names(&self) -> impl Iterator<Item = &str> {
+        self.entries.keys().map(String::as_str)
+    }
+
+    /// Set `name` to `value` (setxattr's `flags`: XATTR_CREATE fails with
+    /// EEXIST if it exists, XATTR_REPLACE with ENODATA if it does not).
+    pub fn set(&mut self, name: &str, value: &[u8], flags: u32) -> Result<(), KernelError> {
+        let exists = self.entries.contains_key(name);
+        if flags & XATTR_CREATE != 0 && exists {
+            return Err(KernelError::FsError(FsError::AlreadyExists));
+        }
+        if flags & XATTR_REPLACE != 0 && !exists {
+            return Err(KernelError::FsError(FsError::NoData));
+        }
+        self.entries.insert(String::from(name), Vec::from(value));
+        Ok(())
+    }
+
+    /// Remove `name` (ENODATA if absent).
+    pub fn remove(&mut self, name: &str) -> Result<(), KernelError> {
+        self.entries
+            .remove(name)
+            .map(drop)
+            .ok_or(KernelError::FsError(FsError::NoData))
+    }
+
+    /// Drop every attribute.
+    pub fn clear(&mut self) {
+        self.entries.clear();
+    }
+
+    /// The bytes `encode` needs.
+    pub fn encoded_size(&self) -> usize {
+        BLOCK_HEADER
+            + self
+                .entries
+                .iter()
+                .map(|(n, v)| (ENTRY_HEADER + n.len() + v.len()).next_multiple_of(4))
+                .sum::<usize>()
+    }
+
+    /// Encode into `buf` (a BlockFS attribute block): ENOSPC if it does
+    /// not fit. Zeros follow the last entry.
+    pub fn encode(&self, buf: &mut [u8]) -> Result<(), KernelError> {
+        if self.encoded_size() > buf.len() {
+            return Err(KernelError::FsError(FsError::NoSpace));
+        }
+        buf.fill(0);
+        buf[0..4].copy_from_slice(&BLOCK_MAGIC.to_le_bytes());
+        buf[4..6].copy_from_slice(&(self.entries.len() as u16).to_le_bytes());
+        let mut at = BLOCK_HEADER;
+        for (name, value) in &self.entries {
+            buf[at] = name.len() as u8;
+            buf[at + 2..at + 4].copy_from_slice(&(value.len() as u16).to_le_bytes());
+            let name_at = at + ENTRY_HEADER;
+            buf[name_at..name_at + name.len()].copy_from_slice(name.as_bytes());
+            let value_at = name_at + name.len();
+            buf[value_at..value_at + value.len()].copy_from_slice(value);
+            at += (ENTRY_HEADER + name.len() + value.len()).next_multiple_of(4);
+        }
+        Ok(())
+    }
+
+    /// Decode an attribute block. A block that is not one, or whose
+    /// entries run past its end, is corrupt (EIO).
+    pub fn decode(buf: &[u8]) -> Result<Self, KernelError> {
+        let corrupt = KernelError::FsError(FsError::CorruptedData);
+        if buf.len() < BLOCK_HEADER
+            || u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]) != BLOCK_MAGIC
+        {
+            return Err(corrupt);
+        }
+        let count = u16::from_le_bytes([buf[4], buf[5]]) as usize;
+        let mut set = Self::new();
+        let mut at = BLOCK_HEADER;
+        for _ in 0..count {
+            let header = buf.get(at..at + ENTRY_HEADER).ok_or(corrupt)?;
+            let name_len = header[0] as usize;
+            let value_len = u16::from_le_bytes([header[2], header[3]]) as usize;
+            let name_at = at + ENTRY_HEADER;
+            let name = buf
+                .get(name_at..name_at + name_len)
+                .and_then(|n| core::str::from_utf8(n).ok())
+                .filter(|n| !n.is_empty())
+                .ok_or(corrupt)?;
+            let value = buf
+                .get(name_at + name_len..name_at + name_len + value_len)
+                .ok_or(corrupt)?;
+            set.entries.insert(String::from(name), Vec::from(value));
+            at += (ENTRY_HEADER + name_len + value_len).next_multiple_of(4);
+        }
+        Ok(set)
+    }
+}
+
+/// The most a memory filesystem keeps for one node, names and values
+/// together, as the encoding counts them (its attributes always fit one
+/// list buffer).
+pub const MEMORY_XATTR_LIMIT: usize = XATTR_LIST_MAX;
+
+/// Apply `f` to `set`, a memory filesystem node's attributes, keeping the
+/// old ones if `f` fails or the result is over [`MEMORY_XATTR_LIMIT`]
+/// (ENOSPC).
+pub fn update_in_memory(
+    set: &mut XattrSet,
+    f: &mut dyn FnMut(&mut XattrSet) -> Result<(), KernelError>,
+) -> Result<(), KernelError> {
+    let mut new = set.clone();
+    f(&mut new)?;
+    if new.encoded_size() > MEMORY_XATTR_LIMIT {
+        return Err(KernelError::FsError(FsError::NoSpace));
+    }
+    *set = new;
     Ok(())
 }
-
-/// List all extended attribute names for an inode.
-///
-/// Returns an empty vector if the inode has no attributes.
-pub fn listxattr(inode: u64) -> Result<Vec<String>, KernelError> {
-    let store = XATTR_STORE.read();
-    match store.attrs.get(&inode) {
-        Some(inode_attrs) => Ok(inode_attrs.keys().cloned().collect()),
-        None => Ok(Vec::new()),
-    }
-}
-
-/// Remove a single extended attribute.
-///
-/// Returns an error if the attribute does not exist.
-pub fn removexattr(inode: u64, name: &str) -> Result<(), KernelError> {
-    validate_name(name)?;
-
-    let mut store = XATTR_STORE.write();
-    let inode_attrs = store
-        .attrs
-        .get_mut(&inode)
-        .ok_or(KernelError::FsError(FsError::NotFound))?;
-
-    if inode_attrs.remove(name).is_none() {
-        return Err(KernelError::FsError(FsError::NotFound));
-    }
-
-    // If no attributes remain, drop the inode entry to save memory.
-    if inode_attrs.is_empty() {
-        store.attrs.remove(&inode);
-    }
-
-    Ok(())
-}
-
-/// Remove all extended attributes for an inode.
-///
-/// Intended to be called when an inode is deleted.  This is a no-op if the
-/// inode has no attributes.
-pub fn cleanup_inode_xattrs(inode: u64) {
-    let mut store = XATTR_STORE.write();
-    store.attrs.remove(&inode);
-}
-
-/// Return the number of attributes currently stored for `inode`.
-///
-/// Returns 0 if the inode has no attributes.
-pub fn count_xattrs(inode: u64) -> usize {
-    let store = XATTR_STORE.read();
-    store.attrs.get(&inode).map_or(0, BTreeMap::len)
-}
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
-    #[allow(unused_imports)]
-    use alloc::vec;
-
     use super::*;
+    use crate::{
+        fs::Permissions,
+        process::{
+            creds::Credentials,
+            linux_caps::{LinuxCaps, CAP_FOWNER},
+        },
+    };
 
-    // Use a high inode range to avoid collisions between parallel tests
-    // (each test uses its own inode number).
-    const BASE_INODE: u64 = 0xFFFF_0000;
-
-    // -- validate_name -------------------------------------------------------
-
-    #[test]
-    fn test_validate_name_user_ns() {
-        assert!(validate_name("user.mime_type").is_ok());
-    }
-
-    #[test]
-    fn test_validate_name_system_ns() {
-        assert!(validate_name("system.selinux").is_ok());
-    }
-
-    #[test]
-    fn test_validate_name_bad_ns() {
-        assert!(validate_name("trusted.key").is_err());
-        assert!(validate_name("security.ima").is_err());
-    }
-
-    #[test]
-    fn test_validate_name_empty() {
-        assert!(validate_name("").is_err());
-    }
-
-    #[test]
-    fn test_validate_name_no_attr_after_ns() {
-        assert!(validate_name("user.").is_err());
-        assert!(validate_name("system.").is_err());
-    }
-
-    #[test]
-    fn test_validate_name_too_long() {
-        let long_name = alloc::format!("user.{}", "a".repeat(XATTR_MAX_NAME_LEN));
-        assert!(validate_name(&long_name).is_err());
-    }
-
-    // -- setxattr / getxattr -------------------------------------------------
-
-    #[test]
-    fn test_set_and_get() {
-        let inode = BASE_INODE + 1;
-        // Clean up from potential previous test runs.
-        cleanup_inode_xattrs(inode);
-
-        setxattr(inode, "user.color", b"blue", 0).unwrap();
-        let val = getxattr(inode, "user.color").unwrap();
-        assert_eq!(val, b"blue");
-
-        cleanup_inode_xattrs(inode);
-    }
-
-    #[test]
-    fn test_set_replaces_existing() {
-        let inode = BASE_INODE + 2;
-        cleanup_inode_xattrs(inode);
-
-        setxattr(inode, "user.key", b"v1", 0).unwrap();
-        setxattr(inode, "user.key", b"v2", 0).unwrap();
-        assert_eq!(getxattr(inode, "user.key").unwrap(), b"v2");
-
-        cleanup_inode_xattrs(inode);
-    }
-
-    #[test]
-    fn test_set_create_flag_rejects_existing() {
-        let inode = BASE_INODE + 3;
-        cleanup_inode_xattrs(inode);
-
-        setxattr(inode, "user.key", b"v1", 0).unwrap();
-        let result = setxattr(inode, "user.key", b"v2", XATTR_CREATE);
-        assert_eq!(
-            result.unwrap_err(),
-            KernelError::FsError(FsError::AlreadyExists)
-        );
-
-        cleanup_inode_xattrs(inode);
-    }
-
-    #[test]
-    fn test_set_replace_flag_rejects_new() {
-        let inode = BASE_INODE + 4;
-        cleanup_inode_xattrs(inode);
-
-        let result = setxattr(inode, "user.key", b"v1", XATTR_REPLACE);
-        assert_eq!(result.unwrap_err(), KernelError::FsError(FsError::NotFound));
-
-        cleanup_inode_xattrs(inode);
-    }
-
-    #[test]
-    fn test_set_value_too_large() {
-        let inode = BASE_INODE + 5;
-        cleanup_inode_xattrs(inode);
-
-        let big = vec![0u8; XATTR_MAX_VALUE_SIZE + 1];
-        let result = setxattr(inode, "user.big", &big, 0);
-        assert!(result.is_err());
-
-        cleanup_inode_xattrs(inode);
-    }
-
-    #[test]
-    fn test_set_max_attrs_per_inode() {
-        let inode = BASE_INODE + 6;
-        cleanup_inode_xattrs(inode);
-
-        for i in 0..XATTR_MAX_ATTRS_PER_INODE {
-            let name = alloc::format!("user.attr{}", i);
-            setxattr(inode, &name, b"x", 0).unwrap();
+    fn meta(node_type: NodeType, mode: u32, uid: u32) -> Metadata {
+        Metadata {
+            node_type,
+            size: 0,
+            permissions: Permissions::from_mode(mode),
+            uid,
+            gid: uid,
+            created: 0,
+            modified: 0,
+            accessed: 0,
+            inode: 1,
         }
+    }
 
-        // The 257th should fail.
-        let result = setxattr(inode, "user.overflow", b"x", 0);
+    fn user(caps: &[u32]) -> Caller {
+        Caller {
+            creds: Credentials::new(1000, 1000),
+            caps: caps.iter().fold(LinuxCaps::EMPTY, |s, &c| s.with(c)),
+        }
+    }
+
+    fn fs_err(e: KernelError) -> FsError {
+        match e {
+            KernelError::FsError(f) => f,
+            other => panic!("not an FsError: {:?}", other),
+        }
+    }
+
+    /// Linux's xattr_resolve_name: the four prefixes, EOPNOTSUPP for any
+    /// other, EINVAL for a bare prefix.
+    #[test]
+    fn names_resolve_to_linux_namespaces() {
+        assert_eq!(namespace("user.mime").unwrap(), Namespace::User);
+        assert_eq!(namespace("trusted.x").unwrap(), Namespace::Trusted);
         assert_eq!(
-            result.unwrap_err(),
-            KernelError::ResourceExhausted {
-                resource: "xattr slots",
-            }
+            namespace("security.capability").unwrap(),
+            Namespace::Security
         );
-
-        cleanup_inode_xattrs(inode);
+        assert_eq!(
+            namespace("system.posix_acl_access").unwrap(),
+            Namespace::System
+        );
+        assert_eq!(
+            fs_err(namespace("os2.x").unwrap_err()),
+            FsError::NotSupported
+        );
+        assert!(matches!(
+            namespace("user."),
+            Err(KernelError::InvalidArgument { .. })
+        ));
     }
 
+    /// user.*: regular files, directories and sockets, by permission bits;
+    /// a sticky directory's attributes only for its owner or CAP_FOWNER;
+    /// other types refused (EPERM to write, ENODATA to read).
     #[test]
-    fn test_set_invalid_namespace() {
-        let inode = BASE_INODE + 7;
-        let result = setxattr(inode, "trusted.secret", b"val", 0);
-        assert!(result.is_err());
+    fn user_attributes_follow_the_file_permissions() {
+        let u = user(&[]);
+        let mine = meta(NodeType::File, 0o644, 1000);
+        let theirs = meta(NodeType::File, 0o644, 0);
+        assert!(check_access(&u, &mine, "user.a", true).is_ok());
+        assert!(check_access(&u, &theirs, "user.a", false).is_ok());
+        assert_eq!(
+            fs_err(check_access(&u, &theirs, "user.a", true).unwrap_err()),
+            FsError::PermissionDenied
+        );
+        let link = meta(NodeType::Symlink, 0o777, 1000);
+        assert_eq!(
+            fs_err(check_access(&u, &link, "user.a", true).unwrap_err()),
+            FsError::OperationNotPermitted
+        );
+        assert_eq!(
+            fs_err(check_access(&u, &link, "user.a", false).unwrap_err()),
+            FsError::NoData
+        );
+        let sticky = meta(NodeType::Directory, 0o1777, 0);
+        assert_eq!(
+            fs_err(check_access(&u, &sticky, "user.a", true).unwrap_err()),
+            FsError::OperationNotPermitted
+        );
+        assert!(check_access(&u, &sticky, "user.a", false).is_ok());
+        assert!(check_access(&user(&[CAP_FOWNER]), &sticky, "user.a", true).is_ok());
     }
 
-    // -- getxattr errors -----------------------------------------------------
-
+    /// trusted.* needs CAP_SYS_ADMIN, and is not listed without it;
+    /// security.* is readable by anyone and written with CAP_SYS_ADMIN, or
+    /// CAP_SETFCAP for the file capability; system.* is not supported.
     #[test]
-    fn test_get_nonexistent_inode() {
-        let inode = BASE_INODE + 8;
-        cleanup_inode_xattrs(inode);
-
-        let result = getxattr(inode, "user.nope");
-        assert_eq!(result.unwrap_err(), KernelError::FsError(FsError::NotFound));
+    fn privileged_namespaces_need_their_capabilities() {
+        let f = meta(NodeType::File, 0o666, 1000);
+        let u = user(&[]);
+        let admin = user(&[CAP_SYS_ADMIN]);
+        assert_eq!(
+            fs_err(check_access(&u, &f, "trusted.a", false).unwrap_err()),
+            FsError::NoData
+        );
+        assert_eq!(
+            fs_err(check_access(&u, &f, "trusted.a", true).unwrap_err()),
+            FsError::OperationNotPermitted
+        );
+        assert!(check_access(&admin, &f, "trusted.a", true).is_ok());
+        assert!(!listed(&u, "trusted.a") && listed(&admin, "trusted.a") && listed(&u, "user.a"));
+        assert!(check_access(&u, &f, "security.selinux", false).is_ok());
+        assert!(check_access(&u, &f, "security.selinux", true).is_err());
+        assert!(check_access(&admin, &f, "security.selinux", true).is_ok());
+        assert!(check_access(&admin, &f, XATTR_NAME_CAPS, true).is_err());
+        assert!(check_access(&user(&[CAP_SETFCAP]), &f, XATTR_NAME_CAPS, true).is_ok());
+        assert_eq!(
+            fs_err(check_access(&admin, &f, "system.posix_acl_access", false).unwrap_err()),
+            FsError::NotSupported
+        );
     }
 
+    /// setxattr's flags and removexattr's errors.
     #[test]
-    fn test_get_nonexistent_attr() {
-        let inode = BASE_INODE + 9;
-        cleanup_inode_xattrs(inode);
-
-        setxattr(inode, "user.exists", b"yes", 0).unwrap();
-        let result = getxattr(inode, "user.missing");
-        assert_eq!(result.unwrap_err(), KernelError::FsError(FsError::NotFound));
-
-        cleanup_inode_xattrs(inode);
+    fn set_and_remove_follow_the_flags() {
+        let mut s = XattrSet::new();
+        s.set("user.a", b"1", 0).unwrap();
+        assert_eq!(
+            fs_err(s.set("user.a", b"2", XATTR_CREATE).unwrap_err()),
+            FsError::AlreadyExists
+        );
+        s.set("user.a", b"2", XATTR_REPLACE).unwrap();
+        assert_eq!(s.get("user.a"), Some(&b"2"[..]));
+        assert_eq!(
+            fs_err(s.set("user.b", b"", XATTR_REPLACE).unwrap_err()),
+            FsError::NoData
+        );
+        s.set("user.empty", b"", 0).unwrap();
+        assert_eq!(s.get("user.empty"), Some(&b""[..]));
+        s.remove("user.a").unwrap();
+        assert_eq!(fs_err(s.remove("user.a").unwrap_err()), FsError::NoData);
+        assert_eq!(s.names().collect::<Vec<_>>(), ["user.empty"]);
     }
 
-    // -- listxattr -----------------------------------------------------------
-
+    /// The block encoding round-trips, refuses what does not fit (ENOSPC)
+    /// and rejects a block that is not one or runs past its end.
     #[test]
-    fn test_list_empty() {
-        let inode = BASE_INODE + 10;
-        cleanup_inode_xattrs(inode);
+    fn attribute_blocks_round_trip() {
+        let mut s = XattrSet::new();
+        s.set("user.mime_type", b"text/plain", 0).unwrap();
+        s.set("security.capability", &[1, 2, 3, 4, 5], 0).unwrap();
+        s.set("trusted.e", b"", 0).unwrap();
+        let mut block = [0xAAu8; 4096];
+        s.encode(&mut block).unwrap();
+        assert_eq!(XattrSet::decode(&block).unwrap(), s);
+        assert_eq!(
+            XattrSet::decode(&[0u8; 4096]).unwrap_err(),
+            KernelError::FsError(FsError::CorruptedData)
+        );
+        // A count past the entries there are.
+        block[4] = 9;
+        assert!(XattrSet::decode(&block).is_err());
 
-        let names = listxattr(inode).unwrap();
-        assert!(names.is_empty());
+        let mut big = XattrSet::new();
+        big.set("user.big", &[7u8; 4090], 0).unwrap();
+        assert_eq!(
+            fs_err(big.encode(&mut [0u8; 4096]).unwrap_err()),
+            FsError::NoSpace
+        );
+        assert!(XattrSet::new().encoded_size() <= 4096);
     }
 
+    /// A failed or oversized update leaves a memory node's attributes as
+    /// they were.
     #[test]
-    fn test_list_multiple() {
-        let inode = BASE_INODE + 11;
-        cleanup_inode_xattrs(inode);
-
-        setxattr(inode, "user.a", b"1", 0).unwrap();
-        setxattr(inode, "system.b", b"2", 0).unwrap();
-        setxattr(inode, "user.c", b"3", 0).unwrap();
-
-        let mut names = listxattr(inode).unwrap();
-        names.sort();
-        assert_eq!(names.len(), 3);
-        assert_eq!(names[0], "system.b");
-        assert_eq!(names[1], "user.a");
-        assert_eq!(names[2], "user.c");
-
-        cleanup_inode_xattrs(inode);
-    }
-
-    // -- removexattr ---------------------------------------------------------
-
-    #[test]
-    fn test_remove() {
-        let inode = BASE_INODE + 12;
-        cleanup_inode_xattrs(inode);
-
-        setxattr(inode, "user.del", b"bye", 0).unwrap();
-        removexattr(inode, "user.del").unwrap();
-
-        let result = getxattr(inode, "user.del");
-        assert_eq!(result.unwrap_err(), KernelError::FsError(FsError::NotFound));
-    }
-
-    #[test]
-    fn test_remove_nonexistent() {
-        let inode = BASE_INODE + 13;
-        cleanup_inode_xattrs(inode);
-
-        let result = removexattr(inode, "user.ghost");
-        assert_eq!(result.unwrap_err(), KernelError::FsError(FsError::NotFound));
-    }
-
-    #[test]
-    fn test_remove_cleans_inode_entry() {
-        let inode = BASE_INODE + 14;
-        cleanup_inode_xattrs(inode);
-
-        setxattr(inode, "user.only", b"val", 0).unwrap();
-        removexattr(inode, "user.only").unwrap();
-
-        // After removing the last attribute the inode entry should be gone,
-        // so listxattr returns an empty vec (not an error).
-        let names = listxattr(inode).unwrap();
-        assert!(names.is_empty());
-    }
-
-    // -- cleanup_inode_xattrs ------------------------------------------------
-
-    #[test]
-    fn test_cleanup() {
-        let inode = BASE_INODE + 15;
-        cleanup_inode_xattrs(inode);
-
-        setxattr(inode, "user.a", b"1", 0).unwrap();
-        setxattr(inode, "user.b", b"2", 0).unwrap();
-        assert_eq!(count_xattrs(inode), 2);
-
-        cleanup_inode_xattrs(inode);
-        assert_eq!(count_xattrs(inode), 0);
-    }
-
-    // -- count_xattrs --------------------------------------------------------
-
-    #[test]
-    fn test_count() {
-        let inode = BASE_INODE + 16;
-        cleanup_inode_xattrs(inode);
-
-        assert_eq!(count_xattrs(inode), 0);
-        setxattr(inode, "user.x", b"val", 0).unwrap();
-        assert_eq!(count_xattrs(inode), 1);
-        setxattr(inode, "system.y", b"val", 0).unwrap();
-        assert_eq!(count_xattrs(inode), 2);
-
-        cleanup_inode_xattrs(inode);
-    }
-
-    // -- edge cases ----------------------------------------------------------
-
-    #[test]
-    fn test_empty_value() {
-        let inode = BASE_INODE + 17;
-        cleanup_inode_xattrs(inode);
-
-        setxattr(inode, "user.empty", b"", 0).unwrap();
-        let val = getxattr(inode, "user.empty").unwrap();
-        assert!(val.is_empty());
-
-        cleanup_inode_xattrs(inode);
-    }
-
-    #[test]
-    fn test_max_value_size() {
-        let inode = BASE_INODE + 18;
-        cleanup_inode_xattrs(inode);
-
-        let data = vec![0xABu8; XATTR_MAX_VALUE_SIZE];
-        setxattr(inode, "user.big", &data, 0).unwrap();
-        let val = getxattr(inode, "user.big").unwrap();
-        assert_eq!(val.len(), XATTR_MAX_VALUE_SIZE);
-
-        cleanup_inode_xattrs(inode);
-    }
-
-    #[test]
-    fn test_binary_value() {
-        let inode = BASE_INODE + 19;
-        cleanup_inode_xattrs(inode);
-
-        let binary: Vec<u8> = (0..=255u8).collect();
-        setxattr(inode, "user.bin", &binary, 0).unwrap();
-        assert_eq!(getxattr(inode, "user.bin").unwrap(), binary);
-
-        cleanup_inode_xattrs(inode);
-    }
-
-    #[test]
-    fn test_replace_flag_succeeds_on_existing() {
-        let inode = BASE_INODE + 20;
-        cleanup_inode_xattrs(inode);
-
-        setxattr(inode, "user.key", b"old", 0).unwrap();
-        setxattr(inode, "user.key", b"new", XATTR_REPLACE).unwrap();
-        assert_eq!(getxattr(inode, "user.key").unwrap(), b"new");
-
-        cleanup_inode_xattrs(inode);
-    }
-
-    #[test]
-    fn test_create_flag_succeeds_on_new() {
-        let inode = BASE_INODE + 21;
-        cleanup_inode_xattrs(inode);
-
-        setxattr(inode, "user.fresh", b"val", XATTR_CREATE).unwrap();
-        assert_eq!(getxattr(inode, "user.fresh").unwrap(), b"val");
-
-        cleanup_inode_xattrs(inode);
-    }
-
-    #[test]
-    fn test_multiple_inodes_isolated() {
-        let inode_a = BASE_INODE + 22;
-        let inode_b = BASE_INODE + 23;
-        cleanup_inode_xattrs(inode_a);
-        cleanup_inode_xattrs(inode_b);
-
-        setxattr(inode_a, "user.key", b"from_a", 0).unwrap();
-        setxattr(inode_b, "user.key", b"from_b", 0).unwrap();
-
-        assert_eq!(getxattr(inode_a, "user.key").unwrap(), b"from_a");
-        assert_eq!(getxattr(inode_b, "user.key").unwrap(), b"from_b");
-
-        cleanup_inode_xattrs(inode_a);
-        cleanup_inode_xattrs(inode_b);
+    fn memory_updates_are_all_or_nothing() {
+        let mut s = XattrSet::new();
+        s.set("user.keep", b"1", 0).unwrap();
+        let mut too_big = |set: &mut XattrSet| set.set("user.x", &[0; MEMORY_XATTR_LIMIT], 0);
+        assert_eq!(
+            fs_err(update_in_memory(&mut s, &mut too_big).unwrap_err()),
+            FsError::NoSpace
+        );
+        let mut fails = |set: &mut XattrSet| {
+            set.remove("user.keep")?;
+            set.remove("user.keep")
+        };
+        assert!(update_in_memory(&mut s, &mut fails).is_err());
+        assert_eq!(s.get("user.keep"), Some(&b"1"[..]));
     }
 }

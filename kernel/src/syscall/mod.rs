@@ -358,8 +358,10 @@ pub(crate) fn futex_pi_owner_exiting(owner: (u64, u64)) {
 pub(crate) mod linux_compat;
 // capget, capset (ADR 0020)
 mod linux_caps;
+// The extended attribute calls (ADR 0020 step 8)
 mod thread_clone;
 pub(crate) mod userspace;
+mod xattr;
 pub(crate) use filesystem::rename_paths;
 pub use futex::sys_futex_wake;
 
@@ -488,6 +490,8 @@ pub enum SyscallError {
     Overflow = -133,
     /// A write to a read-only filesystem (EROFS, errno 30).
     ReadOnlyFilesystem = -134,
+    /// No such extended attribute (ENODATA, errno 61).
+    NoData = -135,
 }
 
 impl From<IpcError> for SyscallError {
@@ -560,6 +564,7 @@ pub fn map_kernel_error(err: crate::error::KernelError) -> SyscallError {
             FsError::NoSpace => SyscallError::NoSpace,
             FsError::OperationNotPermitted => SyscallError::OperationNotPermitted,
             FsError::Busy => SyscallError::Busy,
+            FsError::NoData => SyscallError::NoData,
             FsError::Canceled => SyscallError::Canceled,
         },
         KernelError::OutOfMemory { .. } => SyscallError::OutOfMemory,
@@ -1022,6 +1027,22 @@ fn handle_syscall(
         // Self-hosting filesystem ops
         Syscall::Chmod => sys_chmod(arg1, arg2),
         Syscall::Fchmod => sys_fchmod(arg1, arg2),
+        Syscall::Setxattr => xattr::sys_setxattr(arg1, arg2, arg3, arg4, arg5),
+        Syscall::Lsetxattr => xattr::sys_lsetxattr(arg1, arg2, arg3, arg4, arg5),
+        Syscall::Fsetxattr => xattr::sys_fsetxattr(arg1, arg2, arg3, arg4, arg5),
+        Syscall::Getxattr => xattr::sys_getxattr(arg1, arg2, arg3, arg4),
+        Syscall::Lgetxattr => xattr::sys_lgetxattr(arg1, arg2, arg3, arg4),
+        Syscall::Fgetxattr => xattr::sys_fgetxattr(arg1, arg2, arg3, arg4),
+        Syscall::Listxattr => xattr::sys_listxattr(arg1, arg2, arg3),
+        Syscall::Llistxattr => xattr::sys_llistxattr(arg1, arg2, arg3),
+        Syscall::Flistxattr => xattr::sys_flistxattr(arg1, arg2, arg3),
+        Syscall::Removexattr => xattr::sys_removexattr(arg1, arg2),
+        Syscall::Lremovexattr => xattr::sys_lremovexattr(arg1, arg2),
+        Syscall::Fremovexattr => xattr::sys_fremovexattr(arg1, arg2),
+        Syscall::Setxattrat => xattr::sys_setxattrat(arg1, arg2, arg3, arg4, arg5, syscall_arg6()?),
+        Syscall::Getxattrat => xattr::sys_getxattrat(arg1, arg2, arg3, arg4, arg5, syscall_arg6()?),
+        Syscall::Listxattrat => xattr::sys_listxattrat(arg1, arg2, arg3, arg4, arg5),
+        Syscall::Removexattrat => xattr::sys_removexattrat(arg1, arg2, arg3, arg4),
         Syscall::Umask => sys_umask(arg1),
         Syscall::Truncate => sys_truncate(arg1, arg2),
         Syscall::Poll => sys_poll(arg1, arg2, arg3),

@@ -23,7 +23,7 @@ BlockFS uses 4KB blocks throughout. The image is divided into four regions:
 
 ```text
 +-------------------+  Block 0
-|    Superblock      |  62 bytes serialized, padded to 4096
+|    Superblock      |  66 bytes serialized, padded to 4096
 +-------------------+  Block 1
 |   Block Bitmap     |  B blocks (B = ceil(total_blocks / 32768))
 |                    |  1 bit per block: 0 = free, 1 = allocated
@@ -37,7 +37,7 @@ BlockFS uses 4KB blocks throughout. The image is divided into four regions:
 +-------------------+
 ```
 
-### Superblock (62 bytes)
+### Superblock (66 bytes)
 
 | Offset | Size | Field | Description |
 |--------|------|-------|-------------|
@@ -57,8 +57,16 @@ BlockFS uses 4KB blocks throughout. The image is divided into four regions:
 | 56 | 2 | max_mount_count | Max mounts before check (100) |
 | 58 | 2 | state | Filesystem state (1 = clean) |
 | 60 | 2 | errors | Error behavior flags |
+| 62 | 4 | revision | Format revision (see below) |
 
 All fields are little-endian.
+
+The format revision is 1. Revision 0, the original format, has zeros in
+bytes 62..66 and no extended attributes; the kernel mounts it, refusing
+attribute changes with EOPNOTSUPP, and refuses any revision newer than it
+knows. `mkfs-blockfs` writes revision 1, and `mkfs-blockfs --upgrade
+<image>` raises a revision 0 image in place after checking that no inode
+uses bytes 92..96.
 
 ### Inode (96 bytes)
 
@@ -80,9 +88,24 @@ Each inode stores file metadata and block pointers:
 | 36 | 48 | direct_blocks[12] | 12 direct block pointers (4 bytes each) |
 | 84 | 4 | indirect_block | Single indirect block pointer |
 | 88 | 4 | double_indirect_block | Double indirect block pointer |
-| 92 | 4 | triple_indirect_block | Triple indirect block pointer |
+| 92 | 4 | xattr_block | Extended-attribute block, 0 for none (revision 1; in revision 0 an unused triple-indirect pointer, always 0) |
 
 With 12 direct blocks + single indirect (1024 pointers), a single file can be up to `(12 + 1024) * 4096 = 4,243,456 bytes` (~4MB) without double indirect blocks.
+
+### Extended attributes
+
+An inode's extended attributes (ADR 0020) are all in one block, named by
+`xattr_block`; it is allocated with the first attribute, freed with the
+last and with the inode, and written as metadata (pinned until `sync`, ADR
+0011). A set that does not fit is refused with ENOSPC, as ext4 without
+`ea_inode` refuses it.
+
+| Offset | Size | Field |
+|--------|------|-------|
+| 0 | 4 | magic `0x52544158` ("XATR") |
+| 4 | 2 | entry count |
+| 6 | 2 | reserved (0) |
+| 8 | ... | entries, each 4-byte aligned: name length (1), reserved (1), value length (2), name, value |
 
 ### Directory Entries
 

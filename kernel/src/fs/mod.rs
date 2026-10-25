@@ -673,6 +673,22 @@ pub trait VfsNode: Send + Sync {
     fn is_special_inode(&self) -> bool {
         false
     }
+
+    /// The node's extended attributes (`fs::xattr`; ADR 0020). EOPNOTSUPP
+    /// on a filesystem that keeps none.
+    fn xattrs(&self) -> Result<xattr::XattrSet, KernelError> {
+        Err(KernelError::FsError(crate::error::FsError::NotSupported))
+    }
+
+    /// Change the node's extended attributes with `f`, as one step: when
+    /// `f` or the filesystem fails (ENOSPC when they no longer fit),
+    /// nothing changes. EOPNOTSUPP on a filesystem that keeps none.
+    fn update_xattrs(
+        &self,
+        _f: &mut dyn FnMut(&mut xattr::XattrSet) -> Result<(), KernelError>,
+    ) -> Result<(), KernelError> {
+        Err(KernelError::FsError(crate::error::FsError::NotSupported))
+    }
 }
 
 /// The major number of a device number in Linux's 32-bit encoding (as

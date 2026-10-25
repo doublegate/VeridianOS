@@ -221,6 +221,8 @@ pub enum FsError {
     OperationNotPermitted,
     /// In use (EBUSY): F_SEAL_WRITE on a memfd that is mapped shared
     Busy,
+    /// No such attribute (ENODATA): an extended attribute that is not set
+    NoData,
 }
 
 /// Result type alias for kernel operations

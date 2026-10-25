@@ -226,7 +226,8 @@ What remains:
   capability prctl options read and change and `/proc/<pid>/status` shows, and every privilege check
   uses them as Linux does: the set*id calls, file permissions and ownership, signals, the clock,
   scheduling, resource limits, ptrace, mount and the account calls. exec computes them as Linux
-  does, but there are no file capabilities yet (ADR 0020 steps 8 and 9). A directory's
+  does, but programs carry no file capabilities yet (ADR 0020 step 9; the extended attribute that
+  holds them is kept since step 8). A directory's
   set-group-ID bit is kept but not acted on: new entries take the creator's group, not the
   directory's.
 - **Process ids never wrap.** `/proc/sys/kernel/pid_max` reports 4194304, Linux's limit on

@@ -66,6 +66,19 @@
   root's; under no_new_privs, a tracer without CAP_SYS_PTRACE or shared filesystem state nothing is
   gained. The process becomes non-dumpable when its permitted set grows, and AT_SECURE follows the
   same decision.
+- Extended attributes (ADR 0020 step 8): the twelve Linux calls (`setxattr`, `getxattr`,
+  `listxattr`, `removexattr` and their `l*` and `f*` forms) and the four `*xattrat` calls of Linux
+  6.13, with Linux's rules: names up to 255 bytes (ERANGE), values up to 64 KiB (E2BIG),
+  XATTR_CREATE and XATTR_REPLACE, size-0 queries and ERANGE for a short buffer; `user.*` on regular
+  files, directories (owner or CAP_FOWNER in a sticky one) and sockets by the file's permission
+  bits, `trusted.*` with CAP_SYS_ADMIN (hidden from others' lists), `security.*` written with
+  CAP_SYS_ADMIN (CAP_SETFCAP for `security.capability`), `system.*` (POSIX ACLs) EOPNOTSUPP. tmpfs
+  and ramfs keep them in the node (up to 64 KiB per node); BlockFS keeps them on disk, in one
+  attribute block per inode, which needed format revision 1 (an inode's unused triple-indirect
+  pointer became its attribute block; the superblock records the revision, a revision 0 image mounts
+  without attributes, and `mkfs-blockfs --upgrade` raises one). The in-memory store keyed by inode
+  number, which the shell's `xattr` command used and whose numbers collided across filesystems, is
+  gone; the command acts on the node.
 - `pause` on x86_64 (system call 34 had no handler, so musl's `pause()` returned ENOSYS at once and a
   forked child meant to wait ran on): it waits as `ppoll` with no descriptors and no timeout,
   which is what musl does on AArch64 and RISC-V, and returns EINTR after a handler.

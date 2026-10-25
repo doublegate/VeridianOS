@@ -1197,17 +1197,23 @@ impl BuiltinCommand for XattrCommand {
             ));
         }
 
-        // Resolve path to inode via VFS metadata
-        let resolve_inode = |path: &str| -> Result<u64, String> {
-            let vfs = crate::fs::try_get_vfs()
-                .ok_or_else(|| String::from("xattr: VFS not initialized"))?;
-            let node = vfs
-                .resolve_path(path)
-                .map_err(|e| format!("xattr: cannot resolve '{}': {:?}", path, e))?;
-            let meta = node
-                .metadata()
-                .map_err(|e| format!("xattr: metadata error: {:?}", e))?;
-            Ok(meta.inode)
+        // The node itself: its filesystem keeps its attributes (the kernel
+        // console acts with every capability, so no permission check).
+        let resolve_node =
+            |path: &str| -> Result<alloc::sync::Arc<dyn crate::fs::VfsNode>, String> {
+                let vfs = crate::fs::try_get_vfs()
+                    .ok_or_else(|| String::from("xattr: VFS not initialized"))?;
+                vfs.resolve_path(path)
+                    .map_err(|e| format!("xattr: cannot resolve '{}': {:?}", path, e))
+            };
+        // A name in a namespace the kernel keeps (fs::xattr::namespace).
+        let check_name = |name: &str| -> Result<(), String> {
+            match crate::fs::xattr::namespace(name) {
+                Ok(crate::fs::xattr::Namespace::System) | Err(_) => {
+                    Err(format!("xattr: unsupported attribute name '{}'", name))
+                }
+                Ok(_) => Ok(()),
+            }
         };
 
         match args[0].as_str() {
@@ -1217,17 +1223,17 @@ impl BuiltinCommand for XattrCommand {
                         "Usage: xattr list|get|set|remove <path> [name] [value]",
                     ));
                 }
-                let inode = match resolve_inode(&args[1]) {
-                    Ok(i) => i,
+                let node = match resolve_node(&args[1]) {
+                    Ok(n) => n,
                     Err(e) => return CommandResult::Error(e),
                 };
-                match crate::fs::xattr::listxattr(inode) {
+                match node.xattrs() {
                     Ok(attrs) if attrs.is_empty() => {
                         crate::println!("Extended attributes for {}: (none)", args[1]);
                     }
                     Ok(attrs) => {
                         crate::println!("Extended attributes for {}:", args[1]);
-                        for name in &attrs {
+                        for name in attrs.names() {
                             crate::println!("  {}", name);
                         }
                     }
@@ -1243,18 +1249,19 @@ impl BuiltinCommand for XattrCommand {
                         "Usage: xattr list|get|set|remove <path> [name] [value]",
                     ));
                 }
-                let inode = match resolve_inode(&args[1]) {
-                    Ok(i) => i,
+                let node = match resolve_node(&args[1]) {
+                    Ok(n) => n,
                     Err(e) => return CommandResult::Error(e),
                 };
-                match crate::fs::xattr::getxattr(inode, &args[2]) {
+                let attrs = node.xattrs();
+                match attrs.as_ref().ok().and_then(|a| a.get(&args[2])).ok_or(()) {
                     Ok(value) => {
                         // Try to display as UTF-8, fall back to hex
-                        if let Ok(s) = core::str::from_utf8(&value) {
+                        if let Ok(s) = core::str::from_utf8(value) {
                             crate::println!("{}=\"{}\"", args[2], s);
                         } else {
                             crate::print!("{}=0x", args[2]);
-                            for b in &value {
+                            for b in value {
                                 crate::print!("{:02x}", b);
                             }
                             crate::println!();
@@ -1272,11 +1279,15 @@ impl BuiltinCommand for XattrCommand {
                         "Usage: xattr list|get|set|remove <path> [name] [value]",
                     ));
                 }
-                let inode = match resolve_inode(&args[1]) {
-                    Ok(i) => i,
+                let node = match resolve_node(&args[1]) {
+                    Ok(n) => n,
                     Err(e) => return CommandResult::Error(e),
                 };
-                match crate::fs::xattr::setxattr(inode, &args[2], args[3].as_bytes(), 0) {
+                if let Err(e) = check_name(&args[2]) {
+                    return CommandResult::Error(e);
+                }
+                let value = args[3].as_bytes();
+                match node.update_xattrs(&mut |a| a.set(&args[2], value, 0)) {
                     Ok(()) => {
                         crate::println!("Set {}={} on {}", args[2], args[3], args[1]);
                     }
@@ -1292,11 +1303,11 @@ impl BuiltinCommand for XattrCommand {
                         "Usage: xattr list|get|set|remove <path> [name] [value]",
                     ));
                 }
-                let inode = match resolve_inode(&args[1]) {
-                    Ok(i) => i,
+                let node = match resolve_node(&args[1]) {
+                    Ok(n) => n,
                     Err(e) => return CommandResult::Error(e),
                 };
-                match crate::fs::xattr::removexattr(inode, &args[2]) {
+                match node.update_xattrs(&mut |a| a.remove(&args[2])) {
                     Ok(()) => {
                         crate::println!("Removed {} from {}", args[2], args[1]);
                     }
