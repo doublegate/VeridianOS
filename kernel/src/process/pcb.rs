@@ -185,6 +185,11 @@ pub struct Process {
     /// inherited on fork, as on Linux.
     pub tracer: AtomicU64,
 
+    /// Whether the tracer held CAP_SYS_PTRACE when it attached (Linux's
+    /// ptracer_cred, which ptracer_capable checks at exec); meaningful only
+    /// while `tracer` is set. Changed with `tracer`, under `cred_guard`.
+    pub tracer_capable: core::sync::atomic::AtomicBool,
+
     /// Linux's cred_guard_mutex: exec decides and installs set-ID
     /// credentials under it, and ptrace attaches under it, so a tracer
     /// either attaches first (and exec grants no privilege) or sees the new
@@ -471,6 +476,7 @@ impl Process {
             creds: Mutex::new(super::creds::Credentials::new(0, 0)),
             pgid: AtomicU64::new(pid.0),
             tracer: AtomicU64::new(0),
+            tracer_capable: core::sync::atomic::AtomicBool::new(false),
             cred_guard: Mutex::new(()),
             exec_in_progress: core::sync::atomic::AtomicBool::new(false),
             dumpable: core::sync::atomic::AtomicBool::new(true),

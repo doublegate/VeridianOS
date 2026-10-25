@@ -2122,7 +2122,7 @@ fn sys_get_robust_list(tid: usize, head_out: usize, len_out: usize) -> SyscallRe
         if tid < 0 {
             return Err(SyscallError::ProcessNotFound);
         }
-        let caller = crate::process::current_process().ok_or(SyscallError::InvalidState)?;
+        crate::process::current_process().ok_or(SyscallError::InvalidState)?;
         let mut found = None;
         crate::process::table::PROCESS_TABLE.for_each(|p| {
             if found.is_none() {
@@ -2136,7 +2136,8 @@ fn sys_get_robust_list(tid: usize, head_out: usize, len_out: usize) -> SyscallRe
             }
         });
         let (target_creds, target_dumpable, thread) = found.ok_or(SyscallError::ProcessNotFound)?;
-        if !debug::may_access(&caller.credentials(), &target_creds, target_dumpable) {
+        let me = crate::process::creds::Caller::current();
+        if !debug::may_access(&me, &target_creds, target_dumpable) {
             return Err(SyscallError::OperationNotPermitted);
         }
         thread

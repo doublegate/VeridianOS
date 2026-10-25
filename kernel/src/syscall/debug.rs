@@ -202,13 +202,13 @@ fn phys_to_kernel_vaddr(phys_addr: usize) -> usize {
 /// # Returns
 /// Request-specific value on success, or error.
 /// Whether a process may attach to `target`: never to itself or to a
-/// process that already has a tracer; and unless it is root, the target's
-/// real, effective and saved IDs must all be the caller's real ones (Linux
-/// `ptrace_may_access` without capabilities), so a setuid program running
+/// process that already has a tracer; and unless it holds CAP_SYS_PTRACE,
+/// the target's real, effective and saved IDs must all be the caller's real
+/// ones (Linux `ptrace_may_access`), so a setuid program running
 /// privileged cannot be traced.
 fn may_attach(
     caller_pid: u64,
-    caller: &process::creds::Credentials,
+    caller: &process::creds::Caller,
     target_pid: u64,
     target: &process::creds::Credentials,
     target_tracer: u64,
@@ -223,22 +223,23 @@ fn may_attach(
     Ok(())
 }
 
-/// Linux `ptrace_may_access` without capabilities: root, or the target's
-/// real, effective and saved IDs are all the caller's real ones (so a
-/// setuid program running privileged is out of reach) and the target is
-/// dumpable (PR_SET_DUMPABLE). Also guards get_robust_list.
+/// Linux `ptrace_may_access`: the caller holds CAP_SYS_PTRACE, or the
+/// target's real, effective and saved IDs are all the caller's real ones
+/// (so a setuid program running privileged is out of reach) and the target
+/// is dumpable (PR_SET_DUMPABLE). Also guards get_robust_list.
 pub(super) fn may_access(
-    caller: &process::creds::Credentials,
+    caller: &process::creds::Caller,
     target: &process::creds::Credentials,
     target_dumpable: bool,
 ) -> bool {
+    let c = &caller.creds;
     let same_user = [target.ruid, target.euid, target.suid]
         .iter()
-        .all(|&id| id == caller.ruid)
+        .all(|&id| id == c.ruid)
         && [target.rgid, target.egid, target.sgid]
             .iter()
-            .all(|&id| id == caller.rgid);
-    caller.euid == 0 || (same_user && target_dumpable)
+            .all(|&id| id == c.rgid);
+    (same_user && target_dumpable) || caller.capable(process::linux_caps::CAP_SYS_PTRACE)
 }
 
 /// Checked again with the target's address space locked (the lock exec's
@@ -283,11 +284,21 @@ pub fn sys_ptrace(request: usize, pid: usize, addr: usize, data: usize) -> Sysca
         PtraceRequest::TraceMe => {
             // The parent becomes the tracer; a process can be traced once.
             let parent = caller.parent().ok_or(SyscallError::OperationNotPermitted)?;
+            // The tracer's privilege is the parent's (Linux's ptrace_link
+            // takes the new parent's credentials), here its main thread's.
+            let parent_capable = process::find_process(parent).is_some_and(|p| {
+                p.get_main_thread_id()
+                    .and_then(|tid| p.get_thread(tid))
+                    .is_some_and(|t| t.caps.lock().capable(process::linux_caps::CAP_SYS_PTRACE))
+            });
             let _guard = caller.cred_guard.lock();
             caller
                 .tracer
                 .compare_exchange(0, parent.0, Ordering::AcqRel, Ordering::Acquire)
                 .map_err(|_| SyscallError::OperationNotPermitted)?;
+            caller
+                .tracer_capable
+                .store(parent_capable, Ordering::Release);
             Ok(0)
         }
 
@@ -297,10 +308,11 @@ pub fn sys_ptrace(request: usize, pid: usize, addr: usize, data: usize) -> Sysca
             // Checked and attached under the target's credential guard, as
             // a set-ID exec decides under it: the target's credentials
             // cannot change between the check and the attach.
+            let me = process::creds::Caller::current();
             let _guard = target.cred_guard.lock();
             may_attach(
                 caller_pid,
-                &caller.credentials(),
+                &me,
                 target.pid.0,
                 &target.credentials(),
                 target.tracer.load(Ordering::Acquire),
@@ -311,6 +323,10 @@ pub fn sys_ptrace(request: usize, pid: usize, addr: usize, data: usize) -> Sysca
                 .tracer
                 .compare_exchange(0, caller_pid, Ordering::AcqRel, Ordering::Acquire)
                 .map_err(|_| SyscallError::OperationNotPermitted)?;
+            target.tracer_capable.store(
+                me.capable(process::linux_caps::CAP_SYS_PTRACE),
+                Ordering::Release,
+            );
             Ok(0)
         }
 
@@ -381,26 +397,41 @@ mod tests {
     use super::*;
 
     /// ptrace ATTACH: not to oneself or an already traced process; only
-    /// to a process whose IDs are all the caller's, unless root.
+    /// to a process whose IDs are all the caller's, unless the caller holds
+    /// CAP_SYS_PTRACE.
     #[test]
-    fn attach_needs_same_ids_or_root_and_no_tracer() {
-        use process::creds::Credentials;
-        let user = Credentials::new(1000, 100);
-        let root = Credentials::new(0, 0);
+    fn attach_needs_same_ids_or_cap_sys_ptrace_and_no_tracer() {
+        use process::{
+            creds::{Caller, Credentials},
+            linux_caps::LinuxCaps,
+        };
+        let user = Caller {
+            creds: Credentials::new(1000, 100),
+            caps: LinuxCaps::EMPTY,
+        };
+        let root = Caller::KERNEL;
+        let bare_root = Caller {
+            creds: Credentials::new(0, 0),
+            caps: LinuxCaps::EMPTY,
+        };
         let other = Credentials::new(1001, 100);
         let mut setuid_root = Credentials::new(1000, 100);
         setuid_root.euid = 0;
         setuid_root.suid = 0;
-        assert_eq!(may_attach(10, &user, 20, &user, 0, true), Ok(()));
-        assert_eq!(may_attach(10, &root, 20, &user, 0, true), Ok(()));
+        let me = user.creds;
+        assert_eq!(may_attach(10, &user, 20, &me, 0, true), Ok(()));
+        assert_eq!(may_attach(10, &root, 20, &me, 0, true), Ok(()));
         let eperm = Err(SyscallError::OperationNotPermitted);
         assert_eq!(may_attach(10, &user, 20, &other, 0, true), eperm);
         assert_eq!(may_attach(10, &user, 20, &setuid_root, 0, true), eperm);
-        assert_eq!(may_attach(10, &user, 10, &user, 0, true), eperm);
-        assert_eq!(may_attach(10, &root, 20, &user, 30, true), eperm);
+        assert_eq!(may_attach(10, &user, 10, &me, 0, true), eperm);
+        assert_eq!(may_attach(10, &root, 20, &me, 30, true), eperm);
+        // Uid 0 without CAP_SYS_PTRACE is an ordinary user.
+        assert_eq!(may_attach(10, &bare_root, 20, &me, 0, true), eperm);
         // A process that made itself non-dumpable (PR_SET_DUMPABLE 0), or
-        // exec'd a set-ID or unreadable program, only root may trace.
-        assert_eq!(may_attach(10, &user, 20, &user, 0, false), eperm);
-        assert_eq!(may_attach(10, &root, 20, &user, 0, false), Ok(()));
+        // exec'd a set-ID or unreadable program, only CAP_SYS_PTRACE may
+        // trace.
+        assert_eq!(may_attach(10, &user, 20, &me, 0, false), eperm);
+        assert_eq!(may_attach(10, &root, 20, &me, 0, false), Ok(()));
     }
 }

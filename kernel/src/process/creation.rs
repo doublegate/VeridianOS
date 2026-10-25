@@ -310,8 +310,17 @@ struct ExecIds {
     set_gid: Option<u32>,
     /// The caller may read the program (and its loader).
     readable: bool,
-    /// The process's tracer (0: none) when the exec started.
-    tracer_at_start: u64,
+    /// The process was traced, by a tracer without CAP_SYS_PTRACE, when
+    /// the exec started.
+    unprivileged_tracer_at_start: bool,
+}
+
+/// Whether `process` is traced by a tracer that lacked CAP_SYS_PTRACE when
+/// it attached. Read under `cred_guard`, which attach holds.
+#[cfg(feature = "alloc")]
+fn unprivileged_tracer(process: &super::Process) -> bool {
+    use core::sync::atomic::Ordering;
+    process.tracer.load(Ordering::Acquire) != 0 && !process.tracer_capable.load(Ordering::Acquire)
 }
 
 /// Install the credentials a program runs with (Linux's
@@ -328,13 +337,10 @@ fn install_exec_credentials(process: &super::Process, thread: &super::Thread, id
     use core::sync::atomic::Ordering;
 
     let _guard = process.cred_guard.lock();
-    // Traced without privilege as the exec started or now: either denies.
-    let unprivileged = |tracer: u64| match tracer {
-        0 => false,
-        tracer => super::table::get_process(super::ProcessId(tracer)).is_none_or(|t| t.euid() != 0),
-    };
-    let traced_unprivileged =
-        unprivileged(ids.tracer_at_start) || unprivileged(process.tracer.load(Ordering::Acquire));
+    // Traced without privilege as the exec started or now: either denies
+    // (Linux's ptracer_capable: the tracer's CAP_SYS_PTRACE when it
+    // attached).
+    let traced_unprivileged = ids.unprivileged_tracer_at_start || unprivileged_tracer(process);
     // exec runs only in a single-threaded process, so this thread is the
     // process's only user of its filesystem state.
     let fs_shared = thread.fs().users.load(Ordering::Acquire) > 1;
@@ -546,7 +552,7 @@ fn exec_at_depth(
             set_uid: perms.set_uid.then_some(meta.uid),
             set_gid: (perms.set_gid && perms.group_exec).then_some(meta.gid),
             readable: readable(&meta) && interp_readable,
-            tracer_at_start: 0,
+            unprivileged_tracer_at_start: false,
         }
     };
 
@@ -571,15 +577,15 @@ fn exec_at_depth(
     // PEEK and POKE do not write into the image being built (PR #23
     // review: a tracer could poke the new set-ID image, then detach before
     // the decision and have the privilege granted to its modified image).
-    let tracer_at_start = {
+    let unprivileged_tracer_at_start = {
         let _guard = process.cred_guard.lock();
         process
             .exec_in_progress
             .store(true, core::sync::atomic::Ordering::Release);
-        process.tracer.load(core::sync::atomic::Ordering::Acquire)
+        unprivileged_tracer(&process)
     };
     let set_ids = ExecIds {
-        tracer_at_start,
+        unprivileged_tracer_at_start,
         ..set_ids
     };
 
