@@ -153,7 +153,17 @@ pub fn create_process_with_options(
         entry: options.entry_point as u64,
         ..Default::default()
     };
-    let stack_top = setup_exec_stack(&process, &argv_refs, &envp_refs, &options.name, &program)?;
+    // A process the kernel starts runs as its credentials say, with no
+    // exec to grant privilege: AT_SECURE only for differing IDs.
+    let secure = process.credentials().ids_differ();
+    let stack_top = setup_exec_stack(
+        &process,
+        &argv_refs,
+        &envp_refs,
+        &options.name,
+        &program,
+        secure,
+    )?;
 
     // Update the thread context with the adjusted stack pointer
     if let Some(thread) = process.get_thread(tid) {
@@ -323,39 +333,70 @@ fn unprivileged_tracer(process: &super::Process) -> bool {
     process.tracer.load(Ordering::Acquire) != 0 && !process.tracer_capable.load(Ordering::Acquire)
 }
 
-/// Install the credentials a program runs with (Linux's
-/// cred_guard_mutex section of exec): `set_ids` are the owner and group a
-/// set-user-ID or set-group-ID file offers, granted unless the thread asked
-/// for no new privileges, a tracer without privilege is attached, or
-/// another process shares this one's directories and umask (CLONE_FS: it
-/// could redirect the privileged program; LSM_UNSAFE_SHARE). Decided and
+/// Install the credentials and capability sets a program runs with
+/// (Linux's cred_guard_mutex section of exec), and say whether it runs
+/// with AT_SECURE. `set_ids` are the owner and group a set-user-ID or
+/// set-group-ID file offers; `CapSets::after_exec` (Linux's
+/// cap_bprm_creds_from_file, without file capabilities yet) decides what
+/// is granted: not more than before if the thread asked for no new
+/// privileges, a tracer without CAP_SYS_PTRACE is attached, or another
+/// process shares this one's directories and umask (CLONE_FS: it could
+/// redirect the privileged program; LSM_UNSAFE_SHARE). Decided and
 /// installed under `cred_guard`, which ptrace attach takes too: a tracer
 /// attached before is seen here, and one attaching after sees the new
 /// credentials.
 #[cfg(feature = "alloc")]
-fn install_exec_credentials(process: &super::Process, thread: &super::Thread, ids: ExecIds) {
+fn install_exec_credentials(
+    process: &super::Process,
+    thread: &super::Thread,
+    ids: ExecIds,
+) -> Result<bool, KernelError> {
     use core::sync::atomic::Ordering;
 
     let _guard = process.cred_guard.lock();
-    // Traced without privilege as the exec started or now: either denies
-    // (Linux's ptracer_capable: the tracer's CAP_SYS_PTRACE when it
+    // Traced without privilege as the exec started or now: either is
+    // unsafe (Linux's ptracer_capable: the tracer's CAP_SYS_PTRACE when it
     // attached).
     let traced_unprivileged = ids.unprivileged_tracer_at_start || unprivileged_tracer(process);
     // exec runs only in a single-threaded process, so this thread is the
     // process's only user of its filesystem state.
     let fs_shared = thread.fs().users.load(Ordering::Acquire) > 1;
-    let may_gain =
-        !thread.no_new_privs.load(Ordering::Acquire) && !traced_unprivileged && !fs_shared;
-    let creds = process
-        .credentials()
-        .after_exec(ids.set_uid, ids.set_gid, may_gain);
+    let old = process.credentials();
+    let no_new_privs = thread.no_new_privs.load(Ordering::Acquire);
+    // Under no_new_privs the set-ID bits are ignored altogether (Linux's
+    // bprm_fill_uid): the IDs do not change, so the program is not secure.
+    let (set_uid, set_gid) = if no_new_privs {
+        (None, None)
+    } else {
+        (ids.set_uid, ids.set_gid)
+    };
+    let (new_euid, new_egid) = (set_uid.unwrap_or(old.euid), set_gid.unwrap_or(old.egid));
+    let ctx = super::linux_caps::ExecContext {
+        file: None,
+        no_new_privs,
+        unsafe_exec: traced_unprivileged || fs_shared,
+        egid_in_groups: old.in_group(new_egid),
+    };
+    let mut caps = thread.caps.lock();
+    // Without file capabilities the rules never refuse the exec (EPERM is
+    // for a capability-dumb program that would not get its capabilities).
+    let outcome = caps
+        .after_exec(old.ruid, old.euid, old.rgid, new_euid, new_egid, ctx)
+        .map_err(|_| KernelError::PermissionDenied { operation: "exec" })?;
+    let creds = old.after_exec(Some(outcome.euid), Some(outcome.egid), true);
     process.update_credentials(|c| *c = creds);
-    // Linux's begin_new_exec: a process running with other effective IDs
-    // than its real ones, or a program it could not read, may not be
-    // traced or have its memory read by its user (PR_GET_DUMPABLE 0);
-    // otherwise exec makes it dumpable again.
-    let dumpable = ids.readable && creds.euid == creds.ruid && creds.egid == creds.rgid;
+    // Linux's begin_new_exec and commit_creds: a process whose effective
+    // IDs differed from its real ones, whose effective or filesystem IDs
+    // exec changed, whose permitted capabilities grew, or which runs a
+    // program it could not read, may not be traced or have its memory
+    // read by its user (PR_GET_DUMPABLE 0); otherwise exec makes it
+    // dumpable again. What counts is the result: a set-user-ID exec that
+    // was downgraded (shared filesystem state) leaves it dumpable.
+    let grew = !outcome.caps.permitted.is_subset_of(caps.permitted);
+    *caps = outcome.caps;
+    let dumpable = ids.readable && old.exec_keeps_dumpable(&creds) && !grew;
     process.dumpable.store(dumpable, Ordering::Release);
+    Ok(outcome.secure)
 }
 
 /// The last component of `path` (Linux's kbasename).
@@ -660,10 +701,11 @@ fn exec_at_depth(
         // The program's credentials, before the stack: AT_SECURE (and so
         // the loader's refusal of LD_PRELOAD and LD_LIBRARY_PATH) follows
         // from them.
-        install_exec_credentials(&process, &current_thread, set_ids);
+        let secure = install_exec_credentials(&process, &current_thread, set_ids)?;
 
         // Step 3: Setup new stack with arguments, environment, and aux vector
-        let stack_top = setup_exec_stack(&process, argv, envp, &resolved_path, &loaded.aux)?;
+        let stack_top =
+            setup_exec_stack(&process, argv, envp, &resolved_path, &loaded.aux, secure)?;
         Ok((loaded.start, stack_top))
     })();
     process
@@ -976,6 +1018,7 @@ pub(crate) fn setup_exec_stack(
     envp: &[&str],
     execfn: &str,
     program: &crate::elf::dynamic::ProgramAux,
+    secure: bool,
 ) -> Result<usize, KernelError> {
     let creds = process.credentials();
     let process_aux = crate::elf::dynamic::ProcessAux {
@@ -983,8 +1026,8 @@ pub(crate) fn setup_exec_stack(
         euid: creds.euid,
         gid: creds.rgid,
         egid: creds.egid,
-        // Linux's secureexec: the effective IDs differ from the real ones.
-        secure: creds.euid != creds.ruid || creds.egid != creds.rgid,
+        // Linux's secureexec, as exec decided it (`ExecOutcome::secure`).
+        secure,
     };
     let mut random = [0u8; 16];
     crate::crypto::random::get_random()

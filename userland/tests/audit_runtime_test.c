@@ -2223,6 +2223,62 @@ static void test_exec_environment(void)
     exec_without_env("exec-env-null", "execve_null_envp_is_empty");
 }
 
+/* --- exec computes the capability sets (ADR 0020 step 7): the helper
+ * image exits with which of CAP_NET_BIND_SERVICE (10) and CAP_KILL (5) it
+ * holds: 1 effective NET_BIND_SERVICE, 2 permitted NET_BIND_SERVICE, 4
+ * effective KILL, 8 ambient NET_BIND_SERVICE. ------------------------- */
+static void exec_caps_helper(void)
+{
+    uint32_t c[6];
+    if (capget_self(c) != 0)
+        _exit(100);
+    long amb = veridian_syscall5(SYS_prctl, 47 /* PR_CAP_AMBIENT */, 1 /* IS_SET */, 10, 0, 0);
+    _exit((c[0] >> 10 & 1) | (c[1] >> 10 & 1) << 1 | (c[0] >> 5 & 1) << 2 | (amb == 1) << 3);
+}
+
+/* Run the helper in a child prepared by `mode` and return its exit code. */
+static int exec_caps_child(int mode)
+{
+    pid_t pid = fork();
+    if (pid == 0) {
+        if (mode >= 1) {
+            /* Keep pP through the uid change; pE is cleared by it. */
+            if (veridian_syscall5(SYS_prctl, 8 /* PR_SET_KEEPCAPS */, 1, 0, 0, 0) != 0 ||
+                setresuid(1000, 1000, 1000) != 0)
+                _exit(102);
+        }
+        if (mode == 2) {
+            /* NET_BIND_SERVICE effective, permitted, inheritable, ambient. */
+            struct {
+                uint32_t version;
+                int pid;
+            } hdr = {0x20080522, 0};
+            uint32_t d[6] = {1u << 10, 1u << 10, 1u << 10, 0, 0, 0};
+            if (veridian_syscall2(SYS_capset, &hdr, d) != 0 ||
+                veridian_syscall5(SYS_prctl, 47, 2 /* RAISE */, 10, 0, 0) != 0)
+                _exit(103);
+        }
+        char *args[] = {"audit_runtime_test", "exec-caps", NULL};
+        char *env[] = {NULL};
+        execve("/bin/audit_runtime_test", args, env);
+        _exit(101);
+    }
+    int st = 0;
+    if (waitpid(pid, &st, 0) != pid || !WIFEXITED(st))
+        return -1;
+    return WEXITSTATUS(st);
+}
+
+static void test_exec_caps(void)
+{
+    /* Root keeps everything; a user keeps only its ambient set; a user's
+     * permitted set kept with keep-caps does not survive exec. */
+    int root = exec_caps_child(0), user = exec_caps_child(1), amb = exec_caps_child(2);
+    static char why[64];
+    snprintf(why, sizeof(why), "root=%d keepcaps-user=%d ambient-user=%d", root, user, amb);
+    report("exec_computes_capability_sets", root == 7 && user == 0 && amb == 11, why);
+}
+
 /* --- memfd_create (N-229): it returned an eventfd id that was never an
  * fd. Now a sizeable, readable, mappable, sealable anonymous file. ---- */
 static void test_memfd(void)
@@ -2811,6 +2867,8 @@ int main(int argc, char **argv)
     setvbuf(stdout, NULL, _IONBF, 0);
     if (argc > 1 && strncmp(argv[1], "exec-env-", 9) == 0)
         exec_env_helper(argv[1]);
+    if (argc > 1 && strcmp(argv[1], "exec-caps") == 0)
+        exec_caps_helper();
     test_fd_numbering();
     test_scanf();
     /* Native libc threads (N-102): clone through clone_<arch>.S, errno
@@ -2856,6 +2914,7 @@ int main(int argc, char **argv)
     test_credentials_and_paths();
     test_positioned_io_and_truncate();
     test_exec_environment();
+    test_exec_caps();
     test_memfd();
     test_realtime_signals();
     test_vfork_and_clone();

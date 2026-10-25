@@ -229,8 +229,9 @@ pub struct ExecOutcome {
     pub egid: u32,
     /// AT_SECURE: the program runs with privilege its invoker did not have.
     pub secure: bool,
-    /// The permitted set grew: the process becomes non-dumpable and the
-    /// dangerous personality flags are cleared.
+    /// The file would grow the permitted set, before any downgrade (Linux's
+    /// `__cap_gained`, which clears the dangerous personality flags).
+    /// Dumpability goes by the final sets instead.
     pub gained: bool,
 }
 
@@ -1058,6 +1059,9 @@ mod tests {
         let out = c.after_exec(1000, 1000, 1000, 0, 1000, ctx).unwrap();
         assert_eq!(out.euid, 1000, "back to the real uid");
         assert!(out.caps.permitted.is_empty());
+        // The exec asked for another ID, so it is still secure (Linux's
+        // id_changed is taken before the downgrade).
+        assert!(out.secure);
         let nnp = ExecContext {
             no_new_privs: true,
             ..plain()

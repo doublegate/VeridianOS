@@ -1993,10 +1993,13 @@ static int run_ids_as_user(const char *path, enum ids_run how, char *out, size_t
 
 /* Set-user-ID programs (Linux's bprm_fill_uid): a root-owned 04755 copy of
  * this program, run by user 1000, runs with effective and saved user 0 and
- * AT_SECURE (so the loader ignores LD_PRELOAD); under no_new_privs, or when
- * another process shares its directories and umask (LSM_UNSAFE_SHARE), it
- * gains nothing; the command name is the file's. A write by a non-root owner and
- * any chown clear the bit (file_remove_privs, chown). */
+ * AT_SECURE (so the loader ignores LD_PRELOAD); under no_new_privs the bit
+ * is ignored (bprm_fill_uid); when another process shares its directories
+ * and umask (LSM_UNSAFE_SHARE) it gains nothing but still runs with AT_SECURE,
+ * since the exec asked for another ID (cap_bprm_creds_from_file's
+ * id_changed), and stays dumpable; the command name is the file's. A write
+ * by a non-root owner and any chown clear the bit (file_remove_privs,
+ * chown). */
 static void test_setuid_exec(const char *self)
 {
     const char *copy = "/tmp/suid_ids";
@@ -2028,7 +2031,7 @@ static void test_setuid_exec(const char *self)
     report("musl_setuid_exec",
            chmodded && st_gained == 0 && strcmp(gained, "1000 0 0 1 0 suid_ids") == 0
                && st_kept == 0 && strcmp(kept, "1000 1000 1000 0 1 suid_ids") == 0
-               && st_shared == 0 && strcmp(shared, "1000 1000 1000 0 1 suid_ids") == 0,
+               && st_shared == 0 && strcmp(shared, "1000 1000 1000 1 1 suid_ids") == 0,
            why);
 
     /* The owner (1000) writing its own set-user-ID file clears the bit;

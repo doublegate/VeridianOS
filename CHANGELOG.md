@@ -59,7 +59,13 @@
   another user's process need CAP_SYS_PTRACE, and the tracer's CAP_SYS_PTRACE when it attached
   decides whether a set-ID exec under it gains privilege (Linux's ptracer_capable). The account
   calls act on another user's account with CAP_DAC_OVERRIDE, and mount needs CAP_SYS_ADMIN besides
-  its object capability. No privilege check uses `euid == 0` any more.
+  its object capability. No privilege check uses `euid == 0` any more. exec computes the sets as
+  Linux's `cap_bprm_creds_from_file` does (no file capabilities yet): real or effective uid 0 gets
+  the bounding and inheritable sets as permitted (unless SECBIT_NOROOT) and effective uid 0 all of
+  them effective, anyone else keeps only its ambient set, and a set-user-ID-root program gains
+  root's; under no_new_privs, a tracer without CAP_SYS_PTRACE or shared filesystem state nothing is
+  gained. The process becomes non-dumpable when its permitted set grows, and AT_SECURE follows the
+  same decision.
 - `pause` on x86_64 (system call 34 had no handler, so musl's `pause()` returned ENOSYS at once and a
   forked child meant to wait ran on): it waits as `ppoll` with no descriptors and no timeout,
   which is what musl does on AArch64 and RISC-V, and returns EINTR after a handler.

@@ -58,6 +58,25 @@ impl Credentials {
         &self.groups[..self.ngroups]
     }
 
+    /// Whether the effective IDs differ from the real ones (a set-ID
+    /// program running privileged).
+    pub const fn ids_differ(&self) -> bool {
+        self.euid != self.ruid || self.egid != self.rgid
+    }
+
+    /// Whether exec leaves the process dumpable as far as its IDs go:
+    /// `self` are the credentials before exec, `new` those after. Not if
+    /// the effective IDs differed from the real ones before (Linux's
+    /// begin_new_exec checks the old credentials) or if exec changed an
+    /// effective or filesystem ID (commit_creds).
+    pub const fn exec_keeps_dumpable(&self, new: &Self) -> bool {
+        !self.ids_differ()
+            && self.euid == new.euid
+            && self.egid == new.egid
+            && self.fsuid == new.fsuid
+            && self.fsgid == new.fsgid
+    }
+
     /// Whether the process is in group `gid` for file access (its
     /// filesystem gid or a supplementary group; Linux's `in_group_p`).
     pub fn in_group(&self, gid: u32) -> bool {
@@ -411,6 +430,26 @@ mod tests {
         // no_new_privs or an unprivileged tracer: nothing is gained.
         let c = user.after_exec(Some(0), Some(5), false);
         assert_eq!((c.euid, c.suid, c.egid, c.sgid), (1000, 1000, 100, 100));
+    }
+
+    #[test]
+    fn exec_keeps_dumpable_only_without_an_id_change() {
+        let user = Credentials::new(1000, 100);
+        // An ordinary program, or a set-user-ID one downgraded back to the
+        // user (shared filesystem state): still dumpable.
+        assert!(user.exec_keeps_dumpable(&user.after_exec(None, None, true)));
+        assert!(user.exec_keeps_dumpable(&user.after_exec(Some(0), None, false)));
+        // Set-user-ID or set-group-ID taken: not.
+        assert!(!user.exec_keeps_dumpable(&user.after_exec(Some(0), None, true)));
+        assert!(!user.exec_keeps_dumpable(&user.after_exec(None, Some(5), true)));
+        // A filesystem uid that exec resets counts as a change.
+        let mut fs = user;
+        fs.fsuid = 7;
+        assert!(!fs.exec_keeps_dumpable(&fs.after_exec(None, None, true)));
+        // Effective IDs that differed from the real ones before exec.
+        let mut suid = user;
+        suid.euid = 0;
+        assert!(!suid.exec_keeps_dumpable(&suid.after_exec(None, None, true)));
     }
 
     #[test]

@@ -87,7 +87,8 @@ pub struct ProcessAux {
     pub euid: u32,
     pub gid: u32,
     pub egid: u32,
-    /// The exec changed the effective user or group ID.
+    /// AT_SECURE: the program runs with privilege its invoker did not
+    /// have (changed IDs or capabilities; Linux's secureexec).
     pub secure: bool,
 }
 

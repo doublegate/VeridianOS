@@ -249,8 +249,17 @@ fn load_image(
         // argv[0] is the program name if no arguments were given.
         let default_argv = [path];
         let argv_for_stack: &[&str] = if argv.is_empty() { &default_argv } else { argv };
-        let stack_top =
-            lifecycle::setup_exec_stack_pub(process, argv_for_stack, envp, path, &loaded.aux)?;
+        // A program the kernel starts: AT_SECURE only for differing IDs,
+        // as there is no exec to grant privilege.
+        let secure = process.credentials().ids_differ();
+        let stack_top = lifecycle::setup_exec_stack_pub(
+            process,
+            argv_for_stack,
+            envp,
+            path,
+            &loaded.aux,
+            secure,
+        )?;
 
         if let Some(main_tid) = process.get_main_thread_id() {
             if let Some(thread) = process.get_thread(main_tid) {
