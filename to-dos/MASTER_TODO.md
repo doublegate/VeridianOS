@@ -345,7 +345,7 @@ What does not work yet: `docs/KNOWN-LIMITATIONS.md`.
      - [x] step 3: capget, capset, `/proc/sys/kernel/cap_last_cap` and `pid_max`; pause on x86_64
      - [x] step 4: the capability prctl options; `Cap*` lines in `/proc/<pid>/status`
      - [x] step 5: the set*id fix-ups on every thread; CAP_SETUID/CAP_SETGID decide privilege
-     - [ ] step 6: every `euid == 0` check replaced by its capability, one subsystem per commit
+     - [x] step 6: every `euid == 0` check replaced by its capability, one subsystem per commit
      - [ ] step 7: exec computes the sets (no file capabilities yet)
      - [ ] step 8: persistent BlockFS xattrs (format version bump, migration in mkfs-blockfs) and
        the xattr calls

@@ -836,9 +836,13 @@ pub fn sys_mount(
     validate_user_string_ptr(mount_point)?;
     validate_user_string_ptr(fs_type)?;
 
-    // Mount is a privileged operation - verify the calling process has
-    // a Memory capability with WRITE rights (needed to modify the VFS tree)
+    // Mount needs CAP_SYS_ADMIN, as on Linux (EPERM), and, as a native
+    // authority over the VFS tree, a Memory object capability with WRITE
+    // and CREATE rights: both must hold (ADR 0020, decision 9).
     let current = process::current_process().ok_or(SyscallError::InvalidState)?;
+    if !Caller::current().capable(crate::process::linux_caps::CAP_SYS_ADMIN) {
+        return Err(SyscallError::OperationNotPermitted);
+    }
     let cap_space = current.capability_space.lock();
     let has_mount_perm = {
         let mut found = false;

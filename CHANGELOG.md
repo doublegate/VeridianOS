@@ -57,8 +57,9 @@
   CAP_SYS_NICE; another process's limits and a raised hard limit CAP_SYS_RESOURCE; RLIMIT_NPROC
   spares real uid 0 and CAP_SYS_RESOURCE or CAP_SYS_ADMIN. ptrace attach and the robust-list read of
   another user's process need CAP_SYS_PTRACE, and the tracer's CAP_SYS_PTRACE when it attached
-  decides whether a set-ID exec under it gains privilege (Linux's ptracer_capable). The other
-  privilege checks still use `euid == 0` until later steps.
+  decides whether a set-ID exec under it gains privilege (Linux's ptracer_capable). The account
+  calls act on another user's account with CAP_DAC_OVERRIDE, and mount needs CAP_SYS_ADMIN besides
+  its object capability. No privilege check uses `euid == 0` any more.
 - `pause` on x86_64 (system call 34 had no handler, so musl's `pause()` returned ENOSYS at once and a
   forked child meant to wait ran on): it waits as `ppoll` with no descriptors and no timeout,
   which is what musl does on AArch64 and RISC-V, and returns EINTR after a handler.

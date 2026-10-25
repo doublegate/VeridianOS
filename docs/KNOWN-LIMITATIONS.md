@@ -223,12 +223,11 @@ What remains:
 - **Credentials (N-131 remainder, planned v0.30):** real, effective and saved IDs,
   filesystem IDs (setfsuid, setfsgid), supplementary groups (N-248) and set-user-ID/set-group-ID
   exec exist. Each thread has Linux capability sets (ADR 0020), which `capget`, `capset` and the
-  capability prctl options read and change and `/proc/<pid>/status` shows, and which the set*id
-  calls check (CAP_SETUID, CAP_SETGID) and fix up as Linux does, as do the filesystem's permission
-  and ownership checks (CAP_DAC_OVERRIDE, CAP_DAC_READ_SEARCH, CAP_FOWNER, CAP_FSETID, CAP_CHOWN,
-  CAP_MKNOD, CAP_SYS_CHROOT) and CAP_KILL, CAP_SYS_TIME, CAP_SYS_NICE, CAP_SYS_RESOURCE,
-  CAP_SYS_PTRACE. The rest do not use them yet: other privilege is still effective uid 0. A
-  directory's
+  capability prctl options read and change and `/proc/<pid>/status` shows, and every privilege check
+  uses them as Linux does: the set*id calls, file permissions and ownership, signals, the clock,
+  scheduling, resource limits, ptrace, mount and the account calls. exec does not compute the sets
+  yet (a program keeps its caller's, ADR 0020 step 7), and there are no file capabilities (steps 8
+  and 9). A directory's
   set-group-ID bit is kept but not acted on: new entries take the creator's group, not the
   directory's.
 - **Process ids never wrap.** `/proc/sys/kernel/pid_max` reports 4194304, Linux's limit on
