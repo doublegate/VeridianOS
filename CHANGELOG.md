@@ -2,6 +2,10 @@
 
 ### Changed
 
+- `docs/PORTING-GUIDE.md` describes the privilege model as it is: Unix credentials and Linux
+  capabilities for POSIX programs (ADR 0020) beside the object capabilities of the native calls.
+  It said VeridianOS had no user or group IDs and that `setuid` should be removed from ported
+  programs. KNOWN-LIMITATIONS closes N-131 except the set-group-ID directory rule.
 - The five Gemini workflows (`gemini-cli`, `gemini-dispatch`, `gemini-invoke`,
   `gemini-pr-review`, `gemini-review`) are removed; pull requests are reviewed by the Antigravity
   workflow and the review bots.

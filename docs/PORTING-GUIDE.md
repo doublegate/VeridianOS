@@ -17,7 +17,8 @@ VeridianOS is a capability-based microkernel. While it provides a POSIX-like
 syscall interface for compatibility, there are important differences from
 traditional Unix systems that affect ported software:
 
-- Capability-based security instead of Unix UID/GID permissions
+- Unix credentials and Linux capabilities for POSIX programs (ADR 0020), and object
+  capabilities for the native IPC and memory calls
 - Microkernel architecture with user-space drivers
 - A BlockFS root on a virtio disk, with RamFS and tmpfs mounts
 - musl 1.2.5 with GCC cross toolchains for all three architectures
@@ -151,7 +152,7 @@ in ported software:
 | `access`/`faccessat` | Check by attempting to open the file                  |
 | `link`/`symlink`   | Not supported; VFS has no hard/symbolic links           |
 | `rename`           | Not implemented; copy and delete as workaround          |
-| `chmod`/`chown`    | Capability-based; traditional permissions not applicable|
+| `chmod`/`chown`    | As on Linux: the owner, or CAP_FOWNER / CAP_CHOWN       |
 | `exec` variants    | Only `ProcessExec` (13); no `execvp`/`execle`/etc.      |
 | `signal`/`sigaction` | Basic `ProcessKill` (113) exists; no full signal API  |
 
@@ -201,32 +202,38 @@ delivery mechanism is simplified:
 Porting advice: Software that relies on signal handlers should be refactored
 to use polling or IPC-based notification where possible.
 
-## Process Model (Capability-Based)
+## Process Model and Privilege
 
-### Key Differences from Unix
+### Two kinds of capability
 
-1. **No UID/GID**: Access control is capability-based, not identity-based.
-   Every resource access requires an unforgeable capability token.
+1. **Credentials and Linux capabilities (ADR 0020)**: a process has Linux's
+   real, effective, saved and filesystem user and group IDs and supplementary
+   groups, and each thread Linux's capability sets (effective, permitted,
+   inheritable, bounding, ambient, securebits). Every privilege check
+   consults the calling thread's effective set as Linux does: file
+   permissions (CAP_DAC_OVERRIDE, CAP_DAC_READ_SEARCH), ownership
+   (CAP_FOWNER, CAP_CHOWN, CAP_FSETID), signals (CAP_KILL), the set*id calls
+   (CAP_SETUID, CAP_SETGID), and so on. Root holds every capability. The
+   set*id fixups, `capget`/`capset`, the capability `prctl` options, exec's
+   rules and file capabilities (`security.capability`) follow Linux, so
+   libcap, `setcap`-ed programs and services that drop privilege work
+   unmodified. User namespaces do not exist yet.
 
-2. **Capability Inheritance**: On `fork()`, the child inherits capabilities
-   from the parent. On `exec()`, only capabilities marked for preservation
-   are carried over.
+2. **Object capabilities**: the native IPC and memory calls are authorised
+   by unforgeable capability tokens (`kernel/src/cap/`), inherited on
+   `fork()` and filtered on `exec()`. Where a native call stands for a POSIX
+   privilege it needs both: `mount` takes CAP_SYS_ADMIN and a Memory
+   capability with WRITE and CREATE rights.
 
-3. **Privileged Operations**: Operations like `mount`/`unmount` and package
-   management require specific capability rights (WRITE + CREATE), not
-   root/superuser status.
-
-4. **Priority Model**: Five priority levels (RealTime, System, Normal, Low,
+3. **Priority Model**: Five priority levels (RealTime, System, Normal, Low,
    Idle) mapped from numeric ranges 0-140.
 
 ### Porting Considerations
 
-- Remove `setuid`/`setgid` calls
-- Replace permission checks (`access()`, `stat().st_mode`) with capability
-  checks or try-and-fail patterns
-- Do not assume process 0 or 1 have special privileges
-- File creation mode arguments are accepted but interpreted through the
-  capability system
+- `setuid`/`setgid`, `access()` and `stat().st_mode` behave as on Linux.
+- A program that needs one privilege can run as an ordinary user with a
+  file capability or an ambient capability instead of as root.
+- The kernel console's shell runs with every capability.
 
 ## Using the Portfile System
 

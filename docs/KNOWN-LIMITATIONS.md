@@ -220,15 +220,13 @@ What remains:
   PEEKDATA and POKEDATA (and deny the tracee set-ID privilege at exec), but the tracee is not
   stopped, the tracer's `wait` does not report it, and the register and resume requests (GETREGS,
   SETREGS, CONT, SINGLESTEP) fail. A debugger cannot drive a process yet (planned v0.28).
-- **Credentials (N-131 remainder, planned v0.30):** real, effective and saved IDs,
-  filesystem IDs (setfsuid, setfsgid), supplementary groups (N-248) and set-user-ID/set-group-ID
-  exec exist. Each thread has Linux capability sets (ADR 0020), which `capget`, `capset` and the
-  capability prctl options read and change and `/proc/<pid>/status` shows, and every privilege check
-  uses them as Linux does: the set*id calls, file permissions and ownership, signals, the clock,
-  scheduling, resource limits, ptrace, mount and the account calls; exec computes them as Linux
-  does, file capabilities (`security.capability`) included. A directory's
-  set-group-ID bit is kept but not acted on: new entries take the creator's group, not the
-  directory's.
+- **Credentials (N-131):** Linux's credential model is in place (ADR 0020): real, effective,
+  saved and filesystem IDs, supplementary groups, set-user-ID/set-group-ID exec, and per-thread
+  capability sets that every privilege check consults, with file capabilities at exec. One gap
+  remains: a directory's set-group-ID bit is kept but not acted on, so new entries take the
+  creator's group, not the directory's. User namespaces do not exist yet (queue item 3); until
+  they do, every check is in the initial namespace and a v3 file capability with a nonzero root
+  id grants nothing.
 - **Process ids never wrap.** `/proc/sys/kernel/pid_max` reports 4194304, Linux's limit on
   64-bit systems, but the kernel does not keep ids below it: process and thread ids count up from
   1 and are never reused, where Linux wraps at `pid_max` and reuses freed ids. A system that
