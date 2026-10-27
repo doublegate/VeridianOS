@@ -10,6 +10,8 @@
 //! Everything in this module is pure: the system calls read the calling
 //! thread's [`CapSets`], apply one of these transitions and store the result.
 
+use alloc::vec::Vec;
+
 use super::super::syscall::SyscallError;
 
 pub const CAP_CHOWN: u32 = 0;
@@ -203,6 +205,91 @@ pub struct FileCaps {
     pub inheritable: LinuxCaps,
     /// The effective bit: the program runs with pE' = pP'.
     pub effective: bool,
+}
+
+/// `security.capability` revisions and sizes (`<linux/capability.h>`):
+/// the revision is the top byte of `magic_etc`, the effective flag bit 0.
+const VFS_CAP_REVISION_MASK: u32 = 0xFF00_0000;
+const VFS_CAP_REVISION_1: u32 = 0x0100_0000;
+const VFS_CAP_REVISION_2: u32 = 0x0200_0000;
+const VFS_CAP_REVISION_3: u32 = 0x0300_0000;
+const VFS_CAP_FLAGS_EFFECTIVE: u32 = 0x0000_0001;
+const XATTR_CAPS_SZ_1: usize = 12;
+const XATTR_CAPS_SZ_2: usize = 20;
+const XATTR_CAPS_SZ_3: usize = 24;
+
+fn le32(v: &[u8], at: usize) -> u32 {
+    u32::from_le_bytes([v[at], v[at + 1], v[at + 2], v[at + 3]])
+}
+
+impl FileCaps {
+    /// A file's capabilities from its `security.capability` value, as exec
+    /// reads them (Linux's get_vfs_caps_from_disk, in the initial user
+    /// namespace): v1, v2 and v3 at their exact sizes, masked to the valid
+    /// capabilities; `None` for a v3 whose root id is not 0 (it grants
+    /// nothing outside its namespace); EINVAL for anything else.
+    pub fn from_xattr(value: &[u8]) -> Result<Option<Self>, SyscallError> {
+        let bad = SyscallError::InvalidArgument;
+        if value.len() < 4 {
+            return Err(bad);
+        }
+        let magic = le32(value, 0);
+        let size = match magic & VFS_CAP_REVISION_MASK {
+            VFS_CAP_REVISION_1 => XATTR_CAPS_SZ_1,
+            VFS_CAP_REVISION_2 => XATTR_CAPS_SZ_2,
+            VFS_CAP_REVISION_3 => XATTR_CAPS_SZ_3,
+            _ => return Err(bad),
+        };
+        if value.len() != size {
+            return Err(bad);
+        }
+        if size == XATTR_CAPS_SZ_3 && le32(value, 20) != 0 {
+            return Ok(None);
+        }
+        let (high_p, high_i) = if size == XATTR_CAPS_SZ_1 {
+            (0, 0)
+        } else {
+            (le32(value, 12), le32(value, 16))
+        };
+        Ok(Some(Self {
+            permitted: LinuxCaps::from_words(le32(value, 4), high_p),
+            inheritable: LinuxCaps::from_words(le32(value, 8), high_i),
+            effective: magic & VFS_CAP_FLAGS_EFFECTIVE != 0,
+        }))
+    }
+
+    /// Whether `value` may be written as `security.capability` (Linux's
+    /// validheader in cap_convert_nscap): a v2 or v3 value at its exact
+    /// size. A v1 value can be read but not written.
+    pub fn valid_to_write(value: &[u8]) -> bool {
+        let rev = |want| value.len() >= 4 && le32(value, 0) & !VFS_CAP_FLAGS_EFFECTIVE == want;
+        (value.len() == XATTR_CAPS_SZ_2 && rev(VFS_CAP_REVISION_2))
+            || (value.len() == XATTR_CAPS_SZ_3 && rev(VFS_CAP_REVISION_3))
+    }
+
+    /// The `security.capability` value getxattr returns for a stored one
+    /// (Linux's cap_inode_getsecurity, in the initial user namespace): a
+    /// v3 value with root id 0 is shown as v2, any other v2 or v3 value as
+    /// it is; anything else is EINVAL.
+    pub fn xattr_for_reader(stored: &[u8]) -> Result<Vec<u8>, SyscallError> {
+        if stored.len() == XATTR_CAPS_SZ_2
+            && le32(stored, 0) & !VFS_CAP_FLAGS_EFFECTIVE == VFS_CAP_REVISION_2
+        {
+            return Ok(Vec::from(stored));
+        }
+        if stored.len() == XATTR_CAPS_SZ_3
+            && le32(stored, 0) & !VFS_CAP_FLAGS_EFFECTIVE == VFS_CAP_REVISION_3
+        {
+            if le32(stored, 20) != 0 {
+                return Ok(Vec::from(stored));
+            }
+            let magic = VFS_CAP_REVISION_2 | (le32(stored, 0) & VFS_CAP_FLAGS_EFFECTIVE);
+            let mut v2 = Vec::from(&stored[..XATTR_CAPS_SZ_2]);
+            v2[0..4].copy_from_slice(&magic.to_le_bytes());
+            return Ok(v2);
+        }
+        Err(SyscallError::InvalidArgument)
+    }
 }
 
 /// What exec needs to know besides the old and new IDs.
@@ -649,6 +736,64 @@ mod tests {
         assert!(cap_valid(40) && !cap_valid(41) && !cap_valid(u64::MAX));
         assert!(FS_SET.has(CAP_LINUX_IMMUTABLE) && FS_SET.has(CAP_MAC_OVERRIDE));
         assert!(!FS_SET.has(CAP_KILL));
+    }
+
+    /// security.capability as Linux reads and writes it (initial user
+    /// namespace): v1/v2/v3 at their exact sizes for exec, v3 with a
+    /// nonzero root id granting nothing; only v2 and v3 writable; a v3 with
+    /// root id 0 read back as v2.
+    #[test]
+    fn file_capability_values_follow_linux() {
+        fn value(magic: u32, words: &[u32]) -> Vec<u8> {
+            let mut v = Vec::from(magic.to_le_bytes());
+            for w in words {
+                v.extend_from_slice(&w.to_le_bytes());
+            }
+            v
+        }
+        let nbs = 1u32 << CAP_NET_BIND_SERVICE;
+        let v2 = value(0x0200_0001, &[nbs, 0, 1 << (CAP_SYSLOG - 32), 0]);
+        let fc = FileCaps::from_xattr(&v2).unwrap().unwrap();
+        assert!(fc.effective);
+        assert_eq!(fc.permitted, caps(&[CAP_NET_BIND_SERVICE, CAP_SYSLOG]));
+        assert!(fc.inheritable.is_empty());
+        let v1 = value(0x0100_0000, &[nbs, nbs]);
+        let one = FileCaps::from_xattr(&v1).unwrap().unwrap();
+        assert!(!one.effective && one.inheritable.has(CAP_NET_BIND_SERVICE));
+        // Bits past the last capability are dropped.
+        let wide = FileCaps::from_xattr(&value(0x0200_0000, &[0, 0, u32::MAX, 0]))
+            .unwrap()
+            .unwrap();
+        assert_eq!(wide.permitted, LinuxCaps::from_words(0, u32::MAX));
+        let mut v3 = value(0x0300_0000, &[nbs, 0, 0, 0, 0]);
+        assert_eq!(
+            FileCaps::from_xattr(&v3).unwrap().unwrap().permitted,
+            caps(&[CAP_NET_BIND_SERVICE])
+        );
+        v3[20..24].copy_from_slice(&1000u32.to_le_bytes());
+        assert_eq!(FileCaps::from_xattr(&v3), Ok(None));
+        assert_eq!(FileCaps::from_xattr(&v2[..12]), Err(EINVAL));
+        assert_eq!(
+            FileCaps::from_xattr(&value(0x0400_0000, &[0; 4])),
+            Err(EINVAL)
+        );
+
+        assert!(FileCaps::valid_to_write(&v2) && FileCaps::valid_to_write(&v3));
+        assert!(!FileCaps::valid_to_write(&v1));
+        assert!(!FileCaps::valid_to_write(&v2[..16]));
+
+        assert_eq!(FileCaps::xattr_for_reader(&v2).unwrap(), v2);
+        assert_eq!(
+            FileCaps::xattr_for_reader(&v3).unwrap(),
+            v3,
+            "a foreign root id stays v3"
+        );
+        let rooted = value(0x0300_0001, &[nbs, 0, 0, 0, 0]);
+        assert_eq!(
+            FileCaps::xattr_for_reader(&rooted).unwrap(),
+            value(0x0200_0001, &[nbs, 0, 0, 0])
+        );
+        assert_eq!(FileCaps::xattr_for_reader(&v1), Err(EINVAL));
     }
 
     /// access(2) checks as the caller's real self (do_faccessat): a real

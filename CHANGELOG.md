@@ -65,7 +65,14 @@
   them effective, anyone else keeps only its ambient set, and a set-user-ID-root program gains
   root's; under no_new_privs, a tracer without CAP_SYS_PTRACE or shared filesystem state nothing is
   gained. The process becomes non-dumpable when its permitted set grows, and AT_SECURE follows the
-  same decision.
+  same decision. Programs carry file capabilities in `security.capability` (step 9): v1, v2 and v3
+  values apply at exec (pP' = (X & fP) | (pI & fI) | pA, and with the effective bit pE' = pP'), a v3
+  value whose root id is not 0 grants nothing, a malformed one fails the exec (EINVAL), an effective
+  bit asking for capabilities the bounding set withholds fails it with EPERM before the point of no
+  return, and a set-user-ID-root program run by another user gets only its file capabilities. Only
+  v2 and v3 values can be written (EINVAL otherwise), with CAP_SETFCAP; a v3 value with root id 0
+  reads back as v2; a write, truncate or chown removes the attribute, whoever makes it (Linux's
+  killpriv).
 - Extended attributes (ADR 0020 step 8): the twelve Linux calls (`setxattr`, `getxattr`,
   `listxattr`, `removexattr` and their `l*` and `f*` forms) and the four `*xattrat` calls of Linux
   6.13, with Linux's rules: names up to 255 bytes (ERANGE), values up to 64 KiB (E2BIG),

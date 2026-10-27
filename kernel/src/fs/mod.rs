@@ -144,13 +144,15 @@ pub fn check_fsize_truncate(node: &dyn VfsNode, size: usize) -> Result<(), Kerne
     Ok(())
 }
 
-/// After a write or truncate of `node` by the calling process: drop the
-/// set-user-ID and set-group-ID bits as [`Permissions::after_write`] says.
+/// After a write or truncate of `node` by the calling process: drop its
+/// file capabilities ([`kill_file_caps`]) and the set-user-ID and
+/// set-group-ID bits as [`Permissions::after_write`] says.
 /// Regular files only; a failure to read or change the mode leaves it.
 pub fn remove_privs_after_write(node: &dyn VfsNode) {
     if node.node_type() != NodeType::File {
         return;
     }
+    kill_file_caps(node);
     // The kernel itself (no process) holds CAP_FSETID.
     let caller = crate::process::creds::Caller::current();
     let Ok(meta) = node.metadata() else {
@@ -162,6 +164,18 @@ pub fn remove_privs_after_write(node: &dyn VfsNode) {
         .after_write(fsetid, caller.creds.in_group(meta.gid))
     {
         let _ = node.chmod(kept);
+    }
+}
+
+/// Remove a file's capabilities (Linux's cap_inode_killpriv), as a write,
+/// truncate or chown does whoever makes it: a changed program must not
+/// keep the privilege granted to the old one. Only read when present.
+pub fn kill_file_caps(node: &dyn VfsNode) {
+    let has = node
+        .xattrs()
+        .is_ok_and(|a| a.get(xattr::XATTR_NAME_CAPS).is_some());
+    if has {
+        let _ = node.update_xattrs(&mut |a| a.remove(xattr::XATTR_NAME_CAPS));
     }
 }
 
@@ -2404,6 +2418,28 @@ mod tests {
             MAY_READ | MAY_EXEC
         ));
         assert!(!permission(&rs, &meta(dir, 0o000, 0, 0), MAY_WRITE));
+    }
+
+    /// A write, as a truncate or chown, removes a file's capabilities
+    /// (cap_inode_killpriv), even the kernel's own write; other
+    /// attributes stay.
+    #[test]
+    fn writes_remove_file_capabilities() {
+        let vfs = make_vfs_with_root();
+        let root = vfs.root_fs().unwrap().root();
+        let f = root.create("prog", Permissions::from_mode(0o755)).unwrap();
+        f.update_xattrs(&mut |a| {
+            a.set(xattr::XATTR_NAME_CAPS, &[0; 20], 0)?;
+            a.set("user.keep", b"1", 0)
+        })
+        .unwrap();
+        remove_privs_after_write(&*f);
+        let attrs = f.xattrs().unwrap();
+        assert!(attrs.get(xattr::XATTR_NAME_CAPS).is_none());
+        assert_eq!(attrs.get("user.keep"), Some(&b"1"[..]));
+        // Nothing to remove: no error, nothing changes.
+        kill_file_caps(&*f);
+        assert_eq!(f.xattrs().unwrap().names().count(), 1);
     }
 
     /// Linux's file_remove_privs: a write without CAP_FSETID drops

@@ -3291,9 +3291,10 @@ pub(crate) fn chown_node(
     }
     node.chown(uid, gid).map_err(super::map_kernel_error)?;
     // A non-directory that changes hands loses set-user-ID and
-    // set-group-ID (`Permissions::after_chown`).
+    // set-group-ID (`Permissions::after_chown`) and its file capabilities.
     let meta = node.metadata().map_err(super::map_kernel_error)?;
     if meta.node_type != crate::fs::NodeType::Directory {
+        crate::fs::kill_file_caps(&**node);
         if let Some(kept) = meta.permissions.after_chown() {
             node.chmod(kept).map_err(super::map_kernel_error)?;
         }

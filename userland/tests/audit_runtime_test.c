@@ -2364,6 +2364,88 @@ static void test_xattrs(void)
     report("xattr_calls_follow_linux", fails == 0, why);
 }
 
+/* --- File capabilities (ADR 0020 step 9): a copy of this program with a
+ * security.capability attribute. A user running it gets the file's
+ * capabilities; one outside the bounding set with the effective bit makes
+ * the exec fail (EPERM); a write removes the attribute. -------------- */
+static int copy_file(const char *from, const char *to)
+{
+    char buf[4096];
+    int in = open(from, O_RDONLY), out = open(to, O_WRONLY | O_CREAT | O_TRUNC, 0755);
+    long n = 0;
+    while (in >= 0 && out >= 0 && (n = read(in, buf, sizeof(buf))) > 0)
+        if (write(out, buf, (size_t)n) != n)
+            n = -1;
+    if (in >= 0)
+        close(in);
+    if (out >= 0)
+        close(out);
+    return in >= 0 && out >= 0 && n == 0 ? 0 : -1;
+}
+
+/* A v2 security.capability value: effective bit, `perm` low and high. */
+static void fcap_v2(uint32_t v[5], uint32_t lo, uint32_t hi)
+{
+    v[0] = 0x02000001;
+    v[1] = lo;
+    v[2] = 0;
+    v[3] = hi;
+    v[4] = 0;
+}
+
+static void test_file_caps(void)
+{
+    const char *prog = "/tmp/audit_capprog";
+    int fails = 0;
+    uint32_t v[5], got[6];
+    if (copy_file("/bin/audit_runtime_test", prog) != 0) {
+        report("file_capabilities_at_exec", 0, "copy failed");
+        return;
+    }
+    uint32_t v1[3] = {0x01000000, 1u << 10, 0};
+    if (!failed_with(xa_set(prog, "security.capability", v1, sizeof(v1), 0), EINVAL)) fails |= 1;
+    fcap_v2(v, 1u << 10, 0);
+    if (xa_set(prog, "security.capability", v, sizeof(v), 0) != 0) fails |= 2;
+    if (xa_get(prog, "security.capability", got, sizeof(got)) != 20 || memcmp(got, v, 20) != 0)
+        fails |= 4;
+    pid_t pid = fork();
+    if (pid == 0) {
+        if (setresuid(1000, 1000, 1000) != 0) _exit(102);
+        char *args[] = {"audit_capprog", "exec-caps", NULL};
+        char *env[] = {NULL};
+        execve(prog, args, env);
+        _exit(101);
+    }
+    int st = 0;
+    /* NET_BIND_SERVICE effective and permitted, KILL not, none ambient. */
+    if (waitpid(pid, &st, 0) != pid || !WIFEXITED(st) || WEXITSTATUS(st) != 3)
+        fails |= 8 | (WIFEXITED(st) ? WEXITSTATUS(st) : 0xff) << 8;
+    /* CAP_SYSLOG (34), effective, but dropped from the bounding set. */
+    fcap_v2(v, 0, 1u << (34 - 32));
+    if (xa_set(prog, "security.capability", v, sizeof(v), 0) != 0) fails |= 1 << 16;
+    pid = fork();
+    if (pid == 0) {
+        if (veridian_syscall5(SYS_prctl, 24 /* PR_CAPBSET_DROP */, 34, 0, 0, 0) != 0) _exit(2);
+        char *args[] = {"audit_capprog", "exec-caps", NULL};
+        char *env[] = {NULL};
+        execve(prog, args, env);
+        _exit(errno == EPERM ? 0 : 3);
+    }
+    if (waitpid(pid, &st, 0) != pid || !WIFEXITED(st) || WEXITSTATUS(st) != 0)
+        fails |= 1 << 17 | (WIFEXITED(st) ? WEXITSTATUS(st) : 0xff) << 24;
+    /* A write, even root's, removes the attribute. */
+    int fd = open(prog, O_WRONLY | O_APPEND);
+    if (fd < 0 || write(fd, "", 1) != 1 ||
+        !failed_with(xa_get(prog, "security.capability", got, sizeof(got)), ENODATA))
+        fails |= 1 << 18;
+    if (fd >= 0)
+        close(fd);
+    unlink(prog);
+    static char why[48];
+    snprintf(why, sizeof(why), "fails=0x%x", fails);
+    report("file_capabilities_at_exec", fails == 0, why);
+}
+
 /* --- memfd_create (N-229): it returned an eventfd id that was never an
  * fd. Now a sizeable, readable, mappable, sealable anonymous file. ---- */
 static void test_memfd(void)
@@ -3002,6 +3084,7 @@ int main(int argc, char **argv)
     test_exec_caps();
     test_memfd();
     test_xattrs();
+    test_file_caps();
     test_realtime_signals();
     test_vfork_and_clone();
     test_wait_and_groups();

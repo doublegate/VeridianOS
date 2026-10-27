@@ -349,7 +349,7 @@ What does not work yet: `docs/KNOWN-LIMITATIONS.md`.
      - [x] step 7: exec computes the sets (no file capabilities yet)
      - [x] step 8: persistent BlockFS xattrs (format version bump, migration in mkfs-blockfs) and
        the xattr calls
-     - [ ] step 9: file capabilities (`security.capability`) at exec and cleared on write
+     - [x] step 9: file capabilities (`security.capability`) at exec and cleared on write
      - [ ] step 10: docs (N-131 in KNOWN-LIMITATIONS, PORTING-GUIDE, CHANGELOG); then the PR
   2. [ ] statfs and fstatfs per filesystem type: most LTP tests stop on their ENOSYS in setup, so
      this comes first among the remaining groups (it makes the later ones measurable).

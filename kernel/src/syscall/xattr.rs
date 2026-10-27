@@ -18,7 +18,7 @@ use crate::{
         },
         VfsNode,
     },
-    process::creds::Caller,
+    process::{creds::Caller, linux_caps::FileCaps},
 };
 
 const AT_FDCWD: i32 = -100;
@@ -105,6 +105,11 @@ fn set(
     let mut bytes = alloc::vec![0u8; size];
     userspace::read_user_bytes(value, &mut bytes)?;
     let node = target(dfd, path, at_flags)?;
+    // A file capability must be a v2 or v3 value (cap_convert_nscap,
+    // before its CAP_SETFCAP check).
+    if name == xattr::XATTR_NAME_CAPS && !FileCaps::valid_to_write(&bytes) {
+        return Err(SyscallError::InvalidArgument);
+    }
     check(&node, &name, true)?;
     node.update_xattrs(&mut |a| a.set(&name, &bytes, flags))
         .map_err(super::map_kernel_error)?;
@@ -124,6 +129,15 @@ fn get(
     check(&node, &name, false)?;
     let attrs = node.xattrs().map_err(super::map_kernel_error)?;
     let found = attrs.get(&name).ok_or(SyscallError::NoData)?;
+    // A file capability is shown as the reader's namespace sees it
+    // (cap_inode_getsecurity).
+    let converted;
+    let found = if name == xattr::XATTR_NAME_CAPS {
+        converted = FileCaps::xattr_for_reader(found)?;
+        &converted[..]
+    } else {
+        found
+    };
     if size == 0 {
         return Ok(found.len());
     }

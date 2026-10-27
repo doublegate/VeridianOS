@@ -323,6 +323,8 @@ struct ExecIds {
     /// The process was traced, by a tracer without CAP_SYS_PTRACE, when
     /// the exec started.
     unprivileged_tracer_at_start: bool,
+    /// The program's capabilities (`security.capability`), if it has any.
+    file_caps: Option<super::linux_caps::FileCaps>,
 }
 
 /// Whether `process` is traced by a tracer that lacked CAP_SYS_PTRACE when
@@ -336,8 +338,8 @@ fn unprivileged_tracer(process: &super::Process) -> bool {
 /// Install the credentials and capability sets a program runs with
 /// (Linux's cred_guard_mutex section of exec), and say whether it runs
 /// with AT_SECURE. `set_ids` are the owner and group a set-user-ID or
-/// set-group-ID file offers; `CapSets::after_exec` (Linux's
-/// cap_bprm_creds_from_file, without file capabilities yet) decides what
+/// set-group-ID file offers, `file_caps` its capabilities;
+/// `CapSets::after_exec` (Linux's cap_bprm_creds_from_file) decides what
 /// is granted: not more than before if the thread asked for no new
 /// privileges, a tracer without CAP_SYS_PTRACE is attached, or another
 /// process shares this one's directories and umask (CLONE_FS: it could
@@ -372,14 +374,14 @@ fn install_exec_credentials(
     };
     let (new_euid, new_egid) = (set_uid.unwrap_or(old.euid), set_gid.unwrap_or(old.egid));
     let ctx = super::linux_caps::ExecContext {
-        file: None,
+        file: ids.file_caps,
         no_new_privs,
         unsafe_exec: traced_unprivileged || fs_shared,
         egid_in_groups: old.in_group(new_egid),
     };
     let mut caps = thread.caps.lock();
-    // Without file capabilities the rules never refuse the exec (EPERM is
-    // for a capability-dumb program that would not get its capabilities).
+    // A capability-dumb program was refused before the point of no return,
+    // by the same rules on the same file and sets: they cannot refuse here.
     let outcome = caps
         .after_exec(old.ruid, old.euid, old.rgid, new_euid, new_egid, ctx)
         .map_err(|_| KernelError::PermissionDenied { operation: "exec" })?;
@@ -482,8 +484,6 @@ fn exec_at_depth(
     before_commit: &dyn Fn() -> Result<(), KernelError>,
     depth: usize,
 ) -> Result<(), KernelError> {
-    use crate::elf::ElfLoader;
-
     let process = super::current_process().ok_or(KernelError::ProcessNotFound { pid: 0 })?;
     let current_thread = super::current_thread().ok_or(KernelError::ThreadNotFound { tid: 0 })?;
 
@@ -530,6 +530,38 @@ fn exec_at_depth(
         *current_thread.comm.lock() = super::thread::comm_from(basename(&resolved_path).as_bytes());
         return Ok(());
     }
+
+    exec_image(
+        process,
+        current_thread,
+        resolved_path,
+        file_node,
+        file_data,
+        argv,
+        envp,
+        before_commit,
+    )
+}
+
+/// The rest of exec once the file is a program rather than a script. It is
+/// kept out of `exec_at_depth`, which recurses for `#!` interpreters, so
+/// each level of that recursion holds only a small frame: the image work
+/// takes several KiB of stack in a debug build, and with file capabilities
+/// a self-interpreting script overflowed the 64 KiB kernel stack on AArch64.
+#[cfg(feature = "alloc")]
+#[inline(never)]
+#[allow(clippy::too_many_arguments)]
+fn exec_image(
+    process: alloc::sync::Arc<super::Process>,
+    current_thread: alloc::sync::Arc<super::Thread>,
+    resolved_path: String,
+    file_node: alloc::sync::Arc<dyn crate::fs::VfsNode>,
+    file_data: Vec<u8>,
+    argv: &[&str],
+    envp: &[&str],
+    before_commit: &dyn Fn() -> Result<(), KernelError>,
+) -> Result<(), KernelError> {
+    use crate::elf::ElfLoader;
 
     // Validate and plan the image before touching the current address
     // space (ADR 0010). exec must leave the caller intact when it fails;
@@ -589,13 +621,53 @@ fn exec_at_depth(
             Some((node, ..)) => readable(&node.metadata()?),
             None => true,
         };
+        // The program's own capabilities, read with the file (Linux's
+        // get_file_caps): a malformed value fails the exec (EINVAL); a
+        // filesystem without attributes gives none.
+        let file_caps = match file_node.xattrs() {
+            Ok(attrs) => match attrs.get(crate::fs::xattr::XATTR_NAME_CAPS) {
+                Some(value) => super::linux_caps::FileCaps::from_xattr(value).map_err(|_| {
+                    KernelError::InvalidArgument {
+                        name: "security.capability",
+                        value: "not a file capability",
+                    }
+                })?,
+                None => None,
+            },
+            Err(_) => None,
+        };
         ExecIds {
             set_uid: perms.set_uid.then_some(meta.uid),
             set_gid: (perms.set_gid && perms.group_exec).then_some(meta.gid),
             readable: readable(&meta) && interp_readable,
             unprivileged_tracer_at_start: false,
+            file_caps,
         }
     };
+
+    // A program whose effective bit asks for capabilities it would not get
+    // (a capability-dumb program would run without them) fails here, with
+    // the caller intact (Linux's bprm_caps_from_vfs_caps, EPERM). The
+    // check does not depend on what install decides later.
+    if let Some(file) = set_ids.file_caps {
+        let old = process.credentials();
+        let ctx = super::linux_caps::ExecContext {
+            file: Some(file),
+            ..Default::default()
+        };
+        current_thread
+            .caps
+            .lock()
+            .after_exec(
+                old.ruid,
+                old.euid,
+                old.rgid,
+                set_ids.set_uid.unwrap_or(old.euid),
+                set_ids.set_gid.unwrap_or(old.egid),
+                ctx,
+            )
+            .map_err(|_| KernelError::FsError(crate::error::FsError::OperationNotPermitted))?;
+    }
 
     // BTI guarding, from the images' property notes: a malformed one is
     // ENOEXEC here, with the caller intact.
