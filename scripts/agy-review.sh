@@ -165,7 +165,12 @@ AGY_PRINT_TIMEOUT="${AGY_PRINT_TIMEOUT:-5m}"
 # Seconds of budget per MiB of diff handed to agy, on top of the base. Reading a 1.6 MB patch and
 # reasoning over it is not work a five-minute budget can absorb, and the failure is indistinguishable
 # from a backend outage: `Error: timeout waiting for response`, three times, with no review.
-AGY_TIMEOUT_SECONDS_PER_MIB="${AGY_TIMEOUT_SECONDS_PER_MIB:-240}"
+#
+# 900, not the 240 this started with: a diff handed over as a FILE costs agy 6-8 minutes almost
+# whatever its size (reading it through its tools at high effort is mostly fixed cost). Measured on
+# VeridianOS: a 1.15 MB diff took 465 s, and a 426 KB one timed out three times at 300 + 240 x 0.41
+# = 397 s. At 900 s/MiB the 426 KB diff gets 665 s and anything over ~650 KB the cap.
+AGY_TIMEOUT_SECONDS_PER_MIB="${AGY_TIMEOUT_SECONDS_PER_MIB:-900}"
 AGY_PRINT_TIMEOUT_MAX_SECONDS="${AGY_PRINT_TIMEOUT_MAX_SECONDS:-1800}"
 
 # Both of the above reach `$(( ... ))`, so both are validated before they get there.
@@ -205,7 +210,7 @@ normalise_numeric_env() {
   esac
 }
 # <<< SELFTEST-EXTRACT
-normalise_numeric_env AGY_TIMEOUT_SECONDS_PER_MIB   240
+normalise_numeric_env AGY_TIMEOUT_SECONDS_PER_MIB   900
 normalise_numeric_env AGY_PRINT_TIMEOUT_MAX_SECONDS 1800
 AGY_DIFF_MODE="${AGY_DIFF_MODE:-auto}"     # auto|inline|file. A diff is passed to agy either inlined
                                            # in the --print prompt, or written to a FILE agy reads with
