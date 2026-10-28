@@ -48,7 +48,9 @@
   for the group IDs, setfsgid and setgroups, and a change of the user IDs applies Linux's fixup to
   every thread's sets: leaving every root ID clears the permitted and effective sets (unless
   keep-caps) and the ambient set, the effective set follows the effective uid, and the filesystem
-  capabilities follow fsuid 0. File permission checks (open, access, exec, path search, chdir,
+  capabilities follow fsuid 0. fork copies the IDs and the calling thread's sets as one snapshot,
+  so a set*id call on another thread can never leave a child with root IDs and dropped sets,
+  which exec would turn back into full privilege. File permission checks (open, access, exec, path search, chdir,
   creating, removing and renaming entries) follow Linux's `generic_permission`: the mode bits,
   then CAP_DAC_OVERRIDE (read and write anything, search any directory, execute where some
   execute bit is set) and CAP_DAC_READ_SEARCH (read files, read and search directories), where
@@ -144,7 +146,9 @@
   User pointers are now refused when a page they cover is present without user access; LTP
   `capset02`'s bad address and guard pages behave as on Linux. A read or write that moves data in
   chunks checks each page as it copies, so a `PROT_NONE` page after the bytes it moves does not
-  fail it: a read of a 1-byte file into such a buffer returns 1, as on Linux.
+  fail it: a read of a 1-byte file into such a buffer returns 1, as on Linux. The native
+  thread-affinity call checks only the bytes it copies, so a huge size no longer keeps that
+  page-by-page check walking page tables in the kernel.
 - `scripts/run-compat-tests.sh --update` dropped the comment lines written by hand at the top of an
   expected list (the baseline's date and versions); it now keeps them.
 - `mkfs-blockfs` let a directory entry cross a 4 KiB block boundary, and the kernel reads a

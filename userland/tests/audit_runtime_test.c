@@ -2438,11 +2438,22 @@ static void test_xattrs(void)
      * and fsetxattr (Linux's path_getxattrat looks the empty name up when
      * the fd is negative) but is a bad descriptor for flistxattr and
      * fremovexattr, which always take the fd. Any other negative fd is a
-     * bad descriptor. */
-    if (failed_with(veridian_syscall4(SYS_fgetxattr, -100, "user.none", buf, sizeof(buf)), EBADF) ||
+     * bad descriptor. The set and the read are checked against the
+     * directory itself, through getxattr("."). */
+    char cwd[256];
+    if (getcwd(cwd, sizeof(cwd)) == NULL || chdir("/tmp") != 0 ||
+        veridian_syscall5(SYS_fsetxattr, -100, "user.cwd", "d1", 2, 0) != 0 ||
+        xa_get(".", "user.cwd", buf, sizeof(buf)) != 2 || memcmp(buf, "d1", 2) != 0 ||
+        veridian_syscall5(SYS_fsetxattr, -100, "user.cwd", "d2", 2, XA_REPLACE) != 0 ||
+        veridian_syscall4(SYS_fgetxattr, -100, "user.cwd", buf, sizeof(buf)) != 2 ||
+        memcmp(buf, "d2", 2) != 0 ||
+        !failed_with(veridian_syscall4(SYS_fgetxattr, -100, "user.none", buf, sizeof(buf)), ENODATA) ||
         !failed_with(veridian_syscall4(SYS_fgetxattr, -5, "user.none", buf, sizeof(buf)), EBADF) ||
         !failed_with(veridian_syscall3(SYS_flistxattr, -100, buf, sizeof(buf)), EBADF) ||
         !failed_with(veridian_syscall2(SYS_fremovexattr, -100, "user.none"), EBADF))
+        fails |= 1 << 18;
+    veridian_syscall2(SYS_removexattr, "/tmp", "user.cwd");
+    if (cwd[0] != 0 && chdir(cwd) != 0)
         fails |= 1 << 18;
     if (veridian_syscall2(SYS_removexattr, f, "user.k") != 0 ||
         !failed_with(xa_get(f, "user.k", buf, sizeof(buf)), ENODATA) ||
@@ -2483,6 +2494,20 @@ static void test_xattrs(void)
     static char why[48];
     snprintf(why, sizeof(why), "fails=0x%x", fails);
     report("xattr_calls_follow_linux", fails == 0, why);
+}
+
+/* The native thread-affinity call (1069) copies at most the 8-byte mask.
+ * A huge size used to set how many pages the pointer check walked in
+ * ring 0 (PR #33 review); the call must return at once with the mask. */
+static unsigned long long affinity_mask;
+
+static void test_native_affinity_len(void)
+{
+    affinity_mask = 0;
+    long r = veridian_syscall3(1069, 0, &affinity_mask, 0x400000000000UL);
+    static char why[48];
+    snprintf(why, sizeof(why), "r=%ld mask=0x%llx", r, affinity_mask);
+    report("native_affinity_ignores_huge_len", r == 0 && affinity_mask != 0, why);
 }
 
 /* --- File capabilities (ADR 0020 step 9): a copy of this program with a
@@ -3205,6 +3230,7 @@ int main(int argc, char **argv)
     test_exec_caps();
     test_memfd();
     test_xattrs();
+    test_native_affinity_len();
     test_file_caps();
     test_realtime_signals();
     test_vfork_and_clone();

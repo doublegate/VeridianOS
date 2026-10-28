@@ -768,8 +768,10 @@ pub fn sys_thread_getaffinity(tid: usize, cpuset_ptr: usize, cpuset_size: usize)
         return Err(SyscallError::InvalidArgument);
     }
 
-    // Validate user pointer
-    validate_user_ptr(cpuset_ptr as *const u8, cpuset_size)?;
+    // Only the bytes copied (at most the 8-byte mask) are checked: the
+    // check walks the page tables page by page, so the caller's size
+    // would otherwise set how long it runs in ring 0 (PR #33 review).
+    validate_user_ptr(cpuset_ptr as *const u8, cpuset_size.min(8))?;
 
     let target_tid = if tid == 0 {
         get_thread_tid()

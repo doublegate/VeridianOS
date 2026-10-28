@@ -102,11 +102,14 @@ pub fn fork_process_with(opts: &ForkOptions) -> Result<(ProcessId, super::Thread
 
     // Create new process as copy of current
     // The child has its parent's credentials: a process that dropped to
-    // an unprivileged uid used to fork children running as root (N-93).
+    // an unprivileged uid used to fork children running as root (N-93). The
+    // IDs and the calling thread's capability sets are read as one
+    // snapshot, as a concurrent set*id call changes them together.
+    let (parent_creds, parent_caps) = current_process.creds_and_caps(&current_thread);
     let new_process = ProcessBuilder::new(format!("{}-fork", current_process.name))
         .parent(current_process.pid)
         .priority(*current_process.priority.lock())
-        .credentials(current_process.credentials())
+        .credentials(parent_creds)
         .build();
 
     let new_pid = new_process.pid;
@@ -384,10 +387,10 @@ pub fn fork_process_with(opts: &ForkOptions) -> Result<(ProcessId, super::Thread
                 .load(core::sync::atomic::Ordering::Acquire),
             core::sync::atomic::Ordering::Release,
         );
-        // Read after the credentials (above): a set*id call on another
-        // thread in between can leave the child with fewer capabilities
-        // than its IDs, never more.
-        *new_thread.caps.lock() = *current_thread.caps.lock();
+        // The sets read with the credentials (above), not re-read here: a
+        // set*id call on another thread in between would pair root IDs
+        // with dropped sets, which exec turns back into full privilege.
+        *new_thread.caps.lock() = parent_caps;
         new_process.add_thread(new_thread)?;
         Ok(new_tid)
     };
