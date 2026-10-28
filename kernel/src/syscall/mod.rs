@@ -2156,9 +2156,15 @@ fn sys_get_robust_list(tid: usize, head_out: usize, len_out: usize) -> SyscallRe
                 }
             }
         });
-        let (target_creds, target_dumpable, thread) = found.ok_or(SyscallError::ProcessNotFound)?;
+        let (creds, dumpable, thread) = found.ok_or(SyscallError::ProcessNotFound)?;
+        // Linux checks the named task: this thread's permitted set.
+        let target = debug::PtraceTarget {
+            creds,
+            permitted: thread.caps.lock().permitted,
+            dumpable,
+        };
         let me = crate::process::creds::Caller::current();
-        if !debug::may_access(&me, &target_creds, target_dumpable) {
+        if !debug::may_access(&me, debug::current_permitted(), &target) {
             return Err(SyscallError::OperationNotPermitted);
         }
         thread

@@ -684,8 +684,28 @@ pub fn create_thread(
             // For now, we'll skip this as it requires arch-specific code
             let _ = arg;
 
+            // The creator's no_new_privs and capability sets, as clone copies
+            // them (ADR 0020): a new thread has no more privilege than the
+            // thread that made it. Thread::new starts from root's sets, for
+            // the kernel's own threads (PR #33 review).
+            let creator = current_thread();
+            if let Some(creator) = &creator {
+                thread.no_new_privs.store(
+                    creator.no_new_privs.load(Ordering::Acquire),
+                    Ordering::Release,
+                );
+                *thread.caps.lock() = *creator.caps.lock();
+            }
+
             // Add thread to process
-            process.add_thread(thread)?;
+            let thread = process.add_thread(thread)?;
+            // Copied again under the thread map, which a set*id call on
+            // another thread fixes every thread's sets under
+            // (`Process::change_uids`), as clone does.
+            if let Some(creator) = &creator {
+                let _threads = process.threads.lock();
+                *thread.caps.lock() = *creator.caps.lock();
+            }
 
             Ok(tid)
         }

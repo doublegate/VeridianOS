@@ -33,7 +33,8 @@
   ambient sets plus securebits), replacing the `euid == 0` privilege checks in steps. First step:
   `process::linux_caps`, the pure rules for capset, the set*id fix-ups, the capability prctl
   options and exec, with tests transcribed from Linux 7.3's `security/commoncap.c`. Every thread
-  carries its sets (root's full sets at boot; fork and clone copy the creator's), and
+  carries its sets (root's full sets at boot; fork, clone and the native thread call copy the
+  creator's; the native call gave a new thread root's sets), and
   `capget`/`capset` read and change them with Linux's header versions 1 to 3:
   capget reads any thread by id and probes the version when the data pointer is NULL; capset changes
   only the caller's sets. `/proc/sys/kernel/cap_last_cap` reports 40, and
@@ -60,7 +61,10 @@
   Scheduling another user's threads, raising priority or nice and the real-time policies need
   CAP_SYS_NICE; another process's limits and a raised hard limit CAP_SYS_RESOURCE; RLIMIT_NPROC
   spares real uid 0 and CAP_SYS_RESOURCE or CAP_SYS_ADMIN. ptrace attach and the robust-list read of
-  another user's process need CAP_SYS_PTRACE, and the tracer's CAP_SYS_PTRACE when it attached
+  another user's process need CAP_SYS_PTRACE, as does a target whose permitted capabilities the
+  caller does not hold (Linux's cap_ptrace_access_check: a process that dropped capabilities with
+  capset cannot trace a child that kept them); PTRACE_TRACEME needs a parent holding the caller's
+  permitted set or CAP_SYS_PTRACE (cap_ptrace_traceme). The tracer's CAP_SYS_PTRACE when it attached
   decides whether a set-ID exec under it gains privilege (Linux's ptracer_capable). The account
   calls act on another user's account with CAP_DAC_OVERRIDE, and mount needs CAP_SYS_ADMIN besides
   its object capability. No privilege check uses `euid == 0` any more. exec computes the sets as
@@ -84,10 +88,12 @@
   files, directories (owner or CAP_FOWNER in a sticky one) and sockets by the file's permission
   bits, `trusted.*` with CAP_SYS_ADMIN (hidden from others' lists), `security.*` written with
   CAP_SYS_ADMIN (CAP_SETFCAP for `security.capability`), `system.*` (POSIX ACLs) EOPNOTSUPP. tmpfs
-  and ramfs keep them in the node (up to 64 KiB per node); BlockFS keeps them on disk, in one
+  and ramfs keep them in the node (up to 64 KiB per node; tmpfs charges them to its size limit);
+  BlockFS keeps them on disk, in one
   attribute block per inode, which needed format revision 1 (an inode's unused triple-indirect
   pointer became its attribute block; the superblock records the revision, a revision 0 image mounts
-  without attributes, and `mkfs-blockfs --upgrade` raises one). The in-memory store keyed by inode
+  without attributes, its old pointer bytes neither read nor freed as an attribute block, and
+  `mkfs-blockfs --upgrade` raises one). The in-memory store keyed by inode
   number, which the shell's `xattr` command used and whose numbers collided across filesystems, is
   gone; the command acts on the node.
 - `pause` on x86_64 (system call 34 had no handler, so musl's `pause()` returned ENOSYS at once and a
@@ -128,7 +134,9 @@
   (N-132 follow-up): such a page keeps its frame mapped for the kernel only, so the kernel's own
   copy did not fault and `write` from it or `read` into it succeeded where Linux returns EFAULT.
   User pointers are now refused when a page they cover is present without user access; LTP
-  `capset02`'s bad address and guard pages behave as on Linux.
+  `capset02`'s bad address and guard pages behave as on Linux. A read or write that moves data in
+  chunks checks each page as it copies, so a `PROT_NONE` page after the bytes it moves does not
+  fail it: a read of a 1-byte file into such a buffer returns 1, as on Linux.
 - `scripts/run-compat-tests.sh --update` dropped the comment lines written by hand at the top of an
   expected list (the baseline's date and versions); it now keeps them.
 - `mkfs-blockfs` let a directory entry cross a 4 KiB block boundary, and the kernel reads a

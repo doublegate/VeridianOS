@@ -570,6 +570,20 @@ impl Process {
         self.threads.lock().get(&tid).cloned()
     }
 
+    /// The union of the permitted sets of the process's threads: what
+    /// tracing it gives access to, for the ptrace checks (Linux's
+    /// cap_ptrace_access_check compares a task's set; tracing here reaches
+    /// the whole process).
+    #[cfg(feature = "alloc")]
+    pub fn permitted_caps(&self) -> super::linux_caps::LinuxCaps {
+        self.threads
+            .lock()
+            .values()
+            .fold(super::linux_caps::LinuxCaps::EMPTY, |all, t| {
+                all.union(t.caps.lock().permitted)
+            })
+    }
+
     /// Get number of threads
     #[cfg(feature = "alloc")]
     pub fn thread_count(&self) -> usize {

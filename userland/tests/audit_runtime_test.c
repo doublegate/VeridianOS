@@ -838,6 +838,35 @@ static void test_memory_protection(void)
     report("syscall_on_prot_none_is_efault",
            pnok && pw == -1 && pwe == EFAULT && pr == -1 && pre == EFAULT, pnwhy);
 
+    /* A PROT_NONE page after the bytes a call moves does not fail it: a
+     * read of a 1-byte file into a buffer whose second page is PROT_NONE
+     * returns 1, and a write from such a buffer moves the readable page and
+     * stops there, as Linux's copies do (PR #33 review). */
+    char *pp = mmap(0, 8192, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    int ppok = pp != MAP_FAILED;
+    long ppr = 0, ppw = 0;
+    if (ppok) {
+        memset(pp, 'z', 8192);
+        ppok = mprotect(pp + 4096, 4096, PROT_NONE) == 0;
+        write_file("/tmp/audit_one_byte", "1", 0644);
+        int ofd = open("/tmp/audit_one_byte", O_RDONLY);
+        ppr = ofd >= 0 ? read(ofd, pp, 8192) : -2;
+        if (ofd >= 0) close(ofd);
+        int qfd[2];
+        if (pipe(qfd) == 0) {
+            ppw = write(qfd[1], pp, 8192);
+            close(qfd[0]);
+            close(qfd[1]);
+        } else {
+            ppw = -2;
+        }
+        munmap(pp, 8192);
+        unlink("/tmp/audit_one_byte");
+    }
+    static char ppwhy[64];
+    snprintf(ppwhy, sizeof(ppwhy), "read=%ld write=%ld", ppr, ppw);
+    report("prot_none_after_the_data_keeps_partial_io", ppok && ppr == 1 && ppw == 4096, ppwhy);
+
     /* Absurd sizes fail cleanly instead of halting the kernel. */
     void *huge = mmap(0, 1UL << 46, PROT_READ, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     void *huge2 = mmap(0, (size_t)-4096, PROT_READ, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
@@ -1892,6 +1921,28 @@ static int capget_self(uint32_t c[6])
     return (int)veridian_syscall2(SYS_capget, &hdr, c);
 }
 
+/* A child for ptrace_needs_the_targets_capabilities: it makes itself
+ * dumpable, so only the capability rule can refuse, says so on `ready`,
+ * waits on `go`, then does `what`: 0 exits, 1 tries PTRACE_TRACEME and
+ * exits 0 if that was refused with EPERM. */
+static pid_t ptrace_target(int go, int ready, int what)
+{
+    pid_t pid = fork();
+    if (pid == 0) {
+        char b;
+        if (veridian_syscall5(SYS_prctl, 4 /* PR_SET_DUMPABLE */, 1, 0, 0, 0) != 0)
+            _exit(90);
+        if (write(ready, "r", 1) != 1 || read(go, &b, 1) != 1)
+            _exit(91);
+        if (what == 1) {
+            long r = veridian_syscall4(SYS_ptrace, 0 /* TRACEME */, 0, 0, 0);
+            _exit(r == -EPERM ? 0 : 92); /* raw call: -errno */
+        }
+        _exit(0);
+    }
+    return pid;
+}
+
 /* Started before the uid drop; checks its own sets once told it happened. */
 static void *caps_after_drop(void *arg)
 {
@@ -1954,6 +2005,43 @@ static void test_credentials_and_paths(void)
         _exit(f);
     }
     report_child("keepcaps_keeps_permitted_across_uid_drop", pid);
+
+    /* ptrace needs the target's permitted capabilities in the caller's
+     * (Linux's cap_ptrace_access_check, cap_ptrace_traceme; PR #33 review):
+     * a user process that kept its permitted set starts two children, one
+     * of which it may trace while both hold the same sets; after it drops
+     * its own with capset, the other child, which kept them, can neither be
+     * attached to nor choose it as its tracer. */
+    pid = fork();
+    if (pid == 0) {
+        int f = 0;
+        int go[2], ready[2];
+        if (pipe(go) != 0 || pipe(ready) != 0) _exit(100);
+        if (veridian_syscall5(SYS_prctl, 8 /* PR_SET_KEEPCAPS */, 1, 0, 0, 0) != 0 ||
+            setresuid(1000, 1000, 1000) != 0)
+            _exit(101);
+        pid_t same = ptrace_target(go[0], ready[1], 0);
+        pid_t kept = ptrace_target(go[0], ready[1], 1);
+        char r2[2];
+        if (same < 0 || kept < 0 || read(ready[0], r2, 1) != 1 || read(ready[0], r2, 1) != 1)
+            _exit(102);
+        if (veridian_syscall4(SYS_ptrace, 16 /* ATTACH */, same, 0, 0) != 0) f |= 1;
+        else if (veridian_syscall4(SYS_ptrace, 17 /* DETACH */, same, 0, 0) != 0) f |= 2;
+        struct {
+            uint32_t version;
+            int pid;
+        } hdr = {0x20080522, 0};
+        uint32_t none[6] = {0};
+        if (veridian_syscall2(SYS_capset, &hdr, none) != 0) f |= 4;
+        if (veridian_syscall4(SYS_ptrace, 16 /* ATTACH */, kept, 0, 0) != -EPERM) f |= 8;
+        (void)!write(go[1], "xx", 2);
+        int st = 0;
+        if (waitpid(same, &st, 0) != same || !WIFEXITED(st) || WEXITSTATUS(st) != 0) f |= 16;
+        if (waitpid(kept, &st, 0) != kept || !WIFEXITED(st)) f |= 32;
+        else if (WEXITSTATUS(st) != 0) f |= 64; /* its TRACEME was allowed */
+        _exit(f);
+    }
+    report_child("ptrace_needs_the_targets_capabilities", pid);
 
     /* Supplementary groups grant group access; only root may set them. */
     write_file("/tmp/audit_grp", "g", 0640);

@@ -59,12 +59,17 @@ be confused, in code or in documentation.
    - The set*id rules take their privilege from the calling thread: CAP_SETUID for the user IDs
      and setfsuid, CAP_SETGID for the group IDs, setfsgid and setgroups.
 3. **One representation and one check.** A `LinuxCaps(u64)` bitset masked by
-   `CAP_VALID_MASK`, and `capable(cap)` (current thread's pE) and `has_capability(task, cap)`.
+   `CAP_VALID_MASK`, and one check: `Caller::capable(cap)` (the calling thread's pE, from
+   `Caller::current()`), with `CapSets::capable(cap)` for another thread's sets (Linux's
+   `has_capability`).
    Every uid-0 decision site is converted to the capability Linux checks there,
    and `privileged()` / `fs_privileged()` are removed. The VfsContext bypass becomes the
    individual checks: CAP_DAC_OVERRIDE, CAP_DAC_READ_SEARCH and CAP_FOWNER.
-   - The checks take a user-namespace argument now (`ns_capable(ns, cap)`), always the initial
-     namespace, so the namespace work adds the argument's meaning and not a second rewrite.
+   - Every check is in the initial user namespace, and the checks take no namespace argument
+     yet. (The draft gave them one, `ns_capable(ns, cap)`; it was left out because nothing could
+     pass any other value. Corrected 2026-10-27 in review.) The namespace work adds it to these
+     two methods: about 33 call sites, all through them, so it is a signature change rather than
+     a second conversion.
 4. **Root keeps working.** A process starting as root gets all capabilities, and the exec and
    UID-change rules emulate root as Linux does, including SECBIT_NOROOT, SECBIT_NO_SETUID_FIXUP
    and SECBIT_KEEP_CAPS. Unmodified login, su, BusyBox and service managers behave as on Linux.
@@ -111,8 +116,8 @@ be confused, in code or in documentation.
   process's; code that passes a process where Linux passes a task must change.
 - BlockFS's on-disk format changes for extended attributes. Existing images are migrated by
   `mkfs-blockfs` (or rebuilt by the rootfs scripts), and the format version guards the mount.
-- User namespaces remain future work; the `ns_capable` signature and the v3 root-id rule are the
-  hooks for them.
+- User namespaces remain future work; the single check (`Caller::capable`, `CapSets::capable`)
+  and the v3 root-id rule are the hooks for them.
 - The kernel console's root shell (N-131) keeps all capabilities; logging in there is a separate
   item.
 

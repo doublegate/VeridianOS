@@ -333,11 +333,10 @@ pub struct CapSets {
     pub securebits: u32,
 }
 
-impl Default for CapSets {
-    fn default() -> Self {
-        Self::ROOT
-    }
-}
+// No `Default`: a default would have to be either root's sets, which a
+// `..Default::default()` would hand out silently, or none, which would make
+// the kernel's own threads fail their checks. Callers name `ROOT` or `NONE`
+// (PR #33 review).
 
 impl CapSets {
     /// The first process's state, and every kernel-created thread's (Linux's

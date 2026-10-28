@@ -4,13 +4,14 @@
 //! Used by debuggers (gdb, lldb) to inspect and control other processes.
 //!
 //! Currently implemented:
-//! - TRACEME: Mark process as traceable (accepted, no enforcement yet)
+//! - TRACEME, ATTACH and DETACH: the tracer relationship, with Linux's access
+//!   checks (`may_access`, `may_trace_me`); attaching does not stop the tracee
+//!   yet
 //! - PEEKTEXT/PEEKDATA: Read a word from tracee's address space via VAS
 //! - POKETEXT/POKEDATA: Write a word to tracee's address space via VAS
 //!
 //! Deferred (requires scheduler integration):
 //! - GETREGS/SETREGS: Read/write register state
-//! - ATTACH/DETACH: Tracer relationship management
 //! - CONT/SINGLESTEP: Resume control
 
 use super::{SyscallError, SyscallResult};
@@ -201,45 +202,85 @@ fn phys_to_kernel_vaddr(phys_addr: usize) -> usize {
 ///
 /// # Returns
 /// Request-specific value on success, or error.
+/// What the ptrace checks need to know about the process to be traced.
+pub(super) struct PtraceTarget {
+    pub creds: process::creds::Credentials,
+    /// The union of its threads' permitted sets.
+    pub permitted: process::linux_caps::LinuxCaps,
+    /// Its dumpable flag (PR_SET_DUMPABLE).
+    pub dumpable: bool,
+}
+
+impl PtraceTarget {
+    /// `process` as the checks see it.
+    pub fn of(process: &process::Process) -> Self {
+        Self {
+            creds: process.credentials(),
+            permitted: process.permitted_caps(),
+            dumpable: process.dumpable.load(core::sync::atomic::Ordering::Acquire),
+        }
+    }
+}
+
+/// The calling thread's permitted set (the caller's side of
+/// cap_ptrace_access_check, PTRACE_MODE_REALCREDS).
+pub(super) fn current_permitted() -> process::linux_caps::LinuxCaps {
+    process::current_thread().map_or(process::linux_caps::LinuxCaps::EMPTY, |t| {
+        t.caps.lock().permitted
+    })
+}
+
 /// Whether a process may attach to `target`: never to itself or to a
-/// process that already has a tracer; and unless it holds CAP_SYS_PTRACE,
-/// the target's real, effective and saved IDs must all be the caller's real
-/// ones (Linux `ptrace_may_access`), so a setuid program running
-/// privileged cannot be traced.
+/// process that already has a tracer, and only as [`may_access`] allows.
 fn may_attach(
     caller_pid: u64,
     caller: &process::creds::Caller,
+    caller_permitted: process::linux_caps::LinuxCaps,
     target_pid: u64,
-    target: &process::creds::Credentials,
+    target: &PtraceTarget,
     target_tracer: u64,
-    target_dumpable: bool,
 ) -> Result<(), SyscallError> {
     if target_pid == caller_pid
         || target_tracer != 0
-        || !may_access(caller, target, target_dumpable)
+        || !may_access(caller, caller_permitted, target)
     {
         return Err(SyscallError::OperationNotPermitted);
     }
     Ok(())
 }
 
-/// Linux `ptrace_may_access`: the caller holds CAP_SYS_PTRACE, or the
-/// target's real, effective and saved IDs are all the caller's real ones
-/// (so a setuid program running privileged is out of reach) and the target
-/// is dumpable (PR_SET_DUMPABLE). Also guards get_robust_list.
+/// Linux `__ptrace_may_access` with `cap_ptrace_access_check`: the caller
+/// holds CAP_SYS_PTRACE, or all three hold:
+/// - the target's real, effective and saved IDs are all the caller's real ones
+///   (so a setuid program running privileged is out of reach);
+/// - the target is dumpable (PR_SET_DUMPABLE);
+/// - the target's permitted capabilities are within the caller's permitted set,
+///   so a process that dropped capabilities with capset cannot trace a child
+///   that kept them and use them through it.
+///
+/// Also guards get_robust_list.
 pub(super) fn may_access(
     caller: &process::creds::Caller,
-    target: &process::creds::Credentials,
-    target_dumpable: bool,
+    caller_permitted: process::linux_caps::LinuxCaps,
+    target: &PtraceTarget,
 ) -> bool {
     let c = &caller.creds;
-    let same_user = [target.ruid, target.euid, target.suid]
-        .iter()
-        .all(|&id| id == c.ruid)
-        && [target.rgid, target.egid, target.sgid]
-            .iter()
-            .all(|&id| id == c.rgid);
-    (same_user && target_dumpable) || caller.capable(process::linux_caps::CAP_SYS_PTRACE)
+    let t = &target.creds;
+    let same_user = [t.ruid, t.euid, t.suid].iter().all(|&id| id == c.ruid)
+        && [t.rgid, t.egid, t.sgid].iter().all(|&id| id == c.rgid);
+    caller.capable(process::linux_caps::CAP_SYS_PTRACE)
+        || (same_user && target.dumpable && target.permitted.is_subset_of(caller_permitted))
+}
+
+/// Linux `cap_ptrace_traceme`: a process may make its parent its tracer if
+/// its permitted capabilities are within the parent's, or the parent holds
+/// CAP_SYS_PTRACE.
+fn may_trace_me(
+    own_permitted: process::linux_caps::LinuxCaps,
+    parent: &process::linux_caps::CapSets,
+) -> bool {
+    own_permitted.is_subset_of(parent.permitted)
+        || parent.capable(process::linux_caps::CAP_SYS_PTRACE)
 }
 
 /// Checked again with the target's address space locked (the lock exec's
@@ -286,11 +327,14 @@ pub fn sys_ptrace(request: usize, pid: usize, addr: usize, data: usize) -> Sysca
             let parent = caller.parent().ok_or(SyscallError::OperationNotPermitted)?;
             // The tracer's privilege is the parent's (Linux's ptrace_link
             // takes the new parent's credentials), here its main thread's.
-            let parent_capable = process::find_process(parent).is_some_and(|p| {
-                p.get_main_thread_id()
-                    .and_then(|tid| p.get_thread(tid))
-                    .is_some_and(|t| t.caps.lock().capable(process::linux_caps::CAP_SYS_PTRACE))
-            });
+            let parent_caps = process::find_process(parent)
+                .and_then(|p| p.get_main_thread_id().and_then(|tid| p.get_thread(tid)))
+                .map(|t| *t.caps.lock())
+                .ok_or(SyscallError::OperationNotPermitted)?;
+            if !may_trace_me(current_permitted(), &parent_caps) {
+                return Err(SyscallError::OperationNotPermitted);
+            }
+            let parent_capable = parent_caps.capable(process::linux_caps::CAP_SYS_PTRACE);
             let _guard = caller.cred_guard.lock();
             caller
                 .tracer
@@ -313,10 +357,10 @@ pub fn sys_ptrace(request: usize, pid: usize, addr: usize, data: usize) -> Sysca
             may_attach(
                 caller_pid,
                 &me,
+                current_permitted(),
                 target.pid.0,
-                &target.credentials(),
+                &PtraceTarget::of(&target),
                 target.tracer.load(Ordering::Acquire),
-                target.dumpable.load(Ordering::Acquire),
             )?;
             // Lost race with another tracer: EPERM, as above.
             target
@@ -397,41 +441,80 @@ mod tests {
     use super::*;
 
     /// ptrace ATTACH: not to oneself or an already traced process; only
-    /// to a process whose IDs are all the caller's, unless the caller holds
-    /// CAP_SYS_PTRACE.
+    /// to a dumpable process whose IDs are all the caller's and whose
+    /// permitted capabilities the caller also holds, unless the caller
+    /// holds CAP_SYS_PTRACE.
     #[test]
     fn attach_needs_same_ids_or_cap_sys_ptrace_and_no_tracer() {
         use process::{
             creds::{Caller, Credentials},
-            linux_caps::LinuxCaps,
+            linux_caps::{LinuxCaps, CAP_KILL, CAP_NET_RAW},
         };
+        let none = LinuxCaps::EMPTY;
         let user = Caller {
             creds: Credentials::new(1000, 100),
-            caps: LinuxCaps::EMPTY,
+            caps: none,
         };
         let root = Caller::KERNEL;
         let bare_root = Caller {
             creds: Credentials::new(0, 0),
-            caps: LinuxCaps::EMPTY,
+            caps: none,
+        };
+        let target = |creds: Credentials, permitted: LinuxCaps, dumpable: bool| PtraceTarget {
+            creds,
+            permitted,
+            dumpable,
         };
         let other = Credentials::new(1001, 100);
         let mut setuid_root = Credentials::new(1000, 100);
         setuid_root.euid = 0;
         setuid_root.suid = 0;
-        let me = user.creds;
-        assert_eq!(may_attach(10, &user, 20, &me, 0, true), Ok(()));
-        assert_eq!(may_attach(10, &root, 20, &me, 0, true), Ok(()));
+        let me = target(user.creds, none, true);
+        let full = LinuxCaps::FULL;
+        assert_eq!(may_attach(10, &user, none, 20, &me, 0), Ok(()));
+        assert_eq!(may_attach(10, &root, full, 20, &me, 0), Ok(()));
         let eperm = Err(SyscallError::OperationNotPermitted);
-        assert_eq!(may_attach(10, &user, 20, &other, 0, true), eperm);
-        assert_eq!(may_attach(10, &user, 20, &setuid_root, 0, true), eperm);
-        assert_eq!(may_attach(10, &user, 10, &me, 0, true), eperm);
-        assert_eq!(may_attach(10, &root, 20, &me, 30, true), eperm);
+        let t_other = target(other, none, true);
+        let t_suid = target(setuid_root, none, true);
+        assert_eq!(may_attach(10, &user, none, 20, &t_other, 0), eperm);
+        assert_eq!(may_attach(10, &user, none, 20, &t_suid, 0), eperm);
+        assert_eq!(may_attach(10, &user, none, 10, &me, 0), eperm);
+        assert_eq!(may_attach(10, &root, full, 20, &me, 30), eperm);
         // Uid 0 without CAP_SYS_PTRACE is an ordinary user.
-        assert_eq!(may_attach(10, &bare_root, 20, &me, 0, true), eperm);
+        assert_eq!(may_attach(10, &bare_root, none, 20, &me, 0), eperm);
         // A process that made itself non-dumpable (PR_SET_DUMPABLE 0), or
         // exec'd a set-ID or unreadable program, only CAP_SYS_PTRACE may
         // trace.
-        assert_eq!(may_attach(10, &user, 20, &me, 0, false), eperm);
-        assert_eq!(may_attach(10, &root, 20, &me, 0, false), Ok(()));
+        let undumpable = target(user.creds, none, false);
+        assert_eq!(may_attach(10, &user, none, 20, &undumpable, 0), eperm);
+        assert_eq!(may_attach(10, &root, full, 20, &undumpable, 0), Ok(()));
+        // A parent that dropped CAP_NET_RAW with capset may not trace the
+        // child that kept it (PR #33 review), though IDs and dumpability
+        // match; holding it again, or a superset, it may.
+        let keeps = target(user.creds, LinuxCaps::EMPTY.with(CAP_NET_RAW), true);
+        assert_eq!(may_attach(10, &user, none, 20, &keeps, 0), eperm);
+        let kill = LinuxCaps::EMPTY.with(CAP_KILL);
+        assert_eq!(may_attach(10, &user, kill, 20, &keeps, 0), eperm);
+        let both = LinuxCaps::EMPTY.with(CAP_KILL).with(CAP_NET_RAW);
+        assert_eq!(may_attach(10, &user, both, 20, &keeps, 0), Ok(()));
+        assert_eq!(may_attach(10, &root, full, 20, &keeps, 0), Ok(()));
+    }
+
+    /// PTRACE_TRACEME (Linux's cap_ptrace_traceme): the parent must hold
+    /// the caller's permitted capabilities, or CAP_SYS_PTRACE.
+    #[test]
+    fn traceme_needs_a_parent_holding_the_callers_capabilities() {
+        use process::linux_caps::{CapSets, LinuxCaps, CAP_NET_RAW, CAP_SYS_PTRACE};
+        let raw = LinuxCaps::EMPTY.with(CAP_NET_RAW);
+        let mut parent = CapSets::NONE;
+        assert!(may_trace_me(LinuxCaps::EMPTY, &parent));
+        assert!(!may_trace_me(raw, &parent));
+        parent.permitted = raw;
+        assert!(may_trace_me(raw, &parent));
+        let mut tracer = CapSets::NONE;
+        tracer.permitted = LinuxCaps::EMPTY.with(CAP_SYS_PTRACE);
+        tracer.effective = tracer.permitted;
+        assert!(may_trace_me(raw, &tracer));
+        assert!(may_trace_me(LinuxCaps::FULL, &CapSets::ROOT));
     }
 }
