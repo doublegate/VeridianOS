@@ -169,7 +169,7 @@ ltp-syscalls	epoll_pwait06	WARN	tst_test.c:1101: TWARN: Kernel is older than min
 ltp-syscalls	epoll_wait01	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
 ltp-syscalls	epoll_wait02	FAIL	exit 5; tst_timer_test.c:314: TFAIL: epoll_wait() slept for too long
 ltp-syscalls	epoll_wait03	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
-ltp-syscalls	epoll_wait04	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
+ltp-syscalls	epoll_wait04	FLAKY	FAIL and WARN in aarch64 runs under TCG with 7 guests (2026-10-24, 2026-10-27); last here: FAIL; epoll_wait04.c:35: TFAIL: epoll_wait() waited for 14566us with a timeout equal to zero
 ltp-syscalls	epoll_wait05	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
 ltp-syscalls	epoll_wait06	BROK	epoll_wait06.c:41: TBROK: fcntl(4,F_SETPIPE_SZ,...) failed: EINVAL (22)
 ltp-syscalls	epoll_wait07	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
@@ -372,7 +372,7 @@ ltp-syscalls	fork01	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(
 ltp-syscalls	fork03	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
 ltp-syscalls	fork04	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
 ltp-syscalls	fork05	CONF	tst_test.c:1429: TCONF: Test only supports Intel 32 bits
-ltp-syscalls	fork06	TIMEOUT	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
+ltp-syscalls	fork06	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
 ltp-syscalls	fork07	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
 ltp-syscalls	fork08	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
 ltp-syscalls	fork09	BROK	tst_fs_type.c:20: TBROK: tst_fs_type: Failed to statfs(/tmp/LTP_XXXXXX): ENOSYS (38)
@@ -1292,7 +1292,7 @@ ltp-syscalls	setsockopt09	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .co
 ltp-syscalls	setsockopt10	BROK	tst_kconfig.c:289: TBROK: Cannot parse kernel .config
 ltp-syscalls	setsockopt11	BROK	tst_taint.c:43: TBROK: Failed to open FILE '/proc/sys/kernel/tainted' for reading: ENOENT (2)
 ltp-syscalls	settimeofday01	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
-ltp-syscalls	settimeofday02	FAIL	exit 5; settimeofday02.c:33: TFAIL: settimeofday(&tc->tv, NULL) succeeded
+ltp-syscalls	settimeofday02	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
 ltp-syscalls	setuid01	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
 ltp-syscalls	setuid01_16	CONF	testcases/kernel/syscalls/setuid/../utils/compat_tst_16.h:84: TCONF: 16-bit version of setuid() is not supported on your platform
 ltp-syscalls	setuid03	WARN	tst_test.c:1101: TWARN: Kernel is older than minimal supported 4.4
