@@ -53,7 +53,8 @@
   then CAP_DAC_OVERRIDE (read and write anything, search any directory, execute where some
   execute bit is set) and CAP_DAC_READ_SEARCH (read files, read and search directories), where
   they used to let filesystem uid 0 through; `access` checks as the caller's real self, as Linux's
-  `do_faccessat` does (no capabilities for a real uid other than 0). Ownership checks take their
+  `do_faccessat` does (no capabilities for a real uid other than 0), for the whole path lookup and
+  not only its last component. Ownership checks take their
   capability: CAP_FOWNER for chmod, explicit utimes and sticky directories, CAP_FSETID to keep the
   set-ID bits through a write or a set-group-ID bit outside the group, CAP_CHOWN for chown,
   CAP_MKNOD for device nodes and CAP_SYS_CHROOT for chroot. kill(2) needs a uid match or CAP_KILL
@@ -77,7 +78,10 @@
   values apply at exec (pP' = (X & fP) | (pI & fI) | pA, and with the effective bit pE' = pP'), a v3
   value whose root id is not 0 grants nothing, a malformed one fails the exec (EINVAL), an effective
   bit asking for capabilities the bounding set withholds fails it with EPERM before the point of no
-  return, and a set-user-ID-root program run by another user gets only its file capabilities. Only
+  return, and a set-user-ID-root program run by another user gets only its file capabilities. An
+  exec that may grant privilege (file capabilities, a set-user-ID or set-group-ID bit) maps the
+  program and its loader from the bytes it read and checked, not from the page cache, so a write
+  to the file meanwhile cannot change what runs privileged. Only
   v2 and v3 values can be written (EINVAL otherwise), with CAP_SETFCAP; a v3 value with root id 0
   reads back as v2; a write, truncate or chown removes the attribute, whoever makes it (Linux's
   killpriv).
@@ -95,7 +99,8 @@
   without attributes, its old pointer bytes neither read nor freed as an attribute block, and
   `mkfs-blockfs --upgrade` raises one). The in-memory store keyed by inode
   number, which the shell's `xattr` command used and whose numbers collided across filesystems, is
-  gone; the command acts on the node.
+  gone; the command acts on the node, with the limits and the file-capability check the system
+  calls apply (an over-long name could otherwise have corrupted a BlockFS attribute block).
 - `pause` on x86_64 (system call 34 had no handler, so musl's `pause()` returned ENOSYS at once and a
   forked child meant to wait ran on): it waits as `ppoll` with no descriptors and no timeout,
   which is what musl does on AArch64 and RISC-V, and returns EINTR after a handler.

@@ -107,9 +107,7 @@ fn set(
     let node = target(dfd, path, at_flags)?;
     // A file capability must be a v2 or v3 value (cap_convert_nscap,
     // before its CAP_SETFCAP check).
-    if name == xattr::XATTR_NAME_CAPS && !FileCaps::valid_to_write(&bytes) {
-        return Err(SyscallError::InvalidArgument);
-    }
+    xattr::check_value(&name, &bytes).map_err(|_| SyscallError::InvalidArgument)?;
     check(&node, &name, true)?;
     node.update_xattrs(&mut |a| a.set(&name, &bytes, flags))
         .map_err(super::map_kernel_error)?;

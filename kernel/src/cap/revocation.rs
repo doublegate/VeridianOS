@@ -619,10 +619,14 @@ mod tests {
         assert!(cache.is_revoked(b));
         assert!(cache.is_revoked(a), "earlier entries are kept");
         assert!(cache.seen.load(Ordering::Relaxed) > seen);
-        // Adding an entry already present does not grow the log.
-        let len = REVOCATION_LIST.log.read().len();
-        REVOCATION_LIST.add(a);
-        assert_eq!(REVOCATION_LIST.log.read().len(), len);
+        // Adding an entry already present does not grow the log. Checked on
+        // a list of its own: the global one is shared with tests running in
+        // parallel, which add between the two reads (a flaky failure).
+        let list = RevocationList::new();
+        list.add(a);
+        let len = list.log.read().len();
+        list.add(a);
+        assert_eq!(list.log.read().len(), len);
     }
 
     #[test]

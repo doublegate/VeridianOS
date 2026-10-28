@@ -241,6 +241,8 @@ fn load_image(
                 .as_ref()
                 .map(|(node, data, parsed)| (parsed, &**node, data.as_slice())),
             guards,
+            // The first program, started by the kernel: nothing is gained.
+            false,
         )?;
         if interp.is_none() {
             lifecycle::setup_static_tls(process, binary, buffer);

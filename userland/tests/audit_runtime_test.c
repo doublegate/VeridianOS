@@ -2085,6 +2085,29 @@ static void test_credentials_and_paths(void)
     }
     report_child("access_uses_owner_bits", pid);
 
+    /* access(2) resolves the whole path as the real user, not only the last
+     * component (Linux's do_faccessat; PR #33 review): a set-user-ID-root
+     * style process (real 1000, effective 0) may not reach a 0644 file in a
+     * directory only root may search, while AT_EACCESS checks as root. */
+    mkdir("/tmp/audit_rootdir", 0700);
+    chmod("/tmp/audit_rootdir", 0700);
+    write_file("/tmp/audit_rootdir/f", "r", 0644);
+    pid = fork();
+    if (pid == 0) {
+        int f = 0;
+        if (setresuid(1000, 0, 0) != 0) _exit(100);
+        errno = 0;
+        if (access("/tmp/audit_rootdir/f", R_OK) == 0 || errno != EACCES) f |= 1;
+        errno = 0;
+        if (access("/tmp/audit_rootdir/f", F_OK) == 0 || errno != EACCES) f |= 2;
+        /* faccessat2(AT_FDCWD, ..., AT_EACCESS): the raw call, since the
+         * native libc has no faccessat (and faccessat has no flags). */
+        if (veridian_syscall4(SYS_faccessat2, -100, "/tmp/audit_rootdir/f", R_OK, 0x200) != 0)
+            f |= 4;
+        _exit(f);
+    }
+    report_child("access_resolves_the_path_as_the_real_user", pid);
+
     /* chroot: lookups stay inside, including "..", absolute paths and
      * absolute symlink targets; only root may call it. */
     mkdir("/tmp/audit_jail", 0755);

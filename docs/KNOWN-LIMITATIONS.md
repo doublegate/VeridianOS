@@ -334,6 +334,11 @@ filesystem.
   Only mount images you trust.
 - **mount (N-129)** is allowed to any process holding a memory capability, and type `blockfs`
   mounts an empty RAM filesystem.
+- **No ETXTBSY.** Linux refuses to open for writing a file that a process is running (and refuses
+  to exec a file open for writing). Here such a write succeeds, and processes running the program
+  from BlockFS see it through the shared page cache. An exec that grants privilege (file
+  capabilities, set-user-ID or set-group-ID) maps a private copy of the bytes it checked, so the
+  write cannot change what runs privileged (v0.28 queue item 3, file tier).
 
 ### Shared IPC regions are never reclaimed
 

@@ -313,18 +313,26 @@ pub fn bti_guards(
     })
 }
 
+/// With `private`, nothing comes from the page cache: every page is written
+/// from the bytes exec read and checked (`data`, `interp_data`). An exec that
+/// grants privilege (file capabilities, set-user-ID or set-group-ID) maps
+/// privately, so the program that runs privileged is the one that held the
+/// privilege when it was read, not what a later write put in the file
+/// (PR #33 review; Linux refuses such writes with ETXTBSY, which VeridianOS
+/// does not have yet).
 pub fn load(
     vas: &crate::mm::VirtualAddressSpace,
     program: (&ElfBinary, &dyn crate::fs::VfsNode, &[u8], &ImagePlan),
     interpreter: Option<(&ElfBinary, &dyn crate::fs::VfsNode, &[u8])>,
     guards: (bool, bool),
+    private: bool,
 ) -> Result<Loaded, crate::error::KernelError> {
     let (binary, node, data, program_plan) = program;
     let (program_guarded, interp_guarded) = guards;
     // W^X follows the new program's note (the interpreter's does not
     // count), and PR_SET_MDWE the old program's (ADR 0017).
     vas.set_wx_policy(vas.wx_policy().exec(wants_wx(binary, data)));
-    map_image(vas, node, data, program_plan, program_guarded)?;
+    map_image(vas, node, data, program_plan, program_guarded, private)?;
     let mut interpreter_plan = None;
     let (start, base) = match interpreter {
         Some((interp, interp_node, interp_data)) => {
@@ -335,7 +343,14 @@ pub fn load(
             let size = check_interpreter(interp, interp_data.len()).map_err(bad)?;
             let at = vas.reserve_mmap_area(size as usize)?;
             let interp_plan = plan(interp, interp_data.len(), at.as_u64()).map_err(bad)?;
-            map_image(vas, interp_node, interp_data, &interp_plan, interp_guarded)?;
+            map_image(
+                vas,
+                interp_node,
+                interp_data,
+                &interp_plan,
+                interp_guarded,
+                private,
+            )?;
             let entry = (interp_plan.entry, interp_plan.bias);
             interpreter_plan = Some(interp_plan);
             entry
@@ -371,17 +386,19 @@ pub fn load(
 /// into `vas`: one mapping per run of equal permissions. Whole-file pages
 /// come from the file's page cache when it has one, so every process
 /// running the program shares them (read-only, or copy-on-write in a
-/// writable segment); the other pages are written from `data`. With
-/// `guarded`, executable pages are BTI guarded (PROT_BTI).
+/// writable segment); the other pages are written from `data`, and so is
+/// every page with `private` (see [`load`]). With `guarded`, executable
+/// pages are BTI guarded (PROT_BTI).
 pub fn map_image(
     vas: &crate::mm::VirtualAddressSpace,
     node: &dyn crate::fs::VfsNode,
     data: &[u8],
     plan: &ImagePlan,
     guarded: bool,
+    private: bool,
 ) -> Result<(), crate::error::KernelError> {
     use crate::mm::{vas::MappingType, VirtualAddress};
-    let cache = node.page_cache();
+    let cache = if private { None } else { node.page_cache() };
     let mut first = 0;
     for run in plan.runs() {
         // PF_R/W/X to PROT_READ (1) / PROT_WRITE (2) / PROT_EXEC (4), and

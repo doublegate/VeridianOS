@@ -584,6 +584,27 @@ impl Process {
             })
     }
 
+    /// What the process's live threads hold in common, for a check where
+    /// any of them could be the one that counts: the intersection of their
+    /// permitted sets and whether every one has CAP_SYS_PTRACE effective.
+    /// None if no thread is alive. The fail-closed side of
+    /// [`Self::permitted_caps`].
+    #[cfg(feature = "alloc")]
+    pub fn common_ptrace_caps(&self) -> Option<(super::linux_caps::LinuxCaps, bool)> {
+        use super::thread::ThreadState;
+        let threads = self.threads.lock();
+        let mut live = threads
+            .values()
+            .filter(|t| !matches!(t.get_state(), ThreadState::Zombie | ThreadState::Dead))
+            .map(|t| *t.caps.lock());
+        let first = live.next()?;
+        let cap = super::linux_caps::CAP_SYS_PTRACE;
+        Some(live.fold(
+            (first.permitted, first.capable(cap)),
+            |(permitted, capable), c| (permitted.intersect(c.permitted), capable && c.capable(cap)),
+        ))
+    }
+
     /// Get number of threads
     #[cfg(feature = "alloc")]
     pub fn thread_count(&self) -> usize {

@@ -701,6 +701,10 @@ fn exec_image(
         unprivileged_tracer_at_start,
         ..set_ids
     };
+    // An exec that may grant privilege maps the bytes it checked, not the
+    // page cache (`elf::image::load`).
+    let private_image =
+        set_ids.file_caps.is_some() || set_ids.set_uid.is_some() || set_ids.set_gid.is_some();
 
     // Point of no return: from clear() on, a failure cannot go back to the
     // old image. The process is then killed with SIGSEGV at the system-call
@@ -760,6 +764,7 @@ fn exec_image(
                     .as_ref()
                     .map(|(node, data, binary)| (binary, &**node, data.as_slice())),
                 guards,
+                private_image,
             )?
         };
 

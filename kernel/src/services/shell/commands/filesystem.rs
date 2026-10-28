@@ -1287,6 +1287,12 @@ impl BuiltinCommand for XattrCommand {
                     return CommandResult::Error(e);
                 }
                 let value = args[3].as_bytes();
+                // The checks every writer runs (a file capability must be
+                // well formed); the console's shell holds every capability,
+                // so the permission check would pass anyway.
+                if let Err(e) = crate::fs::xattr::check_value(&args[2], value) {
+                    return CommandResult::Error(format!("xattr: {:?}", e));
+                }
                 match node.update_xattrs(&mut |a| a.set(&args[2], value, 0)) {
                     Ok(()) => {
                         crate::println!("Set {}={} on {}", args[2], args[3], args[1]);

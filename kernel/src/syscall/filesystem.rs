@@ -2267,7 +2267,16 @@ fn access_path(path: &str, mode: usize, flags: usize) -> SyscallResult {
     if mode & !7 != 0 || flags & !(AT_EACCESS | AT_SYMLINK_NOFOLLOW_FLAG) != 0 {
         return Err(SyscallError::InvalidArgument);
     }
-    let vfs = vfs()?;
+    let caller = if flags & AT_EACCESS != 0 {
+        Caller::current()
+    } else {
+        access_caller()
+    };
+    // The whole lookup runs as that caller, not only the last component:
+    // a directory the real user may not search is not searched for it.
+    let vfs = try_get_vfs()
+        .ok_or(SyscallError::InvalidState)?
+        .as_caller_with(caller);
     let node = if flags & AT_SYMLINK_NOFOLLOW_FLAG != 0 {
         vfs.resolve_path_no_follow(path)
     } else {
@@ -2278,11 +2287,6 @@ fn access_path(path: &str, mode: usize, flags: usize) -> SyscallResult {
         return Ok(0); // F_OK: it exists
     }
     let meta = node.metadata().map_err(super::map_kernel_error)?;
-    let caller = if flags & AT_EACCESS != 0 {
-        Caller::current()
-    } else {
-        access_caller()
-    };
     if crate::fs::permission(&caller, &meta, mode as u32) {
         Ok(0)
     } else {

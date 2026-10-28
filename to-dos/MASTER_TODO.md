@@ -355,7 +355,8 @@ What does not work yet: `docs/KNOWN-LIMITATIONS.md`.
      this comes first among the remaining groups (it makes the later ones measurable).
   3. [ ] The remaining syscall groups: personality (READ_IMPLIES_EXEC with the W^X opt-in only),
      unshare/setns with every namespace type and `/proc/<pid>/ns`, then the process, signal, time
-     and file tiers with ABI-review findings N-194 to N-247; the `docs/PORTING-GUIDE.md` rewrite.
+     and file tiers with ABI-review findings N-194 to N-247 (with ETXTBSY: no writing a running
+     program, no exec of a file open for writing); the `docs/PORTING-GUIDE.md` rewrite.
   4. [ ] ABI-review items N-190 to N-193, N-207, N-209 to N-211, N-217, N-221, N-222, N-225, N-231,
      N-235 to N-238.
   5. [ ] D leftovers: N-115, N-260, N-52/N-261, N-282; the native thread call (private 1064),

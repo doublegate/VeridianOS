@@ -70,6 +70,20 @@ pub fn namespace(name: &str) -> Result<Namespace, KernelError> {
     Err(KernelError::FsError(FsError::NotSupported))
 }
 
+/// Whether `value` may be stored as attribute `name` at all, whoever asks:
+/// a file capability must be a v2 or v3 value (cap_convert_nscap). The
+/// system calls check it before their permission check; the kernel shell's
+/// `xattr set` runs it too, so it cannot store a malformed capability.
+pub fn check_value(name: &str, value: &[u8]) -> Result<(), KernelError> {
+    if name == XATTR_NAME_CAPS && !crate::process::linux_caps::FileCaps::valid_to_write(value) {
+        return Err(KernelError::InvalidArgument {
+            name: "security.capability",
+            value: "not a v2 or v3 file capability",
+        });
+    }
+    Ok(())
+}
+
 /// The error for an access the namespace rules refuse: EPERM for a write,
 /// ENODATA (as if absent) for a read (xattr_permission_error).
 fn refused(write: bool) -> KernelError {
@@ -181,6 +195,21 @@ impl XattrSet {
     /// Set `name` to `value` (setxattr's `flags`: XATTR_CREATE fails with
     /// EEXIST if it exists, XATTR_REPLACE with ENODATA if it does not).
     pub fn set(&mut self, name: &str, value: &[u8], flags: u32) -> Result<(), KernelError> {
+        // The limits the system calls check before getting here, kept by the
+        // set itself so no caller (the kernel shell's `xattr`) can store an
+        // entry the encoding's length fields cannot hold (PR #33 review).
+        if name.is_empty() || name.len() > XATTR_NAME_MAX {
+            return Err(KernelError::InvalidArgument {
+                name: "xattr name",
+                value: "empty or longer than XATTR_NAME_MAX",
+            });
+        }
+        if value.len() > XATTR_SIZE_MAX {
+            return Err(KernelError::InvalidArgument {
+                name: "xattr value",
+                value: "longer than XATTR_SIZE_MAX",
+            });
+        }
         let exists = self.entries.contains_key(name);
         if flags & XATTR_CREATE != 0 && exists {
             return Err(KernelError::FsError(FsError::AlreadyExists));
@@ -219,6 +248,16 @@ impl XattrSet {
     /// not fit. Zeros follow the last entry.
     pub fn encode(&self, buf: &mut [u8]) -> Result<(), KernelError> {
         if self.encoded_size() > buf.len() {
+            return Err(KernelError::FsError(FsError::NoSpace));
+        }
+        // A name length is one byte and a value length two: anything longer
+        // would be written truncated and corrupt the block.
+        if self.entries.len() > usize::from(u16::MAX)
+            || self
+                .entries
+                .iter()
+                .any(|(n, v)| n.len() > usize::from(u8::MAX) || v.len() > usize::from(u16::MAX))
+        {
             return Err(KernelError::FsError(FsError::NoSpace));
         }
         buf.fill(0);
@@ -293,6 +332,34 @@ pub fn update_in_memory(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The set keeps Linux's limits itself, and encoding never truncates a
+    /// length field (PR #33 review).
+    #[test]
+    fn set_refuses_what_the_encoding_cannot_hold() {
+        let mut s = XattrSet::new();
+        let long = alloc::format!("user.{}", "n".repeat(XATTR_NAME_MAX - 4));
+        assert!(s.set(&long, b"v", 0).is_err(), "256-byte name");
+        let max = alloc::format!("user.{}", "n".repeat(XATTR_NAME_MAX - 5));
+        assert!(s.set(&max, b"v", 0).is_ok(), "255-byte name");
+        assert!(s.set("", b"v", 0).is_err());
+        assert!(s
+            .set("user.big", &alloc::vec![0; XATTR_SIZE_MAX + 1], 0)
+            .is_err());
+        // A value of XATTR_SIZE_MAX is a valid attribute but not encodable
+        // (its length is two bytes): encode refuses it, it does not wrap.
+        let mut big = XattrSet::new();
+        big.set("user.big", &alloc::vec![0; XATTR_SIZE_MAX], 0)
+            .unwrap();
+        let mut buf = alloc::vec![0u8; XATTR_SIZE_MAX + 64];
+        assert_eq!(
+            big.encode(&mut buf),
+            Err(KernelError::FsError(FsError::NoSpace))
+        );
+        // A malformed file capability is refused for every caller.
+        assert!(check_value(XATTR_NAME_CAPS, b"junk").is_err());
+        assert!(check_value("user.x", b"junk").is_ok());
+    }
     use crate::{
         fs::Permissions,
         process::{

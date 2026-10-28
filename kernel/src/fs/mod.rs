@@ -1370,6 +1370,16 @@ impl Vfs {
         }
     }
 
+    /// Lookups as `caller` instead of the calling thread's credentials,
+    /// with the thread's root and working directory: access(2) resolves the
+    /// whole path with the real IDs, as Linux's do_faccessat overrides the
+    /// credentials before the lookup (PR #33 review).
+    pub fn as_caller_with(&self, caller: crate::process::creds::Caller) -> CallerView<'_> {
+        let mut ctx = self.caller_context();
+        ctx.creds = Some(caller);
+        CallerView { vfs: self, ctx }
+    }
+
     /// Resolve `path` (relative paths from `cwd`) in `ctx`'s view: the
     /// node and its canonical path in the whole tree.
     fn lookup(

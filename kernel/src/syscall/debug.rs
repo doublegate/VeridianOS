@@ -274,13 +274,15 @@ pub(super) fn may_access(
 
 /// Linux `cap_ptrace_traceme`: a process may make its parent its tracer if
 /// its permitted capabilities are within the parent's, or the parent holds
-/// CAP_SYS_PTRACE.
+/// CAP_SYS_PTRACE. Linux checks the parent task; here any of the parent's
+/// threads may trace, so `parent_permitted` and `parent_capable` are what
+/// all its live threads hold (`Process::common_ptrace_caps`).
 fn may_trace_me(
     own_permitted: process::linux_caps::LinuxCaps,
-    parent: &process::linux_caps::CapSets,
+    parent_permitted: process::linux_caps::LinuxCaps,
+    parent_capable: bool,
 ) -> bool {
-    own_permitted.is_subset_of(parent.permitted)
-        || parent.capable(process::linux_caps::CAP_SYS_PTRACE)
+    own_permitted.is_subset_of(parent_permitted) || parent_capable
 }
 
 /// Checked again with the target's address space locked (the lock exec's
@@ -326,15 +328,16 @@ pub fn sys_ptrace(request: usize, pid: usize, addr: usize, data: usize) -> Sysca
             // The parent becomes the tracer; a process can be traced once.
             let parent = caller.parent().ok_or(SyscallError::OperationNotPermitted)?;
             // The tracer's privilege is the parent's (Linux's ptrace_link
-            // takes the new parent's credentials), here its main thread's.
-            let parent_caps = process::find_process(parent)
-                .and_then(|p| p.get_main_thread_id().and_then(|tid| p.get_thread(tid)))
-                .map(|t| *t.caps.lock())
+            // takes the new parent's credentials): what all its live
+            // threads hold, since any of them may trace (PR #33 review; the
+            // main thread alone could be one with more than the rest, or
+            // gone). No live thread: EPERM.
+            let (parent_permitted, parent_capable) = process::find_process(parent)
+                .and_then(|p| p.common_ptrace_caps())
                 .ok_or(SyscallError::OperationNotPermitted)?;
-            if !may_trace_me(current_permitted(), &parent_caps) {
+            if !may_trace_me(current_permitted(), parent_permitted, parent_capable) {
                 return Err(SyscallError::OperationNotPermitted);
             }
-            let parent_capable = parent_caps.capable(process::linux_caps::CAP_SYS_PTRACE);
             let _guard = caller.cred_guard.lock();
             caller
                 .tracer
@@ -500,21 +503,20 @@ mod tests {
         assert_eq!(may_attach(10, &root, full, 20, &keeps, 0), Ok(()));
     }
 
-    /// PTRACE_TRACEME (Linux's cap_ptrace_traceme): the parent must hold
-    /// the caller's permitted capabilities, or CAP_SYS_PTRACE.
+    /// PTRACE_TRACEME (Linux's cap_ptrace_traceme): the parent's threads
+    /// must all hold the caller's permitted capabilities, or all hold
+    /// CAP_SYS_PTRACE.
     #[test]
     fn traceme_needs_a_parent_holding_the_callers_capabilities() {
-        use process::linux_caps::{CapSets, LinuxCaps, CAP_NET_RAW, CAP_SYS_PTRACE};
+        use process::linux_caps::{LinuxCaps, CAP_NET_RAW};
         let raw = LinuxCaps::EMPTY.with(CAP_NET_RAW);
-        let mut parent = CapSets::NONE;
-        assert!(may_trace_me(LinuxCaps::EMPTY, &parent));
-        assert!(!may_trace_me(raw, &parent));
-        parent.permitted = raw;
-        assert!(may_trace_me(raw, &parent));
-        let mut tracer = CapSets::NONE;
-        tracer.permitted = LinuxCaps::EMPTY.with(CAP_SYS_PTRACE);
-        tracer.effective = tracer.permitted;
-        assert!(may_trace_me(raw, &tracer));
-        assert!(may_trace_me(LinuxCaps::FULL, &CapSets::ROOT));
+        let none = LinuxCaps::EMPTY;
+        assert!(may_trace_me(none, none, false));
+        assert!(!may_trace_me(raw, none, false));
+        assert!(may_trace_me(raw, raw, false));
+        assert!(
+            may_trace_me(raw, none, true),
+            "CAP_SYS_PTRACE in every thread"
+        );
     }
 }
