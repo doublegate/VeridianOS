@@ -379,7 +379,10 @@ fn install_exec_credentials(
         unsafe_exec: traced_unprivileged || fs_shared,
         egid_in_groups: old.in_group(new_egid),
     };
-    let mut caps = thread.caps.lock();
+    // A copy: exec runs single-threaded, so nothing else changes this
+    // thread's sets, and no thread's sets lock is held while the
+    // credentials are (the order of `Process::change_uids`).
+    let caps = *thread.caps.lock();
     // A capability-dumb program was refused before the point of no return,
     // by the same rules on the same file and sets: they cannot refuse here.
     let outcome = caps
@@ -395,7 +398,7 @@ fn install_exec_credentials(
     // dumpable again. What counts is the result: a set-user-ID exec that
     // was downgraded (shared filesystem state) leaves it dumpable.
     let grew = !outcome.caps.permitted.is_subset_of(caps.permitted);
-    *caps = outcome.caps;
+    *thread.caps.lock() = outcome.caps;
     let dumpable = ids.readable && old.exec_keeps_dumpable(&creds) && !grew;
     process.dumpable.store(dumpable, Ordering::Release);
     Ok(outcome.secure)

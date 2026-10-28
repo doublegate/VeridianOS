@@ -91,7 +91,8 @@
   data or the owner changes and its error is the call's, so a file that cannot lose its
   capabilities is neither written nor given away; an attribute read that fails counts as a
   failed removal, not as no capability. A chown to an owner the filesystem cannot store (BlockFS
-  keeps 16-bit IDs) fails before the file loses anything.
+  keeps 16-bit IDs) fails before the file loses anything. Two writers that both remove the
+  capability do not fail the one that finds it already gone.
 - Extended attributes (ADR 0020 step 8): the twelve Linux calls (`setxattr`, `getxattr`,
   `listxattr`, `removexattr` and their `l*` and `f*` forms) and the four `*xattrat` calls of Linux
   6.13, with Linux's rules: names up to 255 bytes (ERANGE), values up to 64 KiB (E2BIG),

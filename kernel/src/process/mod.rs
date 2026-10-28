@@ -694,7 +694,8 @@ pub fn create_thread(
                     creator.no_new_privs.load(Ordering::Acquire),
                     Ordering::Release,
                 );
-                *thread.caps.lock() = *creator.caps.lock();
+                let sets = *creator.caps.lock();
+                *thread.caps.lock() = sets;
             }
 
             // Add thread to process
@@ -704,7 +705,8 @@ pub fn create_thread(
             // (`Process::change_uids`), as clone does.
             if let Some(creator) = &creator {
                 let _threads = process.threads.lock();
-                *thread.caps.lock() = *creator.caps.lock();
+                let sets = *creator.caps.lock();
+                *thread.caps.lock() = sets;
             }
 
             Ok(tid)

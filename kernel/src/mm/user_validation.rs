@@ -43,7 +43,11 @@ pub fn translate_address(addr: usize) -> Option<PageTableEntry> {
 /// address space, or `None` if it is not mapped. Takes no lock (a system
 /// call may hold any), and reads the root of the lower half: CR3 and satp
 /// hold the whole address space, AArch64's TTBR0_EL1 the user half (ADR
-/// 0015).
+/// 0015). Lock-free is safe for a read: munmap and mprotect only rewrite
+/// entries, and table frames are freed only when the whole user half goes
+/// (exec, single-threaded by then, and teardown, with no thread left in
+/// it), so the walk reads live tables and sees each entry before or after
+/// a concurrent change, as the hardware walker does (PR #33 review).
 #[cfg(target_os = "none")]
 pub fn active_user_page_flags(addr: usize) -> Option<PageFlags> {
     #[cfg(target_arch = "aarch64")]

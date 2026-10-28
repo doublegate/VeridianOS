@@ -180,7 +180,12 @@ pub fn kill_file_caps(node: &dyn VfsNode) -> Result<(), KernelError> {
         Err(e) => return Err(e),
     };
     if has {
-        node.update_xattrs(&mut |a| a.remove(xattr::XATTR_NAME_CAPS))?;
+        // Another writer may remove it between the check and the update:
+        // gone is the outcome wanted, not an error.
+        node.update_xattrs(&mut |a| match a.remove(xattr::XATTR_NAME_CAPS) {
+            Err(KernelError::FsError(FsError::NoData)) => Ok(()),
+            r => r,
+        })?;
     }
     Ok(())
 }
@@ -2551,6 +2556,72 @@ pub(crate) mod tests {
             OpenFlags::read_write(),
         );
         assert_eq!(file.write(b"new").unwrap(), 3);
+    }
+
+    /// A file whose capability another writer removes between
+    /// kill_file_caps's check and its update (PR #33 review): the update
+    /// finds the attribute already gone.
+    struct RacedCaps(Arc<dyn VfsNode>);
+
+    impl VfsNode for RacedCaps {
+        fn node_type(&self) -> NodeType {
+            self.0.node_type()
+        }
+        fn read(&self, o: usize, b: &mut [u8]) -> Result<usize, KernelError> {
+            self.0.read(o, b)
+        }
+        fn write(&self, o: usize, d: &[u8]) -> Result<usize, KernelError> {
+            self.0.write(o, d)
+        }
+        fn metadata(&self) -> Result<Metadata, KernelError> {
+            self.0.metadata()
+        }
+        fn readdir(&self) -> Result<Vec<DirEntry>, KernelError> {
+            self.0.readdir()
+        }
+        fn lookup(&self, n: &str) -> Result<Arc<dyn VfsNode>, KernelError> {
+            self.0.lookup(n)
+        }
+        fn create(&self, n: &str, p: Permissions) -> Result<Arc<dyn VfsNode>, KernelError> {
+            self.0.create(n, p)
+        }
+        fn mkdir(&self, n: &str, p: Permissions) -> Result<Arc<dyn VfsNode>, KernelError> {
+            self.0.mkdir(n, p)
+        }
+        fn unlink(&self, n: &str) -> Result<(), KernelError> {
+            self.0.unlink(n)
+        }
+        fn truncate(&self, s: usize) -> Result<(), KernelError> {
+            self.0.truncate(s)
+        }
+        fn xattrs(&self) -> Result<xattr::XattrSet, KernelError> {
+            self.0.xattrs()
+        }
+        fn update_xattrs(
+            &self,
+            f: &mut dyn FnMut(&mut xattr::XattrSet) -> Result<(), KernelError>,
+        ) -> Result<(), KernelError> {
+            self.0
+                .update_xattrs(&mut |a| a.remove(xattr::XATTR_NAME_CAPS))?;
+            self.0.update_xattrs(f)
+        }
+    }
+
+    #[test]
+    fn a_capability_removed_meanwhile_does_not_fail_the_write() {
+        let vfs = make_vfs_with_root();
+        let root = vfs.root_fs().unwrap().root();
+        let inner = root.create("prog", Permissions::from_mode(0o755)).unwrap();
+        inner
+            .update_xattrs(&mut |a| a.set(xattr::XATTR_NAME_CAPS, &[0; 20], 0))
+            .unwrap();
+        let node = RacedCaps(inner.clone());
+        assert!(kill_file_caps(&node).is_ok());
+        assert!(inner
+            .xattrs()
+            .unwrap()
+            .get(xattr::XATTR_NAME_CAPS)
+            .is_none());
     }
 
     /// An attribute read that fails is not taken for "no capability": the
