@@ -116,6 +116,11 @@ jobs:
           # 397 s under the old 240 s/MiB scaling). The scaling is now 900 s/MiB (the
           # script's AGY_TIMEOUT_SECONDS_PER_MIB), so 900 s here is reached from ~650 KB.
           AGY_PRINT_TIMEOUT_MAX_SECONDS: "900"  # per-attempt cap (default 1800)
+          # Also set here, not only as the script's default: a pull_request run takes
+          # this file from the PR branch but the script from the default branch, so a
+          # repository whose default branch still has the old script would otherwise
+          # keep scaling at 240 s/MiB.
+          AGY_TIMEOUT_SECONDS_PER_MIB: "900"    # budget per MiB of diff (script default 900)
           # Two attempts, not three: a retry is for a transient backend error; a third
           # attempt at the same budget only repeats a timeout.
           AGY_RETRIES: "2"
