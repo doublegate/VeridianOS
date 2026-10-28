@@ -172,6 +172,11 @@ work. User code is preempted when its slice ends (D3). What is still missing:
   registered through `arch_prctl` (the signal mask and pending set are per thread since D3).
 - **Old binaries.** KDE binaries built before the v0.27 musl patch map `pthread_exit` to a
   process exit.
+- **The native thread call (private number 1064) adds a thread it never starts.** The thread has
+  no dispatcher task and stays in its creating state, so the process's last real thread to exit
+  sees it as alive: the process is never torn down, never becomes a zombie and never signals its
+  parent, whose wait does not return. Nothing in the C libraries calls it (threads use `clone`
+  since N-102); it is to be started as `clone` starts a thread, or retired (v0.28 queue item 5).
 
 ### x86_64 entry layer remainders (N-167, N-168; sprint D2)
 
