@@ -86,8 +86,10 @@
   to the file meanwhile cannot change what runs privileged. Only
   v2 and v3 values can be written (EINVAL otherwise), with CAP_SETFCAP; a v3 value with root id 0
   reads back as v2; a write, truncate or chown removes the attribute, whoever makes it (Linux's
-  killpriv). As Linux's `file_remove_privs`, that removal comes before the data changes and its
-  error is the write's, so a file that cannot lose its capabilities is not written.
+  killpriv). As Linux's `file_remove_privs` and `setattr_prepare`, that removal comes before the
+  data or the owner changes and its error is the call's, so a file that cannot lose its
+  capabilities is neither written nor given away; an attribute read that fails counts as a
+  failed removal, not as no capability.
 - Extended attributes (ADR 0020 step 8): the twelve Linux calls (`setxattr`, `getxattr`,
   `listxattr`, `removexattr` and their `l*` and `f*` forms) and the four `*xattrat` calls of Linux
   6.13, with Linux's rules: names up to 255 bytes (ERANGE), values up to 64 KiB (E2BIG),

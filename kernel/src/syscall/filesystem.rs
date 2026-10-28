@@ -3295,16 +3295,18 @@ pub(crate) fn chown_node(
     if !may_chown(&Caller::current(), meta.uid, meta.gid, uid, gid) {
         return Err(SyscallError::OperationNotPermitted);
     }
-    node.chown(uid, gid).map_err(super::map_kernel_error)?;
     // A non-directory that changes hands loses set-user-ID and
     // set-group-ID (`Permissions::after_chown`) and its file capabilities.
-    let meta = node.metadata().map_err(super::map_kernel_error)?;
+    // As Linux's setattr_prepare, they go first: when that fails the file
+    // keeps its owner, never a new owner with the old privileges (PR #33
+    // review).
     if meta.node_type != crate::fs::NodeType::Directory {
         crate::fs::kill_file_caps(&**node).map_err(super::map_kernel_error)?;
         if let Some(kept) = meta.permissions.after_chown() {
             node.chmod(kept).map_err(super::map_kernel_error)?;
         }
     }
+    node.chown(uid, gid).map_err(super::map_kernel_error)?;
     Ok(0)
 }
 
@@ -3447,6 +3449,31 @@ pub(crate) fn find_socket_file(
 
 #[cfg(test)]
 mod tests {
+    use alloc::sync::Arc;
+
+    use crate::fs::{
+        tests::{make_vfs_with_root, StuckCaps},
+        xattr, Permissions, VfsNode,
+    };
+
+    /// As Linux's setattr_prepare, chown removes the file's privileges
+    /// before the owner changes: when that fails, the file keeps its owner
+    /// (PR #33 review).
+    #[test]
+    fn a_chown_that_cannot_drop_file_caps_keeps_the_owner() {
+        let vfs = make_vfs_with_root();
+        let root = vfs.root_fs().unwrap().root();
+        let inner = root.create("prog", Permissions::from_mode(0o4755)).unwrap();
+        inner
+            .update_xattrs(&mut |a| a.set(xattr::XATTR_NAME_CAPS, &[0; 20], 0))
+            .unwrap();
+        let node: Arc<dyn VfsNode> = Arc::new(StuckCaps(inner.clone(), false));
+        assert!(super::chown_node(&node, 1000, 1000).is_err());
+        let meta = inner.metadata().unwrap();
+        assert_eq!((meta.uid, meta.gid), (0, 0));
+        assert!(meta.permissions.set_uid);
+    }
+
     #[test]
     fn generic_stat_takes_every_field() {
         let x = super::X86Stat {

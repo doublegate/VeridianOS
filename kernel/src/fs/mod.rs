@@ -171,11 +171,14 @@ pub fn remove_privs(node: &dyn VfsNode) -> Result<(), KernelError> {
 /// Remove a file's capabilities (Linux's cap_inode_killpriv), as a write,
 /// truncate or chown does whoever makes it: a changed program must not
 /// keep the privilege granted to the old one. Only read when present; a
-/// filesystem without attributes has none to remove.
+/// filesystem without attributes has none to remove. Any other read error
+/// is the caller's, since the capability may still be there (PR #33 review).
 pub fn kill_file_caps(node: &dyn VfsNode) -> Result<(), KernelError> {
-    let has = node
-        .xattrs()
-        .is_ok_and(|a| a.get(xattr::XATTR_NAME_CAPS).is_some());
+    let has = match node.xattrs() {
+        Ok(a) => a.get(xattr::XATTR_NAME_CAPS).is_some(),
+        Err(KernelError::FsError(FsError::NotSupported)) => false,
+        Err(e) => return Err(e),
+    };
     if has {
         node.update_xattrs(&mut |a| a.remove(xattr::XATTR_NAME_CAPS))?;
     }
@@ -2151,7 +2154,7 @@ pub fn append_file(path: &str, data: &[u8]) -> Result<usize, KernelError> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     /// Linux's device-number encoding (`new_encode_dev`): 12 bits of
@@ -2457,8 +2460,9 @@ mod tests {
 
     /// A file whose capabilities cannot be removed is not written: as
     /// Linux's file_remove_privs, the removal comes first and its error is
-    /// the write's (PR #33 review). Delegates to a ramfs file.
-    struct StuckCaps(Arc<dyn VfsNode>);
+    /// the write's (PR #33 review). Delegates to a ramfs file; with
+    /// `unreadable` the attribute read fails too.
+    pub(crate) struct StuckCaps(pub(crate) Arc<dyn VfsNode>, pub(crate) bool);
 
     impl VfsNode for StuckCaps {
         fn node_type(&self) -> NodeType {
@@ -2491,7 +2495,16 @@ mod tests {
         fn truncate(&self, s: usize) -> Result<(), KernelError> {
             self.0.truncate(s)
         }
+        fn chmod(&self, p: Permissions) -> Result<(), KernelError> {
+            self.0.chmod(p)
+        }
+        fn chown(&self, u: Option<u32>, g: Option<u32>) -> Result<(), KernelError> {
+            self.0.chown(u, g)
+        }
         fn xattrs(&self) -> Result<xattr::XattrSet, KernelError> {
+            if self.1 {
+                return Err(KernelError::FsError(FsError::IoError));
+            }
             self.0.xattrs()
         }
         fn update_xattrs(
@@ -2510,7 +2523,7 @@ mod tests {
         inner
             .update_xattrs(&mut |a| a.set(xattr::XATTR_NAME_CAPS, &[0; 20], 0))
             .unwrap();
-        let node: Arc<dyn VfsNode> = Arc::new(StuckCaps(inner.clone()));
+        let node: Arc<dyn VfsNode> = Arc::new(StuckCaps(inner.clone(), false));
         assert!(remove_privs(&*node).is_err());
         let file = file::File::new(node, OpenFlags::read_write());
         assert!(file.write(b"new").is_err());
@@ -2522,8 +2535,27 @@ mod tests {
             .is_some());
         // Without file capabilities nothing needs removing: the write runs.
         let plain = root.create("data", Permissions::from_mode(0o644)).unwrap();
-        let file = file::File::new(Arc::new(StuckCaps(plain.clone())), OpenFlags::read_write());
+        let file = file::File::new(
+            Arc::new(StuckCaps(plain.clone(), false)),
+            OpenFlags::read_write(),
+        );
         assert_eq!(file.write(b"new").unwrap(), 3);
+    }
+
+    /// An attribute read that fails is not taken for "no capability": the
+    /// write stops, since the capability may still be there (PR #33 review).
+    /// Only a filesystem without attributes has none to remove.
+    #[test]
+    fn a_write_whose_caps_cannot_be_read_fails_unwritten() {
+        let vfs = make_vfs_with_root();
+        let root = vfs.root_fs().unwrap().root();
+        let inner = root.create("prog", Permissions::from_mode(0o755)).unwrap();
+        let file = file::File::new(
+            Arc::new(StuckCaps(inner.clone(), true)),
+            OpenFlags::read_write(),
+        );
+        assert!(file.write(b"new").is_err());
+        assert_eq!(inner.metadata().unwrap().size, 0);
     }
 
     /// Linux's file_remove_privs: a write without CAP_FSETID drops
@@ -2569,7 +2601,7 @@ mod tests {
     }
 
     /// Helper: create a Vfs with a ramfs root filesystem already mounted.
-    fn make_vfs_with_root() -> Vfs {
+    pub(crate) fn make_vfs_with_root() -> Vfs {
         let vfs = Vfs::new();
         let ramfs = Arc::new(ramfs::RamFs::new());
         vfs.mount_root(ramfs).expect("mount_root should succeed");

@@ -1313,6 +1313,9 @@ impl BuiltinCommand for XattrCommand {
                     Ok(n) => n,
                     Err(e) => return CommandResult::Error(e),
                 };
+                if let Err(e) = check_name(&args[2]) {
+                    return CommandResult::Error(e);
+                }
                 match node.update_xattrs(&mut |a| a.remove(&args[2])) {
                     Ok(()) => {
                         crate::println!("Removed {} from {}", args[2], args[1]);
