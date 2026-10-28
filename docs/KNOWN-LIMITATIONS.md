@@ -100,15 +100,12 @@ their check, for a few shared reasons:
 
 - **statfs is ENOSYS.** LTP's library asks for the filesystem type of its temporary directory, so
   about 630 of the 1,552 tests are TBROK before they start.
-- **The release `uname` reports.** LTP warns that the kernel is "older than minimal supported 4.4"
-  (TWARN) in every new-API test: VeridianOS reports its own version. About 205 of them otherwise
-  passed; in the rest the warning comes with the real outcome (a skip, a failure).
 - **No kernel configuration.** Tests that check a `CONFIG_*` option (about 95) find neither
   `/proc/config.gz` nor `/boot/config-<release>` and are TBROK.
 - **Missing calls.** alarm and the interval and POSIX timers, the System V IPC calls, message
   queues, mlock, msync, sched_getparam and the other calls the coverage tables list as missing;
-  most of `/proc/sys` (it has `kernel/pid_max`, `kernel/cap_last_cap` and
-  `kernel/core_pattern`), `/proc/self/mounts` and parts of `/proc/<pid>/stat` and `status`.
+  most of `/proc/sys` (it has `kernel/pid_max`, `kernel/cap_last_cap`, `kernel/core_pattern`,
+  `kernel/ostype`, `kernel/osrelease` and `kernel/version`), `/proc/self/mounts` and parts of `/proc/<pid>/stat` and `status`.
 - **Memory exhaustion.** libc-test's `malloc-oom`, `malloc-brk-fail` and `pthread_create-oom`
   stop the whole guest on RISC-V. On x86_64 and AArch64 they ran until the time limit after the
   full LTP and Open POSIX runs in the same guest, but reached ENOMEM within 10 to 16 s when

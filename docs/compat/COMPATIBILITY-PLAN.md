@@ -169,8 +169,9 @@ Each group lands with its LTP cases. The counts are "missing" entries in the cov
   | Open POSIX (1,965) | 1,569 | 1,565 | 1,565 |
   | musl libc-test (560) | 523 | 525 | 525 |
 
-  Most LTP tests stop in its library before their check: statfs is ENOSYS, `uname` reports
-  VeridianOS's version, and there is no kernel configuration to read
+  Most LTP tests stop in its library before their check: statfs is ENOSYS, `uname` reported
+  VeridianOS's version (until v0.28 reported `7.3.0-veridian`, ADR 0021), and there is no kernel
+  configuration to read
   (`docs/KNOWN-LIMITATIONS.md`, "Conformance suites"). Those three are where the system call
   groups (X2) start paying off first.
 - **Coverage tables.** Regenerate the coverage table every release, add one for arm64, and track

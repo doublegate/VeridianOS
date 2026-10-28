@@ -81,12 +81,11 @@ impl VfsNode for ProcNode {
         let content = match &self.node_type {
             ProcNodeType::SystemFile(name) => {
                 match name.as_str() {
-                    "version" => {
-                        format!(
-                            "VeridianOS version 0.5.0 (gcc 16.2.0) #1 SMP {}\n",
-                            env!("CARGO_PKG_VERSION")
-                        )
-                    }
+                    // The system's identity (ADR 0021).
+                    "version" => crate::utils::uname::proc_version(crate::utils::uname::SYSNAME),
+                    "ostype" => format!("{}\n", crate::utils::uname::SYSNAME),
+                    "osrelease" => format!("{}\n", crate::utils::uname::RELEASE),
+                    "sys/kernel/version" => format!("{}\n", crate::utils::uname::VERSION),
                     "uptime" => {
                         let secs = crate::arch::timer::get_timestamp_secs();
                         let frac_ms = crate::arch::timer::get_timestamp_ms() % 1000;
@@ -389,10 +388,14 @@ impl VfsNode for ProcNode {
                         "core_pattern" => Ok(Arc::new(ProcNode::new_system_file(String::from(
                             "core_pattern",
                         ))) as Arc<dyn VfsNode>),
-                        "cap_last_cap" | "pid_max" => {
+                        "cap_last_cap" | "pid_max" | "ostype" | "osrelease" => {
                             Ok(Arc::new(ProcNode::new_system_file(String::from(name)))
                                 as Arc<dyn VfsNode>)
                         }
+                        // Not /proc/version, which has the same file name.
+                        "version" => Ok(Arc::new(ProcNode::new_system_file(String::from(
+                            "sys/kernel/version",
+                        ))) as Arc<dyn VfsNode>),
                         "random" => Ok(Arc::new(ProcNode {
                             node_type: ProcNodeType::SubDir(String::from("sys/kernel/random")),
                         }) as Arc<dyn VfsNode>),
@@ -850,6 +853,28 @@ mod tests {
         let mut buf = [0u8; 16];
         let n = file.read(0, &mut buf).unwrap();
         assert_eq!(&buf[..n], b"40\n");
+    }
+
+    /// /proc/sys/kernel/{ostype,osrelease,version} are uname's sysname,
+    /// release and version, and /proc/version names all three (ADR 0021).
+    #[test]
+    fn kernel_identity_files_match_uname() {
+        let dir = ProcNode {
+            node_type: ProcNodeType::SubDir(String::from("sys/kernel")),
+        };
+        let read = |node: Arc<dyn VfsNode>| {
+            let mut buf = [0u8; 160];
+            let n = node.read(0, &mut buf).unwrap();
+            String::from(core::str::from_utf8(&buf[..n]).unwrap())
+        };
+        assert_eq!(read(dir.lookup("ostype").unwrap()), "VeridianOS\n");
+        assert_eq!(read(dir.lookup("osrelease").unwrap()), "7.3.0-veridian\n");
+        assert_eq!(
+            read(dir.lookup("version").unwrap()),
+            concat!("#1 SMP VeridianOS ", env!("CARGO_PKG_VERSION"), "\n")
+        );
+        let proc_version = read(Arc::new(ProcNode::new_system_file(String::from("version"))));
+        assert!(proc_version.starts_with("VeridianOS version 7.3.0-veridian ("));
     }
 
     /// /proc/sys/kernel/pid_max is Linux's 64-bit limit (PID_MAX_LIMIT);

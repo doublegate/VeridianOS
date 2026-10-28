@@ -2,6 +2,13 @@
 
 ### Changed
 
+- uname reports the release `7.3.0-veridian` (the Linux version whose sources are the kernel's
+  specification) instead of the crate version, which LTP read as older than its minimum (4.4) and
+  answered with a warning in every new-API test; the version field carries the VeridianOS version
+  (`#1 SMP VeridianOS 0.27.0`). `/proc/version` follows Linux's layout with the same strings
+  (it said `VeridianOS version 0.5.0`), `/proc/sys/kernel/{ostype,osrelease,version}` exist, and
+  the kernel shell's `uname` takes its fields from the same place (its release said `0.7.1`).
+
 - `docs/PORTING-GUIDE.md` describes the privilege model as it is: Unix credentials and Linux
   capabilities for POSIX programs (ADR 0020) beside the object capabilities of the native calls.
   It said VeridianOS had no user or group IDs and that `setuid` should be removed from ported

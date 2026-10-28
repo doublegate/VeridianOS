@@ -666,32 +666,7 @@ fn execute_substitution_command(command: &str) -> String {
 
 /// Evaluate `uname` with optional flags.
 fn subst_uname(args: &[&str]) -> String {
-    let show_all = args.contains(&"-a");
-    let show_sysname = args.is_empty() || show_all || args.contains(&"-s");
-    let show_nodename = show_all || args.contains(&"-n");
-    let show_release = show_all || args.contains(&"-r");
-    let show_machine = show_all || args.contains(&"-m");
-
-    let mut parts_out: Vec<&str> = Vec::new();
-    if show_sysname {
-        parts_out.push("VeridianOS");
-    }
-    if show_nodename {
-        parts_out.push("veridian");
-    }
-    if show_release {
-        parts_out.push("0.7.1");
-    }
-    if show_machine {
-        #[cfg(target_arch = "x86_64")]
-        parts_out.push("x86_64");
-        #[cfg(target_arch = "aarch64")]
-        parts_out.push("aarch64");
-        #[cfg(target_arch = "riscv64")]
-        parts_out.push("riscv64");
-    }
-
-    parts_out.join(" ")
+    crate::utils::uname::command_output(args)
 }
 
 /// Evaluate `basename <path> [suffix]`.
@@ -1412,7 +1387,7 @@ mod tests {
     #[test]
     fn test_command_sub_uname_release() {
         let env = BTreeMap::new();
-        assert_eq!(expand_variables("$(uname -r)", &env, 0), "0.7.1");
+        assert_eq!(expand_variables("$(uname -r)", &env, 0), "7.3.0-veridian");
     }
 
     #[test]

@@ -48,6 +48,7 @@
 #include <sys/signalfd.h>
 #include <sys/syscall.h>
 #include <sys/uio.h>
+#include <sys/utsname.h>
 #include <shadow.h>
 #include <crypt.h>
 #include <pwd.h>
@@ -1939,6 +1940,52 @@ static void test_unix_accept_blocks(void)
     static char why[48];
     snprintf(why, sizeof(why), "fail=%#x st=%#x", f, st);
     report("musl_unix_accept_blocks", f == 0, why);
+}
+
+/* The first line of a small file, without its newline, in `out`. */
+static int read_line(const char *path, char *out, size_t len)
+{
+    int fd = open(path, O_RDONLY);
+    if (fd < 0)
+        return -1;
+    ssize_t n = read(fd, out, len - 1);
+    close(fd);
+    if (n < 0)
+        return -1;
+    out[n] = 0;
+    char *nl = strchr(out, '\n');
+    if (nl)
+        *nl = 0;
+    return 0;
+}
+
+/* What the system reports about itself (ADR 0021): uname gives the system
+ * name, a Linux release (so programs comparing kernel versions recognise
+ * it) and the VeridianOS version; /proc/sys/kernel and /proc/version say
+ * the same. */
+static void test_uname_identity(void)
+{
+    struct utsname u;
+    char ostype[80] = "", osrelease[80] = "", version[80] = "", procver[200] = "";
+    int ok = uname(&u) == 0;
+    ok = ok && read_line("/proc/sys/kernel/ostype", ostype, sizeof(ostype)) == 0;
+    ok = ok && read_line("/proc/sys/kernel/osrelease", osrelease, sizeof(osrelease)) == 0;
+    ok = ok && read_line("/proc/sys/kernel/version", version, sizeof(version)) == 0;
+    ok = ok && read_line("/proc/version", procver, sizeof(procver)) == 0;
+    char want_ver[200];
+    snprintf(want_ver, sizeof(want_ver), "%s version %s (", u.sysname, u.release);
+    static char why[600];
+    snprintf(why, sizeof(why),
+             "sys=%s node=%s rel=%s ver=%s ostype=%s osrelease=%s version=%s proc=%s", u.sysname,
+             u.nodename, u.release, u.version, ostype, osrelease, version, procver);
+    report("musl_uname_identity",
+           ok && strcmp(u.sysname, "VeridianOS") == 0 && strcmp(u.nodename, "veridian") == 0
+               && strcmp(u.release, "7.3.0-veridian") == 0
+               && strncmp(u.version, "#1 SMP VeridianOS ", 18) == 0
+               && strcmp(ostype, u.sysname) == 0 && strcmp(osrelease, u.release) == 0
+               && strcmp(version, u.version) == 0
+               && strncmp(procver, want_ver, strlen(want_ver)) == 0,
+           why);
 }
 
 /* The --ids mode: this program's IDs, AT_SECURE, dumpable flag and
@@ -5178,6 +5225,7 @@ int main(int argc, char **argv)
     test_dir_check_race();
     test_relative_entry_paths();
     test_setuid_exec("/bin/musl_runtime_test");
+    test_uname_identity();
     test_clocks_and_usage();
     test_process_clock_monotonic();
     test_many_threads();
