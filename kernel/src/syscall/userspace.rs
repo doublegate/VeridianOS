@@ -33,8 +33,9 @@ pub fn validate_user_ptr<T>(ptr: *const T, len: usize) -> Result<(), SyscallErro
     // find out is a present page user mode may not touch: a PROT_NONE leaf
     // is kept for the kernel only, so the kernel's access does not fault.
     // Those are refused here, as Linux's not-present PROT_NONE entries are.
+    // An empty range touches no page, whatever its alignment.
     #[cfg(all(target_os = "none", feature = "alloc"))]
-    {
+    if len != 0 {
         let mut page = addr & !(PAGE_SIZE - 1);
         while page < end {
             if present_but_not_user(crate::mm::user_validation::active_user_page_flags(page)) {

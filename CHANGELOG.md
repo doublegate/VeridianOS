@@ -86,7 +86,8 @@
   to the file meanwhile cannot change what runs privileged. Only
   v2 and v3 values can be written (EINVAL otherwise), with CAP_SETFCAP; a v3 value with root id 0
   reads back as v2; a write, truncate or chown removes the attribute, whoever makes it (Linux's
-  killpriv).
+  killpriv). As Linux's `file_remove_privs`, that removal comes before the data changes and its
+  error is the write's, so a file that cannot lose its capabilities is not written.
 - Extended attributes (ADR 0020 step 8): the twelve Linux calls (`setxattr`, `getxattr`,
   `listxattr`, `removexattr` and their `l*` and `f*` forms) and the four `*xattrat` calls of Linux
   6.13, with Linux's rules: names up to 255 bytes (ERANGE), values up to 64 KiB (E2BIG),
@@ -147,8 +148,10 @@
   `capset02`'s bad address and guard pages behave as on Linux. A read or write that moves data in
   chunks checks each page as it copies, so a `PROT_NONE` page after the bytes it moves does not
   fail it: a read of a 1-byte file into such a buffer returns 1, as on Linux. The native
-  thread-affinity call checks only the bytes it copies, so a huge size no longer keeps that
-  page-by-page check walking page tables in the kernel.
+  thread-affinity calls check only the bytes they copy, so a huge size no longer keeps that
+  page-by-page check walking page tables in the kernel, and setting accepts any size, as Linux's
+  `sched_setaffinity` does. An empty range is not checked for a `PROT_NONE` page, whatever its
+  alignment.
 - `scripts/run-compat-tests.sh --update` dropped the comment lines written by hand at the top of an
   expected list (the baseline's date and versions); it now keeps them.
 - `mkfs-blockfs` let a directory entry cross a 4 KiB block boundary, and the kernel reads a

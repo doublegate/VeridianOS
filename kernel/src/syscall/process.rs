@@ -723,7 +723,10 @@ pub fn sys_thread_setaffinity(tid: usize, cpuset_ptr: usize, cpuset_size: usize)
     if cpuset_size == 0 {
         return Err(SyscallError::InvalidArgument);
     }
-    validate_user_buffer(cpuset_ptr, cpuset_size)?;
+    // As sys_thread_getaffinity: only the bytes read (at most 128) are
+    // checked, so a larger size is accepted, as Linux's
+    // sched_setaffinity accepts one (PR #33 review).
+    super::userspace::validate_user_ptr(cpuset_ptr as *const u8, cpuset_size.min(128))?;
 
     let target_tid = if tid == 0 {
         get_thread_tid()

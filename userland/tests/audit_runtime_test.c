@@ -2440,7 +2440,7 @@ static void test_xattrs(void)
      * fremovexattr, which always take the fd. Any other negative fd is a
      * bad descriptor. The set and the read are checked against the
      * directory itself, through getxattr("."). */
-    char cwd[256];
+    char cwd[256] = {0};
     if (getcwd(cwd, sizeof(cwd)) == NULL || chdir("/tmp") != 0 ||
         veridian_syscall5(SYS_fsetxattr, -100, "user.cwd", "d1", 2, 0) != 0 ||
         xa_get(".", "user.cwd", buf, sizeof(buf)) != 2 || memcmp(buf, "d1", 2) != 0 ||
@@ -2508,6 +2508,13 @@ static void test_native_affinity_len(void)
     static char why[48];
     snprintf(why, sizeof(why), "r=%ld mask=0x%llx", r, affinity_mask);
     report("native_affinity_ignores_huge_len", r == 0 && affinity_mask != 0, why);
+    /* Setting takes the same: the current mask back, with a huge size
+     * (from a buffer as long as the 128 bytes the kernel reads). */
+    static unsigned long long set[16];
+    set[0] = affinity_mask;
+    r = veridian_syscall3(1068, 0, set, 0x400000000000UL);
+    snprintf(why, sizeof(why), "set r=%ld", r);
+    report("native_setaffinity_ignores_huge_len", r == 0, why);
 }
 
 /* --- File capabilities (ADR 0020 step 9): a copy of this program with a

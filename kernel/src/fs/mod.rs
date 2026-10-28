@@ -144,39 +144,42 @@ pub fn check_fsize_truncate(node: &dyn VfsNode, size: usize) -> Result<(), Kerne
     Ok(())
 }
 
-/// After a write or truncate of `node` by the calling process: drop its
-/// file capabilities ([`kill_file_caps`]) and the set-user-ID and
-/// set-group-ID bits as [`Permissions::after_write`] says.
-/// Regular files only; a failure to read or change the mode leaves it.
-pub fn remove_privs_after_write(node: &dyn VfsNode) {
+/// Before a write or truncate of `node` by the calling process (Linux's
+/// file_remove_privs): drop its file capabilities ([`kill_file_caps`]) and
+/// the set-user-ID and set-group-ID bits as [`Permissions::after_write`]
+/// says. Regular files only. As on Linux it runs before the data changes
+/// and its error is the write's, so a file that keeps its privileges is
+/// never changed (PR #33 review).
+pub fn remove_privs(node: &dyn VfsNode) -> Result<(), KernelError> {
     if node.node_type() != NodeType::File {
-        return;
+        return Ok(());
     }
-    kill_file_caps(node);
+    kill_file_caps(node)?;
     // The kernel itself (no process) holds CAP_FSETID.
     let caller = crate::process::creds::Caller::current();
-    let Ok(meta) = node.metadata() else {
-        return;
-    };
+    let meta = node.metadata()?;
     let fsetid = caller.capable(crate::process::linux_caps::CAP_FSETID);
     if let Some(kept) = meta
         .permissions
         .after_write(fsetid, caller.creds.in_group(meta.gid))
     {
-        let _ = node.chmod(kept);
+        node.chmod(kept)?;
     }
+    Ok(())
 }
 
 /// Remove a file's capabilities (Linux's cap_inode_killpriv), as a write,
 /// truncate or chown does whoever makes it: a changed program must not
-/// keep the privilege granted to the old one. Only read when present.
-pub fn kill_file_caps(node: &dyn VfsNode) {
+/// keep the privilege granted to the old one. Only read when present; a
+/// filesystem without attributes has none to remove.
+pub fn kill_file_caps(node: &dyn VfsNode) -> Result<(), KernelError> {
     let has = node
         .xattrs()
         .is_ok_and(|a| a.get(xattr::XATTR_NAME_CAPS).is_some());
     if has {
-        let _ = node.update_xattrs(&mut |a| a.remove(xattr::XATTR_NAME_CAPS));
+        node.update_xattrs(&mut |a| a.remove(xattr::XATTR_NAME_CAPS))?;
     }
+    Ok(())
 }
 
 /// Names that can never be a rename source or target.
@@ -2443,13 +2446,84 @@ mod tests {
             a.set("user.keep", b"1", 0)
         })
         .unwrap();
-        remove_privs_after_write(&*f);
+        remove_privs(&*f).unwrap();
         let attrs = f.xattrs().unwrap();
         assert!(attrs.get(xattr::XATTR_NAME_CAPS).is_none());
         assert_eq!(attrs.get("user.keep"), Some(&b"1"[..]));
         // Nothing to remove: no error, nothing changes.
-        kill_file_caps(&*f);
+        kill_file_caps(&*f).unwrap();
         assert_eq!(f.xattrs().unwrap().names().count(), 1);
+    }
+
+    /// A file whose capabilities cannot be removed is not written: as
+    /// Linux's file_remove_privs, the removal comes first and its error is
+    /// the write's (PR #33 review). Delegates to a ramfs file.
+    struct StuckCaps(Arc<dyn VfsNode>);
+
+    impl VfsNode for StuckCaps {
+        fn node_type(&self) -> NodeType {
+            self.0.node_type()
+        }
+        fn read(&self, o: usize, b: &mut [u8]) -> Result<usize, KernelError> {
+            self.0.read(o, b)
+        }
+        fn write(&self, o: usize, d: &[u8]) -> Result<usize, KernelError> {
+            self.0.write(o, d)
+        }
+        fn metadata(&self) -> Result<Metadata, KernelError> {
+            self.0.metadata()
+        }
+        fn readdir(&self) -> Result<Vec<DirEntry>, KernelError> {
+            self.0.readdir()
+        }
+        fn lookup(&self, n: &str) -> Result<Arc<dyn VfsNode>, KernelError> {
+            self.0.lookup(n)
+        }
+        fn create(&self, n: &str, p: Permissions) -> Result<Arc<dyn VfsNode>, KernelError> {
+            self.0.create(n, p)
+        }
+        fn mkdir(&self, n: &str, p: Permissions) -> Result<Arc<dyn VfsNode>, KernelError> {
+            self.0.mkdir(n, p)
+        }
+        fn unlink(&self, n: &str) -> Result<(), KernelError> {
+            self.0.unlink(n)
+        }
+        fn truncate(&self, s: usize) -> Result<(), KernelError> {
+            self.0.truncate(s)
+        }
+        fn xattrs(&self) -> Result<xattr::XattrSet, KernelError> {
+            self.0.xattrs()
+        }
+        fn update_xattrs(
+            &self,
+            _f: &mut dyn FnMut(&mut xattr::XattrSet) -> Result<(), KernelError>,
+        ) -> Result<(), KernelError> {
+            Err(KernelError::FsError(FsError::IoError))
+        }
+    }
+
+    #[test]
+    fn a_write_that_cannot_drop_file_caps_fails_unwritten() {
+        let vfs = make_vfs_with_root();
+        let root = vfs.root_fs().unwrap().root();
+        let inner = root.create("prog", Permissions::from_mode(0o755)).unwrap();
+        inner
+            .update_xattrs(&mut |a| a.set(xattr::XATTR_NAME_CAPS, &[0; 20], 0))
+            .unwrap();
+        let node: Arc<dyn VfsNode> = Arc::new(StuckCaps(inner.clone()));
+        assert!(remove_privs(&*node).is_err());
+        let file = file::File::new(node, OpenFlags::read_write());
+        assert!(file.write(b"new").is_err());
+        assert_eq!(inner.metadata().unwrap().size, 0);
+        assert!(inner
+            .xattrs()
+            .unwrap()
+            .get(xattr::XATTR_NAME_CAPS)
+            .is_some());
+        // Without file capabilities nothing needs removing: the write runs.
+        let plain = root.create("data", Permissions::from_mode(0o644)).unwrap();
+        let file = file::File::new(Arc::new(StuckCaps(plain.clone())), OpenFlags::read_write());
+        assert_eq!(file.write(b"new").unwrap(), 3);
     }
 
     /// Linux's file_remove_privs: a write without CAP_FSETID drops
