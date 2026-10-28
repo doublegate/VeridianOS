@@ -379,7 +379,10 @@ fn install_exec_credentials(
         unsafe_exec: traced_unprivileged || fs_shared,
         egid_in_groups: old.in_group(new_egid),
     };
-    let mut caps = thread.caps.lock();
+    // A copy: exec runs single-threaded, so nothing else changes this
+    // thread's sets, and no thread's sets lock is held while the
+    // credentials are (the order of `Process::change_uids`).
+    let caps = *thread.caps.lock();
     // A capability-dumb program was refused before the point of no return,
     // by the same rules on the same file and sets: they cannot refuse here.
     let outcome = caps
@@ -395,7 +398,7 @@ fn install_exec_credentials(
     // dumpable again. What counts is the result: a set-user-ID exec that
     // was downgraded (shared filesystem state) leaves it dumpable.
     let grew = !outcome.caps.permitted.is_subset_of(caps.permitted);
-    *caps = outcome.caps;
+    *thread.caps.lock() = outcome.caps;
     let dumpable = ids.readable && old.exec_keeps_dumpable(&creds) && !grew;
     process.dumpable.store(dumpable, Ordering::Release);
     Ok(outcome.secure)
@@ -621,21 +624,7 @@ fn exec_image(
             Some((node, ..)) => readable(&node.metadata()?),
             None => true,
         };
-        // The program's own capabilities, read with the file (Linux's
-        // get_file_caps): a malformed value fails the exec (EINVAL); a
-        // filesystem without attributes gives none.
-        let file_caps = match file_node.xattrs() {
-            Ok(attrs) => match attrs.get(crate::fs::xattr::XATTR_NAME_CAPS) {
-                Some(value) => super::linux_caps::FileCaps::from_xattr(value).map_err(|_| {
-                    KernelError::InvalidArgument {
-                        name: "security.capability",
-                        value: "not a file capability",
-                    }
-                })?,
-                None => None,
-            },
-            Err(_) => None,
-        };
+        let file_caps = exec_file_caps(&*file_node)?;
         ExecIds {
             set_uid: perms.set_uid.then_some(meta.uid),
             set_gid: (perms.set_gid && perms.group_exec).then_some(meta.gid),
@@ -701,6 +690,10 @@ fn exec_image(
         unprivileged_tracer_at_start,
         ..set_ids
     };
+    // An exec that may grant privilege maps the bytes it checked, not the
+    // page cache (`elf::image::load`).
+    let private_image =
+        set_ids.file_caps.is_some() || set_ids.set_uid.is_some() || set_ids.set_gid.is_some();
 
     // Point of no return: from clear() on, a failure cannot go back to the
     // old image. The process is then killed with SIGSEGV at the system-call
@@ -760,6 +753,7 @@ fn exec_image(
                     .as_ref()
                     .map(|(node, data, binary)| (binary, &**node, data.as_slice())),
                 guards,
+                private_image,
             )?
         };
 
@@ -1233,10 +1227,52 @@ pub(crate) fn exec_stack_layout<'a>(
     }
 }
 
+/// The program's own capabilities, read with the file (Linux's
+/// get_file_caps): a malformed value fails the exec (EINVAL); a filesystem
+/// without attributes gives none; any other failure to read them fails the
+/// exec, since a set-user-ID-root program's file capabilities may be what
+/// limits it (get_vfs_caps_from_disk returns the error).
+#[cfg(feature = "alloc")]
+fn exec_file_caps(
+    node: &dyn crate::fs::VfsNode,
+) -> Result<Option<super::linux_caps::FileCaps>, KernelError> {
+    match node.xattrs() {
+        Ok(attrs) => match attrs.get(crate::fs::xattr::XATTR_NAME_CAPS) {
+            Some(value) => super::linux_caps::FileCaps::from_xattr(value).map_err(|_| {
+                KernelError::InvalidArgument {
+                    name: "security.capability",
+                    value: "not a file capability",
+                }
+            }),
+            None => Ok(None),
+        },
+        Err(KernelError::FsError(crate::error::FsError::NotSupported)) => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::elf::dynamic::{AuxType, ProcessAux, ProgramAux};
+
+    /// An exec whose file capabilities cannot be read fails rather than
+    /// running without them (PR #33 review round 7); no attributes is none.
+    #[test]
+    fn an_exec_whose_caps_cannot_be_read_fails() {
+        use alloc::sync::Arc;
+
+        use crate::fs::{
+            tests::{make_vfs_with_root, StuckCaps},
+            Permissions,
+        };
+        let vfs = make_vfs_with_root();
+        let root = vfs.root_fs().unwrap().root();
+        let inner = root.create("prog", Permissions::from_mode(0o4755)).unwrap();
+        assert!(matches!(exec_file_caps(&*inner), Ok(None)));
+        let stuck = Arc::new(StuckCaps(inner, true));
+        assert!(exec_file_caps(&*stuck).is_err());
+    }
 
     /// An exec follows at most four `#!` interpreters, as Linux, and then
     /// fails with ELOOP: a script naming itself recursed until the kernel

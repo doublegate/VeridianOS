@@ -418,6 +418,21 @@ impl Process {
         result
     }
 
+    /// The credentials and `thread`'s capability sets as one snapshot,
+    /// read under the thread map as [`Self::change_uids`] writes them, so
+    /// a set*id call on another thread is wholly before or wholly after
+    /// it. fork copies this pair: credentials from before a uid drop with
+    /// sets from after it would let the child's exec treat it as root and
+    /// raise pP from the bounding set again (PR #33 review).
+    #[cfg(feature = "alloc")]
+    pub fn creds_and_caps(
+        &self,
+        thread: &Thread,
+    ) -> (super::creds::Credentials, super::linux_caps::CapSets) {
+        let _threads = self.threads.lock();
+        (self.credentials(), *thread.caps.lock())
+    }
+
     /// Real user ID.
     pub fn uid(&self) -> u32 {
         self.creds.lock().ruid
@@ -568,6 +583,41 @@ impl Process {
     #[cfg(feature = "alloc")]
     pub fn get_thread(&self, tid: ThreadId) -> Option<Arc<Thread>> {
         self.threads.lock().get(&tid).cloned()
+    }
+
+    /// The union of the permitted sets of the process's threads: what
+    /// tracing it gives access to, for the ptrace checks (Linux's
+    /// cap_ptrace_access_check compares a task's set; tracing here reaches
+    /// the whole process).
+    #[cfg(feature = "alloc")]
+    pub fn permitted_caps(&self) -> super::linux_caps::LinuxCaps {
+        self.threads
+            .lock()
+            .values()
+            .fold(super::linux_caps::LinuxCaps::EMPTY, |all, t| {
+                all.union(t.caps.lock().permitted)
+            })
+    }
+
+    /// What the process's live threads hold in common, for a check where
+    /// any of them could be the one that counts: the intersection of their
+    /// permitted sets and whether every one has CAP_SYS_PTRACE effective.
+    /// None if no thread is alive. The fail-closed side of
+    /// [`Self::permitted_caps`].
+    #[cfg(feature = "alloc")]
+    pub fn common_ptrace_caps(&self) -> Option<(super::linux_caps::LinuxCaps, bool)> {
+        use super::thread::ThreadState;
+        let threads = self.threads.lock();
+        let mut live = threads
+            .values()
+            .filter(|t| !matches!(t.get_state(), ThreadState::Zombie | ThreadState::Dead))
+            .map(|t| *t.caps.lock());
+        let first = live.next()?;
+        let cap = super::linux_caps::CAP_SYS_PTRACE;
+        Some(live.fold(
+            (first.permitted, first.capable(cap)),
+            |(permitted, capable), c| (permitted.intersect(c.permitted), capable && c.capable(cap)),
+        ))
     }
 
     /// Get number of threads
@@ -994,6 +1044,22 @@ mod tests {
             assert_eq!(caps.bounding, CapSets::ROOT.bounding);
         }
         assert_eq!(proc.credentials().euid, 1000);
+    }
+
+    /// fork's snapshot pairs the credentials with the thread's sets as one
+    /// change_uids step left them: never root IDs with dropped sets.
+    #[test]
+    fn creds_and_caps_is_one_snapshot() {
+        use super::super::linux_caps::{CapSets, LinuxCaps};
+        let proc = make_process(5, "snapshot");
+        let threads = with_threads(&proc, &[50]);
+        let (creds, caps) = proc.creds_and_caps(&threads[0]);
+        assert_eq!((creds.euid, caps.permitted), (0, CapSets::ROOT.permitted));
+        proc.change_uids(false, |c| c.setresuid(1000, 1000, 1000, true))
+            .unwrap();
+        let (creds, caps) = proc.creds_and_caps(&threads[0]);
+        assert_eq!((creds.ruid, creds.euid, creds.suid), (1000, 1000, 1000));
+        assert_eq!(caps.permitted, LinuxCaps::EMPTY);
     }
 
     /// A change of effective user or group makes the process non-dumpable

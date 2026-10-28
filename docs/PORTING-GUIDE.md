@@ -149,10 +149,8 @@ in ported software:
 | `ioctl`            | Syscall 112 exists but returns `InvalidSyscall`         |
 | `fcntl`            | Not implemented; use `dup`/`dup2` for fd manipulation   |
 | `getdents`         | `DirReaddir` (63) is a stub                             |
-| `access`/`faccessat` | Check by attempting to open the file                  |
 | `link`/`symlink`   | Not supported; VFS has no hard/symbolic links           |
 | `rename`           | Not implemented; copy and delete as workaround          |
-| `chmod`/`chown`    | As on Linux: the owner, or CAP_FOWNER / CAP_CHOWN       |
 | `exec` variants    | Only `ProcessExec` (13); no `execvp`/`execle`/etc.      |
 | `signal`/`sigaction` | Basic `ProcessKill` (113) exists; no full signal API  |
 

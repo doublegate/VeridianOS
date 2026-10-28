@@ -21,10 +21,40 @@ const USER_SPACE_START: usize = 0x0000_0000_0000_0000;
 use crate::mm::user_layout::user_space_end; // exclusive end
 const PAGE_SIZE: usize = 4096;
 
-/// Check if a user pointer is valid with comprehensive validation
+/// Check if a user pointer is valid with comprehensive validation: the
+/// range (below) and no PROT_NONE page in it.
 pub fn validate_user_ptr<T>(ptr: *const T, len: usize) -> Result<(), SyscallError> {
     let addr = ptr as usize;
+    let end = validate_user_range(addr, len)?;
+    // Whether the pages are mapped is not checked here: the copy itself
+    // finds out. A fault in the user-copy routines returns EFAULT through
+    // the exception table (MEM-SEC-01, ARCH-MEM-03, ADR 0016), after the
+    // fault path has tried the page as a user access. What the copy cannot
+    // find out is a present page user mode may not touch: a PROT_NONE leaf
+    // is kept for the kernel only, so the kernel's access does not fault.
+    // Those are refused here, as Linux's not-present PROT_NONE entries are.
+    // An empty range touches no page, whatever its alignment.
+    #[cfg(all(target_os = "none", feature = "alloc"))]
+    if len != 0 {
+        let mut page = addr & !(PAGE_SIZE - 1);
+        while page < end {
+            if present_but_not_user(crate::mm::user_validation::active_user_page_flags(page)) {
+                return Err(SyscallError::InvalidPointer);
+            }
+            page += PAGE_SIZE;
+        }
+    }
+    #[cfg(not(all(target_os = "none", feature = "alloc")))]
+    let _ = end;
 
+    Ok(())
+}
+
+/// The address-range part of [`validate_user_ptr`]: not null, no overflow,
+/// below the end of user space. Returns the end. Copies that go page by
+/// page check each page's permissions themselves, so a transfer stopped by
+/// a PROT_NONE page still returns what it moved before it (PR #33 review).
+fn validate_user_range(addr: usize, len: usize) -> Result<usize, SyscallError> {
     // Check for null pointer
     if addr == 0 {
         return Err(SyscallError::InvalidPointer);
@@ -38,26 +68,7 @@ pub fn validate_user_ptr<T>(ptr: *const T, len: usize) -> Result<(), SyscallErro
     if end > user_space_end() {
         return Err(SyscallError::InvalidPointer);
     }
-
-    // Whether the pages are mapped is not checked here: the copy itself
-    // finds out. A fault in the user-copy routines returns EFAULT through
-    // the exception table (MEM-SEC-01, ARCH-MEM-03, ADR 0016), after the
-    // fault path has tried the page as a user access. What the copy cannot
-    // find out is a present page user mode may not touch: a PROT_NONE leaf
-    // is kept for the kernel only, so the kernel's access does not fault.
-    // Those are refused here, as Linux's not-present PROT_NONE entries are.
-    #[cfg(all(target_os = "none", feature = "alloc"))]
-    {
-        let mut page = addr & !(PAGE_SIZE - 1);
-        while page < end {
-            if present_but_not_user(crate::mm::user_validation::active_user_page_flags(page)) {
-                return Err(SyscallError::InvalidPointer);
-            }
-            page += PAGE_SIZE;
-        }
-    }
-
-    Ok(())
+    Ok(end)
 }
 
 /// Whether a page the kernel would copy through is one user mode may not
@@ -485,7 +496,9 @@ pub fn produce_to_user(
     if count == 0 {
         return Ok(0);
     }
-    validate_user_ptr(addr as *const u8, count)?;
+    // The range only: each chunk's copy checks its pages, so a PROT_NONE
+    // page past the bytes moved does not fail the whole call.
+    validate_user_range(addr, count)?;
     let mut kbuf = alloc::vec![0u8; count.min(USER_COPY_CHUNK)];
     let mut total = 0;
     while total < count {
@@ -556,7 +569,9 @@ pub fn consume_from_user(
     if count == 0 {
         return Ok(0);
     }
-    validate_user_ptr(addr as *const u8, count)?;
+    // The range only: each chunk's copy checks its pages, so a PROT_NONE
+    // page past the bytes moved does not fail the whole call.
+    validate_user_range(addr, count)?;
     let mut kbuf = alloc::vec![0u8; count.min(USER_COPY_CHUNK)];
     let mut total = 0;
     while total < count {

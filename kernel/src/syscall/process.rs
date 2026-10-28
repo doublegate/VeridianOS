@@ -723,7 +723,10 @@ pub fn sys_thread_setaffinity(tid: usize, cpuset_ptr: usize, cpuset_size: usize)
     if cpuset_size == 0 {
         return Err(SyscallError::InvalidArgument);
     }
-    validate_user_buffer(cpuset_ptr, cpuset_size)?;
+    // As sys_thread_getaffinity: only the bytes read (at most 128) are
+    // checked, so a larger size is accepted, as Linux's
+    // sched_setaffinity accepts one (PR #33 review).
+    super::userspace::validate_user_ptr(cpuset_ptr as *const u8, cpuset_size.min(128))?;
 
     let target_tid = if tid == 0 {
         get_thread_tid()
@@ -768,8 +771,10 @@ pub fn sys_thread_getaffinity(tid: usize, cpuset_ptr: usize, cpuset_size: usize)
         return Err(SyscallError::InvalidArgument);
     }
 
-    // Validate user pointer
-    validate_user_ptr(cpuset_ptr as *const u8, cpuset_size)?;
+    // Only the bytes copied (at most the 8-byte mask) are checked: the
+    // check walks the page tables page by page, so the caller's size
+    // would otherwise set how long it runs in ring 0 (PR #33 review).
+    validate_user_ptr(cpuset_ptr as *const u8, cpuset_size.min(8))?;
 
     let target_tid = if tid == 0 {
         get_thread_tid()
@@ -905,34 +910,45 @@ fn id_arg(arg: usize) -> u32 {
     arg as u32
 }
 
-/// Whether the calling thread holds `cap` (ADR 0020): the set*id rules
-/// take their privilege from it, CAP_SETUID for the user IDs and
-/// CAP_SETGID for the group IDs.
-fn capable(cap: u32) -> Result<bool, SyscallError> {
-    let me = crate::process::current_thread().ok_or(SyscallError::InvalidState)?;
-    let held = me.caps.lock().capable(cap);
-    Ok(held)
-}
-
 /// A change of the user IDs, with the capability fixup on every thread
-/// (`Process::change_uids`).
+/// (`Process::change_uids`). CAP_SETUID is read inside it, under the thread
+/// map that change_uids holds while it fixes every thread's sets: read
+/// before, a concurrent setuid on another thread could clear this thread's
+/// capabilities in between, and the stale answer would let it set uid 0
+/// back (PR #33 review).
 fn change_uids<R>(
     fs: bool,
     f: impl FnOnce(&mut crate::process::creds::Credentials, bool) -> R,
 ) -> Result<R, SyscallError> {
-    let may = capable(crate::process::linux_caps::CAP_SETUID)?;
+    let me = crate::process::current_thread().ok_or(SyscallError::InvalidState)?;
     let proc = current_process().ok_or(SyscallError::InvalidState)?;
-    Ok(proc.change_uids(fs, |c| f(c, may)))
+    Ok(proc.change_uids(fs, |c| {
+        let may = me
+            .caps
+            .lock()
+            .capable(crate::process::linux_caps::CAP_SETUID);
+        f(c, may)
+    }))
 }
 
 /// A change of the group IDs or the supplementary groups (no capability
-/// fixup: Linux has none for them).
+/// fixup: Linux has none for them). CAP_SETGID is read with the change,
+/// under the thread map, which a user-ID change holds while it clears every
+/// thread's sets, so a concurrent privilege drop cannot leave a stale
+/// answer (as in [`change_uids`]).
 fn change_gids<R>(
     f: impl FnOnce(&mut crate::process::creds::Credentials, bool) -> R,
 ) -> Result<R, SyscallError> {
-    let may = capable(crate::process::linux_caps::CAP_SETGID)?;
+    let me = crate::process::current_thread().ok_or(SyscallError::InvalidState)?;
     let proc = current_process().ok_or(SyscallError::InvalidState)?;
-    Ok(proc.update_credentials(|c| f(c, may)))
+    let _threads = proc.threads.lock();
+    Ok(proc.update_credentials(|c| {
+        let may = me
+            .caps
+            .lock()
+            .capable(crate::process::linux_caps::CAP_SETGID);
+        f(c, may)
+    }))
 }
 
 /// setuid: Linux rules (`Credentials::setuid`).

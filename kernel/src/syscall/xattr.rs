@@ -30,8 +30,16 @@ const AT_EMPTY_PATH: u32 = 0x1000;
 const XATTR_ARGS_SIZE_VER0: usize = 16;
 
 /// The node a call acts on: a path (`at_flags` of the `*xattrat` form),
-/// or with AT_EMPTY_PATH and an empty or NULL path, `dfd` itself.
-fn target(dfd: usize, path_ptr: usize, at_flags: u32) -> Result<Arc<dyn VfsNode>, SyscallError> {
+/// or with AT_EMPTY_PATH and an empty or NULL path, `dfd` itself. There
+/// AT_FDCWD names the working directory only when `cwd_ok` (get and set:
+/// Linux's path_getxattrat and path_setxattrat look the empty name up for
+/// a negative fd); list and remove always take the fd, so it is EBADF.
+fn target(
+    dfd: usize,
+    path_ptr: usize,
+    at_flags: u32,
+    cwd_ok: bool,
+) -> Result<Arc<dyn VfsNode>, SyscallError> {
     if at_flags & !(AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH) != 0 {
         return Err(SyscallError::InvalidArgument);
     }
@@ -46,7 +54,7 @@ fn target(dfd: usize, path_ptr: usize, at_flags: u32) -> Result<Arc<dyn VfsNode>
     };
     let vfs = vfs()?;
     if path.is_empty() {
-        if dfd as u32 as i32 == AT_FDCWD {
+        if cwd_ok && dfd as u32 as i32 == AT_FDCWD {
             return vfs.resolve_path(&vfs.get_cwd()).map_err(map_resolve_err);
         }
         let proc = crate::process::current_process().ok_or(SyscallError::InvalidState)?;
@@ -104,12 +112,10 @@ fn set(
     }
     let mut bytes = alloc::vec![0u8; size];
     userspace::read_user_bytes(value, &mut bytes)?;
-    let node = target(dfd, path, at_flags)?;
+    let node = target(dfd, path, at_flags, true)?;
     // A file capability must be a v2 or v3 value (cap_convert_nscap,
     // before its CAP_SETFCAP check).
-    if name == xattr::XATTR_NAME_CAPS && !FileCaps::valid_to_write(&bytes) {
-        return Err(SyscallError::InvalidArgument);
-    }
+    xattr::check_value(&name, &bytes).map_err(|_| SyscallError::InvalidArgument)?;
     check(&node, &name, true)?;
     node.update_xattrs(&mut |a| a.set(&name, &bytes, flags))
         .map_err(super::map_kernel_error)?;
@@ -125,7 +131,7 @@ fn get(
     size: usize,
 ) -> SyscallResult {
     let name = read_name(name)?;
-    let node = target(dfd, path, at_flags)?;
+    let node = target(dfd, path, at_flags, true)?;
     check(&node, &name, false)?;
     let attrs = node.xattrs().map_err(super::map_kernel_error)?;
     let found = attrs.get(&name).ok_or(SyscallError::NoData)?;
@@ -149,7 +155,7 @@ fn get(
 }
 
 fn list(dfd: usize, path: usize, at_flags: u32, out: usize, size: usize) -> SyscallResult {
-    let node = target(dfd, path, at_flags)?;
+    let node = target(dfd, path, at_flags, false)?;
     let attrs = node.xattrs().map_err(super::map_kernel_error)?;
     let caller = Caller::current();
     let mut names = Vec::new();
@@ -173,7 +179,7 @@ fn list(dfd: usize, path: usize, at_flags: u32, out: usize, size: usize) -> Sysc
 
 fn remove(dfd: usize, path: usize, at_flags: u32, name: usize) -> SyscallResult {
     let name = read_name(name)?;
-    let node = target(dfd, path, at_flags)?;
+    let node = target(dfd, path, at_flags, false)?;
     check(&node, &name, true)?;
     node.update_xattrs(&mut |a| a.remove(&name))
         .map_err(super::map_kernel_error)?;

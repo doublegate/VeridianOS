@@ -169,6 +169,11 @@ work. User code is preempted when its slice ends (D3). What is still missing:
   registered through `arch_prctl` (the signal mask and pending set are per thread since D3).
 - **Old binaries.** KDE binaries built before the v0.27 musl patch map `pthread_exit` to a
   process exit.
+- **The native thread call (private number 1064) adds a thread it never starts.** The thread has
+  no dispatcher task and stays in its creating state, so the process's last real thread to exit
+  sees it as alive: the process is never torn down, never becomes a zombie and never signals its
+  parent, whose wait does not return. Nothing in the C libraries calls it (threads use `clone`
+  since N-102); it is to be started as `clone` starts a thread, or retired (v0.28 queue item 5).
 
 ### x86_64 entry layer remainders (N-167, N-168; sprint D2)
 
@@ -326,6 +331,15 @@ filesystem.
   Only mount images you trust.
 - **mount (N-129)** is allowed to any process holding a memory capability, and type `blockfs`
   mounts an empty RAM filesystem.
+- **No ETXTBSY.** Linux refuses to open for writing a file that a process is running (and refuses
+  to exec a file open for writing). Here such a write succeeds, and processes running the program
+  from BlockFS see it through the shared page cache. An exec that grants privilege (file
+  capabilities, set-user-ID or set-group-ID) maps a private copy of the bytes it checked, so the
+  write cannot change what runs privileged (v0.28 queue item 3, file tier).
+- **Status-change time on ramfs and tmpfs.** Their nodes have no ctime field: `stat` reports the
+  creation time as `st_ctime`. Extended-attribute changes move it, but chmod and chown move the
+  modification time instead (Linux moves ctime, not mtime) and writes do not move it. BlockFS
+  inodes keep a real ctime (v0.28 queue item 3, file tier).
 
 ### Shared IPC regions are never reclaimed
 

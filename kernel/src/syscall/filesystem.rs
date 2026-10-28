@@ -274,8 +274,8 @@ fn open_path(path: &str, flags: usize, mode: usize) -> SyscallResult {
         require_open_access(&node, &open_flags)?;
     }
     if open_flags.truncate && open_flags.write && !created && node_type == NodeType::File {
+        crate::fs::remove_privs(&*node).map_err(map_resolve_err)?;
         node.truncate(0).map_err(map_resolve_err)?;
-        crate::fs::remove_privs_after_write(&*node);
     }
     // A special file made by mknod opens what it names; a socket file
     // cannot be opened (ENXIO, as Linux's `sock_no_open`).
@@ -762,10 +762,10 @@ pub fn sys_ftruncate(fd: usize, length: usize) -> SyscallResult {
         return Err(SyscallError::InvalidArgument);
     }
     crate::fs::check_fsize_truncate(&*file.node, length).map_err(super::map_kernel_error)?;
+    crate::fs::remove_privs(&*file.node).map_err(super::map_kernel_error)?;
     file.node
         .truncate(length)
         .map_err(super::map_kernel_error)?;
-    crate::fs::remove_privs_after_write(&*file.node);
     Ok(0)
 }
 
@@ -2267,7 +2267,16 @@ fn access_path(path: &str, mode: usize, flags: usize) -> SyscallResult {
     if mode & !7 != 0 || flags & !(AT_EACCESS | AT_SYMLINK_NOFOLLOW_FLAG) != 0 {
         return Err(SyscallError::InvalidArgument);
     }
-    let vfs = vfs()?;
+    let caller = if flags & AT_EACCESS != 0 {
+        Caller::current()
+    } else {
+        access_caller()
+    };
+    // The whole lookup runs as that caller, not only the last component:
+    // a directory the real user may not search is not searched for it.
+    let vfs = try_get_vfs()
+        .ok_or(SyscallError::InvalidState)?
+        .as_caller_with(caller);
     let node = if flags & AT_SYMLINK_NOFOLLOW_FLAG != 0 {
         vfs.resolve_path_no_follow(path)
     } else {
@@ -2278,11 +2287,6 @@ fn access_path(path: &str, mode: usize, flags: usize) -> SyscallResult {
         return Ok(0); // F_OK: it exists
     }
     let meta = node.metadata().map_err(super::map_kernel_error)?;
-    let caller = if flags & AT_EACCESS != 0 {
-        Caller::current()
-    } else {
-        access_caller()
-    };
     if crate::fs::permission(&caller, &meta, mode as u32) {
         Ok(0)
     } else {
@@ -2923,8 +2927,8 @@ pub fn sys_truncate(path_ptr: usize, length: usize) -> SyscallResult {
     // As opening it for writing would need (N-191).
     require_open_access(&node, &OpenFlags::write_only())?;
     crate::fs::check_fsize_truncate(&*node, length).map_err(super::map_kernel_error)?;
+    crate::fs::remove_privs(&*node).map_err(super::map_kernel_error)?;
     node.truncate(length).map_err(super::map_kernel_error)?;
-    crate::fs::remove_privs_after_write(&*node);
     Ok(0)
 }
 
@@ -3205,13 +3209,15 @@ pub fn sys_pwrite(fd: usize, buf: usize, count: usize, offset: usize) -> Syscall
     // VfsNode, a chunk at a time (N-43).
     let count =
         crate::fs::check_fsize(&*file.node, offset, count).map_err(super::map_kernel_error)?;
+    if count != 0 {
+        crate::fs::remove_privs(&*file.node).map_err(super::map_kernel_error)?;
+    }
     let mut at = offset;
     let written = super::userspace::consume_from_user(buf, count, true, |kbuf| {
         let n = file.node.write(at, kbuf).map_err(super::map_kernel_error)?;
         at += n;
         Ok(n)
     })?;
-    crate::fs::remove_privs_after_write(&*file.node);
     Ok(written)
 }
 
@@ -3289,16 +3295,21 @@ pub(crate) fn chown_node(
     if !may_chown(&Caller::current(), meta.uid, meta.gid, uid, gid) {
         return Err(SyscallError::OperationNotPermitted);
     }
-    node.chown(uid, gid).map_err(super::map_kernel_error)?;
     // A non-directory that changes hands loses set-user-ID and
     // set-group-ID (`Permissions::after_chown`) and its file capabilities.
-    let meta = node.metadata().map_err(super::map_kernel_error)?;
+    // As Linux's setattr_prepare, they go first: when that fails the file
+    // keeps its owner, never a new owner with the old privileges (PR #33
+    // review). An owner the filesystem cannot store is refused before
+    // anything changes.
+    node.check_owner(uid, gid)
+        .map_err(super::map_kernel_error)?;
     if meta.node_type != crate::fs::NodeType::Directory {
-        crate::fs::kill_file_caps(&**node);
+        crate::fs::kill_file_caps(&**node).map_err(super::map_kernel_error)?;
         if let Some(kept) = meta.permissions.after_chown() {
             node.chmod(kept).map_err(super::map_kernel_error)?;
         }
     }
+    node.chown(uid, gid).map_err(super::map_kernel_error)?;
     Ok(0)
 }
 
@@ -3441,6 +3452,47 @@ pub(crate) fn find_socket_file(
 
 #[cfg(test)]
 mod tests {
+    use alloc::sync::Arc;
+
+    use crate::fs::{
+        tests::{make_vfs_with_root, StuckCaps},
+        xattr, Permissions, VfsNode,
+    };
+
+    /// As Linux's setattr_prepare, chown removes the file's privileges
+    /// before the owner changes: when that fails, the file keeps its owner
+    /// (PR #33 review).
+    #[test]
+    fn a_chown_that_cannot_drop_file_caps_keeps_the_owner() {
+        let vfs = make_vfs_with_root();
+        let root = vfs.root_fs().unwrap().root();
+        let inner = root.create("prog", Permissions::from_mode(0o4755)).unwrap();
+        inner
+            .update_xattrs(&mut |a| a.set(xattr::XATTR_NAME_CAPS, &[0; 20], 0))
+            .unwrap();
+        let node: Arc<dyn VfsNode> = Arc::new(StuckCaps(inner.clone(), false));
+        assert!(super::chown_node(&node, 1000, 1000).is_err());
+        let meta = inner.metadata().unwrap();
+        assert_eq!((meta.uid, meta.gid), (0, 0));
+        assert!(meta.permissions.set_uid);
+    }
+
+    /// A chown the filesystem cannot store (BlockFS keeps 16-bit IDs) fails
+    /// before the file loses its privileges (PR #33 review round 7).
+    #[test]
+    fn a_chown_the_filesystem_cannot_store_keeps_the_privileges() {
+        use crate::fs::Filesystem;
+        let fs = crate::fs::blockfs::BlockFs::format(1000, 100).unwrap();
+        let prog = fs
+            .root()
+            .create("prog", Permissions::from_mode(0o4755))
+            .unwrap();
+        assert!(super::chown_node(&prog, 70000, 0).is_err());
+        let meta = prog.metadata().unwrap();
+        assert_eq!(meta.uid, 0);
+        assert!(meta.permissions.set_uid);
+    }
+
     #[test]
     fn generic_stat_takes_every_field() {
         let x = super::X86Stat {

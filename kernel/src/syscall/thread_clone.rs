@@ -259,7 +259,8 @@ pub fn sys_thread_clone(
             .load(core::sync::atomic::Ordering::Acquire),
         core::sync::atomic::Ordering::Release,
     );
-    *thread.caps.lock() = *current_thread.caps.lock();
+    let sets = *current_thread.caps.lock();
+    *thread.caps.lock() = sets;
 
     // Override context with cloned registers so the child returns 0 from clone.
     //
@@ -355,7 +356,8 @@ pub fn sys_thread_clone(
     // creator that already has.
     {
         let _threads = proc.threads.lock();
-        *thread.caps.lock() = *current_thread.caps.lock();
+        let sets = *current_thread.caps.lock();
+        *thread.caps.lock() = sets;
     }
 
     // The new thread runs as its own dispatcher task (stage D2), starting

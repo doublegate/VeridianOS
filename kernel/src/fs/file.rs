@@ -267,9 +267,11 @@ impl File {
         }
 
         let len = super::check_fsize(&*self.node, *pos, data.len())?;
+        if len != 0 {
+            super::remove_privs(&*self.node)?;
+        }
         let bytes_written = self.node.write(*pos, &data[..len])?;
         *pos += bytes_written;
-        super::remove_privs_after_write(&*self.node);
         Ok(bytes_written)
     }
 

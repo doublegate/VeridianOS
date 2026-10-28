@@ -40,7 +40,8 @@
   ambient sets plus securebits), replacing the `euid == 0` privilege checks in steps. First step:
   `process::linux_caps`, the pure rules for capset, the set*id fix-ups, the capability prctl
   options and exec, with tests transcribed from Linux 7.3's `security/commoncap.c`. Every thread
-  carries its sets (root's full sets at boot; fork and clone copy the creator's), and
+  carries its sets (root's full sets at boot; fork, clone and the native thread call copy the
+  creator's; the native call gave a new thread root's sets), and
   `capget`/`capset` read and change them with Linux's header versions 1 to 3:
   capget reads any thread by id and probes the version when the data pointer is NULL; capset changes
   only the caller's sets. `/proc/sys/kernel/cap_last_cap` reports 40, and
@@ -54,12 +55,15 @@
   for the group IDs, setfsgid and setgroups, and a change of the user IDs applies Linux's fixup to
   every thread's sets: leaving every root ID clears the permitted and effective sets (unless
   keep-caps) and the ambient set, the effective set follows the effective uid, and the filesystem
-  capabilities follow fsuid 0. File permission checks (open, access, exec, path search, chdir,
+  capabilities follow fsuid 0. fork copies the IDs and the calling thread's sets as one snapshot,
+  so a set*id call on another thread can never leave a child with root IDs and dropped sets,
+  which exec would turn back into full privilege. File permission checks (open, access, exec, path search, chdir,
   creating, removing and renaming entries) follow Linux's `generic_permission`: the mode bits,
   then CAP_DAC_OVERRIDE (read and write anything, search any directory, execute where some
   execute bit is set) and CAP_DAC_READ_SEARCH (read files, read and search directories), where
   they used to let filesystem uid 0 through; `access` checks as the caller's real self, as Linux's
-  `do_faccessat` does (no capabilities for a real uid other than 0). Ownership checks take their
+  `do_faccessat` does (no capabilities for a real uid other than 0), for the whole path lookup and
+  not only its last component. Ownership checks take their
   capability: CAP_FOWNER for chmod, explicit utimes and sticky directories, CAP_FSETID to keep the
   set-ID bits through a write or a set-group-ID bit outside the group, CAP_CHOWN for chown,
   CAP_MKNOD for device nodes and CAP_SYS_CHROOT for chroot. kill(2) needs a uid match or CAP_KILL
@@ -67,7 +71,10 @@
   Scheduling another user's threads, raising priority or nice and the real-time policies need
   CAP_SYS_NICE; another process's limits and a raised hard limit CAP_SYS_RESOURCE; RLIMIT_NPROC
   spares real uid 0 and CAP_SYS_RESOURCE or CAP_SYS_ADMIN. ptrace attach and the robust-list read of
-  another user's process need CAP_SYS_PTRACE, and the tracer's CAP_SYS_PTRACE when it attached
+  another user's process need CAP_SYS_PTRACE, as does a target whose permitted capabilities the
+  caller does not hold (Linux's cap_ptrace_access_check: a process that dropped capabilities with
+  capset cannot trace a child that kept them); PTRACE_TRACEME needs a parent holding the caller's
+  permitted set or CAP_SYS_PTRACE (cap_ptrace_traceme). The tracer's CAP_SYS_PTRACE when it attached
   decides whether a set-ID exec under it gains privilege (Linux's ptracer_capable). The account
   calls act on another user's account with CAP_DAC_OVERRIDE, and mount needs CAP_SYS_ADMIN besides
   its object capability. No privilege check uses `euid == 0` any more. exec computes the sets as
@@ -78,25 +85,40 @@
   gained. The process becomes non-dumpable when its permitted set grows, and AT_SECURE follows the
   same decision. Programs carry file capabilities in `security.capability` (step 9): v1, v2 and v3
   values apply at exec (pP' = (X & fP) | (pI & fI) | pA, and with the effective bit pE' = pP'), a v3
-  value whose root id is not 0 grants nothing, a malformed one fails the exec (EINVAL), an effective
+  value whose root id is not 0 grants nothing, a malformed one fails the exec (EINVAL), so does any failure to read it other than a filesystem
+  without attributes, an effective
   bit asking for capabilities the bounding set withholds fails it with EPERM before the point of no
-  return, and a set-user-ID-root program run by another user gets only its file capabilities. Only
+  return, and a set-user-ID-root program run by another user gets only its file capabilities. An
+  exec that may grant privilege (file capabilities, a set-user-ID or set-group-ID bit) maps the
+  program and its loader from the bytes it read and checked, not from the page cache, so a write
+  to the file meanwhile cannot change what runs privileged. Only
   v2 and v3 values can be written (EINVAL otherwise), with CAP_SETFCAP; a v3 value with root id 0
   reads back as v2; a write, truncate or chown removes the attribute, whoever makes it (Linux's
-  killpriv).
+  killpriv). As Linux's `file_remove_privs` and `setattr_prepare`, that removal comes before the
+  data or the owner changes and its error is the call's, so a file that cannot lose its
+  capabilities is neither written nor given away; an attribute read that fails counts as a
+  failed removal, not as no capability. A chown to an owner the filesystem cannot store (BlockFS
+  keeps 16-bit IDs) fails before the file loses anything. Two writers that both remove the
+  capability do not fail the one that finds it already gone.
 - Extended attributes (ADR 0020 step 8): the twelve Linux calls (`setxattr`, `getxattr`,
   `listxattr`, `removexattr` and their `l*` and `f*` forms) and the four `*xattrat` calls of Linux
   6.13, with Linux's rules: names up to 255 bytes (ERANGE), values up to 64 KiB (E2BIG),
-  XATTR_CREATE and XATTR_REPLACE, size-0 queries and ERANGE for a short buffer; `user.*` on regular
+  XATTR_CREATE and XATTR_REPLACE, size-0 queries and ERANGE for a short buffer, and Linux 7.3's
+  handling of AT_FDCWD with no path (the working directory for `fgetxattr` and `fsetxattr`, EBADF
+  for `flistxattr` and `fremovexattr`); `user.*` on regular
   files, directories (owner or CAP_FOWNER in a sticky one) and sockets by the file's permission
   bits, `trusted.*` with CAP_SYS_ADMIN (hidden from others' lists), `security.*` written with
   CAP_SYS_ADMIN (CAP_SETFCAP for `security.capability`), `system.*` (POSIX ACLs) EOPNOTSUPP. tmpfs
-  and ramfs keep them in the node (up to 64 KiB per node); BlockFS keeps them on disk, in one
+  and ramfs keep them in the node (up to 64 KiB per node; tmpfs charges them to its size limit; a
+  change moves the time `stat` reports as `st_ctime`);
+  BlockFS keeps them on disk, in one
   attribute block per inode, which needed format revision 1 (an inode's unused triple-indirect
   pointer became its attribute block; the superblock records the revision, a revision 0 image mounts
-  without attributes, and `mkfs-blockfs --upgrade` raises one). The in-memory store keyed by inode
+  without attributes, its old pointer bytes neither read nor freed as an attribute block, and
+  `mkfs-blockfs --upgrade` raises one). The in-memory store keyed by inode
   number, which the shell's `xattr` command used and whose numbers collided across filesystems, is
-  gone; the command acts on the node.
+  gone; the command acts on the node, with the limits and the file-capability check the system
+  calls apply (an over-long name could otherwise have corrupted a BlockFS attribute block).
 - `pause` on x86_64 (system call 34 had no handler, so musl's `pause()` returned ENOSYS at once and a
   forked child meant to wait ran on): it waits as `ppoll` with no descriptors and no timeout,
   which is what musl does on AArch64 and RISC-V, and returns EINTR after a handler.
@@ -135,7 +157,13 @@
   (N-132 follow-up): such a page keeps its frame mapped for the kernel only, so the kernel's own
   copy did not fault and `write` from it or `read` into it succeeded where Linux returns EFAULT.
   User pointers are now refused when a page they cover is present without user access; LTP
-  `capset02`'s bad address and guard pages behave as on Linux.
+  `capset02`'s bad address and guard pages behave as on Linux. A read or write that moves data in
+  chunks checks each page as it copies, so a `PROT_NONE` page after the bytes it moves does not
+  fail it: a read of a 1-byte file into such a buffer returns 1, as on Linux. The native
+  thread-affinity calls check only the bytes they copy, so a huge size no longer keeps that
+  page-by-page check walking page tables in the kernel, and setting accepts any size, as Linux's
+  `sched_setaffinity` does. An empty range is not checked for a `PROT_NONE` page, whatever its
+  alignment.
 - `scripts/run-compat-tests.sh --update` dropped the comment lines written by hand at the top of an
   expected list (the baseline's date and versions); it now keeps them.
 - `mkfs-blockfs` let a directory entry cross a 4 KiB block boundary, and the kernel reads a

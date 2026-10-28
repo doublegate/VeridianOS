@@ -509,6 +509,24 @@ impl BlockBitmap {
     }
 }
 
+/// Owner and group as stored on disk. On-disk ids are 16-bit, so a larger
+/// id is rejected rather than truncated.
+fn disk_owner_ids(
+    uid: Option<u32>,
+    gid: Option<u32>,
+) -> Result<(Option<u16>, Option<u16>), KernelError> {
+    let to_u16 = |id: Option<u32>| -> Result<Option<u16>, KernelError> {
+        id.map(|v| {
+            u16::try_from(v).map_err(|_| KernelError::InvalidArgument {
+                name: "owner id",
+                value: "exceeds 16-bit BlockFS limit",
+            })
+        })
+        .transpose()
+    };
+    Ok((to_u16(uid)?, to_u16(gid)?))
+}
+
 /// BlockFS node implementation
 pub struct BlockFsNode {
     inode_num: u32,
@@ -659,6 +677,10 @@ impl VfsNode for BlockFsNode {
     fn chown(&self, uid: Option<u32>, gid: Option<u32>) -> Result<(), KernelError> {
         let mut fs = self.fs.write();
         fs.chown_inode(self.inode_num, uid, gid)
+    }
+
+    fn check_owner(&self, uid: Option<u32>, gid: Option<u32>) -> Result<(), KernelError> {
+        disk_owner_ids(uid, gid).map(|_| ())
     }
 
     fn set_times(&self, atime: Option<u64>, mtime: Option<u64>) -> Result<(), KernelError> {
@@ -2220,12 +2242,23 @@ impl BlockFsInner {
 
     /// Change the permission bits on an inode, preserving the type bits.
     /// The extended attributes of an inode (none without a block).
-    fn inode_xattrs(&self, inode_num: u32) -> Result<super::xattr::XattrSet, KernelError> {
-        let block = self
+    /// An inode's attribute block, 0 for none. On a revision 0 image the
+    /// field's bytes are the old, unused triple-indirect pointer: not a
+    /// block this image owns, so never read or freed as one (PR #33 review).
+    fn xattr_block_of(&self, inode_num: u32) -> Result<u32, KernelError> {
+        let inode = self
             .inode_table
             .get(inode_num as usize)
-            .ok_or(KernelError::FsError(FsError::NotFound))?
-            .xattr_block;
+            .ok_or(KernelError::FsError(FsError::NotFound))?;
+        Ok(if self.superblock.revision < 1 {
+            0
+        } else {
+            inode.xattr_block
+        })
+    }
+
+    fn inode_xattrs(&self, inode_num: u32) -> Result<super::xattr::XattrSet, KernelError> {
+        let block = self.xattr_block_of(inode_num)?;
         if block == 0 {
             return Ok(super::xattr::XattrSet::new());
         }
@@ -2320,24 +2353,14 @@ impl BlockFsInner {
         Ok(())
     }
 
-    /// Change an inode's owner and/or group. On-disk ids are 16-bit, so a
-    /// larger id is rejected rather than truncated.
+    /// Change an inode's owner and/or group ([`disk_owner_ids`]).
     fn chown_inode(
         &mut self,
         inode_num: u32,
         uid: Option<u32>,
         gid: Option<u32>,
     ) -> Result<(), KernelError> {
-        let to_u16 = |id: Option<u32>| -> Result<Option<u16>, KernelError> {
-            id.map(|v| {
-                u16::try_from(v).map_err(|_| KernelError::InvalidArgument {
-                    name: "owner id",
-                    value: "exceeds 16-bit BlockFS limit",
-                })
-            })
-            .transpose()
-        };
-        let (uid, gid) = (to_u16(uid)?, to_u16(gid)?);
+        let (uid, gid) = disk_owner_ids(uid, gid)?;
         let inode = self
             .inode_table
             .get_mut(inode_num as usize)
@@ -2842,7 +2865,8 @@ impl BlockFsInner {
     fn free_inode_blocks(&mut self, inode_num: u32) -> Result<(), KernelError> {
         self.page_cache.invalidate(inode_num as u64);
         // The attributes go with the inode, whatever its type.
-        let xattr_block = core::mem::take(&mut self.inode_table[inode_num as usize].xattr_block);
+        let xattr_block = self.xattr_block_of(inode_num)?;
+        self.inode_table[inode_num as usize].xattr_block = 0;
         if xattr_block != 0 {
             self.free_block(xattr_block);
         }
@@ -3458,6 +3482,27 @@ mod tests {
             g.update_xattrs(&mut |a| a.set("user.x", b"1", 0)),
             Err(KernelError::FsError(FsError::NotSupported))
         );
+        // Stale bytes where revision 1 keeps the attribute block, naming a
+        // block another file uses: neither read as attributes nor freed with
+        // the inode (PR #33 review).
+        let h = fs.root().create("h", Permissions::default()).unwrap();
+        h.write(0, b"data").unwrap();
+        let (g_ino, h_block) = {
+            let inner = fs.inner.read();
+            let ino = |name: &str| inner.lookup_in_dir(0, name).unwrap();
+            (
+                ino("g"),
+                inner.inode_table[ino("h") as usize].direct_blocks[0],
+            )
+        };
+        assert_ne!(h_block, 0);
+        fs.inner.write().inode_table[g_ino as usize].xattr_block = h_block;
+        assert!(g.xattrs().unwrap().is_empty());
+        let free = fs.inner.read().superblock.free_blocks;
+        drop(g);
+        fs.root().unlink("g").unwrap();
+        assert!(fs.inner.read().block_bitmap.is_allocated(h_block));
+        assert_eq!(fs.inner.read().superblock.free_blocks, free);
     }
 
     /// A newer format than the kernel knows is refused at mount.
