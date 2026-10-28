@@ -509,6 +509,24 @@ impl BlockBitmap {
     }
 }
 
+/// Owner and group as stored on disk. On-disk ids are 16-bit, so a larger
+/// id is rejected rather than truncated.
+fn disk_owner_ids(
+    uid: Option<u32>,
+    gid: Option<u32>,
+) -> Result<(Option<u16>, Option<u16>), KernelError> {
+    let to_u16 = |id: Option<u32>| -> Result<Option<u16>, KernelError> {
+        id.map(|v| {
+            u16::try_from(v).map_err(|_| KernelError::InvalidArgument {
+                name: "owner id",
+                value: "exceeds 16-bit BlockFS limit",
+            })
+        })
+        .transpose()
+    };
+    Ok((to_u16(uid)?, to_u16(gid)?))
+}
+
 /// BlockFS node implementation
 pub struct BlockFsNode {
     inode_num: u32,
@@ -659,6 +677,10 @@ impl VfsNode for BlockFsNode {
     fn chown(&self, uid: Option<u32>, gid: Option<u32>) -> Result<(), KernelError> {
         let mut fs = self.fs.write();
         fs.chown_inode(self.inode_num, uid, gid)
+    }
+
+    fn check_owner(&self, uid: Option<u32>, gid: Option<u32>) -> Result<(), KernelError> {
+        disk_owner_ids(uid, gid).map(|_| ())
     }
 
     fn set_times(&self, atime: Option<u64>, mtime: Option<u64>) -> Result<(), KernelError> {
@@ -2331,24 +2353,14 @@ impl BlockFsInner {
         Ok(())
     }
 
-    /// Change an inode's owner and/or group. On-disk ids are 16-bit, so a
-    /// larger id is rejected rather than truncated.
+    /// Change an inode's owner and/or group ([`disk_owner_ids`]).
     fn chown_inode(
         &mut self,
         inode_num: u32,
         uid: Option<u32>,
         gid: Option<u32>,
     ) -> Result<(), KernelError> {
-        let to_u16 = |id: Option<u32>| -> Result<Option<u16>, KernelError> {
-            id.map(|v| {
-                u16::try_from(v).map_err(|_| KernelError::InvalidArgument {
-                    name: "owner id",
-                    value: "exceeds 16-bit BlockFS limit",
-                })
-            })
-            .transpose()
-        };
-        let (uid, gid) = (to_u16(uid)?, to_u16(gid)?);
+        let (uid, gid) = disk_owner_ids(uid, gid)?;
         let inode = self
             .inode_table
             .get_mut(inode_num as usize)

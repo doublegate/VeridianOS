@@ -554,6 +554,14 @@ pub trait VfsNode: Send + Sync {
         Err(KernelError::NotImplemented { feature: "chown" })
     }
 
+    /// Whether this node can store `uid` and `gid` (`None` unchanged),
+    /// checked before a chown removes any privileges so a chown the
+    /// filesystem would refuse changes nothing (as Linux's notify_change
+    /// rejects an unmappable id before the inode changes).
+    fn check_owner(&self, _uid: Option<u32>, _gid: Option<u32>) -> Result<(), KernelError> {
+        Ok(())
+    }
+
     /// Set the access and/or modification time (seconds); `None` leaves
     /// that time unchanged. Permission checks are the caller's job
     /// (utimensat, N-249).
@@ -2500,6 +2508,9 @@ pub(crate) mod tests {
         }
         fn chown(&self, u: Option<u32>, g: Option<u32>) -> Result<(), KernelError> {
             self.0.chown(u, g)
+        }
+        fn check_owner(&self, u: Option<u32>, g: Option<u32>) -> Result<(), KernelError> {
+            self.0.check_owner(u, g)
         }
         fn xattrs(&self) -> Result<xattr::XattrSet, KernelError> {
             if self.1 {

@@ -621,21 +621,7 @@ fn exec_image(
             Some((node, ..)) => readable(&node.metadata()?),
             None => true,
         };
-        // The program's own capabilities, read with the file (Linux's
-        // get_file_caps): a malformed value fails the exec (EINVAL); a
-        // filesystem without attributes gives none.
-        let file_caps = match file_node.xattrs() {
-            Ok(attrs) => match attrs.get(crate::fs::xattr::XATTR_NAME_CAPS) {
-                Some(value) => super::linux_caps::FileCaps::from_xattr(value).map_err(|_| {
-                    KernelError::InvalidArgument {
-                        name: "security.capability",
-                        value: "not a file capability",
-                    }
-                })?,
-                None => None,
-            },
-            Err(_) => None,
-        };
+        let file_caps = exec_file_caps(&*file_node)?;
         ExecIds {
             set_uid: perms.set_uid.then_some(meta.uid),
             set_gid: (perms.set_gid && perms.group_exec).then_some(meta.gid),
@@ -1238,10 +1224,52 @@ pub(crate) fn exec_stack_layout<'a>(
     }
 }
 
+/// The program's own capabilities, read with the file (Linux's
+/// get_file_caps): a malformed value fails the exec (EINVAL); a filesystem
+/// without attributes gives none; any other failure to read them fails the
+/// exec, since a set-user-ID-root program's file capabilities may be what
+/// limits it (get_vfs_caps_from_disk returns the error).
+#[cfg(feature = "alloc")]
+fn exec_file_caps(
+    node: &dyn crate::fs::VfsNode,
+) -> Result<Option<super::linux_caps::FileCaps>, KernelError> {
+    match node.xattrs() {
+        Ok(attrs) => match attrs.get(crate::fs::xattr::XATTR_NAME_CAPS) {
+            Some(value) => super::linux_caps::FileCaps::from_xattr(value).map_err(|_| {
+                KernelError::InvalidArgument {
+                    name: "security.capability",
+                    value: "not a file capability",
+                }
+            }),
+            None => Ok(None),
+        },
+        Err(KernelError::FsError(crate::error::FsError::NotSupported)) => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::elf::dynamic::{AuxType, ProcessAux, ProgramAux};
+
+    /// An exec whose file capabilities cannot be read fails rather than
+    /// running without them (PR #33 review round 7); no attributes is none.
+    #[test]
+    fn an_exec_whose_caps_cannot_be_read_fails() {
+        use alloc::sync::Arc;
+
+        use crate::fs::{
+            tests::{make_vfs_with_root, StuckCaps},
+            Permissions,
+        };
+        let vfs = make_vfs_with_root();
+        let root = vfs.root_fs().unwrap().root();
+        let inner = root.create("prog", Permissions::from_mode(0o4755)).unwrap();
+        assert!(matches!(exec_file_caps(&*inner), Ok(None)));
+        let stuck = Arc::new(StuckCaps(inner, true));
+        assert!(exec_file_caps(&*stuck).is_err());
+    }
 
     /// An exec follows at most four `#!` interpreters, as Linux, and then
     /// fails with ELOOP: a script naming itself recursed until the kernel

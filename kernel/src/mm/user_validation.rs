@@ -53,6 +53,8 @@ pub fn active_user_page_flags(addr: usize) -> Option<PageFlags> {
         unsafe { core::arch::asm!("mrs {}, TTBR0_EL1", out(reg) ttbr0) };
         ttbr0 & 0x0000_FFFF_FFFF_F000
     };
+    // The low 12 bits are x86_64 CR3 flags (PCID, PWT, PCD); the RISC-V
+    // root is already page-aligned.
     #[cfg(not(target_arch = "aarch64"))]
     let root = crate::mm::get_kernel_page_table() as u64 & 0x000F_FFFF_FFFF_F000;
     // SAFETY: the active root, mapped by the physical-memory map for the

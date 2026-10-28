@@ -78,7 +78,8 @@
   gained. The process becomes non-dumpable when its permitted set grows, and AT_SECURE follows the
   same decision. Programs carry file capabilities in `security.capability` (step 9): v1, v2 and v3
   values apply at exec (pP' = (X & fP) | (pI & fI) | pA, and with the effective bit pE' = pP'), a v3
-  value whose root id is not 0 grants nothing, a malformed one fails the exec (EINVAL), an effective
+  value whose root id is not 0 grants nothing, a malformed one fails the exec (EINVAL), so does any failure to read it other than a filesystem
+  without attributes, an effective
   bit asking for capabilities the bounding set withholds fails it with EPERM before the point of no
   return, and a set-user-ID-root program run by another user gets only its file capabilities. An
   exec that may grant privilege (file capabilities, a set-user-ID or set-group-ID bit) maps the
@@ -89,7 +90,8 @@
   killpriv). As Linux's `file_remove_privs` and `setattr_prepare`, that removal comes before the
   data or the owner changes and its error is the call's, so a file that cannot lose its
   capabilities is neither written nor given away; an attribute read that fails counts as a
-  failed removal, not as no capability.
+  failed removal, not as no capability. A chown to an owner the filesystem cannot store (BlockFS
+  keeps 16-bit IDs) fails before the file loses anything.
 - Extended attributes (ADR 0020 step 8): the twelve Linux calls (`setxattr`, `getxattr`,
   `listxattr`, `removexattr` and their `l*` and `f*` forms) and the four `*xattrat` calls of Linux
   6.13, with Linux's rules: names up to 255 bytes (ERANGE), values up to 64 KiB (E2BIG),

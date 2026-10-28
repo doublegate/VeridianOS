@@ -3299,7 +3299,10 @@ pub(crate) fn chown_node(
     // set-group-ID (`Permissions::after_chown`) and its file capabilities.
     // As Linux's setattr_prepare, they go first: when that fails the file
     // keeps its owner, never a new owner with the old privileges (PR #33
-    // review).
+    // review). An owner the filesystem cannot store is refused before
+    // anything changes.
+    node.check_owner(uid, gid)
+        .map_err(super::map_kernel_error)?;
     if meta.node_type != crate::fs::NodeType::Directory {
         crate::fs::kill_file_caps(&**node).map_err(super::map_kernel_error)?;
         if let Some(kept) = meta.permissions.after_chown() {
@@ -3471,6 +3474,22 @@ mod tests {
         assert!(super::chown_node(&node, 1000, 1000).is_err());
         let meta = inner.metadata().unwrap();
         assert_eq!((meta.uid, meta.gid), (0, 0));
+        assert!(meta.permissions.set_uid);
+    }
+
+    /// A chown the filesystem cannot store (BlockFS keeps 16-bit IDs) fails
+    /// before the file loses its privileges (PR #33 review round 7).
+    #[test]
+    fn a_chown_the_filesystem_cannot_store_keeps_the_privileges() {
+        use crate::fs::Filesystem;
+        let fs = crate::fs::blockfs::BlockFs::format(1000, 100).unwrap();
+        let prog = fs
+            .root()
+            .create("prog", Permissions::from_mode(0o4755))
+            .unwrap();
+        assert!(super::chown_node(&prog, 70000, 0).is_err());
+        let meta = prog.metadata().unwrap();
+        assert_eq!(meta.uid, 0);
         assert!(meta.permissions.set_uid);
     }
 
