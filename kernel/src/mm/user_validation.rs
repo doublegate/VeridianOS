@@ -43,11 +43,10 @@ pub fn translate_address(addr: usize) -> Option<PageTableEntry> {
 /// address space, or `None` if it is not mapped. Takes no lock (a system
 /// call may hold any), and reads the root of the lower half: CR3 and satp
 /// hold the whole address space, AArch64's TTBR0_EL1 the user half (ADR
-/// 0015). Lock-free is safe for a read: munmap and mprotect only rewrite
-/// entries, and table frames are freed only when the whole user half goes
-/// (exec, single-threaded by then, and teardown, with no thread left in
-/// it), so the walk reads live tables and sees each entry before or after
-/// a concurrent change, as the hardware walker does (PR #33 review).
+/// 0015). The walk is `translate_lockless`: one atomic load per entry and
+/// no reference to any table, against entry writes that are atomic stores,
+/// so it reads each entry before or after a concurrent munmap or mprotect
+/// (PR #33 review).
 #[cfg(target_os = "none")]
 pub fn active_user_page_flags(addr: usize) -> Option<PageFlags> {
     #[cfg(target_arch = "aarch64")]
@@ -61,13 +60,20 @@ pub fn active_user_page_flags(addr: usize) -> Option<PageFlags> {
     // root is already page-aligned.
     #[cfg(not(target_arch = "aarch64"))]
     let root = crate::mm::get_kernel_page_table() as u64 & 0x000F_FFFF_FFFF_F000;
+    let root = crate::mm::phys_to_virt_addr(root) as *const crate::mm::page_table::PageTable;
     // SAFETY: the active root, mapped by the physical-memory map for the
-    // kernel's lifetime; the mapper only reads here.
-    let mapper = unsafe { crate::mm::vas::create_mapper_from_root_pub(root) };
-    mapper
-        .translate_page(crate::mm::VirtualAddress(addr as u64 & !0xFFF))
-        .ok()
-        .map(|(_, flags)| flags)
+    // kernel's lifetime. The user half's table frames are freed only at
+    // exec (single-threaded by then) and teardown (no thread left in it),
+    // so every table the walk reaches stays allocated.
+    unsafe {
+        crate::mm::page_table::translate_lockless(
+            root,
+            crate::mm::page_table::paging_levels(),
+            crate::mm::VirtualAddress(addr as u64 & !0xFFF),
+        )
+    }
+    .ok()
+    .map(|(_, flags)| flags)
 }
 
 /// Extension trait for PageTableEntry to check user accessibility
