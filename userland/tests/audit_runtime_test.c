@@ -2434,6 +2434,16 @@ static void test_xattrs(void)
         fails |= 1 << 8;
     if (fd >= 0)
         close(fd);
+    /* With no path, AT_FDCWD names the working directory for fgetxattr
+     * and fsetxattr (Linux's path_getxattrat looks the empty name up when
+     * the fd is negative) but is a bad descriptor for flistxattr and
+     * fremovexattr, which always take the fd. Any other negative fd is a
+     * bad descriptor. */
+    if (failed_with(veridian_syscall4(SYS_fgetxattr, -100, "user.none", buf, sizeof(buf)), EBADF) ||
+        !failed_with(veridian_syscall4(SYS_fgetxattr, -5, "user.none", buf, sizeof(buf)), EBADF) ||
+        !failed_with(veridian_syscall3(SYS_flistxattr, -100, buf, sizeof(buf)), EBADF) ||
+        !failed_with(veridian_syscall2(SYS_fremovexattr, -100, "user.none"), EBADF))
+        fails |= 1 << 18;
     if (veridian_syscall2(SYS_removexattr, f, "user.k") != 0 ||
         !failed_with(xa_get(f, "user.k", buf, sizeof(buf)), ENODATA) ||
         !failed_with(veridian_syscall2(SYS_removexattr, f, "user.k"), ENODATA))

@@ -88,11 +88,14 @@
 - Extended attributes (ADR 0020 step 8): the twelve Linux calls (`setxattr`, `getxattr`,
   `listxattr`, `removexattr` and their `l*` and `f*` forms) and the four `*xattrat` calls of Linux
   6.13, with Linux's rules: names up to 255 bytes (ERANGE), values up to 64 KiB (E2BIG),
-  XATTR_CREATE and XATTR_REPLACE, size-0 queries and ERANGE for a short buffer; `user.*` on regular
+  XATTR_CREATE and XATTR_REPLACE, size-0 queries and ERANGE for a short buffer, and Linux 7.3's
+  handling of AT_FDCWD with no path (the working directory for `fgetxattr` and `fsetxattr`, EBADF
+  for `flistxattr` and `fremovexattr`); `user.*` on regular
   files, directories (owner or CAP_FOWNER in a sticky one) and sockets by the file's permission
   bits, `trusted.*` with CAP_SYS_ADMIN (hidden from others' lists), `security.*` written with
   CAP_SYS_ADMIN (CAP_SETFCAP for `security.capability`), `system.*` (POSIX ACLs) EOPNOTSUPP. tmpfs
-  and ramfs keep them in the node (up to 64 KiB per node; tmpfs charges them to its size limit);
+  and ramfs keep them in the node (up to 64 KiB per node; tmpfs charges them to its size limit; a
+  change moves the time `stat` reports as `st_ctime`);
   BlockFS keeps them on disk, in one
   attribute block per inode, which needed format revision 1 (an inode's unused triple-indirect
   pointer became its attribute block; the superblock records the revision, a revision 0 image mounts

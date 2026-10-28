@@ -187,7 +187,10 @@ impl VfsNode for RamNode {
         &self,
         f: &mut dyn FnMut(&mut super::xattr::XattrSet) -> Result<(), KernelError>,
     ) -> Result<(), KernelError> {
-        super::xattr::update_in_memory(&mut self.xattrs.write(), f)
+        super::xattr::update_in_memory(&mut self.xattrs.write(), f)?;
+        // The status-change time, which stat reports from `created`.
+        self.metadata.write().created = crate::arch::timer::get_timestamp_secs();
+        Ok(())
     }
 
     fn node_type(&self) -> NodeType {
@@ -662,6 +665,22 @@ mod tests {
     use alloc::vec;
 
     use super::*;
+
+    /// A committed attribute change moves the status-change time (stat's
+    /// st_ctime, the node's `created`); a refused one leaves it (PR #33
+    /// review).
+    #[test]
+    fn xattr_changes_move_the_status_change_time() {
+        let node = RamNode::new_file(2, 1, 0, Permissions::default());
+        node.metadata.write().created = u64::MAX;
+        assert!(node
+            .update_xattrs(&mut |_| Err(KernelError::FsError(FsError::NoSpace)))
+            .is_err());
+        assert_eq!(node.metadata.read().created, u64::MAX);
+        node.update_xattrs(&mut |a| a.set("user.a", b"v", 0))
+            .unwrap();
+        assert_ne!(node.metadata.read().created, u64::MAX);
+    }
 
     /// unlink removes no directory and rmdir nothing else, the type being
     /// checked where the entry is removed (PR #23 review).

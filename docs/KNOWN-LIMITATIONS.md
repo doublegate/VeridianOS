@@ -339,6 +339,10 @@ filesystem.
   from BlockFS see it through the shared page cache. An exec that grants privilege (file
   capabilities, set-user-ID or set-group-ID) maps a private copy of the bytes it checked, so the
   write cannot change what runs privileged (v0.28 queue item 3, file tier).
+- **Status-change time on ramfs and tmpfs.** Their nodes have no ctime field: `stat` reports the
+  creation time as `st_ctime`. Extended-attribute changes move it, but chmod and chown move the
+  modification time instead (Linux moves ctime, not mtime) and writes do not move it. BlockFS
+  inodes keep a real ctime (v0.28 queue item 3, file tier).
 
 ### Shared IPC regions are never reclaimed
 

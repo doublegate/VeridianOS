@@ -255,6 +255,8 @@ impl VfsNode for TmpNode {
             self.release_space(old_charge - new_charge);
         }
         *set = new;
+        // The status-change time, which stat reports from `created`.
+        self.metadata.write().created = crate::arch::timer::get_timestamp_secs();
         Ok(())
     }
 
@@ -922,6 +924,28 @@ mod tests {
 
         // Still one page used
         assert_eq!(fs.bytes_used(), P);
+    }
+
+    /// A committed attribute change moves the status-change time (stat's
+    /// st_ctime, the node's `created`), as Linux's shmem_xattr_handler_set
+    /// does; a refused one leaves it (PR #33 review).
+    #[test]
+    fn xattr_changes_move_the_status_change_time() {
+        let node = TmpNode::new_file(
+            2,
+            1,
+            Permissions::default(),
+            Arc::new(AtomicUsize::new(0)),
+            P,
+        );
+        node.metadata.write().created = u64::MAX;
+        assert!(node
+            .update_xattrs(&mut |_| Err(KernelError::FsError(FsError::NoSpace)))
+            .is_err());
+        assert_eq!(node.metadata.read().created, u64::MAX);
+        node.update_xattrs(&mut |a| a.set("user.a", b"v", 0))
+            .unwrap();
+        assert_ne!(node.metadata.read().created, u64::MAX);
     }
 
     /// Extended attributes count against the size limit, and are refunded
