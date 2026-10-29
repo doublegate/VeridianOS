@@ -98,8 +98,12 @@ LTP's `syscalls`, the Open POSIX Test Suite and musl libc-test run on all three 
 [`docs/compat/COMPATIBILITY-PLAN.md`](compat/COMPATIBILITY-PLAN.md)). Most LTP tests never reach
 their check, for a few shared reasons:
 
-- **statfs is ENOSYS.** LTP's library asks for the filesystem type of its temporary directory, so
-  about 630 of the 1,552 tests are TBROK before they start.
+- **statfs reports no mount flags.** It reports each filesystem's type and counts (until it was
+  implemented, about 630 of LTP's 1,552 tests were TBROK on its ENOSYS), but VeridianOS has no
+  per-mount flags, so `f_flags` carries only `ST_VALID` and a read-only ext4's or FAT's
+  `ST_RDONLY` (never `ST_NOSUID`, `ST_NODEV`, `ST_NOEXEC` or `ST_RELATIME`). `f_fsid` is 0 except
+  on ext4, and an ext4 image whose superblock does not record its metadata overhead reports the
+  whole volume in `f_blocks`.
 - **No kernel configuration.** Tests that check a `CONFIG_*` option (about 95) find neither
   `/proc/config.gz` nor `/boot/config-<release>` and are TBROK.
 - **Missing calls.** alarm and the interval and POSIX timers, the System V IPC calls, message

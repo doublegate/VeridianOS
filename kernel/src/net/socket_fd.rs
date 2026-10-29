@@ -78,6 +78,13 @@ impl Drop for SocketNode {
 }
 
 impl VfsNode for SocketNode {
+    /// Linux's sockfs.
+    fn statfs(&self) -> Result<crate::fs::statfs::FsStats, crate::error::KernelError> {
+        Ok(crate::fs::statfs::FsStats::simple(
+            crate::fs::statfs::SOCKFS_MAGIC,
+        ))
+    }
+
     fn node_type(&self) -> NodeType {
         NodeType::Socket
     }

@@ -379,6 +379,13 @@ struct SerialConsoleNode;
 
 #[cfg(feature = "alloc")]
 impl crate::fs::VfsNode for SerialConsoleNode {
+    /// /dev/console, on devtmpfs as on Linux.
+    fn statfs(&self) -> Result<crate::fs::statfs::FsStats, crate::error::KernelError> {
+        Ok(crate::fs::statfs::FsStats::simple(
+            crate::fs::statfs::TMPFS_MAGIC,
+        ))
+    }
+
     fn node_type(&self) -> crate::fs::NodeType {
         crate::fs::NodeType::CharDevice
     }

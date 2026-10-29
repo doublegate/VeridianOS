@@ -36,6 +36,7 @@
 #include <sys/prctl.h>
 #include <sys/resource.h>
 #include <sys/sysinfo.h>
+#include <sys/statfs.h>
 #include <sys/sysmacros.h>
 #include <sys/time.h>
 #include <sys/times.h>
@@ -5213,6 +5214,80 @@ static void test_dev_shm(void)
     report("dev_shm_maps_the_file_s_pages", ok, why);
 }
 
+/* statfs and fstatfs: each filesystem reports Linux's magic number, tmpfs
+ * its page counts against the size limit, and pipes, sockets and
+ * anonymous-inode files their pseudo filesystems (fs/statfs.rs). */
+static void test_statfs(void)
+{
+    char why[160];
+    struct statfs a, b;
+    int ok = statfs("/dev/shm", &a) == 0 && a.f_type == 0x01021994 && a.f_bsize == 4096 &&
+             a.f_blocks > 0 && a.f_bavail == a.f_bfree && a.f_namelen == 255 &&
+             a.f_frsize == 4096 && (a.f_flags & 0x20);
+    long before = ok ? (long)a.f_bfree : -1, after = -1;
+    int fd = open("/dev/shm/musl_statfs", O_CREAT | O_RDWR | O_TRUNC, 0600);
+    static char chunk[16 * 4096];
+    memset(chunk, 1, sizeof(chunk));
+    ok = ok && fd >= 0 && write(fd, chunk, sizeof(chunk)) == (ssize_t)sizeof(chunk) &&
+         fstatfs(fd, &b) == 0;
+    if (ok)
+        after = (long)b.f_bfree;
+    ok = ok && b.f_type == 0x01021994 && after <= before - 16;
+    if (fd >= 0)
+        close(fd);
+    unlink("/dev/shm/musl_statfs");
+    snprintf(why, sizeof(why), "type=%#lx bfree %ld -> %ld errno=%d", (unsigned long)a.f_type,
+             before, after, errno);
+    report("statfs_tmpfs_counts_pages", ok, why);
+
+    memset(&a, 0, sizeof(a));
+    memset(&b, 0, sizeof(b));
+    ok = statfs("/proc", &a) == 0 && a.f_type == 0x9fa0 && a.f_blocks == 0 &&
+         statfs("/", &b) == 0 && b.f_type == 0x424C4B46 && b.f_blocks > 0 &&
+         b.f_bfree <= b.f_blocks && b.f_files > 0;
+    snprintf(why, sizeof(why), "proc=%#lx root=%#lx blocks=%ld errno=%d",
+             (unsigned long)a.f_type, (unsigned long)b.f_type, (long)b.f_blocks, errno);
+    report("statfs_names_each_filesystem", ok, why);
+
+    int p[2] = {-1, -1}, sv[2] = {-1, -1};
+    int efd = eventfd(0, 0);
+    unsigned long pt = 0, st = 0, et = 0;
+    ok = pipe(p) == 0 && socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0 && efd >= 0;
+    if (ok && fstatfs(p[0], &a) == 0)
+        pt = a.f_type;
+    if (ok && fstatfs(sv[0], &a) == 0)
+        st = a.f_type;
+    if (ok && fstatfs(efd, &a) == 0)
+        et = a.f_type;
+    ok = ok && pt == 0x50495045 && st == 0x534F434B && et == 0x09041934;
+    for (int i = 0; i < 2; i++) {
+        if (p[i] >= 0)
+            close(p[i]);
+        if (sv[i] >= 0)
+            close(sv[i]);
+    }
+    if (efd >= 0)
+        close(efd);
+    snprintf(why, sizeof(why), "pipe=%#lx socket=%#lx eventfd=%#lx", pt, st, et);
+    report("fstatfs_pseudo_filesystems", ok, why);
+
+    int e1 = 0, e2 = 0, e3 = 0;
+    errno = 0;
+    if (statfs("/no/such/path", &a) != 0)
+        e1 = errno;
+    /* musl's statfs clears *buf before the call, so a bad buffer goes to
+     * the kernel through syscall(). */
+    errno = 0;
+    if (syscall(SYS_statfs, "/", (struct statfs *)8) != 0)
+        e2 = errno;
+    errno = 0;
+    if (fstatfs(-1, &a) != 0)
+        e3 = errno;
+    ok = e1 == ENOENT && e2 == EFAULT && e3 == EBADF;
+    snprintf(why, sizeof(why), "enoent=%d efault=%d ebadf=%d", e1, e2, e3);
+    report("statfs_errors", ok, why);
+}
+
 /* Tests `--only NAME` can run alone (for debugging a single test). */
 static const struct {
     const char *name;
@@ -5241,6 +5316,7 @@ static const struct {
     {"unix_accept_blocks", test_unix_accept_blocks},
     {"fs_ids", test_fs_ids},
     {"dev_shm_maps_the_file_s_pages", test_dev_shm},
+    {"statfs", test_statfs},
 };
 
 int main(int argc, char **argv)
@@ -5332,6 +5408,7 @@ int main(int argc, char **argv)
     test_ipc();
     test_priority_inheritance();
     test_dev_shm();
+    test_statfs();
     printf("MUSL-RUNTIME: %d/%d\n", passed, total);
     return passed == total ? 0 : 1;
 }

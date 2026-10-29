@@ -3053,6 +3053,40 @@ pub fn sys_fstatat(dirfd: usize, path_ptr: usize, stat_buf: usize, flags: usize)
     Ok(0)
 }
 
+/// Copy what statfs reports about `node`'s filesystem to `buf` (`struct
+/// statfs`, `fs::statfs::LINUX_STATFS_SIZE` bytes). A filesystem that
+/// cannot say is ENOSYS, as on Linux.
+fn write_statfs(node: &dyn crate::fs::VfsNode, buf: usize) -> SyscallResult {
+    let stats = node.statfs().map_err(|e| match e {
+        crate::error::KernelError::NotImplemented { .. } => SyscallError::NotImplemented,
+        e => super::map_kernel_error(e),
+    })?;
+    super::userspace::write_user_bytes(buf, &stats.to_linux())?;
+    Ok(0)
+}
+
+/// statfs(path, buf): the filesystem holding `path`, following symlinks,
+/// as Linux's `user_statfs` (`fs/statfs.c`).
+pub fn sys_statfs(path_ptr: usize, buf: usize) -> SyscallResult {
+    let rel_path = read_user_path(path_ptr)?;
+    let abs_path = resolve_at_path(AT_FDCWD, &rel_path)?;
+    let node = vfs()?.resolve_path(&abs_path).map_err(map_resolve_err)?;
+    write_statfs(&*node, buf)
+}
+
+/// fstatfs(fd, buf): the filesystem holding the open file `fd`; for a
+/// pipe, socket or anonymous-inode file, its pseudo filesystem.
+pub fn sys_fstatfs(fd: usize, buf: usize) -> SyscallResult {
+    let proc = process::current_process().ok_or(SyscallError::InvalidState)?;
+    // Lookup only; the lock is not held over the operation (N-118).
+    let file = proc
+        .file_table
+        .lock()
+        .get(fd as u32 as usize)
+        .ok_or(SyscallError::BadFileDescriptor)?;
+    write_statfs(&*file.node, buf)
+}
+
 /// unlinkat(dirfd, path, flags) (N-195), and unlink and rmdir through it,
 /// as Linux's do_unlinkat and do_rmdir: a relative path is resolved
 /// against the cwd or `dirfd` (unlink used to refuse a path without `/`).

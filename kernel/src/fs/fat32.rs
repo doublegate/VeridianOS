@@ -332,6 +332,8 @@ struct Fat32State {
     dirty: bool,
     /// Next free cluster hint
     next_free_hint: u32,
+    /// Mounted read-only, for statfs (`Fat32Fs::readonly`).
+    readonly: bool,
 }
 
 impl Fat32State {
@@ -615,6 +617,25 @@ impl Fat32Node {
 }
 
 impl VfsNode for Fat32Node {
+    /// Linux's `fat_statfs`: blocks are clusters, the data clusters (all
+    /// but the two reserved FAT entries) and the free ones, every free one
+    /// available; no inode counts; long names of up to 255 characters.
+    fn statfs(&self) -> Result<super::statfs::FsStats, KernelError> {
+        let state = self.fs_state.read();
+        let mut st = super::statfs::FsStats::simple(super::statfs::MSDOS_SUPER_MAGIC);
+        st.block_size = state.bpb.cluster_size() as u64;
+        let clusters = state.fat.entries.len() as u32;
+        st.blocks = clusters.saturating_sub(2) as u64;
+        st.blocks_free = (2..clusters)
+            .filter(|&c| state.fat.get(c) == FAT32_FREE)
+            .count() as u64;
+        st.blocks_avail = st.blocks_free;
+        if state.readonly {
+            st.flags = super::statfs::ST_RDONLY;
+        }
+        Ok(st)
+    }
+
     fn node_type(&self) -> NodeType {
         self.node_type
     }
@@ -932,6 +953,7 @@ impl Fat32Fs {
             sector_cache,
             dirty: false,
             next_free_hint: 2,
+            readonly,
         }));
 
         let root_inode = FAT32_NEXT_INODE.fetch_add(1, Ordering::Relaxed);
@@ -1061,6 +1083,26 @@ mod tests {
 
         let root = fs.root();
         assert_eq!(root.node_type(), NodeType::Directory);
+    }
+
+    #[test]
+    fn statfs_counts_clusters() {
+        let image = make_test_fat32_image();
+        let fs = Fat32Fs::from_image(&image, true).unwrap();
+        let st = fs.root().statfs().unwrap();
+        assert_eq!(st.fs_type, crate::fs::statfs::MSDOS_SUPER_MAGIC);
+        // One 512-byte sector per cluster in the test image.
+        assert_eq!(st.block_size, 512);
+        let state = fs.state.read();
+        let clusters = state.fat.entries.len() as u64;
+        assert_eq!(st.blocks, clusters - 2);
+        // The root directory's cluster is in use.
+        assert!(st.blocks_free < st.blocks);
+        assert_eq!(st.blocks_avail, st.blocks_free);
+        assert_eq!(st.flags, crate::fs::statfs::ST_RDONLY);
+        drop(state);
+        let rw = Fat32Fs::from_image(&image, false).unwrap();
+        assert_eq!(rw.root().statfs().unwrap().flags, 0);
     }
 
     #[test]

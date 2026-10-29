@@ -1463,12 +1463,11 @@ fn handle_syscall(
         Syscall::Sysinfo => usage::sys_sysinfo(arg1),
         #[cfg(feature = "alloc")]
         Syscall::Times => usage::sys_times(arg1),
-        Syscall::Rseq
-        | Syscall::Statx
-        | Syscall::Clone3
-        | Syscall::Fallocate
-        | Syscall::Statfs
-        | Syscall::Fstatfs => Err(SyscallError::NotImplemented),
+        Syscall::Rseq | Syscall::Statx | Syscall::Clone3 | Syscall::Fallocate => {
+            Err(SyscallError::NotImplemented)
+        }
+        Syscall::Statfs => sys_statfs(arg1, arg2),
+        Syscall::Fstatfs => sys_fstatfs(arg1, arg2),
         Syscall::Sigaltstack => signal::sys_sigaltstack(arg1, arg2),
         // Scheduling policy, priority and affinity (N-221).
         Syscall::SchedSetscheduler => scheduling::sys_sched_setscheduler(arg1, arg2, arg3),

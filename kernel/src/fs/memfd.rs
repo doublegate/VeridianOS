@@ -74,6 +74,13 @@ impl MemfdNode {
 }
 
 impl VfsNode for MemfdNode {
+    /// A memfd lives on Linux's internal tmpfs mount.
+    fn statfs(&self) -> Result<crate::fs::statfs::FsStats, crate::error::KernelError> {
+        Ok(crate::fs::statfs::FsStats::simple(
+            crate::fs::statfs::TMPFS_MAGIC,
+        ))
+    }
+
     fn node_type(&self) -> NodeType {
         NodeType::File
     }

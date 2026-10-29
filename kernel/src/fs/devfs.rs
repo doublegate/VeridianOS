@@ -55,6 +55,13 @@ struct DeviceFile {
 }
 
 impl VfsNode for DeviceFile {
+    /// /dev is devtmpfs on Linux, which reports itself as tmpfs.
+    fn statfs(&self) -> Result<crate::fs::statfs::FsStats, crate::error::KernelError> {
+        Ok(crate::fs::statfs::FsStats::simple(
+            crate::fs::statfs::TMPFS_MAGIC,
+        ))
+    }
+
     fn node_type(&self) -> NodeType {
         NodeType::CharDevice
     }
@@ -170,6 +177,13 @@ impl DevNode {
 }
 
 impl VfsNode for DevNode {
+    /// /dev is devtmpfs on Linux, which reports itself as tmpfs.
+    fn statfs(&self) -> Result<crate::fs::statfs::FsStats, crate::error::KernelError> {
+        Ok(crate::fs::statfs::FsStats::simple(
+            crate::fs::statfs::TMPFS_MAGIC,
+        ))
+    }
+
     fn node_type(&self) -> NodeType {
         self.node_type
     }
@@ -394,6 +408,13 @@ impl DevSubDir {
 }
 
 impl VfsNode for DevSubDir {
+    /// /dev is devtmpfs on Linux, which reports itself as tmpfs.
+    fn statfs(&self) -> Result<crate::fs::statfs::FsStats, crate::error::KernelError> {
+        Ok(crate::fs::statfs::FsStats::simple(
+            crate::fs::statfs::TMPFS_MAGIC,
+        ))
+    }
+
     fn node_type(&self) -> NodeType {
         NodeType::Directory
     }
@@ -528,6 +549,13 @@ impl DevRoot {
 }
 
 impl VfsNode for DevRoot {
+    /// /dev is devtmpfs on Linux, which reports itself as tmpfs.
+    fn statfs(&self) -> Result<crate::fs::statfs::FsStats, crate::error::KernelError> {
+        Ok(crate::fs::statfs::FsStats::simple(
+            crate::fs::statfs::TMPFS_MAGIC,
+        ))
+    }
+
     fn node_type(&self) -> NodeType {
         NodeType::Directory
     }

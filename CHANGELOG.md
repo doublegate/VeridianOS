@@ -48,6 +48,17 @@
 
 ### Added
 
+- statfs and fstatfs (`fs::statfs`; they were ENOSYS). Every filesystem reports Linux's magic
+  number, so programs that tell filesystems apart by `f_type` see what they expect: tmpfs
+  (`/dev/shm`, also memfd, devtmpfs and `/dev/console`), ramfs, procfs, ext4, FAT (`MSDOS`),
+  devpts for a pty slave, pipefs, sockfs and the anonymous-inode filesystem for eventfd,
+  signalfd, timerfd and epoll; BlockFS, which Linux does not have, reports `0x424C4B46`. tmpfs
+  counts pages against its size limit (Linux's `shmem_statfs`), BlockFS and ext4 report their
+  superblock's block and inode counts (ext4 less its reserved blocks, with the UUID as `f_fsid`),
+  FAT its clusters, and the rest no counts, as Linux's `simple_statfs`. `f_frsize` defaults to
+  `f_bsize`, `f_flags` carries `ST_VALID` and `ST_RDONLY` for a read-only ext4 or FAT. The ext4
+  superblock parser now insists on the whole 1 KiB superblock (it indexed past a 256-byte
+  minimum). `musl_runtime_test --only statfs` runs the new runtime checks alone.
 - ADR 0020: Linux capabilities, per thread (effective, permitted, inheritable, bounding and
   ambient sets plus securebits), replacing the `euid == 0` privilege checks in steps. First step:
   `process::linux_caps`, the pure rules for capset, the set*id fix-ups, the capability prctl
@@ -158,8 +169,8 @@
   `tests/compat/expected-<arch>.tsv`; a test expected to pass that does not fails the run.
   The baseline (2026-10-22), on x86_64, AArch64 and RISC-V: LTP 24 of 1,552 pass (another 202 to
   206 pass with LTP's warning that the kernel is older than 4.4), Open POSIX 1,569, 1,565 and
-  1,565 of 1,965, libc-test 523, 525 and 525 of 560; most LTP tests stop in its library because
-  statfs is ENOSYS (`docs/KNOWN-LIMITATIONS.md`, "Conformance suites").
+  1,565 of 1,965, libc-test 523, 525 and 525 of 560; most LTP tests stopped in its library because
+  statfs was ENOSYS (implemented since; `docs/KNOWN-LIMITATIONS.md`, "Conformance suites").
   The gate runs the tests expected to pass (`--rootfs`) and, with `--compat`, the full suites; a
   weekly workflow (`.github/workflows/compat.yml`) runs the x86_64 tests expected to pass (the
   full suites do not fit in a GitHub job: there they took over six hours).

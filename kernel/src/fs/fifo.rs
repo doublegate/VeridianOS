@@ -194,6 +194,11 @@ impl Drop for FifoEnd {
 }
 
 impl VfsNode for FifoEnd {
+    /// The filesystem holding the FIFO's inode.
+    fn statfs(&self) -> Result<crate::fs::statfs::FsStats, KernelError> {
+        self.inode.statfs()
+    }
+
     fn node_type(&self) -> NodeType {
         NodeType::Pipe
     }

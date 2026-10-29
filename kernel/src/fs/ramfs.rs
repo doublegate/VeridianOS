@@ -179,6 +179,13 @@ fn as_ram_arc(node: Arc<dyn VfsNode>) -> Option<Arc<RamNode>> {
 }
 
 impl VfsNode for RamNode {
+    /// Linux's ramfs: `simple_statfs`, no counts.
+    fn statfs(&self) -> Result<crate::fs::statfs::FsStats, crate::error::KernelError> {
+        Ok(crate::fs::statfs::FsStats::simple(
+            crate::fs::statfs::RAMFS_MAGIC,
+        ))
+    }
+
     fn xattrs(&self) -> Result<super::xattr::XattrSet, KernelError> {
         Ok(self.xattrs.read().clone())
     }

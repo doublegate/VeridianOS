@@ -371,6 +371,13 @@ impl TimerFdNode {
 }
 
 impl VfsNode for TimerFdNode {
+    /// An anonymous inode, as on Linux.
+    fn statfs(&self) -> Result<crate::fs::statfs::FsStats, crate::error::KernelError> {
+        Ok(crate::fs::statfs::FsStats::simple(
+            crate::fs::statfs::ANON_INODE_FS_MAGIC,
+        ))
+    }
+
     fn node_type(&self) -> NodeType {
         NodeType::CharDevice
     }

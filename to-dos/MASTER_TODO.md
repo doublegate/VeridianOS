@@ -358,7 +358,7 @@ What does not work yet: `docs/KNOWN-LIMITATIONS.md`.
      - [x] the system name per process: Linux mode (feature note, GNU ABI tag, prctl, the
        `linux-uname` launcher, `veridian-elfctl set linux-uname`) and the configure site file
      - [ ] expected lists from full compat runs on all three architectures
-     - [ ] statfs and fstatfs per filesystem type
+     - [x] statfs and fstatfs per filesystem type (`fs::statfs`)
   3. [ ] The remaining syscall groups: personality (READ_IMPLIES_EXEC with the W^X opt-in only),
      unshare/setns with every namespace type and `/proc/<pid>/ns`, then the process, signal, time
      and file tiers with ABI-review findings N-194 to N-247 (with ETXTBSY: no writing a running

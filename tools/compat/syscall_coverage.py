@@ -129,15 +129,23 @@ def veridian_status() -> tuple[set[str], set[str]]:
     src = (REPO / "kernel/src/syscall/mod.rs").read_text()
     body = src[src.index("fn handle_syscall(") :]
     body = body[: body.index("\n}\n")]
-    stub_variants = set()
-    for pats, _ in re.findall(
-        r"((?:Syscall::\w+\s*\|\s*)*Syscall::\w+)\s*=>\s*"
-        r"(Err\(SyscallError::(?:NotImplemented|OutOfMemory)\)|Ok\(0\)),",
+    stubs = stub_variants(body)
+    stubbed = {n for n in names if camel(n) in stubs}
+    return names - stubbed, stubbed
+
+
+def stub_variants(body: str) -> set[str]:
+    """The `Syscall` variants of the match arms in `body` that answer with
+    a constant, written either as `=> value,` or, as rustfmt wraps a long
+    pattern list, `=> { value }`."""
+    variants = set()
+    for pats, _, _ in re.findall(
+        r"((?:Syscall::\w+\s*\|\s*)*Syscall::\w+)\s*=>\s*(\{\s*)?"
+        r"(Err\(SyscallError::(?:NotImplemented|OutOfMemory)\)|Ok\(0\))(?(2)\s*\}|,)",
         body,
     ):
-        stub_variants |= set(re.findall(r"Syscall::(\w+)", pats))
-    stubbed = {n for n in names if camel(n) in stub_variants}
-    return names - stubbed, stubbed
+        variants |= set(re.findall(r"Syscall::(\w+)", pats))
+    return variants
 
 
 RELEASE = "v7.2"

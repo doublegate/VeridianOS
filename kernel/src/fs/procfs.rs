@@ -55,6 +55,13 @@ impl ProcNode {
 }
 
 impl VfsNode for ProcNode {
+    /// procfs: `simple_statfs`, no counts.
+    fn statfs(&self) -> Result<crate::fs::statfs::FsStats, crate::error::KernelError> {
+        Ok(crate::fs::statfs::FsStats::simple(
+            crate::fs::statfs::PROC_SUPER_MAGIC,
+        ))
+    }
+
     fn node_type(&self) -> NodeType {
         match &self.node_type {
             ProcNodeType::Root | ProcNodeType::ProcessDir(_) | ProcNodeType::SubDir(_) => {

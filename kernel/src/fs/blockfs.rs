@@ -559,6 +559,21 @@ impl BlockFsNode {
 }
 
 impl VfsNode for BlockFsNode {
+    /// The superblock's counts, in BlockFS's 4 KiB blocks. Nothing is
+    /// reserved for root, so every free block is available.
+    fn statfs(&self) -> Result<super::statfs::FsStats, KernelError> {
+        let fs = self.fs.read();
+        let sb = &fs.superblock;
+        let mut st = super::statfs::FsStats::simple(super::statfs::BLOCKFS_MAGIC);
+        st.block_size = BLOCK_SIZE as u64;
+        st.blocks = sb.block_count as u64;
+        st.blocks_free = sb.free_blocks as u64;
+        st.blocks_avail = sb.free_blocks as u64;
+        st.files = sb.inode_count as u64;
+        st.files_free = sb.free_inodes as u64;
+        Ok(st)
+    }
+
     fn xattrs(&self) -> Result<super::xattr::XattrSet, KernelError> {
         self.fs.read().inode_xattrs(self.inode_num)
     }
@@ -3054,6 +3069,26 @@ pub fn attach_virtio_backend(fs: &BlockFs, load_from_disk: bool) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// statfs reports the superblock's counts, and they move as a file
+    /// takes an inode and blocks.
+    #[test]
+    fn statfs_follows_the_superblock() {
+        let fs = BlockFs::format(1000, 100).unwrap();
+        let root = fs.root();
+        let before = root.statfs().unwrap();
+        assert_eq!(before.fs_type, crate::fs::statfs::BLOCKFS_MAGIC);
+        assert_eq!(
+            (before.block_size, before.blocks, before.files),
+            (4096, 1000, 100)
+        );
+        assert_eq!(before.blocks_avail, before.blocks_free);
+        let f = root.create("f", Permissions::default()).unwrap();
+        f.write(0, &[1u8; 2 * BLOCK_SIZE]).unwrap();
+        let after = f.statfs().unwrap();
+        assert_eq!(after.files_free, before.files_free - 1);
+        assert!(after.blocks_free <= before.blocks_free - 2);
+    }
 
     /// mknod on BlockFS: each special type reads back as itself (the type
     /// bits were tested as bits, so a block device and a socket came back
