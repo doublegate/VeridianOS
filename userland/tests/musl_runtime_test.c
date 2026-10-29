@@ -2061,18 +2061,29 @@ static void test_setuid_exec(const char *self)
     /* So does punching a hole through a shared mapping (MADV_REMOVE ends in
      * file_modified, as fallocate does); a store through the mapping does
      * not (Linux's page_mkwrite only updates the times). The file also
-     * carries a capability attribute, which the hole must remove too. */
+     * carries a capability attribute, which the hole must remove too. It
+     * is a tmpfs file, whose pages the mapping shares, so the hole reaches
+     * the file itself (a /tmp mapping is a private copy until the page
+     * cache, docs/KNOWN-LIMITATIONS.md). */
+    unlink(copy);
+    const char *hole = "/dev/shm/suid_hole";
     f = 0;
-    if (chmod(copy, 04755) != 0)
+    char page[4096];
+    memset(page, 0x5a, sizeof(page));
+    int hfd = open(hole, O_RDWR | O_CREAT | O_TRUNC, 0755);
+    if (hfd < 0 || write(hfd, page, sizeof(page)) != (ssize_t)sizeof(page) ||
+        fchown(hfd, 1000, (gid_t)-1) != 0 || fchmod(hfd, 04755) != 0)
         f |= 1;
+    if (hfd >= 0)
+        close(hfd);
     uint32_t fcap[5] = {0x02000001, 1u << 10, 0, 0, 0};
-    if (setxattr(copy, "security.capability", fcap, sizeof(fcap), 0) != 0)
+    if (setxattr(hole, "security.capability", fcap, sizeof(fcap), 0) != 0)
         f |= 128;
     pid = fork();
     if (pid == 0) {
         if (setresuid(1000, 1000, 1000) != 0)
             _exit(1);
-        int fd = open(copy, O_RDWR);
+        int fd = open(hole, O_RDWR);
         char *m = fd >= 0 ? mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0)
                           : MAP_FAILED;
         if (m == MAP_FAILED)
@@ -2088,14 +2099,20 @@ static void test_setuid_exec(const char *self)
     waitpid(pid, &st, 0);
     if (!WIFEXITED(st) || WEXITSTATUS(st) != 0)
         f |= 2 << (WIFEXITED(st) ? WEXITSTATUS(st) : 0);
-    if (stat(copy, &sb) != 0 || (sb.st_mode & 07777) != 0755)
+    if (stat(hole, &sb) != 0 || (sb.st_mode & 07777) != 0755)
         f |= 64;
     errno = 0;
-    if (getxattr(copy, "security.capability", NULL, 0) != -1 || errno != ENODATA)
+    if (getxattr(hole, "security.capability", NULL, 0) != -1 || errno != ENODATA)
         f |= 256;
+    char first = 1;
+    hfd = open(hole, O_RDONLY);
+    if (hfd < 0 || pread(hfd, &first, 1, 0) != 1 || first != 0)
+        f |= 512;
+    if (hfd >= 0)
+        close(hfd);
     snprintf(why, sizeof(why), "fail=%d mode=%o", f, (unsigned)(sb.st_mode & 07777));
     report("musl_setuid_cleared_by_hole", f == 0, why);
-    unlink(copy);
+    unlink(hole);
 }
 
 /* raise() and abort() go through tkill (N-103): the child must die by the
