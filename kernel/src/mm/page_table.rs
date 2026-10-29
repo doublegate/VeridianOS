@@ -885,7 +885,7 @@ pub unsafe fn translate_lockless(
 ) -> Result<(FrameNumber, PageFlags), KernelError> {
     // SAFETY: the caller's.
     match unsafe { walk_lockless(root, levels, page) } {
-        Ok(found) => Ok(found),
+        Ok(leaf) => Ok((leaf.frame, leaf.flags)),
         Err(Hole::NotCanonical) => Err(KernelError::InvalidAddress {
             addr: page.as_u64() as usize,
         }),
@@ -907,7 +907,21 @@ pub enum Hole {
     Unmapped(u64),
 }
 
-/// [`translate_lockless`], telling a missing mapping's extent apart.
+/// What [`walk_lockless`] found mapping a page.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Leaf {
+    /// The 4 KiB frame holding the page, also inside a larger leaf.
+    pub frame: FrameNumber,
+    /// The leaf's flags; HUGE for a 2 MiB or 1 GiB leaf.
+    pub flags: PageFlags,
+    /// The bytes the leaf maps (4 KiB, 2 MiB or 1 GiB), from the level
+    /// the walk stopped at: bit 7 of a last-level entry is x86_64's PAT
+    /// bit, not HUGE, so the flags cannot tell (PR #33 review).
+    pub span: u64,
+}
+
+/// [`translate_lockless`], telling a missing mapping's extent apart and
+/// reporting the size of the leaf.
 ///
 /// # Safety
 ///
@@ -916,7 +930,7 @@ pub unsafe fn walk_lockless(
     root: *const PageTable,
     levels: u8,
     page: VirtualAddress,
-) -> Result<(FrameNumber, PageFlags), Hole> {
+) -> Result<Leaf, Hole> {
     const L1_SPAN: u64 = 1 << 12;
     const L2_SPAN: u64 = 1 << 21;
     const L3_SPAN: u64 = 1 << 30;
@@ -954,10 +968,11 @@ pub unsafe fn walk_lockless(
     // A 1 GiB leaf (the kernel's physical map): the 4 KiB frame in it.
     if l3_entry.is_huge() {
         let base = l3_entry.frame().ok_or(Hole::Unmapped(L3_SPAN))?;
-        return Ok((
-            FrameNumber::new(base.as_u64() + (va >> 12 & 0x3FFFF)),
-            l3_entry.flags() | PageFlags::HUGE,
-        ));
+        return Ok(Leaf {
+            frame: FrameNumber::new(base.as_u64() + (va >> 12 & 0x3FFFF)),
+            flags: l3_entry.flags() | PageFlags::HUGE,
+            span: L3_SPAN,
+        });
     }
 
     // SAFETY: as above, from a present L3 entry.
@@ -973,11 +988,12 @@ pub unsafe fn walk_lockless(
     // A 2 MiB leaf: the 4 KiB frame within it (flags keep HUGE).
     if l2_entry.is_huge() {
         let base = l2_entry.frame().ok_or(Hole::Unmapped(L2_SPAN))?;
-        return Ok((
-            FrameNumber::new(base.as_u64() + (va >> 12 & 0x1FF)),
+        return Ok(Leaf {
+            frame: FrameNumber::new(base.as_u64() + (va >> 12 & 0x1FF)),
             // RISC-V leaves have no HUGE bit: the level is the size.
-            l2_entry.flags() | PageFlags::HUGE,
-        ));
+            flags: l2_entry.flags() | PageFlags::HUGE,
+            span: L2_SPAN,
+        });
     }
 
     // SAFETY: as above, from a present L2 entry.
@@ -988,7 +1004,11 @@ pub unsafe fn walk_lockless(
         )
     };
     let frame = entry.frame().ok_or(Hole::Unmapped(L1_SPAN))?;
-    Ok((frame, entry.flags()))
+    Ok(Leaf {
+        frame,
+        flags: entry.flags(),
+        span: L1_SPAN,
+    })
 }
 
 /// Extract a physical address from a present page table entry.
@@ -1178,6 +1198,36 @@ mod tests {
         // SAFETY: as above.
         let three = unsafe { walk_lockless(root3, 3, VirtualAddress(0x4000_0000)) };
         assert_eq!(three.unwrap_err(), Hole::Unmapped(1 << 30));
+    }
+
+    /// The walk reports the size of the leaf it stopped at, from the level
+    /// rather than bit 7: in a last-level entry that is x86_64's PAT bit,
+    /// HUGE only above it, so a 4 KiB page with PAT set is still 4 KiB
+    /// (PR #33 review).
+    #[test]
+    fn lockless_walk_reports_the_span_of_its_leaf() {
+        let mut tables = HeapTables(Vec::new());
+        let root = tables.table();
+        // SAFETY: `root` is a live, zeroed table owned by `tables`.
+        let mut m = unsafe { PageMapper::with_levels(root, 4) };
+        let small = VirtualAddress(0x7FFF_0000_0000);
+        m.map_page(
+            small,
+            FrameNumber::new(0x42),
+            USER | PageFlags::HUGE,
+            &mut tables,
+        )
+        .unwrap();
+        // SAFETY (both walks): `root` and the tables under it are live in
+        // `tables`.
+        let leaf = unsafe { walk_lockless(root, 4, small) }.unwrap();
+        assert_eq!((leaf.frame, leaf.span), (FrameNumber::new(0x42), 1 << 12));
+        let huge = VirtualAddress(0x7FFF_4000_0000);
+        m.map_huge_2m(huge, FrameNumber::new(0x200), USER, &mut tables)
+            .unwrap();
+        let leaf =
+            unsafe { walk_lockless(root, 4, VirtualAddress(huge.as_u64() + 0x3000)) }.unwrap();
+        assert_eq!((leaf.frame, leaf.span), (FrameNumber::new(0x203), 1 << 21));
     }
 
     /// The same page under four levels goes through root entry 0, and
