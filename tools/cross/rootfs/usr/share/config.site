@@ -1,0 +1,13 @@
+# VeridianOS site defaults for autoconf configure scripts (ADR 0021).
+#
+# uname -s says "VeridianOS", which config.guess does not know ("unable to
+# guess system type"). configure loads this file before it guesses the
+# build system and uses build_alias when it is set, so this names the
+# build system instead: VeridianOS runs Linux programs built against musl.
+# --build, or a CONFIG_SITE of your own, still takes precedence.
+#
+# The same file is installed as $prefix/share/config.site for the prefixes
+# configure looks in by default (/usr/local without --prefix, /usr).
+if test -z "$build_alias"; then
+    build_alias="$(uname -m)-unknown-linux-musl"
+fi

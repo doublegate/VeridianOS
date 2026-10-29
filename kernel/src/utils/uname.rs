@@ -4,6 +4,28 @@
 
 /// The system name VeridianOS programs see.
 pub const SYSNAME: &str = "VeridianOS";
+/// The system name a process in Linux uname mode sees: build scripts and
+/// runtimes that test for Linux (autoconf's `uname -s`, Python's
+/// `platform.system()`) need it.
+pub const LINUX_SYSNAME: &str = "Linux";
+
+/// The system name for a process in Linux uname mode (`linux`) or not.
+pub const fn sysname(linux: bool) -> &'static str {
+    if linux {
+        LINUX_SYSNAME
+    } else {
+        SYSNAME
+    }
+}
+
+/// The system name the calling process sees; [`SYSNAME`] outside any
+/// process.
+pub fn current_sysname() -> &'static str {
+    sysname(
+        crate::process::current_process()
+            .is_some_and(|p| p.uname_linux.load(core::sync::atomic::Ordering::Acquire)),
+    )
+}
 /// The host name (until sethostname and UTS namespaces exist).
 pub const NODENAME: &str = "veridian";
 /// The release: the Linux version whose sources are the kernel's
@@ -87,7 +109,14 @@ mod tests {
     #[test]
     fn every_field_fits_utsname() {
         // utsname fields are 65 bytes including the NUL.
-        for s in [SYSNAME, "Linux", NODENAME, RELEASE, VERSION, machine()] {
+        for s in [
+            SYSNAME,
+            LINUX_SYSNAME,
+            NODENAME,
+            RELEASE,
+            VERSION,
+            machine(),
+        ] {
             assert!(s.len() < 65, "{s}");
         }
     }
@@ -103,6 +132,15 @@ mod tests {
         let all = command_output(&["-a"]);
         assert!(all.starts_with("VeridianOS veridian 7.3.0-veridian #1 SMP VeridianOS "));
         assert!(all.ends_with(machine()));
+    }
+
+    #[test]
+    fn linux_mode_changes_only_the_system_name() {
+        assert_eq!(sysname(false), "VeridianOS");
+        assert_eq!(sysname(true), "Linux");
+        // Outside a process (the kernel, host tests): VeridianOS.
+        assert_eq!(current_sysname(), "VeridianOS");
+        assert!(proc_version(sysname(true)).starts_with("Linux version 7.3.0-veridian ("));
     }
 
     #[test]

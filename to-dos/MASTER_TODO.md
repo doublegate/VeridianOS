@@ -354,6 +354,11 @@ What does not work yet: `docs/KNOWN-LIMITATIONS.md`.
   2. [ ] First: uname's release `7.3.0-veridian`, the version field and procfs (2026-10-27), then
      the system name per process (ADR 0021); then statfs and fstatfs per filesystem type: most LTP tests stop on their ENOSYS in setup, so
      this comes first among the remaining groups (it makes the later ones measurable).
+     - [x] the release, the version field, `/proc/version` and `/proc/sys/kernel` (ADR 0021)
+     - [x] the system name per process: Linux mode (feature note, GNU ABI tag, prctl, the
+       `linux-uname` launcher, `veridian-elfctl set linux-uname`) and the configure site file
+     - [ ] expected lists from full compat runs on all three architectures
+     - [ ] statfs and fstatfs per filesystem type
   3. [ ] The remaining syscall groups: personality (READ_IMPLIES_EXEC with the W^X opt-in only),
      unshare/setns with every namespace type and `/proc/<pid>/ns`, then the process, signal, time
      and file tiers with ABI-review findings N-194 to N-247 (with ETXTBSY: no writing a running
@@ -441,7 +446,10 @@ What does not work yet: `docs/KNOWN-LIMITATIONS.md`.
     (N-130), stable getdents cookies (N-124), atomic O_APPEND (N-126).
   - [ ] **v0.29 memory architecture** (also N-267 demand-paging mapping overlap, N-268 empty
     page tables kept): lazy anonymous memory, range-indexed mappings, per-frame
-    refcount array, ranged per-mm TLB flushes, per-VMA locks (N-143).
+    refcount array, ranged per-mm TLB flushes, per-VMA locks (N-143); page tables without
+    exclusive references to published tables (entries as `AtomicU64` behind `&PageTable`, no
+    `IndexMut`), so the mapper's writes and the lock-free walk (`translate_lockless`) satisfy
+    Rust's aliasing rules and not only the atomicity of each access (PR #33 review).
   - [ ] **v0.30 credentials remainder:** filesystem ids, Linux capabilities, setuid exec
     (N-131; the id triples and groups move to v0.27 as N-248).
 - [ ] **C6 (staged from v0.28):** move drivers, protocols and codecs out of the kernel.

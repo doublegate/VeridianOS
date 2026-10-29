@@ -658,6 +658,12 @@ impl Shell {
         env.insert(String::from("TERM"), String::from("veridian"));
         env.insert(String::from("USER"), String::from("root"));
         env.insert(String::from("PWD"), String::from("/"));
+        // Names the build system for autoconf configure scripts started
+        // from here, whatever their --prefix (ADR 0021), as init does.
+        env.insert(
+            String::from("CONFIG_SITE"),
+            String::from("/usr/share/config.site"),
+        );
     }
 
     fn register_builtins(&self) {

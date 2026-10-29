@@ -8,7 +8,8 @@
 # /usr/share (keymaps, ALSA configuration, fonts and fontconfig rules, D-Bus
 # configuration and services, libinput quirks, icons, sounds, Plasma
 # packages, translations) and the configuration under /etc, with the root
-# filesystem's own files (tools/cross/rootfs: accounts, PAM services).
+# filesystem's own files (tools/cross/rootfs: accounts, PAM services,
+# /etc/profile and the configure site file).
 # Build-only files stay behind: headers, pkg-config and CMake files,
 # development links, documentation, and scripts that only serve builds.
 # No program may depend on a build-host path. The staging tree becomes a
@@ -174,6 +175,9 @@ copy_data() {
     rsync -a "${SYSROOT}/etc/" "${STAGING}/etc/"
     # The root filesystem's own: accounts and PAM services.
     rsync -a "${ROOTFS_FILES}/etc/" "${STAGING}/etc/"
+    # Linux uname mode (ADR 0021): the launcher, the configure site file
+    # and /etc/profile.
+    "${PROJECT_ROOT}/scripts/build-uname-programs.sh" "${VERIDIAN_CC}" "${STAGING}"
     # The session configuration (userland/integration).
     install -Dm644 "${PROJECT_ROOT}/userland/integration/default-session.conf" \
         "${STAGING}/etc/veridian/session.conf"
@@ -256,6 +260,7 @@ verify() {
     for item in "${REQUIRED_PROGRAMS[@]}" lib/ld-musl-x86_64.so.1 \
                 etc/veridian/session.conf etc/fonts/fonts.conf etc/ssl/openssl.cnf \
                 etc/passwd etc/group etc/shadow etc/pam.d/kde etc/pam.d/polkit-1 etc/pam.d/other \
+                etc/profile usr/share/config.site bin/linux-uname \
                 usr/lib/security/pam_veridian.so usr/lib/security/pam_deny.so \
                 usr/share/X11/xkb/rules/evdev usr/share/alsa/alsa.conf \
                 usr/share/dbus-1/session.conf usr/share/libinput \

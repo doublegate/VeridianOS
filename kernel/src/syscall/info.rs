@@ -65,7 +65,8 @@ fn utsname_bytes(sysname: &str) -> [u8; UTSNAME_SIZE] {
 pub fn sys_uname(buf: usize) -> SyscallResult {
     validate_user_buffer(buf, UTSNAME_SIZE)?;
     // Built in a kernel buffer and copied out once (N-43).
-    let out = utsname_bytes(crate::utils::uname::SYSNAME);
+    // The system name is the caller's: "Linux" in Linux uname mode.
+    let out = utsname_bytes(crate::utils::uname::current_sysname());
     super::userspace::write_user_bytes(buf, &out)?;
     Ok(0)
 }

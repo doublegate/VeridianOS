@@ -2269,6 +2269,92 @@ static void test_wx_note_tool(void)
     report("musl_wx_note_tool", f == 0, why);
 }
 
+/* Linux uname mode (ADR 0021; <veridian/linux-uname.h>). */
+#define PR_VERIDIAN_UNAME 0x56455249
+#define PR_VERIDIAN_UNAME_GET 0
+#define PR_VERIDIAN_UNAME_SET 1
+
+/* uname reports "Linux" in Linux mode and "VeridianOS" otherwise; the mode
+ * is entered at exec by the note (from the header or veridian-elfctl) or a
+ * GNU ABI tag naming Linux, and with the prctl, inherited across fork and
+ * exec, and shown by /proc/sys/kernel/ostype and /proc/version too. The
+ * launcher runs a command in it, and configure finds the site file. */
+static void test_uname_linux_mode(void)
+{
+    static const struct {
+        const char *path, *arg, *want;
+    } cases[] = {
+        {"/bin/uname_plain_test", NULL, "VeridianOS"},
+        {"/bin/uname_linux_test", NULL, "Linux"},
+        {"/bin/uname_gnu_tag_test", NULL, "Linux"},
+        {"/bin/uname_patched_test", NULL, "Linux"},
+        {"/bin/linux-uname", "/bin/uname_plain_test", "Linux"},
+        {"/bin/linux-uname", NULL, "native"},
+    };
+    static char out[128], why[300];
+    int f = 0;
+    why[0] = 0;
+    if (prctl(PR_VERIDIAN_UNAME, PR_VERIDIAN_UNAME_GET, 0, 0, 0) != 0)
+        f |= 1;
+    for (unsigned i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        int st = run_capture(cases[i].path, cases[i].arg, out, sizeof(out));
+        if (st != 0 || strcmp(out, cases[i].want) != 0) {
+            f |= 2;
+            snprintf(why, sizeof(why), "%s %s: status=%#x output: %s", cases[i].path,
+                     cases[i].arg ? cases[i].arg : "", st, out);
+        }
+    }
+    /* The prctl in a child, so this process keeps its mode. */
+    pid_t pid = fork();
+    if (pid == 0) {
+        int c = 0;
+        struct utsname u;
+        char line[200] = "";
+        if (prctl(PR_VERIDIAN_UNAME, PR_VERIDIAN_UNAME_SET, 1, 0, 0) != 0
+            || prctl(PR_VERIDIAN_UNAME, PR_VERIDIAN_UNAME_GET, 0, 0, 0) != 1)
+            c |= 1;
+        if (uname(&u) != 0 || strcmp(u.sysname, "Linux") != 0
+            || strcmp(u.release, "7.3.0-veridian") != 0)
+            c |= 2;
+        if (read_line("/proc/sys/kernel/ostype", line, sizeof(line)) != 0
+            || strcmp(line, "Linux") != 0)
+            c |= 4;
+        if (read_line("/proc/version", line, sizeof(line)) != 0
+            || strncmp(line, "Linux version 7.3.0-veridian (", 30) != 0)
+            c |= 4;
+        /* Inherited by what this child runs, and by forks of it. */
+        if (run_capture("/bin/uname_plain_test", NULL, out, sizeof(out)) != 0
+            || strcmp(out, "Linux") != 0)
+            c |= 8;
+        if (run_capture("/bin/linux-uname", NULL, out, sizeof(out)) != 0
+            || strcmp(out, "linux") != 0)
+            c |= 8;
+        /* Bad arguments are EINVAL; back to native. */
+        if (prctl(PR_VERIDIAN_UNAME, PR_VERIDIAN_UNAME_SET, 2, 0, 0) != -1 || errno != EINVAL)
+            c |= 16;
+        if (prctl(PR_VERIDIAN_UNAME, 2, 0, 0, 0) != -1 || errno != EINVAL)
+            c |= 16;
+        if (prctl(PR_VERIDIAN_UNAME, PR_VERIDIAN_UNAME_SET, 0, 0, 0) != 0 || uname(&u) != 0
+            || strcmp(u.sysname, "VeridianOS") != 0)
+            c |= 32;
+        _exit(c);
+    }
+    int st = -1;
+    if (pid < 0 || waitpid(pid, &st, 0) != pid || !WIFEXITED(st) || WEXITSTATUS(st) != 0) {
+        f |= 4;
+        snprintf(why + strlen(why), sizeof(why) - strlen(why), " child=%#x", st);
+    }
+    /* init and /etc/profile point configure at the site file. */
+    const char *site = getenv("CONFIG_SITE");
+    if (!site || strcmp(site, "/usr/share/config.site") != 0 || access(site, R_OK) != 0
+        || access("/usr/local/share/config.site", R_OK) != 0 || access("/etc/profile", R_OK) != 0)
+        f |= 8;
+    char tail[40];
+    snprintf(tail, sizeof(tail), " fail=%#x", f);
+    strncat(why, tail, sizeof(why) - strlen(why) - 1);
+    report("musl_uname_linux_mode", f == 0, why);
+}
+
 /* PR_SET_MDWE as Linux: argument checks, one way (EPERM), no RWX and no
  * exec gain, kept across fork and exec -- where it overrides the W^X
  * note -- unless set with PR_MDWE_NO_INHERIT. In children: it is
@@ -5226,6 +5312,7 @@ int main(int argc, char **argv)
     test_relative_entry_paths();
     test_setuid_exec("/bin/musl_runtime_test");
     test_uname_identity();
+    test_uname_linux_mode();
     test_clocks_and_usage();
     test_process_clock_monotonic();
     test_many_threads();

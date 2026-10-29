@@ -8,6 +8,18 @@
   (`#1 SMP VeridianOS 0.27.0`). `/proc/version` follows Linux's layout with the same strings
   (it said `VeridianOS version 0.5.0`), `/proc/sys/kernel/{ostype,osrelease,version}` exist, and
   the kernel shell's `uname` takes its fields from the same place (its release said `0.7.1`).
+- uname's system name is per process (ADR 0021): `VeridianOS` by default, `Linux` in Linux
+  mode, which build scripts and runtimes that branch on the name at run time need. A program
+  enters it at exec through the VeridianOS feature note (`<veridian/linux-uname.h>`, or
+  `veridian-elfctl set linux-uname`, which now also shows and clears the bit in every note) or a
+  GNU ABI tag naming Linux; `prctl(PR_VERIDIAN_UNAME)` reads and sets it, the `linux-uname`
+  launcher runs a command in it, and fork and exec keep it. `/proc/version` and
+  `/proc/sys/kernel/ostype` give the caller's name. The bits of every feature note are now
+  combined, so a program can carry both the W^X and the uname note; only the first note counted.
+- autoconf configure scripts find the build system on VeridianOS: `/usr/share/config.site` (and a
+  copy in `/usr/local/share`) sets `build_alias` to `<machine>-unknown-linux-musl`, and init, the
+  kernel shell and `/etc/profile` set `CONFIG_SITE` to it. `config.guess` used to stop with
+  "unable to guess system type".
 
 - `docs/PORTING-GUIDE.md` describes the privilege model as it is: Unix credentials and Linux
   capabilities for POSIX programs (ADR 0020) beside the object capabilities of the native calls.

@@ -9,7 +9,8 @@
 #   - /sbin/init (userland/init/init.c);
 #   - the runtime tests: audit_runtime_test, musl_runtime_test with
 #     wx_needed_test and its veridian-elfctl copies
-#     (scripts/build-wx-note-tests.sh), and the dynamically linked
+#     (scripts/build-wx-note-tests.sh), the uname mode programs
+#     (scripts/build-uname-programs.sh), and the dynamically linked
 #     musl_dynamic_test with its
 #     library, musl's loader and the shared C++ runtime;
 #   - the BusyBox self-test (userland/tests/busybox_test.sh) and its data.
@@ -119,6 +120,9 @@ build_programs() {
     "${CC}" -static-pie -O2 -Wall -Wextra -idirafter "${ROOT}/userland/libc/include" \
         -o "${BUILD_DIR}/bin/wx_needed_test" "${TESTS}/wx_needed_test.c"
     "${ROOT}/scripts/build-wx-note-tests.sh" "${CC}" "${BUILD_DIR}/bin"
+    # Linux uname mode (ADR 0021): the launcher, the configure site file,
+    # /etc/profile, and the programs that test the mode.
+    "${ROOT}/scripts/build-uname-programs.sh" "${CC}" "${BUILD_DIR}" --tests
     # Dynamic linking: musl's loader (a copy of libc.so, which is both; a
     # link would be resolved on the build host), the shared C++ runtime and
     # a C++ program that dlopens a C++ library.

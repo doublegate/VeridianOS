@@ -562,74 +562,126 @@ pub fn wants_bti(binary: &ElfBinary, data: &[u8]) -> Result<bool, ElfError> {
     note_wants_bti(data.get(start..end).ok_or(ElfError::InvalidProgramHeader)?)
 }
 
-/// The owner of VeridianOS notes, and the feature-control note's type and
-/// its W^X opt-in bit (`<veridian/wxneeded.h>`).
+/// The owner of VeridianOS notes, the feature-control note's type, and its
+/// bits: the W^X opt-in (`<veridian/wxneeded.h>`) and Linux uname mode
+/// (`<veridian/linux-uname.h>`, ADR 0021).
 const VERIDIAN_NOTE_NAME: &[u8] = b"VeridianOS\0";
 const NT_VERIDIAN_FEATURE_CTL: u32 = 1;
 const VERIDIAN_FCTL_WXNEEDED: u32 = 1;
+const VERIDIAN_FCTL_LINUX_UNAME: u32 = 2;
+/// The GNU ABI tag (`.note.ABI-tag`, glibc programs): its first word is
+/// the OS, 0 for Linux.
+const GNU_NOTE_NAME: &[u8] = b"GNU\0";
+const NT_GNU_ABI_TAG: u32 = 1;
+const ELF_NOTE_OS_LINUX: u32 = 0;
 
-/// Whether the notes of one PT_NOTE segment (`note`, aligned to `align`
-/// bytes, 4 or 8) hold a VeridianOS feature-control note with the W^X
-/// opt-in. A malformed segment counts as no opt-in: the safe default, and
-/// as Linux, which ignores what it does not read, exec does not fail.
-pub fn note_wants_wx(note: &[u8], align: usize) -> bool {
+/// What the notes of an image ask for.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct NoteFeatures {
+    /// The bits of every VeridianOS feature-control note, combined.
+    pub bits: u32,
+    /// A GNU ABI tag naming Linux.
+    pub gnu_linux: bool,
+}
+
+impl NoteFeatures {
+    fn union(self, other: Self) -> Self {
+        Self {
+            bits: self.bits | other.bits,
+            gnu_linux: self.gnu_linux || other.gnu_linux,
+        }
+    }
+}
+
+/// The features the notes of one PT_NOTE segment (`note`, aligned to
+/// `align` bytes, 4 or 8) ask for. Reading stops at a malformed note, and
+/// what was read before it counts: as Linux, which ignores what it does not
+/// read, exec does not fail, and nothing is granted that no note asked for.
+pub fn note_features(note: &[u8], align: usize) -> NoteFeatures {
     let word = |at: usize| -> Option<u32> {
         let w = note.get(at..at.checked_add(4)?)?;
         Some(u32::from_le_bytes(<[u8; 4]>::try_from(w).ok()?))
     };
+    let mut found = NoteFeatures::default();
     let mut at = 0usize;
     while at < note.len() {
         let (Some(namesz), Some(descsz), Some(kind)) = (word(at), word(at + 4), word(at + 8))
         else {
-            return false;
+            break;
         };
         let name_at = at + 12;
         let Some(desc_at) = name_at
             .checked_add(namesz as usize)
             .and_then(|e| e.checked_next_multiple_of(align))
         else {
-            return false;
+            break;
         };
         let Some(next) = desc_at
             .checked_add(descsz as usize)
             .and_then(|e| e.checked_next_multiple_of(align))
         else {
-            return false;
+            break;
         };
         let (Some(name), Some(desc)) = (
             note.get(name_at..name_at + namesz as usize),
             note.get(desc_at..desc_at + descsz as usize),
         ) else {
-            return false;
+            break;
         };
+        let first = desc
+            .get(..4)
+            .map(|w| u32::from_le_bytes([w[0], w[1], w[2], w[3]]));
         if name == VERIDIAN_NOTE_NAME && kind == NT_VERIDIAN_FEATURE_CTL && desc.len() == 4 {
-            let bits = u32::from_le_bytes([desc[0], desc[1], desc[2], desc[3]]);
-            return bits & VERIDIAN_FCTL_WXNEEDED != 0;
+            found.bits |= first.unwrap_or(0);
+        } else if name == GNU_NOTE_NAME
+            && kind == NT_GNU_ABI_TAG
+            && desc.len() >= 16
+            && first == Some(ELF_NOTE_OS_LINUX)
+        {
+            found.gnu_linux = true;
         }
         at = next;
     }
-    false
+    found
+}
+
+/// Whether the notes of one PT_NOTE segment opt in to writable and
+/// executable memory (see [`note_features`]).
+pub fn note_wants_wx(note: &[u8], align: usize) -> bool {
+    note_features(note, align).bits & VERIDIAN_FCTL_WXNEEDED != 0
+}
+
+/// The features the notes of `binary` (whose file is `data`) ask for: its
+/// PT_NOTE segments, combined.
+pub fn image_features(binary: &ElfBinary, data: &[u8]) -> NoteFeatures {
+    binary
+        .segments
+        .iter()
+        .filter(|s| s.segment_type == SegmentType::Note)
+        .filter_map(|s| {
+            let start = usize::try_from(s.file_offset).ok()?;
+            let len = usize::try_from(s.file_size).ok()?;
+            let align = if s.alignment == 8 { 8 } else { 4 };
+            Some(note_features(
+                data.get(start..start.checked_add(len)?)?,
+                align,
+            ))
+        })
+        .fold(NoteFeatures::default(), NoteFeatures::union)
 }
 
 /// Whether `binary` (whose file is `data`) opts in to writable and
 /// executable memory: a VeridianOS feature-control note in any PT_NOTE.
 pub fn wants_wx(binary: &ElfBinary, data: &[u8]) -> bool {
-    binary
-        .segments
-        .iter()
-        .filter(|s| s.segment_type == SegmentType::Note)
-        .any(|s| {
-            let (Ok(start), Ok(len)) =
-                (usize::try_from(s.file_offset), usize::try_from(s.file_size))
-            else {
-                return false;
-            };
-            let align = if s.alignment == 8 { 8 } else { 4 };
-            start
-                .checked_add(len)
-                .and_then(|end| data.get(start..end))
-                .is_some_and(|n| note_wants_wx(n, align))
-        })
+    image_features(binary, data).bits & VERIDIAN_FCTL_WXNEEDED != 0
+}
+
+/// Whether `binary` (whose file is `data`) runs in Linux uname mode: a
+/// feature-control note asking for it, or a GNU ABI tag naming Linux, as
+/// glibc programs carry (ADR 0021).
+pub fn wants_linux_uname(binary: &ElfBinary, data: &[u8]) -> bool {
+    let n = image_features(binary, data);
+    n.bits & VERIDIAN_FCTL_LINUX_UNAME != 0 || n.gnu_linux
 }
 
 #[cfg(test)]
@@ -734,6 +786,67 @@ mod tests {
         assert!(wants_wx(&b, &file));
         b.segments[1].file_size = 0x1000;
         assert!(!wants_wx(&b, &file), "a note past the end of the file");
+    }
+
+    /// One note: namesz, descsz, type, name padded, desc padded.
+    fn one_note(name: &[u8], kind: u32, desc: &[u8], align: usize) -> Vec<u8> {
+        let mut n = Vec::new();
+        n.extend_from_slice(&(name.len() as u32).to_le_bytes());
+        n.extend_from_slice(&(desc.len() as u32).to_le_bytes());
+        n.extend_from_slice(&kind.to_le_bytes());
+        n.extend_from_slice(name);
+        n.resize(n.len().next_multiple_of(align), 0);
+        n.extend_from_slice(desc);
+        n.resize(n.len().next_multiple_of(align), 0);
+        n
+    }
+
+    /// Every VeridianOS feature-control note counts: their bits are
+    /// combined, so a program carrying both <veridian/wxneeded.h> and
+    /// <veridian/linux-uname.h> gets both (ADR 0021).
+    #[test]
+    fn feature_notes_are_combined() {
+        let wx = one_note(b"VeridianOS\0", 1, &1u32.to_le_bytes(), 4);
+        let uname = one_note(b"VeridianOS\0", 1, &2u32.to_le_bytes(), 4);
+        let mut both = wx.clone();
+        both.extend_from_slice(&uname);
+        let n = note_features(&both, 4);
+        assert_eq!(n.bits, 3);
+        assert!(!n.gnu_linux);
+        assert!(note_wants_wx(&both, 4));
+        let mut both = uname.clone();
+        both.extend_from_slice(&wx);
+        assert!(note_wants_wx(&both, 4), "the order does not matter");
+        assert_eq!(note_features(&uname, 4).bits, 2);
+        assert!(!note_wants_wx(&uname, 4));
+        // A malformed note after a good one: what was read before counts.
+        let mut bad = uname.clone();
+        bad.extend_from_slice(&[0xff; 6]);
+        assert_eq!(note_features(&bad, 4).bits, 2);
+    }
+
+    /// A GNU ABI tag (NT_GNU_ABI_TAG, "GNU", os word 0) names Linux, as
+    /// glibc programs carry; another os, type or size does not.
+    #[test]
+    fn gnu_abi_tag_names_linux() {
+        let tag = |os: u32, kind: u32, words: usize| {
+            let mut d = os.to_le_bytes().to_vec();
+            for v in [3u32, 2, 0].iter().take(words - 1) {
+                d.extend_from_slice(&v.to_le_bytes());
+            }
+            one_note(b"GNU\0", kind, &d, 4)
+        };
+        assert!(note_features(&tag(0, 1, 4), 4).gnu_linux);
+        assert!(!note_features(&tag(3, 1, 4), 4).gnu_linux, "FreeBSD");
+        assert!(!note_features(&tag(0, 3, 4), 4).gnu_linux, "a build id");
+        assert!(!note_features(&tag(0, 1, 2), 4).gnu_linux, "too short");
+        assert_eq!(note_features(&tag(0, 1, 4), 4).bits, 0);
+        // With the uname note in the same segment.
+        let mut both = tag(0, 1, 4);
+        both.extend_from_slice(&one_note(b"VeridianOS\0", 1, &2u32.to_le_bytes(), 4));
+        let n = note_features(&both, 4);
+        assert!(n.gnu_linux);
+        assert_eq!(n.bits, 2);
     }
 
     #[test]

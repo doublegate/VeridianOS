@@ -1,0 +1,8 @@
+# /etc/profile: login shells (VeridianOS).
+#
+# autoconf configure scripts load $CONFIG_SITE, which names the build
+# system for them (uname -s says VeridianOS, which config.guess does not
+# know; ADR 0021). init sets it for every session too; a value of your own
+# takes precedence.
+: "${CONFIG_SITE:=/usr/share/config.site}"
+export CONFIG_SITE

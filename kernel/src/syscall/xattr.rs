@@ -265,14 +265,14 @@ pub fn sys_fremovexattr(fd: usize, name: usize) -> SyscallResult {
 /// `struct xattr_args` from user memory (Linux's copy_struct_from_user):
 /// EINVAL below its first version's size, E2BIG above a page or for
 /// nonzero bytes past the fields this kernel knows.
-fn read_args(ptr: usize, usize_: usize) -> Result<(usize, usize, u32), SyscallError> {
-    if usize_ < XATTR_ARGS_SIZE_VER0 {
+fn read_args(ptr: usize, args_size: usize) -> Result<(usize, usize, u32), SyscallError> {
+    if args_size < XATTR_ARGS_SIZE_VER0 {
         return Err(SyscallError::InvalidArgument);
     }
-    if usize_ > 4096 {
+    if args_size > 4096 {
         return Err(SyscallError::ArgumentListTooLong);
     }
-    let mut raw = alloc::vec![0u8; usize_];
+    let mut raw = alloc::vec![0u8; args_size];
     userspace::read_user_bytes(ptr, &mut raw)?;
     if raw[XATTR_ARGS_SIZE_VER0..].iter().any(|&b| b != 0) {
         return Err(SyscallError::ArgumentListTooLong);

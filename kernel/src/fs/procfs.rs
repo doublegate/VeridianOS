@@ -82,8 +82,11 @@ impl VfsNode for ProcNode {
             ProcNodeType::SystemFile(name) => {
                 match name.as_str() {
                     // The system's identity (ADR 0021).
-                    "version" => crate::utils::uname::proc_version(crate::utils::uname::SYSNAME),
-                    "ostype" => format!("{}\n", crate::utils::uname::SYSNAME),
+                    // The system name is the reader's (Linux uname mode).
+                    "version" => {
+                        crate::utils::uname::proc_version(crate::utils::uname::current_sysname())
+                    }
+                    "ostype" => format!("{}\n", crate::utils::uname::current_sysname()),
                     "osrelease" => format!("{}\n", crate::utils::uname::RELEASE),
                     "sys/kernel/version" => format!("{}\n", crate::utils::uname::VERSION),
                     "uptime" => {

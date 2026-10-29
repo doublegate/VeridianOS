@@ -23,6 +23,9 @@ static char *const shell_envp[] = {
     "USER=root",
     "PWD=/",
     "TMPDIR=/tmp",
+    /* Names the build system for autoconf configure scripts, whatever
+     * their --prefix (ADR 0021; /etc/profile sets it for login shells). */
+    "CONFIG_SITE=/usr/share/config.site",
     // GCC_VERSION of scripts/build-native-gcc-static.sh (the native compiler).
     "COMPILER_PATH=/usr/libexec/gcc/x86_64-veridian/16.2.0",
     "LIBRARY_PATH=/usr/lib:/usr/lib/gcc/x86_64-veridian/16.2.0",

@@ -237,6 +237,14 @@ What remains:
   it as an id no process has (LTP's `tst_get_unused_pid`), work until then.
 - **chroot (N-250):** a working directory outside the new root is moved to the root, where Linux
   would leave it outside.
+- **uname says `VeridianOS`, not `Linux`, by default (ADR 0021).** Programs that test the
+  system name at run time (CMake's `CMAKE_HOST_SYSTEM_NAME`, Python's `platform.system()` and
+  `sysconfig.get_platform()`, Node's `os.type()`, OpenJDK's `os.name`) take their unknown-system
+  path unless they run in Linux mode: built with `<veridian/linux-uname.h>`, marked with
+  `veridian-elfctl set linux-uname`, built for GNU/Linux (a GNU ABI tag), or started under
+  `linux-uname`. autoconf configure scripts are covered by the site file and `CONFIG_SITE`, except
+  under `env -i` with a `--prefix` other than `/usr` or `/usr/local`, where they need `--build`.
+  The release (`7.3.0-veridian`) is Linux's for every process.
 
 ### SMP: what is not done yet (sprint D5 leftovers, planned v0.28)
 

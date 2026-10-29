@@ -2240,8 +2240,6 @@ impl BlockFsInner {
         Ok(s.to_string())
     }
 
-    /// Change the permission bits on an inode, preserving the type bits.
-    /// The extended attributes of an inode (none without a block).
     /// An inode's attribute block, 0 for none. On a revision 0 image the
     /// field's bytes are the old, unused triple-indirect pointer: not a
     /// block this image owns, so never read or freed as one (PR #33 review).
@@ -2257,6 +2255,7 @@ impl BlockFsInner {
         })
     }
 
+    /// The extended attributes of an inode (none without a block).
     fn inode_xattrs(&self, inode_num: u32) -> Result<super::xattr::XattrSet, KernelError> {
         let block = self.xattr_block_of(inode_num)?;
         if block == 0 {
@@ -2313,6 +2312,7 @@ impl BlockFsInner {
         Ok(())
     }
 
+    /// Change the permission bits on an inode, preserving the type bits.
     fn chmod_inode(&mut self, inode_num: u32, permissions: Permissions) -> Result<(), KernelError> {
         let inode = self
             .inode_table

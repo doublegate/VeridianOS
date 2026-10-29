@@ -257,6 +257,11 @@ pub struct Process {
     /// File creation mask (umask). Default 0o022.
     pub umask: AtomicU32,
 
+    /// Linux uname mode (ADR 0021): uname reports the system name "Linux".
+    /// Copied by fork, kept by exec and set by exec of a program that asks
+    /// for it; changed with prctl(PR_VERIDIAN_UNAME).
+    pub uname_linux: core::sync::atomic::AtomicBool,
+
     /// TLS FS_BASE address for x86_64 (Thread-Local Storage).
     /// Set by exec_process when loading an ELF with PT_TLS segment.
     /// Read by sys_exec before enter_usermode to set MSR 0xC0000100.
@@ -516,6 +521,7 @@ impl Process {
             rt_queue: super::signals::RtQueue::new(),
             signal_mask: AtomicU64::new(0),
             umask: AtomicU32::new(0o022),
+            uname_linux: core::sync::atomic::AtomicBool::new(false),
             tls_fs_base: AtomicU64::new(0),
             container_id: AtomicU64::new(0),
             clear_child_tid: AtomicU64::new(0),

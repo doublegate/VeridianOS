@@ -88,6 +88,17 @@ system tools), and those should name the system they run on.
    `osrelease` the release, `version` the version field; `/proc/version` is
    `<sysname> version <release> (veridian@veridian) #1 SMP VeridianOS <version>`.
 8. **The kernel shell's `uname` builtin keeps reporting `VeridianOS`**: it is not a Linux program.
+9. **autoconf configure scripts are told the build system without Linux mode**, by a site file:
+   autoconf loads `$CONFIG_SITE` (else `$prefix/share/config.site` and `$prefix/etc/config.site`)
+   before it guesses the build system, and uses `build_alias` when that is set. The base system
+   installs `/usr/share/config.site` setting `build_alias=$(uname -m)-unknown-linux-musl` unless
+   it is already set, and a copy in `/usr/local/share` for configure's default prefix. Because
+   the prefix copies are found only for those two prefixes, `CONFIG_SITE=/usr/share/config.site`
+   is in the environment of every session: init's, the kernel shell's, and `/etc/profile`'s for
+   login shells. `--build` and a `CONFIG_SITE` of the user's own still win. This covers the
+   commonest case (`./configure && make` of a package) with `uname -s` still saying
+   `VeridianOS`; Linux mode remains for tools that read the name themselves (CMake, Python,
+   Node, OpenJDK).
 
 ## Consequences
 
@@ -95,8 +106,11 @@ system tools), and those should name the system they run on.
   until their system calls exist, which is the remaining work made visible.
 - A Linux distribution's binaries (glibc-built) and any program marked with the note or run under
   `linux-uname` see `Linux` and take their Linux paths; everything else sees `VeridianOS`. A
-  musl-built third-party tool that branches on the name must be marked or launched in Linux mode:
-  the rootfs scripts mark the runtimes VeridianOS ships for that purpose.
+  musl-built third-party tool that branches on the name must be marked (`veridian-elfctl set
+  linux-uname`) or launched in Linux mode. The roots built today ship no such runtime; one that
+  is added later is marked when it is installed.
+- `./configure` works at the prompt without Linux mode (decision 9), and with `env -i` or
+  another `--prefix` only through `--build` or `linux-uname`.
 - The answer to "what system is this" depends on how a program was started. That is deliberate,
   and the same trade-off FreeBSD and Linux's personality make; `prctl(PR_VERIDIAN_UNAME,
   PR_VERIDIAN_UNAME_GET)` and `/proc/self` tell a program which view it has.
@@ -110,6 +124,7 @@ system tools), and those should name the system they run on.
   - Reusing Linux's personality values: personality(2) is Linux ABI (and its own queue item); a
     VeridianOS meaning in it would break programs and LTP's personality tests.
 - Tests: host tests for the note reader (both bits, several notes, the GNU tag, malformed notes),
-  the mode's fork/exec rules and the prctl; runtime tests on all three architectures for the
-  default, the prctl, inheritance across fork and exec, a marked program, the launcher and
-  procfs.
+  the prctl and `veridian-elfctl`'s second feature; the runtime test `musl_uname_linux_mode` on
+  all three architectures for the default, the prctl, inheritance across fork and exec, programs
+  marked by the header, a GNU ABI tag and `veridian-elfctl`, the launcher, procfs, and the site
+  file and `CONFIG_SITE`.
