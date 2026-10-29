@@ -48,6 +48,7 @@
 #include <sys/signalfd.h>
 #include <sys/syscall.h>
 #include <sys/uio.h>
+#include <sys/xattr.h>
 #include <shadow.h>
 #include <crypt.h>
 #include <pwd.h>
@@ -2059,10 +2060,14 @@ static void test_setuid_exec(const char *self)
 
     /* So does punching a hole through a shared mapping (MADV_REMOVE ends in
      * file_modified, as fallocate does); a store through the mapping does
-     * not (Linux's page_mkwrite only updates the times). */
+     * not (Linux's page_mkwrite only updates the times). The file also
+     * carries a capability attribute, which the hole must remove too. */
     f = 0;
     if (chmod(copy, 04755) != 0)
         f |= 1;
+    uint32_t fcap[5] = {0x02000001, 1u << 10, 0, 0, 0};
+    if (setxattr(copy, "security.capability", fcap, sizeof(fcap), 0) != 0)
+        f |= 128;
     pid = fork();
     if (pid == 0) {
         if (setresuid(1000, 1000, 1000) != 0)
@@ -2072,7 +2077,8 @@ static void test_setuid_exec(const char *self)
                           : MAP_FAILED;
         if (m == MAP_FAILED)
             _exit(2);
-        m[0] = m[0];
+        volatile char *vm = m;
+        vm[0] = vm[0];
         struct stat ms;
         if (fstat(fd, &ms) != 0 || (ms.st_mode & 07777) != 04755)
             _exit(3);
@@ -2084,6 +2090,9 @@ static void test_setuid_exec(const char *self)
         f |= 2 << (WIFEXITED(st) ? WEXITSTATUS(st) : 0);
     if (stat(copy, &sb) != 0 || (sb.st_mode & 07777) != 0755)
         f |= 64;
+    errno = 0;
+    if (getxattr(copy, "security.capability", NULL, 0) != -1 || errno != ENODATA)
+        f |= 256;
     snprintf(why, sizeof(why), "fail=%d mode=%o", f, (unsigned)(sb.st_mode & 07777));
     report("musl_setuid_cleared_by_hole", f == 0, why);
     unlink(copy);

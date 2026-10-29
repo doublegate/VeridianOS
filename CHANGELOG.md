@@ -87,9 +87,11 @@
   to the file meanwhile cannot change what runs privileged. Only
   v2 and v3 values can be written (EINVAL otherwise), with CAP_SETFCAP; a v3 value with root id 0
   reads back as v2; a write, truncate, chown or MADV_REMOVE hole removes the attribute, whoever
-  makes it (Linux's killpriv; a store through a shared mapping does not, as in Linux). As Linux's `file_remove_privs` and `setattr_prepare`, that removal comes before the
-  data or the owner changes and its error is the call's, so a file that cannot lose its
-  capabilities is neither written nor given away; an attribute read that fails counts as a
+  makes it (Linux's killpriv; a store through a shared mapping does not, as in Linux). For a
+  write, truncate or chown, as Linux's `file_remove_privs` and `setattr_prepare`, that removal
+  comes before the data or the owner changes and its error is the call's, so a file that cannot
+  lose its capabilities is neither written nor given away (an MADV_REMOVE hole removes it after
+  the pages are zeroed and ignores its error, as `shmem_fallocate`'s closing `file_modified` does); an attribute read that fails counts as a
   failed removal, not as no capability. A chown to an owner the filesystem cannot store (BlockFS
   keeps 16-bit IDs) fails before the file loses anything. Two writers that both remove the
   capability do not fail the one that finds it already gone.
