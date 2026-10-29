@@ -86,8 +86,8 @@
   program and its loader from the bytes it read and checked, not from the page cache, so a write
   to the file meanwhile cannot change what runs privileged. Only
   v2 and v3 values can be written (EINVAL otherwise), with CAP_SETFCAP; a v3 value with root id 0
-  reads back as v2; a write, truncate or chown removes the attribute, whoever makes it (Linux's
-  killpriv). As Linux's `file_remove_privs` and `setattr_prepare`, that removal comes before the
+  reads back as v2; a write, truncate, chown or MADV_REMOVE hole removes the attribute, whoever
+  makes it (Linux's killpriv; a store through a shared mapping does not, as in Linux). As Linux's `file_remove_privs` and `setattr_prepare`, that removal comes before the
   data or the owner changes and its error is the call's, so a file that cannot lose its
   capabilities is neither written nor given away; an attribute read that fails counts as a
   failed removal, not as no capability. A chown to an owner the filesystem cannot store (BlockFS

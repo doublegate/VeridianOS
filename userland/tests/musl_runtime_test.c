@@ -2056,6 +2056,36 @@ static void test_setuid_exec(const char *self)
         f |= 8;
     snprintf(why, sizeof(why), "fail=%d mode=%o", f, (unsigned)(sb.st_mode & 07777));
     report("musl_setuid_cleared", f == 0, why);
+
+    /* So does punching a hole through a shared mapping (MADV_REMOVE ends in
+     * file_modified, as fallocate does); a store through the mapping does
+     * not (Linux's page_mkwrite only updates the times). */
+    f = 0;
+    if (chmod(copy, 04755) != 0)
+        f |= 1;
+    pid = fork();
+    if (pid == 0) {
+        if (setresuid(1000, 1000, 1000) != 0)
+            _exit(1);
+        int fd = open(copy, O_RDWR);
+        char *m = fd >= 0 ? mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0)
+                          : MAP_FAILED;
+        if (m == MAP_FAILED)
+            _exit(2);
+        m[0] = m[0];
+        struct stat ms;
+        if (fstat(fd, &ms) != 0 || (ms.st_mode & 07777) != 04755)
+            _exit(3);
+        _exit(madvise(m, 4096, MADV_REMOVE) == 0 ? 0 : 4);
+    }
+    st = 0;
+    waitpid(pid, &st, 0);
+    if (!WIFEXITED(st) || WEXITSTATUS(st) != 0)
+        f |= 2 << (WIFEXITED(st) ? WEXITSTATUS(st) : 0);
+    if (stat(copy, &sb) != 0 || (sb.st_mode & 07777) != 0755)
+        f |= 64;
+    snprintf(why, sizeof(why), "fail=%d mode=%o", f, (unsigned)(sb.st_mode & 07777));
+    report("musl_setuid_cleared_by_hole", f == 0, why);
     unlink(copy);
 }
 

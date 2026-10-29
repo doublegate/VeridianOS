@@ -873,11 +873,20 @@ pub fn sys_madvise(addr: usize, len: usize, advice: usize) -> SyscallResult {
             }
             // Checked and done under one lock (a sealed mapping swapped in
             // after a check on the snapshot would be zeroed).
-            madv::REMOVE => proc
-                .memory_space
-                .lock()
-                .zero_shared_pages(start, end)
-                .map_err(super::map_kernel_error)?,
+            // Like a write, the hole drops the files' set-ID bits and file
+            // capabilities (file_modified at the end of shmem_fallocate,
+            // which ignores its result, PR #33 review); outside the memory
+            // space lock, since that takes node locks.
+            madv::REMOVE => {
+                let files = proc
+                    .memory_space
+                    .lock()
+                    .zero_shared_pages(start, end)
+                    .map_err(super::map_kernel_error)?;
+                for node in files {
+                    let _ = crate::fs::remove_privs(&*node);
+                }
+            }
             madv::DONTFORK | madv::DOFORK | madv::WIPEONFORK | madv::KEEPONFORK => {
                 let (dont_fork, wipe) = match advice {
                     madv::DONTFORK => (Some(true), None),

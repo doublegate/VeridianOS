@@ -2426,8 +2426,15 @@ impl VirtualAddressSpace {
     /// (`PermissionDenied`: a read-only file or a write-sealed memfd),
     /// checked under the same lock as the zeroing, so no other thread can
     /// swap a sealed mapping in between; nothing is zeroed on refusal.
+    /// Returns the files whose pages were zeroed, for the caller to drop
+    /// their set-ID bits and file capabilities once this lock is released
+    /// (Linux's shmem_fallocate ends in file_modified).
     #[cfg(feature = "alloc")]
-    pub fn zero_shared_pages(&self, start: u64, end: u64) -> Result<(), KernelError> {
+    pub fn zero_shared_pages(
+        &self,
+        start: u64,
+        end: u64,
+    ) -> Result<Vec<alloc::sync::Arc<dyn crate::fs::VfsNode>>, KernelError> {
         let mappings = self.mappings.lock();
         for (_, m) in mappings.range(..VirtualAddress(end)).rev() {
             if m.end().0 <= start {
@@ -2445,6 +2452,7 @@ impl VirtualAddressSpace {
                 });
             }
         }
+        let mut files = Vec::new();
         for (_, m) in mappings.range(..VirtualAddress(end)).rev() {
             if m.end().0 <= start {
                 break;
@@ -2459,8 +2467,11 @@ impl VirtualAddressSpace {
                     unsafe { crate::mm::page_ops::clear_page(virt) };
                 }
             }
+            if let Some(b) = &m.backing {
+                files.push(b.node.clone());
+            }
         }
-        Ok(())
+        Ok(files)
     }
 
     /// MADV_DONTFORK/DOFORK and MADV_WIPEONFORK/KEEPONFORK (N-243): set the
