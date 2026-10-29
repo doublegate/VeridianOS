@@ -95,10 +95,13 @@ impl PageTableEntry {
     /// Write the entry with one atomic store, so a lock-free walk
     /// ([`translate_lockless`]) racing it reads the old or the new value and
     /// the two accesses are not a data race (Linux's WRITE_ONCE in set_pte).
+    /// Release, paired with the walk's Acquire load: a table zeroed before
+    /// it is installed here reads as zeroed to a walk that finds it (Linux's
+    /// smp_wmb in pmd_install). Both are plain moves on x86_64.
     fn store(&mut self, value: u64) {
         // SAFETY: `self.entry` is a valid, 8-byte aligned u64 (the entry is
         // repr(transparent) over it), borrowed mutably for the call.
-        unsafe { AtomicU64::from_ptr(&mut self.entry) }.store(value, Ordering::Relaxed);
+        unsafe { AtomicU64::from_ptr(&mut self.entry) }.store(value, Ordering::Release);
     }
 
     /// Entry `index` of the table at `table`, read with one atomic load and
@@ -114,7 +117,7 @@ impl PageTableEntry {
         // to an entry is atomic (`store`).
         let word = unsafe { AtomicU64::from_ptr(table.cast::<u64>().add(index).cast_mut()) };
         Self {
-            entry: word.load(Ordering::Relaxed),
+            entry: word.load(Ordering::Acquire),
         }
     }
 }
