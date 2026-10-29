@@ -2074,14 +2074,20 @@ static void test_setuid_exec(const char *self)
      * a name someone else left there (PR #33 review). */
     unlink(hole);
     int hfd = open(hole, O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW, 0755);
+    uint32_t fcap[5] = {0x02000001, 1u << 10, 0, 0, 0};
     if (hfd < 0 || write(hfd, page, sizeof(page)) != (ssize_t)sizeof(page) ||
         fchown(hfd, 1000, (gid_t)-1) != 0 || fchmod(hfd, 04755) != 0)
         f |= 1;
+    else if (fsetxattr(hfd, "security.capability", fcap, sizeof(fcap), 0) != 0)
+        f |= 128;
     if (hfd >= 0)
         close(hfd);
-    uint32_t fcap[5] = {0x02000001, 1u << 10, 0, 0, 0};
-    if (setxattr(hole, "security.capability", fcap, sizeof(fcap), 0) != 0)
-        f |= 128;
+    if (f != 0) {
+        /* No path-based call on a file this test did not create. */
+        snprintf(why, sizeof(why), "setup fail=%d", f);
+        report("musl_setuid_cleared_by_hole", 0, why);
+        return;
+    }
     pid = fork();
     if (pid == 0) {
         if (setresuid(1000, 1000, 1000) != 0)
