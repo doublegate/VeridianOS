@@ -2070,7 +2070,10 @@ static void test_setuid_exec(const char *self)
     f = 0;
     char page[4096];
     memset(page, 0x5a, sizeof(page));
-    int hfd = open(hole, O_RDWR | O_CREAT | O_TRUNC, 0755);
+    /* /dev/shm is world-writable: create the file afresh, never through
+     * a name someone else left there (PR #33 review). */
+    unlink(hole);
+    int hfd = open(hole, O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW, 0755);
     if (hfd < 0 || write(hfd, page, sizeof(page)) != (ssize_t)sizeof(page) ||
         fchown(hfd, 1000, (gid_t)-1) != 0 || fchmod(hfd, 04755) != 0)
         f |= 1;

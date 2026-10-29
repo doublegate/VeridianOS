@@ -204,6 +204,15 @@ impl XattrSet {
                 value: "empty or longer than XATTR_NAME_MAX",
             });
         }
+        // What `decode` accepts from disk, so a stored set always reads
+        // back.
+        if name.contains('\0') {
+            return Err(KernelError::InvalidArgument {
+                name: "xattr name",
+                value: "contains NUL",
+            });
+        }
+        namespace(name)?;
         if value.len() > XATTR_SIZE_MAX {
             return Err(KernelError::InvalidArgument {
                 name: "xattr value",
@@ -296,12 +305,20 @@ impl XattrSet {
             let name = buf
                 .get(name_at..name_at + name_len)
                 .and_then(|n| core::str::from_utf8(n).ok())
-                .filter(|n| !n.is_empty())
+                // Only a name `set` could have stored: a NUL would split
+                // one listxattr entry in two (PR #33 review).
+                .filter(|n| !n.contains('\0') && namespace(n).is_ok())
                 .ok_or(corrupt)?;
             let value = buf
                 .get(name_at + name_len..name_at + name_len + value_len)
                 .ok_or(corrupt)?;
-            set.entries.insert(String::from(name), Vec::from(value));
+            if set
+                .entries
+                .insert(String::from(name), Vec::from(value))
+                .is_some()
+            {
+                return Err(corrupt);
+            }
             at += (ENTRY_HEADER + name_len + value_len).next_multiple_of(4);
         }
         Ok(set)
@@ -343,6 +360,9 @@ mod tests {
         let max = alloc::format!("user.{}", "n".repeat(XATTR_NAME_MAX - 5));
         assert!(s.set(&max, b"v", 0).is_ok(), "255-byte name");
         assert!(s.set("", b"v", 0).is_err());
+        // What decode would refuse from disk is refused here too.
+        assert!(s.set("nonamespace", b"v", 0).is_err());
+        assert!(s.set("user.a\0b", b"v", 0).is_err());
         assert!(s
             .set("user.big", &alloc::vec![0; XATTR_SIZE_MAX + 1], 0)
             .is_err());
@@ -529,6 +549,40 @@ mod tests {
             FsError::NoSpace
         );
         assert!(XattrSet::new().encoded_size() <= 4096);
+    }
+
+    /// A block from disk holds only names `set` would have stored: one with
+    /// a NUL (which would split a listxattr entry), none outside the four
+    /// namespaces, and no name twice (PR #33 review).
+    #[test]
+    fn decode_rejects_names_set_would_refuse() {
+        let encoded = |names: &[&str]| {
+            let mut block = alloc::vec![0u8; 4096];
+            block[0..4].copy_from_slice(&BLOCK_MAGIC.to_le_bytes());
+            block[4..6].copy_from_slice(&(names.len() as u16).to_le_bytes());
+            let mut at = BLOCK_HEADER;
+            for name in names {
+                block[at] = name.len() as u8;
+                block[at + 2] = 1;
+                let name_at = at + ENTRY_HEADER;
+                block[name_at..name_at + name.len()].copy_from_slice(name.as_bytes());
+                at += (ENTRY_HEADER + name.len() + 1).next_multiple_of(4);
+            }
+            block
+        };
+        assert!(XattrSet::decode(&encoded(&["user.a", "user.b"])).is_ok());
+        for bad in [
+            &["user.a\0user.b"][..],
+            &["nonamespace"],
+            &["user."],
+            &["user.a", "user.a"],
+        ] {
+            assert_eq!(
+                XattrSet::decode(&encoded(bad)).unwrap_err(),
+                KernelError::FsError(FsError::CorruptedData),
+                "{bad:?}"
+            );
+        }
     }
 
     /// A failed or oversized update leaves a memory node's attributes as

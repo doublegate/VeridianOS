@@ -660,11 +660,14 @@ fn file_write_from_user(file: &crate::fs::file::File, buf: usize, count: usize) 
     let count = file.fsize_room(count).map_err(super::map_kernel_error)?;
     // A regular file is written as one step (see `File::io_lock`).
     let _io = (file.node.node_type() == crate::fs::NodeType::File).then(|| file.io_lock.lock());
-    super::userspace::consume_from_user(buf, count, true, |kbuf| match file.write(kbuf) {
-        Ok(n) => Ok(n),
-        Err(crate::error::KernelError::BrokenPipe) => Err(SyscallError::BrokenPipe),
-        Err(crate::error::KernelError::WouldBlock) => Err(SyscallError::WouldBlock),
-        Err(e) => Err(super::map_kernel_error(e)),
+    let mut first = true;
+    super::userspace::consume_from_user(buf, count, true, |kbuf| {
+        match file.write_part(kbuf, core::mem::take(&mut first)) {
+            Ok(n) => Ok(n),
+            Err(crate::error::KernelError::BrokenPipe) => Err(SyscallError::BrokenPipe),
+            Err(crate::error::KernelError::WouldBlock) => Err(SyscallError::WouldBlock),
+            Err(e) => Err(super::map_kernel_error(e)),
+        }
     })
 }
 
