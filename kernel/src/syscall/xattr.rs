@@ -8,7 +8,10 @@
 use alloc::{string::String, sync::Arc, vec::Vec};
 
 use super::{
-    filesystem::{map_resolve_err, read_user_path, read_user_path_or_empty, resolve_at_path, vfs},
+    filesystem::{
+        map_resolve_err, read_user_path, read_user_path_or_empty, resolve_at_path, vfs,
+        AT_EMPTY_PATH, AT_FDCWD, AT_SYMLINK_NOFOLLOW,
+    },
     userspace, SyscallError, SyscallResult,
 };
 use crate::{
@@ -20,10 +23,6 @@ use crate::{
     },
     process::{creds::Caller, linux_caps::FileCaps},
 };
-
-const AT_FDCWD: i32 = -100;
-const AT_SYMLINK_NOFOLLOW: u32 = 0x100;
-const AT_EMPTY_PATH: u32 = 0x1000;
 
 /// `struct xattr_args` (value pointer, size, flags) as the `*xattrat` calls
 /// take it: 16 bytes in its first version, the only one.
@@ -37,7 +36,7 @@ const XATTR_ARGS_SIZE_VER0: usize = 16;
 fn target(
     dfd: usize,
     path_ptr: usize,
-    at_flags: u32,
+    at_flags: usize,
     cwd_ok: bool,
 ) -> Result<Arc<dyn VfsNode>, SyscallError> {
     if at_flags & !(AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH) != 0 {
@@ -54,7 +53,7 @@ fn target(
     };
     let vfs = vfs()?;
     if path.is_empty() {
-        if cwd_ok && dfd as u32 as i32 == AT_FDCWD {
+        if cwd_ok && dfd as u32 as i32 as usize == AT_FDCWD {
             return vfs.resolve_path(&vfs.get_cwd()).map_err(map_resolve_err);
         }
         let proc = crate::process::current_process().ok_or(SyscallError::InvalidState)?;
@@ -97,7 +96,7 @@ fn check(node: &Arc<dyn VfsNode>, name: &str, write: bool) -> Result<(), Syscall
 fn set(
     dfd: usize,
     path: usize,
-    at_flags: u32,
+    at_flags: usize,
     name: usize,
     value: usize,
     size: usize,
@@ -125,7 +124,7 @@ fn set(
 fn get(
     dfd: usize,
     path: usize,
-    at_flags: u32,
+    at_flags: usize,
     name: usize,
     value: usize,
     size: usize,
@@ -154,7 +153,7 @@ fn get(
     Ok(found.len())
 }
 
-fn list(dfd: usize, path: usize, at_flags: u32, out: usize, size: usize) -> SyscallResult {
+fn list(dfd: usize, path: usize, at_flags: usize, out: usize, size: usize) -> SyscallResult {
     let node = target(dfd, path, at_flags, false)?;
     let attrs = node.xattrs().map_err(super::map_kernel_error)?;
     let caller = Caller::current();
@@ -177,7 +176,7 @@ fn list(dfd: usize, path: usize, at_flags: u32, out: usize, size: usize) -> Sysc
     Ok(names.len())
 }
 
-fn remove(dfd: usize, path: usize, at_flags: u32, name: usize) -> SyscallResult {
+fn remove(dfd: usize, path: usize, at_flags: usize, name: usize) -> SyscallResult {
     let name = read_name(name)?;
     let node = target(dfd, path, at_flags, false)?;
     check(&node, &name, true)?;
@@ -186,8 +185,6 @@ fn remove(dfd: usize, path: usize, at_flags: u32, name: usize) -> SyscallResult 
     Ok(0)
 }
 
-const CWD: usize = AT_FDCWD as isize as usize;
-
 pub fn sys_setxattr(
     path: usize,
     name: usize,
@@ -195,7 +192,7 @@ pub fn sys_setxattr(
     size: usize,
     flags: usize,
 ) -> SyscallResult {
-    set(CWD, path, 0, name, value, size, flags as u32)
+    set(AT_FDCWD, path, 0, name, value, size, flags as u32)
 }
 
 pub fn sys_lsetxattr(
@@ -206,7 +203,7 @@ pub fn sys_lsetxattr(
     flags: usize,
 ) -> SyscallResult {
     set(
-        CWD,
+        AT_FDCWD,
         path,
         AT_SYMLINK_NOFOLLOW,
         name,
@@ -227,11 +224,11 @@ pub fn sys_fsetxattr(
 }
 
 pub fn sys_getxattr(path: usize, name: usize, value: usize, size: usize) -> SyscallResult {
-    get(CWD, path, 0, name, value, size)
+    get(AT_FDCWD, path, 0, name, value, size)
 }
 
 pub fn sys_lgetxattr(path: usize, name: usize, value: usize, size: usize) -> SyscallResult {
-    get(CWD, path, AT_SYMLINK_NOFOLLOW, name, value, size)
+    get(AT_FDCWD, path, AT_SYMLINK_NOFOLLOW, name, value, size)
 }
 
 pub fn sys_fgetxattr(fd: usize, name: usize, value: usize, size: usize) -> SyscallResult {
@@ -239,11 +236,11 @@ pub fn sys_fgetxattr(fd: usize, name: usize, value: usize, size: usize) -> Sysca
 }
 
 pub fn sys_listxattr(path: usize, list_ptr: usize, size: usize) -> SyscallResult {
-    list(CWD, path, 0, list_ptr, size)
+    list(AT_FDCWD, path, 0, list_ptr, size)
 }
 
 pub fn sys_llistxattr(path: usize, list_ptr: usize, size: usize) -> SyscallResult {
-    list(CWD, path, AT_SYMLINK_NOFOLLOW, list_ptr, size)
+    list(AT_FDCWD, path, AT_SYMLINK_NOFOLLOW, list_ptr, size)
 }
 
 pub fn sys_flistxattr(fd: usize, list_ptr: usize, size: usize) -> SyscallResult {
@@ -251,11 +248,11 @@ pub fn sys_flistxattr(fd: usize, list_ptr: usize, size: usize) -> SyscallResult 
 }
 
 pub fn sys_removexattr(path: usize, name: usize) -> SyscallResult {
-    remove(CWD, path, 0, name)
+    remove(AT_FDCWD, path, 0, name)
 }
 
 pub fn sys_lremovexattr(path: usize, name: usize) -> SyscallResult {
-    remove(CWD, path, AT_SYMLINK_NOFOLLOW, name)
+    remove(AT_FDCWD, path, AT_SYMLINK_NOFOLLOW, name)
 }
 
 pub fn sys_fremovexattr(fd: usize, name: usize) -> SyscallResult {
@@ -296,7 +293,15 @@ pub fn sys_setxattrat(
     args_size: usize,
 ) -> SyscallResult {
     let (value, size, flags) = read_args(args, args_size)?;
-    set(dfd, path, at_flags as u32, name, value, size, flags)
+    set(
+        dfd,
+        path,
+        at_flags as u32 as usize,
+        name,
+        value,
+        size,
+        flags,
+    )
 }
 
 /// getxattrat(dfd, path, at_flags, name, args, size): `args.flags` must be 0.
@@ -312,7 +317,7 @@ pub fn sys_getxattrat(
     if flags != 0 {
         return Err(SyscallError::InvalidArgument);
     }
-    get(dfd, path, at_flags as u32, name, value, size)
+    get(dfd, path, at_flags as u32 as usize, name, value, size)
 }
 
 /// listxattrat(dfd, path, at_flags, list, size).
@@ -323,10 +328,10 @@ pub fn sys_listxattrat(
     list_ptr: usize,
     size: usize,
 ) -> SyscallResult {
-    list(dfd, path, at_flags as u32, list_ptr, size)
+    list(dfd, path, at_flags as u32 as usize, list_ptr, size)
 }
 
 /// removexattrat(dfd, path, at_flags, name).
 pub fn sys_removexattrat(dfd: usize, path: usize, at_flags: usize, name: usize) -> SyscallResult {
-    remove(dfd, path, at_flags as u32, name)
+    remove(dfd, path, at_flags as u32 as usize, name)
 }

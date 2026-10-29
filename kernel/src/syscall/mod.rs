@@ -1929,11 +1929,10 @@ fn sys_fchownat(
     gid: usize,
     flags: usize,
 ) -> SyscallResult {
-    const AT_SYMLINK_NOFOLLOW: usize = 0x100;
     let rel_path = filesystem::read_user_path(path_ptr)?;
     let abs_path = filesystem::resolve_at_path(dirfd, &rel_path)?;
     let vfs = filesystem::vfs()?;
-    let node = if flags & AT_SYMLINK_NOFOLLOW != 0 {
+    let node = if flags & filesystem::AT_SYMLINK_NOFOLLOW != 0 {
         vfs.resolve_path_no_follow(&abs_path)
     } else {
         vfs.resolve_path(&abs_path)
