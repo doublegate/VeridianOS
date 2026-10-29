@@ -36,12 +36,15 @@ pub fn validate_user_ptr<T>(ptr: *const T, len: usize) -> Result<(), SyscallErro
     // An empty range touches no page, whatever its alignment.
     #[cfg(all(target_os = "none", feature = "alloc"))]
     if len != 0 {
+        // Unmapped regions and huge leaves are passed over whole, so a long
+        // range costs what is mapped in it, not one walk per page of it.
         let mut page = addr & !(PAGE_SIZE - 1);
         while page < end {
-            if present_but_not_user(crate::mm::user_validation::active_user_page_flags(page)) {
+            let (flags, next) = crate::mm::user_validation::active_user_page(page);
+            if present_but_not_user(flags) {
                 return Err(SyscallError::InvalidPointer);
             }
-            page += PAGE_SIZE;
+            page = next;
         }
     }
     #[cfg(not(all(target_os = "none", feature = "alloc")))]

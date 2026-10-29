@@ -102,7 +102,9 @@
   files, directories (owner or CAP_FOWNER in a sticky one) and sockets by the file's permission
   bits, `trusted.*` with CAP_SYS_ADMIN (hidden from others' lists), `security.*` written with
   CAP_SYS_ADMIN (CAP_SETFCAP for `security.capability`), `system.*` (POSIX ACLs) EOPNOTSUPP. tmpfs
-  and ramfs keep them in the node (up to 64 KiB per node; tmpfs charges them to its size limit; a
+  and ramfs keep them in the node (up to 64 KiB per node, counting an 8-byte header and each
+  entry's 4-byte header and padding, so one value there is ENOSPC somewhat under 64 KiB, as a
+  full tmpfs is on Linux; tmpfs charges them to its size limit; a
   change moves the time `stat` reports as `st_ctime`);
   BlockFS keeps them on disk, in one
   attribute block per inode, which needed format revision 1 (an inode's unused triple-indirect
@@ -156,7 +158,9 @@
   thread-affinity calls check only the bytes they copy, so a huge size no longer keeps that
   page-by-page check walking page tables in the kernel, and setting accepts any size, as Linux's
   `sched_setaffinity` does. An empty range is not checked for a `PROT_NONE` page, whatever its
-  alignment.
+  alignment. The check passes over an unmapped region or a huge page whole (the page-table walk
+  reports how much the missing entry covers), so a `read` or `write` with a count of many
+  terabytes no longer walks the page tables once per 4 KiB in the kernel.
 - `scripts/run-compat-tests.sh --update` dropped the comment lines written by hand at the top of an
   expected list (the baseline's date and versions); it now keeps them.
 - `mkfs-blockfs` let a directory entry cross a 4 KiB block boundary, and the kernel reads a

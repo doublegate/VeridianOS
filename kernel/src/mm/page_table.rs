@@ -883,16 +883,50 @@ pub unsafe fn translate_lockless(
     levels: u8,
     page: VirtualAddress,
 ) -> Result<(FrameNumber, PageFlags), KernelError> {
-    let unmapped = || KernelError::UnmappedMemory {
-        addr: page.as_u64() as usize,
-    };
+    // SAFETY: the caller's.
+    match unsafe { walk_lockless(root, levels, page) } {
+        Ok(found) => Ok(found),
+        Err(Hole::NotCanonical) => Err(KernelError::InvalidAddress {
+            addr: page.as_u64() as usize,
+        }),
+        Err(Hole::Unmapped(_)) => Err(KernelError::UnmappedMemory {
+            addr: page.as_u64() as usize,
+        }),
+    }
+}
+
+/// Why [`walk_lockless`] found no leaf.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Hole {
+    /// The address is not canonical for the number of levels.
+    NotCanonical,
+    /// No entry maps it: the bytes the missing entry covers (512 GiB,
+    /// 1 GiB, 2 MiB or 4 KiB), aligned to that size, so a caller scanning a
+    /// range can skip all of it (PR #33 review: checking a long range page
+    /// by page took one walk per 4 KiB of address space).
+    Unmapped(u64),
+}
+
+/// [`translate_lockless`], telling a missing mapping's extent apart.
+///
+/// # Safety
+///
+/// As [`translate_lockless`].
+pub unsafe fn walk_lockless(
+    root: *const PageTable,
+    levels: u8,
+    page: VirtualAddress,
+) -> Result<(FrameNumber, PageFlags), Hole> {
+    const L1_SPAN: u64 = 1 << 12;
+    const L2_SPAN: u64 = 1 << 21;
+    const L3_SPAN: u64 = 1 << 30;
     let va = page.as_u64();
     let shift = 64 - (12 + 9 * u32::from(levels));
     if (((va << shift) as i64) >> shift) as u64 != va {
-        return Err(KernelError::InvalidAddress { addr: va as usize });
+        return Err(Hole::NotCanonical);
     }
-    let table_at = |entry: PageTableEntry| -> Result<*const PageTable, KernelError> {
-        let phys = entry.addr().ok_or_else(unmapped)?;
+    let table_at = |entry: PageTableEntry, span: u64| -> Result<*const PageTable, Hole> {
+        let phys = entry.addr().ok_or(Hole::Unmapped(span))?;
         Ok(super::phys_to_virt_addr(phys.as_u64()) as *const PageTable)
     };
     let breakdown = VirtualAddressBreakdown::new(page);
@@ -900,24 +934,26 @@ pub unsafe fn translate_lockless(
     let l3_table = if levels == 3 {
         root
     } else {
-        let index = ((va >> (12 + 9 * (u32::from(levels) - 1))) & 0x1FF) as usize;
+        let top_shift = 12 + 9 * (u32::from(levels) - 1);
+        let top_span = 1u64 << top_shift;
+        let index = ((va >> top_shift) & 0x1FF) as usize;
         // SAFETY: `root` is live (the caller) and the index is masked to 9
         // bits.
         let entry = unsafe { PageTableEntry::load(root, index) };
         if !entry.is_present() || entry.is_huge() {
-            return Err(unmapped());
+            return Err(Hole::Unmapped(top_span));
         }
-        table_at(entry)?
+        table_at(entry, top_span)?
     };
     // SAFETY: a table below the live root, through the physical map; the
     // breakdown indices are 9 bits.
     let l3_entry = unsafe { PageTableEntry::load(l3_table, usize::from(breakdown.l3_index)) };
     if !l3_entry.is_present() {
-        return Err(unmapped());
+        return Err(Hole::Unmapped(L3_SPAN));
     }
     // A 1 GiB leaf (the kernel's physical map): the 4 KiB frame in it.
     if l3_entry.is_huge() {
-        let base = l3_entry.frame().ok_or_else(unmapped)?;
+        let base = l3_entry.frame().ok_or(Hole::Unmapped(L3_SPAN))?;
         return Ok((
             FrameNumber::new(base.as_u64() + (va >> 12 & 0x3FFFF)),
             l3_entry.flags() | PageFlags::HUGE,
@@ -925,14 +961,18 @@ pub unsafe fn translate_lockless(
     }
 
     // SAFETY: as above, from a present L3 entry.
-    let l2_entry =
-        unsafe { PageTableEntry::load(table_at(l3_entry)?, usize::from(breakdown.l2_index)) };
+    let l2_entry = unsafe {
+        PageTableEntry::load(
+            table_at(l3_entry, L3_SPAN)?,
+            usize::from(breakdown.l2_index),
+        )
+    };
     if !l2_entry.is_present() {
-        return Err(unmapped());
+        return Err(Hole::Unmapped(L2_SPAN));
     }
     // A 2 MiB leaf: the 4 KiB frame within it (flags keep HUGE).
     if l2_entry.is_huge() {
-        let base = l2_entry.frame().ok_or_else(unmapped)?;
+        let base = l2_entry.frame().ok_or(Hole::Unmapped(L2_SPAN))?;
         return Ok((
             FrameNumber::new(base.as_u64() + (va >> 12 & 0x1FF)),
             // RISC-V leaves have no HUGE bit: the level is the size.
@@ -941,9 +981,13 @@ pub unsafe fn translate_lockless(
     }
 
     // SAFETY: as above, from a present L2 entry.
-    let entry =
-        unsafe { PageTableEntry::load(table_at(l2_entry)?, usize::from(breakdown.l1_index)) };
-    let frame = entry.frame().ok_or_else(unmapped)?;
+    let entry = unsafe {
+        PageTableEntry::load(
+            table_at(l2_entry, L2_SPAN)?,
+            usize::from(breakdown.l1_index),
+        )
+    };
+    let frame = entry.frame().ok_or(Hole::Unmapped(L1_SPAN))?;
     Ok((frame, entry.flags()))
 }
 
@@ -1104,6 +1148,36 @@ mod tests {
         assert!(unsafe { translate_lockless(root, 4, va) }.is_err());
         // Not canonical: refused, as by the mapper.
         assert!(unsafe { translate_lockless(root, 4, VirtualAddress(0x8000_0000_0000)) }.is_err());
+    }
+
+    /// A missing mapping is reported with the extent of the entry that is
+    /// missing, so a range check can pass over it whole (PR #33 review).
+    #[test]
+    fn lockless_walk_reports_the_extent_of_a_hole() {
+        let mut tables = HeapTables(Vec::new());
+        let root = tables.table();
+        // SAFETY: `root` is a live, zeroed table owned by `tables`.
+        let mut m = unsafe { PageMapper::with_levels(root, 4) };
+        let va = VirtualAddress(0x7FFF_0000_0000);
+        let hole = |at: u64| {
+            // SAFETY: `root` and the tables under it are live in `tables`.
+            unsafe { walk_lockless(root, 4, VirtualAddress(at)) }.unwrap_err()
+        };
+        assert_eq!(hole(va.as_u64()), Hole::Unmapped(1 << 39));
+        m.map_page(va, FrameNumber::new(0x42), USER, &mut tables)
+            .unwrap();
+        // The next page shares the last-level table, the next 2 MiB the
+        // L2 table, the next 1 GiB the L3 table; another 512 GiB has none.
+        assert_eq!(hole(va.as_u64() + 0x1000), Hole::Unmapped(1 << 12));
+        assert_eq!(hole(va.as_u64() + (1 << 21)), Hole::Unmapped(1 << 21));
+        assert_eq!(hole(va.as_u64() + (1 << 30)), Hole::Unmapped(1 << 30));
+        assert_eq!(hole(va.as_u64() - (1 << 39)), Hole::Unmapped(1 << 39));
+        assert_eq!(hole(0x8000_0000_0000), Hole::NotCanonical);
+        // Three levels: the root is the L3 table.
+        let root3 = tables.table();
+        // SAFETY: as above.
+        let three = unsafe { walk_lockless(root3, 3, VirtualAddress(0x4000_0000)) };
+        assert_eq!(three.unwrap_err(), Hole::Unmapped(1 << 30));
     }
 
     /// The same page under four levels goes through root entry 0, and

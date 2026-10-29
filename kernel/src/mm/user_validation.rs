@@ -40,15 +40,19 @@ pub fn translate_address(addr: usize) -> Option<PageTableEntry> {
 }
 
 /// The flags of the page holding the user address `addr` in the active
-/// address space, or `None` if it is not mapped. Takes no lock (a system
-/// call may hold any), and reads the root of the lower half: CR3 and satp
-/// hold the whole address space, AArch64's TTBR0_EL1 the user half (ADR
-/// 0015). The walk is `translate_lockless`: one atomic load per entry and
+/// address space, or `None` if it is not mapped, and the first address
+/// past `addr` that may differ: the next page, or the end of the unmapped
+/// or huge region `addr` is in, so checking a range costs one walk per
+/// mapped page or missing entry rather than per 4 KiB of address space
+/// (PR #33 review). Takes no lock (a system call may hold any), and reads
+/// the root of the lower half: CR3 and satp hold the whole address space,
+/// AArch64's TTBR0_EL1 the user half (ADR 0015). The walk is
+/// `walk_lockless`: one atomic load per entry and
 /// no reference to any table, against entry writes that are atomic stores,
 /// so it reads each entry before or after a concurrent munmap or mprotect
 /// (PR #33 review).
 #[cfg(target_os = "none")]
-pub fn active_user_page_flags(addr: usize) -> Option<PageFlags> {
+pub fn active_user_page(addr: usize) -> (Option<PageFlags>, usize) {
     #[cfg(target_arch = "aarch64")]
     let root = {
         let ttbr0: u64;
@@ -65,15 +69,22 @@ pub fn active_user_page_flags(addr: usize) -> Option<PageFlags> {
     // kernel's lifetime. The user half's table frames are freed only at
     // exec (single-threaded by then) and teardown (no thread left in it),
     // so every table the walk reaches stays allocated.
-    unsafe {
-        crate::mm::page_table::translate_lockless(
+    let found = unsafe {
+        crate::mm::page_table::walk_lockless(
             root,
             crate::mm::page_table::paging_levels(),
             crate::mm::VirtualAddress(addr as u64 & !0xFFF),
         )
-    }
-    .ok()
-    .map(|(_, flags)| flags)
+    };
+    let span = match found {
+        // 1 GiB and 2 MiB leaves are both marked HUGE: stepping by the
+        // smaller never passes over a different mapping.
+        Ok((_, flags)) if flags.contains(PageFlags::HUGE) => 1 << 21,
+        Ok(_) | Err(crate::mm::page_table::Hole::NotCanonical) => 0x1000,
+        Err(crate::mm::page_table::Hole::Unmapped(span)) => span as usize,
+    };
+    let next = (addr & !(span - 1)).saturating_add(span);
+    (found.ok().map(|(_, flags)| flags), next)
 }
 
 /// Extension trait for PageTableEntry to check user accessibility
