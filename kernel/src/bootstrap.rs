@@ -1954,13 +1954,31 @@ fn run_dispatch_tests(passed: &mut u32, failed: &mut u32) {
         static SEEN: AtomicU32 = AtomicU32::new(0);
         static WQ: dispatch::WaitQueue = dispatch::WaitQueue::new();
 
+        /// Whose step it is (1 or 2): the workers take turns, so only a
+        /// yield that lets the other one run moves them on. Without the
+        /// handshake the trace depended on time charging: a host stall
+        /// charged to one worker let the other run all its steps in a row.
+        static TURN: AtomicU32 = AtomicU32::new(1);
+        /// A worker that waited too long for its turn.
+        static STUCK: AtomicU32 = AtomicU32::new(0);
+
         extern "C" fn worker(id: usize) {
             for _ in 0..20 {
+                let mut yields = 0u32;
+                while TURN.load(Ordering::Acquire) != id as u32 {
+                    dispatch::yield_now();
+                    yields += 1;
+                    if yields > 100_000 {
+                        STUCK.store(id as u32, Ordering::Relaxed);
+                        return;
+                    }
+                }
                 COUNTER.fetch_add(1, Ordering::Relaxed);
                 let t = TRACE.load(Ordering::Relaxed);
                 if t < u64::MAX / 4 {
                     TRACE.store(t * 3 + id as u64, Ordering::Relaxed);
                 }
+                TURN.store(3 - id as u32, Ordering::Release);
                 dispatch::yield_now();
             }
         }
@@ -1992,9 +2010,25 @@ fn run_dispatch_tests(passed: &mut u32, failed: &mut u32) {
                         last = d;
                         t /= 3;
                     }
-                    COUNTER.load(Ordering::Relaxed) == 40
-                        && alternations >= 4
-                        && dispatch::task_count() == before
+                    // The joins returned, so both were reaped; the count
+                    // shows the test left nothing behind (an unrelated
+                    // task the reaper freed meanwhile only lowers it).
+                    let count = COUNTER.load(Ordering::Relaxed);
+                    let stuck = STUCK.load(Ordering::Relaxed);
+                    let after = dispatch::task_count();
+                    let ok = count == 40 && stuck == 0 && alternations >= 4 && after <= before;
+                    if !ok {
+                        crate::println!(
+                            "    steps {} (40), stuck worker {}, alternations {} (>= 4), tasks {} \
+                             -> {}",
+                            count,
+                            stuck,
+                            alternations,
+                            before,
+                            after
+                        );
+                    }
+                    ok
                 }
                 _ => false,
             };

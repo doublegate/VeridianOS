@@ -4,7 +4,8 @@
 # Passes when the serial log shows BOOTOK, the boot-test tally is complete
 # ("Results: N/N passed"), and nothing panicked during a settle period after
 # BOOTOK (later boot stages run after the marker). AArch64 and RISC-V boot
-# with a ramfb display, so the framebuffer console is checked too.
+# with a ramfb display, so the framebuffer console is checked too. A failed
+# boot prints its failed tests and keeps its log as boot-<arch>.failed.log.
 #
 # QEMU runs in the background and is killed when done; it is never wrapped
 # in `timeout` (QEMU 10 misbehaves under it).
@@ -120,7 +121,12 @@ fi
 
 echo "$status $arch: BOOTOK=$(grep -ac BOOTOK "$log") after ${waited}s; ${tally:-no test tally}"
 if [[ $status != PASS ]]; then
+    # The failed tests with the line after (a test's own detail), then the
+    # panic or summary.
+    grep -aE -A1 '\.\.\.\[failed\]' "$log" | head -20
     grep -aE -A3 'KERNEL PANIC|panicked at|BOOTFAIL|\[FAIL' "$log" | head -20
-    echo "log: $log"
+    # The next boot of this architecture overwrites the log; keep this one.
+    cp "$log" "$log_dir/boot-$arch.failed.log"
+    echo "log: $log_dir/boot-$arch.failed.log"
     exit 1
 fi
