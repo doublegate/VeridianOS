@@ -132,8 +132,9 @@ pub fn nproc_allows(tasks: usize, limit: u64) -> bool {
 
 /// RLIMIT_NPROC (N-224) for `process` making a process or thread (Linux's
 /// copy_process): its real user may not already have as many tasks --
-/// threads, and processes not yet reaped -- as the limit allows. Root is
-/// exempt, as Linux exempts the root user and CAP_SYS_RESOURCE.
+/// threads, and processes not yet reaped -- as the limit allows. As on
+/// Linux, the root user (real uid 0) is exempt, and so is a calling thread
+/// holding CAP_SYS_RESOURCE or CAP_SYS_ADMIN.
 ///
 /// The check and the new task's arrival in the process table must be one
 /// step, or two creations by the same user could both see its last free
@@ -143,8 +144,10 @@ pub fn nproc_allows(tasks: usize, limit: u64) -> bool {
 /// RLIM_INFINITY, the default) take no lock.
 #[cfg(feature = "alloc")]
 pub fn check_nproc(process: &super::Process) -> Result<NprocGuard, SyscallError> {
+    use super::linux_caps::{CAP_SYS_ADMIN, CAP_SYS_RESOURCE};
     let creds = process.credentials();
-    if creds.ruid == 0 || creds.euid == 0 {
+    let caller = super::creds::Caller::current();
+    if creds.ruid == 0 || caller.capable(CAP_SYS_RESOURCE) || caller.capable(CAP_SYS_ADMIN) {
         return Ok(NprocGuard { _held: None });
     }
     let limit = process.limits().cur(RLIMIT_NPROC);

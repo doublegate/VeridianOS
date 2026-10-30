@@ -153,7 +153,17 @@ pub fn create_process_with_options(
         entry: options.entry_point as u64,
         ..Default::default()
     };
-    let stack_top = setup_exec_stack(&process, &argv_refs, &envp_refs, &options.name, &program)?;
+    // A process the kernel starts runs as its credentials say, with no
+    // exec to grant privilege: AT_SECURE only for differing IDs.
+    let secure = process.credentials().ids_differ();
+    let stack_top = setup_exec_stack(
+        &process,
+        &argv_refs,
+        &envp_refs,
+        &options.name,
+        &program,
+        secure,
+    )?;
 
     // Update the thread context with the adjusted stack pointer
     if let Some(thread) = process.get_thread(tid) {
@@ -310,46 +320,88 @@ struct ExecIds {
     set_gid: Option<u32>,
     /// The caller may read the program (and its loader).
     readable: bool,
-    /// The process's tracer (0: none) when the exec started.
-    tracer_at_start: u64,
+    /// The process was traced, by a tracer without CAP_SYS_PTRACE, when
+    /// the exec started.
+    unprivileged_tracer_at_start: bool,
+    /// The program's capabilities (`security.capability`), if it has any.
+    file_caps: Option<super::linux_caps::FileCaps>,
 }
 
-/// Install the credentials a program runs with (Linux's
-/// cred_guard_mutex section of exec): `set_ids` are the owner and group a
-/// set-user-ID or set-group-ID file offers, granted unless the thread asked
-/// for no new privileges, a tracer without privilege is attached, or
-/// another process shares this one's directories and umask (CLONE_FS: it
-/// could redirect the privileged program; LSM_UNSAFE_SHARE). Decided and
+/// Whether `process` is traced by a tracer that lacked CAP_SYS_PTRACE when
+/// it attached. Read under `cred_guard`, which attach holds.
+#[cfg(feature = "alloc")]
+fn unprivileged_tracer(process: &super::Process) -> bool {
+    use core::sync::atomic::Ordering;
+    process.tracer.load(Ordering::Acquire) != 0 && !process.tracer_capable.load(Ordering::Acquire)
+}
+
+/// Install the credentials and capability sets a program runs with
+/// (Linux's cred_guard_mutex section of exec), and say whether it runs
+/// with AT_SECURE. `set_ids` are the owner and group a set-user-ID or
+/// set-group-ID file offers, `file_caps` its capabilities;
+/// `CapSets::after_exec` (Linux's cap_bprm_creds_from_file) decides what
+/// is granted: not more than before if the thread asked for no new
+/// privileges, a tracer without CAP_SYS_PTRACE is attached, or another
+/// process shares this one's directories and umask (CLONE_FS: it could
+/// redirect the privileged program; LSM_UNSAFE_SHARE). Decided and
 /// installed under `cred_guard`, which ptrace attach takes too: a tracer
 /// attached before is seen here, and one attaching after sees the new
 /// credentials.
 #[cfg(feature = "alloc")]
-fn install_exec_credentials(process: &super::Process, thread: &super::Thread, ids: ExecIds) {
+fn install_exec_credentials(
+    process: &super::Process,
+    thread: &super::Thread,
+    ids: ExecIds,
+) -> Result<bool, KernelError> {
     use core::sync::atomic::Ordering;
 
     let _guard = process.cred_guard.lock();
-    // Traced without privilege as the exec started or now: either denies.
-    let unprivileged = |tracer: u64| match tracer {
-        0 => false,
-        tracer => super::table::get_process(super::ProcessId(tracer)).is_none_or(|t| t.euid() != 0),
-    };
-    let traced_unprivileged =
-        unprivileged(ids.tracer_at_start) || unprivileged(process.tracer.load(Ordering::Acquire));
+    // Traced without privilege as the exec started or now: either is
+    // unsafe (Linux's ptracer_capable: the tracer's CAP_SYS_PTRACE when it
+    // attached).
+    let traced_unprivileged = ids.unprivileged_tracer_at_start || unprivileged_tracer(process);
     // exec runs only in a single-threaded process, so this thread is the
     // process's only user of its filesystem state.
     let fs_shared = thread.fs().users.load(Ordering::Acquire) > 1;
-    let may_gain =
-        !thread.no_new_privs.load(Ordering::Acquire) && !traced_unprivileged && !fs_shared;
-    let creds = process
-        .credentials()
-        .after_exec(ids.set_uid, ids.set_gid, may_gain);
+    let old = process.credentials();
+    let no_new_privs = thread.no_new_privs.load(Ordering::Acquire);
+    // Under no_new_privs the set-ID bits are ignored altogether (Linux's
+    // bprm_fill_uid): the IDs do not change, so the program is not secure.
+    let (set_uid, set_gid) = if no_new_privs {
+        (None, None)
+    } else {
+        (ids.set_uid, ids.set_gid)
+    };
+    let (new_euid, new_egid) = (set_uid.unwrap_or(old.euid), set_gid.unwrap_or(old.egid));
+    let ctx = super::linux_caps::ExecContext {
+        file: ids.file_caps,
+        no_new_privs,
+        unsafe_exec: traced_unprivileged || fs_shared,
+        egid_in_groups: old.in_group(new_egid),
+    };
+    // A copy: exec runs single-threaded, so nothing else changes this
+    // thread's sets, and no thread's sets lock is held while the
+    // credentials are (the order of `Process::change_uids`).
+    let caps = *thread.caps.lock();
+    // A capability-dumb program was refused before the point of no return,
+    // by the same rules on the same file and sets: they cannot refuse here.
+    let outcome = caps
+        .after_exec(old.ruid, old.euid, old.rgid, new_euid, new_egid, ctx)
+        .map_err(|_| KernelError::PermissionDenied { operation: "exec" })?;
+    let creds = old.after_exec(Some(outcome.euid), Some(outcome.egid), true);
     process.update_credentials(|c| *c = creds);
-    // Linux's begin_new_exec: a process running with other effective IDs
-    // than its real ones, or a program it could not read, may not be
-    // traced or have its memory read by its user (PR_GET_DUMPABLE 0);
-    // otherwise exec makes it dumpable again.
-    let dumpable = ids.readable && creds.euid == creds.ruid && creds.egid == creds.rgid;
+    // Linux's begin_new_exec and commit_creds: a process whose effective
+    // IDs differed from its real ones, whose effective or filesystem IDs
+    // exec changed, whose permitted capabilities grew, or which runs a
+    // program it could not read, may not be traced or have its memory
+    // read by its user (PR_GET_DUMPABLE 0); otherwise exec makes it
+    // dumpable again. What counts is the result: a set-user-ID exec that
+    // was downgraded (shared filesystem state) leaves it dumpable.
+    let grew = !outcome.caps.permitted.is_subset_of(caps.permitted);
+    *thread.caps.lock() = outcome.caps;
+    let dumpable = ids.readable && old.exec_keeps_dumpable(&creds) && !grew;
     process.dumpable.store(dumpable, Ordering::Release);
+    Ok(outcome.secure)
 }
 
 /// The last component of `path` (Linux's kbasename).
@@ -358,23 +410,23 @@ fn basename(path: &str) -> &str {
     path.rsplit('/').next().unwrap_or(path)
 }
 
-/// Read the file at `path` for exec: it must be a regular file the caller
-/// (`uid`, `gid`) may execute -- root needs at least one execute bit, as on
-/// Linux -- or the result is `PermissionDenied` (EACCES). The check and the
-/// read use the same resolved node, so the file cannot be swapped between
-/// them (N-101). The node comes back too: the loader maps the file's pages
-/// from its page cache (ADR 0010).
+/// Read the file at `path` for exec: it must be a regular file `caller`
+/// may execute (`fs::permission`: CAP_DAC_OVERRIDE needs at least one
+/// execute bit, as on Linux), or the result is `PermissionDenied` (EACCES). The
+/// check and the read use the same resolved node, so the file cannot be swapped
+/// between them (N-101). The node comes back too: the loader maps the file's
+/// pages from its page cache (ADR 0010).
 #[cfg(feature = "alloc")]
 pub(crate) fn read_executable(
     path: &str,
-    creds: &super::creds::Credentials,
+    caller: &super::creds::Caller,
 ) -> Result<(alloc::sync::Arc<dyn crate::fs::VfsNode>, Vec<u8>), KernelError> {
     let node = crate::fs::get_vfs()
         .as_caller()
         .resolve_path(path)
         .map_err(|_| KernelError::FsError(crate::error::FsError::NotFound))?;
     let meta = node.metadata()?;
-    if !may_execute(&meta, creds.fsuid, creds.gid_for(meta.gid)) {
+    if !may_execute(&meta, caller) {
         return Err(KernelError::PermissionDenied { operation: "exec" });
     }
     let mut data = alloc::vec![0u8; meta.size];
@@ -383,16 +435,12 @@ pub(crate) fn read_executable(
     Ok((node, data))
 }
 
-/// Whether `uid`/`gid` may execute a node with metadata `meta`.
+/// Whether `caller` may execute a node with metadata `meta`: a regular
+/// file only.
 #[cfg(feature = "alloc")]
-fn may_execute(meta: &crate::fs::Metadata, uid: u32, gid: u32) -> bool {
-    let perms = &meta.permissions;
+fn may_execute(meta: &crate::fs::Metadata, caller: &super::creds::Caller) -> bool {
     meta.node_type == crate::fs::NodeType::File
-        && if uid == 0 {
-            perms.owner_exec || perms.group_exec || perms.other_exec
-        } else {
-            perms.can_run(uid, gid, meta.uid, meta.gid)
-        }
+        && crate::fs::permission(caller, meta, crate::fs::MAY_EXEC)
 }
 
 /// Execute a new program in current process
@@ -439,8 +487,6 @@ fn exec_at_depth(
     before_commit: &dyn Fn() -> Result<(), KernelError>,
     depth: usize,
 ) -> Result<(), KernelError> {
-    use crate::elf::ElfLoader;
-
     let process = super::current_process().ok_or(KernelError::ProcessNotFound { pid: 0 })?;
     let current_thread = super::current_thread().ok_or(KernelError::ThreadNotFound { tid: 0 })?;
 
@@ -453,7 +499,7 @@ fn exec_at_depth(
 
     // Step 1: Load new program from filesystem, checking execute
     // permission on the node that is read (N-101).
-    let (file_node, file_data) = read_executable(&resolved_path, &process.credentials())?;
+    let (file_node, file_data) = read_executable(&resolved_path, &super::creds::Caller::current())?;
 
     // Step 1b: Check for shebang (#!) and delegate to interpreter if found
     if let Some((interpreter, opt_arg)) = parse_shebang(&file_data) {
@@ -488,6 +534,38 @@ fn exec_at_depth(
         return Ok(());
     }
 
+    exec_image(
+        process,
+        current_thread,
+        resolved_path,
+        file_node,
+        file_data,
+        argv,
+        envp,
+        before_commit,
+    )
+}
+
+/// The rest of exec once the file is a program rather than a script. It is
+/// kept out of `exec_at_depth`, which recurses for `#!` interpreters, so
+/// each level of that recursion holds only a small frame: the image work
+/// takes several KiB of stack in a debug build, and with file capabilities
+/// a self-interpreting script overflowed the 64 KiB kernel stack on AArch64.
+#[cfg(feature = "alloc")]
+#[inline(never)]
+#[allow(clippy::too_many_arguments)]
+fn exec_image(
+    process: alloc::sync::Arc<super::Process>,
+    current_thread: alloc::sync::Arc<super::Thread>,
+    resolved_path: String,
+    file_node: alloc::sync::Arc<dyn crate::fs::VfsNode>,
+    file_data: Vec<u8>,
+    argv: &[&str],
+    envp: &[&str],
+    before_commit: &dyn Fn() -> Result<(), KernelError>,
+) -> Result<(), KernelError> {
+    use crate::elf::ElfLoader;
+
     // Validate and plan the image before touching the current address
     // space (ADR 0010). exec must leave the caller intact when it fails;
     // parsing after clear() meant a non-ELF file (e.g. the empty
@@ -519,7 +597,7 @@ fn exec_at_depth(
     );
     let interp: Option<Interp> = match &elf_binary.interpreter {
         Some(path) => {
-            let (node, data) = read_executable(path, &process.credentials())?;
+            let (node, data) = read_executable(path, &super::creds::Caller::current())?;
             let bad = |_| KernelError::InvalidArgument {
                 name: "interpreter",
                 value: "not a loadable ELF image",
@@ -537,24 +615,48 @@ fn exec_at_depth(
     // A program (or loader) the caller may run but not read must not be
     // readable through the process either (Linux's would_dump).
     let set_ids = {
-        let creds = process.credentials();
-        let readable = |meta: &crate::fs::Metadata| {
-            meta.permissions
-                .can_read(creds.fsuid, creds.gid_for(meta.gid), meta.uid, meta.gid)
-        };
+        let caller = super::creds::Caller::current();
+        let readable =
+            |meta: &crate::fs::Metadata| crate::fs::permission(&caller, meta, crate::fs::MAY_READ);
         let meta = file_node.metadata()?;
         let perms = meta.permissions;
         let interp_readable = match &interp {
             Some((node, ..)) => readable(&node.metadata()?),
             None => true,
         };
+        let file_caps = exec_file_caps(&*file_node)?;
         ExecIds {
             set_uid: perms.set_uid.then_some(meta.uid),
             set_gid: (perms.set_gid && perms.group_exec).then_some(meta.gid),
             readable: readable(&meta) && interp_readable,
-            tracer_at_start: 0,
+            unprivileged_tracer_at_start: false,
+            file_caps,
         }
     };
+
+    // A program whose effective bit asks for capabilities it would not get
+    // (a capability-dumb program would run without them) fails here, with
+    // the caller intact (Linux's bprm_caps_from_vfs_caps, EPERM). The
+    // check does not depend on what install decides later.
+    if let Some(file) = set_ids.file_caps {
+        let old = process.credentials();
+        let ctx = super::linux_caps::ExecContext {
+            file: Some(file),
+            ..Default::default()
+        };
+        current_thread
+            .caps
+            .lock()
+            .after_exec(
+                old.ruid,
+                old.euid,
+                old.rgid,
+                set_ids.set_uid.unwrap_or(old.euid),
+                set_ids.set_gid.unwrap_or(old.egid),
+                ctx,
+            )
+            .map_err(|_| KernelError::FsError(crate::error::FsError::OperationNotPermitted))?;
+    }
 
     // BTI guarding, from the images' property notes: a malformed one is
     // ENOEXEC here, with the caller intact.
@@ -577,17 +679,21 @@ fn exec_at_depth(
     // PEEK and POKE do not write into the image being built (PR #23
     // review: a tracer could poke the new set-ID image, then detach before
     // the decision and have the privilege granted to its modified image).
-    let tracer_at_start = {
+    let unprivileged_tracer_at_start = {
         let _guard = process.cred_guard.lock();
         process
             .exec_in_progress
             .store(true, core::sync::atomic::Ordering::Release);
-        process.tracer.load(core::sync::atomic::Ordering::Acquire)
+        unprivileged_tracer(&process)
     };
     let set_ids = ExecIds {
-        tracer_at_start,
+        unprivileged_tracer_at_start,
         ..set_ids
     };
+    // An exec that may grant privilege maps the bytes it checked, not the
+    // page cache (`elf::image::load`).
+    let private_image =
+        set_ids.file_caps.is_some() || set_ids.set_uid.is_some() || set_ids.set_gid.is_some();
 
     // Point of no return: from clear() on, a failure cannot go back to the
     // old image. The process is then killed with SIGSEGV at the system-call
@@ -647,6 +753,7 @@ fn exec_at_depth(
                     .as_ref()
                     .map(|(node, data, binary)| (binary, &**node, data.as_slice())),
                 guards,
+                private_image,
             )?
         };
 
@@ -660,10 +767,11 @@ fn exec_at_depth(
         // The program's credentials, before the stack: AT_SECURE (and so
         // the loader's refusal of LD_PRELOAD and LD_LIBRARY_PATH) follows
         // from them.
-        install_exec_credentials(&process, &current_thread, set_ids);
+        let secure = install_exec_credentials(&process, &current_thread, set_ids)?;
 
         // Step 3: Setup new stack with arguments, environment, and aux vector
-        let stack_top = setup_exec_stack(&process, argv, envp, &resolved_path, &loaded.aux)?;
+        let stack_top =
+            setup_exec_stack(&process, argv, envp, &resolved_path, &loaded.aux, secure)?;
         Ok((loaded.start, stack_top))
     })();
     process
@@ -976,6 +1084,7 @@ pub(crate) fn setup_exec_stack(
     envp: &[&str],
     execfn: &str,
     program: &crate::elf::dynamic::ProgramAux,
+    secure: bool,
 ) -> Result<usize, KernelError> {
     let creds = process.credentials();
     let process_aux = crate::elf::dynamic::ProcessAux {
@@ -983,8 +1092,8 @@ pub(crate) fn setup_exec_stack(
         euid: creds.euid,
         gid: creds.rgid,
         egid: creds.egid,
-        // Linux's secureexec: the effective IDs differ from the real ones.
-        secure: creds.euid != creds.ruid || creds.egid != creds.rgid,
+        // Linux's secureexec, as exec decided it (`ExecOutcome::secure`).
+        secure,
     };
     let mut random = [0u8; 16];
     crate::crypto::random::get_random()
@@ -1118,10 +1227,52 @@ pub(crate) fn exec_stack_layout<'a>(
     }
 }
 
+/// The program's own capabilities, read with the file (Linux's
+/// get_file_caps): a malformed value fails the exec (EINVAL); a filesystem
+/// without attributes gives none; any other failure to read them fails the
+/// exec, since a set-user-ID-root program's file capabilities may be what
+/// limits it (get_vfs_caps_from_disk returns the error).
+#[cfg(feature = "alloc")]
+fn exec_file_caps(
+    node: &dyn crate::fs::VfsNode,
+) -> Result<Option<super::linux_caps::FileCaps>, KernelError> {
+    match node.xattrs() {
+        Ok(attrs) => match attrs.get(crate::fs::xattr::XATTR_NAME_CAPS) {
+            Some(value) => super::linux_caps::FileCaps::from_xattr(value).map_err(|_| {
+                KernelError::InvalidArgument {
+                    name: "security.capability",
+                    value: "not a file capability",
+                }
+            }),
+            None => Ok(None),
+        },
+        Err(KernelError::FsError(crate::error::FsError::NotSupported)) => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::elf::dynamic::{AuxType, ProcessAux, ProgramAux};
+
+    /// An exec whose file capabilities cannot be read fails rather than
+    /// running without them (PR #33 review round 7); no attributes is none.
+    #[test]
+    fn an_exec_whose_caps_cannot_be_read_fails() {
+        use alloc::sync::Arc;
+
+        use crate::fs::{
+            tests::{make_vfs_with_root, StuckCaps},
+            Permissions,
+        };
+        let vfs = make_vfs_with_root();
+        let root = vfs.root_fs().unwrap().root();
+        let inner = root.create("prog", Permissions::from_mode(0o4755)).unwrap();
+        assert!(matches!(exec_file_caps(&*inner), Ok(None)));
+        let stuck = Arc::new(StuckCaps(inner, true));
+        assert!(exec_file_caps(&*stuck).is_err());
+    }
 
     /// An exec follows at most four `#!` interpreters, as Linux, and then
     /// fails with ELOOP: a script naming itself recursed until the kernel
@@ -1257,21 +1408,36 @@ mod tests {
     }
 
     /// N-101: exec needs a regular file with an execute bit the caller
-    /// holds; root needs any execute bit, and never a directory.
+    /// holds; CAP_DAC_OVERRIDE (root) needs any execute bit, and never a
+    /// directory.
     #[test]
     fn exec_permission_follows_linux_rules() {
-        use crate::fs::NodeType;
+        use crate::{
+            fs::NodeType,
+            process::creds::{Caller, Credentials},
+        };
         let file = NodeType::File;
+        let root = Caller::KERNEL;
+        let user = |uid: u32, gid: u32| Caller {
+            creds: Credentials::new(uid, gid),
+            caps: crate::process::linux_caps::LinuxCaps::EMPTY,
+        };
         // Root: any execute bit, but at least one.
-        assert!(!may_execute(&meta(file, 0o644, 0, 0), 0, 0));
-        assert!(may_execute(&meta(file, 0o001, 5, 5), 0, 0));
-        assert!(!may_execute(&meta(NodeType::Directory, 0o755, 0, 0), 0, 0));
+        assert!(!may_execute(&meta(file, 0o644, 0, 0), &root));
+        assert!(may_execute(&meta(file, 0o001, 5, 5), &root));
+        assert!(!may_execute(&meta(NodeType::Directory, 0o755, 0, 0), &root));
         // Owner, group and other classes.
-        assert!(may_execute(&meta(file, 0o700, 1000, 1000), 1000, 1000));
-        assert!(!may_execute(&meta(file, 0o700, 0, 0), 1000, 1000));
-        assert!(may_execute(&meta(file, 0o710, 0, 100), 1000, 100));
-        assert!(may_execute(&meta(file, 0o701, 0, 0), 1000, 1000));
+        assert!(may_execute(
+            &meta(file, 0o700, 1000, 1000),
+            &user(1000, 1000)
+        ));
+        assert!(!may_execute(&meta(file, 0o700, 0, 0), &user(1000, 1000)));
+        assert!(may_execute(&meta(file, 0o710, 0, 100), &user(1000, 100)));
+        assert!(may_execute(&meta(file, 0o701, 0, 0), &user(1000, 1000)));
         // The owner class decides for the owner, even if others may run it.
-        assert!(!may_execute(&meta(file, 0o611, 1000, 0), 1000, 1000));
+        assert!(!may_execute(&meta(file, 0o611, 1000, 0), &user(1000, 1000)));
+        // Uid 0 without CAP_DAC_OVERRIDE is held to the mode bits.
+        assert!(!may_execute(&meta(file, 0o100, 5, 5), &user(0, 0)));
+        assert!(may_execute(&meta(file, 0o100, 5, 5), &root));
     }
 }

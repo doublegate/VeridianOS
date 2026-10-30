@@ -10,6 +10,7 @@
 use core::{
     marker::PhantomData,
     ops::{Index, IndexMut},
+    sync::atomic::{AtomicU64, Ordering},
 };
 
 use super::{pte, FrameNumber, PageFlags, PhysicalAddress, VirtualAddress, FRAME_ALLOCATOR};
@@ -66,19 +67,19 @@ impl PageTableEntry {
 
     /// Set this entry to map to a frame with given flags (a leaf)
     pub fn set(&mut self, frame: FrameNumber, flags: PageFlags) {
-        self.entry = pte::native::leaf(frame, flags);
+        self.store(pte::native::leaf(frame, flags));
     }
 
     /// Point this entry at the next-level table in `frame`; `user` when it
     /// is on the path to a user page.
     pub fn set_table(&mut self, frame: FrameNumber, user: bool) {
-        self.entry = pte::native::table(frame, user);
+        self.store(pte::native::table(frame, user));
     }
 
     /// Let user pages below this table entry be reached (x86_64 checks
     /// USER at every level; RISC-V has nothing to add).
     pub fn grant_user_table(&mut self) {
-        self.entry = pte::native::grant_user_table(self.entry);
+        self.store(pte::native::grant_user_table(self.entry));
     }
 
     /// Set this entry to map to an address with given flags
@@ -88,7 +89,36 @@ impl PageTableEntry {
 
     /// Clear this entry
     pub fn clear(&mut self) {
-        self.entry = 0;
+        self.store(0);
+    }
+
+    /// Write the entry with one atomic store, so a lock-free walk
+    /// ([`translate_lockless`]) racing it reads the old or the new value and
+    /// the two accesses are not a data race (Linux's WRITE_ONCE in set_pte).
+    /// Release, paired with the walk's Acquire load: a table zeroed before
+    /// it is installed here reads as zeroed to a walk that finds it (Linux's
+    /// smp_wmb in pmd_install). Both are plain moves on x86_64.
+    fn store(&mut self, value: u64) {
+        // SAFETY: `self.entry` is a valid, 8-byte aligned u64 (the entry is
+        // repr(transparent) over it), borrowed mutably for the call.
+        unsafe { AtomicU64::from_ptr(&mut self.entry) }.store(value, Ordering::Release);
+    }
+
+    /// Entry `index` of the table at `table`, read with one atomic load and
+    /// no reference to the table (Linux's READ_ONCE in a lockless walk).
+    ///
+    /// # Safety
+    ///
+    /// `table` points to a live page table and `index` is below
+    /// [`PAGE_TABLE_ENTRIES`].
+    unsafe fn load(table: *const PageTable, index: usize) -> Self {
+        // SAFETY: per the caller, the word is inside a live table; entries
+        // are 8-byte aligned (the table is 4096-aligned), and every write
+        // to an entry is atomic (`store`).
+        let word = unsafe { AtomicU64::from_ptr(table.cast::<u64>().add(index).cast_mut()) };
+        Self {
+            entry: word.load(Ordering::Acquire),
+        }
     }
 }
 
@@ -628,74 +658,15 @@ impl PageMapper {
     /// Look up the physical frame mapped at a virtual address.
     ///
     /// Walks the page table hierarchy and returns the frame number and flags
-    /// of the L1 (leaf) entry if the page is present at all four levels.
+    /// of the leaf entry if the page is present at every level. The walk is
+    /// [`translate_lockless`]: it makes no reference to any table.
     pub fn translate_page(
         &self,
         page: VirtualAddress,
     ) -> Result<(FrameNumber, PageFlags), KernelError> {
-        let breakdown = VirtualAddressBreakdown::new(page);
-
-        // SAFETY: the root or a present entry's table, through the physical
-        // map (same invariants as the other PageMapper methods).
-        let l3_table = unsafe { &*self.l3_table(page, false)? };
-        let l3_entry = &l3_table[breakdown.l3_index];
-        if !l3_entry.is_present() {
-            return Err(KernelError::UnmappedMemory {
-                addr: page.as_u64() as usize,
-            });
-        }
-        // A 1 GiB leaf (the kernel's physical map): the 4 KiB frame in it.
-        if l3_entry.is_huge() {
-            let base = l3_entry.frame().ok_or(KernelError::UnmappedMemory {
-                addr: page.as_u64() as usize,
-            })?;
-            return Ok((
-                FrameNumber::new(base.as_u64() + (page.as_u64() >> 12 & 0x3FFFF)),
-                l3_entry.flags() | PageFlags::HUGE,
-            ));
-        }
-
-        let l2_phys = l3_entry.addr().ok_or(KernelError::InvalidState {
-            expected: "L3 entry has address",
-            actual: "no address",
-        })?;
-        // SAFETY: Physical address from a present L3 entry, converted to virtual via
-        // identity-mapped region.
-        let l2_table =
-            unsafe { &*(super::phys_to_virt_addr(l2_phys.as_u64()) as *const PageTable) };
-        let l2_entry = &l2_table[breakdown.l2_index];
-        if !l2_entry.is_present() {
-            return Err(KernelError::UnmappedMemory {
-                addr: page.as_u64() as usize,
-            });
-        }
-        // A 2 MiB leaf: the 4 KiB frame within it (flags keep HUGE).
-        if l2_entry.is_huge() {
-            let base = l2_entry.frame().ok_or(KernelError::UnmappedMemory {
-                addr: page.as_u64() as usize,
-            })?;
-            return Ok((
-                FrameNumber::new(base.as_u64() + (page.as_u64() >> 12 & 0x1FF)),
-                // RISC-V leaves have no HUGE bit: the level is the size.
-                l2_entry.flags() | PageFlags::HUGE,
-            ));
-        }
-
-        let l1_phys = l2_entry.addr().ok_or(KernelError::InvalidState {
-            expected: "L2 entry has address",
-            actual: "no address",
-        })?;
-        // SAFETY: Physical address from a present L2 entry, converted to virtual via
-        // identity-mapped region.
-        let l1_table =
-            unsafe { &*(super::phys_to_virt_addr(l1_phys.as_u64()) as *const PageTable) };
-        let entry = &l1_table[breakdown.l1_index];
-
-        let frame = entry.frame().ok_or(KernelError::UnmappedMemory {
-            addr: page.as_u64() as usize,
-        })?;
-
-        Ok((frame, entry.flags()))
+        // SAFETY: `self.l4_table` is a live root (PageMapper::new), and the
+        // tables below it stay allocated while this mapper exists.
+        unsafe { translate_lockless(self.l4_table, self.levels, page) }
     }
 
     /// Update the flags on an existing page table entry without changing the
@@ -892,6 +863,154 @@ fn next_table_or_create(
     Ok(super::phys_to_virt_addr(phys.as_u64()) as *mut PageTable)
 }
 
+/// The frame and flags `page` maps to under the root table `root`, walked
+/// with `levels` levels (3 or 4), as [`PageMapper::translate_page`]. Takes
+/// no lock and makes no reference to any table: each entry is one atomic
+/// load ([`PageTableEntry::load`]), and entries are only written by atomic
+/// stores, so a walk racing an unmap or an mprotect of the same address
+/// space reads each entry before or after the change, as the hardware
+/// walker does (PR #33 review).
+///
+/// # Safety
+///
+/// `root` points to a live page table, and every table below it stays
+/// allocated for the call. That holds for the active user half, whose
+/// table frames are freed only at exec (single-threaded by then) and at
+/// teardown (no thread left in it); unmap and mprotect only rewrite
+/// entries.
+pub unsafe fn translate_lockless(
+    root: *const PageTable,
+    levels: u8,
+    page: VirtualAddress,
+) -> Result<(FrameNumber, PageFlags), KernelError> {
+    // SAFETY: the caller's.
+    match unsafe { walk_lockless(root, levels, page) } {
+        Ok(leaf) => Ok((leaf.frame, leaf.flags)),
+        Err(Hole::NotCanonical) => Err(KernelError::InvalidAddress {
+            addr: page.as_u64() as usize,
+        }),
+        Err(Hole::Unmapped(_)) => Err(KernelError::UnmappedMemory {
+            addr: page.as_u64() as usize,
+        }),
+    }
+}
+
+/// Why [`walk_lockless`] found no leaf.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Hole {
+    /// The address is not canonical for the number of levels.
+    NotCanonical,
+    /// No entry maps it: the bytes the missing entry covers (512 GiB,
+    /// 1 GiB, 2 MiB or 4 KiB), aligned to that size, so a caller scanning a
+    /// range can skip all of it (PR #33 review: checking a long range page
+    /// by page took one walk per 4 KiB of address space).
+    Unmapped(u64),
+}
+
+/// What [`walk_lockless`] found mapping a page.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Leaf {
+    /// The 4 KiB frame holding the page, also inside a larger leaf.
+    pub frame: FrameNumber,
+    /// The leaf's flags; HUGE for a 2 MiB or 1 GiB leaf.
+    pub flags: PageFlags,
+    /// The bytes the leaf maps (4 KiB, 2 MiB or 1 GiB), from the level
+    /// the walk stopped at: bit 7 of a last-level entry is x86_64's PAT
+    /// bit, not HUGE, so the flags cannot tell (PR #33 review).
+    pub span: u64,
+}
+
+/// [`translate_lockless`], telling a missing mapping's extent apart and
+/// reporting the size of the leaf.
+///
+/// # Safety
+///
+/// As [`translate_lockless`].
+pub unsafe fn walk_lockless(
+    root: *const PageTable,
+    levels: u8,
+    page: VirtualAddress,
+) -> Result<Leaf, Hole> {
+    const L1_SPAN: u64 = 1 << 12;
+    const L2_SPAN: u64 = 1 << 21;
+    const L3_SPAN: u64 = 1 << 30;
+    let va = page.as_u64();
+    let shift = 64 - (12 + 9 * u32::from(levels));
+    if (((va << shift) as i64) >> shift) as u64 != va {
+        return Err(Hole::NotCanonical);
+    }
+    let table_at = |entry: PageTableEntry, span: u64| -> Result<*const PageTable, Hole> {
+        let phys = entry.addr().ok_or(Hole::Unmapped(span))?;
+        Ok(super::phys_to_virt_addr(phys.as_u64()) as *const PageTable)
+    };
+    let breakdown = VirtualAddressBreakdown::new(page);
+
+    let l3_table = if levels == 3 {
+        root
+    } else {
+        let top_shift = 12 + 9 * (u32::from(levels) - 1);
+        let top_span = 1u64 << top_shift;
+        let index = ((va >> top_shift) & 0x1FF) as usize;
+        // SAFETY: `root` is live (the caller) and the index is masked to 9
+        // bits.
+        let entry = unsafe { PageTableEntry::load(root, index) };
+        if !entry.is_present() || entry.is_huge() {
+            return Err(Hole::Unmapped(top_span));
+        }
+        table_at(entry, top_span)?
+    };
+    // SAFETY: a table below the live root, through the physical map; the
+    // breakdown indices are 9 bits.
+    let l3_entry = unsafe { PageTableEntry::load(l3_table, usize::from(breakdown.l3_index)) };
+    if !l3_entry.is_present() {
+        return Err(Hole::Unmapped(L3_SPAN));
+    }
+    // A 1 GiB leaf (the kernel's physical map): the 4 KiB frame in it.
+    if l3_entry.is_huge() {
+        let base = l3_entry.frame().ok_or(Hole::Unmapped(L3_SPAN))?;
+        return Ok(Leaf {
+            frame: FrameNumber::new(base.as_u64() + (va >> 12 & 0x3FFFF)),
+            flags: l3_entry.flags() | PageFlags::HUGE,
+            span: L3_SPAN,
+        });
+    }
+
+    // SAFETY: as above, from a present L3 entry.
+    let l2_entry = unsafe {
+        PageTableEntry::load(
+            table_at(l3_entry, L3_SPAN)?,
+            usize::from(breakdown.l2_index),
+        )
+    };
+    if !l2_entry.is_present() {
+        return Err(Hole::Unmapped(L2_SPAN));
+    }
+    // A 2 MiB leaf: the 4 KiB frame within it (flags keep HUGE).
+    if l2_entry.is_huge() {
+        let base = l2_entry.frame().ok_or(Hole::Unmapped(L2_SPAN))?;
+        return Ok(Leaf {
+            frame: FrameNumber::new(base.as_u64() + (va >> 12 & 0x1FF)),
+            // RISC-V leaves have no HUGE bit: the level is the size.
+            flags: l2_entry.flags() | PageFlags::HUGE,
+            span: L2_SPAN,
+        });
+    }
+
+    // SAFETY: as above, from a present L2 entry.
+    let entry = unsafe {
+        PageTableEntry::load(
+            table_at(l2_entry, L2_SPAN)?,
+            usize::from(breakdown.l1_index),
+        )
+    };
+    let frame = entry.frame().ok_or(Hole::Unmapped(L1_SPAN))?;
+    Ok(Leaf {
+        frame,
+        flags: entry.flags(),
+        span: L1_SPAN,
+    })
+}
+
 /// Extract a physical address from a present page table entry.
 /// Returns the address as a raw u64 suitable for casting to a pointer.
 fn l3_phys_from_entry(entry: &PageTableEntry, page: VirtualAddress) -> Result<u64, KernelError> {
@@ -1022,6 +1141,93 @@ mod tests {
             assert!(m.unmap_page(bad).is_err());
         }
         assert_eq!(present_entries(root), [255, 256]);
+    }
+
+    /// The lock-free walk reads what the mapper wrote, through the root
+    /// alone, and sees each later change to an entry (PR #33 review).
+    #[test]
+    fn lockless_walk_reads_the_entries_the_mapper_writes() {
+        let mut tables = HeapTables(Vec::new());
+        let root = tables.table();
+        // SAFETY: `root` is a live, zeroed table owned by `tables`.
+        let mut m = unsafe { PageMapper::with_levels(root, 4) };
+        let va = VirtualAddress(0x7FFF_0000_0000);
+        // SAFETY (each call below): `root` and the tables under it are live
+        // in `tables` for the whole test.
+        assert!(unsafe { translate_lockless(root, 4, va) }.is_err());
+        m.map_page(va, FrameNumber::new(0x42), USER, &mut tables)
+            .unwrap();
+        let (frame, flags) = unsafe { translate_lockless(root, 4, va) }.unwrap();
+        assert_eq!(frame, FrameNumber::new(0x42));
+        assert!(flags.contains(PageFlags::WRITABLE));
+        m.update_page_flags(va, PageFlags::PRESENT | PageFlags::USER)
+            .unwrap();
+        let (_, flags) = unsafe { translate_lockless(root, 4, va) }.unwrap();
+        assert!(!flags.contains(PageFlags::WRITABLE));
+        m.unmap_page(va).unwrap();
+        assert!(unsafe { translate_lockless(root, 4, va) }.is_err());
+        // Not canonical: refused, as by the mapper.
+        assert!(unsafe { translate_lockless(root, 4, VirtualAddress(0x8000_0000_0000)) }.is_err());
+    }
+
+    /// A missing mapping is reported with the extent of the entry that is
+    /// missing, so a range check can pass over it whole (PR #33 review).
+    #[test]
+    fn lockless_walk_reports_the_extent_of_a_hole() {
+        let mut tables = HeapTables(Vec::new());
+        let root = tables.table();
+        // SAFETY: `root` is a live, zeroed table owned by `tables`.
+        let mut m = unsafe { PageMapper::with_levels(root, 4) };
+        let va = VirtualAddress(0x7FFF_0000_0000);
+        let hole = |at: u64| {
+            // SAFETY: `root` and the tables under it are live in `tables`.
+            unsafe { walk_lockless(root, 4, VirtualAddress(at)) }.unwrap_err()
+        };
+        assert_eq!(hole(va.as_u64()), Hole::Unmapped(1 << 39));
+        m.map_page(va, FrameNumber::new(0x42), USER, &mut tables)
+            .unwrap();
+        // The next page shares the last-level table, the next 2 MiB the
+        // L2 table, the next 1 GiB the L3 table; another 512 GiB has none.
+        assert_eq!(hole(va.as_u64() + 0x1000), Hole::Unmapped(1 << 12));
+        assert_eq!(hole(va.as_u64() + (1 << 21)), Hole::Unmapped(1 << 21));
+        assert_eq!(hole(va.as_u64() + (1 << 30)), Hole::Unmapped(1 << 30));
+        assert_eq!(hole(va.as_u64() - (1 << 39)), Hole::Unmapped(1 << 39));
+        assert_eq!(hole(0x8000_0000_0000), Hole::NotCanonical);
+        // Three levels: the root is the L3 table.
+        let root3 = tables.table();
+        // SAFETY: as above.
+        let three = unsafe { walk_lockless(root3, 3, VirtualAddress(0x4000_0000)) };
+        assert_eq!(three.unwrap_err(), Hole::Unmapped(1 << 30));
+    }
+
+    /// The walk reports the size of the leaf it stopped at, from the level
+    /// rather than bit 7: in a last-level entry that is x86_64's PAT bit,
+    /// HUGE only above it, so a 4 KiB page with PAT set is still 4 KiB
+    /// (PR #33 review).
+    #[test]
+    fn lockless_walk_reports_the_span_of_its_leaf() {
+        let mut tables = HeapTables(Vec::new());
+        let root = tables.table();
+        // SAFETY: `root` is a live, zeroed table owned by `tables`.
+        let mut m = unsafe { PageMapper::with_levels(root, 4) };
+        let small = VirtualAddress(0x7FFF_0000_0000);
+        m.map_page(
+            small,
+            FrameNumber::new(0x42),
+            USER | PageFlags::HUGE,
+            &mut tables,
+        )
+        .unwrap();
+        // SAFETY (both walks): `root` and the tables under it are live in
+        // `tables`.
+        let leaf = unsafe { walk_lockless(root, 4, small) }.unwrap();
+        assert_eq!((leaf.frame, leaf.span), (FrameNumber::new(0x42), 1 << 12));
+        let huge = VirtualAddress(0x7FFF_4000_0000);
+        m.map_huge_2m(huge, FrameNumber::new(0x200), USER, &mut tables)
+            .unwrap();
+        let leaf =
+            unsafe { walk_lockless(root, 4, VirtualAddress(huge.as_u64() + 0x3000)) }.unwrap();
+        assert_eq!((leaf.frame, leaf.span), (FrameNumber::new(0x203), 1 << 21));
     }
 
     /// The same page under four levels goes through root entry 0, and

@@ -5,10 +5,10 @@
 //!
 //! As on Linux these name a thread (pid 0: the caller), whose parameters are
 //! kept in `Thread::sched`; the dispatcher runs the thread's task with them
-//! (`dispatch::set_policy`). There are no capabilities yet, so "privileged"
-//! is root. An unprivileged caller may lower a nice value only as far as
-//! the target process's RLIMIT_NICE allows, take a real-time policy or
-//! priority only up to its RLIMIT_RTPRIO (both 0 by default, as on Linux),
+//! (`dispatch::set_policy`). "Privileged" is the calling thread holding
+//! CAP_SYS_NICE (ADR 0020). An unprivileged caller may lower a nice value only
+//! as far as the target process's RLIMIT_NICE allows, take a real-time policy
+//! or priority only up to its RLIMIT_RTPRIO (both 0 by default, as on Linux),
 //! never take SCHED_DEADLINE, leave SCHED_IDLE only if RLIMIT_NICE allows
 //! its current nice value, never clear SCHED_RESET_ON_FORK, and change only
 //! threads of its own user (EPERM). SCHED_DEADLINE goes through admission
@@ -24,7 +24,8 @@ use spin::Mutex;
 use super::{userspace, SyscallError, SyscallResult};
 use crate::{
     process::{
-        creds::Credentials,
+        creds::{Caller, Credentials},
+        linux_caps::CAP_SYS_NICE,
         thread::{
             SchedParams, Thread, SCHED_BATCH, SCHED_DEADLINE, SCHED_FIFO, SCHED_IDLE, SCHED_NORMAL,
             SCHED_RR,
@@ -227,17 +228,17 @@ fn target(
     found.ok_or(SyscallError::ProcessNotFound)
 }
 
-/// The caller's credentials.
-fn caller() -> Result<Credentials, SyscallError> {
-    Ok(crate::process::current_process()
-        .ok_or(SyscallError::InvalidState)?
-        .credentials())
+/// The calling thread, which must belong to a process.
+fn caller() -> Result<Caller, SyscallError> {
+    crate::process::current_process().ok_or(SyscallError::InvalidState)?;
+    Ok(Caller::current())
 }
 
 /// Linux's check_same_owner: the caller's effective UID is the target's
-/// real or effective one, or the caller is root.
-fn same_owner(caller: &Credentials, target: &Credentials) -> bool {
-    caller.euid == 0 || caller.euid == target.euid || caller.euid == target.ruid
+/// real or effective one, or the caller holds CAP_SYS_NICE.
+fn same_owner(caller: &Caller, target: &Credentials) -> bool {
+    let euid = caller.creds.euid;
+    euid == target.euid || euid == target.ruid || caller.capable(CAP_SYS_NICE)
 }
 
 /// Whether the caller may change the scheduling of process `pid`'s threads
@@ -260,7 +261,12 @@ fn set(
     let me = caller()?;
     let mut params = thread.sched.lock();
     let request = req(&params)?;
-    let new = decide(&params, &request, me.euid == 0, Allowance::of(owner_pid))?;
+    let new = decide(
+        &params,
+        &request,
+        me.capable(CAP_SYS_NICE),
+        Allowance::of(owner_pid),
+    )?;
     if !same_owner(&me, &owner) {
         return Err(SyscallError::OperationNotPermitted);
     }
@@ -657,7 +663,7 @@ pub fn sys_setpriority(which: usize, who: usize, nice: usize) -> SyscallResult {
         }
         let allow = Allowance::of(pid);
         let mut params = thread.sched.lock();
-        if nice < params.nice && me.euid != 0 && !allow.can_nice(nice) {
+        if nice < params.nice && !me.capable(CAP_SYS_NICE) && !allow.can_nice(nice) {
             result = Err(SyscallError::PermissionDenied);
             continue;
         }

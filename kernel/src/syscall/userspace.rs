@@ -21,10 +21,43 @@ const USER_SPACE_START: usize = 0x0000_0000_0000_0000;
 use crate::mm::user_layout::user_space_end; // exclusive end
 const PAGE_SIZE: usize = 4096;
 
-/// Check if a user pointer is valid with comprehensive validation
+/// Check if a user pointer is valid with comprehensive validation: the
+/// range (below) and no PROT_NONE page in it.
 pub fn validate_user_ptr<T>(ptr: *const T, len: usize) -> Result<(), SyscallError> {
     let addr = ptr as usize;
+    let end = validate_user_range(addr, len)?;
+    // Whether the pages are mapped is not checked here: the copy itself
+    // finds out. A fault in the user-copy routines returns EFAULT through
+    // the exception table (MEM-SEC-01, ARCH-MEM-03, ADR 0016), after the
+    // fault path has tried the page as a user access. What the copy cannot
+    // find out is a present page user mode may not touch: a PROT_NONE leaf
+    // is kept for the kernel only, so the kernel's access does not fault.
+    // Those are refused here, as Linux's not-present PROT_NONE entries are.
+    // An empty range touches no page, whatever its alignment.
+    #[cfg(all(target_os = "none", feature = "alloc"))]
+    if len != 0 {
+        // Unmapped regions and huge leaves are passed over whole, so a long
+        // range costs what is mapped in it, not one walk per page of it.
+        let mut page = addr & !(PAGE_SIZE - 1);
+        while page < end {
+            let (flags, next) = crate::mm::user_validation::active_user_page(page);
+            if present_but_not_user(flags) {
+                return Err(SyscallError::InvalidPointer);
+            }
+            page = next;
+        }
+    }
+    #[cfg(not(all(target_os = "none", feature = "alloc")))]
+    let _ = end;
 
+    Ok(())
+}
+
+/// The address-range part of [`validate_user_ptr`]: not null, no overflow,
+/// below the end of user space. Returns the end. Copies that go page by
+/// page check each page's permissions themselves, so a transfer stopped by
+/// a PROT_NONE page still returns what it moved before it (PR #33 review).
+fn validate_user_range(addr: usize, len: usize) -> Result<usize, SyscallError> {
     // Check for null pointer
     if addr == 0 {
         return Err(SyscallError::InvalidPointer);
@@ -38,14 +71,15 @@ pub fn validate_user_ptr<T>(ptr: *const T, len: usize) -> Result<(), SyscallErro
     if end > user_space_end() {
         return Err(SyscallError::InvalidPointer);
     }
+    Ok(end)
+}
 
-    // Whether the pages are mapped is not checked here: the copy itself
-    // finds out. On x86_64 a fault in the user-copy routines returns EFAULT
-    // through the exception table (MEM-SEC-01); AArch64 and RISC-V get that
-    // with user mode (sprint E, ARCH-MEM-03). The per-page loop that used to
-    // follow only re-checked the bound above, once per page (PB-MEM-07).
-
-    Ok(())
+/// Whether a page the kernel would copy through is one user mode may not
+/// access (PROT_NONE): present, without the user bit. A page that is not
+/// present is left to the copy's fault path.
+fn present_but_not_user(flags: Option<crate::mm::PageFlags>) -> bool {
+    use crate::mm::PageFlags;
+    flags.is_some_and(|f| f.contains(PageFlags::PRESENT) && !f.contains(PageFlags::USER))
 }
 
 /// Whether `addr` is in user space.
@@ -465,7 +499,9 @@ pub fn produce_to_user(
     if count == 0 {
         return Ok(0);
     }
-    validate_user_ptr(addr as *const u8, count)?;
+    // The range only: each chunk's copy checks its pages, so a PROT_NONE
+    // page past the bytes moved does not fail the whole call.
+    validate_user_range(addr, count)?;
     let mut kbuf = alloc::vec![0u8; count.min(USER_COPY_CHUNK)];
     let mut total = 0;
     while total < count {
@@ -536,7 +572,9 @@ pub fn consume_from_user(
     if count == 0 {
         return Ok(0);
     }
-    validate_user_ptr(addr as *const u8, count)?;
+    // The range only: each chunk's copy checks its pages, so a PROT_NONE
+    // page past the bytes moved does not fail the whole call.
+    validate_user_range(addr, count)?;
     let mut kbuf = alloc::vec![0u8; count.min(USER_COPY_CHUNK)];
     let mut total = 0;
     while total < count {
@@ -850,5 +888,20 @@ mod accessor_tests {
     fn empty_writes_need_no_valid_pointer() {
         assert!(write_user_slice::<u32>(0, &[]).is_ok());
         assert!(write_user_bytes(0, &[]).is_ok());
+    }
+
+    /// Only a present page without the user bit (PROT_NONE) is refused
+    /// before the copy; a missing page is left to the fault path.
+    #[test]
+    fn prot_none_pages_are_refused_before_the_copy() {
+        use super::present_but_not_user as refused;
+        use crate::mm::PageFlags as F;
+        let user = F::PRESENT | F::USER;
+        assert!(!refused(Some(user)));
+        assert!(!refused(Some(user | F::WRITABLE)));
+        assert!(refused(Some(F::PRESENT)));
+        assert!(refused(Some(F::PRESENT | F::WRITABLE | F::NO_EXECUTE)));
+        assert!(!refused(None));
+        assert!(!refused(Some(F::USER)));
     }
 }

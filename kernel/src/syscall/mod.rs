@@ -356,8 +356,12 @@ pub(crate) fn futex_pi_owner_exiting(owner: (u64, u64)) {
     futex_pi::owner_exiting(owner);
 }
 pub(crate) mod linux_compat;
+// capget, capset (ADR 0020)
+mod linux_caps;
+// The extended attribute calls (ADR 0020 step 8)
 mod thread_clone;
 pub(crate) mod userspace;
+mod xattr;
 pub(crate) use filesystem::rename_paths;
 pub use futex::sys_futex_wake;
 
@@ -486,6 +490,8 @@ pub enum SyscallError {
     Overflow = -133,
     /// A write to a read-only filesystem (EROFS, errno 30).
     ReadOnlyFilesystem = -134,
+    /// No such extended attribute (ENODATA, errno 61).
+    NoData = -135,
 }
 
 impl From<IpcError> for SyscallError {
@@ -558,6 +564,7 @@ pub fn map_kernel_error(err: crate::error::KernelError) -> SyscallError {
             FsError::NoSpace => SyscallError::NoSpace,
             FsError::OperationNotPermitted => SyscallError::OperationNotPermitted,
             FsError::Busy => SyscallError::Busy,
+            FsError::NoData => SyscallError::NoData,
             FsError::Canceled => SyscallError::Canceled,
         },
         KernelError::OutOfMemory { .. } => SyscallError::OutOfMemory,
@@ -833,6 +840,7 @@ fn never_restarted(syscall: Syscall) -> bool {
     matches!(
         syscall,
         Syscall::RtSigsuspend
+            | Syscall::Pause
             | Syscall::RtSigtimedwait
             | Syscall::Nanosleep
             | Syscall::ClockNanosleep
@@ -955,6 +963,8 @@ fn handle_syscall(
         Syscall::RtSigaction => sys_sigaction(arg1, arg2, arg3),
         Syscall::RtSigprocmask => sys_sigprocmask(arg1, arg2, arg3),
         Syscall::RtSigsuspend => sys_sigsuspend(arg1),
+        // pause(): what musl does on the generic table, which has no pause.
+        Syscall::Pause => sys_ppoll(0, 0, 0, 0, 0),
         Syscall::RtSigreturn => sys_sigreturn(arg1),
 
         // POSIX time syscalls
@@ -983,6 +993,8 @@ fn handle_syscall(
         Syscall::Getresgid => process::sys_getresgid(arg1, arg2, arg3),
         Syscall::Getgroups => process::sys_getgroups(arg1, arg2),
         Syscall::Setgroups => process::sys_setgroups(arg1, arg2),
+        Syscall::Capget => linux_caps::sys_capget(arg1, arg2),
+        Syscall::Capset => linux_caps::sys_capset(arg1, arg2),
         Syscall::Fchdir => sys_fchdir(arg1),
         Syscall::Chroot => sys_chroot(arg1),
         Syscall::Utimensat => sys_utimensat(arg1, arg2, arg3, arg4),
@@ -1015,6 +1027,22 @@ fn handle_syscall(
         // Self-hosting filesystem ops
         Syscall::Chmod => sys_chmod(arg1, arg2),
         Syscall::Fchmod => sys_fchmod(arg1, arg2),
+        Syscall::Setxattr => xattr::sys_setxattr(arg1, arg2, arg3, arg4, arg5),
+        Syscall::Lsetxattr => xattr::sys_lsetxattr(arg1, arg2, arg3, arg4, arg5),
+        Syscall::Fsetxattr => xattr::sys_fsetxattr(arg1, arg2, arg3, arg4, arg5),
+        Syscall::Getxattr => xattr::sys_getxattr(arg1, arg2, arg3, arg4),
+        Syscall::Lgetxattr => xattr::sys_lgetxattr(arg1, arg2, arg3, arg4),
+        Syscall::Fgetxattr => xattr::sys_fgetxattr(arg1, arg2, arg3, arg4),
+        Syscall::Listxattr => xattr::sys_listxattr(arg1, arg2, arg3),
+        Syscall::Llistxattr => xattr::sys_llistxattr(arg1, arg2, arg3),
+        Syscall::Flistxattr => xattr::sys_flistxattr(arg1, arg2, arg3),
+        Syscall::Removexattr => xattr::sys_removexattr(arg1, arg2),
+        Syscall::Lremovexattr => xattr::sys_lremovexattr(arg1, arg2),
+        Syscall::Fremovexattr => xattr::sys_fremovexattr(arg1, arg2),
+        Syscall::Setxattrat => xattr::sys_setxattrat(arg1, arg2, arg3, arg4, arg5, syscall_arg6()?),
+        Syscall::Getxattrat => xattr::sys_getxattrat(arg1, arg2, arg3, arg4, arg5, syscall_arg6()?),
+        Syscall::Listxattrat => xattr::sys_listxattrat(arg1, arg2, arg3, arg4, arg5),
+        Syscall::Removexattrat => xattr::sys_removexattrat(arg1, arg2, arg3, arg4),
         Syscall::Umask => sys_umask(arg1),
         Syscall::Truncate => sys_truncate(arg1, arg2),
         Syscall::Poll => sys_poll(arg1, arg2, arg3),
@@ -2115,7 +2143,7 @@ fn sys_get_robust_list(tid: usize, head_out: usize, len_out: usize) -> SyscallRe
         if tid < 0 {
             return Err(SyscallError::ProcessNotFound);
         }
-        let caller = crate::process::current_process().ok_or(SyscallError::InvalidState)?;
+        crate::process::current_process().ok_or(SyscallError::InvalidState)?;
         let mut found = None;
         crate::process::table::PROCESS_TABLE.for_each(|p| {
             if found.is_none() {
@@ -2128,8 +2156,15 @@ fn sys_get_robust_list(tid: usize, head_out: usize, len_out: usize) -> SyscallRe
                 }
             }
         });
-        let (target_creds, target_dumpable, thread) = found.ok_or(SyscallError::ProcessNotFound)?;
-        if !debug::may_access(&caller.credentials(), &target_creds, target_dumpable) {
+        let (creds, dumpable, thread) = found.ok_or(SyscallError::ProcessNotFound)?;
+        // Linux checks the named task: this thread's permitted set.
+        let target = debug::PtraceTarget {
+            creds,
+            permitted: thread.caps.lock().permitted,
+            dumpable,
+        };
+        let me = crate::process::creds::Caller::current();
+        if !debug::may_access(&me, debug::current_permitted(), &target) {
             return Err(SyscallError::OperationNotPermitted);
         }
         thread
@@ -3772,6 +3807,14 @@ mod tests {
 
     /// Linux numbers that the old musl remap or the old Linux translation
     /// table sent to the wrong call now reach the right one.
+    /// pause, like sigsuspend, returns EINTR after a handler and is never
+    /// restarted (Linux: ERESTARTNOHAND).
+    #[test]
+    fn pause_is_never_restarted() {
+        assert!(never_restarted(Syscall::Pause));
+        assert!(!never_restarted(Syscall::Read));
+    }
+
     #[test]
     fn linux_numbers_reach_the_linux_call() {
         let cases: &[(usize, Syscall)] = &[
@@ -3788,6 +3831,9 @@ mod tests {
             (128, Syscall::RtSigtimedwait),
             (129, Syscall::RtSigqueueinfo),
             (297, Syscall::RtTgsigqueueinfo),
+            (34, Syscall::Pause),
+            (125, Syscall::Capget),
+            (126, Syscall::Capset),
             (130, Syscall::RtSigsuspend),
             (131, Syscall::Sigaltstack),
             (157, Syscall::Prctl),

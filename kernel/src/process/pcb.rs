@@ -185,6 +185,11 @@ pub struct Process {
     /// inherited on fork, as on Linux.
     pub tracer: AtomicU64,
 
+    /// Whether the tracer held CAP_SYS_PTRACE when it attached (Linux's
+    /// ptracer_cred, which ptracer_capable checks at exec); meaningful only
+    /// while `tracer` is set. Changed with `tracer`, under `cred_guard`.
+    pub tracer_capable: core::sync::atomic::AtomicBool,
+
     /// Linux's cred_guard_mutex: exec decides and installs set-ID
     /// credentials under it, and ptrace attaches under it, so a tracer
     /// either attaches first (and exec grants no privilege) or sees the new
@@ -374,6 +379,60 @@ impl Process {
         result
     }
 
+    /// Change the user IDs with a set*id rule (`f`) and apply Linux's
+    /// capability fixup to every thread's sets in the same step (ADR 0020,
+    /// decision 5): the IDs belong to the process and the sets to each
+    /// thread, which is fixed under its own securebits. `fs` selects
+    /// setfsuid's fixup (the filesystem capabilities follow fsuid 0)
+    /// instead of setuid's. Lock order: the thread map, the credentials,
+    /// then each thread's sets; the map held throughout keeps a thread from
+    /// being added between the change and its fixup (clone copies its
+    /// creator's sets under the map too).
+    #[cfg(feature = "alloc")]
+    pub fn change_uids<R>(
+        &self,
+        fs: bool,
+        f: impl FnOnce(&mut super::creds::Credentials) -> R,
+    ) -> R {
+        use super::linux_caps::Uids;
+        let uids = |c: &super::creds::Credentials| Uids {
+            ruid: c.ruid,
+            euid: c.euid,
+            suid: c.suid,
+            fsuid: c.fsuid,
+        };
+        let threads = self.threads.lock();
+        let (result, old, new) = self.update_credentials(|c| {
+            let old = uids(c);
+            let result = f(c);
+            (result, old, uids(c))
+        });
+        for thread in threads.values() {
+            let mut caps = thread.caps.lock();
+            if fs {
+                caps.fix_setfsuid(old.fsuid, new.fsuid);
+            } else {
+                caps.fix_setuid(old, new);
+            }
+        }
+        result
+    }
+
+    /// The credentials and `thread`'s capability sets as one snapshot,
+    /// read under the thread map as [`Self::change_uids`] writes them, so
+    /// a set*id call on another thread is wholly before or wholly after
+    /// it. fork copies this pair: credentials from before a uid drop with
+    /// sets from after it would let the child's exec treat it as root and
+    /// raise pP from the bounding set again (PR #33 review).
+    #[cfg(feature = "alloc")]
+    pub fn creds_and_caps(
+        &self,
+        thread: &Thread,
+    ) -> (super::creds::Credentials, super::linux_caps::CapSets) {
+        let _threads = self.threads.lock();
+        (self.credentials(), *thread.caps.lock())
+    }
+
     /// Real user ID.
     pub fn uid(&self) -> u32 {
         self.creds.lock().ruid
@@ -432,6 +491,7 @@ impl Process {
             creds: Mutex::new(super::creds::Credentials::new(0, 0)),
             pgid: AtomicU64::new(pid.0),
             tracer: AtomicU64::new(0),
+            tracer_capable: core::sync::atomic::AtomicBool::new(false),
             cred_guard: Mutex::new(()),
             exec_in_progress: core::sync::atomic::AtomicBool::new(false),
             dumpable: core::sync::atomic::AtomicBool::new(true),
@@ -523,6 +583,41 @@ impl Process {
     #[cfg(feature = "alloc")]
     pub fn get_thread(&self, tid: ThreadId) -> Option<Arc<Thread>> {
         self.threads.lock().get(&tid).cloned()
+    }
+
+    /// The union of the permitted sets of the process's threads: what
+    /// tracing it gives access to, for the ptrace checks (Linux's
+    /// cap_ptrace_access_check compares a task's set; tracing here reaches
+    /// the whole process).
+    #[cfg(feature = "alloc")]
+    pub fn permitted_caps(&self) -> super::linux_caps::LinuxCaps {
+        self.threads
+            .lock()
+            .values()
+            .fold(super::linux_caps::LinuxCaps::EMPTY, |all, t| {
+                all.union(t.caps.lock().permitted)
+            })
+    }
+
+    /// What the process's live threads hold in common, for a check where
+    /// any of them could be the one that counts: the intersection of their
+    /// permitted sets and whether every one has CAP_SYS_PTRACE effective.
+    /// None if no thread is alive. The fail-closed side of
+    /// [`Self::permitted_caps`].
+    #[cfg(feature = "alloc")]
+    pub fn common_ptrace_caps(&self) -> Option<(super::linux_caps::LinuxCaps, bool)> {
+        use super::thread::ThreadState;
+        let threads = self.threads.lock();
+        let mut live = threads
+            .values()
+            .filter(|t| !matches!(t.get_state(), ThreadState::Zombie | ThreadState::Dead))
+            .map(|t| *t.caps.lock());
+        let first = live.next()?;
+        let cap = super::linux_caps::CAP_SYS_PTRACE;
+        Some(live.fold(
+            (first.permitted, first.capable(cap)),
+            |(permitted, capable), c| (permitted.intersect(c.permitted), capable && c.capable(cap)),
+        ))
     }
 
     /// Get number of threads
@@ -900,6 +995,73 @@ mod tests {
         )
     }
 
+    /// A process with threads `tids`, each with root's capability sets.
+    fn with_threads(proc: &Process, tids: &[u64]) -> Vec<Arc<Thread>> {
+        tids.iter()
+            .map(|&tid| {
+                let thread = Thread::new(
+                    ThreadId(tid),
+                    proc.pid,
+                    alloc::string::String::from("t"),
+                    0,
+                    0x10_0000,
+                    0x1000,
+                    0x20_0000,
+                    0x1000,
+                    super::super::thread::ThreadFs::new_root(),
+                );
+                proc.add_thread(thread).unwrap()
+            })
+            .collect()
+    }
+
+    /// A user-ID change fixes every thread's capability sets (ADR 0020,
+    /// decision 5): dropping every root ID clears pP and pE everywhere; an
+    /// fsuid leaving 0 drops only the filesystem capabilities, and coming
+    /// back raises them again from pP.
+    #[test]
+    fn uid_changes_fix_every_threads_sets() {
+        use super::super::linux_caps::{CapSets, LinuxCaps, CAP_CHOWN, CAP_KILL};
+        let proc = make_process(4, "fixup");
+        let threads = with_threads(&proc, &[40, 41]);
+
+        proc.change_uids(true, |c| c.setfsuid(1000, true));
+        for t in &threads {
+            let caps = *t.caps.lock();
+            assert!(!caps.capable(CAP_CHOWN), "a filesystem capability");
+            assert!(caps.capable(CAP_KILL), "not a filesystem capability");
+            assert_eq!(caps.permitted, CapSets::ROOT.permitted);
+        }
+        proc.change_uids(true, |c| c.setfsuid(0, true));
+        assert!(threads.iter().all(|t| t.caps.lock().capable(CAP_CHOWN)));
+
+        proc.change_uids(false, |c| c.setresuid(1000, 1000, 1000, true))
+            .unwrap();
+        for t in &threads {
+            let caps = *t.caps.lock();
+            assert_eq!(caps.permitted, LinuxCaps::EMPTY);
+            assert_eq!(caps.effective, LinuxCaps::EMPTY);
+            assert_eq!(caps.bounding, CapSets::ROOT.bounding);
+        }
+        assert_eq!(proc.credentials().euid, 1000);
+    }
+
+    /// fork's snapshot pairs the credentials with the thread's sets as one
+    /// change_uids step left them: never root IDs with dropped sets.
+    #[test]
+    fn creds_and_caps_is_one_snapshot() {
+        use super::super::linux_caps::{CapSets, LinuxCaps};
+        let proc = make_process(5, "snapshot");
+        let threads = with_threads(&proc, &[50]);
+        let (creds, caps) = proc.creds_and_caps(&threads[0]);
+        assert_eq!((creds.euid, caps.permitted), (0, CapSets::ROOT.permitted));
+        proc.change_uids(false, |c| c.setresuid(1000, 1000, 1000, true))
+            .unwrap();
+        let (creds, caps) = proc.creds_and_caps(&threads[0]);
+        assert_eq!((creds.ruid, creds.euid, creds.suid), (1000, 1000, 1000));
+        assert_eq!(caps.permitted, LinuxCaps::EMPTY);
+    }
+
     /// A change of effective user or group makes the process non-dumpable
     /// (Linux's commit_creds); other credential changes leave it.
     #[test]
@@ -907,9 +1069,9 @@ mod tests {
         use core::sync::atomic::Ordering;
         let proc = make_process(3, "creds");
         assert!(proc.dumpable.load(Ordering::Acquire));
-        proc.update_credentials(|c| c.setgroups(&[5]).unwrap());
+        proc.update_credentials(|c| c.setgroups(&[5], true).unwrap());
         assert!(proc.dumpable.load(Ordering::Acquire));
-        proc.update_credentials(|c| c.setuid(1000).unwrap());
+        proc.update_credentials(|c| c.setuid(1000, true).unwrap());
         assert!(!proc.dumpable.load(Ordering::Acquire));
     }
 

@@ -142,6 +142,24 @@ select
 pselect6
 getdents64
 
+## Extended attributes (ADR 0020)
+setxattr
+lsetxattr
+fsetxattr
+getxattr
+lgetxattr
+fgetxattr
+listxattr
+llistxattr
+flistxattr
+removexattr
+lremovexattr
+fremovexattr
+setxattrat
+getxattrat
+listxattrat
+removexattrat
+
 ## Directories
 mkdir
 mkdirat
@@ -187,6 +205,7 @@ times
 rt_sigaction
 rt_sigprocmask
 rt_sigsuspend
+pause
 rt_sigreturn
 rt_sigpending
 rt_sigtimedwait
@@ -211,6 +230,8 @@ setfsuid
 setfsgid
 getgroups
 setgroups
+capget
+capset
 VeridianAuth            private 1352
 
 ## Process groups and sessions

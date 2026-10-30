@@ -214,7 +214,10 @@ fn load_image(
             .map_err(not_elf)?;
         let interp = match &binary.interpreter {
             Some(interp_path) => {
-                let (node, data) = lifecycle::read_executable(interp_path, &process.credentials())?;
+                let (node, data) = lifecycle::read_executable(
+                    interp_path,
+                    &crate::process::creds::Caller::current(),
+                )?;
                 let parsed = ElfLoader::new().parse(&data).map_err(not_elf)?;
                 Some((node, data, parsed))
             }
@@ -238,6 +241,8 @@ fn load_image(
                 .as_ref()
                 .map(|(node, data, parsed)| (parsed, &**node, data.as_slice())),
             guards,
+            // The first program, started by the kernel: nothing is gained.
+            false,
         )?;
         if interp.is_none() {
             lifecycle::setup_static_tls(process, binary, buffer);
@@ -246,8 +251,17 @@ fn load_image(
         // argv[0] is the program name if no arguments were given.
         let default_argv = [path];
         let argv_for_stack: &[&str] = if argv.is_empty() { &default_argv } else { argv };
-        let stack_top =
-            lifecycle::setup_exec_stack_pub(process, argv_for_stack, envp, path, &loaded.aux)?;
+        // A program the kernel starts: AT_SECURE only for differing IDs,
+        // as there is no exec to grant privilege.
+        let secure = process.credentials().ids_differ();
+        let stack_top = lifecycle::setup_exec_stack_pub(
+            process,
+            argv_for_stack,
+            envp,
+            path,
+            &loaded.aux,
+            secure,
+        )?;
 
         if let Some(main_tid) = process.get_main_thread_id() {
             if let Some(thread) = process.get_thread(main_tid) {

@@ -144,29 +144,80 @@ pub fn check_fsize_truncate(node: &dyn VfsNode, size: usize) -> Result<(), Kerne
     Ok(())
 }
 
-/// After a write or truncate of `node` by the calling process: drop the
-/// set-user-ID and set-group-ID bits as [`Permissions::after_write`] says.
-/// Regular files only; a failure to read or change the mode leaves it.
-pub fn remove_privs_after_write(node: &dyn VfsNode) {
+/// Before a write or truncate of `node` by the calling process (Linux's
+/// file_remove_privs): drop its file capabilities ([`kill_file_caps`]) and
+/// the set-user-ID and set-group-ID bits as [`Permissions::after_write`]
+/// says. Regular files only. As on Linux it runs before the data changes
+/// and its error is the write's, so a file that keeps its privileges is
+/// never changed (PR #33 review).
+pub fn remove_privs(node: &dyn VfsNode) -> Result<(), KernelError> {
     if node.node_type() != NodeType::File {
-        return;
+        return Ok(());
     }
-    let Some(process) = crate::process::current_process() else {
-        return;
-    };
-    let creds = process.credentials();
-    if creds.fs_privileged() {
-        return;
+    kill_file_caps(node)?;
+    drop_set_id(node, &crate::process::creds::Caller::current())
+}
+
+/// Set the size of `node` to `size` for the calling process, removing its
+/// privileges as Linux's notify_change does: the file capabilities go
+/// first (setattr_prepare), and the set-ID bits only once the size has
+/// changed (setattr_copy), so a refused truncate, such as one a memfd seal
+/// forbids, leaves the mode as it was (PR #33 review).
+pub fn truncate_removing_privs(node: &dyn VfsNode, size: usize) -> Result<(), KernelError> {
+    truncate_removing_privs_as(node, size, &crate::process::creds::Caller::current())
+}
+
+fn truncate_removing_privs_as(
+    node: &dyn VfsNode,
+    size: usize,
+    caller: &crate::process::creds::Caller,
+) -> Result<(), KernelError> {
+    if node.node_type() != NodeType::File {
+        return node.truncate(size);
     }
-    let Ok(meta) = node.metadata() else {
-        return;
-    };
+    kill_file_caps(node)?;
+    node.truncate(size)?;
+    drop_set_id(node, caller)
+}
+
+/// The set-user-ID and set-group-ID bits a write or truncate by `caller`
+/// removes ([`Permissions::after_write`]). The kernel itself (no process)
+/// holds CAP_FSETID.
+fn drop_set_id(
+    node: &dyn VfsNode,
+    caller: &crate::process::creds::Caller,
+) -> Result<(), KernelError> {
+    let meta = node.metadata()?;
+    let fsetid = caller.capable(crate::process::linux_caps::CAP_FSETID);
     if let Some(kept) = meta
         .permissions
-        .after_write(creds.fsuid, creds.in_group(meta.gid))
+        .after_write(fsetid, caller.creds.in_group(meta.gid))
     {
-        let _ = node.chmod(kept);
+        node.chmod(kept)?;
     }
+    Ok(())
+}
+
+/// Remove a file's capabilities (Linux's cap_inode_killpriv), as a write,
+/// truncate or chown does whoever makes it: a changed program must not
+/// keep the privilege granted to the old one. Only read when present; a
+/// filesystem without attributes has none to remove. Any other read error
+/// is the caller's, since the capability may still be there (PR #33 review).
+pub fn kill_file_caps(node: &dyn VfsNode) -> Result<(), KernelError> {
+    let has = match node.xattrs() {
+        Ok(a) => a.get(xattr::XATTR_NAME_CAPS).is_some(),
+        Err(KernelError::FsError(FsError::NotSupported)) => false,
+        Err(e) => return Err(e),
+    };
+    if has {
+        // Another writer may remove it between the check and the update:
+        // gone is the outcome wanted, not an error.
+        node.update_xattrs(&mut |a| match a.remove(xattr::XATTR_NAME_CAPS) {
+            Err(KernelError::FsError(FsError::NoData)) => Ok(()),
+            r => r,
+        })?;
+    }
+    Ok(())
 }
 
 /// Names that can never be a rename source or target.
@@ -277,13 +328,13 @@ impl Permissions {
     }
 
     /// Linux's file_remove_privs: the permissions a file keeps after a
-    /// write or truncate by `uid` (`in_group`: the writer belongs to the
-    /// file's group). Root keeps the bits (CAP_FSETID); anyone else drops
-    /// set-user-ID, and set-group-ID where it means set-group-ID (group
-    /// execute set) or the writer is outside the group. `None` when nothing
-    /// changes.
-    pub fn after_write(&self, uid: u32, in_group: bool) -> Option<Self> {
-        if uid == 0 {
+    /// write or truncate (`fsetid`: the writer holds CAP_FSETID;
+    /// `in_group`: it belongs to the file's group). With CAP_FSETID the
+    /// bits stay; otherwise set-user-ID goes, and set-group-ID where it
+    /// means set-group-ID (group execute set) or the writer is outside the
+    /// group. `None` when nothing changes.
+    pub fn after_write(&self, fsetid: bool, in_group: bool) -> Option<Self> {
+        if fsetid {
             return None;
         }
         let mut kept = *self;
@@ -307,46 +358,22 @@ impl Permissions {
         (kept != *self).then_some(kept)
     }
 
-    /// Check if the given uid/gid has read access.
-    pub fn can_read(&self, uid: u32, gid: u32, file_uid: u32, file_gid: u32) -> bool {
-        if uid == 0 {
-            return true; // root bypasses permission checks
-        }
-        if uid == file_uid {
-            self.owner_read
-        } else if gid == file_gid {
-            self.group_read
+    /// The access bits (MAY_READ, MAY_WRITE, MAY_EXEC) of one class: the
+    /// owner's, the group's, or everyone else's.
+    fn class_bits(&self, owner: bool, group: bool) -> u32 {
+        let (r, w, x) = if owner {
+            (self.owner_read, self.owner_write, self.owner_exec)
+        } else if group {
+            (self.group_read, self.group_write, self.group_exec)
         } else {
-            self.other_read
-        }
+            (self.other_read, self.other_write, self.other_exec)
+        };
+        ((r as u32) * MAY_READ) | ((w as u32) * MAY_WRITE) | ((x as u32) * MAY_EXEC)
     }
 
-    /// Check if the given uid/gid has write access.
-    pub fn can_write(&self, uid: u32, gid: u32, file_uid: u32, file_gid: u32) -> bool {
-        if uid == 0 {
-            return true;
-        }
-        if uid == file_uid {
-            self.owner_write
-        } else if gid == file_gid {
-            self.group_write
-        } else {
-            self.other_write
-        }
-    }
-
-    /// Check if the given uid/gid has run access.
-    pub fn can_run(&self, uid: u32, gid: u32, file_uid: u32, file_gid: u32) -> bool {
-        if uid == 0 {
-            return true;
-        }
-        if uid == file_uid {
-            self.owner_exec
-        } else if gid == file_gid {
-            self.group_exec
-        } else {
-            self.other_exec
-        }
+    /// Whether any class may execute.
+    pub fn any_exec(&self) -> bool {
+        self.owner_exec || self.group_exec || self.other_exec
     }
 }
 
@@ -362,6 +389,39 @@ pub struct Metadata {
     pub modified: u64,
     pub accessed: u64,
     pub inode: u64,
+}
+
+/// Access asked of a node, as Linux's MAY_* bits (the same values as
+/// access(2)'s R_OK, W_OK and X_OK).
+pub const MAY_EXEC: u32 = 1;
+pub const MAY_WRITE: u32 = 2;
+pub const MAY_READ: u32 = 4;
+
+/// Whether `caller` may access a node with `meta` as `mask` asks (MAY_*
+/// bits), as Linux's generic_permission (ADR 0020): the mode bits of the
+/// first class that applies -- owner, then group (any of the caller's
+/// groups), then other -- and then the capabilities that override them. On
+/// a directory CAP_DAC_READ_SEARCH grants anything but writing and
+/// CAP_DAC_OVERRIDE everything; on anything else CAP_DAC_READ_SEARCH grants
+/// reading alone, and CAP_DAC_OVERRIDE reading and writing, and executing
+/// only where some execute bit is set.
+pub fn permission(caller: &crate::process::creds::Caller, meta: &Metadata, mask: u32) -> bool {
+    use crate::process::linux_caps::{CAP_DAC_OVERRIDE, CAP_DAC_READ_SEARCH};
+    let c = &caller.creds;
+    let p = &meta.permissions;
+    let owner = c.fsuid == meta.uid;
+    let granted = p.class_bits(owner, !owner && c.in_group(meta.gid));
+    if mask & !granted == 0 {
+        return true;
+    }
+    if meta.node_type == NodeType::Directory {
+        return (mask & MAY_WRITE == 0 && caller.capable(CAP_DAC_READ_SEARCH))
+            || caller.capable(CAP_DAC_OVERRIDE);
+    }
+    if mask == MAY_READ && caller.capable(CAP_DAC_READ_SEARCH) {
+        return true;
+    }
+    (mask & MAY_EXEC == 0 || p.any_exec()) && caller.capable(CAP_DAC_OVERRIDE)
 }
 
 /// Directory entry
@@ -529,6 +589,14 @@ pub trait VfsNode: Send + Sync {
         Err(KernelError::NotImplemented { feature: "chown" })
     }
 
+    /// Whether this node can store `uid` and `gid` (`None` unchanged),
+    /// checked before a chown removes any privileges so a chown the
+    /// filesystem would refuse changes nothing (as Linux's notify_change
+    /// rejects an unmappable id before the inode changes).
+    fn check_owner(&self, _uid: Option<u32>, _gid: Option<u32>) -> Result<(), KernelError> {
+        Ok(())
+    }
+
     /// Set the access and/or modification time (seconds); `None` leaves
     /// that time unchanged. Permission checks are the caller's job
     /// (utimensat, N-249).
@@ -667,6 +735,22 @@ pub trait VfsNode: Send + Sync {
     /// object itself is not one.
     fn is_special_inode(&self) -> bool {
         false
+    }
+
+    /// The node's extended attributes (`fs::xattr`; ADR 0020). EOPNOTSUPP
+    /// on a filesystem that keeps none.
+    fn xattrs(&self) -> Result<xattr::XattrSet, KernelError> {
+        Err(KernelError::FsError(crate::error::FsError::NotSupported))
+    }
+
+    /// Change the node's extended attributes with `f`, as one step: when
+    /// `f` or the filesystem fails (ENOSPC when they no longer fit),
+    /// nothing changes. EOPNOTSUPP on a filesystem that keeps none.
+    fn update_xattrs(
+        &self,
+        _f: &mut dyn FnMut(&mut xattr::XattrSet) -> Result<(), KernelError>,
+    ) -> Result<(), KernelError> {
+        Err(KernelError::FsError(crate::error::FsError::NotSupported))
     }
 }
 
@@ -878,7 +962,7 @@ impl MountTable {
         cwd: &str,
         follow_last: bool,
         symlink_depth: usize,
-        creds: Option<crate::process::creds::Credentials>,
+        creds: Option<crate::process::creds::Caller>,
     ) -> Result<(Arc<dyn VfsNode>, String), KernelError> {
         self.resolve_in(path, cwd, "/", follow_last, symlink_depth, creds)
     }
@@ -896,7 +980,7 @@ impl MountTable {
         root: &str,
         follow_last: bool,
         symlink_depth: usize,
-        creds: Option<crate::process::creds::Credentials>,
+        creds: Option<crate::process::creds::Caller>,
     ) -> Result<(Arc<dyn VfsNode>, String), KernelError> {
         use alloc::collections::VecDeque;
 
@@ -925,12 +1009,8 @@ impl MountTable {
             if node.node_type() != NodeType::Directory {
                 return Err(KernelError::FsError(crate::error::FsError::NotADirectory));
             }
-            if let Some(c) = creds {
-                let meta = node.metadata()?;
-                if !meta
-                    .permissions
-                    .can_run(c.fsuid, c.gid_for(meta.gid), meta.uid, meta.gid)
-                {
+            if let Some(c) = &creds {
+                if !permission(c, &node.metadata()?, MAY_EXEC) {
                     return Err(KernelError::FsError(
                         crate::error::FsError::PermissionDenied,
                     ));
@@ -1030,7 +1110,7 @@ pub struct PathContext {
     /// The root directory, as a canonical path in the whole tree.
     pub root: String,
     /// Whose search permission a walk checks; `None` checks none.
-    pub creds: Option<crate::process::creds::Credentials>,
+    pub creds: Option<crate::process::creds::Caller>,
     /// The process MAC policy is checked for (0: the kernel).
     pub pid: u64,
 }
@@ -1311,8 +1391,9 @@ impl Vfs {
     }
 
     /// The calling thread's view: its working directory and root
-    /// (chroot), its process's credentials for search permission (none
-    /// for root) and its pid for MAC. Without a current thread or process
+    /// (chroot), who it is for search permission (`Caller`: CAP_DAC_OVERRIDE
+    /// and CAP_DAC_READ_SEARCH pass it) and its pid for MAC. Without a
+    /// current thread or process
     /// (the kernel shell) that part is the kernel's.
     pub fn caller_context(&self) -> PathContext {
         let mut ctx = self.kernel_context();
@@ -1324,7 +1405,7 @@ impl Vfs {
         }
         if let Some(process) = crate::process::current_process() {
             ctx.pid = process.pid.0;
-            ctx.creds = Some(process.credentials()).filter(|c| !c.fs_privileged());
+            ctx.creds = Some(crate::process::creds::Caller::current());
         }
         ctx
     }
@@ -1336,6 +1417,16 @@ impl Vfs {
             vfs: self,
             ctx: self.caller_context(),
         }
+    }
+
+    /// Lookups as `caller` instead of the calling thread's credentials,
+    /// with the thread's root and working directory: access(2) resolves the
+    /// whole path with the real IDs, as Linux's do_faccessat overrides the
+    /// credentials before the lookup (PR #33 review).
+    pub fn as_caller_with(&self, caller: crate::process::creds::Caller) -> CallerView<'_> {
+        let mut ctx = self.caller_context();
+        ctx.creds = Some(caller);
+        CallerView { vfs: self, ctx }
     }
 
     /// Resolve `path` (relative paths from `cwd`) in `ctx`'s view: the
@@ -2106,7 +2197,7 @@ pub fn append_file(path: &str, data: &[u8]) -> Result<usize, KernelError> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     /// Linux's device-number encoding (`new_encode_dev`): 12 bits of
@@ -2320,20 +2411,328 @@ mod tests {
         assert!(p.set_uid && p.set_gid && !p.sticky);
     }
 
-    /// Linux's file_remove_privs: a write by anyone but root drops
+    /// fs::permission is Linux's generic_permission: the first class that
+    /// applies decides from the mode bits, then the DAC capabilities
+    /// override -- not uid 0 (ADR 0020).
+    #[test]
+    fn permission_is_mode_bits_then_capabilities() {
+        use crate::process::{
+            creds::{Caller, Credentials},
+            linux_caps::{LinuxCaps, CAP_DAC_OVERRIDE, CAP_DAC_READ_SEARCH},
+        };
+        let meta = |node_type, mode, uid, gid| Metadata {
+            node_type,
+            size: 0,
+            permissions: Permissions::from_mode(mode),
+            uid,
+            gid,
+            created: 0,
+            modified: 0,
+            accessed: 0,
+            inode: 1,
+        };
+        let who = |uid, caps: &[u32]| Caller {
+            creds: Credentials::new(uid, uid),
+            caps: caps.iter().fold(LinuxCaps::EMPTY, |s, &c| s.with(c)),
+        };
+        let file = NodeType::File;
+        let dir = NodeType::Directory;
+        let user = who(1000, &[]);
+        // The owner class alone decides for the owner, even if others may.
+        assert!(!permission(&user, &meta(file, 0o077, 1000, 1000), MAY_READ));
+        assert!(permission(&user, &meta(file, 0o640, 0, 1000), MAY_READ));
+        assert!(!permission(&user, &meta(file, 0o640, 0, 1000), MAY_WRITE));
+        assert!(permission(&user, &meta(file, 0o604, 0, 0), MAY_READ));
+        // Root without capabilities is an ordinary user.
+        let bare_root = who(0, &[]);
+        assert!(!permission(
+            &bare_root,
+            &meta(file, 0o600, 1000, 1000),
+            MAY_READ
+        ));
+        assert!(permission(
+            &Caller::KERNEL,
+            &meta(file, 0o600, 1000, 1000),
+            MAY_READ
+        ));
+        // CAP_DAC_OVERRIDE: read and write anything, execute only with an
+        // execute bit; any directory.
+        let dac = who(1000, &[CAP_DAC_OVERRIDE]);
+        let secret = meta(file, 0o000, 0, 0);
+        assert!(permission(&dac, &secret, MAY_READ | MAY_WRITE));
+        assert!(!permission(&dac, &secret, MAY_EXEC));
+        assert!(permission(&dac, &meta(file, 0o001, 0, 0), MAY_EXEC));
+        assert!(permission(
+            &dac,
+            &meta(dir, 0o000, 0, 0),
+            MAY_WRITE | MAY_EXEC
+        ));
+        // CAP_DAC_READ_SEARCH: read files, read and search directories.
+        let rs = who(1000, &[CAP_DAC_READ_SEARCH]);
+        assert!(permission(&rs, &secret, MAY_READ));
+        assert!(!permission(&rs, &secret, MAY_READ | MAY_WRITE));
+        assert!(permission(
+            &rs,
+            &meta(dir, 0o000, 0, 0),
+            MAY_READ | MAY_EXEC
+        ));
+        assert!(!permission(&rs, &meta(dir, 0o000, 0, 0), MAY_WRITE));
+    }
+
+    /// A write, as a truncate or chown, removes a file's capabilities
+    /// (cap_inode_killpriv), even the kernel's own write; other
+    /// attributes stay.
+    #[test]
+    fn writes_remove_file_capabilities() {
+        let vfs = make_vfs_with_root();
+        let root = vfs.root_fs().unwrap().root();
+        let f = root.create("prog", Permissions::from_mode(0o755)).unwrap();
+        f.update_xattrs(&mut |a| {
+            a.set(xattr::XATTR_NAME_CAPS, &[0; 20], 0)?;
+            a.set("user.keep", b"1", 0)
+        })
+        .unwrap();
+        remove_privs(&*f).unwrap();
+        let attrs = f.xattrs().unwrap();
+        assert!(attrs.get(xattr::XATTR_NAME_CAPS).is_none());
+        assert_eq!(attrs.get("user.keep"), Some(&b"1"[..]));
+        // Nothing to remove: no error, nothing changes.
+        kill_file_caps(&*f).unwrap();
+        assert_eq!(f.xattrs().unwrap().names().count(), 1);
+    }
+
+    /// A write(2) split into pieces removes the privileges once, before its
+    /// first piece, as Linux's __generic_file_write_iter does; later pieces
+    /// do not read the attributes again (PR #33 review).
+    #[test]
+    fn a_split_write_removes_privileges_with_its_first_piece() {
+        let vfs = make_vfs_with_root();
+        let root = vfs.root_fs().unwrap().root();
+        let f = root.create("prog", Permissions::from_mode(0o755)).unwrap();
+        let caps = |f: &Arc<dyn VfsNode>| f.xattrs().unwrap().get(xattr::XATTR_NAME_CAPS).is_some();
+        let set_caps = |f: &Arc<dyn VfsNode>| {
+            f.update_xattrs(&mut |a| a.set(xattr::XATTR_NAME_CAPS, &[0; 20], 0))
+                .unwrap()
+        };
+        let file = file::File::new(f.clone(), file::OpenFlags::read_write());
+        set_caps(&f);
+        file.write_part(b"later", false).unwrap();
+        assert!(caps(&f), "a later piece leaves the attribute alone");
+        file.write_part(b"first", true).unwrap();
+        assert!(!caps(&f), "the first piece removes it");
+        set_caps(&f);
+        file.write(b"whole").unwrap();
+        assert!(!caps(&f), "a whole write removes it");
+    }
+
+    /// A file whose capabilities cannot be removed is not written: as
+    /// Linux's file_remove_privs, the removal comes first and its error is
+    /// the write's (PR #33 review). Delegates to a ramfs file; with
+    /// `unreadable` the attribute read fails too.
+    pub(crate) struct StuckCaps(pub(crate) Arc<dyn VfsNode>, pub(crate) bool);
+
+    impl VfsNode for StuckCaps {
+        fn node_type(&self) -> NodeType {
+            self.0.node_type()
+        }
+        fn read(&self, o: usize, b: &mut [u8]) -> Result<usize, KernelError> {
+            self.0.read(o, b)
+        }
+        fn write(&self, o: usize, d: &[u8]) -> Result<usize, KernelError> {
+            self.0.write(o, d)
+        }
+        fn metadata(&self) -> Result<Metadata, KernelError> {
+            self.0.metadata()
+        }
+        fn readdir(&self) -> Result<Vec<DirEntry>, KernelError> {
+            self.0.readdir()
+        }
+        fn lookup(&self, n: &str) -> Result<Arc<dyn VfsNode>, KernelError> {
+            self.0.lookup(n)
+        }
+        fn create(&self, n: &str, p: Permissions) -> Result<Arc<dyn VfsNode>, KernelError> {
+            self.0.create(n, p)
+        }
+        fn mkdir(&self, n: &str, p: Permissions) -> Result<Arc<dyn VfsNode>, KernelError> {
+            self.0.mkdir(n, p)
+        }
+        fn unlink(&self, n: &str) -> Result<(), KernelError> {
+            self.0.unlink(n)
+        }
+        fn truncate(&self, s: usize) -> Result<(), KernelError> {
+            self.0.truncate(s)
+        }
+        fn chmod(&self, p: Permissions) -> Result<(), KernelError> {
+            self.0.chmod(p)
+        }
+        fn chown(&self, u: Option<u32>, g: Option<u32>) -> Result<(), KernelError> {
+            self.0.chown(u, g)
+        }
+        fn check_owner(&self, u: Option<u32>, g: Option<u32>) -> Result<(), KernelError> {
+            self.0.check_owner(u, g)
+        }
+        fn xattrs(&self) -> Result<xattr::XattrSet, KernelError> {
+            if self.1 {
+                return Err(KernelError::FsError(FsError::IoError));
+            }
+            self.0.xattrs()
+        }
+        fn update_xattrs(
+            &self,
+            _f: &mut dyn FnMut(&mut xattr::XattrSet) -> Result<(), KernelError>,
+        ) -> Result<(), KernelError> {
+            Err(KernelError::FsError(FsError::IoError))
+        }
+    }
+
+    #[test]
+    fn a_write_that_cannot_drop_file_caps_fails_unwritten() {
+        let vfs = make_vfs_with_root();
+        let root = vfs.root_fs().unwrap().root();
+        let inner = root.create("prog", Permissions::from_mode(0o755)).unwrap();
+        inner
+            .update_xattrs(&mut |a| a.set(xattr::XATTR_NAME_CAPS, &[0; 20], 0))
+            .unwrap();
+        let node: Arc<dyn VfsNode> = Arc::new(StuckCaps(inner.clone(), false));
+        assert!(remove_privs(&*node).is_err());
+        let file = file::File::new(node, OpenFlags::read_write());
+        assert!(file.write(b"new").is_err());
+        assert_eq!(inner.metadata().unwrap().size, 0);
+        assert!(inner
+            .xattrs()
+            .unwrap()
+            .get(xattr::XATTR_NAME_CAPS)
+            .is_some());
+        // Without file capabilities nothing needs removing: the write runs.
+        let plain = root.create("data", Permissions::from_mode(0o644)).unwrap();
+        let file = file::File::new(
+            Arc::new(StuckCaps(plain.clone(), false)),
+            OpenFlags::read_write(),
+        );
+        assert_eq!(file.write(b"new").unwrap(), 3);
+    }
+
+    /// A file whose capability another writer removes between
+    /// kill_file_caps's check and its update (PR #33 review): the update
+    /// finds the attribute already gone.
+    struct RacedCaps(Arc<dyn VfsNode>);
+
+    impl VfsNode for RacedCaps {
+        fn node_type(&self) -> NodeType {
+            self.0.node_type()
+        }
+        fn read(&self, o: usize, b: &mut [u8]) -> Result<usize, KernelError> {
+            self.0.read(o, b)
+        }
+        fn write(&self, o: usize, d: &[u8]) -> Result<usize, KernelError> {
+            self.0.write(o, d)
+        }
+        fn metadata(&self) -> Result<Metadata, KernelError> {
+            self.0.metadata()
+        }
+        fn readdir(&self) -> Result<Vec<DirEntry>, KernelError> {
+            self.0.readdir()
+        }
+        fn lookup(&self, n: &str) -> Result<Arc<dyn VfsNode>, KernelError> {
+            self.0.lookup(n)
+        }
+        fn create(&self, n: &str, p: Permissions) -> Result<Arc<dyn VfsNode>, KernelError> {
+            self.0.create(n, p)
+        }
+        fn mkdir(&self, n: &str, p: Permissions) -> Result<Arc<dyn VfsNode>, KernelError> {
+            self.0.mkdir(n, p)
+        }
+        fn unlink(&self, n: &str) -> Result<(), KernelError> {
+            self.0.unlink(n)
+        }
+        fn truncate(&self, s: usize) -> Result<(), KernelError> {
+            self.0.truncate(s)
+        }
+        fn xattrs(&self) -> Result<xattr::XattrSet, KernelError> {
+            self.0.xattrs()
+        }
+        fn update_xattrs(
+            &self,
+            f: &mut dyn FnMut(&mut xattr::XattrSet) -> Result<(), KernelError>,
+        ) -> Result<(), KernelError> {
+            self.0
+                .update_xattrs(&mut |a| a.remove(xattr::XATTR_NAME_CAPS))?;
+            self.0.update_xattrs(f)
+        }
+    }
+
+    #[test]
+    fn a_capability_removed_meanwhile_does_not_fail_the_write() {
+        let vfs = make_vfs_with_root();
+        let root = vfs.root_fs().unwrap().root();
+        let inner = root.create("prog", Permissions::from_mode(0o755)).unwrap();
+        inner
+            .update_xattrs(&mut |a| a.set(xattr::XATTR_NAME_CAPS, &[0; 20], 0))
+            .unwrap();
+        let node = RacedCaps(inner.clone());
+        assert!(kill_file_caps(&node).is_ok());
+        assert!(inner
+            .xattrs()
+            .unwrap()
+            .get(xattr::XATTR_NAME_CAPS)
+            .is_none());
+    }
+
+    /// An attribute read that fails is not taken for "no capability": the
+    /// write stops, since the capability may still be there (PR #33 review).
+    /// Only a filesystem without attributes has none to remove.
+    #[test]
+    fn a_write_whose_caps_cannot_be_read_fails_unwritten() {
+        let vfs = make_vfs_with_root();
+        let root = vfs.root_fs().unwrap().root();
+        let inner = root.create("prog", Permissions::from_mode(0o755)).unwrap();
+        let file = file::File::new(
+            Arc::new(StuckCaps(inner.clone(), true)),
+            OpenFlags::read_write(),
+        );
+        assert!(file.write(b"new").is_err());
+        assert_eq!(inner.metadata().unwrap().size, 0);
+    }
+
+    /// Linux's file_remove_privs: a write without CAP_FSETID drops
     /// set-user-ID; set-group-ID goes with group execute or when the writer
     /// is outside the group, and stays as a locking mark otherwise.
     #[test]
-    fn writes_drop_set_id_bits_except_for_root() {
+    fn writes_drop_set_id_bits_without_cap_fsetid() {
         let suid = Permissions::from_mode(0o4755);
-        assert_eq!(suid.after_write(0, false), None);
-        assert_eq!(suid.after_write(1000, true).unwrap().to_mode(), 0o755);
+        assert_eq!(suid.after_write(true, false), None);
+        assert_eq!(suid.after_write(false, true).unwrap().to_mode(), 0o755);
         let sgid = Permissions::from_mode(0o2755);
-        assert_eq!(sgid.after_write(1000, true).unwrap().to_mode(), 0o755);
+        assert_eq!(sgid.after_write(false, true).unwrap().to_mode(), 0o755);
         let lock_mark = Permissions::from_mode(0o2644);
-        assert_eq!(lock_mark.after_write(1000, true), None);
-        assert_eq!(lock_mark.after_write(1000, false).unwrap().to_mode(), 0o644);
-        assert_eq!(Permissions::from_mode(0o644).after_write(1000, false), None);
+        assert_eq!(lock_mark.after_write(false, true), None);
+        assert_eq!(
+            lock_mark.after_write(false, false).unwrap().to_mode(),
+            0o644
+        );
+        assert_eq!(
+            Permissions::from_mode(0o644).after_write(false, false),
+            None
+        );
+    }
+
+    /// A truncate removes the set-ID bits only once the size has changed,
+    /// as Linux's shmem_setattr applies the mode after its seal check: a
+    /// memfd sealed against shrinking keeps them (PR #33 review).
+    #[test]
+    fn a_refused_truncate_keeps_the_set_id_bits() {
+        let user = crate::process::creds::Caller {
+            creds: crate::process::creds::Credentials::new(1000, 1000),
+            caps: crate::process::linux_caps::LinuxCaps::EMPTY,
+        };
+        let m = memfd::MemfdNode::new(Permissions::from_mode(0o4755), 1000, 1000, true, 0);
+        m.truncate(8192).unwrap();
+        m.add_seals(seals::SHRINK).unwrap();
+        assert!(truncate_removing_privs_as(&*m, 0, &user).is_err());
+        assert_eq!(m.metadata().unwrap().permissions.to_mode(), 0o4755);
+        assert_eq!(m.metadata().unwrap().size, 8192);
+        truncate_removing_privs_as(&*m, 16384, &user).unwrap();
+        assert_eq!(m.metadata().unwrap().permissions.to_mode(), 0o755);
     }
 
     /// chown drops set-user-ID always and set-group-ID with group execute.
@@ -2357,7 +2756,7 @@ mod tests {
     }
 
     /// Helper: create a Vfs with a ramfs root filesystem already mounted.
-    fn make_vfs_with_root() -> Vfs {
+    pub(crate) fn make_vfs_with_root() -> Vfs {
         let vfs = Vfs::new();
         let ramfs = Arc::new(ramfs::RamFs::new());
         vfs.mount_root(ramfs).expect("mount_root should succeed");
@@ -2448,7 +2847,10 @@ mod tests {
             .unwrap();
         open.create("f", Permissions::from_mode(0o644)).unwrap();
         let table = vfs.snapshot();
-        let other = Some(crate::process::creds::Credentials::new(1000, 1000));
+        let other = Some(crate::process::creds::Caller {
+            creds: crate::process::creds::Credentials::new(1000, 1000),
+            caps: crate::process::linux_caps::LinuxCaps::EMPTY,
+        });
         // Root-owned 0700: another user cannot pass through it, even to a
         // world-readable file, and not by ".." either.
         assert!(matches!(

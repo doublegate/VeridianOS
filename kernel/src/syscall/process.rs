@@ -723,7 +723,10 @@ pub fn sys_thread_setaffinity(tid: usize, cpuset_ptr: usize, cpuset_size: usize)
     if cpuset_size == 0 {
         return Err(SyscallError::InvalidArgument);
     }
-    validate_user_buffer(cpuset_ptr, cpuset_size)?;
+    // As sys_thread_getaffinity: only the bytes read (at most 128) are
+    // checked, so a larger size is accepted, as Linux's
+    // sched_setaffinity accepts one (PR #33 review).
+    super::userspace::validate_user_ptr(cpuset_ptr as *const u8, cpuset_size.min(128))?;
 
     let target_tid = if tid == 0 {
         get_thread_tid()
@@ -768,8 +771,10 @@ pub fn sys_thread_getaffinity(tid: usize, cpuset_ptr: usize, cpuset_size: usize)
         return Err(SyscallError::InvalidArgument);
     }
 
-    // Validate user pointer
-    validate_user_ptr(cpuset_ptr as *const u8, cpuset_size)?;
+    // Only the bytes copied (at most the 8-byte mask) are checked: the
+    // check walks the page tables page by page, so the caller's size
+    // would otherwise set how long it runs in ring 0 (PR #33 review).
+    validate_user_ptr(cpuset_ptr as *const u8, cpuset_size.min(8))?;
 
     let target_tid = if tid == 0 {
         get_thread_tid()
@@ -905,59 +910,94 @@ fn id_arg(arg: usize) -> u32 {
     arg as u32
 }
 
+/// A change of the user IDs, with the capability fixup on every thread
+/// (`Process::change_uids`). CAP_SETUID is read inside it, under the thread
+/// map that change_uids holds while it fixes every thread's sets: read
+/// before, a concurrent setuid on another thread could clear this thread's
+/// capabilities in between, and the stale answer would let it set uid 0
+/// back (PR #33 review).
+fn change_uids<R>(
+    fs: bool,
+    f: impl FnOnce(&mut crate::process::creds::Credentials, bool) -> R,
+) -> Result<R, SyscallError> {
+    let me = crate::process::current_thread().ok_or(SyscallError::InvalidState)?;
+    let proc = current_process().ok_or(SyscallError::InvalidState)?;
+    Ok(proc.change_uids(fs, |c| {
+        let may = me
+            .caps
+            .lock()
+            .capable(crate::process::linux_caps::CAP_SETUID);
+        f(c, may)
+    }))
+}
+
+/// A change of the group IDs or the supplementary groups (no capability
+/// fixup: Linux has none for them). CAP_SETGID is read with the change,
+/// under the thread map, which a user-ID change holds while it clears every
+/// thread's sets, so a concurrent privilege drop cannot leave a stale
+/// answer (as in [`change_uids`]).
+fn change_gids<R>(
+    f: impl FnOnce(&mut crate::process::creds::Credentials, bool) -> R,
+) -> Result<R, SyscallError> {
+    let me = crate::process::current_thread().ok_or(SyscallError::InvalidState)?;
+    let proc = current_process().ok_or(SyscallError::InvalidState)?;
+    let _threads = proc.threads.lock();
+    Ok(proc.update_credentials(|c| {
+        let may = me
+            .caps
+            .lock()
+            .capable(crate::process::linux_caps::CAP_SETGID);
+        f(c, may)
+    }))
+}
+
 /// setuid: Linux rules (`Credentials::setuid`).
 pub fn sys_setuid(uid: usize) -> SyscallResult {
-    let proc = current_process().ok_or(SyscallError::InvalidState)?;
-    proc.update_credentials(|c| c.setuid(id_arg(uid)))?;
+    change_uids(false, |c, may| c.setuid(id_arg(uid), may))??;
     Ok(0)
 }
 
 /// setgid: Linux rules (`Credentials::setgid`).
 pub fn sys_setgid(gid: usize) -> SyscallResult {
-    let proc = current_process().ok_or(SyscallError::InvalidState)?;
-    proc.update_credentials(|c| c.setgid(id_arg(gid)))?;
+    change_gids(|c, may| c.setgid(id_arg(gid), may))??;
     Ok(0)
 }
 
 /// setreuid(ruid, euid); -1 leaves an ID unchanged.
 pub fn sys_setreuid(r: usize, e: usize) -> SyscallResult {
-    let proc = current_process().ok_or(SyscallError::InvalidState)?;
-    proc.update_credentials(|c| c.setreuid(id_arg(r), id_arg(e)))?;
+    change_uids(false, |c, may| c.setreuid(id_arg(r), id_arg(e), may))??;
     Ok(0)
 }
 
 /// setregid(rgid, egid); -1 leaves an ID unchanged.
 pub fn sys_setregid(r: usize, e: usize) -> SyscallResult {
-    let proc = current_process().ok_or(SyscallError::InvalidState)?;
-    proc.update_credentials(|c| c.setregid(id_arg(r), id_arg(e)))?;
+    change_gids(|c, may| c.setregid(id_arg(r), id_arg(e), may))??;
     Ok(0)
 }
 
 /// setresuid(ruid, euid, suid); -1 leaves an ID unchanged.
 pub fn sys_setresuid(r: usize, e: usize, s: usize) -> SyscallResult {
-    let proc = current_process().ok_or(SyscallError::InvalidState)?;
-    proc.update_credentials(|c| c.setresuid(id_arg(r), id_arg(e), id_arg(s)))?;
+    change_uids(false, |c, may| {
+        c.setresuid(id_arg(r), id_arg(e), id_arg(s), may)
+    })??;
     Ok(0)
 }
 
 /// setresgid(rgid, egid, sgid); -1 leaves an ID unchanged.
 pub fn sys_setresgid(r: usize, e: usize, s: usize) -> SyscallResult {
-    let proc = current_process().ok_or(SyscallError::InvalidState)?;
-    proc.update_credentials(|c| c.setresgid(id_arg(r), id_arg(e), id_arg(s)))?;
+    change_gids(|c, may| c.setresgid(id_arg(r), id_arg(e), id_arg(s), may))??;
     Ok(0)
 }
 
 /// setfsuid(fsuid): the old filesystem uid, whether or not it changed;
 /// never fails (Linux).
 pub fn sys_setfsuid(uid: usize) -> SyscallResult {
-    let proc = current_process().ok_or(SyscallError::InvalidState)?;
-    Ok(proc.update_credentials(|c| c.setfsuid(id_arg(uid))) as usize)
+    Ok(change_uids(true, |c, may| c.setfsuid(id_arg(uid), may))? as usize)
 }
 
-/// setfsgid(fsgid): the old filesystem gid, as setfsuid.
+/// setfsgid(gid): the old filesystem gid, as setfsuid.
 pub fn sys_setfsgid(gid: usize) -> SyscallResult {
-    let proc = current_process().ok_or(SyscallError::InvalidState)?;
-    Ok(proc.update_credentials(|c| c.setfsgid(id_arg(gid))) as usize)
+    Ok(change_gids(|c, may| c.setfsgid(id_arg(gid), may))? as usize)
 }
 
 /// getresuid / getresgid: write the three IDs (each a 4-byte uid_t) to
@@ -1006,7 +1046,7 @@ pub fn sys_getgroups(size: usize, list: usize) -> SyscallResult {
     Ok(groups.len())
 }
 
-/// setgroups(size, list): replace the supplementary groups (root only;
+/// setgroups(size, list): replace the supplementary groups (CAP_SETGID;
 /// EINVAL above NGROUPS_MAX).
 pub fn sys_setgroups(size: usize, list: usize) -> SyscallResult {
     use crate::process::creds::NGROUPS_MAX;
@@ -1018,8 +1058,7 @@ pub fn sys_setgroups(size: usize, list: usize) -> SyscallResult {
     for (i, slot) in groups.iter_mut().take(size as usize).enumerate() {
         *slot = super::userspace::read_user::<u32>(list + i * 4)?;
     }
-    let proc = current_process().ok_or(SyscallError::InvalidState)?;
-    proc.update_credentials(|c| c.setgroups(&groups[..size as usize]))?;
+    change_gids(|c, may| c.setgroups(&groups[..size as usize], may))??;
     Ok(0)
 }
 

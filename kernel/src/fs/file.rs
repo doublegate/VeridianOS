@@ -249,6 +249,14 @@ impl File {
 
     /// Write to the file
     pub fn write(&self, data: &[u8]) -> Result<usize, KernelError> {
+        self.write_part(data, true)
+    }
+
+    /// [`Self::write`] for one piece of a larger write: `first` is whether
+    /// it is the first, the one that removes the file's privileges
+    /// ([`super::remove_privs`]). A write(2) removes them once, as Linux's
+    /// __generic_file_write_iter does, not once per piece (PR #33 review).
+    pub fn write_part(&self, data: &[u8], first: bool) -> Result<usize, KernelError> {
         if !self.flags.write {
             return Err(KernelError::PermissionDenied {
                 operation: "write file not opened for writing",
@@ -267,9 +275,11 @@ impl File {
         }
 
         let len = super::check_fsize(&*self.node, *pos, data.len())?;
+        if len != 0 && first {
+            super::remove_privs(&*self.node)?;
+        }
         let bytes_written = self.node.write(*pos, &data[..len])?;
         *pos += bytes_written;
-        super::remove_privs_after_write(&*self.node);
         Ok(bytes_written)
     }
 

@@ -422,6 +422,10 @@ check "scaling: 1.6 MB gets a real raise"        "670s"  "$(sc 1619782)"
 check "scaling: a padded count still scales"     "670s"  "$(sc '  1619782  ')"
 check "scaling: a huge diff hits the ceiling"    "1800s" "$(sc 20000000)"
 check "scaling: no argument leaves the base"     "5m"    "$(sc '')"
+# The default (900 s/MiB): the 426 KB diff that timed out three times at 397 s under 240.
+AGY_TIMEOUT_SECONDS_PER_MIB="$(sed -n 's/^AGY_TIMEOUT_SECONDS_PER_MIB="${AGY_TIMEOUT_SECONDS_PER_MIB:-\([0-9]*\)}".*/\1/p' "$SCRIPT_DIR/agy-review.sh")"
+check "scaling: the default gives a 426 KB diff 665 s" "665s" "$(sc 425786)"
+AGY_TIMEOUT_SECONDS_PER_MIB=240
 check "scaling: junk leaves the base"            "5m"    "$(sc junk)"
 AGY_PRINT_TIMEOUT_EXPLICIT=set
 check "scaling: an explicit timeout is not touched" "5m" "$(sc 20000000)"

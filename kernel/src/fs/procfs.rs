@@ -131,6 +131,10 @@ impl VfsNode for ProcNode {
                     "loadavg" => generate_loadavg(),
                     // Qt/KDE compatibility files
                     "core_pattern" => String::from("core\n"),
+                    "pid_max" => format!("{}\n", crate::process::PID_MAX),
+                    "cap_last_cap" => {
+                        format!("{}\n", crate::process::linux_caps::CAP_LAST_CAP)
+                    }
                     "boot_id" => String::from("00000000-0000-0000-0000-000000000001\n"),
                     "self/maps" => crate::process::current_process()
                         .map(|p| generate_maps(p.pid.0))
@@ -162,13 +166,22 @@ impl VfsNode for ProcNode {
 
                             let parent = process.parent().unwrap_or(crate::process::ProcessId(0));
 
+                            // The sets are per thread; the process's are its
+                            // main thread's, as on Linux.
+                            let caps = process
+                                .get_main_thread_id()
+                                .and_then(|tid| process.get_thread(tid))
+                                .map(|t| status_caps(&t.caps.lock()))
+                                .unwrap_or_default();
+
                             format!(
-                                "Name:\t{}\nPid:\t{}\nPPid:\t{}\nState:\t{}\n{}",
+                                "Name:\t{}\nPid:\t{}\nPPid:\t{}\nState:\t{}\n{}{}",
                                 name,
                                 pid,
                                 parent.0,
                                 state,
-                                status_ids(&process.credentials())
+                                status_ids(&process.credentials()),
+                                caps
                             )
                         } else {
                             format!("Name:\tProcess\nPid:\t{}\nState:\tR (running)\n", pid)
@@ -376,6 +389,10 @@ impl VfsNode for ProcNode {
                         "core_pattern" => Ok(Arc::new(ProcNode::new_system_file(String::from(
                             "core_pattern",
                         ))) as Arc<dyn VfsNode>),
+                        "cap_last_cap" | "pid_max" => {
+                            Ok(Arc::new(ProcNode::new_system_file(String::from(name)))
+                                as Arc<dyn VfsNode>)
+                        }
                         "random" => Ok(Arc::new(ProcNode {
                             node_type: ProcNodeType::SubDir(String::from("sys/kernel/random")),
                         }) as Arc<dyn VfsNode>),
@@ -557,6 +574,25 @@ fn status_ids(c: &crate::process::creds::Credentials) -> String {
     format!(
         "Uid:\t{}\t{}\t{}\t{}\nGid:\t{}\t{}\t{}\t{}\nGroups:\t{}\n",
         c.ruid, c.euid, c.suid, c.fsuid, c.rgid, c.egid, c.sgid, c.fsgid, groups
+    )
+}
+
+/// The capability lines of /proc/[pid]/status, as Linux prints them (ADR
+/// 0020): each set as 16 hexadecimal digits.
+fn status_caps(c: &crate::process::linux_caps::CapSets) -> String {
+    format!(
+        concat!(
+            "CapInh:\t{:016x}\n",
+            "CapPrm:\t{:016x}\n",
+            "CapEff:\t{:016x}\n",
+            "CapBnd:\t{:016x}\n",
+            "CapAmb:\t{:016x}\n",
+        ),
+        c.inheritable.bits(),
+        c.permitted.bits(),
+        c.effective.bits(),
+        c.bounding.bits(),
+        c.ambient.bits()
     )
 }
 
@@ -757,20 +793,76 @@ mod tests {
     #[test]
     fn status_shows_every_id() {
         let mut c = crate::process::creds::Credentials::new(0, 0);
-        c.setgroups(&[10, 20]).unwrap();
-        c.setresgid(5, 6, 7).unwrap();
-        c.setfsgid(8);
-        c.setresuid(1, 2, 3).unwrap();
+        c.setgroups(&[10, 20], true).unwrap();
+        c.setresgid(5, 6, 7, true).unwrap();
+        c.setfsgid(8, true);
+        c.setresuid(1, 2, 3, true).unwrap();
         assert_eq!(
             status_ids(&c),
             "Uid:\t1\t2\t3\t2\nGid:\t5\t6\t7\t8\nGroups:\t10 20\n"
         );
         let mut c = crate::process::creds::Credentials::new(0, 0);
-        c.setfsuid(1000);
+        c.setfsuid(1000, true);
         assert_eq!(
             status_ids(&c),
             "Uid:\t0\t0\t0\t1000\nGid:\t0\t0\t0\t0\nGroups:\t\n"
         );
+    }
+
+    /// Status shows the five capability sets as Linux does: 16 hex digits,
+    /// in the order inheritable, permitted, effective, bounding, ambient.
+    #[test]
+    fn status_shows_the_capability_sets() {
+        use crate::process::linux_caps::{CapSets, LinuxCaps, CAP_KILL, CAP_NET_BIND_SERVICE};
+        assert_eq!(
+            status_caps(&CapSets::ROOT),
+            concat!(
+                "CapInh:\t0000000000000000\n",
+                "CapPrm:\t000001ffffffffff\n",
+                "CapEff:\t000001ffffffffff\n",
+                "CapBnd:\t000001ffffffffff\n",
+                "CapAmb:\t0000000000000000\n",
+            )
+        );
+        let mut caps = CapSets::NONE;
+        caps.inheritable = LinuxCaps::of(CAP_KILL);
+        caps.ambient = LinuxCaps::of(CAP_NET_BIND_SERVICE);
+        assert_eq!(
+            status_caps(&caps),
+            concat!(
+                "CapInh:\t0000000000000020\n",
+                "CapPrm:\t0000000000000000\n",
+                "CapEff:\t0000000000000000\n",
+                "CapBnd:\t000001ffffffffff\n",
+                "CapAmb:\t0000000000000400\n",
+            )
+        );
+    }
+
+    /// /proc/sys/kernel/cap_last_cap is the highest capability number, which
+    /// libcap and LTP read to size their sets.
+    #[test]
+    fn cap_last_cap_names_the_highest_capability() {
+        let dir = ProcNode {
+            node_type: ProcNodeType::SubDir(String::from("sys/kernel")),
+        };
+        let file = dir.lookup("cap_last_cap").unwrap();
+        let mut buf = [0u8; 16];
+        let n = file.read(0, &mut buf).unwrap();
+        assert_eq!(&buf[..n], b"40\n");
+    }
+
+    /// /proc/sys/kernel/pid_max is Linux's 64-bit limit (PID_MAX_LIMIT);
+    /// VeridianOS ids do not wrap at it (docs/KNOWN-LIMITATIONS.md).
+    #[test]
+    fn pid_max_is_the_linux_64_bit_limit() {
+        let dir = ProcNode {
+            node_type: ProcNodeType::SubDir(String::from("sys/kernel")),
+        };
+        let file = dir.lookup("pid_max").unwrap();
+        let mut buf = [0u8; 16];
+        let n = file.read(0, &mut buf).unwrap();
+        assert_eq!(&buf[..n], b"4194304\n");
     }
 
     /// The RISC-V `mmu` field names the mode, as Linux prints it.

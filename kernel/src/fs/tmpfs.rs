@@ -24,6 +24,9 @@ struct TmpNode {
     /// A symlink's target.
     data: RwLock<Vec<u8>>,
     children: RwLock<BTreeMap<String, Arc<TmpNode>>>,
+
+    /// Extended attributes (`fs::xattr`), kept with the node.
+    xattrs: RwLock<super::xattr::XattrSet>,
     metadata: RwLock<Metadata>,
     inode: u64,
     /// Device number of a device node (Linux's encoding, `fs::make_dev`);
@@ -77,6 +80,7 @@ impl TmpNode {
             pages: RwLock::new(ShmemPages::new()),
             data: RwLock::new(Vec::new()),
             children: RwLock::new(BTreeMap::new()),
+            xattrs: RwLock::new(super::xattr::XattrSet::new()),
             metadata: RwLock::new(Metadata {
                 node_type: NodeType::File,
                 size: 0,
@@ -108,6 +112,7 @@ impl TmpNode {
             pages: RwLock::new(ShmemPages::new()),
             data: RwLock::new(Vec::new()),
             children: RwLock::new(BTreeMap::new()),
+            xattrs: RwLock::new(super::xattr::XattrSet::new()),
             metadata: RwLock::new(Metadata {
                 node_type: NodeType::Directory,
                 size: 0,
@@ -141,6 +146,7 @@ impl TmpNode {
             pages: RwLock::new(ShmemPages::new()),
             data: RwLock::new(target_bytes),
             children: RwLock::new(BTreeMap::new()),
+            xattrs: RwLock::new(super::xattr::XattrSet::new()),
             metadata: RwLock::new(Metadata {
                 node_type: NodeType::Symlink,
                 size,
@@ -178,6 +184,16 @@ impl TmpNode {
             .map_err(|_| KernelError::FsError(FsError::NoSpace))
     }
 
+    /// What a node's extended attributes are charged: their encoded size,
+    /// nothing for none (an empty set's size is only its header).
+    fn xattr_charge(set: &super::xattr::XattrSet) -> usize {
+        if set.is_empty() {
+            0
+        } else {
+            set.encoded_size()
+        }
+    }
+
     fn release_space(&self, bytes: usize) {
         let _ = self
             .bytes_used
@@ -192,7 +208,9 @@ impl Drop for TmpNode {
     /// they are released when the last name and the last open file are
     /// gone. Releasing at unlink let a hard link keep data alive uncounted.
     fn drop(&mut self) {
-        let freed = self.data.get_mut().len() + self.pages.get_mut().allocated_bytes();
+        let freed = self.data.get_mut().len()
+            + self.pages.get_mut().allocated_bytes()
+            + Self::xattr_charge(self.xattrs.get_mut());
         if freed > 0 {
             let _ = self
                 .bytes_used
@@ -216,6 +234,32 @@ fn as_tmp_arc(node: Arc<dyn VfsNode>) -> Option<Arc<TmpNode>> {
 }
 
 impl VfsNode for TmpNode {
+    fn xattrs(&self) -> Result<super::xattr::XattrSet, KernelError> {
+        Ok(self.xattrs.read().clone())
+    }
+
+    fn update_xattrs(
+        &self,
+        f: &mut dyn FnMut(&mut super::xattr::XattrSet) -> Result<(), KernelError>,
+    ) -> Result<(), KernelError> {
+        // Charged to the filesystem like file data (PR #33 review): user.*
+        // attributes are writable by the owner of any file, so without it
+        // they would let a user fill memory past the size limit.
+        let mut set = self.xattrs.write();
+        let mut new = set.clone();
+        super::xattr::update_in_memory(&mut new, f)?;
+        let (old_charge, new_charge) = (Self::xattr_charge(&set), Self::xattr_charge(&new));
+        if new_charge > old_charge {
+            self.reserve_space(new_charge - old_charge)?;
+        } else {
+            self.release_space(old_charge - new_charge);
+        }
+        *set = new;
+        // The status-change time, which stat reports from `created`.
+        self.metadata.write().created = crate::arch::timer::get_timestamp_secs();
+        Ok(())
+    }
+
     fn node_type(&self) -> NodeType {
         self.node_type
     }
@@ -880,6 +924,62 @@ mod tests {
 
         // Still one page used
         assert_eq!(fs.bytes_used(), P);
+    }
+
+    /// A committed attribute change moves the status-change time (stat's
+    /// st_ctime, the node's `created`), as Linux's shmem_xattr_handler_set
+    /// does; a refused one leaves it (PR #33 review).
+    #[test]
+    fn xattr_changes_move_the_status_change_time() {
+        let node = TmpNode::new_file(
+            2,
+            1,
+            Permissions::default(),
+            Arc::new(AtomicUsize::new(0)),
+            P,
+        );
+        node.metadata.write().created = u64::MAX;
+        assert!(node
+            .update_xattrs(&mut |_| Err(KernelError::FsError(FsError::NoSpace)))
+            .is_err());
+        assert_eq!(node.metadata.read().created, u64::MAX);
+        node.update_xattrs(&mut |a| a.set("user.a", b"v", 0))
+            .unwrap();
+        assert_ne!(node.metadata.read().created, u64::MAX);
+    }
+
+    /// Extended attributes count against the size limit, and are refunded
+    /// when removed and when the node goes.
+    #[test]
+    fn xattrs_are_charged_to_the_size_limit() {
+        let fs = TmpFs::new(P);
+        let root = fs.root();
+        let file = root.create("f", Permissions::default()).unwrap();
+        file.update_xattrs(&mut |a| a.set("user.a", &[7; 1000], 0))
+            .unwrap();
+        let one = fs.bytes_used();
+        assert!(one >= 1000);
+        // Five more would pass the one-page limit: the set is unchanged.
+        let mut grow = |a: &mut crate::fs::xattr::XattrSet| {
+            for name in ["user.b", "user.c", "user.d", "user.e"] {
+                a.set(name, &[7; 1000], 0)?;
+            }
+            Ok(())
+        };
+        assert_eq!(
+            file.update_xattrs(&mut grow),
+            Err(KernelError::FsError(FsError::NoSpace))
+        );
+        assert_eq!(fs.bytes_used(), one);
+        let kept = file.xattrs().unwrap();
+        assert!(kept.get("user.a").is_some() && kept.get("user.b").is_none());
+        file.update_xattrs(&mut |a| a.remove("user.a")).unwrap();
+        assert_eq!(fs.bytes_used(), 0, "an empty set costs nothing");
+        file.update_xattrs(&mut |a| a.set("user.a", &[7; 1000], 0))
+            .unwrap();
+        drop(file);
+        root.unlink("f").unwrap();
+        assert_eq!(fs.bytes_used(), 0, "refunded with the node");
     }
 
     #[test]

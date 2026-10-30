@@ -14,14 +14,19 @@
 //! (`security::accounts`: /etc/shadow, mode 0600): EIO if they cannot be
 //! written, though the new password is already in effect.
 //!
-//! Root may act on any account. Any other caller only on its own: the
+//! A caller holding CAP_DAC_OVERRIDE -- the power these calls stand for,
+//! writing `/etc/shadow` (ADR 0020, decision 9) -- may act on any account.
+//! Any other caller only on its own: the
 //! account the user database names for the caller's real user ID, as
 //! Linux's unix_chkpwd allows. So an unprivileged program can neither guess
 //! another user's password nor lock that account by failing on purpose
 //! (EPERM).
 
 use super::{SyscallError, SyscallResult};
-use crate::{process::creds::Credentials, security::auth::AuthResult};
+use crate::{
+    process::{creds::Caller, linux_caps::CAP_DAC_OVERRIDE},
+    security::auth::AuthResult,
+};
 
 /// Check a password.
 pub const AUTH_CHECK: usize = 0;
@@ -60,10 +65,10 @@ fn result_code(result: AuthResult) -> usize {
     }
 }
 
-/// Whether `creds` may act on an account whose user ID in the user
+/// Whether `caller` may act on an account whose user ID in the user
 /// database is `account_uid` (`None`: the database does not know the name).
-pub(crate) fn may_act_on(creds: &Credentials, account_uid: Option<u32>) -> bool {
-    creds.euid == 0 || account_uid == Some(creds.ruid)
+pub(crate) fn may_act_on(caller: &Caller, account_uid: Option<u32>) -> bool {
+    caller.capable(CAP_DAC_OVERRIDE) || account_uid == Some(caller.creds.ruid)
 }
 
 /// A NUL-terminated string from user memory into `buf`, at most
@@ -125,12 +130,11 @@ pub fn sys_veridian_auth(
     let name =
         core::str::from_utf8(&name_buf[..name_len]).map_err(|_| SyscallError::InvalidArgument)?;
 
-    let creds = crate::process::current_process()
-        .ok_or(SyscallError::InvalidState)?
-        .credentials();
+    crate::process::current_process().ok_or(SyscallError::InvalidState)?;
+    let caller = Caller::current();
     let account_uid =
         super::userland_ext::with_user_db(|db| db.get_user_by_name(name).map(|u| u.uid)).flatten();
-    if !may_act_on(&creds, account_uid) {
+    if !may_act_on(&caller, account_uid) {
         return Err(SyscallError::OperationNotPermitted);
     }
     let auth = crate::security::auth::try_auth_manager().ok_or(SyscallError::InvalidState)?;
@@ -153,7 +157,7 @@ pub fn sys_veridian_auth(
             // told the change failed (PR #23 review).
             let before = auth.account_snapshot(name);
             let changed = if secret == 0 {
-                if creds.euid != 0 {
+                if !caller.capable(CAP_DAC_OVERRIDE) {
                     return Err(SyscallError::OperationNotPermitted);
                 }
                 auth.reset_password(name, new)
@@ -178,22 +182,34 @@ pub fn sys_veridian_auth(
 mod tests {
     use super::*;
 
-    /// Root acts on any account; a user only on its own (by real uid), and
-    /// on no account the user database does not know.
+    /// CAP_DAC_OVERRIDE acts on any account; a user only on its own (by
+    /// real uid), and on no account the user database does not know.
     #[test]
-    fn only_root_or_the_owner_may_act() {
-        let root = Credentials::new(0, 0);
+    fn only_cap_dac_override_or_the_owner_may_act() {
+        use crate::process::{creds::Credentials, linux_caps::LinuxCaps};
+        let root = Caller::KERNEL;
         assert!(may_act_on(&root, Some(1000)));
         assert!(may_act_on(&root, None));
-        let mut user = Credentials::new(1000, 100);
+        let mut user = Caller {
+            creds: Credentials::new(1000, 100),
+            caps: LinuxCaps::EMPTY,
+        };
         assert!(may_act_on(&user, Some(1000)));
         assert!(!may_act_on(&user, Some(0)));
         assert!(!may_act_on(&user, None));
         // A setuid program running for user 1000 (effective 1001, real
         // 1000) acts for the real user, as unix_chkpwd does.
-        user.euid = 1001;
+        user.creds.euid = 1001;
         assert!(may_act_on(&user, Some(1000)));
         assert!(!may_act_on(&user, Some(1001)));
+        // The capability, not uid 0.
+        user.caps = LinuxCaps::EMPTY.with(CAP_DAC_OVERRIDE);
+        assert!(may_act_on(&user, Some(0)));
+        let bare_root = Caller {
+            creds: Credentials::new(0, 0),
+            caps: LinuxCaps::EMPTY,
+        };
+        assert!(!may_act_on(&bare_root, Some(1000)));
     }
 
     #[test]

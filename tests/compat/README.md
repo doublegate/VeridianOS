@@ -107,8 +107,9 @@ After a change that makes tests pass, run the suites and accept the result:
 scripts/run-compat-tests.sh x86_64 --update
 ```
 
-`--update` keeps a note written by hand while the status stays the same, and
-keeps `FLAKY` entries. Commit the list with the change that moved it. A test
+`--update` keeps a note written by hand while the status stays the same,
+keeps `FLAKY` entries, and keeps the comment lines at the top of the list
+(such as the baseline's date and versions). Commit the list with the change that moved it. A test
 whose result varies between runs (timing, load) is marked `FLAKY` by hand,
 with the reason in the note: the gate's "FLAKY candidate" lines (a test that
 failed once and passed on its retry) are where these turn up; a failure explained by a documented limitation

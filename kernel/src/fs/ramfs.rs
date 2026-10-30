@@ -20,6 +20,9 @@ struct RamNode {
     /// Children (for directories)
     children: RwLock<BTreeMap<String, Arc<RamNode>>>,
 
+    /// Extended attributes (`fs::xattr`), kept with the node.
+    xattrs: RwLock<super::xattr::XattrSet>,
+
     /// Metadata
     metadata: RwLock<Metadata>,
 
@@ -71,6 +74,7 @@ impl RamNode {
             node_type: NodeType::File,
             data: RwLock::new(Vec::new()),
             children: RwLock::new(BTreeMap::new()),
+            xattrs: RwLock::new(super::xattr::XattrSet::new()),
             metadata: RwLock::new(Metadata {
                 node_type: NodeType::File,
                 size: 0,
@@ -95,6 +99,7 @@ impl RamNode {
             node_type: NodeType::Directory,
             data: RwLock::new(Vec::new()),
             children: RwLock::new(BTreeMap::new()),
+            xattrs: RwLock::new(super::xattr::XattrSet::new()),
             metadata: RwLock::new(Metadata {
                 node_type: NodeType::Directory,
                 size: 0,
@@ -123,6 +128,7 @@ impl RamNode {
             node_type: NodeType::Symlink,
             data: RwLock::new(target_bytes),
             children: RwLock::new(BTreeMap::new()),
+            xattrs: RwLock::new(super::xattr::XattrSet::new()),
             metadata: RwLock::new(Metadata {
                 node_type: NodeType::Symlink,
                 size,
@@ -173,6 +179,20 @@ fn as_ram_arc(node: Arc<dyn VfsNode>) -> Option<Arc<RamNode>> {
 }
 
 impl VfsNode for RamNode {
+    fn xattrs(&self) -> Result<super::xattr::XattrSet, KernelError> {
+        Ok(self.xattrs.read().clone())
+    }
+
+    fn update_xattrs(
+        &self,
+        f: &mut dyn FnMut(&mut super::xattr::XattrSet) -> Result<(), KernelError>,
+    ) -> Result<(), KernelError> {
+        super::xattr::update_in_memory(&mut self.xattrs.write(), f)?;
+        // The status-change time, which stat reports from `created`.
+        self.metadata.write().created = crate::arch::timer::get_timestamp_secs();
+        Ok(())
+    }
+
     fn node_type(&self) -> NodeType {
         self.node_type
     }
@@ -645,6 +665,22 @@ mod tests {
     use alloc::vec;
 
     use super::*;
+
+    /// A committed attribute change moves the status-change time (stat's
+    /// st_ctime, the node's `created`); a refused one leaves it (PR #33
+    /// review).
+    #[test]
+    fn xattr_changes_move_the_status_change_time() {
+        let node = RamNode::new_file(2, 1, 0, Permissions::default());
+        node.metadata.write().created = u64::MAX;
+        assert!(node
+            .update_xattrs(&mut |_| Err(KernelError::FsError(FsError::NoSpace)))
+            .is_err());
+        assert_eq!(node.metadata.read().created, u64::MAX);
+        node.update_xattrs(&mut |a| a.set("user.a", b"v", 0))
+            .unwrap();
+        assert_ne!(node.metadata.read().created, u64::MAX);
+    }
 
     /// unlink removes no directory and rmdir nothing else, the type being
     /// checked where the entry is removed (PR #23 review).

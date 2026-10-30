@@ -29,6 +29,7 @@ pub mod cwd;
 pub mod exit;
 pub mod fork;
 pub mod lifecycle;
+pub mod linux_caps;
 pub mod memory;
 pub mod pcb;
 pub mod rlimit;
@@ -63,6 +64,13 @@ pub const MAX_THREADS_PER_PROCESS: usize = 256;
 /// every other thread an ID no process has, so gettid, tkill and tgkill name
 /// threads and processes without ambiguity (N-217).
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+
+/// What /proc/sys/kernel/pid_max reports: Linux's limit on 64-bit systems
+/// (`PID_MAX_LIMIT`). Linux allocates ids below it and wraps around to
+/// reuse freed ones; `NEXT_ID` only counts up and never reuses an id, so the
+/// file is a bound programs size tables by, not where ids stop
+/// (docs/KNOWN-LIMITATIONS.md).
+pub const PID_MAX: u64 = 4_194_304;
 
 /// Allocate a new process ID
 pub fn alloc_pid() -> ProcessId {
@@ -676,8 +684,30 @@ pub fn create_thread(
             // For now, we'll skip this as it requires arch-specific code
             let _ = arg;
 
+            // The creator's no_new_privs and capability sets, as clone copies
+            // them (ADR 0020): a new thread has no more privilege than the
+            // thread that made it. Thread::new starts from root's sets, for
+            // the kernel's own threads (PR #33 review).
+            let creator = current_thread();
+            if let Some(creator) = &creator {
+                thread.no_new_privs.store(
+                    creator.no_new_privs.load(Ordering::Acquire),
+                    Ordering::Release,
+                );
+                let sets = *creator.caps.lock();
+                *thread.caps.lock() = sets;
+            }
+
             // Add thread to process
-            process.add_thread(thread)?;
+            let thread = process.add_thread(thread)?;
+            // Copied again under the thread map, which a set*id call on
+            // another thread fixes every thread's sets under
+            // (`Process::change_uids`), as clone does.
+            if let Some(creator) = &creator {
+                let _threads = process.threads.lock();
+                let sets = *creator.caps.lock();
+                *thread.caps.lock() = sets;
+            }
 
             Ok(tid)
         }

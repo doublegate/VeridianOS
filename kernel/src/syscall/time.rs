@@ -264,12 +264,16 @@ unsafe impl super::userspace::UserPod for Timezone {}
 /// The timezone settimeofday last set (minutes west, DST type).
 static SYS_TZ: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
-/// Setting the wall clock needs privilege (CAP_SYS_TIME; root here). A
-/// caller that is not a process is refused, not trusted.
+/// Setting the wall clock needs CAP_SYS_TIME (ADR 0020). A caller that is
+/// not a process is refused, not trusted.
 fn require_time_privilege() -> Result<(), SyscallError> {
-    match crate::process::current_process() {
-        Some(p) if p.euid() == 0 => Ok(()),
-        _ => Err(SyscallError::OperationNotPermitted),
+    let caller = crate::process::creds::Caller::current();
+    if crate::process::current_process().is_some()
+        && caller.capable(crate::process::linux_caps::CAP_SYS_TIME)
+    {
+        Ok(())
+    } else {
+        Err(SyscallError::OperationNotPermitted)
     }
 }
 

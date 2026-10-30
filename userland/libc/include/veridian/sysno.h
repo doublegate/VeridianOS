@@ -128,6 +128,23 @@
 #define SYS_select                       23
 #define SYS_pselect6                     270
 #define SYS_getdents64                   217
+/* Extended attributes (ADR 0020) */
+#define SYS_setxattr                     188
+#define SYS_lsetxattr                    189
+#define SYS_fsetxattr                    190
+#define SYS_getxattr                     191
+#define SYS_lgetxattr                    192
+#define SYS_fgetxattr                    193
+#define SYS_listxattr                    194
+#define SYS_llistxattr                   195
+#define SYS_flistxattr                   196
+#define SYS_removexattr                  197
+#define SYS_lremovexattr                 198
+#define SYS_fremovexattr                 199
+#define SYS_setxattrat                   463
+#define SYS_getxattrat                   464
+#define SYS_listxattrat                  465
+#define SYS_removexattrat                466
 /* Directories */
 #define SYS_mkdir                        83
 #define SYS_mkdirat                      258
@@ -168,6 +185,7 @@
 #define SYS_rt_sigaction                 13
 #define SYS_rt_sigprocmask               14
 #define SYS_rt_sigsuspend                130
+#define SYS_pause                        34
 #define SYS_rt_sigreturn                 15
 #define SYS_rt_sigpending                127
 #define SYS_rt_sigtimedwait              128
@@ -191,6 +209,8 @@
 #define SYS_setfsgid                     123
 #define SYS_getgroups                    115
 #define SYS_setgroups                    116
+#define SYS_capget                       125
+#define SYS_capset                       126
 #define SYS_VERIDIAN_AUTH                1352
 /* Process groups and sessions */
 #define SYS_setpgid                      109
@@ -394,6 +414,23 @@
 #define SYS_ppoll                        73
 #define SYS_pselect6                     72
 #define SYS_getdents64                   61
+/* Extended attributes (ADR 0020) */
+#define SYS_setxattr                     5
+#define SYS_lsetxattr                    6
+#define SYS_fsetxattr                    7
+#define SYS_getxattr                     8
+#define SYS_lgetxattr                    9
+#define SYS_fgetxattr                    10
+#define SYS_listxattr                    11
+#define SYS_llistxattr                   12
+#define SYS_flistxattr                   13
+#define SYS_removexattr                  14
+#define SYS_lremovexattr                 15
+#define SYS_fremovexattr                 16
+#define SYS_setxattrat                   463
+#define SYS_getxattrat                   464
+#define SYS_listxattrat                  465
+#define SYS_removexattrat                466
 /* Directories */
 #define SYS_mkdirat                      34
 #define SYS_DIR_OPENDIR                  1086
@@ -454,6 +491,8 @@
 #define SYS_setfsgid                     152
 #define SYS_getgroups                    158
 #define SYS_setgroups                    159
+#define SYS_capget                       90
+#define SYS_capset                       91
 #define SYS_VERIDIAN_AUTH                1352
 /* Process groups and sessions */
 #define SYS_setpgid                      154
@@ -653,6 +692,23 @@
 #define SYS_ppoll                        73
 #define SYS_pselect6                     72
 #define SYS_getdents64                   61
+/* Extended attributes (ADR 0020) */
+#define SYS_setxattr                     5
+#define SYS_lsetxattr                    6
+#define SYS_fsetxattr                    7
+#define SYS_getxattr                     8
+#define SYS_lgetxattr                    9
+#define SYS_fgetxattr                    10
+#define SYS_listxattr                    11
+#define SYS_llistxattr                   12
+#define SYS_flistxattr                   13
+#define SYS_removexattr                  14
+#define SYS_lremovexattr                 15
+#define SYS_fremovexattr                 16
+#define SYS_setxattrat                   463
+#define SYS_getxattrat                   464
+#define SYS_listxattrat                  465
+#define SYS_removexattrat                466
 /* Directories */
 #define SYS_mkdirat                      34
 #define SYS_DIR_OPENDIR                  1086
@@ -713,6 +769,8 @@
 #define SYS_setfsgid                     152
 #define SYS_getgroups                    158
 #define SYS_setgroups                    159
+#define SYS_capget                       90
+#define SYS_capset                       91
 #define SYS_VERIDIAN_AUTH                1352
 /* Process groups and sessions */
 #define SYS_setpgid                      154
