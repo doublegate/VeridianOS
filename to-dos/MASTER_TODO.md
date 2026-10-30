@@ -357,7 +357,8 @@ What does not work yet: `docs/KNOWN-LIMITATIONS.md`.
      - [x] the release, the version field, `/proc/version` and `/proc/sys/kernel` (ADR 0021)
      - [x] the system name per process: Linux mode (feature note, GNU ABI tag, prctl, the
        `linux-uname` launcher, `veridian-elfctl set linux-uname`) and the configure site file
-     - [ ] expected lists from full compat runs on all three architectures
+     - [x] expected lists from full compat runs on all three architectures (2026-10-30: LTP
+       524/519/519 of 1,552 on x86_64/AArch64/RISC-V, from 24)
      - [x] statfs and fstatfs per filesystem type (`fs::statfs`)
   3. [ ] The remaining syscall groups: personality (READ_IMPLIES_EXEC with the W^X opt-in only),
      unshare/setns with every namespace type and `/proc/<pid>/ns`, then the process, signal, time

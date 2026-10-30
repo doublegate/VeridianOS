@@ -22,6 +22,12 @@
   copy in `/usr/local/share`) sets `build_alias` to `<machine>-unknown-linux-musl`, and init, the
   kernel shell and `/etc/profile` set `CONFIG_SITE` to it. `config.guess` used to stop with
   "unable to guess system type".
+- The conformance expected lists (`tests/compat/expected-<arch>.tsv`) come from full runs on all
+  three architectures with statfs and the new uname: LTP passes 524 of 1,552 tests on x86_64 and
+  519 on AArch64 and RISC-V (24 before), Open POSIX 1,577/1,574/1,570 of 1,965 and libc-test 527
+  of 560 on each. The notes of tests whose status did not change were refreshed too (`--update`
+  keeps them, so 225 x86_64 entries still named statfs's ENOSYS); hand-written `known:` notes
+  were kept.
 
 - `docs/PORTING-GUIDE.md` describes the privilege model as it is: Unix credentials and Linux
   capabilities for POSIX programs (ADR 0020) beside the object capabilities of the native calls.

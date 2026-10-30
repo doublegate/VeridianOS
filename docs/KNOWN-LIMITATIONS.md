@@ -104,6 +104,12 @@ their check, for a few shared reasons:
   `ST_RDONLY` (never `ST_NOSUID`, `ST_NODEV`, `ST_NOEXEC` or `ST_RELATIME`). `f_fsid` is 0 except
   on ext4, and an ext4 image whose superblock does not record its metadata overhead reports the
   whole volume in `f_blocks`.
+- **No test block device.** Tests that need a block device (about 175) ask LTP for a loop device
+  backed by a 300 MB image in their temporary directory. `fallocate` is ENOSYS, so LTP writes the
+  image instead, and there are no loop devices to attach it to: on x86_64 the write stops short
+  and the test is TBROK; on AArch64 and RISC-V, under emulation, writing it outlasts the
+  180-second limit and the test is a TIMEOUT. `fallocate` belongs to the file tier of the system
+  call groups; loop devices come after it.
 - **No kernel configuration.** Tests that check a `CONFIG_*` option (about 95) find neither
   `/proc/config.gz` nor `/boot/config-<release>` and are TBROK.
 - **Missing calls.** alarm and the interval and POSIX timers, the System V IPC calls, message

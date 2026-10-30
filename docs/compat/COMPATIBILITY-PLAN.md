@@ -159,21 +159,22 @@ Each group lands with its LTP cases. The counts are "missing" entries in the cov
   the tests x86_64 is expected to pass, `--compat` the full suites, and
   `.github/workflows/compat.yml` the x86_64 tests expected to pass, weekly (the full suites do not
   fit in a GitHub job).
-- **Results (baseline of 2026-10-22).** Passing tests per suite; WARN is LTP's "kernel older than
-  4.4" warning on tests that otherwise passed, and FLAKY tests (varying results, or passing close
-  to the time limit) are accepted either way. Open POSIX counts include its 195 compile-only tests.
+- **Results (full runs of 2026-10-30; baseline of 2026-10-22).** Passing tests per suite in the
+  run that refreshed the expected lists; FLAKY tests (varying results, or passing close to the
+  time limit) are accepted either way. Open POSIX counts include its 195 compile-only tests.
 
-  | Suite | x86_64 | AArch64 | RISC-V |
-  |---|---|---|---|
-  | LTP `syscalls` (1,552) | 24 pass, 206 WARN | 24 pass, 203 WARN | 24 pass, 202 WARN |
-  | Open POSIX (1,965) | 1,569 | 1,565 | 1,565 |
-  | musl libc-test (560) | 523 | 525 | 525 |
+  | Suite | x86_64 | AArch64 | RISC-V | baseline (x86_64) |
+  |---|---|---|---|---|
+  | LTP `syscalls` (1,552) | 524 | 519 | 519 | 24 pass, 206 WARN |
+  | Open POSIX (1,965) | 1,577 | 1,574 | 1,570 | 1,569 |
+  | musl libc-test (560) | 527 | 527 | 527 | 523 |
 
-  Most LTP tests stop in its library before their check: statfs is ENOSYS, `uname` reported
-  VeridianOS's version (until v0.28 reported `7.3.0-veridian`, ADR 0021), and there is no kernel
-  configuration to read
-  (`docs/KNOWN-LIMITATIONS.md`, "Conformance suites"). Those three are where the system call
-  groups (X2) start paying off first.
+  The LTP gain is statfs and fstatfs (about 233 tests stopped in setup on their ENOSYS) and
+  uname's release `7.3.0-veridian` (ADR 0021: about 230 tests passed with LTP's "kernel older than
+  4.4" warning, which now appears once). What still stops most LTP tests before their check is
+  listed in `docs/KNOWN-LIMITATIONS.md`, "Conformance suites": no test block device (about 175
+  tests, which on AArch64 and RISC-V run into the time limit while they write the image), no
+  kernel configuration, no mount.
 - **Coverage tables.** Regenerate the coverage table every release, add one for arm64, and track
   partial semantics per syscall.
 - **Application ladder.** The ladder above runs as CI smoke tests.
