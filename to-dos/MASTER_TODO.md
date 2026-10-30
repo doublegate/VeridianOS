@@ -340,7 +340,7 @@ What does not work yet: `docs/KNOWN-LIMITATIONS.md`.
   step is gated (`scripts/dev/gate.sh --boot --rootfs`) and committed on its own, and a change that
   moves LTP results updates `tests/compat/expected-<arch>.tsv` from full runs. The items are
   described in the list below this one.
-  1. [ ] Linux capabilities, ADR 0020 (`feat/v0.28-linux-caps`):
+  1. [x] Linux capabilities, ADR 0020 (`feat/v0.28-linux-caps`, PR #33, merged 2026-10-30):
      - [x] steps 1-2: the rules (`process::linux_caps`) and per-thread sets
      - [x] step 3: capget, capset, `/proc/sys/kernel/cap_last_cap` and `pid_max`; pause on x86_64
      - [x] step 4: the capability prctl options; `Cap*` lines in `/proc/<pid>/status`

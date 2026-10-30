@@ -3379,8 +3379,8 @@ pub fn sys_mknod(path_ptr: usize, mode: usize, dev: usize) -> SyscallResult {
 /// Linux's encoding) or socket file named by `path_ptr` relative to
 /// `dirfd`. A directory type is EPERM, any other type EINVAL; an existing
 /// name (not followed) is EEXIST; the parent needs write and search
-/// permission (EACCES); a device needs privilege (EPERM, CAP_MKNOD: root
-/// here); the mode is reduced by the umask. A filesystem that cannot hold
+/// permission (EACCES); a device needs CAP_MKNOD (EPERM without it); the
+/// mode is reduced by the umask. A filesystem that cannot hold
 /// special files (devfs, procfs) is EPERM.
 pub fn sys_mknodat(dirfd: usize, path_ptr: usize, mode: usize, dev: usize) -> SyscallResult {
     let rel_path = read_user_path(path_ptr)?;
