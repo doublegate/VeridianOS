@@ -246,7 +246,8 @@ What remains:
   `sysconfig.get_platform()`, Node's `os.type()`, OpenJDK's `os.name`) take their unknown-system
   path unless they run in Linux mode: built with `<veridian/linux-uname.h>`, marked with
   `veridian-elfctl set linux-uname`, built for GNU/Linux (a GNU ABI tag), or started under
-  `linux-uname`. autoconf configure scripts are covered by the site file and `CONFIG_SITE`, except
+  `linux-uname` (only the launcher's mode reaches the programs a process execs; a marked or
+  glibc program's ends at its next exec). autoconf configure scripts are covered by the site file and `CONFIG_SITE`, except
   under `env -i` with a `--prefix` other than `/usr` or `/usr/local`, where they need `--build`.
   The release (`7.3.0-veridian`) is Linux's for every process.
 

@@ -212,12 +212,9 @@ pub fn fork_process_with(opts: &ForkOptions) -> Result<(ProcessId, super::Thread
             core::sync::atomic::Ordering::Release,
         );
         // Linux uname mode is inherited (ADR 0021).
-        new_process.uname_linux.store(
-            current_process
-                .uname_linux
-                .load(core::sync::atomic::Ordering::Acquire),
-            core::sync::atomic::Ordering::Release,
-        );
+        new_process
+            .uname_linux
+            .inherit(&current_process.uname_linux);
 
         // Create thread in new process matching current thread
         let new_thread = {

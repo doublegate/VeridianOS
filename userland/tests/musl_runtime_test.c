@@ -2277,8 +2277,8 @@ static void test_wx_note_tool(void)
 
 /* uname reports "Linux" in Linux mode and "VeridianOS" otherwise; the mode
  * is entered at exec by the note (from the header or veridian-elfctl) or a
- * GNU ABI tag naming Linux, and with the prctl, inherited across fork and
- * exec, and shown by /proc/sys/kernel/ostype and /proc/version too. The
+ * GNU ABI tag naming Linux, which hold for that image only, and with the
+ * prctl, which is inherited across fork and exec; it is shown by /proc/sys/kernel/ostype and /proc/version too. The
  * launcher runs a command in it, and configure finds the site file. */
 static void test_uname_linux_mode(void)
 {
@@ -2291,6 +2291,9 @@ static void test_uname_linux_mode(void)
         {"/bin/uname_patched_test", NULL, "Linux"},
         {"/bin/linux-uname", "/bin/uname_plain_test", "Linux"},
         {"/bin/linux-uname", NULL, "native"},
+        /* A mode the image asked for ends at the next exec. */
+        {"/bin/uname_gnu_tag_test", "/bin/uname_plain_test", "VeridianOS"},
+        {"/bin/uname_linux_test", "/bin/uname_plain_test", "VeridianOS"},
     };
     static char out[128], why[300];
     int f = 0;
@@ -2323,8 +2326,12 @@ static void test_uname_linux_mode(void)
         if (read_line("/proc/version", line, sizeof(line)) != 0
             || strncmp(line, "Linux version 7.3.0-veridian (", 30) != 0)
             c |= 4;
-        /* Inherited by what this child runs, and by forks of it. */
+        /* Inherited by what this child runs, and by forks of it, through
+         * any number of execs. */
         if (run_capture("/bin/uname_plain_test", NULL, out, sizeof(out)) != 0
+            || strcmp(out, "Linux") != 0)
+            c |= 8;
+        if (run_capture("/bin/uname_gnu_tag_test", "/bin/uname_plain_test", out, sizeof(out)) != 0
             || strcmp(out, "Linux") != 0)
             c |= 8;
         if (run_capture("/bin/linux-uname", NULL, out, sizeof(out)) != 0

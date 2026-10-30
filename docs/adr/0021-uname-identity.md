@@ -53,9 +53,13 @@ system tools), and those should name the system they run on.
 2. **`nodename` stays `veridian`** (the host name; changed only by sethostname, and later per UTS
    namespace). It is not part of the choice either.
 3. **`sysname` is per process: `VeridianOS` by default, `Linux` for a process in Linux mode.**
-   - The mode is a process attribute, copied by fork and clone and kept across exec, as Linux keeps
-     its personality flags. A build driver or a login shell in Linux mode therefore covers every
-     `uname -s`, `config.guess`, `cmake` and interpreter it starts.
+   - The mode is a process attribute, copied by fork and clone. A mode the process *chose* (the
+     prctl, and so the launcher) is kept across exec, as Linux keeps its personality flags: a
+     build driver or a shell started under `linux-uname` covers every `uname -s`, `config.guess`,
+     `cmake` and interpreter it starts.
+   - A mode the program image asked for (item 4) holds for that image and its forks only; each exec
+     decides again from the program it loads. Otherwise a glibc login shell, in Linux mode by its
+     GNU ABI tag, would carry `Linux` into every native program of the session.
    - It changes only what the process is told about the system. It grants nothing, so any process
      may set or clear it, without a capability.
 4. **A process enters Linux mode at exec when its main program asks for it**, in one of two ways:
@@ -70,7 +74,8 @@ system tools), and those should name the system they run on.
      programs are unaffected.
 
    Only the main program counts, as for the W^X note; an interpreter (`PT_INTERP`) or a library
-   cannot set the mode. Exec never clears an inherited mode.
+   cannot set the mode. Exec never clears a chosen mode, and always replaces one that came from the
+   previous image.
 5. **A private prctl sets and reads the mode at run time**: `PR_VERIDIAN_UNAME` = `0x56455249`
    (`'VERI'`, following Linux's ASCII-tagged private options such as `PR_SET_VMA` and
    `PR_SET_PTRACER`).
@@ -125,6 +130,7 @@ system tools), and those should name the system they run on.
     VeridianOS meaning in it would break programs and LTP's personality tests.
 - Tests: host tests for the note reader (both bits, several notes, the GNU tag, malformed notes),
   the prctl and `veridian-elfctl`'s second feature; the runtime test `musl_uname_linux_mode` on
-  all three architectures for the default, the prctl, inheritance across fork and exec, programs
+  all three architectures for the default, the prctl, inheritance of a chosen mode across fork and exec,
+  an image's mode ending at the next exec, programs
   marked by the header, a GNU ABI tag and `veridian-elfctl`, the launcher, procfs, and the site
   file and `CONFIG_SITE`.

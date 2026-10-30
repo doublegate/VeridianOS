@@ -237,7 +237,10 @@ to use polling or IPC-based notification where possible.
 
 uname reports the release `7.3.0-veridian` to every program, and the
 system name `VeridianOS` unless the program runs in Linux mode, where it
-is `Linux` (ADR 0021). The mode is kept across fork and exec.
+is `Linux` (ADR 0021). Fork keeps the mode. Exec keeps it when the
+process chose it (the launcher or the prctl); a mode that came from a
+marked program or a glibc binary ends when that program execs another,
+which decides again.
 
 - **autoconf `./configure`** needs nothing: `CONFIG_SITE` points at
   `/usr/share/config.site`, which sets the build system to
@@ -251,7 +254,8 @@ is `Linux` (ADR 0021). The mode is kept across fork and exec.
   - or add the note to a built binary: `veridian-elfctl set linux-uname
     FILE` (run it after `strip`);
   - binaries built for GNU/Linux (glibc, which emits a GNU ABI tag) are
-    in Linux mode already.
+    in Linux mode already. A marked program does not pass the mode to
+    what it execs; use the launcher for a whole session.
 - **At run time**: `prctl(PR_VERIDIAN_UNAME, PR_VERIDIAN_UNAME_SET,
   PR_VERIDIAN_UNAME_LINUX, 0, 0)` enters the mode and
   `PR_VERIDIAN_UNAME_GET` reads it (constants in

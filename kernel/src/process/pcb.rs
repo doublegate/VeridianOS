@@ -258,9 +258,9 @@ pub struct Process {
     pub umask: AtomicU32,
 
     /// Linux uname mode (ADR 0021): uname reports the system name "Linux".
-    /// Copied by fork, kept by exec and set by exec of a program that asks
-    /// for it; changed with prctl(PR_VERIDIAN_UNAME).
-    pub uname_linux: core::sync::atomic::AtomicBool,
+    /// Copied by fork; exec keeps it only when the process chose it with
+    /// prctl(PR_VERIDIAN_UNAME), and otherwise sets it from the new image.
+    pub uname_linux: crate::utils::uname::UnameMode,
 
     /// TLS FS_BASE address for x86_64 (Thread-Local Storage).
     /// Set by exec_process when loading an ELF with PT_TLS segment.
@@ -521,7 +521,7 @@ impl Process {
             rt_queue: super::signals::RtQueue::new(),
             signal_mask: AtomicU64::new(0),
             umask: AtomicU32::new(0o022),
-            uname_linux: core::sync::atomic::AtomicBool::new(false),
+            uname_linux: crate::utils::uname::UnameMode::new(),
             tls_fs_base: AtomicU64::new(0),
             container_id: AtomicU64::new(0),
             clear_child_tid: AtomicU64::new(0),

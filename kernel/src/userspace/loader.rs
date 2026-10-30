@@ -244,11 +244,9 @@ fn load_image(
             // The first program, started by the kernel: nothing is gained.
             false,
         )?;
-        if crate::elf::image::wants_linux_uname(binary, buffer) {
-            process
-                .uname_linux
-                .store(true, core::sync::atomic::Ordering::Release);
-        }
+        process
+            .uname_linux
+            .exec(crate::elf::image::wants_linux_uname(binary, buffer));
         if interp.is_none() {
             lifecycle::setup_static_tls(process, binary, buffer);
         }

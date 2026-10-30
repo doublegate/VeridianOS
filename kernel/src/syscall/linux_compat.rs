@@ -245,14 +245,13 @@ pub(crate) fn sys_prctl(
         PR_VERIDIAN_UNAME => {
             let process =
                 crate::process::current_process().ok_or(super::SyscallError::InvalidState)?;
-            let (mode, ret) = uname_prctl(
-                process.uname_linux.load(Ordering::Acquire),
-                arg2,
-                arg3,
-                arg4,
-                arg5,
-            )?;
-            process.uname_linux.store(mode, Ordering::Release);
+            let linux = process.uname_linux.is_linux();
+            let (mode, ret) = uname_prctl(linux, arg2, arg3, arg4, arg5)?;
+            // GET changes nothing; SET is the process's own choice, which
+            // exec keeps.
+            if arg2 == PR_VERIDIAN_UNAME_SET {
+                process.uname_linux.set(mode);
+            }
             Ok(ret)
         }
         _ => Err(super::SyscallError::InvalidArgument),

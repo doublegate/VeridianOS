@@ -757,13 +757,14 @@ fn exec_image(
             )?
         };
 
-        // Linux uname mode stays on across exec, and a program that asks
-        // for it turns it on (ADR 0021).
-        if crate::elf::image::wants_linux_uname(&elf_binary, &file_data) {
-            process
-                .uname_linux
-                .store(true, core::sync::atomic::Ordering::Release);
-        }
+        // Linux uname mode: kept if the process chose it, otherwise what
+        // the new program asks for (ADR 0021).
+        process
+            .uname_linux
+            .exec(crate::elf::image::wants_linux_uname(
+                &elf_binary,
+                &file_data,
+            ));
 
         // Step 2c: a static program gets its TLS block from the kernel
         // (the native libc relies on it); a dynamic one's loader sets up

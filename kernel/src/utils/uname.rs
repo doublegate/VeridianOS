@@ -18,13 +18,72 @@ pub const fn sysname(linux: bool) -> &'static str {
     }
 }
 
+/// A process's Linux uname mode (ADR 0021). A mode the process chose, with
+/// prctl(PR_VERIDIAN_UNAME) or the `linux-uname` launcher, holds across fork
+/// and exec, so everything it runs sees Linux. One that the program image
+/// asked for (a GNU ABI tag naming Linux, as glibc programs carry, or the
+/// VeridianOS feature note) holds for that image and its forks only: each
+/// exec decides again from the program it loads, so a glibc shell does not
+/// carry the mode into everything started from it.
+pub struct UnameMode(core::sync::atomic::AtomicU8);
+
+impl UnameMode {
+    /// uname reports Linux.
+    const LINUX: u8 = 1;
+    /// The process chose the mode, so exec keeps it.
+    const CHOSEN: u8 = 2;
+
+    /// Native: uname reports VeridianOS.
+    pub const fn new() -> Self {
+        Self(core::sync::atomic::AtomicU8::new(0))
+    }
+
+    /// Whether uname reports Linux.
+    pub fn is_linux(&self) -> bool {
+        self.0.load(core::sync::atomic::Ordering::Acquire) & Self::LINUX != 0
+    }
+
+    /// The process's own choice (prctl): Linux and kept across exec, or
+    /// native.
+    pub fn set(&self, linux: bool) {
+        let v = if linux { Self::LINUX | Self::CHOSEN } else { 0 };
+        self.0.store(v, core::sync::atomic::Ordering::Release);
+    }
+
+    /// Exec of an image that does (`image_wants`) or does not ask for Linux
+    /// mode.
+    pub fn exec(&self, image_wants: bool) {
+        let chosen = self.0.load(core::sync::atomic::Ordering::Acquire) & Self::CHOSEN;
+        let v = if chosen != 0 {
+            Self::LINUX | Self::CHOSEN
+        } else if image_wants {
+            Self::LINUX
+        } else {
+            0
+        };
+        self.0.store(v, core::sync::atomic::Ordering::Release);
+    }
+
+    /// Fork: the child runs the same image, so it has the parent's mode and
+    /// whether it was chosen.
+    pub fn inherit(&self, parent: &Self) {
+        self.0.store(
+            parent.0.load(core::sync::atomic::Ordering::Acquire),
+            core::sync::atomic::Ordering::Release,
+        );
+    }
+}
+
+impl Default for UnameMode {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// The system name the calling process sees; [`SYSNAME`] outside any
 /// process.
 pub fn current_sysname() -> &'static str {
-    sysname(
-        crate::process::current_process()
-            .is_some_and(|p| p.uname_linux.load(core::sync::atomic::Ordering::Acquire)),
-    )
+    sysname(crate::process::current_process().is_some_and(|p| p.uname_linux.is_linux()))
 }
 /// The host name (until sethostname and UTS namespaces exist).
 pub const NODENAME: &str = "veridian";
@@ -89,6 +148,36 @@ pub fn command_output(args: &[&str]) -> alloc::string::String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// ADR 0021: a mode the process chose (prctl, the launcher) holds across
+    /// fork and every exec; one an image asked for (a GNU ABI tag naming
+    /// Linux, the feature note) holds only for that image, so the next exec
+    /// decides again from the program it loads.
+    #[test]
+    fn only_a_chosen_mode_outlives_exec() {
+        let m = UnameMode::new();
+        assert!(!m.is_linux());
+        m.exec(true);
+        assert!(m.is_linux());
+        let child = UnameMode::new();
+        child.inherit(&m);
+        assert!(child.is_linux(), "fork keeps the image's mode");
+        child.exec(false);
+        assert!(!child.is_linux(), "a plain exec after an image's mode");
+        m.set(true);
+        m.exec(false);
+        assert!(m.is_linux(), "a chosen mode survives a plain exec");
+        child.inherit(&m);
+        child.exec(false);
+        child.exec(false);
+        assert!(child.is_linux(), "and is inherited as chosen");
+        m.set(false);
+        assert!(!m.is_linux());
+        m.exec(true);
+        assert!(m.is_linux(), "turning it off leaves images free to ask");
+        m.exec(false);
+        assert!(!m.is_linux());
+    }
 
     #[test]
     fn the_release_is_a_linux_version_newer_than_ltp_requires() {
