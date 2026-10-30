@@ -274,7 +274,7 @@ fn open_path(path: &str, flags: usize, mode: usize) -> SyscallResult {
         require_open_access(&node, &open_flags)?;
     }
     if open_flags.truncate && open_flags.write && !created && node_type == NodeType::File {
-        crate::fs::truncate_removing_privs(&*node, 0).map_err(map_resolve_err)?;
+        open_truncate(&*node)?;
     }
     // A special file made by mknod opens what it names; a socket file
     // cannot be opened (ENXIO, as Linux's `sock_no_open`).
@@ -1138,6 +1138,13 @@ fn is_not_found(e: &crate::error::KernelError) -> bool {
         e,
         crate::error::KernelError::FsError(crate::error::FsError::NotFound)
     )
+}
+
+/// open(O_TRUNC) of an existing file: truncate it to zero, removing its
+/// privileges as a write does. The file was found, so a failure is reported
+/// as its own errno.
+fn open_truncate(node: &dyn crate::fs::VfsNode) -> Result<(), SyscallError> {
+    crate::fs::truncate_removing_privs(node, 0).map_err(super::map_kernel_error)
 }
 
 pub(crate) fn map_resolve_err(e: crate::error::KernelError) -> SyscallError {
@@ -3456,6 +3463,21 @@ mod tests {
         tests::{make_vfs_with_root, StuckCaps},
         xattr, Permissions, VfsNode,
     };
+
+    /// open(O_TRUNC) reports why a truncate of an existing file failed: a
+    /// memfd sealed against shrinking is EPERM, as Linux's shmem_setattr
+    /// returns, not ENOENT for a file that exists.
+    #[test]
+    fn a_refused_open_truncate_keeps_its_errno() {
+        let m = crate::fs::memfd::MemfdNode::new(Permissions::from_mode(0o644), 0, 0, true, 0);
+        m.truncate(4096).unwrap();
+        m.add_seals(crate::fs::seals::SHRINK).unwrap();
+        assert_eq!(
+            super::open_truncate(&*m),
+            Err(super::SyscallError::OperationNotPermitted)
+        );
+        assert_eq!(m.metadata().unwrap().size, 4096);
+    }
 
     /// As Linux's setattr_prepare, chown removes the file's privileges
     /// before the owner changes: when that fails, the file keeps its owner
