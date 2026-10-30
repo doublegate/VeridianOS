@@ -96,7 +96,9 @@
   keeps 16-bit IDs) fails before the file loses anything. Two writers that both remove the
   capability do not fail the one that finds it already gone. A write(2) the kernel copies in
   pieces removes them once, before the first piece, as Linux's `__generic_file_write_iter` does,
-  rather than reading the attributes again for every 4 KiB.
+  rather than reading the attributes again for every 4 KiB. A truncate drops the set-ID bits only
+  once the size has changed, as Linux's `notify_change` applies the mode in `setattr_copy`, so one
+  that fails, such as a memfd sealed against shrinking, keeps them.
 - Extended attributes (ADR 0020 step 8): the twelve Linux calls (`setxattr`, `getxattr`,
   `listxattr`, `removexattr` and their `l*` and `f*` forms) and the four `*xattrat` calls of Linux
   6.13, with Linux's rules: names up to 255 bytes (ERANGE), values up to 64 KiB (E2BIG),

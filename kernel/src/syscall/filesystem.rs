@@ -274,8 +274,7 @@ fn open_path(path: &str, flags: usize, mode: usize) -> SyscallResult {
         require_open_access(&node, &open_flags)?;
     }
     if open_flags.truncate && open_flags.write && !created && node_type == NodeType::File {
-        crate::fs::remove_privs(&*node).map_err(map_resolve_err)?;
-        node.truncate(0).map_err(map_resolve_err)?;
+        crate::fs::truncate_removing_privs(&*node, 0).map_err(map_resolve_err)?;
     }
     // A special file made by mknod opens what it names; a socket file
     // cannot be opened (ENXIO, as Linux's `sock_no_open`).
@@ -765,10 +764,7 @@ pub fn sys_ftruncate(fd: usize, length: usize) -> SyscallResult {
         return Err(SyscallError::InvalidArgument);
     }
     crate::fs::check_fsize_truncate(&*file.node, length).map_err(super::map_kernel_error)?;
-    crate::fs::remove_privs(&*file.node).map_err(super::map_kernel_error)?;
-    file.node
-        .truncate(length)
-        .map_err(super::map_kernel_error)?;
+    crate::fs::truncate_removing_privs(&*file.node, length).map_err(super::map_kernel_error)?;
     Ok(0)
 }
 
@@ -2930,8 +2926,7 @@ pub fn sys_truncate(path_ptr: usize, length: usize) -> SyscallResult {
     // As opening it for writing would need (N-191).
     require_open_access(&node, &OpenFlags::write_only())?;
     crate::fs::check_fsize_truncate(&*node, length).map_err(super::map_kernel_error)?;
-    crate::fs::remove_privs(&*node).map_err(super::map_kernel_error)?;
-    node.truncate(length).map_err(super::map_kernel_error)?;
+    crate::fs::truncate_removing_privs(&*node, length).map_err(super::map_kernel_error)?;
     Ok(0)
 }
 
