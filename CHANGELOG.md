@@ -118,13 +118,21 @@
   program and its loader from the bytes it read and checked, not from the page cache, so a write
   to the file meanwhile cannot change what runs privileged. Only
   v2 and v3 values can be written (EINVAL otherwise), with CAP_SETFCAP; a v3 value with root id 0
-  reads back as v2; a write, truncate or chown removes the attribute, whoever makes it (Linux's
-  killpriv). As Linux's `file_remove_privs` and `setattr_prepare`, that removal comes before the
-  data or the owner changes and its error is the call's, so a file that cannot lose its
-  capabilities is neither written nor given away; an attribute read that fails counts as a
+  reads back as v2; a write, truncate, chown or MADV_REMOVE hole removes the attribute, whoever
+  makes it (Linux's killpriv; a store through a shared mapping does not, as in Linux). For a
+  write, truncate or chown, as Linux's `file_remove_privs` and `setattr_prepare`, that removal
+  comes before the data or the owner changes and its error is the call's, so a file that cannot
+  lose its capabilities is neither written nor given away (an MADV_REMOVE hole removes it after
+  the pages are zeroed and ignores its error, as `shmem_fallocate`'s closing `file_modified` does); an attribute read that fails counts as a
   failed removal, not as no capability. A chown to an owner the filesystem cannot store (BlockFS
   keeps 16-bit IDs) fails before the file loses anything. Two writers that both remove the
-  capability do not fail the one that finds it already gone.
+  capability do not fail the one that finds it already gone. A write(2) the kernel copies in
+  pieces removes them once, before the first piece, as Linux's `__generic_file_write_iter` does,
+  rather than reading the attributes again for every 4 KiB. A truncate drops the set-ID bits only
+  once the size has changed, as Linux's `notify_change` applies the mode in `setattr_copy`, so one
+  that fails, such as a memfd sealed against shrinking, keeps them. open with O_TRUNC reports
+  why such a truncate failed (EPERM for the sealed memfd) rather than ENOENT for a file that
+  exists.
 - Extended attributes (ADR 0020 step 8): the twelve Linux calls (`setxattr`, `getxattr`,
   `listxattr`, `removexattr` and their `l*` and `f*` forms) and the four `*xattrat` calls of Linux
   6.13, with Linux's rules: names up to 255 bytes (ERANGE), values up to 64 KiB (E2BIG),
@@ -145,7 +153,10 @@
   `mkfs-blockfs --upgrade` raises one). The in-memory store keyed by inode
   number, which the shell's `xattr` command used and whose numbers collided across filesystems, is
   gone; the command acts on the node, with the limits and the file-capability check the system
-  calls apply (an over-long name could otherwise have corrupted a BlockFS attribute block).
+  calls apply (an over-long name could otherwise have corrupted a BlockFS attribute block). An
+  attribute block read from disk holds only names the kernel could have stored, in one of the four
+  namespaces, without a NUL and none twice; any other is corrupt (EIO), so a crafted image cannot
+  split one `listxattr` entry into two.
 - `pause` on x86_64 (system call 34 had no handler, so musl's `pause()` returned ENOSYS at once and a
   forked child meant to wait ran on): it waits as `ppoll` with no descriptors and no timeout,
   which is what musl does on AArch64 and RISC-V, and returns EINTR after a handler.

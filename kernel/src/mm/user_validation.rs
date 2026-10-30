@@ -76,15 +76,16 @@ pub fn active_user_page(addr: usize) -> (Option<PageFlags>, usize) {
             crate::mm::VirtualAddress(addr as u64 & !0xFFF),
         )
     };
+    // The leaf's size comes from the level the walk stopped at, never from
+    // bit 7 of the flags, which is the PAT bit in a 4 KiB entry on x86_64
+    // (PR #33 review).
     let span = match found {
-        // 1 GiB and 2 MiB leaves are both marked HUGE: stepping by the
-        // smaller never passes over a different mapping.
-        Ok((_, flags)) if flags.contains(PageFlags::HUGE) => 1 << 21,
-        Ok(_) | Err(crate::mm::page_table::Hole::NotCanonical) => 0x1000,
+        Ok(leaf) => leaf.span as usize,
+        Err(crate::mm::page_table::Hole::NotCanonical) => 0x1000,
         Err(crate::mm::page_table::Hole::Unmapped(span)) => span as usize,
     };
     let next = (addr & !(span - 1)).saturating_add(span);
-    (found.ok().map(|(_, flags)| flags), next)
+    (found.ok().map(|leaf| leaf.flags), next)
 }
 
 /// Extension trait for PageTableEntry to check user accessibility

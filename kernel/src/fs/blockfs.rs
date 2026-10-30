@@ -267,7 +267,10 @@ pub struct DiskInode {
     pub double_indirect_block: u32,
     /// The block holding the inode's extended attributes (`fs::xattr`
     /// encoding), 0 for none. Revision 1; in revision 0 the unused
-    /// triple-indirect pointer, always 0.
+    /// triple-indirect pointer, always 0. The block belongs to this inode
+    /// alone (unlike ext4, BlockFS never shares one between inodes with
+    /// equal attributes), so freeing the inode or rewriting its
+    /// attributes frees it without a reference count.
     pub xattr_block: u32,
 }
 

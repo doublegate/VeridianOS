@@ -274,8 +274,7 @@ fn open_path(path: &str, flags: usize, mode: usize) -> SyscallResult {
         require_open_access(&node, &open_flags)?;
     }
     if open_flags.truncate && open_flags.write && !created && node_type == NodeType::File {
-        crate::fs::remove_privs(&*node).map_err(map_resolve_err)?;
-        node.truncate(0).map_err(map_resolve_err)?;
+        open_truncate(&*node)?;
     }
     // A special file made by mknod opens what it names; a socket file
     // cannot be opened (ENXIO, as Linux's `sock_no_open`).
@@ -660,11 +659,14 @@ fn file_write_from_user(file: &crate::fs::file::File, buf: usize, count: usize) 
     let count = file.fsize_room(count).map_err(super::map_kernel_error)?;
     // A regular file is written as one step (see `File::io_lock`).
     let _io = (file.node.node_type() == crate::fs::NodeType::File).then(|| file.io_lock.lock());
-    super::userspace::consume_from_user(buf, count, true, |kbuf| match file.write(kbuf) {
-        Ok(n) => Ok(n),
-        Err(crate::error::KernelError::BrokenPipe) => Err(SyscallError::BrokenPipe),
-        Err(crate::error::KernelError::WouldBlock) => Err(SyscallError::WouldBlock),
-        Err(e) => Err(super::map_kernel_error(e)),
+    let mut first = true;
+    super::userspace::consume_from_user(buf, count, true, |kbuf| {
+        match file.write_part(kbuf, core::mem::take(&mut first)) {
+            Ok(n) => Ok(n),
+            Err(crate::error::KernelError::BrokenPipe) => Err(SyscallError::BrokenPipe),
+            Err(crate::error::KernelError::WouldBlock) => Err(SyscallError::WouldBlock),
+            Err(e) => Err(super::map_kernel_error(e)),
+        }
     })
 }
 
@@ -762,10 +764,7 @@ pub fn sys_ftruncate(fd: usize, length: usize) -> SyscallResult {
         return Err(SyscallError::InvalidArgument);
     }
     crate::fs::check_fsize_truncate(&*file.node, length).map_err(super::map_kernel_error)?;
-    crate::fs::remove_privs(&*file.node).map_err(super::map_kernel_error)?;
-    file.node
-        .truncate(length)
-        .map_err(super::map_kernel_error)?;
+    crate::fs::truncate_removing_privs(&*file.node, length).map_err(super::map_kernel_error)?;
     Ok(0)
 }
 
@@ -1139,6 +1138,13 @@ fn is_not_found(e: &crate::error::KernelError) -> bool {
         e,
         crate::error::KernelError::FsError(crate::error::FsError::NotFound)
     )
+}
+
+/// open(O_TRUNC) of an existing file: truncate it to zero, removing its
+/// privileges as a write does. The file was found, so a failure is reported
+/// as its own errno.
+fn open_truncate(node: &dyn crate::fs::VfsNode) -> Result<(), SyscallError> {
+    crate::fs::truncate_removing_privs(node, 0).map_err(super::map_kernel_error)
 }
 
 pub(crate) fn map_resolve_err(e: crate::error::KernelError) -> SyscallError {
@@ -2926,8 +2932,7 @@ pub fn sys_truncate(path_ptr: usize, length: usize) -> SyscallResult {
     // As opening it for writing would need (N-191).
     require_open_access(&node, &OpenFlags::write_only())?;
     crate::fs::check_fsize_truncate(&*node, length).map_err(super::map_kernel_error)?;
-    crate::fs::remove_privs(&*node).map_err(super::map_kernel_error)?;
-    node.truncate(length).map_err(super::map_kernel_error)?;
+    crate::fs::truncate_removing_privs(&*node, length).map_err(super::map_kernel_error)?;
     Ok(0)
 }
 
@@ -3491,6 +3496,21 @@ mod tests {
         tests::{make_vfs_with_root, StuckCaps},
         xattr, Permissions, VfsNode,
     };
+
+    /// open(O_TRUNC) reports why a truncate of an existing file failed: a
+    /// memfd sealed against shrinking is EPERM, as Linux's shmem_setattr
+    /// returns, not ENOENT for a file that exists.
+    #[test]
+    fn a_refused_open_truncate_keeps_its_errno() {
+        let m = crate::fs::memfd::MemfdNode::new(Permissions::from_mode(0o644), 0, 0, true, 0);
+        m.truncate(4096).unwrap();
+        m.add_seals(crate::fs::seals::SHRINK).unwrap();
+        assert_eq!(
+            super::open_truncate(&*m),
+            Err(super::SyscallError::OperationNotPermitted)
+        );
+        assert_eq!(m.metadata().unwrap().size, 4096);
+    }
 
     /// As Linux's setattr_prepare, chown removes the file's privileges
     /// before the owner changes: when that fails, the file keeps its owner

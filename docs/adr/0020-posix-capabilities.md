@@ -85,9 +85,10 @@ be confused, in code or in documentation.
      keyed by inode number is retired.
    - The `security.`, `trusted.`, `user.` and `system.` namespaces follow Linux's permission
      rules, and the setxattr/getxattr/listxattr/removexattr families are implemented.
-   - `security.capability`: read v1, v2 and v3 at their exact sizes; write v2 (or v3 with root id
-     0) and only with CAP_SETFCAP; a v3 with a non-zero root id means no capabilities until user
-     namespaces exist. A write, truncate or chown of the file removes it (Linux's killpriv).
+   - `security.capability`: exec reads v1, v2 and v3 at their exact sizes; getxattr returns v2
+     and v3 (a v3 with root id 0 as v2) and EINVAL for anything else, v1 included, as Linux's
+     `cap_inode_getsecurity` does; write v2 (or v3 with root id 0) and only with CAP_SETFCAP; a
+     v3 with a non-zero root id means no capabilities until user namespaces exist. A write, truncate or chown of the file removes it (Linux's killpriv).
 7. **Exec implements `cap_bprm_creds_from_file`**, including the unsafe-exec cap, the ambient
    clear, the capability-dumb EPERM, the KEEP_CAPS clear, AT_SECURE from Linux's condition, and
    non-dumpable when pP grows.

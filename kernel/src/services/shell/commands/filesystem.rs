@@ -1253,8 +1253,14 @@ impl BuiltinCommand for XattrCommand {
                     Ok(n) => n,
                     Err(e) => return CommandResult::Error(e),
                 };
-                let attrs = node.xattrs();
-                match attrs.as_ref().ok().and_then(|a| a.get(&args[2])).ok_or(()) {
+                let attrs = match node.xattrs() {
+                    Ok(a) => a,
+                    Err(e) => {
+                        crate::println!("xattr: get error: {:?}", e);
+                        return CommandResult::Success(0);
+                    }
+                };
+                match attrs.get(&args[2]).ok_or(()) {
                     Ok(value) => {
                         // Try to display as UTF-8, fall back to hex
                         if let Ok(s) = core::str::from_utf8(value) {

@@ -156,8 +156,38 @@ pub fn remove_privs(node: &dyn VfsNode) -> Result<(), KernelError> {
         return Ok(());
     }
     kill_file_caps(node)?;
-    // The kernel itself (no process) holds CAP_FSETID.
-    let caller = crate::process::creds::Caller::current();
+    drop_set_id(node, &crate::process::creds::Caller::current())
+}
+
+/// Set the size of `node` to `size` for the calling process, removing its
+/// privileges as Linux's notify_change does: the file capabilities go
+/// first (setattr_prepare), and the set-ID bits only once the size has
+/// changed (setattr_copy), so a refused truncate, such as one a memfd seal
+/// forbids, leaves the mode as it was (PR #33 review).
+pub fn truncate_removing_privs(node: &dyn VfsNode, size: usize) -> Result<(), KernelError> {
+    truncate_removing_privs_as(node, size, &crate::process::creds::Caller::current())
+}
+
+fn truncate_removing_privs_as(
+    node: &dyn VfsNode,
+    size: usize,
+    caller: &crate::process::creds::Caller,
+) -> Result<(), KernelError> {
+    if node.node_type() != NodeType::File {
+        return node.truncate(size);
+    }
+    kill_file_caps(node)?;
+    node.truncate(size)?;
+    drop_set_id(node, caller)
+}
+
+/// The set-user-ID and set-group-ID bits a write or truncate by `caller`
+/// removes ([`Permissions::after_write`]). The kernel itself (no process)
+/// holds CAP_FSETID.
+fn drop_set_id(
+    node: &dyn VfsNode,
+    caller: &crate::process::creds::Caller,
+) -> Result<(), KernelError> {
     let meta = node.metadata()?;
     let fsetid = caller.capable(crate::process::linux_caps::CAP_FSETID);
     if let Some(kept) = meta
@@ -2479,6 +2509,30 @@ pub(crate) mod tests {
         assert_eq!(f.xattrs().unwrap().names().count(), 1);
     }
 
+    /// A write(2) split into pieces removes the privileges once, before its
+    /// first piece, as Linux's __generic_file_write_iter does; later pieces
+    /// do not read the attributes again (PR #33 review).
+    #[test]
+    fn a_split_write_removes_privileges_with_its_first_piece() {
+        let vfs = make_vfs_with_root();
+        let root = vfs.root_fs().unwrap().root();
+        let f = root.create("prog", Permissions::from_mode(0o755)).unwrap();
+        let caps = |f: &Arc<dyn VfsNode>| f.xattrs().unwrap().get(xattr::XATTR_NAME_CAPS).is_some();
+        let set_caps = |f: &Arc<dyn VfsNode>| {
+            f.update_xattrs(&mut |a| a.set(xattr::XATTR_NAME_CAPS, &[0; 20], 0))
+                .unwrap()
+        };
+        let file = file::File::new(f.clone(), file::OpenFlags::read_write());
+        set_caps(&f);
+        file.write_part(b"later", false).unwrap();
+        assert!(caps(&f), "a later piece leaves the attribute alone");
+        file.write_part(b"first", true).unwrap();
+        assert!(!caps(&f), "the first piece removes it");
+        set_caps(&f);
+        file.write(b"whole").unwrap();
+        assert!(!caps(&f), "a whole write removes it");
+    }
+
     /// A file whose capabilities cannot be removed is not written: as
     /// Linux's file_remove_privs, the removal comes first and its error is
     /// the write's (PR #33 review). Delegates to a ramfs file; with
@@ -2668,6 +2722,25 @@ pub(crate) mod tests {
             Permissions::from_mode(0o644).after_write(false, false),
             None
         );
+    }
+
+    /// A truncate removes the set-ID bits only once the size has changed,
+    /// as Linux's shmem_setattr applies the mode after its seal check: a
+    /// memfd sealed against shrinking keeps them (PR #33 review).
+    #[test]
+    fn a_refused_truncate_keeps_the_set_id_bits() {
+        let user = crate::process::creds::Caller {
+            creds: crate::process::creds::Credentials::new(1000, 1000),
+            caps: crate::process::linux_caps::LinuxCaps::EMPTY,
+        };
+        let m = memfd::MemfdNode::new(Permissions::from_mode(0o4755), 1000, 1000, true, 0);
+        m.truncate(8192).unwrap();
+        m.add_seals(seals::SHRINK).unwrap();
+        assert!(truncate_removing_privs_as(&*m, 0, &user).is_err());
+        assert_eq!(m.metadata().unwrap().permissions.to_mode(), 0o4755);
+        assert_eq!(m.metadata().unwrap().size, 8192);
+        truncate_removing_privs_as(&*m, 16384, &user).unwrap();
+        assert_eq!(m.metadata().unwrap().permissions.to_mode(), 0o755);
     }
 
     /// chown drops set-user-ID always and set-group-ID with group execute.
