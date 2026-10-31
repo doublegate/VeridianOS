@@ -5355,8 +5355,13 @@ static void test_statfs(void)
     errno = 0;
     if (fstatfs(-1, &a) != 0)
         e3 = errno;
-    ok = e1 == ENOENT && e2 == EFAULT && e3 == EBADF;
-    snprintf(why, sizeof(why), "enoent=%d efault=%d ebadf=%d", e1, e2, e3);
+    /* A trailing slash needs a directory, as for stat (PR #34 review). */
+    int e4 = 0;
+    errno = 0;
+    if (statfs("/bin/sh/", &a) != 0)
+        e4 = errno;
+    ok = e1 == ENOENT && e2 == EFAULT && e3 == EBADF && e4 == ENOTDIR;
+    snprintf(why, sizeof(why), "enoent=%d efault=%d ebadf=%d enotdir=%d", e1, e2, e3, e4);
     report("statfs_errors", ok, why);
 }
 

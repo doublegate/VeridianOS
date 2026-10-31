@@ -351,7 +351,7 @@ What does not work yet: `docs/KNOWN-LIMITATIONS.md`.
        the xattr calls
      - [x] step 9: file capabilities (`security.capability`) at exec and cleared on write
      - [x] step 10: docs (N-131 in KNOWN-LIMITATIONS, PORTING-GUIDE, CHANGELOG); then the PR
-  2. [ ] First: uname's release `7.3.0-veridian`, the version field and procfs (2026-10-27), then
+  2. [x] First: uname's release `7.3.0-veridian`, the version field and procfs (2026-10-27), then
      the system name per process (ADR 0021); then statfs and fstatfs per filesystem type: most LTP tests stop on their ENOSYS in setup, so
      this comes first among the remaining groups (it makes the later ones measurable).
      - [x] the release, the version field, `/proc/version` and `/proc/sys/kernel` (ADR 0021)

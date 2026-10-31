@@ -3,11 +3,13 @@
  *
  * uname's sysname is "VeridianOS" unless the process is in Linux mode, in
  * which case it is "Linux" (the release, "7.3.0-veridian", is the same in
- * both). The mode is inherited across fork and exec. A program enters it at
- * exec when it carries the note below (include this header in exactly one
- * of its source files) or a GNU ABI tag naming Linux (glibc programs), and
- * at run time with prctl(PR_VERIDIAN_UNAME, PR_VERIDIAN_UNAME_SET, ...).
- * The `linux-uname` command runs a program in Linux mode.
+ * both). A program enters it at exec when it carries the note below
+ * (include this header in exactly one of its source files) or a GNU ABI tag
+ * naming Linux (glibc programs), and at run time with
+ * prctl(PR_VERIDIAN_UNAME, PR_VERIDIAN_UNAME_SET, ...). Fork keeps the mode.
+ * Exec keeps it only when the process chose it with the prctl (as the
+ * `linux-uname` command does to run a program in Linux mode); otherwise the
+ * new program's note or ABI tag decides.
  *
  * Note layout (as <veridian/wxneeded.h>; the feature bits of every
  * VeridianOS feature-control note are combined): namesz 11, descsz 4,

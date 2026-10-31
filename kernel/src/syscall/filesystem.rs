@@ -3071,11 +3071,15 @@ fn write_statfs(node: &dyn crate::fs::VfsNode, buf: usize) -> SyscallResult {
 }
 
 /// statfs(path, buf): the filesystem holding `path`, following symlinks,
-/// as Linux's `user_statfs` (`fs/statfs.c`).
+/// as Linux's `user_statfs` (`fs/statfs.c`). A trailing slash needs a
+/// directory (ENOTDIR), as for stat.
 pub fn sys_statfs(path_ptr: usize, buf: usize) -> SyscallResult {
     let rel_path = read_user_path(path_ptr)?;
     let abs_path = resolve_at_path(AT_FDCWD, &rel_path)?;
     let node = vfs()?.resolve_path(&abs_path).map_err(map_resolve_err)?;
+    if rel_path.ends_with('/') && node.node_type() != crate::fs::NodeType::Directory {
+        return Err(SyscallError::NotADirectory);
+    }
     write_statfs(&*node, buf)
 }
 

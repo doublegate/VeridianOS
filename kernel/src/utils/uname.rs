@@ -124,18 +124,43 @@ pub fn proc_version(sysname: &str) -> alloc::string::String {
 
 /// What the kernel shell's `uname [-asnrvm]` prints: the selected fields in
 /// uname(1)'s order (system, node, release, version, machine), the system
-/// name alone without options. The shell is not a Linux program, so it
-/// always names VeridianOS.
+/// name alone without options. Options combine (`-sr`) and `--all` is
+/// `-a`; anything else is uname(1)'s error. The shell is not a Linux
+/// program, so it always names VeridianOS.
 #[cfg(feature = "alloc")]
 pub fn command_output(args: &[&str]) -> alloc::string::String {
-    let all = args.contains(&"-a");
-    let want = |flag: &str| all || args.contains(&flag);
+    // Fields in output order: s, n, r, v, m.
+    let mut on = [false; 5];
+    for arg in args {
+        let letters = match *arg {
+            "--all" => "a",
+            a if a.starts_with("--") => {
+                return alloc::format!("uname: unrecognized option '{}'", a)
+            }
+            a if a.starts_with('-') && a.len() > 1 => &a[1..],
+            a => return alloc::format!("uname: extra operand '{}'", a),
+        };
+        for c in letters.chars() {
+            match c {
+                'a' => on = [true; 5],
+                's' => on[0] = true,
+                'n' => on[1] = true,
+                'r' => on[2] = true,
+                'v' => on[3] = true,
+                'm' => on[4] = true,
+                c => return alloc::format!("uname: invalid option -- '{}'", c),
+            }
+        }
+    }
+    if on == [false; 5] {
+        on[0] = true;
+    }
     let fields = [
-        (args.is_empty() || want("-s"), SYSNAME),
-        (want("-n"), NODENAME),
-        (want("-r"), RELEASE),
-        (want("-v"), VERSION),
-        (want("-m"), machine()),
+        (on[0], SYSNAME),
+        (on[1], NODENAME),
+        (on[2], RELEASE),
+        (on[3], VERSION),
+        (on[4], machine()),
     ];
     let words: alloc::vec::Vec<&str> = fields
         .iter()
@@ -221,6 +246,12 @@ mod tests {
         let all = command_output(&["-a"]);
         assert!(all.starts_with("VeridianOS veridian 7.3.0-veridian #1 SMP VeridianOS "));
         assert!(all.ends_with(machine()));
+        assert_eq!(command_output(&["-sr"]), "VeridianOS 7.3.0-veridian");
+        assert_eq!(command_output(&["--all"]), all);
+        assert_eq!(command_output(&["-x"]), "uname: invalid option -- 'x'");
+        assert_eq!(command_output(&["-sx"]), "uname: invalid option -- 'x'");
+        assert_eq!(command_output(&["foo"]), "uname: extra operand 'foo'");
+        assert_eq!(command_output(&["--x"]), "uname: unrecognized option '--x'");
     }
 
     #[test]

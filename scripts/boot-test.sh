@@ -121,9 +121,9 @@ fi
 
 echo "$status $arch: BOOTOK=$(grep -ac BOOTOK "$log") after ${waited}s; ${tally:-no test tally}"
 if [[ $status != PASS ]]; then
-    # The failed tests with the line after (a test's own detail), then the
-    # panic or summary.
-    grep -aE -A1 '\.\.\.\[failed\]' "$log" | head -20
+    # The failed tests with the line before (a test prints its own detail
+    # before its result), then the panic or summary.
+    grep -aE -B1 '\.\.\.\[failed\]' "$log" | head -20
     grep -aE -A3 'KERNEL PANIC|panicked at|BOOTFAIL|\[FAIL' "$log" | head -20
     # The next boot of this architecture overwrites the log; keep this one.
     cp "$log" "$log_dir/boot-$arch.failed.log"

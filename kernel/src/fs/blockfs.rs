@@ -563,11 +563,15 @@ impl BlockFsNode {
 
 impl VfsNode for BlockFsNode {
     /// The superblock's counts, in BlockFS's 4 KiB blocks. Nothing is
-    /// reserved for root, so every free block is available.
+    /// reserved for root, so every free block is available. A read-only
+    /// disk is `ST_RDONLY`; a filesystem in memory only is writable.
     fn statfs(&self) -> Result<super::statfs::FsStats, KernelError> {
         let fs = self.fs.read();
         let sb = &fs.superblock;
         let mut st = super::statfs::FsStats::simple(super::statfs::BLOCKFS_MAGIC);
+        if fs.disk.is_some() && !fs.disk_writable {
+            st.flags = super::statfs::ST_RDONLY;
+        }
         st.block_size = BLOCK_SIZE as u64;
         st.blocks = sb.block_count as u64;
         st.blocks_free = sb.free_blocks as u64;
@@ -3093,6 +3097,24 @@ mod tests {
         assert!(after.blocks_free <= before.blocks_free - 2);
     }
 
+    /// A filesystem on a read-only disk says so (PR #34 review); one in
+    /// memory only, or on a writable disk, does not.
+    #[test]
+    fn statfs_reports_a_read_only_disk() {
+        let fs = BlockFs::format(128, 16).unwrap();
+        assert_eq!(fs.root().statfs().unwrap().flags, 0);
+        let disk = MemDisk::new(128);
+        fs.set_disk_backend(backend(&disk), false).unwrap();
+        assert_eq!(fs.root().statfs().unwrap().flags, 0);
+        let ro = BlockFs::format(128, 16).unwrap();
+        ro.set_disk_backend(Arc::new(Mutex::new(ReadOnly(MemDisk::new(128)))), false)
+            .unwrap();
+        assert_eq!(
+            ro.root().statfs().unwrap().flags,
+            crate::fs::statfs::ST_RDONLY
+        );
+    }
+
     /// mknod on BlockFS: each special type reads back as itself (the type
     /// bits were tested as bits, so a block device and a socket came back
     /// as directories), a device keeps its number, nothing reads or writes
@@ -3294,6 +3316,24 @@ mod tests {
 
     fn backend(disk: &Arc<MemDisk>) -> Arc<Mutex<dyn DiskBackend>> {
         Arc::new(Mutex::new(Shared(disk.clone())))
+    }
+
+    /// A disk that refuses writes (QEMU's `readonly=on`).
+    struct ReadOnly(Arc<MemDisk>);
+
+    impl DiskBackend for ReadOnly {
+        fn read_block(&self, n: u64, buf: &mut [u8]) -> Result<(), KernelError> {
+            self.0.read_block(n, buf)
+        }
+        fn write_block(&self, _n: u64, _data: &[u8]) -> Result<(), KernelError> {
+            Err(KernelError::FsError(FsError::ReadOnly))
+        }
+        fn block_count(&self) -> u64 {
+            self.0.block_count()
+        }
+        fn is_read_only(&self) -> bool {
+            true
+        }
     }
 
     fn pattern(seed: u8, len: usize) -> Vec<u8> {

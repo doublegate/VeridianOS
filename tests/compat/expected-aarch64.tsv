@@ -4016,8 +4016,8 @@ libc-test	regression/pthread_cond_wait-cancel_ignored	PASS
 libc-test	regression/pthread_cond_wait-cancel_ignored-static	PASS	
 libc-test	regression/pthread_condattr_setclock	PASS	
 libc-test	regression/pthread_condattr_setclock-static	PASS	
-libc-test	regression/pthread_create-oom	TIMEOUT	
-libc-test	regression/pthread_create-oom-static	TIMEOUT	
+libc-test	regression/pthread_create-oom	TIMEOUT	known: docs/KNOWN-LIMITATIONS.md (memory exhaustion)
+libc-test	regression/pthread_create-oom-static	TIMEOUT	known: docs/KNOWN-LIMITATIONS.md (memory exhaustion)
 libc-test	regression/pthread_exit-cancel	PASS	
 libc-test	regression/pthread_exit-cancel-static	PASS	
 libc-test	regression/pthread_exit-dtor	PASS	

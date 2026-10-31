@@ -27,7 +27,13 @@
   519 on AArch64 and RISC-V (24 before), Open POSIX 1,577/1,574/1,570 of 1,965 and libc-test 527
   of 560 on each. The notes of tests whose status did not change were refreshed too (`--update`
   keeps them, so 225 x86_64 entries still named statfs's ENOSYS); hand-written `known:` notes
-  were kept.
+  were kept, and given back to the RISC-V memory-exhaustion tests, which went from HANG to
+  TIMEOUT.
+- statfs details: a device node's fstatfs names the filesystem holding the node (it said tmpfs
+  wherever the node was), BlockFS on a read-only disk reports `ST_RDONLY`, and statfs of a
+  non-directory with a trailing slash is ENOTDIR, as stat is.
+- The kernel shell's `uname` takes combined options (`-sr`) and `--all`, and reports an
+  invalid option or an operand as uname(1) does; an unknown option printed an empty line.
 
 - `docs/PORTING-GUIDE.md` describes the privilege model as it is: Unix credentials and Linux
   capabilities for POSIX programs (ADR 0020) beside the object capabilities of the native calls.

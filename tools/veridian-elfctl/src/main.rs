@@ -5,7 +5,9 @@
 //! - `wxneeded` (ADR 0017): the program may map memory that is writable and
 //!   executable at once;
 //! - `linux-uname` (ADR 0021): uname reports the system name "Linux" to the
-//!   program and what it runs.
+//!   program; a program it runs gets Linux mode only from its own note or
+//!   GNU ABI tag (only the prctl, which the `linux-uname` command uses,
+//!   carries the mode through exec).
 //!
 //! ```text
 //! veridian-elfctl show FILE

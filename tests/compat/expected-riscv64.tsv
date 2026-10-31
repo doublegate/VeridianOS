@@ -3982,10 +3982,10 @@ libc-test	regression/lseek-large	PASS
 libc-test	regression/lseek-large-static	PASS	
 libc-test	regression/malloc-0	PASS	
 libc-test	regression/malloc-0-static	PASS	
-libc-test	regression/malloc-brk-fail	TIMEOUT	
-libc-test	regression/malloc-brk-fail-static	TIMEOUT	
-libc-test	regression/malloc-oom	TIMEOUT	
-libc-test	regression/malloc-oom-static	TIMEOUT	
+libc-test	regression/malloc-brk-fail	TIMEOUT	known: docs/KNOWN-LIMITATIONS.md (memory exhaustion)
+libc-test	regression/malloc-brk-fail-static	TIMEOUT	known: docs/KNOWN-LIMITATIONS.md (memory exhaustion)
+libc-test	regression/malloc-oom	TIMEOUT	known: docs/KNOWN-LIMITATIONS.md (memory exhaustion)
+libc-test	regression/malloc-oom-static	TIMEOUT	known: docs/KNOWN-LIMITATIONS.md (memory exhaustion)
 libc-test	regression/mbsrtowcs-overflow	PASS	
 libc-test	regression/mbsrtowcs-overflow-static	PASS	
 libc-test	regression/memmem-oob	PASS	
@@ -4016,8 +4016,8 @@ libc-test	regression/pthread_cond_wait-cancel_ignored	PASS
 libc-test	regression/pthread_cond_wait-cancel_ignored-static	PASS	
 libc-test	regression/pthread_condattr_setclock	PASS	
 libc-test	regression/pthread_condattr_setclock-static	PASS	
-libc-test	regression/pthread_create-oom	TIMEOUT	
-libc-test	regression/pthread_create-oom-static	TIMEOUT	
+libc-test	regression/pthread_create-oom	TIMEOUT	known: docs/KNOWN-LIMITATIONS.md (memory exhaustion)
+libc-test	regression/pthread_create-oom-static	TIMEOUT	known: docs/KNOWN-LIMITATIONS.md (memory exhaustion)
 libc-test	regression/pthread_exit-cancel	PASS	
 libc-test	regression/pthread_exit-cancel-static	PASS	
 libc-test	regression/pthread_exit-dtor	PASS	

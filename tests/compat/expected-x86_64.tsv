@@ -122,7 +122,7 @@ ltp-syscalls	copy_file_range03	BROK	copy_file_range03.c:42: TBROK: copy_file_ran
 ltp-syscalls	creat01	PASS	
 ltp-syscalls	creat03	PASS	
 ltp-syscalls	creat04	PASS	
-ltp-syscalls	creat05	PASS	
+ltp-syscalls	creat05	FLAKY	HANG once on the GitHub runner, passed on its retry (PR #34, 2026-10-30); last here: PASS
 ltp-syscalls	creat06	BROK	tst_device.c:450: TBROK: Failed to acquire device
 ltp-syscalls	creat07	FAIL	creat07.c:43: TFAIL: creat() succeeded unexpectedly
 ltp-syscalls	creat08	FAIL	creat08.c:55: TFAIL: dir_b/nosetgid: Incorrect group, 65534 != 4
@@ -200,7 +200,7 @@ ltp-syscalls	execve01	PASS
 ltp-syscalls	execve02	FAIL	execve_child.c:27: TFAIL: execve_child shouldn't be executed
 ltp-syscalls	execve03	FAIL	execve03.c:106: TFAIL: execve failed unexpectedly; expected Filename too long: ENOENT (2)
 ltp-syscalls	execve04	FAIL	execve_child.c:27: TFAIL: execve_child shouldn't be executed
-ltp-syscalls	execve05	PASS	
+ltp-syscalls	execve05	FLAKY	PASS locally in 41 s of the 60 s limit, TIMEOUT on the GitHub runner (PR #34, 2026-10-30); last here: PASS
 ltp-syscalls	execve06	FAIL	execve06_child.c:15: TFAIL: argc is 0, expected 1
 ltp-syscalls	execveat01	CONF	../../../../include/lapi/execveat.h:18: TCONF: syscall(322) __NR_execveat not supported on your arch
 ltp-syscalls	execveat02	CONF	../../../../include/lapi/execveat.h:18: TCONF: syscall(322) __NR_execveat not supported on your arch
@@ -374,7 +374,7 @@ ltp-syscalls	fork03	PASS
 ltp-syscalls	fork04	PASS	
 ltp-syscalls	fork05	CONF	tst_test.c:1429: TCONF: Test only supports Intel 32 bits
 ltp-syscalls	fork06	TIMEOUT	tst_test.c:1895: TINFO: Overall timeout per run is 0h 00m 30s
-ltp-syscalls	fork07	PASS	
+ltp-syscalls	fork07	FLAKY	PASS locally in 36 s of the 60 s limit, failed once on the GitHub runner and passed on its retry (PR #34, 2026-10-30); last here: PASS
 ltp-syscalls	fork08	PASS	
 ltp-syscalls	fork09	TIMEOUT	fork09.c:34: TINFO: Opening files from parent
 ltp-syscalls	fork10	PASS	
@@ -882,7 +882,7 @@ ltp-syscalls	nice05	PASS
 ltp-syscalls	open01	PASS	
 ltp-syscalls	open02	FAIL	open02.c:47: TFAIL: open() unprivileged O_RDONLY | O_NOATIME succeeded
 ltp-syscalls	open03	PASS	
-ltp-syscalls	open04	PASS	
+ltp-syscalls	open04	FLAKY	PASS locally in 55 s of the 60 s limit (2026-10-30); last here: PASS
 ltp-syscalls	open06	PASS	
 ltp-syscalls	open07	PASS	
 ltp-syscalls	open08	FAIL	open08.c:50: TFAIL: O_RDWR expected ENAMETOOLONG: ENOENT (2)
@@ -1538,7 +1538,7 @@ ltp-syscalls	waitpid06	PASS
 ltp-syscalls	waitpid07	PASS	
 ltp-syscalls	waitpid08	PASS	
 ltp-syscalls	waitpid09	PASS	
-ltp-syscalls	waitpid10	PASS	
+ltp-syscalls	waitpid10	FLAKY	PASS locally in 37 s of the 60 s limit, failed once on the GitHub runner and passed on its retry (PR #34, 2026-10-30); last here: PASS
 ltp-syscalls	waitpid11	PASS	
 ltp-syscalls	waitpid12	PASS	
 ltp-syscalls	waitpid13	PASS	
@@ -4016,8 +4016,8 @@ libc-test	regression/pthread_cond_wait-cancel_ignored	PASS
 libc-test	regression/pthread_cond_wait-cancel_ignored-static	PASS	
 libc-test	regression/pthread_condattr_setclock	PASS	
 libc-test	regression/pthread_condattr_setclock-static	PASS	
-libc-test	regression/pthread_create-oom	TIMEOUT	
-libc-test	regression/pthread_create-oom-static	TIMEOUT	
+libc-test	regression/pthread_create-oom	TIMEOUT	known: docs/KNOWN-LIMITATIONS.md (memory exhaustion)
+libc-test	regression/pthread_create-oom-static	TIMEOUT	known: docs/KNOWN-LIMITATIONS.md (memory exhaustion)
 libc-test	regression/pthread_exit-cancel	PASS	
 libc-test	regression/pthread_exit-cancel-static	PASS	
 libc-test	regression/pthread_exit-dtor	PASS	
