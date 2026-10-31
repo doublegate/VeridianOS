@@ -170,6 +170,11 @@ pub mod sysno {
     pub const SYS_getitimer: usize = 36;
     pub const SYS_setitimer: usize = 38;
     pub const SYS_alarm: usize = 37;
+    pub const SYS_timer_create: usize = 222;
+    pub const SYS_timer_settime: usize = 223;
+    pub const SYS_timer_gettime: usize = 224;
+    pub const SYS_timer_getoverrun: usize = 225;
+    pub const SYS_timer_delete: usize = 226;
     pub const SYS_rt_sigaction: usize = 13;
     pub const SYS_rt_sigprocmask: usize = 14;
     pub const SYS_rt_sigsuspend: usize = 130;
@@ -430,6 +435,11 @@ pub mod sysno {
     pub const SYS_times: usize = 153;
     pub const SYS_getitimer: usize = 102;
     pub const SYS_setitimer: usize = 103;
+    pub const SYS_timer_create: usize = 107;
+    pub const SYS_timer_settime: usize = 110;
+    pub const SYS_timer_gettime: usize = 108;
+    pub const SYS_timer_getoverrun: usize = 109;
+    pub const SYS_timer_delete: usize = 111;
     pub const SYS_rt_sigaction: usize = 134;
     pub const SYS_rt_sigprocmask: usize = 135;
     pub const SYS_rt_sigsuspend: usize = 133;
@@ -685,6 +695,11 @@ pub mod sysno {
     pub const SYS_times: usize = 153;
     pub const SYS_getitimer: usize = 102;
     pub const SYS_setitimer: usize = 103;
+    pub const SYS_timer_create: usize = 107;
+    pub const SYS_timer_settime: usize = 110;
+    pub const SYS_timer_gettime: usize = 108;
+    pub const SYS_timer_getoverrun: usize = 109;
+    pub const SYS_timer_delete: usize = 111;
     pub const SYS_rt_sigaction: usize = 134;
     pub const SYS_rt_sigprocmask: usize = 135;
     pub const SYS_rt_sigsuspend: usize = 133;

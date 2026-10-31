@@ -33,6 +33,7 @@ pub mod lifecycle;
 pub mod linux_caps;
 pub mod memory;
 pub mod pcb;
+pub mod posix_timer;
 pub mod rlimit;
 pub mod robust_list;
 pub mod session;
@@ -592,6 +593,8 @@ pub extern "C" fn user_return_check() {
             rlimit::check_cpu(&process);
             // ITIMER_VIRTUAL and ITIMER_PROF: SIGVTALRM, SIGPROF.
             itimer::check_cpu(&process);
+            // POSIX timers on CPU clocks.
+            posix_timer::check_cpu(&process);
             let sig = process.kill_pending.load(Ordering::Acquire);
             if sig == exit::GROUP_EXIT_PENDING {
                 drop(process);

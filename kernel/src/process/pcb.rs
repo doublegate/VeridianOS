@@ -216,6 +216,11 @@ pub struct Process {
     /// Whether ITIMER_VIRTUAL or ITIMER_PROF is armed, for the return to
     /// user mode to check without the lock.
     pub cpu_itimers_armed: core::sync::atomic::AtomicBool,
+    /// POSIX timers (timer_create): none in a fork child, deleted by exec.
+    pub posix_timers: Mutex<super::posix_timer::PosixTimers>,
+    /// Whether a POSIX timer waits on a CPU clock, for the return to user
+    /// mode to check without the lock.
+    pub posix_cpu_armed: core::sync::atomic::AtomicBool,
 
     /// CPU time of the process's exited threads (its live threads' is the
     /// dispatcher's), and of its children it has waited for, with theirs
@@ -513,6 +518,8 @@ impl Process {
             ],
             itimers: Mutex::new(super::itimer::Itimers::default()),
             cpu_itimers_armed: core::sync::atomic::AtomicBool::new(false),
+            posix_timers: Mutex::new(super::posix_timer::PosixTimers::default()),
+            posix_cpu_armed: core::sync::atomic::AtomicBool::new(false),
             cpu_exited: Mutex::new(crate::sched::cputime::CpuTimes::ZERO),
             cpu_children: Mutex::new(crate::sched::cputime::CpuTimes::ZERO),
             cpu_split: crate::sched::cputime::PrevSplit::new(),

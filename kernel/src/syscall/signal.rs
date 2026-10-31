@@ -172,9 +172,17 @@ pub fn sys_sigaction(signum: usize, act_ptr: usize, oldact_ptr: usize) -> Syscal
             (act.sa_flags, act.restorer(), act.sa_mask),
         )
     });
+    #[cfg(feature = "alloc")]
+    let was_ignored = crate::process::signals::ignored(&proc, signum);
     let (old_handler, (flags, restorer, mask)) = proc
         .swap_signal_action(signum, new)
         .map_err(|_| SyscallError::InvalidArgument)?;
+    // An action that ignores the signal discards it if pending; POSIX
+    // timers follow (Linux's do_sigaction).
+    #[cfg(feature = "alloc")]
+    if new.is_some() {
+        crate::process::signals::action_changed(&proc, signum, was_ignored);
+    }
     if oldact_ptr != 0 {
         super::userspace::write_user(
             oldact_ptr,

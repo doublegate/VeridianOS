@@ -710,6 +710,7 @@ pub fn cleanup_process(process: &Process) {
 
     // Its ITIMER_REAL fires no more.
     crate::timer::ktimerd::cancel_owner(process.pid.0);
+    super::posix_timer::delete_all(process);
 
     // SCHED_DEADLINE reservations of every thread go back, whatever path
     // ended them (each thread's own exit already did; idempotent), so a

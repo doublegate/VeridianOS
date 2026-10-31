@@ -1,5 +1,5 @@
 //! ktimerd: the kernel thread that acts on expiries of timers that send
-//! signals (ITIMER_REAL).
+//! signals (ITIMER_REAL, POSIX timers).
 //!
 //! The timer interrupt runs on CPU 0 with interrupts off and must not take
 //! the locks a signal send takes (the task table, the signal queues), so
@@ -7,7 +7,9 @@
 //! expiry, then acts on every one that is due. Each timer has at most one
 //! entry, named by its [`Key`]: arming replaces it and cancelling removes
 //! it. An owner checks an expiry against its own state when it comes, so
-//! one taken off just before the timer was set again does nothing.
+//! one taken off just before the timer was set again does nothing. An entry
+//! for a time on the wall clock moves when the clock is set
+//! ([`clock_was_set`]).
 //!
 //! Lock order: an owner's timer lock, then [`ENTRIES`]; the thread never
 //! holds [`ENTRIES`] while it calls an owner.
@@ -22,12 +24,14 @@ use spin::Mutex;
 pub enum Key {
     /// Process `pid`'s ITIMER_REAL.
     Real(u64),
+    /// Process `pid`'s POSIX timer `id`.
+    Posix(u64, i32),
 }
 
 impl Key {
     fn owner(self) -> u64 {
         match self {
-            Key::Real(pid) => pid,
+            Key::Real(pid) | Key::Posix(pid, _) => pid,
         }
     }
 }
@@ -37,6 +41,8 @@ struct Entry {
     /// The expiry (`monotonic_ns`).
     at: u64,
     key: Key,
+    /// For a time on the wall clock: `at` follows the clock when it is set.
+    wall: bool,
 }
 
 /// The armed timers.
@@ -50,10 +56,22 @@ static WAKE: crate::sched::dispatch::WaitQueue = crate::sched::dispatch::WaitQue
 static STATE: AtomicU8 = AtomicU8::new(0);
 
 /// Put `key`'s entry, replacing any it has.
-fn put(entries: &mut Vec<Entry>, key: Key, at: u64) {
+fn put(entries: &mut Vec<Entry>, key: Key, at: u64, wall: bool) {
     match entries.iter_mut().find(|e| e.key == key) {
-        Some(e) => e.at = at,
-        None => entries.push(Entry { at, key }),
+        Some(e) => (e.at, e.wall) = (at, wall),
+        None => entries.push(Entry { at, key, wall }),
+    }
+}
+
+/// The wall clock moved by `delta_ns`: wall-clock entries keep their wall
+/// time, so their monotonic expiry moves the other way.
+fn shift_wall(entries: &mut [Entry], delta_ns: i64) {
+    for e in entries.iter_mut().filter(|e| e.wall) {
+        e.at = if delta_ns >= 0 {
+            e.at.saturating_sub(delta_ns as u64)
+        } else {
+            e.at.saturating_add(delta_ns.unsigned_abs())
+        };
     }
 }
 
@@ -78,7 +96,20 @@ fn changed() {
 
 /// Arm `key` to expire at `at` (`monotonic_ns`), replacing its entry.
 pub fn arm(key: Key, at: u64) {
-    put(&mut ENTRIES.lock(), key, at);
+    put(&mut ENTRIES.lock(), key, at, false);
+    changed();
+}
+
+/// Arm `key` for a time on the wall clock, which reads it at `at`
+/// (`monotonic_ns`, `timer::realtime::monotonic_at`).
+pub fn arm_wall(key: Key, at: u64) {
+    put(&mut ENTRIES.lock(), key, at, true);
+    changed();
+}
+
+/// The wall clock was set, moving by `delta_ns`.
+pub fn clock_was_set(delta_ns: i64) {
+    shift_wall(&mut ENTRIES.lock(), delta_ns);
     changed();
 }
 
@@ -122,6 +153,7 @@ extern "C" fn ktimerd(_: usize) {
         for key in due {
             match key {
                 Key::Real(pid) => crate::process::itimer::real_expired(pid, now),
+                Key::Posix(pid, id) => crate::process::posix_timer::expired(pid, id),
             }
         }
     }
@@ -136,10 +168,10 @@ mod tests {
     #[test]
     fn entries_are_one_per_timer_and_taken_when_due() {
         let mut e = Vec::new();
-        put(&mut e, Key::Real(1), 50);
-        put(&mut e, Key::Real(2), 30);
-        put(&mut e, Key::Real(3), 90);
-        put(&mut e, Key::Real(1), 20);
+        put(&mut e, Key::Real(1), 50, false);
+        put(&mut e, Key::Real(2), 30, false);
+        put(&mut e, Key::Real(3), 90, false);
+        put(&mut e, Key::Real(1), 20, false);
         assert_eq!(e.len(), 3);
         assert_eq!(earliest(&e), Some(20));
         assert_eq!(take_due(&mut e, 40), [Key::Real(1), Key::Real(2)]);
@@ -147,5 +179,23 @@ mod tests {
         assert!(take_due(&mut e, 89).is_empty());
         assert_eq!(take_due(&mut e, 90), [Key::Real(3)]);
         assert_eq!(earliest(&e), None);
+    }
+
+    /// Setting the wall clock moves only wall-clock entries, keeping their
+    /// wall time; a timer re-armed off the wall clock stops moving.
+    #[test]
+    fn wall_entries_follow_the_clock() {
+        let mut e = Vec::new();
+        put(&mut e, Key::Posix(1, 0), 100, true);
+        put(&mut e, Key::Posix(1, 1), 100, false);
+        shift_wall(&mut e, 30);
+        assert_eq!(take_due(&mut e, 70), [Key::Posix(1, 0)]);
+        put(&mut e, Key::Posix(1, 0), 100, true);
+        shift_wall(&mut e, -50);
+        assert_eq!(earliest(&e), Some(100));
+        put(&mut e, Key::Posix(1, 0), 120, false);
+        shift_wall(&mut e, 500);
+        assert_eq!(take_due(&mut e, 110), [Key::Posix(1, 1)]);
+        assert_eq!(earliest(&e), Some(120));
     }
 }

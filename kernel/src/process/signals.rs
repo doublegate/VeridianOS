@@ -102,7 +102,7 @@ static QUEUED_BY_USER: spin::Mutex<alloc::collections::BTreeMap<u32, u64>> =
     spin::Mutex::new(alloc::collections::BTreeMap::new());
 
 /// Charge one queued signal to `charge.uid` if it stays within the limit.
-fn charge_user(charge: Charge) -> bool {
+pub(super) fn charge_user(charge: Charge) -> bool {
     #[cfg(feature = "alloc")]
     {
         let mut queued = QUEUED_BY_USER.lock();
@@ -117,7 +117,7 @@ fn charge_user(charge: Charge) -> bool {
 }
 
 /// Give back `n` queued signals charged to `uid`.
-fn uncharge_user(uid: u32, n: u64) {
+pub(super) fn uncharge_user(uid: u32, n: u64) {
     #[cfg(feature = "alloc")]
     if n > 0 {
         let mut queued = QUEUED_BY_USER.lock();
@@ -146,6 +146,8 @@ pub fn queued_by_user(uid: u32) -> u64 {
 pub const SI_USER: i32 = 0;
 pub const SI_KERNEL: i32 = 0x80;
 pub const SI_QUEUE: i32 = -1;
+/// A POSIX timer expired (`process::posix_timer`).
+pub const SI_TIMER: i32 = -2;
 pub const SI_TKILL: i32 = -6;
 /// SIGCHLD `si_code`: how the child changed state.
 pub const CLD_EXITED: i32 = 1;
@@ -247,6 +249,38 @@ impl SigInfo {
         Self::child(sig, code, child, status)
     }
 
+    /// POSIX timer `id` expired (SI_TIMER): `si_tid` the id, `si_overrun`
+    /// filled in when it is taken, `si_value` the timer's value. `serial`
+    /// (where Linux keeps si_sys_private) tells it from a signal of an
+    /// earlier timer with the same id, and is cleared before user space
+    /// sees it.
+    pub fn timer(sig: usize, id: i32, value: u64, serial: u64) -> Self {
+        let mut info = Self::with(sig, SI_TIMER);
+        info.fields[0] = id as u32 as u64;
+        info.fields[1] = value;
+        info.fields[2] = serial;
+        info
+    }
+
+    /// A timer signal's timer id (si_tid).
+    pub fn timer_id(&self) -> i32 {
+        self.fields[0] as u32 as i32
+    }
+
+    /// A timer signal's overrun (si_overrun).
+    pub fn overrun(&self) -> i32 {
+        (self.fields[0] >> 32) as u32 as i32
+    }
+
+    pub fn set_overrun(&mut self, overrun: i32) {
+        self.fields[0] = self.fields[0] as u32 as u64 | (overrun as u32 as u64) << 32;
+    }
+
+    /// Whether a timer queued it (it then carries the timer's serial).
+    fn is_timer(&self) -> bool {
+        self.si_code == SI_TIMER
+    }
+
     /// A hardware fault at `addr` (`code` is a SEGV_, FPE_, ILL_, BUS_ or
     /// TRAP_ value; SI_KERNEL when there is none).
     pub fn fault(sig: usize, code: i32, addr: u64) -> Self {
@@ -300,7 +334,8 @@ struct Queued {
     /// The siginfo of every pending signal instance, oldest first: one per
     /// pending standard signal (the first sender's: a standard signal sent
     /// again while pending is not queued twice), one per queued instance of
-    /// a real-time signal.
+    /// a real-time signal, and one per POSIX timer whose signal is pending
+    /// (beside any other instance, standard signal or not, as on Linux).
     /// Each with the user a real-time instance is charged to: the
     /// receiver's real user when it was queued, given back to that user
     /// when it is taken, cleared or dropped, whatever the process's real
@@ -345,7 +380,7 @@ impl RtQueue {
             if pending.load(Ordering::Acquire) & bit == 0 {
                 // A pending bit cleared without the queue (job control)
                 // leaves its record behind: drop it for the new one.
-                q.infos.retain(|(i, _)| i.signo() != sig);
+                q.infos.retain(|(i, _)| i.signo() != sig || i.is_timer());
                 q.infos.push_back((info, None));
                 pending.fetch_or(bit, Ordering::AcqRel);
             }
@@ -360,11 +395,50 @@ impl RtQueue {
         Ok(())
     }
 
+    /// Queue timer signal `info` (SI_TIMER) in `pending`, unless that timer's
+    /// signal is queued already (Linux queues each timer's own preallocated
+    /// sigqueue at most once). Uncharged: the timer was charged when it was
+    /// made. Returns whether it was queued.
+    pub fn push_timer(&self, pending: &core::sync::atomic::AtomicU64, info: SigInfo) -> bool {
+        let mut q = self.0.lock();
+        let queued = q.infos.iter().any(|(i, _)| {
+            i.is_timer()
+                && i.signo() == info.signo()
+                && i.timer_id() == info.timer_id()
+                && i.fields[2] == info.fields[2]
+        });
+        if queued {
+            return false;
+        }
+        q.infos.push_back((info, None));
+        pending.fetch_or(sig_bit(info.signo()), Ordering::AcqRel);
+        true
+    }
+
+    /// Drop every queued timer signal (exec: Linux's flush_itimer_signals).
+    /// A signal stays pending if another instance of it is queued, or if it
+    /// was pending without a record.
+    pub fn clear_timers(&self, pending: &core::sync::atomic::AtomicU64) {
+        let mut q = self.0.lock();
+        let mut dropped = 0u64;
+        q.infos.retain(|(i, _)| {
+            if i.is_timer() {
+                dropped |= sig_bit(i.signo());
+            }
+            !i.is_timer()
+        });
+        let kept = q
+            .infos
+            .iter()
+            .fold(0, |bits, (i, _)| bits | sig_bit(i.signo()));
+        pending.fetch_and(!(dropped & !kept), Ordering::AcqRel);
+    }
+
     /// Take one instance of `sig` off `pending`, with its siginfo; None if
-    /// it is not pending. A real-time signal's bit stays while instances
-    /// remain. A signal pending without a record (one merged past the
-    /// queue limit) comes with an SI_USER siginfo that names no sender, as
-    /// on Linux.
+    /// it is not pending. The bit stays while instances remain (real-time
+    /// signals, a timer's signal beside another). A signal pending without
+    /// a record (one merged past the queue limit) comes with an SI_USER
+    /// siginfo that names no sender, as on Linux.
     pub fn take(&self, pending: &core::sync::atomic::AtomicU64, sig: usize) -> Option<SigInfo> {
         let bit = sig_bit(sig);
         let mut q = self.0.lock();
@@ -381,7 +455,7 @@ impl RtQueue {
             }
             None => SigInfo::with(sig, SI_USER),
         };
-        if sig < SIGRTMIN || !q.infos.iter().any(|(i, _)| i.signo() == sig) {
+        if !q.infos.iter().any(|(i, _)| i.signo() == sig) {
             pending.fetch_and(!bit, Ordering::AcqRel);
         }
         Some(info)
@@ -839,6 +913,68 @@ pub fn send_to_thread(
     Ok(())
 }
 
+/// What sending a timer's signal did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TimerSend {
+    Queued,
+    /// That timer's signal was queued already.
+    AlreadyQueued,
+    /// The signal is ignored: nothing was queued.
+    Ignored,
+}
+
+/// Send POSIX timer signal `info` to `process`, or to its thread `thread`
+/// (SIGEV_THREAD_ID): as [`send_info_to_process`], but queued even beside a
+/// pending instance of the same standard signal, and at most once per
+/// timer (Linux's posixtimer_send_sigqueue).
+#[cfg(feature = "alloc")]
+pub fn send_timer(process: &Process, thread: Option<&Thread>, info: SigInfo) -> TimerSend {
+    use crate::sched::dispatch;
+
+    let sig = info.signo();
+    job_control_on_send(process, sig);
+    if sig == SIGKILL {
+        super::exit::set_kill_pending(process, SIGKILL as u32);
+    } else if ignored(process, sig) {
+        return TimerSend::Ignored;
+    } else {
+        let queued = match thread {
+            Some(t) => t.rt_queue.push_timer(&t.sigpending, info),
+            None => process.rt_queue.push_timer(&process.pending_signals, info),
+        };
+        if !queued {
+            return TimerSend::AlreadyQueued;
+        }
+        crate::fs::signalfd::signal_generated();
+    }
+    for task in dispatch::tasks_of(process.pid.0) {
+        let mine = thread.is_none_or(|t| task.owner() == Some((process.pid.0, t.tid.0)));
+        if mine || sig == SIGKILL {
+            dispatch::notify(&task);
+        }
+    }
+    dispatch::PROCESS_EVENTS.wake_all();
+    TimerSend::Queued
+}
+
+/// `sig`'s action was changed, from one that ignored it if `was_ignored`
+/// (sigaction; Linux's do_sigaction): an action that ignores it discards
+/// its pending instances, blocked or not, parking the periodic timers that
+/// queued it; one that no longer does queues their signals again.
+#[cfg(feature = "alloc")]
+pub fn action_changed(process: &Process, sig: usize, was_ignored: bool) {
+    if ignored(process, sig) {
+        let bit = sig_bit(sig);
+        process.rt_queue.clear(&process.pending_signals, bit);
+        for thread in process.threads.lock().values() {
+            thread.rt_queue.clear(&thread.sigpending, bit);
+        }
+        super::posix_timer::park(process, sig);
+    } else if was_ignored {
+        super::posix_timer::unpark(process, sig);
+    }
+}
+
 /// Signals `thread` of `process` could take now (pending, not blocked).
 pub fn deliverable(process: &Process, thread: &Thread) -> u64 {
     let pending =
@@ -860,21 +996,33 @@ pub fn pending_in(mask: u64) -> bool {
 /// Take the lowest signal of `ready` pending for `thread` -- its own
 /// instance first, then its process's -- with its siginfo. A real-time
 /// signal's instances come one at a time, oldest first (N-209). None if
-/// another thread took it first.
-fn take_lowest(process: &Process, thread: &Thread, ready: u64) -> Option<SigInfo> {
-    if ready == 0 {
-        return None;
-    }
-    let sig = ready.trailing_zeros() as usize + 1;
-    thread.rt_queue.take(&thread.sigpending, sig).or_else(|| {
-        let info = process.rt_queue.take(&process.pending_signals, sig)?;
-        // An interval ITIMER_REAL waits again once its SIGALRM is taken
-        // (Linux's dequeue_signal).
-        if sig == super::itimer::SIGALRM {
-            super::itimer::sigalrm_taken(process);
+/// another thread took it first. A stale POSIX timer signal is dropped and
+/// the next one taken (Linux's dequeue_signal).
+fn take_lowest(process: &Process, thread: &Thread, mut ready: u64) -> Option<SigInfo> {
+    loop {
+        if ready == 0 {
+            return None;
         }
-        Some(info)
-    })
+        let sig = ready.trailing_zeros() as usize + 1;
+        let mut info = match thread.rt_queue.take(&thread.sigpending, sig) {
+            Some(info) => info,
+            None => {
+                let info = process.rt_queue.take(&process.pending_signals, sig)?;
+                // An interval ITIMER_REAL waits again once its SIGALRM is
+                // taken.
+                if sig == super::itimer::SIGALRM {
+                    super::itimer::sigalrm_taken(process);
+                }
+                info
+            }
+        };
+        // Its timer is looked at with the queues unlocked (lock order).
+        if !info.is_timer() || super::posix_timer::deliver(process, &mut info) {
+            return Some(info);
+        }
+        ready &= thread.sigpending.load(Ordering::Acquire)
+            | process.pending_signals.load(Ordering::Acquire);
+    }
 }
 
 /// Take the calling thread's lowest pending signal in `mask`, blocked or
@@ -1946,6 +2094,63 @@ mod tests {
         let mut info = SigInfo::from_process(sig, SI_QUEUE, 7, 1000);
         info.fields[1] = value;
         info
+    }
+
+    /// A timer's signal is queued once however often it fires, beside a
+    /// pending instance of the same standard signal; the bit stays until
+    /// both are taken; an earlier timer with the same id is told apart.
+    #[test]
+    fn timer_signals_queue_once_per_timer() {
+        let q = RtQueue::new();
+        let pending = core::sync::atomic::AtomicU64::new(0);
+        let kill = SigInfo::from_process(14, SI_USER, 42, 0);
+        q.push(&pending, kill, Charge::UNLIMITED, Overflow::Merge)
+            .unwrap();
+        assert!(q.push_timer(&pending, SigInfo::timer(14, 3, 9, 1)));
+        assert!(!q.push_timer(&pending, SigInfo::timer(14, 3, 9, 1)));
+        assert!(q.push_timer(&pending, SigInfo::timer(14, 3, 9, 2)));
+        // A standard signal sent again while pending is still not queued.
+        q.push(&pending, kill, Charge::UNLIMITED, Overflow::Merge)
+            .unwrap();
+        assert_eq!(q.take(&pending, 14), Some(kill));
+        let first = q.take(&pending, 14).unwrap();
+        assert_eq!(
+            (first.si_code, first.timer_id(), first.value()),
+            (SI_TIMER, 3, 9)
+        );
+        assert_ne!(pending.load(Ordering::Acquire) & sig_bit(14), 0);
+        assert_eq!(q.take(&pending, 14).unwrap().fields[2], 2);
+        assert_eq!(pending.load(Ordering::Acquire), 0);
+        assert_eq!(q.take(&pending, 14), None);
+    }
+
+    /// exec drops timer signals only: another instance of the signal, or
+    /// the signal without a record, stays pending.
+    #[test]
+    fn clear_timers_keeps_other_instances() {
+        let q = RtQueue::new();
+        let pending = core::sync::atomic::AtomicU64::new(0);
+        q.push(&pending, queued(40, 1), Charge::UNLIMITED, Overflow::Fail)
+            .unwrap();
+        q.push_timer(&pending, SigInfo::timer(40, 0, 0, 1));
+        q.push_timer(&pending, SigInfo::timer(41, 1, 0, 2));
+        pending.fetch_or(sig_bit(50), Ordering::AcqRel);
+        q.clear_timers(&pending);
+        assert_eq!(pending.load(Ordering::Acquire), sig_bit(40) | sig_bit(50));
+        assert_eq!(q.take(&pending, 40).unwrap().value(), 1);
+        assert_eq!(q.take(&pending, 40), None);
+    }
+
+    /// The overrun shares a word with the timer id, as Linux's si_tid and
+    /// si_overrun share it.
+    #[test]
+    fn timer_siginfo_layout() {
+        let mut info = SigInfo::timer(34, 5, 0xabcd, 9);
+        info.set_overrun(-1);
+        assert_eq!((info.timer_id(), info.overrun()), (5, -1));
+        info.set_overrun(7);
+        assert_eq!(info.fields[0], 5 | 7 << 32);
+        assert_eq!((info.si_code, info.value()), (-2, 0xabcd));
     }
 
     /// Each queued real-time instance keeps its own siginfo, oldest first

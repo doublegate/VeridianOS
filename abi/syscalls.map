@@ -206,6 +206,11 @@ times
 getitimer
 setitimer
 alarm
+timer_create
+timer_settime
+timer_gettime
+timer_getoverrun
+timer_delete
 
 ## Signals
 rt_sigaction

@@ -281,8 +281,7 @@ fn require_time_privilege() -> Result<(), SyscallError> {
 fn clock_was_set(delta_ns: i64) {
     #[cfg(feature = "alloc")]
     crate::fs::timerfd::clock_was_set(delta_ns);
-    #[cfg(not(feature = "alloc"))]
-    let _ = delta_ns;
+    crate::timer::ktimerd::clock_was_set(delta_ns);
 }
 
 /// clock_gettime (Linux 228): every Linux clock (N-218), REALTIME counting
@@ -595,9 +594,293 @@ pub fn sys_alarm(seconds: usize) -> SyscallResult {
     Ok(crate::process::itimer::alarm_seconds(old) as usize)
 }
 
+/// `struct sigevent` (64 bytes): the value, signal and notification, then
+/// a union of which only the thread id (SIGEV_THREAD_ID) reaches the
+/// kernel.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct Sigevent {
+    value: u64,
+    signo: i32,
+    notify: i32,
+    tid: i32,
+    pad: [i32; 11],
+}
+
+// SAFETY: integers only, no padding (8 + 4 + 4 + 4 + 44 = 64 bytes, 8-byte
+// aligned); every bit pattern is a valid value.
+unsafe impl super::userspace::UserPod for Sigevent {}
+
+/// The clock timer_create puts a timer on for clock ID `id`, called by
+/// thread `tid` of process `pid` (Linux's clockid_to_kclock): EINVAL for an
+/// unknown clock; EOPNOTSUPP for one without timers (the raw and coarse
+/// clocks) or for another process's CPU clock, which only Linux supports.
+/// A relative CLOCK_REALTIME setting runs on the monotonic clock
+/// (`posix_timer::settime`).
+fn timer_clock(
+    id: i32,
+    pid: u64,
+    tid: u64,
+) -> Result<crate::process::posix_timer::TimerClock, SyscallError> {
+    use crate::process::posix_timer::TimerClock;
+    if matches!(
+        id,
+        CLOCK_MONOTONIC_RAW | CLOCK_REALTIME_COARSE | CLOCK_MONOTONIC_COARSE
+    ) {
+        return Err(SyscallError::NotSupported);
+    }
+    let user = |kind| kind == CpuClockKind::Virt;
+    Ok(match Clock::decode(id)? {
+        Clock::Realtime => TimerClock::Wall,
+        Clock::Monotonic => TimerClock::Mono,
+        Clock::ProcessCpu(target, kind) => {
+            if target.is_some_and(|target| target != pid) {
+                return Err(SyscallError::NotSupported);
+            }
+            TimerClock::ProcessCpu { user: user(kind) }
+        }
+        Clock::ThreadCpu(target, kind) => TimerClock::ThreadCpu {
+            tid: target.unwrap_or(tid),
+            user: user(kind),
+        },
+    })
+}
+
+/// A `struct sigevent` as a timer's notification (Linux's good_sigevent):
+/// EINVAL for an unknown kind, a signal outside 1..=64, or (with
+/// SIGEV_THREAD_ID) a thread `is_thread` does not know.
+fn timer_notify(
+    event: Sigevent,
+    is_thread: impl Fn(u64) -> bool,
+) -> Result<crate::process::posix_timer::Notify, SyscallError> {
+    use crate::process::posix_timer::{
+        Notify, SIGEV_NONE, SIGEV_SIGNAL, SIGEV_THREAD, SIGEV_THREAD_ID,
+    };
+    let thread = match event.notify {
+        SIGEV_NONE => return Ok(Notify::None),
+        SIGEV_SIGNAL | SIGEV_THREAD => None,
+        SIGEV_THREAD_ID if event.tid > 0 && is_thread(event.tid as u64) => Some(event.tid as u64),
+        _ => return Err(SyscallError::InvalidArgument),
+    };
+    if !(1..=crate::process::signals::NSIG as i32).contains(&event.signo) {
+        return Err(SyscallError::InvalidArgument);
+    }
+    Ok(Notify::Signal {
+        signo: event.signo as usize,
+        value: event.value,
+        thread,
+    })
+}
+
+#[cfg(feature = "alloc")]
+fn timer_error(e: crate::process::posix_timer::TimerError) -> SyscallError {
+    match e {
+        crate::process::posix_timer::TimerError::Invalid => SyscallError::InvalidArgument,
+        crate::process::posix_timer::TimerError::Again => SyscallError::WouldBlock,
+    }
+}
+
+/// A timer id from a syscall argument (`timer_t` is an int): EINVAL for
+/// one outside 0..=INT_MAX, as Linux's lock_timer.
+fn timer_id(arg: usize) -> Result<i32, SyscallError> {
+    i32::try_from(arg as u32 as i64).map_err(|_| SyscallError::InvalidArgument)
+}
+
+/// timer_create(clock, sevp, timerid): a POSIX timer
+/// (`process::posix_timer`). The alarm clocks need CAP_WAKE_ALARM (EPERM).
+#[cfg(feature = "alloc")]
+pub fn sys_timer_create(clock_id: usize, sevp: usize, id_ptr: usize) -> SyscallResult {
+    let event = match sevp {
+        0 => None,
+        ptr => Some(super::userspace::read_user::<Sigevent>(ptr)?),
+    };
+    let process = crate::process::current_process().ok_or(SyscallError::InvalidState)?;
+    let tid = crate::process::current_thread().map_or(process.pid.0, |t| t.tid.0);
+    let clock_id = clock_id as i32;
+    let clock = timer_clock(clock_id, process.pid.0, tid)?;
+    if let crate::process::posix_timer::TimerClock::ThreadCpu { tid, .. } = clock {
+        process
+            .get_thread(crate::process::ThreadId(tid))
+            .ok_or(SyscallError::InvalidArgument)?;
+    }
+    if matches!(clock_id, CLOCK_REALTIME_ALARM | CLOCK_BOOTTIME_ALARM)
+        && !crate::process::creds::Caller::current()
+            .capable(crate::process::linux_caps::CAP_WAKE_ALARM)
+    {
+        return Err(SyscallError::OperationNotPermitted);
+    }
+    let notify = event
+        .map(|event| {
+            timer_notify(event, |tid| {
+                process.get_thread(crate::process::ThreadId(tid)).is_some()
+            })
+        })
+        .transpose()?;
+    let id = crate::process::posix_timer::create(&process, clock, notify).map_err(timer_error)?;
+    if let Err(e) = super::userspace::write_user(id_ptr, id) {
+        let _ = crate::process::posix_timer::delete(&process, id);
+        return Err(e);
+    }
+    Ok(0)
+}
+
+/// `struct itimerspec` ({it_interval, it_value}) as a timer setting
+/// (EINVAL for an invalid timespec, as Linux's timespec64_valid).
+fn itimerspec_spec(v: [Timespec; 2]) -> Result<crate::process::posix_timer::Spec, SyscallError> {
+    Ok(crate::process::posix_timer::Spec {
+        interval: v[0].to_ns()?,
+        value: v[1].to_ns()?,
+    })
+}
+
+fn spec_itimerspec(s: crate::process::posix_timer::Spec) -> [Timespec; 2] {
+    [
+        Timespec::from_ns(s.interval.max(0)),
+        Timespec::from_ns(s.value.max(0)),
+    ]
+}
+
+/// timer_settime(timerid, flags, new, old): TIMER_ABSTIME sets an expiry
+/// on the clock; a NULL `new` is EINVAL.
+#[cfg(feature = "alloc")]
+pub fn sys_timer_settime(id: usize, flags: usize, new_ptr: usize, old_ptr: usize) -> SyscallResult {
+    if new_ptr == 0 {
+        return Err(SyscallError::InvalidArgument);
+    }
+    let new = super::userspace::read_user::<[Timespec; 2]>(new_ptr)?;
+    let new = itimerspec_spec(new)?;
+    let process = crate::process::current_process().ok_or(SyscallError::InvalidState)?;
+    let absolute = flags as i32 & crate::process::posix_timer::TIMER_ABSTIME as i32 != 0;
+    let old = crate::process::posix_timer::settime(&process, timer_id(id)?, absolute, new)
+        .map_err(timer_error)?;
+    if old_ptr != 0 {
+        super::userspace::write_user(old_ptr, spec_itimerspec(old))?;
+    }
+    Ok(0)
+}
+
+/// timer_gettime(timerid, curr).
+#[cfg(feature = "alloc")]
+pub fn sys_timer_gettime(id: usize, cur_ptr: usize) -> SyscallResult {
+    let process = crate::process::current_process().ok_or(SyscallError::InvalidState)?;
+    let spec =
+        crate::process::posix_timer::gettime(&process, timer_id(id)?).map_err(timer_error)?;
+    super::userspace::write_user(cur_ptr, spec_itimerspec(spec))?;
+    Ok(0)
+}
+
+/// timer_getoverrun(timerid): the overrun of its last delivered signal.
+#[cfg(feature = "alloc")]
+pub fn sys_timer_getoverrun(id: usize) -> SyscallResult {
+    let process = crate::process::current_process().ok_or(SyscallError::InvalidState)?;
+    crate::process::posix_timer::getoverrun(&process, timer_id(id)?)
+        .map(|n| n as usize)
+        .map_err(timer_error)
+}
+
+/// timer_delete(timerid).
+#[cfg(feature = "alloc")]
+pub fn sys_timer_delete(id: usize) -> SyscallResult {
+    let process = crate::process::current_process().ok_or(SyscallError::InvalidState)?;
+    crate::process::posix_timer::delete(&process, timer_id(id)?).map_err(timer_error)?;
+    Ok(0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// timer_create's clocks: the raw and coarse clocks have no timers,
+    /// another process's CPU clock is not supported, a thread's is named
+    /// by its id.
+    #[test]
+    fn timer_clocks_follow_clockid_to_kclock() {
+        use crate::process::posix_timer::TimerClock;
+        assert_eq!(timer_clock(CLOCK_REALTIME, 5, 6), Ok(TimerClock::Wall));
+        assert_eq!(timer_clock(CLOCK_TAI, 5, 6), Ok(TimerClock::Wall));
+        assert_eq!(timer_clock(CLOCK_BOOTTIME, 5, 6), Ok(TimerClock::Mono));
+        for id in [
+            CLOCK_MONOTONIC_RAW,
+            CLOCK_REALTIME_COARSE,
+            CLOCK_MONOTONIC_COARSE,
+        ] {
+            assert_eq!(timer_clock(id, 5, 6), Err(SyscallError::NotSupported));
+        }
+        assert_eq!(timer_clock(10, 5, 6), Err(SyscallError::InvalidArgument));
+        assert_eq!(
+            timer_clock(CLOCK_PROCESS_CPUTIME_ID, 5, 6),
+            Ok(TimerClock::ProcessCpu { user: false })
+        );
+        assert_eq!(
+            timer_clock(CLOCK_THREAD_CPUTIME_ID, 5, 6),
+            Ok(TimerClock::ThreadCpu {
+                tid: 6,
+                user: false
+            })
+        );
+        // clock_getcpuclockid(pid): ~pid << 3 | kind (1: CPUCLOCK_VIRT).
+        let cpu = |pid: i32, kind| (!pid) << 3 | kind;
+        assert_eq!(
+            timer_clock(cpu(5, 1), 5, 6),
+            Ok(TimerClock::ProcessCpu { user: true })
+        );
+        assert_eq!(
+            timer_clock(cpu(7, 2), 5, 6),
+            Err(SyscallError::NotSupported)
+        );
+        assert_eq!(
+            timer_clock(cpu(9, 2) | 4, 5, 6),
+            Ok(TimerClock::ThreadCpu {
+                tid: 9,
+                user: false
+            })
+        );
+    }
+
+    /// good_sigevent: the kinds, the signal range, and SIGEV_THREAD_ID's
+    /// thread.
+    #[test]
+    fn timer_notify_follows_good_sigevent() {
+        use crate::process::posix_timer::Notify;
+        let event = |notify, signo, tid| Sigevent {
+            value: 77,
+            signo,
+            notify,
+            tid,
+            pad: [0; 11],
+        };
+        let known = |tid| tid == 6;
+        assert_eq!(timer_notify(event(1, 0, 0), known), Ok(Notify::None));
+        let signal = |thread| Notify::Signal {
+            signo: 34,
+            value: 77,
+            thread,
+        };
+        assert_eq!(timer_notify(event(0, 34, 0), known), Ok(signal(None)));
+        assert_eq!(timer_notify(event(2, 34, 0), known), Ok(signal(None)));
+        assert_eq!(timer_notify(event(4, 34, 6), known), Ok(signal(Some(6))));
+        for bad in [
+            event(4, 34, 7),
+            event(0, 0, 0),
+            event(0, 65, 0),
+            event(3, 34, 0),
+            event(6, 34, 6),
+        ] {
+            assert_eq!(timer_notify(bad, known), Err(SyscallError::InvalidArgument));
+        }
+    }
+
+    /// Timer ids are ints: one past INT_MAX (or negative) names no timer.
+    #[test]
+    fn timer_ids_are_non_negative_ints() {
+        assert_eq!(timer_id(0), Ok(0));
+        assert_eq!(timer_id(i32::MAX as usize), Ok(i32::MAX));
+        assert_eq!(
+            timer_id(-1i32 as u32 as usize),
+            Err(SyscallError::InvalidArgument)
+        );
+        assert_eq!(timer_id(usize::MAX), Err(SyscallError::InvalidArgument));
+    }
 
     /// Linux's CPU clock IDs: `~id << 3 | thread << 2 | kind`.
     fn cpu_clock(id: u32, thread: bool, kind: i32) -> i32 {

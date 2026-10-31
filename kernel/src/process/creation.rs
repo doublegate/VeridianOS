@@ -856,8 +856,15 @@ fn exec_image(
     }
 
     // Step 6: Reset signal handlers to defaults, and the alternate signal
-    // stack (it was in the old image), as Linux does.
+    // stack (it was in the old image), as Linux does. POSIX timers are
+    // deleted and their pending signals dropped (exit_itimers and
+    // flush_itimer_signals); the interval timers stay.
     process.reset_signal_handlers();
+    super::posix_timer::delete_all(&process);
+    process.rt_queue.clear_timers(&process.pending_signals);
+    current_thread
+        .rt_queue
+        .clear_timers(&current_thread.sigpending);
     *current_thread.altstack.lock() = super::signals::SigAltStack::default();
     // The robust list was in the old image too (N-225).
     current_thread

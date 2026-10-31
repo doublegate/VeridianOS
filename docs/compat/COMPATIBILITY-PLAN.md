@@ -94,7 +94,8 @@ Each group lands with its LTP cases. The counts are "missing" entries in the cov
   - Semantics to get right: delivery on every return to user mode, SA_RESTART versus EINTR, queued
     realtime signals, per-thread masks, core dumps and job-control stops.
 - **time (14)**
-  - Settable and adjustable clocks and POSIX timers (the utime family is done).
+  - Settable and adjustable clocks and POSIX timers (the utime family and the POSIX timers are
+    done).
   - CLOCK_REALTIME from the RTC epoch, every clock ID, and nanosecond file timestamps.
 - **files (55)**
   - truncate, fchdir, creat, lchown, getdents, mknodat, readahead/fadvise and the sync family.

@@ -5681,6 +5681,219 @@ static void test_itimers(void)
     report("itimer_checks_alarm_and_fork", einval && alarms && child == 1, why);
 }
 
+/* POSIX timers (timer_create, timer_settime, timer_gettime,
+ * timer_getoverrun, timer_delete): a periodic timer's signal carries
+ * SI_TIMER and its value; a blocked periodic timer is queued once and
+ * reports the expiries missed as its overrun; SIGEV_NONE counts down;
+ * TIMER_ABSTIME in the past fires at once; a deleted timer's pending
+ * signal is dropped; an ignored periodic timer is parked and resumes when
+ * caught again; CPU-clock timers fire on CPU time; a fork child has none. */
+static volatile int ptimer_count, ptimer_code, ptimer_value;
+static void ptimer_handler(int sig, siginfo_t *si, void *uc)
+{
+    (void)sig;
+    (void)uc;
+    ptimer_code = si->si_code;
+    ptimer_value = si->si_value.sival_int;
+    ptimer_count++;
+}
+
+static int ptimer_make(clockid_t clock, int notify, int sig, int value, timer_t *t)
+{
+    struct sigevent sev;
+    memset(&sev, 0, sizeof(sev));
+    sev.sigev_notify = notify;
+    sev.sigev_signo = sig;
+    sev.sigev_value.sival_int = value;
+    return timer_create(clock, &sev, t);
+}
+
+static int ptimer_wait_count(int n)
+{
+    for (int i = 0; i < 300 && ptimer_count < n; i++)
+        usleep(10000);
+    return ptimer_count >= n;
+}
+
+static void test_posix_timers(void)
+{
+    char why[256];
+    int sig = SIGRTMIN + 3;
+    struct sigaction sa, old_sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_sigaction = ptimer_handler;
+    sa.sa_flags = SA_SIGINFO;
+    sigaction(sig, &sa, &old_sa);
+
+    /* Periodic, caught: SI_TIMER with the timer's value. */
+    timer_t t;
+    int made = ptimer_make(CLOCK_MONOTONIC, SIGEV_SIGNAL, sig, 4242, &t) == 0;
+    struct itimerspec ten_ms = {{0, 10000000}, {0, 10000000}}, cur;
+    int set = made && timer_settime(t, 0, &ten_ms, NULL) == 0;
+    int fired = set && ptimer_wait_count(3);
+    int got = timer_gettime(t, &cur) == 0 && cur.it_interval.tv_nsec == 10000000 &&
+              cur.it_value.tv_sec == 0 && cur.it_value.tv_nsec > 0 &&
+              cur.it_value.tv_nsec <= 10000000;
+    int del = timer_delete(t) == 0;
+    snprintf(why, sizeof(why), "made=%d set=%d fired=%d(%d) code=%d value=%d get=%d del=%d", made,
+             set, fired, ptimer_count, ptimer_code, ptimer_value, got, del);
+    report("posix_timer_periodic_siginfo",
+           made && set && fired && ptimer_code == SI_TIMER && ptimer_value == 4242 && got && del,
+           why);
+
+    /* Blocked periodic: queued once, the missed expiries as its overrun,
+     * and the same through signalfd. */
+    sigset_t set1, old_mask;
+    sigemptyset(&set1);
+    sigaddset(&set1, sig);
+    sigprocmask(SIG_BLOCK, &set1, &old_mask);
+    struct itimerspec five_ms = {{0, 5000000}, {0, 5000000}};
+    made = ptimer_make(CLOCK_MONOTONIC, SIGEV_SIGNAL, sig, 7, &t) == 0;
+    set = made && timer_settime(t, 0, &five_ms, NULL) == 0;
+    usleep(60000);
+    struct timespec wait = {1, 0};
+    siginfo_t si;
+    memset(&si, 0, sizeof(si));
+    int taken = sigtimedwait(&set1, &si, &wait) == sig;
+    int overrun = si.si_overrun, getover = timer_getoverrun(t);
+    /* Taking the signal re-arms the timer, so on a slow machine its next
+     * expiry can be queued before the second wait: a second signal is a
+     * duplicate only if it came within one period (seen on RISC-V Sv39). */
+    struct timespec zero = {0, 0}, w0, w1;
+    clock_gettime(CLOCK_MONOTONIC, &w0);
+    errno = 0;
+    int again = sigtimedwait(&set1, &si, &zero);
+    int eagain = again == -1 && errno == EAGAIN;
+    clock_gettime(CLOCK_MONOTONIC, &w1);
+    long gap = (w1.tv_sec - w0.tv_sec) * 1000000000L + (w1.tv_nsec - w0.tv_nsec);
+    int once = eagain || (again == sig && gap >= 5000000);
+    int fd = signalfd(-1, &set1, SFD_CLOEXEC);
+    struct signalfd_siginfo ssi;
+    memset(&ssi, 0, sizeof(ssi));
+    usleep(20000);
+    int sfd = fd >= 0 && read(fd, &ssi, sizeof(ssi)) == (ssize_t)sizeof(ssi) &&
+              ssi.ssi_code == SI_TIMER && ssi.ssi_tid == (unsigned)(intptr_t)t &&
+              ssi.ssi_int == 7 && ssi.ssi_overrun >= 1;
+    if (fd >= 0)
+        close(fd);
+    struct itimerspec old;
+    struct itimerspec off = {{0, 0}, {0, 0}};
+    int oldok = timer_settime(t, 0, &off, &old) == 0 && old.it_interval.tv_nsec == 5000000;
+    timer_delete(t);
+    snprintf(why, sizeof(why),
+             "made=%d set=%d taken=%d overrun=%d getoverrun=%d once=%d sfd=%d(%d,%u,%u) old=%d",
+             made, set, taken, overrun, getover, once, sfd, ssi.ssi_code, ssi.ssi_tid,
+             ssi.ssi_overrun, oldok);
+    report("posix_timer_overrun_when_blocked",
+           made && set && taken && overrun >= 5 && getover == overrun && once && sfd && oldok,
+           why);
+
+    /* SIGEV_NONE counts down; TIMER_ABSTIME in the past fires at once; a
+     * deleted timer's pending signal is dropped; the default sigevent is
+     * SIGALRM with the timer id. */
+    timer_t n;
+    int none = ptimer_make(CLOCK_MONOTONIC, SIGEV_NONE, 0, 0, &n) == 0;
+    struct itimerspec sec = {{0, 0}, {1, 0}}, ms = {{0, 0}, {0, 1000000}};
+    none = none && timer_settime(n, 0, &sec, NULL) == 0 && timer_gettime(n, &cur) == 0 &&
+           cur.it_value.tv_sec == 0 && cur.it_value.tv_nsec > 500000000;
+    none = none && timer_settime(n, 0, &ms, NULL) == 0 && usleep(10000) == 0 &&
+           timer_gettime(n, &cur) == 0 && cur.it_value.tv_sec == 0 && cur.it_value.tv_nsec == 0;
+    timer_delete(n);
+    made = ptimer_make(CLOCK_REALTIME, SIGEV_SIGNAL, sig, 9, &t) == 0;
+    struct timespec now;
+    clock_gettime(CLOCK_REALTIME, &now);
+    struct itimerspec past = {{0, 0}, {now.tv_sec - 1, 0}};
+    sigset_t pend;
+    int abs = made && timer_settime(t, TIMER_ABSTIME, &past, NULL) == 0 &&
+              sigpending(&pend) == 0 && sigismember(&pend, sig);
+    int dropped = timer_delete(t) == 0 && sigtimedwait(&set1, &si, &zero) == -1 && errno == EAGAIN;
+    sigset_t alrm;
+    sigemptyset(&alrm);
+    sigaddset(&alrm, SIGALRM);
+    sigset_t alrm_old;
+    sigprocmask(SIG_BLOCK, &alrm, &alrm_old);
+    timer_t d;
+    memset(&si, 0, sizeof(si));
+    int dflt = timer_create(CLOCK_MONOTONIC, NULL, &d) == 0 && timer_settime(d, 0, &ms, NULL) == 0 &&
+               sigtimedwait(&alrm, &si, &wait) == SIGALRM && si.si_code == SI_TIMER &&
+               si.si_value.sival_int == (int)(intptr_t)d;
+    timer_delete(d);
+    sigprocmask(SIG_SETMASK, &alrm_old, NULL);
+    snprintf(why, sizeof(why), "none=%d abs=%d dropped=%d dflt=%d", none, abs, dropped, dflt);
+    report("posix_timer_none_abstime_delete", none && abs && dropped && dflt, why);
+    sigprocmask(SIG_SETMASK, &old_mask, NULL);
+
+    /* Ignored periodic timer: parked, then queued again once caught. */
+    struct sigaction ign;
+    memset(&ign, 0, sizeof(ign));
+    ign.sa_handler = SIG_IGN;
+    sigaction(sig, &ign, NULL);
+    made = ptimer_make(CLOCK_MONOTONIC, SIGEV_SIGNAL, sig, 11, &t) == 0;
+    set = made && timer_settime(t, 0, &five_ms, NULL) == 0;
+    usleep(30000);
+    ptimer_count = 0;
+    sigaction(sig, &sa, NULL);
+    int resumed = set && ptimer_wait_count(2) && ptimer_value == 11;
+    timer_delete(t);
+
+    /* CPU time: a process CPU-clock timer fires while the process spins. */
+    ptimer_count = 0;
+    made = ptimer_make(CLOCK_PROCESS_CPUTIME_ID, SIGEV_SIGNAL, sig, 12, &t) == 0;
+    struct itimerspec cpu = {{0, 0}, {0, 20000000}};
+    set = made && timer_settime(t, 0, &cpu, NULL) == 0;
+    struct timespec t0, t1;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    volatile unsigned long spin = 0;
+    do {
+        for (int i = 0; i < 100000; i++)
+            spin++;
+        clock_gettime(CLOCK_MONOTONIC, &t1);
+    } while (ptimer_count == 0 && t1.tv_sec - t0.tv_sec < 5);
+    (void)spin;
+    int cpuok = set && ptimer_count == 1 && ptimer_value == 12 && timer_gettime(t, &cur) == 0 &&
+                cur.it_value.tv_sec == 0 && cur.it_value.tv_nsec == 0;
+    timer_delete(t);
+
+    /* Errors, and a fork child without timers. */
+    timer_t bad = (timer_t)(intptr_t)12345;
+    errno = 0;
+    int e1 = timer_gettime(bad, &cur) == -1 && errno == EINVAL;
+    errno = 0;
+    int e2 = timer_create(1234, NULL, &t) == -1 && errno == EINVAL;
+    errno = 0;
+    int e3 = timer_create(CLOCK_MONOTONIC_RAW, NULL, &t) == -1 && errno == EOPNOTSUPP;
+    made = timer_create(CLOCK_MONOTONIC, NULL, &t) == 0;
+    struct itimerspec badns = {{0, 0}, {0, 1000000000}};
+    errno = 0;
+    int e4 = made && timer_settime(t, 0, &badns, NULL) == -1 && errno == EINVAL;
+    int fds[2] = {-1, -1};
+    pipe(fds);
+    pid_t pid = fork();
+    if (pid == 0) {
+        errno = 0;
+        char r = timer_gettime(t, &cur) == -1 && errno == EINVAL;
+        write(fds[1], &r, 1);
+        _exit(0);
+    }
+    char child = 0;
+    if (pid > 0) {
+        read(fds[0], &child, 1);
+        waitpid(pid, NULL, 0);
+    }
+    close(fds[0]);
+    close(fds[1]);
+    timer_delete(t);
+    /* musl's timer_delete returns the raw -EINVAL without errno: ask the
+     * kernel directly. */
+    errno = 0;
+    int e5 = syscall(SYS_timer_delete, (int)(intptr_t)t) == -1 && errno == EINVAL;
+    sigaction(sig, &old_sa, NULL);
+    snprintf(why, sizeof(why), "resumed=%d(%d) cpu=%d errors=%d,%d,%d,%d,%d child=%d", resumed,
+             ptimer_count, cpuok, e1, e2, e3, e4, e5, child);
+    report("posix_timer_ignore_cpu_errors_fork",
+           resumed && cpuok && e1 && e2 && e3 && e4 && e5 && child == 1, why);
+}
+
 int main(int argc, char **argv)
 {
     if (argc >= 2 && strcmp(argv[1], "--ids") == 0)
@@ -5774,6 +5987,7 @@ int main(int argc, char **argv)
     test_fallocate();
     test_utimes();
     test_itimers();
+    test_posix_timers();
     printf("MUSL-RUNTIME: %d/%d\n", passed, total);
     return passed == total ? 0 : 1;
 }

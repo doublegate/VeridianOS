@@ -72,6 +72,20 @@
   EOPNOTSUPP, as Linux's does. LTP creates its 300 MB loop image with fallocate, so the tests
   that ask for a block device now stop at once instead of writing the image until the disk is
   full or the time limit passes.
+- POSIX timers: timer_create, timer_settime, timer_gettime, timer_getoverrun and timer_delete
+  (they were ENOSYS), following Linux's `kernel/time/posix-timers.c` (`process::posix_timer`).
+  Timers run on CLOCK_REALTIME (an absolute setting follows the clock when it is set; a
+  relative one runs on the monotonic clock), the monotonic and boot clocks, TAI, the alarm
+  clocks (with CAP_WAKE_ALARM), and the CPU clocks of the process and its threads; the raw and
+  coarse clocks are EOPNOTSUPP. Each timer queues at most one SI_TIMER signal, beside any
+  pending instance of the same standard signal, to the process or to one thread
+  (SIGEV_THREAD_ID); an interval timer is armed again when its signal is taken, and the
+  expiries missed meanwhile are its overrun (`si_overrun`, timer_getoverrun, signalfd's
+  `ssi_overrun`). A signal from a timer set again or deleted is dropped when taken; a periodic
+  timer whose signal is ignored waits, and resumes when the signal is caught again. SIGEV_NONE
+  timers count down without a signal. Timers are charged to RLIMIT_SIGPENDING, not inherited by
+  fork, and deleted by exec, which also drops their pending signals. sigaction now discards a
+  pending signal whose new action ignores it, as POSIX requires.
 - Interval timers: getitimer, setitimer and alarm (alarm on x86_64 only, as in Linux; they were
   ENOSYS), following Linux's `kernel/time/itimer.c` (`process::itimer`). ITIMER_REAL sends
   SIGALRM from a new kernel thread, `ktimerd`, that sleeps until the earliest expiry (the timer

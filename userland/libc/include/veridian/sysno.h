@@ -187,6 +187,11 @@
 #define SYS_getitimer                    36
 #define SYS_setitimer                    38
 #define SYS_alarm                        37
+#define SYS_timer_create                 222
+#define SYS_timer_settime                223
+#define SYS_timer_gettime                224
+#define SYS_timer_getoverrun             225
+#define SYS_timer_delete                 226
 /* Signals */
 #define SYS_rt_sigaction                 13
 #define SYS_rt_sigprocmask               14
@@ -472,6 +477,11 @@
 #define SYS_times                        153
 #define SYS_getitimer                    102
 #define SYS_setitimer                    103
+#define SYS_timer_create                 107
+#define SYS_timer_settime                110
+#define SYS_timer_gettime                108
+#define SYS_timer_getoverrun             109
+#define SYS_timer_delete                 111
 /* Signals */
 #define SYS_rt_sigaction                 134
 #define SYS_rt_sigprocmask               135
@@ -752,6 +762,11 @@
 #define SYS_times                        153
 #define SYS_getitimer                    102
 #define SYS_setitimer                    103
+#define SYS_timer_create                 107
+#define SYS_timer_settime                110
+#define SYS_timer_gettime                108
+#define SYS_timer_getoverrun             109
+#define SYS_timer_delete                 111
 /* Signals */
 #define SYS_rt_sigaction                 134
 #define SYS_rt_sigprocmask               135

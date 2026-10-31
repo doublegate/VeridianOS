@@ -91,6 +91,14 @@ impl SignalfdSiginfo {
             if si.signo() == SIGCHLD && (1..=CLD_CONTINUED).contains(&si.si_code) {
                 info.ssi_status = si.status();
                 (info.ssi_utime, info.ssi_stime) = si.times();
+            } else if si.si_code == crate::process::signals::SI_TIMER {
+                // A POSIX timer's: its id and overrun, not a sender.
+                info.ssi_pid = 0;
+                info.ssi_uid = 0;
+                info.ssi_tid = si.timer_id() as u32;
+                info.ssi_overrun = si.overrun() as u32;
+                info.ssi_int = si.value() as u32 as i32;
+                info.ssi_ptr = si.value();
             } else if si.si_code < 0 {
                 info.ssi_int = si.value() as u32 as i32;
                 info.ssi_ptr = si.value();
