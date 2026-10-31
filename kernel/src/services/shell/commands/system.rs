@@ -550,8 +550,16 @@ impl BuiltinCommand for UnameCommand {
 
     fn execute(&self, args: &[String], _shell: &Shell) -> CommandResult {
         let args: Vec<&str> = args.iter().map(String::as_str).collect();
-        crate::println!("{}", crate::utils::uname::command_output(&args));
-        CommandResult::Success(0)
+        match crate::utils::uname::command_output(&args) {
+            Ok(out) => {
+                crate::println!("{}", out);
+                CommandResult::Success(0)
+            }
+            Err(msg) => {
+                crate::println!("{}", msg);
+                CommandResult::Success(1)
+            }
+        }
     }
 }
 

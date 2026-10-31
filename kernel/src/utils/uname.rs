@@ -20,11 +20,11 @@ pub const fn sysname(linux: bool) -> &'static str {
 
 /// A process's Linux uname mode (ADR 0021). A mode the process chose, with
 /// prctl(PR_VERIDIAN_UNAME) or the `linux-uname` launcher, holds across fork
-/// and exec, so everything it runs sees Linux. One that the program image
-/// asked for (a GNU ABI tag naming Linux, as glibc programs carry, or the
-/// VeridianOS feature note) holds for that image and its forks only: each
-/// exec decides again from the program it loads, so a glibc shell does not
-/// carry the mode into everything started from it.
+/// and exec, so everything it runs sees what it chose, Linux or native. One
+/// that the program image asked for (a GNU ABI tag naming Linux, as glibc
+/// programs carry, or the VeridianOS feature note) holds for that image and its
+/// forks only: each exec decides again from the program it loads, so a glibc
+/// shell does not carry the mode into everything started from it.
 pub struct UnameMode(core::sync::atomic::AtomicU8);
 
 impl UnameMode {
@@ -43,19 +43,24 @@ impl UnameMode {
         self.0.load(core::sync::atomic::Ordering::Acquire) & Self::LINUX != 0
     }
 
-    /// The process's own choice (prctl): Linux and kept across exec, or
-    /// native.
+    /// The process's own choice (prctl, the launcher): Linux or native,
+    /// kept across exec either way, so `linux-uname -n CMD` keeps CMD native
+    /// even when its image asks for Linux.
     pub fn set(&self, linux: bool) {
-        let v = if linux { Self::LINUX | Self::CHOSEN } else { 0 };
+        let v = if linux {
+            Self::LINUX | Self::CHOSEN
+        } else {
+            Self::CHOSEN
+        };
         self.0.store(v, core::sync::atomic::Ordering::Release);
     }
 
     /// Exec of an image that does (`image_wants`) or does not ask for Linux
     /// mode.
     pub fn exec(&self, image_wants: bool) {
-        let chosen = self.0.load(core::sync::atomic::Ordering::Acquire) & Self::CHOSEN;
-        let v = if chosen != 0 {
-            Self::LINUX | Self::CHOSEN
+        let cur = self.0.load(core::sync::atomic::Ordering::Acquire);
+        let v = if cur & Self::CHOSEN != 0 {
+            cur
         } else if image_wants {
             Self::LINUX
         } else {
@@ -125,20 +130,21 @@ pub fn proc_version(sysname: &str) -> alloc::string::String {
 /// What the kernel shell's `uname [-asnrvm]` prints: the selected fields in
 /// uname(1)'s order (system, node, release, version, machine), the system
 /// name alone without options. Options combine (`-sr`) and `--all` is
-/// `-a`; anything else is uname(1)'s error. The shell is not a Linux
-/// program, so it always names VeridianOS.
+/// `-a`; anything else is uname(1)'s error message, as `Err`, for the
+/// shell to print with a failing status. The shell is not a Linux program,
+/// so it always names VeridianOS.
 #[cfg(feature = "alloc")]
-pub fn command_output(args: &[&str]) -> alloc::string::String {
+pub fn command_output(args: &[&str]) -> Result<alloc::string::String, alloc::string::String> {
     // Fields in output order: s, n, r, v, m.
     let mut on = [false; 5];
     for arg in args {
         let letters = match *arg {
             "--all" => "a",
             a if a.starts_with("--") => {
-                return alloc::format!("uname: unrecognized option '{}'", a)
+                return Err(alloc::format!("uname: unrecognized option '{}'", a));
             }
             a if a.starts_with('-') && a.len() > 1 => &a[1..],
-            a => return alloc::format!("uname: extra operand '{}'", a),
+            a => return Err(alloc::format!("uname: extra operand '{}'", a)),
         };
         for c in letters.chars() {
             match c {
@@ -148,7 +154,7 @@ pub fn command_output(args: &[&str]) -> alloc::string::String {
                 'r' => on[2] = true,
                 'v' => on[3] = true,
                 'm' => on[4] = true,
-                c => return alloc::format!("uname: invalid option -- '{}'", c),
+                c => return Err(alloc::format!("uname: invalid option -- '{}'", c)),
             }
         }
     }
@@ -167,7 +173,7 @@ pub fn command_output(args: &[&str]) -> alloc::string::String {
         .filter(|(on, _)| *on)
         .map(|(_, v)| *v)
         .collect();
-    words.join(" ")
+    Ok(words.join(" "))
 }
 
 #[cfg(test)]
@@ -199,9 +205,13 @@ mod tests {
         m.set(false);
         assert!(!m.is_linux());
         m.exec(true);
-        assert!(m.is_linux(), "turning it off leaves images free to ask");
-        m.exec(false);
-        assert!(!m.is_linux());
+        assert!(
+            !m.is_linux(),
+            "a chosen native mode survives an image that asks for Linux (linux-uname -n)"
+        );
+        child.inherit(&m);
+        child.exec(true);
+        assert!(!child.is_linux(), "and is inherited as chosen");
     }
 
     #[test]
@@ -237,21 +247,29 @@ mod tests {
 
     #[test]
     fn shell_uname_prints_fields_in_uname_order() {
-        assert_eq!(command_output(&[]), "VeridianOS");
-        assert_eq!(command_output(&["-r"]), "7.3.0-veridian");
+        let out = |args: &[&str]| command_output(args).unwrap();
+        assert_eq!(out(&[]), "VeridianOS");
+        assert_eq!(out(&["-r"]), "7.3.0-veridian");
         assert_eq!(
-            command_output(&["-m", "-s"]),
+            out(&["-m", "-s"]),
             alloc::format!("VeridianOS {}", machine())
         );
-        let all = command_output(&["-a"]);
+        let all = out(&["-a"]);
         assert!(all.starts_with("VeridianOS veridian 7.3.0-veridian #1 SMP VeridianOS "));
         assert!(all.ends_with(machine()));
-        assert_eq!(command_output(&["-sr"]), "VeridianOS 7.3.0-veridian");
-        assert_eq!(command_output(&["--all"]), all);
-        assert_eq!(command_output(&["-x"]), "uname: invalid option -- 'x'");
-        assert_eq!(command_output(&["-sx"]), "uname: invalid option -- 'x'");
-        assert_eq!(command_output(&["foo"]), "uname: extra operand 'foo'");
-        assert_eq!(command_output(&["--x"]), "uname: unrecognized option '--x'");
+        assert_eq!(out(&["-sr"]), "VeridianOS 7.3.0-veridian");
+        assert_eq!(out(&["--all"]), all);
+    }
+
+    /// A bad option or an operand is an error (a failing status, nothing
+    /// for `$(uname ...)` to capture), worded as uname(1) words it.
+    #[test]
+    fn shell_uname_rejects_what_uname_rejects() {
+        let err = |args: &[&str]| command_output(args).unwrap_err();
+        assert_eq!(err(&["-x"]), "uname: invalid option -- 'x'");
+        assert_eq!(err(&["-sx"]), "uname: invalid option -- 'x'");
+        assert_eq!(err(&["foo"]), "uname: extra operand 'foo'");
+        assert_eq!(err(&["--x"]), "uname: unrecognized option '--x'");
     }
 
     #[test]

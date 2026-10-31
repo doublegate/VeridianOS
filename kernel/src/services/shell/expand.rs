@@ -664,9 +664,13 @@ fn execute_substitution_command(command: &str) -> String {
 // Command substitution inline evaluators
 // ---------------------------------------------------------------------------
 
-/// Evaluate `uname` with optional flags.
+/// Evaluate `uname` with optional flags. An error is printed, as uname
+/// writes it to stderr, and substitutes nothing.
 fn subst_uname(args: &[&str]) -> String {
-    crate::utils::uname::command_output(args)
+    crate::utils::uname::command_output(args).unwrap_or_else(|msg| {
+        crate::println!("{}", msg);
+        String::new()
+    })
 }
 
 /// Evaluate `basename <path> [suffix]`.

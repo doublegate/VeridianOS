@@ -872,7 +872,8 @@ pub struct Ext4Fs {
 impl Ext4Fs {
     /// Create an ext4 filesystem from raw image data (read-only).
     pub fn from_image(image_data: &[u8]) -> Result<Self, KernelError> {
-        if image_data.len() < SUPERBLOCK_OFFSET + 256 {
+        // The superblock is 1024 bytes (parse checks the same).
+        if image_data.len() < SUPERBLOCK_OFFSET + 1024 {
             return Err(KernelError::FsError(FsError::CorruptedData));
         }
 

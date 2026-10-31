@@ -54,7 +54,8 @@ system tools), and those should name the system they run on.
    namespace). It is not part of the choice either.
 3. **`sysname` is per process: `VeridianOS` by default, `Linux` for a process in Linux mode.**
    - The mode is a process attribute, copied by fork and clone. A mode the process *chose* (the
-     prctl, and so the launcher) is kept across exec, as Linux keeps its personality flags: a
+     prctl, and so the launcher), Linux or native, is kept across exec, as Linux keeps its
+     personality flags (a chosen native mode outranks an image that asks for Linux): a
      build driver or a shell started under `linux-uname` covers every `uname -s`, `config.guess`,
      `cmake` and interpreter it starts.
    - A mode the program image asked for (item 4) holds for that image and its forks only; each exec

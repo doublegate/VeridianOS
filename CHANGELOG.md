@@ -14,7 +14,8 @@
   `veridian-elfctl set linux-uname`, which now also shows and clears the bit in every note) or a
   GNU ABI tag naming Linux; `prctl(PR_VERIDIAN_UNAME)` reads and sets it, the `linux-uname`
   launcher runs a command in it. Fork keeps the mode; exec keeps it only when the process chose it
-  (the prctl or the launcher), and otherwise sets it from the new program, so a glibc shell does
+  (the prctl or the launcher, Linux or native, so `linux-uname -n` keeps even a glibc program
+  native), and otherwise sets it from the new program, so a glibc shell does
   not pass `Linux` on to the native programs it starts. `/proc/version` and
   `/proc/sys/kernel/ostype` give the caller's name. The bits of every feature note are now
   combined, so a program can carry both the W^X and the uname note; only the first note counted.

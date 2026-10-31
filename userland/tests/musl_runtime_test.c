@@ -2410,6 +2410,11 @@ static void test_uname_linux_mode(void)
         if (prctl(PR_VERIDIAN_UNAME, PR_VERIDIAN_UNAME_SET, 0, 0, 0) != 0 || uname(&u) != 0
             || strcmp(u.sysname, "VeridianOS") != 0)
             c |= 32;
+        /* A chosen native mode holds too, even for an image that asks for
+         * Linux (what linux-uname -n does; PR #34 review). */
+        if (run_capture("/bin/uname_gnu_tag_test", NULL, out, sizeof(out)) != 0
+            || strcmp(out, "VeridianOS") != 0)
+            c |= 64;
         _exit(c);
     }
     int st = -1;

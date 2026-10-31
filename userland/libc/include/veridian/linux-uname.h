@@ -7,9 +7,9 @@
  * (include this header in exactly one of its source files) or a GNU ABI tag
  * naming Linux (glibc programs), and at run time with
  * prctl(PR_VERIDIAN_UNAME, PR_VERIDIAN_UNAME_SET, ...). Fork keeps the mode.
- * Exec keeps it only when the process chose it with the prctl (as the
- * `linux-uname` command does to run a program in Linux mode); otherwise the
- * new program's note or ABI tag decides.
+ * Exec keeps it only when the process chose it with the prctl, Linux or
+ * native (as `linux-uname` and `linux-uname -n` do); otherwise the new
+ * program's note or ABI tag decides.
  *
  * Note layout (as <veridian/wxneeded.h>; the feature bits of every
  * VeridianOS feature-control note are combined): namesz 11, descsz 4,
