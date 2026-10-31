@@ -70,11 +70,17 @@ struct Ext4Superblock {
     feature_ro_compat: u32,
     desc_size: u16,
     blocks_count_hi: u32,
+    r_blocks_count_lo: u32,
+    r_blocks_count_hi: u32,
+    free_blocks_count_hi: u32,
+    overhead_clusters: u32,
+    uuid: [u8; 16],
 }
 
 impl Ext4Superblock {
     fn parse(data: &[u8]) -> Result<Self, KernelError> {
-        if data.len() < 256 {
+        // The whole 1 KiB superblock: fields up to 0x24C are read below.
+        if data.len() < 1024 {
             return Err(KernelError::FsError(FsError::CorruptedData));
         }
 
@@ -113,7 +119,64 @@ impl Ext4Superblock {
                 data[0x152],
                 data[0x153],
             ]),
+            r_blocks_count_lo: u32::from_le_bytes([data[8], data[9], data[10], data[11]]),
+            r_blocks_count_hi: u32::from_le_bytes([
+                data[0x154],
+                data[0x155],
+                data[0x156],
+                data[0x157],
+            ]),
+            free_blocks_count_hi: u32::from_le_bytes([
+                data[0x158],
+                data[0x159],
+                data[0x15A],
+                data[0x15B],
+            ]),
+            overhead_clusters: u32::from_le_bytes([
+                data[0x248],
+                data[0x249],
+                data[0x24A],
+                data[0x24B],
+            ]),
+            uuid: data[0x68..0x78].try_into().unwrap_or([0; 16]),
         })
+    }
+
+    /// A block count from its two halves; the high half counts only with
+    /// the 64bit feature, as Linux's `ext4_blocks_count`.
+    fn blocks(&self, lo: u32, hi: u32) -> u64 {
+        const INCOMPAT_64BIT: u32 = 0x80;
+        let hi = if self.feature_incompat & INCOMPAT_64BIT != 0 {
+            hi as u64
+        } else {
+            0
+        };
+        (hi << 32) | lo as u64
+    }
+
+    /// What Linux's `ext4_statfs` reports, from the superblock. The
+    /// metadata overhead subtracted from the block count is
+    /// `s_overhead_clusters`, 0 when the superblock does not record it
+    /// (Linux then computes it from the group layout, so on such an image
+    /// `f_blocks` here is the larger, `minixdf` figure). The mount is
+    /// read-only.
+    fn statfs(&self) -> super::statfs::FsStats {
+        let mut st = super::statfs::FsStats::simple(super::statfs::EXT4_SUPER_MAGIC);
+        st.block_size = self.block_size() as u64;
+        st.blocks = self
+            .blocks(self.blocks_count_lo, self.blocks_count_hi)
+            .saturating_sub(self.overhead_clusters as u64);
+        st.blocks_free = self.blocks(self.free_blocks_count_lo, self.free_blocks_count_hi);
+        st.blocks_avail = st
+            .blocks_free
+            .saturating_sub(self.blocks(self.r_blocks_count_lo, self.r_blocks_count_hi));
+        st.files = self.inodes_count as u64;
+        st.files_free = self.free_inodes_count as u64;
+        let half = |at: usize| u64::from_le_bytes(self.uuid[at..at + 8].try_into().unwrap());
+        let fsid = half(0) ^ half(8);
+        st.fsid = [fsid as u32, (fsid >> 32) as u32];
+        st.flags = super::statfs::ST_RDONLY;
+        st
     }
 
     fn block_size(&self) -> usize {
@@ -691,6 +754,10 @@ impl Ext4Node {
 }
 
 impl VfsNode for Ext4Node {
+    fn statfs(&self) -> Result<super::statfs::FsStats, KernelError> {
+        Ok(self.fs_state.read().sb.statfs())
+    }
+
     fn node_type(&self) -> NodeType {
         self.node_type
     }
@@ -805,7 +872,8 @@ pub struct Ext4Fs {
 impl Ext4Fs {
     /// Create an ext4 filesystem from raw image data (read-only).
     pub fn from_image(image_data: &[u8]) -> Result<Self, KernelError> {
-        if image_data.len() < SUPERBLOCK_OFFSET + 256 {
+        // The superblock is 1024 bytes (parse checks the same).
+        if image_data.len() < SUPERBLOCK_OFFSET + 1024 {
             return Err(KernelError::FsError(FsError::CorruptedData));
         }
 
@@ -1007,6 +1075,28 @@ mod tests {
         assert_eq!(sb.block_size(), 1024);
         assert_eq!(sb.inodes_count, 16);
         assert_eq!(sb.inode_size, 128);
+    }
+
+    #[test]
+    fn statfs_reads_the_superblock_counts() {
+        let mut img = make_test_ext4_image();
+        let sb = SUPERBLOCK_OFFSET;
+        img[sb + 0x08..sb + 0x0C].copy_from_slice(&5u32.to_le_bytes()); // reserved
+        img[sb + 0x0C..sb + 0x10].copy_from_slice(&20u32.to_le_bytes()); // free blocks
+        img[sb + 0x10..sb + 0x14].copy_from_slice(&12u32.to_le_bytes()); // free inodes
+        img[sb + 0x68..sb + 0x78]
+            .copy_from_slice(&[1, 0, 0, 0, 0, 0, 0, 0, 3, 0, 0, 0, 2, 0, 0, 0]);
+        // A high half that does not count without the 64bit feature.
+        img[sb + 0x158..sb + 0x15C].copy_from_slice(&1u32.to_le_bytes());
+        let fs = Ext4Fs::from_image(&img).unwrap();
+        let st = fs.root().lookup("hello.txt").unwrap().statfs().unwrap();
+        assert_eq!(st.fs_type, crate::fs::statfs::EXT4_SUPER_MAGIC);
+        assert_eq!((st.block_size, st.blocks), (1024, 64));
+        assert_eq!((st.blocks_free, st.blocks_avail), (20, 15));
+        assert_eq!((st.files, st.files_free), (16, 12));
+        // fsid: the two 64-bit halves of the UUID xored, low word first.
+        assert_eq!(st.fsid, [2, 2]);
+        assert_eq!(st.flags, crate::fs::statfs::ST_RDONLY);
     }
 
     #[test]

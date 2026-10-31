@@ -98,21 +98,29 @@ LTP's `syscalls`, the Open POSIX Test Suite and musl libc-test run on all three 
 [`docs/compat/COMPATIBILITY-PLAN.md`](compat/COMPATIBILITY-PLAN.md)). Most LTP tests never reach
 their check, for a few shared reasons:
 
-- **statfs is ENOSYS.** LTP's library asks for the filesystem type of its temporary directory, so
-  about 630 of the 1,552 tests are TBROK before they start.
-- **The release `uname` reports.** LTP warns that the kernel is "older than minimal supported 4.4"
-  (TWARN) in every new-API test: VeridianOS reports its own version. About 205 of them otherwise
-  passed; in the rest the warning comes with the real outcome (a skip, a failure).
+- **statfs reports no mount flags.** It reports each filesystem's type and counts (until it was
+  implemented, about 630 of LTP's 1,552 tests were TBROK on its ENOSYS), but VeridianOS has no
+  per-mount flags, so `f_flags` carries only `ST_VALID` and a read-only ext4's or FAT's
+  `ST_RDONLY` (never `ST_NOSUID`, `ST_NODEV`, `ST_NOEXEC` or `ST_RELATIME`). `f_fsid` is 0 except
+  on ext4, and an ext4 image whose superblock does not record its metadata overhead reports the
+  whole volume in `f_blocks`.
+- **No test block device.** Tests that need a block device (about 175) ask LTP for a loop device
+  backed by a 300 MB image in their temporary directory. `fallocate` is ENOSYS, so LTP writes the
+  image instead, and there are no loop devices to attach it to: on x86_64 the write stops short
+  and the test is TBROK; on AArch64 and RISC-V, under emulation, writing it outlasts the
+  180-second limit and the test is a TIMEOUT. `fallocate` belongs to the file tier of the system
+  call groups; loop devices come after it.
 - **No kernel configuration.** Tests that check a `CONFIG_*` option (about 95) find neither
   `/proc/config.gz` nor `/boot/config-<release>` and are TBROK.
 - **Missing calls.** alarm and the interval and POSIX timers, the System V IPC calls, message
   queues, mlock, msync, sched_getparam and the other calls the coverage tables list as missing;
-  most of `/proc/sys` (it has `kernel/pid_max`, `kernel/cap_last_cap` and
-  `kernel/core_pattern`), `/proc/self/mounts` and parts of `/proc/<pid>/stat` and `status`.
+  most of `/proc/sys` (it has `kernel/pid_max`, `kernel/cap_last_cap`, `kernel/core_pattern`,
+  `kernel/ostype`, `kernel/osrelease` and `kernel/version`), `/proc/self/mounts` and parts of `/proc/<pid>/stat` and `status`.
 - **Memory exhaustion.** libc-test's `malloc-oom`, `malloc-brk-fail` and `pthread_create-oom`
-  stop the whole guest on RISC-V. On x86_64 and AArch64 they ran until the time limit after the
-  full LTP and Open POSIX runs in the same guest, but reached ENOMEM within 10 to 16 s when
-  libc-test ran on its own (x86_64): how they end depends on what ran before.
+  run until the time limit on all three architectures after the full LTP and Open POSIX runs in
+  the same guest (on RISC-V they stopped the whole guest until the runs of 2026-10-30), but
+  reached ENOMEM within 10 to 16 s when libc-test ran on its own (x86_64): how they end depends
+  on what ran before.
 - **A new process can be missing from /proc for a moment.** Open POSIX tests that wait for a
   child's state in `/proc/<pid>/stat` (its `include/proc.h`) read it right after fork and now and
   then find no such file (`sem_timedwait/9-1`, once in four x86_64 runs; it is marked FLAKY).
@@ -240,6 +248,15 @@ What remains:
   it as an id no process has (LTP's `tst_get_unused_pid`), work until then.
 - **chroot (N-250):** a working directory outside the new root is moved to the root, where Linux
   would leave it outside.
+- **uname says `VeridianOS`, not `Linux`, by default (ADR 0021).** Programs that test the
+  system name at run time (CMake's `CMAKE_HOST_SYSTEM_NAME`, Python's `platform.system()` and
+  `sysconfig.get_platform()`, Node's `os.type()`, OpenJDK's `os.name`) take their unknown-system
+  path unless they run in Linux mode: built with `<veridian/linux-uname.h>`, marked with
+  `veridian-elfctl set linux-uname`, built for GNU/Linux (a GNU ABI tag), or started under
+  `linux-uname` (only the launcher's mode reaches the programs a process execs; a marked or
+  glibc program's ends at its next exec). autoconf configure scripts are covered by the site file and `CONFIG_SITE`, except
+  under `env -i` with a `--prefix` other than `/usr` or `/usr/local`, where they need `--build`.
+  The release (`7.3.0-veridian`) is Linux's for every process.
 
 ### SMP: what is not done yet (sprint D5 leftovers, planned v0.28)
 

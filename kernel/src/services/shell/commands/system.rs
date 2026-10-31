@@ -549,34 +549,17 @@ impl BuiltinCommand for UnameCommand {
     }
 
     fn execute(&self, args: &[String], _shell: &Shell) -> CommandResult {
-        let show_all = args.iter().any(|a| a == "-a");
-        let show_sysname = args.is_empty() || show_all || args.iter().any(|a| a == "-s");
-        let show_nodename = show_all || args.iter().any(|a| a == "-n");
-        let show_release = show_all || args.iter().any(|a| a == "-r");
-        let show_machine = show_all || args.iter().any(|a| a == "-m");
-
-        let mut parts: Vec<&str> = Vec::new();
-
-        if show_sysname {
-            parts.push("VeridianOS");
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        match crate::utils::uname::command_output(&args) {
+            Ok(out) => {
+                crate::println!("{}", out);
+                CommandResult::Success(0)
+            }
+            Err(msg) => {
+                crate::println!("{}", msg);
+                CommandResult::Success(1)
+            }
         }
-        if show_nodename {
-            parts.push("veridian");
-        }
-        if show_release {
-            parts.push(env!("CARGO_PKG_VERSION"));
-        }
-        if show_machine {
-            #[cfg(target_arch = "x86_64")]
-            parts.push("x86_64");
-            #[cfg(target_arch = "aarch64")]
-            parts.push("aarch64");
-            #[cfg(target_arch = "riscv64")]
-            parts.push("riscv64");
-        }
-
-        crate::println!("{}", parts.join(" "));
-        CommandResult::Success(0)
     }
 }
 
@@ -2649,8 +2632,9 @@ impl BuiltinCommand for SysctlCommand {
             crate::println!("vm.free_memory = {}K", free_kb);
             let uptime = crate::arch::timer::get_ticks() / 1000;
             crate::println!("kernel.uptime = {}s", uptime);
-            crate::println!("kernel.hostname = veridian");
-            crate::println!("kernel.ostype = VeridianOS");
+            crate::println!("kernel.hostname = {}", crate::utils::uname::NODENAME);
+            crate::println!("kernel.ostype = {}", crate::utils::uname::SYSNAME);
+            crate::println!("kernel.osrelease = {}", crate::utils::uname::RELEASE);
         } else if let Some(eq_pos) = arg.find('=') {
             let key = &arg[..eq_pos];
             let value = &arg[eq_pos + 1..];

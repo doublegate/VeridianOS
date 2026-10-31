@@ -1,16 +1,24 @@
 //! veridian-elfctl: show, set or clear the VeridianOS feature-control note
-//! of an ELF program, as FreeBSD's elfctl(1) does for its feature note
-//! (ADR 0017). The one feature is `wxneeded`: the program may map memory
-//! that is writable and executable at once.
+//! of an ELF program, as FreeBSD's elfctl(1) does for its feature note.
+//! The features:
+//!
+//! - `wxneeded` (ADR 0017): the program may map memory that is writable and
+//!   executable at once;
+//! - `linux-uname` (ADR 0021): uname reports the system name "Linux" to the
+//!   program; a program it runs gets Linux mode only from its own note or
+//!   GNU ABI tag (only the prctl, which the `linux-uname` command uses,
+//!   carries the mode through exec).
 //!
 //! ```text
 //! veridian-elfctl show FILE
-//! veridian-elfctl set wxneeded FILE [-o OUT]
-//! veridian-elfctl clear wxneeded FILE [-o OUT]
+//! veridian-elfctl set FEATURE FILE [-o OUT]
+//! veridian-elfctl clear FEATURE FILE [-o OUT]
 //! ```
 //!
-//! A program that already carries the note has its feature word changed
-//! in place. A program without one -- any binary built for Linux -- gets
+//! The kernel combines the feature words of every feature-control note, so
+//! `show` reports them combined and `clear` clears the bit in each. A
+//! program that already carries a note has its feature word changed in
+//! place. A program without one -- any binary built for Linux -- gets
 //! the note added without relinking, the way patchelf grows a program
 //! header table:
 //!
@@ -40,11 +48,17 @@ const PHDR_SIZE: usize = 56;
 /// e_phnum's escape value (the real count would be in section 0).
 const PN_XNUM: usize = 0xffff;
 
-/// The owner, type and W^X bit of the VeridianOS feature-control note
-/// (`userland/libc/include/veridian/wxneeded.h`, `kernel/src/elf/image.rs`).
+/// The owner and type of the VeridianOS feature-control note, and its
+/// feature bits (`userland/libc/include/veridian/{wxneeded,linux-uname}.h`,
+/// `kernel/src/elf/image.rs`).
 const NOTE_NAME: &[u8] = b"VeridianOS\0";
 const NT_VERIDIAN_FEATURE_CTL: u32 = 1;
 const FCTL_WXNEEDED: u32 = 1;
+const FCTL_LINUX_UNAME: u32 = 2;
+const FEATURES: [(&str, u32); 2] = [
+    ("wxneeded", FCTL_WXNEEDED),
+    ("linux-uname", FCTL_LINUX_UNAME),
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Phdr {
@@ -140,10 +154,11 @@ fn parse(data: &[u8]) -> Result<Elf, String> {
     Ok(Elf { phdrs })
 }
 
-/// The file offset of the feature word of a VeridianOS feature-control
-/// note in any PT_NOTE segment, if there is one. A malformed note segment
+/// The file offsets of the feature words of the VeridianOS feature-control
+/// notes in every PT_NOTE segment, in file order. A malformed note segment
 /// is an error, so the tool never rewrites what it cannot read.
-fn find_feature_word(data: &[u8], elf: &Elf) -> Result<Option<usize>, String> {
+fn find_feature_words(data: &[u8], elf: &Elf) -> Result<Vec<usize>, String> {
+    let mut words = Vec::new();
     for p in elf.phdrs.iter().filter(|p| p.kind == PT_NOTE) {
         let bad = || format!("malformed PT_NOTE at offset {:#x}", p.offset);
         let start = usize::try_from(p.offset).map_err(|_| bad())?;
@@ -177,12 +192,12 @@ fn find_feature_word(data: &[u8], elf: &Elf) -> Result<Option<usize>, String> {
                 && kind == NT_VERIDIAN_FEATURE_CTL
                 && descsz == 4
             {
-                return Ok(Some(desc_at));
+                words.push(desc_at);
             }
             at = next;
         }
     }
-    Ok(None)
+    Ok(words)
 }
 
 /// The feature-control note with feature word `bits`, 4-byte aligned.
@@ -292,50 +307,63 @@ fn add_note(data: &[u8], elf: &Elf, bits: u32) -> Result<Vec<u8>, String> {
     Ok(out)
 }
 
-/// What a command does to the file: the new contents, or `None` if it
-/// needs no change, with a line to report.
-fn apply(data: &[u8], set: bool) -> Result<(Option<Vec<u8>>, String), String> {
+/// What a command does to the file for the feature `(name, bit)`: the new
+/// contents, or `None` if it needs no change, with a line to report. `set`
+/// sets the bit in the first note (adding one if there is none); `clear`
+/// clears it in every note, as the kernel combines them.
+fn apply(
+    data: &[u8],
+    set: bool,
+    (name, bit): (&str, u32),
+) -> Result<(Option<Vec<u8>>, String), String> {
     let elf = parse(data)?;
-    match find_feature_word(data, &elf)? {
-        Some(at) => {
-            let bits = u32_at(data, at);
-            let new = if set {
-                bits | FCTL_WXNEEDED
-            } else {
-                bits & !FCTL_WXNEEDED
-            };
-            if new == bits {
-                return Ok((None, "wxneeded already as asked; unchanged".into()));
-            }
-            let mut out = data.to_vec();
-            out[at..at + 4].copy_from_slice(&new.to_le_bytes());
-            Ok((Some(out), "feature note changed in place".into()))
-        }
-        None if !set => Ok((None, "no feature note: wxneeded is not set".into())),
-        None => Ok((
-            Some(add_note(data, &elf, FCTL_WXNEEDED)?),
-            "feature note added".into(),
-        )),
+    let words = find_feature_words(data, &elf)?;
+    if words.is_empty() {
+        return Ok(if set {
+            (
+                Some(add_note(data, &elf, bit)?),
+                "feature note added".into(),
+            )
+        } else {
+            (None, format!("no feature note: {name} is not set"))
+        });
     }
+    let bits = combined(data, &words);
+    if (bits & bit != 0) == set {
+        return Ok((None, format!("{name} already as asked; unchanged")));
+    }
+    let mut out = data.to_vec();
+    let targets = if set { &words[..1] } else { &words[..] };
+    for &at in targets {
+        let new = if set {
+            u32_at(data, at) | bit
+        } else {
+            u32_at(data, at) & !bit
+        };
+        out[at..at + 4].copy_from_slice(&new.to_le_bytes());
+    }
+    Ok((Some(out), "feature note changed in place".into()))
 }
 
-/// `show`: whether the program opts in, as the kernel reads it.
+/// The feature words at `words`, combined as the kernel combines them.
+fn combined(data: &[u8], words: &[usize]) -> u32 {
+    words.iter().fold(0, |b, &at| b | u32_at(data, at))
+}
+
+/// `show`: the features the program asks for, as the kernel reads them.
 fn show(data: &[u8]) -> Result<String, String> {
     let elf = parse(data)?;
-    Ok(match find_feature_word(data, &elf)? {
-        Some(at) => {
-            let bits = u32_at(data, at);
-            format!(
-                "feature note: {bits:#x}; wxneeded: {}",
-                if bits & FCTL_WXNEEDED != 0 {
-                    "yes"
-                } else {
-                    "no"
-                }
-            )
-        }
-        None => "no feature note; wxneeded: no".into(),
-    })
+    let words = find_feature_words(data, &elf)?;
+    let bits = combined(data, &words);
+    let mut line = if words.is_empty() {
+        "no feature note".to_string()
+    } else {
+        format!("feature note: {bits:#x}")
+    };
+    for (name, bit) in FEATURES {
+        line += &format!("; {name}: {}", if bits & bit != 0 { "yes" } else { "no" });
+    }
+    Ok(line)
 }
 
 fn write_out(path: &Path, data: &[u8], mode_from: &Path) -> Result<(), String> {
@@ -348,23 +376,25 @@ fn write_out(path: &Path, data: &[u8], mode_from: &Path) -> Result<(), String> {
     fs::rename(&tmp, path).map_err(err)
 }
 
-const USAGE: &str =
-    "usage: veridian-elfctl show FILE\n       veridian-elfctl set|clear wxneeded FILE [-o OUT]";
+const USAGE: &str = "usage: veridian-elfctl show FILE\n       veridian-elfctl set|clear \
+                     wxneeded|linux-uname FILE [-o OUT]";
 
 fn run(args: &[String]) -> Result<String, String> {
     match args {
         [cmd, file] if cmd == "show" => show(&fs::read(file).map_err(|e| format!("{file}: {e}"))?),
         [cmd, feature, file, rest @ ..] if cmd == "set" || cmd == "clear" => {
-            if feature != "wxneeded" {
-                return Err(format!("unknown feature {feature:?} (known: wxneeded)"));
-            }
+            let Some(&known) = FEATURES.iter().find(|(name, _)| name == feature) else {
+                return Err(format!(
+                    "unknown feature {feature:?} (known: wxneeded, linux-uname)"
+                ));
+            };
             let out = match rest {
                 [] => file.clone(),
                 [flag, out] if flag == "-o" => out.clone(),
                 _ => return Err(USAGE.into()),
             };
             let data = fs::read(file).map_err(|e| format!("{file}: {e}"))?;
-            let (new, what) = apply(&data, cmd == "set")?;
+            let (new, what) = apply(&data, cmd == "set", known)?;
             match new {
                 Some(new) => write_out(Path::new(&out), &new, Path::new(file))?,
                 None if out != *file => write_out(Path::new(&out), &data, Path::new(file))?,
@@ -428,11 +458,14 @@ mod tests {
         }
     }
 
+    const WX: (&str, u32) = FEATURES[0];
+    const UNAME: (&str, u32) = FEATURES[1];
+
+    /// The combined feature bits, or `None` without a note.
     fn feature_bits(data: &[u8]) -> Option<u32> {
         let elf = parse(data).unwrap();
-        find_feature_word(data, &elf)
-            .unwrap()
-            .map(|at| u32_at(data, at))
+        let words = find_feature_words(data, &elf).unwrap();
+        (!words.is_empty()).then(|| combined(data, &words))
     }
 
     #[test]
@@ -453,7 +486,7 @@ mod tests {
             load(0x2000, 0x3000, 0x500, 0x1000),
         ];
         let file = elf(&old, &[0xaa; 0x2600]);
-        let (new, _) = apply(&file, true).unwrap();
+        let (new, _) = apply(&file, true, WX).unwrap();
         let new = new.unwrap();
         assert_eq!(feature_bits(&new), Some(FCTL_WXNEEDED));
         // The old bytes are untouched past the header.
@@ -485,7 +518,7 @@ mod tests {
     #[test]
     fn adds_pt_phdr_when_missing_and_honours_large_alignment() {
         let file = elf(&[load(0, 0x40_0000, 0x1000, 0x1_0000)], &[0; 0x1000]);
-        let new = apply(&file, true).unwrap().0.unwrap();
+        let new = apply(&file, true, WX).unwrap().0.unwrap();
         let e = parse(&new).unwrap();
         assert_eq!(e.phdrs.len(), 4);
         assert_eq!(e.phdrs[0].kind, PT_PHDR);
@@ -510,21 +543,24 @@ mod tests {
             align: 4,
         };
         let file = elf(&[load(0, 0, 0x1000, 0x1000), nphdr], &note);
-        let set = apply(&file, true).unwrap().0.unwrap();
+        let set = apply(&file, true, WX).unwrap().0.unwrap();
         assert_eq!(set.len(), file.len());
         assert_eq!(feature_bits(&set), Some(0x11));
-        assert_eq!(apply(&set, true).unwrap().0, None, "already set");
-        let cleared = apply(&set, false).unwrap().0.unwrap();
+        assert_eq!(apply(&set, true, WX).unwrap().0, None, "already set");
+        let cleared = apply(&set, false, WX).unwrap().0.unwrap();
         assert_eq!(feature_bits(&cleared), Some(0x10), "other bits kept");
-        assert!(show(&set).unwrap().ends_with("wxneeded: yes"));
-        assert!(show(&cleared).unwrap().ends_with("wxneeded: no"));
+        assert!(show(&set).unwrap().contains("wxneeded: yes"));
+        assert!(show(&cleared).unwrap().contains("wxneeded: no"));
     }
 
     #[test]
     fn clear_without_a_note_changes_nothing() {
         let file = elf(&[load(0, 0, 0x1000, 0x1000)], &[]);
-        assert_eq!(apply(&file, false).unwrap().0, None);
-        assert_eq!(show(&file).unwrap(), "no feature note; wxneeded: no");
+        assert_eq!(apply(&file, false, WX).unwrap().0, None);
+        assert_eq!(
+            show(&file).unwrap(),
+            "no feature note; wxneeded: no; linux-uname: no"
+        );
     }
 
     #[test]
@@ -552,7 +588,7 @@ mod tests {
             align: 4,
         };
         let f = elf(&[load(0, 0, 0x1000, 0x1000), bad_note], &[]);
-        assert!(apply(&f, true).is_err());
+        assert!(apply(&f, true, WX).is_err());
         // A note whose name size runs past its segment.
         let mut note = note_bytes(0);
         note[0..4].copy_from_slice(&0xffu32.to_le_bytes());
@@ -561,10 +597,47 @@ mod tests {
             ..bad_note
         };
         let f = elf(&[load(0, 0, 0x1000, 0x1000), nphdr], &note);
-        assert!(apply(&f, true).is_err());
+        assert!(apply(&f, true, WX).is_err());
         // Nothing to map the new table with.
         let f = elf(&[nphdr], &note_bytes(0)[..0]);
         assert!(add_note(&f, &parse(&f).unwrap(), 1).is_err());
+    }
+
+    /// linux-uname shares the note: added on its own, set beside wxneeded
+    /// in place, and cleared in every note the program carries.
+    #[test]
+    fn linux_uname_shares_the_feature_note() {
+        let file = elf(&[load(0, 0, 0x2000, 0x1000)], &[0; 0x1000]);
+        let added = apply(&file, true, UNAME).unwrap().0.unwrap();
+        assert_eq!(feature_bits(&added), Some(FCTL_LINUX_UNAME));
+        assert_eq!(
+            show(&added).unwrap(),
+            "feature note: 0x2; wxneeded: no; linux-uname: yes"
+        );
+        let both = apply(&added, true, WX).unwrap().0.unwrap();
+        assert_eq!(both.len(), added.len(), "in place");
+        assert_eq!(feature_bits(&both), Some(3));
+
+        // Two notes, as a program with both headers carries: the bits are
+        // combined, and clearing reaches the second.
+        let mut notes = note_bytes(FCTL_WXNEEDED);
+        notes.extend_from_slice(&note_bytes(FCTL_LINUX_UNAME));
+        let nphdr = Phdr {
+            kind: PT_NOTE,
+            flags: PF_R,
+            offset: 64 + 2 * 56,
+            vaddr: 64 + 2 * 56,
+            paddr: 0,
+            filesz: notes.len() as u64,
+            memsz: notes.len() as u64,
+            align: 4,
+        };
+        let two = elf(&[load(0, 0, 0x1000, 0x1000), nphdr], &notes);
+        assert_eq!(feature_bits(&two), Some(3));
+        assert_eq!(apply(&two, true, UNAME).unwrap().0, None, "already set");
+        let cleared = apply(&two, false, UNAME).unwrap().0.unwrap();
+        assert_eq!(feature_bits(&cleared), Some(FCTL_WXNEEDED));
+        assert!(show(&cleared).unwrap().ends_with("linux-uname: no"));
     }
 
     /// The note this tool writes is the one `<veridian/wxneeded.h>` emits.

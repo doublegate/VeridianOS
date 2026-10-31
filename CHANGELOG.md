@@ -2,6 +2,40 @@
 
 ### Changed
 
+- uname reports the release `7.3.0-veridian` (the Linux version whose sources are the kernel's
+  specification) instead of the crate version, which LTP read as older than its minimum (4.4) and
+  answered with a warning in every new-API test; the version field carries the VeridianOS version
+  (`#1 SMP VeridianOS 0.27.0`). `/proc/version` follows Linux's layout with the same strings
+  (it said `VeridianOS version 0.5.0`), `/proc/sys/kernel/{ostype,osrelease,version}` exist, and
+  the kernel shell's `uname` takes its fields from the same place (its release said `0.7.1`).
+- uname's system name is per process (ADR 0021): `VeridianOS` by default, `Linux` in Linux
+  mode, which build scripts and runtimes that branch on the name at run time need. A program
+  enters it at exec through the VeridianOS feature note (`<veridian/linux-uname.h>`, or
+  `veridian-elfctl set linux-uname`, which now also shows and clears the bit in every note) or a
+  GNU ABI tag naming Linux; `prctl(PR_VERIDIAN_UNAME)` reads and sets it, the `linux-uname`
+  launcher runs a command in it. Fork keeps the mode; exec keeps it only when the process chose it
+  (the prctl or the launcher, Linux or native, so `linux-uname -n` keeps even a glibc program
+  native), and otherwise sets it from the new program, so a glibc shell does
+  not pass `Linux` on to the native programs it starts. `/proc/version` and
+  `/proc/sys/kernel/ostype` give the caller's name. The bits of every feature note are now
+  combined, so a program can carry both the W^X and the uname note; only the first note counted.
+- autoconf configure scripts find the build system on VeridianOS: `/usr/share/config.site` (and a
+  copy in `/usr/local/share`) sets `build_alias` to `<machine>-unknown-linux-musl`, and init, the
+  kernel shell and `/etc/profile` set `CONFIG_SITE` to it. `config.guess` used to stop with
+  "unable to guess system type".
+- The conformance expected lists (`tests/compat/expected-<arch>.tsv`) come from full runs on all
+  three architectures with statfs and the new uname: LTP passes 524 of 1,552 tests on x86_64 and
+  519 on AArch64 and RISC-V (24 before), Open POSIX 1,577/1,574/1,570 of 1,965 and libc-test 527
+  of 560 on each. The notes of tests whose status did not change were refreshed too (`--update`
+  keeps them, so 225 x86_64 entries still named statfs's ENOSYS); hand-written `known:` notes
+  were kept, and given back to the RISC-V memory-exhaustion tests, which went from HANG to
+  TIMEOUT.
+- statfs details: a device node's fstatfs names the filesystem holding the node (it said tmpfs
+  wherever the node was), BlockFS on a read-only disk reports `ST_RDONLY`, and statfs of a
+  non-directory with a trailing slash is ENOTDIR, as stat is.
+- The kernel shell's `uname` takes combined options (`-sr`) and `--all`, and reports an
+  invalid option or an operand as uname(1) does; an unknown option printed an empty line.
+
 - `docs/PORTING-GUIDE.md` describes the privilege model as it is: Unix credentials and Linux
   capabilities for POSIX programs (ADR 0020) beside the object capabilities of the native calls.
   It said VeridianOS had no user or group IDs and that `setuid` should be removed from ported
@@ -29,6 +63,17 @@
 
 ### Added
 
+- statfs and fstatfs (`fs::statfs`; they were ENOSYS). Every filesystem reports Linux's magic
+  number, so programs that tell filesystems apart by `f_type` see what they expect: tmpfs
+  (`/dev/shm`, also memfd, devtmpfs and `/dev/console`), ramfs, procfs, ext4, FAT (`MSDOS`),
+  devpts for a pty slave, pipefs, sockfs and the anonymous-inode filesystem for eventfd,
+  signalfd, timerfd and epoll; BlockFS, which Linux does not have, reports `0x424C4B46`. tmpfs
+  counts pages against its size limit (Linux's `shmem_statfs`), BlockFS and ext4 report their
+  superblock's block and inode counts (ext4 less its reserved blocks, with the UUID as `f_fsid`),
+  FAT its clusters, and the rest no counts, as Linux's `simple_statfs`. `f_frsize` defaults to
+  `f_bsize`, `f_flags` carries `ST_VALID` and `ST_RDONLY` for a read-only ext4 or FAT. The ext4
+  superblock parser now insists on the whole 1 KiB superblock (it indexed past a 256-byte
+  minimum). `musl_runtime_test --only statfs` runs the new runtime checks alone.
 - ADR 0020: Linux capabilities, per thread (effective, permitted, inheritable, bounding and
   ambient sets plus securebits), replacing the `euid == 0` privilege checks in steps. First step:
   `process::linux_caps`, the pure rules for capset, the set*id fix-ups, the capability prctl
@@ -150,8 +195,8 @@
   `tests/compat/expected-<arch>.tsv`; a test expected to pass that does not fails the run.
   The baseline (2026-10-22), on x86_64, AArch64 and RISC-V: LTP 24 of 1,552 pass (another 202 to
   206 pass with LTP's warning that the kernel is older than 4.4), Open POSIX 1,569, 1,565 and
-  1,565 of 1,965, libc-test 523, 525 and 525 of 560; most LTP tests stop in its library because
-  statfs is ENOSYS (`docs/KNOWN-LIMITATIONS.md`, "Conformance suites").
+  1,565 of 1,965, libc-test 523, 525 and 525 of 560; most LTP tests stopped in its library because
+  statfs was ENOSYS (implemented since; `docs/KNOWN-LIMITATIONS.md`, "Conformance suites").
   The gate runs the tests expected to pass (`--rootfs`) and, with `--compat`, the full suites; a
   weekly workflow (`.github/workflows/compat.yml`) runs the x86_64 tests expected to pass (the
   full suites do not fit in a GitHub job: there they took over six hours).

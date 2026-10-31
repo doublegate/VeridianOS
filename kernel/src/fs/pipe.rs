@@ -270,6 +270,13 @@ impl PipeReadNode {
 }
 
 impl VfsNode for PipeReadNode {
+    /// Linux's pipefs.
+    fn statfs(&self) -> Result<crate::fs::statfs::FsStats, crate::error::KernelError> {
+        Ok(crate::fs::statfs::FsStats::simple(
+            crate::fs::statfs::PIPEFS_MAGIC,
+        ))
+    }
+
     fn node_type(&self) -> NodeType {
         NodeType::Pipe
     }
@@ -372,6 +379,13 @@ impl PipeWriteNode {
 }
 
 impl VfsNode for PipeWriteNode {
+    /// Linux's pipefs.
+    fn statfs(&self) -> Result<crate::fs::statfs::FsStats, crate::error::KernelError> {
+        Ok(crate::fs::statfs::FsStats::simple(
+            crate::fs::statfs::PIPEFS_MAGIC,
+        ))
+    }
+
     fn node_type(&self) -> NodeType {
         NodeType::Pipe
     }

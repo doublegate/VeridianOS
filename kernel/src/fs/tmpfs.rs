@@ -234,6 +234,21 @@ fn as_tmp_arc(node: Arc<dyn VfsNode>) -> Option<Arc<TmpNode>> {
 }
 
 impl VfsNode for TmpNode {
+    /// Linux's `shmem_statfs`: page-sized blocks, the size limit as the
+    /// block count and what is not charged as free; no counts without a
+    /// limit. Inodes are not limited, so their counts are 0.
+    fn statfs(&self) -> Result<super::statfs::FsStats, KernelError> {
+        let mut st = super::statfs::FsStats::simple(super::statfs::TMPFS_MAGIC);
+        if self.size_limit != 0 {
+            let page = st.block_size as usize;
+            st.blocks = (self.size_limit / page) as u64;
+            let used = self.bytes_used.load(Ordering::Acquire).div_ceil(page) as u64;
+            st.blocks_free = st.blocks.saturating_sub(used);
+            st.blocks_avail = st.blocks_free;
+        }
+        Ok(st)
+    }
+
     fn xattrs(&self) -> Result<super::xattr::XattrSet, KernelError> {
         Ok(self.xattrs.read().clone())
     }
@@ -786,6 +801,23 @@ mod tests {
 
     /// tmpfs charges whole pages, as Linux's does.
     const P: usize = 4096;
+
+    #[test]
+    fn statfs_counts_pages_against_the_size_limit() {
+        let fs = TmpFs::new(4 * P);
+        let root = fs.root();
+        let a = root.create("a", Permissions::default()).unwrap();
+        a.write(0, b"x").unwrap();
+        let st = a.statfs().unwrap();
+        assert_eq!(st.fs_type, super::super::statfs::TMPFS_MAGIC);
+        assert_eq!((st.block_size, st.blocks), (P as u64, 4));
+        // One page charged; every node of the filesystem says the same.
+        assert_eq!((st.blocks_free, st.blocks_avail), (3, 3));
+        assert_eq!(root.statfs().unwrap(), st);
+        // No limit: no counts, as Linux's tmpfs mounted with size=0.
+        let st = TmpFs::new(0).root().statfs().unwrap();
+        assert_eq!((st.blocks, st.blocks_free), (0, 0));
+    }
 
     #[test]
     fn hard_link_shares_the_file_and_its_bytes() {

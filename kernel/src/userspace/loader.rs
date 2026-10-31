@@ -244,6 +244,9 @@ fn load_image(
             // The first program, started by the kernel: nothing is gained.
             false,
         )?;
+        process
+            .uname_linux
+            .exec(crate::elf::image::wants_linux_uname(binary, buffer));
         if interp.is_none() {
             lifecycle::setup_static_tls(process, binary, buffer);
         }
@@ -374,6 +377,13 @@ struct SerialConsoleNode;
 
 #[cfg(feature = "alloc")]
 impl crate::fs::VfsNode for SerialConsoleNode {
+    /// /dev/console, on devtmpfs as on Linux.
+    fn statfs(&self) -> Result<crate::fs::statfs::FsStats, crate::error::KernelError> {
+        Ok(crate::fs::statfs::FsStats::simple(
+            crate::fs::statfs::TMPFS_MAGIC,
+        ))
+    }
+
     fn node_type(&self) -> crate::fs::NodeType {
         crate::fs::NodeType::CharDevice
     }

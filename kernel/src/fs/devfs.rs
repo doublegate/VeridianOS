@@ -55,6 +55,13 @@ struct DeviceFile {
 }
 
 impl VfsNode for DeviceFile {
+    /// The filesystem holding the node, as for any inode: tmpfs for /dev
+    /// (devtmpfs on Linux reports itself as tmpfs), BlockFS for a node
+    /// made by mknod on the root.
+    fn statfs(&self) -> Result<crate::fs::statfs::FsStats, crate::error::KernelError> {
+        self.inode.statfs()
+    }
+
     fn node_type(&self) -> NodeType {
         NodeType::CharDevice
     }
@@ -170,6 +177,13 @@ impl DevNode {
 }
 
 impl VfsNode for DevNode {
+    /// /dev is devtmpfs on Linux, which reports itself as tmpfs.
+    fn statfs(&self) -> Result<crate::fs::statfs::FsStats, crate::error::KernelError> {
+        Ok(crate::fs::statfs::FsStats::simple(
+            crate::fs::statfs::TMPFS_MAGIC,
+        ))
+    }
+
     fn node_type(&self) -> NodeType {
         self.node_type
     }
@@ -394,6 +408,13 @@ impl DevSubDir {
 }
 
 impl VfsNode for DevSubDir {
+    /// /dev is devtmpfs on Linux, which reports itself as tmpfs.
+    fn statfs(&self) -> Result<crate::fs::statfs::FsStats, crate::error::KernelError> {
+        Ok(crate::fs::statfs::FsStats::simple(
+            crate::fs::statfs::TMPFS_MAGIC,
+        ))
+    }
+
     fn node_type(&self) -> NodeType {
         NodeType::Directory
     }
@@ -528,6 +549,13 @@ impl DevRoot {
 }
 
 impl VfsNode for DevRoot {
+    /// /dev is devtmpfs on Linux, which reports itself as tmpfs.
+    fn statfs(&self) -> Result<crate::fs::statfs::FsStats, crate::error::KernelError> {
+        Ok(crate::fs::statfs::FsStats::simple(
+            crate::fs::statfs::TMPFS_MAGIC,
+        ))
+    }
+
     fn node_type(&self) -> NodeType {
         NodeType::Directory
     }
@@ -696,6 +724,11 @@ mod tests {
         assert_eq!(file.read(0, &mut b), Ok(0), "/dev/null reads nothing");
         assert_eq!(file.device_id(), Some((1, 3)));
         assert_eq!(file.metadata().unwrap().permissions.to_mode(), 0o600);
+        assert_eq!(
+            file.statfs().unwrap().fs_type,
+            root.statfs().unwrap().fs_type,
+            "fstatfs names the filesystem holding the node, not /dev's"
+        );
         let zero = root
             .mknod("z", NodeType::CharDevice, perms, make_dev(1, 5))
             .unwrap();

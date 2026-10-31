@@ -562,6 +562,25 @@ impl BlockFsNode {
 }
 
 impl VfsNode for BlockFsNode {
+    /// The superblock's counts, in BlockFS's 4 KiB blocks. Nothing is
+    /// reserved for root, so every free block is available. A read-only
+    /// disk is `ST_RDONLY`; a filesystem in memory only is writable.
+    fn statfs(&self) -> Result<super::statfs::FsStats, KernelError> {
+        let fs = self.fs.read();
+        let sb = &fs.superblock;
+        let mut st = super::statfs::FsStats::simple(super::statfs::BLOCKFS_MAGIC);
+        if fs.disk.is_some() && !fs.disk_writable {
+            st.flags = super::statfs::ST_RDONLY;
+        }
+        st.block_size = BLOCK_SIZE as u64;
+        st.blocks = sb.block_count as u64;
+        st.blocks_free = sb.free_blocks as u64;
+        st.blocks_avail = sb.free_blocks as u64;
+        st.files = sb.inode_count as u64;
+        st.files_free = sb.free_inodes as u64;
+        Ok(st)
+    }
+
     fn xattrs(&self) -> Result<super::xattr::XattrSet, KernelError> {
         self.fs.read().inode_xattrs(self.inode_num)
     }
@@ -2243,8 +2262,6 @@ impl BlockFsInner {
         Ok(s.to_string())
     }
 
-    /// Change the permission bits on an inode, preserving the type bits.
-    /// The extended attributes of an inode (none without a block).
     /// An inode's attribute block, 0 for none. On a revision 0 image the
     /// field's bytes are the old, unused triple-indirect pointer: not a
     /// block this image owns, so never read or freed as one (PR #33 review).
@@ -2260,6 +2277,7 @@ impl BlockFsInner {
         })
     }
 
+    /// The extended attributes of an inode (none without a block).
     fn inode_xattrs(&self, inode_num: u32) -> Result<super::xattr::XattrSet, KernelError> {
         let block = self.xattr_block_of(inode_num)?;
         if block == 0 {
@@ -2316,6 +2334,7 @@ impl BlockFsInner {
         Ok(())
     }
 
+    /// Change the permission bits on an inode, preserving the type bits.
     fn chmod_inode(&mut self, inode_num: u32, permissions: Permissions) -> Result<(), KernelError> {
         let inode = self
             .inode_table
@@ -3058,6 +3077,44 @@ pub fn attach_virtio_backend(fs: &BlockFs, load_from_disk: bool) -> bool {
 mod tests {
     use super::*;
 
+    /// statfs reports the superblock's counts, and they move as a file
+    /// takes an inode and blocks.
+    #[test]
+    fn statfs_follows_the_superblock() {
+        let fs = BlockFs::format(1000, 100).unwrap();
+        let root = fs.root();
+        let before = root.statfs().unwrap();
+        assert_eq!(before.fs_type, crate::fs::statfs::BLOCKFS_MAGIC);
+        assert_eq!(
+            (before.block_size, before.blocks, before.files),
+            (4096, 1000, 100)
+        );
+        assert_eq!(before.blocks_avail, before.blocks_free);
+        let f = root.create("f", Permissions::default()).unwrap();
+        f.write(0, &[1u8; 2 * BLOCK_SIZE]).unwrap();
+        let after = f.statfs().unwrap();
+        assert_eq!(after.files_free, before.files_free - 1);
+        assert!(after.blocks_free <= before.blocks_free - 2);
+    }
+
+    /// A filesystem on a read-only disk says so (PR #34 review); one in
+    /// memory only, or on a writable disk, does not.
+    #[test]
+    fn statfs_reports_a_read_only_disk() {
+        let fs = BlockFs::format(128, 16).unwrap();
+        assert_eq!(fs.root().statfs().unwrap().flags, 0);
+        let disk = MemDisk::new(128);
+        fs.set_disk_backend(backend(&disk), false).unwrap();
+        assert_eq!(fs.root().statfs().unwrap().flags, 0);
+        let ro = BlockFs::format(128, 16).unwrap();
+        ro.set_disk_backend(Arc::new(Mutex::new(ReadOnly(MemDisk::new(128)))), false)
+            .unwrap();
+        assert_eq!(
+            ro.root().statfs().unwrap().flags,
+            crate::fs::statfs::ST_RDONLY
+        );
+    }
+
     /// mknod on BlockFS: each special type reads back as itself (the type
     /// bits were tested as bits, so a block device and a socket came back
     /// as directories), a device keeps its number, nothing reads or writes
@@ -3259,6 +3316,24 @@ mod tests {
 
     fn backend(disk: &Arc<MemDisk>) -> Arc<Mutex<dyn DiskBackend>> {
         Arc::new(Mutex::new(Shared(disk.clone())))
+    }
+
+    /// A disk that refuses writes (QEMU's `readonly=on`).
+    struct ReadOnly(Arc<MemDisk>);
+
+    impl DiskBackend for ReadOnly {
+        fn read_block(&self, n: u64, buf: &mut [u8]) -> Result<(), KernelError> {
+            self.0.read_block(n, buf)
+        }
+        fn write_block(&self, _n: u64, _data: &[u8]) -> Result<(), KernelError> {
+            Err(KernelError::FsError(FsError::ReadOnly))
+        }
+        fn block_count(&self) -> u64 {
+            self.0.block_count()
+        }
+        fn is_read_only(&self) -> bool {
+            true
+        }
     }
 
     fn pattern(seed: u8, len: usize) -> Vec<u8> {

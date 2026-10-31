@@ -36,6 +36,7 @@
 #include <sys/prctl.h>
 #include <sys/resource.h>
 #include <sys/sysinfo.h>
+#include <sys/statfs.h>
 #include <sys/sysmacros.h>
 #include <sys/time.h>
 #include <sys/times.h>
@@ -48,6 +49,7 @@
 #include <sys/signalfd.h>
 #include <sys/syscall.h>
 #include <sys/uio.h>
+#include <sys/utsname.h>
 #include <sys/xattr.h>
 #include <shadow.h>
 #include <crypt.h>
@@ -1942,6 +1944,52 @@ static void test_unix_accept_blocks(void)
     report("musl_unix_accept_blocks", f == 0, why);
 }
 
+/* The first line of a small file, without its newline, in `out`. */
+static int read_line(const char *path, char *out, size_t len)
+{
+    int fd = open(path, O_RDONLY);
+    if (fd < 0)
+        return -1;
+    ssize_t n = read(fd, out, len - 1);
+    close(fd);
+    if (n < 0)
+        return -1;
+    out[n] = 0;
+    char *nl = strchr(out, '\n');
+    if (nl)
+        *nl = 0;
+    return 0;
+}
+
+/* What the system reports about itself (ADR 0021): uname gives the system
+ * name, a Linux release (so programs comparing kernel versions recognise
+ * it) and the VeridianOS version; /proc/sys/kernel and /proc/version say
+ * the same. */
+static void test_uname_identity(void)
+{
+    struct utsname u;
+    char ostype[80] = "", osrelease[80] = "", version[80] = "", procver[200] = "";
+    int ok = uname(&u) == 0;
+    ok = ok && read_line("/proc/sys/kernel/ostype", ostype, sizeof(ostype)) == 0;
+    ok = ok && read_line("/proc/sys/kernel/osrelease", osrelease, sizeof(osrelease)) == 0;
+    ok = ok && read_line("/proc/sys/kernel/version", version, sizeof(version)) == 0;
+    ok = ok && read_line("/proc/version", procver, sizeof(procver)) == 0;
+    char want_ver[200];
+    snprintf(want_ver, sizeof(want_ver), "%s version %s (", u.sysname, u.release);
+    static char why[600];
+    snprintf(why, sizeof(why),
+             "sys=%s node=%s rel=%s ver=%s ostype=%s osrelease=%s version=%s proc=%s", u.sysname,
+             u.nodename, u.release, u.version, ostype, osrelease, version, procver);
+    report("musl_uname_identity",
+           ok && strcmp(u.sysname, "VeridianOS") == 0 && strcmp(u.nodename, "veridian") == 0
+               && strcmp(u.release, "7.3.0-veridian") == 0
+               && strncmp(u.version, "#1 SMP VeridianOS ", 18) == 0
+               && strcmp(ostype, u.sysname) == 0 && strcmp(osrelease, u.release) == 0
+               && strcmp(version, u.version) == 0
+               && strncmp(procver, want_ver, strlen(want_ver)) == 0,
+           why);
+}
+
 /* The --ids mode: this program's IDs, AT_SECURE, dumpable flag and
  * command name, for test_setuid_exec. */
 static int print_ids(void)
@@ -2285,6 +2333,104 @@ static void test_wx_note_tool(void)
         }
     }
     report("musl_wx_note_tool", f == 0, why);
+}
+
+/* Linux uname mode (ADR 0021; <veridian/linux-uname.h>). */
+#define PR_VERIDIAN_UNAME 0x56455249
+#define PR_VERIDIAN_UNAME_GET 0
+#define PR_VERIDIAN_UNAME_SET 1
+
+/* uname reports "Linux" in Linux mode and "VeridianOS" otherwise; the mode
+ * is entered at exec by the note (from the header or veridian-elfctl) or a
+ * GNU ABI tag naming Linux, which hold for that image only, and with the
+ * prctl, which is inherited across fork and exec; it is shown by /proc/sys/kernel/ostype and /proc/version too. The
+ * launcher runs a command in it, and configure finds the site file. */
+static void test_uname_linux_mode(void)
+{
+    static const struct {
+        const char *path, *arg, *want;
+    } cases[] = {
+        {"/bin/uname_plain_test", NULL, "VeridianOS"},
+        {"/bin/uname_linux_test", NULL, "Linux"},
+        {"/bin/uname_gnu_tag_test", NULL, "Linux"},
+        {"/bin/uname_patched_test", NULL, "Linux"},
+        {"/bin/linux-uname", "/bin/uname_plain_test", "Linux"},
+        {"/bin/linux-uname", NULL, "native"},
+        /* A mode the image asked for ends at the next exec. */
+        {"/bin/uname_gnu_tag_test", "/bin/uname_plain_test", "VeridianOS"},
+        {"/bin/uname_linux_test", "/bin/uname_plain_test", "VeridianOS"},
+    };
+    static char out[128], why[300];
+    int f = 0;
+    why[0] = 0;
+    if (prctl(PR_VERIDIAN_UNAME, PR_VERIDIAN_UNAME_GET, 0, 0, 0) != 0)
+        f |= 1;
+    for (unsigned i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        int st = run_capture(cases[i].path, cases[i].arg, out, sizeof(out));
+        if (st != 0 || strcmp(out, cases[i].want) != 0) {
+            f |= 2;
+            snprintf(why, sizeof(why), "%s %s: status=%#x output: %s", cases[i].path,
+                     cases[i].arg ? cases[i].arg : "", st, out);
+        }
+    }
+    /* The prctl in a child, so this process keeps its mode. */
+    pid_t pid = fork();
+    if (pid == 0) {
+        int c = 0;
+        struct utsname u;
+        char line[200] = "";
+        if (prctl(PR_VERIDIAN_UNAME, PR_VERIDIAN_UNAME_SET, 1, 0, 0) != 0
+            || prctl(PR_VERIDIAN_UNAME, PR_VERIDIAN_UNAME_GET, 0, 0, 0) != 1)
+            c |= 1;
+        if (uname(&u) != 0 || strcmp(u.sysname, "Linux") != 0
+            || strcmp(u.release, "7.3.0-veridian") != 0)
+            c |= 2;
+        if (read_line("/proc/sys/kernel/ostype", line, sizeof(line)) != 0
+            || strcmp(line, "Linux") != 0)
+            c |= 4;
+        if (read_line("/proc/version", line, sizeof(line)) != 0
+            || strncmp(line, "Linux version 7.3.0-veridian (", 30) != 0)
+            c |= 4;
+        /* Inherited by what this child runs, and by forks of it, through
+         * any number of execs. */
+        if (run_capture("/bin/uname_plain_test", NULL, out, sizeof(out)) != 0
+            || strcmp(out, "Linux") != 0)
+            c |= 8;
+        if (run_capture("/bin/uname_gnu_tag_test", "/bin/uname_plain_test", out, sizeof(out)) != 0
+            || strcmp(out, "Linux") != 0)
+            c |= 8;
+        if (run_capture("/bin/linux-uname", NULL, out, sizeof(out)) != 0
+            || strcmp(out, "linux") != 0)
+            c |= 8;
+        /* Bad arguments are EINVAL; back to native. */
+        if (prctl(PR_VERIDIAN_UNAME, PR_VERIDIAN_UNAME_SET, 2, 0, 0) != -1 || errno != EINVAL)
+            c |= 16;
+        if (prctl(PR_VERIDIAN_UNAME, 2, 0, 0, 0) != -1 || errno != EINVAL)
+            c |= 16;
+        if (prctl(PR_VERIDIAN_UNAME, PR_VERIDIAN_UNAME_SET, 0, 0, 0) != 0 || uname(&u) != 0
+            || strcmp(u.sysname, "VeridianOS") != 0)
+            c |= 32;
+        /* A chosen native mode holds too, even for an image that asks for
+         * Linux (what linux-uname -n does; PR #34 review). */
+        if (run_capture("/bin/uname_gnu_tag_test", NULL, out, sizeof(out)) != 0
+            || strcmp(out, "VeridianOS") != 0)
+            c |= 64;
+        _exit(c);
+    }
+    int st = -1;
+    if (pid < 0 || waitpid(pid, &st, 0) != pid || !WIFEXITED(st) || WEXITSTATUS(st) != 0) {
+        f |= 4;
+        snprintf(why + strlen(why), sizeof(why) - strlen(why), " child=%#x", st);
+    }
+    /* init and /etc/profile point configure at the site file. */
+    const char *site = getenv("CONFIG_SITE");
+    if (!site || strcmp(site, "/usr/share/config.site") != 0 || access(site, R_OK) != 0
+        || access("/usr/local/share/config.site", R_OK) != 0 || access("/etc/profile", R_OK) != 0)
+        f |= 8;
+    char tail[40];
+    snprintf(tail, sizeof(tail), " fail=%#x", f);
+    strncat(why, tail, sizeof(why) - strlen(why) - 1);
+    report("musl_uname_linux_mode", f == 0, why);
 }
 
 /* PR_SET_MDWE as Linux: argument checks, one way (EPERM), no RWX and no
@@ -5145,6 +5291,85 @@ static void test_dev_shm(void)
     report("dev_shm_maps_the_file_s_pages", ok, why);
 }
 
+/* statfs and fstatfs: each filesystem reports Linux's magic number, tmpfs
+ * its page counts against the size limit, and pipes, sockets and
+ * anonymous-inode files their pseudo filesystems (fs/statfs.rs). */
+static void test_statfs(void)
+{
+    char why[160];
+    struct statfs a, b;
+    int ok = statfs("/dev/shm", &a) == 0 && a.f_type == 0x01021994 && a.f_bsize == 4096 &&
+             a.f_blocks > 0 && a.f_bavail == a.f_bfree && a.f_namelen == 255 &&
+             a.f_frsize == 4096 && (a.f_flags & 0x20);
+    long before = ok ? (long)a.f_bfree : -1, after = -1;
+    int fd = open("/dev/shm/musl_statfs", O_CREAT | O_RDWR | O_TRUNC, 0600);
+    static char chunk[16 * 4096];
+    memset(chunk, 1, sizeof(chunk));
+    ok = ok && fd >= 0 && write(fd, chunk, sizeof(chunk)) == (ssize_t)sizeof(chunk) &&
+         fstatfs(fd, &b) == 0;
+    if (ok)
+        after = (long)b.f_bfree;
+    ok = ok && b.f_type == 0x01021994 && after <= before - 16;
+    if (fd >= 0)
+        close(fd);
+    unlink("/dev/shm/musl_statfs");
+    snprintf(why, sizeof(why), "type=%#lx bfree %ld -> %ld errno=%d", (unsigned long)a.f_type,
+             before, after, errno);
+    report("statfs_tmpfs_counts_pages", ok, why);
+
+    memset(&a, 0, sizeof(a));
+    memset(&b, 0, sizeof(b));
+    ok = statfs("/proc", &a) == 0 && a.f_type == 0x9fa0 && a.f_blocks == 0 &&
+         statfs("/", &b) == 0 && b.f_type == 0x424C4B46 && b.f_blocks > 0 &&
+         b.f_bfree <= b.f_blocks && b.f_files > 0;
+    snprintf(why, sizeof(why), "proc=%#lx root=%#lx blocks=%ld errno=%d",
+             (unsigned long)a.f_type, (unsigned long)b.f_type, (long)b.f_blocks, errno);
+    report("statfs_names_each_filesystem", ok, why);
+
+    int p[2] = {-1, -1}, sv[2] = {-1, -1};
+    int efd = eventfd(0, 0);
+    unsigned long pt = 0, st = 0, et = 0;
+    ok = pipe(p) == 0 && socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0 && efd >= 0;
+    if (ok && fstatfs(p[0], &a) == 0)
+        pt = a.f_type;
+    if (ok && fstatfs(sv[0], &a) == 0)
+        st = a.f_type;
+    if (ok && fstatfs(efd, &a) == 0)
+        et = a.f_type;
+    ok = ok && pt == 0x50495045 && st == 0x534F434B && et == 0x09041934;
+    for (int i = 0; i < 2; i++) {
+        if (p[i] >= 0)
+            close(p[i]);
+        if (sv[i] >= 0)
+            close(sv[i]);
+    }
+    if (efd >= 0)
+        close(efd);
+    snprintf(why, sizeof(why), "pipe=%#lx socket=%#lx eventfd=%#lx", pt, st, et);
+    report("fstatfs_pseudo_filesystems", ok, why);
+
+    int e1 = 0, e2 = 0, e3 = 0;
+    errno = 0;
+    if (statfs("/no/such/path", &a) != 0)
+        e1 = errno;
+    /* musl's statfs clears *buf before the call, so a bad buffer goes to
+     * the kernel through syscall(). */
+    errno = 0;
+    if (syscall(SYS_statfs, "/", (struct statfs *)8) != 0)
+        e2 = errno;
+    errno = 0;
+    if (fstatfs(-1, &a) != 0)
+        e3 = errno;
+    /* A trailing slash needs a directory, as for stat (PR #34 review). */
+    int e4 = 0;
+    errno = 0;
+    if (statfs("/bin/sh/", &a) != 0)
+        e4 = errno;
+    ok = e1 == ENOENT && e2 == EFAULT && e3 == EBADF && e4 == ENOTDIR;
+    snprintf(why, sizeof(why), "enoent=%d efault=%d ebadf=%d enotdir=%d", e1, e2, e3, e4);
+    report("statfs_errors", ok, why);
+}
+
 /* Tests `--only NAME` can run alone (for debugging a single test). */
 static const struct {
     const char *name;
@@ -5173,6 +5398,7 @@ static const struct {
     {"unix_accept_blocks", test_unix_accept_blocks},
     {"fs_ids", test_fs_ids},
     {"dev_shm_maps_the_file_s_pages", test_dev_shm},
+    {"statfs", test_statfs},
 };
 
 int main(int argc, char **argv)
@@ -5243,6 +5469,8 @@ int main(int argc, char **argv)
     test_dir_check_race();
     test_relative_entry_paths();
     test_setuid_exec("/bin/musl_runtime_test");
+    test_uname_identity();
+    test_uname_linux_mode();
     test_clocks_and_usage();
     test_process_clock_monotonic();
     test_many_threads();
@@ -5262,6 +5490,7 @@ int main(int argc, char **argv)
     test_ipc();
     test_priority_inheritance();
     test_dev_shm();
+    test_statfs();
     printf("MUSL-RUNTIME: %d/%d\n", passed, total);
     return passed == total ? 0 : 1;
 }

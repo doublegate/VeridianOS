@@ -33,45 +33,66 @@ pub fn sys_get_kernel_info(buf: usize) -> SyscallResult {
 const UTSNAME_LENGTH: usize = 65;
 const UTSNAME_SIZE: usize = UTSNAME_LENGTH * 6;
 
+/// The utsname a process with system name `sysname` sees: sysname,
+/// nodename, release, version, machine and domainname, each NUL-padded to
+/// 65 bytes (ADR 0021).
+fn utsname_bytes(sysname: &str) -> [u8; UTSNAME_SIZE] {
+    use crate::utils::uname;
+
+    let mut out = [0u8; UTSNAME_SIZE];
+    // The fields hold their value and at least one NUL.
+    let fields = [
+        sysname,
+        uname::NODENAME,
+        uname::RELEASE,
+        uname::VERSION,
+        uname::machine(),
+        // domainname: no NIS domain
+        "",
+    ];
+    for (i, value) in fields.iter().enumerate() {
+        let len = core::cmp::min(value.len(), UTSNAME_LENGTH - 1);
+        let at = i * UTSNAME_LENGTH;
+        out[at..at + len].copy_from_slice(&value.as_bytes()[..len]);
+    }
+    out
+}
+
 /// Fill a user-space utsname struct with system identification.
 ///
 /// # Arguments
-/// * `buf` - Pointer to a user-space utsname struct (325 bytes).
+/// * `buf` - Pointer to a user-space utsname struct (390 bytes).
 pub fn sys_uname(buf: usize) -> SyscallResult {
     validate_user_buffer(buf, UTSNAME_SIZE)?;
-
     // Built in a kernel buffer and copied out once (N-43).
-    let mut out = [0u8; UTSNAME_SIZE];
-
-    // Helper: write a string into a fixed-size field, NUL-padded.
-    let mut write_field = |offset: usize, value: &[u8]| {
-        let field = &mut out[offset..offset + UTSNAME_LENGTH];
-        let len = core::cmp::min(value.len(), UTSNAME_LENGTH - 1);
-        field[..len].copy_from_slice(&value[..len]);
-        // Zero the rest
-        for byte in &mut field[len..] {
-            *byte = 0;
-        }
-    };
-
-    // Field offsets: sysname=0, nodename=65, release=130, version=195, machine=260
-    write_field(0, b"VeridianOS");
-    write_field(UTSNAME_LENGTH, b"veridian");
-    // The release is the crate version, set once in Cargo.toml (it said
-    // 0.5.0 for twenty releases).
-    write_field(UTSNAME_LENGTH * 2, env!("CARGO_PKG_VERSION").as_bytes());
-    write_field(UTSNAME_LENGTH * 3, b"#1 SMP");
-
-    #[cfg(target_arch = "x86_64")]
-    write_field(UTSNAME_LENGTH * 4, b"x86_64");
-    #[cfg(target_arch = "aarch64")]
-    write_field(UTSNAME_LENGTH * 4, b"aarch64");
-    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
-    write_field(UTSNAME_LENGTH * 4, b"riscv64");
-
-    // domainname (6th field) -- empty string (no NIS domain)
-    write_field(UTSNAME_LENGTH * 5, b"");
-
+    // The system name is the caller's: "Linux" in Linux uname mode.
+    let out = utsname_bytes(crate::utils::uname::current_sysname());
     super::userspace::write_user_bytes(buf, &out)?;
     Ok(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn field(out: &[u8; UTSNAME_SIZE], i: usize) -> &str {
+        let f = &out[i * UTSNAME_LENGTH..(i + 1) * UTSNAME_LENGTH];
+        let end = f.iter().position(|&b| b == 0).unwrap();
+        assert!(f[end..].iter().all(|&b| b == 0), "field {i} is NUL-padded");
+        core::str::from_utf8(&f[..end]).unwrap()
+    }
+
+    #[test]
+    fn uname_reports_a_linux_release_and_the_veridian_version() {
+        let out = utsname_bytes("VeridianOS");
+        assert_eq!(field(&out, 0), "VeridianOS");
+        assert_eq!(field(&out, 1), "veridian");
+        assert_eq!(field(&out, 2), "7.3.0-veridian");
+        assert_eq!(
+            field(&out, 3),
+            concat!("#1 SMP VeridianOS ", env!("CARGO_PKG_VERSION"))
+        );
+        assert_eq!(field(&out, 4), crate::utils::uname::machine());
+        assert_eq!(field(&out, 5), "");
+    }
 }

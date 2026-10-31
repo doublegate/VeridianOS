@@ -1463,12 +1463,11 @@ fn handle_syscall(
         Syscall::Sysinfo => usage::sys_sysinfo(arg1),
         #[cfg(feature = "alloc")]
         Syscall::Times => usage::sys_times(arg1),
-        Syscall::Rseq
-        | Syscall::Statx
-        | Syscall::Clone3
-        | Syscall::Fallocate
-        | Syscall::Statfs
-        | Syscall::Fstatfs => Err(SyscallError::NotImplemented),
+        Syscall::Rseq | Syscall::Statx | Syscall::Clone3 | Syscall::Fallocate => {
+            Err(SyscallError::NotImplemented)
+        }
+        Syscall::Statfs => sys_statfs(arg1, arg2),
+        Syscall::Fstatfs => sys_fstatfs(arg1, arg2),
         Syscall::Sigaltstack => signal::sys_sigaltstack(arg1, arg2),
         // Scheduling policy, priority and affinity (N-221).
         Syscall::SchedSetscheduler => scheduling::sys_sched_setscheduler(arg1, arg2, arg3),
@@ -1929,11 +1928,10 @@ fn sys_fchownat(
     gid: usize,
     flags: usize,
 ) -> SyscallResult {
-    const AT_SYMLINK_NOFOLLOW: usize = 0x100;
     let rel_path = filesystem::read_user_path(path_ptr)?;
     let abs_path = filesystem::resolve_at_path(dirfd, &rel_path)?;
     let vfs = filesystem::vfs()?;
-    let node = if flags & AT_SYMLINK_NOFOLLOW != 0 {
+    let node = if flags & filesystem::AT_SYMLINK_NOFOLLOW != 0 {
         vfs.resolve_path_no_follow(&abs_path)
     } else {
         vfs.resolve_path(&abs_path)

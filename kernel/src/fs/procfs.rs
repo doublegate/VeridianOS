@@ -55,6 +55,13 @@ impl ProcNode {
 }
 
 impl VfsNode for ProcNode {
+    /// procfs: `simple_statfs`, no counts.
+    fn statfs(&self) -> Result<crate::fs::statfs::FsStats, crate::error::KernelError> {
+        Ok(crate::fs::statfs::FsStats::simple(
+            crate::fs::statfs::PROC_SUPER_MAGIC,
+        ))
+    }
+
     fn node_type(&self) -> NodeType {
         match &self.node_type {
             ProcNodeType::Root | ProcNodeType::ProcessDir(_) | ProcNodeType::SubDir(_) => {
@@ -81,12 +88,14 @@ impl VfsNode for ProcNode {
         let content = match &self.node_type {
             ProcNodeType::SystemFile(name) => {
                 match name.as_str() {
+                    // The system's identity (ADR 0021).
+                    // The system name is the reader's (Linux uname mode).
                     "version" => {
-                        format!(
-                            "VeridianOS version 0.5.0 (gcc 16.2.0) #1 SMP {}\n",
-                            env!("CARGO_PKG_VERSION")
-                        )
+                        crate::utils::uname::proc_version(crate::utils::uname::current_sysname())
                     }
+                    "ostype" => format!("{}\n", crate::utils::uname::current_sysname()),
+                    "osrelease" => format!("{}\n", crate::utils::uname::RELEASE),
+                    "sys/kernel/version" => format!("{}\n", crate::utils::uname::VERSION),
                     "uptime" => {
                         let secs = crate::arch::timer::get_timestamp_secs();
                         let frac_ms = crate::arch::timer::get_timestamp_ms() % 1000;
@@ -300,6 +309,12 @@ impl VfsNode for ProcNode {
                     inode: 0,
                 });
 
+                entries.push(DirEntry {
+                    name: String::from("sys"),
+                    node_type: NodeType::Directory,
+                    inode: 0,
+                });
+
                 // Add process directories for all running processes
                 if let Some(process_list) = crate::process::get_process_list() {
                     for pid in process_list {
@@ -330,6 +345,30 @@ impl VfsNode for ProcNode {
                     node_type: NodeType::File,
                     inode: 0,
                 });
+            }
+            // What lookup finds in /proc/sys and below.
+            ProcNodeType::SubDir(dir) if dir.starts_with("sys") => {
+                let listed: &[(&str, NodeType)] = match dir.as_str() {
+                    "sys" => &[("kernel", NodeType::Directory)],
+                    "sys/kernel" => &[
+                        ("cap_last_cap", NodeType::File),
+                        ("core_pattern", NodeType::File),
+                        ("osrelease", NodeType::File),
+                        ("ostype", NodeType::File),
+                        ("pid_max", NodeType::File),
+                        ("random", NodeType::Directory),
+                        ("version", NodeType::File),
+                    ],
+                    "sys/kernel/random" => &[("boot_id", NodeType::File)],
+                    _ => return Err(KernelError::FsError(FsError::NotADirectory)),
+                };
+                for (name, node_type) in listed {
+                    entries.push(DirEntry {
+                        name: String::from(*name),
+                        node_type: *node_type,
+                        inode: 0,
+                    });
+                }
             }
             _ => return Err(KernelError::FsError(FsError::NotADirectory)),
         }
@@ -389,10 +428,14 @@ impl VfsNode for ProcNode {
                         "core_pattern" => Ok(Arc::new(ProcNode::new_system_file(String::from(
                             "core_pattern",
                         ))) as Arc<dyn VfsNode>),
-                        "cap_last_cap" | "pid_max" => {
+                        "cap_last_cap" | "pid_max" | "ostype" | "osrelease" => {
                             Ok(Arc::new(ProcNode::new_system_file(String::from(name)))
                                 as Arc<dyn VfsNode>)
                         }
+                        // Not /proc/version, which has the same file name.
+                        "version" => Ok(Arc::new(ProcNode::new_system_file(String::from(
+                            "sys/kernel/version",
+                        ))) as Arc<dyn VfsNode>),
                         "random" => Ok(Arc::new(ProcNode {
                             node_type: ProcNodeType::SubDir(String::from("sys/kernel/random")),
                         }) as Arc<dyn VfsNode>),
@@ -850,6 +893,76 @@ mod tests {
         let mut buf = [0u8; 16];
         let n = file.read(0, &mut buf).unwrap();
         assert_eq!(&buf[..n], b"40\n");
+    }
+
+    /// /proc/sys/kernel/{ostype,osrelease,version} are uname's sysname,
+    /// release and version, and /proc/version names all three (ADR 0021).
+    #[test]
+    fn kernel_identity_files_match_uname() {
+        let dir = ProcNode {
+            node_type: ProcNodeType::SubDir(String::from("sys/kernel")),
+        };
+        let read = |node: Arc<dyn VfsNode>| {
+            let mut buf = [0u8; 160];
+            let n = node.read(0, &mut buf).unwrap();
+            String::from(core::str::from_utf8(&buf[..n]).unwrap())
+        };
+        assert_eq!(read(dir.lookup("ostype").unwrap()), "VeridianOS\n");
+        assert_eq!(read(dir.lookup("osrelease").unwrap()), "7.3.0-veridian\n");
+        assert_eq!(
+            read(dir.lookup("version").unwrap()),
+            concat!("#1 SMP VeridianOS ", env!("CARGO_PKG_VERSION"), "\n")
+        );
+        let proc_version = read(Arc::new(ProcNode::new_system_file(String::from("version"))));
+        assert!(proc_version.starts_with("VeridianOS version 7.3.0-veridian ("));
+    }
+
+    /// /proc/sys and the directories below it list what lookup finds there,
+    /// so a program reading the directory (getdents64) sees the files; it
+    /// was ENOTDIR (PR #34 review). /proc lists sys.
+    #[test]
+    fn sys_directories_list_their_entries() {
+        let names = |n: &ProcNode| -> Vec<String> {
+            n.readdir()
+                .unwrap()
+                .into_iter()
+                .filter(|e| e.name != "." && e.name != "..")
+                .map(|e| e.name)
+                .collect()
+        };
+        assert!(names(&ProcNode::new_root()).iter().any(|n| n == "sys"));
+        for (dir, want) in [
+            ("sys", &["kernel"][..]),
+            (
+                "sys/kernel",
+                &[
+                    "cap_last_cap",
+                    "core_pattern",
+                    "osrelease",
+                    "ostype",
+                    "pid_max",
+                    "random",
+                    "version",
+                ][..],
+            ),
+            ("sys/kernel/random", &["boot_id"][..]),
+        ] {
+            let node = ProcNode {
+                node_type: ProcNodeType::SubDir(String::from(dir)),
+            };
+            let mut got = names(&node);
+            got.sort();
+            assert_eq!(got, want, "/proc/{}", dir);
+            for e in node
+                .readdir()
+                .unwrap()
+                .iter()
+                .filter(|e| !e.name.starts_with('.'))
+            {
+                let found = node.lookup(&e.name).unwrap();
+                assert_eq!(found.node_type(), e.node_type, "/proc/{}/{}", dir, e.name);
+            }
+        }
     }
 
     /// /proc/sys/kernel/pid_max is Linux's 64-bit limit (PID_MAX_LIMIT);

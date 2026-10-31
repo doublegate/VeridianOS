@@ -1341,7 +1341,7 @@ pub fn sys_utimensat(
     times_ptr: usize,
     flags: usize,
 ) -> SyscallResult {
-    if flags & !AT_SYMLINK_NOFOLLOW_FLAG != 0 {
+    if flags & !AT_SYMLINK_NOFOLLOW != 0 {
         return Err(SyscallError::InvalidArgument);
     }
     let node = if path_ptr == 0 {
@@ -1355,7 +1355,7 @@ pub fn sys_utimensat(
     } else {
         let path = resolve_at_path(dirfd, &read_user_path(path_ptr)?)?;
         let vfs = vfs()?;
-        if flags & AT_SYMLINK_NOFOLLOW_FLAG != 0 {
+        if flags & AT_SYMLINK_NOFOLLOW != 0 {
             vfs.resolve_path_no_follow(&path)
         } else {
             vfs.resolve_path(&path)
@@ -2249,7 +2249,6 @@ pub fn sys_faccessat(dirfd: usize, path_ptr: usize, mode: usize, flags: usize) -
 }
 
 const AT_EACCESS: usize = 0x200;
-const AT_SYMLINK_NOFOLLOW_FLAG: usize = 0x100;
 
 /// Who access(2) checks for (Linux's do_faccessat): the real IDs as the
 /// filesystem IDs, and unless SECBIT_NO_SETUID_FIXUP, no capabilities for
@@ -2270,7 +2269,7 @@ fn access_caller() -> Caller {
 /// AT_EACCESS), owner, then group (any of the process's groups), then
 /// other bits. It checked only the "other" bits (N-193).
 fn access_path(path: &str, mode: usize, flags: usize) -> SyscallResult {
-    if mode & !7 != 0 || flags & !(AT_EACCESS | AT_SYMLINK_NOFOLLOW_FLAG) != 0 {
+    if mode & !7 != 0 || flags & !(AT_EACCESS | AT_SYMLINK_NOFOLLOW) != 0 {
         return Err(SyscallError::InvalidArgument);
     }
     let caller = if flags & AT_EACCESS != 0 {
@@ -2283,7 +2282,7 @@ fn access_path(path: &str, mode: usize, flags: usize) -> SyscallResult {
     let vfs = try_get_vfs()
         .ok_or(SyscallError::InvalidState)?
         .as_caller_with(caller);
-    let node = if flags & AT_SYMLINK_NOFOLLOW_FLAG != 0 {
+    let node = if flags & AT_SYMLINK_NOFOLLOW != 0 {
         vfs.resolve_path_no_follow(path)
     } else {
         vfs.resolve_path(path)
@@ -2830,14 +2829,14 @@ pub fn sys_writev(fd: usize, iov_ptr: usize, iovcnt: usize) -> SyscallResult {
 
 /// AT_FDCWD sentinel: use process current working directory.
 /// Must match the C-side `#define AT_FDCWD (-100)` in syscall.h.
-const AT_FDCWD: usize = (-100isize) as usize;
+pub(super) const AT_FDCWD: usize = (-100isize) as usize;
 
 /// unlinkat: remove a directory (rmdir).
 const AT_REMOVEDIR: usize = 0x200;
 /// Do not follow a final symlink.
-const AT_SYMLINK_NOFOLLOW: usize = 0x100;
+pub(super) const AT_SYMLINK_NOFOLLOW: usize = 0x100;
 /// An empty path names the dirfd itself.
-const AT_EMPTY_PATH: usize = 0x1000;
+pub(super) const AT_EMPTY_PATH: usize = 0x1000;
 
 /// Create a hard link (syscall 155).
 ///
@@ -3057,6 +3056,44 @@ pub fn sys_fstatat(dirfd: usize, path_ptr: usize, stat_buf: usize, flags: usize)
     let metadata = node.metadata().map_err(super::map_kernel_error)?;
     super::userspace::write_user(stat_buf, fill_stat(&metadata, &*node))?;
     Ok(0)
+}
+
+/// Copy what statfs reports about `node`'s filesystem to `buf` (`struct
+/// statfs`, `fs::statfs::LINUX_STATFS_SIZE` bytes). A filesystem that
+/// cannot say is ENOSYS, as on Linux.
+fn write_statfs(node: &dyn crate::fs::VfsNode, buf: usize) -> SyscallResult {
+    let stats = node.statfs().map_err(|e| match e {
+        crate::error::KernelError::NotImplemented { .. } => SyscallError::NotImplemented,
+        e => super::map_kernel_error(e),
+    })?;
+    super::userspace::write_user_bytes(buf, &stats.to_linux())?;
+    Ok(0)
+}
+
+/// statfs(path, buf): the filesystem holding `path`, following symlinks,
+/// as Linux's `user_statfs` (`fs/statfs.c`). A trailing slash needs a
+/// directory (ENOTDIR), as for stat.
+pub fn sys_statfs(path_ptr: usize, buf: usize) -> SyscallResult {
+    let rel_path = read_user_path(path_ptr)?;
+    let abs_path = resolve_at_path(AT_FDCWD, &rel_path)?;
+    let node = vfs()?.resolve_path(&abs_path).map_err(map_resolve_err)?;
+    if rel_path.ends_with('/') && node.node_type() != crate::fs::NodeType::Directory {
+        return Err(SyscallError::NotADirectory);
+    }
+    write_statfs(&*node, buf)
+}
+
+/// fstatfs(fd, buf): the filesystem holding the open file `fd`; for a
+/// pipe, socket or anonymous-inode file, its pseudo filesystem.
+pub fn sys_fstatfs(fd: usize, buf: usize) -> SyscallResult {
+    let proc = process::current_process().ok_or(SyscallError::InvalidState)?;
+    // Lookup only; the lock is not held over the operation (N-118).
+    let file = proc
+        .file_table
+        .lock()
+        .get(fd as u32 as usize)
+        .ok_or(SyscallError::BadFileDescriptor)?;
+    write_statfs(&*file.node, buf)
 }
 
 /// unlinkat(dirfd, path, flags) (N-195), and unlink and rmdir through it,
@@ -3346,8 +3383,8 @@ pub fn sys_mknod(path_ptr: usize, mode: usize, dev: usize) -> SyscallResult {
 /// Linux's encoding) or socket file named by `path_ptr` relative to
 /// `dirfd`. A directory type is EPERM, any other type EINVAL; an existing
 /// name (not followed) is EEXIST; the parent needs write and search
-/// permission (EACCES); a device needs privilege (EPERM, CAP_MKNOD: root
-/// here); the mode is reduced by the umask. A filesystem that cannot hold
+/// permission (EACCES); a device needs CAP_MKNOD (EPERM without it); the
+/// mode is reduced by the umask. A filesystem that cannot hold
 /// special files (devfs, procfs) is EPERM.
 pub fn sys_mknodat(dirfd: usize, path_ptr: usize, mode: usize, dev: usize) -> SyscallResult {
     let rel_path = read_user_path(path_ptr)?;

@@ -606,6 +606,14 @@ impl PtyMasterNode {
 }
 
 impl VfsNode for PtyMasterNode {
+    /// Opened through /dev/ptmx, on devtmpfs: Linux reports that inode's
+    /// filesystem, not devpts (only /dev/pts/ptmx would say devpts).
+    fn statfs(&self) -> Result<crate::fs::statfs::FsStats, crate::error::KernelError> {
+        Ok(crate::fs::statfs::FsStats::simple(
+            crate::fs::statfs::TMPFS_MAGIC,
+        ))
+    }
+
     fn node_type(&self) -> NodeType {
         NodeType::CharDevice
     }
@@ -723,6 +731,13 @@ impl Drop for PtySlaveNode {
 }
 
 impl VfsNode for PtySlaveNode {
+    /// /dev/pts is devpts.
+    fn statfs(&self) -> Result<crate::fs::statfs::FsStats, crate::error::KernelError> {
+        Ok(crate::fs::statfs::FsStats::simple(
+            crate::fs::statfs::DEVPTS_SUPER_MAGIC,
+        ))
+    }
+
     fn node_type(&self) -> NodeType {
         NodeType::CharDevice
     }

@@ -233,6 +233,35 @@ to use polling or IPC-based notification where possible.
   file capability or an ambient capability instead of as root.
 - The kernel console's shell runs with every capability.
 
+## The System Name (uname)
+
+uname reports the release `7.3.0-veridian` to every program, and the
+system name `VeridianOS` unless the program runs in Linux mode, where it
+is `Linux` (ADR 0021). Fork keeps the mode. Exec keeps it when the
+process chose it (the launcher or the prctl); a mode that came from a
+marked program or a glibc binary ends when that program execs another,
+which decides again.
+
+- **autoconf `./configure`** needs nothing: `CONFIG_SITE` points at
+  `/usr/share/config.site`, which sets the build system to
+  `<machine>-unknown-linux-musl` for `config.guess`. Pass `--build` to
+  override it.
+- **Tools that branch on the name at run time** (CMake, Python's
+  `platform` and `sysconfig`, Node, the JDK) need Linux mode. Run them
+  under the launcher (`linux-uname cmake ..`, `linux-uname sh` for a
+  whole session), or mark the program once:
+  - build it with `#include <veridian/linux-uname.h>` in one source file;
+  - or add the note to a built binary: `veridian-elfctl set linux-uname
+    FILE` (run it after `strip`);
+  - binaries built for GNU/Linux (glibc, which emits a GNU ABI tag) are
+    in Linux mode already. A marked program does not pass the mode to
+    what it execs; use the launcher for a whole session.
+- **At run time**: `prctl(PR_VERIDIAN_UNAME, PR_VERIDIAN_UNAME_SET,
+  PR_VERIDIAN_UNAME_LINUX, 0, 0)` enters the mode and
+  `PR_VERIDIAN_UNAME_GET` reads it (constants in
+  `<veridian/linux-uname.h>`; Linux answers EINVAL). `linux-uname`
+  without arguments prints the current mode.
+
 ## Using the Portfile System
 
 VeridianOS uses a TOML-based Portfile system for building third-party

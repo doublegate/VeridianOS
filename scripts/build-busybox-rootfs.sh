@@ -522,6 +522,16 @@ phase_rootfs() {
             exit 1
         fi
 
+        # Linux uname mode (ADR 0021): the launcher, the configure site
+        # file, /etc/profile, and the programs that test the mode.
+        echo -n "    linux-uname and its tests... "
+        if "${PROJECT_ROOT}/scripts/build-uname-programs.sh" "$musl_cc" "$BUILD_DIR" --tests 2>&1; then
+            echo "OK"
+        else
+            echo "FAILED"
+            exit 1
+        fi
+
         # Dynamic linking (ADR 0010): musl's loader and the shared C++
         # runtime, stripped, and a dynamically linked C++ program that
         # dlopens a C++ library (musl_runtime_test runs it). The loader is

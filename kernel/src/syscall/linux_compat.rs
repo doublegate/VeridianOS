@@ -241,6 +241,46 @@ pub(crate) fn sys_prctl(
                 .wx_policy()
                 .mdwe() as usize)
         }
+        // VeridianOS's own option (ADR 0021): Linux returns EINVAL for it.
+        PR_VERIDIAN_UNAME => {
+            let process =
+                crate::process::current_process().ok_or(super::SyscallError::InvalidState)?;
+            let linux = process.uname_linux.is_linux();
+            let (mode, ret) = uname_prctl(linux, arg2, arg3, arg4, arg5)?;
+            // GET changes nothing; SET is the process's own choice, which
+            // exec keeps.
+            if arg2 == PR_VERIDIAN_UNAME_SET {
+                process.uname_linux.set(mode);
+            }
+            Ok(ret)
+        }
+        _ => Err(super::SyscallError::InvalidArgument),
+    }
+}
+
+/// prctl(PR_VERIDIAN_UNAME, ...): which system name uname reports
+/// (`<veridian/linux-uname.h>`, ADR 0021).
+const PR_VERIDIAN_UNAME: usize = 0x5645_5249;
+const PR_VERIDIAN_UNAME_GET: usize = 0;
+const PR_VERIDIAN_UNAME_SET: usize = 1;
+
+/// PR_VERIDIAN_UNAME on a process whose Linux uname mode is `linux`: the
+/// mode afterwards and the call's result. GET returns the mode (0 native,
+/// 1 Linux); SET takes it in `mode`. Unused arguments must be 0, as for
+/// Linux's own options.
+fn uname_prctl(
+    linux: bool,
+    sub: usize,
+    mode: usize,
+    arg4: usize,
+    arg5: usize,
+) -> Result<(bool, usize), super::SyscallError> {
+    if arg4 != 0 || arg5 != 0 {
+        return Err(super::SyscallError::InvalidArgument);
+    }
+    match (sub, mode) {
+        (PR_VERIDIAN_UNAME_GET, 0) => Ok((linux, linux as usize)),
+        (PR_VERIDIAN_UNAME_SET, 0 | 1) => Ok((mode == 1, 0)),
         _ => Err(super::SyscallError::InvalidArgument),
     }
 }
@@ -252,6 +292,31 @@ pub(crate) fn sys_prctl(
 #[cfg(test)]
 mod tests {
     use super::{super::SyscallError, *};
+
+    /// PR_VERIDIAN_UNAME (ADR 0021): GET reports the mode, SET changes it
+    /// either way, and anything else is EINVAL with the mode unchanged.
+    #[test]
+    fn uname_prctl_gets_and_sets_the_mode() {
+        assert_eq!(PR_VERIDIAN_UNAME, 0x5645_5249); // 'VERI'
+        assert_eq!(uname_prctl(false, 0, 0, 0, 0), Ok((false, 0)));
+        assert_eq!(uname_prctl(true, 0, 0, 0, 0), Ok((true, 1)));
+        assert_eq!(uname_prctl(false, 1, 1, 0, 0), Ok((true, 0)));
+        assert_eq!(uname_prctl(true, 1, 0, 0, 0), Ok((false, 0)));
+        assert_eq!(uname_prctl(true, 1, 1, 0, 0), Ok((true, 0)));
+        for (sub, mode, a4, a5) in [
+            (1, 2, 0, 0),
+            (0, 1, 0, 0),
+            (2, 0, 0, 0),
+            (1, 1, 1, 0),
+            (0, 0, 0, 1),
+        ] {
+            assert_eq!(
+                uname_prctl(true, sub, mode, a4, a5),
+                Err(SyscallError::InvalidArgument),
+                "{sub} {mode} {a4} {a5}"
+            );
+        }
+    }
 
     /// N-127: filesystem errors reach user space as the Linux errno of
     /// their cause, not EINVAL or ENOENT for everything.

@@ -29,6 +29,7 @@ pub mod ramfs;
 #[cfg(feature = "alloc")]
 pub mod shmem;
 pub mod signalfd;
+pub mod statfs;
 pub mod tar;
 pub mod timerfd;
 #[cfg(feature = "alloc")]
@@ -751,6 +752,13 @@ pub trait VfsNode: Send + Sync {
         _f: &mut dyn FnMut(&mut xattr::XattrSet) -> Result<(), KernelError>,
     ) -> Result<(), KernelError> {
         Err(KernelError::FsError(crate::error::FsError::NotSupported))
+    }
+
+    /// What statfs and fstatfs report about the filesystem holding this
+    /// node. ENOSYS by default, as Linux answers for a filesystem without
+    /// `statfs` in its superblock operations.
+    fn statfs(&self) -> Result<statfs::FsStats, KernelError> {
+        Err(KernelError::NotImplemented { feature: "statfs" })
     }
 }
 

@@ -565,5 +565,31 @@ class Lists(unittest.TestCase):
         )
 
 
+class SyscallCoverage(unittest.TestCase):
+    def test_stub_arms_in_either_layout(self):
+        import syscall_coverage
+
+        body = """
+        Syscall::Rseq | Syscall::Statx | Syscall::Clone3 | Syscall::Fallocate => {
+            Err(SyscallError::NotImplemented)
+        }
+        Syscall::Sync => Ok(0),
+        Syscall::Brk | Syscall::Mmap => Err(SyscallError::OutOfMemory),
+        Syscall::Statfs => sys_statfs(arg1, arg2),
+        Syscall::Getpid => {
+            let pid = current();
+            Ok(pid)
+        }
+        Syscall::Open => {
+            Err(SyscallError::NotImplemented)?;
+            Ok(0)
+        }
+        """
+        self.assertEqual(
+            syscall_coverage.stub_variants(body),
+            {"Rseq", "Statx", "Clone3", "Fallocate", "Sync", "Brk", "Mmap"},
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
