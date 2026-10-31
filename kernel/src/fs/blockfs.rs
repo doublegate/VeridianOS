@@ -66,6 +66,17 @@ pub const BLOCKFS_REVISION: u32 = 1;
 /// Maximum filename length
 pub const MAX_FILENAME_LEN: usize = 255;
 
+/// The largest file BlockFS holds: what the double-indirect tree reaches,
+/// within the 32-bit size field.
+pub const MAX_FILE_BYTES: usize = {
+    let tree = DOUBLE_INDIRECT_MAX_BLOCKS * BLOCK_SIZE;
+    if tree < u32::MAX as usize {
+        tree
+    } else {
+        u32::MAX as usize
+    }
+};
+
 /// Number of 512-byte virtio sectors per 4KB BlockFS block
 const SECTORS_PER_BLOCK: usize = BLOCK_SIZE / 512;
 
@@ -672,6 +683,15 @@ impl VfsNode for BlockFsNode {
 
     fn truncate(&self, size: usize) -> Result<(), KernelError> {
         self.mutate(|fs| fs.truncate_inode(self.inode_num, size))
+    }
+
+    /// Allocate, zero range and punch hole (`BlockFsInner::fallocate_inode`).
+    fn fallocate(&self, request: super::falloc::Request) -> Result<(), KernelError> {
+        if let super::falloc::Op::Other(_) = request.op {
+            return Err(super::falloc::unsupported());
+        }
+        super::falloc::begin(self, &request)?;
+        self.mutate(|fs| fs.fallocate_inode(self.inode_num, request))
     }
 
     fn symlink(&self, name: &str, target: &str) -> Result<Arc<dyn VfsNode>, KernelError> {
@@ -2235,6 +2255,165 @@ impl BlockFsInner {
         Ok(())
     }
 
+    /// fallocate on regular file `inode_num` (`VfsNode::fallocate`):
+    /// allocate, zero or punch `request`'s range. An allocation that needs
+    /// more blocks than are free (indirect blocks included) is ENOSPC
+    /// before anything changes; a range past the largest file BlockFS can
+    /// hold is EFBIG. New blocks read as zero (`allocate_block`). A punched
+    /// range frees its whole blocks and zeroes the partial ones at its
+    /// edges; indirect blocks stay. The file's modification and change
+    /// times move, as Linux's `file_modified` moves them.
+    fn fallocate_inode(
+        &mut self,
+        inode_num: u32,
+        request: super::falloc::Request,
+    ) -> Result<(), KernelError> {
+        use super::falloc::Op;
+        let inode = self
+            .inode_table
+            .get(inode_num as usize)
+            .ok_or(KernelError::FsError(FsError::NotFound))?;
+        if inode.is_special() {
+            return Err(KernelError::FsError(FsError::NotAFile));
+        }
+        if request.end() > MAX_FILE_BYTES {
+            return Err(KernelError::FsError(FsError::FileTooLarge));
+        }
+        let size = inode.size as usize;
+        self.page_cache.invalidate(inode_num as u64);
+        let blocks = request.offset / BLOCK_SIZE..request.end().div_ceil(BLOCK_SIZE);
+        // The bytes of logical block `lb` inside the range.
+        let within = |lb: usize| {
+            let start = (lb * BLOCK_SIZE).max(request.offset) - lb * BLOCK_SIZE;
+            let end = ((lb + 1) * BLOCK_SIZE).min(request.end()) - lb * BLOCK_SIZE;
+            start..end
+        };
+        match request.op {
+            Op::Allocate | Op::ZeroRange => {
+                if self.blocks_missing(inode_num, blocks.clone())?
+                    > self.superblock.free_blocks as usize
+                {
+                    return Err(KernelError::FsError(FsError::NoSpace));
+                }
+                for lb in blocks {
+                    let block = self.ensure_block(inode_num, lb).map_err(|e| match e {
+                        KernelError::ResourceExhausted { .. } => {
+                            KernelError::FsError(FsError::NoSpace)
+                        }
+                        e => e,
+                    })?;
+                    if request.op == Op::ZeroRange {
+                        self.data_block_mut(block)?[within(lb)].fill(0);
+                    }
+                }
+            }
+            Op::PunchHole => {
+                for lb in blocks {
+                    let part = within(lb);
+                    if part.len() == BLOCK_SIZE {
+                        self.release_logical_block(inode_num, lb)?;
+                    } else if let Some(block) =
+                        self.resolve_block(&self.inode_table[inode_num as usize], lb)?
+                    {
+                        self.data_block_mut(block)?[part].fill(0);
+                    }
+                }
+            }
+            Op::Other(_) => return Err(super::falloc::unsupported()),
+        }
+        let now = now_secs();
+        let inode = &mut self.inode_table[inode_num as usize];
+        inode.size = request.new_size(size) as u32;
+        inode.mtime = now;
+        inode.ctime = now;
+        Ok(())
+    }
+
+    /// How many blocks giving every logical block in `range` of
+    /// `inode_num` a data block would allocate: the missing data blocks
+    /// and the indirect blocks they need.
+    fn blocks_missing(
+        &self,
+        inode_num: u32,
+        range: core::ops::Range<usize>,
+    ) -> Result<usize, KernelError> {
+        let inode = &self.inode_table[inode_num as usize];
+        let mut missing = 0;
+        let mut single_counted = false;
+        let mut double_counted = false;
+        // The level-1 block of the double-indirect tree last looked at, and
+        // whether it exists.
+        let mut l1_seen: Option<(usize, bool)> = None;
+        for lb in range {
+            if lb >= SINGLE_INDIRECT_MAX_BLOCKS {
+                if inode.double_indirect_block == 0 && !double_counted {
+                    double_counted = true;
+                    missing += 1;
+                }
+                let l1_idx = (lb - SINGLE_INDIRECT_MAX_BLOCKS) / PTRS_PER_BLOCK;
+                if l1_seen.map(|(i, _)| i) != Some(l1_idx) {
+                    let exists = inode.double_indirect_block != 0
+                        && self.read_block_ptr(inode.double_indirect_block, l1_idx)? != 0;
+                    if !exists {
+                        missing += 1;
+                    }
+                    l1_seen = Some((l1_idx, exists));
+                }
+                if l1_seen.is_some_and(|(_, exists)| !exists) {
+                    missing += 1;
+                    continue;
+                }
+            } else if lb >= DIRECT_BLOCKS && inode.indirect_block == 0 {
+                if !single_counted {
+                    single_counted = true;
+                    missing += 1;
+                }
+                missing += 1;
+                continue;
+            }
+            if self.resolve_block(inode, lb)?.is_none() {
+                missing += 1;
+            }
+        }
+        Ok(missing)
+    }
+
+    /// Free the data block of logical block `lb` of `inode_num`, if it has
+    /// one, and clear its pointer.
+    fn release_logical_block(&mut self, inode_num: u32, lb: usize) -> Result<(), KernelError> {
+        let inode = &self.inode_table[inode_num as usize];
+        let block = if lb < DIRECT_BLOCKS {
+            let block = inode.direct_blocks[lb];
+            self.inode_table[inode_num as usize].direct_blocks[lb] = 0;
+            block
+        } else {
+            let (table, idx) = if lb < SINGLE_INDIRECT_MAX_BLOCKS {
+                (inode.indirect_block, lb - DIRECT_BLOCKS)
+            } else {
+                let rel = lb - SINGLE_INDIRECT_MAX_BLOCKS;
+                if inode.double_indirect_block == 0 {
+                    return Ok(());
+                }
+                let l1 = self.read_block_ptr(inode.double_indirect_block, rel / PTRS_PER_BLOCK)?;
+                (l1, rel % PTRS_PER_BLOCK)
+            };
+            if table == 0 {
+                return Ok(());
+            }
+            let block = self.read_block_ptr(table, idx)?;
+            if block != 0 {
+                self.write_block_ptr(table, idx, 0)?;
+            }
+            block
+        };
+        if block != 0 {
+            self.free_block(block);
+            let inode = &mut self.inode_table[inode_num as usize];
+            inode.blocks = inode.blocks.saturating_sub(1);
+        }
+        Ok(())
+    }
+
     /// Read the target of a symlink inode.
     ///
     /// Reads the inode's data content (which contains the symlink target
@@ -3112,6 +3291,153 @@ mod tests {
         assert_eq!(
             ro.root().statfs().unwrap().flags,
             crate::fs::statfs::ST_RDONLY
+        );
+    }
+
+    fn falloc(mode: u32, offset: usize, len: usize) -> crate::fs::falloc::Request {
+        crate::fs::falloc::Request::parse(mode, offset as i64, len as i64).unwrap()
+    }
+
+    fn free_blocks(node: &Arc<dyn VfsNode>) -> u64 {
+        node.statfs().unwrap().blocks_free
+    }
+
+    /// fallocate allocates the range's missing blocks: the size grows
+    /// unless KEEP_SIZE, data already there stays, and the rest reads as
+    /// zero; allocating again takes nothing.
+    #[test]
+    fn fallocate_allocates_the_missing_blocks() {
+        use crate::fs::falloc::KEEP_SIZE;
+        let fs = BlockFs::format(1000, 100).unwrap();
+        let f = fs.root().create("f", Permissions::default()).unwrap();
+        f.write(0, b"abc").unwrap();
+        let before = free_blocks(&f);
+        f.fallocate(falloc(0, 0, 5 * BLOCK_SIZE)).unwrap();
+        assert_eq!(f.metadata().unwrap().size, 5 * BLOCK_SIZE);
+        assert_eq!(free_blocks(&f), before - 4);
+        let data = read_all(&f);
+        assert_eq!(&data[..3], b"abc");
+        assert!(data[3..].iter().all(|&b| b == 0));
+        f.fallocate(falloc(0, 0, 5 * BLOCK_SIZE)).unwrap();
+        assert_eq!(free_blocks(&f), before - 4);
+        f.fallocate(falloc(KEEP_SIZE, 5 * BLOCK_SIZE, 3 * BLOCK_SIZE))
+            .unwrap();
+        assert_eq!(f.metadata().unwrap().size, 5 * BLOCK_SIZE);
+        assert_eq!(free_blocks(&f), before - 7);
+        f.write(5 * BLOCK_SIZE, &[1u8; 3 * BLOCK_SIZE]).unwrap();
+        assert_eq!(free_blocks(&f), before - 7, "the write used them");
+    }
+
+    /// The count before allocating includes the indirect blocks, so it is
+    /// exact across the single- and double-indirect boundaries: a request
+    /// that needs every free block fits, one more does not.
+    #[test]
+    fn fallocate_counts_indirect_blocks() {
+        let fs = BlockFs::format(1000, 100).unwrap();
+        let f = fs.root().create("f", Permissions::default()).unwrap();
+        let before = free_blocks(&f);
+        f.fallocate(falloc(0, 0, (DIRECT_BLOCKS + 2) * BLOCK_SIZE))
+            .unwrap();
+        assert_eq!(free_blocks(&f), before - (DIRECT_BLOCKS as u64 + 2 + 1));
+        let g = fs.root().create("g", Permissions::default()).unwrap();
+        let before = free_blocks(&g);
+        g.fallocate(falloc(
+            0,
+            (SINGLE_INDIRECT_MAX_BLOCKS - 1) * BLOCK_SIZE,
+            4 * BLOCK_SIZE,
+        ))
+        .unwrap();
+        // The single-indirect table and one data block, then the
+        // double-indirect table, a level-1 table and three data blocks.
+        assert_eq!(free_blocks(&g), before - 7);
+        let h = fs.root().create("h", Permissions::default()).unwrap();
+        let free = free_blocks(&h) as usize;
+        // `free` data blocks need the single-indirect table too.
+        assert_eq!(
+            h.fallocate(falloc(0, 0, free * BLOCK_SIZE)),
+            Err(KernelError::FsError(FsError::NoSpace))
+        );
+        h.fallocate(falloc(0, 0, (free - 1) * BLOCK_SIZE)).unwrap();
+        assert_eq!(free_blocks(&h), 0);
+    }
+
+    /// An allocation that does not fit is ENOSPC and changes nothing.
+    #[test]
+    fn fallocate_without_room_is_enospc_and_changes_nothing() {
+        let fs = BlockFs::format(100, 16).unwrap();
+        let f = fs.root().create("f", Permissions::default()).unwrap();
+        let before = free_blocks(&f);
+        assert_eq!(
+            f.fallocate(falloc(0, 0, 200 * BLOCK_SIZE)),
+            Err(KernelError::FsError(FsError::NoSpace))
+        );
+        assert_eq!(free_blocks(&f), before);
+        assert_eq!(f.metadata().unwrap().size, 0);
+    }
+
+    /// A punched hole frees its whole blocks and zeroes the partial ones;
+    /// the size stays.
+    #[test]
+    fn fallocate_punches_holes() {
+        use crate::fs::falloc::{KEEP_SIZE, PUNCH_HOLE};
+        let fs = BlockFs::format(1000, 100).unwrap();
+        let f = fs.root().create("f", Permissions::default()).unwrap();
+        let data = pattern(7, 3 * BLOCK_SIZE);
+        f.write(0, &data).unwrap();
+        let before = free_blocks(&f);
+        let (from, to) = (BLOCK_SIZE / 2, 2 * BLOCK_SIZE + BLOCK_SIZE / 2);
+        f.fallocate(falloc(PUNCH_HOLE | KEEP_SIZE, from, to - from))
+            .unwrap();
+        assert_eq!(free_blocks(&f), before + 1);
+        assert_eq!(f.metadata().unwrap().size, 3 * BLOCK_SIZE);
+        let after = read_all(&f);
+        assert_eq!(after[..from], data[..from]);
+        assert!(after[from..to].iter().all(|&b| b == 0));
+        assert_eq!(after[to..], data[to..]);
+        // A hole past the end changes nothing.
+        f.fallocate(falloc(PUNCH_HOLE | KEEP_SIZE, 8 * BLOCK_SIZE, BLOCK_SIZE))
+            .unwrap();
+        assert_eq!(f.metadata().unwrap().size, 3 * BLOCK_SIZE);
+    }
+
+    /// A zeroed range reads as zero and is allocated; it grows the file
+    /// unless KEEP_SIZE.
+    #[test]
+    fn fallocate_zeroes_ranges() {
+        use crate::fs::falloc::{KEEP_SIZE, ZERO_RANGE};
+        let fs = BlockFs::format(1000, 100).unwrap();
+        let f = fs.root().create("f", Permissions::default()).unwrap();
+        let data = pattern(3, 2 * BLOCK_SIZE);
+        f.write(0, &data).unwrap();
+        f.fallocate(falloc(ZERO_RANGE | KEEP_SIZE, 100, 5000))
+            .unwrap();
+        let after = read_all(&f);
+        assert_eq!(after.len(), 2 * BLOCK_SIZE);
+        assert_eq!(after[..100], data[..100]);
+        assert!(after[100..5100].iter().all(|&b| b == 0));
+        assert_eq!(after[5100..], data[5100..]);
+        f.fallocate(falloc(ZERO_RANGE, 2 * BLOCK_SIZE - 10, 30))
+            .unwrap();
+        assert_eq!(f.metadata().unwrap().size, 2 * BLOCK_SIZE + 20);
+    }
+
+    /// Collapse, insert, unshare and write-zeroes are EOPNOTSUPP; a range
+    /// past the largest file is EFBIG.
+    #[test]
+    fn fallocate_refuses_what_blockfs_does_not_do() {
+        use crate::fs::falloc::{COLLAPSE_RANGE, INSERT_RANGE, UNSHARE_RANGE, WRITE_ZEROES};
+        let fs = BlockFs::format(100, 16).unwrap();
+        let f = fs.root().create("f", Permissions::default()).unwrap();
+        for mode in [COLLAPSE_RANGE, INSERT_RANGE, UNSHARE_RANGE, WRITE_ZEROES] {
+            assert_eq!(
+                f.fallocate(falloc(mode, 0, BLOCK_SIZE)),
+                Err(KernelError::FsError(FsError::NotSupported)),
+                "mode {mode:#x}"
+            );
+        }
+        assert_eq!(
+            f.fallocate(falloc(0, MAX_FILE_BYTES, 1)),
+            Err(KernelError::FsError(FsError::FileTooLarge))
         );
     }
 

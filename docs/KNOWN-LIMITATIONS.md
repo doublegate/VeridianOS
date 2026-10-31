@@ -105,11 +105,11 @@ their check, for a few shared reasons:
   on ext4, and an ext4 image whose superblock does not record its metadata overhead reports the
   whole volume in `f_blocks`.
 - **No test block device.** Tests that need a block device (about 175) ask LTP for a loop device
-  backed by a 300 MB image in their temporary directory. `fallocate` is ENOSYS, so LTP writes the
-  image instead, and there are no loop devices to attach it to: on x86_64 the write stops short
-  and the test is TBROK; on AArch64 and RISC-V, under emulation, writing it outlasts the
-  180-second limit and the test is a TIMEOUT. `fallocate` belongs to the file tier of the system
-  call groups; loop devices come after it.
+  backed by a 300 MB image in their temporary directory, and there are no loop devices to attach
+  it to, so the test is TBROK. LTP creates the image with `fallocate`, which refuses it at once
+  with ENOSPC when the compat disk has less room (until fallocate existed, LTP wrote the image
+  instead, which outlasted the 180-second limit under emulation). Loop devices come after the
+  system call groups.
 - **No kernel configuration.** Tests that check a `CONFIG_*` option (about 95) find neither
   `/proc/config.gz` nor `/boot/config-<release>` and are TBROK.
 - **Missing calls.** alarm and the interval and POSIX timers, the System V IPC calls, message
@@ -507,6 +507,10 @@ Page protections now follow `prot` (fixed in v0.27, N-132 to N-137). What remain
 - **A memfd or tmpfs file cannot shrink under a shared mapping:** `ftruncate` that would drop a page still
   mapped `MAP_SHARED` fails with EBUSY. Linux shrinks it and unmaps those pages (access raises
   SIGBUS); mappings cannot be invalidated here yet (v0.29 memory work).
+- **fallocate on a memfd or tmpfs file reserves nothing past the end:** a file holds exactly the
+  pages its size covers, so `FALLOC_FL_KEEP_SIZE` beyond the end succeeds without reserving the
+  memory (a later write can still find none), and a punched hole is zeroed in place rather than
+  given back (Linux frees its pages). Zero range is EOPNOTSUPP there, as on Linux.
 - **A shared mapping of a memfd or tmpfs file must lie within the file:** `mmap(MAP_SHARED)`
   of pages past the file's last page fails with EINVAL. Linux maps them and raises SIGBUS when a
   page wholly beyond the end is touched; that needs the same mapping invalidation. (Before

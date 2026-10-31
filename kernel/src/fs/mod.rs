@@ -15,6 +15,7 @@ pub mod blockfs;
 pub mod devfs;
 pub mod eventfd;
 pub mod ext4;
+pub mod falloc;
 pub mod fat32;
 pub mod fifo;
 pub mod file;
@@ -759,6 +760,15 @@ pub trait VfsNode: Send + Sync {
     /// `statfs` in its superblock operations.
     fn statfs(&self) -> Result<statfs::FsStats, KernelError> {
         Err(KernelError::NotImplemented { feature: "statfs" })
+    }
+
+    /// fallocate(2) on this regular file, after the VFS checks
+    /// (`falloc::Request::parse`). EOPNOTSUPP by default, as Linux answers
+    /// for a filesystem without `fallocate` in its file operations (ramfs);
+    /// a filesystem that has one answers EOPNOTSUPP for the operations it
+    /// does not do.
+    fn fallocate(&self, _request: falloc::Request) -> Result<(), KernelError> {
+        Err(KernelError::FsError(crate::error::FsError::NotSupported))
     }
 }
 

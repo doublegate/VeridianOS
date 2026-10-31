@@ -201,6 +201,34 @@ impl TmpNode {
                 Some(cur.saturating_sub(bytes))
             });
     }
+
+    /// Resize the file to `size`, charging or releasing its pages
+    /// (truncate, and a growing fallocate), with its pages locked.
+    fn resize_charged(&self, pages: &mut ShmemPages, size: usize) -> Result<(), KernelError> {
+        // Charged in whole pages, as in `write`.
+        let held = pages.allocated_bytes();
+        let need = ShmemPages::bytes_for(size);
+
+        if need > held {
+            // Growing: check space
+            self.reserve_space(need - held)?;
+            if let Err(e) = pages.resize(size) {
+                self.release_space(need - held);
+                return Err(e);
+            }
+        } else {
+            // Same pages or fewer: reclaim what goes (EBUSY while a
+            // dropped page is still mapped, `ShmemPages::resize`)
+            pages.resize(size)?;
+            self.release_space(held - need);
+        }
+
+        let mut metadata = self.metadata.write();
+        metadata.size = size;
+        metadata.modified = crate::arch::timer::get_timestamp_secs();
+
+        Ok(())
+    }
 }
 
 impl Drop for TmpNode {
@@ -434,28 +462,30 @@ impl VfsNode for TmpNode {
         }
 
         let mut pages = self.pages.write();
-        // Charged in whole pages, as in `write`.
-        let held = pages.allocated_bytes();
-        let need = ShmemPages::bytes_for(size);
+        self.resize_charged(&mut pages, size)
+    }
 
-        if need > held {
-            // Growing: check space
-            self.reserve_space(need - held)?;
-            if let Err(e) = pages.resize(size) {
-                self.release_space(need - held);
-                return Err(e);
-            }
-        } else {
-            // Same pages or fewer: reclaim what goes (EBUSY while a
-            // dropped page is still mapped, `ShmemPages::resize`)
-            pages.resize(size)?;
-            self.release_space(held - need);
+    /// fallocate as Linux's `shmem_fallocate`: allocate (growing the file
+    /// unless KEEP_SIZE) and punch holes; anything else is EOPNOTSUPP. The
+    /// pages are the file's size (`ShmemPages`), so KEEP_SIZE reserves
+    /// nothing past the end and a punched hole is zeroed in place
+    /// (docs/KNOWN-LIMITATIONS.md).
+    fn fallocate(&self, request: super::falloc::Request) -> Result<(), KernelError> {
+        use super::falloc::Op;
+        if self.node_type != NodeType::File {
+            return Err(KernelError::FsError(FsError::NotAFile));
         }
-
-        let mut metadata = self.metadata.write();
-        metadata.size = size;
-        metadata.modified = crate::arch::timer::get_timestamp_secs();
-
+        if !matches!(request.op, Op::Allocate | Op::PunchHole) {
+            return Err(super::falloc::unsupported());
+        }
+        super::falloc::begin(self, &request)?;
+        let mut pages = self.pages.write();
+        if request.op == Op::PunchHole {
+            pages.zero(request.offset, request.len);
+        } else if request.new_size(pages.size()) > pages.size() {
+            return self.resize_charged(&mut pages, request.end());
+        }
+        self.metadata.write().modified = crate::arch::timer::get_timestamp_secs();
         Ok(())
     }
 
@@ -801,6 +831,40 @@ mod tests {
 
     /// tmpfs charges whole pages, as Linux's does.
     const P: usize = 4096;
+
+    fn falloc(mode: u32, offset: usize, len: usize) -> super::super::falloc::Request {
+        super::super::falloc::Request::parse(mode, offset as i64, len as i64).unwrap()
+    }
+
+    /// fallocate as Linux's tmpfs: allocating grows the file, charged to the
+    /// size limit (ENOSPC past it, the file unchanged); KEEP_SIZE leaves the
+    /// size; a punched hole reads as zero; zero range is EOPNOTSUPP.
+    #[test]
+    fn fallocate_allocates_and_punches_as_shmem_does() {
+        use super::super::falloc::{KEEP_SIZE, PUNCH_HOLE, ZERO_RANGE};
+        let fs = TmpFs::new(4 * P);
+        let a = fs.root().create("a", Permissions::default()).unwrap();
+        a.write(0, &[7u8; 10]).unwrap();
+        a.fallocate(falloc(0, 0, 2 * P)).unwrap();
+        assert_eq!(a.metadata().unwrap().size, 2 * P);
+        assert_eq!(a.statfs().unwrap().blocks_free, 2);
+        a.fallocate(falloc(KEEP_SIZE, P, 3 * P)).unwrap();
+        assert_eq!(a.metadata().unwrap().size, 2 * P);
+        assert_eq!(
+            a.fallocate(falloc(0, 0, 5 * P)),
+            Err(KernelError::FsError(FsError::NoSpace))
+        );
+        assert_eq!(a.metadata().unwrap().size, 2 * P);
+        assert_eq!(a.statfs().unwrap().blocks_free, 2);
+        a.fallocate(falloc(PUNCH_HOLE | KEEP_SIZE, 2, 4)).unwrap();
+        let mut buf = [0xAAu8; 10];
+        a.read(0, &mut buf).unwrap();
+        assert_eq!(buf, [7, 7, 0, 0, 0, 0, 7, 7, 7, 7]);
+        assert_eq!(
+            a.fallocate(falloc(ZERO_RANGE, 0, 1)),
+            Err(KernelError::FsError(FsError::NotSupported))
+        );
+    }
 
     #[test]
     fn statfs_counts_pages_against_the_size_limit() {

@@ -232,6 +232,25 @@ impl ShmemPages {
         Ok(())
     }
 
+    /// Zero `len` bytes from `offset`, as far as the file reaches (a
+    /// punched hole: the pages stay, docs/KNOWN-LIMITATIONS.md). A mapping
+    /// of a page sees the zeros, as it would see the fresh zero page Linux
+    /// faults in after unmapping the hole.
+    pub(crate) fn zero(&mut self, offset: usize, len: usize) {
+        let end = offset.saturating_add(len).min(self.size);
+        let mut at = offset;
+        while at < end {
+            let (page, within) = (at / PAGE, at % PAGE);
+            let chunk = (PAGE - within).min(end - at);
+            // SAFETY: page `page` is below the size, so the file holds its
+            // frame; `within + chunk <= PAGE`.
+            unsafe {
+                core::ptr::write_bytes(source::bytes(self.frames[page]).add(within), 0, chunk)
+            };
+            at += chunk;
+        }
+    }
+
     /// The frames of pages `first_page..first_page + count`, each given one
     /// more owner for the mapping that takes them. The range must lie
     /// within the file (EINVAL): Linux maps past the end and faults on
@@ -275,6 +294,18 @@ mod tests {
         let n = p.read(offset, &mut buf);
         buf.truncate(n);
         buf
+    }
+
+    #[test]
+    fn zero_clears_only_the_range_within_the_file() {
+        let mut p = ShmemPages::new();
+        p.write(0, &[0xEE; 2 * PAGE]).unwrap();
+        p.zero(PAGE - 3, 6);
+        assert_eq!(bytes_at(&p, PAGE - 4, 8), [0xEE, 0, 0, 0, 0, 0, 0, 0xEE]);
+        p.zero(2 * PAGE - 1, 100);
+        assert_eq!(bytes_at(&p, 2 * PAGE - 2, 4), [0xEE, 0]);
+        assert_eq!(p.size(), 2 * PAGE, "nothing past the end");
+        p.zero(5 * PAGE, usize::MAX);
     }
 
     #[test]

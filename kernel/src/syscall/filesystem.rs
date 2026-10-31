@@ -768,6 +768,39 @@ pub fn sys_ftruncate(fd: usize, length: usize) -> SyscallResult {
     Ok(0)
 }
 
+/// fallocate (N-208), with Linux's `vfs_fallocate` checks in its order:
+/// the range (EINVAL) and the mode (EOPNOTSUPP), then the descriptor
+/// (EBADF unless open for writing), the file type (ESPIPE for a pipe,
+/// EISDIR, ENODEV for anything else but a regular file) and the range's
+/// end (EFBIG). The filesystem does the rest (`VfsNode::fallocate`,
+/// starting with `falloc::begin` once it accepts the operation).
+pub fn sys_fallocate(fd: usize, mode: usize, offset: usize, len: usize) -> SyscallResult {
+    use crate::fs::{falloc, NodeType};
+    let fs_err = |e| super::map_kernel_error(crate::error::KernelError::FsError(e));
+    let request = falloc::Request::parse(mode as u32, offset as i64, len as i64).map_err(fs_err)?;
+    let process = process::current_process().ok_or(SyscallError::InvalidState)?;
+    // Lookup only; the lock is not held over the operation (N-118).
+    let file = process
+        .file_table
+        .lock()
+        .get(fd)
+        .ok_or(SyscallError::BadFileDescriptor)?;
+    if !file.flags.write {
+        return Err(SyscallError::BadFileDescriptor);
+    }
+    match file.node.node_type() {
+        NodeType::File => {}
+        NodeType::Pipe => return Err(SyscallError::IllegalSeek),
+        NodeType::Directory => return Err(SyscallError::IsADirectory),
+        _ => return Err(SyscallError::NoDevice),
+    }
+    request.check_range().map_err(fs_err)?;
+    file.node
+        .fallocate(request)
+        .map_err(super::map_kernel_error)?;
+    Ok(0)
+}
+
 /// Create a directory
 ///
 /// # Arguments

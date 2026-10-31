@@ -63,6 +63,15 @@
 
 ### Added
 
+- fallocate (`fs::falloc`, N-208; it was ENOSYS), with Linux's argument checks in their order
+  (EINVAL, EOPNOTSUPP, EBADF, ESPIPE, EISDIR, ENODEV, EFBIG), RLIMIT_FSIZE, and the removal of
+  set-ID bits and file capabilities a write makes. BlockFS allocates (with or without
+  `FALLOC_FL_KEEP_SIZE`), zeroes ranges and punches holes, and refuses an allocation that does
+  not fit with ENOSPC before changing anything; tmpfs and memfd allocate and punch holes as
+  Linux's `shmem_fallocate` does, a memfd's grow and write seals included; ramfs answers
+  EOPNOTSUPP, as Linux's does. LTP creates its 300 MB loop image with fallocate, so the tests
+  that ask for a block device now stop at once instead of writing the image until the disk is
+  full or the time limit passes.
 - statfs and fstatfs (`fs::statfs`; they were ENOSYS). Every filesystem reports Linux's magic
   number, so programs that tell filesystems apart by `f_type` see what they expect: tmpfs
   (`/dev/shm`, also memfd, devtmpfs and `/dev/console`), ramfs, procfs, ext4, FAT (`MSDOS`),

@@ -5291,6 +5291,107 @@ static void test_dev_shm(void)
     report("dev_shm_maps_the_file_s_pages", ok, why);
 }
 
+/* fallocate (N-208): BlockFS allocates (statfs sees the blocks go), keeps
+ * the size with KEEP_SIZE and punches holes that read as zero; an
+ * allocation larger than the free space is ENOSPC at once, the file
+ * unchanged (LTP's 300 MB loop image); tmpfs grows the file; a memfd's
+ * GROW seal refuses it; and the VFS checks come in Linux's order. */
+#ifndef FALLOC_FL_ZERO_RANGE
+#define FALLOC_FL_ZERO_RANGE 0x10 /* <linux/falloc.h>; musl's fcntl.h lacks it */
+#endif
+static void test_fallocate(void)
+{
+    char why[200];
+    struct statfs a, b;
+    struct stat st;
+    long before = -1, after = -1;
+    int fd = open("/tmp/musl_falloc", O_CREAT | O_RDWR | O_TRUNC, 0600);
+    int ok = fd >= 0 && fstatfs(fd, &a) == 0 && write(fd, "abc", 3) == 3 &&
+             fallocate(fd, 0, 0, 8 * 4096) == 0 && fstat(fd, &st) == 0 &&
+             st.st_size == 8 * 4096 && fstatfs(fd, &b) == 0;
+    if (ok) {
+        before = (long)a.f_bfree;
+        after = (long)b.f_bfree;
+    }
+    char buf[8] = {1, 1, 1, 1, 1, 1, 1, 1};
+    ok = ok && after <= before - 7 && pread(fd, buf, 8, 0) == 8 && memcmp(buf, "abc\0\0\0\0\0", 8) == 0;
+    ok = ok && fallocate(fd, FALLOC_FL_KEEP_SIZE, 8 * 4096, 4096) == 0 && fstat(fd, &st) == 0 &&
+         st.st_size == 8 * 4096;
+    ok = ok && fallocate(fd, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE, 1, 1) == 0 &&
+         pread(fd, buf, 3, 0) == 3 && memcmp(buf, "a\0c", 3) == 0;
+    errno = 0;
+    int big = fd >= 0 ? fallocate(fd, 0, 0, (off_t)b.f_bfree * 4096 * 2 + (1 << 20)) : 0;
+    int e_big = errno;
+    ok = ok && big == -1 && e_big == ENOSPC && fstat(fd, &st) == 0 && st.st_size == 8 * 4096;
+    if (fd >= 0)
+        close(fd);
+    unlink("/tmp/musl_falloc");
+    snprintf(why, sizeof(why), "bfree %ld -> %ld big=%d errno=%d size=%ld", before, after, big,
+             e_big, (long)st.st_size);
+    report("fallocate_blockfs", ok, why);
+
+    fd = open("/dev/shm/musl_falloc", O_CREAT | O_RDWR | O_TRUNC, 0600);
+    ok = fd >= 0 && fallocate(fd, 0, 4096, 4096) == 0 && fstat(fd, &st) == 0 &&
+         st.st_size == 8192;
+    int e_zero = 0;
+    errno = 0;
+    if (fd >= 0 && fallocate(fd, FALLOC_FL_ZERO_RANGE, 0, 1) != 0)
+        e_zero = errno;
+    ok = ok && e_zero == EOPNOTSUPP;
+    if (fd >= 0)
+        close(fd);
+    unlink("/dev/shm/musl_falloc");
+    int mfd = memfd_create("falloc", MFD_ALLOW_SEALING);
+    int e_seal = 0;
+    ok = ok && mfd >= 0 && fallocate(mfd, 0, 0, 4096) == 0 &&
+         fcntl(mfd, F_ADD_SEALS, F_SEAL_GROW) == 0;
+    errno = 0;
+    if (mfd >= 0 && fallocate(mfd, FALLOC_FL_KEEP_SIZE, 0, 8192) != 0)
+        e_seal = errno;
+    ok = ok && e_seal == EPERM && fallocate(mfd, 0, 0, 4096) == 0;
+    if (mfd >= 0)
+        close(mfd);
+    snprintf(why, sizeof(why), "zero_range errno=%d grow-sealed errno=%d", e_zero, e_seal);
+    report("fallocate_tmpfs_memfd", ok, why);
+
+    /* EINVAL before EOPNOTSUPP before EBADF; then the file type. */
+    int ro = open("/tmp", O_RDONLY | O_DIRECTORY), p[2] = {-1, -1};
+    int e[6] = {0};
+    errno = 0;
+    if (fallocate(-1, 0x100, 0, 0) != 0)
+        e[0] = errno;
+    errno = 0;
+    if (fallocate(-1, 0x100, 0, 1) != 0)
+        e[1] = errno;
+    errno = 0;
+    if (fallocate(-1, FALLOC_FL_PUNCH_HOLE, 0, 1) != 0)
+        e[2] = errno;
+    errno = 0;
+    if (fallocate(ro, 0, 0, 1) != 0)
+        e[3] = errno;
+    if (pipe(p) == 0) {
+        errno = 0;
+        if (fallocate(p[1], 0, 0, 1) != 0)
+            e[4] = errno;
+    }
+    fd = open("/tmp/musl_falloc", O_CREAT | O_RDWR | O_TRUNC, 0600);
+    errno = 0;
+    if (fd >= 0 && fallocate(fd, 0, 0x7fffffffffffffffLL, 1) != 0)
+        e[5] = errno;
+    ok = e[0] == EINVAL && e[1] == EOPNOTSUPP && e[2] == EOPNOTSUPP && e[3] == EBADF &&
+         e[4] == ESPIPE && e[5] == EFBIG;
+    for (int i = 0; i < 2; i++)
+        if (p[i] >= 0)
+            close(p[i]);
+    if (ro >= 0)
+        close(ro);
+    if (fd >= 0)
+        close(fd);
+    unlink("/tmp/musl_falloc");
+    snprintf(why, sizeof(why), "errnos %d %d %d %d %d %d", e[0], e[1], e[2], e[3], e[4], e[5]);
+    report("fallocate_checks_in_linux_order", ok, why);
+}
+
 /* statfs and fstatfs: each filesystem reports Linux's magic number, tmpfs
  * its page counts against the size limit, and pipes, sockets and
  * anonymous-inode files their pseudo filesystems (fs/statfs.rs). */
@@ -5491,6 +5592,7 @@ int main(int argc, char **argv)
     test_priority_inheritance();
     test_dev_shm();
     test_statfs();
+    test_fallocate();
     printf("MUSL-RUNTIME: %d/%d\n", passed, total);
     return passed == total ? 0 : 1;
 }
