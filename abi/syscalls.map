@@ -134,6 +134,9 @@ symlinkat
 readlink
 readlinkat
 utimensat
+utimes
+futimesat
+utime
 unlink
 unlinkat
 poll

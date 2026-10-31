@@ -72,6 +72,12 @@
   EOPNOTSUPP, as Linux's does. LTP creates its 300 MB loop image with fallocate, so the tests
   that ask for a block device now stop at once instead of writing the image until the disk is
   full or the time limit passes.
+- utime, utimes and futimesat on x86_64 (the generic table of AArch64 and RISC-V has none of
+  them; they were ENOSYS), sharing utimensat's code as Linux's `do_utimes` does: utime takes
+  whole seconds, utimes and futimesat microseconds (EINVAL outside 0..999999, which also refuses
+  UTIME_NOW and UTIME_OMIT), and futimesat with a NULL path acts on the descriptor. utimensat now
+  returns 0 for two UTIME_OMIT times without looking at the path, and refuses flags on a
+  descriptor (NULL path) with EINVAL, as Linux does.
 - statfs and fstatfs (`fs::statfs`; they were ENOSYS). Every filesystem reports Linux's magic
   number, so programs that tell filesystems apart by `f_type` see what they expect: tmpfs
   (`/dev/shm`, also memfd, devtmpfs and `/dev/console`), ramfs, procfs, ext4, FAT (`MSDOS`),

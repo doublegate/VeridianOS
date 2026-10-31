@@ -998,6 +998,9 @@ fn handle_syscall(
         Syscall::Fchdir => sys_fchdir(arg1),
         Syscall::Chroot => sys_chroot(arg1),
         Syscall::Utimensat => sys_utimensat(arg1, arg2, arg3, arg4),
+        Syscall::Utimes => sys_utimes(arg1, arg2),
+        Syscall::Futimesat => sys_futimesat(arg1, arg2, arg3),
+        Syscall::Utime => sys_utime(arg1, arg2),
 
         // Process group / session syscalls
         Syscall::Setpgid => sys_setpgid(arg1, arg2),

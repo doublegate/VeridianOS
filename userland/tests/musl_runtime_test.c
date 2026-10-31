@@ -5392,6 +5392,69 @@ static void test_fallocate(void)
     report("fallocate_checks_in_linux_order", ok, why);
 }
 
+/* utimensat with two UTIME_OMIT times returns 0 without looking at the
+ * path, and on a descriptor (NULL path) takes no flags. x86_64 also has
+ * utime, utimes and futimesat, which musl routes through utimensat, so
+ * they are called directly: whole seconds, microseconds (EINVAL outside
+ * 0..999999, UTIME_NOW included), a path under a directory fd, and a NULL
+ * path acting on the fd. */
+static void test_utimes(void)
+{
+    char why[200];
+    struct timespec omit[2] = {{0, UTIME_OMIT}, {0, UTIME_OMIT}};
+    int fd = open("/tmp/musl_utimes", O_CREAT | O_RDWR | O_TRUNC, 0600);
+    errno = 0;
+    int omit_ok = utimensat(AT_FDCWD, "/tmp/no/such/file", omit, 0) == 0;
+    errno = 0;
+    long r = fd >= 0 ? syscall(SYS_utimensat, fd, NULL, NULL, AT_SYMLINK_NOFOLLOW) : 0;
+    int e_flags = errno;
+    snprintf(why, sizeof(why), "omit=%d fd+flags=%ld errno=%d", omit_ok, r, e_flags);
+    report("utimensat_omit_and_fd_flags", fd >= 0 && omit_ok && r == -1 && e_flags == EINVAL,
+           why);
+#if defined(__x86_64__)
+    struct stat st;
+    long t[2] = {100, 200}; /* struct utimbuf: actime, modtime */
+    int ok = fd >= 0 && syscall(SYS_utime, "/tmp/musl_utimes", t) == 0 &&
+             stat("/tmp/musl_utimes", &st) == 0 && st.st_atime == 100 && st.st_mtime == 200;
+    int step = ok ? 1 : 0;
+    struct timeval tv[2] = {{300, 5}, {400, 999999}};
+    ok = ok && syscall(SYS_utimes, "/tmp/musl_utimes", tv) == 0 &&
+         stat("/tmp/musl_utimes", &st) == 0 && st.st_atime == 300 && st.st_mtime == 400;
+    step += ok;
+    int dir = open("/tmp", O_RDONLY | O_DIRECTORY);
+    tv[0].tv_sec = 500;
+    tv[1].tv_sec = 600;
+    ok = ok && dir >= 0 && syscall(SYS_futimesat, dir, "musl_utimes", tv) == 0 &&
+         fstat(fd, &st) == 0 && st.st_atime == 500 && st.st_mtime == 600;
+    step += ok;
+    tv[0].tv_sec = 700;
+    tv[1].tv_sec = 800;
+    ok = ok && syscall(SYS_futimesat, fd, NULL, tv) == 0 && fstat(fd, &st) == 0 &&
+         st.st_atime == 700 && st.st_mtime == 800;
+    step += ok;
+    int e[2] = {0, 0};
+    tv[1].tv_usec = 1000000;
+    errno = 0;
+    if (syscall(SYS_utimes, "/tmp/musl_utimes", tv) != 0)
+        e[0] = errno;
+    tv[1].tv_usec = UTIME_NOW;
+    errno = 0;
+    if (syscall(SYS_futimesat, fd, NULL, tv) != 0)
+        e[1] = errno;
+    ok = ok && e[0] == EINVAL && e[1] == EINVAL && fstat(fd, &st) == 0 && st.st_mtime == 800 &&
+         syscall(SYS_utime, "/tmp/musl_utimes", NULL) == 0 &&
+         syscall(SYS_utimes, "/tmp/musl_utimes", NULL) == 0;
+    if (dir >= 0)
+        close(dir);
+    snprintf(why, sizeof(why), "steps=%d einval=%d,%d atime=%ld mtime=%ld", step, e[0], e[1],
+             (long)st.st_atime, (long)st.st_mtime);
+    report("legacy_utime_utimes_futimesat", ok, why);
+#endif
+    if (fd >= 0)
+        close(fd);
+    unlink("/tmp/musl_utimes");
+}
+
 /* statfs and fstatfs: each filesystem reports Linux's magic number, tmpfs
  * its page counts against the size limit, and pipes, sockets and
  * anonymous-inode files their pseudo filesystems (fs/statfs.rs). */
@@ -5593,6 +5656,7 @@ int main(int argc, char **argv)
     test_dev_shm();
     test_statfs();
     test_fallocate();
+    test_utimes();
     printf("MUSL-RUNTIME: %d/%d\n", passed, total);
     return passed == total ? 0 : 1;
 }

@@ -1364,17 +1364,89 @@ fn utime_spec(spec: [i64; 2], now: u64) -> Result<Option<u64>, SyscallError> {
     }
 }
 
+/// utimes/futimesat's two timevals ([tv_sec, tv_usec]) as utimensat times,
+/// as Linux's do_futimesat converts them. The range check comes before the
+/// multiplication so that it also refuses UTIME_NOW and UTIME_OMIT.
+fn timeval_times(tv: [[i64; 2]; 2]) -> Result<[[i64; 2]; 2], SyscallError> {
+    if tv.iter().any(|t| !(0..1_000_000).contains(&t[1])) {
+        return Err(SyscallError::InvalidArgument);
+    }
+    Ok(tv.map(|t| [t[0], t[1] * 1_000]))
+}
+
+/// utime's `struct utimbuf` ([actime, modtime], whole seconds) as utimensat
+/// times.
+fn utimbuf_times(buf: [i64; 2]) -> [[i64; 2]; 2] {
+    [[buf[0], 0], [buf[1], 0]]
+}
+
 /// utimensat(dirfd, path, times, flags) (N-249); with a NULL path it acts
-/// on `dirfd` itself (futimens). NULL `times` sets both to now. Setting
-/// explicit times needs the owner (or root, EPERM otherwise); setting the
-/// current time also allows a caller with write permission (EACCES).
+/// on `dirfd` itself (futimens). NULL `times` sets both to now; two
+/// UTIME_OMIT times return 0 without looking at the path, as Linux does.
 pub fn sys_utimensat(
     dirfd: usize,
     path_ptr: usize,
     times_ptr: usize,
     flags: usize,
 ) -> SyscallResult {
-    if flags & !AT_SYMLINK_NOFOLLOW != 0 {
+    let specs = if times_ptr == 0 {
+        None
+    } else {
+        Some(super::userspace::read_user::<[[i64; 2]; 2]>(times_ptr)?)
+    };
+    if specs.is_some_and(|[a, m]| a[1] == UTIME_OMIT && m[1] == UTIME_OMIT) {
+        return Ok(0);
+    }
+    do_utimes(dirfd, path_ptr, specs, flags)
+}
+
+/// utimes(path, times): utimensat at the cwd with microsecond times.
+pub fn sys_utimes(path_ptr: usize, times_ptr: usize) -> SyscallResult {
+    sys_futimesat(AT_FDCWD, path_ptr, times_ptr)
+}
+
+/// futimesat(dirfd, path, times): utimensat with microsecond times and no
+/// flags; a NULL path acts on `dirfd` (futimes).
+pub fn sys_futimesat(dirfd: usize, path_ptr: usize, times_ptr: usize) -> SyscallResult {
+    let specs = if times_ptr == 0 {
+        None
+    } else {
+        Some(timeval_times(
+            super::userspace::read_user::<[[i64; 2]; 2]>(times_ptr)?,
+        )?)
+    };
+    do_utimes(dirfd, path_ptr, specs, 0)
+}
+
+/// utime(path, times): utimensat at the cwd with whole-second times.
+pub fn sys_utime(path_ptr: usize, times_ptr: usize) -> SyscallResult {
+    let specs = if times_ptr == 0 {
+        None
+    } else {
+        Some(utimbuf_times(super::userspace::read_user::<[i64; 2]>(
+            times_ptr,
+        )?))
+    };
+    do_utimes(AT_FDCWD, path_ptr, specs, 0)
+}
+
+/// The common part of the four time-setting calls, Linux's do_utimes:
+/// `specs` are utimensat times, or `None` for now. A NULL path acts on
+/// `dirfd` and takes no flags. Setting explicit times needs the owner (or
+/// root, EPERM otherwise); setting the current time also allows a caller
+/// with write permission (EACCES).
+fn do_utimes(
+    dirfd: usize,
+    path_ptr: usize,
+    specs: Option<[[i64; 2]; 2]>,
+    flags: usize,
+) -> SyscallResult {
+    let allowed = if path_ptr == 0 {
+        0
+    } else {
+        AT_SYMLINK_NOFOLLOW
+    };
+    if flags & !allowed != 0 {
         return Err(SyscallError::InvalidArgument);
     }
     let node = if path_ptr == 0 {
@@ -1394,11 +1466,6 @@ pub fn sys_utimensat(
             vfs.resolve_path(&path)
         }
         .map_err(map_resolve_err)?
-    };
-    let specs = if times_ptr == 0 {
-        None
-    } else {
-        Some(super::userspace::read_user::<[[i64; 2]; 2]>(times_ptr)?)
     };
     let now = crate::arch::timer::get_timestamp_secs();
     let (atime, mtime) = match specs {
@@ -3808,5 +3875,32 @@ mod tests {
             Err(SyscallError::InvalidArgument)
         );
         assert_eq!(utime_spec([1, -1], 100), Err(SyscallError::InvalidArgument));
+    }
+
+    /// utimes/futimesat times: microseconds become nanoseconds, and a
+    /// tv_usec outside 0..1000000 is EINVAL, which also refuses the
+    /// UTIME_NOW and UTIME_OMIT values utimensat alone accepts.
+    #[test]
+    fn timeval_times_follow_do_futimesat() {
+        assert_eq!(
+            timeval_times([[7, 1], [9, 999_999]]),
+            Ok([[7, 1_000], [9, 999_999_000]])
+        );
+        for usec in [1_000_000, -1, UTIME_NOW, UTIME_OMIT] {
+            assert_eq!(
+                timeval_times([[1, usec], [2, 0]]),
+                Err(SyscallError::InvalidArgument)
+            );
+            assert_eq!(
+                timeval_times([[1, 0], [2, usec]]),
+                Err(SyscallError::InvalidArgument)
+            );
+        }
+    }
+
+    /// utime's utimbuf holds whole seconds: actime, then modtime.
+    #[test]
+    fn utimbuf_times_are_whole_seconds() {
+        assert_eq!(utimbuf_times([11, 22]), [[11, 0], [22, 0]]);
     }
 }

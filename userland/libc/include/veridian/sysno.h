@@ -121,6 +121,9 @@
 #define SYS_readlink                     89
 #define SYS_readlinkat                   267
 #define SYS_utimensat                    280
+#define SYS_utimes                       235
+#define SYS_futimesat                    261
+#define SYS_utime                        132
 #define SYS_unlink                       87
 #define SYS_unlinkat                     263
 #define SYS_poll                         7

@@ -110,6 +110,9 @@ pub mod sysno {
     pub const SYS_readlink: usize = 89;
     pub const SYS_readlinkat: usize = 267;
     pub const SYS_utimensat: usize = 280;
+    pub const SYS_utimes: usize = 235;
+    pub const SYS_futimesat: usize = 261;
+    pub const SYS_utime: usize = 132;
     pub const SYS_unlink: usize = 87;
     pub const SYS_unlinkat: usize = 263;
     pub const SYS_poll: usize = 7;
