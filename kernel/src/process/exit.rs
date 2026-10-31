@@ -708,6 +708,9 @@ pub fn cleanup_process(process: &Process) {
     // A parent waiting in vfork for this child may resume.
     process.release_vfork_parent();
 
+    // Its ITIMER_REAL fires no more.
+    crate::timer::ktimerd::cancel_owner(process.pid.0);
+
     // SCHED_DEADLINE reservations of every thread go back, whatever path
     // ended them (each thread's own exit already did; idempotent), so a
     // lost one can never hold admission control's bandwidth for good.

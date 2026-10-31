@@ -167,6 +167,9 @@ pub mod sysno {
     pub const SYS_settimeofday: usize = 164;
     pub const SYS_time: usize = 201;
     pub const SYS_times: usize = 100;
+    pub const SYS_getitimer: usize = 36;
+    pub const SYS_setitimer: usize = 38;
+    pub const SYS_alarm: usize = 37;
     pub const SYS_rt_sigaction: usize = 13;
     pub const SYS_rt_sigprocmask: usize = 14;
     pub const SYS_rt_sigsuspend: usize = 130;
@@ -425,6 +428,8 @@ pub mod sysno {
     pub const SYS_gettimeofday: usize = 169;
     pub const SYS_settimeofday: usize = 170;
     pub const SYS_times: usize = 153;
+    pub const SYS_getitimer: usize = 102;
+    pub const SYS_setitimer: usize = 103;
     pub const SYS_rt_sigaction: usize = 134;
     pub const SYS_rt_sigprocmask: usize = 135;
     pub const SYS_rt_sigsuspend: usize = 133;
@@ -678,6 +683,8 @@ pub mod sysno {
     pub const SYS_gettimeofday: usize = 169;
     pub const SYS_settimeofday: usize = 170;
     pub const SYS_times: usize = 153;
+    pub const SYS_getitimer: usize = 102;
+    pub const SYS_setitimer: usize = 103;
     pub const SYS_rt_sigaction: usize = 134;
     pub const SYS_rt_sigprocmask: usize = 135;
     pub const SYS_rt_sigsuspend: usize = 133;

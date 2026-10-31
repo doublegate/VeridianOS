@@ -866,10 +866,15 @@ fn take_lowest(process: &Process, thread: &Thread, ready: u64) -> Option<SigInfo
         return None;
     }
     let sig = ready.trailing_zeros() as usize + 1;
-    thread
-        .rt_queue
-        .take(&thread.sigpending, sig)
-        .or_else(|| process.rt_queue.take(&process.pending_signals, sig))
+    thread.rt_queue.take(&thread.sigpending, sig).or_else(|| {
+        let info = process.rt_queue.take(&process.pending_signals, sig)?;
+        // An interval ITIMER_REAL waits again once its SIGALRM is taken
+        // (Linux's dequeue_signal).
+        if sig == super::itimer::SIGALRM {
+            super::itimer::sigalrm_taken(process);
+        }
+        Some(info)
+    })
 }
 
 /// Take the calling thread's lowest pending signal in `mask`, blocked or

@@ -72,6 +72,15 @@
   EOPNOTSUPP, as Linux's does. LTP creates its 300 MB loop image with fallocate, so the tests
   that ask for a block device now stop at once instead of writing the image until the disk is
   full or the time limit passes.
+- Interval timers: getitimer, setitimer and alarm (alarm on x86_64 only, as in Linux; they were
+  ENOSYS), following Linux's `kernel/time/itimer.c` (`process::itimer`). ITIMER_REAL sends
+  SIGALRM from a new kernel thread, `ktimerd`, that sleeps until the earliest expiry (the timer
+  interrupt takes none of the locks a signal send needs); an interval timer is armed again when
+  its SIGALRM is taken, so a blocked or slow handler never piles up expiries. ITIMER_VIRTUAL
+  and ITIMER_PROF count user, or user and system, CPU time and send SIGVTALRM and SIGPROF on
+  the way back to user mode, a new value getting one tick more as in Linux. A NULL new value
+  disarms, bad values are EINVAL, alarm rounds the old time up from half a second, a fork child
+  starts with no timers and exec keeps them.
 - utime, utimes and futimesat on x86_64 (the generic table of AArch64 and RISC-V has none of
   them; they were ENOSYS), sharing utimensat's code as Linux's `do_utimes` does: utime takes
   whole seconds, utimes and futimesat microseconds (EINVAL outside 0..999999, which also refuses

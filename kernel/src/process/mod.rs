@@ -28,6 +28,7 @@ pub mod creds;
 pub mod cwd;
 pub mod exit;
 pub mod fork;
+pub mod itimer;
 pub mod lifecycle;
 pub mod linux_caps;
 pub mod memory;
@@ -589,6 +590,8 @@ pub extern "C" fn user_return_check() {
             // RLIMIT_CPU: SIGXCPU or SIGKILL, acted on just below or by
             // the signal delivery that follows.
             rlimit::check_cpu(&process);
+            // ITIMER_VIRTUAL and ITIMER_PROF: SIGVTALRM, SIGPROF.
+            itimer::check_cpu(&process);
             let sig = process.kill_pending.load(Ordering::Acquire);
             if sig == exit::GROUP_EXIT_PENDING {
                 drop(process);

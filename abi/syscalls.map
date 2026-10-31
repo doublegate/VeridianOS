@@ -203,6 +203,9 @@ gettimeofday
 settimeofday
 time
 times
+getitimer
+setitimer
+alarm
 
 ## Signals
 rt_sigaction

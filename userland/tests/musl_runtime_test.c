@@ -5565,6 +5565,122 @@ static const struct {
     {"statfs", test_statfs},
 };
 
+/* Interval timers (setitimer, getitimer, alarm): ITIMER_REAL sends SIGALRM
+ * and an interval one keeps going (re-armed as each SIGALRM is taken);
+ * getitimer reads back what was set; ITIMER_PROF fires on CPU time; bad
+ * arguments are EINVAL; alarm returns the seconds left of the timer it
+ * replaces; a fork child starts with none. */
+static volatile int alrm_count, prof_count;
+static void count_alrm(int sig)
+{
+    (void)sig;
+    alrm_count++;
+}
+static void count_prof(int sig)
+{
+    (void)sig;
+    prof_count++;
+}
+
+static void test_itimers(void)
+{
+    char why[200];
+    struct sigaction sa, old_alrm, old_prof;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = count_alrm;
+    sigaction(SIGALRM, &sa, &old_alrm);
+    sa.sa_handler = count_prof;
+    sigaction(SIGPROF, &sa, &old_prof);
+
+    /* A 20 ms interval timer: three SIGALRMs, then disarmed. */
+    struct itimerval it = {{0, 20000}, {0, 20000}}, got;
+    int set = setitimer(ITIMER_REAL, &it, NULL) == 0;
+    int got_ok = getitimer(ITIMER_REAL, &got) == 0 && got.it_interval.tv_sec == 0 &&
+               got.it_interval.tv_usec == 20000 && got.it_value.tv_sec == 0 &&
+               got.it_value.tv_usec > 0 && got.it_value.tv_usec <= 20000;
+    for (int i = 0; i < 200 && alrm_count < 3; i++)
+        usleep(10000);
+    struct itimerval zero = {{0, 0}, {0, 0}};
+    int disarmed = setitimer(ITIMER_REAL, &zero, &got) == 0 && got.it_interval.tv_usec == 20000;
+    int count = alrm_count;
+    usleep(60000);
+    int stopped = alrm_count == count && getitimer(ITIMER_REAL, &got) == 0 &&
+                  got.it_value.tv_sec == 0 && got.it_value.tv_usec == 0 &&
+                  got.it_interval.tv_usec == 0;
+    snprintf(why, sizeof(why), "set=%d read=%d count=%d disarmed=%d stopped=%d", set, got_ok, count,
+             disarmed, stopped);
+    report("itimer_real_interval", set && got_ok && count >= 3 && disarmed && stopped, why);
+
+    /* ITIMER_PROF on CPU time: a busy loop gets SIGPROF. */
+    struct itimerval prof = {{0, 0}, {0, 10000}};
+    int pset = setitimer(ITIMER_PROF, &prof, NULL) == 0;
+    struct timespec t0, t1;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    volatile unsigned long spin = 0;
+    do {
+        for (int i = 0; i < 100000; i++)
+            spin++;
+        clock_gettime(CLOCK_MONOTONIC, &t1);
+    } while (prof_count == 0 && t1.tv_sec - t0.tv_sec < 5);
+    (void)spin;
+    int pread = getitimer(ITIMER_PROF, &got) == 0 && got.it_value.tv_sec == 0 &&
+                got.it_value.tv_usec == 0;
+    snprintf(why, sizeof(why), "set=%d fired=%d disarmed=%d", pset, prof_count, pread);
+    report("itimer_prof_counts_cpu_time", pset && prof_count == 1 && pread, why);
+
+    /* EINVAL: a bad timer, a bad tv_usec, a negative tv_sec. */
+    int e[3] = {0, 0, 0};
+    struct itimerval bad = {{0, 0}, {0, 1000000}};
+    errno = 0;
+    if (setitimer(3, &zero, NULL) != 0)
+        e[0] = errno;
+    errno = 0;
+    if (setitimer(ITIMER_REAL, &bad, NULL) != 0)
+        e[1] = errno;
+    bad.it_value.tv_usec = 0;
+    bad.it_value.tv_sec = -1;
+    errno = 0;
+    if (setitimer(ITIMER_VIRTUAL, &bad, NULL) != 0)
+        e[2] = errno;
+    errno = 0;
+    int gbad = getitimer(3, &got) == -1 && errno == EINVAL;
+    int einval = e[0] == EINVAL && e[1] == EINVAL && e[2] == EINVAL && gbad;
+
+    /* alarm: seconds left of the timer it replaces, rounded up. */
+    unsigned a0 = alarm(10);
+    unsigned a1 = alarm(0);
+    struct itimerval half = {{0, 0}, {2, 600000}};
+    setitimer(ITIMER_REAL, &half, NULL);
+    unsigned a2 = alarm(0);
+    int alarms = a0 == 0 && a1 == 10 && a2 == 3;
+
+    /* A fork child has no timers. */
+    struct itimerval ten = {{0, 0}, {10, 0}};
+    setitimer(ITIMER_REAL, &ten, NULL);
+    int fds[2] = {-1, -1};
+    pipe(fds);
+    pid_t pid = fork();
+    if (pid == 0) {
+        struct itimerval c;
+        char r = getitimer(ITIMER_REAL, &c) == 0 && c.it_value.tv_sec == 0 && c.it_value.tv_usec == 0;
+        write(fds[1], &r, 1);
+        _exit(0);
+    }
+    char child = 0;
+    if (pid > 0) {
+        read(fds[0], &child, 1);
+        waitpid(pid, NULL, 0);
+    }
+    alarm(0);
+    close(fds[0]);
+    close(fds[1]);
+    sigaction(SIGALRM, &old_alrm, NULL);
+    sigaction(SIGPROF, &old_prof, NULL);
+    snprintf(why, sizeof(why), "einval=%d,%d,%d,%d alarm=%u,%u,%u child=%d", e[0], e[1], e[2],
+             gbad, a0, a1, a2, child);
+    report("itimer_checks_alarm_and_fork", einval && alarms && child == 1, why);
+}
+
 int main(int argc, char **argv)
 {
     if (argc >= 2 && strcmp(argv[1], "--ids") == 0)
@@ -5657,6 +5773,7 @@ int main(int argc, char **argv)
     test_statfs();
     test_fallocate();
     test_utimes();
+    test_itimers();
     printf("MUSL-RUNTIME: %d/%d\n", passed, total);
     return passed == total ? 0 : 1;
 }

@@ -184,6 +184,9 @@
 #define SYS_settimeofday                 164
 #define SYS_time                         201
 #define SYS_times                        100
+#define SYS_getitimer                    36
+#define SYS_setitimer                    38
+#define SYS_alarm                        37
 /* Signals */
 #define SYS_rt_sigaction                 13
 #define SYS_rt_sigprocmask               14
@@ -467,6 +470,8 @@
 #define SYS_gettimeofday                 169
 #define SYS_settimeofday                 170
 #define SYS_times                        153
+#define SYS_getitimer                    102
+#define SYS_setitimer                    103
 /* Signals */
 #define SYS_rt_sigaction                 134
 #define SYS_rt_sigprocmask               135
@@ -745,6 +750,8 @@
 #define SYS_gettimeofday                 169
 #define SYS_settimeofday                 170
 #define SYS_times                        153
+#define SYS_getitimer                    102
+#define SYS_setitimer                    103
 /* Signals */
 #define SYS_rt_sigaction                 134
 #define SYS_rt_sigprocmask               135

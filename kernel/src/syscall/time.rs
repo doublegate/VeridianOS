@@ -516,6 +516,85 @@ pub fn sys_clock_nanosleep(
     Ok(0)
 }
 
+/// `struct itimerval` ({it_interval, it_value}, two timevals) as a
+/// setting, as Linux's get_itimerval checks it: EINVAL for a negative
+/// tv_sec or a tv_usec outside 0..1000000.
+fn itimerval_setting(v: [Timeval; 2]) -> Result<crate::process::itimer::Setting, SyscallError> {
+    let ns = |t: Timeval| {
+        if t.tv_sec < 0 || !(0..1_000_000).contains(&t.tv_usec) {
+            return Err(SyscallError::InvalidArgument);
+        }
+        Ok((t.tv_sec as u64)
+            .saturating_mul(1_000_000_000)
+            .saturating_add(t.tv_usec as u64 * 1_000))
+    };
+    Ok(crate::process::itimer::Setting {
+        interval: ns(v[0])?,
+        value: ns(v[1])?,
+    })
+}
+
+/// A setting as `struct itimerval`, nanoseconds truncated to microseconds.
+fn setting_itimerval(s: crate::process::itimer::Setting) -> [Timeval; 2] {
+    let tv = |ns: u64| Timeval {
+        tv_sec: (ns / 1_000_000_000) as i64,
+        tv_usec: (ns % 1_000_000_000 / 1_000) as i64,
+    };
+    [tv(s.interval), tv(s.value)]
+}
+
+/// getitimer(which, value): ITIMER_REAL, ITIMER_VIRTUAL or ITIMER_PROF
+/// (`process::itimer`); EINVAL for another.
+#[cfg(feature = "alloc")]
+pub fn sys_getitimer(which: usize, value_ptr: usize) -> SyscallResult {
+    let process = crate::process::current_process().ok_or(SyscallError::InvalidState)?;
+    let setting =
+        crate::process::itimer::get(&process, which).ok_or(SyscallError::InvalidArgument)?;
+    super::userspace::write_user(value_ptr, setting_itimerval(setting))?;
+    Ok(0)
+}
+
+/// setitimer(which, new, old): a NULL `new` disarms the timer, as Linux
+/// still allows.
+#[cfg(feature = "alloc")]
+pub fn sys_setitimer(which: usize, new_ptr: usize, old_ptr: usize) -> SyscallResult {
+    let new = if new_ptr == 0 {
+        crate::process::itimer::Setting::default()
+    } else {
+        itimerval_setting(super::userspace::read_user::<[Timeval; 2]>(new_ptr)?)?
+    };
+    let old = set_itimer(which, new)?;
+    if old_ptr != 0 {
+        super::userspace::write_user(old_ptr, setting_itimerval(old))?;
+    }
+    Ok(0)
+}
+
+#[cfg(feature = "alloc")]
+fn set_itimer(
+    which: usize,
+    new: crate::process::itimer::Setting,
+) -> Result<crate::process::itimer::Setting, SyscallError> {
+    use crate::process::itimer::SetError;
+    let process = crate::process::current_process().ok_or(SyscallError::InvalidState)?;
+    crate::process::itimer::set(&process, which, new).map_err(|e| match e {
+        SetError::Invalid => SyscallError::InvalidArgument,
+        SetError::NoThread => SyscallError::WouldBlock,
+    })
+}
+
+/// alarm(seconds): ITIMER_REAL to `seconds` (0 disarms it), returning the
+/// seconds the replaced setting had left (`itimer::alarm_seconds`).
+#[cfg(feature = "alloc")]
+pub fn sys_alarm(seconds: usize) -> SyscallResult {
+    let new = crate::process::itimer::Setting {
+        value: (seconds as u32 as u64) * 1_000_000_000,
+        interval: 0,
+    };
+    let old = set_itimer(crate::process::itimer::ITIMER_REAL, new)?;
+    Ok(crate::process::itimer::alarm_seconds(old) as usize)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -590,5 +669,32 @@ mod tests {
         assert_eq!(cpu_clock_ns(times, user, CpuClockKind::Sched), 100);
         assert_eq!(cpu_clock_ns(times, user, CpuClockKind::Prof), 100);
         assert_eq!(cpu_clock_ns(times, user, CpuClockKind::Virt), 50);
+    }
+
+    /// itimerval: interval first; EINVAL for a negative second or a
+    /// microsecond count outside 0..1000000; back out truncated to
+    /// microseconds.
+    #[test]
+    fn itimerval_conversions_follow_get_itimerval() {
+        let tv = |tv_sec, tv_usec| Timeval { tv_sec, tv_usec };
+        let s = itimerval_setting([tv(1, 500), tv(2, 999_999)]).unwrap();
+        assert_eq!(s.interval, 1_000_500_000);
+        assert_eq!(s.value, 2_999_999_000);
+        for bad in [tv(-1, 0), tv(0, -1), tv(0, 1_000_000)] {
+            assert!(matches!(
+                itimerval_setting([tv(0, 0), bad]),
+                Err(SyscallError::InvalidArgument)
+            ));
+            assert!(matches!(
+                itimerval_setting([bad, tv(0, 0)]),
+                Err(SyscallError::InvalidArgument)
+            ));
+        }
+        let back = setting_itimerval(crate::process::itimer::Setting {
+            value: 3_000_001_999,
+            interval: 999,
+        });
+        assert_eq!((back[0].tv_sec, back[0].tv_usec), (0, 0));
+        assert_eq!((back[1].tv_sec, back[1].tv_usec), (3, 1));
     }
 }

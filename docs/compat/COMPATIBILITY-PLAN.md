@@ -90,7 +90,7 @@ Each group lands with its LTP cases. The counts are "missing" entries in the cov
   - real prctl, rseq
 - **signals (11)**
   - The pending/timedwait/suspend/queueinfo family, tkill/tgkill, pause, alarm, itimers,
-    restart_syscall, and a real sigaltstack.
+    restart_syscall, and a real sigaltstack (alarm and the itimers are done).
   - Semantics to get right: delivery on every return to user mode, SA_RESTART versus EINTR, queued
     realtime signals, per-thread masks, core dumps and job-control stops.
 - **time (14)**

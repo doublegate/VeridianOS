@@ -112,8 +112,8 @@ their check, for a few shared reasons:
   system call groups.
 - **No kernel configuration.** Tests that check a `CONFIG_*` option (about 95) find neither
   `/proc/config.gz` nor `/boot/config-<release>` and are TBROK.
-- **Missing calls.** alarm and the interval and POSIX timers, the System V IPC calls, message
-  queues, mlock, msync, sched_getparam and the other calls the coverage tables list as missing;
+- **Missing calls.** The POSIX timers, the System V IPC calls, message queues, mlock, msync,
+  sched_getparam and the other calls the coverage tables list as missing;
   most of `/proc/sys` (it has `kernel/pid_max`, `kernel/cap_last_cap`, `kernel/core_pattern`,
   `kernel/ostype`, `kernel/osrelease` and `kernel/version`), `/proc/self/mounts` and parts of `/proc/<pid>/stat` and `status`.
 - **Memory exhaustion.** libc-test's `malloc-oom`, `malloc-brk-fail` and `pthread_create-oom`

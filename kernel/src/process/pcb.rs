@@ -210,6 +210,12 @@ pub struct Process {
     /// RLIMIT_CPU's soft and hard values in nanoseconds, for the return to
     /// user mode to check without the lock (u64::MAX: none).
     pub cpu_limit_ns: [core::sync::atomic::AtomicU64; 2],
+    /// Interval timers (setitimer, alarm): none in a fork child, kept
+    /// across exec.
+    pub itimers: Mutex<super::itimer::Itimers>,
+    /// Whether ITIMER_VIRTUAL or ITIMER_PROF is armed, for the return to
+    /// user mode to check without the lock.
+    pub cpu_itimers_armed: core::sync::atomic::AtomicBool,
 
     /// CPU time of the process's exited threads (its live threads' is the
     /// dispatcher's), and of its children it has waited for, with theirs
@@ -505,6 +511,8 @@ impl Process {
                 core::sync::atomic::AtomicU64::new(u64::MAX),
                 core::sync::atomic::AtomicU64::new(u64::MAX),
             ],
+            itimers: Mutex::new(super::itimer::Itimers::default()),
+            cpu_itimers_armed: core::sync::atomic::AtomicBool::new(false),
             cpu_exited: Mutex::new(crate::sched::cputime::CpuTimes::ZERO),
             cpu_children: Mutex::new(crate::sched::cputime::CpuTimes::ZERO),
             cpu_split: crate::sched::cputime::PrevSplit::new(),
